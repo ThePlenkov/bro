@@ -16,10 +16,12 @@ ordinary fleet registry agents — `bro fleet agents` sees them).
 End-to-end dogfooding as a first-class command. One scenario file is a
 markdown runbook (`dogfood/<name>.md`, committed): prose steps naming
 `bro`/`bd` commands and `$skill` invocations, no links. `bro self
-dogfood run <name>` provisions a scratch repo inside
-`<git-common>/bro/dogfood/<run-id>/`, creates the step bead in the
-scratch store (the runner's claims never pollute the host's), spawns a
-fresh agent via `spawnStepAgent`, and returns the run id. `bro self
+dogfood run <name>` provisions a scratch repo under
+`$XDG_DATA_HOME/bro/dogfood/` (outside the host tree — `bd init`
+ancestor-walks, so a nested scratch would inherit the host's beads
+remote), creates the step bead in the scratch store (the runner's
+claims never pollute the host's), spawns a fresh agent via
+`spawnStepAgent`, and returns the run id. `bro self
 dogfood status` is the point check AND the lazy pipeline advancer —
 when the runner reads terminal (`exited`/`lost`/`stopped`) the analyst
 spawn happens there, never on a background tick. `bro self dogfood
@@ -38,10 +40,13 @@ fail lines + findings).
 ## Policy
 
 - **Orchestrator-only** — `BRO_AGENT_ID` refuses `run`: a worker never
-  arms workers. Status/report are read-only and safe anywhere.
+  arms workers. `status` is read-mostly (it may lazily spawn the
+  analyst for a terminal runner — orchestrator-only too); `report` is
+  fully read-only.
 - **Isolation is the point** — the scratch repo lives outside the
-  host tree (`bro-dogfood-*` under the OS temp dir) with its own git
-  store and stealth beads store; host `bro/` state, claims, and
+  host tree (`run-*` under `$XDG_DATA_HOME/bro/dogfood/`, persistent
+  and workspace-trusted on hosts where `~` is trusted) with its own
+  git store and stealth beads store; host `bro/` state, claims, and
   watch markers are never touched.
 - **Monitor by point checks** — `status` between turns, never a
   blocking wait. The analyst's verdict file is the artifact; a

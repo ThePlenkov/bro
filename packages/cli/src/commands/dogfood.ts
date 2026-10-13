@@ -36,7 +36,14 @@ import {
 } from 'node:fs'
 import { homedir } from 'node:os'
 import { basename, join } from 'node:path'
-import { gitCommonDir, gitTry, taskStoreAt, type AgentInfo } from '@broject/core'
+import {
+  acquireFileLock,
+  gitCommonDir,
+  gitTry,
+  LockTimeout,
+  taskStoreAt,
+  type AgentInfo,
+} from '@broject/core'
 import { loadAgentEnv, type AgentConnectorEnv } from '../agent-connectors.ts'
 import { collectAgentBackends, spawnStepAgent } from './agents.ts'
 import { flag, positionals } from './args.ts'
@@ -77,8 +84,19 @@ export function listScenarios(dir: string): string[] {
     .sort()
 }
 
+/** A scenario name / run id is ONE path segment — separators or a
+ *  dot-segment would let `join` escape the ledger. The values are
+ *  local-CLI input, so this is path hygiene, not a security boundary. */
+function segment(what: string, value: string): string {
+  if (value === '' || /[/\\]/.test(value) || value.includes('..')) {
+    die(`invalid ${what} "${value}"`)
+  }
+  return value
+}
+
 function scenarioPath(dir: string, name: string): string {
-  const file = join(dir, 'dogfood', name.endsWith('.md') ? name : `${name}.md`)
+  const clean = segment('scenario name', name)
+  const file = join(dir, 'dogfood', clean.endsWith('.md') ? clean : `${clean}.md`)
   if (!existsSync(file)) {
     die(`no scenario ${name} — \`bro self dogfood scenarios\` lists them`)
   }
@@ -111,7 +129,7 @@ function runDir(dir: string, runId: string): string {
   if (home === null) {
     die('not inside a git worktree')
   }
-  return join(home, runId)
+  return join(home, segment('run id', runId))
 }
 
 function readRun(rdir: string): RunState | null {
@@ -285,7 +303,10 @@ async function advanceRun(
     return state
   }
   const runner = await agentView(dir, env, state.runnerAgent)
-  if (runner === null || !TERMINAL.has(runner.state)) {
+  // a null view means the registry pruned the entry — terminal for our
+  // purposes: the runner cannot un-exit, so the run must not sit
+  // 'running' forever on a dead lookup
+  if (runner !== null && !TERMINAL.has(runner.state)) {
     return state
   }
   if (state.analyst === 'none') {
@@ -298,45 +319,71 @@ async function advanceRun(
   if (!isOrchestratorSession()) {
     return state
   }
-  const scenarioFile = join(rdir, 'scenario.md')
-  const prompt = analystPrompt(scenarioFile, rdir, state.repo, state.runnerAgent)
-  const promptFile = join(rdir, 'analyst.prompt.md')
-  writeFileSync(promptFile, prompt)
-  // 'same' means the runner's lane when recorded; an absent pin (a
-  // pre-field run record) falls through to the default connector probe,
-  // which names its own resolution failure — never a silent mystery
-  const backend = state.analyst === 'same' ? state.runnerBackend : state.analyst
+  // `<rdir>/advance.lock` serializes the check→spawn→write critical
+  // section: two concurrent status calls would each pass the terminal
+  // probe and spawn their OWN analyst — distinct bead ids, so registry
+  // dedup never sees the collision. A held lock means another advancer
+  // owns this run's outcome; return the record as-is.
+  let release: () => void
   try {
-    // a step of its own — registry dedup keys on molStep, and the
-    // runner's entry (dead or alive) must not collide with the
-    // analyst's claim; both beads live in the scratch store
-    const beads = join(state.repo, '.beads')
-    const analystBead = taskStoreAt(beads).create({
-      title: `dogfood analyst ${state.scenario} ${basename(rdir)}`,
-      description: `Analyst pass of ${basename(rdir)} — verdict writer.`,
-      type: 'task',
-      priority: 2,
+    release = acquireFileLock(join(rdir, 'advance.lock'), {
+      waitMs: 10_000,
+      label: 'dogfood advance',
     })
-    const info = await spawnStepAgent(dir, env, {
-      molStep: analystBead.id,
-      worktree: state.repo,
-      promptFile,
-      connector: backend,
-      beadsDir: beads,
-    })
-    state.analystAgent = info.id
-    state.analystBackend = info.backend
-    state.phase = 'analyzing'
   } catch (err) {
-    state.phase = 'failed'
-    writeRun(rdir, state)
-    die(
-      `analyst spawn failed for ${basename(rdir)}: ` +
-        (err instanceof Error ? err.message : String(err))
-    )
+    if (err instanceof LockTimeout) {
+      return state
+    }
+    throw err
   }
-  writeRun(rdir, state)
-  return state
+  try {
+    // re-read inside the hold — a racing advancer may have closed it
+    const fresh = readRun(rdir)
+    if (fresh === null || fresh.phase !== 'running') {
+      return fresh ?? state
+    }
+    const scenarioFile = join(rdir, 'scenario.md')
+    const prompt = analystPrompt(scenarioFile, rdir, fresh.repo, fresh.runnerAgent)
+    const promptFile = join(rdir, 'analyst.prompt.md')
+    writeFileSync(promptFile, prompt)
+    // 'same' means the runner's lane when recorded; an absent pin (a
+    // pre-field run record) falls through to the default connector probe,
+    // which names its own resolution failure — never a silent mystery
+    const backend = fresh.analyst === 'same' ? fresh.runnerBackend : fresh.analyst
+    try {
+      // a step of its own — registry dedup keys on molStep, and the
+      // runner's entry (dead or alive) must not collide with the
+      // analyst's claim; both beads live in the scratch store
+      const beads = join(fresh.repo, '.beads')
+      const analystBead = taskStoreAt(beads).create({
+        title: `dogfood analyst ${fresh.scenario} ${basename(rdir)}`,
+        description: `Analyst pass of ${basename(rdir)} — verdict writer.`,
+        type: 'task',
+        priority: 2,
+      })
+      const info = await spawnStepAgent(dir, env, {
+        molStep: analystBead.id,
+        worktree: fresh.repo,
+        promptFile,
+        connector: backend,
+        beadsDir: beads,
+      })
+      fresh.analystAgent = info.id
+      fresh.analystBackend = info.backend
+      fresh.phase = 'analyzing'
+    } catch (err) {
+      fresh.phase = 'failed'
+      writeRun(rdir, fresh)
+      die(
+        `analyst spawn failed for ${basename(rdir)}: ` +
+          (err instanceof Error ? err.message : String(err))
+      )
+    }
+    writeRun(rdir, fresh)
+    return fresh
+  } finally {
+    release()
+  }
 }
 
 // --- verbs ------------------------------------------------------------------
@@ -368,46 +415,49 @@ async function cmdRun(dir: string, argv: string[]): Promise<void> {
   const rdir = join(home, runId)
   mkdirSync(rdir, { recursive: true })
   copyFileSync(src, join(rdir, 'scenario.md'))
-  const { repo, beads, initErr } = provisionRepo()
 
-  // the step bead lives in the scratch store — the runner's claims
-  // stay inside the disposable repo
-  let bead: { id: string }
+  // state.json fills in as provisioning lands — a failure at ANY stage
+  // writes 'failed' so the run is discoverable (`status`/`report` can
+  // name what died, cleanup can find `state.repo`) instead of leaving
+  // an orphan run dir + scratch repo nobody records
+  const state: RunState = {
+    scenario: name,
+    phase: 'failed',
+    bead: '',
+    repo: '',
+    analyst,
+    createdAt: new Date().toISOString(),
+  }
+  let initErr: string | null = null
+  let stage = 'provision'
   try {
-    bead = taskStoreAt(beads).create({
+    const prov = provisionRepo()
+    initErr = prov.initErr
+    state.repo = prov.repo
+
+    // the step bead lives in the scratch store — the runner's claims
+    // stay inside the disposable repo
+    stage = 'bead'
+    const bead = taskStoreAt(prov.beads).create({
       title: `dogfood ${name} ${runId}`,
       description: `Dogfood run ${runId} of scenario ${name} — runner claim.`,
       type: 'task',
       priority: 2,
     })
-  } catch (err) {
-    die(
-      `step bead create failed` +
-        (initErr === null ? '' : ` (bd init also failed: ${initErr})`) +
-        `: ${err instanceof Error ? err.message : String(err)}`
-    )
-  }
+    state.bead = bead.id
 
-  const prompt = runnerPrompt(repo, readFileSync(src, 'utf8'))
-  const promptFile = join(rdir, 'runner.prompt.md')
-  writeFileSync(promptFile, prompt)
+    stage = 'prompt'
+    const promptFile = join(rdir, 'runner.prompt.md')
+    writeFileSync(promptFile, runnerPrompt(prov.repo, readFileSync(src, 'utf8')))
 
-  const env = loadAgentEnv(dir)
-  const state: RunState = {
-    scenario: name,
-    phase: 'running',
-    bead: bead.id,
-    repo,
-    analyst,
-    createdAt: new Date().toISOString(),
-  }
-  try {
-    const info = await spawnStepAgent(dir, env, {
+    stage = 'spawn'
+    state.phase = 'running'
+    const info = await spawnStepAgent(dir, loadAgentEnv(dir), {
       molStep: bead.id,
-      worktree: repo,
+      worktree: prov.repo,
       promptFile,
       connector: backend ?? undefined,
-      beadsDir: beads,
+      beadsDir: prov.beads,
       env: keep ? { BRO_DOGFOOD_KEEP: '1' } : undefined,
     })
     state.runnerAgent = info.id
@@ -415,11 +465,15 @@ async function cmdRun(dir: string, argv: string[]): Promise<void> {
   } catch (err) {
     state.phase = 'failed'
     writeRun(rdir, state)
-    die(`runner spawn failed: ${err instanceof Error ? err.message : String(err)}`)
+    die(
+      `dogfood run ${stage} failed` +
+        (initErr === null ? '' : ` (bd init also failed: ${initErr})`) +
+        `: ${err instanceof Error ? err.message : String(err)}`
+    )
   }
   writeRun(rdir, state)
   console.log(
-    `dogfood run ${runId} — runner ${state.runnerAgent} (${state.runnerBackend}) on ${repo}` +
+    `dogfood run ${runId} — runner ${state.runnerAgent} (${state.runnerBackend}) on ${state.repo}` +
       `\n  status: bro self dogfood status ${runId}`
   )
 }

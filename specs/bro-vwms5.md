@@ -120,8 +120,9 @@ spawn/registry errors — recorded, never thrown mid-write).
   pattern the whole fleet surface exists to prevent.
 - No agent reimplementation: runner/analyst are ordinary registry
   agents — `bro fleet agents`, occupancy caps, and exit records apply.
-- No hidden scheduling: the pipeline advances only when someone asks
-  (`status`/`report`), never from a background tick.
+- No hidden scheduling: the pipeline advances only on `status` (the
+  lazy advancer), never from a background tick. `report` is read-only —
+  it renders the record, it does not advance it.
 
 ## Tests
 
