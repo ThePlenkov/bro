@@ -39,8 +39,9 @@ fail lines + findings).
 
 - **Orchestrator-only** — `BRO_AGENT_ID` refuses `run`: a worker never
   arms workers. Status/report are read-only and safe anywhere.
-- **Isolation is the point** — the scratch repo gets its own git store
-  and its own stealth beads store; host `bro/` state, claims, and
+- **Isolation is the point** — the scratch repo lives outside the
+  host tree (`bro-dogfood-*` under the OS temp dir) with its own git
+  store and stealth beads store; host `bro/` state, claims, and
   watch markers are never touched.
 - **Monitor by point checks** — `status` between turns, never a
   blocking wait. The analyst's verdict file is the artifact; a

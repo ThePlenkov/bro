@@ -28,10 +28,12 @@ import {
   copyFileSync,
   existsSync,
   mkdirSync,
+  mkdtempSync,
   readFileSync,
   readdirSync,
   writeFileSync,
 } from 'node:fs'
+import { tmpdir } from 'node:os'
 import { basename, join } from 'node:path'
 import { gitCommonDir, gitTry, taskStoreAt, type AgentInfo } from '@broject/core'
 import { loadAgentEnv, type AgentConnectorEnv } from '../agent-connectors.ts'
@@ -91,6 +93,9 @@ interface RunState {
   phase: RunPhase
   /** Step bead in the scratch store — the runner's claim/registry key. */
   bead: string
+  /** The scratch repo's path — under os.tmpdir(), never inside the
+   *  host tree (see provisionRepo). */
+  repo: string
   runnerAgent?: string
   runnerBackend?: string
   analystAgent?: string
@@ -146,7 +151,7 @@ function runnerPrompt(repo: string, scenario: string): string {
 end-to-end exercise of the bro CLI itself.
 
 Work ONLY inside ${repo}. Every command runs there. \`bro\` is on PATH
-(\`which bro\` to confirm; \$BRO_BIN pins a specific build when set).
+(\`which bro\` to confirm).
 \`bd\` works inside the repo — a stealth store was initialized at
 provisioning.
 
@@ -195,16 +200,27 @@ The verdict file is the artifact — keep it tight.`
 
 // --- spawn ------------------------------------------------------------------
 
-/** Provision the scratch repo inside the run dir: own git store, own
- *  stealth beads store — claims the runner makes never pollute the
- *  host's. The step bead lives in the scratch store for the same
- *  reason (state.json is the host-side record). */
-function provisionRepo(rdir: string): { repo: string; beads: string } {
-  const repo = join(rdir, 'repo')
+/** Provision the scratch repo — own git store, own stealth beads
+ *  store; claims the runner makes never pollute the host's. It lives
+ *  under os.tmpdir(), NOT inside the run dir: `bd init` walks ancestor
+ *  directories for an existing .beads config, and a scratch nested
+ *  under the host checkout would silently bootstrap from the host's
+ *  beads remote instead of starting empty. Isolation requires being
+ *  outside the tree. The step bead lives in the scratch store for the
+ *  same reason (state.json is the host-side record). */
+function provisionRepo(): { repo: string; beads: string } {
+  const repo = mkdtempSync(join(tmpdir(), 'bro-dogfood-'))
   const beads = join(repo, '.beads')
-  mkdirSync(repo, { recursive: true })
   execFileSync('git', ['init', '-q', '-b', 'main', repo])
   execFileSync('git', ['-C', repo, 'commit', '-q', '--allow-empty', '-m', 'dogfood scratch'])
+  // the store must be a real bd database, not just a dir — best-effort:
+  // a scripted bd (tests) may not implement init; the step-bead create
+  // below is the real gate and names the failure when init can't help
+  try {
+    execFileSync('bd', ['init', '--stealth'], { cwd: repo, stdio: 'pipe' })
+  } catch {
+    // a scripted bd may not implement init — create the dir anyway
+  }
   mkdirSync(beads, { recursive: true })
   return { repo, beads }
 }
@@ -250,20 +266,18 @@ async function advanceRun(
     return state
   }
   const scenarioFile = join(rdir, 'scenario.md')
-  const prompt = analystPrompt(
-    scenarioFile,
-    rdir,
-    join(rdir, 'repo'),
-    state.runnerAgent
-  )
+  const prompt = analystPrompt(scenarioFile, rdir, state.repo, state.runnerAgent)
   const promptFile = join(rdir, 'analyst.prompt.md')
   writeFileSync(promptFile, prompt)
+  // 'same' means the runner's lane when recorded; an absent pin (a
+  // pre-field run record) falls through to the default connector probe,
+  // which names its own resolution failure — never a silent mystery
   const backend = state.analyst === 'same' ? state.runnerBackend : state.analyst
   try {
     // a step of its own — registry dedup keys on molStep, and the
     // runner's entry (dead or alive) must not collide with the
     // analyst's claim; both beads live in the scratch store
-    const beads = join(rdir, 'repo', '.beads')
+    const beads = join(state.repo, '.beads')
     const analystBead = taskStoreAt(beads).create({
       title: `dogfood analyst ${state.scenario} ${basename(rdir)}`,
       description: `Analyst pass of ${basename(rdir)} — verdict writer.`,
@@ -272,7 +286,7 @@ async function advanceRun(
     })
     const info = await spawnStepAgent(dir, env, {
       molStep: analystBead.id,
-      worktree: join(rdir, 'repo'),
+      worktree: state.repo,
       promptFile,
       connector: backend,
       beadsDir: beads,
@@ -319,7 +333,7 @@ async function cmdRun(dir: string, argv: string[]): Promise<void> {
   const rdir = join(home, runId)
   mkdirSync(rdir, { recursive: true })
   copyFileSync(src, join(rdir, 'scenario.md'))
-  const { repo, beads } = provisionRepo(rdir)
+  const { repo, beads } = provisionRepo()
 
   // the step bead lives in the scratch store — the runner's claims
   // stay inside the disposable repo
@@ -339,6 +353,7 @@ async function cmdRun(dir: string, argv: string[]): Promise<void> {
     scenario: name,
     phase: 'running',
     bead: bead.id,
+    repo,
     analyst,
     createdAt: new Date().toISOString(),
   }
@@ -365,6 +380,78 @@ async function cmdRun(dir: string, argv: string[]): Promise<void> {
   )
 }
 
+interface StatusRow {
+  run: string
+  scenario: string
+  phase: RunPhase
+  runner?: string
+  analyst?: string
+  verdict?: string
+  repo: string
+}
+
+function agentLabel(
+  state: RunState,
+  which: 'runner' | 'analyst',
+  info: AgentInfo | null
+): string | undefined {
+  const id = which === 'runner' ? state.runnerAgent : state.analystAgent
+  if (id === undefined) {
+    return which === 'analyst' && state.analyst === 'none' ? 'none' : undefined
+  }
+  const cause = info?.cause === undefined ? '' : ` (${info.cause})`
+  return `${id} ${info?.state ?? '?'}${cause}`
+}
+
+/** One run's status row — advance the pipeline first (status IS the
+ *  advancer), then read agent liveness and the verdict file. A verdict
+ *  on disk closes the run even before the analyst's process exits. */
+async function statusRow(
+  dir: string,
+  env: AgentConnectorEnv,
+  run: { id: string; dir: string; state: RunState }
+): Promise<StatusRow> {
+  const state = await advanceRun(dir, env, run.dir, run.state)
+  const verdict = join(run.dir, 'verdict.md')
+  const hasVerdict = existsSync(verdict)
+  if (state.phase === 'analyzing' && hasVerdict) {
+    state.phase = 'done'
+    writeRun(run.dir, state)
+  }
+  const [runner, analyst] = await Promise.all([
+    state.runnerAgent === undefined
+      ? Promise.resolve(null)
+      : agentView(dir, env, state.runnerAgent),
+    state.analystAgent === undefined
+      ? Promise.resolve(null)
+      : agentView(dir, env, state.analystAgent),
+  ])
+  return {
+    run: run.id,
+    scenario: state.scenario,
+    phase: state.phase,
+    runner: agentLabel(state, 'runner', runner),
+    analyst: agentLabel(state, 'analyst', analyst),
+    verdict: hasVerdict ? verdict : undefined,
+    repo: existsSync(state.repo) ? state.repo : 'reaped',
+  }
+}
+
+function statusLine(r: StatusRow): string {
+  const parts = [`${r.run} [${r.phase}] ${r.scenario}`]
+  if (r.runner !== undefined) {
+    parts.push(`runner ${r.runner}`)
+  }
+  if (r.analyst !== undefined) {
+    parts.push(r.analyst === 'none' ? 'no analyst' : `analyst ${r.analyst}`)
+  }
+  return (
+    parts.join(' — ') +
+    (r.verdict === undefined ? '' : `\n  verdict: ${r.verdict}`) +
+    `\n  repo: ${r.repo}`
+  )
+}
+
 async function cmdStatus(dir: string, argv: string[]): Promise<void> {
   const runId = positionals(argv, new Set(), {
     boolFlags: new Set(['--json']),
@@ -374,63 +461,19 @@ async function cmdStatus(dir: string, argv: string[]): Promise<void> {
   const runs =
     runId === undefined
       ? listRuns(dir)
-      : [{ id: runId, dir: runDir(dir, runId), state: readRun(runDir(dir, runId)) }]
-          .filter((r): r is { id: string; dir: string; state: RunState } => r.state !== null)
+      : [{ id: runId, dir: runDir(dir, runId), state: readRun(runDir(dir, runId)) }].filter(
+          (r): r is { id: string; dir: string; state: RunState } => r.state !== null
+        )
   if (runs.length === 0) {
     die(runId === undefined ? 'no dogfood runs' : `no run ${runId}`)
   }
-  const rows: Array<Record<string, unknown>> = []
-  for (const run of runs) {
-    const state = await advanceRun(dir, env, run.dir, run.state)
-    const runner =
-      state.runnerAgent === undefined
-        ? null
-        : await agentView(dir, env, state.runnerAgent)
-    const analyst =
-      state.analystAgent === undefined
-        ? null
-        : await agentView(dir, env, state.analystAgent)
-    const verdict = existsSync(join(run.dir, 'verdict.md'))
-    // a verdict file closes the pipeline even before the analyst's
-    // own process exits
-    if (state.phase === 'analyzing' && verdict) {
-      state.phase = 'done'
-      writeRun(run.dir, state)
-    }
-    rows.push({
-      run: run.id,
-      scenario: state.scenario,
-      phase: state.phase,
-      runner:
-        state.runnerAgent === undefined
-          ? undefined
-          : `${state.runnerAgent} ${runner?.state ?? '?'}${runner?.cause !== undefined ? ` (${runner.cause})` : ''}`,
-      analyst:
-        state.analystAgent === undefined
-          ? state.analyst === 'none'
-            ? 'none'
-            : undefined
-          : `${state.analystAgent} ${analyst?.state ?? '?'}`,
-      verdict: verdict ? join(run.dir, 'verdict.md') : undefined,
-      repo: existsSync(join(run.dir, 'repo')) ? join(run.dir, 'repo') : 'reaped',
-    })
-  }
+  const rows = await Promise.all(runs.map((run) => statusRow(dir, env, run)))
   if (argv.includes('--json')) {
     console.log(JSON.stringify(runs.length === 1 ? rows[0] : rows, null, 2))
     return
   }
   for (const r of rows) {
-    console.log(
-      `${r.run} [${r.phase}] ${r.scenario}` +
-        (r.runner === undefined ? '' : ` — runner ${r.runner}`) +
-        (r.analyst === undefined
-          ? ''
-          : r.analyst === 'none'
-            ? ' — no analyst'
-            : ` — analyst ${r.analyst}`) +
-        (r.verdict === undefined ? '' : `\n  verdict: ${r.verdict}`) +
-        `\n  repo: ${r.repo}`
-    )
+    console.log(statusLine(r))
   }
 }
 

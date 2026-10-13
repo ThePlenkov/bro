@@ -14,6 +14,7 @@ import {
   rmSync,
   writeFileSync,
 } from 'node:fs'
+import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import type { AgentInfo } from '@broject/core'
 import { registerAgentConnector } from '../agent-connectors.ts'
@@ -139,6 +140,13 @@ function fixture() {
     root,
     main,
     restore() {
+      // scratch repos live under tmpdir — reap any recorded paths
+      for (const id of runsOf(main)) {
+        const repo = stateOf(join(main, '.git', 'bro', 'dogfood', id)).repo
+        if (typeof repo === 'string' && repo.startsWith(tmpdir())) {
+          rmSync(repo, { recursive: true, force: true })
+        }
+      }
       process.chdir(prev.cwd)
       process.env.PATH = prev.PATH
       if (prev.FAKE_BD_DB === undefined) {
@@ -197,14 +205,17 @@ describe('bro self dogfood', () => {
       const state = stateOf(rdir)
       assert.equal(state.phase, 'running')
       assert.equal(state.runnerBackend, 'dogfood-test')
-      // the scratch repo is inside the run dir with its own beads store
-      assert.ok(existsSync(join(rdir, 'repo', '.git')))
-      assert.ok(existsSync(join(rdir, 'repo', '.beads')))
+      // the scratch repo lives OUTSIDE the host tree with its own
+      // git + beads stores — host claims/marks stay untouched
+      const repo = state.repo as string
+      assert.ok(repo.startsWith(tmpdir()))
+      assert.ok(existsSync(join(repo, '.git')))
+      assert.ok(existsSync(join(repo, '.beads')))
       // the spawn went through the registry path: repoRoot = scratch,
       // prompt text = the wrapped runner prompt, beadsDir = scratch store
       const spec = spawned[0]!
-      assert.equal(spec.repoRoot, join(rdir, 'repo'))
-      assert.equal(spec.beadsDir, join(rdir, 'repo', '.beads'))
+      assert.equal(spec.repoRoot, repo)
+      assert.equal(spec.beadsDir, join(repo, '.beads'))
       assert.match(spec.prompt, /RUNNER of a bro dogfood scenario/)
       assert.match(spec.prompt, /run `bro status`/)
       assert.match(r.out[0]!, new RegExp(`dogfood run ${runs[0]}`))
@@ -246,7 +257,7 @@ describe('bro self dogfood', () => {
       assert.equal(r.code, 0, r.err.join('\n'))
       assert.equal(spawned.length, 2)
       assert.match(spawned[1]!.prompt, /ANALYST of a bro dogfood run/)
-      assert.match(spawned[1]!.prompt, new RegExp(rdir.replace(/\//g, '\\/')))
+      assert.ok(spawned[1]!.prompt.includes(rdir))
       // the verdict file landed — a second status closes the phase
       await dogfood(['status'])
       const state = stateOf(rdir)
