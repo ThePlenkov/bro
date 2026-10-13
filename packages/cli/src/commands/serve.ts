@@ -132,6 +132,7 @@ import {
 } from './agents.ts'
 import { flag, positionals } from './args.ts'
 import { providerConfig, providerProxy } from './serve-provider.ts'
+import { conductorConfig, conductorProxy } from './serve-conductor.ts'
 import { readBeads } from './status.ts'
 import { collectSnapshot } from './watch.ts'
 import { readHeartbeat, type HeartbeatSummary } from './watch-heartbeat.ts'
@@ -1138,8 +1139,14 @@ function dropActStateForEvent(dir: string, event: EventInput): void {
 
 function realDeps(dir: string, env: AgentConnectorEnv): ServeDeps {
   const socketPath = busSocketPath(dir)
-  const providerCfg = providerConfig(process.env)
-  if (providerCfg !== undefined) {
+  // the conductor answers /v1 from a configured acp provider
+  // (BRO_PROVIDER_BACKEND) — explicit backend intent beats the byte
+  // proxy's upstream+key pair, which stays the plain-HTTP fallback
+  const conductorCfg = conductorConfig(process.env, dir)
+  const providerCfg = conductorCfg === undefined ? providerConfig(process.env) : undefined
+  if (conductorCfg !== undefined) {
+    console.log(`provider: /v1/* → acp conductor (${conductorCfg.backend})`)
+  } else if (providerCfg !== undefined) {
     console.log(`provider: /v1/* → ${providerCfg.upstream}`)
   }
   return {
@@ -1178,7 +1185,11 @@ function realDeps(dir: string, env: AgentConnectorEnv): ServeDeps {
         },
       }),
     },
-    ...(providerCfg !== undefined ? { provider: providerProxy(providerCfg) } : {}),
+    ...(conductorCfg !== undefined
+      ? { provider: conductorProxy(conductorCfg) }
+      : providerCfg !== undefined
+        ? { provider: providerProxy(providerCfg) }
+        : {}),
   }
 }
 
