@@ -1,0 +1,3 @@
+display_name: dogfood
+short_description: Run bro's scenario-driven e2e self-test — markdown runbook, fresh-agent runner, analyst verdict.
+allow_implicit_invocation: true
