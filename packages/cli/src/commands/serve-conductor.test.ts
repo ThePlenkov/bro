@@ -2,12 +2,10 @@
  *  session instead of an HTTP upstream (spec bro-xeozo). */
 import { describe, test } from 'node:test'
 import assert from 'node:assert/strict'
-import { createServer } from 'node:http'
-import type { AddressInfo } from 'node:net'
 import type { SessionConfigOption } from '@agentclientprotocol/sdk'
 import { fakeAcpAgent } from '@broject/providers'
 import { conductorConfig, conductorProxy, parseReply } from './serve-conductor.ts'
-import { createServeHandler, type ServeDeps } from './serve.ts'
+import { authHeaders, listen, serveDeps as deps } from './serve-testkit.ts'
 
 const MODEL_OPTION: SessionConfigOption = {
   id: 'model',
@@ -21,46 +19,7 @@ const MODEL_OPTION: SessionConfigOption = {
   ],
 }
 
-const fakeConn = {
-  name: 'native',
-  capabilities: () => ({ supervisor: 'none' as const }),
-}
-
-const deps = (over: Partial<ServeDeps> = {}): ServeDeps => ({
-  snapshot: async () => ({}),
-  agents: async () => ({
-    backends: [{ conn: fakeConn as never, agents: [] }],
-    occupancy: { occupied: 0, maxConcurrent: 3 },
-    sessions: [],
-    discovered: [],
-    degraded: [],
-  }),
-  queue: async () => ({}),
-  ticks: async () => ({}),
-  mailbox: async () => ({}),
-  find: async () => ({ degraded: [] }),
-  spawn: async () => {
-    throw new Error('unused')
-  },
-  stop: async () => {
-    throw new Error('unused')
-  },
-  connectors: () => ['native'],
-  ...over,
-})
-
-const TOKEN = 'test-session-token'
-const auth = { authorization: `Bearer ${TOKEN}` }
-
-async function listen(d: ServeDeps): Promise<{ url: string; close: () => Promise<void> }> {
-  const server = createServer(createServeHandler(d, { dir: '/repo', startedAt: 't0' }, TOKEN))
-  await new Promise<void>((r) => server.listen(0, '127.0.0.1', r))
-  const { port } = server.address() as AddressInfo
-  return {
-    url: `http://127.0.0.1:${port}`,
-    close: () => new Promise<void>((r) => server.close(() => r())),
-  }
-}
+const auth = authHeaders
 
 const CFG = {
   backend: 'dv-acp',
@@ -89,6 +48,16 @@ describe('conductorConfig', () => {
       'swe-z'
     )
   })
+  test('a negative/zero timeout falls back to the default', () => {
+    for (const raw of ['-5', '0', 'abc']) {
+      const cfg = conductorConfig(
+        { BRO_PROVIDER_BACKEND: 'dv-acp', BRO_PROVIDER_TIMEOUT_MS: raw },
+        '/r',
+        providers
+      )
+      assert.equal(cfg?.timeoutMs, 120_000, raw)
+    }
+  })
   test('unknown backend and non-acp kind are loud errors', () => {
     assert.throws(
       () => conductorConfig({ BRO_PROVIDER_BACKEND: 'nope' }, '/r', providers),
@@ -112,6 +81,10 @@ describe('parseReply', () => {
     assert.equal(blocks[1]?.name, 'ls')
     assert.match(blocks[1]?.id ?? '', /^toolu_[0-9a-f]{16}$/)
     assert.equal(blocks[2]?.type, 'text')
+  })
+  test('a scalar tool input lands wrapped — anthropic needs an object', () => {
+    const blocks = parseReply('<tool_call>{"name":"ls","input":"/tmp"}</tool_call>')
+    assert.deepEqual(blocks[0]?.input, { value: '/tmp' })
   })
   test('unparseable tool_call stays raw text — no invented calls', () => {
     const blocks = parseReply('x <tool_call>{nope</tool_call> y')
