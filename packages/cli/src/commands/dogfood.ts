@@ -34,7 +34,7 @@ import {
   readdirSync,
   writeFileSync,
 } from 'node:fs'
-import { tmpdir } from 'node:os'
+import { homedir } from 'node:os'
 import { basename, join } from 'node:path'
 import { gitCommonDir, gitTry, taskStoreAt, type AgentInfo } from '@broject/core'
 import { loadAgentEnv, type AgentConnectorEnv } from '../agent-connectors.ts'
@@ -94,7 +94,7 @@ interface RunState {
   phase: RunPhase
   /** Step bead in the scratch store — the runner's claim/registry key. */
   bead: string
-  /** The scratch repo's path — under os.tmpdir(), never inside the
+  /** The scratch repo's path — under scratchRoot(), never inside the
    *  host tree (see provisionRepo). */
   repo: string
   runnerAgent?: string
@@ -201,16 +201,28 @@ The verdict file is the artifact — keep it tight.`
 
 // --- spawn ------------------------------------------------------------------
 
+/** Scratch parent — `$XDG_DATA_HOME/bro/dogfood` (same convention as
+ *  sessionSlotsDir). NOT inside the run dir or anywhere in the host
+ *  checkout: `bd init` walks ancestor directories for an existing
+ *  .beads config and a scratch nested under the host would silently
+ *  bootstrap from the host's beads remote instead of starting empty.
+ *  Persistent (not /tmp) on purpose: run repos survive reboots like
+ *  every other dogfood record, and on hosts where ~ is already a
+ *  trusted workspace (devin's trusted_paths is prefix-based) the tree
+ *  inherits workspace trust — `devin -p` refused /tmp scratch as
+ *  untrusted on the first live run. */
+function scratchRoot(): string {
+  const xdg = process.env['XDG_DATA_HOME']
+  const base = xdg !== undefined && xdg.trim() !== '' ? xdg : join(homedir(), '.local', 'share')
+  return join(base, 'bro', 'dogfood')
+}
+
 /** Provision the scratch repo — own git store, own stealth beads
- *  store; claims the runner makes never pollute the host's. It lives
- *  under os.tmpdir(), NOT inside the run dir: `bd init` walks ancestor
- *  directories for an existing .beads config, and a scratch nested
- *  under the host checkout would silently bootstrap from the host's
- *  beads remote instead of starting empty. Isolation requires being
- *  outside the tree. The step bead lives in the scratch store for the
- *  same reason (state.json is the host-side record). */
+ *  store; claims the runner makes never pollute the host's. */
 function provisionRepo(): { repo: string; beads: string; initErr: string | null } {
-  const repo = mkdtempSync(join(tmpdir(), 'bro-dogfood-'))
+  const root = scratchRoot()
+  mkdirSync(root, { recursive: true })
+  const repo = mkdtempSync(join(root, 'run-'))
   const beads = join(repo, '.beads')
   execFileSync('git', ['init', '-q', '-b', 'main', repo]) // NOSONAR — PATH lookup is the contract
   execFileSync('git', [ // NOSONAR — PATH lookup is the contract

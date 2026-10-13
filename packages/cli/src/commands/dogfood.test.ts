@@ -14,7 +14,6 @@ import {
   rmSync,
   writeFileSync,
 } from 'node:fs'
-import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { AgentNotFound } from '@broject/core'
 import type { AgentInfo, SpawnSpec } from '@broject/core'
@@ -118,6 +117,7 @@ function fixture() {
     cwd: process.cwd(),
     PATH: process.env.PATH ?? '',
     FAKE_BD_DB: process.env.FAKE_BD_DB,
+    XDG_DATA_HOME: process.env.XDG_DATA_HOME,
     scrubbed: {} as Record<string, string | undefined>,
   }
   for (const k of Object.keys(process.env)) {
@@ -128,6 +128,10 @@ function fixture() {
   }
   process.env.PATH = `${binDir}:${prev.PATH}`
   process.env.FAKE_BD_DB = db
+  // scratch repos land under $XDG_DATA_HOME/bro/dogfood — point XDG at
+  // the fixture root so runs never touch the real share dir
+  const xdg = join(root, 'xdg')
+  process.env.XDG_DATA_HOME = xdg
   process.chdir(main)
   mkdirSync(join(main, 'dogfood'))
   writeFileSync(
@@ -137,20 +141,21 @@ function fixture() {
   return {
     root,
     main,
+    xdg,
     restore() {
-      // scratch repos live under tmpdir — reap any recorded paths
-      for (const id of runsOf(main)) {
-        const repo = stateOf(join(main, '.git', 'bro', 'dogfood', id)).repo
-        if (typeof repo === 'string' && repo.startsWith(tmpdir())) {
-          rmSync(repo, { recursive: true, force: true })
-        }
-      }
+      // scratch repos live under the fixture's XDG root — reaped with
+      // root itself; nothing extra to clean
       process.chdir(prev.cwd)
       process.env.PATH = prev.PATH
       if (prev.FAKE_BD_DB === undefined) {
         delete process.env.FAKE_BD_DB
       } else {
         process.env.FAKE_BD_DB = prev.FAKE_BD_DB
+      }
+      if (prev.XDG_DATA_HOME === undefined) {
+        delete process.env.XDG_DATA_HOME
+      } else {
+        process.env.XDG_DATA_HOME = prev.XDG_DATA_HOME
       }
       for (const [k, v] of Object.entries(prev.scrubbed)) {
         if (v === undefined) {
@@ -206,7 +211,7 @@ describe('bro self dogfood', () => {
       // the scratch repo lives OUTSIDE the host tree with its own
       // git + beads stores — host claims/marks stay untouched
       const repo = state.repo as string
-      assert.ok(repo.startsWith(tmpdir()))
+      assert.ok(repo.startsWith(join(fx.xdg, 'bro', 'dogfood')))
       assert.ok(existsSync(join(repo, '.git')))
       assert.ok(existsSync(join(repo, '.beads')))
       // the spawn went through the registry path: repoRoot = scratch,

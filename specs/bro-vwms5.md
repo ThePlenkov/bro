@@ -49,20 +49,27 @@ analyst.prompt.md  — the wrapped prompt the analyst received
 verdict.md         — the analyst's output
 ```
 
-The scratch checkout itself lives under `os.tmpdir()`
-(`bro-dogfood-*`), recorded as `state.repo` — never inside the run
-dir or anywhere under the host tree: `bd init` walks ancestor
-directories for an existing `.beads` config, and a scratch nested
-under the host checkout would silently bootstrap the host's beads
-remote instead of starting empty.
+The scratch checkout itself lives under
+`$XDG_DATA_HOME/bro/dogfood/run-*` (default `~/.local/share/bro/
+dogfood/`), recorded as `state.repo` — never inside the run dir or
+anywhere under the host tree: `bd init` walks ancestor directories
+for an existing `.beads` config, and a scratch nested under the host
+checkout would silently bootstrap the host's beads remote instead of
+starting empty. The dir is persistent rather than `os.tmpdir()` for
+two reasons: run repos survive reboots like every other dogfood
+record, and on hosts where `~` is already a trusted workspace the
+tree inherits the agent CLI's workspace trust (devin's
+trusted_paths is prefix-based; `devin -p` refuses a `/tmp` scratch
+as untrusted).
 
 Phases: `running` → `analyzing` → `done` (or `failed` on
 spawn/registry errors — recorded, never thrown mid-write).
 
 ## Runner mechanics
 
-- The scratch repo is `git init`'d under tmpdir (own git store, own
-  stealth `bd init` beads store — the runner's claims stay inside it).
+- The scratch repo is `git init`'d under the XDG scratch root (own
+  git store, own stealth `bd init` beads store — the runner's claims
+  stay inside it).
   `bro` resolves on PATH — scenarios dogfood the installed build,
   which is the point.
 - A real step bead is created per agent (`dogfood <name> <run-id>`
