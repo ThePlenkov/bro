@@ -23,6 +23,11 @@ now": one call instead of `bd list` + `bro fleet agents status` +
 ```jsonc
 {
   "dir": "/repo", "branch": "feat/x", "dirty": 3,
+  "worktrees": [{ "name": "repo--fix-x", "path": "/repo--fix-x",
+                  "branch": "work/fix-x", "state": "dirty(2)",
+                  "claim": "fix-x" },
+                { "name": "repo", "path": "/repo", "branch": "main",
+                  "state": "clean", "main": true, "here": true }],
   "beads": { "inProgress": [{ "id": "bro-1", "title": "…",
                               "priority": 2, "assignee": "…" }],
              "ready": [{ "id": "bro-9", "title": "…" }],
@@ -65,3 +70,10 @@ now": one call instead of `bd list` + `bro fleet agents status` +
 - **fleet.agents[].state** — `running | exited | stopped | unknown`,
   derived cheaply (pidAlive + recorded exitStatus), not the full
   connector probe `bro fleet agents status` does.
+- **`worktrees` is the claimed-live-work plane** — every checkout in
+  `git worktree list`, each with `branch`, `state` in `bro work list`'s
+  vocabulary (`clean | dirty(n) | gone | LOCKED | PRUNABLE`), and
+  `claim`: the live in-tree marker detail `bro work enter` stamped
+  (absent = unclaimed or aged out). `main`/`here` flag the primary
+  checkout and the board's own cwd — a sibling holding work is visible
+  even when it never became a bead row.

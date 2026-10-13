@@ -4,7 +4,7 @@
  * needs per refresh tick, where N shell calls per tick used to be the
  * only way:
  *
- *   bro status            compact board — beads, fleet, drill, git
+ *   bro status            compact board — beads, worktrees, fleet, drill, git
  *   bro status --json     the same board, machine-readable
  *   bro status --deep     + act exit gate for the current branch's PR
  *                         (network — the fast path stays local-only)
@@ -12,11 +12,13 @@
  * All state is read, never mutated. Sources: the tasks facade
  * (in-progress + ready — the serving backend, not a hardcoded bd),
  * the agent registry (<git-common>/bro/agents.json — shared across
- * linked worktrees), the drill stack, git porcelain. Bead-less or
+ * linked worktrees), `git worktree list` + the in-tree claim markers
+ * `bro work enter` stamps, the drill stack, git porcelain. Bead-less or
  * registry-less checkouts still answer — the absent sections are empty
  * arrays/null, never errors.
  */
-import { basename } from 'node:path'
+import { realpathSync } from 'node:fs'
+import { basename, resolve } from 'node:path'
 import { evaluateExitGate, fetchPrActState, prStateCache } from '@broject/act'
 import {
   facade,
@@ -38,6 +40,11 @@ import {
   readHeartbeat,
   type HeartbeatSummary,
 } from './watch-heartbeat.ts'
+import {
+  parseWorktreePorcelain,
+  stateOfWorktree,
+  worktreeClaim,
+} from './work.ts'
 
 export interface BeadRow {
   id: string
@@ -59,11 +66,33 @@ interface StatusAgent {
   model?: string
 }
 
+/** One checkout on the board. `state` is `bro work list`'s vocabulary
+ *  (clean|dirty(n)|gone|LOCKED|PRUNABLE — via stateOfWorktree, so the
+ *  two planes never disagree); `claim` is the live in-tree marker
+ *  detail `bro work enter` stamped — absent when the tree is
+ *  unclaimed or its marker aged out. */
+export interface StatusWorktree {
+  name: string
+  path: string
+  branch?: string
+  state: string
+  claim?: string
+  /** the primary checkout (porcelain's first entry) */
+  main?: boolean
+  /** the board's own cwd — loop/drive workers run in linked trees, so
+   *  cwd ≠ main in general */
+  here?: boolean
+}
+
 interface BroStatus {
   dir: string
   branch: string
   /** Dirty-path count from `git status --porcelain` — untracked incl. */
   dirty: number
+  /** Every checkout in `git worktree list` — the claimed-live-work
+   *  plane `bro work list` owns, surfaced on the board so an occupied
+   *  sibling doesn't read only as a bead row (bro-0vj14). */
+  worktrees: StatusWorktree[]
   beads: {
     inProgress: BeadRow[]
     /** First READY_CAP ready beads — the board shows the top, not all. */
@@ -181,6 +210,48 @@ export function readBeads(dir: string): StatusBeads {
     ready: readyRows.slice(0, READY_CAP),
     readyTotal: readyRows.length,
   }
+}
+
+/** Every checkout `git worktree list` names — one porcelain read plus
+ *  the per-tree probes `bro work list` already pays (a `status
+ *  --porcelain` each) and a marker file read for the claim. A failed
+ *  list is an empty array, never an error. */
+function readWorktrees(dir: string): StatusWorktree[] {
+  const res = gitTry(['-C', dir, 'worktree', 'list', '--porcelain'])
+  if (res.code !== 0) {
+    return []
+  }
+  // git canonicalizes the paths it registers — compare realpaths so a
+  // symlinked tmpdir/cwd still matches its own row
+  const real = (p: string): string => {
+    try {
+      return realpathSync(p)
+    } catch {
+      return resolve(p)
+    }
+  }
+  const here = real(dir)
+  return parseWorktreePorcelain(res.out).map((w, i) => {
+    const row: StatusWorktree = {
+      name: basename(w.path),
+      path: w.path,
+      state: stateOfWorktree(w),
+    }
+    if (w.branch !== undefined) {
+      row.branch = w.branch
+    }
+    const claim = worktreeClaim(w.path)
+    if (claim !== undefined) {
+      row.claim = claim
+    }
+    if (i === 0) {
+      row.main = true
+    }
+    if (real(w.path) === here) {
+      row.here = true
+    }
+    return row
+  })
 }
 
 function readFleet(dir: string): BroStatus['fleet'] {
@@ -309,6 +380,7 @@ export function collectStatus(dir: string): BroStatus {
     dir,
     branch,
     dirty,
+    worktrees: readWorktrees(dir),
     beads: readBeads(dir),
     fleet: readFleet(dir),
     loop: readLoop(dir),
@@ -318,6 +390,17 @@ export function collectStatus(dir: string): BroStatus {
     watch: readHeartbeat(dir),
     build: readBuild(dir),
   }
+}
+
+function worktreeLine(w: StatusWorktree): string {
+  const glyph = w.claim !== undefined ? '◐' : '·'
+  const bits = [
+    w.branch ?? 'detached',
+    w.state,
+    w.claim === undefined ? '' : w.claim === '' ? 'claimed' : `claim ${w.claim}`,
+    w.here === true ? '← here' : '',
+  ].filter((b) => b !== '')
+  return `  ${glyph} ${w.name}  ${bits.join('  ')}`
 }
 
 function agentLine(a: StatusAgent): string {
@@ -380,6 +463,15 @@ function render(s: BroStatus): string[] {
     }
   }
   lines.push(`ready: ${s.beads.readyTotal} bead(s)`)
+  // the worktree plane is siblings-only in text — the main checkout is
+  // already the `board:` header (JSON carries every row)
+  const linked = s.worktrees.filter((w) => w.main !== true)
+  if (linked.length > 0) {
+    lines.push(`worktrees: ${linked.length} linked`)
+    for (const w of linked) {
+      lines.push(worktreeLine(w))
+    }
+  }
   const cap = s.fleet.maxConcurrent > 0 ? `/${s.fleet.maxConcurrent}` : ''
   const live = s.fleet.agents.filter((a) => a.state === 'running')
   lines.push(`fleet: ${live.length}${cap} running`)
