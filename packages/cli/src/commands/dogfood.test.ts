@@ -192,6 +192,39 @@ describe('bro self dogfood', () => {
     }
   })
 
+  test('run --provider pins the worker engine on runner and analyst spawns', async () => {
+    const fx = fixture()
+    const { conn, spawned, states } = dogfoodConnector()
+    const dispose = registerAgentConnector('dogfood-test', () => conn)
+    try {
+      writeFileSync(
+        join(fx.main, 'bro.config.json'),
+        JSON.stringify({ providers: { p1: { type: 'cli', command: 'p1-cmd' } } })
+      )
+      const r = await dogfood([
+        'run',
+        'smoke',
+        '--backend',
+        'dogfood-test',
+        '--provider',
+        'p1',
+      ])
+      assert.equal(r.code, 0, r.err.join('\n'))
+      const rdir = rdirOf(fx.main)
+      assert.equal(stateOf(rdir).provider, 'p1')
+      assert.equal(spawned[0]!.provider, 'p1')
+      // terminal runner → lazy advance: the analyst rides the same pin
+      states.get('dogfood-test-1')!.state = 'exited'
+      const s = await dogfood(['status'])
+      assert.equal(s.code, 0)
+      assert.equal(spawned.length, 2)
+      assert.equal(spawned[1]!.provider, 'p1')
+    } finally {
+      dispose?.()
+      fx.restore()
+    }
+  })
+
   test('status stays running while the runner is live', async () => {
     const fx = fixture()
     const { conn } = dogfoodConnector()

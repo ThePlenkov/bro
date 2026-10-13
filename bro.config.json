@@ -168,6 +168,12 @@
       "type": "cli",
       "command": "devin -p --permission-mode dangerous --prompt-file {promptFile}"
     },
+    "devin-acp": {
+      "type": "acp",
+      "command": "devin acp",
+      "autoApprove": true,
+      "sessionRm": "devin rm {sessionId} --force"
+    },
     "opencode-free": {
       "type": "cli",
       "command": "opencode run --model {model} --auto -f {promptFile} 'Follow the attached instructions.'",
