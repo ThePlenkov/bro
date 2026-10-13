@@ -7,7 +7,8 @@
  * by name and ask for a surface (`call`, `chat`, `spawn`); they never
  * name a vendor.
  */
-export { acpCall, acpChat, acpClient, acpConverse, acpModels, acpWorkerArgv, isSystemoneFamily } from './acp.ts'
+export { acpCall, acpChat, acpClient, acpConverse, acpModels, acpOpen, acpPooledTurn, acpWorkerArgv, isSystemoneFamily } from './acp.ts'
+export type { AcpPeer } from './acp.ts'
 export { AcpWorkerError, renderAcpUpdate, runAcpWorker } from './acp-worker.ts'
 export type { AcpWorkerSpec } from './acp-worker.ts'
 export { cliChat, expandPromptFile } from './cli.ts'

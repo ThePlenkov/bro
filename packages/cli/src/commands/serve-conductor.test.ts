@@ -170,6 +170,29 @@ describe('serve /v1/* — the conductor plane', () => {
     }
   })
 
+  test('a provider/model request id pins the acp session model', async () => {
+    const fake = fakeAcpAgent({ replyText: 'ok', configOptions: [MODEL_OPTION] })
+    const { url, close } = await listen(
+      deps({ provider: conductorProxy(CFG, { acp: { peer: fake.app } }) })
+    )
+    try {
+      const r = await fetch(`${url}/v1/messages`, {
+        method: 'POST',
+        headers: { ...auth, 'content-type': 'application/json' },
+        body: JSON.stringify({
+          model: 'dv-acp/swe-y',
+          messages: [{ role: 'user', content: 'x' }],
+          stream: false,
+        }),
+      })
+      assert.equal(r.status, 200)
+      assert.deepEqual(fake.configSets, [{ configId: 'model', value: 'swe-y' }])
+      assert.equal((await r.json()).model, 'swe-y')
+    } finally {
+      await close()
+    }
+  })
+
   test('stream:false answers a buffered anthropic message', async () => {
     const fake = fakeAcpAgent({ replyText: 'plain', configOptions: [MODEL_OPTION] })
     const { url, close } = await listen(

@@ -17,8 +17,8 @@ import { randomBytes } from 'node:crypto'
 import type { IncomingMessage, ServerResponse } from 'node:http'
 import { loadConfig } from '@broject/core'
 import type { ProviderEntry } from '@broject/core'
-import { acpConverse, acpModels } from '@broject/providers'
-import type { ProviderWireOpts } from '@broject/providers'
+import { acpModels, acpOpen, acpPooledTurn } from '@broject/providers'
+import type { AcpPeer, ProviderWireOpts } from '@broject/providers'
 
 type AcpEntry = Extract<ProviderEntry, { type: 'acp' }>
 
@@ -303,7 +303,8 @@ async function messages(
   req: IncomingMessage,
   res: ServerResponse,
   cfg: ConductorConfig,
-  opts: ProviderWireOpts
+  opts: ProviderWireOpts,
+  link: () => Promise<AcpPeer>
 ): Promise<void> {
   let body: MessagesRequest
   try {
@@ -317,16 +318,23 @@ async function messages(
   // a dropped client cancels the acp turn — no orphan devin session
   const ac = new AbortController()
   res.once('close', () => ac.abort())
-  let reply: Awaited<ReturnType<typeof acpConverse>>
+  let reply: Awaited<ReturnType<typeof acpPooledTurn>>
   try {
-    reply = await acpConverse(
-      `conductor:${cfg.backend}`,
+    const peer = await link()
+    // `provider/model` ids are a real pin — resolved against the agent's
+    // own catalog; bare foreign ids (claude-sonnet-*) are display labels
+    reply = await acpPooledTurn(
+      peer,
       cfg.entry,
       opts,
       prompt,
       () => {},
       Date.now() + cfg.timeoutMs,
-      ac.signal
+      ac.signal,
+      `conductor:${cfg.backend}`,
+      typeof body.model === 'string' && body.model.includes('/')
+        ? body.model
+        : undefined
     )
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err)
@@ -415,11 +423,31 @@ export function conductorProxy(
     model: opts.model ?? cfg.model,
     acp: { cwd: cfg.cwd, ...opts.acp },
   }
+  // warm pool: one acp child serves every /v1/messages turn — spawn +
+  // initialize is paid once per listener; session/new per request is
+  // cheap and concurrent sessions multiplex on the same connection.
+  // A dead transport drops the link so the next request respawns.
+  let link: Promise<AcpPeer> | undefined
+  const getLink = (): Promise<AcpPeer> => {
+    if (link === undefined) {
+      link = acpOpen(
+        `conductor:${cfg.backend}`,
+        cfg.entry,
+        wireOpts,
+        Date.now() + cfg.timeoutMs
+      )
+      void link.then(
+        (p) => p.signal.addEventListener('abort', () => (link = undefined), { once: true }),
+        () => (link = undefined)
+      )
+    }
+    return link
+  }
   return async (req, res) => {
     const path = (req.url ?? '/').split('?')[0]
     const method = req.method ?? 'GET'
     if (method === 'POST' && path === '/v1/messages') {
-      await messages(req, res, cfg, wireOpts)
+      await messages(req, res, cfg, wireOpts, getLink)
       return
     }
     if (method === 'POST' && path === '/v1/messages/count_tokens') {
