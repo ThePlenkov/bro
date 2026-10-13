@@ -391,13 +391,13 @@ export async function acpModels(
     const { session } = await acpSession(ctx, opts, by, deadline)
     try {
       const opt = (session.newSessionResponse.configOptions ?? []).find(
-        (o) => o.category === 'model'
+        (o) => o.category === 'model' && o.type === 'select'
       )
-      return (opt?.options ?? []).flatMap((o) =>
-        typeof o.value === 'string'
-          ? [{ value: o.value, ...(typeof o.name === 'string' ? { name: o.name } : {}) }]
-          : []
-      )
+      const options = opt?.type === 'select' ? opt.options : []
+      // options may be grouped — a group's leaf options carry the values
+      return options
+        .flatMap((o) => ('options' in o ? o.options : [o]))
+        .map((o) => ({ value: String(o.value), name: o.name }))
     } finally {
       session.dispose()
     }
