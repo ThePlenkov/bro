@@ -210,14 +210,12 @@ interface AcpReply {
  *  operation shares (prompt, model listing). Carries the negotiated
  *  version check and the auth-failure mapper; callers get the live
  *  session object and dispose it themselves. */
-async function acpSession(
-  ctx: ClientContext,
-  opts: ProviderWireOpts,
-  by: string,
-  deadline: number
-) {
-  const req = (): SendRequestOptions => ({
-    cancellationSignal: AbortSignal.timeout(Math.max(1, remaining(deadline))),
+/** The initialize handshake — once per connection, not per session.
+ *  `req(d)` mints per-request cancel options against ANY deadline so a
+ *  pooled caller's per-turn budget is what bounds its requests. */
+async function acpInit(ctx: ClientContext, by: string, deadline: number) {
+  const req = (d = deadline): SendRequestOptions => ({
+    cancellationSignal: AbortSignal.timeout(Math.max(1, remaining(d))),
   })
   const init = await ctx.request(
     'initialize',
@@ -260,10 +258,31 @@ async function acpSession(
         )
       : err
   }
+  return { asAuthError, req }
+}
+
+/** session/new on an ALREADY-initialized connection — the pooled path. */
+async function acpSessionOpen(
+  ctx: ClientContext,
+  opts: ProviderWireOpts,
+  asAuthError: (err: unknown) => never,
+  req: () => SendRequestOptions
+) {
   const session = await ctx
     .buildSession({ cwd: opts.acp?.cwd ?? process.cwd(), mcpServers: [] })
     .start(req())
     .catch(asAuthError)
+  return session
+}
+
+async function acpSession(
+  ctx: ClientContext,
+  opts: ProviderWireOpts,
+  by: string,
+  deadline: number
+) {
+  const { asAuthError, req } = await acpInit(ctx, by, deadline)
+  const session = await acpSessionOpen(ctx, opts, asAuthError, req)
   return { session, asAuthError, req }
 }
 
@@ -446,42 +465,212 @@ export async function acpConverse(
         opts.model ?? entry.model,
         req
       )
-      const turn = session.prompt(promptText, req()).catch(asAuthError)
-      // the turn's completion also queues as a `stop` for nextUpdate —
-      // racing keeps a prompt-level failure from hanging the pump
-      const stopP = turn.then((response) => ({
-        kind: 'stop' as const,
-        stopReason: response.stopReason,
-        response,
-      }))
-      // a gone caller cancels the turn: the dispose below ends the
-      // session and withAcp's finally kills the child — no orphan work
-      const aborted = new Promise<never>((_, reject) => {
-        const drop = () =>
-          reject(new JudgeUnavailable(`${by}: caller aborted the turn`))
-        if (signal?.aborted === true) drop()
-        signal?.addEventListener('abort', drop, { once: true })
-      })
-      let text = ''
-      for (;;) {
-        const msg: ActiveSessionMessage = await Promise.race([
-          session.nextUpdate(),
-          stopP,
-          aborted,
-        ])
-        if (msg.kind === 'stop') {
-          return { stopReason: msg.stopReason, text, model }
-        }
-        onUpdate(msg.update)
-        if (msg.update.sessionUpdate === 'agent_message_chunk') {
-          const c = msg.update.content
-          if (c.type === 'text') text += c.text
-        }
-      }
+      const r = await pumpTurn(session, promptText, onUpdate, asAuthError, req, signal, by)
+      return { ...r, model }
     } finally {
       session.dispose()
     }
   })
+}
+
+/** The prompt→updates loop shared by one-shot and pooled turns. */
+async function pumpTurn(
+  session: Awaited<ReturnType<typeof acpSession>>['session'],
+  promptText: string,
+  onUpdate: (update: SessionUpdate) => void,
+  asAuthError: (err: unknown) => never,
+  req: () => SendRequestOptions,
+  signal: AbortSignal | undefined,
+  by: string
+): Promise<{ stopReason: StopReason; text: string }> {
+  const turn = session.prompt(promptText, req()).catch(asAuthError)
+  // the turn's completion also queues as a `stop` for nextUpdate —
+  // racing keeps a prompt-level failure from hanging the pump
+  const stopP = turn.then((response) => ({
+    kind: 'stop' as const,
+    stopReason: response.stopReason,
+    response,
+  }))
+  // a gone caller cancels the turn: the caller's dispose ends the
+  // session — no orphan work on the agent
+  const aborted = new Promise<never>((_, reject) => {
+    const drop = () => reject(new JudgeUnavailable(`${by}: caller aborted the turn`))
+    if (signal?.aborted === true) drop()
+    signal?.addEventListener('abort', drop, { once: true })
+  })
+  let text = ''
+  for (;;) {
+    const msg: ActiveSessionMessage = await Promise.race([
+      session.nextUpdate(),
+      stopP,
+      aborted,
+    ])
+    if (msg.kind === 'stop') {
+      return { stopReason: msg.stopReason, text }
+    }
+    onUpdate(msg.update)
+    if (msg.update.sessionUpdate === 'agent_message_chunk') {
+      const c = msg.update.content
+      if (c.type === 'text') text += c.text
+    }
+  }
+}
+
+/** A long-lived acp connection — the conductor's warm pool leg (bro-xeozo).
+ *  `connect` keeps the child alive across requests: spawn+initialize cost
+ *  is paid once per listener, `session/new` per request is the cheap part.
+ *  `closed`/`signal` report transport death so callers can respawn. */
+export interface AcpPeer {
+  ctx: ClientContext
+  /** Aborts when the transport dies — pooled callers respawn on next use. */
+  signal: AbortSignal
+  close: () => void
+  tail: () => string
+  /** Per-request cancel options against any deadline (init one is default). */
+  req: (deadline?: number) => SendRequestOptions
+  asAuthError: (err: unknown) => never
+}
+
+export async function acpOpen(
+  by: string,
+  entry: AcpEntry,
+  opts: ProviderWireOpts,
+  deadline: number
+): Promise<AcpPeer> {
+  const app = client({ name: 'bro' }).onRequest(
+    'session/request_permission',
+    denyPermission
+  )
+  const peer = opts.acp?.peer
+  let child: ChildProcess | undefined
+  let tail = (): string => ''
+  let conn: Awaited<ReturnType<typeof app.connect>>
+  if (peer !== undefined) {
+    conn = app.connect(peer)
+  } else {
+    const argv = [
+      ...shellWords(entry.command),
+      ...(entry.profile === undefined ? [] : ['--profile', entry.profile]),
+    ]
+    const bin = argv[0]
+    if (bin === undefined) {
+      throw new AcpConfigError(`${by}: acp command is empty`)
+    }
+    const proc = spawn(bin, argv.slice(1), { stdio: 'pipe' })
+    child = proc
+    let spawnError: string | undefined
+    proc.once('error', (e) => {
+      spawnError = e.message
+    })
+    tail = stderrTail(proc)
+    const stream = ndJsonStream(
+      Writable.toWeb(proc.stdin) as WritableStream<Uint8Array>,
+      Readable.toWeb(proc.stdout) as ReadableStream<Uint8Array>
+    )
+    conn = app.connect(stream)
+    if (spawnError !== undefined) {
+      child.kill('SIGKILL')
+      throw new AcpConfigError(`${by}: cannot exec acp command — ${spawnError}`)
+    }
+  }
+  const close = (): void => {
+    conn.close()
+    child?.kill('SIGKILL')
+  }
+  try {
+    const { asAuthError, req } = await withDeadline(deadline, () =>
+      acpInit(conn.agent, by, deadline)
+    )
+    return { ctx: conn.agent, signal: conn.signal, close, tail, req, asAuthError }
+  } catch (err) {
+    close()
+    throw err
+  }
+}
+
+/** Resolve a caller's model name against the agent's advertised select
+ *  options: `<provider>/` prefixes strip, exact value/name wins, a unique
+ *  `<id>-` prefix match resolves family shorthand — anything else is a
+ *  loud config error naming the catalog, never a silent fallback. */
+function resolveModelPin(
+  want: string,
+  configOptions: SessionConfigOption[],
+  by: string
+): string {
+  const opt = configOptions.find((o) => o.category === 'model')
+  if (opt === undefined || opt.type !== 'select') {
+    return want // no catalog to resolve against — applyModel decides
+  }
+  const leaves = opt.options.flatMap((o) => ('options' in o ? o.options : [o]))
+  const bare = want.includes('/') ? want.slice(want.indexOf('/') + 1) : want
+  const exact = leaves.find(
+    (o) => o.value === bare || o.name.toLowerCase() === bare.toLowerCase()
+  )
+  if (exact !== undefined) return exact.value
+  const prefixed = leaves.filter((o) => o.value.startsWith(`${bare}-`))
+  if (prefixed.length === 1) return prefixed[0]!.value
+  if (prefixed.length > 1) {
+    throw new AcpConfigError(
+      `${by}: model '${want}' is ambiguous — the agent offers ` +
+        prefixed.map((o) => o.value).join(', ')
+    )
+  }
+  return bare // unknown id — the agent's own refusal names it
+}
+
+/** One conversational turn on an already-open acp link — session/new,
+ *  model pin, prompt pump, session dispose. The link itself survives.
+ *  `requestModel` (the API caller's `model` field) outranks config. */
+export async function acpPooledTurn(
+  peer: AcpPeer,
+  entry: AcpEntry,
+  opts: ProviderWireOpts,
+  promptText: string,
+  onUpdate: (update: SessionUpdate) => void,
+  deadline: number,
+  signal?: AbortSignal,
+  by = 'conductor',
+  requestModel?: string
+): Promise<{ stopReason: StopReason; text: string; model: string }> {
+  const ctx = peer.ctx
+  const req = () => peer.req(deadline)
+  try {
+    const session = await acpSessionOpen(ctx, opts, peer.asAuthError, req)
+    try {
+      const want = requestModel ?? opts.model ?? entry.model
+      const model = await applyModel(
+        ctx,
+        session.sessionId,
+        session.newSessionResponse.configOptions ?? [],
+        by,
+        want === undefined
+          ? undefined
+          : resolveModelPin(want, session.newSessionResponse.configOptions ?? [], by),
+        req
+      )
+      const r = await pumpTurn(
+        session,
+        promptText,
+        onUpdate,
+        peer.asAuthError,
+        req,
+        signal,
+        by
+      )
+      return { ...r, model }
+    } finally {
+      session.dispose()
+    }
+  } catch (err) {
+    // the pooled link skips withAcp's error mapping — same contract here:
+    // config problems stay config, everything else is availability
+    if (err instanceof JudgeUnavailable || err instanceof AcpConfigError) {
+      throw err
+    }
+    const tail = peer.tail()
+    const detail = tail === '' ? '' : ` (${tail})`
+    throw new JudgeUnavailable(`acp ${by} unavailable — ${errMsg(err)}${detail}`)
+  }
 }
 
 /** The typed reply contract — the agent's message text IS the
