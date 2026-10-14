@@ -31,6 +31,11 @@ which agent CLI answers.
 - Missing/invalid backend = a loud startup error naming what IS
   configured (the provider-contract error shape), never a silent proxy
   fallback.
+- Telemetry: when `OTEL_EXPORTER_OTLP_ENDPOINT` is set, the conductor
+  pushes OTLP log events (`serve.request`, `conductor.turn`,
+  `conductor.error`, `acp.spawn`) with `service.name=bro` — durations,
+  served model, stop_reason, status. Fire-and-forget, never awaited,
+  never blocks the request path.
 
 ## Endpoints
 

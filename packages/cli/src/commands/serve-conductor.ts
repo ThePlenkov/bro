@@ -27,6 +27,7 @@ import { loadConfig } from '@broject/core'
 import type { ProviderEntry } from '@broject/core'
 import { acpOpen, acpPooledTurn } from '@broject/providers'
 import type { AcpPeer, ProviderWireOpts } from '@broject/providers'
+import { otelEvent } from './otel.ts'
 import { catalogModels } from './providers.ts'
 
 type AcpEntry = Extract<ProviderEntry, { type: 'acp' }>
@@ -341,6 +342,7 @@ async function messages(
   }
   const prompt = serializeRequest(body)
   const inputTokens = estTokens(prompt)
+  const t0 = Date.now()
   // a dropped client cancels the acp turn — no orphan devin session
   const ac = new AbortController()
   res.once('close', () => ac.abort())
@@ -364,9 +366,16 @@ async function messages(
     )
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err)
+    const status = AVAIL.test(msg) ? 529 : 500
+    otelEvent('conductor.error', {
+      backend: cfg.backend,
+      status,
+      duration_ms: Date.now() - t0,
+      error: msg.slice(0, 200),
+    })
     apiError(
       res,
-      AVAIL.test(msg) ? 529 : 500,
+      status,
       AVAIL.test(msg) ? 'overloaded_error' : 'api_error',
       `bro conductor: ${msg}`
     )
@@ -376,6 +385,15 @@ async function messages(
   const stopReason = blocks.some((b) => b.type === 'tool_use')
     ? 'tool_use'
     : (STOP_REASON[reply.stopReason] ?? 'end_turn')
+  otelEvent('conductor.turn', {
+    backend: cfg.backend,
+    model: reply.model,
+    stop_reason: stopReason,
+    stream: body.stream !== false,
+    input_tokens: inputTokens,
+    output_tokens: estTokens(reply.text),
+    duration_ms: Date.now() - t0,
+  })
   if (body.stream === false) {
     res.writeHead(200, { 'content-type': 'application/json' })
     res.end(
@@ -453,6 +471,7 @@ export function conductorProxy(
   let link: Promise<AcpPeer> | undefined
   const getLink = (): Promise<AcpPeer> => {
     if (link === undefined) {
+      otelEvent('acp.spawn', { backend: cfg.backend })
       link = acpOpen(
         `conductor:${cfg.backend}`,
         cfg.entry,
@@ -469,6 +488,15 @@ export function conductorProxy(
   return async (req, res) => {
     const path = (req.url ?? '/').split('?')[0]
     const method = req.method ?? 'GET'
+    const t0 = Date.now()
+    res.once('finish', () =>
+      otelEvent('serve.request', {
+        route: `${method} ${path}`,
+        status: res.statusCode,
+        duration_ms: Date.now() - t0,
+        backend: cfg.backend,
+      })
+    )
     if (method === 'POST' && path === '/v1/messages') {
       await messages(req, res, cfg, wireOpts, getLink)
       return
