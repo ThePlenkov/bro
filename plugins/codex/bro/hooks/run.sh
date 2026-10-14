@@ -19,7 +19,11 @@ set -u
 # the agent it spawns — spec bro-ddksm): session hooks rehydrate and gate
 # for a human session that isn't there, so each event is pure deadline
 # cost. Exit before resolving any binary — the flag must cost nothing.
-[ "${BRO_HOOKS:-}" = "0" ] && exit 0
+# permission is the exception: its stdout IS the answer (Cursor denies a
+# beforeShellExecution hook that prints nothing — even the self-tools it
+# must allow), so it still resolves the binary; the CLI's flag check
+# answers before any probe runs.
+[ "${BRO_HOOKS:-}" = "0" ] && [ "${1:-}" != "permission" ] && exit 0
 
 # each client exports its own plugin-root var — take whichever exists
 # (Cursor, Devin, Claude, or the generic PLUGIN_ROOT).

@@ -774,6 +774,29 @@ describe('hooks e2e — BRO_HOOKS=0 machine-backend trees (bro-ddksm)', () => {
       assert.equal(r.stdout, '')
     })
   })
+
+  test('run.sh still answers a cursor permission — empty stdout is a deny', () => {
+    const f = hookFixture()
+    inside(f.main, f.root, () => {
+      const env = e2eEnv(OFF)
+      const allow = spawnSync('sh', [RUN_SH, 'permission'], {
+        cwd: f.main,
+        input: JSON.stringify(cursorPayload('beforeShellExecution', { command: 'bd ready' })),
+        env,
+        encoding: 'utf8',
+      })
+      assert.equal(allow.status, 0)
+      assert.match(allow.stdout, /"permission":"allow"/)
+      const ask = spawnSync('sh', [RUN_SH, 'permission'], {
+        cwd: f.main,
+        input: JSON.stringify(cursorPayload('beforeShellExecution', { command: 'rm -rf x' })),
+        env,
+        encoding: 'utf8',
+      })
+      assert.equal(ask.status, 0)
+      assert.match(ask.stdout, /"permission":"ask"/)
+    })
+  })
 })
 
 describe('hooks e2e — perf journal', () => {
