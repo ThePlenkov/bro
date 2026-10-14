@@ -78,6 +78,9 @@ describe('bro drive install/uninstall — beads-gate ordering', () => {
       } catch {
         /* already gone */
       }
+      // inside() removes root only when reached — a throw on the
+      // pgrep-visible assert above leaks it, so the finally owns both
+      rmSync(root, { recursive: true, force: true })
       rmSync(other.root, { recursive: true, force: true })
     }
   })
