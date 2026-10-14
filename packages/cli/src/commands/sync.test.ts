@@ -4,7 +4,7 @@ import { mkdirSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { syncAfterAudit } from './loop.ts'
 import { runSyncCommand } from './sync.ts'
-import { git, initRepo, inside, tmpDir } from './testrepo.ts'
+import { git, initRepo, inside, scrubEnv, tmpDir } from './testrepo.ts'
 
 /** process.exit stubbed into a throw — `runSyncCommand` runs in-process
  *  inside the loop's exit audit, so a hard exit anywhere on its path
@@ -44,20 +44,14 @@ const threwNotExited = (match: RegExp) => (e: unknown) =>
   e instanceof Error && !(e instanceof ExitSignal) && match.test(e.message)
 
 describe('runSyncCommand', () => {
-  // artifactDirs reads BRO_DEBT_DIR — an ambient pin would add a second
-  // sync dir outside the fixture and make assertions env-dependent.
-  // Same for BEADS_DIR: bd resolves it before .beads discovery, so a
-  // pinned shared store (loop workers always carry one) routes the
-  // fixture's replication leg at the caller's real store and fails for
-  // the wrong reason.
-  const ambientDebtDir = process.env.BRO_DEBT_DIR
-  const ambientBeadsDir = process.env.BEADS_DIR
-  delete process.env.BRO_DEBT_DIR
-  delete process.env.BEADS_DIR
-  after(() => {
-    if (ambientDebtDir !== undefined) process.env.BRO_DEBT_DIR = ambientDebtDir
-    if (ambientBeadsDir !== undefined) process.env.BEADS_DIR = ambientBeadsDir
-  })
+  // ambient repo/agent pins would route the fixture's git and store
+  // legs at the caller's real repo: artifactDirs reads BRO_DEBT_DIR, bd
+  // resolves BEADS_DIR before .beads discovery (a pinned shared store —
+  // loop workers always carry one — makes the replication leg fail for
+  // the wrong reason), and GIT_DIR/GIT_WORK_TREE retarget the
+  // in-process git calls outright. scrubEnv drops the lot for the
+  // suite and restores it after.
+  after(scrubEnv())
 
   test('outside a worktree it throws — never exits the host process', () => {
     const dir = tmpDir('bro-sync-norepo-')
