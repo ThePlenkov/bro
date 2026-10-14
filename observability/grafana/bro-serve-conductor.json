@@ -683,6 +683,44 @@
       ],
       "title": "All bro events",
       "type": "logs"
+    },
+    {
+      "datasource": {
+        "type": "tempo",
+        "uid": "tempo"
+      },
+      "gridPos": {
+        "h": 10,
+        "w": 24,
+        "x": 0,
+        "y": 500
+      },
+      "options": {},
+      "targets": [
+        {
+          "datasource": {
+            "type": "tempo",
+            "uid": "tempo"
+          },
+          "filters": [
+            {
+              "id": "status",
+              "operator": "=",
+              "scope": "unscoped",
+              "tag": "status",
+              "value": [],
+              "valueType": "string"
+            }
+          ],
+          "limit": 20,
+          "query": "{ resource.service.name = \"bro\" }",
+          "queryType": "traceqlSearch",
+          "refId": "A",
+          "tableType": "traces"
+        }
+      ],
+      "title": "Traces \u2014 one session = one trace (serve.http \u2192 acp.open/turn, peer.* attributes)",
+      "type": "traces"
     }
   ],
   "refresh": "30s",
