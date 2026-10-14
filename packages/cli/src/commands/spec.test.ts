@@ -90,6 +90,8 @@ function withRepo(
   const prevPath = process.env.PATH
   const prevList = process.env.FAKE_BD_LIST_FILE
   const prevActor = process.env.BEADS_ACTOR
+  const prevBead = process.env.BRO_BEAD_ID
+  const prevBeads = process.env.BRO_BEAD_IDS
   const run = async (): Promise<void> => {
     execFileSync('git', ['init', '-q', dir])
     execFileSync('git', ['-C', dir, 'config', 'user.email', 't@t'])
@@ -110,6 +112,10 @@ function withRepo(
     process.env.FAKE_BD_LIST_FILE = join(dir, 'list.json')
     // pin the claim-ownership identity — git user.name is not hermetic
     process.env.BEADS_ACTOR = 'test-agent'
+    // a suite run under a spawned worker carries its assignment pin —
+    // sessionTaskClaims would read it as this session's claim
+    delete process.env.BRO_BEAD_ID
+    delete process.env.BRO_BEAD_IDS
     await fn(dir)
   }
   return run().finally(() => {
@@ -118,6 +124,10 @@ function withRepo(
     else process.env.FAKE_BD_LIST_FILE = prevList
     if (prevActor === undefined) delete process.env.BEADS_ACTOR
     else process.env.BEADS_ACTOR = prevActor
+    if (prevBead === undefined) delete process.env.BRO_BEAD_ID
+    else process.env.BRO_BEAD_ID = prevBead
+    if (prevBeads === undefined) delete process.env.BRO_BEAD_IDS
+    else process.env.BRO_BEAD_IDS = prevBeads
     rmSync(dir, { recursive: true, force: true })
   })
 }

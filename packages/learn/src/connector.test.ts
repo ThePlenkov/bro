@@ -60,8 +60,10 @@ switch (pos[0]) {
     console.log(JSON.stringify(rows)); break
   }
   case 'show': {
-    const r = (db.rows || []).find((r) => r.id === pos[1])
-    console.log(JSON.stringify(r ? [r] : [])); break
+    // multi-id like real bd: found rows for every id, misses omitted
+    const ids = pos.slice(1)
+    const found = ids.map((id) => (db.rows || []).find((r) => r.id === id)).filter(Boolean)
+    console.log(JSON.stringify(found)); break
   }
   case 'config': console.log('(not set)'); break
   default: fail('unhandled ' + args.join(' '))
@@ -121,12 +123,19 @@ function fixture(opts: {
     PATH: process.env.PATH,
     FAKE_BD_DB: process.env.FAKE_BD_DB,
     BEADS_DIR: process.env.BEADS_DIR,
+    BRO_BEAD_ID: process.env.BRO_BEAD_ID,
+    BRO_BEAD_IDS: process.env.BRO_BEAD_IDS,
   }
   process.env.PATH = `${binDir}:${prev.PATH}`
   process.env.FAKE_BD_DB = db
   // a session-pinned BEADS_DIR (agent env) would resolve the real store
-  // instead of the fixture's — the snapshot stamp must key on fx.dir
+  // instead of the fixture's — the snapshot stamp must key on fx.dir.
+  // Same for BRO_BEAD_ID(S): a suite run under a spawned worker carries
+  // its assignment pin, and sessionTaskClaims would read it as this
+  // session's claim
   delete process.env.BEADS_DIR
+  delete process.env.BRO_BEAD_ID
+  delete process.env.BRO_BEAD_IDS
   const hooks = join(dir, '.git', 'bro', 'hooks')
   return {
     dir,
@@ -138,6 +147,10 @@ function fixture(opts: {
       else process.env.FAKE_BD_DB = prev.FAKE_BD_DB
       if (prev.BEADS_DIR === undefined) delete process.env.BEADS_DIR
       else process.env.BEADS_DIR = prev.BEADS_DIR
+      if (prev.BRO_BEAD_ID === undefined) delete process.env.BRO_BEAD_ID
+      else process.env.BRO_BEAD_ID = prev.BRO_BEAD_ID
+      if (prev.BRO_BEAD_IDS === undefined) delete process.env.BRO_BEAD_IDS
+      else process.env.BRO_BEAD_IDS = prev.BRO_BEAD_IDS
       rmSync(root, { recursive: true, force: true })
     },
   }

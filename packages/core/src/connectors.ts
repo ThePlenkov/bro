@@ -187,17 +187,39 @@ const shortTitle = (t: string | undefined): string => {
   return flat.length > 60 ? `${flat.slice(0, 60)}…` : flat
 }
 
+/** Bead ids the spawn pinned into this session's env — BRO_BEAD_ID plus
+ *  the comma-joined BRO_BEAD_IDS clump. Unlike marker ids these are
+ *  *assigned* claims: `claimStep` refusing aborts the spawn, so a live
+ *  pin is proof the rig claimed the bead for this session before it
+ *  started. `isOwnClaim` trusts a pin outright — the claim's assignee
+ *  may be a claimAs worker identity (gascity binds the step id), never
+ *  this actor's. */
+export function sessionPinnedClaims(): Set<string> {
+  const out = new Set<string>()
+  for (const raw of [process.env.BRO_BEAD_ID, process.env.BRO_BEAD_IDS]) {
+    for (const id of raw?.split(',') ?? []) {
+      const t = id.trim()
+      if (t !== '') {
+        out.add(t)
+      }
+    }
+  }
+  return out
+}
+
 /** Bead ids this session claimed — the `task` aspect marker records one
- *  claim per detail line (line 1 is the timestamp). No session or no
- *  marker → nothing is "mine". Exported for policy connectors (sdd)
- *  that scope their nudges to the session's own claims.
+ *  claim per detail line (line 1 is the timestamp) and a spawned
+ *  worker's assignment arrives as env pins. No session and no pins →
+ *  nothing is "mine". Exported for policy connectors (sdd) that scope
+ *  their nudges to the session's own claims.
  *
- *  The marker is written from command classification alone, so these are
- *  *attempted* claims: `bro work enter <bead>` arms the id even when its
- *  best-effort claim was refused (another actor holds the bead). Confirm
- *  real ownership per row with `isOwnClaim` before treating one as ours. */
+ *  The marker is written from command classification alone, so marker
+ *  ids are *attempted* claims: `bro work enter <bead>` arms the id even
+ *  when its best-effort claim was refused (another actor holds the
+ *  bead). Confirm real ownership per row with `isOwnClaim` before
+ *  treating one as ours. */
 export function sessionTaskClaims(ctx: ConnectorCtx): Set<string> {
-  const mine = new Set<string>()
+  const mine = sessionPinnedClaims()
   if (!ctx.sessionId) {
     return mine
   }
@@ -230,10 +252,20 @@ export function sessionTaskClaims(ctx: ConnectorCtx): Set<string> {
  *  assignee is in its own identity space, never comparable to bdActor.
  *  An unverifiable row (missing assignee, unresolvable/absent actor)
  *  keeps the marker's word — probes stay fail-open rather than
- *  re-nudging on claims we can't disprove. */
-export function isOwnClaim(row: TaskRow, mine: Set<string>, actor: string): boolean {
+ *  re-nudging on claims we can't disprove. A spawn-pinned id needs no
+ *  verification at all: the pin exists only because the claim held at
+ *  spawn, and its assignee may be a worker identity, not this actor. */
+export function isOwnClaim(
+  row: TaskRow,
+  mine: Set<string>,
+  actor: string,
+  pinned: Set<string> = sessionPinnedClaims()
+): boolean {
   if (!mine.has(row.id)) {
     return false
+  }
+  if (pinned.has(row.id)) {
+    return true
   }
   if (actor === '' || row.assignee === undefined || row.assignee === '') {
     return true
