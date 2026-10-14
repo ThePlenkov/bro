@@ -243,6 +243,15 @@ function provisionRepo(): { repo: string; beads: string; initErr: string | null 
   const repo = mkdtempSync(join(root, 'run-'))
   const beads = join(repo, '.beads')
   execFileSync('git', ['init', '-q', '-b', 'main', repo]) // NOSONAR — PATH lookup is the contract
+  // arm SDD — a bare repo leaves sdd.mode 'off' and a scenario that
+  // describes the gate would narrate a hook that cannot fire. Committed
+  // so the runner starts from a clean tree (an uncommitted config would
+  // itself trip the dirty-worktree stop-gate probe)
+  writeFileSync(
+    join(repo, 'bro.config.json'),
+    `${JSON.stringify({ sdd: { mode: 'gate' } }, null, 2)}\n`
+  )
+  execFileSync('git', ['-C', repo, 'add', 'bro.config.json']) // NOSONAR — PATH lookup is the contract
   execFileSync('git', [ // NOSONAR — PATH lookup is the contract
     '-C',
     repo,
@@ -254,7 +263,6 @@ function provisionRepo(): { repo: string; beads: string; initErr: string | null 
     'user.email=dogfood@localhost',
     'commit',
     '-q',
-    '--allow-empty',
     '-m',
     'dogfood scratch',
   ])
