@@ -579,7 +579,9 @@ function dueSnoozes(out: string): string[] {
  *  Best-effort: an unreadable store or a failed undefer leaves the
  *  rows snoozed for the next read rather than breaking the queue. */
 function wakeSnoozed(x: StoreExec): void {
-  const res = x.probe(['list', '--deferred', '--json'], 15_000)
+  // --limit 0: a configured list.limit (or bd's default page) must not
+  // hide due rows — a snooze past the page edge would stay iced forever
+  const res = x.probe(['list', '--deferred', '--limit', '0', '--json'], 15_000)
   if (res.code !== 0) {
     return
   }
@@ -856,7 +858,7 @@ export function taskStoreAsync(dir?: string): TaskStoreAsync {
     ready: async (f = {}) => {
       // same lazy wake as the sync store — a due snooze the session
       // sweep surfaces must read as ready work, not stay iced
-      const res = await bdTryAsync(['list', '--deferred', '--json'], 15_000, dir)
+      const res = await bdTryAsync(['list', '--deferred', '--limit', '0', '--json'], 15_000, dir)
       if (res.code === 0) {
         const due = dueSnoozes(res.out)
         if (due.length > 0) {
