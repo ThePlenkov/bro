@@ -195,7 +195,6 @@ interface OutBlock {
 export function parseReply(text: string): OutBlock[] {
   const out: OutBlock[] = []
   let at = 0
-  let n = 0
   for (const m of text.matchAll(TOOL_CALL)) {
     let parsed: { name?: unknown; input?: unknown } | undefined
     try {
@@ -218,13 +217,11 @@ export function parseReply(text: string): OutBlock[] {
       name: parsed.name,
       input,
     })
-    n += 1
     at = (m.index ?? 0) + m[0].length
   }
   const tail = text.slice(at)
   if (tail.trim() !== '') out.push({ type: 'text', text: tail })
   if (out.length === 0) out.push({ type: 'text', text: '' })
-  void n
   return out
 }
 
