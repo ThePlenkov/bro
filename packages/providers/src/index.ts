@@ -9,6 +9,8 @@
  */
 export { acpCall, acpChat, acpClient, acpConverse, acpModels, acpOpen, acpPooledTurn, acpWorkerArgv, isSystemoneFamily } from './acp.ts'
 export type { AcpPeer } from './acp.ts'
+export { newSpanId, newTraceId, otelEvent, otelParent, otelSpan } from './otel.ts'
+export type { OtelCtx, OtelSpan } from './otel.ts'
 export { AcpWorkerError, renderAcpUpdate, runAcpWorker } from './acp-worker.ts'
 export type { AcpWorkerSpec } from './acp-worker.ts'
 export { cliChat, expandPromptFile } from './cli.ts'

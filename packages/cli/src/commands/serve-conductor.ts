@@ -25,9 +25,9 @@ import { randomBytes } from 'node:crypto'
 import type { IncomingMessage, ServerResponse } from 'node:http'
 import { loadConfig } from '@broject/core'
 import type { ProviderEntry } from '@broject/core'
-import { acpOpen, acpPooledTurn } from '@broject/providers'
-import type { AcpPeer, ProviderWireOpts } from '@broject/providers'
-import { otelEvent } from './otel.ts'
+import { acpOpen, acpPooledTurn, otelEvent, otelParent, otelSpan } from '@broject/providers'
+import type { AcpPeer, OtelCtx, ProviderWireOpts } from '@broject/providers'
+import { peerAttrs } from './peer.ts'
 import { catalogModels } from './providers.ts'
 
 type AcpEntry = Extract<ProviderEntry, { type: 'acp' }>
@@ -331,7 +331,8 @@ async function messages(
   res: ServerResponse,
   cfg: ConductorConfig,
   opts: ProviderWireOpts,
-  link: () => Promise<AcpPeer>
+  link: (parent?: OtelCtx) => Promise<AcpPeer>,
+  parent?: OtelCtx
 ): Promise<void> {
   let body: MessagesRequest
   try {
@@ -348,22 +349,16 @@ async function messages(
   res.once('close', () => ac.abort())
   let reply: Awaited<ReturnType<typeof acpPooledTurn>>
   try {
-    const peer = await link()
+    const peer = await link(parent)
     // `provider/model` ids are a real pin — resolved against the agent's
     // own catalog; bare foreign ids (claude-sonnet-*) are display labels
-    reply = await acpPooledTurn(
-      peer,
-      cfg.entry,
-      opts,
-      prompt,
-      () => {},
-      Date.now() + cfg.timeoutMs,
-      ac.signal,
-      `conductor:${cfg.backend}`,
-      typeof body.model === 'string' && body.model.includes('/')
-        ? body.model
-        : undefined
-    )
+    reply = await acpPooledTurn(peer, cfg.entry, opts, prompt, Date.now() + cfg.timeoutMs, {
+      signal: ac.signal,
+      by: `conductor:${cfg.backend}`,
+      requestModel:
+        typeof body.model === 'string' && body.model.includes('/') ? body.model : undefined,
+      parent,
+    })
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err)
     const status = AVAIL.test(msg) ? 529 : 500
@@ -469,16 +464,17 @@ export function conductorProxy(
   // cheap and concurrent sessions multiplex on the same connection.
   // A dead transport drops the link so the next request respawns.
   let link: Promise<AcpPeer> | undefined
-  const getLink = (): Promise<AcpPeer> => {
+  const getLink = (parent?: OtelCtx): Promise<AcpPeer> => {
     if (link === undefined) {
       otelEvent('acp.spawn', { backend: cfg.backend })
       link = acpOpen(
         `conductor:${cfg.backend}`,
         cfg.entry,
         wireOpts,
-        Date.now() + cfg.timeoutMs
+        Date.now() + cfg.timeoutMs,
+        parent
       )
-      void link.then(
+      link.then(
         (p) => p.signal.addEventListener('abort', () => (link = undefined), { once: true }),
         () => (link = undefined)
       )
@@ -489,16 +485,28 @@ export function conductorProxy(
     const path = (req.url ?? '/').split('?')[0]
     const method = req.method ?? 'GET'
     const t0 = Date.now()
-    res.once('finish', () =>
+    // one session = one trace: an instrumented caller's traceparent
+    // parents every span we emit; local agents that don't propagate are
+    // still attributed by process tree (peer.*)
+    const httpSpan = otelSpan(
+      `serve.http ${method} ${path}`,
+      { backend: cfg.backend, 'http.method': method, 'http.route': path, ...peerAttrs(req.socket) },
+      { parent: otelParent(req.headers.traceparent) }
+    )
+    res.once('finish', () => {
+      httpSpan.end(
+        { 'http.status': res.statusCode, 'http.duration_ms': Date.now() - t0 },
+        res.statusCode >= 500 ? 'error' : 'ok'
+      )
       otelEvent('serve.request', {
         route: `${method} ${path}`,
         status: res.statusCode,
         duration_ms: Date.now() - t0,
         backend: cfg.backend,
       })
-    )
+    })
     if (method === 'POST' && path === '/v1/messages') {
-      await messages(req, res, cfg, wireOpts, getLink)
+      await messages(req, res, cfg, wireOpts, getLink, httpSpan.ctx)
       return
     }
     if (method === 'POST' && path === '/v1/messages/count_tokens') {

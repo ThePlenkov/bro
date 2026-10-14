@@ -34,6 +34,8 @@ import type {
   ActiveSessionMessage,
 } from '@agentclientprotocol/sdk'
 import { isSystemoneFamily, JudgeUnavailable } from '@broject/core'
+import { otelSpan } from './otel.ts'
+import type { OtelCtx } from './otel.ts'
 import type {
   DecideResult,
   JudgeQuestion,
@@ -578,8 +580,14 @@ export async function acpOpen(
   by: string,
   entry: AcpEntry,
   opts: ProviderWireOpts,
-  deadline: number
+  deadline: number,
+  parent?: OtelCtx
 ): Promise<AcpPeer> {
+  const span = otelSpan('acp.open', { 'acp.by': by, 'acp.command': entry.command }, { parent })
+  function fail(err: unknown): never {
+    span.end({ error: errMsg(err) }, 'error')
+    throw err
+  }
   const app = client({ name: 'bro' }).onRequest(
     'session/request_permission',
     denyPermission
@@ -597,7 +605,7 @@ export async function acpOpen(
     ]
     const bin = argv[0]
     if (bin === undefined) {
-      throw new AcpConfigError(`${by}: acp command is empty`)
+      fail(new AcpConfigError(`${by}: acp command is empty`))
     }
     const proc = spawn(bin, argv.slice(1), { stdio: 'pipe' })
     child = proc
@@ -613,7 +621,7 @@ export async function acpOpen(
     conn = app.connect(stream)
     if (spawnError !== undefined) {
       child.kill('SIGKILL')
-      throw new AcpConfigError(`${by}: cannot exec acp command — ${spawnError}`)
+      fail(new AcpConfigError(`${by}: cannot exec acp command — ${spawnError}`))
     }
   }
   const close = (): void => {
@@ -624,10 +632,11 @@ export async function acpOpen(
     const { asAuthError, req } = await withDeadline(deadline, () =>
       acpInit(conn.agent, by, deadline)
     )
+    span.end({ 'acp.pid': child?.pid ?? 0 })
     return { ctx: conn.agent, signal: conn.signal, close, tail, req, asAuthError }
   } catch (err) {
     close()
-    throw err
+    fail(err)
   }
 }
 
@@ -667,93 +676,136 @@ function resolveModelPin(
   return undefined
 }
 
+/** Resolve a wanted pin against a live session — exact value, unique
+ *  family prefix, composite `<base>-<level>` (thought_level leaf), or a
+ *  spawn-level pin the session already reports. Returns the provenance
+ *  label (the asked id when it names the (model, level) pair exactly). */
+async function resolveTurnModel(
+  ctx: ClientContext,
+  sessionId: string,
+  configOptions: SessionConfigOption[],
+  want: string | undefined,
+  configuredLabel: string | undefined,
+  by: string,
+  req: () => SendRequestOptions
+): Promise<string> {
+  const resolved = want === undefined ? undefined : resolveModelPin(want, configOptions, by)
+  if (
+    want === undefined ||
+    resolved !== undefined ||
+    !configOptions.some((o) => o.category === 'model')
+  ) {
+    // direct path — or a tool-less backend (no model option): the
+    // reported label is the configured pin, never the ask
+    return converseModel(ctx, sessionId, configOptions, by, resolved, configuredLabel, req)
+  }
+  // the agent advertises a catalog that doesn't contain the ask.
+  // Two honest ways it can still be served:
+  //  - composite variant: `<base>-<level>` where <level> is a leaf of
+  //    the agent's thought_level option (devin's swe-2 family maps
+  //    -medium/-high/-max onto the thinking dimension — 'swe-2-max'
+  //    is model swe-2-high + level max, never its own catalog id)
+  //  - spawn-level pin: the provider command's --model already set
+  //    state the session reports back verbatim
+  const bare = want.includes('/') ? want.slice(want.indexOf('/') + 1) : want
+  const modelOpt = configOptions.find((o) => o.category === 'model')
+  const thought = configOptions.find((o) => o.category === 'thought_level')
+  const dash = bare.lastIndexOf('-')
+  const level = dash > 0 ? bare.slice(dash + 1) : ''
+  const baseResolved =
+    thought !== undefined && dash > 0 && selectLeaves(thought).some((o) => o.value === level)
+      ? resolveModelPin(bare.slice(0, dash), configOptions, by)
+      : undefined
+  if (modelOpt !== undefined && thought !== undefined && baseResolved !== undefined) {
+    if (modelOpt.currentValue !== baseResolved || thought.currentValue !== level) {
+      await applyOption(ctx, sessionId, modelOpt, baseResolved, by, req)
+      await applyOption(ctx, sessionId, thought, level, by, req)
+    }
+    return bare // the asked id names this exact (model, level) pair
+  }
+  const cur = modelOpt?.currentValue
+  if (cur !== bare) {
+    throw new AcpConfigError(
+      `${by}: model '${want}' is not in the agent's catalog and the session serves ` +
+        `'${typeof cur === 'string' ? cur : 'unknown'}' — pick a catalog id or pin ` +
+        `the model in the provider command`
+    )
+  }
+  return bare
+}
+
+export interface PooledTurnOpts {
+  /** Session updates sink — default drops them (the conductor parses). */
+  onUpdate?: (update: SessionUpdate) => void
+  signal?: AbortSignal
+  by?: string
+  /** The API caller's `model` field — outranks the configured pin. */
+  requestModel?: string
+  /** Parent span context — nests `acp.turn` under the caller's trace. */
+  parent?: OtelCtx
+}
+
 /** One conversational turn on an already-open acp link — session/new,
- *  model pin, prompt pump, session dispose. The link itself survives.
- *  `requestModel` (the API caller's `model` field) outranks config. */
+ *  model pin, prompt pump, session dispose. The link itself survives. */
 export async function acpPooledTurn(
   peer: AcpPeer,
   entry: AcpEntry,
   opts: ProviderWireOpts,
   promptText: string,
-  onUpdate: (update: SessionUpdate) => void,
   deadline: number,
-  signal?: AbortSignal,
-  by = 'conductor',
-  requestModel?: string
+  turn: PooledTurnOpts = {}
 ): Promise<{ stopReason: StopReason; text: string; model: string }> {
   const ctx = peer.ctx
   const req = () => peer.req(deadline)
+  const by = turn.by ?? 'conductor'
+  const span = otelSpan(
+    'acp.turn',
+    { 'acp.by': by, 'acp.requested_model': turn.requestModel ?? '' },
+    { parent: turn.parent }
+  )
+  let ended = false
+  const end = (a: Record<string, string | number | boolean>, status?: 'ok' | 'error'): void => {
+    if (ended) return
+    ended = true
+    span.end(a, status)
+  }
   try {
     const session = await acpSessionOpen(ctx, opts, peer.asAuthError, req)
     try {
       const configOptions = session.newSessionResponse.configOptions ?? []
-      const want = requestModel ?? opts.model ?? entry.model
-      const resolved = want === undefined ? undefined : resolveModelPin(want, configOptions, by)
-      let model: string
-      if (
-        want !== undefined &&
-        resolved === undefined &&
-        configOptions.some((o) => o.category === 'model')
-      ) {
-        // the agent advertises a catalog that doesn't contain the ask.
-        // Two honest ways it can still be served:
-        //  - composite variant: `<base>-<level>` where <level> is a leaf of
-        //    the agent's thought_level option (devin's swe-2 family maps
-        //    -medium/-high/-max onto the thinking dimension — 'swe-2-max'
-        //    is model swe-2-high + level max, never its own catalog id)
-        //  - spawn-level pin: the provider command's --model already set
-        //    state the session reports back verbatim
-        // (no model option at all → tool-less backend → converseModel
-        // reports the configured label, never throws on a pin)
-        const bare = want.includes('/') ? want.slice(want.indexOf('/') + 1) : want
-        const modelOpt = configOptions.find((o) => o.category === 'model')
-        const thought = configOptions.find((o) => o.category === 'thought_level')
-        const dash = bare.lastIndexOf('-')
-        const level = dash > 0 ? bare.slice(dash + 1) : ''
-        const baseResolved =
-          thought !== undefined && dash > 0 && selectLeaves(thought).some((o) => o.value === level)
-            ? resolveModelPin(bare.slice(0, dash), configOptions, by)
-            : undefined
-        if (modelOpt !== undefined && thought !== undefined && baseResolved !== undefined) {
-          if (modelOpt.currentValue !== baseResolved || thought.currentValue !== level) {
-            await applyOption(ctx, session.sessionId, modelOpt, baseResolved, by, req)
-            await applyOption(ctx, session.sessionId, thought, level, by, req)
-          }
-          model = bare // the asked id names this exact (model, level) pair
-        } else {
-          const cur = modelOpt?.currentValue
-          if (cur !== bare) {
-            throw new AcpConfigError(
-              `${by}: model '${want}' is not in the agent's catalog and the session serves ` +
-                `'${typeof cur === 'string' ? cur : 'unknown'}' — pick a catalog id or pin ` +
-                `the model in the provider command`
-            )
-          }
-          model = bare
-        }
-      } else {
-        model = await converseModel(
-          ctx,
-          session.sessionId,
-          configOptions,
-          by,
-          resolved,
-          // a request pin cannot be honored under a tool-less backend —
-          // the reported label is the configured pin, never the ask
-          opts.model ?? entry.model,
-          req
-        )
-      }
+      const model = await resolveTurnModel(
+        ctx,
+        session.sessionId,
+        configOptions,
+        turn.requestModel ?? opts.model ?? entry.model,
+        // a request pin cannot be honored under a tool-less backend —
+        // the reported label is the configured pin, never the ask
+        opts.model ?? entry.model,
+        by,
+        req
+      )
       const r = await pumpTurn(
         session,
         promptText,
-        onUpdate,
+        turn.onUpdate ?? (() => {}),
         peer.asAuthError,
         req,
-        signal,
+        turn.signal,
         by
       )
+      end({
+        'acp.session_id': session.sessionId,
+        'acp.model': model,
+        'acp.stop_reason': r.stopReason,
+        'acp.reply_len': r.text.length,
+      })
       return { ...r, model }
+    } catch (err) {
+      end(
+        { 'acp.session_id': session.sessionId, error: errMsg(err) },
+        'error'
+      )
+      throw err
     } finally {
       session.dispose()
     }
@@ -761,10 +813,12 @@ export async function acpPooledTurn(
     // the pooled link skips withAcp's error mapping — same contract here:
     // config problems stay config, everything else is availability
     if (err instanceof JudgeUnavailable || err instanceof AcpConfigError) {
+      end({ error: errMsg(err) }, 'error')
       throw err
     }
     const tail = peer.tail()
     const detail = tail === '' ? '' : ` (${tail})`
+    end({ error: errMsg(err) }, 'error')
     throw new JudgeUnavailable(`acp ${by} unavailable — ${errMsg(err)}${detail}`)
   }
 }

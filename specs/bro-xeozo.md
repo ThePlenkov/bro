@@ -34,7 +34,14 @@ which agent CLI answers.
 - Telemetry: when `OTEL_EXPORTER_OTLP_ENDPOINT` is set, the conductor
   pushes OTLP log events (`serve.request`, `conductor.turn`,
   `conductor.error`, `acp.spawn`) with `service.name=bro` — durations,
-  served model, stop_reason, status. Fire-and-forget, never awaited,
+  served model, stop_reason, status — AND spans to `/v1/traces`
+  (`serve.http` → `acp.open`/`acp.turn`). One session = one trace:
+  an incoming `traceparent` header is honored so instrumented callers
+  land in the same trace; callers that don't propagate are attributed
+  by process tree (`peer.pid`, `peer.tree`, `peer.agent` — resolved
+  via /proc/net/tcp → inode → pid → ppid walk). The terminal path
+  (a bro command spawning `devin acp` directly) emits the same acp
+  spans with its own trace root. Fire-and-forget, never awaited,
   never blocks the request path.
 
 ## Endpoints

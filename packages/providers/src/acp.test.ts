@@ -585,11 +585,8 @@ describe('tool-less backends — converse surfaces (bro-wxfls)', () => {
         { ...TOOLLESS, model: 'claude-sum' },
         { acp: { peer: fake.app } },
         'p',
-        () => {},
         deadline(),
-        undefined,
-        'conductor:sum',
-        'devin-acp/other-model'
+        { by: 'conductor:sum', requestModel: 'devin-acp/other-model' }
       )
       assert.equal(r.model, 'claude-sum')
       assert.deepEqual(fake.configSets, [])
@@ -607,11 +604,8 @@ describe('tool-less backends — converse surfaces (bro-wxfls)', () => {
         TOOLLESS,
         { acp: { peer: fake.app } },
         'p',
-        () => {},
         deadline(),
-        undefined,
-        'conductor:kilo',
-        'kilo/qwen3-coder'
+        { by: 'conductor:kilo', requestModel: 'kilo/qwen3-coder' }
       )
       assert.equal(r.model, 'qwen3-coder')
       assert.deepEqual(fake.configSets, [{ configId: 'model-pick', value: 'qwen3-coder' }])
