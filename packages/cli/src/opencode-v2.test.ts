@@ -16,7 +16,11 @@ describe('v2 loader shape', () => {
 })
 
 const dir = mkdtempSync(join(tmpdir(), 'bro-oc2-'))
-const logFile = join(dir, 'calls.log')
+// a fresh log per test: a fire-and-forget hook spawn that outlives its
+// test writes the BRO_STUB_LOG captured at spawn — sharing one file lets
+// that late write land in the NEXT test's window after beforeEach wipes it
+let logFile = join(dir, 'calls-0.log')
+let logSeq = 0
 
 // The same `bro hooks <event>` stand-in the V1 suite drives — records the
 // payload, replays a canned answer, exits env-controlled.
@@ -231,6 +235,7 @@ async function waitFor(cond: () => boolean, ms = 5_000): Promise<void> {
 }
 
 beforeEach(() => {
+  logFile = join(dir, `calls-${++logSeq}.log`)
   writeFileSync(logFile, '')
   process.env.BRO_STUB_LOG = logFile
   delete process.env.BRO_STUB_STATUS
