@@ -422,6 +422,13 @@ function drillMemo(notes: string | undefined): { result: string; prevents: strin
   return { result, prevents }
 }
 
+/** `result — prevent: a; b` — a memo's preventions ride its lesson line. */
+function drillLesson(memo: { result: string; prevents: string[] }): string {
+  return memo.prevents.length > 0
+    ? oneLine(`${memo.result} — prevent: ${memo.prevents.join('; ')}`)
+    : oneLine(memo.result)
+}
+
 function harvestDrill(dir?: string): Harvest {
   const out: Harvest = { candidates: [], skipped: [] }
   const drillRows = listLabeled('drill', dir)
@@ -456,10 +463,7 @@ function harvestDrill(dir?: string): Harvest {
       out.skipped.push({ origin: row.id, reason: 'closed drill frame has no result memo' })
       continue
     }
-    const lesson =
-      memo.prevents.length > 0
-        ? oneLine(`${memo.result} — prevent: ${memo.prevents.join('; ')}`)
-        : oneLine(memo.result)
+    const lesson = drillLesson(memo)
     const trigger = buildTrigger(
       row.title ?? '',
       `${row.description ?? ''}\n${row.notes ?? ''}`
