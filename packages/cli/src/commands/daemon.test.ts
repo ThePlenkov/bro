@@ -5,10 +5,11 @@
  *  rearm decision, and install/uninstall with injected up/down. */
 import { describe, test } from 'node:test'
 import assert from 'node:assert/strict'
+import { execFileSync, spawn } from 'node:child_process'
 import { existsSync, mkdirSync, readFileSync, rmSync, utimesSync, writeFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { initRepo } from './testrepo.ts'
-import { lockHolderPid } from '@broject/core'
+import { lockHolderPid, pidAlive } from '@broject/core'
 import {
   armDrive,
   daemonProbe,
@@ -21,6 +22,7 @@ import {
   installDrive,
   readDaemonRecord,
   readDriveMarker,
+  supervisorDown,
   supervisorUp,
   uninstallDrive,
   type SupervisorDown,
@@ -553,6 +555,76 @@ describe('supervisorUp requireMarker', () => {
       assert.equal(supervisorUp(main, 120, { BRO_AGENT_ID: 'w-1' }).kind, 'refuse-worker')
     } finally {
       rmSync(root, { recursive: true, force: true })
+    }
+  })
+})
+
+describe('supervisorDown', () => {
+  const pause = (ms: number) =>
+    Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms)
+
+  /** A live process wearing a supervisor cmdline, parked at cwd — the
+   *  pgrep pattern matches it, so only the repo scope decides whether
+   *  the sweep may signal it. */
+  const fakeSupervisor = (cwd: string): number => {
+    const child = spawn(
+      process.execPath,
+      ['-e', 'setInterval(() => {}, 1e9)', 'daemon', 'run', '--every', '4242'],
+      { cwd, detached: true, stdio: 'ignore' }
+    )
+    child.unref()
+    return child.pid!
+  }
+
+  /** What pgrep -f reads — invisible until execve lands. */
+  const cmdlineVisible = (pid: number): boolean => {
+    try {
+      return readFileSync(`/proc/${pid}/cmdline`, 'utf8').includes('--every')
+    } catch {
+      return false
+    }
+  }
+
+  test('the standby sweep is repo-scoped — foreign supervisors are spared', () => {
+    const a = initRepo('bro-dsweep-a-')
+    const b = initRepo('bro-dsweep-b-')
+    const pids: number[] = []
+    const fake = (cwd: string): number => {
+      const pid = fakeSupervisor(cwd)
+      pids.push(pid)
+      return pid
+    }
+    try {
+      // a linked worktree shares the common dir — a supervisor running
+      // there is still ours
+      execFileSync('git', ['-C', a.main, 'worktree', 'add', '-b', 'sweep-wt', join(a.root, 'wt')])
+      const own = fake(a.main)
+      const linked = fake(join(a.root, 'wt'))
+      const foreign = fake(b.main)
+      const stray = fake(a.root)
+      const all = [own, linked, foreign, stray]
+      // a spared assertion on a pgrep-invisible candidate proves nothing
+      for (let i = 0; i < 100 && !all.every(cmdlineVisible); i++) {
+        pause(10)
+      }
+      assert.ok(all.every(cmdlineVisible), 'fake supervisors never became pgrep-visible')
+      const down = supervisorDown(a.main)
+      assert.ok(down.pids.includes(own), `own supervisor missed: ${down.pids}`)
+      assert.ok(down.pids.includes(linked), `linked-worktree supervisor missed: ${down.pids}`)
+      assert.ok(!down.pids.includes(foreign), 'foreign supervisor was signalled')
+      assert.ok(!down.pids.includes(stray), 'non-repo process was signalled')
+      assert.ok(pidAlive(foreign), 'foreign supervisor was killed')
+      assert.ok(pidAlive(stray), 'non-repo process was killed')
+    } finally {
+      for (const pid of pids) {
+        try {
+          process.kill(pid, 'SIGKILL')
+        } catch {
+          /* already gone */
+        }
+      }
+      rmSync(a.root, { recursive: true, force: true })
+      rmSync(b.root, { recursive: true, force: true })
     }
   })
 })
