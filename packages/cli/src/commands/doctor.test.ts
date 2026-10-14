@@ -1054,6 +1054,24 @@ describe('bro doctor', () => {
       }
     ))
 
+  test('conductor: a pin prefixed by a configured non-acp provider is the client’s own route', () =>
+    withEnv(
+      {
+        config: {
+          providers: {
+            'devin-acp': { type: 'acp', command: 'devin acp --model swe-2-max' },
+            openrouter: { type: 'api', baseUrl: 'https://x', models: { 'swe-2-max': 'openai-compat' } },
+          },
+        },
+        bins: ['gh'],
+        env: { ANTHROPIC_SMALL_FAST_MODEL: 'openrouter/swe-2-max' },
+      },
+      (dir) => {
+        const c = byName(runDoctorChecks(dir), 'conductor')
+        assert.equal(c.status, 'ok', JSON.stringify(c))
+      }
+    ))
+
   test('conductor: no acp providers and no client pins → quiet ok', () =>
     withEnv({ config: { providers: { local: { type: 'cli', command: 'x -p' } } }, bins: ['gh'] }, (dir) => {
       const c = byName(runDoctorChecks(dir), 'conductor')

@@ -1063,19 +1063,25 @@ function acpWireIds(providers: Record<string, ProviderEntry>): Map<string, strin
 }
 
 /** A client-pinned model id → the acp providers serving that wire:
- *  `<acp-name>/<id>` is conductor vocabulary outright; any other
- *  `<prefix>/<id>` or bare id matches every entry serving the bare
- *  id (the conductor strips the prefix before resolving). */
+ *  `<acp-name>/<id>` is conductor vocabulary outright; an
+ *  unrecognized `<prefix>/<id>` or bare id matches every entry
+ *  serving the bare id (the conductor strips the prefix before
+ *  resolving). A prefix naming a configured *non-acp* provider is
+ *  the client's own routing intent, not a conductor spelling. */
 function acpWireProviders(
   value: string,
   ids: Map<string, string[]>,
-  acpNames: Set<string>
+  acpNames: Set<string>,
+  nonAcpNames: Set<string>
 ): string[] {
   const slash = value.indexOf('/')
   if (slash > 0) {
     const pfx = value.slice(0, slash)
     if (acpNames.has(pfx)) {
       return [pfx]
+    }
+    if (nonAcpNames.has(pfx)) {
+      return []
     }
     return ids.get(value.slice(slash + 1)) ?? []
   }
@@ -1091,6 +1097,11 @@ function conductorClassifierChecks(dir: string, root: string | null): DoctorChec
   const acpNames = new Set(
     Object.entries(providers)
       .filter((kv): kv is [string, ProviderEntry & { type: 'acp' }] => kv[1].type === 'acp')
+      .map(([n]) => n)
+  )
+  const nonAcpNames = new Set(
+    Object.entries(providers)
+      .filter(([, e]) => e.type !== 'acp')
       .map(([n]) => n)
   )
   const serve = liveServeEndpoint(dir)
@@ -1126,7 +1137,7 @@ function conductorClassifierChecks(dir: string, root: string | null): DoctorChec
     const endpointLive =
       serve !== undefined && base !== undefined && norm(base) === norm(serve.url)
     const hits = classifierPins(src).flatMap(([knob, v]) => {
-      const ps = acpWireProviders(v, ids, acpNames)
+      const ps = acpWireProviders(v, ids, acpNames, nonAcpNames)
       return ps.length === 0
         ? []
         : [`${knob}=${v} → ${ps.map((n) => `providers.${n}`).join(', ')}`]
