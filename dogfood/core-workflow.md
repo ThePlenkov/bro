@@ -12,8 +12,10 @@ Setup already done for you: this repo has git and a beads store.
 2. Claim work: create a bead for "add a hello.txt greeting file" with
    `bd create`, then take it into a worktree with `bro work enter`.
 3. Spec first: inside the worktree, write the spec stub with
-   `bro spec new <bead>` and add the `spec:` link to the bead
-   description (the SDD gate requires one or the other).
+   `bro spec new <bead>` and add the spec link with
+   `bd update <bead> -d 'spec: specs/<bead>.md'` — a `spec:` line in
+   the description is what the gate reads, not bd's `--spec-id`
+   field (the SDD gate requires one or the other).
 4. Implement: create `hello.txt` containing `hello from dogfood` and
    commit it on the work branch.
 5. Surface check: run `bro status` again — the worktree should now
