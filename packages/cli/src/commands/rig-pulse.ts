@@ -38,6 +38,7 @@ import {
   worktreeGitDir,
   type Connector,
 } from '@broject/core'
+import { MAX_INTERVAL_SEC, MIN_INTERVAL_SEC } from './drive-config.ts'
 import { isOrchestratorSession } from './watch-pulse.ts'
 import { rigSection, type RigConfig } from './rig-config.ts'
 
@@ -60,7 +61,8 @@ export function rigPulseLockPath(dir: string): string | null {
 
 /** The want-record — null when absent, malformed, or the repo has no
  *  common dir. Same torn-marker rule as the watch pulse: a half-shape
- *  reads as none. `repo` is required — a rearm without it would land
+ *  reads as none, and `everySec` outside the shared cadence bounds is
+ *  malformed too. `repo` is required — a rearm without it would land
  *  on whatever checkout cwd happens to resolve. */
 export function readRigPulseMarker(dir: string): RigPulseMarker | null {
   const file = rigPulseMarkerPath(dir)
@@ -77,7 +79,8 @@ export function readRigPulseMarker(dir: string): RigPulseMarker | null {
       raw.repo.trim() !== '' &&
       typeof raw.everySec === 'number' &&
       Number.isFinite(raw.everySec) &&
-      raw.everySec > 0 &&
+      raw.everySec >= MIN_INTERVAL_SEC &&
+      raw.everySec <= MAX_INTERVAL_SEC &&
       typeof raw.armedAt === 'string'
       ? { repo: raw.repo, everySec: raw.everySec, armedAt: raw.armedAt }
       : null

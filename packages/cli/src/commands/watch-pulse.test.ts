@@ -51,6 +51,12 @@ describe('marker', () => {
       assert.equal(readPulseMarker(main), null)
       writeFileSync(file, JSON.stringify({ everySec: '60' }))
       assert.equal(readPulseMarker(main), null)
+      // a cadence outside the shared bounds reads as none — a sub-floor
+      // marker would churn a rearm whose spawned child fails closed
+      writeFileSync(file, JSON.stringify({ everySec: 0.05, armedAt: 't' }))
+      assert.equal(readPulseMarker(main), null)
+      writeFileSync(file, JSON.stringify({ everySec: 0.1, armedAt: 't' }))
+      assert.equal(readPulseMarker(main)?.everySec, 0.1)
     } finally {
       rmSync(root, { recursive: true, force: true })
     }

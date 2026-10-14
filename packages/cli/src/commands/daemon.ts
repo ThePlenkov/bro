@@ -406,7 +406,10 @@ export function driveMarkerPath(dir: string): string | null {
 
 /** The want-record — null when absent, malformed, or the repo has no
  *  common dir. A torn marker is the same answer as none: the checkpoint
- *  stays quiet rather than rearming from a half-shape. */
+ *  stays quiet rather than rearming from a half-shape. `everySec`
+ *  outside the shared cadence bounds is malformed too — a sub-floor
+ *  marker would churn a rearm whose spawned child fails closed on
+ *  every checkpoint. */
 export function readDriveMarker(dir: string): DriveMarker | null {
   const file = driveMarkerPath(dir)
   if (file === null || !existsSync(file)) {
@@ -419,7 +422,8 @@ export function readDriveMarker(dir: string): DriveMarker | null {
     }
     return typeof raw.everySec === 'number' &&
       Number.isFinite(raw.everySec) &&
-      raw.everySec > 0 &&
+      raw.everySec >= MIN_INTERVAL_SEC &&
+      raw.everySec <= MAX_INTERVAL_SEC &&
       typeof raw.armedAt === 'string'
       ? { everySec: raw.everySec, armedAt: raw.armedAt }
       : null
