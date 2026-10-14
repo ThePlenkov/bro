@@ -453,11 +453,48 @@ describe('rig pulse (session-pulse model, bro-killn)', () => {
       rigLock(main, `${process.pid}:tok`)
       assert.deepEqual(rigPulseRearm(main, 900, {}), { kind: 'quiet' })
       rmSync(rigPulseLockPath(main)!)
-      writeRigPulseSpawn(main, { pid: process.pid, spawnedAt: 'x' })
+      // a legacy record without pidStart is trusted inside the
+      // post-spawn window — the child's pre-lock window
+      writeRigPulseSpawn(main, { pid: process.pid, spawnedAt: new Date().toISOString() })
       assert.deepEqual(rigPulseRearm(main, 900, {}), { kind: 'quiet' })
       writeRigPulseSpawn(main, { pid: 1 << 30, spawnedAt: 'x' })
       assert.deepEqual(rigPulseRearm(main, 900, { BRO_AGENT_ID: 'native-x' }), { kind: 'quiet' })
       assert.equal(readRigPulseSpawn(main)?.pid, 1 << 30)
+    } finally {
+      rmSync(root, { recursive: true, force: true })
+    }
+  })
+
+  test('rearm — a reused recorded pid does not suppress (pidStart pin + bounded legacy trust)', () => {
+    const { root, main } = initRepo('bro-rig-pid-')
+    try {
+      armRigPulse(main, main, 120)
+      // the recorded child is gone and its pid was recycled onto a
+      // different live process: a matching pid with a different start
+      // is not the recorded spawn, so the rearm must not stay quiet
+      writeRigPulseSpawn(main, {
+        pid: process.pid,
+        spawnedAt: new Date().toISOString(),
+        pidStart: 'bogus-start',
+      })
+      assert.deepEqual(rigPulseRearm(main, 900, {}), {
+        kind: 'rearm',
+        repo: main,
+        everySec: 120,
+        forSec: 900,
+      })
+      // a record that predates pidStart only covers the pre-lock
+      // window — a live pid ten minutes on is reuse, not the child
+      writeRigPulseSpawn(main, {
+        pid: process.pid,
+        spawnedAt: new Date(Date.now() - 10 * 60_000).toISOString(),
+      })
+      assert.deepEqual(rigPulseRearm(main, 900, {}), {
+        kind: 'rearm',
+        repo: main,
+        everySec: 120,
+        forSec: 900,
+      })
     } finally {
       rmSync(root, { recursive: true, force: true })
     }

@@ -178,9 +178,10 @@ export function writePulseSpawn(dir: string, record: PulseSpawn): void {
 const SPAWN_TRUST_MS = 120_000
 
 /** A recorded pid is trusted with its stored start time; records that
- *  predate the field get the bounded window around `spawnedAt` only —
- *  a reused pid must not suppress the rearm forever. */
-function spawnedAlive(spawned: PulseSpawn, now: number = Date.now()): boolean {
+ *  predate the field get the bounded post-spawn window only — a reused
+ *  pid must not suppress the rearm forever. Shared with the rig pulse
+ *  (same spawn-record contract) so the pin can't drift. */
+export function spawnedAlive(spawned: PulseSpawn, now: number = Date.now()): boolean {
   if (spawned.pidStart !== undefined) {
     return pidAlive(spawned.pid, spawned.pidStart)
   }
