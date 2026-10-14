@@ -355,6 +355,25 @@ describe('bro loop e2e', () => {
     })
   })
 
+  test('a parkedWakeMin past the clock horizon clamps — the park still lands (bro-hl22w)', () => {
+    // an unbounded snooze overflows Date into a toISOString() RangeError
+    // thrown BEFORE the per-bead catch — the abort would strand the
+    // claims in_progress. The cap keeps any absurd value a valid defer.
+    const f = loopFixture(
+      [{ ...FAKE_BEAD, id: 'fx-a', title: 'doomed' }],
+      { parkedWakeMin: 1e15 },
+      'fail'
+    )
+    inside(f.main, f.root, () => {
+      const r = f.run()
+      assert.match(r.stdout, /1 parked/)
+      const row = bead(f.db, 'fx-a')
+      assert.equal(row?.status, 'deferred')
+      const wake = Date.parse(String(row?.defer_until))
+      assert.ok(Number.isFinite(wake) && wake > Date.now())
+    })
+  })
+
   test('agent verdict: bd close without a PR → closed, never reopened', () => {
     const f = loopFixture(
       [{ ...FAKE_BEAD, id: 'fx-a', title: 'nothing to ship' }],
@@ -1106,6 +1125,47 @@ describe('bro loop gate-stack round-robin', () => {
     inside(f.main, f.root, () => {
       const r = f.run()
       assert.match(r.stdout, /loop: fx-a landed/)
+      assert.equal(bead(f.db, 'fx-a')?.status, 'closed')
+    })
+  })
+
+  test('a woken park whose branch already gates on a PR re-attaches — no re-spawn (bro-hl22w)', () => {
+    // the claim-side half of the park contract: the snoozed bead kept
+    // its worktree AND the open PR the earlier run pushed. The wake
+    // must rejoin that gate — re-running the finished work order would
+    // redo landed work and shove a duplicate push at the same PR
+    const f = loopFixture([
+      {
+        ...FAKE_BEAD,
+        id: 'fx-a',
+        title: 'woken',
+        status: 'deferred',
+        defer_until: new Date(Date.now() - 60_000).toISOString(),
+      },
+    ])
+    // what the park left behind: the worktree, its branch's covering
+    // commit, and the PR gating on it
+    git(['worktree', 'add', '-b', 'loop/fx-a', f.worktree], f.main)
+    git(['-C', f.worktree, 'commit', '-q', '--allow-empty', '-m', 'fix: fx-a work (fx-a)'])
+    const head = git(['-C', f.worktree, 'rev-parse', 'HEAD'], f.main).trim()
+    writeHostState(f.hostState, {
+      prs: {
+        'loop/fx-a': {
+          number: 7,
+          state: 'OPEN',
+          headRef: 'loop/fx-a',
+          baseRef: 'main',
+          headSha: head,
+        },
+      },
+    })
+    inside(f.main, f.root, () => {
+      const r = f.run()
+      assert.match(r.stdout, /re-attaches to \[#7\]/)
+      assert.match(r.stdout, /loop: fx-a landed/)
+      // no worker ran — the reattach never reached the spawn
+      const evs = (readHostState(f.hostState).events ?? []) as Array<Record<string, unknown>>
+      assert.equal(evs.filter((e) => e.spawn !== undefined).length, 0)
       assert.equal(bead(f.db, 'fx-a')?.status, 'closed')
     })
   })
