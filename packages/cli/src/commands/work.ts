@@ -174,42 +174,26 @@ export function claimLockPath(path: string): string | null {
   return gd === null ? null : join(gd, 'bro', 'claim.lock')
 }
 
-/** The worktree's own claim marker with its stamp — detail + mtime is
- *  what the merge-path occupancy TTL reads (bro-ihnlv): the marker's
- *  mtime is the last proven claim activity. */
-export interface WorktreeClaimInfo {
-  detail: string
-  mtimeMs: number
-}
-
 /** The worktree's own claim marker — `<gitdir>/bro/work`, stamped by
  *  `bro work enter` (bro-pywx). Unlike .work marker details it needs no
  *  name matching: presence inside THIS tree is the claim. Returns the
  *  marker detail ('' when fresh but anonymous), undefined when absent
  *  or stale. */
-export function worktreeClaimInfo(
-  worktree: string,
-  now: number = Date.now()
-): WorktreeClaimInfo | undefined {
+export function worktreeClaim(worktree: string, now: number = Date.now()): string | undefined {
   try {
     const gd = worktreeGitDir(worktree)
     if (gd === null) {
       return undefined
     }
     const marker = join(gd, 'bro', 'work')
-    const mtimeMs = statSync(marker).mtimeMs
     const lines = readFileSync(marker, 'utf8').split('\n')
-    if (!markerLive(lines[0], mtimeMs, LIVE_MARKER_MS, now)) {
+    if (!markerLive(lines[0], statSync(marker).mtimeMs, LIVE_MARKER_MS, now)) {
       return undefined
     }
-    return { detail: lines[1]?.trim() ?? '', mtimeMs }
+    return lines[1]?.trim() ?? ''
   } catch {
     return undefined
   }
-}
-
-export function worktreeClaim(worktree: string, now: number = Date.now()): string | undefined {
-  return worktreeClaimInfo(worktree, now)?.detail
 }
 
 /** The worktree's own claim marker — `<gitdir>/bro/work`, the in-tree

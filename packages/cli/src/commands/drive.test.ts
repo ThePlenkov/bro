@@ -27,19 +27,13 @@ import {
   fixerBeadFor,
   fixerRef,
   freshOccupancy,
-  greenOccupancy,
   liveWorkDetails,
-  liveWorkEntries,
   occupied,
-  occupancyProofs,
   recordFixerAttempt,
   registryAgents,
   registryEntryState,
   supervisedBy,
-  supervisorFresh,
   worktreeClaim,
-  worktreeClaimInfo,
-  type WorkEntry,
 } from './drive.ts'
 import { driveSection } from './drive-config.ts'
 import { git, initRepo, inside } from './testrepo.ts'
@@ -83,28 +77,15 @@ describe('driveArgs', () => {
 
 describe('driveSection', () => {
   test('defaults', () => {
-    assert.deepEqual(driveSection(undefined), {
-      intervalSec: 300,
-      merge: 'auto',
-      occupancyTtlSec: 7200,
-    })
-    assert.deepEqual(driveSection({}), {
-      intervalSec: 300,
-      merge: 'auto',
-      occupancyTtlSec: 7200,
-    })
-    assert.deepEqual(driveSection('garbage'), {
-      intervalSec: 300,
-      merge: 'auto',
-      occupancyTtlSec: 7200,
-    })
+    assert.deepEqual(driveSection(undefined), { intervalSec: 300, merge: 'auto' })
+    assert.deepEqual(driveSection({}), { intervalSec: 300, merge: 'auto' })
+    assert.deepEqual(driveSection('garbage'), { intervalSec: 300, merge: 'auto' })
   })
 
   test('values survive; junk falls back', () => {
-    assert.deepEqual(driveSection({ intervalSec: 60, merge: 'never', occupancyTtlSec: 600 }), {
+    assert.deepEqual(driveSection({ intervalSec: 60, merge: 'never' }), {
       intervalSec: 60,
       merge: 'never',
-      occupancyTtlSec: 600,
     })
     assert.equal(driveSection({ intervalSec: -5 }).intervalSec, 300)
     // a saved cadence below the --every floor would be rejected as its
@@ -112,10 +93,6 @@ describe('driveSection', () => {
     assert.equal(driveSection({ intervalSec: 0.05 }).intervalSec, 300)
     assert.equal(driveSection({ intervalSec: Infinity }).intervalSec, 300)
     assert.equal(driveSection({ merge: 'always' }).merge, 'auto')
-    // a TTL under the activity floor reads per-pass noise as silence
-    assert.equal(driveSection({ occupancyTtlSec: 5 }).occupancyTtlSec, 7200)
-    assert.equal(driveSection({ occupancyTtlSec: 'never' }).occupancyTtlSec, 7200)
-    assert.equal(driveSection({ occupancyTtlSec: 60 }).occupancyTtlSec, 60)
   })
 })
 
@@ -349,7 +326,7 @@ describe('occupied', () => {
     agents: [] as AgentInfo[],
     branch: 'work/bro-a',
     worktree: '/repos/bro--bro-a',
-    workDetails: [] as WorkEntry[],
+    workDetails: [] as string[],
   }
 
   test('no signals → orphaned', () => {
@@ -378,12 +355,12 @@ describe('occupied', () => {
   })
 
   test('a fresh marker detail naming the bead occupies', () => {
-    const why = occupied({ ...base, workDetails: [{ detail: 'bro-a' }] })
+    const why = occupied({ ...base, workDetails: ['bro-a'] })
     assert.match(why ?? '', /armed work/)
   })
 
   test('a marker for other work does not occupy', () => {
-    const why = occupied({ ...base, workDetails: [{ detail: 'bro-unrelated' }] })
+    const why = occupied({ ...base, workDetails: ['bro-unrelated'] })
     assert.equal(why, undefined)
   })
 
@@ -396,10 +373,7 @@ describe('occupied', () => {
   })
 
   test('the worktree claim marker occupies without any name matching', () => {
-    const why = occupied({
-      ...base,
-      scanClaim: () => ({ detail: 'bro-a', mtimeMs: Date.now() }),
-    })
+    const why = occupied({ ...base, scanClaim: () => 'bro-a' })
     assert.match(why ?? '', /claimed by bro-a/)
   })
 
@@ -408,201 +382,9 @@ describe('occupied', () => {
       ...base,
       fixerBead: 'bro-fix1',
       agents: [agent({ molStep: 'bro-fix1' })],
-      scanClaim: () => ({ detail: 'bro-a', mtimeMs: Date.now() }),
+      scanClaim: () => 'bro-a',
     })
     assert.match(why ?? '', /fixer agent live/)
-  })
-})
-
-describe('greenOccupancy — the merge-path TTL (bro-ihnlv)', () => {
-  const NOW = Date.parse('2026-10-12T12:00:00Z')
-  const TTL = 2 * 3_600_000
-  const ago = (ms: number): number => NOW - ms
-  const iso = (ms: number): string => new Date(ago(ms)).toISOString()
-  const base = {
-    agents: [] as AgentInfo[],
-    branch: 'work/bro-a',
-    worktree: '/repos/bro--bro-a',
-    workDetails: [] as WorkEntry[],
-  }
-
-  test('no occupancy → neither fresh nor stale', () => {
-    assert.deepEqual(greenOccupancy(base, TTL, NOW), {})
-  })
-
-  test('fresh marker activity keeps the PR occupied — detail is the freshest proof', () => {
-    const g = greenOccupancy(
-      { ...base, workDetails: [{ detail: 'bro-a', mtimeMs: ago(60_000) }] },
-      TTL,
-      NOW
-    )
-    assert.match(g.fresh ?? '', /armed work on bro-a/)
-    assert.equal(g.stale, undefined)
-  })
-
-  test('a stale .work marker reads silent → adopted with the silence measured', () => {
-    const g = greenOccupancy(
-      { ...base, workDetails: [{ detail: 'bro-a', mtimeMs: ago(3 * 3_600_000) }] },
-      TTL,
-      NOW
-    )
-    assert.equal(g.fresh, undefined)
-    assert.match(g.stale ?? '', /armed work/)
-    assert.equal(g.silentMs, 3 * 3_600_000)
-  })
-
-  test('a proof with no activity stamp is unverifiable → adopted, silence unmeasured', () => {
-    const g = greenOccupancy({ ...base, workDetails: [{ detail: 'bro-a' }] }, TTL, NOW)
-    assert.match(g.stale ?? '', /armed work/)
-    assert.equal(g.silentMs, undefined)
-  })
-
-  test('a stale fixer beside a fresh marker still vetoes — the freshest proof wins', () => {
-    const g = greenOccupancy(
-      {
-        ...base,
-        fixerBead: 'bro-fix1',
-        agents: [agent({ molStep: 'bro-fix1', spawnedAt: iso(5 * 3_600_000) })],
-        workDetails: [{ detail: 'bro-a', mtimeMs: ago(5 * 60_000) }],
-      },
-      TTL,
-      NOW
-    )
-    assert.match(g.fresh ?? '', /armed work on bro-a/)
-  })
-
-  test('an agent\'s activity is max(log mtime, spawnedAt)', () => {
-    const dir = mkdtempSync(join(tmpdir(), 'bro-drive-act-'))
-    try {
-      const log = join(dir, 'native-a.log')
-      writeFileSync(log, 'out')
-      // old spawn, fresh log — the log carries the proof
-      utimesSync(log, ago(60_000) / 1000, ago(60_000) / 1000)
-      const g = greenOccupancy(
-        {
-          ...base,
-          fixerBead: 'bro-fix1',
-          agents: [agent({ molStep: 'bro-fix1', spawnedAt: iso(5 * 3_600_000), log })],
-        },
-        TTL,
-        NOW
-      )
-      assert.match(g.fresh ?? '', /fixer agent live/)
-      // fresh spawn, stale log — spawnedAt carries it
-      utimesSync(log, ago(5 * 3_600_000) / 1000, ago(5 * 3_600_000) / 1000)
-      const g2 = greenOccupancy(
-        {
-          ...base,
-          fixerBead: 'bro-fix1',
-          agents: [agent({ molStep: 'bro-fix1', spawnedAt: iso(60_000), log })],
-        },
-        TTL,
-        NOW
-      )
-      assert.match(g2.fresh ?? '', /fixer agent live/)
-    } finally {
-      rmSync(dir, { recursive: true, force: true })
-    }
-  })
-
-  test('a pid-less spawned entry bounds by spawnedAt — the bead\'s own case', () => {
-    const live = greenOccupancy(
-      {
-        ...base,
-        fixerBead: 'fx',
-        agents: [agent({ molStep: 'fx', state: 'spawned', spawnedAt: iso(3_600_000) })],
-      },
-      TTL,
-      NOW
-    )
-    assert.match(live.fresh ?? '', /fixer agent live/)
-    const stale = greenOccupancy(
-      {
-        ...base,
-        fixerBead: 'fx',
-        agents: [agent({ molStep: 'fx', state: 'spawned', spawnedAt: iso(5 * 3_600_000) })],
-      },
-      TTL,
-      NOW
-    )
-    assert.match(stale.stale ?? '', /fixer agent live/)
-    // and never-readable (no spawnedAt, no log) is unverifiable → adopted
-    const bare = greenOccupancy(
-      { ...base, fixerBead: 'fx', agents: [agent({ molStep: 'fx', state: 'spawned' })] },
-      TTL,
-      NOW
-    )
-    assert.equal(bare.fresh, undefined)
-    assert.match(bare.stale ?? '', /fixer agent live/)
-    assert.equal(bare.silentMs, undefined)
-  })
-
-  test('a /proc hit ages by the worktree\'s own churn — a parked process is silent', () => {
-    const ctx = { ...base, scanProc: () => [{ pid: 42, cmd: 'devin -p x' }] }
-    const parked = greenOccupancy({ ...ctx, treeIdleMs: () => 3 * 3_600_000 }, TTL, NOW)
-    assert.equal(parked.fresh, undefined)
-    assert.match(parked.stale ?? '', /process 42/)
-    const active = greenOccupancy({ ...ctx, treeIdleMs: () => 60_000 }, TTL, NOW)
-    assert.match(active.fresh ?? '', /process 42/)
-    // an unstat-able tree (idle ∞) proves nothing → adopted
-    const unverifiable = greenOccupancy(
-      { ...ctx, treeIdleMs: () => Number.POSITIVE_INFINITY },
-      TTL,
-      NOW
-    )
-    assert.equal(unverifiable.fresh, undefined)
-  })
-
-  test('a stale claim marker is adopted; a fresh one vetoes', () => {
-    const stale = greenOccupancy(
-      { ...base, scanClaim: () => ({ detail: 'bro-a', mtimeMs: ago(3 * 3_600_000) }) },
-      TTL,
-      NOW
-    )
-    assert.match(stale.stale ?? '', /claimed by bro-a/)
-    const fresh = greenOccupancy(
-      { ...base, scanClaim: () => ({ detail: 'bro-a', mtimeMs: ago(60_000) }) },
-      TTL,
-      NOW
-    )
-    assert.match(fresh.fresh ?? '', /claimed by bro-a/)
-  })
-})
-
-describe('supervisorFresh — the adopt-path veto bound (bro-ihnlv)', () => {
-  // real file mtimes — NOW is the wall clock, not a fixture date
-  const NOW = Date.now()
-  const TTL = 2 * 3_600_000
-  const sup = (file: string): ListedWatch => ({
-    watch: {
-      pr: 7,
-      link: '[#7](https://x/pull/7)',
-      pid: 4242,
-      merge: true,
-      startedAt: NOW - 60_000,
-      timeoutMin: 60,
-    },
-    file,
-    alive: true,
-  })
-
-  test('a fresh marker file vetoes; a stale one does not', () => {
-    const dir = mkdtempSync(join(tmpdir(), 'bro-drive-sup-'))
-    try {
-      const fresh = join(dir, '7-loop-1.json')
-      const stale = join(dir, '8-loop-1.json')
-      writeFileSync(fresh, '{}')
-      writeFileSync(stale, '{}')
-      utimesSync(stale, (NOW - 5 * 3_600_000) / 1000, (NOW - 5 * 3_600_000) / 1000)
-      assert.equal(supervisorFresh(sup(fresh), TTL, NOW), true)
-      assert.equal(supervisorFresh(sup(stale), TTL, NOW), false)
-    } finally {
-      rmSync(dir, { recursive: true, force: true })
-    }
-  })
-
-  test('an unreadable stamp stays conservative — veto once more', () => {
-    assert.equal(supervisorFresh(sup('/no/such/marker.json'), TTL, NOW), true)
   })
 })
 
@@ -611,7 +393,7 @@ describe('supervisedBy — the watch-marker plane (bro-0aa87)', () => {
     agents: [] as AgentInfo[],
     branch: 'work/bro-a',
     worktree: '/repos/bro--bro-a',
-    workDetails: [] as WorkEntry[],
+    workDetails: [] as string[],
   }
   /** Marker names carry the kind: `<pr>-loop-<pid>.json` or
    *  `<pr>-<pid>-<nonce>.json` (kind 'wait'). */
@@ -678,7 +460,7 @@ describe('supervisedBy — the watch-marker plane (bro-0aa87)', () => {
       ...occBase,
       pr: 7,
       watches: [watch(7, 'loop')],
-      workDetails: [{ detail: 'bro-a' }],
+      workDetails: ['bro-a'],
     })
     assert.match(why ?? '', /supervised by loop/)
     const fixer = occupied({

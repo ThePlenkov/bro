@@ -33,7 +33,7 @@ fail lines + findings).
 | Command | What it does |
 | ------- | ------------ |
 | `bro self dogfood scenarios` | List committed `dogfood/*.md` scenario names |
-| `bro self dogfood run <name> [--backend <c>] [--analyst <c\|same\|none>] [--keep]` | Provision + spawn the runner; prints the run id. `--analyst` defaults to `same` (runner's backend), `none` skips the verdict pass, `<c>` names a different connector |
+| `bro self dogfood run <name> [--backend <c>] [--analyst <c\|same\|none>] [--provider <p>] [--keep]` | Provision + spawn the runner; prints the run id. `--analyst` defaults to `same` (runner's backend), `none` skips the verdict pass, `<c>` names a different connector. `--provider` pins the worker engine (a `providers.<name>` entry — e.g. `devin-acp`) for BOTH runner and analyst |
 | `bro self dogfood status [run-id] [--json]` | Run ledger; calling it advances runner→analyst for terminal runners |
 | `bro self dogfood report <run-id>` | The verdict once written; run state + transcript pointers otherwise |
 

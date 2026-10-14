@@ -93,8 +93,7 @@ fleet branches and uses the act gate to decide what happens:
 | ---------- | ----- | ------ |
 | `open_threads > 0` | occupied | Skip; the live owner keeps its work |
 | `open_threads > 0` | orphaned | Spawn or respawn a fixer on the PR worktree |
-| green | occupied, active | Report; the owner's merge step lands it |
-| green | occupied, silent | Adopt as an orphan and merge — occupancy may hold a green PR back, never forever |
+| green | occupied | Report; the owner's merge step lands it |
 | green | orphaned | Merge through `bro review act merge`, retire clean work, close the fixer |
 
 ```text
@@ -103,13 +102,8 @@ bro review drive [--once] [--every [N]] [--no-merge] [--connector <name>] [--jso
 
 `--once` is the default pass. `--every` is for a detached supervisor;
 `--no-merge` supervises without merging. `--json` emits one verdict per
-PR. The config section is `drive.intervalSec` (default `300`),
-`drive.merge` (`auto`, the default, or `never`), and
-`drive.occupancyTtlSec` (default `7200`) — the merge-path activity
-bound: an occupied green PR whose owner shows no proven activity
-(agent log mtime, marker stamp, worktree churn) inside the window is
-adopted and merged, so a dead or silent owner never parks a green PR
-forever.
+PR. The config section is `drive.intervalSec` (default `300`) and
+`drive.merge` (`auto`, the default, or `never`).
 
 The durable form is `bro review drive install [--every N] [--print]`: it
 arms `<git-common>/bro/drive.json` — the want-marker — and brings the

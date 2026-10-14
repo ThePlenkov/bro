@@ -2,50 +2,13 @@ import { describe, test } from 'node:test'
 import assert from 'node:assert/strict'
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http'
 import type { AddressInfo } from 'node:net'
-import type { AgentConnector } from '@broject/core'
 import { providerConfig, providerProxy } from './serve-provider.ts'
-import { createServeHandler, type ServeDeps } from './serve.ts'
-
-const fakeConn = {
-  name: 'native',
-  capabilities: () => ({ supervisor: 'none' as const }),
-} as AgentConnector
-
-const deps = (over: Partial<ServeDeps> = {}): ServeDeps => ({
-  snapshot: async () => ({}),
-  agents: async () => ({
-    backends: [{ conn: fakeConn, agents: [] }],
-    occupancy: { occupied: 0, maxConcurrent: 3 },
-    sessions: [],
-    discovered: [],
-    degraded: [],
-  }),
-  queue: async () => ({}),
-  ticks: async () => ({}),
-  mailbox: async () => ({}),
-  find: async () => ({ degraded: [] }),
-  spawn: async () => {
-    throw new Error('unused')
-  },
-  stop: async () => {
-    throw new Error('unused')
-  },
-  connectors: () => ['native'],
-  ...over,
-})
-
-const TOKEN = 'test-session-token'
-const auth = { authorization: `Bearer ${TOKEN}` }
-
-async function listen(d: ServeDeps): Promise<{ url: string; close: () => Promise<void> }> {
-  const server = createServer(createServeHandler(d, { dir: '/repo', startedAt: 't0' }, TOKEN))
-  await new Promise<void>((r) => server.listen(0, '127.0.0.1', r))
-  const { port } = server.address() as AddressInfo
-  return {
-    url: `http://127.0.0.1:${port}`,
-    close: () => new Promise<void>((r) => server.close(() => r())),
-  }
-}
+import {
+  authHeaders as auth,
+  listen,
+  serveDeps as deps,
+  testToken as TOKEN,
+} from './serve-testkit.ts'
 
 describe('providerConfig', () => {
   test('unwired without a key; BRO_PROVIDER_API_KEY wins; ANTHROPIC_* fall back', () => {

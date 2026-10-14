@@ -92,6 +92,7 @@ import { cmdRecord, runRetrospectCommand } from './commands/retrospect.ts'
 import { runServeCommand } from './commands/serve.ts'
 import { runSetupCommand } from './commands/setup.ts'
 import { runMeshCommand } from './commands/mesh.ts'
+import { runProvidersCommand } from './commands/providers.ts'
 import { runSpecCommand, sddConnector } from './commands/spec.ts'
 import { runStackCommand } from './commands/stack.ts'
 import { runStampCommand } from './commands/buildstamp.ts'
@@ -461,6 +462,13 @@ export const PLUGINS: BroPlugin[] = [
     summary: 'ACP provider spawn unit — backends exec this; never typed',
     run: runAcpWorkerCommand,
     hidden: true,
+  }),
+  definePlugin({
+    name: 'providers',
+    group: 'self',
+    summary: 'Provider registry — models catalog as <provider>/<model> [name…]',
+    run: runProvidersCommand,
+    skill: 'providers',
   }),
   definePlugin({
     name: 'setup',
