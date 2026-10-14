@@ -39,11 +39,11 @@ export function testGitEnv(base: NodeJS.ProcessEnv = process.env): NodeJS.Proces
  *  surface (encoding forced utf8), with the ambient strip and the
  *  null-config pins applied to whatever env the site passes. */
 export function testGit(args: string[], opts: ExecFileSyncOptions = {}): string {
-  return execFileSync('git', args, { // codeql[js/second-order-command-line-injection] — test seam: args are fixture literals, never user input
+  return execFileSync('git', args, { // NOSONAR codeql[js/second-order-command-line-injection] — PATH lookup is the contract (same as core/git.ts); args are fixture literals
     ...opts,
     env: testGitEnv(opts.env ?? process.env),
     encoding: 'utf8',
-  }) // NOSONAR — PATH lookup is the contract (same as core/git.ts)
+  })
 }
 
 /** spawnSync('git') under the same contract — for call sites that need
@@ -52,11 +52,11 @@ export function testGitSpawn(
   args: string[],
   opts: SpawnSyncOptions = {}
 ): SpawnSyncReturns<string> {
-  return spawnSync('git', args, { // codeql[js/second-order-command-line-injection] — test seam: args are fixture literals, never user input
+  return spawnSync('git', args, { // NOSONAR codeql[js/second-order-command-line-injection] — PATH lookup is the contract (same as core/git.ts); args are fixture literals
     ...opts,
     env: testGitEnv(opts.env ?? process.env),
     encoding: 'utf8',
-  }) // NOSONAR — PATH lookup is the contract (same as core/git.ts)
+  })
 }
 
 /** Delete ambient repo/agent pins from process.env (git-location and

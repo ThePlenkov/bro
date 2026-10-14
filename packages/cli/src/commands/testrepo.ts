@@ -16,7 +16,7 @@ import {
   rmSync,
   writeFileSync,
 } from 'node:fs'
-import { tmpdir } from 'node:os'
+import { devNull, tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
@@ -121,6 +121,11 @@ export function e2eEnv(extra: Record<string, string> = {}): NodeJS.ProcessEnv {
       env[k] = process.env[k]!
     }
   }
+  // the whitelist drops even a file-scope scrub's null-config pins —
+  // HOME rides along, so without these the child's git reads the host
+  // ~/.gitconfig (core.hooksPath, commit.gpgsign) on fixture commits
+  env.GIT_CONFIG_NOSYSTEM = '1'
+  env.GIT_CONFIG_GLOBAL = devNull
   return { ...env, ...extra }
 }
 

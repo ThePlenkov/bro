@@ -46,9 +46,17 @@ describe('testGit/testGitSpawn', () => {
       GIT_CONFIG_KEY_0: 'core.hooksPath',
       GIT_CONFIG_VALUE_0: '/tmp/pwned-hooks',
     }
-    const r = testGitSpawn(['config', '--get', 'core.hooksPath'], { env })
-    assert.equal(r.status, 1)
-    assert.equal(r.stdout, '')
+    // run outside any repo — `config --get` merges the local level too,
+    // and a repo-local core.hooksPath would read as set for the wrong
+    // reason
+    const dir = mkdtempSync(join(tmpdir(), 'bro-testkit-'))
+    try {
+      const r = testGitSpawn(['config', '--get', 'core.hooksPath'], { env, cwd: dir })
+      assert.equal(r.status, 1)
+      assert.equal(r.stdout, '')
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
   })
 
   test('a caller env whitelist stays a whitelist plus the null pins', () => {
