@@ -68,6 +68,24 @@ describe('conductorConfig', () => {
       /type 'cli' — the conductor needs an 'acp' entry/
     )
   })
+  test('BRO_PROVIDER_CATALOG resolves a second entry for /v1/models', () => {
+    const cfg = conductorConfig(
+      { BRO_PROVIDER_BACKEND: 'dv-acp', BRO_PROVIDER_CATALOG: 'cli1' },
+      '/r',
+      providers
+    )
+    assert.equal(cfg?.catalog?.name, 'cli1')
+    assert.equal(conductorConfig({ BRO_PROVIDER_BACKEND: 'dv-acp' }, '/r', providers)?.catalog, undefined)
+    assert.throws(
+      () =>
+        conductorConfig(
+          { BRO_PROVIDER_BACKEND: 'dv-acp', BRO_PROVIDER_CATALOG: 'nope' },
+          '/r',
+          providers
+        ),
+      /providers\.nope is not configured/
+    )
+  })
 })
 
 describe('parseReply', () => {
@@ -228,7 +246,7 @@ describe('serve /v1/* — the conductor plane', () => {
       const body = await r.json()
       assert.deepEqual(
         body.data.map((m: { id: string }) => m.id),
-        ['swe-x', 'swe-y']
+        ['dv-acp/swe-x', 'dv-acp/swe-y']
       )
       const c = await fetch(`${url}/v1/messages/count_tokens`, {
         method: 'POST',
@@ -236,6 +254,86 @@ describe('serve /v1/* — the conductor plane', () => {
         body: 'x'.repeat(400),
       })
       assert.equal((await c.json()).input_tokens, 100)
+    } finally {
+      await close()
+    }
+  })
+
+  test('a tool-less backend serves its configured pin as label and catalog row', async () => {
+    const fake = fakeAcpAgent({ replyText: 'sum' })
+    const cfg = { ...CFG, entry: { ...CFG.entry, model: 'swe-sum' } }
+    const { url, close } = await listen(
+      deps({ provider: conductorProxy(cfg, { acp: { peer: fake.app } }) })
+    )
+    try {
+      const r = await fetch(`${url}/v1/messages`, {
+        method: 'POST',
+        headers: { ...auth, 'content-type': 'application/json' },
+        body: JSON.stringify({ messages: [{ role: 'user', content: 'x' }], stream: false }),
+      })
+      assert.equal(r.status, 200)
+      assert.equal((await r.json()).model, 'swe-sum')
+      assert.deepEqual(fake.configSets, [])
+      // the pin is a one-row catalog — a tool-less backend still names itself
+      const m = await fetch(`${url}/v1/models`, { headers: auth })
+      assert.deepEqual(
+        (await m.json()).data.map((x: { id: string }) => x.id),
+        ['dv-acp/swe-sum']
+      )
+    } finally {
+      await close()
+    }
+  })
+
+  test('an unpinned tool-less backend answers "unknown" and an empty catalog', async () => {
+    const fake = fakeAcpAgent({ replyText: 'sum' })
+    const { url, close } = await listen(
+      deps({ provider: conductorProxy(CFG, { acp: { peer: fake.app } }) })
+    )
+    try {
+      const r = await fetch(`${url}/v1/messages`, {
+        method: 'POST',
+        headers: { ...auth, 'content-type': 'application/json' },
+        body: JSON.stringify({ messages: [{ role: 'user', content: 'x' }], stream: false }),
+      })
+      assert.equal(r.status, 200)
+      assert.equal((await r.json()).model, 'unknown')
+      const m = await fetch(`${url}/v1/models`, { headers: auth })
+      assert.deepEqual((await m.json()).data, [])
+    } finally {
+      await close()
+    }
+  })
+
+  test('BRO_PROVIDER_CATALOG models come from the catalog entry, not the backend', async () => {
+    const fake = fakeAcpAgent({ replyText: 'sum' })
+    const cfg = {
+      ...CFG,
+      catalog: {
+        name: 'orcarouter',
+        entry: {
+          type: 'api' as const,
+          baseUrl: 'https://x',
+          models: { 'typesafe/jev-1.13': 'systemone' as const },
+        },
+      },
+    }
+    const { url, close } = await listen(
+      deps({ provider: conductorProxy(cfg, { acp: { peer: fake.app } }) })
+    )
+    try {
+      const r = await fetch(`${url}/v1/models`, { headers: auth })
+      assert.deepEqual(
+        (await r.json()).data.map((m: { id: string }) => m.id),
+        ['orcarouter/typesafe/jev-1.13']
+      )
+      // the backend itself still answers messages
+      const msg = await fetch(`${url}/v1/messages`, {
+        method: 'POST',
+        headers: { ...auth, 'content-type': 'application/json' },
+        body: JSON.stringify({ messages: [{ role: 'user', content: 'x' }], stream: false }),
+      })
+      assert.equal(msg.status, 200)
     } finally {
       await close()
     }

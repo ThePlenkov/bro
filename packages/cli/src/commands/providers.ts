@@ -39,6 +39,18 @@ interface Opts {
   out?: (line: string) => void
 }
 
+/** The catalog as `<name>/<model-id>` strings — the same list
+ *  `bro providers models` renders, exported for the serve conductor's
+ *  `/v1/models` surface (spec bro-wxfls: the catalog may be a
+ *  different entry than the messages backend). */
+export async function catalogModels(
+  name: string,
+  entry: ProviderEntry,
+  opts: { acp?: AcpSeam; exec?: (command: string) => string } = {}
+): Promise<string[]> {
+  return providerModels(name, entry, opts)
+}
+
 /** One provider's catalog lines — `<name>/<model-id>` each. */
 async function providerModels(
   name: string,

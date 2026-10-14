@@ -191,6 +191,32 @@ async function applyModel(
   return reported
 }
 
+/** Model resolution for the CONVERSE surfaces (acpConverse,
+ *  acpPooledTurn) — tool-less agents advertise no model option, so a
+ *  configured pin cannot be applied or verified; it IS the provenance
+ *  (the operator asserted the fixed model at config time — spec
+ *  bro-wxfls). `model` is what gets applied when an option exists;
+ *  `label` is served verbatim when none does (never the client's
+ *  request id — provenance reports what ran, not what was asked).
+ *  Unlike applyModel this never throws on a pin under a tool-less
+ *  backend — the converse surface serves a chat turn, not a
+ *  calibrated verdict, so an unverifiable label is honest. The judge
+ *  path keeps applyModel's hard refusal. */
+async function converseModel(
+  ctx: ClientContext,
+  sessionId: string,
+  configOptions: SessionConfigOption[],
+  by: string,
+  model: string | undefined,
+  label: string | undefined = model,
+  req: () => SendRequestOptions
+): Promise<string> {
+  if (!configOptions.some((o) => o.category === 'model')) {
+    return label ?? 'unknown'
+  }
+  return applyModel(ctx, sessionId, configOptions, by, model, req)
+}
+
 interface AcpReply {
   /** Concatenated agent_message_chunk text. */
   text: string
@@ -444,12 +470,13 @@ export async function acpConverse(
   return withAcp(by, entry, opts, deadline, async (ctx) => {
     const { session, asAuthError, req } = await acpSession(ctx, opts, by, deadline)
     try {
-      const model = await applyModel(
+      const model = await converseModel(
         ctx,
         session.sessionId,
         session.newSessionResponse.configOptions ?? [],
         by,
         opts.model ?? entry.model,
+        undefined,
         req
       )
       const r = await pumpTurn(session, promptText, onUpdate, asAuthError, req, signal, by)
@@ -624,15 +651,17 @@ export async function acpPooledTurn(
   try {
     const session = await acpSessionOpen(ctx, opts, peer.asAuthError, req)
     try {
+      const configOptions = session.newSessionResponse.configOptions ?? []
       const want = requestModel ?? opts.model ?? entry.model
-      const model = await applyModel(
+      const model = await converseModel(
         ctx,
         session.sessionId,
-        session.newSessionResponse.configOptions ?? [],
+        configOptions,
         by,
-        want === undefined
-          ? undefined
-          : resolveModelPin(want, session.newSessionResponse.configOptions ?? [], by),
+        want === undefined ? undefined : resolveModelPin(want, configOptions, by),
+        // a request pin cannot be honored under a tool-less backend —
+        // the reported label is the configured pin, never the ask
+        opts.model ?? entry.model,
         req
       )
       const r = await pumpTurn(
