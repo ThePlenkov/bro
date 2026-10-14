@@ -203,34 +203,25 @@ interface DevDist {
   entry: string
 }
 
-/** `bro` as PATH resolves it — the binary spawns/hooks actually exec —
- *  plus the running entrypoint (doctor may run via npx while PATH-bro is
- *  the dev symlink). Realpath'd so the symlink into the checkout exposes
- *  itself; deduped since the two usually converge on one file. */
-function broEntrypoints(): string[] {
-  const raw: string[] = []
+/** First `bro` executable PATH resolves — the binary spawns/hooks
+ *  actually exec. Windows shims (.cmd/.exe) lead so the spawn target
+ *  matches what a shell would pick. */
+function pathBroBin(): string | null {
   const names = process.platform === 'win32' ? ['bro.cmd', 'bro.exe', 'bro'] : ['bro']
   for (const dir of (process.env.PATH ?? '').split(delimiter)) {
-    if (dir === '') {
-      continue
-    }
-    for (const name of names) {
-      const p = join(dir, name)
-      if (existsSync(p)) {
-        raw.push(p)
-        break
-      }
-    }
-    if (raw.length > 0) {
-      break // first PATH hit is the one spawns exec
+    const hit = dir === '' ? undefined : names.map((name) => join(dir, name)).find(existsSync)
+    if (hit !== undefined) {
+      return hit
     }
   }
-  const self = process.argv[1]
-  if (typeof self === 'string' && self !== '') {
-    raw.push(self)
-  }
+  return null
+}
+
+/** Realpath'd and deduped — a symlink into a dev checkout exposes
+ *  itself; a dangling one contributes nothing. */
+function realpathDedup(paths: string[]): string[] {
   const out: string[] = []
-  for (const p of raw) {
+  for (const p of paths) {
     try {
       const r = realpathSync(p)
       if (!out.includes(r)) {
@@ -241,6 +232,23 @@ function broEntrypoints(): string[] {
     }
   }
   return out
+}
+
+/** `bro` as PATH resolves it — the binary spawns/hooks actually exec —
+ *  plus the running entrypoint (doctor may run via npx while PATH-bro is
+ *  the dev symlink). Realpath'd so the symlink into the checkout exposes
+ *  itself; deduped since the two usually converge on one file. */
+function broEntrypoints(): string[] {
+  const raw: string[] = []
+  const onPath = pathBroBin()
+  if (onPath !== null) {
+    raw.push(onPath)
+  }
+  const self = process.argv[1]
+  if (typeof self === 'string' && self !== '') {
+    raw.push(self)
+  }
+  return realpathDedup(raw)
 }
 
 /** A file inside a bro dev checkout's packages/cli/dist, or null. The
