@@ -53,7 +53,9 @@ async function providerModels(
     case 'cli': {
       const ids: string[] = []
       if (entry.models !== undefined) {
-        const exec = opts.exec ?? ((cmd: string) => execFileSync('sh', ['-c', cmd], { encoding: 'utf8' })) // NOSONAR — operator-configured models template, same contract as command
+        // bounded — a hung template fails this provider, never the
+        // whole catalog
+        const exec = opts.exec ?? ((cmd: string) => execFileSync('sh', ['-c', cmd], { encoding: 'utf8', timeout: 30_000 })) // NOSONAR — operator-configured models template, same contract as command
         ids.push(
           ...exec(entry.models)
             .split('\n')

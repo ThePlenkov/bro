@@ -72,6 +72,67 @@ describe('bro providers models', () => {
     assert.deepEqual(out, ['dv-acp/m1', 'dv-acp/m2'])
   })
 
+  test('acp falls back to an uncategorized select — category is never required', async () => {
+    const uncategorized: SessionConfigOption = {
+      id: 'model',
+      name: 'Model',
+      type: 'select',
+      currentValue: 'm1',
+      options: [
+        { value: 'm1', name: 'Model One' },
+        { value: 'm9', name: 'Model Nine' },
+      ],
+    }
+    const fake = fakeAcpAgent({ configOptions: [uncategorized] })
+    const out: string[] = []
+    await runProvidersCommand(['models', 'dv-acp'], {
+      providers: { 'dv-acp': { type: 'acp', command: 'dv acp' } },
+      acp: { peer: fake.app },
+      out: (l) => out.push(l),
+    })
+    assert.deepEqual(out, ['dv-acp/m1', 'dv-acp/m9'])
+  })
+
+  test('a select categorized mode is never the model picker', async () => {
+    const mode: SessionConfigOption = {
+      id: 'mode',
+      name: 'Mode',
+      type: 'select',
+      category: 'mode',
+      currentValue: 'plan',
+      options: [
+        { value: 'plan', name: 'Plan' },
+        { value: 'build', name: 'Build' },
+      ],
+    }
+    const fake = fakeAcpAgent({ configOptions: [mode] })
+    const out: string[] = []
+    await runProvidersCommand(['models', 'dv-acp'], {
+      providers: { 'dv-acp': { type: 'acp', command: 'dv acp' } },
+      acp: { peer: fake.app },
+      out: (l) => out.push(l),
+    })
+    assert.deepEqual(out, [])
+  })
+
+  test('a categorized model option wins over an uncategorized select', async () => {
+    const uncategorized: SessionConfigOption = {
+      id: 'other',
+      name: 'Other',
+      type: 'select',
+      currentValue: 'x',
+      options: [{ value: 'x', name: 'X' }],
+    }
+    const fake = fakeAcpAgent({ configOptions: [uncategorized, MODEL_OPTION] })
+    const out: string[] = []
+    await runProvidersCommand(['models', 'dv-acp'], {
+      providers: { 'dv-acp': { type: 'acp', command: 'dv acp' } },
+      acp: { peer: fake.app },
+      out: (l) => out.push(l),
+    })
+    assert.deepEqual(out, ['dv-acp/m1', 'dv-acp/m2'])
+  })
+
   test('an unknown named provider dies naming what IS configured', async () => {
     const r = await capture(() =>
       runProvidersCommand(['models', 'nope'], {

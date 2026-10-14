@@ -65,6 +65,13 @@ export { isSystemoneFamily } from '@broject/core'
  *  peer refusing a value. */
 const REQUEST_CANCELLED = -32800
 
+/** ACP categories that say "not the model picker" — 'model_config' is
+ *  a model PARAMETER (its options are parameter values, not model
+ *  ids), 'mode'/'thought_level' select session behavior. Absent or
+ *  unknown categories stay ambiguous — the spec forbids requiring
+ *  category for correctness, so they may still serve. */
+const NON_MODEL_CATEGORIES = new Set(['mode', 'thought_level', 'model_config'])
+
 const errMsg = (err: unknown): string =>
   err instanceof Error ? err.message : String(err)
 
@@ -390,9 +397,15 @@ export async function acpModels(
   return withAcp(by, entry, opts, deadline, async (ctx) => {
     const { session } = await acpSession(ctx, opts, by, deadline)
     try {
-      const opt = (session.newSessionResponse.configOptions ?? []).find(
-        (o) => o.category === 'model' && o.type === 'select'
+      const selects = (session.newSessionResponse.configOptions ?? []).filter(
+        (o) => o.type === 'select'
       )
+      // 'model' wins outright; a select without it still serves when
+      // the category is absent or unknown — never when the agent
+      // labeled it a known non-model kind
+      const opt =
+        selects.find((o) => o.category === 'model') ??
+        selects.find((o) => o.category == null || !NON_MODEL_CATEGORIES.has(o.category))
       const options = opt?.type === 'select' ? opt.options : []
       // options may be grouped — a group's leaf options carry the values
       return options
