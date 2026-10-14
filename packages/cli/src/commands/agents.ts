@@ -57,6 +57,7 @@ import {
   type DiscoveredSession,
 } from '@broject/core'
 import type { AcpSeam, FetchFn } from '@broject/providers'
+import { otelHeader, otelSpan } from '@broject/providers'
 import { beadsDir } from '@broject/convoy'
 import {
   agentPromptPath,
@@ -628,19 +629,40 @@ export function spawnStepAgent(
         autoApprove: req.autoApprove ?? profile?.autoApprove,
       },
       req.provider !== undefined ? 'flag' : profile === undefined ? 'backend' : 'profile'
-    ).then((pick) =>
-      conn.spawn({
-        molStep: req.molStep,
-        repoRoot,
-        beadsDir: beads,
-        prompt,
-        env: req.env,
-        provider: pick.provider,
-        model: pick.model,
-        class: route?.class,
-        worker: pick.worker,
+    ).then((pick) => {
+      // a spawned worker is a child trace: the span ctx crosses the
+      // process boundary as TRACEPARENT (and the endpoint itself so the
+      // worker emits without sourcing provider.env) — the worker's own
+      // bro.cmd/acp.* spans nest under this one in Tempo.
+      const span = otelSpan('agent.spawn', {
+        'agent.step': req.molStep ?? '',
+        'agent.backend': conn.name,
+        'agent.provider': pick.provider ?? '',
+        'agent.model': pick.model ?? '',
       })
-    )
+      const tp = otelHeader(span.ctx)
+      const ep = process.env.OTEL_EXPORTER_OTLP_ENDPOINT
+      return conn
+        .spawn({
+          molStep: req.molStep,
+          repoRoot,
+          beadsDir: beads,
+          prompt,
+          env: {
+            ...req.env,
+            TRACEPARENT: tp,
+            ...(ep !== undefined && ep !== '' ? { OTEL_EXPORTER_OTLP_ENDPOINT: ep } : {}),
+          },
+          provider: pick.provider,
+          model: pick.model,
+          class: route?.class,
+          worker: pick.worker,
+        })
+        .then((r) => {
+          span.end({ 'agent.id': String(r.id ?? ''), 'agent.pid': r.pid ?? 0 })
+          return r
+        })
+    })
   })
 }
 

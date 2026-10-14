@@ -8,6 +8,7 @@
  */
 import { warnDeprecated, type BroPlugin } from '@broject/core'
 import { journalCommand } from './commands/hooks.ts'
+import { otelSpan, setAmbient } from '@broject/providers'
 import { docUsageLines, reservedWords, runDocVerb } from './docs.ts'
 import { GROUP_META, loadExternalPlugins, pluginGroups, PLUGINS } from './plugins.ts'
 import { VERSION } from './version.ts'
@@ -136,8 +137,18 @@ async function main(): Promise<void> {
   const t0 = Date.now()
   const META_CMDS = new Set([undefined, '--version', '-v', '--help', '-h'])
   if (!META_CMDS.has(cmd)) {
+    // bro.cmd span: ambient parent for everything the command opens
+    // (hook probes, acp turns, spawned workers); endDetached on exit —
+    // plugins terminate via process.exit() where in-flight fetch dies,
+    // so the completed span rides out on a detached node child.
+    const cmdSpan = otelSpan(`bro.cmd ${cmd}`, { cmd: cmd as string }, { startMs: t0 })
+    setAmbient(cmdSpan.ctx)
     process.on('exit', (code) => {
       journalCommand(cmd as string, Date.now() - t0, code ?? 0)
+      cmdSpan.endDetached(
+        { 'cmd.exit_code': code ?? 0, 'cmd.duration_ms': Date.now() - t0 },
+        (code ?? 0) === 0 ? 'ok' : 'error'
+      )
     })
   }
 

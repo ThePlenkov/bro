@@ -498,7 +498,9 @@ export async function acpConverse(
   deadline = Date.now() + 120_000,
   signal?: AbortSignal
 ): Promise<{ stopReason: StopReason; text: string; model: string }> {
+  const span = otelSpan('acp.turn', { 'acp.by': by, 'acp.requested_model': opts.model ?? '' })
   return withAcp(by, entry, opts, deadline, async (ctx) => {
+    const sessSpan = otelSpan('acp.session', { 'acp.by': by }, { parent: span.ctx })
     const { session, asAuthError, req } = await acpSession(ctx, opts, by, deadline)
     try {
       const model = await converseModel(
@@ -510,12 +512,84 @@ export async function acpConverse(
         undefined,
         req
       )
-      const r = await pumpTurn(session, promptText, onUpdate, asAuthError, req, signal, by)
+      const r = await pumpTurn(session, promptText, onUpdate, asAuthError, req, signal, by, sessSpan.ctx)
+      sessSpan.end({ 'acp.session_id': session.sessionId })
+      span.end({
+        'acp.model': model,
+        'acp.stop_reason': r.stopReason,
+        'acp.reply_len': r.text.length,
+      })
       return { ...r, model }
+    } catch (err) {
+      sessSpan.end({ error: errMsg(err) }, 'error')
+      span.end({ error: errMsg(err) }, 'error')
+      throw err
     } finally {
       session.dispose()
     }
   })
+}
+
+/** Wrap an update sink so every tool_call opens an `acp.tool` span and
+ *  every subagent_update an `acp.subagent` span (a child session inside
+ *  the turn — the "each subagent, new span" edge). Spans end on the
+ *  update's terminal status; anything still open at turn end flushes
+ *  with the turn's own verdict. */
+function tracedUpdates(
+  onUpdate: (u: SessionUpdate) => void,
+  parent: OtelCtx | undefined
+): { sink: (u: SessionUpdate) => void; flush: (status: 'ok' | 'error') => void } {
+  const open = new Map<string, ReturnType<typeof otelSpan>>()
+  const terminal = (s: unknown): 'ok' | 'error' | undefined =>
+    s === 'completed' ? 'ok' : s === 'failed' ? 'error' : undefined
+  return {
+    sink: (u) => {
+      if (u.sessionUpdate === 'tool_call') {
+        const s = otelSpan(
+          'acp.tool',
+          {
+            'tool.id': u.toolCallId,
+            'tool.title': u.title ?? '',
+            'tool.name': u.name ?? '',
+            'tool.kind': u.kind ?? '',
+          },
+          { parent }
+        )
+        const done = terminal(u.status)
+        if (done === undefined) open.set(u.toolCallId, s)
+        else s.end({ 'tool.status': String(u.status) }, done)
+      } else if (u.sessionUpdate === 'tool_call_update') {
+        const done = terminal(u.status)
+        const s = open.get(u.toolCallId)
+        if (s !== undefined && done !== undefined) {
+          s.end({ 'tool.status': String(u.status) }, done)
+          open.delete(u.toolCallId)
+        }
+      } else if (u.sessionUpdate === 'subagent_update') {
+        // a child session — its own span under this turn's ctx; ended
+        // with the turn (subagent updates carry no terminal status)
+        if (!open.has(`sub:${u.sessionId}`)) {
+          open.set(
+            `sub:${u.sessionId}`,
+            otelSpan(
+              'acp.subagent',
+              {
+                'sub.session_id': u.sessionId,
+                'sub.title': u.title ?? '',
+                'sub.role': u.description ?? '',
+              },
+              { parent }
+            )
+          )
+        }
+      }
+      onUpdate(u)
+    },
+    flush: (status) => {
+      for (const [, s] of open) s.end({ 'tool.status': 'turn_end' }, status)
+      open.clear()
+    },
+  }
 }
 
 /** The prompt→updates loop shared by one-shot and pooled turns. */
@@ -526,8 +600,10 @@ async function pumpTurn(
   asAuthError: (err: unknown) => never,
   req: () => SendRequestOptions,
   signal: AbortSignal | undefined,
-  by: string
+  by: string,
+  parent?: OtelCtx
 ): Promise<{ stopReason: StopReason; text: string }> {
+  const traced = tracedUpdates(onUpdate, parent)
   const turn = session.prompt(promptText, req()).catch(asAuthError)
   // the turn's completion also queues as a `stop` for nextUpdate —
   // racing keeps a prompt-level failure from hanging the pump
@@ -544,20 +620,26 @@ async function pumpTurn(
     signal?.addEventListener('abort', drop, { once: true })
   })
   let text = ''
-  for (;;) {
-    const msg: ActiveSessionMessage = await Promise.race([
-      session.nextUpdate(),
-      stopP,
-      aborted,
-    ])
-    if (msg.kind === 'stop') {
-      return { stopReason: msg.stopReason, text }
+  try {
+    for (;;) {
+      const msg: ActiveSessionMessage = await Promise.race([
+        session.nextUpdate(),
+        stopP,
+        aborted,
+      ])
+      if (msg.kind === 'stop') {
+        traced.flush('ok')
+        return { stopReason: msg.stopReason, text }
+      }
+      traced.sink(msg.update)
+      if (msg.update.sessionUpdate === 'agent_message_chunk') {
+        const c = msg.update.content
+        if (c.type === 'text') text += c.text
+      }
     }
-    onUpdate(msg.update)
-    if (msg.update.sessionUpdate === 'agent_message_chunk') {
-      const c = msg.update.content
-      if (c.type === 'text') text += c.text
-    }
+  } catch (err) {
+    traced.flush('error')
+    throw err
   }
 }
 
@@ -770,7 +852,10 @@ export async function acpPooledTurn(
     span.end(a, status)
   }
   try {
+    const sessSpan = otelSpan('acp.session', { 'acp.by': by }, { parent: span.ctx })
     const session = await acpSessionOpen(ctx, opts, peer.asAuthError, req)
+    const endSession = (a: Record<string, string | number | boolean> = {}): void =>
+      sessSpan.end({ 'acp.session_id': session.sessionId, ...a })
     try {
       const configOptions = session.newSessionResponse.configOptions ?? []
       const model = await resolveTurnModel(
@@ -791,8 +876,10 @@ export async function acpPooledTurn(
         peer.asAuthError,
         req,
         turn.signal,
-        by
+        by,
+        sessSpan.ctx
       )
+      endSession()
       end({
         'acp.session_id': session.sessionId,
         'acp.model': model,
@@ -801,6 +888,7 @@ export async function acpPooledTurn(
       })
       return { ...r, model }
     } catch (err) {
+      endSession({ error: errMsg(err) })
       end(
         { 'acp.session_id': session.sessionId, error: errMsg(err) },
         'error'

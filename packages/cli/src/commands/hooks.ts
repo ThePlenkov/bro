@@ -79,6 +79,7 @@ import { markerLive, ownerTag } from './proc-owner.ts'
 import { runGuards, type GuardConfig, type GuardJudgeInput } from '@broject/guard'
 import { GUARD_PROBES } from '../guard-probes.ts'
 import { appendRow, judgeConfig, judgeFacade } from '@broject/judge'
+import { otelSpan } from '@broject/providers'
 import {
   hooksDir,
   previousTraceFile,
@@ -865,9 +866,14 @@ function perfFile(sessionId: string): string | null {
 let perfBuf: PerfRow[] | null = null
 
 /** Build the collector's callback: stamps probe + event onto each
- *  timing row and buffers it for the event-end flush. */
+ *  timing row and buffers it for the event-end flush. Also opens the
+ *  probe's otel span — created inline with the probe call and ended
+ *  when rows arrive, so span duration ≈ probe duration (spec
+ *  bro-xeozo telemetry). */
 function probeReporter(event: string, probe: string): ProbeReporter {
+  const span = otelSpan(`hook.probe.${probe}`, { 'hook.event': event })
   return (rows) => {
+    span.end({ 'hook.rows': rows.length })
     if (!perfBuf) {
       return
     }
@@ -1778,9 +1784,15 @@ export async function runHooksCommand(argv: string[]): Promise<void> {
   }
   perfBuf = []
   const t0 = Date.now()
+  const evSpan = otelSpan('hook.event', {
+    'hook.event': event,
+    'hook.session': typeof input.session_id === 'string' ? input.session_id : '',
+  })
   try {
     await dispatchHook(event, raw, input)
+    evSpan.end()
   } catch {
+    evSpan.end({}, 'error')
     // hooks fail open — a bro bug must never break the session.
     // A permission hook that already answered returned above; this
     // covers a throw before that answer.
