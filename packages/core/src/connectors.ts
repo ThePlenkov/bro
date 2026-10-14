@@ -317,9 +317,12 @@ const beadsConnector: Connector = {
           return []
         }
         // foreign claims are ambient — the session can't close beads it
-        // doesn't own, so they stay passive context. Ownership is the
-        // store's assignee, not the marker: a refused claim still arms
-        // the id, and a bead held by another actor is never ours to close
+        // doesn't own, so they must never reach the stop output of a
+        // session that armed nothing: armedHint shows only to 'task'-
+        // armed sessions, and parallelWork already names them at session
+        // start (bro-hpb35). Ownership is the store's assignee, not the
+        // marker: a refused claim still arms the id, and a bead held by
+        // another actor is never ours to close
         const own = claimed.filter((r) => isOwnClaim(r, mine, me))
         const foreign = claimed.filter((r) => !isOwnClaim(r, mine, me))
         const fmt = (r: { id: string; title?: string }): string =>
@@ -339,7 +342,7 @@ const beadsConnector: Connector = {
         if (foreign.length > 0) {
           out.push({
             aspect: 'task',
-            passive: `bro: claimed beads open: ${foreign.slice(0, 5).map(fmt).join(', ')}`,
+            armedHint: `bro: claimed beads open: ${foreign.slice(0, 5).map(fmt).join(', ')}`,
           })
         }
         return out

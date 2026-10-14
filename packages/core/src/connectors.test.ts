@@ -415,16 +415,20 @@ describe('beads claim ownership', () => {
     })
   })
 
-  test('stopGate blocks only on verified own claims; refused stays passive', async () => {
+  test('stopGate blocks only on verified own claims; refused stays an armed hint', async () => {
     await withClaimRepo(opts, async (dir) => {
       const task = (await stopGateContributions({ dir, sessionId: 's1' })).filter(
         (g) => g.aspect === 'task'
       )
       const block = task.find((g) => g.block)
-      const passive = task.find((g) => g.passive)
+      const hint = task.find((g) => g.armedHint)
       assert.match(block?.block ?? '', /\bb2\b/)
       assert.doesNotMatch(block?.block ?? '', /\bb1\b/)
-      assert.match(passive?.passive ?? '', /\bb1\b/)
+      assert.match(hint?.armedHint ?? '', /\bb1\b/)
+      // ambient claims are armed-session context — nothing 'task' emits
+      // is passive, so a session that armed no marker never hears about
+      // them at the stop gate (bro-hpb35)
+      assert.ok(task.every((g) => g.passive === undefined))
     })
   })
 })

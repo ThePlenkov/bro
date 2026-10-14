@@ -45,11 +45,18 @@ const threwNotExited = (match: RegExp) => (e: unknown) =>
 
 describe('runSyncCommand', () => {
   // artifactDirs reads BRO_DEBT_DIR — an ambient pin would add a second
-  // sync dir outside the fixture and make assertions env-dependent
+  // sync dir outside the fixture and make assertions env-dependent.
+  // Same for BEADS_DIR: bd resolves it before .beads discovery, so a
+  // pinned shared store (loop workers always carry one) routes the
+  // fixture's replication leg at the caller's real store and fails for
+  // the wrong reason.
   const ambientDebtDir = process.env.BRO_DEBT_DIR
+  const ambientBeadsDir = process.env.BEADS_DIR
   delete process.env.BRO_DEBT_DIR
+  delete process.env.BEADS_DIR
   after(() => {
     if (ambientDebtDir !== undefined) process.env.BRO_DEBT_DIR = ambientDebtDir
+    if (ambientBeadsDir !== undefined) process.env.BEADS_DIR = ambientBeadsDir
   })
 
   test('outside a worktree it throws — never exits the host process', () => {

@@ -11,6 +11,7 @@ import { join, resolve } from 'node:path'
 import {
   CLI_DIST,
   e2eEnv,
+  FAKE_BEAD,
   git,
   initRepo,
   installFakeBd,
@@ -116,6 +117,44 @@ describe('hooks e2e — stop gate', () => {
       assert.equal(r.code, 0)
       assert.doesNotMatch(r.stdout, BLOCK)
       assert.match(r.stdout, /bro work leave/)
+    })
+  })
+
+  test('foreign claimed beads never reach an unarmed session — armed task gets the hint', () => {
+    const f = hookFixture()
+    inside(f.main, f.root, () => {
+      const { binDir, db } = installFakeBd(f.root, [
+        {
+          ...FAKE_BEAD,
+          id: 'fx-9',
+          title: 'held elsewhere',
+          status: 'in_progress',
+          assignee: 'other-agent',
+        },
+      ])
+      const env = {
+        PATH: `${binDir}:${process.env.PATH}`,
+        FAKE_BD_DB: db,
+        XDG_STATE_HOME: join(f.root, 'xdg-state'),
+      }
+      const stop = (session_id: string) =>
+        runCli(['hooks', 'stop'], {
+          cwd: f.main,
+          input: JSON.stringify({ session_id }),
+          env,
+        })
+      // bro-hpb35: ambient claims belong to the session-start parallel
+      // probe — a session that armed nothing hears nothing at stop
+      const fresh = stop('s-fresh')
+      assert.equal(fresh.code, 0)
+      assert.doesNotMatch(fresh.stdout, /claimed beads/)
+      // the marker's owner still sees the foreign claim as a hint —
+      // its `work enter fx-9` was refused by the other actor
+      arm(f, 's1', 'task', 'fx-9')
+      const armed = stop('s1')
+      assert.equal(armed.code, 0)
+      assert.doesNotMatch(armed.stdout, BLOCK)
+      assert.match(armed.stdout, /claimed beads open: fx-9/)
     })
   })
 })
