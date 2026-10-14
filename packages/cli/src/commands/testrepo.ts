@@ -12,6 +12,7 @@ import {
   mkdtempSync,
   readFileSync,
   readdirSync,
+  renameSync,
   rmSync,
   writeFileSync,
 } from 'node:fs'
@@ -485,12 +486,34 @@ export const FAKE_BEAD = {
  *  round, a PR closed under the gate's feet, a merge that reports a
  *  queue hold). */
 const FAKE_HOST_PLUGIN = `// e2e fixture — a review-host connector driven by host.json beside this file
-import { readdirSync, readFileSync, writeFileSync } from 'node:fs'
+import { mkdirSync, readdirSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 const STATE = join(dirname(fileURLToPath(import.meta.url)), 'host.json')
 const load = () => JSON.parse(readFileSync(STATE, 'utf8'))
-const save = (s) => writeFileSync(STATE, JSON.stringify(s))
+// host.json is shared by this process and every detached worker — a
+// read-modify-write needs a cross-process critical section (mkdir is
+// atomic), and every write goes through tmp+rename so a reader never
+// sees a torn file. Without it the batch e2e flakes: a stale save
+// resurrects a merged PR and concurrent spawns clobber each other's
+// events.
+const LOCK = STATE + '.lock'
+const save = (s) => {
+  const tmp = STATE + '.tmp.' + process.pid
+  writeFileSync(tmp, JSON.stringify(s))
+  renameSync(tmp, STATE)
+}
+const withState = (fn) => {
+  for (let i = 0; ; i++) {
+    try { mkdirSync(LOCK); break } catch (e) {
+      if (e.code !== 'EEXIST') throw e
+      if (i > 2000) throw new Error('host state lock wedged')
+      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 5)
+    }
+  }
+  try { const s = load(); const r = fn(s); save(s); return r }
+  finally { rmSync(LOCK, { recursive: true }) }
+}
 const facade = {
   resolveRepo: () => 'o/r',
   prLink: (_repo, pr) => '[#' + pr + '](https://example.test/o/r/pull/' + pr + ')',
@@ -511,8 +534,7 @@ const facade = {
     return s.prOpened ? [s.pr ?? 7] : []
   },
   parsePrRef: () => null,
-  prMeta: (t) => {
-    const s = load()
+  prMeta: (t) => withState((s) => {
     // readQueues.meta — the same mid-flight race scripting as
     // readQueues.checks: each call shifts one partial-meta overlay, so a
     // test can script 'OPEN + head aaa at the gate, MERGED (or a moved
@@ -521,7 +543,6 @@ const facade = {
     const mq = s.readQueues?.meta
     if (Array.isArray(mq) && mq.length > 0) {
       s.readQueues.meta = mq.slice(1)
-      save(s)
       over = mq[0] ?? {}
     }
     const per = s.prs
@@ -538,11 +559,10 @@ const facade = {
       mergeState: per.mergeState ?? s.mergeState ?? 'CLEAN',
       ...over,
     }
-  },
+  }),
   mergedPrInfo: () => { throw new Error('not merged') },
   mergedPrs: () => [],
-  checks: (t) => {
-    const s = load()
+  checks: (t) => withState((s) => {
     // mid-poll snapshot of the watch-marker dir — a waitForGate caller
     // that armed watch: holds the marker for the fetch's duration, so
     // the loop's gate wait is observable exactly like act wait's
@@ -553,7 +573,6 @@ const facade = {
           .filter((f) => f.endsWith('.json'))
           .map((f) => ({ file: f, marker: JSON.parse(readFileSync(join(wd, f), 'utf8')) }))
       )
-      save(s)
     } catch {}
     // a readQueues.checks list overrides everything — each call shifts
     // one entry, so a test can script 'red at the gate snapshot, green
@@ -561,7 +580,6 @@ const facade = {
     const cq = s.readQueues?.checks
     if (Array.isArray(cq) && cq.length > 0) {
       s.readQueues.checks = cq.slice(1)
-      save(s)
       return cq[0]
     }
     // per-PR checks — a mapped entry carries its own check list (with a
@@ -575,15 +593,13 @@ const facade = {
           (s.events ?? []).some((e) => e.merge === p.clearAfterMerge)
         ) {
           p.checks = []
-          save(s)
         }
         return p.checks ?? s.checks ?? []
       }
     }
     return s.checks ?? []
-  },
-  checkAnnotations: (_repo, sha, names) => {
-    const s = load()
+  }),
+  checkAnnotations: (_repo, sha, names) => withState((s) => {
     // record the sha each probe targeted — a fixer re-probe on a moved
     // head must read the LIVE sha, never the gate's stale one
     s.annotationReads = (s.annotationReads ?? []).concat([sha])
@@ -595,14 +611,13 @@ const facade = {
       s.readQueues.annotations = aq.slice(1)
       all = aq[0] ?? {}
     }
-    save(s)
     // names-given callers read exactly that set — an unrequested check
     // never appears (absent key = no annotations endpoint, like gh).
     // An explicit null is the fake's 'fetch failed' — it passes through
     // as sast_unknown; an absent name is a clean read
     const keys = names ? [...names] : Object.keys(all)
     return new Map(keys.map((k) => [k, Object.hasOwn(all, k) ? all[k]! : 0]))
-  },
+  }),
   reviewedShas: () => load().reviewedShas ?? ['abc123'],
   reviewThreads: async () => load().threads ?? [],
   resolveThread: () => {},
@@ -627,59 +642,47 @@ const facade = {
     }
     return s.prBody ?? ''
   },
-  updatePrBody: (t, body) => {
-    const s = load()
+  updatePrBody: (t, body) => withState((s) => {
     if (s.prs) {
       const p = Object.values(s.prs).find((p) => p.number === t.pr)
       if (p) {
         p.body = body
-        save(s)
         return
       }
     }
     s.prBody = body
-    save(s)
-  },
+  }),
   createLabel: () => {},
-  addLabel: (t, label) => {
-    const s = load()
+  addLabel: (t, label) => withState((s) => {
     if (s.prs) {
       const p = Object.values(s.prs).find((p) => p.number === t.pr)
       if (p) {
         p.labels = (p.labels ?? []).concat(label)
-        save(s)
         return
       }
     }
     s.labels = (s.labels ?? []).concat(label)
-    save(s)
-  },
-  removeLabel: (t, label) => {
-    const s = load()
+  }),
+  removeLabel: (t, label) => withState((s) => {
     if (s.prs) {
       const p = Object.values(s.prs).find((p) => p.number === t.pr)
       if (p) {
         p.labels = (p.labels ?? []).filter((l) => l !== label)
-        save(s)
         return
       }
     }
     s.labels = (s.labels ?? []).filter((l) => l !== label)
-    save(s)
-  },
-  retargetPr: (t, base) => {
-    const s = load()
+  }),
+  retargetPr: (t, base) => withState((s) => {
     s.retargets = (s.retargets ?? []).concat([{ pr: t.pr, base }])
     if (s.prs) {
       for (const p of Object.values(s.prs)) {
         if (p.number === t.pr) p.baseRef = base
       }
     }
-    save(s)
     return true
-  },
-  updateBranch: (t) => {
-    const s = load()
+  }),
+  updateBranch: (t) => withState((s) => {
     if (s.updateFails) return false
     s.events = (s.events ?? []).concat([{ update: t.pr }])
     if (s.prs) {
@@ -687,17 +690,14 @@ const facade = {
       if (p) {
         p.mergeState = 'CLEAN'
         p.headSha = 'updated-' + t.pr
-        save(s)
         return true
       }
     }
     s.mergeState = 'CLEAN'
     s.headSha = 'updated-' + t.pr
-    save(s)
     return true
-  },
-  mergePr: (t) => {
-    const s = load()
+  }),
+  mergePr: (t) => withState((s) => {
     s.merges = (s.merges ?? 0) + 1
     s.events = (s.events ?? []).concat([{ merge: t.pr }])
     // merge order is asserted in stack e2e — per-layer must go bottom→top
@@ -708,14 +708,12 @@ const facade = {
       const p = Object.values(s.prs).find((p) => p.number === t.pr)
       if (p) {
         p.state = p.mergeResult ?? s.mergeResult ?? 'MERGED'
-        save(s)
         return p.state
       }
     }
     s.prState = s.mergeResult ?? 'MERGED'
-    save(s)
     return s.prState
-  },
+  }),
 }
 // the stacks facade — host.json cascade: {retarget, rebase} scripts
 // platform ownership for every PR-carrying member (GitLab-style
@@ -736,8 +734,7 @@ const stacksFacade = {
     const id = load().stacks?.[m.branch]
     return id === undefined ? null : { id }
   },
-  publish: (members) => {
-    const s = load()
+  publish: (members) => withState((s) => {
     // publishGap scripts the unproven-publish shape — link "ran" but
     // the membership readback reports nothing, so the stack registry
     // stays empty and the verb returns null
@@ -750,9 +747,8 @@ const stacksFacade = {
     for (const m of members) {
       s.stacks[m.branch] = id
     }
-    save(s)
     return { id, size: members.length }
-  },
+  }),
 }
 export default {
   name: 'fakehost-cmd',
@@ -777,7 +773,27 @@ if (!STATE || !promptFile) {
 }
 const scenario = process.env.E2E_SCENARIO || 'land'
 const load = () => JSON.parse(fs.readFileSync(STATE, 'utf8'))
-const save = (s) => fs.writeFileSync(STATE, JSON.stringify(s))
+// same host.json contract as the plugin: workers are detached and the
+// CLI probes mid-run, so mutations serialize on a mkdir lock and writes
+// go through tmp+rename — an unlocked read-modify-write was the batch
+// e2e's flake source (lost spawn events, resurrected PR state)
+const LOCK = STATE + '.lock'
+const save = (s) => {
+  const tmp = STATE + '.tmp.' + process.pid
+  fs.writeFileSync(tmp, JSON.stringify(s))
+  fs.renameSync(tmp, STATE)
+}
+const withState = (fn) => {
+  for (let i = 0; ; i++) {
+    try { fs.mkdirSync(LOCK); break } catch (e) {
+      if (e.code !== 'EEXIST') throw e
+      if (i > 2000) throw new Error('host state lock wedged')
+      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 5)
+    }
+  }
+  try { const s = load(); const r = fn(s); save(s); return r }
+  finally { fs.rmSync(LOCK, { recursive: true }) }
+}
 const prompt = fs.readFileSync(promptFile, 'utf8')
 const branch = execFileSync('git', ['branch', '--show-current'], { encoding: 'utf8' }).trim()
 // stdout line — proves the loop's spawn tee lands agent output in the
@@ -818,46 +834,40 @@ const delayMs = Number((load().delays ?? {})[process.env.BRO_BEAD_ID] ?? 0)
 if (delayMs > 0) Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, delayMs)
 if (prompt.includes('review-threads')) {
   // fix round — resolve the threads and stop
-  const s = load()
-  s.threads = []
-  save(s)
+  withState((s) => { s.threads = [] })
   log('resolved threads')
   process.exit(0)
 }
 if (prompt.includes('merge conflicts')) {
   // rebase round — clear the conflict and stop
-  const s = load()
-  s.mergeable = 'MERGEABLE'
-  if (s.prs?.[branch]) s.prs[branch].mergeable = 'MERGEABLE'
-  s.events = (s.events ?? []).concat([{ rebase: process.env.BRO_BEAD_ID || null, branch }])
-  save(s)
+  withState((s) => {
+    s.mergeable = 'MERGEABLE'
+    if (s.prs?.[branch]) s.prs[branch].mergeable = 'MERGEABLE'
+    s.events = (s.events ?? []).concat([{ rebase: process.env.BRO_BEAD_ID || null, branch }])
+  })
   log('rebased onto base')
   process.exit(0)
 }
 if (prompt.includes('CI fixer')) {
   // ci-fail round — clear the failing checks and stop. fixerNoop leaves
   // them red: the drive dedup test needs an ok-exit with nothing fixed.
-  const s = load()
-  if (s.fixerNoop === true) {
-    log('left failing (noop)')
-  } else {
+  const cleared = withState((s) => {
+    if (s.fixerNoop === true) return false
     s.checks = []
     if (s.prs?.[branch]) s.prs[branch].checks = []
-    save(s)
-    log('cleared checks')
-  }
+    return true
+  })
+  log(cleared ? 'cleared checks' : 'left failing (noop)')
   process.exit(0)
 }
 if (prompt.includes('SAST fixer')) {
   // sast round — clear the annotation counts and stop
-  const s = load()
-  if (s.fixerNoop === true) {
-    log('left findings (noop)')
-  } else {
+  const cleared = withState((s) => {
+    if (s.fixerNoop === true) return false
     s.annotations = {}
-    save(s)
-    log('cleared annotations')
-  }
+    return true
+  })
+  log(cleared ? 'cleared annotations' : 'left findings (noop)')
   process.exit(0)
 }
 switch (scenario) {
@@ -865,10 +875,10 @@ switch (scenario) {
     fs.writeFileSync('work.txt', 'did the thing\\n')
     execFileSync('git', ['add', '-A'])
     execFileSync('git', ['commit', '-qm', 'feat: the thing'])
-    const s = load()
-    s.events = (s.events ?? []).concat([{ spawn: process.env.BRO_BEAD_ID || null, branch }])
-    markPrOpened(s)
-    save(s)
+    withState((s) => {
+      s.events = (s.events ?? []).concat([{ spawn: process.env.BRO_BEAD_ID || null, branch }])
+      markPrOpened(s)
+    })
     log('opened pr')
     break
   }
@@ -885,12 +895,12 @@ switch (scenario) {
       execFileSync('git', ['add', '-A'])
       execFileSync('git', ['commit', '-qm', 'fix: ' + id + ' work (' + id + ')'])
     }
-    const s = load()
-    s.events = (s.events ?? []).concat([
-      { spawn: process.env.BRO_BEAD_ID || null, ids: ids.join(','), branch },
-    ])
-    markPrOpened(s)
-    save(s)
+    withState((s) => {
+      s.events = (s.events ?? []).concat([
+        { spawn: process.env.BRO_BEAD_ID || null, ids: ids.join(','), branch },
+      ])
+      markPrOpened(s)
+    })
     log('opened pr for ' + ids.join(','))
     break
   }
@@ -1076,10 +1086,29 @@ export function installFakeDolt(dir: string): string {
 }
 
 export function writeHostState(state: string, patch: Record<string, unknown>): void {
-  const cur = existsSync(state)
-    ? (JSON.parse(readFileSync(state, 'utf8')) as Record<string, unknown>)
-    : {}
-  writeFileSync(state, JSON.stringify({ ...cur, ...patch }))
+  // the same mkdir lock + tmp+rename the embedded fixtures serialize on
+  // — a mid-run scripted write must not lose to a worker's mutation
+  const lock = `${state}.lock`
+  for (let i = 0; ; i++) {
+    try {
+      mkdirSync(lock)
+      break
+    } catch (e) {
+      if ((e as NodeJS.ErrnoException).code !== 'EEXIST') throw e
+      if (i > 2000) throw new Error('host state lock wedged')
+      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 5)
+    }
+  }
+  try {
+    const cur = existsSync(state)
+      ? (JSON.parse(readFileSync(state, 'utf8')) as Record<string, unknown>)
+      : {}
+    const tmp = `${state}.tmp.${process.pid}`
+    writeFileSync(tmp, JSON.stringify({ ...cur, ...patch }))
+    renameSync(tmp, state)
+  } finally {
+    rmSync(lock, { recursive: true })
+  }
 }
 
 // --- drive e2e scaffolding ------------------------------------------------
