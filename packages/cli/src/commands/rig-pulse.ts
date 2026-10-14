@@ -40,6 +40,7 @@ import {
 } from '@broject/core'
 import { isOrchestratorSession } from './watch-pulse.ts'
 import { rigSection, type RigConfig } from './rig-config.ts'
+import { SELF_ENTRY } from './self-entry.ts'
 
 export interface RigPulseMarker {
   /** the resolved rig checkout — `bro rig watch --repo` on rearm */
@@ -218,23 +219,24 @@ export function rigPulseRearm(
 }
 
 /** Fire-and-forget the bounded window — detached, unref'd, stdio
- *  ignored, `process.argv[1]` re-runs this CLI entry so npx/dist/source
- *  installs all re-spawn themselves. The marker's repo rides `--repo`
- *  explicitly — the child never re-derives the target from cwd. */
+ *  ignored, `SELF_ENTRY` re-runs this CLI entry so npx/dist/source
+ *  installs all re-spawn themselves (a relative argv[1] would resolve
+ *  against the child's cwd and never find the CLI). The marker's repo
+ *  rides `--repo` explicitly — the child never re-derives the target
+ *  from cwd. */
 export function spawnRigPulse(
   dir: string,
   repo: string,
   everySec: number,
   forSec: number
 ): number | null {
-  const entry = process.argv[1]
   // the marker is repo-local writable state — before its `repo` can
   // steer the child it must name a worktree of THIS repo: an absolute
   // path whose common dir is the marker's own. A foreign checkout's
   // refresh commands would otherwise run under our cadence (CWE-73).
   const common = gitCommonDir(dir)
   if (
-    entry === undefined ||
+    SELF_ENTRY === null ||
     common === null ||
     !isAbsolute(repo) ||
     !existsSync(repo) ||
@@ -246,7 +248,7 @@ export function spawnRigPulse(
   try {
     const child = spawn(
       process.execPath,
-      [entry, 'rig', 'watch', '--repo', repo, '--every', String(everySec), '--for', String(forSec)],
+      [SELF_ENTRY, 'rig', 'watch', '--repo', repo, '--every', String(everySec), '--for', String(forSec)],
       { cwd: repo, detached: true, stdio: 'ignore' }
     )
     child.unref()
