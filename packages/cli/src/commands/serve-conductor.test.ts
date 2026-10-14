@@ -211,6 +211,103 @@ describe('serve /v1/* — the conductor plane', () => {
     }
   })
 
+  test('a composite <base>-<level> id applies model + thought_level together', async () => {
+    // devin's swe-2 family: -medium/-high/-max are the thinking dimension,
+    // not catalog ids — 'swe-2-max' = model swe-2-high + thought_level max
+    const DEVIN_OPTIONS: SessionConfigOption[] = [
+      {
+        id: 'model',
+        name: 'Model',
+        category: 'model',
+        type: 'select',
+        currentValue: 'swe-2-high',
+        options: [
+          { value: 'swe-2-high', name: 'SWE-2 High' },
+          { value: 'swe-1-7-lightning-medium', name: 'Lightning' },
+        ],
+      },
+      {
+        id: 'thought_level',
+        name: 'Thinking',
+        category: 'thought_level',
+        type: 'select',
+        currentValue: 'high',
+        options: [
+          { value: 'medium', name: 'medium' },
+          { value: 'high', name: 'high' },
+          { value: 'max', name: 'max' },
+        ],
+      },
+    ]
+    const fake = fakeAcpAgent({ replyText: 'ok', configOptions: DEVIN_OPTIONS })
+    const { url, close } = await listen(
+      deps({ provider: conductorProxy(CFG, { acp: { peer: fake.app } }) })
+    )
+    try {
+      const r = await fetch(`${url}/v1/messages`, {
+        method: 'POST',
+        headers: { ...auth, 'content-type': 'application/json' },
+        body: JSON.stringify({
+          model: 'dv-acp/swe-2-max',
+          messages: [{ role: 'user', content: 'x' }],
+          stream: false,
+        }),
+      })
+      assert.equal(r.status, 200)
+      assert.deepEqual(fake.configSets, [
+        { configId: 'model', value: 'swe-2-high' },
+        { configId: 'thought_level', value: 'max' },
+      ])
+      assert.equal((await r.json()).model, 'swe-2-max')
+    } finally {
+      await close()
+    }
+  })
+
+  test('a spawn-pinned composite already live skips the set calls', async () => {
+    const LIVE: SessionConfigOption[] = [
+      {
+        id: 'model',
+        name: 'Model',
+        category: 'model',
+        type: 'select',
+        currentValue: 'swe-2-high',
+        options: [{ value: 'swe-2-high', name: 'SWE-2 High' }],
+      },
+      {
+        id: 'thought_level',
+        name: 'Thinking',
+        category: 'thought_level',
+        type: 'select',
+        currentValue: 'max',
+        options: [
+          { value: 'medium', name: 'm' },
+          { value: 'max', name: 'x' },
+        ],
+      },
+    ]
+    const fake = fakeAcpAgent({ replyText: 'ok', configOptions: LIVE })
+    const { url, close } = await listen(
+      deps({ provider: conductorProxy(CFG, { acp: { peer: fake.app } }) })
+    )
+    try {
+      const r = await fetch(`${url}/v1/messages`, {
+        method: 'POST',
+        headers: { ...auth, 'content-type': 'application/json' },
+        body: JSON.stringify({
+          model: 'dv-acp/swe-2-max',
+          messages: [{ role: 'user', content: 'x' }],
+          stream: false,
+        }),
+      })
+      assert.equal(r.status, 200)
+      assert.deepEqual(fake.configSets, [])
+      assert.equal((await r.json()).model, 'swe-2-max')
+    } finally {
+      await close()
+    }
+  })
+
   test('stream:false answers a buffered anthropic message', async () => {
     const fake = fakeAcpAgent({ replyText: 'plain', configOptions: [MODEL_OPTION] })
     const { url, close } = await listen(

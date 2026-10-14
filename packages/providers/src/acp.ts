@@ -170,29 +170,45 @@ async function applyModel(
       `${by}: model '${model}' requested but the acp agent advertises no model config option — refusing to run an unpinned model`
     )
   }
+  return applyOption(ctx, sessionId, modelOpt, model, by, req)
+}
+
+/** `session/set_config_option` on one advertised option + verify the
+ *  agent's reported currentValue. A refused set is config, a cancelled
+ *  or dropped transport is availability. For the model option a family
+ *  swap is laundering — asked jev, served qwen must never parse; other
+ *  categories must report exactly what was asked. */
+async function applyOption(
+  ctx: ClientContext,
+  sessionId: string,
+  opt: SessionConfigOption,
+  value: string,
+  by: string,
+  req: () => SendRequestOptions
+): Promise<string> {
   const res = await ctx
     .request(
       'session/set_config_option',
-      { sessionId, configId: modelOpt.id, value: model },
+      { sessionId, configId: opt.id, value },
       req()
     )
     .catch((err: unknown) => {
-      // only the peer's own error reply is a refusal — a cancel or a
-      // dropped transport is availability, not config: it rides up to
-      // the JudgeUnavailable mapping in acpRoundTrip
       if (err instanceof RequestError && err.code !== REQUEST_CANCELLED) {
-        throw new AcpConfigError(`${by}: agent refused model '${model}' — ${errMsg(err)}`)
+        throw new AcpConfigError(`${by}: agent refused ${opt.category} '${value}' — ${errMsg(err)}`)
       }
       throw err
     })
-  const served = res.configOptions.find((o) => o.id === modelOpt.id)?.currentValue
-  const reported = typeof served === 'string' ? served : model
-  // a family swap is laundering — asked jev, served qwen must never
-  // parse as a typed answer. Same-family drift is canonicalization:
-  // provenance carries the reported id.
-  if (isSystemoneFamily(reported) !== isSystemoneFamily(model)) {
+  const served = res.configOptions.find((o) => o.id === opt.id)?.currentValue
+  const reported = typeof served === 'string' ? served : value
+  if (opt.category === 'model') {
+    if (isSystemoneFamily(reported) !== isSystemoneFamily(value)) {
+      throw new AcpConfigError(
+        `${by}: asked for '${value}' but the agent reports '${reported}' — refusing a model-family swap`
+      )
+    }
+  } else if (reported !== value) {
     throw new AcpConfigError(
-      `${by}: asked for '${model}' but the agent reports '${reported}' — refusing a model-family swap`
+      `${by}: asked for ${opt.category} '${value}' but the agent reports '${reported}'`
     )
   }
   return reported
@@ -615,6 +631,12 @@ export async function acpOpen(
   }
 }
 
+/** Flatten a select config option's (possibly grouped) leaf entries. */
+function selectLeaves(opt: SessionConfigOption): { name: string; value: string }[] {
+  if (opt.type !== 'select') return []
+  return opt.options.flatMap((o) => ('options' in o ? o.options : [o]))
+}
+
 /** Resolve a caller's model name against the agent's advertised select
  *  options: `<provider>/` prefixes strip, exact value/name wins, a unique
  *  `<id>-` prefix match resolves family shorthand — anything else is a
@@ -623,12 +645,12 @@ function resolveModelPin(
   want: string,
   configOptions: SessionConfigOption[],
   by: string
-): string {
+): string | undefined {
   const opt = configOptions.find((o) => o.category === 'model')
   if (opt === undefined || opt.type !== 'select') {
-    return want // no catalog to resolve against — applyModel decides
+    return undefined // no catalog to resolve against — the session check decides
   }
-  const leaves = opt.options.flatMap((o) => ('options' in o ? o.options : [o]))
+  const leaves = selectLeaves(opt)
   const bare = want.includes('/') ? want.slice(want.indexOf('/') + 1) : want
   const exact = leaves.find(
     (o) => o.value === bare || o.name.toLowerCase() === bare.toLowerCase()
@@ -642,7 +664,7 @@ function resolveModelPin(
         prefixed.map((o) => o.value).join(', ')
     )
   }
-  return bare // unknown id — the agent's own refusal names it
+  return undefined
 }
 
 /** One conversational turn on an already-open acp link — session/new,
@@ -666,17 +688,62 @@ export async function acpPooledTurn(
     try {
       const configOptions = session.newSessionResponse.configOptions ?? []
       const want = requestModel ?? opts.model ?? entry.model
-      const model = await converseModel(
-        ctx,
-        session.sessionId,
-        configOptions,
-        by,
-        want === undefined ? undefined : resolveModelPin(want, configOptions, by),
-        // a request pin cannot be honored under a tool-less backend —
-        // the reported label is the configured pin, never the ask
-        opts.model ?? entry.model,
-        req
-      )
+      const resolved = want === undefined ? undefined : resolveModelPin(want, configOptions, by)
+      let model: string
+      if (
+        want !== undefined &&
+        resolved === undefined &&
+        configOptions.some((o) => o.category === 'model')
+      ) {
+        // the agent advertises a catalog that doesn't contain the ask.
+        // Two honest ways it can still be served:
+        //  - composite variant: `<base>-<level>` where <level> is a leaf of
+        //    the agent's thought_level option (devin's swe-2 family maps
+        //    -medium/-high/-max onto the thinking dimension — 'swe-2-max'
+        //    is model swe-2-high + level max, never its own catalog id)
+        //  - spawn-level pin: the provider command's --model already set
+        //    state the session reports back verbatim
+        // (no model option at all → tool-less backend → converseModel
+        // reports the configured label, never throws on a pin)
+        const bare = want.includes('/') ? want.slice(want.indexOf('/') + 1) : want
+        const modelOpt = configOptions.find((o) => o.category === 'model')
+        const thought = configOptions.find((o) => o.category === 'thought_level')
+        const dash = bare.lastIndexOf('-')
+        const level = dash > 0 ? bare.slice(dash + 1) : ''
+        const baseResolved =
+          thought !== undefined && dash > 0 && selectLeaves(thought).some((o) => o.value === level)
+            ? resolveModelPin(bare.slice(0, dash), configOptions, by)
+            : undefined
+        if (modelOpt !== undefined && thought !== undefined && baseResolved !== undefined) {
+          if (modelOpt.currentValue !== baseResolved || thought.currentValue !== level) {
+            await applyOption(ctx, session.sessionId, modelOpt, baseResolved, by, req)
+            await applyOption(ctx, session.sessionId, thought, level, by, req)
+          }
+          model = bare // the asked id names this exact (model, level) pair
+        } else {
+          const cur = modelOpt?.currentValue
+          if (cur !== bare) {
+            throw new AcpConfigError(
+              `${by}: model '${want}' is not in the agent's catalog and the session serves ` +
+                `'${typeof cur === 'string' ? cur : 'unknown'}' — pick a catalog id or pin ` +
+                `the model in the provider command`
+            )
+          }
+          model = bare
+        }
+      } else {
+        model = await converseModel(
+          ctx,
+          session.sessionId,
+          configOptions,
+          by,
+          resolved,
+          // a request pin cannot be honored under a tool-less backend —
+          // the reported label is the configured pin, never the ask
+          opts.model ?? entry.model,
+          req
+        )
+      }
       const r = await pumpTurn(
         session,
         promptText,
