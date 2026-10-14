@@ -96,6 +96,15 @@ export function shellWords(command: string): string[] {
   }
 }
 
+/** The spawned agent's env — `BRO_HOOKS=0` marks the child tree a
+ *  machine backend (spec bro-ddksm): `bro hooks` no-ops there, so a
+ *  session/new serving a disposable conductor/judge turn never pays
+ *  session-start rehydrate probes written for a human session. A
+ *  default, not a lock — an explicit ambient `BRO_HOOKS` wins. */
+export function acpChildEnv(): NodeJS.ProcessEnv {
+  return { BRO_HOOKS: '0', ...process.env }
+}
+
 /** The last bytes of peer stderr — the diagnostic that survives the
  *  process dying mid-turn (rate-limit walls, crash text). */
 function stderrTail(child: ChildProcess): () => string {
@@ -403,7 +412,7 @@ async function withAcp<T>(
     if (bin === undefined) {
       throw new AcpConfigError(`${by}: acp command is empty`)
     }
-    const proc = spawn(bin, argv.slice(1), { stdio: 'pipe' })
+    const proc = spawn(bin, argv.slice(1), { stdio: 'pipe', env: acpChildEnv() })
     child = proc
     // a binary that can't exec is operator misconfig — name it as such
     proc.once('error', (e) => {
@@ -677,6 +686,7 @@ export async function acpOpen(
   const peer = opts.acp?.peer
   let child: ChildProcess | undefined
   let tail = (): string => ''
+  let spawnError: string | undefined
   let conn: Awaited<ReturnType<typeof app.connect>>
   if (peer !== undefined) {
     conn = app.connect(peer)
@@ -689,9 +699,8 @@ export async function acpOpen(
     if (bin === undefined) {
       fail(new AcpConfigError(`${by}: acp command is empty`))
     }
-    const proc = spawn(bin, argv.slice(1), { stdio: 'pipe' })
+    const proc = spawn(bin, argv.slice(1), { stdio: 'pipe', env: acpChildEnv() })
     child = proc
-    let spawnError: string | undefined
     proc.once('error', (e) => {
       spawnError = e.message
     })
@@ -701,10 +710,6 @@ export async function acpOpen(
       Readable.toWeb(proc.stdout) as ReadableStream<Uint8Array>
     )
     conn = app.connect(stream)
-    if (spawnError !== undefined) {
-      child.kill('SIGKILL')
-      fail(new AcpConfigError(`${by}: cannot exec acp command — ${spawnError}`))
-    }
   }
   const close = (): void => {
     conn.close()
@@ -718,6 +723,14 @@ export async function acpOpen(
     return { ctx: conn.agent, signal: conn.signal, close, tail, req, asAuthError }
   } catch (err) {
     close()
+    // spawn's 'error' event is async — a binary that can't exec is only
+    // knowable here, once the handshake on the dead transport has failed
+    if (err instanceof AcpConfigError) {
+      fail(err)
+    }
+    if (spawnError !== undefined) {
+      fail(new AcpConfigError(`${by}: cannot exec acp command — ${spawnError}`))
+    }
     fail(err)
   }
 }

@@ -1,11 +1,12 @@
 import { describe, test } from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import type { AuthMethod, SessionConfigOption } from '@agentclientprotocol/sdk'
 import { JudgeUnavailable } from '@broject/core'
 import type { JudgeQuestion, ProviderEntry } from '@broject/core'
 import {
+  acpChildEnv,
   acpClient,
   acpConverse,
   acpOpen,
@@ -513,6 +514,41 @@ await agent({ name: 'fake' })
     }
   })
 
+  test('the spawned child carries BRO_HOOKS=0 — session hooks no-op in its tree (bro-ddksm)', async () => {
+    const dir = mkdtempSync(join(process.cwd(), '.acp-fake-'))
+    const script = join(dir, 'agent.mjs')
+    const envOut = join(dir, 'env.out')
+    writeFileSync(
+      script,
+      `import { agent, ndJsonStream } from '@agentclientprotocol/sdk'
+import { Readable, Writable } from 'node:stream'
+import { writeFileSync } from 'node:fs'
+const stream = ndJsonStream(Writable.toWeb(process.stdout), Readable.toWeb(process.stdin))
+await agent({ name: 'fake' })
+  .onRequest('initialize', (ctx) => {
+    writeFileSync(${JSON.stringify(envOut)}, String(process.env.BRO_HOOKS))
+    return { protocolVersion: ctx.params.protocolVersion, authMethods: [] }
+  })
+  .connectWith(stream, () => new Promise(() => {}))
+`
+    )
+    try {
+      const peer = await acpOpen(
+        'conductor:fake',
+        { type: 'acp', command: `"${process.execPath}" "${script}"` },
+        {},
+        deadline(30_000)
+      )
+      try {
+        assert.equal(readFileSync(envOut, 'utf8'), '0')
+      } finally {
+        peer.close()
+      }
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
   test('a missing binary is a config error naming the provider', async () => {
     await assert.rejects(
       acpClient(
@@ -522,6 +558,33 @@ await agent({ name: 'fake' })
       ).chat!('p', deadline()),
       /cannot exec acp command/
     )
+  })
+
+  test('acpOpen maps a missing binary to the same config error', async () => {
+    await assert.rejects(
+      acpOpen(
+        'conductor:kilo',
+        { type: 'acp', command: 'definitely-not-a-real-bin-xyz' },
+        {},
+        deadline()
+      ),
+      /cannot exec acp command/
+    )
+  })
+})
+
+describe('acpChildEnv', () => {
+  test('pins BRO_HOOKS=0; an explicit ambient value wins', () => {
+    const prev = process.env.BRO_HOOKS
+    try {
+      delete process.env.BRO_HOOKS
+      assert.equal(acpChildEnv().BRO_HOOKS, '0')
+      process.env.BRO_HOOKS = '1'
+      assert.equal(acpChildEnv().BRO_HOOKS, '1')
+    } finally {
+      if (prev === undefined) delete process.env.BRO_HOOKS
+      else process.env.BRO_HOOKS = prev
+    }
   })
 })
 
