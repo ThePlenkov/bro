@@ -559,6 +559,18 @@ await agent({ name: 'fake' })
       /cannot exec acp command/
     )
   })
+
+  test('acpOpen maps a missing binary to the same config error', async () => {
+    await assert.rejects(
+      acpOpen(
+        'conductor:kilo',
+        { type: 'acp', command: 'definitely-not-a-real-bin-xyz' },
+        {},
+        deadline()
+      ),
+      /cannot exec acp command/
+    )
+  })
 })
 
 describe('acpChildEnv', () => {

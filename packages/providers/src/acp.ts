@@ -686,6 +686,7 @@ export async function acpOpen(
   const peer = opts.acp?.peer
   let child: ChildProcess | undefined
   let tail = (): string => ''
+  let spawnError: string | undefined
   let conn: Awaited<ReturnType<typeof app.connect>>
   if (peer !== undefined) {
     conn = app.connect(peer)
@@ -700,7 +701,6 @@ export async function acpOpen(
     }
     const proc = spawn(bin, argv.slice(1), { stdio: 'pipe', env: acpChildEnv() })
     child = proc
-    let spawnError: string | undefined
     proc.once('error', (e) => {
       spawnError = e.message
     })
@@ -710,10 +710,6 @@ export async function acpOpen(
       Readable.toWeb(proc.stdout) as ReadableStream<Uint8Array>
     )
     conn = app.connect(stream)
-    if (spawnError !== undefined) {
-      child.kill('SIGKILL')
-      fail(new AcpConfigError(`${by}: cannot exec acp command — ${spawnError}`))
-    }
   }
   const close = (): void => {
     conn.close()
@@ -727,6 +723,14 @@ export async function acpOpen(
     return { ctx: conn.agent, signal: conn.signal, close, tail, req, asAuthError }
   } catch (err) {
     close()
+    // spawn's 'error' event is async — a binary that can't exec is only
+    // knowable here, once the handshake on the dead transport has failed
+    if (err instanceof AcpConfigError) {
+      fail(err)
+    }
+    if (spawnError !== undefined) {
+      fail(new AcpConfigError(`${by}: cannot exec acp command — ${spawnError}`))
+    }
     fail(err)
   }
 }
