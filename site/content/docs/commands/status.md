@@ -42,3 +42,57 @@ requires `Authorization: Bearer <token>`.
 | `GET /api/v1/agents/<ref>` | One agent by ID or molecule step |
 | `POST /api/v1/agents` | Spawn an agent |
 | `DELETE /api/v1/agents/<ref>` | Stop an agent |
+| `POST /api/v1/webhooks/github` | GitHub webhook ingest → `github:*` bus topics (HMAC auth, not the session token) |
+| `ALL /v1/*` | The Messages-API provider plane — byte proxy by default, conductor when `BRO_PROVIDER_BACKEND` is set |
+
+### Provider plane — proxy and conductor
+
+`/v1/*` speaks the Anthropic Messages API and authenticates on the
+session token (`Authorization: Bearer` / `x-api-key`), GETs included —
+an unauthenticated call would spend the upstream credential anyway.
+Which engine answers is fixed by the server's own env, never the
+client request:
+
+| Mode | Armed by | What answers |
+| ---- | -------- | ------------ |
+| proxy | `BRO_PROVIDER_API_KEY` (falls back to `ANTHROPIC_API_KEY` / `ANTHROPIC_AUTH_TOKEN`); `BRO_PROVIDER_UPSTREAM` overrides `https://api.anthropic.com` | A byte proxy — SSE frames, `tool_use` blocks, and beta surface pass through untouched while the session token is swapped for the real upstream key |
+| conductor | `BRO_PROVIDER_BACKEND=<name>` naming a `type: "acp"` [provider](/docs/commands/providers) entry | A conducted ACP session — the model is an agent (`devin acp` carries claude-class models through the operator's existing devin auth, no Anthropic key) |
+
+Conductor knobs: `BRO_PROVIDER_MODEL` pins over the entry's `model`
+(the client's requested id is never trusted), `BRO_PROVIDER_CATALOG`
+names a second providers entry whose catalog answers `GET /v1/models`
+for a tool-less backend that advertises nothing, and
+`BRO_PROVIDER_TIMEOUT_MS` sets the per-call deadline (default 120000).
+An unset backend falls back to the proxy; a misnamed or non-`acp`
+entry is a loud startup error, never a silent proxy.
+
+**The conductor path is session-grade.** Every `POST /v1/messages`
+opens a real agent session — `session/new` plus the client's own
+session-start hooks. A conversation turn can afford seconds; a
+client's *internal* model calls cannot. An interactive client must
+point its internal models — the auto-mode permission/safety
+classifier and the small/fast background model (claude-code's
+`ANTHROPIC_SMALL_FAST_MODEL`) — at a direct `api`-kind endpoint: the
+byte-proxy mode above, or the real upstream. Routing them at the
+conductor pays a session spin-up inside a seconds-scale permission
+deadline, so every check fail-closes as "temporarily unavailable" and
+each approval times out.
+
+**Two permission layers, independent of each other:**
+
+- *Conductor layer* — the hosted agent's `session/request_permission`
+  (its native tools) is answered `deny`. The path has no interactive
+  policy surface; the deny renders to the agent as a refusal — it is
+  bro's policy, not a human's rejection.
+- *Client layer* — the `tool_use` blocks that come back execute on the
+  client's own tool surface, gated by the client's own permission
+  machinery — the classifier that must live on a direct `api` provider
+  per above.
+
+**Tools bounce through the client.** The hosted agent carries no
+native tools on this path: the client sends its tool definitions, the
+conductor serializes them into the prompt, and the agent answers
+`<tool_call>{json}</tool_call>`. Each call maps to an anthropic
+`tool_use` block (`stop_reason: "tool_use"`); the client executes it
+with its own tools and returns `tool_result` on the next request —
+proved end to end by a live Bash echo round-trip (`ACP_BRIDGE_OK`).
