@@ -5,6 +5,7 @@
  *  scenario" means (the analyst writes verdict.md where its prompt
  *  points). */
 import assert from 'node:assert/strict'
+import { execFileSync } from 'node:child_process'
 import { describe, test } from 'node:test'
 import {
   existsSync,
@@ -167,6 +168,13 @@ describe('bro self dogfood', () => {
       assert.ok(repo.startsWith(join(fx.xdg, 'bro', 'dogfood')))
       assert.ok(existsSync(join(repo, '.git')))
       assert.ok(existsSync(join(repo, '.beads')))
+      // SDD is armed — a scenario describing the gate must not narrate
+      // a hook that cannot fire; committed so the runner starts clean
+      const cfg = JSON.parse(readFileSync(join(repo, 'bro.config.json'), 'utf8')) as {
+        sdd?: { mode?: string }
+      }
+      assert.equal(cfg.sdd?.mode, 'gate')
+      assert.match(execFileSync('git', ['-C', repo, 'ls-files'], { encoding: 'utf8' }), /^bro\.config\.json$/m)
       // the spawn went through the registry path: repoRoot = scratch,
       // prompt text = the wrapped runner prompt, beadsDir = scratch store
       const spec = spawned[0]!
