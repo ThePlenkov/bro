@@ -1088,6 +1088,29 @@ function acpWireProviders(
   return ids.get(value) ?? []
 }
 
+/** Host:port identity with the loopback aliases folded — `localhost`
+ *  and `[::1]` spell the serve's 127.0.0.1 bind too, and scheme/path
+ *  don't change which process answers the port. Unparseable values
+ *  fall back to the plain string compare. */
+function endpointKey(u: string): string {
+  let t = u.trim()
+  while (t.endsWith('/')) {
+    t = t.slice(0, -1)
+  }
+  for (const cand of [t, `http://${t}`]) {
+    try {
+      const p = new URL(cand)
+      const host = ['localhost', '[::1]', '::1'].includes(p.hostname) ? '127.0.0.1' : p.hostname
+      if (host !== '') {
+        return `${host}:${p.port}`
+      }
+    } catch {
+      // try the scheme-prefixed shape, then the plain string
+    }
+  }
+  return t.toLowerCase()
+}
+
 /** The guardrail row(s): warn when the endpoint is proven acp-backed
  *  AND a client points its base url at it (the classifier rides the
  *  same endpoint — no separate URL knob exists), or when a classifier
@@ -1099,48 +1122,22 @@ function conductorClassifierChecks(dir: string, root: string | null): DoctorChec
       .filter((kv): kv is [string, ProviderEntry & { type: 'acp' }] => kv[1].type === 'acp')
       .map(([n]) => n)
   )
-  const nonAcpNames = new Set(
-    Object.entries(providers)
-      .filter(([, e]) => e.type !== 'acp')
-      .map(([n]) => n)
-  )
+  const nonAcpNames = new Set(Object.keys(providers).filter((n) => !acpNames.has(n)))
   const serve = liveServeEndpoint(dir)
   const backend = serveBackendName(serve)
   const conductor = backend !== undefined && acpNames.has(backend) ? backend : undefined
   const ids = acpWireIds(providers)
   const sources = claudeClientSources(root !== null && root !== dir ? [dir, root] : [dir])
-  /** Host:port identity with the loopback aliases folded — `localhost`
-   *  and `[::1]` spell the serve's 127.0.0.1 bind too, and scheme/path
-   *  don't change which process answers the port. Unparseable values
-   *  fall back to the plain string compare. */
-  const norm = (u: string): string => {
-    const t = u.trim().replace(/\/+$/, '')
-    for (const cand of [t, `http://${t}`]) {
-      try {
-        const p = new URL(cand)
-        const host = ['localhost', '[::1]', '::1'].includes(p.hostname)
-          ? '127.0.0.1'
-          : p.hostname
-        if (host !== '') {
-          return `${host}:${p.port}`
-        }
-      } catch {
-        // try the scheme-prefixed shape, then the plain string
-      }
-    }
-    return t.toLowerCase()
-  }
-
   const warns: DoctorCheck[] = []
   for (const src of sources) {
     const base = src.env['ANTHROPIC_BASE_URL']
     const endpointLive =
-      serve !== undefined && base !== undefined && norm(base) === norm(serve.url)
+      serve !== undefined && base !== undefined && endpointKey(base) === endpointKey(serve.url)
     const hits = classifierPins(src).flatMap(([knob, v]) => {
-      const ps = acpWireProviders(v, ids, acpNames, nonAcpNames)
-      return ps.length === 0
-        ? []
-        : [`${knob}=${v} → ${ps.map((n) => `providers.${n}`).join(', ')}`]
+      const names = acpWireProviders(v, ids, acpNames, nonAcpNames)
+        .map((n) => 'providers.' + n)
+        .join(', ')
+      return names === '' ? [] : [`${knob}=${v} → ${names}`]
     })
     if (endpointLive && conductor !== undefined) {
       warns.push(
