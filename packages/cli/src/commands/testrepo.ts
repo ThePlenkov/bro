@@ -163,8 +163,27 @@ const path = require('node:path')
 const DB = process.env.FAKE_BD_DB
 const fail = (m) => { console.error('fake bd: ' + m); process.exit(1) }
 if (!DB) fail('FAKE_BD_DB unset')
-const load = () => { try { return JSON.parse(fs.readFileSync(DB, 'utf8')) } catch { return { rows: [] } } }
-const save = (db) => fs.writeFileSync(DB, JSON.stringify(db))
+// transient fs hiccups (EMFILE/EAGAIN on a loaded CI runner) must not
+// read as an empty store or kill a bd call — retry first (bro-6u1tu)
+const pause = (ms) => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms)
+const retry = (fn) => {
+  for (let i = 0; ; i++) {
+    try { return fn() } catch (e) {
+      if (i > 40) throw e
+      pause(25)
+    }
+  }
+}
+const load = () => {
+  try { return retry(() => JSON.parse(fs.readFileSync(DB, 'utf8'))) } catch { return { rows: [] } }
+}
+const save = (db) => retry(() => {
+  // tmp+rename — a worker's own 'bd close' racing the loop's calls must
+  // never hand a reader a torn store
+  const tmp = DB + '.tmp.' + process.pid
+  fs.writeFileSync(tmp, JSON.stringify(db))
+  fs.renameSync(tmp, DB)
+})
 const args = process.argv.slice(2)
 const flags = {}
 const pos = []
@@ -452,8 +471,22 @@ export function writeBeads(
   writeFileSync(db, JSON.stringify({ ...extra, rows }))
 }
 
+/** Test-side read with the same CI-jitter shield the embedded fakes
+ *  carry — a transient EMFILE/EAGAIN on a loaded runner must not fail
+ *  an assertion path (bro-6u1tu). ~1s of retries, then it throws. */
+function readJsonRetry(path: string): unknown {
+  for (let i = 0; ; i++) {
+    try {
+      return JSON.parse(readFileSync(path, 'utf8'))
+    } catch (e) {
+      if (i > 40) throw e
+      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 25)
+    }
+  }
+}
+
 export function readBeads(db: string): Array<Record<string, unknown>> {
-  return (JSON.parse(readFileSync(db, 'utf8')) as { rows: Array<Record<string, unknown>> }).rows
+  return (readJsonRetry(db) as { rows: Array<Record<string, unknown>> }).rows
 }
 
 export function bead(db: string, id: string): Record<string, unknown> | undefined {
@@ -490,7 +523,21 @@ import { mkdirSync, readdirSync, readFileSync, renameSync, rmSync, writeFileSync
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 const STATE = join(dirname(fileURLToPath(import.meta.url)), 'host.json')
-const load = () => JSON.parse(readFileSync(STATE, 'utf8'))
+// a transient fs hiccup (EMFILE/EAGAIN on a loaded CI runner) must not
+// read as a dead host — a one-shot load throw settles as 'lookup-error'
+// and parks a member whose PR exists (the batch e2e's '4 landed'
+// flake, bro-6u1tu). ~1s of retries; a deterministic bad state still
+// throws, just late.
+const pause = (ms) => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms)
+const retry = (fn) => {
+  for (let i = 0; ; i++) {
+    try { return fn() } catch (e) {
+      if (i > 40) throw e
+      pause(25)
+    }
+  }
+}
+const load = () => retry(() => JSON.parse(readFileSync(STATE, 'utf8')))
 // host.json is shared by this process and every detached worker — a
 // read-modify-write needs a cross-process critical section (mkdir is
 // atomic), and every write goes through tmp+rename so a reader never
@@ -500,19 +547,21 @@ const load = () => JSON.parse(readFileSync(STATE, 'utf8'))
 const LOCK = STATE + '.lock'
 const save = (s) => {
   const tmp = STATE + '.tmp.' + process.pid
-  writeFileSync(tmp, JSON.stringify(s))
-  renameSync(tmp, STATE)
+  retry(() => {
+    writeFileSync(tmp, JSON.stringify(s))
+    renameSync(tmp, STATE)
+  })
 }
 const withState = (fn) => {
   for (let i = 0; ; i++) {
     try { mkdirSync(LOCK); break } catch (e) {
       if (e.code !== 'EEXIST') throw e
       if (i > 2000) throw new Error('host state lock wedged')
-      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 5)
+      pause(5)
     }
   }
   try { const s = load(); const r = fn(s); save(s); return r }
-  finally { rmSync(LOCK, { recursive: true }) }
+  finally { rmSync(LOCK, { recursive: true, force: true }) }
 }
 const facade = {
   resolveRepo: () => 'o/r',
@@ -772,7 +821,20 @@ if (!STATE || !promptFile) {
   process.exit(1)
 }
 const scenario = process.env.E2E_SCENARIO || 'land'
-const load = () => JSON.parse(fs.readFileSync(STATE, 'utf8'))
+// a transient fs/spawn hiccup (EMFILE/EAGAIN on a loaded CI runner)
+// must not kill the worker — an early exit-1 parks a good bead as a
+// 'crash' (the batch e2e's '4 landed' flake, bro-6u1tu). ~1s of
+// retries; a deterministic failure still dies, just late.
+const pause = (ms) => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms)
+const retry = (fn) => {
+  for (let i = 0; ; i++) {
+    try { return fn() } catch (e) {
+      if (i > 40) throw e
+      pause(25)
+    }
+  }
+}
+const load = () => retry(() => JSON.parse(fs.readFileSync(STATE, 'utf8')))
 // same host.json contract as the plugin: workers are detached and the
 // CLI probes mid-run, so mutations serialize on a mkdir lock and writes
 // go through tmp+rename — an unlocked read-modify-write was the batch
@@ -780,22 +842,25 @@ const load = () => JSON.parse(fs.readFileSync(STATE, 'utf8'))
 const LOCK = STATE + '.lock'
 const save = (s) => {
   const tmp = STATE + '.tmp.' + process.pid
-  fs.writeFileSync(tmp, JSON.stringify(s))
-  fs.renameSync(tmp, STATE)
+  retry(() => {
+    fs.writeFileSync(tmp, JSON.stringify(s))
+    fs.renameSync(tmp, STATE)
+  })
 }
 const withState = (fn) => {
   for (let i = 0; ; i++) {
     try { fs.mkdirSync(LOCK); break } catch (e) {
       if (e.code !== 'EEXIST') throw e
       if (i > 2000) throw new Error('host state lock wedged')
-      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 5)
+      pause(5)
     }
   }
   try { const s = load(); const r = fn(s); save(s); return r }
-  finally { fs.rmSync(LOCK, { recursive: true }) }
+  finally { fs.rmSync(LOCK, { recursive: true, force: true }) }
 }
-const prompt = fs.readFileSync(promptFile, 'utf8')
-const branch = execFileSync('git', ['branch', '--show-current'], { encoding: 'utf8' }).trim()
+const sh = (cmd, args) => retry(() => execFileSync(cmd, args, { encoding: 'utf8' }))
+const prompt = retry(() => fs.readFileSync(promptFile, 'utf8'))
+const branch = sh('git', ['branch', '--show-current']).trim()
 // stdout line — proves the loop's spawn tee lands agent output in the
 // run record's <slug>.log, not the loop's own stream (bro-9lpn3)
 console.log('agent ' + scenario + ' on ' + (process.env.BRO_BEAD_ID || '?'))
@@ -810,7 +875,7 @@ const log = (msg) => {
         : prompt.includes('SAST fixer')
           ? 'sast'
           : 'work'
-  fs.appendFileSync(f, kind + ' ' + msg + '\\n')
+  retry(() => fs.appendFileSync(f, kind + ' ' + msg + '\\n'))
 }
 // register the "opened" PR — the per-branch map (seeded prs: {}) is
 // authoritative when present; the flat prOpened flag feeds the legacy
@@ -872,9 +937,9 @@ if (prompt.includes('SAST fixer')) {
 }
 switch (scenario) {
   case 'land': {
-    fs.writeFileSync('work.txt', 'did the thing\\n')
-    execFileSync('git', ['add', '-A'])
-    execFileSync('git', ['commit', '-qm', 'feat: the thing'])
+    retry(() => fs.writeFileSync('work.txt', 'did the thing\\n'))
+    sh('git', ['add', '-A'])
+    sh('git', ['commit', '-qm', 'feat: the thing'])
     withState((s) => {
       s.events = (s.events ?? []).concat([{ spawn: process.env.BRO_BEAD_ID || null, branch }])
       markPrOpened(s)
@@ -891,9 +956,9 @@ switch (scenario) {
       .filter(Boolean)
     const cover = scenario === 'batch-partial' ? ids.slice(0, 1) : ids
     for (const id of cover) {
-      fs.writeFileSync('work-' + id + '.txt', 'did ' + id + '\\n')
-      execFileSync('git', ['add', '-A'])
-      execFileSync('git', ['commit', '-qm', 'fix: ' + id + ' work (' + id + ')'])
+      retry(() => fs.writeFileSync('work-' + id + '.txt', 'did ' + id + '\\n'))
+      sh('git', ['add', '-A'])
+      sh('git', ['commit', '-qm', 'fix: ' + id + ' work (' + id + ')'])
     }
     withState((s) => {
       s.events = (s.events ?? []).concat([
@@ -905,7 +970,7 @@ switch (scenario) {
     break
   }
   case 'verdict':
-    execFileSync('bd', ['close', process.env.BRO_BEAD_ID, '--reason', 'nothing to ship'])
+    sh('bd', ['close', process.env.BRO_BEAD_ID, '--reason', 'nothing to ship'])
     log('closed bead')
     break
   case 'fail':
@@ -934,7 +999,7 @@ export function installFakeHost(root: string): { state: string; agent: string } 
 }
 
 export function readHostState(state: string): Record<string, unknown> {
-  return JSON.parse(readFileSync(state, 'utf8')) as Record<string, unknown>
+  return readJsonRetry(state) as Record<string, unknown>
 }
 
 export interface HostFixture {
@@ -981,12 +1046,25 @@ export function hostFixture(prefix: string, opts: { loopAgent?: boolean } = {}):
  *  facade's TaskStore ops land on this file instead of `bd`. Only the
  *  surface the bead-close path needs is implemented. */
 const FAKE_TASKS_PLUGIN = `// e2e fixture — a tasks connector driven by tasks.json beside this file
-import { readFileSync, writeFileSync } from 'node:fs'
+import { readFileSync, renameSync, writeFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 const DB = join(dirname(fileURLToPath(import.meta.url)), 'tasks.json')
-const load = () => JSON.parse(readFileSync(DB, 'utf8'))
-const save = (db) => writeFileSync(DB, JSON.stringify(db))
+// same CI-jitter shield as the host fakes — a transient read throw
+// inside tasks.close lands in the merge path's catch (bro-6u1tu)
+const load = () => {
+  for (let i = 0; ; i++) {
+    try { return JSON.parse(readFileSync(DB, 'utf8')) } catch (e) {
+      if (i > 40) throw e
+      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 25)
+    }
+  }
+}
+const save = (db) => {
+  const tmp = DB + '.tmp.' + process.pid
+  writeFileSync(tmp, JSON.stringify(db))
+  renameSync(tmp, DB)
+}
 export default {
   name: 'faketasks-plugin',
   summary: 'e2e fixture',
@@ -1118,14 +1196,12 @@ export function writeHostState(state: string, patch: Record<string, unknown>): v
     }
   }
   try {
-    const cur = existsSync(state)
-      ? (JSON.parse(readFileSync(state, 'utf8')) as Record<string, unknown>)
-      : {}
+    const cur = existsSync(state) ? (readJsonRetry(state) as Record<string, unknown>) : {}
     const tmp = `${state}.tmp.${process.pid}`
     writeFileSync(tmp, JSON.stringify({ ...cur, ...patch }))
     renameSync(tmp, state)
   } finally {
-    rmSync(lock, { recursive: true })
+    rmSync(lock, { recursive: true, force: true })
   }
 }
 

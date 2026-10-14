@@ -103,27 +103,41 @@ const { execFileSync } = require('node:child_process')
 const args = process.argv.slice(2)
 const pf = args[args.length - 1]
 const STATE = process.env.FAKE_HOST_STATE
-const load = () => JSON.parse(fs.readFileSync(STATE, 'utf8'))
+// a transient fs/spawn hiccup (EMFILE/EAGAIN on a loaded CI runner)
+// must not kill the worker — a one-shot crash parks a good bead (the
+// batch e2e's '4 landed' flake, bro-6u1tu)
+const pause = (ms) => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms)
+const retry = (fn) => {
+  for (let i = 0; ; i++) {
+    try { return fn() } catch (e) {
+      if (i > 40) throw e
+      pause(25)
+    }
+  }
+}
+const load = () => retry(() => JSON.parse(fs.readFileSync(STATE, 'utf8')))
 // host.json mutations serialize on the same mkdir lock the fake
 // agent/plugin hold — workers are detached processes, not in-order
 const LOCK = STATE + '.lock'
 const save = (s) => {
   const tmp = STATE + '.tmp.' + process.pid
-  fs.writeFileSync(tmp, JSON.stringify(s))
-  fs.renameSync(tmp, STATE)
+  retry(() => {
+    fs.writeFileSync(tmp, JSON.stringify(s))
+    fs.renameSync(tmp, STATE)
+  })
 }
 const withState = (fn) => {
   for (let i = 0; ; i++) {
     try { fs.mkdirSync(LOCK); break } catch (e) {
       if (e.code !== 'EEXIST') throw e
       if (i > 2000) throw new Error('host state lock wedged')
-      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 5)
+      pause(5)
     }
   }
   try { const s = load(); const r = fn(s); save(s); return r }
-  finally { fs.rmSync(LOCK, { recursive: true }) }
+  finally { fs.rmSync(LOCK, { recursive: true, force: true }) }
 }
-fs.appendFileSync(
+retry(() => fs.appendFileSync(
   path.join(path.dirname(STATE), 'acpworker.log'),
   JSON.stringify({
     args,
@@ -134,14 +148,14 @@ fs.appendFileSync(
     agent: process.env.BRO_AGENT || null,
     model: process.env.BRO_AGENT_MODEL || null,
   }) + '\\n'
-)
-if (fs.readFileSync(pf, 'utf8').includes('review-threads')) {
+))
+if (retry(() => fs.readFileSync(pf, 'utf8')).includes('review-threads')) {
   withState((s) => { s.threads = [] })
   process.exit(0)
 }
-fs.writeFileSync('work.txt', 'did the thing\\n')
-execFileSync('git', ['add', '-A'])
-execFileSync('git', ['commit', '-qm', 'feat: the thing'])
+retry(() => fs.writeFileSync('work.txt', 'did the thing\\n'))
+retry(() => execFileSync('git', ['add', '-A']))
+retry(() => execFileSync('git', ['commit', '-qm', 'feat: the thing']))
 withState((s) => { s.prOpened = true })
 `
 
