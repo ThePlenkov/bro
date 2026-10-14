@@ -5,7 +5,14 @@ import { join } from 'node:path'
 import type { AuthMethod, SessionConfigOption } from '@agentclientprotocol/sdk'
 import { JudgeUnavailable } from '@broject/core'
 import type { JudgeQuestion, ProviderEntry } from '@broject/core'
-import { acpClient, isSystemoneFamily, shellWords } from './acp.ts'
+import {
+  acpClient,
+  acpConverse,
+  acpOpen,
+  acpPooledTurn,
+  isSystemoneFamily,
+  shellWords,
+} from './acp.ts'
 import { providerClient } from './registry.ts'
 import { fakeAcpAgent } from './testkit.ts'
 
@@ -514,6 +521,114 @@ await agent({ name: 'fake' })
         {}
       ).chat!('p', deadline()),
       /cannot exec acp command/
+    )
+  })
+})
+
+describe('tool-less backends — converse surfaces (bro-wxfls)', () => {
+  // a summarizer-shaped agent advertises no configOptions at all — the
+  // pin IS the provenance; there is nothing to apply or verify against
+  const TOOLLESS: AcpEntry = { type: 'acp', command: 'dv acp --agent-type summarizer' }
+
+  test('acpConverse serves the entry pin as the model label — no option to apply', async () => {
+    const fake = fakeAcpAgent({ replyText: 'sum' })
+    const r = await acpConverse(
+      'conductor:sum',
+      { ...TOOLLESS, model: 'claude-sum' },
+      { acp: { peer: fake.app } },
+      'p',
+      () => {},
+      deadline()
+    )
+    assert.equal(r.text, 'sum')
+    assert.equal(r.model, 'claude-sum')
+    assert.deepEqual(fake.configSets, [])
+  })
+
+  test('a wire-level pin (env) labels the same way', async () => {
+    const fake = fakeAcpAgent({ replyText: 'sum' })
+    const r = await acpConverse(
+      'conductor:sum',
+      TOOLLESS,
+      { acp: { peer: fake.app }, model: 'env-pin' },
+      'p',
+      () => {},
+      deadline()
+    )
+    assert.equal(r.model, 'env-pin')
+  })
+
+  test('unpinned tool-less answers "unknown" — nothing to report', async () => {
+    const fake = fakeAcpAgent({ replyText: 'sum' })
+    const r = await acpConverse(
+      'conductor:sum',
+      TOOLLESS,
+      { acp: { peer: fake.app } },
+      'p',
+      () => {},
+      deadline()
+    )
+    assert.equal(r.model, 'unknown')
+  })
+
+  test('a request pin on a tool-less backend never launders the served label', async () => {
+    const fake = fakeAcpAgent({ replyText: 'sum' })
+    const peer = await acpOpen(
+      'conductor:sum',
+      TOOLLESS,
+      { acp: { peer: fake.app } },
+      deadline()
+    )
+    try {
+      const r = await acpPooledTurn(
+        peer,
+        { ...TOOLLESS, model: 'claude-sum' },
+        { acp: { peer: fake.app } },
+        'p',
+        () => {},
+        deadline(),
+        undefined,
+        'conductor:sum',
+        'devin-acp/other-model'
+      )
+      assert.equal(r.model, 'claude-sum')
+      assert.deepEqual(fake.configSets, [])
+    } finally {
+      peer.close()
+    }
+  })
+
+  test('a request pin the backend CAN serve still resolves through its catalog', async () => {
+    const fake = fakeAcpAgent({ replyText: 'sum', configOptions: [MODEL_OPTION] })
+    const peer = await acpOpen('conductor:kilo', TOOLLESS, { acp: { peer: fake.app } }, deadline())
+    try {
+      const r = await acpPooledTurn(
+        peer,
+        TOOLLESS,
+        { acp: { peer: fake.app } },
+        'p',
+        () => {},
+        deadline(),
+        undefined,
+        'conductor:kilo',
+        'kilo/qwen3-coder'
+      )
+      assert.equal(r.model, 'qwen3-coder')
+      assert.deepEqual(fake.configSets, [{ configId: 'model-pick', value: 'qwen3-coder' }])
+    } finally {
+      peer.close()
+    }
+  })
+
+  test('the judge path still refuses a pin with no option — the laundering guard holds', async () => {
+    const fake = fakeAcpAgent({ replyText: TYPED_REPLY })
+    await assert.rejects(
+      acpClient(
+        'provider:sum',
+        { ...TOOLLESS, model: 'typesafe/jev-1.13' },
+        { acp: { peer: fake.app } }
+      ).call!('s', QUESTIONS, deadline()),
+      /no model config option/
     )
   })
 })

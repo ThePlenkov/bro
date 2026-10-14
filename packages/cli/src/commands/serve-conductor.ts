@@ -10,6 +10,14 @@
  *   BRO_PROVIDER_MODEL=<id>       optional pin — wins over entry.model;
  *                                 the client's requested id is never
  *                                 trusted (provenance maps to served).
+ *   BRO_PROVIDER_CATALOG=<name>   optional providers.<name> entry whose
+ *                                 catalog answers GET /v1/models
+ *                                 instead of the backend's — for
+ *                                 tool-less backends (a summarizer
+ *                                 advertises no model option) the
+ *                                 catalog is what clients may pick.
+ *                                 Any provider kind works (spec
+ *                                 bro-wxfls).
  *   BRO_PROVIDER_TIMEOUT_MS       per-call deadline (default 120000).
  */
 
@@ -17,14 +25,19 @@ import { randomBytes } from 'node:crypto'
 import type { IncomingMessage, ServerResponse } from 'node:http'
 import { loadConfig } from '@broject/core'
 import type { ProviderEntry } from '@broject/core'
-import { acpModels, acpOpen, acpPooledTurn } from '@broject/providers'
+import { acpOpen, acpPooledTurn } from '@broject/providers'
 import type { AcpPeer, ProviderWireOpts } from '@broject/providers'
+import { catalogModels } from './providers.ts'
 
 type AcpEntry = Extract<ProviderEntry, { type: 'acp' }>
 
 export interface ConductorConfig {
   backend: string
   entry: AcpEntry
+  /** The /v1/models source — defaults to the backend itself; a
+   *  BRO_PROVIDER_CATALOG pin points at a different providers entry
+   *  (a tool-less backend advertises nothing, the catalog still can). */
+  catalog?: { name: string; entry: ProviderEntry }
   model?: string
   cwd: string
   timeoutMs: number
@@ -58,9 +71,22 @@ export function conductorConfig(
   }
   const model = env.BRO_PROVIDER_MODEL?.trim()
   const t = Number(env.BRO_PROVIDER_TIMEOUT_MS)
+  const catalogName = env.BRO_PROVIDER_CATALOG?.trim()
+  let catalog: ConductorConfig['catalog']
+  if (catalogName !== undefined && catalogName !== '') {
+    const catalogEntry = providers[catalogName]
+    if (catalogEntry === undefined) {
+      throw new Error(
+        `BRO_PROVIDER_CATALOG=${catalogName} — providers.${catalogName} is not configured ` +
+          `(configured: ${Object.keys(providers).join(', ') || 'none'})`
+      )
+    }
+    catalog = { name: catalogName, entry: catalogEntry }
+  }
   return {
     backend,
     entry,
+    catalog,
     model: model === undefined || model === '' ? entry.model : model,
     cwd: dir,
     timeoutMs: Number.isFinite(t) && t > 0 ? t : 120_000,
@@ -375,25 +401,22 @@ async function messages(
   res.end()
 }
 
-/** The anthropic /v1/models row — the backend's own catalog via
- *  session/new configOptions (the same list `bro providers models`
- *  renders as `<backend>/<id>`). */
+/** The anthropic /v1/models rows — the configured catalog source
+ *  (`BRO_PROVIDER_CATALOG`, else the backend itself) through the SAME
+ *  `bro providers models` surface, so ids arrive `<entry>/<model>` and
+ *  re-pin on /v1/messages. */
 async function models(
   res: ServerResponse,
   cfg: ConductorConfig,
   opts: ProviderWireOpts
 ): Promise<void> {
   try {
-    const list = await acpModels(
-      `conductor:${cfg.backend}`,
-      cfg.entry,
-      opts,
-      Date.now() + 30_000
-    )
+    const source = cfg.catalog ?? { name: cfg.backend, entry: cfg.entry }
+    const list = await catalogModels(source.name, source.entry, { acp: opts.acp })
     const data = list.map((m) => ({
       type: 'model',
-      id: m.value,
-      display_name: m.name ?? m.value,
+      id: m.id,
+      display_name: m.name ?? m.id,
       created_at: '2025-01-01T00:00:00Z',
     }))
     res.writeHead(200, { 'content-type': 'application/json' })
