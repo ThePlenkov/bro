@@ -180,7 +180,7 @@ Documentation=https://github.com/steveyegge/beads
 [Service]
 Type=simple
 WorkingDirectory=${escUnit(beadPath('dolt'))}
-ExecStart=${doltBin} sql-server --config ${escUnit(beadPath('dolt-server-config.yaml'))}
+ExecStart=${escUnit(doltBin)} sql-server --config ${escUnit(beadPath('dolt-server-config.yaml'))}
 Restart=on-failure
 RestartSec=2
 
