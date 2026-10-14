@@ -9,6 +9,7 @@ import type {
   PermissionOption,
   SessionConfigOption,
   StopReason,
+  ToolCallUpdate,
 } from '@agentclientprotocol/sdk'
 import type { FetchFn } from './http.ts'
 
@@ -42,6 +43,8 @@ export interface FakeAcpAgent {
   sessions: Array<{ cwd: string }>
   /** The client's answer to a scripted session/request_permission. */
   permissionOutcome?: unknown
+  /** The response's _meta — e.g. a policy-denied mark. */
+  permissionMeta?: unknown
 }
 
 /** A scripted in-process ACP agent — the real protocol round-trip
@@ -62,8 +65,11 @@ export function fakeAcpAgent(
      *  'cancel' answers -32800 like an aborted request. */
     failConfig?: 'refuse' | 'cancel'
     /** Ask session/request_permission mid-prompt with these options —
-     *  the outcome lands in `permissionOutcome`. */
+     *  the outcome lands in `permissionOutcome`, the response _meta in
+     *  `permissionMeta`. `askToolCall` overrides the asked toolCall
+     *  shape (kind/title/rawInput drive allowlist matchers). */
     askPermission?: PermissionOption[]
+    askToolCall?: Partial<ToolCallUpdate>
     /** session/prompt fails: 'auth' answers the wire's auth_required
      *  error (code −32000), 'generic' a plain handler error that
      *  arrives as "Internal error" like any backend flake would,
@@ -128,10 +134,11 @@ export function fakeAcpAgent(
       if (opts.askPermission !== undefined) {
         const res = await ctx.client.request('session/request_permission', {
           sessionId: ctx.params.sessionId,
-          toolCall: { toolCallId: 'tc-1', title: 'run tests' },
+          toolCall: { toolCallId: 'tc-1', title: 'run tests', ...opts.askToolCall },
           options: opts.askPermission,
         })
         seen.permissionOutcome = res.outcome
+        seen.permissionMeta = res._meta
       }
       await ctx.client.notify('session/update', {
         sessionId: ctx.params.sessionId,

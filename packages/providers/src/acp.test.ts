@@ -11,6 +11,8 @@ import {
   acpOpen,
   acpPooledTurn,
   isSystemoneFamily,
+  permitReason,
+  POLICY_DENIED_META,
   shellWords,
 } from './acp.ts'
 import { providerClient } from './registry.ts'
@@ -624,6 +626,154 @@ describe('tool-less backends — converse surfaces (bro-wxfls)', () => {
       ).call!('s', QUESTIONS, deadline()),
       /no model config option/
     )
+  })
+})
+
+describe('permission policy (bro-84qhx)', () => {
+  const PERM_OPTS = [
+    { optionId: 'allow-1', name: 'Allow once', kind: 'allow_once' as const },
+    { optionId: 'deny-1', name: 'Deny', kind: 'reject_once' as const },
+  ]
+  const ASK = { toolCallId: 'tc-1', title: 'run tests' }
+  const TOOLLESS_ENTRY: AcpEntry = { type: 'acp', command: 'dv acp' }
+
+  test('permitReason: autoApprove wins outright; kind: and substring matchers hit', () => {
+    assert.equal(permitReason(undefined, ASK), undefined)
+    assert.equal(permitReason({}, ASK), undefined)
+    assert.equal(permitReason({ autoApprove: true }, ASK), 'autoApprove')
+    assert.equal(
+      permitReason({ allow: ['kind:read'] }, { ...ASK, kind: 'read' }),
+      'allowlist:kind:read'
+    )
+    assert.equal(permitReason({ allow: ['kind:read'] }, { ...ASK, kind: 'execute' }), undefined)
+    assert.equal(permitReason({ allow: ['RUN TESTS'] }, ASK), 'allowlist:RUN TESTS')
+    assert.equal(
+      permitReason({ allow: ['git status'] }, { ...ASK, rawInput: { command: 'git status' } }),
+      'allowlist:git status'
+    )
+    assert.equal(permitReason({ allow: ['other'] }, ASK), undefined)
+  })
+
+  test('a pooled turn default-denies with the policy meta mark and reports the ledger', async () => {
+    const fake = fakeAcpAgent({ replyText: 'sum', askPermission: PERM_OPTS })
+    const peer = await acpOpen('conductor:x', TOOLLESS_ENTRY, { acp: { peer: fake.app } }, deadline())
+    try {
+      const r = await acpPooledTurn(
+        peer,
+        TOOLLESS_ENTRY,
+        { acp: { peer: fake.app } },
+        'p',
+        deadline()
+      )
+      assert.deepEqual(r.denied, ['run tests'])
+      assert.deepEqual(fake.permissionOutcome, { outcome: 'selected', optionId: 'deny-1' })
+      assert.deepEqual(fake.permissionMeta, POLICY_DENIED_META)
+    } finally {
+      peer.close()
+    }
+  })
+
+  test('autoApprove allows; an allowlist matcher allows; a miss still denies', async () => {
+    const approved = fakeAcpAgent({ replyText: 'sum', askPermission: PERM_OPTS })
+    const peer = await acpOpen('conductor:x', TOOLLESS_ENTRY, {
+      acp: { peer: approved.app, permissions: { autoApprove: true } },
+    }, deadline())
+    try {
+      const r = await acpPooledTurn(
+        peer,
+        TOOLLESS_ENTRY,
+        { acp: { peer: approved.app } },
+        'p',
+        deadline()
+      )
+      assert.deepEqual(r.denied, [])
+      assert.deepEqual(approved.permissionOutcome, { outcome: 'selected', optionId: 'allow-1' })
+      assert.equal(approved.permissionMeta, undefined)
+    } finally {
+      peer.close()
+    }
+
+    const kindOk = fakeAcpAgent({
+      replyText: 'sum',
+      askPermission: PERM_OPTS,
+      askToolCall: { kind: 'read' },
+    })
+    const peer2 = await acpOpen('conductor:x', TOOLLESS_ENTRY, {
+      acp: { peer: kindOk.app, permissions: { allow: ['kind:read'] } },
+    }, deadline())
+    try {
+      const r = await acpPooledTurn(
+        peer2,
+        TOOLLESS_ENTRY,
+        { acp: { peer: kindOk.app } },
+        'p',
+        deadline()
+      )
+      assert.deepEqual(r.denied, [])
+      assert.deepEqual(kindOk.permissionOutcome, { outcome: 'selected', optionId: 'allow-1' })
+    } finally {
+      peer2.close()
+    }
+
+    const miss = fakeAcpAgent({
+      replyText: 'sum',
+      askPermission: PERM_OPTS,
+      askToolCall: { kind: 'execute' },
+    })
+    const peer3 = await acpOpen('conductor:x', TOOLLESS_ENTRY, {
+      acp: { peer: miss.app, permissions: { allow: ['kind:read'] } },
+    }, deadline())
+    try {
+      const r = await acpPooledTurn(
+        peer3,
+        TOOLLESS_ENTRY,
+        { acp: { peer: miss.app } },
+        'p',
+        deadline()
+      )
+      assert.deepEqual(r.denied, ['run tests'])
+      assert.deepEqual(miss.permissionMeta, POLICY_DENIED_META)
+    } finally {
+      peer3.close()
+    }
+  })
+
+  test('an allowless option set still denies under autoApprove — and is marked policy', async () => {
+    const fake = fakeAcpAgent({
+      replyText: 'sum',
+      askPermission: [{ optionId: 'deny-1', name: 'Deny', kind: 'reject_once' as const }],
+    })
+    const peer = await acpOpen('conductor:x', TOOLLESS_ENTRY, {
+      acp: { peer: fake.app, permissions: { autoApprove: true } },
+    }, deadline())
+    try {
+      const r = await acpPooledTurn(
+        peer,
+        TOOLLESS_ENTRY,
+        { acp: { peer: fake.app } },
+        'p',
+        deadline()
+      )
+      assert.deepEqual(r.denied, ['run tests'])
+      assert.deepEqual(fake.permissionOutcome, { outcome: 'selected', optionId: 'deny-1' })
+      assert.deepEqual(fake.permissionMeta, POLICY_DENIED_META)
+    } finally {
+      peer.close()
+    }
+  })
+
+  test('the one-shot converse path honors the same policy', async () => {
+    const fake = fakeAcpAgent({ replyText: 'sum', askPermission: PERM_OPTS })
+    const r = await acpConverse(
+      'conductor:x',
+      TOOLLESS_ENTRY,
+      { acp: { peer: fake.app, permissions: { allow: ['run tests'] } } },
+      'p',
+      () => {},
+      deadline()
+    )
+    assert.equal(r.text, 'sum')
+    assert.deepEqual(fake.permissionOutcome, { outcome: 'selected', optionId: 'allow-1' })
   })
 })
 

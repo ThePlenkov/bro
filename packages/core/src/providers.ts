@@ -64,11 +64,16 @@ export type ProviderEntry =
       profile?: string
       model?: string
       apiKeyEnv?: string
-      /** Permission policy for the spawn surface's driver (spec
-       *  bro-5hx1.1 §7): answer `session/request_permission` with the
-       *  allow option. Default false — a headless worker denies and
-       *  logs. */
+      /** Permission policy for the agent's `session/request_permission`
+       *  asks (spec bro-5hx1.1 §7, bro-84qhx): answer with the allow
+       *  option. Default false — deny and log. Worker and conductor
+       *  surfaces honor it alike. */
       autoApprove?: boolean
+      /** Permission allowlist (spec bro-84qhx) — matchers approving
+       *  asks without a blanket autoApprove: `kind:<acp-tool-kind>`
+       *  pins the tool-call kind, a bare string is a case-insensitive
+       *  substring over the call's title/rawInput. */
+      permissionAllow?: string[]
       /** Session-cleanup template run when the worker exits —
        *  `{sessionId}` substitutes the acp session id. ACP sessions
        *  still land in the agent CLI's session history; e.g.
@@ -122,6 +127,9 @@ export interface ProviderKindSpec {
   /** Boolean knobs — a flag's value type is boolean, not the string
    *  contract `optional` enforces. */
   optionalBool?: readonly string[]
+  /** String-list knobs — the value must be an array of non-empty
+   *  strings. */
+  optionalList?: readonly string[]
 }
 
 export const PROVIDER_REGISTRY: Record<ProviderKind, ProviderKindSpec> = {
@@ -139,6 +147,7 @@ export const PROVIDER_REGISTRY: Record<ProviderKind, ProviderKindSpec> = {
     required: ['command'],
     optional: ['profile', 'model', 'apiKeyEnv', 'sessionRm'],
     optionalBool: ['autoApprove'],
+    optionalList: ['permissionAllow'],
   },
   cli: { call: 'prose', spawn: true, required: ['command'], optional: ['model', 'models'] },
 }
@@ -174,7 +183,7 @@ function pickOptStr(
   name: string,
   o: Record<string, unknown>,
   f: string,
-  picked: Record<string, string | boolean>
+  picked: Record<string, string | boolean | string[]>
 ): void {
   const v = o[f]
   if (v === undefined) {
@@ -192,7 +201,7 @@ function pickOptBool(
   name: string,
   o: Record<string, unknown>,
   f: string,
-  picked: Record<string, string | boolean>
+  picked: Record<string, string | boolean | string[]>
 ): void {
   const v = o[f]
   if (v === undefined) {
@@ -203,6 +212,28 @@ function pickOptBool(
     return
   }
   picked[f] = v
+}
+
+/** Optional string-list field — a non-array, or any member that isn't
+ *  a non-empty string, drops the field with a warning (never the
+ *  entry). */
+function pickOptStrList(
+  name: string,
+  o: Record<string, unknown>,
+  f: string,
+  picked: Record<string, string | boolean | string[]>
+): void {
+  const v = o[f]
+  if (v === undefined) {
+    return
+  }
+  if (!Array.isArray(v) || v.some((m) => typeof m !== 'string' || m.trim() === '')) {
+    console.error(
+      `bro.config: providers.${name}.${f} must be an array of non-empty strings — field dropped`
+    )
+    return
+  }
+  picked[f] = v.map((m) => m.trim())
 }
 
 /** One model entry → its wire. A bare string wins; `{wire}` unwraps;
@@ -285,7 +316,7 @@ function parseApiModels(raw: unknown): ModelsParsed {
  *  must sit in the allowlist; a systemone wire needs a key source —
  *  checked here, while the error still names the config field. */
 function parseApiEntry(
-  picked: Record<string, string | boolean>,
+  picked: Record<string, string | boolean | string[]>,
   rawModels: unknown
 ): ModelsParsed {
   const parsed = parseApiModels(rawModels)
@@ -333,8 +364,8 @@ function pickSpecFields(
   name: string,
   spec: ProviderKindSpec,
   o: Record<string, unknown>
-): { picked: Record<string, string | boolean> } | { err: string } {
-  const picked: Record<string, string | boolean> = {}
+): { picked: Record<string, string | boolean | string[]> } | { err: string } {
+  const picked: Record<string, string | boolean | string[]> = {}
   for (const f of spec.required) {
     const v = str(o[f])
     if (v === undefined) {
@@ -347,6 +378,9 @@ function pickSpecFields(
   }
   for (const f of spec.optionalBool ?? []) {
     pickOptBool(name, o, f, picked)
+  }
+  for (const f of spec.optionalList ?? []) {
+    pickOptStrList(name, o, f, picked)
   }
   return { picked }
 }
@@ -389,7 +423,7 @@ export function parseProviderEntry(name: string, raw: unknown): ProviderEntry | 
  *  (config never holds a value); apiKeyCommand must RUN a lookup — an
  *  `echo sk-…`/`printf ts_live_…` "command" smuggles the key into
  *  config, which is the whole point the field exists to prevent. */
-function keySourceErr(picked: Record<string, string | boolean>): string | null {
+function keySourceErr(picked: Record<string, string | boolean | string[]>): string | null {
   if (typeof picked.apiKeyEnv === 'string' && !isEnvName(picked.apiKeyEnv)) {
     return 'apiKeyEnv must NAME an env var (SCREAMING_SNAKE) — config never holds a key value'
   }

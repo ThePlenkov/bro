@@ -392,6 +392,34 @@ describe('parseProviderEntry', () => {
     })
   })
 
+  test('permissionAllow keeps a valid list, drops a malformed one (bro-84qhx)', () => {
+    const ok = parseProviderEntry('p', {
+      type: 'acp',
+      command: 'kilo --acp',
+      permissionAllow: ['kind:read', 'git status'],
+    })
+    assert.deepEqual(ok, {
+      type: 'acp',
+      command: 'kilo --acp',
+      permissionAllow: ['kind:read', 'git status'],
+    })
+    for (const bad of ['kind:read', [42], [''], ['ok', ' ']]) {
+      const e = parseProviderEntry('p', {
+        type: 'acp',
+        command: 'kilo --acp',
+        permissionAllow: bad,
+      })
+      assert.deepEqual(e, { type: 'acp', command: 'kilo --acp' }, JSON.stringify(bad))
+    }
+    // an unknown key on another kind is stripped like any other
+    const cli = parseProviderEntry('p', {
+      type: 'cli',
+      command: 'devin -p',
+      permissionAllow: ['kind:read'],
+    })
+    assert.deepEqual(cli, { type: 'cli', command: 'devin -p' })
+  })
+
   test('a non-boolean autoApprove drops the field, keeps the entry', () => {
     const e = parseProviderEntry('p', {
       type: 'acp',

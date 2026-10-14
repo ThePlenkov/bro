@@ -19,6 +19,19 @@
  *                                 Any provider kind works (spec
  *                                 bro-wxfls).
  *   BRO_PROVIDER_TIMEOUT_MS       per-call deadline (default 120000).
+ *   BRO_PROVIDER_AUTO_APPROVE     permission policy (spec bro-84qhx) —
+ *                                 truthy auto-approves every ask that
+ *                                 offers an allow option; wins over
+ *                                 providers.<name>.autoApprove.
+ *   BRO_PROVIDER_PERMISSION_ALLOW comma-separated allowlist matchers —
+ *                                 `kind:<acp-tool-kind>` or a bare
+ *                                 title/rawInput substring; wins over
+ *                                 providers.<name>.permissionAllow.
+ *                                 Interactive sessions want this: a
+ *                                 deny otherwise reads to the agent as
+ *                                 "User rejected" though nobody was
+ *                                 asked — and the reply is annotated
+ *                                 so the human sees the policy.
  */
 
 import { randomBytes } from 'node:crypto'
@@ -26,7 +39,7 @@ import type { IncomingMessage, ServerResponse } from 'node:http'
 import { loadConfig } from '@broject/core'
 import type { ProviderEntry } from '@broject/core'
 import { acpOpen, acpPooledTurn, otelEvent, otelParent, otelSpan } from '@broject/providers'
-import type { AcpPeer, OtelCtx, ProviderWireOpts } from '@broject/providers'
+import type { AcpPeer, AcpPermissionPolicy, OtelCtx, ProviderWireOpts } from '@broject/providers'
 import { peerAttrs } from './peer.ts'
 import { catalogModels } from './providers.ts'
 
@@ -42,6 +55,9 @@ export interface ConductorConfig {
   model?: string
   cwd: string
   timeoutMs: number
+  /** The listener's permission policy — env pins win over the entry's
+   *  autoApprove/permissionAllow (spec bro-84qhx). Absent = deny-all. */
+  permissions?: AcpPermissionPolicy
 }
 
 /** BRO_PROVIDER_BACKEND resolves to the conductor's acp entry — a name
@@ -91,7 +107,37 @@ export function conductorConfig(
     model: model === undefined || model === '' ? entry.model : model,
     cwd: dir,
     timeoutMs: Number.isFinite(t) && t > 0 ? t : 120_000,
+    permissions: permissionPolicy(env, entry),
   }
+}
+
+/** The env layer of the permission policy (spec bro-84qhx) — a set
+ *  pin wins over the entry's field so one provider entry can serve a
+ *  deny-all worker fleet AND an allowlisted interactive listener. An
+ *  unrecognized bool value is a loud error, never a silent default. */
+function permissionPolicy(env: NodeJS.ProcessEnv, entry: AcpEntry): AcpPermissionPolicy {
+  const rawApprove = env.BRO_PROVIDER_AUTO_APPROVE?.trim()
+  let autoApprove = entry.autoApprove
+  if (rawApprove !== undefined && rawApprove !== '') {
+    if (/^(0|false|no|off)$/i.test(rawApprove)) {
+      autoApprove = false
+    } else if (/^(1|true|yes|on)$/i.test(rawApprove)) {
+      autoApprove = true
+    } else {
+      throw new Error(
+        `BRO_PROVIDER_AUTO_APPROVE must be a boolean (1/0, true/false) — got ${JSON.stringify(rawApprove)}`
+      )
+    }
+  }
+  const rawAllow = env.BRO_PROVIDER_PERMISSION_ALLOW
+  const allow =
+    rawAllow === undefined || rawAllow.trim() === ''
+      ? entry.permissionAllow
+      : rawAllow
+          .split(',')
+          .map((m) => m.trim())
+          .filter((m) => m !== '')
+  return { autoApprove, allow }
 }
 
 // --- anthropic request shapes (the subset claude-code sends) ----------
@@ -377,6 +423,24 @@ async function messages(
     return
   }
   const blocks = parseReply(reply.text)
+  // a policy denial must never read as "User rejected" — annotate the
+  // reply so the transcript names the policy and the remediation
+  // (spec bro-84qhx); the wire response already carried the meta mark
+  if (reply.denied.length > 0) {
+    otelEvent('conductor.permission_denied', {
+      backend: cfg.backend,
+      denied: reply.denied.length,
+      titles: reply.denied.join(', ').slice(0, 200),
+    })
+    blocks.push({
+      type: 'text',
+      text:
+        `\n\n[bro conductor: ${reply.denied.length} permission request(s) denied by policy — ` +
+        `no user was prompted: ${reply.denied.map((t) => `"${t}"`).join(', ')}. ` +
+        `Allow via BRO_PROVIDER_AUTO_APPROVE / BRO_PROVIDER_PERMISSION_ALLOW or ` +
+        `providers.${cfg.backend}.autoApprove/.permissionAllow]`,
+    })
+  }
   const stopReason = blocks.some((b) => b.type === 'tool_use')
     ? 'tool_use'
     : (STOP_REASON[reply.stopReason] ?? 'end_turn')
@@ -387,6 +451,7 @@ async function messages(
     stream: body.stream !== false,
     input_tokens: inputTokens,
     output_tokens: estTokens(reply.text),
+    denied_permissions: reply.denied.length,
     duration_ms: Date.now() - t0,
   })
   if (body.stream === false) {
@@ -457,7 +522,7 @@ export function conductorProxy(
   const wireOpts: ProviderWireOpts = {
     ...opts,
     model: opts.model ?? cfg.model,
-    acp: { cwd: cfg.cwd, ...opts.acp },
+    acp: { cwd: cfg.cwd, permissions: cfg.permissions, ...opts.acp },
   }
   // warm pool: one acp child serves every /v1/messages turn — spawn +
   // initialize is paid once per listener; session/new per request is

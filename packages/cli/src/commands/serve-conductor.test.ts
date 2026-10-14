@@ -68,6 +68,52 @@ describe('conductorConfig', () => {
       /type 'cli' — the conductor needs an 'acp' entry/
     )
   })
+  test('permission policy: env pins win over the entry (bro-84qhx)', () => {
+    const providers = {
+      'dv-acp': {
+        type: 'acp' as const,
+        command: 'dv acp',
+        autoApprove: true,
+        permissionAllow: ['kind:read'],
+      },
+    }
+    // entry fields flow through when env is silent
+    const fromEntry = conductorConfig({ BRO_PROVIDER_BACKEND: 'dv-acp' }, '/r', providers)
+    assert.deepEqual(fromEntry?.permissions, {
+      autoApprove: true,
+      allow: ['kind:read'],
+    })
+    // env wins piecewise
+    const fromEnv = conductorConfig(
+      {
+        BRO_PROVIDER_BACKEND: 'dv-acp',
+        BRO_PROVIDER_AUTO_APPROVE: '0',
+        BRO_PROVIDER_PERMISSION_ALLOW: 'kind:fetch, git status',
+      },
+      '/r',
+      providers
+    )
+    assert.deepEqual(fromEnv?.permissions, {
+      autoApprove: false,
+      allow: ['kind:fetch', 'git status'],
+    })
+    // a non-bool env is a loud config error
+    assert.throws(
+      () =>
+        conductorConfig(
+          { BRO_PROVIDER_BACKEND: 'dv-acp', BRO_PROVIDER_AUTO_APPROVE: 'maybe' },
+          '/r',
+          providers
+        ),
+      /BRO_PROVIDER_AUTO_APPROVE must be a boolean/
+    )
+    // defaults absent → deny-all
+    const bare = conductorConfig({ BRO_PROVIDER_BACKEND: 'dv-acp' }, '/r', {
+      'dv-acp': { type: 'acp' as const, command: 'dv acp' },
+    })
+    assert.deepEqual(bare?.permissions, { autoApprove: undefined, allow: undefined })
+  })
+
   test('BRO_PROVIDER_CATALOG resolves a second entry for /v1/models', () => {
     const cfg = conductorConfig(
       { BRO_PROVIDER_BACKEND: 'dv-acp', BRO_PROVIDER_CATALOG: 'cli1' },
@@ -437,6 +483,68 @@ describe('serve /v1/* — the conductor plane', () => {
         body: JSON.stringify({ messages: [{ role: 'user', content: 'x' }], stream: false }),
       })
       assert.equal(msg.status, 200)
+    } finally {
+      await close()
+    }
+  })
+
+  test('a policy-denied permission annotates the reply — never "User rejected" (bro-84qhx)', async () => {
+    const PERM_OPTS = [
+      { optionId: 'allow-1', name: 'Allow once', kind: 'allow_once' as const },
+      { optionId: 'deny-1', name: 'Deny', kind: 'reject_once' as const },
+    ]
+    const fake = fakeAcpAgent({ replyText: 'tried', askPermission: PERM_OPTS })
+    const { url, close } = await listen(
+      deps({ provider: conductorProxy({ ...CFG, permissions: {} }, { acp: { peer: fake.app } }) })
+    )
+    try {
+      const r = await fetch(`${url}/v1/messages`, {
+        method: 'POST',
+        headers: { ...auth, 'content-type': 'application/json' },
+        body: JSON.stringify({ messages: [{ role: 'user', content: 'x' }], stream: false }),
+      })
+      assert.equal(r.status, 200)
+      const body = await r.json()
+      const note = body.content.at(-1)
+      assert.equal(note.type, 'text')
+      assert.match(note.text, /denied by policy — no user was prompted/)
+      assert.match(note.text, /"run tests"/)
+      assert.match(note.text, /BRO_PROVIDER_PERMISSION_ALLOW/)
+      // the wire mark — a policy denial is distinguishable from a human reject
+      assert.deepEqual(fake.permissionMeta, { 'bro/policyDenied': true })
+    } finally {
+      await close()
+    }
+  })
+
+  test('an allowlisted ask is approved — no annotation lands', async () => {
+    const PERM_OPTS = [
+      { optionId: 'allow-1', name: 'Allow once', kind: 'allow_once' as const },
+      { optionId: 'deny-1', name: 'Deny', kind: 'reject_once' as const },
+    ]
+    const fake = fakeAcpAgent({
+      replyText: 'ran',
+      askPermission: PERM_OPTS,
+      askToolCall: { kind: 'read' },
+    })
+    const { url, close } = await listen(
+      deps({
+        provider: conductorProxy(
+          { ...CFG, permissions: { allow: ['kind:read'] } },
+          { acp: { peer: fake.app } }
+        ),
+      })
+    )
+    try {
+      const r = await fetch(`${url}/v1/messages`, {
+        method: 'POST',
+        headers: { ...auth, 'content-type': 'application/json' },
+        body: JSON.stringify({ messages: [{ role: 'user', content: 'x' }], stream: false }),
+      })
+      assert.equal(r.status, 200)
+      const body = await r.json()
+      assert.deepEqual(body.content, [{ type: 'text', text: 'ran' }])
+      assert.deepEqual(fake.permissionOutcome, { outcome: 'selected', optionId: 'allow-1' })
     } finally {
       await close()
     }
