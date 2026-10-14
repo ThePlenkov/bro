@@ -300,6 +300,34 @@ describe('runGuards', () => {
     assert.match(v.clauses.find((c) => c.clause === 'budget')!.detail!, /no session/)
   })
 
+  test('a dead fired store still emits — the record degrades, never the lines', async () => {
+    const dir = repo()
+    dirty(dir, 'src/a.ts')
+    // hooks/fired as a FILE — the lock mkdir and the record append both
+    // fail; the guard line must survive the dead store (bro-oahg)
+    const hooks = join(dir, '.git', 'bro', 'hooks')
+    mkdirSync(hooks, { recursive: true })
+    writeFileSync(join(hooks, 'fired'), 'x')
+    const run = await runGuards(opts(dir, { defs: [GUARD], record: true }))
+    assert.deepEqual(run.lines, [`bro guard tests-with-src: ${GUARD.say}`])
+  })
+
+  test('a mid-section throw still resolves the decided lines', async () => {
+    const dir = repo()
+    dirty(dir, 'src/a.ts')
+    // an out-of-contract def stands in for a record-path regression —
+    // emit() throws mid-loop after the first guard decided; the run
+    // must resolve with that line and exactly one budget row (a
+    // non-idempotent re-emit would append a second '1/1 spent' row)
+    const bad = { name: 'bad', when: { on: ['stop' as const] }, say: 1 as unknown as string }
+    const run = await runGuards(opts(dir, { defs: [GUARD, bad], record: true }))
+    assert.deepEqual(run.lines, [`bro guard tests-with-src: ${GUARD.say}`])
+    const v = run.verdicts[0]!
+    assert.equal(v.fire, true)
+    assert.equal(v.clauses.filter((c) => c.clause === 'budget').length, 1)
+    assert.equal(run.verdicts[1]!.fire, false)
+  })
+
   test('judge clause: no judge wiring abstains, never vetoes', async () => {
     const dir = repo()
     dirty(dir, 'src/a.ts')

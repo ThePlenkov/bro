@@ -339,7 +339,14 @@ export async function runGuards(opts: GuardEvalOpts): Promise<GuardRun> {
 
   // phase 2 — budget rows + emission, inside the fired lock when recording
   const counts = fired === null ? new Map<string, number>() : firedCounts(fired)
+  let decided = false
   const emit = (): void => {
+    // run-once — the degraded retry below must not re-append budget/cap
+    // rows or re-spend fired budget when a mid-section call threw
+    if (decided) {
+      return
+    }
+    decided = true
     let emitted = 0
     for (const v of verdicts) {
       const g = guards.find((x) => x.guard.name === v.name)!.guard
@@ -362,8 +369,8 @@ export async function runGuards(opts: GuardEvalOpts): Promise<GuardRun> {
         v.clauses.push({ clause: 'cap', ok: false, detail: `maxPerEvent ${cfg.maxPerEvent}` })
         continue
       }
-      v.fire = true
       v.line = renderLine(g)
+      v.fire = true
       v.clauses.push({ clause: 'budget', ok: true, detail: `${used + 1}/${v.budget}` })
       counts.set(guardId(v.name), used + 1)
       emitted++
@@ -387,7 +394,11 @@ export async function runGuards(opts: GuardEvalOpts): Promise<GuardRun> {
     try {
       withFileLock(`${fired}.lock`, run, { waitMs: 2_000, label: 'guard fired lock' })
     } catch {
-      run() // lock timeout degrades to the unlocked race, never a stall
+      try {
+        run() // lock timeout degrades to the unlocked race, never a stall
+      } catch {
+        emit() // a mid-section rethrow loses the record, never decided lines
+      }
     }
   } else {
     emit()
