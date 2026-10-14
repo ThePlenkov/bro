@@ -875,7 +875,6 @@ describe('bro doctor', () => {
           join(dir, '.claude', 'settings.local.json'),
           JSON.stringify({
             env: {
-              ANTHROPIC_BASE_URL: 'http://127.0.0.1:44927',
               ANTHROPIC_DEFAULT_HAIKU_MODEL: 'devin/swe-2-max',
             },
           })
@@ -980,6 +979,78 @@ describe('bro doctor', () => {
         assert.equal(c.status, 'warn', JSON.stringify(c))
         assert.match(c.detail, /ANTHROPIC_SMALL_FAST_MODEL=devin-acp\/swe-2-max/)
         assert.match(c.detail, /providers\.devin-acp/)
+      }
+    ))
+
+  test('conductor: a localhost-spelled client url still matches the 127.0.0.1 serve', () =>
+    withEnv(
+      {
+        config: {
+          providers: { 'devin-acp': { type: 'acp', command: 'devin acp --model swe-2-max' } },
+        },
+        bins: ['gh'],
+        env: { BRO_PROVIDER_BACKEND: 'devin-acp' },
+      },
+      (dir) => {
+        mkdirSync(join(dir, '.git', 'bro'), { recursive: true })
+        writeFileSync(
+          join(dir, '.git', 'bro', 'serve.json'),
+          JSON.stringify({ pid: process.pid, url: 'http://127.0.0.1:44927', dir, startedAt: 'x', token: 't' })
+        )
+        mkdirSync(join(dir, '.claude'), { recursive: true })
+        writeFileSync(
+          join(dir, '.claude', 'settings.local.json'),
+          JSON.stringify({ env: { ANTHROPIC_BASE_URL: 'http://localhost:44927/' } })
+        )
+        const c = byName(runDoctorChecks(dir), 'conductor')
+        assert.equal(c.status, 'warn', JSON.stringify(c))
+        assert.match(c.detail, /acp conductor \(providers\.devin-acp\)/)
+      }
+    ))
+
+  test('conductor: a serve.json pointing off-loopback is not live-endpoint evidence', () =>
+    withEnv(
+      {
+        config: {
+          providers: { 'devin-acp': { type: 'acp', command: 'devin acp --model swe-2-max' } },
+        },
+        bins: ['gh'],
+        env: { BRO_PROVIDER_BACKEND: 'devin-acp' },
+      },
+      (dir) => {
+        const url = 'http://203.0.113.9:44927'
+        mkdirSync(join(dir, '.git', 'bro'), { recursive: true })
+        writeFileSync(
+          join(dir, '.git', 'bro', 'serve.json'),
+          JSON.stringify({ pid: process.pid, url, dir, startedAt: 'x', token: 't' })
+        )
+        mkdirSync(join(dir, '.claude'), { recursive: true })
+        writeFileSync(
+          join(dir, '.claude', 'settings.local.json'),
+          JSON.stringify({ env: { ANTHROPIC_BASE_URL: url } })
+        )
+        const c = byName(runDoctorChecks(dir), 'conductor')
+        assert.equal(c.status, 'ok', JSON.stringify(c))
+      }
+    ))
+
+  test('conductor: two acp entries claiming one bare id are both named in the warn', () =>
+    withEnv(
+      {
+        config: {
+          providers: {
+            'acp-a': { type: 'acp', command: 'devin acp --model swe-2-max' },
+            'acp-b': { type: 'acp', command: 'other acp --model=swe-2-max' },
+          },
+        },
+        bins: ['gh'],
+        env: { ANTHROPIC_SMALL_FAST_MODEL: 'swe-2-max' },
+      },
+      (dir) => {
+        const c = byName(runDoctorChecks(dir), 'conductor')
+        assert.equal(c.status, 'warn', JSON.stringify(c))
+        assert.match(c.detail, /providers\.acp-a/)
+        assert.match(c.detail, /providers\.acp-b/)
       }
     ))
 

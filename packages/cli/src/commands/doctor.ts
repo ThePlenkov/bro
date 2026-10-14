@@ -953,6 +953,20 @@ function classifierPins(src: ClientSource): [knob: string, value: string][] {
   return out
 }
 
+/** Loopback hostnames — same vocabulary the serve host-header guard
+ *  and the debt collectors use. `bro serve` only ever binds 127.0.0.1,
+ *  so a serve.json recording any other host was not written by bro —
+ *  refusing it keeps a tampered state file from pointing the guard's
+ *  "live endpoint" evidence at an arbitrary host. */
+function loopbackUrlHost(url: string): string | undefined {
+  try {
+    const h = new URL(url).hostname
+    return ['localhost', '127.0.0.1', '[::1]'].includes(h) ? h : undefined
+  } catch {
+    return undefined
+  }
+}
+
 /** The serve.json liveness read — same contract serve.ts publishes
  *  (readServeState + pidAlive); kept local so a state-file peek never
  *  loads the HTTP server's import graph into doctor. */
@@ -966,7 +980,12 @@ function liveServeEndpoint(dir: string): { url: string; pid: number } | undefine
       pid?: unknown
       url?: unknown
     }
-    if (typeof v.pid === 'number' && typeof v.url === 'string' && v.url !== '' && pidAlive(v.pid)) {
+    if (
+      typeof v.pid === 'number' &&
+      typeof v.url === 'string' &&
+      loopbackUrlHost(v.url) !== undefined &&
+      pidAlive(v.pid)
+    ) {
       return { url: v.url, pid: v.pid }
     }
   } catch {
@@ -1005,48 +1024,62 @@ function serveBackendName(serve: { url: string; pid: number } | undefined): stri
 /** The model ids an acp entry can serve: the pinned `model` field plus
  *  `--model` flags inside its command. The conductor strips any
  *  `<prefix>/` off the caller's id, so the match vocabulary is bare
- *  ids — `<name>/<id>` spellings resolve to the same wire. */
-function acpWireIds(providers: Record<string, ProviderEntry>): Map<string, string> {
-  const ids = new Map<string, string>()
+ *  ids — `<name>/<id>` spellings resolve to the same wire. Two acp
+ *  entries can claim the same bare id, so each id lists every entry
+ *  serving it — the warn names them all rather than silently
+ *  crediting whichever registered last. */
+function acpWireIds(providers: Record<string, ProviderEntry>): Map<string, string[]> {
+  const ids = new Map<string, string[]>()
+  const add = (id: string, name: string): void => {
+    if (id === '') {
+      return
+    }
+    const l = ids.get(id)
+    if (l === undefined) {
+      ids.set(id, [name])
+    } else if (!l.includes(name)) {
+      l.push(name)
+    }
+  }
   for (const [name, e] of Object.entries(providers)) {
     if (e.type !== 'acp') {
       continue
     }
     if (e.model !== undefined) {
-      ids.set(e.model, name)
+      add(e.model, name)
     }
-    const toks = e.command.split(/\s+/)
+    const toks = e.command.split(/\s+/).filter((t) => t !== '')
     for (let i = 0; i < toks.length; i++) {
-      if (toks[i] === '--model' && toks[i + 1] !== undefined) {
-        ids.set(toks[i + 1], name)
+      if (toks[i] === '--model' && i + 1 < toks.length) {
+        add(toks[i + 1]!, name)
       }
       const eq = /^--model=(.+)$/.exec(toks[i]!)
       if (eq !== null) {
-        ids.set(eq[1]!, name)
+        add(eq[1]!, name)
       }
     }
   }
   return ids
 }
 
-/** A client-pinned model id → the acp provider serving that wire:
+/** A client-pinned model id → the acp providers serving that wire:
  *  `<acp-name>/<id>` is conductor vocabulary outright; any other
- *  `<prefix>/<id>` or bare id matches when the entry serves the bare
+ *  `<prefix>/<id>` or bare id matches every entry serving the bare
  *  id (the conductor strips the prefix before resolving). */
-function acpWireProvider(
+function acpWireProviders(
   value: string,
-  ids: Map<string, string>,
+  ids: Map<string, string[]>,
   acpNames: Set<string>
-): string | undefined {
+): string[] {
   const slash = value.indexOf('/')
   if (slash > 0) {
     const pfx = value.slice(0, slash)
     if (acpNames.has(pfx)) {
-      return pfx
+      return [pfx]
     }
-    return ids.get(value.slice(slash + 1))
+    return ids.get(value.slice(slash + 1)) ?? []
   }
-  return ids.get(value)
+  return ids.get(value) ?? []
 }
 
 /** The guardrail row(s): warn when the endpoint is proven acp-backed
@@ -1065,7 +1098,27 @@ function conductorClassifierChecks(dir: string, root: string | null): DoctorChec
   const conductor = backend !== undefined && acpNames.has(backend) ? backend : undefined
   const ids = acpWireIds(providers)
   const sources = claudeClientSources(root !== null && root !== dir ? [dir, root] : [dir])
-  const norm = (u: string): string => u.replace(/\/+$/, '').toLowerCase()
+  /** Host:port identity with the loopback aliases folded — `localhost`
+   *  and `[::1]` spell the serve's 127.0.0.1 bind too, and scheme/path
+   *  don't change which process answers the port. Unparseable values
+   *  fall back to the plain string compare. */
+  const norm = (u: string): string => {
+    const t = u.trim().replace(/\/+$/, '')
+    for (const cand of [t, `http://${t}`]) {
+      try {
+        const p = new URL(cand)
+        const host = ['localhost', '[::1]', '::1'].includes(p.hostname)
+          ? '127.0.0.1'
+          : p.hostname
+        if (host !== '') {
+          return `${host}:${p.port}`
+        }
+      } catch {
+        // try the scheme-prefixed shape, then the plain string
+      }
+    }
+    return t.toLowerCase()
+  }
 
   const warns: DoctorCheck[] = []
   for (const src of sources) {
@@ -1073,8 +1126,10 @@ function conductorClassifierChecks(dir: string, root: string | null): DoctorChec
     const endpointLive =
       serve !== undefined && base !== undefined && norm(base) === norm(serve.url)
     const hits = classifierPins(src).flatMap(([knob, v]) => {
-      const p = acpWireProvider(v, ids, acpNames)
-      return p === undefined ? [] : [`${knob}=${v} → providers.${p}`]
+      const ps = acpWireProviders(v, ids, acpNames)
+      return ps.length === 0
+        ? []
+        : [`${knob}=${v} → ${ps.map((n) => `providers.${n}`).join(', ')}`]
     })
     if (endpointLive && conductor !== undefined) {
       warns.push(
