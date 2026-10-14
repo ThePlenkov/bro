@@ -1061,20 +1061,24 @@ import { readFileSync, renameSync, writeFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 const DB = join(dirname(fileURLToPath(import.meta.url)), 'tasks.json')
-// same CI-jitter shield as the host fakes — a transient read throw
+// same CI-jitter shield as the host fakes — a transient fs throw
 // inside tasks.close lands in the merge path's catch (bro-6u1tu)
-const load = () => {
+const pause = (ms) => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms)
+const retry = (fn) => {
   for (let i = 0; ; i++) {
-    try { return JSON.parse(readFileSync(DB, 'utf8')) } catch (e) {
+    try { return fn() } catch (e) {
       if (i > 40) throw e
-      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 25)
+      pause(25)
     }
   }
 }
+const load = () => retry(() => JSON.parse(readFileSync(DB, 'utf8')))
 const save = (db) => {
   const tmp = DB + '.tmp.' + process.pid
-  writeFileSync(tmp, JSON.stringify(db))
-  renameSync(tmp, DB)
+  retry(() => {
+    writeFileSync(tmp, JSON.stringify(db))
+    renameSync(tmp, DB)
+  })
 }
 export default {
   name: 'faketasks-plugin',
