@@ -1,4 +1,4 @@
-import { describe, test } from 'node:test'
+import { after, describe, test } from 'node:test'
 import assert from 'node:assert/strict'
 import { execFileSync } from 'node:child_process'
 import {
@@ -12,6 +12,11 @@ import {
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { doctorExitCode, runDoctorChecks, type DoctorCheck } from './doctor.ts'
+import { scrubEnv, testGit } from '@broject/core'
+
+// ambient repo/agent/store pins must not reach fixture git children
+// or the code-under-test spawns — scrub once, restore after the file
+after(scrubEnv())
 
 /** Scripted tools — PATH is set to the shim dir ONLY, so nothing real
  *  leaks in: git is a symlink to the real binary (repo probes need it);
@@ -75,10 +80,10 @@ function withEnv(opts: EnvOpts, fn: (dir: string) => void): Promise<void> {
     writeFileSync(path, shims[name]!)
     chmodSync(path, 0o755)
   }
-  execFileSync('git', ['init', '-q', dir])
+  testGit(['init', '-q', dir])
   if (opts.remote) {
     const url = typeof opts.remote === 'string' ? opts.remote : 'https://example.com/x.git'
-    execFileSync('git', ['-C', dir, 'remote', 'add', 'origin', url])
+    testGit(['-C', dir, 'remote', 'add', 'origin', url])
   }
   if (opts.beadsDir) {
     mkdirSync(join(dir, '.beads'))
@@ -517,10 +522,10 @@ describe('bro doctor', () => {
   test('build row: absent stamp is ok; a foreign session or a stamp behind HEAD warns (bro-fatja)', () =>
     withEnv({ bins: ['gh'] }, (dir) => {
       // git init ran with no commit — a stamp needs HEAD, make one
-      execFileSync('git', ['-C', dir, 'config', 'user.email', 't@t'])
-      execFileSync('git', ['-C', dir, 'config', 'user.name', 't'])
-      execFileSync('git', ['-C', dir, 'commit', '-qm', 'init', '--allow-empty'])
-      const head = execFileSync('git', ['-C', dir, 'rev-parse', 'HEAD'], { encoding: 'utf8' }).trim()
+      testGit(['-C', dir, 'config', 'user.email', 't@t'])
+      testGit(['-C', dir, 'config', 'user.name', 't'])
+      testGit(['-C', dir, 'commit', '-qm', 'init', '--allow-empty'])
+      const head = testGit(['-C', dir, 'rev-parse', 'HEAD'], { encoding: 'utf8' }).trim()
       assert.match(byName(runDoctorChecks(dir), 'build').detail, /no stamped build/)
 
       const stampFile = join(dir, '.git', 'bro', 'last-build.json')

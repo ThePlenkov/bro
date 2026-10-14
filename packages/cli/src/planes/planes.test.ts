@@ -2,21 +2,26 @@
  *  descriptor (declared reads dispatch, undeclared names throw, verbs
  *  are declared-but-unwired), and the debt plane's adapter reads a real
  *  ledger in a tmp dir. */
-import { describe, test } from 'node:test'
+import { after, describe, test } from 'node:test'
 import assert from 'node:assert/strict'
-import { execFileSync } from 'node:child_process'
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import {
   planes,
+  scrubEnv,
   PlaneUnavailable,
   PlaneVerbError,
+  testGit,
   type EventRow,
   type Finding,
 } from '@broject/core'
 // registration side-effect — the catalog is empty without it
 import './index.ts'
+
+// ambient repo/agent/store pins must not reach fixture git children
+// or the code-under-test spawns — scrub once, restore after the file
+after(scrubEnv())
 
 const EXPECTED = ['work', 'agents', 'queue', 'gates', 'events', 'judge', 'debt', 'learn']
 
@@ -167,7 +172,7 @@ describe('events plane adapter', () => {
     delete process.env.BRO_AGENT_ID
     return (async () => {
       try {
-        execFileSync('git', ['init', '-q'], { cwd: dir })
+        testGit(['init', '-q'], { cwd: dir })
         const mb = join(dir, '.git', 'bro', 'notify')
         mkdirSync(mb, { recursive: true })
         for (const [name, text] of Object.entries(drops)) {
@@ -250,7 +255,7 @@ describe('events plane — durable lifecycle journal', () => {
     const savedXdg = process.env.XDG_STATE_HOME
     process.env.XDG_STATE_HOME = xdg
     try {
-      execFileSync('git', ['init', '-q'], { cwd: dir })
+      testGit(['init', '-q'], { cwd: dir })
       const bro = join(dir, '.git', 'bro')
       mkdirSync(bro, { recursive: true })
       writeFileSync(join(bro, 'events.jsonl'), rows.map((r) => JSON.stringify(r)).join('\n') + '\n')
@@ -306,7 +311,7 @@ describe('events plane — durable lifecycle journal', () => {
   test('no journal still serves — empty read, not an error', async () => {
     const { dir, rm } = tmp()
     try {
-      execFileSync('git', ['init', '-q'], { cwd: dir })
+      testGit(['init', '-q'], { cwd: dir })
       const events = planes(dir).find((p) => p.name === 'events')!
       const res = (await events.read('lifecycle', {})) as { events: EventRow[]; gapped: boolean }
       assert.deepEqual(res.events, [])

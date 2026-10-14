@@ -1,6 +1,5 @@
-import { describe, test } from 'node:test'
+import { after, describe, test } from 'node:test'
 import assert from 'node:assert/strict'
-import { execFileSync } from 'node:child_process'
 import { existsSync, mkdirSync, mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -14,11 +13,16 @@ import {
   mirrorPathFor,
   type BdProbe,
 } from './dolt-bridge.ts'
+import { scrubEnv, testGit } from './testkit.ts'
+
+// ambient repo/agent/store pins must not reach fixture git children
+// or the code-under-test spawns — scrub once, restore after the file
+after(scrubEnv())
 
 const WIN32 = process.platform === 'win32'
 
 function git(...args: string[]): string {
-  return execFileSync('git', args, { encoding: 'utf8' }).trim()
+  return testGit(args, { encoding: 'utf8' }).trim()
 }
 
 /** tmpdir whose lifetime is the test — mkdtemp under os.tmpdir. */

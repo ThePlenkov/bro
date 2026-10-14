@@ -1,12 +1,15 @@
-import { describe, test } from 'node:test'
+import { after, describe, test } from 'node:test'
 import assert from 'node:assert/strict'
-import { execSync } from 'node:child_process'
 import { chmodSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { facade, registerConnector } from '@broject/core'
+import { facade, registerConnector, scrubEnv, testGit } from '@broject/core'
 import { githubConnector } from '@broject/github'
 import { gitlabConnector, gitlabReview } from './index.ts'
+
+// ambient repo/agent/store pins must not reach fixture git children
+// or the code-under-test spawns — scrub once, restore after the file
+after(scrubEnv())
 
 const WIN32 = process.platform === 'win32'
 
@@ -56,8 +59,8 @@ esac
  *  a real checkout, the host never sees a call. */
 function makeRepo(url: string): string {
   const dir = mkdtempSync(join(tmpdir(), 'bro-gitlab-'))
-  execSync('git init -b main', { cwd: dir, stdio: 'ignore' })
-  execSync(`git remote add origin ${url}`, { cwd: dir, stdio: 'ignore' })
+  testGit(['init', '-b', 'main'], { cwd: dir, stdio: 'ignore' })
+  testGit(['remote', 'add', 'origin', url], { cwd: dir, stdio: 'ignore' })
   return dir
 }
 

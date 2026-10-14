@@ -1,6 +1,5 @@
-import { describe, test } from 'node:test'
+import { after, describe, test } from 'node:test'
 import assert from 'node:assert/strict'
-import { execFileSync } from 'node:child_process'
 import { appendFileSync, mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -14,11 +13,16 @@ import {
   recordDisposition,
   threadSubject,
 } from './journal.ts'
+import { scrubEnv, testGit } from '@broject/core'
+
+// ambient repo/agent/store pins must not reach fixture git children
+// or the code-under-test spawns — scrub once, restore after the file
+after(scrubEnv())
 
 const withRepo = async (fn: (dir: string) => void | Promise<void>): Promise<void> => {
   const dir = mkdtempSync(join(tmpdir(), 'bro-judge-journal-'))
   try {
-    execFileSync('git', ['init', '-q', dir])
+    testGit(['init', '-q', dir])
     await fn(dir)
   } finally {
     rmSync(dir, { recursive: true, force: true })

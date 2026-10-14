@@ -4,7 +4,7 @@
  *  regression here would silently break: fail-open (a wedged/missing
  *  probe never stalls a session) and arming (only a session that touched
  *  the thing is blocked; ambient state is passive context). */
-import { describe, test } from 'node:test'
+import { after, describe, test } from 'node:test'
 import assert from 'node:assert/strict'
 import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { join, resolve } from 'node:path'
@@ -19,6 +19,11 @@ import {
   runCli,
 } from './testrepo.ts'
 import { spawnSync } from 'node:child_process'
+import { scrubEnv, testGitSpawn } from '@broject/core'
+
+// ambient repo/agent/store pins must not reach fixture git children
+// or the code-under-test spawns — scrub once, restore after the file
+after(scrubEnv())
 
 interface Fixture {
   root: string
@@ -431,7 +436,7 @@ describe('hooks e2e — commit provenance (prepare-commit-msg)', () => {
       assert.equal(existsSync(shim), true)
       writeFileSync(join(f.main, 'work.txt'), 'x\n')
       git(['add', '-A'], f.main)
-      const commit = spawnSync('git', ['commit', '-qm', 'feat: tagged'], {
+      const commit = testGitSpawn(['commit', '-qm', 'feat: tagged'], {
         cwd: f.main,
         env: e2eEnv({
           PATH: `${fakeBro(f)}:${process.env.PATH}`,

@@ -27,6 +27,11 @@ import {
   type PendingWatch,
   type RearmPlan,
 } from './pending-watch.ts'
+import { scrubEnv, testGit } from '@broject/core'
+
+// ambient repo/agent/store pins must not reach fixture git children
+// or the code-under-test spawns — scrub once, restore after the file
+after(scrubEnv())
 
 const base: Omit<PendingWatch, 'pid' | 'startedAt'> = {
   pr: 42,
@@ -44,7 +49,7 @@ after(() => {
 
 function repo(): string {
   const dir = mkdtempSync(join(tmpdir(), 'bro-watch-'))
-  execFileSync('git', ['init', '-q', dir])
+  testGit(['init', '-q', dir])
   dirs.push(dir)
   return dir
 }

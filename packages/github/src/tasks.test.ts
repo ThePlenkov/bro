@@ -1,12 +1,15 @@
-import { describe, test } from 'node:test'
+import { after, describe, test } from 'node:test'
 import assert from 'node:assert/strict'
 import { chmodSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { execFileSync } from 'node:child_process'
-import { facade, facadeName, registerConnector } from '@broject/core'
+import { facade, facadeName, registerConnector, scrubEnv, testGit } from '@broject/core'
 import { githubConnector } from './index.ts'
 import { githubTasks } from './tasks.ts'
+
+// ambient repo/agent/store pins must not reach fixture git children
+// or the code-under-test spawns — scrub once, restore after the file
+after(scrubEnv())
 
 const WIN32 = process.platform === 'win32'
 
@@ -741,8 +744,8 @@ esac
 describe('github tasks connector selection', { skip: WIN32 }, () => {
   const repoWithRemote = (url: string): string => {
     const dir = mkdtempSync(join(tmpdir(), 'bro-gh-conn-'))
-    execFileSync('git', ['init', '-q', dir])
-    execFileSync('git', ['-C', dir, 'remote', 'add', 'origin', url])
+    testGit(['init', '-q', dir])
+    testGit(['-C', dir, 'remote', 'add', 'origin', url])
     return dir
   }
 

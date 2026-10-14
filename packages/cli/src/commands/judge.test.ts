@@ -1,14 +1,17 @@
-import { describe, test } from 'node:test'
+import { after, describe, test } from 'node:test'
 import assert from 'node:assert/strict'
-import { execFileSync } from 'node:child_process'
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { registerConnector } from '@broject/core'
+import { registerConnector, scrubEnv, testGit } from '@broject/core'
 import type { DecideResult, JudgeFacade } from '@broject/core'
 import { appendRow } from '@broject/judge'
 import { loadQuestions, loadState, runJudgeCommand } from './judge.ts'
 import { capture, Exit } from './testrepo.ts'
+
+// ambient repo/agent/store pins must not reach fixture git children
+// or the code-under-test spawns — scrub once, restore after the file
+after(scrubEnv())
 
 function tmpdirWith(prefix: string): { dir: string; done: () => void } {
   const dir = mkdtempSync(join(tmpdir(), prefix))
@@ -160,7 +163,7 @@ describe('bro judge stats', () => {
   test('reads the repo journal; --json prints the stats object', async () => {
     const fx = tmpdirWith('bro-judge-stats-')
     try {
-      execFileSync('git', ['init', '-q', fx.dir])
+      testGit(['init', '-q', fx.dir])
       appendRow(fx.dir, {
         ts: '2026-01-01T00:00:00Z',
         kind: 'act-thread',

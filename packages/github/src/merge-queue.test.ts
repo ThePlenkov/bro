@@ -1,11 +1,15 @@
-import { describe, test } from 'node:test'
+import { after, describe, test } from 'node:test'
 import assert from 'node:assert/strict'
 import { chmodSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { spawnSync } from 'node:child_process'
-import { mergeQueueHost, registerConnector } from '@broject/core'
+import { mergeQueueHost, registerConnector, scrubEnv, testGitSpawn } from '@broject/core'
 import { graphiteConnector, graphiteQueue, mergifyConnector, mergifyQueue } from './merge-queue.ts'
+
+// ambient repo/agent/store pins must not reach fixture git children
+// or the code-under-test spawns — scrub once, restore after the file
+after(scrubEnv())
 
 const WIN32 = process.platform === 'win32'
 
@@ -61,7 +65,7 @@ function fakeTools(
   const ghLog = join(dir, 'gh.log')
   const gtLog = join(dir, 'gt.log')
   spawnSync('mkdir', ['-p', bin])
-  spawnSync('git', ['-C', dir, 'init', '-b', opts.branch ?? 'feature-x'])
+  testGitSpawn(['-C', dir, 'init', '-b', opts.branch ?? 'feature-x'])
   writeFileSync(ghLog, '')
   writeFileSync(gtLog, '')
   writeFileSync(join(bin, 'gh'), FAKE_GH)
@@ -100,11 +104,11 @@ const target = { repo: 'acme/widgets', pr: 42 }
 
 /** First commit so `git rev-parse HEAD` resolves — returns its sha. */
 function initCommit(dir: string): string {
-  spawnSync('git', [
+  testGitSpawn([
     '-C', dir, '-c', 'user.email=t@t', '-c', 'user.name=t',
     'commit', '-qm', 'init', '--allow-empty',
   ])
-  return String(spawnSync('git', ['-C', dir, 'rev-parse', 'HEAD']).stdout ?? '').trim()
+  return String(testGitSpawn(['-C', dir, 'rev-parse', 'HEAD']).stdout ?? '').trim()
 }
 
 describe('mergifyQueue', { skip: WIN32 }, () => {

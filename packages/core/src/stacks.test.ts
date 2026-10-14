@@ -1,18 +1,22 @@
 /** stacks facade contract tests — `mergeChainPerLayer` over a scripted
  *  ReviewFacade, and the built-in git connector's local merge cascade
  *  over a real repo. No gh/glab: the facade contract is the seam. */
-import { describe, test } from 'node:test'
+import { after, describe, test } from 'node:test'
 import assert from 'node:assert/strict'
-import { execFileSync } from 'node:child_process'
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { gitStacks, mergeChainPerLayer } from './stacks.ts'
 import type { StackCascade, StackChainMember } from './stacks.ts'
 import type { PrMeta, PrTarget, ReviewFacade } from './review.ts'
+import { scrubEnv, testGit } from './testkit.ts'
+
+// ambient repo/agent/store pins must not reach fixture git children
+// or the code-under-test spawns — scrub once, restore after the file
+after(scrubEnv())
 
 const git = (args: string[], cwd: string): string =>
-  execFileSync('git', args, { cwd, encoding: 'utf8' })
+  testGit(args, { cwd, encoding: 'utf8' })
 
 const META = (over: Partial<PrMeta> = {}): PrMeta => ({
   state: 'OPEN',

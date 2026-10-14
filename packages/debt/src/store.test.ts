@@ -1,6 +1,5 @@
-import { describe, test } from 'node:test'
+import { after, describe, test } from 'node:test'
 import assert from 'node:assert/strict'
-import { execFileSync } from 'node:child_process'
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { tmpDir } from './testtmp.ts'
@@ -14,6 +13,11 @@ import {
   writeSummary,
 } from './store.ts'
 import type { DebtRecord } from './types.ts'
+import { scrubEnv, testGit } from '@broject/core'
+
+// ambient repo/agent/store pins must not reach fixture git children
+// or the code-under-test spawns — scrub once, restore after the file
+after(scrubEnv())
 
 // BRO_DEBT_DIR would redirect every write in this file — tests need the
 // cwd-relative path.
@@ -21,12 +25,12 @@ delete process.env.BRO_DEBT_DIR
 
 function tmpRepo(): string {
   const dir = tmpDir('bro-debt-')
-  execFileSync('git', ['init', '-q', dir])
+  testGit(['init', '-q', dir])
   // A global excludesFile covering the ledger dir would make check-ignore
   // short-circuit and the exclude assertions flaky — neutralize it.
   const emptyExcludes = join(dir, '.test-excludes')
   writeFileSync(emptyExcludes, '')
-  execFileSync('git', ['-C', dir, 'config', 'core.excludesFile', emptyExcludes])
+  testGit(['-C', dir, 'config', 'core.excludesFile', emptyExcludes])
   return dir
 }
 
@@ -44,7 +48,7 @@ describe('ensureDebtDirExcluded (via writeSummary)', () => {
     const repo = tmpRepo()
     writeSummary(buildSummary([]), repo)
     assert.doesNotThrow(() =>
-      execFileSync('git', ['-C', repo, 'check-ignore', '-q', '.agents/review-debt'])
+      testGit(['-C', repo, 'check-ignore', '-q', '.agents/review-debt'])
     )
   })
 

@@ -1,6 +1,5 @@
-import { describe, test } from 'node:test'
+import { after, describe, test } from 'node:test'
 import assert from 'node:assert/strict'
-import { execFileSync } from 'node:child_process'
 import {
   chmodSync,
   existsSync,
@@ -14,8 +13,12 @@ import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { runSpecCommand, sddConnector, specState } from './spec.ts'
 import { hasSpecFile, SPEC_CONNECTORS } from '../spec-connectors.ts'
-import { loadConfig, registerConnector, specStore } from '@broject/core'
+import { loadConfig, registerConnector, scrubEnv, specStore, testGit } from '@broject/core'
 import type { ConnectorCtx, SpecStore, TaskRow, TaskStore } from '@broject/core'
+
+// ambient repo/agent/store pins must not reach fixture git children
+// or the code-under-test spawns — scrub once, restore after the file
+after(scrubEnv())
 
 for (const c of SPEC_CONNECTORS) {
   registerConnector(c)
@@ -93,9 +96,9 @@ function withRepo(
   const prevBead = process.env.BRO_BEAD_ID
   const prevBeads = process.env.BRO_BEAD_IDS
   const run = async (): Promise<void> => {
-    execFileSync('git', ['init', '-q', dir])
-    execFileSync('git', ['-C', dir, 'config', 'user.email', 't@t'])
-    execFileSync('git', ['-C', dir, 'config', 'user.name', 't'])
+    testGit(['init', '-q', dir])
+    testGit(['-C', dir, 'config', 'user.email', 't@t'])
+    testGit(['-C', dir, 'config', 'user.name', 't'])
     writeFileSync(
       join(dir, 'bro.config.json'),
       JSON.stringify(opts.config ?? { sdd: { mode: 'gate' } })
@@ -758,20 +761,13 @@ describe('bro spec drift', () => {
       mkdirSync(dirname(abs), { recursive: true })
       writeFileSync(abs, content)
     }
-    const {
-      GIT_DIR: _d,
-      GIT_WORK_TREE: _w,
-      GIT_INDEX_FILE: _i,
-      GIT_COMMON_DIR: _c,
-      ...env
-    } = process.env
     // stage the declared files only — `add -A` would sweep the fixture's
     // bro.config.json / bin / list.json into a (b1) commit and fabricate
     // a commit-resolved scope
-    execFileSync('git', ['add', '--', ...Object.keys(files)], { cwd: dir, env })
-    execFileSync('git', ['commit', '-qm', subject], {
+    testGit(['add', '--', ...Object.keys(files)], { cwd: dir })
+    testGit(['commit', '-qm', subject], {
       cwd: dir,
-      env: { ...env, GIT_AUTHOR_DATE: date, GIT_COMMITTER_DATE: date },
+      env: { ...process.env, GIT_AUTHOR_DATE: date, GIT_COMMITTER_DATE: date },
     })
   }
 
@@ -962,7 +958,7 @@ describe('bro spec drift', () => {
       commit(dir, 'spec+code', { 'specs/b1.md': scopedSpec(), 'src/a.ts': 'x\n' }, T0)
       // .git/shallow is what --is-shallow-repository reads — one line
       // fakes a boundary clone without a second repo
-      const sha = execFileSync('git', ['-C', dir, 'rev-parse', 'HEAD'], {
+      const sha = testGit(['-C', dir, 'rev-parse', 'HEAD'], {
         encoding: 'utf8',
       }).trim()
       writeFileSync(join(dir, '.git', 'shallow'), `${sha}\n`)

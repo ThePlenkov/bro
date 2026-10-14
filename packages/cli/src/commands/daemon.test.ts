@@ -3,13 +3,13 @@
  *  drive's own (`daemon run` delegates), tested there. The install
  *  want-marker (bro-y5zon) lives here too: marker round-trips, the
  *  rearm decision, and install/uninstall with injected up/down. */
-import { describe, test } from 'node:test'
+import { after, describe, test } from 'node:test'
 import assert from 'node:assert/strict'
-import { execFileSync, spawn } from 'node:child_process'
+import { spawn } from 'node:child_process'
 import { existsSync, mkdirSync, readFileSync, rmSync, utimesSync, writeFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { initRepo } from './testrepo.ts'
-import { lockHolderPid, pidAlive } from '@broject/core'
+import { lockHolderPid, pidAlive, scrubEnv, testGit } from '@broject/core'
 import {
   armDrive,
   daemonProbe,
@@ -29,6 +29,10 @@ import {
   type SupervisorUp,
 } from './daemon.ts'
 import { driveLockPath } from './drive.ts'
+
+// ambient repo/agent/store pins must not reach fixture git children
+// or the code-under-test spawns — scrub once, restore after the file
+after(scrubEnv())
 
 const DEAD = 1 << 30
 
@@ -597,7 +601,7 @@ describe('supervisorDown', () => {
     try {
       // a linked worktree shares the common dir — a supervisor running
       // there is still ours
-      execFileSync('git', ['-C', a.main, 'worktree', 'add', '-b', 'sweep-wt', join(a.root, 'wt')])
+      testGit(['-C', a.main, 'worktree', 'add', '-b', 'sweep-wt', join(a.root, 'wt')])
       const own = fake(a.main)
       const linked = fake(join(a.root, 'wt'))
       const foreign = fake(b.main)

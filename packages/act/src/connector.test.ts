@@ -1,10 +1,14 @@
 import { after, describe, test } from 'node:test'
 import assert from 'node:assert/strict'
-import { execFileSync } from 'node:child_process'
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { actConnector } from './connector.ts'
+import { scrubEnv, testGit } from '@broject/core'
+
+// ambient repo/agent/store pins must not reach fixture git children
+// or the code-under-test spawns — scrub once, restore after the file
+after(scrubEnv())
 
 const dirs: string[] = []
 after(() => {
@@ -15,7 +19,7 @@ after(() => {
 
 function repo(): string {
   const dir = mkdtempSync(join(tmpdir(), 'bro-act-conn-'))
-  execFileSync('git', ['init', '-q', dir])
+  testGit(['init', '-q', dir])
   dirs.push(dir)
   return dir
 }

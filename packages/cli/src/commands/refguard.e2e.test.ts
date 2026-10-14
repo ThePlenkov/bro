@@ -3,14 +3,19 @@
  *  The bead's evidence: `reset --hard` to a non-descendant dies with the
  *  branch ref intact; amend/rebase/merge land; forced refspecs and
  *  update-ref die; the env escape hatch passes. */
-import { describe, test } from 'node:test'
+import { after, describe, test } from 'node:test'
 import assert from 'node:assert/strict'
-import { execFileSync, spawnSync } from 'node:child_process'
+import { spawnSync } from 'node:child_process'
 import { chmodSync, mkdirSync, readFileSync, symlinkSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { installRefGuardHook, uninstallRefGuardHook } from './githooks.ts'
 import { REFGUARD_HOOK_MARK } from './refguard.ts'
 import { CLI_DIST, e2eEnv, git, initRepo, inside } from './testrepo.ts'
+import { scrubEnv, testGit, testGitSpawn } from '@broject/core'
+
+// ambient repo/agent/store pins must not reach fixture git children
+// or the code-under-test spawns — scrub once, restore after the file
+after(scrubEnv())
 
 /** A fake `bro` binary routing to the built CLI — the installed shim
  *  resolves it via PATH like the real thing. */
@@ -26,7 +31,7 @@ function fakeBroBin(root: string): string {
 /** git with the fake-bro PATH — spawnSync so a veto's nonzero exit is
  *  observable instead of throwing. */
 function gitTry(args: string[], cwd: string, env: NodeJS.ProcessEnv) {
-  const r = spawnSync('git', args, { cwd, env, encoding: 'utf8' })
+  const r = testGitSpawn(args, { cwd, env, encoding: 'utf8' })
   return { code: r.status, out: r.stdout ?? '', err: (r.stderr ?? '').trim() }
 }
 
@@ -50,8 +55,8 @@ describe('refguard e2e', () => {
         assert.ok(readFileSync(HOOK_PATH(main), 'utf8').includes(REFGUARD_HOOK_MARK))
 
         // commit + amend — produced-content verbs move the branch freely
-        execFileSync('git', ['commit', '-qm', 'c2', '--allow-empty'], { cwd: main, env })
-        execFileSync('git', ['commit', '-qm', 'c2a', '--allow-empty', '--amend'], {
+        testGit(['commit', '-qm', 'c2', '--allow-empty'], { cwd: main, env })
+        testGit(['commit', '-qm', 'c2a', '--allow-empty', '--amend'], {
           cwd: main,
           env,
         })
@@ -73,7 +78,7 @@ describe('refguard e2e', () => {
         // a divergent branch for the fetch/branch -f matrix — created via
         // switch -c + commit, both legal under the guard
         git(['switch', '-c', 'diverge', before], main)
-        execFileSync('git', ['commit', '-qm', 'd1', '--allow-empty'], { cwd: main, env })
+        testGit(['commit', '-qm', 'd1', '--allow-empty'], { cwd: main, env })
         git(['switch', 'main'], main)
 
         // forced fetch refspec: a create passes; a forced non-ff move dies
@@ -96,8 +101,8 @@ describe('refguard e2e', () => {
 
         // rebase — a content-producing rewrite — lands
         git(['switch', '-c', 'topic', before], main)
-        execFileSync('git', ['commit', '-qm', 't1', '--allow-empty'], { cwd: main, env })
-        execFileSync('git', ['rebase', 'main'], { cwd: main, env })
+        testGit(['commit', '-qm', 't1', '--allow-empty'], { cwd: main, env })
+        testGit(['rebase', 'main'], { cwd: main, env })
         assert.equal(
           git(['rev-parse', 'topic'], main).trim(),
           git(['rev-parse', 'HEAD'], main).trim()
@@ -105,7 +110,7 @@ describe('refguard e2e', () => {
 
         // merge — same class
         git(['switch', 'main'], main)
-        execFileSync('git', ['merge', '--no-ff', '-m', 'merge', 'topic'], { cwd: main, env })
+        testGit(['merge', '--no-ff', '-m', 'merge', 'topic'], { cwd: main, env })
 
         // the deliberate-rewrite escape hatch
         const off = gitTry(['reset', '--hard', before], main, {

@@ -1,6 +1,5 @@
-import { describe, test } from 'node:test'
+import { after, describe, test } from 'node:test'
 import assert from 'node:assert/strict'
-import { execFileSync } from 'node:child_process'
 import { mkdirSync, realpathSync, rmSync, writeFileSync } from 'node:fs'
 import { join, relative } from 'node:path'
 import { tmpDir } from './testtmp.ts'
@@ -12,6 +11,11 @@ import {
   loadConfigLayers,
   repoOptedIn,
 } from './config.ts'
+import { scrubEnv, testGit } from './testkit.ts'
+
+// ambient repo/agent/store pins must not reach fixture git children
+// or the code-under-test spawns — scrub once, restore after the file
+after(scrubEnv())
 
 // the global layer reads $XDG_CONFIG_HOME/bro — pin it to an empty tmp
 // for the whole file so a dev machine's real user config can't leak in
@@ -532,10 +536,10 @@ describe('loadConfig linked worktree', () => {
     // realpath — git reports the real path for --git-common-dir; on
     // symlinked tmpdirs (macOS /var→/private/var) assertions must match
     const main = realpathSync(tmpDir('bro-main-'))
-    execFileSync('git', ['init', '-q', main])
-    execFileSync('git', ['-C', main, '-c', 'user.email=t@t', '-c', 'user.name=t', 'commit', '-q', '--allow-empty', '-m', 'init'])
+    testGit(['init', '-q', main])
+    testGit(['-C', main, '-c', 'user.email=t@t', '-c', 'user.name=t', 'commit', '-q', '--allow-empty', '-m', 'init'])
     const wt = tmpDir('bro-wt-')
-    execFileSync('git', ['-C', main, 'worktree', 'add', '-qf', '--detach', wt])
+    testGit(['-C', main, 'worktree', 'add', '-qf', '--detach', wt])
     return { main, wt }
   }
 
@@ -594,26 +598,26 @@ describe('loadConfig linked worktree', () => {
     const holder = realpathSync(tmpDir('bro-sep-'))
     const gitdir = join(holder, 'gitdir')
     const main = join(holder, 'checkout')
-    execFileSync('git', ['init', '-q', '--separate-git-dir', gitdir, main])
-    execFileSync('git', ['-C', main, '-c', 'user.email=t@t', '-c', 'user.name=t', 'commit', '-q', '--allow-empty', '-m', 'init'])
+    testGit(['init', '-q', '--separate-git-dir', gitdir, main])
+    testGit(['-C', main, '-c', 'user.email=t@t', '-c', 'user.name=t', 'commit', '-q', '--allow-empty', '-m', 'init'])
     writeFileSync(join(main, 'bro.config.json'), JSON.stringify({ personality: 'mentor' }))
     const wt = realpathSync(tmpDir('bro-wt-'))
-    execFileSync('git', ['-C', main, 'worktree', 'add', '-qf', '--detach', wt])
+    testGit(['-C', main, 'worktree', 'add', '-qf', '--detach', wt])
     assert.equal(loadConfig(wt).personality, 'mentor')
   })
 
   test('worktree of a bare repo inherits nothing', () => {
     const main = tmpDir('bro-main-')
-    execFileSync('git', ['init', '-q', main])
-    execFileSync('git', ['-C', main, '-c', 'user.email=t@t', '-c', 'user.name=t', 'commit', '-q', '--allow-empty', '-m', 'init'])
+    testGit(['init', '-q', main])
+    testGit(['-C', main, '-c', 'user.email=t@t', '-c', 'user.name=t', 'commit', '-q', '--allow-empty', '-m', 'init'])
     const holder = tmpDir('bro-bare-')
     const bare = join(holder, 'repo.git')
-    execFileSync('git', ['clone', '-q', '--bare', main, bare])
+    testGit(['clone', '-q', '--bare', main, bare])
     // a config sitting next to the bare repo (the wrong fallback target)
     // must NOT leak into a worktree of it
     writeFileSync(join(holder, 'bro.config.json'), JSON.stringify({ personality: 'sarcastic' }))
     const wt = tmpDir('bro-wt-')
-    execFileSync('git', ['-C', bare, 'worktree', 'add', '-qf', '--detach', wt])
+    testGit(['-C', bare, 'worktree', 'add', '-qf', '--detach', wt])
     assert.equal(loadConfig(wt).personality, DEFAULT_CONFIG.personality)
   })
 })
@@ -732,12 +736,12 @@ describe('config layers (spec bro-9vmx)', () => {
 
   test('linked worktree inherits main-root local layer', () => {
     const main = realpathSync(tmpDir('bro-main-'))
-    execFileSync('git', ['init', '-q', main])
-    execFileSync('git', ['-C', main, '-c', 'user.email=t@t', '-c', 'user.name=t', 'commit', '-q', '--allow-empty', '-m', 'init'])
+    testGit(['init', '-q', main])
+    testGit(['-C', main, '-c', 'user.email=t@t', '-c', 'user.name=t', 'commit', '-q', '--allow-empty', '-m', 'init'])
     writeFileSync(join(main, 'bro.config.json'), JSON.stringify({ personality: 'terse' }))
     writeFileSync(join(main, 'bro.config.local.json'), JSON.stringify({ personality: 'sarcastic' }))
     const wt = tmpDir('bro-wt-')
-    execFileSync('git', ['-C', main, 'worktree', 'add', '-qf', '--detach', wt])
+    testGit(['-C', main, 'worktree', 'add', '-qf', '--detach', wt])
     assert.equal(loadConfig(wt).personality, 'sarcastic')
   })
 

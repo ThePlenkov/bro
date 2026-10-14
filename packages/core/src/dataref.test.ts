@@ -1,6 +1,5 @@
-import { describe, test } from 'node:test'
+import { after, describe, test } from 'node:test'
 import assert from 'node:assert/strict'
-import { execFileSync } from 'node:child_process'
 import {
   existsSync,
   mkdirSync,
@@ -16,9 +15,14 @@ import {
   dataRefPush,
   dataRefRoot,
 } from './dataref.ts'
+import { scrubEnv, testGit } from './testkit.ts'
+
+// ambient repo/agent/store pins must not reach fixture git children
+// or the code-under-test spawns — scrub once, restore after the file
+after(scrubEnv())
 
 function git(cwd: string, args: string[], opts?: { input?: string }): string {
-  return execFileSync('git', ['-C', cwd, ...args], { // NOSONAR — test fixture
+  return testGit(['-C', cwd, ...args], { // NOSONAR — test fixture
     encoding: 'utf8',
     input: opts?.input,
   }).trim()

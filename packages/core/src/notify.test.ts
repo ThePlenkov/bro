@@ -1,6 +1,5 @@
-import { describe, test } from 'node:test'
+import { after, describe, test } from 'node:test'
 import assert from 'node:assert/strict'
-import { execFileSync } from 'node:child_process'
 import {
   existsSync,
   mkdirSync,
@@ -27,13 +26,18 @@ import {
   renderDrop,
   userMailboxDir,
 } from './notify.ts'
+import { scrubEnv, testGit } from './testkit.ts'
+
+// ambient repo/agent/store pins must not reach fixture git children
+// or the code-under-test spawns — scrub once, restore after the file
+after(scrubEnv())
 
 const tmp = (prefix: string): string => mkdtempSync(join(tmpdir(), prefix))
 
 const withRepo = (fn: (dir: string) => void): void => {
   const dir = tmp('bro-notify-')
   try {
-    execFileSync('git', ['init', '-q', '-b', 'main', dir])
+    testGit(['init', '-q', '-b', 'main', dir])
     fn(dir)
   } finally {
     rmSync(dir, { recursive: true, force: true })
@@ -69,7 +73,7 @@ describe('mailboxDir', () => {
   test('a linked worktree resolves to the shared common dir', () => {
     withRepo((dir) => {
       const wt = join(dir, '..', `${dir.split('/').pop()}-wt`)
-      execFileSync('git', ['-C', dir, 'worktree', 'add', '-q', wt, '-b', 'w'])
+      testGit(['-C', dir, 'worktree', 'add', '-q', wt, '-b', 'w'])
       try {
         assert.equal(mailboxDir(wt), mailboxDir(dir))
       } finally {
