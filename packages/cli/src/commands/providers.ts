@@ -39,7 +39,16 @@ interface Opts {
   out?: (line: string) => void
 }
 
-/** The catalog as `<name>/<model-id>` strings — the same list
+/** A catalog row — `id` is `<name>/<model-id>`; `name` is the
+ *  provider's own display label when it advertises one (acp options
+ *  carry a human name; api/cli catalogs are id-only). The conductor's
+ *  `/v1/models` maps `name` onto display_name. */
+export interface CatalogModel {
+  id: string
+  name?: string
+}
+
+/** The catalog as `<name>/<model-id>` rows — the same list
  *  `bro providers models` renders, exported for the serve conductor's
  *  `/v1/models` surface (spec bro-wxfls: the catalog may be a
  *  different entry than the messages backend). */
@@ -47,21 +56,24 @@ export async function catalogModels(
   name: string,
   entry: ProviderEntry,
   opts: { acp?: AcpSeam; exec?: (command: string) => string } = {}
-): Promise<string[]> {
+): Promise<CatalogModel[]> {
   return providerModels(name, entry, opts)
 }
 
-/** One provider's catalog lines — `<name>/<model-id>` each. */
+/** One provider's catalog rows — `id` is `<name>/<model-id>` each. */
 async function providerModels(
   name: string,
   entry: ProviderEntry,
   opts: Opts
-): Promise<string[]> {
-  const render = (id: string): string => `${name}/${id}`
+): Promise<CatalogModel[]> {
+  const render = (id: string, modelName?: string): CatalogModel => ({
+    id: `${name}/${id}`,
+    name: modelName,
+  })
   switch (entry.type) {
     case 'api':
       // the allowlist IS the catalog — a model not declared can't run
-      return Object.keys(entry.models).map(render)
+      return Object.keys(entry.models).map((id) => render(id))
     case 'cli': {
       const ids: string[] = []
       if (entry.models !== undefined) {
@@ -76,15 +88,15 @@ async function providerModels(
       if (entry.model !== undefined && !ids.includes(entry.model)) {
         ids.push(entry.model)
       }
-      return ids.map(render)
+      return ids.map((id) => render(id))
     }
     case 'acp': {
       const { acpModels } = await import('@broject/providers')
-      const listed = (await acpModels(name, entry, { acp: opts.acp })).map((m) => m.value)
-      if (entry.model !== undefined && !listed.includes(entry.model)) {
-        listed.push(entry.model)
+      const listed = await acpModels(name, entry, { acp: opts.acp })
+      if (entry.model !== undefined && !listed.some((m) => m.value === entry.model)) {
+        listed.push({ value: entry.model })
       }
-      return listed.map(render)
+      return listed.map((m) => render(m.value, m.name))
     }
   }
 }
@@ -112,8 +124,8 @@ export async function runProvidersCommand(argv: string[], opts: Opts = {}): Prom
   let failed = 0
   for (const [name, entry] of wanted) {
     try {
-      for (const line of await providerModels(name, entry, opts)) {
-        out(line)
+      for (const row of await providerModels(name, entry, opts)) {
+        out(row.id)
       }
     } catch (err) {
       failed += 1

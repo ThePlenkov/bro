@@ -413,10 +413,10 @@ async function models(
   try {
     const source = cfg.catalog ?? { name: cfg.backend, entry: cfg.entry }
     const list = await catalogModels(source.name, source.entry, { acp: opts.acp })
-    const data = list.map((id) => ({
+    const data = list.map((m) => ({
       type: 'model',
-      id,
-      display_name: id,
+      id: m.id,
+      display_name: m.name ?? m.id,
       created_at: '2025-01-01T00:00:00Z',
     }))
     res.writeHead(200, { 'content-type': 'application/json' })

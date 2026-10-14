@@ -248,6 +248,12 @@ describe('serve /v1/* — the conductor plane', () => {
         body.data.map((m: { id: string }) => m.id),
         ['dv-acp/swe-x', 'dv-acp/swe-y']
       )
+      // acp catalog names surface as display_name — pickers show the
+      // human label, clients pin the id
+      assert.deepEqual(
+        body.data.map((m: { display_name: string }) => m.display_name),
+        ['SWE X', 'SWE Y']
+      )
       const c = await fetch(`${url}/v1/messages/count_tokens`, {
         method: 'POST',
         headers: { ...auth, 'content-type': 'application/json' },
