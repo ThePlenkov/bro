@@ -15,7 +15,8 @@
  * surface exists — `bro providers models` never prints an empty
  * provider silently.
  */
-import { execFileSync } from 'node:child_process'
+import { execFile as execFileCb } from 'node:child_process'
+import { promisify } from 'node:util'
 import { loadConfig } from '@broject/core'
 import type { ProviderEntry } from '@broject/core'
 import type { AcpSeam } from '@broject/providers'
@@ -28,11 +29,13 @@ const die = (msg: string): never => {
   process.exit(1)
 }
 
+const execFile = promisify(execFileCb)
+
 interface Opts {
   /** Test seam — injected in-process acp peer (AcpSeam.peer). */
   acp?: AcpSeam
   /** Test seam — replaces the models-template exec. */
-  exec?: (command: string) => string
+  exec?: (command: string) => string | Promise<string>
   /** Test seam — the registry; default loads cwd config. */
   providers?: Record<string, ProviderEntry>
   /** Test seam — stdout capture; default console.log. */
@@ -55,7 +58,7 @@ export interface CatalogModel {
 export async function catalogModels(
   name: string,
   entry: ProviderEntry,
-  opts: { acp?: AcpSeam; exec?: (command: string) => string } = {}
+  opts: { acp?: AcpSeam; exec?: (command: string) => string | Promise<string> } = {}
 ): Promise<CatalogModel[]> {
   return providerModels(name, entry, opts)
 }
@@ -77,9 +80,15 @@ async function providerModels(
     case 'cli': {
       const ids: string[] = []
       if (entry.models !== undefined) {
-        const exec = opts.exec ?? ((cmd: string) => execFileSync('sh', ['-c', cmd], { encoding: 'utf8' })) // NOSONAR — operator-configured models template, same contract as command
+        // async exec — the conductor serves this path on /v1/models and a
+        // sync spawn would stall the event loop; the timeout matches the
+        // acp catalog's 30s bound
+        const exec =
+          opts.exec ??
+          (async (cmd: string) =>
+            (await execFile('sh', ['-c', cmd], { encoding: 'utf8', timeout: 30_000 })).stdout) // NOSONAR — operator-configured models template, same contract as command
         ids.push(
-          ...exec(entry.models)
+          ...(await exec(entry.models))
             .split('\n')
             .map((l) => l.trim())
             .filter((l) => l !== '')
