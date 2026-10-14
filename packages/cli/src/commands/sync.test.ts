@@ -48,9 +48,10 @@ describe('runSyncCommand', () => {
   // legs at the caller's real repo: artifactDirs reads BRO_DEBT_DIR, bd
   // resolves BEADS_DIR before .beads discovery (a pinned shared store —
   // loop workers always carry one — makes the replication leg fail for
-  // the wrong reason), and GIT_DIR/GIT_WORK_TREE retarget the
-  // in-process git calls outright. scrubEnv drops the lot for the
-  // suite and restores it after.
+  // the wrong reason), GIT_DIR/GIT_WORK_TREE retarget the
+  // in-process git calls outright, and GIT_CONFIG_* injects config
+  // (core.hooksPath would run host hooks on fixture commits). scrubEnv
+  // drops the lot for the suite and restores it after.
   after(scrubEnv())
 
   test('outside a worktree it throws — never exits the host process', () => {
