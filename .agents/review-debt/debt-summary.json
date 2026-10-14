@@ -1,0 +1,32 @@
+{
+  "generated_at": "2026-10-12T09:00:50.835Z",
+  "open_count": 70,
+  "by_area": {
+    "specs/sessions": 4,
+    "nx.json": 1,
+    "packages/providers": 2,
+    "specs/bro-ribc.1.md": 6,
+    "packages/cli": 19,
+    "packages/judge": 1,
+    "packages/core": 5,
+    "packages/guard": 1,
+    "package.json": 1,
+    "skills/retro": 1,
+    "AGENTS.md": 2,
+    "specs/cross-repo": 6,
+    "specs/fleet-routing": 11,
+    ".github/workflows": 2,
+    "specs/backends": 1,
+    "site/content": 5,
+    "site/src": 1,
+    "(root)": 1
+  },
+  "by_author": {
+    "kilo-code-bot": 14,
+    "codeant-ai": 54,
+    "coderabbitai": 1,
+    "ThePlenkov": 1
+  },
+  "duplicate_fingerprints": [],
+  "oldest_open": "2026-10-04T10:54:12.041Z"
+}

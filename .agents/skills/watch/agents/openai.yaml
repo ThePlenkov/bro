@@ -1,0 +1,7 @@
+interface:
+  display_name: "Bro Watch"
+  short_description: "Orchestrator heartbeat via the bro CLI — one snapshot of mols, PR gates, and the fleet"
+  brand_color: "#0E8A16"
+  default_prompt: "Use $watch to get started."
+policy:
+  allow_implicit_invocation: false
