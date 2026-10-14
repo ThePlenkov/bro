@@ -344,6 +344,27 @@ describe('pulseRearm', () => {
     }
   })
 
+  test('a future-dated record does not suppress — the window bounds both directions', () => {
+    const { root, main } = initRepo('bro-pulse-r4d-')
+    try {
+      armPulse(main, 120)
+      // a stepped-ahead clock makes now - spawnedAt negative — a
+      // one-sided bound would trust the live pid until the clock
+      // catches up, suppressing every rearm in between
+      writePulseSpawn(main, {
+        pid: process.pid,
+        spawnedAt: new Date(Date.now() + 10 * 60_000).toISOString(),
+      })
+      assert.deepEqual(pulseRearm(main, 900, {}), {
+        kind: 'rearm',
+        everySec: 120,
+        forSec: 900,
+      })
+    } finally {
+      rmSync(root, { recursive: true, force: true })
+    }
+  })
+
   test('a dead recorded spawn does not suppress — the next event retries', () => {
     const { root, main } = initRepo('bro-pulse-r5-')
     try {
