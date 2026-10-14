@@ -22,7 +22,7 @@
  * checkpoint brings it back; `bro drive uninstall` is the disarm.
  */
 import { execFileSync, spawn } from 'node:child_process'
-import { existsSync, mkdirSync, openSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, openSync, readFileSync, readlinkSync, realpathSync, renameSync, rmSync, writeFileSync } from 'node:fs'
 import { basename, dirname, join } from 'node:path'
 import {
   acquireFileLock,
@@ -223,10 +223,23 @@ export function spawnDaemon(dir: string, everySec: number): { pid: number; log: 
   return { pid: child.pid!, log }
 }
 
-/** Every supervision-loop process — `daemon run --every` children plus
- *  raw `bro drive --every` runs (they hold the same lock, so `down`
- *  owes them the same SIGTERM or a standby quietly inherits it). */
-function supervisionProcs(): number[] {
+/** Every supervision-loop process OWNED BY THIS REPO — `daemon run
+ *  --every` children plus raw `bro drive --every` runs (they hold the
+ *  same lock, so `down` owes them the same SIGTERM or a standby
+ *  quietly inherits it). The pgrep match is machine-wide, so each hit
+ *  is re-scoped by repo: the candidate's /proc cwd must resolve to the
+ *  same git common dir as `dir` — a raw drive started in a linked
+ *  worktree resolves to it, a supervisor serving another repo (the
+ *  rig's own daemon included) never does. A candidate whose ownership
+ *  can't be verified — no /proc, cwd raced away, outside any repo —
+ *  is spared: the sweep errs toward missing a standby, never toward
+ *  killing a stranger. */
+function supervisionProcs(dir: string): number[] {
+  const common = gitCommonDir(dir)
+  if (common === null) {
+    return []
+  }
+  let pids: number[]
   try {
     const out = execFileSync('pgrep', ['-f', '(daemon run|drive) --every'], { // NOSONAR — pgrep is a required runtime dep; env below pins PATH to fixed unwriteable dirs
       encoding: 'utf8',
@@ -235,13 +248,41 @@ function supervisionProcs(): number[] {
       // inherited PATH can contain user-writable dirs (sonar S4036)
       env: { PATH: '/usr/bin:/bin' },
     })
-    return out
+    pids = out
       .split('\n')
       .map((s) => Number(s.trim()))
       .filter((n) => Number.isInteger(n) && n > 0)
   } catch {
     return []
   }
+  return pids.filter((pid) => {
+    const owned = procRepoCommon(pid)
+    return owned !== null && sameDir(owned, common)
+  })
+}
+
+/** The git common dir of the repo a process runs in — /proc cwd first,
+ *  then git names the repo. null when either step can't answer: an
+ *  unverifiable candidate is spared, never killed. */
+function procRepoCommon(pid: number): string | null {
+  try {
+    return gitCommonDir(readlinkSync(`/proc/${pid}/cwd`))
+  } catch {
+    return null
+  }
+}
+
+/** Path equality that survives symlink spellings — worktree paths and
+ *  /proc targets may spell the same directory differently. */
+function sameDir(a: string, b: string): boolean {
+  const real = (p: string): string => {
+    try {
+      return realpathSync(p)
+    } catch {
+      return p
+    }
+  }
+  return real(a) === real(b)
 }
 
 function everyArg(argv: string[], fallback: number): number {
@@ -318,7 +359,7 @@ export function supervisorDown(dir: string): SupervisorDown {
     ...(probe.recorded !== null && pidAlive(probe.recorded.pid, probe.recorded.pidStart)
       ? [probe.recorded.pid]
       : []),
-    ...supervisionProcs(),
+    ...supervisionProcs(dir),
   ])
   victims.delete(process.pid)
   for (const pid of victims) {
