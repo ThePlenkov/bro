@@ -413,15 +413,41 @@ export function collectStatus(dir: string): BroStatus {
   }
 }
 
+/** The claim fragment — `claim:<slug>`, the same vocabulary
+ *  `bro work list` renders, so consumers parse one format. */
+function claimBit(claim: string): string {
+  return claim === '' ? 'claimed' : `claim:${claim}`
+}
+
 function worktreeLine(w: StatusWorktree): string {
   const glyph = w.claim !== undefined ? '◐' : '·'
   const bits = [
     w.branch ?? 'detached',
     w.state ?? '',
-    w.claim === undefined ? '' : w.claim === '' ? 'claimed' : `claim ${w.claim}`,
+    w.claim === undefined ? '' : claimBit(w.claim),
     w.here === true ? '← here' : '',
   ].filter((b) => b !== '')
   return `  ${glyph} ${w.name}  ${bits.join('  ')}`
+}
+
+/** The linked-worktree block — the main checkout is already the
+ *  `board:` header (JSON carries every row). Rows print only for
+ *  live work: claimed trees plus the board's own checkout; parked
+ *  litter reads as the count, `bro work list` is the drill-down. */
+function worktreeSection(s: BroStatus): string[] {
+  const linked = s.worktrees.filter((w) => w.main !== true)
+  if (linked.length === 0) {
+    return []
+  }
+  const claimed = linked.filter((w) => w.claim !== undefined).length
+  const head = `worktrees: ${linked.length} linked`
+  const lines = [claimed > 0 ? `${head}, ${claimed} claimed` : head]
+  for (const w of linked) {
+    if (w.claim !== undefined || w.here === true) {
+      lines.push(worktreeLine(w))
+    }
+  }
+  return lines
 }
 
 function agentLine(a: StatusAgent): string {
@@ -484,22 +510,7 @@ function render(s: BroStatus): string[] {
     }
   }
   lines.push(`ready: ${s.beads.readyTotal} bead(s)`)
-  // the worktree plane lists siblings — the main checkout is already
-  // the `board:` header (JSON carries every row). Rows print only for
-  // live work: claimed trees plus the board's own checkout; parked
-  // litter reads as the count, `bro work list` is the drill-down.
-  const linked = s.worktrees.filter((w) => w.main !== true)
-  if (linked.length > 0) {
-    const claimed = linked.filter((w) => w.claim !== undefined).length
-    lines.push(
-      `worktrees: ${linked.length} linked${claimed > 0 ? `, ${claimed} claimed` : ''}`
-    )
-    for (const w of linked) {
-      if (w.claim !== undefined || w.here === true) {
-        lines.push(worktreeLine(w))
-      }
-    }
-  }
+  lines.push(...worktreeSection(s))
   const cap = s.fleet.maxConcurrent > 0 ? `/${s.fleet.maxConcurrent}` : ''
   const live = s.fleet.agents.filter((a) => a.state === 'running')
   lines.push(`fleet: ${live.length}${cap} running`)
