@@ -2,16 +2,19 @@
  *  Pinned author+committer dates make staleness deterministic, same as
  *  commands/spec.test.ts's drift fixtures (spec@T0 < scope@T1 → STALE;
  *  spec recommitted at T2 → fresh). */
-import { execFileSync } from 'node:child_process'
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
-import { describe, test } from 'node:test'
+import { after, describe, test } from 'node:test'
 import assert from 'node:assert/strict'
-import { registerConnector } from '@broject/core'
+import { registerConnector, scrubEnv, testGit } from '@broject/core'
 import { GUARD_PROBES } from './guard-probes.ts'
 import { SPEC_CONNECTORS } from './spec-connectors.ts'
 import { initRepo, insideAsync, installFakeBd } from './commands/testrepo.ts'
+
+// ambient repo/agent/store pins must not reach fixture git children
+// or the code-under-test spawns — scrub once, restore after the file
+after(scrubEnv())
 
 // the probe resolves the specs facade through the registry — unit
 // tests must register what the CLI entrypoint would
@@ -28,17 +31,10 @@ const commit = (dir: string, subject: string, files: Record<string, string>, dat
     mkdirSync(dirname(join(dir, p)), { recursive: true })
     writeFileSync(join(dir, p), content)
   }
-  const {
-    GIT_DIR: _d,
-    GIT_WORK_TREE: _w,
-    GIT_INDEX_FILE: _i,
-    GIT_COMMON_DIR: _c,
-    ...env
-  } = process.env
-  execFileSync('git', ['add', '--', ...Object.keys(files)], { cwd: dir, env })
-  execFileSync('git', ['commit', '-qm', subject], {
+  testGit(['add', '--', ...Object.keys(files)], { cwd: dir })
+  testGit(['commit', '-qm', subject], {
     cwd: dir,
-    env: { ...env, GIT_AUTHOR_DATE: date, GIT_COMMITTER_DATE: date },
+    env: { ...process.env, GIT_AUTHOR_DATE: date, GIT_COMMITTER_DATE: date },
   })
 }
 

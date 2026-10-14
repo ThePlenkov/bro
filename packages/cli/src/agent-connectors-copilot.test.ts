@@ -1,13 +1,14 @@
-import { describe, test } from 'node:test'
+import { after, describe, test } from 'node:test'
 import assert from 'node:assert/strict'
-import { execFileSync } from 'node:child_process'
 import { chmodSync, existsSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import {
   readAgentRegistry,
+  scrubEnv,
   sessionPlane,
   SpawnError,
   AgentNotFound,
+  testGit,
   type AgentConnector,
 } from '@broject/core'
 import {
@@ -18,6 +19,10 @@ import {
 } from './agent-connectors.ts'
 import { copilotCountFile } from './session-planes/copilot.ts'
 import { initRepo, installFakeBd, readBeads } from './commands/testrepo.ts'
+
+// ambient repo/agent/store pins must not reach fixture git children
+// or the code-under-test spawns — scrub once, restore after the file
+after(scrubEnv())
 
 /** gh shim — the REST agent-task surface the connector speaks, backed
  *  by a JSON store at $FAKE_GH_DB ({tasks, prs, cancelledRuns, seq}).
@@ -256,7 +261,7 @@ describe('copilot connector', () => {
   test('the origin remote supplies the dispatch target', async () => {
     const fx = fixture([{ id: 'fx-1', status: 'open' }], {})
     try {
-      execFileSync('git', ['-C', fx.main, 'remote', 'add', 'origin', 'git@github.com:octo/origin-repo.git'])
+      testGit(['-C', fx.main, 'remote', 'add', 'origin', 'git@github.com:octo/origin-repo.git'])
       const conn = makeCopilotConnector({ dir: fx.main }, fx.env)
       await conn.spawn(SPEC(fx.main, fx.beadsDir, 'fx-1'))
       assert.equal(readAgentRegistry(fx.main)['fx-1']!.taskRepo, 'octo/origin-repo')

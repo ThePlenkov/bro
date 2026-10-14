@@ -1,6 +1,5 @@
-import { describe, test } from 'node:test'
+import { after, describe, test } from 'node:test'
 import assert from 'node:assert/strict'
-import { execFileSync } from 'node:child_process'
 import { mkdirSync, mkdtempSync, renameSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
@@ -11,26 +10,14 @@ import {
   gitLogPathRecords,
   gitLogStamp,
 } from './git.ts'
+import { scrubEnv, testGit } from './testkit.ts'
 
-/** A test run inside another repo still carries its repo-location env —
- *  strip it so child git only sees the fixture's cwd (same scrub as the
- *  cli testrepo fixture). */
-const cleanEnv = (): NodeJS.ProcessEnv => {
-  const {
-    GIT_DIR: _d,
-    GIT_WORK_TREE: _w,
-    GIT_INDEX_FILE: _i,
-    GIT_COMMON_DIR: _c,
-    ...env
-  } = process.env
-  return env
-}
+// ambient repo/agent/store pins must not reach fixture git children
+// or the code-under-test spawns — scrub once, restore after the file
+after(scrubEnv())
 
 function git(cwd: string, args: string[]): string {
-  return execFileSync('git', ['-C', cwd, ...args], { // NOSONAR — test fixture
-    encoding: 'utf8',
-    env: cleanEnv(),
-  }).trim()
+  return testGit(['-C', cwd, ...args]).trim()
 }
 
 /** mkdtemp repo on `branch` with git identity and one commit. */
@@ -325,9 +312,7 @@ describe('gitIsShallow', () => {
       assert.equal(gitIsShallow(dir), false)
       const clone = mkdtempSync(join(tmpdir(), 'bro-git-shallow-'))
       try {
-        execFileSync('git', ['clone', '-q', '--depth', '1', `file://${dir}`, join(clone, 'c')], {
-          env: cleanEnv(),
-        })
+        testGit(['clone', '-q', '--depth', '1', `file://${dir}`, join(clone, 'c')])
         assert.equal(gitIsShallow(join(clone, 'c')), true)
       } finally {
         rmSync(clone, { recursive: true, force: true })

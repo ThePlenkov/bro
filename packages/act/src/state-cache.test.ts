@@ -1,13 +1,17 @@
 import assert from 'node:assert/strict'
-import { execFileSync } from 'node:child_process'
 import { mkdirSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
-import { describe, test } from 'node:test'
+import { after, describe, test } from 'node:test'
 import type { CheckInfo, PrMeta, PrTarget, ReviewFacade, ReviewThread } from '@broject/core'
 import { fetchPrActState } from './state.ts'
 import { prStateCache } from './state-cache.ts'
 import { tmpDir } from './testtmp.ts'
 import type { PrActState } from './types.ts'
+import { scrubEnv, testGit } from '@broject/core'
+
+// ambient repo/agent/store pins must not reach fixture git children
+// or the code-under-test spawns — scrub once, restore after the file
+after(scrubEnv())
 
 const target: PrTarget = { repo: 'o/r', pr: 7 }
 
@@ -15,7 +19,7 @@ const target: PrTarget = { repo: 'o/r', pr: 7 }
  *  --git-common-dir, so the fixture is a `git init`, not a bare dir. */
 function repo(): string {
   const dir = tmpDir('bro-actstate-')
-  execFileSync('git', ['init', '-q', dir])
+  testGit(['init', '-q', dir])
   return dir
 }
 

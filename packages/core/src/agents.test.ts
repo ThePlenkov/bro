@@ -1,4 +1,4 @@
-import { describe, test } from 'node:test'
+import { after, describe, test } from 'node:test'
 import assert from 'node:assert/strict'
 import { execFileSync, spawn, spawnSync } from 'node:child_process'
 import {
@@ -30,11 +30,16 @@ import {
   writeAgentRegistry,
 } from './agents.ts'
 import { bdAt } from './bd.ts'
+import { scrubEnv, testGit } from './testkit.ts'
+
+// ambient repo/agent/store pins must not reach fixture git children
+// or the code-under-test spawns — scrub once, restore after the file
+after(scrubEnv())
 
 const withRepo = (fn: (dir: string) => void): void => {
   const dir = mkdtempSync(join(tmpdir(), 'bro-agents-'))
   try {
-    execFileSync('git', ['init', '-q', dir])
+    testGit(['init', '-q', dir])
     fn(dir)
   } finally {
     rmSync(dir, { recursive: true, force: true })
@@ -44,7 +49,7 @@ const withRepo = (fn: (dir: string) => void): void => {
 const withRepoAsync = async (fn: (dir: string) => Promise<void>): Promise<void> => {
   const dir = mkdtempSync(join(tmpdir(), 'bro-agents-'))
   try {
-    execFileSync('git', ['init', '-q', dir])
+    testGit(['init', '-q', dir])
     await fn(dir)
   } finally {
     rmSync(dir, { recursive: true, force: true })

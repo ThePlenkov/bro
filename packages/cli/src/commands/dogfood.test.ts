@@ -5,8 +5,7 @@
  *  scenario" means (the analyst writes verdict.md where its prompt
  *  points). */
 import assert from 'node:assert/strict'
-import { execFileSync } from 'node:child_process'
-import { describe, test } from 'node:test'
+import { after, describe, test } from 'node:test'
 import {
   existsSync,
   mkdirSync,
@@ -16,11 +15,15 @@ import {
   writeFileSync,
 } from 'node:fs'
 import { join } from 'node:path'
-import { AgentNotFound } from '@broject/core'
+import { AgentNotFound, testGit } from '@broject/core'
 import type { AgentInfo, SpawnSpec } from '@broject/core'
 import { registerAgentConnector } from '../agent-connectors.ts'
 import { listScenarios, runDogfoodCommand } from './dogfood.ts'
 import { capture, initRepo, installFakeBd, scrubEnv } from './testrepo.ts'
+
+// ambient repo/agent/store pins must not reach fixture git children
+// or the code-under-test spawns — scrub once, restore after the file
+after(scrubEnv())
 
 const dogfood = (argv: string[]) => capture(() => runDogfoodCommand(argv))
 
@@ -174,7 +177,7 @@ describe('bro self dogfood', () => {
         sdd?: { mode?: string }
       }
       assert.equal(cfg.sdd?.mode, 'gate')
-      assert.match(execFileSync('git', ['-C', repo, 'ls-files'], { encoding: 'utf8' }), /^bro\.config\.json$/m)
+      assert.match(testGit(['-C', repo, 'ls-files'], { encoding: 'utf8' }), /^bro\.config\.json$/m)
       // the spawn went through the registry path: repoRoot = scratch,
       // prompt text = the wrapped runner prompt, beadsDir = scratch store
       const spec = spawned[0]!

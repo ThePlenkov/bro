@@ -3,8 +3,7 @@
  *  `act rearm`, a recorded-but-dead daemon respawns at its cadence,
  *  dead loop/run/agent/worktree residue reports (run records reap),
  *  and --dry-run mutates nothing. */
-import { execFileSync } from 'node:child_process'
-import { describe, test, type TestContext } from 'node:test'
+import { after, describe, test, type TestContext } from 'node:test'
 import assert from 'node:assert/strict'
 import {
   existsSync,
@@ -16,6 +15,11 @@ import {
 } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { initRepo, installFakeHost, inside, runCli, writeHostState } from './testrepo.ts'
+import { scrubEnv, testGit } from '@broject/core'
+
+// ambient repo/agent/store pins must not reach fixture git children
+// or the code-under-test spawns — scrub once, restore after the file
+after(scrubEnv())
 
 const DEAD = 1 << 30
 
@@ -236,7 +240,7 @@ describe('fleet resume', () => {
     inside(main, root, () => {
       // a linked worktree carrying uncommitted work
       const sib = join(root, 'sibling')
-      execFileSync('git', ['-C', main, 'worktree', 'add', '-b', 'sib', sib])
+      testGit(['-C', main, 'worktree', 'add', '-b', 'sib', sib])
       writeFileSync(join(sib, 'stranded.txt'), 'unsaved work\n')
       const r = runCli(['fleet', 'resume'], { cwd: main })
       assert.equal(r.code, 0, r.stderr)

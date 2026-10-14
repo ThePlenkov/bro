@@ -1,11 +1,15 @@
 import assert from 'node:assert/strict'
-import { execFileSync } from 'node:child_process'
 import { mkdirSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
-import { describe, test } from 'node:test'
+import { after, describe, test } from 'node:test'
 import { writeStamp } from './buildstamp.ts'
 import { collectStatus } from './status.ts'
 import { tmpDir } from './testrepo.ts'
+import { scrubEnv, testGit } from '@broject/core'
+
+// ambient repo/agent/store pins must not reach fixture git children
+// or the code-under-test spawns — scrub once, restore after the file
+after(scrubEnv())
 
 // bd resolves BEADS_DIR before any .beads discovery — a session that
 // pinned it (agent env) would leak the real store into the bare-repo
@@ -14,12 +18,12 @@ process.env.BEADS_DIR = tmpDir('bro-status-beads-')
 
 function gitRepo(): string {
   const dir = tmpDir('bro-status-')
-  execFileSync('git', ['init', '-b', 'main'], { cwd: dir })
-  execFileSync('git', ['config', 'user.email', 't@t'], { cwd: dir })
-  execFileSync('git', ['config', 'user.name', 't'], { cwd: dir })
+  testGit(['init', '-b', 'main'], { cwd: dir })
+  testGit(['config', 'user.email', 't@t'], { cwd: dir })
+  testGit(['config', 'user.name', 't'], { cwd: dir })
   writeFileSync(join(dir, 'a.txt'), 'a')
-  execFileSync('git', ['add', 'a.txt'], { cwd: dir })
-  execFileSync('git', ['commit', '-m', 'init'], { cwd: dir })
+  testGit(['add', 'a.txt'], { cwd: dir })
+  testGit(['commit', '-m', 'init'], { cwd: dir })
   return dir
 }
 
@@ -38,9 +42,9 @@ describe('collectStatus', () => {
     const dir = gitRepo()
     writeFileSync(join(dir, 'untracked.txt'), 'x')
     assert.equal(collectStatus(dir).dirty, 1)
-    execFileSync('git', ['add', 'untracked.txt'], { cwd: dir })
+    testGit(['add', 'untracked.txt'], { cwd: dir })
     assert.equal(collectStatus(dir).dirty, 1)
-    execFileSync('git', ['commit', '-m', 'x'], { cwd: dir })
+    testGit(['commit', '-m', 'x'], { cwd: dir })
     assert.equal(collectStatus(dir).dirty, 0)
   })
 

@@ -4,7 +4,6 @@
  * for the lesson store — the same fixture shape as connector.test.ts.
  */
 import assert from 'node:assert/strict'
-import { execFileSync } from 'node:child_process'
 import {
   chmodSync,
   existsSync,
@@ -17,7 +16,7 @@ import {
 } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { describe, it } from 'node:test'
+import { after, describe, it } from 'node:test'
 import {
   probeQuestion,
   probeTerms,
@@ -28,6 +27,11 @@ import {
 } from './probe.ts'
 import { getLesson } from './store.ts'
 import type { Lesson } from './lesson.ts'
+import { scrubEnv, testGit } from '@broject/core'
+
+// ambient repo/agent/store pins must not reach fixture git children
+// or the code-under-test spawns — scrub once, restore after the file
+after(scrubEnv())
 
 const WIN32 = process.platform === 'win32'
 
@@ -90,7 +94,7 @@ function fixture(opts: {
 } = {}): Fixture & { restore: () => void } {
   const root = mkdtempSync(join(tmpdir(), 'bro-learn-probe-'))
   const dir = join(root, 'repo')
-  execFileSync('git', ['init', '-q', '-b', 'main', dir])
+  testGit(['init', '-q', '-b', 'main', dir])
   const binDir = join(root, 'bin')
   mkdirSync(binDir, { recursive: true })
   writeFileSync(join(binDir, 'bd'), FAKE_BD)

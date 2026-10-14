@@ -1,4 +1,4 @@
-import { describe, test } from 'node:test'
+import { after, describe, test } from 'node:test'
 import assert from 'node:assert/strict'
 import { spawnSync } from 'node:child_process'
 import {
@@ -20,8 +20,10 @@ import {
   patchAgentRegistry,
   procStat,
   readAgentRegistry,
+  scrubEnv,
   SpawnError,
   AgentNotFound,
+  testGitSpawn,
   type AgentCapabilities,
   type AgentConnector,
   type AgentInfo,
@@ -55,6 +57,10 @@ import {
   type BudgetSnapshot,
 } from './agent-connectors.ts'
 import { initRepo, installFakeBd, readBeads, writeBeads } from './commands/testrepo.ts'
+
+// ambient repo/agent/store pins must not reach fixture git children
+// or the code-under-test spawns — scrub once, restore after the file
+after(scrubEnv())
 
 /** tmux shim — a state file per socket at $TMUX_FAKE_HOME/<socket>.json
  *  maps session → pid; new-session spawns the pane command detached like
@@ -1203,7 +1209,7 @@ describe('docker connector', () => {
       // a linked worktree — the real spawn shape — puts .git OUTSIDE
       // the worktree, so the common dir needs its own mount
       const wt = join(f.root, 'wt-1')
-      spawnSync('git', ['-C', f.main, 'worktree', 'add', wt, '-b', 'wt-1'], {
+      testGitSpawn(['-C', f.main, 'worktree', 'add', wt, '-b', 'wt-1'], {
         stdio: 'pipe',
       })
       const env: AgentConnectorEnv = {

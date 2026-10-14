@@ -1,6 +1,5 @@
-import { describe, test } from 'node:test'
+import { after, describe, test } from 'node:test'
 import assert from 'node:assert/strict'
-import { execFileSync } from 'node:child_process'
 import { chmodSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -20,13 +19,18 @@ import {
 import type { Connector } from './connectors.ts'
 import { bdActor } from './tasks.ts'
 import type { TaskStore } from './tasks.ts'
+import { scrubEnv, testGit } from './testkit.ts'
+
+// ambient repo/agent/store pins must not reach fixture git children
+// or the code-under-test spawns — scrub once, restore after the file
+after(scrubEnv())
 
 const withRepo = (remote: string | null, fn: (dir: string) => void): void => {
   const dir = mkdtempSync(join(tmpdir(), 'bro-conn-'))
   try {
-    execFileSync('git', ['init', '-q', dir])
+    testGit(['init', '-q', dir])
     if (remote !== null) {
-      execFileSync('git', ['-C', dir, 'remote', 'add', 'origin', remote])
+      testGit(['-C', dir, 'remote', 'add', 'origin', remote])
     }
     fn(dir)
   } finally {
@@ -70,7 +74,7 @@ function withClaimRepo(
     BRO_BEAD_IDS: process.env.BRO_BEAD_IDS,
   }
   const run = async (): Promise<void> => {
-    execFileSync('git', ['init', '-q', dir])
+    testGit(['init', '-q', dir])
     if (opts.claims !== undefined) {
       const hooks = join(dir, '.git', 'bro', 'hooks')
       mkdirSync(hooks, { recursive: true })
@@ -180,7 +184,7 @@ describe('connectors', () => {
     withRepo('git@github.com:o/r.git', (dir) => {
       const first = facade('tasks', { dir }) as unknown as { tag?: string }
       assert.notEqual(first.tag, 'remote2')
-      execFileSync('git', [
+      testGit([
         '-C',
         dir,
         'remote',

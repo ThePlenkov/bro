@@ -5,7 +5,6 @@
  * are the contract; the fake's job is to fail loudly on anything else.
  */
 import assert from 'node:assert/strict'
-import { execFileSync } from 'node:child_process'
 import {
   chmodSync,
   existsSync,
@@ -18,9 +17,14 @@ import {
 } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
-import { describe, it } from 'node:test'
+import { after, describe, it } from 'node:test'
 import { learnConnector } from './connector.ts'
 import type { Lesson } from './lesson.ts'
+import { scrubEnv, testGit } from '@broject/core'
+
+// ambient repo/agent/store pins must not reach fixture git children
+// or the code-under-test spawns — scrub once, restore after the file
+after(scrubEnv())
 
 const WIN32 = process.platform === 'win32'
 
@@ -101,7 +105,7 @@ function fixture(opts: {
 } = {}): Fixture & { restore: () => void } {
   const root = mkdtempSync(join(tmpdir(), 'bro-learn-conn-'))
   const dir = join(root, 'repo')
-  execFileSync('git', ['init', '-q', '-b', 'main', dir])
+  testGit(['init', '-q', '-b', 'main', dir])
   if (opts.config !== undefined) {
     writeFileSync(join(dir, 'bro.config.json'), JSON.stringify(opts.config))
   }

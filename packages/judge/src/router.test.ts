@@ -1,10 +1,9 @@
-import { describe, test } from 'node:test'
+import { after, describe, test } from 'node:test'
 import assert from 'node:assert/strict'
-import { execFileSync } from 'node:child_process'
 import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { JudgeUnavailable } from '@broject/core'
+import { JudgeUnavailable, scrubEnv, testGit } from '@broject/core'
 import type {
   DecideResult,
   JudgeFacade,
@@ -15,10 +14,14 @@ import type {
 import { readJournal } from './journal.ts'
 import { ROUTE_CLASS_KIND, routeClass, routeClassQuestions } from './router.ts'
 
+// ambient repo/agent/store pins must not reach fixture git children
+// or the code-under-test spawns — scrub once, restore after the file
+after(scrubEnv())
+
 const withRepo = async (fn: (dir: string) => Promise<void>): Promise<void> => {
   const dir = mkdtempSync(join(tmpdir(), 'bro-judge-router-'))
   try {
-    execFileSync('git', ['init', '-q', dir])
+    testGit(['init', '-q', dir])
     await fn(dir)
   } finally {
     rmSync(dir, { recursive: true, force: true })

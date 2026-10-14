@@ -2,7 +2,7 @@
  *  CLI. `me` derives mesh://<org>/<repo> from origin; peers writes
  *  round-trip bro.config.json and reject malformed rigs. */
 import assert from 'node:assert/strict'
-import { describe, test } from 'node:test'
+import { after, describe, test } from 'node:test'
 import { execFileSync } from 'node:child_process'
 import { mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
@@ -15,11 +15,16 @@ import {
   readBeads,
   runCli,
 } from './testrepo.ts'
+import { scrubEnv, testGit } from '@broject/core'
+
+// ambient repo/agent/store pins must not reach fixture git children
+// or the code-under-test spawns — scrub once, restore after the file
+after(scrubEnv())
 
 describe('bro mesh', () => {
   test('me derives the rig uri from origin; peers add|list|remove round-trips', () => {
     const { root, main } = initRepo('bro-mesh-e2e-', (m) => {
-      execFileSync('git', ['remote', 'add', 'origin', 'https://github.com/acme/widgets.git'], { cwd: m })
+      testGit(['remote', 'add', 'origin', 'https://github.com/acme/widgets.git'], { cwd: m })
     })
     inside(main, root, () => {
       const me = runCli(['mesh', 'me'], { cwd: main })
@@ -70,7 +75,7 @@ describe('bro mesh', () => {
 
   test('mesh.rig config pin wins over origin', () => {
     const { root, main } = initRepo('bro-mesh-e2e-pin-', (m) => {
-      execFileSync('git', ['remote', 'add', 'origin', 'https://github.com/acme/widgets.git'], { cwd: m })
+      testGit(['remote', 'add', 'origin', 'https://github.com/acme/widgets.git'], { cwd: m })
     })
     inside(main, root, () => {
       writeFileSync(
@@ -87,7 +92,7 @@ describe('bro mesh', () => {
 
   test('pull + inbox — beads-remote replica surfaces addressed requests with provenance', () => {
     const { root, main } = initRepo('bro-mesh-e2e-remote-', (m) => {
-      execFileSync('git', ['remote', 'add', 'origin', 'https://github.com/ThePlenkov/bro.git'], { cwd: m })
+      testGit(['remote', 'add', 'origin', 'https://github.com/ThePlenkov/bro.git'], { cwd: m })
     })
     inside(main, root, () => {
       const binDir = installFakeDolt(root)
@@ -154,7 +159,7 @@ describe('bro mesh', () => {
 
   test('inbox — verdicted threads (accepted/rejected) no longer list their request', () => {
     const { root, main } = initRepo('bro-mesh-e2e-term-', (m) => {
-      execFileSync('git', ['remote', 'add', 'origin', 'https://github.com/ThePlenkov/bro.git'], { cwd: m })
+      testGit(['remote', 'add', 'origin', 'https://github.com/ThePlenkov/bro.git'], { cwd: m })
     })
     inside(main, root, () => {
       const binDir = installFakeDolt(root)
@@ -220,7 +225,7 @@ describe('bro mesh', () => {
 
   test('inbox — a local peer is read through its live store', () => {
     const { root, main } = initRepo('bro-mesh-e2e-local-', (m) => {
-      execFileSync('git', ['remote', 'add', 'origin', 'https://github.com/ThePlenkov/bro.git'], { cwd: m })
+      testGit(['remote', 'add', 'origin', 'https://github.com/ThePlenkov/bro.git'], { cwd: m })
     })
     inside(main, root, () => {
       const peerDir = join(root, 'peer')
@@ -252,7 +257,7 @@ describe('bro mesh', () => {
 
   test('inbox — an unreachable peer reports an error, not a silent empty', () => {
     const { root, main } = initRepo('bro-mesh-e2e-dead-', (m) => {
-      execFileSync('git', ['remote', 'add', 'origin', 'https://github.com/ThePlenkov/bro.git'], { cwd: m })
+      testGit(['remote', 'add', 'origin', 'https://github.com/ThePlenkov/bro.git'], { cwd: m })
     })
     inside(main, root, () => {
       const binDir = installFakeDolt(root)
@@ -268,7 +273,7 @@ describe('bro mesh', () => {
 
   test('peers add refuses to clobber a malformed config or a ts-shadowed one', () => {
     const { root, main } = initRepo('bro-mesh-e2e-cfg-', (m) => {
-      execFileSync('git', ['remote', 'add', 'origin', 'https://github.com/acme/widgets.git'], { cwd: m })
+      testGit(['remote', 'add', 'origin', 'https://github.com/acme/widgets.git'], { cwd: m })
       writeFileSync(join(m, 'bro.config.json'), '{ not json')
     })
     inside(main, root, () => {
@@ -281,7 +286,7 @@ describe('bro mesh', () => {
 
   test('request → claim → done → accept lifecycle on the local store', () => {
     const { root, main } = initRepo('bro-mesh-e2e-life-', (m) => {
-      execFileSync('git', ['remote', 'add', 'origin', 'https://github.com/ThePlenkov/bro.git'], { cwd: m })
+      testGit(['remote', 'add', 'origin', 'https://github.com/ThePlenkov/bro.git'], { cwd: m })
     })
     inside(main, root, () => {
       const { binDir, db } = installFakeBd(join(root, 'tools'), [])
@@ -353,7 +358,7 @@ describe('bro mesh', () => {
 
   test('request --for blocks a local bead on external:<rig>:<id>', () => {
     const { root, main } = initRepo('bro-mesh-e2e-dep-', (m) => {
-      execFileSync('git', ['remote', 'add', 'origin', 'https://github.com/ThePlenkov/bro.git'], { cwd: m })
+      testGit(['remote', 'add', 'origin', 'https://github.com/ThePlenkov/bro.git'], { cwd: m })
     })
     inside(main, root, () => {
       const { binDir, db } = installFakeBd(join(root, 'tools'), [])

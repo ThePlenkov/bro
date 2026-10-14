@@ -1,10 +1,14 @@
-import { describe, test } from 'node:test'
+import { after, describe, test } from 'node:test'
 import assert from 'node:assert/strict'
-import { execFileSync } from 'node:child_process'
 import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { getTasks, getTasksAsync, taskStore, type TaskStore, type TaskStoreAsync } from './tasks.ts'
+import { scrubEnv, testGit } from './testkit.ts'
+
+// ambient repo/agent/store pins must not reach fixture git children
+// or the code-under-test spawns — scrub once, restore after the file
+after(scrubEnv())
 
 const WIN32 = process.platform === 'win32'
 
@@ -334,9 +338,9 @@ describe('taskStore', { skip: WIN32 }, () => {
     try {
       const upstream = join(dir, 'upstream.git')
       const mirror = join(dir, 'mirror.git')
-      const git = (...a: string[]) => execFileSync('git', a, { encoding: 'utf8' })
+      const git = (...a: string[]) => testGit(a, { encoding: 'utf8' })
       git('init', '--bare', '-q', upstream)
-      const tree = execFileSync('git', ['-C', upstream, 'mktree', '--missing', '-z'], { encoding: 'utf8', input: '' }).trim()
+      const tree = testGit(['-C', upstream, 'mktree', '--missing', '-z'], { encoding: 'utf8', input: '' }).trim()
       const head = git('-C', upstream, '-c', 'user.email=t@t', '-c', 'user.name=t', 'commit-tree', tree, '-m', 'x').trim()
       git('-C', upstream, 'update-ref', 'refs/dolt/data', head)
       git('init', '--bare', '-q', mirror)

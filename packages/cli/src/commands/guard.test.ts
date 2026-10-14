@@ -1,12 +1,16 @@
 /** `bro guard` e2e — config defs resolve through the built CLI: `list`
  *  TSV/JSON + fail-closed malformed defs; `test` runs the engine
  *  read-only (exit 0 FIRE / 1 SKIP / 2 usage, fired set untouched). */
-import { execFileSync } from 'node:child_process'
 import { mkdirSync, writeFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
-import { describe, test } from 'node:test'
+import { after, describe, test } from 'node:test'
 import assert from 'node:assert/strict'
 import { initRepo, inside, installFakeBd, runCli } from './testrepo.ts'
+import { scrubEnv, testGit } from '@broject/core'
+
+// ambient repo/agent/store pins must not reach fixture git children
+// or the code-under-test spawns — scrub once, restore after the file
+after(scrubEnv())
 
 function guardFixture(config?: Record<string, unknown>) {
   const { root, main } = initRepo('bro-guard-e2e-', (dir) => {
@@ -170,8 +174,8 @@ describe('bro guard test', () => {
           mkdirSync(dirname(join(f.main, p)), { recursive: true })
           writeFileSync(join(f.main, p), c)
         }
-        execFileSync('git', ['add', '--', ...Object.keys(files)], { cwd: f.main })
-        execFileSync('git', ['commit', '-qm', 'x'], {
+        testGit(['add', '--', ...Object.keys(files)], { cwd: f.main })
+        testGit(['commit', '-qm', 'x'], {
           cwd: f.main,
           env: { ...process.env, GIT_AUTHOR_DATE: date, GIT_COMMITTER_DATE: date },
         })
