@@ -146,13 +146,20 @@ export function epicParentIds(ready: ReadyBead[], dir?: string, opts?: FacadeOpt
     try {
       // one bulk read for the whole uncached set — the ~0.65s bd spawn
       // floor is per-call, so serial `get`s here stack latencies
+      // (getTasks bounds the argv per `bd show`; a huge queue can't
+      // E2BIG its way in here)
       for (const r of getTasks(storeFor(dir, opts), missed)) {
         if (r.issue_type === 'epic') {
           parentEpicCache.set(`${cwd}:${dir ?? ''}:${r.id}`, true)
           epic.add(r.id)
         }
       }
-    } catch { /* parents we can't inspect stay molecule steps — never cached */ }
+    } catch (err) {
+      // parents we can't inspect stay molecule steps — never cached;
+      // the warn keeps a dead store from silently hiding epic children
+      const why = err instanceof Error ? err.message : String(err)
+      console.error(`warning: parent lookup failed — ${missed.length} parent(s) read as molecule steps (${why})`)
+    }
   }
   return epic
 }

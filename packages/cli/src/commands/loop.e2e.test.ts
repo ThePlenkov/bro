@@ -104,7 +104,25 @@ const args = process.argv.slice(2)
 const pf = args[args.length - 1]
 const STATE = process.env.FAKE_HOST_STATE
 const load = () => JSON.parse(fs.readFileSync(STATE, 'utf8'))
-const save = (s) => fs.writeFileSync(STATE, JSON.stringify(s))
+// host.json mutations serialize on the same mkdir lock the fake
+// agent/plugin hold — workers are detached processes, not in-order
+const LOCK = STATE + '.lock'
+const save = (s) => {
+  const tmp = STATE + '.tmp.' + process.pid
+  fs.writeFileSync(tmp, JSON.stringify(s))
+  fs.renameSync(tmp, STATE)
+}
+const withState = (fn) => {
+  for (let i = 0; ; i++) {
+    try { fs.mkdirSync(LOCK); break } catch (e) {
+      if (e.code !== 'EEXIST') throw e
+      if (i > 2000) throw new Error('host state lock wedged')
+      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 5)
+    }
+  }
+  try { const s = load(); const r = fn(s); save(s); return r }
+  finally { fs.rmSync(LOCK, { recursive: true }) }
+}
 fs.appendFileSync(
   path.join(path.dirname(STATE), 'acpworker.log'),
   JSON.stringify({
@@ -118,14 +136,13 @@ fs.appendFileSync(
   }) + '\\n'
 )
 if (fs.readFileSync(pf, 'utf8').includes('review-threads')) {
-  const s = load(); s.threads = []; save(s); process.exit(0)
+  withState((s) => { s.threads = [] })
+  process.exit(0)
 }
 fs.writeFileSync('work.txt', 'did the thing\\n')
 execFileSync('git', ['add', '-A'])
 execFileSync('git', ['commit', '-qm', 'feat: the thing'])
-const s = load()
-s.prOpened = true
-save(s)
+withState((s) => { s.prOpened = true })
 `
 
 /** Install the fake `bro` beside the fake `bd` — same dir, first on
@@ -511,14 +528,15 @@ describe('bro loop e2e', () => {
       // the tally counts work ITEMS (gate members) — the clump is one
       assert.match(r.stdout, /2 landed, 0 closed, 0 parked, 0 failed/)
       // two worker spawns total — the clump's one plus fx-c's solo —
-      // and two PRs, not three
+      // and two PRs, not three. Spawn order between detached workers is
+      // a race, so assert the SET, not the sequence
       const evs = (readHostState(f.hostState).events ?? []) as Array<Record<string, unknown>>
       const works = evs.filter((e) => e.spawn !== undefined)
       assert.equal(works.length, 2)
-      assert.equal(works[0]?.spawn, 'fx-a')
-      assert.equal(works[0]?.ids, 'fx-a,fx-b')
-      assert.equal(works[1]?.spawn, 'fx-c')
-      assert.equal(works[1]?.ids, 'fx-c')
+      const clump = works.find((w) => w.spawn === 'fx-a')
+      const solo = works.find((w) => w.spawn === 'fx-c')
+      assert.equal(clump?.ids, 'fx-a,fx-b')
+      assert.equal(solo?.ids, 'fx-c')
       assert.equal(Object.keys(readHostState(f.hostState).prs as object).length, 2)
       // coverage close: the commits named both members
       assertLandedBead(f.db, 'fx-a')
