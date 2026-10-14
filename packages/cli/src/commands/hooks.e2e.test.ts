@@ -710,6 +710,39 @@ describe('hooks e2e — session-start + the run.sh launcher', () => {
     })
   })
 
+  test('the session\'s own spawn-pinned claim is not parallel work — the nudge stays quiet', () => {
+    // bro-qteky: a spawned worker's bead is claimed by the orchestrator,
+    // so no `.task` marker ever armed — BRO_BEAD_ID is the session's
+    // claim record. In a single-runner scratch repo the nudge must say
+    // nothing at all (the assignee is the pin's claimAs identity, not
+    // this actor — pin trust bypasses assignee verification).
+    const f = hookFixture()
+    inside(f.main, f.root, () => {
+      const { binDir, db } = installFakeBd(f.root, [
+        {
+          ...FAKE_BEAD,
+          id: 'fx-9',
+          title: 'spawn-assigned step',
+          status: 'in_progress',
+          assignee: 'fx-9',
+        },
+      ])
+      const r = runCli(['hooks', 'session-start'], {
+        cwd: f.main,
+        input: JSON.stringify({ session_id: 's1' }),
+        env: {
+          PATH: `${binDir}:${process.env.PATH}`,
+          FAKE_BD_DB: db,
+          BRO_BEAD_ID: 'fx-9',
+          XDG_STATE_HOME: join(f.root, 'xdg-state'),
+        },
+      })
+      assert.equal(r.code, 0)
+      assert.doesNotMatch(r.stdout, /parallel work detected/)
+      assert.doesNotMatch(r.stdout, /fx-9/)
+    })
+  })
+
   // the launcher is part of the fail-open contract — it's what plugin
   // hosts actually exec; dist must resolve without PATH help
   const RUN_SH = resolve(CLI_DIST, '..', '..', '..', '..', 'hooks', 'run.sh')

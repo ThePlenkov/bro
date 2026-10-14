@@ -47,9 +47,11 @@ esac
 
 /** Tmp git repo + scripted bd + a `.task` claim marker — the beads
  *  connector's claim-scoped probes (parallelWork, stopGate) run against
- *  it. BEADS_ACTOR pins the actor so ownership checks are hermetic. */
+ *  it. BEADS_ACTOR pins the actor so ownership checks are hermetic;
+ *  BRO_BEAD_ID(S) are cleared unless `pins` names the spawn's assigned
+ *  claims — a suite run under a worker env must not leak its pin in. */
 function withClaimRepo(
-  opts: { claims?: string[]; list?: string },
+  opts: { claims?: string[]; list?: string; pins?: string[] },
   fn: (dir: string) => void | Promise<void>
 ): Promise<void> {
   const dir = mkdtempSync(join(tmpdir(), 'bro-conn-claim-'))
@@ -64,6 +66,8 @@ function withClaimRepo(
     PATH: process.env.PATH,
     FAKE_BD_LIST_FILE: process.env.FAKE_BD_LIST_FILE,
     BEADS_ACTOR: process.env.BEADS_ACTOR,
+    BRO_BEAD_ID: process.env.BRO_BEAD_ID,
+    BRO_BEAD_IDS: process.env.BRO_BEAD_IDS,
   }
   const run = async (): Promise<void> => {
     execFileSync('git', ['init', '-q', dir])
@@ -75,6 +79,13 @@ function withClaimRepo(
     process.env.PATH = `${bin}:${saved.PATH}`
     process.env.FAKE_BD_LIST_FILE = join(dir, 'list.json')
     process.env.BEADS_ACTOR = 'test-agent'
+    if (opts.pins === undefined) {
+      delete process.env.BRO_BEAD_ID
+      delete process.env.BRO_BEAD_IDS
+    } else {
+      process.env.BRO_BEAD_ID = opts.pins[0] ?? ''
+      process.env.BRO_BEAD_IDS = opts.pins.join(',')
+    }
     await fn(dir)
   }
   return run().finally(() => {
@@ -359,6 +370,16 @@ describe('isOwnClaim', () => {
     assert.equal(isOwnClaim({ id: 'b1' }, mine, 'me'), true)
     assert.equal(isOwnClaim({ id: 'b1', assignee: 'x' }, mine, ''), true)
   })
+
+  test('a spawn pin needs no verification — a claimAs worker identity stays own', () => {
+    // gascity rebinds the claim to the step id itself — an assignee that
+    // never matches the actor must not disprove a pinned assignment
+    const pinned = new Set(['b2'])
+    assert.equal(isOwnClaim({ id: 'b2', assignee: 'b2' }, new Set(['b2']), 'me', pinned), true)
+    assert.equal(isOwnClaim({ id: 'b2', assignee: 'other' }, new Set(['b2']), 'me', pinned), true)
+    // un-pinned ids still verify — pin trust never rescues a bare marker
+    assert.equal(isOwnClaim({ id: 'b1', assignee: 'other' }, mine, 'me', pinned), false)
+  })
 })
 
 describe('preToolVerdicts', () => {
@@ -429,6 +450,34 @@ describe('beads claim ownership', () => {
       // is passive, so a session that armed no marker never hears about
       // them at the stop gate (bro-hpb35)
       assert.ok(task.every((g) => g.passive === undefined))
+    })
+  })
+
+  test('a spawn-pinned bead is the session\'s own claim — never parallel work', async () => {
+    // the dogfood FP (bro-qteky): the orchestrator claimed the step for
+    // the worker, so no `.task` marker exists — BRO_BEAD_ID(S) is the
+    // session's claim record. b2's pin subtracts it without a marker.
+    await withClaimRepo({ pins: ['b2'], list: CLAIMED_LIST }, async (dir) => {
+      const beads = (await parallelWorkLines({ dir, sessionId: 's1' })).find((l) =>
+        l.startsWith('claimed beads:')
+      )
+      assert.match(beads ?? '', /\bb1\b/)
+      assert.doesNotMatch(beads ?? '', /\bb2\b/)
+    })
+  })
+
+  test('a claimAs-pinned bead (assignee is the step id) stays own', async () => {
+    // gascity rebinds the claim to the step id — the pin trusts it
+    // without an assignee/actor match
+    const list =
+      '[{"id":"b3","status":"in_progress","title":"gc step","assignee":"b3"},' +
+      '{"id":"b1","status":"in_progress","title":"foreign","assignee":"other-agent"}]'
+    await withClaimRepo({ pins: ['b3'], list }, async (dir) => {
+      const beads = (await parallelWorkLines({ dir, sessionId: 's1' })).find((l) =>
+        l.startsWith('claimed beads:')
+      )
+      assert.match(beads ?? '', /\bb1\b/)
+      assert.doesNotMatch(beads ?? '', /\bb3\b/)
     })
   })
 })

@@ -248,6 +248,7 @@ export {
   registerConnector,
   reviewHost,
   specStore,
+  sessionPinnedClaims,
   sessionStartLines,
   sessionStartProbe,
   sessionTaskClaims,
