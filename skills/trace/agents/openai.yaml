@@ -1,0 +1,7 @@
+interface:
+  display_name: "Bro Trace"
+  short_description: "OTLP export of session trace journals via the bro CLI — spans to Langfuse/Phoenix"
+  brand_color: "#0E8A16"
+  default_prompt: "Use $trace to get started."
+policy:
+  allow_implicit_invocation: true

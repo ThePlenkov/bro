@@ -101,6 +101,7 @@ import {
   type InstallResult,
 } from './githooks.ts'
 import { emitPostMerge, runPostMergeRefresh } from './postmerge.ts'
+import { maybeSpawnTraceFlush } from './trace.ts'
 import { emitRefGuard } from './refguard.ts'
 import { goalContextLines, goalStopLines } from './goal.ts'
 import { heartbeatLine } from './watch-heartbeat.ts'
@@ -803,7 +804,18 @@ function journalTrace(input: HookInput, sessionId: string): void {
     // discarded. Best-effort — a lock timeout degrades to the plain
     // append, never a stalled hook.
     const append = (): void => {
-      appendFileSync(path, `${JSON.stringify(traceEntry(input))}\n`)
+      const entry = traceEntry(input)
+      // env pins are session context, not payload — spawned workers
+      // carry BRO_BEAD_ID/BRO_AGENT_ID so fleet work attributes to its
+      // bead; interactive sessions simply omit the fields (absent
+      // fields stay absent, same rule as paths)
+      if (process.env.BRO_BEAD_ID !== undefined && process.env.BRO_BEAD_ID !== '') {
+        entry.bead = process.env.BRO_BEAD_ID
+      }
+      if (process.env.BRO_AGENT_ID !== undefined && process.env.BRO_AGENT_ID !== '') {
+        entry.agent = process.env.BRO_AGENT_ID
+      }
+      appendFileSync(path, `${JSON.stringify(entry)}\n`)
       if (statSync(path).size > TRACE_JOURNAL_MAX_BYTES) {
         const kept = readFileSync(path, 'utf8')
           .split('\n')
@@ -1233,6 +1245,10 @@ async function emitPostTool(input: HookInput): Promise<void> {
   // journal before the probes run — a lesson triggered on this exact
   // tool landing must see its own trace line in the same event
   journalTrace(input, sessionId)
+  // OTLP auto-flush — opt-in only, throttled, detached; a dead
+  // collector can lose spans, never stall the hook (spec:
+  // specs/telemetry/bro-huy5o.11.md)
+  maybeSpawnTraceFlush(process.cwd())
   if (input.tool_response?.success === true) {
     const cmd = typeof input.tool_input?.command === 'string' ? input.tool_input.command : ''
     const aspects = classifyArmCommands(cmd)
@@ -1296,6 +1312,9 @@ const GATE_PRIORITY = ['drill', 'work', 'act', 'task']
 
 async function emitStopGate(input: HookInput): Promise<void> {
   const sessionId = typeof input.session_id === 'string' ? input.session_id : ''
+  // session tail — the last post-tool lines only ship if a flush fires
+  // here; a stop's spawn is the same detached, throttled respawn
+  maybeSpawnTraceFlush(process.cwd())
   // the goal reminder fires on EVERY stop — it is the keep-going nudge,
   // exempt from the once-per-session block budget (context, never
   // `decision: block`; spec: specs/goal/bro-6vcll.md)
