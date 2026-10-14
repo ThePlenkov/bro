@@ -82,6 +82,70 @@ const sha256hex = (s: string): string => createHash('sha256').update(s).digest('
 
 const nano = (ms: number): string => `${BigInt(Math.max(0, Math.round(ms))) * 1_000_000n}`
 
+/** `bro.command` attribute — absent for a missing/empty command, the
+ *  value truncated to COMMAND_ATTR_MAX like any other string field. */
+function commandAttr(command: unknown): OtlpKeyValue | null {
+  if (typeof command !== 'string' || command === '') {
+    return null
+  }
+  return {
+    key: 'bro.command',
+    value: {
+      stringValue:
+        command.length > COMMAND_ATTR_MAX ? command.slice(0, COMMAND_ATTR_MAX) : command,
+    },
+  }
+}
+
+/** `bro.paths` attribute — absent unless the field is an array holding
+ *  at least one string. */
+function pathsAttr(paths: unknown): OtlpKeyValue | null {
+  if (!Array.isArray(paths)) {
+    return null
+  }
+  const strings = paths.filter((p): p is string => typeof p === 'string')
+  if (strings.length === 0) {
+    return null
+  }
+  return {
+    key: 'bro.paths',
+    value: { arrayValue: { values: strings.map((p) => ({ stringValue: p })) } },
+  }
+}
+
+/** Span attributes: bro.session first, every non-structural journal
+ *  field verbatim, then the tool/command/paths projections. */
+function spanAttributes(
+  session: string,
+  raw: Record<string, unknown>,
+  tool: string
+): OtlpKeyValue[] {
+  const attributes: OtlpKeyValue[] = [
+    { key: 'bro.session', value: { stringValue: session } },
+  ]
+  for (const [k, v] of Object.entries(raw)) {
+    if (STRUCTURAL.has(k)) {
+      continue
+    }
+    const a = fieldAttr(k, v)
+    if (a !== null) {
+      attributes.push(a)
+    }
+  }
+  if (tool !== 'event') {
+    attributes.push({ key: 'bro.tool', value: { stringValue: tool } })
+  }
+  const command = commandAttr(raw.command)
+  if (command !== null) {
+    attributes.push(command)
+  }
+  const paths = pathsAttr(raw.paths)
+  if (paths !== null) {
+    attributes.push(paths)
+  }
+  return attributes
+}
+
 /** Journal line → span. `traceId` is deterministic per session file,
  *  `spanId` a content hash — a re-sent line lands on the same span and
  *  dedups server-side. Duration is the gap to the next entry's ts (the
@@ -98,39 +162,6 @@ export function lineToSpan(
   const spanId = sha256hex(`${traceId}|${JSON.stringify(raw)}`).slice(0, 16)
   const tool = typeof raw.tool === 'string' && raw.tool !== '' ? raw.tool : 'event'
   const end = nextTs !== undefined && nextTs > raw.ts ? nextTs : raw.ts
-  const attributes: OtlpKeyValue[] = [{ key: 'bro.session', value: { stringValue: session } }]
-  for (const [k, v] of Object.entries(raw)) {
-    if (STRUCTURAL.has(k)) {
-      continue
-    }
-    const a = fieldAttr(k, v)
-    if (a !== null) {
-      attributes.push(a)
-    }
-  }
-  if (tool !== 'event') {
-    attributes.push({ key: 'bro.tool', value: { stringValue: tool } })
-  }
-  if (typeof raw.command === 'string' && raw.command !== '') {
-    attributes.push({
-      key: 'bro.command',
-      value: {
-        stringValue:
-          raw.command.length > COMMAND_ATTR_MAX
-            ? raw.command.slice(0, COMMAND_ATTR_MAX)
-            : raw.command,
-      },
-    })
-  }
-  if (Array.isArray(raw.paths)) {
-    const paths = raw.paths.filter((p): p is string => typeof p === 'string')
-    if (paths.length > 0) {
-      attributes.push({
-        key: 'bro.paths',
-        value: { arrayValue: { values: paths.map((p) => ({ stringValue: p })) } },
-      })
-    }
-  }
   return {
     traceId,
     spanId,
@@ -138,7 +169,7 @@ export function lineToSpan(
     kind: 1,
     startTimeUnixNano: nano(raw.ts),
     endTimeUnixNano: nano(end),
-    attributes,
+    attributes: spanAttributes(session, raw, tool),
     ...(raw.ok === false ? { status: { code: 2 } } : {}),
   }
 }
@@ -291,6 +322,87 @@ export interface ExportResult {
   payload?: Record<string, unknown>
 }
 
+interface JournalScan {
+  spans: OtlpSpan[]
+  /** journal basename → the offset a successful POST commits. */
+  advance: Map<string, { line: number; tail: string }>
+}
+
+/** Journals past their cursor offsets → spans + the cursor advance.
+ *  `off` resyncs to the live tail when the pinned last-sent line no
+ *  longer sits at `off-1` (front-trimmed or recreated journal). */
+function scanJournals(
+  traceDir: string,
+  session: string | undefined,
+  cursor: ExportCursor
+): JournalScan {
+  const spans: OtlpSpan[] = []
+  const advance = new Map<string, { line: number; tail: string }>()
+  for (const j of journalFiles(traceDir, session)) {
+    let lines: string[]
+    try {
+      lines = readFileSync(j.path, 'utf8')
+        .split('\n')
+        .filter((l) => l.trim() !== '')
+    } catch {
+      // a racing reap can unlink mid-scan — that journal just sits out
+      continue
+    }
+    const cur = cursor.sessions[basename(j.path)]
+    let off = cur?.line ?? 0
+    if (
+      off > lines.length ||
+      (off > 0 && cur?.tail !== undefined && lines[off - 1] !== cur.tail)
+    ) {
+      // the journal trimmed or was recreated past the cursor — resync
+      // to the live tail (a resend dedups by span id)
+      off = 0
+    }
+    const fresh = lines.slice(off)
+    if (fresh.length === 0) {
+      continue
+    }
+    spans.push(...journalSpans(j.session, fresh))
+    advance.set(basename(j.path), { line: lines.length, tail: lines[lines.length - 1]! })
+  }
+  return { spans, advance }
+}
+
+/** POST the payload — success commits the cursor advance and clears
+ *  lastError; failure records lastError on the cursor for the detached
+ *  path's postmortem. Either way writeCursor runs. */
+async function postSpans(
+  cPath: string,
+  cursor: ExportCursor,
+  advance: Map<string, { line: number; tail: string }>,
+  result: ExportResult,
+  cfg: OtlpConfig
+): Promise<void> {
+  try {
+    const res = await fetch(result.endpoint, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', ...cfg.headers },
+      body: JSON.stringify(result.payload),
+      signal: AbortSignal.timeout(cfg.timeoutMs),
+    })
+    if (!res.ok) {
+      throw new Error(`OTLP endpoint ${result.endpoint} answered ${res.status}`)
+    }
+    for (const [file, s] of advance) {
+      cursor.sessions[file] = { line: s.line, tail: s.tail, at: Date.now() }
+    }
+    delete cursor.lastError
+    delete cursor.lastErrorAt
+    writeCursor(cPath, cursor)
+    result.posted = true
+  } catch (e) {
+    result.error = e instanceof Error ? e.message : String(e)
+    cursor.lastError = result.error
+    cursor.lastErrorAt = Date.now()
+    writeCursor(cPath, cursor)
+  }
+}
+
 /** The export itself — journals → spans → one POST, cursor advance on
  *  success. Never throws: every failure lands in the result (and the
  *  cursor's lastError for the detached path's postmortem). */
@@ -323,35 +435,7 @@ export async function exportTraces(opts: {
   }
   const cPath = cursorPath(traceDir)
   const cursor = readCursor(cPath)
-  const spans: OtlpSpan[] = []
-  const advance = new Map<string, { line: number; tail: string }>()
-  for (const j of journalFiles(traceDir, opts.session)) {
-    let lines: string[]
-    try {
-      lines = readFileSync(j.path, 'utf8')
-        .split('\n')
-        .filter((l) => l.trim() !== '')
-    } catch {
-      // a racing reap can unlink mid-scan — that journal just sits out
-      continue
-    }
-    const cur = cursor.sessions[basename(j.path)]
-    let off = cur?.line ?? 0
-    if (
-      off > lines.length ||
-      (off > 0 && cur?.tail !== undefined && lines[off - 1] !== cur.tail)
-    ) {
-      // the journal trimmed or was recreated past the cursor — resync
-      // to the live tail (a resend dedups by span id)
-      off = 0
-    }
-    const fresh = lines.slice(off)
-    if (fresh.length === 0) {
-      continue
-    }
-    spans.push(...journalSpans(j.session, fresh))
-    advance.set(basename(j.path), { line: lines.length, tail: lines[lines.length - 1]! })
-  }
+  const { spans, advance } = scanJournals(traceDir, opts.session, cursor)
   result.sessions = advance.size
   result.spans = spans.length
   if (spans.length === 0) {
@@ -363,29 +447,7 @@ export async function exportTraces(opts: {
   if (result.dryRun) {
     return result
   }
-  try {
-    const res = await fetch(result.endpoint, {
-      method: 'POST',
-      headers: { 'content-type': 'application/json', ...cfg.headers },
-      body: JSON.stringify(result.payload),
-      signal: AbortSignal.timeout(cfg.timeoutMs),
-    })
-    if (!res.ok) {
-      throw new Error(`OTLP endpoint ${result.endpoint} answered ${res.status}`)
-    }
-    for (const [file, s] of advance) {
-      cursor.sessions[file] = { line: s.line, tail: s.tail, at: Date.now() }
-    }
-    delete cursor.lastError
-    delete cursor.lastErrorAt
-    writeCursor(cPath, cursor)
-    result.posted = true
-  } catch (e) {
-    result.error = e instanceof Error ? e.message : String(e)
-    cursor.lastError = result.error
-    cursor.lastErrorAt = Date.now()
-    writeCursor(cPath, cursor)
-  }
+  await postSpans(cPath, cursor, advance, result, cfg)
   return result
 }
 
@@ -451,50 +513,78 @@ export function maybeSpawnTraceFlush(
 
 // --- command -----------------------------------------------------------------------
 
-export async function runTraceCommand(argv: string[]): Promise<void> {
-  const [verb, ...args] = argv
-  if (verb !== 'export') {
-    console.error('usage: bro trace export [--session <id>] [--dry-run] [--json]')
-    process.exit(2)
-  }
+interface ExportArgs {
+  session: string | undefined
+  dryRun: boolean
+  json: boolean
+}
+
+const EXPORT_USAGE = 'usage: bro trace export [--session <id>] [--dry-run] [--json]'
+
+/** export flags → a normalized arg set; null on a dangling --session —
+ *  it must not widen the filter to every journal. */
+function parseExportArgs(args: string[]): ExportArgs | null {
   const si = args.indexOf('--session')
   const session = si >= 0 ? args[si + 1] : undefined
   if (si >= 0 && (session === undefined || session.startsWith('--'))) {
-    // a dangling --session must not widen the filter to every journal
-    console.error('usage: bro trace export [--session <id>] [--dry-run] [--json]')
-    process.exit(2)
+    return null
   }
-  const dryRun = args.includes('--dry-run')
-  const json = args.includes('--json')
-  const r = await exportTraces({ dir: process.cwd(), session, dryRun })
-  if (json) {
-    const { payload: _p, ...rest } = r ?? { endpoint: '', sessions: 0, spans: 0, dryRun, posted: false }
+  return { session, dryRun: args.includes('--dry-run'), json: args.includes('--json') }
+}
+
+/** Human/JSON result reporting — the JSON line always comes first so a
+ *  machine reader sees the summary even on a failing run. Returns the
+ *  process exit code. */
+function reportExport(r: ExportResult | null, args: ExportArgs): number {
+  if (args.json) {
+    const { payload: _p, ...rest } = r ?? {
+      endpoint: '',
+      sessions: 0,
+      spans: 0,
+      dryRun: args.dryRun,
+      posted: false,
+    }
     console.log(JSON.stringify({ ...(r === null ? { error: 'not a git repo' } : rest) }))
   }
   if (r === null) {
-    if (!json) {
+    if (!args.json) {
       console.error('bro trace export: not a git repo — no journals to read')
     }
-    process.exit(1)
+    return 1
   }
   if (r.error !== undefined && !r.posted) {
-    if (!json) {
+    if (!args.json) {
       console.error(`bro trace export: ${r.error}`)
     }
-    process.exit(1)
+    return 1
   }
   if (r.dryRun) {
-    if (!json) {
+    if (!args.json) {
       console.log(JSON.stringify(r.payload, null, 2))
     }
-    return
+    return 0
   }
-  if (json) {
-    return
+  if (args.json) {
+    return 0
   }
   console.log(
     r.spans === 0
       ? 'nothing to export — all journals already flushed'
       : `exported ${r.spans} span(s) from ${r.sessions} session(s) → ${r.endpoint}`
   )
+  return 0
+}
+
+export async function runTraceCommand(argv: string[]): Promise<void> {
+  const [verb, ...rest] = argv
+  const args = verb === 'export' ? parseExportArgs(rest) : null
+  if (args === null) {
+    console.error(EXPORT_USAGE)
+    process.exit(2)
+  }
+  const r = await exportTraces({ dir: process.cwd(), session: args.session, dryRun: args.dryRun })
+  const code = reportExport(r, args)
+  if (code !== 0) {
+    process.exit(code)
+  }
 }
