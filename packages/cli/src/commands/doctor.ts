@@ -12,6 +12,7 @@
  */
 import { spawnSync } from 'node:child_process'
 import { existsSync, readdirSync, readFileSync, realpathSync, statSync } from 'node:fs'
+import { homedir } from 'node:os'
 import { basename, delimiter, dirname, join, resolve } from 'node:path'
 import {
   bdTry,
@@ -20,11 +21,13 @@ import {
   CORE_CONFIG_SECTIONS,
   facadeAuth,
   facadeName,
+  gitCommonDir,
   gitTry,
   isEnvName,
   janitorDidWork,
   janitorLine,
   loadConfigLayers,
+  pidAlive,
   probeBdCompat,
   PROVIDER_REGISTRY,
   runJanitor,
@@ -846,6 +849,277 @@ function providerChecks(dir: string): DoctorCheck[] {
   ]
 }
 
+// --- conductor classifier guard (bro-9ww2q) -------------------------------
+// A client whose ANTHROPIC_BASE_URL lands on an acp-backed /v1 plane runs
+// its permission/safety classifier through session/new — a check that must
+// answer in seconds pays the full session-start cost (hooks, bd reads)
+// and fails closed, deadlocking interactive approvals (retro bro-p0baz).
+// The triangle is static: providers.<name> acp entry, the serve endpoint
+// referencing it (BRO_PROVIDER_BACKEND), and the client's classifier
+// knobs naming a wire that endpoint serves.
+
+/** Env knobs a Claude-shaped client resolves its classifier lane through
+ *  — dedicated small/fast pins first; unset, the main-model lane carries
+ *  the check instead (and inherits the same endpoint). */
+const CLASSIFIER_KNOBS = ['ANTHROPIC_SMALL_FAST_MODEL', 'ANTHROPIC_DEFAULT_HAIKU_MODEL'] as const
+const MODEL_KNOBS = [
+  'ANTHROPIC_MODEL',
+  'ANTHROPIC_DEFAULT_SONNET_MODEL',
+  'ANTHROPIC_DEFAULT_OPUS_MODEL',
+] as const
+
+interface ClientSource {
+  label: string
+  env: Record<string, string>
+  /** top-level `model` field — the main lane the classifier inherits. */
+  model?: string
+}
+
+const isRecord = (v: unknown): v is Record<string, unknown> =>
+  typeof v === 'object' && v !== null && !Array.isArray(v)
+
+/** One client settings file → its env block + main model, or null when
+ *  the file carries no client signal. */
+function readClientSource(path: string, label: string): ClientSource | null {
+  try {
+    const raw = JSON.parse(readFileSync(path, 'utf8')) as Record<string, unknown>
+    const env: Record<string, string> = {}
+    if (isRecord(raw.env)) {
+      for (const [k, v] of Object.entries(raw.env)) {
+        if (typeof v === 'string' && v.trim() !== '') {
+          env[k] = v.trim()
+        }
+      }
+    }
+    const model =
+      typeof raw.model === 'string' && raw.model.trim() !== '' ? raw.model.trim() : undefined
+    return Object.keys(env).length > 0 || model !== undefined ? { label, env, model } : null
+  } catch {
+    return null // absent/malformed — not client evidence
+  }
+}
+
+/** Where the client's env block can pin a classifier model: user-level
+ *  claude settings (CLAUDE_CONFIG_DIR honored like the client does),
+ *  the repo's .claude settings pair, and doctor's own process env (a
+ *  live client session's knobs). */
+function claudeClientSources(dirs: string[]): ClientSource[] {
+  const home = process.env.CLAUDE_CONFIG_DIR?.trim() || join(homedir(), '.claude')
+  const files: [path: string, label: string][] = [
+    [join(home, 'settings.json'), `${home}/settings.json`],
+    [join(home, 'settings.local.json'), `${home}/settings.local.json`],
+  ]
+  for (const d of new Set(dirs)) {
+    files.push(
+      [join(d, '.claude', 'settings.json'), '.claude/settings.json'],
+      [join(d, '.claude', 'settings.local.json'), '.claude/settings.local.json']
+    )
+  }
+  const out: ClientSource[] = []
+  for (const [path, label] of files) {
+    const src = readClientSource(path, label)
+    if (src !== null) {
+      out.push(src)
+    }
+  }
+  const procEnv: Record<string, string> = {}
+  for (const k of [...CLASSIFIER_KNOBS, ...MODEL_KNOBS, 'ANTHROPIC_BASE_URL']) {
+    const v = process.env[k]
+    if (v !== undefined && v.trim() !== '') {
+      procEnv[k] = v.trim()
+    }
+  }
+  if (Object.keys(procEnv).length > 0) {
+    out.push({ label: 'process env', env: procEnv })
+  }
+  return out
+}
+
+/** The knobs whose values the classifier resolves — the dedicated
+ *  lane when pinned, else the main-model lane it inherits. */
+function classifierPins(src: ClientSource): [knob: string, value: string][] {
+  const dedicated = CLASSIFIER_KNOBS.flatMap((k): [string, string][] =>
+    src.env[k] !== undefined ? [[k, src.env[k]]] : []
+  )
+  if (dedicated.length > 0) {
+    return dedicated
+  }
+  const out = MODEL_KNOBS.flatMap((k): [string, string][] =>
+    src.env[k] !== undefined ? [[k, src.env[k]]] : []
+  )
+  if (src.model !== undefined) {
+    out.push(['model', src.model])
+  }
+  return out
+}
+
+/** The serve.json liveness read — same contract serve.ts publishes
+ *  (readServeState + pidAlive); kept local so a state-file peek never
+ *  loads the HTTP server's import graph into doctor. */
+function liveServeEndpoint(dir: string): { url: string; pid: number } | undefined {
+  const common = gitCommonDir(dir)
+  if (common === null) {
+    return undefined
+  }
+  try {
+    const v = JSON.parse(readFileSync(join(common, 'bro', 'serve.json'), 'utf8')) as {
+      pid?: unknown
+      url?: unknown
+    }
+    if (typeof v.pid === 'number' && typeof v.url === 'string' && v.url !== '' && pidAlive(v.pid)) {
+      return { url: v.url, pid: v.pid }
+    }
+  } catch {
+    // torn/absent state file — not a live endpoint
+  }
+  return undefined
+}
+
+/** The endpoint's BRO_PROVIDER_BACKEND — doctor's own env first (when
+ *  the same env hosts the serve), else the running server's /proc
+ *  environ. Non-/proc platforms can't read a foreign env — the
+ *  client-side wire evidence below then decides the row alone. */
+function serveBackendName(serve: { url: string; pid: number } | undefined): string | undefined {
+  const own = process.env.BRO_PROVIDER_BACKEND?.trim()
+  if (own !== undefined && own !== '') {
+    return own
+  }
+  if (serve === undefined) {
+    return undefined
+  }
+  try {
+    const environ = readFileSync(`/proc/${serve.pid}/environ`).toString('latin1')
+    for (const kv of environ.split('\0')) {
+      const eq = kv.indexOf('=')
+      if (eq > 0 && kv.slice(0, eq) === 'BRO_PROVIDER_BACKEND') {
+        const v = kv.slice(eq + 1).trim()
+        return v === '' ? undefined : v
+      }
+    }
+  } catch {
+    // unreadable — raced exit or a platform without /proc
+  }
+  return undefined
+}
+
+/** The model ids an acp entry can serve: the pinned `model` field plus
+ *  `--model` flags inside its command. The conductor strips any
+ *  `<prefix>/` off the caller's id, so the match vocabulary is bare
+ *  ids — `<name>/<id>` spellings resolve to the same wire. */
+function acpWireIds(providers: Record<string, ProviderEntry>): Map<string, string> {
+  const ids = new Map<string, string>()
+  for (const [name, e] of Object.entries(providers)) {
+    if (e.type !== 'acp') {
+      continue
+    }
+    if (e.model !== undefined) {
+      ids.set(e.model, name)
+    }
+    const toks = e.command.split(/\s+/)
+    for (let i = 0; i < toks.length; i++) {
+      if (toks[i] === '--model' && toks[i + 1] !== undefined) {
+        ids.set(toks[i + 1], name)
+      }
+      const eq = /^--model=(.+)$/.exec(toks[i]!)
+      if (eq !== null) {
+        ids.set(eq[1]!, name)
+      }
+    }
+  }
+  return ids
+}
+
+/** A client-pinned model id → the acp provider serving that wire:
+ *  `<acp-name>/<id>` is conductor vocabulary outright; any other
+ *  `<prefix>/<id>` or bare id matches when the entry serves the bare
+ *  id (the conductor strips the prefix before resolving). */
+function acpWireProvider(
+  value: string,
+  ids: Map<string, string>,
+  acpNames: Set<string>
+): string | undefined {
+  const slash = value.indexOf('/')
+  if (slash > 0) {
+    const pfx = value.slice(0, slash)
+    if (acpNames.has(pfx)) {
+      return pfx
+    }
+    return ids.get(value.slice(slash + 1))
+  }
+  return ids.get(value)
+}
+
+/** The guardrail row(s): warn when the endpoint is proven acp-backed
+ *  AND a client points its base url at it (the classifier rides the
+ *  same endpoint — no separate URL knob exists), or when a classifier
+ *  pin names a wire only an acp conductor serves. */
+function conductorClassifierChecks(dir: string, root: string | null): DoctorCheck[] {
+  const providers = loadAgentEnv(dir).providers ?? {}
+  const acpNames = new Set(
+    Object.entries(providers)
+      .filter((kv): kv is [string, ProviderEntry & { type: 'acp' }] => kv[1].type === 'acp')
+      .map(([n]) => n)
+  )
+  const serve = liveServeEndpoint(dir)
+  const backend = serveBackendName(serve)
+  const conductor = backend !== undefined && acpNames.has(backend) ? backend : undefined
+  const ids = acpWireIds(providers)
+  const sources = claudeClientSources(root !== null && root !== dir ? [dir, root] : [dir])
+  const norm = (u: string): string => u.replace(/\/+$/, '').toLowerCase()
+
+  const warns: DoctorCheck[] = []
+  for (const src of sources) {
+    const base = src.env['ANTHROPIC_BASE_URL']
+    const endpointLive =
+      serve !== undefined && base !== undefined && norm(base) === norm(serve.url)
+    const hits = classifierPins(src).flatMap(([knob, v]) => {
+      const p = acpWireProvider(v, ids, acpNames)
+      return p === undefined ? [] : [`${knob}=${v} → providers.${p}`]
+    })
+    if (endpointLive && conductor !== undefined) {
+      warns.push(
+        check(
+          'conductor',
+          'warn',
+          `${src.label}: ANTHROPIC_BASE_URL → ${serve.url} is the acp conductor (providers.${conductor})` +
+            (hits.length > 0
+              ? ` — ${hits.join('; ')}`
+              : ' — the client\u2019s safety classifier rides it too'),
+          'every permission check pays a full session/new and fail-closes — point the classifier lane at a kind:api provider'
+        )
+      )
+      continue
+    }
+    if (hits.length > 0) {
+      warns.push(
+        check(
+          'conductor',
+          'warn',
+          `${src.label}: ${hits.join('; ')} — a classifier model wire only an acp conductor serves`,
+          'session-grade wires deadlock interactive approvals — pin the classifier lane at a kind:api provider'
+        )
+      )
+    }
+  }
+  if (warns.length > 0) {
+    return warns
+  }
+  if (conductor !== undefined) {
+    return [
+      check('conductor', 'ok', `acp conductor live (providers.${conductor}) — no classifier pins on its wires`),
+    ]
+  }
+  return [
+    check(
+      'conductor',
+      'ok',
+      acpNames.size > 0
+        ? `${acpNames.size} acp provider(s) — no classifier pins on their wires`
+        : 'no acp-backed serve endpoint'
+    ),
+  ]
+}
+
 /** Build-stamp row (bro-fatja) — who last wrote this worktree's shared
  *  mutable outputs (dist/, node_modules/). The record itself is the
  *  attribution; the warns are a stamp behind HEAD and a resolvable
@@ -1227,6 +1501,7 @@ export function runDoctorChecks(dir: string = process.cwd()): DoctorCheck[] {
     ...selfDistChecks(),
     ...checkConfig(dir),
     ...providerChecks(dir),
+    ...conductorClassifierChecks(dir, root),
     ...queryCliChecks(dir, cfg.connectors),
     // properties files live at the checkout root — doctor must resolve
     // them there even when run from a subdirectory (collect does the same)

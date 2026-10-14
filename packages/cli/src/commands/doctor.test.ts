@@ -136,9 +136,24 @@ function withEnv(opts: EnvOpts, fn: (dir: string) => void): Promise<void> {
     'CLAUDE_SESSION_ID',
     'CODEX_SESSION_ID',
     'OPENCODE_SESSION_ID',
+    // client/conductor evidence — the dev machine's real claude env and
+    // serve pins must not leak into the classifier-guard probe
+    'ANTHROPIC_BASE_URL',
+    'ANTHROPIC_MODEL',
+    'ANTHROPIC_SMALL_FAST_MODEL',
+    'ANTHROPIC_DEFAULT_HAIKU_MODEL',
+    'ANTHROPIC_DEFAULT_SONNET_MODEL',
+    'ANTHROPIC_DEFAULT_OPUS_MODEL',
+    'BRO_PROVIDER_BACKEND',
   ].filter((k) => opts.env === undefined || !(k in opts.env))) {
     saved[k] = process.env[k]
     delete process.env[k]
+  }
+  // absent CLAUDE_CONFIG_DIR the conductor probe reads the real
+  // ~/.claude — pin it at an empty fixture dir instead
+  if (opts.env === undefined || !('CLAUDE_CONFIG_DIR' in opts.env)) {
+    saved.CLAUDE_CONFIG_DIR ??= process.env.CLAUDE_CONFIG_DIR
+    process.env.CLAUDE_CONFIG_DIR = join(dir, 'xdg', 'claude-home')
   }
   const run = async (): Promise<void> => {
     process.env.PATH = bin
@@ -845,4 +860,133 @@ describe('bro doctor', () => {
         }
       )
     ))
+
+  test('conductor: a classifier pin naming an acp-served wire warns (bro-9ww2q)', () =>
+    withEnv(
+      {
+        config: {
+          providers: { 'devin-acp': { type: 'acp', command: 'devin acp --model swe-2-max' } },
+        },
+        bins: ['gh'],
+      },
+      (dir) => {
+        mkdirSync(join(dir, '.claude'), { recursive: true })
+        writeFileSync(
+          join(dir, '.claude', 'settings.local.json'),
+          JSON.stringify({
+            env: {
+              ANTHROPIC_BASE_URL: 'http://127.0.0.1:44927',
+              ANTHROPIC_DEFAULT_HAIKU_MODEL: 'devin/swe-2-max',
+            },
+          })
+        )
+        const c = byName(runDoctorChecks(dir), 'conductor')
+        assert.equal(c.status, 'warn', JSON.stringify(c))
+        assert.match(c.detail, /ANTHROPIC_DEFAULT_HAIKU_MODEL=devin\/swe-2-max/)
+        assert.match(c.detail, /providers\.devin-acp/)
+      }
+    ))
+
+  test('conductor: a live acp-backed endpoint + client base url warns with no pin at all', () =>
+    withEnv(
+      {
+        config: {
+          providers: { 'devin-acp': { type: 'acp', command: 'devin acp --model swe-2-max' } },
+        },
+        bins: ['gh'],
+        env: { BRO_PROVIDER_BACKEND: 'devin-acp' },
+      },
+      (dir) => {
+        const url = 'http://127.0.0.1:44927'
+        mkdirSync(join(dir, '.git', 'bro'), { recursive: true })
+        writeFileSync(
+          join(dir, '.git', 'bro', 'serve.json'),
+          JSON.stringify({ pid: process.pid, url, dir, startedAt: 'x', token: 't' })
+        )
+        mkdirSync(join(dir, '.claude'), { recursive: true })
+        writeFileSync(
+          join(dir, '.claude', 'settings.local.json'),
+          JSON.stringify({ env: { ANTHROPIC_BASE_URL: url } })
+        )
+        const c = byName(runDoctorChecks(dir), 'conductor')
+        assert.equal(c.status, 'warn', JSON.stringify(c))
+        assert.match(c.detail, /acp conductor \(providers\.devin-acp\)/)
+        assert.match(c.detail, /classifier rides it too/)
+      }
+    ))
+
+  test('conductor: a live serve with no acp backend stays ok — the byte proxy forwards classifiers fine', () =>
+    withEnv(
+      {
+        config: {
+          providers: { 'devin-acp': { type: 'acp', command: 'devin acp --model swe-2-max' } },
+        },
+        bins: ['gh'],
+      },
+      (dir) => {
+        const url = 'http://127.0.0.1:44927'
+        mkdirSync(join(dir, '.git', 'bro'), { recursive: true })
+        writeFileSync(
+          join(dir, '.git', 'bro', 'serve.json'),
+          JSON.stringify({ pid: process.pid, url, dir, startedAt: 'x', token: 't' })
+        )
+        mkdirSync(join(dir, '.claude'), { recursive: true })
+        writeFileSync(
+          join(dir, '.claude', 'settings.local.json'),
+          JSON.stringify({
+            env: { ANTHROPIC_BASE_URL: url, ANTHROPIC_DEFAULT_HAIKU_MODEL: 'claude-haiku-4-5' },
+          })
+        )
+        const c = byName(runDoctorChecks(dir), 'conductor')
+        assert.equal(c.status, 'ok', JSON.stringify(c))
+      }
+    ))
+
+  test('conductor: a clean dedicated classifier lane wins — the main-model pin is not evaluated', () =>
+    withEnv(
+      {
+        config: {
+          providers: { 'devin-acp': { type: 'acp', command: 'devin acp --model swe-2-max' } },
+        },
+        bins: ['gh'],
+      },
+      (dir) => {
+        mkdirSync(join(dir, '.claude'), { recursive: true })
+        writeFileSync(
+          join(dir, '.claude', 'settings.local.json'),
+          JSON.stringify({
+            env: {
+              ANTHROPIC_DEFAULT_HAIKU_MODEL: 'claude-haiku-4-5',
+              ANTHROPIC_DEFAULT_SONNET_MODEL: 'devin/swe-2-max',
+            },
+          })
+        )
+        const c = byName(runDoctorChecks(dir), 'conductor')
+        assert.equal(c.status, 'ok', JSON.stringify(c))
+      }
+    ))
+
+  test('conductor: process-env pins count — <acp-name>/<id> is conductor vocabulary', () =>
+    withEnv(
+      {
+        config: {
+          providers: { 'devin-acp': { type: 'acp', command: 'devin acp' } },
+        },
+        bins: ['gh'],
+        env: { ANTHROPIC_SMALL_FAST_MODEL: 'devin-acp/swe-2-max' },
+      },
+      (dir) => {
+        const c = byName(runDoctorChecks(dir), 'conductor')
+        assert.equal(c.status, 'warn', JSON.stringify(c))
+        assert.match(c.detail, /ANTHROPIC_SMALL_FAST_MODEL=devin-acp\/swe-2-max/)
+        assert.match(c.detail, /providers\.devin-acp/)
+      }
+    ))
+
+  test('conductor: no acp providers and no client pins → quiet ok', () =>
+    withEnv({ config: { providers: { local: { type: 'cli', command: 'x -p' } } }, bins: ['gh'] }, (dir) => {
+      const c = byName(runDoctorChecks(dir), 'conductor')
+      assert.equal(c.status, 'ok', JSON.stringify(c))
+      assert.match(c.detail, /no acp-backed serve endpoint/)
+    }))
 })
