@@ -96,6 +96,15 @@ export function shellWords(command: string): string[] {
   }
 }
 
+/** The spawned agent's env — `BRO_HOOKS=0` marks the child tree a
+ *  machine backend (spec bro-ddksm): `bro hooks` no-ops there, so a
+ *  session/new serving a disposable conductor/judge turn never pays
+ *  session-start rehydrate probes written for a human session. A
+ *  default, not a lock — an explicit ambient `BRO_HOOKS` wins. */
+export function acpChildEnv(): NodeJS.ProcessEnv {
+  return { BRO_HOOKS: '0', ...process.env }
+}
+
 /** The last bytes of peer stderr — the diagnostic that survives the
  *  process dying mid-turn (rate-limit walls, crash text). */
 function stderrTail(child: ChildProcess): () => string {
@@ -403,7 +412,7 @@ async function withAcp<T>(
     if (bin === undefined) {
       throw new AcpConfigError(`${by}: acp command is empty`)
     }
-    const proc = spawn(bin, argv.slice(1), { stdio: 'pipe' })
+    const proc = spawn(bin, argv.slice(1), { stdio: 'pipe', env: acpChildEnv() })
     child = proc
     // a binary that can't exec is operator misconfig — name it as such
     proc.once('error', (e) => {
@@ -689,7 +698,7 @@ export async function acpOpen(
     if (bin === undefined) {
       fail(new AcpConfigError(`${by}: acp command is empty`))
     }
-    const proc = spawn(bin, argv.slice(1), { stdio: 'pipe' })
+    const proc = spawn(bin, argv.slice(1), { stdio: 'pipe', env: acpChildEnv() })
     child = proc
     let spawnError: string | undefined
     proc.once('error', (e) => {

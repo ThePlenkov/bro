@@ -73,6 +73,10 @@ function linked(f: Fixture, dirty: boolean): string {
 
 const BLOCK = /"decision":"block"/
 
+// the launcher is part of the fail-open contract — it's what plugin
+// hosts actually exec; dist must resolve without PATH help
+const RUN_SH = resolve(CLI_DIST, '..', '..', '..', '..', 'hooks', 'run.sh')
+
 describe('hooks e2e — stop gate', () => {
   test('armed work session in a dirty linked worktree is blocked', () => {
     const f = hookFixture()
@@ -671,9 +675,6 @@ describe('hooks e2e — session-start + the run.sh launcher', () => {
     })
   })
 
-  // the launcher is part of the fail-open contract — it's what plugin
-  // hosts actually exec; dist must resolve without PATH help
-  const RUN_SH = resolve(CLI_DIST, '..', '..', '..', '..', 'hooks', 'run.sh')
   const runSh = (cwd: string, event: string, input: string) =>
     spawnSync('sh', [RUN_SH, event], { cwd, input, env: e2eEnv(), encoding: 'utf8' })
 
@@ -706,6 +707,71 @@ describe('hooks e2e — session-start + the run.sh launcher', () => {
       })
       assert.equal(r.code, 0)
       assert.equal(r.stdout.trim(), '')
+    })
+  })
+})
+
+describe('hooks e2e — BRO_HOOKS=0 machine-backend trees (bro-ddksm)', () => {
+  const OFF = { BRO_HOOKS: '0' }
+
+  test('session-start emits nothing — no rehydrate probes run', () => {
+    const f = hookFixture()
+    inside(f.main, f.root, () => {
+      const r = runCli(['hooks', 'session-start'], {
+        cwd: f.main,
+        input: JSON.stringify({ session_id: 's-off' }),
+        env: { ...OFF, XDG_STATE_HOME: join(f.root, 'xdg-state') },
+      })
+      assert.equal(r.code, 0, r.stderr)
+      assert.equal(r.stdout, '')
+    })
+  })
+
+  test('an armed session on a dirty worktree is not even gated', () => {
+    const f = hookFixture()
+    inside(f.main, f.root, () => {
+      const wt = linked(f, true)
+      arm(f, 's-off', 'work')
+      const r = runCli(['hooks', 'stop'], {
+        cwd: wt,
+        input: JSON.stringify({ session_id: 's-off' }),
+        env: { ...OFF, XDG_STATE_HOME: join(f.root, 'xdg-state') },
+      })
+      assert.equal(r.code, 0, r.stderr)
+      assert.equal(r.stdout.trim(), '')
+    })
+  })
+
+  test('permission answers nothing — the host falls through to its own policy', () => {
+    const f = hookFixture()
+    inside(f.main, f.root, () => {
+      // 'bro act status' is a self-tool command — without the flag the
+      // hook auto-approves it; off means no opinion
+      const r = runCli(['hooks', 'permission'], {
+        cwd: f.main,
+        input: JSON.stringify({
+          session_id: 's-off',
+          tool_name: 'exec',
+          tool_input: { command: 'bro act status' },
+        }),
+        env: { ...OFF, XDG_STATE_HOME: join(f.root, 'xdg-state') },
+      })
+      assert.equal(r.code, 0, r.stderr)
+      assert.equal(r.stdout.trim(), '')
+    })
+  })
+
+  test('run.sh exits 0 before resolving any bro binary', () => {
+    const f = hookFixture()
+    inside(f.main, f.root, () => {
+      const r = spawnSync('sh', [RUN_SH, 'session-start'], {
+        cwd: f.main,
+        input: JSON.stringify({ session_id: 's-off' }),
+        env: e2eEnv(OFF),
+        encoding: 'utf8',
+      })
+      assert.equal(r.status, 0)
+      assert.equal(r.stdout, '')
     })
   })
 })
