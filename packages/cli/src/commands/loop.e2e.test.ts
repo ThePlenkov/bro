@@ -116,6 +116,17 @@ const retry = (fn) => {
   }
 }
 const load = () => retry(() => JSON.parse(fs.readFileSync(STATE, 'utf8')))
+// retry only spawn hiccups (the error carries e.code) — a non-zero
+// exit means the command ran, and re-running a non-idempotent op
+// ('git commit' → 'nothing to commit') parks a landed bead as a crash
+const sh = (cmd, args) => {
+  for (let i = 0; ; i++) {
+    try { return execFileSync(cmd, args, { encoding: 'utf8' }) } catch (e) {
+      if (e.code === undefined || i > 40) throw e
+      pause(25)
+    }
+  }
+}
 // host.json mutations serialize on the same mkdir lock the fake
 // agent/plugin hold — workers are detached processes, not in-order
 const LOCK = STATE + '.lock'
@@ -154,8 +165,8 @@ if (retry(() => fs.readFileSync(pf, 'utf8')).includes('review-threads')) {
   process.exit(0)
 }
 retry(() => fs.writeFileSync('work.txt', 'did the thing\\n'))
-retry(() => execFileSync('git', ['add', '-A']))
-retry(() => execFileSync('git', ['commit', '-qm', 'feat: the thing']))
+sh('git', ['add', '-A'])
+sh('git', ['commit', '-qm', 'feat: the thing'])
 withState((s) => { s.prOpened = true })
 `
 

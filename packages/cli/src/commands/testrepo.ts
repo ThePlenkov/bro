@@ -858,7 +858,18 @@ const withState = (fn) => {
   try { const s = load(); const r = fn(s); save(s); return r }
   finally { fs.rmSync(LOCK, { recursive: true, force: true }) }
 }
-const sh = (cmd, args) => retry(() => execFileSync(cmd, args, { encoding: 'utf8' }))
+// retry only spawn hiccups (EMFILE/EAGAIN — the error carries e.code
+// and no exit status): the command never ran. A non-zero exit means it
+// ran to completion — re-running a non-idempotent op ('git commit' →
+// 'nothing to commit') would read a landed commit as a crash
+const sh = (cmd, args) => {
+  for (let i = 0; ; i++) {
+    try { return execFileSync(cmd, args, { encoding: 'utf8' }) } catch (e) {
+      if (e.code === undefined || i > 40) throw e
+      pause(25)
+    }
+  }
+}
 const prompt = retry(() => fs.readFileSync(promptFile, 'utf8'))
 const branch = sh('git', ['branch', '--show-current']).trim()
 // stdout line — proves the loop's spawn tee lands agent output in the
