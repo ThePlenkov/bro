@@ -823,7 +823,12 @@ function reopenBead(ctx: Ctx, id: string): void {
  *  the write (down, or a backend with no defer concept) keeps the old
  *  claim-hold — best-effort, never a crash. */
 function parkBeads(ctx: Ctx, beads: ReadyBead[], msg: string): void {
-  const min = ctx.cfg.parkedWakeMin
+  // parkedWakeMin has no natural ceiling — an absurd value overflows the
+  // clock into a toISOString() RangeError BEFORE the per-bead catch,
+  // aborting the park and leaving claims in progress. Past a decade the
+  // operator's intent is the icebox anyway, so clamp the snooze there.
+  const PARKED_WAKE_CAP_MIN = 10 * 365 * 24 * 60
+  const min = Math.min(ctx.cfg.parkedWakeMin, PARKED_WAKE_CAP_MIN)
   const patch: Record<string, string | number> =
     min > 0
       ? { defer: new Date(Date.now() + min * 60_000).toISOString(), assignee: '' }
@@ -1201,9 +1206,10 @@ const laneLabel = (ctx: Ctx): string =>
 function planItemAndWorktree(
   ctx: Ctx,
   bead: ReadyBead
-): { slot: StackSlot | undefined; item: LoopItem } {
+): { slot: StackSlot | undefined; item: LoopItem; reused: boolean } {
   let slot: StackSlot | undefined
   let item!: LoopItem
+  let reused = false
   const planAndCreate = (): void => {
     const plan = stackPlan(ctx, bead)
     slot = plan.slot
@@ -1212,6 +1218,7 @@ function planItemAndWorktree(
     // a surviving worktree dir is reused as-is — its branch kept its
     // original base, so the stack edge only records on fresh creation
     const fresh = !existsSync(item.worktreeDir)
+    reused = !fresh
     ensureWorktree(ctx.root, item.branch, item.worktreeDir, slot?.base)
     if (fresh) {
       emitLifecycle(ctx.root, {
@@ -1250,7 +1257,7 @@ function planItemAndWorktree(
       }
     }
   }
-  return { slot, item }
+  return { slot, item, reused }
 }
 
 // --- the gate stack: task-stack round-robin (spec bro-zsmwq) -----------------
@@ -1337,6 +1344,7 @@ async function pushItem(ctx: Ctx, beads: ReadyBead[]): Promise<PushOutcome> {
   // push correctly yields the default branch as the next base.
   let slot: StackSlot | undefined
   let item!: LoopItem
+  let reused = false
   // the claims this run actually holds — claimUpTo owns the lead only
   // outside the registry path; there the lead is a PROBE until
   // claimStep lands it under the spawn lock, so a pre-spawn settle
@@ -1347,6 +1355,7 @@ async function pushItem(ctx: Ctx, beads: ReadyBead[]): Promise<PushOutcome> {
     const planned = planItemAndWorktree(ctx, lead)
     slot = planned.slot
     item = planned.item
+    reused = planned.reused
   } catch (err) {
     for (const b of openBeads(ctx, ours)) {
       noteBead(ctx.tasks, b.id, `loop: worktree failed — ${err instanceof Error ? err.message : String(err)}`)
@@ -1369,6 +1378,32 @@ async function pushItem(ctx: Ctx, beads: ReadyBead[]): Promise<PushOutcome> {
     worktree: item.worktreeDir,
     log: loopRunLog(ctx.root, loopSlug(lead.id)) ?? '',
   })
+  // A woken park re-claims into the worktree it kept — and possibly
+  // the open PR it kept too. Only a REUSED worktree can carry that PR:
+  // when the branch already gates on one, re-arm the watch and rejoin
+  // the gate — re-running the finished work order would redo landed
+  // work and shove a duplicate push at the same PR. A lookup error
+  // can't prove a PR absent, so it falls through to the spawn exactly
+  // as before — the post-spawn findPr stays the backstop.
+  if (reused) {
+    ctx.stage = 'pr lookup'
+    const parkedPr = findPr(ctx, item.branch)
+    if (typeof parkedPr === 'number') {
+      // registry mode leaves the lead a mere probe until spawnWorker's
+      // claimStep — with no spawn to land it, claim it the non-registry
+      // way or the bead snaps back to ready and re-parks forever
+      if (ctx.agents !== undefined && claimUpTo([lead], 1, ctx.root).length === 0) {
+        for (const b of openBeads(ctx, ours)) {
+          reopenBead(ctx, b.id)
+        }
+        endLoopRun(ctx.root, loopSlug(lead.id))
+        return { kind: 'done', result: 'failed' }
+      }
+      say(ctx, `loop: ${lead.id} re-attaches to ${prRef(ctx, parkedPr)} — no re-spawn`)
+      endLoopRun(ctx.root, loopSlug(lead.id))
+      return { kind: 'member', member: armMember(ctx, beads, item, parkedPr) }
+    }
+  }
   ctx.stage = 'bootstrap'
   if (!runBootstrap(ctx, ours, item)) {
     endLoopRun(ctx.root, loopSlug(lead.id))
@@ -1427,15 +1462,23 @@ async function pushItem(ctx: Ctx, beads: ReadyBead[]): Promise<PushOutcome> {
   if (pr === null) {
     return { kind: 'done', result: settleNoPr(ctx, beads, item, code, elapsed) }
   }
-  // the loop IS the watcher — arm the same marker `act wait` drops
-  // (bro-z0k2u) for the member's whole stack tenure, not per poll:
-  // a reboot-killed loop leaves a dead marker `bro act rearm`
-  // resurrects instead of the PR sitting silently unwatched. `bead`
-  // rides the marker so the resurrected wait can run the finalizeMerge
-  // half the dead loop never reached — merge lands, claims close
-  // (bro-q6ppv); a clump's whole id list rides comma-joined. The marker
-  // lands BEFORE the stamp — a stall or death inside stampProjection's
-  // tracker calls must not strand the open PR markerless.
+  // custody transfers to the armed watch — the run record's job is done
+  endLoopRun(ctx.root, loopSlug(lead.id))
+  return { kind: 'member', member: armMember(ctx, beads, item, pr) }
+}
+
+/** The PR-armed moment, shared by the post-spawn discovery and the
+ *  pre-spawn reattach of a woken park. The loop IS the watcher — arm
+ *  the same marker `act wait` drops (bro-z0k2u) for the member's whole
+ *  stack tenure, not per poll: a reboot-killed loop leaves a dead
+ *  marker `bro act rearm` resurrects instead of the PR sitting silently
+ *  unwatched. `bead` rides the marker so the resurrected wait can run
+ *  the finalizeMerge half the dead loop never reached — merge lands,
+ *  claims close (bro-q6ppv); a clump's whole id list rides
+ *  comma-joined. The marker lands BEFORE the stamp — a stall or death
+ *  inside stampProjection's tracker calls must not strand the open PR
+ *  markerless. */
+function armMember(ctx: Ctx, beads: ReadyBead[], item: LoopItem, pr: number): GateMember {
   emitLifecycle(ctx.root, {
     kind: 'pr-open',
     bead: beads[0]?.id,
@@ -1449,7 +1492,7 @@ async function pushItem(ctx: Ctx, beads: ReadyBead[]): Promise<PushOutcome> {
   })
   stampProjection(ctx, beads, pr)
   stampLoopPr(ctx, beads, item, pr)
-  const member: GateMember = {
+  return {
     beads,
     item,
     pr,
@@ -1458,9 +1501,6 @@ async function pushItem(ctx: Ctx, beads: ReadyBead[]): Promise<PushOutcome> {
     rounds: 0,
     fetchErrors: 0,
   }
-  // custody transfers to the armed watch — the run record's job is done
-  endLoopRun(ctx.root, loopSlug(lead.id))
-  return { kind: 'member', member }
 }
 
 /** The agent exited without a PR — the settle order: a self-reported
