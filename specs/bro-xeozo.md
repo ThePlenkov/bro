@@ -74,6 +74,9 @@ which agent CLI answers.
 - Buffered reply: the wire stays SSE but blocks emit after the turn
   ends — a mid-text `<tool_call>` can't be un-streamed. Per-chunk live
   streaming with a rolling fence parser is v2.
-- `session/request_permission` answered deny — the conductor needs a
-  no-tools agent (`devin acp --agent-type summarizer` shape); a
-  permission ask surfaces as a provider error, never a hang.
+- `session/request_permission` answered by policy — default deny for
+  a no-tools agent (`devin acp --agent-type summarizer` shape), with
+  `BRO_PROVIDER_AUTO_APPROVE` / `BRO_PROVIDER_PERMISSION_ALLOW` and the
+  entry's `autoApprove`/`permissionAllow` as the interactive escape
+  hatch; a policy deny is marked on the wire (`_meta`) and annotated
+  in the reply, never rendered as a user rejection (spec bro-84qhx).

@@ -49,12 +49,26 @@ export interface ProviderClient {
   chat?: ProviderChat
 }
 
+/** Permission policy for `session/request_permission` (spec
+ *  bro-84qhx). Absent/`{}` is the headless default-deny; `autoApprove`
+ *  allows every ask that offers an allow option; `allow` matchers
+ *  approve selectively — `kind:<acp-tool-kind>` pins the tool-call
+ *  kind, a bare string is a case-insensitive substring over the
+ *  call's title and rawInput. */
+export interface AcpPermissionPolicy {
+  autoApprove?: boolean
+  allow?: string[]
+}
+
 /** The acp kind's session seam — `peer` replaces the spawned `command`
  *  with an in-process agent (the SDK's AgentApp; tests wire a scripted
- *  one), `cwd` is the session's working directory. */
+ *  one), `cwd` is the session's working directory. `permissions` is
+ *  the permission policy the connection's request handler applies
+ *  (the conductor sets it per listener; absent = default-deny). */
 export interface AcpSeam {
   peer?: import('@agentclientprotocol/sdk').AgentApp
   cwd?: string
+  permissions?: AcpPermissionPolicy
 }
 
 /** Load an entry → its typed client. `name` is the registry key —

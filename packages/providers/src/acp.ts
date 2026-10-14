@@ -34,7 +34,7 @@ import type {
   ActiveSessionMessage,
 } from '@agentclientprotocol/sdk'
 import { isSystemoneFamily, JudgeUnavailable } from '@broject/core'
-import { otelSpan } from './otel.ts'
+import { otelEvent, otelSpan } from './otel.ts'
 import type { OtelCtx } from './otel.ts'
 import type {
   DecideResult,
@@ -43,6 +43,7 @@ import type {
 } from '@broject/core'
 import { objOr, remaining, splitShellWords } from './http.ts'
 import type {
+  AcpPermissionPolicy,
   ProviderCall,
   ProviderChat,
   ProviderChatResult,
@@ -115,20 +116,79 @@ function stderrTail(child: ChildProcess): () => string {
   return () => tail.trim()
 }
 
-/** A judge call has no user to ask — default-deny: take a reject
- *  option when the agent offers one, else cancel the request. */
-const denyPermission: ClientRequestHandler<
-  RequestPermissionRequest,
-  RequestPermissionResponse
-> = (ctx) => {
-  const reject = ctx.params.options.find(
-    (o) => o.kind === 'reject_once' || o.kind === 'reject_always'
-  )
-  return {
-    outcome:
-      reject === undefined
-        ? { outcome: 'cancelled' }
-        : { outcome: 'selected', optionId: reject.optionId },
+/** The reason a policy approves an ask — `'autoApprove'` or
+ *  `'allowlist:<matcher>'` — or undefined when the policy denies. */
+export function permitReason(
+  policy: AcpPermissionPolicy | undefined,
+  toolCall: RequestPermissionRequest['toolCall']
+): string | undefined {
+  if (policy === undefined) {
+    return undefined
+  }
+  if (policy.autoApprove === true) {
+    return 'autoApprove'
+  }
+  const hay =
+    `${toolCall.title ?? ''}\n${JSON.stringify(toolCall.rawInput ?? null)}`.toLowerCase()
+  for (const m of policy.allow ?? []) {
+    const kind = /^kind:(\S+)$/i.exec(m)?.[1]
+    if (kind !== undefined) {
+      if (toolCall.kind?.toLowerCase() === kind.toLowerCase()) {
+        return `allowlist:${m}`
+      }
+    } else if (hay.includes(m.toLowerCase())) {
+      return `allowlist:${m}`
+    }
+  }
+  return undefined
+}
+
+/** What the handler decided — sinks (the conductor's denial ledger,
+ *  otel) read it; `via` is the permitReason or 'deny'. */
+export interface AcpPermissionVerdict {
+  sessionId: string
+  title: string
+  allowed: boolean
+  via: string
+}
+
+/** `_meta` a policy denial carries — the wire-level "denied by policy,
+ *  no user was asked" an agent/IDE can render distinctly from a
+ *  human's reject choice (retro bro-p0baz: today it reads 'User
+ *  rejected this tool call' and gaslights the operator). */
+export const POLICY_DENIED_META = { 'bro/policyDenied': true } as const
+
+/** The shared `session/request_permission` handler (spec bro-84qhx):
+ *  policy-permitted asks take an allow option (an ask offering none
+ *  still denies — approval is never invented); denied asks take a
+ *  reject option (else cancel) and carry POLICY_DENIED_META. The sink
+ *  observes every verdict — the conductor's ledger keys on it. */
+export function acpPermissionHandler(
+  policy: AcpPermissionPolicy | undefined,
+  sink?: (v: AcpPermissionVerdict) => void
+): ClientRequestHandler<RequestPermissionRequest, RequestPermissionResponse> {
+  return (ctx) => {
+    const opts = ctx.params.options ?? []
+    const title =
+      ctx.params.toolCall?.title ?? ctx.params.toolCall?.toolCallId ?? 'permission request'
+    const via = permitReason(policy, ctx.params.toolCall)
+    const allow =
+      via === undefined
+        ? undefined
+        : opts.find((o) => o.kind === 'allow_once' || o.kind === 'allow_always')
+    if (via !== undefined && allow !== undefined) {
+      sink?.({ sessionId: ctx.params.sessionId, title, allowed: true, via })
+      return { outcome: { outcome: 'selected', optionId: allow.optionId } }
+    }
+    sink?.({ sessionId: ctx.params.sessionId, title, allowed: false, via: via ?? 'deny' })
+    const reject = opts.find((o) => o.kind === 'reject_once' || o.kind === 'reject_always')
+    return {
+      outcome:
+        reject === undefined
+          ? { outcome: 'cancelled' }
+          : { outcome: 'selected', optionId: reject.optionId },
+      _meta: POLICY_DENIED_META,
+    }
   }
 }
 
@@ -394,7 +454,7 @@ async function withAcp<T>(
 ): Promise<T> {
   const app = client({ name: 'bro' }).onRequest(
     'session/request_permission',
-    denyPermission
+    acpPermissionHandler(opts.acp?.permissions)
   )
   const peer = opts.acp?.peer
   let child: ChildProcess | undefined
@@ -665,6 +725,9 @@ export interface AcpPeer {
   /** Per-request cancel options against any deadline (init one is default). */
   req: (deadline?: number) => SendRequestOptions
   asAuthError: (err: unknown) => never
+  /** Drains the policy denials recorded for one session — the turn
+   *  owner reads it once to render "denied by policy" (spec bro-84qhx). */
+  takeDenials: (sessionId: string) => string[]
 }
 
 export async function acpOpen(
@@ -679,9 +742,24 @@ export async function acpOpen(
     span.end({ error: errMsg(err) }, 'error')
     throw err
   }
+  // per-session ledger of policy denials — sessions multiplex on the
+  // link, so verdicts key on sessionId and the turn owner drains its own
+  const denied = new Map<string, string[]>()
   const app = client({ name: 'bro' }).onRequest(
     'session/request_permission',
-    denyPermission
+    acpPermissionHandler(opts.acp?.permissions, (v) => {
+      otelEvent('acp.permission', {
+        'acp.by': by,
+        'permission.title': v.title,
+        'permission.allowed': v.allowed,
+        'permission.via': v.via,
+      })
+      if (!v.allowed) {
+        const list = denied.get(v.sessionId) ?? []
+        list.push(v.title)
+        denied.set(v.sessionId, list)
+      }
+    })
   )
   const peer = opts.acp?.peer
   let child: ChildProcess | undefined
@@ -719,8 +797,13 @@ export async function acpOpen(
     const { asAuthError, req } = await withDeadline(deadline, () =>
       acpInit(conn.agent, by, deadline)
     )
+    const takeDenials = (sessionId: string): string[] => {
+      const list = denied.get(sessionId) ?? []
+      denied.delete(sessionId)
+      return list
+    }
     span.end({ 'acp.pid': child?.pid ?? 0 })
-    return { ctx: conn.agent, signal: conn.signal, close, tail, req, asAuthError }
+    return { ctx: conn.agent, signal: conn.signal, close, tail, req, asAuthError, takeDenials }
   } catch (err) {
     close()
     // spawn's 'error' event is async — a binary that can't exec is only
@@ -849,7 +932,7 @@ export async function acpPooledTurn(
   promptText: string,
   deadline: number,
   turn: PooledTurnOpts = {}
-): Promise<{ stopReason: StopReason; text: string; model: string }> {
+): Promise<{ stopReason: StopReason; text: string; model: string; denied: string[] }> {
   const ctx = peer.ctx
   const req = () => peer.req(deadline)
   const by = turn.by ?? 'conductor'
@@ -893,13 +976,15 @@ export async function acpPooledTurn(
         sessSpan.ctx
       )
       endSession()
+      const denials = peer.takeDenials(session.sessionId)
       end({
         'acp.session_id': session.sessionId,
         'acp.model': model,
         'acp.stop_reason': r.stopReason,
         'acp.reply_len': r.text.length,
+        'acp.denied_permissions': denials.length,
       })
-      return { ...r, model }
+      return { ...r, model, denied: denials }
     } catch (err) {
       endSession({ error: errMsg(err) })
       end(
@@ -908,6 +993,7 @@ export async function acpPooledTurn(
       )
       throw err
     } finally {
+      peer.takeDenials(session.sessionId) // drain — a failed turn leaves no ledger leak
       session.dispose()
     }
   } catch (err) {
@@ -1027,7 +1113,7 @@ const shQ = (s: string): string => `'${s.replaceAll("'", String.raw`'\''`)}'`
 export function acpWorkerArgv(
   broBin: string[],
   entry: AcpEntry,
-  opts: { model?: string; autoApprove?: boolean; sessionRm?: string } = {}
+  opts: { model?: string; autoApprove?: boolean; allow?: string[]; sessionRm?: string } = {}
 ): string[] {
   const command =
     entry.profile === undefined ? entry.command : `${entry.command} --profile ${shQ(entry.profile)}`
@@ -1038,6 +1124,9 @@ export function acpWorkerArgv(
   }
   if (opts.autoApprove ?? entry.autoApprove) {
     argv.push('--auto-approve')
+  }
+  for (const m of opts.allow ?? entry.permissionAllow ?? []) {
+    argv.push('--allow', m)
   }
   const sessionRm = opts.sessionRm ?? entry.sessionRm
   if (sessionRm !== undefined) {

@@ -74,6 +74,23 @@ describe('acpWorkerArgv', () => {
     ])
   })
 
+  test('permissionAllow entries render as repeated --allow; opts.allow wins piecewise', () => {
+    const argv = acpWorkerArgv(
+      ['bro'],
+      { type: 'acp', command: 'kilo --acp', permissionAllow: ['kind:read', 'git status'] }
+    )
+    assert.deepEqual(argv, [
+      'bro', 'acp-worker', '--command', 'kilo --acp',
+      '--allow', 'kind:read', '--allow', 'git status',
+    ])
+    const over = acpWorkerArgv(
+      ['bro'],
+      { type: 'acp', command: 'kilo --acp', permissionAllow: ['kind:read'] },
+      { allow: ['kind:fetch'] }
+    )
+    assert.deepEqual(over.slice(-2), ['--allow', 'kind:fetch'])
+  })
+
   test('opts beat the entry pin piecewise — model override, autoApprove off stays off', () => {
     const argv = acpWorkerArgv(
       ['bro'],
@@ -237,6 +254,33 @@ describe('runAcpWorker', () => {
       assert.match(a.lines.join('\n'), /permission run tests — approved \(autoApprove\)/)
     } finally {
       rmSync(a.dir, { recursive: true, force: true })
+    }
+  })
+
+  test('the allow list approves matching asks and denies the rest (bro-84qhx)', async () => {
+    const options = [
+      { optionId: 'allow-1', name: 'Allow once', kind: 'allow_once' as const },
+      { optionId: 'deny-1', name: 'Deny', kind: 'reject_once' as const },
+    ]
+    const matching = fakeAcpAgent({ askPermission: options, askToolCall: { kind: 'read' } })
+    const m = workerSpec({ peer: matching.app, allow: ['kind:read'] })
+    try {
+      assert.equal(await runAcpWorker(m.spec), 0)
+      assert.deepEqual(matching.permissionOutcome, { outcome: 'selected', optionId: 'allow-1' })
+      assert.match(m.lines.join('\n'), /permission run tests — approved \(allowlist:kind:read\)/)
+    } finally {
+      rmSync(m.dir, { recursive: true, force: true })
+    }
+
+    const denied = fakeAcpAgent({ askPermission: options, askToolCall: { kind: 'execute' } })
+    const d = workerSpec({ peer: denied.app, allow: ['kind:read'] })
+    try {
+      assert.equal(await runAcpWorker(d.spec), 0)
+      assert.deepEqual(denied.permissionOutcome, { outcome: 'selected', optionId: 'deny-1' })
+      assert.deepEqual(denied.permissionMeta, { 'bro/policyDenied': true })
+      assert.match(d.lines.join('\n'), /permission run tests — denied \(headless policy/)
+    } finally {
+      rmSync(d.dir, { recursive: true, force: true })
     }
   })
 

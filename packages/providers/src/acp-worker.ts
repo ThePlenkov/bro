@@ -43,6 +43,7 @@ import type {
   SessionUpdate,
   StopReason,
 } from '@agentclientprotocol/sdk'
+import { permitReason, POLICY_DENIED_META } from './acp.ts'
 
 /** What the resolver computed for one spawn — self-contained, so the
  *  worker never re-reads bro.config.json mid-run. */
@@ -57,6 +58,11 @@ export interface AcpWorkerSpec {
   /** Permission policy: answer `session/request_permission` with the
    *  allow option. Default false — deny, and log the denial. */
   autoApprove?: boolean
+  /** Permission allowlist (spec bro-84qhx) — matchers permitting asks
+   *  without a blanket autoApprove: `kind:<acp-tool-kind>` pins the
+   *  tool-call kind, a bare matcher is a case-insensitive substring
+   *  over the call's title/rawInput. */
+  allow?: string[]
   /** The prepared prompt artifact — its text rides session/prompt. */
   promptFile: string
   /** The session cwd — spec.repoRoot (the step's worktree). */
@@ -151,10 +157,13 @@ export function renderAcpUpdate(u: SessionUpdate): string {
 /** `session/request_permission` policy — the headless default-deny:
  *  reject when the agent offers one, cancel otherwise, and LOG the
  *  denial either way (a permissions-asking agent stalls visibly, not
- *  silently). `autoApprove` answers with the allow option; an agent
- *  offering no allow option still gets denied, not invented approval. */
+ *  silently). `autoApprove`/`allow` (spec bro-84qhx) answer with the
+ *  allow option; an agent offering no allow option still gets denied,
+ *  not invented approval. The deny carries POLICY_DENIED_META — the
+ *  wire-level "policy said no", never a human rejection. */
 function permissionHandler(
   autoApprove: boolean,
+  allow: string[] | undefined,
   provider: string | undefined,
   log: (line: string) => void
 ): ClientRequestHandler<RequestPermissionRequest, RequestPermissionResponse> {
@@ -162,18 +171,19 @@ function permissionHandler(
     const opts = ctx.params.options ?? []
     const what =
       ctx.params.toolCall?.title ?? ctx.params.toolCall?.toolCallId ?? 'permission request'
-    if (autoApprove) {
-      const allow = opts.find((o) => o.kind === 'allow_once' || o.kind === 'allow_always')
-      if (allow !== undefined) {
-        log(`permission ${what} — approved (autoApprove)`)
-        return { outcome: { outcome: 'selected', optionId: allow.optionId } }
+    const via = permitReason({ autoApprove, allow }, ctx.params.toolCall)
+    if (via !== undefined) {
+      const allowOpt = opts.find((o) => o.kind === 'allow_once' || o.kind === 'allow_always')
+      if (allowOpt !== undefined) {
+        log(`permission ${what} — approved (${via})`)
+        return { outcome: { outcome: 'selected', optionId: allowOpt.optionId } }
       }
       log(`permission ${what} — no allow option offered; denying`)
     } else {
       log(
-        `permission ${what} — denied (headless default; opt in via providers.${
+        `permission ${what} — denied (headless policy — no user is prompted; opt in via providers.${
           provider ?? '<name>'
-        }.autoApprove, --auto-approve, or the agent CLI's own flag)`
+        }.autoApprove/.permissionAllow, --auto-approve/--allow, or the agent CLI's own flag)`
       )
     }
     const reject = opts.find((o) => o.kind === 'reject_once' || o.kind === 'reject_always')
@@ -182,6 +192,7 @@ function permissionHandler(
         reject === undefined
           ? { outcome: 'cancelled' }
           : { outcome: 'selected', optionId: reject.optionId },
+      _meta: POLICY_DENIED_META,
     }
   }
 }
@@ -213,7 +224,7 @@ export async function runAcpWorker(spec: AcpWorkerSpec): Promise<number> {
 
   const app = client({ name: 'bro' }).onRequest(
     'session/request_permission',
-    permissionHandler(spec.autoApprove === true, spec.provider, log)
+    permissionHandler(spec.autoApprove === true, spec.allow, spec.provider, log)
   )
   for (const m of UNADVERTISED_METHODS) {
     app.onRequest<unknown, never>(
