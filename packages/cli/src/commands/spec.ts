@@ -9,6 +9,14 @@
  * ship-beads, and `trivial`-/`debt`-labeled beads are exempt — SDD
  * measures design mass, not bookkeeping.
  *
+ * Evidence precedence (spec: specs/sdd/bro-xkrbk.md): exempt → the
+ * declared `spec:` link → the connector's hasSpec discovery → missing.
+ * A declaration outranks a discovered file — the bead's own statement
+ * of where its spec lives is authoritative, and `bro spec drift`
+ * audits the declared target for the same reason. Coverage reads the
+ * working tree: an uncommitted spec file counts (the spec rides the
+ * feature branch); drift freshness still needs its commit on the ref.
+ *
  *   bro spec check [id…]   coverage over in_progress beads (exit 1 on
  *                          missing — CI-able); --all includes open
  *   bro spec drift [id…]   freshness over spec'd beads — STALE when
@@ -71,6 +79,9 @@ export function specState(row: TaskRow, spec: SpecStore): SpecState {
   ) {
     return 'exempt'
   }
+  // a declared spec: link outranks a discovered spec file — the bead's
+  // own statement of where its spec lives wins, and check counts the
+  // declaration itself (resolution is drift's audit, not coverage's)
   if (SPEC_LINK.test(row.description ?? '')) {
     return 'link'
   }
@@ -213,6 +224,9 @@ function usage(): never {
 Commands:
   check [id…]   spec coverage for in_progress beads (or the given ids);
                 --all also scans open beads. Exit 1 when any MISSING.
+                verdicts spec | link | exempt | MISSING — a declared
+                spec: link outranks a discovered spec file, and an
+                uncommitted spec file already counts (working tree).
   drift [id…]   spec freshness over spec'd beads — STALE when landed
                 code moved past the spec. Default scans closed beads;
                 --all scans every spec'd bead, --json emits rows as

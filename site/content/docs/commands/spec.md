@@ -17,6 +17,13 @@ A directory spec also counts when
 files and index-bearing subdirectories form its tree. A `spec:` link in
 the bead description is an external spec.
 
+When a bead has both a `spec:` link and a discovered spec file, the
+declared link wins: `check` reports `link` and `drift` audits the linked
+file. The bead's own statement outranks convention-based discovery.
+Coverage reads the working tree, so an uncommitted spec file already
+counts for `check`; `drift` freshness still needs the spec's commit on
+the ref.
+
 Chores, molecule ship-beads, and beads labeled `trivial` or `debt` are
 exempt. SDD measures design mass, not bookkeeping, and a harvested
 review finding already carries evidence.
