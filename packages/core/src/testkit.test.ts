@@ -72,22 +72,32 @@ describe('scrubEnv', () => {
     // assert restore returns to whatever was there, not to a guess
     const beforeDir = process.env.GIT_DIR
     const beforeNosystem = process.env.GIT_CONFIG_NOSYSTEM
+    const beforeGlobal = process.env.GIT_CONFIG_GLOBAL
     process.env.GIT_DIR = '/x'
     process.env.BRO_EDWTN_TEST = '1'
-    const restore = scrubEnv()
+    const restore = scrubEnv(['EDWTN_EXTRA_LATE'])
     try {
       assert.equal(process.env.GIT_DIR, undefined)
       assert.equal(process.env.BRO_EDWTN_TEST, undefined)
       assert.equal(process.env.GIT_CONFIG_NOSYSTEM, '1')
       assert.equal(process.env.GIT_CONFIG_GLOBAL, devNull)
+      // vars the code-under-test sets mid-window — extra-named or
+      // pattern-matched — must not leak past the restore
+      process.env.EDWTN_EXTRA_LATE = 'late'
+      process.env.BRO_EDWTN_LATE = 'late'
     } finally {
       restore()
     }
     assert.equal(process.env.GIT_DIR, '/x')
     assert.equal(process.env.BRO_EDWTN_TEST, '1')
     assert.equal(process.env.GIT_CONFIG_NOSYSTEM, beforeNosystem)
+    assert.equal(process.env.GIT_CONFIG_GLOBAL, beforeGlobal)
+    assert.equal(process.env.EDWTN_EXTRA_LATE, undefined)
+    assert.equal(process.env.BRO_EDWTN_LATE, undefined)
     if (beforeDir === undefined) delete process.env.GIT_DIR
     else process.env.GIT_DIR = beforeDir
     delete process.env.BRO_EDWTN_TEST
+    delete process.env.EDWTN_EXTRA_LATE
+    delete process.env.BRO_EDWTN_LATE
   })
 })

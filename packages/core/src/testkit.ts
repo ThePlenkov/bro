@@ -39,7 +39,7 @@ export function testGitEnv(base: NodeJS.ProcessEnv = process.env): NodeJS.Proces
  *  surface (encoding forced utf8), with the ambient strip and the
  *  null-config pins applied to whatever env the site passes. */
 export function testGit(args: string[], opts: ExecFileSyncOptions = {}): string {
-  return execFileSync('git', args, {
+  return execFileSync('git', args, { // codeql[js/second-order-command-line-injection] — test seam: args are fixture literals, never user input
     ...opts,
     env: testGitEnv(opts.env ?? process.env),
     encoding: 'utf8',
@@ -52,7 +52,7 @@ export function testGitSpawn(
   args: string[],
   opts: SpawnSyncOptions = {}
 ): SpawnSyncReturns<string> {
-  return spawnSync('git', args, {
+  return spawnSync('git', args, { // codeql[js/second-order-command-line-injection] — test seam: args are fixture literals, never user input
     ...opts,
     env: testGitEnv(opts.env ?? process.env),
     encoding: 'utf8',
@@ -68,21 +68,29 @@ export function testGitSpawn(
  *  so in-process git children can't read host hooks/config either. */
 export function scrubEnv(extra: string[] = []): () => void {
   const ambient = /^(BEADS_DIR|BRO_)/
+  const scrubbed = (k: string) =>
+    AMBIENT_GIT.test(k) || ambient.test(k) || extra.includes(k)
   const saved: Record<string, string | undefined> = {}
   for (const k of Object.keys(process.env)) {
-    if (AMBIENT_GIT.test(k) || ambient.test(k) || extra.includes(k)) {
+    if (scrubbed(k)) {
       saved[k] = process.env[k]
       delete process.env[k]
     }
   }
-  // a var that matched AMBIENT_GIT is only in saved when it was set —
-  // record the pins too or they'd leak past the restore
-  for (const k of ['GIT_CONFIG_NOSYSTEM', 'GIT_CONFIG_GLOBAL']) {
+  // record absent extras and the pin keys as undefined too — a var the
+  // code-under-test sets during the scrub window must not leak past
+  // the restore
+  for (const k of [...extra, 'GIT_CONFIG_NOSYSTEM', 'GIT_CONFIG_GLOBAL']) {
     if (!(k in saved)) saved[k] = process.env[k]
   }
   process.env.GIT_CONFIG_NOSYSTEM = '1'
   process.env.GIT_CONFIG_GLOBAL = devNull
   return () => {
+    // the pattern classes are unbounded — rescan so a pin re-added
+    // mid-window dies here instead of leaking into the next suite
+    for (const k of Object.keys(process.env)) {
+      if (scrubbed(k) && !(k in saved)) delete process.env[k]
+    }
     for (const [k, v] of Object.entries(saved)) {
       if (v === undefined) {
         delete process.env[k]
