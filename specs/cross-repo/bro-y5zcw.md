@@ -70,7 +70,7 @@ carries the thread's progress. All are status-bearing:
 ```text
 bd -C <post-store> show <id> --json                      # request bead: status, labels
 closed issues labelled `provides:<id>` on the peer plane # bd's ship rule, restated
-meshThread(<dir>, peers, <id>, common, {pull: false})    # stage/turn annotation
+meshThread(<dir>, peers, <id>, common, {pull: false})    # envelope set (rejected = a `reject` env is present) + stage/turn annotation
 ```
 
 `<post-store>` is the posting store above; the peer plane is always
