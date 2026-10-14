@@ -65,6 +65,13 @@ configured, and `bro doctor` reports the resolved set (a misnamed
   `fleet.profiles.<p>.provider` — the provider supplies what runs inside
   the backend's spawn; provenance rides `BRO_AGENT_PROVIDER` /
   `BRO_AGENT_MODEL` into the registry entry and `bro fleet` output.
+- **Conductor** — `BRO_PROVIDER_BACKEND=<name>` in the
+  `bro fleet serve` env mounts an `acp` entry behind `/v1/messages` —
+  the hosted-session plane for interactive clients; see
+  [serve](/docs/commands/status). It is session-grade by design: a
+  client's internal/classifier models belong on a direct Messages-API
+  endpoint — the `bro fleet serve` byte-proxy or the real upstream —
+  never on this path.
 
 No defaults, no hardcoding: absent `providers` means provider behavior
 is off — a consumer naming a missing entry errors rather than silently
