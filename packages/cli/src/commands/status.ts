@@ -17,7 +17,7 @@
  * registry-less checkouts still answer — the absent sections are empty
  * arrays/null, never errors.
  */
-import { realpathSync } from 'node:fs'
+import { existsSync, realpathSync } from 'node:fs'
 import { basename, resolve } from 'node:path'
 import { evaluateExitGate, fetchPrActState, prStateCache } from '@broject/act'
 import {
@@ -68,14 +68,16 @@ interface StatusAgent {
 
 /** One checkout on the board. `state` is `bro work list`'s vocabulary
  *  (clean|dirty(n)|gone|LOCKED|PRUNABLE — via stateOfWorktree, so the
- *  two planes never disagree); `claim` is the live in-tree marker
- *  detail `bro work enter` stamped — absent when the tree is
- *  unclaimed or its marker aged out. */
+ *  two planes never disagree); it is present only where the board
+ *  probed — claimed trees, main, and cwd — because a per-tree
+ *  `git status` is the one expensive read this section has. `claim`
+ *  is the live in-tree marker detail `bro work enter` stamped —
+ *  absent when the tree is unclaimed or its marker aged out. */
 export interface StatusWorktree {
   name: string
   path: string
   branch?: string
-  state: string
+  state?: string
   claim?: string
   /** the primary checkout (porcelain's first entry) */
   main?: boolean
@@ -212,11 +214,19 @@ export function readBeads(dir: string): StatusBeads {
   }
 }
 
+/** Cap on per-tree `git status` probes — a rig parking dozens of
+ *  siblings must not pay N subprocesses per board tick. Claimed
+ *  trees, main, and cwd probe first (the live-work rows); beyond the
+ *  cap the rest list name/branch/claim only. */
+const STATE_PROBE_CAP = 16
+
 /** Every checkout `git worktree list` names — one porcelain read plus
- *  the per-tree probes `bro work list` already pays (a `status
- *  --porcelain` each) and a marker file read for the claim. A failed
- *  list is an empty array, never an error. */
-function readWorktrees(dir: string): StatusWorktree[] {
+ *  a marker file read per tree for the claim. The per-tree dirty
+ *  count (a `status --porcelain` each — what `bro work list` pays) is
+ *  probed only where the board needs it: claimed live work, the main
+ *  checkout, and cwd — cwd reuses the header's own dirty count, free.
+ *  A failed list is an empty array, never an error. */
+function readWorktrees(dir: string, dirty: number): StatusWorktree[] {
   const res = gitTry(['-C', dir, 'worktree', 'list', '--porcelain'])
   if (res.code !== 0) {
     return []
@@ -231,11 +241,11 @@ function readWorktrees(dir: string): StatusWorktree[] {
     }
   }
   const here = real(dir)
+  let probes = 0
   return parseWorktreePorcelain(res.out).map((w, i) => {
-    const row: StatusWorktree = {
-      name: basename(w.path),
-      path: w.path,
-      state: stateOfWorktree(w),
+    const row: StatusWorktree = { name: basename(w.path), path: w.path }
+    if (i === 0) {
+      row.main = true
     }
     if (w.branch !== undefined) {
       row.branch = w.branch
@@ -244,11 +254,22 @@ function readWorktrees(dir: string): StatusWorktree[] {
     if (claim !== undefined) {
       row.claim = claim
     }
-    if (i === 0) {
-      row.main = true
-    }
     if (real(w.path) === here) {
       row.here = true
+    }
+    // LOCKED/PRUNABLE/gone come free with the porcelain metadata;
+    // clean|dirty(n) costs a subprocess — spend it on live work only
+    if (w.locked !== undefined) {
+      row.state = 'LOCKED'
+    } else if (w.prunable) {
+      row.state = 'PRUNABLE'
+    } else if (!existsSync(w.path)) {
+      row.state = 'gone'
+    } else if (row.here === true) {
+      row.state = dirty === 0 ? 'clean' : `dirty(${dirty})`
+    } else if ((claim !== undefined || row.main === true) && probes < STATE_PROBE_CAP) {
+      probes++
+      row.state = stateOfWorktree(w)
     }
     return row
   })
@@ -380,7 +401,7 @@ export function collectStatus(dir: string): BroStatus {
     dir,
     branch,
     dirty,
-    worktrees: readWorktrees(dir),
+    worktrees: readWorktrees(dir, dirty),
     beads: readBeads(dir),
     fleet: readFleet(dir),
     loop: readLoop(dir),
@@ -396,7 +417,7 @@ function worktreeLine(w: StatusWorktree): string {
   const glyph = w.claim !== undefined ? '◐' : '·'
   const bits = [
     w.branch ?? 'detached',
-    w.state,
+    w.state ?? '',
     w.claim === undefined ? '' : w.claim === '' ? 'claimed' : `claim ${w.claim}`,
     w.here === true ? '← here' : '',
   ].filter((b) => b !== '')
@@ -463,13 +484,20 @@ function render(s: BroStatus): string[] {
     }
   }
   lines.push(`ready: ${s.beads.readyTotal} bead(s)`)
-  // the worktree plane is siblings-only in text — the main checkout is
-  // already the `board:` header (JSON carries every row)
+  // the worktree plane lists siblings — the main checkout is already
+  // the `board:` header (JSON carries every row). Rows print only for
+  // live work: claimed trees plus the board's own checkout; parked
+  // litter reads as the count, `bro work list` is the drill-down.
   const linked = s.worktrees.filter((w) => w.main !== true)
   if (linked.length > 0) {
-    lines.push(`worktrees: ${linked.length} linked`)
+    const claimed = linked.filter((w) => w.claim !== undefined).length
+    lines.push(
+      `worktrees: ${linked.length} linked${claimed > 0 ? `, ${claimed} claimed` : ''}`
+    )
     for (const w of linked) {
-      lines.push(worktreeLine(w))
+      if (w.claim !== undefined || w.here === true) {
+        lines.push(worktreeLine(w))
+      }
     }
   }
   const cap = s.fleet.maxConcurrent > 0 ? `/${s.fleet.maxConcurrent}` : ''

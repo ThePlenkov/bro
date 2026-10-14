@@ -71,9 +71,11 @@ now": one call instead of `bd list` + `bro fleet agents status` +
   derived cheaply (pidAlive + recorded exitStatus), not the full
   connector probe `bro fleet agents status` does.
 - **`worktrees` is the claimed-live-work plane** — every checkout in
-  `git worktree list`, each with `branch`, `state` in `bro work list`'s
-  vocabulary (`clean | dirty(n) | gone | LOCKED | PRUNABLE`), and
-  `claim`: the live in-tree marker detail `bro work enter` stamped
-  (absent = unclaimed or aged out). `main`/`here` flag the primary
-  checkout and the board's own cwd — a sibling holding work is visible
-  even when it never became a bead row.
+  `git worktree list`, each with `branch` and `claim`: the live
+  in-tree marker detail `bro work enter` stamped (absent = unclaimed
+  or aged out). `state` follows `bro work list`'s vocabulary
+  (`clean | dirty(n) | gone | LOCKED | PRUNABLE`) but is probed only
+  for live work — claimed trees, main, cwd — a parked sibling lists
+  without it. `main`/`here` flag the primary checkout and the board's
+  own cwd — a sibling holding work is visible even when it never
+  became a bead row.

@@ -21,9 +21,13 @@ from `git worktree list --porcelain`, each carrying:
 - `name`/`path` — basename for the board, the absolute path for a
   thin client that wants to open it;
 - `branch` — shortname, absent when detached;
-- `state` — `bro work list`'s own vocabulary via `stateOfWorktree`
-  (`clean | dirty(n) | gone | LOCKED | PRUNABLE`), so the board and
-  the dedicated plane never disagree on what a row means;
+- `state` — `bro work list`'s own vocabulary (`clean | dirty(n) |
+  gone | LOCKED | PRUNABLE`), present only where the board probed.
+  LOCKED/PRUNABLE/gone come free with the porcelain metadata;
+  `clean|dirty(n)` costs a `git status` subprocess per tree, so the
+  probe lands only on live work — claimed trees, main, and cwd (cwd
+  reuses the header's own dirty count, free), capped at 16 probes so
+  a rig parking dozens of siblings stays ms-cheap;
 - `claim` — the live in-tree claim marker's detail
   (`<gitdir>/bro/work`, stamped by `bro work enter`; read through
   `worktreeClaim`, so an aged-out marker stops reading as claimed);
@@ -32,15 +36,16 @@ from `git worktree list --porcelain`, each carrying:
   linked trees).
 
 Cost stays inside the board's local-only contract: one porcelain
-list, one `git status --porcelain` per tree (exactly what `bro work
-list` already pays), one marker file read. A failed `worktree list`
-is `worktrees: []`, never an error — the empty-sections rule holds.
+list, a marker file read per tree, and the bounded state probes. A
+failed `worktree list` is `worktrees: []`, never an error — the
+empty-sections rule holds.
 
-Render gains a `worktrees: N linked` section between the beads queue
-and the fleet rows — one line per linked tree, `◐` when a live claim
-is stamped, `·` otherwise, `← here` on the board's own checkout. The
-main row stays in JSON but isn't rendered: the `board:` header line
-already covers the ambient checkout.
+Render gains a `worktrees: N linked[, M claimed]` section between the
+beads queue and the fleet rows. Rows print only for live work —
+claimed trees and the board's own checkout (`◐` claimed, `·` not,
+`← here` on cwd); parked litter reads as the count, `bro work list`
+is the drill-down. The main row stays in JSON but isn't rendered:
+the `board:` header line already covers the ambient checkout.
 
 `bro work list` also learns the claim column — the dedicated plane
 shows the same live-claim read the board does, so "claimed live work"
