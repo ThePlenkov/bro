@@ -42,6 +42,9 @@ function startProvider(
       const m = /bro provider — (http:\/\/127\.0\.0\.1:\d+)/.exec(out)
       if (m) {
         clearTimeout(timer)
+        // the bound-listener path won — drop the pre-bind failure hook
+        // or a later clean stop() still fires fail() on a dead child
+        child.removeAllListeners('exit')
         resolve({ child, url: m[1]! })
       }
     })

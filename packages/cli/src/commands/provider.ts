@@ -78,14 +78,17 @@ export interface ProviderEndpoint {
 
 /** Compare ANTHROPIC_BASE_URL to a recorded listener url — the env
  *  spells it however the user wrote it (localhost, default port,
- *  trailing slash); URL parsing normalizes all three. */
+ *  trailing slash); URL parsing normalizes all three. The path
+ *  survives — a base carrying one (/custom) is not a listener that
+ *  serves root-anchored /v1/*, so the pin misses (fails closed)
+ *  instead of returning a token for a URL that would only 404. */
 function normalizeBase(raw: string): string {
   try {
     const u = new URL(raw.trim())
     if (u.hostname === 'localhost' || u.hostname === '[::1]') {
       u.hostname = '127.0.0.1'
     }
-    return u.origin
+    return u.origin + u.pathname.replace(/\/+$/, '')
   } catch {
     return raw.trim().replace(/\/+$/, '')
   }
@@ -110,10 +113,12 @@ export function resolveProviderEndpoint(
   const repo = liveServeState(dir)
   if (typeof baseRaw === 'string' && baseRaw.trim() !== '') {
     const base = normalizeBase(baseRaw)
-    if (host?.url === base) {
+    // the recorded side normalizes too — a state file written with
+    // localhost, a default port, or a trailing slash still matches
+    if (host !== undefined && normalizeBase(host.url) === base) {
       return { url: host.url, token: host.token, source: 'host' }
     }
-    if (repo?.url === base) {
+    if (repo !== undefined && normalizeBase(repo.url) === base) {
       return { url: repo.url, token: repo.token, source: 'repo' }
     }
     return undefined
@@ -300,21 +305,24 @@ async function cmdServe(argv: string[]): Promise<void> {
   )
 
   try {
-    const url = await new Promise<string>((resolve, reject) => {
-      server.once('error', reject)
-      // 127.0.0.1 only — the loopback bind IS the trust boundary; there
-      // is no --host flag to widen it with
-      server.listen(port, '127.0.0.1', () => {
-        meta.startedAt = new Date().toISOString()
-        const addr = server.address()
-        resolve(
-          `http://127.0.0.1:${typeof addr === 'object' && addr !== null ? addr.port : port}`
-        )
+    let url: string
+    try {
+      url = await new Promise<string>((resolve, reject) => {
+        server.once('error', reject)
+        // 127.0.0.1 only — the loopback bind IS the trust boundary; there
+        // is no --host flag to widen it with
+        server.listen(port, '127.0.0.1', () => {
+          meta.startedAt = new Date().toISOString()
+          const addr = server.address()
+          resolve(
+            `http://127.0.0.1:${typeof addr === 'object' && addr !== null ? addr.port : port}`
+          )
+        })
       })
-    }).catch((err: unknown) => {
+    } catch (err) {
       console.error(`error: ${err instanceof Error ? err.message : String(err)}`)
       process.exit(1)
-    })
+    }
 
     writeStateFile(statePath, {
       pid: process.pid,
@@ -381,8 +389,11 @@ function cmdEnv(argv: string[]): void {
     console.log(JSON.stringify(block, null, 2))
     return
   }
-  console.log(`export ANTHROPIC_BASE_URL='${ep.url}'`)
-  console.log(`export ANTHROPIC_AUTH_TOKEN='${ep.token}'`)
+  // eval-able output is shell — quote defensively: a ' in a recorded
+  // field must not break out of the literal
+  const sq = (s: string): string => `'${s.replace(/'/g, `'\\''`)}'`
+  console.log(`export ANTHROPIC_BASE_URL=${sq(ep.url)}`)
+  console.log(`export ANTHROPIC_AUTH_TOKEN=${sq(ep.token)}`)
   console.log('# ~/.claude/settings.json — one-time, survives every repo:')
   console.log(`# ${JSON.stringify(block)}`)
 }

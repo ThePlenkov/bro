@@ -37,9 +37,11 @@ Two planes produce an endpoint:
 
 `url`/`token`/`env` all pick the same endpoint:
 
-1. `ANTHROPIC_BASE_URL` set in env → exact url match (localhost and
-   trailing-slash normalized) against the live host listener, then the
-   cwd repo's live serve — the helper tracks the client's actual
+1. `ANTHROPIC_BASE_URL` set in env → exact url match (localhost,
+   default port, and trailing slash normalized — **the path must
+   match too**: a base carrying one never selects a listener that
+   serves root-anchored `/v1/*`) against the live host listener, then
+   the cwd repo's live serve — the helper tracks the client's actual
    target, never guesses;
 2. unset → the cwd repo's live serve **with the provider plane wired**;
 3. else the live host listener;

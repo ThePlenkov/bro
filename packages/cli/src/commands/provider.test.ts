@@ -119,6 +119,19 @@ describe('resolveProviderEndpoint — the cwd-aware pick', () => {
         resolveProviderEndpoint(main, { ANTHROPIC_BASE_URL: 'http://127.0.0.1:7777' }),
         undefined
       )
+      // a base carrying a path is not the root listener — fail closed
+      // rather than return a token for a URL that would only 404
+      assert.equal(
+        resolveProviderEndpoint(main, { ANTHROPIC_BASE_URL: 'http://127.0.0.1:4545/custom' }),
+        undefined
+      )
+      // the recorded side normalizes too — a state file holding a
+      // default-port or localhost url still matches the pin
+      writeStateFile(providerStatePath(), state(LIVE, 'http://127.0.0.1:80/', '/x', 'h80'))
+      assert.equal(
+        resolveProviderEndpoint(main, { ANTHROPIC_BASE_URL: 'http://localhost' })?.token,
+        'h80'
+      )
       // a dead host entry falls through — only live listeners count
       writeStateFile(providerStatePath(), state(DEAD, 'http://127.0.0.1:4545'))
       assert.equal(resolveProviderEndpoint('/nowhere', {}), undefined)
