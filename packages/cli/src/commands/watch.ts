@@ -356,6 +356,58 @@ function worktreeList(errors?: string[]): WorktreeInfo[] {
   }
 }
 
+/** The row-resolved half — every PR on a fleet row's branch is gated;
+ *  prNum is only the display pick. */
+function addRowPrs(rows: FleetRow[], add: (pr: number, link?: string) => void): void {
+  for (const row of rows) {
+    for (const pr of row.prNums ?? (row.prNum === undefined ? [] : [row.prNum])) {
+      add(pr, pr === row.prNum ? row.pr : undefined)
+    }
+  }
+}
+
+/** One listing call covers the whole open-PR set — an exact branch
+ *  match for worktree heads, the fleet prefix for remote-only ones. A
+ *  failed listing is a lookupError, never a silent "no PRs". */
+function addListedPrs(
+  openPrs: NonNullable<ReviewFacade['openPrs']>,
+  repo: string,
+  branches: string[],
+  add: (pr: number) => void,
+  lookupErrors: string[]
+): void {
+  try {
+    const branchSet = new Set(branches)
+    for (const { pr, headRef } of openPrs(repo)) {
+      if (branchSet.has(headRef) || FLEET_BRANCH_PREFIXES.some((p) => headRef.startsWith(p))) {
+        add(pr)
+      }
+    }
+  } catch (err) {
+    lookupErrors.push(`open-PR listing: ${errText(err)}`)
+  }
+}
+
+/** The per-branch fallback for hosts without `openPrs` — one lookup per
+ *  candidate branch; a failed branch lands in lookupErrors, not a
+ *  quietly dropped PR. */
+function addBranchPrs(
+  rev: ReviewFacade,
+  branches: string[],
+  add: (pr: number) => void,
+  lookupErrors: string[]
+): void {
+  for (const branch of branches) {
+    try {
+      for (const pr of rev.prsForBranch(branch)) {
+        add(pr)
+      }
+    } catch (err) {
+      lookupErrors.push(`${branch}: ${errText(err)}`)
+    }
+  }
+}
+
 /** Open-PR discovery for the gates plane — the fleet rows' resolved
  *  PRs unioned with every open PR on a fleet branch. The registry is
  *  not the PR plane (bro-hn7kx): rows only exist for steps of OPEN
@@ -380,35 +432,11 @@ export function openPrTargets(
       seen.set(pr, link ?? rev.prLink(repo, pr))
     }
   }
-  for (const row of rows) {
-    // every PR on the branch is gated — prNum is only the display pick
-    for (const pr of row.prNums ?? (row.prNum === undefined ? [] : [row.prNum])) {
-      add(pr, pr === row.prNum ? row.pr : undefined)
-    }
-  }
-  if (rev.openPrs !== undefined) {
-    try {
-      const branchSet = new Set(branches)
-      for (const { pr, headRef } of rev.openPrs(repo)) {
-        // exact match covers worktree branches; the prefix match is
-        // fleet scope — a remote-only loop//work//stack/ head counts too
-        if (branchSet.has(headRef) || FLEET_BRANCH_PREFIXES.some((p) => headRef.startsWith(p))) {
-          add(pr)
-        }
-      }
-    } catch (err) {
-      lookupErrors.push(`open-PR listing: ${errText(err)}`)
-    }
+  addRowPrs(rows, add)
+  if (rev.openPrs === undefined) {
+    addBranchPrs(rev, branches, add, lookupErrors)
   } else {
-    for (const branch of branches) {
-      try {
-        for (const pr of rev.prsForBranch(branch)) {
-          add(pr)
-        }
-      } catch (err) {
-        lookupErrors.push(`${branch}: ${errText(err)}`)
-      }
-    }
+    addListedPrs(rev.openPrs, repo, branches, add, lookupErrors)
   }
   return [...seen.entries()].map(([pr, link]) => ({ pr, link }))
 }
@@ -535,18 +563,19 @@ async function fleetPlane(
 
 /** gates — no review host renders the section unavailable; a throwing
  *  probe renders `error`, distinct from a host failure. Discovery is
- *  the branch plane (bro-hn7kx), so branch→PR failures from both the
- *  fleet rows and the candidate-branch scan collect in lookupErrors. */
+ *  the branch plane (bro-hn7kx); fleet prErrors already report through
+ *  the fleet section + attention, so lookupErrors here collects only
+ *  the gates plane's own discovery failures — seeding both into the
+ *  same list would double-report them. */
 async function gatesPlane(
   dir: string,
   host: ResolvedHost,
-  rows: FleetRow[],
-  prErrors: string[]
+  rows: FleetRow[]
 ): Promise<WatchGates> {
   if (host.rev === undefined) {
     return { available: false, reason: host.reason, prs: [] }
   }
-  const lookupErrors = [...prErrors]
+  const lookupErrors: string[] = []
   try {
     const prs = await gateFleetPrs(host.rev, host.repo, rows, dir, lookupErrors)
     return {
@@ -599,7 +628,7 @@ export async function collectSnapshot(dir: string): Promise<WatchSnapshot> {
   const molsPlane_ = molsPlane()
   const host = hostPlane(dir)
   const fleet = await fleetPlane(dir, host)
-  const gates = await gatesPlane(dir, host, fleet.rows, fleet.prErrors ?? [])
+  const gates = await gatesPlane(dir, host, fleet.rows)
   const loop = loopPlane(dir)
   const daemon = daemonPlane(dir)
 
@@ -610,8 +639,17 @@ export async function collectSnapshot(dir: string): Promise<WatchSnapshot> {
     fleet.walls ?? [],
     loop
   )
-  for (const e of fleet.prErrors ?? []) {
-    attention.push(`PR lookup failed — ${e}`)
+  // fleet prErrors and gates lookupErrors can name the same failure
+  // (one dead host failing both scans) — the headline reports it once.
+  // Promoting gates lookupErrors keeps an under-counted PR set from
+  // reading as quiet.
+  const reported = new Set(attention)
+  for (const e of [...(fleet.prErrors ?? []), ...(gates.lookupErrors ?? [])]) {
+    const line = `PR lookup failed — ${e}`
+    if (!reported.has(line)) {
+      reported.add(line)
+      attention.push(line)
+    }
   }
   if (gates.error !== undefined) {
     attention.push(`gates probe failed — ${gates.error}`)
@@ -689,7 +727,7 @@ function gateLines(gates: WatchGates): string[] {
   const lookupWarn =
     gates.lookupErrors === undefined
       ? []
-      : [`  warning: ${gates.lookupErrors.length} branch→PR lookup(s) failed — see fleet`]
+      : [`  warning: ${gates.lookupErrors.length} branch→PR lookup(s) failed — see attention`]
   if (gates.prs.length === 0) {
     return gates.lookupErrors === undefined
       ? ['  no open PRs on fleet branches']
