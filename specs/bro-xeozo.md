@@ -20,6 +20,14 @@ which agent CLI answers.
   client's requested model id is never trusted — provenance maps to the
   served id in every response `model` field (anthropic clients rename
   built-in rows via `ANTHROPIC_DEFAULT_*_MODEL` anyway).
+- Model ids resolve against the session's `configOptions` catalog:
+  exact value/name, unique `<id>-` family prefix, loud error otherwise.
+  A non-catalog `<base>-<level>` id resolves as a composite when
+  `<level>` is a leaf of the `thought_level` option — agents expose
+  reasoning-tier aliases this way (devin's `swe-2-max` IS
+  `swe-2-high` + `thought_level=max`); both options are applied via
+  `set_config_option` and verified against the reported
+  `currentValue`s.
 - Missing/invalid backend = a loud startup error naming what IS
   configured (the provider-contract error shape), never a silent proxy
   fallback.
