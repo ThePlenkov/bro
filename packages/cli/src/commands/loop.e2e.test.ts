@@ -1146,7 +1146,7 @@ describe('bro loop gate-stack round-robin', () => {
     // what the park left behind: the worktree, its branch's covering
     // commit, and the PR gating on it
     git(['worktree', 'add', '-b', 'loop/fx-a', f.worktree], f.main)
-    git(['-C', f.worktree, 'commit', '-q', '--allow-empty', '-m', 'fix: fx-a work (fx-a)'])
+    git(['-C', f.worktree, 'commit', '-q', '--allow-empty', '-m', 'fix: fx-a work (fx-a)'], f.main)
     const head = git(['-C', f.worktree, 'rev-parse', 'HEAD'], f.main).trim()
     writeHostState(f.hostState, {
       prs: {
