@@ -33,7 +33,7 @@
  * warnings say so once, and the metronome still beats.
  */
 import { spawnSync } from 'node:child_process'
-import { dropMailbox, holdFileLock, loadConfig, mailboxDir } from '@broject/core'
+import { dropMailbox, holdFileLock, loadConfig, LockTimeout, mailboxDir } from '@broject/core'
 import { positionals } from './args.ts'
 import { MAX_INTERVAL_SEC, MIN_INTERVAL_SEC } from './drive-config.ts'
 import { writeHeartbeat } from './watch-heartbeat.ts'
@@ -119,7 +119,14 @@ export function pulseMailer(dir: string): PulseMailer {
   }
   try {
     return { release: holdFileLock(lock, { waitMs: 60, label: 'pulse lock' }) }
-  } catch {
+  } catch (err) {
+    // LockTimeout is contention — a live holder mails, we stay a stdout
+    // standby. Anything else (EACCES, EIO, a dead staged write) is a
+    // filesystem fault: without a warning the pulse ticks forever
+    // unable to mail and nobody learns why.
+    if (!(err instanceof LockTimeout)) {
+      console.error(`pulse: pulse.lock acquire failed — ${errText(err)}`)
+    }
     return { release: null }
   }
 }
