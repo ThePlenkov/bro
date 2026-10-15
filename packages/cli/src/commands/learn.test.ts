@@ -279,28 +279,25 @@ describe('bro learn', () => {
   })
 
   test('capture --mol distills flagged learn: lines from step results', () => {
-    const f = learnFixture(
-      [
-        {
-          id: 'fx-s1',
-          title: 'Implement the thing',
-          status: 'closed',
-          close_reason: 'PR open\nlearn: bro act merge refuses on a red gate',
+    const f = learnFixture([], {
+      // bd mol show's issue rows carry title + close_reason — the
+      // harvest reads them off the payload, not a per-step show
+      mols: {
+        'fx-m1': {
+          root: { id: 'fx-m1', status: 'closed' },
+          issues: [
+            { id: 'fx-m1', status: 'closed' },
+            {
+              id: 'fx-s1',
+              status: 'closed',
+              title: 'Implement the thing',
+              close_reason: 'PR open\nlearn: bro act merge refuses on a red gate',
+            },
+          ],
+          dependencies: [],
         },
-      ],
-      {
-        mols: {
-          'fx-m1': {
-            root: { id: 'fx-m1', status: 'closed' },
-            issues: [
-              { id: 'fx-m1', status: 'closed' },
-              { id: 'fx-s1', status: 'closed' },
-            ],
-            dependencies: [],
-          },
-        },
-      }
-    )
+      },
+    })
     inside(f.main, f.root, () => {
       const r = f.run(['capture', '--mol', 'fx-m1'])
       assert.equal(r.code, 0, r.stderr)
