@@ -710,10 +710,19 @@ describe('permission policy (bro-84qhx)', () => {
     )
     assert.equal(permitReason({ allow: ['kind:read'] }, { ...ASK, kind: 'execute' }), undefined)
     assert.equal(permitReason({ allow: ['RUN TESTS'] }, ASK), 'allowlist:RUN TESTS')
+    // rawInput is agent-shaped — name-dropping the matcher inside a
+    // nested field is a bypass, not a permit
     assert.equal(
       permitReason({ allow: ['git status'] }, { ...ASK, rawInput: { command: 'git status' } }),
+      undefined
+    )
+    assert.equal(
+      permitReason({ allow: ['git status'] }, { ...ASK, title: 'Ran git status' }),
       'allowlist:git status'
     )
+    // an empty matcher never permits — includes('') would hit everything
+    assert.equal(permitReason({ allow: [''] }, ASK), undefined)
+    assert.equal(permitReason({ allow: ['  '] }, ASK), undefined)
     assert.equal(permitReason({ allow: ['other'] }, ASK), undefined)
   })
 

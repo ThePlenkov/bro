@@ -88,7 +88,7 @@ describe('conductorConfig', () => {
       {
         BRO_PROVIDER_BACKEND: 'dv-acp',
         BRO_PROVIDER_AUTO_APPROVE: '0',
-        BRO_PROVIDER_PERMISSION_ALLOW: 'kind:fetch, git status',
+        BRO_PROVIDER_PERMISSION_ALLOW: 'kind:fetch\ngit status',
       },
       '/r',
       providers
@@ -97,6 +97,16 @@ describe('conductorConfig', () => {
       autoApprove: false,
       allow: ['kind:fetch', 'git status'],
     })
+    // a comma is never a delimiter — `fix(a, b)` stays ONE matcher
+    const comma = conductorConfig(
+      {
+        BRO_PROVIDER_BACKEND: 'dv-acp',
+        BRO_PROVIDER_PERMISSION_ALLOW: 'git commit -m "fix(a, b)"',
+      },
+      '/r',
+      providers
+    )
+    assert.deepEqual(comma?.permissions?.allow, ['git commit -m "fix(a, b)"'])
     // a non-bool env is a loud config error
     assert.throws(
       () =>

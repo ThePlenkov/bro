@@ -25,17 +25,19 @@ interface AcpPermissionPolicy {
   `bro serve` wants its own knob without mutating the entry the
   headless fleet resolves through:
   - `BRO_PROVIDER_AUTO_APPROVE=<bool>` — wins over the entry field.
-  - `BRO_PROVIDER_PERMISSION_ALLOW=<comma-separated matchers>` — wins
-    over `permissionAllow`; the same list reaches the worker as
+  - `BRO_PROVIDER_PERMISSION_ALLOW=<newline-separated matchers>` —
+    wins over `permissionAllow`; the same list reaches the worker as
     repeated `--allow=<matcher>` argv (`=` spelling — a matcher that
     starts with `--` must not die in the worker's option parser).
-    A matcher may itself contain a comma (a `commit -m "fix(a, b)"`
-    substring) — for that case the env value takes the newline form:
-    one matcher per line, commas literal.
+    One matcher per line; a comma never splits — matchers are
+    arbitrary substrings and splitting `fix(a, b)` on `,` would
+    silently widen the grant into two weaker matchers.
 
 A matcher is `kind:<acp-tool-kind>` (exact, case-insensitive — e.g.
 `kind:read`, `kind:fetch`) or a bare string matched case-insensitively
-as a substring of the tool call's `title` or serialized `rawInput`.
+as a substring of the tool call's `title`. `rawInput` is never
+matched: it is agent-shaped, so any nested field could name-drop an
+allowlisted string and bypass the policy.
 An ask with no matching allow option still denies — approval is never
 invented.
 

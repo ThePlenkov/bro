@@ -227,13 +227,23 @@ function pickOptStrList(
   if (v === undefined) {
     return
   }
-  if (!Array.isArray(v) || v.some((m) => typeof m !== 'string' || m.trim() === '')) {
+  // densify after the type check — some()/map() skip/preserve sparse
+  // holes, and a surviving hole crashes permitReason's toLowerCase
+  // mid-ask
+  if (!Array.isArray(v)) {
     console.error(
       `bro.config: providers.${name}.${f} must be an array of non-empty strings — field dropped`
     )
     return
   }
-  picked[f] = v.map((m) => m.trim())
+  const dense = [...v]
+  if (dense.some((m) => typeof m !== 'string' || m.trim() === '')) {
+    console.error(
+      `bro.config: providers.${name}.${f} must be an array of non-empty strings — field dropped`
+    )
+    return
+  }
+  picked[f] = dense.map((m) => m.trim())
 }
 
 /** One model entry → its wire. A bare string wins; `{wire}` unwraps;

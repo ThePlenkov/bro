@@ -128,9 +128,16 @@ export function permitReason(
   if (policy.autoApprove === true) {
     return 'autoApprove'
   }
-  const hay =
-    `${toolCall.title ?? ''}\n${JSON.stringify(toolCall.rawInput ?? null)}`.toLowerCase()
+  // substring matchers hit the title only — rawInput is agent-shaped:
+  // any nested field could name-drop an allowlisted string and bypass
+  // it. kind: stays the precise matcher; the title is the human-legible
+  // label the operator actually read when writing the entry. An empty
+  // matcher is skipped — `includes('')` would permit everything.
+  const hay = (toolCall.title ?? '').toLowerCase()
   for (const m of policy.allow ?? []) {
+    if (m.trim() === '') {
+      continue
+    }
     const kind = /^kind:(\S+)$/i.exec(m)?.[1]
     if (kind !== undefined) {
       if (toolCall.kind?.toLowerCase() === kind.toLowerCase()) {

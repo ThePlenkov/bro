@@ -411,6 +411,17 @@ describe('parseProviderEntry', () => {
       })
       assert.deepEqual(e, { type: 'acp', command: 'kilo --acp' }, JSON.stringify(bad))
     }
+    // a sparse array carries holes — some()/map() skip/preserve them,
+    // and a surviving hole is undefined crashing toLowerCase mid-ask
+    const sparse: string[] = []
+    sparse[0] = 'kind:read'
+    sparse[2] = 'git status'
+    const s = parseProviderEntry('p', {
+      type: 'acp',
+      command: 'kilo --acp',
+      permissionAllow: sparse,
+    })
+    assert.deepEqual(s, { type: 'acp', command: 'kilo --acp' })
     // an unknown key on another kind is stripped like any other
     const cli = parseProviderEntry('p', {
       type: 'cli',

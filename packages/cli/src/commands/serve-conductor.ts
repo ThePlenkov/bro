@@ -23,10 +23,11 @@
  *                                 truthy auto-approves every ask that
  *                                 offers an allow option; wins over
  *                                 providers.<name>.autoApprove.
- *   BRO_PROVIDER_PERMISSION_ALLOW comma-separated allowlist matchers —
- *                                 `kind:<acp-tool-kind>` or a bare
- *                                 title/rawInput substring; wins over
- *                                 providers.<name>.permissionAllow.
+ *   BRO_PROVIDER_PERMISSION_ALLOW newline-separated allowlist
+ *                                 matchers — `kind:<acp-tool-kind>` or a
+ *                                 bare title substring (rawInput is
+ *                                 agent-shaped, never matched); wins
+ *                                 over providers.<name>.permissionAllow.
  *                                 Interactive sessions want this: a
  *                                 deny otherwise reads to the agent as
  *                                 "User rejected" though nobody was
@@ -130,12 +131,13 @@ function permissionPolicy(env: NodeJS.ProcessEnv, entry: AcpEntry): AcpPermissio
     }
   }
   const rawAllow = env.BRO_PROVIDER_PERMISSION_ALLOW
-  // newline form when a matcher itself carries a comma (e.g. a
-  // `commit -m "fix(a, b)"` substring) — otherwise comma-separated
+  // one matcher per line — a comma never splits: matchers are arbitrary
+  // substrings and a `fix(a, b)` comma-split silently widens the grant
   const allow =
     rawAllow === undefined || rawAllow.trim() === ''
       ? entry.permissionAllow
-      : (rawAllow.includes('\n') ? rawAllow.split(/\r?\n/) : rawAllow.split(','))
+      : rawAllow
+          .split(/\r?\n/)
           .map((m) => m.trim())
           .filter((m) => m !== '')
   return { autoApprove, allow }
@@ -360,10 +362,22 @@ function apiError(res: ServerResponse, status: number, type: string, message: st
   res.end(`${JSON.stringify({ type: 'error', error: { type, message } })}\n`)
 }
 
+/** A request body larger than this is a stream attack, not a prompt —
+ *  contexts are big but nowhere near it. Exceed → 413. */
+const BODY_MAX_BYTES = 32 * 1024 * 1024
+
+class BodyTooLarge extends Error {
+  override name = 'BodyTooLarge'
+}
+
 async function readBody(req: IncomingMessage): Promise<string> {
   let body = ''
   for await (const chunk of req) {
     body += chunk
+    if (body.length > BODY_MAX_BYTES) {
+      req.destroy()
+      throw new BodyTooLarge(`request body exceeds ${BODY_MAX_BYTES} bytes`)
+    }
   }
   return body
 }
@@ -381,7 +395,11 @@ async function messages(
   let body: MessagesRequest
   try {
     body = JSON.parse(await readBody(req)) as MessagesRequest
-  } catch {
+  } catch (err) {
+    if (err instanceof BodyTooLarge) {
+      apiError(res, 413, 'invalid_request_error', err.message)
+      return
+    }
     apiError(res, 400, 'invalid_request_error', 'malformed JSON body')
     return
   }
@@ -538,7 +556,9 @@ export function conductorProxy(
   const wireOpts: ProviderWireOpts = {
     ...opts,
     model: opts.model ?? cfg.model,
-    acp: { cwd: cfg.cwd, permissions: cfg.permissions, ...opts.acp },
+    // the listener's resolved policy and root always win — a caller's
+    // opts.acp must never overwrite cfg (peer/cwd fall back, not win)
+    acp: { ...opts.acp, cwd: cfg.cwd, permissions: cfg.permissions ?? opts.acp?.permissions },
   }
   // warm pool: one acp child serves every /v1/messages turn — spawn +
   // initialize is paid once per listener; session/new per request is
@@ -591,8 +611,16 @@ export function conductorProxy(
       return
     }
     if (method === 'POST' && path === '/v1/messages/count_tokens') {
-      const raw = await readBody(req)
-      apiErrorCountTokens(res, raw)
+      try {
+        const raw = await readBody(req)
+        apiErrorCountTokens(res, raw)
+      } catch (err) {
+        if (err instanceof BodyTooLarge) {
+          apiError(res, 413, 'invalid_request_error', err.message)
+          return
+        }
+        throw err
+      }
       return
     }
     if (method === 'GET' && path === '/v1/models') {
