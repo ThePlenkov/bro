@@ -51,18 +51,24 @@ transition lands — `emitLifecycle` is the only write path).
 
 ```
 queued ──claim──> claimed ──spawn──> working ──pr-open──> pr_open
-  ^                 │                                    │    │
-  │                 │           gate ticks:              │    │
-  │                 │         threads/ci/sast/           │    ▼
-  │                 │         reviewers/human            gate_blocked ──fixer──> pr_open
-  │                 │                                    │
-  │                 │                                    ▼
-  │                 │                                  green ──merge──> merged ──> closed
+  ^                 │         ▲  ▲                       │    │
+  │                 │         │  │ gate ticks:           │    │
+  │                 │         │  │ threads/ci/sast/      │    ▼
+  │                 │         │  │ reviewers/human    gate_blocked
+  │                 │         │  │                       │
+  │                 │         │  └──push── working <──fixer──┘
+  │                 │         │                            │
+  │                 │         └──────── green <────────────┘
+  │                 │                      │
+  │                 │                      ▼
+  │                 │                    merged ──> closed
   │                 │
-  │                 └────── park/release ──────> parked ──release──> queued
-  │
-  └── any non-terminal state may go --> lost   (lease dead, pid gone,
-      worker superseded — reapable, never auto-resumed without intent)
+  │                 └── (every non-terminal state) ──park──> parked
+  │                                                        │ release
+  └────────────────────────────────────────────────────────┘
+  (any non-terminal state) ──────────────────────────────> lost
+     lease dead, pid gone, worker superseded — reapable;
+     re-queue is a policy decision, never silent (below)
 ```
 
 - `queued` — open, unclaimed, in the ready set (deps satisfied).
@@ -77,9 +83,18 @@ queued ──claim──> claimed ──spawn──> working ──pr-open──
 - `green` — `exit_gate=OK`; merge pending. Merge is an edge, not a
   state — it either lands (`merged`) or bounces back to `gate_blocked`.
 - `parked` — explicitly suspended with a resume payload (the
-  interrupter state); `release` returns it to `queued`.
-- `lost` — lease expired or worker dead mid-flight. Reaped by sweep;
-  a policy may re-queue, never silently.
+  interrupter state); `release` returns it to `queued`. **Every**
+  non-terminal state may park — `working` and `pr_open` are the common
+  real-world suspension points (a worker interrupted mid-flight, a PR
+  waiting on a human); `park` records the suspend-from state and the
+  wake predicate so `release` can report what it interrupted.
+- `lost` — lease expired or worker dead mid-flight. The sweep reaps
+  the record; **re-queue is owned by the loop policy**: `lost →
+  queued` fires only when the item's claim lease has expired AND its
+  registry entry is terminal (`exited`/`lost`/`stopped`) — a monitor
+  or parked frame never counts (dkw3e). The transition emits its
+  journal row with `detail.cause` so the re-entry is auditable; a
+  lost item is never silently retried.
 - `closed`/`merged` — terminal.
 
 Every edge emits its `LifecycleKind` (claim/worktree/spawn/agent-exit/
@@ -128,10 +143,12 @@ the engine — not daemons:
   pr_open` on push.
 - **drive policy** — `pr_open → gate_blocked` on any blocker signal
   (threads, failed checks, SAST, pending reviewers, missing human
-  approval); `gate_blocked → working` by spawning a fixer **on any
-  blocker kind** — check-only failures spawn fixers exactly like
-  threads (njyn8). Occupancy counts worker-kind registry entries only —
-  monitors and watchers never count (dkw3e). `green → merged`.
+  approval); `gate_blocked → working` spawns a fixer **on any blocker
+  kind** — check-only failures spawn fixers exactly like threads
+  (njyn8). The fixer works the PR's own branch: its push re-enters
+  `pr_open` (the existing PR is retained — never a duplicate PR) and
+  the gate re-evaluates. Occupancy counts worker-kind registry entries
+  only — monitors and watchers never count (dkw3e). `green → merged`.
 - **convoy policy** — step drain: `convoy next`'s recomputation is the
   reference implementation; a mol root's `ready` steps are `queued`
   items, `gates` are human-kind items only a human verdict releases.
