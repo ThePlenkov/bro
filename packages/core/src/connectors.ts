@@ -241,17 +241,8 @@ export function sessionTaskClaims(ctx: ConnectorCtx): Set<string> {
     // absolute in linked ones — resolve against ctx.dir, never cwd
     const hooks = join(resolve(ctx.dir, gd.out.trim()), 'bro', 'hooks')
     const safe = ctx.sessionId.replace(/[^\w.-]/g, '_')
-    try {
-      for (const d of readFileSync(join(hooks, `${safe}.task`), 'utf8')
-        .split('\n')
-        .slice(1)) {
-        const id = d.trim()
-        if (id) {
-          mine.add(id)
-        }
-      }
-    } catch {
-      // no marker file — the session claimed nothing under this id
+    for (const id of markerDetails(join(hooks, `${safe}.task`))) {
+      mine.add(id)
     }
     // A session id is the CLIENT's handle — it rotates on restart and
     // rehydration while the owning agent process persists. Markers
@@ -259,35 +250,58 @@ export function sessionTaskClaims(ctx: ConnectorCtx): Set<string> {
     // claims under a stale id; folding them in keeps the parallel-work
     // probe from re-nudging the agent about its own beads (bro-7022c).
     if (ctx.owner) {
-      for (const f of readdirSync(hooks)) {
-        if (f === `${safe}.task` || !f.endsWith('.task')) {
-          continue
-        }
-        try {
-          const lines = readFileSync(join(hooks, f), 'utf8').split('\n')
-          const owner = markerOwner(lines[0])
-          if (
-            owner === null ||
-            owner.pid !== ctx.owner.pid ||
-            owner.start !== ctx.owner.start
-          ) {
-            continue
-          }
-          for (const d of lines.slice(1)) {
-            const id = d.trim()
-            if (id) {
-              mine.add(id)
-            }
-          }
-        } catch {
-          // unreadable marker — skip
-        }
+      for (const id of ownerTaskClaims(hooks, `${safe}.task`, ctx.owner)) {
+        mine.add(id)
       }
     }
   } catch {
-    // no marker file — the session claimed nothing
+    // no git dir — the session claimed nothing
   }
   return mine
+}
+
+/** Raw lines of one session marker — empty on any read failure. */
+function markerLines(path: string): string[] {
+  try {
+    return readFileSync(path, 'utf8').split('\n')
+  } catch {
+    return []
+  }
+}
+
+/** Detail lines of one session marker (line 0 is the stamp). */
+function markerDetails(path: string): string[] {
+  return markerLines(path)
+    .slice(1)
+    .map((d) => d.trim())
+    .filter((d) => d !== '')
+}
+
+/** Detail ids of every `.task` marker owned by `self` — the rotated-id
+ *  fold (bro-7022c). `skip` is the caller's own marker, already read. */
+function ownerTaskClaims(
+  hooks: string,
+  skip: string,
+  self: { pid: number; start: string }
+): string[] {
+  const ids: string[] = []
+  for (const f of readdirSync(hooks)) {
+    if (f === skip || !f.endsWith('.task')) {
+      continue
+    }
+    const lines = markerLines(join(hooks, f))
+    const owner = markerOwner(lines[0])
+    if (owner === null || owner.pid !== self.pid || owner.start !== self.start) {
+      continue
+    }
+    for (const d of lines.slice(1)) {
+      const id = d.trim()
+      if (id) {
+        ids.push(id)
+      }
+    }
+  }
+  return ids
 }
 
 /** Does `row` belong to this session's claims? The marker alone cannot
