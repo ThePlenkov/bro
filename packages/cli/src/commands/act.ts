@@ -439,22 +439,9 @@ async function spawnDetachedWait(opts: {
     return undefined
   }
   const fd = waitLogFd(opts.dir, opts.pr)
-  let child: ChildProcess
-  try {
-    if (fd !== undefined) {
-      appendFileSync(fd, `\n--- bro ${opts.args.join(' ')} — ${new Date().toISOString()}\n`)
-    }
-    child = spawn(process.execPath, [entry, ...opts.args], {
-      cwd: opts.cwd,
-      detached: true,
-      stdio: fd === undefined ? 'ignore' : ['ignore', fd, fd],
-    })
-  } catch {
+  const child = spawnWaitChild(opts, entry, fd)
+  if (child === undefined) {
     return undefined
-  } finally {
-    if (fd !== undefined) {
-      closeSync(fd)
-    }
   }
   // an unhandled 'error' event (ENOENT on cwd, EACCES on the entry)
   // would crash the caller mid-loop — swallow it; state stays the verdict
@@ -468,17 +455,49 @@ async function spawnDetachedWait(opts: {
   if (pid === undefined) {
     return undefined
   }
-  // the deadline ends the loop, not the read — the last sleep can cross
-  // it, so take one final read: a child that armed or died inside that
-  // sleep must not be misreported 'pending'
+  return awaitWaitMarker(opts.dir, pid, () => exited)
+}
+
+function spawnWaitChild(
+  opts: { args: string[]; cwd: string },
+  entry: string,
+  fd: number | undefined
+): ChildProcess | undefined {
+  try {
+    if (fd !== undefined) {
+      appendFileSync(fd, `\n--- bro ${opts.args.join(' ')} — ${new Date().toISOString()}\n`)
+    }
+    return spawn(process.execPath, [entry, ...opts.args], {
+      cwd: opts.cwd,
+      detached: true,
+      stdio: fd === undefined ? 'ignore' : ['ignore', fd, fd],
+    })
+  } catch {
+    return undefined
+  } finally {
+    if (fd !== undefined) {
+      closeSync(fd)
+    }
+  }
+}
+
+// the deadline ends the loop, not the read — the last sleep can cross
+// it, so take one final read: a child that armed or died inside that
+// sleep must not be misreported 'pending'
+async function awaitWaitMarker(
+  dir: string,
+  pid: number,
+  exited: () => number | null | undefined
+): Promise<DetachedWait | undefined> {
   const deadline = Date.now() + 10_000
   for (;;) {
-    const live = listWatches(opts.dir).find((l) => l.alive && l.watch.pid === pid)
+    const live = listWatches(dir).find((l) => l.alive && l.watch.pid === pid)
     if (live !== undefined) {
       return { pid, state: 'armed' }
     }
-    if (exited !== undefined) {
-      return exited === 0 ? { pid, state: 'settled' } : undefined
+    const code = exited()
+    if (code !== undefined) {
+      return code === 0 ? { pid, state: 'settled' } : undefined
     }
     if (Date.now() >= deadline) {
       return { pid, state: 'pending' }
@@ -508,29 +527,15 @@ async function cmdWaitDetach(argv: string[]): Promise<void> {
   ensureAuth('reviews', { dir: process.cwd() }, { prefer: loadBroConfig().connectors })
   const rev = reviewHost(undefined, loadBroConfig().connectors)
   const t = resolvePr(rev, argv)
-  const args = [
-    'act', 'wait', String(t.pr),
-    '--interval', String(interval),
-    '--timeout', String(timeout),
-  ]
-  // the wait's whole flag surface replays — merge mode + strategy the
-  // child's mergeIfAsked dispatches on, the bead its marker re-records
-  for (const f of ['--merge', '--cleanup', '--squash', '--rebase', '--admin']) {
-    if (argv.includes(f)) {
-      args.push(f)
-    }
-  }
-  const bead = flag(argv, '--bead')
-  if (bead !== undefined) {
-    args.push('--bead', bead)
-  }
+  const args = detachWaitArgs(argv, t.pr, interval, timeout)
   const r = await spawnDetachedWait({ dir: process.cwd(), pr: t.pr, args, cwd: process.cwd() })
   const link = rev.prLink(t.repo, t.pr)
   const log = waitLogPath(process.cwd(), t.pr)
+  const logTag = (sep: string): string => (log === null ? '' : `${sep}log: ${log}`)
   if (r === undefined) {
     console.error(
       `error: detached act wait on ${link} never armed — the child exited ` +
-        `before its marker landed${log === null ? '' : `; log: ${log}`}`
+        `before its marker landed${logTag('; ')}`
     )
     process.exitCode = 1
     return
@@ -544,17 +549,42 @@ async function cmdWaitDetach(argv: string[]): Promise<void> {
     // the spawn (a --merge already landed), no watcher is needed at all
     console.log(
       `act wait ${link} — gate already settled; the wait ran to completion ` +
-        `in the child (exit 0)${log === null ? '' : ` — log: ${log}`}`
+        `in the child (exit 0)${logTag(' — ')}`
     )
     return
   }
   console.log(
     `act wait ${link} detached — pid ${r.pid} polling every ${interval}s, timeout ${timeout}m`
   )
-  console.log(`  inspect: \`bro act status --pr ${t.pr}\`${log === null ? '' : ` · log: ${log}`}`)
+  console.log(`  inspect: \`bro act status --pr ${t.pr}\`${logTag(' · ')}`)
   if (r.state === 'pending') {
     console.error('warning: marker not confirmed within 10s — the child may still be arming')
   }
+}
+
+// the wait's whole flag surface replays — merge mode + strategy the
+// child's mergeIfAsked dispatches on, the bead its marker re-records
+function detachWaitArgs(
+  argv: string[],
+  pr: number,
+  interval: number,
+  timeout: number
+): string[] {
+  const args = [
+    'act', 'wait', String(pr),
+    '--interval', String(interval),
+    '--timeout', String(timeout),
+  ]
+  for (const f of ['--merge', '--cleanup', '--squash', '--rebase', '--admin']) {
+    if (argv.includes(f)) {
+      args.push(f)
+    }
+  }
+  const bead = flag(argv, '--bead')
+  if (bead !== undefined) {
+    args.push('--bead', bead)
+  }
+  return args
 }
 
 /** Detached `act wait` resurrection — the same spawnDetachedWait shape
