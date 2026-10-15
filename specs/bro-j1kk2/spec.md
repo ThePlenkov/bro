@@ -55,7 +55,7 @@ not the intro.
 | ---- | ----------- |
 | .1 | `bro fleet agents log <ref> [-f\|--follow]` — live tail of a managed agent's log (canonical grouped spelling; `bro agents log` stays as the flat alias until `bro-vlmrb.3` retires it) |
 | .2 | positioning: `plugin.json`/`package.json`/README — orchestration-first |
-| .3 | `bro fleet serve`: SSE `GET /api/v1/agents/<ref>/log?follow` |
+| .3 | `bro fleet serve`: SSE `GET /api/v1/agents/<ref>/log?follow` — bearer-token gated like the write routes (agent logs can carry secrets; the 127.0.0.1 bind is the transport boundary, not the auth one) |
 | .4 | site: landing rewrite around the act-gate wedge |
 | .5 | site/docs: glossary page — one line per concept |
 | .6 | decision: deprecate `@theplenkov/bro` — **deprecate** |
