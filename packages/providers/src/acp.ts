@@ -7,8 +7,10 @@
  * separate `--profile <value>` arg.
  *
  * One minimal session per decide(): initialize → session/new →
- * optional session/set_config_option for the entry's model (looked up
- * by category: "model", never a hardcoded configId) → session/prompt.
+ * optional pins for the entry's model and sessionMode — model rides
+ * the category:"model" configOption, mode the advertised `modes` state
+ * (session/set_mode) or the category:"mode" configOption, never a
+ * hardcoded configId) → session/prompt.
  * The caller's deadline bounds the whole round-trip; an expired budget
  * fails open and the peer process dies with the call.
  *
@@ -27,6 +29,7 @@ import type {
   ClientRequestHandler,
   RequestPermissionRequest,
   RequestPermissionResponse,
+  NewSessionResponse,
   SendRequestOptions,
   SessionConfigOption,
 } from '@agentclientprotocol/sdk'
@@ -188,6 +191,66 @@ async function applyModel(
   return reported
 }
 
+/** Session-mode pin — `session/set_mode` when the agent advertises a
+ *  `modes` state, else `session/set_config_option` on the option
+ *  categorized "mode" (e.g. `bypass` for a conductor-hosted session).
+ *  Unlike `autoApprove`, which answers each `session/request_permission`,
+ *  the mode stops the request from firing at all. A mode the agent
+ *  can't apply is a config error — a silently unpinned session would
+ *  run with permissions the operator never granted. */
+export async function applySessionMode(
+  ctx: ClientContext,
+  sessionId: string,
+  newSession: NewSessionResponse,
+  by: string,
+  mode: string | undefined,
+  req: () => SendRequestOptions
+): Promise<void> {
+  if (mode === undefined) {
+    return
+  }
+  const modeRefused = (err: unknown): never => {
+    // same split as applyModel — only the peer's own error reply is
+    // a refusal; a cancel or a dropped transport is availability
+    if (err instanceof RequestError && err.code !== REQUEST_CANCELLED) {
+      throw new AcpConfigError(`${by}: agent refused session mode '${mode}' — ${errMsg(err)}`)
+    }
+    throw err
+  }
+  const modes = newSession.modes
+  if (modes != null && modes.availableModes.length > 0) {
+    if (!modes.availableModes.some((m) => m.id === mode)) {
+      throw new AcpConfigError(
+        `${by}: sessionMode '${mode}' is not in the agent's advertised modes (${modes.availableModes.map((m) => m.id).join(', ')})`
+      )
+    }
+    await ctx
+      .request('session/set_mode', { sessionId, modeId: mode }, req())
+      .catch(modeRefused)
+    return
+  }
+  const modeOpt = (newSession.configOptions ?? []).find((o) => o.category === 'mode')
+  if (modeOpt === undefined) {
+    throw new AcpConfigError(
+      `${by}: sessionMode '${mode}' requested but the acp agent advertises no mode surface — refusing to run an unpinned session`
+    )
+  }
+  const res = await ctx
+    .request(
+      'session/set_config_option',
+      { sessionId, configId: modeOpt.id, value: mode },
+      req()
+    )
+    .catch(modeRefused)
+  const served = res.configOptions.find((o) => o.id === modeOpt.id)?.currentValue
+  const reported = typeof served === 'string' ? served : mode
+  if (reported !== mode) {
+    throw new AcpConfigError(
+      `${by}: asked for session mode '${mode}' but the agent reports '${reported}' — refusing a silently unpinned session`
+    )
+  }
+}
+
 interface AcpReply {
   /** Concatenated agent_message_chunk text. */
   text: string
@@ -262,6 +325,14 @@ async function acpOp(
       session.newSessionResponse.configOptions ?? [],
       by,
       opts.model ?? entry.model,
+      req
+    )
+    await applySessionMode(
+      ctx,
+      session.sessionId,
+      session.newSessionResponse,
+      by,
+      entry.sessionMode,
       req
     )
     const [resp, text] = await Promise.all([

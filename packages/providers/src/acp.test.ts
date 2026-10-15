@@ -45,6 +45,18 @@ const MODEL_OPTION: SessionConfigOption = {
   ],
 }
 
+const MODE_OPTION: SessionConfigOption = {
+  type: 'select',
+  id: 'mode-pick',
+  name: 'Session mode',
+  category: 'mode',
+  currentValue: 'default',
+  options: [
+    { value: 'default', name: 'Default' },
+    { value: 'bypassPermissions', name: 'Bypass' },
+  ],
+}
+
 const deadline = (ms = 10_000): number => Date.now() + ms
 
 describe('shellWords', () => {
@@ -172,6 +184,101 @@ describe('acp call surface — typed mode', () => {
       deadline()
     )
     assert.deepEqual(fake.configSets, [{ configId: 'model-pick', value: 'typesafe/jev-1.13' }])
+  })
+
+  test('the session mode rides session/set_mode when the agent advertises modes', async () => {
+    const fake = fakeAcpAgent({
+      replyText: TYPED_REPLY,
+      configOptions: [MODEL_OPTION],
+      modes: {
+        currentModeId: 'default',
+        availableModes: [
+          { id: 'default', name: 'Default' },
+          { id: 'bypass', name: 'Bypass' },
+        ],
+      },
+    })
+    await acpClient(
+      'provider:kilo',
+      { ...entry, sessionMode: 'bypass' },
+      { acp: { peer: fake.app } }
+    ).call!('s', QUESTIONS, deadline())
+    assert.deepEqual(fake.modeSets, ['bypass'])
+    assert.deepEqual(fake.configSets, [
+      { configId: 'model-pick', value: 'typesafe/jev-1.13' },
+    ])
+  })
+
+  test('a sessionMode outside the advertised modes fails — never silently unpinned', async () => {
+    const fake = fakeAcpAgent({
+      replyText: TYPED_REPLY,
+      configOptions: [MODEL_OPTION],
+      modes: {
+        currentModeId: 'default',
+        availableModes: [{ id: 'default', name: 'Default' }],
+      },
+    })
+    await assert.rejects(
+      acpClient(
+        'provider:kilo',
+        { ...entry, sessionMode: 'bypass' },
+        { acp: { peer: fake.app } }
+      ).call!('s', QUESTIONS, deadline()),
+      (e: unknown) =>
+        e instanceof Error &&
+        !(e instanceof JudgeUnavailable) &&
+        /not in the agent's advertised modes/.test(e.message) &&
+        /default/.test(e.message)
+    )
+    assert.equal(fake.prompts.length, 0)
+    assert.deepEqual(fake.modeSets, [])
+  })
+
+  test('the session mode rides session/set_config_option on the category:mode option', async () => {
+    const fake = fakeAcpAgent({
+      replyText: TYPED_REPLY,
+      configOptions: [MODEL_OPTION, MODE_OPTION],
+    })
+    await acpClient(
+      'provider:kilo',
+      { ...entry, sessionMode: 'bypassPermissions' },
+      { acp: { peer: fake.app } }
+    ).call!('s', QUESTIONS, deadline())
+    assert.deepEqual(fake.configSets, [
+      { configId: 'model-pick', value: 'typesafe/jev-1.13' },
+      { configId: 'mode-pick', value: 'bypassPermissions' },
+    ])
+  })
+
+  test('no sessionMode pin — the mode option is never touched', async () => {
+    const fake = fakeAcpAgent({
+      replyText: TYPED_REPLY,
+      configOptions: [MODEL_OPTION, MODE_OPTION],
+    })
+    await acpClient('provider:kilo', entry, { acp: { peer: fake.app } }).call!(
+      's',
+      QUESTIONS,
+      deadline()
+    )
+    assert.deepEqual(fake.configSets, [{ configId: 'model-pick', value: 'typesafe/jev-1.13' }])
+  })
+
+  test('a requested sessionMode with no advertised option fails — never silently unpinned', async () => {
+    const fake = fakeAcpAgent({ replyText: TYPED_REPLY, configOptions: [MODEL_OPTION] })
+    await assert.rejects(
+      acpClient(
+        'provider:kilo',
+        { ...entry, sessionMode: 'bypassPermissions' },
+        { acp: { peer: fake.app } }
+      ).call!('s', QUESTIONS, deadline()),
+      (e: unknown) =>
+        e instanceof Error &&
+        !(e instanceof JudgeUnavailable) &&
+        /provider:kilo/.test(e.message) &&
+        /bypassPermissions/.test(e.message) &&
+        /no mode surface/.test(e.message)
+    )
+    assert.equal(fake.prompts.length, 0)
   })
 
   test('a requested model with no advertised option fails — never silently unpinned', async () => {

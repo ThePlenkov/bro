@@ -69,6 +69,15 @@ export type ProviderEntry =
        *  allow option. Default false — a headless worker denies and
        *  logs. */
       autoApprove?: boolean
+      /** Session-mode pin applied after session/new — `session/set_mode`
+       *  on the advertised `modes` state, else `session/set_config_option`
+       *  on the `category: 'mode'` option (e.g. `bypass` for an
+       *  interactive conductor-hosted session). Distinct from
+       *  `autoApprove`: that answers each `session/request_permission`,
+       *  this stops the request from firing at all. A requested mode
+       *  the agent doesn't advertise is a config error, never a
+       *  silently unpinned session. */
+      sessionMode?: string
       /** Session-cleanup template run when the worker exits —
        *  `{sessionId}` substitutes the acp session id. ACP sessions
        *  still land in the agent CLI's session history; e.g.
@@ -128,7 +137,7 @@ export const PROVIDER_REGISTRY: Record<ProviderKind, ProviderKindSpec> = {
     call: 'auto',
     spawn: true,
     required: ['command'],
-    optional: ['profile', 'model', 'apiKeyEnv', 'sessionRm'],
+    optional: ['profile', 'model', 'apiKeyEnv', 'sessionRm', 'sessionMode'],
     optionalBool: ['autoApprove'],
   },
   cli: { call: 'prose', spawn: true, required: ['command'], optional: ['model'] },

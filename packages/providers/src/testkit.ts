@@ -8,6 +8,7 @@ import type {
   AuthMethod,
   PermissionOption,
   SessionConfigOption,
+  SessionModeState,
   StopReason,
 } from '@agentclientprotocol/sdk'
 import type { FetchFn } from './http.ts'
@@ -38,6 +39,8 @@ export interface FakeAcpAgent {
   prompts: string[]
   /** session/set_config_option calls the client made. */
   configSets: Array<{ configId: string; value: unknown }>
+  /** session/set_mode modeIds the client requested. */
+  modeSets: string[]
   /** session/new requests (cwd recorded). */
   sessions: Array<{ cwd: string }>
   /** The client's answer to a scripted session/request_permission. */
@@ -55,6 +58,12 @@ export function fakeAcpAgent(
     authMethods?: AuthMethod[]
     protocolVersion?: number
     configOptions?: SessionConfigOption[]
+    /** session/new advertises this modes state — the dedicated
+     *  `session/set_mode` surface (vs the configOption one). */
+    modes?: SessionModeState
+    /** session/set_mode fails: 'refuse' answers a peer error,
+     *  'cancel' answers -32800 like an aborted request. */
+    failMode?: 'refuse' | 'cancel'
     /** set_config_option reports this value instead of the pin — an
      *  agent that "applied" the request but kept running another model. */
     reportedModel?: string
@@ -80,6 +89,7 @@ export function fakeAcpAgent(
     app: undefined as never,
     prompts: [],
     configSets: [],
+    modeSets: [],
     sessions: [],
   }
   const app = agent({ name: 'fake-acp' })
@@ -93,7 +103,20 @@ export function fakeAcpAgent(
         throw RequestError.authRequired()
       }
       seen.sessions.push({ cwd: ctx.params.cwd })
-      return { sessionId: 'sess-1', configOptions: opts.configOptions ?? [] }
+      return {
+        sessionId: 'sess-1',
+        configOptions: opts.configOptions ?? [],
+        ...(opts.modes !== undefined ? { modes: opts.modes } : {}),
+      }
+    })
+    .onRequest('session/set_mode', (ctx) => {
+      seen.modeSets.push(ctx.params.modeId)
+      if (opts.failMode === 'cancel') {
+        throw RequestError.requestCancelled({ modeId: ctx.params.modeId })
+      }
+      if (opts.failMode === 'refuse') {
+        throw new Error('mode not supported')
+      }
     })
     .onRequest('session/set_config_option', (ctx) => {
       seen.configSets.push({ configId: ctx.params.configId, value: ctx.params.value })
