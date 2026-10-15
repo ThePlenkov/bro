@@ -725,9 +725,12 @@ export interface AcpPeer {
   /** Per-request cancel options against any deadline (init one is default). */
   req: (deadline?: number) => SendRequestOptions
   asAuthError: (err: unknown) => never
-  /** Drains the policy denials recorded for one session — the turn
-   *  owner reads it once to render "denied by policy" (spec bro-84qhx). */
-  takeDenials: (sessionId: string) => string[]
+  /** Drains the permission ledger recorded for one session — the turn
+   *  owner reads it once to render the annotations (spec bro-84qhx).
+   *  `denied` = policy said no (`via === 'deny'`); `noAllow` = policy
+   *  permitted but the agent's ask offered no allow option — a
+   *  different story, never "denied by policy". */
+  takeDenials: (sessionId: string) => { denied: string[]; noAllow: string[] }
 }
 
 export async function acpOpen(
@@ -742,9 +745,13 @@ export async function acpOpen(
     span.end({ error: errMsg(err) }, 'error')
     throw err
   }
-  // per-session ledger of policy denials — sessions multiplex on the
-  // link, so verdicts key on sessionId and the turn owner drains its own
+  // per-session permission ledger — sessions multiplex on the link,
+  // so verdicts key on sessionId and the turn owner drains its own.
+  // Two buckets: `denied` = the policy refused; `noAllow` = the policy
+  // permitted but the agent offered no allow option — conflating them
+  // makes an approval-intent read as a policy denial in the transcript
   const denied = new Map<string, string[]>()
+  const noAllow = new Map<string, string[]>()
   const app = client({ name: 'bro' }).onRequest(
     'session/request_permission',
     acpPermissionHandler(opts.acp?.permissions, (v) => {
@@ -755,9 +762,10 @@ export async function acpOpen(
         'permission.via': v.via,
       })
       if (!v.allowed) {
-        const list = denied.get(v.sessionId) ?? []
+        const bucket = v.via === 'deny' ? denied : noAllow
+        const list = bucket.get(v.sessionId) ?? []
         list.push(v.title)
-        denied.set(v.sessionId, list)
+        bucket.set(v.sessionId, list)
       }
     })
   )
@@ -797,10 +805,14 @@ export async function acpOpen(
     const { asAuthError, req } = await withDeadline(deadline, () =>
       acpInit(conn.agent, by, deadline)
     )
-    const takeDenials = (sessionId: string): string[] => {
-      const list = denied.get(sessionId) ?? []
+    const takeDenials = (sessionId: string): { denied: string[]; noAllow: string[] } => {
+      const out = {
+        denied: denied.get(sessionId) ?? [],
+        noAllow: noAllow.get(sessionId) ?? [],
+      }
       denied.delete(sessionId)
-      return list
+      noAllow.delete(sessionId)
+      return out
     }
     span.end({ 'acp.pid': child?.pid ?? 0 })
     return { ctx: conn.agent, signal: conn.signal, close, tail, req, asAuthError, takeDenials }
@@ -932,7 +944,13 @@ export async function acpPooledTurn(
   promptText: string,
   deadline: number,
   turn: PooledTurnOpts = {}
-): Promise<{ stopReason: StopReason; text: string; model: string; denied: string[] }> {
+): Promise<{
+  stopReason: StopReason
+  text: string
+  model: string
+  denied: string[]
+  noAllow: string[]
+}> {
   const ctx = peer.ctx
   const req = () => peer.req(deadline)
   const by = turn.by ?? 'conductor'
@@ -976,15 +994,15 @@ export async function acpPooledTurn(
         sessSpan.ctx
       )
       endSession()
-      const denials = peer.takeDenials(session.sessionId)
+      const ledger = peer.takeDenials(session.sessionId)
       end({
         'acp.session_id': session.sessionId,
         'acp.model': model,
         'acp.stop_reason': r.stopReason,
         'acp.reply_len': r.text.length,
-        'acp.denied_permissions': denials.length,
+        'acp.denied_permissions': ledger.denied.length,
       })
-      return { ...r, model, denied: denials }
+      return { ...r, model, denied: ledger.denied, noAllow: ledger.noAllow }
     } catch (err) {
       endSession({ error: errMsg(err) })
       end(
@@ -1117,20 +1135,23 @@ export function acpWorkerArgv(
 ): string[] {
   const command =
     entry.profile === undefined ? entry.command : `${entry.command} --profile ${shQ(entry.profile)}`
-  const argv = [...broBin, 'acp-worker', '--command', command]
+  // every value flag rides the `--name=value` spelling — a matcher or
+  // command starting with `--` would otherwise die in flagValue's
+  // "value must not look like an option" check before the agent runs
+  const argv = [...broBin, 'acp-worker', `--command=${command}`]
   const model = opts.model ?? entry.model
   if (model !== undefined) {
-    argv.push('--model', model)
+    argv.push(`--model=${model}`)
   }
   if (opts.autoApprove ?? entry.autoApprove) {
     argv.push('--auto-approve')
   }
   for (const m of opts.allow ?? entry.permissionAllow ?? []) {
-    argv.push('--allow', m)
+    argv.push(`--allow=${m}`)
   }
   const sessionRm = opts.sessionRm ?? entry.sessionRm
   if (sessionRm !== undefined) {
-    argv.push('--session-rm', sessionRm)
+    argv.push(`--session-rm=${sessionRm}`)
   }
   return argv
 }

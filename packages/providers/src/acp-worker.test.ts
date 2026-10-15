@@ -50,8 +50,8 @@ describe('acpWorkerArgv', () => {
       { model: 'm; rm -rf /' }
     )
     assert.deepEqual(argv, [
-      'bro', 'acp-worker', '--command', 'kilo --acp',
-      '--model', 'm; rm -rf /',
+      'bro', 'acp-worker', '--command=kilo --acp',
+      '--model=m; rm -rf /',
     ])
   })
 
@@ -68,8 +68,8 @@ describe('acpWorkerArgv', () => {
     )
     assert.deepEqual(argv, [
       'npx', '-y', '@broject/bro@0', 'acp-worker',
-      '--command', `kilo --acp --profile 'it'\\''s work'`,
-      '--model', 'jev',
+      `--command=kilo --acp --profile 'it'\\''s work'`,
+      '--model=jev',
       '--auto-approve',
     ])
   })
@@ -80,15 +80,15 @@ describe('acpWorkerArgv', () => {
       { type: 'acp', command: 'kilo --acp', permissionAllow: ['kind:read', 'git status'] }
     )
     assert.deepEqual(argv, [
-      'bro', 'acp-worker', '--command', 'kilo --acp',
-      '--allow', 'kind:read', '--allow', 'git status',
+      'bro', 'acp-worker', '--command=kilo --acp',
+      '--allow=kind:read', '--allow=git status',
     ])
     const over = acpWorkerArgv(
       ['bro'],
       { type: 'acp', command: 'kilo --acp', permissionAllow: ['kind:read'] },
       { allow: ['kind:fetch'] }
     )
-    assert.deepEqual(over.slice(-2), ['--allow', 'kind:fetch'])
+    assert.deepEqual(over.slice(-1), ['--allow=kind:fetch'])
   })
 
   test('opts beat the entry pin piecewise — model override, autoApprove off stays off', () => {
@@ -97,8 +97,8 @@ describe('acpWorkerArgv', () => {
       { type: 'acp', command: 'kilo --acp', model: 'entry-m', autoApprove: false },
       { model: 'flag-m' }
     )
-    assert.ok(argv.includes('flag-m'))
-    assert.ok(!argv.includes('entry-m'))
+    assert.ok(argv.includes('--model=flag-m'))
+    assert.ok(!argv.includes('--model=entry-m'))
     assert.ok(!argv.includes('--auto-approve'))
   })
 
@@ -109,14 +109,15 @@ describe('acpWorkerArgv', () => {
       sessionRm: 'devin rm {sessionId} --force',
     }
     const argv = acpWorkerArgv(['bro'], entry)
-    const i = argv.indexOf('--session-rm')
-    assert.equal(argv[i + 1], 'devin rm {sessionId} --force')
+    const flagVal = (a: string[], name: string): string | undefined =>
+      a.find((x) => x.startsWith(`${name}=`))?.slice(name.length + 1)
+    assert.equal(flagVal(argv, '--session-rm'), 'devin rm {sessionId} --force')
 
     const over = acpWorkerArgv(['bro'], entry, { sessionRm: 'rm -f {sessionId}.lock' })
-    assert.equal(over[over.indexOf('--session-rm') + 1], 'rm -f {sessionId}.lock')
+    assert.equal(flagVal(over, '--session-rm'), 'rm -f {sessionId}.lock')
 
     const none = acpWorkerArgv(['bro'], { type: 'acp', command: 'devin acp' })
-    assert.ok(!none.includes('--session-rm'))
+    assert.ok(flagVal(none, '--session-rm') === undefined)
   })
 })
 

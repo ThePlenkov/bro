@@ -130,11 +130,12 @@ function permissionPolicy(env: NodeJS.ProcessEnv, entry: AcpEntry): AcpPermissio
     }
   }
   const rawAllow = env.BRO_PROVIDER_PERMISSION_ALLOW
+  // newline form when a matcher itself carries a comma (e.g. a
+  // `commit -m "fix(a, b)"` substring) — otherwise comma-separated
   const allow =
     rawAllow === undefined || rawAllow.trim() === ''
       ? entry.permissionAllow
-      : rawAllow
-          .split(',')
+      : (rawAllow.includes('\n') ? rawAllow.split(/\r?\n/) : rawAllow.split(','))
           .map((m) => m.trim())
           .filter((m) => m !== '')
   return { autoApprove, allow }
@@ -436,6 +437,24 @@ async function messages(
         `no user was prompted: ${reply.denied.map((t) => `"${t}"`).join(', ')}. ` +
         `Allow via BRO_PROVIDER_AUTO_APPROVE / BRO_PROVIDER_PERMISSION_ALLOW or ` +
         `providers.${cfg.backend}.autoApprove/.permissionAllow]`,
+    })
+  }
+  // policy permitted the ask but the agent offered no allow option —
+  // not a policy denial: name it so the transcript doesn't blame the
+  // policy for the agent's option set (and so an agent lacking allow
+  // options is visible, not silent)
+  if (reply.noAllow.length > 0) {
+    otelEvent('conductor.permission_no_allow', {
+      backend: cfg.backend,
+      noAllow: reply.noAllow.length,
+      titles: reply.noAllow.join(', ').slice(0, 200),
+    })
+    blocks.push({
+      type: 'text',
+      text:
+        `\n\n[bro conductor: ${reply.noAllow.length} permission request(s) the policy would ` +
+        `approve went denied — the agent offered no allow option to select: ` +
+        `${reply.noAllow.map((t) => `"${t}"`).join(', ')}]`,
     })
   }
   const stopReason = blocks.some((b) => b.type === 'tool_use')

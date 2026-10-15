@@ -27,7 +27,11 @@ interface AcpPermissionPolicy {
   - `BRO_PROVIDER_AUTO_APPROVE=<bool>` — wins over the entry field.
   - `BRO_PROVIDER_PERMISSION_ALLOW=<comma-separated matchers>` — wins
     over `permissionAllow`; the same list reaches the worker as
-    repeated `--allow <matcher>` argv.
+    repeated `--allow=<matcher>` argv (`=` spelling — a matcher that
+    starts with `--` must not die in the worker's option parser).
+    A matcher may itself contain a comma (a `commit -m "fix(a, b)"`
+    substring) — for that case the env value takes the newline form:
+    one matcher per line, commas literal.
 
 A matcher is `kind:<acp-tool-kind>` (exact, case-insensitive — e.g.
 `kind:read`, `kind:fetch`) or a bare string matched case-insensitively

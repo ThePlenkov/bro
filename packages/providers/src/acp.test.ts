@@ -801,7 +801,7 @@ describe('permission policy (bro-84qhx)', () => {
     }
   })
 
-  test('an allowless option set still denies under autoApprove — and is marked policy', async () => {
+  test('an allowless option set still denies under autoApprove — ledgered as noAllow, never policy', async () => {
     const fake = fakeAcpAgent({
       replyText: 'sum',
       askPermission: [{ optionId: 'deny-1', name: 'Deny', kind: 'reject_once' as const }],
@@ -817,7 +817,10 @@ describe('permission policy (bro-84qhx)', () => {
         'p',
         deadline()
       )
-      assert.deepEqual(r.denied, ['run tests'])
+      // policy wanted to allow — the missing allow option denied it,
+      // and the ledger must not record that as a policy denial
+      assert.deepEqual(r.denied, [])
+      assert.deepEqual(r.noAllow, ['run tests'])
       assert.deepEqual(fake.permissionOutcome, { outcome: 'selected', optionId: 'deny-1' })
       assert.deepEqual(fake.permissionMeta, POLICY_DENIED_META)
     } finally {
