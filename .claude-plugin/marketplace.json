@@ -1,6 +1,6 @@
 {
   "name": "bro",
-  "description": "Agent's sidekick: review-debt pipeline, PR review loop, scoped drill frames, and wtf→retrospect self-correction — mechanics in the bro CLI",
+  "description": "Agent's sidekick — the rig that owns the PR-to-merge loop: fleet, convoy, review gates, mesh, self-correction — mechanics in the bro CLI",
   "owner": {
     "name": "Petr Plenkov"
   },
@@ -8,10 +8,21 @@
     {
       "name": "bro",
       "source": "./",
-      "description": "Agent's sidekick: review-debt pipeline, PR review loop, and scoped drill frames — all mechanics in the bro CLI over gh + beads",
+      "description": "Agent's sidekick — the rig that owns the PR-to-merge loop: beads claims, fleet workers, review gates, cross-repo mesh — all mechanics in the bro CLI over gh + beads",
       "version": "0.2.5",
       "license": "MIT",
-      "keywords": ["review-debt", "pr-review", "beads", "drill", "agent-workflow"]
+      "keywords": [
+        "agent-rig",
+        "orchestration",
+        "fleet",
+        "convoy",
+        "mesh",
+        "pr-review",
+        "merge-gate",
+        "review-debt",
+        "beads",
+        "agent-workflow"
+      ]
     }
   ]
 }

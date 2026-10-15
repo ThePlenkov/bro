@@ -1,7 +1,8 @@
 {
   "name": "@broject/bro",
   "version": "0.2.5",
-  "description": "bro — agent's sidekick CLI: review-debt pipeline, PR triage, fix loops",
+  "description": "bro — agent's sidekick CLI: the rig that owns the PR-to-merge loop — fleet, convoy, review gates, mesh, debt sweep",
+  "keywords": ["agent-rig", "orchestration", "fleet", "convoy", "mesh", "pr-review", "merge-gate", "review-debt", "beads", "agent-workflow"],
   "type": "module",
   "bin": {
     "bro": "dist/index.js"
