@@ -52,6 +52,7 @@ import {
   type FreshnessConfig,
 } from './postmerge.ts'
 import { rigSection, type RigConfig } from './rig-config.ts'
+import { rigNext } from './rig-next.ts'
 import {
   armRigPulse,
   disarmRigPulse,
@@ -437,6 +438,7 @@ function usage(): never {
   console.error(`usage:
   bro rig sync [--repo <dir>]       fetch → merge --ff-only @{upstream} → refresh
   bro rig status [--repo <dir>] [--json]
+  bro rig next [<item>] [--json]    the engine's re-entry verdict: step|gate|wait|done|blocked
   bro rig watch [--repo <dir>] [--every SEC] [--for SEC]
   bro rig install [--repo <dir>] [--every SEC] [--print]
   bro rig uninstall [--repo <dir>]
@@ -618,6 +620,17 @@ export async function runRigCommand(argv: string[]): Promise<void> {
   }
   if (sub === 'status') {
     cmdStatus(resolved, argv)
+  }
+  if (sub === 'next') {
+    // the engine's re-entry verb — a pure read over durable state,
+    // no repo-sync resolution needed (rig-pulse's `--repo` contract)
+    const n = rigNext(cwd, pos[1])
+    if (argv.includes('--json')) {
+      console.log(JSON.stringify(n))
+    } else {
+      console.log(`rig next: ${n.verdict}${n.id === undefined ? '' : ` ${n.id}`}${n.detail === undefined ? '' : ` — ${n.detail}`}`)
+    }
+    process.exit(n.verdict === 'blocked' ? 1 : 0)
   }
   if (sub === 'watch') {
     await cmdWatch(argv, cfg, resolved)
