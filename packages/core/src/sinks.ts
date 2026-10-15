@@ -179,9 +179,11 @@ export function sinkStatePath(dir: string): string {
  *  one message on screen but two distinct webhook bodies. */
 function dedupHash(sinkId: string, event: EventInput, text: string): string {
   const raw = event.payload === undefined ? '' : (JSON.stringify(event.payload) ?? '')
+  // to/ref ride the generic webhook body but not the rendered text —
+  // key them or two events differing only in addressee collapse
   return createHash('sha256')
     .update(
-      `${sinkId}\0${event.topic}\0${event.kind}\0${event.key ?? ''}\0${text}\0${raw}`
+      `${sinkId}\0${event.topic}\0${event.kind}\0${event.key ?? ''}\0${event.to ?? ''}\0${event.ref ?? ''}\0${text}\0${raw}`
     )
     .digest('hex')
     .slice(0, 24)
