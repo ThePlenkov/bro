@@ -5,6 +5,8 @@ description: "Session-scoped completion goal — set|status|pause|resume|clear; 
 
 **`bro goal`** — Session-scoped completion goal — set|status|pause|resume|clear; hooks remind + judge-verdict
 
+`bro goal set|status|pause|resume|clear`
+
 | | |
 | --- | --- |
 | group | `work` |

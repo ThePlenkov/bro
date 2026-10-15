@@ -5,6 +5,8 @@ description: "Spec-driven development policy: check|new (sdd.mode gates hooks)"
 
 **`bro spec`** — Spec-driven development policy: check|new (sdd.mode gates hooks)
 
+`bro spec check|new`
+
 | | |
 | --- | --- |
 | group | `spec` |

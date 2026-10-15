@@ -101,8 +101,20 @@ const groupOf = (r: Row): string => r.group ?? 'utility'
 // YAML double-quoted scalar — backslash first, then the delimiter,
 // then newlines (frontmatter must stay single-line)
 const esc = (s: string): string => s.replace(/\\/g, '\\\\').replace(/"/g, '\\"').replace(/\n/g, ' ')
-// prose single-line — a summary with a newline would split the entry
-const plain = (s: string): string => s.replace(/\s+/g, ' ').trim()
+// prose single-line — a summary with a newline would split the entry,
+// and a raw <token> parses as an unclosed MDX tag (bro-mcp's
+// `bro_<plane>_<read>` broke the site build) — entities, never <, >
+const plain = (s: string): string =>
+  s.replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/\s+/g, ' ').trim()
+
+/** The command signature — the `a|b|c` subcommand list a registry
+ *  summary embeds ("Agent supervisor — status|up|down over …"),
+ *  rendered as `bro <name> <list>`; absent when the summary declares
+ *  none. */
+function signature(r: Row): string | undefined {
+  const m = /[a-z][a-z0-9-]*(?:\|[a-z0-9][a-z0-9-]*)+/.exec(r.summary)
+  return m === null ? undefined : `bro ${r.name} ${m[0]}`
+}
 
 function page(r: Row, visible: Set<string>): string {
   const lines: string[] = [
@@ -112,23 +124,31 @@ function page(r: Row, visible: Set<string>): string {
     '---',
     '',
     `**\`bro ${r.name}\`** — ${plain(r.summary)}`,
+  ]
+  const sig = signature(r)
+  if (sig !== undefined) lines.push('', `\`${sig}\``)
+  lines.push(
     '',
     '| | |',
     '| --- | --- |',
-    `| group | \`${groupOf(r)}\` |`,
-  ]
+    `| group | \`${groupOf(r)}\` |`
+  )
   if (r.skill !== undefined) lines.push(`| skill | \`${r.skill}\` |`)
   if (r.configKey !== undefined) lines.push(`| config | \`${r.configKey}\` in bro.config |`)
   if (r.plan) lines.push(`| plan | \`kind = "${r.name}"\` (v${r.planVersion ?? 1}) |`)
   const guide = GUIDES[r.name]
   if (guide !== undefined) lines.push(`| guide | [commands/${guide}](/docs/commands/${guide}) |`)
   lines.push('')
-  if (r.aliasOf !== undefined) {
+  // the loader doesn't type-check aliasOf — a non-string would throw
+  // here and abort the whole generation; treat drift as "no alias"
+  if (typeof r.aliasOf === 'string' && r.aliasOf !== '') {
     const target = r.aliasOf.split(' ')[0]!
-    const link = visible.has(target)
-      ? `[\`bro ${target}\`](/docs/reference/${target})`
-      : `\`bro ${r.aliasOf}\``
-    lines.push(`Alias for ${link} — see that page.`)
+    lines.push(
+      visible.has(target)
+        ? `Alias for [\`bro ${target}\`](/docs/reference/${target}) — see that page.`
+        : // a hidden/internal target has no page to link — name it, don't promise one
+          `Alias for \`bro ${r.aliasOf}\` (internal — no reference page).`
+    )
     if (r.deprecated !== undefined) {
       lines.push('', `> Deprecated — ${r.deprecated}`)
     }
@@ -140,15 +160,26 @@ function page(r: Row, visible: Set<string>): string {
 const visible = new Set(rows.filter((r) => !r.hidden).map((r) => r.name))
 const files = new Map<string, string>()
 
+/** A page name must be a filename — an external plugin's name lands in
+ *  `<name>.md` verbatim, so `../../../../README` would write outside
+ *  reference/. Anything else is skipped loudly, never written. */
+const SAFE_PAGE = /^[a-z0-9][a-z0-9._-]*$/
+
 for (const r of rows) {
-  if (r.hidden) continue
+  // external plugins resolve from the CALLER's config — generated
+  // pages must be the core registry only or output varies by checkout
+  if (r.hidden || r.external) continue
+  if (!SAFE_PAGE.test(r.name)) {
+    console.error(`skip: unsafe page name "${r.name}" — not a filename`)
+    continue
+  }
   files.set(`${r.name}.md`, page(r, visible))
 }
 
 // meta.json — grouped sections in fixed order, registry order inside
 const grouped = new Map<string, string[]>()
 for (const r of rows) {
-  if (r.hidden) continue
+  if (r.hidden || r.external || !SAFE_PAGE.test(r.name)) continue
   const g = groupOf(r)
   if (!grouped.has(g)) grouped.set(g, [])
   grouped.get(g)!.push(r.name)

@@ -5,6 +5,8 @@ description: "Parallel-friendly worktrees: enter|leave|list|prune"
 
 **`bro work`** — Parallel-friendly worktrees: enter|leave|list|prune
 
+`bro work enter|leave|list|prune`
+
 | | |
 | --- | --- |
 | group | `work` |

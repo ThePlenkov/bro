@@ -5,6 +5,8 @@ description: "Review-debt pipeline: collect|status|prs|list|mark|sync|set"
 
 **`bro debt`** — Review-debt pipeline: collect|status|prs|list|mark|sync|set
 
+`bro debt collect|status|prs|list|mark|sync|set`
+
 | | |
 | --- | --- |
 | group | `review` |

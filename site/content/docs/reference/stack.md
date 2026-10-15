@@ -5,6 +5,8 @@ description: "Stacked bead→worktree→PR chains: push|list|sync|publish|merge"
 
 **`bro stack`** — Stacked bead→worktree→PR chains: push|list|sync|publish|merge
 
+`bro stack push|list|sync|publish|merge`
+
 | | |
 | --- | --- |
 | group | `flow` |

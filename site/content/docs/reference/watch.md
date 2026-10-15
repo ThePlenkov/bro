@@ -5,6 +5,8 @@ description: "Orchestrator heartbeat — mols × act gates × fleet snapshot [--
 
 **`bro watch`** — Orchestrator heartbeat — mols × act gates × fleet snapshot [--once|--every N|--notify|--json|install|uninstall]
 
+`bro watch json|install|uninstall`
+
 | | |
 | --- | --- |
 | group | `review` |

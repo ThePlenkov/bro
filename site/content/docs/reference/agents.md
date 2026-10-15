@@ -5,6 +5,8 @@ description: "Agent supervisor — status|up|down over the orchestrator connecto
 
 **`bro agents`** — Agent supervisor — status|up|down over the orchestrator connectors
 
+`bro agents status|up|down`
+
 | | |
 | --- | --- |
 | group | `fleet` |

@@ -5,6 +5,8 @@ description: "Open-PR loop: status|threads|resolve|reply|merge"
 
 **`bro act`** — Open-PR loop: status|threads|resolve|reply|merge
 
+`bro act status|threads|resolve|reply|merge`
+
 | | |
 | --- | --- |
 | group | `review` |

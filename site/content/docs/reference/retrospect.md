@@ -5,6 +5,8 @@ description: "Self-correction: capture|record|status|list|schema"
 
 **`bro retrospect`** — Self-correction: capture|record|status|list|schema
 
+`bro retrospect capture|record|status|list|schema`
+
 | | |
 | --- | --- |
 | group | `self` |

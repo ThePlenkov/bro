@@ -5,6 +5,8 @@ description: "Outbound event sinks — list configured webhooks, send a probe [l
 
 **`bro sinks`** — Outbound event sinks — list configured webhooks, send a probe [list|test]
 
+`bro sinks list|test`
+
 | | |
 | --- | --- |
 | group | `comms` |

@@ -5,6 +5,8 @@ description: "Gated disposal for closed beads: status|distill|run — gate → a
 
 **`bro sweep`** — Gated disposal for closed beads: status|distill|run — gate → archive → prune
 
+`bro sweep status|distill|run`
+
 | | |
 | --- | --- |
 | group | `work` |

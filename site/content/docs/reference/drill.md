@@ -5,6 +5,8 @@ description: "Scoped descent over beads: down|up|current|tree|list|report|distil
 
 **`bro drill`** — Scoped descent over beads: down|up|current|tree|list|report|distill
 
+`bro drill down|up|current|tree|list|report|distill`
+
 | | |
 | --- | --- |
 | group | `work` |

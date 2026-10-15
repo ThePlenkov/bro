@@ -5,6 +5,8 @@ description: "Convoy execution over beads molecules: status|next|done|pour|list|
 
 **`bro convoy`** — Convoy execution over beads molecules: status|next|done|pour|list|run
 
+`bro convoy status|next|done|pour|list|run`
+
 | | |
 | --- | --- |
 | group | `flow` |
