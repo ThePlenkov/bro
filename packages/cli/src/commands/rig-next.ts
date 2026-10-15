@@ -34,10 +34,14 @@ export interface RigNext {
 /** The WAKE: predicate is the last `WAKE:` line in the frame's notes —
  *  parkFrame's append contract. */
 function wakePredicate(row: TaskRow): string | undefined {
-  return row.notes
-    ?.split('\n')
-    .findLast((l) => l.startsWith('WAKE: '))
-    ?.slice(6)
+  const lines = row.notes?.split('\n') ?? []
+  for (let i = lines.length - 1; i >= 0; i -= 1) {
+    const l = lines[i]!
+    if (l.startsWith('WAKE: ')) {
+      return l.slice(6)
+    }
+  }
+  return undefined
 }
 
 /** No-arg focus: the current frame's queue top (intake order), else
@@ -90,7 +94,7 @@ function agentWait(entry: AgentRegistryEntry | undefined, id: string): RigNext |
  *  `<main>--<id>` sibling path. Undefined when the repo/worktree plane
  *  can't answer. */
 function itemWorktree(id: string, entry: AgentRegistryEntry | undefined): string | undefined {
-  if (entry?.worktree !== undefined) {
+  if (typeof entry?.worktree === 'string') {
     return entry.worktree
   }
   try {
