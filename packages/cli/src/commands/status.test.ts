@@ -50,7 +50,7 @@ describe('collectStatus', () => {
   test('linked worktrees surface with branch and live claim (bro-0vj14)', () => {
     const dir = gitRepo()
     const linked = join(tmpDir('bro-status-wt-'), 'linked')
-    execFileSync('git', ['-C', dir, 'worktree', 'add', '-q', linked, '-b', 'work/x'])
+    testGit(['-C', dir, 'worktree', 'add', '-q', linked, '-b', 'work/x'])
 
     let w = collectStatus(dir).worktrees.find((t) => t.main !== true)
     assert.ok(w !== undefined)
@@ -81,7 +81,7 @@ describe('collectStatus', () => {
   test('the board run from a linked worktree flags it as here', () => {
     const dir = gitRepo()
     const linked = join(tmpDir('bro-status-wt-'), 'linked')
-    execFileSync('git', ['-C', dir, 'worktree', 'add', '-q', linked, '-b', 'work/x'])
+    testGit(['-C', dir, 'worktree', 'add', '-q', linked, '-b', 'work/x'])
     const s = collectStatus(linked)
     const mine = s.worktrees.find((t) => t.here === true)
     assert.equal(mine?.name, 'linked')
