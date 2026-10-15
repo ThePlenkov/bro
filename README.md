@@ -19,7 +19,7 @@ carries.
 
 ```bash
 npx @broject/bro next                   # pick the top claimable bead
-npx @broject/bro fleet agents up <mol>  # spawn a registered worker on it
+npx @broject/bro flow convoy run <mol>  # pour the molecule queue — workers spawn per step
 npx @broject/bro review debt status     # the damage report
 ```
 

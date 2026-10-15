@@ -18,6 +18,7 @@
         "convoy",
         "mesh",
         "pr-review",
+        "merge-gate",
         "review-debt",
         "beads",
         "agent-workflow"
