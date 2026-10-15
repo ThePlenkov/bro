@@ -6,11 +6,13 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import {
   deliverSinks,
+  registerSinkBuilder,
   renderEventText,
   requestFor,
   sinkMatches,
   sinkSecrets,
   sinkStatePath,
+  unregisterSinkBuilder,
   withSinks,
   type FetchFn,
 } from './sinks.ts'
@@ -119,8 +121,6 @@ describe('renderEventText', () => {
 describe('requestFor', () => {
   const env = {
     SLACK_URL: 'https://hooks.slack.test/x',
-    TG_TOKEN: 'tok-1',
-    TG_CHAT: '42',
   } as unknown as NodeJS.ProcessEnv
 
   test('slack posts {text} to the env-resolved url', () => {
@@ -162,47 +162,25 @@ describe('requestFor', () => {
     assert.deepEqual(r, { missing: 'NOPE_VAR' })
   })
 
-  test('telegram builds the bot-api sendMessage request', () => {
-    const r = requestFor(
-      { type: 'telegram', tokenEnv: 'TG_TOKEN', chatIdEnv: 'TG_CHAT' },
-      EVENT,
-      env
+  test('a registered builder owns its type — the plugin-layer dispatch (bro-mq1t2)', () => {
+    registerSinkBuilder('webhook', () => ({ refused: 'plugin refused' }))
+    try {
+      assert.deepEqual(requestFor({ type: 'webhook', url: 'https://h.test/x' }, EVENT, env), {
+        refused: 'plugin refused',
+      })
+      // other types keep the generic path
+      assert.equal(
+        'url' in requestFor({ type: 'slack', urlEnv: 'SLACK_URL' }, EVENT, env),
+        true
+      )
+    } finally {
+      unregisterSinkBuilder('webhook')
+    }
+    // the generic path is restored once the builder unregisters
+    assert.equal(
+      'url' in requestFor({ type: 'webhook', url: 'https://h.test/x' }, EVENT, env),
+      true
     )
-    assert.equal('url' in r && r.url, 'https://api.telegram.org/bottok-1/sendMessage')
-    const body = 'body' in r && (r.body as Record<string, unknown>)
-    assert.equal(body && body.chat_id, '42')
-    assert.equal(body && body.text, renderEventText(EVENT))
-  })
-
-  test('telegram honors a literal chatId and apiBase', () => {
-    const r = requestFor(
-      {
-        type: 'telegram',
-        tokenEnv: 'TG_TOKEN',
-        chatId: '7',
-        apiBase: 'https://tg.internal.test/',
-      },
-      EVENT,
-      env
-    )
-    assert.equal('url' in r && r.url, 'https://tg.internal.test/bottok-1/sendMessage')
-    assert.equal('body' in r && (r.body as Record<string, unknown>).chat_id, '7')
-  })
-
-  test('a cleartext apiBase is refused — the token rides the request URL', () => {
-    const r = requestFor(
-      {
-        type: 'telegram',
-        tokenEnv: 'TG_TOKEN',
-        chatId: '7',
-        apiBase: 'http://tg.internal.test',
-      },
-      EVENT,
-      env
-    )
-    assert.deepEqual(r, {
-      refused: 'apiBase must be https:// — the bot token rides the request URL',
-    })
   })
 
   test('an env-resolved http endpoint is refused — the URL is a declared secret', () => {
@@ -220,16 +198,6 @@ describe('requestFor', () => {
     assert.equal('url' in r && r.url, 'http://ci.internal/x')
   })
 
-  test('telegram missing token or chat env reports the var', () => {
-    assert.deepEqual(
-      requestFor({ type: 'telegram', tokenEnv: 'NOPE', chatId: '1' }, EVENT, env),
-      { missing: 'NOPE' }
-    )
-    assert.deepEqual(
-      requestFor({ type: 'telegram', tokenEnv: 'TG_TOKEN', chatIdEnv: 'NOPE2' }, EVENT, env),
-      { missing: 'NOPE2' }
-    )
-  })
 })
 
 describe('deliverSinks', () => {

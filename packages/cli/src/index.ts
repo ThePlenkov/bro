@@ -8,6 +8,7 @@
  */
 import { warnDeprecated, type BroPlugin } from '@broject/core'
 import { journalCommand } from './commands/hooks.ts'
+import './commands/sinks-telegram.ts' // sink delivery policies register on import
 import { docUsageLines, reservedWords, runDocVerb } from './docs.ts'
 import { GROUP_META, loadExternalPlugins, pluginGroups, PLUGINS } from './plugins.ts'
 import { VERSION } from './version.ts'
