@@ -338,6 +338,10 @@ packages/cli/src/agent-connectors.ts  provider-scoped respawn block; chain
                                       run-step spawn's wrapper tail turns
                                       exit 0 into the step's `convoy done`
 packages/cli/src/commands/agents.ts   --class flag; StepSpawnRequest.class
+packages/cli/src/commands/loop.ts     per-bead class resolution — each
+                                      claimed bead's class: label /
+                                      --class / default → chain head
+                                      provider (bro-zmned)
 packages/cli/src/commands/fleet.ts    provider wall rendering
 packages/providers/src/acp-worker.ts  session/load resume path
 packages/convoy/                      step kind 'run' — `command` on the step

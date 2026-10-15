@@ -60,6 +60,7 @@ import {
   AgentNotFound,
   agentRegistryPath,
   awaitFileLock,
+  CLASS_LABEL_PREFIX,
   commandCliName,
   emitLifecycle,
   ensureTasksBackend,
@@ -72,15 +73,18 @@ import {
   LockTimeout,
   procStat,
   reviewHost,
+  routeStepClass,
   SpawnError,
   specStore,
   stampPrOwnership,
+  stepClassInfo,
   stepParent,
   withFileLock,
   type AgentConnector,
   type AgentInfo,
   type AgentState,
   type MirrorPolicy,
+  type ResolvedClass,
   type ReviewFacade,
   type SpawnWorker,
   type TaskStore,
@@ -116,6 +120,7 @@ import {
 } from '@broject/loop'
 import { loadBroConfig } from '../plugins.ts'
 import {
+  applyFleetRouter,
   fleetProfileOf,
   loadAgentEnv,
   resolveAgentConnector,
@@ -173,7 +178,20 @@ interface Ctx {
    *  cli provider's `command` when the provider lane resolved one. For an
    *  acp (argv) worker this field is inert — the spawn never expands it. */
   agent: string
+  /** The resolved spawn lane when routing is off (or the flag-tier pin
+   *  when it's on) — `resolveBeadLane` re-resolves per bead. */
   lane: LoopLane
+  /** The spawn env config — `fleet.routing`/`providers` for per-bead
+   *  class resolution (spec bro-1x7p). */
+  env: AgentConnectorEnv
+  /** The invocation's lane picks — per-bead resolution merges them
+   *  above the routed chain exactly like `bro agents up`. */
+  sel: LoopLaneSel
+  /** `fleet.routing` declared AND not bypassed by a template --agent —
+   *  each claimed bead resolves `class:` label → `default` → chain
+   *  head provider. Flag picks (`--provider`/`--profile`/`--agent
+   *  <name>`) still outrank the table piecewise. */
+  routing: boolean
   intervalS: number
   json: boolean
   /** Declared label scope — `bro loop --label debt,ui` only claims
@@ -228,6 +246,9 @@ function usage(): never {
                                 spawns through the provider registry instead
   --provider NAME                providers.<name> pick (acp → headless worker)
   --profile NAME                 fleet.profiles.<name> preset
+  --class NAME                   pin every claimed bead to one
+                                fleet.routing class (default: the bead's
+                                class:<name> label, else 'default')
   --model M                      model override for the provider lane
   --auto-approve                 acp permission policy: allow, not deny
   --merge-timeout MIN            gate budget per round (loop.mergeTimeoutMin, 45)
@@ -313,6 +334,7 @@ function agentEnv(ctx: Ctx, extra: Record<string, string>): NodeJS.ProcessEnv {
     'BRO_AGENT',
     'BRO_AGENT_PROVIDER',
     'BRO_AGENT_MODEL',
+    'BRO_AGENT_CLASS',
     'BRO_SESSION_ID',
     'BRO_MOL_ID',
   ]) {
@@ -325,20 +347,27 @@ function agentEnv(ctx: Ctx, extra: Record<string, string>): NodeJS.ProcessEnv {
   }
 }
 
+/** The command the template arm expands for a lane — a cli provider's
+ *  `command` substitutes for the configured template; argv workers never
+ *  reach it. */
+const laneCommand = (ctx: Ctx, lane: LoopLane): string =>
+  lane.worker?.kind === 'template' ? lane.worker.command : ctx.agent
+
 /** Commit-provenance pins for the loop's agent (bro-fzot) — the cli the
  *  effective command names (the acp worker's `cliName` on the argv lane),
  *  the provider/model lane labels, and the bead's molecule parent when
  *  the shared store can answer. */
-function provenancePins(ctx: Ctx, beadId: string): Record<string, string> {
-  const w = ctx.lane.worker
+function provenancePins(ctx: Ctx, beadId: string, lane: LoopLane): Record<string, string> {
+  const w = lane.worker
   const pins: Record<string, string> = {
-    BRO_AGENT: w?.kind === 'argv' ? (w.cliName ?? 'agent') : commandCliName(ctx.agent),
+    BRO_AGENT:
+      w?.kind === 'argv' ? (w.cliName ?? 'agent') : commandCliName(laneCommand(ctx, lane)),
   }
-  if (ctx.lane.provider !== undefined) {
-    pins.BRO_AGENT_PROVIDER = ctx.lane.provider
+  if (lane.provider !== undefined) {
+    pins.BRO_AGENT_PROVIDER = lane.provider
   }
-  if (ctx.lane.model !== undefined) {
-    pins.BRO_AGENT_MODEL = ctx.lane.model
+  if (lane.model !== undefined) {
+    pins.BRO_AGENT_MODEL = lane.model
   }
   const mol = ctx.beadsDir !== undefined ? stepParent(ctx.beadsDir, beadId) : undefined
   if (mol !== undefined) {
@@ -357,29 +386,40 @@ export interface LoopLane {
    *  (`bro agents up` prints the same pair). */
   provider?: string
   model?: string
+  /** The routing lane the spawn resolved to (fleet.routing class — spec
+   *  bro-1x7p). Provenance like provider/model; absent on unrouted
+   *  spawns (no fleet.routing declared). */
+  class?: string
 }
 
 /** Per-run lane picks — undefined means "not given" so config fields
- *  still apply piecewise, mirroring the facade's merge order. */
+ *  still apply piecewise, mirroring the facade's merge order. `class`
+ *  is the `--class` pin — the fleet.routing lane every claimed bead
+ *  takes (spec bro-1x7p's explicit-request tier). */
 export interface LoopLaneSel {
   agent?: string
   provider?: string
   profile?: string
   model?: string
   autoApprove?: boolean
+  class?: string
 }
 
 /** Resolve which lane `bro loop` spawns through. A `--agent` value that
  *  exactly names a configured `providers.<name>` IS a provider pick;
  *  any other value is the escape-hatch template and wins the whole lane
  *  (provider flags beside it are contradictory — SpawnError). The order
- *  is the facade's own: explicit pick → fleet.profiles preset →
- *  `loop.provider` → `agents.native.provider` → legacy template. A bad
+ *  is the facade's own — explicit flag pick → flag-named
+ *  fleet.profiles preset → the routed chain head (spec bro-1x7p: a
+ *  declared `fleet.routing` resolves the bead's class per spawn and its
+ *  chain head supplies the provider) → config picks (`loop.profile`,
+ *  `loop.provider`) → `agents.native.provider` → legacy template. A bad
  *  name throws SpawnError — the caller exits before a bead is claimed. */
 export async function resolveLoopLane(
   env: AgentConnectorEnv,
   sel: LoopLaneSel,
-  cfg: LoopConfig
+  cfg: LoopConfig,
+  route?: ResolvedClass
 ): Promise<LoopLane> {
   const agentIsProvider =
     sel.agent !== undefined && Object.hasOwn(env.providers ?? {}, sel.agent)
@@ -390,43 +430,77 @@ export async function resolveLoopLane(
     )
   }
   if (sel.agent !== undefined && !agentIsProvider) {
-    return templateEscape(sel, cfg)
+    return templateEscape(sel, cfg, env)
   }
+  const { provider, model, autoApprove, profileSourced } = lanePicks(env, sel, cfg, route, agentIsProvider)
+  const pick = await resolveSpawnProvider(env, 'native', { provider, model, autoApprove }, pickTier(sel, agentIsProvider, profileSourced))
+  const lane = providerLaneOrEmpty(pick, model, autoApprove)
+  return route === undefined ? lane : { ...lane, class: route.class }
+}
+
+/** The pick tiers — flag > flag-named profile > routing table >
+ *  config-named profile > config. A flag-named profile is an explicit
+ *  pick (outranks the table); a config-named one is a standing default
+ *  below it (the same tiers `spawnStepAgent` puts req.profile vs
+ *  route.provider in). `profileSourced` reports whether the provider
+ *  came off a profile — the provenance tier resolveSpawnProvider logs. */
+function lanePicks(
+  env: AgentConnectorEnv,
+  sel: LoopLaneSel,
+  cfg: LoopConfig,
+  route: ResolvedClass | undefined,
+  agentIsProvider: boolean
+): { provider?: string; model?: string; autoApprove?: boolean; profileSourced: boolean } {
   const profileName = sel.profile ?? (cfg.profile !== '' ? cfg.profile : undefined)
   const profile = profileName !== undefined ? fleetProfileOf(env, profileName) : undefined
+  const flagProfile = sel.profile !== undefined ? profile : undefined
+  const cfgProfile = sel.profile === undefined ? profile : undefined
   const provider =
     sel.provider ??
     (agentIsProvider ? sel.agent : undefined) ??
-    profile?.provider ??
+    flagProfile?.provider ??
+    route?.provider ??
+    cfgProfile?.provider ??
     (cfg.provider !== '' ? cfg.provider : undefined)
-  const model = sel.model ?? profile?.model ?? (cfg.model !== '' ? cfg.model : undefined)
-  const autoApprove = sel.autoApprove ?? profile?.autoApprove
-  const pick = await resolveSpawnProvider(
-    env,
-    'native',
-    { provider, model, autoApprove },
-    sel.provider !== undefined || agentIsProvider
-      ? 'flag'
-      : profile?.provider !== undefined
-        ? 'profile'
-        : 'backend'
-  )
-  return providerLaneOrEmpty(pick, model, autoApprove)
+  const model =
+    sel.model ??
+    flagProfile?.model ??
+    // the chain head's model pin pairs with ITS provider only — an
+    // override provider never inherits chain[0]'s model
+    (provider !== undefined && provider === route?.provider ? route.model : undefined) ??
+    cfgProfile?.model ??
+    (cfg.model !== '' ? cfg.model : undefined)
+  return { provider, model, autoApprove: sel.autoApprove ?? profile?.autoApprove, profileSourced: profile?.provider !== undefined }
+}
+
+/** The provenance tier for the provider pick — a flag's typo is caller
+ *  'input', a config-sourced name is 'config' (resolveSpawnProvider's
+ *  namedBy contract). */
+function pickTier(
+  sel: LoopLaneSel,
+  agentIsProvider: boolean,
+  profileSourced: boolean
+): 'flag' | 'profile' | 'backend' {
+  if (sel.provider !== undefined || agentIsProvider) {
+    return 'flag'
+  }
+  return profileSourced ? 'profile' : 'backend'
 }
 
 /** The escape hatch — a template --agent replaces the provider lane for
- *  this run, config picks included; provider flags beside it are
- *  contradictory input. */
-function templateEscape(sel: LoopLaneSel, cfg: LoopConfig): LoopLane {
+ *  this run, config picks and fleet.routing included; provider/routing
+ *  flags beside it are contradictory input. */
+function templateEscape(sel: LoopLaneSel, cfg: LoopConfig, env: AgentConnectorEnv): LoopLane {
   const extras = [
     sel.provider !== undefined ? '--provider' : undefined,
     sel.profile !== undefined ? '--profile' : undefined,
     sel.model !== undefined ? '--model' : undefined,
+    sel.class !== undefined ? '--class' : undefined,
     sel.autoApprove === true ? '--auto-approve' : undefined,
   ].filter((f): f is string => f !== undefined)
   if (extras.length > 0) {
     throw new SpawnError(
-      `${extras.join(', ')} pick a provider, but --agent '${sel.agent}' is a ` +
+      `${extras.join(', ')} pick a provider lane, but --agent '${sel.agent}' is a ` +
         'raw template — name the provider instead (--agent <name>)',
       'input'
     )
@@ -436,6 +510,9 @@ function templateEscape(sel: LoopLaneSel, cfg: LoopConfig): LoopLane {
       'loop: --agent template bypasses the configured provider lane ' +
         '(loop.provider/loop.profile/loop.model)'
     )
+  }
+  if (env.fleet?.routing !== undefined && Object.keys(env.fleet.routing).length > 0) {
+    console.error('loop: --agent template bypasses fleet.routing — every bead runs the template')
   }
   return {}
 }
@@ -460,6 +537,82 @@ function providerLaneOrEmpty(
     )
   }
   return {}
+}
+
+// --- per-bead class routing (spec bro-1x7p / bead bro-zmned) ---------------------
+
+/** The bead's `class:` label — the lane pin `resolveStepClass` reads.
+ *  ReadyBead.labels come from the claim read (`bd ready --json` rows
+ *  carry them); the parse matches stepClassInfo's exactly. */
+function classLabelOf(bead: ReadyBead): string | undefined {
+  const hit = bead.labels?.find((l) => l.startsWith(CLASS_LABEL_PREFIX))
+  const name = hit === undefined ? undefined : hit.slice(CLASS_LABEL_PREFIX.length).trim()
+  return name === '' ? undefined : name
+}
+
+/** The routing inputs one bead carries — `class:` label, priority
+ *  (the onWall default), and title/description for the judge router.
+ *  The ready row already answers; a beads store pays one extra
+ *  `bd show` only when the router could fire on an unclassed bead and
+ *  needs the description the list row doesn't carry. */
+function beadClassInfo(
+  ctx: Ctx,
+  bead: ReadyBead,
+  routerEnabled = true
+): { label?: string; priority?: number; title?: string; description?: string } {
+  const info = {
+    label: classLabelOf(bead),
+    priority: bead.priority,
+    title: bead.title,
+    description: bead.description,
+  }
+  const router = ctx.env.fleet?.router
+  const routerMayFire =
+    routerEnabled &&
+    router !== undefined &&
+    router.mode !== 'off' &&
+    ctx.sel.class === undefined &&
+    info.label === undefined &&
+    ctx.beadsDir !== undefined
+  return routerMayFire ? { ...info, ...stepClassInfo(ctx.beadsDir!, bead.id) } : info
+}
+
+/** One claimed bead's spawn lane — fleet.routing resolves its class
+ *  (`--class` flag → `class:` label → `default`) and the chain head
+ *  supplies the provider, exactly like `bro agents up`'s spawn path
+ *  (routeStepClass → applyFleetRouter → resolveSpawnProvider). The
+ *  flag-tier picks still outrank the table piecewise; `ctx.lane` is the
+ *  run's fixed lane when routing is off or bypassed. The judge router
+ *  fires only on a genuinely unclassed bead — an explicit `--class` pin
+ *  is the top precedence tier and must not be overruled (agents.ts
+ *  signals the pin by withholding `info`; here the flag is checked
+ *  directly) — and `router:false` skips it entirely for render-only
+ *  callers (a dry run must not spend a judge call or journal a shadow
+ *  verdict). Throws SpawnError — a bad `class:` label or broken chain
+ *  is a config error the caller settles as a failed item, never a
+ *  silent template drop. */
+async function resolveBeadLane(
+  ctx: Ctx,
+  bead: ReadyBead,
+  opts: { router?: boolean } = {}
+): Promise<LoopLane> {
+  if (!ctx.routing) {
+    return ctx.lane
+  }
+  const info = beadClassInfo(ctx, bead, opts.router !== false)
+  const routed = routeStepClass(
+    ctx.env.fleet,
+    ctx.env.providers ?? {},
+    ctx.beadsDir,
+    bead.id,
+    ctx.sel.class,
+    info
+  )
+  const route =
+    opts.router === false || ctx.sel.class !== undefined
+      ? routed
+      : await applyFleetRouter(ctx.root, ctx.env, bead.id, info, routed)
+  return resolveLoopLane(ctx.env, ctx.sel, ctx.cfg, route)
 }
 
 /** Dry-run rendering for an argv worker — single-quotes only the args
@@ -500,7 +653,9 @@ function ensureWorktree(root: string, branch: string, dir: string, base?: string
  *
  *  `beadIds` is the whole claimed clump — a solo claim is a
  *  one-element list (spec bro-nspj7); the run record, log slug, and
- *  provenance pins key off the lead (`beadIds[0]`).
+ *  provenance pins key off the lead (`beadIds[0]`). `lane` is the
+ *  clump's resolved spawn lane — with fleet.routing declared it can
+ *  differ bead to bead (spec bro-1x7p).
  *
  *  stdout/stderr go straight to `<git-common>/bro/loop/<slug>.log`
  *  (append — fix rounds continue the same trail), and the spawn leaves a
@@ -513,6 +668,7 @@ function ensureWorktree(root: string, branch: string, dir: string, base?: string
  *  stream stays parseable) — a record-less spawn still works. */
 function spawnAgent(
   ctx: Ctx,
+  lane: LoopLane,
   beadIds: string[],
   title: string,
   promptFile: string,
@@ -527,7 +683,8 @@ function spawnAgent(
       BRO_BEAD_IDS: beadIds.join(','),
       BRO_BEAD_TITLE: title,
       BRO_PROMPT_FILE: promptFile,
-      ...provenancePins(ctx, leadId),
+      ...provenancePins(ctx, leadId, lane),
+      ...(lane.class === undefined ? {} : { BRO_AGENT_CLASS: lane.class }),
     })
     const slug = loopSlug(leadId)
     const log = loopRunLog(ctx.root, slug)
@@ -549,14 +706,14 @@ function spawnAgent(
           : (['inherit', ctx.json ? 2 : 'inherit', 'inherit'] as Array<'inherit' | number>),
       detached: true,
     }
-    const w = ctx.lane.worker
+    const w = lane.worker
     const child =
       w?.kind === 'argv'
         ? // the same `"$@"` positional exec the native backend builds —
           // argv workers are headless by construction (acp); sh resolves
           // argv[0] ('bro'/'npx') on PATH the way the backend does
           spawn('sh', ['-c', 'exec "$@"', 'loop-agent', ...w.argv, promptFile], opts) // NOSONAR — argv[0] resolves on PATH by design, same as the backend's spawn
-        : spawn('sh', ['-c', expandAgentCmd(ctx.agent, promptFile)], opts) // NOSONAR — operator-configured agent command
+        : spawn('sh', ['-c', expandAgentCmd(laneCommand(ctx, lane), promptFile)], opts) // NOSONAR — operator-configured agent command
     if (logFd !== null) {
       // the child holds its own dup — our copy is spent
       closeSync(logFd)
@@ -629,7 +786,7 @@ function specEnv(ctx: Ctx, extra: Record<string, string>): Record<string, string
  *  lands in `<git-common>/bro/agents/<id>.exit` for serviceWorker to
  *  poll — the tick never awaits the run. Sets `m.worker`; a SpawnError
  *  is the caller's settle decision (cap → hold, conflict → park). */
-async function spawnWorker(ctx: Ctx, m: GateMember, prompt: string): Promise<void> {
+async function spawnWorker(ctx: Ctx, m: GateMember, prompt: string, lane: LoopLane): Promise<void> {
   const lead = m.beads[0]!
   const info = await ctx.agents!.spawn({
     molStep: lead.id,
@@ -640,12 +797,15 @@ async function spawnWorker(ctx: Ctx, m: GateMember, prompt: string): Promise<voi
       BRO_BEAD_IDS: m.beads.map((b) => b.id).join(','),
       BRO_BEAD_TITLE: clumpTitle(m.beads),
     }),
-    provider: ctx.lane.provider,
-    model: ctx.lane.model,
+    provider: lane.provider,
+    model: lane.model,
+    // the routing lane the spawn resolved to — provenance the registry
+    // records and the BRO_AGENT_CLASS env pin both read spec.class
+    class: lane.class,
     // an explicit worker keeps the backend's own command fallback from
     // re-reading loop.agent config — a --agent flag override would
     // otherwise be silently ignored
-    worker: ctx.lane.worker ?? { kind: 'template', command: ctx.agent },
+    worker: lane.worker ?? { kind: 'template', command: laneCommand(ctx, lane) },
   })
   m.worker = {
     agentId: info.id,
@@ -1060,7 +1220,8 @@ async function runFixRound(
   ctx: Ctx,
   m: GateMember,
   pr: number,
-  round: number
+  round: number,
+  lane: LoopLane
 ): Promise<void> {
   ctx.stage = `fix round ${round} pr=${pr}`
   const threads = (await ctx.rev.reviewThreads({ repo: ctx.repo, pr }))
@@ -1080,10 +1241,10 @@ async function runFixRound(
   writePrompt(m.item, prompt)
   say(ctx, `loop: ${prRef(ctx, pr)} has open threads — fix round ${round}`)
   if (ctx.agents !== undefined) {
-    await spawnWorker(ctx, m, prompt)
+    await spawnWorker(ctx, m, prompt, lane)
     return
   }
-  const code = await spawnAgent(ctx, m.beads.map((b) => b.id), clumpTitle(m.beads), m.item.promptFile, m.item.worktreeDir)
+  const code = await spawnAgent(ctx, lane, m.beads.map((b) => b.id), clumpTitle(m.beads), m.item.promptFile, m.item.worktreeDir)
   if (code !== 0) {
     console.error(`loop: fix agent exited ${code ?? 'abnormal'} — the next gate poll decides`)
   }
@@ -1225,9 +1386,8 @@ function stackPlan(
 
 /** `P · model M` provenance label — the lane announce and the dry-run
  *  render print the same pair. */
-const laneLabel = (ctx: Ctx): string =>
-  `${ctx.lane.provider}` +
-  (ctx.lane.model !== undefined ? ` · model ${ctx.lane.model}` : '')
+const laneLabel = (lane: LoopLane): string =>
+  `${lane.provider}` + (lane.model !== undefined ? ` · model ${lane.model}` : '')
 
 /** Resolve the bead's stack slot and create its worktree under the same
  *  push lock `stack push` holds — without it a loop and a push racing
@@ -1308,6 +1468,12 @@ interface GateMember {
   /** The in-flight registry worker — set at push and again on every
    *  fix/rebase respawn; cleared when its exit record lands. */
   worker?: WorkerRef
+  /** The lane resolved at push — fix/rebase respawns reuse it. The
+   *  member's class was settled before its worktree existed (config
+   *  and bead labels are read once, never refreshed mid-run), so
+   *  re-resolving in a round can only re-hit the same route error —
+   *  silently burning a round per poll — or drift the lane mid-tenure. */
+  lane: LoopLane
   /** watchBegin marker path — armed for the member's whole stack
    *  tenure: a dead loop leaves a dead marker `act rearm` resurrects
    *  as `act wait --merge --cleanup` in the member's worktree. */
@@ -1372,6 +1538,33 @@ export function loopWatch(
 
 async function pushItem(ctx: Ctx, beads: ReadyBead[]): Promise<PushOutcome> {
   const lead = beads[0]!
+  // the lead's spawn lane resolves before any worktree exists — a
+  // fleet.routing config error (an unknown `class:` label, a broken
+  // chain) is deterministic: reopening would re-claim into the same
+  // wall, so the lead parks claimed+noted like a spawn-environment
+  // crash (bro-sovl3) while the clump's members release for re-pick —
+  // their lanes were never resolved, the bad class is the lead's alone
+  let lane: LoopLane
+  try {
+    lane = await resolveBeadLane(ctx, lead)
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err)
+    // the registry path only probed the lead (claimStep owns the real
+    // claim under the spawn lock) — take the claim here or the park
+    // can't hold the bead off the queue and it re-fails every pass.
+    // A raced claim means a foreign owner; the note still lands.
+    if (ctx.agents !== undefined) {
+      try {
+        claimUpTo([lead], 1, ctx.root)
+      } catch { /* best-effort park claim */ }
+    }
+    noteBead(ctx.tasks, lead.id, `loop: route resolution failed — ${msg} — parked`)
+    say(ctx, `loop: ${lead.id} route failed — ${msg} — parked`)
+    for (const b of openBeads(ctx, beads.slice(1))) {
+      reopenBead(ctx, b.id)
+    }
+    return { kind: 'done', result: 'parked' }
+  }
   // resolved here, not earlier — a member that landed since the last
   // push correctly yields the default branch as the next base.
   let slot: StackSlot | undefined
@@ -1433,7 +1626,7 @@ async function pushItem(ctx: Ctx, beads: ReadyBead[]): Promise<PushOutcome> {
       }
       say(ctx, `loop: ${lead.id} re-attaches to ${prRef(ctx, parkedPr)} — no re-spawn`)
       endLoopRun(ctx.root, loopSlug(lead.id))
-      return { kind: 'member', member: armMember(ctx, beads, item, parkedPr) }
+      return { kind: 'member', member: armMember(ctx, beads, item, parkedPr, lane) }
     }
   }
   ctx.stage = 'bootstrap'
@@ -1463,13 +1656,14 @@ async function pushItem(ctx: Ctx, beads: ReadyBead[]): Promise<PushOutcome> {
     const member: GateMember = {
       beads,
       item,
+      lane,
       marker: null,
       since: Date.now(),
       rounds: 0,
       fetchErrors: 0,
     }
     try {
-      await spawnWorker(ctx, member, prompt)
+      await spawnWorker(ctx, member, prompt, lane)
     } catch (err) {
       return settleSpawnRefusal(ctx, member, err)
     }
@@ -1483,7 +1677,7 @@ async function pushItem(ctx: Ctx, beads: ReadyBead[]): Promise<PushOutcome> {
   // no shared store to pin a claim/exit record against — the awaited
   // spawn keeps the serial semantics (documented fallback)
   const spawnAt = Date.now()
-  const code = await spawnAgent(ctx, beads.map((b) => b.id), clumpTitle(beads), item.promptFile, item.worktreeDir)
+  const code = await spawnAgent(ctx, lane, beads.map((b) => b.id), clumpTitle(beads), item.promptFile, item.worktreeDir)
   // agent wall-time — measured before findPr's gh call; a slow lookup
   // must not inflate an instant crash past the crashExitMs threshold
   const elapsed = Date.now() - spawnAt
@@ -1498,7 +1692,7 @@ async function pushItem(ctx: Ctx, beads: ReadyBead[]): Promise<PushOutcome> {
   }
   // custody transfers to the armed watch — the run record's job is done
   endLoopRun(ctx.root, loopSlug(lead.id))
-  return { kind: 'member', member: armMember(ctx, beads, item, pr) }
+  return { kind: 'member', member: armMember(ctx, beads, item, pr, lane) }
 }
 
 /** The PR-armed moment, shared by the post-spawn discovery and the
@@ -1512,7 +1706,7 @@ async function pushItem(ctx: Ctx, beads: ReadyBead[]): Promise<PushOutcome> {
  *  comma-joined. The marker lands BEFORE the stamp — a stall or death
  *  inside stampProjection's tracker calls must not strand the open PR
  *  markerless. */
-function armMember(ctx: Ctx, beads: ReadyBead[], item: LoopItem, pr: number): GateMember {
+function armMember(ctx: Ctx, beads: ReadyBead[], item: LoopItem, pr: number, lane: LoopLane): GateMember {
   emitLifecycle(ctx.root, {
     kind: 'pr-open',
     bead: beads[0]?.id,
@@ -1530,6 +1724,7 @@ function armMember(ctx: Ctx, beads: ReadyBead[], item: LoopItem, pr: number): Ga
     beads,
     item,
     pr,
+    lane,
     marker,
     since: Date.now(),
     rounds: 0,
@@ -1840,7 +2035,7 @@ async function serviceGate(ctx: Ctx, m: GateMember): Promise<ServiceVerdict> {
       return leave(m, 'parked')
     case 'fix': {
       gateRow('blocked', { action: 'fix', round: m.rounds + 1, blockers: snap.blockers })
-      const verdict = await respawnRound(ctx, m, () => runFixRound(ctx, m, pr, m.rounds))
+      const verdict = await respawnRound(ctx, m, () => runFixRound(ctx, m, pr, m.rounds, m.lane))
       // the snapshot that spawned the round must not be re-served —
       // a synchronous round (or a skipped spawn on already-resolved
       // threads) re-polls immediately and would re-trigger 'fix' on
@@ -1850,7 +2045,7 @@ async function serviceGate(ctx: Ctx, m: GateMember): Promise<ServiceVerdict> {
     }
     case 'rebase': {
       gateRow('blocked', { action: 'rebase', round: m.rounds + 1 })
-      const verdict = await respawnRound(ctx, m, () => runRebaseRound(ctx, m, pr, m.rounds))
+      const verdict = await respawnRound(ctx, m, () => runRebaseRound(ctx, m, pr, m.rounds, m.lane))
       ctx.stateCache?.invalidate({ repo: ctx.repo, pr })
       return verdict
     }
@@ -1947,7 +2142,8 @@ async function runRebaseRound(
   ctx: Ctx,
   m: GateMember,
   pr: number,
-  round: number
+  round: number,
+  lane: LoopLane
 ): Promise<void> {
   let base: string
   try {
@@ -1960,10 +2156,10 @@ async function runRebaseRound(
   writePrompt(m.item, prompt)
   say(ctx, `loop: ${prRef(ctx, pr)} conflicts — rebase round ${round} onto ${base}`)
   if (ctx.agents !== undefined) {
-    await spawnWorker(ctx, m, prompt)
+    await spawnWorker(ctx, m, prompt, lane)
     return
   }
-  const code = await spawnAgent(ctx, m.beads.map((b) => b.id), clumpTitle(m.beads), m.item.promptFile, m.item.worktreeDir)
+  const code = await spawnAgent(ctx, lane, m.beads.map((b) => b.id), clumpTitle(m.beads), m.item.promptFile, m.item.worktreeDir)
   if (code !== 0) {
     console.error(`loop: rebase agent exited ${code ?? 'abnormal'} — the next gate poll decides`)
   }
@@ -2012,6 +2208,7 @@ const LOOP_VALUE_FLAGS = new Set([
   '--stack',
   '--provider',
   '--profile',
+  '--class',
   '--model',
 ])
 const LOOP_BOOL_FLAGS = new Set(['--json', '--dry-run', '--help', '--auto-approve'])
@@ -2029,10 +2226,10 @@ export async function runLoopCommand(argv: string[]): Promise<void> {
   const broCfg = loadBroConfig(root)
   const backend = ensureTasksBackend(root, broCfg.connectors)
   const cfg = broCfg.loop as LoopConfig
-  const { lane, agent } = await resolveRunLane(root, argv, broCfg, cfg)
-  const ctx = buildCtx(root, argv, broCfg, cfg, agent, lane, backend)
+  const run = await resolveRunLane(root, argv, cfg)
+  const ctx = buildCtx(root, argv, broCfg, cfg, run, backend)
   if (argv.includes('--dry-run')) {
-    dryRunPlan(ctx)
+    await dryRunPlan(ctx)
     return
   }
   // One loop supervisor per repo: a respawn wrapper's duplicate stands
@@ -2075,32 +2272,102 @@ function rejectStrayArgs(argv: string[]): void {
   }
 }
 
-/** The lane resolves once, up front — a bad provider name is a config
- *  error that must fail BEFORE a bead is claimed, not mid-run with
- *  claims held. Returns the lane plus the effective template (a cli
- *  provider's `command` substitutes for `loop.agent`; a template
- *  --agent stays the literal value — provider names are never
- *  templates, resolveLoopLane consumed them). */
+/** The lane picks resolve once, up front — a bad provider name (or a
+ *  broken fleet.routing table) is a config error that must fail BEFORE
+ *  a bead is claimed, not mid-run with claims held. Returns the flag
+ *  sel, the fixed lane (the whole lane when routing is off or a flag
+ *  pins it; `resolveBeadLane` re-resolves per bead otherwise), the
+ *  effective template (a cli provider's `command` substitutes for
+ *  `loop.agent`; a template --agent stays the literal value — provider
+ *  names are never templates, resolveLoopLane consumed them), and
+ *  whether per-bead fleet.routing is armed. */
 async function resolveRunLane(
   root: string,
   argv: string[],
-  broCfg: ReturnType<typeof loadBroConfig>,
   cfg: LoopConfig
-): Promise<{ lane: LoopLane; agent: string }> {
-  const agentFlag = flag(argv, '--agent')
+): Promise<{
+  env: AgentConnectorEnv
+  sel: LoopLaneSel
+  lane: LoopLane
+  agent: string
+  routing: boolean
+  flagPin: boolean
+}> {
+  const env = loadAgentEnv(root)
+  const sel = loopLaneSel(argv)
+  return { env, sel, ...(await resolveRunLaneInner(env, sel, cfg)) }
+}
+
+function loopLaneSel(argv: string[]): LoopLaneSel {
+  return {
+    agent: flag(argv, '--agent'),
+    provider: flag(argv, '--provider'),
+    profile: flag(argv, '--profile'),
+    model: flag(argv, '--model'),
+    autoApprove: argv.includes('--auto-approve') ? true : undefined,
+    class: flag(argv, '--class'),
+  }
+}
+
+/** The flag TIER's provider pick — with routing armed, lane.provider
+ *  also carries the fallback class's chain head (the floor), so
+ *  "is the provider pinned?" must be read from the picks themselves. */
+function flagTierPin(env: AgentConnectorEnv, sel: LoopLaneSel): boolean {
+  return (
+    sel.provider !== undefined ||
+    (sel.agent !== undefined && Object.hasOwn(env.providers ?? {}, sel.agent)) ||
+    (sel.profile !== undefined && fleetProfileOf(env, sel.profile).provider !== undefined)
+  )
+}
+
+/** The template the run expands — a cli provider's `command`
+ *  substitutes for `loop.agent`; a template --agent stays the literal
+ *  value (provider names are never templates, resolveLoopLane consumed
+ *  them); else the config default. */
+function effectiveAgent(
+  lane: LoopLane,
+  sel: LoopLaneSel,
+  env: AgentConnectorEnv,
+  cfg: LoopConfig
+): string {
+  if (lane.worker?.kind === 'template') {
+    return lane.worker.command
+  }
+  const agentFlag = sel.agent
+  if (agentFlag !== undefined && !Object.hasOwn(env.providers ?? {}, agentFlag)) {
+    return agentFlag
+  }
+  return cfg.agent
+}
+
+async function resolveRunLaneInner(
+  env: AgentConnectorEnv,
+  sel: LoopLaneSel,
+  cfg: LoopConfig
+): Promise<{ lane: LoopLane; agent: string; routing: boolean; flagPin: boolean }> {
+  // a template --agent bypasses the registry entirely — routing can
+  // only arm when the provider lane is in play (templateEscape already
+  // warned about the bypass)
+  const templateAgent =
+    sel.agent !== undefined && !Object.hasOwn(env.providers ?? {}, sel.agent)
+  const routing =
+    !templateAgent &&
+    env.fleet?.routing !== undefined &&
+    Object.keys(env.fleet.routing).length > 0
   let lane: LoopLane
   try {
-    lane = await resolveLoopLane(
-      loadAgentEnv(root),
-      {
-        agent: agentFlag,
-        provider: flag(argv, '--provider'),
-        profile: flag(argv, '--profile'),
-        model: flag(argv, '--model'),
-        autoApprove: argv.includes('--auto-approve') ? true : undefined,
-      },
-      cfg
-    )
+    // preflight the class every bead falls back to — a table whose
+    // `default` (or the --class pin) doesn't resolve is a global
+    // config error, detected before the first claim. The route feeds
+    // the lane preflight too: under routing its chain head is the
+    // effective provider floor, so a dead lower-tier pick
+    // (loop.provider/loop.profile) can't abort a run every bead routes
+    // around. Per-bead `class:` labels still resolve per spawn inside
+    // pushItem.
+    const preflight = routing
+      ? routeStepClass(env.fleet, env.providers ?? {}, undefined, '', sel.class, {})
+      : undefined
+    lane = await resolveLoopLane(env, sel, cfg, preflight)
   } catch (err) {
     if (err instanceof SpawnError) {
       console.error(`bro loop: ${err.message}`)
@@ -2108,13 +2375,9 @@ async function resolveRunLane(
     }
     throw err
   }
-  const agent =
-    lane.worker?.kind === 'template'
-      ? lane.worker.command
-      : agentFlag !== undefined && !Object.hasOwn(broCfg.providers ?? {}, agentFlag)
-        ? agentFlag
-        : cfg.agent
-  if (lane.worker === undefined && agent === '') {
+  const flagPin = flagTierPin(env, sel)
+  const agent = effectiveAgent(lane, sel, env, cfg)
+  if (lane.worker === undefined && agent === '' && !routing) {
     console.error(
       'bro loop: no agent configured — set loop.agent or loop.provider in bro.config ' +
         '(e.g. "devin --prompt-file {promptFile} -p") or pass --agent/--provider'
@@ -2126,8 +2389,15 @@ async function resolveRunLane(
   // without it opens an interactive session per bead (the file path
   // lands positionally = the prompt). Warn loudly, don't refuse. An
   // argv worker takes the file as a positional arg by contract — the
-  // check would only misfire on it.
-  if (lane.worker?.kind !== 'argv' && !agent.includes('{promptFile}')) {
+  // check would only misfire on it. With fleet.routing armed and no
+  // flag-tier pin the base template is inert — each bead's routed lane
+  // carries its own command (lane.worker already holds the fallback
+  // class's floor, so the pin test is the picks, not the lane).
+  if (
+    !(routing && !flagPin) &&
+    lane.worker?.kind !== 'argv' &&
+    !agent.includes('{promptFile}')
+  ) {
     // binary name only — the template may carry inline credentials
     const agentBin = agent.split(/\s+/, 1)[0]
     console.error(
@@ -2137,7 +2407,7 @@ async function resolveRunLane(
         'Intended for env-reading agents (BRO_PROMPT_FILE) only.'
     )
   }
-  return { lane, agent }
+  return { lane, agent, routing, flagPin }
 }
 
 function buildCtx(
@@ -2145,10 +2415,17 @@ function buildCtx(
   argv: string[],
   broCfg: ReturnType<typeof loadBroConfig>,
   cfg: LoopConfig,
-  agent: string,
-  lane: LoopLane,
+  run: {
+    env: AgentConnectorEnv
+    sel: LoopLaneSel
+    lane: LoopLane
+    agent: string
+    routing: boolean
+    flagPin: boolean
+  },
   backend: string
 ): Ctx {
+  const { env, sel, lane, agent, routing, flagPin } = run
   const rev = reviewHost(root, broCfg.connectors)
   const ctx: Ctx = {
     rev,
@@ -2169,6 +2446,9 @@ function buildCtx(
     stateCache: prStateCache(root),
     agent,
     lane,
+    env,
+    sel,
+    routing,
     intervalS: num(flag(argv, '--interval'), 60, 1, Math.floor(TIMER_MAX_MS / 1000)),
     json: argv.includes('--json'),
     selection: {
@@ -2186,27 +2466,9 @@ function buildCtx(
     // pick, so github's optInFacades doesn't apply (the operator asked
     // for this connector's reviews already). A rig whose tasks backend
     // IS the review host has nothing to project.
-    mirror: (() => {
-      try {
-        const name = facadeName('reviews', { dir: root }, { prefer: broCfg.connectors })
-        if (name === backend) {
-          return undefined
-        }
-        const s = facade('tasks', { dir: root }, { connector: name })
-        return s.publish === undefined ? undefined : s
-      } catch {
-        return undefined
-      }
-    })(),
+    mirror: mirrorStore(root, broCfg, backend),
     mirrorPolicy: broCfg.mirror,
-    specHas: (() => {
-      try {
-        const specs = specStore(root, broCfg.connectors)
-        return (id: string) => specs.hasSpec(id)
-      } catch {
-        return () => false
-      }
-    })(),
+    specHas: specProbe(root, broCfg),
   }
   // the registry spawn engages when there's a shared store to pin the
   // claim/exit record against — without one the legacy awaited spawn
@@ -2221,19 +2483,59 @@ function buildCtx(
       )
     }
   }
-  // announce the resolved lane once — agents.native.provider picking up
-  // the run must not be a silent behavior change for template users
-  if (ctx.lane.provider !== undefined) {
-    say(
-      ctx,
-      `loop: provider ${laneLabel(ctx)}` +
-        (ctx.lane.worker?.kind === 'argv' ? ' (acp worker)' : '')
-    )
-  }
+  sayLaneNotes(ctx, flagPin)
   return ctx
 }
 
-function dryRunPlan(ctx: Ctx): void {
+// announce the resolved lane once — agents.native.provider picking up
+// the run must not be a silent behavior change for template users.
+// With routing armed the pin test is the flag TIER, not ctx.lane —
+// the preflight route fills lane.provider with the fallback class's
+// head, which advertises the floor, not a pin.
+function sayLaneNotes(ctx: Ctx, flagPin: boolean): void {
+  if (ctx.routing && !flagPin) {
+    const pin = ctx.sel.class === undefined ? '' : ` (pinned: ${ctx.sel.class})`
+    say(ctx, `loop: fleet.routing — provider resolves per bead class${pin}`)
+  }
+  if (ctx.lane.provider === undefined || (ctx.routing && !flagPin)) {
+    return
+  }
+  const worker = ctx.lane.worker?.kind === 'argv' ? ' (acp worker)' : ''
+  const routed = ctx.routing ? ' (pinned — fleet.routing supplies classes only)' : ''
+  say(ctx, `loop: provider ${laneLabel(ctx.lane)}${worker}${routed}`)
+}
+
+// the projection target rides the REVIEW host's tasks — a named
+// pick, so github's optInFacades doesn't apply (the operator asked
+// for this connector's reviews already). A rig whose tasks backend
+// IS the review host has nothing to project.
+function mirrorStore(
+  root: string,
+  broCfg: ReturnType<typeof loadBroConfig>,
+  backend: string
+): Ctx['mirror'] {
+  try {
+    const name = facadeName('reviews', { dir: root }, { prefer: broCfg.connectors })
+    if (name === backend) {
+      return undefined
+    }
+    const s = facade('tasks', { dir: root }, { connector: name })
+    return s.publish === undefined ? undefined : s
+  } catch {
+    return undefined
+  }
+}
+
+function specProbe(root: string, broCfg: ReturnType<typeof loadBroConfig>): Ctx['specHas'] {
+  try {
+    const specs = specStore(root, broCfg.connectors)
+    return (id: string) => specs.hasSpec(id)
+  } catch {
+    return () => false
+  }
+}
+
+async function dryRunPlan(ctx: Ctx): Promise<void> {
   const scope = loopScope()
   if (!scope) {
     return
@@ -2259,16 +2561,39 @@ function dryRunPlan(ctx: Ctx): void {
         ]
       : [top]
   console.log(`would claim ${clump.map((b) => b.id).join(', ')} — ${top.title}`)
+  for (const b of clump.slice(1)) {
+    console.log(`  + ${b.id} — ${b.title}`)
+  }
   if (clump.length > 1) {
-    for (const b of clump.slice(1)) {
-      console.log(`  + ${b.id} — ${b.title}`)
-    }
     console.log(`  batch: ${clump.length} beads, one worktree, one PR`)
   }
   const { slot, item } = stackPlan(ctx, top)
   console.log(`  worktree ${item.worktreeDir} on ${item.branch}`)
-  // the same floor tryClaim enforces — a dry run is exactly where an
-  // operator sizes maxOpen against real headroom
+  dryRunDisk(ctx)
+  if (slot !== undefined) {
+    console.log(`  stack ${ctx.stack} member ${slot.n} — PR base ${slot.base}`)
+  }
+  const lane = await dryRunLane(ctx, top)
+  if (lane === undefined) {
+    return
+  }
+  if (lane.class !== undefined) {
+    console.log(`  class: ${lane.class}`)
+  }
+  if (lane.provider !== undefined) {
+    console.log(`  provider: ${laneLabel(lane)}`)
+  }
+  const w = lane.worker
+  const argvLine =
+    w?.kind === 'argv'
+      ? [...w.argv, item.promptFile].map(shRender).join(' ')
+      : expandAgentCmd(laneCommand(ctx, lane), item.promptFile)
+  console.log(`  agent: ${argvLine}`)
+}
+
+// the same floor tryClaim enforces — a dry run is exactly where an
+// operator sizes maxOpen against real headroom
+function dryRunDisk(ctx: Ctx): void {
   const probes = diskProbes(ctx)
   const breach = diskFloorBreach(probes, ctx.cfg)
   for (const p of probes) {
@@ -2280,20 +2605,35 @@ function dryRunPlan(ctx: Ctx): void {
         `(${ctx.cfg.diskMinSlots}×${ctx.cfg.worktreeMb}M)`
     )
   }
-  if (slot !== undefined) {
-    console.log(`  stack ${ctx.stack} member ${slot.n} — PR base ${slot.base}`)
+}
+
+// the render resolves THIS bead's lane — with fleet.routing armed the
+// provider differs per bead; a broken route reports the same error a
+// claimed run would park on. The judge router is skipped: a dry run
+// spends no judge call and journals no shadow verdict — it reports
+// the armed router instead.
+async function dryRunLane(ctx: Ctx, top: ReadyBead): Promise<LoopLane | undefined> {
+  if (!ctx.routing) {
+    return ctx.lane
   }
-  const w = ctx.lane.worker
-  if (ctx.lane.provider !== undefined) {
-    console.log(`  provider: ${laneLabel(ctx)}`)
+  let lane: LoopLane
+  try {
+    lane = await resolveBeadLane(ctx, top, { router: false })
+  } catch (err) {
+    console.log(`  route: ${err instanceof Error ? err.message : String(err)}`)
+    return undefined
   }
-  console.log(
-    `  agent: ${
-      w?.kind === 'argv'
-        ? [...w.argv, item.promptFile].map(shRender).join(' ')
-        : expandAgentCmd(ctx.agent, item.promptFile)
-    }`
-  )
+  const router = ctx.env.fleet?.router
+  if (
+    router !== undefined &&
+    router.mode !== 'off' &&
+    ctx.sel.class === undefined &&
+    ctx.beadsDir !== undefined &&
+    classLabelOf(top) === undefined
+  ) {
+    console.log(`  router: ${router.provider} armed (${router.mode}) — a real run may re-class`)
+  }
+  return lane
 }
 
 /** Project scope for the queue — a failed prefix lookup is reported

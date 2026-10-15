@@ -932,7 +932,12 @@ const log = (msg) => {
         : prompt.includes('SAST fixer')
           ? 'sast'
           : 'work'
-  retry(() => fs.appendFileSync(f, kind + ' ' + msg + '\\n'))
+  // provider/class provenance pins the loop sets — routing tests key
+  // off them; the bracket suffix keeps the 'work opened pr' match intact
+  const prov = ' [bead=' + (process.env.BRO_BEAD_ID || '-') +
+    ' provider=' + (process.env.BRO_AGENT_PROVIDER || '-') +
+    ' class=' + (process.env.BRO_AGENT_CLASS || '-') + ']'
+  retry(() => fs.appendFileSync(f, kind + ' ' + msg + prov + '\\n'))
 }
 // in-band run-record peek (bro-wg896): the detached worker can't ask
 // the loop mid-tick, so it snapshots bro/loop/ itself — the cwd is
