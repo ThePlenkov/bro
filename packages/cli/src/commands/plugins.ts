@@ -615,11 +615,31 @@ function printRegistry(plugins: BroPlugin[]): void {
   }
 }
 
+/** The registry as data — generators (command reference) read this. */
+function registryRows(plugins: BroPlugin[]) {
+  return plugins.map((p) => ({
+    name: p.name,
+    group: p.group,
+    summary: p.summary,
+    skill: p.skill,
+    configKey: p.configKey,
+    hidden: p.hidden === true,
+    aliasOf: p.aliasOf,
+    deprecated: p.deprecated,
+    plan: p.planSchema !== undefined,
+    planVersion: p.planVersion,
+    external: p.external === true,
+  }))
+}
+
 export function runPluginsCommand(argv: string[], plugins: BroPlugin[]): void {
   const [sub, ...rest] = argv
   switch (sub) {
     case undefined:
       printRegistry(plugins)
+      return
+    case '--json':
+      console.log(JSON.stringify(registryRows(plugins), null, 2))
       return
     case 'list': {
       const rows = pluginRows()

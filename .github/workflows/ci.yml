@@ -34,6 +34,9 @@ jobs:
       - name: Check embedded snapshot is fresh
         run: npm run check:embedded
 
+      - name: Check command reference is fresh
+        run: npm run check:command-docs
+
       - name: Typecheck
         run: npm run typecheck
 
