@@ -167,6 +167,12 @@ export interface ReviewFacade {
    *  the host's listing order — stack sync needs them to see a member's
    *  merge land. */
   prsForBranch(branch: string, state?: 'open' | 'all'): number[]
+  /** Every open PR on the repo — {pr, headRef} rows for one-call
+   *  discovery (the watch gates tick wants the set, not N per-branch
+   *  lookups). Optional — a host without it leaves callers on the
+   *  prsForBranch scan. Connector-bounded (one listing page); a repo
+   *  past the cap under-counts, never errors. */
+  openPrs?(repo: string): { pr: number; headRef: string }[]
   /** A PR reference in free text (the host's own URL shape) → target —
    *  the prompt-submit probe's way to spot its PRs. Null when the text
    *  names none. */

@@ -3,12 +3,14 @@ import assert from 'node:assert/strict'
 import { mkdtempSync, readdirSync, readFileSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+import type { ReviewFacade } from '@broject/core'
 import type { FleetRow } from './fleet.ts'
 import type { LoopRunView } from './loop-state.ts'
 import { initRepo, inside } from './testrepo.ts'
 import {
   attentionOf,
   emitMailbox,
+  openPrTargets,
   renderSnapshot,
   snapshotKey,
   watchArgs,
@@ -208,13 +210,121 @@ describe('snapshotKey', () => {
   })
 })
 
+describe('openPrTargets', () => {
+  /** A facade stub — openPrTargets only reads prsForBranch + prLink
+   *  (+ openPrs when given, the bulk path). */
+  const stubRev = (
+    byBranch: Record<string, number[]>,
+    seen: string[],
+    open?: { pr: number; headRef: string }[] | Error
+  ): ReviewFacade =>
+    ({
+      prsForBranch: (branch: string) => {
+        seen.push(branch)
+        const prs = byBranch[branch]
+        if (prs === undefined) {
+          throw new Error(`${branch}: lookup failed`)
+        }
+        return prs
+      },
+      openPrs:
+        open === undefined
+          ? undefined
+          : () => {
+              if (open instanceof Error) {
+                throw open
+              }
+              return open
+            },
+      prLink: (repo: string, pr: number) => `[#${pr}](https://example.test/${repo}/pull/${pr})`,
+    }) as unknown as ReviewFacade
+
+  test('no fleet rows still finds the branches\' open PRs (bro-hn7kx)', () => {
+    const seen: string[] = []
+    const rev = stubRev({ 'loop/bro-a': [11], 'work/bro-b': [12, 13] }, seen)
+    const errors: string[] = []
+    const targets = openPrTargets(rev, 'o/r', [], ['loop/bro-a', 'work/bro-b'], errors)
+    assert.deepEqual(
+      targets.map((t) => t.pr),
+      [11, 12, 13]
+    )
+    assert.deepEqual(errors, [])
+    assert.deepEqual(seen, ['loop/bro-a', 'work/bro-b'])
+  })
+
+  test('row PRs union with branch PRs — deduped, row link kept', () => {
+    const seen: string[] = []
+    const rev = stubRev({ 'loop/bro-a': [11, 12] }, seen)
+    const errors: string[] = []
+    const rows = [
+      row({ prNum: 11, pr: '[#11](https://row.link/11)' }),
+      row({ prNum: 12, prNums: [12, 14] }),
+    ]
+    const targets = openPrTargets(rev, 'o/r', rows, ['loop/bro-a'], errors)
+    assert.deepEqual(
+      targets.map((t) => t.pr),
+      [11, 12, 14]
+    )
+    assert.equal(targets[0]!.link, '[#11](https://row.link/11)')
+  })
+
+  test('a failed branch lookup is a lookupError, not a dead plane', () => {
+    const seen: string[] = []
+    const rev = stubRev({ 'loop/bro-a': [11] }, seen)
+    const errors: string[] = []
+    const targets = openPrTargets(rev, 'o/r', [], ['loop/bro-a', 'loop/gone'], errors)
+    assert.deepEqual(
+      targets.map((t) => t.pr),
+      [11]
+    )
+    assert.equal(errors.length, 1)
+    assert.match(errors[0]!, /loop\/gone: lookup failed/)
+  })
+
+  test('the bulk listing is one call — fleet-prefixed heads match, foreign ones don\'t', () => {
+    const seen: string[] = []
+    const rev = stubRev({}, seen, [
+      { pr: 11, headRef: 'loop/bro-a' },
+      { pr: 12, headRef: 'work/bro-b' },
+      // a remote-only fleet branch counts — its local branch may be gone
+      { pr: 13, headRef: 'stack/s/1-bro-c' },
+      { pr: 99, headRef: 'feature/not-fleet' },
+      { pr: 98, headRef: 'main' },
+    ])
+    const errors: string[] = []
+    const targets = openPrTargets(rev, 'o/r', [], ['loop/bro-a', 'main'], errors)
+    assert.deepEqual(
+      targets.map((t) => t.pr).sort((a, b) => a - b),
+      [11, 12, 13, 98]
+    )
+    assert.deepEqual(errors, [])
+    // bulk path never fans out to per-branch lookups
+    assert.deepEqual(seen, [])
+  })
+
+  test('a failed bulk listing is a lookupError — row PRs still gate', () => {
+    const seen: string[] = []
+    const rev = stubRev({}, seen, new Error('gh down'))
+    const errors: string[] = []
+    const rows = [row({ prNum: 11, pr: '[#11](https://row.link/11)' })]
+    const targets = openPrTargets(rev, 'o/r', rows, ['loop/bro-a'], errors)
+    assert.deepEqual(
+      targets.map((t) => t.pr),
+      [11]
+    )
+    assert.equal(errors.length, 1)
+    assert.match(errors[0]!, /open-PR listing: gh down/)
+    assert.deepEqual(seen, [])
+  })
+})
+
 describe('renderSnapshot', () => {
   test('a quiet snapshot reads quiet, with every section present', () => {
     const text = renderSnapshot(snap())
     assert.match(text, /bro watch — 2026-10-02T00:00:00\.000Z/)
     assert.match(text, /attention\n  \(quiet\)/)
     assert.match(text, /mols\n  no open molecules/)
-    assert.match(text, /gates\n  no PRs in the fleet/)
+    assert.match(text, /gates\n  no open PRs on fleet branches/)
     assert.match(text, /fleet\n  no open molecules — nothing in the fleet/)
     assert.match(text, /loop\n  no loop agents on record/)
     assert.match(text, /daemon\n  down/)

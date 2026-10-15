@@ -1278,6 +1278,17 @@ export function githubReview(dir: string = process.cwd()): ReviewFacade {
         dir
       ).map((p) => p.number)
     },
+    openPrs(repo) {
+      // one listing beats N `pr list --head` subprocesses — bulk
+      // discovery callers want the open set, not per-branch round-trips
+      return ghJson<Array<{ number: number; headRefName?: string }>>(
+        [
+          'pr', 'list', '--repo', repo, '--state', 'open', '--limit', '500',
+          '--json', 'number,headRefName',
+        ],
+        dir
+      ).map((p) => ({ pr: p.number, headRef: p.headRefName ?? '' }))
+    },
     parsePrRef(text) {
       const m = /github\.com\/([\w.-]+)\/([\w.-]+)\/pull\/(\d+)/.exec(text)
       return m ? { repo: `${m[1]}/${m[2]}`, pr: Number(m[3]) } : null
