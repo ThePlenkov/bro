@@ -985,6 +985,47 @@ export function followLog(
   }
   opts.signal?.addEventListener('abort', stop, { once: true })
 
+  const onMissing = () => {
+    if (!missing) {
+      on.note('[log removed — watching for a respawn]')
+      missing = true
+    }
+    close()
+  }
+  const readAppended = (size: number) => {
+    if (fd === undefined) {
+      try {
+        fd = openSync(path, 'r')
+      } catch {
+        return
+      }
+    }
+    const buf = Buffer.allocUnsafe(size - offset)
+    const n = readSync(fd, buf, 0, buf.length, offset)
+    offset += n
+    if (n > 0) {
+      on.data(decoder.decode(buf.subarray(0, n), { stream: true }))
+    }
+  }
+  const onPresent = (size: number) => {
+    if (missing) {
+      on.note('[log reopened]')
+      missing = false
+      offset = 0
+      decoder = new TextDecoder()
+    }
+    if (size < offset) {
+      on.note('[log truncated — resyncing]')
+      offset = 0
+      decoder = new TextDecoder()
+      // a replaced file is a new inode — the open fd still resolves
+      // the OLD one's bytes; drop it so the next read reopens fresh
+      close()
+    }
+    if (size > offset) {
+      readAppended(size)
+    }
+  }
   const tick = () => {
     if (stopped) {
       return
@@ -996,43 +1037,9 @@ export function followLog(
       size = undefined
     }
     if (size === undefined) {
-      if (!missing) {
-        on.note('[log removed — watching for a respawn]')
-        missing = true
-      }
-      close()
+      onMissing()
     } else {
-      if (missing) {
-        on.note('[log reopened]')
-        missing = false
-        offset = 0
-        decoder = new TextDecoder()
-      }
-      if (size < offset) {
-        on.note('[log truncated — resyncing]')
-        offset = 0
-        decoder = new TextDecoder()
-        // a replaced file is a new inode — the open fd still resolves
-        // the OLD one's bytes; drop it so the next read reopens fresh
-        close()
-      }
-      if (size > offset) {
-        if (fd === undefined) {
-          try {
-            fd = openSync(path, 'r')
-          } catch {
-            fd = undefined
-          }
-        }
-        if (fd !== undefined) {
-          const buf = Buffer.allocUnsafe(size - offset)
-          const n = readSync(fd, buf, 0, buf.length, offset)
-          offset += n
-          if (n > 0) {
-            on.data(decoder.decode(buf.subarray(0, n), { stream: true }))
-          }
-        }
-      }
+      onPresent(size)
     }
     if (!stopped) {
       timer = setTimeout(tick, pollMs)

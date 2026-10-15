@@ -1124,22 +1124,23 @@ describe('bro agents log', () => {
 
   test('followLog emits appends, reports truncation, and rides remove/reopen', async () => {
     const root = mkdtempSync(join(tmpdir(), 'bro-log-follow-'))
-    const log = join(root, 'a.log')
-    writeFileSync(log, 'one\n')
-    const data: string[] = []
-    const notes: string[] = []
-    const handle = followLog(
-      log,
-      { data: (s) => data.push(s), note: (s) => notes.push(s) },
-      { pollMs: 15, startOffset: 4 }
-    )
-    const until = async (pred: () => boolean) => {
-      for (let i = 0; i < 100 && !pred(); i += 1) {
-        await sleep(10)
-      }
-      assert.ok(pred(), 'followLog never reached the expected state')
-    }
+    let handle: ReturnType<typeof followLog> | undefined
     try {
+      const log = join(root, 'a.log')
+      writeFileSync(log, 'one\n')
+      const data: string[] = []
+      const notes: string[] = []
+      handle = followLog(
+        log,
+        { data: (s) => data.push(s), note: (s) => notes.push(s) },
+        { pollMs: 15, startOffset: 4 }
+      )
+      const until = async (pred: () => boolean) => {
+        for (let i = 0; i < 100 && !pred(); i += 1) {
+          await sleep(10)
+        }
+        assert.ok(pred(), 'followLog never reached the expected state')
+      }
       appendFileSync(log, 'two\nthree\n')
       await until(() => data.join('').includes('three'))
       assert.equal(data.join(''), 'two\nthree\n')
@@ -1157,13 +1158,13 @@ describe('bro agents log', () => {
       await until(() => notes.some((n) => n.includes('reopened')))
       await until(() => data.join('').includes('reborn'))
 
-      handle.stop()
+      handle?.stop()
       const drained = data.length
       appendFileSync(log, 'after-stop\n')
       await sleep(60)
       assert.equal(data.length, drained)
     } finally {
-      handle.stop()
+      handle?.stop()
       rmSync(root, { recursive: true, force: true })
     }
   })
