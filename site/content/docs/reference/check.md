@@ -1,5 +1,5 @@
 ---
-title: bro check
+title: "bro check"
 description: "Run the repo sverka workflow — per-step stats + findings [--json]"
 ---
 

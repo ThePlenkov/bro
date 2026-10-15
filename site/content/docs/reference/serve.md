@@ -1,5 +1,5 @@
 ---
-title: bro serve
+title: "bro serve"
 description: "Facade host for thin clients — HTTP/JSON on 127.0.0.1 [--port N]"
 ---
 

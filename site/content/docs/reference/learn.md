@@ -1,5 +1,5 @@
 ---
-title: bro learn
+title: "bro learn"
 description: "Self-improvement loop — lessons: add|list|show|forget|capture|probe"
 ---
 

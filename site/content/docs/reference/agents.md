@@ -1,5 +1,5 @@
 ---
-title: bro agents
+title: "bro agents"
 description: "Agent supervisor — status|up|down over the orchestrator connectors"
 ---
 

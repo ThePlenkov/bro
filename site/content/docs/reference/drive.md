@@ -1,5 +1,5 @@
 ---
-title: bro drive
+title: "bro drive"
 description: "Post-PR review driver — poll act gates, spawn fixer agents, merge on green [--once|--every N|--no-merge]"
 ---
 

@@ -1,5 +1,5 @@
 ---
-title: bro work
+title: "bro work"
 description: "Parallel-friendly worktrees: enter|leave|list|prune"
 ---
 

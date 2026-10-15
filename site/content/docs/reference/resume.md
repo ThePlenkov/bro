@@ -1,5 +1,5 @@
 ---
-title: bro resume
+title: "bro resume"
 description: "Post-restart recovery — rearm dead watches, revive the daemon, audit survivors [--dry-run|--json]"
 ---
 

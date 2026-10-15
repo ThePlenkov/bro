@@ -1,5 +1,5 @@
 ---
-title: bro act
+title: "bro act"
 description: "Open-PR loop: status|threads|resolve|reply|merge"
 ---
 

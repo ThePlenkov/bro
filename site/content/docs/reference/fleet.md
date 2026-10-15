@@ -1,5 +1,5 @@
 ---
-title: bro fleet
+title: "bro fleet"
 description: "Fleet view — mols × steps × agents × worktrees × PRs [--json|--live|--every N]"
 ---
 

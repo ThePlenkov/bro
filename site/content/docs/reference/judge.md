@@ -1,5 +1,5 @@
 ---
-title: bro judge
+title: "bro judge"
 description: "Calibrated decision judge — decide smoke test over systemone + llm-judge"
 ---
 

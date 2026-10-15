@@ -1,5 +1,5 @@
 ---
-title: bro daemon
+title: "bro daemon"
 description: "Project-scoped supervisor — owns the drive pass long-term [up|status|down|run --every N]"
 ---
 

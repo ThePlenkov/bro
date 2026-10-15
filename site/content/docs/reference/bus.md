@@ -1,5 +1,5 @@
 ---
-title: bro bus
+title: "bro bus"
 description: "Local event bus — serve/publish/subscribe agent events by topic"
 ---
 

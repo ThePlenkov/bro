@@ -1,5 +1,5 @@
 ---
-title: bro sinks
+title: "bro sinks"
 description: "Outbound event sinks — list configured webhooks, send a probe [list|test]"
 ---
 

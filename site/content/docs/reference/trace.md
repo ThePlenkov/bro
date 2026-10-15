@@ -1,5 +1,5 @@
 ---
-title: bro trace
+title: "bro trace"
 description: "OTLP export of the session trace journals — export [--session|--dry-run|--json]"
 ---
 

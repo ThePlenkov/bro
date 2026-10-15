@@ -1,5 +1,5 @@
 ---
-title: bro next
+title: "bro next"
 description: "Claim + emit the top ready bead — the autonomous backlog loop"
 ---
 

@@ -1,5 +1,5 @@
 ---
-title: bro debt
+title: "bro debt"
 description: "Review-debt pipeline: collect|status|prs|list|mark|sync|set"
 ---
 

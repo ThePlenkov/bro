@@ -1,5 +1,5 @@
 ---
-title: bro plan
+title: "bro plan"
 description: "Plan contract: list kinds + schema versions, validate a file"
 ---
 

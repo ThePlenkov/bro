@@ -1,5 +1,5 @@
 ---
-title: bro spec
+title: "bro spec"
 description: "Spec-driven development policy: check|new (sdd.mode gates hooks)"
 ---
 

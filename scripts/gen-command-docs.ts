@@ -11,7 +11,7 @@
  * re-declared here.
  */
 import { execFileSync } from 'node:child_process'
-import { existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
@@ -98,16 +98,20 @@ const GROUP_LABELS: Record<string, string> = {
 }
 const groupOf = (r: Row): string => r.group ?? 'utility'
 
-const esc = (s: string): string => s.replace(/"/g, '\\"')
+// YAML double-quoted scalar — backslash first, then the delimiter,
+// then newlines (frontmatter must stay single-line)
+const esc = (s: string): string => s.replace(/\\/g, '\\\\').replace(/"/g, '\\"').replace(/\n/g, ' ')
+// prose single-line — a summary with a newline would split the entry
+const plain = (s: string): string => s.replace(/\s+/g, ' ').trim()
 
 function page(r: Row, visible: Set<string>): string {
   const lines: string[] = [
     '---',
-    `title: bro ${r.name}`,
+    `title: "${esc(`bro ${r.name}`)}"`,
     `description: "${esc(r.summary)}"`,
     '---',
     '',
-    `**\`bro ${r.name}\`** — ${r.summary}`,
+    `**\`bro ${r.name}\`** — ${plain(r.summary)}`,
     '',
     '| | |',
     '| --- | --- |',
@@ -179,6 +183,8 @@ for (const extra of onDisk) {
   if (check) {
     console.error(`stray: reference/${extra} — not in the registry`)
     drift++
+  } else {
+    rmSync(join(outDir, extra))
   }
 }
 if (check && drift > 0) {

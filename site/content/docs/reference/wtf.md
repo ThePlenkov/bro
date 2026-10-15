@@ -1,5 +1,5 @@
 ---
-title: bro wtf
+title: "bro wtf"
 description: "Alias for `retrospect capture` — vent, verbatim"
 ---
 

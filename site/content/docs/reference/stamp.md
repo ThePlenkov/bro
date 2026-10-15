@@ -1,5 +1,5 @@
 ---
-title: bro stamp
+title: "bro stamp"
 description: "Attribute shared-output writes — record/read the last build stamp"
 ---
 

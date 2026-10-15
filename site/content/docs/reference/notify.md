@@ -1,5 +1,5 @@
 ---
-title: bro notify
+title: "bro notify"
 description: "Drop an event into the session mailbox — drained into context by the next postTool probe"
 ---
 

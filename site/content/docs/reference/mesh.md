@@ -1,5 +1,5 @@
 ---
-title: bro mesh
+title: "bro mesh"
 description: "Inter-rig work federation: me|peers|pull|inbox|request|claim|done|accept|reject|wait (specs/mesh)"
 ---
 

@@ -1,5 +1,5 @@
 ---
-title: bro query
+title: "bro query"
 description: "Cross-provider GraphQL plan — `bro query <plan.toml>` or `kind = \"query\"` via `bro run`"
 ---
 

@@ -1,5 +1,5 @@
 ---
-title: bro status
+title: "bro status"
 description: "The compact live board — beads + fleet + drill + git [--json|--deep]"
 ---
 

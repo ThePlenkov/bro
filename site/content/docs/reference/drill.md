@@ -1,5 +1,5 @@
 ---
-title: bro drill
+title: "bro drill"
 description: "Scoped descent over beads: down|up|current|tree|list|report|distill"
 ---
 

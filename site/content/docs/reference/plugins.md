@@ -1,5 +1,5 @@
 ---
-title: bro plugins
+title: "bro plugins"
 description: "Plugin registry + client adapters: install|uninstall|list <client>"
 ---
 

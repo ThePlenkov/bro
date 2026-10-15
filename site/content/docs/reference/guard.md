@@ -1,5 +1,5 @@
 ---
-title: bro guard
+title: "bro guard"
 description: "Declarative prompt guards — list resolved declarations [--json]"
 ---
 

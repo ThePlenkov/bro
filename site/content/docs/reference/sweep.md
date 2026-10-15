@@ -1,5 +1,5 @@
 ---
-title: bro sweep
+title: "bro sweep"
 description: "Gated disposal for closed beads: status|distill|run — gate → archive → prune"
 ---
 

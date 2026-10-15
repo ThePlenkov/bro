@@ -1,5 +1,5 @@
 ---
-title: bro run
+title: "bro run"
 description: "Execute a plan file — `kind` routes to the owning plugin"
 ---
 

@@ -1,5 +1,5 @@
 ---
-title: bro loop
+title: "bro loop"
 description: "Autonomous backlog runner — claim → agent → gate → close → repeat"
 ---
 

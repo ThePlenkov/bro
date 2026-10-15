@@ -1,5 +1,5 @@
 ---
-title: bro telemetry
+title: "bro telemetry"
 description: "Hook + command latency report — perf journal rollup [--session <id>] [--json]"
 ---
 

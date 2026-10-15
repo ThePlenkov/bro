@@ -1,5 +1,5 @@
 ---
-title: bro stack
+title: "bro stack"
 description: "Stacked bead→worktree→PR chains: push|list|sync|publish|merge"
 ---
 

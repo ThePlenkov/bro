@@ -1,5 +1,5 @@
 ---
-title: bro provider
+title: "bro provider"
 description: "Claude-facing Messages-API plane — host listener + url|token|env wiring helpers"
 ---
 

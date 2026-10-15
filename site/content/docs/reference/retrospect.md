@@ -1,5 +1,5 @@
 ---
-title: bro retrospect
+title: "bro retrospect"
 description: "Self-correction: capture|record|status|list|schema"
 ---
 

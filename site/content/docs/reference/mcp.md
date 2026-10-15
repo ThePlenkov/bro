@@ -1,5 +1,5 @@
 ---
-title: bro mcp
+title: "bro mcp"
 description: "Stdio MCP server over the read planes — bro_<plane>_<read> tools"
 ---
 

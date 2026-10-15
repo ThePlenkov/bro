@@ -1,5 +1,5 @@
 ---
-title: bro rig
+title: "bro rig"
 description: "Rig freshness — main checkout tracks upstream, rebuilt + hotpatched: sync|status|watch|install"
 ---
 

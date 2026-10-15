@@ -1,5 +1,5 @@
 ---
-title: bro sync
+title: "bro sync"
 description: "Push/pull artifact dirs on refs/bro/data [--pull]"
 ---
 

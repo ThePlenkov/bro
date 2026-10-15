@@ -1,5 +1,5 @@
 ---
-title: bro goal
+title: "bro goal"
 description: "Session-scoped completion goal — set|status|pause|resume|clear; hooks remind + judge-verdict"
 ---
 

@@ -1,5 +1,5 @@
 ---
-title: bro setup
+title: "bro setup"
 description: "Wire bro into the current repo"
 ---
 

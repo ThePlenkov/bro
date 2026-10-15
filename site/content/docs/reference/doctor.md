@@ -1,5 +1,5 @@
 ---
-title: bro doctor
+title: "bro doctor"
 description: "Environment diagnostics: node, git, gh auth, bd, hooks, config, remotes [--json]"
 ---
 

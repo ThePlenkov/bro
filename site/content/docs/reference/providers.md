@@ -1,5 +1,5 @@
 ---
-title: bro providers
+title: "bro providers"
 description: "Provider registry — models catalog as <provider>/<model> [name…]"
 ---
 

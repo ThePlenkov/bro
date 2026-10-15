@@ -1,5 +1,5 @@
 ---
-title: bro cleanup
+title: "bro cleanup"
 description: "Delete local branches whose PR merged [--remote] [--dry-run]"
 ---
 

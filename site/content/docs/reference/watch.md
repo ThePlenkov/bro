@@ -1,5 +1,5 @@
 ---
-title: bro watch
+title: "bro watch"
 description: "Orchestrator heartbeat — mols × act gates × fleet snapshot [--once|--every N|--notify|--json|install|uninstall]"
 ---
 
