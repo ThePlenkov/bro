@@ -22,6 +22,14 @@ import type { DownOptions, DrillFrame, DrillRow, UpOptions, UpResult } from './t
 
 const DRILL_LABEL = 'drill'
 const PREVENTION_LABEL = 'prevention'
+/** bro-oy3k1.3 — the interrupter state: a waiting frame parks with a
+ *  wake predicate in its notes and leaves the active set until a wake
+ *  pops it back (stack-of-queues, LIFO). A label, never a process. */
+export const WAITING_LABEL = 'waiting'
+
+function isWaiting(row: DrillRow): boolean {
+  return row.labels?.includes(WAITING_LABEL) ?? false
+}
 
 function isDrill(row: DrillRow): boolean {
   return row.labels?.includes(DRILL_LABEL) ?? false
@@ -200,9 +208,10 @@ function pickLeaf(
   }
   // leaf = no open DRILL child. A drill frame with an open non-drill child
   // is still the active frame — close eligibility (any open child) is
-  // enforced separately in drillUp.
+  // enforced separately in drillUp. A waiting frame is suspended: the
+  // interrupter hands the session to the next active leaf.
   const leaves = rows.filter(
-    (r) => !(kids.get(r.id) ?? []).some((k) => isOpen(k) && isDrill(k))
+    (r) => !isWaiting(r) && !(kids.get(r.id) ?? []).some((k) => isOpen(k) && isDrill(k))
   )
   leaves.sort((a, b) => {
     const d = depthOf(b.id) - depthOf(a.id)
@@ -566,6 +575,52 @@ export function drillUp(opts: UpOptions): UpResult {
   return { closed: frame.id, preventionIds, ...rep }
 }
 
+/** The wait stack — open waiting frames, most-recently-touched first
+ *  (LIFO is the interrupter's resume order). */
+export function waitingFrames(): DrillRow[] {
+  return listDrills()
+    .filter((r) => isOpen(r) && isDrill(r) && isWaiting(r))
+    .sort((a, b) => (b.updated_at ?? '').localeCompare(a.updated_at ?? ''))
+}
+
+/** Suspend a frame: `waiting` label + the wake predicate in notes.
+ *  The predicate is provenance for the resuming session — free text,
+ *  never machine-evaluated (spec .1: parked = suspended with a resume
+ *  payload). Idempotent — parking twice appends nothing. */
+export function parkFrame(id: string | undefined, wake: string): DrillRow {
+  const frame = id === undefined ? currentFrame() : requireOpenDrill(id, '--id')
+  if (!frame) {
+    throw new Error('no open drill frame — nothing to park')
+  }
+  const row = taskStore().get<DrillRow>(frame.id)!
+  if (isWaiting(row)) {
+    return row
+  }
+  taskStore().update(frame.id, { 'add-label': WAITING_LABEL })
+  taskStore().note(frame.id, `WAKE: ${wake.trim()}`)
+  return { ...frame, labels: [...(frame.labels ?? []), WAITING_LABEL] }
+}
+
+/** Release a waiting frame: no id pops the stack top, an explicit id
+ *  must name a waiting frame (releasing an active one is a bug, not a
+ *  no-op — it would mask a mistyped resume). */
+export function wakeFrame(id?: string): DrillRow {
+  if (id !== undefined) {
+    const row = requireOpenDrill(id, 'wake')
+    if (!isWaiting(row)) {
+      throw new Error(`${id} is not waiting — nothing to release`)
+    }
+    taskStore().update(id, { 'remove-label': WAITING_LABEL })
+    return { ...row, labels: row.labels?.filter((l) => l !== WAITING_LABEL) }
+  }
+  const top = waitingFrames()[0]
+  if (!top) {
+    throw new Error('no waiting frames')
+  }
+  taskStore().update(top.id, { 'remove-label': WAITING_LABEL })
+  return { ...top, labels: top.labels?.filter((l) => l !== WAITING_LABEL) }
+}
+
 /** Root frames + rendered tree (indented, roots first). */
 export function drillTree(): string {
   const rows = listDrills()
@@ -576,8 +631,9 @@ export function drillTree(): string {
   const roots = rows.filter((r) => !parents.has(r.id))
   const lines: string[] = []
   const walk = (row: DrillRow, depth: number): void => {
-    const mark = isOpen(row) ? '●' : '○'
-    lines.push(`${'  '.repeat(depth)}${mark} ${row.id} ${row.title} [${row.status}]`)
+    const mark = isOpen(row) ? (isWaiting(row) ? '◌' : '●') : '○'
+    const state = isWaiting(row) ? 'waiting' : row.status
+    lines.push(`${'  '.repeat(depth)}${mark} ${row.id} ${row.title} [${state}]`)
     for (const kid of (kids.get(row.id) ?? []).filter(isDrill)) {
       walk(kid, depth + 1)
     }
