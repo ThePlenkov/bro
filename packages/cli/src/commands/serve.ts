@@ -31,6 +31,14 @@
  *   GET    /api/v1/agents       the agents board — per-backend registry
  *                               agents + occupancy + armed quota lanes +
  *                               session-plane discovery rows
+ *   GET    /api/v1/agents/<ref>/log?lines=N[&follow]
+ *                               one-shot text/plain tail of the agent's
+ *                               log; `follow` upgrades to text/event-stream
+ *                               (replay lands as data: frames, followLog
+ *                               notes as `event: note`). Bearer- or
+ *                               `?token=`gated like the writes — the log
+ *                               can carry secrets, loopback alone is not
+ *                               the auth boundary.
  *   GET    /api/v1/queue        the beads queue — claimed (in-progress)
  *                               work + ready depth (`bro status` shape)
  *   GET    /api/v1/ticks        supervision — the watch heartbeat file,
@@ -76,9 +84,12 @@ import {
   chmodSync,
   closeSync,
   existsSync,
+  fstatSync,
   linkSync,
   mkdirSync,
+  openSync,
   readFileSync,
+  readSync,
   renameSync,
   rmSync,
   statSync,
@@ -119,11 +130,13 @@ import {
   collectAgentBackends,
   discoverSessions,
   findAgent,
+  followLog,
   occupancyOf,
   sessionQuotaViewsOf,
   SpawnInputError,
   spawnStepAgent,
   stopAgent,
+  tailLines,
   type AgentBackendPlane,
   type DiscoveredAgentSession,
   type FleetOccupancy,
@@ -389,6 +402,7 @@ const ROUTES = [
   'GET /api/v1/mailbox',
   'POST /api/v1/agents',
   'GET /api/v1/agents/<ref>',
+  'GET /api/v1/agents/<ref>/log',
   'DELETE /api/v1/agents/<ref>',
   'POST /api/v1/webhooks/github',
   'ALL /v1/*',
@@ -817,6 +831,13 @@ function bearerMatch(header: string | undefined, token: string): boolean {
   // is case-insensitive (RFC 7235); the token compare stays exact
   const presented =
     header?.slice(0, 7).toLowerCase() === 'bearer ' ? header.slice(7) : ''
+  return tokenEq(presented, token)
+}
+
+/** Constant-time token compare — the shared core of bearerMatch and
+ *  the `?token=` SSE fallback. An empty presented token fails closed:
+ *  `?token=` on a log route must never validate. */
+function tokenEq(presented: string, token: string): boolean {
   const a = Buffer.from(presented, 'utf8')
   const b = Buffer.from(token, 'utf8')
   return a.length === b.length && a.length > 0 && timingSafeEqual(a, b)
@@ -946,6 +967,9 @@ async function handleRequest(
     if (await routeProvider(req, res, url.pathname, deps, token, statePathHint)) {
       return
     }
+    if (await routeAgentLog(req, res, url, deps, token, statePathHint)) {
+      return
+    }
     const wantsBody =
       req.method === 'POST' || req.method === 'PUT' || req.method === 'PATCH'
     if (!webhookRoute && WRITE_METHODS.has(req.method ?? 'GET')) {
@@ -1010,6 +1034,173 @@ async function routeProvider(
   }
   await deps.provider(req, res)
   return true
+}
+
+/** `GET /api/v1/agents/<ref>/log` — the SSE leg sits below the
+ *  ServeResponse envelope: `follow` upgrades the response and pipes
+ *  for as long as the client stays. The plain tail could fit the
+ *  envelope — but BOTH legs stay here: route()/routeAgentsBranch
+ *  carry no request headers or token, so the credential check would
+ *  be unenforceable inside routeRequest. The divergence is deliberate
+ *  and confined to this function. Auth is write-grade: log payloads
+ *  can carry secrets, so the loopback bind is the transport boundary,
+ *  not the auth one. Credentials: Bearer
+ *  like the writes, or `?token=` for EventSource clients that can't
+ *  set headers — the query-param fallback is a known CWE-598 tradeoff
+ *  (URL-borne secrets can land in access logs/browser history; this
+ *  server keeps no request log and serves loopback only, and the
+ *  token itself is the 0600 serve.json file a same-UID process can
+ *  already read). True once the path matches — any verdict
+ *  (401/404/405/422 or the stream); false lets other paths through. */
+async function routeAgentLog(
+  req: IncomingMessage,
+  res: ServerResponse,
+  url: URL,
+  deps: ServeDeps,
+  token: string,
+  statePathHint: string
+): Promise<boolean> {
+  const m = /^\/api\/v1\/agents\/([^/]+)\/log$/.exec(url.pathname)
+  if (m === null) {
+    return false
+  }
+  if (req.method !== 'GET') {
+    send(res, 405, { error: 'method not allowed' })
+    return true
+  }
+  const credentialed =
+    bearerMatch(req.headers.authorization, token) ||
+    tokenEq(url.searchParams.get('token') ?? '', token)
+  if (!credentialed) {
+    send(
+      res,
+      401,
+      { error: `session token required — read it from ${statePathHint}` },
+      { headers: { 'www-authenticate': 'Bearer' } }
+    )
+    return true
+  }
+  let ref: string
+  try {
+    ref = parseRef(m[1]!)
+  } catch (err) {
+    // keep the refusal local — a bad ref answers 400 here rather than
+    // escaping to handleRequest's catch, which would try to write an
+    // error body after this route's stream may already have started
+    if (err instanceof HttpError) {
+      send(res, err.status, { error: err.message })
+      return true
+    }
+    throw err
+  }
+  const { hit, degraded } = await deps.find(ref)
+  if (!hit) {
+    send(res, 404, missBody(ref, degraded))
+    return true
+  }
+  const log = logTarget(hit.agent)
+  if ('status' in log) {
+    send(res, log.status, { error: log.error })
+    return true
+  }
+  const replay = readLogTail(log.path)
+  if (!url.searchParams.has('follow')) {
+    send(res, 200, tailLines(replay.text, logLineCount(url)), {
+      contentType: 'text/plain; charset=utf-8',
+    })
+    return true
+  }
+  res.writeHead(200, {
+    'content-type': 'text/event-stream; charset=utf-8',
+    'cache-control': 'no-cache',
+    connection: 'keep-alive',
+  })
+  const sse = (chunk: string) => {
+    if (res.writableEnded || res.destroyed) {
+      return
+    }
+    // drop the trailing newline BEFORE fanning \n out to `data: ` —
+    // otherwise a newline-terminated chunk ends the frame on an empty
+    // `data:` field, polluting the client's event payload
+    const trimmed = chunk.replace(/\n$/, '')
+    res.write(`data: ${trimmed.replace(/\n/g, '\ndata: ')}\n\n`)
+  }
+  sse(tailLines(replay.text, logLineCount(url)))
+  const handle = followLog(
+    log.path,
+    {
+      data: sse,
+      note: (line) => {
+        if (!res.writableEnded && !res.destroyed) {
+          res.write(`event: note\ndata: ${line}\n\n`)
+        }
+      },
+    },
+    // replay.byteLength is the TRUE file size at snapshot — followLog
+    // offsets from there, so appends after the bounded tail read still
+    // stream and never get skipped
+    { startOffset: replay.byteLength }
+  )
+  res.on('close', () => handle.stop())
+  return true
+}
+
+/** The replay bound for one leg — default the CLI's 50, a non-integer
+ *  or negative `lines=` falls back rather than 400ing (the CLI's own
+ *  flag parser is the strict surface). */
+function logLineCount(url: URL): number {
+  const n = Number(url.searchParams.get('lines') ?? '50')
+  return Number.isInteger(n) && n >= 0 ? n : 50
+}
+
+/** Cap on the replay read — a log's tail-N never needs the whole file,
+ *  and an unbounded readFileSync on a fat agent log would block the
+ *  event loop for every concurrent client. Generous next to the
+ *  janitor's own tail-cap. */
+const LOG_READ_CAP = 8 * 1024 * 1024
+
+/** Read only the file's last LOG_READ_CAP bytes — plus the byte length
+ *  of the WHOLE file at snapshot time, the follow offset that pins the
+ *  replay boundary (never a second statSync, which could land past a
+ *  janitor truncation). `text` keeps a torn head on a truncated read —
+ *  tailLines drops the first partial line below. */
+function readLogTail(path: string): { text: string; byteLength: number } {
+  let fd: number | undefined
+  try {
+    fd = openSync(path, 'r')
+    const size = fstatSync(fd).size
+    const from = Math.max(0, size - LOG_READ_CAP)
+    const buf = Buffer.allocUnsafe(size - from)
+    const n = readSync(fd, buf, 0, buf.length, from)
+    let text = buf.subarray(0, n).toString('utf8')
+    // a capped read starts mid-line — drop the torn head so clients
+    // never see a log fragment that begins halfway through a byte run
+    if (from > 0) {
+      text = text.slice(text.indexOf('\n') + 1)
+    }
+    return { text, byteLength: size }
+  } finally {
+    if (fd !== undefined) {
+      closeSync(fd)
+    }
+  }
+}
+
+/** Where the agent's log lives — a path to stream, or the refusal the
+ *  route answers (remote refs name the pointer, missing files 404) —
+ *  mirrors `bro fleet agents log`'s shapes. */
+function logTarget(a: AgentInfo): { path: string } | { status: number; error: string } {
+  if (a.log === undefined) {
+    return { status: 404, error: `agent ${a.id} has no recorded log` }
+  }
+  // a remote backend records its attach pointer, not a file — name it
+  if (/^[a-zA-Z][a-zA-Z0-9+.-]*:\/\//.test(a.log)) {
+    return { status: 422, error: `agent ${a.id}'s log is remote — ${a.log}` }
+  }
+  if (!existsSync(a.log)) {
+    return { status: 404, error: `log missing: ${a.log} — reaped or never written` }
+  }
+  return { path: a.log }
 }
 
 export function createServeHandler(

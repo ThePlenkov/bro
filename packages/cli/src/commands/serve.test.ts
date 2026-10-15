@@ -1,8 +1,9 @@
 import { describe, test } from 'node:test'
 import assert from 'node:assert/strict'
-import { existsSync, mkdirSync, rmSync, statSync, utimesSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, rmSync, statSync, utimesSync, writeFileSync } from 'node:fs'
 import { createServer, request, type IncomingMessage } from 'node:http'
 import type { AddressInfo } from 'node:net'
+import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { Readable } from 'node:stream'
 import { lockHolderPid, SpawnError, type AgentConnector, type AgentInfo } from '@broject/core'
@@ -594,6 +595,102 @@ describe('serve state discovery', () => {
 })
 
 describe('serve handler over a real socket', () => {
+  test('GET /api/v1/agents/<ref>/log — token-gated one-shot tail and SSE follow', async () => {
+    const TOKEN = 'test-session-token'
+    const auth = { authorization: `Bearer ${TOKEN}` }
+    const dir = mkdtempSync(join(tmpdir(), 'bro-serve-log-'))
+    const logPath = join(dir, 'agent.log')
+    writeFileSync(logPath, 'one\ntwo\nthree\n')
+    const logged: AgentInfo = { ...fakeAgent, log: logPath }
+    const logDeps = deps({
+      find: async (ref) =>
+        ref === logged.id
+          ? { hit: { conn: fakeConn, agent: logged }, degraded: [] }
+          : { degraded: [] },
+    })
+    const server = createServer(
+      createServeHandler(logDeps, { dir: '/repo', startedAt: 't0' }, TOKEN)
+    )
+    await new Promise<void>((r) => server.listen(0, '127.0.0.1', r))
+    const port = (server.address() as AddressInfo).port
+    const base = `http://127.0.0.1:${port}`
+    try {
+      const path = `/api/v1/agents/${logged.id}/log`
+      // write-grade credential — unauthenticated reads 401
+      assert.equal((await fetch(`${base}${path}`)).status, 401)
+      assert.equal(
+        (await fetch(`${base}${path}?token=nope`)).status,
+        401,
+        'a wrong ?token= fails closed'
+      )
+
+      // one-shot text/plain tail — ?lines=N bounds the replay
+      const tail = await fetch(`${base}${path}?lines=2`, { headers: auth })
+      assert.equal(tail.status, 200)
+      assert.match(tail.headers.get('content-type') ?? '', /text\/plain/)
+      assert.equal(await tail.text(), 'two\nthree\n')
+
+      // the ?token= fallback authenticates EventSource-grade clients
+      const viaParam = await fetch(`${base}${path}?lines=1&token=${TOKEN}`)
+      assert.equal(viaParam.status, 200)
+      assert.equal(await viaParam.text(), 'three\n')
+
+      // ?follow — replay lands as data: frames, then live appends
+      const follow = await fetch(`${base}${path}?lines=1&follow`, { headers: auth })
+      assert.equal(follow.status, 200)
+      assert.match(follow.headers.get('content-type') ?? '', /text\/event-stream/)
+      const reader = follow.body!.getReader()
+      const read = async (): Promise<string> =>
+        new TextDecoder().decode((await reader.read()).value)
+      assert.match(await read(), /^data: three/)
+      writeFileSync(logPath, 'one\ntwo\nthree\nfour\n', 'utf8')
+      let appended = ''
+      for (let i = 0; i < 20 && !appended.includes('four'); i++) {
+        appended += await read()
+      }
+      assert.match(appended, /data: four/)
+      await reader.cancel()
+    } finally {
+      await new Promise<void>((r) => server.close(() => r()))
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  test('GET /api/v1/agents/<ref>/log — 404 unknown/missing, 422 remote ref', async () => {
+    const TOKEN = 'test-session-token'
+    const auth = { authorization: `Bearer ${TOKEN}` }
+    const remote: AgentInfo = { ...fakeAgent, id: 'remote-bb22', log: 'https://x.example/s/1' }
+    const missing: AgentInfo = { ...fakeAgent, id: 'gone-cc33', log: '/no/such/log' }
+    const byRef: Record<string, AgentInfo> = { 'remote-bb22': remote, 'gone-cc33': missing }
+    const d = deps({
+      find: async (ref) => {
+        const agent = byRef[ref]
+        return agent === undefined ? { degraded: [] } : { hit: { conn: fakeConn, agent }, degraded: [] }
+      },
+    })
+    const server = createServer(createServeHandler(d, { dir: '/repo', startedAt: 't0' }, TOKEN))
+    await new Promise<void>((r) => server.listen(0, '127.0.0.1', r))
+    const port = (server.address() as AddressInfo).port
+    const base = `http://127.0.0.1:${port}`
+    try {
+      const hit = async (ref: string) =>
+        fetch(`${base}/api/v1/agents/${ref}/log`, { headers: auth })
+      assert.equal((await hit('nobody')).status, 404)
+      const rem = await hit('remote-bb22')
+      assert.equal(rem.status, 422)
+      assert.match((await rem.json() as { error: string }).error, /remote — https:\/\/x\.example/)
+      assert.equal((await hit('gone-cc33')).status, 404)
+      // non-GET on the log route is a flat 405
+      const post = await fetch(`${base}/api/v1/agents/${fakeAgent.id}/log`, {
+        method: 'POST',
+        headers: auth,
+      })
+      assert.equal(post.status, 405)
+    } finally {
+      await new Promise<void>((r) => server.close(() => r()))
+    }
+  })
+
   test('health, JSON envelope, 413 cap, and bad-JSON 400 all hold on the wire', async () => {
     const TOKEN = 'test-session-token'
     const auth = { authorization: `Bearer ${TOKEN}` }
