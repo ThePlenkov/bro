@@ -379,7 +379,6 @@ async function recordBlockedVerdict(
   }
 }
 
-<<<<<<< HEAD
 // --- detached wait -------------------------------------------------------------
 
 /** Cap the per-PR wait log — append-only state in a .git dir still
