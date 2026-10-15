@@ -2,6 +2,7 @@ import { describe, test } from 'node:test'
 import assert from 'node:assert/strict'
 import {
   appendFileSync,
+  existsSync,
   mkdirSync,
   mkdtempSync,
   readFileSync,
@@ -364,12 +365,46 @@ describe('bro agents up <step>', () => {
     }
   })
 
-  test('no worktree names the fix instead of guessing', async () => {
-    const fx = fixture([{ id: 'fx-1', status: 'open' }])
+  test('spawn owns enter: no worktree → minted, claimed, spawned as one transition', async () => {
+    // rig bro-oy3k1.4 — `agents up` performs enter+claim+spawn under the
+    // registry lock; the old `no worktree` refusal is gone
+    const fx = fixture([{ id: 'fx-1', status: 'open', title: 'step one' }])
     try {
-      const r = await agents(['up', 'fx-1', '--beads-dir', fx.beads])
+      const r = await agents([
+        'up', 'fx-1', '--beads-dir', fx.beads,
+        '--prompt-file', fx.promptFile(LONG_RUN),
+      ])
+      assert.equal(r.code, 0, r.err.join('\n'))
+      // the conventional sibling was minted on branch work/fx-1
+      const wt = join(fx.root, 'main--fx-1')
+      assert.ok(existsSync(wt), 'spawn minted the conventional worktree')
+      assert.equal(
+        spawnSync('git', ['-C', wt, 'branch', '--show-current']).stdout.toString().trim(),
+        'work/fx-1'
+      )
+      // the claim landed and the registry pins the minted path
+      assert.equal(readBeads(fx.db)[0]!.status, 'in_progress')
+      assert.equal(readAgentRegistry(fx.main)['fx-1']!.worktree, wt)
+      await agents(['down', 'fx-1'])
+    } finally {
+      fx.restore()
+    }
+  })
+
+  test('a foreign claim refuses before any worktree is minted', async () => {
+    const fx = fixture([{ id: 'fx-1', status: 'in_progress', assignee: 'other-actor' }])
+    try {
+      const r = await agents([
+        'up', 'fx-1', '--beads-dir', fx.beads,
+        '--prompt-file', fx.promptFile(LONG_RUN),
+      ])
       assert.equal(r.code, 1)
-      assert.match(r.err.join('\n'), /no worktree for fx-1.*bro work enter fx-1/)
+      assert.match(r.err.join('\n'), /claimed outside the agent registry/)
+      assert.equal(
+        existsSync(join(fx.root, 'main--fx-1')),
+        false,
+        'refusal must not leave a half-entered worktree'
+      )
     } finally {
       fx.restore()
     }

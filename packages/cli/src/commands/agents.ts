@@ -42,7 +42,7 @@
  * The respawn semantics live in the connector (spawn dedup correlates
  * the beads claim with the registry's liveness); this command only
  * resolves the SpawnSpec — worktree (recorded → <repo>--<step>
- * convention → --worktree), prompt (--prompt-file → the dead agent's
+ * convention → spawn-owns-enter → --worktree), prompt (--prompt-file → the dead agent's
  * stored prompt → the bead's own text), and the pinned shared store.
  */
 import {
@@ -68,6 +68,7 @@ import {
   type AgentInfo,
   type AgentState,
   type DiscoveredSession,
+  type SpawnSpec,
 } from '@broject/core'
 import type { AcpSeam, FetchFn } from '@broject/providers'
 import { beadsDir } from '@broject/convoy'
@@ -453,39 +454,46 @@ async function supervisorVerb(conn: AgentConnector, verb: 'up' | 'down'): Promis
 
 /** The step's worktree: explicit --worktree → the registry's recorded
  *  path (a respawn reuses the dead agent's checkout) → the
- *  `<repo>--<step>` sibling convention. Missing = the caller never
- *  entered one — the error names the command, not a guess. Throws so
- *  `bro serve` can map it to a 4xx; the command layer renders via die. */
+ *  `<repo>--<step>` sibling convention → the spawn-owns-enter intent
+ *  (rig bro-oy3k1.4: `enter` tells prepareSpawn to mint the worktree
+ *  under the registry lock, same transition as the claim). */
 function resolveWorktree(
   dir: string,
   molStep: string,
   explicit: string | undefined,
   backend: string
-): string {
+): { path: string; enter?: NonNullable<SpawnSpec['enter']> } {
   if (explicit !== undefined) {
-    return explicit
+    return { path: explicit }
   }
   // recorded state is the resolving backend's — `--connector x` must not
   // inherit backend-y's worktree/prompt for the same step
   const entry = readAgentRegistry(dir)[molStep]
   const recorded = entry?.backend === backend ? entry.worktree : undefined
   if (typeof recorded === 'string' && existsSync(recorded)) {
-    return recorded
+    return { path: recorded }
   }
-  const conventional = worktreePathFor(mainWorktree().path, molStep)
+  const main = mainWorktree()
+  const conventional = worktreePathFor(main.path, molStep)
   if (existsSync(conventional)) {
-    return conventional
+    return { path: conventional }
   }
   // a remote-only backend needs no local checkout — the copilot
   // connector reads repoRoot only for the origin remote it dispatches
   // against, and the caller's repo IS that remote's checkout
   if (backend === 'copilot') {
-    return dir
+    return { path: dir }
   }
-  throw new SpawnInputError(
-    `no worktree for ${molStep} — run \`bro work enter ${molStep}\` first ` +
-      `(or pass --worktree <path>)`
-  )
+  return {
+    path: conventional,
+    enter: {
+      branch: `work/${molStep}`,
+      base: main.branch ?? main.head,
+      mainPath: main.path,
+      mainBranch: main.branch,
+      mainHead: main.head,
+    },
+  }
 }
 
 /** The spawn prompt: --prompt-file → the previous run's stored prompt
@@ -604,8 +612,9 @@ export function spawnStepAgent(
     env
   )
   const beads = req.beadsDir ?? beadsDir()
-  const repoRoot = resolveWorktree(dir, req.molStep, req.worktree, conn.name)
-  if (!existsSync(repoRoot)) {
+  const resolved = resolveWorktree(dir, req.molStep, req.worktree, conn.name)
+  const repoRoot = resolved.path
+  if (resolved.enter === undefined && !existsSync(repoRoot)) {
     throw new SpawnInputError(`worktree ${repoRoot} does not exist`)
   }
   const prompt = req.prompt ?? resolvePrompt(dir, beads, req.molStep, req.promptFile, conn.name)
@@ -653,6 +662,7 @@ export function spawnStepAgent(
         model: pick.model,
         class: route?.class,
         worker: pick.worker,
+        enter: resolved.enter,
       })
     )
   })

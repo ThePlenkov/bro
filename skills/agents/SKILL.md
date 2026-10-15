@@ -44,6 +44,10 @@ cached count that fails closed when stale.
 flags on `up`: `--worktree <path>` (overrides the
 recorded/conventional `<repo>--<step>` lookup), `--prompt-file <file>`
 (overrides the stored prompt / bead text), `--beads-dir <dir>`.
+With no worktree to resolve, `up` mints the conventional sibling on
+branch `work/<step>` inside the spawn transition — enter, claim, and
+spawn land as one step under the registry lock, so a refusal leaves no
+half-entered tree (the remote-only copilot backend skips this).
 
 ## Policy
 
