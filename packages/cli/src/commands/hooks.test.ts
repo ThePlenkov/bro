@@ -3,6 +3,7 @@ import assert from 'node:assert/strict'
 import { mkdirSync, utimesSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { classifyArmCommand, classifyArmCommands, classifyExecCommand, classifySkillMutation, isSelfToolCommand, readArmed, readCodexInstructions, armDetail, otherLiveWork, traceEntry } from './hooks.ts'
+import { procStat } from '@broject/core'
 import { tmpDir } from './testrepo.ts'
 
 describe('readCodexInstructions', () => {
@@ -318,5 +319,25 @@ describe('otherLiveWork', () => {
       ['unrelated-file', 'x'],
     ])
     assert.equal(otherLiveWork(dir, 'self-session').length, 0)
+  })
+
+  test("a marker owned by this agent's process tree is suppressed", () => {
+    // bro-7022c: restart/rehydration rotates the session id but the
+    // owner tag still names the same agent root — own work, not foreign
+    const st = procStat(process.pid)
+    assert.ok(st)
+    const self = { pid: process.pid, start: st.start }
+    const dir = markerDir([['rotated.work', `${Date.now()} ${process.pid} ${st.start}\nbro-mine`]])
+    assert.equal(otherLiveWork(dir, 'new-session', Date.now(), self).length, 0)
+  })
+
+  test('a marker owned by a foreign live process still reports', () => {
+    const init = procStat(1) // pid 1 is always live and never this agent
+    const st = procStat(process.pid)
+    assert.ok(init && st)
+    const dir = markerDir([['foreign.work', `${Date.now()} 1 ${init.start}\nbro-theirs`]])
+    const found = otherLiveWork(dir, 'self', Date.now(), { pid: process.pid, start: st.start })
+    assert.equal(found.length, 1)
+    assert.equal(found[0]!.detail, 'bro-theirs')
   })
 })

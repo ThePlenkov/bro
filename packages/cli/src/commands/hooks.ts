@@ -74,8 +74,13 @@ import {
   unrefPendingChildren,
   withFileLock,
 } from '@broject/core'
-import type { ProbeReporter, ProbeResult, ProbeTiming } from '@broject/core'
-import { markerLive, ownerTag } from './proc-owner.ts'
+import type {
+  ConnectorCtx,
+  ProbeReporter,
+  ProbeResult,
+  ProbeTiming,
+} from '@broject/core'
+import { agentOwner, markerLive, markerOwner, ownerTag } from './proc-owner.ts'
 import { runGuards, type GuardConfig, type GuardJudgeInput } from '@broject/guard'
 import { GUARD_PROBES } from '../guard-probes.ts'
 import { appendRow, judgeConfig, judgeFacade } from '@broject/judge'
@@ -483,7 +488,8 @@ export function readArmed(sessionId: string): Set<string> {
 export function otherLiveWork(
   dir: string,
   selfId: string,
-  now: number = Date.now()
+  now: number = Date.now(),
+  selfOwner: { pid: number; start: string } | null = agentOwner()
 ): Array<{ session: string; detail: string; ageMs: number }> {
   const out: Array<{ session: string; detail: string; ageMs: number }> = []
   let files: string[]
@@ -502,6 +508,18 @@ export function otherLiveWork(
       const st = statSync(path)
       const lines = readFileSync(path, 'utf8').split('\n')
       if (!markerLive(lines[0], st.mtimeMs, LIVE_SESSION_MS, now)) {
+        continue
+      }
+      // a marker owned by THIS agent's process tree is own work under a
+      // rotated session id (restart/rehydrate) — not a foreign session
+      // (bro-7022c)
+      const owner = markerOwner(lines[0])
+      if (
+        selfOwner !== null &&
+        owner !== null &&
+        owner.pid === selfOwner.pid &&
+        owner.start === selfOwner.start
+      ) {
         continue
       }
       const detail = lines[1]?.trim() ?? ''
@@ -528,6 +546,13 @@ function formatAge(ageMs: number): string {
   return `${Math.round(ageMs / 3_600_000)}h ago`
 }
 
+/** Connector ctx for hook events — sessionId plus this process's
+ *  agent-root owner so claim probes treat markers stamped by the same
+ *  agent tree under a rotated session id as own work (bro-7022c). */
+function hookCtx(sessionId: string): ConnectorCtx {
+  return { dir: process.cwd(), sessionId, owner: agentOwner() }
+}
+
 function liveSessionLines(dir: string, selfId: string): string[] {
   return otherLiveWork(dir, selfId).map((w) => {
     const on = w.detail ? ` on ${w.detail}` : ''
@@ -546,7 +571,7 @@ async function parallelLines(sessionId: string, onProbe?: ProbeReporter): Promis
     if (dir) {
       parts.push(...liveSessionLines(dir, sessionId))
     }
-    const work = await parallelWorkProbe({ dir: process.cwd(), sessionId }, onProbe)
+    const work = await parallelWorkProbe(hookCtx(sessionId), onProbe)
     parts.push(...work.lines)
     if (parts.length === 0) {
       return { lines: [], settled: work.settled }
@@ -1136,7 +1161,7 @@ async function emitSessionContext(
   // keeps the hook total at the slowest single probe, not their sum
   // (spec: specs/bro-wc0i6.md)
   const [start, par, guards] = await Promise.all([
-    sessionStartProbe({ dir: process.cwd(), sessionId }, probeReporter(cliEvent, 'sessionStart')),
+    sessionStartProbe(hookCtx(sessionId), probeReporter(cliEvent, 'sessionStart')),
     parallelLines(sessionId, probeReporter(cliEvent, 'parallelWork')),
     guardLines('session-start', sessionId, async () => {
       const dir = process.cwd()
@@ -1192,14 +1217,14 @@ async function emitPromptContext(input: HookInput): Promise<void> {
     hydrate
       ? Promise.all([
           sessionStartProbe(
-            { dir: process.cwd(), sessionId },
+            hookCtx(sessionId),
             probeReporter('prompt-submit', 'sessionStart')
           ),
           parallelLines(sessionId, probeReporter('prompt-submit', 'parallelWork')),
         ])
       : undefined,
     promptContextLines(
-      { dir: process.cwd(), sessionId },
+      hookCtx(sessionId),
       prompt,
       probeReporter('prompt-submit', 'promptSubmit')
     ),
@@ -1283,10 +1308,7 @@ async function emitPostTool(input: HookInput): Promise<void> {
   // still a delivery tick for a drained mailbox (notify). Guards read
   // the same journaled tail — one parallel flight with the probes
   const [postLines, guards] = await Promise.all([
-    postToolLines(
-      { dir: process.cwd(), sessionId },
-      probeReporter('post-tool', 'postTool')
-    ),
+    postToolLines(hookCtx(sessionId), probeReporter('post-tool', 'postTool')),
     // guards on post-tool: match sees the journaled trace tail (this
     // landing included — journalTrace ran first), state sees live repo
     guardLines('post-tool', sessionId, async () => {
@@ -1355,7 +1377,7 @@ async function emitStopGateBody(sessionId: string, goalP: Promise<string[]>): Pr
   // a block their lines are dropped but the verdict rows still journal.
   const [goal, contributions, guards] = await Promise.all([
     goalP,
-    stopGateContributions({ dir: process.cwd(), sessionId }, probeReporter('stop', 'stopGate')).then(
+    stopGateContributions(hookCtx(sessionId), probeReporter('stop', 'stopGate')).then(
       (rows) => rows.sort((a, b) => rank(a.aspect) - rank(b.aspect))
     ),
     guardLines('stop', sessionId, async () => {
@@ -1398,7 +1420,7 @@ async function emitPreTool(input: HookInput): Promise<void> {
   const sessionId = typeof input.session_id === 'string' ? input.session_id : ''
   const tool = typeof input.tool_name === 'string' ? input.tool_name : ''
   const verdicts = await preToolVerdicts(
-    { dir: process.cwd(), sessionId },
+    hookCtx(sessionId),
     tool,
     (input.tool_input ?? {}) as Record<string, unknown>
   )
