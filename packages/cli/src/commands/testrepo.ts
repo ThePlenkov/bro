@@ -1156,7 +1156,7 @@ export function hostFixture(prefix: string, opts: { loopAgent?: boolean } = {}):
 export function e2eRepo(
   prefix: string,
   rows: Array<Record<string, unknown>> = []
-): { main: string; db: string; env: NodeJS.ProcessEnv } {
+): { main: string; db: string; env: Record<string, string> } {
   const { root, main } = initRepo(prefix)
   const { binDir, db } = installFakeBd(root, rows)
   return {
