@@ -590,6 +590,9 @@ export function waitingFrames(): DrillRow[] {
  *  never machine-evaluated (spec .1: parked = suspended with a resume
  *  payload). Idempotent — parking twice appends nothing. */
 export function parkFrame(id: string | undefined, wake: string): DrillRow {
+  if (!wake.trim()) {
+    throw new Error('park requires a wake predicate — a parked frame owes a resume condition')
+  }
   const frame = id === undefined ? currentFrame() : requireOpenDrill(id, '--id')
   if (!frame) {
     throw new Error('no open drill frame — nothing to park')
