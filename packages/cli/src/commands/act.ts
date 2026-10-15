@@ -252,53 +252,7 @@ async function cmdWait(argv: string[]): Promise<void> {
       })
       return { state, gate: evaluateExitGate(state) }
     },
-    {
-      intervalMs: interval * 1000,
-      timeoutMs: timeout * 60_000,
-      // a github:* bus subscription pokes the poll loop early (spec
-      // bro-huy5o.7) — broker down arms nothing and the timer rules
-      wake: () => githubPrWake(process.cwd(), t.pr),
-      // a session-bound watcher that dies with the turn leaves a marker —
-      // the session-start hook flags the stale promise (bro-97lk)
-      watch: {
-        dir: process.cwd(),
-        pr: t.pr,
-        link: rev.prLink(t.repo, t.pr),
-        merge: argv.includes('--merge'),
-        cleanup: argv.includes('--cleanup'),
-        workdir: process.cwd(),
-        bead: flag(argv, '--bead'),
-        timeoutMin: timeout,
-      },
-      onPoll: (s, g) =>
-        console.error(
-          `act wait ${rev.prLink(t.repo, s.pr)}: threads=${g.open_threads} ci=${g.ci_pending}+${g.ci_failing}f reviewers=${g.reviewers_pending} sast=${g.sast_pending}`
-        ),
-      onError: (err, n) =>
-        console.error(
-          `act wait ${rev.prLink(t.repo, t.pr)}: fetch failed (${n}) — ${err instanceof Error ? err.message : String(err)}`
-        ),
-      // the "Update branch" button as a wait step: BEHIND + mergeable is
-      // a state to fix, not to sit on — conflicts still settle for a human
-      updateBranch: (s) => {
-        const ok = rev.updateBranch(t, s.headSha)
-        console.error(
-          `act wait ${rev.prLink(t.repo, t.pr)}: update-branch ${ok ? 'pushed a new head' : 'refused'}`
-        )
-        // the pushed head obsoletes this PR's feed entry — the next
-        // poll must fetch it, not re-serve the pre-update state
-        if (ok) {
-          cache?.invalidate(t)
-        }
-        emitLifecycle(process.cwd(), {
-          kind: 'gate',
-          pr: t.pr,
-          to: ok ? 'updated' : 'blocked',
-          detail: { via: 'act', action: 'update', sha: s.headSha },
-        })
-        return ok
-      },
-    }
+    waitOpts(rev, t, argv, { interval, timeout }, cache)
   )
   // the settled wait is one gate verdict — timeout, blocked, externally
   // settled, or green. Poll snapshots inside waitForGate are noise;
@@ -326,6 +280,79 @@ async function cmdWait(argv: string[]): Promise<void> {
       console.log(`wait: timed out after ${timeout}m — still pending`)
     }
   }
+  await settleWait(argv, rev, t, res, timeout)
+}
+
+/** The poll loop's knobs — cadence, wake subscription, the session
+ *  marker, and the callbacks. `updateBranch` is the "Update branch"
+ *  button as a wait step: BEHIND + mergeable is a state to fix, not
+ *  to sit on — conflicts still settle for a human. */
+function waitOpts(
+  rev: ReviewFacade,
+  t: PrTarget,
+  argv: string[],
+  timing: { interval: number; timeout: number },
+  cache: ReturnType<typeof prStateCache>
+): Parameters<typeof waitForGate>[1] {
+  return {
+    intervalMs: timing.interval * 1000,
+    timeoutMs: timing.timeout * 60_000,
+    // a github:* bus subscription pokes the poll loop early (spec
+    // bro-huy5o.7) — broker down arms nothing and the timer rules
+    wake: () => githubPrWake(process.cwd(), t.pr),
+    // a session-bound watcher that dies with the turn leaves a marker —
+    // the session-start hook flags the stale promise (bro-97lk)
+    watch: {
+      dir: process.cwd(),
+      pr: t.pr,
+      link: rev.prLink(t.repo, t.pr),
+      merge: argv.includes('--merge'),
+      cleanup: argv.includes('--cleanup'),
+      workdir: process.cwd(),
+      bead: flag(argv, '--bead'),
+      timeoutMin: timing.timeout,
+    },
+    onPoll: (s, g) =>
+      console.error(
+        `act wait ${rev.prLink(t.repo, s.pr)}: threads=${g.open_threads} ci=${g.ci_pending}+${g.ci_failing}f reviewers=${g.reviewers_pending} sast=${g.sast_pending}`
+      ),
+    onError: (err, n) =>
+      console.error(
+        `act wait ${rev.prLink(t.repo, t.pr)}: fetch failed (${n}) — ${err instanceof Error ? err.message : String(err)}`
+      ),
+    updateBranch: (s) => {
+      const ok = rev.updateBranch(t, s.headSha)
+      console.error(
+        `act wait ${rev.prLink(t.repo, t.pr)}: update-branch ${ok ? 'pushed a new head' : 'refused'}`
+      )
+      // the pushed head obsoletes this PR's feed entry — the next
+      // poll must fetch it, not re-serve the pre-update state
+      if (ok) {
+        cache?.invalidate(t)
+      }
+      emitLifecycle(process.cwd(), {
+        kind: 'gate',
+        pr: t.pr,
+        to: ok ? 'updated' : 'blocked',
+        detail: { via: 'act', action: 'update', sha: s.headSha },
+      })
+      return ok
+    },
+  }
+}
+
+/** The settled tail — verdict events, the loop-claimed bead's discharge
+ *  on external settle, and the green path's optional merge. An external
+ *  merge settles the wait before mergeIfAsked ever runs — watchEnd
+ *  already swept the marker, so nothing is left for `act rearm`'s
+ *  settle-path reconcile to see. */
+async function settleWait(
+  argv: string[],
+  rev: ReviewFacade,
+  t: PrTarget,
+  res: GateWaitResult,
+  timeout: number
+): Promise<void> {
   if (res.timedOut || !res.gate.ok || res.state.state !== 'OPEN') {
     if (!res.timedOut && !res.gate.ok) {
       await recordBlockedVerdict(rev, t, res, timeout)
@@ -334,10 +361,7 @@ async function cmdWait(argv: string[]): Promise<void> {
       // finished" moment a sink is for (spec: specs/bro-huy5o.8.md)
       await recordSettledVerdict(rev, t, res.state.url, res.state.state.toLowerCase())
     }
-    // an external merge settles the wait before mergeIfAsked ever runs —
-    // watchEnd already swept the marker, so nothing is left for `act
-    // rearm`'s settle-path reconcile to see. Discharge the loop-claimed
-    // bead here (its twin rule: MERGED closes, CLOSED-unmerged keeps)
+    // the bead's twin rule: MERGED closes, CLOSED-unmerged keeps
     closeBeadIfLanded(argv, rev, t, res.state.state)
     process.exitCode = res.timedOut || !res.gate.ok ? 1 : 0
     return
