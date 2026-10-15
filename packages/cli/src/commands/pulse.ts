@@ -63,9 +63,26 @@ export function pulseArgs(argv: string[]): PulseArgs {
   if (sep !== -1 && cmd.length === 0) {
     throw new Error("a trailing '--' needs a command after it")
   }
-  // an unknown flag fails loudly as a usage error — a typo'd `--notfy`
-  // must not silently disarm the wake channel. Thrown, not
-  // positionals' strict exit, so the parse stays testable in-process.
+  rejectUnknownFlags(head)
+  const pos = positionals(head, new Set(), { boolFlags: BOOL_FLAGS })
+  if (pos.length > 1) {
+    throw new Error(`bro pulse takes at most one <seconds> — got ${pos.join(' ')}`)
+  }
+  if (head.includes('--notify') && head.includes('--no-notify')) {
+    throw new Error('--notify and --no-notify conflict')
+  }
+  return {
+    sec: pos.length === 1 ? parsePulseSec(pos[0]!) : undefined,
+    notify: !head.includes('--no-notify'),
+    json: head.includes('--json'),
+    cmd,
+  }
+}
+
+// an unknown flag fails loudly as a usage error — a typo'd `--notfy`
+// must not silently disarm the wake channel. Thrown, not
+// positionals' strict exit, so the parse stays testable in-process.
+function rejectUnknownFlags(head: string[]): void {
   for (const a of head) {
     if (!a.startsWith('--')) {
       continue
@@ -78,26 +95,18 @@ export function pulseArgs(argv: string[]): PulseArgs {
       throw new Error(`option ${name} takes no value`)
     }
   }
-  const pos = positionals(head, new Set(), { boolFlags: BOOL_FLAGS })
-  if (pos.length > 1) {
-    throw new Error(`bro pulse takes at most one <seconds> — got ${pos.join(' ')}`)
+}
+
+// the shared interval bounds: a sub-floor pulse busy-loops, a
+// >2^31-1 ms one clamps to ~1ms — both fail closed
+function parsePulseSec(v: string): number {
+  const sec = Number(v)
+  if (!Number.isFinite(sec) || sec < MIN_INTERVAL_SEC || sec > MAX_INTERVAL_SEC) {
+    throw new Error(
+      `<seconds> needs a value ≥${MIN_INTERVAL_SEC} up to ${MAX_INTERVAL_SEC}s, got "${v}"`
+    )
   }
-  if (head.includes('--notify') && head.includes('--no-notify')) {
-    throw new Error('--notify and --no-notify conflict')
-  }
-  let sec: number | undefined
-  if (pos.length === 1) {
-    const v = pos[0]!
-    // the shared interval bounds: a sub-floor pulse busy-loops, a
-    // >2^31-1 ms one clamps to ~1ms — both fail closed
-    sec = Number(v)
-    if (!Number.isFinite(sec) || sec < MIN_INTERVAL_SEC || sec > MAX_INTERVAL_SEC) {
-      throw new Error(
-        `<seconds> needs a value ≥${MIN_INTERVAL_SEC} up to ${MAX_INTERVAL_SEC}s, got "${v}"`
-      )
-    }
-  }
-  return { sec, notify: !head.includes('--no-notify'), json: head.includes('--json'), cmd }
+  return sec
 }
 
 /** The mailer role: who this process's pulse.lock hold is. `release`
@@ -182,7 +191,8 @@ async function pulseBeat(
   // null status = spawn error (127, the shell's missing-binary code) or
   // signal-death — either way the beat reports it, the metronome lives
   const code = r.status ?? 127
-  const head = `bro pulse — ${ts} — $ ${cmd.join(' ')}${code === 0 ? '' : ` (exit ${code})`}`
+  const codeNote = code === 0 ? '' : ` (exit ${code})`
+  const head = `bro pulse — ${ts} — $ ${cmd.join(' ')}${codeNote}`
   const text = [head, out === '' ? '' : out.trimEnd(), err === '' ? '' : `stderr:\n${err.trimEnd()}`]
     .filter((s) => s !== '')
     .join('\n')
@@ -252,8 +262,10 @@ export async function runPulseCommand(argv: string[]): Promise<void> {
   const mailer = pulseMailer(dir)
 
   const resolved = { sec, notify: args.notify, json: args.json, cmd: args.cmd }
+  // the metronome contract is serial: a beat lands, then the gap —
+  // parallel ticks would be a broken pulse, not a faster one
   for (;;) {
-    await pulseTick(dir, resolved, mailer, mb)
-    await new Promise((r) => setTimeout(r, sec * 1000))
+    await pulseTick(dir, resolved, mailer, mb) // NOSONAR — serial by contract
+    await new Promise((r) => setTimeout(r, sec * 1000)) // NOSONAR — serial by contract
   }
 }

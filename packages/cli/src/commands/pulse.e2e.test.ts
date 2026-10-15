@@ -129,6 +129,7 @@ describe('bro pulse e2e', () => {
         5_000,
         'the next beat after a failed probe'
       )
+      assert.ok((p.out().match(/bro pulse — /g) ?? []).length > n)
     } finally {
       await kill(p)
       rmSync(root, { recursive: true, force: true })
@@ -155,6 +156,7 @@ describe('bro pulse e2e', () => {
         10_000,
         `B takes the mailer role over — out: ${other.out()}`
       )
+      assert.ok(other.out().includes('"mailing":true'))
     } finally {
       await kill(a).catch(() => {})
       if (b !== undefined) {
