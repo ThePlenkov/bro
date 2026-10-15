@@ -537,6 +537,32 @@ for (const src of VERSIONED_SOURCES) {
   }
 }
 
+// skill frontmatter pins the MAJOR line (`Requires: npx -y @broject/bro@0`)
+// — rewrite every skills/*/SKILL.md pin to plugin.json's major so the
+// version-bump commit flips the whole tree at once and a hand-edited
+// foreign major surfaces as check:plugins drift
+const PIN_MAJOR_RE = /@broject\/bro@\d+/g
+const skillsRoot = join(ROOT, 'skills')
+for (const name of readdirSync(skillsRoot).sort()) {
+  const p = join(skillsRoot, name, 'SKILL.md')
+  if (!existsSync(p)) {
+    continue
+  }
+  const text = readFileSync(p, 'utf8')
+  const synced = text.replace(PIN_MAJOR_RE, `@broject/bro@${manifest.version.split('.')[0]}`)
+  if (CHECK ? synced !== text : false) {
+    drift.push(`skills/${name}/SKILL.md`)
+  } else if (!CHECK && synced !== text) {
+    // a symlinked SKILL.md is a pointer managed elsewhere — writing
+    // through it could land outside this checkout; report, don't write
+    if (lstatSync(p).isSymbolicLink()) {
+      drift.push(`skills/${name}/SKILL.md (symlink — skipped)`)
+    } else {
+      writeFileSync(p, synced)
+    }
+  }
+}
+
 /** plugins/<client>/bro/skills → the one repo skills/ tree. Forward
  * slashes so the git symlink is the same on every OS. */
 function skillsLinkTarget(adapterRel) {
