@@ -47,7 +47,7 @@ export function queueScope(under?: string): string {
 /** The frame's open queue items in rank order (id breaks ties). */
 export function queueItems(frame: string): QueueItem[] {
   return taskStore()
-    .list<DrillRow>({ labels: [queueLabel(frame)] })
+    .list<DrillRow>({ labels: [queueLabel(frame)], limit: 0 })
     .filter(isOpen)
     .map((r) => ({ id: r.id, title: r.title, rank: rankOf(r) }))
     .sort((a, b) => a.rank - b.rank || a.id.localeCompare(b.id))

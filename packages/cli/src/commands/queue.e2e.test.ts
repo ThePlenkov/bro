@@ -4,29 +4,13 @@
  *  through behavior, never by reading rows directly. */
 import { describe, test } from 'node:test'
 import assert from 'node:assert/strict'
-import {
-  bead,
-  initRepo,
-  installFakeBd,
-  runCli,
-  FAKE_BEAD,
-} from './testrepo.ts'
+import { bead, e2eRepo, runCli, FAKE_BEAD } from './testrepo.ts'
 
-const env = (binDir: string, db: string) => ({
-  PATH: `${binDir}:${process.env.PATH ?? ''}`,
-  FAKE_BD_DB: db,
-})
-
-function fixture(rows: Array<Record<string, unknown>> = []) {
-  const { root, main } = initRepo('bro-queue-e2e-')
-  const { binDir, db } = installFakeBd(root, rows)
-  return { root, main, binDir, db }
-}
+const fixture = (rows: Array<Record<string, unknown>> = []) => e2eRepo('bro-queue-e2e-', rows)
 
 describe('bro queue', () => {
   test('intake → ls: rank order, queue:root scope without a frame', () => {
-    const { main, binDir, db } = fixture()
-    const e = env(binDir, db)
+    const { main, db, env: e } = fixture()
     assert.equal(runCli(['queue', 'first thing'], { cwd: main, env: e }).code, 0)
     assert.equal(runCli(['queue', 'second thing'], { cwd: main, env: e }).code, 0)
     const r = runCli(['queue', 'ls'], { cwd: main, env: e })
@@ -45,8 +29,7 @@ describe('bro queue', () => {
   })
 
   test('bump floats to top; --to lands between ranks', () => {
-    const { main, binDir, db } = fixture()
-    const e = env(binDir, db)
+    const { main, db, env: e } = fixture()
     runCli(['queue', 'a'], { cwd: main, env: e })
     runCli(['queue', 'b'], { cwd: main, env: e })
     runCli(['queue', 'c'], { cwd: main, env: e })
@@ -67,8 +50,7 @@ describe('bro queue', () => {
   })
 
   test('drill promotes the item into a frame and closes the bead', () => {
-    const { main, binDir, db } = fixture()
-    const e = env(binDir, db)
+    const { main, db, env: e } = fixture()
     runCli(['queue', 'investigate flakiness'], { cwd: main, env: e })
     const id = runCli(['queue', 'ls'], { cwd: main, env: e })
       .stdout.split('\n')[1]!
@@ -85,8 +67,7 @@ describe('bro queue', () => {
   })
 
   test('rm dequeues without closing; foreign-queue id refuses', () => {
-    const { main, binDir, db } = fixture()
-    const e = env(binDir, db)
+    const { main, db, env: e } = fixture()
     runCli(['queue', 'park me'], { cwd: main, env: e })
     const id = runCli(['queue', 'ls'], { cwd: main, env: e })
       .stdout.split('\n')[1]!
@@ -109,8 +90,7 @@ describe('bro queue', () => {
       labels: ['drill'],
       issue_type: 'feature',
     }
-    const { main, binDir, db } = fixture([frame])
-    const e = env(binDir, db)
+    const { main, db, env: e } = fixture([frame])
     const r = runCli(['queue', 'scoped intake'], { cwd: main, env: e })
     assert.equal(r.code, 0, r.stderr)
     assert.match(r.stdout, /→ fx-fr1/)
@@ -120,8 +100,7 @@ describe('bro queue', () => {
   })
 
   test('empty queue reports without error; syntax errors beat beads setup', () => {
-    const { main, binDir, db } = fixture()
-    const e = env(binDir, db)
+    const { main, db, env: e } = fixture()
     const r = runCli(['queue', 'ls'], { cwd: main, env: e })
     assert.equal(r.code, 0)
     assert.match(r.stdout, /empty/)
