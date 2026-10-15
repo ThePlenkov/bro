@@ -19,7 +19,7 @@
  * `fleet daemon up` / `fleet resume`: a worker never arms workers.
  *
  *   bro self dogfood scenarios
- *   bro self dogfood run <name> [--backend <c>] [--analyst <c|same|none>] [--keep]
+ *   bro self dogfood run <name> [--backend <c>] [--analyst <c|same|none>] [--provider <p>] [--keep]
  *   bro self dogfood status [run-id] [--json]
  *   bro self dogfood report <run-id>
  */
@@ -53,7 +53,7 @@ import { isOrchestratorSession } from './watch-pulse.ts'
 function usage(): never {
   console.error(`usage:
   bro self dogfood scenarios
-  bro self dogfood run <name> [--backend <c>] [--analyst <c|same|none>] [--keep]
+  bro self dogfood run <name> [--backend <c>] [--analyst <c|same|none>] [--provider <p>] [--keep]
   bro self dogfood status [run-id] [--json]
   bro self dogfood report <run-id>`)
   process.exit(2)
@@ -119,6 +119,10 @@ interface RunState {
   runnerBackend?: string
   analystAgent?: string
   analystBackend?: string
+  /** --provider pin — the worker engine for both spawns; a backend
+   *  stays the transport shell around whatever worker the provider
+   *  resolves to. */
+  provider?: string
   /** 'none' skips the analyst pass. */
   analyst: string
   createdAt: string
@@ -366,7 +370,9 @@ async function advanceRun(
       const analystBead = taskStoreAt(beads).create({
         title: `dogfood analyst ${fresh.scenario} ${basename(rdir)}`,
         description: `Analyst pass of ${basename(rdir)} — verdict writer.`,
-        type: 'task',
+        // chore = harness bookkeeping — `bro spec check` exempts it;
+        // task-type scaffolding beads turn every verdict ISSUES
+        type: 'chore',
         priority: 2,
       })
       const info = await spawnStepAgent(dir, env, {
@@ -375,6 +381,7 @@ async function advanceRun(
         promptFile,
         connector: backend,
         beadsDir: beads,
+        provider: fresh.provider,
       })
       fresh.analystAgent = info.id
       fresh.analystBackend = info.backend
@@ -397,7 +404,7 @@ async function advanceRun(
 // --- verbs ------------------------------------------------------------------
 
 async function cmdRun(dir: string, argv: string[]): Promise<void> {
-  const pos = positionals(argv, new Set(['--backend', '--analyst']), {
+  const pos = positionals(argv, new Set(['--backend', '--analyst', '--provider']), {
     boolFlags: new Set(['--keep']),
     strict: true,
   })
@@ -410,6 +417,7 @@ async function cmdRun(dir: string, argv: string[]): Promise<void> {
   }
   const analyst = flag(argv, '--analyst') ?? 'same'
   const backend = flag(argv, '--backend')
+  const provider = flag(argv, '--provider')
   const keep = argv.includes('--keep')
   const src = scenarioPath(dir, name)
 
@@ -434,6 +442,7 @@ async function cmdRun(dir: string, argv: string[]): Promise<void> {
     bead: '',
     repo: '',
     analyst,
+    provider,
     createdAt: new Date().toISOString(),
   }
   let initErr: string | null = null
@@ -449,7 +458,7 @@ async function cmdRun(dir: string, argv: string[]): Promise<void> {
     const bead = taskStoreAt(prov.beads).create({
       title: `dogfood ${name} ${runId}`,
       description: `Dogfood run ${runId} of scenario ${name} — runner claim.`,
-      type: 'task',
+      type: 'chore',
       priority: 2,
     })
     state.bead = bead.id
@@ -465,6 +474,7 @@ async function cmdRun(dir: string, argv: string[]): Promise<void> {
       worktree: prov.repo,
       promptFile,
       connector: backend ?? undefined,
+      provider,
       beadsDir: prov.beads,
       env: keep ? { BRO_DOGFOOD_KEEP: '1' } : undefined,
     })
