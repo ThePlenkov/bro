@@ -84,9 +84,12 @@ import {
   chmodSync,
   closeSync,
   existsSync,
+  fstatSync,
   linkSync,
   mkdirSync,
+  openSync,
   readFileSync,
+  readSync,
   renameSync,
   rmSync,
   statSync,
@@ -1033,13 +1036,21 @@ async function routeProvider(
   return true
 }
 
-/** `GET /api/v1/agents/<ref>/log` — like routeProvider this sits below
- *  the ServeResponse envelope: `follow` upgrades the response to SSE
- *  and pipes for as long as the client stays. Auth is write-grade:
- *  log payloads can carry secrets, so the loopback bind alone is not
- *  the boundary — Bearer like the writes, or `?token=` for EventSource
- *  clients that can't set headers (loopback dev-server grade; the
- *  token is never logged). True once the path matches — any verdict
+/** `GET /api/v1/agents/<ref>/log` — the SSE leg sits below the
+ *  ServeResponse envelope: `follow` upgrades the response and pipes
+ *  for as long as the client stays. The plain tail could fit the
+ *  envelope — but BOTH legs stay here: route()/routeAgentsBranch
+ *  carry no request headers or token, so the credential check would
+ *  be unenforceable inside routeRequest. The divergence is deliberate
+ *  and confined to this function. Auth is write-grade: log payloads
+ *  can carry secrets, so the loopback bind is the transport boundary,
+ *  not the auth one. Credentials: Bearer
+ *  like the writes, or `?token=` for EventSource clients that can't
+ *  set headers — the query-param fallback is a known CWE-598 tradeoff
+ *  (URL-borne secrets can land in access logs/browser history; this
+ *  server keeps no request log and serves loopback only, and the
+ *  token itself is the 0600 serve.json file a same-UID process can
+ *  already read). True once the path matches — any verdict
  *  (401/404/405/422 or the stream); false lets other paths through. */
 async function routeAgentLog(
   req: IncomingMessage,
@@ -1069,44 +1080,32 @@ async function routeAgentLog(
     )
     return true
   }
-  const { hit, degraded } = await deps.find(parseRef(m[1]!))
+  let ref: string
+  try {
+    ref = parseRef(m[1]!)
+  } catch (err) {
+    // keep the refusal local — a bad ref answers 400 here rather than
+    // escaping to handleRequest's catch, which would try to write an
+    // error body after this route's stream may already have started
+    if (err instanceof HttpError) {
+      send(res, err.status, { error: err.message })
+      return true
+    }
+    throw err
+  }
+  const { hit, degraded } = await deps.find(ref)
   if (!hit) {
-    send(res, 404, missBody(parseRef(m[1]!), degraded))
+    send(res, 404, missBody(ref, degraded))
     return true
   }
-  return sendAgentLog(res, url, hit.agent)
-}
-
-/** The replay bound for one leg — default the CLI's 50, a non-integer
- *  or negative `lines=` falls back rather than 400ing (the CLI's own
- *  flag parser is the strict surface). */
-function logLineCount(url: URL): number {
-  const n = Number(url.searchParams.get('lines') ?? '50')
-  return Number.isInteger(n) && n >= 0 ? n : 50
-}
-
-/** The resolved-log leg of routeAgentLog — one-shot text/plain, or
- *  SSE when `follow` is present. Mirrors `bro fleet agents log`'s
- *  refusal shapes (remote ref 422, missing file 404). */
-function sendAgentLog(res: ServerResponse, url: URL, a: AgentInfo): boolean {
-  if (a.log === undefined) {
-    send(res, 404, { error: `agent ${a.id} has no recorded log` })
+  const log = logTarget(hit.agent)
+  if ('status' in log) {
+    send(res, log.status, { error: log.error })
     return true
   }
-  // a remote backend records its attach pointer, not a file — name it
-  if (/^[a-zA-Z][a-zA-Z0-9+.-]*:\/\//.test(a.log)) {
-    send(res, 422, { error: `agent ${a.id}'s log is remote — ${a.log}` })
-    return true
-  }
-  if (!existsSync(a.log)) {
-    send(res, 404, { error: `log missing: ${a.log} — reaped or never written` })
-    return true
-  }
-  // one read pins the replay boundary — a statSync later could land
-  // past a janitor truncation and fake a resync over replayed bytes
-  const replay = readFileSync(a.log, 'utf8')
+  const replay = readLogTail(log.path)
   if (!url.searchParams.has('follow')) {
-    send(res, 200, tailLines(replay, logLineCount(url)), {
+    send(res, 200, tailLines(replay.text, logLineCount(url)), {
       contentType: 'text/plain; charset=utf-8',
     })
     return true
@@ -1117,19 +1116,91 @@ function sendAgentLog(res: ServerResponse, url: URL, a: AgentInfo): boolean {
     connection: 'keep-alive',
   })
   const sse = (chunk: string) => {
-    res.write(`data: ${chunk.replace(/\n/g, '\ndata: ')}\n\n`)
+    if (res.writableEnded || res.destroyed) {
+      return
+    }
+    // drop the trailing newline BEFORE fanning \n out to `data: ` —
+    // otherwise a newline-terminated chunk ends the frame on an empty
+    // `data:` field, polluting the client's event payload
+    const trimmed = chunk.replace(/\n$/, '')
+    res.write(`data: ${trimmed.replace(/\n/g, '\ndata: ')}\n\n`)
   }
-  sse(tailLines(replay, logLineCount(url)))
+  sse(tailLines(replay.text, logLineCount(url)))
   const handle = followLog(
-    a.log,
+    log.path,
     {
       data: sse,
-      note: (line) => res.write(`event: note\ndata: ${line}\n\n`),
+      note: (line) => {
+        if (!res.writableEnded && !res.destroyed) {
+          res.write(`event: note\ndata: ${line}\n\n`)
+        }
+      },
     },
-    { startOffset: Buffer.byteLength(replay) }
+    // replay.byteLength is the TRUE file size at snapshot — followLog
+    // offsets from there, so appends after the bounded tail read still
+    // stream and never get skipped
+    { startOffset: replay.byteLength }
   )
   res.on('close', () => handle.stop())
   return true
+}
+
+/** The replay bound for one leg — default the CLI's 50, a non-integer
+ *  or negative `lines=` falls back rather than 400ing (the CLI's own
+ *  flag parser is the strict surface). */
+function logLineCount(url: URL): number {
+  const n = Number(url.searchParams.get('lines') ?? '50')
+  return Number.isInteger(n) && n >= 0 ? n : 50
+}
+
+/** Cap on the replay read — a log's tail-N never needs the whole file,
+ *  and an unbounded readFileSync on a fat agent log would block the
+ *  event loop for every concurrent client. Generous next to the
+ *  janitor's own tail-cap. */
+const LOG_READ_CAP = 8 * 1024 * 1024
+
+/** Read only the file's last LOG_READ_CAP bytes — plus the byte length
+ *  of the WHOLE file at snapshot time, the follow offset that pins the
+ *  replay boundary (never a second statSync, which could land past a
+ *  janitor truncation). `text` keeps a torn head on a truncated read —
+ *  tailLines drops the first partial line below. */
+function readLogTail(path: string): { text: string; byteLength: number } {
+  let fd: number | undefined
+  try {
+    fd = openSync(path, 'r')
+    const size = fstatSync(fd).size
+    const from = Math.max(0, size - LOG_READ_CAP)
+    const buf = Buffer.allocUnsafe(size - from)
+    const n = readSync(fd, buf, 0, buf.length, from)
+    let text = buf.subarray(0, n).toString('utf8')
+    // a capped read starts mid-line — drop the torn head so clients
+    // never see a log fragment that begins halfway through a byte run
+    if (from > 0) {
+      text = text.slice(text.indexOf('\n') + 1)
+    }
+    return { text, byteLength: size }
+  } finally {
+    if (fd !== undefined) {
+      closeSync(fd)
+    }
+  }
+}
+
+/** Where the agent's log lives — a path to stream, or the refusal the
+ *  route answers (remote refs name the pointer, missing files 404) —
+ *  mirrors `bro fleet agents log`'s shapes. */
+function logTarget(a: AgentInfo): { path: string } | { status: number; error: string } {
+  if (a.log === undefined) {
+    return { status: 404, error: `agent ${a.id} has no recorded log` }
+  }
+  // a remote backend records its attach pointer, not a file — name it
+  if (/^[a-zA-Z][a-zA-Z0-9+.-]*:\/\//.test(a.log)) {
+    return { status: 422, error: `agent ${a.id}'s log is remote — ${a.log}` }
+  }
+  if (!existsSync(a.log)) {
+    return { status: 404, error: `log missing: ${a.log} — reaped or never written` }
+  }
+  return { path: a.log }
 }
 
 export function createServeHandler(
