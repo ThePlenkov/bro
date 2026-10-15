@@ -57,6 +57,7 @@ import {
   type BudgetSnapshot,
 } from './agent-connectors.ts'
 import { initRepo, installFakeBd, readBeads, writeBeads } from './commands/testrepo.ts'
+import { VERSION } from './version.ts'
 
 // ambient repo/agent/store pins must not reach fixture git children
 // or the code-under-test spawns — scrub once, restore after the file
@@ -1860,10 +1861,11 @@ describe('fleetProfileOf', () => {
 
 describe('broSpawnArgv', () => {
   test('bro on PATH wins; an empty PATH falls back to the npx shim', () => {
-    assert.deepEqual(broSpawnArgv({ PATH: '' }), ['npx', '-y', '@broject/bro@0'])
+    const npxFallback = ['npx', '-y', `@broject/bro@${VERSION.split('.')[0]}`]
+    assert.deepEqual(broSpawnArgv({ PATH: '' }), npxFallback)
     // whatever dir holds this test's node binary doubles as a fake bin dir
     const binDir = join(process.execPath, '..')
-    assert.deepEqual(broSpawnArgv({ PATH: binDir }), ['npx', '-y', '@broject/bro@0'])
+    assert.deepEqual(broSpawnArgv({ PATH: binDir }), npxFallback)
     // drop a `bro` shim next to it — PATH-first picks the plain name
     const dir = mkdtempSync(join(tmpdir(), 'bro-bin-'))
     try {

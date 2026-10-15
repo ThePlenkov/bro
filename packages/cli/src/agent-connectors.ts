@@ -97,6 +97,7 @@ import './session-planes/devin.ts'
 import './session-planes/copilot.ts'
 import { writeCopilotCount } from './session-planes/copilot.ts'
 import { enterWorktree } from './commands/work.ts'
+import { VERSION } from './version.ts'
 
 /** Everything a factory needs: the repo ctx + the resolved config
  *  (agents.<backend> knobs, connectors.agents pick, loop.agent fallback). */
@@ -264,10 +265,11 @@ function backendProvider(env: AgentConnectorEnv, backend: string): string | unde
   return typeof v === 'string' && v.trim() !== '' ? v : undefined
 }
 
-/** The `bro` invocation for a provider driver — PATH-first, then the
- *  `npx -y @broject/bro@0` fallback, the same contract the hooks shim
- *  pins at install time (spec bro-5hx1.1). A spawned env that strips
- *  both is a startup error the driver itself reports. */
+/** The `bro` invocation for a provider driver — PATH-first, then an
+ *  `npx -y` fallback pinned to the running plugin's own major, the same
+ *  contract the hooks shim pins at install time (spec bro-5hx1.1). A
+ *  spawned env that strips both is a startup error the driver itself
+ *  reports. */
 export function broSpawnArgv(env: NodeJS.ProcessEnv = process.env): string[] {
   const names = process.platform === 'win32' ? ['bro.cmd', 'bro.exe', 'bro'] : ['bro']
   for (const dir of (env.PATH ?? '').split(delimiter)) {
@@ -283,7 +285,7 @@ export function broSpawnArgv(env: NodeJS.ProcessEnv = process.env): string[] {
       }
     }
   }
-  return ['npx', '-y', '@broject/bro@0']
+  return ['npx', '-y', `@broject/bro@${VERSION.split('.')[0]}`]
 }
 
 /** What resolution computed for a spawn — provenance labels plus the
