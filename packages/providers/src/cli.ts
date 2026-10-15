@@ -70,8 +70,8 @@ function runTemplate(by: string, command: string, deadline: number): Promise<str
     }
     // operator-configured provider command (same contract as
     // loop.agent / agents.*.command everywhere: PATH lookup, sh -c)
-    // NOSONAR codeql[js/shell-command-constructed-from-input] — see expandPromptFile
-    const child = spawn('sh', ['-c', command], { stdio: ['ignore', 'pipe', 'pipe'] })
+    // codeql[js/shell-command-constructed-from-input] — see expandPromptFile
+    const child = spawn('sh', ['-c', command], { stdio: ['ignore', 'pipe', 'pipe'] }) // NOSONAR — see expandPromptFile
     const out: Buffer[] = []
     let tail = ''
     child.stdout?.on('data', (d: Buffer) => out.push(d))
