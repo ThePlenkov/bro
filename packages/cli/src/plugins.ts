@@ -90,6 +90,7 @@ import { runAgentsCommand } from './commands/agents.ts'
 import { runStatusCommand } from './commands/status.ts'
 import { cmdRecord, runRetrospectCommand } from './commands/retrospect.ts'
 import { runServeCommand } from './commands/serve.ts'
+import { runProviderCommand } from './commands/provider.ts'
 import { runSetupCommand } from './commands/setup.ts'
 import { runMeshCommand } from './commands/mesh.ts'
 import { runSpecCommand, sddConnector } from './commands/spec.ts'
@@ -279,6 +280,14 @@ export const PLUGINS: BroPlugin[] = [
     summary: 'Facade host for thin clients — HTTP/JSON on 127.0.0.1 [--port N]',
     run: runServeCommand,
     skill: 'serve',
+  }),
+  definePlugin({
+    name: 'provider',
+    group: 'fleet',
+    summary:
+      'Claude-facing Messages-API plane — host listener + url|token|env wiring helpers',
+    run: runProviderCommand,
+    skill: 'provider',
   }),
   definePlugin({
     name: 'mcp',

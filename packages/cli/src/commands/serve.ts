@@ -131,7 +131,7 @@ import {
   type StopOutcome,
 } from './agents.ts'
 import { flag, positionals } from './args.ts'
-import { providerConfig, providerProxy } from './serve-provider.ts'
+import { providerConfig, providerProxy, type ProviderConfig } from './serve-provider.ts'
 import { readBeads } from './status.ts'
 import { collectSnapshot } from './watch.ts'
 import { readHeartbeat, type HeartbeatSummary } from './watch-heartbeat.ts'
@@ -149,6 +149,11 @@ export interface ServeState {
   dir: string
   startedAt: string
   token: string
+  /** The `/v1/*` provider plane is wired (bro-om6m8.1) — `bro provider`
+   *  resolution skips facade-only serves so `url` never names an
+   *  endpoint whose Messages routes 404. Absent on pre-flag files:
+   *  treated as unwired, which is the safe read. */
+  provider?: boolean
 }
 
 /** `<git-common-dir>/bro/serve.json` — shared across linked worktrees,
@@ -160,14 +165,11 @@ export function serveStatePath(dir: string): string | null {
   return common === '' ? null : join(common, 'bro', 'serve.json')
 }
 
-export function readServeState(dir: string): ServeState | undefined {
-  const path = serveStatePath(dir)
-  if (path === null) {
-    return undefined
-  }
+/** The state-file read — full-record validation shared by serve.json
+ *  and provider.json: a torn/garbage entry is not a state. */
+export function readStateFile(path: string): ServeState | undefined {
   try {
     const v = JSON.parse(readFileSync(path, 'utf8')) as Partial<ServeState>
-    // a torn/garbage entry is not a state — only a full record counts
     if (
       typeof v.pid === 'number' &&
       typeof v.url === 'string' &&
@@ -185,12 +187,14 @@ export function readServeState(dir: string): ServeState | undefined {
   }
 }
 
-/** tmp+rename — readers never see a half-written state file. */
-export function writeServeState(dir: string, state: ServeState): void {
+export function readServeState(dir: string): ServeState | undefined {
   const path = serveStatePath(dir)
-  if (path === null) {
-    throw new Error('no git common dir — cannot write serve.json')
-  }
+  return path === null ? undefined : readStateFile(path)
+}
+
+/** tmp+rename — readers never see a half-written state file. Path-based:
+ *  serve.json (repo) and provider.json (host) share the discipline. */
+export function writeStateFile(path: string, state: ServeState): void {
   mkdirSync(dirname(path), { recursive: true })
   const tmp = `${path}.${process.pid}.${randomBytes(4).toString('hex')}.tmp`
   // the file carries the session token — publish at 0600 so "can read
@@ -206,20 +210,32 @@ export function writeServeState(dir: string, state: ServeState): void {
   renameSync(tmp, path)
 }
 
+export function writeServeState(dir: string, state: ServeState): void {
+  const path = serveStatePath(dir)
+  if (path === null) {
+    throw new Error('no git common dir — cannot write serve.json')
+  }
+  writeStateFile(path, state)
+}
+
 /** Remove the state file only while it still names THIS process — a
  *  successor that already rewrote it must not be unregistered by the
  *  dying predecessor's cleanup. */
-export function clearServeState(dir: string): void {
+export function clearStateFile(path: string): void {
   try {
-    const state = readServeState(dir)
+    const state = readStateFile(path)
     if (state !== undefined && state.pid === process.pid) {
-      const path = serveStatePath(dir)
-      if (path !== null) {
-        rmSync(path, { force: true })
-      }
+      rmSync(path, { force: true })
     }
   } catch {
     // best-effort — the stale-pid check on next start covers leftovers
+  }
+}
+
+export function clearServeState(dir: string): void {
+  const path = serveStatePath(dir)
+  if (path !== null) {
+    clearStateFile(path)
   }
 }
 
@@ -777,7 +793,7 @@ function routeWebhook(
 
 // --- server ----------------------------------------------------------------------------
 
-function send(
+export function send(
   res: ServerResponse,
   status: number,
   body: unknown,
@@ -823,7 +839,7 @@ function apiKeyMatch(header: string | string[] | undefined, token: string): bool
 /** `/v1/*` write guard — writeGuard's shape (bearer → Origin →
  *  content-type) but the credential accepts x-api-key too: the
  *  provider contract is "the session token IS the API key". */
-function providerGuard(
+export function providerGuard(
   req: IncomingMessage,
   token: string,
   wantsBody: boolean,
@@ -893,7 +909,7 @@ function writeGuard(
  *  attacker's Host — only loopback names are real clients. Covers
  *  reads too: CSRF only blinds the response, rebinding would expose
  *  the snapshot/agents planes to the page. */
-function isLoopbackHostHeader(hostHeader: string | undefined): boolean {
+export function isLoopbackHostHeader(hostHeader: string | undefined): boolean {
   const rawHost = (hostHeader ?? '').toLowerCase()
   const host = rawHost.startsWith('[')
     ? rawHost.slice(0, rawHost.indexOf(']') + 1)
@@ -1136,12 +1152,12 @@ function dropActStateForEvent(dir: string, event: EventInput): void {
   }
 }
 
-function realDeps(dir: string, env: AgentConnectorEnv): ServeDeps {
+function realDeps(
+  dir: string,
+  env: AgentConnectorEnv,
+  providerCfg: ProviderConfig | undefined
+): ServeDeps {
   const socketPath = busSocketPath(dir)
-  const providerCfg = providerConfig(process.env)
-  if (providerCfg !== undefined) {
-    console.log(`provider: /v1/* → ${providerCfg.upstream}`)
-  }
   return {
     snapshot: () => collectSnapshot(dir),
     agents: async () => {
@@ -1274,11 +1290,17 @@ export async function runServeCommand(argv: string[]): Promise<void> {
 
   const env = loadAgentEnv(dir)
   const meta: ServeMeta = { dir, startedAt: '' }
+  const providerCfg = providerConfig(process.env)
+  if (providerCfg !== undefined) {
+    console.log(`provider: /v1/* → ${providerCfg.upstream}`)
+  }
   // the session token — the "local session context" made concrete.
   // Generated per serve, never printed: clients read it out of the
   // 0600 serve.json below, so possession implies same-UID file access
   const token = randomBytes(32).toString('hex')
-  const server = createServer(createServeHandler(realDeps(dir, env), meta, token))
+  const server = createServer(
+    createServeHandler(realDeps(dir, env, providerCfg), meta, token)
+  )
 
   try {
     const url = await new Promise<string>((resolve, reject) => {
@@ -1295,7 +1317,16 @@ export async function runServeCommand(argv: string[]): Promise<void> {
       process.exit(1)
     })
 
-    writeServeState(dir, { pid: process.pid, url, dir, startedAt: meta.startedAt, token })
+    writeServeState(dir, {
+      pid: process.pid,
+      url,
+      dir,
+      startedAt: meta.startedAt,
+      token,
+      // the flag `bro provider` resolution reads — a facade-only serve
+      // must not shadow the host listener's endpoint
+      ...(providerCfg !== undefined ? { provider: true } : {}),
+    })
     // filesystems that ignore mode bits (some fuse/9p/drvfs mounts) can
     // leave the token group/other-readable — the auth boundary then
     // doesn't hold, so say so loudly rather than trusting silently
