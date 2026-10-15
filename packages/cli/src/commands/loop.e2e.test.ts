@@ -230,6 +230,49 @@ describe('bro loop e2e', () => {
     })
   })
 
+  test('the run record rides the registry worker — the check-in planes see it (bro-wg896)', () => {
+    const f = loopFixture([{ ...FAKE_BEAD, id: 'fx-a', title: 'ship it' }])
+    inside(f.main, f.root, () => {
+      const r = f.run()
+      assert.match(r.stdout, /loop: fx-a landed/)
+      const peeks = (readHostState(f.hostState).loopPeeks ?? []) as Array<{
+        at: string
+        records: Record<
+          string,
+          { beadId?: string; beadIds?: string[]; pid?: number; worktree?: string; log?: string }
+        >
+      }>
+      // the record exists from the worker's first instruction — an
+      // early peek may still read the claim-custody stamp (spawn()
+      // resolves after the fork races it), so only identity is
+      // asserted here; the custody fields land by worker-done
+      const startPeek = peeks.find((p) => p.at === 'worker-start')
+      assert.ok(startPeek, 'worker-phase loop peek missing')
+      const startRec = startPeek.records['fx-a']
+      assert.ok(startRec, 'no loop run record while the registry worker ran')
+      assert.equal(startRec.beadId, 'fx-a')
+      assert.equal(startRec.worktree, f.worktree)
+      // by the worker's end the record carries its pid + agents-plane
+      // log — the row `bro watch`/`bro status` renders
+      const donePeek = peeks.find((p) => p.at === 'worker-done')
+      assert.ok(donePeek, 'worker-done loop peek missing')
+      const rec = donePeek.records['fx-a']
+      assert.ok(rec, 'loop run record gone before the worker even exited')
+      assert.ok(typeof rec.pid === 'number' && rec.pid > 0)
+      assert.match(rec.log ?? '', /bro[/\\]agents[/\\].+\.log$/)
+      // the settle window (worker exited, PR lookup in flight) keeps
+      // the record — custody back with the loop process
+      const settlePeek = peeks.find((p) => p.at === 'pr-lookup' && p.records['fx-a'])
+      assert.ok(settlePeek, 'no loop run record during the PR-lookup window')
+      // once the watch marker arms, the record retires — every gate
+      // poll must read an empty plane, and the run leaves no residue
+      for (const p of peeks.filter((p) => p.at === 'gate')) {
+        assert.equal(p.records['fx-a'], undefined, 'run record leaked into the gate phase')
+      }
+      assert.equal(existsSync(join(f.main, '.git', 'bro', 'loop', 'fx-a.json')), false)
+    })
+  })
+
   test('the gate wait arms a rearmable watch marker (bro-z0k2u)', () => {
     const f = loopFixture([{ ...FAKE_BEAD, id: 'fx-a', title: 'ship it' }])
     inside(f.main, f.root, () => {

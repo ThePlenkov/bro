@@ -134,7 +134,25 @@ function renderAgents(board, snap) {
     });
   });
   var loopRuns = (((snap || {}).loop || {}).runs) || [];
+  var normTree = function (t) { return typeof t === 'string' ? t.replace(/\/+$/, '') : t };
   loopRuns.forEach(function (r) {
+    // a registry-backed loop worker rides the record now (bro-wg896) —
+    // the same work in both planes folds into the registry row, its
+    // silence read merging in; a DEAD record never folds — crashed-run
+    // residue is its own row
+    if (r.state !== 'dead') {
+      var hit = rows.find(function (x) {
+        return (r.pid !== null && r.pid !== undefined && x.pid === r.pid) ||
+          (normTree(x.worktree) !== undefined && normTree(x.worktree) === normTree(r.worktree));
+      });
+      if (hit !== undefined) {
+        if (r.silentMs !== null && r.silentMs !== undefined) {
+          hit.ageMs = r.silentMs;
+          hit.ageNote = 'silent ';
+        }
+        return;
+      }
+    }
     rows.push({
       id: 'loop:' + (r.slug || r.beadId || ''), backend: 'loop',
       step: r.beadId || r.slug || '—',
