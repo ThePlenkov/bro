@@ -449,8 +449,10 @@ export function providerCallGrade(entry: ProviderEntry): 'typed' | 'prose' {
  *  sites own the rule that an override a bare command can't consume
  *  is a loud error, never a relabel. */
 export function expandModelArg(command: string, model: string): string {
-  const esc = model.replaceAll("'", String.raw`'\''`) // codeql[js/shell-command-constructed-from-input] — operator-authored template, resolved value quoted
-  return command.replaceAll('{model}', `'${esc}'`) // codeql[js/shell-command-constructed-from-input] — see above
+  // codeql[js/shell-command-constructed-from-input] — operator-authored template, resolved value quoted
+  const esc = model.replaceAll("'", String.raw`'\''`)
+  // codeql[js/shell-command-constructed-from-input] — see above
+  return command.replaceAll('{model}', `'${esc}'`)
 }
 
 /** The cli kind's model resolution — `resolveApiModel`'s analogue for

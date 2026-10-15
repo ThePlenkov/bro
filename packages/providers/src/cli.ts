@@ -44,12 +44,16 @@ class CliConfigError extends Error {
  *  the expansion IS the feature. */
 export function expandPromptFile(command: string, promptFile: string): string {
   // ' → '\'' — the only character with meaning inside single quotes
-  const esc = promptFile.replaceAll("'", String.raw`'\''`) // codeql[js/shell-command-constructed-from-input] — see doc comment
-  const q = `'${esc}'` // codeql[js/shell-command-constructed-from-input] — see doc comment
+  // codeql[js/shell-command-constructed-from-input] — see doc comment
+  const esc = promptFile.replaceAll("'", String.raw`'\''`)
+  // codeql[js/shell-command-constructed-from-input] — see doc comment
+  const q = `'${esc}'`
   if (command.includes('{promptFile}')) {
-    return command.replaceAll('{promptFile}', q) // codeql[js/shell-command-constructed-from-input] — see doc comment
+    // codeql[js/shell-command-constructed-from-input] — see doc comment
+    return command.replaceAll('{promptFile}', q)
   }
-  return `${command} ${q}` // codeql[js/shell-command-constructed-from-input] — see doc comment
+  // codeql[js/shell-command-constructed-from-input] — see doc comment
+  return `${command} ${q}`
 }
 
 /** One `sh -c` round-trip under the caller's budget — an expired
@@ -66,7 +70,8 @@ function runTemplate(by: string, command: string, deadline: number): Promise<str
     }
     // operator-configured provider command (same contract as
     // loop.agent / agents.*.command everywhere: PATH lookup, sh -c)
-    const child = spawn('sh', ['-c', command], { stdio: ['ignore', 'pipe', 'pipe'] }) // NOSONAR codeql[js/shell-command-constructed-from-input] — see expandPromptFile
+    // NOSONAR codeql[js/shell-command-constructed-from-input] — see expandPromptFile
+    const child = spawn('sh', ['-c', command], { stdio: ['ignore', 'pipe', 'pipe'] })
     const out: Buffer[] = []
     let tail = ''
     child.stdout?.on('data', (d: Buffer) => out.push(d))
