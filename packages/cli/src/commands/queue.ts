@@ -38,16 +38,30 @@ function needId(rest: string[], sub: string): string {
   return ids[0] as string
 }
 
-/** An integer flag or a syntax error — never a silent NaN. */
+/** An integer flag or a syntax error — never a silent NaN, and never
+ *  an unsafe integer: --to 2**60 passes isInteger yet rounds on the
+ *  label. */
 function intFlag(argv: string[], name: string): number | undefined {
   const raw = flag(argv, name)
   if (raw === undefined) return undefined
   const n = Number(raw)
-  if (!Number.isInteger(n)) {
-    console.error(`error: ${name} must be an integer, got "${raw}"`)
+  if (!Number.isSafeInteger(n)) {
+    console.error(`error: ${name} must be a safe integer, got "${raw}"`)
     process.exit(2)
   }
   return n
+}
+
+/** Intake words are subjects — a `--underer=x` typo must error, never
+ *  silently queue into the default scope. */
+function rejectUnknownFlags(argv: string[]): void {
+  for (const arg of argv) {
+    const key = arg.split('=', 1)[0]!
+    if (key.length > 1 && key.startsWith('-') && !VALUE_FLAGS.has(key)) {
+      console.error(`error: unknown option "${key}"`)
+      process.exit(2)
+    }
+  }
 }
 
 function run(fn: () => void): void {
@@ -96,6 +110,7 @@ function cmdRm(rest: string[]): void {
 }
 
 function cmdIntake(words: string[]): void {
+  rejectUnknownFlags(words)
   const priority = intFlag(words, '--priority')
   run(() => {
     const { row, frame, rank } = queueAdd(positionalsOf(words).join(' '), {
