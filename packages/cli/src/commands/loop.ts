@@ -432,11 +432,36 @@ export async function resolveLoopLane(
   if (sel.agent !== undefined && !agentIsProvider) {
     return templateEscape(sel, cfg, env)
   }
+  const { provider, model, autoApprove, profileSourced } = lanePicks(env, sel, cfg, route, agentIsProvider)
+  const pick = await resolveSpawnProvider(
+    env,
+    'native',
+    { provider, model, autoApprove },
+    sel.provider !== undefined || agentIsProvider
+      ? 'flag'
+      : profileSourced
+        ? 'profile'
+        : 'backend'
+  )
+  const lane = providerLaneOrEmpty(pick, model, autoApprove)
+  return route === undefined ? lane : { ...lane, class: route.class }
+}
+
+/** The pick tiers — flag > flag-named profile > routing table >
+ *  config-named profile > config. A flag-named profile is an explicit
+ *  pick (outranks the table); a config-named one is a standing default
+ *  below it (the same tiers `spawnStepAgent` puts req.profile vs
+ *  route.provider in). `profileSourced` reports whether the provider
+ *  came off a profile — the provenance tier resolveSpawnProvider logs. */
+function lanePicks(
+  env: AgentConnectorEnv,
+  sel: LoopLaneSel,
+  cfg: LoopConfig,
+  route: ResolvedClass | undefined,
+  agentIsProvider: boolean
+): { provider?: string; model?: string; autoApprove?: boolean; profileSourced: boolean } {
   const profileName = sel.profile ?? (cfg.profile !== '' ? cfg.profile : undefined)
   const profile = profileName !== undefined ? fleetProfileOf(env, profileName) : undefined
-  // a flag-named profile is an explicit pick — it outranks the table;
-  // a config-named one is a standing default and sits below it (the
-  // same tiers `spawnStepAgent` puts req.profile vs route.provider in)
   const flagProfile = sel.profile !== undefined ? profile : undefined
   const cfgProfile = sel.profile === undefined ? profile : undefined
   const provider =
@@ -454,19 +479,7 @@ export async function resolveLoopLane(
     (provider !== undefined && provider === route?.provider ? route.model : undefined) ??
     cfgProfile?.model ??
     (cfg.model !== '' ? cfg.model : undefined)
-  const autoApprove = sel.autoApprove ?? profile?.autoApprove
-  const pick = await resolveSpawnProvider(
-    env,
-    'native',
-    { provider, model, autoApprove },
-    sel.provider !== undefined || agentIsProvider
-      ? 'flag'
-      : profile?.provider !== undefined
-        ? 'profile'
-        : 'backend'
-  )
-  const lane = providerLaneOrEmpty(pick, model, autoApprove)
-  return route === undefined ? lane : { ...lane, class: route.class }
+  return { provider, model, autoApprove: sel.autoApprove ?? profile?.autoApprove, profileSourced: profile?.provider !== undefined }
 }
 
 /** The escape hatch — a template --agent replaces the provider lane for
@@ -1608,7 +1621,7 @@ async function pushItem(ctx: Ctx, beads: ReadyBead[]): Promise<PushOutcome> {
       }
       say(ctx, `loop: ${lead.id} re-attaches to ${prRef(ctx, parkedPr)} — no re-spawn`)
       endLoopRun(ctx.root, loopSlug(lead.id))
-      return { kind: 'member', member: armMember(ctx, beads, item, parkedPr) }
+      return { kind: 'member', member: armMember(ctx, beads, item, parkedPr, lane) }
     }
   }
   ctx.stage = 'bootstrap'
@@ -1674,7 +1687,7 @@ async function pushItem(ctx: Ctx, beads: ReadyBead[]): Promise<PushOutcome> {
   }
   // custody transfers to the armed watch — the run record's job is done
   endLoopRun(ctx.root, loopSlug(lead.id))
-  return { kind: 'member', member: armMember(ctx, beads, item, pr) }
+  return { kind: 'member', member: armMember(ctx, beads, item, pr, lane) }
 }
 
 /** The PR-armed moment, shared by the post-spawn discovery and the
@@ -1688,7 +1701,7 @@ async function pushItem(ctx: Ctx, beads: ReadyBead[]): Promise<PushOutcome> {
  *  comma-joined. The marker lands BEFORE the stamp — a stall or death
  *  inside stampProjection's tracker calls must not strand the open PR
  *  markerless. */
-function armMember(ctx: Ctx, beads: ReadyBead[], item: LoopItem, pr: number): GateMember {
+function armMember(ctx: Ctx, beads: ReadyBead[], item: LoopItem, pr: number, lane: LoopLane): GateMember {
   emitLifecycle(ctx.root, {
     kind: 'pr-open',
     bead: beads[0]?.id,
@@ -2276,20 +2289,62 @@ async function resolveRunLane(
   flagPin: boolean
 }> {
   const env = loadAgentEnv(root)
-  const agentFlag = flag(argv, '--agent')
-  const sel: LoopLaneSel = {
-    agent: agentFlag,
+  const sel = loopLaneSel(argv)
+  return { env, sel, ...(await resolveRunLaneInner(env, sel, cfg)) }
+}
+
+function loopLaneSel(argv: string[]): LoopLaneSel {
+  return {
+    agent: flag(argv, '--agent'),
     provider: flag(argv, '--provider'),
     profile: flag(argv, '--profile'),
     model: flag(argv, '--model'),
     autoApprove: argv.includes('--auto-approve') ? true : undefined,
     class: flag(argv, '--class'),
   }
+}
+
+/** The flag TIER's provider pick — with routing armed, lane.provider
+ *  also carries the fallback class's chain head (the floor), so
+ *  "is the provider pinned?" must be read from the picks themselves. */
+function flagTierPin(env: AgentConnectorEnv, sel: LoopLaneSel): boolean {
+  return (
+    sel.provider !== undefined ||
+    (sel.agent !== undefined && Object.hasOwn(env.providers ?? {}, sel.agent)) ||
+    (sel.profile !== undefined && fleetProfileOf(env, sel.profile).provider !== undefined)
+  )
+}
+
+/** The template the run expands — a cli provider's `command`
+ *  substitutes for `loop.agent`; a template --agent stays the literal
+ *  value (provider names are never templates, resolveLoopLane consumed
+ *  them); else the config default. */
+function effectiveAgent(
+  lane: LoopLane,
+  sel: LoopLaneSel,
+  env: AgentConnectorEnv,
+  cfg: LoopConfig
+): string {
+  if (lane.worker?.kind === 'template') {
+    return lane.worker.command
+  }
+  const agentFlag = sel.agent
+  if (agentFlag !== undefined && !Object.hasOwn(env.providers ?? {}, agentFlag)) {
+    return agentFlag
+  }
+  return cfg.agent
+}
+
+async function resolveRunLaneInner(
+  env: AgentConnectorEnv,
+  sel: LoopLaneSel,
+  cfg: LoopConfig
+): Promise<{ lane: LoopLane; agent: string; routing: boolean; flagPin: boolean }> {
   // a template --agent bypasses the registry entirely — routing can
   // only arm when the provider lane is in play (templateEscape already
   // warned about the bypass)
   const templateAgent =
-    agentFlag !== undefined && !Object.hasOwn(env.providers ?? {}, agentFlag)
+    sel.agent !== undefined && !Object.hasOwn(env.providers ?? {}, sel.agent)
   const routing =
     !templateAgent &&
     env.fleet?.routing !== undefined &&
@@ -2315,19 +2370,8 @@ async function resolveRunLane(
     }
     throw err
   }
-  // the flag TIER's provider pick — with routing armed, lane.provider
-  // also carries the fallback class's chain head (the floor), so
-  // "is the provider pinned?" must be read from the picks themselves
-  const flagPin =
-    sel.provider !== undefined ||
-    (sel.agent !== undefined && Object.hasOwn(env.providers ?? {}, sel.agent)) ||
-    (sel.profile !== undefined && fleetProfileOf(env, sel.profile).provider !== undefined)
-  const agent =
-    lane.worker?.kind === 'template'
-      ? lane.worker.command
-      : agentFlag !== undefined && !Object.hasOwn(env.providers ?? {}, agentFlag)
-        ? agentFlag
-        : cfg.agent
+  const flagPin = flagTierPin(env, sel)
+  const agent = effectiveAgent(lane, sel, env, cfg)
   if (lane.worker === undefined && agent === '' && !routing) {
     console.error(
       'bro loop: no agent configured — set loop.agent or loop.provider in bro.config ' +
@@ -2358,7 +2402,7 @@ async function resolveRunLane(
         'Intended for env-reading agents (BRO_PROMPT_FILE) only.'
     )
   }
-  return { env, sel, lane, agent, routing, flagPin }
+  return { lane, agent, routing, flagPin }
 }
 
 function buildCtx(
@@ -2417,27 +2461,9 @@ function buildCtx(
     // pick, so github's optInFacades doesn't apply (the operator asked
     // for this connector's reviews already). A rig whose tasks backend
     // IS the review host has nothing to project.
-    mirror: (() => {
-      try {
-        const name = facadeName('reviews', { dir: root }, { prefer: broCfg.connectors })
-        if (name === backend) {
-          return undefined
-        }
-        const s = facade('tasks', { dir: root }, { connector: name })
-        return s.publish === undefined ? undefined : s
-      } catch {
-        return undefined
-      }
-    })(),
+    mirror: mirrorStore(root, broCfg, backend),
     mirrorPolicy: broCfg.mirror,
-    specHas: (() => {
-      try {
-        const specs = specStore(root, broCfg.connectors)
-        return (id: string) => specs.hasSpec(id)
-      } catch {
-        return () => false
-      }
-    })(),
+    specHas: specProbe(root, broCfg),
   }
   // the registry spawn engages when there's a shared store to pin the
   // claim/exit record against — without one the legacy awaited spawn
@@ -2475,6 +2501,36 @@ function buildCtx(
   return ctx
 }
 
+// the projection target rides the REVIEW host's tasks — a named
+// pick, so github's optInFacades doesn't apply (the operator asked
+// for this connector's reviews already). A rig whose tasks backend
+// IS the review host has nothing to project.
+function mirrorStore(
+  root: string,
+  broCfg: ReturnType<typeof loadBroConfig>,
+  backend: string
+): Ctx['mirror'] {
+  try {
+    const name = facadeName('reviews', { dir: root }, { prefer: broCfg.connectors })
+    if (name === backend) {
+      return undefined
+    }
+    const s = facade('tasks', { dir: root }, { connector: name })
+    return s.publish === undefined ? undefined : s
+  } catch {
+    return undefined
+  }
+}
+
+function specProbe(root: string, broCfg: ReturnType<typeof loadBroConfig>): Ctx['specHas'] {
+  try {
+    const specs = specStore(root, broCfg.connectors)
+    return (id: string) => specs.hasSpec(id)
+  } catch {
+    return () => false
+  }
+}
+
 async function dryRunPlan(ctx: Ctx): Promise<void> {
   const scope = loopScope()
   if (!scope) {
@@ -2501,16 +2557,39 @@ async function dryRunPlan(ctx: Ctx): Promise<void> {
         ]
       : [top]
   console.log(`would claim ${clump.map((b) => b.id).join(', ')} — ${top.title}`)
+  for (const b of clump.slice(1)) {
+    console.log(`  + ${b.id} — ${b.title}`)
+  }
   if (clump.length > 1) {
-    for (const b of clump.slice(1)) {
-      console.log(`  + ${b.id} — ${b.title}`)
-    }
     console.log(`  batch: ${clump.length} beads, one worktree, one PR`)
   }
   const { slot, item } = stackPlan(ctx, top)
   console.log(`  worktree ${item.worktreeDir} on ${item.branch}`)
-  // the same floor tryClaim enforces — a dry run is exactly where an
-  // operator sizes maxOpen against real headroom
+  dryRunDisk(ctx)
+  if (slot !== undefined) {
+    console.log(`  stack ${ctx.stack} member ${slot.n} — PR base ${slot.base}`)
+  }
+  const lane = await dryRunLane(ctx, top)
+  if (lane === undefined) {
+    return
+  }
+  if (lane.class !== undefined) {
+    console.log(`  class: ${lane.class}`)
+  }
+  if (lane.provider !== undefined) {
+    console.log(`  provider: ${laneLabel(lane)}`)
+  }
+  const w = lane.worker
+  const argvLine =
+    w?.kind === 'argv'
+      ? [...w.argv, item.promptFile].map(shRender).join(' ')
+      : expandAgentCmd(laneCommand(ctx, lane), item.promptFile)
+  console.log(`  agent: ${argvLine}`)
+}
+
+// the same floor tryClaim enforces — a dry run is exactly where an
+// operator sizes maxOpen against real headroom
+function dryRunDisk(ctx: Ctx): void {
   const probes = diskProbes(ctx)
   const breach = diskFloorBreach(probes, ctx.cfg)
   for (const p of probes) {
@@ -2522,47 +2601,35 @@ async function dryRunPlan(ctx: Ctx): Promise<void> {
         `(${ctx.cfg.diskMinSlots}×${ctx.cfg.worktreeMb}M)`
     )
   }
-  if (slot !== undefined) {
-    console.log(`  stack ${ctx.stack} member ${slot.n} — PR base ${slot.base}`)
+}
+
+// the render resolves THIS bead's lane — with fleet.routing armed the
+// provider differs per bead; a broken route reports the same error a
+// claimed run would park on. The judge router is skipped: a dry run
+// spends no judge call and journals no shadow verdict — it reports
+// the armed router instead.
+async function dryRunLane(ctx: Ctx, top: ReadyBead): Promise<LoopLane | undefined> {
+  if (!ctx.routing) {
+    return ctx.lane
   }
-  // the render resolves THIS bead's lane — with fleet.routing armed the
-  // provider differs per bead; a broken route reports the same error a
-  // claimed run would park on. The judge router is skipped: a dry run
-  // spends no judge call and journals no shadow verdict — it reports
-  // the armed router instead.
-  let lane = ctx.lane
-  if (ctx.routing) {
-    try {
-      lane = await resolveBeadLane(ctx, top, { router: false })
-    } catch (err) {
-      console.log(`  route: ${err instanceof Error ? err.message : String(err)}`)
-      return
-    }
-    const router = ctx.env.fleet?.router
-    if (
-      router !== undefined &&
-      router.mode !== 'off' &&
-      ctx.sel.class === undefined &&
-      ctx.beadsDir !== undefined &&
-      classLabelOf(top) === undefined
-    ) {
-      console.log(`  router: ${router.provider} armed (${router.mode}) — a real run may re-class`)
-    }
+  let lane: LoopLane
+  try {
+    lane = await resolveBeadLane(ctx, top, { router: false })
+  } catch (err) {
+    console.log(`  route: ${err instanceof Error ? err.message : String(err)}`)
+    return undefined
   }
-  const w = lane.worker
-  if (lane.class !== undefined) {
-    console.log(`  class: ${lane.class}`)
+  const router = ctx.env.fleet?.router
+  if (
+    router !== undefined &&
+    router.mode !== 'off' &&
+    ctx.sel.class === undefined &&
+    ctx.beadsDir !== undefined &&
+    classLabelOf(top) === undefined
+  ) {
+    console.log(`  router: ${router.provider} armed (${router.mode}) — a real run may re-class`)
   }
-  if (lane.provider !== undefined) {
-    console.log(`  provider: ${laneLabel(lane)}`)
-  }
-  console.log(
-    `  agent: ${
-      w?.kind === 'argv'
-        ? [...w.argv, item.promptFile].map(shRender).join(' ')
-        : expandAgentCmd(laneCommand(ctx, lane), item.promptFile)
-    }`
-  )
+  return lane
 }
 
 /** Project scope for the queue — a failed prefix lookup is reported
