@@ -63,7 +63,7 @@ queued ──claim──> claimed ──spawn──> working ──pr-open──
   │                 │                      ▼
   │                 │                    merged ──> closed
   │                 │
-  │                 └── (every non-terminal state) ──park──> parked
+  │                 └── (every active state) ──park──> parked
   │                                                        │ release
   └────────────────────────────────────────────────────────┘
   (any non-terminal state) ──────────────────────────────> lost
@@ -87,10 +87,12 @@ queued ──claim──> claimed ──spawn──> working ──pr-open──
   state — it either lands (`merged`) or bounces back to `gate_blocked`.
 - `parked` — explicitly suspended with a resume payload (the
   interrupter state); `release` returns it to `queued`. **Every**
-  non-terminal state may park — `working` and `pr_open` are the common
-  real-world suspension points (a worker interrupted mid-flight, a PR
-  waiting on a human); `park` records the suspend-from state and the
-  wake predicate so `release` can report what it interrupted.
+  active (non-terminal, non-settled) state may park — `merged` and
+  `closed` cannot (nothing remains to suspend). `working` and
+  `pr_open` are the common real-world suspension points (a worker
+  interrupted mid-flight, a PR waiting on a human); `park` records the
+  suspend-from state and the wake predicate so `release` can report
+  what it interrupted.
 - `lost` — lease expired or worker dead mid-flight. The sweep reaps
   the record; **re-queue is owned by the loop policy**: `lost →
   queued` fires only when the item's claim lease has expired AND its
