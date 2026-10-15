@@ -63,6 +63,10 @@ export type SinkRequestBuilder = (
  *  unregistered type takes the generic {url,body} path below. */
 const sinkBuilders = new Map<string, SinkRequestBuilder>()
 
+/** Types whose wire shape the generic path below knows — every other
+ *  type without a registered builder reports unwired, not "no url". */
+const GENERIC_SINK_TYPES = new Set<string>(['slack', 'webhook'])
+
 export function registerSinkBuilder(type: string, build: SinkRequestBuilder): void {
   sinkBuilders.set(type, build)
 }
@@ -136,7 +140,22 @@ export function requestFor(
   // path below is the contract for url/urlEnv sinks
   const build = sinkBuilders.get(sink.type)
   if (build !== undefined) {
-    return build(sink, event, env)
+    try {
+      return build(sink, event, env)
+    } catch {
+      // a throwing builder is a policy bug — report it like any refused
+      // endpoint; the contract is "requestFor never throws"
+      return { refused: `builder for '${sink.type}' threw` }
+    }
+  }
+  // a non-generic type with no builder and no endpoint fields is unwired
+  // — say so plainly instead of a misleading "env url not set"
+  if (
+    !GENERIC_SINK_TYPES.has(sink.type) &&
+    sink.url === undefined &&
+    sink.urlEnv === undefined
+  ) {
+    return { refused: `no request builder registered for sink type '${sink.type}'` }
   }
   // `urlEnv` when named is the whole channel — falling back to a
   // literal `url` would post events to a stale endpoint the operator

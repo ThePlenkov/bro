@@ -183,6 +183,28 @@ describe('requestFor', () => {
     )
   })
 
+  test('a throwing builder is a refused row — requestFor never throws', () => {
+    registerSinkBuilder('webhook', () => {
+      throw new Error('builder boom')
+    })
+    try {
+      assert.deepEqual(requestFor({ type: 'webhook', url: 'https://h.test/x' }, EVENT, env), {
+        refused: "builder for 'webhook' threw",
+      })
+    } finally {
+      unregisterSinkBuilder('webhook')
+    }
+  })
+
+  test('an unregistered non-generic type reports unwired, not missing url', () => {
+    // telegram's builder lives in the cli layer — a bare core consumer
+    // gets an honest refusal, not "env url not set"
+    assert.deepEqual(
+      requestFor({ type: 'telegram', tokenEnv: 'T', chatId: '1' }, EVENT, env),
+      { refused: "no request builder registered for sink type 'telegram'" }
+    )
+  })
+
   test('an env-resolved http endpoint is refused — the URL is a declared secret', () => {
     const e = { HOOK: 'http://insecure.internal/hook' } as unknown as NodeJS.ProcessEnv
     assert.deepEqual(requestFor({ type: 'slack', urlEnv: 'HOOK' }, EVENT, e), {
