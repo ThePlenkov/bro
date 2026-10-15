@@ -17,6 +17,8 @@
     "restore",
     "---Extend---",
     "plugins",
-    "packages"
+    "packages",
+    "---Design---",
+    "...design"
   ]
 }
