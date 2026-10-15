@@ -169,6 +169,29 @@ function withEnv(opts: EnvOpts, fn: (dir: string) => void): Promise<void> {
   })
 }
 
+/** The two-file fixture the conductor guard reads as "live endpoint +
+ *  client riding it": serve.json under .git/bro, the client's
+ *  ANTHROPIC_BASE_URL under .claude — `baseUrl` may differ from
+ *  serveUrl when the test exercises loopback-alias equality, extraEnv
+ *  merges into the client settings. */
+function liveServeClient(
+  dir: string,
+  serveUrl: string,
+  baseUrl = serveUrl,
+  extraEnv: Record<string, string> = {}
+): void {
+  mkdirSync(join(dir, '.git', 'bro'), { recursive: true })
+  writeFileSync(
+    join(dir, '.git', 'bro', 'serve.json'),
+    JSON.stringify({ pid: process.pid, url: serveUrl, dir, startedAt: 'x', token: 't' })
+  )
+  mkdirSync(join(dir, '.claude'), { recursive: true })
+  writeFileSync(
+    join(dir, '.claude', 'settings.local.json'),
+    JSON.stringify({ env: { ANTHROPIC_BASE_URL: baseUrl, ...extraEnv } })
+  )
+}
+
 const byName = (checks: DoctorCheck[], name: string): DoctorCheck =>
   checks.find((c) => c.name === name)!
 
@@ -896,17 +919,7 @@ describe('bro doctor', () => {
         env: { BRO_PROVIDER_BACKEND: 'devin-acp' },
       },
       (dir) => {
-        const url = 'http://127.0.0.1:44927'
-        mkdirSync(join(dir, '.git', 'bro'), { recursive: true })
-        writeFileSync(
-          join(dir, '.git', 'bro', 'serve.json'),
-          JSON.stringify({ pid: process.pid, url, dir, startedAt: 'x', token: 't' })
-        )
-        mkdirSync(join(dir, '.claude'), { recursive: true })
-        writeFileSync(
-          join(dir, '.claude', 'settings.local.json'),
-          JSON.stringify({ env: { ANTHROPIC_BASE_URL: url } })
-        )
+        liveServeClient(dir, 'http://127.0.0.1:44927')
         const c = byName(runDoctorChecks(dir), 'conductor')
         assert.equal(c.status, 'warn', JSON.stringify(c))
         assert.match(c.detail, /acp conductor \(providers\.devin-acp\)/)
@@ -924,18 +937,7 @@ describe('bro doctor', () => {
       },
       (dir) => {
         const url = 'http://127.0.0.1:44927'
-        mkdirSync(join(dir, '.git', 'bro'), { recursive: true })
-        writeFileSync(
-          join(dir, '.git', 'bro', 'serve.json'),
-          JSON.stringify({ pid: process.pid, url, dir, startedAt: 'x', token: 't' })
-        )
-        mkdirSync(join(dir, '.claude'), { recursive: true })
-        writeFileSync(
-          join(dir, '.claude', 'settings.local.json'),
-          JSON.stringify({
-            env: { ANTHROPIC_BASE_URL: url, ANTHROPIC_DEFAULT_HAIKU_MODEL: 'claude-haiku-4-5' },
-          })
-        )
+        liveServeClient(dir, url, url, { ANTHROPIC_DEFAULT_HAIKU_MODEL: 'claude-haiku-4-5' })
         const c = byName(runDoctorChecks(dir), 'conductor')
         assert.equal(c.status, 'ok', JSON.stringify(c))
       }
@@ -992,16 +994,7 @@ describe('bro doctor', () => {
         env: { BRO_PROVIDER_BACKEND: 'devin-acp' },
       },
       (dir) => {
-        mkdirSync(join(dir, '.git', 'bro'), { recursive: true })
-        writeFileSync(
-          join(dir, '.git', 'bro', 'serve.json'),
-          JSON.stringify({ pid: process.pid, url: 'http://127.0.0.1:44927', dir, startedAt: 'x', token: 't' })
-        )
-        mkdirSync(join(dir, '.claude'), { recursive: true })
-        writeFileSync(
-          join(dir, '.claude', 'settings.local.json'),
-          JSON.stringify({ env: { ANTHROPIC_BASE_URL: 'http://localhost:44927/' } })
-        )
+        liveServeClient(dir, 'http://127.0.0.1:44927', 'http://localhost:44927/')
         const c = byName(runDoctorChecks(dir), 'conductor')
         assert.equal(c.status, 'warn', JSON.stringify(c))
         assert.match(c.detail, /acp conductor \(providers\.devin-acp\)/)
@@ -1018,17 +1011,7 @@ describe('bro doctor', () => {
         env: { BRO_PROVIDER_BACKEND: 'devin-acp' },
       },
       (dir) => {
-        const url = 'http://203.0.113.9:44927'
-        mkdirSync(join(dir, '.git', 'bro'), { recursive: true })
-        writeFileSync(
-          join(dir, '.git', 'bro', 'serve.json'),
-          JSON.stringify({ pid: process.pid, url, dir, startedAt: 'x', token: 't' })
-        )
-        mkdirSync(join(dir, '.claude'), { recursive: true })
-        writeFileSync(
-          join(dir, '.claude', 'settings.local.json'),
-          JSON.stringify({ env: { ANTHROPIC_BASE_URL: url } })
-        )
+        liveServeClient(dir, 'http://203.0.113.9:44927')
         const c = byName(runDoctorChecks(dir), 'conductor')
         assert.equal(c.status, 'ok', JSON.stringify(c))
       }
