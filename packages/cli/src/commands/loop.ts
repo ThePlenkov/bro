@@ -154,6 +154,7 @@ import {
   type ReadyBead,
 } from './next.ts'
 import type { NextPlan } from './next-plan.ts'
+import { rigNext } from './rig-next.ts'
 
 interface Ctx {
   /** Review facade bound to the main checkout — host calls follow the
@@ -2897,15 +2898,36 @@ function claimClump(
   // only re-probes the store so a raced-away bead still skips down the
   // candidate chain exactly as claimUpTo's claim loop did.
   let statuses: Map<string, string> | undefined
-  const lead =
-    ctx.agents === undefined
-      ? claimUpTo(candidates, 1, ctx.root)[0]
-      : candidates.find((b) => {
-          // lazily fetched — the claimUpTo path probes on its own and
-          // must not pay an extra batch read it never reads
-          const s = (statuses ??= beadStatuses(ctx, candidates)).get(b.id)
-          return s !== 'in_progress' && s !== 'closed'
-        })
+  // The engine's verdict gates the pick (spec bro-oy3k1.6): a parked
+  // frame, a live registry worker, or a foreign/dep-held claim are not
+  // claimable even when raw status still reads open. `gate` IS
+  // claimable — the loop owns the re-attach contract (a woken park
+  // with a PR up must rejoin that gate, not orphan it). Probed lazily
+  // — one `bd ready`+`bd show` per candidate, only until the first
+  // claimable.
+  const step = (b: ReadyBead): boolean => {
+    const v = rigNext(ctx.root, b.id).verdict
+    return v === 'step' || v === 'gate'
+  }
+  let lead: ReadyBead | undefined
+  if (ctx.agents === undefined) {
+    for (const b of candidates) {
+      if (!step(b)) {
+        continue
+      }
+      lead = claimUpTo([b], 1, ctx.root)[0]
+      if (lead !== undefined) {
+        break
+      }
+    }
+  } else {
+    lead = candidates.find((b) => {
+      // lazily fetched — a cheap status prefetch ahead of the verdict
+      // probe, which costs the ready/show reads
+      const s = (statuses ??= beadStatuses(ctx, candidates)).get(b.id)
+      return s !== 'in_progress' && s !== 'closed' && step(b)
+    })
+  }
   if (!lead) {
     if (foreign > 0) {
       say(ctx, `loop: ${foreign} foreign-scope bead(s) remain — not claimable in this project`)

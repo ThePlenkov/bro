@@ -25,6 +25,7 @@ import {
   readHostState,
   spawnLog,
   waitFor,
+  writeBeads,
   writeHostState,
 } from './testrepo.ts'
 
@@ -266,6 +267,35 @@ describe('bro drive — ci/sast blockers on orphaned PRs (bro-atb2g)', () => {
       assert.match(second.detail ?? '', /sast fx-/)
       assert.equal(await waitFor(() => spawnLog(f.main).includes('sast')), true)
       assert.match(spawnLog(f.main), /sast left findings \(noop\)/)
+    })
+  })
+
+  test('a parked fixer bead refuses the spawn — the verdict ladder owns the park (bro-oy3k1.6)', async () => {
+    const f = fixture()
+    await insideAsync(f.main, f.root, async () => {
+      git(['branch', 'work/fx-a'], f.main)
+      writeHostState(f.hostState, { prs: ciFailing })
+      // a human shelved this PR's fixer — the `waiting` label is the
+      // park, and the spawn path must refuse rather than resurrect it
+      writeBeads(f.db, [
+        {
+          id: 'fix-1',
+          title: 'review fixer — PR #7',
+          status: 'open',
+          issue_type: 'task',
+          labels: ['fixer', 'waiting'],
+          external_ref: 'drive:pr:7',
+          priority: 2,
+          created_at: new Date().toISOString(),
+        },
+      ])
+      const v = verdict(f.run(['--once', '--json']))
+      assert.equal(v.verdict, 'spawn-refused', v.detail)
+      assert.match(v.detail ?? '', /rig next → wait/)
+      // no spawn, and the parked bead is untouched
+      assert.equal(existsSync(join(f.main, 'spawns.log')), false)
+      assert.equal(fixerRows(f.db).length, 1)
+      assert.equal(fixerRows(f.db)[0]?.status, 'open')
     })
   })
 

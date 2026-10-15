@@ -143,8 +143,10 @@ function gateVerdict(dir: string, id: string, wt: string | undefined): RigNext |
 
 /** The verdict for one item — the ladder from spec .5: done → wait →
  *  gate → live-worker wait → foreign-claim blocked → dep-gated
- *  blocked → step. */
-export function rigNext(dir: string, item?: string): RigNext {
+ *  blocked → step. `opts.gate === false` skips the worktree/PR probe —
+ *  callers that own the gate themselves (drive's fixer spawn,
+ *  spec bro-oy3k1.6) ask for the cheap ladder only. */
+export function rigNext(dir: string, item?: string, opts?: { gate?: boolean }): RigNext {
   const store = taskStore()
   const id = item ?? rigFocus(dir)
   if (id === undefined) {
@@ -161,7 +163,9 @@ export function rigNext(dir: string, item?: string): RigNext {
     return { verdict: 'wait', id, detail: wakePredicate(row) }
   }
   const entry = readAgentRegistry(dir)[id]
-  const settled = agentWait(entry, id) ?? gateVerdict(dir, id, itemWorktree(id, entry))
+  const settled =
+    agentWait(entry, id) ??
+    (opts?.gate === false ? undefined : gateVerdict(dir, id, itemWorktree(id, entry)))
   if (settled !== undefined) {
     return settled
   }

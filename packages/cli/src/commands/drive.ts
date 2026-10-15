@@ -129,6 +129,7 @@ import {
   type WorktreeClaimInfo,
 } from './work.ts'
 import { installDrive, uninstallDrive } from './daemon.ts'
+import { rigNext, type RigNext } from './rig-next.ts'
 import { isOrchestratorSession } from './watch-pulse.ts'
 export { LIVE_MARKER_MS, worktreeClaim, worktreeClaimInfo, worktreeIdleMs } from './work.ts'
 
@@ -1387,6 +1388,27 @@ async function spawnFixerAgent(
         detail:
           `${s.attempt.cls} fixer already exited clean on this head — ` +
           'a pushed head earns a fresh round',
+      }
+    }
+    // The one verdict ladder (spec bro-oy3k1.6): parked, foreign-
+    // claimed, dep-gated, or closed fixer beads refuse the spawn — the
+    // registry dedup can't see a 'waiting' label. The gate probe is
+    // skipped: an open PR on this bead is drive's own premise, and the
+    // host call has no business under the occupancy lock. A probe on a
+    // rig with no store answers nothing — the registry dedup below
+    // stays the net.
+    let rig: RigNext | undefined
+    try {
+      rig = rigNext(ctx.mainRoot, bead.id, { gate: false })
+    } catch {
+      // a probe on a rig with no store answers nothing — proceed
+    }
+    if (rig !== undefined && rig.verdict !== 'step' && rig.verdict !== 'gate') {
+      return {
+        pr,
+        link,
+        verdict: 'spawn-refused',
+        detail: `rig next → ${rig.verdict}${rig.detail === undefined ? '' : ` — ${rig.detail}`}`,
       }
     }
     try {
