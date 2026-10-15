@@ -2879,6 +2879,23 @@ function queueDrained(
   return true
 }
 
+/** The engine's verdict gates the pick (spec bro-oy3k1.6): a parked
+ *  frame, a live registry worker, or a foreign/dep-held claim are not
+ *  claimable even when raw status still reads open. `allowGate` — the
+ *  lead pick keeps `gate` claimable (the loop owns the re-attach
+ *  contract for a woken park with a PR up); clump members join on
+ *  `step` only. The probe reads through the caller's facade store and
+ *  a throwing probe treats the candidate as claimable — racedAway
+ *  stays the guard; a blind probe must not mask work. */
+function claimableByLadder(ctx: Ctx, b: ReadyBead, allowGate: boolean): boolean {
+  try {
+    const v = rigNext(ctx.root, b.id, { store: ctx.tasks }).verdict
+    return v === 'step' || (allowGate && v === 'gate')
+  } catch {
+    return true
+  }
+}
+
 /** Claim the next work item — the top ready bead, plus its compatible
  *  tail when `loop.batch` > 1 (spec bro-nspj7: the clump binds on the
  *  lead's affinity key — spec/epic/area/path — and never reaches past
@@ -2898,26 +2915,10 @@ function claimClump(
   // only re-probes the store so a raced-away bead still skips down the
   // candidate chain exactly as claimUpTo's claim loop did.
   let statuses: Map<string, string> | undefined
-  // The engine's verdict gates the pick (spec bro-oy3k1.6): a parked
-  // frame, a live registry worker, or a foreign/dep-held claim are not
-  // claimable even when raw status still reads open. `gate` IS
-  // claimable — the loop owns the re-attach contract (a woken park
-  // with a PR up must rejoin that gate, not orphan it). Probed lazily
-  // — one `bd ready`+`bd show` per candidate, only until the first
-  // claimable. A probe that cannot read the store must not mask work:
-  // claim stays guarded by racedAway.
-  const claimable = (b: ReadyBead, allowGate = true): boolean => {
-    try {
-      const v = rigNext(ctx.root, b.id, { store: ctx.tasks }).verdict
-      return v === 'step' || (allowGate && v === 'gate')
-    } catch {
-      return true
-    }
-  }
   let lead: ReadyBead | undefined
   if (ctx.agents === undefined) {
     for (const b of candidates) {
-      if (!claimable(b)) {
+      if (!claimableByLadder(ctx, b, true)) {
         continue
       }
       lead = claimUpTo([b], 1, ctx.root)[0]
@@ -2930,7 +2931,7 @@ function claimClump(
       // lazily fetched — a cheap status prefetch ahead of the verdict
       // probe, which costs the ready/show reads
       const s = (statuses ??= beadStatuses(ctx, candidates)).get(b.id)
-      return s !== 'in_progress' && s !== 'closed' && claimable(b)
+      return s !== 'in_progress' && s !== 'closed' && claimableByLadder(ctx, b, true)
     })
   }
   if (!lead) {
@@ -2970,7 +2971,7 @@ function claimClump(
     // members join only on `step` — a `gate` verdict means the
     // member's own PR is already in flight; folding it into this
     // clump would re-work a gated branch (spec bro-oy3k1.6)
-    if (!claimable(m, false)) {
+    if (!claimableByLadder(ctx, m, false)) {
       continue
     }
     try {

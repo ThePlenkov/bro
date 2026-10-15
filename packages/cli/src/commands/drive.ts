@@ -1332,6 +1332,25 @@ function fixerSpent(
     : undefined
 }
 
+/** The one verdict ladder (spec bro-oy3k1.6): a parked, foreign-
+ *  claimed, dep-gated, or closed fixer bead refuses the spawn — the
+ *  registry dedup can't see a 'waiting' label. The gate probe is
+ *  skipped: an open PR on this bead is drive's own premise, and a host
+ *  call has no business under the occupancy lock. A probe on a rig
+ *  with no store answers nothing — the registry dedup stays the net. */
+function fixerVerdictRefusal(root: string, store: Ctx['store'], beadId: string): string | undefined {
+  let rig: RigNext | undefined
+  try {
+    rig = rigNext(root, beadId, { gate: false, store })
+  } catch {
+    return undefined
+  }
+  if (rig.verdict === 'step' || rig.verdict === 'gate') {
+    return undefined
+  }
+  return `rig next → ${rig.verdict}${rig.detail === undefined ? '' : ` — ${rig.detail}`}`
+}
+
 /** The locked spawn ceremony both fixer kinds share — a last occupancy
  *  read right before the spawn (the gap since the pass-level check
  *  covered the worktree create + state refetch, long enough for another
@@ -1390,26 +1409,9 @@ async function spawnFixerAgent(
           'a pushed head earns a fresh round',
       }
     }
-    // The one verdict ladder (spec bro-oy3k1.6): parked, foreign-
-    // claimed, dep-gated, or closed fixer beads refuse the spawn — the
-    // registry dedup can't see a 'waiting' label. The gate probe is
-    // skipped: an open PR on this bead is drive's own premise, and the
-    // host call has no business under the occupancy lock. A probe on a
-    // rig with no store answers nothing — the registry dedup below
-    // stays the net.
-    let rig: RigNext | undefined
-    try {
-      rig = rigNext(ctx.mainRoot, bead.id, { gate: false, store: ctx.store })
-    } catch {
-      // a probe on a rig with no store answers nothing — proceed
-    }
-    if (rig !== undefined && rig.verdict !== 'step' && rig.verdict !== 'gate') {
-      return {
-        pr,
-        link,
-        verdict: 'spawn-refused',
-        detail: `rig next → ${rig.verdict}${rig.detail === undefined ? '' : ` — ${rig.detail}`}`,
-      }
+    const refused = fixerVerdictRefusal(ctx.mainRoot, ctx.store, bead.id)
+    if (refused !== undefined) {
+      return { pr, link, verdict: 'spawn-refused', detail: refused }
     }
     try {
       const info = await spawnStepAgent(ctx.mainRoot, ctx.env, {
