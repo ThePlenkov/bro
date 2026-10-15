@@ -9,9 +9,9 @@ Axes: `PLUGINS` registry (`packages/cli/src/plugins.ts`, 50 entries) ×
 
 act, debt, watch, drive, cleanup, convoy, next, loop, stack, fleet,
 agents, status, daemon, serve, pulse, rig, resume, notify, sinks, bus,
-drill (+unwind alias), retrospect (+wtf alias), learn, judge, guard,
+drill (+unwind alias), retrospect (+wtf alias), learn, judge,
 docs (task/store verbs), work, stamp, spec (sdd), hooks, providers,
-check, sync, sweep, query, plan/run, plugins, setup, doctor — 41
+check, sync, sweep, query, plan/run, plugins, setup, doctor — 40
 surfaces land under `commands/*.md` or `utility.md`.
 
 ### Internal by design — no user docs wanted
