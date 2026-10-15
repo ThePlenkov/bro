@@ -1111,6 +1111,58 @@ function endpointKey(u: string): string {
   return t.toLowerCase()
 }
 
+/** Everything one client-source warn needs from the conductor probe —
+ *  resolved once per doctor run, read-only for each source. */
+interface ClassifierCtx {
+  serve?: { url: string; pid: number }
+  conductor?: string
+  ids: Map<string, string[]>
+  acpNames: Set<string>
+  nonAcpNames: Set<string>
+}
+
+/** One client source → its warn row(s). A live-endpoint hit outranks
+ *  bare pin hits: the classifier rides the same base url (no separate
+ *  URL knob exists), so the conductor answer is the live one. */
+function classifierSrcWarns(src: ClientSource, ctx: ClassifierCtx): DoctorCheck[] {
+  const base = src.env['ANTHROPIC_BASE_URL']
+  const hits = classifierPins(src).flatMap(([knob, v]) => {
+    const names = acpWireProviders(v, ctx.ids, ctx.acpNames, ctx.nonAcpNames)
+      .map((n) => 'providers.' + n)
+      .join(', ')
+    return names === '' ? [] : [`${knob}=${v} → ${names}`]
+  })
+  if (
+    ctx.serve !== undefined &&
+    ctx.conductor !== undefined &&
+    base !== undefined &&
+    endpointKey(base) === endpointKey(ctx.serve.url)
+  ) {
+    return [
+      check(
+        'conductor',
+        'warn',
+        `${src.label}: ANTHROPIC_BASE_URL → ${ctx.serve.url} is the acp conductor (providers.${ctx.conductor})` +
+          (hits.length > 0
+            ? ` — ${hits.join('; ')}`
+            : ' — the client\u2019s safety classifier rides it too'),
+        'every permission check pays a full session/new and fail-closes — point the classifier lane at a kind:api provider'
+      ),
+    ]
+  }
+  if (hits.length > 0) {
+    return [
+      check(
+        'conductor',
+        'warn',
+        `${src.label}: ${hits.join('; ')} — a classifier model wire only an acp conductor serves`,
+        'session-grade wires deadlock interactive approvals — pin the classifier lane at a kind:api provider'
+      ),
+    ]
+  }
+  return []
+}
+
 /** The guardrail row(s): warn when the endpoint is proven acp-backed
  *  AND a client points its base url at it (the classifier rides the
  *  same endpoint — no separate URL knob exists), or when a classifier
@@ -1126,44 +1178,15 @@ function conductorClassifierChecks(dir: string, root: string | null): DoctorChec
   const serve = liveServeEndpoint(dir)
   const backend = serveBackendName(serve)
   const conductor = backend !== undefined && acpNames.has(backend) ? backend : undefined
-  const ids = acpWireIds(providers)
-  const sources = claudeClientSources(root !== null && root !== dir ? [dir, root] : [dir])
-  const warns: DoctorCheck[] = []
-  for (const src of sources) {
-    const base = src.env['ANTHROPIC_BASE_URL']
-    const endpointLive =
-      serve !== undefined && base !== undefined && endpointKey(base) === endpointKey(serve.url)
-    const hits = classifierPins(src).flatMap(([knob, v]) => {
-      const names = acpWireProviders(v, ids, acpNames, nonAcpNames)
-        .map((n) => 'providers.' + n)
-        .join(', ')
-      return names === '' ? [] : [`${knob}=${v} → ${names}`]
-    })
-    if (endpointLive && conductor !== undefined) {
-      warns.push(
-        check(
-          'conductor',
-          'warn',
-          `${src.label}: ANTHROPIC_BASE_URL → ${serve.url} is the acp conductor (providers.${conductor})` +
-            (hits.length > 0
-              ? ` — ${hits.join('; ')}`
-              : ' — the client\u2019s safety classifier rides it too'),
-          'every permission check pays a full session/new and fail-closes — point the classifier lane at a kind:api provider'
-        )
-      )
-      continue
-    }
-    if (hits.length > 0) {
-      warns.push(
-        check(
-          'conductor',
-          'warn',
-          `${src.label}: ${hits.join('; ')} — a classifier model wire only an acp conductor serves`,
-          'session-grade wires deadlock interactive approvals — pin the classifier lane at a kind:api provider'
-        )
-      )
-    }
+  const ctx: ClassifierCtx = {
+    serve,
+    conductor,
+    ids: acpWireIds(providers),
+    acpNames,
+    nonAcpNames,
   }
+  const sources = claudeClientSources(root !== null && root !== dir ? [dir, root] : [dir])
+  const warns = sources.flatMap((src) => classifierSrcWarns(src, ctx))
   if (warns.length > 0) {
     return warns
   }
