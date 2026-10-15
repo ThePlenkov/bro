@@ -1759,10 +1759,8 @@ describe('resolveSpawnProvider', () => {
     const i = argv.indexOf('acp-worker')
     assert.ok(i > 0, `argv: ${argv.join(' ')}`)
     assert.deepEqual(argv.slice(i + 1), [
-      '--command',
-      'kilo --acp',
-      '--model',
-      'qwen3-coder',
+      '--command=kilo --acp',
+      '--model=qwen3-coder',
       '--auto-approve',
     ])
     assert.equal(pick.worker?.kind === 'argv' ? pick.worker.cliName : undefined, 'kilo')

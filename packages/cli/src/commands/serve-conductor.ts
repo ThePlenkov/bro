@@ -382,6 +382,25 @@ async function readBody(req: IncomingMessage): Promise<string> {
   return body
 }
 
+/** Body read + JSON parse with the api error already written —
+ *  413 over the cap, 400 malformed. undefined = response sent. */
+async function jsonBody(
+  req: IncomingMessage,
+  res: ServerResponse
+): Promise<MessagesRequest | undefined> {
+  try {
+    return JSON.parse(await readBody(req)) as MessagesRequest
+  } catch (err) {
+    apiError(
+      res,
+      err instanceof BodyTooLarge ? 413 : 400,
+      'invalid_request_error',
+      err instanceof BodyTooLarge ? err.message : 'malformed JSON body'
+    )
+    return undefined
+  }
+}
+
 const AVAIL = /unavailable|timeout|timed out/i
 
 async function messages(
@@ -392,15 +411,8 @@ async function messages(
   link: (parent?: OtelCtx) => Promise<AcpPeer>,
   parent?: OtelCtx
 ): Promise<void> {
-  let body: MessagesRequest
-  try {
-    body = JSON.parse(await readBody(req)) as MessagesRequest
-  } catch (err) {
-    if (err instanceof BodyTooLarge) {
-      apiError(res, 413, 'invalid_request_error', err.message)
-      return
-    }
-    apiError(res, 400, 'invalid_request_error', 'malformed JSON body')
+  const body = await jsonBody(req, res)
+  if (body === undefined) {
     return
   }
   const prompt = serializeRequest(body)
@@ -448,11 +460,12 @@ async function messages(
       denied: reply.denied.length,
       titles: reply.denied.join(', ').slice(0, 200),
     })
+    const deniedTitles = reply.denied.map((t) => `"${t}"`).join(', ')
     blocks.push({
       type: 'text',
       text:
         `\n\n[bro conductor: ${reply.denied.length} permission request(s) denied by policy — ` +
-        `no user was prompted: ${reply.denied.map((t) => `"${t}"`).join(', ')}. ` +
+        `no user was prompted: ${deniedTitles}. ` +
         `Allow via BRO_PROVIDER_AUTO_APPROVE / BRO_PROVIDER_PERMISSION_ALLOW or ` +
         `providers.${cfg.backend}.autoApprove/.permissionAllow]`,
     })
@@ -467,12 +480,13 @@ async function messages(
       noAllow: reply.noAllow.length,
       titles: reply.noAllow.join(', ').slice(0, 200),
     })
+    const noAllowTitles = reply.noAllow.map((t) => `"${t}"`).join(', ')
     blocks.push({
       type: 'text',
       text:
         `\n\n[bro conductor: ${reply.noAllow.length} permission request(s) the policy would ` +
         `approve went denied — the agent offered no allow option to select: ` +
-        `${reply.noAllow.map((t) => `"${t}"`).join(', ')}]`,
+        `${noAllowTitles}]`,
     })
   }
   const stopReason = blocks.some((b) => b.type === 'tool_use')

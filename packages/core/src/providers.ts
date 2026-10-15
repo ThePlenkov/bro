@@ -177,13 +177,17 @@ export class ProviderSurfaceError extends Error {
 const str = (v: unknown): string | undefined =>
   typeof v === 'string' && v.trim() !== '' ? v.trim() : undefined
 
+/** The scalar shapes a providers.<name> field may carry — strings,
+ *  bools, and string lists (permissionAllow). */
+type PickedValue = string | boolean | string[]
+
 /** Optional string field — a present-but-blank value drops the field
  *  with a warning, never the entry (the required fields do that). */
 function pickOptStr(
   name: string,
   o: Record<string, unknown>,
   f: string,
-  picked: Record<string, string | boolean | string[]>
+  picked: Record<string, PickedValue>
 ): void {
   const v = o[f]
   if (v === undefined) {
@@ -201,7 +205,7 @@ function pickOptBool(
   name: string,
   o: Record<string, unknown>,
   f: string,
-  picked: Record<string, string | boolean | string[]>
+  picked: Record<string, PickedValue>
 ): void {
   const v = o[f]
   if (v === undefined) {
@@ -221,7 +225,7 @@ function pickOptStrList(
   name: string,
   o: Record<string, unknown>,
   f: string,
-  picked: Record<string, string | boolean | string[]>
+  picked: Record<string, PickedValue>
 ): void {
   const v = o[f]
   if (v === undefined) {
@@ -326,7 +330,7 @@ function parseApiModels(raw: unknown): ModelsParsed {
  *  must sit in the allowlist; a systemone wire needs a key source —
  *  checked here, while the error still names the config field. */
 function parseApiEntry(
-  picked: Record<string, string | boolean | string[]>,
+  picked: Record<string, PickedValue>,
   rawModels: unknown
 ): ModelsParsed {
   const parsed = parseApiModels(rawModels)
@@ -374,8 +378,8 @@ function pickSpecFields(
   name: string,
   spec: ProviderKindSpec,
   o: Record<string, unknown>
-): { picked: Record<string, string | boolean | string[]> } | { err: string } {
-  const picked: Record<string, string | boolean | string[]> = {}
+): { picked: Record<string, PickedValue> } | { err: string } {
+  const picked: Record<string, PickedValue> = {}
   for (const f of spec.required) {
     const v = str(o[f])
     if (v === undefined) {
@@ -433,7 +437,7 @@ export function parseProviderEntry(name: string, raw: unknown): ProviderEntry | 
  *  (config never holds a value); apiKeyCommand must RUN a lookup — an
  *  `echo sk-…`/`printf ts_live_…` "command" smuggles the key into
  *  config, which is the whole point the field exists to prevent. */
-function keySourceErr(picked: Record<string, string | boolean | string[]>): string | null {
+function keySourceErr(picked: Record<string, PickedValue>): string | null {
   if (typeof picked.apiKeyEnv === 'string' && !isEnvName(picked.apiKeyEnv)) {
     return 'apiKeyEnv must NAME an env var (SCREAMING_SNAKE) — config never holds a key value'
   }

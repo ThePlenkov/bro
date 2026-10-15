@@ -62,7 +62,7 @@ describe('resolveLoopLane', () => {
     const argv = argvOf(lane.worker)
     const i = argv.indexOf('acp-worker')
     assert.ok(i > 0, `argv: ${argv.join(' ')}`)
-    assert.deepEqual(argv.slice(i + 1), ['--command', 'devin acp', '--model', 'swe-2'])
+    assert.deepEqual(argv.slice(i + 1), ['--command=devin acp', '--model=swe-2'])
     assert.equal(argv.includes('--auto-approve'), false)
     // provenance badge is the agent cli, not the driver
     assert.equal(lane.worker?.kind === 'argv' ? lane.worker.cliName : undefined, 'devin')
@@ -117,7 +117,7 @@ describe('resolveLoopLane', () => {
     assert.equal(lane.model, 'jev-1.13')
     const argv = argvOf(lane.worker)
     assert.equal(argv.includes('--auto-approve'), true)
-    assert.equal(argv.includes('jev-1.13'), true)
+    assert.equal(argv.includes('--model=jev-1.13'), true)
   })
 
   test('agents.native.provider is the backend default for a bare run', async () => {

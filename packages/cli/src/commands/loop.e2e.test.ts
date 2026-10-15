@@ -759,13 +759,11 @@ describe('bro loop provider lane', () => {
         agent: string
         model: string
       }
-      // `bro acp-worker --command <cmd> --model <m> --auto-approve <pf>`
+      // `bro acp-worker --command=<cmd> --model=<m> --auto-approve <pf>`
       assert.equal(rec.args[0], 'acp-worker')
       assert.deepEqual(rec.args.slice(1, -1), [
-        '--command',
-        'devin acp',
-        '--model',
-        'swe-2',
+        '--command=devin acp',
+        '--model=swe-2',
         '--auto-approve',
       ])
       assert.equal(rec.promptOk, true, `prompt file ${rec.promptFile} missing`)
@@ -858,7 +856,7 @@ describe('bro loop provider lane', () => {
       assert.match(r.stdout, /would claim fx-a/)
       assert.match(r.stdout, /provider: devin/)
       assert.match(r.stdout, /acp-worker/)
-      assert.match(r.stdout, /--command 'devin acp'/)
+      assert.match(r.stdout, /--command=devin acp/)
       assert.equal(bead(f.db, 'fx-a')?.status, 'open')
     })
   })
