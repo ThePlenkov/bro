@@ -1399,7 +1399,7 @@ async function spawnFixerAgent(
     // stays the net.
     let rig: RigNext | undefined
     try {
-      rig = rigNext(ctx.mainRoot, bead.id, { gate: false })
+      rig = rigNext(ctx.mainRoot, bead.id, { gate: false, store: ctx.store })
     } catch {
       // a probe on a rig with no store answers nothing — proceed
     }

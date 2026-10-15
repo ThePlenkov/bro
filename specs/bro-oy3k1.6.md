@@ -12,15 +12,22 @@ wires the two policies onto the one ladder.
 a live registry agent without a re-stamped claim (`wait`), a parked
 frame (`wait`), a dep-gated or foreign-claimed row (`blocked`).
 
-Fold: a candidate is claimable iff `rigNext(root, id).verdict ∈
-{step, gate}`. `step` is obvious; `gate` stays claimable because the
-loop owns the *re-attach* contract — a woken park whose branch already
-carries an open PR must be re-claimed so the loop rejoins that gate
-(merging + closing the bead), not skipped into an orphaned PR. What
+Fold: a **lead** candidate is claimable iff `rigNext(root, id,
+{store: ctx.tasks}).verdict ∈ {step, gate}`. `step` is obvious;
+`gate` stays claimable because the loop owns the *re-attach*
+contract — a woken park whose branch already carries an open PR must
+be re-claimed so the loop rejoins that gate (merging + closing the
+bead), not skipped into an orphaned PR. **Clump members** are stricter
+— `step` only: a `gate` member already has its own PR in flight, and
+folding it into the lead's clump would re-work a gated branch. What
 the fold excludes is `wait`/`blocked`/`done`: parked frames, live
 workers, foreign claims, dep-gates — the work another plane owns.
 The worktree/gate probe costs a host call only for items that
-actually have a worktree (fresh beads skip it by construction).
+actually have a worktree (fresh beads skip it by construction). The
+probe reads through `ctx.tasks` (the facade-resolved store), so a
+non-beads `connectors.tasks` backend answers the same verdicts; a
+probe that throws treats the candidate as claimable — racedAway stays
+the guard, a blind probe must not mask work.
 
 ## Drive — the fixer spawn respects `wait`/`blocked`
 
