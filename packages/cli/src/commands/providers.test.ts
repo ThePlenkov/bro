@@ -2,7 +2,7 @@
 import { test, describe } from 'node:test'
 import assert from 'node:assert/strict'
 import type { SessionConfigOption } from '@agentclientprotocol/sdk'
-import { fakeAcpAgent } from '@broject/providers'
+import { fakeAcpAgent } from '@broject/providers/testkit'
 import { runProvidersCommand } from './providers.ts'
 import { capture } from './testrepo.ts'
 
