@@ -35,7 +35,19 @@ function needId(rest: string[], sub: string): string {
     console.error(`error: queue ${sub} requires exactly one bead id`)
     process.exit(2)
   }
-  return ids[0]!
+  return ids[0] as string
+}
+
+/** An integer flag or a syntax error — never a silent NaN. */
+function intFlag(argv: string[], name: string): number | undefined {
+  const raw = flag(argv, name)
+  if (raw === undefined) return undefined
+  const n = Number(raw)
+  if (!Number.isInteger(n)) {
+    console.error(`error: ${name} must be an integer, got "${raw}"`)
+    process.exit(2)
+  }
+  return n
 }
 
 function run(fn: () => void): void {
@@ -47,7 +59,55 @@ function run(fn: () => void): void {
   }
 }
 
-export async function runQueueCommand(argv: string[]): Promise<void> {
+function cmdLs(rest: string[]): void {
+  const frame = queueScope(flag(rest, '--under'))
+  const items = queueItems(frame)
+  if (items.length === 0) {
+    console.log(`queue ${frame}: empty`)
+    return
+  }
+  console.log(`queue ${frame}:`)
+  for (const i of items) console.log(`  ${i.rank}\t${i.id}\t${i.title}`)
+}
+
+function cmdDrill(rest: string[]): void {
+  const id = needId(rest, 'drill')
+  run(() => {
+    const { frame } = queueDrill(id)
+    console.log(`drill ↓ ${frame.id} ${frame.title}`)
+  })
+}
+
+function cmdBump(rest: string[]): void {
+  const id = needId(rest, 'bump')
+  const to = intFlag(rest, '--to')
+  run(() => {
+    const rank = queueBump(id, { under: flag(rest, '--under'), to })
+    console.log(`${id} → rank ${rank}`)
+  })
+}
+
+function cmdRm(rest: string[]): void {
+  const id = needId(rest, 'rm')
+  run(() => {
+    queueDrop(id, { under: flag(rest, '--under') })
+    console.log(`dequeued ${id}`)
+  })
+}
+
+function cmdIntake(words: string[]): void {
+  const priority = intFlag(words, '--priority')
+  run(() => {
+    const { row, frame, rank } = queueAdd(positionalsOf(words).join(' '), {
+      under: flag(words, '--under'),
+      description: flag(words, '--description'),
+      priority,
+    })
+    console.log(`queued ${row.id} → ${frame} rank ${rank}`)
+  })
+}
+
+export function runQueueCommand(argv: string[]): void {
   const [sub, ...rest] = argv
   if (sub === '--help' || sub === '-h') usage(0)
   const subs = new Set(['ls', 'drill', 'bump', 'rm', 'add'])
@@ -59,61 +119,25 @@ export async function runQueueCommand(argv: string[]): Promise<void> {
   }
   checkBeads()
 
-  if (sub === undefined || sub === 'ls') {
-    const frame = queueScope(sub === 'ls' ? flag(rest, '--under') : undefined)
-    const items = queueItems(frame)
-    if (items.length === 0) {
-      console.log(`queue ${frame}: empty`)
+  switch (sub) {
+    case undefined:
+    case 'ls':
+      cmdLs(rest)
       return
-    }
-    console.log(`queue ${frame}:`)
-    for (const i of items) console.log(`  ${i.rank}\t${i.id}\t${i.title}`)
-    return
+    case 'drill':
+      cmdDrill(rest)
+      return
+    case 'bump':
+      cmdBump(rest)
+      return
+    case 'rm':
+      cmdRm(rest)
+      return
+    // intake: `queue <subject…>` or `queue add <subject…>`
+    case 'add':
+      cmdIntake(rest)
+      return
+    default:
+      cmdIntake(argv)
   }
-  if (sub === 'drill') {
-    const id = needId(rest, sub)
-    run(() => {
-      const { frame } = queueDrill(id)
-      console.log(`drill ↓ ${frame.id} ${frame.title}`)
-    })
-    return
-  }
-  if (sub === 'bump') {
-    const id = needId(rest, sub)
-    const toRaw = flag(rest, '--to')
-    const to = toRaw === undefined ? undefined : Number(toRaw)
-    if (to !== undefined && !Number.isInteger(to)) {
-      console.error(`error: --to must be an integer, got "${toRaw}"`)
-      process.exit(2)
-    }
-    run(() => {
-      const rank = queueBump(id, { under: flag(rest, '--under'), to })
-      console.log(`${id} → rank ${rank}`)
-    })
-    return
-  }
-  if (sub === 'rm') {
-    const id = needId(rest, sub)
-    run(() => {
-      queueDrop(id, { under: flag(rest, '--under') })
-      console.log(`dequeued ${id}`)
-    })
-    return
-  }
-  // intake: `queue <subject…>` or `queue add <subject…>`
-  const words = sub === 'add' ? rest : argv
-  const priorityRaw = flag(words, '--priority')
-  const priority = priorityRaw === undefined ? undefined : Number(priorityRaw)
-  if (priority !== undefined && !Number.isInteger(priority)) {
-    console.error(`error: --priority must be an integer, got "${priorityRaw}"`)
-    process.exit(2)
-  }
-  run(() => {
-    const { row, frame, rank } = queueAdd(positionalsOf(words).join(' '), {
-      under: flag(words, '--under'),
-      description: flag(words, '--description'),
-      priority,
-    })
-    console.log(`queued ${row.id} → ${frame} rank ${rank}`)
-  })
 }

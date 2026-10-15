@@ -65,7 +65,10 @@ export function queueAdd(
   }
   const frame = queueScope(opts.under)
   const items = queueItems(frame)
-  const rank = (items.at(-1)?.rank ?? 0) + RANK_STEP
+  // an unranked member sorts at MAX_SAFE_INTEGER — stepping off it
+  // overflows; +1 keeps it representable instead
+  const last = items.at(-1)?.rank ?? 0
+  const rank = last >= Number.MAX_SAFE_INTEGER - RANK_STEP ? last + 1 : last + RANK_STEP
   const row = taskStore().create<DrillRow>({
     title: trimmed,
     type: 'task',
@@ -85,7 +88,11 @@ export function queueBump(id: string, opts: { under?: string; to?: number } = {}
   if (!row || !isOpen(row) || !(row.labels ?? []).includes(queueLabel(frame))) {
     throw new Error(`${id} is not on ${frame}'s queue`)
   }
-  const rank = opts.to ?? Math.min(...queueItems(frame).map((i) => i.rank)) - RANK_STEP
+  const items = queueItems(frame)
+  // Math.min over an empty queue is Infinity — qrank:Infinity then
+  // fails rankOf's isInteger and silently sorts last, inverting bump
+  const min = items.length > 0 ? Math.min(...items.map((i) => i.rank)) : RANK_STEP
+  const rank = opts.to ?? min - RANK_STEP
   const old = row.labels!.find((l) => l.startsWith(RANK_LABEL_PREFIX))
   if (old !== undefined) {
     taskStore().update(id, { 'remove-label': old })
@@ -102,10 +109,13 @@ export function queueDrop(id: string, opts: { under?: string } = {}): void {
   if (!row || !(row.labels ?? []).includes(queueLabel(frame))) {
     throw new Error(`${id} is not on ${frame}'s queue`)
   }
-  for (const l of row.labels ?? []) {
-    if (l.startsWith(QUEUE_LABEL_PREFIX) || l.startsWith(RANK_LABEL_PREFIX)) {
-      taskStore().update(id, { 'remove-label': l })
-    }
+  // snapshot first — iterating row.labels while update() mutates the
+  // store's array in place would skip every second matching label
+  const toRemove = (row.labels ?? []).filter(
+    (l) => l.startsWith(QUEUE_LABEL_PREFIX) || l.startsWith(RANK_LABEL_PREFIX)
+  )
+  for (const l of toRemove) {
+    taskStore().update(id, { 'remove-label': l })
   }
 }
 
