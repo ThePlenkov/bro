@@ -20,7 +20,6 @@ import {
   queueItems,
   queueScope,
   WAITING_LABEL,
-  type DrillRow,
 } from '@broject/drill'
 import { worktreePathFor, mainWorktree } from './work.ts'
 
@@ -74,10 +73,21 @@ export function rigNext(dir: string, item?: string): RigNext {
   if (row.labels?.includes(WAITING_LABEL)) {
     return { verdict: 'wait', id, detail: wakePredicate(row) }
   }
+  const entry = readAgentRegistry(dir)[id]
+  // a live registry agent owns the step — a signal re-enters. Checked
+  // ahead of the PR plane: a fixer mid-flight keeps the item at wait
+  // even while its PR is open or settled
+  if (
+    entry !== undefined &&
+    entry.stopped !== true &&
+    typeof entry.pid === 'number' &&
+    pidAlive(entry.pid, typeof entry.pidStart === 'string' ? entry.pidStart : undefined)
+  ) {
+    return { verdict: 'wait', id, detail: `agent ${entry.agentId} in flight` }
+  }
   // gate — an open PR on the item's worktree branch moves the next
   // transition to the gate (threads/CI/human), ahead of claim reads:
   // a claimed item with a PR up is decided by the gate, not by work
-  const entry = readAgentRegistry(dir)[id]
   let wt = entry?.worktree
   if (wt === undefined) {
     try {
@@ -88,39 +98,29 @@ export function rigNext(dir: string, item?: string): RigNext {
     }
   }
   if (typeof wt === 'string' && existsSync(wt)) {
-    const branch =
-      gitTry(['-C', wt, 'branch', '--show-current']).out.trim() || `work/${id}`
-    try {
-      const rev = reviewHost(
-        dir,
-        (loadConfig(dir) as { connectors?: Record<string, string> }).connectors
-      )
-      const open = rev.prsForBranch(branch)
-      if (open.length > 0) {
-        return { verdict: 'gate', id, detail: `pr=#${open[0]}` }
+    // a detached/failed branch read means the PR association is
+    // unknowable — skip the probe rather than guess a branch name
+    const branch = gitTry(['-C', wt, 'branch', '--show-current']).out.trim()
+    if (branch !== '') {
+      try {
+        const rev = reviewHost(
+          dir,
+          (loadConfig(dir) as { connectors?: Record<string, string> }).connectors
+        )
+        const open = rev.prsForBranch(branch)
+        if (open.length > 0) {
+          return { verdict: 'gate', id, detail: `pr=#${open[0]}` }
+        }
+        // a merged PR + still-open bead is the cleanup edge — the next
+        // step is finalization, not work
+        if (rev.prsForBranch(branch, 'all').length > 0) {
+          return { verdict: 'step', id, detail: 'pr settled — close/ledger' }
+        }
+      } catch {
+        // the host is unreachable — fall through to the claim ladder;
+        // the next re-entry sees the gate again
       }
-      // a merged PR + still-open bead is the cleanup edge — the next
-      // step is finalization, not work
-      if (
-        row.status !== 'in_progress' &&
-        rev.prsForBranch(branch, 'all').length > 0 &&
-        open.length === 0
-      ) {
-        return { verdict: 'step', id, detail: 'pr settled — close/ledger' }
-      }
-    } catch {
-      // the host is unreachable — fall through to the claim ladder;
-      // the next re-entry sees the gate again
     }
-  }
-  // a live registry agent owns the step — a signal re-enters
-  if (
-    entry !== undefined &&
-    entry.stopped !== true &&
-    typeof entry.pid === 'number' &&
-    pidAlive(entry.pid, typeof entry.pidStart === 'string' ? entry.pidStart : undefined)
-  ) {
-    return { verdict: 'wait', id, detail: `agent ${entry.agentId} in flight` }
   }
   if (row.status === 'in_progress') {
     const actor = bdActor(dir)

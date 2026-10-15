@@ -73,7 +73,8 @@ describe('bro rig next — the re-entry verb', () => {
     ])
     // live agent — a real pid the probe can verify
     const sleeper = spawn('sleep', ['30'], { stdio: 'ignore' })
-    const sleeperPid = sleeper.pid!
+    assert.ok(sleeper.pid !== undefined, 'sleep process did not start')
+    const sleeperPid = sleeper.pid
     try {
       const agentsDir = join(main, '.git', 'bro')
       mkdirSync(agentsDir, { recursive: true })
