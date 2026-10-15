@@ -52,7 +52,7 @@ import {
   type FreshnessConfig,
 } from './postmerge.ts'
 import { rigSection, type RigConfig } from './rig-config.ts'
-import { rigNext } from './rig-next.ts'
+import { runRigNext } from './rig-next.ts'
 import {
   armRigPulse,
   disarmRigPulse,
@@ -622,15 +622,7 @@ export async function runRigCommand(argv: string[]): Promise<void> {
     cmdStatus(resolved, argv)
   }
   if (sub === 'next') {
-    // the engine's re-entry verb — a pure read over durable state,
-    // no repo-sync resolution needed (rig-pulse's `--repo` contract)
-    const n = rigNext(cwd, pos[1])
-    if (argv.includes('--json')) {
-      console.log(JSON.stringify(n))
-    } else {
-      console.log(`rig next: ${n.verdict}${n.id === undefined ? '' : ` ${n.id}`}${n.detail === undefined ? '' : ` — ${n.detail}`}`)
-    }
-    process.exit(n.verdict === 'blocked' ? 1 : 0)
+    runRigNext(cwd, pos[1], argv.includes('--json') || argv.some((a) => a.startsWith('--json=')))
   }
   if (sub === 'watch') {
     await cmdWatch(argv, cfg, resolved)

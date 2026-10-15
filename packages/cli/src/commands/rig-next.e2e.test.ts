@@ -3,11 +3,12 @@
  *  queue labels, waiting frames, the forge — through the spawned CLI. */
 import { describe, test } from 'node:test'
 import assert from 'node:assert/strict'
-import { spawn, spawnSync } from 'node:child_process'
+import { spawn } from 'node:child_process'
 import { existsSync, mkdirSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import {
   e2eRepo,
+  git,
   installFakeHost,
   runCli,
   writeHostState,
@@ -69,6 +70,7 @@ describe('bro rig next — the re-entry verb', () => {
   test('a live registry agent reports wait; an open PR reports gate', () => {
     const { main, env } = e2eRepo('bro-rignext-e2e-', [
       { id: 'a-1', title: 'in flight', status: 'in_progress', assignee: 'tester' },
+      { id: 'r-1', title: 'remote worker', status: 'in_progress', assignee: 'tester' },
       { id: 'g-1', title: 'pr up', status: 'open' },
     ])
     // live agent — a real pid the probe can verify
@@ -87,11 +89,22 @@ describe('bro rig next — the re-entry verb', () => {
             spawnedAt: new Date().toISOString(),
             pid: sleeperPid,
           },
+          // a remote backend — no pid handle; absent a recorded death
+          // the entry reads in-flight
+          'r-1': {
+            agentId: 'devin-zz',
+            backend: 'devin',
+            spawnedAt: new Date().toISOString(),
+            sessionId: 'sess-1',
+          },
         })
       )
       const live = rig(main, env, ['next', 'a-1'])
       assert.equal(live.code, 0)
       assert.match(live.stdout, /rig next: wait a-1 — agent native-zz in flight/)
+      const remote = rig(main, env, ['next', 'r-1'])
+      assert.equal(remote.code, 0)
+      assert.match(remote.stdout, /rig next: wait r-1 — agent devin-zz in flight/)
     } finally {
       sleeper.kill('SIGKILL')
     }
@@ -102,7 +115,7 @@ describe('bro rig next — the re-entry verb', () => {
       JSON.stringify({ plugins: ['./fakehost.ts'], connectors: { reviews: 'fakehost' } })
     )
     const wt = join(main, '..', 'main--g-1')
-    assert.equal(spawnSync('git', ['worktree', 'add', '-b', 'work/g-1', wt], { cwd: main }).status, 0)
+    git(['worktree', 'add', '-b', 'work/g-1', wt], main)
     assert.ok(existsSync(wt))
     writeHostState(host.state, { prOpened: true, pr: 7 })
     const gate = rig(main, env, ['next', 'g-1'])
