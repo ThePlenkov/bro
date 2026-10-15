@@ -17,6 +17,7 @@ take the deliberate actions.
 | `bro fleet agents status [<id\|step>] [--json] [--connector <name>]` | Read the agent plane or one agent |
 | `bro fleet agents up [<step>] [--connector <name>]` | Bring up a supervisor or spawn/respawn a step |
 | `bro fleet agents down [<id\|step>] [--connector <name>]` | Bring down a supervisor or stop one agent |
+| `bro fleet agents log <id\|step> [--follow] [--lines <N>]` | Tail an agent's recorded `.log` — `--follow` streams it live (truncation and respawn-reopen are reported, never skipped) |
 | `bro fleet agents prune [--connector <name>] [--older-than Nd] [--json]` | Reap terminal registry entries (exited, stopped, crashed); `blocked` stays — a wall-parked worker is still a worker |
 
 The agents facade resolves native detached processes, tmux, and Gas City

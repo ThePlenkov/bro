@@ -1,6 +1,14 @@
 import { describe, test } from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import {
+  appendFileSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  unlinkSync,
+  writeFileSync,
+} from 'node:fs'
 import { spawnSync } from 'node:child_process'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -16,9 +24,11 @@ import { fakeFetch } from '@broject/providers/testkit'
 import { capture, initRepo, installFakeBd, readBeads } from './testrepo.ts'
 import {
   discoverSessions,
+  followLog,
   runAgentsCommand,
   SpawnInputError,
   spawnStepAgent,
+  tailLines,
 } from './agents.ts'
 
 interface Fixture {
@@ -988,6 +998,173 @@ describe('discoverSessions', () => {
       assert.equal(degraded.length, 1)
       assert.match(degraded[0]!, /^devin: /)
     } finally {
+      rmSync(root, { recursive: true, force: true })
+    }
+  })
+})
+
+describe('bro agents log', () => {
+  /** Registry entry with a real log file — the `log` key is
+   *  connector-private and rides the registry untyped into AgentInfo. */
+  const seedLoggedAgent = (fx: Fixture, lines = 5) => {
+    const log = join(fx.root, 'agent.log')
+    writeFileSync(log, Array.from({ length: lines }, (_, i) => `line-${i + 1}`).join('\n') + '\n')
+    writeAgentRegistry(fx.main, {
+      'fx-1': {
+        agentId: 'native-aa11',
+        backend: 'native',
+        spawnedAt: new Date().toISOString(),
+        pid: process.pid,
+        worktree: fx.main,
+        log,
+      },
+    })
+    return log
+  }
+
+  /** capture() hooks console.* — the log tail rides process.stdout.write
+   *  for byte fidelity, so these tests hook stdout themselves. */
+  const captureStdout = async <T>(fn: () => Promise<T>): Promise<{ ret: T; text: string }> => {
+    const orig = process.stdout.write.bind(process.stdout)
+    const chunks: string[] = []
+    process.stdout.write = ((c: string | Uint8Array) => {
+      chunks.push(String(c))
+      return true
+    }) as typeof process.stdout.write
+    try {
+      return { ret: await fn(), text: chunks.join('') }
+    } finally {
+      process.stdout.write = orig
+    }
+  }
+
+  test('prints the tail by ref; --lines bounds the replay, --lines 0 prints nothing', async () => {
+    const fx = fixture()
+    try {
+      const log = seedLoggedAgent(fx)
+      const r = await captureStdout(() => agents(['log', 'fx-1']))
+      assert.equal(r.ret.code, 0)
+      assert.match(r.text, /line-1\n(.*\n)*line-5\n$/)
+      assert.match(r.ret.err.join('\n'), new RegExp(`agent native-aa11 \\(running\\) — ${log}`))
+
+      const two = await captureStdout(() => agents(['log', 'native-aa11', '--lines', '2']))
+      assert.equal(two.ret.code, 0)
+      assert.equal(two.text, 'line-4\nline-5\n')
+
+      const none = await captureStdout(() => agents(['log', 'fx-1', '--lines', '0']))
+      assert.equal(none.ret.code, 0)
+      assert.equal(none.text, '')
+    } finally {
+      fx.restore()
+    }
+  })
+
+  test('misses are named, never invented — unknown ref, no recorded log, reaped file', async () => {
+    const fx = fixture()
+    try {
+      const miss = await agents(['log', 'native-nope'])
+      assert.equal(miss.code, 1)
+      assert.match(miss.err.join('\n'), /no agent "native-nope"/)
+
+      writeAgentRegistry(fx.main, {
+        'fx-bare': {
+          agentId: 'native-bare',
+          backend: 'native',
+          spawnedAt: new Date().toISOString(),
+          pid: process.pid,
+          worktree: fx.main,
+        },
+      })
+      const bare = await agents(['log', 'fx-bare'])
+      assert.equal(bare.code, 1)
+      assert.match(bare.err.join('\n'), /agent native-bare has no recorded log/)
+
+      const gone = join(fx.root, 'gone.log')
+      writeAgentRegistry(fx.main, {
+        'fx-gone': {
+          agentId: 'native-gone',
+          backend: 'native',
+          spawnedAt: new Date().toISOString(),
+          pid: process.pid,
+          worktree: fx.main,
+          log: gone,
+        },
+      })
+      const reaped = await agents(['log', 'fx-gone'])
+      assert.equal(reaped.code, 1)
+      assert.match(reaped.err.join('\n'), /log missing:.*gone\.log — reaped or never written/)
+
+      // a remote backend's attach pointer (copilot sessionUrl) is not
+      // a filesystem path — name it, never a 'reaped' misreport
+      writeAgentRegistry(fx.main, {
+        'fx-remote': {
+          agentId: 'native-rr1',
+          backend: 'native',
+          spawnedAt: new Date().toISOString(),
+          pid: process.pid,
+          worktree: fx.main,
+          log: 'https://github.com/org/repo/copilot/session/x',
+        },
+      })
+      const remote = await agents(['log', 'fx-remote'])
+      assert.equal(remote.code, 1)
+      assert.match(remote.err.join('\n'), /agent native-rr1's log is remote/)
+    } finally {
+      fx.restore()
+    }
+  })
+
+  test('tailLines keeps a trailing partial line and the n bound', () => {
+    assert.equal(tailLines('a\nb\nc\n', 2), 'b\nc\n')
+    assert.equal(tailLines('a\nb\nc', 2), 'b\nc') // died mid-write — no invented newline
+    assert.equal(tailLines('a\nb\n', 0), '')
+    assert.equal(tailLines('', 5), '')
+    assert.equal(tailLines('a\n', 50), 'a\n')
+  })
+
+  test('followLog emits appends, reports truncation, and rides remove/reopen', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'bro-log-follow-'))
+    let handle: ReturnType<typeof followLog> | undefined
+    try {
+      const log = join(root, 'a.log')
+      writeFileSync(log, 'one\n')
+      const data: string[] = []
+      const notes: string[] = []
+      handle = followLog(
+        log,
+        { data: (s) => data.push(s), note: (s) => notes.push(s) },
+        { pollMs: 15, startOffset: 4 }
+      )
+      const until = async (pred: () => boolean) => {
+        for (let i = 0; i < 100 && !pred(); i += 1) {
+          await sleep(10)
+        }
+        assert.ok(pred(), 'followLog never reached the expected state')
+      }
+      appendFileSync(log, 'two\nthree\n')
+      await until(() => data.join('').includes('three'))
+      assert.equal(data.join(''), 'two\nthree\n')
+
+      // janitor tail-cap: file shrinks under the offset — marker + resync from 0
+      writeFileSync(log, 'cap\n')
+      await until(() => notes.some((n) => n.includes('truncated')))
+      await until(() => data.join('').includes('cap'))
+      assert.ok(data.join('').includes('cap\n'))
+
+      // reaped then respawned on the same path — notes both ways, offset resets
+      unlinkSync(log)
+      await until(() => notes.some((n) => n.includes('removed')))
+      writeFileSync(log, 'reborn\n')
+      await until(() => notes.some((n) => n.includes('reopened')))
+      await until(() => data.join('').includes('reborn'))
+
+      handle?.stop()
+      const drained = data.length
+      appendFileSync(log, 'after-stop\n')
+      await sleep(60)
+      assert.equal(data.length, drained)
+    } finally {
+      handle?.stop()
       rmSync(root, { recursive: true, force: true })
     }
   })
