@@ -7,7 +7,7 @@ import { JudgeUnavailable, UnknownProviderError } from '@broject/core'
 import type { JudgeQuestion, ProviderEntry } from '@broject/core'
 import { judgeFacade } from './chain.ts'
 import type { JudgeConfig } from './config.ts'
-import { fakeAcpAgent, fakeFetch } from '@broject/providers'
+import { fakeAcpAgent, fakeFetch } from '@broject/providers/testkit'
 import {
   providerJudge,
   providerJudgeAuth,
