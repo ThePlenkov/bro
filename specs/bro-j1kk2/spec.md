@@ -53,7 +53,7 @@ not the intro.
 
 | Bead | Deliverable |
 | ---- | ----------- |
-| .1 | `bro agents log <ref> [-f\|--follow]` — live tail of a managed agent's log |
+| .1 | `bro fleet agents log <ref> [-f\|--follow]` — live tail of a managed agent's log (canonical grouped spelling; `bro agents log` stays as the flat alias until `bro-vlmrb.3` retires it) |
 | .2 | positioning: `plugin.json`/`package.json`/README — orchestration-first |
 | .3 | `bro fleet serve`: SSE `GET /api/v1/agents/<ref>/log?follow` |
 | .4 | site: landing rewrite around the act-gate wedge |
@@ -62,8 +62,9 @@ not the intro.
 | .7 | decision: semver boundary — **1.0.0** |
 | .8 | site/docs: generated command reference from the plugin registry |
 | .9 | `specs/` archive-vs-docs — curate live specs, sweep the rest |
-| .10 | CHANGELOG catch-up — 0.2.5 and skipped versions |
+| .10 | CHANGELOG catch-up — audit `npm view @broject/bro versions` against CHANGELOG; every published version gets an entry (known gap: 0.2.4 → 0.2.5 → 1.0.0) |
 | .11 | docs coverage audit — every skill area has a docs page or an `internal` marker |
+| .12 | release pins: `@broject/bro@0` → `@1` — `broSpawnArgv` fallback, every `skills/*/SKILL.md` prerequisite, README/site install snippets |
 
 ## Non-goals
 
@@ -76,6 +77,8 @@ the roadmap; it does not block on it.
 ## Exit criteria
 
 - All children closed; decision beads carry recorded outcomes.
+- No shipped surface pins `@broject/bro@0` — runtime fallbacks and
+  documented install/Requires lines resolve the released major (`.12`).
 - `npm run build`, `npm run typecheck`, `npm test` green on main.
 - Site deployed with the new landing + glossary + generated reference.
 - GitHub release + npm publish at the chosen version; CHANGELOG current.
