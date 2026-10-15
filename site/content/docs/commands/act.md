@@ -13,12 +13,11 @@ checks, SAST annotations, mergeability, and fix rounds.
 | ------- | ------------ |
 | `bro review act status [PR] [--json]` | PR state + exit gate. Non-zero while blocked |
 | `bro review act threads [PR]` | Unresolved review threads, TSV |
-| `bro review act wait [PR] [--interval S] [--timeout M] [--merge] [--cleanup] [--bead ID]` | Poll the gate until it settles — green, blockers, or timeout. `--merge` lands the PR on green; `--cleanup` requires `--merge` and retires the merged worktree and local branch; `--bead` closes the loop-claimed bead once the merge lands |
+| `bro review act wait [PR] [--interval S] [--timeout M] [--merge] [--cleanup] [--bead ID] [--detach]` | Poll the gate until it settles — green, blockers, or timeout. `--merge` lands the PR on green; `--cleanup` requires `--merge` and retires the merged worktree and local branch; `--bead` closes the loop-claimed bead once the merge lands; `--detach` re-spawns the wait detached so it outlives the session, output on `<git-common>/bro/act-wait-<pr>.log` |
 | `bro review act merge [PR] [--squash\|--merge\|--rebase] [--admin] [--cleanup] [--bead ID]` | Merge **only if the gate is green** — refuses and names blockers; `--cleanup` retires the checkout the command runs in when safe, and keeps the local branch if another worktree still checks it out; `--bead` closes the loop-claimed bead on land |
 | `bro review act resolve --thread ID [--comment T]` | Resolve (reply first if comment given); `--unresolve` reopens |
 | `bro review act reply --thread ID --comment T` | Reply without resolving; `--file TSV` for batch |
 | `bro review act rearm [--dry-run] [--json]` | Resurrect dead PR watchers — respawn `act wait` for open PRs whose watch marker outlived its process (bead identity included); settled markers are swept — a merged one closes the bead it carried — live ones kept |
-
 ## The gate
 
 `bro review act status` exits non-zero with named blockers:
@@ -81,9 +80,12 @@ branch itself — no `;`-sequenced cleanup that could run on a failed
 wait.
 
 The caveat: a session-bound background task dies when the session ends.
-For a watch that must outlive the session, spawn it detached or let
-`bro review act rearm` resurrect the dead marker on the next session's nudge —
-`bro review drive install` and `bro review watch install` are the durable forms.
+For a watch that must outlive the session, arm it with `--detach` — the
+wait re-spawns as its own process group (output on
+`<git-common>/bro/act-wait-<pr>.log`), and its marker is the same record
+`bro review act rearm` resurrects and session start flags when it dies.
+`bro review drive install` and `bro review watch install` are the durable,
+supervisor-wide forms.
 
 ## Stacked PRs and merge queues
 

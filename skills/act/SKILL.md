@@ -18,7 +18,7 @@ default store, so standard installs already have it).
 | ------- | ------------ |
 | `bro review act status [PR] [--json]` | PR state + **exit gate** — open threads, CI failures, SAST findings. Exits non-zero while blocked |
 | `bro review act threads [PR]` | Unresolved review threads, TSV |
-| `bro review act wait [PR] [--interval S] [--timeout M] [--merge] [--cleanup] [--bead ID]` | Poll the gate until it settles — green, blockers, or timeout. `--merge` lands the PR on green; add `--cleanup` to retire the worktree the command runs in + the local branch after the merge lands; `--bead` closes the loop-claimed bead once the merge lands (rearm replays it) |
+| `bro review act wait [PR] [--interval S] [--timeout M] [--merge] [--cleanup] [--bead ID] [--detach]` | Poll the gate until it settles — green, blockers, or timeout. `--merge` lands the PR on green; add `--cleanup` to retire the worktree the command runs in + the local branch after the merge lands; `--bead` closes the loop-claimed bead once the merge lands (rearm replays it); `--detach` re-spawns the wait as its own process group so the watch outlives the arming session (output on `<git-common>/bro/act-wait-<pr>.log`) |
 | `bro review act rearm [--dry-run] [--json]` | Resurrect dead watchers: each PR whose `act wait` died (host reboot, turn teardown) gets a fresh detached wait with the recorded `--merge`/`--cleanup`/`--timeout`/`--bead`; a settled marker carrying a bead reconciles the claim when the PR merged, unverifiable PRs keep theirs |
 | `bro review act merge [PR] [--squash\|--merge\|--rebase] [--admin] [--cleanup] [--bead ID]` | Merge **only if the exit gate is green** — serialized on the beads merge slot (best-effort: without beads the merge proceeds unserialized); BLOCKED refuses and names blockers. `--cleanup` retires the merged branch's checkout (when run inside it) + local ref; `--bead` closes the loop-claimed bead on land |
 | `bro review act resolve --thread ID [--comment T]` | Resolve a thread (reply first if comment given) |
@@ -108,8 +108,9 @@ default store, so standard installs already have it).
 - **A background task dies when your turn ends** — it is only watching
   while you are. Never end a reply that promises "will report when it
   lands" on a session-bound watcher: keep polling inside the reply until
-  the gate settles, spawn the watch detached (`nohup`/`systemd-run`/
-  `tmux`), or hand off with the exact open state spelled out.
+  the gate settles, arm `bro act wait <PR> --detach` (the self-detaching
+  form — no hand-rolled `nohup`/`systemd-run`/`tmux`), or hand off with
+  the exact open state spelled out.
 - **Resolve silently when you fixed it.** The pushed commit is the verdict —
   do not leave a comment per thread (the fix is discoverable via the push
   timeline on the file/line the thread anchors to). Reply only when
@@ -122,7 +123,8 @@ default store, so standard installs already have it).
   `exit_gate=OK` or hands off to `bro review act wait --merge`. Never report a
   PR as done from the resolve output alone.
 - **A pushed PR is merged, watched, or handed off — never unwatched.**
-  `bro review act wait <PR> --merge` in the background is the default end-state;
+  `bro review act wait <PR> --merge` in the background is the default end-state —
+  `--detach` when the watch must outlive the session;
   a watcher exit is a state to inspect, not silence — a `timed_out` exit
   means the PR is still open, so start a fresh `bro review act wait --merge`
   (a timeout retires its marker on the way out, so `act rearm` has
