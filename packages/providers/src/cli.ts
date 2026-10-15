@@ -50,7 +50,8 @@ export function expandPromptFile(command: string, promptFile: string): string {
   const q = `'${esc}'`
   if (command.includes('{promptFile}')) {
     // codeql[js/shell-command-constructed-from-input] — see doc comment
-    return command.replaceAll('{promptFile}', q)
+    // fn replacer — a string replacement would expand $&/$' tokens in q
+    return command.replaceAll('{promptFile}', () => q)
   }
   // codeql[js/shell-command-constructed-from-input] — see doc comment
   return `${command} ${q}`

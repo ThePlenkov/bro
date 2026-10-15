@@ -22,6 +22,10 @@ describe('expandPromptFile', () => {
   test('a quote in the path escapes shell-style', () => {
     assert.equal(expandPromptFile('cat {promptFile}', "/tmp/it's.md"), "cat '/tmp/it'\\''s.md'")
   })
+
+  test('$ tokens in the path substitute literally, not as replaceAll patterns', () => {
+    assert.equal(expandPromptFile('cat {promptFile}', '/tmp/$&-$`.md'), "cat '/tmp/$&-$`.md'")
+  })
 })
 
 describe('cliCommandModel / expandModelArg', () => {
@@ -31,6 +35,10 @@ describe('cliCommandModel / expandModelArg', () => {
   test('{model} expands to the resolved, shell-quoted model', () => {
     assert.equal(expandModelArg('run --model {model} -x', 'a/b-c'), "run --model 'a/b-c' -x")
     assert.equal(expandModelArg('run {model}', "it's"), "run 'it'\\''s'")
+  })
+
+  test('$ tokens in the model id substitute literally, not as replaceAll patterns', () => {
+    assert.equal(expandModelArg('run --model {model}', 'a$&-b'), "run --model 'a$&-b'")
   })
 
   test('override > pin through the placeholder; verbatim needs equality or silence', () => {

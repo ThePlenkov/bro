@@ -452,7 +452,8 @@ export function expandModelArg(command: string, model: string): string {
   // codeql[js/shell-command-constructed-from-input] — operator-authored template, resolved value quoted
   const esc = model.replaceAll("'", String.raw`'\''`)
   // codeql[js/shell-command-constructed-from-input] — see above
-  return command.replaceAll('{model}', `'${esc}'`)
+  // fn replacer — a string replacement would expand $&/$' tokens in the model id
+  return command.replaceAll('{model}', () => `'${esc}'`)
 }
 
 /** The cli kind's model resolution — `resolveApiModel`'s analogue for
