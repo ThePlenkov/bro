@@ -32,6 +32,12 @@
  *                       no arg: supervisor down. With a target: stop
  *                       that one agent — idempotent, a gone agent is
  *                       the desired end state, exit 0.
+ *   bro agents log <id|step> [--follow] [--lines <N>]
+ *                       tail the agent's recorded .log — the wire
+ *                       streams into it, nothing else surfaces it
+ *                       (spec bro-j1kk2.1). --follow is tail -F:
+ *                       truncation and remove/respawn-reopen are
+ *                       reported on stderr, never silently skipped.
  *
  * The respawn semantics live in the connector (spawn dedup correlates
  * the beads claim with the registry's liveness); this command only
@@ -39,7 +45,14 @@
  * convention → --worktree), prompt (--prompt-file → the dead agent's
  * stored prompt → the bead's own text), and the pinned shared store.
  */
-import { existsSync, readFileSync } from 'node:fs'
+import {
+  closeSync,
+  existsSync,
+  openSync,
+  readFileSync,
+  readSync,
+  statSync,
+} from 'node:fs'
 import { basename } from 'node:path'
 import {
   countSessionReservations,
@@ -79,6 +92,7 @@ function usage(): never {
   bro agents up [<step>] [--connector <name>] [--worktree <path>] [--prompt-file <file>] [--beads-dir <dir>]
                 [--provider <name>] [--model <m>] [--profile <name>] [--class <name>] [--auto-approve]
   bro agents down [<id|step>] [--connector <name>]
+  bro agents log <id|step> [--follow] [--lines <N>] [--connector <name>]
   bro agents prune [--connector <name>] [--older-than <N>d] [--json]
                 reap terminal registry entries (exited/lost/stopped —
                 'blocked' is respawn-able debt, never litter)`)
@@ -891,6 +905,188 @@ async function cmdPrune(dir: string, env: AgentConnectorEnv, argv: string[]): Pr
   }
 }
 
+// --- log -----------------------------------------------------------------------
+
+const DEFAULT_LOG_LINES = 50
+const LOG_POLL_MS = 250
+
+/** The newest `n` whole lines of `text` — a trailing partial line (a
+ *  worker that died mid-write) counts as a line and keeps its missing
+ *  newline; `n <= 0` or empty input prints nothing. */
+export function tailLines(text: string, n: number): string {
+  if (n <= 0 || text === '') {
+    return ''
+  }
+  const hadNl = text.endsWith('\n')
+  const body = hadNl ? text.slice(0, -1) : text
+  return `${body.split('\n').slice(-n).join('\n')}${hadNl ? '\n' : ''}`
+}
+
+export interface LogFollowHandlers {
+  /** Appended log bytes — the only data channel. */
+  data(chunk: string): void
+  /** State markers (truncated/removed/reopened) — a side channel, so
+   *  callers can keep stdout pure log bytes. */
+  note(line: string): void
+}
+
+export interface LogFollowHandle {
+  stop(): void
+}
+
+/** tail -F over `path`: offset-tracked appends on a poll loop, honest
+ *  about the two loss shapes instead of pretending the file is a stream:
+ *
+ *  - size < offset (the janitor tail-cap dropped the head) →
+ *    `[log truncated — resyncing]`, re-read from 0;
+ *  - path disappears / reappears (reaped, then a respawn rewrites the
+ *    same per-id path) → one note each way, offset resets on reopen —
+ *    the watcher's interest is the agentId's log, which outlives one
+ *    process generation.
+ *
+ *  Returns a handle; `signal` or `.stop()` ends the loop. */
+export function followLog(
+  path: string,
+  on: LogFollowHandlers,
+  opts: { pollMs?: number; signal?: AbortSignal; startOffset?: number } = {}
+): LogFollowHandle {
+  const pollMs = opts.pollMs ?? LOG_POLL_MS
+  const decoder = new TextDecoder()
+  let offset = opts.startOffset ?? 0
+  let fd: number | undefined
+  let missing = false
+  let stopped = false
+  let timer: NodeJS.Timeout | undefined
+
+  const close = () => {
+    if (fd !== undefined) {
+      try {
+        closeSync(fd)
+      } catch {
+        // a path that vanished under the fd — nothing to report
+      }
+      fd = undefined
+    }
+  }
+  const stop = () => {
+    stopped = true
+    if (timer !== undefined) {
+      clearTimeout(timer)
+      timer = undefined
+    }
+    close()
+  }
+  opts.signal?.addEventListener('abort', stop, { once: true })
+
+  const tick = () => {
+    if (stopped) {
+      return
+    }
+    let size: number | undefined
+    try {
+      size = statSync(path).size
+    } catch {
+      size = undefined
+    }
+    if (size === undefined) {
+      if (!missing) {
+        on.note('[log removed — watching for a respawn]')
+        missing = true
+      }
+      close()
+    } else {
+      if (missing) {
+        on.note('[log reopened]')
+        missing = false
+        offset = 0
+      }
+      if (size < offset) {
+        on.note('[log truncated — resyncing]')
+        offset = 0
+      }
+      if (size > offset) {
+        if (fd === undefined) {
+          try {
+            fd = openSync(path, 'r')
+          } catch {
+            fd = undefined
+          }
+        }
+        if (fd !== undefined) {
+          const buf = Buffer.allocUnsafe(size - offset)
+          const n = readSync(fd, buf, 0, buf.length, offset)
+          offset += n
+          if (n > 0) {
+            on.data(decoder.decode(buf.subarray(0, n), { stream: true }))
+          }
+        }
+      }
+    }
+    if (!stopped) {
+      timer = setTimeout(tick, pollMs)
+    }
+  }
+
+  timer = setTimeout(tick, pollMs)
+  return { stop }
+}
+
+async function cmdLog(dir: string, env: AgentConnectorEnv, argv: string[]): Promise<void> {
+  const pos = positionals(argv, new Set(['--connector', '--lines']), {
+    boolFlags: new Set(['--follow']),
+  })
+  if (pos.length !== 1) {
+    usage()
+  }
+  const target = pos[0]!
+  const connectorName = flag(argv, '--connector')
+  const linesArg = flag(argv, '--lines')
+  let lines = DEFAULT_LOG_LINES
+  if (linesArg !== undefined) {
+    if (!/^\d+$/.test(linesArg)) {
+      die(`--lines takes a non-negative integer, got "${linesArg}"`)
+    }
+    lines = Number(linesArg)
+  }
+  const follow = argv.includes('--follow')
+
+  const { backends } = await collectAgentBackends(dir, env, connectorName).catch((err: unknown) =>
+    die(err instanceof Error ? err.message : String(err))
+  )
+  const { hit, degraded } = findInBackends(backends, target)
+  if (!hit) {
+    const blind = degraded.length > 0 ? ` (degraded: ${degraded.join('; ')})` : ''
+    die(
+      `no agent "${target}"${blind} — checked ${backends.map((b) => b.conn.name).join(', ') || 'no backends'}`
+    )
+  }
+  for (const d of degraded) {
+    console.error(`warning: backend degraded — ${d}`)
+  }
+  const a = hit.agent
+  if (a.log === undefined) {
+    die(`agent ${a.id} has no recorded log — backend ${a.backend} may not keep one`)
+  }
+  if (!existsSync(a.log)) {
+    die(`log missing: ${a.log} — reaped or never written`)
+  }
+  // stdout stays pure log bytes — the context header rides stderr
+  console.error(`agent ${a.id} (${a.state}) — ${a.log}`)
+  process.stdout.write(tailLines(readFileSync(a.log, 'utf8'), lines))
+  if (!follow) {
+    return
+  }
+
+  const handle = followLog(
+    a.log,
+    { data: (s) => process.stdout.write(s), note: (s) => console.error(s) },
+    { startOffset: statSync(a.log).size }
+  )
+  // a SIGINT listener suppresses the default kill — resolve clean (0)
+  await new Promise<void>((resolve) => process.once('SIGINT', resolve))
+  handle.stop()
+}
+
 export async function runAgentsCommand(argv: string[]): Promise<void> {
   const dir = process.cwd()
   const env = loadAgentEnv(dir)
@@ -904,6 +1100,9 @@ export async function runAgentsCommand(argv: string[]): Promise<void> {
       return
     case 'down':
       await cmdDown(dir, env, argv.slice(1))
+      return
+    case 'log':
+      await cmdLog(dir, env, argv.slice(1))
       return
     case 'prune':
       await cmdPrune(dir, env, argv.slice(1))

@@ -38,8 +38,9 @@ cached count that fails closed when stale.
 | `bro fleet agents status [<id\|step>] [--json] [--connector <name>]` | The agent plane across every backend; an arg prints one agent's detail. Degraded backends warn — never a hard failure of the view, but a targeted miss exits non-zero when a backend is degraded ('gone' is only claimed on a healthy read) |
 | `bro fleet agents up [<step>] [--connector <name>]` | No arg: the backend's supervisor up (a `supervisor:'none'` backend like native is a reported no-op). With `<step>`: spawn the step's agent — a `lost`/`exited` agent is respawned on the same agentId (the beads claim rebinds), a live one is a SpawnError |
 | `bro fleet agents down [<id\|step>] [--connector <name>]` | No arg: supervisor down. With a target: stop that one agent — a gone agent exits 0 on a healthy read; a miss beside a degraded backend reports unverified (exit 1), not 'gone' |
+| `bro fleet agents log <id\|step> [--follow] [--lines <N>]` | Tail the agent's recorded `.log` — the surface for "is it actually working?" `status` prints the path; `log` reads it. `--follow` is `tail -F`: janitor truncation and remove/respawn-reopen are reported, never silently skipped. stdout is log bytes only — the context header rides stderr |
 
-`--connector <name>` scopes all three subcommands to one backend. Useful
+`--connector <name>` scopes these subcommands to one backend. Useful
 flags on `up`: `--worktree <path>` (overrides the
 recorded/conventional `<repo>--<step>` lookup), `--prompt-file <file>`
 (overrides the stored prompt / bead text), `--beads-dir <dir>`.
