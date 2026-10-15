@@ -62,12 +62,14 @@ import { listWatches, type ListedWatch } from '@broject/act'
 import { parseStackBranch } from '@broject/stack'
 import { flag, positionals } from './args.ts'
 import {
+  agentOwner,
   agentProcessesIn,
   detailMatches,
   hooksDirOf,
   LIVE_MARKER_MS,
   liveWorkDetails,
   markerLive,
+  markerOwner,
   ownerTag,
   registryEntryHoldsClaim,
 } from './proc-owner.ts'
@@ -181,6 +183,11 @@ export function claimLockPath(path: string): string | null {
 export interface WorktreeClaimInfo {
   detail: string
   mtimeMs: number
+  /** The claiming agent's pid + start parsed from the marker's first
+   *  line — null on anonymous markers. Lets callers tell "a sibling
+   *  worktree claimed by MY agent tree" (own work, suppress from
+   *  parallel-work nudges) from a foreign agent's claim (bro-7022c). */
+  owner: { pid: number; start: string } | null
 }
 
 /** The worktree's own claim marker — `<gitdir>/bro/work`, stamped by
@@ -203,7 +210,7 @@ export function worktreeClaimInfo(
     if (!markerLive(lines[0], mtimeMs, LIVE_MARKER_MS, now)) {
       return undefined
     }
-    return { detail: lines[1]?.trim() ?? '', mtimeMs }
+    return { detail: lines[1]?.trim() ?? '', mtimeMs, owner: markerOwner(lines[0]) }
   } catch {
     return undefined
   }
@@ -2046,11 +2053,24 @@ export const workConnector: Connector = {
     parallelWork(ctx) {
       try {
         const cur = gitTry(['-C', ctx.dir, 'rev-parse', '--show-toplevel']).out.trim()
+        const self = agentOwner()
         return parseWorktreePorcelain(
           gitTry(['-C', ctx.dir, 'worktree', 'list', '--porcelain']).out
         )
           .slice(1) // porcelain lists the main worktree first
           .filter((w) => !w.prunable && w.path !== cur)
+          // a worktree claimed by THIS agent's process tree is own
+          // work, not a foreign session — the nudge exists to warn
+          // about OTHER live claimants (bro-7022c)
+          .filter((w) => {
+            const claimOwner = worktreeClaimInfo(w.path)?.owner
+            return (
+              self === null ||
+              claimOwner == null ||
+              claimOwner.pid !== self.pid ||
+              claimOwner.start !== self.start
+            )
+          })
           .slice(0, 5)
           .map((w) => `worktree ${basename(w.path)} [${w.branch ?? 'detached'}]`)
       } catch {

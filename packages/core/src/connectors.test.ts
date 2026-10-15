@@ -19,6 +19,7 @@ import {
 import type { Connector } from './connectors.ts'
 import { bdActor } from './tasks.ts'
 import type { TaskStore } from './tasks.ts'
+import { procStat } from './proc.ts'
 import { scrubEnv, testGit } from './testkit.ts'
 
 // ambient repo/agent/store pins must not reach fixture git children
@@ -55,7 +56,7 @@ esac
  *  BRO_BEAD_ID(S) are cleared unless `pins` names the spawn's assigned
  *  claims — a suite run under a worker env must not leak its pin in. */
 function withClaimRepo(
-  opts: { claims?: string[]; list?: string; pins?: string[] },
+  opts: { claims?: string[]; list?: string; pins?: string[]; ownerTag?: string },
   fn: (dir: string) => void | Promise<void>
 ): Promise<void> {
   const dir = mkdtempSync(join(tmpdir(), 'bro-conn-claim-'))
@@ -78,7 +79,10 @@ function withClaimRepo(
     if (opts.claims !== undefined) {
       const hooks = join(dir, '.git', 'bro', 'hooks')
       mkdirSync(hooks, { recursive: true })
-      writeFileSync(join(hooks, 's1.task'), ['2026-01-01', ...opts.claims].join('\n'))
+      writeFileSync(
+        join(hooks, 's1.task'),
+        [`2026-01-01${opts.ownerTag ?? ''}`, ...opts.claims].join('\n')
+      )
     }
     process.env.PATH = `${bin}:${saved.PATH}`
     process.env.FAKE_BD_LIST_FILE = join(dir, 'list.json')
@@ -467,6 +471,42 @@ describe('beads claim ownership', () => {
       )
       assert.match(beads ?? '', /\bb1\b/)
       assert.doesNotMatch(beads ?? '', /\bb2\b/)
+    })
+  })
+
+  test('same-agent claims under a rotated session id stay own work', async () => {
+    // bro-7022c (the dogfood FP): the claim marker was armed under the
+    // runner's session id, but a rehydrated hook event carries a NEW
+    // session id — sessionTaskClaims must still fold the marker in by
+    // its owner tag, or the run's own beads nudge as foreign work.
+    const self = procStat(process.pid)
+    assert.ok(self)
+    await withClaimRepo(
+      { ...opts, ownerTag: ` ${process.pid} ${self.start}` },
+      async (dir) => {
+        const beads = (
+          await parallelWorkLines({
+            dir,
+            sessionId: 's9',
+            owner: { pid: process.pid, start: self.start },
+          })
+        ).find((l) => l.startsWith('claimed beads:'))
+        // b2 is own (marker owner matches), b1 stays foreign (refused)
+        assert.match(beads ?? '', /\bb1\b/)
+        assert.doesNotMatch(beads ?? '', /\bb2\b/)
+      }
+    )
+  })
+
+  test('a rotated session id with no owner still reads foreign', async () => {
+    // without an owner tag the marker can't be proven ours — the
+    // sessionId-only match misses s1's marker and both claims report
+    await withClaimRepo(opts, async (dir) => {
+      const beads = (await parallelWorkLines({ dir, sessionId: 's9' })).find((l) =>
+        l.startsWith('claimed beads:')
+      )
+      assert.match(beads ?? '', /\bb1\b/)
+      assert.match(beads ?? '', /\bb2\b/)
     })
   })
 

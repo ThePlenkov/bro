@@ -21,11 +21,12 @@
  * contract). New facades join FacadeMap + Connector together, and only
  * when a real consumer exists.
  */
-import { readFileSync } from 'node:fs'
+import { readdirSync, readFileSync } from 'node:fs'
 import { join, resolve } from 'node:path'
 import { checkBeads } from './bd.ts'
 import { loadConfig } from './config.ts'
 import { gitTry } from './git.ts'
+import { markerOwner } from './proc.ts'
 import type { EventsFacade } from './events.ts'
 import type { QueryFacade } from './queries.ts'
 import type { JudgeFacade } from './judge.ts'
@@ -46,6 +47,14 @@ export interface ConnectorCtx {
    *  (recorded in `<git-common-dir>/bro/hooks/<session>.<aspect>` markers)
    *  from foreign live work. Absent outside hook events. */
   sessionId?: string
+  /** The firing process's agent-root owner (pid + start) — the marker
+   *  owner tag's counterpart. Session ids rotate across restarts and
+   *  client rehydrations while the owning agent process stays; a claim
+   *  marker owned by this process tree is this agent's own work, not a
+   *  foreign session's (bro-7022c). Absent when the caller can't or
+   *  doesn't want to resolve it — ownership then falls back to the
+   *  sessionId-only match. */
+  owner?: { pid: number; start: string } | null
 }
 
 /** Capability → facade type. Optional on Connector; required here once
@@ -230,12 +239,49 @@ export function sessionTaskClaims(ctx: ConnectorCtx): Set<string> {
     }
     // --git-common-dir is relative in the main worktree ('.git') and
     // absolute in linked ones — resolve against ctx.dir, never cwd
+    const hooks = join(resolve(ctx.dir, gd.out.trim()), 'bro', 'hooks')
     const safe = ctx.sessionId.replace(/[^\w.-]/g, '_')
-    const marker = join(resolve(ctx.dir, gd.out.trim()), 'bro', 'hooks', `${safe}.task`)
-    for (const d of readFileSync(marker, 'utf8').split('\n').slice(1)) {
-      const id = d.trim()
-      if (id) {
-        mine.add(id)
+    try {
+      for (const d of readFileSync(join(hooks, `${safe}.task`), 'utf8')
+        .split('\n')
+        .slice(1)) {
+        const id = d.trim()
+        if (id) {
+          mine.add(id)
+        }
+      }
+    } catch {
+      // no marker file — the session claimed nothing under this id
+    }
+    // A session id is the CLIENT's handle — it rotates on restart and
+    // rehydration while the owning agent process persists. Markers
+    // stamped by this same agent tree (owner pid + start match) are own
+    // claims under a stale id; folding them in keeps the parallel-work
+    // probe from re-nudging the agent about its own beads (bro-7022c).
+    if (ctx.owner) {
+      for (const f of readdirSync(hooks)) {
+        if (f === `${safe}.task` || !f.endsWith('.task')) {
+          continue
+        }
+        try {
+          const lines = readFileSync(join(hooks, f), 'utf8').split('\n')
+          const owner = markerOwner(lines[0])
+          if (
+            owner === null ||
+            owner.pid !== ctx.owner.pid ||
+            owner.start !== ctx.owner.start
+          ) {
+            continue
+          }
+          for (const d of lines.slice(1)) {
+            const id = d.trim()
+            if (id) {
+              mine.add(id)
+            }
+          }
+        } catch {
+          // unreadable marker — skip
+        }
       }
     }
   } catch {

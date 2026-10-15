@@ -398,7 +398,7 @@ describe('occupied', () => {
   test('the worktree claim marker occupies without any name matching', () => {
     const why = occupied({
       ...base,
-      scanClaim: () => ({ detail: 'bro-a', mtimeMs: Date.now() }),
+      scanClaim: () => ({ detail: 'bro-a', mtimeMs: Date.now(), owner: null }),
     })
     assert.match(why ?? '', /claimed by bro-a/)
   })
@@ -408,7 +408,7 @@ describe('occupied', () => {
       ...base,
       fixerBead: 'bro-fix1',
       agents: [agent({ molStep: 'bro-fix1' })],
-      scanClaim: () => ({ detail: 'bro-a', mtimeMs: Date.now() }),
+      scanClaim: () => ({ detail: 'bro-a', mtimeMs: Date.now(), owner: null }),
     })
     assert.match(why ?? '', /fixer agent live/)
   })
@@ -555,13 +555,13 @@ describe('greenOccupancy — the merge-path TTL (bro-ihnlv)', () => {
 
   test('a stale claim marker is adopted; a fresh one vetoes', () => {
     const stale = greenOccupancy(
-      { ...base, scanClaim: () => ({ detail: 'bro-a', mtimeMs: ago(3 * 3_600_000) }) },
+      { ...base, scanClaim: () => ({ detail: 'bro-a', mtimeMs: ago(3 * 3_600_000), owner: null }) },
       TTL,
       NOW
     )
     assert.match(stale.stale ?? '', /claimed by bro-a/)
     const fresh = greenOccupancy(
-      { ...base, scanClaim: () => ({ detail: 'bro-a', mtimeMs: ago(60_000) }) },
+      { ...base, scanClaim: () => ({ detail: 'bro-a', mtimeMs: ago(60_000), owner: null }) },
       TTL,
       NOW
     )
