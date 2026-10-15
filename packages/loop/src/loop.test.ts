@@ -61,6 +61,7 @@ describe('loopSection', () => {
       batchMinPriority: 2,
       parkedKeep: 5,
       parkedTtlDays: 30,
+      parkedWakeMin: 45,
     })
     assert.deepEqual(cfg, {
       agent: 'devin -p',
@@ -80,6 +81,7 @@ describe('loopSection', () => {
       batchMinPriority: 2,
       parkedKeep: 5,
       parkedTtlDays: 30,
+      parkedWakeMin: 45,
     })
   })
 
@@ -90,6 +92,19 @@ describe('loopSection', () => {
     assert.equal(
       loopSection({ parkedTtlDays: 'week' }).parkedTtlDays,
       DEFAULT_LOOP_CONFIG.parkedTtlDays
+    )
+  })
+
+  test('parkedWakeMin — the snooze TTL; 0 = indefinite icebox, negatives/junk fall back', () => {
+    assert.equal(loopSection({ parkedWakeMin: 0 }).parkedWakeMin, 0)
+    assert.equal(loopSection({ parkedWakeMin: 90 }).parkedWakeMin, 90)
+    assert.equal(
+      loopSection({ parkedWakeMin: -5 }).parkedWakeMin,
+      DEFAULT_LOOP_CONFIG.parkedWakeMin
+    )
+    assert.equal(
+      loopSection({ parkedWakeMin: 'soon' }).parkedWakeMin,
+      DEFAULT_LOOP_CONFIG.parkedWakeMin
     )
   })
 

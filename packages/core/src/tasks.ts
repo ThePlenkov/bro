@@ -543,10 +543,61 @@ interface StoreExec {
   storeDir?: string
 }
 
+/** `defer_until` rows whose snooze already ended — `bd list --deferred`
+ *  output parsed down to due ids. Malformed/missing fields just don't
+ *  wake; a non-array payload answers none. */
+function dueSnoozes(out: string): string[] {
+  let rows: unknown
+  try {
+    rows = JSON.parse(out)
+  } catch {
+    return []
+  }
+  if (!Array.isArray(rows)) {
+    return []
+  }
+  const now = Date.now()
+  const due: string[] = []
+  for (const r of rows as Array<{ id?: unknown; defer_until?: unknown }>) {
+    if (typeof r?.id !== 'string') {
+      continue
+    }
+    const t = typeof r.defer_until === 'string' ? Date.parse(r.defer_until) : NaN
+    if (Number.isFinite(t) && t <= now) {
+      due.push(r.id)
+    }
+  }
+  return due
+}
+
+/** The snooze's wake half. bd documents defer-with-date as "once
+ *  --until passes, the next ready-front read returns the issue to open
+ *  automatically" — bd 1.3.1's dolt store never performs the wake, so
+ *  a parked/snoozed bead would stay deferred forever (spec bro-hl22w).
+ *  ready() pays one probe to undefer every due row before the ready
+ *  query — the documented lazy wake, where the contract puts it.
+ *  Best-effort: an unreadable store or a failed undefer leaves the
+ *  rows snoozed for the next read rather than breaking the queue. */
+function wakeSnoozed(x: StoreExec): void {
+  // --limit 0: a configured list.limit (or bd's default page) must not
+  // hide due rows — a snooze past the page edge would stay iced forever
+  const res = x.probe(['list', '--deferred', '--limit', '0', '--json'], 15_000)
+  if (res.code !== 0) {
+    return
+  }
+  const due = dueSnoozes(res.out)
+  if (due.length > 0) {
+    x.probe(['undefer', ...due], 15_000)
+  }
+}
+
 function makeStore(x: StoreExec): TaskStore {
   return {
     list: (f = {}) => taskRows(x.json(['list', '--json', ...filterArgs(f)]), 'list'),
-    ready: (f = {}) => taskRows(x.json(['ready', ...filterArgs(f)]), 'ready'),
+    ready: (f = {}) => {
+      wakeSnoozed(x)
+      return taskRows(x.json(['ready', ...filterArgs(f)]), 'ready')
+    },
     get: (id) => {
       let r: TaskRow | TaskRow[]
       try {
@@ -804,7 +855,18 @@ export interface TaskStoreAsync {
 export function taskStoreAsync(dir?: string): TaskStoreAsync {
   return {
     list: async (f = {}) => taskRows(await bdJsonAsync(['list', '--json', ...filterArgs(f)], dir), 'list'),
-    ready: async (f = {}) => taskRows(await bdJsonAsync(['ready', ...filterArgs(f)], dir), 'ready'),
+    ready: async (f = {}) => {
+      // same lazy wake as the sync store — a due snooze the session
+      // sweep surfaces must read as ready work, not stay iced
+      const res = await bdTryAsync(['list', '--deferred', '--limit', '0', '--json'], 15_000, dir)
+      if (res.code === 0) {
+        const due = dueSnoozes(res.out)
+        if (due.length > 0) {
+          await bdTryAsync(['undefer', ...due], 15_000, dir)
+        }
+      }
+      return taskRows(await bdJsonAsync(['ready', ...filterArgs(f)], dir), 'ready')
+    },
     get: async (id) => {
       let r: TaskRow | TaskRow[]
       try {

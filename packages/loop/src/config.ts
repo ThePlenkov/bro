@@ -25,7 +25,8 @@ export const loopSection: ConfigSection<LoopConfig> = (raw) => {
       | 'batch'
       | 'batchMinPriority'
       | 'parkedKeep'
-      | 'parkedTtlDays',
+      | 'parkedTtlDays'
+      | 'parkedWakeMin',
     min = 0
   ) =>
     typeof obj[k] === 'number' && Number.isFinite(obj[k]) && (obj[k] as number) >= min
@@ -51,5 +52,6 @@ export const loopSection: ConfigSection<LoopConfig> = (raw) => {
     batchMinPriority: num('batchMinPriority'),
     parkedKeep: num('parkedKeep'),
     parkedTtlDays: num('parkedTtlDays'),
+    parkedWakeMin: num('parkedWakeMin'),
   }
 }

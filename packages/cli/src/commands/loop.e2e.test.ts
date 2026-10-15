@@ -374,9 +374,11 @@ describe('bro loop e2e', () => {
     })
   })
 
-  test('agent gone in <crashExitMs → parked, never reopened (bro-sovl3)', () => {
+  test('agent gone in <crashExitMs → parked, claim snoozed not held (bro-sovl3/bro-hl22w)', () => {
     // the exit-3-instantly shape that burned the supervisor: reopening
-    // reclaims the bead into the same broken spawn — park instead
+    // reclaims the bead into the same broken spawn — park instead. The
+    // claim releases into a deferred snooze: hidden from ready for the
+    // cooldown, never an in_progress strand
     const f = loopFixture(
       [{ ...FAKE_BEAD, id: 'fx-a', title: 'doomed' }],
       {},
@@ -387,9 +389,30 @@ describe('bro loop e2e', () => {
       assert.match(r.stdout, /1 parked/)
       assert.match(r.stdout, /parked \(crash, not work\)/)
       const row = bead(f.db, 'fx-a')
-      assert.equal(row?.status, 'in_progress')
+      assert.equal(row?.status, 'deferred')
+      assert.ok(Date.parse(String(row?.defer_until)) > Date.now())
+      assert.equal(row?.assignee ?? '', '')
       assert.match(String(row?.notes), /environment crash, not a verdict; parked/)
       assert.equal(existsSync(f.worktree), true)
+    })
+  })
+
+  test('a parkedWakeMin past the clock horizon clamps — the park still lands (bro-hl22w)', () => {
+    // an unbounded snooze overflows Date into a toISOString() RangeError
+    // thrown BEFORE the per-bead catch — the abort would strand the
+    // claims in_progress. The cap keeps any absurd value a valid defer.
+    const f = loopFixture(
+      [{ ...FAKE_BEAD, id: 'fx-a', title: 'doomed' }],
+      { parkedWakeMin: 1e15 },
+      'fail'
+    )
+    inside(f.main, f.root, () => {
+      const r = f.run()
+      assert.match(r.stdout, /1 parked/)
+      const row = bead(f.db, 'fx-a')
+      assert.equal(row?.status, 'deferred')
+      const wake = Date.parse(String(row?.defer_until))
+      assert.ok(Number.isFinite(wake) && wake > Date.now())
     })
   })
 
@@ -409,7 +432,7 @@ describe('bro loop e2e', () => {
     })
   })
 
-  test('open threads with fixRounds=0 → parked, claim + worktree kept', () => {
+  test('open threads with fixRounds=0 → parked, claim snoozed + worktree kept', () => {
     const f = loopFixture(
       [{ ...FAKE_BEAD, id: 'fx-a', title: 'contested' }],
       { fixRounds: 0 }
@@ -435,7 +458,7 @@ describe('bro loop e2e', () => {
       const r = f.run()
       assert.match(r.stdout, /1 parked/)
       const row = bead(f.db, 'fx-a')
-      assert.equal(row?.status, 'in_progress')
+      assert.equal(row?.status, 'deferred')
       assert.match(String(row?.notes), /blocked: 1 unresolved/)
       assert.equal(existsSync(f.worktree), true)
     })
@@ -489,7 +512,7 @@ describe('bro loop e2e', () => {
       const r = f.run()
       assert.match(r.stdout, /1 parked/)
       const row = bead(f.db, 'fx-a')
-      assert.equal(row?.status, 'in_progress')
+      assert.equal(row?.status, 'deferred')
       assert.match(String(row?.notes), /did not land \(state=OPEN\)/)
       assert.equal(existsSync(f.worktree), true)
     })
@@ -502,7 +525,7 @@ describe('bro loop e2e', () => {
       const r = f.run()
       assert.match(r.stdout, /1 parked/)
       const row = bead(f.db, 'fx-a')
-      assert.equal(row?.status, 'in_progress')
+      assert.equal(row?.status, 'deferred')
       assert.match(String(row?.notes), /closed unmerged/)
     })
   })
@@ -514,7 +537,7 @@ describe('bro loop e2e', () => {
       const r = f.run()
       assert.match(r.stdout, /1 parked/)
       const row = bead(f.db, 'fx-a')
-      assert.equal(row?.status, 'in_progress')
+      assert.equal(row?.status, 'deferred')
       assert.match(String(row?.notes), /PR lookup failed/)
       assert.equal(existsSync(f.worktree), true)
     })
@@ -1111,7 +1134,7 @@ describe('bro loop gate-stack round-robin', () => {
     })
   })
 
-  test('a parked member keeps its claim — worktree + note survive the run', () => {
+  test('a parked member snoozes its claim — worktree + note survive the run', () => {
     const f = loopFixture([{ ...FAKE_BEAD, id: 'fx-a', title: 'red ci' }])
     writeHostState(f.hostState, {
       prs: {
@@ -1124,8 +1147,69 @@ describe('bro loop gate-stack round-robin', () => {
       const r = f.run(['--interval', '1'])
       assert.match(r.stdout, /1 parked/)
       const row = bead(f.db, 'fx-a')
-      assert.equal(row?.status, 'in_progress')
+      assert.equal(row?.status, 'deferred')
       assert.match(String(row?.notes), /blocked: 1 failing check\(s\)/)
+    })
+  })
+
+  test('a bead whose snooze expired wakes on the ready read and lands (bro-hl22w)', () => {
+    // the other half of the snooze contract: a deferred bead past its
+    // defer_until is undeferred by the next ready-front read, claimed
+    // like any open bead, and lands through the normal pipeline
+    const f = loopFixture([
+      {
+        ...FAKE_BEAD,
+        id: 'fx-a',
+        title: 'woken',
+        status: 'deferred',
+        defer_until: new Date(Date.now() - 60_000).toISOString(),
+      },
+    ])
+    inside(f.main, f.root, () => {
+      const r = f.run()
+      assert.match(r.stdout, /loop: fx-a landed/)
+      assert.equal(bead(f.db, 'fx-a')?.status, 'closed')
+    })
+  })
+
+  test('a woken park whose branch already gates on a PR re-attaches — no re-spawn (bro-hl22w)', () => {
+    // the claim-side half of the park contract: the snoozed bead kept
+    // its worktree AND the open PR the earlier run pushed. The wake
+    // must rejoin that gate — re-running the finished work order would
+    // redo landed work and shove a duplicate push at the same PR
+    const f = loopFixture([
+      {
+        ...FAKE_BEAD,
+        id: 'fx-a',
+        title: 'woken',
+        status: 'deferred',
+        defer_until: new Date(Date.now() - 60_000).toISOString(),
+      },
+    ])
+    // what the park left behind: the worktree, its branch's covering
+    // commit, and the PR gating on it
+    git(['worktree', 'add', '-b', 'loop/fx-a', f.worktree], f.main)
+    git(['-C', f.worktree, 'commit', '-q', '--allow-empty', '-m', 'fix: fx-a work (fx-a)'], f.main)
+    const head = git(['-C', f.worktree, 'rev-parse', 'HEAD'], f.main).trim()
+    writeHostState(f.hostState, {
+      prs: {
+        'loop/fx-a': {
+          number: 7,
+          state: 'OPEN',
+          headRef: 'loop/fx-a',
+          baseRef: 'main',
+          headSha: head,
+        },
+      },
+    })
+    inside(f.main, f.root, () => {
+      const r = f.run()
+      assert.match(r.stdout, /re-attaches to \[#7\]/)
+      assert.match(r.stdout, /loop: fx-a landed/)
+      // no worker ran — the reattach never reached the spawn
+      const evs = (readHostState(f.hostState).events ?? []) as Array<Record<string, unknown>>
+      assert.equal(evs.filter((e) => e.spawn !== undefined).length, 0)
+      assert.equal(bead(f.db, 'fx-a')?.status, 'closed')
     })
   })
 })

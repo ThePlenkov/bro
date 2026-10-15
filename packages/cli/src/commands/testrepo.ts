@@ -225,6 +225,7 @@ switch (cmd === undefined && args[0] === '--version' ? '--version' : cmd) {
   case 'list': {
     let rows = db.rows
     if (flags.status) rows = rows.filter((r) => r.status === flags.status)
+    if (flags.deferred) rows = rows.filter((r) => r.defer_until)
     if (!flags.all) rows = rows.filter((r) => r.status !== 'closed')
     const labs = [].concat(flags.l || [])
     for (const l of labs) rows = rows.filter((r) => (r.labels || []).includes(l))
@@ -294,6 +295,9 @@ switch (cmd === undefined && args[0] === '--version' ? '--version' : cmd) {
         if (k === 'json') continue
         if (k === 'set-labels' || k === 'add-label') { r.labels = String(v).split(',') }
         else if (k === 'external-ref') { r.external_ref = v }
+        // --defer <ts> is the snooze: defer_until + deferred status,
+        // hidden from ready until a wake (real bd semantics)
+        else if (k === 'defer') { r.defer_until = v; r.status = 'deferred' }
         else r[k] = v === true ? true : v
       }
     }
@@ -312,6 +316,18 @@ switch (cmd === undefined && args[0] === '--version' ? '--version' : cmd) {
     const r = row(pos[1])
     if (!r) fail('not found: ' + pos[1])
     r.status = 'open'
+    save(db)
+    break
+  }
+  case 'undefer': {
+    // bd undefer <id>… — the snooze's release: back to open, defer_until
+    // cleared; the assignee survives (real bd keeps it)
+    for (const id of pos.slice(1)) {
+      const r = row(id)
+      if (!r) fail('not found: ' + id)
+      r.status = 'open'
+      delete r.defer_until
+    }
     save(db)
     break
   }

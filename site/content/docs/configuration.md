@@ -87,6 +87,7 @@ a `BroPlugin`. See [Plugins](/docs/plugins).
 | `stallMin` | `45` | Output-silence advisory in minutes — a live loop agent quiet this long surfaces in `bro review watch`/`bro fleet status`. Advisory only; nothing is killed |
 | `crashExitMs` | `10000` | An agent exit faster than this is an environment crash — the bead parks loud instead of reopening into a respawn-burn. `0` restores legacy reopen-on-every-exit |
 | `mergeTimeoutMin` | `45` | Review-gate budget in minutes |
+| `parkedWakeMin` | `120` | Minutes a parked bead stays `deferred` before the next ready-front read wakes it to `open` — the claim-side park TTL. `0` ices the bead until `bd undefer` |
 | `fixRounds` | `3` | Maximum review-fix respawns per bead |
 | `maxItems` | `0` | Maximum beads per run; `0` means until idle or gated |
 | `maxOpen` | `3` | Maximum open PRs on the run's gate stack — a full stack only services gates until a merge frees a slot |
@@ -94,6 +95,8 @@ a `BroPlugin`. See [Plugins](/docs/plugins).
 | `diskMinSlots` | `2` | Disk floor in slot units — pushes hold while free disk on the worktree parent or tmpdir drops below `diskMinSlots × worktreeMb`. `0` disables the watermark |
 | `batch` | `1` | Max beads one claim may clump into a single work item — one worktree, one worker, one PR closing them all. `1` = solo claims only |
 | `batchMinPriority` | `3` | Lowest urgency allowed into a clump — a bead batches only when `priority >= batchMinPriority`, so urgent work always claims solo |
+| `parkedKeep` | `3` | Parked-worktree resume cache cap — the litter sweep keeps at most this many clean parked trees (newest first). `0` = uncapped |
+| `parkedTtlDays` | `14` | Days a parked worktree may idle before the litter sweep reaps it regardless of the cap. `0` = no age bound |
 
 ### `drive`
 

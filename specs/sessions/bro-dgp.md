@@ -58,13 +58,13 @@ before `npm test`) against real-git fixture repos (`initRepo` in
   kept
 - verdict: agent `bd close`s the bead → result `closed`, never reopened
 - park: open threads with `fixRounds: 0` → parked, worktree kept, claim
-  retained
+  released into a deferred snooze (`loop.parkedWakeMin`; bro-hl22w)
 - fix round: open threads → agent respawned on fix prompt → threads
   resolved → landed
 - park: `mergePr` reports a non-MERGED post state (merge queue) → parked
 - park: PR closed externally while the gate polls → parked
-- park: PR lookup failure → parked (never reopens a bead whose PR may
-  exist)
+- park: PR lookup failure → parked — the claim snoozes rather than
+  reopens on a bead whose PR may still exist
 
 ### hooks (`hooks.e2e.test.ts`)
 
