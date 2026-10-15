@@ -36,22 +36,25 @@ context), never an inference from whether a session was polled.
   degraded / unavailable / probe-failed lines before treating the
   snapshot as healthy, and don't go hunting for work the heartbeat
   didn't raise.
-- **The session owns the cadence — the pulse is bounded, never
-  infinite.** The orchestrator arms `bro review watch --every N --for S
-  --notify` in a visible background shell (`watch.pulseSec` suggests the
-  window, default 900s). The window's exit IS the wake event: run one
-  `bro review drive` pass, digest, re-arm the next window. Never sit in a
-  foreground poll, never nohup an unbounded `--every`.
-- **Armed-but-dead rearms itself.** `bro review watch install` writes
-  `bro/pulse.json` — the durable want-record. A session start (or
-  post-compaction) that finds the marker armed but no live pulse lock
-  gets the rearm nudge; the orchestrator re-arms the window. OS timers
-  are retired — systemd/crontab installs no longer exist; install only
-  strips the legacy entries they left.
+- **The session owns the cadence — the attended leg is `bro pulse`.**
+  A live orchestrator session arms `bro pulse <S>` in a visible
+  background shell (the `/pulse` skill) — a continuous metronome whose
+  mailbox ticks are the wakes. The bounded form, `bro review watch
+  --every N --for S --notify` (`watch.pulseSec` suggests the window,
+  default 900s), is the unattended leg — what the checkpoint respawns
+  from `pulse.json` when no session's pulse holds the lock. Never sit
+  in a foreground poll, never nohup an unbounded `--every`.
+- **Armed-but-dead rearms itself.** `bro review watch install` (and
+  every `bro pulse` start) writes `bro/pulse.json` — the durable
+  want-record. A session start (or post-compaction) that finds the
+  marker armed but no live pulse lock gets the rearm nudge; the
+  orchestrator re-arms the leg. OS timers are retired — systemd/crontab
+  installs no longer exist; install only strips the legacy entries
+  they left.
 - **Only orchestrators pulse.** Sessions with `BRO_AGENT_ID` set —
-  spawned workers — never see the nudge and get refused by
-  `bro review watch --every` / `bro review drive --every`: recursion is how the
-  watcher tree multiplies.
+  spawned workers — never see the nudge and get refused by `bro pulse`,
+  `bro review watch --every`, and `bro review drive --every`: recursion is
+  how the watcher tree multiplies.
 - **`--notify` is how a watcher reaches its parent.** With a notify
   connector installed, mailbox drops surface mid-turn in the parent
   session — the initial snapshot plus each transition. Dedup is
