@@ -33,6 +33,7 @@ import {
   type Connector,
 } from '@broject/core'
 import { SELF_ENTRY } from './self-entry.ts'
+import { readWantMarker } from './want-marker.ts'
 import { watchSection, type WatchConfig } from './watch-config.ts'
 
 export interface PulseMarker {
@@ -52,27 +53,9 @@ export function pulseLockPath(dir: string): string | null {
 }
 
 /** The want-record — null when absent, malformed, or the repo has no
- *  common dir. A torn marker is the same answer as none: the nudge
- *  stays quiet rather than rearming from a half-shape. */
+ *  common dir; readWantMarker owns the torn/cadence verdict. */
 export function readPulseMarker(dir: string): PulseMarker | null {
-  const file = pulseMarkerPath(dir)
-  if (file === null || !existsSync(file)) {
-    return null
-  }
-  try {
-    const raw = JSON.parse(readFileSync(file, 'utf8')) as {
-      everySec?: unknown
-      armedAt?: unknown
-    }
-    return typeof raw.everySec === 'number' &&
-      Number.isFinite(raw.everySec) &&
-      raw.everySec > 0 &&
-      typeof raw.armedAt === 'string'
-      ? { everySec: raw.everySec, armedAt: raw.armedAt }
-      : null
-  } catch {
-    return null
-  }
+  return readWantMarker(pulseMarkerPath(dir))
 }
 
 export type ArmState = 'armed' | 'updated' | 'already'

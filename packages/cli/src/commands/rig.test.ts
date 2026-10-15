@@ -383,6 +383,9 @@ describe('rig pulse (session-pulse model, bro-killn)', () => {
       mkdirSync(dirname(file), { recursive: true })
       writeFileSync(file, JSON.stringify({ everySec: 60, armedAt: 'x' }))
       assert.equal(readRigPulseMarker(main), null)
+      // a cadence below the shared floor reads as none too
+      writeFileSync(file, JSON.stringify({ repo: main, everySec: 0.05, armedAt: 'x' }))
+      assert.equal(readRigPulseMarker(main), null)
     } finally {
       rmSync(root, { recursive: true, force: true })
     }

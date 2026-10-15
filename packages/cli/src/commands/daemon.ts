@@ -36,6 +36,7 @@ import { flag } from './args.ts'
 import { driveLockPath, runDriveCommand } from './drive.ts'
 import { driveSection, MAX_INTERVAL_SEC, MIN_INTERVAL_SEC } from './drive-config.ts'
 import { SELF_ENTRY } from './self-entry.ts'
+import { readWantMarker } from './want-marker.ts'
 import { isOrchestratorSession } from './watch-pulse.ts'
 import { mainWorktree } from './work.ts'
 import { loadBroConfig } from '../plugins.ts'
@@ -465,27 +466,9 @@ export function driveMarkerPath(dir: string): string | null {
 }
 
 /** The want-record — null when absent, malformed, or the repo has no
- *  common dir. A torn marker is the same answer as none: the checkpoint
- *  stays quiet rather than rearming from a half-shape. */
+ *  common dir; readWantMarker owns the torn/cadence verdict. */
 export function readDriveMarker(dir: string): DriveMarker | null {
-  const file = driveMarkerPath(dir)
-  if (file === null || !existsSync(file)) {
-    return null
-  }
-  try {
-    const raw = JSON.parse(readFileSync(file, 'utf8')) as {
-      everySec?: unknown
-      armedAt?: unknown
-    }
-    return typeof raw.everySec === 'number' &&
-      Number.isFinite(raw.everySec) &&
-      raw.everySec > 0 &&
-      typeof raw.armedAt === 'string'
-      ? { everySec: raw.everySec, armedAt: raw.armedAt }
-      : null
-  } catch {
-    return null
-  }
+  return readWantMarker(driveMarkerPath(dir))
 }
 
 /** Write the want-marker (tmp+rename — the mailbox drop rule). Same

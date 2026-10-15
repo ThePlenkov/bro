@@ -276,6 +276,12 @@ describe('drive marker', () => {
       assert.equal(readDriveMarker(main), null)
       writeFileSync(file, JSON.stringify({ everySec: 0, armedAt: 't' }))
       assert.equal(readDriveMarker(main), null)
+      // a cadence outside the shared bounds reads as none — a sub-floor
+      // marker would churn a rearm whose spawned child fails closed
+      writeFileSync(file, JSON.stringify({ everySec: 0.05, armedAt: 't' }))
+      assert.equal(readDriveMarker(main), null)
+      writeFileSync(file, JSON.stringify({ everySec: 0.1, armedAt: 't' }))
+      assert.equal(readDriveMarker(main)?.everySec, 0.1)
     } finally {
       rmSync(root, { recursive: true, force: true })
     }

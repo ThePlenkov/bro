@@ -39,6 +39,7 @@ import {
   worktreeGitDir,
   type Connector,
 } from '@broject/core'
+import { readWantMarker } from './want-marker.ts'
 import { isOrchestratorSession } from './watch-pulse.ts'
 import { rigSection, type RigConfig } from './rig-config.ts'
 import { SELF_ENTRY } from './self-entry.ts'
@@ -61,31 +62,14 @@ export function rigPulseLockPath(dir: string): string | null {
 }
 
 /** The want-record — null when absent, malformed, or the repo has no
- *  common dir. Same torn-marker rule as the watch pulse: a half-shape
- *  reads as none. `repo` is required — a rearm without it would land
- *  on whatever checkout cwd happens to resolve. */
+ *  common dir; readWantMarker owns the torn/cadence verdict. `repo` is
+ *  required — a rearm without it would land on whatever checkout cwd
+ *  happens to resolve. */
 export function readRigPulseMarker(dir: string): RigPulseMarker | null {
-  const file = rigPulseMarkerPath(dir)
-  if (file === null || !existsSync(file)) {
-    return null
-  }
-  try {
-    const raw = JSON.parse(readFileSync(file, 'utf8')) as {
-      repo?: unknown
-      everySec?: unknown
-      armedAt?: unknown
-    }
-    return typeof raw.repo === 'string' &&
-      raw.repo.trim() !== '' &&
-      typeof raw.everySec === 'number' &&
-      Number.isFinite(raw.everySec) &&
-      raw.everySec > 0 &&
-      typeof raw.armedAt === 'string'
-      ? { repo: raw.repo, everySec: raw.everySec, armedAt: raw.armedAt }
-      : null
-  } catch {
-    return null
-  }
+  const raw = readWantMarker(rigPulseMarkerPath(dir))
+  return raw !== null && typeof raw.repo === 'string' && raw.repo.trim() !== ''
+    ? { repo: raw.repo, everySec: raw.everySec, armedAt: raw.armedAt }
+    : null
 }
 
 export type ArmState = 'armed' | 'updated' | 'already'
