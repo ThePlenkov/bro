@@ -467,6 +467,13 @@ describe('rig pulse (session-pulse model, bro-killn)', () => {
 
   test('rearm — a reused recorded pid does not suppress (pidStart pin + bounded legacy trust)', () => {
     const { root, main } = initRepo('bro-rig-pid-')
+    const expectRearm = () =>
+      assert.deepEqual(rigPulseRearm(main, 900, {}), {
+        kind: 'rearm',
+        repo: main,
+        everySec: 120,
+        forSec: 900,
+      })
     try {
       armRigPulse(main, main, 120)
       // the recorded child is gone and its pid was recycled onto a
@@ -477,24 +484,14 @@ describe('rig pulse (session-pulse model, bro-killn)', () => {
         spawnedAt: new Date().toISOString(),
         pidStart: 'bogus-start',
       })
-      assert.deepEqual(rigPulseRearm(main, 900, {}), {
-        kind: 'rearm',
-        repo: main,
-        everySec: 120,
-        forSec: 900,
-      })
+      expectRearm()
       // a record that predates pidStart only covers the pre-lock
       // window — a live pid ten minutes on is reuse, not the child
       writeRigPulseSpawn(main, {
         pid: process.pid,
         spawnedAt: new Date(Date.now() - 10 * 60_000).toISOString(),
       })
-      assert.deepEqual(rigPulseRearm(main, 900, {}), {
-        kind: 'rearm',
-        repo: main,
-        everySec: 120,
-        forSec: 900,
-      })
+      expectRearm()
     } finally {
       rmSync(root, { recursive: true, force: true })
     }
