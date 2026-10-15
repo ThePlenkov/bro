@@ -24,13 +24,17 @@ internals stay free to move.
 
 ## Transports are adapters
 
-`bro serve` (REST + SSE for live tails), the MCP endpoint, and any
-future surface serve the same catalog identically. A new consumer binds
-a transport, not a feature set — there is no route-per-feature growth
-and no tool list that drifts from what the CLI actually does.
+The contract is: every transport serves the same plane catalog — a new
+consumer binds a transport, not a feature set. Today's surfaces ride
+this axis but do not mount the whole catalog yet: `bro serve` exposes
+bespoke routes (a snapshot endpoint plus an SSE tail over agent logs),
+and the MCP endpoint fronts a tool list generated from the same
+facades. The full REST/SSE plane surface — a route per plane resource —
+is the facade work `bro-9rls` still specs; until it lands, planes.md is
+the contract those bespoke endpoints are the first slices of.
 
-This is the axis `bro serve`'s snapshot endpoint and the SSE log tail
-already ride, and the one `/ui`-style thin dashboards sit on.
+`/ui`-style thin dashboards sit on this axis: read the planes, never
+the internals.
 
 **Sources:** `specs/bro-9rls.1.md` (facade-out contract, plane
 catalog), `specs/bro-9rls.2.md`, the serve/mcp commands.

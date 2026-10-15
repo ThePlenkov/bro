@@ -21,9 +21,11 @@ are provenance, not docs: nobody curates them, nobody deletes them.
 
 ## This pass
 
-- 15 loose specs qualify for archive (closed beads, zero references):
+- 14 loose specs qualify for archive (closed beads, zero references):
   2szm, 5lfp1, 7z2q, 8o9f8, d6k4v, g0ti, hcx5p, j1kk2.4, j1kk2.5,
-  j1kk2.8, j1kk2.10, n59xn, pw69n, ujipn, z76f2.
+  j1kk2.8, j1kk2.10, pw69n, ujipn, z76f2. (`bro-n59xn` stays live —
+  `scripts/beads-dolt-server.ts` cites it, so it fails the
+  "unreferenced" test.)
 - `specs/README.md` — the convention above.
 - Site gains a Design section (`site/content/docs/design/`): three
   narrative pages distilled from the normative specs — the rig engine
