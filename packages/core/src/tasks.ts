@@ -652,7 +652,11 @@ function makeStore(x: StoreExec): TaskStore {
     },
     actor: () => x.actor(),
     reopen: (id) => {
-      x.run(['reopen', id])
+      // NOT `bd reopen` — that verb is closed→open only and no-ops on
+      // an in_progress claim ("not closed; nothing to do"), stranding
+      // the claim (bro-aqjji). `update --status open` covers both legs:
+      // claim release and closed reopen.
+      x.run(['update', id, '--status', 'open', '--assignee', ''])
     },
     close: (id, reason) => {
       x.run(['close', id, ...(reason ? ['--reason', reason] : [])])

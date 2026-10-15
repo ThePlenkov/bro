@@ -264,6 +264,17 @@ describe('taskStore', { skip: WIN32 }, () => {
     })
   })
 
+  test('reopen releases via update --status open, never `bd reopen` (bro-aqjji)', () => {
+    withFakeBd({}, (log) => {
+      taskStore().reopen('t1')
+      const call = logLines(log)[0] ?? ''
+      // `bd reopen` no-ops on an in_progress claim — a quota-refused
+      // spawn's settle would strand the bead in_progress forever
+      assert.ok(call.includes('update t1 --status open --assignee'), call)
+      assert.ok(!call.includes('reopen'), call)
+    })
+  })
+
   test('deps narrows by type and direction', () => {
     withFakeBd({}, (log) => {
       taskStore().deps(['t1', 't2'], { rel: 'parent', direction: 'up' })
