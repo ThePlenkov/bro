@@ -31,6 +31,14 @@
  *   GET    /api/v1/agents       the agents board — per-backend registry
  *                               agents + occupancy + armed quota lanes +
  *                               session-plane discovery rows
+ *   GET    /api/v1/agents/<ref>/log?lines=N[&follow]
+ *                               one-shot text/plain tail of the agent's
+ *                               log; `follow` upgrades to text/event-stream
+ *                               (replay lands as data: frames, followLog
+ *                               notes as `event: note`). Bearer- or
+ *                               `?token=`gated like the writes — the log
+ *                               can carry secrets, loopback alone is not
+ *                               the auth boundary.
  *   GET    /api/v1/queue        the beads queue — claimed (in-progress)
  *                               work + ready depth (`bro status` shape)
  *   GET    /api/v1/ticks        supervision — the watch heartbeat file,
@@ -119,11 +127,13 @@ import {
   collectAgentBackends,
   discoverSessions,
   findAgent,
+  followLog,
   occupancyOf,
   sessionQuotaViewsOf,
   SpawnInputError,
   spawnStepAgent,
   stopAgent,
+  tailLines,
   type AgentBackendPlane,
   type DiscoveredAgentSession,
   type FleetOccupancy,
@@ -389,6 +399,7 @@ const ROUTES = [
   'GET /api/v1/mailbox',
   'POST /api/v1/agents',
   'GET /api/v1/agents/<ref>',
+  'GET /api/v1/agents/<ref>/log',
   'DELETE /api/v1/agents/<ref>',
   'POST /api/v1/webhooks/github',
   'ALL /v1/*',
@@ -817,6 +828,13 @@ function bearerMatch(header: string | undefined, token: string): boolean {
   // is case-insensitive (RFC 7235); the token compare stays exact
   const presented =
     header?.slice(0, 7).toLowerCase() === 'bearer ' ? header.slice(7) : ''
+  return tokenEq(presented, token)
+}
+
+/** Constant-time token compare — the shared core of bearerMatch and
+ *  the `?token=` SSE fallback. An empty presented token fails closed:
+ *  `?token=` on a log route must never validate. */
+function tokenEq(presented: string, token: string): boolean {
   const a = Buffer.from(presented, 'utf8')
   const b = Buffer.from(token, 'utf8')
   return a.length === b.length && a.length > 0 && timingSafeEqual(a, b)
@@ -946,6 +964,9 @@ async function handleRequest(
     if (await routeProvider(req, res, url.pathname, deps, token, statePathHint)) {
       return
     }
+    if (await routeAgentLog(req, res, url, deps, token, statePathHint)) {
+      return
+    }
     const wantsBody =
       req.method === 'POST' || req.method === 'PUT' || req.method === 'PATCH'
     if (!webhookRoute && WRITE_METHODS.has(req.method ?? 'GET')) {
@@ -1009,6 +1030,105 @@ async function routeProvider(
     return true
   }
   await deps.provider(req, res)
+  return true
+}
+
+/** `GET /api/v1/agents/<ref>/log` — like routeProvider this sits below
+ *  the ServeResponse envelope: `follow` upgrades the response to SSE
+ *  and pipes for as long as the client stays. Auth is write-grade:
+ *  log payloads can carry secrets, so the loopback bind alone is not
+ *  the boundary — Bearer like the writes, or `?token=` for EventSource
+ *  clients that can't set headers (loopback dev-server grade; the
+ *  token is never logged). True once the path matches — any verdict
+ *  (401/404/405/422 or the stream); false lets other paths through. */
+async function routeAgentLog(
+  req: IncomingMessage,
+  res: ServerResponse,
+  url: URL,
+  deps: ServeDeps,
+  token: string,
+  statePathHint: string
+): Promise<boolean> {
+  const m = /^\/api\/v1\/agents\/([^/]+)\/log$/.exec(url.pathname)
+  if (m === null) {
+    return false
+  }
+  if (req.method !== 'GET') {
+    send(res, 405, { error: 'method not allowed' })
+    return true
+  }
+  const credentialed =
+    bearerMatch(req.headers.authorization, token) ||
+    tokenEq(url.searchParams.get('token') ?? '', token)
+  if (!credentialed) {
+    send(
+      res,
+      401,
+      { error: `session token required — read it from ${statePathHint}` },
+      { headers: { 'www-authenticate': 'Bearer' } }
+    )
+    return true
+  }
+  const { hit, degraded } = await deps.find(parseRef(m[1]!))
+  if (!hit) {
+    send(res, 404, missBody(parseRef(m[1]!), degraded))
+    return true
+  }
+  return sendAgentLog(res, url, hit.agent)
+}
+
+/** The replay bound for one leg — default the CLI's 50, a non-integer
+ *  or negative `lines=` falls back rather than 400ing (the CLI's own
+ *  flag parser is the strict surface). */
+function logLineCount(url: URL): number {
+  const n = Number(url.searchParams.get('lines') ?? '50')
+  return Number.isInteger(n) && n >= 0 ? n : 50
+}
+
+/** The resolved-log leg of routeAgentLog — one-shot text/plain, or
+ *  SSE when `follow` is present. Mirrors `bro fleet agents log`'s
+ *  refusal shapes (remote ref 422, missing file 404). */
+function sendAgentLog(res: ServerResponse, url: URL, a: AgentInfo): boolean {
+  if (a.log === undefined) {
+    send(res, 404, { error: `agent ${a.id} has no recorded log` })
+    return true
+  }
+  // a remote backend records its attach pointer, not a file — name it
+  if (/^[a-zA-Z][a-zA-Z0-9+.-]*:\/\//.test(a.log)) {
+    send(res, 422, { error: `agent ${a.id}'s log is remote — ${a.log}` })
+    return true
+  }
+  if (!existsSync(a.log)) {
+    send(res, 404, { error: `log missing: ${a.log} — reaped or never written` })
+    return true
+  }
+  // one read pins the replay boundary — a statSync later could land
+  // past a janitor truncation and fake a resync over replayed bytes
+  const replay = readFileSync(a.log, 'utf8')
+  if (!url.searchParams.has('follow')) {
+    send(res, 200, tailLines(replay, logLineCount(url)), {
+      contentType: 'text/plain; charset=utf-8',
+    })
+    return true
+  }
+  res.writeHead(200, {
+    'content-type': 'text/event-stream; charset=utf-8',
+    'cache-control': 'no-cache',
+    connection: 'keep-alive',
+  })
+  const sse = (chunk: string) => {
+    res.write(`data: ${chunk.replace(/\n/g, '\ndata: ')}\n\n`)
+  }
+  sse(tailLines(replay, logLineCount(url)))
+  const handle = followLog(
+    a.log,
+    {
+      data: sse,
+      note: (line) => res.write(`event: note\ndata: ${line}\n\n`),
+    },
+    { startOffset: Buffer.byteLength(replay) }
+  )
+  res.on('close', () => handle.stop())
   return true
 }
 
