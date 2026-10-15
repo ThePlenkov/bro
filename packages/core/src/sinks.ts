@@ -107,31 +107,7 @@ export function requestFor(
   env: NodeJS.ProcessEnv = process.env
 ): { url: string; body: unknown } | { missing: string } | { refused: string } {
   if (sink.type === 'telegram') {
-    const token = sink.tokenEnv !== undefined ? env[sink.tokenEnv]?.trim() : undefined
-    if (token === undefined || token === '') {
-      return { missing: sink.tokenEnv ?? 'tokenEnv' }
-    }
-    const chatId =
-      sink.chatId ?? (sink.chatIdEnv !== undefined ? env[sink.chatIdEnv]?.trim() : undefined)
-    if (chatId === undefined || chatId === '') {
-      return { missing: sink.chatIdEnv ?? 'chatId' }
-    }
-    // linear trim — a `/+$/` regex on operator input is a ReDoS shape
-    let base = sink.apiBase ?? TELEGRAM_API
-    while (base.endsWith('/')) {
-      base = base.slice(0, -1)
-    }
-    if (!base.toLowerCase().startsWith('https://')) {
-      return { refused: 'apiBase must be https:// — the bot token rides the request URL' }
-    }
-    return {
-      url: `${base}/bot${token}/sendMessage`,
-      body: {
-        chat_id: chatId,
-        text: renderEventText(event),
-        disable_web_page_preview: true,
-      },
-    }
+    return telegramRequest(sink, event, env)
   }
   // `urlEnv` when named is the whole channel — falling back to a
   // literal `url` would post events to a stale endpoint the operator
@@ -151,6 +127,38 @@ export function requestFor(
       ? { text: renderEventText(event) }
       : { ...event, ts: new Date().toISOString(), text: renderEventText(event) }
   return { url, body }
+}
+
+function telegramRequest(
+  sink: SinkDef,
+  event: EventInput,
+  env: NodeJS.ProcessEnv
+): { url: string; body: unknown } | { missing: string } | { refused: string } {
+  const token = sink.tokenEnv !== undefined ? env[sink.tokenEnv]?.trim() : undefined
+  if (token === undefined || token === '') {
+    return { missing: sink.tokenEnv ?? 'tokenEnv' }
+  }
+  const chatId =
+    sink.chatId ?? (sink.chatIdEnv !== undefined ? env[sink.chatIdEnv]?.trim() : undefined)
+  if (chatId === undefined || chatId === '') {
+    return { missing: sink.chatIdEnv ?? 'chatId' }
+  }
+  // linear trim — a `/+$/` regex on operator input is a ReDoS shape
+  let base = sink.apiBase ?? TELEGRAM_API
+  while (base.endsWith('/')) {
+    base = base.slice(0, -1)
+  }
+  if (!base.toLowerCase().startsWith('https://')) {
+    return { refused: 'apiBase must be https:// — the bot token rides the request URL' }
+  }
+  return {
+    url: `${base}/bot${token}/sendMessage`,
+    body: {
+      chat_id: chatId,
+      text: renderEventText(event),
+      disable_web_page_preview: true,
+    },
+  }
 }
 
 /** One sink's outcome — `delivered` is the only success; `reason`

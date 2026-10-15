@@ -37,8 +37,9 @@ function endpointOf(sink: SinkDef): { via: string; set: boolean } {
       sink.chatId !== undefined ||
       (sink.chatIdEnv !== undefined &&
         (process.env[sink.chatIdEnv]?.trim() ?? '') !== '')
+    const chatNote = chatVia === '' ? '' : ` · chat ${chatVia}`
     return {
-      via: `token ${sink.tokenEnv}${chatVia === '' ? '' : ` · chat ${chatVia}`}`,
+      via: `token ${sink.tokenEnv}${chatNote}`,
       set: (process.env[sink.tokenEnv ?? '']?.trim() ?? '') !== '' && chatSet,
     }
   }
@@ -81,9 +82,14 @@ function cmdList(json: boolean): void {
     const envs =
       secrets.length === 0
         ? ''
-        : ` [${secrets.map((e) => `${e}:${(process.env[e]?.trim() ?? '') === '' ? 'UNSET' : 'set'}`).join(' ')}]`
+        : ' [' +
+          secrets
+            .map((e) => `${e}:${(process.env[e]?.trim() ?? '') === '' ? 'UNSET' : 'set'}`)
+            .join(' ') +
+          ']'
+    const name = s.name ?? `${s.type}#${i}`
     console.log(
-      `${s.name ?? `${s.type}#${i}`}  ${s.type}  events:${events}  via:${ep.via} ` +
+      `${name}  ${s.type}  events:${events}  via:${ep.via} ` +
         `${ep.set ? 'ready' : 'NOT READY'}${envs}`
     )
   }

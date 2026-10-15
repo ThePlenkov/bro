@@ -510,9 +510,9 @@ export async function runQueue(
   }
   const results: MolResult[] = []
   for (const molId of ids) {
-    const r = await runMol(deps, cfg, molId)
+    const r = await runMol(deps, cfg, molId) // NOSONAR — a convoy runs its mols in order, never fanned out
     if (r.verdict === 'gated') {
-      await deps.onGated?.(r)
+      await deps.onGated?.(r) // NOSONAR — serial by contract
     }
     results.push(r)
   }

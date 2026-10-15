@@ -2288,7 +2288,7 @@ async function driveOnce(ctx: Ctx): Promise<void> {
   for (const pr of prs) {
     // a throwing probe on one PR must not kill the pass — in --every
     // mode an unhandled throw would end the driver entirely
-    const v: PrVerdict = await drivePr(ctx, pr, work).catch((err) => ({
+    const v: PrVerdict = await drivePr(ctx, pr, work).catch((err) => ({ // NOSONAR — a pass settles one PR before judging the next
       pr,
       link: ctx.rev.prLink(ctx.repo, pr),
       verdict: 'error',
@@ -2297,10 +2297,10 @@ async function driveOnce(ctx: Ctx): Promise<void> {
     // the human edge: unmovable verdicts and silent-reviewer alerts —
     // dedup keys make a repeated pass quiet, not absent
     if (ALERT_VERDICTS.has(v.verdict)) {
-      await publishDriveAlert(ctx.mainRoot, v.pr, v.link, v.verdict, v.detail)
+      await publishDriveAlert(ctx.mainRoot, v.pr, v.link, v.verdict, v.detail) // NOSONAR — sinks deliver serially, dedup order matters
     }
     if ((v.alerts?.length ?? 0) > 0) {
-      await publishDriveAlert(ctx.mainRoot, v.pr, v.link, 'reviewer-alert', v.alerts!.join('; '))
+      await publishDriveAlert(ctx.mainRoot, v.pr, v.link, 'reviewer-alert', v.alerts!.join('; ')) // NOSONAR — serial by contract
     }
     if (ctx.json) {
       console.log(JSON.stringify(v))

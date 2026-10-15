@@ -398,7 +398,7 @@ export async function runConvoyCommand(argv: string[]): Promise<void> {
           // for even when no session is live to drain the mailbox
           // (spec: specs/bro-huy5o.8.md)
           for (const id of gated) {
-            await publishGate(process.cwd(), id, '')
+            await publishGate(process.cwd(), id, '') // NOSONAR — gate alerts fan out serially, dedup order matters
           }
           emit(`gated: ${gated.join(' ')}`, 3)
           return
