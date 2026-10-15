@@ -10,7 +10,8 @@
  *                       current worktree's branch — the session's stack head
  *   bro work leave [slug] [--force] [--delete-branch]
  *                       remove a worktree — current one by default
- *   bro work list       worktrees with branch, dirty state, disk usage
+ *   bro work list       worktrees with branch, dirty state, the live
+ *                       in-tree claim, disk usage
  *   bro work prune      drop admin entries for worktrees already gone;
  *                       --loop also reaps loop/* (+stack/*) litter whose
  *                       bead closed or PR merged, releases in_progress
@@ -295,7 +296,7 @@ function usage(): never {
   console.error(`usage:
   bro work enter <slug> [--branch <name>] [--base <ref>] [--stack]
   bro work leave [slug] [--force] [--delete-branch]
-  bro work list
+  bro work list [--sizes]
   bro work prune [--loop] [--dry-run]`)
   process.exit(2)
 }
@@ -891,6 +892,12 @@ function cmdList(argv: string[]): void {
   const main = all[0]
   for (const [i, w] of all.entries()) {
     const parts = [i === 0 ? 'main' : 'linked', w.path, refLabel(w), stateOfWorktree(w)]
+    // the live in-tree claim — the 'claimed live work' read `bro status`
+    // surfaces too (bro-0vj14); absent markers and stale ones print nothing
+    const claim = worktreeClaim(w.path)
+    if (claim !== undefined) {
+      parts.push(claim === '' ? 'claimed' : `claim:${claim}`)
+    }
     if (withSizes && existsSync(w.path)) {
       parts.push(diskUsage(w.path))
     }

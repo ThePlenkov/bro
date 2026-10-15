@@ -36,6 +36,59 @@ describe('collectStatus', () => {
     assert.deepEqual(s.fleet.agents, [])
     assert.equal(s.drill.frame, null)
     assert.equal(s.act, undefined)
+    // the main checkout is always row 0 of the worktree plane
+    assert.equal(s.worktrees.length, 1)
+    assert.equal(s.worktrees[0]!.main, true)
+    assert.equal(s.worktrees[0]!.here, true)
+    assert.equal(s.worktrees[0]!.branch, 'main')
+  })
+
+  test('a non-git directory answers an empty worktree plane', () => {
+    assert.deepEqual(collectStatus(tmpDir('bro-status-nogit-')).worktrees, [])
+  })
+
+  test('linked worktrees surface with branch and live claim (bro-0vj14)', () => {
+    const dir = gitRepo()
+    const linked = join(tmpDir('bro-status-wt-'), 'linked')
+    execFileSync('git', ['-C', dir, 'worktree', 'add', '-q', linked, '-b', 'work/x'])
+
+    let w = collectStatus(dir).worktrees.find((t) => t.main !== true)
+    assert.ok(w !== undefined)
+    assert.equal(w.name, 'linked')
+    assert.equal(w.branch, 'work/x')
+    assert.equal(w.claim, undefined)
+    assert.equal(w.here, undefined)
+    // unclaimed siblings are listed, not probed — the dirty read is
+    // spent on claimed/main/cwd rows only
+    assert.equal(w.state, undefined)
+    // main is always probed — its clean/dirty state is board-worthy
+    assert.equal(collectStatus(dir).worktrees[0]!.state, 'clean')
+
+    // the in-tree marker `bro work enter` stamps — <gitdir>/bro/work
+    const gd = join(dir, '.git', 'worktrees', 'linked', 'bro')
+    mkdirSync(gd, { recursive: true })
+    writeFileSync(join(gd, 'work'), `${Date.now()}\nx\n`)
+    w = collectStatus(dir).worktrees.find((t) => t.main !== true)
+    assert.equal(w?.claim, 'x')
+    // a live claim earns the state probe
+    assert.equal(w?.state, 'clean')
+
+    // dirty state tracks the tree's own porcelain, not the board's dir
+    writeFileSync(join(linked, 'd.txt'), 'x')
+    assert.equal(collectStatus(dir).worktrees.find((t) => t.main !== true)?.state, 'dirty(1)')
+  })
+
+  test('the board run from a linked worktree flags it as here', () => {
+    const dir = gitRepo()
+    const linked = join(tmpDir('bro-status-wt-'), 'linked')
+    execFileSync('git', ['-C', dir, 'worktree', 'add', '-q', linked, '-b', 'work/x'])
+    const s = collectStatus(linked)
+    const mine = s.worktrees.find((t) => t.here === true)
+    assert.equal(mine?.name, 'linked')
+    assert.equal(mine?.main, undefined)
+    // cwd's state reuses the header's own dirty count — probed, free
+    assert.equal(mine?.state, 'clean')
+    assert.equal(s.worktrees.find((t) => t.main === true)?.here, undefined)
   })
 
   test('dirty count reflects porcelain — untracked included', () => {
