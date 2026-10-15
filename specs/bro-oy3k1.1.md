@@ -75,11 +75,14 @@ queued ──claim──> claimed ──spawn──> working ──pr-open──
 - `claimed` — lease held by a session or worker; no live worker yet.
 - `working` — registry entry `spawned`/`running` under the claim.
 - `pr_open` — a PR for the item's branch exists; the gate evaluates.
-- `gate_blocked` — any blocker signal: unresolved threads, failing
-  checks, SAST findings, pending reviewers, **or a required human
-  approval outstanding** (3vy93 — the gate accepts an approval input,
+- `gate_blocked` — a *settled* blocker signal: unresolved threads,
+  failing checks, SAST findings, **or a required human approval
+  outstanding** (3vy93 — the gate accepts an approval input,
   `act.approval`; a check-failure-only PR blocks here identically to a
   thread-blocked one — njyn8, no fixer spawn may key on threads alone).
+  Pending checks/reviewers are *settling*, not blocked — the item stays
+  `pr_open` until every signal resolves; a fixer never launches on a
+  still-running reviewer.
 - `green` — `exit_gate=OK`; merge pending. Merge is an edge, not a
   state — it either lands (`merged`) or bounces back to `gate_blocked`.
 - `parked` — explicitly suspended with a resume payload (the
@@ -95,11 +98,18 @@ queued ──claim──> claimed ──spawn──> working ──pr-open──
   or parked frame never counts (dkw3e). The transition emits its
   journal row with `detail.cause` so the re-entry is auditable; a
   lost item is never silently retried.
-- `closed`/`merged` — terminal.
+- `merged` — settled, not terminal: the only edge left is `merged →
+  closed` (cleanup/ledger finalization — a squash-merged branch
+  deletes, the bead's close reason lands). It never re-enters work.
+- `closed` — terminal; no outgoing edges.
 
 Every edge emits its `LifecycleKind` (claim/worktree/spawn/agent-exit/
-pr-open/gate/verdict/merge/park/release/close) — the journal row IS the
-edge; a transition that cannot journal is suspect.
+pr-open/gate/verdict/merge/park/release/close). The journal is the
+audit trail, **not** the authority: re-derivation reads the beads
+claims, git-common registry, worktrees, and the forge — a lost or
+compacted journal row must never change the verdict, it only erases
+provenance. A transition that cannot journal is still suspect (an
+unaccounted edge), but absence of the row is never state.
 
 ## Frames
 
@@ -141,10 +151,10 @@ the engine — not daemons:
   owns worktree creation AND the claim; `bro work enter`'s
   session-claiming splits this today and is the bug), then `working →
   pr_open` on push.
-- **drive policy** — `pr_open → gate_blocked` on any blocker signal
-  (threads, failed checks, SAST, pending reviewers, missing human
-  approval); `gate_blocked → working` spawns a fixer **on any blocker
-  kind** — check-only failures spawn fixers exactly like threads
+- **drive policy** — `pr_open → gate_blocked` on any *settled* blocker
+  signal (threads, failed checks, SAST, missing human approval — never
+  a pending one); `gate_blocked → working` spawns a fixer **on any
+  blocker kind** — check-only failures spawn fixers exactly like threads
   (njyn8). The fixer works the PR's own branch: its push re-enters
   `pr_open` (the existing PR is retained — never a duplicate PR) and
   the gate re-evaluates. Occupancy counts worker-kind registry entries
