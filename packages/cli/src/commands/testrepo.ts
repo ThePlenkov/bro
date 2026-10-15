@@ -20,17 +20,26 @@ import { devNull, tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
+/** Ambient env that must not reach a fixture's git children. The
+ *  repo-location pins retarget the child outright; the GIT_CONFIG*
+ *  family (GIT_CONFIG_COUNT/KEY_n/VALUE_n, GIT_CONFIG_PARAMETERS)
+ *  injects config — a pinned core.hooksPath would run host hooks on
+ *  fixture commits — and GIT_TEMPLATE_DIR plants hook files at init. */
+const AMBIENT_GIT =
+  /^(GIT_DIR|GIT_WORK_TREE|GIT_INDEX_FILE|GIT_COMMON_DIR|GIT_CONFIG($|_)|GIT_TEMPLATE_DIR$)/
+
 export function git(args: string[], cwd: string): string {
   // a test run inside another repo still carries its repo-location env —
   // strip it so the child only sees the fixture's cwd (GIT_WORK_TREE is
-  // the canonical spelling; GIT_WORKTREE is dead text git ignores)
-  const {
-    GIT_DIR: _d,
-    GIT_WORK_TREE: _w,
-    GIT_INDEX_FILE: _i,
-    GIT_COMMON_DIR: _c,
-    ...env
-  } = process.env
+  // the canonical spelling; GIT_WORKTREE is dead text git ignores).
+  // Global/system config files get nulled too: a host ~/.gitconfig
+  // core.hooksPath (or commit.gpgsign, init.defaultBranch) is the same
+  // leak through a file instead of a var
+  const env = Object.fromEntries(
+    Object.entries(process.env).filter(([k]) => !AMBIENT_GIT.test(k))
+  ) as NodeJS.ProcessEnv
+  env.GIT_CONFIG_NOSYSTEM = '1'
+  env.GIT_CONFIG_GLOBAL = devNull
   return execFileSync('git', args, { cwd, env, encoding: 'utf8' }) // NOSONAR — PATH lookup is the contract (same as core/git.ts)
 }
 
@@ -1384,20 +1393,29 @@ export async function capture(
   }
 }
 
-/** Delete ambient repo/agent pins from process.env (GIT_*, BEADS_DIR,
- *  BRO_*, plus caller-named extras) and return a restore(). An in-process
- *  command test run inside a real work item inherits pins that redirect
- *  the fixture's git/beads lookups into the OUTER repo — same reason
- *  testrepo's git() strips them from the child's env. */
+/** Delete ambient repo/agent pins from process.env (git-location and
+ *  GIT_CONFIG* vars, BEADS_DIR, BRO_*, plus caller-named extras) and
+ *  return a restore(). An in-process command test run inside a real work
+ *  item inherits pins that redirect the fixture's git/beads lookups into
+ *  the OUTER repo — same reason testrepo's git() strips them from the
+ *  child's env. The same null-config pins are set so git children the
+ *  in-process code spawns can't read host hooks/config either. */
 export function scrubEnv(extra: string[] = []): () => void {
-  const ambient = /^(GIT_DIR|GIT_WORK_TREE|GIT_INDEX_FILE|GIT_COMMON_DIR|BEADS_DIR|BRO_)/
+  const ambient = /^(BEADS_DIR|BRO_)/
   const saved: Record<string, string | undefined> = {}
   for (const k of Object.keys(process.env)) {
-    if (ambient.test(k) || extra.includes(k)) {
+    if (AMBIENT_GIT.test(k) || ambient.test(k) || extra.includes(k)) {
       saved[k] = process.env[k]
       delete process.env[k]
     }
   }
+  // a var that matched AMBIENT_GIT is only in saved when it was set —
+  // record the pins too or they'd leak past the restore
+  for (const k of ['GIT_CONFIG_NOSYSTEM', 'GIT_CONFIG_GLOBAL']) {
+    if (!(k in saved)) saved[k] = process.env[k]
+  }
+  process.env.GIT_CONFIG_NOSYSTEM = '1'
+  process.env.GIT_CONFIG_GLOBAL = devNull
   return () => {
     for (const [k, v] of Object.entries(saved)) {
       if (v === undefined) {
