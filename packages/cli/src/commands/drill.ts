@@ -312,11 +312,6 @@ function parsePark(rest: string[]): { id?: string; wake: string } {
     console.error('error: drill park requires --wake — a parked frame owes a resume predicate')
     process.exit(2)
   }
-  const extras = drillPositionals(rest)
-  if (extras.length > 0) {
-    console.error(`error: unexpected argument "${extras[0]}"`)
-    process.exit(2)
-  }
   return { id: flag(rest, '--id'), wake }
 }
 

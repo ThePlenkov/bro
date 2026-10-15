@@ -580,7 +580,9 @@ export function drillUp(opts: UpOptions): UpResult {
 export function waitingFrames(): DrillRow[] {
   return listDrills()
     .filter((r) => isOpen(r) && isDrill(r) && isWaiting(r))
-    .sort((a, b) => (b.updated_at ?? '').localeCompare(a.updated_at ?? ''))
+    .sort((a, b) =>
+      (b.updated_at ?? b.created_at ?? '').localeCompare(a.updated_at ?? a.created_at ?? '')
+    )
 }
 
 /** Suspend a frame: `waiting` label + the wake predicate in notes.
@@ -596,9 +598,12 @@ export function parkFrame(id: string | undefined, wake: string): DrillRow {
   if (isWaiting(row)) {
     return row
   }
-  taskStore().update(frame.id, { 'add-label': WAITING_LABEL })
+  // note lands first: a crash between the writes leaves a stray
+  // WAKE: line on an unparked frame (harmless provenance) rather
+  // than a waiting frame with no resume predicate
   taskStore().note(frame.id, `WAKE: ${wake.trim()}`)
-  return { ...frame, labels: [...(frame.labels ?? []), WAITING_LABEL] }
+  taskStore().update(frame.id, { 'add-label': WAITING_LABEL })
+  return { ...row, labels: [...(row.labels ?? []), WAITING_LABEL] }
 }
 
 /** Release a waiting frame: no id pops the stack top, an explicit id

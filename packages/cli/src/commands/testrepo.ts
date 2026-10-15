@@ -47,7 +47,7 @@ export function git(args: string[], cwd: string): string {
  *  `seed` may drop files before the commit; without it the commit is
  *  --allow-empty. */
 export function initRepo(prefix: string, seed?: (main: string) => void): { root: string; main: string } {
-  const root = mkdtempSync(join(tmpdir(), prefix))
+  const root = tmpDir(prefix)
   const main = join(root, 'main')
   git(['init', '-q', '-b', 'main', main], root)
   git(['config', 'user.email', 't@t'], main)
@@ -305,6 +305,7 @@ switch (cmd === undefined && args[0] === '--version' ? '--version' : cmd) {
       if (r.status !== 'open') fail('already claimed: ' + r.id)
       r.status = 'in_progress'
       r.assignee = 'tester'
+      r.updated_at = new Date().toISOString()
     } else {
       for (const [k, v] of Object.entries(flags)) {
         if (k === 'json') continue
