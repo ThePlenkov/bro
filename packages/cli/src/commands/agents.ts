@@ -951,7 +951,10 @@ export function followLog(
   opts: { pollMs?: number; signal?: AbortSignal; startOffset?: number } = {}
 ): LogFollowHandle {
   const pollMs = opts.pollMs ?? LOG_POLL_MS
-  const decoder = new TextDecoder()
+  // the decoder carries a partial multibyte tail between chunks — it
+  // resets when the byte stream restarts (truncation/reopen) and
+  // drains into `data` on stop so a torn tail is reported, not dropped
+  let decoder = new TextDecoder()
   let offset = opts.startOffset ?? 0
   let fd: number | undefined
   let missing = false
@@ -973,6 +976,10 @@ export function followLog(
     if (timer !== undefined) {
       clearTimeout(timer)
       timer = undefined
+    }
+    const tail = decoder.decode()
+    if (tail !== '') {
+      on.data(tail)
     }
     close()
   }
@@ -999,10 +1006,15 @@ export function followLog(
         on.note('[log reopened]')
         missing = false
         offset = 0
+        decoder = new TextDecoder()
       }
       if (size < offset) {
         on.note('[log truncated — resyncing]')
         offset = 0
+        decoder = new TextDecoder()
+        // a replaced file is a new inode — the open fd still resolves
+        // the OLD one's bytes; drop it so the next read reopens fresh
+        close()
       }
       if (size > offset) {
         if (fd === undefined) {
@@ -1072,7 +1084,10 @@ async function cmdLog(dir: string, env: AgentConnectorEnv, argv: string[]): Prom
   }
   // stdout stays pure log bytes — the context header rides stderr
   console.error(`agent ${a.id} (${a.state}) — ${a.log}`)
-  process.stdout.write(tailLines(readFileSync(a.log, 'utf8'), lines))
+  // one read pins the replay boundary: a second statSync could land past
+  // a janitor truncation and fake a 'truncated' resync over printed text
+  const replay = readFileSync(a.log, 'utf8')
+  process.stdout.write(tailLines(replay, lines))
   if (!follow) {
     return
   }
@@ -1080,7 +1095,7 @@ async function cmdLog(dir: string, env: AgentConnectorEnv, argv: string[]): Prom
   const handle = followLog(
     a.log,
     { data: (s) => process.stdout.write(s), note: (s) => console.error(s) },
-    { startOffset: statSync(a.log).size }
+    { startOffset: Buffer.byteLength(replay) }
   )
   // a SIGINT listener suppresses the default kill — resolve clean (0)
   await new Promise<void>((resolve) => process.once('SIGINT', resolve))
