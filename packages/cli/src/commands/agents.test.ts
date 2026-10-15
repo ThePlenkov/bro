@@ -1093,6 +1093,22 @@ describe('bro agents log', () => {
       const reaped = await agents(['log', 'fx-gone'])
       assert.equal(reaped.code, 1)
       assert.match(reaped.err.join('\n'), /log missing:.*gone\.log — reaped or never written/)
+
+      // a remote backend's attach pointer (copilot sessionUrl) is not
+      // a filesystem path — name it, never a 'reaped' misreport
+      writeAgentRegistry(fx.main, {
+        'fx-remote': {
+          agentId: 'native-rr1',
+          backend: 'native',
+          spawnedAt: new Date().toISOString(),
+          pid: process.pid,
+          worktree: fx.main,
+          log: 'https://github.com/org/repo/copilot/session/x',
+        },
+      })
+      const remote = await agents(['log', 'fx-remote'])
+      assert.equal(remote.code, 1)
+      assert.match(remote.err.join('\n'), /agent native-rr1's log is remote/)
     } finally {
       fx.restore()
     }

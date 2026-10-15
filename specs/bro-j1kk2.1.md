@@ -52,7 +52,9 @@ same degraded-backend warnings on stderr.
 - **Missing pieces are named, never invented.** `info.log` absent →
   die `agent <id> has no recorded log` (a backend may not keep one).
   Recorded path missing on disk → die `log missing: <path> — reaped or
-  never written`.
+  never written`. A `scheme://` ref (copilot records its sessionUrl as
+  `info.log`) → die `log is remote — <url>` naming the backend's own
+  surface, never a filesystem error on a URL.
 - **stdout carries log bytes only** — replay + appends. The one-line
   context header (`agent <id> (<state>) — <path>`) goes to stderr so
   `bro agents log x | …` pipes clean.

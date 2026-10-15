@@ -1079,6 +1079,11 @@ async function cmdLog(dir: string, env: AgentConnectorEnv, argv: string[]): Prom
   if (a.log === undefined) {
     die(`agent ${a.id} has no recorded log — backend ${a.backend} may not keep one`)
   }
+  // a remote backend records its attach pointer, not a file — name it
+  // instead of misreporting 'reaped' (copilot keeps a sessionUrl here)
+  if (/^[a-zA-Z][a-zA-Z0-9+.-]*:\/\//.test(a.log)) {
+    die(`agent ${a.id}'s log is remote — ${a.log} (read it through the ${a.backend} backend's own surface)`)
+  }
   if (!existsSync(a.log)) {
     die(`log missing: ${a.log} — reaped or never written`)
   }
