@@ -41,3 +41,13 @@ export {
 } from './plan.ts'
 export type { DrillPlan, DrillStep } from './plan.ts'
 export { drillConnector } from './connector.ts'
+export {
+  queueAdd,
+  queueBump,
+  queueDrill,
+  queueDrop,
+  queueItems,
+  queueScope,
+  ROOT_QUEUE,
+} from './queue.ts'
+export type { QueueItem } from './queue.ts'

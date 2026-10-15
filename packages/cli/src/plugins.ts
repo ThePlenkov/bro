@@ -82,6 +82,7 @@ import { runGuardCommand } from './commands/guard.ts'
 import { runHooksCommand } from './commands/hooks.ts'
 import { freshnessSection } from './commands/postmerge.ts'
 import { runJudgeCommand } from './commands/judge.ts'
+import { runQueueCommand } from './commands/queue.ts'
 import { runLearnCommand } from './commands/learn.ts'
 import { runMcpCommand } from './commands/mcp.ts'
 import { runPulseCommand } from './commands/pulse.ts'
@@ -357,6 +358,12 @@ export const PLUGINS: BroPlugin[] = [
     summary: 'Alias for `drill up`',
     run: runDrillCommand,
     argvPrefix: ['up'],
+  }),
+  definePlugin({
+    name: 'queue',
+    group: 'work',
+    summary: 'Frame-scoped intake queue: ls|drill|bump|rm — rank-ordered items that promote to frames',
+    run: runQueueCommand,
   }),
   definePlugin({
     name: 'retrospect',

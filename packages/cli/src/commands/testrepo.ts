@@ -1154,6 +1154,22 @@ export function hostFixture(prefix: string, opts: { loopAgent?: boolean } = {}):
   }
 }
 
+/** Repo + fake bd + a PATH-pinned spawn env — the minimal scaffold for
+ *  spawned-CLI e2e that doesn't need the fake review host. `rows` seeds
+ *  the store at install (see installFakeBd). */
+export function e2eRepo(
+  prefix: string,
+  rows: Array<Record<string, unknown>> = []
+): { main: string; db: string; env: Record<string, string> } {
+  const { root, main } = initRepo(prefix)
+  const { binDir, db } = installFakeBd(root, rows)
+  return {
+    main,
+    db,
+    env: { PATH: `${binDir}:${process.env.PATH ?? ''}`, FAKE_BD_DB: db },
+  }
+}
+
 /** A `tasks` connector over tasks.json beside the plugin — the
  *  configured-backend fixture half: `connectors.tasks` pins it and the
  *  facade's TaskStore ops land on this file instead of `bd`. Only the
