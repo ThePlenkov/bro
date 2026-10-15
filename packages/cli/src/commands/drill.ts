@@ -25,6 +25,10 @@ import {
   drillUp,
   listDrills,
   listReports,
+  parkFrame,
+  waitingFrames,
+  wakeFrame,
+  WAITING_LABEL,
   bd,
   taskStore,
   type DrillConfig,
@@ -40,6 +44,9 @@ Commands:
   down <title> [--under ID] [--ephemeral]        New child frame under current leaf (or root)
   up --result T [--prevent T]… [--evidence R]…   Close current frame, memo goes to beads
      [--report]                                  also write <drill.report.dir>/<id>.md (default drills/)
+  park [--id ID] --wake TEXT                     Suspend frame — leaves the active set until wake
+  wake [ID]                                      Release a waiting frame (bare: LIFO stack top)
+  waiting                                        The wait stack, most recently parked first
   current                                        Show the active leaf frame
   tree                                           Render all drill hierarchies
   list                                           Open drill frames
@@ -59,6 +66,7 @@ const VALUE_FLAGS: ReadonlySet<string> = new Set([
   '--priority',
   '--description',
   '--id',
+  '--wake',
 ])
 
 const drillPositionals = (argv: string[]): string[] => positionals(argv, VALUE_FLAGS)
@@ -293,7 +301,50 @@ function cmdList(): void {
     return
   }
   for (const row of rows) {
-    console.log(`${row.id}\t${row.status}\t${row.title}`)
+    const state = (row.labels ?? []).includes(WAITING_LABEL) ? 'waiting' : row.status
+    console.log(`${row.id}\t${state}\t${row.title}`)
+  }
+}
+
+function parsePark(rest: string[]): { id?: string; wake: string } {
+  const wake = flag(rest, '--wake')
+  if (!wake?.trim()) {
+    console.error('error: drill park requires --wake — a parked frame owes a resume predicate')
+    process.exit(2)
+  }
+  return { id: flag(rest, '--id'), wake }
+}
+
+function cmdPark(rest: string[]): void {
+  const { id, wake } = parsePark(rest)
+  const row = parkFrame(id, wake)
+  console.log(`parked ${row.id} — wake: ${wake}`)
+}
+
+function cmdWake(rest: string[]): void {
+  const ids = drillPositionals(rest)
+  if (ids.length > 1) {
+    console.error('error: drill wake takes at most one frame id')
+    process.exit(2)
+  }
+  try {
+    const row = wakeFrame(ids[0])
+    console.log(`woken ${row.id} ${row.title}`)
+  } catch (err) {
+    console.error(`error: ${err instanceof Error ? err.message : err}`)
+    process.exit(1)
+  }
+}
+
+function cmdWaiting(): void {
+  const rows = waitingFrames()
+  if (rows.length === 0) {
+    console.log('no waiting frames')
+    return
+  }
+  for (const row of rows) {
+    const wake = row.notes?.split('\n').find((l) => l.startsWith('WAKE: '))?.slice(6) ?? ''
+    console.log(`${row.id}\t${wake || 'waiting'}\t${row.title}`)
   }
 }
 
@@ -301,6 +352,9 @@ function cmdList(): void {
 const KNOWN_FLAGS: Record<string, Set<string>> = {
   down: new Set(['--under', '--ephemeral', '--type', '--priority', '--description']),
   up: new Set(['--id', '--result', '--prevent', '--evidence', '--report']),
+  park: new Set(['--id', '--wake']),
+  wake: new Set(),
+  waiting: new Set(),
   current: new Set(),
   tree: new Set(),
   list: new Set(),
@@ -342,7 +396,7 @@ export async function runDrillCommand(argv: string[]): Promise<void> {
   }
   rejectUnknownFlags(sub, rest)
   // these subs take no positional args — a stray one is a typo, not input
-  const noPositionals = new Set(['up', 'current', 'tree', 'list', 'report'])
+  const noPositionals = new Set(['up', 'current', 'tree', 'list', 'report', 'park', 'waiting'])
   const extras = drillPositionals(rest)
   if (noPositionals.has(sub) && extras.length > 0) {
     console.error(`error: unexpected argument "${extras[0]}"`)
@@ -378,6 +432,21 @@ export async function runDrillCommand(argv: string[]): Promise<void> {
       return
     case 'list':
       cmdList()
+      return
+    case 'park': {
+      try {
+        cmdPark(rest)
+      } catch (err) {
+        console.error(`error: ${err instanceof Error ? err.message : err}`)
+        process.exit(1)
+      }
+      return
+    }
+    case 'wake':
+      cmdWake(rest)
+      return
+    case 'waiting':
+      cmdWaiting()
       return
     case 'report':
       cmdReport()
