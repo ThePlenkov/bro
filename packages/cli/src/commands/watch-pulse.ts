@@ -135,25 +135,27 @@ export function pulseSpawnPath(dir: string): string | null {
   return common === null ? null : join(common, 'bro', 'pulse.spawn.json')
 }
 
+/** Shared record parse — the rig pulse stores the same spawn contract at
+ *  its own path, so the shape lives once here (sonar duplication cap). */
+export function parsePulseSpawn(raw: unknown): PulseSpawn | null {
+  const r = raw as { pid?: unknown; spawnedAt?: unknown; pidStart?: unknown }
+  return typeof r.pid === 'number' && Number.isInteger(r.pid) && r.pid > 0 &&
+    typeof r.spawnedAt === 'string'
+    ? {
+        pid: r.pid,
+        spawnedAt: r.spawnedAt,
+        pidStart: typeof r.pidStart === 'string' ? r.pidStart : undefined,
+      }
+    : null
+}
+
 export function readPulseSpawn(dir: string): PulseSpawn | null {
   const file = pulseSpawnPath(dir)
   if (file === null || !existsSync(file)) {
     return null
   }
   try {
-    const raw = JSON.parse(readFileSync(file, 'utf8')) as {
-      pid?: unknown
-      spawnedAt?: unknown
-      pidStart?: unknown
-    }
-    return typeof raw.pid === 'number' && Number.isInteger(raw.pid) && raw.pid > 0 &&
-      typeof raw.spawnedAt === 'string'
-      ? {
-          pid: raw.pid,
-          spawnedAt: raw.spawnedAt,
-          pidStart: typeof raw.pidStart === 'string' ? raw.pidStart : undefined,
-        }
-      : null
+    return parsePulseSpawn(JSON.parse(readFileSync(file, 'utf8')))
   } catch {
     return null
   }
@@ -178,9 +180,10 @@ export function writePulseSpawn(dir: string, record: PulseSpawn): void {
 const SPAWN_TRUST_MS = 120_000
 
 /** A recorded pid is trusted with its stored start time; records that
- *  predate the field get the bounded window around `spawnedAt` only —
- *  a reused pid must not suppress the rearm forever. */
-function spawnedAlive(spawned: PulseSpawn, now: number = Date.now()): boolean {
+ *  predate the field get the bounded post-spawn window only — a reused
+ *  pid must not suppress the rearm forever. Shared with the rig pulse
+ *  (same spawn-record contract) so the pin can't drift. */
+export function spawnedAlive(spawned: PulseSpawn, now: number = Date.now()): boolean {
   if (spawned.pidStart !== undefined) {
     return pidAlive(spawned.pid, spawned.pidStart)
   }

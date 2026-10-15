@@ -35,12 +35,18 @@ import {
   loadConfig,
   lockHolderPid,
   pidAlive,
+  procStat,
   staleLock,
   worktreeGitDir,
   type Connector,
 } from '@broject/core'
 import { readWantMarker } from './want-marker.ts'
-import { isOrchestratorSession } from './watch-pulse.ts'
+import {
+  isOrchestratorSession,
+  parsePulseSpawn,
+  spawnedAlive,
+  type PulseSpawn,
+} from './watch-pulse.ts'
 import { rigSection, type RigConfig } from './rig-config.ts'
 import { SELF_ENTRY } from './self-entry.ts'
 
@@ -135,10 +141,7 @@ export function rigPulseState(dir: string): string {
     : `armed every ${marker.everySec}s — dead (session checkpoints rearm)`
 }
 
-export interface PulseSpawn {
-  pid: number
-  spawnedAt: string
-}
+export type { PulseSpawn }
 
 export function rigPulseSpawnPath(dir: string): string | null {
   const common = gitCommonDir(dir)
@@ -151,14 +154,7 @@ export function readRigPulseSpawn(dir: string): PulseSpawn | null {
     return null
   }
   try {
-    const raw = JSON.parse(readFileSync(file, 'utf8')) as {
-      pid?: unknown
-      spawnedAt?: unknown
-    }
-    return typeof raw.pid === 'number' && Number.isInteger(raw.pid) && raw.pid > 0 &&
-      typeof raw.spawnedAt === 'string'
-      ? { pid: raw.pid, spawnedAt: raw.spawnedAt }
-      : null
+    return parsePulseSpawn(JSON.parse(readFileSync(file, 'utf8')))
   } catch {
     return null
   }
@@ -195,7 +191,7 @@ export function rigPulseRearm(
     return { kind: 'quiet' }
   }
   const spawned = readRigPulseSpawn(dir)
-  if (spawned !== null && pidAlive(spawned.pid)) {
+  if (spawned !== null && spawnedAlive(spawned)) {
     return { kind: 'quiet' }
   }
   return {
@@ -275,7 +271,11 @@ function rigPulseCheckpoint(dir: string, where: string): string[] {
     if (pid === null) {
       return []
     }
-    writeRigPulseSpawn(dir, { pid, spawnedAt: new Date().toISOString() })
+    writeRigPulseSpawn(dir, {
+      pid,
+      spawnedAt: new Date().toISOString(),
+      pidStart: procStat(pid)?.start,
+    })
     return [
       `rig pulse rearmed on ${where} — spawned ` +
         `\`bro rig watch --repo ${r.repo} --every ${r.everySec} --for ${r.forSec}\` (pid ${pid})`,
