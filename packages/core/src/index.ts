@@ -300,6 +300,8 @@ export {
 } from './events-connectors.ts'
 export {
   deliverSinks,
+  registerSinkBuilder,
+  unregisterSinkBuilder,
   renderEventText,
   requestFor,
   sinkMatches,
@@ -309,6 +311,8 @@ export {
   type DeliverOpts,
   type FetchFn as SinkFetchFn,
   type SinkDelivery,
+  type SinkRequest,
+  type SinkRequestBuilder,
 } from './sinks.ts'
 export {
   addressedTo,

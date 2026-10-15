@@ -40,12 +40,42 @@ import { notifyDir } from './notify.ts'
 
 const DEFAULT_TIMEOUT_MS = 5_000
 const DEFAULT_MIN_INTERVAL_MS = 4 * 60 * 60 * 1000
-const TELEGRAM_API = 'https://api.telegram.org'
 /** Dedup records past this age are swept — the file is a cache, not a
  *  ledger; a stale hash that outlived its use is just noise. */
 const STATE_TTL_MS = 7 * 24 * 60 * 60 * 1000
 
 export type FetchFn = typeof fetch
+
+/** One sink's resolved wire shape — the `{url, body}` pair, a missing
+ *  env var name, or a refused reason. Core owns the contract; a sink
+ *  type's builder owns the policy that produces it. */
+export type SinkRequest = { url: string; body: unknown } | { missing: string } | { refused: string }
+
+export type SinkRequestBuilder = (
+  sink: SinkDef,
+  event: EventInput,
+  env: NodeJS.ProcessEnv
+) => SinkRequest
+
+/** Per-type request builders registered by the plugin layer — a sink's
+ *  delivery policy (url shape, apiBase rules, secret fields) lives with
+ *  the plugin that ships the type, not in core (bro-mq1t2). An
+ *  unregistered type takes the generic {url,body} path below. */
+const sinkBuilders = new Map<string, SinkRequestBuilder>()
+
+/** Types whose wire shape the generic path below knows — every other
+ *  type without a registered builder reports unwired, not "no url". */
+const GENERIC_SINK_TYPES = new Set<string>(['slack', 'webhook'])
+
+export function registerSinkBuilder(type: string, build: SinkRequestBuilder): void {
+  sinkBuilders.set(type, build)
+}
+
+/** Tests unregister what they registered — a leak would hijack every
+ *  later requestFor for that type in the same process. */
+export function unregisterSinkBuilder(type: string): void {
+  sinkBuilders.delete(type)
+}
 
 /** Does `event` pass this sink's routing patterns? `topic` or
  *  `topic:kind`, each half `*`/trailing-`*`-able; absent/empty means
@@ -95,9 +125,9 @@ export function sinkSecrets(sink: SinkDef): string[] {
  *  is process state, and a worker spawned before the var existed
  *  should fail then, not at parse time. Returns `{missing: <env name>}`
  *  when a required secret is unset and `{refused: <reason>}` when the
- *  endpoint itself is unacceptable — a credential-bearing URL (the
- *  telegram token rides the request path; a `urlEnv` indirection marks
- *  the endpoint as a secret) must be `https://`, since an `http://`
+ *  endpoint itself is unacceptable — a credential-bearing URL (a
+ *  `urlEnv` indirection marks the endpoint as a secret) must be
+ *  `https://`, since an `http://`
  *  first hop hands the secret to any on-path observer. `requestFor`
  *  never reveals the secret itself: the URL goes to the wire, never to
  *  a log, and `refused` names the field, not the value. */
@@ -105,9 +135,27 @@ export function requestFor(
   sink: SinkDef,
   event: EventInput,
   env: NodeJS.ProcessEnv = process.env
-): { url: string; body: unknown } | { missing: string } | { refused: string } {
-  if (sink.type === 'telegram') {
-    return telegramRequest(sink, event, env)
+): SinkRequest {
+  // a registered builder owns its type's whole wire shape — the generic
+  // path below is the contract for url/urlEnv sinks
+  const build = sinkBuilders.get(sink.type)
+  if (build !== undefined) {
+    try {
+      return build(sink, event, env)
+    } catch {
+      // a throwing builder is a policy bug — report it like any refused
+      // endpoint; the contract is "requestFor never throws"
+      return { refused: `builder for '${sink.type}' threw` }
+    }
+  }
+  // a non-generic type with no builder and no endpoint fields is unwired
+  // — say so plainly instead of a misleading "env url not set"
+  if (
+    !GENERIC_SINK_TYPES.has(sink.type) &&
+    sink.url === undefined &&
+    sink.urlEnv === undefined
+  ) {
+    return { refused: `no request builder registered for sink type '${sink.type}'` }
   }
   // `urlEnv` when named is the whole channel — falling back to a
   // literal `url` would post events to a stale endpoint the operator
@@ -127,38 +175,6 @@ export function requestFor(
       ? { text: renderEventText(event) }
       : { ...event, ts: new Date().toISOString(), text: renderEventText(event) }
   return { url, body }
-}
-
-function telegramRequest(
-  sink: SinkDef,
-  event: EventInput,
-  env: NodeJS.ProcessEnv
-): { url: string; body: unknown } | { missing: string } | { refused: string } {
-  const token = sink.tokenEnv !== undefined ? env[sink.tokenEnv]?.trim() : undefined
-  if (token === undefined || token === '') {
-    return { missing: sink.tokenEnv ?? 'tokenEnv' }
-  }
-  const chatId =
-    sink.chatId ?? (sink.chatIdEnv !== undefined ? env[sink.chatIdEnv]?.trim() : undefined)
-  if (chatId === undefined || chatId === '') {
-    return { missing: sink.chatIdEnv ?? 'chatId' }
-  }
-  // linear trim — a `/+$/` regex on operator input is a ReDoS shape
-  let base = sink.apiBase ?? TELEGRAM_API
-  while (base.endsWith('/')) {
-    base = base.slice(0, -1)
-  }
-  if (!base.toLowerCase().startsWith('https://')) {
-    return { refused: 'apiBase must be https:// — the bot token rides the request URL' }
-  }
-  return {
-    url: `${base}/bot${token}/sendMessage`,
-    body: {
-      chat_id: chatId,
-      text: renderEventText(event),
-      disable_web_page_preview: true,
-    },
-  }
 }
 
 /** One sink's outcome — `delivered` is the only success; `reason`
