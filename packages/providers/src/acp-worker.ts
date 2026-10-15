@@ -79,8 +79,9 @@ export interface AcpWorkerSpec {
    *  e.g. `devin rm {sessionId} --force`. Advisory — a failed cleanup
    *  logs, never changes the exit code. */
   sessionRm?: string
-  /** The in-process test seam — a fakeAcpAgent() app, skipping the
-   *  process spawn entirely. */
+  /** The in-process test seam — a fakeAcpAgent() app from
+   *  `@broject/providers/testkit`, skipping the process spawn
+   *  entirely. */
   peer?: AgentApp
   /** Log sink — one rendered line per update plus driver's own lines.
    *  Default stdout, which the backend redirects into the .log. */

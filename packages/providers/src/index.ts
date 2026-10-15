@@ -38,7 +38,3 @@ export {
   stripTrailingSlashes,
 } from './http.ts'
 export type { FetchFn, HttpResult, RetryWhen } from './http.ts'
-// test seam — one scripted transport shared by the providers and
-// judge suites (was four identical copies; sonar flagged the blocks)
-export { fakeAcpAgent, fakeFetch } from './testkit.ts'
-export type { Call, FakeAcpAgent } from './testkit.ts'

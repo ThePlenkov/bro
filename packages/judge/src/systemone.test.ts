@@ -3,7 +3,7 @@ import assert from 'node:assert/strict'
 import { JudgeUnavailable } from '@broject/core'
 import type { JudgeQuestion } from '@broject/core'
 import { systemoneJudge } from './systemone.ts'
-import { fakeFetch } from '@broject/providers'
+import { fakeFetch } from '@broject/providers/testkit'
 import type { JudgeConfig } from './config.ts'
 
 const CFG: JudgeConfig = {

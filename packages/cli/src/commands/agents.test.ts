@@ -12,7 +12,7 @@ import {
 } from '../agent-connectors.ts'
 import { readAgentRegistry, writeAgentRegistry, type Verdict } from '@broject/core'
 import { readJournal, ROUTE_CLASS_KIND } from '@broject/judge'
-import { fakeFetch } from '@broject/providers'
+import { fakeFetch } from '@broject/providers/testkit'
 import { capture, initRepo, installFakeBd, readBeads } from './testrepo.ts'
 import {
   discoverSessions,
