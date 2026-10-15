@@ -553,7 +553,13 @@ for (const name of readdirSync(skillsRoot).sort()) {
   if (CHECK ? synced !== text : false) {
     drift.push(`skills/${name}/SKILL.md`)
   } else if (!CHECK && synced !== text) {
-    writeFileSync(p, synced)
+    // a symlinked SKILL.md is a pointer managed elsewhere — writing
+    // through it could land outside this checkout; report, don't write
+    if (lstatSync(p).isSymbolicLink()) {
+      drift.push(`skills/${name}/SKILL.md (symlink — skipped)`)
+    } else {
+      writeFileSync(p, synced)
+    }
   }
 }
 

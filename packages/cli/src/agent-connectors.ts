@@ -285,7 +285,7 @@ export function broSpawnArgv(env: NodeJS.ProcessEnv = process.env): string[] {
       }
     }
   }
-  return ['npx', '-y', `@broject/bro@${VERSION.split('.')[0]}`]
+  return ['npx', '-y', `@broject/bro@${VERSION.split('.')[0] || '0'}`]
 }
 
 /** What resolution computed for a spawn — provenance labels plus the
