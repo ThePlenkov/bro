@@ -2053,7 +2053,10 @@ export const workConnector: Connector = {
     parallelWork(ctx) {
       try {
         const cur = gitTry(['-C', ctx.dir, 'rev-parse', '--show-toplevel']).out.trim()
-        const self = agentOwner()
+        // ctx.owner is the dispatched owner; undefined means the caller
+        // never resolved one — resolve lazily. An explicit null stays
+        // ownerless: no suppression, every claim reports as foreign
+        const self = ctx.owner === undefined ? agentOwner() : ctx.owner
         return parseWorktreePorcelain(
           gitTry(['-C', ctx.dir, 'worktree', 'list', '--porcelain']).out
         )
