@@ -52,6 +52,7 @@ import {
   type FreshnessConfig,
 } from './postmerge.ts'
 import { rigSection, type RigConfig } from './rig-config.ts'
+import { runRigNext } from './rig-next.ts'
 import {
   armRigPulse,
   disarmRigPulse,
@@ -437,6 +438,7 @@ function usage(): never {
   console.error(`usage:
   bro rig sync [--repo <dir>]       fetch → merge --ff-only @{upstream} → refresh
   bro rig status [--repo <dir>] [--json]
+  bro rig next [<item>] [--json]    the engine's re-entry verdict: step|gate|wait|done|blocked
   bro rig watch [--repo <dir>] [--every SEC] [--for SEC]
   bro rig install [--repo <dir>] [--every SEC] [--print]
   bro rig uninstall [--repo <dir>]
@@ -618,6 +620,9 @@ export async function runRigCommand(argv: string[]): Promise<void> {
   }
   if (sub === 'status') {
     cmdStatus(resolved, argv)
+  }
+  if (sub === 'next') {
+    runRigNext(cwd, pos[1], argv.includes('--json') || argv.some((a) => a.startsWith('--json=')))
   }
   if (sub === 'watch') {
     await cmdWatch(argv, cfg, resolved)

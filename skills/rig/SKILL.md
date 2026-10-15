@@ -25,6 +25,7 @@ Prereq: `bro` on PATH or `npx -y @broject/bro@0`.
 | `bro fleet rig watch [--every N] [--for S]` | Foreground supervisor — `rig sync` per tick under `bro/rig-pulse.lock` (one per repo, standby on contention); cadence `rig.intervalSec` (default 600s); `--for` bounds a session-side run. Orchestrator-only — refuses under `BRO_AGENT_ID` |
 | `bro fleet rig install [--every N] [--print]` | Arm the session pulse — writes `bro/rig-pulse.json`; the session's checkpoints rearm a bounded `bro fleet rig watch` window from it (bro-killn: no OS timer is written) |
 | `bro fleet rig uninstall` | Disarm the marker — a live `rig watch` keeps its lock until it exits |
+| `bro rig next [<item>] [--json]` | The engine's re-entry verdict over durable state: `step` (work it), `gate` (PR open — gate decision), `wait` (parked frame or live worker — a signal re-enters), `done`, `blocked` (foreign claim/deps). Stateless and read-only — races resolve on the next call |
 
 ## Policy
 
