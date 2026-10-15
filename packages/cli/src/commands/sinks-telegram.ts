@@ -1,8 +1,9 @@
 /** Telegram sink delivery policy — the bot-api request builder. Lives
  *  in the plugin layer (bro-mq1t2): core keeps the sink contract and
  *  dispatch; the token-in-URL shape, the chatId/tokenEnv resolution,
- *  and the apiBase https rule are telegram's own policy. Importing
- *  this module registers the builder. */
+ *  and the apiBase https rule are telegram's own policy. The cli entry
+ *  calls `registerTelegramSink()` — importing this module alone wires
+ *  nothing. */
 import {
   registerSinkBuilder,
   renderEventText,
@@ -13,6 +14,12 @@ import {
 
 const TELEGRAM_API = 'https://api.telegram.org'
 
+/** Bot tokens are `<bot-id>:<secret>` — the token rides the URL path, so
+ *  anything that can alter the path (`/`, `..`, whitespace, a second
+ *  colon) is refused before it reaches the wire. Bounds are generous:
+ *  telegram ids/secrets have a documented shape, not a pinned length. */
+const TOKEN_SHAPE = /^\d{5,20}:[A-Za-z0-9_-]{20,}$/
+
 export function telegramRequest(
   sink: SinkDef,
   event: EventInput,
@@ -21,6 +28,9 @@ export function telegramRequest(
   const token = sink.tokenEnv !== undefined ? env[sink.tokenEnv]?.trim() : undefined
   if (token === undefined || token === '') {
     return { missing: sink.tokenEnv ?? 'tokenEnv' }
+  }
+  if (!TOKEN_SHAPE.test(token)) {
+    return { refused: 'tokenEnv must hold a telegram bot token (<id>:<secret>)' }
   }
   const chatId =
     sink.chatId ?? (sink.chatIdEnv !== undefined ? env[sink.chatIdEnv]?.trim() : undefined)
@@ -45,4 +55,6 @@ export function telegramRequest(
   }
 }
 
-registerSinkBuilder('telegram', telegramRequest)
+export function registerTelegramSink(): void {
+  registerSinkBuilder('telegram', telegramRequest)
+}

@@ -8,7 +8,7 @@
  */
 import { warnDeprecated, type BroPlugin } from '@broject/core'
 import { journalCommand } from './commands/hooks.ts'
-import './commands/sinks-telegram.ts' // sink delivery policies register on import
+import { registerTelegramSink } from './commands/sinks-telegram.ts'
 import { docUsageLines, reservedWords, runDocVerb } from './docs.ts'
 import { GROUP_META, loadExternalPlugins, pluginGroups, PLUGINS } from './plugins.ts'
 import { VERSION } from './version.ts'
@@ -130,6 +130,10 @@ Examples:
 
 async function main(): Promise<void> {
   const [cmd, ...rest] = process.argv.slice(2)
+
+  // sink delivery policies — the plugin layer owns each type's wire
+  // shape; core dispatches to whoever registered (bro-mq1t2)
+  registerTelegramSink()
 
   // command telemetry: plugins end via process.exit() — the exit event
   // is the only site that sees every path and its code. Meta commands

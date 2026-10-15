@@ -1,7 +1,9 @@
 import { describe, test } from 'node:test'
 import assert from 'node:assert/strict'
 import { renderEventText, requestFor, type EventInput } from '@broject/core'
-import './sinks-telegram.ts' // registers the telegram builder
+import { registerTelegramSink, telegramRequest } from './sinks-telegram.ts'
+
+registerTelegramSink()
 
 const EVENT: EventInput = {
   topic: 'convoy',
@@ -11,8 +13,9 @@ const EVENT: EventInput = {
   payload: 'convoy mol-1: HUMAN GATE ready — human input needed',
 }
 
+// a syntactically valid bot token — the builder validates the shape
 const env = {
-  TG_TOKEN: 'tok-1',
+  TG_TOKEN: '123456789:ABCdef0123456789XYZabc_-DEFghi',
   TG_CHAT: '42',
 } as unknown as NodeJS.ProcessEnv
 
@@ -23,7 +26,10 @@ describe('telegram sink policy (plugin layer, bro-mq1t2)', () => {
       EVENT,
       env
     )
-    assert.equal('url' in r && r.url, 'https://api.telegram.org/bottok-1/sendMessage')
+    assert.equal(
+      'url' in r && r.url,
+      'https://api.telegram.org/bot123456789:ABCdef0123456789XYZabc_-DEFghi/sendMessage'
+    )
     const body = 'body' in r && (r.body as Record<string, unknown>)
     assert.equal(body && body.chat_id, '42')
     assert.equal(body && body.text, renderEventText(EVENT))
@@ -40,7 +46,10 @@ describe('telegram sink policy (plugin layer, bro-mq1t2)', () => {
       EVENT,
       env
     )
-    assert.equal('url' in r && r.url, 'https://tg.internal.test/bottok-1/sendMessage')
+    assert.equal(
+      'url' in r && r.url,
+      'https://tg.internal.test/bot123456789:ABCdef0123456789XYZabc_-DEFghi/sendMessage'
+    )
     assert.equal('body' in r && (r.body as Record<string, unknown>).chat_id, '7')
   })
 
@@ -68,6 +77,19 @@ describe('telegram sink policy (plugin layer, bro-mq1t2)', () => {
     assert.deepEqual(
       requestFor({ type: 'telegram', tokenEnv: 'TG_TOKEN', chatIdEnv: 'NOPE2' }, EVENT, env),
       { missing: 'NOPE2' }
+    )
+  })
+
+  test('a malformed token is refused — path injection never reaches the wire', () => {
+    const e = { T: 'not-a-token' } as unknown as NodeJS.ProcessEnv
+    assert.deepEqual(
+      telegramRequest({ type: 'telegram', tokenEnv: 'T', chatId: '1' }, EVENT, e),
+      { refused: 'tokenEnv must hold a telegram bot token (<id>:<secret>)' }
+    )
+    const evil = { T: '1:abc/../admin' } as unknown as NodeJS.ProcessEnv
+    assert.equal(
+      'refused' in telegramRequest({ type: 'telegram', tokenEnv: 'T', chatId: '1' }, EVENT, evil),
+      true
     )
   })
 })
