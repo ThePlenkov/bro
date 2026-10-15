@@ -96,6 +96,7 @@ import { expandAgentCmd, loopSection, type LoopConfig } from '@broject/loop'
 import './session-planes/devin.ts'
 import './session-planes/copilot.ts'
 import { writeCopilotCount } from './session-planes/copilot.ts'
+import { enterWorktree } from './commands/work.ts'
 
 /** Everything a factory needs: the repo ctx + the resolved config
  *  (agents.<backend> knobs, connectors.agents pick, loop.agent fallback). */
@@ -1423,6 +1424,10 @@ function prepareSpawn(
           workerEnv: spec.env,
         })
   try {
+  // enter half of the rig transition — inside the try so an enter
+  // failure also hands the session-quota reservation back via the
+  // catch below
+  enterSpawnTree(spec)
   mkdirSync(home, { recursive: true })
   const promptFile = join(home, `${agentId}.prompt.md`)
   const log = join(home, `${agentId}.log`)
@@ -1517,6 +1522,51 @@ function prepareSpawn(
       releaseSessionSlot(reservation)
     }
     throw err
+  }
+}
+
+/** The enter half of the rig transition (bro-oy3k1.4): spec.enter is
+ *  set when no worktree resolved — mint the conventional sibling under
+ *  the registry lock this caller already holds, before the registry
+ *  write and claimStep land. Runs AFTER every refuse path so a refusal
+ *  never mints a tree; a retire waits on this same lock. The bead
+ *  claim stays with claimStep — the worker's, never the session's. */
+function enterSpawnTree(spec: SpawnSpec): void {
+  if (spec.enter === undefined || existsSync(spec.repoRoot)) {
+    return
+  }
+  let entered
+  try {
+    entered = enterWorktree({
+      slug: spec.molStep,
+      branch: spec.enter.branch,
+      base: spec.enter.base,
+      main: {
+        path: spec.enter.mainPath,
+        branch: spec.enter.mainBranch,
+        head: spec.enter.mainHead ?? '',
+        bare: false,
+        detached: spec.enter.mainBranch === undefined,
+      },
+      throws: true,
+      beadClaim: false,
+      preLocked: true,
+      reusePath: true,
+    })
+  } catch (err) {
+    throw new SpawnError(
+      `worktree enter failed — ${err instanceof Error ? err.message : String(err)}`,
+      'conflict'
+    )
+  }
+  if (entered.gone === true) {
+    throw new SpawnError(`${spec.repoRoot} was retired mid-enter — retry the spawn`, 'conflict')
+  }
+  if (entered.claimLockTimedOut === true) {
+    throw new SpawnError(
+      `claim lock for ${spec.repoRoot} timed out — a driver may still be mid-retire; retry`,
+      'conflict'
+    )
   }
 }
 
@@ -1695,7 +1745,10 @@ function spawnHome(dir: string, backend: string, command: string, spec: SpawnSpe
       'config'
     )
   }
-  if (!existsSync(spec.repoRoot)) {
+  // spec.enter means prepareSpawn mints repoRoot inside the lock — the
+  // tree legitimately doesn't exist yet; the post-create state is the
+  // check that matters (it throws conflict on gone/lock-timeout)
+  if (spec.enter === undefined && !existsSync(spec.repoRoot)) {
     throw new SpawnError(`worktree ${spec.repoRoot} does not exist`, 'input')
   }
   const home = agentsHome(dir)

@@ -216,6 +216,19 @@ export interface SpawnSpec {
   class?: string
   /** Provider-resolved spawn payload — see SpawnWorker. */
   worker?: SpawnWorker
+  /** Spawn owns the enter transition (rig bro-oy3k1.4): when set,
+   *  `repoRoot` doesn't exist yet — prepareSpawn mints it as a
+   *  worktree under the registry lock before the claim lands, so
+   *  enter/claim/spawn is one lifecycle step. */
+  enter?: {
+    branch: string
+    base?: string
+    /** the repo's primary worktree — path for the sibling convention,
+     *  branch/head for the stacked-edge comparison. */
+    mainPath: string
+    mainBranch?: string
+    mainHead?: string
+  }
 }
 
 export interface AgentInfo {

@@ -235,7 +235,7 @@ export function worktreeClaim(worktree: string, now: number = Date.now()): strin
 export function claimWorktree(
   path: string,
   detail: string,
-  opts: { waitMs?: number } = {}
+  opts: { waitMs?: number; preLocked?: boolean } = {}
 ): 'stamped' | 'gone' | 'lock-timeout' | 'skipped' {
   try {
     const lock = claimLockPath(path)
@@ -250,12 +250,16 @@ export function claimWorktree(
     // the action, never between (bro-qry9). Registry first, claim
     // second — the driver's order. A non-contention failure degrades
     // to claim-lock-only: the stamp is still the occupancy record.
+    // preLocked = the caller already holds that lock (the spawn
+    // transition) — reacquiring a file lock in-process never lands.
     let releaseShared: () => void = () => {}
-    try {
-      releaseShared = acquireAgentRegistryLock(path, { waitMs: opts.waitMs })
-    } catch (err) {
-      if (err instanceof LockTimeout) {
-        return 'lock-timeout'
+    if (opts.preLocked !== true) {
+      try {
+        releaseShared = acquireAgentRegistryLock(path, { waitMs: opts.waitMs })
+      } catch (err) {
+        if (err instanceof LockTimeout) {
+          return 'lock-timeout'
+        }
       }
     }
     try {
@@ -570,6 +574,17 @@ export interface EnterWorktreeOpts {
   /** claim-stamp lock wait — tests bound it; production uses the
    *  default (the 20s shared-lock/claim-lock bound). */
   claimWaitMs?: number
+  /** throw on create failure instead of console.error + process.exit —
+   *  library callers (the spawn transition) render errors themselves
+   *  and a `bro serve` host must not die on a git error. */
+  throws?: boolean
+  /** false = the caller owns the bead claim (spawn's claimStep lands it
+   *  under the registry lock as the worker's, never the session's). */
+  beadClaim?: boolean
+  /** the caller already holds the agents.json registry lock — the
+   *  claim stamp skips its inner acquireAgentRegistryLock (nesting a
+   *  file lock would deadlock). The in-tree claim lock still runs. */
+  preLocked?: boolean
 }
 
 export interface WorktreeCreateResult {
@@ -597,6 +612,13 @@ export interface WorktreeCreateResult {
  *  the same branch name is not this stack's member). */
 export function createWorktree(opts: EnterWorktreeOpts): WorktreeCreateResult {
   const { slug, branch, base, main, defaultRef, allowExisting = true, reusePath = false } = opts
+  const fail = (msg: string): never => {
+    if (opts.throws === true) {
+      throw new Error(msg)
+    }
+    console.error(`error: ${msg}`)
+    process.exit(1)
+  }
   const path = worktreePathFor(main.path, slug)
   if (existsSync(path)) {
     const onBranch = gitTry(['-C', path, 'branch', '--show-current']).out.trim()
@@ -606,16 +628,14 @@ export function createWorktree(opts: EnterWorktreeOpts): WorktreeCreateResult {
     if (reusePath && onBranch === branch && sameRepo) {
       return { path, branch, branchExists: true, reused: true, stacked: false }
     }
-    console.error(`error: ${path} already exists`)
-    process.exit(1)
+    fail(`${path} already exists`)
   }
   // an existing branch under the target name means the slug names an
   // in-flight task — check it out rather than failing on -b. The
   // resolved default base is irrelevant here.
   const branchExists = gitTry(['rev-parse', '--verify', '--quiet', `refs/heads/${branch}`]).code === 0
   if (branchExists && !allowExisting) {
-    console.error(`error: ${branch} already exists`)
-    process.exit(1)
+    fail(`${branch} already exists`)
   }
   const args = ['worktree', 'add', path]
   if (branchExists) {
@@ -628,8 +648,7 @@ export function createWorktree(opts: EnterWorktreeOpts): WorktreeCreateResult {
   }
   const res = gitTry(args)
   if (res.code !== 0) {
-    console.error(`error: git worktree add failed — ${res.err}`)
-    process.exit(1)
+    fail(`git worktree add failed — ${res.err}`)
   }
   // a stack edge is only a real edge when the base is a local branch —
   // a raw commit-ish (--base abc123 / origin/main) yields no merge order.
@@ -657,7 +676,11 @@ export function finishWorktreeEnter(
 ): EnterWorktreeResult {
   const { slug, branch, base } = opts
   const { path } = created
-  const stamp = claimWorktree(path, slug, { waitMs: opts.claimWaitMs })
+  const claimBeadFor = () => (opts.beadClaim === false ? {} : claimBead(slug))
+  const stamp = claimWorktree(path, slug, {
+    waitMs: opts.claimWaitMs,
+    preLocked: opts.preLocked,
+  })
   if (stamp === 'gone') {
     // a driver retired the tree between the add and the stamp — claiming
     // the bead and reporting success would strand both on a dead path
@@ -711,7 +734,7 @@ export function finishWorktreeEnter(
         ...(edgeBase !== undefined ? { base: edgeBase, stacked: true } : {}),
       },
     })
-    return { path, branch, base: edgeBase, stacked: edgeBase !== undefined, claim: claimBead(slug) }
+    return { path, branch, base: edgeBase, stacked: edgeBase !== undefined, claim: claimBeadFor() }
   }
   initSubmodules(path)
   emitLifecycle(opts.main.path, {
@@ -726,7 +749,7 @@ export function finishWorktreeEnter(
       ...(created.stacked ? { stacked: true } : {}),
     },
   })
-  return { path, branch, base, stacked: created.stacked, claim: claimBead(slug) }
+  return { path, branch, base, stacked: created.stacked, claim: claimBeadFor() }
 }
 
 /** The worktree-add core shared by `work enter` and `stack push` — the
