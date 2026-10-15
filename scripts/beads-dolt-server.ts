@@ -170,7 +170,22 @@ ${BLOCK_END}
 `
 
 // `%` is a specifier prefix in systemd unit values — escape it
-const escUnit = (s: string): string => s.replace(/%/g, '%%')
+const escUnit = (s: string): string => s.replaceAll('%', '%%')
+
+const BACKSLASH = '\\'
+const ESCAPED_BACKSLASH = String.raw`\\`
+const ESCAPED_DQUOTE = String.raw`\"`
+// shell single-quote escape: close, literal quote, reopen
+const SQ_ESC = "'\\''"
+
+// ExecStart splits on whitespace — each path must be one quoted word.
+// Inside "…" systemd decodes \" and \\ ; %% still yields % (specifier
+// expansion runs on the raw line before quote parsing).
+const escUnitArg = (s: string): string =>
+  `"${s.replaceAll(BACKSLASH, ESCAPED_BACKSLASH).replaceAll('"', ESCAPED_DQUOTE).replaceAll('%', '%%')}"`
+
+// the manual-endpoint hint is a shell command — same quoting problem
+const shq = (s: string): string => `'${s.replaceAll("'", SQ_ESC)}'`
 
 const unitConfig = (doltBin: string): string =>
   `[Unit]
@@ -180,7 +195,7 @@ Documentation=https://github.com/steveyegge/beads
 [Service]
 Type=simple
 WorkingDirectory=${escUnit(beadPath('dolt'))}
-ExecStart=${escUnit(doltBin)} sql-server --config ${escUnit(beadPath('dolt-server-config.yaml'))}
+ExecStart=${escUnitArg(doltBin)} sql-server --config ${escUnitArg(beadPath('dolt-server-config.yaml'))}
 Restart=on-failure
 RestartSec=2
 
@@ -206,12 +221,16 @@ const systemctl = (args: string[]) =>
   spawnSync('systemctl', ['--user', ...args], { encoding: 'utf8', timeout: 30_000 }) // NOSONAR — literal argv, unit names regex-validated
 
 /** Absolute path for a PATH-resolved binary — the unit's ExecStart
- *  needs it (systemd PATH is minimal). */
+ *  needs it (systemd PATH is minimal). A non-printable PATH dir would
+ *  inject a unit directive — same refusal as resolveBeads(). */
 function whereis(bin: string): string {
   for (const dir of (process.env.PATH ?? '').split(':')) {
     const p = join(dir, bin)
     try {
       accessSync(p, constants.X_OK)
+      if (/[^\x20-\x7e]/.test(p)) {
+        return fail(`PATH-resolved ${bin} path contains non-printable characters — refusing`)
+      }
       return p // NOSONAR — PATH lookup is the contract (same as bd/gh resolution)
     } catch {
       // not here — next dir
@@ -258,7 +277,7 @@ async function installUnit(): Promise<void> {
   const probe = systemctl(['list-units', '--no-pager'])
   if (probe.status !== 0) {
     console.log(`systemctl --user unavailable — no unit installed`)
-    console.log(`manual endpoint: cd ${beads}/dolt && ${whereis('dolt')} sql-server --config ${beads}/dolt-server-config.yaml`) // NOSONAR — recovery instructions are the output's purpose
+    console.log(`manual endpoint: cd ${shq(`${beads}/dolt`)} && ${shq(whereis('dolt'))} sql-server --config ${shq(`${beads}/dolt-server-config.yaml`)}`) // NOSONAR — recovery instructions are the output's purpose
     return
   }
   mkdirSync(unitDir, { recursive: true })
