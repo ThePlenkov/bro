@@ -433,16 +433,7 @@ export async function resolveLoopLane(
     return templateEscape(sel, cfg, env)
   }
   const { provider, model, autoApprove, profileSourced } = lanePicks(env, sel, cfg, route, agentIsProvider)
-  const pick = await resolveSpawnProvider(
-    env,
-    'native',
-    { provider, model, autoApprove },
-    sel.provider !== undefined || agentIsProvider
-      ? 'flag'
-      : profileSourced
-        ? 'profile'
-        : 'backend'
-  )
+  const pick = await resolveSpawnProvider(env, 'native', { provider, model, autoApprove }, pickTier(sel, agentIsProvider, profileSourced))
   const lane = providerLaneOrEmpty(pick, model, autoApprove)
   return route === undefined ? lane : { ...lane, class: route.class }
 }
@@ -480,6 +471,20 @@ function lanePicks(
     cfgProfile?.model ??
     (cfg.model !== '' ? cfg.model : undefined)
   return { provider, model, autoApprove: sel.autoApprove ?? profile?.autoApprove, profileSourced: profile?.provider !== undefined }
+}
+
+/** The provenance tier for the provider pick — a flag's typo is caller
+ *  'input', a config-sourced name is 'config' (resolveSpawnProvider's
+ *  namedBy contract). */
+function pickTier(
+  sel: LoopLaneSel,
+  agentIsProvider: boolean,
+  profileSourced: boolean
+): 'flag' | 'profile' | 'backend' {
+  if (sel.provider !== undefined || agentIsProvider) {
+    return 'flag'
+  }
+  return profileSourced ? 'profile' : 'backend'
 }
 
 /** The escape hatch — a template --agent replaces the provider lane for
@@ -2478,27 +2483,26 @@ function buildCtx(
       )
     }
   }
-  // announce the resolved lane once — agents.native.provider picking up
-  // the run must not be a silent behavior change for template users.
-  // With routing armed the pin test is the flag TIER, not ctx.lane —
-  // the preflight route fills lane.provider with the fallback class's
-  // head, which advertises the floor, not a pin.
-  if (ctx.routing && !flagPin) {
-    say(
-      ctx,
-      'loop: fleet.routing — provider resolves per bead class' +
-        (ctx.sel.class === undefined ? '' : ` (pinned: ${ctx.sel.class})`)
-    )
-  }
-  if (ctx.lane.provider !== undefined && (!ctx.routing || flagPin)) {
-    say(
-      ctx,
-      `loop: provider ${laneLabel(ctx.lane)}` +
-        (ctx.lane.worker?.kind === 'argv' ? ' (acp worker)' : '') +
-        (ctx.routing ? ' (pinned — fleet.routing supplies classes only)' : '')
-    )
-  }
+  sayLaneNotes(ctx, flagPin)
   return ctx
+}
+
+// announce the resolved lane once — agents.native.provider picking up
+// the run must not be a silent behavior change for template users.
+// With routing armed the pin test is the flag TIER, not ctx.lane —
+// the preflight route fills lane.provider with the fallback class's
+// head, which advertises the floor, not a pin.
+function sayLaneNotes(ctx: Ctx, flagPin: boolean): void {
+  if (ctx.routing && !flagPin) {
+    const pin = ctx.sel.class === undefined ? '' : ` (pinned: ${ctx.sel.class})`
+    say(ctx, `loop: fleet.routing — provider resolves per bead class${pin}`)
+  }
+  if (ctx.lane.provider === undefined || (ctx.routing && !flagPin)) {
+    return
+  }
+  const worker = ctx.lane.worker?.kind === 'argv' ? ' (acp worker)' : ''
+  const routed = ctx.routing ? ' (pinned — fleet.routing supplies classes only)' : ''
+  say(ctx, `loop: provider ${laneLabel(ctx.lane)}${worker}${routed}`)
 }
 
 // the projection target rides the REVIEW host's tasks — a named
