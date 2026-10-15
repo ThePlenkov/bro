@@ -9,14 +9,17 @@
 >
 > **Landing:** [broject.dev](https://broject.dev) · **Docs:** [broject.dev/docs](https://broject.dev/docs/)
 
-Your AI agent can read a PR. Can it tell which merged PRs still have
-unresolved review threads rotting in them? Can it say "bro, what's left?"
+Your AI agent can read a PR. Can it claim the next bead, spawn a fleet
+of workers to chew the queue, drive the review gate to merge, and sweep
+the merged threads into a debt ledger — without you orchestrating a
+thing? Can it say "bro, what's left?"
 
-Now it can.
+Now it can. Not another orchestrator — the rig your agent already
+carries.
 
 ```bash
-npx @broject/bro review debt prs        # merged PRs nobody processed yet
-npx @broject/bro review debt collect    # sweep them, label them debt:collected
+npx @broject/bro next                   # pick the top claimable bead
+npx @broject/bro fleet agents up <mol>  # spawn a registered worker on it
 npx @broject/bro review debt status     # the damage report
 ```
 
