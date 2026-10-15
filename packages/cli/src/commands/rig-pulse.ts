@@ -43,6 +43,7 @@ import {
 import { readWantMarker } from './want-marker.ts'
 import {
   isOrchestratorSession,
+  parsePulseSpawn,
   spawnedAlive,
   type PulseSpawn,
 } from './watch-pulse.ts'
@@ -153,19 +154,7 @@ export function readRigPulseSpawn(dir: string): PulseSpawn | null {
     return null
   }
   try {
-    const raw = JSON.parse(readFileSync(file, 'utf8')) as {
-      pid?: unknown
-      spawnedAt?: unknown
-      pidStart?: unknown
-    }
-    return typeof raw.pid === 'number' && Number.isInteger(raw.pid) && raw.pid > 0 &&
-      typeof raw.spawnedAt === 'string'
-      ? {
-          pid: raw.pid,
-          spawnedAt: raw.spawnedAt,
-          pidStart: typeof raw.pidStart === 'string' ? raw.pidStart : undefined,
-        }
-      : null
+    return parsePulseSpawn(JSON.parse(readFileSync(file, 'utf8')))
   } catch {
     return null
   }
