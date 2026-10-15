@@ -15,6 +15,7 @@ import {
   installClient,
   isBroAdapter,
   pluginRows,
+  runPluginsCommand,
   scopesOf,
   uninstallClient,
   type MutateOpts,
@@ -441,5 +442,52 @@ describe('plugins install/uninstall/list — kilo', () => {
     assert.ok(!existsSync(f.globalPath))
     assert.ok(!existsSync(f.localPath))
     assert.ok(!existsSync(f.manifestPath))
+  })
+})
+
+describe('plugins --json', () => {
+  test('prints the registry as data — the generator contract', () => {
+    const plugins = [
+      { name: 'act', group: 'review', summary: 'the gate', run: () => {}, skill: 'act' },
+      { name: 'hooks', summary: 'plumbing', run: () => {}, hidden: true },
+      {
+        name: 'wtf',
+        group: 'self',
+        summary: 'vent',
+        run: () => {},
+        aliasOf: 'retrospect capture',
+      },
+    ]
+    const orig = console.log
+    let printed = ''
+    console.log = (s: unknown) => {
+      printed += String(s)
+    }
+    try {
+      runPluginsCommand(['--json'], plugins as never)
+    } finally {
+      console.log = orig
+    }
+    const rows = JSON.parse(printed) as {
+      name: string
+      group?: string
+      hidden: boolean
+      aliasOf?: string
+      plan: boolean
+      external: boolean
+    }[]
+    assert.equal(rows.length, 3)
+    // JSON.stringify drops undefined keys — the row is sparse by design
+    assert.deepEqual(rows[0], {
+      name: 'act',
+      group: 'review',
+      summary: 'the gate',
+      skill: 'act',
+      hidden: false,
+      plan: false,
+      external: false,
+    })
+    assert.equal(rows[1]!.hidden, true)
+    assert.equal(rows[2]!.aliasOf, 'retrospect capture')
   })
 })
