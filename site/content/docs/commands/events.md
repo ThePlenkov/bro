@@ -1,6 +1,6 @@
 ---
-title: Events — notify, mailbox, bus
-description: The events facade — a session mailbox by default, a local event broker behind it.
+title: Events — notify, mailbox, bus, sinks
+description: The events facade — a session mailbox by default, a local event broker behind it, webhook sinks for humans.
 ---
 
 `bro comms notify` writes through one `events` facade — mailbox by default,
@@ -77,6 +77,73 @@ public Host a tunnel forwards with.
 event lands — a check completing wakes the wait instead of sitting out
 the interval. Broker down means plain timer polling: the webhook path
 is an accelerator over the default, never a requirement.
+
+## Webhook sinks — `notify.sinks`
+
+The mailbox reaches agents; sinks reach PEOPLE. A `sinks` array in the
+operator-local `notify` section fans every publish out to configured
+webhooks — Slack incoming webhooks, telegram `sendMessage`, or a
+generic JSON endpoint. Two paths deliver. Facade `publish` — `bro
+notify`, convoy, drive, act, retrospect — awaits the sink fan-out
+before resolving, so a slow sink holds the call until it answers or
+hits `timeoutMs`. `bro bus publish` and the GitHub webhook ingest call
+`deliverSinks` without awaiting — delivery completes in the
+background and the caller never sees the per-sink result rows.
+
+| Command | What it does |
+| ------- | ------------ |
+| `bro sinks list [--json]` | Resolved sinks — type, route patterns, and each secret env var's set/unset status (never the value) |
+| `bro sinks test [--json]` | Probe every configured sink's endpoint (routes bypassed), report per-sink delivered/deduped/error — verify a webhook before a real event needs it |
+
+```json
+{
+  "notify": {
+    "sinks": [
+      { "type": "slack", "urlEnv": "SLACK_HOOK", "events": ["convoy:gate", "drive:alert"] },
+      { "type": "telegram", "tokenEnv": "TG_TOKEN", "chatIdEnv": "TG_CHAT", "events": ["*"] },
+      { "type": "webhook", "urlEnv": "WH_URL", "events": ["act:*", "retro:*"] },
+      { "type": "webhook", "url": "http://ci.internal/bro-events" }
+    ]
+  }
+}
+```
+
+Each entry is `{ type, ... }`:
+
+- `events` — the route. `[]`/absent means every event; entries are
+  `topic` (any kind), `topic:kind` (exact), or `*`-globs (`dr*`,
+  `drive:*`). A sink posts only when some pattern matches.
+- Secrets name env vars — `urlEnv`, `tokenEnv`, `chatIdEnv` — never
+  literal values in config; a missing var skips the sink. `url` and
+  `chatId` accept literals for non-secret endpoints. Credential-bearing
+  endpoints must be `https://` — a `urlEnv`-resolved URL and telegram
+  `apiBase` answering `http://` are refused, not sent: the token or
+  secret URL never leaves over cleartext. Literal `url` stays
+  unrestricted for internal non-secret receivers.
+- `timeoutMs` bounds one delivery (default 5s — a wedged endpoint
+  doesn't hold the caller); `minIntervalMs` deduplicates an identical
+  repeat (same sink, key, rendered text, and raw payload) so an
+  every-N-minutes alert source doesn't re-page each tick (default 4h;
+  `0` disables). A changed payload is a new event and sends
+  immediately — payloads that merely render alike (whitespace-collapsed
+  strings) still count as changed.
+- Bodies: slack posts `{ text: "[topic/kind] message" }`, telegram
+  `{ chat_id, text }` to `bot<token>/sendMessage` (`apiBase`
+  overrides the API host), generic webhook posts the event fields
+  plus a rendered `text` — all `application/json`.
+
+Delivery never FAILS the agent: a missing env var, an HTTP error, a
+dead endpoint returns a result row, not an exception. Blocking depends
+on the path — facade publish waits on the fan-out (`timeoutMs`, default
+5s per request with all sinks in parallel, is the bound; it does not
+make publish nonblocking) while the `bro bus publish` and
+webhook-ingest paths don't wait at all. Built-in
+emissions — convoy HUMAN GATE (`convoy:gate`), drive stuck-PR and
+silent-reviewer alerts (`drive:alert`), `act wait` settles
+(`act:block`/`act:result`), wtf captures (`wtf:note`) and retro records
+(`retro:result`) — all arrive through the same publish path. The
+`notify` section is operator-scoped — commit the file without secrets
+anyway; values stay in env.
 
 ## Policy
 
