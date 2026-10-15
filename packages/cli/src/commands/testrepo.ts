@@ -288,6 +288,12 @@ switch (cmd === undefined && args[0] === '--version' ? '--version' : cmd) {
       external_ref: flags['external-ref'],
       created_at: new Date().toISOString(),
     })
+    // --parent is a dep edge, not a field — record it so drill/queue
+    // promote paths keep the child↔frame link real bd would write
+    if (flags.parent) {
+      db.deps = db.deps || []
+      db.deps.push({ issue_id: id, depends_on_id: flags.parent, type: 'parent' })
+    }
     save(db)
     jsonOut({ id })
     break
@@ -302,7 +308,14 @@ switch (cmd === undefined && args[0] === '--version' ? '--version' : cmd) {
     } else {
       for (const [k, v] of Object.entries(flags)) {
         if (k === 'json') continue
-        if (k === 'set-labels' || k === 'add-label') { r.labels = String(v).split(',') }
+        if (k === 'set-labels') { r.labels = String(v).split(',') }
+        // real bd: add-label appends, remove-label drops — repeatable
+        // flags arrive as an array from the arg scan above
+        else if (k === 'add-label') { r.labels = [...new Set([...(r.labels || []), ...[].concat(v)])] }
+        else if (k === 'remove-label') {
+          const drop = new Set([].concat(v))
+          r.labels = (r.labels || []).filter((l) => !drop.has(l))
+        }
         else if (k === 'external-ref') { r.external_ref = v }
         // --defer <ts> is the snooze: defer_until + deferred status,
         // hidden from ready until a wake (real bd semantics)
@@ -401,6 +414,7 @@ switch (cmd === undefined && args[0] === '--version' ? '--version' : cmd) {
       console.log('Root issue: ' + id)
       break
     }
+    if (pos[1] === 'wisp' && pos[2] === 'list') { jsonOut({ wisps: db.wisps || [] }); break }
     if (pos[1] !== 'show') fail('mol ' + (pos[1] || ''))
     const m = (db.mols || {})[pos[2]]
     if (!m) fail('no molecule ' + pos[2])
@@ -427,6 +441,13 @@ switch (cmd === undefined && args[0] === '--version' ? '--version' : cmd) {
     break
   }
   case 'provenance': {
+    if (pos[1] === 'record') {
+      db.prov = db.prov || {}
+      const id = flags.issue
+      db.prov[id] = [...(db.prov[id] || []), { kind: flags.kind, source: flags.source, ref: flags.ref }]
+      save(db)
+      break
+    }
     if (pos[1] !== 'log') fail('provenance ' + (pos[1] || ''))
     if ((db.provFail || []).includes(pos[2])) fail('provenance log failed')
     jsonOut((db.prov || {})[pos[2]] || [])
