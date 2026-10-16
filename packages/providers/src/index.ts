@@ -20,6 +20,7 @@ export { cliChat, expandPromptFile } from './cli.ts'
 export { openaiCompatChat } from './openai.ts'
 export { providerClient } from './registry.ts'
 export type {
+  AcpClientBridge,
   AcpSeam,
   ProviderCall,
   ProviderChat,
