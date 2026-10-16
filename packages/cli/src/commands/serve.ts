@@ -818,9 +818,22 @@ async function route(
   if (plane !== undefined) {
     return routePlane(method, () => plane(deps))
   }
+  return routeApiBranch(method, api, rawBody, deps, headers, query)
+}
+
+/** The deeper `/api/v1/*` dispatch — kept out of `route` so the top
+ *  dispatcher stays under the SonarCloud cognitive ceiling. */
+function routeApiBranch(
+  method: string,
+  api: string[],
+  rawBody: string | undefined,
+  deps: ServeDeps,
+  headers: Record<string, string | string[] | undefined>,
+  query: Record<string, string>
+): ServeResponse | Promise<ServeResponse> {
   if (api[0] === 'events' && api[1] === 'asyncapi.json' && api.length === 2) {
     const doc = deps.asyncApi?.()
-    return doc === undefined ? NOT_FOUND : routePlane(method, async () => doc)
+    return doc === undefined ? NOT_FOUND : routePlane(method, () => Promise.resolve(doc))
   }
   if (api[0] === 'planes') {
     return routePlanes(method, api, rawBody, deps.planeCatalog?.(), query)
