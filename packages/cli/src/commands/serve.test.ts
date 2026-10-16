@@ -128,6 +128,22 @@ describe('serve — routes', () => {
     assert.equal(post.status, 405)
   })
 
+  test('GET /api/v1/events/asyncapi.json serves the generated doc', async () => {
+    const r = await route('GET', '/api/v1/events/asyncapi.json', undefined, deps({
+      asyncApi: () => ({ asyncapi: '3.0.0', channels: {} }),
+    }))
+    assert.equal(r.status, 200)
+    assert.equal((r.body as { asyncapi: string }).asyncapi, '3.0.0')
+
+    // absent dep unwires the route like any unwired plane
+    const absent = await route('GET', '/api/v1/events/asyncapi.json')
+    assert.equal(absent.status, 404)
+    const post = await route('POST', '/api/v1/events/asyncapi.json', '{}', deps({
+      asyncApi: () => ({}),
+    }))
+    assert.equal(post.status, 405)
+  })
+
   test('GET /api/v1/health answers liveness', async () => {
     const r = await route('GET', '/api/v1/health')
     assert.equal(r.status, 200)

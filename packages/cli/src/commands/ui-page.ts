@@ -163,12 +163,16 @@ function armStream(index) {
   var canStream = events && events.capabilities && events.capabilities.stream === true;
   if (canStream && evtSource === null && typeof EventSource !== 'undefined') {
     evtSource = new EventSource(STREAM);
-    evtSource.onmessage = function () {
+    var wake = function () {
       if (!document.hidden) {
         clearTimeout(timer);
         tick();
       }
     };
+    evtSource.onmessage = wake;
+    // 'gap' is the one named frame — cursor fell outside the ring,
+    // re-derive: an early tick does exactly that through the planes
+    evtSource.addEventListener('gap', wake);
     evtSource.onerror = function () {
       // stream death is a client-side step of the ladder — the poll
       // cadence already covers the gap; retry comes with the next
