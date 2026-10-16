@@ -304,25 +304,36 @@ export function devinPidCwd(pid: number, procDir = '/proc'): string | undefined 
   }
 }
 
-/** Devin's per-process log dir — `devin_<ts>_<pid>.log`, the sibling
- *  of session_locks under the same data base. */
-export function devinLogsDir(
-  bag?: Record<string, unknown>,
-  env: Record<string, string | undefined> = process.env
+/** A sibling dir of session_locks under the same data base — `logs`,
+ *  `transcripts`, whatever a plane needs next. The `<name>Dir`
+ *  override wins; a custom lockDir broke the real-install sibling
+ *  layout, so the fallback nests inside the override instead of
+ *  escaping the operator's chosen root via `..`. */
+function devinSiblingDir(
+  bag: Record<string, unknown> | undefined,
+  env: Record<string, string | undefined>,
+  overrideKey: string,
+  name: string
 ): string {
-  const override = bag?.['logsDir']
+  const override = bag?.[overrideKey]
   if (typeof override === 'string' && override.trim() !== '') {
     return override
   }
   const locks = devinLocksDir(bag, env)
   const lockOverride = bag?.['lockDir']
   if (typeof lockOverride === 'string' && lockOverride.trim() !== '') {
-    // a custom lockDir broke the real-install sibling layout — a
-    // `../logs` escape would land outside the operator's chosen root,
-    // so the fallback nests inside the override instead
-    return join(locks, 'logs')
+    return join(locks, name)
   }
-  return join(locks, '..', 'logs')
+  return join(locks, '..', name)
+}
+
+/** Devin's per-process log dir — `devin_<ts>_<pid>.log`, the sibling
+ *  of session_locks under the same data base. */
+export function devinLogsDir(
+  bag?: Record<string, unknown>,
+  env: Record<string, string | undefined> = process.env
+): string {
+  return devinSiblingDir(bag, env, 'logsDir', 'logs')
 }
 
 /** Devin's transcript dir — `transcripts/<session-name>.json`, the
@@ -334,16 +345,7 @@ export function devinTranscriptsDir(
   bag?: Record<string, unknown>,
   env: Record<string, string | undefined> = process.env
 ): string {
-  const override = bag?.['transcriptsDir']
-  if (typeof override === 'string' && override.trim() !== '') {
-    return override
-  }
-  const locks = devinLocksDir(bag, env)
-  const lockOverride = bag?.['lockDir']
-  if (typeof lockOverride === 'string' && lockOverride.trim() !== '') {
-    return join(locks, 'transcripts')
-  }
-  return join(locks, '..', 'transcripts')
+  return devinSiblingDir(bag, env, 'transcriptsDir', 'transcripts')
 }
 
 /** A session's ATIF transcript — `transcripts/<lock-name>.json` when
