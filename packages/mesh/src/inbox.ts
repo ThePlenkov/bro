@@ -195,7 +195,7 @@ export function meshInbox(
       // outbound posts (requests I posted to peers, results I shipped)
       // live in the same store but are not inbox material — and must
       // never feed the terminal set
-      if (env === null || env.to !== selfRig) {
+      if (env?.to !== selfRig) {
         continue
       }
       records.push({

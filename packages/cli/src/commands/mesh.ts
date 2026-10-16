@@ -20,7 +20,6 @@ import {
   wireDep,
   syncReplica,
   withMeshConfig,
-  type MeshConfigFile,
   type MeshKind,
   type MeshRef,
   type MeshPeer,
@@ -392,6 +391,68 @@ function lifecycleTarget(
   return senderOf(worker)
 }
 
+/** A foreign anchor's `.beads` pins over ambient BEADS_DIR — the
+ *  caller's env belongs to its own store; an own anchor honors the
+ *  ambient pin (a spawned worker's shared store) */
+function anchorStore(anchor: string, dir: string) {
+  return anchor !== dir ? taskStoreAt(join(anchor, '.beads')) : taskStore(anchor)
+}
+
+// the thread's home is the anchor store — a `local` peer binding
+// names the checkout the request was delivered into; own store
+// otherwise (pull topology: verdicts ship on the author's side)
+function resolveAnchor(dir: string, state: ReturnType<typeof meshThread>, thread: string): string {
+  if (state.requestPeer?.transport !== 'local') {
+    return dir
+  }
+  const checkout = localCheckout(state.requestPeer.remote)
+  if (checkout === null) {
+    console.error(
+      `error: thread "${thread}" anchors at ${state.requestPeer.remote} — the checkout does not resolve`
+    )
+    process.exit(2)
+  }
+  return checkout
+}
+
+// delivered threads carry `export:<thread>` — `done` ships the
+// capability so the requester's `external:` dep can release. The
+// guard is the pin itself: pull-topology threads anchor on stores
+// whose request bead has no export:, and shipping there would only
+// fail. An open request bead fails the ship and names the remedy;
+// --force is never passed (releasing the dep on open work is the
+// lie the dep exists to prevent)
+function shipCapability(anchor: string, dir: string, thread: string): void {
+  let pinned = false
+  try {
+    const bead = anchorStore(anchor, dir).get<{ id: string; labels?: string[] }>(thread)
+    pinned = bead?.labels?.includes(`export:${thread}`) === true
+  } catch (e) {
+    console.error(
+      `! result posted but the anchor bead could not be read — capability NOT shipped ` +
+        `(${e instanceof Error ? e.message : String(e)})`
+    )
+    return
+  }
+  if (!pinned) {
+    return
+  }
+  try {
+    if (anchor !== dir) {
+      const ship = bdAt(join(anchor, '.beads'), ['ship', thread])
+      if (ship.code !== 0 || !ship.ran) {
+        throw new Error(ship.err || 'bd unreachable')
+      }
+    } else {
+      bd(['ship', thread], anchor)
+    }
+  } catch {
+    console.error(
+      `! result posted but capability not shipped — close the request bead, then \`bd -C ${anchor} ship ${thread}\``
+    )
+  }
+}
+
 function cmdLifecycle(dir: string, kind: MeshKind, args: string[]): void {
   const [thread, ...rest] = args
   if (thread === undefined) {
@@ -401,27 +462,7 @@ function cmdLifecycle(dir: string, kind: MeshKind, args: string[]): void {
   const { rig, state } = threadAnchor(dir, thread, !args.includes('--no-pull'))
   const request = state.request!
   const to = lifecycleTarget(kind, rig, state, thread)
-
-  // the thread's home is the anchor store — a `local` peer binding
-  // names the checkout the request was delivered into; own store
-  // otherwise (pull topology: verdicts ship on the author's side)
-  let anchor = dir
-  if (state.requestPeer?.transport === 'local') {
-    const checkout = localCheckout(state.requestPeer.remote)
-    if (checkout === null) {
-      console.error(
-        `error: thread "${thread}" anchors at ${state.requestPeer.remote} — the checkout does not resolve`
-      )
-      process.exit(2)
-    }
-    anchor = checkout
-  }
-
-  /** A foreign anchor's `.beads` pins over ambient BEADS_DIR — the
-   *  caller's env belongs to its own store; an own anchor honors the
-   *  ambient pin (a spawned worker's shared store) */
-  const anchorStore = (a: string) =>
-    a !== dir ? taskStoreAt(join(a, '.beads')) : taskStore(a)
+  const anchor = resolveAnchor(dir, state, thread)
 
   const posted = postEnvelope({
     dir: anchor,
@@ -440,41 +481,8 @@ function cmdLifecycle(dir: string, kind: MeshKind, args: string[]): void {
   }
   console.log(`${kind} ${posted.id} → ${to} (thread ${thread})`)
 
-  // delivered threads carry `export:<thread>` — `done` ships the
-  // capability so the requester's `external:` dep can release. The
-  // guard is the pin itself: pull-topology threads anchor on stores
-  // whose request bead has no export:, and shipping there would only
-  // fail. An open request bead fails the ship and names the remedy;
-  // --force is never passed (releasing the dep on open work is the
-  // lie the dep exists to prevent)
   if (kind === 'result') {
-    let pinned = false
-    try {
-      const bead = anchorStore(anchor).get<{ id: string; labels?: string[] }>(thread)
-      pinned = bead?.labels?.includes(`export:${thread}`) === true
-    } catch (e) {
-      console.error(
-        `! result posted but the anchor bead could not be read — capability NOT shipped ` +
-          `(${e instanceof Error ? e.message : String(e)})`
-      )
-      return
-    }
-    if (pinned) {
-      try {
-        if (anchor !== dir) {
-          const ship = bdAt(join(anchor, '.beads'), ['ship', thread])
-          if (ship.code !== 0 || !ship.ran) {
-            throw new Error(ship.err || 'bd unreachable')
-          }
-        } else {
-          bd(['ship', thread], anchor)
-        }
-      } catch {
-        console.error(
-          `! result posted but capability not shipped — close the request bead, then \`bd -C ${anchor} ship ${thread}\``
-        )
-      }
-    }
+    shipCapability(anchor, dir, thread)
   }
 }
 

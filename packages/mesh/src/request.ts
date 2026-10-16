@@ -74,61 +74,66 @@ function targetForCheckout(checkout: string, peer?: MeshPeer): ResolvedTarget | 
   return t
 }
 
-/** Resolve `<repo-or-alias>` against bindings, then the filesystem —
- *  the spec order: alias → URI → path → peer-remote basename →
- *  sibling checkouts. */
-export function resolveTarget(dir: string, arg: string, peers: MeshPeer[]): ResolveResult {
+function wrap(t: ResolvedTarget | { error: string }): ResolveResult {
+  return 'error' in t ? { error: t.error } : { target: t }
+}
+
+function localCheckoutTarget(peer: MeshPeer, arg: string): ResolveResult {
+  const checkout = localCheckout(peer.remote)
+  if (checkout === null) {
+    return { error: `peer "${arg}" checkout ${peer.remote} does not resolve` }
+  }
+  return wrap(targetForCheckout(checkout, peer))
+}
+
+function resolveAlias(arg: string, peers: MeshPeer[]): ResolveResult | null {
   const byAlias = peers.find((p) => p.alias === arg)
-  if (byAlias !== undefined) {
-    if (byAlias.transport !== 'local') {
-      return { target: { rig: byAlias.rig, peer: byAlias } }
-    }
-    const checkout = localCheckout(byAlias.remote)
-    if (checkout === null) {
-      return { error: `peer "${arg}" checkout ${byAlias.remote} does not resolve` }
-    }
-    const t = targetForCheckout(checkout, byAlias)
-    return 'error' in t ? { error: t.error } : { target: t }
+  if (byAlias === undefined) {
+    return null
   }
+  if (byAlias.transport !== 'local') {
+    return { target: { rig: byAlias.rig, peer: byAlias } }
+  }
+  return localCheckoutTarget(byAlias, arg)
+}
 
+function resolveUri(arg: string): ResolveResult | null {
   const uri = parseRigUri(arg)
-  if (uri !== null) {
-    return { target: { rig: formatRigUri(uri) } }
-  }
+  return uri === null ? null : { target: { rig: formatRigUri(uri) } }
+}
 
+function resolveExplicit(dir: string, arg: string): ResolveResult | null {
   const explicit =
     arg.includes('/') || arg === '.' || arg === '..' || arg.startsWith('./') || arg.startsWith('../')
-  if (explicit) {
-    const path = isAbsolute(arg) ? arg : resolve(dir, arg)
-    if (!isCheckout(path)) {
-      return { error: `${arg} is not a beads checkout (no .beads/ under ${path})` }
-    }
-    const t = targetForCheckout(path)
-    return 'error' in t ? { error: t.error } : { target: t }
+  if (!explicit) {
+    return null
   }
+  const path = isAbsolute(arg) ? arg : resolve(dir, arg)
+  if (!isCheckout(path)) {
+    return { error: `${arg} is not a beads checkout (no .beads/ under ${path})` }
+  }
+  return wrap(targetForCheckout(path))
+}
 
-  const byRemoteName = peers.find(
+function resolveBasename(arg: string, peers: MeshPeer[]): ResolveResult | null {
+  const byName = peers.find(
     (p) => p.transport === 'local' && basename(localCheckout(p.remote) ?? p.remote) === arg,
   )
-  if (byRemoteName !== undefined) {
-    const checkout = localCheckout(byRemoteName.remote)
-    if (checkout === null) {
-      return { error: `peer "${byRemoteName.alias}" checkout ${byRemoteName.remote} does not resolve` }
-    }
-    const t = targetForCheckout(checkout, byRemoteName)
-    return 'error' in t ? { error: t.error } : { target: t }
-  }
+  return byName === undefined ? null : localCheckoutTarget(byName, byName.alias)
+}
 
-  // sibling checkouts — `<name>` itself, else the `bro work` shape
-  // `<name>--<slug>`; several --siblings and no bare <name> is
-  // ambiguous, never a silent pick
+function unresolved(arg: string): ResolveResult {
+  return {
+    error:
+      `cannot resolve "${arg}" — no peer alias, mesh:// uri, checkout path, ` +
+      'or sibling checkout matches (see `bro mesh peers list`)',
+  }
+}
+
+function resolveSibling(dir: string, arg: string): ResolveResult {
   const parent = dirname(dir)
   if (parent === dir) {
-    return {
-      error:
-        `cannot resolve "${arg}" — no peer alias, mesh:// uri, checkout path, ` +
-        'or sibling checkout matches (see `bro mesh peers list`)',
-    }
+    return unresolved(arg)
   }
   let siblings: string[] = []
   try {
@@ -138,8 +143,7 @@ export function resolveTarget(dir: string, arg: string, peers: MeshPeer[]): Reso
   }
   const bare = join(parent, arg)
   if (siblings.includes(arg) && isCheckout(bare)) {
-    const t = targetForCheckout(bare)
-    return 'error' in t ? { error: t.error } : { target: t }
+    return wrap(targetForCheckout(bare))
   }
   const candidates = siblings
     .filter((s) => s.startsWith(`${arg}--`))
@@ -148,16 +152,20 @@ export function resolveTarget(dir: string, arg: string, peers: MeshPeer[]): Reso
   if (candidates.length > 1) {
     return { ambiguous: candidates }
   }
-  if (candidates.length === 1) {
-    const t = targetForCheckout(candidates[0]!)
-    return 'error' in t ? { error: t.error } : { target: t }
-  }
+  return candidates.length === 1 ? wrap(targetForCheckout(candidates[0]!)) : unresolved(arg)
+}
 
-  return {
-    error:
-      `cannot resolve "${arg}" — no peer alias, mesh:// uri, checkout path, ` +
-      'or sibling checkout matches (see `bro mesh peers list`)',
-  }
+/** Resolve `<repo-or-alias>` against bindings, then the filesystem —
+ *  the spec order: alias → URI → path → peer-remote basename →
+ *  sibling checkouts. */
+export function resolveTarget(dir: string, arg: string, peers: MeshPeer[]): ResolveResult {
+  return (
+    resolveAlias(arg, peers) ??
+    resolveUri(arg) ??
+    resolveExplicit(dir, arg) ??
+    resolveBasename(arg, peers) ??
+    resolveSibling(dir, arg)
+  )
 }
 
 /** Deliver a request envelope INTO the target checkout's store —
@@ -225,8 +233,7 @@ export function ensurePeerBinding(
     // outside it would let two invocations both pass the guard and a
     // second alias bind the same checkout twice
     return withMeshConfig(dir, (cfg) => {
-      const mesh = cfg.mesh ?? {}
-      const peers = { ...(mesh.peers ?? {}) }
+      const peers = { ...cfg.mesh?.peers }
       const existing = peers[alias]
       if (existing !== undefined) {
         // idempotent only when the alias already names THIS checkout —
@@ -244,7 +251,7 @@ export function ensurePeerBinding(
         return { added: false, note: `peer "${boundTo}" already binds ${checkout}` }
       }
       peers[alias] = { rig, remote: checkout }
-      cfg.mesh = { ...mesh, peers }
+      cfg.mesh = { ...cfg.mesh, peers }
       return { added: true }
     })
   } catch (e) {
