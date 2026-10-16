@@ -22,6 +22,15 @@ export interface PostInput {
   refs?: MeshRef[]
   priority?: number
   evidence?: MeshRef[]
+  /** labels beyond the envelope set — delivery pins `export:<id>` so a
+   *  later `bd ship` finds the bead; resolved after create, when the
+   *  id exists, so entries may interpolate `{id}`. */
+  extraLabels?: string[]
+  /** rig the external_ref URI names — defaults to `from`, the author =
+   *  store owner case. Delivery overrides it with the target rig: the
+   *  bead lives in the TARGET's store, so its beads:// address is the
+   *  target's, not the requester's. */
+  beadRig?: string
 }
 
 export interface PostResult {
@@ -62,11 +71,14 @@ export function postEnvelope(input: PostInput): PostResult {
     terms: {},
     evidence: input.evidence ?? [],
   }
-  const labels = envelopeLabels(env)
+  const labels = [
+    ...envelopeLabels(env),
+    ...(input.extraLabels ?? []).map((l) => l.replaceAll('{id}', id)),
+  ]
   try {
     store.update(id, {
       'set-labels': labels.join(','),
-      'external-ref': beadUri(input.from, id),
+      'external-ref': beadUri(input.beadRig ?? input.from, id),
     })
   } catch (err) {
     return {

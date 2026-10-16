@@ -3,6 +3,7 @@ export {
   parseRigDescriptor,
   parseRigUri,
   rigFromRemoteUrl,
+  selfRig,
 } from './identity.ts'
 export type { RigDescriptor, RigRef } from './identity.ts'
 export {
@@ -26,3 +27,10 @@ export { postEnvelope, wireDep } from './post.ts'
 export type { PostInput, PostResult } from './post.ts'
 export { meshThread } from './thread.ts'
 export type { ThreadStage, ThreadState } from './thread.ts'
+export {
+  deliverRequest,
+  ensurePeerBinding,
+  resolveTarget,
+  withMeshConfig,
+} from './request.ts'
+export type { MeshConfigFile, ResolvedTarget, ResolveResult } from './request.ts'

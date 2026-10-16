@@ -10,6 +10,7 @@
  */
 import { taskStore } from '@broject/core'
 import { envelopeFromBead, type BeadLike, type MeshEnvelope, type MeshKind } from './envelope.ts'
+import { selfRig } from './identity.ts'
 import type { MeshPeer } from './peers.ts'
 import { meshScan, type PeerRecord } from './inbox.ts'
 
@@ -23,8 +24,14 @@ export interface ThreadState {
   envelopes: MeshEnvelope[]
   /** envelope id → the bound peer rig the record arrived over. The
    *  binding is the authoritative sender for replies; a record with
-   *  no entry came from our own store. */
+   *  no entry came from our own store. On a `local` peer the entry
+   *  is the envelope's `from` — the binding attests the store, not
+   *  the author (delivered threads carry the requester's records). */
   provenance: Record<string, string>
+  /** the peer that produced the REQUEST envelope — a `local` peer
+   *  means the thread's anchor store is that checkout; lifecycle
+   *  writes land there, not in our own store. */
+  requestPeer?: MeshPeer
   stage?: ThreadStage
   /** the side that owes the next move — absent on a terminal verdict */
   turn?: 'requester' | 'worker'
@@ -63,12 +70,26 @@ function ownBeads(dir: string): { rows: BeadLike[]; error?: string } {
 /** One scanned record → the thread, if it belongs. A peer can only
  *  author envelopes as itself — a record whose `from` doesn't match
  *  its binding is impersonation, and letting it into the reduction
- *  would let a peer forge lifecycle moves. */
-function admitPeerRecord(r: PeerRecord, thread: string, seen: Set<string>, state: ThreadState): void {
+ *  would let a peer forge lifecycle moves. On `local` peers the
+ *  binding attests the *store*, not the author: a delivered thread
+ *  carries the requester's records, so `from` ∈ {binding rig, own
+ *  rig} is admitted with provenance = `from`; anything else still
+ *  drops and flags. */
+function admitPeerRecord(
+  r: PeerRecord,
+  thread: string,
+  seen: Set<string>,
+  state: ThreadState,
+  own: string | null,
+  peers: MeshPeer[],
+): void {
   if (r.envelope.thread !== thread) {
     return
   }
-  if (r.envelope.from !== r.peerRig) {
+  const admitted =
+    r.envelope.from === r.peerRig ||
+    (r.transport === 'local' && own !== null && r.envelope.from === own)
+  if (!admitted) {
     state.errors.push(
       `${r.peer}: ignoring ${r.envelope.kind} ${r.envelope.id} — from ${r.envelope.from} doesn't match peer rig ${r.peerRig}`
     )
@@ -77,7 +98,11 @@ function admitPeerRecord(r: PeerRecord, thread: string, seen: Set<string>, state
   if (!seen.has(r.envelope.id)) {
     seen.add(r.envelope.id)
     state.envelopes.push(r.envelope)
-    state.provenance[r.envelope.id] = r.peerRig
+    state.provenance[r.envelope.id] =
+      r.transport === 'local' ? r.envelope.from : r.peerRig
+    if (r.envelope.kind === 'request') {
+      state.requestPeer = peers.find((p) => p.alias === r.peer)
+    }
   }
 }
 
@@ -106,10 +131,15 @@ export function meshThread(
     }
   }
 
-  const scan = meshScan(dir, peers, gitCommon, { pull: opts.pull })
+  // `closedLocal` — the request anchor's `bd close` is `done`'s ship
+  // precondition, so a closed request bead is a healthy thread's
+  // terminal state, not absence; an open-only scan loses the anchor
+  // the moment `done` lands
+  const scan = meshScan(dir, peers, gitCommon, { pull: opts.pull, closedLocal: true })
   state.errors.push(...scan.errors)
+  const ownRig = selfRig(dir)
   for (const r of scan.records) {
-    admitPeerRecord(r, thread, seen, state)
+    admitPeerRecord(r, thread, seen, state, ownRig, peers)
   }
 
   state.request = state.envelopes.find((e) => e.kind === 'request')

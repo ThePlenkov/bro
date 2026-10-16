@@ -6,6 +6,7 @@
  * URI is declared in the peer binding — never trusted from an inbound
  * envelope's `from`.
  */
+import { gitTry, loadConfig } from '@broject/core'
 
 export interface RigRef {
   org: string
@@ -23,6 +24,24 @@ export function parseRigUri(uri: string): RigRef | null {
 
 export function formatRigUri(rig: RigRef): string {
   return `mesh://${rig.org}/${rig.repo}`
+}
+
+/** A rig's own URI: the `mesh.rig` config pin wins (a repo whose
+ *  origin isn't a forge URL can still be addressed); else derived
+ *  from origin. Shared by `bro mesh me` and `bro request` — the
+ *  target side resolves exactly what its own `bro mesh inbox`
+ *  answers to. */
+export function selfRig(dir: string): string | null {
+  const cfg = loadConfig(dir)
+  if (cfg.mesh.rig !== undefined && parseRigUri(cfg.mesh.rig) !== null) {
+    return formatRigUri(parseRigUri(cfg.mesh.rig)!)
+  }
+  const origin = gitTry(['-C', dir, 'remote', 'get-url', 'origin'])
+  if (origin.code !== 0) {
+    return null
+  }
+  const rig = rigFromRemoteUrl(origin.out)
+  return rig === null ? null : formatRigUri(rig)
 }
 
 /** Derive this repo's rig URI from its origin remote — https or ssh

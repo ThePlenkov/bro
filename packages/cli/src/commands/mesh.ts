@@ -5,19 +5,22 @@
  * `mesh.peers` config map; `me` prints this rig's derived (or pinned)
  * mesh:// URI. Request/lifecycle/wait land in later milestones.
  */
-import { existsSync, readFileSync, renameSync, writeFileSync } from 'node:fs'
+import { existsSync } from 'node:fs'
 import { join } from 'node:path'
-import { facade, gitCommonDir, gitTry, loadConfig, withFileLock } from '@broject/core'
+import { bd, facade, gitCommonDir, loadConfig, taskStore } from '@broject/core'
 import {
   formatRigUri,
+  localCheckout,
   meshInbox,
   meshThread,
   parsePeer,
   parseRigUri,
   postEnvelope,
-  rigFromRemoteUrl,
+  selfRig,
   wireDep,
   syncReplica,
+  withMeshConfig,
+  type MeshConfigFile,
   type MeshKind,
   type MeshRef,
   type MeshPeer,
@@ -52,50 +55,6 @@ Commands:
                           point-check the thread's stage across own
                           store and peer replicas
 `
-
-/** This rig's URI: the `mesh.rig` config pin wins (a repo whose origin
- *  isn't a forge URL can still be addressed); else derive from origin. */
-export function selfRig(dir: string): string | null {
-  const cfg = loadConfig(dir)
-  if (cfg.mesh.rig !== undefined && parseRigUri(cfg.mesh.rig) !== null) {
-    return formatRigUri(parseRigUri(cfg.mesh.rig)!)
-  }
-  const origin = gitTry(['-C', dir, 'remote', 'get-url', 'origin'])
-  if (origin.code !== 0) {
-    return null
-  }
-  const rig = rigFromRemoteUrl(origin.out)
-  return rig === null ? null : formatRigUri(rig)
-}
-
-interface MeshConfigFile {
-  mesh?: { rig?: string; peers?: Record<string, { rig: string; remote: string }> }
-  [k: string]: unknown
-}
-
-/** Mutate `bro.config.json` under a file lock. Two refusals: a TS
- *  config shadows anything we would write (edit `mesh.peers` there
- *  instead), and a malformed file must not be silently overwritten —
- *  the error propagates and the command exits non-zero. */
-function withMeshConfig<T>(dir: string, mutate: (cfg: MeshConfigFile) => T): T {
-  const ts = join(dir, 'bro.config.ts')
-  if (existsSync(ts)) {
-    throw new Error(`bro.config.ts shadows bro.config.json — edit mesh.peers in ${ts}`)
-  }
-  const path = join(dir, 'bro.config.json')
-  return withFileLock(`${path}.lock`, () => {
-    const cfg = existsSync(path)
-      ? (JSON.parse(readFileSync(path, 'utf8')) as MeshConfigFile)
-      : ({} as MeshConfigFile)
-    const out = mutate(cfg)
-    // atomic write: temp file in the same dir + rename, so a crash
-    // mid-write can't leave a truncated config
-    const tmp = join(dir, '.bro.config.json.tmp')
-    writeFileSync(tmp, `${JSON.stringify(cfg, null, 2)}\n`)
-    renameSync(tmp, path)
-    return out
-  })
-}
 
 function cmdPeersList(dir: string): void {
   const peers = loadConfig(dir).mesh.peers
@@ -181,7 +140,7 @@ function cmdMe(dir: string): void {
   }
 }
 
-function meshPeers(dir: string) {
+export function meshPeers(dir: string): MeshPeer[] {
   return Object.entries(loadConfig(dir).mesh.peers)
     .map(([alias, raw]) => parsePeer(alias, raw))
     .filter((p): p is NonNullable<typeof p> => p !== null)
@@ -267,6 +226,7 @@ function cmdInbox(dir: string, args: string[]): void {
           bead: r.beadId,
           ...r.envelope,
           mismatch: r.mismatch || undefined,
+          unbound: r.unbound || undefined,
         })),
         null,
         2,
@@ -280,7 +240,8 @@ function cmdInbox(dir: string, args: string[]): void {
   }
   for (const r of result.requests) {
     const flag = r.mismatch ? `  ! from=${r.envelope.from} ≠ ${r.peerRig}` : ''
-    console.log(`${r.peer}\t${r.beadId}\t${r.envelope.title}${flag}`)
+    const unbound = r.unbound === true ? `  ! from=${r.envelope.from} unbound` : ''
+    console.log(`${r.peer}\t${r.beadId}\t${r.envelope.title}${flag}${unbound}`)
   }
 }
 
@@ -293,7 +254,7 @@ function requireRig(dir: string): string {
   return rig
 }
 
-function parseRefs(args: string[], flag: string): MeshRef[] {
+export function parseRefs(args: string[], flag: string): MeshRef[] {
   const out: MeshRef[] = []
   for (let i = 0; i < args.length; i++) {
     if (args[i] === flag && args[i + 1] !== undefined) {
@@ -315,7 +276,7 @@ function parseRefs(args: string[], flag: string): MeshRef[] {
   return out
 }
 
-function flagValue(args: string[], flag: string): string | undefined {
+export function flagValue(args: string[], flag: string): string | undefined {
   const i = args.indexOf(flag)
   return i !== -1 ? args[i + 1] : undefined
 }
@@ -441,8 +402,23 @@ function cmdLifecycle(dir: string, kind: MeshKind, args: string[]): void {
   const request = state.request!
   const to = lifecycleTarget(kind, rig, state, thread)
 
+  // the thread's home is the anchor store — a `local` peer binding
+  // names the checkout the request was delivered into; own store
+  // otherwise (pull topology: verdicts ship on the author's side)
+  let anchor = dir
+  if (state.requestPeer?.transport === 'local') {
+    const checkout = localCheckout(state.requestPeer.remote)
+    if (checkout === null) {
+      console.error(
+        `error: thread "${thread}" anchors at ${state.requestPeer.remote} — the checkout does not resolve`
+      )
+      process.exit(2)
+    }
+    anchor = checkout
+  }
+
   const posted = postEnvelope({
-    dir,
+    dir: anchor,
     kind,
     thread,
     from: rig,
@@ -456,6 +432,32 @@ function cmdLifecycle(dir: string, kind: MeshKind, args: string[]): void {
     process.exit(1)
   }
   console.log(`${kind} ${posted.id} → ${to} (thread ${thread})`)
+
+  // delivered threads carry `export:<thread>` — `done` ships the
+  // capability so the requester's `external:` dep can release. The
+  // guard is the pin itself: pull-topology threads anchor on stores
+  // whose request bead has no export:, and shipping there would only
+  // fail. An open request bead fails the ship and names the remedy;
+  // --force is never passed (releasing the dep on open work is the
+  // lie the dep exists to prevent)
+  if (kind === 'result') {
+    let pinned = false
+    try {
+      const bead = taskStore(anchor).get<{ id: string; labels?: string[] }>(thread)
+      pinned = bead?.labels?.includes(`export:${thread}`) === true
+    } catch {
+      pinned = false
+    }
+    if (pinned) {
+      try {
+        bd(['ship', thread], anchor)
+      } catch {
+        console.error(
+          `! result posted but capability not shipped — close the request bead, then \`bd -C ${anchor} ship ${thread}\``
+        )
+      }
+    }
+  }
 }
 
 function cmdWait(dir: string, args: string[]): void {
