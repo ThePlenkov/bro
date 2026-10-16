@@ -25,7 +25,8 @@ import type { ServeResponse } from '../commands/serve.ts'
 const NOT_ALLOWED: ServeResponse = { status: 405, body: { error: 'method not allowed' } }
 
 /** list() filter — `status`/`limit` are the declared spine; every
- *  other query key passes through to plane-specific filters. */
+ *  other query key passes through to plane-specific filters. limit=0
+ *  is a real value (zero rows), not a drop. */
 function filterOf(query: Record<string, string>): PlaneFilter {
   const { status, limit, ...rest } = query
   const filter: PlaneFilter = { ...rest }
@@ -33,7 +34,7 @@ function filterOf(query: Record<string, string>): PlaneFilter {
     filter.status = status
   }
   const n = Number(limit)
-  if (limit !== undefined && Number.isFinite(n) && n > 0) {
+  if (limit !== undefined && Number.isFinite(n) && n >= 0) {
     filter.limit = n
   }
   return filter
@@ -73,7 +74,13 @@ async function planesIndex(catalog: PlaneDescriptor[]): Promise<ServeResponse> {
 
 /** One plane's sub-routes. `seg` is the third path component — a
  *  declared read name wins over get(ref): refs can't shadow the
- *  contract, and the catalog makes "is a read" enumerable. */
+ *  contract, and the catalog makes "is a read" enumerable.
+ *
+ *  Capability gating mirrors the spec's "absent capability = hidden":
+ *  a GET requires caps.read === true, a verb requires caps[verb] ===
+ *  true — anything else (false, absent, or a probe that threw) 404s
+ *  naming the plane. Degraded never fakes an empty list and never
+ *  silently serves. */
 async function planeBranch(
   method: string,
   desc: PlaneDescriptor,
@@ -81,16 +88,20 @@ async function planeBranch(
   rawBody: string | undefined,
   query: Record<string, string>
 ): Promise<ServeResponse> {
+  const caps = await desc
+    .capabilities()
+    .catch((): Record<string, boolean> => ({ read: false, error: true }))
+  const incapable = (cap: string): ServeResponse => ({
+    status: 404,
+    body: { error: `plane "${desc.name}" cannot '${cap}'`, capabilities: caps },
+  })
   if (method === 'GET') {
-    const caps = await desc.capabilities()
-    if (caps['read'] === false) {
-      return { status: 404, body: { error: `plane "${desc.name}" not capable`, capabilities: caps } }
+    if (caps['read'] !== true) {
+      return incapable('read')
     }
-  }
-  if (method === 'GET' && seg === undefined) {
-    return { status: 200, body: await desc.list(filterOf(query)) }
-  }
-  if (method === 'GET' && seg !== undefined) {
+    if (seg === undefined) {
+      return { status: 200, body: await desc.list(filterOf(query)) }
+    }
     if (desc.reads.includes(seg)) {
       return { status: 200, body: await desc.read(seg, query) }
     }
@@ -104,6 +115,9 @@ async function planeBranch(
     // the 503 is the descriptor's own answer, not a route-level guess
     if (!desc.verbs.includes(seg)) {
       throw new PlaneVerbError(desc.name, seg, 'undeclared verb')
+    }
+    if (caps[seg] !== true) {
+      return incapable(seg)
     }
     const result = await desc.exec(seg, argsBody(rawBody, desc.name, seg))
     return { status: 200, body: result ?? { ok: true } }
@@ -138,7 +152,17 @@ export async function routePlanes(
         body: { error: `no plane "${api[1]}"`, planes: catalog.map((p) => p.name) },
       }
     }
-    return await planeBranch(method, desc, api[2], rawBody, query)
+    // row ids carry ':'/spaces (gen:seq refs, thread ids) — the wire
+    // shape is percent-encoded, the descriptor wants the decoded ref
+    let seg: string | undefined
+    if (api.length === 3) {
+      try {
+        seg = decodeURIComponent(api[2]!)
+      } catch {
+        throw new PlaneVerbError(desc.name, api[2]!, 'malformed percent-encoding')
+      }
+    }
+    return await planeBranch(method, desc, seg, rawBody, query)
   } catch (err) {
     if (err instanceof PlaneVerbError) {
       return { status: 400, body: { error: err.message } }

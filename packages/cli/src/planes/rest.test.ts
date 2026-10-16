@@ -10,7 +10,7 @@ const fakePlane = (over: Partial<PlaneDescriptor> = {}): PlaneDescriptor => ({
   name: 'test',
   reads: ['tail'],
   verbs: ['poke'],
-  capabilities: async () => ({ read: true, verbs: true }),
+  capabilities: async () => ({ read: true, poke: true }),
   list: async () => [{ id: 'a' }],
   get: async (ref: string) => (ref === 'a' ? { id: 'a' } : undefined),
   read: async (name: string, args?: Record<string, unknown>) => ({ read: name, args }),
@@ -46,7 +46,7 @@ describe('planes/rest — the catalog index', () => {
     )
     assert.deepEqual(body.planes[0]!.reads, ['tail'])
     assert.deepEqual(body.planes[0]!.verbs, ['poke'])
-    assert.deepEqual(body.planes[0]!.capabilities, { read: true, verbs: true })
+    assert.deepEqual(body.planes[0]!.capabilities, { read: true, poke: true })
   })
 
   test('a failed capabilities probe indexes as incapable, never an error', async () => {
@@ -87,6 +87,35 @@ describe('planes/rest — reads', () => {
     })
     assert.equal(r.status, 200)
     assert.deepEqual(seen, { owner: 'me', status: 'open', limit: 5 })
+    // limit=0 is a real value — zero rows, not "no limit"
+    await call('GET', ['test'], {
+      catalog: [
+        fakePlane({
+          list: async (f) => {
+            seen = f
+            return []
+          },
+        }),
+      ],
+      query: { limit: '0' },
+    })
+    assert.deepEqual(seen, { limit: 0 })
+  })
+
+  test('percent-encoded refs decode before get — gen%3Aseq reaches the descriptor as gen:seq', async () => {
+    let seen: string | undefined
+    const r = await call('GET', ['test', 'gen%3Aseq'], {
+      catalog: [
+        fakePlane({
+          get: async (ref) => {
+            seen = ref
+            return { id: ref }
+          },
+        }),
+      ],
+    })
+    assert.equal(r.status, 200)
+    assert.equal(seen, 'gen:seq')
   })
 
   test('a declared read name wins over get(ref) — precedence is enumerable', async () => {
@@ -103,7 +132,7 @@ describe('planes/rest — reads', () => {
     assert.equal(miss.status, 404)
   })
 
-  test('read:false capability hides the plane — 404, not a fake empty list', async () => {
+  test('absent capability hides the plane — read:false, a missing flag, and a thrown probe all 404', async () => {
     const catalog = [fakePlane({ capabilities: async () => ({ read: false }) })]
     for (const api of [['test'], ['test', 'a'], ['test', 'tail']]) {
       const r = await call('GET', api, { catalog })
@@ -111,6 +140,32 @@ describe('planes/rest — reads', () => {
       const body = r.body as { error: string }
       assert.match(body.error, /test/)
     }
+    // spec's "absent capability = hidden" — a caps doc without read
+    // answers nothing
+    const noFlag = await call('GET', ['test'], {
+      catalog: [fakePlane({ capabilities: async () => ({}) })],
+    })
+    assert.equal(noFlag.status, 404)
+    // a thrown probe is incapable, never a 500
+    const thrown = await call('GET', ['test'], {
+      catalog: [
+        fakePlane({
+          capabilities: async () => {
+            throw new Error('backend dead')
+          },
+        }),
+      ],
+    })
+    assert.equal(thrown.status, 404)
+  })
+
+  test('POST to a verb-incapable plane is 404 — the read gate does not cover writes', async () => {
+    const r = await call('POST', ['test', 'poke'], {
+      catalog: [fakePlane({ capabilities: async () => ({ read: true }) })],
+    })
+    assert.equal(r.status, 404)
+    const body = r.body as { error: string }
+    assert.match(body.error, /poke/)
   })
 
   test('PlaneUnavailable on a read is 503, a thrown read is the handler’s 500', async () => {

@@ -1404,7 +1404,12 @@ function realDeps(
     spawn: (req) => spawnStepAgent(dir, env, req),
     stop: (ref) => stopAgent(dir, env, ref),
     connectors: () => agentConnectorNames(),
-    planeCatalog: () => planes(dir, { connectors: loadBroConfig(dir).connectors }),
+    // resolved once at serve start — loadBroConfig is a filesystem read
+    // and planeCatalog() answers per request
+    planeCatalog: (() => {
+      const connectors = loadBroConfig(dir).connectors
+      return () => planes(dir, { connectors })
+    })(),
     webhooks: {
       github: githubWebhookHandler({
         secret: () => process.env[GITHUB_WEBHOOK_SECRET_ENV],
