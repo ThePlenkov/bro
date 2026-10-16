@@ -4752,8 +4752,10 @@ registerAgentConnector('copilot', makeCopilotConnector)
  *  step. */
 function devinSessionInfo(s: DiscoveredSession, logsDir: string, procDir: string): AgentInfo {
   return {
-    id: s.agentId ?? `devin:${s.name ?? s.pid}`,
-    molStep: devinPidBead(s.pid, procDir) ?? s.agentId ?? s.name ?? 'external',
+    // `||` not `??` — an empty name ids like a missing one, matching the
+    // board fold's `s.name || s.pid` key
+    id: s.agentId ?? `devin:${s.name || s.pid}`,
+    molStep: devinPidBead(s.pid, procDir) ?? s.agentId ?? (s.name || 'external'),
     backend: 'devin',
     state: 'running', // the lock scan only surfaces pid-alive sessions
     pid: s.pid,
@@ -4781,6 +4783,10 @@ export function makeDevinConnector(ctx: ConnectorCtx, env: AgentConnectorEnv): A
   const rows = (): AgentInfo[] => {
     const claimed = new Set(
       Object.values(readAgentRegistry(dir))
+        // only a live registry row folds a badged session out — a
+        // terminal entry's badge on a still-live session must surface
+        // as its own row, not disappear behind a dead claim
+        .filter((e) => e.stopped !== true && e.exitStatus === undefined)
         .map((e) => e.agentId)
         .filter((id): id is string => typeof id === 'string' && id !== '')
     )
@@ -4840,8 +4846,14 @@ export function makeDevinConnector(ctx: ConnectorCtx, env: AgentConnectorEnv): A
         if (hit.pid !== undefined) {
           process.kill(hit.pid, 'SIGTERM')
         }
-      } catch {
-        // already dead between the scan and the signal — the desired end
+      } catch (err) {
+        // ESRCH — already dead between the scan and the signal, the
+        // desired end. Anything else (EPERM: alive but not ours to
+        // signal) is a stop that did NOT happen — report it, don't
+        // claim it
+        if ((err as NodeJS.ErrnoException).code !== 'ESRCH') {
+          return Promise.reject(err as Error)
+        }
       }
       return Promise.resolve()
     },
