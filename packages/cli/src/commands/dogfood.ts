@@ -258,6 +258,13 @@ function provisionRepo(filesDir?: string | null): { repo: string; beads: string;
   const repo = mkdtempSync(join(root, 'run-'))
   const beads = join(repo, '.beads')
   execFileSync('git', ['init', '-q', '-b', 'main', repo]) // NOSONAR — PATH lookup is the contract
+  // the scenario's own seed files land FIRST — a claude runner's
+  // settings.local.json must exist before the runner's client reads it
+  // on startup. The harness's config is written after so a scenario
+  // can never ship its own bro.config.json over the SDD gate
+  if (filesDir !== undefined && filesDir !== null) {
+    cpSync(filesDir, repo, { recursive: true })
+  }
   // arm SDD — a bare repo leaves sdd.mode 'off' and a scenario that
   // describes the gate would narrate a hook that cannot fire. Committed
   // so the runner starts from a clean tree (an uncommitted config would
@@ -266,12 +273,6 @@ function provisionRepo(filesDir?: string | null): { repo: string; beads: string;
     join(repo, 'bro.config.json'),
     `${JSON.stringify({ sdd: { mode: 'gate' } }, null, 2)}\n`
   )
-  // the scenario's own seed files land alongside the config — a claude
-  // runner's settings.local.json, for example, must exist before the
-  // runner's client reads it on startup
-  if (filesDir !== undefined && filesDir !== null) {
-    cpSync(filesDir, repo, { recursive: true })
-  }
   execFileSync('git', ['-C', repo, 'add', '-A']) // NOSONAR — PATH lookup is the contract
   execFileSync('git', [ // NOSONAR — PATH lookup is the contract
     '-C',
