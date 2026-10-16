@@ -1,6 +1,6 @@
 import { after, describe, test } from 'node:test'
 import assert from 'node:assert/strict'
-import { spawnSync } from 'node:child_process'
+import { spawn, spawnSync } from 'node:child_process'
 import {
   chmodSync,
   existsSync,
@@ -8,6 +8,7 @@ import {
   mkdtempSync,
   readFileSync,
   rmSync,
+  symlinkSync,
   writeFileSync,
 } from 'node:fs'
 import { tmpdir } from 'node:os'
@@ -42,6 +43,7 @@ import {
   fleetProfileOf,
   jsoncToJson,
   loadAgentEnv,
+  makeDevinConnector,
   makeDockerConnector,
   makeGascityConnector,
   makeNativeConnector,
@@ -57,6 +59,7 @@ import {
   type BudgetSnapshot,
 } from './agent-connectors.ts'
 import { initRepo, installFakeBd, readBeads, writeBeads } from './commands/testrepo.ts'
+import { devinSessionPlane } from './session-planes/devin.ts'
 import { VERSION } from './version.ts'
 
 // ambient repo/agent/store pins must not reach fixture git children
@@ -424,7 +427,7 @@ describe('resolveAgentConnector', () => {
       )
       // registry order — native is the designed default
       assert.equal(resolveAgentConnector({ dir: main }, {}, env).name, 'native')
-      assert.deepEqual(agentConnectorNames(), ['native', 'tmux', 'gascity', 'docker', 'copilot'])
+      assert.deepEqual(agentConnectorNames(), ['native', 'tmux', 'gascity', 'docker', 'copilot', 'devin'])
     } finally {
       rmSync(root, { recursive: true, force: true })
     }
@@ -1402,7 +1405,7 @@ describe('eachAgentConnector', () => {
       { agents: {}, connectors: {} },
       (name, err) => notes.push(`${name}: ${err instanceof Error ? err.message : String(err)}`)
     )
-    assert.deepEqual(conns.map((c) => c.name), ['native', 'tmux', 'gascity', 'docker', 'copilot'])
+    assert.deepEqual(conns.map((c) => c.name), ['native', 'tmux', 'gascity', 'docker', 'copilot', 'devin'])
     assert.deepEqual(notes, ['explody: backend exploded'])
     assert.throws(
       () => eachAgentConnector({ dir: '/x' }, { agents: {}, connectors: {} }),
@@ -2013,6 +2016,221 @@ describe('provider-resolved spawns', () => {
       assert.equal(f.dbRows()[0]!.status, 'open')
     } finally {
       cleanup(f)
+    }
+  })
+})
+
+describe('devin connector', () => {
+  /** A scripted devin world — lockDir holds <name>.lock → pid, the
+   *  fake /proc carries environ/cwd/fd-0 as scripted, logsDir names
+   *  devin_*_<pid>.log files. `mk` scripts one session; pids must be
+   *  LIVE for the plane's scan (process.pid or a spawned child). */
+  const withDevinWorld = async <T>(
+    fn: (w: {
+      bag: Record<string, unknown>
+      mk: (pid: number, name: string, opts?: { environ?: string; cwd?: string; log?: boolean }) => void
+    }) => T | Promise<T>
+  ): Promise<T> => {
+    const root = mkdtempSync(join(tmpdir(), 'bro-devin-conn-'))
+    const lockDir = join(root, 'locks')
+    const logsDir = join(root, 'logs')
+    const procDir = join(root, 'proc')
+    mkdirSync(lockDir, { recursive: true })
+    mkdirSync(logsDir, { recursive: true })
+    mkdirSync(procDir, { recursive: true })
+    const mk = (
+      pid: number,
+      name: string,
+      opts: { environ?: string; cwd?: string; log?: boolean } = {}
+    ): void => {
+      writeFileSync(join(lockDir, `${name}.lock`), String(pid))
+      const p = join(procDir, String(pid))
+      mkdirSync(join(p, 'fd'), { recursive: true })
+      writeFileSync(join(p, 'environ'), opts.environ ?? 'PATH=/bin\0')
+      symlinkSync(opts.cwd ?? root, join(p, 'cwd'))
+      if (opts.log === true) {
+        writeFileSync(join(logsDir, `devin_2026_${pid}.log`), 'log bytes')
+      }
+    }
+    try {
+      return await fn({ bag: { lockDir, logsDir, procDir }, mk })
+    } finally {
+      rmSync(root, { recursive: true, force: true })
+    }
+  }
+
+  const conn = (dir: string, bag: Record<string, unknown>) =>
+    makeDevinConnector({ dir }, { agents: { devin: bag }, connectors: {} })
+
+  test('an unbadged live session projects a devin row — name, pid, worktree, log', async () => {
+    const f = fixture([])
+    try {
+      await withDevinWorld(async ({ bag, mk }) => {
+        mk(process.pid, 'cli-session', { cwd: f.main, log: true })
+        const { agents } = await conn(f.main, bag).list()
+        assert.equal(agents.length, 1)
+        const a = agents[0]!
+        assert.equal(a.id, 'devin:cli-session')
+        assert.equal(a.backend, 'devin')
+        assert.equal(a.state, 'running')
+        assert.equal(a.pid, process.pid)
+        assert.equal(a.worktree, f.main)
+        assert.match(a.log!, /devin_2026_\d+\.log$/)
+        // no bead pin — the session name stands in for the step
+        assert.equal(a.molStep, 'cli-session')
+      })
+    } finally {
+      cleanup(f)
+    }
+  })
+
+  test('a badged worker surfaces agentId + its BRO_BEAD_ID step', async () => {
+    const f = fixture([])
+    try {
+      await withDevinWorld(async ({ bag, mk }) => {
+        mk(process.pid, 'w', {
+          environ: 'PATH=/bin\0BRO_AGENT_ID=native-dead\0BRO_BEAD_ID=fx-9\0',
+        })
+        const { agents } = await conn(f.main, bag).list()
+        assert.equal(agents.length, 1)
+        assert.equal(agents[0]!.id, 'native-dead')
+        assert.equal(agents[0]!.molStep, 'fx-9')
+      })
+    } finally {
+      cleanup(f)
+    }
+  })
+
+  test('a session the registry already claims folds out — no duplicate row', async () => {
+    const f = fixture([])
+    try {
+      patchAgentRegistry(f.main, 'fx-1', {
+        agentId: 'native-mine',
+        backend: 'native',
+        pid: process.pid,
+      })
+      await withDevinWorld(async ({ bag, mk }) => {
+        mk(process.pid, 'w', { environ: 'PATH=/bin\0BRO_AGENT_ID=native-mine\0' })
+        const { agents } = await conn(f.main, bag).list()
+        assert.equal(agents.length, 0)
+      })
+    } finally {
+      cleanup(f)
+    }
+  })
+
+  test('status finds by devin:<name> and by agentId; a miss is AgentNotFound', async () => {
+    const f = fixture([])
+    try {
+      await withDevinWorld(async ({ bag, mk }) => {
+        mk(process.pid, 'named', {})
+        const c = conn(f.main, bag)
+        const a = await c.status('named')
+        assert.equal(a.id, 'devin:named')
+        await assert.rejects(c.status('ghost'), (e: unknown) => e instanceof AgentNotFound)
+      })
+    } finally {
+      cleanup(f)
+    }
+  })
+
+  test('spawn refuses — devin workers ride the native backend', async () => {
+    const f = fixture([])
+    try {
+      const c = conn(f.main, {})
+      await assert.rejects(
+        c.spawn(SPEC(f.main, f.beadsDir, 'fx-1', 'x')),
+        (e: unknown) => e instanceof SpawnError && e.kind === 'config' && /native backend/.test(e.message)
+      )
+      assert.equal(f.dbRows().filter((r) => r.status !== 'open').length, 0)
+    } finally {
+      cleanup(f)
+    }
+  })
+
+  test('stop SIGTERMs the session pid and is idempotent once gone', async () => {
+    const f = fixture([])
+    try {
+      const child = spawn('sleep', ['30'], { stdio: 'ignore' })
+      const pid = child.pid!
+      try {
+      await withDevinWorld(async ({ bag, mk }) => {
+        mk(pid, 'victim', {})
+        const c = conn(f.main, bag)
+        await c.stop('victim')
+        // the signal may take a beat to reap
+        for (let i = 0; i < 40 && pidAlive(pid); i++) {
+          Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 25)
+        }
+        assert.equal(pidAlive(pid), false)
+        await c.stop('victim') // gone — the desired end, no throw
+      })
+      } finally {
+        child.kill('SIGKILL')
+      }
+    } finally {
+      cleanup(f)
+    }
+  })
+
+  test('an unreadable lock dir degrades the list, never the board', async () => {
+    const f = fixture([])
+    try {
+      const notdir = join(f.main, 'notdir')
+      writeFileSync(notdir, 'x')
+      const { agents, degraded } = await conn(f.main, { lockDir: notdir }).list()
+      assert.equal(agents.length, 0)
+      assert.match(degraded!, /cannot verify devin session list/)
+    } finally {
+      cleanup(f)
+    }
+  })
+
+  test('devin is a protected built-in — unregister skips it', async () => {
+    const names = agentConnectorNames()
+    assert.ok(names.includes('devin'))
+    unregisterAgentConnector('devin')
+    assert.deepEqual(agentConnectorNames(), names)
+    // and it never leads the registry — the default spawn backend is
+    // still the first entry, whatever it is
+    assert.notEqual(names[0], 'devin')
+  })
+
+  test('a misbuilt plane (no listLive) degrades list(), never crashes', async () => {
+    const f = fixture([])
+    const saved = devinSessionPlane.listLive
+    const mutable = devinSessionPlane as { listLive?: unknown }
+    mutable.listLive = undefined
+    try {
+      const l = await conn(f.main, {}).list()
+      assert.deepEqual(l.agents, [])
+      assert.match(l.degraded ?? '', /lacks listLive/)
+    } finally {
+      mutable.listLive = saved
+      cleanup(f)
+    }
+  })
+
+  test('a backend:devin registry row holds no fleet slot — debris cannot stall the cap', () => {
+    const { root, main } = initRepo('bro-devinocc-')
+    try {
+      const home = join(main, '.git', 'bro', 'agents')
+      mkdirSync(home, { recursive: true })
+      // entryOccupies' devin case — the connector never spawns, so a row
+      // naming it is debris; the session quota lives in the devin plane
+      const registry: Record<string, AgentRegistryEntry> = {
+        'step-d': {
+          agentId: 'devin-x',
+          backend: 'devin',
+          spawnedAt: '2026-10-05T14:00:00Z',
+        },
+      }
+      assert.equal(
+        fleetOccupancy(main, home, registry, { agents: {}, connectors: {} }),
+        0
+      )
+    } finally {
+      rmSync(root, { recursive: true, force: true })
     }
   })
 })

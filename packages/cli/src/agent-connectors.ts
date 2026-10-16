@@ -77,6 +77,7 @@ import {
   type AgentRegistryEntry,
   type AgentState,
   type ConnectorCtx,
+  type DiscoveredSession,
   type FleetProfile,
   type FleetRouter,
   type ListResult,
@@ -94,6 +95,14 @@ import { expandAgentCmd, loopSection, type LoopConfig } from '@broject/loop'
 // is the plugin host for agent backends, and admission planes ride the
 // same surface
 import './session-planes/devin.ts'
+import {
+  devinLogsDir,
+  devinPidBead,
+  devinPidCwd,
+  devinPidLog,
+  devinProcDir,
+  devinSessionPlane,
+} from './session-planes/devin.ts'
 import './session-planes/copilot.ts'
 import { writeCopilotCount } from './session-planes/copilot.ts'
 import { enterWorktree } from './commands/work.ts'
@@ -170,7 +179,7 @@ export function registerAgentConnector(
  *  these (a misnamed cleanup, or a name whose register was skipped as a
  *  duplicate) would silently change which factory the name resolves to
  *  for the rest of the process. */
-const BUILTIN_AGENT_BACKENDS = new Set(['native', 'tmux', 'gascity', 'docker', 'copilot'])
+const BUILTIN_AGENT_BACKENDS = new Set(['native', 'tmux', 'gascity', 'docker', 'copilot', 'devin'])
 
 /** Deliberate name-based removal — fixtures prefer the disposer
  *  registerAgentConnector returns, which can only drop the entry it
@@ -914,6 +923,12 @@ function entryOccupies(
       return dockerOccupies(entry, probes.dockerLive())
     case 'copilot':
       return copilotOccupies(entry, probes.copilotLive())
+    case 'devin':
+      // the devin connector never spawns — a registry row naming it is
+      // hand-edited or migrated debris, and the session quota lives in
+      // the devin plane, not the fleet cap. Holding a slot here would
+      // stall legitimate spawns on a phantom forever
+      return false
     default:
       // a backend this build doesn't know — no probe exists, so the
       // .exit file is the only death record readable. Harvest before
@@ -4725,3 +4740,126 @@ export function makeCopilotConnector(ctx: ConnectorCtx, env: AgentConnectorEnv):
 }
 
 registerAgentConnector('copilot', makeCopilotConnector)
+
+// --- devin (external sessions) ------------------------------------------------------
+
+/** One discovered devin session → an AgentInfo row. The lock-name is
+ *  the session's own ref (`devin --resume <name>`); the id prefers the
+ *  worker's BRO_AGENT_ID badge — the registry correlation the
+ *  discovered-session fold already keys on. `molStep` reads the
+ *  worker's BRO_BEAD_ID pin, then the badge, then the session name —
+ *  an unbadged interactive session names itself, never a phantom
+ *  step. */
+function devinSessionInfo(s: DiscoveredSession, logsDir: string, procDir: string): AgentInfo {
+  return {
+    // `||` not `??` — an empty name ids like a missing one, matching the
+    // board fold's `s.name || s.pid` key
+    id: s.agentId ?? `devin:${s.name || s.pid}`,
+    molStep: devinPidBead(s.pid, procDir) ?? s.agentId ?? (s.name || 'external'),
+    backend: 'devin',
+    state: 'running', // the lock scan only surfaces pid-alive sessions
+    pid: s.pid,
+    worktree: devinPidCwd(s.pid, procDir),
+    log: devinPidLog(s.pid, logsDir),
+  }
+}
+
+/** The devin connector — READ-MOSTLY. Devin sessions the registry
+ *  never spawned (user `devin --resume`, MCP-created, legacy paths)
+ *  project into AgentInfo rows so `bro agents status` names them with
+ *  backend=devin, their session ref, and a real log reach — instead
+ *  of existing only as the session plane's bare count. Sessions a
+ *  registry entry already claims (by BRO_AGENT_ID badge) fold out:
+ *  the owning backend's row represents that work.
+ *
+ *  spawn() refuses: bro-spawned devin workers ride the native backend
+ *  so their claim/log/exit artifacts land in the registry — the one
+ *  shape `agents up` must keep producing. */
+export function makeDevinConnector(ctx: ConnectorCtx, env: AgentConnectorEnv): AgentConnector {
+  const dir = ctx.dir
+  const bag = env.agents['devin'] ?? {}
+  const logsDir = devinLogsDir(bag)
+  const procDir = devinProcDir(bag)
+  const rows = (): AgentInfo[] => {
+    const claimed = new Set(
+      Object.values(readAgentRegistry(dir))
+        // only a live registry row folds a badged session out — a
+        // terminal entry's badge on a still-live session must surface
+        // as its own row, not disappear behind a dead claim
+        .filter((e) => e.stopped !== true && e.exitStatus === undefined)
+        .map((e) => e.agentId)
+        .filter((id): id is string => typeof id === 'string' && id !== '')
+    )
+    const listLive = devinSessionPlane.listLive
+    if (listLive === undefined) {
+      // surfaces through list()'s degrade path — a misbuilt plane is a
+      // degraded backend, never a TypeError or a silent empty board
+      throw new SpawnError('devin session plane lacks listLive', 'unavailable')
+    }
+    return listLive(bag)
+      .filter((s) => s.agentId === undefined || !claimed.has(s.agentId))
+      .map((s) => devinSessionInfo(s, logsDir, procDir))
+  }
+  const find = (ref: string): AgentInfo | undefined =>
+    rows().find((a) => a.id === ref || a.molStep === ref || `devin:${ref}` === a.id)
+
+  return {
+    name: 'devin',
+
+    spawn(): Promise<AgentInfo> { // NOSONAR — connector contract is async; the refusal is sync
+      return Promise.reject(
+        new SpawnError(
+          'the devin connector lists host sessions — it does not spawn; ' +
+            '`bro agents up` runs devin workers through the native backend so the registry pins step/log/exit',
+          'config'
+        )
+      )
+    },
+
+    list(): Promise<ListResult> { // NOSONAR — connector contract is async; the scan is sync
+      try {
+        return Promise.resolve({ agents: rows() })
+      } catch (err) {
+        return Promise.resolve({
+          agents: [],
+          degraded: err instanceof Error ? err.message : String(err),
+        })
+      }
+    },
+
+    status(id: string): Promise<AgentInfo> { // NOSONAR — connector contract is async; the scan is sync
+      const hit = find(id)
+      if (hit === undefined) {
+        return Promise.reject(new AgentNotFound(`no devin session ${id}`))
+      }
+      return Promise.resolve(hit)
+    },
+
+    stop(id: string): Promise<void> { // NOSONAR — connector contract is async; the signal is sync
+      const hit = find(id)
+      if (hit === undefined) {
+        return Promise.resolve() // idempotent — gone is the desired end state
+      }
+      // the session process itself — devin sessions are not detached
+      // group leaders the way native spawns are, so no -pid group signal
+      try {
+        if (hit.pid !== undefined) {
+          process.kill(hit.pid, 'SIGTERM')
+        }
+      } catch (err) {
+        // ESRCH — already dead between the scan and the signal, the
+        // desired end. Anything else (EPERM: alive but not ours to
+        // signal) is a stop that did NOT happen — report it, don't
+        // claim it
+        if ((err as NodeJS.ErrnoException).code !== 'ESRCH') {
+          return Promise.reject(err as Error)
+        }
+      }
+      return Promise.resolve()
+    },
+
+    capabilities: () => ({ supervisor: 'none' }),
+  }
+}
+
+registerAgentConnector('devin', makeDevinConnector)

@@ -486,7 +486,9 @@ describe('copilot connector', () => {
 
   test('registered as a builtin backend', () => {
     assert.ok(agentConnectorNames().includes('copilot'))
-    assert.equal(agentConnectorNames().at(-1), 'copilot')
+    // last of the spawnable built-ins — 'devin' trails the registry but
+    // its spawn() refuses, so it never counts against this ordering
+    assert.equal(agentConnectorNames().at(-2), 'copilot')
   })
 
   test('status on an unknown id throws AgentNotFound', async () => {
