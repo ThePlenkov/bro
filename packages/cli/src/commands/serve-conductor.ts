@@ -26,7 +26,7 @@ import type { IncomingMessage, ServerResponse } from 'node:http'
 import { loadConfig } from '@broject/core'
 import type { ProviderEntry } from '@broject/core'
 import { acpOpen, acpPooledTurn, otelEvent, otelParent, otelSpan } from '@broject/providers'
-import type { AcpPeer, OtelCtx, PooledTurnOpts, ProviderWireOpts } from '@broject/providers'
+import type { AcpContentBlock, AcpPeer, OtelCtx, PooledTurnOpts, ProviderWireOpts } from '@broject/providers'
 import { peerAttrs } from './peer.ts'
 import { catalogModels } from './providers.ts'
 
@@ -113,6 +113,11 @@ interface ToolResultBlock {
 }
 type InBlock = TextBlock | ToolUseBlock | ToolResultBlock | { type: string }
 
+interface ImageBlock {
+  type: 'image'
+  source?: { type?: string; media_type?: string; data?: string; url?: string }
+}
+
 interface MessagesRequest {
   model?: string
   system?: string | { text?: string }[]
@@ -158,25 +163,97 @@ function toolContract(tools: NonNullable<MessagesRequest['tools']>): string {
   ].join('\n')
 }
 
-function serializeRequest(body: MessagesRequest): string {
+const turnRole = (m: { role?: string }): string =>
+  m.role === 'assistant' ? 'assistant' : 'user'
+
+/** system + tools — the transcript prefix shared by serializeRequest
+ *  (one merged text block) and turnsToBlocks (its own leading block). */
+function prefixText(body: MessagesRequest): string {
   const parts: string[] = []
   const system =
     typeof body.system === 'string'
       ? body.system
       : (body.system ?? []).map((s) => s.text ?? '').join('')
-  if (system !== '') parts.push(`<system>\n${system}\n</system>`)
+  if (system !== '') {
+    parts.push(`<system>\n${system}\n</system>`)
+  }
   if (body.tools !== undefined && body.tools.length > 0) {
     parts.push(toolContract(body.tools))
   }
+  return parts.join('\n\n')
+}
+
+function serializeRequest(body: MessagesRequest): string {
+  const parts = [prefixText(body)]
   for (const m of body.messages ?? []) {
-    const role = m.role === 'assistant' ? 'assistant' : 'user'
     const text =
       typeof m.content === 'string'
         ? m.content
         : (m.content ?? []).map(blockText).join('')
-    parts.push(`<turn role="${role}">${text}</turn>`)
+    parts.push(`<turn role="${turnRole(m)}">${text}</turn>`)
   }
-  return parts.join('\n\n')
+  return parts.filter((p) => p !== '').join('\n\n')
+}
+
+/** An inbound image block → ACP image content. Only base64 sources
+ *  carry the payload ACP needs (`data` + `mimeType`) — url/file
+ *  sources degrade to the `[image]` marker rather than a block the
+ *  agent can't read. */
+function acpImage(b: InBlock): AcpContentBlock | undefined {
+  const s = (b as ImageBlock).source
+  if (s?.type === 'base64' && s.data !== undefined && s.media_type !== undefined) {
+    return { type: 'image', data: s.data, mimeType: s.media_type }
+  }
+  return undefined
+}
+
+/** The request as ACP content blocks — same transcript as
+ *  serializeRequest, but when the agent advertised
+ *  promptCapabilities.image the wire carries real image content;
+ *  without the capability the request stays one text block with the
+ *  `[image]` marker exactly as before (bro-7izjx). */
+function serializeBlocks(body: MessagesRequest, imageOk: boolean): AcpContentBlock[] {
+  return imageOk ? turnsToBlocks(body) : [{ type: 'text', text: serializeRequest(body) }]
+}
+
+/** The image-capable path: the prefix leads, then every turn is its
+ *  own text block followed by that turn's image blocks. <turn> tags
+ *  stay balanced inside a single text block (amazon-q #558) and
+ *  source order holds. */
+function turnsToBlocks(body: MessagesRequest): AcpContentBlock[] {
+  const blocks: AcpContentBlock[] = []
+  const prefix = prefixText(body)
+  if (prefix !== '') {
+    blocks.push({ type: 'text', text: prefix })
+  }
+  for (const m of body.messages ?? []) {
+    const { text, imgs } = turnParts(m.content)
+    blocks.push({ type: 'text', text: `<turn role="${turnRole(m)}">${text}</turn>` }, ...imgs)
+  }
+  return blocks
+}
+
+/** A turn's content → its serialized text (passed-through image
+ *  blocks stripped) plus the mappable ACP image blocks, in source
+ *  order. Unmappable images stay inline as `[image]`. */
+function turnParts(
+  content: string | InBlock[] | undefined
+): { text: string; imgs: AcpContentBlock[] } {
+  if (typeof content === 'string') {
+    return { text: content, imgs: [] }
+  }
+  const imgs: AcpContentBlock[] = []
+  const text = (content ?? [])
+    .map((b) => {
+      const img = b.type === 'image' ? acpImage(b) : undefined
+      if (img === undefined) {
+        return blockText(b)
+      }
+      imgs.push(img)
+      return ''
+    })
+    .join('')
+  return { text, imgs }
 }
 
 const TOOL_CALL = /<tool_call>\s*(\{[\s\S]*?\})\s*<\/tool_call>/g
@@ -316,48 +393,55 @@ class LiveTurn {
     }
   }
 
-  private text(s: string): void {
-    if (s === '') return
-    if (!this.open) {
-      sse(this.res, 'content_block_start', {
-        type: 'content_block_start',
-        index: this.idx,
-        content_block: { type: 'text', text: '' },
-      })
-      this.open = true
-    }
+  private blockStart(contentBlock: unknown): void {
+    sse(this.res, 'content_block_start', {
+      type: 'content_block_start',
+      index: this.idx,
+      content_block: contentBlock,
+    })
+  }
+
+  private delta(d: unknown): void {
     sse(this.res, 'content_block_delta', {
       type: 'content_block_delta',
       index: this.idx,
-      delta: { type: 'text_delta', text: s },
+      delta: d,
     })
+  }
+
+  private blockStop(): void {
+    sse(this.res, 'content_block_stop', { type: 'content_block_stop', index: this.idx })
+    this.idx++
+  }
+
+  private closeBlock(): void {
+    if (this.open) {
+      this.blockStop()
+      this.open = false
+    }
+  }
+
+  private text(s: string): void {
+    if (s === '') return
+    if (!this.open) {
+      this.blockStart({ type: 'text', text: '' })
+      this.open = true
+    }
+    this.delta({ type: 'text_delta', text: s })
     this.acc += s
   }
 
   private tool(name: string, input: unknown): void {
-    if (this.open) {
-      sse(this.res, 'content_block_stop', { type: 'content_block_stop', index: this.idx })
-      this.idx++
-      this.open = false
-    }
-    sse(this.res, 'content_block_start', {
-      type: 'content_block_start',
-      index: this.idx,
-      content_block: {
-        type: 'tool_use',
-        id: `toolu_${randomBytes(8).toString('hex')}`,
-        name,
-        input: {},
-      },
+    this.closeBlock()
+    this.blockStart({
+      type: 'tool_use',
+      id: `toolu_${randomBytes(8).toString('hex')}`,
+      name,
+      input: {},
     })
     const json = JSON.stringify(input)
-    sse(this.res, 'content_block_delta', {
-      type: 'content_block_delta',
-      index: this.idx,
-      delta: { type: 'input_json_delta', partial_json: json },
-    })
-    sse(this.res, 'content_block_stop', { type: 'content_block_stop', index: this.idx })
-    this.idx++
+    this.delta({ type: 'input_json_delta', partial_json: json })
+    this.blockStop()
     this.sawTool = true
     this.acc += json
   }
@@ -394,37 +478,21 @@ class LiveTurn {
     }
   }
 
-  private closeBlock(): void {
-    if (this.open) {
-      sse(this.res, 'content_block_stop', { type: 'content_block_stop', index: this.idx })
-      this.idx++
-      this.open = false
-    }
-  }
-
   finish(stopReason: string): void {
     this.drain(true)
     this.closeBlock()
     if (this.idx === 0 && !this.sawTool) {
       // parity with the buffered shape — a silent turn still answers
       // with one (empty) text block
-      sse(this.res, 'content_block_start', {
-        type: 'content_block_start',
-        index: 0,
-        content_block: { type: 'text', text: '' },
-      })
-      sse(this.res, 'content_block_delta', {
-        type: 'content_block_delta',
-        index: 0,
-        delta: { type: 'text_delta', text: '' },
-      })
-      sse(this.res, 'content_block_stop', { type: 'content_block_stop', index: 0 })
+      this.blockStart({ type: 'text', text: '' })
+      this.delta({ type: 'text_delta', text: '' })
+      this.blockStop()
     }
     this.stopReason = this.sawTool ? 'tool_use' : stopReason
     sse(this.res, 'message_delta', {
       type: 'message_delta',
       delta: { stop_reason: this.stopReason, stop_sequence: null },
-      usage: { output_tokens: estTokens(this.acc) },
+      usage: { output_tokens: this.outputTokens() },
     })
     sse(this.res, 'message_stop', { type: 'message_stop' })
   }
@@ -436,7 +504,9 @@ class LiveTurn {
   }
 
   outputTokens(): number {
-    return estTokens(this.acc)
+    // estTokens floors at 1 — a genuinely silent turn reports 0, not
+    // a phantom token (amazon-q #566)
+    return this.acc === '' ? 0 : estTokens(this.acc)
   }
 }
 
@@ -489,8 +559,6 @@ async function messages(
     apiError(res, 400, 'invalid_request_error', 'malformed JSON body')
     return
   }
-  const prompt = serializeRequest(body)
-  const inputTokens = estTokens(prompt)
   const t0 = Date.now()
   // a dropped client cancels the acp turn — no orphan devin session
   const ac = new AbortController()
@@ -507,16 +575,30 @@ async function messages(
   }
   let reply: Awaited<ReturnType<typeof acpPooledTurn>>
   let live: LiveTurn | undefined
+  let inputTokens = 0
   try {
     const peer = await link(parent)
+    // image blocks ride the wire only when the agent advertised the
+    // prompt capability — serialize after link() so the negotiated
+    // caps are known (bro-7izjx)
+    const prompt = serializeBlocks(body, peer.caps?.image === true)
+    // an image's true token cost is dimension-based, not size-based —
+    // base64-length/4 is the rough wire proxy so usage reporting
+    // doesn't silently zero a large payload (amazon-q #558)
+    inputTokens =
+      estTokens(prompt.map((b) => (b.type === 'text' ? b.text : '')).join('')) +
+      prompt.reduce((n, b) => n + (b.type === 'image' ? Math.ceil(b.data.length / 4) : 0), 0)
     if (body.stream !== false) {
       // a streamed answer commits to SSE at turn start — headers and
       // message_start leave before the first delta; a failed turn lands
-      // as an in-stream error event, the wire's own dead-stream shape
+      // as an in-stream error event, the wire's own dead-stream shape.
+      // x-accel-buffering:no stops a proxy from re-buffering the stream
+      // back into one end-of-turn burst (amazon-q #566)
       res.writeHead(200, {
         'content-type': 'text/event-stream',
         'cache-control': 'no-cache',
         connection: 'keep-alive',
+        'x-accel-buffering': 'no',
       })
       live = new LiveTurn(res, servedModel(requestModel, opts, cfg, body), inputTokens)
       turnOpts.onUpdate = live.onUpdate

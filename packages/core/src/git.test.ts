@@ -9,6 +9,7 @@ import {
   gitIsShallow,
   gitLogPathRecords,
   gitLogStamp,
+  gitUpstreamBehind,
 } from './git.ts'
 import { scrubEnv, testGit } from './testkit.ts'
 
@@ -317,6 +318,36 @@ describe('gitIsShallow', () => {
       } finally {
         rmSync(clone, { recursive: true, force: true })
       }
+    })
+  })
+})
+
+describe('gitUpstreamBehind', () => {
+  test('positive drift reports the count and ref; current reads null', () => {
+    withRepo((dir) => {
+      const remote = mkdtempSync(join(tmpdir(), 'bro-git-up-'))
+      try {
+        git(remote, ['init', '-q', '--bare', '-b', 'main'])
+        git(dir, ['remote', 'add', 'origin', remote])
+        git(dir, ['push', '-qu', 'origin', 'main'])
+        commit(dir, 'one', { 'a.ts': 'a\n' })
+        commit(dir, 'two', { 'b.ts': 'b\n' })
+        git(dir, ['push', '-q', 'origin', 'main'])
+        git(dir, ['reset', '-q', '--hard', 'HEAD~2'])
+        assert.deepEqual(gitUpstreamBehind(dir), { behind: 2, upstream: 'origin/main' })
+        git(dir, ['reset', '-q', '--hard', 'origin/main'])
+        assert.equal(gitUpstreamBehind(dir), null)
+      } finally {
+        rmSync(remote, { recursive: true, force: true })
+      }
+    })
+  })
+
+  test('no upstream and detached HEAD read null, never an error', () => {
+    withRepo((dir) => {
+      assert.equal(gitUpstreamBehind(dir), null)
+      git(dir, ['checkout', '-q', '--detach', 'HEAD'])
+      assert.equal(gitUpstreamBehind(dir), null)
     })
   })
 })

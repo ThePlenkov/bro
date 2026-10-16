@@ -144,6 +144,27 @@ describe('candidateBranches', () => {
     assert.deepEqual(branches, [])
     assert.equal(complete, false)
   })
+
+  test('remote-only fleet branches keep orphan PRs enumerable (bro-njyn8)', () => {
+    const { root, main } = initRepo('bro-drive-cand-remote-')
+    inside(main, root, () => {
+      const head = git(['rev-parse', 'HEAD'], main).trim()
+      // bead closed → local work/ branch reaped; the remote head (and its
+      // still-open PR) survives — the ref must stay a drive candidate
+      git(['update-ref', 'refs/remotes/origin/work/bro-orphan', head], main)
+      git(['update-ref', 'refs/remotes/origin/work/bro-a', head], main)
+      git(['update-ref', 'refs/remotes/origin/feature/x', head], main)
+      git(['branch', 'work/bro-a'], main)
+      const { branches, complete } = candidateBranches(main)
+      assert.equal(complete, true)
+      assert.ok(branches.includes('work/bro-orphan'))
+      assert.ok(branches.includes('work/bro-a'))
+      assert.ok(!branches.includes('origin/work/bro-orphan'))
+      assert.ok(!branches.includes('origin/feature/x'))
+      assert.ok(!branches.includes('feature/x'))
+      assert.equal(branches.filter((b) => b === 'work/bro-a').length, 1)
+    })
+  })
 })
 
 describe('branchSlug', () => {
@@ -342,6 +363,32 @@ describe('agentProcessesIn', () => {
 
   test('a missing procDir is empty — non-Linux degrades, never blocks', () => {
     assert.deepEqual(agentProcessesIn('/tmp', '/no/such/proc'), [])
+  })
+
+  // bro-dkw3e: monitors inherit BRO_AGENT_ID from the session that
+  // spawned them — the ancestry scan can't tell them from workers,
+  // so the occupancy check reads their own argv instead.
+  test('monitor-shaped processes do not occupy the worktree', () => {
+    const wt = mkdtempSync(join(tmpdir(), 'bro-drive-wt-'))
+    const { proc, mk, rm } = fakeProc()
+    try {
+      mk(601, wt, 'bro\0watch\0--every\x00300', 'BRO_AGENT_ID=w1\0')
+      mk(602, wt, `node\0${join('/repo', 'dist', 'index.js')}\0serve\0--port\x001`, 'AI_AGENT=devin\0')
+      mk(603, wt, `node\0${join('/repo', 'dist', 'index.js')}\0review\0act\0wait\x00554`, 'AI_AGENT=devin\0')
+      // monitor-ish args on a NON-bro entry are still workers
+      mk(604, wt, `node\0${join(wt, 'worker.js')}\0wait`, 'BRO_AGENT_ID=w1\0')
+      // real workers keep counting — including tool shells (bro-pywx)
+      mk(605, wt, 'sh\0-c\0npm test', 'BRO_AGENT_ID=w1\0')
+      mk(606, wt, 'devin\0-p\0fix stuff')
+      mk(607, wt, 'bash\0-l', 'AI_AGENT=devin\0')
+      assert.deepEqual(
+        agentProcessesIn(wt, proc).map((h) => h.pid),
+        [604, 605, 606, 607]
+      )
+    } finally {
+      rm()
+      rmSync(wt, { recursive: true, force: true })
+    }
   })
 })
 

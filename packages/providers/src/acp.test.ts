@@ -442,6 +442,47 @@ describe('acp chat surface — prose mode', () => {
   })
 })
 
+describe('acp streaming surface — acp.onUpdate (bro-d6mcd)', () => {
+  const entry: AcpEntry = { type: 'acp', command: 'kilo --acp', model: 'qwen3-coder' }
+
+  test('every session/update reaches the sink in order; the turn still resolves whole', async () => {
+    const fake = fakeAcpAgent({
+      updates: [
+        {
+          sessionUpdate: 'tool_call',
+          toolCallId: 'tc-1',
+          title: 'run tests',
+          status: 'in_progress',
+        } as never,
+        { sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: 'hello ' } },
+        { sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: 'world' } },
+        { sessionUpdate: 'tool_call_update', toolCallId: 'tc-1', status: 'completed' } as never,
+      ],
+      configOptions: [MODEL_OPTION],
+    })
+    const seen: string[] = []
+    const res = await acpClient('provider:kilo', entry, {
+      acp: { peer: fake.app, onUpdate: (u) => seen.push(u.sessionUpdate) },
+    }).chat!('p', deadline())
+    assert.equal(res.content, 'hello world')
+    assert.deepEqual(seen, [
+      'tool_call',
+      'agent_message_chunk',
+      'agent_message_chunk',
+      'tool_call_update',
+    ])
+  })
+
+  test('no sink — the whole-turn contract is unchanged', async () => {
+    const fake = fakeAcpAgent({ replyText: 'answer', configOptions: [MODEL_OPTION] })
+    const res = await acpClient('provider:kilo', entry, { acp: { peer: fake.app } }).chat!(
+      'p',
+      deadline()
+    )
+    assert.equal(res.content, 'answer')
+  })
+})
+
 describe('spawn path — a real child process on stdio', () => {
   test('node script serving ACP answers a typed turn; the child is reaped', async () => {
     // lives under the package dir so the SDK resolves from node_modules

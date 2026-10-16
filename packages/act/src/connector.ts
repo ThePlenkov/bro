@@ -50,11 +50,12 @@ async function gateLine(dir: string, target?: PrTarget): Promise<string | null> 
       maxRounds: cfg.act.maxRounds,
       docsPaths: cfg.act.docsPaths,
       docsMaxRounds: cfg.act.docsMaxRounds,
+      requireApproval: cfg.act.requireApproval,
       // the feed serves most probes; lockWaitMs 0 keeps a budgeted hook
       // from ever queuing behind a peer's in-flight fetch
       stateCache: prStateCache(dir, { lockWaitMs: 0 }),
     })
-    const gate = evaluateExitGate(state)
+    const gate = evaluateExitGate(state, { requireApproval: cfg.act.requireApproval })
     const link = rev.prLink(t.repo, state.pr)
     const alertSuffix =
       gate.alerts.length === 0 ? '' : `; alert: ${gate.alerts.join('; ')}`
@@ -102,12 +103,13 @@ async function prProbe(dir: string): Promise<PrProbe | null> {
         maxRounds: cfg.act.maxRounds,
         docsPaths: cfg.act.docsPaths,
         docsMaxRounds: cfg.act.docsMaxRounds,
+        requireApproval: cfg.act.requireApproval,
         stateCache: prStateCache(dir, { lockWaitMs: 0 }),
       }
     )
     // The same gate `bro act status` enforces: open threads, pending/failed
     // CI and AI reviewers, SAST findings, unknown mergeability, BEHIND.
-    return { pr: cur.pr, url: cur.url, gate: evaluateExitGate(state) }
+    return { pr: cur.pr, url: cur.url, gate: evaluateExitGate(state, { requireApproval: cfg.act.requireApproval }) }
   } catch {
     // no repo/PR/auth — nothing to gate on
     return null

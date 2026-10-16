@@ -155,9 +155,10 @@ async function cmdStatus(argv: string[]): Promise<void> {
     maxRounds: act.maxRounds,
     docsPaths: act.docsPaths,
     docsMaxRounds: act.docsMaxRounds,
+    requireApproval: act.requireApproval,
     stateCache: prStateCache(process.cwd()),
   })
-  const gate = evaluateExitGate(state)
+  const gate = evaluateExitGate(state, { requireApproval: act.requireApproval })
 
   if (!gate.ok) {
     process.exitCode = 1
@@ -248,9 +249,10 @@ async function cmdWait(argv: string[]): Promise<void> {
         maxRounds: act.maxRounds,
         docsPaths: act.docsPaths,
         docsMaxRounds: act.docsMaxRounds,
+        requireApproval: act.requireApproval,
         stateCache: cache,
       })
-      return { state, gate: evaluateExitGate(state) }
+      return { state, gate: evaluateExitGate(state, { requireApproval: act.requireApproval }) }
     },
     waitOpts(rev, t, argv, { interval, timeout }, cache)
   )
@@ -1001,6 +1003,7 @@ async function cmdMerge(argv: string[]): Promise<void> {
       maxRounds: act.maxRounds,
       docsPaths: act.docsPaths,
       docsMaxRounds: act.docsMaxRounds,
+      requireApproval: act.requireApproval,
     })
 
     // a closed/merged PR can pass the gate (threads resolved, checks
@@ -1016,7 +1019,7 @@ async function cmdMerge(argv: string[]): Promise<void> {
       return
     }
 
-    const gate = evaluateExitGate(state)
+    const gate = evaluateExitGate(state, { requireApproval: act.requireApproval })
     if (!gate.ok) {
       console.error(`exit_gate=BLOCKED — refusing to merge ${rev.prLink(t.repo, t.pr)}`)
       for (const b of gate.blockers) {

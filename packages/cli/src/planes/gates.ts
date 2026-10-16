@@ -52,9 +52,10 @@ async function stateOf(
     maxRounds: act.maxRounds,
     docsPaths: act.docsPaths,
     docsMaxRounds: act.docsMaxRounds,
+      requireApproval: act.requireApproval,
     stateCache: cache,
   })
-  return { state, gate: evaluateExitGate(state) }
+  return { state, gate: evaluateExitGate(state, { requireApproval: act.requireApproval }) }
 }
 
 const gateRow = (state: PrActState, gate: ExitGate): Gate => ({

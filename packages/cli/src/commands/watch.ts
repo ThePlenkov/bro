@@ -470,9 +470,10 @@ async function gateFleetPrs(
           maxRounds: act.maxRounds,
           docsPaths: act.docsPaths,
           docsMaxRounds: act.docsMaxRounds,
+          requireApproval: act.requireApproval,
           stateCache: cache,
         })
-        const gate = evaluateExitGate(state)
+        const gate = evaluateExitGate(state, { requireApproval: act.requireApproval })
         // ownership marker — one extra labels read per PR; a failure
         // degrades the marker, never the gate row it rides on
         let ownership: PrOwnership | undefined

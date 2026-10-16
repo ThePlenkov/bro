@@ -6,7 +6,13 @@ import type { AddressInfo } from 'node:net'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { Readable } from 'node:stream'
-import { lockHolderPid, SpawnError, type AgentConnector, type AgentInfo } from '@broject/core'
+import {
+  lockHolderPid,
+  SpawnError,
+  type AgentConnector,
+  type AgentInfo,
+  type PlaneFilter,
+} from '@broject/core'
 import { initRepo, inside, insideAsync } from './testrepo.ts'
 import { SpawnInputError } from './agents.ts'
 import {
@@ -26,6 +32,7 @@ import {
   type ServeDeps,
 } from './serve.ts'
 import { WEBUI_CSP } from './webui.ts'
+import { UI_CSP } from './ui-page.ts'
 
 const fakeConn = {
   name: 'native',
@@ -101,6 +108,39 @@ describe('serve — routes', () => {
     }
 
     const post = await route('POST', '/fleet', '{}')
+    assert.equal(post.status, 405)
+  })
+
+  test('GET /ui serves the catalog dashboard with its CSP; non-GET is 405', async () => {
+    const r = await route('GET', '/ui')
+    assert.equal(r.status, 200)
+    assert.equal(r.contentType, 'text/html; charset=utf-8')
+    assert.equal(r.headers?.['content-security-policy'], UI_CSP)
+    const html = String(r.body)
+    assert.match(html, /<!doctype html>/)
+    // the dashboard is index-driven — it fetches the plane catalog,
+    // not the bespoke read planes /fleet polls
+    assert.match(html, /\/api\/v1\/planes/)
+    // read-only: no write surface, verbs render as badges not buttons
+    assert.doesNotMatch(html, /method="post"|<form/)
+
+    const post = await route('POST', '/ui', '{}')
+    assert.equal(post.status, 405)
+  })
+
+  test('GET /api/v1/events/asyncapi.json serves the generated doc', async () => {
+    const r = await route('GET', '/api/v1/events/asyncapi.json', undefined, deps({
+      asyncApi: () => ({ asyncapi: '3.0.0', channels: {} }),
+    }))
+    assert.equal(r.status, 200)
+    assert.equal((r.body as { asyncapi: string }).asyncapi, '3.0.0')
+
+    // absent dep unwires the route like any unwired plane
+    const absent = await route('GET', '/api/v1/events/asyncapi.json')
+    assert.equal(absent.status, 404)
+    const post = await route('POST', '/api/v1/events/asyncapi.json', '{}', deps({
+      asyncApi: () => ({}),
+    }))
     assert.equal(post.status, 405)
   })
 
@@ -315,6 +355,79 @@ describe('serve — routes', () => {
       const r = await route(m, p, '{}')
       assert.equal(r.status, 405, `${m} ${p}`)
     }
+  })
+})
+
+describe('serve — /api/v1/planes dispatch', () => {
+  const planeDeps = () =>
+    deps({
+      planeCatalog: () => [
+        {
+          name: 'test',
+          reads: ['tail'],
+          verbs: ['poke'],
+          capabilities: async () => ({ read: true }),
+          list: async () => [],
+          get: async (ref: string) => ({ id: ref }),
+          read: async (name: string) => ({ read: name }),
+          exec: async () => undefined,
+        },
+      ],
+    })
+
+  test('the index, list, read, and get shapes all route through the dep', async () => {
+    const d = planeDeps()
+    const index = await routeRequest('GET', '/api/v1/planes', undefined, d, {
+      dir: '/repo',
+      startedAt: 't0',
+    })
+    assert.equal(index.status, 200)
+    const body = index.body as { planes: { name: string }[] }
+    assert.deepEqual(
+      body.planes.map((p) => p.name),
+      ['test']
+    )
+
+    for (const p of ['/api/v1/planes/test', '/api/v1/planes/test/tail', '/api/v1/planes/test/ref']) {
+      const r = await routeRequest('GET', p, undefined, d, { dir: '/repo', startedAt: 't0' })
+      assert.notEqual(r.status, 404, p)
+    }
+  })
+
+  test('query params reach the plane filter/read args', async () => {
+    let seen: unknown
+    const d = deps({
+      planeCatalog: () => [
+        {
+          name: 'work',
+          reads: [],
+          verbs: [],
+          capabilities: async () => ({ read: true }),
+          list: async (filter?: PlaneFilter) => {
+            seen = filter
+            return []
+          },
+          get: async () => undefined,
+          read: async () => ({}),
+          exec: async () => undefined,
+        },
+      ],
+    })
+    await routeRequest(
+      'GET',
+      '/api/v1/planes/work',
+      undefined,
+      d,
+      { dir: '/repo', startedAt: 't0' },
+      {},
+      { status: 'open', limit: '2' }
+    )
+    assert.deepEqual(seen, { status: 'open', limit: 2 })
+  })
+
+  test('absent planeCatalog dep → the whole subtree 404s', async () => {
+    const r = await route('GET', '/api/v1/planes')
+    assert.equal(r.status, 404)
   })
 })
 

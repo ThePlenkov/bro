@@ -260,6 +260,9 @@ export interface FetchPrActStateOpts {
   maxRounds?: number
   docsPaths?: string[]
   docsMaxRounds?: number
+  /** act.requireApproval — when true the gate also requires an
+   *  approving review verdict before auto-merge may land (bro-3vy93). */
+  requireApproval?: boolean
   /** The shared gate-state feed (bro-0tcrl): observe-path callers pass
    *  `prStateCache(dir)` so concurrent pollers share one fetch per
    *  target per TTL window instead of each paying the full 5-7 host
@@ -283,8 +286,13 @@ export async function fetchPrActState(
   opts?: FetchPrActStateOpts
 ): Promise<PrActState> {
   const cache = opts?.stateCache ?? null
+  // a cached entry serves only when it answers what THIS caller asked —
+  // requireApproval needs the humanApproval probe, and an entry fetched
+  // without it carries no verdict (the probe is lazy)
+  const usable = (s: PrActState): boolean =>
+    !(opts?.requireApproval === true && s.humanApproval === undefined)
   const hit = cache?.read(target)
-  if (hit != null) {
+  if (hit != null && usable(hit)) {
     return hit
   }
   const key = `${target.repo}#${target.pr}`
@@ -314,7 +322,10 @@ async function fetchShared(
   try {
     if (release !== null && cache !== null) {
       const hit = cache.read(target)
-      if (hit != null) {
+      if (
+        hit != null &&
+        !(opts?.requireApproval === true && hit.humanApproval === undefined)
+      ) {
         return hit
       }
     }
@@ -398,6 +409,30 @@ async function fetchState(
   const sastPending = sast.pending
   const sastUnknown = sast.unknown
 
+  // The approval verdict is lazy: prMeta carries it for free on hosts
+  // that expose it (GitHub), and the separate approvals probe (GitLab)
+  // only pays its call when the gate is on (bro-3vy93)
+  const requireApproval = opts?.requireApproval === true
+  const reviewDecision =
+    meta.reviewDecision ??
+    (requireApproval
+      ? await orSync(
+          rev.reviewDecisionAsync?.bind(rev),
+          (t: PrTarget) => rev.reviewDecision?.(t),
+          target
+        ).catch((): undefined => undefined)
+      : undefined)
+  // the human-approval probe — a bot-only APPROVED verdict must not
+  // satisfy act.requireApproval; unanswerable stays undefined, which
+  // the gate reads as "not approved" (never a pass)
+  const humanApproval = requireApproval
+    ? await orSync(
+        rev.humanApprovedAsync?.bind(rev),
+        (t: PrTarget) => rev.humanApproved?.(t) ?? false,
+        target
+      ).catch((): undefined => undefined)
+    : undefined
+
   // A "fix round" is a reviewed push after the first — counting distinct
   // reviewed head SHAs, not commits: one push can carry many commits, and
   // committer dates are commit-time, not push-time. The first reviewed
@@ -440,5 +475,7 @@ async function fetchState(
     maxRounds,
     docsOnly: isDocsOnly,
     alerts,
+    reviewDecision,
+    humanApproval,
   }
 }

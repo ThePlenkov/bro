@@ -25,6 +25,8 @@ import { client, ndJsonStream, PROTOCOL_VERSION, RequestError } from '@agentclie
 import type {
   ClientContext,
   ClientRequestHandler,
+  ContentBlock,
+  PromptResponse,
   RequestPermissionRequest,
   RequestPermissionResponse,
   SendRequestOptions,
@@ -304,6 +306,9 @@ async function acpInit(ctx: ClientContext, by: string, deadline: number) {
   // that actually names auth is the operator's problem; keep the
   // advertised ids for the remediation line.
   const authMethods = init.authMethods ?? []
+  // prompt capabilities gate rich content — image blocks only go on
+  // the wire when the agent says it can consume them (bro-7izjx)
+  const caps = { image: init.agentCapabilities?.promptCapabilities?.image === true }
   const authHint = (): string =>
     authMethods.length > 0 ? ` (${authMethods.map((m) => m.id).join(', ')})` : ''
   const asAuthError = (err: unknown): never => {
@@ -322,7 +327,7 @@ async function acpInit(ctx: ClientContext, by: string, deadline: number) {
         )
       : err
   }
-  return { asAuthError, req }
+  return { asAuthError, req, caps }
 }
 
 /** session/new on an ALREADY-initialized connection — the pooled path. */
@@ -345,9 +350,9 @@ async function acpSession(
   by: string,
   deadline: number
 ) {
-  const { asAuthError, req } = await acpInit(ctx, by, deadline)
+  const { asAuthError, req, caps } = await acpInit(ctx, by, deadline)
   const session = await acpSessionOpen(ctx, opts, asAuthError, req)
-  return { session, asAuthError, req }
+  return { session, asAuthError, req, caps }
 }
 
 /** initialize → session/new → model → prompt → collect chunks — the
@@ -371,16 +376,25 @@ async function acpOp(
       opts.model ?? entry.model,
       req
     )
-    const [resp, text] = await Promise.all([
-      session.prompt(promptText, req()).catch(asAuthError),
-      session.readText(),
-    ])
-    if (resp.stopReason !== 'end_turn') {
-      throw new JudgeUnavailable(`${by} (acp) turn stopped — ${resp.stopReason}`)
+    // spec bro-d6mcd: drain session/update as it arrives — the
+    // caller's onUpdate sink (streaming hosts) sees every chunk,
+    // tool_call and plan update; absent sink = the same whole-turn
+    // contract readText() gave before.
+    const r = await pumpTurn(
+      session,
+      promptText,
+      opts.acp?.onUpdate ?? (() => {}),
+      asAuthError,
+      req,
+      undefined,
+      by
+    )
+    if (r.stopReason !== 'end_turn') {
+      throw new JudgeUnavailable(`${by} (acp) turn stopped — ${r.stopReason}`)
     }
-    const usage = resp.usage
+    const usage = r.response.usage
     return {
-      text,
+      text: r.text,
       model,
       usage:
         usage != null && Number.isSafeInteger(usage.inputTokens)
@@ -595,7 +609,13 @@ function tracedUpdates(
           )
         }
       }
-      onUpdate(u)
+      // a throwing sink is an observer bug, not a turn failure —
+      // swallow it so the pump keeps draining updates to stop
+      try {
+        onUpdate(u)
+      } catch {
+        /* observer must not kill the turn pump */
+      }
     },
     flush: (status) => {
       for (const [, s] of open) s.end({ 'tool.status': 'turn_end' }, status)
@@ -607,23 +627,22 @@ function tracedUpdates(
 /** The prompt→updates loop shared by one-shot and pooled turns. */
 async function pumpTurn(
   session: Awaited<ReturnType<typeof acpSession>>['session'],
-  promptText: string,
+  prompt: string | ContentBlock[],
   onUpdate: (update: SessionUpdate) => void,
   asAuthError: (err: unknown) => never,
   req: () => SendRequestOptions,
   signal: AbortSignal | undefined,
   by: string,
   parent?: OtelCtx
-): Promise<{ stopReason: StopReason; text: string }> {
+): Promise<{ stopReason: StopReason; text: string; response: PromptResponse }> {
   const traced = tracedUpdates(onUpdate, parent)
-  const turn = session.prompt(promptText, req()).catch(asAuthError)
-  // the turn's completion also queues as a `stop` for nextUpdate —
-  // racing keeps a prompt-level failure from hanging the pump
-  const stopP = turn.then((response) => ({
-    kind: 'stop' as const,
-    stopReason: response.stopReason,
-    response,
-  }))
+  // prompt() enqueues `stop` into the SAME updates stream in order —
+  // updates drain first, `stop` arrives last, so trailing chunks can't
+  // be lost by racing the response promise (bro-d6mcd). The turn's
+  // own rejection lands on the queue as a reject — swallow it on the
+  // direct promise so it can't fire unhandled; the pump reads and
+  // classifies the same failure through nextUpdate.
+  void session.prompt(prompt, req()).catch(() => {})
   // a gone caller cancels the turn: the caller's dispose ends the
   // session — no orphan work on the agent
   const aborted = new Promise<never>((_, reject) => {
@@ -635,13 +654,14 @@ async function pumpTurn(
   try {
     for (;;) {
       const msg: ActiveSessionMessage = await Promise.race([
-        session.nextUpdate(),
-        stopP,
+        // prompt failures surface on the queue itself — classify the
+        // rejection through asAuthError the same as a direct throw
+        session.nextUpdate().catch(asAuthError),
         aborted,
       ])
       if (msg.kind === 'stop') {
         traced.flush('ok')
-        return { stopReason: msg.stopReason, text }
+        return { stopReason: msg.stopReason, text, response: msg.response }
       }
       traced.sink(msg.update)
       if (msg.update.sessionUpdate === 'agent_message_chunk') {
@@ -668,6 +688,11 @@ export interface AcpPeer {
   /** Per-request cancel options against any deadline (init one is default). */
   req: (deadline?: number) => SendRequestOptions
   asAuthError: (err: unknown) => never
+  /** Prompt capabilities negotiated at initialize — `image` gates
+   *  whether image content blocks may go on the wire (bro-7izjx).
+   *  Optional: external peers built before the field existed are
+   *  treated as image-incapable (codeant #558). */
+  caps?: { image: boolean }
 }
 
 export async function acpOpen(
@@ -719,11 +744,11 @@ export async function acpOpen(
     child?.kill('SIGKILL')
   }
   try {
-    const { asAuthError, req } = await withDeadline(deadline, () =>
+    const { asAuthError, req, caps } = await withDeadline(deadline, () =>
       acpInit(conn.agent, by, deadline)
     )
     span.end({ 'acp.pid': child?.pid ?? 0 })
-    return { ctx: conn.agent, signal: conn.signal, close, tail, req, asAuthError }
+    return { ctx: conn.agent, signal: conn.signal, close, tail, req, asAuthError, caps }
   } catch (err) {
     close()
     // spawn's 'error' event is async — a binary that can't exec is only
@@ -849,7 +874,7 @@ export async function acpPooledTurn(
   peer: AcpPeer,
   entry: AcpEntry,
   opts: ProviderWireOpts,
-  promptText: string,
+  prompt: string | ContentBlock[],
   deadline: number,
   turn: PooledTurnOpts = {}
 ): Promise<{ stopReason: StopReason; text: string; model: string }> {
@@ -887,7 +912,7 @@ export async function acpPooledTurn(
       )
       const r = await pumpTurn(
         session,
-        promptText,
+        prompt,
         turn.onUpdate ?? (() => {}),
         peer.asAuthError,
         req,

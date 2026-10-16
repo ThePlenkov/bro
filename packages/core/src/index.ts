@@ -20,6 +20,7 @@ export {
   gitBranchLog,
   gitIsAncestor,
   gitIsShallow,
+  gitUpstreamBehind,
   worktreeGitDir,
 } from './git.ts'
 export type { GitLogPathRecord, GitStamp, GitLogStamp } from './git.ts'
@@ -451,6 +452,7 @@ export {
   BUS_RING_LIMIT,
   BUS_TIMEOUT_MS,
   BusRing,
+  BUS_PROBE_LIMIT,
   busMatches,
   busProbe,
   busPublish,

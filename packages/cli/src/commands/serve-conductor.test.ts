@@ -2,7 +2,7 @@
  *  session instead of an HTTP upstream (spec bro-xeozo). */
 import { describe, test } from 'node:test'
 import assert from 'node:assert/strict'
-import type { SessionConfigOption } from '@agentclientprotocol/sdk'
+import type { SessionConfigOption, SessionUpdate } from '@agentclientprotocol/sdk'
 import { fakeAcpAgent } from '@broject/providers/testkit'
 import { conductorConfig, conductorProxy, parseReply } from './serve-conductor.ts'
 import { authHeaders, listen, serveDeps as deps } from './serve-testkit.ts'
@@ -20,6 +20,14 @@ const MODEL_OPTION: SessionConfigOption = {
 }
 
 const auth = authHeaders
+
+/** Each entry becomes its own agent_message_chunk — splits inside a
+ *  <tool_call> tag exercise the conductor's incremental parser. */
+const chunks = (...texts: string[]): SessionUpdate[] =>
+  texts.map((text) => ({
+    sessionUpdate: 'agent_message_chunk',
+    content: { type: 'text' as const, text },
+  }))
 
 const CFG = {
   backend: 'dv-acp',
@@ -159,6 +167,72 @@ describe('serve /v1/* — the conductor plane', () => {
       // the conversation reached the agent serialized, not the client's model id
       assert.match(fake.prompts[0] ?? '', /say hi/)
       assert.match(fake.prompts[0] ?? '', /<turn role="user">/)
+    } finally {
+      await close()
+    }
+  })
+
+  // bro-7izjx — base64 image blocks ride the wire as real ACP image
+  // content when the agent advertised promptCapabilities.image;
+  // without the capability they degrade to the `[image]` marker.
+  const IMAGE_BODY = {
+    model: 'claude-sonnet-4-5',
+    messages: [
+      {
+        role: 'user',
+        content: [
+          { type: 'text', text: 'what is this' },
+          {
+            type: 'image',
+            source: { type: 'base64', media_type: 'image/png', data: 'aGVsbG8=' },
+          },
+        ],
+      },
+    ],
+    stream: true,
+  }
+
+  test('an image-capable agent receives the image block on the wire', async () => {
+    const fake = fakeAcpAgent({
+      replyText: 'a png',
+      configOptions: [MODEL_OPTION],
+      imageCapable: true,
+    })
+    const { url, close } = await listen(
+      deps({ provider: conductorProxy(CFG, { acp: { peer: fake.app } }) })
+    )
+    try {
+      const r = await fetch(`${url}/v1/messages`, {
+        method: 'POST',
+        headers: { ...auth, 'content-type': 'application/json' },
+        body: JSON.stringify(IMAGE_BODY),
+      })
+      assert.equal(r.status, 200)
+      await r.text()
+      const img = fake.blocks[0]?.find((b) => b.type === 'image')
+      assert.deepEqual(img, { type: 'image', data: 'aGVsbG8=', mimeType: 'image/png' })
+      // the turn wrapper still frames the text around the image
+      assert.match(fake.prompts[0] ?? '', /<turn role="user">what is this/)
+    } finally {
+      await close()
+    }
+  })
+
+  test('an agent without the image capability gets the [image] marker instead', async () => {
+    const fake = fakeAcpAgent({ replyText: 'ok', configOptions: [MODEL_OPTION] })
+    const { url, close } = await listen(
+      deps({ provider: conductorProxy(CFG, { acp: { peer: fake.app } }) })
+    )
+    try {
+      const r = await fetch(`${url}/v1/messages`, {
+        method: 'POST',
+        headers: { ...auth, 'content-type': 'application/json' },
+        body: JSON.stringify(IMAGE_BODY),
+      })
+      assert.equal(r.status, 200)
+      await r.text()
+      assert.equal(fake.blocks[0]?.every((b) => b.type === 'text'), true)
+      assert.match(fake.prompts[0] ?? '', /\[image\]/)
     } finally {
       await close()
     }
@@ -473,7 +547,7 @@ describe('serve /v1/* — the conductor plane', () => {
       release = resolve
     })
     const fake = fakeAcpAgent({
-      replyChunks: ['he', 'llo'],
+      updates: chunks('he', 'llo'),
       holdEnd: () => gate,
       configOptions: [MODEL_OPTION],
     })
@@ -523,11 +597,11 @@ describe('serve /v1/* — the conductor plane', () => {
 
   test('a <tool_call> split across deltas lands as one tool_use block', async () => {
     const fake = fakeAcpAgent({
-      replyChunks: [
+      updates: chunks(
         'checking <tool_ca',
         'll>{"name":"ls","input":{"d":"/tmp"}}</tool',
-        '_call> done',
-      ],
+        '_call> done'
+      ),
       configOptions: [MODEL_OPTION],
     })
     const { url, close } = await listen(
@@ -567,7 +641,7 @@ describe('serve /v1/* — the conductor plane', () => {
 
   test('malformed and unclosed <tool_call> markup streams as plain text', async () => {
     const fake = fakeAcpAgent({
-      replyChunks: ['x <tool_call>{nope</tool_call> y <tool_call>{"na'],
+      updates: chunks('x <tool_call>{nope</tool_call> y <tool_call>{"na'),
       configOptions: [MODEL_OPTION],
     })
     const { url, close } = await listen(

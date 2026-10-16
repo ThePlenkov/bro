@@ -202,32 +202,60 @@ export function driveArgs(argv: string[], defaultEverySec = 300): DriveArgs {
 export const FLEET_BRANCH_PREFIXES = ['work/', 'loop/', 'stack/']
 
 /** Every branch that can hold an orphaned PR: each worktree's branch
- *  plus local fleet-prefixed branches. `complete` is false when any
- *  git listing failed — a partial set is under-counted, not drained. */
+ *  plus local AND remote-tracking fleet-prefixed branches. `complete`
+ *  is false when any git listing failed — a partial set is
+ *  under-counted, not drained. */
 export function candidateBranches(root: string): { branches: string[]; complete: boolean } {
-  const branches = new Set<string>()
-  let complete = true
+  const wt = worktreeBranches(root)
+  const fleet = fleetPrefixed(root)
+  const branches = new Set([...(wt ?? []), ...fleet.branches])
+  return { branches: [...branches], complete: wt !== null && fleet.complete }
+}
+
+/** `git worktree list` branch names, or null on git failure — the
+ *  caller's `complete` flag degrades while the set keeps what it has. */
+function worktreeBranches(root: string): string[] | null {
   const wt = gitTry(['-C', root, 'worktree', 'list', '--porcelain'])
-  if (wt.code === 0) {
-    for (const w of parseWorktreePorcelain(wt.out)) {
-      if (w.branch) {
-        branches.add(w.branch)
-      }
-    }
-  } else {
-    complete = false
-  }
+  return wt.code === 0
+    ? parseWorktreePorcelain(wt.out).flatMap((w) => (w.branch ? [w.branch] : []))
+    : null
+}
+
+/** Local + remote-tracking fleet-prefixed branches. Remote rows carry
+ *  the `origin/` prefix, stripped so a remote-only head dedups against
+ *  its local name (a merged-bead cleanup reaps the local branch while
+ *  the remote head — and its still-open PR — survives; bro-njyn8). */
+function fleetPrefixed(root: string): { branches: string[]; complete: boolean } {
+  const branches: string[] = []
+  let complete = true
   for (const prefix of FLEET_BRANCH_PREFIXES) {
-    const res = gitTry(['-C', root, 'branch', '--list', `${prefix}*`, '--format=%(refname:short)'])
-    if (res.code === 0) {
-      for (const b of res.out.split('\n').filter((s) => s !== '')) {
-        branches.add(b)
+    for (const remote of [false, true]) {
+      const rows = fleetBranches(root, prefix, remote)
+      if (rows === null) {
+        complete = false
+      } else {
+        branches.push(...rows)
       }
-    } else {
-      complete = false
     }
   }
-  return { branches: [...branches], complete }
+  return { branches, complete }
+}
+
+/** One `git branch --list` row set for a fleet prefix, or null on git
+ *  failure — the caller's `complete` flag degrades while the set keeps
+ *  what it has. */
+function fleetBranches(root: string, prefix: string, remote: boolean): string[] | null {
+  const args = remote
+    ? ['-C', root, 'branch', '-r', '--list', `origin/${prefix}*`, '--format=%(refname:short)']
+    : ['-C', root, 'branch', '--list', `${prefix}*`, '--format=%(refname:short)']
+  const res = gitTry(args)
+  if (res.code !== 0) {
+    return null
+  }
+  return res.out
+    .split('\n')
+    .filter((s) => s !== '')
+    .map((s) => (remote ? s.replace(/^origin\//, '') : s))
 }
 
 /** work/bro-x → bro-x; stack/name/3-bro-x → 3-bro-x. */
@@ -789,6 +817,7 @@ interface Ctx {
     maxRounds: number
     docsPaths: string[]
     docsMaxRounds: number
+    requireApproval: boolean
   }
   merge: boolean
   json: boolean
@@ -1888,6 +1917,7 @@ async function mergeAndRetire(
         maxRounds: ctx.act.maxRounds,
         docsPaths: ctx.act.docsPaths,
         docsMaxRounds: ctx.act.docsMaxRounds,
+        requireApproval: ctx.act.requireApproval,
       }
   ).catch(() => undefined)
   // exit-0 + OPEN IS the enqueue contract — act merge exits 0 only on a
@@ -2115,6 +2145,7 @@ async function drivePr(ctx: Ctx, pr: number, work: PassWork): Promise<PrVerdict>
         maxRounds: ctx.act.maxRounds,
         docsPaths: ctx.act.docsPaths,
         docsMaxRounds: ctx.act.docsMaxRounds,
+        requireApproval: ctx.act.requireApproval,
         stateCache: ctx.stateCache,
       }
     )
@@ -2128,7 +2159,7 @@ async function drivePr(ctx: Ctx, pr: number, work: PassWork): Promise<PrVerdict>
     }
     return { pr, link, verdict: 'settled', detail: state.state.toLowerCase() }
   }
-  const gate = evaluateExitGate(state)
+  const gate = evaluateExitGate(state, { requireApproval: ctx.act.requireApproval })
   const worktree = work.worktreeByBranch.get(state.headRef)
   const occCtx: OccupancyCtx = {
     agents: work.agents,
@@ -2228,6 +2259,7 @@ async function sweepSettledFixers(ctx: Ctx, prs: Set<number>): Promise<void> {
         maxRounds: ctx.act.maxRounds,
         docsPaths: ctx.act.docsPaths,
         docsMaxRounds: ctx.act.docsMaxRounds,
+        requireApproval: ctx.act.requireApproval,
         stateCache: ctx.stateCache,
       }
       )

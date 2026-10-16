@@ -26,6 +26,12 @@
  *   GET    /                    service index
  *   GET    /fleet               the fleet webui — an HTML dashboard over
  *                               the read planes below (spec bro-w4a45)
+ *   GET    /ui                  the plane-catalog dashboard — one panel
+ *                               per descriptor, index-driven (bro-9rls.4)
+ *   GET    /api/v1/events/stream  SSE over the bus — Last-Event-ID
+ *                               `<gen>:<seq>` resume, gap→re-derive
+ *   GET    /api/v1/events/asyncapi.json
+ *                               generated AsyncAPI 3.x for the stream
  *   GET    /api/v1/health       {ok, pid, dir, startedAt}
  *   GET    /api/v1/snapshot     the watch snapshot — mols × gates × fleet × loop
  *   GET    /api/v1/agents       the agents board — per-backend registry
@@ -46,6 +52,16 @@
  *                               markers (armed waits: live pid or stale)
  *   GET    /api/v1/mailbox      {drops} — the notify tail: pending drops,
  *                               newest first, read-only (consumes nothing)
+ *   GET    /api/v1/planes       the plane-catalog index — every registered
+ *                               descriptor with its reads, verbs, and live
+ *                               capabilities (specs/bro-9rls.1.md)
+ *   GET    /api/v1/planes/<p>   the plane's list(?status&limit&filters)
+ *   GET    /api/v1/planes/<p>/<name>
+ *                               a declared named read, else get(<name>)
+ *   POST   /api/v1/planes/<p>/<verb>
+ *                               exec — the body IS the args object; the
+ *                               uniform write shape under the same
+ *                               serve.json-token gate as every write
  *   GET    /api/v1/agents/<ref> one agent — ref is agentId or molStep
  *   POST   /api/v1/agents       spawn {molStep, worktree?, prompt?|promptFile?,
  *                               connector?, beadsDir?, provider?, model?,
@@ -101,6 +117,7 @@ import type { Readable } from 'node:stream'
 import {
   busPublish,
   busSocketPath,
+  busSubscribe,
   deliverSinks,
   gitCommonDir,
   gitTry,
@@ -108,6 +125,7 @@ import {
   LockTimeout,
   lockHolderPid,
   peekMailbox,
+  planes,
   SpawnError,
   staleLock,
   startBusBroker,
@@ -116,6 +134,7 @@ import {
   type BusBroker,
   type EventInput,
   type HeldLockOptions,
+  type PlaneDescriptor,
   type SpawnErrorKind,
 } from '@broject/core'
 import { GITHUB_WEBHOOK_SECRET_ENV, githubWebhookHandler } from '@broject/github'
@@ -145,12 +164,21 @@ import {
   type StopOutcome,
 } from './agents.ts'
 import { flag, positionals } from './args.ts'
+import { loadBroConfig } from '../plugins.ts'
+import '../planes/index.ts'
+import { routePlanes } from '../planes/rest.ts'
+import {
+  asyncapiDocument,
+  routeEventsStream,
+  type EventsStreamBus,
+} from '../planes/stream.ts'
 import { providerConfig, providerProxy, type ProviderConfig } from './serve-provider.ts'
 import { conductorConfig, conductorProxy, type ConductorConfig } from './serve-conductor.ts'
 import { readBeads } from './status.ts'
 import { collectSnapshot } from './watch.ts'
 import { readHeartbeat, type HeartbeatSummary } from './watch-heartbeat.ts'
 import { FLEET_PAGE, WEBUI_CSP } from './webui.ts'
+import { UI_CSP, UI_PAGE } from './ui-page.ts'
 
 // --- serve state (discovery) ---------------------------------------------------
 
@@ -374,6 +402,18 @@ export interface ServeDeps {
   spawn(req: StepSpawnRequest): Promise<AgentInfo>
   stop(ref: string): Promise<StopOutcome>
   connectors(): string[]
+  /** `/api/v1/planes*` — the descriptor-catalog surface (spec
+   *  bro-9rls.1): absent → the whole subtree 404s like any unwired
+   *  plane. Sync — planes() builds descriptors, capabilities() is the
+   *  live probe. */
+  planeCatalog?(): PlaneDescriptor[]
+  /** `/api/v1/events/stream` — the SSE bus seam (spec bro-9rls.5).
+   *  Absent or a null socket → 503; the route is a raw stream below
+   *  the ServeResponse envelope, read-only under the Host guard. */
+  eventsBus?(): EventsStreamBus
+  /** `/api/v1/events/asyncapi.json` — the generated doc; absent
+   *  unwires the route to a plain 404. */
+  asyncApi?(): unknown
   /** `/api/v1/webhooks/<provider>` handlers keyed by provider slug. */
   webhooks?: Record<string, ServeWebhookHandler>
   /** `/v1/*` Messages-API provider proxy (bro-om6m8) — raw-stream,
@@ -395,12 +435,19 @@ export interface ServeResponse {
 
 const ROUTES = [
   'GET /fleet',
+  'GET /ui',
   'GET /api/v1/health',
   'GET /api/v1/snapshot',
   'GET /api/v1/agents',
   'GET /api/v1/queue',
   'GET /api/v1/ticks',
   'GET /api/v1/mailbox',
+  'GET /api/v1/planes',
+  'GET /api/v1/planes/<plane>',
+  'GET /api/v1/planes/<plane>/<read|ref>',
+  'POST /api/v1/planes/<plane>/<verb>',
+  'GET /api/v1/events/stream',
+  'GET /api/v1/events/asyncapi.json',
   'POST /api/v1/agents',
   'GET /api/v1/agents/<ref>',
   'GET /api/v1/agents/<ref>/log',
@@ -554,10 +601,11 @@ export async function routeRequest(
   rawBody: string | undefined,
   deps: ServeDeps,
   meta: ServeMeta,
-  headers: Record<string, string | string[] | undefined> = {}
+  headers: Record<string, string | string[] | undefined> = {},
+  query: Record<string, string> = {}
 ): Promise<ServeResponse> {
   try {
-    return await route(method, pathname, rawBody, deps, meta, headers)
+    return await route(method, pathname, rawBody, deps, meta, headers, query)
   } catch (err) {
     // HttpError is fail-closed input validation — a response, not a crash
     if (err instanceof HttpError) {
@@ -706,17 +754,24 @@ async function routeAgentRef(
   return NOT_ALLOWED
 }
 
-/** The site route — read-only HTML over the snapshot plane; the
- *  loopback Host check guards it like every other route. */
-function routeFleet(method: string): ServeResponse {
+/** The site routes — read-only HTML pages; the loopback Host check
+ *  guards them like every other route. `fleet` is the bespoke snapshot
+ *  view (spec bro-w4a45); `ui` is the index-driven catalog dashboard
+ *  (bro-9rls.4). */
+const PAGES: Record<string, { body: string; csp: string }> = {
+  fleet: { body: FLEET_PAGE, csp: WEBUI_CSP },
+  ui: { body: UI_PAGE, csp: UI_CSP },
+}
+
+function routePage(method: string, page: { body: string; csp: string }): ServeResponse {
   if (method !== 'GET') {
     return NOT_ALLOWED
   }
   return {
     status: 200,
-    body: FLEET_PAGE,
+    body: page.body,
     contentType: 'text/html; charset=utf-8',
-    headers: { 'content-security-policy': WEBUI_CSP },
+    headers: { 'content-security-policy': page.csp },
   }
 }
 
@@ -735,7 +790,8 @@ async function route(
   rawBody: string | undefined,
   deps: ServeDeps,
   meta: ServeMeta,
-  headers: Record<string, string | string[] | undefined>
+  headers: Record<string, string | string[] | undefined>,
+  query: Record<string, string>
 ): Promise<ServeResponse> {
   const seg = pathname.split('/').filter((s) => s !== '')
 
@@ -743,10 +799,11 @@ async function route(
     return { status: 200, body: { service: 'bro', routes: ROUTES } }
   }
 
-  // one comparison — a compound condition would push route() over the
-  // SonarCloud cognitive-complexity ceiling; join() tolerates stray slashes
-  if (seg.join('/') === 'fleet') {
-    return routeFleet(method)
+  // a table lookup keeps route() under the SonarCloud ceiling —
+  // a compound condition per site page would not
+  const page = seg.length === 1 ? PAGES[seg[0]!] : undefined
+  if (page !== undefined) {
+    return routePage(method, page)
   }
 
   const api = seg[0] === 'api' && seg[1] === 'v1' ? seg.slice(2) : undefined
@@ -760,6 +817,26 @@ async function route(
   const plane = api.length === 1 ? READ_PLANES[api[0]!] : undefined
   if (plane !== undefined) {
     return routePlane(method, () => plane(deps))
+  }
+  return routeApiBranch(method, api, rawBody, deps, headers, query)
+}
+
+/** The deeper `/api/v1/*` dispatch — kept out of `route` so the top
+ *  dispatcher stays under the SonarCloud cognitive ceiling. */
+function routeApiBranch(
+  method: string,
+  api: string[],
+  rawBody: string | undefined,
+  deps: ServeDeps,
+  headers: Record<string, string | string[] | undefined>,
+  query: Record<string, string>
+): ServeResponse | Promise<ServeResponse> {
+  if (api[0] === 'events' && api[1] === 'asyncapi.json' && api.length === 2) {
+    const doc = deps.asyncApi?.()
+    return doc === undefined ? NOT_FOUND : routePlane(method, () => Promise.resolve(doc))
+  }
+  if (api[0] === 'planes') {
+    return routePlanes(method, api, rawBody, deps.planeCatalog?.(), query)
   }
   if (api[0] === 'agents') {
     return routeAgentsBranch(method, api, rawBody, deps)
@@ -971,6 +1048,9 @@ async function handleRequest(
     if (await routeAgentLog(req, res, url, deps, token, statePathHint)) {
       return
     }
+    if (await routeEventsStream(req, res, url.pathname, deps.eventsBus?.())) {
+      return
+    }
     const wantsBody =
       req.method === 'POST' || req.method === 'PUT' || req.method === 'PATCH'
     if (!webhookRoute && WRITE_METHODS.has(req.method ?? 'GET')) {
@@ -987,7 +1067,8 @@ async function handleRequest(
       rawBody,
       deps,
       meta,
-      req.headers
+      req.headers,
+      Object.fromEntries(url.searchParams)
     )
     send(res, r.status, r.body, r)
   } catch (err) {
@@ -1374,6 +1455,19 @@ function realDeps(
     spawn: (req) => spawnStepAgent(dir, env, req),
     stop: (ref) => stopAgent(dir, env, ref),
     connectors: () => agentConnectorNames(),
+    // resolved once at serve start — loadBroConfig is a filesystem read
+    // and planeCatalog() answers per request
+    planeCatalog: (() => {
+      const connectors = loadBroConfig(dir).connectors
+      return () => planes(dir, { connectors })
+    })(),
+    eventsBus: () => ({
+      // the socket is re-probed per stream — a broker that comes up
+      // after serve start must not stay invisible until restart
+      socketPath: () => busSocketPath(dir),
+      subscribe: busSubscribe,
+    }),
+    asyncApi: () => asyncapiDocument(),
     webhooks: {
       github: githubWebhookHandler({
         secret: () => process.env[GITHUB_WEBHOOK_SECRET_ENV],
