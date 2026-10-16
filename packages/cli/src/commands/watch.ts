@@ -470,7 +470,7 @@ async function gateFleetPrs(
           maxRounds: act.maxRounds,
           docsPaths: act.docsPaths,
           docsMaxRounds: act.docsMaxRounds,
-    requireApproval: act.requireApproval,
+          requireApproval: act.requireApproval,
           stateCache: cache,
         })
         const gate = evaluateExitGate(state)

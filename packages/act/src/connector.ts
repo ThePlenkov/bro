@@ -103,7 +103,7 @@ async function prProbe(dir: string): Promise<PrProbe | null> {
         maxRounds: cfg.act.maxRounds,
         docsPaths: cfg.act.docsPaths,
         docsMaxRounds: cfg.act.docsMaxRounds,
-      requireApproval: cfg.act.requireApproval,
+        requireApproval: cfg.act.requireApproval,
         stateCache: prStateCache(dir, { lockWaitMs: 0 }),
       }
     )
