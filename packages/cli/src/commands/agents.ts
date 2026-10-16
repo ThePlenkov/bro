@@ -54,6 +54,7 @@ import {
   statSync,
 } from 'node:fs'
 import { basename } from 'node:path'
+import { randomBytes } from 'node:crypto'
 import {
   countSessionReservations,
   readAgentRegistry,
@@ -93,6 +94,12 @@ function usage(): never {
   bro agents status [<id|step>] [--json] [--connector <name>]
   bro agents up [<step>] [--connector <name>] [--worktree <path>] [--prompt-file <file>] [--beads-dir <dir>]
                 [--provider <name>] [--model <m>] [--profile <name>] [--class <name>] [--auto-approve]
+  bro agents run [<prompt>…] [--prompt <text>] [--prompt-file <file>] [--connector <name>]
+                [--worktree <path>] [--provider <name>] [--model <m>] [--profile <name>]
+                [--class <name>] [--auto-approve] [--beads-dir <dir>]
+                ad-hoc spawn — mints a phantom adhoc-<hex> step (no bead,
+                no claim) and sends the prompt through the same
+                registry/worktree/quota path as up <step>
   bro agents down [<id|step>] [--connector <name>]
   bro agents log <id|step> [--follow] [--lines <N>] [--connector <name>]
   bro agents prune [--connector <name>] [--older-than <N>d] [--json]
@@ -619,6 +626,11 @@ export function spawnStepAgent(
     throw new SpawnInputError(`worktree ${repoRoot} does not exist`)
   }
   const prompt = req.prompt ?? resolvePrompt(dir, beads, req.molStep, req.promptFile, conn.name)
+  // a whitespace-only FILE resolves to nothing as surely as a
+  // whitespace-only flag — check the resolved text, not just req.prompt
+  if (prompt.trim() === '') {
+    throw new SpawnInputError('prompt must not be empty')
+  }
   // class resolution (spec bro-1x7p): runs whenever fleet.routing is
   // declared — the lane pins provenance regardless of who named the
   // provider. The routed chain head supplies the provider only when no
@@ -805,6 +817,12 @@ async function cmdUp(dir: string, env: AgentConnectorEnv, argv: string[]): Promi
   } catch (err) {
     die(err instanceof Error ? err.message : String(err))
   }
+  reportSpawn(info, molStep)
+}
+
+/** The spawn report — `up <step>` and `run` share it: id/state/backend
+ *  first, then the provenance and handles the caller needs next. */
+function reportSpawn(info: AgentInfo, molStep: string): void {
   const pid = info.pid === undefined ? '' : ` pid ${info.pid}`
   console.log(`agent ${info.id} ${info.state} for ${molStep} (${info.backend}${pid})`)
   if (info.provider !== undefined) {
@@ -816,6 +834,57 @@ async function cmdUp(dir: string, env: AgentConnectorEnv, argv: string[]): Promi
   if (info.worktree !== undefined) {
     console.log(`  worktree: ${info.worktree}`)
   }
+}
+
+/** `bro agents run <prompt>` — the ad-hoc front door (spec bro-fqen0).
+ *  Same spawn machinery as `up <step>`; the only difference is the
+ *  minted `adhoc-<hex>` step — a phantom id, never a bead: no claim,
+ *  no `bd ready` litter, nothing to close. The registry row still
+ *  answers status/log/down under the minted id. */
+async function cmdRun(dir: string, env: AgentConnectorEnv, argv: string[]): Promise<void> {
+  const pos = positionals(
+    argv,
+    new Set([
+      '--connector',
+      '--worktree',
+      '--prompt',
+      '--prompt-file',
+      '--beads-dir',
+      '--provider',
+      '--model',
+      '--profile',
+      '--class',
+    ])
+  )
+  const promptFlag = flag(argv, '--prompt')
+  if (promptFlag !== undefined && pos.length > 0) {
+    die('positional text and --prompt are the same channel — pick one')
+  }
+  const prompt = promptFlag ?? (pos.length > 0 ? pos.join(' ') : undefined)
+  const promptFile = flag(argv, '--prompt-file')
+  if (prompt === undefined && promptFile === undefined) {
+    die('run requires a prompt — positional text, --prompt <text>, or --prompt-file <file>')
+  }
+  const molStep = `adhoc-${randomBytes(4).toString('hex')}`
+  let info: AgentInfo
+  try {
+    info = await spawnStepAgent(dir, env, {
+      molStep,
+      connector: flag(argv, '--connector'),
+      worktree: flag(argv, '--worktree'),
+      prompt,
+      promptFile,
+      beadsDir: flag(argv, '--beads-dir'),
+      provider: flag(argv, '--provider'),
+      model: flag(argv, '--model'),
+      profile: flag(argv, '--profile'),
+      class: flag(argv, '--class'),
+      autoApprove: argv.includes('--auto-approve') ? true : undefined,
+    })
+  } catch (err) {
+    die(err instanceof Error ? err.message : String(err))
+  }
+  reportSpawn(info, molStep)
 }
 
 async function cmdDown(dir: string, env: AgentConnectorEnv, argv: string[]): Promise<void> {
@@ -1156,6 +1225,9 @@ export async function runAgentsCommand(argv: string[]): Promise<void> {
       return
     case 'up':
       await cmdUp(dir, env, argv.slice(1))
+      return
+    case 'run':
+      await cmdRun(dir, env, argv.slice(1))
       return
     case 'down':
       await cmdDown(dir, env, argv.slice(1))
