@@ -528,3 +528,191 @@ describe('serve /v1/* — the conductor plane', () => {
     }
   })
 })
+
+// bro-whn25 — the messages API is stateless but a claude client resends
+// full history anyway, so the conductor retains one acp session per
+// conversation and feeds it only the delta. Identity is the history
+// fingerprint; a pinned x-bro-session namespaces explicitly.
+describe('serve /v1/* — retained acp sessions', () => {
+  const post = (
+    url: string,
+    messages: unknown[],
+    opts: { headers?: Record<string, string>; model?: string } = {}
+  ): Promise<Response> =>
+    fetch(`${url}/v1/messages`, {
+      method: 'POST',
+      headers: { ...auth, 'content-type': 'application/json', ...opts.headers },
+      body: JSON.stringify({ model: opts.model, messages, stream: false }),
+    })
+
+  /** Every case needs the same listener over a scripted acp peer — the
+   *  helper carries the boilerplate so each test is just the posts. */
+  const withConductor = async (
+    fakeOpts: Parameters<typeof fakeAcpAgent>[0],
+    fn: (ctx: { fake: ReturnType<typeof fakeAcpAgent>; url: string }) => Promise<void>
+  ): Promise<void> => {
+    const fake = fakeAcpAgent(fakeOpts)
+    const { url, close } = await listen(
+      deps({ provider: conductorProxy(CFG, { acp: { peer: fake.app } }) })
+    )
+    try {
+      await fn({ fake, url })
+    } finally {
+      await close()
+    }
+  }
+
+  test('a continued conversation reuses one session and sends only the delta', () =>
+    withConductor({ replyText: 'r1', configOptions: [MODEL_OPTION] }, async ({ fake, url }) => {
+      const t1 = await post(url, [{ role: 'user', content: 'first' }])
+      assert.equal(t1.status, 200)
+      // the client resends full history — own echo included
+      const t2 = await post(url, [
+        { role: 'user', content: 'first' },
+        { role: 'assistant', content: 'r1' },
+        { role: 'user', content: 'second' },
+      ])
+      assert.equal(t2.status, 200)
+      const t3 = await post(url, [
+        { role: 'user', content: 'first' },
+        { role: 'assistant', content: 'r1' },
+        { role: 'user', content: 'second' },
+        { role: 'assistant', content: 'r2' },
+        { role: 'user', content: 'third' },
+      ])
+      assert.equal(t3.status, 200)
+      // one session/new carried all three turns
+      assert.equal(fake.sessions.length, 1)
+      assert.equal(fake.prompts.length, 3)
+      // turn 2 saw only its delta — the prior turns are session context
+      assert.match(fake.prompts[1] ?? '', /second/)
+      assert.doesNotMatch(fake.prompts[1] ?? '', /first/)
+      assert.match(fake.prompts[2] ?? '', /third/)
+      assert.doesNotMatch(fake.prompts[2] ?? '', /first|second/)
+      // the internal f: fingerprint is NEVER echoed — a client must not
+      // pin back into the fingerprint namespace
+      assert.equal(t1.headers.get('x-bro-session'), null)
+    }))
+
+  test('an identical resend replays the reply without a new turn', () =>
+    withConductor(
+      { replyText: 'same answer', configOptions: [MODEL_OPTION] },
+      async ({ fake, url }) => {
+        const msgs = [{ role: 'user', content: 'ping' }]
+        assert.equal((await post(url, msgs)).status, 200)
+        const retry = await post(url, msgs)
+        assert.equal(retry.status, 200)
+        assert.equal((await retry.json()).content[0].text, 'same answer')
+        // a retry never reaches the agent — one prompt total
+        assert.equal(fake.prompts.length, 1)
+        assert.equal(fake.sessions.length, 1)
+      }
+    ))
+
+  test('x-bro-session keys explicitly; different pins get different sessions', () =>
+    withConductor({ replyText: 'x', configOptions: [MODEL_OPTION] }, async ({ fake, url }) => {
+      const msgs = [{ role: 'user', content: 'same first turn' }]
+      const ra = await post(url, msgs, { headers: { 'x-bro-session': 'a' } })
+      assert.equal(ra.status, 200)
+      // a client pin is echoed back for the client to confirm
+      assert.equal(ra.headers.get('x-bro-session'), 'h:a')
+      assert.equal(
+        (await post(url, msgs, { headers: { 'x-bro-session': 'b' } })).status,
+        200
+      )
+      // identical bodies, different pins — two sessions, no replay
+      assert.equal(fake.sessions.length, 2)
+      assert.equal(fake.prompts.length, 2)
+      // pin a keeps its session across a real continuation
+      const more = [
+        { role: 'user', content: 'same first turn' },
+        { role: 'assistant', content: 'x' },
+        { role: 'user', content: 'more' },
+      ]
+      assert.equal(
+        (await post(url, more, { headers: { 'x-bro-session': 'a' } })).status,
+        200
+      )
+      assert.equal(fake.sessions.length, 2)
+      assert.match(fake.prompts[2] ?? '', /more/)
+    }))
+
+  test('an edited prefix under a pinned key evicts and restarts', () =>
+    withConductor({ replyText: 'x', configOptions: [MODEL_OPTION] }, async ({ fake, url }) => {
+      const pin = { headers: { 'x-bro-session': 's' } }
+      assert.equal((await post(url, [{ role: 'user', content: 'orig' }], pin)).status, 200)
+      // the client rewrote history — the stored prefix proof fails
+      const r = await post(
+        url,
+        [
+          { role: 'user', content: 'EDITED' },
+          { role: 'assistant', content: 'x' },
+          { role: 'user', content: 'next' },
+        ],
+        pin
+      )
+      assert.equal(r.status, 200)
+      // a fresh session got the FULL body, not a delta
+      assert.equal(fake.sessions.length, 2)
+      assert.match(fake.prompts[1] ?? '', /EDITED/)
+      assert.match(fake.prompts[1] ?? '', /next/)
+    }))
+
+  test('a differing model mid-conversation re-pins the live session', () =>
+    withConductor({ replyText: 'x', configOptions: [MODEL_OPTION] }, async ({ fake, url }) => {
+      const pin = { headers: { 'x-bro-session': 'pin' } }
+      assert.equal((await post(url, [{ role: 'user', content: 'a' }], pin)).status, 200)
+      const cont = [
+        { role: 'user', content: 'a' },
+        { role: 'assistant', content: 'x' },
+        { role: 'user', content: 'b' },
+      ]
+      assert.equal((await post(url, cont, { ...pin, model: 'dv-acp/swe-y' })).status, 200)
+      // same session, the new pin applied on it
+      assert.equal(fake.sessions.length, 1)
+      assert.deepEqual(fake.configSets, [{ configId: 'model', value: 'swe-y' }])
+    }))
+
+  test('histories differing only in image data never collide', () =>
+    withConductor({ replyText: 'x', imageCapable: true }, async ({ fake, url }) => {
+      const img = (data: string) => [
+        {
+          role: 'user',
+          content: [
+            { type: 'text', text: 'what is this' },
+            { type: 'image', source: { type: 'base64', media_type: 'image/png', data } },
+          ],
+        },
+      ]
+      // serTurn collapses both to `[image]` — the fingerprint must
+      // still tell them apart (codeant #569)
+      assert.equal((await post(url, img('aGVsbG8='))).status, 200)
+      assert.equal((await post(url, img('d29ybGQ='))).status, 200)
+      assert.equal(fake.sessions.length, 2)
+      assert.equal(fake.prompts.length, 2)
+    }))
+
+  test('a resend pinning a different model re-pins without a new turn', () =>
+    withConductor({ replyText: 'x', configOptions: [MODEL_OPTION] }, async ({ fake, url }) => {
+      const pin = { headers: { 'x-bro-session': 's' } }
+      assert.equal((await post(url, [{ role: 'user', content: 'a' }], pin)).status, 200)
+      // same history, new model pin — the session re-pins and the
+      // recorded reply replays; no duplicate turn reaches the agent
+      const r = await post(url, [{ role: 'user', content: 'a' }], { ...pin, model: 'dv-acp/swe-y' })
+      assert.equal(r.status, 200)
+      assert.equal(fake.sessions.length, 1)
+      assert.equal(fake.prompts.length, 1)
+      assert.deepEqual(fake.configSets, [{ configId: 'model', value: 'swe-y' }])
+    }))
+
+  test('a failed turn evicts — the retry opens a fresh session', () =>
+    withConductor({ replyText: 'x', failPrompt: 'generic' }, async ({ fake, url }) => {
+      const pin = { headers: { 'x-bro-session': 's' } }
+      const turn = { role: 'user', content: 'a' }
+      assert.equal((await post(url, [turn], pin)).status, 529)
+      assert.equal((await post(url, [turn], pin)).status, 529)
+      // each attempt opened (and lost) its own session — a poisoned
+      // session is never implicitly retried
+      assert.equal(fake.sessions.length, 2)
+    }))
+})

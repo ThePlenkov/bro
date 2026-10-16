@@ -11,6 +11,7 @@ import {
   acpConverse,
   acpOpen,
   acpPooledTurn,
+  acpSessionRetain,
   isSystemoneFamily,
   shellWords,
 } from './acp.ts'
@@ -728,6 +729,64 @@ describe('tool-less backends — converse surfaces (bro-wxfls)', () => {
       ).call!('s', QUESTIONS, deadline()),
       /no model config option/
     )
+  })
+})
+
+// bro-whn25 — a conductor conversation is N anthropic turns over ONE
+// acp session: session/new once, prompt per turn, dispose on eviction.
+describe('acpSessionRetain — one session, many turns', () => {
+  const ENTRY: AcpEntry = { type: 'acp', command: 'dv acp' }
+
+  test('two prompts ride one session/new; dispose ends it', async () => {
+    const fake = fakeAcpAgent({ replyText: 'ok', configOptions: [MODEL_OPTION] })
+    const peer = await acpOpen('conductor:t', ENTRY, { acp: { peer: fake.app } }, deadline())
+    try {
+      const live = await acpSessionRetain(peer, ENTRY, { acp: { peer: fake.app } }, deadline())
+      assert.equal(live.sessionId, 'sess-1')
+      const r1 = await live.prompt('first', deadline())
+      const r2 = await live.prompt('second', deadline())
+      assert.equal(r1.text, 'ok')
+      assert.equal(r2.stopReason, 'end_turn')
+      // one session/new carried both prompts — the pooled path pays
+      // open+dispose per turn, the retained path pays once
+      assert.equal(fake.sessions.length, 1)
+      assert.equal(fake.prompts.length, 2)
+      live.dispose()
+    } finally {
+      peer.close()
+    }
+  })
+
+  test('a differing request model re-pins on the live session', async () => {
+    const fake = fakeAcpAgent({ replyText: 'ok', configOptions: [MODEL_OPTION] })
+    const peer = await acpOpen('conductor:t', ENTRY, { acp: { peer: fake.app } }, deadline())
+    try {
+      const live = await acpSessionRetain(peer, ENTRY, { acp: { peer: fake.app } }, deadline())
+      await live.prompt('a', deadline())
+      const r = await live.prompt('b', deadline(), {
+        requestModel: 'kilo/qwen3-coder',
+      })
+      assert.equal(r.model, 'qwen3-coder')
+      assert.deepEqual(fake.configSets, [{ configId: 'model-pick', value: 'qwen3-coder' }])
+      // resubmitting the same request id does NOT re-set — the open
+      // already resolved it (raw-vs-raw compare, spec bro-whn25)
+      fake.configSets.length = 0
+      await live.prompt('c', deadline(), { requestModel: 'kilo/qwen3-coder' })
+      assert.deepEqual(fake.configSets, [])
+    } finally {
+      peer.close()
+    }
+  })
+
+  test('a failed turn disposes the session and surfaces JudgeUnavailable', async () => {
+    const fake = fakeAcpAgent({ failPrompt: 'generic' })
+    const peer = await acpOpen('conductor:t', ENTRY, { acp: { peer: fake.app } }, deadline())
+    try {
+      const live = await acpSessionRetain(peer, ENTRY, { acp: { peer: fake.app } }, deadline())
+      await assert.rejects(live.prompt('x', deadline()), JudgeUnavailable)
+    } finally {
+      peer.close()
+    }
   })
 })
 

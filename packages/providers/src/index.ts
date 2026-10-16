@@ -7,8 +7,8 @@
  * by name and ask for a surface (`call`, `chat`, `spawn`); they never
  * name a vendor.
  */
-export { acpCall, acpChat, acpClient, acpConverse, acpModels, acpOpen, acpPooledTurn, acpWorkerArgv, isSystemoneFamily } from './acp.ts'
-export type { AcpPeer } from './acp.ts'
+export { acpCall, acpChat, acpClient, acpConverse, acpModels, acpOpen, acpPooledTurn, acpSessionRetain, acpWorkerArgv, isSystemoneFamily } from './acp.ts'
+export type { AcpPeer, AcpRetainedSession } from './acp.ts'
 export type { ContentBlock as AcpContentBlock } from '@agentclientprotocol/sdk'
 export { newSpanId, newTraceId, otelEvent, otelHeader, otelParent, otelSpan, postDetached, setAmbient } from './otel.ts'
 export type { OtelCtx, OtelSpan } from './otel.ts'
