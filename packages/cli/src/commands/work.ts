@@ -71,6 +71,7 @@ import {
   markerLive,
   markerOwner,
   ownerTag,
+  processesRootedIn,
   registryEntryHoldsClaim,
 } from './proc-owner.ts'
 import { collectLoopRuns, type LoopRunView } from './loop-state.ts'
@@ -702,12 +703,16 @@ export function finishWorktreeEnter(
         try {
           // the registry pins agent occupants; the in-tree claim marker
           // pins a session that won a `work enter`/`stack push` stamp
-          // during our wait — neither is visible in the other plane
+          // during our wait — neither is visible in the other plane; a
+          // non-agent process rooted in the tree (a serve, a watcher)
+          // is visible only in /proc (bro-1usa8)
           const movedIn =
             Object.values(readAgentRegistry(opts.main.path)).some(
               (e) =>
                 typeof e.worktree === 'string' && resolve(e.worktree) === resolve(path)
-            ) || worktreeClaim(path) !== undefined
+            ) ||
+            worktreeClaim(path) !== undefined ||
+            processesRootedIn(path).length > 0
           partialRemoved =
             !movedIn &&
             gitTry(['-C', opts.main.path, 'worktree', 'remove', '--force', path])
@@ -1080,6 +1085,18 @@ export function removeMergedWorktree(root: string, here: WorktreeInfo, main: Wor
   if (here.locked !== undefined) {
     const why = here.locked ? ` (${here.locked})` : ''
     console.error(`cleanup: ${root} is locked${why} — worktree kept; unlock with \`git worktree unlock\``)
+    return false
+  }
+  // a process rooted in the tree — cwd inside it, or argv executing its
+  // files (a `node <wt>/dist serve` runs deleted code after removal;
+  // bro-1usa8's zombie serve) — the merge verdict on the PR says
+  // nothing about what the worktree is still HOSTING. Kept, not lost.
+  const rooted = processesRootedIn(root)
+  if (rooted.length > 0) {
+    const who = rooted
+      .map((h) => `${h.pid} (${h.cmd.slice(0, 80)})`)
+      .join(', ')
+    console.error(`cleanup: ${root} hosts live process(es): ${who} — worktree kept`)
     return false
   }
   const status = gitTry(['-c', 'status.showUntrackedFiles=all', '-C', root, 'status', '--porcelain'])

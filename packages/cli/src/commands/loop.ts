@@ -154,6 +154,7 @@ import {
   type ReadyBead,
 } from './next.ts'
 import type { NextPlan } from './next-plan.ts'
+import { processesRootedIn } from './proc-owner.ts'
 import { rigNext } from './rig-next.ts'
 
 interface Ctx {
@@ -1197,18 +1198,29 @@ async function finalizeMerge(
     return 'parked'
   }
   settleClump(ctx, beads, item, pr)
-  // an agent-initialized submodule inside the worktree blocks removal —
-  // deinit first; either way a failed cleanup is loud, never silent
-  gitTry(['-C', item.worktreeDir, 'submodule', 'deinit', '-f', '--all'])
-  const rm = gitTry(['-C', ctx.root, 'worktree', 'remove', '--force', item.worktreeDir])
-  if (rm.code !== 0) {
-    ctx.tails.push(`worktree ${item.worktreeDir} not removed — ${rm.err.trim()}`)
+  // a process rooted in the tree (a serve, a watcher, a leftover agent)
+  // keeps it — removal would strand a zombie on deleted files (bro-1usa8)
+  const rooted = processesRootedIn(item.worktreeDir)
+  if (rooted.length > 0) {
+    ctx.tails.push(
+      `worktree ${item.worktreeDir} kept — hosts live process(es): ${rooted.map((h) => h.pid).join(', ')}`
+    )
     console.error(`loop: ${ctx.tails.at(-1)}`)
   }
-  const br = gitTry(['-C', ctx.root, 'branch', '-D', item.branch])
-  if (br.code !== 0) {
-    ctx.tails.push(`branch ${item.branch} not deleted — ${br.err.trim()}`)
-    console.error(`loop: ${ctx.tails.at(-1)}`)
+  if (rooted.length === 0) {
+    // an agent-initialized submodule inside the worktree blocks removal —
+    // deinit first; either way a failed cleanup is loud, never silent
+    gitTry(['-C', item.worktreeDir, 'submodule', 'deinit', '-f', '--all'])
+    const rm = gitTry(['-C', ctx.root, 'worktree', 'remove', '--force', item.worktreeDir])
+    if (rm.code !== 0) {
+      ctx.tails.push(`worktree ${item.worktreeDir} not removed — ${rm.err.trim()}`)
+      console.error(`loop: ${ctx.tails.at(-1)}`)
+    }
+    const br = gitTry(['-C', ctx.root, 'branch', '-D', item.branch])
+    if (br.code !== 0) {
+      ctx.tails.push(`branch ${item.branch} not deleted — ${br.err.trim()}`)
+      console.error(`loop: ${ctx.tails.at(-1)}`)
+    }
   }
   say(ctx, `loop: ${beads.map((b) => b.id).join(', ')} landed via ${prRef(ctx, pr)}`)
   return 'landed'

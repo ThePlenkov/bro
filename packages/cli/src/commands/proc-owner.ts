@@ -122,6 +122,45 @@ function procIsAgent(dir: string): boolean {
   return procAgentPid(dir) !== null
 }
 
+/** Live processes ROOTED in `worktree` — cwd inside, or an argv token
+ *  that is a path inside the tree. The argv leg catches
+ *  `node <wt>/dist/index.js serve`: the code a long-lived service is
+ *  executing IS the tree even when its cwd sits elsewhere; removing
+ *  the worktree strands a zombie running deleted files (bro-1usa8).
+ *  Wider than agentProcessesIn by design — removal guards need every
+ *  occupant, not only agent-shaped ones. A missing /proc reads as
+ *  "no data" (same contract as agentProcessesIn). `procDir` injectable. */
+export function processesRootedIn(worktree: string, procDir = '/proc'): ProcHit[] {
+  const hits: ProcHit[] = []
+  let names: string[]
+  try {
+    names = readdirSync(procDir)
+  } catch {
+    return hits
+  }
+  const root = resolve(worktree)
+  const inside = (p: string): boolean => p === root || p.startsWith(root + sep)
+  for (const name of names) {
+    if (!/^\d+$/.test(name) || Number(name) === process.pid) {
+      continue
+    }
+    const dir = join(procDir, name)
+    const cmdline = readProcText(dir, 'cmdline')
+    let rooted = cmdline.split('\0').some((tok) => tok.startsWith(root + sep))
+    if (!rooted) {
+      try {
+        rooted = inside(readlinkSync(join(dir, 'cwd')))
+      } catch {
+        continue // gone between readdir and readlink
+      }
+    }
+    if (rooted) {
+      hits.push({ pid: Number(name), cmd: cmdline.replaceAll('\0', ' ').trim() })
+    }
+  }
+  return hits
+}
+
 /** Live agent-shaped processes with cwd inside `worktree` — Linux-only
  *  layer; a missing /proc is "no data", not "occupied" (the facade and
  *  marker planes still apply). `procDir` is injectable for tests. */

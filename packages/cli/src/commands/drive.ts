@@ -256,6 +256,7 @@ export {
   detailMatches,
   liveWorkDetails,
   liveWorkEntries,
+  processesRootedIn,
   registryEntryState,
 } from './proc-owner.ts'
 export type { ProcHit, WorkEntry }

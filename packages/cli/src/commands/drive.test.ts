@@ -32,6 +32,7 @@ import {
   liveWorkEntries,
   occupied,
   occupancyProofs,
+  processesRootedIn,
   recordFixerAttempt,
   registryAgents,
   registryEntryState,
@@ -236,33 +237,33 @@ describe('liveWorkDetails', () => {
   })
 })
 
-describe('agentProcessesIn', () => {
-  /** Minimal /proc tree: <pid>/cwd symlink + cmdline/environ files,
-   *  plus a status file carrying PPid when the test wires ancestry. */
-  function fakeProc(): {
-    proc: string
-    mk: (pid: number, cwd: string, cmdline: string, environ?: string, ppid?: number) => void
-    rm: () => void
-  } {
-    const proc = mkdtempSync(join(tmpdir(), 'bro-drive-proc-'))
-    return {
-      proc,
-      rm: () => rmSync(proc, { recursive: true, force: true }),
-      mk: (pid, cwd, cmdline, environ, ppid) => {
-        const dir = join(proc, String(pid))
-        mkdirSync(dir)
-        symlinkSync(cwd, join(dir, 'cwd'))
-        writeFileSync(join(dir, 'cmdline'), cmdline)
-        if (environ !== undefined) {
-          writeFileSync(join(dir, 'environ'), environ)
-        }
-        if (ppid !== undefined) {
-          writeFileSync(join(dir, 'status'), `Name:\tx\nPPid:\t${ppid}\n`)
-        }
-      },
-    }
+/** Minimal /proc tree: <pid>/cwd symlink + cmdline/environ files,
+ *  plus a status file carrying PPid when the test wires ancestry. */
+function fakeProc(): {
+  proc: string
+  mk: (pid: number, cwd: string, cmdline: string, environ?: string, ppid?: number) => void
+  rm: () => void
+} {
+  const proc = mkdtempSync(join(tmpdir(), 'bro-drive-proc-'))
+  return {
+    proc,
+    rm: () => rmSync(proc, { recursive: true, force: true }),
+    mk: (pid, cwd, cmdline, environ, ppid) => {
+      const dir = join(proc, String(pid))
+      mkdirSync(dir)
+      symlinkSync(cwd, join(dir, 'cwd'))
+      writeFileSync(join(dir, 'cmdline'), cmdline)
+      if (environ !== undefined) {
+        writeFileSync(join(dir, 'environ'), environ)
+      }
+      if (ppid !== undefined) {
+        writeFileSync(join(dir, 'status'), `Name:\tx\nPPid:\t${ppid}\n`)
+      }
+    },
   }
+}
 
+describe('agentProcessesIn', () => {
   test('agent-shaped cmdlines inside the worktree count; others do not', () => {
     const wt = mkdtempSync(join(tmpdir(), 'bro-drive-wt-'))
     const { proc, mk, rm } = fakeProc()
@@ -341,6 +342,54 @@ describe('agentProcessesIn', () => {
 
   test('a missing procDir is empty — non-Linux degrades, never blocks', () => {
     assert.deepEqual(agentProcessesIn('/tmp', '/no/such/proc'), [])
+  })
+})
+
+describe('processesRootedIn', () => {
+  // bro-1usa8: a merged-PR worktree cleanup kept nothing about what the
+  // tree still HOSTED — `node <wt>/dist serve` has cwd in the main repo
+  // but its argv executes the tree's code; removal stranded a zombie.
+
+  test('an argv token inside the tree roots the process — cwd elsewhere', () => {
+    const wt = mkdtempSync(join(tmpdir(), 'bro-drive-wt-'))
+    const main = mkdtempSync(join(tmpdir(), 'bro-drive-main-'))
+    const { proc, mk, rm } = fakeProc()
+    try {
+      mk(601, main, `node\0${join(wt, 'packages', 'cli', 'dist', 'index.js')}\0serve`)
+      mk(602, main, 'node\0/other/dist/index.js\0serve') // another repo's serve — not rooted
+      const hits = processesRootedIn(wt, proc).map((h) => h.pid)
+      assert.deepEqual(hits, [601])
+    } finally {
+      rm()
+      rmSync(wt, { recursive: true, force: true })
+      rmSync(main, { recursive: true, force: true })
+    }
+  })
+
+  test('cwd inside the tree roots any process — agent shape not required', () => {
+    const wt = mkdtempSync(join(tmpdir(), 'bro-drive-wt-'))
+    const { proc, mk, rm } = fakeProc()
+    try {
+      mk(701, join(wt, 'sub'), 'tail\0-f\0log.txt') // a watcher, not an agent
+      const hits = processesRootedIn(wt, proc).map((h) => h.pid)
+      assert.deepEqual(hits, [701])
+    } finally {
+      rm()
+      rmSync(wt, { recursive: true, force: true })
+    }
+  })
+
+  test('unrelated processes and a missing procDir read as unoccupied', () => {
+    const wt = mkdtempSync(join(tmpdir(), 'bro-drive-wt-'))
+    const { proc, mk, rm } = fakeProc()
+    try {
+      mk(801, '/elsewhere', 'sleep\x00300')
+      assert.deepEqual(processesRootedIn(wt, proc), [])
+      assert.deepEqual(processesRootedIn(wt, '/no/such/proc'), [])
+    } finally {
+      rm()
+      rmSync(wt, { recursive: true, force: true })
+    }
   })
 })
 
