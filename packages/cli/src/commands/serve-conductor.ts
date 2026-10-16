@@ -820,9 +820,18 @@ async function messages(
       parent,
       // `provider/model` ids are a real pin — resolved against the
       // agent's own catalog; bare foreign ids (claude-sonnet-*) are
-      // display labels
-      requestModel:
-        typeof body.model === 'string' && body.model.includes('/') ? body.model : undefined,
+      // display labels. Claude pins context variants as `model[1m]` —
+      // the bracket suffix is a client-side opt-in, not a different
+      // model; strip it or the catalog lookup 500s (bro-0g2l3)
+      requestModel: (() => {
+        const raw = typeof body.model === 'string' ? body.model.trimEnd() : undefined
+        const open = raw?.lastIndexOf('[') ?? -1
+        const inner = open >= 0 && raw?.endsWith(']') ? raw.slice(open + 1, -1) : undefined
+        const m = inner !== undefined && /^\d+[km]?$/i.test(inner)
+          ? raw?.slice(0, open).trimEnd()
+          : raw
+        return m?.includes('/') ? m : undefined
+      })(),
       deadline: Date.now() + wire.cfg.timeoutMs,
       signal: ac.signal,
       by: `conductor:${wire.cfg.backend}`,
