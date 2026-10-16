@@ -231,17 +231,7 @@ function serializeBlocks(body: MessagesRequest, imageOk: boolean): AcpContentBlo
       buf += `${sep}<turn role="${role}">${m.content}</turn>`
       continue
     }
-    const imgs: AcpContentBlock[] = []
-    const text = (m.content ?? [])
-      .map((b) => {
-        const img = b.type === 'image' ? acpImage(b) : undefined
-        if (img !== undefined) {
-          imgs.push(img)
-          return ''
-        }
-        return blockText(b)
-      })
-      .join('')
+    const { text, imgs } = turnParts(m.content)
     if (imgs.length === 0) {
       buf += `${sep}<turn role="${role}">${text}</turn>`
       continue
@@ -250,11 +240,28 @@ function serializeBlocks(body: MessagesRequest, imageOk: boolean): AcpContentBlo
     // blocks follow the turn's text block rather than splitting the
     // open/close tags across block boundaries (amazon-q #558)
     flush()
-    blocks.push({ type: 'text', text: `<turn role="${role}">${text}</turn>` })
-    blocks.push(...imgs)
+    blocks.push({ type: 'text', text: `<turn role="${role}">${text}</turn>` }, ...imgs)
   }
   flush()
   return blocks
+}
+
+/** An array-content turn → its serialized text (passed-through image
+ *  blocks stripped) plus the mappable ACP image blocks, in source
+ *  order. Unmappable images stay inline as `[image]`. */
+function turnParts(content: InBlock[] | undefined): { text: string; imgs: AcpContentBlock[] } {
+  const imgs: AcpContentBlock[] = []
+  const text = (content ?? [])
+    .map((b) => {
+      const img = b.type === 'image' ? acpImage(b) : undefined
+      if (img === undefined) {
+        return blockText(b)
+      }
+      imgs.push(img)
+      return ''
+    })
+    .join('')
+  return { text, imgs }
 }
 
 const TOOL_CALL = /<tool_call>\s*(\{[\s\S]*?\})\s*<\/tool_call>/g
