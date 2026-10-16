@@ -25,6 +25,7 @@ import { client, ndJsonStream, PROTOCOL_VERSION, RequestError } from '@agentclie
 import type {
   ClientContext,
   ClientRequestHandler,
+  PromptResponse,
   RequestPermissionRequest,
   RequestPermissionResponse,
   SendRequestOptions,
@@ -278,12 +279,37 @@ async function acpOp(
       opts.model ?? entry.model,
       req
     )
-    const [resp, text] = await Promise.all([
-      session.prompt(promptText, req()).catch(asAuthError),
-      session.readText(),
-    ])
-    if (resp.stopReason !== 'end_turn') {
-      throw new JudgeUnavailable(`${by} (acp) turn stopped — ${resp.stopReason}`)
+    // spec bro-d6mcd: drain session/update as it arrives — the
+    // caller's onUpdate sink (streaming hosts) sees every chunk,
+    // tool_call and plan update; absent sink = the same whole-turn
+    // contract readText() gave before.
+    const onUpdate = opts.acp?.onUpdate
+    const turn = session.prompt(promptText, req()).catch(asAuthError)
+    // the turn's completion also queues as a `stop` for nextUpdate —
+    // racing keeps a prompt-level failure from hanging the pump
+    const stop = turn.then((response) => ({
+      kind: 'stop' as const,
+      stopReason: response.stopReason,
+      response,
+    }))
+    let text = ''
+    let resp: PromptResponse | undefined
+    for (;;) {
+      // prompt failures can surface on EITHER leg — a rejection through
+      // nextUpdate must classify through asAuthError the same way
+      const msg = await Promise.race([session.nextUpdate(), stop]).catch(asAuthError)
+      if (msg.kind === 'stop') {
+        resp = msg.response
+        break
+      }
+      onUpdate?.(msg.update)
+      if (msg.update.sessionUpdate === 'agent_message_chunk') {
+        const c = msg.update.content
+        if (c.type === 'text') text += c.text
+      }
+    }
+    if (resp!.stopReason !== 'end_turn') {
+      throw new JudgeUnavailable(`${by} (acp) turn stopped — ${resp!.stopReason}`)
     }
     const usage = resp.usage
     return {

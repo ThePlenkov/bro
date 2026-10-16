@@ -8,6 +8,7 @@ import type {
   AuthMethod,
   PermissionOption,
   SessionConfigOption,
+  SessionUpdate,
   StopReason,
 } from '@agentclientprotocol/sdk'
 import type { FetchFn } from './http.ts'
@@ -51,6 +52,9 @@ export interface FakeAcpAgent {
 export function fakeAcpAgent(
   opts: {
     replyText?: string
+    /** Full update sequence to emit before the stop — supersedes the
+     *  single replyText chunk (streaming-surface tests, spec bro-d6mcd). */
+    updates?: SessionUpdate[]
     stopReason?: StopReason
     authMethods?: AuthMethod[]
     protocolVersion?: number
@@ -133,13 +137,18 @@ export function fakeAcpAgent(
         })
         seen.permissionOutcome = res.outcome
       }
-      await ctx.client.notify('session/update', {
-        sessionId: ctx.params.sessionId,
-        update: {
+      const updates: SessionUpdate[] = opts.updates ?? [
+        {
           sessionUpdate: 'agent_message_chunk',
           content: { type: 'text', text: opts.replyText ?? '{}' },
         },
-      })
+      ]
+      for (const update of updates) {
+        await ctx.client.notify('session/update', {
+          sessionId: ctx.params.sessionId,
+          update,
+        })
+      }
       return { stopReason: opts.stopReason ?? 'end_turn' }
     })
   seen.app = app
