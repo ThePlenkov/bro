@@ -146,6 +146,7 @@ import {
 } from './agents.ts'
 import { flag, positionals } from './args.ts'
 import { providerConfig, providerProxy, type ProviderConfig } from './serve-provider.ts'
+import { conductorConfig, conductorProxy, type ConductorConfig } from './serve-conductor.ts'
 import { readBeads } from './status.ts'
 import { collectSnapshot } from './watch.ts'
 import { readHeartbeat, type HeartbeatSummary } from './watch-heartbeat.ts'
@@ -1347,9 +1348,10 @@ function dropActStateForEvent(dir: string, event: EventInput): void {
 function realDeps(
   dir: string,
   env: AgentConnectorEnv,
-  providerCfg: ProviderConfig | undefined
+  provider: { conductorCfg?: ConductorConfig; providerCfg?: ProviderConfig }
 ): ServeDeps {
   const socketPath = busSocketPath(dir)
+  const { conductorCfg, providerCfg } = provider
   return {
     snapshot: () => collectSnapshot(dir),
     agents: async () => {
@@ -1389,7 +1391,11 @@ function realDeps(
         },
       }),
     },
-    ...(providerCfg !== undefined ? { provider: providerProxy(providerCfg) } : {}),
+    ...(conductorCfg !== undefined
+      ? { provider: conductorProxy(conductorCfg) }
+      : providerCfg !== undefined
+        ? { provider: providerProxy(providerCfg) }
+        : {}),
   }
 }
 
@@ -1485,8 +1491,14 @@ export async function runServeCommand(argv: string[]): Promise<void> {
 
   const env = loadAgentEnv(dir)
   const meta: ServeMeta = { dir, startedAt: '' }
-  const providerCfg = providerConfig(process.env)
-  if (providerCfg !== undefined) {
+  // the conductor answers /v1 from a configured acp provider
+  // (BRO_PROVIDER_BACKEND) — explicit backend intent beats the byte
+  // proxy's upstream+key pair, which stays the plain-HTTP fallback
+  const conductorCfg = conductorConfig(process.env, dir)
+  const providerCfg = conductorCfg === undefined ? providerConfig(process.env) : undefined
+  if (conductorCfg !== undefined) {
+    console.log(`provider: /v1/* → acp conductor (${conductorCfg.backend})`)
+  } else if (providerCfg !== undefined) {
     console.log(`provider: /v1/* → ${providerCfg.upstream}`)
   }
   // the session token — the "local session context" made concrete.
@@ -1494,7 +1506,7 @@ export async function runServeCommand(argv: string[]): Promise<void> {
   // 0600 serve.json below, so possession implies same-UID file access
   const token = randomBytes(32).toString('hex')
   const server = createServer(
-    createServeHandler(realDeps(dir, env, providerCfg), meta, token)
+    createServeHandler(realDeps(dir, env, { conductorCfg, providerCfg }), meta, token)
   )
 
   try {
@@ -1520,7 +1532,7 @@ export async function runServeCommand(argv: string[]): Promise<void> {
       token,
       // the flag `bro provider` resolution reads — a facade-only serve
       // must not shadow the host listener's endpoint
-      ...(providerCfg !== undefined ? { provider: true } : {}),
+      ...(providerCfg !== undefined || conductorCfg !== undefined ? { provider: true } : {}),
     })
     // filesystems that ignore mode bits (some fuse/9p/drvfs mounts) can
     // leave the token group/other-readable — the auth boundary then
