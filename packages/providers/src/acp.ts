@@ -769,6 +769,17 @@ function selectLeaves(opt: SessionConfigOption): { name: string; value: string }
   return opt.options.flatMap((o) => ('options' in o ? o.options : [o]))
 }
 
+/** Claude pins context-window variants as `model[1m]` — a client-side
+ *  opt-in, not a different catalog model; the trailing `[<size>]`
+ *  bracket strips before resolution or the catalog match misses
+ *  (bro-0g2l3). Other brackets stay — `model[custom]` is a real id. */
+function modelBase(model: string): string {
+  const raw = model.trimEnd()
+  const open = raw.lastIndexOf('[')
+  const inner = open >= 0 && raw.endsWith(']') ? raw.slice(open + 1, -1) : undefined
+  return inner !== undefined && /^\d+[km]?$/i.test(inner) ? raw.slice(0, open).trimEnd() : raw
+}
+
 /** Resolve a caller's model name against the agent's advertised select
  *  options: `<provider>/` prefixes strip, exact value/name wins, a unique
  *  `<id>-` prefix match resolves family shorthand — anything else is a
@@ -812,9 +823,10 @@ async function resolveTurnModel(
   by: string,
   req: () => SendRequestOptions
 ): Promise<string> {
-  const resolved = want === undefined ? undefined : resolveModelPin(want, configOptions, by)
+  const asked = want === undefined ? undefined : modelBase(want)
+  const resolved = asked === undefined ? undefined : resolveModelPin(asked, configOptions, by)
   if (
-    want === undefined ||
+    asked === undefined ||
     resolved !== undefined ||
     modelSelect(configOptions) === undefined
   ) {
@@ -830,7 +842,7 @@ async function resolveTurnModel(
   //    is model swe-2-high + level max, never its own catalog id)
   //  - spawn-level pin: the provider command's --model already set
   //    state the session reports back verbatim
-  const bare = want.includes('/') ? want.slice(want.indexOf('/') + 1) : want
+  const bare = asked.includes('/') ? asked.slice(asked.indexOf('/') + 1) : asked
   const modelOpt = modelSelect(configOptions)
   const thought = configOptions.find((o) => o.category === 'thought_level')
   const dash = bare.lastIndexOf('-')

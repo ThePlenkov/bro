@@ -732,6 +732,109 @@ describe('tool-less backends — converse surfaces (bro-wxfls)', () => {
   })
 })
 
+// bro-0g2l3 — a `model[1m]` context pin is the same model under a
+// client-side opt-in: every pin source normalizes to the base id
+// before the catalog match.
+describe('model pin resolution — [1m] context suffix (bro-0g2l3)', () => {
+  const ENTRY: AcpEntry = { type: 'acp', command: 'dv acp' }
+  const THOUGHT_OPTION: SessionConfigOption = {
+    type: 'select',
+    id: 'thought',
+    name: 'Thinking',
+    category: 'thought_level',
+    currentValue: 'low',
+    options: [
+      { value: 'low', name: 'low' },
+      { value: 'max', name: 'max' },
+    ],
+  }
+
+  test('a request pin carrying the suffix resolves to the base id', async () => {
+    const fake = fakeAcpAgent({ replyText: 'x', configOptions: [MODEL_OPTION] })
+    const peer = await acpOpen('conductor:t', ENTRY, { acp: { peer: fake.app } }, deadline())
+    try {
+      const r = await acpPooledTurn(peer, ENTRY, { acp: { peer: fake.app } }, 'p', deadline(), {
+        by: 'conductor:t',
+        requestModel: 'dv/qwen3-coder[1m]',
+      })
+      assert.equal(r.model, 'qwen3-coder')
+      assert.deepEqual(fake.configSets, [{ configId: 'model-pick', value: 'qwen3-coder' }])
+    } finally {
+      peer.close()
+    }
+  })
+
+  test('a configured pin carrying the suffix resolves the same', async () => {
+    const fake = fakeAcpAgent({ replyText: 'x', configOptions: [MODEL_OPTION] })
+    const peer = await acpOpen('conductor:t', ENTRY, { acp: { peer: fake.app } }, deadline())
+    try {
+      const r = await acpPooledTurn(
+        peer,
+        { ...ENTRY, model: 'qwen3-coder[1m]' },
+        { acp: { peer: fake.app } },
+        'p',
+        deadline(),
+        { by: 'conductor:t' }
+      )
+      assert.equal(r.model, 'qwen3-coder')
+      assert.deepEqual(fake.configSets, [{ configId: 'model-pick', value: 'qwen3-coder' }])
+    } finally {
+      peer.close()
+    }
+  })
+
+  test('a composite -level[1m] pin still parses the level off the base', async () => {
+    const fake = fakeAcpAgent({
+      replyText: 'x',
+      configOptions: [MODEL_OPTION, THOUGHT_OPTION],
+    })
+    const peer = await acpOpen('conductor:t', ENTRY, { acp: { peer: fake.app } }, deadline())
+    try {
+      const r = await acpPooledTurn(peer, ENTRY, { acp: { peer: fake.app } }, 'p', deadline(), {
+        by: 'conductor:t',
+        requestModel: 'dv/qwen3-coder-max[1m]',
+      })
+      assert.equal(r.model, 'qwen3-coder-max')
+      assert.deepEqual(fake.configSets, [
+        { configId: 'model-pick', value: 'qwen3-coder' },
+        { configId: 'thought', value: 'max' },
+      ])
+    } finally {
+      peer.close()
+    }
+  })
+
+  test('a [1m] repin on a live session resolves to the base id', async () => {
+    const fake = fakeAcpAgent({ replyText: 'x', configOptions: [MODEL_OPTION] })
+    const peer = await acpOpen('conductor:t', ENTRY, { acp: { peer: fake.app } }, deadline())
+    try {
+      const live = await acpSessionRetain(peer, ENTRY, { acp: { peer: fake.app } }, deadline())
+      const m = await live.repin('dv/qwen3-coder[1m]', deadline())
+      assert.equal(m, 'qwen3-coder')
+      assert.deepEqual(fake.configSets, [{ configId: 'model-pick', value: 'qwen3-coder' }])
+      live.dispose()
+    } finally {
+      peer.close()
+    }
+  })
+
+  test('a non-context bracket stays in the id — the miss is still loud', async () => {
+    const fake = fakeAcpAgent({ replyText: 'x', configOptions: [MODEL_OPTION] })
+    const peer = await acpOpen('conductor:t', ENTRY, { acp: { peer: fake.app } }, deadline())
+    try {
+      await assert.rejects(
+        acpPooledTurn(peer, ENTRY, { acp: { peer: fake.app } }, 'p', deadline(), {
+          by: 'conductor:t',
+          requestModel: 'dv/qwen3-coder[custom]',
+        }),
+        /qwen3-coder\[custom].*not in the agent's catalog/
+      )
+    } finally {
+      peer.close()
+    }
+  })
+})
+
 // bro-whn25 — a conductor conversation is N anthropic turns over ONE
 // acp session: session/new once, prompt per turn, dispose on eviction.
 describe('acpSessionRetain — one session, many turns', () => {
