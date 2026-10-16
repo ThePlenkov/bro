@@ -144,6 +144,27 @@ describe('candidateBranches', () => {
     assert.deepEqual(branches, [])
     assert.equal(complete, false)
   })
+
+  test('remote-only fleet branches keep orphan PRs enumerable (bro-njyn8)', () => {
+    const { root, main } = initRepo('bro-drive-cand-remote-')
+    inside(main, root, () => {
+      const head = git(['rev-parse', 'HEAD'], main).trim()
+      // bead closed → local work/ branch reaped; the remote head (and its
+      // still-open PR) survives — the ref must stay a drive candidate
+      git(['update-ref', 'refs/remotes/origin/work/bro-orphan', head], main)
+      git(['update-ref', 'refs/remotes/origin/work/bro-a', head], main)
+      git(['update-ref', 'refs/remotes/origin/feature/x', head], main)
+      git(['branch', 'work/bro-a'], main)
+      const { branches, complete } = candidateBranches(main)
+      assert.equal(complete, true)
+      assert.ok(branches.includes('work/bro-orphan'))
+      assert.ok(branches.includes('work/bro-a'))
+      assert.ok(!branches.includes('origin/work/bro-orphan'))
+      assert.ok(!branches.includes('origin/feature/x'))
+      assert.ok(!branches.includes('feature/x'))
+      assert.equal(branches.filter((b) => b === 'work/bro-a').length, 1)
+    })
+  })
 })
 
 describe('branchSlug', () => {

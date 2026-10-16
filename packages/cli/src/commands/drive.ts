@@ -226,6 +226,19 @@ export function candidateBranches(root: string): { branches: string[]; complete:
     } else {
       complete = false
     }
+    // a merged-bead cleanup removes the local work/<bead> branch while
+    // the remote (and its still-open PR) survives — remote refs keep
+    // the PR enumerable so orphans can be driven (bro-njyn8)
+    const rem = gitTry([
+      '-C', root, 'branch', '-r', '--list', `origin/${prefix}*`, '--format=%(refname:short)',
+    ])
+    if (rem.code === 0) {
+      for (const b of rem.out.split('\n').filter((s) => s !== '')) {
+        branches.add(b.replace(/^origin\//, ''))
+      }
+    } else {
+      complete = false
+    }
   }
   return { branches: [...branches], complete }
 }
