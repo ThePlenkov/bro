@@ -127,6 +127,7 @@ export async function routeEventsStream(
   let sub: BusSubscription | undefined
   const drop = (): void => {
     sub?.close()
+    clearInterval(keepalive)
     if (!res.writableEnded && !res.destroyed) {
       res.end()
     }
@@ -144,16 +145,20 @@ export async function routeEventsStream(
       {
         onEvent: (e) => {
           const rec = e as { gen?: string; seq?: number }
+          // the id line is wire text — a gen carrying CR/LF would
+          // inject frames; the broker's own gen is a token, but the
+          // field is sanitized because the frame boundary depends on it
           const id =
             typeof rec.gen === 'string' && typeof rec.seq === 'number'
-              ? `${rec.gen}:${rec.seq}`
+              ? `${rec.gen.replace(/[\r\n]/g, '')}:${rec.seq}`
               : undefined
           frame(id, undefined, JSON.stringify(e))
           if (res.writableLength > SSE_BACKPRESSURE_BYTES) {
             drop()
           }
         },
-        onGap: (seq) => frame(undefined, 'gap', JSON.stringify({ seq })),
+        onGap: (seq) =>
+          frame(undefined, 'gap', JSON.stringify({ seq: typeof seq === 'number' ? seq : null })),
         onClose: () => drop(),
       },
       // cursorless: the BUS_PROBE_LIMIT ring tail. A cursor replays
@@ -163,7 +168,6 @@ export async function routeEventsStream(
     )
   } catch {
     drop()
-    clearInterval(keepalive)
     return true
   }
   res.on('close', () => {

@@ -156,6 +156,16 @@ describe('routeEventsStream', () => {
 
     sub.handlers?.onGap?.(9)
     assert.equal(cap.chunks[1], 'event: gap\ndata: {"seq":9}\n\n')
+
+    // a CR/LF in gen can never inject a second frame into the id line
+    sub.handlers?.onEvent({
+      gen: 'r\nun',
+      seq: 8,
+      topic: 'act',
+      kind: 'k',
+      ts: 't',
+    } as never)
+    assert.match(cap.chunks[2] ?? '', /^id: run:8\n/)
   })
 
   test('broker close ends the response; client close stops the subscription', async () => {
