@@ -251,10 +251,15 @@ function unquoted(cmd: string): string {
  * aspect names; arming patterns for those live where they're owned. */
 export type GateAspect = 'act' | 'drill' | 'work' | 'task'
 
+/** `bro` at a command position — the installed bin (`bro …`) or npx
+ *  against the package (`npx [--flags] [@broject/]bro[@ver] …`). The
+ *  negative lookahead keeps `npx bro-fu`/`npx brother` out. */
+const BRO_CMD = String.raw`(?:bro|npx(?:\s+--?[\w-]+(?:=\S+)?)*\s+(?:@broject\/)?bro(?:@[\w.:-]+)?(?![\w./-]))`
+
 export function classifyArmCommand(cmd: string): GateAspect | null {
   const c = unquoted(cmd)
   const at = '(^|[;&|\\n])\\s*'
-  const bro = '(?:bro|npx\\s+(?:-y\\s+)?@broject/bro(?:@[\\w.:-]+)?)'
+  const bro = BRO_CMD
   if (new RegExp(`${at}${bro}\\s+act\\b`).test(c)) {
     return 'act'
   }
@@ -297,7 +302,7 @@ export function classifyArmCommands(cmd: string): GateAspect[] {
     out.add(primary)
   }
   const c = unquoted(cmd)
-  const bro = '(?:bro|npx\\s+(?:-y\\s+)?@broject/bro(?:@[\\w.:-]+)?)'
+  const bro = BRO_CMD
   if (new RegExp(`(^|[;&|\\n])\\s*${bro}\\s+work\\s+enter\\b`).test(c)) {
     out.add('task')
   }
@@ -387,7 +392,7 @@ export function classifySkillMutation(
   const c = unquoted(cmd)
   // non-capturing position group — m[1] must stay the plugin name
   const at = String.raw`(?:^|[;&|\n])\s*`
-  const bro = String.raw`(?:bro|npx\s+(?:-y\s+)?@broject/bro(?:@[\w.:-]+)?)`
+  const bro = BRO_CMD
   // chained commands may carry several bro calls — the first mutation wins
   for (const m of c.matchAll(new RegExp(String.raw`${at}${bro}\s+([a-z]+)\b`, 'g'))) {
     // the command segment ends at the next separator — a later segment's
@@ -410,7 +415,7 @@ export function isSelfToolCommand(cmd: string): boolean {
   }
   return (
     /^\s*(bro|bd)(\s|$)/.test(cmd) ||
-    /^\s*npx\s+(-y\s+)?@broject\/bro(@[\w.:-]+)?(\s|$)/.test(cmd)
+    new RegExp(`^\\s*${BRO_CMD}(\\s|$)`).test(cmd)
   )
 }
 
