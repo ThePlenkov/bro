@@ -70,7 +70,7 @@ jobs:
           echo "url=$url" >>"$GITHUB_OUTPUT"
           echo "sha256=$sha" >>"$GITHUB_OUTPUT"
 
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         if: env.TAP_TOKEN != ''
         with:
           repository: ThePlenkov/homebrew-brew
