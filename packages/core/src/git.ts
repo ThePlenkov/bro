@@ -279,3 +279,22 @@ export function gitLogPathRecords(
   }
   return records
 }
+
+/** How far the checkout trails its recorded upstream — `@{u}` resolves
+ *  the branch's configured tracking ref, `rev-list --count` the drift.
+ *  Strictly LOCAL — the remote-tracking ref is only as fresh as the
+ *  last fetch, and surfacing exactly that staleness is the point (a
+ *  stale main fabricates phantom reverts — bro-6k3f4); fetching here
+ *  would turn a board/hook read into a network call. null when there
+ *  is no upstream, the count fails, or the checkout is current —
+ *  callers surface positive drift only. */
+export function gitUpstreamBehind(dir: string): { behind: number; upstream: string } | null {
+  const up = gitTry(['-C', dir, 'rev-parse', '--abbrev-ref', '--symbolic-full-name', '@{u}'])
+  const upstream = up.code === 0 ? up.out.trim() : ''
+  if (upstream === '') {
+    return null
+  }
+  const n = gitTry(['-C', dir, 'rev-list', '--count', 'HEAD..@{u}'])
+  const behind = n.code === 0 ? Number.parseInt(n.out.trim(), 10) : Number.NaN
+  return Number.isFinite(behind) && behind > 0 ? { behind, upstream } : null
+}
