@@ -6,6 +6,7 @@ import { agent, RequestError } from '@agentclientprotocol/sdk'
 import type {
   AgentApp,
   AuthMethod,
+  ContentBlock,
   PermissionOption,
   SessionConfigOption,
   SessionUpdate,
@@ -37,6 +38,9 @@ export interface FakeAcpAgent {
   app: AgentApp
   /** Prompt texts the agent received. */
   prompts: string[]
+  /** Raw content blocks per prompt — image-passthrough assertions
+   *  (bro-7izjx). */
+  blocks: ContentBlock[][]
   /** session/set_config_option calls the client made. */
   configSets: Array<{ configId: string; value: unknown }>
   /** session/new requests (cwd recorded). */
@@ -78,11 +82,15 @@ export function fakeAcpAgent(
      *  real gate for an agent whose advertised authMethods are not
      *  covered by stored credentials. */
     failNew?: 'auth'
+    /** advertise promptCapabilities.image — the conductor only sends
+     *  image blocks when the agent says it can consume them (bro-7izjx). */
+    imageCapable?: boolean
   } = {}
 ): FakeAcpAgent {
   const seen: FakeAcpAgent = {
     app: undefined as never,
     prompts: [],
+    blocks: [],
     configSets: [],
     sessions: [],
   }
@@ -91,6 +99,9 @@ export function fakeAcpAgent(
       protocolVersion: opts.protocolVersion ?? ctx.params.protocolVersion,
       authMethods: opts.authMethods ?? [],
       agentInfo: { name: 'fake-acp', version: '0' },
+      agentCapabilities: {
+        promptCapabilities: { image: opts.imageCapable === true },
+      },
     }))
     .onRequest('session/new', (ctx) => {
       if (opts.failNew === 'auth') {
@@ -117,6 +128,7 @@ export function fakeAcpAgent(
       }
     })
     .onRequest('session/prompt', async (ctx) => {
+      seen.blocks.push(ctx.params.prompt)
       seen.prompts.push(
         ctx.params.prompt.map((b) => (b.type === 'text' ? b.text : '')).join('')
       )

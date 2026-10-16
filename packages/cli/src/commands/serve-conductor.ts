@@ -26,7 +26,7 @@ import type { IncomingMessage, ServerResponse } from 'node:http'
 import { loadConfig } from '@broject/core'
 import type { ProviderEntry } from '@broject/core'
 import { acpOpen, acpPooledTurn, otelEvent, otelParent, otelSpan } from '@broject/providers'
-import type { AcpPeer, OtelCtx, ProviderWireOpts } from '@broject/providers'
+import type { AcpContentBlock, AcpPeer, OtelCtx, ProviderWireOpts } from '@broject/providers'
 import { peerAttrs } from './peer.ts'
 import { catalogModels } from './providers.ts'
 
@@ -113,6 +113,11 @@ interface ToolResultBlock {
 }
 type InBlock = TextBlock | ToolUseBlock | ToolResultBlock | { type: string }
 
+interface ImageBlock {
+  type: 'image'
+  source?: { type?: string; media_type?: string; data?: string; url?: string }
+}
+
 interface MessagesRequest {
   model?: string
   system?: string | { text?: string }[]
@@ -177,6 +182,68 @@ function serializeRequest(body: MessagesRequest): string {
     parts.push(`<turn role="${role}">${text}</turn>`)
   }
   return parts.join('\n\n')
+}
+
+/** An inbound image block → ACP image content. Only base64 sources
+ *  carry the payload ACP needs (`data` + `mimeType`) — url/file
+ *  sources degrade to the `[image]` marker rather than a block the
+ *  agent can't read. */
+function acpImage(b: InBlock): AcpContentBlock | undefined {
+  const s = (b as ImageBlock).source
+  if (s?.type === 'base64' && s.data !== undefined && s.media_type !== undefined) {
+    return { type: 'image', data: s.data, mimeType: s.media_type }
+  }
+  return undefined
+}
+
+/** The request as ACP content blocks — same transcript as
+ *  serializeRequest, but base64 image blocks pass through as real
+ *  image content when the agent advertised promptCapabilities.image;
+ *  without the capability they degrade to the `[image]` marker exactly
+ *  as before (bro-7izjx). */
+function serializeBlocks(body: MessagesRequest, imageOk: boolean): AcpContentBlock[] {
+  const hasImage = (body.messages ?? []).some(
+    (m) => Array.isArray(m.content) && m.content.some((b) => b.type === 'image')
+  )
+  if (!imageOk || !hasImage) {
+    return [{ type: 'text', text: serializeRequest(body) }]
+  }
+  const blocks: AcpContentBlock[] = []
+  let buf = ''
+  const flush = (): void => {
+    if (buf !== '') {
+      blocks.push({ type: 'text', text: buf })
+      buf = ''
+    }
+  }
+  const system =
+    typeof body.system === 'string'
+      ? body.system
+      : (body.system ?? []).map((s) => s.text ?? '').join('')
+  if (system !== '') buf += `<system>\n${system}\n</system>`
+  if (body.tools !== undefined && body.tools.length > 0) {
+    buf += `${buf === '' ? '' : '\n\n'}${toolContract(body.tools)}`
+  }
+  for (const m of body.messages ?? []) {
+    const role = m.role === 'assistant' ? 'assistant' : 'user'
+    if (typeof m.content === 'string') {
+      buf += `${buf === '' ? '' : '\n\n'}<turn role="${role}">${m.content}</turn>`
+      continue
+    }
+    buf += `${buf === '' ? '' : '\n\n'}<turn role="${role}">`
+    for (const b of m.content ?? []) {
+      const img = b.type === 'image' ? acpImage(b) : undefined
+      if (img !== undefined) {
+        flush()
+        blocks.push(img)
+      } else {
+        buf += blockText(b)
+      }
+    }
+    buf += '</turn>'
+  }
+  flush()
+  return blocks
 }
 
 const TOOL_CALL = /<tool_call>\s*(\{[\s\S]*?\})\s*<\/tool_call>/g
@@ -338,15 +405,19 @@ async function messages(
     apiError(res, 400, 'invalid_request_error', 'malformed JSON body')
     return
   }
-  const prompt = serializeRequest(body)
-  const inputTokens = estTokens(prompt)
   const t0 = Date.now()
   // a dropped client cancels the acp turn — no orphan devin session
   const ac = new AbortController()
   res.once('close', () => ac.abort())
   let reply: Awaited<ReturnType<typeof acpPooledTurn>>
+  let inputTokens = 0
   try {
     const peer = await link(parent)
+    // image blocks ride the wire only when the agent advertised the
+    // prompt capability — serialize after link() so the negotiated
+    // caps are known (bro-7izjx)
+    const prompt = serializeBlocks(body, peer.caps.image)
+    inputTokens = estTokens(prompt.map((b) => (b.type === 'text' ? b.text : '')).join(''))
     // `provider/model` ids are a real pin — resolved against the agent's
     // own catalog; bare foreign ids (claude-sonnet-*) are display labels
     reply = await acpPooledTurn(peer, cfg.entry, opts, prompt, Date.now() + cfg.timeoutMs, {

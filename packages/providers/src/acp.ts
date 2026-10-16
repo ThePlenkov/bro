@@ -25,6 +25,7 @@ import { client, ndJsonStream, PROTOCOL_VERSION, RequestError } from '@agentclie
 import type {
   ClientContext,
   ClientRequestHandler,
+  ContentBlock,
   PromptResponse,
   RequestPermissionRequest,
   RequestPermissionResponse,
@@ -305,6 +306,9 @@ async function acpInit(ctx: ClientContext, by: string, deadline: number) {
   // that actually names auth is the operator's problem; keep the
   // advertised ids for the remediation line.
   const authMethods = init.authMethods ?? []
+  // prompt capabilities gate rich content — image blocks only go on
+  // the wire when the agent says it can consume them (bro-7izjx)
+  const caps = { image: init.agentCapabilities?.promptCapabilities?.image === true }
   const authHint = (): string =>
     authMethods.length > 0 ? ` (${authMethods.map((m) => m.id).join(', ')})` : ''
   const asAuthError = (err: unknown): never => {
@@ -323,7 +327,7 @@ async function acpInit(ctx: ClientContext, by: string, deadline: number) {
         )
       : err
   }
-  return { asAuthError, req }
+  return { asAuthError, req, caps }
 }
 
 /** session/new on an ALREADY-initialized connection — the pooled path. */
@@ -346,9 +350,9 @@ async function acpSession(
   by: string,
   deadline: number
 ) {
-  const { asAuthError, req } = await acpInit(ctx, by, deadline)
+  const { asAuthError, req, caps } = await acpInit(ctx, by, deadline)
   const session = await acpSessionOpen(ctx, opts, asAuthError, req)
-  return { session, asAuthError, req }
+  return { session, asAuthError, req, caps }
 }
 
 /** initialize → session/new → model → prompt → collect chunks — the
@@ -623,7 +627,7 @@ function tracedUpdates(
 /** The prompt→updates loop shared by one-shot and pooled turns. */
 async function pumpTurn(
   session: Awaited<ReturnType<typeof acpSession>>['session'],
-  promptText: string,
+  prompt: string | ContentBlock[],
   onUpdate: (update: SessionUpdate) => void,
   asAuthError: (err: unknown) => never,
   req: () => SendRequestOptions,
@@ -638,7 +642,7 @@ async function pumpTurn(
   // own rejection lands on the queue as a reject — swallow it on the
   // direct promise so it can't fire unhandled; the pump reads and
   // classifies the same failure through nextUpdate.
-  void session.prompt(promptText, req()).catch(() => {})
+  void session.prompt(prompt, req()).catch(() => {})
   // a gone caller cancels the turn: the caller's dispose ends the
   // session — no orphan work on the agent
   const aborted = new Promise<never>((_, reject) => {
@@ -684,6 +688,9 @@ export interface AcpPeer {
   /** Per-request cancel options against any deadline (init one is default). */
   req: (deadline?: number) => SendRequestOptions
   asAuthError: (err: unknown) => never
+  /** Prompt capabilities negotiated at initialize — `image` gates
+   *  whether image content blocks may go on the wire (bro-7izjx). */
+  caps: { image: boolean }
 }
 
 export async function acpOpen(
@@ -735,11 +742,11 @@ export async function acpOpen(
     child?.kill('SIGKILL')
   }
   try {
-    const { asAuthError, req } = await withDeadline(deadline, () =>
+    const { asAuthError, req, caps } = await withDeadline(deadline, () =>
       acpInit(conn.agent, by, deadline)
     )
     span.end({ 'acp.pid': child?.pid ?? 0 })
-    return { ctx: conn.agent, signal: conn.signal, close, tail, req, asAuthError }
+    return { ctx: conn.agent, signal: conn.signal, close, tail, req, asAuthError, caps }
   } catch (err) {
     close()
     // spawn's 'error' event is async — a binary that can't exec is only
@@ -865,7 +872,7 @@ export async function acpPooledTurn(
   peer: AcpPeer,
   entry: AcpEntry,
   opts: ProviderWireOpts,
-  promptText: string,
+  prompt: string | ContentBlock[],
   deadline: number,
   turn: PooledTurnOpts = {}
 ): Promise<{ stopReason: StopReason; text: string; model: string }> {
@@ -903,7 +910,7 @@ export async function acpPooledTurn(
       )
       const r = await pumpTurn(
         session,
-        promptText,
+        prompt,
         turn.onUpdate ?? (() => {}),
         peer.asAuthError,
         req,

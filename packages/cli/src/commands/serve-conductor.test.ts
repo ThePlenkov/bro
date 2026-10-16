@@ -159,6 +159,72 @@ describe('serve /v1/* — the conductor plane', () => {
     }
   })
 
+  // bro-7izjx — base64 image blocks ride the wire as real ACP image
+  // content when the agent advertised promptCapabilities.image;
+  // without the capability they degrade to the `[image]` marker.
+  const IMAGE_BODY = {
+    model: 'claude-sonnet-4-5',
+    messages: [
+      {
+        role: 'user',
+        content: [
+          { type: 'text', text: 'what is this' },
+          {
+            type: 'image',
+            source: { type: 'base64', media_type: 'image/png', data: 'aGVsbG8=' },
+          },
+        ],
+      },
+    ],
+    stream: true,
+  }
+
+  test('an image-capable agent receives the image block on the wire', async () => {
+    const fake = fakeAcpAgent({
+      replyText: 'a png',
+      configOptions: [MODEL_OPTION],
+      imageCapable: true,
+    })
+    const { url, close } = await listen(
+      deps({ provider: conductorProxy(CFG, { acp: { peer: fake.app } }) })
+    )
+    try {
+      const r = await fetch(`${url}/v1/messages`, {
+        method: 'POST',
+        headers: { ...auth, 'content-type': 'application/json' },
+        body: JSON.stringify(IMAGE_BODY),
+      })
+      assert.equal(r.status, 200)
+      await r.text()
+      const img = fake.blocks[0]?.find((b) => b.type === 'image')
+      assert.deepEqual(img, { type: 'image', data: 'aGVsbG8=', mimeType: 'image/png' })
+      // the turn wrapper still frames the text around the image
+      assert.match(fake.prompts[0] ?? '', /<turn role="user">what is this/)
+    } finally {
+      await close()
+    }
+  })
+
+  test('an agent without the image capability gets the [image] marker instead', async () => {
+    const fake = fakeAcpAgent({ replyText: 'ok', configOptions: [MODEL_OPTION] })
+    const { url, close } = await listen(
+      deps({ provider: conductorProxy(CFG, { acp: { peer: fake.app } }) })
+    )
+    try {
+      const r = await fetch(`${url}/v1/messages`, {
+        method: 'POST',
+        headers: { ...auth, 'content-type': 'application/json' },
+        body: JSON.stringify(IMAGE_BODY),
+      })
+      assert.equal(r.status, 200)
+      await r.text()
+      assert.equal(fake.blocks[0]?.every((b) => b.type === 'text'), true)
+      assert.match(fake.prompts[0] ?? '', /\[image\]/)
+    } finally {
+      await close()
+    }
+  })
+
   test('a <tool_call> reply lands as tool_use + stop_reason tool_use', async () => {
     const fake = fakeAcpAgent({
       replyText: 'checking <tool_call>{"name":"ls","input":{"d":"/tmp"}}</tool_call>',
