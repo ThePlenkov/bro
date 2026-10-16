@@ -51,10 +51,14 @@ export interface ProviderClient {
 
 /** The acp kind's session seam — `peer` replaces the spawned `command`
  *  with an in-process agent (the SDK's AgentApp; tests wire a scripted
- *  one), `cwd` is the session's working directory. */
+ *  one), `cwd` is the session's working directory. `onUpdate` (spec
+ *  bro-d6mcd) receives every session/update as it arrives — chunk,
+ *  tool_call, plan — while the call still resolves the whole turn;
+ *  absent sink = the original whole-turn contract. */
 export interface AcpSeam {
   peer?: import('@agentclientprotocol/sdk').AgentApp
   cwd?: string
+  onUpdate?: (update: import('@agentclientprotocol/sdk').SessionUpdate) => void
 }
 
 /** Load an entry → its typed client. `name` is the registry key —
