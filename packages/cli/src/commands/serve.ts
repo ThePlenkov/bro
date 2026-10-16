@@ -121,7 +121,7 @@ import {
   writeFileSync,
 } from 'node:fs'
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http'
-import { dirname, join } from 'node:path'
+import { basename, dirname, join } from 'node:path'
 import type { Readable } from 'node:stream'
 import {
   busPublish,
@@ -1053,16 +1053,15 @@ async function handleRequest(
       send(res, 403, { error: 'loopback host only' })
       return
     }
-    if (await routeProvider(req, res, url.pathname, deps, token, statePathHint)) {
-      return
-    }
-    if (await routeAgentLog(req, res, url, deps, token, statePathHint)) {
-      return
-    }
-    if (await routeAgentEvents(req, res, url, deps, token, statePathHint)) {
-      return
-    }
-    if (await routeEventsStream(req, res, url.pathname, deps.eventsBus?.())) {
+    // self-answering routes chain first — each returns true once it
+    // owns the response (guarded refusal, SSE upgrade, or a 404 it
+    // alone can phrase); anything else falls through to the envelope
+    const routed =
+      (await routeProvider(req, res, url.pathname, deps, token, statePathHint)) ||
+      (await routeAgentLog(req, res, url, deps, token, statePathHint)) ||
+      (await routeAgentEvents(req, res, url, deps, token, statePathHint)) ||
+      (await routeEventsStream(req, res, url.pathname, deps.eventsBus?.()))
+    if (routed) {
       return
     }
     const wantsBody =
@@ -1316,7 +1315,12 @@ async function routeAgentEvents(
     send(res, log.status, { error: log.error })
     return true
   }
-  const archive = log.path.replace(/\.log$/, '.events.jsonl')
+  // derive the sibling the writer actually names — bro/agents/
+  // <agentId>.events.jsonl (basename pins the id to one segment so a
+  // weird registry id can't walk the path). A blind .log→.events.jsonl
+  // replace would silently check the log itself whenever the log's
+  // name drifts (rotation, a non-standard name).
+  const archive = join(dirname(log.path), `${basename(hit.agent.id)}.events.jsonl`)
   if (!existsSync(archive)) {
     send(res, 404, {
       error: `no events archive for agent ${hit.agent.id} — the worker predates the event plane or its turn never wrote`,

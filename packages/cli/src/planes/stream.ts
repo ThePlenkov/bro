@@ -177,8 +177,9 @@ export async function openEventsSse(
   }
   if (clientGone) {
     // the client left while subscribe was in flight — nothing reads
-    // this subscription; release it instead of streaming into a hole
-    sub.close()
+    // this subscription; drop() (not bare sub.close()) also clears the
+    // keepalive the 'close' handler armed before sub existed
+    drop()
     return
   }
 }

@@ -714,7 +714,14 @@ async function activityPlane(dir: string): Promise<WatchActivity | undefined> {
   if (sock === null) {
     return undefined
   }
-  const res = await busProbe(sock, { filter: { topics: ['agent'] }, limit: 128 })
+  // a snapshot read, not a tail — the replay arrives as one contiguous
+  // prefix, so a short quiet beat is enough; holding the whole 250ms
+  // window would tax every collectSnapshot with dead time
+  const res = await busProbe(sock, {
+    filter: { topics: ['agent'] },
+    limit: 128,
+    settleMs: 50,
+  })
   const latest: Record<string, string> = {}
   for (const e of res.events) {
     if (typeof e.key === 'string') {

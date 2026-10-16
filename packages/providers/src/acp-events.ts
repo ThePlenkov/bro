@@ -22,7 +22,7 @@
  * queue and drain() is capped, file writes are swallowed whole — an
  * observer that throws is a dead observer, not a dead agent.
  */
-import { appendFileSync, mkdirSync } from 'node:fs'
+import { appendFileSync, chmodSync, mkdirSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import {
   busPublish,
@@ -139,13 +139,27 @@ export function agentTurnPlane(opts: AgentTurnPlaneOpts): AgentTurnPlane {
     queue = queue.then(() => busPublish(socket, event))
   }
 
+  let dirReady = false
   const record = (row: Record<string, unknown>): void => {
     if (file === undefined) {
       return
     }
     try {
-      mkdirSync(dirname(file), { recursive: true })
-      appendFileSync(file, `${JSON.stringify(row)}\n`)
+      // mkdir + chmod once — the dir is stable for the plane's life, so
+      // per-row syscalls are dead weight. The archive carries raw ACP
+      // prompts and replies: pinned owner-only (0600) like the bus
+      // socket and state files — a 022 umask would leave it 0644,
+      // readable by every local user without the token-gated route
+      if (!dirReady) {
+        mkdirSync(dirname(file), { recursive: true })
+      }
+      appendFileSync(file, `${JSON.stringify(row)}\n`, { mode: 0o600 })
+      if (!dirReady) {
+        // appendFileSync mode only pins a NEW file — a pre-existing
+        // archive keeps its old mode without this one-time chmod
+        chmodSync(file, 0o600)
+        dirReady = true
+      }
     } catch {
       /* the archive is telemetry — a disk failure never fails a turn */
     }
@@ -167,6 +181,77 @@ export function agentTurnPlane(opts: AgentTurnPlaneOpts): AgentTurnPlane {
     }
   }
 
+  /** A pending counter must not pin stale numbers through a long quiet
+   *  stretch — it rides the next non-usage update once the throttle
+   *  window has elapsed (the stop() flush stays the last resort). */
+  const flushUsageIfDue = (): void => {
+    if (pendingUsage !== undefined && Date.now() - lastUsageAt >= AGENT_USAGE_THROTTLE_MS) {
+      emitUsage()
+    }
+  }
+
+  const onToolCall = (u: Toolish): void => {
+    const terminal = u.status !== undefined && u.status !== null && TERMINAL_STATUS.has(u.status)
+    const fresh = !seenTools.has(u.toolCallId)
+    if (fresh) seenTools.add(u.toolCallId)
+    // a mid-flight repeat of an already-open call is churn — only
+    // lifecycle edges (open, finish) go on the wire
+    if (!fresh && !terminal) return
+    if (fresh && terminal) {
+      // a call first seen already-terminal still needs its open edge —
+      // consumers pair open→finish and a bare finish orphans the row
+      const openEdge = toolPayload(u, 'open')
+      delete openEdge['status']
+      emit('tool_call', openEdge)
+    }
+    emit('tool_call', toolPayload(u, terminal ? 'finish' : 'open'))
+  }
+
+  const onToolCallUpdate = (u: Toolish): void => {
+    const terminal = u.status != null && TERMINAL_STATUS.has(u.status)
+    if (!terminal) return
+    seenTools.add(u.toolCallId)
+    emit('tool_call', toolPayload(u, 'finish'))
+  }
+
+  const onSubagent = (u: {
+    sessionId: string
+    title?: string | null
+    description?: string | null
+  }): void => {
+    const fresh = !seenSubs.has(u.sessionId)
+    if (fresh) seenSubs.add(u.sessionId)
+    const p: Record<string, unknown> = {
+      phase: fresh ? 'open' : 'update',
+      sessionId: u.sessionId,
+    }
+    if (typeof u.title === 'string' && u.title !== '') p['title'] = u.title
+    if (typeof u.description === 'string' && u.description !== '') {
+      p['description'] = u.description
+    }
+    emit('subagent', p)
+  }
+
+  const onUsage = (u: {
+    used?: unknown
+    size?: unknown
+    cost?: { amount?: unknown } | null
+  }): void => {
+    const p: Record<string, unknown> = { used: u.used, size: u.size }
+    if (u.cost != null && typeof u.cost.amount === 'number') {
+      p['cost'] = u.cost
+    }
+    if (Date.now() - lastUsageAt >= AGENT_USAGE_THROTTLE_MS) {
+      // a window-passed tick emits directly — any older pending one is
+      // stale by definition (this counter is newer)
+      pendingUsage = undefined
+      emit('usage', p)
+      lastUsageAt = Date.now()
+    } else {
+      pendingUsage = p
+    }
+  }
+
   return {
     start() {
       record({ ...stamp(), kind: 'turn', phase: 'start' })
@@ -177,51 +262,20 @@ export function agentTurnPlane(opts: AgentTurnPlaneOpts): AgentTurnPlane {
       // the durable row is the full-fidelity record — every update,
       // chunks included, written BEFORE the bus sees the filtered view
       record({ ...stamp(), kind: 'update', update: u })
+      if (u.sessionUpdate !== 'usage_update') flushUsageIfDue()
       switch (u.sessionUpdate) {
-        case 'tool_call': {
-          const terminal = u.status !== undefined && TERMINAL_STATUS.has(u.status)
-          const fresh = !seenTools.has(u.toolCallId)
-          if (fresh) seenTools.add(u.toolCallId)
-          // a mid-flight repeat of an already-open call is churn — only
-          // lifecycle edges (open, finish) go on the wire
-          if (!fresh && !terminal) return
-          emit('tool_call', toolPayload(u, terminal ? 'finish' : 'open'))
+        case 'tool_call':
+          onToolCall(u)
           return
-        }
-        case 'tool_call_update': {
-          const terminal = u.status != null && TERMINAL_STATUS.has(u.status)
-          if (!terminal) return
-          seenTools.add(u.toolCallId)
-          emit('tool_call', toolPayload(u, 'finish'))
+        case 'tool_call_update':
+          onToolCallUpdate(u)
           return
-        }
-        case 'subagent_update': {
-          const fresh = !seenSubs.has(u.sessionId)
-          if (fresh) seenSubs.add(u.sessionId)
-          const p: Record<string, unknown> = {
-            phase: fresh ? 'open' : 'update',
-            sessionId: u.sessionId,
-          }
-          if (typeof u.title === 'string' && u.title !== '') p['title'] = u.title
-          if (typeof u.description === 'string' && u.description !== '') {
-            p['description'] = u.description
-          }
-          emit('subagent', p)
+        case 'subagent_update':
+          onSubagent(u)
           return
-        }
-        case 'usage_update': {
-          const p: Record<string, unknown> = { used: u.used, size: u.size }
-          if (u.cost != null && typeof u.cost.amount === 'number') {
-            p['cost'] = u.cost
-          }
-          if (Date.now() - lastUsageAt >= AGENT_USAGE_THROTTLE_MS) {
-            emit('usage', p)
-            lastUsageAt = Date.now()
-          } else {
-            pendingUsage = p
-          }
+        case 'usage_update':
+          onUsage(u)
           return
-        }
         default:
           // text deltas and the rest stay off the bus — the archive
           // row above already holds them for the durable record

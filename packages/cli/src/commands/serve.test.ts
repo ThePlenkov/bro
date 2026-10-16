@@ -808,10 +808,12 @@ describe('serve handler over a real socket', () => {
     const TOKEN = 'test-session-token'
     const auth = { authorization: `Bearer ${TOKEN}` }
     const dir = mkdtempSync(join(tmpdir(), 'bro-serve-events-'))
-    const logPath = join(dir, 'agent.log')
+    // production naming: the archive is the agent id's sibling —
+    // bro/agents/<id>.events.jsonl next to <id>.log
+    const logPath = join(dir, `${fakeAgent.id}.log`)
     writeFileSync(logPath, 'rendered log\n')
     writeFileSync(
-      logPath.replace(/\.log$/, '.events.jsonl'),
+      join(dir, `${fakeAgent.id}.events.jsonl`),
       `${JSON.stringify({ ts: 't1', kind: 'turn', phase: 'start' })}\n` +
         `${JSON.stringify({ ts: 't2', kind: 'update', update: { sessionUpdate: 'tool_call' } })}\n`
     )

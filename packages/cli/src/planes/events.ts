@@ -24,7 +24,7 @@ import {
   type PlaneCtx,
   type PlaneDescriptor,
 } from '@broject/core'
-import { argNumber, argString, bounded, dispatchRead } from './helpers.ts'
+import { argLimit, argNumber, argString, bounded, dispatchRead } from './helpers.ts'
 
 /** The topics that ride the stream — the channel registry the
  *  AsyncAPI doc in stream.ts projects. Generated, not authored: a
@@ -38,52 +38,82 @@ export const EVENTS_TOPICS = [
   { topic: 'agent', summary: 'in-turn activity — turn/tool_call/subagent/usage at the acp pump' },
 ] as const
 
+type Payload = Record<string, unknown>
+
+/** Defensive payload pulls — a peer publishing a newer envelope shape
+ *  degrades to its discriminator, never throws. */
+const pOf = (e: { payload?: unknown }): Payload =>
+  (typeof e.payload === 'object' && e.payload !== null ? e.payload : {}) as Payload
+
+const sOf = (p: Payload, k: string): string | undefined => {
+  const v = p[k]
+  return typeof v === 'string' && v !== '' ? v : undefined
+}
+
+const nOf = (p: Payload, k: string): number | undefined => {
+  const v = p[k]
+  return typeof v === 'number' && Number.isFinite(v) ? v : undefined
+}
+
+function turnLine(who: string, p: Payload): string {
+  if (sOf(p, 'phase') === 'start') {
+    return `${who}: turn started`
+  }
+  const err = sOf(p, 'error')
+  if (err !== undefined) {
+    return `${who}: turn failed — ${err}`
+  }
+  const reason = sOf(p, 'stopReason')
+  return `${who}: turn stopped${reason !== undefined ? ` (${reason})` : ''}`
+}
+
+function toolCallLine(who: string, p: Payload): string {
+  const what = sOf(p, 'title') ?? sOf(p, 'name') ?? sOf(p, 'toolCallId') ?? 'tool'
+  let phase = 'finished'
+  if (sOf(p, 'phase') === 'open') {
+    phase = 'started'
+  } else {
+    const status = sOf(p, 'status')
+    if (status !== undefined) {
+      phase = `finished (${status})`
+    }
+  }
+  const kind = sOf(p, 'kind')
+  return `${who}: ${what} ${phase}${kind !== undefined ? ` [${kind}]` : ''}`
+}
+
+function usageLine(who: string, p: Payload): string {
+  const cost = p['cost']
+  let costStr = ''
+  if (
+    typeof cost === 'object' &&
+    cost !== null &&
+    typeof (cost as { amount?: unknown }).amount === 'number'
+  ) {
+    costStr =
+      ` ${(cost as { currency?: string }).currency ?? ''}${(cost as { amount: number }).amount}`.trim()
+  }
+  return `${who}: context ${nOf(p, 'used') ?? '?'}/${nOf(p, 'size') ?? '?'}${costStr === '' ? '' : ` (${costStr})`}`
+}
+
 /** One human line for an 'agent'-topic envelope — the "agent last did
  *  X" cell in `bro watch` and the MCP activity read's `latest` map.
  *  Payload fields are read defensively: a peer publishing a newer
  *  shape degrades to its discriminator, never throws. */
 export function agentEventLine(e: { kind: string; key?: string; payload?: unknown }): string {
-  const p = (typeof e.payload === 'object' && e.payload !== null ? e.payload : {}) as Record<
-    string,
-    unknown
-  >
-  const s = (k: string): string | undefined => {
-    const v = p[k]
-    return typeof v === 'string' && v !== '' ? v : undefined
-  }
-  const n = (k: string): number | undefined => {
-    const v = p[k]
-    return typeof v === 'number' && Number.isFinite(v) ? v : undefined
-  }
+  const p = pOf(e)
   const who = e.key ?? 'agent'
   switch (e.kind) {
-    case 'turn': {
-      if (s('phase') === 'start') {
-        return `${who}: turn started`
-      }
-      const err = s('error')
-      const tail =
-        err !== undefined
-          ? ` failed — ${err}`
-          : ` stopped${s('stopReason') !== undefined ? ` (${s('stopReason')})` : ''}`
-      return `${who}: turn${tail}`
+    case 'turn':
+      return turnLine(who, p)
+    case 'tool_call':
+      return toolCallLine(who, p)
+    case 'subagent': {
+      const what = sOf(p, 'title') ?? sOf(p, 'sessionId') ?? '?'
+      return `${who}: subagent ${what} ${sOf(p, 'phase') ?? ''}`.trimEnd()
     }
-    case 'tool_call': {
-      const what = s('title') ?? s('name') ?? s('toolCallId') ?? 'tool'
-      const phase =
-        s('phase') === 'open' ? 'started' : `finished${s('status') !== undefined ? ` (${s('status')})` : ''}`
-      return `${who}: ${what} ${phase}${s('kind') !== undefined ? ` [${s('kind')}]` : ''}`
-    }
-    case 'subagent':
-      return `${who}: subagent ${s('title') ?? s('sessionId') ?? '?'} ${s('phase') ?? ''}`.trimEnd()
-    case 'usage': {
-      const cost = p['cost']
-      const costStr =
-        typeof cost === 'object' && cost !== null && typeof (cost as { amount?: unknown }).amount === 'number'
-          ? ` ${(cost as { currency?: string }).currency ?? ''}${(cost as { amount: number }).amount}`.trim()
-          : ''
-      return `${who}: context ${n('used') ?? '?'}/${n('size') ?? '?'}${costStr === '' ? '' : ` (${costStr})`}`
-    }
+    case 'usage':
+      return usageLine(who, p)
     default:
       return `${who}: ${e.kind}`
   }
@@ -166,7 +196,7 @@ export function eventsPlane(ctx: PlaneCtx): PlaneDescriptor {
   const dir = ctx.dir
   const socket = () => busSocketPath(dir)
   const tail = async (a?: Record<string, unknown>) => {
-    const limit = Math.min(argNumber(a, 'limit') ?? 64, 512)
+    const limit = argLimit(a, 'limit', 64, 512)
     const since = argNumber(a, 'since')
     const sock = socket()
     let gapped = false
@@ -201,7 +231,7 @@ export function eventsPlane(ctx: PlaneCtx): PlaneDescriptor {
    *  (cycle-time, fix-rounds, WIP curve) is built on. `since` is an
    *  ISO timestamp here (unlike tail's bus-seq cursor). */
   const lifecycle = (a?: Record<string, unknown>) => {
-    const limit = Math.min(argNumber(a, 'limit') ?? 256, 2_000)
+    const limit = argLimit(a, 'limit', 256, 2_000)
     const since = argString(a, 'since')
     const rows = lifecycleRows(dir, {
       limit: limit + 1,
@@ -225,7 +255,7 @@ export function eventsPlane(ctx: PlaneCtx): PlaneDescriptor {
    *  `acp:<sessionId>` fallback unbadged turns publish under. `latest`
    *  folds each subject's newest row into its one-line "last did X". */
   const activity = async (a?: Record<string, unknown>) => {
-    const limit = Math.min(argNumber(a, 'limit') ?? 64, 512)
+    const limit = argLimit(a, 'limit', 64, 512)
     const agent = argString(a, 'agent')
     const sock = socket()
     if (sock === null) {
@@ -234,6 +264,9 @@ export function eventsPlane(ctx: PlaneCtx): PlaneDescriptor {
     const res = await busProbe(sock, {
       limit,
       windowMs: 2_000,
+      // a snapshot read — the replay prefix is contiguous, so socket
+      // quiet after the last frame is enough; no full-window wait
+      settleMs: 100,
       filter: {
         topics: ['agent'],
         ...(agent !== undefined ? { keys: [agent] } : {}),
@@ -310,7 +343,7 @@ export function eventsPlane(ctx: PlaneCtx): PlaneDescriptor {
       return { read: sock !== null || mail || life, stream, publish: false }
     },
     list: async (f) => {
-      const limit = Math.min(typeof f?.limit === 'number' ? f.limit : 64, 512)
+      const limit = argLimit(f, 'limit', 64, 512)
       const { events } = await tail({ limit })
       return events
     },

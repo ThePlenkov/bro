@@ -930,9 +930,19 @@ export async function busProbe(
      *  asking "what did agent X do" must not spend its window on the
      *  fleet's whole ring. Empty/absent means everything. */
     filter?: EventFilter
+    /** Settle-based early exit: the wire carries no end-of-replay
+     *  marker, but the broker writes the replay as one contiguous
+     *  prefix, so `settleMs` of socket quiet after the last frame reads
+     *  as "caught up". Without it the probe holds the whole `windowMs`
+     *  even on an idle broker — dead time every snapshot read pays. */
+    settleMs?: number
   } = {}
 ): Promise<BusProbeResult> {
   const windowMs = opts.windowMs ?? BUS_PROBE_WINDOW_MS
+  // a bound is a positive integer — 0/negative would read as "no bound"
+  // at the broker's parseReplayLimit and invert slice(-n) into all rows
+  const limit =
+    opts.limit === undefined ? BUS_PROBE_LIMIT : Math.max(1, Math.floor(opts.limit))
   // One budget, spent once. The connect and the listen window are two
   // waits, and giving each the full window would let a probe take twice
   // the budget it advertises — on the hook path that ceiling is the
@@ -942,14 +952,21 @@ export async function busProbe(
   const events: EventEnvelope[] = []
   let gapped = false
   let sub: BusSubscription | undefined
+  // frames rearm the settle timer — assigned once the listen phase is
+  // armed below (frames can beat the subscribe resolution)
+  let noteFrame: () => void = () => {}
   try {
     sub = await busSubscribe(
       socketPath,
       opts.filter ?? {},
       {
-        onEvent: (e) => events.push(e),
+        onEvent: (e) => {
+          events.push(e)
+          noteFrame()
+        },
         onGap: () => {
           gapped = true
+          noteFrame()
         },
       },
       // Probe asks "what happened while I was away", so it defaults to
@@ -959,7 +976,7 @@ export async function busProbe(
       // through the socket inside the probe window.
       {
         since: opts.since ?? 0,
-        ...(opts.since === undefined ? { limit: opts.limit ?? BUS_PROBE_LIMIT } : {}),
+        ...(opts.since === undefined ? { limit } : {}),
         timeoutMs: Math.max(1, deadline - Date.now()),
       }
     )
@@ -967,15 +984,32 @@ export async function busProbe(
     return { events, gapped, reason: brokerDownReason(err) }
   }
   await new Promise<void>((resolve) => {
-    const timer = setTimeout(resolve, Math.max(0, deadline - Date.now()))
-    timer.unref?.()
+    const cap = setTimeout(() => {
+      clearTimeout(idle)
+      resolve()
+    }, Math.max(0, deadline - Date.now()))
+    cap.unref?.()
+    const settle = opts.settleMs
+    let idle: NodeJS.Timeout | undefined
+    const arm = (): void => {
+      if (settle === undefined) {
+        return
+      }
+      clearTimeout(idle)
+      idle = setTimeout(() => {
+        clearTimeout(cap)
+        resolve()
+      }, settle)
+      idle.unref?.()
+    }
+    noteFrame = arm
+    arm()
   })
   sub.close()
   // With no cursor the probe catches up from the start of the ring, and
   // an unbounded ring would hand a hook run thousands of lines. Keep the
   // newest slice and say so: `gapped` already means "you are not seeing
   // everything, re-derive", which is exactly what truncation is.
-  const limit = opts.limit ?? BUS_PROBE_LIMIT
   if (opts.since === undefined && events.length > limit) {
     return { events: events.slice(-limit), gapped: true }
   }

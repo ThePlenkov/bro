@@ -1,6 +1,6 @@
 import { after, describe, test } from 'node:test'
 import assert from 'node:assert/strict'
-import { existsSync, mkdtempSync, readFileSync } from 'node:fs'
+import { existsSync, mkdtempSync, readdirSync, readFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import {
@@ -171,12 +171,27 @@ describe('agentTurnPlane', () => {
         toolCallId: 'tc-other',
         status: 'failed',
       } as SessionUpdate)
+      // a tool_call first seen already-terminal emits its open edge
+      // before the finish — consumers pair the two
+      plane.update({
+        sessionUpdate: 'tool_call',
+        toolCallId: 'tc-late',
+        title: 'bash pwd',
+        status: 'completed',
+      } as SessionUpdate)
       plane.stop('end_turn')
       await plane.drain()
       const events = await probeAgent(dir)
       assert.deepEqual(
         events.map((e) => [e.kind, (e.payload as Record<string, unknown>).phase, (e.payload as Record<string, unknown>).toolCallId].join('/')),
-        ['turn/start/', 'tool_call/open/tc-1', 'tool_call/finish/tc-other', 'turn/stop/']
+        [
+          'turn/start/',
+          'tool_call/open/tc-1',
+          'tool_call/finish/tc-other',
+          'tool_call/open/tc-late',
+          'tool_call/finish/tc-late',
+          'turn/stop/',
+        ]
       )
     } finally {
       await broker.close()
@@ -207,6 +222,8 @@ describe('agentTurnPlane', () => {
     plane.update(toolOpen)
     plane.stop('end_turn')
     await plane.drain()
+    // no bus socket and no common dir — nothing may have been written
+    assert.deepEqual(readdirSync(dir), [])
   })
 
   test('an unsafe BRO_AGENT_ID badge degrades to the session key, never a path escape', async () => {

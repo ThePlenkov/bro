@@ -45,6 +45,20 @@ export function argNumber(args: Record<string, unknown> | undefined, key: string
   return undefined
 }
 
+/** `limit` read-arg — a bound is a positive integer. The integer
+ *  schema admits `0` and negatives, but downstream `slice(-n)` and the
+ *  broker's replay bound both read non-positive as "no bound" — an
+ *  inversion that would uncap the read. Clamps to [1, cap]. */
+export function argLimit(
+  args: Record<string, unknown> | undefined,
+  key: string,
+  def: number,
+  cap: number
+): number {
+  const n = argNumber(args, key)
+  return Math.min(Math.max(n === undefined ? def : Math.floor(n), 1), cap)
+}
+
 export function argString(
   args: Record<string, unknown> | undefined,
   key: string
