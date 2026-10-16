@@ -804,6 +804,92 @@ describe('serve handler over a real socket', () => {
     }
   })
 
+  test('GET /api/v1/agents/<ref>/events — token-gated NDJSON tail and key-filtered SSE follow', async () => {
+    const TOKEN = 'test-session-token'
+    const auth = { authorization: `Bearer ${TOKEN}` }
+    const dir = mkdtempSync(join(tmpdir(), 'bro-serve-events-'))
+    const logPath = join(dir, 'agent.log')
+    writeFileSync(logPath, 'rendered log\n')
+    writeFileSync(
+      logPath.replace(/\.log$/, '.events.jsonl'),
+      `${JSON.stringify({ ts: 't1', kind: 'turn', phase: 'start' })}\n` +
+        `${JSON.stringify({ ts: 't2', kind: 'update', update: { sessionUpdate: 'tool_call' } })}\n`
+    )
+    const logged: AgentInfo = { ...fakeAgent, log: logPath }
+    let seenFilter: unknown
+    const logDeps = deps({
+      find: async (ref) =>
+        ref === logged.id
+          ? { hit: { conn: fakeConn, agent: logged }, degraded: [] }
+          : { degraded: [] },
+      eventsBus: () => ({
+        socketPath: () => '/tmp/bus.sock',
+        subscribe: async (_s, f, h) => {
+          seenFilter = f
+          void h
+          return { close: () => {} }
+        },
+      }),
+    })
+    const server = createServer(
+      createServeHandler(logDeps, { dir: '/repo', startedAt: 't0' }, TOKEN)
+    )
+    await new Promise<void>((r) => server.listen(0, '127.0.0.1', r))
+    const port = (server.address() as AddressInfo).port
+    const base = `http://127.0.0.1:${port}`
+    try {
+      const path = `/api/v1/agents/${logged.id}/events`
+      // same credential boundary as the log route
+      assert.equal((await fetch(`${base}${path}`)).status, 401)
+
+      // plain GET tails the durable archive as NDJSON — ?lines= bounds
+      const tail = await fetch(`${base}${path}?lines=1`, { headers: auth })
+      assert.equal(tail.status, 200)
+      assert.match(tail.headers.get('content-type') ?? '', /x-ndjson/)
+      const rows = (await tail.text()).split('\n').filter((l) => l !== '')
+      assert.equal(rows.length, 1)
+      assert.equal((JSON.parse(rows[0]!) as { kind: string }).kind, 'update')
+
+      // ?follow streams SSE filtered broker-side to the agent's key —
+      // an AbortController teardown is the deterministic client close
+      const followCtl = new AbortController()
+      const follow = await fetch(`${base}${path}?follow`, {
+        headers: auth,
+        signal: followCtl.signal,
+      })
+      assert.equal(follow.status, 200)
+      assert.match(follow.headers.get('content-type') ?? '', /text\/event-stream/)
+      assert.deepEqual(seenFilter, { topics: ['agent'], keys: [logged.id] })
+      // the abort destroys the request socket — the server's own
+      // 'close' → drop() ends the response and releases the broker sub
+      followCtl.abort()
+
+      // an unknown agent 404s; a known agent without an archive 404s honestly
+      assert.equal((await fetch(`${base}/api/v1/agents/nobody/events`, { headers: auth })).status, 404)
+      const bare: AgentInfo = { ...fakeAgent, id: 'native-cc44', log: join(dir, 'bare.log') }
+      writeFileSync(bare.log!, 'x\n')
+      const bareDeps = deps({
+        find: async (ref) =>
+          ref === bare.id ? { hit: { conn: fakeConn, agent: bare }, degraded: [] } : { degraded: [] },
+      })
+      const server2 = createServer(
+        createServeHandler(bareDeps, { dir: '/repo', startedAt: 't0' }, TOKEN)
+      )
+      await new Promise<void>((r) => server2.listen(0, '127.0.0.1', r))
+      try {
+        const p2 = `http://127.0.0.1:${(server2.address() as AddressInfo).port}`
+        const miss = await fetch(`${p2}/api/v1/agents/${bare.id}/events`, { headers: auth })
+        assert.equal(miss.status, 404)
+        assert.match((await miss.json() as { error: string }).error, /no events archive/)
+      } finally {
+        await new Promise<void>((r) => server2.close(() => r()))
+      }
+    } finally {
+      await new Promise<void>((r) => server.close(() => r()))
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
   test('health, JSON envelope, 413 cap, and bad-JSON 400 all hold on the wire', async () => {
     const TOKEN = 'test-session-token'
     const auth = { authorization: `Bearer ${TOKEN}` }

@@ -35,7 +35,59 @@ export const EVENTS_TOPICS = [
   { topic: 'convoy', summary: 'molecule/step lifecycle — claims, completions' },
   { topic: 'drive', summary: 'drive supervision — fixer spawns, orphan merges' },
   { topic: 'mesh', summary: 'cross-repo request lifecycle — claims, dones' },
+  { topic: 'agent', summary: 'in-turn activity — turn/tool_call/subagent/usage at the acp pump' },
 ] as const
+
+/** One human line for an 'agent'-topic envelope — the "agent last did
+ *  X" cell in `bro watch` and the MCP activity read's `latest` map.
+ *  Payload fields are read defensively: a peer publishing a newer
+ *  shape degrades to its discriminator, never throws. */
+export function agentEventLine(e: { kind: string; key?: string; payload?: unknown }): string {
+  const p = (typeof e.payload === 'object' && e.payload !== null ? e.payload : {}) as Record<
+    string,
+    unknown
+  >
+  const s = (k: string): string | undefined => {
+    const v = p[k]
+    return typeof v === 'string' && v !== '' ? v : undefined
+  }
+  const n = (k: string): number | undefined => {
+    const v = p[k]
+    return typeof v === 'number' && Number.isFinite(v) ? v : undefined
+  }
+  const who = e.key ?? 'agent'
+  switch (e.kind) {
+    case 'turn': {
+      if (s('phase') === 'start') {
+        return `${who}: turn started`
+      }
+      const err = s('error')
+      const tail =
+        err !== undefined
+          ? ` failed — ${err}`
+          : ` stopped${s('stopReason') !== undefined ? ` (${s('stopReason')})` : ''}`
+      return `${who}: turn${tail}`
+    }
+    case 'tool_call': {
+      const what = s('title') ?? s('name') ?? s('toolCallId') ?? 'tool'
+      const phase =
+        s('phase') === 'open' ? 'started' : `finished${s('status') !== undefined ? ` (${s('status')})` : ''}`
+      return `${who}: ${what} ${phase}${s('kind') !== undefined ? ` [${s('kind')}]` : ''}`
+    }
+    case 'subagent':
+      return `${who}: subagent ${s('title') ?? s('sessionId') ?? '?'} ${s('phase') ?? ''}`.trimEnd()
+    case 'usage': {
+      const cost = p['cost']
+      const costStr =
+        typeof cost === 'object' && cost !== null && typeof (cost as { amount?: unknown }).amount === 'number'
+          ? ` ${(cost as { currency?: string }).currency ?? ''}${(cost as { amount: number }).amount}`.trim()
+          : ''
+      return `${who}: context ${n('used') ?? '?'}/${n('size') ?? '?'}${costStr === '' ? '' : ` (${costStr})`}`
+    }
+    default:
+      return `${who}: ${e.kind}`
+  }
+}
 
 const VERBS = ['publish']
 
@@ -165,9 +217,45 @@ export function eventsPlane(ctx: PlaneCtx): PlaneDescriptor {
       ...(truncated ? { reason: 'limit-truncated — page with since' } : {}),
     }
   }
+  /** 'agent' topic activity — the fleet's in-turn heartbeat read
+   *  (bro-0ppt0): MCP `bro_events_activity` is how an orchestrator sees
+   *  what its workers are doing between status polls. Broker-side
+   *  narrowing (`filter`) keeps the probe window for agent rows only.
+   *  `agent` pins one subject key — the worker's id or the
+   *  `acp:<sessionId>` fallback unbadged turns publish under. `latest`
+   *  folds each subject's newest row into its one-line "last did X". */
+  const activity = async (a?: Record<string, unknown>) => {
+    const limit = Math.min(argNumber(a, 'limit') ?? 64, 512)
+    const agent = argString(a, 'agent')
+    const sock = socket()
+    if (sock === null) {
+      return { events: [] as EventRow[], latest: {}, reason: 'no broker socket' }
+    }
+    const res = await busProbe(sock, {
+      limit,
+      windowMs: 2_000,
+      filter: {
+        topics: ['agent'],
+        ...(agent !== undefined ? { keys: [agent] } : {}),
+      },
+    })
+    const latest: Record<string, string> = {}
+    for (const e of res.events) {
+      if (typeof e.key === 'string') {
+        latest[e.key] = agentEventLine(e)
+      }
+    }
+    return {
+      events: res.events.map((e) => busRow(e as BusRecord)),
+      latest,
+      gapped: res.gapped,
+      ...(res.reason === undefined ? {} : { reason: res.reason }),
+    }
+  }
   const reads: Record<string, (a?: Record<string, unknown>) => unknown> = {
     tail,
     lifecycle,
+    activity,
   }
   return {
     name: 'events',
@@ -190,6 +278,17 @@ export function eventsPlane(ctx: PlaneCtx): PlaneDescriptor {
           kind: { type: 'string', description: 'transition kind filter' },
           bead: { type: 'string', description: 'bead id filter' },
           pr: { type: 'integer', description: 'PR number filter' },
+        },
+      },
+      activity: {
+        type: 'object',
+        properties: {
+          limit: { type: 'integer', description: 'max rows (default 64, cap 512)' },
+          agent: {
+            type: 'string',
+            description:
+              "subject key filter — the worker's BRO_AGENT_ID or an 'acp:<sessionId>' fallback key",
+          },
         },
       },
     },

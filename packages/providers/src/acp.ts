@@ -23,6 +23,7 @@ import { spawn, type ChildProcess } from 'node:child_process'
 import { Readable, Writable } from 'node:stream'
 import { client, ndJsonStream, PROTOCOL_VERSION, RequestError } from '@agentclientprotocol/sdk'
 import type {
+  ActiveSession,
   ClientContext,
   ClientRequestHandler,
   ContentBlock,
@@ -36,6 +37,7 @@ import type {
   ActiveSessionMessage,
 } from '@agentclientprotocol/sdk'
 import { isSystemoneFamily, JudgeUnavailable } from '@broject/core'
+import { agentTurnPlane } from './acp-events.ts'
 import { otelSpan } from './otel.ts'
 import type { OtelCtx } from './otel.ts'
 import type {
@@ -387,7 +389,9 @@ async function acpOp(
       asAuthError,
       req,
       undefined,
-      by
+      by,
+      undefined,
+      opts.acp?.cwd
     )
     if (r.stopReason !== 'end_turn') {
       throw new JudgeUnavailable(`${by} (acp) turn stopped — ${r.stopReason}`)
@@ -538,7 +542,17 @@ export async function acpConverse(
         undefined,
         req
       )
-      const r = await pumpTurn(session, promptText, onUpdate, asAuthError, req, signal, by, sessSpan.ctx)
+      const r = await pumpTurn(
+        session,
+        promptText,
+        onUpdate,
+        asAuthError,
+        req,
+        signal,
+        by,
+        sessSpan.ctx,
+        opts.acp?.cwd
+      )
       sessSpan.end({ 'acp.session_id': session.sessionId })
       span.end({
         'acp.model': model,
@@ -624,18 +638,25 @@ function tracedUpdates(
   }
 }
 
-/** The prompt→updates loop shared by one-shot and pooled turns. */
-async function pumpTurn(
-  session: Awaited<ReturnType<typeof acpSession>>['session'],
+/** The prompt→updates loop shared by one-shot and pooled turns — and
+ *  the single chokepoint the 'agent' event plane hangs off (bro-0ppt0):
+ *  every ACP turn (conductor pool, fleet worker, judge) funnels here,
+ *  so the plane observer is attached once, not per transport. `cwd`
+ *  anchors the bus socket + the per-agent .events.jsonl archive. */
+export async function pumpTurn(
+  session: ActiveSession,
   prompt: string | ContentBlock[],
   onUpdate: (update: SessionUpdate) => void,
   asAuthError: (err: unknown) => never,
   req: () => SendRequestOptions,
   signal: AbortSignal | undefined,
   by: string,
-  parent?: OtelCtx
+  parent?: OtelCtx,
+  cwd?: string
 ): Promise<{ stopReason: StopReason; text: string; response: PromptResponse }> {
   const traced = tracedUpdates(onUpdate, parent)
+  const plane = agentTurnPlane({ cwd, by, sessionId: session.sessionId })
+  plane.start()
   // prompt() enqueues `stop` into the SAME updates stream in order —
   // updates drain first, `stop` arrives last, so trailing chunks can't
   // be lost by racing the response promise (bro-d6mcd). The turn's
@@ -661,8 +682,10 @@ async function pumpTurn(
       ])
       if (msg.kind === 'stop') {
         traced.flush('ok')
+        plane.stop(msg.stopReason, { replyLen: text.length })
         return { stopReason: msg.stopReason, text, response: msg.response }
       }
+      plane.update(msg.update)
       traced.sink(msg.update)
       if (msg.update.sessionUpdate === 'agent_message_chunk') {
         const c = msg.update.content
@@ -671,7 +694,12 @@ async function pumpTurn(
     }
   } catch (err) {
     traced.flush('error')
+    plane.stop(undefined, { error: errMsg(err) })
     throw err
+  } finally {
+    // the acp-worker driver exits right after the turn — settle the
+    // queued publishes first or the turn's last events die with it
+    await plane.drain()
   }
 }
 
@@ -918,7 +946,8 @@ export async function acpPooledTurn(
         req,
         turn.signal,
         by,
-        sessSpan.ctx
+        sessSpan.ctx,
+        opts.acp?.cwd
       )
       endSession()
       end({

@@ -922,7 +922,15 @@ export interface BusProbeResult {
  *  throws is a critical finding per REVIEW.md. */
 export async function busProbe(
   socketPath: string,
-  opts: { since?: number; windowMs?: number; limit?: number } = {}
+  opts: {
+    since?: number
+    windowMs?: number
+    limit?: number
+    /** Broker-side narrowing (topic glob, kind, `to`, `keys`) — a probe
+     *  asking "what did agent X do" must not spend its window on the
+     *  fleet's whole ring. Empty/absent means everything. */
+    filter?: EventFilter
+  } = {}
 ): Promise<BusProbeResult> {
   const windowMs = opts.windowMs ?? BUS_PROBE_WINDOW_MS
   // One budget, spent once. The connect and the listen window are two
@@ -937,7 +945,7 @@ export async function busProbe(
   try {
     sub = await busSubscribe(
       socketPath,
-      {},
+      opts.filter ?? {},
       {
         onEvent: (e) => events.push(e),
         onGap: () => {

@@ -86,29 +86,26 @@ function sendJson(res: ServerResponse, status: number, body: unknown): void {
   res.end(`${JSON.stringify(body)}\n`)
 }
 
-/** True once the path matched — any verdict (405/503 or the stream);
- *  false lets other paths through. */
-export async function routeEventsStream(
+/** Pump a filtered broker stream onto an SSE response — the shared
+ *  leg `/api/v1/events/stream` and `/api/v1/agents/<id>/events?follow`
+ *  ride. `filter` is applied broker-side: an agent-scoped stream never
+ *  pays for the fleet's traffic. Takes over `res` (200 + SSE headers,
+ *  keepalives, close cleanup); resolves when the subscription is armed
+ *  — NOT when the client leaves, the caller returns immediately. */
+export async function openEventsSse(
   req: IncomingMessage,
   res: ServerResponse,
-  pathname: string,
-  bus: EventsStreamBus | undefined
-): Promise<boolean> {
-  if (pathname !== '/api/v1/events/stream') {
-    return false
-  }
-  if (req.method !== 'GET') {
-    sendJson(res, 405, { error: 'method not allowed' })
-    return true
-  }
-  const socket = bus?.socketPath() ?? null
-  if (bus === undefined || socket === null) {
-    sendJson(res, 503, { error: 'event broker unavailable — no live bus on this repo' })
-    return true
-  }
+  bus: EventsStreamBus,
+  socket: string,
+  filter: EventFilter
+): Promise<void> {
   const cursor = parseEventCursor(req.headers['last-event-id'])
 
   res.writeHead(200, SSE_HEADERS)
+  // headers must leave NOW, not with the first frame — an idle ring
+  // would otherwise keep a client (and undici's fetch) blind until the
+  // keepalive tick, mistaking a live stream for a hung request
+  res.flushHeaders()
   // the stream dies on a wedged write — EventSource's own reconnect
   // re-enters with Last-Event-ID and gets gap-or-replay, never a lie.
   // Domain envelopes go out UNNAMED (`data:` only — the topic lives
@@ -149,7 +146,7 @@ export async function routeEventsStream(
   try {
     sub = await bus.subscribe(
       socket,
-      {},
+      filter,
       {
         onEvent: (e) => {
           const rec = e as { gen?: string; seq?: number }
@@ -176,14 +173,37 @@ export async function routeEventsStream(
     )
   } catch {
     drop()
-    return true
+    return
   }
   if (clientGone) {
     // the client left while subscribe was in flight — nothing reads
     // this subscription; release it instead of streaming into a hole
     sub.close()
+    return
+  }
+}
+
+/** True once the path matched — any verdict (405/503 or the stream);
+ *  false lets other paths through. */
+export async function routeEventsStream(
+  req: IncomingMessage,
+  res: ServerResponse,
+  pathname: string,
+  bus: EventsStreamBus | undefined
+): Promise<boolean> {
+  if (pathname !== '/api/v1/events/stream') {
+    return false
+  }
+  if (req.method !== 'GET') {
+    sendJson(res, 405, { error: 'method not allowed' })
     return true
   }
+  const socket = bus?.socketPath() ?? null
+  if (bus === undefined || socket === null) {
+    sendJson(res, 503, { error: 'event broker unavailable — no live bus on this repo' })
+    return true
+  }
+  await openEventsSse(req, res, bus, socket, {})
   return true
 }
 

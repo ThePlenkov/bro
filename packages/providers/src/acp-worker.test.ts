@@ -1,9 +1,16 @@
 import { describe, test } from 'node:test'
 import assert from 'node:assert/strict'
-import { existsSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import type { SessionConfigOption } from '@agentclientprotocol/sdk'
+import {
+  busProbe,
+  busSocketPath,
+  gitCommonDir,
+  startBusBrokerAt,
+  testGit,
+} from '@broject/core'
 import { acpWorkerArgv } from './acp.ts'
 import { renderAcpUpdate, runAcpWorker } from './acp-worker.ts'
 import type { AcpWorkerSpec } from './acp-worker.ts'
@@ -121,6 +128,72 @@ describe('runAcpWorker', () => {
       assert.match(lines.join('\n'), /done/)
       assert.match(lines.join('\n'), /turn stopped — end_turn/)
     } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  test('a repo-anchored worker publishes its turn on the bus and archives every update', async () => {
+    const { spec, lines, dir } = workerSpec()
+    testGit(['init', '-q', dir])
+    const broker = await startBusBrokerAt(busSocketPath(dir)!)
+    const agentId = 'native-test1'
+    const savedId = process.env.BRO_AGENT_ID
+    const savedBead = process.env.BRO_BEAD_ID
+    process.env.BRO_AGENT_ID = agentId
+    process.env.BRO_BEAD_ID = 'bro-w1'
+    try {
+      const fake = fakeAcpAgent({
+        updates: [
+          {
+            sessionUpdate: 'tool_call',
+            toolCallId: 'tc-1',
+            title: 'Read x.ts',
+            kind: 'read',
+            status: 'in_progress',
+          } as never,
+          {
+            sessionUpdate: 'agent_message_chunk',
+            content: { type: 'text', text: 'done' },
+          } as never,
+        ],
+      })
+      const code = await runAcpWorker({ ...spec, peer: fake.app })
+      assert.equal(code, 0)
+      assert.match(lines.join('\n'), /turn stopped — end_turn/)
+
+      // the live tail — turn/tool lifecycle on the 'agent' topic
+      const probed = await busProbe(busSocketPath(dir)!, {
+        filter: { topics: ['agent'] },
+        windowMs: 50,
+      })
+      assert.deepEqual(
+        probed.events.map((e) => `${e.kind}:${(e.payload as { phase?: string }).phase}`),
+        ['turn:start', 'tool_call:open', 'turn:stop']
+      )
+      for (const e of probed.events) {
+        assert.equal(e.key, agentId)
+        assert.equal(e.cause, 'bro-w1')
+      }
+
+      // the durable archive — every update including the chunk,
+      // bookended by turn start/stop, next to the rendered .log
+      const archive = join(gitCommonDir(dir)!, 'bro', 'agents', `${agentId}.events.jsonl`)
+      assert.ok(existsSync(archive), 'events.jsonl written beside the .log')
+      const rows = readFileSync(archive, 'utf8')
+        .split('\n')
+        .filter((l) => l !== '')
+        .map((l) => JSON.parse(l) as { kind: string; phase?: string })
+      assert.equal(rows[0]!.kind, 'turn')
+      assert.equal(rows[0]!.phase, 'start')
+      assert.equal(rows.filter((r) => r.kind === 'update').length, 2)
+      assert.equal(rows.at(-1)!.kind, 'turn')
+      assert.equal(rows.at(-1)!.phase, 'stop')
+    } finally {
+      if (savedId === undefined) delete process.env.BRO_AGENT_ID
+      else process.env.BRO_AGENT_ID = savedId
+      if (savedBead === undefined) delete process.env.BRO_BEAD_ID
+      else process.env.BRO_BEAD_ID = savedBead
+      await broker.close()
       rmSync(dir, { recursive: true, force: true })
     }
   })

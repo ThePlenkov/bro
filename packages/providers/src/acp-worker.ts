@@ -37,12 +37,12 @@ import type {
   AgentApp,
   ClientContext,
   ClientRequestHandler,
-  PromptResponse,
   RequestPermissionRequest,
   RequestPermissionResponse,
   SessionUpdate,
   StopReason,
 } from '@agentclientprotocol/sdk'
+import { pumpTurn } from './acp.ts'
 
 /** What the resolver computed for one spawn — self-contained, so the
  *  worker never re-reads bro.config.json mid-run. */
@@ -329,21 +329,27 @@ export async function runAcpWorker(spec: AcpWorkerSpec): Promise<number> {
         }
       }
       const promptText = readFileSync(spec.promptFile, 'utf8')
-      // the stop lands in the update queue with the same response —
-      // draining to `stop` IS awaiting the turn, and keeps every
-      // notification on the log in arrival order
-      const drain = async (): Promise<PromptResponse> => {
-        for (;;) {
-          const m = await session.nextUpdate()
-          if (m.kind === 'stop') {
-            return m.response
-          }
-          log(renderAcpUpdate(m.update))
-        }
-      }
-      const [resp] = await Promise.all([session.prompt(promptText), drain()])
-      log(`turn stopped — ${resp.stopReason}`)
-      return resp.stopReason === 'end_turn' ? 0 : 1
+      // the shared pump IS the turn (bro-0ppt0): draining to `stop`
+      // keeps every notification on the .log in arrival order, and
+      // the same updates publish onto the 'agent' bus topic + the
+      // .events.jsonl archive at the pumpTurn chokepoint — one seam,
+      // no worker-local wire shapes. The worker's error mapping lives
+      // in the outer catch; the pump's own failures classify plainly.
+      const r = await pumpTurn(
+        session,
+        promptText,
+        (u) => log(renderAcpUpdate(u)),
+        (err: unknown): never => {
+          throw err
+        },
+        () => ({}),
+        undefined,
+        by,
+        undefined,
+        spec.cwd
+      )
+      log(`turn stopped — ${r.stopReason}`)
+      return r.stopReason === 'end_turn' ? 0 : 1
     } finally {
       session.dispose()
     }

@@ -45,6 +45,13 @@
  *                               `?token=`gated like the writes — the log
  *                               can carry secrets, loopback alone is not
  *                               the auth boundary.
+ *   GET    /api/v1/agents/<ref>/events?lines=N[&follow]
+ *                               the 'agent' bus topic scoped to one
+ *                               worker (bro-0ppt0): `follow` streams SSE
+ *                               through the broker key-filtered to the
+ *                               agent; plain GET tails the durable
+ *                               .events.jsonl archive as NDJSON. Same
+ *                               credential boundary as the log route.
  *   GET    /api/v1/queue        the beads queue — claimed (in-progress)
  *                               work + ready depth (`bro status` shape)
  *   GET    /api/v1/ticks        supervision — the watch heartbeat file,
@@ -169,6 +176,7 @@ import '../planes/index.ts'
 import { routePlanes } from '../planes/rest.ts'
 import {
   asyncapiDocument,
+  openEventsSse,
   routeEventsStream,
   type EventsStreamBus,
 } from '../planes/stream.ts'
@@ -451,6 +459,7 @@ const ROUTES = [
   'POST /api/v1/agents',
   'GET /api/v1/agents/<ref>',
   'GET /api/v1/agents/<ref>/log',
+  'GET /api/v1/agents/<ref>/events',
   'DELETE /api/v1/agents/<ref>',
   'POST /api/v1/webhooks/github',
   'ALL /v1/*',
@@ -1048,6 +1057,9 @@ async function handleRequest(
     if (await routeAgentLog(req, res, url, deps, token, statePathHint)) {
       return
     }
+    if (await routeAgentEvents(req, res, url, deps, token, statePathHint)) {
+      return
+    }
     if (await routeEventsStream(req, res, url.pathname, deps.eventsBus?.())) {
       return
     }
@@ -1224,6 +1236,94 @@ async function routeAgentLog(
     { startOffset: replay.byteLength }
   )
   res.on('close', () => handle.stop())
+  return true
+}
+
+/** GET /api/v1/agents/<id>/events — the agent-scoped leg of the bus's
+ *  'agent' topic (bro-0ppt0). Same credential surface as the log
+ *  route: the structured stream reveals exactly what the .log renders,
+ *  so the same same-UID token boundary applies.
+ *
+ *  `?follow` → SSE through the broker, filtered broker-side to this
+ *  agent's event key — the live tail.
+ *  plain GET → the durable `.events.jsonl` archive tail (NDJSON) —
+ *  the archive is the record the ring only mirrors transiently. */
+async function routeAgentEvents(
+  req: IncomingMessage,
+  res: ServerResponse,
+  url: URL,
+  deps: ServeDeps,
+  token: string,
+  statePathHint: string
+): Promise<boolean> {
+  const m = /^\/api\/v1\/agents\/([^/]+)\/events$/.exec(url.pathname)
+  if (m === null) {
+    return false
+  }
+  if (req.method !== 'GET') {
+    send(res, 405, { error: 'method not allowed' })
+    return true
+  }
+  const credentialed =
+    bearerMatch(req.headers.authorization, token) ||
+    tokenEq(url.searchParams.get('token') ?? '', token)
+  if (!credentialed) {
+    send(
+      res,
+      401,
+      { error: `session token required — read it from ${statePathHint}` },
+      { headers: { 'www-authenticate': 'Bearer' } }
+    )
+    return true
+  }
+  let ref: string
+  try {
+    ref = parseRef(m[1]!)
+  } catch (err) {
+    if (err instanceof HttpError) {
+      send(res, err.status, { error: err.message })
+      return true
+    }
+    throw err
+  }
+  const { hit, degraded } = await deps.find(ref)
+  if (!hit) {
+    send(res, 404, missBody(ref, degraded))
+    return true
+  }
+  if (url.searchParams.has('follow')) {
+    const bus = deps.eventsBus?.()
+    const socket = bus?.socketPath() ?? null
+    if (bus === undefined || socket === null) {
+      send(res, 503, { error: 'event broker unavailable — no live bus on this repo' })
+      return true
+    }
+    // the envelope key IS the agent id (unbadged turns key
+    // `acp:<sessionId>` — those address by session, not by this route)
+    await openEventsSse(req, res, bus, socket, {
+      topics: ['agent'],
+      keys: [hit.agent.id],
+    })
+    return true
+  }
+  // the durable archive sits next to the .log — derive from the same
+  // pointer so remote-backend honesty (a URL `log`, a missing file)
+  // applies identically to its structured sibling
+  const log = logTarget(hit.agent)
+  if ('status' in log) {
+    send(res, log.status, { error: log.error })
+    return true
+  }
+  const archive = log.path.replace(/\.log$/, '.events.jsonl')
+  if (!existsSync(archive)) {
+    send(res, 404, {
+      error: `no events archive for agent ${hit.agent.id} — the worker predates the event plane or its turn never wrote`,
+    })
+    return true
+  }
+  send(res, 200, tailLines(readLogTail(archive).text, logLineCount(url)), {
+    contentType: 'application/x-ndjson; charset=utf-8',
+  })
   return true
 }
 
@@ -1535,28 +1635,31 @@ function parseServePort(argv: string[]): number {
   return port
 }
 
-/** Webhook ingest armed → this serve is the bus host too: the
- *  endpoint publishes through the repo socket, so the broker must
- *  live somewhere. An already-running `bro bus serve` wins (same
- *  socket either way); any other failure degrades the route to
- *  published:false — fail-open, serve still answers. */
-async function armWebhookBroker(
-  dir: string,
-  url: string
-): Promise<BusBroker | undefined> {
-  if ((process.env[GITHUB_WEBHOOK_SECRET_ENV] ?? '') === '') {
-    return undefined
-  }
+/** This serve is the bus's co-host (bro-0ppt0): the events stream, the
+ *  per-agent SSE, the webui's live activity pane and the conductor's
+ *  own turn events all ride the repo socket — a broker must live
+ *  somewhere for any of it to flow, and the long-lived serve process
+ *  is the natural host. An already-running `bro bus serve` wins (same
+ *  socket either way); any other failure degrades the routes to
+ *  503/published:false — fail-open, serve still answers. Webhook
+ *  ingest publishes through the same socket when armed. */
+async function armBusBroker(dir: string, url: string): Promise<BusBroker | undefined> {
+  const webhookArmed = (process.env[GITHUB_WEBHOOK_SECRET_ENV] ?? '') !== ''
   try {
     const broker = await startBusBroker(dir)
-    console.log(`webhooks: POST ${url}/api/v1/webhooks/github → bus ${broker.socketPath}`)
+    console.log(`bus: broker on ${broker.socketPath}`)
+    if (webhookArmed) {
+      console.log(`webhooks: POST ${url}/api/v1/webhooks/github → bus ${broker.socketPath}`)
+    }
     return broker
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err)
     if (/already running/.test(msg)) {
-      console.log(`webhooks: POST ${url}/api/v1/webhooks/github → existing bus broker`)
+      if (webhookArmed) {
+        console.log(`webhooks: POST ${url}/api/v1/webhooks/github → existing bus broker`)
+      }
     } else {
-      console.error(`warning: webhooks armed but broker did not start — ${msg}`)
+      console.error(`warning: bus broker did not start — ${msg}`)
     }
     return undefined
   }
@@ -1640,7 +1743,7 @@ export async function runServeCommand(argv: string[]): Promise<void> {
     console.log(`bro serve — ${url}`)
     console.log('discovery: <git-common-dir>/bro/serve.json · ctrl-c to stop')
 
-    const broker = await armWebhookBroker(dir, url)
+    const broker = await armBusBroker(dir, url)
 
     await new Promise<void>((resolve) => {
       const shutdown = (): void => {

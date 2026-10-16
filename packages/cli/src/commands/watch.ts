@@ -38,6 +38,8 @@
  */
 import {
   awaitFileLock,
+  busProbe,
+  busSocketPath,
   dropMailbox,
   git,
   gitTry,
@@ -76,6 +78,7 @@ import { isOrchestratorSession, pulseLockPath } from './watch-pulse.ts'
 import { daemonProbe, readDriveMarker } from './daemon.ts'
 import { writeHeartbeat } from './watch-heartbeat.ts'
 import { watchSection, type WatchConfig } from './watch-config.ts'
+import { agentEventLine } from '../planes/events.ts'
 
 export interface WatchMol {
   mol: string
@@ -174,6 +177,19 @@ export interface WatchSnapshot {
    *  the watchdog's subject: a recorded-but-dead daemon is attention,
    *  absent is just quiet. */
   daemon: WatchDaemon
+  /** 'agent' topic tail — subject key → its "last did X" line
+   *  (bro-0ppt0). Absent entirely when the bus recorded nothing — an
+   *  idle or broker-less repo reads compact, never a false wall of
+   *  silence-reporting. */
+  activity?: WatchActivity
+}
+
+export interface WatchActivity {
+  /** agent key → the one-line verdict of its newest in-turn event. */
+  latest: Record<string, string>
+  /** the ring tail was truncated — the map is the newest slice, not
+   *  every live agent */
+  gapped?: boolean
 }
 
 export interface WatchDaemon {
@@ -632,6 +648,7 @@ export async function collectSnapshot(dir: string): Promise<WatchSnapshot> {
   const gates = await gatesPlane(dir, host, fleet.rows)
   const loop = loopPlane(dir)
   const daemon = daemonPlane(dir)
+  const activity = await activityPlane(dir)
 
   const attention = attentionOf(
     molsPlane_.mols,
@@ -683,7 +700,31 @@ export async function collectSnapshot(dir: string): Promise<WatchSnapshot> {
     fleet,
     loop,
     daemon,
+    ...(activity !== undefined ? { activity } : {}),
   }
+}
+
+/** The 'agent' bus tail — one probe over the ring narrowed to the
+ *  agent topic, folded to the newest event per subject key. The live
+ *  half of "agent last did X"; the durable half is each worker's
+ *  .events.jsonl. Undefined when no agent events ride the ring — the
+ *  section renders only when there is something to report. */
+async function activityPlane(dir: string): Promise<WatchActivity | undefined> {
+  const sock = busSocketPath(dir)
+  if (sock === null) {
+    return undefined
+  }
+  const res = await busProbe(sock, { filter: { topics: ['agent'] }, limit: 128 })
+  const latest: Record<string, string> = {}
+  for (const e of res.events) {
+    if (typeof e.key === 'string') {
+      latest[e.key] = agentEventLine(e)
+    }
+  }
+  if (Object.keys(latest).length === 0) {
+    return undefined
+  }
+  return { latest, ...(res.gapped ? { gapped: true } : {}) }
 }
 
 function attentionLines(attention: string[]): string[] {
@@ -822,6 +863,16 @@ export function renderSnapshot(s: WatchSnapshot): string {
     '',
     'fleet',
     ...fleetLines(s.fleet),
+    ...(s.activity === undefined
+      ? []
+      : [
+          '',
+          'activity',
+          ...Object.values(s.activity.latest).map((l) => `  ${l}`),
+          ...(s.activity.gapped === true
+            ? ['  (ring tail truncated — newest events only)']
+            : []),
+        ]),
     '',
     'loop',
     ...loopLines(s.loop),

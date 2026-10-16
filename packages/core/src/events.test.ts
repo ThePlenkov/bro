@@ -65,6 +65,32 @@ describe('event contract', () => {
     assert.equal(eventMatches({}, broadcast), true)
   })
 
+  test('a keys filter is a subject restriction — keyless events do not pass', () => {
+    const mine = { topic: 'agent', kind: 'tool_call', key: 'native-aa11' }
+    const theirs = { topic: 'agent', kind: 'tool_call', key: 'native-bb22' }
+    const keyless = { topic: 'agent', kind: 'turn' }
+    assert.equal(eventMatches({ keys: ['native-aa11'] }, mine), true)
+    assert.equal(eventMatches({ keys: ['native-aa11', 'native-bb22'] }, theirs), true)
+    assert.equal(eventMatches({ keys: ['native-aa11'] }, theirs), false)
+    // opposite polarity from `to`: a keyless event under a keys filter
+    // is unaddressed activity, not a broadcast
+    assert.equal(eventMatches({ keys: ['native-aa11'] }, keyless), false)
+    assert.equal(eventMatches({}, keyless), true)
+    // an empty keys list narrows nothing — same rule as topics/kinds
+    assert.equal(eventMatches({ keys: [] }, mine), true)
+    // a malformed (non-string) key never matches, never throws
+    const malformed = { topic: 'agent', kind: 'turn', key: 7 } as unknown as {
+      topic: string
+      kind: string
+    }
+    assert.equal(eventMatches({ keys: ['7'] }, malformed), false)
+    // keys intersect with the other axes
+    assert.equal(
+      eventMatches({ keys: ['native-aa11'], topics: ['notify'] }, mine),
+      false
+    )
+  })
+
   test('an event that cannot be filtered on is not an event', () => {
     assert.equal(isEventInput({ topic: 'a', kind: 'b' }), true)
     assert.equal(isEventInput({ topic: 'a' }), false)

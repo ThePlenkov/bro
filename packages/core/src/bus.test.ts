@@ -473,6 +473,36 @@ describe('probe collects what is waiting', () => {
     })
   })
 
+  test('a filtered probe spends its window on the narrowed stream only', async () => {
+    await withBroker(async (_broker, socketPath) => {
+      await busPublish(socketPath, { topic: 'agent', kind: 'tool_call', key: 'native-aa11' })
+      await busPublish(socketPath, { topic: 'agent', kind: 'turn', key: 'native-bb22' })
+      await busPublish(socketPath, { topic: 'notify', kind: 'note', key: 'native-aa11' })
+      await busPublish(socketPath, { topic: 'agent', kind: 'turn' }) // keyless
+
+      // topic narrowing — the fleet's other topics stay out
+      const agentOnly = await busProbe(socketPath, {
+        windowMs: 120,
+        filter: { topics: ['agent'] },
+      })
+      assert.deepEqual(
+        agentOnly.events.map((e) => `${e.topic}/${e.kind}`),
+        ['agent/tool_call', 'agent/turn', 'agent/turn']
+      )
+
+      // key narrowing on top — the per-agent events route's substrate
+      const scoped = await busProbe(socketPath, {
+        windowMs: 120,
+        filter: { topics: ['agent'], keys: ['native-aa11'] },
+      })
+      assert.deepEqual(
+        scoped.events.map((e) => `${e.topic}/${e.kind}`),
+        ['agent/tool_call'],
+        'keyless activity and other subjects must not pass a keys filter'
+      )
+    })
+  })
+
   test('a quiet broker yields nothing and stays quiet', async () => {
     await withBroker(async (_broker, socketPath) => {
       const result = await busProbe(socketPath, { windowMs: 80 })
