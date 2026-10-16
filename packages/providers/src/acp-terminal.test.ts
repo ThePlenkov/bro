@@ -203,4 +203,45 @@ describe('AcpTerminals', () => {
       await t.waitForExit(ctx(wait(missing)))
     }, /Unknown terminal/)
   })
+
+  test('follow returns the atomic snapshot, then live data and exit (bro-eua0d)', async () => {
+    const t = new AcpTerminals()
+    try {
+      assert.equal(t.size, 0)
+      const { terminalId } = await t.create(
+        ctx(create('sh', ['-c', 'echo first; sleep 60']))
+      )
+      assert.equal(t.size, 1)
+      const chunks: string[] = []
+      const exits: unknown[] = []
+      const f = t.follow(terminalId, {
+        data: (c) => chunks.push(c),
+        exit: (s) => exits.push(s),
+      })
+      // wait for 'first' — either already in the snapshot or a live chunk
+      for (let i = 0; i < 100 && ![f.snapshot.output, ...chunks].join('').includes('first'); i++) {
+        await new Promise((r) => setTimeout(r, 10))
+      }
+      assert.match([f.snapshot.output, ...chunks].join(''), /first/)
+      await t.kill(ctx(kil(terminalId)))
+      for (let i = 0; i < 100 && exits.length === 0; i++) {
+        await new Promise((r) => setTimeout(r, 10))
+      }
+      assert.equal(exits.length, 1, 'the exit tap fires once')
+      assert.equal((exits[0] as { signal: string }).signal, 'SIGTERM')
+      // a completed terminal still follows — snapshot carries the verdict,
+      // no callbacks fire, stop is a no-op
+      const dead = t.follow(terminalId, {
+        data: () => assert.fail('no data on a completed terminal'),
+        exit: () => assert.fail('no exit on a completed terminal'),
+      })
+      assert.equal(dead.snapshot.exitStatus?.signal, 'SIGTERM')
+      dead.stop()
+      f.stop()
+      assert.throws(() => t.follow('term-nope' as TerminalId, { data: () => {}, exit: () => {} }), /Unknown terminal/)
+      assert.throws(() => t.snapshot('term-nope' as TerminalId), /Unknown terminal/)
+    } finally {
+      t.dispose()
+    }
+  })
 })

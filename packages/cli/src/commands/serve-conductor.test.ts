@@ -687,6 +687,41 @@ describe('serve /v1/* — the conductor plane', () => {
       await close()
     }
   })
+
+  test('the conductor surfaces the live link terminal registry (bro-eua0d)', async () => {
+    const fake = fakeAcpAgent({ replyText: 'x' })
+    const proxy = conductorProxy(CFG, { acp: { peer: fake.app } })
+    // no request yet — the pooled link doesn't exist, so no registry
+    assert.equal(proxy.terminals(), undefined)
+    const { url, close } = await listen(deps({ provider: proxy }))
+    try {
+      const r = await fetch(`${url}/v1/messages`, {
+        method: 'POST',
+        headers: { ...auth, 'content-type': 'application/json' },
+        body: JSON.stringify({ messages: [{ role: 'user', content: 'x' }], stream: false }),
+      })
+      assert.equal(r.status, 200)
+      const reg = proxy.terminals()
+      assert.ok(reg, 'the pooled acp link carries its terminal registry')
+      // the registry is the live one — an agent terminal/create call
+      // over the link lands in it
+      const { terminalId } = await reg.create({
+        params: { command: 'sh', args: ['-c', 'echo via-conductor'], env: [] },
+      } as never)
+      for (let i = 0; i < 100; i++) {
+        const snap = await reg.output({ params: { terminalId } } as never)
+        if (snap.output.includes('via-conductor')) {
+          break
+        }
+        await new Promise((r2) => setTimeout(r2, 10))
+      }
+      const snap = await reg.output({ params: { terminalId } } as never)
+      assert.match(snap.output, /via-conductor/)
+      await reg.release({ params: { terminalId } } as never)
+    } finally {
+      await close()
+    }
+  })
 })
 
 // bro-whn25 — the messages API is stateless but a claude client resends
