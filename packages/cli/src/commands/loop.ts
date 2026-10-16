@@ -1203,7 +1203,7 @@ async function finalizeMerge(
   const rooted = processesRootedIn(item.worktreeDir)
   if (rooted.length > 0) {
     ctx.tails.push(
-      `worktree ${item.worktreeDir} kept — hosts live process(es): ${rooted.map((h) => h.pid).join(', ')}`
+      `worktree ${item.worktreeDir} kept — hosts live process(es): ${rooted.map((h) => h.pid).join(', ')}; branch ${item.branch} kept with it`
     )
     console.error(`loop: ${ctx.tails.at(-1)}`)
   }

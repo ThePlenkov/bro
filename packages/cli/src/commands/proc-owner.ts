@@ -146,7 +146,7 @@ export function processesRootedIn(worktree: string, procDir = '/proc'): ProcHit[
     }
     const dir = join(procDir, name)
     const cmdline = readProcText(dir, 'cmdline')
-    let rooted = cmdline.split('\0').some((tok) => tok.startsWith(root + sep))
+    let rooted = cmdline.split('\0').some((tok) => inside(tok))
     if (!rooted) {
       try {
         rooted = inside(readlinkSync(join(dir, 'cwd')))
