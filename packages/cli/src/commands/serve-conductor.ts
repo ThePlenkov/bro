@@ -824,9 +824,13 @@ async function messages(
       // the bracket suffix is a client-side opt-in, not a different
       // model; strip it or the catalog lookup 500s (bro-0g2l3)
       requestModel: (() => {
+        const raw = typeof body.model === 'string' ? body.model.trimEnd() : undefined
+        const open = raw?.lastIndexOf('[') ?? -1
         const m =
-          typeof body.model === 'string' ? body.model.replace(/\[[^\]]*\]\s*$/, '') : undefined
-        return m !== undefined && m.includes('/') ? m : undefined
+          raw !== undefined && open >= 0 && raw.endsWith(']')
+            ? raw.slice(0, open).trimEnd()
+            : raw
+        return m?.includes('/') ? m : undefined
       })(),
       deadline: Date.now() + wire.cfg.timeoutMs,
       signal: ac.signal,
