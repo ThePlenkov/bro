@@ -23,6 +23,7 @@ import { evaluateExitGate, fetchPrActState, prStateCache } from '@broject/act'
 import {
   facade,
   gitTry,
+  gitUpstreamBehind,
   pidAlive,
   prOwnership,
   prOwnershipMark,
@@ -124,6 +125,10 @@ interface BroStatus {
     behind: boolean
     mine: boolean | null
   } | null
+  /** Positive upstream drift — the checkout trails its tracking ref.
+   *  Local read, never a fetch: the staleness of the remote-tracking
+   *  ref IS the signal (bro-6k3f4). null when current or untracked. */
+  sync: { behind: number; upstream: string } | null
   /** --deep only: the act gate for the current branch's open PR. */
   act?: {
     pr: number
@@ -410,6 +415,7 @@ export function collectStatus(dir: string): BroStatus {
     },
     watch: readHeartbeat(dir),
     build: readBuild(dir),
+    sync: gitUpstreamBehind(dir),
   }
 }
 
@@ -492,6 +498,11 @@ function buildLine(build: NonNullable<BroStatus['build']>): string {
 function render(s: BroStatus): string[] {
   const lines: string[] = []
   lines.push(`board: ${basename(s.dir)} · ${s.branch}${s.dirty > 0 ? ` · dirty ${s.dirty}` : ''}`)
+  if (s.sync !== null) {
+    lines.push(
+      `sync: ${s.branch} ${s.sync.behind} behind ${s.sync.upstream} — stale; fetch before trusting state`
+    )
+  }
   if (s.watch !== null) {
     const tail = s.watch.attention === 0 ? 'quiet' : `${s.watch.attention} attention`
     lines.push(`watch: heartbeat ${heartbeatAge(s.watch.ageMs)} ago — ${tail}`)

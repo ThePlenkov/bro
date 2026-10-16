@@ -20,6 +20,7 @@ export {
   gitBranchLog,
   gitIsAncestor,
   gitIsShallow,
+  gitUpstreamBehind,
   worktreeGitDir,
 } from './git.ts'
 export type { GitLogPathRecord, GitStamp, GitLogStamp } from './git.ts'

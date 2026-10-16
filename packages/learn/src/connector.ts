@@ -33,6 +33,7 @@ import { basename, dirname, isAbsolute, join, relative, resolve } from 'node:pat
 import {
   getTasksAsync,
   gitTry,
+  gitUpstreamBehind,
   loadConfig,
   markerLive,
   sessionTaskClaims,
@@ -239,6 +240,14 @@ export async function sessionContextText(ctx: ConnectorCtx): Promise<string> {
   const br = gitTry(['-C', ctx.dir, 'branch', '--show-current'])
   if (br.code === 0 && br.out.trim() !== '') {
     parts.push(`branch:${br.out.trim()}`)
+  }
+  // stale-checkout nudge (bro-6k3f4): a head behind its tracking ref
+  // fabricates phantom reverts for any agent reasoning over file state
+  const behind = gitUpstreamBehind(ctx.dir)
+  if (behind !== null) {
+    parts.push(
+      `sync:${br.out.trim() || 'HEAD'} ${behind.behind} behind ${behind.upstream} — stale checkout; fetch before trusting file state`
+    )
   }
   try {
     const store = taskStoreAsync(ctx.dir)
