@@ -174,9 +174,9 @@ export function runCli(
 const FAKE_BD = `#!/usr/bin/env node
 const fs = require('node:fs')
 const path = require('node:path')
-const DB = process.env.FAKE_BD_DB
+const ENV_DB = process.env.FAKE_BD_DB
 const fail = (m) => { console.error('fake bd: ' + m); process.exit(1) }
-if (!DB) fail('FAKE_BD_DB unset')
+if (!ENV_DB) fail('FAKE_BD_DB unset')
 // transient fs hiccups (EMFILE/EAGAIN on a loaded CI runner) must not
 // read as an empty store or kill a bd call — retry first (bro-6u1tu)
 const pause = (ms) => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms)
@@ -213,6 +213,15 @@ for (let i = 0; i < args.length; i++) {
     flags[k] = flags[k] === undefined ? args[++i] : [].concat(flags[k], args[++i])
   } else pos.push(t)
 }
+// real bd resolves BEADS_DIR BEFORE directory discovery — an ambient
+// pin wins over both -C and cwd. A checkout carrying .beads/beads.json
+// gets its own store under discovery; anything else falls back to the
+// env-pinned db (the single-store fixture)
+const dir = flags.C || process.cwd()
+const ownDb = path.join(dir, '.beads', 'beads.json')
+const DB = process.env.BEADS_DIR
+  ? path.join(process.env.BEADS_DIR, 'beads.json')
+  : fs.existsSync(ownDb) ? ownDb : ENV_DB
 const db = load()
 const row = (id) => db.rows.find((r) => r.id === id)
 const jsonOut = (v) => { process.stdout.write(JSON.stringify(v) + '\\n') }
@@ -402,6 +411,20 @@ switch (cmd === undefined && args[0] === '--version' ? '--version' : cmd) {
       break
     }
     jsonOut(db.deps || [])
+    break
+  }
+  case 'ship': {
+    // real bd: finds the issue by its export:<cap> label, refuses an
+    // open one unless --force, then pins provides:<cap>
+    const cap = pos[1]
+    if (cap === undefined) fail('ship <capability>')
+    const r = db.rows.find((x) => (x.labels || []).includes('export:' + cap))
+    if (!r) fail('no issue found with export:' + cap + ' label')
+    if (r.status !== 'closed' && flags.force !== true) {
+      fail('issue ' + r.id + ' is not closed — use --force to override')
+    }
+    r.labels = [...new Set([...(r.labels || []), 'provides:' + cap])]
+    save(db)
     break
   }
   case 'children':

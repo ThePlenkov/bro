@@ -5,19 +5,21 @@
  * `mesh.peers` config map; `me` prints this rig's derived (or pinned)
  * mesh:// URI. Request/lifecycle/wait land in later milestones.
  */
-import { existsSync, readFileSync, renameSync, writeFileSync } from 'node:fs'
+import { existsSync } from 'node:fs'
 import { join } from 'node:path'
-import { facade, gitCommonDir, gitTry, loadConfig, withFileLock } from '@broject/core'
+import { bd, bdAt, facade, gitCommonDir, loadConfig, taskStore, taskStoreAt } from '@broject/core'
 import {
   formatRigUri,
+  localCheckout,
   meshInbox,
   meshThread,
   parsePeer,
   parseRigUri,
   postEnvelope,
-  rigFromRemoteUrl,
+  selfRig,
   wireDep,
   syncReplica,
+  withMeshConfig,
   type MeshKind,
   type MeshRef,
   type MeshPeer,
@@ -52,50 +54,6 @@ Commands:
                           point-check the thread's stage across own
                           store and peer replicas
 `
-
-/** This rig's URI: the `mesh.rig` config pin wins (a repo whose origin
- *  isn't a forge URL can still be addressed); else derive from origin. */
-export function selfRig(dir: string): string | null {
-  const cfg = loadConfig(dir)
-  if (cfg.mesh.rig !== undefined && parseRigUri(cfg.mesh.rig) !== null) {
-    return formatRigUri(parseRigUri(cfg.mesh.rig)!)
-  }
-  const origin = gitTry(['-C', dir, 'remote', 'get-url', 'origin'])
-  if (origin.code !== 0) {
-    return null
-  }
-  const rig = rigFromRemoteUrl(origin.out)
-  return rig === null ? null : formatRigUri(rig)
-}
-
-interface MeshConfigFile {
-  mesh?: { rig?: string; peers?: Record<string, { rig: string; remote: string }> }
-  [k: string]: unknown
-}
-
-/** Mutate `bro.config.json` under a file lock. Two refusals: a TS
- *  config shadows anything we would write (edit `mesh.peers` there
- *  instead), and a malformed file must not be silently overwritten —
- *  the error propagates and the command exits non-zero. */
-function withMeshConfig<T>(dir: string, mutate: (cfg: MeshConfigFile) => T): T {
-  const ts = join(dir, 'bro.config.ts')
-  if (existsSync(ts)) {
-    throw new Error(`bro.config.ts shadows bro.config.json — edit mesh.peers in ${ts}`)
-  }
-  const path = join(dir, 'bro.config.json')
-  return withFileLock(`${path}.lock`, () => {
-    const cfg = existsSync(path)
-      ? (JSON.parse(readFileSync(path, 'utf8')) as MeshConfigFile)
-      : ({} as MeshConfigFile)
-    const out = mutate(cfg)
-    // atomic write: temp file in the same dir + rename, so a crash
-    // mid-write can't leave a truncated config
-    const tmp = join(dir, '.bro.config.json.tmp')
-    writeFileSync(tmp, `${JSON.stringify(cfg, null, 2)}\n`)
-    renameSync(tmp, path)
-    return out
-  })
-}
 
 function cmdPeersList(dir: string): void {
   const peers = loadConfig(dir).mesh.peers
@@ -181,7 +139,7 @@ function cmdMe(dir: string): void {
   }
 }
 
-function meshPeers(dir: string) {
+export function meshPeers(dir: string): MeshPeer[] {
   return Object.entries(loadConfig(dir).mesh.peers)
     .map(([alias, raw]) => parsePeer(alias, raw))
     .filter((p): p is NonNullable<typeof p> => p !== null)
@@ -267,6 +225,7 @@ function cmdInbox(dir: string, args: string[]): void {
           bead: r.beadId,
           ...r.envelope,
           mismatch: r.mismatch || undefined,
+          unbound: r.unbound || undefined,
         })),
         null,
         2,
@@ -280,7 +239,8 @@ function cmdInbox(dir: string, args: string[]): void {
   }
   for (const r of result.requests) {
     const flag = r.mismatch ? `  ! from=${r.envelope.from} ≠ ${r.peerRig}` : ''
-    console.log(`${r.peer}\t${r.beadId}\t${r.envelope.title}${flag}`)
+    const unbound = r.unbound === true ? `  ! from=${r.envelope.from} unbound` : ''
+    console.log(`${r.peer}\t${r.beadId}\t${r.envelope.title}${flag}${unbound}`)
   }
 }
 
@@ -293,7 +253,7 @@ function requireRig(dir: string): string {
   return rig
 }
 
-function parseRefs(args: string[], flag: string): MeshRef[] {
+export function parseRefs(args: string[], flag: string): MeshRef[] {
   const out: MeshRef[] = []
   for (let i = 0; i < args.length; i++) {
     if (args[i] === flag && args[i + 1] !== undefined) {
@@ -315,7 +275,7 @@ function parseRefs(args: string[], flag: string): MeshRef[] {
   return out
 }
 
-function flagValue(args: string[], flag: string): string | undefined {
+export function flagValue(args: string[], flag: string): string | undefined {
   const i = args.indexOf(flag)
   return i !== -1 ? args[i + 1] : undefined
 }
@@ -431,6 +391,78 @@ function lifecycleTarget(
   return senderOf(worker)
 }
 
+/** A foreign anchor's `.beads` pins over ambient BEADS_DIR — the
+ *  caller's env belongs to its own store; an own anchor honors the
+ *  ambient pin (a spawned worker's shared store) */
+function anchorStore(anchor: string, dir: string) {
+  return anchor !== dir ? taskStoreAt(join(anchor, '.beads')) : taskStore(anchor)
+}
+
+// the thread's home is the anchor store — a `local` peer binding
+// names the checkout the request was delivered into; own store
+// otherwise (pull topology: verdicts ship on the author's side)
+function resolveAnchor(dir: string, state: ReturnType<typeof meshThread>, thread: string): string {
+  if (state.requestPeer?.transport !== 'local') {
+    return dir
+  }
+  const checkout = localCheckout(state.requestPeer.remote)
+  if (checkout === null) {
+    console.error(
+      `error: thread "${thread}" anchors at ${state.requestPeer.remote} — the checkout does not resolve`
+    )
+    process.exit(2)
+  }
+  return checkout
+}
+
+// delivered threads carry `export:<thread>` — `done` ships the
+// capability so the requester's `external:` dep can release. The
+// guard is the pin itself: pull-topology threads anchor on stores
+// whose request bead has no export:, and shipping there would only
+// fail. `bd ship` refuses an open bead — `done` IS the completion, so
+// the lifecycle closes the anchor request first (never --force: the
+// close is the honest record, force would release the dep on work the
+// store still calls open)
+function shipCapability(anchor: string, dir: string, thread: string): void {
+  let bead: { id: string; labels?: string[]; status?: string } | undefined
+  try {
+    bead = anchorStore(anchor, dir).get<{ id: string; labels?: string[]; status?: string }>(thread)
+  } catch (e) {
+    console.error(
+      `! result posted but the anchor bead could not be read — capability NOT shipped ` +
+        `(${e instanceof Error ? e.message : String(e)})`
+    )
+    return
+  }
+  if (bead?.labels?.includes(`export:${thread}`) !== true) {
+    return
+  }
+  try {
+    if (bead.status !== 'closed') {
+      bdAnchor(anchor, dir, ['close', thread])
+    }
+    bdAnchor(anchor, dir, ['ship', thread])
+  } catch {
+    console.error(
+      `! result posted but capability not shipped — close the request bead, then \`bd -C ${anchor} ship ${thread}\``
+    )
+  }
+}
+
+/** bd on the anchor store — pinned `bdAt` for foreign checkouts, the
+ *  ambient-env `bd` for our own (the pin contract: own-store env is
+ *  the caller's contract, a stale worktree `.beads` must not win). */
+function bdAnchor(anchor: string, dir: string, args: string[]): void {
+  if (anchor !== dir) {
+    const r = bdAt(join(anchor, '.beads'), args)
+    if (r.code !== 0 || !r.ran) {
+      throw new Error(r.err || 'bd unreachable')
+    }
+    return
+  }
+  bd(args, anchor)
+}
+
 function cmdLifecycle(dir: string, kind: MeshKind, args: string[]): void {
   const [thread, ...rest] = args
   if (thread === undefined) {
@@ -440,9 +472,11 @@ function cmdLifecycle(dir: string, kind: MeshKind, args: string[]): void {
   const { rig, state } = threadAnchor(dir, thread, !args.includes('--no-pull'))
   const request = state.request!
   const to = lifecycleTarget(kind, rig, state, thread)
+  const anchor = resolveAnchor(dir, state, thread)
 
   const posted = postEnvelope({
-    dir,
+    dir: anchor,
+    pinStore: anchor !== dir,
     kind,
     thread,
     from: rig,
@@ -456,6 +490,10 @@ function cmdLifecycle(dir: string, kind: MeshKind, args: string[]): void {
     process.exit(1)
   }
   console.log(`${kind} ${posted.id} → ${to} (thread ${thread})`)
+
+  if (kind === 'result') {
+    shipCapability(anchor, dir, thread)
+  }
 }
 
 function cmdWait(dir: string, args: string[]): void {

@@ -3,6 +3,7 @@ export {
   parseRigDescriptor,
   parseRigUri,
   rigFromRemoteUrl,
+  selfRig,
 } from './identity.ts'
 export type { RigDescriptor, RigRef } from './identity.ts'
 export {
@@ -22,7 +23,14 @@ export { issueLabels, meshIssues, replicaDir, syncReplica } from './pull.ts'
 export type { IssueRow } from './pull.ts'
 export { meshInbox, meshScan } from './inbox.ts'
 export type { InboundRequest, InboxResult, PeerRecord, ScanResult } from './inbox.ts'
-export { postEnvelope, wireDep } from './post.ts'
+export { postEnvelope, storeFor, wireDep } from './post.ts'
 export type { PostInput, PostResult } from './post.ts'
 export { meshThread } from './thread.ts'
 export type { ThreadStage, ThreadState } from './thread.ts'
+export {
+  deliverRequest,
+  ensurePeerBinding,
+  resolveTarget,
+  withMeshConfig,
+} from './request.ts'
+export type { MeshConfigFile, ResolvedTarget, ResolveResult } from './request.ts'
