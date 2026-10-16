@@ -351,16 +351,18 @@ describe('agentProcessesIn', () => {
     const wt = mkdtempSync(join(tmpdir(), 'bro-drive-wt-'))
     const { proc, mk, rm } = fakeProc()
     try {
-      mk(501, wt, 'bro\0watch\0--every\x00300', 'BRO_AGENT_ID=w1\0')
-      mk(502, wt, `node\0${join('/repo', 'dist', 'index.js')}\0serve\0--port\x001`, 'AI_AGENT=devin\0')
-      mk(504, wt, `node\0${join('/repo', 'dist', 'index.js')}\0review\0act\0wait\x00554`, 'AI_AGENT=devin\0')
+      mk(601, wt, 'bro\0watch\0--every\x00300', 'BRO_AGENT_ID=w1\0')
+      mk(602, wt, `node\0${join('/repo', 'dist', 'index.js')}\0serve\0--port\x001`, 'AI_AGENT=devin\0')
+      mk(603, wt, `node\0${join('/repo', 'dist', 'index.js')}\0review\0act\0wait\x00554`, 'AI_AGENT=devin\0')
+      // monitor-ish args on a NON-bro entry are still workers
+      mk(604, wt, `node\0${join(wt, 'worker.js')}\0wait`, 'BRO_AGENT_ID=w1\0')
       // real workers keep counting — including tool shells (bro-pywx)
-      mk(505, wt, 'sh\0-c\0npm test', 'BRO_AGENT_ID=w1\0')
-      mk(506, wt, 'devin\0-p\0fix stuff')
-      mk(507, wt, 'bash\0-l', 'AI_AGENT=devin\0')
+      mk(605, wt, 'sh\0-c\0npm test', 'BRO_AGENT_ID=w1\0')
+      mk(606, wt, 'devin\0-p\0fix stuff')
+      mk(607, wt, 'bash\0-l', 'AI_AGENT=devin\0')
       assert.deepEqual(
         agentProcessesIn(wt, proc).map((h) => h.pid),
-        [505, 506, 507]
+        [604, 605, 606, 607]
       )
     } finally {
       rm()

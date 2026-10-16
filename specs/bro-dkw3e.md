@@ -19,9 +19,14 @@ never spawns (sverka #356 stalled on exactly this).
 monitor-shaped — the shape test reads the process's own argv, never
 its ancestry:
 
-- **bro monitor verbs** — any positional after the CLI entry matching
-  `watch|wait|status|serve|pulse|notify|daemon` (covers `bro watch`,
-  `node dist/index.js serve`, `review act wait`, `setsid bro watch`).
+- **bro monitor verbs** — when the process is *bro-shaped* (exe `bro`,
+  a `bro` first positional under setsid/nohup/npx, or the shipped
+  `…/dist/index.js` entry), any positional after the CLI entry
+  matching `watch|wait|status|serve|pulse|notify|daemon` marks a
+  monitor (covers `bro watch`, `node dist/index.js serve`,
+  `review act wait`, `setsid bro watch`). A non-bro process carrying
+  a monitor-ish arg (`node worker.js wait`) is not bro — it stays a
+  worker.
 
 Shells stay workers by prior ruling: a bare `bash` inside the tree is
 indistinguishable from a raced worker's tool shell (bro-pywx), and a

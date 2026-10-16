@@ -135,12 +135,20 @@ function procIsMonitor(dir: string): boolean {
   const argv = readProcText(dir, 'cmdline').split('\0').filter(Boolean)
   const exe = basename(argv[0] ?? '')
   const positionals = argv.slice(1).filter((a) => !a.startsWith('-'))
+  // monitor verbs only count when the process is actually bro — exe
+  // `bro`, a `bro` first positional under setsid/nohup/npx, or the
+  // shipped `…/dist/index.js` entry. `node worker.js wait` carries a
+  // monitor-ish arg but isn't bro — it stays a worker.
+  const first = positionals[0] ?? ''
+  const broShaped =
+    exe === 'bro' || first === 'bro' || /[/\\]dist[/\\]index\.js$/.test(first)
+  if (!broShaped) {
+    return false
+  }
   // `node <dist>/index.js serve` — the script path is the entry, the
-  // verb follows it; `bro watch` needs no drop. A bare `bro` binary
-  // path keeps argv0 semantics (devin/claude argv0s never reach here —
-  // they aren't in MONITOR_VERBS anyway).
-  const dropEntry = exe !== 'bro' && /\.(?:js|ts|mjs|cjs)$/.test(positionals[0] ?? '')
-  const cmdTokens = dropEntry ? positionals.slice(1) : positionals
+  // verb follows it; `bro watch` needs no drop
+  const cmdTokens =
+    exe !== 'bro' && /\.(?:js|ts|mjs|cjs)$/.test(first) ? positionals.slice(1) : positionals
   return cmdTokens.some((t) => MONITOR_VERBS.has(t))
 }
 
