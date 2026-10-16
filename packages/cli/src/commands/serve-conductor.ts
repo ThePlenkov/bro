@@ -310,8 +310,12 @@ const turnHashInput = (m: ClientMessage): string => {
     typeof m.content === 'string'
       ? ''
       : (m.content ?? [])
-          .filter((b) => b.type === 'image' && typeof b.source?.data === 'string')
-          .map((b) => createHash('sha256').update(b.source?.data ?? '').digest('hex'))
+          .filter((b) => b.type === 'image' && typeof (b as ImageBlock).source?.data === 'string')
+          .map((b) =>
+            createHash('sha256')
+              .update((b as ImageBlock).source?.data ?? '')
+              .digest('hex')
+          )
           .join(',')
   return `${serTurn(m)}\x00${imgs}`
 }
