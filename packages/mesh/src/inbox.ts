@@ -10,6 +10,7 @@
  * top; thread tracking (thread.ts) consumes the scan directly.
  */
 import { taskStore } from '@broject/core'
+import { storeFor } from './post.ts'
 import { envelopeFromBead, type BeadLike, type MeshEnvelope } from './envelope.ts'
 import { existsSync } from 'node:fs'
 import { localCheckout, type MeshPeer, type MeshTransport } from './peers.ts'
@@ -117,7 +118,7 @@ function scanLocal(
     // closedLocal needs the store's own all-filter off too — the
     // backend drops closed rows before this loop ever sees them.
     // limit:0 likewise — a configured page must not hide envelopes
-    rows = taskStore(dir).list<BeadLike & { status?: string }>({
+    rows = storeFor(dir).list<BeadLike & { status?: string }>({
       all: closedLocal || undefined,
       limit: 0,
     })

@@ -99,6 +99,8 @@ export function runRequestCommand(argv: string[]): void {
     console.error(`! request delivered but peer binding failed: ${bound.error}`)
   } else if (bound.added) {
     console.log(`peer ${alias} → ${t.rig} (${t.checkout})`)
+  } else if (bound.note !== undefined) {
+    console.log(bound.note)
   }
 
   const waiting = flagValue(rest, '--for')

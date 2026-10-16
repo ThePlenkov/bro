@@ -7,12 +7,30 @@
  * The task id is assigned by `create`, and a request's thread IS that
  * id — so labels land in a follow-up `update` once the id exists.
  */
-import { taskStore } from '@broject/core'
+import { join } from 'node:path'
+import { taskStore, taskStoreAt, type TaskStore } from '@broject/core'
 import { envelopeLabels, type MeshEnvelope, type MeshKind, type MeshRef } from './envelope.ts'
 import { beadUri } from './envelope.ts'
 
+/** The store a FOREIGN checkout's `.beads/` backs — pinned through
+ *  taskStoreAt so an ambient BEADS_DIR (a spawned worker's
+ *  shared-store pin) can't redirect the read/write back into the
+ *  caller's store: `bd` resolves env before cwd, so plain
+ *  `taskStore(dir)` silently routes wrong inside a worker's env.
+ *  Only for peer/target checkouts — own-dir callers take
+ *  `taskStore(dir)` because the ambient pin IS the contract there
+ *  (a worktree's own .beads may be a stale tracked copy; the worker's
+ *  shared-store pin is what keeps writes unified). */
+export function storeFor(dir: string): TaskStore {
+  return taskStoreAt(join(dir, '.beads'))
+}
+
 export interface PostInput {
   dir: string
+  /** true on delivery into a foreign checkout — pins dir/.beads over
+   *  any ambient BEADS_DIR (storeFor); absent → cwd routing, where a
+   *  worker's shared-store pin is honored */
+  pinStore?: boolean
   kind: MeshKind
   thread: string
   from: string
@@ -42,7 +60,7 @@ export interface PostResult {
  *  its external_ref. The second step failing leaves a plain task — an
  *  incomplete record, so the error is reported, not swallowed. */
 export function postEnvelope(input: PostInput): PostResult {
-  const store = taskStore(input.dir)
+  const store = input.pinStore === true ? storeFor(input.dir) : taskStore(input.dir)
   let id: string
   try {
     id = store

@@ -7,7 +7,7 @@
  */
 import { existsSync } from 'node:fs'
 import { join } from 'node:path'
-import { bd, facade, gitCommonDir, loadConfig, taskStore } from '@broject/core'
+import { bd, bdAt, facade, gitCommonDir, loadConfig, taskStore, taskStoreAt } from '@broject/core'
 import {
   formatRigUri,
   localCheckout,
@@ -417,8 +417,15 @@ function cmdLifecycle(dir: string, kind: MeshKind, args: string[]): void {
     anchor = checkout
   }
 
+  /** A foreign anchor's `.beads` pins over ambient BEADS_DIR — the
+   *  caller's env belongs to its own store; an own anchor honors the
+   *  ambient pin (a spawned worker's shared store) */
+  const anchorStore = (a: string) =>
+    a !== dir ? taskStoreAt(join(a, '.beads')) : taskStore(a)
+
   const posted = postEnvelope({
     dir: anchor,
+    pinStore: anchor !== dir,
     kind,
     thread,
     from: rig,
@@ -443,7 +450,7 @@ function cmdLifecycle(dir: string, kind: MeshKind, args: string[]): void {
   if (kind === 'result') {
     let pinned = false
     try {
-      const bead = taskStore(anchor).get<{ id: string; labels?: string[] }>(thread)
+      const bead = anchorStore(anchor).get<{ id: string; labels?: string[] }>(thread)
       pinned = bead?.labels?.includes(`export:${thread}`) === true
     } catch (e) {
       console.error(
@@ -454,7 +461,14 @@ function cmdLifecycle(dir: string, kind: MeshKind, args: string[]): void {
     }
     if (pinned) {
       try {
-        bd(['ship', thread], anchor)
+        if (anchor !== dir) {
+          const ship = bdAt(join(anchor, '.beads'), ['ship', thread])
+          if (ship.code !== 0 || !ship.ran) {
+            throw new Error(ship.err || 'bd unreachable')
+          }
+        } else {
+          bd(['ship', thread], anchor)
+        }
       } catch {
         console.error(
           `! result posted but capability not shipped — close the request bead, then \`bd -C ${anchor} ship ${thread}\``

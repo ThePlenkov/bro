@@ -213,12 +213,15 @@ for (let i = 0; i < args.length; i++) {
     flags[k] = flags[k] === undefined ? args[++i] : [].concat(flags[k], args[++i])
   } else pos.push(t)
 }
-// real bd selects the store by directory — -C <dir> or the cwd. A
-// checkout carrying .beads/beads.json gets its own store; anything
-// else falls back to the env-pinned db (the single-store fixture)
+// real bd resolves BEADS_DIR BEFORE directory discovery — an ambient
+// pin wins over both -C and cwd. A checkout carrying .beads/beads.json
+// gets its own store under discovery; anything else falls back to the
+// env-pinned db (the single-store fixture)
 const dir = flags.C || process.cwd()
 const ownDb = path.join(dir, '.beads', 'beads.json')
-const DB = fs.existsSync(ownDb) ? ownDb : ENV_DB
+const DB = process.env.BEADS_DIR
+  ? path.join(process.env.BEADS_DIR, 'beads.json')
+  : fs.existsSync(ownDb) ? ownDb : ENV_DB
 const db = load()
 const row = (id) => db.rows.find((r) => r.id === id)
 const jsonOut = (v) => { process.stdout.write(JSON.stringify(v) + '\\n') }

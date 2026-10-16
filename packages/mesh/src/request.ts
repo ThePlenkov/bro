@@ -167,10 +167,11 @@ export function resolveTarget(dir: string, arg: string, peers: MeshPeer[]): Reso
  *  names the TARGET rig: the bead lives there. */
 export function deliverRequest(
   checkout: string,
-  input: Omit<PostInput, 'dir' | 'kind' | 'thread' | 'beadRig' | 'extraLabels'>,
+  input: Omit<PostInput, 'dir' | 'kind' | 'thread' | 'beadRig' | 'extraLabels' | 'pinStore'>,
 ): { id?: string; error?: string } {
   return postEnvelope({
     dir: checkout,
+    pinStore: true,
     ...input,
     kind: 'request',
     thread: '',
@@ -218,7 +219,7 @@ export function ensurePeerBinding(
   alias: string,
   rig: string,
   checkout: string,
-): { added: boolean; error?: string } {
+): { added: boolean; error?: string; note?: string } {
   try {
     // the whole check-and-set rides inside the file lock — reading
     // outside it would let two invocations both pass the guard and a
@@ -234,8 +235,13 @@ export function ensurePeerBinding(
           ? { added: false }
           : { added: false, error: `peer "${alias}" is already bound to ${existing.remote}` }
       }
-      if (Object.values(peers).some((p) => localCheckout(p.remote) === checkout)) {
-        return { added: false }
+      const boundTo = Object.entries(peers).find(
+        ([, p]) => localCheckout(p.remote) === checkout
+      )?.[0]
+      if (boundTo !== undefined) {
+        // reachable already — `mesh wait`/inbox resolve through the
+        // existing alias; the caller still hears which name holds it
+        return { added: false, note: `peer "${boundTo}" already binds ${checkout}` }
       }
       peers[alias] = { rig, remote: checkout }
       cfg.mesh = { ...mesh, peers }
