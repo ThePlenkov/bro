@@ -10,7 +10,7 @@
  *  This is vendor knowledge living at the plugin layer — core's
  *  session-planes module owns the mutex/reservation/quota mechanics,
  *  this file owns ONLY how devin marks and counts its sessions. */
-import { existsSync, readdirSync, readFileSync, readlinkSync, rmSync } from 'node:fs'
+import { existsSync, readdirSync, readFileSync, readlinkSync, rmSync, statSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
 import {
@@ -258,6 +258,14 @@ function devinSlotsDir(bag: Record<string, unknown>): string {
   return sessionSlotsDir('devin', typeof override === 'string' ? override : undefined)
 }
 
+/** The /proc root the pid probes read — `agents.devin.procDir`
+ *  overrides for tests (a scripted /proc tree); production reads the
+ *  real one. Same override convention as lockDir/logsDir. */
+export function devinProcDir(bag?: Record<string, unknown>): string {
+  const override = bag?.['procDir']
+  return typeof override === 'string' && override.trim() !== '' ? override : '/proc'
+}
+
 /** The BRO_AGENT_ID env badge on a live pid — the worker's registry
  *  correlation id. Undefined when the environ is unreadable or carries
  *  no badge (an interactive session, a foreign spawn). */
@@ -270,6 +278,66 @@ export function devinPidAgentId(pid: number, procDir = '/proc'): string | undefi
   } catch {
     return undefined
   }
+}
+
+/** The BRO_BEAD_ID pin on a live pid — the step a bro-spawned worker
+ *  claims. Undefined when unreadable or unpinned (a foreign session). */
+export function devinPidBead(pid: number, procDir = '/proc'): string | undefined {
+  try {
+    const m = /(?:^|\0)BRO_BEAD_ID=([^\0]+)/.exec(
+      readFileSync(join(procDir, String(pid), 'environ'), 'utf8')
+    )
+    return m === null ? undefined : m[1]
+  } catch {
+    return undefined
+  }
+}
+
+/** The session's working directory — /proc/<pid>/cwd. For a bro worker
+ *  this IS the claimed step's worktree; for a foreign session the
+ *  checkout it was launched in. Undefined when unreadable. */
+export function devinPidCwd(pid: number, procDir = '/proc'): string | undefined {
+  try {
+    return readlinkSync(join(procDir, String(pid), 'cwd'))
+  } catch {
+    return undefined
+  }
+}
+
+/** Devin's per-process log dir — `devin_<ts>_<pid>.log`, the sibling
+ *  of session_locks under the same data base. */
+export function devinLogsDir(
+  bag?: Record<string, unknown>,
+  env: Record<string, string | undefined> = process.env
+): string {
+  const override = bag?.['logsDir']
+  if (typeof override === 'string' && override.trim() !== '') {
+    return override
+  }
+  const locks = devinLocksDir(bag, env)
+  return join(locks, '..', 'logs')
+}
+
+/** The newest `devin_*_<pid>.log` — a live session's own output, the
+ *  `bro agents log` reach for sessions the registry never spawned.
+ *  Undefined when no file names the pid. */
+export function devinPidLog(pid: number, logsDir: string): string | undefined {
+  let newest: { path: string; mtime: number } | undefined
+  try {
+    for (const name of readdirSync(logsDir)) {
+      if (!name.startsWith('devin_') || !name.endsWith(`_${pid}.log`)) {
+        continue
+      }
+      const path = join(logsDir, name)
+      const mtime = statSync(path).mtimeMs
+      if (newest === undefined || mtime > newest.mtime) {
+        newest = { path, mtime }
+      }
+    }
+  } catch {
+    return undefined
+  }
+  return newest?.path
 }
 
 /** Live devin sessions as rows — the same lock scan liveDevinLockPids
@@ -329,7 +397,7 @@ export const devinSessionPlane: SessionPlane = {
     )
   },
   listLive(bag, workerEnv) {
-    return listDevinSessions(devinSessionDirs(bag, workerEnv))
+    return listDevinSessions(devinSessionDirs(bag, workerEnv), devinProcDir(bag))
   },
 }
 
