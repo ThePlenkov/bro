@@ -376,43 +376,21 @@ async function acpOp(
     // caller's onUpdate sink (streaming hosts) sees every chunk,
     // tool_call and plan update; absent sink = the same whole-turn
     // contract readText() gave before.
-    const onUpdate = opts.acp?.onUpdate
-    const turn = session.prompt(promptText, req()).catch(asAuthError)
-    // the turn's completion also queues as a `stop` for nextUpdate —
-    // racing keeps a prompt-level failure from hanging the pump
-    const stop = turn.then((response) => ({
-      kind: 'stop' as const,
-      stopReason: response.stopReason,
-      response,
-    }))
-    let text = ''
-    let resp: PromptResponse | undefined
-    for (;;) {
-      // prompt failures can surface on EITHER leg — a rejection through
-      // nextUpdate must classify through asAuthError the same way
-      const msg = await Promise.race([session.nextUpdate(), stop]).catch(asAuthError)
-      if (msg.kind === 'stop') {
-        resp = msg.response
-        break
-      }
-      // a throwing sink is an observer bug, not a turn failure —
-      // swallow it so the pump keeps draining updates to stop
-      try {
-        onUpdate?.(msg.update)
-      } catch {
-        /* observer must not kill the turn pump */
-      }
-      if (msg.update.sessionUpdate === 'agent_message_chunk') {
-        const c = msg.update.content
-        if (c.type === 'text') text += c.text
-      }
+    const r = await pumpTurn(
+      session,
+      promptText,
+      opts.acp?.onUpdate ?? (() => {}),
+      asAuthError,
+      req,
+      undefined,
+      by
+    )
+    if (r.stopReason !== 'end_turn') {
+      throw new JudgeUnavailable(`${by} (acp) turn stopped — ${r.stopReason}`)
     }
-    if (resp!.stopReason !== 'end_turn') {
-      throw new JudgeUnavailable(`${by} (acp) turn stopped — ${resp!.stopReason}`)
-    }
-    const usage = resp.usage
+    const usage = r.response.usage
     return {
-      text,
+      text: r.text,
       model,
       usage:
         usage != null && Number.isSafeInteger(usage.inputTokens)
@@ -627,7 +605,13 @@ function tracedUpdates(
           )
         }
       }
-      onUpdate(u)
+      // a throwing sink is an observer bug, not a turn failure —
+      // swallow it so the pump keeps draining updates to stop
+      try {
+        onUpdate(u)
+      } catch {
+        /* observer must not kill the turn pump */
+      }
     },
     flush: (status) => {
       for (const [, s] of open) s.end({ 'tool.status': 'turn_end' }, status)
@@ -646,16 +630,15 @@ async function pumpTurn(
   signal: AbortSignal | undefined,
   by: string,
   parent?: OtelCtx
-): Promise<{ stopReason: StopReason; text: string }> {
+): Promise<{ stopReason: StopReason; text: string; response: PromptResponse }> {
   const traced = tracedUpdates(onUpdate, parent)
-  const turn = session.prompt(promptText, req()).catch(asAuthError)
-  // the turn's completion also queues as a `stop` for nextUpdate —
-  // racing keeps a prompt-level failure from hanging the pump
-  const stopP = turn.then((response) => ({
-    kind: 'stop' as const,
-    stopReason: response.stopReason,
-    response,
-  }))
+  // prompt() enqueues `stop` into the SAME updates stream in order —
+  // updates drain first, `stop` arrives last, so trailing chunks can't
+  // be lost by racing the response promise (bro-d6mcd). The turn's
+  // own rejection lands on the queue as a reject — swallow it on the
+  // direct promise so it can't fire unhandled; the pump reads and
+  // classifies the same failure through nextUpdate.
+  void session.prompt(promptText, req()).catch(() => {})
   // a gone caller cancels the turn: the caller's dispose ends the
   // session — no orphan work on the agent
   const aborted = new Promise<never>((_, reject) => {
@@ -667,13 +650,14 @@ async function pumpTurn(
   try {
     for (;;) {
       const msg: ActiveSessionMessage = await Promise.race([
-        session.nextUpdate(),
-        stopP,
+        // prompt failures surface on the queue itself — classify the
+        // rejection through asAuthError the same as a direct throw
+        session.nextUpdate().catch(asAuthError),
         aborted,
       ])
       if (msg.kind === 'stop') {
         traced.flush('ok')
-        return { stopReason: msg.stopReason, text }
+        return { stopReason: msg.stopReason, text, response: msg.response }
       }
       traced.sink(msg.update)
       if (msg.update.sessionUpdate === 'agent_message_chunk') {
