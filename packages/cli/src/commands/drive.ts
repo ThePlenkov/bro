@@ -789,6 +789,7 @@ interface Ctx {
     maxRounds: number
     docsPaths: string[]
     docsMaxRounds: number
+    requireApproval: boolean
   }
   merge: boolean
   json: boolean
@@ -1888,6 +1889,7 @@ async function mergeAndRetire(
         maxRounds: ctx.act.maxRounds,
         docsPaths: ctx.act.docsPaths,
         docsMaxRounds: ctx.act.docsMaxRounds,
+        requireApproval: ctx.act.requireApproval,
       }
   ).catch(() => undefined)
   // exit-0 + OPEN IS the enqueue contract — act merge exits 0 only on a
@@ -2115,6 +2117,7 @@ async function drivePr(ctx: Ctx, pr: number, work: PassWork): Promise<PrVerdict>
         maxRounds: ctx.act.maxRounds,
         docsPaths: ctx.act.docsPaths,
         docsMaxRounds: ctx.act.docsMaxRounds,
+        requireApproval: ctx.act.requireApproval,
         stateCache: ctx.stateCache,
       }
     )
@@ -2228,6 +2231,7 @@ async function sweepSettledFixers(ctx: Ctx, prs: Set<number>): Promise<void> {
         maxRounds: ctx.act.maxRounds,
         docsPaths: ctx.act.docsPaths,
         docsMaxRounds: ctx.act.docsMaxRounds,
+        requireApproval: ctx.act.requireApproval,
         stateCache: ctx.stateCache,
       }
       )

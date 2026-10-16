@@ -24,6 +24,7 @@ const open = (over: Partial<PrActState> = {}): PrActState => ({
   maxRounds: 3,
   docsOnly: false,
   alerts: [],
+  requireApproval: false,
   ...over,
 })
 
@@ -111,5 +112,30 @@ describe('evaluateExitGate', () => {
     assert.match(g.blockers[0], /fix-round cap hit \(3>2, docs-only PR\)/)
     assert.equal(g.docs_only, true)
     assert.equal(evaluateExitGate(open()).docs_only, false)
+  })
+})
+
+describe('evaluateExitGate — requireApproval (bro-3vy93)', () => {
+  it('blocks auto-merge without an APPROVED verdict when the gate is on', () => {
+    const on = (over: Partial<PrActState> = {}) => open({ requireApproval: true, ...over })
+    assert.equal(evaluateExitGate(on({ reviewDecision: 'APPROVED' })).ok, true)
+    // REVIEW_REQUIRED / CHANGES_REQUESTED / an unanswerable probe all
+    // read as "not approved" — the flag exists for hostile-input rigs
+    assert.equal(evaluateExitGate(on({ reviewDecision: 'REVIEW_REQUIRED' })).ok, false)
+    assert.equal(evaluateExitGate(on({ reviewDecision: 'CHANGES_REQUESTED' })).ok, false)
+    const g = evaluateExitGate(on())
+    assert.equal(g.ok, false)
+    assert.match(g.blockers.at(-1)!, /no human approval.*\(got none\)/)
+    // the flag off → the verdict is ignored entirely
+    assert.equal(
+      evaluateExitGate(open({ reviewDecision: 'CHANGES_REQUESTED' })).ok,
+      true
+    )
+    // a merged PR's stale verdict is not a blocker — same rule as the
+    // rest of the gate
+    assert.equal(
+      evaluateExitGate(open({ requireApproval: true, state: 'MERGED' })).ok,
+      true
+    )
   })
 })

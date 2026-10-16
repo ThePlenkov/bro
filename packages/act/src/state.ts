@@ -260,6 +260,9 @@ export interface FetchPrActStateOpts {
   maxRounds?: number
   docsPaths?: string[]
   docsMaxRounds?: number
+  /** act.requireApproval — when true the gate also requires an
+   *  approving review verdict before auto-merge may land (bro-3vy93). */
+  requireApproval?: boolean
   /** The shared gate-state feed (bro-0tcrl): observe-path callers pass
    *  `prStateCache(dir)` so concurrent pollers share one fetch per
    *  target per TTL window instead of each paying the full 5-7 host
@@ -398,6 +401,20 @@ async function fetchState(
   const sastPending = sast.pending
   const sastUnknown = sast.unknown
 
+  // The approval verdict is lazy: prMeta carries it for free on hosts
+  // that expose it (GitHub), and the separate approvals probe (GitLab)
+  // only pays its call when the gate is on (bro-3vy93)
+  const requireApproval = opts?.requireApproval === true
+  const reviewDecision =
+    meta.reviewDecision ??
+    (requireApproval
+      ? await orSync(
+          rev.reviewDecisionAsync?.bind(rev),
+          (t: PrTarget) => rev.reviewDecision?.(t),
+          target
+        ).catch((): undefined => undefined)
+      : undefined)
+
   // A "fix round" is a reviewed push after the first — counting distinct
   // reviewed head SHAs, not commits: one push can carry many commits, and
   // committer dates are commit-time, not push-time. The first reviewed
@@ -440,5 +457,7 @@ async function fetchState(
     maxRounds,
     docsOnly: isDocsOnly,
     alerts,
+    reviewDecision,
+    requireApproval,
   }
 }

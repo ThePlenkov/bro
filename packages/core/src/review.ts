@@ -25,6 +25,11 @@ export interface PrMeta {
   baseRef: string
   mergeable: string // MERGEABLE | CONFLICTING | UNKNOWN
   mergeState: string
+  /** Host-side review verdict — 'APPROVED' | 'CHANGES_REQUESTED' |
+   *  'REVIEW_REQUIRED' (raw host spelling). undefined when the facade
+   *  can't say — an approval gate treats absent as "not approved",
+   *  never as a pass (bro-3vy93). */
+  reviewDecision?: string
 }
 
 /** One status check on the PR head — name + settled verdict. */
@@ -184,6 +189,12 @@ export interface ReviewFacade {
    *  inside a hook sweep. Optional: `fetchPrActState` falls back to the
    *  sync method wrapped in a resolved Promise for hosts without them. */
   prMetaAsync?(t: PrTarget): Promise<PrMeta>
+  /** The host's review verdict when prMeta can't carry it — GitLab
+   *  approvals live on a separate endpoint, so a lazy probe keeps the
+   *  call off every poll. Optional — fetched only when a caller's
+   *  gate needs it (act.requireApproval, bro-3vy93). */
+  reviewDecision?(t: PrTarget): string | undefined
+  reviewDecisionAsync?(t: PrTarget): Promise<string | undefined>
   /** Merged-PR detail for harvest — throws when the PR isn't merged or a
    *  MERGED PR reports no mergedAt. */
   mergedPrInfo(t: PrTarget, mergeSha?: string): MergedPrInfo

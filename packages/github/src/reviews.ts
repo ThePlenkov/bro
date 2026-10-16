@@ -56,6 +56,7 @@ function prMeta(t: PrTarget): PrMeta {
           state: string
           url: string
           isDraft: boolean
+          reviewDecision?: string | null
         }
       }
     }
@@ -64,7 +65,7 @@ function prMeta(t: PrTarget): PrMeta {
     'api',
     'graphql',
     '-f',
-    `query=query($o:String!,$r:String!,$pr:Int!){repository(owner:$o,name:$r){pullRequest(number:$pr){headRefOid headRefName baseRefName mergeable mergeStateStatus state url isDraft}}}`,
+    `query=query($o:String!,$r:String!,$pr:Int!){repository(owner:$o,name:$r){pullRequest(number:$pr){headRefOid headRefName baseRefName mergeable mergeStateStatus state url isDraft reviewDecision}}}`,
     '-f',
     `o=${owner}`,
     '-f',
@@ -84,6 +85,7 @@ function prMeta(t: PrTarget): PrMeta {
     baseRef: pr.baseRefName,
     mergeable: (pr.mergeable || 'UNKNOWN').toUpperCase(),
     mergeState: (pr.mergeStateStatus || 'UNKNOWN').toUpperCase(),
+    reviewDecision: pr.reviewDecision ?? undefined,
   }
 }
 
@@ -510,6 +512,7 @@ async function prMetaAsync(t: PrTarget): Promise<PrMeta> {
             state: string
             url: string
             isDraft: boolean
+            reviewDecision?: string | null
           }
         }
       }
@@ -518,7 +521,7 @@ async function prMetaAsync(t: PrTarget): Promise<PrMeta> {
       'api',
       'graphql',
       '-f',
-      `query=query($o:String!,$r:String!,$pr:Int!){repository(owner:$o,name:$r){pullRequest(number:$pr){headRefOid headRefName baseRefName mergeable mergeStateStatus state url isDraft}}}`,
+      `query=query($o:String!,$r:String!,$pr:Int!){repository(owner:$o,name:$r){pullRequest(number:$pr){headRefOid headRefName baseRefName mergeable mergeStateStatus state url isDraft reviewDecision}}}`,
       '-f',
       `o=${owner}`,
       '-f',
@@ -539,6 +542,7 @@ async function prMetaAsync(t: PrTarget): Promise<PrMeta> {
     baseRef: pr.baseRefName,
     mergeable: (pr.mergeable || 'UNKNOWN').toUpperCase(),
     mergeState: (pr.mergeStateStatus || 'UNKNOWN').toUpperCase(),
+    reviewDecision: pr.reviewDecision ?? undefined,
   }
 }
 

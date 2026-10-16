@@ -357,6 +357,7 @@ async function readAct(dir: string): Promise<BroStatus['act']> {
       maxRounds: act.maxRounds,
       docsPaths: act.docsPaths,
       docsMaxRounds: act.docsMaxRounds,
+    requireApproval: act.requireApproval,
       stateCache: prStateCache(dir),
     })
     const gate = evaluateExitGate(state)

@@ -1975,6 +1975,7 @@ async function serviceGate(ctx: Ctx, m: GateMember): Promise<ServiceVerdict> {
         maxRounds: ctx.act.maxRounds,
         docsPaths: ctx.act.docsPaths,
         docsMaxRounds: ctx.act.docsMaxRounds,
+        requireApproval: ctx.act.requireApproval,
         stateCache: ctx.stateCache,
       }
     )

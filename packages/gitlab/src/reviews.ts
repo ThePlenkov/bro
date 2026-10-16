@@ -577,6 +577,31 @@ export function gitlabReview(dir: string = process.cwd()): ReviewFacade {
       return m ? { repo: m[1]!, pr: Number(m[2]) } : null
     },
     prMeta,
+    reviewDecision(t) {
+      // GitLab has no single reviewDecision field — the approvals
+      // endpoint reports the verdict, and an unanswerable read stays
+      // "not approved", never a pass (bro-3vy93)
+      try {
+        const res = glabJson<{ approved?: boolean }>(
+          ['api', api(t.repo, `merge_requests/${t.pr}/approvals`)],
+          gopts()
+        )
+        return res.approved === true ? 'APPROVED' : undefined
+      } catch {
+        return undefined
+      }
+    },
+    async reviewDecisionAsync(t) {
+      try {
+        const res = await glabJsonAsync<{ approved?: boolean }>(
+          ['api', api(t.repo, `merge_requests/${t.pr}/approvals`)],
+          gopts()
+        )
+        return res.approved === true ? 'APPROVED' : undefined
+      } catch {
+        return undefined
+      }
+    },
     mergedPrInfo,
     mergedPrs,
     scanMergedPrs,

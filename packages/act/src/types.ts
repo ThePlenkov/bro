@@ -47,6 +47,13 @@ export interface PrActState {
    *  failure + fresh thread activity). The silent-reviewer signal:
    *  visible, never blocking. */
   alerts: string[]
+  /** Host review verdict ('APPROVED' etc.) — undefined when the facade
+   *  can't say. Probed lazily via the facade's optional reviewDecision
+   *  when meta doesn't carry it (GitLab approvals are a second call). */
+  reviewDecision?: string
+  /** act.requireApproval resolved into the fetch — the gate blocks
+   *  auto-merge unless reviewDecision is APPROVED (bro-3vy93). */
+  requireApproval: boolean
 }
 
 export interface ExitGate {

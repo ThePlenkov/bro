@@ -81,5 +81,13 @@ export function evaluateExitGate(state: PrActState): ExitGate {
   if (state.isDraft) {
     blockers.push('PR is a draft')
   }
+  // act.requireApproval — the hostile-input hardening: agent output
+  // never auto-lands without a human APPROVED verdict; an unanswerable
+  // probe (no facade method, host error) reads as "not approved"
+  if (state.requireApproval && state.reviewDecision !== 'APPROVED') {
+    blockers.push(
+      `no human approval — act.requireApproval requires APPROVED (got ${state.reviewDecision ?? 'none'})`
+    )
+  }
   return { ok: blockers.length === 0, blockers, ...base }
 }
