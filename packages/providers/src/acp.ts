@@ -689,8 +689,10 @@ export interface AcpPeer {
   req: (deadline?: number) => SendRequestOptions
   asAuthError: (err: unknown) => never
   /** Prompt capabilities negotiated at initialize — `image` gates
-   *  whether image content blocks may go on the wire (bro-7izjx). */
-  caps: { image: boolean }
+   *  whether image content blocks may go on the wire (bro-7izjx).
+   *  Optional: external peers built before the field existed are
+   *  treated as image-incapable (codeant #558). */
+  caps?: { image: boolean }
 }
 
 export async function acpOpen(

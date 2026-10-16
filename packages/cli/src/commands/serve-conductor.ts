@@ -427,7 +427,7 @@ async function messages(
     // image blocks ride the wire only when the agent advertised the
     // prompt capability — serialize after link() so the negotiated
     // caps are known (bro-7izjx)
-    const prompt = serializeBlocks(body, peer.caps.image)
+    const prompt = serializeBlocks(body, peer.caps?.image === true)
     // an image's true token cost is dimension-based, not size-based —
     // base64-length/4 is the rough wire proxy so usage reporting
     // doesn't silently zero a large payload (amazon-q #558)
