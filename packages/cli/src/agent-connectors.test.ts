@@ -59,6 +59,7 @@ import {
   type BudgetSnapshot,
 } from './agent-connectors.ts'
 import { initRepo, installFakeBd, readBeads, writeBeads } from './commands/testrepo.ts'
+import { devinSessionPlane } from './session-planes/devin.ts'
 import { VERSION } from './version.ts'
 
 // ambient repo/agent/store pins must not reach fixture git children
@@ -2193,5 +2194,43 @@ describe('devin connector', () => {
     // and it never leads the registry — the default spawn backend is
     // still the first entry, whatever it is
     assert.notEqual(names[0], 'devin')
+  })
+
+  test('a misbuilt plane (no listLive) degrades list(), never crashes', async () => {
+    const f = fixture([])
+    const saved = devinSessionPlane.listLive
+    const mutable = devinSessionPlane as { listLive?: unknown }
+    mutable.listLive = undefined
+    try {
+      const l = await conn(f.main, {}).list()
+      assert.deepEqual(l.agents, [])
+      assert.match(l.degraded ?? '', /lacks listLive/)
+    } finally {
+      mutable.listLive = saved
+      cleanup(f)
+    }
+  })
+
+  test('a backend:devin registry row holds no fleet slot — debris cannot stall the cap', () => {
+    const { root, main } = initRepo('bro-devinocc-')
+    try {
+      const home = join(main, '.git', 'bro', 'agents')
+      mkdirSync(home, { recursive: true })
+      // entryOccupies' devin case — the connector never spawns, so a row
+      // naming it is debris; the session quota lives in the devin plane
+      const registry: Record<string, AgentRegistryEntry> = {
+        'step-d': {
+          agentId: 'devin-x',
+          backend: 'devin',
+          spawnedAt: '2026-10-05T14:00:00Z',
+        },
+      }
+      assert.equal(
+        fleetOccupancy(main, home, registry, { agents: {}, connectors: {} }),
+        0
+      )
+    } finally {
+      rmSync(root, { recursive: true, force: true })
+    }
   })
 })

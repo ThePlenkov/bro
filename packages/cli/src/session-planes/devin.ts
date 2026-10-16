@@ -315,6 +315,13 @@ export function devinLogsDir(
     return override
   }
   const locks = devinLocksDir(bag, env)
+  const lockOverride = bag?.['lockDir']
+  if (typeof lockOverride === 'string' && lockOverride.trim() !== '') {
+    // a custom lockDir broke the real-install sibling layout — a
+    // `../logs` escape would land outside the operator's chosen root,
+    // so the fallback nests inside the override instead
+    return join(locks, 'logs')
+  }
   return join(locks, '..', 'logs')
 }
 

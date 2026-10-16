@@ -923,6 +923,12 @@ function entryOccupies(
       return dockerOccupies(entry, probes.dockerLive())
     case 'copilot':
       return copilotOccupies(entry, probes.copilotLive())
+    case 'devin':
+      // the devin connector never spawns — a registry row naming it is
+      // hand-edited or migrated debris, and the session quota lives in
+      // the devin plane, not the fleet cap. Holding a slot here would
+      // stall legitimate spawns on a phantom forever
+      return false
     default:
       // a backend this build doesn't know — no probe exists, so the
       // .exit file is the only death record readable. Harvest before
@@ -4778,8 +4784,13 @@ export function makeDevinConnector(ctx: ConnectorCtx, env: AgentConnectorEnv): A
         .map((e) => e.agentId)
         .filter((id): id is string => typeof id === 'string' && id !== '')
     )
-    return devinSessionPlane
-      .listLive!(bag)
+    const listLive = devinSessionPlane.listLive
+    if (listLive === undefined) {
+      // surfaces through list()'s degrade path — a misbuilt plane is a
+      // degraded backend, never a TypeError or a silent empty board
+      throw new SpawnError('devin session plane lacks listLive', 'unavailable')
+    }
+    return listLive(bag)
       .filter((s) => s.agentId === undefined || !claimed.has(s.agentId))
       .map((s) => devinSessionInfo(s, logsDir, procDir))
   }
