@@ -226,10 +226,15 @@ export function ensurePeerBinding(
     return withMeshConfig(dir, (cfg) => {
       const mesh = cfg.mesh ?? {}
       const peers = { ...(mesh.peers ?? {}) }
-      if (
-        peers[alias] !== undefined ||
-        Object.values(peers).some((p) => localCheckout(p.remote) === checkout)
-      ) {
+      const existing = peers[alias]
+      if (existing !== undefined) {
+        // idempotent only when the alias already names THIS checkout —
+        // an alias bound elsewhere is a conflict the caller must name
+        return localCheckout(existing.remote) === checkout
+          ? { added: false }
+          : { added: false, error: `peer "${alias}" is already bound to ${existing.remote}` }
+      }
+      if (Object.values(peers).some((p) => localCheckout(p.remote) === checkout)) {
         return { added: false }
       }
       peers[alias] = { rig, remote: checkout }

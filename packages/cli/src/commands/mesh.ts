@@ -445,8 +445,12 @@ function cmdLifecycle(dir: string, kind: MeshKind, args: string[]): void {
     try {
       const bead = taskStore(anchor).get<{ id: string; labels?: string[] }>(thread)
       pinned = bead?.labels?.includes(`export:${thread}`) === true
-    } catch {
-      pinned = false
+    } catch (e) {
+      console.error(
+        `! result posted but the anchor bead could not be read — capability NOT shipped ` +
+          `(${e instanceof Error ? e.message : String(e)})`
+      )
+      return
     }
     if (pinned) {
       try {

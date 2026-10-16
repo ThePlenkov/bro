@@ -115,8 +115,12 @@ function scanLocal(
   let rows: (BeadLike & { status?: string })[]
   try {
     // closedLocal needs the store's own all-filter off too — the
-    // backend drops closed rows before this loop ever sees them
-    rows = taskStore(dir).list<BeadLike & { status?: string }>({ all: closedLocal || undefined })
+    // backend drops closed rows before this loop ever sees them.
+    // limit:0 likewise — a configured page must not hide envelopes
+    rows = taskStore(dir).list<BeadLike & { status?: string }>({
+      all: closedLocal || undefined,
+      limit: 0,
+    })
   } catch (err) {
     errors.push(
       `${peer.alias}: store list failed — ${err instanceof Error ? err.message : String(err)}`
@@ -179,7 +183,7 @@ export function meshInbox(
   // matching no binding is surfaced flagged `unbound`, like mismatch
   const bound = new Set(peers.map((p) => p.rig))
   try {
-    const rows = taskStore(dir).list<BeadLike & { status?: string }>()
+    const rows = taskStore(dir).list<BeadLike & { status?: string }>({ limit: 0 })
     for (const row of rows) {
       if (row.status === 'closed') {
         continue
