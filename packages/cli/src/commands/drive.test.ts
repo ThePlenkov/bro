@@ -343,6 +343,30 @@ describe('agentProcessesIn', () => {
   test('a missing procDir is empty — non-Linux degrades, never blocks', () => {
     assert.deepEqual(agentProcessesIn('/tmp', '/no/such/proc'), [])
   })
+
+  // bro-dkw3e: monitors inherit BRO_AGENT_ID from the session that
+  // spawned them — the ancestry scan can't tell them from workers,
+  // so the occupancy check reads their own argv instead.
+  test('monitor-shaped processes do not occupy the worktree', () => {
+    const wt = mkdtempSync(join(tmpdir(), 'bro-drive-wt-'))
+    const { proc, mk, rm } = fakeProc()
+    try {
+      mk(501, wt, 'bro\0watch\0--every\x00300', 'BRO_AGENT_ID=w1\0')
+      mk(502, wt, `node\0${join('/repo', 'dist', 'index.js')}\0serve\0--port\x001`, 'AI_AGENT=devin\0')
+      mk(504, wt, `node\0${join('/repo', 'dist', 'index.js')}\0review\0act\0wait\x00554`, 'AI_AGENT=devin\0')
+      // real workers keep counting — including tool shells (bro-pywx)
+      mk(505, wt, 'sh\0-c\0npm test', 'BRO_AGENT_ID=w1\0')
+      mk(506, wt, 'devin\0-p\0fix stuff')
+      mk(507, wt, 'bash\0-l', 'AI_AGENT=devin\0')
+      assert.deepEqual(
+        agentProcessesIn(wt, proc).map((h) => h.pid),
+        [505, 506, 507]
+      )
+    } finally {
+      rm()
+      rmSync(wt, { recursive: true, force: true })
+    }
+  })
 })
 
 describe('processesRootedIn', () => {

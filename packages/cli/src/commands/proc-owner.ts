@@ -122,6 +122,28 @@ function procIsAgent(dir: string): boolean {
   return procAgentPid(dir) !== null
 }
 
+/** Monitor shape — a process that OBSERVES the repo but never works
+ *  in the tree: bro's own watcher/status/serve verbs and act waits
+ *  (bro-dkw3e). The badge is inherited from the spawning session, so
+ *  the ancestry scan alone can't tell a monitor from a worker — this
+ *  test reads the process's OWN argv. Shells stay workers: a bare
+ *  bash inside the tree is indistinguishable from a raced worker's
+ *  tool shell (bro-pywx), and false-positive beats false-negative. */
+const MONITOR_VERBS = new Set(['watch', 'wait', 'status', 'serve', 'pulse', 'notify', 'daemon'])
+
+function procIsMonitor(dir: string): boolean {
+  const argv = readProcText(dir, 'cmdline').split('\0').filter(Boolean)
+  const exe = basename(argv[0] ?? '')
+  const positionals = argv.slice(1).filter((a) => !a.startsWith('-'))
+  // `node <dist>/index.js serve` — the script path is the entry, the
+  // verb follows it; `bro watch` needs no drop. A bare `bro` binary
+  // path keeps argv0 semantics (devin/claude argv0s never reach here —
+  // they aren't in MONITOR_VERBS anyway).
+  const dropEntry = exe !== 'bro' && /\.(?:js|ts|mjs|cjs)$/.test(positionals[0] ?? '')
+  const cmdTokens = dropEntry ? positionals.slice(1) : positionals
+  return cmdTokens.some((t) => MONITOR_VERBS.has(t))
+}
+
 /** Live processes ROOTED in `worktree` — cwd inside, or an argv token
  *  that is a path inside the tree. The argv leg catches
  *  `node <wt>/dist/index.js serve`: the code a long-lived service is
@@ -187,6 +209,12 @@ export function agentProcessesIn(worktree: string, procDir = '/proc'): ProcHit[]
       continue
     }
     if (cwd !== root && !cwd.startsWith(root + sep)) {
+      continue
+    }
+    // a monitor (bro watch/serve, act wait, a parked shell) inherits
+    // the agent badge but never works the tree — exclude it before
+    // the agent-shape verdict (bro-dkw3e)
+    if (procIsMonitor(dir)) {
       continue
     }
     if (procIsAgent(dir)) {
