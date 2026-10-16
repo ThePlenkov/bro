@@ -47,6 +47,10 @@ export interface FakeAcpAgent {
   sessions: Array<{ cwd: string }>
   /** The client's answer to a scripted session/request_permission. */
   permissionOutcome?: unknown
+  /** What the agent got back from a scripted terminal/* round-trip. */
+  terminalResult?: { output: string; exitCode: number | null | undefined }
+  /** The client's advertised capabilities from initialize. */
+  clientCapabilities?: unknown
 }
 
 /** A scripted in-process ACP agent — the real protocol round-trip
@@ -89,6 +93,9 @@ export function fakeAcpAgent(
     /** advertise promptCapabilities.image — the conductor only sends
      *  image blocks when the agent says it can consume them (bro-7izjx). */
     imageCapable?: boolean
+    /** Exercise the client's terminal plane mid-prompt: create →
+     *  wait_for_exit → output → release on `sh -c <value>`. */
+    askTerminal?: string
   } = {}
 ): FakeAcpAgent {
   const seen: FakeAcpAgent = {
@@ -99,14 +106,17 @@ export function fakeAcpAgent(
     sessions: [],
   }
   const app = agent({ name: 'fake-acp' })
-    .onRequest('initialize', (ctx) => ({
-      protocolVersion: opts.protocolVersion ?? ctx.params.protocolVersion,
-      authMethods: opts.authMethods ?? [],
-      agentInfo: { name: 'fake-acp', version: '0' },
-      agentCapabilities: {
-        promptCapabilities: { image: opts.imageCapable === true },
-      },
-    }))
+    .onRequest('initialize', (ctx) => {
+      seen.clientCapabilities = ctx.params.clientCapabilities
+      return {
+        protocolVersion: opts.protocolVersion ?? ctx.params.protocolVersion,
+        authMethods: opts.authMethods ?? [],
+        agentInfo: { name: 'fake-acp', version: '0' },
+        agentCapabilities: {
+          promptCapabilities: { image: opts.imageCapable === true },
+        },
+      }
+    })
     .onRequest('session/new', (ctx) => {
       if (opts.failNew === 'auth') {
         throw RequestError.authRequired()
@@ -152,6 +162,26 @@ export function fakeAcpAgent(
           options: opts.askPermission,
         })
         seen.permissionOutcome = res.outcome
+      }
+      if (opts.askTerminal !== undefined) {
+        const created = await ctx.client.request('terminal/create', {
+          sessionId: ctx.params.sessionId,
+          command: 'sh',
+          args: ['-c', opts.askTerminal],
+        })
+        const status = await ctx.client.request('terminal/wait_for_exit', {
+          sessionId: ctx.params.sessionId,
+          terminalId: created.terminalId,
+        })
+        const out = await ctx.client.request('terminal/output', {
+          sessionId: ctx.params.sessionId,
+          terminalId: created.terminalId,
+        })
+        await ctx.client.request('terminal/release', {
+          sessionId: ctx.params.sessionId,
+          terminalId: created.terminalId,
+        })
+        seen.terminalResult = { output: out.output, exitCode: status.exitCode }
       }
       const updates: SessionUpdate[] = opts.updates ?? [
         {

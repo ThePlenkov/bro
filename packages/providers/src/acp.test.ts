@@ -808,3 +808,39 @@ describe('providerClient wiring', () => {
     assert.equal(client.call, undefined)
   })
 })
+
+describe('acp terminal plane (bro-z7afs)', () => {
+  const ENTRY: AcpEntry = { type: 'acp', command: 'agent --acp' }
+
+  test('clientCapabilities advertise terminal: true', async () => {
+    const fake = fakeAcpAgent({ replyText: '{}' })
+    await acpClient('provider:x', ENTRY, { acp: { peer: fake.app } }).chat!(
+      'p',
+      deadline()
+    )
+    const caps = fake.clientCapabilities as { terminal?: boolean }
+    assert.equal(caps.terminal, true)
+  })
+
+  test('agent terminal/* calls run a real host-side child — create, wait, output, release', async () => {
+    const fake = fakeAcpAgent({ replyText: '{}', askTerminal: 'echo host-side-terminal' })
+    await acpClient('provider:x', ENTRY, { acp: { peer: fake.app } }).chat!(
+      'p',
+      deadline()
+    )
+    assert.equal(fake.terminalResult?.exitCode, 0)
+    assert.match(fake.terminalResult?.output ?? '', /host-side-terminal/)
+  })
+
+  test('the pooled path (acpOpen) registers the same handlers', async () => {
+    const fake = fakeAcpAgent({ replyText: 'sum', askTerminal: 'echo pooled-terminal' })
+    const peer = await acpOpen('conductor:x', ENTRY, { acp: { peer: fake.app } }, deadline())
+    try {
+      await acpPooledTurn(peer, ENTRY, { acp: { peer: fake.app } }, 'p', deadline())
+      assert.equal(fake.terminalResult?.exitCode, 0)
+      assert.match(fake.terminalResult?.output ?? '', /pooled-terminal/)
+    } finally {
+      peer.close()
+    }
+  })
+})
