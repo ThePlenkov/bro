@@ -626,6 +626,11 @@ export function spawnStepAgent(
     throw new SpawnInputError(`worktree ${repoRoot} does not exist`)
   }
   const prompt = req.prompt ?? resolvePrompt(dir, beads, req.molStep, req.promptFile, conn.name)
+  // a whitespace-only FILE resolves to nothing as surely as a
+  // whitespace-only flag — check the resolved text, not just req.prompt
+  if (prompt.trim() === '') {
+    throw new SpawnInputError('prompt must not be empty')
+  }
   // class resolution (spec bro-1x7p): runs whenever fleet.routing is
   // declared — the lane pins provenance regardless of who named the
   // provider. The routed chain head supplies the provider only when no

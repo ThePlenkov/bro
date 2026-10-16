@@ -1349,20 +1349,25 @@ function guardExistingEntry(
 /** Guard the beads claim — a spawn must own (or create) the claim it
  *  will pin, never steal a live worker's or a human's step. Returns the
  *  claim state the write phase needs for claim-vs-rebind. `phantom`
- *  marks the agents-run `adhoc-` namespace (spec bro-fqen0): a step id
- *  that is never a bead — no probe, no claim, the registry row is the
- *  only record. probeStep can't tell "bead missing" from "store down"
- *  (its catch is silent), so the namespace prefix is the honest
- *  predicate — a store outage on a real step still claims fail-loud. */
+ *  marks the agents-run `adhoc-` namespace (spec bro-fqen0): a minted
+ *  `adhoc-<hex>` id is never a bead — no claim, the registry row is
+ *  the only record. The prefix alone is not the predicate: a store
+ *  CAN use `adhoc` as its issue prefix, minting real `adhoc-*` beads
+ *  (codeant #583) — so an `adhoc-*` id that probes as a live bead
+ *  takes the normal claim path. A probe miss stays phantom: minted
+ *  ids are random (a real bead can't collide), and when the store is
+ *  down no claim could land anyway — probeStep can't tell "missing"
+ *  from "store down" (its catch is silent), so for every OTHER step
+ *  the claim write still fails loud. */
 function guardClaim(
   spec: SpawnSpec,
   hasEntry: boolean,
   claimAs: string | undefined
 ): { claimed: boolean; actor: string | undefined; phantom: boolean } {
-  if (spec.molStep.startsWith('adhoc-')) {
+  const step = probeStep(spec.beadsDir, spec.molStep)
+  if (spec.molStep.startsWith('adhoc-') && step === undefined) {
     return { claimed: false, actor: undefined, phantom: true }
   }
-  const step = probeStep(spec.beadsDir, spec.molStep)
   if (step?.status !== 'in_progress') {
     return { claimed: false, actor: undefined, phantom: false }
   }
