@@ -167,7 +167,14 @@ function renderAgents(board, snap) {
   });
   (board.discovered || []).forEach(function (s) {
     var label = s.kind + ':' + (s.name || 'pid ' + s.pid);
+    // fold onto the registry row by badge, or onto the connector's own
+    // projection of the same session (a devin-backend row ids itself
+    // devin:<name> — listing it again as a discovered row would
+    // double-count one live session)
     var hit = s.agentId !== undefined && s.agentId !== '' ? byId[s.agentId] : undefined;
+    if (hit === undefined) {
+      hit = byId[s.kind + ':' + (s.name || s.pid)];
+    }
     if (hit !== undefined) {
       // the session is this agent's inner process — annotate, don't
       // double-count

@@ -14,6 +14,7 @@ import {
   installFakeDoltRemote,
   readBeads,
   runCli,
+  writeBeads,
 } from './testrepo.ts'
 import { scrubEnv, testGit } from '@broject/core'
 
@@ -230,7 +231,9 @@ describe('bro mesh', () => {
     inside(main, root, () => {
       const peerDir = join(root, 'peer')
       mkdirSync(join(peerDir, '.beads'), { recursive: true })
-      const { binDir, db } = installFakeBd(join(root, 'peertools'), [
+      // the envelope lives in the peer's OWN store — a real local peer
+      // keeps its rows under <checkout>/.beads, not the reader's store
+      writeBeads(join(peerDir, '.beads', 'beads.json'), [
         {
           id: 'peer-1',
           title: 'local ask',
@@ -244,6 +247,7 @@ describe('bro mesh', () => {
           ],
         },
       ])
+      const { binDir, db } = installFakeBd(join(root, 'peertools'))
       const env = { PATH: `${binDir}:${process.env.PATH}`, FAKE_BD_DB: db }
 
       const add = runCli(['mesh', 'peers', 'add', 'p', 'mesh://acme/peer', peerDir], { cwd: main, env })

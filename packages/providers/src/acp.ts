@@ -981,6 +981,177 @@ export async function acpPooledTurn(
   }
 }
 
+/** A session kept alive across turns — the conductor's Messages-API
+ *  reuse leg (bro-whn25). The caller owns `dispose()` — a failed turn,
+ *  an eviction, or peer death all end the session's cacheability, and
+ *  the caller drops it from any reuse map. */
+export interface AcpRetainedSession {
+  sessionId: string
+  /** One more user turn on the live session — the pooled pump minus
+   *  session/new+dispose. A differing requestModel re-pins on the
+   *  live session's config options. */
+  prompt(
+    prompt: string | ContentBlock[],
+    deadline: number,
+    turn?: PooledTurnOpts
+  ): Promise<{ stopReason: StopReason; text: string; model: string }>
+  /** Re-resolve a request model on the live session without a turn —
+   *  a resend that pins a different model still owns the session. */
+  repin(requestModel: string, deadline: number): Promise<string>
+  dispose(): void
+}
+
+/** session/new WITHOUT the per-request dispose — the model pin is
+ *  resolved at open and re-resolvable per prompt. Error surface is
+ *  acpPooledTurn's: config stays config, everything else is a
+ *  JudgeUnavailable naming the backend. */
+export async function acpSessionRetain(
+  peer: AcpPeer,
+  entry: AcpEntry,
+  opts: ProviderWireOpts,
+  deadline: number,
+  turn: PooledTurnOpts = {}
+): Promise<AcpRetainedSession> {
+  const ctx = peer.ctx
+  const req = () => peer.req(deadline)
+  const by = turn.by ?? 'conductor'
+  const span = otelSpan(
+    'acp.session.retain',
+    { 'acp.by': by, 'acp.requested_model': turn.requestModel ?? '' },
+    { parent: turn.parent }
+  )
+  try {
+    const session = await acpSessionOpen(ctx, opts, peer.asAuthError, req)
+    const configOptions = session.newSessionResponse.configOptions ?? []
+    const base = opts.model ?? entry.model
+    // the RAW requested id (possibly a composite like 'swe-2-max') —
+    // prompt() compares raw-to-raw so a resubmitted request id doesn't
+    // re-pin a model the open already resolved
+    const requested = turn.requestModel ?? base
+    let model: string
+    try {
+      model = await resolveTurnModel(
+        ctx,
+        session.sessionId,
+        configOptions,
+        requested,
+        base,
+        by,
+        req
+      )
+    } catch (err) {
+      // the session opened but can't run the pin — it is not
+      // cacheable, and no caller ever sees the handle to dispose it
+      try {
+        session.dispose()
+      } catch {
+        // already gone — the drop is the point
+      }
+      throw err
+    }
+    // what the session currently RUNS — a mid-conversation re-pin moves
+    // the cursor so the same new pin isn't applied twice
+    let curReq = requested
+    let curModel = model
+    span.end({ 'acp.session_id': session.sessionId, 'acp.model': model })
+    // dispose is idempotent — the prompt failure path already drops the
+    // handle, and the cache caller drops it again on eviction; a second
+    // cancel on a dead session is a no-op, not an error
+    let disposed = false
+    const dispose = () => {
+      if (disposed) {
+        return
+      }
+      disposed = true
+      session.dispose()
+    }
+    /** The shared wire classification: config stays config (a refused
+     *  pin names the caller's mistake); everything else is a
+     *  JudgeUnavailable naming the backend and the last transport
+     *  lines. */
+    const classifyWire = (err: unknown): Error => {
+      if (err instanceof JudgeUnavailable || err instanceof AcpConfigError) {
+        return err
+      }
+      const tail = peer.tail()
+      const detail = tail === '' ? '' : ` (${tail})`
+      return new JudgeUnavailable(`acp ${by} unavailable — ${errMsg(err)}${detail}`)
+    }
+    /** Resolve a request pin on the live session and move the cursor —
+     *  shared by prompt() and repin(); a refused pin surfaces config
+     *  and keeps the session, a dead wire disposes + goes unavailable. */
+    const applyPin = async (want: string | undefined, dl: number): Promise<string> => {
+      try {
+        const m = await resolveTurnModel(
+          ctx,
+          session.sessionId,
+          configOptions,
+          want,
+          base,
+          by,
+          () => peer.req(dl)
+        )
+        curReq = want
+        curModel = m
+        return m
+      } catch (err) {
+        const classified = classifyWire(err)
+        if (!(classified instanceof JudgeUnavailable)) {
+          throw classified
+        }
+        try {
+          dispose()
+        } catch {
+          // already gone — the drop is the point
+        }
+        throw classified
+      }
+    }
+    return {
+      sessionId: session.sessionId,
+      prompt: async (prompt, dl, t = {}) => {
+        try {
+          const r2 = () => peer.req(dl)
+          const want = t.requestModel ?? curReq
+          const effective = want === curReq ? curModel : await applyPin(want, dl)
+          const r = await pumpTurn(
+            session,
+            prompt,
+            t.onUpdate ?? (() => {}),
+            peer.asAuthError,
+            r2,
+            t.signal,
+            by,
+            t.parent
+          )
+          return { ...r, model: effective }
+        } catch (err) {
+          // a failed turn leaves the session's context in doubt — the
+          // session is dead weight; the caller evicts its cache entry
+          // but the acp-side handle is dropped here and now
+          try {
+            dispose()
+          } catch {
+            // already gone — the drop is the point
+          }
+          throw classifyWire(err)
+        }
+      },
+      repin: (requestModel, dl) =>
+        requestModel === curReq ? Promise.resolve(curModel) : applyPin(requestModel, dl),
+      dispose,
+    }
+  } catch (err) {
+    span.end({ error: errMsg(err) }, 'error')
+    if (err instanceof JudgeUnavailable || err instanceof AcpConfigError) {
+      throw err
+    }
+    const tail = peer.tail()
+    const detail = tail === '' ? '' : ` (${tail})`
+    throw new JudgeUnavailable(`acp ${by} unavailable — ${errMsg(err)}${detail}`)
+  }
+}
+
 /** The typed reply contract — the agent's message text IS the
  *  `{answers: {…}}` payload (a jev-family model speaks it natively).
  *  Strict JSON: a fenced or prosaic reply is drift, fail-open. */

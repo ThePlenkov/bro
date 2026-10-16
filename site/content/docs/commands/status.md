@@ -36,12 +36,20 @@ requires `Authorization: Bearer <token>`.
 | ----- | ------- |
 | `GET /` | Service index |
 | `GET /fleet` | Fleet web UI |
+| `GET /ui` | Plane-catalog dashboard — one panel per plane, generated from the index |
 | `GET /api/v1/health` | Liveness |
 | `GET /api/v1/snapshot` | Watch snapshot |
 | `GET /api/v1/agents` | Agent plane |
 | `GET /api/v1/agents/<ref>` | One agent by ID or molecule step |
+| `GET /api/v1/agents/<ref>/log?lines=N[&follow]` | Agent log tail — `follow` upgrades to SSE |
 | `POST /api/v1/agents` | Spawn an agent |
 | `DELETE /api/v1/agents/<ref>` | Stop an agent |
+| `GET /api/v1/planes` | Plane-catalog index — reads, verbs, live capabilities |
+| `GET /api/v1/planes/<plane>` | The plane's `list()` — `status`, `limit`, filters |
+| `GET /api/v1/planes/<plane>/<read\|ref>` | A declared read, or `get(ref)` |
+| `POST /api/v1/planes/<plane>/<verb>` | Execute a declared verb — body is the args object |
+| `GET /api/v1/events/stream` | SSE over the local bus — `Last-Event-ID` resume |
+| `GET /api/v1/events/asyncapi.json` | Generated AsyncAPI schema for the stream |
 | `POST /api/v1/webhooks/github` | GitHub webhook ingest → `github:*` bus topics (HMAC auth, not the session token) |
 | `ALL /v1/*` | The Messages-API provider plane — byte proxy by default, conductor when `BRO_PROVIDER_BACKEND` is set |
 
