@@ -439,28 +439,28 @@ function shipCapability(anchor: string, dir: string, thread: string): void {
   }
   try {
     if (bead.status !== 'closed') {
-      if (anchor !== dir) {
-        const close = bdAt(join(anchor, '.beads'), ['close', thread])
-        if (close.code !== 0 || !close.ran) {
-          throw new Error(close.err || 'bd unreachable')
-        }
-      } else {
-        bd(['close', thread], anchor)
-      }
+      bdAnchor(anchor, dir, ['close', thread])
     }
-    if (anchor !== dir) {
-      const ship = bdAt(join(anchor, '.beads'), ['ship', thread])
-      if (ship.code !== 0 || !ship.ran) {
-        throw new Error(ship.err || 'bd unreachable')
-      }
-    } else {
-      bd(['ship', thread], anchor)
-    }
+    bdAnchor(anchor, dir, ['ship', thread])
   } catch {
     console.error(
       `! result posted but capability not shipped — close the request bead, then \`bd -C ${anchor} ship ${thread}\``
     )
   }
+}
+
+/** bd on the anchor store — pinned `bdAt` for foreign checkouts, the
+ *  ambient-env `bd` for our own (the pin contract: own-store env is
+ *  the caller's contract, a stale worktree `.beads` must not win). */
+function bdAnchor(anchor: string, dir: string, args: string[]): void {
+  if (anchor !== dir) {
+    const r = bdAt(join(anchor, '.beads'), args)
+    if (r.code !== 0 || !r.ran) {
+      throw new Error(r.err || 'bd unreachable')
+    }
+    return
+  }
+  bd(args, anchor)
 }
 
 function cmdLifecycle(dir: string, kind: MeshKind, args: string[]): void {
