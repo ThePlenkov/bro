@@ -966,6 +966,9 @@ export interface AcpRetainedSession {
     deadline: number,
     turn?: PooledTurnOpts
   ): Promise<{ stopReason: StopReason; text: string; model: string }>
+  /** Re-resolve a request model on the live session without a turn —
+   *  a resend that pins a different model still owns the session. */
+  repin(requestModel: string, deadline: number): Promise<string>
   dispose(): void
 }
 
@@ -996,15 +999,27 @@ export async function acpSessionRetain(
     // prompt() compares raw-to-raw so a resubmitted request id doesn't
     // re-pin a model the open already resolved
     const requested = turn.requestModel ?? base
-    const model = await resolveTurnModel(
-      ctx,
-      session.sessionId,
-      configOptions,
-      requested,
-      base,
-      by,
-      req
-    )
+    let model: string
+    try {
+      model = await resolveTurnModel(
+        ctx,
+        session.sessionId,
+        configOptions,
+        requested,
+        base,
+        by,
+        req
+      )
+    } catch (err) {
+      // the session opened but can't run the pin — it is not
+      // cacheable, and no caller ever sees the handle to dispose it
+      try {
+        session.dispose()
+      } catch {
+        // already gone — the drop is the point
+      }
+      throw err
+    }
     // what the session currently RUNS — a mid-conversation re-pin moves
     // the cursor so the same new pin isn't applied twice
     let curReq = requested
@@ -1021,26 +1036,44 @@ export async function acpSessionRetain(
       disposed = true
       session.dispose()
     }
+    /** Resolve a request pin on the live session and move the cursor —
+     *  shared by prompt() and repin(); a refused pin surfaces config,
+     *  a dead wire disposes and surfaces unavailable. */
+    const applyPin = async (want: string | undefined, dl: number): Promise<string> => {
+      try {
+        const m = await resolveTurnModel(
+          ctx,
+          session.sessionId,
+          configOptions,
+          want,
+          base,
+          by,
+          () => peer.req(dl)
+        )
+        curReq = want
+        curModel = m
+        return m
+      } catch (err) {
+        if (err instanceof JudgeUnavailable || err instanceof AcpConfigError) {
+          throw err
+        }
+        try {
+          dispose()
+        } catch {
+          // already gone — the drop is the point
+        }
+        const tail = peer.tail()
+        const detail = tail === '' ? '' : ` (${tail})`
+        throw new JudgeUnavailable(`acp ${by} unavailable — ${errMsg(err)}${detail}`)
+      }
+    }
     return {
       sessionId: session.sessionId,
       prompt: async (prompt, dl, t = {}) => {
         try {
           const r2 = () => peer.req(dl)
           const want = t.requestModel ?? curReq
-          let effective = curModel
-          if (want !== curReq) {
-            effective = await resolveTurnModel(
-              ctx,
-              session.sessionId,
-              configOptions,
-              want,
-              base,
-              by,
-              r2
-            )
-            curReq = want
-            curModel = effective
-          }
+          const effective = want === curReq ? curModel : await applyPin(want, dl)
           const r = await pumpTurn(
             session,
             prompt,
@@ -1069,6 +1102,8 @@ export async function acpSessionRetain(
           throw new JudgeUnavailable(`acp ${by} unavailable — ${errMsg(err)}${detail}`)
         }
       },
+      repin: (requestModel, dl) =>
+        requestModel === curReq ? Promise.resolve(curModel) : applyPin(requestModel, dl),
       dispose,
     }
   } catch (err) {

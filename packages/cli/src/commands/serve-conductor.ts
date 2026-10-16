@@ -287,8 +287,12 @@ interface ConvSession {
   /** body.messages count fully accounted for — sent user turns AND
    *  assistant echoes the session already holds. */
   consumed: number
-  /** sha256 over serTurn(messages[0..consumed-1]) — the prefix proof. */
+  /** sha256 over prefix+turnHashInput(messages[0..consumed-1]) — the
+   *  prefix proof; a changed system/tools fails it and evicts. */
   historyHash: string
+  /** raw request-model id the session currently runs — a resend that
+   *  pins a different model re-pins instead of replaying. */
+  requestModel?: string
   lastReply: { blocks: OutBlock[]; model: string; stopReason: string; inputTokens: number }
   busy: boolean
   lastSeen: number
@@ -297,9 +301,24 @@ interface ConvSession {
 const CONV_TTL_MS = 10 * 60_000
 const CONV_CAP = 32
 
-const hashTurns = (msgs: ClientMessage[], n: number): string =>
+/** What the fingerprint/history proofs hash: the canonical turn text
+ *  PLUS a digest of any image payload — `serTurn` collapses images to
+ *  `[image]`, so without this two histories differing only in pixels
+ *  would collide (codeant #569). */
+const turnHashInput = (m: ClientMessage): string => {
+  const imgs =
+    typeof m.content === 'string'
+      ? ''
+      : (m.content ?? [])
+          .filter((b) => b.type === 'image' && typeof b.source?.data === 'string')
+          .map((b) => createHash('sha256').update(b.source?.data ?? '').digest('hex'))
+          .join(',')
+  return `${serTurn(m)}\x00${imgs}`
+}
+
+const hashTurns = (prefix: string, msgs: ClientMessage[], n: number): string =>
   createHash('sha256')
-    .update(msgs.slice(0, n).map(serTurn).join('\n'))
+    .update(`${prefix}\n${msgs.slice(0, n).map(turnHashInput).join('\n')}`)
     .digest('hex')
 
 /** Where the conversation id comes from: an explicit `x-bro-session`
@@ -320,7 +339,7 @@ function conversationKey(req: IncomingMessage, body: MessagesRequest): string | 
     return undefined
   }
   const fp = createHash('sha256')
-    .update(`${prefixText(body)}\n${serTurn(first)}`)
+    .update(`${prefixText(body)}\n${turnHashInput(first)}`)
     .digest('hex')
   return `f:${fp}`
 }
@@ -583,7 +602,8 @@ async function messages(
   opts: ProviderWireOpts,
   link: (parent?: OtelCtx) => Promise<AcpPeer>,
   parent: OtelCtx | undefined,
-  sessions: Map<string, ConvSession>
+  sessions: Map<string, ConvSession>,
+  pendingOpens: Set<string>
 ): Promise<void> {
   let body: MessagesRequest
   try {
@@ -612,17 +632,37 @@ async function messages(
     const deadline = Date.now() + cfg.timeoutMs
     sweepSessions(sessions, t0)
     const cand = key !== undefined ? sessions.get(key) : undefined
+    const prefix = prefixText(body)
     const usable =
       cand !== undefined &&
       cand.peer === peer &&
       !cand.busy &&
       cand.consumed <= msgs.length &&
-      hashTurns(msgs, cand.consumed) === cand.historyHash
+      hashTurns(prefix, msgs, cand.consumed) === cand.historyHash
     if (usable === true) {
       const tail = tailTurns(msgs, cand.consumed)
       if (tail.length === 0) {
         // a pure retry — nothing new for the session; replay the
-        // recorded reply instead of paying a duplicate turn
+        // recorded reply instead of paying a duplicate turn. A
+        // resend that pins a DIFFERENT model is not a replay — the
+        // session re-pins and the recorded answer stays honest
+        // (the reply was generated under the old pin either way).
+        if (requestModel !== undefined && requestModel !== cand.requestModel) {
+          try {
+            await cand.live.repin(requestModel, deadline)
+            cand.requestModel = requestModel
+          } catch (err) {
+            if (key !== undefined) {
+              sessions.delete(key)
+            }
+            try {
+              cand.live.dispose()
+            } catch {
+              // already gone — the drop is the point
+            }
+            throw err
+          }
+        }
         cand.lastSeen = Date.now()
         respond(
           res,
@@ -681,13 +721,19 @@ async function messages(
       // caps are known (bro-7izjx)
       const prompt = serializeBlocks(body, imageOk)
       inputTokens = inputTokensOf(prompt)
-      if (key !== undefined && !candBusy) {
-        const live = await acpSessionRetain(peer, cfg.entry, opts, deadline, {
-          by: `conductor:${cfg.backend}`,
-          requestModel,
-          parent,
-        })
+      const opening = key !== undefined && pendingOpens.has(key)
+      if (key !== undefined && !candBusy && !opening) {
+        // mark BEFORE the await — a concurrent first request on the
+        // same key takes the one-shot path instead of opening a twin
+        // session whose loser leaks out of the map (codeant #569)
+        pendingOpens.add(key)
+        let live: AcpRetainedSession | undefined
         try {
+          live = await acpSessionRetain(peer, cfg.entry, opts, deadline, {
+            by: `conductor:${cfg.backend}`,
+            requestModel,
+            parent,
+          })
           reply = await live.prompt(prompt, deadline, {
             signal: ac.signal,
             by: `conductor:${cfg.backend}`,
@@ -698,17 +744,21 @@ async function messages(
           // the first turn died — nothing is cached yet but the acp
           // side still holds the session; drop it before surfacing
           try {
-            live.dispose()
+            live?.dispose()
           } catch {
             // already gone — the drop is the point
           }
           throw err
+        } finally {
+          pendingOpens.delete(key)
         }
         conv = {
-          live,
+          // reaching here means prompt() settled — live is assigned
+          live: live as AcpRetainedSession,
           peer,
           consumed: msgs.length,
-          historyHash: hashTurns(msgs, msgs.length),
+          historyHash: hashTurns(prefix, msgs, msgs.length),
+          requestModel,
           lastReply: { blocks: [], model: '', stopReason: '', inputTokens: 0 },
           busy: false,
           lastSeen: Date.now(),
@@ -750,7 +800,7 @@ async function messages(
     // session just proved it holds) is consumed context now
     const all = body.messages ?? []
     conv.consumed = all.length
-    conv.historyHash = hashTurns(all, all.length)
+    conv.historyHash = hashTurns(prefixText(body), all, all.length)
     conv.lastReply = { blocks, model: reply.model, stopReason, inputTokens }
     if (key !== undefined) {
       // re-insert on every hit — insertion order is the LRU order
@@ -827,6 +877,9 @@ export function conductorProxy(
   // (x-bro-session pin or history fingerprint). Transport death kills
   // every session it carried, so the abort listener drops the map.
   const sessions = new Map<string, ConvSession>()
+  // keys whose first session/new is in flight — a concurrent same-key
+  // request must not open a twin (the loser would leak unmapped)
+  const pendingOpens = new Set<string>()
   const getLink = (parent?: OtelCtx): Promise<AcpPeer> => {
     if (link === undefined) {
       otelEvent('acp.spawn', { backend: cfg.backend })
@@ -885,7 +938,7 @@ export function conductorProxy(
       })
     })
     if (method === 'POST' && path === '/v1/messages') {
-      await messages(req, res, cfg, wireOpts, getLink, httpSpan.ctx, sessions)
+      await messages(req, res, cfg, wireOpts, getLink, httpSpan.ctx, sessions, pendingOpens)
       return
     }
     if (method === 'POST' && path === '/v1/messages/count_tokens') {

@@ -700,6 +700,60 @@ describe('serve /v1/* — retained acp sessions', () => {
     }
   })
 
+  test('histories differing only in image data never collide', async () => {
+    const fake = fakeAcpAgent({ replyText: 'x', imageCapable: true })
+    const { url, close } = await listen(
+      deps({ provider: conductorProxy(CFG, { acp: { peer: fake.app } }) })
+    )
+    try {
+      const img = (data: string) => [
+        {
+          role: 'user',
+          content: [
+            { type: 'text', text: 'what is this' },
+            { type: 'image', source: { type: 'base64', media_type: 'image/png', data } },
+          ],
+        },
+      ]
+      // serTurn collapses both to `[image]` — the fingerprint must
+      // still tell them apart (codeant #569)
+      assert.equal((await post(url, img('aGVsbG8='))).status, 200)
+      assert.equal((await post(url, img('d29ybGQ='))).status, 200)
+      assert.equal(fake.sessions.length, 2)
+      assert.equal(fake.prompts.length, 2)
+    } finally {
+      await close()
+    }
+  })
+
+  test('a resend pinning a different model re-pins without a new turn', async () => {
+    const fake = fakeAcpAgent({ replyText: 'x', configOptions: [MODEL_OPTION] })
+    const { url, close } = await listen(
+      deps({ provider: conductorProxy(CFG, { acp: { peer: fake.app } }) })
+    )
+    try {
+      const headers = { 'x-bro-session': 's' }
+      assert.equal((await post(url, [{ role: 'user', content: 'a' }], headers)).status, 200)
+      // same history, new model pin — the session re-pins and the
+      // recorded reply replays; no duplicate turn reaches the agent
+      const r = await fetch(`${url}/v1/messages`, {
+        method: 'POST',
+        headers: { ...auth, 'content-type': 'application/json', ...headers },
+        body: JSON.stringify({
+          model: 'dv-acp/swe-y',
+          messages: [{ role: 'user', content: 'a' }],
+          stream: false,
+        }),
+      })
+      assert.equal(r.status, 200)
+      assert.equal(fake.sessions.length, 1)
+      assert.equal(fake.prompts.length, 1)
+      assert.deepEqual(fake.configSets, [{ configId: 'model', value: 'swe-y' }])
+    } finally {
+      await close()
+    }
+  })
+
   test('a failed turn evicts — the retry opens a fresh session', async () => {
     const fake = fakeAcpAgent({ replyText: 'x', failPrompt: 'generic' })
     const { url, close } = await listen(
