@@ -39,6 +39,9 @@
  * stdout, exit 0. Everything is best-effort — hooks only fire in bro-enabled
  * repos (bro.config.json or .beads/ walking up) and every connector probe is
  * fail-open so a missing bd/gh or a dead network can never stall the session.
+ * `BRO_HOOKS=0` marks the tree a machine backend (the acp provider pins it on
+ * spawned agents — spec bro-ddksm): session events no-op; installed git-hook
+ * events are unaffected.
  *
  * Cursor's stdin (`cursor_version` / `hook_event_name`) is translated at
  * this edge: `conversation_id` → session id, `loop_count > 0` →
@@ -84,6 +87,7 @@ import { agentOwner, markerLive, markerOwner, ownerTag } from './proc-owner.ts'
 import { runGuards, type GuardConfig, type GuardJudgeInput } from '@broject/guard'
 import { GUARD_PROBES } from '../guard-probes.ts'
 import { appendRow, judgeConfig, judgeFacade } from '@broject/judge'
+import { otelSpan } from '@broject/providers'
 import {
   hooksDir,
   previousTraceFile,
@@ -902,9 +906,14 @@ function perfFile(sessionId: string): string | null {
 let perfBuf: PerfRow[] | null = null
 
 /** Build the collector's callback: stamps probe + event onto each
- *  timing row and buffers it for the event-end flush. */
+ *  timing row and buffers it for the event-end flush. Also opens the
+ *  probe's otel span — created inline with the probe call and ended
+ *  when rows arrive, so span duration ≈ probe duration (spec
+ *  bro-xeozo telemetry). */
 function probeReporter(event: string, probe: string): ProbeReporter {
+  const span = otelSpan(`hook.probe.${probe}`, { 'hook.event': event })
   return (rows) => {
+    span.end({ 'hook.rows': rows.length })
     if (!perfBuf) {
       return
     }
@@ -1813,15 +1822,31 @@ export async function runHooksCommand(argv: string[]): Promise<void> {
     typeof (raw as { turn_id?: unknown }).turn_id === 'string'
   const root = hookProjectDir(raw)
   const input = cursorClient ? cursorToHookInput(raw) : asHookInput(raw)
+  // BRO_HOOKS=0 marks a machine-backend tree — the acp provider pins it
+  // on the agent it spawns (spec bro-ddksm): session hooks rehydrate and
+  // gate for a human session that isn't there, so every event is pure
+  // deadline cost. Only session-lifecycle events skip; the git-hook and
+  // operator paths above stay live — installed shims (provenance, the
+  // shared-ref guard) are a different contract the flag must not weaken.
+  if (process.env.BRO_HOOKS === '0') {
+    answerCursorPermission(event, input)
+    return
+  }
   if (!broEnabled(root) || !enterHookProject(root)) {
     answerCursorPermission(event, input)
     return
   }
   perfBuf = []
   const t0 = Date.now()
+  const evSpan = otelSpan('hook.event', {
+    'hook.event': event,
+    'hook.session': typeof input.session_id === 'string' ? input.session_id : '',
+  })
   try {
     await dispatchHook(event, raw, input)
+    evSpan.end()
   } catch {
+    evSpan.end({}, 'error')
     // hooks fail open — a bro bug must never break the session.
     // A permission hook that already answered returned above; this
     // covers a throw before that answer.

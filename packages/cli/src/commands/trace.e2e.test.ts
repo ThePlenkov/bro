@@ -114,14 +114,26 @@ const cursor = (f: Fixture): Record<string, unknown> =>
 
 interface OtlpBody {
   resourceSpans: Array<{
-    scopeSpans: Array<{ spans: Array<{ name: string; attributes?: Array<{ key: string }> }> }>
+    scopeSpans: Array<{
+      scope?: { name?: string }
+      spans: Array<{ name: string; attributes?: Array<{ key: string }> }>
+    }>
   }>
 }
 
+/** Bodies posted by the journal export — the child's own `bro.cmd`
+ *  span shares this collector under scope 'bro.acp', so assertions
+ *  filter on the emitter scope rather than raw request count. */
+const journalBodies = (c: Collector): OtlpBody[] =>
+  c.bodies
+    .map((b) => JSON.parse(b) as OtlpBody)
+    .filter((b) =>
+      b.resourceSpans.some((r) => r.scopeSpans.some((s) => s.scope?.name === '@broject/bro'))
+    )
+
 const postedSpans = (c: Collector): OtlpBody['resourceSpans'][number]['scopeSpans'][number]['spans'] =>
-  c.bodies.flatMap(
-    (b) =>
-      (JSON.parse(b) as OtlpBody).resourceSpans.flatMap((r) => r.scopeSpans.flatMap((s) => s.spans))
+  journalBodies(c).flatMap((b) =>
+    b.resourceSpans.flatMap((r) => r.scopeSpans.flatMap((s) => s.spans))
   )
 
 /** Collector + fixture wired for one test — the try/finally is owned
@@ -174,7 +186,7 @@ describe('bro trace export', () => {
       const r = await runCliAsync(['trace', 'export'], { cwd: f.main, env })
       assert.equal(r.code, 0, r.stderr)
       assert.match(r.stdout, /exported 2 span/)
-      assert.deepEqual(c.paths, ['POST /v1/traces'])
+      assert.ok(c.paths.includes('POST /v1/traces'))
       const spans = postedSpans(c)
       assert.equal(spans.length, 2)
       assert.equal(spans[0]!.name, 'bro.exec')
@@ -183,7 +195,7 @@ describe('bro trace export', () => {
       const again = await runCliAsync(['trace', 'export'], { cwd: f.main, env })
       assert.equal(again.code, 0)
       assert.match(again.stdout, /nothing to export/)
-      assert.equal(c.bodies.length, 1)
+      assert.equal(journalBodies(c).length, 1)
       // the cursor recorded the advance
       const cur = cursor(f) as { sessions: Record<string, { line: number }> }
       assert.equal(cur.sessions['s1.jsonl']?.line, 2)
@@ -200,11 +212,11 @@ describe('bro trace export', () => {
       assert.equal(r.code, 0, r.stderr)
       const payload = JSON.parse(r.stdout) as OtlpBody
       assert.equal(payload.resourceSpans.length, 1)
-      assert.equal(c.bodies.length, 0)
+      assert.equal(journalBodies(c).length, 0)
       // dry-run must not consume the lines — a real export still sends
       const r2 = await runCliAsync(['trace', 'export'], { cwd: f.main, env: otlpEnv(c) })
       assert.equal(r2.code, 0)
-      assert.equal(c.bodies.length, 1)
+      assert.equal(journalBodies(c).length, 1)
     })
   })
 
@@ -217,7 +229,7 @@ describe('bro trace export', () => {
       const line = readFileSync(join(f.markerDir, 'trace', 's1.jsonl'), 'utf8').trim()
       assert.equal((JSON.parse(line) as { bead?: string }).bead, 'bro-x1')
       // the detached export lands shortly after — poll, never block
-      const arrived = await until(() => c.bodies.length > 0)
+      const arrived = await until(() => journalBodies(c).length > 0)
       assert.equal(arrived, true, 'detached flush never reached the collector')
       const span = postedSpans(c)[0]!
       assert.equal(span.name, 'bro.exec')
