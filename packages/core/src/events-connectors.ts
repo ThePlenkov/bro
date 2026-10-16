@@ -112,6 +112,17 @@ export function mailboxEvents(dir: string, sessionId: string | undefined): Event
             locator
           )
         }
+        // bro-9rls.5 dual-write: the mailbox stays the in-session
+        // delivery path AND a live broker gets the mirrored envelope —
+        // the bus becomes the live stream (/api/v1/events/stream)
+        // without either consumer changing when it is down. Fail-open:
+        // a dead broker is routine, never a publish failure.
+        if (event.topic === 'notify') {
+          const socket = busSocketPath(dir)
+          if (socket !== null) {
+            await busPublish(socket, event).catch(() => {})
+          }
+        }
         return { published: true, locator }
       } catch (err) {
         return { published: false, reason: err instanceof Error ? err.message : String(err) }
