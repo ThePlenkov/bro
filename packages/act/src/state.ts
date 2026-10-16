@@ -286,8 +286,13 @@ export async function fetchPrActState(
   opts?: FetchPrActStateOpts
 ): Promise<PrActState> {
   const cache = opts?.stateCache ?? null
+  // a cached entry serves only when it answers what THIS caller asked —
+  // requireApproval needs the humanApproval probe, and an entry fetched
+  // without it carries no verdict (the probe is lazy)
+  const usable = (s: PrActState): boolean =>
+    !(opts?.requireApproval === true && s.humanApproval === undefined)
   const hit = cache?.read(target)
-  if (hit != null) {
+  if (hit != null && usable(hit)) {
     return hit
   }
   const key = `${target.repo}#${target.pr}`
@@ -317,7 +322,10 @@ async function fetchShared(
   try {
     if (release !== null && cache !== null) {
       const hit = cache.read(target)
-      if (hit != null) {
+      if (
+        hit != null &&
+        !(opts?.requireApproval === true && hit.humanApproval === undefined)
+      ) {
         return hit
       }
     }
@@ -414,6 +422,16 @@ async function fetchState(
           target
         ).catch((): undefined => undefined)
       : undefined)
+  // the human-approval probe — a bot-only APPROVED verdict must not
+  // satisfy act.requireApproval; unanswerable stays undefined, which
+  // the gate reads as "not approved" (never a pass)
+  const humanApproval = requireApproval
+    ? await orSync(
+        rev.humanApprovedAsync?.bind(rev),
+        (t: PrTarget) => rev.humanApproved?.(t) ?? false,
+        target
+      ).catch((): undefined => undefined)
+    : undefined
 
   // A "fix round" is a reviewed push after the first — counting distinct
   // reviewed head SHAs, not commits: one push can carry many commits, and
@@ -458,6 +476,6 @@ async function fetchState(
     docsOnly: isDocsOnly,
     alerts,
     reviewDecision,
-    requireApproval,
+    humanApproval,
   }
 }

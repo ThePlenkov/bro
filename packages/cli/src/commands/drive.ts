@@ -2131,7 +2131,7 @@ async function drivePr(ctx: Ctx, pr: number, work: PassWork): Promise<PrVerdict>
     }
     return { pr, link, verdict: 'settled', detail: state.state.toLowerCase() }
   }
-  const gate = evaluateExitGate(state)
+  const gate = evaluateExitGate(state, { requireApproval: ctx.act.requireApproval })
   const worktree = work.worktreeByBranch.get(state.headRef)
   const occCtx: OccupancyCtx = {
     agents: work.agents,

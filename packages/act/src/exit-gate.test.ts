@@ -24,7 +24,6 @@ const open = (over: Partial<PrActState> = {}): PrActState => ({
   maxRounds: 3,
   docsOnly: false,
   alerts: [],
-  requireApproval: false,
   ...over,
 })
 
@@ -116,26 +115,30 @@ describe('evaluateExitGate', () => {
 })
 
 describe('evaluateExitGate — requireApproval (bro-3vy93)', () => {
-  it('blocks auto-merge without an APPROVED verdict when the gate is on', () => {
-    const on = (over: Partial<PrActState> = {}) => open({ requireApproval: true, ...over })
-    assert.equal(evaluateExitGate(on({ reviewDecision: 'APPROVED' })).ok, true)
-    // REVIEW_REQUIRED / CHANGES_REQUESTED / an unanswerable probe all
-    // read as "not approved" — the flag exists for hostile-input rigs
-    assert.equal(evaluateExitGate(on({ reviewDecision: 'REVIEW_REQUIRED' })).ok, false)
-    assert.equal(evaluateExitGate(on({ reviewDecision: 'CHANGES_REQUESTED' })).ok, false)
-    const g = evaluateExitGate(on())
-    assert.equal(g.ok, false)
-    assert.match(g.blockers.at(-1)!, /no human approval.*\(got none\)/)
+  it('blocks auto-merge without a human approval when the gate is on', () => {
+    const on = { requireApproval: true }
+    // a human approval passes — the probe, not the host's aggregate
+    // verdict (bot approvals don't satisfy it)
+    assert.equal(evaluateExitGate(open({ humanApproval: true }), on).ok, true)
+    // no human approval — bot-only reviews land here too
+    const denied = evaluateExitGate(open({ humanApproval: false }), on)
+    assert.equal(denied.ok, false)
+    assert.match(denied.blockers.at(-1)!, /none\/bot-only/)
+    // an unanswerable probe reads as "not approved", never a pass
+    const unknown = evaluateExitGate(open(), on)
+    assert.equal(unknown.ok, false)
+    assert.match(unknown.blockers.at(-1)!, /unanswerable/)
     // the flag off → the verdict is ignored entirely
+    assert.equal(evaluateExitGate(open({ humanApproval: false })).ok, true)
     assert.equal(
-      evaluateExitGate(open({ reviewDecision: 'CHANGES_REQUESTED' })).ok,
+      evaluateExitGate(open({ humanApproval: false }), { requireApproval: false }).ok,
       true
     )
-    // a merged PR's stale verdict is not a blocker — same rule as the
-    // rest of the gate
-    assert.equal(
-      evaluateExitGate(open({ requireApproval: true, state: 'MERGED' })).ok,
-      true
-    )
+    // policy rides the call, not the state: a PrActState physically
+    // cannot carry requireApproval, so a cached `false` can never slip
+    // the check — the caller decides every gate evaluation
+    // (a merged PR's stale verdict is not a blocker — same rule as the
+    // rest of the gate)
+    assert.equal(evaluateExitGate(open({ state: 'MERGED' }), on).ok, true)
   })
 })

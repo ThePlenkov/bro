@@ -963,7 +963,7 @@ async function cmdMerge(argv: string[]): Promise<void> {
             requireApproval: act.requireApproval,
           }
         )
-        const gate = evaluateExitGate(state)
+        const gate = evaluateExitGate(state, { requireApproval: act.requireApproval })
         if (!gate.ok) {
           console.error(
             `exit_gate=BLOCKED — refusing to merge; ${rev.facade.prLink(rev.repo, pr)} (${m.branch}) is not ready:`

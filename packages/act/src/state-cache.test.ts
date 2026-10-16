@@ -44,7 +44,6 @@ const stateFor = (pr: number, headSha = 'a'.repeat(40)): PrActState => ({
   maxRounds: 0,
   docsOnly: false,
   alerts: [],
-  requireApproval: false,
 })
 
 describe('prStateCache', () => {

@@ -51,9 +51,14 @@ export interface PrActState {
    *  can't say. Probed lazily via the facade's optional reviewDecision
    *  when meta doesn't carry it (GitLab approvals are a second call). */
   reviewDecision?: string
-  /** act.requireApproval resolved into the fetch — the gate blocks
-   *  auto-merge unless reviewDecision is APPROVED (bro-3vy93). */
-  requireApproval: boolean
+  /** 'at least one approving review by a human actor' — the probe
+   *  behind act.requireApproval. Aggregate host verdicts count bot
+   *  approvals; this one doesn't. Probed lazily via the facade's
+   *  optional humanApproved — undefined = unanswerable, which the
+   *  gate reads as "not approved" (bro-3vy93). Data, not policy —
+   *  the requireApproval flag itself lives on the gate call so a
+   *  cached state can never smuggle a stale option through. */
+  humanApproval?: boolean
 }
 
 export interface ExitGate {

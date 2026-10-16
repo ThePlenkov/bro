@@ -195,6 +195,13 @@ export interface ReviewFacade {
    *  gate needs it (act.requireApproval, bro-3vy93). */
   reviewDecision?(t: PrTarget): string | undefined
   reviewDecisionAsync?(t: PrTarget): Promise<string | undefined>
+  /** 'at least one approving review authored by a human actor' — the
+   *  aggregate host verdict (GitHub reviewDecision, GitLab approved)
+   *  counts bot/service approvals, and act.requireApproval means a
+   *  human sign-off. Optional + lazy like reviewDecisionAsync — a
+   *  host without the probe reads "unanswerable" → not approved. */
+  humanApproved?(t: PrTarget): boolean
+  humanApprovedAsync?(t: PrTarget): Promise<boolean>
   /** Merged-PR detail for harvest — throws when the PR isn't merged or a
    *  MERGED PR reports no mergedAt. */
   mergedPrInfo(t: PrTarget, mergeSha?: string): MergedPrInfo

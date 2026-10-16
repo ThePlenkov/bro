@@ -26,6 +26,29 @@ import { glab, glabJson, glabJsonAsync, glabPaged, glabPagedAsync, glabTry } fro
 const api = (repo: string, path: string): string =>
   `projects/${encodeURIComponent(repo)}/${path}`
 
+/** The approvals endpoint's payload — `approved` is the aggregate
+ *  verdict, `approved_by[].user` the per-actor identity the human
+ *  filter needs (GitLab marks service/project bots with `bot: true`;
+ *  an absent flag is a normal account). */
+type ApprovalsDoc = {
+  approved?: boolean
+  approved_by?: { user?: { bot?: boolean } }[]
+}
+
+const approvalsArgs = (t: PrTarget): string[] => [
+  'api',
+  api(t.repo, `merge_requests/${t.pr}/approvals`),
+]
+
+/** 'approved by a human' — the aggregate verdict counts bot/service
+ *  approvals, so act.requireApproval keeps only non-bot approvers. */
+function humanApproval(res: ApprovalsDoc): boolean {
+  return (
+    res.approved === true &&
+    (res.approved_by ?? []).some((a) => a.user?.bot !== true)
+  )
+}
+
 // --- repo / host ------------------------------------------------------------
 
 function remoteUrl(dir: string): string | undefined {
@@ -580,26 +603,45 @@ export function gitlabReview(dir: string = process.cwd()): ReviewFacade {
     reviewDecision(t) {
       // GitLab has no single reviewDecision field — the approvals
       // endpoint reports the verdict, and an unanswerable read stays
-      // "not approved", never a pass (bro-3vy93)
+      // "not approved", never a pass. `approved: true` with an EMPTY
+      // approved_by means "no approvals required", not a review — the
+      // verdict needs an actual approver (bro-3vy93)
       try {
-        const res = glabJson<{ approved?: boolean }>(
-          ['api', api(t.repo, `merge_requests/${t.pr}/approvals`)],
-          gopts()
-        )
-        return res.approved === true ? 'APPROVED' : undefined
+        const res = glabJson<ApprovalsDoc>(approvalsArgs(t), gopts())
+        return res.approved === true && (res.approved_by?.length ?? 0) > 0
+          ? 'APPROVED'
+          : undefined
       } catch {
         return undefined
       }
     },
     async reviewDecisionAsync(t) {
       try {
-        const res = await glabJsonAsync<{ approved?: boolean }>(
-          ['api', api(t.repo, `merge_requests/${t.pr}/approvals`)],
-          gopts()
-        )
-        return res.approved === true ? 'APPROVED' : undefined
+        const res = await glabJsonAsync<ApprovalsDoc>(approvalsArgs(t), gopts())
+        return res.approved === true && (res.approved_by?.length ?? 0) > 0
+          ? 'APPROVED'
+          : undefined
       } catch {
         return undefined
+      }
+    },
+    humanApproved(t) {
+      // the aggregate `approved` counts bot/service accounts — a human
+      // sign-off needs at least one approved_by entry whose user is not
+      // flagged bot (absent flag reads as a normal account)
+      try {
+        const res = glabJson<ApprovalsDoc>(approvalsArgs(t), gopts())
+        return humanApproval(res)
+      } catch {
+        return false
+      }
+    },
+    async humanApprovedAsync(t) {
+      try {
+        const res = await glabJsonAsync<ApprovalsDoc>(approvalsArgs(t), gopts())
+        return humanApproval(res)
+      } catch {
+        return false
       }
     },
     mergedPrInfo,

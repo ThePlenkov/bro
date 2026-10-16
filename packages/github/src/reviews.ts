@@ -497,6 +497,61 @@ function prUpdatedAt(t: PrTarget): string | null {
 // Same bodies, ghJsonAsync/ghTryAsync in place of the spawnSync forms —
 // semantics identical, only the event loop notices.
 
+/** 'approved by a human' — the host's reviewDecision verdict counts
+ *  bot/app approvals, so act.requireApproval enumerates the approving
+ *  reviews and keeps only User-authored ones (bro-3vy93). */
+function approvedReviewsQuery(): string {
+  return 'query($o:String!,$r:String!,$pr:Int!){repository(owner:$o,name:$r){pullRequest(number:$pr){reviews(first:50,states:[APPROVED]){nodes{author{__typename}}}}}}'
+}
+
+type ApprovedReviewNodes = {
+  data?: {
+    repository?: {
+      pullRequest?: {
+        reviews?: { nodes?: { author?: { __typename?: string } | null }[] }
+      }
+    }
+  }
+}
+
+function humanApproved(t: PrTarget): boolean {
+  const { owner, name } = parts(t.repo)
+  const nodes =
+    ghJson<ApprovedReviewNodes>([
+      'api',
+      'graphql',
+      '-f',
+      `query=${approvedReviewsQuery()}`,
+      '-f',
+      `o=${owner}`,
+      '-f',
+      `r=${name}`,
+      '-F',
+      `pr=${t.pr}`,
+    ]).data?.repository?.pullRequest?.reviews?.nodes ?? []
+  return nodes.some((n) => n?.author?.__typename === 'User')
+}
+
+async function humanApprovedAsync(t: PrTarget): Promise<boolean> {
+  const { owner, name } = parts(t.repo)
+  const nodes =
+    (
+      await ghJsonAsync<ApprovedReviewNodes>([
+        'api',
+        'graphql',
+        '-f',
+        `query=${approvedReviewsQuery()}`,
+        '-f',
+        `o=${owner}`,
+        '-f',
+        `r=${name}`,
+        '-F',
+        `pr=${t.pr}`,
+      ])
+    ).data?.repository?.pullRequest?.reviews?.nodes ?? []
+  return nodes.some((n) => n?.author?.__typename === 'User')
+}
+
 async function prMetaAsync(t: PrTarget): Promise<PrMeta> {
   const { owner, name } = parts(t.repo)
   const pr = (
@@ -1307,6 +1362,8 @@ export function githubReview(dir: string = process.cwd()): ReviewFacade {
     reviewedShas,
 
     prMetaAsync,
+    humanApproved,
+    humanApprovedAsync,
     checksAsync,
     checkAnnotationsAsync,
     reviewedShasAsync,
