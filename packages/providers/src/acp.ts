@@ -43,6 +43,7 @@ import type {
   JudgeQuestion,
   ProviderEntry,
 } from '@broject/core'
+import { AcpTerminals } from './acp-terminal.ts'
 import { objOr, remaining, splitShellWords } from './http.ts'
 import type {
   ProviderCall,
@@ -290,7 +291,7 @@ async function acpInit(ctx: ClientContext, by: string, deadline: number) {
       clientInfo: { name: 'bro', version: '1' },
       clientCapabilities: {
         fs: { readTextFile: false, writeTextFile: false },
-        terminal: false,
+        terminal: true,
       },
     },
     req()
@@ -417,9 +418,9 @@ async function withAcp<T>(
   deadline: number,
   op: (ctx: ClientContext) => Promise<T>
 ): Promise<T> {
-  const app = client({ name: 'bro' }).onRequest(
-    'session/request_permission',
-    denyPermission
+  const terminals = new AcpTerminals()
+  const app = terminals.register(
+    client({ name: 'bro' }).onRequest('session/request_permission', denyPermission)
   )
   const peer = opts.acp?.peer
   let child: ChildProcess | undefined
@@ -465,6 +466,7 @@ async function withAcp<T>(
     const detail = stderr === '' ? '' : ` (${stderr})`
     throw new JudgeUnavailable(`acp ${by} unavailable — ${errMsg(err)}${detail}`)
   } finally {
+    terminals.dispose()
     child?.kill('SIGKILL')
   }
 }
@@ -707,9 +709,9 @@ export async function acpOpen(
     span.end({ error: errMsg(err) }, 'error')
     throw err
   }
-  const app = client({ name: 'bro' }).onRequest(
-    'session/request_permission',
-    denyPermission
+  const terminals = new AcpTerminals()
+  const app = terminals.register(
+    client({ name: 'bro' }).onRequest('session/request_permission', denyPermission)
   )
   const peer = opts.acp?.peer
   let child: ChildProcess | undefined
@@ -741,8 +743,13 @@ export async function acpOpen(
   }
   const close = (): void => {
     conn.close()
+    terminals.dispose()
     child?.kill('SIGKILL')
   }
+  // a dead transport is itself a close: pooled callers only drop their
+  // peer refs on abort — without this, terminals the agent spawned (and
+  // the child) outlive the dead connection they were created under
+  conn.signal.addEventListener('abort', close, { once: true })
   try {
     const { asAuthError, req, caps } = await withDeadline(deadline, () =>
       acpInit(conn.agent, by, deadline)
