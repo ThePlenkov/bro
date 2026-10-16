@@ -20,10 +20,11 @@ session per client conversation and feeds only the new tail.
   unknowable context.
 - Conversation identity in `serve-conductor.ts`:
   `x-bro-session` header wins for clients that can pin it; otherwise a
-  fingerprint `sha256(prefix + serTurn(messages[0]))` — the history's
-  birth certificate, stable because clients prepend, never rewrite the
-  start. The response echoes the key on `x-bro-session` so a
-  fingerprint client can upgrade to a pin.
+  fingerprint `sha256(prefix + turnHashInput(messages[0]))` (canonical
+  turn text plus image-payload digests) — stable because clients
+  prepend, never rewrite the start. The response echoes `x-bro-session`
+  only for client-pinned (`h:`) keys; the internal `f:` fingerprint is
+  never exposed.
 - Correctness never trusts the key: a candidate session re-proves the
   consumed prefix byte-for-byte (`hashTurns(msgs, consumed)`) before
   slicing the delta. An edited or shrunken history evicts the stale
