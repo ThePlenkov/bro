@@ -226,21 +226,32 @@ function serializeBlocks(body: MessagesRequest, imageOk: boolean): AcpContentBlo
   }
   for (const m of body.messages ?? []) {
     const role = m.role === 'assistant' ? 'assistant' : 'user'
+    const sep = buf === '' ? '' : '\n\n'
     if (typeof m.content === 'string') {
-      buf += `${buf === '' ? '' : '\n\n'}<turn role="${role}">${m.content}</turn>`
+      buf += `${sep}<turn role="${role}">${m.content}</turn>`
       continue
     }
-    buf += `${buf === '' ? '' : '\n\n'}<turn role="${role}">`
-    for (const b of m.content ?? []) {
-      const img = b.type === 'image' ? acpImage(b) : undefined
-      if (img !== undefined) {
-        flush()
-        blocks.push(img)
-      } else {
-        buf += blockText(b)
-      }
+    const imgs: AcpContentBlock[] = []
+    const text = (m.content ?? [])
+      .map((b) => {
+        const img = b.type === 'image' ? acpImage(b) : undefined
+        if (img !== undefined) {
+          imgs.push(img)
+          return ''
+        }
+        return blockText(b)
+      })
+      .join('')
+    if (imgs.length === 0) {
+      buf += `${sep}<turn role="${role}">${text}</turn>`
+      continue
     }
-    buf += '</turn>'
+    // an image-bearing turn keeps its <turn> wrapper whole — the image
+    // blocks follow the turn's text block rather than splitting the
+    // open/close tags across block boundaries (amazon-q #558)
+    flush()
+    blocks.push({ type: 'text', text: `<turn role="${role}">${text}</turn>` })
+    blocks.push(...imgs)
   }
   flush()
   return blocks
@@ -417,7 +428,12 @@ async function messages(
     // prompt capability — serialize after link() so the negotiated
     // caps are known (bro-7izjx)
     const prompt = serializeBlocks(body, peer.caps.image)
-    inputTokens = estTokens(prompt.map((b) => (b.type === 'text' ? b.text : '')).join(''))
+    // an image's true token cost is dimension-based, not size-based —
+    // base64-length/4 is the rough wire proxy so usage reporting
+    // doesn't silently zero a large payload (amazon-q #558)
+    inputTokens =
+      estTokens(prompt.map((b) => (b.type === 'text' ? b.text : '')).join('')) +
+      prompt.reduce((n, b) => n + (b.type === 'image' ? Math.ceil(b.data.length / 4) : 0), 0)
     // `provider/model` ids are a real pin — resolved against the agent's
     // own catalog; bare foreign ids (claude-sonnet-*) are display labels
     reply = await acpPooledTurn(peer, cfg.entry, opts, prompt, Date.now() + cfg.timeoutMs, {
