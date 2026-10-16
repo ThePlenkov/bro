@@ -4,6 +4,7 @@ import type { IncomingMessage, ServerResponse } from 'node:http'
 import type { BusCursor, BusSubscription, BusSubscriptionHandlers, EventFilter } from '@broject/core'
 import {
   asyncapiDocument,
+  openEventsSse,
   parseEventCursor,
   routeEventsStream,
   type EventsStreamBus,
@@ -33,6 +34,7 @@ const fakeRes = () => {
       r.headers = headers
       return res
     },
+    flushHeaders: () => {},
     write: (chunk: string) => {
       r.chunks.push(chunk)
       return true
@@ -52,15 +54,17 @@ const fakeRes = () => {
 interface FakeSub {
   handlers?: BusSubscriptionHandlers
   opts?: { since?: number | BusCursor; limit?: number }
+  filter?: EventFilter
   closed: boolean
   fail?: Error
 }
 
 const fakeBus = (sub: FakeSub): EventsStreamBus => ({
   socketPath: () => '/tmp/bus.sock',
-  subscribe: async (_s: string, _f: EventFilter, h: BusSubscriptionHandlers, o) => {
+  subscribe: async (_s: string, f: EventFilter, h: BusSubscriptionHandlers, o) => {
     sub.handlers = h
     sub.opts = o
+    sub.filter = f
     if (sub.fail !== undefined) throw sub.fail
     return { close: () => (sub.closed = true) }
   },
@@ -211,6 +215,37 @@ describe('routeEventsStream', () => {
     resolveSub({ close: () => (sub.closed = true) })
     await done
     assert.equal(sub.closed, true)
+  })
+})
+
+describe('openEventsSse — the shared filtered leg', () => {
+  test('the declared filter reaches the broker subscribe verbatim', async () => {
+    const sub: FakeSub = { closed: false }
+    const { res, cap } = fakeRes()
+    await openEventsSse(fakeReq('GET'), res, fakeBus(sub), '/tmp/bus.sock', {
+      topics: ['agent'],
+      keys: ['native-aa11'],
+    })
+    assert.equal(cap.status, 200)
+    assert.match(cap.headers?.['content-type'] ?? '', /text\/event-stream/)
+    assert.deepEqual(sub.filter, { topics: ['agent'], keys: ['native-aa11'] })
+    // scoped streams keep the same resume semantics as the fleet tail
+    assert.equal(sub.opts?.since, 0)
+    assert.equal(sub.opts?.limit, 64)
+  })
+
+  test('a scoped stream still honours Last-Event-ID resume', async () => {
+    const sub: FakeSub = { closed: false }
+    const { res } = fakeRes()
+    await openEventsSse(
+      fakeReq('GET', { 'last-event-id': 'run-9:41' }),
+      res,
+      fakeBus(sub),
+      '/tmp/bus.sock',
+      { topics: ['agent'], keys: ['acp:sess-1'] }
+    )
+    assert.deepEqual(sub.opts?.since, { gen: 'run-9', seq: 41 })
+    assert.deepEqual(sub.filter, { topics: ['agent'], keys: ['acp:sess-1'] })
   })
 })
 

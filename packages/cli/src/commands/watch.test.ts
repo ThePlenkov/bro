@@ -416,6 +416,29 @@ describe('renderSnapshot', () => {
     assert.match(text, /\[#15\]\(x\)\s+ok\n/)
   })
 
+  test('the activity section renders "agent last did X"; absent means no section at all', () => {
+    const quiet = renderSnapshot(snap())
+    assert.doesNotMatch(quiet, /activity\n/)
+
+    const live = renderSnapshot(
+      snap({
+        activity: {
+          latest: {
+            'native-aa11': 'native-aa11: Edit x.ts started [edit]',
+            'acp:sess-9': 'acp:sess-9: turn stopped (end_turn)',
+          },
+        },
+      })
+    )
+    assert.match(live, /activity\n  native-aa11: Edit x\.ts started \[edit\]\n  acp:sess-9: turn stopped \(end_turn\)/)
+    assert.doesNotMatch(live, /ring tail truncated/)
+
+    const gapped = renderSnapshot(
+      snap({ activity: { latest: { w1: 'w1: turn started' }, gapped: true } })
+    )
+    assert.match(gapped, /activity\n  w1: turn started\n  \(ring tail truncated — newest events only\)/)
+  })
+
   test('attention and sections render their contents', () => {
     const text = renderSnapshot(
       snap({

@@ -412,6 +412,55 @@ function renderMols(mols, molsError) {
   list(ul, items, undefined);
 }
 
+// one line per 'agent' envelope — mirrors agentEventLine() server-side;
+// the wire carries raw envelopes, the pane renders the same shapes
+function agentLine(e) {
+  var p = e.payload || {};
+  var who = e.key || 'agent';
+  if (e.kind === 'turn') {
+    if (p.phase === 'start') return who + ': turn started';
+    return who + ': turn ' + (p.error ? 'failed — ' + p.error : 'stopped' + (p.stopReason ? ' (' + p.stopReason + ')' : ''));
+  }
+  if (e.kind === 'tool_call') {
+    return who + ': ' + (p.title || p.name || p.toolCallId || 'tool') +
+      (p.phase === 'open' ? ' started' : ' finished' + (p.status ? ' (' + p.status + ')' : '')) +
+      (p.kind ? ' [' + p.kind + ']' : '');
+  }
+  if (e.kind === 'subagent') {
+    return who + ': subagent ' + (p.title || p.sessionId || '?') + (p.phase ? ' ' + p.phase : '');
+  }
+  if (e.kind === 'usage') {
+    return who + ': context ' + (p.used === undefined ? '?' : p.used) + '/' + (p.size === undefined ? '?' : p.size);
+  }
+  return who + ': ' + e.kind;
+}
+
+// the live activity pane — a bus subscriber over /api/v1/events/stream,
+// NOT a file tail (bro-0ppt0): the broker ring is the live tail; the
+// .events.jsonl archive is the durable record. EventSource auto-resumes
+// via Last-Event-ID; 'gap' frames mean re-derive — the feed just keeps
+// newest-first lines and the next event reconciles the view.
+function liveActivity() {
+  var feed = document.getElementById('actfeed');
+  if (feed === null || typeof EventSource === 'undefined') return;
+  var lines = [];
+  var src = new EventSource('/api/v1/events/stream');
+  src.onmessage = function (ev) {
+    var e;
+    try { e = JSON.parse(ev.data); } catch (x) { return; }
+    if (!e || e.topic !== 'agent') return;
+    lines.push(agentLine(e));
+    if (lines.length > 60) lines = lines.slice(-60);
+    list(feed, lines.slice().reverse(), undefined);
+  };
+  src.onopen = function () { feed.classList.remove('stale'); };
+  src.onerror = function () {
+    // auto-reconnect is EventSource's job — flag the pane stale so a
+    // dead broker reads as quiet-but-stale, not live
+    feed.classList.add('stale');
+  };
+}
+
 function renderAll(failed) {
   var snap = last.snapshot;
   document.getElementById('ts').textContent =
@@ -459,6 +508,7 @@ document.addEventListener('visibilitychange', function () {
   }
 });
 
+liveActivity();
 tick();
 `
 
@@ -498,6 +548,9 @@ export const FLEET_PAGE = `<!doctype html>
   <tbody id="agents"><tr><td class="muted">…</td></tr></tbody>
 </table></div>
 <ul id="agentwarn"></ul>
+
+<h2>activity</h2>
+<ul id="actfeed"><li class="muted">listening on the bus…</li></ul>
 
 <h2>queue</h2>
 <div id="queuesum" class="sum muted"></div>
