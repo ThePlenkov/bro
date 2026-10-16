@@ -63,7 +63,7 @@ async function dispatchPlugin(cmd: string, rest: string[]): Promise<boolean> {
   if (!plugin) {
     return false
   }
-  if (plugin.deprecated) {
+  if (plugin.deprecated !== undefined) {
     warnDeprecated(`'bro ${plugin.name}'`, plugin.deprecated)
   }
   const member = pluginGroups()
@@ -72,6 +72,21 @@ async function dispatchPlugin(cmd: string, rest: string[]): Promise<boolean> {
   if (member) {
     await runMember(cmd, member, rest.slice(1))
   } else {
+    // flat-spelling retirement (specs/cli phase 4): only a truly flat
+    // invocation warns — `bro <host> <member>` resolves the member
+    // above and stays silent. A group host has no better spelling
+    // than itself.
+    if (
+      plugin.deprecated === undefined &&
+      plugin.flatDeprecated !== undefined &&
+      plugin.group !== undefined &&
+      plugin.group !== plugin.name
+    ) {
+      warnDeprecated(
+        `'bro ${plugin.name}'`,
+        `${plugin.flatDeprecated} — prefer 'bro ${plugin.group} ${plugin.name}'`
+      )
+    }
     await plugin.run([...(plugin.argvPrefix ?? []), ...rest])
   }
   return true

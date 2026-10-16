@@ -689,6 +689,7 @@ const PLUGIN_FIELD_CHECKS: ReadonlyArray<
   ['runPlan', (v) => typeof v === 'function'],
   ['skill', (v) => typeof v === 'string'],
   ['deprecated', (v) => typeof v === 'string'],
+  ['flatDeprecated', (v) => typeof v === 'string'],
   ['configKey', (v) => typeof v === 'string'],
   ['argvPrefix', (v) => Array.isArray(v)],
   ['docs', (v) => Array.isArray(v) && v.every(isDocType)],
