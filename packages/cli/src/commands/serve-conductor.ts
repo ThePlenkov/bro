@@ -826,10 +826,10 @@ async function messages(
       requestModel: (() => {
         const raw = typeof body.model === 'string' ? body.model.trimEnd() : undefined
         const open = raw?.lastIndexOf('[') ?? -1
-        const m =
-          raw !== undefined && open >= 0 && raw.endsWith(']')
-            ? raw.slice(0, open).trimEnd()
-            : raw
+        const inner = open >= 0 && raw?.endsWith(']') ? raw.slice(open + 1, -1) : undefined
+        const m = inner !== undefined && /^\d+[km]?$/i.test(inner)
+          ? raw?.slice(0, open).trimEnd()
+          : raw
         return m?.includes('/') ? m : undefined
       })(),
       deadline: Date.now() + wire.cfg.timeoutMs,
