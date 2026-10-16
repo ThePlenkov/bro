@@ -66,6 +66,19 @@ async function dispatchPlugin(cmd: string, rest: string[]): Promise<boolean> {
   if (plugin.deprecated) {
     warnDeprecated(`'bro ${plugin.name}'`, plugin.deprecated)
   }
+  // flat-spelling retirement (specs/cli phase 4): warn only on the
+  // flat path and only when there is a grouped spelling to point at —
+  // a group host has no better spelling than itself
+  if (
+    plugin.flatDeprecated !== undefined &&
+    plugin.group !== undefined &&
+    plugin.group !== plugin.name
+  ) {
+    warnDeprecated(
+      `'bro ${plugin.name}'`,
+      `${plugin.flatDeprecated} — prefer 'bro ${plugin.group} ${plugin.name}'`
+    )
+  }
   const member = pluginGroups()
     .get(cmd)
     ?.find((p) => p.name === rest[0] && p.name !== cmd)

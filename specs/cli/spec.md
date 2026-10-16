@@ -80,8 +80,12 @@ working; docs and skills migrate to group form at their own pace.
    `--help` (~50 lines of dispatch, metadata elsewhere).
 2. `aliasOf` field; `wtf`/`unwind`/`telemetry` demoted to aliases.
 3. Docs/skills/site wording moved to group spelling.
-4. Optional later: retire flat spellings per-name via `deprecated:` —
-   decided per command, never bulk.
+4. Optional later: retire flat spellings per-name via `flatDeprecated:` —
+   decided per command, never bulk. The field warns on the flat path
+   only and auto-points at `bro <group> <name>`; `deprecated:` keeps its
+   meaning (the command itself is going away, both spellings warn).
+   A group host's flat spelling is its best spelling — `flatDeprecated`
+   is ignored there.
 
 ## Owns
 

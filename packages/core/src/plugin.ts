@@ -56,6 +56,12 @@ export interface BroPlugin {
    *  stderr warning and still runs the command. Pair with `hidden:
    *  true` to drop it from `--help`; removal lands in a later release. */
   deprecated?: string
+  /** Flat-spelling-only deprecation — `bro <name>` warns and points at
+   *  `bro <group> <name>`; the grouped spelling stays silent. This is
+   *  the per-name retirement knob from specs/cli phase 4 — a command
+   *  only gets it by an explicit per-name decision, never in bulk.
+   *  Ignored on group hosts (`bro plan` can't point at itself). */
+  flatDeprecated?: string
   /** Not listed in usage — plumbing commands like `hooks`. */
   hidden?: boolean
   /** Set by the registry when the plugin came from config `plugins` —
