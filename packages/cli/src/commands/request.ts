@@ -84,7 +84,11 @@ function bindPeer(dir: string, checkout: string, rest: string[], rig: string): v
 
 function wireFor(dir: string, rest: string[], rig: string, id?: string): void {
   const waiting = flagValue(rest, '--for')
-  if (waiting === undefined || id === undefined) {
+  if (waiting === undefined) {
+    return
+  }
+  if (id === undefined) {
+    console.error(`! request delivered but no thread id returned — dep wiring skipped`)
     return
   }
   const depErr = wireDep(dir, waiting, rig, id)

@@ -213,6 +213,10 @@ export function meshInbox(
   const terminal = new Set<string>()
   for (const r of records) {
     if (
+      // own-store records carry peerRig=env.from — `from === peerRig`
+      // is vacuous there, so an unbound inbound verdict would close
+      // any same-id thread it names. Only peer-bound verdicts count.
+      r.peer !== 'self' &&
       (r.envelope.kind === 'accept' || r.envelope.kind === 'reject') &&
       r.envelope.from === r.peerRig
     ) {
