@@ -14,7 +14,7 @@
  */
 import { existsSync, readdirSync, readFileSync, renameSync, statSync, writeFileSync } from 'node:fs'
 import { basename, dirname, isAbsolute, join, resolve } from 'node:path'
-import { loadConfig, withFileLock } from '@broject/core'
+import { withFileLock } from '@broject/core'
 import {
   formatRigUri,
   parseRigDescriptor,
@@ -123,6 +123,13 @@ export function resolveTarget(dir: string, arg: string, peers: MeshPeer[]): Reso
   // `<name>--<slug>`; several --siblings and no bare <name> is
   // ambiguous, never a silent pick
   const parent = dirname(dir)
+  if (parent === dir) {
+    return {
+      error:
+        `cannot resolve "${arg}" — no peer alias, mesh:// uri, checkout path, ` +
+        'or sibling checkout matches (see `bro mesh peers list`)',
+    }
+  }
   let siblings: string[] = []
   try {
     siblings = readdirSync(parent)
@@ -164,9 +171,9 @@ export function deliverRequest(
 ): { id?: string; error?: string } {
   return postEnvelope({
     dir: checkout,
+    ...input,
     kind: 'request',
     thread: '',
-    ...input,
     beadRig: input.to,
     extraLabels: ['export:{id}'],
   })
@@ -194,7 +201,7 @@ export function withMeshConfig<T>(dir: string, mutate: (cfg: MeshConfigFile) => 
     const out = mutate(cfg)
     // atomic write: temp file in the same dir + rename, so a crash
     // mid-write can't leave a truncated config
-    const tmp = join(dir, '.bro.config.json.tmp')
+    const tmp = join(dir, `.bro.config.json.tmp.${process.pid}`)
     writeFileSync(tmp, `${JSON.stringify(cfg, null, 2)}\n`)
     renameSync(tmp, path)
     return out
@@ -212,23 +219,23 @@ export function ensurePeerBinding(
   rig: string,
   checkout: string,
 ): { added: boolean; error?: string } {
-  const existing = loadConfig(dir).mesh.peers
-  if (
-    existing[alias] !== undefined ||
-    Object.values(existing).some((p) => localCheckout(p.remote) === checkout)
-  ) {
-    return { added: false }
-  }
   try {
-    withMeshConfig(dir, (cfg) => {
+    // the whole check-and-set rides inside the file lock — reading
+    // outside it would let two invocations both pass the guard and a
+    // second alias bind the same checkout twice
+    return withMeshConfig(dir, (cfg) => {
       const mesh = cfg.mesh ?? {}
-      const peers = { ...mesh.peers }
-      if (peers[alias] === undefined) {
-        peers[alias] = { rig, remote: checkout }
+      const peers = { ...(mesh.peers ?? {}) }
+      if (
+        peers[alias] !== undefined ||
+        Object.values(peers).some((p) => localCheckout(p.remote) === checkout)
+      ) {
+        return { added: false }
       }
+      peers[alias] = { rig, remote: checkout }
       cfg.mesh = { ...mesh, peers }
+      return { added: true }
     })
-    return { added: true }
   } catch (e) {
     return { added: false, error: e instanceof Error ? e.message : String(e) }
   }

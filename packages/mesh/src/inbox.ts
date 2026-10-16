@@ -185,7 +185,12 @@ export function meshInbox(
         continue
       }
       const env = envelopeFromBead(row)
-      if (env === null) {
+      // own-store records are only INBOUND-shaped envelopes — requests
+      // delivered to me and verdicts addressed back to me. My own
+      // outbound posts (requests I posted to peers, results I shipped)
+      // live in the same store but are not inbox material — and must
+      // never feed the terminal set
+      if (env === null || env.to !== selfRig) {
         continue
       }
       records.push({

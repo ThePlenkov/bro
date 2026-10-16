@@ -71,7 +71,7 @@ export function runRequestCommand(argv: string[]): void {
 
   const body = flagValue(rest, '--body')
   const prio = flagValue(rest, '--priority')
-  const priority = prio === undefined ? undefined : Number.parseInt(prio, 10)
+  const priority = prio === undefined ? undefined : Number(prio)
   if (priority !== undefined && (!Number.isInteger(priority) || priority < 0 || priority > 4)) {
     console.error('error: --priority wants 0-4')
     process.exit(2)
@@ -102,8 +102,8 @@ export function runRequestCommand(argv: string[]): void {
   }
 
   const waiting = flagValue(rest, '--for')
-  if (waiting !== undefined) {
-    const depErr = wireDep(dir, waiting, t.rig, posted.id ?? '')
+  if (waiting !== undefined && posted.id !== undefined) {
+    const depErr = wireDep(dir, waiting, t.rig, posted.id)
     if (depErr !== undefined) {
       console.error(`! request delivered but dep wiring failed: ${depErr}`)
     } else {
