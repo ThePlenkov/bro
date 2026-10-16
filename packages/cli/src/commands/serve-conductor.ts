@@ -348,6 +348,17 @@ function conversationKey(req: IncomingMessage, body: MessagesRequest): string | 
   return `f:${fp}`
 }
 
+/** Drop a session handle without surfacing transport noise — the
+ *  dispose is bookkeeping (eviction, teardown, failure cleanup), never
+ *  an error path worth reporting. */
+function disposeQuiet(live: { dispose(): void }): void {
+  try {
+    live.dispose()
+  } catch {
+    // dead transport — the drop is the point
+  }
+}
+
 /** Retired sessions must be disposed — a leaked session holds agent
  *  context (and its cost) for nothing. TTL first, then oldest-out to
  *  the cap; the overflow count is captured BEFORE the loop so a live
@@ -359,11 +370,7 @@ function sweepSessions(sessions: Map<string, ConvSession>, now: number): void {
   for (const [k, s] of sessions) {
     if (now - s.lastSeen > CONV_TTL_MS || overflow-- > 0) {
       sessions.delete(k)
-      try {
-        s.live.dispose()
-      } catch {
-        // dead transport — the peer's own close reaps it anyway
-      }
+      disposeQuiet(s.live)
     }
   }
 }
@@ -372,11 +379,7 @@ function sweepSessions(sessions: Map<string, ConvSession>, now: number): void {
  *  map so no stale handle is ever reused on a respawned child. */
 function dropSessions(sessions: Map<string, ConvSession>): void {
   for (const s of sessions.values()) {
-    try {
-      s.live.dispose()
-    } catch {
-      // already dead — the drop is the point
-    }
+    disposeQuiet(s.live)
   }
   sessions.clear()
 }
@@ -599,6 +602,238 @@ function respond(
   res.end()
 }
 
+/** Evict a conversation — failed turns, stale prefixes, dead repins
+ *  all land here: out of the map, handle dropped, never reused. */
+function evict(
+  sessions: Map<string, ConvSession>,
+  key: string | undefined,
+  conv: ConvSession
+): void {
+  if (key !== undefined) {
+    sessions.delete(key)
+  }
+  disposeQuiet(conv.live)
+}
+
+type PooledReply = Awaited<ReturnType<typeof acpPooledTurn>>
+
+interface TurnOutcome {
+  reply?: PooledReply
+  conv?: ConvSession
+  reused: boolean
+  inputTokens: number
+  /** the resend carried nothing new — caller replays conv.lastReply */
+  replay: boolean
+}
+
+/** A proven continuation — the delta turns only; an empty tail is a
+ *  replay (with a repin if the resend pins a different model). */
+async function continuationTurn(
+  body: MessagesRequest,
+  cand: ConvSession,
+  key: string | undefined,
+  sessions: Map<string, ConvSession>,
+  requestModel: string | undefined,
+  deadline: number,
+  signal: AbortSignal,
+  by: string,
+  parent: OtelCtx | undefined,
+  imageOk: boolean,
+  msgs: ClientMessage[]
+): Promise<TurnOutcome> {
+  const tail = tailTurns(msgs, cand.consumed)
+  if (tail.length === 0) {
+    // a pure retry — nothing new for the session; the caller replays
+    // the recorded reply. A resend pinning a DIFFERENT model is not a
+    // replay — the session re-pins and the recorded answer stays
+    // honest (it was generated under the old pin either way).
+    if (requestModel !== undefined && requestModel !== cand.requestModel) {
+      try {
+        await cand.live.repin(requestModel, deadline)
+        cand.requestModel = requestModel
+      } catch (err) {
+        evict(sessions, key, cand)
+        throw err
+      }
+    }
+    cand.lastSeen = Date.now()
+    return { reused: true, inputTokens: 0, replay: true, conv: cand }
+  }
+  // the delta only — prior turns live in the session's own context
+  const prompt = tailBlocks(tail, imageOk)
+  const inputTokens = inputTokensOf(prompt)
+  cand.busy = true
+  cand.lastSeen = Date.now()
+  try {
+    const reply = await cand.live.prompt(prompt, deadline, {
+      signal,
+      by,
+      requestModel,
+      parent,
+    })
+    return { reply, reused: true, inputTokens, replay: false, conv: cand }
+  } catch (err) {
+    // a failed turn poisons cacheability — evict and let the retry
+    // open a fresh session rather than pile onto unknown state
+    evict(sessions, key, cand)
+    throw err
+  } finally {
+    cand.busy = false
+  }
+}
+
+/** A first (or restarted) turn — a keyed request retains a session;
+ *  a keyless, busy, or already-opening key takes the one-shot path. */
+async function freshTurn(
+  body: MessagesRequest,
+  key: string | undefined,
+  sessions: Map<string, ConvSession>,
+  pendingOpens: Set<string>,
+  candBusy: boolean,
+  peer: AcpPeer,
+  cfg: ConductorConfig,
+  opts: ProviderWireOpts,
+  requestModel: string | undefined,
+  deadline: number,
+  signal: AbortSignal,
+  by: string,
+  parent: OtelCtx | undefined,
+  imageOk: boolean,
+  msgs: ClientMessage[],
+  prefix: string
+): Promise<TurnOutcome> {
+  // image blocks ride the wire only when the agent advertised the
+  // prompt capability — serialize after link() so the negotiated
+  // caps are known (bro-7izjx)
+  const prompt = serializeBlocks(body, imageOk)
+  const inputTokens = inputTokensOf(prompt)
+  if (key === undefined || candBusy || pendingOpens.has(key)) {
+    // a keyless request, or the conversation's own turn is still in
+    // flight — one-shot over the same link, nothing stored
+    const reply = await acpPooledTurn(peer, cfg.entry, opts, prompt, deadline, {
+      signal,
+      by,
+      requestModel,
+      parent,
+    })
+    return { reply, reused: false, inputTokens, replay: false }
+  }
+  // mark BEFORE the await — a concurrent first request on the same key
+  // takes the one-shot path instead of opening a twin session whose
+  // loser leaks out of the map (codeant #569)
+  pendingOpens.add(key)
+  let live: AcpRetainedSession | undefined
+  try {
+    live = await acpSessionRetain(peer, cfg.entry, opts, deadline, {
+      by,
+      requestModel,
+      parent,
+    })
+    const reply = await live.prompt(prompt, deadline, {
+      signal,
+      by,
+      requestModel,
+      parent,
+    })
+    const conv: ConvSession = {
+      live,
+      peer,
+      consumed: msgs.length,
+      historyHash: hashTurns(prefix, msgs, msgs.length),
+      requestModel,
+      lastReply: { blocks: [], model: '', stopReason: '', inputTokens: 0 },
+      busy: false,
+      lastSeen: Date.now(),
+    }
+    return { reply, reused: false, inputTokens, replay: false, conv }
+  } catch (err) {
+    // the first turn died — nothing is cached yet but the acp side
+    // still holds the session; drop it before surfacing
+    if (live !== undefined) {
+      disposeQuiet(live)
+    }
+    throw err
+  } finally {
+    pendingOpens.delete(key)
+  }
+}
+
+/** One request's acp turn — proves a stored conversation (or evicts a
+ *  stale one), then routes to continuation/fresh/one-shot. */
+async function acpTurn(
+  body: MessagesRequest,
+  req: IncomingMessage,
+  res: ServerResponse,
+  peer: AcpPeer,
+  cfg: ConductorConfig,
+  opts: ProviderWireOpts,
+  sessions: Map<string, ConvSession>,
+  pendingOpens: Set<string>,
+  key: string | undefined,
+  parent: OtelCtx | undefined,
+  t0: number
+): Promise<TurnOutcome> {
+  const ac = new AbortController()
+  // a dropped client cancels the acp turn — no orphan devin session
+  res.once('close', () => ac.abort())
+  const msgs = body.messages ?? []
+  const imageOk = peer.caps?.image === true
+  // `provider/model` ids are a real pin — resolved against the agent's
+  // own catalog; bare foreign ids (claude-sonnet-*) are display labels
+  const requestModel =
+    typeof body.model === 'string' && body.model.includes('/') ? body.model : undefined
+  const deadline = Date.now() + cfg.timeoutMs
+  const by = `conductor:${cfg.backend}`
+  sweepSessions(sessions, t0)
+  const cand = key !== undefined ? sessions.get(key) : undefined
+  const prefix = prefixText(body)
+  const usable =
+    cand !== undefined &&
+    cand.peer === peer &&
+    !cand.busy &&
+    cand.consumed <= msgs.length &&
+    hashTurns(prefix, msgs, cand.consumed) === cand.historyHash
+  if (usable === true) {
+    return continuationTurn(
+      body,
+      cand,
+      key,
+      sessions,
+      requestModel,
+      deadline,
+      ac.signal,
+      by,
+      parent,
+      imageOk,
+      msgs
+    )
+  }
+  const candBusy = cand?.busy === true
+  if (cand !== undefined && !candBusy && key !== undefined) {
+    // a stale key — the stored context never proved this client;
+    // its session is poison for THIS conversation, retire it
+    evict(sessions, key, cand)
+  }
+  return freshTurn(
+    body,
+    key,
+    sessions,
+    pendingOpens,
+    candBusy,
+    peer,
+    cfg,
+    opts,
+    requestModel,
+    deadline,
+    ac.signal,
+    by,
+    parent,
+    imageOk,
+    msgs,
+    prefix
+  )
+}
+
 async function messages(
   req: IncomingMessage,
   res: ServerResponse,
@@ -617,167 +852,23 @@ async function messages(
     return
   }
   const t0 = Date.now()
-  // a dropped client cancels the acp turn — no orphan devin session
-  const ac = new AbortController()
-  res.once('close', () => ac.abort())
-  let reply: Awaited<ReturnType<typeof acpPooledTurn>>
-  let inputTokens = 0
-  let reused = false
   const key = conversationKey(req, body)
-  let conv: ConvSession | undefined
+  let out: TurnOutcome
   try {
     const peer = await link(parent)
-    const msgs = body.messages ?? []
-    const imageOk = peer.caps?.image === true
-    // `provider/model` ids are a real pin — resolved against the agent's
-    // own catalog; bare foreign ids (claude-sonnet-*) are display labels
-    const requestModel =
-      typeof body.model === 'string' && body.model.includes('/') ? body.model : undefined
-    const deadline = Date.now() + cfg.timeoutMs
-    sweepSessions(sessions, t0)
-    const cand = key !== undefined ? sessions.get(key) : undefined
-    const prefix = prefixText(body)
-    const usable =
-      cand !== undefined &&
-      cand.peer === peer &&
-      !cand.busy &&
-      cand.consumed <= msgs.length &&
-      hashTurns(prefix, msgs, cand.consumed) === cand.historyHash
-    if (usable === true) {
-      const tail = tailTurns(msgs, cand.consumed)
-      if (tail.length === 0) {
-        // a pure retry — nothing new for the session; replay the
-        // recorded reply instead of paying a duplicate turn. A
-        // resend that pins a DIFFERENT model is not a replay — the
-        // session re-pins and the recorded answer stays honest
-        // (the reply was generated under the old pin either way).
-        if (requestModel !== undefined && requestModel !== cand.requestModel) {
-          try {
-            await cand.live.repin(requestModel, deadline)
-            cand.requestModel = requestModel
-          } catch (err) {
-            if (key !== undefined) {
-              sessions.delete(key)
-            }
-            try {
-              cand.live.dispose()
-            } catch {
-              // already gone — the drop is the point
-            }
-            throw err
-          }
-        }
-        cand.lastSeen = Date.now()
-        respond(
-          res,
-          body,
-          cand.lastReply.blocks,
-          cand.lastReply.model,
-          cand.lastReply.stopReason,
-          cand.lastReply.inputTokens,
-          key
-        )
-        return
-      }
-      // the delta only — prior turns live in the session's own context
-      const prompt = tailBlocks(tail, imageOk)
-      inputTokens = inputTokensOf(prompt)
-      cand.busy = true
-      cand.lastSeen = Date.now()
-      try {
-        reply = await cand.live.prompt(prompt, deadline, {
-          signal: ac.signal,
-          by: `conductor:${cfg.backend}`,
-          requestModel,
-          parent,
-        })
-      } catch (err) {
-        // a failed turn poisons cacheability — evict and let the retry
-        // open a fresh session rather than pile onto unknown state
-        if (key !== undefined) {
-          sessions.delete(key)
-        }
-        try {
-          cand.live.dispose()
-        } catch {
-          // already dead — the drop is the point
-        }
-        throw err
-      } finally {
-        cand.busy = false
-      }
-      conv = cand
-      reused = true
-    } else {
-      const candBusy = cand?.busy === true
-      if (cand !== undefined && !candBusy && key !== undefined) {
-        // a stale key — the stored context never proved this client;
-        // its session is poison for THIS conversation, retire it
-        sessions.delete(key)
-        try {
-          cand.live.dispose()
-        } catch {
-          // dead transport — the peer's close reaps it anyway
-        }
-      }
-      // image blocks ride the wire only when the agent advertised the
-      // prompt capability — serialize after link() so the negotiated
-      // caps are known (bro-7izjx)
-      const prompt = serializeBlocks(body, imageOk)
-      inputTokens = inputTokensOf(prompt)
-      const opening = key !== undefined && pendingOpens.has(key)
-      if (key !== undefined && !candBusy && !opening) {
-        // mark BEFORE the await — a concurrent first request on the
-        // same key takes the one-shot path instead of opening a twin
-        // session whose loser leaks out of the map (codeant #569)
-        pendingOpens.add(key)
-        let live: AcpRetainedSession | undefined
-        try {
-          live = await acpSessionRetain(peer, cfg.entry, opts, deadline, {
-            by: `conductor:${cfg.backend}`,
-            requestModel,
-            parent,
-          })
-          reply = await live.prompt(prompt, deadline, {
-            signal: ac.signal,
-            by: `conductor:${cfg.backend}`,
-            requestModel,
-            parent,
-          })
-        } catch (err) {
-          // the first turn died — nothing is cached yet but the acp
-          // side still holds the session; drop it before surfacing
-          try {
-            live?.dispose()
-          } catch {
-            // already gone — the drop is the point
-          }
-          throw err
-        } finally {
-          pendingOpens.delete(key)
-        }
-        conv = {
-          // reaching here means prompt() settled — live is assigned
-          live: live as AcpRetainedSession,
-          peer,
-          consumed: msgs.length,
-          historyHash: hashTurns(prefix, msgs, msgs.length),
-          requestModel,
-          lastReply: { blocks: [], model: '', stopReason: '', inputTokens: 0 },
-          busy: false,
-          lastSeen: Date.now(),
-        }
-      } else {
-        // a keyless request, or the conversation's own turn is still in
-        // flight — one-shot over the same link, nothing stored
-        reply = await acpPooledTurn(peer, cfg.entry, opts, prompt, deadline, {
-          signal: ac.signal,
-          by: `conductor:${cfg.backend}`,
-          requestModel,
-          parent,
-        })
-      }
-    }
+    out = await acpTurn(
+      body,
+      req,
+      res,
+      peer,
+      cfg,
+      opts,
+      sessions,
+      pendingOpens,
+      key,
+      parent,
+      t0
+    )
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err)
     const status = AVAIL.test(msg) ? 529 : 500
@@ -795,10 +886,20 @@ async function messages(
     )
     return
   }
+  // a resend that carried nothing new — replay the recorded reply,
+  // no agent round-trip was paid
+  if (out.replay === true) {
+    const lr = out.conv?.lastReply
+    respond(res, body, lr?.blocks ?? [], lr?.model ?? '', lr?.stopReason ?? '', lr?.inputTokens ?? 0, key)
+    return
+  }
+  const reply = out.reply as PooledReply
+  const inputTokens = out.inputTokens
   const blocks = parseReply(reply.text)
   const stopReason = blocks.some((b) => b.type === 'tool_use')
     ? 'tool_use'
     : (STOP_REASON[reply.stopReason] ?? 'end_turn')
+  const conv = out.conv
   if (conv !== undefined) {
     // the turn settled — every client message (including the echoes the
     // session just proved it holds) is consumed context now
@@ -818,7 +919,7 @@ async function messages(
     model: reply.model,
     stop_reason: stopReason,
     stream: body.stream !== false,
-    session_reused: reused,
+    session_reused: out.reused,
     input_tokens: inputTokens,
     output_tokens: estTokens(reply.text),
     duration_ms: Date.now() - t0,

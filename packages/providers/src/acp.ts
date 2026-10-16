@@ -1036,9 +1036,21 @@ export async function acpSessionRetain(
       disposed = true
       session.dispose()
     }
+    /** The shared wire classification: config stays config (a refused
+     *  pin names the caller's mistake); everything else is a
+     *  JudgeUnavailable naming the backend and the last transport
+     *  lines. */
+    const classifyWire = (err: unknown): Error => {
+      if (err instanceof JudgeUnavailable || err instanceof AcpConfigError) {
+        return err
+      }
+      const tail = peer.tail()
+      const detail = tail === '' ? '' : ` (${tail})`
+      return new JudgeUnavailable(`acp ${by} unavailable — ${errMsg(err)}${detail}`)
+    }
     /** Resolve a request pin on the live session and move the cursor —
-     *  shared by prompt() and repin(); a refused pin surfaces config,
-     *  a dead wire disposes and surfaces unavailable. */
+     *  shared by prompt() and repin(); a refused pin surfaces config
+     *  and keeps the session, a dead wire disposes + goes unavailable. */
     const applyPin = async (want: string | undefined, dl: number): Promise<string> => {
       try {
         const m = await resolveTurnModel(
@@ -1054,17 +1066,16 @@ export async function acpSessionRetain(
         curModel = m
         return m
       } catch (err) {
-        if (err instanceof JudgeUnavailable || err instanceof AcpConfigError) {
-          throw err
+        const classified = classifyWire(err)
+        if (!(classified instanceof JudgeUnavailable)) {
+          throw classified
         }
         try {
           dispose()
         } catch {
           // already gone — the drop is the point
         }
-        const tail = peer.tail()
-        const detail = tail === '' ? '' : ` (${tail})`
-        throw new JudgeUnavailable(`acp ${by} unavailable — ${errMsg(err)}${detail}`)
+        throw classified
       }
     }
     return {
@@ -1094,12 +1105,7 @@ export async function acpSessionRetain(
           } catch {
             // already gone — the drop is the point
           }
-          if (err instanceof JudgeUnavailable || err instanceof AcpConfigError) {
-            throw err
-          }
-          const tail = peer.tail()
-          const detail = tail === '' ? '' : ` (${tail})`
-          throw new JudgeUnavailable(`acp ${by} unavailable — ${errMsg(err)}${detail}`)
+          throw classifyWire(err)
         }
       },
       repin: (requestModel, dl) =>
