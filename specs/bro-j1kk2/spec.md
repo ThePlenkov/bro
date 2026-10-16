@@ -32,16 +32,15 @@ Product review (2026-10-15), verdict: strong product, sick packaging.
 
 ## Decision
 
-**Version: 1.0.0.** The release is a positioning statement; 0.x keeps
-breaking-change legality ambiguous exactly where we need it (flat-alias
-retirement, registry churn). 1.0 puts the *plugin contract*
-(`plugin.json` + `skills/*/SKILL.md` — the spec-stable surface) under
-semver while CLI registry evolution continues under the `deprecated:`
-per-command mechanism. Recorded at `bro-j1kk2.7`.
+**Version: 0.3.0.** Owner ruling 2026-10-15 (recorded at `bro-j1kk2.7`,
+supersedes an earlier 1.0.0 record): 'big release' is positioning, not
+a semver-major freeze of the ~50-command registry; flat-alias
+retirement ships in 0.x via the `deprecated:` per-command mechanism.
 
 **npm alias: deprecate.** `@theplenkov/bro` gets a final deprecation
-notice pointing at `@broject/bro`; install docs standardize on
-`npx -y @broject/bro@1`. Recorded at `bro-j1kk2.6`.
+notice pointing at `@broject/bro`; install docs stay on
+`npx -y @broject/bro@0` (resolves the 0.3.x line). Recorded at
+`bro-j1kk2.6`.
 
 **Wedge story: one JTBD.** "Your agent opened a PR — who drives it to
 merge and sweeps behind it?" The act gate (`bro review act status` as
@@ -59,12 +58,12 @@ not the intro.
 | .4 | site: landing rewrite around the act-gate wedge |
 | .5 | site/docs: glossary page — one line per concept |
 | .6 | decision: deprecate `@theplenkov/bro` — **deprecate** |
-| .7 | decision: semver boundary — **1.0.0** |
+| .7 | decision: semver boundary — **0.3.0** |
 | .8 | site/docs: generated command reference from the plugin registry |
 | .9 | `specs/` archive-vs-docs — curate live specs, sweep the rest |
-| .10 | CHANGELOG catch-up — audit `npm view @broject/bro versions` against CHANGELOG; every published version gets an entry (known gap: 0.2.4 → 0.2.5 → 1.0.0) |
+| .10 | CHANGELOG catch-up — audit `npm view @broject/bro versions` against CHANGELOG; every published version gets an entry (known gap: 0.2.4 → 0.2.5 → 0.3.0) |
 | .11 | docs coverage audit — every skill area has a docs page or an `internal` marker |
-| .12 | release pins: `@broject/bro@0` → `@1` — `broSpawnArgv` fallback, every `skills/*/SKILL.md` prerequisite, README/site install snippets |
+| .12 | release pins: verify every `@broject/bro@…` pin resolves the released line — `broSpawnArgv` fallback, every `skills/*/SKILL.md` prerequisite, README/site install snippets (under 0.3.0 the correct pin is `@0`; verified in tree) |
 
 ## Non-goals
 
@@ -77,8 +76,9 @@ the roadmap; it does not block on it.
 ## Exit criteria
 
 - All children closed; decision beads carry recorded outcomes.
-- No shipped surface pins `@broject/bro@0` — runtime fallbacks and
-  documented install/Requires lines resolve the released major (`.12`).
+- Every shipped `@broject/bro@…` pin resolves the released line —
+  runtime fallbacks and documented install/Requires lines consistent
+  with the released major (`.12`; `@0` for 0.3.x).
 - `npm run build`, `npm run typecheck`, `npm test` green on main.
 - Site deployed with the new landing + glossary + generated reference.
 - GitHub release + npm publish at the chosen version; CHANGELOG current.
