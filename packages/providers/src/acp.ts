@@ -302,7 +302,13 @@ async function acpOp(
         resp = msg.response
         break
       }
-      onUpdate?.(msg.update)
+      // a throwing sink is an observer bug, not a turn failure —
+      // swallow it so the pump keeps draining updates to stop
+      try {
+        onUpdate?.(msg.update)
+      } catch {
+        /* observer must not kill the turn pump */
+      }
       if (msg.update.sessionUpdate === 'agent_message_chunk') {
         const c = msg.update.content
         if (c.type === 'text') text += c.text
