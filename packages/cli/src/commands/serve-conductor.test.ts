@@ -715,4 +715,15 @@ describe('serve /v1/* — retained acp sessions', () => {
       // session is never implicitly retried
       assert.equal(fake.sessions.length, 2)
     }))
+
+  test('a claude [1m] context suffix resolves to the base model pin', () =>
+    withConductor({ replyText: 'x', configOptions: [MODEL_OPTION] }, async ({ fake, url }) => {
+      // claude pins 1M-context variants as `model[1m]` — the bracket is
+      // client-side context opt-in, not a different catalog model
+      const r = await post(url, [{ role: 'user', content: 'a' }], {
+        model: 'dv-acp/swe-y[1m]',
+      })
+      assert.equal(r.status, 200)
+      assert.deepEqual(fake.configSets, [{ configId: 'model', value: 'swe-y' }])
+    }))
 })
