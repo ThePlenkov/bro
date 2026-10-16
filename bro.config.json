@@ -188,7 +188,7 @@
     },
     "claude": {
       "type": "cli",
-      "command": "cat {promptFile} | claude -p --permission-mode bypassPermissions"
+      "command": "cat {promptFile} | claude -p --model devin/swe-2-max --permission-mode bypassPermissions"
     }
   },
   "mesh": {
