@@ -218,29 +218,38 @@ export function candidateBranches(root: string): { branches: string[]; complete:
     complete = false
   }
   for (const prefix of FLEET_BRANCH_PREFIXES) {
-    const res = gitTry(['-C', root, 'branch', '--list', `${prefix}*`, '--format=%(refname:short)'])
-    if (res.code === 0) {
-      for (const b of res.out.split('\n').filter((s) => s !== '')) {
-        branches.add(b)
+    for (const remote of [false, true]) {
+      const rows = fleetBranches(root, prefix, remote)
+      if (rows === null) {
+        complete = false
+      } else {
+        for (const b of rows) {
+          branches.add(b)
+        }
       }
-    } else {
-      complete = false
-    }
-    // a merged-bead cleanup removes the local work/<bead> branch while
-    // the remote (and its still-open PR) survives — remote refs keep
-    // the PR enumerable so orphans can be driven (bro-njyn8)
-    const rem = gitTry([
-      '-C', root, 'branch', '-r', '--list', `origin/${prefix}*`, '--format=%(refname:short)',
-    ])
-    if (rem.code === 0) {
-      for (const b of rem.out.split('\n').filter((s) => s !== '')) {
-        branches.add(b.replace(/^origin\//, ''))
-      }
-    } else {
-      complete = false
     }
   }
   return { branches: [...branches], complete }
+}
+
+/** One `git branch --list` row set for a fleet prefix, or null on git
+ *  failure — the caller's `complete` flag degrades while the set keeps
+ *  what it has. Remote rows carry the `origin/` prefix, stripped so a
+ *  remote-only head dedups against its local name (a merged-bead
+ *  cleanup reaps the local branch while the remote head — and its
+ *  still-open PR — survives; bro-njyn8). */
+function fleetBranches(root: string, prefix: string, remote: boolean): string[] | null {
+  const args = remote
+    ? ['-C', root, 'branch', '-r', '--list', `origin/${prefix}*`, '--format=%(refname:short)']
+    : ['-C', root, 'branch', '--list', `${prefix}*`, '--format=%(refname:short)']
+  const res = gitTry(args)
+  if (res.code !== 0) {
+    return null
+  }
+  return res.out
+    .split('\n')
+    .filter((s) => s !== '')
+    .map((s) => (remote ? s.replace(/^origin\//, '') : s))
 }
 
 /** work/bro-x → bro-x; stack/name/3-bro-x → 3-bro-x. */
