@@ -1567,7 +1567,7 @@ export async function ensureServe(
         `port ${port} already serves ${h.dir} — not this repo; pick another port`
       )
     }
-    const state = readServeState(dir)
+    const state = readStateFile(statePath)
     if (state === undefined) {
       throw new Error(`listener on ${port} is up but ${statePath} is missing`)
     }
@@ -1605,7 +1605,7 @@ export async function ensureServe(
         `port ${port} came up serving ${h.dir} — not this repo; pick another port`
       )
     }
-    const state = readServeState(dir)
+    const state = readStateFile(statePath)
     if (state === undefined) continue
     return state.token
   }

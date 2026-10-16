@@ -94,6 +94,12 @@ describe('bro serve ensure', () => {
 
   test('outside a repo there is no anchor — loud, not empty', () =>
     (async () => {
-      await assert.rejects(() => ensureServe('/tmp', PORT), /not inside a git repository/)
+      await assert.rejects(
+        () =>
+          ensureServe('/tmp', PORT, {
+            probe: () => Promise.reject(new Error('probe must not run without an anchor')),
+          }),
+        /not inside a git repository/
+      )
     })())
 })
