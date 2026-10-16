@@ -111,6 +111,28 @@ describe('serve — routes', () => {
     assert.equal(post.status, 405)
   })
 
+  test('GET /fleet wires the per-agent live log pane (bro-wwo7e)', async () => {
+    const r = await route('GET', '/fleet')
+    assert.equal(r.status, 200)
+    const html = String(r.body)
+    // the agents table gains a log column and the pane lives outside
+    // the polled tbody so a re-render never wipes it
+    assert.match(html, /<th>log<\/th>/)
+    assert.match(html, /id="logpanel"/)
+    assert.match(html, /id="logpane"/)
+    // an EventSource tail on the token-gated follow endpoint
+    assert.match(html, /new EventSource\(/)
+    assert.match(html, /\/log\?follow&lines=/)
+    // the write-grade credential never ships in the page — it arrives
+    // via a #token= fragment (stripped) or the paste field, and is
+    // kept in sessionStorage per tab
+    assert.match(html, /location\.hash/)
+    assert.match(html, /history\.replaceState/)
+    assert.match(html, /sessionStorage/)
+    assert.match(html, /id="logtoken"/)
+    assert.doesNotMatch(html, /token[:=]\s*['"][0-9A-Za-z+/=_-]{8,}/i)
+  })
+
   test('GET /ui serves the catalog dashboard with its CSP; non-GET is 405', async () => {
     const r = await route('GET', '/ui')
     assert.equal(r.status, 200)
