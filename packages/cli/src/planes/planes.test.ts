@@ -8,14 +8,18 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import {
+  busPublish,
+  busSocketPath,
   planes,
   scrubEnv,
+  startBusBrokerAt,
   PlaneUnavailable,
   PlaneVerbError,
   testGit,
   type EventRow,
   type Finding,
 } from '@broject/core'
+import { agentEventLine } from './events.ts'
 // registration side-effect — the catalog is empty without it
 import './index.ts'
 
@@ -316,6 +320,135 @@ describe('events plane — durable lifecycle journal', () => {
       const res = (await events.read('lifecycle', {})) as { events: EventRow[]; gapped: boolean }
       assert.deepEqual(res.events, [])
       assert.equal(res.gapped, false)
+    } finally {
+      rm()
+    }
+  })
+})
+
+describe('agentEventLine', () => {
+  test('each kind folds to one "agent last did X" line', () => {
+    assert.equal(
+      agentEventLine({ kind: 'turn', key: 'w1', payload: { phase: 'start' } }),
+      'w1: turn started'
+    )
+    assert.equal(
+      agentEventLine({
+        kind: 'turn',
+        key: 'w1',
+        payload: { phase: 'stop', stopReason: 'end_turn' },
+      }),
+      'w1: turn stopped (end_turn)'
+    )
+    assert.equal(
+      agentEventLine({ kind: 'turn', key: 'w1', payload: { phase: 'stop', error: 'boom' } }),
+      'w1: turn failed — boom'
+    )
+    assert.equal(
+      agentEventLine({
+        kind: 'tool_call',
+        key: 'w1',
+        payload: { phase: 'open', title: 'Read src/foo.ts', kind: 'read' },
+      }),
+      'w1: Read src/foo.ts started [read]'
+    )
+    assert.equal(
+      agentEventLine({
+        kind: 'tool_call',
+        key: 'w1',
+        payload: { phase: 'finish', toolCallId: 'tc-1', status: 'failed' },
+      }),
+      'w1: tc-1 finished (failed)'
+    )
+    assert.equal(
+      agentEventLine({
+        kind: 'subagent',
+        key: 'w1',
+        payload: { phase: 'open', title: 'researcher' },
+      }),
+      'w1: subagent researcher open'
+    )
+    assert.equal(
+      agentEventLine({
+        kind: 'usage',
+        key: 'w1',
+        payload: { used: 100, size: 200 },
+      }),
+      'w1: context 100/200'
+    )
+    // a newer payload shape degrades to its discriminator, never throws
+    assert.equal(agentEventLine({ kind: 'tool_call', key: 'w1', payload: null }), 'w1: tool finished')
+    assert.equal(agentEventLine({ kind: 'mystery', key: 'w1' }), 'w1: mystery')
+    assert.equal(agentEventLine({ kind: 'turn' }), 'agent: turn stopped')
+  })
+})
+
+describe('events plane — activity read', () => {
+  test('activity probes the agent topic and folds the newest row per key', async () => {
+    const { dir, rm } = tmp()
+    try {
+      testGit(['init', '-q'], { cwd: dir })
+      const broker = await startBusBrokerAt(busSocketPath(dir)!)
+      try {
+        await busPublish(busSocketPath(dir)!, {
+          topic: 'agent',
+          kind: 'turn',
+          key: 'w1',
+          payload: { phase: 'start' },
+        })
+        await busPublish(busSocketPath(dir)!, {
+          topic: 'agent',
+          kind: 'tool_call',
+          key: 'w1',
+          payload: { phase: 'open', title: 'Edit x.ts', kind: 'edit' },
+        })
+        // a non-agent topic sharing the key must not leak into activity
+        await busPublish(busSocketPath(dir)!, {
+          topic: 'notify',
+          kind: 'note',
+          key: 'w1',
+          payload: 'unrelated',
+        })
+        await busPublish(busSocketPath(dir)!, {
+          topic: 'agent',
+          kind: 'turn',
+          key: 'w2',
+          payload: { phase: 'stop', stopReason: 'end_turn' },
+        })
+
+        const events = planes(dir).find((p) => p.name === 'events')!
+        const res = (await events.read('activity', {})) as {
+          events: EventRow[]
+          latest: Record<string, string>
+        }
+        assert.deepEqual(res.latest, {
+          w1: 'w1: Edit x.ts started [edit]',
+          w2: 'w2: turn stopped (end_turn)',
+        })
+        assert.equal(res.events.length, 3)
+
+        // the agent arg narrows broker-side to one subject key
+        const scoped = (await events.read('activity', { agent: 'w2' })) as {
+          events: EventRow[]
+          latest: Record<string, string>
+        }
+        assert.deepEqual(Object.keys(scoped.latest), ['w2'])
+        assert.equal(scoped.events.length, 1)
+      } finally {
+        await broker.close()
+      }
+    } finally {
+      rm()
+    }
+  })
+
+  test('a brokerless repo reads empty, never throws', async () => {
+    const { dir, rm } = tmp()
+    try {
+      testGit(['init', '-q'], { cwd: dir })
+      const events = planes(dir).find((p) => p.name === 'events')!
+      const res = (await events.read('activity', {})) as { events: EventRow[] }
+      assert.deepEqual(res.events, [])
     } finally {
       rm()
     }

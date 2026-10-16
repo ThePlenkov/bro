@@ -63,6 +63,11 @@ export interface EventFilter {
    *  filter declaring the same address; broadcast events (no `to`)
    *  match any filter. */
   to?: string
+  /** Subject restriction — only envelopes carrying one of these keys
+   *  match (the per-agent event filter's substrate). Opposite polarity
+   *  from `to`: a keyless event does not match — it is unaddressed
+   *  activity, not a broadcast. */
+  keys?: string[]
 }
 
 export interface EventHandlers {
@@ -154,6 +159,16 @@ export function eventMatches(filter: EventFilter, event: { topic: string; kind: 
   const to = (event as { to?: unknown }).to
   if (typeof to === 'string' && to !== '' && to !== filter.to) {
     return false
+  }
+  // A keys filter is a subject restriction, not an address: an event
+  // without a key does not pass (unlike `to`, where keyless means
+  // broadcast). Non-string keys are malformed — they match nothing.
+  const keys = filter.keys
+  if (Array.isArray(keys) && keys.length > 0) {
+    const key = (event as { key?: unknown }).key
+    if (typeof key !== 'string' || !keys.includes(key)) {
+      return false
+    }
   }
   return true
 }

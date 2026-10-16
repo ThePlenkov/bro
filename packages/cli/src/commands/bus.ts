@@ -42,7 +42,7 @@ const VALUE_FLAGS: ReadonlySet<string> = new Set([
 const KNOWN_FLAGS: Record<string, ReadonlySet<string>> = {
   serve: new Set(['--json']),
   publish: new Set(['--topic', '--kind', '--key', '--source', '--to', '--cause', '--ref', '--payload', '--json']),
-  subscribe: new Set(['--topic', '--kind', '--to', '--since', '--json']),
+  subscribe: new Set(['--topic', '--kind', '--key', '--to', '--since', '--json']),
   status: new Set(['--json']),
 }
 
@@ -66,6 +66,8 @@ function usage(): never {
     --kind K (repeatable)      subscriber-side filter; default: every kind
     --to ADDR                 this subscriber's address — addressed
                               events reach only their declared recipient
+    --key K (repeatable)      subject filter — only keyed events match;
+                              a keyless event does not pass
     --since N                 replay from seq N; a cursor outside the
                               broker's window reports a gap
   status                      liveness and counters (exit 0 even when down)`)
@@ -114,10 +116,12 @@ function formatEvent(event: BusEnvelope): string {
 function filterFrom(rest: string[]): BusFilter {
   const topics = flagAll(rest, '--topic')
   const kinds = flagAll(rest, '--kind')
+  const keys = flagAll(rest, '--key')
   const to = flag(rest, '--to')
   return {
     ...(topics.length > 0 ? { topics } : {}),
     ...(kinds.length > 0 ? { kinds } : {}),
+    ...(keys.length > 0 ? { keys } : {}),
     ...(to !== undefined && to !== '' ? { to } : {}),
   }
 }

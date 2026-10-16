@@ -37,12 +37,12 @@ import type {
   AgentApp,
   ClientContext,
   ClientRequestHandler,
-  PromptResponse,
   RequestPermissionRequest,
   RequestPermissionResponse,
   SessionUpdate,
   StopReason,
 } from '@agentclientprotocol/sdk'
+import { pumpTurn } from './acp.ts'
 
 /** What the resolver computed for one spawn — self-contained, so the
  *  worker never re-reads bro.config.json mid-run. */
@@ -330,47 +330,53 @@ export async function runAcpWorker(spec: AcpWorkerSpec): Promise<number> {
         }
       }
       const promptText = readFileSync(spec.promptFile, 'utf8')
-      // the stop lands in the update queue with the same response —
-      // draining to `stop` IS awaiting the turn, and keeps every
-      // notification on the log in arrival order
-      const drain = async (): Promise<PromptResponse> => {
-        // chunk updates stream token-level — accumulate a same-kind run
-        // and flush it as one line before the next update kind renders,
-        // so the .log carries a sentence, not a line per delta
-        let buf: { kind: string; text: string } | undefined
-        const flush = (): void => {
-          if (buf !== undefined && buf.text !== '') {
-            log(buf.text)
-          }
-          buf = undefined
+      // the shared pump IS the turn (bro-0ppt0): draining to `stop`
+      // keeps every notification on the .log in arrival order, and
+      // the same updates publish onto the 'agent' bus topic + the
+      // .events.jsonl archive at the pumpTurn chokepoint — one seam,
+      // no worker-local wire shapes. The worker's error mapping lives
+      // in the outer catch; the pump's own failures classify plainly.
+      // chunk updates stream token-level — the log sink accumulates a
+      // same-kind run and flushes it as one line before the next update
+      // kind renders, so the .log carries a sentence, not a line per
+      // delta (bro-dojl5's buffering, kept on the sink side of pumpTurn)
+      let buf: { kind: string; text: string } | undefined
+      const flush = (): void => {
+        if (buf !== undefined && buf.text !== '') {
+          log(buf.text)
         }
-        try {
-          for (;;) {
-            const m = await session.nextUpdate()
-            if (m.kind === 'stop') {
-              return m.response
-            }
-            const kind = m.update.sessionUpdate
-            const isChunk =
-              kind === 'agent_message_chunk' || kind === 'agent_thought_chunk'
-            if (isChunk && buf?.kind === kind) {
-              buf.text += renderAcpUpdate(m.update)
-              continue
-            }
-            flush()
-            if (isChunk) {
-              buf = { kind, text: renderAcpUpdate(m.update) }
-            } else {
-              log(renderAcpUpdate(m.update))
-            }
-          }
-        } finally {
-          flush()
+        buf = undefined
+      }
+      const onUpdate = (u: SessionUpdate): void => {
+        const kind = u.sessionUpdate
+        const isChunk =
+          kind === 'agent_message_chunk' || kind === 'agent_thought_chunk'
+        if (isChunk && buf?.kind === kind) {
+          buf.text += renderAcpUpdate(u)
+          return
+        }
+        flush()
+        if (isChunk) {
+          buf = { kind, text: renderAcpUpdate(u) }
+        } else {
+          log(renderAcpUpdate(u))
         }
       }
-      const [resp] = await Promise.all([session.prompt(promptText), drain()])
-      log(`turn stopped — ${resp.stopReason}`)
-      return resp.stopReason === 'end_turn' ? 0 : 1
+      const r = await pumpTurn(
+        session,
+        promptText,
+        onUpdate,
+        (err: unknown): never => {
+          throw err
+        },
+        () => ({}),
+        undefined,
+        by,
+        undefined,
+        spec.cwd
+      ).finally(flush)
+      log(`turn stopped — ${r.stopReason}`)
+      return r.stopReason === 'end_turn' ? 0 : 1
     } finally {
       session.dispose()
     }

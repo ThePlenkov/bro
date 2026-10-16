@@ -9,6 +9,8 @@
  */
 export { acpCall, acpChat, acpClient, acpConverse, acpModels, acpOpen, acpPooledTurn, acpSessionRetain, acpWorkerArgv, isSystemoneFamily } from './acp.ts'
 export type { AcpPeer, AcpRetainedSession, PooledTurnOpts } from './acp.ts'
+export { AGENT_USAGE_THROTTLE_MS, agentTurnPlane } from './acp-events.ts'
+export type { AgentTurnPlane, AgentTurnPlaneOpts } from './acp-events.ts'
 export type { ContentBlock as AcpContentBlock } from '@agentclientprotocol/sdk'
 export { newSpanId, newTraceId, otelEvent, otelHeader, otelParent, otelSpan, postDetached, setAmbient } from './otel.ts'
 export type { OtelCtx, OtelSpan } from './otel.ts'
