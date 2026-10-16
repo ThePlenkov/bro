@@ -362,9 +362,10 @@ async function readAct(dir: string): Promise<BroStatus['act']> {
       maxRounds: act.maxRounds,
       docsPaths: act.docsPaths,
       docsMaxRounds: act.docsMaxRounds,
+      requireApproval: act.requireApproval,
       stateCache: prStateCache(dir),
     })
-    const gate = evaluateExitGate(state)
+    const gate = evaluateExitGate(state, { requireApproval: act.requireApproval })
     // ownership marker — advisory read, a failure degrades the marker,
     // never the section
     let ownership: 'managed' | 'review' | 'human' | undefined

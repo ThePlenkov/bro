@@ -47,6 +47,18 @@ export interface PrActState {
    *  failure + fresh thread activity). The silent-reviewer signal:
    *  visible, never blocking. */
   alerts: string[]
+  /** Host review verdict ('APPROVED' etc.) — undefined when the facade
+   *  can't say. Probed lazily via the facade's optional reviewDecision
+   *  when meta doesn't carry it (GitLab approvals are a second call). */
+  reviewDecision?: string
+  /** 'at least one approving review by a human actor' — the probe
+   *  behind act.requireApproval. Aggregate host verdicts count bot
+   *  approvals; this one doesn't. Probed lazily via the facade's
+   *  optional humanApproved — undefined = unanswerable, which the
+   *  gate reads as "not approved" (bro-3vy93). Data, not policy —
+   *  the requireApproval flag itself lives on the gate call so a
+   *  cached state can never smuggle a stale option through. */
+  humanApproval?: boolean
 }
 
 export interface ExitGate {

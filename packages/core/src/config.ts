@@ -195,6 +195,7 @@ export const actSection: ConfigSection<{
   maxRounds: number
   docsPaths: string[]
   docsMaxRounds: number
+  requireApproval: boolean
   mergeQueue: { label?: string; comment?: string }
 }> = (raw) => {
   const obj = (typeof raw === 'object' && raw !== null ? raw : {}) as {
@@ -202,6 +203,7 @@ export const actSection: ConfigSection<{
     maxRounds?: unknown
     docsPaths?: unknown
     docsMaxRounds?: unknown
+    requireApproval?: unknown
     mergeQueue?: unknown
   }
   const queue = (typeof obj.mergeQueue === 'object' && obj.mergeQueue !== null
@@ -240,6 +242,9 @@ export const actSection: ConfigSection<{
       obj.docsMaxRounds >= 0
         ? obj.docsMaxRounds
         : DEFAULT_CONFIG.act.docsMaxRounds,
+    // opt-in human-signoff gate — off by default, auto-merge stays
+    // bot-only until a rig asks for the APPROVED verdict (bro-3vy93)
+    requireApproval: obj.requireApproval === true,
     mergeQueue,
   }
 }
@@ -831,6 +836,11 @@ export interface BroConfig {
      *  on a docs-only PR — doc threads churn per push, so inline fixing
      *  converges slower for less value. 0 disables the docs-specific cap. */
     docsMaxRounds: number
+    /** Human-signoff gate (bro-3vy93): when true the act exit gate —
+     *  and every auto-merge driven off it — also requires the host's
+     *  review verdict to be APPROVED. Opt-in hostile-input hardening;
+     *  default off keeps bot-only auto-merge. */
+    requireApproval: boolean
     /** External-merge-queue knobs (spec specs/bro-huy5o.6.md) — the
      *  connector pick lives in `connectors.mergeQueue`; these are the
      *  enqueue mechanics it reads. `label` adds a queue label on the
@@ -910,6 +920,7 @@ export const DEFAULT_CONFIG: BroConfig = {
     // no '*.txt' — requirements.txt and test fixtures are not docs
     docsPaths: ['*.md', '*.mdx', '*.rst', 'docs/'],
     docsMaxRounds: 2,
+    requireApproval: false,
     mergeQueue: {},
   },
   connectors: {},

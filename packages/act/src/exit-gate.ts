@@ -19,7 +19,10 @@ function threadsBlocker(state: PrActState): string {
   return `${state.openThreads} unresolved review thread(s)`
 }
 
-export function evaluateExitGate(state: PrActState): ExitGate {
+export function evaluateExitGate(
+  state: PrActState,
+  opts?: { requireApproval?: boolean }
+): ExitGate {
   // the gate guards an open PR's merge readiness — on a merged/closed PR
   // stale pending statuses (e.g. a reviewer that never finished) are
   // noise, not blockers
@@ -80,6 +83,17 @@ export function evaluateExitGate(state: PrActState): ExitGate {
   }
   if (state.isDraft) {
     blockers.push('PR is a draft')
+  }
+  // act.requireApproval — the hostile-input hardening: agent output
+  // never auto-lands without a HUMAN approving review. The flag is a
+  // gate-time option, not cached state — a stale cached `false` must
+  // never slip the check (state.ts usable() re-fetches entries that
+  // predate the probe). Bot approvals don't count; an unanswerable
+  // probe reads as "not approved" — never a pass (bro-3vy93)
+  if (opts?.requireApproval === true && state.humanApproval !== true) {
+    blockers.push(
+      `no human approval — act.requireApproval requires an approving review from a human (got ${state.humanApproval === false ? 'none/bot-only' : 'unanswerable'})`
+    )
   }
   return { ok: blockers.length === 0, blockers, ...base }
 }

@@ -1975,10 +1975,11 @@ async function serviceGate(ctx: Ctx, m: GateMember): Promise<ServiceVerdict> {
         maxRounds: ctx.act.maxRounds,
         docsPaths: ctx.act.docsPaths,
         docsMaxRounds: ctx.act.docsMaxRounds,
+        requireApproval: ctx.act.requireApproval,
         stateCache: ctx.stateCache,
       }
     )
-    const gate = evaluateExitGate(state)
+    const gate = evaluateExitGate(state, { requireApproval: ctx.act.requireApproval })
     console.error(
       `loop ${prRef(ctx, pr)}: threads=${gate.open_threads} ci=${gate.ci_pending}+${gate.ci_failing}f rev=${gate.reviewers_pending} sast=${gate.sast_pending}`
     )
