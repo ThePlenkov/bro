@@ -1,7 +1,7 @@
 import { describe, test } from 'node:test'
 import assert from 'node:assert/strict'
 import type { IncomingMessage, ServerResponse } from 'node:http'
-import type { BusCursor, BusSubscriptionHandlers, EventFilter } from '@broject/core'
+import type { BusCursor, BusSubscription, BusSubscriptionHandlers, EventFilter } from '@broject/core'
 import {
   asyncapiDocument,
   parseEventCursor,
@@ -189,6 +189,29 @@ describe('routeEventsStream', () => {
     await routeEventsStream(fakeReq('GET'), res, '/api/v1/events/stream', fakeBus(sub))
     assert.equal(cap.ended, true)
   })
+
+  test('a client close mid-subscribe still releases the broker subscription', async () => {
+    const sub: FakeSub = { closed: false }
+    const { res, cap } = fakeRes()
+    let resolveSub: (s: BusSubscription) => void = () => {}
+    const bus: EventsStreamBus = {
+      socketPath: () => '/tmp/bus.sock',
+      subscribe: (_s, _f, h, o) => {
+        sub.handlers = h
+        sub.opts = o
+        return new Promise((r) => {
+          resolveSub = r
+        })
+      },
+    }
+    const done = routeEventsStream(fakeReq('GET'), res, '/api/v1/events/stream', bus)
+    // the close listener is armed before the subscribe resolves —
+    // fire it while the handshake is still in flight
+    cap.closeHandlers.forEach((f) => f())
+    resolveSub({ close: () => (sub.closed = true) })
+    await done
+    assert.equal(sub.closed, true)
+  })
 })
 
 describe('asyncapiDocument', () => {
@@ -200,7 +223,7 @@ describe('asyncapiDocument', () => {
     }
     assert.equal(doc.asyncapi, '3.0.0')
     assert.equal(doc.channels.events.address, '/api/v1/events/stream')
-    assert.equal(doc.operations.eventsStream.action, 'receive')
+    assert.equal(doc.operations.eventsStream.action, 'send')
     for (const t of ['notify', 'act', 'convoy', 'drive', 'mesh', 'gap']) {
       assert.ok(t in doc.channels.events.messages, t)
     }

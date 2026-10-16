@@ -125,6 +125,7 @@ export async function routeEventsStream(
     )
   }
   let sub: BusSubscription | undefined
+  let clientGone = false
   const drop = (): void => {
     sub?.close()
     clearInterval(keepalive)
@@ -138,6 +139,13 @@ export async function routeEventsStream(
     }
   }, SSE_KEEPALIVE_MS)
   keepalive.unref?.()
+  // close must be armed BEFORE the subscribe await — a client that
+  // disconnects mid-handshake would otherwise leave the broker
+  // subscription and the keepalive leaking
+  res.on('close', () => {
+    clientGone = true
+    drop()
+  })
   try {
     sub = await bus.subscribe(
       socket,
@@ -170,10 +178,12 @@ export async function routeEventsStream(
     drop()
     return true
   }
-  res.on('close', () => {
-    sub?.close()
-    clearInterval(keepalive)
-  })
+  if (clientGone) {
+    // the client left while subscribe was in flight — nothing reads
+    // this subscription; release it instead of streaming into a hole
+    sub.close()
+    return true
+  }
   return true
 }
 
@@ -216,7 +226,9 @@ export function asyncapiDocument(): unknown {
     },
     operations: {
       eventsStream: {
-        action: 'receive',
+        // bro SENDS the channel's events to the client — AsyncAPI's
+        // action names the documented application's direction
+        action: 'send',
         channel: { $ref: '#/channels/events' },
       },
     },
