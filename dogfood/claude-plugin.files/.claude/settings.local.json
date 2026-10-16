@@ -1,10 +1,11 @@
 {
-  "apiKeyHelper": "bash .claude/dogfood-keyHelper.sh",
+  "apiKeyHelper": "npx --no-install bro serve ensure --port 44928",
   "env": {
     "ANTHROPIC_BASE_URL": "http://127.0.0.1:44928",
     "ANTHROPIC_DEFAULT_SONNET_MODEL": "devin/swe-2-max",
     "ANTHROPIC_DEFAULT_OPUS_MODEL": "devin/swe-2-max",
-    "ANTHROPIC_DEFAULT_HAIKU_MODEL": "devin/swe-2-max"
+    "ANTHROPIC_DEFAULT_HAIKU_MODEL": "devin/swe-2-max",
+    "BRO_PROVIDER_BACKEND": "devin-acp-max"
   },
   "enabledPlugins": {
     "bro@bro": true

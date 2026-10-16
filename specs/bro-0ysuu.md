@@ -25,10 +25,11 @@ scenario needs.
 - `dogfood/claude-plugin.files/` — the scratch's wiring:
   - `.claude/settings.local.json` — apiKeyHelper + `ANTHROPIC_BASE_URL`
     on port 44928 + `devin/swe-2-max` model pins + `bro@bro` enabled.
-  - `.claude/dogfood-keyHelper.sh` — lazy-starts `bro serve` on 44928
-    bound to the scratch repo; prints that listener's token. A scratch
-    never shares port/token with the operator's own listener (the
-    `/v1/*` plane gates on the session token).
+  - the apiKeyHelper is one line — `npx --no-install bro serve ensure
+    --port 44928` — lazy-starts `bro serve` bound to the scratch repo
+    and prints that listener's token (superseded the bash helper in
+    bro-hc1oy). A scratch never shares port/token with the operator's
+    own listener (the `/v1/*` plane gates on the session token).
   - `bro.config.local.json` — the `devin-acp-max` acp provider the
     scratch's conductor serves (`devin acp --model swe-2-max`).
 
