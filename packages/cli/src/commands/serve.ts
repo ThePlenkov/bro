@@ -28,6 +28,10 @@
  *                               the read planes below (spec bro-w4a45)
  *   GET    /ui                  the plane-catalog dashboard — one panel
  *                               per descriptor, index-driven (bro-9rls.4)
+ *   GET    /api/v1/events/stream  SSE over the bus — Last-Event-ID
+ *                               `<gen>:<seq>` resume, gap→re-derive
+ *   GET    /api/v1/events/asyncapi.json
+ *                               generated AsyncAPI 3.x for the stream
  *   GET    /api/v1/health       {ok, pid, dir, startedAt}
  *   GET    /api/v1/snapshot     the watch snapshot — mols × gates × fleet × loop
  *   GET    /api/v1/agents       the agents board — per-backend registry
@@ -113,6 +117,7 @@ import type { Readable } from 'node:stream'
 import {
   busPublish,
   busSocketPath,
+  busSubscribe,
   deliverSinks,
   gitCommonDir,
   gitTry,
@@ -162,6 +167,11 @@ import { flag, positionals } from './args.ts'
 import { loadBroConfig } from '../plugins.ts'
 import '../planes/index.ts'
 import { routePlanes } from '../planes/rest.ts'
+import {
+  asyncapiDocument,
+  routeEventsStream,
+  type EventsStreamBus,
+} from '../planes/stream.ts'
 import { providerConfig, providerProxy, type ProviderConfig } from './serve-provider.ts'
 import { conductorConfig, conductorProxy, type ConductorConfig } from './serve-conductor.ts'
 import { readBeads } from './status.ts'
@@ -397,6 +407,13 @@ export interface ServeDeps {
    *  plane. Sync — planes() builds descriptors, capabilities() is the
    *  live probe. */
   planeCatalog?(): PlaneDescriptor[]
+  /** `/api/v1/events/stream` — the SSE bus seam (spec bro-9rls.5).
+   *  Absent or a null socket → 503; the route is a raw stream below
+   *  the ServeResponse envelope, read-only under the Host guard. */
+  eventsBus?(): EventsStreamBus
+  /** `/api/v1/events/asyncapi.json` — the generated doc; absent
+   *  unwires the route to a plain 404. */
+  asyncApi?(): unknown
   /** `/api/v1/webhooks/<provider>` handlers keyed by provider slug. */
   webhooks?: Record<string, ServeWebhookHandler>
   /** `/v1/*` Messages-API provider proxy (bro-om6m8) — raw-stream,
@@ -429,6 +446,8 @@ const ROUTES = [
   'GET /api/v1/planes/<plane>',
   'GET /api/v1/planes/<plane>/<read|ref>',
   'POST /api/v1/planes/<plane>/<verb>',
+  'GET /api/v1/events/stream',
+  'GET /api/v1/events/asyncapi.json',
   'POST /api/v1/agents',
   'GET /api/v1/agents/<ref>',
   'GET /api/v1/agents/<ref>/log',
@@ -799,6 +818,10 @@ async function route(
   if (plane !== undefined) {
     return routePlane(method, () => plane(deps))
   }
+  if (api[0] === 'events' && api[1] === 'asyncapi.json' && api.length === 2) {
+    const doc = deps.asyncApi?.()
+    return doc === undefined ? NOT_FOUND : routePlane(method, async () => doc)
+  }
   if (api[0] === 'planes') {
     return routePlanes(method, api, rawBody, deps.planeCatalog?.(), query)
   }
@@ -1010,6 +1033,9 @@ async function handleRequest(
       return
     }
     if (await routeAgentLog(req, res, url, deps, token, statePathHint)) {
+      return
+    }
+    if (await routeEventsStream(req, res, url.pathname, deps.eventsBus?.())) {
       return
     }
     const wantsBody =
@@ -1422,6 +1448,13 @@ function realDeps(
       const connectors = loadBroConfig(dir).connectors
       return () => planes(dir, { connectors })
     })(),
+    eventsBus: () => ({
+      // the socket is re-probed per stream — a broker that comes up
+      // after serve start must not stay invisible until restart
+      socketPath: () => busSocketPath(dir),
+      subscribe: busSubscribe,
+    }),
+    asyncApi: () => asyncapiDocument(),
     webhooks: {
       github: githubWebhookHandler({
         secret: () => process.env[GITHUB_WEBHOOK_SECRET_ENV],

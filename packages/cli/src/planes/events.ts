@@ -26,6 +26,17 @@ import {
 } from '@broject/core'
 import { argNumber, argString, bounded, dispatchRead } from './helpers.ts'
 
+/** The topics that ride the stream — the channel registry the
+ *  AsyncAPI doc in stream.ts projects. Generated, not authored: a
+ *  doc/event drift is impossible when both read this table. */
+export const EVENTS_TOPICS = [
+  { topic: 'notify', summary: 'mailbox drops — notify notes, watch pulses, worker results' },
+  { topic: 'act', summary: 'review-loop verdicts — gate settles, thread resolutions' },
+  { topic: 'convoy', summary: 'molecule/step lifecycle — claims, completions' },
+  { topic: 'drive', summary: 'drive supervision — fixer spawns, orphan merges' },
+  { topic: 'mesh', summary: 'cross-repo request lifecycle — claims, dones' },
+] as const
+
 const VERBS = ['publish']
 
 /** Mailbox drops, listed not drained — `.seen-*` cursors and `.*.tmp`
