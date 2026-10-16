@@ -146,14 +146,16 @@ export function processesRootedIn(worktree: string, procDir = '/proc'): ProcHit[
     }
     const dir = join(procDir, name)
     const cmdline = readProcText(dir, 'cmdline')
-    let rooted = cmdline.split('\0').some((tok) => inside(tok))
-    if (!rooted) {
-      try {
-        rooted = inside(readlinkSync(join(dir, 'cwd')))
-      } catch {
-        continue // gone between readdir and readlink
-      }
+    let cwd: string
+    try {
+      cwd = readlinkSync(join(dir, 'cwd'))
+    } catch {
+      continue // gone between readdir and readlink
     }
+    // argv tokens may be relative (node ../wt/dist/index.js serve) —
+    // resolve them against the process cwd, not the ambient one.
+    let rooted =
+      inside(cwd) || cmdline.split('\0').some((tok) => tok !== '' && inside(resolve(cwd, tok)))
     if (rooted) {
       hits.push({ pid: Number(name), cmd: cmdline.replaceAll('\0', ' ').trim() })
     }

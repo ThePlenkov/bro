@@ -2,7 +2,7 @@ import { describe, test } from 'node:test'
 import assert from 'node:assert/strict'
 import { mkdirSync, mkdtempSync, rmSync, symlinkSync, utimesSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { join, relative, sep } from 'node:path'
 import {
   patchAgentRegistry,
   procStat,
@@ -376,6 +376,22 @@ describe('processesRootedIn', () => {
     } finally {
       rm()
       rmSync(wt, { recursive: true, force: true })
+    }
+  })
+
+  test('a relative argv token resolves against the process cwd', () => {
+    const wt = mkdtempSync(join(tmpdir(), 'bro-drive-wt-'))
+    const outside = mkdtempSync(join(tmpdir(), 'bro-drive-out-'))
+    const rel = `${relative(outside, wt)}${sep}dist${sep}index.js`
+    const { proc, mk, rm } = fakeProc()
+    try {
+      mk(901, outside, `node\0${rel}\0serve`)
+      const hits = processesRootedIn(wt, proc).map((h) => h.pid)
+      assert.deepEqual(hits, [901])
+    } finally {
+      rm()
+      rmSync(wt, { recursive: true, force: true })
+      rmSync(outside, { recursive: true, force: true })
     }
   })
 
