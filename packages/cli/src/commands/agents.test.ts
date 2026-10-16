@@ -466,6 +466,87 @@ describe('bro agents up <step>', () => {
   })
 })
 
+// spec bro-fqen0 — the ad-hoc front door: a phantom adhoc-<hex> step,
+// no bead, no claim, same spawn machinery underneath
+describe('bro agents run', () => {
+  test('positional prompt spawns an adhoc agent — registry row, no bead litter', async () => {
+    const fx = fixture([])
+    try {
+      const r = await agents([
+        'run', LONG_RUN, '--worktree', fx.main, '--beads-dir', fx.beads,
+      ])
+      assert.equal(r.code, 0, r.err.join('\n'))
+      const m = /agent native-[0-9a-f]+ running for (adhoc-[0-9a-f]+)/.exec(r.out.join('\n'))
+      assert.ok(m, `expected the adhoc spawn report, got: ${r.out.join('\n')}`)
+      const step = m![1]!
+      const entry = readAgentRegistry(fx.main)[step]!
+      assert.equal(entry.backend, 'native')
+      // the literal prompt reached the worker's prompt file verbatim
+      const stored = agentPromptPath(fx.main, String(entry.agentId))!
+      assert.equal(readFileSync(stored, 'utf8'), LONG_RUN)
+      // phantom step — the store saw nothing: no bead, no claim
+      assert.equal(readBeads(fx.db).length, 0)
+      const stop = await agents(['down', step])
+      assert.equal(stop.code, 0)
+    } finally {
+      fx.restore()
+    }
+  })
+
+  test('--prompt-file spawns through the same path', async () => {
+    const fx = fixture([])
+    try {
+      const r = await agents([
+        'run', '--prompt-file', fx.promptFile(LONG_RUN),
+        '--worktree', fx.main, '--beads-dir', fx.beads,
+      ])
+      assert.equal(r.code, 0, r.err.join('\n'))
+      const m = /(adhoc-[0-9a-f]+)/.exec(r.out.join('\n'))
+      assert.ok(m)
+      await agents(['down', m![1]!])
+    } finally {
+      fx.restore()
+    }
+  })
+
+  test('no prompt is a usage error, not a silent spawn', async () => {
+    const fx = fixture([])
+    try {
+      const r = await agents(['run', '--worktree', fx.main, '--beads-dir', fx.beads])
+      assert.equal(r.code, 1)
+      assert.match(r.err.join('\n'), /run requires a prompt/)
+      assert.equal(Object.keys(readAgentRegistry(fx.main)).length, 0)
+    } finally {
+      fx.restore()
+    }
+  })
+
+  test('positional text and --prompt are the same channel', async () => {
+    const fx = fixture([])
+    try {
+      const r = await agents(['run', 'x', '--prompt', 'y'])
+      assert.equal(r.code, 1)
+      assert.match(r.err.join('\n'), /same channel/)
+    } finally {
+      fx.restore()
+    }
+  })
+
+  test('prompt and --prompt-file stay mutually exclusive', async () => {
+    const fx = fixture([])
+    try {
+      const r = await agents([
+        'run', '--prompt', 'x', '--prompt-file', fx.promptFile(LONG_RUN),
+        '--worktree', fx.main, '--beads-dir', fx.beads,
+      ])
+      assert.equal(r.code, 1)
+      assert.match(r.err.join('\n'), /mutually exclusive/)
+    } finally {
+      fx.restore()
+    }
+  })
+})
+
 // the provider vocabulary (spec bro-5hx1.1) — --provider/--model/
 // --profile resolve through config into the spawned worker's env pins
 // and the registry's provenance
