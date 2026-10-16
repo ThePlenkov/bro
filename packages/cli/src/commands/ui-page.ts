@@ -55,7 +55,6 @@ const UI_SCRIPT = String.raw`
 var POLL_MS = 2000;
 var INDEX = '/api/v1/planes';
 var STREAM = '/api/v1/events/stream';
-var root = document.body;
 var timer;
 var inFlight = false;
 // last good frame — index plus a list body per plane name
@@ -90,7 +89,7 @@ function renderPanels(index, failed) {
     var h = el('h2', p.name);
     (p.reads || []).forEach(function (r) {
       var a = el('a', r, 'badge');
-      a.href = INDEX + '/' + p.name + '/' + r;
+      a.href = INDEX + '/' + encodeURIComponent(p.name) + '/' + encodeURIComponent(r);
       a.title = 'named read';
       h.appendChild(document.createTextNode(' '));
       h.appendChild(a);
@@ -138,7 +137,7 @@ function renderPanels(index, failed) {
             var td = el('td');
             if (k === 'id') {
               var a = el('a', cell(r.id));
-              a.href = INDEX + '/' + p.name + '/' + encodeURIComponent(String(r.id));
+              a.href = INDEX + '/' + encodeURIComponent(p.name) + '/' + encodeURIComponent(String(r.id));
               td.appendChild(a);
             } else {
               td.textContent = cell(r[k]);
@@ -195,7 +194,7 @@ function tick() {
       return p && p.capabilities && p.capabilities.read === true;
     });
     return Promise.allSettled(capable.map(function (p) {
-      return fetch(INDEX + '/' + p.name).then(function (res) {
+      return fetch(INDEX + '/' + encodeURIComponent(p.name) + '?limit=64').then(function (res) {
         if (!res.ok) throw new Error(p.name);
         return res.json();
       }).then(function (rows) { last.lists[p.name] = rows; });
