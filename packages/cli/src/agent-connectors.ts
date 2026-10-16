@@ -1348,15 +1348,23 @@ function guardExistingEntry(
 
 /** Guard the beads claim — a spawn must own (or create) the claim it
  *  will pin, never steal a live worker's or a human's step. Returns the
- *  claim state the write phase needs for claim-vs-rebind. */
+ *  claim state the write phase needs for claim-vs-rebind. `phantom`
+ *  marks the agents-run `adhoc-` namespace (spec bro-fqen0): a step id
+ *  that is never a bead — no probe, no claim, the registry row is the
+ *  only record. probeStep can't tell "bead missing" from "store down"
+ *  (its catch is silent), so the namespace prefix is the honest
+ *  predicate — a store outage on a real step still claims fail-loud. */
 function guardClaim(
   spec: SpawnSpec,
   hasEntry: boolean,
   claimAs: string | undefined
-): { claimed: boolean; actor: string | undefined } {
+): { claimed: boolean; actor: string | undefined; phantom: boolean } {
+  if (spec.molStep.startsWith('adhoc-')) {
+    return { claimed: false, actor: undefined, phantom: true }
+  }
   const step = probeStep(spec.beadsDir, spec.molStep)
   if (step?.status !== 'in_progress') {
-    return { claimed: false, actor: undefined }
+    return { claimed: false, actor: undefined, phantom: false }
   }
   if (!hasEntry) {
     // claimed with no registry entry — an interactive session or a
@@ -1375,7 +1383,7 @@ function guardClaim(
       `${spec.molStep} is claimed by ${step.assignee ?? '?'} — rebind only takes our own claim`
     )
   }
-  return { claimed: true, actor }
+  return { claimed: true, actor, phantom: false }
 }
 
 /* Dedup correlates both planes: a claim alone is not a conflict — a
@@ -1418,7 +1426,7 @@ function prepareSpawn(
   const registry = readAgentRegistry(dir)
   const existing = registry[spec.molStep]
   guardExistingEntry(dir, home, backend, spec, existing, opts)
-  const { claimed, actor } = guardClaim(spec, existing !== undefined, opts.claimAs)
+  const { claimed, actor, phantom } = guardClaim(spec, existing !== undefined, opts.claimAs)
   // fleet admission — before the registry write + claim land, so a
   // refusal leaves no half-spawned state
   enforceFleetCap(dir, home, registry, spec, opts.cap)
@@ -1502,21 +1510,25 @@ function prepareSpawn(
   })
   if (claimed) {
     rebindStep(spec.beadsDir, spec.molStep, actor!)
-  } else {
+  } else if (!phantom) {
     claimStep(spec.beadsDir, spec.molStep)
   }
-  if (opts.claimAs !== undefined) {
+  if (opts.claimAs !== undefined && !phantom) {
     rebindStep(spec.beadsDir, spec.molStep, opts.claimAs)
   }
   // lifecycle — the registry claim + spawn record (specs/telemetry/
-  // bro-ub91h.md); fail-open, so a wedged journal never stalls a spawn
-  emitLifecycle(dir, {
-    kind: 'claim',
-    bead: spec.molStep,
-    from: claimed || opts.claimAs !== undefined ? 'in_progress' : 'open',
-    to: 'in_progress',
-    detail: { via: 'agents', agent: agentId, backend },
-  })
+  // bro-ub91h.md); fail-open, so a wedged journal never stalls a spawn.
+  // A phantom step records the spawn only — there is no bead whose
+  // status a 'claim' event could truthfully report
+  if (!phantom) {
+    emitLifecycle(dir, {
+      kind: 'claim',
+      bead: spec.molStep,
+      from: claimed || opts.claimAs !== undefined ? 'in_progress' : 'open',
+      to: 'in_progress',
+      detail: { via: 'agents', agent: agentId, backend },
+    })
+  }
   emitLifecycle(dir, {
     kind: 'spawn',
     bead: spec.molStep,
