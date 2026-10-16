@@ -408,20 +408,25 @@ export function renderDevinTranscript(
   let watermark = fromStepId
   let systemSkipped = 0
   for (const step of steps) {
-    const id = typeof step['step_id'] === 'number' ? step['step_id'] : 0
-    if (id <= fromStepId) {
+    // -1 marks a step with no numeric id: it renders on the first pass
+    // (id-less steps exist and carry content), but a follow poll skips
+    // it — it can't advance the watermark, so it would reprint forever
+    const id = typeof step['step_id'] === 'number' ? step['step_id'] : -1
+    if (id === -1 ? fromStepId > 0 : id <= fromStepId) {
       continue
     }
-    const stepLines = atifStepLines(step)
-    if (step['source'] === 'system' && stepLines.length === 0) {
+    if (step['source'] === 'system') {
       systemSkipped++
+    } else {
+      lines.push(...atifStepLines(step))
     }
-    lines.push(...stepLines)
+    // consumed steps advance the watermark even when they emit no
+    // lines — a system step must elide exactly once, not every poll
     if (id > watermark) {
       watermark = id
     }
   }
-  if (systemSkipped > 0 && fromStepId === 0) {
+  if (systemSkipped > 0) {
     lines.push(`[transcript] (${systemSkipped} system steps elided)`)
   }
   return { lines, watermark }

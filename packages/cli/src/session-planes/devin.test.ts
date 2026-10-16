@@ -402,27 +402,44 @@ const TRANSCRIPT = JSON.stringify({
       source: 'user',
       message: 'ship it',
     },
+    {
+      step_id: 5,
+      timestamp: '2026-10-16T20:03:00.000Z',
+      source: 'system',
+      message: '',
+      tool_calls: [{ tool_call_id: 'exec:2', function_name: 'exec', arguments: { command: 'internal' } }],
+    },
+    {
+      timestamp: '2026-10-16T20:04:00.000Z',
+      source: 'agent',
+      message: 'a step with no numeric step_id',
+    },
   ],
 })
 
 describe('renderDevinTranscript', () => {
-  test('renders messages and tool calls, elides system steps', () => {
+  test('renders messages and tool calls, elides system steps — tool calls included', () => {
     const r = renderDevinTranscript(TRANSCRIPT)
     assert.ok(r !== undefined)
-    assert.equal(r.watermark, 4)
+    assert.equal(r.watermark, 5)
     const text = r.lines.join('\n')
     assert.match(text, /\[20:01:00\] agent: checking the provider template/)
     assert.match(text, /\[20:01:05\] → exec\(grep -rn loadAgentEnv packages\/cli\/src\)/)
     assert.match(text, /\[20:02:00\] user: ship it/)
+    assert.match(text, /\[20:04:00\] agent: a step with no numeric step_id/)
     assert.doesNotMatch(text, /additional_metadata/)
-    assert.match(text, /1 system steps elided/)
+    assert.doesNotMatch(text, /exec\(internal\)/)
+    assert.match(text, /2 system steps elided/)
   })
 
-  test('fromStepId resumes a follow watermark', () => {
+  test('fromStepId resumes a follow watermark — id-less steps do not reprint', () => {
     const r = renderDevinTranscript(TRANSCRIPT, 3)
     assert.ok(r !== undefined)
-    assert.equal(r.watermark, 4)
-    assert.deepEqual(r.lines, ['[20:02:00] user: ship it'])
+    assert.equal(r.watermark, 5)
+    assert.deepEqual(r.lines, [
+      '[20:02:00] user: ship it',
+      '[transcript] (1 system steps elided)',
+    ])
   })
 
   test('a mid-rewrite torn JSON reports undefined instead of throwing', () => {

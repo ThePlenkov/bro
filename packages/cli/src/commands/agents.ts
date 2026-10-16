@@ -1090,34 +1090,43 @@ export function followLog(
 /** Follow a JSON transcript by step watermark — the file is rewritten
  *  wholesale on each flush (not appended), so the byte-tail in
  *  followLog can't ride it: poll, re-render past the watermark, emit.
- *  Torn reads and vanishes skip a tick; SIGINT resolves clean. */
-async function followTranscript(
+ *  Torn reads and vanishes skip a tick. Same stop-handle contract as
+ *  followLog — stoppable without a signal. */
+function followTranscript(
   path: string,
   startWatermark: number,
   emit: (s: string) => void
-): Promise<void> {
+): { stop: () => void } {
   let watermark = startWatermark
-  await new Promise<void>((resolve) => {
-    const tick = () => {
-      try {
-        const r = renderDevinTranscript(readFileSync(path, 'utf8'), watermark)
-        if (r !== undefined) {
-          if (r.lines.length > 0) {
-            emit(r.lines.join('\n') + '\n')
-          }
-          watermark = r.watermark
+  let stopped = false
+  let timer: NodeJS.Timeout | undefined
+  const stop = () => {
+    stopped = true
+    if (timer !== undefined) {
+      clearTimeout(timer)
+    }
+  }
+  const tick = () => {
+    if (stopped) {
+      return
+    }
+    try {
+      const r = renderDevinTranscript(readFileSync(path, 'utf8'), watermark)
+      if (r !== undefined) {
+        if (r.lines.length > 0) {
+          emit(r.lines.join('\n') + '\n')
         }
-      } catch {
-        // mid-rewrite or reaped — retry next tick
+        watermark = r.watermark
       }
+    } catch {
+      // mid-rewrite or reaped — retry next tick
+    }
+    if (!stopped) {
       timer = setTimeout(tick, 2000)
     }
-    let timer = setTimeout(tick, 2000)
-    process.once('SIGINT', () => {
-      clearTimeout(timer)
-      resolve()
-    })
-  })
+  }
+  timer = setTimeout(tick, 2000)
+  return { stop }
 }
 
 async function cmdLog(dir: string, env: AgentConnectorEnv, argv: string[]): Promise<void> {
@@ -1177,7 +1186,11 @@ async function cmdLog(dir: string, env: AgentConnectorEnv, argv: string[]): Prom
     if (!follow) {
       return
     }
-    await followTranscript(transcript, rendered.watermark, (s) => process.stdout.write(s))
+    const handle = followTranscript(transcript, rendered.watermark, (s) =>
+      process.stdout.write(s)
+    )
+    await new Promise<void>((resolve) => process.once('SIGINT', resolve))
+    handle.stop()
     return
   }
   if (a.log === undefined) {
