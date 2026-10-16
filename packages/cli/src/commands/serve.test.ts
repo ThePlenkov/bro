@@ -32,6 +32,7 @@ import {
   type ServeDeps,
 } from './serve.ts'
 import { WEBUI_CSP } from './webui.ts'
+import { UI_CSP } from './ui-page.ts'
 
 const fakeConn = {
   name: 'native',
@@ -107,6 +108,23 @@ describe('serve — routes', () => {
     }
 
     const post = await route('POST', '/fleet', '{}')
+    assert.equal(post.status, 405)
+  })
+
+  test('GET /ui serves the catalog dashboard with its CSP; non-GET is 405', async () => {
+    const r = await route('GET', '/ui')
+    assert.equal(r.status, 200)
+    assert.equal(r.contentType, 'text/html; charset=utf-8')
+    assert.equal(r.headers?.['content-security-policy'], UI_CSP)
+    const html = String(r.body)
+    assert.match(html, /<!doctype html>/)
+    // the dashboard is index-driven — it fetches the plane catalog,
+    // not the bespoke read planes /fleet polls
+    assert.match(html, /\/api\/v1\/planes/)
+    // read-only: no write surface, verbs render as badges not buttons
+    assert.doesNotMatch(html, /method="post"|<form/)
+
+    const post = await route('POST', '/ui', '{}')
     assert.equal(post.status, 405)
   })
 

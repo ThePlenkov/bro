@@ -26,6 +26,8 @@
  *   GET    /                    service index
  *   GET    /fleet               the fleet webui — an HTML dashboard over
  *                               the read planes below (spec bro-w4a45)
+ *   GET    /ui                  the plane-catalog dashboard — one panel
+ *                               per descriptor, index-driven (bro-9rls.4)
  *   GET    /api/v1/health       {ok, pid, dir, startedAt}
  *   GET    /api/v1/snapshot     the watch snapshot — mols × gates × fleet × loop
  *   GET    /api/v1/agents       the agents board — per-backend registry
@@ -166,6 +168,7 @@ import { readBeads } from './status.ts'
 import { collectSnapshot } from './watch.ts'
 import { readHeartbeat, type HeartbeatSummary } from './watch-heartbeat.ts'
 import { FLEET_PAGE, WEBUI_CSP } from './webui.ts'
+import { UI_CSP, UI_PAGE } from './ui-page.ts'
 
 // --- serve state (discovery) ---------------------------------------------------
 
@@ -415,6 +418,7 @@ export interface ServeResponse {
 
 const ROUTES = [
   'GET /fleet',
+  'GET /ui',
   'GET /api/v1/health',
   'GET /api/v1/snapshot',
   'GET /api/v1/agents',
@@ -731,17 +735,24 @@ async function routeAgentRef(
   return NOT_ALLOWED
 }
 
-/** The site route — read-only HTML over the snapshot plane; the
- *  loopback Host check guards it like every other route. */
-function routeFleet(method: string): ServeResponse {
+/** The site routes — read-only HTML pages; the loopback Host check
+ *  guards them like every other route. `fleet` is the bespoke snapshot
+ *  view (spec bro-w4a45); `ui` is the index-driven catalog dashboard
+ *  (bro-9rls.4). */
+const PAGES: Record<string, { body: string; csp: string }> = {
+  fleet: { body: FLEET_PAGE, csp: WEBUI_CSP },
+  ui: { body: UI_PAGE, csp: UI_CSP },
+}
+
+function routePage(method: string, page: { body: string; csp: string }): ServeResponse {
   if (method !== 'GET') {
     return NOT_ALLOWED
   }
   return {
     status: 200,
-    body: FLEET_PAGE,
+    body: page.body,
     contentType: 'text/html; charset=utf-8',
-    headers: { 'content-security-policy': WEBUI_CSP },
+    headers: { 'content-security-policy': page.csp },
   }
 }
 
@@ -769,10 +780,11 @@ async function route(
     return { status: 200, body: { service: 'bro', routes: ROUTES } }
   }
 
-  // one comparison — a compound condition would push route() over the
-  // SonarCloud cognitive-complexity ceiling; join() tolerates stray slashes
-  if (seg.join('/') === 'fleet') {
-    return routeFleet(method)
+  // a table lookup keeps route() under the SonarCloud ceiling —
+  // a compound condition per site page would not
+  const page = seg.length === 1 ? PAGES[seg[0]!] : undefined
+  if (page !== undefined) {
+    return routePage(method, page)
   }
 
   const api = seg[0] === 'api' && seg[1] === 'v1' ? seg.slice(2) : undefined
