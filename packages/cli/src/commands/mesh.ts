@@ -419,14 +419,14 @@ function resolveAnchor(dir: string, state: ReturnType<typeof meshThread>, thread
 // capability so the requester's `external:` dep can release. The
 // guard is the pin itself: pull-topology threads anchor on stores
 // whose request bead has no export:, and shipping there would only
-// fail. An open request bead fails the ship and names the remedy;
-// --force is never passed (releasing the dep on open work is the
-// lie the dep exists to prevent)
+// fail. `bd ship` refuses an open bead — `done` IS the completion, so
+// the lifecycle closes the anchor request first (never --force: the
+// close is the honest record, force would release the dep on work the
+// store still calls open)
 function shipCapability(anchor: string, dir: string, thread: string): void {
-  let pinned = false
+  let bead: { id: string; labels?: string[]; status?: string } | undefined
   try {
-    const bead = anchorStore(anchor, dir).get<{ id: string; labels?: string[] }>(thread)
-    pinned = bead?.labels?.includes(`export:${thread}`) === true
+    bead = anchorStore(anchor, dir).get<{ id: string; labels?: string[]; status?: string }>(thread)
   } catch (e) {
     console.error(
       `! result posted but the anchor bead could not be read — capability NOT shipped ` +
@@ -434,10 +434,20 @@ function shipCapability(anchor: string, dir: string, thread: string): void {
     )
     return
   }
-  if (!pinned) {
+  if (bead?.labels?.includes(`export:${thread}`) !== true) {
     return
   }
   try {
+    if (bead.status !== 'closed') {
+      if (anchor !== dir) {
+        const close = bdAt(join(anchor, '.beads'), ['close', thread])
+        if (close.code !== 0 || !close.ran) {
+          throw new Error(close.err || 'bd unreachable')
+        }
+      } else {
+        bd(['close', thread], anchor)
+      }
+    }
     if (anchor !== dir) {
       const ship = bdAt(join(anchor, '.beads'), ['ship', thread])
       if (ship.code !== 0 || !ship.ran) {

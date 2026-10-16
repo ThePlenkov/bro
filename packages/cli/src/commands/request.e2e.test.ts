@@ -149,18 +149,22 @@ describe('bro request', () => {
       assert.ok(shipped.labels.includes(`provides:${thread}`), 'done did not ship provides:')
 
       // a second thread whose request bead is still OPEN at done —
-      // the ship refuses and the output names the remedy
+      // `done` IS the completion, so the lifecycle closes the anchor
+      // itself and the ship lands provides: (never --force on open work)
       const req2 = runCli(['request', 'sibling', 'open bead at done'], { cwd: main, env })
       const thread2 = /request (\S+) →/.exec(req2.stdout)?.[1]
       assert.ok(thread2)
       assert.equal(runCli(['mesh', 'claim', thread2], { cwd: target.dir, env }).code, 0)
       const earlyDone = runCli(['mesh', 'done', thread2], { cwd: target.dir, env })
       assert.equal(earlyDone.code, 0, earlyDone.stderr)
-      assert.match(earlyDone.stderr, /capability not shipped.*bd -C .* ship/)
-      const unshipped = readBeads(target.db).find((r) => r.id === thread2) as { labels: string[] }
-      assert.equal(
-        unshipped.labels.some((l) => l.startsWith('provides:')),
-        false,
+      const second = readBeads(target.db).find((r) => r.id === thread2) as {
+        labels: string[]
+        status: string
+      }
+      assert.equal(second.status, 'closed', 'done left the anchor request open')
+      assert.ok(
+        second.labels.includes(`provides:${thread2}`),
+        'auto-close at done did not ship provides:'
       )
 
       // requester's wait still resolves the now-CLOSED anchor: request
