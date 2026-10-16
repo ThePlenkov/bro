@@ -9,6 +9,7 @@
  */
 export { acpCall, acpChat, acpClient, acpConverse, acpModels, acpOpen, acpPooledTurn, acpWorkerArgv, isSystemoneFamily } from './acp.ts'
 export type { AcpPeer } from './acp.ts'
+export type { ContentBlock as AcpContentBlock } from '@agentclientprotocol/sdk'
 export { newSpanId, newTraceId, otelEvent, otelHeader, otelParent, otelSpan, postDetached, setAmbient } from './otel.ts'
 export type { OtelCtx, OtelSpan } from './otel.ts'
 export { AcpWorkerError, renderAcpUpdate, runAcpWorker } from './acp-worker.ts'

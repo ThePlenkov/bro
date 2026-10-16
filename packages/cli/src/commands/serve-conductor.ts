@@ -26,7 +26,7 @@ import type { IncomingMessage, ServerResponse } from 'node:http'
 import { loadConfig } from '@broject/core'
 import type { ProviderEntry } from '@broject/core'
 import { acpOpen, acpPooledTurn, otelEvent, otelParent, otelSpan } from '@broject/providers'
-import type { AcpPeer, OtelCtx, ProviderWireOpts } from '@broject/providers'
+import type { AcpContentBlock, AcpPeer, OtelCtx, ProviderWireOpts } from '@broject/providers'
 import { peerAttrs } from './peer.ts'
 import { catalogModels } from './providers.ts'
 
@@ -113,6 +113,11 @@ interface ToolResultBlock {
 }
 type InBlock = TextBlock | ToolUseBlock | ToolResultBlock | { type: string }
 
+interface ImageBlock {
+  type: 'image'
+  source?: { type?: string; media_type?: string; data?: string; url?: string }
+}
+
 interface MessagesRequest {
   model?: string
   system?: string | { text?: string }[]
@@ -158,25 +163,97 @@ function toolContract(tools: NonNullable<MessagesRequest['tools']>): string {
   ].join('\n')
 }
 
-function serializeRequest(body: MessagesRequest): string {
+const turnRole = (m: { role?: string }): string =>
+  m.role === 'assistant' ? 'assistant' : 'user'
+
+/** system + tools — the transcript prefix shared by serializeRequest
+ *  (one merged text block) and turnsToBlocks (its own leading block). */
+function prefixText(body: MessagesRequest): string {
   const parts: string[] = []
   const system =
     typeof body.system === 'string'
       ? body.system
       : (body.system ?? []).map((s) => s.text ?? '').join('')
-  if (system !== '') parts.push(`<system>\n${system}\n</system>`)
+  if (system !== '') {
+    parts.push(`<system>\n${system}\n</system>`)
+  }
   if (body.tools !== undefined && body.tools.length > 0) {
     parts.push(toolContract(body.tools))
   }
+  return parts.join('\n\n')
+}
+
+function serializeRequest(body: MessagesRequest): string {
+  const parts = [prefixText(body)]
   for (const m of body.messages ?? []) {
-    const role = m.role === 'assistant' ? 'assistant' : 'user'
     const text =
       typeof m.content === 'string'
         ? m.content
         : (m.content ?? []).map(blockText).join('')
-    parts.push(`<turn role="${role}">${text}</turn>`)
+    parts.push(`<turn role="${turnRole(m)}">${text}</turn>`)
   }
-  return parts.join('\n\n')
+  return parts.filter((p) => p !== '').join('\n\n')
+}
+
+/** An inbound image block → ACP image content. Only base64 sources
+ *  carry the payload ACP needs (`data` + `mimeType`) — url/file
+ *  sources degrade to the `[image]` marker rather than a block the
+ *  agent can't read. */
+function acpImage(b: InBlock): AcpContentBlock | undefined {
+  const s = (b as ImageBlock).source
+  if (s?.type === 'base64' && s.data !== undefined && s.media_type !== undefined) {
+    return { type: 'image', data: s.data, mimeType: s.media_type }
+  }
+  return undefined
+}
+
+/** The request as ACP content blocks — same transcript as
+ *  serializeRequest, but when the agent advertised
+ *  promptCapabilities.image the wire carries real image content;
+ *  without the capability the request stays one text block with the
+ *  `[image]` marker exactly as before (bro-7izjx). */
+function serializeBlocks(body: MessagesRequest, imageOk: boolean): AcpContentBlock[] {
+  return imageOk ? turnsToBlocks(body) : [{ type: 'text', text: serializeRequest(body) }]
+}
+
+/** The image-capable path: the prefix leads, then every turn is its
+ *  own text block followed by that turn's image blocks. <turn> tags
+ *  stay balanced inside a single text block (amazon-q #558) and
+ *  source order holds. */
+function turnsToBlocks(body: MessagesRequest): AcpContentBlock[] {
+  const blocks: AcpContentBlock[] = []
+  const prefix = prefixText(body)
+  if (prefix !== '') {
+    blocks.push({ type: 'text', text: prefix })
+  }
+  for (const m of body.messages ?? []) {
+    const { text, imgs } = turnParts(m.content)
+    blocks.push({ type: 'text', text: `<turn role="${turnRole(m)}">${text}</turn>` }, ...imgs)
+  }
+  return blocks
+}
+
+/** A turn's content → its serialized text (passed-through image
+ *  blocks stripped) plus the mappable ACP image blocks, in source
+ *  order. Unmappable images stay inline as `[image]`. */
+function turnParts(
+  content: string | InBlock[] | undefined
+): { text: string; imgs: AcpContentBlock[] } {
+  if (typeof content === 'string') {
+    return { text: content, imgs: [] }
+  }
+  const imgs: AcpContentBlock[] = []
+  const text = (content ?? [])
+    .map((b) => {
+      const img = b.type === 'image' ? acpImage(b) : undefined
+      if (img === undefined) {
+        return blockText(b)
+      }
+      imgs.push(img)
+      return ''
+    })
+    .join('')
+  return { text, imgs }
 }
 
 const TOOL_CALL = /<tool_call>\s*(\{[\s\S]*?\})\s*<\/tool_call>/g
@@ -338,15 +415,24 @@ async function messages(
     apiError(res, 400, 'invalid_request_error', 'malformed JSON body')
     return
   }
-  const prompt = serializeRequest(body)
-  const inputTokens = estTokens(prompt)
   const t0 = Date.now()
   // a dropped client cancels the acp turn — no orphan devin session
   const ac = new AbortController()
   res.once('close', () => ac.abort())
   let reply: Awaited<ReturnType<typeof acpPooledTurn>>
+  let inputTokens = 0
   try {
     const peer = await link(parent)
+    // image blocks ride the wire only when the agent advertised the
+    // prompt capability — serialize after link() so the negotiated
+    // caps are known (bro-7izjx)
+    const prompt = serializeBlocks(body, peer.caps?.image === true)
+    // an image's true token cost is dimension-based, not size-based —
+    // base64-length/4 is the rough wire proxy so usage reporting
+    // doesn't silently zero a large payload (amazon-q #558)
+    inputTokens =
+      estTokens(prompt.map((b) => (b.type === 'text' ? b.text : '')).join('')) +
+      prompt.reduce((n, b) => n + (b.type === 'image' ? Math.ceil(b.data.length / 4) : 0), 0)
     // `provider/model` ids are a real pin — resolved against the agent's
     // own catalog; bare foreign ids (claude-sonnet-*) are display labels
     reply = await acpPooledTurn(peer, cfg.entry, opts, prompt, Date.now() + cfg.timeoutMs, {
