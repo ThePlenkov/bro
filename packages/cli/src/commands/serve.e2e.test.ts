@@ -12,6 +12,7 @@ import {
   e2eEnv,
   initRepo,
   installFakeBd,
+  runCli,
 } from './testrepo.ts'
 
 /** Spawn `bro serve` and resolve once stdout reports the bound URL. */
@@ -191,6 +192,53 @@ describe('bro serve e2e', () => {
         await stop(child).catch(() => child.kill('SIGKILL'))
       }
     } finally {
+      rmSync(root, { recursive: true, force: true })
+    }
+  })
+
+  test('ensure on a dead port spawns the listener and prints its token', async () => {
+    const { root, main } = initRepo('bro-ensure-e2e-')
+    const { binDir, db } = installFakeBd(root, [])
+    const port = 45300 + (process.pid % 500)
+    let spawnedPid: number | undefined
+    try {
+      const r = runCli(['serve', 'ensure', '--port', String(port)], {
+        cwd: main,
+        env: { PATH: `${binDir}:${process.env.PATH ?? ''}`, FAKE_BD_DB: db },
+      })
+      assert.equal(r.code, 0, r.stderr)
+      const token = r.stdout.trim()
+      assert.ok(token.length > 0)
+
+      // the spawned serve is detached — its discovery file is the
+      // handle; token + health must agree with it
+      const stateFile = join(main, '.git', 'bro', 'serve.json')
+      const state = JSON.parse(readFileSync(stateFile, 'utf8')) as {
+        pid: number
+        url: string
+        token: string
+      }
+      spawnedPid = state.pid
+      assert.equal(state.url, `http://127.0.0.1:${port}`)
+      assert.equal(state.token, token)
+      const health = await fetch(`${state.url}/api/v1/health`)
+      assert.equal(health.status, 200)
+
+      // a second ensure is idempotent — same live listener, same token
+      const again = runCli(['serve', 'ensure', '--port', String(port)], {
+        cwd: main,
+        env: { PATH: `${binDir}:${process.env.PATH ?? ''}`, FAKE_BD_DB: db },
+      })
+      assert.equal(again.code, 0, again.stderr)
+      assert.equal(again.stdout.trim(), token)
+    } finally {
+      if (spawnedPid !== undefined) {
+        try {
+          process.kill(spawnedPid, 'SIGTERM')
+        } catch {
+          /* already gone */
+        }
+      }
       rmSync(root, { recursive: true, force: true })
     }
   })
