@@ -103,4 +103,29 @@ describe('command deprecation', () => {
       assert.doesNotMatch(r.stderr, /deprecated/)
     })
   })
+
+  test('deprecated + flatDeprecated emit ONE warning — the command-level verdict wins', () => {
+    const BOTH = `export default {
+  name: 'bothed',
+  summary: 'both fields set',
+  group: 'review',
+  deprecated: 'command retiring entirely',
+  flatDeprecated: 'flat spelling retiring',
+  run: () => console.log('bothed ran'),
+}`
+    const { root, main } = initRepo('bro-dep-e2e-', (dir) => {
+      writeFileSync(
+        join(dir, 'bro.config.json'),
+        JSON.stringify({ plugins: ['./dep.ts'] })
+      )
+      writeFileSync(join(dir, 'dep.ts'), BOTH)
+    })
+    inside(main, root, () => {
+      const r = runCli(['bothed'], { cwd: main })
+      assert.equal(r.code, 0, r.stderr)
+      const warns = r.stderr.match(/warning: 'bro bothed' is deprecated/g) ?? []
+      assert.equal(warns.length, 1, r.stderr)
+      assert.match(r.stderr, /command retiring entirely/)
+    })
+  })
 })

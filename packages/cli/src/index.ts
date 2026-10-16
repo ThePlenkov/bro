@@ -63,13 +63,14 @@ async function dispatchPlugin(cmd: string, rest: string[]): Promise<boolean> {
   if (!plugin) {
     return false
   }
-  if (plugin.deprecated) {
-    warnDeprecated(`'bro ${plugin.name}'`, plugin.deprecated)
-  }
   // flat-spelling retirement (specs/cli phase 4): warn only on the
   // flat path and only when there is a grouped spelling to point at —
-  // a group host has no better spelling than itself
-  if (
+  // a group host has no better spelling than itself. `deprecated` is
+  // the stronger verdict (the command itself is going away) and wins
+  // the warning slot — one stderr line per invocation, never two.
+  if (plugin.deprecated !== undefined) {
+    warnDeprecated(`'bro ${plugin.name}'`, plugin.deprecated)
+  } else if (
     plugin.flatDeprecated !== undefined &&
     plugin.group !== undefined &&
     plugin.group !== plugin.name
