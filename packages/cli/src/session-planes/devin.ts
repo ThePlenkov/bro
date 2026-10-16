@@ -369,20 +369,23 @@ function atifStepLines(step: Record<string, unknown>): string[] {
   for (const c of calls) {
     const call = c as Record<string, unknown>
     const fn = typeof call['function_name'] === 'string' ? call['function_name'] : '?'
-    const args = call['arguments']
-    let brief = ''
-    if (args !== null && typeof args === 'object' && !Array.isArray(args)) {
-      const cmd = (args as Record<string, unknown>)['command']
-      brief = typeof cmd === 'string' ? cmd : JSON.stringify(args)
-    } else if (args !== undefined) {
-      brief = JSON.stringify(args)
-    }
-    if (brief.length > 160) {
-      brief = brief.slice(0, 157) + '...'
-    }
-    out.push(`[${hhmmss}] → ${fn}(${brief.replace(/\s+/g, ' ')})`)
+    const brief = toolCallBrief(call['arguments']).replace(/\s+/g, ' ')
+    out.push(`[${hhmmss}] → ${fn}(${brief})`)
   }
   return out
+}
+
+/** A tool call's argument brief — `command` wins for exec-shaped args,
+ *  otherwise the compact JSON form, capped at one glance. */
+function toolCallBrief(args: unknown): string {
+  let brief = ''
+  if (args !== null && typeof args === 'object' && !Array.isArray(args)) {
+    const cmd = (args as Record<string, unknown>)['command']
+    brief = typeof cmd === 'string' ? cmd : JSON.stringify(args)
+  } else if (args !== undefined) {
+    brief = JSON.stringify(args)
+  }
+  return brief.length > 160 ? brief.slice(0, 157) + '...' : brief
 }
 
 /** An ATIF transcript rendered to log-shaped lines. `fromStepId`
