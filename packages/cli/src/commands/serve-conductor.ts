@@ -26,6 +26,7 @@ import type { IncomingMessage, ServerResponse } from 'node:http'
 import { loadConfig } from '@broject/core'
 import type { ProviderEntry } from '@broject/core'
 import { acpOpen, acpPooledTurn, acpSessionRetain, otelEvent, otelParent, otelSpan } from '@broject/providers'
+import type { AcpTerminals } from '@broject/providers'
 import type { AcpContentBlock, AcpPeer, AcpRetainedSession, OtelCtx, PooledTurnOpts, ProviderWireOpts } from '@broject/providers'
 import { peerAttrs } from './peer.ts'
 import { catalogModels } from './providers.ts'
@@ -1233,13 +1234,22 @@ async function models(
   }
 }
 
+/** The conductor's `(req, res)` handler PLUS the live link's terminal
+ *  registry — the /api/v1/terminals surface reads through it
+ *  (bro-eua0d). `terminals()` is undefined until the first link is
+ *  up and stays undefined on a dead transport until the respawn. */
+export interface ConductorProxy {
+  (req: IncomingMessage, res: ServerResponse): Promise<void>
+  terminals(): AcpTerminals | undefined
+}
+
 /** `(req, res)` handler for `/v1/*` — the conductor's answer when
  *  `BRO_PROVIDER_BACKEND` resolves an acp provider. Same raw-stream
  *  seat as the byte proxy — Messages bodies exceed the envelope cap. */
 export function conductorProxy(
   cfg: ConductorConfig,
   opts: ProviderWireOpts = {}
-): (req: IncomingMessage, res: ServerResponse) => Promise<void> {
+): ConductorProxy {
   const wireOpts: ProviderWireOpts = {
     ...opts,
     model: opts.model ?? cfg.model,
@@ -1291,7 +1301,7 @@ export function conductorProxy(
   // acp worker of the original incident). close() is sync, safe in an
   // 'exit' handler; an in-flight link resolve is a ms-scale window.
   process.once('exit', () => live?.close())
-  return async (req, res) => {
+  const handler = async (req: IncomingMessage, res: ServerResponse): Promise<void> => {
     const path = (req.url ?? '/').split('?')[0]
     const method = req.method ?? 'GET'
     const t0 = Date.now()
@@ -1335,6 +1345,9 @@ export function conductorProxy(
     }
     apiError(res, 404, 'not_found_error', `bro conductor: no route ${method} ${path}`)
   }
+  return Object.assign(handler, {
+    terminals: () => live?.terminals,
+  })
 }
 
 function apiErrorCountTokens(res: ServerResponse, raw: string): void {

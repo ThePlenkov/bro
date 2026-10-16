@@ -52,6 +52,12 @@
  *                               agent; plain GET tails the durable
  *                               .events.jsonl archive as NDJSON. Same
  *                               credential boundary as the log route.
+ *   GET    /api/v1/terminals/<id>/output[?follow]
+ *                               the conductor's acp terminal registry
+ *                               (bro-eua0d) — a REAL shell the agent ran:
+ *                               {output, truncated, exitStatus} JSON, or
+ *                               `follow` → SSE data: chunks + `event: exit`.
+ *                               Same credential rule as the log route.
  *   GET    /api/v1/queue        the beads queue — claimed (in-progress)
  *                               work + ready depth (`bro status` shape)
  *   GET    /api/v1/ticks        supervision — the watch heartbeat file,
@@ -184,6 +190,7 @@ import {
 } from '../planes/stream.ts'
 import { providerConfig, providerProxy, type ProviderConfig } from './serve-provider.ts'
 import { conductorConfig, conductorProxy, type ConductorConfig } from './serve-conductor.ts'
+import type { AcpTerminals, TerminalFollow } from '@broject/providers'
 import { readBeads } from './status.ts'
 import { collectSnapshot } from './watch.ts'
 import { readHeartbeat, type HeartbeatSummary } from './watch-heartbeat.ts'
@@ -431,6 +438,10 @@ export interface ServeDeps {
    *  256KB read cap and SSE answers must pipe. Absent means no
    *  upstream credential — the route 404s like any unknown path. */
   provider?: (req: IncomingMessage, res: ServerResponse) => Promise<void>
+  /** `/api/v1/terminals/<id>/output` — the conductor's live acp
+   *  terminal registry (bro-eua0d). Absent → the route 404s like any
+   *  unwired plane (no conductor, no agent shells to read). */
+  terminals?: () => AcpTerminals | undefined
 }
 
 export interface ServeResponse {
@@ -462,6 +473,7 @@ const ROUTES = [
   'GET /api/v1/agents/<ref>',
   'GET /api/v1/agents/<ref>/log',
   'GET /api/v1/agents/<ref>/events',
+  'GET /api/v1/terminals/<id>/output',
   'DELETE /api/v1/agents/<ref>',
   'POST /api/v1/webhooks/github',
   'ALL /v1/*',
@@ -1060,6 +1072,7 @@ async function handleRequest(
       (await routeProvider(req, res, url.pathname, deps, token, statePathHint)) ||
       (await routeAgentLog(req, res, url, deps, token, statePathHint)) ||
       (await routeAgentEvents(req, res, url, deps, token, statePathHint)) ||
+      (await routeTerminalOutput(req, res, url, deps, token, statePathHint)) ||
       (await routeEventsStream(req, res, url.pathname, deps.eventsBus?.()))
     if (routed) {
       return
@@ -1261,6 +1274,114 @@ async function routeAgentEvents(
   if (m === null) {
     return false
   }
+  return routeAgentEventsImpl(req, res, url, deps, token, statePathHint, m)
+}
+
+/** `GET /api/v1/terminals/<id>/output` — the conductor's acp terminal
+ *  registry (bro-eua0d): the agent's shells spawn inside THIS process,
+ *  so the buffer a `terminal/output` poll reads is a real shell, not a
+ *  transcript line. Same raw-stream seat and credential rule as the
+ *  agent-log route (bearer or `?token=` — output can carry secrets;
+ *  route()/routeRequest carry no headers, so the check lives here).
+ *  Plain GET answers the `terminal/output` wire shape as JSON;
+ *  `?follow` upgrades to SSE — the buffer at subscribe time lands as
+ *  `data:` frames (atomic with the taps, nothing slips between), live
+ *  chunks follow, `event: exit` carries the TerminalExitStatus JSON.
+ *  True once the path matches — false lets other paths through. */
+async function routeTerminalOutput(
+  req: IncomingMessage,
+  res: ServerResponse,
+  url: URL,
+  deps: ServeDeps,
+  token: string,
+  statePathHint: string
+): Promise<boolean> {
+  const m = /^\/api\/v1\/terminals\/([^/]+)\/output$/.exec(url.pathname)
+  if (m === null) {
+    return false
+  }
+  if (req.method !== 'GET') {
+    send(res, 405, { error: 'method not allowed' })
+    return true
+  }
+  const credentialed =
+    bearerMatch(req.headers.authorization, token) ||
+    tokenEq(url.searchParams.get('token') ?? '', token)
+  if (!credentialed) {
+    send(
+      res,
+      401,
+      { error: `session token required — read it from ${statePathHint}` },
+      { headers: { 'www-authenticate': 'Bearer' } }
+    )
+    return true
+  }
+  const reg = deps.terminals?.()
+  if (reg === undefined) {
+    // no live link yet (or a non-conductor serve) — same answer the
+    // other unwired planes give
+    send(res, 404, { error: 'no conductor terminal registry' })
+    return true
+  }
+  const id = m[1]!
+  if (!url.searchParams.has('follow')) {
+    try {
+      send(res, 200, reg.snapshot(id), { contentType: 'application/json' })
+    } catch {
+      send(res, 404, { error: `no terminal "${id}"` })
+    }
+    return true
+  }
+  const sse = (chunk: string) => {
+    if (res.writableEnded || res.destroyed) {
+      return
+    }
+    const trimmed = chunk.replace(/\n$/, '')
+    res.write(`data: ${trimmed.replace(/\n/g, '\ndata: ')}\n\n`)
+  }
+  let handle: TerminalFollow
+  try {
+    const f = reg.follow(id, {
+      data: sse,
+      exit: (status) => {
+        if (!res.writableEnded && !res.destroyed) {
+          res.write(`event: exit\ndata: ${JSON.stringify(status)}\n\n`)
+          res.end()
+        }
+      },
+    })
+    handle = f
+  } catch {
+    send(res, 404, { error: `no terminal "${id}"` })
+    return true
+  }
+  res.writeHead(200, {
+    'content-type': 'text/event-stream; charset=utf-8',
+    'cache-control': 'no-cache',
+    connection: 'keep-alive',
+  })
+  sse(handle.snapshot.output)
+  if (handle.snapshot.exitStatus !== null) {
+    // already-final terminal — the snapshot carries the verdict; no
+    // events will follow
+    res.write(`event: exit\ndata: ${JSON.stringify(handle.snapshot.exitStatus)}\n\n`)
+    res.end()
+    return true
+  }
+  const live = handle
+  res.on('close', () => live.stop())
+  return true
+}
+
+async function routeAgentEventsImpl(
+  req: IncomingMessage,
+  res: ServerResponse,
+  url: URL,
+  deps: ServeDeps,
+  token: string,
+  statePathHint: string,
+  m: RegExpExecArray
+): Promise<boolean> {
   if (req.method !== 'GET') {
     send(res, 405, { error: 'method not allowed' })
     return true
@@ -1539,6 +1660,9 @@ function realDeps(
 ): ServeDeps {
   const socketPath = busSocketPath(dir)
   const { conductorCfg, providerCfg } = provider
+  // the conductor's proxy carries the live link's terminal registry —
+  // the /api/v1/terminals plane reads through it (bro-eua0d)
+  const conductor = conductorCfg !== undefined ? conductorProxy(conductorCfg) : undefined
   return {
     snapshot: () => collectSnapshot(dir),
     agents: async () => {
@@ -1591,8 +1715,8 @@ function realDeps(
         },
       }),
     },
-    ...(conductorCfg !== undefined
-      ? { provider: conductorProxy(conductorCfg) }
+    ...(conductor !== undefined
+      ? { provider: conductor, terminals: conductor.terminals }
       : providerCfg !== undefined
         ? { provider: providerProxy(providerCfg) }
         : {}),

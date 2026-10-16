@@ -3,6 +3,7 @@ import assert from 'node:assert/strict'
 import { existsSync, mkdirSync, mkdtempSync, rmSync, statSync, utimesSync, writeFileSync } from 'node:fs'
 import { createServer, request, type IncomingMessage } from 'node:http'
 import type { AddressInfo } from 'node:net'
+import type { AcpTerminals } from '@broject/providers'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { Readable } from 'node:stream'
@@ -889,6 +890,114 @@ describe('serve handler over a real socket', () => {
     } finally {
       await new Promise<void>((r) => server.close(() => r()))
       rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  test('GET /api/v1/terminals/<id>/output — token-gated snapshot and SSE follow', async () => {
+    const TOKEN = 'test-session-token'
+    const auth = { authorization: `Bearer ${TOKEN}` }
+    // a fake registry over the same surface AcpTerminals exposes —
+    // `live` lets the test push output/exit like a real child would
+    let live: { data(chunk: string): void; exit(status: unknown): void } | undefined
+    const fakeReg = {
+      snapshot: (id: string) => {
+        if (id === 'term-done')
+          return { output: 'done\n', truncated: false, exitStatus: { exitCode: 0, signal: null } }
+        if (id !== 'term-1') throw new Error(`Unknown terminal '${id}'`)
+        return { output: 'hello\n', truncated: false, exitStatus: null }
+      },
+      follow: (id: string, l: { data(c: string): void; exit(s: unknown): void }) => {
+        if (id === 'term-done')
+          return {
+            snapshot: { output: 'done\n', truncated: false, exitStatus: { exitCode: 0, signal: null } },
+            stop: () => {},
+          }
+        if (id !== 'term-1') throw new Error(`Unknown terminal '${id}'`)
+        live = l
+        return {
+          snapshot: { output: 'hello\n', truncated: false, exitStatus: null },
+          stop: () => {},
+        }
+      },
+    }
+    const d = deps({ terminals: () => fakeReg as unknown as AcpTerminals })
+    const server = createServer(createServeHandler(d, { dir: '/repo', startedAt: 't0' }, TOKEN))
+    await new Promise<void>((r) => server.listen(0, '127.0.0.1', r))
+    const port = (server.address() as AddressInfo).port
+    const base = `http://127.0.0.1:${port}`
+    try {
+      const path = '/api/v1/terminals/term-1/output'
+      // output is potentially secret — same credential rule as the log route
+      assert.equal((await fetch(`${base}${path}`)).status, 401)
+      assert.equal((await fetch(`${base}${path}?token=nope`)).status, 401)
+      assert.equal(
+        (await fetch(`${base}${path}`, { method: 'POST', headers: auth })).status,
+        405
+      )
+      // unknown id and a missing registry are both 404
+      assert.equal(
+        (await fetch(`${base}/api/v1/terminals/nope/output`, { headers: auth })).status,
+        404
+      )
+      const bare = createServer(
+        createServeHandler(deps(), { dir: '/repo', startedAt: 't0' }, TOKEN)
+      )
+      await new Promise<void>((r) => bare.listen(0, '127.0.0.1', r))
+      try {
+        const p2 = `http://127.0.0.1:${(bare.address() as AddressInfo).port}`
+        assert.equal(
+          (await fetch(`${p2}${path}`, { headers: auth })).status,
+          404,
+          'no conductor registry — the unwired answer'
+        )
+      } finally {
+        await new Promise<void>((r) => bare.close(() => r()))
+      }
+
+      // plain GET — the terminal/output wire shape
+      const snap = await fetch(`${base}${path}`, { headers: auth })
+      assert.equal(snap.status, 200)
+      assert.deepEqual(await snap.json(), {
+        output: 'hello\n',
+        truncated: false,
+        exitStatus: null,
+      })
+
+      // ?follow — snapshot frame, live data, then `event: exit`
+      const follow = await fetch(`${base}${path}?follow`, { headers: auth })
+      assert.equal(follow.status, 200)
+      assert.match(follow.headers.get('content-type') ?? '', /text\/event-stream/)
+      const reader = follow.body!.getReader()
+      const dec = new TextDecoder()
+      let stream = ''
+      const pump = async (): Promise<void> => {
+        const { value, done } = await reader.read()
+        if (!done && value !== undefined) stream += dec.decode(value)
+      }
+      await pump()
+      assert.match(stream, /data: hello/)
+      live!.data('world\n')
+      for (let i = 0; i < 10 && !stream.includes('world'); i++) {
+        await pump()
+      }
+      assert.match(stream, /data: world/)
+      live!.exit({ exitCode: 0, signal: null })
+      for (let i = 0; i < 10 && !stream.includes('event: exit'); i++) {
+        await pump()
+      }
+      assert.match(stream, /event: exit\ndata: \{"exitCode":0/)
+      await reader.cancel()
+
+      // an already-final terminal emits snapshot + exit immediately
+      const done = await fetch(`${base}/api/v1/terminals/term-done/output?follow`, {
+        headers: auth,
+      })
+      assert.equal(done.status, 200)
+      const text = await done.text()
+      assert.match(text, /data: done/)
+      assert.match(text, /event: exit\ndata: \{"exitCode":0/)
+    } finally {
+      await new Promise<void>((r) => server.close(() => r()))
     }
   })
 
