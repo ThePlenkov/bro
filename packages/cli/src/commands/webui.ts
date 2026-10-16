@@ -12,6 +12,13 @@
  * bead titles are user input, never `innerHTML`. Read-only: GETs
  * only; the respawn decision stays a surface, not a button.
  *
+ * The agents table's `log` column opens a live tail per row
+ * (spec bro-wwo7e): a `tail` link on registry rows expands a pane
+ * streaming `GET /api/v1/agents/<ref>/log?follow` over EventSource.
+ * That route is write-grade credentialed, so the page takes the
+ * session token out-of-band — a `#token=` fragment (stripped via
+ * replaceState) or a paste field — kept in sessionStorage per tab.
+ *
  * Style note for editors: the page is a template literal — client JS
  * must not contain backticks or `${` sequences.
  */
@@ -38,6 +45,10 @@ const PAGE_STYLE = `
   .muted { color: #8b949e; }
   .stale { opacity: .55; }
   .sum { margin: .2rem 0 .4rem; }
+  #logpanel { margin: .3rem 0 .6rem; }
+  #logpanel .sum a { margin-left: .6rem; }
+  #logpane { background: #161b22; border: 1px solid #30363d; padding: .4rem .8rem; margin: .3rem 0 0; max-height: 22rem; overflow: auto; white-space: pre-wrap; word-break: break-word; font-size: .85rem; }
+  #logauth input { background: #0d1117; color: #c9d1d9; border: 1px solid #30363d; font: inherit; padding: .1rem .4rem; }
 `
 
 // String.raw — the script ships regex literals; raw keeps `\[` written
@@ -55,6 +66,29 @@ var inFlight = false;
 // last good frame per plane — a plane that fails this tick leaves its
 // section on the previous frame instead of blanking
 var last = {};
+
+// --- live agent log (spec bro-wwo7e) -------------------------------------
+var TOKEN_KEY = 'bro.serve.token';
+var LOG_REPLAY = 200;   // lines= on open — the replay scrollback
+var LOG_CAP = 300000;   // pane char budget — past it the head trims…
+var LOG_KEEP = 150000;  // …down to this
+var logChars = 0;
+// the log stream is write-grade credentialed and a static page cannot
+// hold the token — it arrives out-of-band: #token=<t> in the page URL
+// (a same-UID handoff; replaceState strips it so it never persists in
+// history) or a paste into the pane's token field. sessionStorage is
+// per-tab — the credential dies with the tab.
+var logToken = '';
+try { logToken = sessionStorage.getItem(TOKEN_KEY) || ''; } catch (e) {}
+var hashTok = /token=([^&]+)/.exec(location.hash || '');
+if (hashTok) {
+  logToken = decodeURIComponent(hashTok[1]);
+  try { sessionStorage.setItem(TOKEN_KEY, logToken); } catch (e) {}
+  history.replaceState(null, '', location.pathname + location.search);
+}
+// one live tail at a time — the pane sits outside the polled tbody so
+// the 2s re-render never wipes it
+var logView = { ref: null, es: null };
 
 function el(tag, text, cls) {
   var e = document.createElement(tag);
@@ -105,6 +139,112 @@ function age(ms) {
   return Math.floor(h / 24) + 'd';
 }
 
+// One appended line — pins to the bottom only while already near it,
+// so reading backscroll isn't yanked away on each append; the pane
+// trims its head past LOG_CAP so a long tail can't grow the DOM
+// unboundedly.
+function logLine(text, cls) {
+  var pane = document.getElementById('logpane');
+  var pinned = pane.scrollTop + pane.clientHeight >= pane.scrollHeight - 24;
+  pane.appendChild(cls ? el('span', text + '\n', cls) : document.createTextNode(text + '\n'));
+  logChars += text.length + 1;
+  if (logChars > LOG_CAP) {
+    pane.textContent = '[…earlier log trimmed…]\n' + pane.textContent.slice(-LOG_KEEP);
+    logChars = pane.textContent.length;
+  }
+  if (pinned) pane.scrollTop = pane.scrollHeight;
+}
+
+function closeLog() {
+  if (logView.es !== null) logView.es.close();
+  logView = { ref: null, es: null };
+  document.getElementById('logpanel').hidden = true;
+}
+
+// tail on the open ref is the collapse gesture; a different ref swaps
+// the stream. The endpoint emits data: log chunks, 'note' event state
+// markers (truncated/removed/reopened), and never ends the stream
+// itself — the client owns the lifetime.
+function openLog(ref) {
+  if (logView.ref === ref && logView.es !== null) { closeLog(); return; }
+  if (logView.es !== null) logView.es.close();
+  logView = { ref: ref, es: null };
+  var panel = document.getElementById('logpanel');
+  panel.hidden = false;
+  panel.scrollIntoView({ block: 'nearest' });
+  document.getElementById('logref').textContent = ref;
+  var pane = document.getElementById('logpane');
+  pane.textContent = '';
+  logChars = 0;
+  if (logToken === '') {
+    // no credential yet — the token row is the next step
+    document.getElementById('logauth').hidden = false;
+    document.getElementById('logtoken').focus();
+    return;
+  }
+  document.getElementById('logauth').hidden = true;
+  if (typeof EventSource === 'undefined') {
+    logLine('EventSource unsupported in this browser', 'bad');
+    return;
+  }
+  logLine('[connecting]', 'muted');
+  var es = new EventSource(
+    '/api/v1/agents/' + encodeURIComponent(ref) +
+    '/log?follow&lines=' + LOG_REPLAY + '&token=' + encodeURIComponent(logToken));
+  logView.es = es;
+  var got = false;
+  es.onopen = function () {
+    if (logView.es !== es) return;
+    if (got) {
+      // a reconnect replays the tail — wipe or it lands twice
+      pane.textContent = '';
+      logChars = 0;
+      logLine('[reconnected — replaying]', 'muted');
+    }
+  };
+  es.onmessage = function (e) {
+    if (logView.es !== es) return;
+    got = true;
+    // one event = one chunk; a multi-data frame is a chunk fanned out
+    // per line, and each frame ends a line (the endpoint's own read)
+    logLine(e.data);
+  };
+  es.addEventListener('note', function (e) {
+    if (logView.es !== es) return;
+    logLine(e.data, 'muted');
+  });
+  // the endpoint never signals completion today; honor it if it does
+  es.addEventListener('done', function () {
+    if (logView.es !== es) return;
+    logLine('[stream ended]', 'muted');
+    es.close();
+    logView.es = null;
+  });
+  es.onerror = function () {
+    if (logView.es !== es) return;
+    // CONNECTING is the browser retrying — leave it; a reconnect wipes
+    // + replays via onopen. CLOSED is fatal — refused (bad token) or
+    // gone (404/422).
+    if (es.readyState === EventSource.CLOSED) {
+      es.close();
+      logView.es = null;
+      logLine(got ? '[stream ended]' : '[refused — bad token, or the log is unavailable]', 'bad');
+      if (!got) document.getElementById('logauth').hidden = false;
+    }
+  };
+}
+
+function saveLogToken(ev) {
+  ev.preventDefault();
+  var v = document.getElementById('logtoken').value.trim();
+  if (v === '') return;
+  logToken = v;
+  try { sessionStorage.setItem(TOKEN_KEY, v); } catch (e) {}
+  document.getElementById('logtoken').value = '';
+  document.getElementById('logauth').hidden = true;
+  if (logView.ref !== null) openLog(logView.ref);
+}
+
 // The agents union — registry agents first (the plane of record), then
 // legacy loop runs, then session-plane discoveries the registry never
 // saw. A discovered session whose BRO_AGENT_ID badge matches a
@@ -121,6 +261,7 @@ function renderAgents(board, snap) {
     (b.agents || []).forEach(function (a) {
       var r = {
         id: a.id, backend: b.name, step: a.molStep || '—',
+        ref: a.id,
         state: a.state + (a.cause ? ' · ' + a.cause : ''),
         bad: a.state === 'lost' || a.state === 'blocked',
         pid: a.pid,
@@ -210,6 +351,26 @@ function renderAgents(board, snap) {
     tr.appendChild(wt);
     tr.appendChild(el('td', r.ageMs === undefined ? '—' : (r.ageNote || '') + age(r.ageMs), 'muted'));
     tr.appendChild(el('td', r.session || '—', 'muted'));
+    // tail — only rows the log route can resolve (registry agentIds)
+    // with a local log path; remote pointers name their surface, and
+    // loop/discovered rows aren't endpoint refs (404/422 on open)
+    var lt = el('td');
+    if (r.ref !== undefined && typeof r.log === 'string' && r.log !== '') {
+      if (/^[a-zA-Z][a-zA-Z0-9+.-]*:\/\//.test(r.log)) {
+        lt.appendChild(el('span', 'remote', 'muted'));
+        lt.title = r.log;
+      } else {
+        var tail = el('a', 'tail', logView.ref === r.ref && logView.es !== null ? 'quiet' : undefined);
+        tail.href = '#';
+        (function (ref) {
+          tail.onclick = function (ev) { ev.preventDefault(); openLog(ref); };
+        })(r.ref);
+        lt.appendChild(tail);
+      }
+    } else {
+      lt.appendChild(el('span', '—', 'muted'));
+    }
+    tr.appendChild(lt);
     tbody.appendChild(tr);
   });
   // occupancy + armed quota lanes — the fleet-cap accounting plus
@@ -509,6 +670,21 @@ document.addEventListener('visibilitychange', function () {
 });
 
 liveActivity();
+document.getElementById('logclose').onclick = function (ev) {
+  ev.preventDefault();
+  closeLog();
+};
+document.getElementById('logtokbtn').onclick = function (ev) {
+  ev.preventDefault();
+  var a = document.getElementById('logauth');
+  a.hidden = !a.hidden;
+};
+document.getElementById('logtoksave').onclick = saveLogToken;
+document.getElementById('logtoken').addEventListener('keydown', function (ev) {
+  if (ev.key === 'Enter') saveLogToken(ev);
+});
+window.addEventListener('pagehide', closeLog);
+
 tick();
 `
 
@@ -544,10 +720,18 @@ export const FLEET_PAGE = `<!doctype html>
 <h2>agents</h2>
 <div id="agentocc" class="sum muted"></div>
 <div class="scroll"><table>
-  <thead><tr><th>agent</th><th>backend</th><th>step</th><th>state</th><th>pid</th><th>provider</th><th>worktree</th><th>age</th><th>session</th></tr></thead>
+  <thead><tr><th>agent</th><th>backend</th><th>step</th><th>state</th><th>pid</th><th>provider</th><th>worktree</th><th>age</th><th>session</th><th>log</th></tr></thead>
   <tbody id="agents"><tr><td class="muted">…</td></tr></tbody>
 </table></div>
 <ul id="agentwarn"></ul>
+<div id="logpanel" hidden>
+  <div class="sum">log — <span id="logref"></span><a id="logtokbtn" href="#">token</a><a id="logclose" href="#">close</a></div>
+  <div id="logauth" class="sum muted" hidden>session token — the token field in &lt;git-common&gt;/bro/serve.json
+    <input id="logtoken" size="36" autocomplete="off" placeholder="paste token">
+    <a id="logtoksave" href="#">set</a>
+  </div>
+  <pre id="logpane"></pre>
+</div>
 
 <h2>activity</h2>
 <ul id="actfeed"><li class="muted">listening on the bus…</li></ul>
