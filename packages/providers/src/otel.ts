@@ -24,6 +24,10 @@ import { spawn } from 'node:child_process'
  *  themselves but should still emit when the operator wired it. */
 let cachedEp: string | null | undefined
 const ENDPOINT = (): string | undefined => {
+  // BRO_TELEMETRY=0 is the repo-wide telemetry off-switch — the same
+  // contract journalCommand and the hook flush honor; the otel plane
+  // must not emit (or spawn detached posters) past it either.
+  if (process.env.BRO_TELEMETRY === '0') return undefined
   if (cachedEp !== undefined) return cachedEp === null ? undefined : cachedEp
   const env = process.env.OTEL_EXPORTER_OTLP_ENDPOINT
   if (env !== undefined && env !== '') {

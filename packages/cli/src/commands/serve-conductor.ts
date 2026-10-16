@@ -461,6 +461,7 @@ export function conductorProxy(
   // cheap and concurrent sessions multiplex on the same connection.
   // A dead transport drops the link so the next request respawns.
   let link: Promise<AcpPeer> | undefined
+  let live: AcpPeer | undefined
   const getLink = (parent?: OtelCtx): Promise<AcpPeer> => {
     if (link === undefined) {
       otelEvent('acp.spawn', { backend: cfg.backend })
@@ -472,12 +473,27 @@ export function conductorProxy(
         parent
       )
       link.then(
-        (p) => p.signal.addEventListener('abort', () => (link = undefined), { once: true }),
+        (p) => {
+          live = p
+          p.signal.addEventListener(
+            'abort',
+            () => {
+              link = undefined
+              live = undefined
+            },
+            { once: true }
+          )
+        },
         () => (link = undefined)
       )
     }
     return link
   }
+  // the pooled child outlives any request — without a close on process
+  // exit serve shutdown orphans it on a dead transport (the zombie
+  // acp worker of the original incident). close() is sync, safe in an
+  // 'exit' handler; an in-flight link resolve is a ms-scale window.
+  process.once('exit', () => live?.close())
   return async (req, res) => {
     const path = (req.url ?? '/').split('?')[0]
     const method = req.method ?? 'GET'

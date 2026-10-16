@@ -8,9 +8,12 @@
  *  map inode → pid, and /proc/<pid>/stat walks ppid up to init. The chain
  *  names the agent even when the caller is a shim inside a shim —
  *  `peer.agent` is the first recognized name walking the tree DOWN,
- *  `peer.tree` the full `comm>comm>…` path, `peer.cmd` the peer's argv. */
+ *  `peer.tree` the full `comm>comm>…` path, `peer.cmd` the peer's
+ *  executable (argv[0] basename — arguments can carry prompts and
+ *  credentials and never enter span attributes). */
 
 import { readdirSync, readFileSync, readlinkSync } from 'node:fs'
+import { basename } from 'node:path'
 import type { Socket } from 'node:net'
 
 const AGENT =
@@ -93,16 +96,30 @@ function procRow(pid: number): ProcRow | undefined {
   }
 }
 
+/** argv[0]'s basename only — the full cmdline can carry prompts,
+ *  tokens and client secrets; arguments stay out of telemetry. */
 function cmdline(pid: number): string {
   try {
-    return readFileSync(`/proc/${pid}/cmdline`, 'utf8').split('\0').filter(Boolean).join(' ')
+    return basename(readFileSync(`/proc/${pid}/cmdline`, 'utf8').split('\0')[0] ?? '')
   } catch {
     return ''
   }
 }
 
+/** Per-socket memo — a keep-alive socket serves many requests and the
+ *  /proc scan is paid once per connection, not once per request. */
+const PEER_CACHE = new WeakMap<Socket, PeerInfo | undefined>()
+
 /** Resolve the process on the other end of a loopback socket. */
 export function peerInfo(sock: Socket): PeerInfo | undefined {
+  const cached = PEER_CACHE.get(sock)
+  if (cached !== undefined) return cached
+  const resolved = resolvePeer(sock)
+  PEER_CACHE.set(sock, resolved)
+  return resolved
+}
+
+function resolvePeer(sock: Socket): PeerInfo | undefined {
   const { remotePort, localPort } = sock
   if (remotePort === undefined || localPort === undefined) return undefined
   const inode = peerInode(remotePort, localPort)

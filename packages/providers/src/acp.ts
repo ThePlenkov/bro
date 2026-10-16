@@ -77,6 +77,21 @@ const REQUEST_CANCELLED = -32800
  *  category for correctness, so they may still serve. */
 const NON_MODEL_CATEGORIES = new Set(['mode', 'thought_level', 'model_config'])
 
+type SelectOpt = Extract<SessionConfigOption, { type: 'select' }>
+
+/** The session's model select: category 'model' wins outright; a
+ *  select whose category is absent or unknown still serves — a known
+ *  non-model kind never does (the spec forbids requiring category for
+ *  correctness). acpModels advertises and resolveModelPin resolves
+ *  against the same pick — a listed id must always be pinnable. */
+function modelSelect(configOptions: SessionConfigOption[]): SelectOpt | undefined {
+  const selects = configOptions.filter((o): o is SelectOpt => o.type === 'select')
+  return (
+    selects.find((o) => o.category === 'model') ??
+    selects.find((o) => o.category == null || !NON_MODEL_CATEGORIES.has(o.category))
+  )
+}
+
 const errMsg = (err: unknown): string =>
   err instanceof Error ? err.message : String(err)
 
@@ -171,7 +186,7 @@ async function applyModel(
   model: string | undefined,
   req: () => SendRequestOptions
 ): Promise<string> {
-  const modelOpt = configOptions.find((o) => o.category === 'model')
+  const modelOpt = modelSelect(configOptions)
   if (model === undefined) {
     const cur = modelOpt?.currentValue
     return typeof cur === 'string' ? cur : 'unknown'
@@ -245,7 +260,7 @@ async function converseModel(
   label: string | undefined = model,
   req: () => SendRequestOptions
 ): Promise<string> {
-  if (!configOptions.some((o) => o.category === 'model')) {
+  if (modelSelect(configOptions) === undefined) {
     return label ?? 'unknown'
   }
   return applyModel(ctx, sessionId, configOptions, by, model, req)
@@ -468,16 +483,8 @@ export async function acpModels(
   return withAcp(by, entry, opts, deadline, async (ctx) => {
     const { session } = await acpSession(ctx, opts, by, deadline)
     try {
-      const selects = (session.newSessionResponse.configOptions ?? []).filter(
-        (o) => o.type === 'select'
-      )
-      // 'model' wins outright; a select without it still serves when
-      // the category is absent or unknown — never when the agent
-      // labeled it a known non-model kind
-      const opt =
-        selects.find((o) => o.category === 'model') ??
-        selects.find((o) => o.category == null || !NON_MODEL_CATEGORIES.has(o.category))
-      const options = opt?.type === 'select' ? opt.options : []
+      const opt = modelSelect(session.newSessionResponse.configOptions ?? [])
+      const options = opt?.options ?? []
       // options may be grouped — a group's leaf options carry the values
       return options
         .flatMap((o) => ('options' in o ? o.options : [o]))
@@ -746,8 +753,8 @@ function resolveModelPin(
   configOptions: SessionConfigOption[],
   by: string
 ): string | undefined {
-  const opt = configOptions.find((o) => o.category === 'model')
-  if (opt === undefined || opt.type !== 'select') {
+  const opt = modelSelect(configOptions)
+  if (opt === undefined) {
     return undefined // no catalog to resolve against — the session check decides
   }
   const leaves = selectLeaves(opt)
@@ -784,7 +791,7 @@ async function resolveTurnModel(
   if (
     want === undefined ||
     resolved !== undefined ||
-    !configOptions.some((o) => o.category === 'model')
+    modelSelect(configOptions) === undefined
   ) {
     // direct path — or a tool-less backend (no model option): the
     // reported label is the configured pin, never the ask
@@ -799,7 +806,7 @@ async function resolveTurnModel(
   //  - spawn-level pin: the provider command's --model already set
   //    state the session reports back verbatim
   const bare = want.includes('/') ? want.slice(want.indexOf('/') + 1) : want
-  const modelOpt = configOptions.find((o) => o.category === 'model')
+  const modelOpt = modelSelect(configOptions)
   const thought = configOptions.find((o) => o.category === 'thought_level')
   const dash = bare.lastIndexOf('-')
   const level = dash > 0 ? bare.slice(dash + 1) : ''
