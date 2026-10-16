@@ -130,7 +130,7 @@ describe('serve — routes', () => {
     assert.match(html, /history\.replaceState/)
     assert.match(html, /sessionStorage/)
     assert.match(html, /id="logtoken"/)
-    assert.doesNotMatch(html, /token:\s*['"][0-9a-f]{16}/)
+    assert.doesNotMatch(html, /token[:=]\s*['"][0-9A-Za-z+/=_-]{8,}/i)
   })
 
   test('GET /ui serves the catalog dashboard with its CSP; non-GET is 405', async () => {

@@ -80,11 +80,13 @@ var logChars = 0;
 // per-tab — the credential dies with the tab.
 var logToken = '';
 try { logToken = sessionStorage.getItem(TOKEN_KEY) || ''; } catch (e) {}
-var hashTok = /token=([^&]+)/.exec(location.hash || '');
+var hashTok = /(?:^#|&)token=([^&]+)/.exec(location.hash || '');
 if (hashTok) {
-  logToken = decodeURIComponent(hashTok[1]);
-  try { sessionStorage.setItem(TOKEN_KEY, logToken); } catch (e) {}
-  history.replaceState(null, '', location.pathname + location.search);
+  try { logToken = decodeURIComponent(hashTok[1]); } catch (e) { logToken = ''; }
+  if (logToken) {
+    try { sessionStorage.setItem(TOKEN_KEY, logToken); } catch (e) {}
+    history.replaceState(null, '', location.pathname + location.search);
+  }
 }
 // one live tail at a time — the pane sits outside the polled tbody so
 // the 2s re-render never wipes it
@@ -149,8 +151,10 @@ function logLine(text, cls) {
   pane.appendChild(cls ? el('span', text + '\n', cls) : document.createTextNode(text + '\n'));
   logChars += text.length + 1;
   if (logChars > LOG_CAP) {
-    pane.textContent = '[…earlier log trimmed…]\n' + pane.textContent.slice(-LOG_KEEP);
-    logChars = pane.textContent.length;
+    while (logChars > LOG_KEEP && pane.firstChild) {
+      logChars -= pane.firstChild.textContent.length;
+      pane.removeChild(pane.firstChild);
+    }
   }
   if (pinned) pane.scrollTop = pane.scrollHeight;
 }
@@ -727,7 +731,7 @@ export const FLEET_PAGE = `<!doctype html>
 <div id="logpanel" hidden>
   <div class="sum">log — <span id="logref"></span><a id="logtokbtn" href="#">token</a><a id="logclose" href="#">close</a></div>
   <div id="logauth" class="sum muted" hidden>session token — the token field in &lt;git-common&gt;/bro/serve.json
-    <input id="logtoken" size="36" autocomplete="off" placeholder="paste token">
+    <input id="logtoken" type="password" size="36" autocomplete="off" placeholder="paste token">
     <a id="logtoksave" href="#">set</a>
   </div>
   <pre id="logpane"></pre>
