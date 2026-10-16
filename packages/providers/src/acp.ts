@@ -24,9 +24,13 @@ import { Readable, Writable } from 'node:stream'
 import { client, ndJsonStream, PROTOCOL_VERSION, RequestError } from '@agentclientprotocol/sdk'
 import type {
   ActiveSession,
+  ClientCapabilities,
   ClientContext,
   ClientRequestHandler,
   ContentBlock,
+  InitializeResponse,
+  NewSessionRequest,
+  NewSessionResponse,
   PromptResponse,
   RequestPermissionRequest,
   RequestPermissionResponse,
@@ -302,8 +306,16 @@ interface AcpReply {
 
 /** The initialize handshake — once per connection, not per session.
  *  `req(d)` mints per-request cancel options against ANY deadline so a
- *  pooled caller's per-turn budget is what bounds its requests. */
-async function acpInit(ctx: ClientContext, by: string, deadline: number) {
+ *  pooled caller's per-turn budget is what bounds its requests.
+ *  `clientCaps` overrides the advertised clientCapabilities — the
+ *  default all-false posture (spec bro-5hx1.1 §7) stands unless the
+ *  caller is a brokered transport bridging the calls to a real client. */
+async function acpInit(
+  ctx: ClientContext,
+  by: string,
+  deadline: number,
+  clientCaps?: ClientCapabilities
+) {
   const req = (d = deadline): SendRequestOptions => ({
     cancellationSignal: AbortSignal.timeout(Math.max(1, remaining(d))),
   })
@@ -312,7 +324,7 @@ async function acpInit(ctx: ClientContext, by: string, deadline: number) {
     {
       protocolVersion: PROTOCOL_VERSION,
       clientInfo: { name: 'bro', version: '1' },
-      clientCapabilities: {
+      clientCapabilities: clientCaps ?? {
         fs: { readTextFile: false, writeTextFile: false },
         terminal: true,
       },
@@ -351,18 +363,22 @@ async function acpInit(ctx: ClientContext, by: string, deadline: number) {
         )
       : err
   }
-  return { asAuthError, req, caps }
+  return { asAuthError, req, caps, init }
 }
 
-/** session/new on an ALREADY-initialized connection — the pooled path. */
+/** session/new on an ALREADY-initialized connection — the pooled path.
+ *  `sessionRequest` is the brokered transport's verbatim client params
+ *  (spec bro-ymbq1) — cwd, mcpServers, _meta all ride through; absent,
+ *  the conductor posture stands: our cwd, no MCP composition. */
 async function acpSessionOpen(
   ctx: ClientContext,
   opts: ProviderWireOpts,
   asAuthError: (err: unknown) => never,
-  req: () => SendRequestOptions
+  req: () => SendRequestOptions,
+  sessionRequest?: NewSessionRequest
 ) {
   const session = await ctx
-    .buildSession({ cwd: opts.acp?.cwd ?? process.cwd(), mcpServers: [] })
+    .buildSession(sessionRequest ?? { cwd: opts.acp?.cwd ?? process.cwd(), mcpServers: [] })
     .start(req())
     .catch(asAuthError)
   return session
@@ -739,6 +755,11 @@ export interface AcpPeer {
   /** Per-request cancel options against any deadline (init one is default). */
   req: (deadline?: number) => SendRequestOptions
   asAuthError: (err: unknown) => never
+  /** The upstream initialize result — protocolVersion is already
+   *  v-checked; agentCapabilities/authMethods/agentInfo are what a
+   *  brokered transport answers its own downstream initialize with
+   *  (spec bro-ymbq1). */
+  init: InitializeResponse
   /** Prompt capabilities negotiated at initialize — `image` gates
    *  whether image content blocks may go on the wire (bro-7izjx).
    *  Optional: external peers built before the field existed are
@@ -749,6 +770,54 @@ export interface AcpPeer {
    *  through it (bro-eua0d). Optional: peers built outside acpOpen
    *  carry no registry. */
   terminals?: AcpTerminals
+}
+
+/** The client-bound methods a brokered link relays (spec bro-ymbq1):
+ *  the SDK's full client-method set plus `mcp/message`, the MCP relay
+ *  some agents emit. Every one rides `opts.acp.bridge` — refusals come
+ *  back from the real client, never invented here. */
+const BRIDGED_METHODS = [
+  'session/request_permission',
+  'fs/write_text_file',
+  'fs/read_text_file',
+  'terminal/create',
+  'terminal/output',
+  'terminal/release',
+  'terminal/wait_for_exit',
+  'terminal/kill',
+  'elicitation/create',
+  'mcp/message',
+] as const
+
+/** The client app for a pooled link — deny-permission posture by
+ *  default (bro-5hx1.1 §7); `opts.acp.bridge` flips it to passthrough,
+ *  forwarding every client-bound call to the delegate. Unbridged links
+ *  also register the local terminal registry — a bridged link forwards
+ *  terminal/* to the real client instead, so it must not shadow it. */
+function pooledClientApp(opts: ProviderWireOpts, terminals: AcpTerminals) {
+  const bridge = opts.acp?.bridge
+  const app = client({ name: 'bro' })
+  if (bridge === undefined) {
+    return terminals.register(
+      app.onRequest('session/request_permission', denyPermission)
+    )
+  }
+  for (const m of BRIDGED_METHODS) {
+    app.onRequest<Record<string, unknown>, unknown>(
+      m,
+      (p) => p as Record<string, unknown>,
+      async (ctx) =>
+        // a void-returning client answer still owes the wire a result
+        // object — `result` absent is not a legal JSON-RPC response
+        (await bridge.request(m, ctx.params, ctx.signal)) ?? {}
+    )
+  }
+  app.onNotification<Record<string, unknown>>(
+    'elicitation/complete',
+    (p) => p as Record<string, unknown>,
+    (ctx) => bridge.notify('elicitation/complete', ctx.params)
+  )
+  return app
 }
 
 export async function acpOpen(
@@ -764,9 +833,7 @@ export async function acpOpen(
     throw err
   }
   const terminals = new AcpTerminals()
-  const app = terminals.register(
-    client({ name: 'bro' }).onRequest('session/request_permission', denyPermission)
-  )
+  const app = pooledClientApp(opts, terminals)
   const peer = opts.acp?.peer
   let child: ChildProcess | undefined
   let tail = (): string => ''
@@ -805,11 +872,11 @@ export async function acpOpen(
   // the child) outlive the dead connection they were created under
   conn.signal.addEventListener('abort', close, { once: true })
   try {
-    const { asAuthError, req, caps } = await withDeadline(deadline, () =>
-      acpInit(conn.agent, by, deadline)
+    const { asAuthError, req, caps, init } = await withDeadline(deadline, () =>
+      acpInit(conn.agent, by, deadline, opts.acp?.clientCapabilities)
     )
     span.end({ 'acp.pid': child?.pid ?? 0 })
-    return { ctx: conn.agent, signal: conn.signal, close, tail, req, asAuthError, caps, terminals }
+    return { ctx: conn.agent, signal: conn.signal, close, tail, req, asAuthError, caps, init, terminals }
   } catch (err) {
     close()
     // spawn's 'error' event is async — a binary that can't exec is only
@@ -975,6 +1042,10 @@ export interface PooledTurnOpts {
   requestModel?: string
   /** Parent span context — nests `acp.turn` under the caller's trace. */
   parent?: OtelCtx
+  /** A verbatim client `session/new` request — the brokered transport
+   *  (spec bro-ymbq1) passes the downstream client's cwd/mcpServers/
+   *  _meta through instead of the synthesized {cwd, mcpServers:[]}. */
+  sessionRequest?: NewSessionRequest
 }
 
 /** One conversational turn on an already-open acp link — session/new,
@@ -1068,14 +1139,19 @@ export async function acpPooledTurn(
  *  the caller drops it from any reuse map. */
 export interface AcpRetainedSession {
   sessionId: string
+  /** The verbatim `session/new` response — a brokered transport answers
+   *  its downstream session/new with it (modes, configOptions, meta). */
+  newSessionResponse: NewSessionResponse
   /** One more user turn on the live session — the pooled pump minus
    *  session/new+dispose. A differing requestModel re-pins on the
-   *  live session's config options. */
+   *  live session's config options. `response` is the verbatim
+   *  PromptResponse the wire answered — the brokered transport returns
+   *  it downstream untouched. */
   prompt(
     prompt: string | ContentBlock[],
     deadline: number,
     turn?: PooledTurnOpts
-  ): Promise<{ stopReason: StopReason; text: string; model: string }>
+  ): Promise<{ stopReason: StopReason; text: string; model: string; response: PromptResponse }>
   /** Re-resolve a request model on the live session without a turn —
    *  a resend that pins a different model still owns the session. */
   repin(requestModel: string, deadline: number): Promise<string>
@@ -1102,7 +1178,13 @@ export async function acpSessionRetain(
     { parent: turn.parent }
   )
   try {
-    const session = await acpSessionOpen(ctx, opts, peer.asAuthError, req)
+    const session = await acpSessionOpen(
+      ctx,
+      opts,
+      peer.asAuthError,
+      req,
+      turn.sessionRequest
+    )
     const configOptions = session.newSessionResponse.configOptions ?? []
     const base = opts.model ?? entry.model
     // the RAW requested id (possibly a composite like 'swe-2-max') —
@@ -1190,6 +1272,7 @@ export async function acpSessionRetain(
     }
     return {
       sessionId: session.sessionId,
+      newSessionResponse: session.newSessionResponse,
       prompt: async (prompt, dl, t = {}) => {
         try {
           const r2 = () => peer.req(dl)
