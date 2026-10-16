@@ -8,7 +8,7 @@
 import { describe, test } from 'node:test'
 import assert from 'node:assert/strict'
 import { spawn, spawnSync } from 'node:child_process'
-import { chmodSync, existsSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { chmodSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import {
   CLI_DIST,
@@ -228,6 +228,42 @@ describe('bro loop e2e', () => {
       // heartbeats, no mid-run audit on a normal exit
       assert.doesNotMatch(r.stderr, /loop: alive —/)
       assert.doesNotMatch(r.stderr, /exiting mid-run/)
+    })
+  })
+
+  test('the pick consults the verdict ladder — parked/live-worker beads skip (bro-oy3k1.6)', () => {
+    // claimClump's filter asks rigNext now: a `waiting`-labelled bead
+    // (a parked frame) and a bead with a live registry worker are not
+    // claimable even though raw status still reads open — the loop
+    // steps down the chain to the first `step` verdict
+    const f = loopFixture([
+      { ...FAKE_BEAD, id: 'fx-parked', title: 'shelved', labels: ['waiting'], priority: 1 },
+      { ...FAKE_BEAD, id: 'fx-live', title: 'in flight', priority: 2 },
+      { ...FAKE_BEAD, id: 'fx-b', title: 'ship it', priority: 3 },
+    ])
+    inside(f.main, f.root, () => {
+      // a live registry entry pins fx-live — pidAlive sees this very
+      // test process, no fake sleeper needed
+      const agentsDir = join(f.main, '.git', 'bro')
+      mkdirSync(agentsDir, { recursive: true })
+      writeFileSync(
+        join(agentsDir, 'agents.json'),
+        JSON.stringify({
+          'fx-live': {
+            agentId: 'native-live',
+            backend: 'native',
+            spawnedAt: new Date().toISOString(),
+            pid: process.pid,
+          },
+        })
+      )
+      const r = f.run()
+      assert.match(r.stdout, /loop: fx-b landed/)
+      assert.match(r.stdout, /1 landed, 0 closed, 0 parked, 0 failed/)
+      assert.equal(bead(f.db, 'fx-b')?.status, 'closed')
+      // both verdict-skipped beads stay untouched in the store
+      assert.equal(bead(f.db, 'fx-parked')?.status, 'open')
+      assert.equal(bead(f.db, 'fx-live')?.status, 'open')
     })
   })
 

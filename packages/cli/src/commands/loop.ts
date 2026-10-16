@@ -154,6 +154,7 @@ import {
   type ReadyBead,
 } from './next.ts'
 import type { NextPlan } from './next-plan.ts'
+import { rigNext } from './rig-next.ts'
 
 interface Ctx {
   /** Review facade bound to the main checkout — host calls follow the
@@ -2878,6 +2879,76 @@ function queueDrained(
   return true
 }
 
+/** The engine's verdict gates the pick (spec bro-oy3k1.6): a parked
+ *  frame, a live registry worker, or a foreign/dep-held claim are not
+ *  claimable even when raw status still reads open. `allowGate` — the
+ *  lead pick keeps `gate` claimable (the loop owns the re-attach
+ *  contract for a woken park with a PR up); clump members join on
+ *  `step` only. The probe reads through the caller's facade store and
+ *  a throwing probe treats the candidate as claimable — racedAway
+ *  stays the guard; a blind probe must not mask work. */
+function claimableByLadder(ctx: Ctx, b: ReadyBead, allowGate: boolean): boolean {
+  try {
+    const v = rigNext(ctx.root, b.id, { store: ctx.tasks }).verdict
+    return v === 'step' || (allowGate && v === 'gate')
+  } catch {
+    return true
+  }
+}
+
+/** The registry's claimStep owns the lead's claim under the spawn lock
+ *  (spec bro-zpa93) — a loop-side pre-claim reads as "claimed outside
+ *  the agent registry" and the spawn refuses it. The pick only
+ *  re-probes the store so a raced-away bead still skips down the
+ *  candidate chain exactly as claimUpTo's claim loop did. */
+function pickLead(ctx: Ctx, candidates: ReadyBead[]): ReadyBead | undefined {
+  if (ctx.agents === undefined) {
+    for (const b of candidates) {
+      if (!claimableByLadder(ctx, b, true)) {
+        continue
+      }
+      const got = claimUpTo([b], 1, ctx.root)[0]
+      if (got !== undefined) {
+        return got
+      }
+    }
+    return undefined
+  }
+  let statuses: Map<string, string> | undefined
+  return candidates.find((b) => {
+    // lazily fetched — a cheap status prefetch ahead of the verdict
+    // probe, which costs the ready/show reads
+    const s = (statuses ??= beadStatuses(ctx, candidates)).get(b.id)
+    return s !== 'in_progress' && s !== 'closed' && claimableByLadder(ctx, b, true)
+  })
+}
+
+/** Members claim one at a time — a raced-away member skips, and a
+ *  mid-fill store failure must not sink the run with half the clump
+ *  claimed: the lead proceeds with whatever members did claim. */
+function claimMembers(ctx: Ctx, want: ReadyBead[]): ReadyBead[] {
+  const members: ReadyBead[] = []
+  for (const m of want) {
+    // members join only on `step` — a `gate` verdict means the
+    // member's own PR is already in flight; folding it into this
+    // clump would re-work a gated branch (spec bro-oy3k1.6)
+    if (!claimableByLadder(ctx, m, false)) {
+      continue
+    }
+    try {
+      const got = claimUpTo([m], 1, ctx.root)[0]
+      if (got === undefined) {
+        continue // raced away
+      }
+      members.push(got)
+    } catch (err) {
+      console.error(`loop: clump member claim failed — ${String(err)} — proceeding with a partial clump`)
+      break
+    }
+  }
+  return members
+}
+
 /** Claim the next work item — the top ready bead, plus its compatible
  *  tail when `loop.batch` > 1 (spec bro-nspj7: the clump binds on the
  *  lead's affinity key — spec/epic/area/path — and never reaches past
@@ -2891,21 +2962,7 @@ function claimClump(
   budget: number
 ): ReadyBead[] | undefined {
   const { candidates, foreign } = clumpCandidates(ctx, scope, seen)
-  // the registry's claimStep owns the lead's claim under the spawn
-  // lock (spec bro-zpa93) — a loop-side pre-claim reads as "claimed
-  // outside the agent registry" and the spawn refuses it. The pick
-  // only re-probes the store so a raced-away bead still skips down the
-  // candidate chain exactly as claimUpTo's claim loop did.
-  let statuses: Map<string, string> | undefined
-  const lead =
-    ctx.agents === undefined
-      ? claimUpTo(candidates, 1, ctx.root)[0]
-      : candidates.find((b) => {
-          // lazily fetched — the claimUpTo path probes on its own and
-          // must not pay an extra batch read it never reads
-          const s = (statuses ??= beadStatuses(ctx, candidates)).get(b.id)
-          return s !== 'in_progress' && s !== 'closed'
-        })
+  const lead = pickLead(ctx, candidates)
   if (!lead) {
     if (foreign > 0) {
       say(ctx, `loop: ${foreign} foreign-scope bead(s) remain — not claimable in this project`)
@@ -2935,22 +2992,7 @@ function claimClump(
   if (want.length === 0) {
     return [lead]
   }
-  // members claim one at a time — a raced-away member skips, and a
-  // mid-fill store failure must not sink the run with half the clump
-  // claimed: the lead proceeds with whatever members did claim
-  const members: ReadyBead[] = []
-  for (const m of want) {
-    try {
-      const got = claimUpTo([m], 1, ctx.root)[0]
-      if (got === undefined) {
-        continue // raced away
-      }
-      members.push(got)
-    } catch (err) {
-      console.error(`loop: clump member claim failed — ${String(err)} — proceeding with a partial clump`)
-      break
-    }
-  }
+  const members = claimMembers(ctx, want)
   if (members.length > 0) {
     say(
       ctx,

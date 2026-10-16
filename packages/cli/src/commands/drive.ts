@@ -129,6 +129,7 @@ import {
   type WorktreeClaimInfo,
 } from './work.ts'
 import { installDrive, uninstallDrive } from './daemon.ts'
+import { rigNext, type RigNext } from './rig-next.ts'
 import { isOrchestratorSession } from './watch-pulse.ts'
 export { LIVE_MARKER_MS, worktreeClaim, worktreeClaimInfo, worktreeIdleMs } from './work.ts'
 
@@ -1331,6 +1332,25 @@ function fixerSpent(
     : undefined
 }
 
+/** The one verdict ladder (spec bro-oy3k1.6): a parked, foreign-
+ *  claimed, dep-gated, or closed fixer bead refuses the spawn — the
+ *  registry dedup can't see a 'waiting' label. The gate probe is
+ *  skipped: an open PR on this bead is drive's own premise, and a host
+ *  call has no business under the occupancy lock. A probe on a rig
+ *  with no store answers nothing — the registry dedup stays the net. */
+function fixerVerdictRefusal(root: string, store: Ctx['store'], beadId: string): string | undefined {
+  let rig: RigNext | undefined
+  try {
+    rig = rigNext(root, beadId, { gate: false, store })
+  } catch {
+    return undefined
+  }
+  if (rig.verdict === 'step' || rig.verdict === 'gate') {
+    return undefined
+  }
+  return `rig next → ${rig.verdict}${rig.detail === undefined ? '' : ` — ${rig.detail}`}`
+}
+
 /** The locked spawn ceremony both fixer kinds share — a last occupancy
  *  read right before the spawn (the gap since the pass-level check
  *  covered the worktree create + state refetch, long enough for another
@@ -1388,6 +1408,10 @@ async function spawnFixerAgent(
           `${s.attempt.cls} fixer already exited clean on this head — ` +
           'a pushed head earns a fresh round',
       }
+    }
+    const refused = fixerVerdictRefusal(ctx.mainRoot, ctx.store, bead.id)
+    if (refused !== undefined) {
+      return { pr, link, verdict: 'spawn-refused', detail: refused }
     }
     try {
       const info = await spawnStepAgent(ctx.mainRoot, ctx.env, {

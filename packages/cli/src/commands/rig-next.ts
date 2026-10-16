@@ -15,6 +15,7 @@ import {
   loadConfig,
   type AgentRegistryEntry,
   type TaskRow,
+  type TaskStore,
 } from '@broject/core'
 import {
   currentFrame,
@@ -143,9 +144,17 @@ function gateVerdict(dir: string, id: string, wt: string | undefined): RigNext |
 
 /** The verdict for one item — the ladder from spec .5: done → wait →
  *  gate → live-worker wait → foreign-claim blocked → dep-gated
- *  blocked → step. */
-export function rigNext(dir: string, item?: string): RigNext {
-  const store = taskStore()
+ *  blocked → step. `opts.gate === false` skips the worktree/PR probe —
+ *  callers that own the gate themselves (drive's fixer spawn,
+ *  spec bro-oy3k1.6) ask for the cheap ladder only. `opts.store` pins
+ *  the tasks backend — a facade-resolved store (loop/drive contexts)
+ *  must answer the same verdicts a beads one does. */
+export function rigNext(
+  dir: string,
+  item?: string,
+  opts?: { gate?: boolean; store?: TaskStore }
+): RigNext {
+  const store = opts?.store ?? taskStore(dir)
   const id = item ?? rigFocus(dir)
   if (id === undefined) {
     return { verdict: 'done' }
@@ -161,7 +170,9 @@ export function rigNext(dir: string, item?: string): RigNext {
     return { verdict: 'wait', id, detail: wakePredicate(row) }
   }
   const entry = readAgentRegistry(dir)[id]
-  const settled = agentWait(entry, id) ?? gateVerdict(dir, id, itemWorktree(id, entry))
+  const settled =
+    agentWait(entry, id) ??
+    (opts?.gate === false ? undefined : gateVerdict(dir, id, itemWorktree(id, entry)))
   if (settled !== undefined) {
     return settled
   }
