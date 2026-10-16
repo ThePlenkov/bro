@@ -29,6 +29,23 @@ const chunks = (...texts: string[]): SessionUpdate[] =>
     content: { type: 'text' as const, text },
   }))
 
+/** Boot the conductor over `fake` and POST a streamed /v1/messages —
+ *  caller owns close() (stream:true is the shape under test here). */
+async function postStream(
+  fake: ReturnType<typeof fakeAcpAgent>,
+  body: unknown = { messages: [{ role: 'user', content: 'x' }], stream: true }
+): Promise<{ r: Response; close: () => Promise<void> }> {
+  const { url, close } = await listen(
+    deps({ provider: conductorProxy(CFG, { acp: { peer: fake.app } }) })
+  )
+  const r = await fetch(`${url}/v1/messages`, {
+    method: 'POST',
+    headers: { ...auth, 'content-type': 'application/json' },
+    body: JSON.stringify(body),
+  })
+  return { r, close }
+}
+
 const CFG = {
   backend: 'dv-acp',
   entry: { type: 'acp' as const, command: 'dv acp' },
@@ -551,15 +568,8 @@ describe('serve /v1/* — the conductor plane', () => {
       holdEnd: () => gate,
       configOptions: [MODEL_OPTION],
     })
-    const { url, close } = await listen(
-      deps({ provider: conductorProxy(CFG, { acp: { peer: fake.app } }) })
-    )
+    const { r, close } = await postStream(fake)
     try {
-      const r = await fetch(`${url}/v1/messages`, {
-        method: 'POST',
-        headers: { ...auth, 'content-type': 'application/json' },
-        body: JSON.stringify({ messages: [{ role: 'user', content: 'x' }], stream: true }),
-      })
       assert.equal(r.status, 200)
       const reader = (r.body as NonNullable<typeof r.body>).getReader()
       const dec = new TextDecoder()
@@ -604,15 +614,11 @@ describe('serve /v1/* — the conductor plane', () => {
       ),
       configOptions: [MODEL_OPTION],
     })
-    const { url, close } = await listen(
-      deps({ provider: conductorProxy(CFG, { acp: { peer: fake.app } }) })
-    )
+    const { r, close } = await postStream(fake, {
+      messages: [{ role: 'user', content: 'list' }],
+      stream: true,
+    })
     try {
-      const r = await fetch(`${url}/v1/messages`, {
-        method: 'POST',
-        headers: { ...auth, 'content-type': 'application/json' },
-        body: JSON.stringify({ messages: [{ role: 'user', content: 'list' }], stream: true }),
-      })
       const ev = await sseEvents(r)
       const texts = ev
         .filter(
@@ -644,15 +650,8 @@ describe('serve /v1/* — the conductor plane', () => {
       updates: chunks('x <tool_call>{nope</tool_call> y <tool_call>{"na'),
       configOptions: [MODEL_OPTION],
     })
-    const { url, close } = await listen(
-      deps({ provider: conductorProxy(CFG, { acp: { peer: fake.app } }) })
-    )
+    const { r, close } = await postStream(fake)
     try {
-      const r = await fetch(`${url}/v1/messages`, {
-        method: 'POST',
-        headers: { ...auth, 'content-type': 'application/json' },
-        body: JSON.stringify({ messages: [{ role: 'user', content: 'x' }], stream: true }),
-      })
       const ev = await sseEvents(r)
       const text = ev
         .filter(
@@ -672,15 +671,8 @@ describe('serve /v1/* — the conductor plane', () => {
 
   test('a failed streamed turn lands as an in-stream error event', async () => {
     const fake = fakeAcpAgent({ configOptions: [MODEL_OPTION], failPrompt: 'generic' })
-    const { url, close } = await listen(
-      deps({ provider: conductorProxy(CFG, { acp: { peer: fake.app } }) })
-    )
+    const { r, close } = await postStream(fake)
     try {
-      const r = await fetch(`${url}/v1/messages`, {
-        method: 'POST',
-        headers: { ...auth, 'content-type': 'application/json' },
-        body: JSON.stringify({ messages: [{ role: 'user', content: 'x' }], stream: true }),
-      })
       // headers commit at turn start — the failure can only travel
       // as an SSE event on the open stream
       assert.equal(r.status, 200)
