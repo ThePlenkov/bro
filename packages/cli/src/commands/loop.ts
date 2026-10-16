@@ -2896,6 +2896,59 @@ function claimableByLadder(ctx: Ctx, b: ReadyBead, allowGate: boolean): boolean 
   }
 }
 
+/** The registry's claimStep owns the lead's claim under the spawn lock
+ *  (spec bro-zpa93) — a loop-side pre-claim reads as "claimed outside
+ *  the agent registry" and the spawn refuses it. The pick only
+ *  re-probes the store so a raced-away bead still skips down the
+ *  candidate chain exactly as claimUpTo's claim loop did. */
+function pickLead(ctx: Ctx, candidates: ReadyBead[]): ReadyBead | undefined {
+  if (ctx.agents === undefined) {
+    for (const b of candidates) {
+      if (!claimableByLadder(ctx, b, true)) {
+        continue
+      }
+      const got = claimUpTo([b], 1, ctx.root)[0]
+      if (got !== undefined) {
+        return got
+      }
+    }
+    return undefined
+  }
+  let statuses: Map<string, string> | undefined
+  return candidates.find((b) => {
+    // lazily fetched — a cheap status prefetch ahead of the verdict
+    // probe, which costs the ready/show reads
+    const s = (statuses ??= beadStatuses(ctx, candidates)).get(b.id)
+    return s !== 'in_progress' && s !== 'closed' && claimableByLadder(ctx, b, true)
+  })
+}
+
+/** Members claim one at a time — a raced-away member skips, and a
+ *  mid-fill store failure must not sink the run with half the clump
+ *  claimed: the lead proceeds with whatever members did claim. */
+function claimMembers(ctx: Ctx, want: ReadyBead[]): ReadyBead[] {
+  const members: ReadyBead[] = []
+  for (const m of want) {
+    // members join only on `step` — a `gate` verdict means the
+    // member's own PR is already in flight; folding it into this
+    // clump would re-work a gated branch (spec bro-oy3k1.6)
+    if (!claimableByLadder(ctx, m, false)) {
+      continue
+    }
+    try {
+      const got = claimUpTo([m], 1, ctx.root)[0]
+      if (got === undefined) {
+        continue // raced away
+      }
+      members.push(got)
+    } catch (err) {
+      console.error(`loop: clump member claim failed — ${String(err)} — proceeding with a partial clump`)
+      break
+    }
+  }
+  return members
+}
+
 /** Claim the next work item — the top ready bead, plus its compatible
  *  tail when `loop.batch` > 1 (spec bro-nspj7: the clump binds on the
  *  lead's affinity key — spec/epic/area/path — and never reaches past
@@ -2909,31 +2962,7 @@ function claimClump(
   budget: number
 ): ReadyBead[] | undefined {
   const { candidates, foreign } = clumpCandidates(ctx, scope, seen)
-  // the registry's claimStep owns the lead's claim under the spawn
-  // lock (spec bro-zpa93) — a loop-side pre-claim reads as "claimed
-  // outside the agent registry" and the spawn refuses it. The pick
-  // only re-probes the store so a raced-away bead still skips down the
-  // candidate chain exactly as claimUpTo's claim loop did.
-  let statuses: Map<string, string> | undefined
-  let lead: ReadyBead | undefined
-  if (ctx.agents === undefined) {
-    for (const b of candidates) {
-      if (!claimableByLadder(ctx, b, true)) {
-        continue
-      }
-      lead = claimUpTo([b], 1, ctx.root)[0]
-      if (lead !== undefined) {
-        break
-      }
-    }
-  } else {
-    lead = candidates.find((b) => {
-      // lazily fetched — a cheap status prefetch ahead of the verdict
-      // probe, which costs the ready/show reads
-      const s = (statuses ??= beadStatuses(ctx, candidates)).get(b.id)
-      return s !== 'in_progress' && s !== 'closed' && claimableByLadder(ctx, b, true)
-    })
-  }
+  const lead = pickLead(ctx, candidates)
   if (!lead) {
     if (foreign > 0) {
       say(ctx, `loop: ${foreign} foreign-scope bead(s) remain — not claimable in this project`)
@@ -2963,28 +2992,7 @@ function claimClump(
   if (want.length === 0) {
     return [lead]
   }
-  // members claim one at a time — a raced-away member skips, and a
-  // mid-fill store failure must not sink the run with half the clump
-  // claimed: the lead proceeds with whatever members did claim
-  const members: ReadyBead[] = []
-  for (const m of want) {
-    // members join only on `step` — a `gate` verdict means the
-    // member's own PR is already in flight; folding it into this
-    // clump would re-work a gated branch (spec bro-oy3k1.6)
-    if (!claimableByLadder(ctx, m, false)) {
-      continue
-    }
-    try {
-      const got = claimUpTo([m], 1, ctx.root)[0]
-      if (got === undefined) {
-        continue // raced away
-      }
-      members.push(got)
-    } catch (err) {
-      console.error(`loop: clump member claim failed — ${String(err)} — proceeding with a partial clump`)
-      break
-    }
-  }
+  const members = claimMembers(ctx, want)
   if (members.length > 0) {
     say(
       ctx,
