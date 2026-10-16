@@ -6,7 +6,13 @@ import type { AddressInfo } from 'node:net'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { Readable } from 'node:stream'
-import { lockHolderPid, SpawnError, type AgentConnector, type AgentInfo } from '@broject/core'
+import {
+  lockHolderPid,
+  SpawnError,
+  type AgentConnector,
+  type AgentInfo,
+  type PlaneFilter,
+} from '@broject/core'
 import { initRepo, inside, insideAsync } from './testrepo.ts'
 import { SpawnInputError } from './agents.ts'
 import {
@@ -315,6 +321,79 @@ describe('serve — routes', () => {
       const r = await route(m, p, '{}')
       assert.equal(r.status, 405, `${m} ${p}`)
     }
+  })
+})
+
+describe('serve — /api/v1/planes dispatch', () => {
+  const planeDeps = () =>
+    deps({
+      planeCatalog: () => [
+        {
+          name: 'test',
+          reads: ['tail'],
+          verbs: ['poke'],
+          capabilities: async () => ({ read: true }),
+          list: async () => [],
+          get: async (ref: string) => ({ id: ref }),
+          read: async (name: string) => ({ read: name }),
+          exec: async () => undefined,
+        },
+      ],
+    })
+
+  test('the index, list, read, and get shapes all route through the dep', async () => {
+    const d = planeDeps()
+    const index = await routeRequest('GET', '/api/v1/planes', undefined, d, {
+      dir: '/repo',
+      startedAt: 't0',
+    })
+    assert.equal(index.status, 200)
+    const body = index.body as { planes: { name: string }[] }
+    assert.deepEqual(
+      body.planes.map((p) => p.name),
+      ['test']
+    )
+
+    for (const p of ['/api/v1/planes/test', '/api/v1/planes/test/tail', '/api/v1/planes/test/ref']) {
+      const r = await routeRequest('GET', p, undefined, d, { dir: '/repo', startedAt: 't0' })
+      assert.notEqual(r.status, 404, p)
+    }
+  })
+
+  test('query params reach the plane filter/read args', async () => {
+    let seen: unknown
+    const d = deps({
+      planeCatalog: () => [
+        {
+          name: 'work',
+          reads: [],
+          verbs: [],
+          capabilities: async () => ({ read: true }),
+          list: async (filter?: PlaneFilter) => {
+            seen = filter
+            return []
+          },
+          get: async () => undefined,
+          read: async () => ({}),
+          exec: async () => undefined,
+        },
+      ],
+    })
+    await routeRequest(
+      'GET',
+      '/api/v1/planes/work',
+      undefined,
+      d,
+      { dir: '/repo', startedAt: 't0' },
+      {},
+      { status: 'open', limit: '2' }
+    )
+    assert.deepEqual(seen, { status: 'open', limit: 2 })
+  })
+
+  test('absent planeCatalog dep → the whole subtree 404s', async () => {
+    const r = await route('GET', '/api/v1/planes')
+    assert.equal(r.status, 404)
   })
 })
 
