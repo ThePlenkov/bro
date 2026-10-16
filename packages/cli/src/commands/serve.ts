@@ -46,6 +46,16 @@
  *                               markers (armed waits: live pid or stale)
  *   GET    /api/v1/mailbox      {drops} — the notify tail: pending drops,
  *                               newest first, read-only (consumes nothing)
+ *   GET    /api/v1/planes       the plane-catalog index — every registered
+ *                               descriptor with its reads, verbs, and live
+ *                               capabilities (specs/bro-9rls.1.md)
+ *   GET    /api/v1/planes/<p>   the plane's list(?status&limit&filters)
+ *   GET    /api/v1/planes/<p>/<name>
+ *                               a declared named read, else get(<name>)
+ *   POST   /api/v1/planes/<p>/<verb>
+ *                               exec — the body IS the args object; the
+ *                               uniform write shape under the same
+ *                               serve.json-token gate as every write
  *   GET    /api/v1/agents/<ref> one agent — ref is agentId or molStep
  *   POST   /api/v1/agents       spawn {molStep, worktree?, prompt?|promptFile?,
  *                               connector?, beadsDir?, provider?, model?,
@@ -108,6 +118,7 @@ import {
   LockTimeout,
   lockHolderPid,
   peekMailbox,
+  planes,
   SpawnError,
   staleLock,
   startBusBroker,
@@ -116,6 +127,7 @@ import {
   type BusBroker,
   type EventInput,
   type HeldLockOptions,
+  type PlaneDescriptor,
   type SpawnErrorKind,
 } from '@broject/core'
 import { GITHUB_WEBHOOK_SECRET_ENV, githubWebhookHandler } from '@broject/github'
@@ -145,6 +157,9 @@ import {
   type StopOutcome,
 } from './agents.ts'
 import { flag, positionals } from './args.ts'
+import { loadBroConfig } from '../plugins.ts'
+import '../planes/index.ts'
+import { routePlanes } from '../planes/rest.ts'
 import { providerConfig, providerProxy, type ProviderConfig } from './serve-provider.ts'
 import { conductorConfig, conductorProxy, type ConductorConfig } from './serve-conductor.ts'
 import { readBeads } from './status.ts'
@@ -374,6 +389,11 @@ export interface ServeDeps {
   spawn(req: StepSpawnRequest): Promise<AgentInfo>
   stop(ref: string): Promise<StopOutcome>
   connectors(): string[]
+  /** `/api/v1/planes*` — the descriptor-catalog surface (spec
+   *  bro-9rls.1): absent → the whole subtree 404s like any unwired
+   *  plane. Sync — planes() builds descriptors, capabilities() is the
+   *  live probe. */
+  planeCatalog?(): PlaneDescriptor[]
   /** `/api/v1/webhooks/<provider>` handlers keyed by provider slug. */
   webhooks?: Record<string, ServeWebhookHandler>
   /** `/v1/*` Messages-API provider proxy (bro-om6m8) — raw-stream,
@@ -401,6 +421,10 @@ const ROUTES = [
   'GET /api/v1/queue',
   'GET /api/v1/ticks',
   'GET /api/v1/mailbox',
+  'GET /api/v1/planes',
+  'GET /api/v1/planes/<plane>',
+  'GET /api/v1/planes/<plane>/<read|ref>',
+  'POST /api/v1/planes/<plane>/<verb>',
   'POST /api/v1/agents',
   'GET /api/v1/agents/<ref>',
   'GET /api/v1/agents/<ref>/log',
@@ -554,10 +578,11 @@ export async function routeRequest(
   rawBody: string | undefined,
   deps: ServeDeps,
   meta: ServeMeta,
-  headers: Record<string, string | string[] | undefined> = {}
+  headers: Record<string, string | string[] | undefined> = {},
+  query: Record<string, string> = {}
 ): Promise<ServeResponse> {
   try {
-    return await route(method, pathname, rawBody, deps, meta, headers)
+    return await route(method, pathname, rawBody, deps, meta, headers, query)
   } catch (err) {
     // HttpError is fail-closed input validation — a response, not a crash
     if (err instanceof HttpError) {
@@ -735,7 +760,8 @@ async function route(
   rawBody: string | undefined,
   deps: ServeDeps,
   meta: ServeMeta,
-  headers: Record<string, string | string[] | undefined>
+  headers: Record<string, string | string[] | undefined>,
+  query: Record<string, string>
 ): Promise<ServeResponse> {
   const seg = pathname.split('/').filter((s) => s !== '')
 
@@ -760,6 +786,9 @@ async function route(
   const plane = api.length === 1 ? READ_PLANES[api[0]!] : undefined
   if (plane !== undefined) {
     return routePlane(method, () => plane(deps))
+  }
+  if (api[0] === 'planes') {
+    return routePlanes(method, api, rawBody, deps.planeCatalog?.(), query)
   }
   if (api[0] === 'agents') {
     return routeAgentsBranch(method, api, rawBody, deps)
@@ -987,7 +1016,8 @@ async function handleRequest(
       rawBody,
       deps,
       meta,
-      req.headers
+      req.headers,
+      Object.fromEntries(url.searchParams)
     )
     send(res, r.status, r.body, r)
   } catch (err) {
@@ -1374,6 +1404,12 @@ function realDeps(
     spawn: (req) => spawnStepAgent(dir, env, req),
     stop: (ref) => stopAgent(dir, env, ref),
     connectors: () => agentConnectorNames(),
+    // resolved once at serve start — loadBroConfig is a filesystem read
+    // and planeCatalog() answers per request
+    planeCatalog: (() => {
+      const connectors = loadBroConfig(dir).connectors
+      return () => planes(dir, { connectors })
+    })(),
     webhooks: {
       github: githubWebhookHandler({
         secret: () => process.env[GITHUB_WEBHOOK_SECRET_ENV],
