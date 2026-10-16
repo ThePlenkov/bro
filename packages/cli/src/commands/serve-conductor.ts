@@ -310,10 +310,10 @@ function conversationKey(req: IncomingMessage, body: MessagesRequest): string | 
   const hdr = req.headers['x-bro-session']
   const named = (Array.isArray(hdr) ? hdr[0] : hdr)?.trim()
   if (named !== undefined && named !== '') {
-    // the response echoes the internal key — a client pinning it back
-    // verbatim keeps the f:/h: namespace, a custom name keys as h:
-    const raw = named.slice(0, 200)
-    return raw.startsWith('h:') || raw.startsWith('f:') ? raw : `h:${raw}`
+    // client values ALWAYS land in the h: namespace — accepting a
+    // client-supplied f: verbatim would let a caller inject into the
+    // fingerprint namespace and collide with another conversation
+    return `h:${named.slice(0, 200)}`
   }
   const first = body.messages?.[0]
   if (first === undefined) {
@@ -327,10 +327,14 @@ function conversationKey(req: IncomingMessage, body: MessagesRequest): string | 
 
 /** Retired sessions must be disposed — a leaked session holds agent
  *  context (and its cost) for nothing. TTL first, then oldest-out to
- *  the cap; both best-effort on a possibly-dead transport. */
+ *  the cap; the overflow count is captured BEFORE the loop so a live
+ *  `size` can't shrink the size-branch mid-iteration. The map is
+ *  insertion-ordered and hits re-insert, so front-to-back IS
+ *  least-recently-used — overflow evicts the coldest entries. */
 function sweepSessions(sessions: Map<string, ConvSession>, now: number): void {
+  let overflow = Math.max(0, sessions.size - CONV_CAP)
   for (const [k, s] of sessions) {
-    if (now - s.lastSeen > CONV_TTL_MS || sessions.size > CONV_CAP) {
+    if (now - s.lastSeen > CONV_TTL_MS || overflow-- > 0) {
       sessions.delete(k)
       try {
         s.live.dispose()
@@ -530,8 +534,9 @@ function inputTokensOf(prompt: AcpContentBlock[]): number {
 }
 
 /** One settled reply → the wire, streamed or buffered. `x-bro-session`
- *  echoes the conversation key so a fingerprint client CAN pin the
- *  header next call and survive a first-turn serialization drift. */
+ *  echoes ONLY an h: (client-pinned) key — echoing the internal f:
+ *  fingerprint would let a client pin back into the fingerprint
+ *  namespace it must never inject into. */
 function respond(
   res: ServerResponse,
   body: MessagesRequest,
@@ -541,7 +546,10 @@ function respond(
   inputTokens: number,
   sessionKey?: string
 ): void {
-  const sessionHdr = sessionKey !== undefined ? { 'x-bro-session': sessionKey } : {}
+  const sessionHdr =
+    sessionKey !== undefined && sessionKey.startsWith('h:')
+      ? { 'x-bro-session': sessionKey }
+      : {}
   if (body.stream === false) {
     res.writeHead(200, { 'content-type': 'application/json', ...sessionHdr })
     res.end(
@@ -744,7 +752,10 @@ async function messages(
     conv.consumed = all.length
     conv.historyHash = hashTurns(all, all.length)
     conv.lastReply = { blocks, model: reply.model, stopReason, inputTokens }
-    if (key !== undefined && sessions.get(key) !== conv) {
+    if (key !== undefined) {
+      // re-insert on every hit — insertion order is the LRU order
+      // sweepSessions' overflow eviction relies on
+      sessions.delete(key)
       sessions.set(key, conv)
     }
   }

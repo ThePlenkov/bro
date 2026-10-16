@@ -576,8 +576,9 @@ describe('serve /v1/* — retained acp sessions', () => {
       assert.doesNotMatch(fake.prompts[1] ?? '', /first/)
       assert.match(fake.prompts[2] ?? '', /third/)
       assert.doesNotMatch(fake.prompts[2] ?? '', /first|second/)
-      // the response echoes a pinnable session key
-      assert.match(t1.headers.get('x-bro-session') ?? '', /^f:/)
+      // the internal f: fingerprint is NEVER echoed — a client must not
+      // pin back into the fingerprint namespace
+      assert.equal(t1.headers.get('x-bro-session'), null)
     } finally {
       await close()
     }
@@ -609,7 +610,10 @@ describe('serve /v1/* — retained acp sessions', () => {
     )
     try {
       const msgs = [{ role: 'user', content: 'same first turn' }]
-      assert.equal((await post(url, msgs, { 'x-bro-session': 'a' })).status, 200)
+      const ra = await post(url, msgs, { 'x-bro-session': 'a' })
+      assert.equal(ra.status, 200)
+      // a client pin is echoed back for the client to confirm
+      assert.equal(ra.headers.get('x-bro-session'), 'h:a')
       assert.equal((await post(url, msgs, { 'x-bro-session': 'b' })).status, 200)
       // identical bodies, different pins — two sessions, no replay
       assert.equal(fake.sessions.length, 2)

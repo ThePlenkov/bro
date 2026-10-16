@@ -1010,6 +1010,17 @@ export async function acpSessionRetain(
     let curReq = requested
     let curModel = model
     span.end({ 'acp.session_id': session.sessionId, 'acp.model': model })
+    // dispose is idempotent — the prompt failure path already drops the
+    // handle, and the cache caller drops it again on eviction; a second
+    // cancel on a dead session is a no-op, not an error
+    let disposed = false
+    const dispose = () => {
+      if (disposed) {
+        return
+      }
+      disposed = true
+      session.dispose()
+    }
     return {
       sessionId: session.sessionId,
       prompt: async (prompt, dl, t = {}) => {
@@ -1046,7 +1057,7 @@ export async function acpSessionRetain(
           // session is dead weight; the caller evicts its cache entry
           // but the acp-side handle is dropped here and now
           try {
-            session.dispose()
+            dispose()
           } catch {
             // already gone — the drop is the point
           }
@@ -1058,7 +1069,7 @@ export async function acpSessionRetain(
           throw new JudgeUnavailable(`acp ${by} unavailable — ${errMsg(err)}${detail}`)
         }
       },
-      dispose: () => session.dispose(),
+      dispose,
     }
   } catch (err) {
     span.end({ error: errMsg(err) }, 'error')
