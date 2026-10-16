@@ -1517,6 +1517,7 @@ Routes: ${ROUTES.join(', ')}`)
 interface ServeHealth {
   ok?: boolean
   dir?: string
+  pid?: number
 }
 
 /** Injectable seams — tests drive the probe/spawn without a real port
@@ -1571,6 +1572,15 @@ export async function ensureServe(
     if (state === undefined) {
       throw new Error(`listener on ${port} is up but ${statePath} is missing`)
     }
+    // a same-dir answer alone is spoofable — the listener must also be
+    // the recorded process, else a squatter claims our repo and
+    // receives the token we hand out
+    if (h.pid !== state.pid) {
+      throw new Error(
+        `listener on ${port} claims this repo but is not the recorded serve ` +
+          `(pid ${h.pid ?? '?'} vs ${state.pid})`
+      )
+    }
     return state.token
   }
 
@@ -1606,7 +1616,9 @@ export async function ensureServe(
       )
     }
     const state = readStateFile(statePath)
-    if (state === undefined) continue
+    // state/pid mismatch = startup race (serve binds before writing
+    // serve.json) or an impostor — keep polling; timeout refuses
+    if (state === undefined || state.pid !== h.pid) continue
     return state.token
   }
   throw new Error(

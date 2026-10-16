@@ -11,14 +11,14 @@ literal command in a dogfood scenario is `npx bro …` — no other CLIs.
 
 ## Surface gaps closed here
 
-1. **`bro task`** (flow group) — a thin TaskStore facade so the runbook
-   never names `bd`:
-   - `bro task new <title> [-d desc] [--priority N]` → prints the id
-   - `bro task desc <id> <text>` → verbatim description (the `spec:`
-     link the SDD gate reads)
-   - `bro task show <id>` · `bro task list [--ready]` ·
-     `bro task claim <id>` · `bro task close <id> [reason]` ·
-     `bro task note <id> <text>`
+1. **`bro task` already exists** — the builtin `task` doc-type exposes
+   `bro task new "title"`, `bro task set <id> --description=…`,
+   `bro task show|list|close|rm` over the connectors-aware
+   `facade('tasks')` store, so the runbook never names `bd`. A first
+   draft of this bead added a duplicate `task` *plugin* — review caught
+   that plugin dispatch shadows the doc-type (and bare `taskStore()`
+   ignores `connectors.tasks`), so the runbook just uses the existing
+   doc verbs; `desc` spells as `set --description=…`.
 2. **`bro serve ensure --port <n>`** — the repo-bound lazy start +
    credential, replacing the bash helper:
    - probe `GET 127.0.0.1:<port>/api/v1/health`

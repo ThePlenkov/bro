@@ -20,7 +20,7 @@ describe('bro serve ensure', () => {
         })
         let spawned = false
         const token = await ensureServe(main, PORT, {
-          probe: async () => ({ ok: true, dir: realpathSync(main) }),
+          probe: async () => ({ ok: true, dir: realpathSync(main), pid: process.pid }),
           spawnServer: () => {
             spawned = true
           },
@@ -54,7 +54,7 @@ describe('bro serve ensure', () => {
           probe: async () => {
             probes += 1
             if (probes < 2) return undefined
-            return { ok: true, dir: realpathSync(main) }
+            return { ok: true, dir: realpathSync(main), pid: process.pid }
           },
           spawnServer: () => {
             spawns += 1
@@ -88,6 +88,31 @@ describe('bro serve ensure', () => {
               pollMs: 1,
             }),
           /never came up.*serve\.log/
+        )
+      })
+    })())
+
+  test('a listener claiming our dir with a foreign pid is refused', () =>
+    (async () => {
+      const { root, main } = initRepo('ensure-')
+      await insideAsync(main, root, async () => {
+        writeServeState(main, {
+          pid: process.pid,
+          url: `http://127.0.0.1:${PORT}`,
+          dir: realpathSync(main),
+          startedAt: new Date().toISOString(),
+          token: 'tok-live',
+        })
+        await assert.rejects(
+          () =>
+            ensureServe(main, PORT, {
+              probe: async () => ({
+                ok: true,
+                dir: realpathSync(main),
+                pid: process.pid + 9_999,
+              }),
+            }),
+          /not the recorded serve/
         )
       })
     })())

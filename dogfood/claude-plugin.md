@@ -25,8 +25,8 @@ this repo's listener and prints its session token.
    prints a bead id, then take it into a worktree with
    `npx bro work enter <bead>`.
 3. Spec first: inside the worktree, `npx bro spec new <bead>` and
-   `npx bro task desc <bead> 'spec: specs/<bead>.md'` — the `spec:`
-   line in the description is what the gate reads.
+   `npx bro task set <bead> --description='spec: specs/<bead>.md'` —
+   the `spec:` line in the description is what the gate reads.
 4. Implement: create `hello.txt` containing `hello from claude
    dogfood` and commit it on the work branch.
 5. Hook check: attempt to end your turn while the claim is open —

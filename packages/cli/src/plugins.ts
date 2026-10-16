@@ -93,7 +93,6 @@ import { runAgentsCommand } from './commands/agents.ts'
 import { runStatusCommand } from './commands/status.ts'
 import { cmdRecord, runRetrospectCommand } from './commands/retrospect.ts'
 import { runServeCommand } from './commands/serve.ts'
-import { runTaskCommand } from './commands/task.ts'
 import { runProviderCommand } from './commands/provider.ts'
 import { runSetupCommand } from './commands/setup.ts'
 import { runMeshCommand } from './commands/mesh.ts'
@@ -212,13 +211,6 @@ export const PLUGINS: BroPlugin[] = [
     skill: 'loop',
     configKey: 'loop',
     configSchema: loopSection,
-  }),
-  definePlugin({
-    name: 'task',
-    group: 'flow',
-    summary: 'Task store facade — new|desc|show|list|claim|close|note',
-    run: runTaskCommand,
-    skill: 'task',
   }),
   definePlugin({
     name: 'fleet',

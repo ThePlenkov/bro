@@ -16,8 +16,8 @@ Setup already done for you: this repo has git and a beads store.
    id — then take it into a worktree with `npx bro work enter <bead>`.
 3. Spec first: inside the worktree, write the spec stub with
    `npx bro spec new <bead>` and add the spec link with
-   `npx bro task desc <bead> 'spec: specs/<bead>.md'` — a `spec:` line
-   in the description is what the gate reads.
+   `npx bro task set <bead> --description='spec: specs/<bead>.md'` —
+   a `spec:` line in the description is what the gate reads.
 4. Implement: create `hello.txt` containing `hello from dogfood` and
    commit it on the work branch.
 5. Surface check: run `npx bro status` again — the worktree should now
