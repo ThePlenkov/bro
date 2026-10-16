@@ -70,6 +70,14 @@ export function fakeAcpAgent(
      *  'auth-gateway-504' an auth-worded outage message that must
      *  classify as availability, never config. */
     failPrompt?: 'auth' | 'generic' | 'auth-gateway-504'
+    /** Emit each entry as its own agent_message_chunk in order —
+     *  replyText stays the single-chunk shorthand. Splits inside a
+     *  <tool_call> tag exercise incremental parsers. */
+    replyChunks?: string[]
+    /** Awaited after every chunk is notified, before session/prompt
+     *  returns — a test gate holding the turn open so a consumer must
+     *  prove it saw deltas before end_turn. */
+    holdEnd?: () => Promise<void>
     /** session/new fails: 'auth' refuses with auth_required — the
      *  real gate for an agent whose advertised authMethods are not
      *  covered by stored credentials. */
@@ -133,13 +141,16 @@ export function fakeAcpAgent(
         })
         seen.permissionOutcome = res.outcome
       }
-      await ctx.client.notify('session/update', {
-        sessionId: ctx.params.sessionId,
-        update: {
-          sessionUpdate: 'agent_message_chunk',
-          content: { type: 'text', text: opts.replyText ?? '{}' },
-        },
-      })
+      for (const text of opts.replyChunks ?? [opts.replyText ?? '{}']) {
+        await ctx.client.notify('session/update', {
+          sessionId: ctx.params.sessionId,
+          update: {
+            sessionUpdate: 'agent_message_chunk',
+            content: { type: 'text', text },
+          },
+        })
+      }
+      await opts.holdEnd?.()
       return { stopReason: opts.stopReason ?? 'end_turn' }
     })
   seen.app = app

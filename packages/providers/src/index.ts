@@ -8,7 +8,7 @@
  * name a vendor.
  */
 export { acpCall, acpChat, acpClient, acpConverse, acpModels, acpOpen, acpPooledTurn, acpWorkerArgv, isSystemoneFamily } from './acp.ts'
-export type { AcpPeer } from './acp.ts'
+export type { AcpPeer, PooledTurnOpts } from './acp.ts'
 export { newSpanId, newTraceId, otelEvent, otelHeader, otelParent, otelSpan, postDetached, setAmbient } from './otel.ts'
 export type { OtelCtx, OtelSpan } from './otel.ts'
 export { AcpWorkerError, renderAcpUpdate, runAcpWorker } from './acp-worker.ts'

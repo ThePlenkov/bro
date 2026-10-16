@@ -26,7 +26,7 @@ import type { IncomingMessage, ServerResponse } from 'node:http'
 import { loadConfig } from '@broject/core'
 import type { ProviderEntry } from '@broject/core'
 import { acpOpen, acpPooledTurn, otelEvent, otelParent, otelSpan } from '@broject/providers'
-import type { AcpPeer, OtelCtx, ProviderWireOpts } from '@broject/providers'
+import type { AcpPeer, OtelCtx, PooledTurnOpts, ProviderWireOpts } from '@broject/providers'
 import { peerAttrs } from './peer.ts'
 import { catalogModels } from './providers.ts'
 
@@ -189,6 +189,28 @@ interface OutBlock {
   input?: unknown
 }
 
+/** One completed <tool_call>'s payload — parseable JSON carrying a
+ *  string name, else undefined: the markup stays raw text, the wire
+ *  never invents a call (shared by the buffered and live splits). */
+function toolCall(raw: string): { name: string; input: unknown } | undefined {
+  let parsed: unknown
+  try {
+    parsed = JSON.parse(raw)
+  } catch {
+    return undefined
+  }
+  if (typeof parsed !== 'object' || parsed === null) return undefined
+  const p = parsed as { name?: unknown; input?: unknown }
+  if (typeof p.name !== 'string') return undefined
+  const input =
+    typeof p.input === 'object' && p.input !== null && !Array.isArray(p.input)
+      ? p.input
+      : p.input === undefined
+        ? {}
+        : { value: p.input }
+  return { name: p.name, input }
+}
+
 /** Reply → ordered anthropic blocks: text segments stay text, each
  *  parseable <tool_call> becomes tool_use (unparseable JSON stays raw
  *  text — the wire never invents a call). */
@@ -196,26 +218,15 @@ export function parseReply(text: string): OutBlock[] {
   const out: OutBlock[] = []
   let at = 0
   for (const m of text.matchAll(TOOL_CALL)) {
-    let parsed: { name?: unknown; input?: unknown } | undefined
-    try {
-      parsed = JSON.parse(m[1])
-    } catch {
-      parsed = undefined
-    }
-    if (parsed === undefined || typeof parsed.name !== 'string') continue
+    const call = toolCall(m[1] ?? '')
+    if (call === undefined) continue
     const lead = text.slice(at, m.index)
     if (lead.trim() !== '') out.push({ type: 'text', text: lead })
-    const input =
-      typeof parsed.input === 'object' && parsed.input !== null && !Array.isArray(parsed.input)
-        ? (parsed.input as Record<string, unknown>)
-        : parsed.input === undefined
-          ? {}
-          : { value: parsed.input }
     out.push({
       type: 'tool_use',
       id: `toolu_${randomBytes(8).toString('hex')}`,
-      name: parsed.name,
-      input,
+      name: call.name,
+      input: call.input,
     })
     at = (m.index ?? 0) + m[0].length
   }
@@ -250,60 +261,200 @@ function sse(res: ServerResponse, event: string, data: unknown): void {
   res.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`)
 }
 
-function emitBlocks(
-  res: ServerResponse,
-  blocks: OutBlock[],
-  model: string,
-  stopReason: string,
-  inputTokens: number
-): void {
-  const msgId = `msg_${randomBytes(12).toString('hex')}`
-  const outTokens = estTokens(JSON.stringify(blocks))
-  sse(res, 'message_start', {
-    type: 'message_start',
-    message: {
-      id: msgId,
-      type: 'message',
-      role: 'assistant',
-      content: [],
-      model,
-      stop_reason: null,
-      stop_sequence: null,
-      usage: { input_tokens: inputTokens, output_tokens: 0 },
-    },
-  })
-  blocks.forEach((b, i) => {
-    if (b.type === 'tool_use') {
-      sse(res, 'content_block_start', {
+const OPEN_TAG = '<tool_call>'
+const CLOSE_TAG = '</tool_call>'
+
+/** Longest suffix of `s` that is a prefix of `tag` — the tail bytes a
+ *  tag split across deltas must hold back until more of the turn
+ *  arrives (or the turn ends and they flush as plain text). */
+function tagSuffix(s: string, tag: string): number {
+  for (let n = Math.min(s.length, tag.length - 1); n > 0; n--) {
+    if (tag.startsWith(s.slice(-n))) return n
+  }
+  return 0
+}
+
+/** Live SSE emission for a streaming turn (bro-728wl) — message_start
+ *  leaves at turn start, text deltas flow inside one open text block,
+ *  and each completed <tool_call> swaps to a tool_use block at the
+ *  next index. The tag can span deltas, so free text is emitted only
+ *  once it is provably outside a tag — parseReply's contract applied
+ *  incrementally (bad JSON stays raw text, never an invented call). */
+class LiveTurn {
+  private idx = 0
+  private open = false
+  private inCall = false
+  private pending = ''
+  private sawTool = false
+  private acc = ''
+  stopReason = 'end_turn'
+
+  constructor(
+    private res: ServerResponse,
+    model: string,
+    inputTokens: number
+  ) {
+    sse(res, 'message_start', {
+      type: 'message_start',
+      message: {
+        id: `msg_${randomBytes(12).toString('hex')}`,
+        type: 'message',
+        role: 'assistant',
+        content: [],
+        model,
+        stop_reason: null,
+        stop_sequence: null,
+        usage: { input_tokens: inputTokens, output_tokens: 0 },
+      },
+    })
+  }
+
+  readonly onUpdate: NonNullable<PooledTurnOpts['onUpdate']> = (u) => {
+    if (u.sessionUpdate === 'agent_message_chunk' && u.content.type === 'text') {
+      this.pending += u.content.text
+      this.drain(false)
+    }
+  }
+
+  private text(s: string): void {
+    if (s === '') return
+    if (!this.open) {
+      sse(this.res, 'content_block_start', {
         type: 'content_block_start',
-        index: i,
-        content_block: { type: 'tool_use', id: b.id, name: b.name, input: {} },
-      })
-      sse(res, 'content_block_delta', {
-        type: 'content_block_delta',
-        index: i,
-        delta: { type: 'input_json_delta', partial_json: JSON.stringify(b.input ?? {}) },
-      })
-    } else {
-      sse(res, 'content_block_start', {
-        type: 'content_block_start',
-        index: i,
+        index: this.idx,
         content_block: { type: 'text', text: '' },
       })
-      sse(res, 'content_block_delta', {
-        type: 'content_block_delta',
-        index: i,
-        delta: { type: 'text_delta', text: b.text },
-      })
+      this.open = true
     }
-    sse(res, 'content_block_stop', { type: 'content_block_stop', index: i })
-  })
-  sse(res, 'message_delta', {
-    type: 'message_delta',
-    delta: { stop_reason: stopReason, stop_sequence: null },
-    usage: { output_tokens: outTokens },
-  })
-  sse(res, 'message_stop', { type: 'message_stop' })
+    sse(this.res, 'content_block_delta', {
+      type: 'content_block_delta',
+      index: this.idx,
+      delta: { type: 'text_delta', text: s },
+    })
+    this.acc += s
+  }
+
+  private tool(name: string, input: unknown): void {
+    if (this.open) {
+      sse(this.res, 'content_block_stop', { type: 'content_block_stop', index: this.idx })
+      this.idx++
+      this.open = false
+    }
+    sse(this.res, 'content_block_start', {
+      type: 'content_block_start',
+      index: this.idx,
+      content_block: {
+        type: 'tool_use',
+        id: `toolu_${randomBytes(8).toString('hex')}`,
+        name,
+        input: {},
+      },
+    })
+    const json = JSON.stringify(input)
+    sse(this.res, 'content_block_delta', {
+      type: 'content_block_delta',
+      index: this.idx,
+      delta: { type: 'input_json_delta', partial_json: json },
+    })
+    sse(this.res, 'content_block_stop', { type: 'content_block_stop', index: this.idx })
+    this.idx++
+    this.sawTool = true
+    this.acc += json
+  }
+
+  private drain(final: boolean): void {
+    for (;;) {
+      if (this.inCall) {
+        const j = this.pending.indexOf(CLOSE_TAG)
+        if (j === -1) {
+          if (final) {
+            this.text(OPEN_TAG + this.pending)
+            this.pending = ''
+          }
+          return
+        }
+        const raw = this.pending.slice(0, j)
+        this.pending = this.pending.slice(j + CLOSE_TAG.length)
+        this.inCall = false
+        const call = toolCall(raw)
+        if (call === undefined) this.text(OPEN_TAG + raw + CLOSE_TAG)
+        else this.tool(call.name, call.input)
+      } else {
+        const i = this.pending.indexOf(OPEN_TAG)
+        if (i === -1) {
+          const hold = final ? 0 : tagSuffix(this.pending, OPEN_TAG)
+          this.text(this.pending.slice(0, this.pending.length - hold))
+          this.pending = this.pending.slice(this.pending.length - hold)
+          return
+        }
+        this.text(this.pending.slice(0, i))
+        this.pending = this.pending.slice(i + OPEN_TAG.length)
+        this.inCall = true
+      }
+    }
+  }
+
+  private closeBlock(): void {
+    if (this.open) {
+      sse(this.res, 'content_block_stop', { type: 'content_block_stop', index: this.idx })
+      this.idx++
+      this.open = false
+    }
+  }
+
+  finish(stopReason: string): void {
+    this.drain(true)
+    this.closeBlock()
+    if (this.idx === 0 && !this.sawTool) {
+      // parity with the buffered shape — a silent turn still answers
+      // with one (empty) text block
+      sse(this.res, 'content_block_start', {
+        type: 'content_block_start',
+        index: 0,
+        content_block: { type: 'text', text: '' },
+      })
+      sse(this.res, 'content_block_delta', {
+        type: 'content_block_delta',
+        index: 0,
+        delta: { type: 'text_delta', text: '' },
+      })
+      sse(this.res, 'content_block_stop', { type: 'content_block_stop', index: 0 })
+    }
+    this.stopReason = this.sawTool ? 'tool_use' : stopReason
+    sse(this.res, 'message_delta', {
+      type: 'message_delta',
+      delta: { stop_reason: this.stopReason, stop_sequence: null },
+      usage: { output_tokens: estTokens(this.acc) },
+    })
+    sse(this.res, 'message_stop', { type: 'message_stop' })
+  }
+
+  error(type: string, message: string): void {
+    this.drain(true)
+    this.closeBlock()
+    sse(this.res, 'error', { type: 'error', error: { type, message } })
+  }
+
+  outputTokens(): number {
+    return estTokens(this.acc)
+  }
+}
+
+/** The model message_start names — the applied pin (a `provider/model`
+ *  request id or the configured entry pin) wins; a bare foreign id
+ *  (claude-sonnet-*) is a display label and echoes as one. */
+function servedModel(
+  requestModel: string | undefined,
+  opts: ProviderWireOpts,
+  cfg: ConductorConfig,
+  body: MessagesRequest
+): string {
+  const id =
+    requestModel ??
+    opts.model ??
+    cfg.entry.model ??
+    (typeof body.model === 'string' ? body.model : undefined)
+  return id?.split('/').pop() ?? 'unknown'
 }
 
 function apiError(res: ServerResponse, status: number, type: string, message: string): void {
@@ -344,20 +495,56 @@ async function messages(
   // a dropped client cancels the acp turn — no orphan devin session
   const ac = new AbortController()
   res.once('close', () => ac.abort())
+  // `provider/model` ids are a real pin — resolved against the agent's
+  // own catalog; bare foreign ids (claude-sonnet-*) are display labels
+  const requestModel =
+    typeof body.model === 'string' && body.model.includes('/') ? body.model : undefined
+  const turnOpts: PooledTurnOpts = {
+    signal: ac.signal,
+    by: `conductor:${cfg.backend}`,
+    requestModel,
+    parent,
+  }
   let reply: Awaited<ReturnType<typeof acpPooledTurn>>
+  let live: LiveTurn | undefined
   try {
     const peer = await link(parent)
-    // `provider/model` ids are a real pin — resolved against the agent's
-    // own catalog; bare foreign ids (claude-sonnet-*) are display labels
-    reply = await acpPooledTurn(peer, cfg.entry, opts, prompt, Date.now() + cfg.timeoutMs, {
-      signal: ac.signal,
-      by: `conductor:${cfg.backend}`,
-      requestModel:
-        typeof body.model === 'string' && body.model.includes('/') ? body.model : undefined,
-      parent,
-    })
+    if (body.stream !== false) {
+      // a streamed answer commits to SSE at turn start — headers and
+      // message_start leave before the first delta; a failed turn lands
+      // as an in-stream error event, the wire's own dead-stream shape
+      res.writeHead(200, {
+        'content-type': 'text/event-stream',
+        'cache-control': 'no-cache',
+        connection: 'keep-alive',
+      })
+      live = new LiveTurn(res, servedModel(requestModel, opts, cfg, body), inputTokens)
+      turnOpts.onUpdate = live.onUpdate
+    }
+    reply = await acpPooledTurn(
+      peer,
+      cfg.entry,
+      opts,
+      prompt,
+      Date.now() + cfg.timeoutMs,
+      turnOpts
+    )
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err)
+    if (live !== undefined) {
+      live.error(
+        AVAIL.test(msg) ? 'overloaded_error' : 'api_error',
+        `bro conductor: ${msg}`
+      )
+      res.end()
+      otelEvent('conductor.error', {
+        backend: cfg.backend,
+        status: 200,
+        duration_ms: Date.now() - t0,
+        error: msg.slice(0, 200),
+      })
+      return
+    }
     const status = AVAIL.test(msg) ? 529 : 500
     otelEvent('conductor.error', {
       backend: cfg.backend,
@@ -373,17 +560,20 @@ async function messages(
     )
     return
   }
-  const blocks = parseReply(reply.text)
-  const stopReason = blocks.some((b) => b.type === 'tool_use')
-    ? 'tool_use'
-    : (STOP_REASON[reply.stopReason] ?? 'end_turn')
+  live?.finish(STOP_REASON[reply.stopReason] ?? 'end_turn')
+  const blocks = live === undefined ? parseReply(reply.text) : []
+  const stopReason =
+    live?.stopReason ??
+    (blocks.some((b) => b.type === 'tool_use')
+      ? 'tool_use'
+      : (STOP_REASON[reply.stopReason] ?? 'end_turn'))
   otelEvent('conductor.turn', {
     backend: cfg.backend,
     model: reply.model,
     stop_reason: stopReason,
     stream: body.stream !== false,
     input_tokens: inputTokens,
-    output_tokens: estTokens(reply.text),
+    output_tokens: live?.outputTokens() ?? estTokens(reply.text),
     duration_ms: Date.now() - t0,
   })
   if (body.stream === false) {
@@ -402,12 +592,6 @@ async function messages(
     )
     return
   }
-  res.writeHead(200, {
-    'content-type': 'text/event-stream',
-    'cache-control': 'no-cache',
-    connection: 'keep-alive',
-  })
-  emitBlocks(res, blocks, reply.model, stopReason, inputTokens)
   res.end()
 }
 
