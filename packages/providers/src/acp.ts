@@ -746,6 +746,10 @@ export async function acpOpen(
     terminals.dispose()
     child?.kill('SIGKILL')
   }
+  // a dead transport is itself a close: pooled callers only drop their
+  // peer refs on abort — without this, terminals the agent spawned (and
+  // the child) outlive the dead connection they were created under
+  conn.signal.addEventListener('abort', close, { once: true })
   try {
     const { asAuthError, req, caps } = await withDeadline(deadline, () =>
       acpInit(conn.agent, by, deadline)

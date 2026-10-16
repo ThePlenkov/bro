@@ -73,6 +73,95 @@ describe('AcpTerminals', () => {
     }
   })
 
+  test('the byte limit trims on a UTF-8 boundary — never a partial character', async () => {
+    const t = new AcpTerminals()
+    try {
+      // 🙂 is 4 bytes — three of them + 'X' = 13 bytes; limit 5 keeps
+      // exactly one emoji + X, cut lands mid-emoji and must skip forward
+      const { terminalId } = await t.create(
+        ctx(create('sh', ['-c', "printf '🙂🙂🙂X'"], 5))
+      )
+      await t.waitForExit(ctx(wait(terminalId)))
+      const snap = await t.output(ctx(out(terminalId)))
+      assert.equal(snap.truncated, true)
+      assert.equal(snap.output, '🙂X')
+    } finally {
+      t.dispose()
+    }
+  })
+
+  test('outputByteLimit 0 keeps the buffer bounded instead of unbounded', async () => {
+    const t = new AcpTerminals()
+    try {
+      const { terminalId } = await t.create(ctx(create('sh', ['-c', 'echo dropped'], 0)))
+      await t.waitForExit(ctx(wait(terminalId)))
+      const snap = await t.output(ctx(out(terminalId)))
+      assert.equal(snap.output, '')
+      assert.equal(snap.truncated, true)
+    } finally {
+      t.dispose()
+    }
+  })
+
+  test('agent env merges but denylisted names cannot hijack the child', async () => {
+    const t = new AcpTerminals()
+    try {
+      // NODE_OPTIONS=--require <missing> kills any node child at boot if
+      // it leaks through the denylist; BRO_T_VAR proves env still merges
+      const req: CreateTerminalRequest = {
+        sessionId: 'sess-1',
+        command: process.execPath,
+        args: ['-e', 'console.log("env-ok-" + (process.env.BRO_T_VAR ?? "missing"))'],
+        env: [
+          { name: 'NODE_OPTIONS', value: '--require /nonexistent-bro-test' },
+          { name: 'BRO_T_VAR', value: 'yes' },
+        ],
+      }
+      const { terminalId } = await t.create(ctx(req))
+      const status = await t.waitForExit(ctx(wait(terminalId)))
+      assert.equal(status.exitCode, 0)
+      const snap = await t.output(ctx(out(terminalId)))
+      assert.match(snap.output, /env-ok-yes/)
+    } finally {
+      t.dispose()
+    }
+  })
+
+  test('release resolves a pending wait_for_exit with the real status', async () => {
+    const t = new AcpTerminals()
+    try {
+      const { terminalId } = await t.create(ctx(create('sh', ['-c', 'sleep 60'])))
+      const pending = t.waitForExit(ctx(wait(terminalId)))
+      await t.release(ctx(rel(terminalId)))
+      const status = await pending
+      assert.equal(status.signal, 'SIGKILL')
+    } finally {
+      t.dispose()
+    }
+  })
+
+  test('release after exit flushes waiters even while a grandchild holds the pipe', async () => {
+    const t = new AcpTerminals()
+    try {
+      // the backgrounded subshell inherits stdout — 'exit' fires for the
+      // main child while 'close' is held open until the sleep ends
+      const { terminalId } = await t.create(ctx(create('sh', ['-c', 'sleep 5 & exit 0'])))
+      for (let i = 0; i < 100; i++) {
+        const snap = await t.output(ctx(out(terminalId)))
+        if (snap.exitStatus !== null) {
+          break
+        }
+        await new Promise((r) => setTimeout(r, 10))
+      }
+      const pending = t.waitForExit(ctx(wait(terminalId)))
+      await t.release(ctx(rel(terminalId)))
+      const status = await pending
+      assert.equal(status.exitCode, 0)
+    } finally {
+      t.dispose()
+    }
+  })
+
   test('kill stops the child but the terminal stays readable until release', async () => {
     const t = new AcpTerminals()
     try {

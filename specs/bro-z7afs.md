@@ -22,19 +22,23 @@ New module `packages/providers/src/acp-terminal.ts` — an `AcpTerminals`
 registry scoped to one connection:
 
 - `terminal/create` → spawn `command + args` (no shell — argv verbatim),
-  `cwd`/`env` applied over `process.env`; capture stdout+stderr interleaved
-  into a bounded buffer (`outputByteLimit` honored, truncate from the front
-  on a UTF-16 code-unit boundary — never a lone surrogate); returns
-  `{ terminalId }`.
+  `cwd`/`env` applied over `process.env` (agent env names on a security
+  denylist — `PATH`, `LD_*`, `NODE_OPTIONS`, … — are dropped); capture
+  stdout+stderr interleaved into a byte-bounded buffer (`outputByteLimit`
+  honored in bytes, truncate from the front on a UTF-8 boundary — never a
+  partial character); returns `{ terminalId }`.
 - `terminal/output` → `{ output, truncated, exitStatus? }` immediately.
-- `terminal/wait_for_exit` → resolve on process exit with `TerminalExitStatus`
+- `terminal/wait_for_exit` → resolve once the exit status is in AND output
+  is final ('close', or 'exit' + orphan grace) with `TerminalExitStatus`
   (`exitCode`/`signal`).
 - `terminal/kill` → SIGTERM the child, terminal stays valid (per spec:
   output retrievable after kill).
-- `terminal/release` → kill if running, drop the entry; id invalid after.
+- `terminal/release` → kill if running, drop the entry (pending waiters
+  resolve with the real status); id invalid after.
 - Unknown `terminalId` → throw (surfaces as a wire error, never silent).
-- `dispose()` — kill every live child; called from the connection's
-  `close()` so leaked terminals die with the transport.
+- `dispose()` — kill every live child; wired to `close()` AND the
+  transport's abort signal so leaked terminals die with the connection
+  even when the caller only drops its peer refs.
 
 Wire-up in `acp.ts`: both `client({ name: 'bro' })` callsites (`withAcp`,
 `acpOpen`) chain the five `onRequest` handlers onto one registry instance per
