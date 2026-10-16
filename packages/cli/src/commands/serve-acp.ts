@@ -49,7 +49,8 @@ import { peerAttrs } from './peer.ts'
 
 /** A session one downstream connection owns — the retained upstream
  *  handle, the peer it lives on, and the connection state back-pointer
- *  so teardown can clear both indexes. */
+ *  so teardown clears both indexes and every sessionId-taking handler
+ *  can verify the CALLER owns the session (the map is transport-wide). */
 interface BrokeredSession {
   retained: AcpRetainedSession
   peer: AcpPeer
@@ -69,6 +70,9 @@ interface ConnState {
   /** initialize's clientInfo.name — otel attribution. */
   clientName: string
   sessions: Set<string>
+  /** conn.closed settled and dropConn ran — a session/new still mid-
+   *  retain lands with no cleanup path left but this flag. */
+  dropped: boolean
 }
 
 /** What the brokered link advertises upstream: the union — every
@@ -102,9 +106,20 @@ export function acpTransport(
   // upstream sessionId → the brokered session; the upstream id is used
   // verbatim downstream, so one key serves both directions
   const sessions = new Map<string, BrokeredSession>()
-  const sessionOf = (params: Record<string, unknown>): BrokeredSession | undefined => {
+  /** `conn` scopes the hit to the owning connection — the map is
+   *  transport-wide, so an unscoped lookup would let one connection
+   *  drive or close a FOREIGN session by id (codeant #581). The bridge
+   *  calls it unscoped: routing BY sessionId is its job. */
+  const sessionOf = (
+    params: Record<string, unknown>,
+    conn?: ConnState
+  ): BrokeredSession | undefined => {
     const sid = idOf(params)
-    return sid === undefined ? undefined : sessions.get(sid)
+    const sess = sid === undefined ? undefined : sessions.get(sid)
+    if (sess === undefined || (conn !== undefined && sess.conn !== conn)) {
+      return undefined
+    }
+    return sess
   }
 
   /** Agent→client calls arrive on the link's bridge — route by
@@ -114,7 +129,9 @@ export function acpTransport(
     request: (method, params, signal) => {
       const sess = sessionOf(params)
       if (sess === undefined) {
-        throw RequestError.methodNotFound(method)
+        // the method exists — the SESSION doesn't; a method-not-found
+        // tells the agent to stop calling, not that a session died
+        throw RequestError.resourceNotFound(idOf(params))
       }
       return sess.client.request(method, params, { cancellationSignal: signal })
     },
@@ -159,12 +176,19 @@ export function acpTransport(
    *  close) → close each owned session upstream best-effort, then drop
    *  the local handles — a disconnect never leaks a peer session. */
   const dropConn = (st: ConnState): void => {
+    // re-entry must never re-close upstream sessions already dropped —
+    // the flag also tells a still-landing session/new it has no owner
+    if (st.dropped) {
+      return
+    }
+    st.dropped = true
     for (const sid of st.sessions) {
       const sess = sessions.get(sid)
       if (sess === undefined) {
         continue
       }
       sessions.delete(sid)
+      st.sessions.delete(sid)
       void sess.peer.ctx.request('session/close', { sessionId: sid }).catch(() => {
         // dead upstream — the local drop is the point
       })
@@ -188,9 +212,10 @@ export function acpTransport(
    *  set_mode ride the session's own peer. */
   const forwardSession = async (
     method: string,
-    params: Record<string, unknown>
+    params: Record<string, unknown>,
+    conn: ConnState
   ): Promise<unknown> => {
-    const sess = sessionOf(params)
+    const sess = sessionOf(params, conn)
     if (sess === undefined) {
       throw RequestError.resourceNotFound(idOf(params))
     }
@@ -211,7 +236,7 @@ export function acpTransport(
    *  fresh AgentContext wrapper per request, so the app closure is the
    *  only stable conn-scope). */
   const buildAgent = () => {
-    const st: ConnState = { clientName: '', sessions: new Set() }
+    const st: ConnState = { clientName: '', sessions: new Set(), dropped: false }
     return (
       agent({ name: 'bro-acp' })
       // AcpServer runs onConnect after initialize answers — attach the
@@ -265,6 +290,15 @@ export function acpTransport(
               Date.now() + cfg.timeoutMs,
               { by, sessionRequest: ctx.params as NewSessionRequest }
             )
+            // upstream reissues ids across a link death+respawn — a
+            // colliding set must not leak the displaced handle (and the
+            // old owner must not later close the NEW session under the
+            // reused id)
+            const prev = sessions.get(retained.sessionId)
+            if (prev !== undefined) {
+              prev.conn.sessions.delete(retained.sessionId)
+              disposeQuiet(prev.retained)
+            }
             sessions.set(retained.sessionId, {
               retained,
               peer,
@@ -273,6 +307,17 @@ export function acpTransport(
               busy: false,
             })
             st.sessions.add(retained.sessionId)
+            // conn.closed may have settled mid-retain — dropConn already
+            // ran and can never see this session: close it upstream +
+            // drop the handle now or it orphans on a dead connection
+            if (st.dropped) {
+              void peer.ctx
+                .request('session/close', { sessionId: retained.sessionId })
+                .catch(() => {
+                  // dead upstream — the local drop is the point
+                })
+              release(retained.sessionId)
+            }
             // a bro--<bead-id>-shaped session cwd attributes the
             // session (dirs are named <repo>--<beadId>, the bead id
             // itself is <prefix>-<slug>)
@@ -295,7 +340,7 @@ export function acpTransport(
         raw,
         async (ctx) => {
           const sid = idOf(ctx.params)
-          const sess = sid === undefined ? undefined : sessions.get(sid)
+          const sess = sessionOf(ctx.params, st)
           if (sess === undefined) {
             throw RequestError.resourceNotFound(sid)
           }
@@ -336,7 +381,7 @@ export function acpTransport(
         }
       )
       .onNotification<Record<string, unknown>>('session/cancel', raw, (ctx) => {
-        const sess = sessionOf(ctx.params)
+        const sess = sessionOf(ctx.params, st)
         sess?.peer.ctx.notify<Record<string, unknown>>('session/cancel', ctx.params).catch(() => {})
       })
       .onRequest<Record<string, unknown>, unknown>(
@@ -344,7 +389,7 @@ export function acpTransport(
         raw,
         async (ctx) => {
           const sid = idOf(ctx.params)
-          const sess = sid === undefined ? undefined : sessions.get(sid)
+          const sess = sessionOf(ctx.params, st)
           if (sess === undefined) {
             throw RequestError.resourceNotFound(sid)
           }
@@ -364,12 +409,12 @@ export function acpTransport(
       .onRequest<Record<string, unknown>, unknown>(
         'session/set_config_option',
         raw,
-        (ctx) => forwardSession('session/set_config_option', ctx.params)
+        (ctx) => forwardSession('session/set_config_option', ctx.params, st)
       )
       .onRequest<Record<string, unknown>, unknown>(
         'session/set_mode',
         raw,
-        (ctx) => forwardSession('session/set_mode', ctx.params)
+        (ctx) => forwardSession('session/set_mode', ctx.params, st)
       )
       .onRequest<Record<string, unknown>, unknown>(
         'authenticate',
