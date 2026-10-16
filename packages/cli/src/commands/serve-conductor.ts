@@ -163,25 +163,36 @@ function toolContract(tools: NonNullable<MessagesRequest['tools']>): string {
   ].join('\n')
 }
 
-function serializeRequest(body: MessagesRequest): string {
+const turnRole = (m: { role?: string }): string =>
+  m.role === 'assistant' ? 'assistant' : 'user'
+
+/** system + tools — the transcript prefix shared by serializeRequest
+ *  (one merged text block) and turnsToBlocks (its own leading block). */
+function prefixText(body: MessagesRequest): string {
   const parts: string[] = []
   const system =
     typeof body.system === 'string'
       ? body.system
       : (body.system ?? []).map((s) => s.text ?? '').join('')
-  if (system !== '') parts.push(`<system>\n${system}\n</system>`)
+  if (system !== '') {
+    parts.push(`<system>\n${system}\n</system>`)
+  }
   if (body.tools !== undefined && body.tools.length > 0) {
     parts.push(toolContract(body.tools))
   }
+  return parts.join('\n\n')
+}
+
+function serializeRequest(body: MessagesRequest): string {
+  const parts = [prefixText(body)]
   for (const m of body.messages ?? []) {
-    const role = m.role === 'assistant' ? 'assistant' : 'user'
     const text =
       typeof m.content === 'string'
         ? m.content
         : (m.content ?? []).map(blockText).join('')
-    parts.push(`<turn role="${role}">${text}</turn>`)
+    parts.push(`<turn role="${turnRole(m)}">${text}</turn>`)
   }
-  return parts.join('\n\n')
+  return parts.filter((p) => p !== '').join('\n\n')
 }
 
 /** An inbound image block → ACP image content. Only base64 sources
@@ -197,55 +208,40 @@ function acpImage(b: InBlock): AcpContentBlock | undefined {
 }
 
 /** The request as ACP content blocks — same transcript as
- *  serializeRequest, but base64 image blocks pass through as real
- *  image content when the agent advertised promptCapabilities.image;
- *  without the capability they degrade to the `[image]` marker exactly
- *  as before (bro-7izjx). */
+ *  serializeRequest, but when the agent advertised
+ *  promptCapabilities.image the wire carries real image content;
+ *  without the capability the request stays one text block with the
+ *  `[image]` marker exactly as before (bro-7izjx). */
 function serializeBlocks(body: MessagesRequest, imageOk: boolean): AcpContentBlock[] {
-  const hasImage = (body.messages ?? []).some(
-    (m) => Array.isArray(m.content) && m.content.some((b) => b.type === 'image')
-  )
-  if (!imageOk || !hasImage) {
-    return [{ type: 'text', text: serializeRequest(body) }]
-  }
+  return imageOk ? turnsToBlocks(body) : [{ type: 'text', text: serializeRequest(body) }]
+}
+
+/** The image-capable path: the prefix leads, then every turn is its
+ *  own text block followed by that turn's image blocks. <turn> tags
+ *  stay balanced inside a single text block (amazon-q #558) and
+ *  source order holds. */
+function turnsToBlocks(body: MessagesRequest): AcpContentBlock[] {
   const blocks: AcpContentBlock[] = []
-  let buf = ''
-  const flush = (): void => {
-    if (buf !== '') {
-      blocks.push({ type: 'text', text: buf })
-      buf = ''
-    }
-  }
-  const system =
-    typeof body.system === 'string'
-      ? body.system
-      : (body.system ?? []).map((s) => s.text ?? '').join('')
-  if (system !== '') buf += `<system>\n${system}\n</system>`
-  if (body.tools !== undefined && body.tools.length > 0) {
-    buf += `${buf === '' ? '' : '\n\n'}${toolContract(body.tools)}`
+  const prefix = prefixText(body)
+  if (prefix !== '') {
+    blocks.push({ type: 'text', text: prefix })
   }
   for (const m of body.messages ?? []) {
-    const role = m.role === 'assistant' ? 'assistant' : 'user'
-    const { text, imgs } =
-      typeof m.content === 'string' ? { text: m.content, imgs: [] } : turnParts(m.content)
-    if (imgs.length === 0) {
-      buf += `${buf === '' ? '' : '\n\n'}<turn role="${role}">${text}</turn>`
-      continue
-    }
-    // an image-bearing turn keeps its <turn> wrapper whole — the image
-    // blocks follow the turn's text block rather than splitting the
-    // open/close tags across block boundaries (amazon-q #558)
-    flush()
-    blocks.push({ type: 'text', text: `<turn role="${role}">${text}</turn>` }, ...imgs)
+    const { text, imgs } = turnParts(m.content)
+    blocks.push({ type: 'text', text: `<turn role="${turnRole(m)}">${text}</turn>` }, ...imgs)
   }
-  flush()
   return blocks
 }
 
-/** An array-content turn → its serialized text (passed-through image
+/** A turn's content → its serialized text (passed-through image
  *  blocks stripped) plus the mappable ACP image blocks, in source
  *  order. Unmappable images stay inline as `[image]`. */
-function turnParts(content: InBlock[] | undefined): { text: string; imgs: AcpContentBlock[] } {
+function turnParts(
+  content: string | InBlock[] | undefined
+): { text: string; imgs: AcpContentBlock[] } {
+  if (typeof content === 'string') {
+    return { text: content, imgs: [] }
+  }
   const imgs: AcpContentBlock[] = []
   const text = (content ?? [])
     .map((b) => {
