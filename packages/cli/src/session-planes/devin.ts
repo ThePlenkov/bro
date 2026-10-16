@@ -325,6 +325,108 @@ export function devinLogsDir(
   return join(locks, '..', 'logs')
 }
 
+/** Devin's transcript dir — `transcripts/<session-name>.json`, the
+ *  readable sibling of session_locks (same derivation contract as
+ *  devinLogsDir: `transcriptsDir` override wins; a custom lockDir
+ *  nests the default inside the override so it never escapes the
+ *  operator's chosen root). */
+export function devinTranscriptsDir(
+  bag?: Record<string, unknown>,
+  env: Record<string, string | undefined> = process.env
+): string {
+  const override = bag?.['transcriptsDir']
+  if (typeof override === 'string' && override.trim() !== '') {
+    return override
+  }
+  const locks = devinLocksDir(bag, env)
+  const lockOverride = bag?.['lockDir']
+  if (typeof lockOverride === 'string' && lockOverride.trim() !== '') {
+    return join(locks, 'transcripts')
+  }
+  return join(locks, '..', 'transcripts')
+}
+
+/** A session's ATIF transcript — `transcripts/<lock-name>.json` when
+ *  the file exists. The lock name IS the session name; a resumed
+ *  session keeps both. */
+export function devinSessionTranscript(name: string, transcriptsDir: string): string | undefined {
+  const path = join(transcriptsDir, `${name}.json`)
+  return existsSync(path) ? path : undefined
+}
+
+/** One ATIF step's display line, or undefined when the step carries
+ *  nothing user-facing (system metadata blobs, empty messages). */
+function atifStepLines(step: Record<string, unknown>): string[] {
+  const ts = typeof step['timestamp'] === 'string' ? step['timestamp'] : ''
+  const hhmmss = ts.length >= 19 ? ts.slice(11, 19) : '??:??:??'
+  const out: string[] = []
+  const message = typeof step['message'] === 'string' ? step['message'] : ''
+  const source = typeof step['source'] === 'string' ? step['source'] : 'agent'
+  if (source !== 'system' && message.trim() !== '') {
+    out.push(`[${hhmmss}] ${source}: ${message.trim()}`)
+  }
+  const calls = Array.isArray(step['tool_calls']) ? step['tool_calls'] : []
+  for (const c of calls) {
+    const call = c as Record<string, unknown>
+    const fn = typeof call['function_name'] === 'string' ? call['function_name'] : '?'
+    const args = call['arguments']
+    let brief = ''
+    if (args !== null && typeof args === 'object' && !Array.isArray(args)) {
+      const cmd = (args as Record<string, unknown>)['command']
+      brief = typeof cmd === 'string' ? cmd : JSON.stringify(args)
+    } else if (args !== undefined) {
+      brief = JSON.stringify(args)
+    }
+    if (brief.length > 160) {
+      brief = brief.slice(0, 157) + '...'
+    }
+    out.push(`[${hhmmss}] → ${fn}(${brief.replace(/\s+/g, ' ')})`)
+  }
+  return out
+}
+
+/** An ATIF transcript rendered to log-shaped lines. `fromStepId`
+ *  resumes a follow watermark — only steps past it are emitted.
+ *  Returns undefined on a mid-rewrite (torn JSON) or a doc without
+ *  steps — the caller retries next tick, never dies on a flush in
+ *  flight. */
+export function renderDevinTranscript(
+  json: string,
+  fromStepId = 0
+): { lines: string[]; watermark: number } | undefined {
+  let doc: unknown
+  try {
+    doc = JSON.parse(json)
+  } catch {
+    return undefined
+  }
+  if (doc === null || typeof doc !== 'object' || !Array.isArray((doc as Record<string, unknown>)['steps'])) {
+    return undefined
+  }
+  const steps = (doc as Record<string, unknown>)['steps'] as Record<string, unknown>[]
+  const lines: string[] = []
+  let watermark = fromStepId
+  let systemSkipped = 0
+  for (const step of steps) {
+    const id = typeof step['step_id'] === 'number' ? step['step_id'] : 0
+    if (id <= fromStepId) {
+      continue
+    }
+    const stepLines = atifStepLines(step)
+    if (step['source'] === 'system' && stepLines.length === 0) {
+      systemSkipped++
+    }
+    lines.push(...stepLines)
+    if (id > watermark) {
+      watermark = id
+    }
+  }
+  if (systemSkipped > 0 && fromStepId === 0) {
+    lines.push(`[transcript] (${systemSkipped} system steps elided)`)
+  }
+  return { lines, watermark }
+}
+
 /** The newest `devin_*_<pid>.log` — a live session's own output, the
  *  `bro agents log` reach for sessions the registry never spawned.
  *  Undefined when no file names the pid. */
