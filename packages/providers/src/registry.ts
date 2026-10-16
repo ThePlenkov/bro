@@ -74,15 +74,9 @@ export interface AcpSeam {
   peer?: import('@agentclientprotocol/sdk').AgentApp
   cwd?: string
   onUpdate?: (update: import('@agentclientprotocol/sdk').SessionUpdate) => void
-  /** Teardown signal for `acpOpen` — aborting it while the handshake
-   *  is still pending closes the conn, which rejects the init request
-   *  and releases the ref'd deadline timer that would otherwise pin
-   *  the event loop past server shutdown. */
-  signal?: AbortSignal
   /** What upstream `initialize` advertises as clientCapabilities —
-   *  default {fs:{readTextFile:false, writeTextFile:false}, terminal:true}:
-   *  fs is never served locally, terminal runs through the local
-   *  AcpTerminals registry (bro-z7afs). A brokered transport advertises
+   *  default {fs:false, terminal:false} (spec bro-5hx1.1 §7: the agent's
+   *  own tool surface does the work). A brokered transport advertises
    *  the union and relays the calls through `bridge`. */
   clientCapabilities?: import('@agentclientprotocol/sdk').ClientCapabilities
   /** Passthrough delegate — set ⇒ EVERY agent→client request

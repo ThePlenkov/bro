@@ -12,7 +12,7 @@ import type {
   ClientConnection,
 } from '@agentclientprotocol/sdk'
 import { createHttpStream } from '@agentclientprotocol/sdk/experimental/http-client'
-import { fakeAcpAgent, type FakeAcpAgent } from '@broject/providers/testkit'
+import { fakeAcpAgent } from '@broject/providers/testkit'
 import { acpTransport } from './serve-acp.ts'
 import { authHeaders, listen, serveDeps as deps } from './serve-testkit.ts'
 
@@ -21,7 +21,6 @@ const CFG = {
   entry: { type: 'acp' as const, command: 'dv acp' },
   cwd: '/repo',
   timeoutMs: 10_000,
-  agents: {},
 }
 
 const INIT_PARAMS: InitializeRequest = {
@@ -86,88 +85,41 @@ function openClient(url: string): TestClient {
   return t
 }
 
-/** The serve wiring every test repeats — a fake upstream agent behind
- *  the real brokered transport. */
-const listenAcp = (fake: FakeAcpAgent) =>
-  listen(deps({ acp: acpTransport(CFG, { acp: { peer: fake.app } }) }))
-
 describe('serve /api/v1/acp — the native ACP transport', () => {
-  test('initialize answers the upstream handshake with brokered capabilities masked', async () => {
+  test('initialize answers the upstream handshake minus loadSession', async () => {
     const fake = fakeAcpAgent({
       authMethods: [{ id: 'devin', name: 'Devin login' }],
-      agentCapabilities: {
-        loadSession: true,
-        providers: {},
-        sessionCapabilities: { list: {}, resume: {}, close: {} },
-      },
+      agentCapabilities: { loadSession: true },
     })
-    const { url, close } = await listenAcp(fake)
+    const { url, close } = await listen(
+      deps({ acp: acpTransport(CFG, { acp: { peer: fake.app } }) })
+    )
     const c = openClient(url)
     try {
       const res = await c.agent.request('initialize', INIT_PARAMS)
       assert.equal(res.protocolVersion, PROTOCOL_VERSION)
       assert.equal(res.agentInfo?.name, 'fake-acp')
       assert.deepEqual(res.authMethods, [{ id: 'devin', name: 'Devin login' }])
-      // unimplemented methods' flags are stripped — the broker never
-      // advertises a call that answers method-not-found
-      const caps = res.agentCapabilities as {
-        loadSession?: boolean
-        providers?: unknown
-        sessionCapabilities?: Record<string, unknown>
-      }
-      assert.equal(caps.loadSession !== true, true)
-      assert.equal(caps.providers === undefined, true)
-      assert.deepEqual(caps.sessionCapabilities, { close: {} })
+      // loadSession is stripped — the broker never joins a session it
+      // did not open
+      assert.equal(res.agentCapabilities?.loadSession !== true, true)
       // and upstream saw the broker's capability union, not the
       // client's literal advertisement (the fake's schema parse adds
       // normalized fields like auth:{terminal:false} — assert the
       // advertised surface)
-      const seen = fake.clientCapabilities as {
+      const caps = fake.clientCapabilities as {
         fs?: { readTextFile?: boolean; writeTextFile?: boolean }
         terminal?: boolean
-        elicitation?: { form?: unknown; url?: unknown }
       }
-      assert.deepEqual(seen.fs, { readTextFile: true, writeTextFile: true })
-      assert.equal(seen.terminal, true)
-      // elicitation/create is bridged — the union advertises both modes
-      assert.deepEqual(seen.elicitation, { form: {}, url: {} })
+      assert.deepEqual(caps.fs, { readTextFile: true, writeTextFile: true })
+      assert.equal(caps.terminal, true)
     } finally {
       await c.conn.close()
       await close()
     }
   })
 
-  test('session/new passes client params verbatim', async () => {
-    const fake = fakeAcpAgent({})
-    const { url, close } = await listenAcp(fake)
-    const c = openClient(url)
-    try {
-      await c.agent.request('initialize', INIT_PARAMS)
-      const mcpServers = [
-        { type: 'stdio', name: 'mine', command: 'mcp-server', args: ['--x'], env: [] },
-      ]
-      const s = (await c.agent.request('session/new', {
-        cwd: '/work/bro--bro-ymbq1',
-        mcpServers,
-        _meta: { bead: 'bro-ymbq1' },
-      })) as { sessionId: string }
-      assert.equal(s.sessionId, 'sess-1')
-      // verbatim passthrough: cwd, mcpServers, _meta all reached the
-      // agent (the fake's schema parse normalizes the shape — assert
-      // the values it must not have touched)
-      const req = fake.sessionRequests[0]
-      assert.ok(req)
-      assert.equal(req.cwd, '/work/bro--bro-ymbq1')
-      assert.equal(req._meta?.bead, 'bro-ymbq1')
-      assert.equal(req.mcpServers?.[0]?.name, 'mine')
-      assert.equal((req.mcpServers?.[0] as { command?: string }).command, 'mcp-server')
-    } finally {
-      await c.conn.close()
-      await close()
-    }
-  })
-
-  test('session/update notifications fan out live mid-turn', async () => {
+  test('session/new passes client params verbatim; updates fan out live', async () => {
     const gate = defer()
     const fake = fakeAcpAgent({
       updates: [
@@ -185,11 +137,32 @@ describe('serve /api/v1/acp — the native ACP transport', () => {
       ],
       holdPromptUntil: gate.promise,
     })
-    const { url, close } = await listenAcp(fake)
+    const { url, close } = await listen(
+      deps({ acp: acpTransport(CFG, { acp: { peer: fake.app } }) })
+    )
     const c = openClient(url)
     try {
       await c.agent.request('initialize', INIT_PARAMS)
-      await c.agent.request('session/new', { cwd: '/w', mcpServers: [] })
+      const mcpServers = [
+        { type: 'stdio', name: 'mine', command: 'mcp-server', args: ['--x'], env: [] },
+      ]
+      const s = (await c.agent.request('session/new', {
+        cwd: '/work/bro--bro-ymbq1',
+        mcpServers,
+        _meta: { bead: 'bro-ymbq1' },
+      })) as { sessionId: string }
+      assert.equal(s.sessionId, 'sess-1')
+      // verbatim passthrough: cwd, mcpServers, _meta all reached the
+      // agent (the fake's schema parse normalizes the shape — assert
+      // the values it must not have touched)
+      const req = fake.sessionRequests[0]
+      assert.equal(req?.cwd, '/work/bro--bro-ymbq1')
+      assert.equal(req?._meta?.bead, 'bro-ymbq1')
+      assert.equal(req?.mcpServers?.[0]?.name, 'mine')
+      assert.equal(
+        (req?.mcpServers?.[0] as { command?: string } | undefined)?.command,
+        'mcp-server'
+      )
       const p = c.agent.request('session/prompt', {
         sessionId: 'sess-1',
         prompt: [{ type: 'text', text: 'say hi' }],
@@ -216,7 +189,9 @@ describe('serve /api/v1/acp — the native ACP transport', () => {
       probeClient: (cl, sid) =>
         cl.request('fs/read_text_file', { sessionId: sid, path: '/etc/motd' }),
     })
-    const { url, close } = await listenAcp(fake)
+    const { url, close } = await listen(
+      deps({ acp: acpTransport(CFG, { acp: { peer: fake.app } }) })
+    )
     const c = openClient(url)
     try {
       await c.agent.request('initialize', INIT_PARAMS)
@@ -244,7 +219,9 @@ describe('serve /api/v1/acp — the native ACP transport', () => {
       holdPromptUntil: gate.promise,
       stopReason: 'cancelled',
     })
-    const { url, close } = await listenAcp(fake)
+    const { url, close } = await listen(
+      deps({ acp: acpTransport(CFG, { acp: { peer: fake.app } }) })
+    )
     const c = openClient(url)
     try {
       await c.agent.request('initialize', INIT_PARAMS)
@@ -267,14 +244,15 @@ describe('serve /api/v1/acp — the native ACP transport', () => {
 
   test('client disconnect (DELETE) closes the session upstream', async () => {
     const fake = fakeAcpAgent({ replyText: 'x' })
-    const { url, close } = await listenAcp(fake)
+    const { url, close } = await listen(
+      deps({ acp: acpTransport(CFG, { acp: { peer: fake.app } }) })
+    )
     const c = openClient(url)
     try {
       await c.agent.request('initialize', INIT_PARAMS)
       await c.agent.request('session/new', { cwd: '/w', mcpServers: [] })
       await c.conn.close()
       await until(() => fake.closes.includes('sess-1'), 'upstream session/close')
-      assert.deepEqual(fake.closes, ['sess-1'])
     } finally {
       await close()
     }
@@ -283,7 +261,9 @@ describe('serve /api/v1/acp — the native ACP transport', () => {
   test('a second prompt on a mid-turn session errors instead of stealing updates', async () => {
     const gate = defer()
     const fake = fakeAcpAgent({ holdPromptUntil: gate.promise })
-    const { url, close } = await listenAcp(fake)
+    const { url, close } = await listen(
+      deps({ acp: acpTransport(CFG, { acp: { peer: fake.app } }) })
+    )
     const c = openClient(url)
     try {
       await c.agent.request('initialize', INIT_PARAMS)
@@ -298,8 +278,7 @@ describe('serve /api/v1/acp — the native ACP transport', () => {
           sessionId: 'sess-1',
           prompt: [{ type: 'text', text: 'two' }],
         }),
-        (e: unknown) =>
-          e instanceof RequestError && e.code === -32001 && /mid-turn/.test(e.message)
+        (e: unknown) => e instanceof RequestError && /mid-turn/.test(e.message)
       )
       gate.resolve()
       await p
@@ -309,61 +288,11 @@ describe('serve /api/v1/acp — the native ACP transport', () => {
     }
   })
 
-  test('upstream auth_required survives the wrap — session/new and prompt keep -32000', async () => {
-    const fake = fakeAcpAgent({
-      failNew: 'auth',
-      authMethods: [{ id: 'oauth', name: 'OAuth' }],
-    })
-    const { url, close } = await listenAcp(fake)
-    const c = openClient(url)
-    try {
-      await c.agent.request('initialize', INIT_PARAMS)
-      // a client that can't tell auth_required from internal-error can
-      // never drive the forwarded `authenticate` recovery
-      await assert.rejects(
-        c.agent.request('session/new', { cwd: '/w', mcpServers: [] }),
-        (e: unknown) => e instanceof RequestError && e.code === -32000
-      )
-    } finally {
-      await c.conn.close()
-      await close()
-    }
-  })
-
-  test('a failed prompt closes upstream and evicts the brokered session', async () => {
-    const fake = fakeAcpAgent({ failPrompt: 'auth' })
-    const { url, close } = await listenAcp(fake)
-    const c = openClient(url)
-    try {
-      await c.agent.request('initialize', INIT_PARAMS)
-      await c.agent.request('session/new', { cwd: '/w', mcpServers: [] })
-      await assert.rejects(
-        c.agent.request('session/prompt', {
-          sessionId: 'sess-1',
-          prompt: [{ type: 'text', text: 'go' }],
-        }),
-        (e: unknown) => e instanceof RequestError && e.code === -32000
-      )
-      // evicted + closed upstream — a retry gets session-not-found,
-      // not a stale handle talking to a dead session
-      await until(() => fake.closes.includes('sess-1'), 'upstream session/close')
-      await assert.rejects(
-        c.agent.request('session/prompt', {
-          sessionId: 'sess-1',
-          prompt: [{ type: 'text', text: 'again' }],
-        }),
-        (e: unknown) => e instanceof RequestError && e.code === -32002
-      )
-      assert.deepEqual(fake.prompts, ['go'])
-    } finally {
-      await c.conn.close()
-      await close()
-    }
-  })
-
   test('unregistered methods (session/load) answer method-not-found', async () => {
     const fake = fakeAcpAgent({})
-    const { url, close } = await listenAcp(fake)
+    const { url, close } = await listen(
+      deps({ acp: acpTransport(CFG, { acp: { peer: fake.app } }) })
+    )
     const c = openClient(url)
     try {
       await c.agent.request('initialize', INIT_PARAMS)
@@ -379,7 +308,9 @@ describe('serve /api/v1/acp — the native ACP transport', () => {
 
   test('guard parity — 401 without the session token', async () => {
     const fake = fakeAcpAgent({})
-    const { url, close } = await listenAcp(fake)
+    const { url, close } = await listen(
+      deps({ acp: acpTransport(CFG, { acp: { peer: fake.app } }) })
+    )
     try {
       const r = await fetch(`${url}/api/v1/acp`, {
         method: 'POST',
