@@ -53,9 +53,12 @@ interface Fixture {
  *  flip every gone-verdict to 'unverified'. */
 function fixture(rows: Array<Record<string, unknown>> = []): Fixture {
   const { root, main } = initRepo('bro-agents-')
-  const { binDir, db } = installFakeBd(root, rows)
   const beads = join(root, 'beads')
   mkdirSync(beads)
+  // real bd treats BEADS_DIR as the store dir itself — a bare dir is an
+  // empty store, so installFakeBd plants the shared db INSIDE the dir
+  // --beads-dir pins (every resolution path lands on the same file)
+  const { binDir, db } = installFakeBd(beads, rows)
   writeFileSync(
     join(main, 'bro.config.json'),
     JSON.stringify({ agents: { native: { command: 'node {promptFile}' } } })

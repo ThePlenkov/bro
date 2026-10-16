@@ -242,6 +242,8 @@ interface Fixture {
   root: string
   main: string
   beadsDir: string
+  /** where the fake bd/docker shims live — write failing binaries here */
+  binDir: string
   /** the fake bd's JSON store (FAKE_BD_DB) */
   db: string
   env: AgentConnectorEnv
@@ -257,9 +259,11 @@ interface Fixture {
   dbRows(): Array<Record<string, unknown>>
 }
 
-/** Real git repo + the shared fake bd on PATH + a beadsDir the pinned
- *  store's cwd contract needs (bdActor shells out with it as cwd; the
- *  store itself keys off FAKE_BD_DB — same wiring as agents.test.ts).
+/** Real git repo + the shared fake bd on PATH + a beadsDir that is a
+ *  real store dir — real bd resolves BEADS_DIR as the store itself, so
+ *  installFakeBd plants the shared db inside it (bdActor's cwd calls,
+ *  worker BEADS_DIR pins, and the FAKE_BD_DB fallback all land on the
+ *  same file — same wiring as agents.test.ts).
  *  The agent command is `node {promptFile}` — the prompt IS the
  *  program. `tmux: true` adds the tmux shim and a tmux knob mirroring
  *  native's; `docker: true` does the same for the docker shim. */
@@ -269,9 +273,12 @@ function fixture(
   opts: { tmux?: boolean; docker?: boolean } = {}
 ): Fixture {
   const { root, main } = initRepo('bro-agconn-')
-  const { binDir, db } = installFakeBd(root, rows)
+  // real bd treats BEADS_DIR as the store dir itself — a bare dir is an
+  // empty store, so installFakeBd plants the shared db INSIDE the dir
+  // spec.beadsDir pins (every resolution path lands on the same file)
   const beadsDir = join(root, 'beads')
   mkdirSync(beadsDir, { recursive: true })
+  const { binDir, db } = installFakeBd(beadsDir, rows)
   const agents: Record<string, Record<string, unknown>> = { native: { command } }
   const prevTmuxFakeHome = process.env.TMUX_FAKE_HOME
   if (opts.tmux === true) {
@@ -313,6 +320,7 @@ function fixture(
     root,
     main,
     beadsDir,
+    binDir,
     db,
     env: { agents, connectors: {} },
     prevPath,
@@ -1125,7 +1133,7 @@ describe('tmux connector', () => {
     try {
       // tmux that can't even report a version — the backend is down
       writeFileSync(
-        join(f.root, 'bin', 'tmux'),
+        join(f.binDir, 'tmux'),
         '#!/bin/sh\necho "tmux exploded" >&2\nexit 1\n'
       )
       const c = makeTmuxConnector({ dir: f.main }, f.env)
@@ -1187,7 +1195,7 @@ describe('docker connector', () => {
     try {
       // docker that can't even report a version — the daemon is down
       writeFileSync(
-        join(f.root, 'bin', 'docker'),
+        join(f.binDir, 'docker'),
         '#!/bin/sh\necho "docker exploded" >&2\nexit 1\n'
       )
       const c = makeDockerConnector({ dir: f.main }, f.env)
