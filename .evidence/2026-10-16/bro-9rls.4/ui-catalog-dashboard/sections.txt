@@ -1,0 +1,8 @@
+work ready status cl | dim=false | ui-ev-13q
+agents backends flee | dim=false | (empty)
+queue next pour clai | dim=false | (empty)
+gates status threads | dim=false | (empty)
+events tail lifecycl | dim=false | (empty)
+judge stats decide r | dim=false | (empty)
+debt next summary co | dim=false | (empty)
+learn probe capture  | dim=false | (empty)

@@ -1,0 +1,11 @@
+GET /ui                     [200]
+GET /api/v1/planes          [200]
+GET /api/v1/planes/work     [200]
+GET /api/v1/planes/agents   [200]
+GET /api/v1/planes/queue    [200]
+GET /api/v1/planes/gates    [200]
+GET /api/v1/planes/events   [200]
+GET /api/v1/planes/judge    [200]
+GET /api/v1/planes/debt     [200]
+GET /api/v1/planes/learn    [200]
+the index + all plane lists re-fetch in a second identical batch — the chained setTimeout poll is live

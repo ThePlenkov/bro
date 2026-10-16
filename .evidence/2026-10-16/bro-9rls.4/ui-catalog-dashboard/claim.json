@@ -1,0 +1,147 @@
+{
+  "version": 1,
+  "claim": "GET /ui serves a self-contained catalog dashboard that renders one capability-aware panel per /api/v1/planes entry — populated tables for readable planes, named-read links, verb/capability badges, a live 2s poll, and no write surface — verified live in headless Chrome against a real bro serve.",
+  "slug": "ui-catalog-dashboard",
+  "task_id": "bro-9rls.4",
+  "agent": "devin",
+  "session_id": "cli-history-821bb30cb48345b8",
+  "produced_at": "2026-10-16T09:01:00Z",
+  "target_environment": "browser",
+  "verification_method": "browser-automation",
+  "preconditions": [
+    "worktree /home/pepl/projects/bro--bro-9rls.4 built (npm run build green)",
+    "temp repo /tmp/ui-ev with bd init --stealth, two seeded beads (ui-ev-13q, ui-ev-2tc), and remote origin=https://github.com/ThePlenkov/bro so gh-backed planes resolve",
+    "bro serve from the worktree dist running on 127.0.0.1:4877 in /tmp/ui-ev",
+    "chromium headless with remote debugging on :9222 driven via chrome-devtools MCP"
+  ],
+  "commands": [
+    {
+      "cmd": "curl -s -o /dev/null -w 'GET /ui -> %{http_code} %{content_type}\\n' http://127.0.0.1:4877/ui",
+      "cwd": "/home/pepl/projects/bro--bro-9rls.4",
+      "exit_code": 0,
+      "duration_ms": 15,
+      "stdout_excerpt": "GET /ui -> 200 text/html; charset=utf-8"
+    },
+    {
+      "cmd": "curl -s http://127.0.0.1:4877/api/v1/planes | node -e 'count planes'",
+      "cwd": "/home/pepl/projects/bro--bro-9rls.4",
+      "exit_code": 0,
+      "duration_ms": 120,
+      "stdout_excerpt": "index planes: 8 work,agents,queue,gates,events,judge,debt,learn"
+    },
+    {
+      "cmd": "curl -s -o /dev/null -w 'POST /ui -> %{http_code}\\n' -X POST http://127.0.0.1:4877/ui",
+      "cwd": "/home/pepl/projects/bro--bro-9rls.4",
+      "exit_code": 0,
+      "duration_ms": 12,
+      "stdout_excerpt": "POST /ui -> 401",
+      "stderr_excerpt": null
+    }
+  ],
+  "assertions": [
+    {
+      "name": "page-loads-over-http",
+      "passed": true,
+      "evidence_quote": "GET /ui -> 200 text/html; charset=utf-8"
+    },
+    {
+      "name": "panels-generated-from-index",
+      "passed": true,
+      "evidence_quote": "  \"sections\": 8,"
+    },
+    {
+      "name": "seeded-bead-rows-rendered",
+      "passed": true,
+      "evidence_quote": "  \"seedVisible\": true"
+    },
+    {
+      "name": "named-reads-become-get-links",
+      "passed": true,
+      "evidence_quote": "  \"readLinks\": 13,"
+    },
+    {
+      "name": "row-ids-link-to-get-route",
+      "passed": true,
+      "evidence_quote": "  \"idLinks\": 2,"
+    },
+    {
+      "name": "capability-badges-render",
+      "passed": true,
+      "evidence_quote": "  \"capBadges\": 62,"
+    },
+    {
+      "name": "no-write-surface",
+      "passed": true,
+      "evidence_quote": "  \"forms\": 0,"
+    },
+    {
+      "name": "clean-header-no-stale",
+      "passed": true,
+      "evidence_quote": "  \"errText\": \"\","
+    },
+    {
+      "name": "every-plane-list-200",
+      "passed": true,
+      "evidence_quote": "GET /api/v1/planes/gates    [200]"
+    },
+    {
+      "name": "poll-cadence-live",
+      "passed": true,
+      "evidence_quote": "the index + all plane lists re-fetch in a second identical batch — the chained setTimeout poll is live"
+    },
+    {
+      "name": "writes-gated-before-routing",
+      "passed": true,
+      "evidence_quote": "POST /ui -> 401"
+    }
+  ],
+  "files_changed": [
+    "packages/cli/src/commands/ui-page.ts",
+    "packages/cli/src/commands/serve.ts",
+    "packages/cli/src/commands/serve.test.ts",
+    "specs/bro-9rls.4.md"
+  ],
+  "artifacts": [
+    {
+      "kind": "screenshot",
+      "path": "screenshot.png",
+      "sha256": null,
+      "content_excerpt": null
+    },
+    {
+      "kind": "log",
+      "path": "console.log",
+      "sha256": null,
+      "content_excerpt": null
+    },
+    {
+      "kind": "network",
+      "path": "network.txt",
+      "sha256": null,
+      "content_excerpt": "GET /api/v1/planes/gates    [200]"
+    },
+    {
+      "kind": "report",
+      "path": "dom.json",
+      "sha256": null,
+      "content_excerpt": "{\n  \"sections\": 8,\n  \"workRows\": 2,\n  \"dimmed\": 0,\n  \"forms\": 0,\n  \"idLinks\": 2,\n  \"readLinks\": 13,\n  \"capBadges\": 62,\n  \"tsText\": \"updated 2026-10-16T09:00:46.344Z · every 2s\",\n  \"errText\": \"\",\n  \"seedVisible\": true\n}\n"
+    },
+    {
+      "kind": "report",
+      "path": "sections.txt",
+      "sha256": null,
+      "content_excerpt": "work ready status cl | dim=false | ui-ev-13q"
+    }
+  ],
+  "remaining_gaps": [
+    "capability-false dimming (.dim section) asserted in code and the earlier no-remote run showed 'unavailable — fetch failed'; the all-green repo fixture renders every plane readable so .dim is not exercised in this capture",
+    "SSE upgrade path unexercised — /api/v1/events/stream lands with bro-9rls.5; the EventSource arm is client-side and degrades silently today",
+    "POST /ui returns 401 over real HTTP (serve.json Bearer gate precedes routing); the 405 non-GET path is covered by the serve.test.ts unit test"
+  ],
+  "self_recheck": {
+    "performed": true,
+    "performed_at": "2026-10-16T09:02:00Z",
+    "method": "re-read-file",
+    "result": "still-holds"
+  }
+}
