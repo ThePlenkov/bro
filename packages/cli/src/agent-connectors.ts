@@ -1464,15 +1464,7 @@ function prepareSpawn(
   const exitFile = join(home, `${agentId}.exit`)
   rmSync(exitFile, { force: true })
   writeFileSync(promptFile, spec.prompt)
-  // the log is append-mode across respawns — pin where THIS run's output
-  // starts so a later exit classifies on new text only, not the old run's
-  // rate-limit wall (which would re-block the fresh run forever)
-  let logFrom = 0
-  try {
-    logFrom = statSync(log).size
-  } catch {
-    // no log yet — the run starts at byte 0
-  }
+  const logFrom = logSizeOrZero(log)
   // exitStatus: undefined clears a respawned entry's stale harvest — the
   // new run must not read as already-exited (undefined keys drop out of
   // the serialized registry). pid/pidStart/spawnError likewise — a claim
@@ -1513,23 +1505,56 @@ function prepareSpawn(
     sessionKind: opts.sessionQuota?.plane.kind,
     ...opts.entry?.(agentId),
   })
-  if (claimed) {
-    rebindStep(spec.beadsDir, spec.molStep, actor!)
-  } else if (!phantom) {
+  recordSpawnClaim(dir, spec, agentId, backend, { claimed, actor, phantom }, opts.claimAs)
+  return { agentId, promptFile, log, exitFile, reservation }
+  } catch (err) {
+    // a write/claim failure after the reservation — the caller never saw
+    // the key, so this is the only place that can hand the slot back
+    if (reservation !== undefined) {
+      releaseSessionSlot(reservation)
+    }
+    throw err
+  }
+}
+
+/** The byte offset a fresh run's log starts at — the log is append-mode
+ *  across respawns, so a later exit must classify on THIS run's text
+ *  only, not the old run's rate-limit wall (which would re-block the
+ *  fresh run forever). No log yet → byte 0. */
+function logSizeOrZero(log: string): number {
+  try {
+    return statSync(log).size
+  } catch {
+    return 0
+  }
+}
+
+/** Post-write claim bookkeeping — claim or rebind the step, then emit
+ *  the lifecycle events (specs/telemetry/bro-ub91h.md); fail-open, so a
+ *  wedged journal never stalls a spawn. A phantom step records the
+ *  spawn only — there is no bead whose status a 'claim' event could
+ *  truthfully report. */
+function recordSpawnClaim(
+  dir: string,
+  spec: SpawnSpec,
+  agentId: string,
+  backend: string,
+  guard: { claimed: boolean; actor: string | undefined; phantom: boolean },
+  claimAs: string | undefined
+): void {
+  if (guard.claimed) {
+    rebindStep(spec.beadsDir, spec.molStep, guard.actor!)
+  } else if (!guard.phantom) {
     claimStep(spec.beadsDir, spec.molStep)
   }
-  if (opts.claimAs !== undefined && !phantom) {
-    rebindStep(spec.beadsDir, spec.molStep, opts.claimAs)
+  if (claimAs !== undefined && !guard.phantom) {
+    rebindStep(spec.beadsDir, spec.molStep, claimAs)
   }
-  // lifecycle — the registry claim + spawn record (specs/telemetry/
-  // bro-ub91h.md); fail-open, so a wedged journal never stalls a spawn.
-  // A phantom step records the spawn only — there is no bead whose
-  // status a 'claim' event could truthfully report
-  if (!phantom) {
+  if (!guard.phantom) {
     emitLifecycle(dir, {
       kind: 'claim',
       bead: spec.molStep,
-      from: claimed || opts.claimAs !== undefined ? 'in_progress' : 'open',
+      from: guard.claimed || claimAs !== undefined ? 'in_progress' : 'open',
       to: 'in_progress',
       detail: { via: 'agents', agent: agentId, backend },
     })
@@ -1548,15 +1573,6 @@ function prepareSpawn(
       ...(spec.class !== undefined ? { class: spec.class } : {}),
     },
   })
-  return { agentId, promptFile, log, exitFile, reservation }
-  } catch (err) {
-    // a write/claim failure after the reservation — the caller never saw
-    // the key, so this is the only place that can hand the slot back
-    if (reservation !== undefined) {
-      releaseSessionSlot(reservation)
-    }
-    throw err
-  }
 }
 
 /** The enter half of the rig transition (bro-oy3k1.4): spec.enter is
