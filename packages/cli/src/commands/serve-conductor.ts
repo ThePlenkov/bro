@@ -226,14 +226,10 @@ function serializeBlocks(body: MessagesRequest, imageOk: boolean): AcpContentBlo
   }
   for (const m of body.messages ?? []) {
     const role = m.role === 'assistant' ? 'assistant' : 'user'
-    const sep = buf === '' ? '' : '\n\n'
-    if (typeof m.content === 'string') {
-      buf += `${sep}<turn role="${role}">${m.content}</turn>`
-      continue
-    }
-    const { text, imgs } = turnParts(m.content)
+    const { text, imgs } =
+      typeof m.content === 'string' ? { text: m.content, imgs: [] } : turnParts(m.content)
     if (imgs.length === 0) {
-      buf += `${sep}<turn role="${role}">${text}</turn>`
+      buf += `${buf === '' ? '' : '\n\n'}<turn role="${role}">${text}</turn>`
       continue
     }
     // an image-bearing turn keeps its <turn> wrapper whole — the image
