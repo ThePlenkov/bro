@@ -96,6 +96,7 @@
  * file a coin flip.
  */
 import { randomBytes, timingSafeEqual } from 'node:crypto'
+import { spawn } from 'node:child_process'
 import {
   chmodSync,
   closeSync,
@@ -106,6 +107,7 @@ import {
   openSync,
   readFileSync,
   readSync,
+  realpathSync,
   renameSync,
   rmSync,
   statSync,
@@ -1496,12 +1498,160 @@ function realDeps(
 function usage(): never {
   console.error(`usage:
   bro serve [--port <n>]
+  bro serve ensure --port <n>
 
 HTTP/JSON facade host on 127.0.0.1 (default port: ephemeral — the bound
 address is printed and written to <git-common-dir>/bro/serve.json).
 
+ensure: the apiKeyHelper contract for a repo-bound listener — probe the
+port, spawn \`bro serve\` detached when dead, then print this repo's
+serve.json token on stdout. Failures are stderr + nonzero; stdout never
+carries an empty key.
+
 Routes: ${ROUTES.join(', ')}`)
   process.exit(2)
+}
+
+// --- ensure ----------------------------------------------------------------
+
+interface ServeHealth {
+  ok?: boolean
+  dir?: string
+  pid?: number
+}
+
+/** Injectable seams — tests drive the probe/spawn without a real port
+ *  or a detached CLI re-exec. */
+export interface EnsureDeps {
+  probe?: (port: number) => Promise<ServeHealth | undefined>
+  spawnServer?: () => void
+  timeoutMs?: number
+  pollMs?: number
+}
+
+async function defaultProbe(port: number): Promise<ServeHealth | undefined> {
+  try {
+    const r = await fetch(`http://127.0.0.1:${port}/api/v1/health`, {
+      signal: AbortSignal.timeout(1_000),
+    })
+    if (!r.ok) return undefined
+    return (await r.json()) as ServeHealth
+  } catch {
+    return undefined
+  }
+}
+
+/** `bro serve ensure` — resolve-or-spawn this repo's listener on a
+ *  fixed port, then the token a client authenticates with. Returns the
+ *  token or throws; the command wrapper owns stderr + exit codes. */
+export async function ensureServe(
+  dir: string,
+  port: number,
+  deps: EnsureDeps = {}
+): Promise<string> {
+  const probe = deps.probe ?? defaultProbe
+  const timeoutMs = deps.timeoutMs ?? 20_000
+  const pollMs = deps.pollMs ?? 250
+
+  const statePath = serveStatePath(dir)
+  if (statePath === null) {
+    throw new Error('not inside a git repository — cannot anchor serve.json')
+  }
+  // node reports serve's dir as its realpath'd cwd — compare alike
+  const repo = realpathSync(dir)
+
+  const healthy = async (): Promise<string | undefined> => {
+    const h = await probe(port)
+    if (h?.ok !== true || typeof h.dir !== 'string') return undefined
+    if (h.dir !== repo) {
+      throw new Error(
+        `port ${port} already serves ${h.dir} — not this repo; pick another port`
+      )
+    }
+    const state = readStateFile(statePath)
+    if (state === undefined) {
+      throw new Error(`listener on ${port} is up but ${statePath} is missing`)
+    }
+    // a same-dir answer alone is spoofable — the listener must also be
+    // the recorded process, else a squatter claims our repo and
+    // receives the token we hand out
+    if (h.pid !== state.pid) {
+      throw new Error(
+        `listener on ${port} claims this repo but is not the recorded serve ` +
+          `(pid ${h.pid ?? '?'} vs ${state.pid})`
+      )
+    }
+    return state.token
+  }
+
+  const first = await healthy()
+  if (first !== undefined) return first
+
+  if (deps.spawnServer !== undefined) {
+    deps.spawnServer()
+  } else {
+    const logDir = dirname(statePath)
+    mkdirSync(logDir, { recursive: true })
+    const logFd = openSync(join(logDir, 'serve.log'), 'a')
+    try {
+      spawn(process.execPath, [process.argv[1]!, 'serve', '--port', String(port)], {
+        cwd: repo,
+        detached: true,
+        stdio: ['ignore', logFd, logFd],
+        env: process.env,
+      }).unref()
+    } finally {
+      closeSync(logFd)
+    }
+  }
+
+  const deadline = Date.now() + timeoutMs
+  while (Date.now() < deadline) {
+    await new Promise((r) => setTimeout(r, pollMs))
+    const h = await probe(port)
+    if (h?.ok !== true || typeof h.dir !== 'string') continue
+    if (h.dir !== repo) {
+      throw new Error(
+        `port ${port} came up serving ${h.dir} — not this repo; pick another port`
+      )
+    }
+    const state = readStateFile(statePath)
+    // state/pid mismatch = startup race (serve binds before writing
+    // serve.json) or an impostor — keep polling; timeout refuses
+    if (state === undefined || state.pid !== h.pid) continue
+    return state.token
+  }
+  throw new Error(
+    `bro serve never came up on ${port} — see ${join(dirname(statePath), 'serve.log')}`
+  )
+}
+
+async function cmdEnsure(argv: string[]): Promise<void> {
+  if (argv.includes('--help') || argv.includes('-h')) usage()
+  const pos = positionals(argv, new Set(['--port']))
+  if (pos.length > 0) usage()
+  for (const a of argv) {
+    if (a.startsWith('--') && a.split('=')[0] !== '--port') {
+      console.error(`error: unknown option ${a}`)
+      usage()
+    }
+  }
+  const portRaw = flag(argv, '--port')
+  if (portRaw === undefined) {
+    console.error('error: ensure needs --port <n> — the client base url is a fixed port')
+    usage()
+  }
+  const port = Number(portRaw)
+  if (!Number.isInteger(port) || port <= 0 || port > 65535) {
+    console.error(`error: --port needs an integer 1–65535, got "${portRaw}"`)
+    process.exit(2)
+  }
+  try {
+    console.log(await ensureServe(process.cwd(), port))
+  } catch (err) {
+    console.error(`error: ${err instanceof Error ? err.message : String(err)}`)
+    process.exit(1)
+  }
 }
 
 /** Argument validation → the bound port (0 = ephemeral). Exits via
@@ -1563,6 +1713,10 @@ async function armWebhookBroker(
 }
 
 export async function runServeCommand(argv: string[]): Promise<void> {
+  if (argv[0] === 'ensure') {
+    await cmdEnsure(argv.slice(1))
+    return
+  }
   const port = parseServePort(argv)
 
   const dir = process.cwd()

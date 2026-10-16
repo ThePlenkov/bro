@@ -33,6 +33,7 @@ function Home() {
         </a>
         <nav>
           <a href={DOCS}>docs</a>
+          <a href={`${DOCS}/whats-new`}>what's new</a>
           <a href={GITHUB}>github</a>
         </nav>
       </header>

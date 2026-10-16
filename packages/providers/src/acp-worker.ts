@@ -109,7 +109,8 @@ export class AcpWorkerError extends Error {
 
 /** One rendered log line per session/update (spec step 6 — the .log
  *  stays the observability plane AND the exit-cause classifier's
- *  input). Text chunks render as text; every other kind renders its
+ *  input). Text chunks render as bare text — the drain loop coalesces
+ *  a same-kind run into one line; every other kind renders its
  *  discriminator plus a compact detail payload. */
 export function renderAcpUpdate(u: SessionUpdate): string {
   switch (u.sessionUpdate) {
@@ -333,12 +334,38 @@ export async function runAcpWorker(spec: AcpWorkerSpec): Promise<number> {
       // draining to `stop` IS awaiting the turn, and keeps every
       // notification on the log in arrival order
       const drain = async (): Promise<PromptResponse> => {
-        for (;;) {
-          const m = await session.nextUpdate()
-          if (m.kind === 'stop') {
-            return m.response
+        // chunk updates stream token-level — accumulate a same-kind run
+        // and flush it as one line before the next update kind renders,
+        // so the .log carries a sentence, not a line per delta
+        let buf: { kind: string; text: string } | undefined
+        const flush = (): void => {
+          if (buf !== undefined && buf.text !== '') {
+            log(buf.text)
           }
-          log(renderAcpUpdate(m.update))
+          buf = undefined
+        }
+        try {
+          for (;;) {
+            const m = await session.nextUpdate()
+            if (m.kind === 'stop') {
+              return m.response
+            }
+            const kind = m.update.sessionUpdate
+            const isChunk =
+              kind === 'agent_message_chunk' || kind === 'agent_thought_chunk'
+            if (isChunk && buf?.kind === kind) {
+              buf.text += renderAcpUpdate(m.update)
+              continue
+            }
+            flush()
+            if (isChunk) {
+              buf = { kind, text: renderAcpUpdate(m.update) }
+            } else {
+              log(renderAcpUpdate(m.update))
+            }
+          }
+        } finally {
+          flush()
         }
       }
       const [resp] = await Promise.all([session.prompt(promptText), drain()])

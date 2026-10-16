@@ -46,6 +46,9 @@ describe('isSelfToolCommand', () => {
     assert.ok(isSelfToolCommand('npx -y @broject/bro debt status'))
     assert.ok(isSelfToolCommand('npx @broject/bro hooks stop'))
     assert.ok(isSelfToolCommand('npx -y @broject/bro@0 act status'))
+    assert.ok(isSelfToolCommand('npx bro status'))
+    assert.ok(isSelfToolCommand('npx --no-install bro serve ensure --port 44928'))
+    assert.ok(!isSelfToolCommand('npx brother status'))
   })
 
   test('does not approve lookalikes or other tools', () => {
@@ -69,6 +72,8 @@ describe('classifyArmCommand', () => {
     assert.equal(classifyArmCommand('bro act status'), 'act')
     assert.equal(classifyArmCommand('bro act merge 33 --squash'), 'act')
     assert.equal(classifyArmCommand('npx -y @broject/bro act threads 33'), 'act')
+    assert.equal(classifyArmCommand('npx bro act status'), 'act')
+    assert.equal(classifyArmCommand('npx --no-install bro act threads 5'), 'act')
     assert.equal(classifyArmCommand('gh pr create --fill'), 'act')
     assert.equal(classifyArmCommand('gh pr view 42'), 'act')
     assert.equal(classifyArmCommand('git push -u origin feat/x'), 'act')
@@ -85,6 +90,9 @@ describe('classifyArmCommand', () => {
     assert.equal(classifyArmCommand('bro work enter fix-x'), 'work')
     assert.equal(classifyArmCommand('bro work leave'), 'work')
     assert.equal(classifyArmCommand('npx -y @broject/bro work list'), 'work')
+    assert.equal(classifyArmCommand('npx bro work enter fix-x'), 'work')
+    assert.equal(classifyArmCommand('npx brother work list'), null)
+    assert.equal(classifyArmCommand('npx bro-fu work list'), null)
     assert.equal(classifyArmCommand('git worktree add ../repo--fix -b work/fix'), 'work')
     assert.equal(classifyArmCommand('git -C /path worktree remove old'), 'work')
     assert.equal(classifyArmCommand('bd worktree create feat'), 'work')

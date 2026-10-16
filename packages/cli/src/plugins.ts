@@ -96,6 +96,7 @@ import { runServeCommand } from './commands/serve.ts'
 import { runProviderCommand } from './commands/provider.ts'
 import { runSetupCommand } from './commands/setup.ts'
 import { runMeshCommand } from './commands/mesh.ts'
+import { runRequestCommand } from './commands/request.ts'
 import { runProvidersCommand } from './commands/providers.ts'
 import { runSpecCommand, sddConnector } from './commands/spec.ts'
 import { runStackCommand } from './commands/stack.ts'
@@ -577,6 +578,12 @@ export const PLUGINS: BroPlugin[] = [
     run: runMeshCommand,
     configKey: 'mesh',
     configSchema: meshSection,
+  }),
+  definePlugin({
+    name: 'request',
+    group: 'mesh',
+    summary: 'Post a request to a repo or peer — delivers into same-machine checkouts (specs/cross-repo)',
+    run: runRequestCommand,
   }),
   definePlugin({
     name: 'run',

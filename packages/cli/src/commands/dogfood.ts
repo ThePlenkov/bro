@@ -27,6 +27,7 @@ import { execFileSync } from 'node:child_process'
 import { randomBytes } from 'node:crypto'
 import {
   copyFileSync,
+  cpSync,
   existsSync,
   mkdirSync,
   mkdtempSync,
@@ -101,6 +102,16 @@ function scenarioPath(dir: string, name: string): string {
     die(`no scenario ${name} — \`bro self dogfood scenarios\` lists them`)
   }
   return file
+}
+
+/** A scenario's provision payload — `dogfood/<name>.files/**` is copied
+ *  verbatim into the scratch repo and committed, so a scenario can
+ *  seed client wiring (`.claude/settings.local.json`, `.devinrc`, …)
+ *  the runner needs before its first turn. */
+export function scenarioFilesDir(dir: string, name: string): string | null {
+  const clean = segment('scenario name', name).replace(/\.md$/, '')
+  const home = join(dir, 'dogfood', `${clean}.files`)
+  return existsSync(home) ? home : null
 }
 
 // --- run records ------------------------------------------------------------
@@ -241,12 +252,19 @@ function scratchRoot(): string {
 
 /** Provision the scratch repo — own git store, own stealth beads
  *  store; claims the runner makes never pollute the host's. */
-function provisionRepo(): { repo: string; beads: string; initErr: string | null } {
+function provisionRepo(filesDir?: string | null): { repo: string; beads: string; initErr: string | null } {
   const root = scratchRoot()
   mkdirSync(root, { recursive: true })
   const repo = mkdtempSync(join(root, 'run-'))
   const beads = join(repo, '.beads')
   execFileSync('git', ['init', '-q', '-b', 'main', repo]) // NOSONAR — PATH lookup is the contract
+  // the scenario's own seed files land FIRST — a claude runner's
+  // settings.local.json must exist before the runner's client reads it
+  // on startup. The harness's config is written after so a scenario
+  // can never ship its own bro.config.json over the SDD gate
+  if (filesDir !== undefined && filesDir !== null) {
+    cpSync(filesDir, repo, { recursive: true })
+  }
   // arm SDD — a bare repo leaves sdd.mode 'off' and a scenario that
   // describes the gate would narrate a hook that cannot fire. Committed
   // so the runner starts from a clean tree (an uncommitted config would
@@ -255,7 +273,7 @@ function provisionRepo(): { repo: string; beads: string; initErr: string | null 
     join(repo, 'bro.config.json'),
     `${JSON.stringify({ sdd: { mode: 'gate' } }, null, 2)}\n`
   )
-  execFileSync('git', ['-C', repo, 'add', 'bro.config.json']) // NOSONAR — PATH lookup is the contract
+  execFileSync('git', ['-C', repo, 'add', '-A']) // NOSONAR — PATH lookup is the contract
   execFileSync('git', [ // NOSONAR — PATH lookup is the contract
     '-C',
     repo,
@@ -448,7 +466,7 @@ async function cmdRun(dir: string, argv: string[]): Promise<void> {
   let initErr: string | null = null
   let stage = 'provision'
   try {
-    const prov = provisionRepo()
+    const prov = provisionRepo(scenarioFilesDir(dir, name))
     initErr = prov.initErr
     state.repo = prov.repo
 

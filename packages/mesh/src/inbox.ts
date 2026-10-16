@@ -10,9 +10,10 @@
  * top; thread tracking (thread.ts) consumes the scan directly.
  */
 import { taskStore } from '@broject/core'
+import { storeFor } from './post.ts'
 import { envelopeFromBead, type BeadLike, type MeshEnvelope } from './envelope.ts'
 import { existsSync } from 'node:fs'
-import { localCheckout, type MeshPeer } from './peers.ts'
+import { localCheckout, type MeshPeer, type MeshTransport } from './peers.ts'
 import { issueLabels, meshIssues, replicaDir, syncReplica } from './pull.ts'
 
 export interface PeerRecord {
@@ -20,6 +21,10 @@ export interface PeerRecord {
   peer: string
   /** The rig the binding declares for that alias. */
   peerRig: string
+  /** The binding's transport — 'local' attests the STORE, not the
+   *  author: delivered envelopes carry the requester's `from` in a
+   *  store the binding names (specs/cross-repo/bro-oam4). */
+  transport: MeshTransport
   envelope: MeshEnvelope
   beadId: string
 }
@@ -27,6 +32,9 @@ export interface PeerRecord {
 export interface InboundRequest extends PeerRecord {
   /** envelope.from !== peer.rig — flagged, never trusted (spec Trust). */
   mismatch: boolean
+  /** own-store row whose `from` matches no peer binding — surfaced
+   *  like `mismatch`, never silently dropped. */
+  unbound?: boolean
 }
 
 export interface ScanResult {
@@ -54,7 +62,7 @@ function rowToBead(row: { id: string; title: string; description?: string; notes
 function admitRow(peer: MeshPeer, bead: BeadLike, out: PeerRecord[]): void {
   const env = envelopeFromBead(bead)
   if (env !== null) {
-    out.push({ peer: peer.alias, peerRig: peer.rig, envelope: env, beadId: bead.id })
+    out.push({ peer: peer.alias, peerRig: peer.rig, transport: peer.transport, envelope: env, beadId: bead.id })
   }
 }
 
@@ -90,8 +98,16 @@ function scanRemote(gitCommon: string, peer: MeshPeer, out: PeerRecord[], errors
 
 /** local: read the peer's live store read-only — `bd -C <checkout>
  *  list --json` carries labels inline. A `local` peer needs no publish
- *  step — its working store is the source. */
-function scanLocal(peer: MeshPeer, out: PeerRecord[], errors: string[]): void {
+ *  step — its working store is the source. `closedLocal` admits
+ *  closed rows for the thread reduction (a closed request bead is a
+ *  healthy anchored thread's terminal state — `done`'s ship needs the
+ *  close as precondition); the inbox keeps the open-only filter. */
+function scanLocal(
+  peer: MeshPeer,
+  out: PeerRecord[],
+  errors: string[],
+  closedLocal: boolean,
+): void {
   const dir = localCheckout(peer.remote)
   if (dir === null) {
     errors.push(`${peer.alias}: local checkout ${peer.remote} does not resolve`)
@@ -99,7 +115,13 @@ function scanLocal(peer: MeshPeer, out: PeerRecord[], errors: string[]): void {
   }
   let rows: (BeadLike & { status?: string })[]
   try {
-    rows = taskStore(dir).list<BeadLike & { status?: string }>()
+    // closedLocal needs the store's own all-filter off too — the
+    // backend drops closed rows before this loop ever sees them.
+    // limit:0 likewise — a configured page must not hide envelopes
+    rows = storeFor(dir).list<BeadLike & { status?: string }>({
+      all: closedLocal || undefined,
+      limit: 0,
+    })
   } catch (err) {
     errors.push(
       `${peer.alias}: store list failed — ${err instanceof Error ? err.message : String(err)}`
@@ -107,7 +129,7 @@ function scanLocal(peer: MeshPeer, out: PeerRecord[], errors: string[]): void {
     return
   }
   for (const row of rows) {
-    if (row.status === 'closed') {
+    if (row.status === 'closed' && !closedLocal) {
       continue
     }
     admitRow(peer, row, out)
@@ -115,18 +137,20 @@ function scanLocal(peer: MeshPeer, out: PeerRecord[], errors: string[]): void {
 }
 
 /** Pull + scan every configured peer — every mesh envelope, every
- *  kind. `pull:false` serves replica contents as they stand. */
+ *  kind. `pull:false` serves replica contents as they stand.
+ *  `closedLocal:true` admits closed rows on `local` peers — the
+ *  thread path needs the anchor past the worker's `bd close`. */
 export function meshScan(
   dir: string,
   peers: MeshPeer[],
   gitCommon: string,
-  opts: { pull?: boolean } = {},
+  opts: { pull?: boolean; closedLocal?: boolean } = {},
 ): ScanResult {
   const out: PeerRecord[] = []
   const errors: string[] = []
   for (const peer of peers) {
     if (peer.transport === 'local') {
-      scanLocal(peer, out, errors)
+      scanLocal(peer, out, errors, opts.closedLocal === true)
     } else if (opts.pull === false) {
       // serve the existing replica — an absent one is simply empty
       const dir = replicaDir(gitCommon, peer.alias)
@@ -154,9 +178,45 @@ export function meshInbox(
   opts: { pull?: boolean } = {},
 ): InboxResult {
   const { records, errors } = meshScan(dir, peers, gitCommon, opts)
+
+  // own-store pass — `bro request` delivers the bead straight into the
+  // recipient's store; no peer transport carries it, so a `from`
+  // matching no binding is surfaced flagged `unbound`, like mismatch
+  const bound = new Set(peers.map((p) => p.rig))
+  try {
+    const rows = taskStore(dir).list<BeadLike & { status?: string }>({ limit: 0 })
+    for (const row of rows) {
+      if (row.status === 'closed') {
+        continue
+      }
+      const env = envelopeFromBead(row)
+      // own-store records are only INBOUND-shaped envelopes — requests
+      // delivered to me and verdicts addressed back to me. My own
+      // outbound posts (requests I posted to peers, results I shipped)
+      // live in the same store but are not inbox material — and must
+      // never feed the terminal set
+      if (env?.to !== selfRig) {
+        continue
+      }
+      records.push({
+        peer: 'self',
+        peerRig: env.from,
+        transport: 'local',
+        envelope: env,
+        beadId: row.id,
+      })
+    }
+  } catch (err) {
+    errors.push(`self: store list failed — ${err instanceof Error ? err.message : String(err)}`)
+  }
+
   const terminal = new Set<string>()
   for (const r of records) {
     if (
+      // own-store records carry peerRig=env.from — `from === peerRig`
+      // is vacuous there, so an unbound inbound verdict would close
+      // any same-id thread it names. Only peer-bound verdicts count.
+      r.peer !== 'self' &&
       (r.envelope.kind === 'accept' || r.envelope.kind === 'reject') &&
       r.envelope.from === r.peerRig
     ) {
@@ -172,6 +232,10 @@ export function meshInbox(
         r.envelope.to === selfRig &&
         !terminal.has(`${r.peer}:${r.envelope.thread}`),
     )
-    .map((r) => ({ ...r, mismatch: r.envelope.from !== r.peerRig }))
+    .map((r) => ({
+      ...r,
+      mismatch: r.peer !== 'self' && r.envelope.from !== r.peerRig,
+      unbound: r.peer === 'self' && !bound.has(r.envelope.from) ? true : undefined,
+    }))
   return { requests, errors }
 }

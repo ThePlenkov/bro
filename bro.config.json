@@ -185,6 +185,10 @@
       "type": "cli",
       "command": "pi --print @{promptFile}",
       "models": "pi --list-models"
+    },
+    "claude": {
+      "type": "cli",
+      "command": "cat {promptFile} | claude -p --permission-mode bypassPermissions"
     }
   },
   "mesh": {

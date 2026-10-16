@@ -17,6 +17,7 @@ import {
   countDevinSessions,
   countDevinWorkers,
   devinLocksDir,
+  devinLogsDir,
   devinPidIsWorker,
   devinSessionPlane,
   listDevinSessions,
@@ -323,5 +324,18 @@ describe('devinLocksDir', () => {
       devinLocksDir({}, { HOME: '/tmp/home' }),
       join('/tmp/home', '.local', 'share', 'devin', 'cli', 'session_locks')
     )
+  })
+})
+
+describe('devinLogsDir', () => {
+  test('explicit override wins; a lockDir override confines the default inside it', () => {
+    assert.equal(devinLogsDir({ logsDir: '/tmp/l' }), '/tmp/l')
+    assert.equal(
+      devinLogsDir({}, { XDG_DATA_HOME: '/tmp/xdg' }),
+      join('/tmp/xdg', 'devin', 'cli', 'session_locks', '..', 'logs')
+    )
+    // lockDir overridden without logsDir — a '../logs' sibling would
+    // escape the chosen root; the default nests inside the override
+    assert.equal(devinLogsDir({ lockDir: '/tmp/locks' }), join('/tmp/locks', 'logs'))
   })
 })

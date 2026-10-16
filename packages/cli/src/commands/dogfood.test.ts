@@ -192,6 +192,38 @@ describe('bro self dogfood', () => {
     }
   })
 
+  test('run copies <name>.files/ into the scratch repo, committed', async () => {
+    const fx = fixture()
+    const { conn } = dogfoodConnector()
+    const dispose = registerAgentConnector('dogfood-test', () => conn)
+    try {
+      // a scenario carrying client wiring — .claude/settings.local.json
+      // is what a claude runner needs present before its first turn
+      writeFileSync(
+        join(fx.main, 'dogfood', 'seeded.md'),
+        '# seeded\n\n1. check files\n\n## Assert\n\n- files exist\n'
+      )
+      mkdirSync(join(fx.main, 'dogfood', 'seeded.files', '.claude'), { recursive: true })
+      writeFileSync(
+        join(fx.main, 'dogfood', 'seeded.files', '.claude', 'settings.local.json'),
+        '{"enabledPlugins":{}}'
+      )
+      const r = await dogfood(['run', 'seeded', '--backend', 'dogfood-test'])
+      assert.equal(r.code, 0, r.err.join('\n'))
+      const repo = stateOf(rdirOf(fx.main)).repo as string
+      assert.ok(existsSync(join(repo, '.claude', 'settings.local.json')))
+      // committed, not just present — the runner starts from a clean
+      // tree or the dirty-worktree stop-gate probe trips
+      assert.match(
+        testGit(['-C', repo, 'ls-files'], { encoding: 'utf8' }),
+        /^\.claude\/settings\.local\.json$/m
+      )
+    } finally {
+      dispose?.()
+      fx.restore()
+    }
+  })
+
   test('run --provider pins the worker engine on runner and analyst spawns', async () => {
     const fx = fixture()
     const { conn, spawned, states } = dogfoodConnector()
