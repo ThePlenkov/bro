@@ -522,6 +522,15 @@ export interface AcpLinkPool {
   onDeath(cb: () => void): void
 }
 
+/** Every live pooled peer, process-wide. The pooled child outlives any
+ *  request — without a close on process exit serve shutdown orphans it
+ *  on a dead transport (the zombie acp worker of the original
+ *  incident). ONE registry + ONE 'exit' hook serve all pool instances:
+ *  a per-pool `process.once` leaked a listener per instantiation
+ *  (amazon-q #581); dead peers drop out as their abort fires. */
+const pooledPeers = new Set<AcpPeer>()
+let poolExitArmed = false
+
 export function acpLinkPool(
   by: string,
   entry: AcpEntry,
@@ -529,13 +538,21 @@ export function acpLinkPool(
   timeoutMs: number
 ): AcpLinkPool {
   let link: Promise<AcpPeer> | undefined
-  let live: AcpPeer | undefined
   const deathHooks: Array<() => void> = []
-  // the pooled child outlives any request — without a close on process
-  // exit serve shutdown orphans it on a dead transport (the zombie
-  // acp worker of the original incident). close() is sync, safe in an
-  // 'exit' handler; an in-flight link resolve is a ms-scale window.
-  process.once('exit', () => live?.close())
+  // close() is sync, safe in an 'exit' handler; an in-flight link
+  // resolve is a ms-scale window.
+  if (!poolExitArmed) {
+    poolExitArmed = true
+    process.once('exit', () => {
+      for (const p of pooledPeers) {
+        try {
+          p.close()
+        } catch {
+          // the drop is the point — one stubborn peer can't block the rest
+        }
+      }
+    })
+  }
   return {
     onDeath: (cb) => deathHooks.push(cb),
     link(parent) {
@@ -544,18 +561,26 @@ export function acpLinkPool(
         link = acpOpen(by, entry, opts, Date.now() + timeoutMs, parent)
         link.then(
           (p) => {
-            live = p
-            p.signal.addEventListener(
-              'abort',
-              () => {
-                link = undefined
-                live = undefined
-                for (const cb of deathHooks) {
-                  cb()
-                }
-              },
-              { once: true }
-            )
+            pooledPeers.add(p)
+            // a peer aborted BEFORE the listener attaches never fires
+            // it — replay the dead state or the pool keeps serving a
+            // corpse and the session cleanup never runs (amazon-q #581)
+            let dead = false
+            const onDead = (): void => {
+              if (dead) {
+                return
+              }
+              dead = true
+              link = undefined
+              pooledPeers.delete(p)
+              for (const cb of deathHooks) {
+                cb()
+              }
+            }
+            p.signal.addEventListener('abort', onDead, { once: true })
+            if (p.signal.aborted) {
+              onDead()
+            }
           },
           () => (link = undefined)
         )
