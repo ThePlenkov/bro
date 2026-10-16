@@ -26,7 +26,7 @@ import type { IncomingMessage, ServerResponse } from 'node:http'
 import { loadConfig } from '@broject/core'
 import type { ProviderEntry } from '@broject/core'
 import { acpOpen, acpPooledTurn, acpSessionRetain, otelEvent, otelParent, otelSpan } from '@broject/providers'
-import type { AcpContentBlock, AcpPeer, AcpRetainedSession, OtelCtx, ProviderWireOpts } from '@broject/providers'
+import type { AcpContentBlock, AcpPeer, AcpRetainedSession, OtelCtx, PooledTurnOpts, ProviderWireOpts } from '@broject/providers'
 import { peerAttrs } from './peer.ts'
 import { catalogModels } from './providers.ts'
 
@@ -419,6 +419,30 @@ interface OutBlock {
   input?: unknown
 }
 
+/** One completed <tool_call>'s payload — parseable JSON carrying a
+ *  string name, else undefined: the markup stays raw text, the wire
+ *  never invents a call (shared by the buffered and live splits). */
+function toolCall(raw: string): { name: string; input: unknown } | undefined {
+  let parsed: unknown
+  try {
+    parsed = JSON.parse(raw)
+  } catch {
+    return undefined
+  }
+  if (typeof parsed !== 'object' || parsed === null) return undefined
+  const p = parsed as { name?: unknown; input?: unknown }
+  if (typeof p.name !== 'string') return undefined
+  let input: unknown
+  if (typeof p.input === 'object' && p.input !== null && !Array.isArray(p.input)) {
+    input = p.input
+  } else if (p.input === undefined) {
+    input = {}
+  } else {
+    input = { value: p.input }
+  }
+  return { name: p.name, input }
+}
+
 /** Reply → ordered anthropic blocks: text segments stay text, each
  *  parseable <tool_call> becomes tool_use (unparseable JSON stays raw
  *  text — the wire never invents a call). */
@@ -426,26 +450,15 @@ export function parseReply(text: string): OutBlock[] {
   const out: OutBlock[] = []
   let at = 0
   for (const m of text.matchAll(TOOL_CALL)) {
-    let parsed: { name?: unknown; input?: unknown } | undefined
-    try {
-      parsed = JSON.parse(m[1])
-    } catch {
-      parsed = undefined
-    }
-    if (parsed === undefined || typeof parsed.name !== 'string') continue
+    const call = toolCall(m[1] ?? '')
+    if (call === undefined) continue
     const lead = text.slice(at, m.index)
     if (lead.trim() !== '') out.push({ type: 'text', text: lead })
-    const input =
-      typeof parsed.input === 'object' && parsed.input !== null && !Array.isArray(parsed.input)
-        ? (parsed.input as Record<string, unknown>)
-        : parsed.input === undefined
-          ? {}
-          : { value: parsed.input }
     out.push({
       type: 'tool_use',
       id: `toolu_${randomBytes(8).toString('hex')}`,
-      name: parsed.name,
-      input,
+      name: call.name,
+      input: call.input,
     })
     at = (m.index ?? 0) + m[0].length
   }
@@ -480,6 +493,9 @@ function sse(res: ServerResponse, event: string, data: unknown): void {
   res.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`)
 }
 
+/** The buffered SSE answer — the whole settled reply emitted as one
+ *  anthropic event sequence. Used where no live turn ran: a replayed
+ *  resend answers from conv.lastReply, never a fresh pump. */
 function emitBlocks(
   res: ServerResponse,
   blocks: OutBlock[],
@@ -534,6 +550,207 @@ function emitBlocks(
     usage: { output_tokens: outTokens },
   })
   sse(res, 'message_stop', { type: 'message_stop' })
+}
+
+const OPEN_TAG = '<tool_call>'
+const CLOSE_TAG = '</tool_call>'
+
+/** Longest suffix of `s` that is a prefix of `tag` — the tail bytes a
+ *  tag split across deltas must hold back until more of the turn
+ *  arrives (or the turn ends and they flush as plain text). */
+function tagSuffix(s: string, tag: string): number {
+  for (let n = Math.min(s.length, tag.length - 1); n > 0; n--) {
+    if (tag.startsWith(s.slice(-n))) return n
+  }
+  return 0
+}
+
+/** Live SSE emission for a streaming turn (bro-728wl) — message_start
+ *  leaves at turn start, text deltas flow inside one open text block,
+ *  and each completed <tool_call> swaps to a tool_use block at the
+ *  next index. The tag can span deltas, so free text is emitted only
+ *  once it is provably outside a tag — parseReply's contract applied
+ *  incrementally (bad JSON stays raw text, never an invented call). */
+class LiveTurn {
+  private idx = 0
+  private open = false
+  private inCall = false
+  private pending = ''
+  private sawTool = false
+  private acc = ''
+  stopReason = 'end_turn'
+
+  constructor(
+    private readonly res: ServerResponse,
+    model: string,
+    inputTokens: number
+  ) {
+    sse(res, 'message_start', {
+      type: 'message_start',
+      message: {
+        id: `msg_${randomBytes(12).toString('hex')}`,
+        type: 'message',
+        role: 'assistant',
+        content: [],
+        model,
+        stop_reason: null,
+        stop_sequence: null,
+        usage: { input_tokens: inputTokens, output_tokens: 0 },
+      },
+    })
+  }
+
+  readonly onUpdate: NonNullable<PooledTurnOpts['onUpdate']> = (u) => {
+    if (u.sessionUpdate === 'agent_message_chunk' && u.content.type === 'text') {
+      this.pending += u.content.text
+      this.drain(false)
+    }
+  }
+
+  private blockStart(contentBlock: unknown): void {
+    sse(this.res, 'content_block_start', {
+      type: 'content_block_start',
+      index: this.idx,
+      content_block: contentBlock,
+    })
+  }
+
+  private delta(d: unknown): void {
+    sse(this.res, 'content_block_delta', {
+      type: 'content_block_delta',
+      index: this.idx,
+      delta: d,
+    })
+  }
+
+  private blockStop(): void {
+    sse(this.res, 'content_block_stop', { type: 'content_block_stop', index: this.idx })
+    this.idx++
+  }
+
+  private closeBlock(): void {
+    if (this.open) {
+      this.blockStop()
+      this.open = false
+    }
+  }
+
+  private text(s: string): void {
+    if (s === '') return
+    if (!this.open) {
+      this.blockStart({ type: 'text', text: '' })
+      this.open = true
+    }
+    this.delta({ type: 'text_delta', text: s })
+    this.acc += s
+  }
+
+  private tool(name: string, input: unknown): void {
+    this.closeBlock()
+    this.blockStart({
+      type: 'tool_use',
+      id: `toolu_${randomBytes(8).toString('hex')}`,
+      name,
+      input: {},
+    })
+    const json = JSON.stringify(input)
+    this.delta({ type: 'input_json_delta', partial_json: json })
+    this.blockStop()
+    this.sawTool = true
+    this.acc += json
+  }
+
+  private drain(final: boolean): void {
+    for (;;) {
+      // each step returns true when the pending buffer stalls on a
+      // boundary — the pump keeps going while a tag let it through
+      if (this.inCall ? this.drainCall(final) : this.drainText(final)) return
+    }
+  }
+
+  /** Inside <tool_call>: emit the call on its close tag, else hold —
+   *  a final flush turns the unclosed remnant back into plain text. */
+  private drainCall(final: boolean): boolean {
+    const j = this.pending.indexOf(CLOSE_TAG)
+    if (j === -1) {
+      if (final) {
+        this.text(OPEN_TAG + this.pending)
+        this.pending = ''
+      }
+      return true
+    }
+    const raw = this.pending.slice(0, j)
+    this.pending = this.pending.slice(j + CLOSE_TAG.length)
+    this.inCall = false
+    const call = toolCall(raw)
+    if (call === undefined) this.text(OPEN_TAG + raw + CLOSE_TAG)
+    else this.tool(call.name, call.input)
+    return false
+  }
+
+  /** Free text: emit down to the next open tag — or everything but a
+   *  partial-tag tail that more deltas might complete. */
+  private drainText(final: boolean): boolean {
+    const i = this.pending.indexOf(OPEN_TAG)
+    if (i === -1) {
+      const hold = final ? 0 : tagSuffix(this.pending, OPEN_TAG)
+      this.text(this.pending.slice(0, this.pending.length - hold))
+      this.pending = this.pending.slice(this.pending.length - hold)
+      return true
+    }
+    this.text(this.pending.slice(0, i))
+    this.pending = this.pending.slice(i + OPEN_TAG.length)
+    this.inCall = true
+    return false
+  }
+
+  finish(stopReason: string): void {
+    this.drain(true)
+    this.closeBlock()
+    if (this.idx === 0 && !this.sawTool) {
+      // parity with the buffered shape — a silent turn still answers
+      // with one (empty) text block
+      this.blockStart({ type: 'text', text: '' })
+      this.delta({ type: 'text_delta', text: '' })
+      this.blockStop()
+    }
+    this.stopReason = this.sawTool ? 'tool_use' : stopReason
+    sse(this.res, 'message_delta', {
+      type: 'message_delta',
+      delta: { stop_reason: this.stopReason, stop_sequence: null },
+      usage: { output_tokens: this.outputTokens() },
+    })
+    sse(this.res, 'message_stop', { type: 'message_stop' })
+  }
+
+  error(type: string, message: string): void {
+    this.drain(true)
+    this.closeBlock()
+    sse(this.res, 'error', { type: 'error', error: { type, message } })
+  }
+
+  outputTokens(): number {
+    // estTokens floors at 1 — a genuinely silent turn reports 0, not
+    // a phantom token (amazon-q #566)
+    return this.acc === '' ? 0 : estTokens(this.acc)
+  }
+}
+
+/** The model message_start names — the applied pin (a `provider/model`
+ *  request id or the configured entry pin) wins; a bare foreign id
+ *  (claude-sonnet-*) is a display label and echoes as one. */
+function servedModel(
+  requestModel: string | undefined,
+  opts: ProviderWireOpts,
+  cfg: ConductorConfig,
+  body: MessagesRequest
+): string {
+  const id =
+    requestModel ??
+    opts.model ??
+    cfg.entry.model ??
+    (typeof body.model === 'string' ? body.model : undefined)
+  return id?.split('/').pop() ?? 'unknown'
 }
 
 function apiError(res: ServerResponse, status: number, type: string, message: string): void {
@@ -646,6 +863,11 @@ interface TurnEnv {
   signal: AbortSignal
   by: string
   imageOk: boolean
+  /** Called the moment a real turn is chosen (never on replay or a
+   *  failed open) — it commits the wire to SSE and hands back the
+   *  session-update sink the prompt pump streams deltas into
+   *  (bro-728wl). Undefined for `stream:false` requests. */
+  openStream?: (inputTokens: number) => PooledTurnOpts['onUpdate']
 }
 
 /** A proven continuation — the delta turns only; an empty tail is a
@@ -680,6 +902,7 @@ async function continuationTurn(env: TurnEnv, cand: ConvSession): Promise<TurnOu
       by: env.by,
       requestModel: env.requestModel,
       parent: env.parent,
+      onUpdate: env.openStream?.(inputTokens),
     })
     return { reply, reused: true, inputTokens, replay: false, conv: cand }
   } catch (err) {
@@ -709,6 +932,7 @@ async function freshTurn(env: TurnEnv, candBusy: boolean): Promise<TurnOutcome> 
       by: env.by,
       requestModel: env.requestModel,
       parent: env.parent,
+      onUpdate: env.openStream?.(inputTokens),
     })
     return { reply, reused: false, inputTokens, replay: false }
   }
@@ -728,6 +952,7 @@ async function freshTurn(env: TurnEnv, candBusy: boolean): Promise<TurnOutcome> 
       by: env.by,
       requestModel: env.requestModel,
       parent: env.parent,
+      onUpdate: env.openStream?.(inputTokens),
     })
     const conv: ConvSession = {
       live,
@@ -785,6 +1010,81 @@ interface WireCtx {
   pendingOpens: Set<string>
 }
 
+/** `provider/model` ids are a real pin — resolved against the agent's
+ *  own catalog; bare foreign ids (claude-sonnet-*) are display labels.
+ *  Claude pins context variants as `model[1m]` — the bracket suffix is
+ *  a client-side opt-in, not a different model; strip it or the
+ *  catalog lookup 500s (bro-0g2l3). */
+function requestModelOf(body: MessagesRequest): string | undefined {
+  const raw = typeof body.model === 'string' ? body.model.trimEnd() : undefined
+  const open = raw?.lastIndexOf('[') ?? -1
+  const inner = open >= 0 && raw?.endsWith(']') ? raw.slice(open + 1, -1) : undefined
+  const m =
+    inner !== undefined && /^\d+[km]?$/i.test(inner) ? raw?.slice(0, open).trimEnd() : raw
+  return m?.includes('/') ? m : undefined
+}
+
+/** A failed turn — on an open SSE stream the failure travels as an
+ *  in-stream error event (the wire's own dead-stream shape); pre-commit
+ *  it is an anthropic-shaped HTTP status. */
+function turnError(
+  res: ServerResponse,
+  err: unknown,
+  live: LiveTurn | undefined,
+  backend: string,
+  t0: number
+): void {
+  const msg = err instanceof Error ? err.message : String(err)
+  const avail = AVAIL.test(msg)
+  if (live !== undefined) {
+    live.error(avail ? 'overloaded_error' : 'api_error', `bro conductor: ${msg}`)
+    res.end()
+    otelEvent('conductor.error', {
+      backend,
+      status: 200,
+      duration_ms: Date.now() - t0,
+      error: msg.slice(0, 200),
+    })
+    return
+  }
+  const status = avail ? 529 : 500
+  otelEvent('conductor.error', {
+    backend,
+    status,
+    duration_ms: Date.now() - t0,
+    error: msg.slice(0, 200),
+  })
+  apiError(
+    res,
+    status,
+    avail ? 'overloaded_error' : 'api_error',
+    `bro conductor: ${msg}`
+  )
+}
+
+/** The turn settled — every client message (including the echoes the
+ *  session just proved it holds) is consumed context now. Re-insert on
+ *  every hit: insertion order is the LRU order sweepSessions' overflow
+ *  eviction relies on. */
+function settleConv(
+  wire: WireCtx,
+  key: string | undefined,
+  conv: ConvSession,
+  body: MessagesRequest,
+  reply: PooledReply,
+  blocks: OutBlock[],
+  stopReason: string,
+  inputTokens: number
+): void {
+  const all = body.messages ?? []
+  conv.consumed = all.length
+  conv.historyHash = hashTurns(prefixText(body), all, all.length)
+  conv.lastReply = { blocks, model: reply.model, stopReason, inputTokens }
+  if (key === undefined) return
+  wire.sessions.delete(key)
+  wire.sessions.set(key, conv)
+}
+
 async function messages(
   req: IncomingMessage,
   res: ServerResponse,
@@ -800,6 +1100,9 @@ async function messages(
   }
   const t0 = Date.now()
   const key = conversationKey(req, body)
+  // set when a streamed turn actually opens — a replay or a failed
+  // session open never commits the wire to SSE
+  let live: LiveTurn | undefined
   let out: TurnOutcome
   try {
     const peer = await wire.link(parent)
@@ -807,6 +1110,7 @@ async function messages(
     // a dropped client cancels the acp turn — no orphan devin session
     res.once('close', () => ac.abort())
     const msgs = body.messages ?? []
+    const requestModel = requestModelOf(body)
     out = await acpTurn({
       body,
       msgs,
@@ -818,40 +1122,41 @@ async function messages(
       pendingOpens: wire.pendingOpens,
       key,
       parent,
-      // `provider/model` ids are a real pin — resolved against the
-      // agent's own catalog; bare foreign ids (claude-sonnet-*) are
-      // display labels. Claude pins context variants as `model[1m]` —
-      // the bracket suffix is a client-side opt-in, not a different
-      // model; strip it or the catalog lookup 500s (bro-0g2l3)
-      requestModel: (() => {
-        const raw = typeof body.model === 'string' ? body.model.trimEnd() : undefined
-        const open = raw?.lastIndexOf('[') ?? -1
-        const inner = open >= 0 && raw?.endsWith(']') ? raw.slice(open + 1, -1) : undefined
-        const m = inner !== undefined && /^\d+[km]?$/i.test(inner)
-          ? raw?.slice(0, open).trimEnd()
-          : raw
-        return m?.includes('/') ? m : undefined
-      })(),
+      requestModel,
       deadline: Date.now() + wire.cfg.timeoutMs,
       signal: ac.signal,
       by: `conductor:${wire.cfg.backend}`,
       imageOk: peer.caps?.image === true,
+      // a streamed answer commits to SSE at turn start — headers and
+      // message_start leave before the first delta; a failed turn lands
+      // as an in-stream error event, the wire's own dead-stream shape.
+      // x-accel-buffering:no stops a proxy from re-buffering the stream
+      // back into one end-of-turn burst (amazon-q #566). The turn layer
+      // fires this only once a real pump is chosen — a replay never
+      // opens the stream, a failed open still answers an HTTP status.
+      openStream:
+        body.stream === false
+          ? undefined
+          : (inputTokens) => {
+              res.writeHead(200, {
+                'content-type': 'text/event-stream',
+                'cache-control': 'no-cache',
+                connection: 'keep-alive',
+                'x-accel-buffering': 'no',
+                // h: pins echo like respond()'s — the internal f:
+                // fingerprint stays server-side
+                ...(key?.startsWith('h:') === true ? { 'x-bro-session': key } : {}),
+              })
+              live = new LiveTurn(
+                res,
+                servedModel(requestModel, wire.opts, wire.cfg, body),
+                inputTokens
+              )
+              return live.onUpdate
+            },
     })
   } catch (err) {
-    const msg = err instanceof Error ? err.message : String(err)
-    const status = AVAIL.test(msg) ? 529 : 500
-    otelEvent('conductor.error', {
-      backend: wire.cfg.backend,
-      status,
-      duration_ms: Date.now() - t0,
-      error: msg.slice(0, 200),
-    })
-    apiError(
-      res,
-      status,
-      AVAIL.test(msg) ? 'overloaded_error' : 'api_error',
-      `bro conductor: ${msg}`
-    )
+    turnError(res, err, live, wire.cfg.backend, t0)
     return
   }
   // a resend that carried nothing new — replay the recorded reply,
@@ -863,24 +1168,18 @@ async function messages(
   }
   const reply = out.reply as PooledReply
   const inputTokens = out.inputTokens
+  // a live stream pushed the wire deltas as they landed — finish()
+  // closes the event shape; parseReply still runs so the settled reply
+  // is recorded verbatim for a later replay
+  live?.finish(STOP_REASON[reply.stopReason] ?? 'end_turn')
   const blocks = parseReply(reply.text)
-  const stopReason = blocks.some((b) => b.type === 'tool_use')
-    ? 'tool_use'
-    : (STOP_REASON[reply.stopReason] ?? 'end_turn')
-  const conv = out.conv
-  if (conv !== undefined) {
-    // the turn settled — every client message (including the echoes the
-    // session just proved it holds) is consumed context now
-    const all = body.messages ?? []
-    conv.consumed = all.length
-    conv.historyHash = hashTurns(prefixText(body), all, all.length)
-    conv.lastReply = { blocks, model: reply.model, stopReason, inputTokens }
-    if (key !== undefined) {
-      // re-insert on every hit — insertion order is the LRU order
-      // sweepSessions' overflow eviction relies on
-      wire.sessions.delete(key)
-      wire.sessions.set(key, conv)
-    }
+  const stopReason =
+    live?.stopReason ??
+    (blocks.some((b) => b.type === 'tool_use')
+      ? 'tool_use'
+      : (STOP_REASON[reply.stopReason] ?? 'end_turn'))
+  if (out.conv !== undefined) {
+    settleConv(wire, key, out.conv, body, reply, blocks, stopReason, inputTokens)
   }
   otelEvent('conductor.turn', {
     backend: wire.cfg.backend,
@@ -889,9 +1188,15 @@ async function messages(
     stream: body.stream !== false,
     session_reused: out.reused,
     input_tokens: inputTokens,
-    output_tokens: estTokens(reply.text),
+    output_tokens: live?.outputTokens() ?? estTokens(reply.text),
     duration_ms: Date.now() - t0,
   })
+  if (live !== undefined) {
+    // the streamed answer already wrote itself — finish() closed the
+    // event sequence; only the socket remains
+    res.end()
+    return
+  }
   respond(res, body, blocks, reply.model, stopReason, inputTokens, key)
 }
 
