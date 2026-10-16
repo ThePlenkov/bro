@@ -1454,10 +1454,46 @@ function prepareSpawn(
           workerEnv: spec.env,
         })
   try {
-  // enter half of the rig transition — inside the try so an enter
-  // failure also hands the session-quota reservation back via the
-  // catch below
-  enterSpawnTree(spec)
+    // enter half of the rig transition — inside the try so an enter
+    // failure also hands the session-quota reservation back via the
+    // catch below
+    enterSpawnTree(spec)
+    return {
+      agentId,
+      ...commitSpawn(dir, home, backend, spec, opts, agentId, {
+        claimed,
+        actor,
+        phantom,
+      }),
+      reservation,
+    }
+  } catch (err) {
+    // a write/claim failure after the reservation — the caller never saw
+    // the key, so this is the only place that can hand the slot back
+    if (reservation !== undefined) {
+      releaseSessionSlot(reservation)
+    }
+    throw err
+  }
+}
+
+/** The write phase of a spawn — prompt/log/exit files, the registry
+ *  row, then claim bookkeeping. Split from the guard/admission phase
+ *  so a refused spawn leaves no half-state and a caller-side
+ *  reservation can be handed back on failure. */
+function commitSpawn(
+  dir: string,
+  home: string,
+  backend: string,
+  spec: SpawnSpec,
+  opts: {
+    entry?: (agentId: string) => Record<string, unknown>
+    claimAs?: string
+    sessionQuota?: SessionQuotaLane | undefined
+  },
+  agentId: string,
+  guard: { claimed: boolean; actor: string | undefined; phantom: boolean }
+): { promptFile: string; log: string; exitFile: string } {
   mkdirSync(home, { recursive: true })
   const promptFile = join(home, `${agentId}.prompt.md`)
   const log = join(home, `${agentId}.log`)
@@ -1505,16 +1541,8 @@ function prepareSpawn(
     sessionKind: opts.sessionQuota?.plane.kind,
     ...opts.entry?.(agentId),
   })
-  recordSpawnClaim(dir, spec, agentId, backend, { claimed, actor, phantom }, opts.claimAs)
-  return { agentId, promptFile, log, exitFile, reservation }
-  } catch (err) {
-    // a write/claim failure after the reservation — the caller never saw
-    // the key, so this is the only place that can hand the slot back
-    if (reservation !== undefined) {
-      releaseSessionSlot(reservation)
-    }
-    throw err
-  }
+  recordSpawnClaim(dir, spec, agentId, backend, guard, opts.claimAs)
+  return { promptFile, log, exitFile }
 }
 
 /** The byte offset a fresh run's log starts at — the log is append-mode
