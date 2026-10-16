@@ -125,6 +125,33 @@ describe('runAcpWorker', () => {
     }
   })
 
+  test('consecutive message chunks flush as ONE line; other updates break the run', async () => {
+    const fake = fakeAcpAgent({
+      updates: [
+        { sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: "I'm" } },
+        { sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: ' a `' } },
+        { sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: 'bro' } },
+        {
+          sessionUpdate: 'tool_call',
+          toolCallId: 'tc-1',
+          title: 'bash ls',
+          status: 'in_progress',
+        },
+        { sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: 'done' } },
+      ] as never,
+    })
+    const { spec, lines, dir } = workerSpec({ peer: fake.app })
+    try {
+      assert.equal(await runAcpWorker(spec), 0)
+      const i = lines.findIndex((l) => l === "I'm a `bro")
+      assert.ok(i >= 0, `merged chunk line missing: ${JSON.stringify(lines)}`)
+      assert.equal(lines[i + 1], 'tool_call bash ls (in_progress)')
+      assert.equal(lines[i + 2], 'done')
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
   test('a non-end_turn stop exits non-zero and says why', async () => {
     const fake = fakeAcpAgent({ stopReason: 'refusal' })
     const { spec, lines, dir } = workerSpec({ peer: fake.app })

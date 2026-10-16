@@ -331,14 +331,37 @@ export async function runAcpWorker(spec: AcpWorkerSpec): Promise<number> {
       const promptText = readFileSync(spec.promptFile, 'utf8')
       // the stop lands in the update queue with the same response —
       // draining to `stop` IS awaiting the turn, and keeps every
-      // notification on the log in arrival order
+      // notification on the log in arrival order. Message chunks are
+      // token deltas — buffer a run of them and flush ONE line when a
+      // non-chunk update (or the drain's own exit) breaks it, so the
+      // .log reads as text instead of one token per line.
       const drain = async (): Promise<PromptResponse> => {
-        for (;;) {
-          const m = await session.nextUpdate()
-          if (m.kind === 'stop') {
-            return m.response
+        let buf = ''
+        const flush = (): void => {
+          if (buf !== '') {
+            log(buf)
+            buf = ''
           }
-          log(renderAcpUpdate(m.update))
+        }
+        try {
+          for (;;) {
+            const m = await session.nextUpdate()
+            if (m.kind === 'stop') {
+              return m.response
+            }
+            const content =
+              m.update.sessionUpdate === 'agent_message_chunk'
+                ? (m.update as { content?: { type?: string; text?: string } }).content
+                : undefined
+            if (content === undefined || content.type !== 'text') {
+              flush()
+              log(renderAcpUpdate(m.update))
+            } else {
+              buf += content.text ?? ''
+            }
+          }
+        } finally {
+          flush()
         }
       }
       const [resp] = await Promise.all([session.prompt(promptText), drain()])
