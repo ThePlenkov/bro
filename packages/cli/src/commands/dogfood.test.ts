@@ -284,7 +284,9 @@ describe('bro self dogfood', () => {
       mkdirSync(join(fx.main, 'dogfood', 'wired.files'), { recursive: true })
       writeFileSync(
         join(fx.main, 'dogfood', 'wired.files', 'bro.config.local.json'),
-        JSON.stringify({ providers: { p9: { type: 'cli', command: 'scratch-p9 {promptFile}' } } })
+        // command-only override — the entry's type must survive from
+        // the host layer or the merged provider fails to resolve
+        JSON.stringify({ providers: { p9: { command: 'scratch-p9 {promptFile}' } } })
       )
       const r = await dogfood(['run', 'wired', '--backend', 'dogfood-test', '--provider', 'p9'])
       assert.equal(r.code, 0, r.err.join('\n'))

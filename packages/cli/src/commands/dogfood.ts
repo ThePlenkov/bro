@@ -378,17 +378,22 @@ async function provisionRepo(
  *  finding the spawned ids. */
 function runEnv(dir: string, scratch: string): AgentConnectorEnv {
   const env = loadAgentEnv(dir)
-  const over: Record<string, ProviderEntry> = {}
+  const providers = { ...(env.providers ?? {}) }
+  let touched = false
   for (const l of loadConfigLayers(scratch).layers) {
     if (l.layer === 'global') continue
     const p = l.raw.providers
-    if (typeof p === 'object' && p !== null) {
-      Object.assign(over, p)
+    if (typeof p !== 'object' || p === null) continue
+    // per-field overlay onto the RESOLVED entry — a payload that sets
+    // only `command` must not drop the `type` a global/host layer
+    // supplied (greptile: raw copies break partial overrides)
+    for (const [name, raw] of Object.entries(p)) {
+      if (typeof raw !== 'object' || raw === null) continue
+      providers[name] = { ...providers[name], ...raw } as ProviderEntry
+      touched = true
     }
   }
-  return Object.keys(over).length === 0
-    ? env
-    : { ...env, providers: { ...env.providers, ...over } }
+  return touched ? { ...env, providers } : env
 }
 
 /** Resolve a live/terminal view of one agent id across backends. */
