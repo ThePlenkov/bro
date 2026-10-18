@@ -1141,4 +1141,33 @@ describe('serve /v1/* — tool_choice, stop_sequences, error taxonomy, keepalive
       await close()
     }
   })
+
+  test('a streamed stop_sequence hit still records the cut reply for replay', async () => {
+    const fake = fakeAcpAgent({ replyText: 'abc MARK tail', configOptions: [MODEL_OPTION] })
+    const { url, close } = await listen(
+      deps({ provider: conductorProxy(CFG, { acp: { peer: fake.app } }) })
+    )
+    try {
+      const body = JSON.stringify({
+        messages: [{ role: 'user', content: 'x' }],
+        stop_sequences: ['MARK'],
+        stream: true,
+      })
+      const post = () =>
+        fetch(`${url}/v1/messages`, {
+          method: 'POST',
+          headers: { ...auth, 'content-type': 'application/json' },
+          body,
+        })
+      const ev = await sseEvents(await post())
+      assert.equal(textDeltas(ev).join(''), 'abc ')
+      // the resend replays the recorded reply — the cut text, not ''
+      const replay = await post()
+      const re = await sseEvents(replay)
+      assert.equal(textDeltas(re).join(''), 'abc ')
+      assert.equal(stopReason(re), 'stop_sequence')
+    } finally {
+      await close()
+    }
+  })
 })

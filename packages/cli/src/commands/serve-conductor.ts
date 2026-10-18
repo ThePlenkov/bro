@@ -101,7 +101,10 @@ export function conductorConfig(
     model: model === undefined || model === '' ? entry.model : model,
     cwd: dir,
     timeoutMs: Number.isFinite(t) && t > 0 ? t : 120_000,
-    keepaliveMs: Number(process.env.BRO_CONDUCTOR_KEEPALIVE_MS) || 10_000,
+    keepaliveMs: (() => {
+      const k = Number(process.env.BRO_CONDUCTOR_KEEPALIVE_MS)
+      return Number.isFinite(k) && k > 0 ? k : 10_000
+    })(),
   }
 }
 
@@ -931,10 +934,19 @@ function apiError(res: ServerResponse, status: number, type: string, message: st
   res.end(`${JSON.stringify({ type: 'error', error: { type, message } })}\n`)
 }
 
+/** Request bodies carry base64 images, so the cap is generous — but
+ *  unbounded reads are a memory-exhaustion door on any listener.
+ *  32MB matches the upstream wire's own payload ceiling. */
+const MAX_BODY = 32 * 1024 * 1024
+
 async function readBody(req: IncomingMessage): Promise<string> {
   let body = ''
   for await (const chunk of req) {
     body += chunk
+    if (body.length > MAX_BODY) {
+      req.destroy()
+      throw new Error('request body too large')
+    }
   }
   return body
 }
@@ -1268,7 +1280,11 @@ async function messages(
   let body: MessagesRequest
   try {
     body = JSON.parse(await readBody(req)) as MessagesRequest
-  } catch {
+  } catch (err) {
+    if (err instanceof Error && err.message === 'request body too large') {
+      apiError(res, 413, 'request_too_large', 'request body exceeds 32MB')
+      return
+    }
     apiError(res, 400, 'invalid_request_error', 'malformed JSON body')
     return
   }
@@ -1292,11 +1308,14 @@ async function messages(
   }
   const t0 = Date.now()
   const key = conversationKey(req, body)
-  // one filter per turn — the streamed leg feeds it delta-by-delta,
-  // the buffered leg cuts reply.text below
-  const stops = new StopFilter(
-    (body.stop_sequences ?? []).filter((s): s is string => typeof s === 'string' && s !== '')
+  // one filter per turn — the streamed leg feeds it delta-by-delta;
+  // the recording leg below cuts reply.text through a FRESH filter
+  // (a streamed hit leaves this one consumed — re-feeding would
+  // erase the recorded reply)
+  const stopSeqs = (body.stop_sequences ?? []).filter(
+    (s): s is string => typeof s === 'string' && s !== ''
   )
+  const stops = new StopFilter(stopSeqs)
   // set when a streamed turn actually opens — a replay or a failed
   // session open never commits the wire to SSE
   let live: LiveTurn | undefined
@@ -1380,18 +1399,20 @@ async function messages(
   // closes the event shape; parseReply still runs so the settled reply
   // is recorded verbatim for a later replay
   live?.finish(STOP_REASON[reply.stopReason] ?? 'end_turn')
-  // the buffered leg's cut lands here — a streamed turn already fed
-  // the same filter per-delta; both record the text the client saw
-  const blocks = parseReply(stops.feed(reply.text) + stops.flush())
+  // the buffered leg's cut lands here — a fresh filter re-runs the
+  // settled text so a streamed hit doesn't starve the recorded reply
+  const recordStops = new StopFilter(stopSeqs)
+  const blocks = parseReply(recordStops.feed(reply.text) + recordStops.flush())
+  const stopHit = stops.hit ?? recordStops.hit
   const stopReason =
     live?.stopReason ??
     (blocks.some((b) => b.type === 'tool_use')
       ? 'tool_use'
-      : stops.hit !== undefined
+      : stopHit !== undefined
         ? 'stop_sequence'
         : (STOP_REASON[reply.stopReason] ?? 'end_turn'))
   if (out.conv !== undefined) {
-    settleConv(wire, key, out.conv, body, reply, blocks, stopReason, stops.hit, inputTokens)
+    settleConv(wire, key, out.conv, body, reply, blocks, stopReason, stopHit, inputTokens)
   }
   otelEvent('conductor.turn', {
     backend: wire.cfg.backend,
@@ -1409,7 +1430,7 @@ async function messages(
     res.end()
     return
   }
-  respond(res, body, blocks, reply.model, stopReason, inputTokens, key, stops.hit)
+  respond(res, body, blocks, reply.model, stopReason, inputTokens, key, stopHit)
 }
 
 /** The anthropic /v1/models rows — the configured catalog source
