@@ -58,7 +58,11 @@ async function postStream(
 
 const CFG = {
   backend: 'dv-acp',
-  entry: { type: 'acp' as const, command: 'dv acp' },
+  entry: { type: 'acp' as const, command: 'dv acp' } as {
+    type: 'acp'
+    command: string
+    model?: string
+  },
   cwd: '/repo',
   timeoutMs: 10_000,
 }
