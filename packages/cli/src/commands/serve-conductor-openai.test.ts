@@ -65,7 +65,7 @@ async function postResponses(
   const { port, close } = await listen(
     deps({ provider: conductorProxy(CFG, { acp: { peer: fake.app } }) })
   )
-  const r = await fetch(api(port, '/v1/responses'), {
+  const r = await fetch(api(port, '/v1/responses'), { // nosemgrep: test loopback listener
     method: 'POST',
     headers: { ...auth, 'content-type': 'application/json' },
     body: JSON.stringify(body),
@@ -207,7 +207,7 @@ describe('serve /v1/responses — the openai dialect', () => {
     )
     try {
       const post = (body: unknown) =>
-        fetch(api(port, '/v1/responses'), {
+        fetch(api(port, '/v1/responses'), { // nosemgrep: test loopback listener
           method: 'POST',
           headers: { ...auth, 'content-type': 'application/json' },
           body: JSON.stringify(body),
@@ -237,7 +237,7 @@ describe('serve /v1/responses — the openai dialect', () => {
     )
     try {
       const post = (body: unknown) =>
-        fetch(api(port, '/v1/responses'), {
+        fetch(api(port, '/v1/responses'), { // nosemgrep: test loopback listener
           method: 'POST',
           headers: { ...auth, 'content-type': 'application/json' },
           body: JSON.stringify(body),
@@ -296,7 +296,7 @@ async function postChat(
   const { port, close } = await listen(
     deps({ provider: conductorProxy(CFG, { acp: { peer: fake.app } }) })
   )
-  const r = await fetch(api(port, '/v1/chat/completions'), {
+  const r = await fetch(api(port, '/v1/chat/completions'), { // nosemgrep: test loopback listener
     method: 'POST',
     headers: { ...auth, 'content-type': 'application/json' },
     body: JSON.stringify(body),
@@ -417,7 +417,7 @@ describe('serve /v1/chat/completions — the stateless chat dialect', () => {
     )
     try {
       const post = () =>
-        fetch(api(port, '/v1/chat/completions'), {
+        fetch(api(port, '/v1/chat/completions'), { // nosemgrep: test loopback listener
           method: 'POST',
           headers: { ...auth, 'content-type': 'application/json' },
           body: JSON.stringify({ messages: [{ role: 'user', content: 'hi' }] }),
@@ -526,7 +526,7 @@ describe('output caps + loud input failures', () => {
     const { port, close } = await postChat(fake)
     try {
       const post = (body: unknown) =>
-        fetch(api(port, '/v1/chat/completions'), {
+        fetch(api(port, '/v1/chat/completions'), { // nosemgrep: test loopback listener
           method: 'POST',
           headers: { ...auth, 'content-type': 'application/json' },
           body: JSON.stringify(body),

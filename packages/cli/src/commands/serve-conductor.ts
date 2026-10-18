@@ -2318,7 +2318,7 @@ function responsesReplay(res: ServerResponse, wire: WireCtx, ctx: RespReplayCtx)
 function respConvKey(
   req: IncomingMessage,
   rreq: ResponsesRequest,
-  body: Body,
+  body: MessagesRequest,
   hit: { key: string; consumed: number } | undefined,
   store: boolean
 ): string | undefined {
@@ -2339,25 +2339,27 @@ function respStreamOpener(
   rreq: ResponsesRequest,
   res: ServerResponse,
   wire: WireCtx,
-  respId: string,
-  body: Body,
-  tools: boolean,
-  store: boolean,
-  set: (live: RespLive) => void
+  d: {
+    respId: string
+    body: MessagesRequest
+    tools: boolean
+    store: boolean
+    set: (live: RespLive) => void
+  }
 ): ((inputTokens: number) => PooledTurnOpts['onUpdate']) | undefined {
   if (rreq.stream !== true) return undefined
   return (inputTokens) => {
     sseHead(res)
     const live = new RespLive(
       res,
-      respId,
-      servedModel(requestModelOf(body), wire.opts, wire.cfg, body),
+      d.respId,
+      servedModel(requestModelOf(d.body), wire.opts, wire.cfg, d.body),
       inputTokens,
-      store,
-      tools,
+      d.store,
+      d.tools,
       capCharsOf(rreq.max_output_tokens)
     )
-    set(live)
+    d.set(live)
     return live.onUpdate
   }
 }
@@ -2404,7 +2406,13 @@ async function responses(
       signal: ac.signal,
       by: `conductor:${wire.cfg.backend}`,
       imageOk: peer.caps?.image === true,
-      openStream: respStreamOpener(rreq, res, wire, respId, body, tools, store, (l) => (live = l)),
+      openStream: respStreamOpener(rreq, res, wire, {
+        respId,
+        body,
+        tools,
+        store,
+        set: (l) => (live = l),
+      }),
     })
   } catch (err) {
     openaiFail(res, err, live)
@@ -2438,7 +2446,7 @@ function responsesDeliver(
   wire: WireCtx,
   d: {
     rreq: ResponsesRequest
-    body: Body
+    body: MessagesRequest
     out: TurnOutcome
     respId: string
     key: string | undefined
@@ -2910,9 +2918,9 @@ function chatDeliver(
   wire: WireCtx,
   d: {
     creq: ChatRequest
-    body: Body
+    body: MessagesRequest
     out: TurnOutcome
-    key: string
+    key: string | undefined
     chatId: string
     created: number
     model: string
@@ -3087,21 +3095,21 @@ export function conductorProxy(
   // 'exit' handler; an in-flight link resolve is a ms-scale window.
   process.once('exit', () => live?.close())
   const wire: WireCtx = { cfg, opts: wireOpts, link: getLink, sessions, pendingOpens }
-  const routes: Record<
+  const routes = new Map<
     string,
     (r: IncomingMessage, s: ServerResponse, p: OtelCtx | undefined) => void | Promise<void>
-  > = {
-    'POST /v1/messages': (r, s, p) => messages(r, s, wire, p),
-    'POST /v1/responses': (r, s, p) => responses(r, s, wire, chains, p),
-    'POST /v1/chat/completions': (r, s, p) => chatCompletions(r, s, wire, p),
-    'POST /v1/messages/count_tokens': (r, s) => countTokens(r, s),
-    'GET /v1/models': (_r, s) => models(s, cfg, wireOpts),
-  }
+  >([
+    ['POST /v1/messages', (r, s, p) => messages(r, s, wire, p)],
+    ['POST /v1/responses', (r, s, p) => responses(r, s, wire, chains, p)],
+    ['POST /v1/chat/completions', (r, s, p) => chatCompletions(r, s, wire, p)],
+    ['POST /v1/messages/count_tokens', (r, s) => countTokens(r, s)],
+    ['GET /v1/models', (_r, s) => models(s, cfg, wireOpts)],
+  ])
   return async (req, res) => {
     const path = (req.url ?? '/').split('?')[0]
     const method = req.method ?? 'GET'
     const httpSpan = httpTap(req, res, cfg, method, path)
-    const route = routes[`${method} ${path}`]
+    const route = routes.get(`${method} ${path}`)
     if (route === undefined) {
       apiError(res, 404, 'not_found_error', `bro conductor: no route ${method} ${path}`)
       return
