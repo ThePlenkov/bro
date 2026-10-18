@@ -740,7 +740,10 @@ class LiveTurn {
       // text (drain still holds a live tag prefix; that tail completes
       // into a block later, so text order is preserved either way)
       this.drain(false)
-      this.text(line)
+      // narration rides the same stop gate — a marker inside a tool
+      // label cuts identically, and post-hit lines emit nothing
+      const kept = this.stops?.feed(line) ?? line
+      if (kept !== '') this.text(kept)
     }
   }
 

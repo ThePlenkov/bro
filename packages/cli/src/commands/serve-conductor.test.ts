@@ -1056,6 +1056,35 @@ describe('serve /v1/* — tool_choice, stop_sequences, error taxonomy, keepalive
     }
   })
 
+  test('a stop hit mutes later tool narration — nothing emits past the cut', async () => {
+    const fake = fakeAcpAgent({
+      updates: [
+        ...chunks('hello STOP'),
+        {
+          sessionUpdate: 'tool_call',
+          toolCallId: 'tc-9',
+          title: 'exec: rm -rf',
+          kind: 'execute',
+          status: 'in_progress',
+        } as SessionUpdate,
+        ...chunks(' trailing'),
+      ],
+      configOptions: [MODEL_OPTION],
+    })
+    const { r, close } = await postStream(fake, {
+      messages: [{ role: 'user', content: 'x' }],
+      stop_sequences: ['STOP'],
+      stream: true,
+    })
+    try {
+      const ev = await sseEvents(r)
+      assert.equal(textDeltas(ev).join(''), 'hello ')
+      assert.equal(stopReason(ev), 'stop_sequence')
+    } finally {
+      await close()
+    }
+  })
+
   test('stop_sequences truncate the buffered reply and report stop_sequence', async () => {
     const fake = fakeAcpAgent({ replyText: 'abc MARK tail', configOptions: [MODEL_OPTION] })
     const { r, close } = await postMessages(fake, {
