@@ -191,6 +191,15 @@ function toolContract(
   ].join('\n')
 }
 
+/** tool_choice → the MUST clause of the injected contract. */
+function mustText(choice: MessagesRequest['tool_choice']): string | undefined {
+  if (choice?.type === 'any') return 'You MUST respond with a tool call.'
+  if (choice?.type === 'tool' && typeof choice.name === 'string') {
+    return `You MUST call the tool "${choice.name}".`
+  }
+  return undefined
+}
+
 const turnRole = (m: { role?: string }): string =>
   m.role === 'assistant' ? 'assistant' : 'user'
 
@@ -341,6 +350,10 @@ interface ConvSession {
   /** raw request-model id the session currently runs — a resend that
    *  pins a different model re-pins instead of replaying. */
   requestModel?: string
+  /** sha256 of the prefix (system+tools) the session last ran under —
+   *  a chained request carrying changed instructions injects them
+   *  instead of silently answering under the old ones. */
+  prefixHash?: string
   lastReply: ReplyView
   busy: boolean
   lastSeen: number
@@ -388,6 +401,11 @@ const hashTurns = (
   createHash('sha256')
     .update(`${prefix}\n${stopKey}\n${msgs.slice(0, n).map(turnHashInput).join('\n')}`)
     .digest('hex')
+
+/** Prefix-only digest — chained requests carry no client history to
+ *  hash, so the system+tools freshness is proven standalone. */
+const prefixSha = (prefix: string): string =>
+  createHash('sha256').update(prefix).digest('hex')
 
 /** Where the conversation id comes from: an explicit `x-bro-session`
  *  wins (clients that can pin); the fingerprint is the birth
@@ -512,10 +530,11 @@ function toolCall(raw: string): { name: string; input: unknown } | undefined {
 /** Reply → ordered anthropic blocks: text segments stay text, each
  *  parseable <tool_call> becomes tool_use (unparseable JSON stays raw
  *  text — the wire never invents a call). */
-export function parseReply(text: string): OutBlock[] {
+export function parseReply(text: string, parseTools = true): OutBlock[] {
   const out: OutBlock[] = []
   let at = 0
   for (const m of text.matchAll(TOOL_CALL)) {
+    if (!parseTools) break
     const call = toolCall(m[1] ?? '')
     if (call === undefined) continue
     const lead = text.slice(at, m.index)
@@ -695,17 +714,94 @@ class StopFilter {
   }
 }
 
+/** The incremental <tool_call> pump every dialect renderer shares:
+ *  feed() appends a delta and pumps whatever is provably outside a
+ *  tag (a partial-tag tail holds for the next delta); inside a tag
+ *  everything holds until the close, when a valid call emits — or bad
+ *  markup falls back to plain text, never an invented call. */
+abstract class TagPump {
+  private pending = ''
+  private inCall = false
+
+  /** tools=false — the request withheld the tool contract; markup an
+   *  agent emits anyway stays raw text, matching the recorded reply. */
+  constructor(private readonly tools = true) {
+    // no base state — the flag is the whole constructor
+  }
+
+  protected abstract text(s: string): void
+  protected abstract call(name: string, input: unknown): void
+
+  /** Append a delta and pump whatever is provably outside a tag. */
+  feed(s: string): void {
+    this.pending += s
+    this.drain(false)
+  }
+
+  /** Turn end — every held byte flushes (final drops the tail-hold). */
+  drainAll(): void {
+    this.drain(true)
+  }
+
+  protected drain(final: boolean): void {
+    if (!this.tools) {
+      this.text(this.pending)
+      this.pending = ''
+      return
+    }
+    for (;;) {
+      // each step returns true when the pending buffer stalls on a
+      // boundary — the pump keeps going while a tag let it through
+      if (this.inCall ? this.drainCall(final) : this.drainText(final)) return
+    }
+  }
+
+  /** Inside <tool_call>: emit the call on its close tag, else hold —
+   *  a final flush turns the unclosed remnant back into plain text. */
+  private drainCall(final: boolean): boolean {
+    const j = this.pending.indexOf(CLOSE_TAG)
+    if (j === -1) {
+      if (final) {
+        this.text(OPEN_TAG + this.pending)
+        this.pending = ''
+      }
+      return true
+    }
+    const raw = this.pending.slice(0, j)
+    this.pending = this.pending.slice(j + CLOSE_TAG.length)
+    this.inCall = false
+    const c = toolCall(raw)
+    if (c === undefined) this.text(OPEN_TAG + raw + CLOSE_TAG)
+    else this.call(c.name, c.input)
+    return false
+  }
+
+  /** Free text: emit down to the next open tag — or everything but a
+   *  partial-tag tail that more deltas might complete. */
+  private drainText(final: boolean): boolean {
+    const i = this.pending.indexOf(OPEN_TAG)
+    if (i === -1) {
+      const hold = final ? 0 : tagSuffix(this.pending, OPEN_TAG)
+      this.text(this.pending.slice(0, this.pending.length - hold))
+      this.pending = this.pending.slice(this.pending.length - hold)
+      return true
+    }
+    this.text(this.pending.slice(0, i))
+    this.pending = this.pending.slice(i + OPEN_TAG.length)
+    this.inCall = true
+    return false
+  }
+}
+
 /** Live SSE emission for a streaming turn (bro-728wl) — message_start
  *  leaves at turn start, text deltas flow inside one open text block,
  *  and each completed <tool_call> swaps to a tool_use block at the
  *  next index. The tag can span deltas, so free text is emitted only
  *  once it is provably outside a tag — parseReply's contract applied
  *  incrementally (bad JSON stays raw text, never an invented call). */
-class LiveTurn {
+class LiveTurn extends TagPump {
   private idx = 0
   private open = false
-  private inCall = false
-  private pending = ''
   private sawTool = false
   private acc = ''
   stopReason = 'end_turn'
@@ -717,8 +813,10 @@ class LiveTurn {
     model: string,
     inputTokens: number,
     private readonly stops: StopFilter | undefined,
-    pingMs?: number
+    pingMs?: number,
+    tools = true
   ) {
+    super(tools)
     if (pingMs !== undefined && pingMs > 0) {
       this.ping = setInterval(() => sse(res, 'ping', { type: 'ping' }), pingMs)
       this.ping.unref()
@@ -729,8 +827,7 @@ class LiveTurn {
   readonly onUpdate: NonNullable<PooledTurnOpts['onUpdate']> = (u) => {
     if (u.sessionUpdate === 'agent_message_chunk' && u.content.type === 'text') {
       // a stop_sequence hit cuts the wire here — later chunks swallow
-      this.pending += this.stops?.feed(u.content.text) ?? u.content.text
-      this.drain(false)
+      this.feed(this.stops?.feed(u.content.text) ?? u.content.text)
       return
     }
     const line = this.narrateTool(u)
@@ -835,7 +932,7 @@ class LiveTurn {
     }
   }
 
-  private text(s: string): void {
+  protected text(s: string): void {
     if (s === '') return
     if (!this.open) {
       this.blockStart({ type: 'text', text: '' })
@@ -845,7 +942,7 @@ class LiveTurn {
     this.acc += s
   }
 
-  private tool(name: string, input: unknown): void {
+  protected call(name: string, input: unknown): void {
     this.closeBlock()
     this.blockStart({
       type: 'tool_use',
@@ -860,53 +957,9 @@ class LiveTurn {
     this.acc += json
   }
 
-  private drain(final: boolean): void {
-    for (;;) {
-      // each step returns true when the pending buffer stalls on a
-      // boundary — the pump keeps going while a tag let it through
-      if (this.inCall ? this.drainCall(final) : this.drainText(final)) return
-    }
-  }
-
-  /** Inside <tool_call>: emit the call on its close tag, else hold —
-   *  a final flush turns the unclosed remnant back into plain text. */
-  private drainCall(final: boolean): boolean {
-    const j = this.pending.indexOf(CLOSE_TAG)
-    if (j === -1) {
-      if (final) {
-        this.text(OPEN_TAG + this.pending)
-        this.pending = ''
-      }
-      return true
-    }
-    const raw = this.pending.slice(0, j)
-    this.pending = this.pending.slice(j + CLOSE_TAG.length)
-    this.inCall = false
-    const call = toolCall(raw)
-    if (call === undefined) this.text(OPEN_TAG + raw + CLOSE_TAG)
-    else this.tool(call.name, call.input)
-    return false
-  }
-
-  /** Free text: emit down to the next open tag — or everything but a
-   *  partial-tag tail that more deltas might complete. */
-  private drainText(final: boolean): boolean {
-    const i = this.pending.indexOf(OPEN_TAG)
-    if (i === -1) {
-      const hold = final ? 0 : tagSuffix(this.pending, OPEN_TAG)
-      this.text(this.pending.slice(0, this.pending.length - hold))
-      this.pending = this.pending.slice(this.pending.length - hold)
-      return true
-    }
-    this.text(this.pending.slice(0, i))
-    this.pending = this.pending.slice(i + OPEN_TAG.length)
-    this.inCall = true
-    return false
-  }
-
   finish(stopReason: string): void {
-    if (this.stops !== undefined) this.pending += this.stops.flush()
-    this.drain(true)
+    if (this.stops !== undefined) this.feed(this.stops.flush())
+    this.drainAll()
     this.closeBlock()
     if (this.ping !== undefined) clearInterval(this.ping)
     if (this.idx === 0 && !this.sawTool) {
@@ -930,7 +983,7 @@ class LiveTurn {
 
   error(type: string, message: string): void {
     if (this.ping !== undefined) clearInterval(this.ping)
-    this.drain(true)
+    this.drainAll()
     this.closeBlock()
     sse(this.res, 'error', { type: 'error', error: { type, message } })
   }
@@ -991,6 +1044,13 @@ async function readBody(req: IncomingMessage): Promise<string> {
 function tooLarge(req: IncomingMessage, res: ServerResponse): void {
   res.setHeader('connection', 'close')
   apiError(res, 413, 'request_too_large', 'request body exceeds 32MB')
+  res.once('finish', () => req.destroy())
+}
+
+/** Same ceiling on the OpenAI dialects — its own error envelope. */
+function openaiTooLarge(req: IncomingMessage, res: ServerResponse): void {
+  res.setHeader('connection', 'close')
+  openaiError(res, 413, 'invalid_request_error', 'request body exceeds 32MB')
   res.once('finish', () => req.destroy())
 }
 
@@ -1087,6 +1147,14 @@ interface TurnEnv {
   /** request's stop settings — hashed into the conversation proofs so
    *  changed markers never replay a reply cut under different ones */
   stopKey: string
+  /** /v1/responses chaining: the key came from the
+   *  previous_response_id ledger — msgs are the DELTA only, the
+   *  session itself holds the history; skip the fingerprint proof. */
+  chained?: boolean
+  /** The consumed count the predecessor response was recorded at —
+   *  a session past it means the caller branched off a superseded
+   *  point; linear chains match exactly. */
+  chainConsumed?: number
   parent: OtelCtx | undefined
   requestModel: string | undefined
   deadline: number
@@ -1103,7 +1171,20 @@ interface TurnEnv {
 /** A proven continuation — the delta turns only; an empty tail is a
  *  replay (with a repin if the resend pins a different model). */
 async function continuationTurn(env: TurnEnv, cand: ConvSession): Promise<TurnOutcome> {
-  const tail = tailTurns(env.msgs, cand.consumed)
+  // a chained request's msgs ARE the tail — the session holds the
+  // head; a fingerprinted request's msgs are the resend, slice proven
+  let tail = env.chained === true ? env.msgs : tailTurns(env.msgs, cand.consumed)
+  // a chained request carrying a CHANGED prefix (new instructions,
+  // tools, tool_choice) — the delta alone would answer under the old
+  // contract; prepend the new prefix as its own turn. Unchanged
+  // prefixes resend nothing.
+  if (
+    env.chained === true &&
+    env.prefix !== '' &&
+    prefixSha(env.prefix) !== cand.prefixHash
+  ) {
+    tail = [{ role: 'user', content: env.prefix }, ...tail]
+  }
   if (tail.length === 0) {
     // a pure retry — nothing new for the session; the caller replays
     // the recorded reply. A resend pinning a DIFFERENT model is not a
@@ -1189,6 +1270,7 @@ async function freshTurn(env: TurnEnv, candBusy: boolean): Promise<TurnOutcome> 
       peer: env.peer,
       consumed: env.msgs.length,
       historyHash: hashTurns(env.prefix, env.msgs, env.msgs.length, env.stopKey),
+      prefixHash: prefixSha(env.prefix),
       requestModel: env.requestModel,
       lastReply: { blocks: [], model: '', stopReason: '', inputTokens: 0 },
       busy: false,
@@ -1207,11 +1289,39 @@ async function freshTurn(env: TurnEnv, candBusy: boolean): Promise<TurnOutcome> 
   }
 }
 
+/** A chained request whose predecessor no longer resolves — expired,
+ *  superseded, or mid-turn. The dialect maps it to a 4xx: answering
+ *  from the bare delta would fabricate a history the session lost. */
+class ChainBroken extends Error {}
+
+/** Why a chained predecessor can't be honored — expired/evicted, a
+ *  dead transport, an in-flight turn, or a session that moved past
+ *  the recorded point (a branch attempt). */
+function chainWhy(cand: ConvSession | undefined, env: TurnEnv): string | undefined {
+  if (cand === undefined) return 'expired or evicted'
+  if (cand.peer !== env.peer) return 'lost its transport'
+  if (cand.busy) return 'has a turn in flight'
+  if (env.chainConsumed !== undefined && cand.consumed !== env.chainConsumed) {
+    return 'was superseded by a later response'
+  }
+  return undefined
+}
+
 /** One request's acp turn — proves a stored conversation (or evicts a
  *  stale one), then routes to continuation/fresh/one-shot. */
 async function acpTurn(env: TurnEnv): Promise<TurnOutcome> {
   sweepSessions(env.sessions, Date.now())
   const cand = env.key !== undefined ? env.sessions.get(env.key) : undefined
+  if (env.chained === true) {
+    // chained routing is strict: the named predecessor must still sit
+    // at the recorded point — else fail loudly, never answer
+    // history-less.
+    const why = chainWhy(cand, env)
+    if (why !== undefined) {
+      throw new ChainBroken(`previous_response_id ${why}`)
+    }
+    return continuationTurn(env, cand as ConvSession)
+  }
   const usable =
     cand !== undefined &&
     cand.peer === env.peer &&
@@ -1304,11 +1414,21 @@ function settleConv(
   conv: ConvSession,
   body: MessagesRequest,
   view: ReplyView,
-  stopKey: string
+  stopKey: string,
+  chained?: boolean
 ): void {
   const all = body.messages ?? []
-  conv.consumed = all.length
-  conv.historyHash = hashTurns(prefixText(body), all, all.length, stopKey)
+  if (chained === true) {
+    // the delta already landed in the session's own context — the
+    // cumulative count is bookkeeping only; no client-side history
+    // exists to re-hash, so the fingerprint proof can never apply
+    conv.consumed += all.length
+    conv.historyHash = ''
+  } else {
+    conv.consumed = all.length
+    conv.historyHash = hashTurns(prefixText(body), all, all.length, stopKey)
+  }
+  conv.prefixHash = prefixSha(prefixText(body))
   conv.lastReply = view
   if (key === undefined) return
   wire.sessions.delete(key)
@@ -1448,7 +1568,8 @@ async function messages(
                 servedModel(requestModel, wire.opts, wire.cfg, body),
                 inputTokens,
                 stops,
-                wire.cfg.keepaliveMs ?? 10_000
+                wire.cfg.keepaliveMs ?? 10_000,
+                body.tool_choice?.type !== 'none'
               )
               return live.onUpdate
             },
@@ -1475,7 +1596,7 @@ async function messages(
     stops.flush()
   }
   const view: ReplyView = {
-    blocks: parseReply(stops.emitted),
+    blocks: parseReply(stops.emitted, body.tool_choice?.type !== 'none'),
     model: reply.model,
     stopReason: live?.stopReason ?? '',
     stopSequence: stops.hit,
@@ -1509,6 +1630,1295 @@ async function messages(
 /** Replay fallback shape — a replay always carries a conv, the empty
  *  view only keeps the types honest. */
 const EMPTY_VIEW: ReplyView = { blocks: [], model: '', stopReason: '', inputTokens: 0 }
+
+// --- openai /v1/responses dialect (bro-zkpju) --------------------------
+//
+// Codex's wire. The dialect owns ingress translation (input items →
+// the canonical MessagesRequest — sessions, retention, the tools
+// contract, and stop filters all reuse the anthropic machinery) and
+// egress rendering (OpenAI's item-ordered SSE or a buffered Response).
+
+interface RespItem {
+  type?: string
+  role?: string
+  content?: string | { type?: string; text?: string; image_url?: string }[]
+  id?: string
+  call_id?: string
+  name?: string
+  arguments?: string
+  output?: string
+}
+
+interface ResponsesRequest {
+  model?: string
+  instructions?: string
+  input?: string | RespItem[]
+  tools?: { type?: string; name?: string; description?: string; parameters?: unknown }[]
+  tool_choice?: string | { type?: string; name?: string }
+  reasoning?: { effort?: string }
+  previous_response_id?: string
+  store?: boolean
+  stream?: boolean
+  max_output_tokens?: number
+}
+
+function openaiError(res: ServerResponse, status: number, type: string, message: string): void {
+  if (!res.headersSent) {
+    res.writeHead(status, { 'content-type': 'application/json' })
+  }
+  res.end(JSON.stringify({ error: { message, type, param: null, code: null } }))
+}
+
+/** reasoning.effort folds into the composite model pin — `base-effort`
+ *  resolves base + thought_level leaf in one pin (devin's swe-2
+ *  family). An existing effort leaf is replaced, not stacked. */
+const EFFORT = /-(none|min|minimal|low|medium|high|max)$/i
+function effortModel(model: string | undefined, effort: string | undefined): string | undefined {
+  if (effort === undefined || effort === '') return model
+  const base = model?.replace(EFFORT, '') ?? model
+  return base === undefined ? undefined : `${base}-${effort}`
+}
+
+/** One input item → canonical turn rows. function_call carries the
+ *  call's markup through the tool_use block type — blockText's
+ *  serialization IS the <tool_call> wire form, so history replays
+ *  verbatim. */
+function itemToMessages(it: RespItem): ClientMessage[] {
+  if (it.type === 'function_call') {
+    let input: unknown = {}
+    try {
+      input = JSON.parse(it.arguments ?? '{}')
+    } catch {
+      input = {}
+    }
+    return [
+      {
+        role: 'assistant',
+        content: [
+          {
+            type: 'tool_use',
+            id: it.call_id ?? it.id ?? '',
+            name: it.name ?? '',
+            input,
+          } as InBlock,
+        ],
+      },
+    ]
+  }
+  if (it.type === 'function_call_output') {
+    return [
+      {
+        role: 'user',
+        content: [
+          {
+            type: 'tool_result',
+            tool_use_id: it.call_id ?? '',
+            content: it.output ?? '',
+          } as InBlock,
+        ],
+      },
+    ]
+  }
+  if (it.type === 'message' || it.type === undefined) {
+    const raw =
+      typeof it.content === 'string'
+        ? [{ type: 'input_text', text: it.content }]
+        : (it.content ?? [])
+    const parts: InBlock[] = raw
+      .map((p): InBlock => {
+        if (p.type === 'input_text' || p.type === 'output_text' || p.type === 'text') {
+          return { type: 'text', text: p.text ?? '' } as InBlock
+        }
+        if (p.type === 'input_image' && typeof p.image_url === 'string') {
+          const m = /^data:([^;]+);base64,(.+)$/.exec(p.image_url)
+          if (m !== null) {
+            return {
+              type: 'image',
+              source: { type: 'base64', media_type: m[1], data: m[2] },
+            } as InBlock
+          }
+          // remote images aren't fetched — a silent drop would let the
+          // agent "answer" about an image it never saw
+          throw new Error('input_image: only data: URLs are supported')
+        }
+        // anything else (input_file, input_audio, computer_screenshot,
+        // refusal, …) would be a silent semantic drop — the model would
+        // answer blind to content the caller paid to send. Fail loudly.
+        throw new Error(`unsupported input part type: ${p.type ?? 'unknown'}`)
+      })
+    return [{ role: it.role ?? 'user', content: parts }]
+  }
+  // reasoning items, item_reference — opaque to the backend's own
+  // reasoning; nothing to replay
+  return []
+}
+
+function respToolChoice(c: ResponsesRequest['tool_choice']): MessagesRequest['tool_choice'] {
+  const t = typeof c === 'string' ? c : c?.type
+  if (t === 'required' || t === 'any') return { type: 'any' }
+  if (t === 'none') return { type: 'none' }
+  if (t === 'function') {
+    const name = typeof c === 'object' ? c.name : undefined
+    return name === undefined ? { type: 'any' } : { type: 'tool', name }
+  }
+  return undefined
+}
+
+/** A bare-string input is one user turn. */
+const stringInput = (s: string): ClientMessage[] =>
+  s === '' ? [] : [{ role: 'user', content: s }]
+
+/** Text content of an input item, whatever its wire shape. */
+const itemText = (it: RespItem): string =>
+  typeof it.content === 'string'
+    ? it.content
+    : (it.content ?? [])
+        .map((p) => {
+          if (p.type === 'input_text' || p.type === 'output_text' || p.type === 'text') {
+            return p.text ?? ''
+          }
+          // system-tier items take this path, not itemToMessages —
+          // a dropped file/image here is the same blind-answer bug
+          throw new Error(`unsupported input part type: ${p.type ?? 'unknown'}`)
+        })
+        .join('')
+
+/** The whole request → canonical body. A translation failure (a
+ *  field the dialect can't carry) throws with a client-readable
+ *  message — never a silent semantic drop. */
+function responsesToBody(r: ResponsesRequest): MessagesRequest {
+  const items = typeof r.input === 'string' ? [] : (r.input ?? [])
+  // developer- and system-tier items join `instructions` in the
+  // canonical body's system slot — never a downgraded user turn
+  const isDev = (i: RespItem): boolean =>
+    (i.type === 'message' || i.type === undefined) &&
+    (i.role === 'developer' || i.role === 'system')
+  const systemText = [r.instructions, ...items.filter(isDev).map(itemText)]
+    .filter((t): t is string => t !== undefined && t !== '')
+    .join('\n')
+  const messages: ClientMessage[] =
+    typeof r.input === 'string'
+      ? stringInput(r.input)
+      : items.filter((i) => !isDev(i)).flatMap(itemToMessages)
+  const tools = (r.tools ?? [])
+    .filter((t) => t.type === 'function' || t.type === undefined)
+    .map((t) => ({ name: t.name, description: t.description, input_schema: t.parameters }))
+  return {
+    model: effortModel(r.model, r.reasoning?.effort),
+    system: systemText === '' ? undefined : [{ text: systemText }],
+    messages,
+    tools: tools.length === 0 ? undefined : tools,
+    tool_choice: respToolChoice(r.tool_choice),
+    stream: r.stream,
+  }
+}
+
+/** Output items from the canonical reply blocks — the mirror of
+ *  itemToMessages. */
+function blocksToOutput(blocks: OutBlock[]): Record<string, unknown>[] {
+  const items: Record<string, unknown>[] = []
+  const text = blocks
+    .filter((b) => b.type === 'text')
+    .map((b) => b.text)
+    .join('')
+  if (text !== '' || blocks.every((b) => b.type !== 'tool_use')) {
+    items.push({
+      id: `msg_${randomBytes(8).toString('hex')}`,
+      type: 'message',
+      status: 'completed',
+      role: 'assistant',
+      content: text === '' ? [] : [{ type: 'output_text', text, annotations: [] }],
+    })
+  }
+  for (const b of blocks) {
+    if (b.type !== 'tool_use') continue
+    items.push({
+      id: b.id,
+      type: 'function_call',
+      call_id: b.id,
+      name: b.name,
+      arguments: JSON.stringify(b.input ?? {}),
+      status: 'completed',
+    })
+  }
+  return items
+}
+
+/** Live OpenAI SSE emission — the same pending/drain pump as LiveTurn
+ *  (a <tool_call> tag can still span deltas), rendered as
+ *  output_item/content_part events. */
+class RespLive extends TagPump {
+  private idx = 0
+  private open = false
+  private acc = ''
+  private itemId = `msg_${randomBytes(8).toString('hex')}`
+  private partIdx = 0
+  private curText = ''
+  /** Completed output items in stream order — the SAME ids and shapes
+   *  the wire saw; response.completed reports these verbatim so a
+   *  client can match the final snapshot to the items it streamed. */
+  private readonly items: Record<string, unknown>[] = []
+
+  private capped = false
+
+  constructor(
+    private readonly res: ServerResponse,
+    private readonly respId: string,
+    private readonly model: string,
+    private readonly inputTokens: number,
+    private readonly store: boolean,
+    tools = true,
+    private readonly cap?: number
+  ) {
+    super(tools)
+    sse(res, 'response.created', {
+      type: 'response.created',
+      response: this.respObj('in_progress'),
+    })
+  }
+
+  private respObj(status: string): Record<string, unknown> {
+    return {
+      id: this.respId,
+      object: 'response',
+      created_at: Math.floor(Date.now() / 1000),
+      status,
+      model: this.model,
+      output: this.items,
+      store: this.store,
+      usage: { input_tokens: this.inputTokens, output_tokens: 0, total_tokens: this.inputTokens },
+      error: null,
+      ...(status === 'incomplete'
+        ? { incomplete_details: { reason: 'max_output_tokens' } }
+        : {}),
+    }
+  }
+
+  readonly onUpdate: NonNullable<PooledTurnOpts['onUpdate']> = (u) => {
+    if (u.sessionUpdate === 'agent_message_chunk' && u.content.type === 'text') {
+      this.feed(u.content.text)
+    }
+  }
+
+  private ev(type: string, data: Record<string, unknown>): void {
+    sse(this.res, type, { type, ...data })
+  }
+
+  private openText(): void {
+    if (this.open) return
+    this.itemId = `msg_${randomBytes(8).toString('hex')}`
+    this.partIdx = 0
+    this.curText = ''
+    this.ev('response.output_item.added', {
+      output_index: this.idx,
+      item: {
+        id: this.itemId,
+        type: 'message',
+        status: 'in_progress',
+        role: 'assistant',
+        content: [],
+      },
+    })
+    this.ev('response.content_part.added', {
+      item_id: this.itemId,
+      output_index: this.idx,
+      content_index: 0,
+      part: { type: 'output_text', text: '', annotations: [] },
+    })
+    this.open = true
+  }
+
+  protected text(s: string): void {
+    if (s === '' || this.capped) return
+    let emit = s
+    if (this.cap !== undefined && this.acc.length + s.length > this.cap) {
+      emit = s.slice(0, Math.max(0, this.cap - this.acc.length))
+      this.capped = true
+      if (emit === '') return
+    }
+    this.openText()
+    this.ev('response.output_text.delta', {
+      item_id: this.itemId,
+      output_index: this.idx,
+      content_index: this.partIdx,
+      delta: emit,
+    })
+    this.acc += emit
+    this.curText += emit
+  }
+
+  protected call(name: string, input: unknown): void {
+    const json = JSON.stringify(input)
+    // a call straddling the cap drops whole — half a function_call is
+    // malformed output; the cut flips the terminal event to incomplete
+    if (
+      this.capped ||
+      (this.cap !== undefined && this.acc.length + json.length > this.cap)
+    ) {
+      this.capped = true
+      return
+    }
+    this.closeItem('completed')
+    const callId = `call_${randomBytes(8).toString('hex')}`
+    const callItem = {
+      id: callId,
+      type: 'function_call',
+      call_id: callId,
+      name,
+      arguments: json,
+      status: 'completed',
+    }
+    this.ev('response.output_item.added', {
+      output_index: this.idx,
+      item: { ...callItem, arguments: '', status: 'in_progress' },
+    })
+    this.ev('response.function_call_arguments.delta', {
+      item_id: callId,
+      output_index: this.idx,
+      delta: json,
+    })
+    this.ev('response.function_call_arguments.done', {
+      item_id: callId,
+      output_index: this.idx,
+      arguments: json,
+    })
+    this.ev('response.output_item.done', { output_index: this.idx, item: callItem })
+    this.items.push(callItem)
+    this.idx++
+    this.acc += json
+  }
+
+  private closeItem(status: string): void {
+    if (!this.open) return
+    const text = this.curText
+    this.ev('response.output_text.done', {
+      item_id: this.itemId,
+      output_index: this.idx,
+      content_index: this.partIdx,
+      text,
+    })
+    const part = { type: 'output_text', text, annotations: [] }
+    this.ev('response.content_part.done', {
+      item_id: this.itemId,
+      output_index: this.idx,
+      content_index: this.partIdx,
+      part,
+    })
+    const item = {
+      id: this.itemId,
+      type: 'message',
+      status,
+      role: 'assistant',
+      content: [part],
+    }
+    this.ev('response.output_item.done', { output_index: this.idx, item })
+    this.items.push(item)
+    this.open = false
+    this.idx++
+  }
+
+  /** The settled reply — the terminal event reports the same items
+   *  the wire streamed, ids and order intact; a cut-off answer ends
+   *  as response.incomplete, not a silent completed. */
+  finish(status: string, usageOut: number): void {
+    this.drainAll()
+    const st = this.capped ? 'incomplete' : status
+    this.closeItem(st === 'incomplete' ? 'incomplete' : 'completed')
+    this.ev(st === 'incomplete' ? 'response.incomplete' : 'response.completed', {
+      response: {
+        ...this.respObj(st),
+        usage: {
+          input_tokens: this.inputTokens,
+          output_tokens: usageOut,
+          total_tokens: this.inputTokens + usageOut,
+        },
+      },
+    })
+  }
+
+  /** Replay recorded blocks through the live emitters — a stream:true
+   *  resend sees the same event sequence the original turn produced
+   *  (fresh ids, consistent within this replay). */
+  replay(blocks: OutBlock[]): void {
+    for (const b of blocks) {
+      if (b.type === 'text') this.text(b.text ?? '')
+      else if (b.type === 'tool_use') this.call(b.name ?? '', b.input ?? {})
+    }
+  }
+
+  fail(type: string, message: string): void {
+    this.drainAll()
+    sse(this.res, 'error', { type: 'error', code: type, message })
+  }
+}
+
+/** Parse-and-translate step shared by the openai dialects — the
+ *  request either yields the canonical body or an already-written
+ *  error (400 bad shape / untranslatable field, 413 oversized). */
+async function parseDialect<T>(
+  req: IncomingMessage,
+  res: ServerResponse,
+  shape: (r: T) => string | undefined,
+  translate: (r: T) => MessagesRequest
+): Promise<{ rreq: T; body: MessagesRequest } | undefined> {
+  let rreq: T
+  try {
+    rreq = JSON.parse(await readBody(req)) as T
+  } catch (err) {
+    if (err instanceof Error && err.message === 'request body too large') {
+      openaiTooLarge(req, res)
+    } else {
+      openaiError(res, 400, 'invalid_request_error', 'malformed JSON body')
+    }
+    return undefined
+  }
+  const bad = shape(rreq)
+  if (bad !== undefined) {
+    openaiError(res, 400, 'invalid_request_error', bad)
+    return undefined
+  }
+  try {
+    return { rreq, body: translate(rreq) }
+  } catch (err) {
+    // translation rejects loudly — a remote image, a shape the
+    // dialect can't carry; the client fixes the request
+    openaiError(
+      res,
+      400,
+      'invalid_request_error',
+      err instanceof Error ? err.message : String(err)
+    )
+    return undefined
+  }
+}
+
+/** Turn failure → openai wire shape. The in-stream variant reports
+ *  'overloaded' for capacity failures while the buffered envelope
+ *  keeps 503 as server_error; 429 carries Retry-After either way. */
+function openaiFailKind(
+  err: unknown,
+  msg: string
+): { status: number; stream: string; wire: string } {
+  if (err instanceof ChainBroken) {
+    return { status: 400, stream: 'invalid_request_error', wire: 'invalid_request_error' }
+  }
+  if (RATE.test(msg)) {
+    return { status: 429, stream: 'rate_limit_error', wire: 'rate_limit_error' }
+  }
+  if (AVAIL.test(msg)) {
+    return { status: 503, stream: 'overloaded', wire: 'server_error' }
+  }
+  return { status: 500, stream: 'server_error', wire: 'server_error' }
+}
+
+/** The shared turn-failure tail for both openai dialects. */
+function openaiFail(
+  res: ServerResponse,
+  err: unknown,
+  live: { fail(type: string, message: string): void } | undefined
+): void {
+  const msg = err instanceof Error ? err.message : String(err)
+  const kind = openaiFailKind(err, msg)
+  if (live !== undefined) {
+    live.fail(kind.stream, `bro conductor: ${msg}`)
+    res.end()
+    return
+  }
+  if (kind.status === 429) res.setHeader('retry-after', '30')
+  openaiError(res, kind.status, kind.wire, `bro conductor: ${msg}`)
+}
+
+/** The SSE response preamble — identical across dialects. */
+function sseHead(res: ServerResponse): void {
+  res.writeHead(200, {
+    'content-type': 'text/event-stream',
+    'cache-control': 'no-cache',
+    connection: 'keep-alive',
+    'x-accel-buffering': 'no',
+  })
+}
+
+/** Estimated tokens over recorded blocks — replay output accounting. */
+const blocksTokens = (blocks: OutBlock[]): number =>
+  estTokens(
+    blocks.map((b) => (b.type === 'text' ? b.text : JSON.stringify(b.input ?? {}))).join('')
+  )
+
+/** Chain ids a listener can afford to remember — LRU-trimmed like
+ *  the sessions map; entries pointing at dead sessions prune away. */
+const CHAIN_CAP = 256
+
+function pruneChains(
+  chains: Map<string, { key: string; consumed: number }>,
+  sessions: Map<string, ConvSession>
+): void {
+  for (const [id, e] of chains) {
+    if (!sessions.has(e.key)) chains.delete(id)
+  }
+  let overflow = chains.size - CHAIN_CAP
+  for (const id of chains.keys()) {
+    if (overflow <= 0) break
+    chains.delete(id)
+    overflow--
+  }
+}
+
+/** Response envelope — the same object shape streamed or buffered. */
+function respEnvelope(
+  respId: string,
+  model: string,
+  status: string,
+  output: unknown[],
+  store: boolean,
+  inputTokens: number,
+  outTokens: number
+): Record<string, unknown> {
+  return {
+    id: respId,
+    object: 'response',
+    created_at: Math.floor(Date.now() / 1000),
+    status,
+    model,
+    output,
+    store,
+    usage: {
+      input_tokens: inputTokens,
+      output_tokens: outTokens,
+      total_tokens: inputTokens + outTokens,
+    },
+    error: null,
+    ...(status === 'incomplete' ? { incomplete_details: { reason: 'max_output_tokens' } } : {}),
+  }
+}
+
+/** acp stop_reason → Response.status — a truncated answer is
+ *  incomplete, never a silent success. */
+const respStatus = (canonicalReason: string): string =>
+  canonicalReason === 'max_tokens' ? 'incomplete' : 'completed'
+
+/** A caller's output-token budget expressed in chars — the inverse of
+ *  estTokens' ~4-chars-per-token estimate. Honored, not authoritative. */
+const capCharsOf = (tokens: number | undefined): number | undefined =>
+  typeof tokens === 'number' && tokens > 0 ? tokens * 4 : undefined
+
+/** Cut recorded blocks at the output cap. Text truncates at the cut;
+ *  a tool_use block straddling it drops whole — half a function_call
+ *  is malformed output. */
+function capBlocks(
+  blocks: OutBlock[],
+  cap: number | undefined
+): { blocks: OutBlock[]; capped: boolean } {
+  if (cap === undefined) return { blocks, capped: false }
+  let used = 0
+  const kept: OutBlock[] = []
+  for (const b of blocks) {
+    const len =
+      b.type === 'text' ? (b.text ?? '').length
+      : b.type === 'tool_use' ? JSON.stringify(b.input ?? {}).length
+      : 0
+    if (used + len > cap) {
+      if (b.type === 'text' && used < cap) {
+        kept.push({ ...b, text: (b.text ?? '').slice(0, cap - used) })
+      }
+      return { blocks: kept, capped: true }
+    }
+    kept.push(b)
+    used += len
+  }
+  return { blocks: kept, capped: false }
+}
+
+/** input shape gate for /v1/responses. */
+const respShape = (r: ResponsesRequest): string | undefined =>
+  r.input === undefined || (typeof r.input !== 'string' && !Array.isArray(r.input))
+    ? 'input: a string or an items array is required'
+    : undefined
+
+/** The model label a recorded reply or the wire config resolves to. */
+function respModel(wire: WireCtx, body: MessagesRequest, recorded?: string): string {
+  if (recorded !== undefined && recorded !== '') return recorded
+  return servedModel(undefined, wire.opts, wire.cfg, body)
+}
+
+/** Replay branch — a resend carried nothing new; answer the recorded
+ *  reply in the openai envelope (or the SSE sequence when the resend
+ *  asked for a stream). The replay id registers too: chaining off a
+ *  replayed response lands on the same live conversation. */
+interface RespReplayCtx {
+  rreq: ResponsesRequest
+  out: TurnOutcome
+  respId: string
+  key: string | undefined
+  store: boolean
+  chains: Map<string, { key: string; consumed: number }>
+}
+
+function responsesReplay(res: ServerResponse, wire: WireCtx, ctx: RespReplayCtx): void {
+  const { rreq, out, respId, key, store, chains } = ctx
+  const lr = out.conv?.lastReply
+  const capped = capBlocks(lr?.blocks ?? [], capCharsOf(rreq.max_output_tokens))
+  const blocks = capped.blocks
+  const model = respModel(wire, {}, lr?.model)
+  const status = capped.capped ? 'incomplete' : respStatus(lr?.stopReason ?? '')
+  if (store && out.conv !== undefined && key !== undefined) {
+    chains.set(respId, { key, consumed: out.conv.consumed })
+    pruneChains(chains, wire.sessions)
+  }
+  if (rreq.stream === true) {
+    sseHead(res)
+    const rl = new RespLive(
+      res,
+      respId,
+      model,
+      lr?.inputTokens ?? 0,
+      store,
+      true,
+      capCharsOf(rreq.max_output_tokens)
+    )
+    rl.replay(blocks)
+    rl.finish(status, blocksTokens(blocks))
+    res.end()
+    return
+  }
+  res.writeHead(200, { 'content-type': 'application/json' })
+  res.end(
+    JSON.stringify(
+      respEnvelope(
+        respId,
+        model,
+        status,
+        blocksToOutput(blocks),
+        store,
+        lr?.inputTokens ?? 0,
+        blocksTokens(blocks)
+      )
+    )
+  )
+}
+
+async function responses(
+  req: IncomingMessage,
+  res: ServerResponse,
+  wire: WireCtx,
+  chains: Map<string, { key: string; consumed: number }>,
+  parent: OtelCtx | undefined
+): Promise<void> {
+  const parsed = await parseDialect<ResponsesRequest>(req, res, respShape, responsesToBody)
+  if (parsed === undefined) return
+  const { rreq, body } = parsed
+  const t0 = Date.now()
+  const store = rreq.store !== false
+  const respId = `resp_${randomBytes(12).toString('hex')}`
+  // chain continuity: the previous response's recorded conv point.
+  // An unknown predecessor just starts fresh (fingerprint), never an
+  // invention; a KNOWN-but-broken one fails inside acpTurn rather
+  // than answering from a history-less delta.
+  const hit =
+    rreq.previous_response_id !== undefined
+      ? chains.get(rreq.previous_response_id)
+      : undefined
+  // store:false — stateless on OUR side: the response isn't recorded
+  // and no chain id registers, but a valid previous_response_id (or an
+  // explicit x-bro-session pin) still chains the turn — predecessor
+  // lookup is independent of whether this response gets stored.
+  const key =
+    hit?.key ??
+    (store || req.headers['x-bro-session'] !== undefined
+      ? conversationKey(req, body)
+      : undefined)
+  const chained = hit !== undefined
+  const tools = body.tool_choice?.type !== 'none'
+  let live: RespLive | undefined
+  let out: TurnOutcome
+  try {
+    const peer = await wire.link(parent)
+    const ac = new AbortController()
+    res.once('close', () => ac.abort())
+    const requestModel = requestModelOf(body)
+    out = await acpTurn({
+      body,
+      msgs: body.messages ?? [],
+      prefix: prefixText(body),
+      peer,
+      cfg: wire.cfg,
+      opts: wire.opts,
+      sessions: wire.sessions,
+      pendingOpens: wire.pendingOpens,
+      key,
+      stopKey: stopKeyOf(stopSeqsOf(body) ?? []),
+      chained,
+      chainConsumed: hit?.consumed,
+      parent,
+      requestModel,
+      deadline: Date.now() + wire.cfg.timeoutMs,
+      signal: ac.signal,
+      by: `conductor:${wire.cfg.backend}`,
+      imageOk: peer.caps?.image === true,
+      // OpenAI semantics: buffered unless stream === true (inverted
+      // vs the anthropic dialect's own default)
+      openStream:
+        rreq.stream === true
+          ? (inputTokens) => {
+              sseHead(res)
+              live = new RespLive(
+                res,
+                respId,
+                servedModel(requestModel, wire.opts, wire.cfg, body),
+                inputTokens,
+                store,
+                tools,
+                capCharsOf(rreq.max_output_tokens)
+              )
+              return live.onUpdate
+            }
+          : undefined,
+    })
+  } catch (err) {
+    openaiFail(res, err, live)
+    return
+  }
+  if (out.replay === true) {
+    responsesReplay(res, wire, { rreq, out, respId, key, store, chains })
+    return
+  }
+  const reply = out.reply as PooledReply
+  const inputTokens = out.inputTokens
+  // withheld tool contracts never produce tool blocks — an agent
+  // emitting markup anyway stays raw text, not an invented call
+  const blocks = parseReply(reply.text, tools)
+  const capped = capBlocks(blocks, capCharsOf(rreq.max_output_tokens))
+  const outBlocks = capped.blocks
+  // the cap reports the same canonical reason the acp's own ceiling
+  // would — replay and status agree the answer was cut
+  const canonicalReason = capped.capped
+    ? 'max_tokens'
+    : (STOP_REASON[reply.stopReason] ?? 'end_turn')
+  const outTokens = capped.capped ? blocksTokens(outBlocks) : estTokens(reply.text)
+  // the cap outranks a surviving tool_use — a cut answer is
+  // incomplete even when a whole call made it under the wire
+  const status = respStatus(
+    capped.capped
+      ? 'max_tokens'
+      : outBlocks.some((b) => b.type === 'tool_use')
+        ? 'tool_use'
+        : canonicalReason
+  )
+  if (out.conv !== undefined && key !== undefined) {
+    // settleConv is NOT store-gated: a non-stored chained turn still
+    // consumed its delta in the predecessor's session — skipping it
+    // leaves consumed behind and later chains read hidden turns
+    settleConv(
+      wire,
+      key,
+      out.conv,
+      body,
+      {
+        blocks: outBlocks,
+        model: reply.model,
+        stopReason: canonicalReason,
+        inputTokens,
+      },
+      stopKeyOf(stopSeqsOf(body) ?? []),
+      chained
+    )
+    if (store) {
+      chains.set(respId, { key, consumed: out.conv.consumed })
+      pruneChains(chains, wire.sessions)
+    }
+  }
+  otelEvent('conductor.turn', {
+    backend: wire.cfg.backend,
+    dialect: 'responses',
+    model: reply.model,
+    stream: rreq.stream === true,
+    session_reused: out.reused,
+    input_tokens: inputTokens,
+    output_tokens: outTokens,
+    duration_ms: Date.now() - t0,
+  })
+  if (live !== undefined) {
+    live.finish(status, outTokens)
+    res.end()
+    return
+  }
+  res.writeHead(200, { 'content-type': 'application/json' })
+  res.end(
+    JSON.stringify(
+      respEnvelope(
+        respId,
+        servedModel(requestModelOf(body), wire.opts, wire.cfg, body),
+        status,
+        blocksToOutput(outBlocks),
+        store,
+        inputTokens,
+        outTokens
+      )
+    )
+  )
+}
+
+// --- openai /v1/chat/completions dialect -------------------------------
+//
+// The legacy chat wire — stateless by contract (the client resends
+// history every turn), so the fingerprint path does all retention
+// work unmodified; only ingress translation and the choice/delta
+// egress shape are new.
+
+interface ChatMessage {
+  role?: string
+  content?: string | { type?: string; text?: string; image_url?: string | { url?: string } }[]
+  tool_calls?: {
+    id?: string
+    type?: string
+    function?: { name?: string; arguments?: string }
+  }[]
+  tool_call_id?: string
+}
+
+interface ChatRequest {
+  model?: string
+  messages?: ChatMessage[]
+  tools?: { type?: string; function?: { name?: string; description?: string; parameters?: unknown } }[]
+  tool_choice?: string | { type?: string; function?: { name?: string } }
+  reasoning_effort?: string
+  stream?: boolean
+  stream_options?: { include_usage?: boolean }
+  max_completion_tokens?: number
+  max_tokens?: number
+}
+
+function chatContent(c: ChatMessage['content']): InBlock[] {
+  if (typeof c === 'string') return c === '' ? [] : [{ type: 'text', text: c } as InBlock]
+  return (c ?? []).map((p): InBlock => {
+    if (p.type === 'text') return { type: 'text', text: p.text ?? '' } as InBlock
+    if (p.type === 'image_url') {
+      const url = typeof p.image_url === 'string' ? p.image_url : p.image_url?.url
+      const m = url !== undefined ? /^data:([^;]+);base64,(.+)$/.exec(url) : null
+      if (m != null) {
+        return { type: 'image', source: { type: 'base64', media_type: m[1], data: m[2] } } as InBlock
+      }
+      // remote images aren't fetched — a silent drop would let the
+      // agent "answer" about an image it never saw
+      throw new Error('image_url: only data: URLs are supported')
+    }
+    // unknown content parts (audio, file, …) fail loudly — the model
+    // must not answer blind to content the caller sent
+    throw new Error(`unsupported content part type: ${p.type ?? 'unknown'}`)
+  })
+}
+
+/** One chat message → canonical rows. assistant.tool_calls ride as
+ *  tool_use blocks (history replays verbatim); role:'tool' is the
+ *  caller's own tool result — a user-side tool_result. */
+function chatToMessages(m: ChatMessage): ClientMessage[] {
+  if (m.role === 'system' || m.role === 'developer') return []
+  if (m.role === 'tool') {
+    const toolText =
+      typeof m.content === 'string'
+        ? m.content
+        : chatContent(m.content)
+            .map((b) => (b.type === 'text' ? (b as { text: string }).text : ''))
+            .join('')
+    return [
+      {
+        role: 'user',
+        content: [
+          {
+            type: 'tool_result',
+            tool_use_id: m.tool_call_id ?? '',
+            content: toolText,
+          } as InBlock,
+        ],
+      },
+    ]
+  }
+  const content = chatContent(m.content)
+  for (const tc of m.tool_calls ?? []) {
+    let input: unknown = {}
+    try {
+      input = JSON.parse(tc.function?.arguments ?? '{}')
+    } catch {
+      input = {}
+    }
+    content.push({
+      type: 'tool_use',
+      id: tc.id ?? '',
+      name: tc.function?.name ?? '',
+      input,
+    } as InBlock)
+  }
+  return [{ role: m.role === 'assistant' ? 'assistant' : 'user', content }]
+}
+
+function chatToolChoice(c: ChatRequest['tool_choice']): MessagesRequest['tool_choice'] {
+  const t = typeof c === 'string' ? c : c?.type
+  if (t === 'required') return { type: 'any' }
+  if (t === 'none') return { type: 'none' }
+  if (t === 'function') {
+    const name = typeof c === 'object' ? c.function?.name : undefined
+    return name === undefined ? { type: 'any' } : { type: 'tool', name }
+  }
+  return undefined
+}
+
+function chatToBody(r: ChatRequest): MessagesRequest {
+  const system = (r.messages ?? [])
+    .filter((m) => m.role === 'system' || m.role === 'developer')
+    .map((m) => ({
+      text: chatContent(m.content)
+        .map((b) => {
+          if (b.type === 'text') return (b as { text: string }).text
+          // a parsed image/file block folded to '' is a silent drop —
+          // system-tier messages carry text or they 400
+          throw new Error('system/developer messages support text content only')
+        })
+        .join(''),
+    }))
+  const messages = (r.messages ?? [])
+    .filter((m) => m.role !== 'system' && m.role !== 'developer')
+    .flatMap(chatToMessages)
+  const tools = (r.tools ?? [])
+    .filter((t) => t.type === 'function' || t.type === undefined)
+    .map((t) => ({
+      name: t.function?.name,
+      description: t.function?.description,
+      input_schema: t.function?.parameters,
+    }))
+  return {
+    model: effortModel(r.model, r.reasoning_effort),
+    system: system.length === 0 ? undefined : system,
+    messages,
+    tools: tools.length === 0 ? undefined : tools,
+    tool_choice: chatToolChoice(r.tool_choice),
+    stream: r.stream,
+  }
+}
+
+/** Canonical reply blocks → the assistant message row —
+ *  tool_use becomes OpenAI tool_calls, text joins into content. */
+function chatMessage(blocks: OutBlock[]): Record<string, unknown> {
+  const text = blocks
+    .filter((b) => b.type === 'text')
+    .map((b) => b.text)
+    .join('')
+  const calls = blocks
+    .filter((b) => b.type === 'tool_use')
+    .map((b) => ({
+      id: b.id === '' ? `call_${randomBytes(8).toString('hex')}` : b.id,
+      type: 'function',
+      function: { name: b.name, arguments: JSON.stringify(b.input ?? {}) },
+    }))
+  return {
+    role: 'assistant',
+    content: text === '' ? null : text,
+    ...(calls.length > 0 ? { tool_calls: calls } : {}),
+  }
+}
+
+const CHAT_FINISH = {
+  end_turn: 'stop',
+  tool_use: 'tool_calls',
+  stop_sequence: 'stop',
+  max_tokens: 'length',
+} as const
+
+/** Live chat-completion SSE — the same pending/drain pump rendered
+ *  as choices[0].delta rows; [DONE] is the wire's own terminator. */
+class ChatLive extends TagPump {
+  private callIdx = 0
+  private first = true
+  private accLen = 0
+  private capped = false
+
+  constructor(
+    private readonly res: ServerResponse,
+    private readonly id: string,
+    private readonly model: string,
+    private readonly created: number,
+    tools = true,
+    private readonly cap?: number
+  ) {
+    super(tools)
+  }
+
+  private ev(delta: Record<string, unknown>, finish: string | null = null): void {
+    const obj = {
+      id: this.id,
+      object: 'chat.completion.chunk',
+      created: this.created,
+      model: this.model,
+      choices: [{ index: 0, delta, finish_reason: finish, logprobs: null }],
+    }
+    this.res.write(`data: ${JSON.stringify(obj)}\n\n`)
+  }
+
+  private head(): void {
+    if (!this.first) return
+    this.first = false
+    this.ev({ role: 'assistant' })
+  }
+
+  readonly onUpdate: NonNullable<PooledTurnOpts['onUpdate']> = (u) => {
+    if (u.sessionUpdate === 'agent_message_chunk' && u.content.type === 'text') {
+      this.feed(u.content.text)
+    }
+  }
+
+  protected text(s: string): void {
+    if (s === '' || this.capped) return
+    let emit = s
+    if (this.cap !== undefined && this.accLen + s.length > this.cap) {
+      emit = s.slice(0, Math.max(0, this.cap - this.accLen))
+      this.capped = true
+      if (emit === '') return
+    }
+    this.head()
+    this.ev({ content: emit })
+    this.accLen += emit.length
+  }
+
+  protected call(name: string, input: unknown): void {
+    const json = JSON.stringify(input)
+    // a call straddling the cap drops whole — half a tool_call is
+    // malformed output; the cut reports finish_reason 'length'
+    if (
+      this.capped ||
+      (this.cap !== undefined && this.accLen + json.length > this.cap)
+    ) {
+      this.capped = true
+      return
+    }
+    this.head()
+    this.accLen += json.length
+    this.ev({
+      tool_calls: [
+        {
+          index: this.callIdx,
+          id: `call_${randomBytes(8).toString('hex')}`,
+          type: 'function',
+          function: { name, arguments: json },
+        },
+      ],
+    })
+    this.callIdx++
+  }
+
+  /** Replay recorded blocks through the same emitters — a stream:true
+   *  resend sees the delta sequence a fresh turn would have made. */
+  replay(blocks: OutBlock[]): void {
+    for (const b of blocks) {
+      if (b.type === 'text') this.text(b.text ?? '')
+      else if (b.type === 'tool_use') this.call(b.name ?? '', b.input ?? {})
+    }
+  }
+
+  /** Final delta + optional usage chunk + [DONE]. */
+  finish(stopReason: string, usage?: Record<string, unknown>): void {
+    this.drainAll()
+    this.head()
+    const finishReason = this.capped
+      ? 'length'
+      : (CHAT_FINISH[stopReason as keyof typeof CHAT_FINISH] ?? 'stop')
+    this.ev({}, finishReason)
+    if (usage !== undefined) {
+      this.res.write(
+        `data: ${JSON.stringify({
+          id: this.id,
+          object: 'chat.completion.chunk',
+          created: this.created,
+          model: this.model,
+          choices: [],
+          usage,
+        })}\n\n`
+      )
+    }
+    this.res.write('data: [DONE]\n\n')
+  }
+
+  fail(type: string, message: string): void {
+    this.drainAll()
+    this.res.write(`data: ${JSON.stringify({ error: { message, type } })}\n\n`)
+    this.res.write('data: [DONE]\n\n')
+  }
+}
+
+/** messages shape gate for /v1/chat/completions. */
+const chatShape = (r: ChatRequest): string | undefined =>
+  !Array.isArray(r.messages) || r.messages.length === 0
+    ? 'messages: a non-empty array is required'
+    : undefined
+
+/** The canonical stop reason over a turn outcome — a replay reports
+ *  the recorded reason, a live turn reads the reply's own. */
+function chatStopReason(
+  replay: boolean,
+  lr: ConvSession['lastReply'] | undefined,
+  blocks: OutBlock[],
+  reply: PooledReply | undefined
+): string {
+  if (replay) return lr?.stopReason ?? 'end_turn'
+  if (blocks.some((b) => b.type === 'tool_use')) return 'tool_use'
+  return STOP_REASON[reply?.stopReason ?? ''] ?? 'end_turn'
+}
+
+/** Chat outcome materialization — a replay reads the recorded reply;
+ *  a fresh turn parses live text. Either way the caller gets one
+ *  normalized bundle. */
+function chatOutcome(
+  out: TurnOutcome,
+  tools: boolean
+): {
+  replay: boolean
+  lr: ConvSession['lastReply'] | undefined
+  reply: PooledReply | undefined
+  inputTokens: number
+  blocks: OutBlock[]
+  outTokens: number
+  stopReason: string
+  finish: string
+} {
+  const replay = out.replay === true
+  const lr = out.conv?.lastReply
+  const reply = replay ? undefined : (out.reply as PooledReply)
+  const inputTokens = replay ? (lr?.inputTokens ?? 0) : out.inputTokens
+  const blocks = replay ? (lr?.blocks ?? []) : parseReply(reply?.text ?? '', tools)
+  const outTokens = replay ? blocksTokens(blocks) : estTokens(reply?.text ?? '')
+  const stopReason = chatStopReason(replay, lr, blocks, reply)
+  const finish =
+    CHAT_FINISH[stopReason as keyof typeof CHAT_FINISH] ??
+    (blocks.some((b) => b.type === 'tool_use') ? 'tool_calls' : 'stop')
+  return { replay, lr, reply, inputTokens, blocks, outTokens, stopReason, finish }
+}
+
+/** POST /v1/chat/completions — the stateless chat dialect. No chain
+ *  ledger: retention is the client's resend, proven by fingerprint. */
+async function chatCompletions(
+  req: IncomingMessage,
+  res: ServerResponse,
+  wire: WireCtx,
+  parent: OtelCtx | undefined
+): Promise<void> {
+  const parsed = await parseDialect<ChatRequest>(req, res, chatShape, chatToBody)
+  if (parsed === undefined) return
+  const { rreq: creq, body } = parsed
+  const t0 = Date.now()
+  const key = conversationKey(req, body)
+  const chatId = `chatcmpl-${randomBytes(12).toString('hex')}`
+  const created = Math.floor(Date.now() / 1000)
+  const model = servedModel(requestModelOf(body), wire.opts, wire.cfg, body)
+  const tools = body.tool_choice?.type !== 'none'
+  let live: ChatLive | undefined
+  let out: TurnOutcome
+  try {
+    const peer = await wire.link(parent)
+    const ac = new AbortController()
+    res.once('close', () => ac.abort())
+    out = await acpTurn({
+      body,
+      msgs: body.messages ?? [],
+      prefix: prefixText(body),
+      peer,
+      cfg: wire.cfg,
+      opts: wire.opts,
+      sessions: wire.sessions,
+      pendingOpens: wire.pendingOpens,
+      key,
+      stopKey: stopKeyOf(stopSeqsOf(body) ?? []),
+      parent,
+      requestModel: requestModelOf(body),
+      deadline: Date.now() + wire.cfg.timeoutMs,
+      signal: ac.signal,
+      by: `conductor:${wire.cfg.backend}`,
+      imageOk: peer.caps?.image === true,
+      openStream:
+        creq.stream === true
+          ? () => {
+              sseHead(res)
+              live = new ChatLive(
+                res,
+                chatId,
+                model,
+                created,
+                tools,
+                capCharsOf(creq.max_completion_tokens ?? creq.max_tokens)
+              )
+              return live.onUpdate
+            }
+          : undefined,
+    })
+  } catch (err) {
+    openaiFail(res, err, live)
+    return
+  }
+  // replay — a resend carried nothing new; answer the recorded reply
+  const o = chatOutcome(out, tools)
+  const cap = capCharsOf(creq.max_completion_tokens ?? creq.max_tokens)
+  const capped = capBlocks(o.blocks, cap)
+  const blocks = capped.blocks
+  // the cap reports the same canonical reason the acp's own ceiling
+  // would — a resend replays the cut, not the uncut original
+  const stopReason = capped.capped ? 'max_tokens' : o.stopReason
+  const finish = capped.capped ? 'length' : o.finish
+  const outTokens = capped.capped ? blocksTokens(blocks) : o.outTokens
+  if (!o.replay && out.conv !== undefined) {
+    settleConv(
+      wire,
+      key,
+      out.conv,
+      body,
+      {
+        blocks,
+        model: (o.reply as PooledReply).model,
+        stopReason,
+        inputTokens: o.inputTokens,
+      },
+      stopKeyOf(stopSeqsOf(body) ?? [])
+    )
+  }
+  const usage = {
+    prompt_tokens: o.inputTokens,
+    completion_tokens: outTokens,
+    total_tokens: o.inputTokens + outTokens,
+  }
+  otelEvent('conductor.turn', {
+    backend: wire.cfg.backend,
+    dialect: 'chat_completions',
+    model: o.reply?.model ?? o.lr?.model ?? '',
+    stream: creq.stream === true,
+    session_reused: out.reused,
+    input_tokens: o.inputTokens,
+    output_tokens: outTokens,
+    duration_ms: Date.now() - t0,
+  })
+  // a stream:true resend answers SSE — never a JSON snapshot of a
+  // response the client never asked to buffer
+  if (o.replay && creq.stream === true) {
+    sseHead(res)
+    const rl = new ChatLive(res, chatId, model, created, tools, cap)
+    rl.replay(blocks)
+    rl.finish(stopReason, creq.stream_options?.include_usage === true ? usage : undefined)
+    res.end()
+    return
+  }
+  if (live !== undefined) {
+    live.finish(stopReason, creq.stream_options?.include_usage === true ? usage : undefined)
+    res.end()
+    return
+  }
+  res.writeHead(200, { 'content-type': 'application/json' })
+  res.end(
+    JSON.stringify({
+      id: chatId,
+      object: 'chat.completion',
+      created,
+      model: o.reply?.model ?? o.lr?.model ?? model,
+      choices: [
+        { index: 0, message: chatMessage(blocks), finish_reason: finish, logprobs: null },
+      ],
+      usage,
+    })
+  )
+}
 
 /** The anthropic /v1/models rows — the configured catalog source
  *  (`BRO_PROVIDER_CATALOG`, else the backend itself) through the SAME
@@ -1568,6 +2978,11 @@ export function conductorProxy(
   // keys whose first session/new is in flight — a concurrent same-key
   // request must not open a twin (the loser would leak unmapped)
   const pendingOpens = new Set<string>()
+  // /v1/responses chain ledger: response id → the conv key + the
+  // consumed count it was recorded at. The count is what makes a
+  // previous_response_id a real predecessor: a session that moved
+  // past it means the caller branched — rejected, not resumed.
+  const chains = new Map<string, { key: string; consumed: number }>()
   const getLink = (parent?: OtelCtx): Promise<AcpPeer> => {
     if (link === undefined) {
       otelEvent('acp.spawn', { backend: cfg.backend })
@@ -1601,38 +3016,19 @@ export function conductorProxy(
   // acp worker of the original incident). close() is sync, safe in an
   // 'exit' handler; an in-flight link resolve is a ms-scale window.
   process.once('exit', () => live?.close())
+  const wire: WireCtx = { cfg, opts: wireOpts, link: getLink, sessions, pendingOpens }
   return async (req, res) => {
     const path = (req.url ?? '/').split('?')[0]
     const method = req.method ?? 'GET'
-    const t0 = Date.now()
-    // one session = one trace: an instrumented caller's traceparent
-    // parents every span we emit; local agents that don't propagate are
-    // still attributed by process tree (peer.*)
-    const httpSpan = otelSpan(
-      `serve.http ${method} ${path}`,
-      { backend: cfg.backend, 'http.method': method, 'http.route': path, ...peerAttrs(req.socket) },
-      { parent: otelParent(req.headers.traceparent) }
-    )
-    res.once('finish', () => {
-      httpSpan.end(
-        { 'http.status': res.statusCode, 'http.duration_ms': Date.now() - t0 },
-        res.statusCode >= 500 ? 'error' : 'ok'
-      )
-      otelEvent('serve.request', {
-        route: `${method} ${path}`,
-        status: res.statusCode,
-        duration_ms: Date.now() - t0,
-        backend: cfg.backend,
-      })
-    })
+    const httpSpan = httpTap(req, res, cfg, method, path)
     if (method === 'POST' && path === '/v1/messages') {
-      await messages(
-        req,
-        res,
-        { cfg, opts: wireOpts, link: getLink, sessions, pendingOpens },
-        httpSpan.ctx
-      )
-      return
+      return messages(req, res, wire, httpSpan.ctx)
+    }
+    if (method === 'POST' && path === '/v1/responses') {
+      return responses(req, res, wire, chains, httpSpan.ctx)
+    }
+    if (method === 'POST' && path === '/v1/chat/completions') {
+      return chatCompletions(req, res, wire, httpSpan.ctx)
     }
     if (method === 'POST' && path === '/v1/messages/count_tokens') {
       try {
@@ -1648,10 +3044,55 @@ export function conductorProxy(
       return
     }
     if (method === 'GET' && path === '/v1/models') {
-      await models(res, cfg, wireOpts)
-      return
+      return models(res, cfg, wireOpts)
     }
     apiError(res, 404, 'not_found_error', `bro conductor: no route ${method} ${path}`)
+  }
+}
+
+/** The per-request span + request-finished telemetry tap — one
+ *  session = one trace: an instrumented caller's traceparent parents
+ *  every span we emit; local agents that don't propagate are still
+ *  attributed by process tree (peer.*). */
+function httpTap(
+  req: IncomingMessage,
+  res: ServerResponse,
+  cfg: ConductorConfig,
+  method: string,
+  path: string
+): ReturnType<typeof otelSpan> {
+  const t0 = Date.now()
+  const httpSpan = otelSpan(
+    `serve.http ${method} ${path}`,
+    { backend: cfg.backend, 'http.method': method, 'http.route': path, ...peerAttrs(req.socket) },
+    { parent: otelParent(req.headers.traceparent) }
+  )
+  res.once('finish', () => {
+    httpSpan.end(
+      { 'http.status': res.statusCode, 'http.duration_ms': Date.now() - t0 },
+      res.statusCode >= 500 ? 'error' : 'ok'
+    )
+    otelEvent('serve.request', {
+      route: `${method} ${path}`,
+      status: res.statusCode,
+      duration_ms: Date.now() - t0,
+      backend: cfg.backend,
+    })
+  })
+  return httpSpan
+}
+
+/** POST /v1/messages/count_tokens — the heuristic estimate; an
+ *  oversized body gets the same 413 lifecycle as the dialects. */
+async function countTokens(req: IncomingMessage, res: ServerResponse): Promise<void> {
+  try {
+    apiErrorCountTokens(res, await readBody(req))
+  } catch (err) {
+    if (err instanceof Error && err.message === 'request body too large') {
+      tooLarge(req, res)
+    } else {
+      apiError(res, 400, 'invalid_request_error', 'malformed request body')
+    }
   }
 }
 
