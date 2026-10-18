@@ -27,12 +27,17 @@ import { execFileSync } from 'node:child_process'
 import { randomBytes } from 'node:crypto'
 import { createServer } from 'node:net'
 import {
+  chmodSync,
   copyFileSync,
   existsSync,
   mkdirSync,
   mkdtempSync,
   readFileSync,
   readdirSync,
+  readlinkSync,
+  realpathSync,
+  rmSync,
+  statSync,
   writeFileSync,
 } from 'node:fs'
 import { homedir } from 'node:os'
@@ -273,9 +278,36 @@ function copyProvision(src: string, dst: string, port: number): void {
       mkdirSync(to, { recursive: true })
       copyProvision(from, to, port)
     } else {
-      writeFileSync(to, readFileSync(from, 'utf8').replaceAll('{{PORT}}', String(port)))
+      // bytes, not utf8 — a binary or executable payload must survive
+      // provisioning with its contents and its mode intact
+      const buf = readFileSync(from)
+      writeFileSync(
+        to,
+        buf.includes(PORT_MARKER) ? substitutePort(buf, port) : buf
+      )
+      chmodSync(to, statSync(from).mode)
     }
   }
+}
+
+const PORT_MARKER = Buffer.from('{{PORT}}')
+
+/** `{{PORT}}` substitution at the byte level — marker spans are the
+ *  only bytes a non-utf8 payload loses. */
+function substitutePort(src: Buffer, port: number): Buffer {
+  const pin = Buffer.from(String(port))
+  const out: Buffer[] = []
+  let off = 0
+  for (;;) {
+    const i = src.indexOf(PORT_MARKER, off)
+    if (i < 0) {
+      out.push(src.subarray(off))
+      break
+    }
+    out.push(src.subarray(off, i), pin)
+    off = i + PORT_MARKER.length
+  }
+  return Buffer.concat(out)
 }
 
 /** Provision the scratch repo — own git store, own stealth beads
@@ -570,15 +602,67 @@ function agentLabel(
 
 /** A terminal run's scratch serve is litter — kill the recorded pid
  *  (serve.json is the same-UID credential that spawned it). Idempotent:
- *  status-driven, re-runs on every status call after terminal. */
+ *  status-driven, and the state file is retired so a repeated call can
+ *  never re-signal a pid the OS has since recycled. */
 function reapScratchServe(repo: string): void {
+  // a run that failed before provisioning recorded '' — join('', …)
+  // would resolve the CALLER's serve.json and kill its serve
+  if (repo === '') return
   try {
-    const state = JSON.parse(
-      readFileSync(join(repo, '.git', 'bro', 'serve.json'), 'utf8')
-    ) as { pid?: number }
-    if (typeof state.pid === 'number') process.kill(state.pid)
+    const statePath = join(repo, '.git', 'bro', 'serve.json')
+    const state = JSON.parse(readFileSync(statePath, 'utf8')) as {
+      pid?: number
+      dir?: string
+      url?: string
+    }
+    const pid = state.pid
+    if (
+      typeof pid === 'number' &&
+      pid > 0 &&
+      isRecordedServe(pid, repo, state)
+    ) {
+      try {
+        process.kill(pid)
+      } catch {
+        /* raced the exit — the reap is done anyway */
+      }
+    }
+    rmSync(statePath, { force: true })
   } catch {
-    /* no serve.json, dead pid, unreadable — nothing to reap */
+    /* no serve.json — nothing was ever spawned */
+  }
+}
+
+/** Identity before signaling: serve.json's pid may name a recycled,
+ *  unrelated process. The spawned serve runs with cwd=repo, so the
+ *  kernel's /proc link is the evidence; where /proc does not exist
+ *  (macOS), the argv snapshot must carry this serve's own port. */
+function isRecordedServe(
+  pid: number,
+  repo: string,
+  state: { dir?: string; url?: string }
+): boolean {
+  if (
+    state.dir !== undefined &&
+    realpathSync(state.dir) !== realpathSync(repo)
+  ) {
+    return false
+  }
+  try {
+    // a readable /proc answer is authoritative — a pid whose cwd names
+    // another directory is not this scratch's serve, whatever argv says
+    return readlinkSync(`/proc/${pid}/cwd`) === realpathSync(repo)
+  } catch {
+    /* /proc absent (macOS) or the pid is gone — try argv evidence */
+  }
+  try {
+    const args = execFileSync('ps', ['-p', String(pid), '-o', 'args='], {
+      encoding: 'utf8',
+    })
+    const port = state.url?.match(/:(\d+)/)?.[1]
+    return /\bserve\b/.test(args) && (port === undefined || args.includes(port))
+  } catch {
+    return false
   }
 }
 
