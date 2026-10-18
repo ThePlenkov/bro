@@ -29,21 +29,31 @@ const chunks = (...texts: string[]): SessionUpdate[] =>
     content: { type: 'text' as const, text },
   }))
 
-/** Boot the conductor over `fake` and POST a streamed /v1/messages —
- *  caller owns close() (stream:true is the shape under test here). */
-async function postStream(
+/** Boot the conductor over `fake` and POST /v1/messages — caller owns
+ *  close(). The one fetch shape every test repeats lives here. */
+async function postMessages(
   fake: ReturnType<typeof fakeAcpAgent>,
-  body: unknown = { messages: [{ role: 'user', content: 'x' }], stream: true }
-): Promise<{ r: Response; close: () => Promise<void> }> {
+  body: unknown = { messages: [{ role: 'user', content: 'x' }], stream: false },
+  cfg: typeof CFG = CFG
+): Promise<{ r: Response; url: string; close: () => Promise<void> }> {
   const { url, close } = await listen(
-    deps({ provider: conductorProxy(CFG, { acp: { peer: fake.app } }) })
+    deps({ provider: conductorProxy(cfg, { acp: { peer: fake.app } }) })
   )
   const r = await fetch(`${url}/v1/messages`, {
     method: 'POST',
     headers: { ...auth, 'content-type': 'application/json' },
     body: JSON.stringify(body),
   })
-  return { r, close }
+  return { r, url, close }
+}
+
+/** Boot the conductor over `fake` and POST a streamed /v1/messages —
+ *  caller owns close() (stream:true is the shape under test here). */
+async function postStream(
+  fake: ReturnType<typeof fakeAcpAgent>,
+  body: unknown = { messages: [{ role: 'user', content: 'x' }], stream: true }
+): Promise<{ r: Response; url: string; close: () => Promise<void> }> {
+  return postMessages(fake, body)
 }
 
 const CFG = {
@@ -151,19 +161,12 @@ async function sseEvents(r: Response): Promise<{ event: string; data: Record<str
 describe('serve /v1/* — the conductor plane', () => {
   test('POST /v1/messages streams the anthropic SSE shape from an acp turn', async () => {
     const fake = fakeAcpAgent({ replyText: 'hi there', configOptions: [MODEL_OPTION] })
-    const { url, close } = await listen(
-      deps({ provider: conductorProxy(CFG, { acp: { peer: fake.app } }) })
-    )
+    const { r, close } = await postStream(fake, {
+      model: 'claude-sonnet-4-5',
+      messages: [{ role: 'user', content: 'say hi' }],
+      stream: true,
+    })
     try {
-      const r = await fetch(`${url}/v1/messages`, {
-        method: 'POST',
-        headers: { ...auth, 'content-type': 'application/json' },
-        body: JSON.stringify({
-          model: 'claude-sonnet-4-5',
-          messages: [{ role: 'user', content: 'say hi' }],
-          stream: true,
-        }),
-      })
       assert.equal(r.status, 200)
       assert.equal(r.headers.get('content-type'), 'text/event-stream')
       const ev = await sseEvents(r)
@@ -215,15 +218,8 @@ describe('serve /v1/* — the conductor plane', () => {
       configOptions: [MODEL_OPTION],
       imageCapable: true,
     })
-    const { url, close } = await listen(
-      deps({ provider: conductorProxy(CFG, { acp: { peer: fake.app } }) })
-    )
+    const { r, close } = await postStream(fake, IMAGE_BODY)
     try {
-      const r = await fetch(`${url}/v1/messages`, {
-        method: 'POST',
-        headers: { ...auth, 'content-type': 'application/json' },
-        body: JSON.stringify(IMAGE_BODY),
-      })
       assert.equal(r.status, 200)
       await r.text()
       const img = fake.blocks[0]?.find((b) => b.type === 'image')
@@ -237,15 +233,8 @@ describe('serve /v1/* — the conductor plane', () => {
 
   test('an agent without the image capability gets the [image] marker instead', async () => {
     const fake = fakeAcpAgent({ replyText: 'ok', configOptions: [MODEL_OPTION] })
-    const { url, close } = await listen(
-      deps({ provider: conductorProxy(CFG, { acp: { peer: fake.app } }) })
-    )
+    const { r, close } = await postStream(fake, IMAGE_BODY)
     try {
-      const r = await fetch(`${url}/v1/messages`, {
-        method: 'POST',
-        headers: { ...auth, 'content-type': 'application/json' },
-        body: JSON.stringify(IMAGE_BODY),
-      })
       assert.equal(r.status, 200)
       await r.text()
       assert.equal(fake.blocks[0]?.every((b) => b.type === 'text'), true)
@@ -260,15 +249,11 @@ describe('serve /v1/* — the conductor plane', () => {
       replyText: 'checking <tool_call>{"name":"ls","input":{"d":"/tmp"}}</tool_call>',
       configOptions: [MODEL_OPTION],
     })
-    const { url, close } = await listen(
-      deps({ provider: conductorProxy(CFG, { acp: { peer: fake.app } }) })
-    )
+    const { r, close } = await postStream(fake, {
+      messages: [{ role: 'user', content: 'list' }],
+      stream: true,
+    })
     try {
-      const r = await fetch(`${url}/v1/messages`, {
-        method: 'POST',
-        headers: { ...auth, 'content-type': 'application/json' },
-        body: JSON.stringify({ messages: [{ role: 'user', content: 'list' }], stream: true }),
-      })
       const ev = await sseEvents(r)
       const tu = ev.find(
         (e) => e.event === 'content_block_delta' && (e.data.delta as { type: string }).type === 'input_json_delta'
@@ -286,19 +271,12 @@ describe('serve /v1/* — the conductor plane', () => {
 
   test('a provider/model request id pins the acp session model', async () => {
     const fake = fakeAcpAgent({ replyText: 'ok', configOptions: [MODEL_OPTION] })
-    const { url, close } = await listen(
-      deps({ provider: conductorProxy(CFG, { acp: { peer: fake.app } }) })
-    )
+    const { r, close } = await postMessages(fake, {
+      model: 'dv-acp/swe-y',
+      messages: [{ role: 'user', content: 'x' }],
+      stream: false,
+    })
     try {
-      const r = await fetch(`${url}/v1/messages`, {
-        method: 'POST',
-        headers: { ...auth, 'content-type': 'application/json' },
-        body: JSON.stringify({
-          model: 'dv-acp/swe-y',
-          messages: [{ role: 'user', content: 'x' }],
-          stream: false,
-        }),
-      })
       assert.equal(r.status, 200)
       assert.deepEqual(fake.configSets, [{ configId: 'model', value: 'swe-y' }])
       assert.equal((await r.json()).model, 'swe-y')
@@ -336,19 +314,12 @@ describe('serve /v1/* — the conductor plane', () => {
       },
     ]
     const fake = fakeAcpAgent({ replyText: 'ok', configOptions: DEVIN_OPTIONS })
-    const { url, close } = await listen(
-      deps({ provider: conductorProxy(CFG, { acp: { peer: fake.app } }) })
-    )
+    const { r, close } = await postMessages(fake, {
+      model: 'dv-acp/swe-2-max',
+      messages: [{ role: 'user', content: 'x' }],
+      stream: false,
+    })
     try {
-      const r = await fetch(`${url}/v1/messages`, {
-        method: 'POST',
-        headers: { ...auth, 'content-type': 'application/json' },
-        body: JSON.stringify({
-          model: 'dv-acp/swe-2-max',
-          messages: [{ role: 'user', content: 'x' }],
-          stream: false,
-        }),
-      })
       assert.equal(r.status, 200)
       assert.deepEqual(fake.configSets, [
         { configId: 'model', value: 'swe-2-high' },
@@ -383,19 +354,12 @@ describe('serve /v1/* — the conductor plane', () => {
       },
     ]
     const fake = fakeAcpAgent({ replyText: 'ok', configOptions: LIVE })
-    const { url, close } = await listen(
-      deps({ provider: conductorProxy(CFG, { acp: { peer: fake.app } }) })
-    )
+    const { r, close } = await postMessages(fake, {
+      model: 'dv-acp/swe-2-max',
+      messages: [{ role: 'user', content: 'x' }],
+      stream: false,
+    })
     try {
-      const r = await fetch(`${url}/v1/messages`, {
-        method: 'POST',
-        headers: { ...auth, 'content-type': 'application/json' },
-        body: JSON.stringify({
-          model: 'dv-acp/swe-2-max',
-          messages: [{ role: 'user', content: 'x' }],
-          stream: false,
-        }),
-      })
       assert.equal(r.status, 200)
       assert.deepEqual(fake.configSets, [])
       assert.equal((await r.json()).model, 'swe-2-max')
@@ -406,18 +370,8 @@ describe('serve /v1/* — the conductor plane', () => {
 
   test('stream:false answers a buffered anthropic message', async () => {
     const fake = fakeAcpAgent({ replyText: 'plain', configOptions: [MODEL_OPTION] })
-    const { url, close } = await listen(
-      deps({ provider: conductorProxy(CFG, { acp: { peer: fake.app } }) })
-    )
+    const { r, close } = await postMessages(fake)
     try {
-      const r = await fetch(`${url}/v1/messages`, {
-        method: 'POST',
-        headers: { ...auth, 'content-type': 'application/json' },
-        body: JSON.stringify({
-          messages: [{ role: 'user', content: 'x' }],
-          stream: false,
-        }),
-      })
       assert.equal(r.headers.get('content-type'), 'application/json')
       const body = await r.json()
       assert.equal(body.type, 'message')
@@ -460,16 +414,12 @@ describe('serve /v1/* — the conductor plane', () => {
 
   test('a tool-less backend serves its configured pin as label and catalog row', async () => {
     const fake = fakeAcpAgent({ replyText: 'sum' })
-    const cfg = { ...CFG, entry: { ...CFG.entry, model: 'swe-sum' } }
-    const { url, close } = await listen(
-      deps({ provider: conductorProxy(cfg, { acp: { peer: fake.app } }) })
+    const { r, url, close } = await postMessages(
+      fake,
+      { messages: [{ role: 'user', content: 'x' }], stream: false },
+      { ...CFG, entry: { ...CFG.entry, model: 'swe-sum' } }
     )
     try {
-      const r = await fetch(`${url}/v1/messages`, {
-        method: 'POST',
-        headers: { ...auth, 'content-type': 'application/json' },
-        body: JSON.stringify({ messages: [{ role: 'user', content: 'x' }], stream: false }),
-      })
       assert.equal(r.status, 200)
       assert.equal((await r.json()).model, 'swe-sum')
       assert.deepEqual(fake.configSets, [])
@@ -486,15 +436,8 @@ describe('serve /v1/* — the conductor plane', () => {
 
   test('an unpinned tool-less backend answers "unknown" and an empty catalog', async () => {
     const fake = fakeAcpAgent({ replyText: 'sum' })
-    const { url, close } = await listen(
-      deps({ provider: conductorProxy(CFG, { acp: { peer: fake.app } }) })
-    )
+    const { r, url, close } = await postMessages(fake)
     try {
-      const r = await fetch(`${url}/v1/messages`, {
-        method: 'POST',
-        headers: { ...auth, 'content-type': 'application/json' },
-        body: JSON.stringify({ messages: [{ role: 'user', content: 'x' }], stream: false }),
-      })
       assert.equal(r.status, 200)
       assert.equal((await r.json()).model, 'unknown')
       const m = await fetch(`${url}/v1/models`, { headers: auth })
@@ -540,15 +483,8 @@ describe('serve /v1/* — the conductor plane', () => {
 
   test('backend errors map to anthropic-shaped errors, never a hang', async () => {
     const fake = fakeAcpAgent({ configOptions: [MODEL_OPTION], failPrompt: 'generic' })
-    const { url, close } = await listen(
-      deps({ provider: conductorProxy(CFG, { acp: { peer: fake.app } }) })
-    )
+    const { r, close } = await postMessages(fake)
     try {
-      const r = await fetch(`${url}/v1/messages`, {
-        method: 'POST',
-        headers: { ...auth, 'content-type': 'application/json' },
-        body: JSON.stringify({ messages: [{ role: 'user', content: 'x' }], stream: false }),
-      })
       assert.equal(r.status, 529)
       const body = await r.json()
       assert.equal(body.type, 'error')
