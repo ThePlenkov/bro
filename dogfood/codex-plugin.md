@@ -14,7 +14,7 @@ armed, `.codex/config.toml` wiring the conductor listener (provider
 `bro`, `wire_api = "responses"`, `env_key = "BRO_SERVE_TOKEN"`), and
 `bro.config.local.json` carrying the acp provider the conductor
 serves. The token reaches the session through `bro serve ensure
---port 44930`, exported by the spawn command as `BRO_SERVE_TOKEN`.
+--port {{PORT}}`, exported by the spawn command as `BRO_SERVE_TOKEN`.
 
 ## Steps
 

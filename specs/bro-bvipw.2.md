@@ -30,11 +30,10 @@ the config points codex at).
   (exercises the effort→composite-pin fold end-to-end).
 - `bro.config.local.json` — `serve.backend = devin-acp-max` plus the
   codex spawn template exporting the token:
-  `BRO_SERVE_TOKEN=$(npx --no-install bro serve ensure --port 44930)`
+  `BRO_SERVE_TOKEN=$(npx --no-install bro serve ensure --port {{PORT}})`
   — `env_key` names an env var, so the export must happen in the
-  spawn command itself.
-- Port `44930` — distinct from claude's `44928` so both dogfoods can
-  hold listeners concurrently.
+  spawn command itself. `{{PORT}}` resolves to the run's allocated
+  port at provision (one run's serve never squats another's).
 
 ### 3. `dogfood/codex-plugin.md` — the scenario
 

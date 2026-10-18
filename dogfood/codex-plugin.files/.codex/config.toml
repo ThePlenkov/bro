@@ -8,7 +8,7 @@ model_reasoning_effort = "high"
 
 [model_providers.bro]
 name = "bro conductor"
-base_url = "http://127.0.0.1:44930/v1"
+base_url = "http://127.0.0.1:{{PORT}}/v1"
 wire_api = "responses"
 # the spawn command exports BRO_SERVE_TOKEN from `bro serve ensure`
 env_key = "BRO_SERVE_TOKEN"
