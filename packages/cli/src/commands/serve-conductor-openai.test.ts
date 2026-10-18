@@ -48,21 +48,32 @@ const CFG: ConductorConfig = {
   timeoutMs: 10_000,
 }
 
-/** Boot the conductor over `fake` and POST /v1/responses —
- *  caller owns close() and reads `r`. */
+/** Boot the conductor over `fake` — caller owns close() and gets a
+ *  bound post(path, body) for /v1/* sends. */
+async function boot(fake: ReturnType<typeof fakeAcpAgent>): Promise<{
+  url: string
+  post: (path: string, body: unknown) => Promise<Response>
+  close: () => Promise<void>
+}> {
+  const { url, close } = await listen(
+    deps({ provider: conductorProxy(CFG, { acp: { peer: fake.app } }) })
+  )
+  const post = (path: string, body: unknown) =>
+    fetch(`${url}${path}`, {
+      method: 'POST',
+      headers: { ...auth, 'content-type': 'application/json' },
+      body: JSON.stringify(body),
+    })
+  return { url, post, close }
+}
+
+/** boot() + one /v1/responses POST — caller reads `r`, owns close(). */
 async function postResponses(
   fake: ReturnType<typeof fakeAcpAgent>,
   body: unknown = { input: 'x', stream: false }
 ): Promise<{ r: Response; url: string; close: () => Promise<void> }> {
-  const { url, close } = await listen(
-    deps({ provider: conductorProxy(CFG, { acp: { peer: fake.app } }) })
-  )
-  const r = await fetch(`${url}/v1/responses`, {
-    method: 'POST',
-    headers: { ...auth, 'content-type': 'application/json' },
-    body: JSON.stringify(body),
-  })
-  return { r, url, close }
+  const { url, post, close } = await boot(fake)
+  return { r: await post('/v1/responses', body), url, close }
 }
 
 async function evs(r: Response): Promise<{ event: string; data: Record<string, unknown> }[]> {
@@ -194,19 +205,11 @@ describe('serve /v1/responses — the openai dialect', () => {
 
   test('previous_response_id chains into the retained session', async () => {
     const fake = fakeAcpAgent({ replyText: 'r1', configOptions: [MODEL_OPTION] })
-    const { url, close } = await listen(
-      deps({ provider: conductorProxy(CFG, { acp: { peer: fake.app } }) })
-    )
+    const { post, close } = await boot(fake)
     try {
-      const post = (body: unknown) =>
-        fetch(`${url}/v1/responses`, {
-          method: 'POST',
-          headers: { ...auth, 'content-type': 'application/json' },
-          body: JSON.stringify(body),
-        })
-      const t1 = await post({ input: 'first', stream: false })
+      const t1 = await post('/v1/responses', { input: 'first', stream: false })
       const id1 = ((await t1.json()) as { id: string }).id
-      const t2 = await post({
+      const t2 = await post('/v1/responses', {
         input: [{ type: 'message', role: 'user', content: [{ type: 'input_text', text: 'second' }] }],
         previous_response_id: id1,
         stream: false,
@@ -224,25 +227,17 @@ describe('serve /v1/responses — the openai dialect', () => {
 
   test('a store:false continuation still consumes the session — the same predecessor then reads as superseded', async () => {
     const fake = fakeAcpAgent({ replyText: 'ok', configOptions: [MODEL_OPTION] })
-    const { url, close } = await listen(
-      deps({ provider: conductorProxy(CFG, { acp: { peer: fake.app } }) })
-    )
+    const { post, close } = await boot(fake)
     try {
-      const post = (body: unknown) =>
-        fetch(`${url}/v1/responses`, {
-          method: 'POST',
-          headers: { ...auth, 'content-type': 'application/json' },
-          body: JSON.stringify(body),
-        })
-      const a = await post({ input: 'one', stream: false })
+      const a = await post('/v1/responses', { input: 'one', stream: false })
       const idA = ((await a.json()) as { id: string }).id
       // non-stored B chains from A — runs in A's session but registers
       // no chain id; the session's consumed point must still advance
-      const b = await post({ input: 'two', previous_response_id: idA, store: false })
+      const b = await post('/v1/responses', { input: 'two', previous_response_id: idA, store: false })
       assert.equal(b.status, 200)
       // C chained from A is now a branch: the session already holds B's
       // turn — answering would silently include hidden context
-      const c = await post({ input: 'three', previous_response_id: idA, stream: false })
+      const c = await post('/v1/responses', { input: 'three', previous_response_id: idA, stream: false })
       assert.equal(c.status, 400)
       const errBody = (await c.json()) as { error: { message: string } }
       assert.match(errBody.error.message, /superseded/)
@@ -281,19 +276,14 @@ describe('serve /v1/responses — the openai dialect', () => {
   })
 })
 
+/** boot() + one /v1/chat/completions POST — same shape as
+ *  postResponses. */
 async function postChat(
   fake: ReturnType<typeof fakeAcpAgent>,
   body: unknown = { messages: [{ role: 'user', content: 'x' }] }
 ): Promise<{ r: Response; url: string; close: () => Promise<void> }> {
-  const { url, close } = await listen(
-    deps({ provider: conductorProxy(CFG, { acp: { peer: fake.app } }) })
-  )
-  const r = await fetch(`${url}/v1/chat/completions`, {
-    method: 'POST',
-    headers: { ...auth, 'content-type': 'application/json' },
-    body: JSON.stringify(body),
-  })
-  return { r, url, close }
+  const { url, post, close } = await boot(fake)
+  return { r: await post('/v1/chat/completions', body), url, close }
 }
 
 describe('serve /v1/chat/completions — the stateless chat dialect', () => {
@@ -404,18 +394,12 @@ describe('serve /v1/chat/completions — the stateless chat dialect', () => {
 
   test('an identical resend replays without a second acp turn', async () => {
     const fake = fakeAcpAgent({ replyText: 'r1', configOptions: [MODEL_OPTION] })
-    const { url, close } = await listen(
-      deps({ provider: conductorProxy(CFG, { acp: { peer: fake.app } }) })
-    )
+    const { post, close } = await boot(fake)
     try {
-      const post = () =>
-        fetch(`${url}/v1/chat/completions`, {
-          method: 'POST',
-          headers: { ...auth, 'content-type': 'application/json' },
-          body: JSON.stringify({ messages: [{ role: 'user', content: 'hi' }] }),
-        })
-      await post()
-      const t2 = await post()
+      const call = () =>
+        post('/v1/chat/completions', { messages: [{ role: 'user', content: 'hi' }] })
+      await call()
+      const t2 = await call()
       assert.equal(t2.status, 200)
       const body = await t2.json()
       assert.equal(body.choices[0].message.content, 'r1')
@@ -515,16 +499,13 @@ describe('output caps + loud input failures', () => {
 
   test('a stream:true resend answers SSE, never a JSON snapshot', async () => {
     const fake = fakeAcpAgent({ replyText: 'r1' })
-    const { url, close } = await postChat(fake)
+    const { post, close } = await boot(fake)
     try {
-      const post = (body: unknown) =>
-        fetch(`${url}/v1/chat/completions`, {
-          method: 'POST',
-          headers: { ...auth, 'content-type': 'application/json' },
-          body: JSON.stringify(body),
-        })
-      await post({ messages: [{ role: 'user', content: 'x' }] })
-      const r2 = await post({ messages: [{ role: 'user', content: 'x' }], stream: true })
+      await post('/v1/chat/completions', { messages: [{ role: 'user', content: 'x' }] })
+      const r2 = await post('/v1/chat/completions', {
+        messages: [{ role: 'user', content: 'x' }],
+        stream: true,
+      })
       assert.match(r2.headers.get('content-type') ?? '', /text\/event-stream/)
       const raw = await r2.text()
       assert.match(raw, /chat\.completion\.chunk/)
