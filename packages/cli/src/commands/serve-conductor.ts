@@ -102,7 +102,7 @@ export function conductorConfig(
     cwd: dir,
     timeoutMs: Number.isFinite(t) && t > 0 ? t : 120_000,
     keepaliveMs: (() => {
-      const k = Number(process.env.BRO_CONDUCTOR_KEEPALIVE_MS)
+      const k = Number(env.BRO_CONDUCTOR_KEEPALIVE_MS)
       return Number.isFinite(k) && k > 0 ? k : 10_000
     })(),
   }
@@ -208,7 +208,7 @@ function stopSeqsOf(body: MessagesRequest): string[] | undefined {
 /** The request's stop settings as one hashable string — part of the
  *  conversation identity: changed markers must not replay a reply
  *  recorded under different ones. */
-const stopKeyOf = (seqs: string[]): string => seqs.join('')
+const stopKeyOf = (seqs: string[]): string => JSON.stringify(seqs)
 
 type ClientMessage = NonNullable<MessagesRequest['messages']>[number]
 
@@ -1327,6 +1327,10 @@ async function parseMessagesBody(
       return undefined
     }
     apiError(res, 400, 'invalid_request_error', 'malformed JSON body')
+    return undefined
+  }
+  if (body === null || typeof body !== 'object') {
+    apiError(res, 400, 'invalid_request_error', 'request body must be a JSON object')
     return undefined
   }
   const badTurn = (m: unknown): boolean =>
