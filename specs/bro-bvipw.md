@@ -22,7 +22,7 @@ driven by the real clients.
 
 The canonical pipeline stays dialect-agnostic:
 
-```
+```text
 ingress parse (per dialect)
   → canonical request { system, transcript, tools, pin, stream }
   → acp turn (retained session per conversation)
@@ -38,7 +38,7 @@ below the seam. The `<tool_call>` reply-markup emulation is shared
 ### Wire: `POST /v1/messages`
 
 | feature | status | note |
-|---|---|---|
+| --- | --- | --- |
 | `messages` text turns | ✅ | serialized into `<turn>` transcript |
 | `system` string / block array | ✅ | `<system>` prefix |
 | `tools` definitions | ✅ | `<tools>` contract; replies parse `<tool_call>` markup → `tool_use` blocks |
@@ -61,14 +61,14 @@ below the seam. The `<tool_call>` reply-markup emulation is shared
 ### Wire: other endpoints
 
 | endpoint | status |
-|---|---|
+| --- | --- |
 | `POST /v1/messages/count_tokens` | ✅ estimate |
 | `GET /v1/models` | ✅ catalog rows |
 
 ### Error taxonomy (currently thin — implement)
 
 | case | today | target |
-|---|---|---|
+| --- | --- | --- |
 | backend dead/unspawnable | 529 `overloaded_error` | keep |
 | backend quota/rate-limited | 529 | 429 `rate_limit_error` + `Retry-After` (implemented) |
 | malformed body / bad field | 500-ish | 400 `invalid_request_error` (implemented; `stop_sequences` non-array → 400) |
@@ -85,7 +85,7 @@ below the seam. The `<tool_call>` reply-markup emulation is shared
 ### Claude Code settings surface
 
 | setting | gateway cares? |
-|---|---|
+| --- | --- |
 | `model` (`devin/swe-2-max`) | ✅ composite pin resolved per request |
 | `apiKeyHelper` | ✅ prints token; `bro serve ensure` keeps listener up |
 | `env.ANTHROPIC_BASE_URL` | ✅ points at the listener |
@@ -103,7 +103,7 @@ compat, deferred until a real client needs it.
 ### `POST /v1/responses` — ingress
 
 | field | handling |
-|---|---|
+| --- | --- |
 | `model` | same composite pin resolution |
 | `input` string | one user turn |
 | `input[]` items: `message` | role/content parts (`input_text`, `input_image`, `output_text`) → transcript |
@@ -124,7 +124,7 @@ compat, deferred until a real client needs it.
 
 Stream (`stream:true`), item-ordered:
 
-```
+```text
 response.created → response.in_progress
 → response.output_item.added (message)
 → response.content_part.added → response.output_text.delta*
@@ -151,7 +151,7 @@ separate from the anthropic envelope; the dialect owns its shape.
 ### Codex settings surface (config.toml)
 
 | key | gateway cares? |
-|---|---|
+| --- | --- |
 | `model`, `model_provider` | ✅ pin resolution |
 | `model_providers.<n>.base_url` | ✅ → listener |
 | `model_providers.<n>.env_key` | ✅ → bro token env |
@@ -169,7 +169,7 @@ export (`BRO_*` token).
 
 ### Integration (hermetic — fake ACP peer, `tsx --test`)
 
-```
+```text
 packages/cli/src/commands/
   serve-conductor.test.ts            anthropic plane (exists, 48)
   serve-conductor-features.test.ts   anthropic gaps
@@ -191,7 +191,7 @@ packages/cli/src/commands/
 
 ### Agentic e2e (dogfood scenarios — real clients on the gateway)
 
-```
+```text
 dogfood/
   claude-plugin.md      exists — native commands + hooks e2e
   claude-basics.md      model pin, streaming, multi-turn — headless claude
