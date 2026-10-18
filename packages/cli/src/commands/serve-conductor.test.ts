@@ -8,6 +8,7 @@ import { join } from 'node:path'
 import type { SessionConfigOption, SessionUpdate } from '@agentclientprotocol/sdk'
 import { fakeAcpAgent } from '@broject/providers/testkit'
 import { conductorConfig, conductorProxy, parseReply } from './serve-conductor.ts'
+import type { ConductorConfig } from './serve-conductor.ts'
 import { authHeaders, listen, serveDeps as deps } from './serve-testkit.ts'
 
 const MODEL_OPTION: SessionConfigOption = {
@@ -32,22 +33,37 @@ const chunks = (...texts: string[]): SessionUpdate[] =>
     content: { type: 'text' as const, text },
   }))
 
-/** Boot the conductor over `fake` and POST /v1/messages — caller owns
- *  close(). The one fetch shape every test repeats lives here. */
-async function postMessages(
+/** Boot the conductor over `fake` — caller owns close() and gets a
+ *  bound post() for repeated /v1/messages sends. */
+async function boot(
   fake: ReturnType<typeof fakeAcpAgent>,
-  body: unknown = { messages: [{ role: 'user', content: 'x' }], stream: false },
-  cfg: typeof CFG = CFG
-): Promise<{ r: Response; url: string; close: () => Promise<void> }> {
+  cfg: ConductorConfig = CFG
+): Promise<{
+  url: string
+  post: (body: unknown) => Promise<Response>
+  close: () => Promise<void>
+}> {
   const { url, close } = await listen(
     deps({ provider: conductorProxy(cfg, { acp: { peer: fake.app } }) })
   )
-  const r = await fetch(`${url}/v1/messages`, {
-    method: 'POST',
-    headers: { ...auth, 'content-type': 'application/json' },
-    body: JSON.stringify(body),
-  })
-  return { r, url, close }
+  const post = (body: unknown) =>
+    fetch(`${url}/v1/messages`, {
+      method: 'POST',
+      headers: { ...auth, 'content-type': 'application/json' },
+      body: JSON.stringify(body),
+    })
+  return { url, post, close }
+}
+
+/** Boot the conductor over `fake` and POST /v1/messages —
+ *  caller owns close() and reads `r`. */
+async function postMessages(
+  fake: ReturnType<typeof fakeAcpAgent>,
+  body: unknown = { messages: [{ role: 'user', content: 'x' }], stream: false },
+  cfg: ConductorConfig = CFG
+): Promise<{ r: Response; url: string; close: () => Promise<void> }> {
+  const { url, post, close } = await boot(fake, cfg)
+  return { r: await post(body), url, close }
 }
 
 /** Collected text_delta payloads from a parsed SSE stream. */
@@ -71,12 +87,13 @@ function stopReason(ev: Awaited<ReturnType<typeof sseEvents>>): string {
  *  caller owns close() (stream:true is the shape under test here). */
 async function postStream(
   fake: ReturnType<typeof fakeAcpAgent>,
-  body: unknown = { messages: [{ role: 'user', content: 'x' }], stream: true }
+  body: unknown = { messages: [{ role: 'user', content: 'x' }], stream: true },
+  cfg: ConductorConfig = CFG
 ): Promise<{ r: Response; url: string; close: () => Promise<void> }> {
-  return postMessages(fake, body)
+  return postMessages(fake, body, cfg)
 }
 
-const CFG = {
+const CFG: ConductorConfig = {
   backend: 'dv-acp',
   entry: { type: 'acp' as const, command: 'dv acp' } as {
     type: 'acp'
@@ -975,4 +992,265 @@ describe('serve /v1/* — retained acp sessions', () => {
       assert.equal(r.status, 200)
       assert.deepEqual(fake.configSets, [{ configId: 'model', value: 'swe-y' }])
     }))
+})
+
+// bro-bvipw.1 — the anthropic surface beyond the happy path:
+// tool_choice steers the contract, stop_sequences truncate the wire,
+// errors classify into the wire's own taxonomy, and a held turn keeps
+// the stream alive with pings.
+describe('serve /v1/* — tool_choice, stop_sequences, error taxonomy, keepalive', () => {
+  const tools = [
+    { name: 'ls', description: 'list', input_schema: { type: 'object' } },
+  ]
+  const withTools = (choice?: unknown) => ({
+    messages: [{ role: 'user', content: 'go' }],
+    tools,
+    tool_choice: choice,
+    stream: false,
+  })
+
+  // one boot + one prompt assertion per row — the contract text each
+  // tool_choice mode produces (or withholds)
+  const choiceCases: { name: string; choice: unknown; want?: RegExp; notWant?: string }[] = [
+    { name: 'auto leaves the contract alone', choice: { type: 'auto' }, want: /<tools>/, notWant: 'MUST' },
+    {
+      name: 'any appends a must-call line to the contract',
+      choice: { type: 'any' },
+      want: /<tools>[\s\S]*MUST respond with a tool call/,
+    },
+    { name: 'tool names the required call', choice: { type: 'tool', name: 'ls' }, want: /MUST call the tool "ls"/ },
+    { name: 'none withholds the tools contract', choice: { type: 'none' }, notWant: '<tools>' },
+  ]
+  for (const c of choiceCases) {
+    test(`tool_choice ${c.name}`, async () => {
+      const fake = fakeAcpAgent({ replyText: 'ok', configOptions: [MODEL_OPTION] })
+      const { close } = await postMessages(fake, withTools(c.choice))
+      try {
+        const prompt = fake.prompts[0] ?? ''
+        if (c.want !== undefined) assert.match(prompt, c.want)
+        if (c.notWant !== undefined) assert.ok(!prompt.includes(c.notWant), prompt)
+      } finally {
+        await close()
+      }
+    })
+  }
+
+  test('stop_sequences cut streamed text at a marker split across deltas', async () => {
+    const fake = fakeAcpAgent({
+      updates: chunks('hello ST', 'OP world'),
+      configOptions: [MODEL_OPTION],
+    })
+    const { r, close } = await postStream(fake, {
+      messages: [{ role: 'user', content: 'x' }],
+      stop_sequences: ['STOP'],
+      stream: true,
+    })
+    try {
+      const ev = await sseEvents(r)
+      assert.equal(textDeltas(ev).join(''), 'hello ')
+      assert.equal(stopReason(ev), 'stop_sequence')
+      const md = ev.find((e) => e.event === 'message_delta')
+      assert.equal((md?.data.delta as { stop_sequence: string }).stop_sequence, 'STOP')
+    } finally {
+      await close()
+    }
+  })
+
+  test('a stop hit mutes later tool narration — nothing emits past the cut', async () => {
+    const fake = fakeAcpAgent({
+      updates: [
+        ...chunks('hello STOP'),
+        {
+          sessionUpdate: 'tool_call',
+          toolCallId: 'tc-9',
+          title: 'exec: rm -rf',
+          kind: 'execute',
+          status: 'in_progress',
+        } as SessionUpdate,
+        ...chunks(' trailing'),
+      ],
+      configOptions: [MODEL_OPTION],
+    })
+    const { r, close } = await postStream(fake, {
+      messages: [{ role: 'user', content: 'x' }],
+      stop_sequences: ['STOP'],
+      stream: true,
+    })
+    try {
+      const ev = await sseEvents(r)
+      assert.equal(textDeltas(ev).join(''), 'hello ')
+      assert.equal(stopReason(ev), 'stop_sequence')
+    } finally {
+      await close()
+    }
+  })
+
+  test('stop_sequences truncate the buffered reply and report stop_sequence', async () => {
+    const fake = fakeAcpAgent({ replyText: 'abc MARK tail', configOptions: [MODEL_OPTION] })
+    const { r, close } = await postMessages(fake, {
+      messages: [{ role: 'user', content: 'x' }],
+      stop_sequences: ['MARK'],
+      stream: false,
+    })
+    try {
+      const body = await r.json()
+      assert.equal(body.stop_reason, 'stop_sequence')
+      assert.equal(body.stop_sequence, 'MARK')
+      assert.equal(body.content[0].text, 'abc ')
+    } finally {
+      await close()
+    }
+  })
+
+  test('an absent stop_sequence holds nothing back — tail flushes whole', async () => {
+    const fake = fakeAcpAgent({
+      updates: chunks('end without ma', 'rker'),
+      configOptions: [MODEL_OPTION],
+    })
+    const { r, close } = await postStream(fake, {
+      messages: [{ role: 'user', content: 'x' }],
+      stop_sequences: ['NOMATCH'],
+      stream: true,
+    })
+    try {
+      const ev = await sseEvents(r)
+      assert.equal(textDeltas(ev).join(''), 'end without marker')
+    } finally {
+      await close()
+    }
+  })
+
+  test('a missing messages array answers 400 invalid_request_error', async () => {
+    const fake = fakeAcpAgent({ replyText: 'x' })
+    const { r, close } = await postMessages(fake, { model: 'x', stream: false })
+    try {
+      assert.equal(r.status, 400)
+      const body = await r.json()
+      assert.equal(body.error.type, 'invalid_request_error')
+    } finally {
+      await close()
+    }
+  })
+
+  test('a rate-limited backend answers 429 + Retry-After', async () => {
+    const fake = fakeAcpAgent({ configOptions: [MODEL_OPTION], failPrompt: 'rate-limit' })
+    const { r, close } = await postMessages(fake)
+    try {
+      assert.equal(r.status, 429)
+      assert.ok(r.headers.get('retry-after') !== null)
+      const body = await r.json()
+      assert.equal(body.error.type, 'rate_limit_error')
+    } finally {
+      await close()
+    }
+  })
+
+  test('a held stream emits keepalive pings until the turn lands', async () => {
+    let release!: () => void
+    const gate = new Promise<void>((resolve) => {
+      release = resolve
+    })
+    const fake = fakeAcpAgent({
+      updates: chunks('after'),
+      holdEnd: () => gate,
+      configOptions: [MODEL_OPTION],
+    })
+    const { r, close } = await postStream(
+      fake,
+      { messages: [{ role: 'user', content: 'x' }], stream: true },
+      { ...CFG, keepaliveMs: 40 }
+    )
+    try {
+      await new Promise((resolve) => setTimeout(resolve, 150))
+      release()
+      const ev = await sseEvents(r)
+      assert.ok(ev.some((e) => e.event === 'ping'), 'ping event present')
+      assert.equal(stopReason(ev), 'end_turn')
+    } finally {
+      await close()
+    }
+  })
+
+  test('a streamed stop_sequence hit still records the cut reply for replay', async () => {
+    const fake = fakeAcpAgent({ replyText: 'abc MARK tail', configOptions: [MODEL_OPTION] })
+    const { post, close } = await boot(fake)
+    try {
+      const body = {
+        messages: [{ role: 'user', content: 'x' }],
+        stop_sequences: ['MARK'],
+        stream: true,
+      }
+      const ev = await sseEvents(await post(body))
+      assert.equal(textDeltas(ev).join(''), 'abc ')
+      // the resend replays the recorded reply — the cut text, not ''
+      const re = await sseEvents(await post(body))
+      assert.equal(textDeltas(re).join(''), 'abc ')
+      assert.equal(stopReason(re), 'stop_sequence')
+    } finally {
+      await close()
+    }
+  })
+
+  test('a cross-chunk stop hit records the streamed cut, not a full-text re-match', async () => {
+    const fake = fakeAcpAgent({
+      updates: chunks('abc', 'd'),
+      configOptions: [MODEL_OPTION],
+    })
+    const { post, close } = await boot(fake)
+    try {
+      const body = {
+        messages: [{ role: 'user', content: 'x' }],
+        stop_sequences: ['abcd', 'bc'],
+        stream: true,
+      }
+      // 'bc' completes first in stream order — the cut is 'a', even
+      // though 'abcd' sits earlier in the settled text
+      const ev = await sseEvents(await post(body))
+      assert.equal(textDeltas(ev).join(''), 'a')
+      assert.equal(stopReason(ev), 'stop_sequence')
+      const replay = await sseEvents(await post(body))
+      assert.equal(textDeltas(replay).join(''), 'a')
+      assert.equal(stopReason(replay), 'stop_sequence')
+    } finally {
+      await close()
+    }
+  })
+
+  test('changed stop_sequences on identical history take a fresh turn, not a replay', async () => {
+    const fake = fakeAcpAgent({ replyText: 'abc MARK tail', configOptions: [MODEL_OPTION] })
+    const { post, close } = await boot(fake)
+    try {
+      const postSeq = (stop_sequences: string[]) =>
+        post({
+          messages: [{ role: 'user', content: 'x' }],
+          stop_sequences,
+          stream: false,
+        })
+      const first = await (await postSeq(['MARK'])).json()
+      assert.equal(first.content[0].text, 'abc ')
+      // same history, different markers — the recorded reply must not
+      // replay; a fresh turn runs and answers under the new stops
+      const second = await (await postSeq(['NOMATCH'])).json()
+      assert.equal(second.content[0].text, 'abc MARK tail')
+      assert.equal(fake.prompts.length, 2)
+    } finally {
+      await close()
+    }
+  })
+
+  test('a non-array stop_sequences answers 400 invalid_request_error', async () => {
+    const fake = fakeAcpAgent({ replyText: 'x', configOptions: [MODEL_OPTION] })
+    const { post, close } = await boot(fake)
+    try {
+      const r = await post({
+        messages: [{ role: 'user', content: 'x' }],
+        stop_sequences: 'STOP',
+      })
+      assert.equal(r.status, 400)
+      const body = await r.json()
+      assert.equal(body.error.type, 'invalid_request_error')
+    } finally {
+      await close()
+    }
+  })
 })
