@@ -637,33 +637,43 @@ class LiveTurn {
    *  Dedup keys on toolCallId when the agent supplies one — an id-less
    *  update can't be correlated, so it narrates every time. */
   private narrateTool(u: SessionUpdate): string | undefined {
-    if (u.sessionUpdate === 'tool_call') {
-      const id = u.toolCallId
-      if (id !== undefined && this.toolStarted.has(id)) return undefined
-      if (id !== undefined) this.toolStarted.add(id)
-      const label = shortLabel(u.title ?? u.name ?? u.kind ?? 'tool call')
-      if (id !== undefined) this.toolLabels.set(id, label)
-      const start = `\n⏺ ${label}\n`
-      // a tool_call can itself arrive already terminal — open and close
-      // the edge in one update so nothing stays mid-flight forever
-      if (u.status === 'completed' || u.status === 'failed') {
-        if (id !== undefined) this.toolDone.add(id)
-        return `${start}${u.status === 'failed' ? '✗' : '✓'} ${label}\n`
-      }
-      return start
-    }
-    if (
-      u.sessionUpdate === 'tool_call_update' &&
-      (u.status === 'completed' || u.status === 'failed')
-    ) {
-      const id = u.toolCallId
-      if (id !== undefined && this.toolDone.has(id)) return undefined
-      if (id !== undefined) this.toolDone.add(id)
-      const known = id !== undefined ? this.toolLabels.get(id) : undefined
-      const label = shortLabel(u.title ?? u.name ?? known ?? 'tool call')
-      return `\n${u.status === 'failed' ? '✗' : '✓'} ${label}\n`
-    }
+    if (u.sessionUpdate === 'tool_call') return this.narrateStart(u)
+    if (u.sessionUpdate === 'tool_call_update') return this.narrateTerminal(u)
     return undefined
+  }
+
+  private narrateStart(u: SessionUpdate): string | undefined {
+    if (u.sessionUpdate !== 'tool_call') return undefined
+    const id = u.toolCallId
+    if (id !== undefined) {
+      if (this.toolStarted.has(id)) return undefined
+      this.toolStarted.add(id)
+    }
+    const label = shortLabel(u.title ?? u.name ?? u.kind ?? 'tool call')
+    if (id !== undefined) this.toolLabels.set(id, label)
+    const start = `\n⏺ ${label}\n`
+    // a tool_call can itself arrive already terminal — open and close
+    // the edge in one update so nothing stays mid-flight forever
+    if (u.status !== 'completed' && u.status !== 'failed') return start
+    if (id !== undefined) this.toolDone.add(id)
+    return `${start}${u.status === 'failed' ? '✗' : '✓'} ${label}\n`
+  }
+
+  private narrateTerminal(u: SessionUpdate): string | undefined {
+    if (
+      u.sessionUpdate !== 'tool_call_update' ||
+      (u.status !== 'completed' && u.status !== 'failed')
+    ) {
+      return undefined
+    }
+    const id = u.toolCallId
+    if (id !== undefined) {
+      if (this.toolDone.has(id)) return undefined
+      this.toolDone.add(id)
+    }
+    const known = id !== undefined ? this.toolLabels.get(id) : undefined
+    const label = shortLabel(u.title ?? u.name ?? known ?? 'tool call')
+    return `\n${u.status === 'failed' ? '✗' : '✓'} ${label}\n`
   }
 
   private blockStart(contentBlock: unknown): void {
