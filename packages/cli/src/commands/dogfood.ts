@@ -46,9 +46,11 @@ import {
   acquireFileLock,
   gitCommonDir,
   gitTry,
+  loadConfigLayers,
   LockTimeout,
   taskStoreAt,
   type AgentInfo,
+  type ProviderEntry,
 } from '@broject/core'
 import { loadAgentEnv, type AgentConnectorEnv } from '../agent-connectors.ts'
 import { collectAgentBackends, spawnStepAgent } from './agents.ts'
@@ -368,13 +370,25 @@ async function provisionRepo(
  *  provider entries. A payload's bro.config.local.json providers
  *  (CODEX_HOME/token wiring) must win over host layers — resolving
  *  providers from `dir` alone silently ignores the scenario's spawn
- *  template and the client falls back to ambient user setup. The
- *  registry/`dir` side stays host-rooted so agentView keeps finding
- *  the spawned ids. */
+ *  template and the client falls back to ambient user setup. Only the
+ *  scratch's own files count: the global layer inside a scratch load
+ *  would shadow the host's project-level providers with user-global
+ *  ones even when the payload defines nothing (greptile PRRT_…tr4Wn).
+ *  The registry/`dir` side stays host-rooted so agentView keeps
+ *  finding the spawned ids. */
 function runEnv(dir: string, scratch: string): AgentConnectorEnv {
   const env = loadAgentEnv(dir)
-  const over = loadAgentEnv(scratch).providers
-  return over === undefined ? env : { ...env, providers: { ...env.providers, ...over } }
+  const over: Record<string, ProviderEntry> = {}
+  for (const l of loadConfigLayers(scratch).layers) {
+    if (l.layer === 'global') continue
+    const p = l.raw.providers
+    if (typeof p === 'object' && p !== null) {
+      Object.assign(over, p)
+    }
+  }
+  return Object.keys(over).length === 0
+    ? env
+    : { ...env, providers: { ...env.providers, ...over } }
 }
 
 /** Resolve a live/terminal view of one agent id across backends. */
