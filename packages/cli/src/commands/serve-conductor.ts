@@ -43,6 +43,9 @@ export interface ConductorConfig {
   model?: string
   cwd: string
   timeoutMs: number
+  /** SSE ping cadence while a streamed turn is open — claude's read
+   *  timeout is the real constraint on slow acp turns. */
+  keepaliveMs?: number
 }
 
 /** BRO_PROVIDER_BACKEND resolves to the conductor's acp entry — a name
@@ -98,6 +101,7 @@ export function conductorConfig(
     model: model === undefined || model === '' ? entry.model : model,
     cwd: dir,
     timeoutMs: Number.isFinite(t) && t > 0 ? t : 120_000,
+    keepaliveMs: Number(process.env.BRO_CONDUCTOR_KEEPALIVE_MS) || 10_000,
   }
 }
 
@@ -130,6 +134,8 @@ interface MessagesRequest {
   system?: string | { text?: string }[]
   messages?: { role?: string; content?: string | InBlock[] }[]
   tools?: { name?: string; description?: string; input_schema?: unknown }[]
+  tool_choice?: { type?: string; name?: string }
+  stop_sequences?: string[]
   stream?: boolean
 }
 
@@ -152,8 +158,13 @@ function blockText(b: InBlock): string {
   return `[${b.type}]`
 }
 
-/** The tool contract — the agent's only way to answer tool_use. */
-function toolContract(tools: NonNullable<MessagesRequest['tools']>): string {
+/** The tool contract — the agent's only way to answer tool_use.
+ *  tool_choice steers the contract tail: any/tool carry a must-call
+ *  line (none withholds the whole contract upstream in prefixText). */
+function toolContract(
+  tools: NonNullable<MessagesRequest['tools']>,
+  choice: MessagesRequest['tool_choice']
+): string {
   const defs = tools
     .filter((t) => typeof t.name === 'string')
     .map(
@@ -161,11 +172,18 @@ function toolContract(tools: NonNullable<MessagesRequest['tools']>): string {
         `- ${t.name}: ${t.description ?? ''} input_schema: ${JSON.stringify(t.input_schema ?? {})}`
     )
     .join('\n')
+  const must =
+    choice?.type === 'any'
+      ? 'You MUST respond with a tool call.'
+      : choice?.type === 'tool' && typeof choice.name === 'string'
+        ? `You MUST call the tool "${choice.name}".`
+        : undefined
   return [
     '<tools>',
     'Call tools by emitting exactly, one per call:',
     '<tool_call>{"name":"<name>","input":{<args>}}</tool_call>',
     defs === '' ? 'No tools available.' : `Available tools:\n${defs}`,
+    ...(must !== undefined ? [must] : []),
     '</tools>',
   ].join('\n')
 }
@@ -197,8 +215,12 @@ function prefixText(body: MessagesRequest): string {
   if (system !== '') {
     parts.push(`<system>\n${system}\n</system>`)
   }
-  if (body.tools !== undefined && body.tools.length > 0) {
-    parts.push(toolContract(body.tools))
+  if (
+    body.tools !== undefined &&
+    body.tools.length > 0 &&
+    body.tool_choice?.type !== 'none'
+  ) {
+    parts.push(toolContract(body.tools, body.tool_choice))
   }
   return parts.join('\n\n')
 }
@@ -300,7 +322,13 @@ interface ConvSession {
   /** raw request-model id the session currently runs — a resend that
    *  pins a different model re-pins instead of replaying. */
   requestModel?: string
-  lastReply: { blocks: OutBlock[]; model: string; stopReason: string; inputTokens: number }
+  lastReply: {
+    blocks: OutBlock[]
+    model: string
+    stopReason: string
+    stopSequence?: string
+    inputTokens: number
+  }
   busy: boolean
   lastSeen: number
 }
@@ -508,7 +536,8 @@ function emitBlocks(
   blocks: OutBlock[],
   model: string,
   stopReason: string,
-  inputTokens: number
+  inputTokens: number,
+  stopSequence?: string
 ): void {
   const msgId = `msg_${randomBytes(12).toString('hex')}`
   const outTokens = estTokens(JSON.stringify(blocks))
@@ -553,7 +582,7 @@ function emitBlocks(
   })
   sse(res, 'message_delta', {
     type: 'message_delta',
-    delta: { stop_reason: stopReason, stop_sequence: null },
+    delta: { stop_reason: stopReason, stop_sequence: stopSequence ?? null },
     usage: { output_tokens: outTokens },
   })
   sse(res, 'message_stop', { type: 'message_stop' })
@@ -579,6 +608,48 @@ function tagSuffix(s: string, tag: string): number {
   return 0
 }
 
+/** stop_sequences as an incremental cut — the marker can span deltas,
+ *  so feed() holds back the longest suffix that still prefixes any
+ *  sequence. A hit returns the pre-marker text once; everything after
+ *  is swallowed (generation stops — the wire's own semantics). */
+class StopFilter {
+  private tail = ''
+  hit: string | undefined
+
+  constructor(private readonly seqs: string[]) {}
+
+  feed(s: string): string {
+    if (this.hit !== undefined || this.seqs.length === 0) {
+      return this.hit === undefined ? s : ''
+    }
+    const buf = this.tail + s
+    let best = -1
+    let seq: string | undefined
+    for (const q of this.seqs) {
+      const i = buf.indexOf(q)
+      if (i !== -1 && (best === -1 || i < best)) {
+        best = i
+        seq = q
+      }
+    }
+    if (best !== -1) {
+      this.hit = seq
+      this.tail = ''
+      return buf.slice(0, best)
+    }
+    const hold = this.seqs.reduce((n, q) => Math.max(n, tagSuffix(buf, q)), 0)
+    this.tail = buf.slice(buf.length - hold)
+    return buf.slice(0, buf.length - hold)
+  }
+
+  /** Turn end without a hit — the held tail was never a marker. */
+  flush(): string {
+    const t = this.hit === undefined ? this.tail : ''
+    this.tail = ''
+    return t
+  }
+}
+
 /** Live SSE emission for a streaming turn (bro-728wl) — message_start
  *  leaves at turn start, text deltas flow inside one open text block,
  *  and each completed <tool_call> swaps to a tool_use block at the
@@ -594,11 +665,19 @@ class LiveTurn {
   private acc = ''
   stopReason = 'end_turn'
 
+  private readonly ping?: NodeJS.Timeout
+
   constructor(
     private readonly res: ServerResponse,
     model: string,
-    inputTokens: number
+    inputTokens: number,
+    private readonly stops: StopFilter | undefined,
+    pingMs?: number
   ) {
+    if (pingMs !== undefined && pingMs > 0) {
+      this.ping = setInterval(() => sse(res, 'ping', { type: 'ping' }), pingMs)
+      this.ping.unref()
+    }
     sse(res, 'message_start', {
       type: 'message_start',
       message: {
@@ -616,7 +695,8 @@ class LiveTurn {
 
   readonly onUpdate: NonNullable<PooledTurnOpts['onUpdate']> = (u) => {
     if (u.sessionUpdate === 'agent_message_chunk' && u.content.type === 'text') {
-      this.pending += u.content.text
+      // a stop_sequence hit cuts the wire here — later chunks swallow
+      this.pending += this.stops?.feed(u.content.text) ?? u.content.text
       this.drain(false)
       return
     }
@@ -789,8 +869,10 @@ class LiveTurn {
   }
 
   finish(stopReason: string): void {
+    if (this.stops !== undefined) this.pending += this.stops.flush()
     this.drain(true)
     this.closeBlock()
+    if (this.ping !== undefined) clearInterval(this.ping)
     if (this.idx === 0 && !this.sawTool) {
       // parity with the buffered shape — a silent turn still answers
       // with one (empty) text block
@@ -798,16 +880,21 @@ class LiveTurn {
       this.delta({ type: 'text_delta', text: '' })
       this.blockStop()
     }
-    this.stopReason = this.sawTool ? 'tool_use' : stopReason
+    this.stopReason = this.sawTool
+      ? 'tool_use'
+      : this.stops?.hit !== undefined
+        ? 'stop_sequence'
+        : stopReason
     sse(this.res, 'message_delta', {
       type: 'message_delta',
-      delta: { stop_reason: this.stopReason, stop_sequence: null },
+      delta: { stop_reason: this.stopReason, stop_sequence: this.stops?.hit ?? null },
       usage: { output_tokens: this.outputTokens() },
     })
     sse(this.res, 'message_stop', { type: 'message_stop' })
   }
 
   error(type: string, message: string): void {
+    if (this.ping !== undefined) clearInterval(this.ping)
     this.drain(true)
     this.closeBlock()
     sse(this.res, 'error', { type: 'error', error: { type, message } })
@@ -853,6 +940,9 @@ async function readBody(req: IncomingMessage): Promise<string> {
 }
 
 const AVAIL = /unavailable|timeout|timed out/i
+/** Quota walls are their own wire class — the client retries on a
+ *  schedule, never on a 5xx hunch. */
+const RATE = /rate.?limit|too many|quota|429/i
 
 /** text-char + image-wire token estimate — an image's true cost is
  *  dimension-based, not size-based; base64-length/4 is the rough wire
@@ -876,7 +966,8 @@ function respond(
   model: string,
   stopReason: string,
   inputTokens: number,
-  sessionKey?: string
+  sessionKey?: string,
+  stopSequence?: string
 ): void {
   const sessionHdr = sessionKey?.startsWith('h:') === true ? { 'x-bro-session': sessionKey } : {}
   if (body.stream === false) {
@@ -889,7 +980,7 @@ function respond(
         content: blocks,
         model,
         stop_reason: stopReason,
-        stop_sequence: null,
+        stop_sequence: stopSequence ?? null,
         usage: { input_tokens: inputTokens, output_tokens: estTokens(JSON.stringify(blocks)) },
       })
     )
@@ -901,7 +992,7 @@ function respond(
     connection: 'keep-alive',
     ...sessionHdr,
   })
-  emitBlocks(res, blocks, model, stopReason, inputTokens)
+  emitBlocks(res, blocks, model, stopReason, inputTokens, stopSequence)
   res.end()
 }
 
@@ -1120,8 +1211,10 @@ function turnError(
 ): void {
   const msg = err instanceof Error ? err.message : String(err)
   const avail = AVAIL.test(msg)
+  const rate = RATE.test(msg)
+  const liveType = rate ? 'rate_limit_error' : avail ? 'overloaded_error' : 'api_error'
   if (live !== undefined) {
-    live.error(avail ? 'overloaded_error' : 'api_error', `bro conductor: ${msg}`)
+    live.error(liveType, `bro conductor: ${msg}`)
     res.end()
     otelEvent('conductor.error', {
       backend,
@@ -1131,19 +1224,15 @@ function turnError(
     })
     return
   }
-  const status = avail ? 529 : 500
+  const status = rate ? 429 : avail ? 529 : 500
+  if (rate) res.setHeader('retry-after', '30')
   otelEvent('conductor.error', {
     backend,
     status,
     duration_ms: Date.now() - t0,
     error: msg.slice(0, 200),
   })
-  apiError(
-    res,
-    status,
-    avail ? 'overloaded_error' : 'api_error',
-    `bro conductor: ${msg}`
-  )
+  apiError(res, status, liveType, `bro conductor: ${msg}`)
 }
 
 /** The turn settled — every client message (including the echoes the
@@ -1158,12 +1247,13 @@ function settleConv(
   reply: PooledReply,
   blocks: OutBlock[],
   stopReason: string,
+  stopSequence: string | undefined,
   inputTokens: number
 ): void {
   const all = body.messages ?? []
   conv.consumed = all.length
   conv.historyHash = hashTurns(prefixText(body), all, all.length)
-  conv.lastReply = { blocks, model: reply.model, stopReason, inputTokens }
+  conv.lastReply = { blocks, model: reply.model, stopReason, stopSequence, inputTokens }
   if (key === undefined) return
   wire.sessions.delete(key)
   wire.sessions.set(key, conv)
@@ -1182,8 +1272,31 @@ async function messages(
     apiError(res, 400, 'invalid_request_error', 'malformed JSON body')
     return
   }
+  if (
+    !Array.isArray(body.messages) ||
+    body.messages.length === 0 ||
+    body.messages.some(
+      (m) =>
+        m === null ||
+        (m.role !== 'user' && m.role !== 'assistant') ||
+        (typeof m.content !== 'string' && !Array.isArray(m.content))
+    )
+  ) {
+    apiError(
+      res,
+      400,
+      'invalid_request_error',
+      'messages: a non-empty array of {role: user|assistant, content} turns is required'
+    )
+    return
+  }
   const t0 = Date.now()
   const key = conversationKey(req, body)
+  // one filter per turn — the streamed leg feeds it delta-by-delta,
+  // the buffered leg cuts reply.text below
+  const stops = new StopFilter(
+    (body.stop_sequences ?? []).filter((s): s is string => typeof s === 'string' && s !== '')
+  )
   // set when a streamed turn actually opens — a replay or a failed
   // session open never commits the wire to SSE
   let live: LiveTurn | undefined
@@ -1234,7 +1347,9 @@ async function messages(
               live = new LiveTurn(
                 res,
                 servedModel(requestModel, wire.opts, wire.cfg, body),
-                inputTokens
+                inputTokens,
+                stops,
+                wire.cfg.keepaliveMs ?? 10_000
               )
               return live.onUpdate
             },
@@ -1247,7 +1362,16 @@ async function messages(
   // no agent round-trip was paid
   if (out.replay === true) {
     const lr = out.conv?.lastReply
-    respond(res, body, lr?.blocks ?? [], lr?.model ?? '', lr?.stopReason ?? '', lr?.inputTokens ?? 0, key)
+    respond(
+      res,
+      body,
+      lr?.blocks ?? [],
+      lr?.model ?? '',
+      lr?.stopReason ?? '',
+      lr?.inputTokens ?? 0,
+      key,
+      lr?.stopSequence
+    )
     return
   }
   const reply = out.reply as PooledReply
@@ -1256,14 +1380,18 @@ async function messages(
   // closes the event shape; parseReply still runs so the settled reply
   // is recorded verbatim for a later replay
   live?.finish(STOP_REASON[reply.stopReason] ?? 'end_turn')
-  const blocks = parseReply(reply.text)
+  // the buffered leg's cut lands here — a streamed turn already fed
+  // the same filter per-delta; both record the text the client saw
+  const blocks = parseReply(stops.feed(reply.text) + stops.flush())
   const stopReason =
     live?.stopReason ??
     (blocks.some((b) => b.type === 'tool_use')
       ? 'tool_use'
-      : (STOP_REASON[reply.stopReason] ?? 'end_turn'))
+      : stops.hit !== undefined
+        ? 'stop_sequence'
+        : (STOP_REASON[reply.stopReason] ?? 'end_turn'))
   if (out.conv !== undefined) {
-    settleConv(wire, key, out.conv, body, reply, blocks, stopReason, inputTokens)
+    settleConv(wire, key, out.conv, body, reply, blocks, stopReason, stops.hit, inputTokens)
   }
   otelEvent('conductor.turn', {
     backend: wire.cfg.backend,
@@ -1281,7 +1409,7 @@ async function messages(
     res.end()
     return
   }
-  respond(res, body, blocks, reply.model, stopReason, inputTokens, key)
+  respond(res, body, blocks, reply.model, stopReason, inputTokens, key, stops.hit)
 }
 
 /** The anthropic /v1/models rows — the configured catalog source
