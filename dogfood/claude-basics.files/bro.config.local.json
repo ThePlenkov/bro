@@ -1,0 +1,13 @@
+{
+  "serve": {
+    "backend": "devin-acp-max"
+  },
+  "providers": {
+    "devin-acp-max": {
+      "type": "acp",
+      "command": "devin acp --model swe-2-max",
+      "autoApprove": true,
+      "sessionRm": "devin rm {sessionId} --force"
+    }
+  }
+}
