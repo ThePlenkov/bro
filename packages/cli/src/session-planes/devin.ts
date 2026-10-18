@@ -81,9 +81,10 @@ function devinSessionDirs(
 }
 
 /** The pid's cmdline identifies the devin CLI — argv[0]'s basename is
- *  `devin*` (the binary, `devin acp`, `devin -p`, interactive `devin`)
- *  or an argv element lives inside a `/devin/` install path (node/bun
- *  launching the versioned script). A live pid that fails this is a
+ *  `devin*` or lives inside a `/devin/` install path; argv[1] counts
+ *  only when argv[0] is a JS runtime launching the versioned script.
+ *  Later argv elements never prove identity — `git -C ~/devin/repo`
+ *  is not a devin session. A live pid that fails this is a
  *  RECYCLED pid: the session that wrote the lock is gone and an
  *  unrelated process holds the number — counting it starves the quota
  *  forever (the lock is foreign-owned; nothing reaps it).
@@ -100,10 +101,16 @@ export function devinPidIsSession(pid: number, procDir = '/proc'): boolean {
   } catch {
     return false
   }
-  return raw.split('\0').some((a) => {
+  const args = raw.split('\0').filter(Boolean)
+  if (args.length === 0) return false
+  const looksDevin = (a: string): boolean => {
     const base = a.slice(a.lastIndexOf('/') + 1)
     return base === 'devin' || base.startsWith('devin-') || a.includes('/devin/')
-  })
+  }
+  if (looksDevin(args[0]!)) return true
+  // a JS runtime's argv0 never names the payload — argv1 is the script
+  const rt = args[0]!.slice(args[0]!.lastIndexOf('/') + 1)
+  return /^(node|bun|deno|tsx)/.test(rt) && args.length > 1 && looksDevin(args[1]!)
 }
 
 /** Live devin session pids across the dirs — lock files whose pid is

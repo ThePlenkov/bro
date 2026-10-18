@@ -238,6 +238,11 @@ describe('devinPidIsSession', () => {
       assert.equal(devinPidIsSession(504, procDir), false)
       mk(505, null, null, '/usr/bin/herdr\0server\0')
       assert.equal(devinPidIsSession(505, procDir), false)
+      // a /devin/ path in a later argv element is not the binary
+      mk(507, null, null, 'git\0-C\0/home/u/devin/repo\0status\0')
+      assert.equal(devinPidIsSession(507, procDir), false)
+      mk(508, null, null, 'cat\0/tmp/devin/config.json\0')
+      assert.equal(devinPidIsSession(508, procDir), false)
       // no cmdline file — unverifiable, not devin
       mk(506, null, null, null)
       assert.equal(devinPidIsSession(506, procDir), false)

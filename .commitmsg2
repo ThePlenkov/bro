@@ -1,0 +1,15 @@
+fix(devin): argv0-scoped cmdline identity + scripted test fixtures (bro-0d7on)
+
+Review fixes on #587:
+
+- identity now reads argv[0] only — a `/devin/` substring in a later
+  argument (`git -C ~/devin/repo status`) is not a devin session;
+  argv[1] counts only when argv[0] is a JS runtime (node/bun/deno/tsx)
+  launching the versioned script inside the install tree
+- devin.test.ts gains the false-positive cases the review flagged
+- agent-connectors.test.ts: withDevinWorld's mk scripts a devin
+  cmdline by default, and the session-quota tests run against a
+  scripted procDir — the test runner's own non-devin cmdline no
+  longer silently empties the count under the new predicate
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
