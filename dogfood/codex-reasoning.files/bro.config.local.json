@@ -1,0 +1,17 @@
+{
+  "serve": {
+    "backend": "devin-acp-max"
+  },
+  "providers": {
+    "devin-acp-max": {
+      "type": "acp",
+      "command": "devin acp --model swe-2-max",
+      "autoApprove": true,
+      "sessionRm": "devin rm {sessionId} --force"
+    },
+    "codex": {
+      "type": "cli",
+      "command": "CODEX_HOME=$PWD/.codex BRO_SERVE_TOKEN=$(npx --no-install bro serve ensure --port {{PORT}}) codex exec --sandbox danger-full-access - < {promptFile}"
+    }
+  }
+}

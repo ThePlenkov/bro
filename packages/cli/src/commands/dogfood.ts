@@ -80,14 +80,15 @@ export function dogfoodHome(dir: string): string | null {
 
 // --- scenarios --------------------------------------------------------------
 
-/** Committed `dogfood/*.md` names (extension stripped). */
+/** Committed `dogfood/*.md` names (extension stripped) — index docs
+ *  (`matrix.md`) are documentation, not runnable scenarios. */
 export function listScenarios(dir: string): string[] {
   const home = join(dir, 'dogfood')
   if (!existsSync(home)) {
     return []
   }
   return readdirSync(home)
-    .filter((f) => f.endsWith('.md'))
+    .filter((f) => f.endsWith('.md') && f !== 'matrix.md')
     .map((f) => f.slice(0, -3))
     .sort()
 }

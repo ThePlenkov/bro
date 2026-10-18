@@ -1,0 +1,10 @@
+{
+  "apiKeyHelper": "npx --no-install bro serve ensure --port {{PORT}}",
+  "model": "devin/swe-2-max",
+  "env": {
+    "ANTHROPIC_BASE_URL": "http://127.0.0.1:{{PORT}}"
+  },
+  "enabledPlugins": {
+    "bro@bro": true
+  }
+}
