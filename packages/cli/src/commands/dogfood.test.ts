@@ -356,4 +356,42 @@ describe('bro self dogfood', () => {
       fx.restore()
     }
   })
+
+  // --- committed scenario payloads -----------------------------------------
+  // The committed dogfood/<name>.files/ trees are real provisioning —
+  // a malformed one dies at run time on a real client. Validate shape
+  // here; the live client proof stays the dogfood run itself.
+
+  const repoRoot = join(import.meta.dirname, '..', '..', '..', '..')
+
+  test('codex-plugin.files carries valid codex + serve wiring', () => {
+    const files = join(repoRoot, 'dogfood', 'codex-plugin.files')
+    assert.ok(existsSync(files), 'codex-plugin.files missing')
+    // the codex user config — CODEX_HOME targets this dir at spawn,
+    // so it loads as the trusted user layer
+    const toml = readFileSync(join(files, '.codex', 'config.toml'), 'utf8')
+    assert.match(toml, /model_provider\s*=\s*"bro"/)
+    assert.match(toml, /wire_api\s*=\s*"responses"/)
+    assert.match(toml, /env_key\s*=\s*"BRO_SERVE_TOKEN"/)
+    assert.match(toml, /base_url\s*=\s*"http:\/\/127\.0\.0\.1:\d+\/v1"/)
+    // the bro side — the acp backend the conductor serves + the
+    // codex spawn template exporting the token env_key names
+    const cfg = JSON.parse(
+      readFileSync(join(files, 'bro.config.local.json'), 'utf8')
+    ) as { serve?: { backend?: string }; providers?: Record<string, { type?: string; command?: string }> }
+    const backend = cfg.serve?.backend ?? ''
+    assert.ok(backend !== '', 'serve.backend missing')
+    assert.ok(cfg.providers?.[backend]?.type === 'acp', `provider ${backend} must be acp`)
+    const codex = cfg.providers?.codex?.command ?? ''
+    assert.match(codex, /CODEX_HOME=\$PWD\/.codex/)
+    assert.match(codex, /BRO_SERVE_TOKEN=\$\(.*bro serve ensure --port \d+\)/)
+    assert.match(codex, /codex exec .*\{promptFile\}/)
+    // the port codex dials is the port ensure answers
+    const tomlPort = toml.match(/127\.0\.0\.1:(\d+)\/v1/)?.[1]
+    const cmdPort = codex.match(/ensure --port (\d+)/)?.[1]
+    assert.equal(tomlPort, cmdPort, 'config.toml port ≠ ensure port')
+    // the scenario pins the openai dialect in its asserts
+    const scenario = readFileSync(join(repoRoot, 'dogfood', 'codex-plugin.md'), 'utf8')
+    assert.match(scenario, /\/v1\/responses/)
+  })
 })
