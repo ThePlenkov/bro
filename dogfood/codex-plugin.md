@@ -42,8 +42,8 @@ serves. The token reaches the session through `bro serve ensure
 
 - The session itself ran on the bro conductor — `bro serve` on this
   repo's port answered `/v1/responses` for every turn (the analyst
-  can check `serve.log` and the conductor's `conductor.turn` events
-  carry `dialect: 'responses'`).
+  can check the `conductor.turn` rows in `serve-turns.jsonl` under
+  the common git dir's `bro/` — `dialect: 'responses'`).
 - `hello.txt` exists on a work branch in a worktree under the repo.
 - The bead is closed or still claimed — never orphaned.
 - Nothing was merged into `main`.

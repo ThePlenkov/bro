@@ -23,9 +23,10 @@
 
 import { createHash, randomBytes } from 'node:crypto'
 import type { IncomingMessage, ServerResponse } from 'node:http'
-import { loadConfig } from '@broject/core'
+import { join } from 'node:path'
+import { gitCommonDir, loadConfig } from '@broject/core'
 import type { ProviderEntry } from '@broject/core'
-import { acpOpen, acpPooledTurn, acpSessionRetain, otelEvent, otelParent, otelSpan } from '@broject/providers'
+import { acpOpen, acpPooledTurn, acpSessionRetain, otelEvent, otelJournal, otelParent, otelSpan } from '@broject/providers'
 import type { AcpContentBlock, AcpPeer, AcpRetainedSession, OtelCtx, PooledTurnOpts, ProviderWireOpts } from '@broject/providers'
 import { peerAttrs } from './peer.ts'
 import { catalogModels } from './providers.ts'
@@ -1555,6 +1556,11 @@ export function conductorProxy(
     model: opts.model ?? cfg.model,
     acp: { cwd: cfg.cwd, ...opts.acp },
   }
+  // the store-side evidence trail — every conductor.* event lands as a
+  // JSONL row next to serve.json so a dogfood analyst can read routing,
+  // model pin and session reuse without an OTLP collector
+  const common = gitCommonDir(cfg.cwd)
+  if (common !== null) otelJournal(join(common, 'bro', 'serve-turns.jsonl'))
   // warm pool: one acp child serves every /v1/messages turn — spawn +
   // initialize is paid once per listener; session/new per request is
   // cheap and concurrent sessions multiplex on the same connection.
