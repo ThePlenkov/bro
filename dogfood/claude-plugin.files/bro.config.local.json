@@ -1,4 +1,7 @@
 {
+  "serve": {
+    "backend": "devin-acp-max"
+  },
   "providers": {
     "devin-acp-max": {
       "type": "acp",

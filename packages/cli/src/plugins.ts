@@ -21,6 +21,7 @@ import {
   meshSection,
   querySection,
   sddSection,
+  serveSection,
   stackSection,
   sweepSection,
   syncSection,
@@ -293,6 +294,8 @@ export const PLUGINS: BroPlugin[] = [
     summary: 'Facade host for thin clients — HTTP/JSON on 127.0.0.1 [--port N]',
     run: runServeCommand,
     skill: 'serve',
+    configKey: 'serve',
+    configSchema: serveSection,
   }),
   definePlugin({
     name: 'provider',

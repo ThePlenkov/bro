@@ -70,6 +70,7 @@ export {
   repoOptedIn,
   sddSection,
   SDD_MODES,
+  serveSection,
   SINK_TYPES,
   stackSection,
   STORE_BACKENDS,

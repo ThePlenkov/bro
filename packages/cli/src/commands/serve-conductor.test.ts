@@ -2,6 +2,9 @@
  *  session instead of an HTTP upstream (spec bro-xeozo). */
 import { describe, test } from 'node:test'
 import assert from 'node:assert/strict'
+import { mkdtempSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import type { SessionConfigOption, SessionUpdate } from '@agentclientprotocol/sdk'
 import { fakeAcpAgent } from '@broject/providers/testkit'
 import { conductorConfig, conductorProxy, parseReply } from './serve-conductor.ts'
@@ -71,6 +74,28 @@ describe('conductorConfig', () => {
         providers
       )?.model,
       'swe-z'
+    )
+  })
+  test('serve.backend in config is the env-less backend pin; env wins', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'bro-conductor-'))
+    writeFileSync(
+      join(dir, 'bro.config.local.json'),
+      JSON.stringify({
+        serve: { backend: 'dv-acp' },
+        providers: {
+          'dv-acp': { type: 'acp', command: 'dv acp', model: 'swe-y' },
+          other: { type: 'acp', command: 'o acp' },
+        },
+      })
+    )
+    // no env — the config section carries the backend
+    const cfg = conductorConfig({}, dir)
+    assert.equal(cfg?.backend, 'dv-acp')
+    assert.equal(cfg?.model, 'swe-y')
+    // env is the explicit operator pin — it overrides the config
+    assert.equal(
+      conductorConfig({ BRO_PROVIDER_BACKEND: 'other' }, dir)?.backend,
+      'other'
     )
   })
   test('a negative/zero timeout falls back to the default', () => {

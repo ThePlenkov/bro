@@ -25,14 +25,19 @@
  */
 import { execFileSync } from 'node:child_process'
 import { randomBytes } from 'node:crypto'
+import { createServer } from 'node:net'
 import {
+  chmodSync,
   copyFileSync,
-  cpSync,
   existsSync,
   mkdirSync,
   mkdtempSync,
   readFileSync,
   readdirSync,
+  readlinkSync,
+  realpathSync,
+  rmSync,
+  statSync,
   writeFileSync,
 } from 'node:fs'
 import { homedir } from 'node:os'
@@ -250,9 +255,67 @@ function scratchRoot(): string {
   return join(base, 'bro', 'dogfood')
 }
 
+/** A real bind on port 0 is the only collision-proof probe — the
+ *  listener closes before handoff, so the picked port races nothing
+ *  except another process in the same instant (ensure's repo+pid
+ *  squat-refusal covers that residual). */
+async function pickFreePort(): Promise<number> {
+  const srv = createServer()
+  await new Promise<void>((resolve) => srv.listen(0, '127.0.0.1', resolve))
+  const { port } = srv.address() as { port: number }
+  await new Promise<void>((resolve) => srv.close(() => resolve()))
+  return port
+}
+
+/** `.files` is copied verbatim except `{{PORT}}`, which substitutes the
+ *  run's own allocated port — a fixed port would let one run's detached
+ *  serve squat the next run's listener slot. */
+function copyProvision(src: string, dst: string, port: number): void {
+  for (const entry of readdirSync(src, { withFileTypes: true })) {
+    const from = join(src, entry.name)
+    const to = join(dst, entry.name)
+    if (entry.isDirectory()) {
+      mkdirSync(to, { recursive: true })
+      copyProvision(from, to, port)
+    } else {
+      // bytes, not utf8 — a binary or executable payload must survive
+      // provisioning with its contents and its mode intact
+      const buf = readFileSync(from)
+      writeFileSync(
+        to,
+        buf.includes(PORT_MARKER) ? substitutePort(buf, port) : buf
+      )
+      chmodSync(to, statSync(from).mode)
+    }
+  }
+}
+
+const PORT_MARKER = Buffer.from('{{PORT}}')
+
+/** `{{PORT}}` substitution at the byte level — marker spans are the
+ *  only bytes a non-utf8 payload loses. */
+function substitutePort(src: Buffer, port: number): Buffer {
+  const pin = Buffer.from(String(port))
+  const out: Buffer[] = []
+  let off = 0
+  for (;;) {
+    const i = src.indexOf(PORT_MARKER, off)
+    if (i < 0) {
+      out.push(src.subarray(off))
+      break
+    }
+    out.push(src.subarray(off, i), pin)
+    off = i + PORT_MARKER.length
+  }
+  return Buffer.concat(out)
+}
+
 /** Provision the scratch repo — own git store, own stealth beads
- *  store; claims the runner makes never pollute the host's. */
-function provisionRepo(filesDir?: string | null): { repo: string; beads: string; initErr: string | null } {
+ *  store; claims the runner makes never pollute the host's. `{{PORT}}`
+ *  in `.files` payloads resolves to the run's freshly allocated port. */
+async function provisionRepo(
+  filesDir?: string | null
+): Promise<{ repo: string; beads: string; initErr: string | null }> {
   const root = scratchRoot()
   mkdirSync(root, { recursive: true })
   const repo = mkdtempSync(join(root, 'run-'))
@@ -263,7 +326,7 @@ function provisionRepo(filesDir?: string | null): { repo: string; beads: string;
   // on startup. The harness's config is written after so a scenario
   // can never ship its own bro.config.json over the SDD gate
   if (filesDir !== undefined && filesDir !== null) {
-    cpSync(filesDir, repo, { recursive: true })
+    copyProvision(filesDir, repo, await pickFreePort())
   }
   // arm SDD — a bare repo leaves sdd.mode 'off' and a scenario that
   // describes the gate would narrate a hook that cannot fire. Committed
@@ -466,7 +529,7 @@ async function cmdRun(dir: string, argv: string[]): Promise<void> {
   let initErr: string | null = null
   let stage = 'provision'
   try {
-    const prov = provisionRepo(scenarioFilesDir(dir, name))
+    const prov = await provisionRepo(scenarioFilesDir(dir, name))
     initErr = prov.initErr
     state.repo = prov.repo
 
@@ -537,6 +600,72 @@ function agentLabel(
   return `${id} ${info?.state ?? '?'}${cause}`
 }
 
+/** A terminal run's scratch serve is litter — kill the recorded pid
+ *  (serve.json is the same-UID credential that spawned it). Idempotent:
+ *  status-driven, and the state file is retired so a repeated call can
+ *  never re-signal a pid the OS has since recycled. */
+function reapScratchServe(repo: string): void {
+  // a run that failed before provisioning recorded '' — join('', …)
+  // would resolve the CALLER's serve.json and kill its serve
+  if (repo === '') return
+  try {
+    const statePath = join(repo, '.git', 'bro', 'serve.json')
+    const state = JSON.parse(readFileSync(statePath, 'utf8')) as {
+      pid?: number
+      dir?: string
+      url?: string
+    }
+    const pid = state.pid
+    if (
+      typeof pid === 'number' &&
+      pid > 0 &&
+      isRecordedServe(pid, repo, state)
+    ) {
+      try {
+        process.kill(pid)
+      } catch {
+        /* raced the exit — the reap is done anyway */
+      }
+    }
+    rmSync(statePath, { force: true })
+  } catch {
+    /* no serve.json — nothing was ever spawned */
+  }
+}
+
+/** Identity before signaling: serve.json's pid may name a recycled,
+ *  unrelated process. The spawned serve runs with cwd=repo, so the
+ *  kernel's /proc link is the evidence; where /proc does not exist
+ *  (macOS), the argv snapshot must carry this serve's own port. */
+function isRecordedServe(
+  pid: number,
+  repo: string,
+  state: { dir?: string; url?: string }
+): boolean {
+  if (
+    state.dir !== undefined &&
+    realpathSync(state.dir) !== realpathSync(repo)
+  ) {
+    return false
+  }
+  try {
+    // a readable /proc answer is authoritative — a pid whose cwd names
+    // another directory is not this scratch's serve, whatever argv says
+    return readlinkSync(`/proc/${pid}/cwd`) === realpathSync(repo)
+  } catch {
+    /* /proc absent (macOS) or the pid is gone — try argv evidence */
+  }
+  try {
+    const args = execFileSync('ps', ['-p', String(pid), '-o', 'args='], { // NOSONAR — PATH lookup is the contract
+      encoding: 'utf8',
+    })
+    const port = state.url?.match(/:(\d+)/)?.[1]
+    return /\bserve\b/.test(args) && (port === undefined || args.includes(port))
+  } catch {
+    return false
+  }
+}
+
 /** One run's status row — advance the pipeline first (status IS the
  *  advancer), then read agent liveness and the verdict file. A verdict
  *  on disk closes the run even before the analyst's process exits. */
@@ -570,6 +699,10 @@ async function statusRow(
   ) {
     state.phase = 'failed'
     writeRun(run.dir, state)
+  }
+  // a settled run's listener is litter — reap by its own serve.json
+  if (state.phase === 'done' || state.phase === 'failed') {
+    reapScratchServe(state.repo)
   }
   return {
     run: run.id,
