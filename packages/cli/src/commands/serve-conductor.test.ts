@@ -33,22 +33,37 @@ const chunks = (...texts: string[]): SessionUpdate[] =>
     content: { type: 'text' as const, text },
   }))
 
-/** Boot the conductor over `fake` and POST /v1/messages — caller owns
- *  close(). The one fetch shape every test repeats lives here. */
+/** Boot the conductor over `fake` — caller owns close() and gets a
+ *  bound post() for repeated /v1/messages sends. */
+async function boot(
+  fake: ReturnType<typeof fakeAcpAgent>,
+  cfg: ConductorConfig = CFG
+): Promise<{
+  url: string
+  post: (body: unknown) => Promise<Response>
+  close: () => Promise<void>
+}> {
+  const { url, close } = await listen(
+    deps({ provider: conductorProxy(cfg, { acp: { peer: fake.app } }) })
+  )
+  const post = (body: unknown) =>
+    fetch(`${url}/v1/messages`, {
+      method: 'POST',
+      headers: { ...auth, 'content-type': 'application/json' },
+      body: JSON.stringify(body),
+    })
+  return { url, post, close }
+}
+
+/** Boot the conductor over `fake` and POST /v1/messages —
+ *  caller owns close() and reads `r`. */
 async function postMessages(
   fake: ReturnType<typeof fakeAcpAgent>,
   body: unknown = { messages: [{ role: 'user', content: 'x' }], stream: false },
   cfg: ConductorConfig = CFG
 ): Promise<{ r: Response; url: string; close: () => Promise<void> }> {
-  const { url, close } = await listen(
-    deps({ provider: conductorProxy(cfg, { acp: { peer: fake.app } }) })
-  )
-  const r = await fetch(`${url}/v1/messages`, {
-    method: 'POST',
-    headers: { ...auth, 'content-type': 'application/json' },
-    body: JSON.stringify(body),
-  })
-  return { r, url, close }
+  const { url, post, close } = await boot(fake, cfg)
+  return { r: await post(body), url, close }
 }
 
 /** Collected text_delta payloads from a parsed SSE stream. */
@@ -994,46 +1009,31 @@ describe('serve /v1/* — tool_choice, stop_sequences, error taxonomy, keepalive
     stream: false,
   })
 
-  test('tool_choice auto leaves the contract alone', async () => {
-    const fake = fakeAcpAgent({ replyText: 'ok', configOptions: [MODEL_OPTION] })
-    const { close } = await postMessages(fake, withTools({ type: 'auto' }))
-    try {
-      assert.match(fake.prompts[0] ?? '', /<tools>/)
-      assert.ok(!fake.prompts[0]?.includes('MUST'))
-    } finally {
-      await close()
-    }
-  })
-
-  test('tool_choice any appends a must-call line to the contract', async () => {
-    const fake = fakeAcpAgent({ replyText: 'ok', configOptions: [MODEL_OPTION] })
-    const { close } = await postMessages(fake, withTools({ type: 'any' }))
-    try {
-      assert.match(fake.prompts[0] ?? '', /<tools>[\s\S]*MUST respond with a tool call/)
-    } finally {
-      await close()
-    }
-  })
-
-  test('tool_choice tool names the required call', async () => {
-    const fake = fakeAcpAgent({ replyText: 'ok', configOptions: [MODEL_OPTION] })
-    const { close } = await postMessages(fake, withTools({ type: 'tool', name: 'ls' }))
-    try {
-      assert.match(fake.prompts[0] ?? '', /MUST call the tool "ls"/)
-    } finally {
-      await close()
-    }
-  })
-
-  test('tool_choice none withholds the tools contract', async () => {
-    const fake = fakeAcpAgent({ replyText: 'ok', configOptions: [MODEL_OPTION] })
-    const { close } = await postMessages(fake, withTools({ type: 'none' }))
-    try {
-      assert.ok(!fake.prompts[0]?.includes('<tools>'), fake.prompts[0])
-    } finally {
-      await close()
-    }
-  })
+  // one boot + one prompt assertion per row — the contract text each
+  // tool_choice mode produces (or withholds)
+  const choiceCases: { name: string; choice: unknown; want?: RegExp; notWant?: string }[] = [
+    { name: 'auto leaves the contract alone', choice: { type: 'auto' }, want: /<tools>/, notWant: 'MUST' },
+    {
+      name: 'any appends a must-call line to the contract',
+      choice: { type: 'any' },
+      want: /<tools>[\s\S]*MUST respond with a tool call/,
+    },
+    { name: 'tool names the required call', choice: { type: 'tool', name: 'ls' }, want: /MUST call the tool "ls"/ },
+    { name: 'none withholds the tools contract', choice: { type: 'none' }, notWant: '<tools>' },
+  ]
+  for (const c of choiceCases) {
+    test(`tool_choice ${c.name}`, async () => {
+      const fake = fakeAcpAgent({ replyText: 'ok', configOptions: [MODEL_OPTION] })
+      const { close } = await postMessages(fake, withTools(c.choice))
+      try {
+        const prompt = fake.prompts[0] ?? ''
+        if (c.want !== undefined) assert.match(prompt, c.want)
+        if (c.notWant !== undefined) assert.ok(!prompt.includes(c.notWant), prompt)
+      } finally {
+        await close()
+      }
+    })
+  }
 
   test('stop_sequences cut streamed text at a marker split across deltas', async () => {
     const fake = fakeAcpAgent({
@@ -1144,26 +1144,17 @@ describe('serve /v1/* — tool_choice, stop_sequences, error taxonomy, keepalive
 
   test('a streamed stop_sequence hit still records the cut reply for replay', async () => {
     const fake = fakeAcpAgent({ replyText: 'abc MARK tail', configOptions: [MODEL_OPTION] })
-    const { url, close } = await listen(
-      deps({ provider: conductorProxy(CFG, { acp: { peer: fake.app } }) })
-    )
+    const { post, close } = await boot(fake)
     try {
-      const body = JSON.stringify({
+      const body = {
         messages: [{ role: 'user', content: 'x' }],
         stop_sequences: ['MARK'],
         stream: true,
-      })
-      const post = () =>
-        fetch(`${url}/v1/messages`, {
-          method: 'POST',
-          headers: { ...auth, 'content-type': 'application/json' },
-          body,
-        })
-      const ev = await sseEvents(await post())
+      }
+      const ev = await sseEvents(await post(body))
       assert.equal(textDeltas(ev).join(''), 'abc ')
       // the resend replays the recorded reply — the cut text, not ''
-      const replay = await post()
-      const re = await sseEvents(replay)
+      const re = await sseEvents(await post(body))
       assert.equal(textDeltas(re).join(''), 'abc ')
       assert.equal(stopReason(re), 'stop_sequence')
     } finally {
@@ -1176,27 +1167,19 @@ describe('serve /v1/* — tool_choice, stop_sequences, error taxonomy, keepalive
       updates: chunks('abc', 'd'),
       configOptions: [MODEL_OPTION],
     })
-    const { url, close } = await listen(
-      deps({ provider: conductorProxy(CFG, { acp: { peer: fake.app } }) })
-    )
+    const { post, close } = await boot(fake)
     try {
-      const body = JSON.stringify({
+      const body = {
         messages: [{ role: 'user', content: 'x' }],
         stop_sequences: ['abcd', 'bc'],
         stream: true,
-      })
-      const post = () =>
-        fetch(`${url}/v1/messages`, {
-          method: 'POST',
-          headers: { ...auth, 'content-type': 'application/json' },
-          body,
-        })
+      }
       // 'bc' completes first in stream order — the cut is 'a', even
       // though 'abcd' sits earlier in the settled text
-      const ev = await sseEvents(await post())
+      const ev = await sseEvents(await post(body))
       assert.equal(textDeltas(ev).join(''), 'a')
       assert.equal(stopReason(ev), 'stop_sequence')
-      const replay = await sseEvents(await post())
+      const replay = await sseEvents(await post(body))
       assert.equal(textDeltas(replay).join(''), 'a')
       assert.equal(stopReason(replay), 'stop_sequence')
     } finally {
@@ -1206,25 +1189,19 @@ describe('serve /v1/* — tool_choice, stop_sequences, error taxonomy, keepalive
 
   test('changed stop_sequences on identical history take a fresh turn, not a replay', async () => {
     const fake = fakeAcpAgent({ replyText: 'abc MARK tail', configOptions: [MODEL_OPTION] })
-    const { url, close } = await listen(
-      deps({ provider: conductorProxy(CFG, { acp: { peer: fake.app } }) })
-    )
+    const { post, close } = await boot(fake)
     try {
-      const post = (stop_sequences: string[]) =>
-        fetch(`${url}/v1/messages`, {
-          method: 'POST',
-          headers: { ...auth, 'content-type': 'application/json' },
-          body: JSON.stringify({
-            messages: [{ role: 'user', content: 'x' }],
-            stop_sequences,
-            stream: false,
-          }),
+      const postSeq = (stop_sequences: string[]) =>
+        post({
+          messages: [{ role: 'user', content: 'x' }],
+          stop_sequences,
+          stream: false,
         })
-      const first = await (await post(['MARK'])).json()
+      const first = await (await postSeq(['MARK'])).json()
       assert.equal(first.content[0].text, 'abc ')
       // same history, different markers — the recorded reply must not
       // replay; a fresh turn runs and answers under the new stops
-      const second = await (await post(['NOMATCH'])).json()
+      const second = await (await postSeq(['NOMATCH'])).json()
       assert.equal(second.content[0].text, 'abc MARK tail')
       assert.equal(fake.prompts.length, 2)
     } finally {
@@ -1234,17 +1211,11 @@ describe('serve /v1/* — tool_choice, stop_sequences, error taxonomy, keepalive
 
   test('a non-array stop_sequences answers 400 invalid_request_error', async () => {
     const fake = fakeAcpAgent({ replyText: 'x', configOptions: [MODEL_OPTION] })
-    const { url, close } = await listen(
-      deps({ provider: conductorProxy(CFG, { acp: { peer: fake.app } }) })
-    )
+    const { post, close } = await boot(fake)
     try {
-      const r = await fetch(`${url}/v1/messages`, {
-        method: 'POST',
-        headers: { ...auth, 'content-type': 'application/json' },
-        body: JSON.stringify({
-          messages: [{ role: 'user', content: 'x' }],
-          stop_sequences: 'STOP',
-        }),
+      const r = await post({
+        messages: [{ role: 'user', content: 'x' }],
+        stop_sequences: 'STOP',
       })
       assert.equal(r.status, 400)
       const body = await r.json()
