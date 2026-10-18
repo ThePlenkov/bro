@@ -615,26 +615,40 @@ class LiveTurn {
       return
     }
     const line = this.narrateTool(u)
-    if (line !== undefined) this.text(line)
+    if (line !== undefined) {
+      // pending may hold a held-back partial-tag tail — flush what
+      // drain releases first so narration never lands inside buffered
+      // text (drain still holds a live tag prefix; that tail completes
+      // into a block later, so text order is preserved either way)
+      this.drain(false)
+      this.text(line)
+    }
   }
 
+  private readonly toolStarted = new Set<string>()
   private readonly toolDone = new Set<string>()
 
   /** The session's own tool_call lifecycle — the client's only view of
    *  agent-side work (exec, file ops, subagent spawns): narrated as
    *  text edges, never tool_use (the tool already ran — a tool_use
    *  would make the client execute it again). One line per start, one
-   *  per terminal status; content/plan/usage updates are chatter. */
+   *  per terminal status; content/plan/usage updates are chatter.
+   *  Dedup keys on toolCallId when the agent supplies one — an id-less
+   *  update can't be correlated, so it narrates every time. */
   private narrateTool(u: SessionUpdate): string | undefined {
     if (u.sessionUpdate === 'tool_call') {
+      const id = u.toolCallId
+      if (id !== undefined && this.toolStarted.has(id)) return undefined
+      if (id !== undefined) this.toolStarted.add(id)
       return `\n⏺ ${shortLabel(u.title ?? u.name ?? u.kind ?? 'tool call')}\n`
     }
     if (
       u.sessionUpdate === 'tool_call_update' &&
-      (u.status === 'completed' || u.status === 'failed') &&
-      !this.toolDone.has(u.toolCallId)
+      (u.status === 'completed' || u.status === 'failed')
     ) {
-      this.toolDone.add(u.toolCallId)
+      const id = u.toolCallId
+      if (id !== undefined && this.toolDone.has(id)) return undefined
+      if (id !== undefined) this.toolDone.add(id)
       return `\n${u.status === 'failed' ? '✗' : '✓'} ${shortLabel(u.title ?? u.name ?? 'tool call')}\n`
     }
     return undefined

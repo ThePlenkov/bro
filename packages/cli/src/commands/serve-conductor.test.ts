@@ -730,6 +730,43 @@ describe('serve /v1/* — the conductor plane', () => {
     }
   })
 
+  test('narration landing mid partial-tag keeps stream order — held tail completes into the block', async () => {
+    const fake = fakeAcpAgent({
+      updates: [
+        ...chunks('work <tool_ca'),
+        {
+          sessionUpdate: 'tool_call',
+          toolCallId: 'tc-9',
+          title: 'exec: ls',
+          kind: 'execute',
+          status: 'in_progress',
+        } as SessionUpdate,
+        ...chunks('ll>{"name":"ls","input":{}}</tool_call> end'),
+      ],
+      configOptions: [MODEL_OPTION],
+    })
+    const { r, close } = await postStream(fake)
+    try {
+      const ev = await sseEvents(r)
+      const texts = ev
+        .filter(
+          (e) =>
+            e.event === 'content_block_delta' &&
+            (e.data.delta as { type: string }).type === 'text_delta'
+        )
+        .map((e) => (e.data.delta as { text: string }).text)
+      assert.deepEqual(texts, ['work ', '\n⏺ exec: ls\n', ' end'])
+      const tu = ev.find(
+        (e) =>
+          e.event === 'content_block_delta' &&
+          (e.data.delta as { type: string }).type === 'input_json_delta'
+      )
+      assert.ok(tu, 'the split tag still completes into one tool_use block')
+    } finally {
+      await close()
+    }
+  })
+
   test('a failed streamed turn lands as an in-stream error event', async () => {
     const fake = fakeAcpAgent({ configOptions: [MODEL_OPTION], failPrompt: 'generic' })
     const { r, close } = await postStream(fake)
