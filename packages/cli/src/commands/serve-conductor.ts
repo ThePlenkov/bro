@@ -653,13 +653,21 @@ class LiveTurn {
 
   private narrateStart(u: SessionUpdate): string | undefined {
     if (u.sessionUpdate !== 'tool_call') return undefined
-    if (!this.once(u.toolCallId, this.toolStarted)) return undefined
+    const terminal = u.status === 'completed' || u.status === 'failed'
+    if (!this.once(u.toolCallId, this.toolStarted)) {
+      // a repeated tool_call can carry the terminal edge (the provider
+      // layer emits it as finish) — narrate it once, with the cached label
+      if (!terminal || !this.once(u.toolCallId, this.toolDone)) return undefined
+      const known = u.toolCallId !== undefined ? this.toolLabels.get(u.toolCallId) : undefined
+      const label = shortLabel(u.title ?? u.name ?? known ?? 'tool call')
+      return `\n${u.status === 'failed' ? '✗' : '✓'} ${label}\n`
+    }
     const label = shortLabel(u.title ?? u.name ?? u.kind ?? 'tool call')
     if (u.toolCallId !== undefined) this.toolLabels.set(u.toolCallId, label)
     const start = `\n⏺ ${label}\n`
     // a tool_call can itself arrive already terminal — open and close
     // the edge in one update so nothing stays mid-flight forever
-    if (u.status !== 'completed' && u.status !== 'failed') return start
+    if (!terminal) return start
     if (u.toolCallId !== undefined) this.toolDone.add(u.toolCallId)
     return `${start}${u.status === 'failed' ? '✗' : '✓'} ${label}\n`
   }

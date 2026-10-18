@@ -656,6 +656,22 @@ describe('serve /v1/* — the conductor plane', () => {
           toolCallId: 'tc-4',
           status: 'completed',
         } as SessionUpdate,
+        // a repeated tool_call carrying the terminal edge narrates too
+        // (tool_call updates keep their title per the acp schema)
+        {
+          sessionUpdate: 'tool_call',
+          toolCallId: 'tc-5',
+          title: 'exec: df',
+          kind: 'execute',
+          status: 'in_progress',
+        } as SessionUpdate,
+        {
+          sessionUpdate: 'tool_call',
+          toolCallId: 'tc-5',
+          title: 'exec: df',
+          kind: 'execute',
+          status: 'completed',
+        } as SessionUpdate,
         ...chunks('done'),
       ],
       configOptions: [MODEL_OPTION],
@@ -675,7 +691,8 @@ describe('serve /v1/* — the conductor plane', () => {
       assert.match(text, /✓ exec: ls \/tmp/)
       assert.match(text, /⏺ instant\n✓ instant/)
       assert.match(text, /✓ exec: pwd/)
-      assert.equal((text.match(/✓/g) ?? []).length, 3)
+      assert.match(text, /✓ exec: df/)
+      assert.equal((text.match(/✓/g) ?? []).length, 4)
       assert.ok(!text.includes('ignored'))
       // narration is text — no tool_use block invented, no tool_use stop
       assert.equal(
