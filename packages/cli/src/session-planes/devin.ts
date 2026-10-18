@@ -80,13 +80,42 @@ function devinSessionDirs(
   return dirs
 }
 
+/** The pid's cmdline identifies the devin CLI — argv[0]'s basename is
+ *  `devin*` (the binary, `devin acp`, `devin -p`, interactive `devin`)
+ *  or an argv element lives inside a `/devin/` install path (node/bun
+ *  launching the versioned script). A live pid that fails this is a
+ *  RECYCLED pid: the session that wrote the lock is gone and an
+ *  unrelated process holds the number — counting it starves the quota
+ *  forever (the lock is foreign-owned; nothing reaps it).
+ *
+ *  Unreadable/empty cmdline on a /proc host means the same: a real
+ *  devin session runs same-uid, its cmdline is always readable — an
+ *  unreadable one is a foreign-uid recycler (the phantoms observed
+ *  were root-owned system processes). Undercounting a real session
+ *  over-admits once; counting a phantom starves permanently. */
+export function devinPidIsSession(pid: number, procDir = '/proc'): boolean {
+  let raw: string
+  try {
+    raw = readFileSync(join(procDir, String(pid), 'cmdline'), 'utf8')
+  } catch {
+    return false
+  }
+  return raw.split('\0').some((a) => {
+    const base = a.slice(a.lastIndexOf('/') + 1)
+    return base === 'devin' || base.startsWith('devin-') || a.includes('/devin/')
+  })
+}
+
 /** Live devin session pids across the dirs — lock files whose pid is
- *  alive, deduplicated (a resumed session leaves a second lock for the
- *  same process). A missing dir means no devin install → empty; any
- *  OTHER read failure throws SpawnError('unavailable') — an
- *  unverifiable count fails closed, never silently admits. */
-function liveDevinLockPids(dirs: string[]): Set<number> {
+ *  alive AND (on a /proc host) verifiably the devin CLI, deduplicated
+ *  (a resumed session leaves a second lock for the same process). A
+ *  missing dir means no devin install → empty; any OTHER read failure
+ *  throws SpawnError('unavailable') — an unverifiable count fails
+ *  closed, never silently admits. No procDir at all skips the identity
+ *  check — a probe that cannot exist must not invent either answer. */
+function liveDevinLockPids(dirs: string[], procDir = '/proc'): Set<number> {
   const live = new Set<number>()
+  const hasProc = existsSync(procDir)
   for (const dir of dirs) {
     let names: string[]
     try {
@@ -105,7 +134,7 @@ function liveDevinLockPids(dirs: string[]): Set<number> {
         continue
       }
       const pid = lockPid(dir, name)
-      if (pid !== undefined && pidAlive(pid)) {
+      if (pid !== undefined && pidAlive(pid) && (!hasProc || devinPidIsSession(pid, procDir))) {
         live.add(pid)
       }
     }
@@ -170,7 +199,7 @@ export function countDevinSessions(
   slotsDir?: string,
   procDir = '/proc'
 ): number {
-  const live = liveDevinLockPids(dirs)
+  const live = liveDevinLockPids(dirs, procDir)
   if (slotsDir !== undefined) {
     sweepLandedSlots(slotsDir, live, procDir)
   }
@@ -229,7 +258,7 @@ export function countDevinWorkers(
   slotsDir?: string,
   procDir = '/proc'
 ): number {
-  const live = liveDevinLockPids(dirs)
+  const live = liveDevinLockPids(dirs, procDir)
   if (isWorker === devinPidIsWorker && live.size > 0 && !existsSync(procDir)) {
     throw new SpawnError(
       `cannot verify devin worker count — ${procDir} absent; ` +
@@ -467,6 +496,7 @@ export function devinPidLog(pid: number, logsDir: string): string | undefined {
  *  contract as devinPidIsWorker. `procDir` injectable for tests. */
 export function listDevinSessions(dirs: string[], procDir = '/proc'): DiscoveredSession[] {
   const seen = new Set<number>()
+  const hasProc = existsSync(procDir)
   const out: DiscoveredSession[] = []
   for (const dir of dirs) {
     let names: string[]
@@ -486,7 +516,12 @@ export function listDevinSessions(dirs: string[], procDir = '/proc'): Discovered
         continue
       }
       const pid = lockPid(dir, name)
-      if (pid === undefined || !pidAlive(pid) || seen.has(pid)) {
+      if (
+        pid === undefined ||
+        !pidAlive(pid) ||
+        (hasProc && !devinPidIsSession(pid, procDir)) ||
+        seen.has(pid)
+      ) {
         continue
       }
       seen.add(pid)
@@ -506,13 +541,18 @@ export const devinSessionPlane: SessionPlane = {
   kind: 'devin',
   detectsCli: (cliName) => cliName === 'devin',
   countLive(bag, workerEnv) {
-    return countDevinSessions(devinSessionDirs(bag, workerEnv), devinSlotsDir(bag))
+    return countDevinSessions(
+      devinSessionDirs(bag, workerEnv),
+      devinSlotsDir(bag),
+      devinProcDir(bag)
+    )
   },
   countWorkers(bag, workerEnv) {
     return countDevinWorkers(
       devinSessionDirs(bag, workerEnv),
       devinPidIsWorker,
-      devinSlotsDir(bag)
+      devinSlotsDir(bag),
+      devinProcDir(bag)
     )
   },
   listLive(bag, workerEnv) {
