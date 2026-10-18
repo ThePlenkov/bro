@@ -46,9 +46,11 @@ import {
   acquireFileLock,
   gitCommonDir,
   gitTry,
+  loadConfigLayers,
   LockTimeout,
   taskStoreAt,
   type AgentInfo,
+  type ProviderEntry,
 } from '@broject/core'
 import { loadAgentEnv, type AgentConnectorEnv } from '../agent-connectors.ts'
 import { collectAgentBackends, spawnStepAgent } from './agents.ts'
@@ -364,6 +366,36 @@ async function provisionRepo(
   return { repo, beads, initErr }
 }
 
+/** The spawn env for a run: host config plus the scratch repo's own
+ *  provider entries. A payload's bro.config.local.json providers
+ *  (CODEX_HOME/token wiring) must win over host layers — resolving
+ *  providers from `dir` alone silently ignores the scenario's spawn
+ *  template and the client falls back to ambient user setup. Only the
+ *  scratch's own files count: the global layer inside a scratch load
+ *  would shadow the host's project-level providers with user-global
+ *  ones even when the payload defines nothing (greptile PRRT_…tr4Wn).
+ *  The registry/`dir` side stays host-rooted so agentView keeps
+ *  finding the spawned ids. */
+function runEnv(dir: string, scratch: string): AgentConnectorEnv {
+  const env = loadAgentEnv(dir)
+  const providers = { ...(env.providers ?? {}) }
+  let touched = false
+  for (const l of loadConfigLayers(scratch).layers) {
+    if (l.layer === 'global') continue
+    const p = l.raw.providers
+    if (typeof p !== 'object' || p === null) continue
+    // per-field overlay onto the RESOLVED entry — a payload that sets
+    // only `command` must not drop the `type` a global/host layer
+    // supplied (greptile: raw copies break partial overrides)
+    for (const [name, raw] of Object.entries(p)) {
+      if (typeof raw !== 'object' || raw === null) continue
+      providers[name] = { ...providers[name], ...raw } as ProviderEntry
+      touched = true
+    }
+  }
+  return touched ? { ...env, providers } : env
+}
+
 /** Resolve a live/terminal view of one agent id across backends. */
 async function agentView(
   dir: string,
@@ -456,7 +488,7 @@ async function advanceRun(
         type: 'chore',
         priority: 2,
       })
-      const info = await spawnStepAgent(dir, env, {
+      const info = await spawnStepAgent(dir, runEnv(dir, fresh.repo), {
         molStep: analystBead.id,
         worktree: fresh.repo,
         promptFile,
@@ -550,7 +582,7 @@ async function cmdRun(dir: string, argv: string[]): Promise<void> {
 
     stage = 'spawn'
     state.phase = 'running'
-    const info = await spawnStepAgent(dir, loadAgentEnv(dir), {
+    const info = await spawnStepAgent(dir, runEnv(dir, prov.repo), {
       molStep: bead.id,
       worktree: prov.repo,
       promptFile,

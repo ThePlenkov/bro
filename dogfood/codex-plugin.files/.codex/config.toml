@@ -1,0 +1,14 @@
+# Codex user config for the dogfood run — CODEX_HOME is pointed at
+# this directory by the spawn command, so this file loads as the
+# trusted user layer (a project .codex/ would need per-path trust).
+model = "devin/swe-2-max"
+model_provider = "bro"
+# exercises the reasoning.effort → composite-pin fold on the wire
+model_reasoning_effort = "high"
+
+[model_providers.bro]
+name = "bro conductor"
+base_url = "http://127.0.0.1:{{PORT}}/v1"
+wire_api = "responses"
+# the spawn command exports BRO_SERVE_TOKEN from `bro serve ensure`
+env_key = "BRO_SERVE_TOKEN"
