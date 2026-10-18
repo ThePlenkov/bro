@@ -52,15 +52,21 @@ export function conductorConfig(
   dir: string,
   providers?: Record<string, ProviderEntry>
 ): ConductorConfig | undefined {
-  const backend = env.BRO_PROVIDER_BACKEND?.trim()
+  const cfg = loadConfig(dir)
+  // env pins the backend explicitly; a repo whose conductor is not
+  // ambient (an apiKeyHelper-spawned serve never sees settings.env)
+  // carries it as serve.backend — env still wins over config
+  const configured = (cfg.serve as { backend?: string } | undefined)?.backend?.trim()
+  const backend = env.BRO_PROVIDER_BACKEND?.trim() || configured
   if (backend === undefined || backend === '') {
     return undefined
   }
-  providers ??= (loadConfig(dir).providers ?? {}) as Record<string, ProviderEntry>
+  providers ??= (cfg.providers ?? {}) as Record<string, ProviderEntry>
   const entry = providers[backend]
   if (entry === undefined) {
     throw new Error(
-      `BRO_PROVIDER_BACKEND=${backend} — providers.${backend} is not configured ` +
+      `provider backend '${backend}' (BRO_PROVIDER_BACKEND or serve.backend) — ` +
+        `providers.${backend} is not configured ` +
         `(configured: ${Object.keys(providers).join(', ') || 'none'})`
     )
   }

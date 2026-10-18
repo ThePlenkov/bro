@@ -206,12 +206,18 @@ describe('bro self dogfood', () => {
       mkdirSync(join(fx.main, 'dogfood', 'seeded.files', '.claude'), { recursive: true })
       writeFileSync(
         join(fx.main, 'dogfood', 'seeded.files', '.claude', 'settings.local.json'),
-        '{"enabledPlugins":{}}'
+        '{"enabledPlugins":{},"apiKeyHelper":"x --port {{PORT}}"}'
       )
       const r = await dogfood(['run', 'seeded', '--backend', 'dogfood-test'])
       assert.equal(r.code, 0, r.err.join('\n'))
       const repo = stateOf(rdirOf(fx.main)).repo as string
       assert.ok(existsSync(join(repo, '.claude', 'settings.local.json')))
+      // {{PORT}} lands substituted — the per-run port is what keeps a
+      // stale listener from squatting the next run's slot
+      const seeded = JSON.parse(
+        readFileSync(join(repo, '.claude', 'settings.local.json'), 'utf8')
+      ) as { apiKeyHelper: string }
+      assert.match(seeded.apiKeyHelper, /--port \d+$/)
       // committed, not just present — the runner starts from a clean
       // tree or the dirty-worktree stop-gate probe trips
       assert.match(

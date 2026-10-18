@@ -25,9 +25,9 @@
  */
 import { execFileSync } from 'node:child_process'
 import { randomBytes } from 'node:crypto'
+import { createServer } from 'node:net'
 import {
   copyFileSync,
-  cpSync,
   existsSync,
   mkdirSync,
   mkdtempSync,
@@ -250,9 +250,40 @@ function scratchRoot(): string {
   return join(base, 'bro', 'dogfood')
 }
 
+/** A real bind on port 0 is the only collision-proof probe — the
+ *  listener closes before handoff, so the picked port races nothing
+ *  except another process in the same instant (ensure's repo+pid
+ *  squat-refusal covers that residual). */
+async function pickFreePort(): Promise<number> {
+  const srv = createServer()
+  await new Promise<void>((resolve) => srv.listen(0, '127.0.0.1', resolve))
+  const { port } = srv.address() as { port: number }
+  await new Promise<void>((resolve) => srv.close(() => resolve()))
+  return port
+}
+
+/** `.files` is copied verbatim except `{{PORT}}`, which substitutes the
+ *  run's own allocated port — a fixed port would let one run's detached
+ *  serve squat the next run's listener slot. */
+function copyProvision(src: string, dst: string, port: number): void {
+  for (const entry of readdirSync(src, { withFileTypes: true })) {
+    const from = join(src, entry.name)
+    const to = join(dst, entry.name)
+    if (entry.isDirectory()) {
+      mkdirSync(to, { recursive: true })
+      copyProvision(from, to, port)
+    } else {
+      writeFileSync(to, readFileSync(from, 'utf8').replaceAll('{{PORT}}', String(port)))
+    }
+  }
+}
+
 /** Provision the scratch repo — own git store, own stealth beads
- *  store; claims the runner makes never pollute the host's. */
-function provisionRepo(filesDir?: string | null): { repo: string; beads: string; initErr: string | null } {
+ *  store; claims the runner makes never pollute the host's. `{{PORT}}`
+ *  in `.files` payloads resolves to the run's freshly allocated port. */
+async function provisionRepo(
+  filesDir?: string | null
+): Promise<{ repo: string; beads: string; initErr: string | null }> {
   const root = scratchRoot()
   mkdirSync(root, { recursive: true })
   const repo = mkdtempSync(join(root, 'run-'))
@@ -263,7 +294,7 @@ function provisionRepo(filesDir?: string | null): { repo: string; beads: string;
   // on startup. The harness's config is written after so a scenario
   // can never ship its own bro.config.json over the SDD gate
   if (filesDir !== undefined && filesDir !== null) {
-    cpSync(filesDir, repo, { recursive: true })
+    copyProvision(filesDir, repo, await pickFreePort())
   }
   // arm SDD — a bare repo leaves sdd.mode 'off' and a scenario that
   // describes the gate would narrate a hook that cannot fire. Committed
@@ -466,7 +497,7 @@ async function cmdRun(dir: string, argv: string[]): Promise<void> {
   let initErr: string | null = null
   let stage = 'provision'
   try {
-    const prov = provisionRepo(scenarioFilesDir(dir, name))
+    const prov = await provisionRepo(scenarioFilesDir(dir, name))
     initErr = prov.initErr
     state.repo = prov.repo
 
@@ -537,6 +568,20 @@ function agentLabel(
   return `${id} ${info?.state ?? '?'}${cause}`
 }
 
+/** A terminal run's scratch serve is litter — kill the recorded pid
+ *  (serve.json is the same-UID credential that spawned it). Idempotent:
+ *  status-driven, re-runs on every status call after terminal. */
+function reapScratchServe(repo: string): void {
+  try {
+    const state = JSON.parse(
+      readFileSync(join(repo, '.git', 'bro', 'serve.json'), 'utf8')
+    ) as { pid?: number }
+    if (typeof state.pid === 'number') process.kill(state.pid)
+  } catch {
+    /* no serve.json, dead pid, unreadable — nothing to reap */
+  }
+}
+
 /** One run's status row — advance the pipeline first (status IS the
  *  advancer), then read agent liveness and the verdict file. A verdict
  *  on disk closes the run even before the analyst's process exits. */
@@ -570,6 +615,10 @@ async function statusRow(
   ) {
     state.phase = 'failed'
     writeRun(run.dir, state)
+  }
+  // a settled run's listener is litter — reap by its own serve.json
+  if (state.phase === 'done' || state.phase === 'failed') {
+    reapScratchServe(state.repo)
   }
   return {
     run: run.id,

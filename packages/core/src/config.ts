@@ -509,6 +509,23 @@ export const sddSection: ConfigSection<{ mode: SddMode; dir: string }> = (raw) =
   }
 }
 
+/** bro.config.json `serve` section — the facade host's own knobs.
+ *  `backend` names the acp provider `BRO_PROVIDER_BACKEND` falls back
+ *  to: a repo that always wants its conductor can pin it in config
+ *  instead of relying on the env var reaching every spawn path
+ *  (apiKeyHelper children do not inherit settings.env). */
+export const serveSection: ConfigSection<{ backend?: string }> = (raw) => {
+  const obj = (typeof raw === 'object' && raw !== null ? raw : {}) as {
+    backend?: unknown
+  }
+  return {
+    backend:
+      typeof obj.backend === 'string' && obj.backend.trim() !== ''
+        ? obj.backend.trim()
+        : undefined,
+  }
+}
+
 /** bro.config.json `mirror` section — the bead→tracker projection
  *  policy (spec specs/backends/bro-z2z7f): which beads materialize as
  *  native tracker items at PR time. Beads stays the source of truth;
@@ -767,6 +784,7 @@ const CORE_SECTIONS: Record<string, ConfigSection<unknown>> = {
   mcp: mcpSection as ConfigSection<unknown>,
   mirror: mirrorSection as ConfigSection<unknown>,
   notify: notifySection as ConfigSection<unknown>,
+  serve: serveSection as ConfigSection<unknown>,
 }
 
 /** Every config key core normalizes itself — the authoritative "known

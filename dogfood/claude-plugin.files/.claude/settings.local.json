@@ -1,11 +1,8 @@
 {
-  "apiKeyHelper": "BRO_PROVIDER_BACKEND=devin-acp-max npx --no-install bro serve ensure --port 44928",
+  "apiKeyHelper": "npx --no-install bro serve ensure --port {{PORT}}",
+  "model": "devin/swe-2-max",
   "env": {
-    "ANTHROPIC_BASE_URL": "http://127.0.0.1:44928",
-    "ANTHROPIC_DEFAULT_SONNET_MODEL": "devin/swe-2-max",
-    "ANTHROPIC_DEFAULT_OPUS_MODEL": "devin/swe-2-max",
-    "ANTHROPIC_DEFAULT_HAIKU_MODEL": "devin/swe-2-max",
-    "BRO_PROVIDER_BACKEND": "devin-acp-max"
+    "ANTHROPIC_BASE_URL": "http://127.0.0.1:{{PORT}}"
   },
   "enabledPlugins": {
     "bro@bro": true
