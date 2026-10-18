@@ -101,10 +101,18 @@ export class AcpTerminals {
         env[e.name] = e.value
       }
     }
-    const child = spawn(ctx.params.command, ctx.params.args ?? [], {
+    const args = ctx.params.args ?? []
+    const child = spawn(ctx.params.command, args, {
       cwd: ctx.params.cwd ?? undefined,
       env,
       stdio: ['ignore', 'pipe', 'pipe'],
+      // ACP only calls `command` "the command to execute" — agents
+      // diverge on whether it is a program path or a whole command line
+      // (devin sends the raw line, args empty). A terminal is a shell:
+      // with no argv supplied, run the line through /bin/sh so pipes,
+      // redirects and multi-word commands behave like the host's
+      // terminal instead of ENOENT on a literal binary name.
+      shell: args.length === 0,
     })
     const entry: TerminalEntry = {
       child,
