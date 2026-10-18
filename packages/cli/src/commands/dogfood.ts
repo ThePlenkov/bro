@@ -103,6 +103,14 @@ function segment(what: string, value: string): string {
   return value
 }
 
+/** The `<client>-*` name prefix doubles as the default provider —
+ *  codex-basics runs on providers.codex unflagged. Unknown prefixes
+ *  (core-workflow) get no pin: default connector resolution. */
+function scenarioProvider(name: string): string | undefined {
+  const prefix = name.replace(/\.md$/, '').split('-')[0]
+  return prefix === 'codex' || prefix === 'claude' ? prefix : undefined
+}
+
 function scenarioPath(dir: string, name: string): string {
   const clean = segment('scenario name', name)
   if (clean.replace(/\.md$/, '') === 'matrix') {
@@ -534,7 +542,10 @@ async function cmdRun(dir: string, argv: string[]): Promise<void> {
   }
   const analyst = flag(argv, '--analyst') ?? 'same'
   const backend = flag(argv, '--backend')
-  const provider = flag(argv, '--provider')
+  // a scenario's client prefix is its provider pin by convention —
+  // `run codex-basics` unflagged must still land on providers.codex or
+  // the payload's wiring is never exercised (an explicit flag wins)
+  const provider = flag(argv, '--provider') ?? scenarioProvider(name)
   const keep = argv.includes('--keep')
   const src = scenarioPath(dir, name)
 

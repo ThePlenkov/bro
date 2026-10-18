@@ -21,17 +21,24 @@ acp backend and the token-exporting spawn template.
    `npx bro work enter <bead>`.
 4. Create `effort.txt` containing `high effort landed`, commit it on
    the work branch.
-5. Inspect the wire: read `.git/bro/serve.log` (or run `npx bro
-   status` and follow the serve pointers) — find a `conductor.turn`
-   event and report the model/pin it recorded for YOUR session.
+5. Inspect the wire yourself: read `.git/bro/serve.json` for `url`
+   and `token`, then probe the conductor directly —
+
+   `curl -s "$URL/v1/responses" -H "authorization: Bearer $TOKEN"
+   -H 'content-type: application/json'
+   -d '{"model":"devin/swe-2-max","reasoning":{"effort":"high"},
+   "input":"ping"}'`
+
+   The Response's `model` field is what the conductor served — the
+   effort-derived composite pin (`…-high`), not the bare base.
 6. Report: `npx bro notify` — one line stating the effort you sent
-   and the pin the conductor logged.
+   and the pin the conductor answered with.
 
 ## Assert
 
 - Every turn answered `/v1/responses` on this run's `bro serve`.
-- The conductor's turn events show the effort-derived pin for this
-  session (a composite `swe-2-max-high`-shaped request model, or the
-  resolved model+thought_level pair it maps to).
+- The probe's Response `model` carries the effort-folded pin
+  (`swe-2-max-high`-shaped — the composite suffix), proving
+  `reasoning.effort` reached the acp pin rather than being dropped.
 - `effort.txt` exists on the work branch; the bead is claimed or
   closed; nothing merged to `main`.

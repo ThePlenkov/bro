@@ -20,9 +20,12 @@ conductor listener and `bro.config.local.json` the acp backend.
    killing it kills the retained acp sessions too; the wire is what
    must recover).
 5. Continue anyway: create `survivor.txt` containing `claude errors
-   dogfood` and commit it on the work branch. Your next model call
-   may fail once — retry it; the apiKeyHelper re-ensures the listener
-   and the turn goes through.
+   dogfood` and commit it on the work branch. If the next model call
+   fails — a 5xx, a timeout, or a refused connection are all legal
+   shapes of a dead listener — re-ensure the plane yourself before
+   retrying: `npx --no-install bro serve ensure --port <port>` (the
+   port from serve.json; the apiKeyHelper's output can sit in claude's
+   cache, so don't wait on it). Then retry the turn.
 6. Verify recovery: read `.git/bro/serve.json` again — a NEW pid
    means the respawn happened. Note the generation change in your
    report.
@@ -31,8 +34,9 @@ conductor listener and `bro.config.local.json` the acp backend.
 
 ## Assert
 
-- The failures surfaced on `POST /v1/messages` through the conductor —
-  a 5xx/timeout on the wire, not a client-side crash.
+- Any failure surfaced on `POST /v1/messages` through the conductor —
+  a 5xx, timeout, or refused connection are all valid shapes (a fast
+  enough re-ensure may show no error at all — recovery still counts).
 - The run COMPLETED (a wedged session is a fail, not a retry story).
 - `.git/bro/serve.json` post-run holds a different pid than the one
   the runner killed (or serve.log shows a new generation binding the

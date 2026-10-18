@@ -299,6 +299,31 @@ describe('bro self dogfood', () => {
     }
   })
 
+  test('a codex-* scenario pins providers.codex without a flag', async () => {
+    const fx = fixture()
+    const { conn, spawned } = dogfoodConnector()
+    const dispose = registerAgentConnector('dogfood-test', () => conn)
+    try {
+      writeFileSync(
+        join(fx.main, 'bro.config.json'),
+        JSON.stringify({ providers: { codex: { type: 'cli', command: 'codex-run {promptFile}' } } })
+      )
+      writeFileSync(
+        join(fx.main, 'dogfood', 'codex-mini.md'),
+        '# codex mini\n\n1. check\n\n## Assert\n\n- ok\n'
+      )
+      const r = await dogfood(['run', 'codex-mini', '--backend', 'dogfood-test'])
+      assert.equal(r.code, 0, r.err.join('\n'))
+      // the name prefix selected the provider — unflagged codex-*
+      // must not silently resolve the host default lane
+      assert.equal(spawned[0]!.provider, 'codex')
+      assert.equal(stateOf(rdirOf(fx.main)).provider, 'codex')
+    } finally {
+      dispose?.()
+      fx.restore()
+    }
+  })
+
   test('status stays running while the runner is live', async () => {
     const fx = fixture()
     const { conn } = dogfoodConnector()
