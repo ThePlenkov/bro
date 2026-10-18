@@ -25,7 +25,7 @@ the config points codex at).
   loads as codex's trusted USER layer (a project `.codex/` would need
   a per-path `[projects.<dir>] trust_level` grant the scratch can't
   pre-seed). Pins `model_provider = "bro"`,
-  `base_url = http://127.0.0.1:44930/v1`, `wire_api = "responses"`,
+  `base_url = http://127.0.0.1:{{PORT}}/v1`, `wire_api = "responses"`,
   `env_key = "BRO_SERVE_TOKEN"`, `model_reasoning_effort = "high"`
   (exercises the effort→composite-pin fold end-to-end).
 - `bro.config.local.json` — `serve.backend = devin-acp-max` plus the

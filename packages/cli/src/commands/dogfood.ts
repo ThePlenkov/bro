@@ -364,6 +364,19 @@ async function provisionRepo(
   return { repo, beads, initErr }
 }
 
+/** The spawn env for a run: host config plus the scratch repo's own
+ *  provider entries. A payload's bro.config.local.json providers
+ *  (CODEX_HOME/token wiring) must win over host layers — resolving
+ *  providers from `dir` alone silently ignores the scenario's spawn
+ *  template and the client falls back to ambient user setup. The
+ *  registry/`dir` side stays host-rooted so agentView keeps finding
+ *  the spawned ids. */
+function runEnv(dir: string, scratch: string): AgentConnectorEnv {
+  const env = loadAgentEnv(dir)
+  const over = loadAgentEnv(scratch).providers
+  return over === undefined ? env : { ...env, providers: { ...env.providers, ...over } }
+}
+
 /** Resolve a live/terminal view of one agent id across backends. */
 async function agentView(
   dir: string,
@@ -456,7 +469,7 @@ async function advanceRun(
         type: 'chore',
         priority: 2,
       })
-      const info = await spawnStepAgent(dir, env, {
+      const info = await spawnStepAgent(dir, runEnv(dir, fresh.repo), {
         molStep: analystBead.id,
         worktree: fresh.repo,
         promptFile,
@@ -550,7 +563,7 @@ async function cmdRun(dir: string, argv: string[]): Promise<void> {
 
     stage = 'spawn'
     state.phase = 'running'
-    const info = await spawnStepAgent(dir, loadAgentEnv(dir), {
+    const info = await spawnStepAgent(dir, runEnv(dir, prov.repo), {
       molStep: bead.id,
       worktree: prov.repo,
       promptFile,

@@ -14,7 +14,7 @@ import {
   rmSync,
   writeFileSync,
 } from 'node:fs'
-import { join } from 'node:path'
+import { dirname, join } from 'node:path'
 import { AgentNotFound, testGit } from '@broject/core'
 import type { AgentInfo, SpawnSpec } from '@broject/core'
 import { registerAgentConnector } from '../agent-connectors.ts'
@@ -132,7 +132,9 @@ function runsOf(main: string): string[] {
 }
 
 function rdirOf(main: string): string {
-  return join(main, '.git', 'bro', 'dogfood', runsOf(main)[0]!)
+  const runs = runsOf(main)
+  assert.ok(runs.length > 0, 'expected at least one dogfood run')
+  return join(main, '.git', 'bro', 'dogfood', runs[0]!)
 }
 
 function stateOf(rdir: string): Record<string, unknown> {
@@ -263,6 +265,38 @@ describe('bro self dogfood', () => {
     }
   })
 
+  test('the scratch payload providers.<name> override host config at spawn', async () => {
+    const fx = fixture()
+    const { conn, spawned } = dogfoodConnector()
+    const dispose = registerAgentConnector('dogfood-test', () => conn)
+    try {
+      // host config wires p9 one way; the payload's local.json carries
+      // the scenario's own spawn env — the scratch layer must win or
+      // the runner launches on ambient user setup instead
+      writeFileSync(
+        join(fx.main, 'bro.config.json'),
+        JSON.stringify({ providers: { p9: { type: 'cli', command: 'host-p9 {promptFile}' } } })
+      )
+      writeFileSync(
+        join(fx.main, 'dogfood', 'wired.md'),
+        '# wired\n\n1. check\n\n## Assert\n\n- ok\n'
+      )
+      mkdirSync(join(fx.main, 'dogfood', 'wired.files'), { recursive: true })
+      writeFileSync(
+        join(fx.main, 'dogfood', 'wired.files', 'bro.config.local.json'),
+        JSON.stringify({ providers: { p9: { type: 'cli', command: 'scratch-p9 {promptFile}' } } })
+      )
+      const r = await dogfood(['run', 'wired', '--backend', 'dogfood-test', '--provider', 'p9'])
+      assert.equal(r.code, 0, r.err.join('\n'))
+      const worker = spawned[0]!.worker
+      assert.ok(worker?.kind === 'template')
+      assert.match(worker.command, /scratch-p9/)
+    } finally {
+      dispose?.()
+      fx.restore()
+    }
+  })
+
   test('status stays running while the runner is live', async () => {
     const fx = fixture()
     const { conn } = dogfoodConnector()
@@ -362,7 +396,16 @@ describe('bro self dogfood', () => {
   // a malformed one dies at run time on a real client. Validate shape
   // here; the live client proof stays the dogfood run itself.
 
-  const repoRoot = join(import.meta.dirname, '..', '..', '..', '..')
+  // the repo root by the dogfood/ sentinel, not a fixed ..-count — a
+  // file move must fail loudly here, not silently retarget asserts
+  const repoRoot = (() => {
+    let d = import.meta.dirname
+    while (!existsSync(join(d, 'dogfood')) && dirname(d) !== d) {
+      d = dirname(d)
+    }
+    assert.ok(existsSync(join(d, 'dogfood')), 'repo root not found — no dogfood/ up-tree')
+    return d
+  })()
 
   test('codex-plugin.files carries valid codex + serve wiring', () => {
     const files = join(repoRoot, 'dogfood', 'codex-plugin.files')
