@@ -86,6 +86,11 @@ import {
   resolveSpawnProvider,
   type AgentConnectorEnv,
 } from '../agent-connectors.ts'
+import {
+  devinSessionTranscript,
+  devinTranscriptsDir,
+  renderDevinTranscript,
+} from '../session-planes/devin.ts'
 import { flag, positionals } from './args.ts'
 import { mainWorktree, worktreePathFor } from './work.ts'
 
@@ -1151,6 +1156,90 @@ export function followLog(
   return { stop }
 }
 
+/** Follow a JSON transcript by step watermark — the file is rewritten
+ *  wholesale on each flush (not appended), so the byte-tail in
+ *  followLog can't ride it: poll, re-render past the watermark, emit.
+ *  Torn reads and vanishes skip a tick. Same stop-handle contract as
+ *  followLog — stoppable without a signal. */
+function followTranscript(
+  path: string,
+  startWatermark: number,
+  emit: (s: string) => void
+): { stop: () => void } {
+  let watermark = startWatermark
+  let stopped = false
+  let timer: NodeJS.Timeout | undefined
+  const stop = () => {
+    stopped = true
+    if (timer !== undefined) {
+      clearTimeout(timer)
+    }
+  }
+  const tick = () => {
+    if (stopped) {
+      return
+    }
+    try {
+      const r = renderDevinTranscript(readFileSync(path, 'utf8'), watermark)
+      if (r !== undefined) {
+        if (r.lines.length > 0) {
+          emit(r.lines.join('\n') + '\n')
+        }
+        watermark = r.watermark
+      }
+    } catch {
+      // mid-rewrite or reaped — retry next tick
+    }
+    if (!stopped) {
+      timer = setTimeout(tick, 2000)
+    }
+  }
+  timer = setTimeout(tick, 2000)
+  return { stop }
+}
+
+/** The devin-transcript branch of `agents log` — a devin session's
+ *  readable plane is its ATIF transcript (a.log is the acp-bridge
+ *  plumbing trace). Returns false when the agent isn't a devin session
+ *  or never flushed a transcript — the caller falls back to the byte
+ *  tail. */
+async function cmdLogDevinTranscript(
+  a: AgentInfo,
+  env: AgentConnectorEnv,
+  lines: number,
+  follow: boolean
+): Promise<boolean> {
+  const devinName =
+    a.backend === 'devin' && a.id.startsWith('devin:') ? a.id.slice('devin:'.length) : undefined
+  const transcript =
+    devinName === undefined
+      ? undefined
+      : devinSessionTranscript(devinName, devinTranscriptsDir(env.agents['devin'] ?? {}))
+  if (transcript === undefined) {
+    return false
+  }
+  console.error(`agent ${a.id} (${a.state}) — ${transcript}`)
+  let rendered = renderDevinTranscript(readFileSync(transcript, 'utf8'))
+  if (rendered === undefined) {
+    // the file is mid-rewrite — one beat later usually parses
+    await new Promise((resolve) => setTimeout(resolve, 250))
+    rendered = renderDevinTranscript(readFileSync(transcript, 'utf8'))
+  }
+  if (rendered === undefined) {
+    die(`transcript unreadable mid-rewrite: ${transcript} — retry`)
+  }
+  process.stdout.write(tailLines(rendered.lines.join('\n') + '\n', lines))
+  if (!follow) {
+    return true
+  }
+  const handle = followTranscript(transcript, rendered.watermark, (s) =>
+    process.stdout.write(s)
+  )
+  await new Promise<void>((resolve) => process.once('SIGINT', resolve))
+  handle.stop()
+  return true
+}
+
 async function cmdLog(dir: string, env: AgentConnectorEnv, argv: string[]): Promise<void> {
   const pos = positionals(argv, new Set(['--connector', '--lines']), {
     boolFlags: new Set(['--follow']),
@@ -1184,6 +1273,9 @@ async function cmdLog(dir: string, env: AgentConnectorEnv, argv: string[]): Prom
     console.error(`warning: backend degraded — ${d}`)
   }
   const a = hit.agent
+  if (await cmdLogDevinTranscript(a, env, lines, follow)) {
+    return
+  }
   if (a.log === undefined) {
     die(`agent ${a.id} has no recorded log — backend ${a.backend} may not keep one`)
   }

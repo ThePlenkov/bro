@@ -20,7 +20,10 @@ import {
   devinLogsDir,
   devinPidIsWorker,
   devinSessionPlane,
+  devinSessionTranscript,
+  devinTranscriptsDir,
   listDevinSessions,
+  renderDevinTranscript,
 } from './devin.ts'
 
 const withLockDir = (fn: (dir: string) => void): void => {
@@ -337,5 +340,110 @@ describe('devinLogsDir', () => {
     // lockDir overridden without logsDir — a '../logs' sibling would
     // escape the chosen root; the default nests inside the override
     assert.equal(devinLogsDir({ lockDir: '/tmp/locks' }), join('/tmp/locks', 'logs'))
+  })
+})
+
+describe('devinTranscriptsDir', () => {
+  test('explicit override wins; a lockDir override confines the default inside it', () => {
+    assert.equal(devinTranscriptsDir({ transcriptsDir: '/tmp/t' }), '/tmp/t')
+    assert.equal(
+      devinTranscriptsDir({}, { XDG_DATA_HOME: '/tmp/xdg' }),
+      join('/tmp/xdg', 'devin', 'cli', 'session_locks', '..', 'transcripts')
+    )
+    assert.equal(
+      devinTranscriptsDir({ lockDir: '/tmp/locks' }),
+      join('/tmp/locks', 'transcripts')
+    )
+  })
+})
+
+describe('devinSessionTranscript', () => {
+  test('resolves <name>.json when the file exists, undefined otherwise', () => {
+    withLockDir((dir) => {
+      writeFileSync(join(dir, 'sess-a.json'), '{}')
+      assert.equal(devinSessionTranscript('sess-a', dir), join(dir, 'sess-a.json'))
+      assert.equal(devinSessionTranscript('sess-b', dir), undefined)
+    })
+  })
+})
+
+const TRANSCRIPT = JSON.stringify({
+  schema_version: 'ATIF-v1.7',
+  session_id: 'sess-x',
+  steps: [
+    {
+      step_id: 1,
+      timestamp: '2026-10-16T20:00:00.000Z',
+      source: 'system',
+      message: '<additional_metadata>noise</additional_metadata>',
+    },
+    {
+      step_id: 2,
+      timestamp: '2026-10-16T20:01:00.000Z',
+      source: 'agent',
+      message: 'checking the provider template',
+    },
+    {
+      step_id: 3,
+      timestamp: '2026-10-16T20:01:05.000Z',
+      source: 'agent',
+      message: '',
+      tool_calls: [
+        {
+          tool_call_id: 'exec:1',
+          function_name: 'exec',
+          arguments: { command: 'grep -rn loadAgentEnv packages/cli/src' },
+        },
+      ],
+    },
+    {
+      step_id: 4,
+      timestamp: '2026-10-16T20:02:00.000Z',
+      source: 'user',
+      message: 'ship it',
+    },
+    {
+      step_id: 5,
+      timestamp: '2026-10-16T20:03:00.000Z',
+      source: 'system',
+      message: '',
+      tool_calls: [{ tool_call_id: 'exec:2', function_name: 'exec', arguments: { command: 'internal' } }],
+    },
+    {
+      timestamp: '2026-10-16T20:04:00.000Z',
+      source: 'agent',
+      message: 'a step with no numeric step_id',
+    },
+  ],
+})
+
+describe('renderDevinTranscript', () => {
+  test('renders messages and tool calls, elides system steps — tool calls included', () => {
+    const r = renderDevinTranscript(TRANSCRIPT)
+    assert.ok(r !== undefined)
+    assert.equal(r.watermark, 5)
+    const text = r.lines.join('\n')
+    assert.match(text, /\[20:01:00\] agent: checking the provider template/)
+    assert.match(text, /\[20:01:05\] → exec\(grep -rn loadAgentEnv packages\/cli\/src\)/)
+    assert.match(text, /\[20:02:00\] user: ship it/)
+    assert.match(text, /\[20:04:00\] agent: a step with no numeric step_id/)
+    assert.doesNotMatch(text, /additional_metadata/)
+    assert.doesNotMatch(text, /exec\(internal\)/)
+    assert.match(text, /2 system steps elided/)
+  })
+
+  test('fromStepId resumes a follow watermark — id-less steps do not reprint', () => {
+    const r = renderDevinTranscript(TRANSCRIPT, 3)
+    assert.ok(r !== undefined)
+    assert.equal(r.watermark, 5)
+    assert.deepEqual(r.lines, [
+      '[20:02:00] user: ship it',
+      '[transcript] (1 system steps elided)',
+    ])
+  })
+
+  test('a mid-rewrite torn JSON reports undefined instead of throwing', () => {
+    assert.equal(renderDevinTranscript(TRANSCRIPT.slice(0, 40)), undefined)
+    assert.equal(renderDevinTranscript('{"steps": null}'), undefined)
   })
 })

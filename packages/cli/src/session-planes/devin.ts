@@ -304,25 +304,137 @@ export function devinPidCwd(pid: number, procDir = '/proc'): string | undefined 
   }
 }
 
-/** Devin's per-process log dir — `devin_<ts>_<pid>.log`, the sibling
- *  of session_locks under the same data base. */
-export function devinLogsDir(
-  bag?: Record<string, unknown>,
-  env: Record<string, string | undefined> = process.env
+/** A sibling dir of session_locks under the same data base — `logs`,
+ *  `transcripts`, whatever a plane needs next. The `<name>Dir`
+ *  override wins; a custom lockDir broke the real-install sibling
+ *  layout, so the fallback nests inside the override instead of
+ *  escaping the operator's chosen root via `..`. */
+function devinSiblingDir(
+  bag: Record<string, unknown> | undefined,
+  env: Record<string, string | undefined>,
+  overrideKey: string,
+  name: string
 ): string {
-  const override = bag?.['logsDir']
+  const override = bag?.[overrideKey]
   if (typeof override === 'string' && override.trim() !== '') {
     return override
   }
   const locks = devinLocksDir(bag, env)
   const lockOverride = bag?.['lockDir']
   if (typeof lockOverride === 'string' && lockOverride.trim() !== '') {
-    // a custom lockDir broke the real-install sibling layout — a
-    // `../logs` escape would land outside the operator's chosen root,
-    // so the fallback nests inside the override instead
-    return join(locks, 'logs')
+    return join(locks, name)
   }
-  return join(locks, '..', 'logs')
+  return join(locks, '..', name)
+}
+
+/** Devin's per-process log dir — `devin_<ts>_<pid>.log`, the sibling
+ *  of session_locks under the same data base. */
+export function devinLogsDir(
+  bag?: Record<string, unknown>,
+  env: Record<string, string | undefined> = process.env
+): string {
+  return devinSiblingDir(bag, env, 'logsDir', 'logs')
+}
+
+/** Devin's transcript dir — `transcripts/<session-name>.json`, the
+ *  readable sibling of session_locks (same derivation contract as
+ *  devinLogsDir: `transcriptsDir` override wins; a custom lockDir
+ *  nests the default inside the override so it never escapes the
+ *  operator's chosen root). */
+export function devinTranscriptsDir(
+  bag?: Record<string, unknown>,
+  env: Record<string, string | undefined> = process.env
+): string {
+  return devinSiblingDir(bag, env, 'transcriptsDir', 'transcripts')
+}
+
+/** A session's ATIF transcript — `transcripts/<lock-name>.json` when
+ *  the file exists. The lock name IS the session name; a resumed
+ *  session keeps both. */
+export function devinSessionTranscript(name: string, transcriptsDir: string): string | undefined {
+  const path = join(transcriptsDir, `${name}.json`)
+  return existsSync(path) ? path : undefined
+}
+
+/** One ATIF step's display line, or undefined when the step carries
+ *  nothing user-facing (system metadata blobs, empty messages). */
+function atifStepLines(step: Record<string, unknown>): string[] {
+  const ts = typeof step['timestamp'] === 'string' ? step['timestamp'] : ''
+  const hhmmss = ts.length >= 19 ? ts.slice(11, 19) : '??:??:??'
+  const out: string[] = []
+  const message = typeof step['message'] === 'string' ? step['message'] : ''
+  const source = typeof step['source'] === 'string' ? step['source'] : 'agent'
+  if (source !== 'system' && message.trim() !== '') {
+    out.push(`[${hhmmss}] ${source}: ${message.trim()}`)
+  }
+  const calls = Array.isArray(step['tool_calls']) ? step['tool_calls'] : []
+  for (const c of calls) {
+    const call = c as Record<string, unknown>
+    const fn = typeof call['function_name'] === 'string' ? call['function_name'] : '?'
+    const brief = toolCallBrief(call['arguments']).replace(/\s+/g, ' ')
+    out.push(`[${hhmmss}] → ${fn}(${brief})`)
+  }
+  return out
+}
+
+/** A tool call's argument brief — `command` wins for exec-shaped args,
+ *  otherwise the compact JSON form, capped at one glance. */
+function toolCallBrief(args: unknown): string {
+  let brief = ''
+  if (args !== null && typeof args === 'object' && !Array.isArray(args)) {
+    const cmd = (args as Record<string, unknown>)['command']
+    brief = typeof cmd === 'string' ? cmd : JSON.stringify(args)
+  } else if (args !== undefined) {
+    brief = JSON.stringify(args)
+  }
+  return brief.length > 160 ? brief.slice(0, 157) + '...' : brief
+}
+
+/** An ATIF transcript rendered to log-shaped lines. `fromStepId`
+ *  resumes a follow watermark — only steps past it are emitted.
+ *  Returns undefined on a mid-rewrite (torn JSON) or a doc without
+ *  steps — the caller retries next tick, never dies on a flush in
+ *  flight. */
+export function renderDevinTranscript(
+  json: string,
+  fromStepId = 0
+): { lines: string[]; watermark: number } | undefined {
+  let doc: unknown
+  try {
+    doc = JSON.parse(json)
+  } catch {
+    return undefined
+  }
+  if (doc === null || typeof doc !== 'object' || !Array.isArray((doc as Record<string, unknown>)['steps'])) {
+    return undefined
+  }
+  const steps = (doc as Record<string, unknown>)['steps'] as Record<string, unknown>[]
+  const lines: string[] = []
+  let watermark = fromStepId
+  let systemSkipped = 0
+  for (const step of steps) {
+    // -1 marks a step with no numeric id: it renders on the first pass
+    // (id-less steps exist and carry content), but a follow poll skips
+    // it — it can't advance the watermark, so it would reprint forever
+    const id = typeof step['step_id'] === 'number' ? step['step_id'] : -1
+    if (id === -1 ? fromStepId > 0 : id <= fromStepId) {
+      continue
+    }
+    if (step['source'] === 'system') {
+      systemSkipped++
+    } else {
+      lines.push(...atifStepLines(step))
+    }
+    // consumed steps advance the watermark even when they emit no
+    // lines — a system step must elide exactly once, not every poll
+    if (id > watermark) {
+      watermark = id
+    }
+  }
+  if (systemSkipped > 0) {
+    lines.push(`[transcript] (${systemSkipped} system steps elided)`)
+  }
+  return { lines, watermark }
 }
 
 /** The newest `devin_*_<pid>.log` — a live session's own output, the
