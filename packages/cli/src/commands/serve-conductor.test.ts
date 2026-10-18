@@ -47,6 +47,23 @@ async function postMessages(
   return { r, url, close }
 }
 
+/** Collected text_delta payloads from a parsed SSE stream. */
+function textDeltas(ev: Awaited<ReturnType<typeof sseEvents>>): string[] {
+  return ev
+    .filter(
+      (e) =>
+        e.event === 'content_block_delta' &&
+        (e.data.delta as { type: string }).type === 'text_delta'
+    )
+    .map((e) => (e.data.delta as { text: string }).text)
+}
+
+/** The turn's terminal stop_reason off the message_delta event. */
+function stopReason(ev: Awaited<ReturnType<typeof sseEvents>>): string {
+  const md = ev.find((e) => e.event === 'message_delta')
+  return (md?.data.delta as { stop_reason: string }).stop_reason
+}
+
 /** Boot the conductor over `fake` and POST a streamed /v1/messages —
  *  caller owns close() (stream:true is the shape under test here). */
 async function postStream(
@@ -186,8 +203,7 @@ describe('serve /v1/* — the conductor plane', () => {
         (start?.data.message as { model: string }).model,
         'claude-sonnet-4-5'
       )
-      const md = ev.find((e) => e.event === 'message_delta')
-      assert.equal((md?.data.delta as { stop_reason: string }).stop_reason, 'end_turn')
+      assert.equal(stopReason(ev), 'end_turn')
       // the conversation reached the agent serialized, not the client's model id
       assert.match(fake.prompts[0] ?? '', /say hi/)
       assert.match(fake.prompts[0] ?? '', /<turn role="user">/)
@@ -266,8 +282,7 @@ describe('serve /v1/* — the conductor plane', () => {
       assert.deepEqual(JSON.parse((tu.data.delta as { partial_json: string }).partial_json), {
         d: '/tmp',
       })
-      const md = ev.find((e) => e.event === 'message_delta')
-      assert.equal((md?.data.delta as { stop_reason: string }).stop_reason, 'tool_use')
+      assert.equal(stopReason(ev), 'tool_use')
     } finally {
       await close()
     }
@@ -560,13 +575,7 @@ describe('serve /v1/* — the conductor plane', () => {
     })
     try {
       const ev = await sseEvents(r)
-      const texts = ev
-        .filter(
-          (e) =>
-            e.event === 'content_block_delta' &&
-            (e.data.delta as { type: string }).type === 'text_delta'
-        )
-        .map((e) => (e.data.delta as { text: string }).text)
+      const texts = textDeltas(ev)
       assert.deepEqual(texts, ['checking ', ' done'])
       const tu = ev.find(
         (e) =>
@@ -578,8 +587,7 @@ describe('serve /v1/* — the conductor plane', () => {
       assert.deepEqual(JSON.parse((tu.data.delta as { partial_json: string }).partial_json), {
         d: '/tmp',
       })
-      const md = ev.find((e) => e.event === 'message_delta')
-      assert.equal((md?.data.delta as { stop_reason: string }).stop_reason, 'tool_use')
+      assert.equal(stopReason(ev), 'tool_use')
     } finally {
       await close()
     }
@@ -593,17 +601,9 @@ describe('serve /v1/* — the conductor plane', () => {
     const { r, close } = await postStream(fake)
     try {
       const ev = await sseEvents(r)
-      const text = ev
-        .filter(
-          (e) =>
-            e.event === 'content_block_delta' &&
-            (e.data.delta as { type: string }).type === 'text_delta'
-        )
-        .map((e) => (e.data.delta as { text: string }).text)
-        .join('')
+      const text = textDeltas(ev).join('')
       assert.equal(text, 'x <tool_call>{nope</tool_call> y <tool_call>{"na')
-      const md = ev.find((e) => e.event === 'message_delta')
-      assert.equal((md?.data.delta as { stop_reason: string }).stop_reason, 'end_turn')
+      assert.equal(stopReason(ev), 'end_turn')
     } finally {
       await close()
     }
@@ -683,14 +683,7 @@ describe('serve /v1/* — the conductor plane', () => {
     const { r, close } = await postStream(fake)
     try {
       const ev = await sseEvents(r)
-      const text = ev
-        .filter(
-          (e) =>
-            e.event === 'content_block_delta' &&
-            (e.data.delta as { type: string }).type === 'text_delta'
-        )
-        .map((e) => (e.data.delta as { text: string }).text)
-        .join('')
+      const text = textDeltas(ev).join('')
       assert.match(text, /⏺ exec: ls \/tmp/)
       assert.match(text, /✓ exec: ls \/tmp/)
       assert.match(text, /⏺ instant\n✓ instant/)
@@ -703,8 +696,7 @@ describe('serve /v1/* — the conductor plane', () => {
         ev.filter((e) => (e.data.delta as { type: string } | undefined)?.type === 'input_json_delta').length,
         0
       )
-      const md = ev.find((e) => e.event === 'message_delta')
-      assert.equal((md?.data.delta as { stop_reason: string }).stop_reason, 'end_turn')
+      assert.equal(stopReason(ev), 'end_turn')
     } finally {
       await close()
     }
@@ -728,13 +720,7 @@ describe('serve /v1/* — the conductor plane', () => {
     const { r, close } = await postStream(fake)
     try {
       const ev = await sseEvents(r)
-      const texts = ev
-        .filter(
-          (e) =>
-            e.event === 'content_block_delta' &&
-            (e.data.delta as { type: string }).type === 'text_delta'
-        )
-        .map((e) => (e.data.delta as { text: string }).text)
+      const texts = textDeltas(ev)
       assert.deepEqual(texts, ['work ', '\n⏺ exec: ls\n', ' end'])
       const tu = ev.find(
         (e) =>
