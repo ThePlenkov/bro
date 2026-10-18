@@ -642,20 +642,25 @@ class LiveTurn {
     return undefined
   }
 
+  /** Id-keyed once-only gate — an id-less update can't be correlated,
+   *  so it always passes (narrates every time). */
+  private once(id: string | undefined, seen: Set<string>): boolean {
+    if (id === undefined) return true
+    if (seen.has(id)) return false
+    seen.add(id)
+    return true
+  }
+
   private narrateStart(u: SessionUpdate): string | undefined {
     if (u.sessionUpdate !== 'tool_call') return undefined
-    const id = u.toolCallId
-    if (id !== undefined) {
-      if (this.toolStarted.has(id)) return undefined
-      this.toolStarted.add(id)
-    }
+    if (!this.once(u.toolCallId, this.toolStarted)) return undefined
     const label = shortLabel(u.title ?? u.name ?? u.kind ?? 'tool call')
-    if (id !== undefined) this.toolLabels.set(id, label)
+    if (u.toolCallId !== undefined) this.toolLabels.set(u.toolCallId, label)
     const start = `\n⏺ ${label}\n`
     // a tool_call can itself arrive already terminal — open and close
     // the edge in one update so nothing stays mid-flight forever
     if (u.status !== 'completed' && u.status !== 'failed') return start
-    if (id !== undefined) this.toolDone.add(id)
+    if (u.toolCallId !== undefined) this.toolDone.add(u.toolCallId)
     return `${start}${u.status === 'failed' ? '✗' : '✓'} ${label}\n`
   }
 
@@ -666,12 +671,8 @@ class LiveTurn {
     ) {
       return undefined
     }
-    const id = u.toolCallId
-    if (id !== undefined) {
-      if (this.toolDone.has(id)) return undefined
-      this.toolDone.add(id)
-    }
-    const known = id !== undefined ? this.toolLabels.get(id) : undefined
+    if (!this.once(u.toolCallId, this.toolDone)) return undefined
+    const known = u.toolCallId !== undefined ? this.toolLabels.get(u.toolCallId) : undefined
     const label = shortLabel(u.title ?? u.name ?? known ?? 'tool call')
     return `\n${u.status === 'failed' ? '✗' : '✓'} ${label}\n`
   }
