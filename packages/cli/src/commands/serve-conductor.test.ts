@@ -669,6 +669,67 @@ describe('serve /v1/* — the conductor plane', () => {
     }
   })
 
+  test('agent-side tool_call lifecycle narrates as text edges — never tool_use', async () => {
+    const fake = fakeAcpAgent({
+      updates: [
+        ...chunks('thinking '),
+        {
+          sessionUpdate: 'tool_call',
+          toolCallId: 'tc-1',
+          title: 'exec: ls /tmp',
+          kind: 'execute',
+          status: 'in_progress',
+        } as SessionUpdate,
+        ...chunks('then '),
+        {
+          sessionUpdate: 'tool_call_update',
+          toolCallId: 'tc-1',
+          status: 'completed',
+          title: 'exec: ls /tmp',
+        } as SessionUpdate,
+        // non-terminal chatter and a duped terminal both emit nothing
+        {
+          sessionUpdate: 'tool_call_update',
+          toolCallId: 'tc-1',
+          status: 'completed',
+        } as SessionUpdate,
+        {
+          sessionUpdate: 'tool_call_update',
+          toolCallId: 'tc-2',
+          status: 'in_progress',
+          title: 'ignored',
+        } as SessionUpdate,
+        ...chunks('done'),
+      ],
+      configOptions: [MODEL_OPTION],
+    })
+    const { r, close } = await postStream(fake)
+    try {
+      const ev = await sseEvents(r)
+      const text = ev
+        .filter(
+          (e) =>
+            e.event === 'content_block_delta' &&
+            (e.data.delta as { type: string }).type === 'text_delta'
+        )
+        .map((e) => (e.data.delta as { text: string }).text)
+        .join('')
+      assert.match(text, /⏺ exec: ls \/tmp/)
+      assert.match(text, /✓ exec: ls \/tmp/)
+      assert.equal((text.match(/✓/g) ?? []).length, 1)
+      assert.ok(!text.includes('ignored'))
+      // narration is text — no tool_use block invented, no tool_use stop
+      assert.equal(
+        ev.filter((e) => (e.data.delta as { type: string } | undefined)?.type === 'input_json_delta').length,
+        0
+      )
+      const md = ev.find((e) => e.event === 'message_delta')
+      assert.equal((md?.data.delta as { stop_reason: string }).stop_reason, 'end_turn')
+    } finally {
+      await close()
+    }
+  })
+
   test('a failed streamed turn lands as an in-stream error event', async () => {
     const fake = fakeAcpAgent({ configOptions: [MODEL_OPTION], failPrompt: 'generic' })
     const { r, close } = await postStream(fake)

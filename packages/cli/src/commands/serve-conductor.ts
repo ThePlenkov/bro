@@ -29,6 +29,7 @@ import { acpOpen, acpPooledTurn, acpSessionRetain, otelEvent, otelParent, otelSp
 import type { AcpContentBlock, AcpPeer, AcpRetainedSession, OtelCtx, PooledTurnOpts, ProviderWireOpts } from '@broject/providers'
 import { peerAttrs } from './peer.ts'
 import { catalogModels } from './providers.ts'
+import type { SessionUpdate } from '@agentclientprotocol/sdk'
 
 type AcpEntry = Extract<ProviderEntry, { type: 'acp' }>
 
@@ -555,6 +556,13 @@ function emitBlocks(
 const OPEN_TAG = '<tool_call>'
 const CLOSE_TAG = '</tool_call>'
 
+/** Narration label — a tool_call title can carry a whole command
+ *  string; first line only, capped. */
+function shortLabel(s: string): string {
+  const line = s.split('\n', 1)[0] ?? s
+  return line.length > 120 ? `${line.slice(0, 117)}…` : line
+}
+
 /** Longest suffix of `s` that is a prefix of `tag` — the tail bytes a
  *  tag split across deltas must hold back until more of the turn
  *  arrives (or the turn ends and they flush as plain text). */
@@ -604,7 +612,32 @@ class LiveTurn {
     if (u.sessionUpdate === 'agent_message_chunk' && u.content.type === 'text') {
       this.pending += u.content.text
       this.drain(false)
+      return
     }
+    const line = this.narrateTool(u)
+    if (line !== undefined) this.text(line)
+  }
+
+  private readonly toolDone = new Set<string>()
+
+  /** The session's own tool_call lifecycle — the client's only view of
+   *  agent-side work (exec, file ops, subagent spawns): narrated as
+   *  text edges, never tool_use (the tool already ran — a tool_use
+   *  would make the client execute it again). One line per start, one
+   *  per terminal status; content/plan/usage updates are chatter. */
+  private narrateTool(u: SessionUpdate): string | undefined {
+    if (u.sessionUpdate === 'tool_call') {
+      return `\n⏺ ${shortLabel(u.title ?? u.name ?? u.kind ?? 'tool call')}\n`
+    }
+    if (
+      u.sessionUpdate === 'tool_call_update' &&
+      (u.status === 'completed' || u.status === 'failed') &&
+      !this.toolDone.has(u.toolCallId)
+    ) {
+      this.toolDone.add(u.toolCallId)
+      return `\n${u.status === 'failed' ? '✗' : '✓'} ${shortLabel(u.title ?? u.name ?? 'tool call')}\n`
+    }
+    return undefined
   }
 
   private blockStart(contentBlock: unknown): void {
