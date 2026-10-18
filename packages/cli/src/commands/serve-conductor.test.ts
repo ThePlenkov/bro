@@ -1170,4 +1170,87 @@ describe('serve /v1/* — tool_choice, stop_sequences, error taxonomy, keepalive
       await close()
     }
   })
+
+  test('a cross-chunk stop hit records the streamed cut, not a full-text re-match', async () => {
+    const fake = fakeAcpAgent({
+      updates: chunks('abc', 'd'),
+      configOptions: [MODEL_OPTION],
+    })
+    const { url, close } = await listen(
+      deps({ provider: conductorProxy(CFG, { acp: { peer: fake.app } }) })
+    )
+    try {
+      const body = JSON.stringify({
+        messages: [{ role: 'user', content: 'x' }],
+        stop_sequences: ['abcd', 'bc'],
+        stream: true,
+      })
+      const post = () =>
+        fetch(`${url}/v1/messages`, {
+          method: 'POST',
+          headers: { ...auth, 'content-type': 'application/json' },
+          body,
+        })
+      // 'bc' completes first in stream order — the cut is 'a', even
+      // though 'abcd' sits earlier in the settled text
+      const ev = await sseEvents(await post())
+      assert.equal(textDeltas(ev).join(''), 'a')
+      assert.equal(stopReason(ev), 'stop_sequence')
+      const replay = await sseEvents(await post())
+      assert.equal(textDeltas(replay).join(''), 'a')
+      assert.equal(stopReason(replay), 'stop_sequence')
+    } finally {
+      await close()
+    }
+  })
+
+  test('changed stop_sequences on identical history take a fresh turn, not a replay', async () => {
+    const fake = fakeAcpAgent({ replyText: 'abc MARK tail', configOptions: [MODEL_OPTION] })
+    const { url, close } = await listen(
+      deps({ provider: conductorProxy(CFG, { acp: { peer: fake.app } }) })
+    )
+    try {
+      const post = (stop_sequences: string[]) =>
+        fetch(`${url}/v1/messages`, {
+          method: 'POST',
+          headers: { ...auth, 'content-type': 'application/json' },
+          body: JSON.stringify({
+            messages: [{ role: 'user', content: 'x' }],
+            stop_sequences,
+            stream: false,
+          }),
+        })
+      const first = await (await post(['MARK'])).json()
+      assert.equal(first.content[0].text, 'abc ')
+      // same history, different markers — the recorded reply must not
+      // replay; a fresh turn runs and answers under the new stops
+      const second = await (await post(['NOMATCH'])).json()
+      assert.equal(second.content[0].text, 'abc MARK tail')
+      assert.equal(fake.prompts.length, 2)
+    } finally {
+      await close()
+    }
+  })
+
+  test('a non-array stop_sequences answers 400 invalid_request_error', async () => {
+    const fake = fakeAcpAgent({ replyText: 'x', configOptions: [MODEL_OPTION] })
+    const { url, close } = await listen(
+      deps({ provider: conductorProxy(CFG, { acp: { peer: fake.app } }) })
+    )
+    try {
+      const r = await fetch(`${url}/v1/messages`, {
+        method: 'POST',
+        headers: { ...auth, 'content-type': 'application/json' },
+        body: JSON.stringify({
+          messages: [{ role: 'user', content: 'x' }],
+          stop_sequences: 'STOP',
+        }),
+      })
+      assert.equal(r.status, 400)
+      const body = await r.json()
+      assert.equal(body.error.type, 'invalid_request_error')
+    } finally {
+      await close()
+    }
+  })
 })

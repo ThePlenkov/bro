@@ -49,8 +49,8 @@ below the seam. The `<tool_call>` reply-markup emulation is shared
 | `[1m]` context suffix | ✅ | stripped to base pin |
 | multi-turn retention | ✅ | history fingerprint + `x-bro-session` pin |
 | `max_tokens` | ⚠️ ignored | ACP exposes no cap — document as accepted no-op |
-| `stop_sequences` | ❌ | **implement**: post-filter deltas, cut at marker |
-| `tool_choice` | ❌ | **implement**: auto/none → contract on/off; any/tool → "must call" contract line |
+| `stop_sequences` | ✅ | incremental `StopFilter` cuts deltas at the marker (cross-chunk safe); `stop_reason: stop_sequence` + `stop_sequence` field; recorded reply = emitted text |
+| `tool_choice` | ✅ | auto/none → contract on/off; any/tool → "must call" contract line |
 | `temperature`, `top_p`, `top_k` | ⚠️ ignored | no ACP knob — accepted no-op, documented |
 | `thinking` / extended thinking | ❌ | **decide**: map budget → thought_level pin, or emit thinking blocks? |
 | `metadata.user_id` | ⚠️ ignored | accepted no-op (privacy-safe) |
@@ -70,8 +70,8 @@ below the seam. The `<tool_call>` reply-markup emulation is shared
 | case | today | target |
 |---|---|---|
 | backend dead/unspawnable | 529 `overloaded_error` | keep |
-| backend quota/rate-limited | 529 | 429 `rate_limit_error` + `Retry-After` |
-| malformed body / bad field | 500-ish | 400 `invalid_request_error` |
+| backend quota/rate-limited | 529 | 429 `rate_limit_error` + `Retry-After` (implemented) |
+| malformed body / bad field | 500-ish | 400 `invalid_request_error` (implemented; `stop_sequences` non-array → 400) |
 | bad/missing token | 401 | keep + `authentication_error` type |
 | unknown model pin | ? | 404 `not_found_error` |
 | mid-stream turn failure | in-stream `error` event | keep |
@@ -116,7 +116,7 @@ compat, deferred until a real client needs it.
 | `parallel_tool_calls` | accepted no-op (emulation is sequential anyway) |
 | `previous_response_id` | → session retention key (chains a turn to its predecessor) |
 | `store: false` | stateless mode — still keyed by history fingerprint |
-| `reasoning.effort` | **the fit**: `low|medium|high` → thought_level |
+| `reasoning.effort` | **the fit**: `low\|medium\|high` → thought_level |
 | `max_output_tokens` | accepted no-op |
 | `text.format`, `metadata`, `include`, `background`, `truncation` | accepted no-op |
 
@@ -171,7 +171,7 @@ export (`BRO_*` token).
 
 ```
 packages/cli/src/commands/
-  serve-conductor.test.ts            anthropic plane (exists, 35)
+  serve-conductor.test.ts            anthropic plane (exists, 48)
   serve-conductor-features.test.ts   anthropic gaps
     ├─ tool_choice auto/any/tool/none → contract variants
     ├─ stop_sequences: mid-stream cut, buffered cut, multi-seq

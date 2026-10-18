@@ -175,12 +175,12 @@ function toolContract(
         `- ${t.name}: ${t.description ?? ''} input_schema: ${JSON.stringify(t.input_schema ?? {})}`
     )
     .join('\n')
-  const must =
-    choice?.type === 'any'
-      ? 'You MUST respond with a tool call.'
-      : choice?.type === 'tool' && typeof choice.name === 'string'
-        ? `You MUST call the tool "${choice.name}".`
-        : undefined
+  let must: string | undefined
+  if (choice?.type === 'any') {
+    must = 'You MUST respond with a tool call.'
+  } else if (choice?.type === 'tool' && typeof choice.name === 'string') {
+    must = `You MUST call the tool "${choice.name}".`
+  }
   return [
     '<tools>',
     'Call tools by emitting exactly, one per call:',
@@ -193,6 +193,22 @@ function toolContract(
 
 const turnRole = (m: { role?: string }): string =>
   m.role === 'assistant' ? 'assistant' : 'user'
+
+/** stop_sequences on the wire is an array of non-empty strings —
+ *  anything else is a 400-class request error, never a 500. */
+function stopSeqsOf(body: MessagesRequest): string[] | undefined {
+  const raw = body.stop_sequences
+  if (raw === undefined) return []
+  if (!Array.isArray(raw) || raw.some((s) => typeof s !== 'string' || s === '')) {
+    return undefined
+  }
+  return raw
+}
+
+/** The request's stop settings as one hashable string — part of the
+ *  conversation identity: changed markers must not replay a reply
+ *  recorded under different ones. */
+const stopKeyOf = (seqs: string[]): string => seqs.join('')
 
 type ClientMessage = NonNullable<MessagesRequest['messages']>[number]
 
@@ -325,15 +341,20 @@ interface ConvSession {
   /** raw request-model id the session currently runs — a resend that
    *  pins a different model re-pins instead of replaying. */
   requestModel?: string
-  lastReply: {
-    blocks: OutBlock[]
-    model: string
-    stopReason: string
-    stopSequence?: string
-    inputTokens: number
-  }
+  lastReply: ReplyView
   busy: boolean
   lastSeen: number
+}
+
+/** One settled reply as the wire renders it — buffered, streamed, or
+ *  replayed from conv.lastReply. Bundling keeps the emit/settle
+ *  signatures under the parameter cap. */
+interface ReplyView {
+  blocks: OutBlock[]
+  model: string
+  stopReason: string
+  stopSequence?: string
+  inputTokens: number
 }
 
 const CONV_TTL_MS = 10 * 60_000
@@ -358,9 +379,14 @@ const turnHashInput = (m: ClientMessage): string => {
   return `${serTurn(m)}\x00${imgs}`
 }
 
-const hashTurns = (prefix: string, msgs: ClientMessage[], n: number): string =>
+const hashTurns = (
+  prefix: string,
+  msgs: ClientMessage[],
+  n: number,
+  stopKey: string
+): string =>
   createHash('sha256')
-    .update(`${prefix}\n${msgs.slice(0, n).map(turnHashInput).join('\n')}`)
+    .update(`${prefix}\n${stopKey}\n${msgs.slice(0, n).map(turnHashInput).join('\n')}`)
     .digest('hex')
 
 /** Where the conversation id comes from: an explicit `x-bro-session`
@@ -381,7 +407,9 @@ function conversationKey(req: IncomingMessage, body: MessagesRequest): string | 
     return undefined
   }
   const fp = createHash('sha256')
-    .update(`${prefixText(body)}\n${turnHashInput(first)}`)
+    .update(
+      `${prefixText(body)}\n${stopKeyOf(stopSeqsOf(body) ?? [])}\n${turnHashInput(first)}`
+    )
     .digest('hex')
   return `f:${fp}`
 }
@@ -531,23 +559,13 @@ function sse(res: ServerResponse, event: string, data: unknown): void {
   res.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`)
 }
 
-/** The buffered SSE answer — the whole settled reply emitted as one
- *  anthropic event sequence. Used where no live turn ran: a replayed
- *  resend answers from conv.lastReply, never a fresh pump. */
-function emitBlocks(
-  res: ServerResponse,
-  blocks: OutBlock[],
-  model: string,
-  stopReason: string,
-  inputTokens: number,
-  stopSequence?: string
-): void {
-  const msgId = `msg_${randomBytes(12).toString('hex')}`
-  const outTokens = estTokens(JSON.stringify(blocks))
-  sse(res, 'message_start', {
+/** The anthropic envelope's first frame — shared by the buffered
+ *  emitBlocks path and the live pump so the shape never forks. */
+function messageStartEvent(model: string, inputTokens: number): object {
+  return {
     type: 'message_start',
     message: {
-      id: msgId,
+      id: `msg_${randomBytes(12).toString('hex')}`,
       type: 'message',
       role: 'assistant',
       content: [],
@@ -556,7 +574,16 @@ function emitBlocks(
       stop_sequence: null,
       usage: { input_tokens: inputTokens, output_tokens: 0 },
     },
-  })
+  }
+}
+
+/** The buffered SSE answer — the whole settled reply emitted as one
+ *  anthropic event sequence. Used where no live turn ran: a replayed
+ *  resend answers from conv.lastReply, never a fresh pump. */
+function emitBlocks(res: ServerResponse, view: ReplyView): void {
+  const { blocks, model, stopReason, inputTokens, stopSequence } = view
+  const outTokens = estTokens(JSON.stringify(blocks))
+  sse(res, 'message_start', messageStartEvent(model, inputTokens))
   blocks.forEach((b, i) => {
     if (b.type === 'tool_use') {
       sse(res, 'content_block_start', {
@@ -617,11 +644,18 @@ function tagSuffix(s: string, tag: string): number {
  *  is swallowed (generation stops — the wire's own semantics). */
 class StopFilter {
   private tail = ''
+  private out = ''
   hit: string | undefined
 
   constructor(private readonly seqs: string[]) {}
 
   feed(s: string): string {
+    const o = this.cut(s)
+    this.out += o
+    return o
+  }
+
+  private cut(s: string): string {
     if (this.hit !== undefined || this.seqs.length === 0) {
       return this.hit === undefined ? s : ''
     }
@@ -649,7 +683,15 @@ class StopFilter {
   flush(): string {
     const t = this.hit === undefined ? this.tail : ''
     this.tail = ''
+    this.out += t
     return t
+  }
+
+  /** Everything the filter let through — byte-identical to what the
+   *  client saw, whatever the delta boundaries were. The recorded
+   *  reply comes from this, never from a re-run of the raw text. */
+  get emitted(): string {
+    return this.out
   }
 }
 
@@ -681,19 +723,7 @@ class LiveTurn {
       this.ping = setInterval(() => sse(res, 'ping', { type: 'ping' }), pingMs)
       this.ping.unref()
     }
-    sse(res, 'message_start', {
-      type: 'message_start',
-      message: {
-        id: `msg_${randomBytes(12).toString('hex')}`,
-        type: 'message',
-        role: 'assistant',
-        content: [],
-        model,
-        stop_reason: null,
-        stop_sequence: null,
-        usage: { input_tokens: inputTokens, output_tokens: 0 },
-      },
-    })
+    sse(res, 'message_start', messageStartEvent(model, inputTokens))
   }
 
   readonly onUpdate: NonNullable<PooledTurnOpts['onUpdate']> = (u) => {
@@ -883,11 +913,10 @@ class LiveTurn {
       this.delta({ type: 'text_delta', text: '' })
       this.blockStop()
     }
-    this.stopReason = this.sawTool
-      ? 'tool_use'
-      : this.stops?.hit !== undefined
-        ? 'stop_sequence'
-        : stopReason
+    let reason = stopReason
+    if (this.stops?.hit !== undefined) reason = 'stop_sequence'
+    if (this.sawTool) reason = 'tool_use'
+    this.stopReason = reason
     sse(this.res, 'message_delta', {
       type: 'message_delta',
       delta: { stop_reason: this.stopReason, stop_sequence: this.stops?.hit ?? null },
@@ -940,15 +969,26 @@ function apiError(res: ServerResponse, status: number, type: string, message: st
 const MAX_BODY = 32 * 1024 * 1024
 
 async function readBody(req: IncomingMessage): Promise<string> {
-  let body = ''
+  const parts: Buffer[] = []
+  let bytes = 0
   for await (const chunk of req) {
-    body += chunk
-    if (body.length > MAX_BODY) {
-      req.destroy()
+    const buf = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk as string)
+    bytes += buf.length
+    if (bytes > MAX_BODY) {
+      // leave the socket open — the caller still owes the 413 answer
       throw new Error('request body too large')
     }
+    parts.push(buf)
   }
-  return body
+  return Buffer.concat(parts).toString('utf8')
+}
+
+/** The 413 answer — the body stays open until the response lands, then
+ *  the socket closes (we never read the rest of the request). */
+function tooLarge(req: IncomingMessage, res: ServerResponse): void {
+  res.setHeader('connection', 'close')
+  apiError(res, 413, 'request_too_large', 'request body exceeds 32MB')
+  res.once('finish', () => req.destroy())
 }
 
 const AVAIL = /unavailable|timeout|timed out/i
@@ -974,13 +1014,10 @@ function inputTokensOf(prompt: AcpContentBlock[]): number {
 function respond(
   res: ServerResponse,
   body: MessagesRequest,
-  blocks: OutBlock[],
-  model: string,
-  stopReason: string,
-  inputTokens: number,
-  sessionKey?: string,
-  stopSequence?: string
+  view: ReplyView,
+  sessionKey?: string
 ): void {
+  const { blocks, model, stopReason, inputTokens, stopSequence } = view
   const sessionHdr = sessionKey?.startsWith('h:') === true ? { 'x-bro-session': sessionKey } : {}
   if (body.stream === false) {
     res.writeHead(200, { 'content-type': 'application/json', ...sessionHdr })
@@ -1004,7 +1041,7 @@ function respond(
     connection: 'keep-alive',
     ...sessionHdr,
   })
-  emitBlocks(res, blocks, model, stopReason, inputTokens, stopSequence)
+  emitBlocks(res, view)
   res.end()
 }
 
@@ -1044,6 +1081,9 @@ interface TurnEnv {
   sessions: Map<string, ConvSession>
   pendingOpens: Set<string>
   key: string | undefined
+  /** request's stop settings — hashed into the conversation proofs so
+   *  changed markers never replay a reply cut under different ones */
+  stopKey: string
   parent: OtelCtx | undefined
   requestModel: string | undefined
   deadline: number
@@ -1145,7 +1185,7 @@ async function freshTurn(env: TurnEnv, candBusy: boolean): Promise<TurnOutcome> 
       live,
       peer: env.peer,
       consumed: env.msgs.length,
-      historyHash: hashTurns(env.prefix, env.msgs, env.msgs.length),
+      historyHash: hashTurns(env.prefix, env.msgs, env.msgs.length, env.stopKey),
       requestModel: env.requestModel,
       lastReply: { blocks: [], model: '', stopReason: '', inputTokens: 0 },
       busy: false,
@@ -1174,7 +1214,7 @@ async function acpTurn(env: TurnEnv): Promise<TurnOutcome> {
     cand.peer === env.peer &&
     !cand.busy &&
     cand.consumed <= env.msgs.length &&
-    hashTurns(env.prefix, env.msgs, cand.consumed) === cand.historyHash
+    hashTurns(env.prefix, env.msgs, cand.consumed, env.stopKey) === cand.historyHash
   if (usable === true) {
     return continuationTurn(env, cand)
   }
@@ -1224,7 +1264,9 @@ function turnError(
   const msg = err instanceof Error ? err.message : String(err)
   const avail = AVAIL.test(msg)
   const rate = RATE.test(msg)
-  const liveType = rate ? 'rate_limit_error' : avail ? 'overloaded_error' : 'api_error'
+  let liveType = 'api_error'
+  if (avail) liveType = 'overloaded_error'
+  if (rate) liveType = 'rate_limit_error'
   if (live !== undefined) {
     live.error(liveType, `bro conductor: ${msg}`)
     res.end()
@@ -1236,7 +1278,9 @@ function turnError(
     })
     return
   }
-  const status = rate ? 429 : avail ? 529 : 500
+  let status = 500
+  if (avail) status = 529
+  if (rate) status = 429
   if (rate) res.setHeader('retry-after', '30')
   otelEvent('conductor.error', {
     backend,
@@ -1256,19 +1300,76 @@ function settleConv(
   key: string | undefined,
   conv: ConvSession,
   body: MessagesRequest,
-  reply: PooledReply,
-  blocks: OutBlock[],
-  stopReason: string,
-  stopSequence: string | undefined,
-  inputTokens: number
+  view: ReplyView,
+  stopKey: string
 ): void {
   const all = body.messages ?? []
   conv.consumed = all.length
-  conv.historyHash = hashTurns(prefixText(body), all, all.length)
-  conv.lastReply = { blocks, model: reply.model, stopReason, stopSequence, inputTokens }
+  conv.historyHash = hashTurns(prefixText(body), all, all.length, stopKey)
+  conv.lastReply = view
   if (key === undefined) return
   wire.sessions.delete(key)
   wire.sessions.set(key, conv)
+}
+
+/** Request validation → 4xx answers. Returns the parsed body, or
+ *  undefined once the error was written. */
+async function parseMessagesBody(
+  req: IncomingMessage,
+  res: ServerResponse
+): Promise<MessagesRequest | undefined> {
+  let body: MessagesRequest
+  try {
+    body = JSON.parse(await readBody(req)) as MessagesRequest
+  } catch (err) {
+    if (err instanceof Error && err.message === 'request body too large') {
+      tooLarge(req, res)
+      return undefined
+    }
+    apiError(res, 400, 'invalid_request_error', 'malformed JSON body')
+    return undefined
+  }
+  const badTurn = (m: unknown): boolean =>
+    m === null ||
+    typeof m !== 'object' ||
+    ((m as ClientMessage).role !== 'user' && (m as ClientMessage).role !== 'assistant') ||
+    (typeof (m as ClientMessage).content !== 'string' &&
+      !Array.isArray((m as ClientMessage).content))
+  if (
+    !Array.isArray(body.messages) ||
+    body.messages.length === 0 ||
+    body.messages.some(badTurn)
+  ) {
+    apiError(
+      res,
+      400,
+      'invalid_request_error',
+      'messages: a non-empty array of {role: user|assistant, content} turns is required'
+    )
+    return undefined
+  }
+  if (stopSeqsOf(body) === undefined) {
+    apiError(
+      res,
+      400,
+      'invalid_request_error',
+      'stop_sequences: an array of non-empty strings is required'
+    )
+    return undefined
+  }
+  return body
+}
+
+/** stop_reason for the settled record — a parsed tool_use or a stop
+ *  hit outrank the transport's raw code. */
+function settledStopReason(
+  blocks: OutBlock[],
+  reply: PooledReply,
+  stopHit: string | undefined
+): string {
+  if (blocks.some((b) => b.type === 'tool_use')) return 'tool_use'
+  if (stopHit !== undefined) return 'stop_sequence'
+  return STOP_REASON[reply.stopReason] ?? 'end_turn'
 }
 
 async function messages(
@@ -1277,44 +1378,15 @@ async function messages(
   wire: WireCtx,
   parent: OtelCtx | undefined
 ): Promise<void> {
-  let body: MessagesRequest
-  try {
-    body = JSON.parse(await readBody(req)) as MessagesRequest
-  } catch (err) {
-    if (err instanceof Error && err.message === 'request body too large') {
-      apiError(res, 413, 'request_too_large', 'request body exceeds 32MB')
-      return
-    }
-    apiError(res, 400, 'invalid_request_error', 'malformed JSON body')
-    return
-  }
-  if (
-    !Array.isArray(body.messages) ||
-    body.messages.length === 0 ||
-    body.messages.some(
-      (m) =>
-        m === null ||
-        (m.role !== 'user' && m.role !== 'assistant') ||
-        (typeof m.content !== 'string' && !Array.isArray(m.content))
-    )
-  ) {
-    apiError(
-      res,
-      400,
-      'invalid_request_error',
-      'messages: a non-empty array of {role: user|assistant, content} turns is required'
-    )
-    return
-  }
+  const body = await parseMessagesBody(req, res)
+  if (body === undefined) return
   const t0 = Date.now()
   const key = conversationKey(req, body)
-  // one filter per turn — the streamed leg feeds it delta-by-delta;
-  // the recording leg below cuts reply.text through a FRESH filter
-  // (a streamed hit leaves this one consumed — re-feeding would
-  // erase the recorded reply)
-  const stopSeqs = (body.stop_sequences ?? []).filter(
-    (s): s is string => typeof s === 'string' && s !== ''
-  )
+  const stopSeqs = stopSeqsOf(body) ?? []
+  const stopKey = stopKeyOf(stopSeqs)
+  // one filter per turn — the streamed leg feeds it delta-by-delta,
+  // the buffered leg cuts the settled text post-hoc. Either way the
+  // recorded reply is `stops.emitted` — exactly what the client saw.
   const stops = new StopFilter(stopSeqs)
   // set when a streamed turn actually opens — a replay or a failed
   // session open never commits the wire to SSE
@@ -1337,6 +1409,7 @@ async function messages(
       sessions: wire.sessions,
       pendingOpens: wire.pendingOpens,
       key,
+      stopKey,
       parent,
       requestModel,
       deadline: Date.now() + wire.cfg.timeoutMs,
@@ -1380,44 +1453,37 @@ async function messages(
   // a resend that carried nothing new — replay the recorded reply,
   // no agent round-trip was paid
   if (out.replay === true) {
-    const lr = out.conv?.lastReply
-    respond(
-      res,
-      body,
-      lr?.blocks ?? [],
-      lr?.model ?? '',
-      lr?.stopReason ?? '',
-      lr?.inputTokens ?? 0,
-      key,
-      lr?.stopSequence
-    )
+    respond(res, body, out.conv?.lastReply ?? EMPTY_VIEW, key)
     return
   }
   const reply = out.reply as PooledReply
   const inputTokens = out.inputTokens
   // a live stream pushed the wire deltas as they landed — finish()
-  // closes the event shape; parseReply still runs so the settled reply
-  // is recorded verbatim for a later replay
+  // closes the event shape; the recorded reply is whatever the filter
+  // let through — byte-identical to the client's own view
   live?.finish(STOP_REASON[reply.stopReason] ?? 'end_turn')
-  // the buffered leg's cut lands here — a fresh filter re-runs the
-  // settled text so a streamed hit doesn't starve the recorded reply
-  const recordStops = new StopFilter(stopSeqs)
-  const blocks = parseReply(recordStops.feed(reply.text) + recordStops.flush())
-  const stopHit = stops.hit ?? recordStops.hit
-  const stopReason =
-    live?.stopReason ??
-    (blocks.some((b) => b.type === 'tool_use')
-      ? 'tool_use'
-      : stopHit !== undefined
-        ? 'stop_sequence'
-        : (STOP_REASON[reply.stopReason] ?? 'end_turn'))
+  if (live === undefined) {
+    // the buffered leg's cut lands post-hoc through the same filter
+    stops.feed(reply.text)
+    stops.flush()
+  }
+  const view: ReplyView = {
+    blocks: parseReply(stops.emitted),
+    model: reply.model,
+    stopReason: live?.stopReason ?? '',
+    stopSequence: stops.hit,
+    inputTokens,
+  }
+  if (live === undefined) {
+    view.stopReason = settledStopReason(view.blocks, reply, stops.hit)
+  }
   if (out.conv !== undefined) {
-    settleConv(wire, key, out.conv, body, reply, blocks, stopReason, stopHit, inputTokens)
+    settleConv(wire, key, out.conv, body, view, stopKey)
   }
   otelEvent('conductor.turn', {
     backend: wire.cfg.backend,
     model: reply.model,
-    stop_reason: stopReason,
+    stop_reason: view.stopReason,
     stream: body.stream !== false,
     session_reused: out.reused,
     input_tokens: inputTokens,
@@ -1430,8 +1496,12 @@ async function messages(
     res.end()
     return
   }
-  respond(res, body, blocks, reply.model, stopReason, inputTokens, key, stopHit)
+  respond(res, body, view, key)
 }
+
+/** Replay fallback shape — a replay always carries a conv, the empty
+ *  view only keeps the types honest. */
+const EMPTY_VIEW: ReplyView = { blocks: [], model: '', stopReason: '', inputTokens: 0 }
 
 /** The anthropic /v1/models rows — the configured catalog source
  *  (`BRO_PROVIDER_CATALOG`, else the backend itself) through the SAME
@@ -1558,8 +1628,16 @@ export function conductorProxy(
       return
     }
     if (method === 'POST' && path === '/v1/messages/count_tokens') {
-      const raw = await readBody(req)
-      apiErrorCountTokens(res, raw)
+      try {
+        const raw = await readBody(req)
+        apiErrorCountTokens(res, raw)
+      } catch (err) {
+        if (err instanceof Error && err.message === 'request body too large') {
+          tooLarge(req, res)
+        } else {
+          apiError(res, 400, 'invalid_request_error', 'malformed request')
+        }
+      }
       return
     }
     if (method === 'GET' && path === '/v1/models') {
