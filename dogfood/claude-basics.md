@@ -24,14 +24,21 @@ conductor listener (`apiKeyHelper` → `bro serve ensure`, model
    `npx bro task set <bead> --description='spec: specs/<bead>.md'`.
 5. Implement: create `greeting.txt` with `hello from claude basics`,
    commit it on the work branch.
-6. Report: `npx bro notify` one line; name the conductor events you
-   would check to prove the wire (`conductor.turn` in `serve.log`).
+6. Prove the wire yourself: the conductor journals every turn as a
+   JSONL row — read
+   `$(git rev-parse --path-format=absolute --git-common-dir)/bro/serve-turns.jsonl`
+   and grep the `conductor.turn` rows. You should see your own turns:
+   `model` carrying the served pin, and `session_reused: true` on
+   every row after the first — one retained acp session served the
+   conversation. If the file is missing or shows a fresh session per
+   turn, the scenario FAILS — say so.
+7. Report: `npx bro notify` one line naming what the journal showed.
 
 ## Assert
 
-- Every turn answered `/v1/messages` on this run's `bro serve`
-  (serve.log `conductor.turn` events; `session_reused` true after
-  the first turn — one retained session served the conversation).
+- Every turn answered `/v1/messages` on this run's `bro serve` —
+  `serve-turns.jsonl` holds one `conductor.turn` row per turn with
+  `session_reused: true` after the first.
 - The runner named `devin/swe-2-max` (or the served alias) as its
   model — the pin round-trips.
 - `greeting.txt` exists on a work branch; the bead is claimed or

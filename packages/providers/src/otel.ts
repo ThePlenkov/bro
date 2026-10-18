@@ -14,7 +14,7 @@
  *  attribution from the live process tree. */
 
 import { randomBytes } from 'node:crypto'
-import { readFileSync } from 'node:fs'
+import { appendFileSync, readFileSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
 import { spawn } from 'node:child_process'
@@ -104,9 +104,31 @@ export function postDetached(path: string, body: unknown): void {
   }
 }
 
+/** Local evidence journal — once a process pins a path via
+ *  `otelJournal()`, every emitted event also appends one JSONL row
+ *  `{ts, event, ...attrs}`. bro serve pins `<git-common>/bro/
+ *  serve-turns.jsonl`: `conductor.turn` rows then prove dialect,
+ *  model pin and session reuse to a dogfood analyst — no OTLP
+ *  collector required. Independent of BRO_TELEMETRY: the journal is
+ *  the store's own record, not telemetry. */
+let journalPath: string | undefined
+export function otelJournal(path: string | undefined): void {
+  journalPath = path
+}
+
+function journal(name: string, a: Record<string, AttrValue>): void {
+  if (journalPath === undefined) return
+  try {
+    appendFileSync(journalPath, `${JSON.stringify({ ts: new Date().toISOString(), event: name, ...a })}\n`)
+  } catch {
+    // a journal that can't write must not stall the wire
+  }
+}
+
 /** Push one OTEL log record. `a` becomes structured metadata —
  *  filterable in loki via `| key="value"` and unwrappable for metrics. */
 export function otelEvent(name: string, a: Record<string, AttrValue> = {}): void {
+  journal(name, a)
   post('/v1/logs', {
     resourceLogs: [
       {

@@ -27,7 +27,8 @@ template that exported your token.
 ## Assert
 
 - Every turn answered `/v1/responses` on this run's `bro serve`
-  (serve.log `conductor.turn` events carry `dialect: 'responses'`).
+  (`serve-turns.jsonl` `conductor.turn` rows carry
+  `dialect: 'responses'`).
 - `greeting.txt` exists on a work branch; the bead is claimed or
   closed, never orphaned; nothing merged to `main`.
 - The runner correctly identified `bro`/`devin/swe-2-max` and

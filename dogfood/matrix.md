@@ -3,7 +3,8 @@
 One row per scenario ↔ the gateway/client features it exercises.
 Every scenario provisions its client wiring via `<name>.files/`
 (`{{PORT}}` resolves to the run's allocation) and lands evidence in
-the bro store: serve.log `conductor.turn` events, the runner's bead
+the bro store: `serve-turns.jsonl` `conductor.turn` rows (written
+next to `serve.json` under the common git dir), the runner's bead
 claim, the analyst's verdict.
 
 | scenario | client | wire | exercises | hermetic home |

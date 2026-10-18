@@ -30,7 +30,7 @@ acp backend and the spawn template that exported your token.
   (`dialect: 'responses'` turn events).
 - `inventory.md` exists on the work branch and truthfully lists the
   worktree root — written by a real tool call, not narrated.
-- The wire carried `function_call` and `function_call_output` items
-  (the conductor's transcript holds the `<tool_call>`/`<tool_result>`
-  markup they translate to).
+- The wire carried `function_call` and `function_call_output` items —
+  the Responses dialect's own item shapes, no Anthropic markup. The
+  journal rows in `serve-turns.jsonl` show the turns answered.
 - The bead is claimed or closed; nothing merged to `main`.

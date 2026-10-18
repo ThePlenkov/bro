@@ -22,15 +22,19 @@ acp backend and the token-exporting spawn template.
 4. Create `effort.txt` containing `high effort landed`, commit it on
    the work branch.
 5. Prove YOUR OWN request carried the effort — this is the primary
-   assertion. Codex records every request it sent in its session
-   rollout under `.codex/sessions/` — grep the newest
-   `rollout-*.jsonl` for `reasoning`/`effort` and for the response
-   `model` the conductor answered with. A request that shows
-   `effort` on the wire and a `-high`-suffixed composite pin in the
-   response is proof `model_reasoning_effort` was honored end to end;
-   if the rollout shows no effort on your own turns, the setting was
+   assertion. The conductor journals every turn it serves — read
+   `$(git rev-parse --path-format=absolute --git-common-dir)/bro/serve-turns.jsonl`
+   and grep the newest `conductor.turn` rows: a turn answering on the
+   responses wire whose `model` carries the `-high`-suffixed composite
+   pin (`swe-2-max-high`-shaped) is proof `model_reasoning_effort`
+   reached the backend and folded. No such row → the setting was
    dropped and this scenario FAILS — say so.
-6. Cross-check the server side: read `.git/bro/serve.json` for `url`
+6. Cross-check the request side: codex records every request it sent
+   in its session rollout under `.codex/sessions/` — grep the newest
+   `rollout-*.jsonl` for `reasoning`/`effort`. That file is a codex
+   internal (its layout is not a contract) so it is corroboration
+   only; the conductor journal is the evidence of record.
+7. Cross-check the server side: read `.git/bro/serve.json` for `url`
    and `token`, then probe the conductor directly —
 
    `curl -s "$URL/v1/responses" -H "authorization: Bearer $TOKEN"
@@ -40,16 +44,16 @@ acp backend and the token-exporting spawn template.
 
    The Response's `model` field should carry the same `-high`
    composite pin — a server-side confirmation, not the proof itself.
-7. Report: `npx bro notify` — one line stating the effort on your own
-   wire and the pin the conductor answered with.
+8. Report: `npx bro notify` — one line stating the journal evidence
+   and the pin the conductor answered with.
 
 ## Assert
 
 - Every turn answered `/v1/responses` on this run's `bro serve`.
-- The codex session rollout shows `effort` on a request Codex itself
-  sent, and the response `model` in that same rollout carries the
-  effort-folded composite pin (`swe-2-max-high`-shaped).
-- The direct probe is a secondary check only — it cannot substitute
-  for the rollout evidence.
+- `serve-turns.jsonl` holds a `conductor.turn` row for this run whose
+  `model` carries the effort-folded composite pin
+  (`swe-2-max-high`-shaped) — the primary assertion.
+- The codex rollout and the direct probe are corroborating checks
+  only — neither substitutes for the journal row.
 - `effort.txt` exists on the work branch; the bead is claimed or
   closed; nothing merged to `main`.
