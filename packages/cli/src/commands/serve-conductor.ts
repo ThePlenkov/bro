@@ -56,7 +56,7 @@ export function conductorConfig(
   // env pins the backend explicitly; a repo whose conductor is not
   // ambient (an apiKeyHelper-spawned serve never sees settings.env)
   // carries it as serve.backend — env still wins over config
-  const configured = (cfg.serve as { backend?: string } | undefined)?.backend?.trim()
+  const configured = cfg.serve.backend?.trim()
   const backend = env.BRO_PROVIDER_BACKEND?.trim() || configured
   if (backend === undefined || backend === '') {
     return undefined
