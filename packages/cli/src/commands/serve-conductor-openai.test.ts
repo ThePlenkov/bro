@@ -48,29 +48,21 @@ const CFG: ConductorConfig = {
   timeoutMs: 10_000,
 }
 
-/** Loopback URL for a test listener — the hostname check is the
- *  allowlist the SSRF rule needs: tests fetch nothing off 127.0.0.1. */
-function api(port: number, path: string): URL {
-  const u = new URL(path, `http://127.0.0.1:${port}`)
-  if (u.hostname !== '127.0.0.1') throw new Error('test listener must bind loopback')
-  return u
-}
-
 /** Boot the conductor over `fake` and POST /v1/responses —
  *  caller owns close() and reads `r`. */
 async function postResponses(
   fake: ReturnType<typeof fakeAcpAgent>,
   body: unknown = { input: 'x', stream: false }
-): Promise<{ r: Response; port: number; close: () => Promise<void> }> {
-  const { port, close } = await listen(
+): Promise<{ r: Response; url: string; close: () => Promise<void> }> {
+  const { url, close } = await listen(
     deps({ provider: conductorProxy(CFG, { acp: { peer: fake.app } }) })
   )
-  const r = await fetch(api(port, '/v1/responses'), { // nosemgrep: test loopback listener
+  const r = await fetch(`${url}/v1/responses`, {
     method: 'POST',
     headers: { ...auth, 'content-type': 'application/json' },
     body: JSON.stringify(body),
   })
-  return { r, port, close }
+  return { r, url, close }
 }
 
 async function evs(r: Response): Promise<{ event: string; data: Record<string, unknown> }[]> {
@@ -202,12 +194,12 @@ describe('serve /v1/responses — the openai dialect', () => {
 
   test('previous_response_id chains into the retained session', async () => {
     const fake = fakeAcpAgent({ replyText: 'r1', configOptions: [MODEL_OPTION] })
-    const { port, close } = await listen(
+    const { url, close } = await listen(
       deps({ provider: conductorProxy(CFG, { acp: { peer: fake.app } }) })
     )
     try {
       const post = (body: unknown) =>
-        fetch(api(port, '/v1/responses'), { // nosemgrep: test loopback listener
+        fetch(`${url}/v1/responses`, {
           method: 'POST',
           headers: { ...auth, 'content-type': 'application/json' },
           body: JSON.stringify(body),
@@ -232,12 +224,12 @@ describe('serve /v1/responses — the openai dialect', () => {
 
   test('a store:false continuation still consumes the session — the same predecessor then reads as superseded', async () => {
     const fake = fakeAcpAgent({ replyText: 'ok', configOptions: [MODEL_OPTION] })
-    const { port, close } = await listen(
+    const { url, close } = await listen(
       deps({ provider: conductorProxy(CFG, { acp: { peer: fake.app } }) })
     )
     try {
       const post = (body: unknown) =>
-        fetch(api(port, '/v1/responses'), { // nosemgrep: test loopback listener
+        fetch(`${url}/v1/responses`, {
           method: 'POST',
           headers: { ...auth, 'content-type': 'application/json' },
           body: JSON.stringify(body),
@@ -292,16 +284,16 @@ describe('serve /v1/responses — the openai dialect', () => {
 async function postChat(
   fake: ReturnType<typeof fakeAcpAgent>,
   body: unknown = { messages: [{ role: 'user', content: 'x' }] }
-): Promise<{ r: Response; port: number; close: () => Promise<void> }> {
-  const { port, close } = await listen(
+): Promise<{ r: Response; url: string; close: () => Promise<void> }> {
+  const { url, close } = await listen(
     deps({ provider: conductorProxy(CFG, { acp: { peer: fake.app } }) })
   )
-  const r = await fetch(api(port, '/v1/chat/completions'), { // nosemgrep: test loopback listener
+  const r = await fetch(`${url}/v1/chat/completions`, {
     method: 'POST',
     headers: { ...auth, 'content-type': 'application/json' },
     body: JSON.stringify(body),
   })
-  return { r, port, close }
+  return { r, url, close }
 }
 
 describe('serve /v1/chat/completions — the stateless chat dialect', () => {
@@ -412,12 +404,12 @@ describe('serve /v1/chat/completions — the stateless chat dialect', () => {
 
   test('an identical resend replays without a second acp turn', async () => {
     const fake = fakeAcpAgent({ replyText: 'r1', configOptions: [MODEL_OPTION] })
-    const { port, close } = await listen(
+    const { url, close } = await listen(
       deps({ provider: conductorProxy(CFG, { acp: { peer: fake.app } }) })
     )
     try {
       const post = () =>
-        fetch(api(port, '/v1/chat/completions'), { // nosemgrep: test loopback listener
+        fetch(`${url}/v1/chat/completions`, {
           method: 'POST',
           headers: { ...auth, 'content-type': 'application/json' },
           body: JSON.stringify({ messages: [{ role: 'user', content: 'hi' }] }),
@@ -523,10 +515,10 @@ describe('output caps + loud input failures', () => {
 
   test('a stream:true resend answers SSE, never a JSON snapshot', async () => {
     const fake = fakeAcpAgent({ replyText: 'r1' })
-    const { port, close } = await postChat(fake)
+    const { url, close } = await postChat(fake)
     try {
       const post = (body: unknown) =>
-        fetch(api(port, '/v1/chat/completions'), { // nosemgrep: test loopback listener
+        fetch(`${url}/v1/chat/completions`, {
           method: 'POST',
           headers: { ...auth, 'content-type': 'application/json' },
           body: JSON.stringify(body),
