@@ -29,6 +29,7 @@ import { acpOpen, acpPooledTurn, acpSessionRetain, otelEvent, otelParent, otelSp
 import type { AcpContentBlock, AcpPeer, AcpRetainedSession, OtelCtx, PooledTurnOpts, ProviderWireOpts } from '@broject/providers'
 import { peerAttrs } from './peer.ts'
 import { catalogModels } from './providers.ts'
+import type { SessionUpdate } from '@agentclientprotocol/sdk'
 
 type AcpEntry = Extract<ProviderEntry, { type: 'acp' }>
 
@@ -561,6 +562,13 @@ function emitBlocks(
 const OPEN_TAG = '<tool_call>'
 const CLOSE_TAG = '</tool_call>'
 
+/** Narration label — a tool_call title can carry a whole command
+ *  string; first line only, capped. */
+function shortLabel(s: string): string {
+  const line = s.split('\n', 1)[0] ?? s
+  return line.length > 120 ? `${line.slice(0, 117)}…` : line
+}
+
 /** Longest suffix of `s` that is a prefix of `tag` — the tail bytes a
  *  tag split across deltas must hold back until more of the turn
  *  arrives (or the turn ends and they flush as plain text). */
@@ -610,7 +618,77 @@ class LiveTurn {
     if (u.sessionUpdate === 'agent_message_chunk' && u.content.type === 'text') {
       this.pending += u.content.text
       this.drain(false)
+      return
     }
+    const line = this.narrateTool(u)
+    if (line !== undefined) {
+      // pending may hold a held-back partial-tag tail — flush what
+      // drain releases first so narration never lands inside buffered
+      // text (drain still holds a live tag prefix; that tail completes
+      // into a block later, so text order is preserved either way)
+      this.drain(false)
+      this.text(line)
+    }
+  }
+
+  private readonly toolStarted = new Set<string>()
+  private readonly toolDone = new Set<string>()
+  private readonly toolLabels = new Map<string, string>()
+
+  /** The session's own tool_call lifecycle — the client's only view of
+   *  agent-side work (exec, file ops, subagent spawns): narrated as
+   *  text edges, never tool_use (the tool already ran — a tool_use
+   *  would make the client execute it again). One line per start, one
+   *  per terminal status; content/plan/usage updates are chatter.
+   *  Dedup keys on toolCallId when the agent supplies one — an id-less
+   *  update can't be correlated, so it narrates every time. */
+  private narrateTool(u: SessionUpdate): string | undefined {
+    if (u.sessionUpdate === 'tool_call') return this.narrateStart(u)
+    if (u.sessionUpdate === 'tool_call_update') return this.narrateTerminal(u)
+    return undefined
+  }
+
+  /** Id-keyed once-only gate — an id-less update can't be correlated,
+   *  so it always passes (narrates every time). */
+  private once(id: string | undefined, seen: Set<string>): boolean {
+    if (id === undefined) return true
+    if (seen.has(id)) return false
+    seen.add(id)
+    return true
+  }
+
+  private narrateStart(u: SessionUpdate): string | undefined {
+    if (u.sessionUpdate !== 'tool_call') return undefined
+    const terminal = u.status === 'completed' || u.status === 'failed'
+    if (!this.once(u.toolCallId, this.toolStarted)) {
+      // a repeated tool_call can carry the terminal edge (the provider
+      // layer emits it as finish) — narrate it once, with the cached label
+      if (!terminal || !this.once(u.toolCallId, this.toolDone)) return undefined
+      const known = u.toolCallId !== undefined ? this.toolLabels.get(u.toolCallId) : undefined
+      const label = shortLabel(u.title ?? u.name ?? known ?? 'tool call')
+      return `\n${u.status === 'failed' ? '✗' : '✓'} ${label}\n`
+    }
+    const label = shortLabel(u.title ?? u.name ?? u.kind ?? 'tool call')
+    if (u.toolCallId !== undefined) this.toolLabels.set(u.toolCallId, label)
+    const start = `\n⏺ ${label}\n`
+    // a tool_call can itself arrive already terminal — open and close
+    // the edge in one update so nothing stays mid-flight forever
+    if (!terminal) return start
+    if (u.toolCallId !== undefined) this.toolDone.add(u.toolCallId)
+    return `${start}${u.status === 'failed' ? '✗' : '✓'} ${label}\n`
+  }
+
+  private narrateTerminal(u: SessionUpdate): string | undefined {
+    if (
+      u.sessionUpdate !== 'tool_call_update' ||
+      (u.status !== 'completed' && u.status !== 'failed')
+    ) {
+      return undefined
+    }
+    if (!this.once(u.toolCallId, this.toolDone)) return undefined
+    const known = u.toolCallId !== undefined ? this.toolLabels.get(u.toolCallId) : undefined
+    const label = shortLabel(u.title ?? u.name ?? known ?? 'tool call')
+    return `\n${u.status === 'failed' ? '✗' : '✓'} ${label}\n`
   }
 
   private blockStart(contentBlock: unknown): void {

@@ -32,26 +32,57 @@ const chunks = (...texts: string[]): SessionUpdate[] =>
     content: { type: 'text' as const, text },
   }))
 
-/** Boot the conductor over `fake` and POST a streamed /v1/messages —
- *  caller owns close() (stream:true is the shape under test here). */
-async function postStream(
+/** Boot the conductor over `fake` and POST /v1/messages — caller owns
+ *  close(). The one fetch shape every test repeats lives here. */
+async function postMessages(
   fake: ReturnType<typeof fakeAcpAgent>,
-  body: unknown = { messages: [{ role: 'user', content: 'x' }], stream: true }
-): Promise<{ r: Response; close: () => Promise<void> }> {
+  body: unknown = { messages: [{ role: 'user', content: 'x' }], stream: false },
+  cfg: typeof CFG = CFG
+): Promise<{ r: Response; url: string; close: () => Promise<void> }> {
   const { url, close } = await listen(
-    deps({ provider: conductorProxy(CFG, { acp: { peer: fake.app } }) })
+    deps({ provider: conductorProxy(cfg, { acp: { peer: fake.app } }) })
   )
   const r = await fetch(`${url}/v1/messages`, {
     method: 'POST',
     headers: { ...auth, 'content-type': 'application/json' },
     body: JSON.stringify(body),
   })
-  return { r, close }
+  return { r, url, close }
+}
+
+/** Collected text_delta payloads from a parsed SSE stream. */
+function textDeltas(ev: Awaited<ReturnType<typeof sseEvents>>): string[] {
+  return ev
+    .filter(
+      (e) =>
+        e.event === 'content_block_delta' &&
+        (e.data.delta as { type: string }).type === 'text_delta'
+    )
+    .map((e) => (e.data.delta as { text: string }).text)
+}
+
+/** The turn's terminal stop_reason off the message_delta event. */
+function stopReason(ev: Awaited<ReturnType<typeof sseEvents>>): string {
+  const md = ev.find((e) => e.event === 'message_delta')
+  return (md?.data.delta as { stop_reason: string }).stop_reason
+}
+
+/** Boot the conductor over `fake` and POST a streamed /v1/messages —
+ *  caller owns close() (stream:true is the shape under test here). */
+async function postStream(
+  fake: ReturnType<typeof fakeAcpAgent>,
+  body: unknown = { messages: [{ role: 'user', content: 'x' }], stream: true }
+): Promise<{ r: Response; url: string; close: () => Promise<void> }> {
+  return postMessages(fake, body)
 }
 
 const CFG = {
   backend: 'dv-acp',
-  entry: { type: 'acp' as const, command: 'dv acp' },
+  entry: { type: 'acp' as const, command: 'dv acp' } as {
+    type: 'acp'
+    command: string
+    model?: string
+  },
   cwd: '/repo',
   timeoutMs: 10_000,
 }
@@ -176,19 +207,12 @@ async function sseEvents(r: Response): Promise<{ event: string; data: Record<str
 describe('serve /v1/* — the conductor plane', () => {
   test('POST /v1/messages streams the anthropic SSE shape from an acp turn', async () => {
     const fake = fakeAcpAgent({ replyText: 'hi there', configOptions: [MODEL_OPTION] })
-    const { url, close } = await listen(
-      deps({ provider: conductorProxy(CFG, { acp: { peer: fake.app } }) })
-    )
+    const { r, close } = await postStream(fake, {
+      model: 'claude-sonnet-4-5',
+      messages: [{ role: 'user', content: 'say hi' }],
+      stream: true,
+    })
     try {
-      const r = await fetch(`${url}/v1/messages`, {
-        method: 'POST',
-        headers: { ...auth, 'content-type': 'application/json' },
-        body: JSON.stringify({
-          model: 'claude-sonnet-4-5',
-          messages: [{ role: 'user', content: 'say hi' }],
-          stream: true,
-        }),
-      })
       assert.equal(r.status, 200)
       assert.equal(r.headers.get('content-type'), 'text/event-stream')
       const ev = await sseEvents(r)
@@ -204,8 +228,7 @@ describe('serve /v1/* — the conductor plane', () => {
         (start?.data.message as { model: string }).model,
         'claude-sonnet-4-5'
       )
-      const md = ev.find((e) => e.event === 'message_delta')
-      assert.equal((md?.data.delta as { stop_reason: string }).stop_reason, 'end_turn')
+      assert.equal(stopReason(ev), 'end_turn')
       // the conversation reached the agent serialized, not the client's model id
       assert.match(fake.prompts[0] ?? '', /say hi/)
       assert.match(fake.prompts[0] ?? '', /<turn role="user">/)
@@ -240,15 +263,8 @@ describe('serve /v1/* — the conductor plane', () => {
       configOptions: [MODEL_OPTION],
       imageCapable: true,
     })
-    const { url, close } = await listen(
-      deps({ provider: conductorProxy(CFG, { acp: { peer: fake.app } }) })
-    )
+    const { r, close } = await postStream(fake, IMAGE_BODY)
     try {
-      const r = await fetch(`${url}/v1/messages`, {
-        method: 'POST',
-        headers: { ...auth, 'content-type': 'application/json' },
-        body: JSON.stringify(IMAGE_BODY),
-      })
       assert.equal(r.status, 200)
       await r.text()
       const img = fake.blocks[0]?.find((b) => b.type === 'image')
@@ -262,15 +278,8 @@ describe('serve /v1/* — the conductor plane', () => {
 
   test('an agent without the image capability gets the [image] marker instead', async () => {
     const fake = fakeAcpAgent({ replyText: 'ok', configOptions: [MODEL_OPTION] })
-    const { url, close } = await listen(
-      deps({ provider: conductorProxy(CFG, { acp: { peer: fake.app } }) })
-    )
+    const { r, close } = await postStream(fake, IMAGE_BODY)
     try {
-      const r = await fetch(`${url}/v1/messages`, {
-        method: 'POST',
-        headers: { ...auth, 'content-type': 'application/json' },
-        body: JSON.stringify(IMAGE_BODY),
-      })
       assert.equal(r.status, 200)
       await r.text()
       assert.equal(fake.blocks[0]?.every((b) => b.type === 'text'), true)
@@ -285,15 +294,11 @@ describe('serve /v1/* — the conductor plane', () => {
       replyText: 'checking <tool_call>{"name":"ls","input":{"d":"/tmp"}}</tool_call>',
       configOptions: [MODEL_OPTION],
     })
-    const { url, close } = await listen(
-      deps({ provider: conductorProxy(CFG, { acp: { peer: fake.app } }) })
-    )
+    const { r, close } = await postStream(fake, {
+      messages: [{ role: 'user', content: 'list' }],
+      stream: true,
+    })
     try {
-      const r = await fetch(`${url}/v1/messages`, {
-        method: 'POST',
-        headers: { ...auth, 'content-type': 'application/json' },
-        body: JSON.stringify({ messages: [{ role: 'user', content: 'list' }], stream: true }),
-      })
       const ev = await sseEvents(r)
       const tu = ev.find(
         (e) => e.event === 'content_block_delta' && (e.data.delta as { type: string }).type === 'input_json_delta'
@@ -302,8 +307,7 @@ describe('serve /v1/* — the conductor plane', () => {
       assert.deepEqual(JSON.parse((tu.data.delta as { partial_json: string }).partial_json), {
         d: '/tmp',
       })
-      const md = ev.find((e) => e.event === 'message_delta')
-      assert.equal((md?.data.delta as { stop_reason: string }).stop_reason, 'tool_use')
+      assert.equal(stopReason(ev), 'tool_use')
     } finally {
       await close()
     }
@@ -311,19 +315,12 @@ describe('serve /v1/* — the conductor plane', () => {
 
   test('a provider/model request id pins the acp session model', async () => {
     const fake = fakeAcpAgent({ replyText: 'ok', configOptions: [MODEL_OPTION] })
-    const { url, close } = await listen(
-      deps({ provider: conductorProxy(CFG, { acp: { peer: fake.app } }) })
-    )
+    const { r, close } = await postMessages(fake, {
+      model: 'dv-acp/swe-y',
+      messages: [{ role: 'user', content: 'x' }],
+      stream: false,
+    })
     try {
-      const r = await fetch(`${url}/v1/messages`, {
-        method: 'POST',
-        headers: { ...auth, 'content-type': 'application/json' },
-        body: JSON.stringify({
-          model: 'dv-acp/swe-y',
-          messages: [{ role: 'user', content: 'x' }],
-          stream: false,
-        }),
-      })
       assert.equal(r.status, 200)
       assert.deepEqual(fake.configSets, [{ configId: 'model', value: 'swe-y' }])
       assert.equal((await r.json()).model, 'swe-y')
@@ -361,19 +358,12 @@ describe('serve /v1/* — the conductor plane', () => {
       },
     ]
     const fake = fakeAcpAgent({ replyText: 'ok', configOptions: DEVIN_OPTIONS })
-    const { url, close } = await listen(
-      deps({ provider: conductorProxy(CFG, { acp: { peer: fake.app } }) })
-    )
+    const { r, close } = await postMessages(fake, {
+      model: 'dv-acp/swe-2-max',
+      messages: [{ role: 'user', content: 'x' }],
+      stream: false,
+    })
     try {
-      const r = await fetch(`${url}/v1/messages`, {
-        method: 'POST',
-        headers: { ...auth, 'content-type': 'application/json' },
-        body: JSON.stringify({
-          model: 'dv-acp/swe-2-max',
-          messages: [{ role: 'user', content: 'x' }],
-          stream: false,
-        }),
-      })
       assert.equal(r.status, 200)
       assert.deepEqual(fake.configSets, [
         { configId: 'model', value: 'swe-2-high' },
@@ -408,19 +398,12 @@ describe('serve /v1/* — the conductor plane', () => {
       },
     ]
     const fake = fakeAcpAgent({ replyText: 'ok', configOptions: LIVE })
-    const { url, close } = await listen(
-      deps({ provider: conductorProxy(CFG, { acp: { peer: fake.app } }) })
-    )
+    const { r, close } = await postMessages(fake, {
+      model: 'dv-acp/swe-2-max',
+      messages: [{ role: 'user', content: 'x' }],
+      stream: false,
+    })
     try {
-      const r = await fetch(`${url}/v1/messages`, {
-        method: 'POST',
-        headers: { ...auth, 'content-type': 'application/json' },
-        body: JSON.stringify({
-          model: 'dv-acp/swe-2-max',
-          messages: [{ role: 'user', content: 'x' }],
-          stream: false,
-        }),
-      })
       assert.equal(r.status, 200)
       assert.deepEqual(fake.configSets, [])
       assert.equal((await r.json()).model, 'swe-2-max')
@@ -431,18 +414,8 @@ describe('serve /v1/* — the conductor plane', () => {
 
   test('stream:false answers a buffered anthropic message', async () => {
     const fake = fakeAcpAgent({ replyText: 'plain', configOptions: [MODEL_OPTION] })
-    const { url, close } = await listen(
-      deps({ provider: conductorProxy(CFG, { acp: { peer: fake.app } }) })
-    )
+    const { r, close } = await postMessages(fake)
     try {
-      const r = await fetch(`${url}/v1/messages`, {
-        method: 'POST',
-        headers: { ...auth, 'content-type': 'application/json' },
-        body: JSON.stringify({
-          messages: [{ role: 'user', content: 'x' }],
-          stream: false,
-        }),
-      })
       assert.equal(r.headers.get('content-type'), 'application/json')
       const body = await r.json()
       assert.equal(body.type, 'message')
@@ -485,16 +458,12 @@ describe('serve /v1/* — the conductor plane', () => {
 
   test('a tool-less backend serves its configured pin as label and catalog row', async () => {
     const fake = fakeAcpAgent({ replyText: 'sum' })
-    const cfg = { ...CFG, entry: { ...CFG.entry, model: 'swe-sum' } }
-    const { url, close } = await listen(
-      deps({ provider: conductorProxy(cfg, { acp: { peer: fake.app } }) })
+    const { r, url, close } = await postMessages(
+      fake,
+      { messages: [{ role: 'user', content: 'x' }], stream: false },
+      { ...CFG, entry: { ...CFG.entry, model: 'swe-sum' } }
     )
     try {
-      const r = await fetch(`${url}/v1/messages`, {
-        method: 'POST',
-        headers: { ...auth, 'content-type': 'application/json' },
-        body: JSON.stringify({ messages: [{ role: 'user', content: 'x' }], stream: false }),
-      })
       assert.equal(r.status, 200)
       assert.equal((await r.json()).model, 'swe-sum')
       assert.deepEqual(fake.configSets, [])
@@ -511,15 +480,8 @@ describe('serve /v1/* — the conductor plane', () => {
 
   test('an unpinned tool-less backend answers "unknown" and an empty catalog', async () => {
     const fake = fakeAcpAgent({ replyText: 'sum' })
-    const { url, close } = await listen(
-      deps({ provider: conductorProxy(CFG, { acp: { peer: fake.app } }) })
-    )
+    const { r, url, close } = await postMessages(fake)
     try {
-      const r = await fetch(`${url}/v1/messages`, {
-        method: 'POST',
-        headers: { ...auth, 'content-type': 'application/json' },
-        body: JSON.stringify({ messages: [{ role: 'user', content: 'x' }], stream: false }),
-      })
       assert.equal(r.status, 200)
       assert.equal((await r.json()).model, 'unknown')
       const m = await fetch(`${url}/v1/models`, { headers: auth })
@@ -565,15 +527,8 @@ describe('serve /v1/* — the conductor plane', () => {
 
   test('backend errors map to anthropic-shaped errors, never a hang', async () => {
     const fake = fakeAcpAgent({ configOptions: [MODEL_OPTION], failPrompt: 'generic' })
-    const { url, close } = await listen(
-      deps({ provider: conductorProxy(CFG, { acp: { peer: fake.app } }) })
-    )
+    const { r, close } = await postMessages(fake)
     try {
-      const r = await fetch(`${url}/v1/messages`, {
-        method: 'POST',
-        headers: { ...auth, 'content-type': 'application/json' },
-        body: JSON.stringify({ messages: [{ role: 'user', content: 'x' }], stream: false }),
-      })
       assert.equal(r.status, 529)
       const body = await r.json()
       assert.equal(body.type, 'error')
@@ -645,13 +600,7 @@ describe('serve /v1/* — the conductor plane', () => {
     })
     try {
       const ev = await sseEvents(r)
-      const texts = ev
-        .filter(
-          (e) =>
-            e.event === 'content_block_delta' &&
-            (e.data.delta as { type: string }).type === 'text_delta'
-        )
-        .map((e) => (e.data.delta as { text: string }).text)
+      const texts = textDeltas(ev)
       assert.deepEqual(texts, ['checking ', ' done'])
       const tu = ev.find(
         (e) =>
@@ -663,8 +612,7 @@ describe('serve /v1/* — the conductor plane', () => {
       assert.deepEqual(JSON.parse((tu.data.delta as { partial_json: string }).partial_json), {
         d: '/tmp',
       })
-      const md = ev.find((e) => e.event === 'message_delta')
-      assert.equal((md?.data.delta as { stop_reason: string }).stop_reason, 'tool_use')
+      assert.equal(stopReason(ev), 'tool_use')
     } finally {
       await close()
     }
@@ -678,17 +626,133 @@ describe('serve /v1/* — the conductor plane', () => {
     const { r, close } = await postStream(fake)
     try {
       const ev = await sseEvents(r)
-      const text = ev
-        .filter(
-          (e) =>
-            e.event === 'content_block_delta' &&
-            (e.data.delta as { type: string }).type === 'text_delta'
-        )
-        .map((e) => (e.data.delta as { text: string }).text)
-        .join('')
+      const text = textDeltas(ev).join('')
       assert.equal(text, 'x <tool_call>{nope</tool_call> y <tool_call>{"na')
-      const md = ev.find((e) => e.event === 'message_delta')
-      assert.equal((md?.data.delta as { stop_reason: string }).stop_reason, 'end_turn')
+      assert.equal(stopReason(ev), 'end_turn')
+    } finally {
+      await close()
+    }
+  })
+
+  test('agent-side tool_call lifecycle narrates as text edges — never tool_use', async () => {
+    const fake = fakeAcpAgent({
+      updates: [
+        ...chunks('thinking '),
+        {
+          sessionUpdate: 'tool_call',
+          toolCallId: 'tc-1',
+          title: 'exec: ls /tmp',
+          kind: 'execute',
+          status: 'in_progress',
+        } as SessionUpdate,
+        ...chunks('then '),
+        {
+          sessionUpdate: 'tool_call_update',
+          toolCallId: 'tc-1',
+          status: 'completed',
+          title: 'exec: ls /tmp',
+        } as SessionUpdate,
+        // non-terminal chatter and a duped terminal both emit nothing
+        {
+          sessionUpdate: 'tool_call_update',
+          toolCallId: 'tc-1',
+          status: 'completed',
+        } as SessionUpdate,
+        {
+          sessionUpdate: 'tool_call_update',
+          toolCallId: 'tc-2',
+          status: 'in_progress',
+          title: 'ignored',
+        } as SessionUpdate,
+        // a tool_call arriving already terminal closes its own edge
+        {
+          sessionUpdate: 'tool_call',
+          toolCallId: 'tc-3',
+          title: 'instant',
+          kind: 'execute',
+          status: 'completed',
+        } as SessionUpdate,
+        // an id-only terminal update reuses the label cached at start
+        {
+          sessionUpdate: 'tool_call',
+          toolCallId: 'tc-4',
+          title: 'exec: pwd',
+          kind: 'execute',
+          status: 'in_progress',
+        } as SessionUpdate,
+        {
+          sessionUpdate: 'tool_call_update',
+          toolCallId: 'tc-4',
+          status: 'completed',
+        } as SessionUpdate,
+        // a repeated tool_call carrying the terminal edge narrates too
+        // (tool_call updates keep their title per the acp schema)
+        {
+          sessionUpdate: 'tool_call',
+          toolCallId: 'tc-5',
+          title: 'exec: df',
+          kind: 'execute',
+          status: 'in_progress',
+        } as SessionUpdate,
+        {
+          sessionUpdate: 'tool_call',
+          toolCallId: 'tc-5',
+          title: 'exec: df',
+          kind: 'execute',
+          status: 'completed',
+        } as SessionUpdate,
+        ...chunks('done'),
+      ],
+      configOptions: [MODEL_OPTION],
+    })
+    const { r, close } = await postStream(fake)
+    try {
+      const ev = await sseEvents(r)
+      const text = textDeltas(ev).join('')
+      assert.match(text, /⏺ exec: ls \/tmp/)
+      assert.match(text, /✓ exec: ls \/tmp/)
+      assert.match(text, /⏺ instant\n✓ instant/)
+      assert.match(text, /✓ exec: pwd/)
+      assert.match(text, /✓ exec: df/)
+      assert.equal((text.match(/✓/g) ?? []).length, 4)
+      assert.ok(!text.includes('ignored'))
+      // narration is text — no tool_use block invented, no tool_use stop
+      assert.equal(
+        ev.filter((e) => (e.data.delta as { type: string } | undefined)?.type === 'input_json_delta').length,
+        0
+      )
+      assert.equal(stopReason(ev), 'end_turn')
+    } finally {
+      await close()
+    }
+  })
+
+  test('narration landing mid partial-tag keeps stream order — held tail completes into the block', async () => {
+    const fake = fakeAcpAgent({
+      updates: [
+        ...chunks('work <tool_ca'),
+        {
+          sessionUpdate: 'tool_call',
+          toolCallId: 'tc-9',
+          title: 'exec: ls',
+          kind: 'execute',
+          status: 'in_progress',
+        } as SessionUpdate,
+        ...chunks('ll>{"name":"ls","input":{}}</tool_call> end'),
+      ],
+      configOptions: [MODEL_OPTION],
+    })
+    const { r, close } = await postStream(fake)
+    try {
+      const ev = await sseEvents(r)
+      const texts = textDeltas(ev)
+      assert.deepEqual(texts, ['work ', '\n⏺ exec: ls\n', ' end'])
+      const tu = ev.find(
+        (e) =>
+          e.event === 'content_block_delta' &&
+          (e.data.delta as { type: string }).type === 'input_json_delta'
+      )
+      assert.ok(tu, 'the split tag still completes into one tool_use block')
     } finally {
       await close()
     }
