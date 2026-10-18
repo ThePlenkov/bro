@@ -1,8 +1,0 @@
-test(connectors): share the scripted devin quota world (bro-0d7on)
-
-SonarCloud flagged 8.8% duplication on new code — the two
-session-quota tests carried identical lock/proc/env setup. One
-devinQuotaWorld helper now builds it; each test keeps only its
-own scenario.
-
-Co-Authored-By: Claude Code <noreply@anthropic.com>
