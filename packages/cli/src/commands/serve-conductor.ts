@@ -627,6 +627,7 @@ class LiveTurn {
 
   private readonly toolStarted = new Set<string>()
   private readonly toolDone = new Set<string>()
+  private readonly toolLabels = new Map<string, string>()
 
   /** The session's own tool_call lifecycle — the client's only view of
    *  agent-side work (exec, file ops, subagent spawns): narrated as
@@ -640,7 +641,16 @@ class LiveTurn {
       const id = u.toolCallId
       if (id !== undefined && this.toolStarted.has(id)) return undefined
       if (id !== undefined) this.toolStarted.add(id)
-      return `\n⏺ ${shortLabel(u.title ?? u.name ?? u.kind ?? 'tool call')}\n`
+      const label = shortLabel(u.title ?? u.name ?? u.kind ?? 'tool call')
+      if (id !== undefined) this.toolLabels.set(id, label)
+      const start = `\n⏺ ${label}\n`
+      // a tool_call can itself arrive already terminal — open and close
+      // the edge in one update so nothing stays mid-flight forever
+      if (u.status === 'completed' || u.status === 'failed') {
+        if (id !== undefined) this.toolDone.add(id)
+        return `${start}${u.status === 'failed' ? '✗' : '✓'} ${label}\n`
+      }
+      return start
     }
     if (
       u.sessionUpdate === 'tool_call_update' &&
@@ -649,7 +659,9 @@ class LiveTurn {
       const id = u.toolCallId
       if (id !== undefined && this.toolDone.has(id)) return undefined
       if (id !== undefined) this.toolDone.add(id)
-      return `\n${u.status === 'failed' ? '✗' : '✓'} ${shortLabel(u.title ?? u.name ?? 'tool call')}\n`
+      const known = id !== undefined ? this.toolLabels.get(id) : undefined
+      const label = shortLabel(u.title ?? u.name ?? known ?? 'tool call')
+      return `\n${u.status === 'failed' ? '✗' : '✓'} ${label}\n`
     }
     return undefined
   }

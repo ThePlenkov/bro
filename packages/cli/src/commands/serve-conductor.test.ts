@@ -699,6 +699,27 @@ describe('serve /v1/* — the conductor plane', () => {
           status: 'in_progress',
           title: 'ignored',
         } as SessionUpdate,
+        // a tool_call arriving already terminal closes its own edge
+        {
+          sessionUpdate: 'tool_call',
+          toolCallId: 'tc-3',
+          title: 'instant',
+          kind: 'execute',
+          status: 'completed',
+        } as SessionUpdate,
+        // an id-only terminal update reuses the label cached at start
+        {
+          sessionUpdate: 'tool_call',
+          toolCallId: 'tc-4',
+          title: 'exec: pwd',
+          kind: 'execute',
+          status: 'in_progress',
+        } as SessionUpdate,
+        {
+          sessionUpdate: 'tool_call_update',
+          toolCallId: 'tc-4',
+          status: 'completed',
+        } as SessionUpdate,
         ...chunks('done'),
       ],
       configOptions: [MODEL_OPTION],
@@ -716,7 +737,9 @@ describe('serve /v1/* — the conductor plane', () => {
         .join('')
       assert.match(text, /⏺ exec: ls \/tmp/)
       assert.match(text, /✓ exec: ls \/tmp/)
-      assert.equal((text.match(/✓/g) ?? []).length, 1)
+      assert.match(text, /⏺ instant\n✓ instant/)
+      assert.match(text, /✓ exec: pwd/)
+      assert.equal((text.match(/✓/g) ?? []).length, 3)
       assert.ok(!text.includes('ignored'))
       // narration is text — no tool_use block invented, no tool_use stop
       assert.equal(
