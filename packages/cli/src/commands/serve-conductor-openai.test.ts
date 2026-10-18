@@ -48,22 +48,29 @@ const CFG: ConductorConfig = {
   timeoutMs: 10_000,
 }
 
+/** Loopback URL for a test listener — the hostname check is the
+ *  allowlist the SSRF rule needs: tests fetch nothing off 127.0.0.1. */
+function api(port: number, path: string): URL {
+  const u = new URL(path, `http://127.0.0.1:${port}`)
+  if (u.hostname !== '127.0.0.1') throw new Error('test listener must bind loopback')
+  return u
+}
+
 /** Boot the conductor over `fake` and POST /v1/responses —
  *  caller owns close() and reads `r`. */
 async function postResponses(
   fake: ReturnType<typeof fakeAcpAgent>,
   body: unknown = { input: 'x', stream: false }
-): Promise<{ r: Response; url: string; close: () => Promise<void> }> {
+): Promise<{ r: Response; port: number; close: () => Promise<void> }> {
   const { port, close } = await listen(
     deps({ provider: conductorProxy(CFG, { acp: { peer: fake.app } }) })
   )
-  const url = `http://127.0.0.1:${port}`
-  const r = await fetch(`http://127.0.0.1:${port}/v1/responses`, {
+  const r = await fetch(api(port, '/v1/responses'), {
     method: 'POST',
     headers: { ...auth, 'content-type': 'application/json' },
     body: JSON.stringify(body),
   })
-  return { r, url, close }
+  return { r, port, close }
 }
 
 async function evs(r: Response): Promise<{ event: string; data: Record<string, unknown> }[]> {
@@ -200,7 +207,7 @@ describe('serve /v1/responses — the openai dialect', () => {
     )
     try {
       const post = (body: unknown) =>
-        fetch(`http://127.0.0.1:${port}/v1/responses`, {
+        fetch(api(port, '/v1/responses'), {
           method: 'POST',
           headers: { ...auth, 'content-type': 'application/json' },
           body: JSON.stringify(body),
@@ -230,7 +237,7 @@ describe('serve /v1/responses — the openai dialect', () => {
     )
     try {
       const post = (body: unknown) =>
-        fetch(`http://127.0.0.1:${port}/v1/responses`, {
+        fetch(api(port, '/v1/responses'), {
           method: 'POST',
           headers: { ...auth, 'content-type': 'application/json' },
           body: JSON.stringify(body),
@@ -285,17 +292,16 @@ describe('serve /v1/responses — the openai dialect', () => {
 async function postChat(
   fake: ReturnType<typeof fakeAcpAgent>,
   body: unknown = { messages: [{ role: 'user', content: 'x' }] }
-): Promise<{ r: Response; url: string; close: () => Promise<void> }> {
+): Promise<{ r: Response; port: number; close: () => Promise<void> }> {
   const { port, close } = await listen(
     deps({ provider: conductorProxy(CFG, { acp: { peer: fake.app } }) })
   )
-  const url = `http://127.0.0.1:${port}`
-  const r = await fetch(`http://127.0.0.1:${port}/v1/chat/completions`, {
+  const r = await fetch(api(port, '/v1/chat/completions'), {
     method: 'POST',
     headers: { ...auth, 'content-type': 'application/json' },
     body: JSON.stringify(body),
   })
-  return { r, url, close }
+  return { r, port, close }
 }
 
 describe('serve /v1/chat/completions — the stateless chat dialect', () => {
@@ -411,7 +417,7 @@ describe('serve /v1/chat/completions — the stateless chat dialect', () => {
     )
     try {
       const post = () =>
-        fetch(`http://127.0.0.1:${port}/v1/chat/completions`, {
+        fetch(api(port, '/v1/chat/completions'), {
           method: 'POST',
           headers: { ...auth, 'content-type': 'application/json' },
           body: JSON.stringify({ messages: [{ role: 'user', content: 'hi' }] }),
@@ -517,10 +523,10 @@ describe('output caps + loud input failures', () => {
 
   test('a stream:true resend answers SSE, never a JSON snapshot', async () => {
     const fake = fakeAcpAgent({ replyText: 'r1' })
-    const { url, close } = await postChat(fake)
+    const { port, close } = await postChat(fake)
     try {
       const post = (body: unknown) =>
-        fetch(`${url}/v1/chat/completions`, {
+        fetch(api(port, '/v1/chat/completions'), {
           method: 'POST',
           headers: { ...auth, 'content-type': 'application/json' },
           body: JSON.stringify(body),

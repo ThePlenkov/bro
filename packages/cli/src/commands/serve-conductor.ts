@@ -732,6 +732,16 @@ abstract class TagPump {
   protected abstract text(s: string): void
   protected abstract call(name: string, input: unknown): void
 
+  /** Replay recorded blocks through the live emitters — a stream:true
+   *  resend sees the same event sequence the original turn produced
+   *  (fresh ids, consistent within this replay). */
+  replay(blocks: OutBlock[]): void {
+    for (const b of blocks) {
+      if (b.type === 'text') this.text(b.text ?? '')
+      else if (b.type === 'tool_use') this.call(b.name ?? '', b.input ?? {})
+    }
+  }
+
   /** Append a delta and pump whatever is provably outside a tag. */
   feed(s: string): void {
     this.pending += s
@@ -2036,16 +2046,6 @@ class RespLive extends TagPump {
     })
   }
 
-  /** Replay recorded blocks through the live emitters — a stream:true
-   *  resend sees the same event sequence the original turn produced
-   *  (fresh ids, consistent within this replay). */
-  replay(blocks: OutBlock[]): void {
-    for (const b of blocks) {
-      if (b.type === 'text') this.text(b.text ?? '')
-      else if (b.type === 'tool_use') this.call(b.name ?? '', b.input ?? {})
-    }
-  }
-
   fail(type: string, message: string): void {
     this.drainAll()
     sse(this.res, 'error', { type: 'error', code: type, message })
@@ -2212,10 +2212,7 @@ function capBlocks(
   let used = 0
   const kept: OutBlock[] = []
   for (const b of blocks) {
-    const len =
-      b.type === 'text' ? (b.text ?? '').length
-      : b.type === 'tool_use' ? JSON.stringify(b.input ?? {}).length
-      : 0
+    const len = blockLen(b)
     if (used + len > cap) {
       if (b.type === 'text' && used < cap) {
         kept.push({ ...b, text: (b.text ?? '').slice(0, cap - used) })
@@ -2226,6 +2223,22 @@ function capBlocks(
     used += len
   }
   return { blocks: kept, capped: false }
+}
+
+/** A block's weight against an output cap — text by chars, a tool
+ *  call by its serialized arguments. */
+function blockLen(b: OutBlock): number {
+  if (b.type === 'text') return (b.text ?? '').length
+  if (b.type === 'tool_use') return JSON.stringify(b.input ?? {}).length
+  return 0
+}
+
+/** Terminal reason for a Responses turn: the post-hoc cap wins over
+ *  a tool_use that survived it, else the canonical backend reason. */
+function finalRespReason(capped: boolean, blocks: OutBlock[], canonical: string): string {
+  if (capped) return 'max_tokens'
+  if (blocks.some((b) => b.type === 'tool_use')) return 'tool_use'
+  return canonical
 }
 
 /** input shape gate for /v1/responses. */
@@ -2296,6 +2309,59 @@ function responsesReplay(res: ServerResponse, wire: WireCtx, ctx: RespReplayCtx)
   )
 }
 
+/** The retained-conversation key a responses turn writes under — a
+ *  chained predecessor wins; else store:true (or an explicit session
+ *  pin) fingerprints this request. An unknown predecessor just starts
+ *  fresh (fingerprint), never an invention; a KNOWN-but-broken one
+ *  fails inside acpTurn rather than answering from history-less
+ *  state. */
+function respConvKey(
+  req: IncomingMessage,
+  rreq: ResponsesRequest,
+  body: Body,
+  hit: { key: string; consumed: number } | undefined,
+  store: boolean
+): string | undefined {
+  if (hit !== undefined) return hit.key
+  // store:false — stateless on OUR side: no chain id registers, but
+  // a valid previous_response_id (or an x-bro-session pin) still
+  // chains the turn — predecessor lookup is independent of whether
+  // this response gets stored.
+  if (!store && req.headers['x-bro-session'] === undefined) return undefined
+  return conversationKey(req, body)
+}
+
+/** The SSE opener for a streamed Responses turn — OpenAI semantics:
+ *  buffered unless stream === true (inverted vs the anthropic
+ *  dialect's own default). `set` hands the RespLive back so the
+ *  caller's catch/finish paths can reach it. */
+function respStreamOpener(
+  rreq: ResponsesRequest,
+  res: ServerResponse,
+  wire: WireCtx,
+  respId: string,
+  body: Body,
+  tools: boolean,
+  store: boolean,
+  set: (live: RespLive) => void
+): ((inputTokens: number) => PooledTurnOpts['onUpdate']) | undefined {
+  if (rreq.stream !== true) return undefined
+  return (inputTokens) => {
+    sseHead(res)
+    const live = new RespLive(
+      res,
+      respId,
+      servedModel(requestModelOf(body), wire.opts, wire.cfg, body),
+      inputTokens,
+      store,
+      tools,
+      capCharsOf(rreq.max_output_tokens)
+    )
+    set(live)
+    return live.onUpdate
+  }
+}
+
 async function responses(
   req: IncomingMessage,
   res: ServerResponse,
@@ -2309,24 +2375,9 @@ async function responses(
   const t0 = Date.now()
   const store = rreq.store !== false
   const respId = `resp_${randomBytes(12).toString('hex')}`
-  // chain continuity: the previous response's recorded conv point.
-  // An unknown predecessor just starts fresh (fingerprint), never an
-  // invention; a KNOWN-but-broken one fails inside acpTurn rather
-  // than answering from a history-less delta.
   const hit =
-    rreq.previous_response_id !== undefined
-      ? chains.get(rreq.previous_response_id)
-      : undefined
-  // store:false — stateless on OUR side: the response isn't recorded
-  // and no chain id registers, but a valid previous_response_id (or an
-  // explicit x-bro-session pin) still chains the turn — predecessor
-  // lookup is independent of whether this response gets stored.
-  const key =
-    hit?.key ??
-    (store || req.headers['x-bro-session'] !== undefined
-      ? conversationKey(req, body)
-      : undefined)
-  const chained = hit !== undefined
+    rreq.previous_response_id !== undefined ? chains.get(rreq.previous_response_id) : undefined
+  const key = respConvKey(req, rreq, body, hit, store)
   const tools = body.tool_choice?.type !== 'none'
   let live: RespLive | undefined
   let out: TurnOutcome
@@ -2334,7 +2385,6 @@ async function responses(
     const peer = await wire.link(parent)
     const ac = new AbortController()
     res.once('close', () => ac.abort())
-    const requestModel = requestModelOf(body)
     out = await acpTurn({
       body,
       msgs: body.messages ?? [],
@@ -2346,32 +2396,15 @@ async function responses(
       pendingOpens: wire.pendingOpens,
       key,
       stopKey: stopKeyOf(stopSeqsOf(body) ?? []),
-      chained,
+      chained: hit !== undefined,
       chainConsumed: hit?.consumed,
       parent,
-      requestModel,
+      requestModel: requestModelOf(body),
       deadline: Date.now() + wire.cfg.timeoutMs,
       signal: ac.signal,
       by: `conductor:${wire.cfg.backend}`,
       imageOk: peer.caps?.image === true,
-      // OpenAI semantics: buffered unless stream === true (inverted
-      // vs the anthropic dialect's own default)
-      openStream:
-        rreq.stream === true
-          ? (inputTokens) => {
-              sseHead(res)
-              live = new RespLive(
-                res,
-                respId,
-                servedModel(requestModel, wire.opts, wire.cfg, body),
-                inputTokens,
-                store,
-                tools,
-                capCharsOf(rreq.max_output_tokens)
-              )
-              return live.onUpdate
-            }
-          : undefined,
+      openStream: respStreamOpener(rreq, res, wire, respId, body, tools, store, (l) => (live = l)),
     })
   } catch (err) {
     openaiFail(res, err, live)
@@ -2381,63 +2414,87 @@ async function responses(
     responsesReplay(res, wire, { rreq, out, respId, key, store, chains })
     return
   }
-  const reply = out.reply as PooledReply
-  const inputTokens = out.inputTokens
+  responsesDeliver(res, wire, {
+    rreq,
+    body,
+    out,
+    respId,
+    key,
+    store,
+    chains,
+    live,
+    t0,
+    chained: hit !== undefined,
+  })
+}
+
+/** Post-turn settlement for /v1/responses — settle the retained
+ *  conversation (always: a non-stored chained turn still consumed its
+ *  delta in the predecessor's session — skipping it leaves consumed
+ *  behind and later chains read hidden turns), register the chain id
+ *  when storing, emit the turn event, write the terminal response. */
+function responsesDeliver(
+  res: ServerResponse,
+  wire: WireCtx,
+  d: {
+    rreq: ResponsesRequest
+    body: Body
+    out: TurnOutcome
+    respId: string
+    key: string | undefined
+    store: boolean
+    chains: Map<string, { key: string; consumed: number }>
+    live: RespLive | undefined
+    t0: number
+    chained: boolean
+  }
+): void {
+  const reply = d.out.reply as PooledReply
+  const inputTokens = d.out.inputTokens
   // withheld tool contracts never produce tool blocks — an agent
   // emitting markup anyway stays raw text, not an invented call
-  const blocks = parseReply(reply.text, tools)
-  const capped = capBlocks(blocks, capCharsOf(rreq.max_output_tokens))
-  const outBlocks = capped.blocks
+  const tools = d.body.tool_choice?.type !== 'none'
   // the cap reports the same canonical reason the acp's own ceiling
   // would — replay and status agree the answer was cut
+  const capped = capBlocks(parseReply(reply.text, tools), capCharsOf(d.rreq.max_output_tokens))
+  const outBlocks = capped.blocks
   const canonicalReason = capped.capped
     ? 'max_tokens'
     : (STOP_REASON[reply.stopReason] ?? 'end_turn')
   const outTokens = capped.capped ? blocksTokens(outBlocks) : estTokens(reply.text)
-  // the cap outranks a surviving tool_use — a cut answer is
-  // incomplete even when a whole call made it under the wire
-  const status = respStatus(
-    capped.capped
-      ? 'max_tokens'
-      : outBlocks.some((b) => b.type === 'tool_use')
-        ? 'tool_use'
-        : canonicalReason
-  )
-  if (out.conv !== undefined && key !== undefined) {
-    // settleConv is NOT store-gated: a non-stored chained turn still
-    // consumed its delta in the predecessor's session — skipping it
-    // leaves consumed behind and later chains read hidden turns
+  const status = respStatus(finalRespReason(capped.capped, outBlocks, canonicalReason))
+  if (d.out.conv !== undefined && d.key !== undefined) {
     settleConv(
       wire,
-      key,
-      out.conv,
-      body,
+      d.key,
+      d.out.conv,
+      d.body,
       {
         blocks: outBlocks,
         model: reply.model,
         stopReason: canonicalReason,
         inputTokens,
       },
-      stopKeyOf(stopSeqsOf(body) ?? []),
-      chained
+      stopKeyOf(stopSeqsOf(d.body) ?? []),
+      d.chained
     )
-    if (store) {
-      chains.set(respId, { key, consumed: out.conv.consumed })
-      pruneChains(chains, wire.sessions)
+    if (d.store) {
+      d.chains.set(d.respId, { key: d.key, consumed: d.out.conv.consumed })
+      pruneChains(d.chains, wire.sessions)
     }
   }
   otelEvent('conductor.turn', {
     backend: wire.cfg.backend,
     dialect: 'responses',
     model: reply.model,
-    stream: rreq.stream === true,
-    session_reused: out.reused,
+    stream: d.rreq.stream === true,
+    session_reused: d.out.reused,
     input_tokens: inputTokens,
     output_tokens: outTokens,
-    duration_ms: Date.now() - t0,
+    duration_ms: Date.now() - d.t0,
   })
-  if (live !== undefined) {
-    live.finish(status, outTokens)
+  if (d.live !== undefined) {
+    d.live.finish(status, outTokens)
     res.end()
     return
   }
@@ -2445,11 +2502,11 @@ async function responses(
   res.end(
     JSON.stringify(
       respEnvelope(
-        respId,
-        servedModel(requestModelOf(body), wire.opts, wire.cfg, body),
+        d.respId,
+        servedModel(requestModelOf(d.body), wire.opts, wire.cfg, d.body),
         status,
         blocksToOutput(outBlocks),
-        store,
+        d.store,
         inputTokens,
         outTokens
       )
@@ -2703,15 +2760,6 @@ class ChatLive extends TagPump {
     this.callIdx++
   }
 
-  /** Replay recorded blocks through the same emitters — a stream:true
-   *  resend sees the delta sequence a fresh turn would have made. */
-  replay(blocks: OutBlock[]): void {
-    for (const b of blocks) {
-      if (b.type === 'text') this.text(b.text ?? '')
-      else if (b.type === 'tool_use') this.call(b.name ?? '', b.input ?? {})
-    }
-  }
-
   /** Final delta + optional usage chunk + [DONE]. */
   finish(stopReason: string, usage?: Record<string, unknown>): void {
     this.drainAll()
@@ -2850,9 +2898,31 @@ async function chatCompletions(
     openaiFail(res, err, live)
     return
   }
-  // replay — a resend carried nothing new; answer the recorded reply
-  const o = chatOutcome(out, tools)
-  const cap = capCharsOf(creq.max_completion_tokens ?? creq.max_tokens)
+  chatDeliver(res, wire, { creq, body, out, key, chatId, created, model, tools, live, t0 })
+}
+
+/** Post-turn settlement for /v1/chat/completions — replay → recorded
+ *  blocks; fresh → settle the conversation, emit the turn event, then
+ *  answer SSE (stream:true resends never see a JSON snapshot) or the
+ *  buffered completion. */
+function chatDeliver(
+  res: ServerResponse,
+  wire: WireCtx,
+  d: {
+    creq: ChatRequest
+    body: Body
+    out: TurnOutcome
+    key: string
+    chatId: string
+    created: number
+    model: string
+    tools: boolean
+    live: ChatLive | undefined
+    t0: number
+  }
+): void {
+  const o = chatOutcome(d.out, d.tools)
+  const cap = capCharsOf(d.creq.max_completion_tokens ?? d.creq.max_tokens)
   const capped = capBlocks(o.blocks, cap)
   const blocks = capped.blocks
   // the cap reports the same canonical reason the acp's own ceiling
@@ -2860,19 +2930,19 @@ async function chatCompletions(
   const stopReason = capped.capped ? 'max_tokens' : o.stopReason
   const finish = capped.capped ? 'length' : o.finish
   const outTokens = capped.capped ? blocksTokens(blocks) : o.outTokens
-  if (!o.replay && out.conv !== undefined) {
+  if (!o.replay && d.out.conv !== undefined) {
     settleConv(
       wire,
-      key,
-      out.conv,
-      body,
+      d.key,
+      d.out.conv,
+      d.body,
       {
         blocks,
         model: (o.reply as PooledReply).model,
         stopReason,
         inputTokens: o.inputTokens,
       },
-      stopKeyOf(stopSeqsOf(body) ?? [])
+      stopKeyOf(stopSeqsOf(d.body) ?? [])
     )
   }
   const usage = {
@@ -2884,34 +2954,34 @@ async function chatCompletions(
     backend: wire.cfg.backend,
     dialect: 'chat_completions',
     model: o.reply?.model ?? o.lr?.model ?? '',
-    stream: creq.stream === true,
-    session_reused: out.reused,
+    stream: d.creq.stream === true,
+    session_reused: d.out.reused,
     input_tokens: o.inputTokens,
     output_tokens: outTokens,
-    duration_ms: Date.now() - t0,
+    duration_ms: Date.now() - d.t0,
   })
-  // a stream:true resend answers SSE — never a JSON snapshot of a
-  // response the client never asked to buffer
-  if (o.replay && creq.stream === true) {
+  const usageOrUndef =
+    d.creq.stream_options?.include_usage === true ? usage : undefined
+  if (o.replay && d.creq.stream === true) {
     sseHead(res)
-    const rl = new ChatLive(res, chatId, model, created, tools, cap)
+    const rl = new ChatLive(res, d.chatId, d.model, d.created, d.tools, cap)
     rl.replay(blocks)
-    rl.finish(stopReason, creq.stream_options?.include_usage === true ? usage : undefined)
+    rl.finish(stopReason, usageOrUndef)
     res.end()
     return
   }
-  if (live !== undefined) {
-    live.finish(stopReason, creq.stream_options?.include_usage === true ? usage : undefined)
+  if (d.live !== undefined) {
+    d.live.finish(stopReason, usageOrUndef)
     res.end()
     return
   }
   res.writeHead(200, { 'content-type': 'application/json' })
   res.end(
     JSON.stringify({
-      id: chatId,
+      id: d.chatId,
       object: 'chat.completion',
-      created,
-      model: o.reply?.model ?? o.lr?.model ?? model,
+      created: d.created,
+      model: o.reply?.model ?? o.lr?.model ?? d.model,
       choices: [
         { index: 0, message: chatMessage(blocks), finish_reason: finish, logprobs: null },
       ],
@@ -3017,36 +3087,26 @@ export function conductorProxy(
   // 'exit' handler; an in-flight link resolve is a ms-scale window.
   process.once('exit', () => live?.close())
   const wire: WireCtx = { cfg, opts: wireOpts, link: getLink, sessions, pendingOpens }
+  const routes: Record<
+    string,
+    (r: IncomingMessage, s: ServerResponse, p: OtelCtx | undefined) => void | Promise<void>
+  > = {
+    'POST /v1/messages': (r, s, p) => messages(r, s, wire, p),
+    'POST /v1/responses': (r, s, p) => responses(r, s, wire, chains, p),
+    'POST /v1/chat/completions': (r, s, p) => chatCompletions(r, s, wire, p),
+    'POST /v1/messages/count_tokens': (r, s) => countTokens(r, s),
+    'GET /v1/models': (_r, s) => models(s, cfg, wireOpts),
+  }
   return async (req, res) => {
     const path = (req.url ?? '/').split('?')[0]
     const method = req.method ?? 'GET'
     const httpSpan = httpTap(req, res, cfg, method, path)
-    if (method === 'POST' && path === '/v1/messages') {
-      return messages(req, res, wire, httpSpan.ctx)
-    }
-    if (method === 'POST' && path === '/v1/responses') {
-      return responses(req, res, wire, chains, httpSpan.ctx)
-    }
-    if (method === 'POST' && path === '/v1/chat/completions') {
-      return chatCompletions(req, res, wire, httpSpan.ctx)
-    }
-    if (method === 'POST' && path === '/v1/messages/count_tokens') {
-      try {
-        const raw = await readBody(req)
-        apiErrorCountTokens(res, raw)
-      } catch (err) {
-        if (err instanceof Error && err.message === 'request body too large') {
-          tooLarge(req, res)
-        } else {
-          apiError(res, 400, 'invalid_request_error', 'malformed request')
-        }
-      }
+    const route = routes[`${method} ${path}`]
+    if (route === undefined) {
+      apiError(res, 404, 'not_found_error', `bro conductor: no route ${method} ${path}`)
       return
     }
-    if (method === 'GET' && path === '/v1/models') {
-      return models(res, cfg, wireOpts)
-    }
-    apiError(res, 404, 'not_found_error', `bro conductor: no route ${method} ${path}`)
+    await route(req, res, httpSpan.ctx)
   }
 }
 
