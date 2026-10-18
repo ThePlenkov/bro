@@ -7,7 +7,7 @@ the bro store: serve.log `conductor.turn` events, the runner's bead
 claim, the analyst's verdict.
 
 | scenario | client | wire | exercises | hermetic home |
-|---|---|---|---|---|
+| --- | --- | --- | --- | --- |
 | `claude-plugin` | claude -p | `/v1/messages` | plugin surface: native commands, hooks, stop-gate, settings.local.json + apiKeyHelper | `serve-conductor.test.ts` |
 | `claude-basics` | claude -p | `/v1/messages` | model pin, streamed deltas, multi-turn retained session | `serve-conductor.test.ts` (retained sessions) |
 | `claude-tools` | claude -p | `/v1/messages` | real client tool loop (Write/Bash) through the wire | `serve-conductor.test.ts` |

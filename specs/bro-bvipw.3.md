@@ -5,7 +5,7 @@ Epic: `bro-bvipw`. This bead delivers the tree's **agentic layer**
 with the dialect PRs themselves:
 
 | layer | artifact | where |
-|---|---|---|
+| --- | --- | --- |
 | hermetic anthropic | `serve-conductor.test.ts` (+ feature gaps) | main / `bro-bvipw.1` |
 | hermetic openai | `serve-conductor-openai.test.ts` | `bro-zkpju` (#589) |
 | agentic claude | `claude-{plugin,basics,tools,errors}` | this bead |
