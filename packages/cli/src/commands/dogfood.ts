@@ -105,6 +105,9 @@ function segment(what: string, value: string): string {
 
 function scenarioPath(dir: string, name: string): string {
   const clean = segment('scenario name', name)
+  if (clean.replace(/\.md$/, '') === 'matrix') {
+    die('matrix is the dogfood index, not a scenario — `bro self dogfood scenarios` lists the runnable set')
+  }
   const file = join(dir, 'dogfood', clean.endsWith('.md') ? clean : `${clean}.md`)
   if (!existsSync(file)) {
     die(`no scenario ${name} — \`bro self dogfood scenarios\` lists them`)

@@ -31,6 +31,8 @@ conductor listener and `bro.config.local.json` the acp backend.
 
 ## Assert
 
+- The failures surfaced on `POST /v1/messages` through the conductor —
+  a 5xx/timeout on the wire, not a client-side crash.
 - The run COMPLETED (a wedged session is a fail, not a retry story).
 - `.git/bro/serve.json` post-run holds a different pid than the one
   the runner killed (or serve.log shows a new generation binding the

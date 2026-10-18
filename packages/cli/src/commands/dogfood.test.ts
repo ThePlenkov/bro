@@ -448,12 +448,26 @@ describe('bro self dogfood', () => {
 // and the matrix index must not list itself as runnable.
 
 describe('committed dogfood scenario tree', () => {
-  const repoRoot = join(import.meta.dirname, '..', '..', '..', '..')
+  // the repo root by the dogfood/ sentinel, not a fixed ..-count — a
+  // file move must fail loudly here, not silently retarget asserts
+  const repoRoot = (() => {
+    let d = import.meta.dirname
+    while (!existsSync(join(d, 'dogfood')) && dirname(d) !== d) {
+      d = dirname(d)
+    }
+    assert.ok(existsSync(join(d, 'dogfood')), 'repo root not found — no dogfood/ up-tree')
+    return d
+  })()
   const dogfoodDir = join(repoRoot, 'dogfood')
 
-  test('matrix.md is an index, never a scenario', () => {
+  test('matrix.md is an index, never a scenario', async () => {
     assert.ok(existsSync(join(dogfoodDir, 'matrix.md')))
     assert.ok(!listScenarios(repoRoot).includes('matrix'))
+    // and not runnable either — the listing filter alone would leave
+    // `run matrix` launching the index as a scenario
+    const r = await dogfood(['run', 'matrix', '--backend', 'dogfood-test'])
+    assert.notEqual(r.code, 0)
+    assert.match(r.err.join('\n'), /index|not a scenario/)
   })
 
   test('every claude-* .files carries claude client wiring', () => {
@@ -498,13 +512,18 @@ describe('committed dogfood scenario tree', () => {
 
   test('every scenario asserts its own dialect on the wire', () => {
     for (const s of listScenarios(repoRoot)) {
-      if (s === 'core-workflow') continue
       const text = readFileSync(join(dogfoodDir, `${s}.md`), 'utf8')
+      if (s === 'core-workflow') {
+        // the workflow scenario is client-agnostic — no payload, no
+        // dialect; the invariant is that it STAYS that way
+        assert.ok(
+          !existsSync(join(dogfoodDir, `${s}.files`)),
+          'core-workflow must stay payload-free'
+        )
+        continue
+      }
       const dialect = s.startsWith('codex-') ? '/v1/responses' : '/v1/messages'
-      assert.ok(
-        text.includes(dialect) || text.includes('conductor'),
-        `${s}: no dialect assertion — the wire is the proof`
-      )
+      assert.ok(text.includes(dialect), `${s}: no ${dialect} assertion — the wire is the proof`)
     }
   })
 })
