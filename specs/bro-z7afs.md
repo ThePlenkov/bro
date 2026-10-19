@@ -21,9 +21,17 @@ the capability is true. Missing: bro-side handlers and the flag.
 New module `packages/providers/src/acp-terminal.ts` — an `AcpTerminals`
 registry scoped to one connection:
 
-- `terminal/create` → spawn `command + args` (no shell — argv verbatim),
+- `terminal/create` → spawn `command + args` — verbatim argv is always
+  the first attempt (bare names resolve via PATH, spaced paths exec
+  literally); an args-empty `command` whose literal exec is ENOENT
+  (async) or ENAMETOOLONG (sync — over-long literals throw before
+  handlers exist) is a whole shell line (devin puts the whole string in
+  `command` with no args — ENOENT is how invisible tasks happened) and
+  re-spawns through `sh -c`/`cmd /c`; a released/disposed entry starts
+  no new work (`stopped` gates the fallback),
   `cwd`/`env` applied over `process.env` (agent env names on a security
-  denylist — `PATH`, `LD_*`, `NODE_OPTIONS`, … — are dropped); capture
+  denylist — `PATH`, `LD_*`, `NODE_OPTIONS`, … — are dropped, matched
+  case-insensitively); capture
   stdout+stderr interleaved into a byte-bounded buffer (`outputByteLimit`
   honored in bytes, truncate from the front on a UTF-8 boundary — never a
   partial character); returns `{ terminalId }`.

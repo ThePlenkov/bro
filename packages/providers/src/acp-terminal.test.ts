@@ -1,5 +1,8 @@
 import { describe, test } from 'node:test'
 import assert from 'node:assert/strict'
+import { chmodSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import type {
   CreateTerminalRequest,
   KillTerminalRequest,
@@ -37,6 +40,70 @@ describe('AcpTerminals', () => {
     } finally {
       t.dispose()
     }
+  })
+
+  test('a whole shell line in command (args empty) runs through the shell', async () => {
+    const t = new AcpTerminals()
+    try {
+      const { terminalId } = await t.create(ctx(create('echo shell-line && echo works')))
+      const status = await t.waitForExit(ctx(wait(terminalId)))
+      assert.equal(status.exitCode, 0)
+      const snap = await t.output(ctx(out(terminalId)))
+      // cmd writes \r\n — normalize so the assertion is platform-neutral
+      assert.match(snap.output.replaceAll('\r\n', '\n'), /shell-line\nworks/)
+    } finally {
+      t.dispose()
+    }
+  })
+
+  test('an args-empty command that is an executable path — spaces included — runs directly', async (t_) => {
+    if (process.platform === 'win32') {
+      t_.skip('needs a chmod-able shebang script')
+      return
+    }
+    const dir = mkdtempSync(join(tmpdir(), 'bro term '))
+    try {
+      const script = join(dir, 'check')
+      writeFileSync(script, '#!/bin/sh\necho spaced-path-ok\n')
+      chmodSync(script, 0o755)
+      const t = new AcpTerminals()
+      try {
+        const { terminalId } = await t.create(ctx(create(script)))
+        const status = await t.waitForExit(ctx(wait(terminalId)))
+        assert.equal(status.exitCode, 0)
+        const snap = await t.output(ctx(out(terminalId)))
+        assert.match(snap.output, /spaced-path-ok/)
+      } finally {
+        t.dispose()
+      }
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  test('a shell line longer than the file-name limit still runs — ENAMETOOLONG falls back too', async () => {
+    const t = new AcpTerminals()
+    try {
+      const { terminalId } = await t.create(ctx(create(`echo ${'x'.repeat(300)}`)))
+      const status = await t.waitForExit(ctx(wait(terminalId)))
+      assert.equal(status.exitCode, 0)
+      const snap = await t.output(ctx(out(terminalId)))
+      assert.match(snap.output, /x{300}/)
+    } finally {
+      t.dispose()
+    }
+  })
+
+  test('a fallback spawn never outruns cleanup — dispose during ENOENT starts no work', async () => {
+    const t = new AcpTerminals()
+    const { terminalId } = await t.create(ctx(create('no-such-cmd-zzz && echo leaked')))
+    const pending = t.waitForExit(ctx(wait(terminalId)))
+    // dispose lands before the async 'error' tick — without the stopped
+    // gate a shell would spawn now and the waiter would resolve {127}
+    t.dispose()
+    const status = await pending
+    assert.equal(status.exitCode, null)
+    assert.equal(status.signal, null)
   })
 
   test('output polls while the child still runs, exitStatus lands after', async () => {
@@ -122,6 +189,30 @@ describe('AcpTerminals', () => {
       assert.equal(status.exitCode, 0)
       const snap = await t.output(ctx(out(terminalId)))
       assert.match(snap.output, /env-ok-yes/)
+    } finally {
+      t.dispose()
+    }
+  })
+
+  test('denylist matches case-insensitively — case variants cannot smuggle hijack vars', async () => {
+    const t = new AcpTerminals()
+    try {
+      // win32 treats Path == PATH — a case-sensitive has() leaks the
+      // hijack; brO_t_var proves normal mixed-case names still merge
+      const req: CreateTerminalRequest = {
+        sessionId: 'sess-1',
+        command: 'sh',
+        args: ['-c', 'echo "p=[$pAtH] v=[$brO_t_var]"'],
+        env: [
+          { name: 'pAtH', value: '/evil' },
+          { name: 'brO_t_var', value: 'yes' },
+        ],
+      }
+      const { terminalId } = await t.create(ctx(req))
+      const status = await t.waitForExit(ctx(wait(terminalId)))
+      assert.equal(status.exitCode, 0)
+      const snap = await t.output(ctx(out(terminalId)))
+      assert.match(snap.output, /p=\[\] v=\[yes\]/)
     } finally {
       t.dispose()
     }
