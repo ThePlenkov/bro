@@ -1,6 +1,66 @@
 {
   "version": 1,
   "skills": {
+    "codescene": {
+      "source": "theplenkov-ai/skills",
+      "sourceType": "github",
+      "skillPath": "skills/integrations/codescene/SKILL.md",
+      "computedHash": "2d9a9d26c5d9e47f8d9f4e7af4d42ce316ab3675d63a9df0e2fa20f495c6d06f"
+    },
+    "configuring-codescene-mcp": {
+      "source": "codescene-oss/codescene-mcp-server",
+      "sourceType": "github",
+      "skillPath": "skills/configuring-codescene-mcp/SKILL.md",
+      "computedHash": "6c89bb232adcaa600cd9a9b7550e7cd007a1c6d45fa020c035aad8a0114b1802"
+    },
+    "explaining-code-health": {
+      "source": "codescene-oss/codescene-mcp-server",
+      "sourceType": "github",
+      "skillPath": "skills/explaining-code-health/SKILL.md",
+      "computedHash": "5ee8a744ccb591b3a2d198cae206462c12385cd8a38f4e445796e34a76ab61ce"
+    },
+    "guiding-refactoring-with-code-health": {
+      "source": "codescene-oss/codescene-mcp-server",
+      "sourceType": "github",
+      "skillPath": "skills/guiding-refactoring-with-code-health/SKILL.md",
+      "computedHash": "22d342392a555cfa0acbce6798771f803f81a78767e8ac41edb5c2667d52dac9"
+    },
+    "installing-and-activating-codescene-mcp": {
+      "source": "codescene-oss/codescene-mcp-server",
+      "sourceType": "github",
+      "skillPath": "skills/installing-and-activating-codescene-mcp/SKILL.md",
+      "computedHash": "e20f7d27098b7db3ea4a488ecfa461db2e29b87d5ea66ec3afb069db2f2507bb"
+    },
+    "making-the-business-case-for-code-health": {
+      "source": "codescene-oss/codescene-mcp-server",
+      "sourceType": "github",
+      "skillPath": "skills/making-the-business-case-for-code-health/SKILL.md",
+      "computedHash": "efaac27bbed91a4af28a2e66e8ef8709ef64c26a64ddc80a0815d68b4a816f14"
+    },
+    "prioritizing-technical-debt": {
+      "source": "codescene-oss/codescene-mcp-server",
+      "sourceType": "github",
+      "skillPath": "skills/prioritizing-technical-debt/SKILL.md",
+      "computedHash": "b7d02eb357f6b54dd094afbeb4605c2e4080e47c482f55ff82a62b934c39fabc"
+    },
+    "risk-based-testing-with-code-health": {
+      "source": "codescene-oss/codescene-mcp-server",
+      "sourceType": "github",
+      "skillPath": "skills/risk-based-testing-with-code-health/SKILL.md",
+      "computedHash": "c2c6af07e80b79bcd6309e063f357e8ff87ce6acc1ab9bfb9e25df26d2d828ab"
+    },
+    "routing-work-with-code-ownership": {
+      "source": "codescene-oss/codescene-mcp-server",
+      "sourceType": "github",
+      "skillPath": "skills/routing-work-with-code-ownership/SKILL.md",
+      "computedHash": "1b0f6afdc57d91fb1dfb3fcee145cbb0bf569f315f050066a85348dccc132c0a"
+    },
+    "safeguarding-ai-generated-code": {
+      "source": "codescene-oss/codescene-mcp-server",
+      "sourceType": "github",
+      "skillPath": "skills/safeguarding-ai-generated-code/SKILL.md",
+      "computedHash": "a55e8c02cdee0f3790dc5ec1956cb3b4f4d851177734b57aa253e56ad7e7d6b7"
+    },
     "typesafe-ai": {
       "source": "typesafe-ai/skills",
       "sourceType": "github",
