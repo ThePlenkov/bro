@@ -906,6 +906,115 @@ describe('model pin resolution — [1m] context suffix (bro-0g2l3)', () => {
       peer.close()
     }
   })
+
+  // the base id hitting the catalog must NOT re-pin a session already
+  // serving the raw suffixed ask — the set would silently drop the
+  // opt-in the spawn flag enabled
+  const SPAWN_PINNED: SessionConfigOption = {
+    type: 'select',
+    id: 'model-pick',
+    name: 'Model',
+    category: 'model',
+    currentValue: 'custom[1m]',
+    options: [
+      { value: 'custom', name: 'custom' },
+      { value: 'other', name: 'other' },
+    ],
+  }
+
+  test('a session already serving the suffixed pin is not re-set to the base', async () => {
+    const fake = fakeAcpAgent({ replyText: 'x', configOptions: [SPAWN_PINNED] })
+    const peer = await acpOpen('conductor:t', ENTRY, { acp: { peer: fake.app } }, deadline())
+    try {
+      const r = await acpPooledTurn(
+        peer,
+        { ...ENTRY, model: 'custom[1m]' },
+        { acp: { peer: fake.app } },
+        'p',
+        deadline(),
+        { by: 'conductor:t' }
+      )
+      assert.equal(r.model, 'custom[1m]')
+      assert.deepEqual(fake.configSets, [])
+    } finally {
+      peer.close()
+    }
+  })
+
+  test('a namespaced suffixed pin the session reports verbatim is kept too', async () => {
+    const fake = fakeAcpAgent({
+      replyText: 'x',
+      configOptions: [
+        {
+          type: 'select',
+          id: 'model-pick',
+          name: 'Model',
+          category: 'model',
+          currentValue: 'acme/custom[1m]',
+          options: [
+            { value: 'acme/custom', name: 'custom' },
+            { value: 'other', name: 'other' },
+          ],
+        },
+      ],
+    })
+    const peer = await acpOpen('conductor:t', ENTRY, { acp: { peer: fake.app } }, deadline())
+    try {
+      const r = await acpPooledTurn(
+        peer,
+        { ...ENTRY, model: 'acme/custom[1m]' },
+        { acp: { peer: fake.app } },
+        'p',
+        deadline(),
+        { by: 'conductor:t' }
+      )
+      assert.equal(r.model, 'acme/custom[1m]')
+      assert.deepEqual(fake.configSets, [])
+    } finally {
+      peer.close()
+    }
+  })
+
+  test('the one-shot path keeps a served spawn-level suffix — no base re-pin', async () => {
+    const fake = fakeAcpAgent({ replyText: 'answer', configOptions: [SPAWN_PINNED] })
+    const res = await acpClient(
+      'provider:kilo',
+      { type: 'acp', command: 'kilo --acp', model: 'custom[1m]' },
+      { acp: { peer: fake.app } }
+    ).chat!('p', deadline())
+    assert.equal(res.model, 'custom[1m]')
+    assert.deepEqual(fake.configSets, [])
+  })
+
+  test('an agent-advertised `model[1m]` leaf is selectable verbatim', async () => {
+    const fake = fakeAcpAgent({
+      replyText: 'x',
+      configOptions: [
+        {
+          type: 'select',
+          id: 'model-pick',
+          name: 'Model',
+          category: 'model',
+          currentValue: 'other',
+          options: [
+            { value: 'custom[1m]', name: 'custom 1m' },
+            { value: 'other', name: 'other' },
+          ],
+        },
+      ],
+    })
+    const peer = await acpOpen('conductor:t', ENTRY, { acp: { peer: fake.app } }, deadline())
+    try {
+      const r = await acpPooledTurn(peer, ENTRY, { acp: { peer: fake.app } }, 'p', deadline(), {
+        by: 'conductor:t',
+        requestModel: 'dv/custom[1m]',
+      })
+      assert.equal(r.model, 'custom[1m]')
+      assert.deepEqual(fake.configSets, [{ configId: 'model-pick', value: 'custom[1m]' }])
+    } finally {
+      peer.close()
+    }
+  })
 })
 
 // bro-whn25 — a conductor conversation is N anthropic turns over ONE
