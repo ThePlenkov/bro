@@ -883,6 +883,93 @@ export function promptSimilar(a: string, b: string): boolean {
   return shared >= 3 && shared / small.size >= 0.6
 }
 
+/** Advisory liveness — a row counts as work in flight when its pid is
+ *  alive, or when it never got one but sits inside the spawn-handoff
+ *  window (mid-spawn; the pid lands within seconds). Terminal rows and
+ *  pid-less crash remnants past the window are not work in flight. */
+function registryEntryLiveish(e: {
+  pid?: number
+  pidStart?: string
+  spawnedAt: string
+  exitStatus?: number
+  stopped?: boolean
+}): boolean {
+  if (typeof e.exitStatus === 'number' || e.stopped === true) {
+    return false
+  }
+  if (typeof e.pid === 'number') {
+    const start =
+      typeof e.pidStart === 'string' && e.pidStart !== '' ? e.pidStart : undefined
+    return pidAlive(e.pid, start)
+  }
+  return Date.now() - Date.parse(e.spawnedAt) < SESSION_SLOT_TTL_MS
+}
+
+/** The agent's stored prompt text — undefined when absent/unreadable. */
+function storedPromptText(dir: string, agentId: string): string | undefined {
+  const file = agentPromptPath(dir, agentId)
+  if (file === null) {
+    return undefined
+  }
+  try {
+    const text = readFileSync(file, 'utf8')
+    return text.trim() === '' ? undefined : text
+  } catch {
+    return undefined
+  }
+}
+
+/** realpath where possible — a dangling path compares literally. */
+function realOrSelf(p: string): string {
+  try {
+    return realpathSync(p)
+  } catch {
+    return p
+  }
+}
+
+/** Session-plane suspects — live rows whose cwd resolves to the same
+ *  git common dir. `seenAgents` marks workers whose stored prompt
+ *  already compared (richer than the title) plus the excluded --for
+ *  row. One bounded probe per distinct cwd: a stalled mount degrades
+ *  this advisory, never hangs the spawn behind it. */
+function sessionSuspects(
+  dir: string,
+  env: AgentConnectorEnv,
+  seenAgents: Set<string>
+): { label: string; text: string }[] {
+  const out: { label: string; text: string }[] = []
+  const ours = gitCommonDir(dir, ADVISORY_PROBE_MS)
+  if (ours === null) {
+    return out
+  }
+  const oursReal = realOrSelf(ours)
+  const probeCache = new Map<string, string | null>()
+  const commonOf = (cwd: string): string | null => {
+    if (!probeCache.has(cwd)) {
+      probeCache.set(cwd, gitCommonDir(cwd, ADVISORY_PROBE_MS))
+    }
+    return probeCache.get(cwd) ?? null
+  }
+  for (const s of discoverSessions(env).sessions) {
+    if (s.name === undefined || s.cwd === undefined) {
+      continue
+    }
+    if (s.agentId !== undefined && seenAgents.has(s.agentId)) {
+      continue // its stored prompt already compared — richer than the title
+    }
+    const common = commonOf(s.cwd)
+    if (common === null || realOrSelf(common) !== oursReal) {
+      continue
+    }
+    out.push({
+      label: `session "${s.name}" (${s.kind}, pid ${s.pid})`,
+      text: s.name.replaceAll('-', ' '),
+    })
+  }
+  return out
+}
+
 /** Work already live in this repo that a new spawn could duplicate —
  *  `{label, text}` pairs the caller's prompt is compared against:
  *  non-terminal registry agents contribute their stored prompt; live
@@ -912,78 +999,18 @@ export function collectDuplicateSuspects(
       seenAgents.add(e.agentId)
       continue
     }
-    // terminal rows prove no live work — exit recorded or manually stopped.
-    // Not marked seen: when a session plane still reports that worker
-    // live, its title is the fresher liveness signal and stays a suspect
-    if (typeof e.exitStatus === 'number' || e.stopped === true) {
+    if (!registryEntryLiveish(e)) {
       continue
     }
-    const pid = typeof e.pid === 'number' ? e.pid : undefined
-    const start =
-      typeof e.pidStart === 'string' && e.pidStart !== '' ? e.pidStart : undefined
-    if (pid !== undefined) {
-      if (!pidAlive(pid, start)) {
-        continue
-      }
-    } else if (Date.now() - Date.parse(e.spawnedAt) >= SESSION_SLOT_TTL_MS) {
-      // a pid-less row past the spawn-handoff window is a crashed spawn's
-      // remnant — unproven-dead is not work in flight for an advisory
-      continue
-    }
-    const file = agentPromptPath(dir, e.agentId)
-    let text: string | undefined
-    try {
-      text = file === null ? undefined : readFileSync(file, 'utf8')
-    } catch {
-      // unreadable prompt — nothing to compare
-    }
-    if (text !== undefined && text.trim() !== '') {
-      // only a consumed prompt marks the agent seen — an unreadable one
-      // leaves the worker's session title as the fallback suspect
+    // only a consumed prompt marks the agent seen — an unreadable one
+    // leaves the worker's session title as the fallback suspect
+    const text = storedPromptText(dir, e.agentId)
+    if (text !== undefined) {
       seenAgents.add(e.agentId)
       out.push({ label: `agent ${e.agentId} for ${molStep}`, text })
     }
   }
-  const ours = gitCommonDir(dir, ADVISORY_PROBE_MS)
-  if (ours === null) {
-    return out
-  }
-  let oursReal: string
-  try {
-    oursReal = realpathSync(ours)
-  } catch {
-    oursReal = ours
-  }
-  const real = (p: string): string => {
-    try {
-      return realpathSync(p)
-    } catch {
-      return p
-    }
-  }
-  // one bounded probe per distinct session cwd — a stalled mount must
-  // degrade this advisory, never stall the spawn behind it
-  const probeCache = new Map<string, string | null>()
-  for (const s of discoverSessions(env).sessions) {
-    if (s.name === undefined || s.cwd === undefined) {
-      continue
-    }
-    if (s.agentId !== undefined && seenAgents.has(s.agentId)) {
-      continue // its stored prompt already compared — richer than the title
-    }
-    if (!probeCache.has(s.cwd)) {
-      probeCache.set(s.cwd, gitCommonDir(s.cwd, ADVISORY_PROBE_MS))
-    }
-    const common = probeCache.get(s.cwd) ?? null
-    if (common === null || real(common) !== oursReal) {
-      continue
-    }
-    out.push({
-      label: `session "${s.name}" (${s.kind}, pid ${s.pid})`,
-      text: s.name.replaceAll('-', ' '),
-    })
-  }
-  return out
+  return out.concat(sessionSuspects(dir, env, seenAgents))
 }
 
 /** Per-probe bound on the advisory's `git rev-parse` — one stalled
@@ -997,13 +1024,17 @@ const ADVISORY_PROBE_MS = 2_000
  *  words the worker never receives), then the `--for` bead's
  *  title/description. undefined when nothing readable resolves — an
  *  advisory check never throws on behalf of a spawn that will produce
- *  its own errors. */
+ *  its own errors. `backend` is the resolved connector name — the
+ *  stored prompt applies only under resolvePrompt's backend gate (a
+ *  row registered to another backend respawns there, so its prompt is
+ *  text this spawn never receives). */
 function advisoryPromptText(
   dir: string,
   beads: string,
   molStep: string,
   prompt: string | undefined,
-  promptFile: string | undefined
+  promptFile: string | undefined,
+  backend: string | undefined
 ): string | undefined {
   if (prompt !== undefined) {
     return prompt
@@ -1017,7 +1048,10 @@ function advisoryPromptText(
   }
   try {
     const entry = readAgentRegistry(dir)[molStep]
-    const stored = entry === undefined ? null : agentPromptPath(dir, entry.agentId)
+    const stored =
+      entry !== undefined && backend !== undefined && entry.backend === backend
+        ? agentPromptPath(dir, entry.agentId)
+        : null
     if (stored !== null && existsSync(stored)) {
       return readFileSync(stored, 'utf8')
     }
@@ -1068,12 +1102,28 @@ async function cmdRun(dir: string, env: AgentConnectorEnv, argv: string[]): Prom
   }
   const molStep = forBead ?? `adhoc-${randomBytes(4).toString('hex')}`
   const beads = flag(argv, '--beads-dir') ?? beadsDir()
+  // mirror spawnStepAgent's connector resolution — the advisory's
+  // stored-prompt branch needs resolvePrompt's backend gate. A
+  // resolution failure is the spawn's error to raise; the advisory
+  // just degrades to bead text
+  let connName: string | undefined
+  try {
+    const profileName = flag(argv, '--profile')
+    const profile = profileName === undefined ? undefined : fleetProfileOf(env, profileName)
+    connName = resolveAgentConnector(
+      { dir },
+      { connector: flag(argv, '--connector') ?? profile?.backend },
+      env
+    ).name
+  } catch {
+    connName = undefined
+  }
   // the similarity floor (spec bro-7dila): an ad-hoc spawn has no claim
   // to dedup on, so a live agent/session in this repo whose prompt or
   // title reads near-identical earns a warning — advisory, the spawn
   // still lands. --for gets the same floor on top of the hard guards;
   // its own registry row is excluded — the guards carry that verdict
-  const warnText = advisoryPromptText(dir, beads, molStep, prompt, promptFile)
+  const warnText = advisoryPromptText(dir, beads, molStep, prompt, promptFile, connName)
   if (warnText !== undefined) {
     for (const s of collectDuplicateSuspects(dir, env, { excludeStep: molStep })) {
       if (promptSimilar(warnText, s.text)) {
