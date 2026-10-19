@@ -3,8 +3,8 @@
  * git, their config, their credentials.
  */
 import { spawnSync } from 'node:child_process'
-import { realpathSync } from 'node:fs'
-import { basename, dirname, resolve } from 'node:path'
+import { readdirSync, readFileSync, realpathSync, statSync } from 'node:fs'
+import { basename, dirname, join, resolve } from 'node:path'
 
 /** `git -C` must select the repo on argv alone — an inherited
  *  GIT_DIR/GIT_WORK_TREE/GIT_COMMON_DIR silently retargets the probe at
@@ -99,45 +99,175 @@ export function worktreeGitDir(dir: string): string | null {
   return p === '' ? null : resolve(dir, p)
 }
 
+/** C-style unquote for porcelain paths — git wraps a path carrying
+ *  specials in `"…"` with `\"`, `\\`, the `\a\b\f\n\r\t\v` escapes,
+ *  and `\NNN` octal BYTES for non-ASCII. JSON.parse can't read the
+ *  octal form (its \uXXXX is code units, not bytes), so the octal
+ *  decode is by hand: escapes → bytes → UTF-8, and `f\303\244o`
+ *  comes back `fäo` rather than literal backslashes. */
+export function unquoteGitPath(raw: string): string {
+  const escapes: Record<string, number> = {
+    '"': 0x22,
+    '\\': 0x5c,
+    a: 0x07,
+    b: 0x08,
+    f: 0x0c,
+    n: 0x0a,
+    r: 0x0d,
+    t: 0x09,
+    v: 0x0b,
+  }
+  const inner = raw.slice(1, -1)
+  const bytes: number[] = []
+  for (let i = 0; i < inner.length; i++) {
+    const c = inner[i]!
+    if (c === '\\' && i + 1 < inner.length) {
+      const n = inner[i + 1]!
+      if (n >= '0' && n <= '7') {
+        const oct = /^[0-7]{1,3}/.exec(inner.slice(i + 1))![0]
+        bytes.push(parseInt(oct, 8) & 0xff)
+        i += oct.length
+        continue
+      }
+      bytes.push(escapes[n] ?? n.charCodeAt(0))
+      i += 1
+      continue
+    }
+    for (const b of Buffer.from(c, 'utf8')) {
+      bytes.push(b)
+    }
+  }
+  return Buffer.from(bytes).toString('utf8')
+}
+
 /** The MAIN worktree's root, absolute — linked worktrees share the
  *  repo's common dir, but an anchor that must outlive any one checkout
  *  (a serve's recorded dir, a respawned process's cwd) belongs to the
- *  primary tree. `dirname(common)` is the answer for the ordinary
- *  `<main>/.git` layout — every worktree resolves the same common dir.
- *  When the common dir is not literally named `.git` (separate-git-dir
- *  exotica), `worktree list` reports the main worktree first — git
- *  guarantees the order. null outside a repository. */
+ *  primary tree. From inside the main worktree `own === common` and
+ *  `--show-toplevel` answers directly — the one branch that needs no
+ *  layout assumption at all. From a linked checkout a `.git` FILE
+ *  claiming `gitdir: <common>` is the only link to the real checkout
+ *  when the gitdir was moved (`--separate-git-dir`): git keeps no
+ *  back-pointer, `worktree list` reports the gitdir's parent (named
+ *  `.git`) or the gitdir itself (any other name) — both wrong. The
+ *  marker scan runs before the positional `<main>/.git` shortcut
+ *  because a moved gitdir named `.git` verifies that same guess
+ *  falsely — its parent is no checkout. Linked worktrees' markers name
+ *  `common/worktrees/<n>`, never common itself, so a match is
+ *  unambiguous. `worktree list` stays last resort; a bare first record
+ *  or the common dir itself is not a checkout — null there so callers
+ *  keep their own dir. */
 export function mainWorktreeRoot(dir: string): string | null {
   const common = gitCommonDir(dir)
   if (common === null) {
     return null
   }
+  const real = (p: string): string => {
+    try {
+      return realpathSync(p)
+    } catch {
+      return p
+    }
+  }
+  const own = worktreeGitDir(dir)
+  if (own !== null && real(own) === real(common)) {
+    const top = gitTry(['-C', dir, 'rev-parse', '--path-format=absolute', '--show-toplevel'])
+    if (top.code === 0 && top.out.trim() !== '') {
+      return top.out.trim()
+    }
+  }
+  const marked = checkoutByMarker(dirname(common), common, real, 3)
+  if (marked !== null) {
+    return marked
+  }
   if (basename(common) === '.git') {
-    return dirname(common)
+    const candidate = dirname(common)
+    const theirs = worktreeGitDir(candidate)
+    if (theirs !== null && real(theirs) === real(common)) {
+      return candidate
+    }
+    // an external gitdir literally named `.git` — its parent is not a
+    // worktree; the fallbacks below answer what git itself reports
   }
   const z = gitTry(['-C', dir, 'worktree', 'list', '--porcelain', '-z'])
   if (z.code === 0 && z.out.startsWith('worktree ')) {
-    const end = z.out.indexOf('\0')
-    if (end !== -1) {
-      return z.out.slice('worktree '.length, end)
+    // -z terminates every FIELD with NUL — the record ends with \0\0
+    const recordEnd = z.out.indexOf('\0\0')
+    const fields = z.out.slice(0, recordEnd === -1 ? undefined : recordEnd).split('\0')
+    if (fields.includes('bare')) {
+      return null
     }
+    const first = fields[0]!.slice('worktree '.length)
+    // a moved gitdir reports itself — git storage is no anchor either
+    return real(first) === real(common) ? null : first
   }
-  // no -z support (pre-2.36 git): the same first entry, possibly
+  // no -z support (pre-2.36 git): the same first record, possibly
   // C-quoted when the path carries specials
   const p = gitTry(['-C', dir, 'worktree', 'list', '--porcelain'])
-  const m = p.code === 0 ? /^worktree (.+)$/m.exec(p.out) : null
-  if (m === null) {
+  const firstRecord = p.code === 0 ? (p.out.split(/\r?\n\r?\n/, 1)[0] ?? '') : ''
+  const m = /^worktree (.+)$/m.exec(firstRecord)
+  if (m === null || firstRecord.split(/\r?\n/).includes('bare')) {
     return null
   }
   const raw = m[1]!.trim()
-  if (raw.startsWith('"') && raw.endsWith('"')) {
+  const answer = raw.startsWith('"') && raw.endsWith('"') ? unquoteGitPath(raw) : raw
+  return real(answer) === real(common) ? null : answer
+}
+
+/** Depth-bounded search under `root` for a directory whose `.git` FILE
+ *  claims `gitdir: <common>` — the marker a moved gitdir's real
+ *  checkout carries. Directories holding their own `.git` entry (some
+ *  checkout — the answer never nests inside another worktree), the
+ *  common dir itself, and dependency trees are pruned. null when
+ *  nothing claims the gitdir. */
+function checkoutByMarker(
+  root: string,
+  common: string,
+  real: (p: string) => string,
+  depth: number
+): string | null {
+  if (depth < 0) {
+    return null
+  }
+  let names: string[]
+  try {
+    names = readdirSync(root)
+  } catch {
+    return null
+  }
+  const descend: string[] = []
+  for (const name of names) {
+    if (name === '.git' || name === 'node_modules') {
+      continue
+    }
+    const sub = join(root, name)
     try {
-      return JSON.parse(raw) as string
+      if (!statSync(sub).isDirectory() || real(sub) === real(common)) {
+        continue
+      }
+      const marker = join(sub, '.git')
+      try {
+        if (!statSync(marker).isFile()) {
+          continue // .git dir — sub is a checkout; prune
+        }
+        const m = /^gitdir:\s*(.+)$/m.exec(readFileSync(marker, 'utf8'))
+        if (m !== null && real(resolve(sub, m[1].trim())) === real(common)) {
+          return sub
+        }
+      } catch {
+        descend.push(sub) // no readable .git — a checkout may nest below
+      }
     } catch {
-      return raw.slice(1, -1)
+      // unreadable entry — skip
     }
   }
-  return raw
+  for (const sub of descend) {
+    const hit = checkoutByMarker(sub, common, real, depth - 1)
+    if (hit !== null) {
+      return hit
+    }
+  }
+  return null
 }
 
 /** The drift comparison ref — landed spec vs landed code, so a feature

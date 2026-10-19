@@ -22,6 +22,7 @@ export {
   gitIsShallow,
   gitUpstreamBehind,
   mainWorktreeRoot,
+  unquoteGitPath,
   worktreeGitDir,
 } from './git.ts'
 export type { GitLogPathRecord, GitStamp, GitLogStamp } from './git.ts'

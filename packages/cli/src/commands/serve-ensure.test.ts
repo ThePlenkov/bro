@@ -3,7 +3,13 @@ import assert from 'node:assert/strict'
 import { realpathSync } from 'node:fs'
 import { join } from 'node:path'
 import { git, initRepo, insideAsync } from './testrepo.ts'
-import { ensureServe, watchdogVerdict, writeServeState } from './serve.ts'
+import {
+  ensureServe,
+  SERVE_TOKEN_ENV,
+  serveSessionToken,
+  watchdogVerdict,
+  writeServeState,
+} from './serve.ts'
 
 const PORT = 44928
 
@@ -191,25 +197,45 @@ describe('bro serve ensure', () => {
       })
     })())
 
-  test('a pid-matching serve on a live other dir is still ours — token, no respawn', () =>
+  test('a pid-matching serve on a live other dir is ours but off-anchor — healed', () =>
     (async () => {
       const { root, main } = initRepo('ensure-')
       await insideAsync(main, root, async () => {
         // pre-fix residue: the recorded dir is a linked worktree that
-        // still exists — the serve is functional, so the hand-out must
-        // not refuse it
+        // still exists — functional, but parked on a doomed anchor; the
+        // hand-out heals it onto the main root now
+        const newPid = process.pid + 10_002
         writeServeState(main, {
           pid: process.pid,
           url: `http://127.0.0.1:${PORT}`,
           dir: root,
           startedAt: new Date().toISOString(),
-          token: 'tok-live',
+          token: 'tok-old',
         })
+        const stopped: number[] = []
+        let probes = 0
         const token = await ensureServe(main, PORT, {
-          probe: async () => ({ ok: true, dir: root, pid: process.pid }),
-          spawnServer: () => assert.fail('must not respawn a working serve'),
+          probe: async () => {
+            probes += 1
+            if (probes === 1) return { ok: true, dir: root, pid: process.pid }
+            return { ok: true, dir: realpathSync(main), pid: newPid }
+          },
+          stopServe: async (pid) => {
+            stopped.push(pid)
+          },
+          spawnServer: () => {
+            writeServeState(main, {
+              pid: newPid,
+              url: `http://127.0.0.1:${PORT}`,
+              dir: realpathSync(main),
+              startedAt: new Date().toISOString(),
+              token: 'tok-new',
+            })
+          },
+          pollMs: 1,
         })
-        assert.equal(token, 'tok-live')
+        assert.equal(token, 'tok-new')
+        assert.deepEqual(stopped, [process.pid])
       })
     })())
 
@@ -242,5 +268,19 @@ describe('watchdogVerdict', () => {
   test('a live recorded pid keeps watching; a dead one respawns', () => {
     assert.equal(watchdogVerdict(record, 7, () => true), 'alive')
     assert.equal(watchdogVerdict(record, 7, () => false), 'respawn')
+  })
+})
+
+describe('serveSessionToken', () => {
+  test('a watchdog respawn adopts the inherited token; a fresh serve mints one', () => {
+    // the crash-recovery contract: the watchdog hands the dead
+    // generation's token through the child env so clients holding it
+    // never see a 401 window (the apiKeyHelper re-ensures only on
+    // auth refresh)
+    assert.equal(serveSessionToken({ [SERVE_TOKEN_ENV]: 'tok-inherited' }), 'tok-inherited')
+    assert.equal(serveSessionToken({ [SERVE_TOKEN_ENV]: '' }).length, 64)
+    const fresh = serveSessionToken({})
+    assert.match(fresh, /^[0-9a-f]{64}$/)
+    assert.notEqual(fresh, serveSessionToken({}))
   })
 })

@@ -28,12 +28,22 @@ a 4th serve generation. Two gaps in the serve lifecycle:
 ### Main-worktree anchor
 
 `mainWorktreeRoot(dir)` in `@broject/core` (git.ts): the primary
-checkout's root. `dirname(gitCommonDir(dir))` covers every ordinary
-`<main>/.git` layout — linked worktrees resolve the same common dir, so
-the answer is identical from any checkout. When the common dir is not
-literally named `.git` (separate-git-dir exotica), the first
-`git worktree list --porcelain -z` entry is the main worktree — git
-guarantees the order. `null` outside a repository.
+checkout's root. From inside the main worktree its own gitdir IS the
+common dir and `--show-toplevel` answers directly — the one branch
+needing no layout assumption. From a linked checkout a `.git` FILE
+claiming `gitdir: <common>` is the only link to the real checkout when
+the gitdir was moved (`--separate-git-dir`): git keeps no
+back-pointer, and `worktree list` reports the gitdir's parent (named
+`.git`) or the gitdir itself (any other name) — both wrong. The marker
+scan walks the gitdir parent's tree depth-bounded, pruning other
+checkouts and dependency dirs, and runs *before* the positional
+`<main>/.git` answer because a moved gitdir named `.git` verifies that
+guess falsely — its parent is no checkout. A real marker beats the
+positional guess; linked worktrees' markers name
+`common/worktrees/<n>`, never common itself, so a match is
+unambiguous. `worktree list` stays last resort; a bare first record or
+the common dir itself is not a checkout — `null` there so the caller
+keeps its own dir. `null` outside a repository too.
 
 `runServeCommand` chdirs to the main root before anything reads cwd —
 `dir`, the recorded serve.json `dir`, the health answer, the conductor's
@@ -51,13 +61,14 @@ serve — the file could only be written by a starter that resolved this
 repo's common dir. Given pid-match:
 
 - `h.dir === repo` → healthy, return the token (unchanged).
-- `h.dir` names a path that no longer exists → the anchor is dead
-  (deleted worktree, moved checkout): SIGTERM the recorded pid, wait
-  out its grace (SIGKILL if wedged), then fall through to the normal
-  spawn + poll path. The respawned serve anchors to the main root.
-- `h.dir` differs but still exists → a pre-fix serve anchored to a
-  live worktree is functional; accept it (token). Its respawn lands on
-  the main root whenever the generation next turns over.
+- `h.dir` differs at all → the anchor is wrong (deleted worktree, a
+  pre-fix serve parked on a live linked checkout): SIGTERM the
+  recorded pid, wait out its grace (SIGKILL if wedged), then fall
+  through to the normal spawn + poll path. The respawned serve
+  anchors to the main root — a pid-matching serve on a doomed or
+  foreign-looking path is the latent version of this bug, so the
+  hand-out heals it immediately rather than waiting for the worktree
+  to disappear.
 
 pid-mismatch keeps the existing refusals: foreign `dir` →
 "already serves", same-dir foreign pid → "not the recorded serve",
@@ -81,10 +92,20 @@ polls `readStateFile` every ~5s:
   the anchor, then settle ~15s; the serve.json.lock serializes any
   racing `ensure`-spawned starter — the loser refuses harmlessly.
   Persistent bind failure (squatted port) retries on the same cadence —
-  cheap, self-healing when the port frees.
+  cheap, self-healing when the port frees. The dead generation's token
+  rides the child's env (`BRO_SERVE_TOKEN`, adopted over a fresh mint)
+  — env, not argv, because /proc/<pid>/environ is same-UID like the
+  0600 serve.json while argv is world-readable. Clients holding the
+  pre-crash token keep working; a fresh token would reopen the outage
+  as a 401 window until the next auth refresh.
 
 Spawn failure (e.g. the anchor itself is gone) is caught — the leg must
-not die on a transient; the next tick reads the same dead record.
+not die on a transient; the next tick reads the same dead record. The
+same holds for arming: an openSync/spawn failure or an async 'error'
+after the state write warns instead of crashing the live serve. Both
+watchdog spawns name the entry script resolved to an absolute path at
+load — a relative argv[1] under the anchor cwd would miss the entry
+and the respawn would die silently.
 
 Exit paths (`SIGINT`/`SIGTERM` → server close → `clearServeState`) leave
 no window where pid-dead + record-present is the steady state: the file
@@ -119,5 +140,6 @@ showed.
 - An ensure facing a recorded serve whose `dir` is gone SIGTERMs it and
   returns the next generation's token — no "already serves" refusal.
 - A killed serve is re-listened on its bound port within seconds
-  without any client call; a cleanly stopped serve leaves no watchdog
-  behind.
+  without any client call, **with the same session token** — a request
+  bearing the pre-crash credential authenticates; a cleanly stopped
+  serve leaves no watchdog behind.
