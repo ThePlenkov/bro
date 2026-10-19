@@ -921,10 +921,15 @@ describe('serve handler over a real socket', () => {
     // a fake registry over the same surface AcpTerminals exposes —
     // `live` lets the test push output/exit like a real child would
     let live: { data(chunk: string): void; exit(status: unknown): void } | undefined
+    // past the backlog cap as one JSON frame — a follower that reads
+    // must still get it all, sliced through the drain loop
+    const BIG = `${'x'.repeat(1_500_000)}\r\nend\n`
     const fakeReg = {
       snapshot: (id: string) => {
         if (id === 'term-done')
           return { output: 'done\n', truncated: false, exitStatus: { exitCode: 0, signal: null } }
+        if (id === 'term-big')
+          return { output: BIG, truncated: false, exitStatus: { exitCode: 7, signal: null } }
         if (id === 'term-gap')
           // exited but not closed — the pipe still owes its last bytes
           return { output: 'head\n', truncated: false, exitStatus: { exitCode: 0, signal: null } }
@@ -939,6 +944,12 @@ describe('serve handler over a real socket', () => {
         if (id === 'term-done')
           return {
             snapshot: { output: 'done\n', truncated: false, exitStatus: { exitCode: 0, signal: null } },
+            completed: true,
+            stop: () => {},
+          }
+        if (id === 'term-big')
+          return {
+            snapshot: { output: BIG, truncated: false, exitStatus: { exitCode: 7, signal: null } },
             completed: true,
             stop: () => {},
           }
@@ -1085,6 +1096,26 @@ describe('serve handler over a real socket', () => {
       const text = await done.text()
       assert.match(text, /data: "done\\n"/)
       assert.match(text, /event: exit\ndata: \{"exitCode":0/)
+
+      // a snapshot bigger than the backlog cap still streams whole —
+      // sliced frames pace through drain instead of dropping the reader
+      const big = await fetch(`${base}/api/v1/terminals/term-big/output?follow`, {
+        headers: auth,
+      })
+      assert.equal(big.status, 200)
+      const bigText = await big.text()
+      let rebuilt = ''
+      let bigExit = ''
+      for (const frame of bigText.split('\n\n')) {
+        if (frame.startsWith('event: exit')) {
+          bigExit = frame
+        } else if (!frame.startsWith('event:')) {
+          const dm = /^data: (.*)$/m.exec(frame)
+          if (dm !== null) rebuilt += JSON.parse(dm[1]!) as string
+        }
+      }
+      assert.equal(rebuilt, BIG, 'sliced data frames reassemble byte-exact')
+      assert.match(bigExit, /exitCode":7/)
 
       // a snapshot with exitStatus but pending 'close' keeps streaming —
       // ending on exitStatus alone would drop bytes still on the pipe

@@ -1279,11 +1279,15 @@ async function routeAgentEvents(
   return routeAgentEventsImpl(req, res, url, deps, token, statePathHint, m)
 }
 
-/** A follower's socket-queue ceiling — a reader this far behind is
+/** A follower's queued-bytes ceiling — a reader this far behind is
  *  dropped rather than letting one slow client grow `bro serve`'s
  *  buffered output without bound. The reconnect lands on a fresh
  *  snapshot, so a dropped follower loses nothing but a retry. */
 const SSE_FOLLOW_BACKLOG = 1_048_576
+
+/** Output slices this size pace a big snapshot through the drain loop —
+ *  one JSON frame can never single-handedly blow the backlog cap. */
+const SSE_SNAPSHOT_SLICE = 65_536
 
 /** `GET /api/v1/terminals/<id>/output` — the conductor's acp terminal
  *  registry (bro-eua0d): the agent's shells spawn inside THIS process,
@@ -1357,17 +1361,65 @@ async function routeTerminalOutput(
   }
   let handle: TerminalFollow | undefined
   const gone = (): boolean => res.writableEnded || res.destroyed
-  const writeFrame = (frame: string): void => {
-    if (gone()) {
-      return
+  // Outbound frames park in `queue`, not the socket's own buffer — when
+  // `res.write` back-pressures, the tail waits for 'drain' instead of
+  // inflating res internals. A snapshot then streams at the reader's
+  // pace; only a genuinely stuck follower (queue past the cap) drops.
+  const queue: string[] = []
+  let queued = 0
+  let waitingDrain = false
+  let endAfterQueue = false
+  const drop = (): void => {
+    queue.length = 0
+    queued = 0
+    handle?.stop()
+    res.end()
+  }
+  const pump = (): void => {
+    while (queue.length > 0 && !gone()) {
+      // write() never refuses the frame — `false` is advisory ("over
+      // high-water"), so the head is off the queue either way; on false
+      // we just stop feeding it more until 'drain'
+      const frame = queue.shift()!
+      queued -= Buffer.byteLength(frame)
+      if (!res.write(frame)) {
+        if (!waitingDrain) {
+          waitingDrain = true
+          res.once('drain', () => {
+            waitingDrain = false
+            pump()
+          })
+        }
+        return
+      }
     }
-    res.write(frame)
-    if (res.writableLength > SSE_FOLLOW_BACKLOG) {
-      handle?.stop()
+    if (queue.length === 0 && endAfterQueue && !gone()) {
       res.end()
     }
   }
-  const sse = (chunk: string): void => writeFrame(`data: ${JSON.stringify(chunk)}\n\n`)
+  const enqueue = (frame: string): void => {
+    if (gone()) {
+      return
+    }
+    queued += Buffer.byteLength(frame)
+    queue.push(frame)
+    if (queued > SSE_FOLLOW_BACKLOG) {
+      drop()
+      return
+    }
+    pump()
+  }
+  const finish = (): void => {
+    endAfterQueue = true
+    if (queue.length === 0 && !gone()) {
+      res.end()
+    }
+  }
+  const sse = (chunk: string): void => {
+    for (let i = 0; i < chunk.length; i += SSE_SNAPSHOT_SLICE) {
+      enqueue(`data: ${JSON.stringify(chunk.slice(i, i + SSE_SNAPSHOT_SLICE))}\n\n`)
+    }
+  }
   // headers before follow() — a registry that fires `exit` at subscribe
   // time must never res.end() ahead of them, and the snapshot probe
   // above keeps the unknown-id 404 reachable now that writeHead is first
@@ -1380,10 +1432,8 @@ async function routeTerminalOutput(
     handle = reg.follow(id, {
       data: sse,
       exit: (status) => {
-        writeFrame(`event: exit\ndata: ${JSON.stringify(status)}\n\n`)
-        if (!gone()) {
-          res.end()
-        }
+        enqueue(`event: exit\ndata: ${JSON.stringify(status)}\n\n`)
+        finish()
       },
     })
   } catch (err) {
@@ -1395,25 +1445,23 @@ async function routeTerminalOutput(
     }
     // a registry fault is not an empty terminal — answer a verdict the
     // client can act on instead of a silent 200 it would retry forever
-    writeFrame(
+    enqueue(
       `event: error\ndata: ${JSON.stringify({ error: err instanceof Error ? err.message : String(err) })}\n\n`
     )
-    res.end()
+    finish()
     return true
   }
   // `truncated` rides ahead of the output — a follower that starts
   // mid-buffer must know bytes are missing, exactly like plain GET
-  writeFrame(`event: meta\ndata: ${JSON.stringify({ truncated: handle.snapshot.truncated })}\n\n`)
+  enqueue(`event: meta\ndata: ${JSON.stringify({ truncated: handle.snapshot.truncated })}\n\n`)
   sse(handle.snapshot.output)
   if (handle.completed) {
     // already-final terminal — no taps attached, the snapshot carries
     // the verdict. exitStatus alone can't gate this: it lands at the
     // child's 'exit' while 'close' still owes the last piped bytes, and
     // ending here would drop them plus leak the registered listener
-    writeFrame(`event: exit\ndata: ${JSON.stringify(handle.snapshot.exitStatus)}\n\n`)
-    if (!gone()) {
-      res.end()
-    }
+    enqueue(`event: exit\ndata: ${JSON.stringify(handle.snapshot.exitStatus)}\n\n`)
+    finish()
     return true
   }
   res.on('close', () => handle?.stop())
