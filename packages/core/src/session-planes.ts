@@ -63,6 +63,9 @@ export interface DiscoveredSession {
   /** The plane's name for the session (a lock-name, a socket id) when
    *  the state plane carries one. */
   name?: string
+  /** The session's working directory when the plane can read it —
+   *  a same-repo similarity/admission check scopes by it. */
+  cwd?: string
   /** The plane's own worker classification — the same predicate
    *  countWorkers applies. False is "live, but not a worker" (an
    *  interactive session), not "unknown". */

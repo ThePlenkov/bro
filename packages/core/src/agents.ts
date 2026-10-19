@@ -197,6 +197,11 @@ export type SpawnWorker =
 export interface SpawnSpec {
   /** Bead id the agent claims — the stable dedup/dedup-respawn key. */
   molStep: string
+  /** `--for <bead>` semantics (spec bro-7dila): the id is promised to be
+   *  a real bead — a probe miss fails the claim loud instead of taking
+   *  the `adhoc-*` phantom shortcut, so a mistyped id never spawns
+   *  unclaimed work. Unset on minted adhoc spawns and `up` respawns. */
+  claimRequired?: boolean
   /** Worktree path the agent runs in. */
   repoRoot: string
   /** Resolved shared beads store dir — pin it into bd via BEADS_DIR. */

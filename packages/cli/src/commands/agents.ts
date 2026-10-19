@@ -51,13 +51,16 @@ import {
   openSync,
   readFileSync,
   readSync,
+  realpathSync,
   statSync,
 } from 'node:fs'
 import { basename } from 'node:path'
 import { randomBytes } from 'node:crypto'
 import {
   countSessionReservations,
+  gitCommonDir,
   readAgentRegistry,
+  SESSION_SLOT_TTL_MS,
   removeAgentRegistryEntries,
   routeStepClass,
   sessionPlanes,
@@ -82,6 +85,7 @@ import {
   fleetOccupancyFor,
   fleetProfileOf,
   loadAgentEnv,
+  pidAlive,
   resolveAgentConnector,
   resolveSpawnProvider,
   type AgentConnectorEnv,
@@ -101,10 +105,15 @@ function usage(): never {
                 [--provider <name>] [--model <m>] [--profile <name>] [--class <name>] [--auto-approve]
   bro agents run [<prompt>…] [--prompt <text>] [--prompt-file <file>] [--connector <name>]
                 [--worktree <path>] [--provider <name>] [--model <m>] [--profile <name>]
-                [--class <name>] [--auto-approve] [--beads-dir <dir>]
+                [--class <name>] [--auto-approve] [--beads-dir <dir>] [--for <bead>]
                 ad-hoc spawn — mints a phantom adhoc-<hex> step (no bead,
                 no claim) and sends the prompt through the same
-                registry/worktree/quota path as up <step>
+                registry/worktree/quota path as up <step>. --for binds the
+                spawn to the bead's claim instead — a live agent or a
+                foreign claim refuses; with no prompt the bead's own text
+                supplies it. Either way a live agent/session in this repo
+                with a near-identical prompt earns a warning (advisory —
+                the spawn still lands)
   bro agents down [<id|step>] [--connector <name>]
   bro agents log <id|step> [--follow] [--lines <N>] [--connector <name>]
   bro agents prune [--connector <name>] [--older-than <N>d] [--json]
@@ -571,6 +580,10 @@ export interface StepSpawnRequest {
   promptFile?: string
   prompt?: string
   beadsDir?: string
+  /** `run --for` — the molStep is promised a real bead: the claim guards
+   *  never take the `adhoc-*` phantom shortcut on it, so a missing or
+   *  mistyped id fails instead of spawning unclaimed (spec bro-7dila). */
+  claimRequired?: boolean
   /** Extra env for the spawned process — identity pins (BEADS_DIR,
    *  BRO_BEAD_ID, BRO_AGENT_ID, BRO_AGENT_PROVIDER/MODEL) still win,
    *  so a caller can't redirect the claim store, re-badge the worker,
@@ -685,6 +698,7 @@ export function spawnStepAgent(
       return conn
         .spawn({
           molStep: req.molStep,
+          claimRequired: req.claimRequired,
           repoRoot,
           beadsDir: beads,
           prompt,
@@ -841,11 +855,267 @@ function reportSpawn(info: AgentInfo, molStep: string): void {
   }
 }
 
+// --- dedup guard (spec bro-7dila) ------------------------------------------------
+
+/** Lowercase alphanumeric word tokens — similarity compares word sets,
+ *  not text: a session title slug `foo-bar-baz` and a prompt naming
+ *  "foo bar baz" tokenize identically. */
+export function promptTokens(text: string): Set<string> {
+  return new Set(text.toLowerCase().split(/[^a-z0-9]+/).filter((t) => t !== ''))
+}
+
+/** Overlap coefficient `|A∩B| / min(|A|,|B|)` — "near-identical" needs
+ *  ≥ 0.6 AND ≥ 3 shared tokens; the shared floor keeps one-word prompts
+ *  from warning on everything (spec bro-7dila). */
+export function promptSimilar(a: string, b: string): boolean {
+  const ta = promptTokens(a)
+  const tb = promptTokens(b)
+  if (ta.size === 0 || tb.size === 0) {
+    return false
+  }
+  const [small, big] = ta.size <= tb.size ? [ta, tb] : [tb, ta]
+  let shared = 0
+  for (const t of small) {
+    if (big.has(t)) {
+      shared++
+    }
+  }
+  return shared >= 3 && shared / small.size >= 0.6
+}
+
+/** Advisory liveness — a row counts as work in flight when its pid is
+ *  alive, or when it never got one but sits inside the spawn-handoff
+ *  window (mid-spawn; the pid lands within seconds). Terminal rows and
+ *  pid-less crash remnants past the window are not work in flight. */
+function registryEntryLiveish(e: {
+  pid?: number
+  pidStart?: string
+  spawnedAt: string
+  exitStatus?: number
+  stopped?: boolean
+}): boolean {
+  if (typeof e.exitStatus === 'number' || e.stopped === true) {
+    return false
+  }
+  if (typeof e.pid === 'number') {
+    const start =
+      typeof e.pidStart === 'string' && e.pidStart !== '' ? e.pidStart : undefined
+    return pidAlive(e.pid, start)
+  }
+  return Date.now() - Date.parse(e.spawnedAt) < SESSION_SLOT_TTL_MS
+}
+
+/** The agent's stored prompt text — undefined when absent/unreadable. */
+function storedPromptText(dir: string, agentId: string): string | undefined {
+  const file = agentPromptPath(dir, agentId)
+  if (file === null) {
+    return undefined
+  }
+  try {
+    const text = readFileSync(file, 'utf8')
+    return text.trim() === '' ? undefined : text
+  } catch {
+    return undefined
+  }
+}
+
+/** realpath where possible — a dangling path compares literally. */
+function realOrSelf(p: string): string {
+  try {
+    return realpathSync(p)
+  } catch {
+    return p
+  }
+}
+
+/** Session-plane suspects — live rows whose cwd resolves to the same
+ *  git common dir. `seenAgents` marks workers whose stored prompt
+ *  already compared (richer than the title) plus the excluded --for
+ *  row. One bounded probe per distinct cwd: a stalled mount degrades
+ *  this advisory, never hangs the spawn behind it. */
+function sessionSuspects(
+  dir: string,
+  env: AgentConnectorEnv,
+  seenAgents: Set<string>
+): { label: string; text: string }[] {
+  const out: { label: string; text: string }[] = []
+  const ours = gitCommonDir(dir, ADVISORY_PROBE_MS)
+  if (ours === null) {
+    return out
+  }
+  const oursReal = realOrSelf(ours)
+  const probeCache = new Map<string, string | null>()
+  const commonOf = (cwd: string): string | null => {
+    if (!probeCache.has(cwd)) {
+      probeCache.set(cwd, gitCommonDir(cwd, ADVISORY_PROBE_MS))
+    }
+    return probeCache.get(cwd) ?? null
+  }
+  for (const s of discoverSessions(env).sessions) {
+    if (s.name === undefined || s.cwd === undefined) {
+      continue
+    }
+    if (s.agentId !== undefined && seenAgents.has(s.agentId)) {
+      continue // its stored prompt already compared — richer than the title
+    }
+    const common = commonOf(s.cwd)
+    if (common === null || realOrSelf(common) !== oursReal) {
+      continue
+    }
+    out.push({
+      label: `session "${s.name}" (${s.kind}, pid ${s.pid})`,
+      text: s.name.replaceAll('-', ' '),
+    })
+  }
+  return out
+}
+
+/** Work already live in this repo that a new spawn could duplicate —
+ *  `{label, text}` pairs the caller's prompt is compared against:
+ *  non-terminal registry agents contribute their stored prompt; live
+ *  sessions the planes see contribute their name when their cwd
+ *  resolves to the same git common dir. A session already counted via
+ *  its registry prompt (agentId known here) is skipped — one suspect
+ *  per worker. Advisory by contract: unreadable/degraded state
+ *  contributes nothing, never a thrown failure. */
+export function collectDuplicateSuspects(
+  dir: string,
+  env: AgentConnectorEnv,
+  opts: { excludeStep?: string } = {}
+): { label: string; text: string }[] {
+  const out: { label: string; text: string }[] = []
+  const seenAgents = new Set<string>()
+  let registry: ReturnType<typeof readAgentRegistry> = {}
+  try {
+    registry = readAgentRegistry(dir)
+  } catch {
+    // a corrupt registry throws — advisory loses the agent pool, not the spawn
+  }
+  for (const [molStep, e] of Object.entries(registry)) {
+    // the --for target's own row is the same work item, not a duplicate —
+    // the spawn guards carry its real verdict (refuse/respawn). Marked
+    // seen so the worker's session row can't echo it as a suspect either
+    if (molStep === opts.excludeStep) {
+      seenAgents.add(e.agentId)
+      continue
+    }
+    if (!registryEntryLiveish(e)) {
+      continue
+    }
+    // only a consumed prompt marks the agent seen — an unreadable one
+    // leaves the worker's session title as the fallback suspect
+    const text = storedPromptText(dir, e.agentId)
+    if (text !== undefined) {
+      seenAgents.add(e.agentId)
+      out.push({ label: `agent ${e.agentId} for ${molStep}`, text })
+    }
+  }
+  return out.concat(sessionSuspects(dir, env, seenAgents))
+}
+
+/** Per-probe bound on the advisory's `git rev-parse` — one stalled
+ *  mounted checkout must cost the spawn a couple of seconds, not a hang. */
+const ADVISORY_PROBE_MS = 2_000
+
+/** The text the similarity floor compares — the effective prompt,
+ *  resolved in the same precedence the spawn uses: the literal prompt,
+ *  the prompt file's content, a dead registry agent's stored prompt
+ *  (respawn reuses it — comparing the bead text instead would check
+ *  words the worker never receives), then the `--for` bead's
+ *  title/description. undefined when nothing readable resolves — an
+ *  advisory check never throws on behalf of a spawn that will produce
+ *  its own errors. `backend` is the resolved connector name — the
+ *  stored prompt applies only under resolvePrompt's backend gate (a
+ *  row registered to another backend respawns there, so its prompt is
+ *  text this spawn never receives). */
+function advisoryPromptText(
+  dir: string,
+  beads: string,
+  molStep: string,
+  prompt: string | undefined,
+  promptFile: string | undefined,
+  backend: string | undefined
+): string | undefined {
+  if (prompt !== undefined) {
+    return prompt
+  }
+  if (promptFile !== undefined) {
+    try {
+      return readFileSync(promptFile, 'utf8')
+    } catch {
+      return undefined
+    }
+  }
+  try {
+    const entry = readAgentRegistry(dir)[molStep]
+    const stored =
+      entry !== undefined && backend !== undefined && entry.backend === backend
+        ? agentPromptPath(dir, entry.agentId)
+        : null
+    if (stored !== null && existsSync(stored)) {
+      return readFileSync(stored, 'utf8')
+    }
+  } catch {
+    // advisory — fall through to the bead text
+  }
+  try {
+    const row = taskStoreAt(beads).get(molStep)
+    const text = `# ${row?.title ?? ''}\n\n${row?.description ?? ''}`.trim()
+    return text === '#' ? undefined : text
+  } catch {
+    return undefined
+  }
+}
+
+/** The similarity floor: resolve the effective prompt, compare it
+ *  against same-repo live work, warn on stderr per near-identical
+ *  suspect. Advisory by contract — every leg degrades, nothing here
+ *  throws into the spawn path. */
+function adviseDuplicates(
+  dir: string,
+  env: AgentConnectorEnv,
+  beads: string,
+  molStep: string,
+  prompt: string | undefined,
+  promptFile: string | undefined,
+  argv: string[]
+): void {
+  // mirror spawnStepAgent's connector resolution — the stored-prompt
+  // branch needs resolvePrompt's backend gate; a resolution failure is
+  // the spawn's error to raise, the advisory just degrades
+  let connName: string | undefined
+  try {
+    const profileName = flag(argv, '--profile')
+    const profile = profileName === undefined ? undefined : fleetProfileOf(env, profileName)
+    connName = resolveAgentConnector(
+      { dir },
+      { connector: flag(argv, '--connector') ?? profile?.backend },
+      env
+    ).name
+  } catch {
+    connName = undefined
+  }
+  const warnText = advisoryPromptText(dir, beads, molStep, prompt, promptFile, connName)
+  if (warnText === undefined) {
+    return
+  }
+  // --for's own registry row is excluded — the guards carry that verdict
+  for (const s of collectDuplicateSuspects(dir, env, { excludeStep: molStep })) {
+    if (promptSimilar(warnText, s.text)) {
+      console.error(
+        `warning: possible duplicate — ${s.label} reads near-identical to this prompt`
+      )
+    }
+  }
+}
+
 /** `bro agents run <prompt>` — the ad-hoc front door (spec bro-fqen0).
  *  Same spawn machinery as `up <step>`; the only difference is the
  *  minted `adhoc-<hex>` step — a phantom id, never a bead: no claim,
  *  no `bd ready` litter, nothing to close. The registry row still
- *  answers status/log/down under the minted id. */
+ *  answers status/log/down under the minted id. `--for <bead>` binds
+ *  the spawn to the bead's claim instead (spec bro-7dila) — the shared
+ *  claim/registry guards then dedup it like `up`. */
 async function cmdRun(dir: string, env: AgentConnectorEnv, argv: string[]): Promise<void> {
   const pos = positionals(
     argv,
@@ -859,6 +1129,7 @@ async function cmdRun(dir: string, env: AgentConnectorEnv, argv: string[]): Prom
       '--model',
       '--profile',
       '--class',
+      '--for',
     ])
   )
   const promptFlag = flag(argv, '--prompt')
@@ -867,10 +1138,17 @@ async function cmdRun(dir: string, env: AgentConnectorEnv, argv: string[]): Prom
   }
   const prompt = promptFlag ?? (pos.length > 0 ? pos.join(' ') : undefined)
   const promptFile = flag(argv, '--prompt-file')
-  if (prompt === undefined && promptFile === undefined) {
-    die('run requires a prompt — positional text, --prompt <text>, or --prompt-file <file>')
+  const forBead = flag(argv, '--for')
+  if (prompt === undefined && promptFile === undefined && forBead === undefined) {
+    die('run requires a prompt — positional text, --prompt <text>, or --prompt-file <file> (or --for <bead>)')
   }
-  const molStep = `adhoc-${randomBytes(4).toString('hex')}`
+  const molStep = forBead ?? `adhoc-${randomBytes(4).toString('hex')}`
+  const beads = flag(argv, '--beads-dir') ?? beadsDir()
+  // the similarity floor (spec bro-7dila): an ad-hoc spawn has no claim
+  // to dedup on, so a live agent/session in this repo whose prompt or
+  // title reads near-identical earns a warning — advisory, the spawn
+  // still lands
+  adviseDuplicates(dir, env, beads, molStep, prompt, promptFile, argv)
   let info: AgentInfo
   try {
     info = await spawnStepAgent(dir, env, {
@@ -879,7 +1157,10 @@ async function cmdRun(dir: string, env: AgentConnectorEnv, argv: string[]): Prom
       worktree: flag(argv, '--worktree'),
       prompt,
       promptFile,
-      beadsDir: flag(argv, '--beads-dir'),
+      beadsDir: beads,
+      // --for promised a real bead — a probe miss must fail the claim,
+      // never slip into the adhoc phantom namespace on a mistyped id
+      claimRequired: forBead !== undefined,
       provider: flag(argv, '--provider'),
       model: flag(argv, '--model'),
       profile: flag(argv, '--profile'),
