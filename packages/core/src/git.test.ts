@@ -10,6 +10,8 @@ import {
   gitLogPathRecords,
   gitLogStamp,
   gitUpstreamBehind,
+  mainWorktreeRoot,
+  unquoteGitPath,
 } from './git.ts'
 import { scrubEnv, testGit } from './testkit.ts'
 
@@ -349,5 +351,131 @@ describe('gitUpstreamBehind', () => {
       git(dir, ['checkout', '-q', '--detach', 'HEAD'])
       assert.equal(gitUpstreamBehind(dir), null)
     })
+  })
+})
+
+describe('mainWorktreeRoot', () => {
+  test('the main checkout resolves to itself, a subdirectory too', () => {
+    withRepo((dir) => {
+      assert.equal(mainWorktreeRoot(dir), dir)
+      mkdirSync(join(dir, 'deep', 'nest'), { recursive: true })
+      assert.equal(mainWorktreeRoot(join(dir, 'deep', 'nest')), dir)
+    })
+  })
+
+  test('a linked worktree resolves to the main checkout, not itself', () => {
+    withRepo((dir) => {
+      const linked = mkdtempSync(join(tmpdir(), 'bro-git-linked-'))
+      try {
+        git(dir, ['worktree', 'add', '-q', linked, '-b', 'work/x'])
+        assert.equal(mainWorktreeRoot(linked), dir)
+        mkdirSync(join(linked, 'sub'), { recursive: true })
+        assert.equal(mainWorktreeRoot(join(linked, 'sub')), dir)
+      } finally {
+        rmSync(linked, { recursive: true, force: true })
+      }
+    })
+  })
+
+  test('a separate-git-dir main checkout resolves via its own toplevel', () => {
+    // .git is a file here, not a dir — gitCommonDir's basename is not
+    // '.git', so dirname(common) can't answer. Inside the main
+    // worktree --git-dir === --git-common-dir, so --show-toplevel is
+    // the root. (`worktree list` can't be: git records no path for a
+    // moved gitdir's checkout and reports the common dir itself.)
+    const root = mkdtempSync(join(tmpdir(), 'bro-git-sep-'))
+    try {
+      const gitdir = join(root, 'sepgit')
+      const wt = join(root, 'checkout')
+      git(root, ['init', '-q', '-b', 'main', '--separate-git-dir', gitdir, wt])
+      git(wt, ['config', 'user.email', 't@t'])
+      git(wt, ['config', 'user.name', 't'])
+      git(wt, ['commit', '-qm', 'init', '--allow-empty'])
+      assert.equal(mainWorktreeRoot(wt), wt)
+    } finally {
+      rmSync(root, { recursive: true, force: true })
+    }
+  })
+
+  test('a linked worktree of a separate-git-dir repo still finds the checkout', () => {
+    // worktree list can't answer — git reports the moved gitdir itself
+    // as the first record. The main checkout's `.git` FILE
+    // (`gitdir: <common>`) is the only link: the sibling scan finds it.
+    const root = mkdtempSync(join(tmpdir(), 'bro-git-seplink-'))
+    const linked = mkdtempSync(join(tmpdir(), 'bro-git-sepw-'))
+    try {
+      const gitdir = join(root, 'sepgit')
+      const wt = join(root, 'checkout')
+      git(root, ['init', '-q', '-b', 'main', '--separate-git-dir', gitdir, wt])
+      git(wt, ['config', 'user.email', 't@t'])
+      git(wt, ['config', 'user.name', 't'])
+      git(wt, ['commit', '-qm', 'init', '--allow-empty'])
+      git(wt, ['worktree', 'add', '-q', linked, '-b', 'work/sep'])
+      assert.equal(mainWorktreeRoot(linked), wt)
+    } finally {
+      rmSync(root, { recursive: true, force: true })
+      rmSync(linked, { recursive: true, force: true })
+    }
+  })
+
+  test('an external gitdir named `.git` does not fake the ordinary layout', () => {
+    // --separate-git-dir can end in `.git` — basename alone would take
+    // its parent as the checkout. Only a candidate whose own gitdir IS
+    // the common dir passes the verify.
+    const root = mkdtempSync(join(tmpdir(), 'bro-git-dotgit-'))
+    try {
+      const gitdir = join(root, '.git')
+      const wt = join(root, 'wt', 'checkout')
+      git(root, ['init', '-q', '-b', 'main', '--separate-git-dir', gitdir, wt])
+      git(wt, ['config', 'user.email', 't@t'])
+      git(wt, ['config', 'user.name', 't'])
+      git(wt, ['commit', '-qm', 'init', '--allow-empty'])
+      assert.equal(mainWorktreeRoot(wt), wt)
+      const linked = join(root, 'wt', 'linked')
+      git(wt, ['worktree', 'add', '-q', linked, '-b', 'work/dotgit'])
+      assert.equal(mainWorktreeRoot(linked), wt)
+    } finally {
+      rmSync(root, { recursive: true, force: true })
+    }
+  })
+
+  test('a bare repo is no anchor — worktree list reports bare, answer is null', () => {
+    const root = mkdtempSync(join(tmpdir(), 'bro-git-bare-'))
+    const linked = mkdtempSync(join(tmpdir(), 'bro-git-barew-'))
+    try {
+      const bare = join(root, 'repo.git')
+      git(root, ['init', '-q', '--bare', '-b', 'main', bare])
+      git(bare, ['worktree', 'add', '-q', linked, '-b', 'work/bare'])
+      // from the linked checkout: no main worktree exists, so null —
+      // the caller keeps its own dir rather than anchoring to git storage
+      assert.equal(mainWorktreeRoot(linked), null)
+    } finally {
+      rmSync(root, { recursive: true, force: true })
+      rmSync(linked, { recursive: true, force: true })
+    }
+  })
+
+  test('outside a repository resolves null, never a throw', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'bro-git-norepo-'))
+    try {
+      assert.equal(mainWorktreeRoot(dir), null)
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+})
+
+describe('unquoteGitPath', () => {
+  test('octal escapes decode as UTF-8 bytes, not literal backslashes', () => {
+    // git's C-quote encodes non-ASCII as \NNN octal bytes — JSON.parse
+    // would reject the form, and a literal read leaves escapes in the
+    // path (the pre-2.36 porcelain fallback hits this)
+    assert.equal(unquoteGitPath('"f\\303\\244o"'), 'fäo')
+    assert.equal(unquoteGitPath('"a\\342\\202\\254b"'), 'a€b')
+  })
+
+  test('named escapes and pass-through characters survive intact', () => {
+    assert.equal(unquoteGitPath('"we\\\\ird\\"na\\tme"'), 'we\\ird"na\tme')
+    assert.equal(unquoteGitPath('"plain/path"'), 'plain/path')
   })
 })
