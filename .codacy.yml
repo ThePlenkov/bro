@@ -1,0 +1,8 @@
+# Codacy scans shipped code. Test suites boot loopback listeners and
+# POST to them — every new fetch() trips the SSRF pattern ("user-
+# controlled URL to HTTP client") even though the host is a literal
+# 127.0.0.1 with a runtime port. The same fetch shapes already live on
+# main unflagged; excluding test files keeps the signal on the code
+# that ships.
+exclude_paths:
+  - '**/*.test.ts'
