@@ -81,6 +81,31 @@ describe('AcpTerminals', () => {
     }
   })
 
+  test('a shell line longer than the file-name limit still runs — ENAMETOOLONG falls back too', async () => {
+    const t = new AcpTerminals()
+    try {
+      const { terminalId } = await t.create(ctx(create(`echo ${'x'.repeat(300)}`)))
+      const status = await t.waitForExit(ctx(wait(terminalId)))
+      assert.equal(status.exitCode, 0)
+      const snap = await t.output(ctx(out(terminalId)))
+      assert.match(snap.output, /x{300}/)
+    } finally {
+      t.dispose()
+    }
+  })
+
+  test('a fallback spawn never outruns cleanup — dispose during ENOENT starts no work', async () => {
+    const t = new AcpTerminals()
+    const { terminalId } = await t.create(ctx(create('no-such-cmd-zzz && echo leaked')))
+    const pending = t.waitForExit(ctx(wait(terminalId)))
+    // dispose lands before the async 'error' tick — without the stopped
+    // gate a shell would spawn now and the waiter would resolve {127}
+    t.dispose()
+    const status = await pending
+    assert.equal(status.exitCode, null)
+    assert.equal(status.signal, null)
+  })
+
   test('output polls while the child still runs, exitStatus lands after', async () => {
     const t = new AcpTerminals()
     try {

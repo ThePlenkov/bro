@@ -39,6 +39,9 @@ interface TerminalEntry {
    *  inheriting the stdout pipe holds 'close' until IT dies, which can
    *  be minutes after the command itself exited. */
   closeTimer?: ReturnType<typeof setTimeout>
+  /** Set by release/dispose — the registry no longer owns the entry, so
+   *  an in-flight spawn-error fallback must not start new work. */
+  stopped?: boolean
   limit: number
 }
 
@@ -112,9 +115,29 @@ export class AcpTerminals {
     /** argv verbatim, always the first attempt — bare names resolve via
      *  PATH and spaced paths exec literally. Agents like devin instead put
      *  the whole shell line in `command` with args empty ('cd repo &&
-     *  cmd …'), where execve of the literal string is ENOENT every time;
+     *  cmd …'), where execve of the literal string fails every time;
      *  that failure alone re-spawns through the platform shell. */
-    const child = spawn(ctx.params.command, args, opts)
+    const shellOf = (): [string, string[]] =>
+      process.platform === 'win32'
+        ? ['cmd', ['/d', '/s', '/c', ctx.params.command]]
+        : ['sh', ['-c', ctx.params.command]]
+    const shellLine = (err: unknown): boolean =>
+      args.length === 0 &&
+      ['ENOENT', 'ENAMETOOLONG'].includes((err as NodeJS.ErrnoException).code ?? '')
+    let shellFellBack = false
+    let child: ChildProcess
+    try {
+      child = spawn(ctx.params.command, args, opts)
+    } catch (err) {
+      // over-long literals throw synchronously (ENAMETOOLONG) — the same
+      // whole-shell-line case the async ENOENT path below covers
+      if (!shellLine(err)) {
+        throw err
+      }
+      shellFellBack = true
+      const [file, argv] = shellOf()
+      child = spawn(file, argv, opts)
+    }
     const entry: TerminalEntry = {
       child,
       out: Buffer.alloc(0),
@@ -142,30 +165,26 @@ export class AcpTerminals {
       }
       entry.out = buf
     }
-    let shellFellBack = false
     const wire = (c: ChildProcess): void => {
       c.stdout?.on('data', append)
       c.stderr?.on('data', append)
       c.once('error', (err) => {
-        // execve of a whole shell line is ENOENT every time — that is the
+        // execve of a whole shell line fails every time — that is the
         // signal to re-spawn through the platform shell, once; every other
-        // spawn error (EACCES, a missing shell) stays a terminal failure
-        if (
-          !shellFellBack &&
-          args.length === 0 &&
-          (err as NodeJS.ErrnoException).code === 'ENOENT'
-        ) {
+        // spawn error (EACCES, a missing shell) stays a terminal failure.
+        // A released/disposed entry starts no new work — the command must
+        // never outrun its connection's cleanup.
+        if (!shellFellBack && shellLine(err)) {
           shellFellBack = true
           // the dead child still owes a 'close' after 'error' — strip its
           // listeners so it cannot settle the entry with a bogus status
           c.removeAllListeners()
-          const [file, argv]: [string, string[]] =
-            process.platform === 'win32'
-              ? ['cmd', ['/d', '/s', '/c', ctx.params.command]]
-              : ['sh', ['-c', ctx.params.command]]
-          entry.child = spawn(file, argv, opts)
-          wire(entry.child)
-          return
+          if (!entry.stopped) {
+            const [file, argv] = shellOf()
+            entry.child = spawn(file, argv, opts)
+            wire(entry.child)
+            return
+          }
         }
         append(Buffer.from(`\n[terminal spawn error: ${err.message}]\n`))
         settle(null, null)
@@ -238,6 +257,7 @@ export class AcpTerminals {
 
   readonly release: ClientRequestHandler<ReleaseTerminalRequest, void> = (ctx) => {
     const entry = this.get(ctx.params.terminalId)
+    entry.stopped = true
     // cancel the pending grace flush — the entry leaves the map now, so
     // a late timer would resolve waiters with a synthetic null status
     clearTimeout(entry.closeTimer)
@@ -267,6 +287,7 @@ export class AcpTerminals {
       // same discipline as release: cancel a pending grace flush so no
       // timer fires post-dispose, and resolve waiters deterministically —
       // live children settle through their own SIGKILL'd 'exit'
+      entry.stopped = true
       clearTimeout(entry.closeTimer)
       if (entry.exitStatus === null) {
         entry.child.kill('SIGKILL')
