@@ -65,27 +65,16 @@ function resultsOf(raw: unknown): DeltaResult[] | undefined {
   return undefined
 }
 
-/** Evaluate a delta report. `strict` also fails on pre-existing
- *  (`unchanged`) findings — the bar a graduated file carries. */
-export function gateReport(raw: string, strict: boolean): GateResult {
-  let parsed: unknown
-  try {
-    parsed = JSON.parse(raw)
-  } catch (err) {
-    throw new Error(`unreadable delta report — ${(err as Error).message}`)
-  }
-  const results = resultsOf(parsed)
-  if (results === undefined) {
-    throw new Error(
-      'unsupported delta report shape — expected a list of results, or an object with a results list'
-    )
-  }
-  // 'fixed' and 'improved' are the diff doing its job; 'unchanged' is
-  // legacy debt the diff did not touch.
+/** Walk the report once: count every finding by change-type, and collect
+ *  the ones the diff caused. 'fixed' and 'improved' are the diff doing its
+ *  job; 'unchanged' is legacy debt the diff did not touch. */
+function collect(
+  results: DeltaResult[],
+  strict: boolean
+): { violations: GateViolation[]; tally: Map<string, number> } {
   const tolerated = new Set(strict ? ['fixed', 'improved'] : ['fixed', 'improved', 'unchanged'])
   const violations: GateViolation[] = []
   const tally = new Map<string, number>()
-
   for (const result of results) {
     for (const finding of result.findings ?? []) {
       const type = finding['change-type'] ?? 'unknown'
@@ -101,7 +90,25 @@ export function gateReport(raw: string, strict: boolean): GateResult {
       }
     }
   }
+  return { violations, tally }
+}
 
+/** Evaluate a delta report. `strict` also fails on pre-existing
+ *  (`unchanged`) findings — the bar a graduated file carries. */
+export function gateReport(raw: string, strict: boolean): GateResult {
+  let parsed: unknown
+  try {
+    parsed = JSON.parse(raw)
+  } catch (err) {
+    throw new Error(`unreadable delta report — ${(err as Error).message}`)
+  }
+  const results = resultsOf(parsed)
+  if (results === undefined) {
+    throw new Error(
+      'unsupported delta report shape — expected a list of results, or an object with a results list'
+    )
+  }
+  const { violations, tally } = collect(results, strict)
   const summary = [...tally.entries()].sort((a, b) => a[0].localeCompare(b[0]))
   return {
     ok: violations.length === 0,
