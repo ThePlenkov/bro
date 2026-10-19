@@ -275,7 +275,8 @@ export class AcpTerminals {
       return {
         snapshot: this.snapshot(id),
         completed: true,
-        stop: () => entry.listeners.delete(listener),
+        // no taps were attached — the stop hook is honestly a no-op
+        stop: () => {},
       }
     }
     entry.listeners.add(listener)
