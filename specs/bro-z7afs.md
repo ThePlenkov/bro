@@ -21,7 +21,11 @@ the capability is true. Missing: bro-side handlers and the flag.
 New module `packages/providers/src/acp-terminal.ts` — an `AcpTerminals`
 registry scoped to one connection:
 
-- `terminal/create` → spawn `command + args` (no shell — argv verbatim),
+- `terminal/create` → spawn `command + args`: argv verbatim when `args`
+  is supplied; `shell: true` when it is empty — ACP's `command` is
+  "the command to execute" without saying program-vs-command-line, and
+  agents diverge (devin sends the raw line). A terminal is a shell, so
+  an argv-less command gets `/bin/sh -c` semantics (bro-hg4om);
   `cwd`/`env` applied over `process.env` (agent env names on a security
   denylist — `PATH`, `LD_*`, `NODE_OPTIONS`, … — are dropped); capture
   stdout+stderr interleaved into a byte-bounded buffer (`outputByteLimit`

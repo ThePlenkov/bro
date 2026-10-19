@@ -39,6 +39,22 @@ describe('AcpTerminals', () => {
     }
   })
 
+  test('an args-empty command line runs through the shell — pipes and all', async () => {
+    const t = new AcpTerminals()
+    try {
+      // devin hands `command` the raw line with no argv — the request a
+      // strict program+args reading would ENOENT on 'spawn ls /tmp'
+      const { terminalId } = await t.create(ctx(create('echo shell-ok | tr a-z A-Z')))
+      const status = await t.waitForExit(ctx(wait(terminalId)))
+      assert.equal(status.exitCode, 0)
+      const snap = await t.output(ctx(out(terminalId)))
+      assert.match(snap.output, /SHELL-OK/)
+      await t.release(ctx(rel(terminalId)))
+    } finally {
+      t.dispose()
+    }
+  })
+
   test('output polls while the child still runs, exitStatus lands after', async () => {
     const t = new AcpTerminals()
     try {
