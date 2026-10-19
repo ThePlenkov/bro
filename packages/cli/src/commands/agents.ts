@@ -54,6 +54,7 @@ import {
   statSync,
 } from 'node:fs'
 import { basename } from 'node:path'
+import { randomBytes } from 'node:crypto'
 import {
   countSessionReservations,
   readAgentRegistry,
@@ -85,6 +86,11 @@ import {
   resolveSpawnProvider,
   type AgentConnectorEnv,
 } from '../agent-connectors.ts'
+import {
+  devinSessionTranscript,
+  devinTranscriptsDir,
+  renderDevinTranscript,
+} from '../session-planes/devin.ts'
 import { flag, positionals } from './args.ts'
 import { mainWorktree, worktreePathFor } from './work.ts'
 
@@ -93,6 +99,12 @@ function usage(): never {
   bro agents status [<id|step>] [--json] [--connector <name>]
   bro agents up [<step>] [--connector <name>] [--worktree <path>] [--prompt-file <file>] [--beads-dir <dir>]
                 [--provider <name>] [--model <m>] [--profile <name>] [--class <name>] [--auto-approve]
+  bro agents run [<prompt>…] [--prompt <text>] [--prompt-file <file>] [--connector <name>]
+                [--worktree <path>] [--provider <name>] [--model <m>] [--profile <name>]
+                [--class <name>] [--auto-approve] [--beads-dir <dir>]
+                ad-hoc spawn — mints a phantom adhoc-<hex> step (no bead,
+                no claim) and sends the prompt through the same
+                registry/worktree/quota path as up <step>
   bro agents down [<id|step>] [--connector <name>]
   bro agents log <id|step> [--follow] [--lines <N>] [--connector <name>]
   bro agents prune [--connector <name>] [--older-than <N>d] [--json]
@@ -619,6 +631,11 @@ export function spawnStepAgent(
     throw new SpawnInputError(`worktree ${repoRoot} does not exist`)
   }
   const prompt = req.prompt ?? resolvePrompt(dir, beads, req.molStep, req.promptFile, conn.name)
+  // a whitespace-only FILE resolves to nothing as surely as a
+  // whitespace-only flag — check the resolved text, not just req.prompt
+  if (prompt.trim() === '') {
+    throw new SpawnInputError('prompt must not be empty')
+  }
   // class resolution (spec bro-1x7p): runs whenever fleet.routing is
   // declared — the lane pins provenance regardless of who named the
   // provider. The routed chain head supplies the provider only when no
@@ -805,6 +822,12 @@ async function cmdUp(dir: string, env: AgentConnectorEnv, argv: string[]): Promi
   } catch (err) {
     die(err instanceof Error ? err.message : String(err))
   }
+  reportSpawn(info, molStep)
+}
+
+/** The spawn report — `up <step>` and `run` share it: id/state/backend
+ *  first, then the provenance and handles the caller needs next. */
+function reportSpawn(info: AgentInfo, molStep: string): void {
   const pid = info.pid === undefined ? '' : ` pid ${info.pid}`
   console.log(`agent ${info.id} ${info.state} for ${molStep} (${info.backend}${pid})`)
   if (info.provider !== undefined) {
@@ -816,6 +839,57 @@ async function cmdUp(dir: string, env: AgentConnectorEnv, argv: string[]): Promi
   if (info.worktree !== undefined) {
     console.log(`  worktree: ${info.worktree}`)
   }
+}
+
+/** `bro agents run <prompt>` — the ad-hoc front door (spec bro-fqen0).
+ *  Same spawn machinery as `up <step>`; the only difference is the
+ *  minted `adhoc-<hex>` step — a phantom id, never a bead: no claim,
+ *  no `bd ready` litter, nothing to close. The registry row still
+ *  answers status/log/down under the minted id. */
+async function cmdRun(dir: string, env: AgentConnectorEnv, argv: string[]): Promise<void> {
+  const pos = positionals(
+    argv,
+    new Set([
+      '--connector',
+      '--worktree',
+      '--prompt',
+      '--prompt-file',
+      '--beads-dir',
+      '--provider',
+      '--model',
+      '--profile',
+      '--class',
+    ])
+  )
+  const promptFlag = flag(argv, '--prompt')
+  if (promptFlag !== undefined && pos.length > 0) {
+    die('positional text and --prompt are the same channel — pick one')
+  }
+  const prompt = promptFlag ?? (pos.length > 0 ? pos.join(' ') : undefined)
+  const promptFile = flag(argv, '--prompt-file')
+  if (prompt === undefined && promptFile === undefined) {
+    die('run requires a prompt — positional text, --prompt <text>, or --prompt-file <file>')
+  }
+  const molStep = `adhoc-${randomBytes(4).toString('hex')}`
+  let info: AgentInfo
+  try {
+    info = await spawnStepAgent(dir, env, {
+      molStep,
+      connector: flag(argv, '--connector'),
+      worktree: flag(argv, '--worktree'),
+      prompt,
+      promptFile,
+      beadsDir: flag(argv, '--beads-dir'),
+      provider: flag(argv, '--provider'),
+      model: flag(argv, '--model'),
+      profile: flag(argv, '--profile'),
+      class: flag(argv, '--class'),
+      autoApprove: argv.includes('--auto-approve') ? true : undefined,
+    })
+  } catch (err) {
+    die(err instanceof Error ? err.message : String(err))
+  }
+  reportSpawn(info, molStep)
 }
 
 async function cmdDown(dir: string, env: AgentConnectorEnv, argv: string[]): Promise<void> {
@@ -1082,6 +1156,90 @@ export function followLog(
   return { stop }
 }
 
+/** Follow a JSON transcript by step watermark — the file is rewritten
+ *  wholesale on each flush (not appended), so the byte-tail in
+ *  followLog can't ride it: poll, re-render past the watermark, emit.
+ *  Torn reads and vanishes skip a tick. Same stop-handle contract as
+ *  followLog — stoppable without a signal. */
+function followTranscript(
+  path: string,
+  startWatermark: number,
+  emit: (s: string) => void
+): { stop: () => void } {
+  let watermark = startWatermark
+  let stopped = false
+  let timer: NodeJS.Timeout | undefined
+  const stop = () => {
+    stopped = true
+    if (timer !== undefined) {
+      clearTimeout(timer)
+    }
+  }
+  const tick = () => {
+    if (stopped) {
+      return
+    }
+    try {
+      const r = renderDevinTranscript(readFileSync(path, 'utf8'), watermark)
+      if (r !== undefined) {
+        if (r.lines.length > 0) {
+          emit(r.lines.join('\n') + '\n')
+        }
+        watermark = r.watermark
+      }
+    } catch {
+      // mid-rewrite or reaped — retry next tick
+    }
+    if (!stopped) {
+      timer = setTimeout(tick, 2000)
+    }
+  }
+  timer = setTimeout(tick, 2000)
+  return { stop }
+}
+
+/** The devin-transcript branch of `agents log` — a devin session's
+ *  readable plane is its ATIF transcript (a.log is the acp-bridge
+ *  plumbing trace). Returns false when the agent isn't a devin session
+ *  or never flushed a transcript — the caller falls back to the byte
+ *  tail. */
+async function cmdLogDevinTranscript(
+  a: AgentInfo,
+  env: AgentConnectorEnv,
+  lines: number,
+  follow: boolean
+): Promise<boolean> {
+  const devinName =
+    a.backend === 'devin' && a.id.startsWith('devin:') ? a.id.slice('devin:'.length) : undefined
+  const transcript =
+    devinName === undefined
+      ? undefined
+      : devinSessionTranscript(devinName, devinTranscriptsDir(env.agents['devin'] ?? {}))
+  if (transcript === undefined) {
+    return false
+  }
+  console.error(`agent ${a.id} (${a.state}) — ${transcript}`)
+  let rendered = renderDevinTranscript(readFileSync(transcript, 'utf8'))
+  if (rendered === undefined) {
+    // the file is mid-rewrite — one beat later usually parses
+    await new Promise((resolve) => setTimeout(resolve, 250))
+    rendered = renderDevinTranscript(readFileSync(transcript, 'utf8'))
+  }
+  if (rendered === undefined) {
+    die(`transcript unreadable mid-rewrite: ${transcript} — retry`)
+  }
+  process.stdout.write(tailLines(rendered.lines.join('\n') + '\n', lines))
+  if (!follow) {
+    return true
+  }
+  const handle = followTranscript(transcript, rendered.watermark, (s) =>
+    process.stdout.write(s)
+  )
+  await new Promise<void>((resolve) => process.once('SIGINT', resolve))
+  handle.stop()
+  return true
+}
+
 async function cmdLog(dir: string, env: AgentConnectorEnv, argv: string[]): Promise<void> {
   const pos = positionals(argv, new Set(['--connector', '--lines']), {
     boolFlags: new Set(['--follow']),
@@ -1115,6 +1273,9 @@ async function cmdLog(dir: string, env: AgentConnectorEnv, argv: string[]): Prom
     console.error(`warning: backend degraded — ${d}`)
   }
   const a = hit.agent
+  if (await cmdLogDevinTranscript(a, env, lines, follow)) {
+    return
+  }
   if (a.log === undefined) {
     die(`agent ${a.id} has no recorded log — backend ${a.backend} may not keep one`)
   }
@@ -1156,6 +1317,9 @@ export async function runAgentsCommand(argv: string[]): Promise<void> {
       return
     case 'up':
       await cmdUp(dir, env, argv.slice(1))
+      return
+    case 'run':
+      await cmdRun(dir, env, argv.slice(1))
       return
     case 'down':
       await cmdDown(dir, env, argv.slice(1))

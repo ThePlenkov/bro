@@ -509,6 +509,23 @@ export const sddSection: ConfigSection<{ mode: SddMode; dir: string }> = (raw) =
   }
 }
 
+/** bro.config.json `serve` section — the facade host's own knobs.
+ *  `backend` names the acp provider `BRO_PROVIDER_BACKEND` falls back
+ *  to: a repo that always wants its conductor can pin it in config
+ *  instead of relying on the env var reaching every spawn path
+ *  (apiKeyHelper children do not inherit settings.env). */
+export const serveSection: ConfigSection<{ backend?: string }> = (raw) => {
+  const obj = (typeof raw === 'object' && raw !== null ? raw : {}) as {
+    backend?: unknown
+  }
+  const backend =
+    typeof obj.backend === 'string' && obj.backend.trim() !== ''
+      ? obj.backend.trim()
+      : undefined
+  // an unset backend reads as an empty bag — same shape as providers:{}
+  return backend === undefined ? {} : { backend }
+}
+
 /** bro.config.json `mirror` section — the bead→tracker projection
  *  policy (spec specs/backends/bro-z2z7f): which beads materialize as
  *  native tracker items at PR time. Beads stays the source of truth;
@@ -767,6 +784,7 @@ const CORE_SECTIONS: Record<string, ConfigSection<unknown>> = {
   mcp: mcpSection as ConfigSection<unknown>,
   mirror: mirrorSection as ConfigSection<unknown>,
   notify: notifySection as ConfigSection<unknown>,
+  serve: serveSection as ConfigSection<unknown>,
 }
 
 /** Every config key core normalizes itself — the authoritative "known
@@ -886,6 +904,11 @@ export interface BroConfig {
    *  (the default — spawning the server IS the consent), `[]` = none,
    *  a list = allowlist. Backend selection stays on connectors.*. */
   mcp: { planes?: string[] }
+  /** `bro serve` — the facade host's own knobs. `backend` names the acp
+   *  provider the conductor wires when `BRO_PROVIDER_BACKEND` is unset —
+   *  a repo that always wants its conductor pins it here instead of
+   *  relying on env reaching every spawn path. */
+  serve: { backend?: string }
   /** Bead→tracker projection policy (spec specs/backends/bro-z2z7f) —
    *  which beads materialize as native tracker items at PR time. */
   mirror: MirrorPolicy
@@ -930,6 +953,7 @@ export const DEFAULT_CONFIG: BroConfig = {
   query: { concurrency: 4, env: {} },
   mesh: { peers: {} },
   mcp: {},
+  serve: {},
   mirror: { labels: [], excludeLabels: [], types: ['feature', 'bug'], specLinked: true },
   notify: { sinks: [] },
   plugins: [],

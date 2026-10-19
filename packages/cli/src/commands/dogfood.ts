@@ -25,14 +25,19 @@
  */
 import { execFileSync } from 'node:child_process'
 import { randomBytes } from 'node:crypto'
+import { createServer } from 'node:net'
 import {
+  chmodSync,
   copyFileSync,
-  cpSync,
   existsSync,
   mkdirSync,
   mkdtempSync,
   readFileSync,
   readdirSync,
+  readlinkSync,
+  realpathSync,
+  rmSync,
+  statSync,
   writeFileSync,
 } from 'node:fs'
 import { homedir } from 'node:os'
@@ -41,9 +46,11 @@ import {
   acquireFileLock,
   gitCommonDir,
   gitTry,
+  loadConfigLayers,
   LockTimeout,
   taskStoreAt,
   type AgentInfo,
+  type ProviderEntry,
 } from '@broject/core'
 import { loadAgentEnv, type AgentConnectorEnv } from '../agent-connectors.ts'
 import { collectAgentBackends, spawnStepAgent } from './agents.ts'
@@ -73,14 +80,15 @@ export function dogfoodHome(dir: string): string | null {
 
 // --- scenarios --------------------------------------------------------------
 
-/** Committed `dogfood/*.md` names (extension stripped). */
+/** Committed `dogfood/*.md` names (extension stripped) — index docs
+ *  (`matrix.md`) are documentation, not runnable scenarios. */
 export function listScenarios(dir: string): string[] {
   const home = join(dir, 'dogfood')
   if (!existsSync(home)) {
     return []
   }
   return readdirSync(home)
-    .filter((f) => f.endsWith('.md'))
+    .filter((f) => f.endsWith('.md') && f !== 'matrix.md')
     .map((f) => f.slice(0, -3))
     .sort()
 }
@@ -95,8 +103,19 @@ function segment(what: string, value: string): string {
   return value
 }
 
+/** The `<client>-*` name prefix doubles as the default provider —
+ *  codex-basics runs on providers.codex unflagged. Unknown prefixes
+ *  (core-workflow) get no pin: default connector resolution. */
+function scenarioProvider(name: string): string | undefined {
+  const prefix = name.replace(/\.md$/, '').split('-')[0]
+  return prefix === 'codex' || prefix === 'claude' ? prefix : undefined
+}
+
 function scenarioPath(dir: string, name: string): string {
   const clean = segment('scenario name', name)
+  if (clean.replace(/\.md$/, '') === 'matrix') {
+    die('matrix is the dogfood index, not a scenario — `bro self dogfood scenarios` lists the runnable set')
+  }
   const file = join(dir, 'dogfood', clean.endsWith('.md') ? clean : `${clean}.md`)
   if (!existsSync(file)) {
     die(`no scenario ${name} — \`bro self dogfood scenarios\` lists them`)
@@ -250,9 +269,67 @@ function scratchRoot(): string {
   return join(base, 'bro', 'dogfood')
 }
 
+/** A real bind on port 0 is the only collision-proof probe — the
+ *  listener closes before handoff, so the picked port races nothing
+ *  except another process in the same instant (ensure's repo+pid
+ *  squat-refusal covers that residual). */
+async function pickFreePort(): Promise<number> {
+  const srv = createServer()
+  await new Promise<void>((resolve) => srv.listen(0, '127.0.0.1', resolve))
+  const { port } = srv.address() as { port: number }
+  await new Promise<void>((resolve) => srv.close(() => resolve()))
+  return port
+}
+
+/** `.files` is copied verbatim except `{{PORT}}`, which substitutes the
+ *  run's own allocated port — a fixed port would let one run's detached
+ *  serve squat the next run's listener slot. */
+function copyProvision(src: string, dst: string, port: number): void {
+  for (const entry of readdirSync(src, { withFileTypes: true })) {
+    const from = join(src, entry.name)
+    const to = join(dst, entry.name)
+    if (entry.isDirectory()) {
+      mkdirSync(to, { recursive: true })
+      copyProvision(from, to, port)
+    } else {
+      // bytes, not utf8 — a binary or executable payload must survive
+      // provisioning with its contents and its mode intact
+      const buf = readFileSync(from)
+      writeFileSync(
+        to,
+        buf.includes(PORT_MARKER) ? substitutePort(buf, port) : buf
+      )
+      chmodSync(to, statSync(from).mode)
+    }
+  }
+}
+
+const PORT_MARKER = Buffer.from('{{PORT}}')
+
+/** `{{PORT}}` substitution at the byte level — marker spans are the
+ *  only bytes a non-utf8 payload loses. */
+function substitutePort(src: Buffer, port: number): Buffer {
+  const pin = Buffer.from(String(port))
+  const out: Buffer[] = []
+  let off = 0
+  for (;;) {
+    const i = src.indexOf(PORT_MARKER, off)
+    if (i < 0) {
+      out.push(src.subarray(off))
+      break
+    }
+    out.push(src.subarray(off, i), pin)
+    off = i + PORT_MARKER.length
+  }
+  return Buffer.concat(out)
+}
+
 /** Provision the scratch repo — own git store, own stealth beads
- *  store; claims the runner makes never pollute the host's. */
-function provisionRepo(filesDir?: string | null): { repo: string; beads: string; initErr: string | null } {
+ *  store; claims the runner makes never pollute the host's. `{{PORT}}`
+ *  in `.files` payloads resolves to the run's freshly allocated port. */
+async function provisionRepo(
+  filesDir?: string | null
+): Promise<{ repo: string; beads: string; initErr: string | null }> {
   const root = scratchRoot()
   mkdirSync(root, { recursive: true })
   const repo = mkdtempSync(join(root, 'run-'))
@@ -263,7 +340,7 @@ function provisionRepo(filesDir?: string | null): { repo: string; beads: string;
   // on startup. The harness's config is written after so a scenario
   // can never ship its own bro.config.json over the SDD gate
   if (filesDir !== undefined && filesDir !== null) {
-    cpSync(filesDir, repo, { recursive: true })
+    copyProvision(filesDir, repo, await pickFreePort())
   }
   // arm SDD — a bare repo leaves sdd.mode 'off' and a scenario that
   // describes the gate would narrate a hook that cannot fire. Committed
@@ -299,6 +376,36 @@ function provisionRepo(filesDir?: string | null): { repo: string; beads: string;
   }
   mkdirSync(beads, { recursive: true })
   return { repo, beads, initErr }
+}
+
+/** The spawn env for a run: host config plus the scratch repo's own
+ *  provider entries. A payload's bro.config.local.json providers
+ *  (CODEX_HOME/token wiring) must win over host layers — resolving
+ *  providers from `dir` alone silently ignores the scenario's spawn
+ *  template and the client falls back to ambient user setup. Only the
+ *  scratch's own files count: the global layer inside a scratch load
+ *  would shadow the host's project-level providers with user-global
+ *  ones even when the payload defines nothing (greptile PRRT_…tr4Wn).
+ *  The registry/`dir` side stays host-rooted so agentView keeps
+ *  finding the spawned ids. */
+function runEnv(dir: string, scratch: string): AgentConnectorEnv {
+  const env = loadAgentEnv(dir)
+  const providers = { ...(env.providers ?? {}) }
+  let touched = false
+  for (const l of loadConfigLayers(scratch).layers) {
+    if (l.layer === 'global') continue
+    const p = l.raw.providers
+    if (typeof p !== 'object' || p === null) continue
+    // per-field overlay onto the RESOLVED entry — a payload that sets
+    // only `command` must not drop the `type` a global/host layer
+    // supplied (greptile: raw copies break partial overrides)
+    for (const [name, raw] of Object.entries(p)) {
+      if (typeof raw !== 'object' || raw === null) continue
+      providers[name] = { ...providers[name], ...raw } as ProviderEntry
+      touched = true
+    }
+  }
+  return touched ? { ...env, providers } : env
 }
 
 /** Resolve a live/terminal view of one agent id across backends. */
@@ -393,7 +500,7 @@ async function advanceRun(
         type: 'chore',
         priority: 2,
       })
-      const info = await spawnStepAgent(dir, env, {
+      const info = await spawnStepAgent(dir, runEnv(dir, fresh.repo), {
         molStep: analystBead.id,
         worktree: fresh.repo,
         promptFile,
@@ -435,7 +542,10 @@ async function cmdRun(dir: string, argv: string[]): Promise<void> {
   }
   const analyst = flag(argv, '--analyst') ?? 'same'
   const backend = flag(argv, '--backend')
-  const provider = flag(argv, '--provider')
+  // a scenario's client prefix is its provider pin by convention —
+  // `run codex-basics` unflagged must still land on providers.codex or
+  // the payload's wiring is never exercised (an explicit flag wins)
+  const provider = flag(argv, '--provider') ?? scenarioProvider(name)
   const keep = argv.includes('--keep')
   const src = scenarioPath(dir, name)
 
@@ -466,7 +576,7 @@ async function cmdRun(dir: string, argv: string[]): Promise<void> {
   let initErr: string | null = null
   let stage = 'provision'
   try {
-    const prov = provisionRepo(scenarioFilesDir(dir, name))
+    const prov = await provisionRepo(scenarioFilesDir(dir, name))
     initErr = prov.initErr
     state.repo = prov.repo
 
@@ -487,7 +597,7 @@ async function cmdRun(dir: string, argv: string[]): Promise<void> {
 
     stage = 'spawn'
     state.phase = 'running'
-    const info = await spawnStepAgent(dir, loadAgentEnv(dir), {
+    const info = await spawnStepAgent(dir, runEnv(dir, prov.repo), {
       molStep: bead.id,
       worktree: prov.repo,
       promptFile,
@@ -537,6 +647,72 @@ function agentLabel(
   return `${id} ${info?.state ?? '?'}${cause}`
 }
 
+/** A terminal run's scratch serve is litter — kill the recorded pid
+ *  (serve.json is the same-UID credential that spawned it). Idempotent:
+ *  status-driven, and the state file is retired so a repeated call can
+ *  never re-signal a pid the OS has since recycled. */
+function reapScratchServe(repo: string): void {
+  // a run that failed before provisioning recorded '' — join('', …)
+  // would resolve the CALLER's serve.json and kill its serve
+  if (repo === '') return
+  try {
+    const statePath = join(repo, '.git', 'bro', 'serve.json')
+    const state = JSON.parse(readFileSync(statePath, 'utf8')) as {
+      pid?: number
+      dir?: string
+      url?: string
+    }
+    const pid = state.pid
+    if (
+      typeof pid === 'number' &&
+      pid > 0 &&
+      isRecordedServe(pid, repo, state)
+    ) {
+      try {
+        process.kill(pid)
+      } catch {
+        /* raced the exit — the reap is done anyway */
+      }
+    }
+    rmSync(statePath, { force: true })
+  } catch {
+    /* no serve.json — nothing was ever spawned */
+  }
+}
+
+/** Identity before signaling: serve.json's pid may name a recycled,
+ *  unrelated process. The spawned serve runs with cwd=repo, so the
+ *  kernel's /proc link is the evidence; where /proc does not exist
+ *  (macOS), the argv snapshot must carry this serve's own port. */
+function isRecordedServe(
+  pid: number,
+  repo: string,
+  state: { dir?: string; url?: string }
+): boolean {
+  if (
+    state.dir !== undefined &&
+    realpathSync(state.dir) !== realpathSync(repo)
+  ) {
+    return false
+  }
+  try {
+    // a readable /proc answer is authoritative — a pid whose cwd names
+    // another directory is not this scratch's serve, whatever argv says
+    return readlinkSync(`/proc/${pid}/cwd`) === realpathSync(repo)
+  } catch {
+    /* /proc absent (macOS) or the pid is gone — try argv evidence */
+  }
+  try {
+    const args = execFileSync('ps', ['-p', String(pid), '-o', 'args='], { // NOSONAR — PATH lookup is the contract
+      encoding: 'utf8',
+    })
+    const port = state.url?.match(/:(\d+)/)?.[1]
+    return /\bserve\b/.test(args) && (port === undefined || args.includes(port))
+  } catch {
+    return false
+  }
+}
+
 /** One run's status row — advance the pipeline first (status IS the
  *  advancer), then read agent liveness and the verdict file. A verdict
  *  on disk closes the run even before the analyst's process exits. */
@@ -570,6 +746,10 @@ async function statusRow(
   ) {
     state.phase = 'failed'
     writeRun(run.dir, state)
+  }
+  // a settled run's listener is litter — reap by its own serve.json
+  if (state.phase === 'done' || state.phase === 'failed') {
+    reapScratchServe(state.repo)
   }
   return {
     run: run.id,

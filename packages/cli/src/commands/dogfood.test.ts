@@ -14,7 +14,7 @@ import {
   rmSync,
   writeFileSync,
 } from 'node:fs'
-import { join } from 'node:path'
+import { dirname, join } from 'node:path'
 import { AgentNotFound, testGit } from '@broject/core'
 import type { AgentInfo, SpawnSpec } from '@broject/core'
 import { registerAgentConnector } from '../agent-connectors.ts'
@@ -132,7 +132,9 @@ function runsOf(main: string): string[] {
 }
 
 function rdirOf(main: string): string {
-  return join(main, '.git', 'bro', 'dogfood', runsOf(main)[0]!)
+  const runs = runsOf(main)
+  assert.ok(runs.length > 0, 'expected at least one dogfood run')
+  return join(main, '.git', 'bro', 'dogfood', runs[0]!)
 }
 
 function stateOf(rdir: string): Record<string, unknown> {
@@ -206,12 +208,18 @@ describe('bro self dogfood', () => {
       mkdirSync(join(fx.main, 'dogfood', 'seeded.files', '.claude'), { recursive: true })
       writeFileSync(
         join(fx.main, 'dogfood', 'seeded.files', '.claude', 'settings.local.json'),
-        '{"enabledPlugins":{}}'
+        '{"enabledPlugins":{},"apiKeyHelper":"x --port {{PORT}}"}'
       )
       const r = await dogfood(['run', 'seeded', '--backend', 'dogfood-test'])
       assert.equal(r.code, 0, r.err.join('\n'))
       const repo = stateOf(rdirOf(fx.main)).repo as string
       assert.ok(existsSync(join(repo, '.claude', 'settings.local.json')))
+      // {{PORT}} lands substituted — the per-run port is what keeps a
+      // stale listener from squatting the next run's slot
+      const seeded = JSON.parse(
+        readFileSync(join(repo, '.claude', 'settings.local.json'), 'utf8')
+      ) as { apiKeyHelper: string }
+      assert.match(seeded.apiKeyHelper, /--port \d+$/)
       // committed, not just present — the runner starts from a clean
       // tree or the dirty-worktree stop-gate probe trips
       assert.match(
@@ -251,6 +259,65 @@ describe('bro self dogfood', () => {
       assert.equal(s.code, 0)
       assert.equal(spawned.length, 2)
       assert.equal(spawned[1]!.provider, 'p1')
+    } finally {
+      dispose?.()
+      fx.restore()
+    }
+  })
+
+  test('the scratch payload providers.<name> override host config at spawn', async () => {
+    const fx = fixture()
+    const { conn, spawned } = dogfoodConnector()
+    const dispose = registerAgentConnector('dogfood-test', () => conn)
+    try {
+      // host config wires p9 one way; the payload's local.json carries
+      // the scenario's own spawn env — the scratch layer must win or
+      // the runner launches on ambient user setup instead
+      writeFileSync(
+        join(fx.main, 'bro.config.json'),
+        JSON.stringify({ providers: { p9: { type: 'cli', command: 'host-p9 {promptFile}' } } })
+      )
+      writeFileSync(
+        join(fx.main, 'dogfood', 'wired.md'),
+        '# wired\n\n1. check\n\n## Assert\n\n- ok\n'
+      )
+      mkdirSync(join(fx.main, 'dogfood', 'wired.files'), { recursive: true })
+      writeFileSync(
+        join(fx.main, 'dogfood', 'wired.files', 'bro.config.local.json'),
+        // command-only override — the entry's type must survive from
+        // the host layer or the merged provider fails to resolve
+        JSON.stringify({ providers: { p9: { command: 'scratch-p9 {promptFile}' } } })
+      )
+      const r = await dogfood(['run', 'wired', '--backend', 'dogfood-test', '--provider', 'p9'])
+      assert.equal(r.code, 0, r.err.join('\n'))
+      const worker = spawned[0]!.worker
+      assert.ok(worker?.kind === 'template')
+      assert.match(worker.command, /scratch-p9/)
+    } finally {
+      dispose?.()
+      fx.restore()
+    }
+  })
+
+  test('a codex-* scenario pins providers.codex without a flag', async () => {
+    const fx = fixture()
+    const { conn, spawned } = dogfoodConnector()
+    const dispose = registerAgentConnector('dogfood-test', () => conn)
+    try {
+      writeFileSync(
+        join(fx.main, 'bro.config.json'),
+        JSON.stringify({ providers: { codex: { type: 'cli', command: 'codex-run {promptFile}' } } })
+      )
+      writeFileSync(
+        join(fx.main, 'dogfood', 'codex-mini.md'),
+        '# codex mini\n\n1. check\n\n## Assert\n\n- ok\n'
+      )
+      const r = await dogfood(['run', 'codex-mini', '--backend', 'dogfood-test'])
+      assert.equal(r.code, 0, r.err.join('\n'))
+      // the name prefix selected the provider — unflagged codex-*
+      // must not silently resolve the host default lane
+      assert.equal(spawned[0]!.provider, 'codex')
+      assert.equal(stateOf(rdirOf(fx.main)).provider, 'codex')
     } finally {
       dispose?.()
       fx.restore()
@@ -348,6 +415,140 @@ describe('bro self dogfood', () => {
     } finally {
       delete process.env.BRO_AGENT_ID
       fx.restore()
+    }
+  })
+
+  // --- committed scenario payloads -----------------------------------------
+  // The committed dogfood/<name>.files/ trees are real provisioning —
+  // a malformed one dies at run time on a real client. Validate shape
+  // here; the live client proof stays the dogfood run itself.
+
+  // the repo root by the dogfood/ sentinel, not a fixed ..-count — a
+  // file move must fail loudly here, not silently retarget asserts
+  const repoRoot = (() => {
+    let d = import.meta.dirname
+    while (!existsSync(join(d, 'dogfood')) && dirname(d) !== d) {
+      d = dirname(d)
+    }
+    assert.ok(existsSync(join(d, 'dogfood')), 'repo root not found — no dogfood/ up-tree')
+    return d
+  })()
+
+  test('codex-plugin.files carries valid codex + serve wiring', () => {
+    const files = join(repoRoot, 'dogfood', 'codex-plugin.files')
+    assert.ok(existsSync(files), 'codex-plugin.files missing')
+    // the codex user config — CODEX_HOME targets this dir at spawn,
+    // so it loads as the trusted user layer
+    const toml = readFileSync(join(files, '.codex', 'config.toml'), 'utf8')
+    assert.match(toml, /model_provider\s*=\s*"bro"/)
+    assert.match(toml, /wire_api\s*=\s*"responses"/)
+    assert.match(toml, /env_key\s*=\s*"BRO_SERVE_TOKEN"/)
+    assert.match(toml, /base_url\s*=\s*"http:\/\/127\.0\.0\.1:\{\{PORT\}\}\/v1"/)
+    // the bro side — the acp backend the conductor serves + the
+    // codex spawn template exporting the token env_key names
+    const cfg = JSON.parse(
+      readFileSync(join(files, 'bro.config.local.json'), 'utf8')
+    ) as { serve?: { backend?: string }; providers?: Record<string, { type?: string; command?: string }> }
+    const backend = cfg.serve?.backend ?? ''
+    assert.ok(backend !== '', 'serve.backend missing')
+    assert.ok(cfg.providers?.[backend]?.type === 'acp', `provider ${backend} must be acp`)
+    const codex = cfg.providers?.codex?.command ?? ''
+    assert.match(codex, /CODEX_HOME=\$PWD\/.codex/)
+    assert.match(codex, /BRO_SERVE_TOKEN=\$\(.*bro serve ensure --port \{\{PORT\}\}\)/)
+    assert.match(codex, /codex exec .*\{promptFile\}/)
+    // the port codex dials is the port ensure answers — the same
+    // {{PORT}} marker in both, resolved to the run's allocation
+    const tomlPort = toml.match(/127\.0\.0\.1:(\{\{PORT\}\}|\d+)\/v1/)?.[1]
+    const cmdPort = codex.match(/ensure --port (\{\{PORT\}\}|\d+)/)?.[1]
+    assert.equal(tomlPort, cmdPort, 'config.toml port ≠ ensure port')
+    // the scenario pins the openai dialect in its asserts
+    const scenario = readFileSync(join(repoRoot, 'dogfood', 'codex-plugin.md'), 'utf8')
+    assert.match(scenario, /\/v1\/responses/)
+  })
+})
+
+// --- the committed scenario tree (bro-bvipw.3) ------------------------------
+// The dogfood/ directory is the epic's agentic proof layer — every
+// committed scenario must carry a valid .files payload for its client
+// and the matrix index must not list itself as runnable.
+
+describe('committed dogfood scenario tree', () => {
+  // the repo root by the dogfood/ sentinel, not a fixed ..-count — a
+  // file move must fail loudly here, not silently retarget asserts
+  const repoRoot = (() => {
+    let d = import.meta.dirname
+    while (!existsSync(join(d, 'dogfood')) && dirname(d) !== d) {
+      d = dirname(d)
+    }
+    assert.ok(existsSync(join(d, 'dogfood')), 'repo root not found — no dogfood/ up-tree')
+    return d
+  })()
+  const dogfoodDir = join(repoRoot, 'dogfood')
+
+  test('matrix.md is an index, never a scenario', async () => {
+    assert.ok(existsSync(join(dogfoodDir, 'matrix.md')))
+    assert.ok(!listScenarios(repoRoot).includes('matrix'))
+    // and not runnable either — the listing filter alone would leave
+    // `run matrix` launching the index as a scenario
+    const r = await dogfood(['run', 'matrix', '--backend', 'dogfood-test'])
+    assert.notEqual(r.code, 0)
+    assert.match(r.err.join('\n'), /index|not a scenario/)
+  })
+
+  test('every claude-* .files carries claude client wiring', () => {
+    for (const s of listScenarios(repoRoot).filter((s) => s.startsWith('claude-'))) {
+      const files = join(dogfoodDir, `${s}.files`)
+      assert.ok(existsSync(files), `${s}.files missing`)
+      const settings = JSON.parse(
+        readFileSync(join(files, '.claude', 'settings.local.json'), 'utf8')
+      ) as { apiKeyHelper?: string; model?: string; env?: Record<string, string> }
+      assert.match(settings.apiKeyHelper ?? '', /bro serve ensure --port \{\{PORT\}\}/)
+      assert.match(settings.env?.ANTHROPIC_BASE_URL ?? '', /\{\{PORT\}\}/)
+      const cfg = JSON.parse(readFileSync(join(files, 'bro.config.local.json'), 'utf8')) as {
+        serve?: { backend?: string }
+        providers?: Record<string, { type?: string }>
+      }
+      const backend = cfg.serve?.backend ?? ''
+      assert.ok(cfg.providers?.[backend]?.type === 'acp', `${s}: serve.backend not an acp entry`)
+    }
+  })
+
+  test('every codex-* .files carries codex client wiring', () => {
+    for (const s of listScenarios(repoRoot).filter((s) => s.startsWith('codex-'))) {
+      const files = join(dogfoodDir, `${s}.files`)
+      assert.ok(existsSync(files), `${s}.files missing`)
+      const toml = readFileSync(join(files, '.codex', 'config.toml'), 'utf8')
+      assert.match(toml, /model_provider\s*=\s*"bro"/, `${s}: model_provider`)
+      assert.match(toml, /wire_api\s*=\s*"responses"/, `${s}: wire_api`)
+      assert.match(toml, /env_key\s*=\s*"BRO_SERVE_TOKEN"/, `${s}: env_key`)
+      assert.match(toml, /127\.0\.0\.1:\{\{PORT\}\}\/v1/, `${s}: base_url port marker`)
+      const cfg = JSON.parse(readFileSync(join(files, 'bro.config.local.json'), 'utf8')) as {
+        providers?: Record<string, { command?: string }>
+      }
+      const cmd = cfg.providers?.codex?.command ?? ''
+      assert.match(cmd, /BRO_SERVE_TOKEN=\$\(.*ensure --port \{\{PORT\}\}\)/, `${s}: token export`)
+    }
+    // only codex-reasoning carries the effort pin — its matrix row's feature
+    const effort = (name: string) =>
+      readFileSync(join(dogfoodDir, `${name}.files`, '.codex', 'config.toml'), 'utf8')
+    assert.match(effort('codex-reasoning'), /model_reasoning_effort\s*=\s*"high"/)
+    assert.doesNotMatch(effort('codex-basics'), /model_reasoning_effort/)
+  })
+
+  test('every scenario asserts its own dialect on the wire', () => {
+    for (const s of listScenarios(repoRoot)) {
+      const text = readFileSync(join(dogfoodDir, `${s}.md`), 'utf8')
+      if (s === 'core-workflow') {
+        // the workflow scenario is client-agnostic — no payload, no
+        // dialect; the invariant is that it STAYS that way
+        assert.ok(
+          !existsSync(join(dogfoodDir, `${s}.files`)),
+          'core-workflow must stay payload-free'
+        )
+        continue
+      }
+      const dialect = s.startsWith('codex-') ? '/v1/responses' : '/v1/messages'
+      assert.ok(text.includes(dialect), `${s}: no ${dialect} assertion — the wire is the proof`)
     }
   })
 })

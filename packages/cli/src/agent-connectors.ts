@@ -1348,15 +1348,28 @@ function guardExistingEntry(
 
 /** Guard the beads claim — a spawn must own (or create) the claim it
  *  will pin, never steal a live worker's or a human's step. Returns the
- *  claim state the write phase needs for claim-vs-rebind. */
+ *  claim state the write phase needs for claim-vs-rebind. `phantom`
+ *  marks the agents-run `adhoc-` namespace (spec bro-fqen0): a minted
+ *  `adhoc-<hex>` id is never a bead — no claim, the registry row is
+ *  the only record. The prefix alone is not the predicate: a store
+ *  CAN use `adhoc` as its issue prefix, minting real `adhoc-*` beads
+ *  (codeant #583) — so an `adhoc-*` id that probes as a live bead
+ *  takes the normal claim path. A probe miss stays phantom: minted
+ *  ids are random (a real bead can't collide), and when the store is
+ *  down no claim could land anyway — probeStep can't tell "missing"
+ *  from "store down" (its catch is silent), so for every OTHER step
+ *  the claim write still fails loud. */
 function guardClaim(
   spec: SpawnSpec,
   hasEntry: boolean,
   claimAs: string | undefined
-): { claimed: boolean; actor: string | undefined } {
+): { claimed: boolean; actor: string | undefined; phantom: boolean } {
   const step = probeStep(spec.beadsDir, spec.molStep)
+  if (spec.molStep.startsWith('adhoc-') && step === undefined) {
+    return { claimed: false, actor: undefined, phantom: true }
+  }
   if (step?.status !== 'in_progress') {
-    return { claimed: false, actor: undefined }
+    return { claimed: false, actor: undefined, phantom: false }
   }
   if (!hasEntry) {
     // claimed with no registry entry — an interactive session or a
@@ -1375,7 +1388,7 @@ function guardClaim(
       `${spec.molStep} is claimed by ${step.assignee ?? '?'} — rebind only takes our own claim`
     )
   }
-  return { claimed: true, actor }
+  return { claimed: true, actor, phantom: false }
 }
 
 /* Dedup correlates both planes: a claim alone is not a conflict — a
@@ -1418,7 +1431,7 @@ function prepareSpawn(
   const registry = readAgentRegistry(dir)
   const existing = registry[spec.molStep]
   guardExistingEntry(dir, home, backend, spec, existing, opts)
-  const { claimed, actor } = guardClaim(spec, existing !== undefined, opts.claimAs)
+  const { claimed, actor, phantom } = guardClaim(spec, existing !== undefined, opts.claimAs)
   // fleet admission — before the registry write + claim land, so a
   // refusal leaves no half-spawned state
   enforceFleetCap(dir, home, registry, spec, opts.cap)
@@ -1441,25 +1454,53 @@ function prepareSpawn(
           workerEnv: spec.env,
         })
   try {
-  // enter half of the rig transition — inside the try so an enter
-  // failure also hands the session-quota reservation back via the
-  // catch below
-  enterSpawnTree(spec)
+    // enter half of the rig transition — inside the try so an enter
+    // failure also hands the session-quota reservation back via the
+    // catch below
+    enterSpawnTree(spec)
+    return {
+      agentId,
+      ...commitSpawn(dir, home, backend, spec, opts, agentId, {
+        claimed,
+        actor,
+        phantom,
+      }),
+      reservation,
+    }
+  } catch (err) {
+    // a write/claim failure after the reservation — the caller never saw
+    // the key, so this is the only place that can hand the slot back
+    if (reservation !== undefined) {
+      releaseSessionSlot(reservation)
+    }
+    throw err
+  }
+}
+
+/** The write phase of a spawn — prompt/log/exit files, the registry
+ *  row, then claim bookkeeping. Split from the guard/admission phase
+ *  so a refused spawn leaves no half-state and a caller-side
+ *  reservation can be handed back on failure. */
+function commitSpawn(
+  dir: string,
+  home: string,
+  backend: string,
+  spec: SpawnSpec,
+  opts: {
+    entry?: (agentId: string) => Record<string, unknown>
+    claimAs?: string
+    sessionQuota?: SessionQuotaLane | undefined
+  },
+  agentId: string,
+  guard: { claimed: boolean; actor: string | undefined; phantom: boolean }
+): { promptFile: string; log: string; exitFile: string } {
   mkdirSync(home, { recursive: true })
   const promptFile = join(home, `${agentId}.prompt.md`)
   const log = join(home, `${agentId}.log`)
   const exitFile = join(home, `${agentId}.exit`)
   rmSync(exitFile, { force: true })
   writeFileSync(promptFile, spec.prompt)
-  // the log is append-mode across respawns — pin where THIS run's output
-  // starts so a later exit classifies on new text only, not the old run's
-  // rate-limit wall (which would re-block the fresh run forever)
-  let logFrom = 0
-  try {
-    logFrom = statSync(log).size
-  } catch {
-    // no log yet — the run starts at byte 0
-  }
+  const logFrom = logSizeOrZero(log)
   // exitStatus: undefined clears a respawned entry's stale harvest — the
   // new run must not read as already-exited (undefined keys drop out of
   // the serialized registry). pid/pidStart/spawnError likewise — a claim
@@ -1500,23 +1541,52 @@ function prepareSpawn(
     sessionKind: opts.sessionQuota?.plane.kind,
     ...opts.entry?.(agentId),
   })
-  if (claimed) {
-    rebindStep(spec.beadsDir, spec.molStep, actor!)
-  } else {
+  recordSpawnClaim(dir, spec, agentId, backend, guard, opts.claimAs)
+  return { promptFile, log, exitFile }
+}
+
+/** The byte offset a fresh run's log starts at — the log is append-mode
+ *  across respawns, so a later exit must classify on THIS run's text
+ *  only, not the old run's rate-limit wall (which would re-block the
+ *  fresh run forever). No log yet → byte 0. */
+function logSizeOrZero(log: string): number {
+  try {
+    return statSync(log).size
+  } catch {
+    return 0
+  }
+}
+
+/** Post-write claim bookkeeping — claim or rebind the step, then emit
+ *  the lifecycle events (specs/telemetry/bro-ub91h.md); fail-open, so a
+ *  wedged journal never stalls a spawn. A phantom step records the
+ *  spawn only — there is no bead whose status a 'claim' event could
+ *  truthfully report. */
+function recordSpawnClaim(
+  dir: string,
+  spec: SpawnSpec,
+  agentId: string,
+  backend: string,
+  guard: { claimed: boolean; actor: string | undefined; phantom: boolean },
+  claimAs: string | undefined
+): void {
+  if (guard.claimed) {
+    rebindStep(spec.beadsDir, spec.molStep, guard.actor!)
+  } else if (!guard.phantom) {
     claimStep(spec.beadsDir, spec.molStep)
   }
-  if (opts.claimAs !== undefined) {
-    rebindStep(spec.beadsDir, spec.molStep, opts.claimAs)
+  if (claimAs !== undefined && !guard.phantom) {
+    rebindStep(spec.beadsDir, spec.molStep, claimAs)
   }
-  // lifecycle — the registry claim + spawn record (specs/telemetry/
-  // bro-ub91h.md); fail-open, so a wedged journal never stalls a spawn
-  emitLifecycle(dir, {
-    kind: 'claim',
-    bead: spec.molStep,
-    from: claimed || opts.claimAs !== undefined ? 'in_progress' : 'open',
-    to: 'in_progress',
-    detail: { via: 'agents', agent: agentId, backend },
-  })
+  if (!guard.phantom) {
+    emitLifecycle(dir, {
+      kind: 'claim',
+      bead: spec.molStep,
+      from: guard.claimed || claimAs !== undefined ? 'in_progress' : 'open',
+      to: 'in_progress',
+      detail: { via: 'agents', agent: agentId, backend },
+    })
+  }
   emitLifecycle(dir, {
     kind: 'spawn',
     bead: spec.molStep,
@@ -1531,15 +1601,6 @@ function prepareSpawn(
       ...(spec.class !== undefined ? { class: spec.class } : {}),
     },
   })
-  return { agentId, promptFile, log, exitFile, reservation }
-  } catch (err) {
-    // a write/claim failure after the reservation — the caller never saw
-    // the key, so this is the only place that can hand the slot back
-    if (reservation !== undefined) {
-      releaseSessionSlot(reservation)
-    }
-    throw err
-  }
 }
 
 /** The enter half of the rig transition (bro-oy3k1.4): spec.enter is

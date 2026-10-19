@@ -189,6 +189,10 @@
     "claude": {
       "type": "cli",
       "command": "cat {promptFile} | claude -p --permission-mode bypassPermissions"
+    },
+    "codex": {
+      "type": "cli",
+      "command": "codex exec --sandbox danger-full-access - < {promptFile}"
     }
   },
   "mesh": {

@@ -6,7 +6,7 @@
  * with it (spec: specs/bro-z7afs.md).
  */
 import { randomUUID } from 'node:crypto'
-import { spawn, type ChildProcess } from 'node:child_process'
+import { spawn, type ChildProcess, type SpawnOptions } from 'node:child_process'
 import { StringDecoder } from 'node:string_decoder'
 import type {
   ClientApp,
@@ -40,6 +40,9 @@ interface TerminalEntry {
    *  inheriting the stdout pipe holds 'close' until IT dies, which can
    *  be minutes after the command itself exited. */
   closeTimer?: ReturnType<typeof setTimeout>
+  /** Set by release/dispose — the registry no longer owns the entry, so
+   *  an in-flight spawn-error fallback must not start new work. */
+  stopped?: boolean
   limit: number
   /** Live taps (bro-eua0d) — the serve SSE route subscribes through
    *  `follow`. `decoder` folds split multi-byte characters across pipe
@@ -72,7 +75,9 @@ const ORPHAN_CLOSE_GRACE_MS = 500
 /** Agent-supplied env merges over the host env but may not hijack it —
  *  a compromised agent sending `NODE_OPTIONS=--require …` or its own
  *  `PATH` would inject code into every child we spawn (CWE-78). These
- *  names are dropped from the agent's list, silently. */
+ *  names are dropped from the agent's list, silently — matched
+ *  case-insensitively, since win32 env names ignore case and `Path`
+ *  hijacks `PATH` there just the same. */
 const ENV_DENYLIST: ReadonlySet<string> = new Set([
   'PATH',
   'NODE_OPTIONS',
@@ -119,15 +124,42 @@ export class AcpTerminals {
   ) => {
     const env = { ...process.env }
     for (const e of ctx.params.env ?? []) {
-      if (!ENV_DENYLIST.has(e.name)) {
+      if (!ENV_DENYLIST.has(e.name.toUpperCase())) {
         env[e.name] = e.value
       }
     }
-    const child = spawn(ctx.params.command, ctx.params.args ?? [], {
+    const args = ctx.params.args ?? []
+    const opts: SpawnOptions = {
       cwd: ctx.params.cwd ?? undefined,
       env,
       stdio: ['ignore', 'pipe', 'pipe'],
-    })
+    }
+    /** argv verbatim, always the first attempt — bare names resolve via
+     *  PATH and spaced paths exec literally. Agents like devin instead put
+     *  the whole shell line in `command` with args empty ('cd repo &&
+     *  cmd …'), where execve of the literal string fails every time;
+     *  that failure alone re-spawns through the platform shell. */
+    const shellOf = (): [string, string[]] =>
+      process.platform === 'win32'
+        ? ['cmd', ['/d', '/s', '/c', ctx.params.command]]
+        : ['sh', ['-c', ctx.params.command]]
+    const shellLine = (err: unknown): boolean =>
+      args.length === 0 &&
+      ['ENOENT', 'ENAMETOOLONG'].includes((err as NodeJS.ErrnoException).code ?? '')
+    let shellFellBack = false
+    let child: ChildProcess
+    try {
+      child = spawn(ctx.params.command, args, opts)
+    } catch (err) {
+      // over-long literals throw synchronously (ENAMETOOLONG) — the same
+      // whole-shell-line case the async ENOENT path below covers
+      if (!shellLine(err)) {
+        throw err
+      }
+      shellFellBack = true
+      const [file, argv] = shellOf()
+      child = spawn(file, argv, opts)
+    }
     const entry: TerminalEntry = {
       child,
       out: Buffer.alloc(0),
@@ -167,26 +199,46 @@ export class AcpTerminals {
         }
       }
     }
-    child.stdout?.on('data', append)
-    child.stderr?.on('data', append)
-    child.once('error', (err) => {
-      append(Buffer.from(`\n[terminal spawn error: ${err.message}]\n`))
-      settle(null, null)
-      this.flushEntry(entry)
-    })
-    // Two-stage settle: 'exit' carries the status (the command completed),
-    // 'close' carries output completeness — exit fires while piped data is
-    // still buffered. Waiters flush on close, or on exit + grace when an
-    // orphaned writer holds the pipe open past the command's death.
-    child.once('exit', (exitCode, signal) => {
-      settle(exitCode, signal)
-      entry.closeTimer = setTimeout(() => this.flushEntry(entry), ORPHAN_CLOSE_GRACE_MS)
-    })
-    child.once('close', (exitCode, signal) => {
-      settle(exitCode, signal)
-      clearTimeout(entry.closeTimer)
-      this.flushEntry(entry)
-    })
+    const wire = (c: ChildProcess): void => {
+      c.stdout?.on('data', append)
+      c.stderr?.on('data', append)
+      c.once('error', (err) => {
+        // execve of a whole shell line fails every time — that is the
+        // signal to re-spawn through the platform shell, once; every other
+        // spawn error (EACCES, a missing shell) stays a terminal failure.
+        // A released/disposed entry starts no new work — the command must
+        // never outrun its connection's cleanup.
+        if (!shellFellBack && shellLine(err)) {
+          shellFellBack = true
+          // the dead child still owes a 'close' after 'error' — strip its
+          // listeners so it cannot settle the entry with a bogus status
+          c.removeAllListeners()
+          if (!entry.stopped) {
+            const [file, argv] = shellOf()
+            entry.child = spawn(file, argv, opts)
+            wire(entry.child)
+            return
+          }
+        }
+        append(Buffer.from(`\n[terminal spawn error: ${err.message}]\n`))
+        settle(null, null)
+        this.flushEntry(entry)
+      })
+      // Two-stage settle: 'exit' carries the status (the command completed),
+      // 'close' carries output completeness — exit fires while piped data is
+      // still buffered. Waiters flush on close, or on exit + grace when an
+      // orphaned writer holds the pipe open past the command's death.
+      c.once('exit', (exitCode, signal) => {
+        settle(exitCode, signal)
+        entry.closeTimer = setTimeout(() => this.flushEntry(entry), ORPHAN_CLOSE_GRACE_MS)
+      })
+      c.once('close', (exitCode, signal) => {
+        settle(exitCode, signal)
+        clearTimeout(entry.closeTimer)
+        this.flushEntry(entry)
+      })
+    }
+    wire(child)
     const terminalId = randomUUID() as TerminalId
     this.entries.set(terminalId, entry)
     return { terminalId }
@@ -284,6 +336,7 @@ export class AcpTerminals {
 
   readonly release: ClientRequestHandler<ReleaseTerminalRequest, void> = (ctx) => {
     const entry = this.get(ctx.params.terminalId)
+    entry.stopped = true
     // cancel the pending grace flush — the entry leaves the map now, so
     // a late timer would resolve waiters with a synthetic null status
     clearTimeout(entry.closeTimer)
@@ -313,6 +366,7 @@ export class AcpTerminals {
       // same discipline as release: cancel a pending grace flush so no
       // timer fires post-dispose, and resolve waiters deterministically —
       // live children settle through their own SIGKILL'd 'exit'
+      entry.stopped = true
       clearTimeout(entry.closeTimer)
       if (entry.exitStatus === null) {
         entry.child.kill('SIGKILL')
