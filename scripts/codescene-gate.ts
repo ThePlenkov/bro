@@ -54,14 +54,15 @@ export interface GateResult {
 }
 
 /** The two report shapes the CLI emits: a bare list, or an object
- *  carrying the list under `results` (--include-metadata). */
-function resultsOf(raw: unknown): DeltaResult[] {
+ *  carrying the list under `results` (--include-metadata). Anything else
+ *  is `undefined` — a gate that cannot read the report must not pass it. */
+function resultsOf(raw: unknown): DeltaResult[] | undefined {
   if (Array.isArray(raw)) return raw as DeltaResult[]
   if (typeof raw === 'object' && raw !== null) {
     const results = (raw as { results?: unknown }).results
     if (Array.isArray(results)) return results as DeltaResult[]
   }
-  return []
+  return undefined
 }
 
 /** Evaluate a delta report. `strict` also fails on pre-existing
@@ -74,6 +75,11 @@ export function gateReport(raw: string, strict: boolean): GateResult {
     throw new Error(`unreadable delta report — ${(err as Error).message}`)
   }
   const results = resultsOf(parsed)
+  if (results === undefined) {
+    throw new Error(
+      'unsupported delta report shape — expected a list of results, or an object with a results list'
+    )
+  }
   // 'fixed' and 'improved' are the diff doing its job; 'unchanged' is
   // legacy debt the diff did not touch.
   const tolerated = new Set(strict ? ['fixed', 'improved'] : ['fixed', 'improved', 'unchanged'])
