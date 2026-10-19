@@ -787,6 +787,47 @@ describe('bro agents run — similarity floor', () => {
     }
   })
 
+  test('a pid-less registry row suspects only inside the spawn-handoff window', () => {
+    const fx = fixture([])
+    try {
+      const prompt = (id: string): void => {
+        const p = agentPromptPath(fx.main, id)!
+        mkdirSync(dirname(p), { recursive: true })
+        writeFileSync(p, 'render the devin session transcripts live')
+      }
+      prompt('native-stale')
+      prompt('native-fresh')
+      writeAgentRegistry(fx.main, {
+        // mid-spawn — the pid lands within seconds of the entry
+        'fx-fresh': {
+          agentId: 'native-fresh',
+          backend: 'native',
+          spawnedAt: new Date().toISOString(),
+          worktree: fx.main,
+        },
+        // hours old, no pid ever recorded — a crashed spawn's remnant
+        'fx-stale': {
+          agentId: 'native-stale',
+          backend: 'native',
+          spawnedAt: new Date(Date.now() - 3_600_000).toISOString(),
+          worktree: fx.main,
+        },
+      })
+      const env = { agents: {}, connectors: {} } as AgentConnectorEnv
+      assert.deepEqual(
+        collectDuplicateSuspects(fx.main, env).map((s) => s.label),
+        ['agent native-fresh for fx-fresh']
+      )
+      // and the --for target's own row is never its own suspect
+      assert.deepEqual(
+        collectDuplicateSuspects(fx.main, env, { excludeStep: 'fx-fresh' }),
+        []
+      )
+    } finally {
+      fx.restore()
+    }
+  })
+
   test('promptSimilar: overlap coefficient with the shared-token floor', () => {
     assert.equal(
       promptSimilar('visible claude background tasks', 'visible claude background tasks via devin acp'),

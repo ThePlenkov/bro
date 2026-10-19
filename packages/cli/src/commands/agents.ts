@@ -60,6 +60,7 @@ import {
   countSessionReservations,
   gitCommonDir,
   readAgentRegistry,
+  SESSION_SLOT_TTL_MS,
   removeAgentRegistryEntries,
   routeStepClass,
   sessionPlanes,
@@ -887,7 +888,8 @@ export function promptSimilar(a: string, b: string): boolean {
  *  contributes nothing, never a thrown failure. */
 export function collectDuplicateSuspects(
   dir: string,
-  env: AgentConnectorEnv
+  env: AgentConnectorEnv,
+  opts: { excludeStep?: string } = {}
 ): { label: string; text: string }[] {
   const out: { label: string; text: string }[] = []
   const seenAgents = new Set<string>()
@@ -899,6 +901,11 @@ export function collectDuplicateSuspects(
   }
   for (const [molStep, e] of Object.entries(registry)) {
     seenAgents.add(e.agentId)
+    // the --for target's own row is the same work item, not a duplicate —
+    // the spawn guards carry its real verdict (refuse/respawn)
+    if (molStep === opts.excludeStep) {
+      continue
+    }
     // terminal rows prove no live work — exit recorded or manually stopped
     if (typeof e.exitStatus === 'number' || e.stopped === true) {
       continue
@@ -906,7 +913,13 @@ export function collectDuplicateSuspects(
     const pid = typeof e.pid === 'number' ? e.pid : undefined
     const start =
       typeof e.pidStart === 'string' && e.pidStart !== '' ? e.pidStart : undefined
-    if (pid !== undefined && !pidAlive(pid, start)) {
+    if (pid !== undefined) {
+      if (!pidAlive(pid, start)) {
+        continue
+      }
+    } else if (Date.now() - Date.parse(e.spawnedAt) >= SESSION_SLOT_TTL_MS) {
+      // a pid-less row past the spawn-handoff window is a crashed spawn's
+      // remnant — unproven-dead is not work in flight for an advisory
       continue
     }
     const file = agentPromptPath(dir, e.agentId)
@@ -1020,18 +1033,15 @@ async function cmdRun(dir: string, env: AgentConnectorEnv, argv: string[]): Prom
     die('run requires a prompt — positional text, --prompt <text>, or --prompt-file <file> (or --for <bead>)')
   }
   const molStep = forBead ?? `adhoc-${randomBytes(4).toString('hex')}`
+  const beads = flag(argv, '--beads-dir') ?? beadsDir()
   // the similarity floor (spec bro-7dila): an ad-hoc spawn has no claim
   // to dedup on, so a live agent/session in this repo whose prompt or
   // title reads near-identical earns a warning — advisory, the spawn
-  // still lands. --for gets the same floor on top of the hard guards.
-  const warnText = advisoryPromptText(
-    flag(argv, '--beads-dir') ?? beadsDir(),
-    molStep,
-    prompt,
-    promptFile
-  )
+  // still lands. --for gets the same floor on top of the hard guards;
+  // its own registry row is excluded — the guards carry that verdict
+  const warnText = advisoryPromptText(beads, molStep, prompt, promptFile)
   if (warnText !== undefined) {
-    for (const s of collectDuplicateSuspects(dir, env)) {
+    for (const s of collectDuplicateSuspects(dir, env, { excludeStep: molStep })) {
       if (promptSimilar(warnText, s.text)) {
         console.error(`warning: possible duplicate — ${s.label} reads near-identical to this prompt`)
       }
@@ -1045,7 +1055,7 @@ async function cmdRun(dir: string, env: AgentConnectorEnv, argv: string[]): Prom
       worktree: flag(argv, '--worktree'),
       prompt,
       promptFile,
-      beadsDir: flag(argv, '--beads-dir'),
+      beadsDir: beads,
       provider: flag(argv, '--provider'),
       model: flag(argv, '--model'),
       profile: flag(argv, '--profile'),

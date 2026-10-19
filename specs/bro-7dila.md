@@ -53,8 +53,13 @@ on stderr. Advisory only — it never refuses; the spawn proceeds.
 Candidates:
 
 - **registry agents** — entries in this repo's `bro/agents.json` that
-  are not verifiably terminal (live pid, or no pid to check) contribute
-  their stored prompt text (`<agentId>.prompt.md`);
+  are not verifiably terminal contribute their stored prompt text
+  (`<agentId>.prompt.md`): terminal rows (`exitStatus`/`stopped`) and
+  dead pids never suspect; a pid-less row counts only inside the
+  spawn-handoff window (`SESSION_SLOT_TTL_MS`) — older ones are crash
+  remnants, not work in flight. The `--for` target's own row is
+  excluded: same work item, and the guards carry its real verdict — an
+  advisory must not precede a hard refusal with a warning about itself;
 - **foreign sessions** — `DiscoveredSession` rows whose `cwd` resolves
   to the same `git --git-common-dir` as ours contribute their session
   `name` (the devin lock name is the session title slug). Rows with no
