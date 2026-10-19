@@ -1,6 +1,6 @@
 /** `bro serve` conductor — /v1/messages answers from an acp provider
  *  session instead of an HTTP upstream (spec bro-xeozo). */
-import { describe, test } from 'node:test'
+import { after, describe, test } from 'node:test'
 import assert from 'node:assert/strict'
 import { mkdtempSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
@@ -105,6 +105,15 @@ const CFG: ConductorConfig = {
 }
 
 describe('conductorConfig', () => {
+  // loadConfig merges the GLOBAL layer — a dev box pinning serve.backend
+  // in ~/.config/bro would leak a backend into the 'unset env' assertions;
+  // this suite reads an empty global config dir instead
+  const prevXdg = process.env.XDG_CONFIG_HOME
+  process.env.XDG_CONFIG_HOME = mkdtempSync(join(tmpdir(), 'bro-conductor-xdg-'))
+  after(() => {
+    if (prevXdg === undefined) delete process.env.XDG_CONFIG_HOME
+    else process.env.XDG_CONFIG_HOME = prevXdg
+  })
   const providers = {
     'dv-acp': { type: 'acp' as const, command: 'dv acp', model: 'swe-y' },
     cli1: { type: 'cli' as const, command: 'x run' },
