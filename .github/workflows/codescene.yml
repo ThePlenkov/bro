@@ -38,7 +38,11 @@ jobs:
       has-token: ${{ steps.check.outputs.has-token }}
     steps:
       - id: check
-        run: echo "has-token=${{ secrets.CS_ACCESS_TOKEN != '' }}" >> "$GITHUB_OUTPUT"
+        env:
+          # the secret rides the env, never the command string — a
+          # secret interpolated into `run:` is a script-injection surface
+          TOKEN: ${{ secrets.CS_ACCESS_TOKEN }}
+        run: echo "has-token=$([ -n "$TOKEN" ] && echo true || echo false)" >> "$GITHUB_OUTPUT"
 
   delta:
     needs: check-secrets
@@ -64,7 +68,7 @@ jobs:
           # downloads.codescene.io 403s intermittently on cold runners —
           # retry rather than fail the PR over a CDN hiccup.
           for attempt in 1 2 3; do
-            if curl -fsSL -H "Authorization: Bearer ${CS_ACCESS_TOKEN}" -o /tmp/cs.zip "$url"; then
+            if curl -fsSL --proto '=https' --tlsv1.2 -H "Authorization: Bearer ${CS_ACCESS_TOKEN}" -o /tmp/cs.zip "$url"; then
               break
             fi
             if [ "$attempt" = "3" ]; then
@@ -87,7 +91,7 @@ jobs:
           set -euo pipefail
           export PATH="$HOME/.local/bin:$PATH"
           cs delta "origin/${{ github.base_ref }}" HEAD --output-format json > delta.json
-          echo "delta report: ${{ runner.temp }}/delta.json"
+          echo "delta report: $PWD/delta.json"
 
       - name: Gate — no technical debt introduced by this diff
         run: node scripts/codescene-gate.ts delta.json

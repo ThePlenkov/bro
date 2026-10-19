@@ -42,7 +42,7 @@ function main(argv: string[]): void {
       env: { ...process.env },
     })
   } catch (err) {
-    const e = err as { status?: number; stdout?: string; stderr?: string }
+    const e = err as { status?: number; stdout?: string; stderr?: string; message?: string }
     if (typeof e.stdout === 'string' && e.stdout.trim() !== '') {
       report = e.stdout
     } else {
