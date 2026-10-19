@@ -754,39 +754,50 @@ describe('model pin resolution — [1m] context suffix (bro-0g2l3)', () => {
       { value: 'max', name: 'max' },
     ],
   }
-
-  test('a request pin carrying the suffix resolves to the base id', async () => {
-    const fake = fakeAcpAgent({ replyText: 'x', configOptions: [MODEL_OPTION] })
-    const peer = await acpOpen('conductor:t', ENTRY, { acp: { peer: fake.app } }, deadline())
-    try {
-      const r = await acpPooledTurn(peer, ENTRY, { acp: { peer: fake.app } }, 'p', deadline(), {
-        by: 'conductor:t',
-        requestModel: 'dv/qwen3-coder[1m]',
-      })
-      assert.equal(r.model, 'qwen3-coder')
-      assert.deepEqual(fake.configSets, [{ configId: 'model-pick', value: 'qwen3-coder' }])
-    } finally {
-      peer.close()
-    }
+  /** A model select — the session reports `currentValue` while its
+   *  catalog advertises `leaves` (a spawn-level `model[<size>]` pin
+   *  reports verbatim what the catalog only knows stripped). */
+  const modelOption = (currentValue: string, leaves: string[]): SessionConfigOption => ({
+    type: 'select',
+    id: 'model-pick',
+    name: 'Model',
+    category: 'model',
+    currentValue,
+    options: leaves.map((v) => ({ value: v, name: v })),
   })
-
-  test('a configured pin carrying the suffix resolves the same', async () => {
-    const fake = fakeAcpAgent({ replyText: 'x', configOptions: [MODEL_OPTION] })
+  /** acpOpen → one pooled turn → close; the reported model out, the
+   *  fake's configSets stay assertable after. */
+  const turn = async (
+    fake: ReturnType<typeof fakeAcpAgent>,
+    entryModel?: string,
+    requestModel?: string
+  ): Promise<string> => {
     const peer = await acpOpen('conductor:t', ENTRY, { acp: { peer: fake.app } }, deadline())
     try {
       const r = await acpPooledTurn(
         peer,
-        { ...ENTRY, model: 'qwen3-coder[1m]' },
+        { ...ENTRY, model: entryModel },
         { acp: { peer: fake.app } },
         'p',
         deadline(),
-        { by: 'conductor:t' }
+        { by: 'conductor:t', requestModel }
       )
-      assert.equal(r.model, 'qwen3-coder')
-      assert.deepEqual(fake.configSets, [{ configId: 'model-pick', value: 'qwen3-coder' }])
+      return r.model
     } finally {
       peer.close()
     }
+  }
+
+  test('a request pin carrying the suffix resolves to the base id', async () => {
+    const fake = fakeAcpAgent({ replyText: 'x', configOptions: [MODEL_OPTION] })
+    assert.equal(await turn(fake, undefined, 'dv/qwen3-coder[1m]'), 'qwen3-coder')
+    assert.deepEqual(fake.configSets, [{ configId: 'model-pick', value: 'qwen3-coder' }])
+  })
+
+  test('a configured pin carrying the suffix resolves the same', async () => {
+    const fake = fakeAcpAgent({ replyText: 'x', configOptions: [MODEL_OPTION] })
+    assert.equal(await turn(fake, 'qwen3-coder[1m]'), 'qwen3-coder')
+    assert.deepEqual(fake.configSets, [{ configId: 'model-pick', value: 'qwen3-coder' }])
   })
 
   test('a composite -level[1m] pin still parses the level off the base', async () => {
@@ -794,20 +805,11 @@ describe('model pin resolution — [1m] context suffix (bro-0g2l3)', () => {
       replyText: 'x',
       configOptions: [MODEL_OPTION, THOUGHT_OPTION],
     })
-    const peer = await acpOpen('conductor:t', ENTRY, { acp: { peer: fake.app } }, deadline())
-    try {
-      const r = await acpPooledTurn(peer, ENTRY, { acp: { peer: fake.app } }, 'p', deadline(), {
-        by: 'conductor:t',
-        requestModel: 'dv/qwen3-coder-max[1m]',
-      })
-      assert.equal(r.model, 'qwen3-coder-max')
-      assert.deepEqual(fake.configSets, [
-        { configId: 'model-pick', value: 'qwen3-coder' },
-        { configId: 'thought', value: 'max' },
-      ])
-    } finally {
-      peer.close()
-    }
+    assert.equal(await turn(fake, undefined, 'dv/qwen3-coder-max[1m]'), 'qwen3-coder-max')
+    assert.deepEqual(fake.configSets, [
+      { configId: 'model-pick', value: 'qwen3-coder' },
+      { configId: 'thought', value: 'max' },
+    ])
   })
 
   test('a [1m] repin on a live session resolves to the base id', async () => {
@@ -826,18 +828,10 @@ describe('model pin resolution — [1m] context suffix (bro-0g2l3)', () => {
 
   test('a non-context bracket stays in the id — the miss is still loud', async () => {
     const fake = fakeAcpAgent({ replyText: 'x', configOptions: [MODEL_OPTION] })
-    const peer = await acpOpen('conductor:t', ENTRY, { acp: { peer: fake.app } }, deadline())
-    try {
-      await assert.rejects(
-        acpPooledTurn(peer, ENTRY, { acp: { peer: fake.app } }, 'p', deadline(), {
-          by: 'conductor:t',
-          requestModel: 'dv/qwen3-coder[custom]',
-        }),
-        /qwen3-coder\[custom].*not in the agent's catalog/
-      )
-    } finally {
-      peer.close()
-    }
+    await assert.rejects(
+      turn(fake, undefined, 'dv/qwen3-coder[custom]'),
+      /qwen3-coder\[custom].*not in the agent's catalog/
+    )
   })
 
   test('the one-shot client path strips the suffix before set_config_option', async () => {
@@ -868,21 +862,8 @@ describe('model pin resolution — [1m] context suffix (bro-0g2l3)', () => {
 
   test('a tool-less backend reports the base id as provenance, not the opt-in', async () => {
     const fake = fakeAcpAgent({ replyText: 'x' })
-    const peer = await acpOpen('conductor:t', ENTRY, { acp: { peer: fake.app } }, deadline())
-    try {
-      const r = await acpPooledTurn(
-        peer,
-        { ...ENTRY, model: 'qwen3-coder[1m]' },
-        { acp: { peer: fake.app } },
-        'p',
-        deadline(),
-        { by: 'conductor:t' }
-      )
-      assert.equal(r.model, 'qwen3-coder')
-      assert.deepEqual(fake.configSets, [])
-    } finally {
-      peer.close()
-    }
+    assert.equal(await turn(fake, 'qwen3-coder[1m]'), 'qwen3-coder')
+    assert.deepEqual(fake.configSets, [])
   })
 
   test('a spawn-level pin the session reports verbatim satisfies the base ask', async () => {
@@ -890,93 +871,38 @@ describe('model pin resolution — [1m] context suffix (bro-0g2l3)', () => {
       replyText: 'x',
       configOptions: [{ ...MODEL_OPTION, currentValue: 'custom[1m]' }],
     })
-    const peer = await acpOpen('conductor:t', ENTRY, { acp: { peer: fake.app } }, deadline())
-    try {
-      const r = await acpPooledTurn(
-        peer,
-        { ...ENTRY, model: 'custom[1m]' },
-        { acp: { peer: fake.app } },
-        'p',
-        deadline(),
-        { by: 'conductor:t', requestModel: 'dv/custom' }
-      )
-      assert.equal(r.model, 'custom')
-      assert.deepEqual(fake.configSets, [])
-    } finally {
-      peer.close()
-    }
+    assert.equal(await turn(fake, 'custom[1m]', 'dv/custom'), 'custom')
+    assert.deepEqual(fake.configSets, [])
   })
 
   // the base id hitting the catalog must NOT re-pin a session already
   // serving the raw suffixed ask — the set would silently drop the
   // opt-in the spawn flag enabled
-  const SPAWN_PINNED: SessionConfigOption = {
-    type: 'select',
-    id: 'model-pick',
-    name: 'Model',
-    category: 'model',
-    currentValue: 'custom[1m]',
-    options: [
-      { value: 'custom', name: 'custom' },
-      { value: 'other', name: 'other' },
-    ],
-  }
-
   test('a session already serving the suffixed pin is not re-set to the base', async () => {
-    const fake = fakeAcpAgent({ replyText: 'x', configOptions: [SPAWN_PINNED] })
-    const peer = await acpOpen('conductor:t', ENTRY, { acp: { peer: fake.app } }, deadline())
-    try {
-      const r = await acpPooledTurn(
-        peer,
-        { ...ENTRY, model: 'custom[1m]' },
-        { acp: { peer: fake.app } },
-        'p',
-        deadline(),
-        { by: 'conductor:t' }
-      )
-      assert.equal(r.model, 'custom[1m]')
-      assert.deepEqual(fake.configSets, [])
-    } finally {
-      peer.close()
-    }
+    const fake = fakeAcpAgent({
+      replyText: 'x',
+      configOptions: [modelOption('custom[1m]', ['custom', 'other'])],
+    })
+    // the configured pin and an aliased request pin both match verbatim
+    assert.equal(await turn(fake, 'custom[1m]'), 'custom[1m]')
+    assert.equal(await turn(fake, undefined, 'dv/custom[1m]'), 'custom[1m]')
+    assert.deepEqual(fake.configSets, [])
   })
 
   test('a namespaced suffixed pin the session reports verbatim is kept too', async () => {
     const fake = fakeAcpAgent({
       replyText: 'x',
-      configOptions: [
-        {
-          type: 'select',
-          id: 'model-pick',
-          name: 'Model',
-          category: 'model',
-          currentValue: 'acme/custom[1m]',
-          options: [
-            { value: 'acme/custom', name: 'custom' },
-            { value: 'other', name: 'other' },
-          ],
-        },
-      ],
+      configOptions: [modelOption('acme/custom[1m]', ['acme/custom', 'other'])],
     })
-    const peer = await acpOpen('conductor:t', ENTRY, { acp: { peer: fake.app } }, deadline())
-    try {
-      const r = await acpPooledTurn(
-        peer,
-        { ...ENTRY, model: 'acme/custom[1m]' },
-        { acp: { peer: fake.app } },
-        'p',
-        deadline(),
-        { by: 'conductor:t' }
-      )
-      assert.equal(r.model, 'acme/custom[1m]')
-      assert.deepEqual(fake.configSets, [])
-    } finally {
-      peer.close()
-    }
+    assert.equal(await turn(fake, 'acme/custom[1m]'), 'acme/custom[1m]')
+    assert.deepEqual(fake.configSets, [])
   })
 
   test('the one-shot path keeps a served spawn-level suffix — no base re-pin', async () => {
-    const fake = fakeAcpAgent({ replyText: 'answer', configOptions: [SPAWN_PINNED] })
+    const fake = fakeAcpAgent({
+      replyText: 'answer',
+      configOptions: [modelOption('custom[1m]', ['custom', 'other'])],
+    })
     const res = await acpClient(
       'provider:kilo',
       { type: 'acp', command: 'kilo --acp', model: 'custom[1m]' },
@@ -989,31 +915,10 @@ describe('model pin resolution — [1m] context suffix (bro-0g2l3)', () => {
   test('an agent-advertised `model[1m]` leaf is selectable verbatim', async () => {
     const fake = fakeAcpAgent({
       replyText: 'x',
-      configOptions: [
-        {
-          type: 'select',
-          id: 'model-pick',
-          name: 'Model',
-          category: 'model',
-          currentValue: 'other',
-          options: [
-            { value: 'custom[1m]', name: 'custom 1m' },
-            { value: 'other', name: 'other' },
-          ],
-        },
-      ],
+      configOptions: [modelOption('other', ['custom[1m]', 'other'])],
     })
-    const peer = await acpOpen('conductor:t', ENTRY, { acp: { peer: fake.app } }, deadline())
-    try {
-      const r = await acpPooledTurn(peer, ENTRY, { acp: { peer: fake.app } }, 'p', deadline(), {
-        by: 'conductor:t',
-        requestModel: 'dv/custom[1m]',
-      })
-      assert.equal(r.model, 'custom[1m]')
-      assert.deepEqual(fake.configSets, [{ configId: 'model-pick', value: 'custom[1m]' }])
-    } finally {
-      peer.close()
-    }
+    assert.equal(await turn(fake, undefined, 'dv/custom[1m]'), 'custom[1m]')
+    assert.deepEqual(fake.configSets, [{ configId: 'model-pick', value: 'custom[1m]' }])
   })
 })
 
