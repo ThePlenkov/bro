@@ -94,7 +94,7 @@ polls `readStateFile` every ~5s:
   Persistent bind failure (squatted port) retries on the same cadence —
   cheap, self-healing when the port frees. The dead generation's token
   rides the child's env (`BRO_SERVE_TOKEN`, adopted over a fresh mint)
-  — env, not argv, because /proc/<pid>/environ is same-UID like the
+  — env, not argv, because `/proc/<pid>/environ` is same-UID like the
   0600 serve.json while argv is world-readable. Clients holding the
   pre-crash token keep working; a fresh token would reopen the outage
   as a 401 window until the next auth refresh.
