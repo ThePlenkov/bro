@@ -284,6 +284,16 @@
     {
       "quality_gates": "pay_down_tech_debt",
       "quality_gates_doc": "Rung 3 — zero CodeScene findings: the strictest bar, goals enforced.",
+      "matching_content_path": "scripts/codescene-check.ts"
+    },
+    {
+      "quality_gates": "pay_down_tech_debt",
+      "quality_gates_doc": "Rung 3 — zero CodeScene findings: the strictest bar, goals enforced.",
+      "matching_content_path": "scripts/codescene-gate.ts"
+    },
+    {
+      "quality_gates": "pay_down_tech_debt",
+      "quality_gates_doc": "Rung 3 — zero CodeScene findings: the strictest bar, goals enforced.",
       "matching_content_path": "scripts/validate-skill.ts"
     },
     {
