@@ -7,6 +7,7 @@ import { join } from 'node:path'
 import {
   createProviderHandler,
   DEFAULT_PROVIDER_PORT,
+  ensureProvider,
   liveProviderState,
   providerStatePath,
   resolveProviderEndpoint,
@@ -67,7 +68,7 @@ describe('provider state — the host-level discovery file', () => {
 })
 
 describe('resolveProviderEndpoint — the cwd-aware pick', () => {
-  test('host listener is the fallback; repo provider serve wins inside its repo', (t) => {
+  test('one gateway per machine — the host listener wins unpinned', (t) => {
     tmpStateDir(t)
     writeStateFile(providerStatePath(), state(LIVE, 'http://127.0.0.1:4545', '/x', 'host-tok'))
     const { root, main } = initRepo('bro-prov-resolve-')
@@ -81,7 +82,24 @@ describe('resolveProviderEndpoint — the cwd-aware pick', () => {
       // a facade-only repo serve must not shadow the host listener
       writeServeState(main, state(LIVE, 'http://127.0.0.1:9000', main, 'facade-tok'))
       assert.equal(resolveProviderEndpoint(main, {})?.source, 'host')
-      // the provider-wired repo serve is the specific context — it wins
+      // even a provider-wired repo serve loses to the live host —
+      // reaching it takes the explicit base-url pin (escape hatch)
+      writeServeState(main, {
+        ...state(LIVE, 'http://127.0.0.1:9000', main, 'repo-tok'),
+        provider: true,
+      })
+      assert.equal(resolveProviderEndpoint(main, {})?.source, 'host')
+      assert.deepEqual(
+        resolveProviderEndpoint(main, { ANTHROPIC_BASE_URL: 'http://127.0.0.1:9000' }),
+        { url: 'http://127.0.0.1:9000', token: 'repo-tok', source: 'repo' }
+      )
+    })
+  })
+
+  test('no host listener — the repo provider serve is the fallback', (t) => {
+    tmpStateDir(t)
+    const { root, main } = initRepo('bro-prov-repo-')
+    inside(main, root, () => {
       writeServeState(main, {
         ...state(LIVE, 'http://127.0.0.1:9000', main, 'repo-tok'),
         provider: true,
@@ -234,6 +252,80 @@ describe('provider host — index, health, and the guarded /v1/* plane', () => {
     } finally {
       await close()
     }
+  })
+})
+
+describe('bro provider ensure — the self-starting apiKeyHelper', () => {
+  const PORT = 4546
+
+  test('a live recorded listener returns its token — no spawn', async (t) => {
+    tmpStateDir(t)
+    writeStateFile(providerStatePath(), state(LIVE, `http://127.0.0.1:${PORT}`, '/x', 'tok-live'))
+    let spawned = false
+    const token = await ensureProvider(PORT, {
+      probe: async () => ({ ok: true, pid: LIVE }),
+      spawnServer: () => {
+        spawned = true
+      },
+    })
+    assert.equal(token, 'tok-live')
+    assert.equal(spawned, false)
+  })
+
+  test('dead port spawns once, then prints the new token', async (t) => {
+    tmpStateDir(t)
+    let spawns = 0
+    let probes = 0
+    const token = await ensureProvider(PORT, {
+      probe: async () => {
+        probes += 1
+        if (probes < 2) return undefined
+        return { ok: true, pid: LIVE }
+      },
+      spawnServer: () => {
+        spawns += 1
+        // the real spawn writes provider.json asynchronously — the stub
+        // lands it between spawn and the next probe
+        writeStateFile(providerStatePath(), state(LIVE, `http://127.0.0.1:${PORT}`, '/x', 'tok-new'))
+      },
+      pollMs: 1,
+    })
+    assert.equal(spawns, 1)
+    assert.equal(token, 'tok-new')
+  })
+
+  test('a port squatter never receives the token — pid mismatch polls out', async (t) => {
+    tmpStateDir(t)
+    writeStateFile(providerStatePath(), state(LIVE, `http://127.0.0.1:${PORT}`, '/x', 'tok'))
+    await assert.rejects(
+      () =>
+        ensureProvider(PORT, {
+          probe: async () => ({ ok: true, pid: LIVE + 9_999 }),
+          spawnServer: () => {},
+          timeoutMs: 10,
+          pollMs: 1,
+        }),
+      /never came up/
+    )
+  })
+
+  test('a stale pid in the state file is dead, not live', async (t) => {
+    tmpStateDir(t)
+    writeStateFile(providerStatePath(), state(DEAD, `http://127.0.0.1:${PORT}`, '/x', 'tok'))
+    let spawns = 0
+    await assert.rejects(
+      () =>
+        ensureProvider(PORT, {
+          probe: async () => ({ ok: true, pid: DEAD }),
+          spawnServer: () => {
+            spawns += 1
+          },
+          timeoutMs: 10,
+          pollMs: 1,
+        }),
+      /never came up.*provider\.log/
+    )
+    assert.equal(spawns, 1)
   })
 })
 

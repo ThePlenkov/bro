@@ -6,7 +6,10 @@
  *   bro provider serve [--port <n>]   the machine-level listener — a
  *                                     thin host serving only GET /,
  *                                     /api/v1/health and the /v1/*
- *                                     byte-proxy, bound to the
+ *                                     plane (acp conductor when the
+ *                                     global config carries
+ *                                     serve.backend, else the upstream
+ *                                     byte-proxy), bound to the
  *                                     well-known port (default 4545)
  *                                     so ANTHROPIC_BASE_URL is a static
  *                                     settings.json entry. Repo-free:
@@ -14,26 +17,33 @@
  *                                     $XDG_STATE_HOME/bro/provider.json
  *                                     (0600) — same file-discipline and
  *                                     token trust model as serve.json.
+ *   bro provider ensure [--port <n>]  resolve-or-spawn the listener,
+ *                                     print the session token — the
+ *                                     self-starting apiKeyHelper: the
+ *                                     client is the supervision, no
+ *                                     dedicated server start exists
  *   bro provider url                  the endpoint to point
  *                                     ANTHROPIC_BASE_URL at
- *   bro provider token                the session token — the claude
- *                                     apiKeyHelper contract: token on
- *                                     stdout, failures on stderr
+ *   bro provider token                the session token — same helper
+ *                                     contract; self-heals through the
+ *                                     ensure path on a dead listener
  *   bro provider env [--json]         eval-able exports, or the
  *                                     settings.json block verbatim
  *
  * Endpoint resolution is cwd-aware (spec picks): ANTHROPIC_BASE_URL in
  * the environment pins the pick by exact url match — the apiKeyHelper
- * always agrees with the URL the client will call; unset, the cwd
- * repo's own provider-wired serve wins, else the host listener. The
- * /v1/* guard stack is serve's unchanged — loopback Host, then the
- * session token as Bearer OR x-api-key.
+ * always agrees with the URL the client will call; unset, the live
+ * host listener wins (one gateway per machine), else the cwd repo's
+ * own provider-wired serve as the fallback. The /v1/* guard stack is
+ * serve's unchanged — loopback Host, then the session token as Bearer
+ * OR x-api-key.
  */
+import { spawn } from 'node:child_process'
 import { randomBytes } from 'node:crypto'
-import { statSync } from 'node:fs'
+import { closeSync, mkdirSync, openSync, statSync } from 'node:fs'
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http'
 import { homedir } from 'node:os'
-import { join } from 'node:path'
+import { dirname, join, resolve } from 'node:path'
 import { holdFileLock, LockTimeout, pidAlive } from '@broject/core'
 import { flag, positionals } from './args.ts'
 import {
@@ -46,6 +56,7 @@ import {
   writeStateFile,
   type ServeState,
 } from './serve.ts'
+import { conductorConfig, conductorProxy } from './serve-conductor.ts'
 import { providerConfig, providerProxy } from './serve-provider.ts'
 
 /** The well-known port — the whole point of the host listener is that
@@ -100,9 +111,9 @@ function normalizeBase(raw: string): string {
  *   1. env.ANTHROPIC_BASE_URL pins by exact match — the apiKeyHelper
  *      must return the credential for the URL the client will call,
  *      never a guess (a wrong token is worse than a nonzero exit);
- *   2. unset — the cwd repo's own provider-wired serve (the specific
- *      context wins over the general one);
- *   3. else the live host listener — the always-on fallback;
+ *   2. unset — the live host listener (one gateway per machine);
+ *   3. else the cwd repo's own provider-wired serve — the back-compat
+ *      fallback and the per-run-port escape hatch;
  *   4. else undefined — the caller reports, nothing is invented. */
 export function resolveProviderEndpoint(
   dir: string,
@@ -123,29 +134,34 @@ export function resolveProviderEndpoint(
     }
     return undefined
   }
-  // a facade-only repo serve (provider flag absent) must not shadow
-  // the host listener — its /v1/* 404s
-  if (repo?.provider === true) {
-    return { url: repo.url, token: repo.token, source: 'repo' }
-  }
+  // host-first: one gateway per machine — the repo serve is the
+  // fallback, reached primarily through the explicit base-url pin (the
+  // per-run-port escape hatch). A facade-only repo serve (provider flag
+  // absent) never shadows — its /v1/* 404s
   if (host !== undefined) {
     return { url: host.url, token: host.token, source: 'host' }
+  }
+  if (repo?.provider === true) {
+    return { url: repo.url, token: repo.token, source: 'repo' }
   }
   return undefined
 }
 
-/** Resolve or report — the shared failure path for url/token/env. */
+/** The shared dead-end text — url/token/env all report the same way. */
+function noEndpointError(): string {
+  const base = process.env.ANTHROPIC_BASE_URL
+  return typeof base === 'string' && base.trim() !== ''
+    ? `no live bro provider listener at ${normalizeBase(base)} — the recorded listener is gone; ensure should have revived it`
+    : 'no live provider endpoint — `bro provider ensure` self-starts the host listener'
+}
+
+/** Resolve or report — the shared failure path for url/env. */
 function endpointOrExit(dir: string): ProviderEndpoint {
   const ep = resolveProviderEndpoint(dir, process.env)
   if (ep !== undefined) {
     return ep
   }
-  const base = process.env.ANTHROPIC_BASE_URL
-  console.error(
-    typeof base === 'string' && base.trim() !== ''
-      ? `error: no live bro provider listener at ${normalizeBase(base)} — the recorded listener is gone; restart it: bro provider serve`
-      : 'error: no live provider endpoint — start one: `bro provider serve` (host) or `bro serve` inside a repo'
-  )
+  console.error(`error: ${noEndpointError()}`)
   process.exit(1)
 }
 
@@ -258,20 +274,25 @@ function waitForSignal(server: Server): Promise<void> {
   })
 }
 
+/** Reject unknown options — `--prot 3000` must fail, not silently
+ *  serve on the default port nobody pointed a client at. */
+function rejectUnknownFlags(argv: string[], known: ReadonlySet<string>): void {
+  for (const a of argv) {
+    if (a === '--') break
+    if (a.startsWith('--') && !known.has(a.split('=', 1)[0]!)) {
+      console.error(`error: unknown option ${a}`)
+      usage()
+    }
+  }
+}
+
 async function cmdServe(argv: string[]): Promise<void> {
   const pos = positionals(argv, new Set(['--port']), { strict: true })
   if (pos.length > 0) {
     usage()
   }
+  rejectUnknownFlags(argv, new Set(['--port']))
   const port = parsePort(argv, DEFAULT_PROVIDER_PORT)
-
-  const cfg = providerConfig(process.env)
-  if (cfg === undefined) {
-    console.error(
-      'error: no upstream credential — set BRO_PROVIDER_API_KEY (or ANTHROPIC_API_KEY / ANTHROPIC_AUTH_TOKEN) in the server env'
-    )
-    process.exit(1)
-  }
 
   const statePath = providerStatePath()
   const live = liveProviderState()
@@ -281,6 +302,38 @@ async function cmdServe(argv: string[]): Promise<void> {
     )
     process.exit(1)
   }
+
+  // Config resolves at the GLOBAL layer only — the host service must
+  // not inherit whichever repo happened to spawn it, and a state dir
+  // inside a checkout (dotfiles $HOME, XDG_STATE_HOME under a repo)
+  // must not re-root it either: 'global' scans ~/.config/bro alone.
+  // serve.backend / providers.* for the gateway live in
+  // ~/.config/bro/config.* — a throwing conductorConfig (unknown backend
+  // name, non-acp entry) stays loud. Resolved before the lock so a
+  // refused start holds nothing.
+  const configDir = dirname(statePath)
+  const conductorCfg = conductorConfig(process.env, configDir, undefined, 'global')
+  const providerCfg = conductorCfg === undefined ? providerConfig(process.env) : undefined
+  if (conductorCfg === undefined && providerCfg === undefined) {
+    console.error(
+      'error: nothing to serve — no serve.backend in the global config and no upstream ' +
+        'credential in the server env (BRO_PROVIDER_API_KEY / ANTHROPIC_API_KEY / ANTHROPIC_AUTH_TOKEN)'
+    )
+    process.exit(1)
+  }
+  if (conductorCfg !== undefined) {
+    // sessions anchor at the operator's home — the state dir is for
+    // files, and a deletable checkout must never be an acp cwd
+    conductorCfg.cwd = homedir()
+  }
+  // the conductor plane carries dispose() — the pooled acp child pins
+  // the loop until its transport closes, so the 'exit' hook alone can
+  // never run; the shutdown path below calls it explicitly
+  const proxy: ((req: IncomingMessage, res: ServerResponse) => Promise<void>) & {
+    dispose?: () => void
+  } =
+    conductorCfg !== undefined ? conductorProxy(conductorCfg) : providerProxy(providerCfg!)
+
   // the lock makes the singleton atomic — live-state check → write has
   // a gap two starters could both pass through; O_EXCL create cannot
   const releaseLock = acquireProviderLock(statePath)
@@ -297,7 +350,7 @@ async function cmdServe(argv: string[]): Promise<void> {
   const token = randomBytes(32).toString('hex')
   const server = createServer(
     createProviderHandler({
-      proxy: providerProxy(cfg),
+      proxy,
       token,
       meta,
       statePathHint: statePath,
@@ -320,6 +373,9 @@ async function cmdServe(argv: string[]): Promise<void> {
         })
       })
     } catch (err) {
+      // process.exit never reaches the outer finally — a dead starter
+      // must not leave provider.json.lock held for the next one
+      releaseLock()
       console.error(`error: ${err instanceof Error ? err.message : String(err)}`)
       process.exit(1)
     }
@@ -338,16 +394,167 @@ async function cmdServe(argv: string[]): Promise<void> {
         `warning: ${statePath} is readable by group/other — the session token is exposed to other local users on this filesystem`
       )
     }
-    console.log(`bro provider — ${url} → ${cfg.upstream}`)
+    const plane =
+      conductorCfg !== undefined ? `acp conductor (${conductorCfg.backend})` : providerCfg!.upstream
+    console.log(`bro provider — ${url} → ${plane}`)
     console.log(`discovery: ${statePath} · ctrl-c to stop`)
     console.log(
-      `wire once into ~/.claude/settings.json: {"env":{"ANTHROPIC_BASE_URL":"${url}"},"apiKeyHelper":"bro provider token"}`
+      `wire once into ~/.claude/settings.json: {"env":{"ANTHROPIC_BASE_URL":"${url}"},"apiKeyHelper":"bro provider ensure"}`
     )
 
     await waitForSignal(server)
+    proxy.dispose?.()
     clearStateFile(statePath)
   } finally {
     releaseLock()
+  }
+}
+
+// --- ensure ------------------------------------------------------------------
+
+interface ProviderHealth {
+  ok?: boolean
+  pid?: number
+}
+
+function providerLogPath(statePath: string): string {
+  return join(dirname(statePath), 'provider.log')
+}
+
+async function defaultProbe(port: number): Promise<ProviderHealth | undefined> {
+  try {
+    const r = await fetch(`http://127.0.0.1:${port}/api/v1/health`, {
+      signal: AbortSignal.timeout(1_000),
+    })
+    if (!r.ok) return undefined
+    return (await r.json()) as ProviderHealth
+  } catch {
+    return undefined
+  }
+}
+
+/** Injectable seams — tests drive the probe/spawn without a real port
+ *  or a detached CLI re-exec (same shape as serve ensure). */
+export interface EnsureProviderDeps {
+  probe?: (port: number) => Promise<ProviderHealth | undefined>
+  spawnServer?: () => void
+  timeoutMs?: number
+  pollMs?: number
+}
+
+/** `bro provider ensure` — resolve-or-spawn THE host listener, then its
+ *  session token: the apiKeyHelper contract that makes the gateway
+ *  self-initiated. One listener per machine — the state file + lock
+ *  dedupe concurrent ensures; a healthy listener counts only when its
+ *  reported pid equals the recorded provider.json pid (a port squatter
+ *  never receives the token we hand out). */
+export async function ensureProvider(
+  port: number = DEFAULT_PROVIDER_PORT,
+  deps: EnsureProviderDeps = {}
+): Promise<string> {
+  const probe = deps.probe ?? defaultProbe
+  const timeoutMs = deps.timeoutMs ?? 20_000
+  const pollMs = deps.pollMs ?? 250
+  const statePath = providerStatePath()
+
+  const healthy = async (): Promise<string | undefined> => {
+    const h = await probe(port)
+    if (h?.ok !== true || typeof h.pid !== 'number') return undefined
+    // liveProviderState gates on pidAlive — a dead recorded pid is a
+    // stale file even while something healthy answers the port
+    const state = liveProviderState()
+    if (state === undefined || state.pid !== h.pid) return undefined
+    return state.token
+  }
+
+  const first = await healthy()
+  if (first !== undefined) return first
+
+  if (deps.spawnServer !== undefined) {
+    deps.spawnServer()
+  } else {
+    mkdirSync(dirname(statePath), { recursive: true })
+    const logFd = openSync(providerLogPath(statePath), 'a')
+    try {
+      // resolve() — argv[1] can be relative, and the child's cwd is
+      // reset to $HOME where a relative entry path resolves to nothing
+      spawn(process.execPath, [resolve(process.argv[1]!), 'provider', 'serve', '--port', String(port)], {
+        // the operator's home — never the caller's cwd: a deleted
+        // worktree must not orphan the host service's anchor
+        cwd: homedir(),
+        detached: true,
+        stdio: ['ignore', logFd, logFd],
+        env: process.env,
+      }).unref()
+    } finally {
+      closeSync(logFd)
+    }
+  }
+
+  const deadline = Date.now() + timeoutMs
+  while (Date.now() < deadline) {
+    await new Promise((r) => setTimeout(r, pollMs))
+    const tok = await healthy()
+    if (tok !== undefined) return tok
+  }
+  throw new Error(
+    `bro provider serve never came up on ${port} — see ${providerLogPath(statePath)}`
+  )
+}
+
+/** Which port a token self-heal may spawn on: unset base → the
+ *  well-known default; a loopback pin → its port; a remote base can
+ *  never be a local spawn — fail closed, never bind it. */
+function ensurePort(base: string | undefined): number | undefined {
+  if (base === undefined || base.trim() === '') return DEFAULT_PROVIDER_PORT
+  try {
+    const u = new URL(base.trim())
+    if (u.hostname !== '127.0.0.1' && u.hostname !== 'localhost' && u.hostname !== '[::1]') {
+      return undefined
+    }
+    if (u.port === '') return u.protocol === 'https:' ? 443 : 80
+    const p = Number(u.port)
+    // a :0 pin means "any port" to a bind but nothing to a probe — a
+    // self-heal spawning on a random port could never be found again
+    return p === 0 ? undefined : p
+  } catch {
+    return undefined
+  }
+}
+
+async function cmdEnsure(argv: string[]): Promise<void> {
+  const pos = positionals(argv, new Set(['--port']), { strict: true })
+  if (pos.length > 0) {
+    usage()
+  }
+  rejectUnknownFlags(argv, new Set(['--port']))
+  const flagPort = parsePort(argv, -1)
+  if (flagPort === 0) {
+    console.error('error: ensure needs a fixed port — --port 0 can never be probed back')
+    process.exit(2)
+  }
+  try {
+    // the client's pin decides WHICH listener matters: a live endpoint —
+    // the host listener, or an explicitly pinned repo serve — already
+    // holds the token the client will actually present
+    const ep = resolveProviderEndpoint(process.cwd(), process.env)
+    if (ep !== undefined) {
+      console.log(ep.token)
+      return
+    }
+    // nothing live → self-start on --port, else the pinned loopback
+    // port, else the well-known host port
+    const port = flagPort !== -1 ? flagPort : ensurePort(process.env.ANTHROPIC_BASE_URL)
+    if (port === undefined) {
+      throw new Error(
+        'ANTHROPIC_BASE_URL is not a usable loopback target (remote or :0) — refusing to bind a local listener for it'
+      )
+    }
+    // apiKeyHelper contract: the token alone on stdout — no decoration
+    console.log(await ensureProvider(port))
+  } catch (err) {
+    console.error(`error: ${err instanceof Error ? err.message : String(err)}`)
+    process.exit(1)
   }
 }
 
@@ -361,13 +568,32 @@ function cmdUrl(argv: string[]): void {
   console.log(endpointOrExit(process.cwd()).url)
 }
 
-function cmdToken(argv: string[]): void {
+async function cmdToken(argv: string[]): Promise<void> {
   const pos = positionals(argv, new Set(), { strict: true })
   if (pos.length > 0) {
     usage()
   }
+  const cwd = process.cwd()
+  let ep = resolveProviderEndpoint(cwd, process.env)
+  if (ep === undefined) {
+    // self-heal: a dead listener spawns on demand — the apiKeyHelper
+    // IS the supervision, there is no separate start step
+    const port = ensurePort(process.env.ANTHROPIC_BASE_URL)
+    if (port !== undefined) {
+      try {
+        await ensureProvider(port)
+      } catch (err) {
+        console.error(`note: listener self-start failed — ${err instanceof Error ? err.message : String(err)}`)
+      }
+      ep = resolveProviderEndpoint(cwd, process.env)
+    }
+  }
+  if (ep === undefined) {
+    console.error(`error: ${noEndpointError()}`)
+    process.exit(1)
+  }
   // apiKeyHelper contract: the token alone on stdout — no decoration
-  console.log(endpointOrExit(process.cwd()).token)
+  console.log(ep.token)
 }
 
 function cmdEnv(argv: string[]): void {
@@ -382,7 +608,7 @@ function cmdEnv(argv: string[]): void {
   const ep = endpointOrExit(process.cwd())
   const block = {
     env: { ANTHROPIC_BASE_URL: ep.url },
-    apiKeyHelper: 'bro provider token',
+    apiKeyHelper: 'bro provider ensure',
   }
   if (json) {
     // the settings.json block verbatim — mergeable, jq-able
@@ -403,12 +629,14 @@ function usage(): never {
   bro provider serve [--port <n>]   host-level provider listener — /v1/* only,
                                     state at $XDG_STATE_HOME/bro/provider.json
                                     (default port ${DEFAULT_PROVIDER_PORT})
+  bro provider ensure [--port <n>]  resolve-or-spawn the host listener, print
+                                    its token — the self-starting apiKeyHelper
   bro provider url                  the endpoint ANTHROPIC_BASE_URL points at
-  bro provider token                the session token — claude apiKeyHelper
+  bro provider token                the session token — self-heals like ensure
   bro provider env [--json]         eval-able exports, or the settings.json block
 
 Resolution is cwd-aware: ANTHROPIC_BASE_URL pins by exact url, else the
-cwd repo's provider-wired serve, else the host listener.`)
+live host listener, else the cwd repo's provider-wired serve.`)
   process.exit(2)
 }
 
@@ -424,11 +652,14 @@ export async function runProviderCommand(argv: string[]): Promise<void> {
     case 'serve':
       await cmdServe(rest)
       return
+    case 'ensure':
+      await cmdEnsure(rest)
+      return
     case 'url':
       cmdUrl(rest)
       return
     case 'token':
-      cmdToken(rest)
+      await cmdToken(rest)
       return
     case 'env':
       cmdEnv(rest)

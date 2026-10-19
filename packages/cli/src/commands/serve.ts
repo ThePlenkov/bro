@@ -429,8 +429,14 @@ export interface ServeDeps {
   /** `/v1/*` Messages-API provider proxy (bro-om6m8) — raw-stream,
    *  below the ServeResponse envelope: real request bodies exceed the
    *  256KB read cap and SSE answers must pipe. Absent means no
-   *  upstream credential — the route 404s like any unknown path. */
-  provider?: (req: IncomingMessage, res: ServerResponse) => Promise<void>
+   *  upstream credential — the route 404s like any unknown path.
+   *  `dispose` tears down any pooled backend the handler holds — a
+   *  retained acp transport pins the event loop past `server.close()`,
+   *  so shutdown calls it explicitly (the 'exit' hook can never fire
+   *  while the child's handles are ref'd). */
+  provider?: ((req: IncomingMessage, res: ServerResponse) => Promise<void>) & {
+    dispose?: () => void
+  }
 }
 
 export interface ServeResponse {
@@ -1860,9 +1866,8 @@ export async function runServeCommand(argv: string[]): Promise<void> {
   // Generated per serve, never printed: clients read it out of the
   // 0600 serve.json below, so possession implies same-UID file access
   const token = randomBytes(32).toString('hex')
-  const server = createServer(
-    createServeHandler(realDeps(dir, env, { conductorCfg, providerCfg }), meta, token)
-  )
+  const deps = realDeps(dir, env, { conductorCfg, providerCfg })
+  const server = createServer(createServeHandler(deps, meta, token))
 
   try {
     const url = await new Promise<string>((resolve, reject) => {
@@ -1919,6 +1924,9 @@ export async function runServeCommand(argv: string[]): Promise<void> {
       process.once('SIGINT', shutdown)
       process.once('SIGTERM', shutdown)
     })
+    // kill the pooled acp transport before the broker — its ref'd child
+    // handles are what would otherwise pin the loop past server.close()
+    deps.provider?.dispose?.()
     await broker?.close()
     clearServeState(dir)
   } finally {

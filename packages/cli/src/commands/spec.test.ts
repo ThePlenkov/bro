@@ -20,6 +20,16 @@ import type { ConnectorCtx, SpecStore, TaskRow, TaskStore } from '@broject/core'
 // or the code-under-test spawns — scrub once, restore after the file
 after(scrubEnv())
 
+// the global layer reads $XDG_CONFIG_HOME/bro — pin it to an empty tmp
+// for the whole file so a dev machine's real user config can't leak in
+const XDG = mkdtempSync(join(tmpdir(), 'bro-xdg-'))
+const prevXdg = process.env.XDG_CONFIG_HOME
+process.env.XDG_CONFIG_HOME = XDG
+process.on('exit', () => {
+  if (prevXdg === undefined) delete process.env.XDG_CONFIG_HOME
+  else process.env.XDG_CONFIG_HOME = prevXdg
+})
+
 for (const c of SPEC_CONNECTORS) {
   registerConnector(c)
 }

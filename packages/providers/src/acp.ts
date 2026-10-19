@@ -759,6 +759,13 @@ export async function acpOpen(
     }
     const proc = spawn(bin, argv.slice(1), { stdio: 'pipe', env: acpChildEnv() })
     child = proc
+    // a pooled transport must not pin the host's event loop — the
+    // server closing drains the process, 'exit' still fires, and the
+    // conductor's close() hook reaps the child on the way out
+    proc.unref()
+    for (const s of proc.stdio) {
+      ;(s as unknown as { unref?: () => void } | null)?.unref?.()
+    }
     proc.once('error', (e) => {
       spawnError = e.message
     })

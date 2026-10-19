@@ -1300,7 +1300,14 @@ export interface ConfigLayersResult {
 /** Reads the raw layer objects loadConfig merges — exported so `bro
  *  doctor` reports effective layers and per-section provenance from the
  *  same load path instead of re-reading files. */
-export function loadConfigLayers(cwd: string = process.cwd()): ConfigLayersResult {
+export function loadConfigLayers(
+  cwd: string = process.cwd(),
+  /** Restrict the scan to these layers — the host gateway reads ONLY the
+   *  global file so a state dir inside a checkout (or a dotfiles $HOME)
+   *  can't smuggle repo-level serve.backend/providers into the shared
+   *  listener's config. */
+  only?: readonly ConfigLayerName[]
+): ConfigLayersResult {
   const base = resolve(cwd)
   // Linked worktrees share the main checkout's machine-local config —
   // bro.config.local.* is gitignored, so a fresh `git worktree add`
@@ -1346,9 +1353,10 @@ export function loadConfigLayers(cwd: string = process.cwd()): ConfigLayersResul
       }
     }
   }
-  scan('global', [globalConfigDir()])
-  scan('project', projectDirs)
-  scan('local', projectDirs)
+  const want = (layer: ConfigLayerName): boolean => only === undefined || only.includes(layer)
+  if (want('global')) scan('global', [globalConfigDir()])
+  if (want('project')) scan('project', projectDirs)
+  if (want('local')) scan('local', projectDirs)
   return { layers, broken }
 }
 
@@ -1356,7 +1364,9 @@ export function loadConfig(
   cwd: string = process.cwd(),
   /** Plugin-registered section schemas — key = configKey, applied over the
    *  merged raw. A throwing schema falls back to schema(undefined). */
-  sections: Record<string, ConfigSection<unknown>> = {}
+  sections: Record<string, ConfigSection<unknown>> = {},
+  /** Layer subset — forwarded to loadConfigLayers. */
+  only?: readonly ConfigLayerName[]
 ): BroConfig & Record<string, unknown> {
   // every exit path applies section schemas — a registered plugin
   // section must resolve to its defaults even with no usable config file
@@ -1365,7 +1375,7 @@ export function loadConfig(
     applySections(config, {}, sections)
     return config
   }
-  const { layers, broken } = loadConfigLayers(cwd)
+  const { layers, broken } = loadConfigLayers(cwd, only)
   if (layers.length === 0) {
     // a config that exists but fails never silently enables beads —
     // jsonl-only in that case, defaults otherwise

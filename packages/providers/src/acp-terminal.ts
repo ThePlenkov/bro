@@ -166,6 +166,14 @@ export class AcpTerminals {
       entry.out = buf
     }
     const wire = (c: ChildProcess): void => {
+      // a terminal must not pin the host's event loop — the parent
+      // draining (server shutdown) is the exit signal; terminals.dispose()
+      // on peer close still reaps it. Every spawn site (first attempt,
+      // catch fallback, error re-spawn) flows through wire().
+      c.unref()
+      for (const s of c.stdio) {
+        ;(s as unknown as { unref?: () => void } | null)?.unref?.()
+      }
       c.stdout?.on('data', append)
       c.stderr?.on('data', append)
       c.once('error', (err) => {
@@ -197,6 +205,8 @@ export class AcpTerminals {
       c.once('exit', (exitCode, signal) => {
         settle(exitCode, signal)
         entry.closeTimer = setTimeout(() => this.flushEntry(entry), ORPHAN_CLOSE_GRACE_MS)
+        // grace is best-effort cleanup — it must not delay host shutdown
+        entry.closeTimer.unref()
       })
       c.once('close', (exitCode, signal) => {
         settle(exitCode, signal)
