@@ -101,7 +101,18 @@ export class AcpTerminals {
         env[e.name] = e.value
       }
     }
-    const child = spawn(ctx.params.command, ctx.params.args ?? [], {
+    const args = ctx.params.args ?? []
+    /** argv verbatim when the agent structures it — but agents like devin
+     *  put the whole shell line in `command` with args empty ('cd repo &&
+     *  cmd …'), where execve of the literal string is ENOENT every time;
+     *  a no-args command runs through the platform shell instead. */
+    const [file, argv]: [string, string[]] =
+      args.length > 0
+        ? [ctx.params.command, args]
+        : process.platform === 'win32'
+          ? ['cmd', ['/d', '/s', '/c', ctx.params.command]]
+          : ['sh', ['-c', ctx.params.command]]
+    const child = spawn(file, argv, {
       cwd: ctx.params.cwd ?? undefined,
       env,
       stdio: ['ignore', 'pipe', 'pipe'],

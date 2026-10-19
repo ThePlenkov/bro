@@ -39,6 +39,19 @@ describe('AcpTerminals', () => {
     }
   })
 
+  test('a whole shell line in command (args empty) runs through the shell', async () => {
+    const t = new AcpTerminals()
+    try {
+      const { terminalId } = await t.create(ctx(create('echo shell-line && echo works')))
+      const status = await t.waitForExit(ctx(wait(terminalId)))
+      assert.equal(status.exitCode, 0)
+      const snap = await t.output(ctx(out(terminalId)))
+      assert.match(snap.output, /shell-line\nworks/)
+    } finally {
+      t.dispose()
+    }
+  })
+
   test('output polls while the child still runs, exitStatus lands after', async () => {
     const t = new AcpTerminals()
     try {

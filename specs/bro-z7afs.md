@@ -21,7 +21,10 @@ the capability is true. Missing: bro-side handlers and the flag.
 New module `packages/providers/src/acp-terminal.ts` — an `AcpTerminals`
 registry scoped to one connection:
 
-- `terminal/create` → spawn `command + args` (no shell — argv verbatim),
+- `terminal/create` → spawn `command + args` — verbatim argv when `args`
+  is non-empty; a lone `command` line (devin puts the whole shell string
+  in `command` with no args) runs through `sh -c` — execve of it is
+  always ENOENT, which is how invisible tasks happened,
   `cwd`/`env` applied over `process.env` (agent env names on a security
   denylist — `PATH`, `LD_*`, `NODE_OPTIONS`, … — are dropped); capture
   stdout+stderr interleaved into a byte-bounded buffer (`outputByteLimit`
