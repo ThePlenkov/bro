@@ -187,18 +187,31 @@ export function mainWorktreeRoot(dir: string): string | null {
       return candidate
     }
     // an external gitdir literally named `.git` — its parent is not a
-    // worktree; the fallbacks below answer what git itself reports
+    // worktree; the fallback below answers what git itself reports
   }
+  return worktreeListMain(dir, common, real)
+}
+
+/** `git worktree list`'s first record — the main worktree as git
+ *  itself reports it, the last resort when neither the marker scan
+ *  nor the `.git`-parent shortcut settled the anchor. `-z` terminates
+ *  every FIELD with NUL, so a record ends with an empty field
+ *  (`\0\0`); the plain form C-quotes paths carrying specials. null
+ *  when the first record is bare or IS the common dir — a moved
+ *  gitdir reports itself, and git storage is no anchor either way. */
+function worktreeListMain(
+  dir: string,
+  common: string,
+  real: (p: string) => string
+): string | null {
   const z = gitTry(['-C', dir, 'worktree', 'list', '--porcelain', '-z'])
   if (z.code === 0 && z.out.startsWith('worktree ')) {
-    // -z terminates every FIELD with NUL — the record ends with \0\0
     const recordEnd = z.out.indexOf('\0\0')
     const fields = z.out.slice(0, recordEnd === -1 ? undefined : recordEnd).split('\0')
     if (fields.includes('bare')) {
       return null
     }
     const first = fields[0]!.slice('worktree '.length)
-    // a moved gitdir reports itself — git storage is no anchor either
     return real(first) === real(common) ? null : first
   }
   // no -z support (pre-2.36 git): the same first record, possibly
@@ -235,30 +248,21 @@ function checkoutByMarker(
   } catch {
     return null
   }
+  // the comparison target is loop-invariant — canonicalize it once
+  // per level, not once per directory entry
+  const realCommon = real(common)
   const descend: string[] = []
   for (const name of names) {
     if (name === '.git' || name === 'node_modules') {
       continue
     }
     const sub = join(root, name)
-    try {
-      if (!statSync(sub).isDirectory() || real(sub) === real(common)) {
-        continue
-      }
-      const marker = join(sub, '.git')
-      try {
-        if (!statSync(marker).isFile()) {
-          continue // .git dir — sub is a checkout; prune
-        }
-        const m = /^gitdir:\s*(.+)$/m.exec(readFileSync(marker, 'utf8'))
-        if (m !== null && real(resolve(sub, m[1].trim())) === real(common)) {
-          return sub
-        }
-      } catch {
-        descend.push(sub) // no readable .git — a checkout may nest below
-      }
-    } catch {
-      // unreadable entry — skip
+    const verdict = markerVerdict(sub, realCommon, real)
+    if (verdict === 'hit') {
+      return sub
+    }
+    if (verdict === 'descend') {
+      descend.push(sub)
     }
   }
   for (const sub of descend) {
@@ -268,6 +272,36 @@ function checkoutByMarker(
     }
   }
   return null
+}
+
+/** One entry's verdict under the marker scan: `hit` — its `.git` FILE
+ *  claims the common dir, the moved gitdir's checkout found;
+ *  `descend` — no readable `.git` entry, a checkout may nest below;
+ *  `prune` — not a directory, the common dir itself, a checkout of
+ *  its own (`.git` dir), or a worktree of some other repo — the
+ *  answer never nests inside either. */
+function markerVerdict(
+  sub: string,
+  realCommon: string,
+  real: (p: string) => string
+): 'hit' | 'descend' | 'prune' {
+  try {
+    if (!statSync(sub).isDirectory() || real(sub) === realCommon) {
+      return 'prune'
+    }
+  } catch {
+    return 'prune' // unreadable entry — skip
+  }
+  const marker = join(sub, '.git')
+  try {
+    if (!statSync(marker).isFile()) {
+      return 'prune' // .git dir — sub is a checkout; prune
+    }
+    const m = /^gitdir:\s*(.+)$/m.exec(readFileSync(marker, 'utf8'))
+    return m !== null && real(resolve(sub, m[1].trim())) === realCommon ? 'hit' : 'prune'
+  } catch {
+    return 'descend' // no readable .git — a checkout may nest below
+  }
 }
 
 /** The drift comparison ref — landed spec vs landed code, so a feature

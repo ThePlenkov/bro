@@ -1775,7 +1775,10 @@ export async function ensureServe(
     mkdirSync(logDir, { recursive: true })
     const logFd = openSync(join(logDir, 'serve.log'), 'a')
     try {
-      spawn(process.execPath, [process.argv[1]!, 'serve', '--port', String(port)], {
+      // ENTRY_FILE, not argv[1] — the child resolves its script under
+      // `cwd: repo`, so a relative argv[1] (CLI launched from a linked
+      // worktree) would point under the main root and never start
+      spawn(process.execPath, [ENTRY_FILE, 'serve', '--port', String(port)], {
         cwd: repo,
         detached: true,
         stdio: ['ignore', logFd, logFd],
