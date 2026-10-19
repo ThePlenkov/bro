@@ -4,7 +4,7 @@
  */
 import { spawnSync } from 'node:child_process'
 import { realpathSync } from 'node:fs'
-import { resolve } from 'node:path'
+import { basename, dirname, resolve } from 'node:path'
 
 /** `git -C` must select the repo on argv alone — an inherited
  *  GIT_DIR/GIT_WORK_TREE/GIT_COMMON_DIR silently retargets the probe at
@@ -97,6 +97,47 @@ export function worktreeGitDir(dir: string): string | null {
   const f = gitTry(['-C', dir, 'rev-parse', '--git-dir'])
   const p = f.code === 0 ? f.out.trim() : ''
   return p === '' ? null : resolve(dir, p)
+}
+
+/** The MAIN worktree's root, absolute — linked worktrees share the
+ *  repo's common dir, but an anchor that must outlive any one checkout
+ *  (a serve's recorded dir, a respawned process's cwd) belongs to the
+ *  primary tree. `dirname(common)` is the answer for the ordinary
+ *  `<main>/.git` layout — every worktree resolves the same common dir.
+ *  When the common dir is not literally named `.git` (separate-git-dir
+ *  exotica), `worktree list` reports the main worktree first — git
+ *  guarantees the order. null outside a repository. */
+export function mainWorktreeRoot(dir: string): string | null {
+  const common = gitCommonDir(dir)
+  if (common === null) {
+    return null
+  }
+  if (basename(common) === '.git') {
+    return dirname(common)
+  }
+  const z = gitTry(['-C', dir, 'worktree', 'list', '--porcelain', '-z'])
+  if (z.code === 0 && z.out.startsWith('worktree ')) {
+    const end = z.out.indexOf('\0')
+    if (end !== -1) {
+      return z.out.slice('worktree '.length, end)
+    }
+  }
+  // no -z support (pre-2.36 git): the same first entry, possibly
+  // C-quoted when the path carries specials
+  const p = gitTry(['-C', dir, 'worktree', 'list', '--porcelain'])
+  const m = p.code === 0 ? /^worktree (.+)$/m.exec(p.out) : null
+  if (m === null) {
+    return null
+  }
+  const raw = m[1]!.trim()
+  if (raw.startsWith('"') && raw.endsWith('"')) {
+    try {
+      return JSON.parse(raw) as string
+    } catch {
+      return raw.slice(1, -1)
+    }
+  }
+  return raw
 }
 
 /** The drift comparison ref — landed spec vs landed code, so a feature

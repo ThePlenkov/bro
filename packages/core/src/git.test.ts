@@ -10,6 +10,7 @@ import {
   gitLogPathRecords,
   gitLogStamp,
   gitUpstreamBehind,
+  mainWorktreeRoot,
 } from './git.ts'
 import { scrubEnv, testGit } from './testkit.ts'
 
@@ -349,5 +350,38 @@ describe('gitUpstreamBehind', () => {
       git(dir, ['checkout', '-q', '--detach', 'HEAD'])
       assert.equal(gitUpstreamBehind(dir), null)
     })
+  })
+})
+
+describe('mainWorktreeRoot', () => {
+  test('the main checkout resolves to itself, a subdirectory too', () => {
+    withRepo((dir) => {
+      assert.equal(mainWorktreeRoot(dir), dir)
+      mkdirSync(join(dir, 'deep', 'nest'), { recursive: true })
+      assert.equal(mainWorktreeRoot(join(dir, 'deep', 'nest')), dir)
+    })
+  })
+
+  test('a linked worktree resolves to the main checkout, not itself', () => {
+    withRepo((dir) => {
+      const linked = mkdtempSync(join(tmpdir(), 'bro-git-linked-'))
+      try {
+        git(dir, ['worktree', 'add', '-q', linked, '-b', 'work/x'])
+        assert.equal(mainWorktreeRoot(linked), dir)
+        mkdirSync(join(linked, 'sub'), { recursive: true })
+        assert.equal(mainWorktreeRoot(join(linked, 'sub')), dir)
+      } finally {
+        rmSync(linked, { recursive: true, force: true })
+      }
+    })
+  })
+
+  test('outside a repository resolves null, never a throw', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'bro-git-norepo-'))
+    try {
+      assert.equal(mainWorktreeRoot(dir), null)
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
   })
 })

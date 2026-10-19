@@ -1,8 +1,9 @@
 import { describe, test } from 'node:test'
 import assert from 'node:assert/strict'
 import { realpathSync } from 'node:fs'
-import { initRepo, insideAsync } from './testrepo.ts'
-import { ensureServe, writeServeState } from './serve.ts'
+import { join } from 'node:path'
+import { git, initRepo, insideAsync } from './testrepo.ts'
+import { ensureServe, watchdogVerdict, writeServeState } from './serve.ts'
 
 const PORT = 44928
 
@@ -117,6 +118,101 @@ describe('bro serve ensure', () => {
       })
     })())
 
+  test('a linked worktree accepts the serve anchored to the main root', () =>
+    (async () => {
+      const { root, main } = initRepo('ensure-')
+      await insideAsync(main, root, async () => {
+        const linked = join(root, 'linked')
+        git(['worktree', 'add', '-q', linked, '-b', 'work/x'], main)
+        // the serve anchors dir to the MAIN checkout; serve.json lives
+        // in the common dir both worktrees share
+        writeServeState(linked, {
+          pid: process.pid,
+          url: `http://127.0.0.1:${PORT}`,
+          dir: realpathSync(main),
+          startedAt: new Date().toISOString(),
+          token: 'tok-live',
+        })
+        let spawned = false
+        const token = await ensureServe(linked, PORT, {
+          probe: async () => ({ ok: true, dir: realpathSync(main), pid: process.pid }),
+          spawnServer: () => {
+            spawned = true
+          },
+        })
+        assert.equal(token, 'tok-live')
+        assert.equal(spawned, false)
+      })
+    })())
+
+  test('a serve anchored to a deleted path is stopped, then respawned', () =>
+    (async () => {
+      const { root, main } = initRepo('ensure-')
+      await insideAsync(main, root, async () => {
+        const gone = join(root, 'deleted-worktree')
+        const stalePid = process.pid + 10_001
+        const newPid = stalePid + 1
+        writeServeState(main, {
+          pid: stalePid,
+          url: `http://127.0.0.1:${PORT}`,
+          dir: gone,
+          startedAt: new Date().toISOString(),
+          token: 'tok-old',
+        })
+        const stopped: number[] = []
+        let spawns = 0
+        let probes = 0
+        const token = await ensureServe(main, PORT, {
+          probe: async () => {
+            probes += 1
+            // first: the stale generation still answers on its dead dir;
+            // after the respawn the new serve reports the main root
+            if (probes === 1) return { ok: true, dir: gone, pid: stalePid }
+            return { ok: true, dir: realpathSync(main), pid: newPid }
+          },
+          stopServe: async (pid) => {
+            stopped.push(pid)
+          },
+          spawnServer: () => {
+            spawns += 1
+            writeServeState(main, {
+              pid: newPid,
+              url: `http://127.0.0.1:${PORT}`,
+              dir: realpathSync(main),
+              startedAt: new Date().toISOString(),
+              token: 'tok-new',
+            })
+          },
+          pollMs: 1,
+        })
+        assert.equal(token, 'tok-new')
+        assert.equal(spawns, 1)
+        assert.deepEqual(stopped, [stalePid])
+      })
+    })())
+
+  test('a pid-matching serve on a live other dir is still ours — token, no respawn', () =>
+    (async () => {
+      const { root, main } = initRepo('ensure-')
+      await insideAsync(main, root, async () => {
+        // pre-fix residue: the recorded dir is a linked worktree that
+        // still exists — the serve is functional, so the hand-out must
+        // not refuse it
+        writeServeState(main, {
+          pid: process.pid,
+          url: `http://127.0.0.1:${PORT}`,
+          dir: root,
+          startedAt: new Date().toISOString(),
+          token: 'tok-live',
+        })
+        const token = await ensureServe(main, PORT, {
+          probe: async () => ({ ok: true, dir: root, pid: process.pid }),
+          spawnServer: () => assert.fail('must not respawn a working serve'),
+        })
+        assert.equal(token, 'tok-live')
+      })
+    })())
+
   test('outside a repo there is no anchor — loud, not empty', () =>
     (async () => {
       await assert.rejects(
@@ -127,4 +223,24 @@ describe('bro serve ensure', () => {
         /not inside a git repository/
       )
     })())
+})
+
+describe('watchdogVerdict', () => {
+  const record = {
+    pid: 7,
+    url: 'http://127.0.0.1:1',
+    dir: '/repo',
+    startedAt: 't',
+    token: 't',
+  }
+
+  test('a retracted record or a superseding pid retires the leg', () => {
+    assert.equal(watchdogVerdict(undefined, 7), 'retire')
+    assert.equal(watchdogVerdict({ ...record, pid: 9 }, 7), 'retire')
+  })
+
+  test('a live recorded pid keeps watching; a dead one respawns', () => {
+    assert.equal(watchdogVerdict(record, 7, () => true), 'alive')
+    assert.equal(watchdogVerdict(record, 7, () => false), 'respawn')
+  })
 })
