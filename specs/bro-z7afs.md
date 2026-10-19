@@ -26,7 +26,8 @@ registry scoped to one connection:
   in `command` with no args) runs through `sh -c` — execve of it is
   always ENOENT, which is how invisible tasks happened,
   `cwd`/`env` applied over `process.env` (agent env names on a security
-  denylist — `PATH`, `LD_*`, `NODE_OPTIONS`, … — are dropped); capture
+  denylist — `PATH`, `LD_*`, `NODE_OPTIONS`, … — are dropped, matched
+  case-insensitively); capture
   stdout+stderr interleaved into a byte-bounded buffer (`outputByteLimit`
   honored in bytes, truncate from the front on a UTF-8 boundary — never a
   partial character); returns `{ terminalId }`.

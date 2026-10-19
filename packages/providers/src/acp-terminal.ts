@@ -50,7 +50,9 @@ const ORPHAN_CLOSE_GRACE_MS = 500
 /** Agent-supplied env merges over the host env but may not hijack it —
  *  a compromised agent sending `NODE_OPTIONS=--require …` or its own
  *  `PATH` would inject code into every child we spawn (CWE-78). These
- *  names are dropped from the agent's list, silently. */
+ *  names are dropped from the agent's list, silently — matched
+ *  case-insensitively, since win32 env names ignore case and `Path`
+ *  hijacks `PATH` there just the same. */
 const ENV_DENYLIST: ReadonlySet<string> = new Set([
   'PATH',
   'NODE_OPTIONS',
@@ -97,7 +99,7 @@ export class AcpTerminals {
   ) => {
     const env = { ...process.env }
     for (const e of ctx.params.env ?? []) {
-      if (!ENV_DENYLIST.has(e.name)) {
+      if (!ENV_DENYLIST.has(e.name.toUpperCase())) {
         env[e.name] = e.value
       }
     }

@@ -140,6 +140,30 @@ describe('AcpTerminals', () => {
     }
   })
 
+  test('denylist matches case-insensitively — case variants cannot smuggle hijack vars', async () => {
+    const t = new AcpTerminals()
+    try {
+      // win32 treats Path == PATH — a case-sensitive has() leaks the
+      // hijack; brO_t_var proves normal mixed-case names still merge
+      const req: CreateTerminalRequest = {
+        sessionId: 'sess-1',
+        command: 'sh',
+        args: ['-c', 'echo "p=[$pAtH] v=[$brO_t_var]"'],
+        env: [
+          { name: 'pAtH', value: '/evil' },
+          { name: 'brO_t_var', value: 'yes' },
+        ],
+      }
+      const { terminalId } = await t.create(ctx(req))
+      const status = await t.waitForExit(ctx(wait(terminalId)))
+      assert.equal(status.exitCode, 0)
+      const snap = await t.output(ctx(out(terminalId)))
+      assert.match(snap.output, /p=\[\] v=\[yes\]/)
+    } finally {
+      t.dispose()
+    }
+  })
+
   test('release resolves a pending wait_for_exit with the real status', async () => {
     const t = new AcpTerminals()
     try {
