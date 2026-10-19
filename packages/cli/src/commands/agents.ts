@@ -1067,6 +1067,48 @@ function advisoryPromptText(
   }
 }
 
+/** The similarity floor: resolve the effective prompt, compare it
+ *  against same-repo live work, warn on stderr per near-identical
+ *  suspect. Advisory by contract — every leg degrades, nothing here
+ *  throws into the spawn path. */
+function adviseDuplicates(
+  dir: string,
+  env: AgentConnectorEnv,
+  beads: string,
+  molStep: string,
+  prompt: string | undefined,
+  promptFile: string | undefined,
+  argv: string[]
+): void {
+  // mirror spawnStepAgent's connector resolution — the stored-prompt
+  // branch needs resolvePrompt's backend gate; a resolution failure is
+  // the spawn's error to raise, the advisory just degrades
+  let connName: string | undefined
+  try {
+    const profileName = flag(argv, '--profile')
+    const profile = profileName === undefined ? undefined : fleetProfileOf(env, profileName)
+    connName = resolveAgentConnector(
+      { dir },
+      { connector: flag(argv, '--connector') ?? profile?.backend },
+      env
+    ).name
+  } catch {
+    connName = undefined
+  }
+  const warnText = advisoryPromptText(dir, beads, molStep, prompt, promptFile, connName)
+  if (warnText === undefined) {
+    return
+  }
+  // --for's own registry row is excluded — the guards carry that verdict
+  for (const s of collectDuplicateSuspects(dir, env, { excludeStep: molStep })) {
+    if (promptSimilar(warnText, s.text)) {
+      console.error(
+        `warning: possible duplicate — ${s.label} reads near-identical to this prompt`
+      )
+    }
+  }
+}
+
 /** `bro agents run <prompt>` — the ad-hoc front door (spec bro-fqen0).
  *  Same spawn machinery as `up <step>`; the only difference is the
  *  minted `adhoc-<hex>` step — a phantom id, never a bead: no claim,
@@ -1102,35 +1144,11 @@ async function cmdRun(dir: string, env: AgentConnectorEnv, argv: string[]): Prom
   }
   const molStep = forBead ?? `adhoc-${randomBytes(4).toString('hex')}`
   const beads = flag(argv, '--beads-dir') ?? beadsDir()
-  // mirror spawnStepAgent's connector resolution — the advisory's
-  // stored-prompt branch needs resolvePrompt's backend gate. A
-  // resolution failure is the spawn's error to raise; the advisory
-  // just degrades to bead text
-  let connName: string | undefined
-  try {
-    const profileName = flag(argv, '--profile')
-    const profile = profileName === undefined ? undefined : fleetProfileOf(env, profileName)
-    connName = resolveAgentConnector(
-      { dir },
-      { connector: flag(argv, '--connector') ?? profile?.backend },
-      env
-    ).name
-  } catch {
-    connName = undefined
-  }
   // the similarity floor (spec bro-7dila): an ad-hoc spawn has no claim
   // to dedup on, so a live agent/session in this repo whose prompt or
   // title reads near-identical earns a warning — advisory, the spawn
-  // still lands. --for gets the same floor on top of the hard guards;
-  // its own registry row is excluded — the guards carry that verdict
-  const warnText = advisoryPromptText(dir, beads, molStep, prompt, promptFile, connName)
-  if (warnText !== undefined) {
-    for (const s of collectDuplicateSuspects(dir, env, { excludeStep: molStep })) {
-      if (promptSimilar(warnText, s.text)) {
-        console.error(`warning: possible duplicate — ${s.label} reads near-identical to this prompt`)
-      }
-    }
-  }
+  // still lands
+  adviseDuplicates(dir, env, beads, molStep, prompt, promptFile, argv)
   let info: AgentInfo
   try {
     info = await spawnStepAgent(dir, env, {
