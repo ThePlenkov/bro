@@ -127,7 +127,8 @@ import {
   writeFileSync,
 } from 'node:fs'
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http'
-import { basename, dirname, join } from 'node:path'
+import { basename, dirname, join, resolve } from 'node:path'
+import { fileURLToPath } from 'node:url'
 import type { Readable } from 'node:stream'
 import {
   busPublish,
@@ -139,6 +140,7 @@ import {
   holdFileLock,
   LockTimeout,
   lockHolderPid,
+  mainWorktreeRoot,
   peekMailbox,
   planes,
   SpawnError,
@@ -1746,6 +1748,7 @@ function usage(): never {
   console.error(`usage:
   bro serve [--port <n>]
   bro serve ensure --port <n>
+  bro serve watchdog --port <n> --pid <p>   (internal — armed by serve)
 
 HTTP/JSON facade host on 127.0.0.1 (default port: ephemeral — the bound
 address is printed and written to <git-common-dir>/bro/serve.json).
@@ -1772,6 +1775,9 @@ interface ServeHealth {
 export interface EnsureDeps {
   probe?: (port: number) => Promise<ServeHealth | undefined>
   spawnServer?: () => void
+  /** The stale-serve stop — a test asserts the kill without signaling
+   *  a real process. */
+  stopServe?: (pid: number) => Promise<void>
   timeoutMs?: number
   pollMs?: number
 }
@@ -1788,6 +1794,44 @@ async function defaultProbe(port: number): Promise<ServeHealth | undefined> {
   }
 }
 
+/** One health-probe answer's verdict. Identity is the recorded pid, not
+ *  the dir string: serve.json can only be written by a starter that
+ *  resolved this repo's common dir, so a pid-matching listener IS this
+ *  repo's serve — its dir answer then only grades the anchor. */
+type EnsureVerdict =
+  | { kind: 'token'; token: string }
+  | { kind: 'down' } // nothing answering — the spawn path's job
+  | { kind: 'respawn'; pid: number } // ours, but the recorded anchor is gone
+  | { kind: 'missing-state' } // listener up, no serve.json
+  | { kind: 'impostor'; reported: number | undefined; recorded: number }
+  | { kind: 'foreign'; dir: string }
+
+/** SIGTERM the stale generation, wait out its grace, SIGKILL only if
+ *  wedged — the shutdown path still clears state for a graceful exit.
+ *  Returns with the pid down or the kill budget spent (the spawn then
+ *  surfaces a still-held port honestly through the poll deadline). */
+async function stopRecordedServe(pid: number, stepMs = 50): Promise<void> {
+  const waitDead = async (budgetMs: number): Promise<boolean> => {
+    const deadline = Date.now() + budgetMs
+    while (pidAlive(pid) && Date.now() < deadline) {
+      await new Promise((r) => setTimeout(r, stepMs))
+    }
+    return !pidAlive(pid)
+  }
+  try {
+    process.kill(pid, 'SIGTERM')
+  } catch {
+    return // already gone
+  }
+  if (await waitDead(5_000)) return
+  try {
+    process.kill(pid, 'SIGKILL')
+  } catch {
+    return
+  }
+  await waitDead(1_000)
+}
+
 /** `bro serve ensure` — resolve-or-spawn this repo's listener on a
  *  fixed port, then the token a client authenticates with. Returns the
  *  token or throws; the command wrapper owns stderr + exit codes. */
@@ -1797,6 +1841,7 @@ export async function ensureServe(
   deps: EnsureDeps = {}
 ): Promise<string> {
   const probe = deps.probe ?? defaultProbe
+  const stopServe = deps.stopServe ?? stopRecordedServe
   const timeoutMs = deps.timeoutMs ?? 20_000
   const pollMs = deps.pollMs ?? 250
 
@@ -1804,35 +1849,67 @@ export async function ensureServe(
   if (statePath === null) {
     throw new Error('not inside a git repository — cannot anchor serve.json')
   }
-  // node reports serve's dir as its realpath'd cwd — compare alike
-  const repo = realpathSync(dir)
+  // node reports serve's dir as its realpath'd cwd — compare alike. The
+  // serve anchors to the MAIN worktree root (bro-ofbw4), so the caller
+  // resolves the same identity through the same helper no matter which
+  // checkout invoked the helper.
+  const root = mainWorktreeRoot(dir) ?? dir
+  const repo = ((): string => {
+    try {
+      return realpathSync(root)
+    } catch {
+      return root // a dead anchor can't canonicalize — compare raw
+    }
+  })()
 
-  const healthy = async (): Promise<string | undefined> => {
+  const classify = async (): Promise<EnsureVerdict> => {
     const h = await probe(port)
-    if (h?.ok !== true || typeof h.dir !== 'string') return undefined
-    if (h.dir !== repo) {
-      throw new Error(
-        `port ${port} already serves ${h.dir} — not this repo; pick another port`
-      )
-    }
+    if (h?.ok !== true || typeof h.dir !== 'string') return { kind: 'down' }
     const state = readStateFile(statePath)
-    if (state === undefined) {
-      throw new Error(`listener on ${port} is up but ${statePath} is missing`)
+    if (state !== undefined && h.pid === state.pid) {
+      // pid-match settles ownership — the file could only be written by
+      // a starter that resolved this repo's common dir. The dir answer
+      // then grades the anchor strictly: the main root → healthy; any
+      // other dir (deleted worktree, pre-fix linked anchor) → heal by
+      // respawn so the anchor lands on the durable root now.
+      if (h.dir === repo) {
+        return { kind: 'token', token: state.token }
+      }
+      return { kind: 'respawn', pid: state.pid }
     }
+    if (h.dir !== repo) return { kind: 'foreign', dir: h.dir }
+    if (state === undefined) return { kind: 'missing-state' }
     // a same-dir answer alone is spoofable — the listener must also be
     // the recorded process, else a squatter claims our repo and
     // receives the token we hand out
-    if (h.pid !== state.pid) {
-      throw new Error(
-        `listener on ${port} claims this repo but is not the recorded serve ` +
-          `(pid ${h.pid ?? '?'} vs ${state.pid})`
-      )
-    }
-    return state.token
+    return { kind: 'impostor', reported: h.pid, recorded: state.pid }
   }
 
-  const first = await healthy()
-  if (first !== undefined) return first
+  const killed = new Set<number>()
+  const heal = async (pid: number): Promise<void> => {
+    if (killed.has(pid)) return
+    killed.add(pid)
+    await stopServe(pid)
+  }
+
+  const first = await classify()
+  switch (first.kind) {
+    case 'token':
+      return first.token
+    case 'foreign':
+      throw new Error(
+        `port ${port} already serves ${first.dir} — not this repo; pick another port`
+      )
+    case 'missing-state':
+      throw new Error(`listener on ${port} is up but ${statePath} is missing`)
+    case 'impostor':
+      throw new Error(
+        `listener on ${port} claims this repo but is not the recorded serve ` +
+          `(pid ${first.reported ?? '?'} vs ${first.recorded})`
+      )
+    case 'respawn':
+      await heal(first.pid)
+  }
 
   if (deps.spawnServer !== undefined) {
     deps.spawnServer()
@@ -1841,7 +1918,10 @@ export async function ensureServe(
     mkdirSync(logDir, { recursive: true })
     const logFd = openSync(join(logDir, 'serve.log'), 'a')
     try {
-      spawn(process.execPath, [process.argv[1]!, 'serve', '--port', String(port)], {
+      // ENTRY_FILE, not argv[1] — the child resolves its script under
+      // `cwd: repo`, so a relative argv[1] (CLI launched from a linked
+      // worktree) would point under the main root and never start
+      spawn(process.execPath, [ENTRY_FILE, 'serve', '--port', String(port)], {
         cwd: repo,
         detached: true,
         stdio: ['ignore', logFd, logFd],
@@ -1855,18 +1935,19 @@ export async function ensureServe(
   const deadline = Date.now() + timeoutMs
   while (Date.now() < deadline) {
     await new Promise((r) => setTimeout(r, pollMs))
-    const h = await probe(port)
-    if (h?.ok !== true || typeof h.dir !== 'string') continue
-    if (h.dir !== repo) {
+    const v = await classify()
+    if (v.kind === 'token') return v.token
+    if (v.kind === 'foreign') {
       throw new Error(
-        `port ${port} came up serving ${h.dir} — not this repo; pick another port`
+        `port ${port} came up serving ${v.dir} — not this repo; pick another port`
       )
     }
-    const state = readStateFile(statePath)
-    // state/pid mismatch = startup race (serve binds before writing
-    // serve.json) or an impostor — keep polling; timeout refuses
-    if (state === undefined || state.pid !== h.pid) continue
-    return state.token
+    if (v.kind === 'respawn') {
+      await heal(v.pid)
+    }
+    // down / missing-state / impostor — startup race (serve binds before
+    // writing serve.json) or a predecessor still tearing down; the
+    // deadline is the honest bound
   }
   throw new Error(
     `bro serve never came up on ${port} — see ${join(dirname(statePath), 'serve.log')}`
@@ -1898,6 +1979,116 @@ async function cmdEnsure(argv: string[]): Promise<void> {
   } catch (err) {
     console.error(`error: ${err instanceof Error ? err.message : String(err)}`)
     process.exit(1)
+  }
+}
+
+// --- watchdog ---------------------------------------------------------------
+
+/** The keepalive leg's poll cadence — the apiKeyHelper only re-ensures
+ *  on auth refresh, so without a respawn leg a dead listener costs
+ *  minutes of failed calls. Seconds, not minutes (bro-ofbw4). */
+const WATCHDOG_POLL_MS = 5_000
+/** A respawned serve needs bind + serve.json write before the next
+ *  verdict reads — settle, else the watchdog fires a duplicate starter
+ *  every poll while the new generation is still coming up. */
+const WATCHDOG_SETTLE_MS = 15_000
+
+/** The entry script the user invoked, made absolute at load —
+ *  runServeCommand chdirs to the main-worktree anchor before spawning
+ *  children, so a relative argv[1] resolved later (or passed through
+ *  unchanged) would point under the anchor, not the cwd `bro` ran
+ *  from. Both watchdog spawns must name THIS file. */
+const ENTRY_FILE = resolve(process.argv[1] ?? fileURLToPath(import.meta.url))
+
+/** The env a watchdog respawn uses to hand the dead generation's token
+ *  to its successor — env, not argv, because /proc/<pid>/environ is
+ *  same-UID like the 0600 serve.json while argv is world-readable.
+ *  Without it the respawn mints a fresh token and every client holding
+ *  the old one (the apiKeyHelper only re-ensures on auth refresh)
+ *  eats 401s through the very window the keepalive exists to close. */
+export const SERVE_TOKEN_ENV = 'BRO_SERVE_TOKEN'
+
+/** The session token this generation binds — adopted from
+ *  SERVE_TOKEN_ENV when a watchdog respawned us, fresh otherwise. */
+export function serveSessionToken(env: NodeJS.ProcessEnv = process.env): string {
+  const inherited = env[SERVE_TOKEN_ENV]
+  return typeof inherited === 'string' && inherited !== '' ? inherited : randomBytes(32).toString('hex')
+}
+
+/** One watchdog tick — exported for the unit tests; `cmdWatchdog` is
+ *  the thin spawn/sleep shell around it. */
+export type WatchdogVerdict = 'retire' | 'alive' | 'respawn'
+export function watchdogVerdict(
+  state: ServeState | undefined,
+  pid: number,
+  alive: (pid: number) => boolean = pidAlive
+): WatchdogVerdict {
+  // a retracted record is a deliberate stop; a different recorded pid
+  // is a successor generation that armed its own watchdog — either way
+  // this leg's work is over. Only OUR dead pid standing in the file
+  // earns a respawn.
+  if (state === undefined || state.pid !== pid) return 'retire'
+  return alive(pid) ? 'alive' : 'respawn'
+}
+
+/** `bro serve watchdog --port <n> --pid <p>` — internal: `bro serve`
+ *  arms exactly one detached watchdog per generation. It polls the
+ *  serve.json record and respawns the listener on the bound port while
+ *  OUR dead entry stands; a cleared record or a successor's pid retires
+ *  the leg. Never hand-run — it exists so a crashed serve is seconds of
+ *  outage, not an auth-refresh interval of it. */
+async function cmdWatchdog(argv: string[]): Promise<void> {
+  const pos = positionals(argv, new Set(['--port', '--pid']), { strict: true })
+  if (pos.length > 0) usage()
+  const port = Number(flag(argv, '--port'))
+  const pid = Number(flag(argv, '--pid'))
+  if (!Number.isInteger(port) || port <= 0 || port > 65535 || !Number.isInteger(pid) || pid <= 0) {
+    console.error('error: watchdog needs --port <n> and --pid <n>')
+    process.exit(2)
+  }
+  const dir = process.cwd()
+  const statePath = serveStatePath(dir)
+  if (statePath === null) {
+    process.exit(1)
+  }
+  const logDir = dirname(statePath)
+  for (;;) {
+    await new Promise((r) => setTimeout(r, WATCHDOG_POLL_MS))
+    const state = readStateFile(statePath)
+    const verdict = watchdogVerdict(state, pid)
+    if (verdict === 'retire') return
+    if (verdict === 'alive') continue
+    try {
+      mkdirSync(logDir, { recursive: true })
+      const logFd = openSync(join(logDir, 'serve.log'), 'a')
+      try {
+        // the new generation writes its own serve.json and arms its own
+        // watchdog — we retire on the next tick's superseded pid. The
+        // serve.json.lock serializes a racing `ensure` starter; the
+        // loser refuses and exits, harmless either way. The dead
+        // generation's token rides the child's env (state is defined —
+        // 'retire' above covers undefined) so cached clients survive
+        // the crash with no 401 window.
+        spawn(process.execPath, [ENTRY_FILE, 'serve', '--port', String(port)], {
+          cwd: dir,
+          detached: true,
+          stdio: ['ignore', logFd, logFd],
+          env: { ...process.env, [SERVE_TOKEN_ENV]: state!.token },
+        })
+          // an async spawn error (e.g. the anchor itself is gone) is a
+          // no-op starter — unhandled it would kill the leg; the next
+          // tick reads the same dead record and retries anyway
+          .once('error', () => {})
+          .unref()
+        console.error(`watchdog: serve pid ${pid} dead — respawned on port ${port}`)
+      } finally {
+        closeSync(logFd)
+      }
+    } catch {
+      // a transient spawn failure must not kill the leg — the next tick
+      // reads the same dead record and retries
+    }
+    await new Promise((r) => setTimeout(r, WATCHDOG_SETTLE_MS))
   }
 }
 
@@ -1967,10 +2158,26 @@ export async function runServeCommand(argv: string[]): Promise<void> {
     await cmdEnsure(argv.slice(1))
     return
   }
+  if (argv[0] === 'watchdog') {
+    await cmdWatchdog(argv.slice(1))
+    return
+  }
   const port = parseServePort(argv)
 
+  // One listener per repo — serve.json lives in the common dir shared
+  // by every linked worktree, so the anchor must be the path that
+  // outlives them all: the MAIN worktree root. A serve spawned inside
+  // a `bro work` checkout that later got `leave`d kept its cwd there —
+  // acp spawns died with the directory and `ensure` refused from main
+  // (bro-ofbw4). chdir first so `dir`, the recorded state, and every
+  // inherited child cwd land on the durable path.
+  const anchor = mainWorktreeRoot(process.cwd())
+  if (anchor !== null && anchor !== process.cwd()) {
+    process.chdir(anchor)
+  }
   const dir = process.cwd()
-  if (serveStatePath(dir) === null) {
+  const statePath = serveStatePath(dir)
+  if (statePath === null) {
     console.error('error: not inside a git repository — bro serve needs the git common dir')
     process.exit(1)
   }
@@ -2000,14 +2207,17 @@ export async function runServeCommand(argv: string[]): Promise<void> {
     console.log(`provider: /v1/* → ${providerCfg.upstream}`)
   }
   // the session token — the "local session context" made concrete.
-  // Generated per serve, never printed: clients read it out of the
-  // 0600 serve.json below, so possession implies same-UID file access
-  const token = randomBytes(32).toString('hex')
+  // Adopted from SERVE_TOKEN_ENV when a watchdog respawned this serve
+  // (crash recovery keeps the credential clients already hold), else
+  // generated fresh. Never printed: clients read it out of the 0600
+  // serve.json below, so possession implies same-UID file access
+  const token = serveSessionToken()
   const server = createServer(
     createServeHandler(realDeps(dir, env, { conductorCfg, providerCfg }), meta, token)
   )
 
   try {
+    let boundPort = port
     const url = await new Promise<string>((resolve, reject) => {
       server.once('error', reject)
       // 127.0.0.1 only — the loopback bind IS the trust boundary; there is
@@ -2015,7 +2225,8 @@ export async function runServeCommand(argv: string[]): Promise<void> {
       server.listen(port, '127.0.0.1', () => {
         meta.startedAt = new Date().toISOString()
         const addr = server.address()
-        resolve(`http://127.0.0.1:${typeof addr === 'object' && addr !== null ? addr.port : port}`)
+        boundPort = typeof addr === 'object' && addr !== null ? addr.port : port
+        resolve(`http://127.0.0.1:${boundPort}`)
       })
     }).catch((err: unknown) => {
       console.error(`error: ${err instanceof Error ? err.message : String(err)}`)
@@ -2035,11 +2246,49 @@ export async function runServeCommand(argv: string[]): Promise<void> {
     // filesystems that ignore mode bits (some fuse/9p/drvfs mounts) can
     // leave the token group/other-readable — the auth boundary then
     // doesn't hold, so say so loudly rather than trusting silently
-    const statePath = serveStatePath(dir)
-    if (statePath !== null && (statSync(statePath).mode & 0o077) !== 0) {
+    if ((statSync(statePath).mode & 0o077) !== 0) {
       console.error(
         `warning: ${statePath} is readable by group/other — the session token is exposed to other local users on this filesystem`
       )
+    }
+    // the keepalive leg (bro-ofbw4): between apiKeyHelper runs — clients
+    // only re-ensure on auth refresh — a dead listener is minutes of
+    // failed calls. One detached watchdog per generation polls the
+    // recorded pid and respawns `bro serve` on the bound port; it
+    // retires when the record is retracted (clean stop) or superseded
+    // (the next generation arms its own).
+    {
+      // arming failure is a warning, never a crash — a serve already
+      // listening must not exit over a supervisor it can live without;
+      // the next generation's own arm is unaffected either way
+      try {
+        const logFd = openSync(join(dirname(statePath), 'serve.log'), 'a')
+        try {
+          spawn(
+            process.execPath,
+            [
+              ENTRY_FILE,
+              'serve',
+              'watchdog',
+              '--port',
+              String(boundPort),
+              '--pid',
+              String(process.pid),
+            ],
+            { cwd: dir, detached: true, stdio: ['ignore', logFd, logFd], env: process.env }
+          )
+            .once('error', (e) => {
+              console.error(`warning: watchdog did not arm — ${e.message}`)
+            })
+            .unref()
+        } finally {
+          closeSync(logFd)
+        }
+      } catch (err) {
+        console.error(
+          `warning: watchdog did not arm — ${err instanceof Error ? err.message : String(err)}`
+        )
+      }
     }
     console.log(`bro serve — ${url}`)
     console.log('discovery: <git-common-dir>/bro/serve.json · ctrl-c to stop')

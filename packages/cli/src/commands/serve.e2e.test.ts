@@ -196,6 +196,48 @@ describe('bro serve e2e', () => {
     }
   })
 
+  test('a killed listener is respawned on its bound port by the watchdog', async () => {
+    const { root, main } = initRepo('bro-watchdog-e2e-')
+    const { binDir, db } = installFakeBd(root, [])
+    const stateFile = join(main, '.git', 'bro', 'serve.json')
+    let livePid: number | undefined
+    try {
+      const { child, url } = await startServe(main, {
+        PATH: `${binDir}:${process.env.PATH ?? ''}`,
+        FAKE_BD_DB: db,
+      })
+      const firstPid = child.pid!
+      child.kill('SIGKILL')
+      // the watchdog polls serve.json, finds the recorded pid dead, and
+      // respawns `bro serve` on the bound port — no client call needed
+      const deadline = Date.now() + 30_000
+      let pid = firstPid
+      while (Date.now() < deadline && pid === firstPid) {
+        try {
+          pid = (JSON.parse(readFileSync(stateFile, 'utf8')) as { pid: number }).pid
+        } catch {
+          /* record momentarily absent mid-handoff */
+        }
+        await new Promise((r) => setTimeout(r, 250))
+      }
+      assert.notEqual(pid, firstPid, 'watchdog never respawned the listener')
+      livePid = pid
+      const health = await fetch(`${url}/api/v1/health`)
+      assert.equal(health.status, 200)
+      const h = (await health.json()) as { ok: boolean; pid: number }
+      assert.equal(h.pid, pid)
+    } finally {
+      if (livePid !== undefined) {
+        try {
+          process.kill(livePid, 'SIGTERM')
+        } catch {
+          /* already gone */
+        }
+      }
+      rmSync(root, { recursive: true, force: true })
+    }
+  })
+
   test('ensure on a dead port spawns the listener and prints its token', async () => {
     const { root, main } = initRepo('bro-ensure-e2e-')
     const { binDir, db } = installFakeBd(root, [])

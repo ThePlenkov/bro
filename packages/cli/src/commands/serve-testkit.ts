@@ -40,12 +40,13 @@ export const authHeaders = { authorization: `Bearer ${testToken}` }
 export async function listen(
   d: ServeDeps,
   token = testToken
-): Promise<{ url: string; close: () => Promise<void> }> {
+): Promise<{ url: string; port: number; close: () => Promise<void> }> {
   const server = createServer(createServeHandler(d, { dir: '/repo', startedAt: 't0' }, token))
   await new Promise<void>((r) => server.listen(0, '127.0.0.1', r))
   const { port } = server.address() as AddressInfo
   return {
     url: `http://127.0.0.1:${port}`,
+    port,
     close: () => new Promise<void>((r) => server.close(() => r())),
   }
 }
