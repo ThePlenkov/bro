@@ -2075,9 +2075,8 @@ export async function runServeCommand(argv: string[]): Promise<void> {
   // generated fresh. Never printed: clients read it out of the 0600
   // serve.json below, so possession implies same-UID file access
   const token = serveSessionToken()
-  const server = createServer(
-    createServeHandler(realDeps(dir, env, { conductorCfg, providerCfg }), meta, token)
-  )
+  const deps = realDeps(dir, env, { conductorCfg, providerCfg })
+  const server = createServer(createServeHandler(deps, meta, token))
 
   try {
     let boundPort = port

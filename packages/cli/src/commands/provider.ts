@@ -274,29 +274,20 @@ function waitForSignal(server: Server): Promise<void> {
   })
 }
 
-/** Reject unknown options — `--prot 3000` must fail, not silently
- *  serve on the default port nobody pointed a client at. */
-function rejectUnknownFlags(argv: string[], known: ReadonlySet<string>): void {
-  for (const a of argv) {
-    if (a === '--') break
-    if (a.startsWith('--') && !known.has(a.split('=', 1)[0]!)) {
-      console.error(`error: unknown option ${a}`)
-      usage()
-    }
-  }
-}
-
 async function cmdServe(argv: string[]): Promise<void> {
   const pos = positionals(argv, new Set(['--port']), { strict: true })
   if (pos.length > 0) {
     usage()
   }
-  rejectUnknownFlags(argv, new Set(['--port']))
   const port = parsePort(argv, DEFAULT_PROVIDER_PORT)
 
   const statePath = providerStatePath()
   const live = liveProviderState()
-  if (live !== undefined) {
+  // a live pid is not a live listener — a record surviving an unclean
+  // shutdown can name a recycled pid a stranger now holds, and refusing
+  // on it would pin the gateway dead forever; only a listener answering
+  // health on the recorded pid counts as 'already serving'
+  if (live !== undefined && (await stateServing(live))) {
     console.error(
       `error: already serving ${live.url} (pid ${live.pid}) — one provider listener per host`
     )
@@ -433,6 +424,32 @@ async function defaultProbe(port: number): Promise<ProviderHealth | undefined> {
   }
 }
 
+/** Does the recorded listener still answer? The state file's pid only
+ *  proves some process holds it — after an unclean shutdown the pid can
+ *  belong to a stranger — so a record counts as serving only when
+ *  /api/v1/health on its url reports the recorded pid (the contract
+ *  ensureProvider's healthy() already applies to the host listener). */
+async function stateServing(state: ServeState): Promise<boolean> {
+  try {
+    const h = await defaultProbe(Number(new URL(state.url).port))
+    return h?.ok === true && h.pid === state.pid
+  } catch {
+    return false // a malformed recorded url is a dead record
+  }
+}
+
+/** Is the resolved endpoint's HOST listener actually answering? The
+ *  apiKeyHelper helpers print a recorded token only while its listener
+ *  provably answers; a recycled-pid provider.json reads as dead, not
+ *  live. A repo-serve record is trusted as recorded — its liveness is
+ *  the repo serve's own business (the watchdog owns revival), and a
+ *  dead one is never hijacked by a host listener on its port. */
+async function endpointAlive(ep: ProviderEndpoint): Promise<boolean> {
+  if (ep.source !== 'host') return true
+  const state = liveProviderState()
+  return state !== undefined && (await stateServing(state))
+}
+
 /** Injectable seams — tests drive the probe/spawn without a real port
  *  or a detached CLI re-exec (same shape as serve ensure). */
 export interface EnsureProviderDeps {
@@ -503,8 +520,8 @@ export async function ensureProvider(
 }
 
 /** Which port a token self-heal may spawn on: unset base → the
- *  well-known default; a loopback pin → its port; a remote base can
- *  never be a local spawn — fail closed, never bind it. */
+ *  well-known default; a loopback pin → its port; a portless or remote
+ *  base can never be a local spawn — fail closed, never bind it. */
 function ensurePort(base: string | undefined): number | undefined {
   if (base === undefined || base.trim() === '') return DEFAULT_PROVIDER_PORT
   try {
@@ -512,7 +529,10 @@ function ensurePort(base: string | undefined): number | undefined {
     if (u.hostname !== '127.0.0.1' && u.hostname !== 'localhost' && u.hostname !== '[::1]') {
       return undefined
     }
-    if (u.port === '') return u.protocol === 'https:' ? 443 : 80
+    // a portless base names no listener — the implied 80/443 is a
+    // privileged bind (or a TLS port a plain listener can't serve), so
+    // it fails closed like a remote target
+    if (u.port === '') return undefined
     const p = Number(u.port)
     // a :0 pin means "any port" to a bind but nothing to a probe — a
     // self-heal spawning on a random port could never be found again
@@ -527,7 +547,6 @@ async function cmdEnsure(argv: string[]): Promise<void> {
   if (pos.length > 0) {
     usage()
   }
-  rejectUnknownFlags(argv, new Set(['--port']))
   const flagPort = parsePort(argv, -1)
   if (flagPort === 0) {
     console.error('error: ensure needs a fixed port — --port 0 can never be probed back')
@@ -535,10 +554,14 @@ async function cmdEnsure(argv: string[]): Promise<void> {
   }
   try {
     // the client's pin decides WHICH listener matters: a live endpoint —
-    // the host listener, or an explicitly pinned repo serve — already
-    // holds the token the client will actually present
+    // the host listener, or an explicitly pinned repo serve — holds the
+    // token the client will actually present. 'Recorded' is not
+    // 'answering': a recycled pid passes pidAlive while the listener is
+    // long gone, so the token prints only when the listener proves
+    // itself on its recorded pid — a stale record falls through to the
+    // self-start below
     const ep = resolveProviderEndpoint(process.cwd(), process.env)
-    if (ep !== undefined) {
+    if (ep !== undefined && (await endpointAlive(ep))) {
       console.log(ep.token)
       return
     }
@@ -547,7 +570,7 @@ async function cmdEnsure(argv: string[]): Promise<void> {
     const port = flagPort !== -1 ? flagPort : ensurePort(process.env.ANTHROPIC_BASE_URL)
     if (port === undefined) {
       throw new Error(
-        'ANTHROPIC_BASE_URL is not a usable loopback target (remote or :0) — refusing to bind a local listener for it'
+        'ANTHROPIC_BASE_URL is not a usable loopback target (remote, portless, or :0) — refusing to bind a local listener for it'
       )
     }
     // apiKeyHelper contract: the token alone on stdout — no decoration
@@ -575,6 +598,12 @@ async function cmdToken(argv: string[]): Promise<void> {
   }
   const cwd = process.cwd()
   let ep = resolveProviderEndpoint(cwd, process.env)
+  // the same recycled-pid stale provider.json as ensure: a token for a
+  // dead host listener is a dead credential — treat it as a miss and
+  // self-heal
+  if (ep !== undefined && !(await endpointAlive(ep))) {
+    ep = undefined
+  }
   if (ep === undefined) {
     // self-heal: a dead listener spawns on demand — the apiKeyHelper
     // IS the supervision, there is no separate start step
