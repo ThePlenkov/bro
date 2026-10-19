@@ -36,7 +36,7 @@ import type {
   StopReason,
   ActiveSessionMessage,
 } from '@agentclientprotocol/sdk'
-import { isSystemoneFamily, JudgeUnavailable } from '@broject/core'
+import { isSystemoneFamily, JudgeUnavailable, modelBase } from '@broject/core'
 import { agentTurnPlane } from './acp-events.ts'
 import { otelSpan } from './otel.ts'
 import type { OtelCtx } from './otel.ts'
@@ -201,7 +201,9 @@ async function applyModel(
       `${by}: model '${model}' requested but the acp agent advertises no model config option — refusing to run an unpinned model`
     )
   }
-  return applyOption(ctx, sessionId, modelOpt, model, by, req)
+  // the `[<size>]` context suffix is a client-side opt-in — the catalog
+  // only knows the base id (bro-0g2l3)
+  return applyOption(ctx, sessionId, modelOpt, modelBase(model), by, req)
 }
 
 /** `session/set_config_option` on one advertised option + verify the
@@ -266,7 +268,8 @@ async function converseModel(
   req: () => SendRequestOptions
 ): Promise<string> {
   if (modelSelect(configOptions) === undefined) {
-    return label ?? 'unknown'
+    // provenance reports the model, never the opt-in modifier
+    return label === undefined ? 'unknown' : modelBase(label)
   }
   return applyModel(ctx, sessionId, configOptions, by, model, req)
 }
@@ -802,17 +805,6 @@ export async function acpOpen(
 function selectLeaves(opt: SessionConfigOption): { name: string; value: string }[] {
   if (opt.type !== 'select') return []
   return opt.options.flatMap((o) => ('options' in o ? o.options : [o]))
-}
-
-/** Claude pins context-window variants as `model[1m]` — a client-side
- *  opt-in, not a different catalog model; the trailing `[<size>]`
- *  bracket strips before resolution or the catalog match misses
- *  (bro-0g2l3). Other brackets stay — `model[custom]` is a real id. */
-function modelBase(model: string): string {
-  const raw = model.trimEnd()
-  const open = raw.lastIndexOf('[')
-  const inner = open >= 0 && raw.endsWith(']') ? raw.slice(open + 1, -1) : undefined
-  return inner !== undefined && /^\d+[km]?$/i.test(inner) ? raw.slice(0, open).trimEnd() : raw
 }
 
 /** Resolve a caller's model name against the agent's advertised select

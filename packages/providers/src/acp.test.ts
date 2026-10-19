@@ -103,6 +103,12 @@ describe('isSystemoneFamily', () => {
     assert.equal(isSystemoneFamily('qwen3-coder'), false)
     assert.equal(isSystemoneFamily('other/jev-1'), false)
     assert.equal(isSystemoneFamily(undefined), false)
+    // a `[<size>]` context opt-in is the same model under a modifier
+    // (bro-0g2l3); non-size brackets stay part of the id
+    assert.equal(isSystemoneFamily('typesafe/jev-1.13[1m]'), true)
+    assert.equal(isSystemoneFamily('jev-latest[500k]'), true)
+    assert.equal(isSystemoneFamily('typesafe/jev-router[1m]'), false)
+    assert.equal(isSystemoneFamily('typesafe/jev-1.13[custom]'), false)
   })
 })
 
@@ -829,6 +835,51 @@ describe('model pin resolution — [1m] context suffix (bro-0g2l3)', () => {
         }),
         /qwen3-coder\[custom].*not in the agent's catalog/
       )
+    } finally {
+      peer.close()
+    }
+  })
+
+  test('the one-shot client path strips the suffix before set_config_option', async () => {
+    const fake = fakeAcpAgent({ replyText: 'answer', configOptions: [MODEL_OPTION] })
+    const res = await acpClient(
+      'provider:kilo',
+      { type: 'acp', command: 'kilo --acp', model: 'qwen3-coder[1m]' },
+      { acp: { peer: fake.app } }
+    ).chat!('p', deadline())
+    assert.deepEqual(fake.configSets, [{ configId: 'model-pick', value: 'qwen3-coder' }])
+    assert.equal(res.model, 'qwen3-coder')
+  })
+
+  test('a suffixed judge pin still binds the typed call surface', async () => {
+    const fake = fakeAcpAgent({ replyText: TYPED_REPLY, configOptions: [MODEL_OPTION] })
+    const client = acpClient(
+      'provider:kilo',
+      { type: 'acp', command: 'kilo --acp', model: 'typesafe/jev-1.13[1m]' },
+      { acp: { peer: fake.app } }
+    )
+    assert.equal(typeof client.call, 'function')
+    const res = await client.call!('s', QUESTIONS, deadline())
+    assert.equal(res.answers.route!.type, 'choice')
+    assert.deepEqual(fake.configSets, [
+      { configId: 'model-pick', value: 'typesafe/jev-1.13' },
+    ])
+  })
+
+  test('a tool-less backend reports the base id as provenance, not the opt-in', async () => {
+    const fake = fakeAcpAgent({ replyText: 'x' })
+    const peer = await acpOpen('conductor:t', ENTRY, { acp: { peer: fake.app } }, deadline())
+    try {
+      const r = await acpPooledTurn(
+        peer,
+        { ...ENTRY, model: 'qwen3-coder[1m]' },
+        { acp: { peer: fake.app } },
+        'p',
+        deadline(),
+        { by: 'conductor:t' }
+      )
+      assert.equal(r.model, 'qwen3-coder')
+      assert.deepEqual(fake.configSets, [])
     } finally {
       peer.close()
     }

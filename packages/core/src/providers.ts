@@ -28,18 +28,33 @@ export type ProviderKind = (typeof PROVIDER_KINDS)[number]
 export type ApiWire = 'systemone' | 'openai-compat'
 export const API_WIRES = ['systemone', 'openai-compat'] as const
 
+/** Claude pins context-window variants as `model[1m]` — a client-side
+ *  opt-in, not a different catalog model; the trailing `[<size>]`
+ *  bracket strips before family tests or resolution or the match
+ *  misses (bro-0g2l3). Other brackets stay — `model[custom]` is a
+ *  real id. Lives in core next to the family test it feeds. */
+export function modelBase(model: string): string {
+  const raw = model.trimEnd()
+  const open = raw.lastIndexOf('[')
+  const inner = open >= 0 && raw.endsWith(']') ? raw.slice(open + 1, -1) : undefined
+  return inner !== undefined && /^\d+[km]?$/i.test(inner) ? raw.slice(0, open).trimEnd() : raw
+}
+
 /** A systemone-family model id — `typesafe/jev-<version|latest>`,
  *  possibly router-prefixed (`kilo/orcarouter/typesafe/jev-1.13`), or a
  *  bare `jev-*` pin. The version anchor is deliberate: `jev-router` is
  *  a router PRODUCT pointing at arbitrary upstreams, not a jev model —
  *  inferring its wire as systemone would let a config silently spend on
  *  it. `latest` must complete the segment for the same reason —
- *  `jev-latest-router` is a product, not the model pin. Lives in core
- *  because api-entry normalization consumes it at parse time, before
- *  any provider binding exists. */
+ *  `jev-latest-router` is a product, not the model pin. A `[<size>]`
+ *  context suffix is the same model under an opt-in — it strips before
+ *  the test. Lives in core because api-entry normalization consumes it
+ *  at parse time, before any provider binding exists. */
 export const isSystemoneFamily = (model: string | undefined): boolean =>
   model !== undefined &&
-  /(?:^|\/)typesafe\/jev-(?:latest|\d+(?:\.\d+)*)(?=$|\/)|^jev-(?:latest|\d+(?:\.\d+)*)(?=$|\/)/.test(model)
+  /(?:^|\/)typesafe\/jev-(?:latest|\d+(?:\.\d+)*)(?=$|\/)|^jev-(?:latest|\d+(?:\.\d+)*)(?=$|\/)/.test(
+    modelBase(model)
+  )
 
 export type ProviderEntry =
   | {

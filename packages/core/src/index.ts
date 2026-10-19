@@ -85,6 +85,7 @@ export {
   getProvider,
   isEnvName,
   isSystemoneFamily,
+  modelBase,
   parseProviderEntry,
   providerCallGrade,
   PROVIDER_KINDS,
