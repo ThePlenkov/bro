@@ -493,6 +493,11 @@ describe('providerCallGrade — the RESOLVED grade (spec bro-1x7p M7)', () => {
     // 'jev-router' is a router PRODUCT, not a jev model — isSystemoneFamily's
     // version anchor keeps it prose
     assert.equal(providerCallGrade({ type: 'acp', command: 'x', model: 'jev-router' }), 'prose')
+    // a `[<size>]` context opt-in doesn't change the grade (bro-0g2l3)
+    assert.equal(
+      providerCallGrade({ type: 'acp', command: 'x', model: 'typesafe/jev-1.13[1m]' }),
+      'typed'
+    )
     assert.equal(providerCallGrade({ type: 'acp', command: 'x' }), 'prose')
   })
 

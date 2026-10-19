@@ -36,7 +36,7 @@ import type {
   StopReason,
   ActiveSessionMessage,
 } from '@agentclientprotocol/sdk'
-import { isSystemoneFamily, JudgeUnavailable } from '@broject/core'
+import { isSystemoneFamily, JudgeUnavailable, modelBase } from '@broject/core'
 import { agentTurnPlane } from './acp-events.ts'
 import { otelSpan } from './otel.ts'
 import type { OtelCtx } from './otel.ts'
@@ -95,6 +95,13 @@ function modelSelect(configOptions: SessionConfigOption[]): SelectOpt | undefine
     selects.find((o) => o.category === 'model') ??
     selects.find((o) => o.category == null || !NON_MODEL_CATEGORIES.has(o.category))
   )
+}
+
+/** A `<provider>/` alias on an asked id is bro-side routing, never part
+ *  of the agent's own model id — the first path segment strips before
+ *  comparing against catalog leaves or a reported currentValue. */
+function providerBare(id: string): string {
+  return id.includes('/') ? id.slice(id.indexOf('/') + 1) : id
 }
 
 const errMsg = (err: unknown): string =>
@@ -201,7 +208,20 @@ async function applyModel(
       `${by}: model '${model}' requested but the acp agent advertises no model config option — refusing to run an unpinned model`
     )
   }
-  return applyOption(ctx, sessionId, modelOpt, model, by, req)
+  const bare = providerBare(model)
+  // a `model[<size>]` opt-in the session already serves verbatim is the
+  // provider command's spawn-level pin — re-setting the base id would
+  // silently drop it (the catalog only knows base ids). The agent's
+  // own id may carry a namespace — compare both spellings.
+  const cur = modelOpt.currentValue
+  if (modelBase(bare) !== bare && (cur === model || cur === bare)) {
+    return cur
+  }
+  // an agent may advertise the suffixed id as its own leaf — that takes
+  // the value verbatim; else the `[<size>]` context opt-in strips, the
+  // catalog only knows the base id (bro-0g2l3)
+  const leaf = selectLeaves(modelOpt).find((o) => o.value === model || o.value === bare)
+  return applyOption(ctx, sessionId, modelOpt, leaf?.value ?? modelBase(model), by, req)
 }
 
 /** `session/set_config_option` on one advertised option + verify the
@@ -266,7 +286,8 @@ async function converseModel(
   req: () => SendRequestOptions
 ): Promise<string> {
   if (modelSelect(configOptions) === undefined) {
-    return label ?? 'unknown'
+    // provenance reports the model, never the opt-in modifier
+    return label === undefined ? 'unknown' : modelBase(label)
   }
   return applyModel(ctx, sessionId, configOptions, by, model, req)
 }
@@ -818,7 +839,7 @@ function resolveModelPin(
     return undefined // no catalog to resolve against — the session check decides
   }
   const leaves = selectLeaves(opt)
-  const bare = want.includes('/') ? want.slice(want.indexOf('/') + 1) : want
+  const bare = providerBare(want)
   const exact = leaves.find(
     (o) => o.value === bare || o.name.toLowerCase() === bare.toLowerCase()
   )
@@ -834,10 +855,44 @@ function resolveModelPin(
   return undefined
 }
 
-/** Resolve a wanted pin against a live session — exact value, unique
- *  family prefix, composite `<base>-<level>` (thought_level leaf), or a
- *  spawn-level pin the session already reports. Returns the provenance
- *  label (the asked id when it names the (model, level) pair exactly). */
+/** `<base>-<level>` composite pin — <level> names a thought_level leaf,
+ *  never a model id (devin's swe-2 family maps -medium/-high/-max onto
+ *  the thinking dimension — 'swe-2-max' is model swe-2-high + level
+ *  max, never its own catalog id). Sets model + level when the pair
+ *  differs from what the session already serves; returns the asked id
+ *  when the catalog admits <base>, undefined otherwise. */
+async function applyCompositeLevel(
+  ctx: ClientContext,
+  sessionId: string,
+  modelOpt: SessionConfigOption,
+  configOptions: SessionConfigOption[],
+  bare: string,
+  by: string,
+  req: () => SendRequestOptions
+): Promise<string | undefined> {
+  const thought = configOptions.find((o) => o.category === 'thought_level')
+  const dash = bare.lastIndexOf('-')
+  const level = dash > 0 ? bare.slice(dash + 1) : ''
+  const baseResolved =
+    thought !== undefined && dash > 0 && selectLeaves(thought).some((o) => o.value === level)
+      ? resolveModelPin(bare.slice(0, dash), configOptions, by)
+      : undefined
+  if (thought === undefined || baseResolved === undefined) {
+    return undefined
+  }
+  if (modelOpt.currentValue !== baseResolved || thought.currentValue !== level) {
+    await applyOption(ctx, sessionId, modelOpt, baseResolved, by, req)
+    await applyOption(ctx, sessionId, thought, level, by, req)
+  }
+  return bare // the asked id names this exact (model, level) pair
+}
+
+/** Resolve a wanted pin against a live session — a verbatim currentValue
+ *  match (a spawn-level `model[<size>]` pin), an exact catalog value (the
+ *  raw id first, then the base), a unique family prefix, a composite
+ *  `<base>-<level>` (thought_level leaf), or a spawn-level pin the
+ *  session reports stripped. Returns the provenance label (the asked id
+ *  when it names the (model, level) pair exactly). */
 async function resolveTurnModel(
   ctx: ClientContext,
   sessionId: string,
@@ -847,12 +902,28 @@ async function resolveTurnModel(
   by: string,
   req: () => SendRequestOptions
 ): Promise<string> {
-  const resolved = want === undefined ? undefined : resolveModelPin(want, configOptions, by)
-  if (
-    want === undefined ||
-    resolved !== undefined ||
-    modelSelect(configOptions) === undefined
-  ) {
+  const modelOpt = modelSelect(configOptions)
+  const asked = want === undefined ? undefined : modelBase(want)
+  // an asked `model[<size>]` the session already reports verbatim is
+  // the provider command's spawn-level pin — normalizing to the base
+  // and re-pinning would silently drop the opt-in. The agent's own id
+  // may carry a namespace the ask aliases away — compare both spellings.
+  if (want !== undefined && asked !== want) {
+    const cur = modelOpt?.currentValue
+    if (cur === want || cur === providerBare(want)) {
+      return cur
+    }
+  }
+  // the raw id tries the catalog first — an agent may advertise
+  // `model[1m]` as its own option value — then the base id (a
+  // `[<size>]` suffix is a client-side opt-in, bro-0g2l3)
+  let resolved: string | undefined
+  if (want !== undefined) {
+    resolved =
+      resolveModelPin(want, configOptions, by) ??
+      (asked === want ? undefined : resolveModelPin(modelBase(want), configOptions, by))
+  }
+  if (asked === undefined || resolved !== undefined || modelOpt === undefined) {
     // direct path — or a tool-less backend (no model option): the
     // reported label is the configured pin, never the ask
     return converseModel(ctx, sessionId, configOptions, by, resolved, configuredLabel, req)
@@ -860,29 +931,27 @@ async function resolveTurnModel(
   // the agent advertises a catalog that doesn't contain the ask.
   // Two honest ways it can still be served:
   //  - composite variant: `<base>-<level>` where <level> is a leaf of
-  //    the agent's thought_level option (devin's swe-2 family maps
-  //    -medium/-high/-max onto the thinking dimension — 'swe-2-max'
-  //    is model swe-2-high + level max, never its own catalog id)
+  //    the agent's thought_level option
   //  - spawn-level pin: the provider command's --model already set
   //    state the session reports back verbatim
-  const bare = want.includes('/') ? want.slice(want.indexOf('/') + 1) : want
-  const modelOpt = modelSelect(configOptions)
-  const thought = configOptions.find((o) => o.category === 'thought_level')
-  const dash = bare.lastIndexOf('-')
-  const level = dash > 0 ? bare.slice(dash + 1) : ''
-  const baseResolved =
-    thought !== undefined && dash > 0 && selectLeaves(thought).some((o) => o.value === level)
-      ? resolveModelPin(bare.slice(0, dash), configOptions, by)
-      : undefined
-  if (modelOpt !== undefined && thought !== undefined && baseResolved !== undefined) {
-    if (modelOpt.currentValue !== baseResolved || thought.currentValue !== level) {
-      await applyOption(ctx, sessionId, modelOpt, baseResolved, by, req)
-      await applyOption(ctx, sessionId, thought, level, by, req)
-    }
-    return bare // the asked id names this exact (model, level) pair
+  const bare = providerBare(asked)
+  const composite = await applyCompositeLevel(
+    ctx,
+    sessionId,
+    modelOpt,
+    configOptions,
+    bare,
+    by,
+    req
+  )
+  if (composite !== undefined) {
+    return composite
   }
+  // the session reports its running pin verbatim — a spawn-level
+  // `model[<size>]` opt-in still serves the asked base id
   const cur = modelOpt?.currentValue
-  if (cur !== bare) {
+  const served = typeof cur === 'string' ? modelBase(cur) : cur
+  if (served !== bare) {
     throw new AcpConfigError(
       `${by}: model '${want}' is not in the agent's catalog and the session serves ` +
         `'${typeof cur === 'string' ? cur : 'unknown'}' — pick a catalog id or pin ` +
