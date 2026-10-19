@@ -1,5 +1,8 @@
 import { describe, test } from 'node:test'
 import assert from 'node:assert/strict'
+import { chmodSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import type {
   CreateTerminalRequest,
   KillTerminalRequest,
@@ -46,9 +49,35 @@ describe('AcpTerminals', () => {
       const status = await t.waitForExit(ctx(wait(terminalId)))
       assert.equal(status.exitCode, 0)
       const snap = await t.output(ctx(out(terminalId)))
-      assert.match(snap.output, /shell-line\nworks/)
+      // cmd writes \r\n — normalize so the assertion is platform-neutral
+      assert.match(snap.output.replaceAll('\r\n', '\n'), /shell-line\nworks/)
     } finally {
       t.dispose()
+    }
+  })
+
+  test('an args-empty command that is an executable path — spaces included — runs directly', async (t_) => {
+    if (process.platform === 'win32') {
+      t_.skip('needs a chmod-able shebang script')
+      return
+    }
+    const dir = mkdtempSync(join(tmpdir(), 'bro term '))
+    try {
+      const script = join(dir, 'check')
+      writeFileSync(script, '#!/bin/sh\necho spaced-path-ok\n')
+      chmodSync(script, 0o755)
+      const t = new AcpTerminals()
+      try {
+        const { terminalId } = await t.create(ctx(create(script)))
+        const status = await t.waitForExit(ctx(wait(terminalId)))
+        assert.equal(status.exitCode, 0)
+        const snap = await t.output(ctx(out(terminalId)))
+        assert.match(snap.output, /spaced-path-ok/)
+      } finally {
+        t.dispose()
+      }
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
     }
   })
 

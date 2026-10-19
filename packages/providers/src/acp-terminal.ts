@@ -6,7 +6,7 @@
  * with it (spec: specs/bro-z7afs.md).
  */
 import { randomUUID } from 'node:crypto'
-import { spawn, type ChildProcess } from 'node:child_process'
+import { spawn, type ChildProcess, type SpawnOptions } from 'node:child_process'
 import type {
   ClientApp,
   ClientRequestHandler,
@@ -104,21 +104,17 @@ export class AcpTerminals {
       }
     }
     const args = ctx.params.args ?? []
-    /** argv verbatim when the agent structures it — but agents like devin
-     *  put the whole shell line in `command` with args empty ('cd repo &&
-     *  cmd …'), where execve of the literal string is ENOENT every time;
-     *  a no-args command runs through the platform shell instead. */
-    const [file, argv]: [string, string[]] =
-      args.length > 0
-        ? [ctx.params.command, args]
-        : process.platform === 'win32'
-          ? ['cmd', ['/d', '/s', '/c', ctx.params.command]]
-          : ['sh', ['-c', ctx.params.command]]
-    const child = spawn(file, argv, {
+    const opts: SpawnOptions = {
       cwd: ctx.params.cwd ?? undefined,
       env,
       stdio: ['ignore', 'pipe', 'pipe'],
-    })
+    }
+    /** argv verbatim, always the first attempt — bare names resolve via
+     *  PATH and spaced paths exec literally. Agents like devin instead put
+     *  the whole shell line in `command` with args empty ('cd repo &&
+     *  cmd …'), where execve of the literal string is ENOENT every time;
+     *  that failure alone re-spawns through the platform shell. */
+    const child = spawn(ctx.params.command, args, opts)
     const entry: TerminalEntry = {
       child,
       out: Buffer.alloc(0),
@@ -146,26 +142,50 @@ export class AcpTerminals {
       }
       entry.out = buf
     }
-    child.stdout?.on('data', append)
-    child.stderr?.on('data', append)
-    child.once('error', (err) => {
-      append(Buffer.from(`\n[terminal spawn error: ${err.message}]\n`))
-      settle(null, null)
-      this.flushEntry(entry)
-    })
-    // Two-stage settle: 'exit' carries the status (the command completed),
-    // 'close' carries output completeness — exit fires while piped data is
-    // still buffered. Waiters flush on close, or on exit + grace when an
-    // orphaned writer holds the pipe open past the command's death.
-    child.once('exit', (exitCode, signal) => {
-      settle(exitCode, signal)
-      entry.closeTimer = setTimeout(() => this.flushEntry(entry), ORPHAN_CLOSE_GRACE_MS)
-    })
-    child.once('close', (exitCode, signal) => {
-      settle(exitCode, signal)
-      clearTimeout(entry.closeTimer)
-      this.flushEntry(entry)
-    })
+    let shellFellBack = false
+    const wire = (c: ChildProcess): void => {
+      c.stdout?.on('data', append)
+      c.stderr?.on('data', append)
+      c.once('error', (err) => {
+        // execve of a whole shell line is ENOENT every time — that is the
+        // signal to re-spawn through the platform shell, once; every other
+        // spawn error (EACCES, a missing shell) stays a terminal failure
+        if (
+          !shellFellBack &&
+          args.length === 0 &&
+          (err as NodeJS.ErrnoException).code === 'ENOENT'
+        ) {
+          shellFellBack = true
+          // the dead child still owes a 'close' after 'error' — strip its
+          // listeners so it cannot settle the entry with a bogus status
+          c.removeAllListeners()
+          const [file, argv]: [string, string[]] =
+            process.platform === 'win32'
+              ? ['cmd', ['/d', '/s', '/c', ctx.params.command]]
+              : ['sh', ['-c', ctx.params.command]]
+          entry.child = spawn(file, argv, opts)
+          wire(entry.child)
+          return
+        }
+        append(Buffer.from(`\n[terminal spawn error: ${err.message}]\n`))
+        settle(null, null)
+        this.flushEntry(entry)
+      })
+      // Two-stage settle: 'exit' carries the status (the command completed),
+      // 'close' carries output completeness — exit fires while piped data is
+      // still buffered. Waiters flush on close, or on exit + grace when an
+      // orphaned writer holds the pipe open past the command's death.
+      c.once('exit', (exitCode, signal) => {
+        settle(exitCode, signal)
+        entry.closeTimer = setTimeout(() => this.flushEntry(entry), ORPHAN_CLOSE_GRACE_MS)
+      })
+      c.once('close', (exitCode, signal) => {
+        settle(exitCode, signal)
+        clearTimeout(entry.closeTimer)
+        this.flushEntry(entry)
+      })
+    }
+    wire(child)
     const terminalId = randomUUID() as TerminalId
     this.entries.set(terminalId, entry)
     return { terminalId }
