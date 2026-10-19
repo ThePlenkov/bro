@@ -49,24 +49,25 @@ export interface ConductorConfig {
   keepaliveMs?: number
 }
 
-/** BRO_PROVIDER_BACKEND resolves to the conductor's acp entry — a name
- *  no registry knows is a loud startup error naming what IS configured,
- *  never a silent fall back to the byte proxy. */
-export function conductorConfig(
-  env: NodeJS.ProcessEnv,
-  dir: string,
-  providers?: Record<string, ProviderEntry>
-): ConductorConfig | undefined {
-  const cfg = loadConfig(dir)
-  // env pins the backend explicitly; a repo whose conductor is not
-  // ambient (an apiKeyHelper-spawned serve never sees settings.env)
-  // carries it as serve.backend — env still wins over config
-  const configured = cfg.serve.backend?.trim()
-  const backend = env.BRO_PROVIDER_BACKEND?.trim() || configured
-  if (backend === undefined || backend === '') {
-    return undefined
-  }
-  providers ??= (cfg.providers ?? {}) as Record<string, ProviderEntry>
+/** A positive-int env pin, else the fallback — 0, negative and NaN are
+ *  not pins (a zero deadline is a hang, not a deadline). */
+function positiveEnvInt(env: NodeJS.ProcessEnv, key: string, fallback: number): number {
+  const raw = Number(env[key])
+  return Number.isFinite(raw) && raw > 0 ? raw : fallback
+}
+
+/** The backend pin — env wins over the repo's serve.backend. Absent or
+ *  blank means no conductor: the byte proxy keeps /v1. */
+function resolveBackend(env: NodeJS.ProcessEnv, configured: string | undefined): string | undefined {
+  const backend = env.BRO_PROVIDER_BACKEND?.trim() || configured?.trim()
+  return backend === undefined || backend === '' ? undefined : backend
+}
+
+/** The backend's acp entry — a name no registry knows is a loud startup
+ *  error naming what IS configured, never a silent fall back to the byte
+ *  proxy; a non-acp entry is a loud error too (cli entries spawn once,
+ *  they don't converse). */
+function requireAcpEntry(backend: string, providers: Record<string, ProviderEntry>): AcpEntry {
   const entry = providers[backend]
   if (entry === undefined) {
     throw new Error(
@@ -81,31 +82,62 @@ export function conductorConfig(
         `(session-grade wire; cli entries spawn once, they don't converse)`
     )
   }
+  return entry
+}
+
+/** The model pin — env wins over the entry's own model; the client's
+ *  requested id is never trusted (provenance maps to served). */
+function resolveModel(env: NodeJS.ProcessEnv, entry: AcpEntry): string | undefined {
   const model = env.BRO_PROVIDER_MODEL?.trim()
-  const t = Number(env.BRO_PROVIDER_TIMEOUT_MS)
-  const catalogName = env.BRO_PROVIDER_CATALOG?.trim()
-  let catalog: ConductorConfig['catalog']
-  if (catalogName !== undefined && catalogName !== '') {
-    const catalogEntry = providers[catalogName]
-    if (catalogEntry === undefined) {
-      throw new Error(
-        `BRO_PROVIDER_CATALOG=${catalogName} — providers.${catalogName} is not configured ` +
-          `(configured: ${Object.keys(providers).join(', ') || 'none'})`
-      )
-    }
-    catalog = { name: catalogName, entry: catalogEntry }
+  return model === undefined || model === '' ? entry.model : model
+}
+
+/** The /v1/models catalog — a second providers entry answering GET
+ *  /v1/models; absent = the backend answers /v1/models itself. */
+function resolveCatalog(
+  env: NodeJS.ProcessEnv,
+  providers: Record<string, ProviderEntry>
+): ConductorConfig['catalog'] {
+  const name = env.BRO_PROVIDER_CATALOG?.trim()
+  if (name === undefined || name === '') {
+    return undefined
   }
+  const entry = providers[name]
+  if (entry === undefined) {
+    throw new Error(
+      `BRO_PROVIDER_CATALOG=${name} — providers.${name} is not configured ` +
+        `(configured: ${Object.keys(providers).join(', ') || 'none'})`
+    )
+  }
+  return { name, entry }
+}
+
+/** BRO_PROVIDER_BACKEND resolves to the conductor's acp entry — a name
+ *  no registry knows is a loud startup error naming what IS configured,
+ *  never a silent fall back to the byte proxy. */
+export function conductorConfig(
+  env: NodeJS.ProcessEnv,
+  dir: string,
+  providers?: Record<string, ProviderEntry>
+): ConductorConfig | undefined {
+  const cfg = loadConfig(dir)
+  // env pins the backend explicitly; a repo whose conductor is not
+  // ambient (an apiKeyHelper-spawned serve never sees settings.env)
+  // carries it as serve.backend — env still wins over config
+  const backend = resolveBackend(env, cfg.serve.backend)
+  if (backend === undefined) {
+    return undefined
+  }
+  const registry = providers ?? (cfg.providers ?? {}) as Record<string, ProviderEntry>
+  const entry = requireAcpEntry(backend, registry)
   return {
     backend,
     entry,
-    catalog,
-    model: model === undefined || model === '' ? entry.model : model,
+    catalog: resolveCatalog(env, registry),
+    model: resolveModel(env, entry),
     cwd: dir,
-    timeoutMs: Number.isFinite(t) && t > 0 ? t : 120_000,
-    keepaliveMs: (() => {
-      const k = Number(env.BRO_CONDUCTOR_KEEPALIVE_MS)
-      return Number.isFinite(k) && k > 0 ? k : 10_000
-    })(),
+    timeoutMs: positiveEnvInt(env, 'BRO_PROVIDER_TIMEOUT_MS', 120_000),
+    keepaliveMs: positiveEnvInt(env, 'BRO_CONDUCTOR_KEEPALIVE_MS', 10_000),
   }
 }
 
@@ -1694,71 +1726,84 @@ function effortModel(model: string | undefined, effort: string | undefined): str
  *  call's markup through the tool_use block type — blockText's
  *  serialization IS the <tool_call> wire form, so history replays
  *  verbatim. */
-function itemToMessages(it: RespItem): ClientMessage[] {
-  if (it.type === 'function_call') {
-    let input: unknown = {}
-    try {
-      input = JSON.parse(it.arguments ?? '{}')
-    } catch {
-      input = {}
+/** A function_call item replays as an assistant tool_use block. */
+function functionCallToMessages(it: RespItem): ClientMessage[] {
+  let input: unknown = {}
+  try {
+    input = JSON.parse(it.arguments ?? '{}')
+  } catch {
+    input = {}
+  }
+  return [
+    {
+      role: 'assistant',
+      content: [
+        {
+          type: 'tool_use',
+          id: it.call_id ?? it.id ?? '',
+          name: it.name ?? '',
+          input,
+        } as InBlock,
+      ],
+    },
+  ]
+}
+
+/** A function_call_output item replays as a user tool_result block. */
+function functionOutputToMessages(it: RespItem): ClientMessage[] {
+  return [
+    {
+      role: 'user',
+      content: [
+        {
+          type: 'tool_result',
+          tool_use_id: it.call_id ?? '',
+          content: it.output ?? '',
+        } as InBlock,
+      ],
+    },
+  ]
+}
+
+/** One input part → one block. An unsupported part is a loud error, never
+ *  a silent drop — the model would answer blind to content the caller paid
+ *  to send. */
+function inputPartToBlock(p: { type?: string; text?: string; image_url?: string }): InBlock {
+  if (p.type === 'input_text' || p.type === 'output_text' || p.type === 'text') {
+    return { type: 'text', text: p.text ?? '' } as InBlock
+  }
+  if (p.type === 'input_image' && typeof p.image_url === 'string') {
+    const m = /^data:([^;]+);base64,(.+)$/.exec(p.image_url)
+    if (m !== null) {
+      return {
+        type: 'image',
+        source: { type: 'base64', media_type: m[1], data: m[2] },
+      } as InBlock
     }
-    return [
-      {
-        role: 'assistant',
-        content: [
-          {
-            type: 'tool_use',
-            id: it.call_id ?? it.id ?? '',
-            name: it.name ?? '',
-            input,
-          } as InBlock,
-        ],
-      },
-    ]
+    // remote images aren't fetched — a silent drop would let the
+    // agent "answer" about an image it never saw
+    throw new Error('input_image: only data: URLs are supported')
   }
-  if (it.type === 'function_call_output') {
-    return [
-      {
-        role: 'user',
-        content: [
-          {
-            type: 'tool_result',
-            tool_use_id: it.call_id ?? '',
-            content: it.output ?? '',
-          } as InBlock,
-        ],
-      },
-    ]
-  }
-  if (it.type === 'message' || it.type === undefined) {
-    const raw =
-      typeof it.content === 'string'
-        ? [{ type: 'input_text', text: it.content }]
-        : (it.content ?? [])
-    const parts: InBlock[] = raw
-      .map((p): InBlock => {
-        if (p.type === 'input_text' || p.type === 'output_text' || p.type === 'text') {
-          return { type: 'text', text: p.text ?? '' } as InBlock
-        }
-        if (p.type === 'input_image' && typeof p.image_url === 'string') {
-          const m = /^data:([^;]+);base64,(.+)$/.exec(p.image_url)
-          if (m !== null) {
-            return {
-              type: 'image',
-              source: { type: 'base64', media_type: m[1], data: m[2] },
-            } as InBlock
-          }
-          // remote images aren't fetched — a silent drop would let the
-          // agent "answer" about an image it never saw
-          throw new Error('input_image: only data: URLs are supported')
-        }
-        // anything else (input_file, input_audio, computer_screenshot,
-        // refusal, …) would be a silent semantic drop — the model would
-        // answer blind to content the caller paid to send. Fail loudly.
-        throw new Error(`unsupported input part type: ${p.type ?? 'unknown'}`)
-      })
-    return [{ role: it.role ?? 'user', content: parts }]
-  }
+  // anything else (input_file, input_audio, computer_screenshot,
+  // refusal, …) would be a silent semantic drop. Fail loudly.
+  throw new Error(`unsupported input part type: ${p.type ?? 'unknown'}`)
+}
+
+/** A message item replays as its role's content parts. */
+function messageToMessages(it: RespItem): ClientMessage[] {
+  const raw =
+    typeof it.content === 'string'
+      ? [{ type: 'input_text', text: it.content }]
+      : (it.content ?? [])
+  const parts: InBlock[] = raw.map((p): InBlock => inputPartToBlock(p))
+  return [{ role: it.role ?? 'user', content: parts }]
+}
+
+/** One Responses-API item → the chat messages the backend sees. */
+function itemToMessages(it: RespItem): ClientMessage[] {
+  if (it.type === 'function_call') return functionCallToMessages(it)
+  if (it.type === 'function_call_output') return functionOutputToMessages(it)
+  if (it.type === 'message' || it.type === undefined) return messageToMessages(it)
   // reasoning items, item_reference — opaque to the backend's own
   // reasoning; nothing to replay
   return []
