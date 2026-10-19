@@ -12,6 +12,7 @@
     "check:command-docs": "node scripts/gen-command-docs.ts --check",
     "gen:command-docs": "node scripts/gen-command-docs.ts",
     "check:embedded": "node scripts/check-embedded.ts",
+    "check:codescene": "node scripts/codescene-check.ts",
     "gen:plugins": "node scripts/gen-plugins.ts",
     "check:plugins": "node scripts/gen-plugins.ts --check",
     "test": "nx run-many -t test --exclude=skills-*,plugins-*-skills-*",

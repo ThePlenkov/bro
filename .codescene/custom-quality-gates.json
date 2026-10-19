@@ -1,0 +1,957 @@
+{
+  "usage": "CodeScene PR quality gates for bro — the ladder, expressed as code. Rules are tried in order and the FIRST match wins; no match means no gates. Rung 3 (pay_down_tech_debt) = files with zero CodeScene findings — the strictest bar, goal enforcement included. Rung 2 (bare_minimum) = files with advisory findings only — the critical-rule safety net. Rung 1 (floor) = the legacy backlog — 'no new technical debt' only, pre-existing debt tolerated. Each wave cleans a batch of files and promotes them one rung; the rungs are ordered strictest-first so a promotion only ever takes effect for the files it names. Generated from a cs CLI scan (cs review --output-format json).",
+  "rule_sets": [
+    {
+      "quality_gates": "pay_down_tech_debt",
+      "quality_gates_doc": "Rung 3 — zero CodeScene findings: the strictest bar, goals enforced.",
+      "matching_content_path": "packages/act/src/docs.ts"
+    },
+    {
+      "quality_gates": "pay_down_tech_debt",
+      "quality_gates_doc": "Rung 3 — zero CodeScene findings: the strictest bar, goals enforced.",
+      "matching_content_path": "packages/act/src/testtmp.ts"
+    },
+    {
+      "quality_gates": "pay_down_tech_debt",
+      "quality_gates_doc": "Rung 3 — zero CodeScene findings: the strictest bar, goals enforced.",
+      "matching_content_path": "packages/cli/src/commands/acp-worker.ts"
+    },
+    {
+      "quality_gates": "pay_down_tech_debt",
+      "quality_gates_doc": "Rung 3 — zero CodeScene findings: the strictest bar, goals enforced.",
+      "matching_content_path": "packages/cli/src/commands/drive-pulse.ts"
+    },
+    {
+      "quality_gates": "pay_down_tech_debt",
+      "quality_gates_doc": "Rung 3 — zero CodeScene findings: the strictest bar, goals enforced.",
+      "matching_content_path": "packages/cli/src/commands/goal-config.ts"
+    },
+    {
+      "quality_gates": "pay_down_tech_debt",
+      "quality_gates_doc": "Rung 3 — zero CodeScene findings: the strictest bar, goals enforced.",
+      "matching_content_path": "packages/cli/src/commands/mcp.ts"
+    },
+    {
+      "quality_gates": "pay_down_tech_debt",
+      "quality_gates_doc": "Rung 3 — zero CodeScene findings: the strictest bar, goals enforced.",
+      "matching_content_path": "packages/cli/src/commands/query.ts"
+    },
+    {
+      "quality_gates": "pay_down_tech_debt",
+      "quality_gates_doc": "Rung 3 — zero CodeScene findings: the strictest bar, goals enforced.",
+      "matching_content_path": "packages/cli/src/commands/serve-provider.ts"
+    },
+    {
+      "quality_gates": "pay_down_tech_debt",
+      "quality_gates_doc": "Rung 3 — zero CodeScene findings: the strictest bar, goals enforced.",
+      "matching_content_path": "packages/cli/src/commands/serve-testkit.ts"
+    },
+    {
+      "quality_gates": "pay_down_tech_debt",
+      "quality_gates_doc": "Rung 3 — zero CodeScene findings: the strictest bar, goals enforced.",
+      "matching_content_path": "packages/cli/src/commands/want-marker.ts"
+    },
+    {
+      "quality_gates": "pay_down_tech_debt",
+      "quality_gates_doc": "Rung 3 — zero CodeScene findings: the strictest bar, goals enforced.",
+      "matching_content_path": "packages/cli/src/commands/watch-config.ts"
+    },
+    {
+      "quality_gates": "pay_down_tech_debt",
+      "quality_gates_doc": "Rung 3 — zero CodeScene findings: the strictest bar, goals enforced.",
+      "matching_content_path": "packages/cli/src/commands/watch-heartbeat.ts"
+    },
+    {
+      "quality_gates": "pay_down_tech_debt",
+      "quality_gates_doc": "Rung 3 — zero CodeScene findings: the strictest bar, goals enforced.",
+      "matching_content_path": "packages/cli/src/embedded.ts"
+    },
+    {
+      "quality_gates": "pay_down_tech_debt",
+      "quality_gates_doc": "Rung 3 — zero CodeScene findings: the strictest bar, goals enforced.",
+      "matching_content_path": "packages/cli/src/planes/agents.ts"
+    },
+    {
+      "quality_gates": "pay_down_tech_debt",
+      "quality_gates_doc": "Rung 3 — zero CodeScene findings: the strictest bar, goals enforced.",
+      "matching_content_path": "packages/cli/src/planes/debt.ts"
+    },
+    {
+      "quality_gates": "pay_down_tech_debt",
+      "quality_gates_doc": "Rung 3 — zero CodeScene findings: the strictest bar, goals enforced.",
+      "matching_content_path": "packages/cli/src/planes/judge.ts"
+    },
+    {
+      "quality_gates": "pay_down_tech_debt",
+      "quality_gates_doc": "Rung 3 — zero CodeScene findings: the strictest bar, goals enforced.",
+      "matching_content_path": "packages/cli/src/planes/learn.ts"
+    },
+    {
+      "quality_gates": "pay_down_tech_debt",
+      "quality_gates_doc": "Rung 3 — zero CodeScene findings: the strictest bar, goals enforced.",
+      "matching_content_path": "packages/cli/src/planes/stream.ts"
+    },
+    {
+      "quality_gates": "pay_down_tech_debt",
+      "quality_gates_doc": "Rung 3 — zero CodeScene findings: the strictest bar, goals enforced.",
+      "matching_content_path": "packages/cli/src/skills-data.ts"
+    },
+    {
+      "quality_gates": "pay_down_tech_debt",
+      "quality_gates_doc": "Rung 3 — zero CodeScene findings: the strictest bar, goals enforced.",
+      "matching_content_path": "packages/cli/tsdown.config.ts"
+    },
+    {
+      "quality_gates": "pay_down_tech_debt",
+      "quality_gates_doc": "Rung 3 — zero CodeScene findings: the strictest bar, goals enforced.",
+      "matching_content_path": "packages/core/src/deprecation.ts"
+    },
+    {
+      "quality_gates": "pay_down_tech_debt",
+      "quality_gates_doc": "Rung 3 — zero CodeScene findings: the strictest bar, goals enforced.",
+      "matching_content_path": "packages/core/src/events-connectors.ts"
+    },
+    {
+      "quality_gates": "pay_down_tech_debt",
+      "quality_gates_doc": "Rung 3 — zero CodeScene findings: the strictest bar, goals enforced.",
+      "matching_content_path": "packages/core/src/output.ts"
+    },
+    {
+      "quality_gates": "pay_down_tech_debt",
+      "quality_gates_doc": "Rung 3 — zero CodeScene findings: the strictest bar, goals enforced.",
+      "matching_content_path": "packages/core/src/ownership.ts"
+    },
+    {
+      "quality_gates": "pay_down_tech_debt",
+      "quality_gates_doc": "Rung 3 — zero CodeScene findings: the strictest bar, goals enforced.",
+      "matching_content_path": "packages/core/src/plugin.ts"
+    },
+    {
+      "quality_gates": "pay_down_tech_debt",
+      "quality_gates_doc": "Rung 3 — zero CodeScene findings: the strictest bar, goals enforced.",
+      "matching_content_path": "packages/core/src/testtmp.ts"
+    },
+    {
+      "quality_gates": "pay_down_tech_debt",
+      "quality_gates_doc": "Rung 3 — zero CodeScene findings: the strictest bar, goals enforced.",
+      "matching_content_path": "packages/debt/src/collect.ts"
+    },
+    {
+      "quality_gates": "pay_down_tech_debt",
+      "quality_gates_doc": "Rung 3 — zero CodeScene findings: the strictest bar, goals enforced.",
+      "matching_content_path": "packages/debt/src/connector.ts"
+    },
+    {
+      "quality_gates": "pay_down_tech_debt",
+      "quality_gates_doc": "Rung 3 — zero CodeScene findings: the strictest bar, goals enforced.",
+      "matching_content_path": "packages/debt/src/stats.ts"
+    },
+    {
+      "quality_gates": "pay_down_tech_debt",
+      "quality_gates_doc": "Rung 3 — zero CodeScene findings: the strictest bar, goals enforced.",
+      "matching_content_path": "packages/debt/src/testhttp.ts"
+    },
+    {
+      "quality_gates": "pay_down_tech_debt",
+      "quality_gates_doc": "Rung 3 — zero CodeScene findings: the strictest bar, goals enforced.",
+      "matching_content_path": "packages/debt/src/testtmp.ts"
+    },
+    {
+      "quality_gates": "pay_down_tech_debt",
+      "quality_gates_doc": "Rung 3 — zero CodeScene findings: the strictest bar, goals enforced.",
+      "matching_content_path": "packages/debt/src/text.ts"
+    },
+    {
+      "quality_gates": "pay_down_tech_debt",
+      "quality_gates_doc": "Rung 3 — zero CodeScene findings: the strictest bar, goals enforced.",
+      "matching_content_path": "packages/drill/src/connector.ts"
+    },
+    {
+      "quality_gates": "pay_down_tech_debt",
+      "quality_gates_doc": "Rung 3 — zero CodeScene findings: the strictest bar, goals enforced.",
+      "matching_content_path": "packages/github/src/index.ts"
+    },
+    {
+      "quality_gates": "pay_down_tech_debt",
+      "quality_gates_doc": "Rung 3 — zero CodeScene findings: the strictest bar, goals enforced.",
+      "matching_content_path": "packages/gitlab/src/index.ts"
+    },
+    {
+      "quality_gates": "pay_down_tech_debt",
+      "quality_gates_doc": "Rung 3 — zero CodeScene findings: the strictest bar, goals enforced.",
+      "matching_content_path": "packages/gitlab/src/stacks.ts"
+    },
+    {
+      "quality_gates": "pay_down_tech_debt",
+      "quality_gates_doc": "Rung 3 — zero CodeScene findings: the strictest bar, goals enforced.",
+      "matching_content_path": "packages/guard/src/testtmp.ts"
+    },
+    {
+      "quality_gates": "pay_down_tech_debt",
+      "quality_gates_doc": "Rung 3 — zero CodeScene findings: the strictest bar, goals enforced.",
+      "matching_content_path": "packages/jira/src/index.ts"
+    },
+    {
+      "quality_gates": "pay_down_tech_debt",
+      "quality_gates_doc": "Rung 3 — zero CodeScene findings: the strictest bar, goals enforced.",
+      "matching_content_path": "packages/judge/src/deadline.ts"
+    },
+    {
+      "quality_gates": "pay_down_tech_debt",
+      "quality_gates_doc": "Rung 3 — zero CodeScene findings: the strictest bar, goals enforced.",
+      "matching_content_path": "packages/judge/src/llm-judge.ts"
+    },
+    {
+      "quality_gates": "pay_down_tech_debt",
+      "quality_gates_doc": "Rung 3 — zero CodeScene findings: the strictest bar, goals enforced.",
+      "matching_content_path": "packages/judge/src/systemone.ts"
+    },
+    {
+      "quality_gates": "pay_down_tech_debt",
+      "quality_gates_doc": "Rung 3 — zero CodeScene findings: the strictest bar, goals enforced.",
+      "matching_content_path": "packages/linear/src/index.ts"
+    },
+    {
+      "quality_gates": "pay_down_tech_debt",
+      "quality_gates_doc": "Rung 3 — zero CodeScene findings: the strictest bar, goals enforced.",
+      "matching_content_path": "packages/linear/src/queries.ts"
+    },
+    {
+      "quality_gates": "pay_down_tech_debt",
+      "quality_gates_doc": "Rung 3 — zero CodeScene findings: the strictest bar, goals enforced.",
+      "matching_content_path": "packages/loop/src/batch.ts"
+    },
+    {
+      "quality_gates": "pay_down_tech_debt",
+      "quality_gates_doc": "Rung 3 — zero CodeScene findings: the strictest bar, goals enforced.",
+      "matching_content_path": "packages/loop/src/item.ts"
+    },
+    {
+      "quality_gates": "pay_down_tech_debt",
+      "quality_gates_doc": "Rung 3 — zero CodeScene findings: the strictest bar, goals enforced.",
+      "matching_content_path": "packages/mcp/src/server.ts"
+    },
+    {
+      "quality_gates": "pay_down_tech_debt",
+      "quality_gates_doc": "Rung 3 — zero CodeScene findings: the strictest bar, goals enforced.",
+      "matching_content_path": "packages/mesh/src/post.ts"
+    },
+    {
+      "quality_gates": "pay_down_tech_debt",
+      "quality_gates_doc": "Rung 3 — zero CodeScene findings: the strictest bar, goals enforced.",
+      "matching_content_path": "packages/mesh/src/pull.ts"
+    },
+    {
+      "quality_gates": "pay_down_tech_debt",
+      "quality_gates_doc": "Rung 3 — zero CodeScene findings: the strictest bar, goals enforced.",
+      "matching_content_path": "packages/pack/src/index.ts"
+    },
+    {
+      "quality_gates": "pay_down_tech_debt",
+      "quality_gates_doc": "Rung 3 — zero CodeScene findings: the strictest bar, goals enforced.",
+      "matching_content_path": "packages/providers/src/acp-terminal.ts"
+    },
+    {
+      "quality_gates": "pay_down_tech_debt",
+      "quality_gates_doc": "Rung 3 — zero CodeScene findings: the strictest bar, goals enforced.",
+      "matching_content_path": "packages/providers/src/cli.ts"
+    },
+    {
+      "quality_gates": "pay_down_tech_debt",
+      "quality_gates_doc": "Rung 3 — zero CodeScene findings: the strictest bar, goals enforced.",
+      "matching_content_path": "packages/providers/src/openai.ts"
+    },
+    {
+      "quality_gates": "pay_down_tech_debt",
+      "quality_gates_doc": "Rung 3 — zero CodeScene findings: the strictest bar, goals enforced.",
+      "matching_content_path": "packages/providers/src/registry.ts"
+    },
+    {
+      "quality_gates": "pay_down_tech_debt",
+      "quality_gates_doc": "Rung 3 — zero CodeScene findings: the strictest bar, goals enforced.",
+      "matching_content_path": "packages/query/src/atlassian.ts"
+    },
+    {
+      "quality_gates": "pay_down_tech_debt",
+      "quality_gates_doc": "Rung 3 — zero CodeScene findings: the strictest bar, goals enforced.",
+      "matching_content_path": "packages/query/src/run.ts"
+    },
+    {
+      "quality_gates": "pay_down_tech_debt",
+      "quality_gates_doc": "Rung 3 — zero CodeScene findings: the strictest bar, goals enforced.",
+      "matching_content_path": "scripts/check-os-independence.ts"
+    },
+    {
+      "quality_gates": "pay_down_tech_debt",
+      "quality_gates_doc": "Rung 3 — zero CodeScene findings: the strictest bar, goals enforced.",
+      "matching_content_path": "scripts/validate-skill.ts"
+    },
+    {
+      "quality_gates": "pay_down_tech_debt",
+      "quality_gates_doc": "Rung 3 — zero CodeScene findings: the strictest bar, goals enforced.",
+      "matching_content_path": "site/src/lib/source.ts"
+    },
+    {
+      "quality_gates": "pay_down_tech_debt",
+      "quality_gates_doc": "Rung 3 — zero CodeScene findings: the strictest bar, goals enforced.",
+      "matching_content_path": "site/src/routes/llms[.]txt.ts"
+    },
+    {
+      "quality_gates": "pay_down_tech_debt",
+      "quality_gates_doc": "Rung 3 — zero CodeScene findings: the strictest bar, goals enforced.",
+      "matching_content_path": "site/src/scenarios.ts"
+    },
+    {
+      "quality_gates": "bare_minimum",
+      "quality_gates_doc": "Rung 2 — advisory findings only (no critical rule fires): the critical-rule safety net.",
+      "matching_content_path": "packages/act/src/check-history.ts"
+    },
+    {
+      "quality_gates": "bare_minimum",
+      "quality_gates_doc": "Rung 2 — advisory findings only (no critical rule fires): the critical-rule safety net.",
+      "matching_content_path": "packages/act/src/connector.ts"
+    },
+    {
+      "quality_gates": "bare_minimum",
+      "quality_gates_doc": "Rung 2 — advisory findings only (no critical rule fires): the critical-rule safety net.",
+      "matching_content_path": "packages/act/src/exit-gate.ts"
+    },
+    {
+      "quality_gates": "bare_minimum",
+      "quality_gates_doc": "Rung 2 — advisory findings only (no critical rule fires): the critical-rule safety net.",
+      "matching_content_path": "packages/act/src/pending-watch.ts"
+    },
+    {
+      "quality_gates": "bare_minimum",
+      "quality_gates_doc": "Rung 2 — advisory findings only (no critical rule fires): the critical-rule safety net.",
+      "matching_content_path": "packages/act/src/state-cache.ts"
+    },
+    {
+      "quality_gates": "bare_minimum",
+      "quality_gates_doc": "Rung 2 — advisory findings only (no critical rule fires): the critical-rule safety net.",
+      "matching_content_path": "packages/cli/src/commands/agents.ts"
+    },
+    {
+      "quality_gates": "bare_minimum",
+      "quality_gates_doc": "Rung 2 — advisory findings only (no critical rule fires): the critical-rule safety net.",
+      "matching_content_path": "packages/cli/src/commands/buildstamp.ts"
+    },
+    {
+      "quality_gates": "bare_minimum",
+      "quality_gates_doc": "Rung 2 — advisory findings only (no critical rule fires): the critical-rule safety net.",
+      "matching_content_path": "packages/cli/src/commands/bus.ts"
+    },
+    {
+      "quality_gates": "bare_minimum",
+      "quality_gates_doc": "Rung 2 — advisory findings only (no critical rule fires): the critical-rule safety net.",
+      "matching_content_path": "packages/cli/src/commands/check-config.ts"
+    },
+    {
+      "quality_gates": "bare_minimum",
+      "quality_gates_doc": "Rung 2 — advisory findings only (no critical rule fires): the critical-rule safety net.",
+      "matching_content_path": "packages/cli/src/commands/cleanup.ts"
+    },
+    {
+      "quality_gates": "bare_minimum",
+      "quality_gates_doc": "Rung 2 — advisory findings only (no critical rule fires): the critical-rule safety net.",
+      "matching_content_path": "packages/cli/src/commands/daemon.ts"
+    },
+    {
+      "quality_gates": "bare_minimum",
+      "quality_gates_doc": "Rung 2 — advisory findings only (no critical rule fires): the critical-rule safety net.",
+      "matching_content_path": "packages/cli/src/commands/dogfood.ts"
+    },
+    {
+      "quality_gates": "bare_minimum",
+      "quality_gates_doc": "Rung 2 — advisory findings only (no critical rule fires): the critical-rule safety net.",
+      "matching_content_path": "packages/cli/src/commands/drill.ts"
+    },
+    {
+      "quality_gates": "bare_minimum",
+      "quality_gates_doc": "Rung 2 — advisory findings only (no critical rule fires): the critical-rule safety net.",
+      "matching_content_path": "packages/cli/src/commands/drive-config.ts"
+    },
+    {
+      "quality_gates": "bare_minimum",
+      "quality_gates_doc": "Rung 2 — advisory findings only (no critical rule fires): the critical-rule safety net.",
+      "matching_content_path": "packages/cli/src/commands/fleet.ts"
+    },
+    {
+      "quality_gates": "bare_minimum",
+      "quality_gates_doc": "Rung 2 — advisory findings only (no critical rule fires): the critical-rule safety net.",
+      "matching_content_path": "packages/cli/src/commands/githooks.ts"
+    },
+    {
+      "quality_gates": "bare_minimum",
+      "quality_gates_doc": "Rung 2 — advisory findings only (no critical rule fires): the critical-rule safety net.",
+      "matching_content_path": "packages/cli/src/commands/guard.ts"
+    },
+    {
+      "quality_gates": "bare_minimum",
+      "quality_gates_doc": "Rung 2 — advisory findings only (no critical rule fires): the critical-rule safety net.",
+      "matching_content_path": "packages/cli/src/commands/learn.ts"
+    },
+    {
+      "quality_gates": "bare_minimum",
+      "quality_gates_doc": "Rung 2 — advisory findings only (no critical rule fires): the critical-rule safety net.",
+      "matching_content_path": "packages/cli/src/commands/loop-state.ts"
+    },
+    {
+      "quality_gates": "bare_minimum",
+      "quality_gates_doc": "Rung 2 — advisory findings only (no critical rule fires): the critical-rule safety net.",
+      "matching_content_path": "packages/cli/src/commands/mesh.ts"
+    },
+    {
+      "quality_gates": "bare_minimum",
+      "quality_gates_doc": "Rung 2 — advisory findings only (no critical rule fires): the critical-rule safety net.",
+      "matching_content_path": "packages/cli/src/commands/notify.ts"
+    },
+    {
+      "quality_gates": "bare_minimum",
+      "quality_gates_doc": "Rung 2 — advisory findings only (no critical rule fires): the critical-rule safety net.",
+      "matching_content_path": "packages/cli/src/commands/peer.ts"
+    },
+    {
+      "quality_gates": "bare_minimum",
+      "quality_gates_doc": "Rung 2 — advisory findings only (no critical rule fires): the critical-rule safety net.",
+      "matching_content_path": "packages/cli/src/commands/plugins.ts"
+    },
+    {
+      "quality_gates": "bare_minimum",
+      "quality_gates_doc": "Rung 2 — advisory findings only (no critical rule fires): the critical-rule safety net.",
+      "matching_content_path": "packages/cli/src/commands/postmerge.ts"
+    },
+    {
+      "quality_gates": "bare_minimum",
+      "quality_gates_doc": "Rung 2 — advisory findings only (no critical rule fires): the critical-rule safety net.",
+      "matching_content_path": "packages/cli/src/commands/proc-owner.ts"
+    },
+    {
+      "quality_gates": "bare_minimum",
+      "quality_gates_doc": "Rung 2 — advisory findings only (no critical rule fires): the critical-rule safety net.",
+      "matching_content_path": "packages/cli/src/commands/providers.ts"
+    },
+    {
+      "quality_gates": "bare_minimum",
+      "quality_gates_doc": "Rung 2 — advisory findings only (no critical rule fires): the critical-rule safety net.",
+      "matching_content_path": "packages/cli/src/commands/pulse.ts"
+    },
+    {
+      "quality_gates": "bare_minimum",
+      "quality_gates_doc": "Rung 2 — advisory findings only (no critical rule fires): the critical-rule safety net.",
+      "matching_content_path": "packages/cli/src/commands/queue.ts"
+    },
+    {
+      "quality_gates": "bare_minimum",
+      "quality_gates_doc": "Rung 2 — advisory findings only (no critical rule fires): the critical-rule safety net.",
+      "matching_content_path": "packages/cli/src/commands/refguard.ts"
+    },
+    {
+      "quality_gates": "bare_minimum",
+      "quality_gates_doc": "Rung 2 — advisory findings only (no critical rule fires): the critical-rule safety net.",
+      "matching_content_path": "packages/cli/src/commands/request.ts"
+    },
+    {
+      "quality_gates": "bare_minimum",
+      "quality_gates_doc": "Rung 2 — advisory findings only (no critical rule fires): the critical-rule safety net.",
+      "matching_content_path": "packages/cli/src/commands/retrospect.ts"
+    },
+    {
+      "quality_gates": "bare_minimum",
+      "quality_gates_doc": "Rung 2 — advisory findings only (no critical rule fires): the critical-rule safety net.",
+      "matching_content_path": "packages/cli/src/commands/rig-config.ts"
+    },
+    {
+      "quality_gates": "bare_minimum",
+      "quality_gates_doc": "Rung 2 — advisory findings only (no critical rule fires): the critical-rule safety net.",
+      "matching_content_path": "packages/cli/src/commands/rig-next.ts"
+    },
+    {
+      "quality_gates": "bare_minimum",
+      "quality_gates_doc": "Rung 2 — advisory findings only (no critical rule fires): the critical-rule safety net.",
+      "matching_content_path": "packages/cli/src/commands/rig-pulse.ts"
+    },
+    {
+      "quality_gates": "bare_minimum",
+      "quality_gates_doc": "Rung 2 — advisory findings only (no critical rule fires): the critical-rule safety net.",
+      "matching_content_path": "packages/cli/src/commands/rig.ts"
+    },
+    {
+      "quality_gates": "bare_minimum",
+      "quality_gates_doc": "Rung 2 — advisory findings only (no critical rule fires): the critical-rule safety net.",
+      "matching_content_path": "packages/cli/src/commands/serve-conductor.ts"
+    },
+    {
+      "quality_gates": "bare_minimum",
+      "quality_gates_doc": "Rung 2 — advisory findings only (no critical rule fires): the critical-rule safety net.",
+      "matching_content_path": "packages/cli/src/commands/serve.ts"
+    },
+    {
+      "quality_gates": "bare_minimum",
+      "quality_gates_doc": "Rung 2 — advisory findings only (no critical rule fires): the critical-rule safety net.",
+      "matching_content_path": "packages/cli/src/commands/setup.ts"
+    },
+    {
+      "quality_gates": "bare_minimum",
+      "quality_gates_doc": "Rung 2 — advisory findings only (no critical rule fires): the critical-rule safety net.",
+      "matching_content_path": "packages/cli/src/commands/sinks-telegram.ts"
+    },
+    {
+      "quality_gates": "bare_minimum",
+      "quality_gates_doc": "Rung 2 — advisory findings only (no critical rule fires): the critical-rule safety net.",
+      "matching_content_path": "packages/cli/src/commands/sinks.ts"
+    },
+    {
+      "quality_gates": "bare_minimum",
+      "quality_gates_doc": "Rung 2 — advisory findings only (no critical rule fires): the critical-rule safety net.",
+      "matching_content_path": "packages/cli/src/commands/status.ts"
+    },
+    {
+      "quality_gates": "bare_minimum",
+      "quality_gates_doc": "Rung 2 — advisory findings only (no critical rule fires): the critical-rule safety net.",
+      "matching_content_path": "packages/cli/src/commands/sync.ts"
+    },
+    {
+      "quality_gates": "bare_minimum",
+      "quality_gates_doc": "Rung 2 — advisory findings only (no critical rule fires): the critical-rule safety net.",
+      "matching_content_path": "packages/cli/src/commands/trace-config.ts"
+    },
+    {
+      "quality_gates": "bare_minimum",
+      "quality_gates_doc": "Rung 2 — advisory findings only (no critical rule fires): the critical-rule safety net.",
+      "matching_content_path": "packages/cli/src/commands/watch-install.ts"
+    },
+    {
+      "quality_gates": "bare_minimum",
+      "quality_gates_doc": "Rung 2 — advisory findings only (no critical rule fires): the critical-rule safety net.",
+      "matching_content_path": "packages/cli/src/commands/watch-pulse.ts"
+    },
+    {
+      "quality_gates": "bare_minimum",
+      "quality_gates_doc": "Rung 2 — advisory findings only (no critical rule fires): the critical-rule safety net.",
+      "matching_content_path": "packages/cli/src/commands/watch.ts"
+    },
+    {
+      "quality_gates": "bare_minimum",
+      "quality_gates_doc": "Rung 2 — advisory findings only (no critical rule fires): the critical-rule safety net.",
+      "matching_content_path": "packages/cli/src/cursor-hook.ts"
+    },
+    {
+      "quality_gates": "bare_minimum",
+      "quality_gates_doc": "Rung 2 — advisory findings only (no critical rule fires): the critical-rule safety net.",
+      "matching_content_path": "packages/cli/src/doctypes/store.ts"
+    },
+    {
+      "quality_gates": "bare_minimum",
+      "quality_gates_doc": "Rung 2 — advisory findings only (no critical rule fires): the critical-rule safety net.",
+      "matching_content_path": "packages/cli/src/doctypes/task.ts"
+    },
+    {
+      "quality_gates": "bare_minimum",
+      "quality_gates_doc": "Rung 2 — advisory findings only (no critical rule fires): the critical-rule safety net.",
+      "matching_content_path": "packages/cli/src/index.ts"
+    },
+    {
+      "quality_gates": "bare_minimum",
+      "quality_gates_doc": "Rung 2 — advisory findings only (no critical rule fires): the critical-rule safety net.",
+      "matching_content_path": "packages/cli/src/opencode-tui.ts"
+    },
+    {
+      "quality_gates": "bare_minimum",
+      "quality_gates_doc": "Rung 2 — advisory findings only (no critical rule fires): the critical-rule safety net.",
+      "matching_content_path": "packages/cli/src/opencode.ts"
+    },
+    {
+      "quality_gates": "bare_minimum",
+      "quality_gates_doc": "Rung 2 — advisory findings only (no critical rule fires): the critical-rule safety net.",
+      "matching_content_path": "packages/cli/src/planes/events.ts"
+    },
+    {
+      "quality_gates": "bare_minimum",
+      "quality_gates_doc": "Rung 2 — advisory findings only (no critical rule fires): the critical-rule safety net.",
+      "matching_content_path": "packages/cli/src/planes/gates.ts"
+    },
+    {
+      "quality_gates": "bare_minimum",
+      "quality_gates_doc": "Rung 2 — advisory findings only (no critical rule fires): the critical-rule safety net.",
+      "matching_content_path": "packages/cli/src/planes/helpers.ts"
+    },
+    {
+      "quality_gates": "bare_minimum",
+      "quality_gates_doc": "Rung 2 — advisory findings only (no critical rule fires): the critical-rule safety net.",
+      "matching_content_path": "packages/cli/src/planes/queue.ts"
+    },
+    {
+      "quality_gates": "bare_minimum",
+      "quality_gates_doc": "Rung 2 — advisory findings only (no critical rule fires): the critical-rule safety net.",
+      "matching_content_path": "packages/cli/src/planes/work.ts"
+    },
+    {
+      "quality_gates": "bare_minimum",
+      "quality_gates_doc": "Rung 2 — advisory findings only (no critical rule fires): the critical-rule safety net.",
+      "matching_content_path": "packages/cli/src/plugins.ts"
+    },
+    {
+      "quality_gates": "bare_minimum",
+      "quality_gates_doc": "Rung 2 — advisory findings only (no critical rule fires): the critical-rule safety net.",
+      "matching_content_path": "packages/cli/src/session-planes/copilot.ts"
+    },
+    {
+      "quality_gates": "bare_minimum",
+      "quality_gates_doc": "Rung 2 — advisory findings only (no critical rule fires): the critical-rule safety net.",
+      "matching_content_path": "packages/convoy/src/molecule.ts"
+    },
+    {
+      "quality_gates": "bare_minimum",
+      "quality_gates_doc": "Rung 2 — advisory findings only (no critical rule fires): the critical-rule safety net.",
+      "matching_content_path": "packages/core/src/agents.ts"
+    },
+    {
+      "quality_gates": "bare_minimum",
+      "quality_gates_doc": "Rung 2 — advisory findings only (no critical rule fires): the critical-rule safety net.",
+      "matching_content_path": "packages/core/src/bd.ts"
+    },
+    {
+      "quality_gates": "bare_minimum",
+      "quality_gates_doc": "Rung 2 — advisory findings only (no critical rule fires): the critical-rule safety net.",
+      "matching_content_path": "packages/core/src/bus.ts"
+    },
+    {
+      "quality_gates": "bare_minimum",
+      "quality_gates_doc": "Rung 2 — advisory findings only (no critical rule fires): the critical-rule safety net.",
+      "matching_content_path": "packages/core/src/events.ts"
+    },
+    {
+      "quality_gates": "bare_minimum",
+      "quality_gates_doc": "Rung 2 — advisory findings only (no critical rule fires): the critical-rule safety net.",
+      "matching_content_path": "packages/core/src/filelock.ts"
+    },
+    {
+      "quality_gates": "bare_minimum",
+      "quality_gates_doc": "Rung 2 — advisory findings only (no critical rule fires): the critical-rule safety net.",
+      "matching_content_path": "packages/core/src/gh.ts"
+    },
+    {
+      "quality_gates": "bare_minimum",
+      "quality_gates_doc": "Rung 2 — advisory findings only (no critical rule fires): the critical-rule safety net.",
+      "matching_content_path": "packages/core/src/git.ts"
+    },
+    {
+      "quality_gates": "bare_minimum",
+      "quality_gates_doc": "Rung 2 — advisory findings only (no critical rule fires): the critical-rule safety net.",
+      "matching_content_path": "packages/core/src/guards.ts"
+    },
+    {
+      "quality_gates": "bare_minimum",
+      "quality_gates_doc": "Rung 2 — advisory findings only (no critical rule fires): the critical-rule safety net.",
+      "matching_content_path": "packages/core/src/lifecycle.ts"
+    },
+    {
+      "quality_gates": "bare_minimum",
+      "quality_gates_doc": "Rung 2 — advisory findings only (no critical rule fires): the critical-rule safety net.",
+      "matching_content_path": "packages/core/src/live-procs.ts"
+    },
+    {
+      "quality_gates": "bare_minimum",
+      "quality_gates_doc": "Rung 2 — advisory findings only (no critical rule fires): the critical-rule safety net.",
+      "matching_content_path": "packages/core/src/notify.ts"
+    },
+    {
+      "quality_gates": "bare_minimum",
+      "quality_gates_doc": "Rung 2 — advisory findings only (no critical rule fires): the critical-rule safety net.",
+      "matching_content_path": "packages/core/src/plan.ts"
+    },
+    {
+      "quality_gates": "bare_minimum",
+      "quality_gates_doc": "Rung 2 — advisory findings only (no critical rule fires): the critical-rule safety net.",
+      "matching_content_path": "packages/core/src/planes.ts"
+    },
+    {
+      "quality_gates": "bare_minimum",
+      "quality_gates_doc": "Rung 2 — advisory findings only (no critical rule fires): the critical-rule safety net.",
+      "matching_content_path": "packages/core/src/proc.ts"
+    },
+    {
+      "quality_gates": "bare_minimum",
+      "quality_gates_doc": "Rung 2 — advisory findings only (no critical rule fires): the critical-rule safety net.",
+      "matching_content_path": "packages/core/src/providers.ts"
+    },
+    {
+      "quality_gates": "bare_minimum",
+      "quality_gates_doc": "Rung 2 — advisory findings only (no critical rule fires): the critical-rule safety net.",
+      "matching_content_path": "packages/core/src/session-planes.ts"
+    },
+    {
+      "quality_gates": "bare_minimum",
+      "quality_gates_doc": "Rung 2 — advisory findings only (no critical rule fires): the critical-rule safety net.",
+      "matching_content_path": "packages/core/src/sinks.ts"
+    },
+    {
+      "quality_gates": "bare_minimum",
+      "quality_gates_doc": "Rung 2 — advisory findings only (no critical rule fires): the critical-rule safety net.",
+      "matching_content_path": "packages/core/src/taskmeta.ts"
+    },
+    {
+      "quality_gates": "bare_minimum",
+      "quality_gates_doc": "Rung 2 — advisory findings only (no critical rule fires): the critical-rule safety net.",
+      "matching_content_path": "packages/debt/src/codacy.ts"
+    },
+    {
+      "quality_gates": "bare_minimum",
+      "quality_gates_doc": "Rung 2 — advisory findings only (no critical rule fires): the critical-rule safety net.",
+      "matching_content_path": "packages/debt/src/codescene.ts"
+    },
+    {
+      "quality_gates": "bare_minimum",
+      "quality_gates_doc": "Rung 2 — advisory findings only (no critical rule fires): the critical-rule safety net.",
+      "matching_content_path": "packages/debt/src/collectors.ts"
+    },
+    {
+      "quality_gates": "bare_minimum",
+      "quality_gates_doc": "Rung 2 — advisory findings only (no critical rule fires): the critical-rule safety net.",
+      "matching_content_path": "packages/debt/src/harvest.ts"
+    },
+    {
+      "quality_gates": "bare_minimum",
+      "quality_gates_doc": "Rung 2 — advisory findings only (no critical rule fires): the critical-rule safety net.",
+      "matching_content_path": "packages/debt/src/labels.ts"
+    },
+    {
+      "quality_gates": "bare_minimum",
+      "quality_gates_doc": "Rung 2 — advisory findings only (no critical rule fires): the critical-rule safety net.",
+      "matching_content_path": "packages/debt/src/sonarcloud.ts"
+    },
+    {
+      "quality_gates": "bare_minimum",
+      "quality_gates_doc": "Rung 2 — advisory findings only (no critical rule fires): the critical-rule safety net.",
+      "matching_content_path": "packages/debt/src/store.ts"
+    },
+    {
+      "quality_gates": "bare_minimum",
+      "quality_gates_doc": "Rung 2 — advisory findings only (no critical rule fires): the critical-rule safety net.",
+      "matching_content_path": "packages/drill/src/config.ts"
+    },
+    {
+      "quality_gates": "bare_minimum",
+      "quality_gates_doc": "Rung 2 — advisory findings only (no critical rule fires): the critical-rule safety net.",
+      "matching_content_path": "packages/drill/src/queue.ts"
+    },
+    {
+      "quality_gates": "bare_minimum",
+      "quality_gates_doc": "Rung 2 — advisory findings only (no critical rule fires): the critical-rule safety net.",
+      "matching_content_path": "packages/drill/src/report.ts"
+    },
+    {
+      "quality_gates": "bare_minimum",
+      "quality_gates_doc": "Rung 2 — advisory findings only (no critical rule fires): the critical-rule safety net.",
+      "matching_content_path": "packages/github/src/queries.ts"
+    },
+    {
+      "quality_gates": "bare_minimum",
+      "quality_gates_doc": "Rung 2 — advisory findings only (no critical rule fires): the critical-rule safety net.",
+      "matching_content_path": "packages/github/src/stacks.ts"
+    },
+    {
+      "quality_gates": "bare_minimum",
+      "quality_gates_doc": "Rung 2 — advisory findings only (no critical rule fires): the critical-rule safety net.",
+      "matching_content_path": "packages/gitlab/src/glab.ts"
+    },
+    {
+      "quality_gates": "bare_minimum",
+      "quality_gates_doc": "Rung 2 — advisory findings only (no critical rule fires): the critical-rule safety net.",
+      "matching_content_path": "packages/gitlab/src/queries.ts"
+    },
+    {
+      "quality_gates": "bare_minimum",
+      "quality_gates_doc": "Rung 2 — advisory findings only (no critical rule fires): the critical-rule safety net.",
+      "matching_content_path": "packages/gitlab/src/reviews.ts"
+    },
+    {
+      "quality_gates": "bare_minimum",
+      "quality_gates_doc": "Rung 2 — advisory findings only (no critical rule fires): the critical-rule safety net.",
+      "matching_content_path": "packages/guard/src/config.ts"
+    },
+    {
+      "quality_gates": "bare_minimum",
+      "quality_gates_doc": "Rung 2 — advisory findings only (no critical rule fires): the critical-rule safety net.",
+      "matching_content_path": "packages/guard/src/engine.ts"
+    },
+    {
+      "quality_gates": "bare_minimum",
+      "quality_gates_doc": "Rung 2 — advisory findings only (no critical rule fires): the critical-rule safety net.",
+      "matching_content_path": "packages/judge/src/chain.ts"
+    },
+    {
+      "quality_gates": "bare_minimum",
+      "quality_gates_doc": "Rung 2 — advisory findings only (no critical rule fires): the critical-rule safety net.",
+      "matching_content_path": "packages/judge/src/config.ts"
+    },
+    {
+      "quality_gates": "bare_minimum",
+      "quality_gates_doc": "Rung 2 — advisory findings only (no critical rule fires): the critical-rule safety net.",
+      "matching_content_path": "packages/judge/src/journal.ts"
+    },
+    {
+      "quality_gates": "bare_minimum",
+      "quality_gates_doc": "Rung 2 — advisory findings only (no critical rule fires): the critical-rule safety net.",
+      "matching_content_path": "packages/judge/src/provider-judge.ts"
+    },
+    {
+      "quality_gates": "bare_minimum",
+      "quality_gates_doc": "Rung 2 — advisory findings only (no critical rule fires): the critical-rule safety net.",
+      "matching_content_path": "packages/judge/src/replay.ts"
+    },
+    {
+      "quality_gates": "bare_minimum",
+      "quality_gates_doc": "Rung 2 — advisory findings only (no critical rule fires): the critical-rule safety net.",
+      "matching_content_path": "packages/judge/src/router.ts"
+    },
+    {
+      "quality_gates": "bare_minimum",
+      "quality_gates_doc": "Rung 2 — advisory findings only (no critical rule fires): the critical-rule safety net.",
+      "matching_content_path": "packages/judge/src/shadow.ts"
+    },
+    {
+      "quality_gates": "bare_minimum",
+      "quality_gates_doc": "Rung 2 — advisory findings only (no critical rule fires): the critical-rule safety net.",
+      "matching_content_path": "packages/judge/src/stats.ts"
+    },
+    {
+      "quality_gates": "bare_minimum",
+      "quality_gates_doc": "Rung 2 — advisory findings only (no critical rule fires): the critical-rule safety net.",
+      "matching_content_path": "packages/learn/src/config.ts"
+    },
+    {
+      "quality_gates": "bare_minimum",
+      "quality_gates_doc": "Rung 2 — advisory findings only (no critical rule fires): the critical-rule safety net.",
+      "matching_content_path": "packages/learn/src/lesson.ts"
+    },
+    {
+      "quality_gates": "bare_minimum",
+      "quality_gates_doc": "Rung 2 — advisory findings only (no critical rule fires): the critical-rule safety net.",
+      "matching_content_path": "packages/learn/src/probe.ts"
+    },
+    {
+      "quality_gates": "bare_minimum",
+      "quality_gates_doc": "Rung 2 — advisory findings only (no critical rule fires): the critical-rule safety net.",
+      "matching_content_path": "packages/learn/src/store.ts"
+    },
+    {
+      "quality_gates": "bare_minimum",
+      "quality_gates_doc": "Rung 2 — advisory findings only (no critical rule fires): the critical-rule safety net.",
+      "matching_content_path": "packages/linear/src/api.ts"
+    },
+    {
+      "quality_gates": "bare_minimum",
+      "quality_gates_doc": "Rung 2 — advisory findings only (no critical rule fires): the critical-rule safety net.",
+      "matching_content_path": "packages/loop/src/capacity.ts"
+    },
+    {
+      "quality_gates": "bare_minimum",
+      "quality_gates_doc": "Rung 2 — advisory findings only (no critical rule fires): the critical-rule safety net.",
+      "matching_content_path": "packages/loop/src/config.ts"
+    },
+    {
+      "quality_gates": "bare_minimum",
+      "quality_gates_doc": "Rung 2 — advisory findings only (no critical rule fires): the critical-rule safety net.",
+      "matching_content_path": "packages/loop/src/mirror.ts"
+    },
+    {
+      "quality_gates": "bare_minimum",
+      "quality_gates_doc": "Rung 2 — advisory findings only (no critical rule fires): the critical-rule safety net.",
+      "matching_content_path": "packages/loop/src/prompt.ts"
+    },
+    {
+      "quality_gates": "bare_minimum",
+      "quality_gates_doc": "Rung 2 — advisory findings only (no critical rule fires): the critical-rule safety net.",
+      "matching_content_path": "packages/loop/src/schedule.ts"
+    },
+    {
+      "quality_gates": "bare_minimum",
+      "quality_gates_doc": "Rung 2 — advisory findings only (no critical rule fires): the critical-rule safety net.",
+      "matching_content_path": "packages/mesh/src/envelope.ts"
+    },
+    {
+      "quality_gates": "bare_minimum",
+      "quality_gates_doc": "Rung 2 — advisory findings only (no critical rule fires): the critical-rule safety net.",
+      "matching_content_path": "packages/mesh/src/identity.ts"
+    },
+    {
+      "quality_gates": "bare_minimum",
+      "quality_gates_doc": "Rung 2 — advisory findings only (no critical rule fires): the critical-rule safety net.",
+      "matching_content_path": "packages/mesh/src/peers.ts"
+    },
+    {
+      "quality_gates": "bare_minimum",
+      "quality_gates_doc": "Rung 2 — advisory findings only (no critical rule fires): the critical-rule safety net.",
+      "matching_content_path": "packages/mesh/src/request.ts"
+    },
+    {
+      "quality_gates": "bare_minimum",
+      "quality_gates_doc": "Rung 2 — advisory findings only (no critical rule fires): the critical-rule safety net.",
+      "matching_content_path": "packages/providers/src/acp-events.ts"
+    },
+    {
+      "quality_gates": "bare_minimum",
+      "quality_gates_doc": "Rung 2 — advisory findings only (no critical rule fires): the critical-rule safety net.",
+      "matching_content_path": "packages/providers/src/otel.ts"
+    },
+    {
+      "quality_gates": "bare_minimum",
+      "quality_gates_doc": "Rung 2 — advisory findings only (no critical rule fires): the critical-rule safety net.",
+      "matching_content_path": "packages/providers/src/systemone.ts"
+    },
+    {
+      "quality_gates": "bare_minimum",
+      "quality_gates_doc": "Rung 2 — advisory findings only (no critical rule fires): the critical-rule safety net.",
+      "matching_content_path": "packages/providers/src/testkit.ts"
+    },
+    {
+      "quality_gates": "bare_minimum",
+      "quality_gates_doc": "Rung 2 — advisory findings only (no critical rule fires): the critical-rule safety net.",
+      "matching_content_path": "packages/providers/src/typed.ts"
+    },
+    {
+      "quality_gates": "bare_minimum",
+      "quality_gates_doc": "Rung 2 — advisory findings only (no critical rule fires): the critical-rule safety net.",
+      "matching_content_path": "packages/retro/src/retro.ts"
+    },
+    {
+      "quality_gates": "bare_minimum",
+      "quality_gates_doc": "Rung 2 — advisory findings only (no critical rule fires): the critical-rule safety net.",
+      "matching_content_path": "packages/stack/src/stack.ts"
+    },
+    {
+      "quality_gates": "bare_minimum",
+      "quality_gates_doc": "Rung 2 — advisory findings only (no critical rule fires): the critical-rule safety net.",
+      "matching_content_path": "plugins/opencode/bro/bro.ts"
+    },
+    {
+      "quality_gates": "bare_minimum",
+      "quality_gates_doc": "Rung 2 — advisory findings only (no critical rule fires): the critical-rule safety net.",
+      "matching_content_path": "plugins/opencode/bro/cli.ts"
+    },
+    {
+      "quality_gates": "bare_minimum",
+      "quality_gates_doc": "Rung 2 — advisory findings only (no critical rule fires): the critical-rule safety net.",
+      "matching_content_path": "scripts/beads-dolt-server.ts"
+    },
+    {
+      "quality_gates": "bare_minimum",
+      "quality_gates_doc": "Rung 2 — advisory findings only (no critical rule fires): the critical-rule safety net.",
+      "matching_content_path": "scripts/gen-command-docs.ts"
+    },
+    {
+      "quality_gates": "bare_minimum",
+      "quality_gates_doc": "Rung 2 — advisory findings only (no critical rule fires): the critical-rule safety net.",
+      "matching_content_path": "scripts/gen-plugins.ts"
+    },
+    {
+      "quality_gates": {
+        "new_code_health": true
+      },
+      "quality_gates_doc": "Rung 1 (floor) — the legacy backlog: new code must not introduce technical debt, pre-existing debt is tolerated. This is the wave-1 baseline; files graduate as waves clear them.",
+      "matching_content_path": "**/*"
+    }
+  ]
+}
