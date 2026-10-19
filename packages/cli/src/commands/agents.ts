@@ -580,6 +580,10 @@ export interface StepSpawnRequest {
   promptFile?: string
   prompt?: string
   beadsDir?: string
+  /** `run --for` — the molStep is promised a real bead: the claim guards
+   *  never take the `adhoc-*` phantom shortcut on it, so a missing or
+   *  mistyped id fails instead of spawning unclaimed (spec bro-7dila). */
+  claimRequired?: boolean
   /** Extra env for the spawned process — identity pins (BEADS_DIR,
    *  BRO_BEAD_ID, BRO_AGENT_ID, BRO_AGENT_PROVIDER/MODEL) still win,
    *  so a caller can't redirect the claim store, re-badge the worker,
@@ -694,6 +698,7 @@ export function spawnStepAgent(
       return conn
         .spawn({
           molStep: req.molStep,
+          claimRequired: req.claimRequired,
           repoRoot,
           beadsDir: beads,
           prompt,
@@ -900,13 +905,16 @@ export function collectDuplicateSuspects(
     // a corrupt registry throws — advisory loses the agent pool, not the spawn
   }
   for (const [molStep, e] of Object.entries(registry)) {
-    seenAgents.add(e.agentId)
     // the --for target's own row is the same work item, not a duplicate —
-    // the spawn guards carry its real verdict (refuse/respawn)
+    // the spawn guards carry its real verdict (refuse/respawn). Marked
+    // seen so the worker's session row can't echo it as a suspect either
     if (molStep === opts.excludeStep) {
+      seenAgents.add(e.agentId)
       continue
     }
-    // terminal rows prove no live work — exit recorded or manually stopped
+    // terminal rows prove no live work — exit recorded or manually stopped.
+    // Not marked seen: when a session plane still reports that worker
+    // live, its title is the fresher liveness signal and stays a suspect
     if (typeof e.exitStatus === 'number' || e.stopped === true) {
       continue
     }
@@ -930,10 +938,13 @@ export function collectDuplicateSuspects(
       // unreadable prompt — nothing to compare
     }
     if (text !== undefined && text.trim() !== '') {
+      // only a consumed prompt marks the agent seen — an unreadable one
+      // leaves the worker's session title as the fallback suspect
+      seenAgents.add(e.agentId)
       out.push({ label: `agent ${e.agentId} for ${molStep}`, text })
     }
   }
-  const ours = gitCommonDir(dir)
+  const ours = gitCommonDir(dir, ADVISORY_PROBE_MS)
   if (ours === null) {
     return out
   }
@@ -950,6 +961,9 @@ export function collectDuplicateSuspects(
       return p
     }
   }
+  // one bounded probe per distinct session cwd — a stalled mount must
+  // degrade this advisory, never stall the spawn behind it
+  const probeCache = new Map<string, string | null>()
   for (const s of discoverSessions(env).sessions) {
     if (s.name === undefined || s.cwd === undefined) {
       continue
@@ -957,7 +971,10 @@ export function collectDuplicateSuspects(
     if (s.agentId !== undefined && seenAgents.has(s.agentId)) {
       continue // its stored prompt already compared — richer than the title
     }
-    const common = gitCommonDir(s.cwd)
+    if (!probeCache.has(s.cwd)) {
+      probeCache.set(s.cwd, gitCommonDir(s.cwd, ADVISORY_PROBE_MS))
+    }
+    const common = probeCache.get(s.cwd) ?? null
     if (common === null || real(common) !== oursReal) {
       continue
     }
@@ -969,12 +986,20 @@ export function collectDuplicateSuspects(
   return out
 }
 
-/** The text the similarity floor compares — the effective prompt: the
- *  literal prompt, the prompt file's content, or the `--for` bead's
- *  title/description (the same rendering resolvePrompt produces).
- *  undefined when nothing readable resolves — an advisory check never
- *  throws on behalf of a spawn that will produce its own errors. */
+/** Per-probe bound on the advisory's `git rev-parse` — one stalled
+ *  mounted checkout must cost the spawn a couple of seconds, not a hang. */
+const ADVISORY_PROBE_MS = 2_000
+
+/** The text the similarity floor compares — the effective prompt,
+ *  resolved in the same precedence the spawn uses: the literal prompt,
+ *  the prompt file's content, a dead registry agent's stored prompt
+ *  (respawn reuses it — comparing the bead text instead would check
+ *  words the worker never receives), then the `--for` bead's
+ *  title/description. undefined when nothing readable resolves — an
+ *  advisory check never throws on behalf of a spawn that will produce
+ *  its own errors. */
 function advisoryPromptText(
+  dir: string,
   beads: string,
   molStep: string,
   prompt: string | undefined,
@@ -989,6 +1014,15 @@ function advisoryPromptText(
     } catch {
       return undefined
     }
+  }
+  try {
+    const entry = readAgentRegistry(dir)[molStep]
+    const stored = entry === undefined ? null : agentPromptPath(dir, entry.agentId)
+    if (stored !== null && existsSync(stored)) {
+      return readFileSync(stored, 'utf8')
+    }
+  } catch {
+    // advisory — fall through to the bead text
   }
   try {
     const row = taskStoreAt(beads).get(molStep)
@@ -1039,7 +1073,7 @@ async function cmdRun(dir: string, env: AgentConnectorEnv, argv: string[]): Prom
   // title reads near-identical earns a warning — advisory, the spawn
   // still lands. --for gets the same floor on top of the hard guards;
   // its own registry row is excluded — the guards carry that verdict
-  const warnText = advisoryPromptText(beads, molStep, prompt, promptFile)
+  const warnText = advisoryPromptText(dir, beads, molStep, prompt, promptFile)
   if (warnText !== undefined) {
     for (const s of collectDuplicateSuspects(dir, env, { excludeStep: molStep })) {
       if (promptSimilar(warnText, s.text)) {
@@ -1056,6 +1090,9 @@ async function cmdRun(dir: string, env: AgentConnectorEnv, argv: string[]): Prom
       prompt,
       promptFile,
       beadsDir: beads,
+      // --for promised a real bead — a probe miss must fail the claim,
+      // never slip into the adhoc phantom namespace on a mistyped id
+      claimRequired: forBead !== undefined,
       provider: flag(argv, '--provider'),
       model: flag(argv, '--model'),
       profile: flag(argv, '--profile'),

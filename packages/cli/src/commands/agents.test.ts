@@ -638,14 +638,30 @@ describe('bro agents run — --for claim dedup', () => {
       fx.restore()
     }
   })
+
+  test('run --for on a missing adhoc-prefixed id still fails — the phantom hatch is closed', async () => {
+    const fx = fixture([])
+    try {
+      const r = await agents([
+        'run', '--for', 'adhoc-deadbeef', '--prompt', 'x',
+        '--worktree', fx.main, '--beads-dir', fx.beads,
+      ])
+      assert.equal(r.code, 1)
+      assert.match(r.err.join('\n'), /adhoc-deadbeef/)
+      assert.equal(r.out.filter((l) => /running for/.test(l)).length, 0)
+    } finally {
+      fx.restore()
+    }
+  })
 })
 
 describe('bro agents run — similarity floor', () => {
   /** A fake devin session: a lock named `<name>` holding this process's
    *  pid, plus a fake /proc whose `<pid>/cwd` symlink answers the
-   *  session's checkout. The fixture's config is rewritten to point
-   *  agents.devin at both. */
-  const fakeDevinSession = (fx: Fixture, name: string, cwd: string): void => {
+   *  session's checkout. `agentId` pins BRO_AGENT_ID into the fake
+   *  environ — the row a bro-spawned worker would produce. The
+   *  fixture's config is rewritten to point agents.devin at both. */
+  const fakeDevinSession = (fx: Fixture, name: string, cwd: string, agentId?: string): void => {
     const lockDir = join(fx.root, 'devin-locks')
     const procDir = join(fx.root, 'proc')
     mkdirSync(lockDir, { recursive: true })
@@ -653,6 +669,9 @@ describe('bro agents run — similarity floor', () => {
     const procPid = join(procDir, String(process.pid))
     mkdirSync(join(procPid, 'fd'), { recursive: true })
     symlinkSync(cwd, join(procPid, 'cwd'))
+    if (agentId !== undefined) {
+      writeFileSync(join(procPid, 'environ'), `PATH=/x\0BRO_AGENT_ID=${agentId}\0`)
+    }
     writeFileSync(
       join(fx.main, 'bro.config.json'),
       JSON.stringify({
@@ -823,6 +842,75 @@ describe('bro agents run — similarity floor', () => {
         collectDuplicateSuspects(fx.main, env, { excludeStep: 'fx-fresh' }),
         []
       )
+    } finally {
+      fx.restore()
+    }
+  })
+
+  test('a live agent with an unreadable stored prompt still suspects via its session title', async () => {
+    const fx = fixture([])
+    try {
+      // registry says live (our pid) but native-noprompt.prompt.md is
+      // absent — the seenAgents mark must not swallow the session row
+      fakeDevinSession(
+        fx,
+        'render-devin-session-transcripts-live',
+        fx.main,
+        'native-noprompt'
+      )
+      writeAgentRegistry(fx.main, {
+        'fx-9': {
+          agentId: 'native-noprompt',
+          backend: 'native',
+          spawnedAt: new Date().toISOString(),
+          pid: process.pid,
+          worktree: fx.main,
+        },
+      })
+      const r = await agents([
+        'run', `${LONG_RUN} // render devin session transcripts readable`,
+        '--worktree', fx.main, '--beads-dir', fx.beads,
+      ])
+      assert.equal(r.code, 0, r.err.join('\n'))
+      assert.match(r.err.join('\n'), /possible duplicate — session "render-devin-session-transcripts-live"/)
+      const m = /(adhoc-[0-9a-f]+)/.exec(r.out.join('\n'))
+      await agents(['down', m![1]!])
+    } finally {
+      fx.restore()
+    }
+  })
+
+  test('run --for on a dead agent warns against its stored prompt, not the bead text', async () => {
+    const fx = fixture([
+      { id: 'fx-2', status: 'open', title: 'unrelated zeta eta theta' },
+    ])
+    try {
+      fakeDevinSession(
+        fx,
+        'render-devin-session-transcripts-live',
+        fx.main
+      )
+      // the dead agent's stored prompt is what the respawn reuses —
+      // the advisory must compare THAT, not the bead's title
+      writeAgentRegistry(fx.main, {
+        'fx-2': {
+          agentId: 'native-old',
+          backend: 'native',
+          spawnedAt: new Date(Date.now() - 3_600_000).toISOString(),
+          exitStatus: 1,
+          worktree: fx.main,
+        },
+      })
+      const stored = agentPromptPath(fx.main, 'native-old')!
+      mkdirSync(dirname(stored), { recursive: true })
+      writeFileSync(stored, `${LONG_RUN} // render devin session transcripts readable`)
+      const r = await agents([
+        'run', '--for', 'fx-2', '--worktree', fx.main, '--beads-dir', fx.beads,
+      ])
+      assert.equal(r.code, 0, r.err.join('\n'))
+      assert.match(r.err.join('\n'), /possible duplicate — session "render-devin-session-transcripts-live"/)
+      assert.match(r.out.join('\n'), /running for fx-2/)
+      await agents(['down', 'fx-2'])
     } finally {
       fx.restore()
     }

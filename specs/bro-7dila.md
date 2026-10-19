@@ -1,7 +1,10 @@
 ---
 scope:
   - packages/core/src/session-planes.ts
+  - packages/core/src/agents.ts
+  - packages/core/src/git.ts
   - packages/cli/src/session-planes/devin.ts
+  - packages/cli/src/agent-connectors.ts
   - packages/cli/src/commands/agents.ts
   - skills/agents/SKILL.md
 ---
@@ -36,7 +39,12 @@ Every existing guard then applies unchanged:
   claim rebinds; the stored prompt is reused when no prompt is given);
 - an open bead → `claimStep` pins the claim before the spawn lands;
 - a nonexistent bead → the claim write fails the spawn — `--for`
-  refuses phantom fallback by construction.
+  refuses phantom fallback by construction. `--for` sets
+  `claimRequired` on the spawn spec: the `adhoc-*` phantom shortcut in
+  `guardClaim` is prefix-based, so a missing `adhoc-<x>` id would
+  otherwise mint unclaimed work — with the flag, a probe miss falls
+  through to the claim write and fails on the id (a real `adhoc`-prefix
+  bead still probes and claims normally).
 
 Prompt channels stay as today (`<prompt>…` / `--prompt` /
 `--prompt-file`); with none given and `--for` set, `resolvePrompt`'s
@@ -59,13 +67,23 @@ Candidates:
   spawn-handoff window (`SESSION_SLOT_TTL_MS`) — older ones are crash
   remnants, not work in flight. The `--for` target's own row is
   excluded: same work item, and the guards carry its real verdict — an
-  advisory must not precede a hard refusal with a warning about itself;
+  advisory must not precede a hard refusal with a warning about itself.
+  An agent whose stored prompt is unreadable is NOT marked seen: its
+  session row stays eligible so the title remains a fallback suspect;
 - **foreign sessions** — `DiscoveredSession` rows whose `cwd` resolves
   to the same `git --git-common-dir` as ours contribute their session
   `name` (the devin lock name is the session title slug). Rows with no
   readable cwd, a non-repo cwd, or a cwd in another repo contribute
   nothing; a plane whose scan fails degrades silently — an advisory
-  check never stalls a spawn.
+  check never stalls a spawn. Each cwd's `git --git-common-dir` probe
+  is bounded (`gitCommonDir` timeout) and cached per cwd — one stalled
+  mount degrades the advisory instead of hanging the spawn behind it.
+
+The text compared is the *effective* prompt in spawn order:
+literal/`--prompt`/`--prompt-file`, then a dead registry agent's stored
+prompt (a `run --for` respawn reuses it — comparing the bead text
+instead would check words the worker never receives), then the bead's
+title/description.
 
 Similarity: lowercase alphanumeric token sets, overlap coefficient
 `|A∩B| / min(|A|,|B|)` — a match needs `≥ 0.6` AND `≥ 3` shared tokens
@@ -94,7 +112,12 @@ when the plane can read it). The devin plane fills it from
 - `run --for <bead>` twice → second refuses `already has a live agent`.
 - `run --for <bead>` on a bead claimed outside the registry refuses.
 - `run --for <bead>` with no prompt uses the bead's title/description.
-- `run --for <missing-bead>` fails — no phantom fallback.
+- `run --for <missing-bead>` fails — no phantom fallback, including a
+  missing `adhoc-*` id (`claimRequired` closes the prefix hatch).
+- `run --for <bead>` on a dead agent with no prompt warns against the
+  stored prompt, not the bead text.
+- a live agent whose stored prompt is unreadable still suspects via
+  its session title.
 - a live session in the same repo with a near-identical name → stderr
   warning; the spawn still lands.
 - a session in a DIFFERENT repo with a near-identical name → no warning.

@@ -59,9 +59,12 @@ export function gitTry(args: string[], timeoutMs?: number): { code: number; out:
  *  a repository, and on git failure: callers treat "no repo" as an
  *  ordinary state, never a throw. Canonical probe for the several
  *  features that keep re-inlining it (agents registry, mailbox, serve
- *  state, broker socket). */
-export function gitCommonDir(dir: string): string | null {
-  const r = gitTry(['-C', dir, 'rev-parse', '--path-format=absolute', '--git-common-dir'])
+ *  state, broker socket). `timeoutMs` bounds each probe — an advisory
+ *  caller pointing at a possibly-stalled mount passes one so the check
+ *  degrades instead of hanging (a timed-out probe reads as failure →
+ *  null, same contract). */
+export function gitCommonDir(dir: string, timeoutMs?: number): string | null {
+  const r = gitTry(['-C', dir, 'rev-parse', '--path-format=absolute', '--git-common-dir'], timeoutMs)
   if (r.code === 0) {
     const common = r.out.trim()
     return common === '' ? null : common
@@ -71,7 +74,7 @@ export function gitCommonDir(dir: string): string | null {
   // is relative to `dir`, so resolve() absolutizes it the same way —
   // but keeps a symlinked dir's alias, and callers hash the result
   // (busSocketPath) — canonicalize so one repo yields one socket.
-  const fallback = gitTry(['-C', dir, 'rev-parse', '--git-common-dir'])
+  const fallback = gitTry(['-C', dir, 'rev-parse', '--git-common-dir'], timeoutMs)
   const common = fallback.code === 0 ? fallback.out.trim() : ''
   if (common === '') {
     return null
