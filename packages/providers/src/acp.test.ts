@@ -884,6 +884,28 @@ describe('model pin resolution — [1m] context suffix (bro-0g2l3)', () => {
       peer.close()
     }
   })
+
+  test('a spawn-level pin the session reports verbatim satisfies the base ask', async () => {
+    const fake = fakeAcpAgent({
+      replyText: 'x',
+      configOptions: [{ ...MODEL_OPTION, currentValue: 'custom[1m]' }],
+    })
+    const peer = await acpOpen('conductor:t', ENTRY, { acp: { peer: fake.app } }, deadline())
+    try {
+      const r = await acpPooledTurn(
+        peer,
+        { ...ENTRY, model: 'custom[1m]' },
+        { acp: { peer: fake.app } },
+        'p',
+        deadline(),
+        { by: 'conductor:t', requestModel: 'dv/custom' }
+      )
+      assert.equal(r.model, 'custom')
+      assert.deepEqual(fake.configSets, [])
+    } finally {
+      peer.close()
+    }
+  })
 })
 
 // bro-whn25 — a conductor conversation is N anthropic turns over ONE

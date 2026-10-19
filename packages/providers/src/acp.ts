@@ -885,8 +885,11 @@ async function resolveTurnModel(
     }
     return bare // the asked id names this exact (model, level) pair
   }
+  // the session reports its running pin verbatim — a spawn-level
+  // `model[<size>]` opt-in still serves the asked base id
   const cur = modelOpt?.currentValue
-  if (cur !== bare) {
+  const served = typeof cur === 'string' ? modelBase(cur) : cur
+  if (served !== bare) {
     throw new AcpConfigError(
       `${by}: model '${want}' is not in the agent's catalog and the session serves ` +
         `'${typeof cur === 'string' ? cur : 'unknown'}' — pick a catalog id or pin ` +
