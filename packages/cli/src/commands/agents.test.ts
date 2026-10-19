@@ -7,12 +7,13 @@ import {
   mkdtempSync,
   readFileSync,
   rmSync,
+  symlinkSync,
   unlinkSync,
   writeFileSync,
 } from 'node:fs'
 import { spawnSync } from 'node:child_process'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { dirname, join } from 'node:path'
 import {
   agentPromptPath,
   loadAgentEnv,
@@ -24,8 +25,10 @@ import { readJournal, ROUTE_CLASS_KIND } from '@broject/judge'
 import { fakeFetch } from '@broject/providers/testkit'
 import { capture, initRepo, installFakeBd, readBeads } from './testrepo.ts'
 import {
+  collectDuplicateSuspects,
   discoverSessions,
   followLog,
+  promptSimilar,
   runAgentsCommand,
   SpawnInputError,
   spawnStepAgent,
@@ -544,6 +547,256 @@ describe('bro agents run', () => {
     } finally {
       fx.restore()
     }
+  })
+})
+
+// spec bro-7dila — the dedup guard: `--for` binds an ad-hoc spawn to a
+// bead's claim (every `up` guard then applies), and a same-repo live
+// agent/session with a near-identical prompt earns an advisory warning
+describe('bro agents run — --for claim dedup', () => {
+  test('run --for on an open bead spawns keyed by the bead and claims it', async () => {
+    const fx = fixture([{ id: 'fx-1', status: 'open' }])
+    try {
+      const r = await agents([
+        'run', LONG_RUN, '--for', 'fx-1',
+        '--worktree', fx.main, '--beads-dir', fx.beads,
+      ])
+      assert.equal(r.code, 0, r.err.join('\n'))
+      assert.match(r.out.join('\n'), /agent native-[0-9a-f]+ running for fx-1/)
+      const entry = readAgentRegistry(fx.main)['fx-1']!
+      assert.equal(entry.backend, 'native')
+      assert.equal(readBeads(fx.db)[0]!.status, 'in_progress')
+      const stored = agentPromptPath(fx.main, String(entry.agentId))!
+      assert.equal(readFileSync(stored, 'utf8'), LONG_RUN)
+      await agents(['down', 'fx-1'])
+    } finally {
+      fx.restore()
+    }
+  })
+
+  test('a second run --for on a live agent refuses', async () => {
+    const fx = fixture([{ id: 'fx-1', status: 'open' }])
+    try {
+      const first = await agents([
+        'run', '--for', 'fx-1', '--prompt-file', fx.promptFile(LONG_RUN),
+        '--worktree', fx.main, '--beads-dir', fx.beads,
+      ])
+      assert.equal(first.code, 0, first.err.join('\n'))
+      const again = await agents([
+        'run', '--for', 'fx-1', '--prompt', 'same goal again',
+        '--worktree', fx.main, '--beads-dir', fx.beads,
+      ])
+      assert.equal(again.code, 1)
+      assert.match(again.err.join('\n'), /already has a live agent/)
+      await agents(['down', 'fx-1'])
+    } finally {
+      fx.restore()
+    }
+  })
+
+  test('a bead claimed outside the registry refuses', async () => {
+    const fx = fixture([{ id: 'fx-1', status: 'in_progress', assignee: 'other-actor' }])
+    try {
+      const r = await agents([
+        'run', '--for', 'fx-1', '--prompt', 'x',
+        '--worktree', fx.main, '--beads-dir', fx.beads,
+      ])
+      assert.equal(r.code, 1)
+      assert.match(r.err.join('\n'), /claimed outside the agent registry/)
+    } finally {
+      fx.restore()
+    }
+  })
+
+  test('run --for with no prompt renders the bead text', async () => {
+    const fx = fixture([{ id: 'fx-1', status: 'open', title: 'my title', description: 'my desc' }])
+    try {
+      const r = await agents([
+        'run', '--for', 'fx-1',
+        '--worktree', fx.main, '--beads-dir', fx.beads,
+      ])
+      assert.equal(r.code, 0, r.err.join('\n'))
+      const entry = readAgentRegistry(fx.main)['fx-1']!
+      const stored = agentPromptPath(fx.main, String(entry.agentId))!
+      assert.equal(readFileSync(stored, 'utf8'), '# my title\n\nmy desc')
+      await agents(['down', 'fx-1'])
+    } finally {
+      fx.restore()
+    }
+  })
+
+  test('run --for on a missing bead fails — no phantom fallback', async () => {
+    const fx = fixture([])
+    try {
+      const r = await agents([
+        'run', '--for', 'fx-nope', '--prompt', 'x',
+        '--worktree', fx.main, '--beads-dir', fx.beads,
+      ])
+      assert.equal(r.code, 1)
+      assert.match(r.err.join('\n'), /fx-nope/)
+    } finally {
+      fx.restore()
+    }
+  })
+})
+
+describe('bro agents run — similarity floor', () => {
+  /** A fake devin session: a lock named `<name>` holding this process's
+   *  pid, plus a fake /proc whose `<pid>/cwd` symlink answers the
+   *  session's checkout. The fixture's config is rewritten to point
+   *  agents.devin at both. */
+  const fakeDevinSession = (fx: Fixture, name: string, cwd: string): void => {
+    const lockDir = join(fx.root, 'devin-locks')
+    const procDir = join(fx.root, 'proc')
+    mkdirSync(lockDir, { recursive: true })
+    writeFileSync(join(lockDir, `${name}.lock`), String(process.pid))
+    const procPid = join(procDir, String(process.pid))
+    mkdirSync(join(procPid, 'fd'), { recursive: true })
+    symlinkSync(cwd, join(procPid, 'cwd'))
+    writeFileSync(
+      join(fx.main, 'bro.config.json'),
+      JSON.stringify({
+        agents: {
+          native: { command: 'node {promptFile}' },
+          devin: { lockDir, procDir },
+        },
+      })
+    )
+  }
+
+  test('a same-repo session with a near-identical title warns; the spawn lands', async () => {
+    const fx = fixture([])
+    try {
+      fakeDevinSession(
+        fx,
+        'visible-claude-background-tasks-via-devin-acp',
+        fx.main
+      )
+      // LONG_RUN + a trailing comment: `node {promptFile}` needs runnable
+      // text, the comment carries the tokens similarity compares
+      const r = await agents([
+        'run', `${LONG_RUN} // show visible claude background tasks via devin acp`,
+        '--worktree', fx.main, '--beads-dir', fx.beads,
+      ])
+      assert.equal(r.code, 0, r.err.join('\n'))
+      assert.match(r.err.join('\n'), /warning: possible duplicate — session "visible-claude-background-tasks-via-devin-acp"/)
+      assert.match(r.out.join('\n'), /agent native-[0-9a-f]+ running for adhoc-/)
+      const m = /(adhoc-[0-9a-f]+)/.exec(r.out.join('\n'))
+      await agents(['down', m![1]!])
+    } finally {
+      fx.restore()
+    }
+  })
+
+  test('a session in a different repo does not warn', async () => {
+    const fx = fixture([])
+    const other = initRepo('bro-agents-other-')
+    try {
+      fakeDevinSession(
+        fx,
+        'visible-claude-background-tasks-via-devin-acp',
+        other.main
+      )
+      const r = await agents([
+        'run', `${LONG_RUN} // show visible claude background tasks via devin acp`,
+        '--worktree', fx.main, '--beads-dir', fx.beads,
+      ])
+      assert.equal(r.code, 0, r.err.join('\n'))
+      assert.equal(
+        r.err.filter((l) => /possible duplicate/.test(l)).length,
+        0,
+        `unexpected duplicate warning: ${r.err.join('\n')}`
+      )
+      const m = /(adhoc-[0-9a-f]+)/.exec(r.out.join('\n'))
+      await agents(['down', m![1]!])
+    } finally {
+      rmSync(other.root, { recursive: true, force: true })
+      fx.restore()
+    }
+  })
+
+  test('a live registry agent with an overlapping stored prompt warns', async () => {
+    const fx = fixture([{ id: 'fx-1', status: 'open' }])
+    try {
+      writeAgentRegistry(fx.main, {
+        'fx-1': {
+          agentId: 'native-aa11',
+          backend: 'native',
+          spawnedAt: new Date().toISOString(),
+          pid: process.pid,
+          worktree: fx.main,
+        },
+      })
+      const prompt = agentPromptPath(fx.main, 'native-aa11')!
+      mkdirSync(dirname(prompt), { recursive: true })
+      writeFileSync(prompt, 'render the devin session transcripts live')
+      const r = await agents([
+        'run', `${LONG_RUN} // render devin session transcripts readable live`,
+        '--worktree', fx.main, '--beads-dir', fx.beads,
+      ])
+      assert.equal(r.code, 0, r.err.join('\n'))
+      assert.match(r.err.join('\n'), /possible duplicate — agent native-aa11 for fx-1/)
+      const m = /(adhoc-[0-9a-f]+)/.exec(r.out.join('\n'))
+      await agents(['down', m![1]!])
+    } finally {
+      fx.restore()
+    }
+  })
+
+  test('dissimilar prompts warn on nothing', async () => {
+    const fx = fixture([])
+    try {
+      fakeDevinSession(fx, 'visible-claude-background-tasks-via-devin-acp', fx.main)
+      const r = await agents([
+        'run', `${LONG_RUN} // prune the stale git worktrees under tmp`,
+        '--worktree', fx.main, '--beads-dir', fx.beads,
+      ])
+      assert.equal(r.code, 0, r.err.join('\n'))
+      assert.equal(r.err.filter((l) => /possible duplicate/.test(l)).length, 0)
+      const m = /(adhoc-[0-9a-f]+)/.exec(r.out.join('\n'))
+      await agents(['down', m![1]!])
+    } finally {
+      fx.restore()
+    }
+  })
+
+  test('a dead registry entry warns on nothing — terminal rows are not work in flight', async () => {
+    const fx = fixture([])
+    try {
+      const dead = spawnSync('true').pid!
+      writeAgentRegistry(fx.main, {
+        'fx-1': {
+          agentId: 'native-dead',
+          backend: 'native',
+          spawnedAt: new Date().toISOString(),
+          pid: dead,
+          worktree: fx.main,
+          exitStatus: 0,
+        },
+      })
+      const prompt = agentPromptPath(fx.main, 'native-dead')!
+      mkdirSync(dirname(prompt), { recursive: true })
+      writeFileSync(prompt, 'render the devin session transcripts live')
+      const suspects = collectDuplicateSuspects(fx.main, {
+        agents: {},
+        connectors: {},
+      } as AgentConnectorEnv)
+      assert.equal(suspects.length, 0)
+    } finally {
+      fx.restore()
+    }
+  })
+
+  test('promptSimilar: overlap coefficient with the shared-token floor', () => {
+    assert.equal(
+      promptSimilar('visible claude background tasks', 'visible claude background tasks via devin acp'),
+      true
+    ) // containment — the shorter set is fully shared
+    assert.equal(promptSimilar('a b c d e', 'a b c f g'), true) // 3/5 = 0.6 — the boundary
+    assert.equal(promptSimilar('a b c d e f', 'a b c x y z'), false) // 3/6 = 0.5 — under it
+    assert.equal(promptSimilar('fix', 'fix'), false) // below the 3-shared floor
+    assert.equal(promptSimilar('a b c d', 'a b e f'), false) // 2 shared — under the floor
+    assert.equal(promptSimilar('ship the convoy', 'refactor the parser'), false)
   })
 })
 
