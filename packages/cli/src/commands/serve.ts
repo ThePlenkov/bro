@@ -1323,25 +1323,47 @@ async function routeTerminalOutput(
     send(res, 404, { error: 'no conductor terminal registry' })
     return true
   }
-  const id = m[1]!
-  if (!url.searchParams.has('follow')) {
-    try {
-      send(res, 200, reg.snapshot(id), { contentType: 'application/json' })
-    } catch {
-      send(res, 404, { error: `no terminal "${id}"` })
+  let id: string
+  try {
+    id = parseRef(m[1]!)
+  } catch (err) {
+    if (err instanceof HttpError) {
+      send(res, err.status, { error: err.message })
+      return true
     }
+    throw err
+  }
+  let snap: ReturnType<AcpTerminals['snapshot']>
+  try {
+    snap = reg.snapshot(id)
+  } catch {
+    send(res, 404, { error: `no terminal "${id}"` })
+    return true
+  }
+  if (!url.searchParams.has('follow')) {
+    send(res, 200, snap, { contentType: 'application/json' })
     return true
   }
   const sse = (chunk: string) => {
     if (res.writableEnded || res.destroyed) {
       return
     }
-    const trimmed = chunk.replace(/\n$/, '')
-    res.write(`data: ${trimmed.replace(/\n/g, '\ndata: ')}\n\n`)
+    // a trailing '\n' maps to its own empty data: line — clients strip
+    // exactly one newline at dispatch, so the chunk round-trips
+    // byte-exact against what plain GET's `output` carries
+    res.write(`data: ${chunk.replace(/\n/g, '\ndata: ')}\n\n`)
   }
+  // headers before follow() — a registry that fires `exit` at subscribe
+  // time must never res.end() ahead of them, and the snapshot probe
+  // above keeps the unknown-id 404 reachable now that writeHead is first
+  res.writeHead(200, {
+    'content-type': 'text/event-stream; charset=utf-8',
+    'cache-control': 'no-cache',
+    connection: 'keep-alive',
+  })
   let handle: TerminalFollow
   try {
-    const f = reg.follow(id, {
+    handle = reg.follow(id, {
       data: sse,
       exit: (status) => {
         if (!res.writableEnded && !res.destroyed) {
@@ -1350,26 +1372,23 @@ async function routeTerminalOutput(
         }
       },
     })
-    handle = f
   } catch {
-    send(res, 404, { error: `no terminal "${id}"` })
+    // released between the probe and here — the stream just opened, so
+    // close it; the client's reconnect lands on the 404 above
+    res.end()
     return true
   }
-  res.writeHead(200, {
-    'content-type': 'text/event-stream; charset=utf-8',
-    'cache-control': 'no-cache',
-    connection: 'keep-alive',
-  })
   sse(handle.snapshot.output)
-  if (handle.snapshot.exitStatus !== null) {
-    // already-final terminal — the snapshot carries the verdict; no
-    // events will follow
+  if (handle.completed) {
+    // already-final terminal — no taps attached, the snapshot carries
+    // the verdict. exitStatus alone can't gate this: it lands at the
+    // child's 'exit' while 'close' still owes the last piped bytes, and
+    // ending here would drop them plus leak the registered listener
     res.write(`event: exit\ndata: ${JSON.stringify(handle.snapshot.exitStatus)}\n\n`)
     res.end()
     return true
   }
-  const live = handle
-  res.on('close', () => live.stop())
+  res.on('close', () => handle.stop())
   return true
 }
 

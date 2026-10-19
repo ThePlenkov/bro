@@ -75,4 +75,4 @@ signal}`; `terminal/release` / `terminal/kill` → `{}`.
 While an acp turn's agent runs exec, `GET
 /api/v1/terminals/<id>/output` returns live content — final content +
 exitCode after; `?follow` streams it end to end. `npm run typecheck`
-+ `tsx --test` green.
+and `tsx --test` green.

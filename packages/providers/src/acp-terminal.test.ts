@@ -309,6 +309,7 @@ describe('AcpTerminals', () => {
         data: (c) => chunks.push(c),
         exit: (s) => exits.push(s),
       })
+      assert.equal(f.completed, false, 'live terminal — taps attached')
       // wait for 'first' — either already in the snapshot or a live chunk
       for (let i = 0; i < 100 && ![f.snapshot.output, ...chunks].join('').includes('first'); i++) {
         await new Promise((r) => setTimeout(r, 10))
@@ -326,6 +327,7 @@ describe('AcpTerminals', () => {
         data: () => assert.fail('no data on a completed terminal'),
         exit: () => assert.fail('no exit on a completed terminal'),
       })
+      assert.equal(dead.completed, true, 'final terminal — no taps, snapshot is the verdict')
       assert.equal(dead.snapshot.exitStatus?.signal, 'SIGTERM')
       dead.stop()
       f.stop()

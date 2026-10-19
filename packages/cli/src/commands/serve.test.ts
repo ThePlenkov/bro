@@ -925,6 +925,9 @@ describe('serve handler over a real socket', () => {
       snapshot: (id: string) => {
         if (id === 'term-done')
           return { output: 'done\n', truncated: false, exitStatus: { exitCode: 0, signal: null } }
+        if (id === 'term-gap')
+          // exited but not closed — the pipe still owes its last bytes
+          return { output: 'head\n', truncated: false, exitStatus: { exitCode: 0, signal: null } }
         if (id !== 'term-1') throw new Error(`Unknown terminal '${id}'`)
         return { output: 'hello\n', truncated: false, exitStatus: null }
       },
@@ -932,12 +935,22 @@ describe('serve handler over a real socket', () => {
         if (id === 'term-done')
           return {
             snapshot: { output: 'done\n', truncated: false, exitStatus: { exitCode: 0, signal: null } },
+            completed: true,
             stop: () => {},
           }
+        if (id === 'term-gap') {
+          live = l
+          return {
+            snapshot: { output: 'head\n', truncated: false, exitStatus: { exitCode: 0, signal: null } },
+            completed: false,
+            stop: () => {},
+          }
+        }
         if (id !== 'term-1') throw new Error(`Unknown terminal '${id}'`)
         live = l
         return {
           snapshot: { output: 'hello\n', truncated: false, exitStatus: null },
+          completed: false,
           stop: () => {},
         }
       },
@@ -1018,6 +1031,30 @@ describe('serve handler over a real socket', () => {
       const text = await done.text()
       assert.match(text, /data: done/)
       assert.match(text, /event: exit\ndata: \{"exitCode":0/)
+
+      // a snapshot with exitStatus but pending 'close' keeps streaming —
+      // ending on exitStatus alone would drop bytes still on the pipe
+      const gap = await fetch(`${base}/api/v1/terminals/term-gap/output?follow`, {
+        headers: auth,
+      })
+      assert.equal(gap.status, 200)
+      const gapReader = gap.body!.getReader()
+      const gapDec = new TextDecoder()
+      let gapStream = ''
+      const gapPump = async (): Promise<void> => {
+        const { value, done: d } = await gapReader.read()
+        if (!d && value !== undefined) gapStream += gapDec.decode(value)
+      }
+      await gapPump()
+      assert.match(gapStream, /data: head/)
+      live!.data('tail\n')
+      live!.exit({ exitCode: 0, signal: null })
+      for (let i = 0; i < 10 && !gapStream.includes('event: exit'); i++) {
+        await gapPump()
+      }
+      assert.match(gapStream, /data: tail/)
+      assert.match(gapStream, /event: exit\ndata: \{"exitCode":0/)
+      await gapReader.cancel()
     } finally {
       await new Promise<void>((r) => server.close(() => r()))
     }

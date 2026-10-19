@@ -61,9 +61,14 @@ export interface TerminalFollower {
 
 /** The atomic snapshot+stream a follow route needs — `snapshot` is the
  *  buffer at registration (no gap, no replay), `stop` drops the taps
- *  without touching the terminal. */
+ *  without touching the terminal. `completed` says whether the taps
+ *  attached: a final terminal fires nothing and the snapshot is the
+ *  whole story, while `snapshot.exitStatus` alone can't say that — it's
+ *  set at the child's 'exit', before 'close' drains the pipe, so a
+ *  subscriber in that gap still owns live taps for the tail bytes. */
 export interface TerminalFollow {
   snapshot: TerminalOutputResponse
+  completed: boolean
   stop(): void
 }
 
@@ -267,6 +272,7 @@ export class AcpTerminals {
     }
     return {
       snapshot: this.snapshot(id),
+      completed: entry.completed,
       stop: () => entry.listeners.delete(listener),
     }
   }
