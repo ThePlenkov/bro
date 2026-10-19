@@ -516,17 +516,17 @@ function isLoopbackOrigin(origin: string): boolean {
   }
 }
 
-function parseRef(seg: string): string {
+function parseRef(seg: string, noun = 'agent ref'): string {
   let ref: string
   try {
     ref = decodeURIComponent(seg)
   } catch {
     // malformed % escapes throw URIError — that's bad input, a 400,
     // not a 500
-    throw new HttpError(400, `invalid agent ref "${seg}"`)
+    throw new HttpError(400, `invalid ${noun} "${seg}"`)
   }
   if (!SAFE_REF.test(ref)) {
-    throw new HttpError(400, `invalid agent ref "${ref}"`)
+    throw new HttpError(400, `invalid ${noun} "${ref}"`)
   }
   return ref
 }
@@ -1279,6 +1279,12 @@ async function routeAgentEvents(
   return routeAgentEventsImpl(req, res, url, deps, token, statePathHint, m)
 }
 
+/** A follower's socket-queue ceiling — a reader this far behind is
+ *  dropped rather than letting one slow client grow `bro serve`'s
+ *  buffered output without bound. The reconnect lands on a fresh
+ *  snapshot, so a dropped follower loses nothing but a retry. */
+const SSE_FOLLOW_BACKLOG = 1_048_576
+
 /** `GET /api/v1/terminals/<id>/output` — the conductor's acp terminal
  *  registry (bro-eua0d): the agent's shells spawn inside THIS process,
  *  so the buffer a `terminal/output` poll reads is a real shell, not a
@@ -1286,9 +1292,12 @@ async function routeAgentEvents(
  *  agent-log route (bearer or `?token=` — output can carry secrets;
  *  route()/routeRequest carry no headers, so the check lives here).
  *  Plain GET answers the `terminal/output` wire shape as JSON;
- *  `?follow` upgrades to SSE — the buffer at subscribe time lands as
- *  `data:` frames (atomic with the taps, nothing slips between), live
- *  chunks follow, `event: exit` carries the TerminalExitStatus JSON.
+ *  `?follow` upgrades to SSE: `event: meta` carries `truncated`, then
+ *  the buffer at subscribe time lands as `data:` frames (atomic with
+ *  the taps, nothing slips between), live chunks follow, `event: exit`
+ *  carries the TerminalExitStatus JSON. Every data frame is a JSON
+ *  string — SSE treats '\r' as a line ending, so raw chunks would lose
+ *  bytes; JSON keeps the stream byte-exact against plain GET's `output`.
  *  True once the path matches — false lets other paths through. */
 async function routeTerminalOutput(
   req: IncomingMessage,
@@ -1318,22 +1327,22 @@ async function routeTerminalOutput(
     )
     return true
   }
-  const reg = deps.terminals?.()
-  if (reg === undefined) {
-    // no live link yet (or a non-conductor serve) — same answer the
-    // other unwired planes give
-    send(res, 404, { error: 'no conductor terminal registry' })
-    return true
-  }
   let id: string
   try {
-    id = parseRef(m[1]!)
+    id = parseRef(m[1]!, 'terminal id')
   } catch (err) {
     if (err instanceof HttpError) {
       send(res, err.status, { error: err.message })
       return true
     }
     throw err
+  }
+  const reg = deps.terminals?.()
+  if (reg === undefined) {
+    // no live link yet (or a non-conductor serve) — same answer the
+    // other unwired planes give
+    send(res, 404, { error: 'no conductor terminal registry' })
+    return true
   }
   let snap: ReturnType<AcpTerminals['snapshot']>
   try {
@@ -1346,15 +1355,19 @@ async function routeTerminalOutput(
     send(res, 200, snap, { contentType: 'application/json' })
     return true
   }
-  const sse = (chunk: string) => {
-    if (res.writableEnded || res.destroyed) {
+  let handle: TerminalFollow | undefined
+  const gone = (): boolean => res.writableEnded || res.destroyed
+  const writeFrame = (frame: string): void => {
+    if (gone()) {
       return
     }
-    // a trailing '\n' maps to its own empty data: line — clients strip
-    // exactly one newline at dispatch, so the chunk round-trips
-    // byte-exact against what plain GET's `output` carries
-    res.write(`data: ${chunk.replace(/\n/g, '\ndata: ')}\n\n`)
+    res.write(frame)
+    if (res.writableLength > SSE_FOLLOW_BACKLOG) {
+      handle?.stop()
+      res.end()
+    }
   }
+  const sse = (chunk: string): void => writeFrame(`data: ${JSON.stringify(chunk)}\n\n`)
   // headers before follow() — a registry that fires `exit` at subscribe
   // time must never res.end() ahead of them, and the snapshot probe
   // above keeps the unknown-id 404 reachable now that writeHead is first
@@ -1363,34 +1376,47 @@ async function routeTerminalOutput(
     'cache-control': 'no-cache',
     connection: 'keep-alive',
   })
-  let handle: TerminalFollow
   try {
     handle = reg.follow(id, {
       data: sse,
       exit: (status) => {
-        if (!res.writableEnded && !res.destroyed) {
-          res.write(`event: exit\ndata: ${JSON.stringify(status)}\n\n`)
+        writeFrame(`event: exit\ndata: ${JSON.stringify(status)}\n\n`)
+        if (!gone()) {
           res.end()
         }
       },
     })
-  } catch {
-    // released between the probe and here — the stream just opened, so
-    // close it; the client's reconnect lands on the 404 above
+  } catch (err) {
+    if (err instanceof Error && err.message.startsWith('Unknown terminal')) {
+      // released between the probe and here — the stream just opened, so
+      // close it; the client's reconnect lands on the 404 above
+      res.end()
+      return true
+    }
+    // a registry fault is not an empty terminal — answer a verdict the
+    // client can act on instead of a silent 200 it would retry forever
+    writeFrame(
+      `event: error\ndata: ${JSON.stringify({ error: err instanceof Error ? err.message : String(err) })}\n\n`
+    )
     res.end()
     return true
   }
+  // `truncated` rides ahead of the output — a follower that starts
+  // mid-buffer must know bytes are missing, exactly like plain GET
+  writeFrame(`event: meta\ndata: ${JSON.stringify({ truncated: handle.snapshot.truncated })}\n\n`)
   sse(handle.snapshot.output)
   if (handle.completed) {
     // already-final terminal — no taps attached, the snapshot carries
     // the verdict. exitStatus alone can't gate this: it lands at the
     // child's 'exit' while 'close' still owes the last piped bytes, and
     // ending here would drop them plus leak the registered listener
-    res.write(`event: exit\ndata: ${JSON.stringify(handle.snapshot.exitStatus)}\n\n`)
-    res.end()
+    writeFrame(`event: exit\ndata: ${JSON.stringify(handle.snapshot.exitStatus)}\n\n`)
+    if (!gone()) {
+      res.end()
+    }
     return true
   }
-  res.on('close', () => handle.stop())
+  res.on('close', () => handle?.stop())
   return true
 }
 

@@ -337,4 +337,39 @@ describe('AcpTerminals', () => {
       t.dispose()
     }
   })
+
+  test('a follow mid-character skips decoder-pending bytes — no doubled U+FFFD', async () => {
+    const t = new AcpTerminals()
+    try {
+      // 😀 is f0 9f 98 80 — the lead byte lands alone, the rest after a
+      // delay, so the entry decoder sits mid-character at follow() time
+      const { terminalId } = await t.create(
+        ctx(create('sh', ['-c', "printf '\\360'; sleep 0.5; printf '\\237\\230\\200'"]))
+      )
+      // poll until the lead byte is buffered — through snapshot()'s
+      // plain toString a lone pending byte reads as U+FFFD
+      for (let i = 0; i < 100 && !t.snapshot(terminalId).output.includes('\uFFFD'); i++) {
+        await new Promise((r) => setTimeout(r, 10))
+      }
+      assert.match(t.snapshot(terminalId).output, /\uFFFD/, 'setup — the decoder holds a partial char')
+      const chunks: string[] = []
+      const f = t.follow(terminalId, {
+        data: (c) => chunks.push(c),
+        exit: () => {},
+      })
+      assert.equal(f.completed, false)
+      assert.equal(
+        f.snapshot.output,
+        '',
+        'the pending byte stays with the live decoder — the tap emits the whole char once'
+      )
+      for (let i = 0; i < 200 && !chunks.join('').includes('😀'); i++) {
+        await new Promise((r) => setTimeout(r, 10))
+      }
+      assert.equal(chunks.join(''), '😀')
+      f.stop()
+    } finally {
+      t.dispose()
+    }
+  })
 })

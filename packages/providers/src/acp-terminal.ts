@@ -264,15 +264,25 @@ export class AcpTerminals {
    *  buffer at tap time, so a chunk can't slip between the read and
    *  the subscribe. A completed terminal still follows: the snapshot
    *  carries its exitStatus and no events fire (the id stays valid
-   *  until release, per the wire contract). */
+   *  until release, per the wire contract). On a live entry the buffer
+   *  decodes through a scratch decoder — the entry's own decoder may
+   *  still hold a split character's head bytes, and re-emitting them
+   *  here as '\uFFFD' would double them when the tap delivers the
+   *  completed character. */
   follow(id: TerminalId, listener: TerminalFollower): TerminalFollow {
     const entry = this.get(id)
-    if (!entry.completed) {
-      entry.listeners.add(listener)
+    if (entry.completed) {
+      return {
+        snapshot: this.snapshot(id),
+        completed: true,
+        stop: () => entry.listeners.delete(listener),
+      }
     }
+    entry.listeners.add(listener)
+    const output = new StringDecoder('utf8').write(entry.out)
     return {
-      snapshot: this.snapshot(id),
-      completed: entry.completed,
+      snapshot: { output, truncated: entry.truncated, exitStatus: entry.exitStatus },
+      completed: false,
       stop: () => entry.listeners.delete(listener),
     }
   }

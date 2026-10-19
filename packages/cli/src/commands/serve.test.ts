@@ -928,6 +928,10 @@ describe('serve handler over a real socket', () => {
         if (id === 'term-gap')
           // exited but not closed — the pipe still owes its last bytes
           return { output: 'head\n', truncated: false, exitStatus: { exitCode: 0, signal: null } }
+        if (id === 'term-trunc')
+          return { output: 'tail\n', truncated: true, exitStatus: null }
+        if (id === 'term-boom')
+          return { output: '', truncated: false, exitStatus: null }
         if (id !== 'term-1') throw new Error(`Unknown terminal '${id}'`)
         return { output: 'hello\n', truncated: false, exitStatus: null }
       },
@@ -938,10 +942,19 @@ describe('serve handler over a real socket', () => {
             completed: true,
             stop: () => {},
           }
+        if (id === 'term-boom') throw new Error('registry exploded')
         if (id === 'term-gap') {
           live = l
           return {
             snapshot: { output: 'head\n', truncated: false, exitStatus: { exitCode: 0, signal: null } },
+            completed: false,
+            stop: () => {},
+          }
+        }
+        if (id === 'term-trunc') {
+          live = l
+          return {
+            snapshot: { output: 'tail\n', truncated: true, exitStatus: null },
             completed: false,
             stop: () => {},
           }
@@ -969,11 +982,15 @@ describe('serve handler over a real socket', () => {
         (await fetch(`${base}${path}`, { method: 'POST', headers: auth })).status,
         405
       )
-      // unknown id and a missing registry are both 404
+      // unknown id and a missing registry are both 404 — but a malformed
+      // id is a 400 about the id itself, ahead of any registry probe
       assert.equal(
         (await fetch(`${base}/api/v1/terminals/nope/output`, { headers: auth })).status,
         404
       )
+      const bad = await fetch(`${base}/api/v1/terminals/%ZZ/output`, { headers: auth })
+      assert.equal(bad.status, 400)
+      assert.match((await bad.json() as { error: string }).error, /invalid terminal id/)
       const bare = createServer(
         createServeHandler(deps(), { dir: '/repo', startedAt: 't0' }, TOKEN)
       )
@@ -984,6 +1001,11 @@ describe('serve handler over a real socket', () => {
           (await fetch(`${p2}${path}`, { headers: auth })).status,
           404,
           'no conductor registry — the unwired answer'
+        )
+        assert.equal(
+          (await fetch(`${p2}/api/v1/terminals/%ZZ/output`, { headers: auth })).status,
+          400,
+          'a malformed id answers 400 even with no registry wired'
         )
       } finally {
         await new Promise<void>((r) => bare.close(() => r()))
@@ -998,7 +1020,7 @@ describe('serve handler over a real socket', () => {
         exitStatus: null,
       })
 
-      // ?follow — snapshot frame, live data, then `event: exit`
+      // ?follow — meta frame, JSON-encoded snapshot/live data, `event: exit`
       const follow = await fetch(`${base}${path}?follow`, { headers: auth })
       assert.equal(follow.status, 200)
       assert.match(follow.headers.get('content-type') ?? '', /text\/event-stream/)
@@ -1010,12 +1032,20 @@ describe('serve handler over a real socket', () => {
         if (!done && value !== undefined) stream += dec.decode(value)
       }
       await pump()
-      assert.match(stream, /data: hello/)
+      assert.match(stream, /event: meta\ndata: \{"truncated":false\}/)
+      assert.match(stream, /data: "hello\\n"/)
       live!.data('world\n')
       for (let i = 0; i < 10 && !stream.includes('world'); i++) {
         await pump()
       }
-      assert.match(stream, /data: world/)
+      assert.match(stream, /data: "world\\n"/)
+      // a carriage return can't break framing — JSON keeps it inside the
+      // data line instead of letting an SSE reader drop it as junk
+      live!.data('50%\r60%\n')
+      for (let i = 0; i < 10 && !stream.includes('60%'); i++) {
+        await pump()
+      }
+      assert.match(stream, /data: "50%\\r60%\\n"/)
       live!.exit({ exitCode: 0, signal: null })
       for (let i = 0; i < 10 && !stream.includes('event: exit'); i++) {
         await pump()
@@ -1023,13 +1053,37 @@ describe('serve handler over a real socket', () => {
       assert.match(stream, /event: exit\ndata: \{"exitCode":0/)
       await reader.cancel()
 
+      // a truncated buffer flags it on the meta frame — the same signal
+      // plain GET's `truncated` field carries
+      const trunc = await fetch(`${base}/api/v1/terminals/term-trunc/output?follow`, {
+        headers: auth,
+      })
+      assert.equal(trunc.status, 200)
+      const truncReader = trunc.body!.getReader()
+      let truncStream = ''
+      {
+        const { value } = await truncReader.read()
+        if (value !== undefined) truncStream += dec.decode(value)
+      }
+      assert.match(truncStream, /event: meta\ndata: \{"truncated":true\}/)
+      assert.match(truncStream, /data: "tail\\n"/)
+      await truncReader.cancel()
+
+      // a follow() fault that isn't the release race gets a verdict the
+      // client can act on — never a silent empty 200
+      const boom = await fetch(`${base}/api/v1/terminals/term-boom/output?follow`, {
+        headers: auth,
+      })
+      assert.equal(boom.status, 200)
+      assert.match(await boom.text(), /event: error\ndata: \{"error":"registry exploded"\}/)
+
       // an already-final terminal emits snapshot + exit immediately
       const done = await fetch(`${base}/api/v1/terminals/term-done/output?follow`, {
         headers: auth,
       })
       assert.equal(done.status, 200)
       const text = await done.text()
-      assert.match(text, /data: done/)
+      assert.match(text, /data: "done\\n"/)
       assert.match(text, /event: exit\ndata: \{"exitCode":0/)
 
       // a snapshot with exitStatus but pending 'close' keeps streaming —
@@ -1046,13 +1100,13 @@ describe('serve handler over a real socket', () => {
         if (!d && value !== undefined) gapStream += gapDec.decode(value)
       }
       await gapPump()
-      assert.match(gapStream, /data: head/)
+      assert.match(gapStream, /data: "head\\n"/)
       live!.data('tail\n')
       live!.exit({ exitCode: 0, signal: null })
       for (let i = 0; i < 10 && !gapStream.includes('event: exit'); i++) {
         await gapPump()
       }
-      assert.match(gapStream, /data: tail/)
+      assert.match(gapStream, /data: "tail\\n"/)
       assert.match(gapStream, /event: exit\ndata: \{"exitCode":0/)
       await gapReader.cancel()
     } finally {
