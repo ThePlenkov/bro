@@ -855,6 +855,38 @@ function resolveModelPin(
   return undefined
 }
 
+/** `<base>-<level>` composite pin — <level> names a thought_level leaf,
+ *  never a model id (devin's swe-2 family maps -medium/-high/-max onto
+ *  the thinking dimension — 'swe-2-max' is model swe-2-high + level
+ *  max, never its own catalog id). Sets model + level when the pair
+ *  differs from what the session already serves; returns the asked id
+ *  when the catalog admits <base>, undefined otherwise. */
+async function applyCompositeLevel(
+  ctx: ClientContext,
+  sessionId: string,
+  modelOpt: SessionConfigOption,
+  configOptions: SessionConfigOption[],
+  bare: string,
+  by: string,
+  req: () => SendRequestOptions
+): Promise<string | undefined> {
+  const thought = configOptions.find((o) => o.category === 'thought_level')
+  const dash = bare.lastIndexOf('-')
+  const level = dash > 0 ? bare.slice(dash + 1) : ''
+  const baseResolved =
+    thought !== undefined && dash > 0 && selectLeaves(thought).some((o) => o.value === level)
+      ? resolveModelPin(bare.slice(0, dash), configOptions, by)
+      : undefined
+  if (thought === undefined || baseResolved === undefined) {
+    return undefined
+  }
+  if (modelOpt.currentValue !== baseResolved || thought.currentValue !== level) {
+    await applyOption(ctx, sessionId, modelOpt, baseResolved, by, req)
+    await applyOption(ctx, sessionId, thought, level, by, req)
+  }
+  return bare // the asked id names this exact (model, level) pair
+}
+
 /** Resolve a wanted pin against a live session — a verbatim currentValue
  *  match (a spawn-level `model[<size>]` pin), an exact catalog value (the
  *  raw id first, then the base), a unique family prefix, a composite
@@ -899,25 +931,21 @@ async function resolveTurnModel(
   // the agent advertises a catalog that doesn't contain the ask.
   // Two honest ways it can still be served:
   //  - composite variant: `<base>-<level>` where <level> is a leaf of
-  //    the agent's thought_level option (devin's swe-2 family maps
-  //    -medium/-high/-max onto the thinking dimension — 'swe-2-max'
-  //    is model swe-2-high + level max, never its own catalog id)
+  //    the agent's thought_level option
   //  - spawn-level pin: the provider command's --model already set
   //    state the session reports back verbatim
   const bare = providerBare(asked)
-  const thought = configOptions.find((o) => o.category === 'thought_level')
-  const dash = bare.lastIndexOf('-')
-  const level = dash > 0 ? bare.slice(dash + 1) : ''
-  const baseResolved =
-    thought !== undefined && dash > 0 && selectLeaves(thought).some((o) => o.value === level)
-      ? resolveModelPin(bare.slice(0, dash), configOptions, by)
-      : undefined
-  if (thought !== undefined && baseResolved !== undefined) {
-    if (modelOpt.currentValue !== baseResolved || thought.currentValue !== level) {
-      await applyOption(ctx, sessionId, modelOpt, baseResolved, by, req)
-      await applyOption(ctx, sessionId, thought, level, by, req)
-    }
-    return bare // the asked id names this exact (model, level) pair
+  const composite = await applyCompositeLevel(
+    ctx,
+    sessionId,
+    modelOpt,
+    configOptions,
+    bare,
+    by,
+    req
+  )
+  if (composite !== undefined) {
+    return composite
   }
   // the session reports its running pin verbatim — a spawn-level
   // `model[<size>]` opt-in still serves the asked base id
