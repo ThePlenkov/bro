@@ -21,6 +21,7 @@ export {
   gitIsAncestor,
   gitIsShallow,
   gitUpstreamBehind,
+  gitWorktreeRoots,
   mainWorktreeRoot,
   unquoteGitPath,
   worktreeGitDir,

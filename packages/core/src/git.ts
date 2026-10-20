@@ -241,6 +241,55 @@ function worktreeListMain(
   return real(answer) === real(common) ? null : answer
 }
 
+/** Every worktree checkout's root — `git worktree list` records, main
+ *  first, bare records dropped (a bare repo's own entry is git storage,
+ *  not a checkout; its LINKED worktrees still count). `-z` terminates
+ *  fields with NUL so a path carrying specials survives verbatim; the
+ *  plain form C-quotes them — unquoteGitPath decodes. [] outside a
+ *  repository or on git failure — callers read "no siblings" and keep
+ *  their own dir. */
+export function gitWorktreeRoots(dir: string): string[] {
+  const z = gitTry(['-C', dir, 'worktree', 'list', '--porcelain', '-z'])
+  if (z.code === 0) {
+    return z.out
+      .split('\0\0')
+      .map(worktreeRootZ)
+      .filter((r): r is string => r !== null)
+  }
+  // no -z support (pre-2.36 git): records split on blank lines, paths
+  // C-quoted when they carry specials
+  const p = gitTry(['-C', dir, 'worktree', 'list', '--porcelain'])
+  if (p.code !== 0) {
+    return []
+  }
+  return p.out
+    .split(/\r?\n\r?\n/)
+    .map(worktreeRootPlain)
+    .filter((r): r is string => r !== null)
+}
+
+/** One `-z` porcelain record (fields NUL-joined) → its checkout root;
+ *  null for a bare record or a fragment that isn't a record head. */
+function worktreeRootZ(rec: string): string | null {
+  const fields = rec.split('\0')
+  const head = fields.find((f) => f !== '')
+  if (head === undefined || !head.startsWith('worktree ') || fields.includes('bare')) {
+    return null
+  }
+  return head.slice('worktree '.length)
+}
+
+/** One plain porcelain record → its checkout root — the bare record
+ *  drops out; the `worktree` line's C-quoting decodes. */
+function worktreeRootPlain(rec: string): string | null {
+  const m = /^worktree (.+)$/m.exec(rec)
+  if (m === null || rec.split(/\r?\n/).includes('bare')) {
+    return null
+  }
+  const raw = m[1]!.trim()
+  return raw.startsWith('"') && raw.endsWith('"') ? unquoteGitPath(raw) : raw
+}
+
 /** Depth-bounded search under `root` for a directory whose `.git` FILE
  *  claims `gitdir: <common>` — the marker a moved gitdir's real
  *  checkout carries. Directories holding their own `.git` entry (some
