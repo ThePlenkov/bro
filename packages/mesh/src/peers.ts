@@ -52,7 +52,7 @@ export function transportOf(remote: string, explicit?: string): MeshTransport | 
     const path = remote.startsWith('file://') ? remote.slice('file://'.length) : remote
     return existsSync(path) && existsSync(`${path}/.beads`) ? 'local' : 'beads-remote'
   }
-  if (parseGithubRemote(remote) !== null) {
+  if (parseGithubRemote({ remote }) !== null) {
     return 'github'
   }
   if (/^(?:wl|wasteland):\/\//.test(remote)) {

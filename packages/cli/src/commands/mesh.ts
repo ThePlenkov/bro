@@ -524,7 +524,7 @@ function ghLifecycle(ctx: {
   env: MeshEnvelope
 }): string | undefined {
   const peer = ctx.peers.find((p) => {
-    const r = parseGithubRemote(p.remote)
+    const r = parseGithubRemote({ remote: p.remote })
     return p.transport === 'github' && r?.owner === ctx.repo.owner && r?.repo === ctx.repo.repo
   })
   if (peer === undefined) {
@@ -616,7 +616,7 @@ interface RemoteWrite {
  *  both planes. Exits 1 on a remote error, before any mirror. */
 function writeRemote(w: RemoteWrite): void {
   const { ctx, plane, env, evidence, body } = w
-  const ghRepo = plane.gh === undefined ? null : issueKey(plane.gh).repo
+  const ghRepo = plane.gh === undefined ? null : issueKey({ thread: plane.gh }).repo
   let remoteErr: string | undefined
   if (plane.gh !== undefined && ghRepo !== null) {
     remoteErr = ghLifecycle({ peers: ctx.peers, thread: plane.gh, repo: ghRepo, env })
@@ -684,7 +684,7 @@ function postRemote(ctx: RemoteCtx, plane: { gh?: string; wl?: string }): void {
  *  anchors on no remote plane — the caller runs the store leg. */
 function remoteLifecycle(ctx: RemoteCtx): boolean {
   const plane = {
-    gh: ctx.state.threads.find((t) => issueKey(t).repo !== null),
+    gh: ctx.state.threads.find((t) => issueKey({ thread: t }).repo !== null),
     wl: ctx.state.threads.find((t) => /^w-\w+$/i.test(t)),
   }
   if (plane.gh === undefined && plane.wl === undefined) {

@@ -123,13 +123,26 @@ function peerProvenance(
 
 /** beads-remote and local peers — the `from` attests the binding rig;
  *  on `local` checkouts the store can carry OUR records too. */
+function admitsFrom(r: PeerRecord, ownRig: string | null): boolean {
+  if (r.envelope.from === r.peerRig) {
+    return true
+  }
+  const localSelf = r.transport === 'local' && ownRig !== null
+  return localSelf && r.envelope.from === ownRig
+}
+
 function ownRecordAdmits(r: PeerRecord, ctx: ReduceCtx): { provenance?: string; error?: string } {
-  const admitted =
-    r.envelope.from === r.peerRig ||
-    (r.transport === 'local' && ctx.ownRig !== null && r.envelope.from === ctx.ownRig)
-  return admitted
+  return admitsFrom(r, ctx.ownRig)
     ? { provenance: r.transport === 'local' ? r.envelope.from : r.peerRig }
     : { error: `from ${r.envelope.from} doesn't match peer rig ${r.peerRig}` }
+}
+
+/** The shared admit tail — dedupe id, keep the envelope, pin who
+ *  sent it. */
+function markAdmitted(env: MeshEnvelope, provenance: string, ctx: ReduceCtx): void {
+  ctx.seen.add(env.id)
+  ctx.state.envelopes.push(env)
+  ctx.state.provenance[env.id] = provenance
 }
 
 function admitPeerRecord(r: PeerRecord, ctx: ReduceCtx): void {
@@ -143,9 +156,7 @@ function admitPeerRecord(r: PeerRecord, ctx: ReduceCtx): void {
     )
     return
   }
-  ctx.seen.add(r.envelope.id)
-  ctx.state.envelopes.push(r.envelope)
-  ctx.state.provenance[r.envelope.id] = v.provenance
+  markAdmitted(r.envelope, v.provenance, ctx)
   if (r.envelope.kind === 'request') {
     ctx.state.requestPeer = ctx.peers.find((p) => p.alias === r.peer)
   }
@@ -189,6 +200,18 @@ function aliasOf(row: BeadLike): string | null {
     : null
 }
 
+/** The alias direction an own bead adds: its external_ref when the
+ *  bead IS the asked thread, its own thread when the ref names it. */
+function aliasThread(env: MeshEnvelope | null, ext: string | null, thread: string): string | null {
+  if (env === null) {
+    return null
+  }
+  if (env.thread === thread && ext !== null) {
+    return ext
+  }
+  return ext === thread ? env.thread : null
+}
+
 /** First pass over own beads — alias recovery only (the asked thread
  *  names both directions through `external_ref`). */
 function collectAliases(
@@ -197,12 +220,9 @@ function collectAliases(
   ctx: ReduceCtx,
 ): void {
   for (const { row, env } of ownEnvs) {
-    const ext = aliasOf(row)
-    if (env !== null && env.thread === thread && ext !== null) {
-      ctx.threads.add(ext)
-    }
-    if (env !== null && ext === thread) {
-      ctx.threads.add(env.thread)
+    const alias = aliasThread(env, aliasOf(row), thread)
+    if (alias !== null) {
+      ctx.threads.add(alias)
     }
   }
 }
@@ -234,7 +254,7 @@ function admitOwnBeads(rows: BeadLike[], thread: string, ctx: ReduceCtx): void {
  *  peer, this account attests us, anything else drops flagged. */
 function admitSelfRepoGithub(dir: string, ctx: ReduceCtx): void {
   const origin = gitTry(['-C', dir, 'remote', 'get-url', 'origin'])
-  const selfRepo = origin.code === 0 ? parseGithubRemote(origin.out) : null
+  const selfRepo = origin.code === 0 ? parseGithubRemote({ remote: origin.out }) : null
   if (selfRepo === null) {
     return
   }
@@ -246,7 +266,7 @@ function admitSelfRepoGithub(dir: string, ctx: ReduceCtx): void {
 /** One thread alias → its issue comments, admitted when they name the
  *  origin's repo. */
 function admitIssueComments(t: string, selfRepo: { owner: string; repo: string }, ctx: ReduceCtx): void {
-  const k = issueKey(t)
+  const k = issueKey({ thread: t })
   if (k.repo === null || k.n === null) {
     return
   }
@@ -280,12 +300,22 @@ function admitSelfRepoRecord(r: GhRecord, ctx: ReduceCtx): void {
     )
     return
   }
-  ctx.seen.add(r.envelope.id)
-  ctx.state.envelopes.push(r.envelope)
-  ctx.state.provenance[r.envelope.id] = v.provenance
+  markAdmitted(r.envelope, v.provenance, ctx)
   if (r.envelope.kind === 'request' && bound !== undefined) {
     ctx.state.requestPeer = bound
   }
+}
+
+/** The furthest stage any admitted envelope reached. */
+function highestStage(envelopes: MeshEnvelope[]): ThreadStage | undefined {
+  let stage: ThreadStage | undefined
+  for (const e of envelopes) {
+    const s = STAGE_OF[e.kind]
+    if (stage === undefined || STAGE_RANK[s] > STAGE_RANK[stage]) {
+      stage = s
+    }
+  }
+  return stage
 }
 
 /** Highest-stage envelope wins; the turn is the side that owes the
@@ -293,17 +323,10 @@ function admitSelfRepoRecord(r: GhRecord, ctx: ReduceCtx): void {
  *  as a new request thread, not a turn). */
 function reduceStage(state: ThreadState): void {
   state.request = state.envelopes.find((e) => e.kind === 'request')
-  let stage: ThreadStage | undefined
-  for (const e of state.envelopes) {
-    const s = STAGE_OF[e.kind]
-    if (stage === undefined || STAGE_RANK[s] > STAGE_RANK[stage]) {
-      stage = s
-    }
-  }
-  state.stage = stage
-  if (stage === 'posted' || stage === 'claimed') {
+  state.stage = highestStage(state.envelopes)
+  if (state.stage === 'posted' || state.stage === 'claimed') {
     state.turn = 'worker'
-  } else if (stage === 'submitted') {
+  } else if (state.stage === 'submitted') {
     state.turn = 'requester'
   }
 }

@@ -45,10 +45,10 @@ describe('parseGithubRemote', () => {
       'ssh://git@github.com/acme/rig.git',
       'ssh://git@github.com:22/acme/rig',
     ]) {
-      assert.deepEqual(parseGithubRemote(remote), want, remote)
+      assert.deepEqual(parseGithubRemote({ remote }), want, remote)
     }
     // owner/repo lowercase — the api path is case-sensitive
-    assert.deepEqual(parseGithubRemote('https://github.com/ACME/Rig.git'), want)
+    assert.deepEqual(parseGithubRemote({ remote: 'https://github.com/ACME/Rig.git' }), want)
   })
 
   test('other hosts and non-urls return null — the caller reports the gap', () => {
@@ -62,7 +62,7 @@ describe('parseGithubRemote', () => {
       'https://github.com/a/b/c',
       '',
     ]) {
-      assert.equal(parseGithubRemote(remote), null, remote)
+      assert.equal(parseGithubRemote({ remote }), null, remote)
     }
   })
 })
@@ -70,12 +70,12 @@ describe('parseGithubRemote', () => {
 describe('issue thread ids', () => {
   test('issueKey strips the /issues/<n> tail and reads it', () => {
     const url = 'https://github.com/acme/rig/issues/42'
-    assert.deepEqual(issueKey(url).repo, { owner: 'acme', repo: 'rig' })
-    assert.equal(issueKey(url).n, 42)
-    assert.equal(issueKey('https://github.com/acme/rig').n, null)
+    assert.deepEqual(issueKey({ thread: url }).repo, { owner: 'acme', repo: 'rig' })
+    assert.equal(issueKey({ thread: url }).n, 42)
+    assert.equal(issueKey({ thread: 'https://github.com/acme/rig' }).n, null)
     // a bare repo url has no /issues tail — the repo still parses
-    assert.deepEqual(issueKey('https://github.com/acme/rig').repo, { owner: 'acme', repo: 'rig' })
-    assert.equal(issueKey('https://gitlab.com/acme/rig/issues/1').repo, null)
+    assert.deepEqual(issueKey({ thread: 'https://github.com/acme/rig' }).repo, { owner: 'acme', repo: 'rig' })
+    assert.equal(issueKey({ thread: 'https://gitlab.com/acme/rig/issues/1' }).repo, null)
   })
 })
 
@@ -240,7 +240,7 @@ describe('github e2e (gated)', () => {
       return
     }
     const { postRequest, postComment, issueComments, parseGithubRemote, issueKey } = await import('./github.ts')
-    const repo = parseGithubRemote(E2E_REPO)
+    const repo = parseGithubRemote({ remote: E2E_REPO })
     assert.ok(repo, `BRO_MESH_E2E_REPO "${E2E_REPO}" is not a github repo`)
 
     const posted = postRequest({
@@ -252,7 +252,7 @@ describe('github e2e (gated)', () => {
     })
     assert.ok(posted.issue, posted.error)
     const issue = posted.issue
-    const n = issueKey(issue).n
+    const n = issueKey({ thread: issue }).n
     assert.ok(n !== null)
     const read = () =>
       issueComments(repo, { number: n }).records.map((r) => r.envelope)

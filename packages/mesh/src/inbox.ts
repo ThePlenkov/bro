@@ -151,7 +151,7 @@ function scanLocal(
  *  replica to pull — every read is a live `gh` call, `pull:false`
  *  changes nothing. */
 function scanGithubPeer(peer: MeshPeer, out: PeerRecord[], errors: string[]): void {
-  const scan = scanGithub(peer.remote)
+  const scan = scanGithub({ remote: peer.remote })
   for (const e of scan.errors) {
     errors.push(`${peer.alias}: ${e}`)
   }
@@ -230,11 +230,11 @@ function scanOwnGithub(
   errors: string[],
 ): void {
   const origin = gitTry(['-C', ctx.dir, 'remote', 'get-url', 'origin'])
-  const repo = origin.code === 0 ? parseGithubRemote(origin.out) : null
+  const repo = origin.code === 0 ? parseGithubRemote({ remote: origin.out }) : null
   if (repo === null) {
     return
   }
-  const scan = scanGithub(`https://github.com/${repo.owner}/${repo.repo}`)
+  const scan = scanGithub({ remote: `https://github.com/${repo.owner}/${repo.repo}` })
   for (const e of scan.errors) {
     errors.push(`self: ${e}`)
   }

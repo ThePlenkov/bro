@@ -27,15 +27,15 @@ export interface GithubRepo {
  *  https/ssh/git@ forms, `.git` suffix and trailing slash tolerated.
  *  Other hosts and non-URL remotes return null: the caller reports
  *  the gap, never guesses. */
-export function parseGithubRemote(remote: string): GithubRepo | null {
-  let rest = remote.trim()
+export function parseGithubRemote(input: { remote: string }): GithubRepo | null {
+  let rest = input.remote.trim()
   while (rest.endsWith('/')) {
     rest = rest.slice(0, -1)
   }
   if (rest.endsWith('.git')) {
     rest = rest.slice(0, -'.git'.length)
   }
-  const hp = splitHostPath(rest)
+  const hp = splitHostPath({ rest })
   if (hp === null || hp.host !== 'github.com') {
     return null
   }
@@ -48,29 +48,29 @@ export function parseGithubRemote(remote: string): GithubRepo | null {
 /** url-shaped and git@ remotes → {host, path}; everything else null.
  *  String ops only — an uncontrolled-input regex here is a ReDoS
  *  surface the scanners flag. */
-function splitHostPath(rest: string): { host: string; path: string } | null {
-  return rest.startsWith('git@') ? scpHostPath(rest) : urlHostPath(rest)
+function splitHostPath(input: { rest: string }): { host: string; path: string } | null {
+  return input.rest.startsWith('git@') ? scpHostPath(input) : urlHostPath(input)
 }
 
 /** `scheme://` → the tail after it — http(s) and ssh only. */
-function schemeTail(rest: string): string | null {
-  const sep = rest.indexOf('://')
-  const scheme = sep === -1 ? '' : rest.slice(0, sep)
-  return ['http', 'https', 'ssh'].includes(scheme) ? rest.slice(sep + '://'.length) : null
+function schemeTail(input: { rest: string }): string | null {
+  const sep = input.rest.indexOf('://')
+  const scheme = sep === -1 ? '' : input.rest.slice(0, sep)
+  return ['http', 'https', 'ssh'].includes(scheme) ? input.rest.slice(sep + '://'.length) : null
 }
 
 /** an @ is userinfo only before the first slash — inside the path
  *  it's just a character. */
-function stripUserInfo(after: string): string {
-  const at = after.indexOf('@')
-  const slash = after.indexOf('/')
-  return at !== -1 && at < slash ? after.slice(at + 1) : after
+function stripUserInfo(input: { after: string }): string {
+  const at = input.after.indexOf('@')
+  const slash = input.after.indexOf('/')
+  return at !== -1 && at < slash ? input.after.slice(at + 1) : input.after
 }
 
 /** `host[:port]` + path → the pair; the port splits off here, not on
  *  the caller's slice. */
-function hostPathOf(after: string): { host: string; path: string } | null {
-  const hostPath = stripUserInfo(after)
+function hostPathOf(input: { after: string }): { host: string; path: string } | null {
+  const hostPath = stripUserInfo(input)
   const slash = hostPath.indexOf('/')
   if (slash === -1) {
     return null
@@ -84,17 +84,17 @@ function hostPathOf(after: string): { host: string; path: string } | null {
 }
 
 /** `scheme://[userinfo@]host[:port]/path` — http(s) and ssh url forms. */
-function urlHostPath(rest: string): { host: string; path: string } | null {
-  const after = schemeTail(rest)
+function urlHostPath(input: { rest: string }): { host: string; path: string } | null {
+  const after = schemeTail(input)
   if (after === null || after.indexOf('/') === -1) {
     return null
   }
-  return hostPathOf(after)
+  return hostPathOf({ after })
 }
 
 /** `git@host:path` — the scp-like form. */
-function scpHostPath(rest: string): { host: string; path: string } | null {
-  const after = rest.slice('git@'.length)
+function scpHostPath(input: { rest: string }): { host: string; path: string } | null {
+  const after = input.rest.slice('git@'.length)
   const colon = after.indexOf(':')
   const slash = after.indexOf('/')
   return colon > 0 && slash > colon
@@ -106,11 +106,11 @@ function scpHostPath(rest: string): { host: string; path: string } | null {
  *  repo from the remote parse (tail stripped), number from the tail.
  *  Callers that only need the repo can pass a bare repo url — `n`
  *  comes back null. */
-export function issueKey(thread: string): { repo: GithubRepo | null; n: number | null } {
-  const t = thread.trim()
+export function issueKey(input: { thread: string }): { repo: GithubRepo | null; n: number | null } {
+  const t = input.thread.trim()
   const m = /\/issues\/(\d+)$/.exec(t)
   return {
-    repo: parseGithubRemote(t.replace(/\/issues\/\d+$/, '')),
+    repo: parseGithubRemote({ remote: t.replace(/\/issues\/\d+$/, '') }),
     n: m === null ? null : Number(m[1]),
   }
 }
@@ -342,10 +342,10 @@ export function issueComments(repo: GithubRepo, issue: GhIssue): { records: GhRe
 
 /** The label-narrowed, comment-verified scan: every mesh record across
  *  every request-labelled issue on the peer's repo. */
-export function scanGithub(remote: string): { records: GhRecord[]; errors: string[] } {
-  const repo = parseGithubRemote(remote)
+export function scanGithub(input: { remote: string }): { records: GhRecord[]; errors: string[] } {
+  const repo = parseGithubRemote(input)
   if (repo === null) {
-    return { records: [], errors: [`remote "${remote}" is not a github url`] }
+    return { records: [], errors: [`remote "${input.remote}" is not a github url`] }
   }
   const listed = listIssues(repo)
   if (listed.error !== undefined) {
@@ -420,7 +420,7 @@ function createIssue(
 export function postRequest(
   input: { remote: string; from: string; to: string; title: string; body?: string; refs?: MeshRef[]; priority?: number },
 ): { issue?: string; error?: string } {
-  const repo = parseGithubRemote(input.remote)
+  const repo = parseGithubRemote({ remote: input.remote })
   if (repo === null) {
     return { error: `remote "${input.remote}" is not a github url` }
   }
@@ -479,7 +479,7 @@ export function githubProvenance(rec: {
  *  envelope's own id is `thread#kind` (one per kind per thread by
  *  lifecycle construction: a second claim is a stage error anyway). */
 export function postComment(comment: { thread: string; env: MeshEnvelope }): { error?: string } {
-  const key = issueKey(comment.thread)
+  const key = issueKey({ thread: comment.thread })
   if (key.repo === null || key.n === null) {
     return { error: `thread "${comment.thread}" is not a github issue url` }
   }
