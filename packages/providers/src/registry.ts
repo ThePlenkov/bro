@@ -59,6 +59,11 @@ export interface AcpSeam {
   peer?: import('@agentclientprotocol/sdk').AgentApp
   cwd?: string
   onUpdate?: (update: import('@agentclientprotocol/sdk').SessionUpdate) => void
+  /** Teardown signal for `acpOpen` — aborting it while the handshake
+   *  is still pending closes the conn, which rejects the init request
+   *  and releases the ref'd deadline timer that would otherwise pin
+   *  the event loop past server shutdown. */
+  signal?: AbortSignal
 }
 
 /** Load an entry → its typed client. `name` is the registry key —

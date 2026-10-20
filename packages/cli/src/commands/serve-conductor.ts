@@ -3073,10 +3073,14 @@ export function conductorProxy(
   cfg: ConductorConfig,
   opts: ProviderWireOpts = {}
 ): ConductorHandler {
+  // teardown handle for a link still mid-handshake — dispose aborts it
+  // (an aborted signal only reaches acpOpen; the request-level seams
+  // ignore it), since a pending init holds no `live` peer to close
+  const poolAbort = new AbortController()
   const wireOpts: ProviderWireOpts = {
     ...opts,
     model: opts.model ?? cfg.model,
-    acp: { cwd: cfg.cwd, ...opts.acp },
+    acp: { cwd: cfg.cwd, signal: poolAbort.signal, ...opts.acp },
   }
   // the store-side evidence trail — every conductor.* event lands as a
   // JSONL row next to serve.json so a dogfood analyst can read routing,
@@ -3175,6 +3179,10 @@ export function conductorProxy(
     {
       dispose: (): void => {
         disposed = true
+        // a getLink still inside acpOpen holds no `live` peer to close
+        // — aborting rejects its init and frees the deadline timer
+        // that would otherwise pin the loop past server close
+        poolAbort.abort()
         untrackPeerClose()
         live?.close()
         live = undefined

@@ -785,6 +785,15 @@ export async function acpOpen(
   // peer refs on abort — without this, terminals the agent spawned (and
   // the child) outlive the dead connection they were created under
   conn.signal.addEventListener('abort', close, { once: true })
+  // the pool's teardown signal: a close here rejects the pending init
+  // below, which releases the ref'd deadline timer — a half-open link
+  // can no longer pin the event loop past serve shutdown
+  const cancel = opts.acp?.signal
+  if (cancel?.aborted === true) {
+    close()
+    fail(new JudgeUnavailable(`${by}: acp open cancelled`))
+  }
+  cancel?.addEventListener('abort', close, { once: true })
   try {
     const { asAuthError, req, caps } = await withDeadline(deadline, () =>
       acpInit(conn.agent, by, deadline)

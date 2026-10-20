@@ -5,7 +5,7 @@ import assert from 'node:assert/strict'
 import { mkdtempSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import type { SessionConfigOption, SessionUpdate } from '@agentclientprotocol/sdk'
+import { agent, type SessionConfigOption, type SessionUpdate } from '@agentclientprotocol/sdk'
 import { fakeAcpAgent } from '@broject/providers/testkit'
 import { conductorConfig, conductorProxy, parseReply } from './serve-conductor.ts'
 import type { ConductorConfig } from './serve-conductor.ts'
@@ -1023,6 +1023,31 @@ describe('serve /v1/* — retained acp sessions', () => {
       await r2.text()
     } finally {
       await close2()
+    }
+
+    // a link still mid-handshake holds no live peer — dispose aborts
+    // the open itself, so the request settles now instead of riding
+    // out cfg.timeoutMs on a deadline the shutdown capped at 2s
+    const hanging = agent({ name: 'hang' }).onRequest(
+      'initialize',
+      () => new Promise<never>(() => {})
+    )
+    const proxy3 = conductorProxy(CFG, { acp: { peer: hanging } })
+    const { url: url3, close: close3 } = await listen(deps({ provider: proxy3 }))
+    try {
+      const t0 = Date.now()
+      const inflight = post(url3, [{ role: 'user', content: 'a' }])
+      await new Promise((r) => setTimeout(r, 50))
+      proxy3.dispose()
+      const r3 = await inflight
+      assert.notEqual(r3.status, 200)
+      await r3.text()
+      assert.ok(
+        Date.now() - t0 < CFG.timeoutMs,
+        'the pending open waited out the request deadline'
+      )
+    } finally {
+      await close3()
     }
   })
 })
