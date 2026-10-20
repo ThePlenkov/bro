@@ -27,6 +27,32 @@ after(scrubEnv())
 const REF = (id: string) => `external:mesh://acme/sibling:${id}`
 const FAR = (id: string) => `external:mesh://acme/far:${id}`
 
+/** origin pinned to bro's rig — `bro mesh me` derives the uri from it */
+const seedOrigin = (m: string) => {
+  testGit(['remote', 'add', 'origin', 'https://github.com/ThePlenkov/bro.git'], { cwd: m })
+}
+
+/** fake bd on PATH, pointed at this checkout's store */
+const fakeEnv = (tools: string) => {
+  const { binDir, db } = installFakeBd(tools, [])
+  return { PATH: `${binDir}:${process.env.PATH}`, FAKE_BD_DB: db }
+}
+
+interface RigFixture {
+  main: string
+  env: { PATH: string; FAKE_BD_DB: string }
+  target: { dir: string; db: string }
+}
+
+/** the two-checkout fixture most wait verdicts need — a `sibling`
+ *  local peer the request delivers into */
+function withRig(prefix: string, fn: (f: RigFixture) => void): void {
+  const { root, main } = initRepo(prefix, seedOrigin)
+  inside(main, root, () => {
+    fn({ main, env: fakeEnv(join(root, 'tools')), target: initTarget(root, 'sibling') })
+  })
+}
+
 /** A mesh/1 envelope row for a fixture store — label-only record, the
  *  shape `postEnvelope` stamps via envelopeLabels. */
 function envelope(e: { id: string; kind: string; thread: string; from: string; to: string }) {
@@ -46,14 +72,7 @@ function envelope(e: { id: string; kind: string; thread: string; from: string; t
 
 describe('bro wait', () => {
   test('local peer — open times out 4, closed-unshipped is 3, ship frees 0', () => {
-    const { root, main } = initRepo('bro-wait-e2e-', (m) => {
-      testGit(['remote', 'add', 'origin', 'https://github.com/ThePlenkov/bro.git'], { cwd: m })
-    })
-    inside(main, root, () => {
-      const target = initTarget(root, 'sibling')
-      const { binDir, db: mainDb } = installFakeBd(join(root, 'tools'), [])
-      const env = { PATH: `${binDir}:${process.env.PATH}`, FAKE_BD_DB: mainDb }
-
+    withRig('bro-wait-e2e-', ({ main, env, target }) => {
       // deliver a request into the sibling's store — installs the
       // peer binding and pins export:<id> for the worker's bd ship
       const req = runCli(['request', 'sibling', 'port the gate'], { cwd: main, env })
@@ -104,14 +123,7 @@ describe('bro wait', () => {
   })
 
   test('reject envelope → actionable 3; accept+reject on one thread stays 3', () => {
-    const { root, main } = initRepo('bro-wait-e2e-rej-', (m) => {
-      testGit(['remote', 'add', 'origin', 'https://github.com/ThePlenkov/bro.git'], { cwd: m })
-    })
-    inside(main, root, () => {
-      const target = initTarget(root, 'sibling')
-      const { binDir, db: mainDb } = installFakeBd(join(root, 'tools'), [])
-      const env = { PATH: `${binDir}:${process.env.PATH}`, FAKE_BD_DB: mainDb }
-
+    withRig('bro-wait-e2e-rej-', ({ main, env, target }) => {
       const req = runCli(['request', 'sibling', 'port the gate'], { cwd: main, env })
       assert.equal(req.code, 0, req.stderr)
       const thread = /request (\S+) →/.exec(req.stdout)?.[1]
@@ -142,14 +154,7 @@ describe('bro wait', () => {
   })
 
   test('verdict hygiene — usage, non-external arg, unbound rig, absent bead, gone checkout', () => {
-    const { root, main } = initRepo('bro-wait-e2e-bad-', (m) => {
-      testGit(['remote', 'add', 'origin', 'https://github.com/ThePlenkov/bro.git'], { cwd: m })
-    })
-    inside(main, root, () => {
-      const target = initTarget(root, 'sibling')
-      const { binDir, db: mainDb } = installFakeBd(join(root, 'tools'), [])
-      const env = { PATH: `${binDir}:${process.env.PATH}`, FAKE_BD_DB: mainDb }
-
+    withRig('bro-wait-e2e-bad-', ({ main, env, target }) => {
       // no args → usage on stderr, exit 2
       const none = runCli(['wait'], { cwd: main, env })
       assert.equal(none.code, 2)
@@ -185,14 +190,11 @@ describe('bro wait', () => {
   })
 
   test('beads-remote peer — posting-store split, replica annotation, absent replica is unreadable', () => {
-    const { root, main } = initRepo('bro-wait-e2e-rem-', (m) => {
-      testGit(['remote', 'add', 'origin', 'https://github.com/ThePlenkov/bro.git'], { cwd: m })
-    })
+    const { root, main } = initRepo('bro-wait-e2e-rem-', seedOrigin)
     inside(main, root, () => {
       const tools = join(root, 'tools')
-      const { binDir, db: mainDb } = installFakeBd(tools, [])
+      const env = fakeEnv(tools)
       installFakeDolt(tools)
-      const env = { PATH: `${binDir}:${process.env.PATH}`, FAKE_BD_DB: mainDb }
       const { remoteDir, publish } = installFakeDoltRemote(root, [])
 
       const add = runCli(
@@ -250,14 +252,7 @@ describe('bro wait', () => {
   })
 
   test('multi-ref — settled refs report while the wait holds for the rest', () => {
-    const { root, main } = initRepo('bro-wait-e2e-multi-', (m) => {
-      testGit(['remote', 'add', 'origin', 'https://github.com/ThePlenkov/bro.git'], { cwd: m })
-    })
-    inside(main, root, () => {
-      const target = initTarget(root, 'sibling')
-      const { binDir, db: mainDb } = installFakeBd(join(root, 'tools'), [])
-      const env = { PATH: `${binDir}:${process.env.PATH}`, FAKE_BD_DB: mainDb }
-
+    withRig('bro-wait-e2e-multi-', ({ main, env, target }) => {
       const threads = ['first ask', 'second ask'].map((title) => {
         const r = runCli(['request', 'sibling', title], { cwd: main, env })
         assert.equal(r.code, 0, r.stderr)

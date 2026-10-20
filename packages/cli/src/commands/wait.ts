@@ -373,6 +373,9 @@ function settleFromPlanes(w: Watch, ctx: WaitCtx, read: DepRead): void {
     closedUnshipped(w, read)
     return
   }
+  // a reopen drains the grace — a store that flickered closed→open
+  // starts the ship-pending count over, not where it left off
+  w.closedUnshipped = 0
   console.error(
     `wait ${w.arg}: stage=${thread.stage ?? 'none'} shipped=no` +
       (thread.turn !== undefined ? ` — ${thread.turn}'s move` : ''),
