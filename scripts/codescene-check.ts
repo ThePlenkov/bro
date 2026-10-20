@@ -1,13 +1,17 @@
 /**
- * The local twin of the CodeScene CI job — same code path, same verdict.
+ * The local twin of the CodeScene App's review — same analysis, same
+ * verdict, before the push instead of after it.
  *
  *   node scripts/codescene-check.ts [base-ref] [--strict]
  *
  * Runs `cs delta <base> HEAD --output-format json` and hands the report to
  * the gate. Defaults to `origin/main`. Without the `cs` CLI on PATH the
  * check SKIPS (exit 0): a machine without CodeScene must not be blocked.
- * The CLI is installed by the codescene skill (or the CI workflow's own
- * install step).
+ *
+ * The App is the gate on the PR itself (it authenticates itself and reads
+ * .codescene/custom-quality-gates.json from the branch); this is the same
+ * delta analysis, run locally, so a push does not have to be the first
+ * time you see what it did to the code health.
  */
 import { execFileSync } from 'node:child_process'
 import { existsSync } from 'node:fs'
@@ -33,6 +37,21 @@ function main(argv: string[]): void {
   if (cs === undefined) {
     console.log('codescene-check: skipped — the `cs` CLI is not installed (see the codescene skill)')
     return
+  }
+  // The delta covers a COMMIT RANGE (what the App analyzes for a PR) —
+  // the CLI's uncommitted mode comes back empty. Say so when the tree is
+  // dirty, or the check silently covers less than the user thinks.
+  try {
+    const dirty = execFileSync('git', ['status', '--porcelain'], { encoding: 'utf8' }).trim()
+    if (dirty !== '') {
+      const files = dirty.split('\n').map((l) => l.slice(3).trim())
+      console.log(
+        `codescene-check: ${files.length} uncommitted file(s) — the delta covers COMMITTED changes only:`
+      )
+      for (const f of files) console.log(`  ${f}`)
+    }
+  } catch {
+    // no git context — the delta below will report it
   }
   let report: string
   try {

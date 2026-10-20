@@ -68,7 +68,22 @@ cost 1.3 points of file score on its own. That is why only the warning
 thresholds are pinned here, and why the bar is raised one threshold at a time,
 each time measured.
 
-## The gate locally
+## Who enforces the ladder
+
+**The CodeScene GitHub App** — it is the gate. It authenticates itself
+(an app installation needs no secret in this repo), it reads
+`.codescene/custom-quality-gates.json` **from the branch under review**, and
+it posts the review as the *CodeScene Code Health Review* check. That check
+is what blocks a merge here: on PR #599 the App failed the PR over a
+Complex Method the diff introduced (cc 10) and the review gate counted it
+as a failing check.
+
+So there is no CI job for this. The App is the enforcement; the repo only
+carries the policy it enforces.
+
+## The local check
+
+The same delta analysis, before you push:
 
 ```bash
 npm run check:codescene                    # delta vs origin/main
@@ -76,10 +91,20 @@ node scripts/codescene-gate.ts <report>    # evaluate a saved report
 node scripts/codescene-gate.ts <report> --strict   # also fail on pre-existing findings
 ```
 
-`--strict` is the wave-N bar for a graduated file: it fails on findings the
-diff did not cause, so a file can only climb a rung by getting cleaner.
+It reads the same `change-type` the App's analysis reports, so a local
+"green" and the App's verdict agree. `--strict` is the wave-N bar for a
+graduated file: it fails on findings the diff did not cause, so a file can
+only climb a rung by getting cleaner.
 
-The gate reads the `change-type` CodeScene reports per finding:
+The check needs the `cs` CLI. On a workstation the OAuth session covers it
+(`cs auth login`); in a headless container, or for bro's own debt source,
+use a Personal Access Token (codescene.io → Account → API tokens) as
+`CS_ACCESS_TOKEN` / `CODESCENE_TOKEN` — the OAuth session's own token
+carries `cli.access` only, and expires in an hour.
+
+## The gate, for reference
+
+`change-type` per finding, as CodeScene reports it:
 
 | change-type | Meaning | Fails the gate? |
 | --- | --- | --- |
@@ -88,15 +113,3 @@ The gate reads the `change-type` CodeScene reports per finding:
 | `unchanged` | pre-existing debt, untouched | no (`--strict`: yes) |
 | `introduced` | the diff added it | **yes** |
 | `degraded` | the diff made it worse | **yes** |
-
-## Enabling the CI job
-
-The job needs `CS_ACCESS_TOKEN` — a CodeScene Personal Access Token
-(codescene.io → Account → API tokens) stored as a repository secret:
-
-```bash
-gh secret set CS_ACCESS_TOKEN --repo ThePlenkov/bro
-```
-
-Without the secret the job **skips**; it never blocks a PR. With it, every
-PR gets a delta analysis and the gate above.
