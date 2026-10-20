@@ -784,6 +784,56 @@ describe('serve /v1/* — the conductor plane', () => {
     }
   })
 
+  // bro-cfwc1 — narration mid-tag corrupts a post-hoc re-parse of the
+  // emitted text; the recorded reply must keep the wire's real shape.
+  test('a resend replays the tool_use a mid-tag narration left intact', async () => {
+    const fake = fakeAcpAgent({
+      updates: [
+        ...chunks('work <tool_ca'),
+        {
+          sessionUpdate: 'tool_call',
+          toolCallId: 'tc-9',
+          title: 'exec: ls',
+          kind: 'execute',
+          status: 'in_progress',
+        } as SessionUpdate,
+        ...chunks('ll>{"name":"ls","input":{}}</tool_call> end'),
+      ],
+      configOptions: [MODEL_OPTION],
+    })
+    const { post, close } = await boot(fake)
+    try {
+      const body = { messages: [{ role: 'user', content: 'list' }], stream: true }
+      const ev = await sseEvents(await post(body))
+      // live wire: narration rides text, the split tag completes
+      assert.ok(
+        ev.some(
+          (e) =>
+            e.event === 'content_block_delta' &&
+            (e.data.delta as { type: string }).type === 'input_json_delta'
+        )
+      )
+      // an identical resend replays the RECORDED reply — narration
+      // must not sit inside the unfinished tag's markup
+      const re = await sseEvents(await post(body))
+      const tu = re.find(
+        (e) =>
+          e.event === 'content_block_delta' &&
+          (e.data.delta as { type: string }).type === 'input_json_delta'
+      )
+      assert.ok(tu, 'the replay still carries the tool_use — not broken markup')
+      // the exact replayed text: narration in place, no markup shards —
+      // a mid-tag corruption splits the literal into <tool_ca…ll>, which
+      // a doesNotMatch on the full tag would evade
+      assert.deepEqual(textDeltas(re), ['work \n⏺ exec: ls\n', ' end'])
+      assert.equal(stopReason(re), 'tool_use')
+      // one prompt total — the resend replayed, never re-ran the turn
+      assert.equal(fake.prompts.length, 1)
+    } finally {
+      await close()
+    }
+  })
+
   test('a failed streamed turn lands as an in-stream error event', async () => {
     const fake = fakeAcpAgent({ configOptions: [MODEL_OPTION], failPrompt: 'generic' })
     const { r, close } = await postStream(fake)

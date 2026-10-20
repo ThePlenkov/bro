@@ -885,6 +885,12 @@ class LiveTurn extends TagPump {
   private open = false
   private sawTool = false
   private acc = ''
+  /** The reply as the wire emitted it — text deltas accumulate into
+   *  the open text block, a completed call lands with the SAME id.
+   *  The recorded reply reads these, never a re-parse of the emitted
+   *  text: a narration landing inside a held <tool_call> corrupts the
+   *  flat markup and the replay loses the call (bro-cfwc1). */
+  private readonly emittedBlocks: OutBlock[] = []
   stopReason = 'end_turn'
 
   private readonly ping?: NodeJS.Timeout
@@ -1018,16 +1024,20 @@ class LiveTurn extends TagPump {
     if (!this.open) {
       this.blockStart({ type: 'text', text: '' })
       this.open = true
+      this.emittedBlocks.push({ type: 'text', text: '' })
     }
     this.delta({ type: 'text_delta', text: s })
+    const rec = this.emittedBlocks[this.emittedBlocks.length - 1]
+    if (rec !== undefined) rec.text = `${rec.text ?? ''}${s}`
     this.acc += s
   }
 
   protected call(name: string, input: unknown): void {
     this.closeBlock()
+    const id = `toolu_${randomBytes(8).toString('hex')}`
     this.blockStart({
       type: 'tool_use',
-      id: `toolu_${randomBytes(8).toString('hex')}`,
+      id,
       name,
       input: {},
     })
@@ -1035,7 +1045,15 @@ class LiveTurn extends TagPump {
     this.delta({ type: 'input_json_delta', partial_json: json })
     this.blockStop()
     this.sawTool = true
+    this.emittedBlocks.push({ type: 'tool_use', id, name, input })
     this.acc += json
+  }
+
+  /** The emitted blocks verbatim — the recorded reply's source for a
+   *  streamed turn (a narration injected mid-tag would break a flat
+   *  re-parse; the blocks never fork from the wire's own shape). */
+  get blocks(): OutBlock[] {
+    return this.emittedBlocks
   }
 
   finish(stopReason: string): void {
@@ -1049,6 +1067,7 @@ class LiveTurn extends TagPump {
       this.blockStart({ type: 'text', text: '' })
       this.delta({ type: 'text_delta', text: '' })
       this.blockStop()
+      this.emittedBlocks.push({ type: 'text', text: '' })
     }
     let reason = stopReason
     if (this.stops?.hit !== undefined) reason = 'stop_sequence'
@@ -1721,7 +1740,11 @@ async function messages(
     stops.flush()
   }
   const view: ReplyView = {
-    blocks: parseReply(stops.emitted, body.tool_choice?.type !== 'none'),
+    // a streamed turn records the blocks it emitted — a mid-tag
+    // narration corrupts the flat markup a re-parse would read
+    // (bro-cfwc1); the buffered leg carries no narration, so its
+    // post-hoc parse stands
+    blocks: live?.blocks ?? parseReply(stops.emitted, body.tool_choice?.type !== 'none'),
     model: reply.model,
     stopReason: live?.stopReason ?? '',
     stopSequence: stops.hit,
