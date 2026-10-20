@@ -36,7 +36,7 @@ have to "start the server". Two gaps make today's shape violate that:
 
 - **host listener** — `bro provider serve` on the well-known port
   (default 4545); `provider.json` under `$XDG_STATE_HOME/bro/`, one per
-  machine enforced by `<provider.json>.lock`.
+  provider state directory enforced by `<provider.json>.lock`.
 - **ensure** — the resolve-or-spawn contract, mirroring `bro serve
   ensure`: probe health, spawn detached when dead, print the session
   token on stdout; failures are stderr + nonzero.

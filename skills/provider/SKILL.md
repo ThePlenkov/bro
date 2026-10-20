@@ -16,9 +16,10 @@ untouched.
 
 Two planes produce an endpoint:
 
-- **host listener** — `bro provider serve`: machine-level, repo-free,
+- **host listener** — `bro provider serve`: user-scoped, repo-free,
   bound to the well-known port **4545** by default. Exactly one per
-  machine — `provider.json.lock` enforces it. The permanent wiring.
+  provider state directory — `provider.json.lock` enforces it. The
+  permanent wiring.
   State at `$XDG_STATE_HOME/bro/provider.json` (0600). There is **no
   dedicated start step** — `bro provider ensure` (the apiKeyHelper)
   resolve-or-spawns it on demand.
@@ -38,7 +39,7 @@ api.anthropic.com) with `BRO_PROVIDER_API_KEY`.
 
 | Command | What it does |
 | ------- | ------------ |
-| `bro provider serve [--port N]` | Foreground host listener on 127.0.0.1 (default 4545). Refuses while another listener is live — one per host — and when nothing is configured to serve (no `serve.backend`/`providers.*` in global config, no upstream key in env). Rarely invoked by hand — `ensure` spawns it. |
+| `bro provider serve [--port N]` | Foreground host listener on 127.0.0.1 (default 4545). Refuses while another listener is live in the same provider state directory and when nothing is configured to serve (no `serve.backend`/`providers.*` in global config, no upstream key in env). Rarely invoked by hand — `ensure` spawns it. |
 | `bro provider ensure [--port N]` | Resolve-or-spawn the host listener, print the session token — **the apiKeyHelper**. Probe → detached spawn → poll → token on stdout; failures exit 1 on stderr. |
 | `bro provider url` | Print the endpoint `ANTHROPIC_BASE_URL` should point at |
 | `bro provider token` | Print the session token — self-heals through the ensure path on a dead listener, same helper contract |
@@ -55,7 +56,8 @@ api.anthropic.com) with `BRO_PROVIDER_API_KEY`.
    serves root-anchored `/v1/*`) against the live host listener, then
    the cwd repo's live serve — the helper tracks the client's actual
    target, never guesses;
-2. unset → the live **host** listener — one gateway per machine;
+2. unset → the live **host** listener — one gateway per provider state
+   directory;
 3. else the cwd repo's live serve **with the provider plane wired**;
 4. else exit 1 — a wrong token is worse than a nonzero exit.
 
