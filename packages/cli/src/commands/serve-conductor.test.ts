@@ -753,6 +753,126 @@ describe('serve /v1/* — the conductor plane', () => {
     }
   })
 
+  test('tool_call lifecycle also emits structured tool_activity events — 3 tools, in order, before message_stop', async () => {
+    const fake = fakeAcpAgent({
+      updates: [
+        ...chunks('working '),
+        {
+          sessionUpdate: 'tool_call',
+          toolCallId: 'tc-1',
+          title: 'exec: a',
+          kind: 'execute',
+          status: 'in_progress',
+        } as SessionUpdate,
+        {
+          sessionUpdate: 'tool_call',
+          toolCallId: 'tc-2',
+          title: 'read: b',
+          kind: 'read',
+          status: 'in_progress',
+        } as SessionUpdate,
+        {
+          sessionUpdate: 'tool_call_update',
+          toolCallId: 'tc-1',
+          status: 'completed',
+        } as SessionUpdate,
+        {
+          sessionUpdate: 'tool_call',
+          toolCallId: 'tc-3',
+          title: 'exec: c',
+          kind: 'execute',
+          status: 'in_progress',
+          content: [{ type: 'terminal', terminalId: 'term-9' }],
+        } as SessionUpdate,
+        {
+          sessionUpdate: 'tool_call_update',
+          toolCallId: 'tc-3',
+          status: 'failed',
+        } as SessionUpdate,
+        {
+          sessionUpdate: 'tool_call_update',
+          toolCallId: 'tc-2',
+          status: 'completed',
+        } as SessionUpdate,
+        ...chunks('done'),
+      ],
+      configOptions: [MODEL_OPTION],
+    })
+    const { r, close } = await postStream(fake)
+    try {
+      const ev = await sseEvents(r)
+      const acts = ev.filter((e) => e.event === 'tool_activity').map((e) => e.data)
+      assert.deepEqual(
+        acts.map((a) => `${a.phase}:${a.toolCallId}`),
+        ['open:tc-1', 'open:tc-2', 'finish:tc-1', 'open:tc-3', 'finish:tc-3', 'finish:tc-2']
+      )
+      // payloads carry the shared bus shape — title/kind/status plus
+      // the terminalId lifted out of tool content
+      const open1 = acts.find((a) => a.phase === 'open' && a.toolCallId === 'tc-1')
+      assert.equal(open1?.title, 'exec: a')
+      assert.equal(open1?.kind, 'execute')
+      assert.equal(open1?.status, 'in_progress')
+      const finish3 = acts.find((a) => a.phase === 'finish' && a.toolCallId === 'tc-3')
+      assert.equal(finish3?.status, 'failed')
+      const open3 = acts.find((a) => a.phase === 'open' && a.toolCallId === 'tc-3')
+      assert.equal(open3?.terminalId, 'term-9')
+      // every event precedes message_stop
+      const stopIdx = ev.findIndex((e) => e.event === 'message_stop')
+      assert.ok(stopIdx > 0)
+      ev.forEach((e, i) => {
+        if (e.event === 'tool_activity') assert.ok(i < stopIdx, 'activity before message_stop')
+      })
+      // activity is an envelope, not a block — nothing invents tool_use
+      assert.equal(stopReason(ev), 'end_turn')
+    } finally {
+      await close()
+    }
+  })
+
+  test('tool_activity edges: first-seen-terminal opens+finishes; churn and dupes emit nothing', async () => {
+    const fake = fakeAcpAgent({
+      updates: [
+        // a call first seen already-terminal — open and close in order
+        {
+          sessionUpdate: 'tool_call',
+          toolCallId: 'tc-9',
+          title: 'instant',
+          kind: 'execute',
+          status: 'completed',
+        } as SessionUpdate,
+        // duped terminal for the same id — no second finish
+        {
+          sessionUpdate: 'tool_call_update',
+          toolCallId: 'tc-9',
+          status: 'completed',
+        } as SessionUpdate,
+        // non-terminal churn — not an edge
+        {
+          sessionUpdate: 'tool_call_update',
+          toolCallId: 'tc-8',
+          status: 'in_progress',
+          title: 'churn',
+        } as SessionUpdate,
+        ...chunks('x'),
+      ],
+      configOptions: [MODEL_OPTION],
+    })
+    const { r, close } = await postStream(fake)
+    try {
+      const ev = await sseEvents(r)
+      const acts = ev.filter((e) => e.event === 'tool_activity').map((e) => e.data)
+      assert.deepEqual(
+        acts.map((a) => `${a.phase}:${a.toolCallId}`),
+        ['open:tc-9', 'finish:tc-9']
+      )
+      // the synthesized open edge drops the terminal status (it lies)
+      assert.equal(acts[0]?.status, undefined)
+      assert.equal(acts[1]?.status, 'completed')
+    } finally {
+      await close()
+    }
+  })
+
   test('narration landing mid partial-tag keeps stream order — held tail completes into the block', async () => {
     const fake = fakeAcpAgent({
       updates: [

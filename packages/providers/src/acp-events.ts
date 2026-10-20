@@ -71,7 +71,7 @@ export interface AgentTurnPlane {
 
 const TERMINAL_STATUS = new Set(['completed', 'failed'])
 
-type Toolish = {
+export type Toolish = {
   toolCallId: string
   title?: string | null
   name?: string | null
@@ -81,8 +81,10 @@ type Toolish = {
 }
 
 /** The tool fields consumers need — kind/title/status/terminalId per
- *  the bead, plus the ids and name so a pane can dedupe or label. */
-function toolPayload(u: Toolish, phase: 'open' | 'finish'): Record<string, unknown> {
+ *  the bead, plus the ids and name so a pane can dedupe or label.
+ *  Shared by the 'agent' bus topic and the conductor's tool_activity
+ *  SSE event (bro-btccj) so both surfaces carry ONE payload shape. */
+export function toolPayload(u: Toolish, phase: 'open' | 'finish'): Record<string, unknown> {
   const p: Record<string, unknown> = { phase, toolCallId: u.toolCallId }
   if (typeof u.title === 'string' && u.title !== '') p['title'] = u.title
   if (typeof u.name === 'string' && u.name !== '') p['name'] = u.name
