@@ -9,14 +9,15 @@
  *   bro queue bump <id> [--to N]    reprioritize (bare = float to top)
  *   bro queue rm <id>               dequeue (bead stays open)
  */
+import { printUsage } from '@broject/core'
 import { checkBeads, queueAdd, queueBump, queueDrill, queueDrop, queueItems, queueScope } from '@broject/drill'
 import { flag, positionals } from './args.ts'
 
 const VALUE_FLAGS = new Set(['--under', '--to', '--description', '--priority'])
 const positionalsOf = (argv: string[]): string[] => positionals(argv, VALUE_FLAGS)
 
-function usage(exitCode = 1): never {
-  console.error(`Usage: bro queue <command> [args…]
+function usage(exitCode = 2): never {
+  printUsage(`Usage: bro queue <command> [args…]
 
 Commands:
   bro queue <subject…>      Enqueue an item on the current frame's queue
@@ -25,8 +26,7 @@ Commands:
   bump <id> [--to N]        Reprioritize — bare bump floats to top
   rm <id> [--under F]       Dequeue — the bead stays open
 
-Scope: the current drill frame, else the session queue (root).`)
-  process.exit(exitCode)
+Scope: the current drill frame, else the session queue (root).`, exitCode)
 }
 
 function needId(rest: string[], sub: string): string {

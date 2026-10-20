@@ -13,6 +13,7 @@ import {
   collectGuards,
   GUARD_DEFAULT_BUDGET,
   isGuardEvent,
+  printUsage,
   type CollectedGuard,
   type GuardEvent,
 } from '@broject/core'
@@ -181,13 +182,15 @@ export function runGuardCommand(argv: string[]): void | Promise<void> {
   if (sub === 'test') {
     return cmdTest(rest)
   }
-  console.error(`Usage: bro guard <command> [args…]
+  printUsage(
+    `Usage: bro guard <command> [args…]
 
 Commands:
   list     Every resolved guard — name, source, on-events, budget,
            validation state [--json]
   test     Per-clause verdicts then FIRE|SKIP — a read on the engine:
            bro guard test <name> [--event E] [--prompt T] [--session ID]
-           exit 0 = FIRE, 1 = SKIP, 2 = usage`)
-  process.exit(sub === undefined ? 1 : 2)
+           exit 0 = FIRE, 1 = SKIP, 2 = usage`,
+    sub === '--help' || sub === '-h' ? 0 : 2
+  )
 }

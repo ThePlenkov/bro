@@ -44,7 +44,7 @@ import { closeSync, mkdirSync, openSync, statSync } from 'node:fs'
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http'
 import { homedir } from 'node:os'
 import { dirname, join, resolve } from 'node:path'
-import { holdFileLock, LockTimeout, pidAlive } from '@broject/core'
+import { holdFileLock, LockTimeout, pidAlive, printUsage } from '@broject/core'
 import { flag, positionals } from './args.ts'
 import {
   clearStateFile,
@@ -663,8 +663,8 @@ function cmdEnv(argv: string[]): void {
   console.log(`# ${JSON.stringify(block)}`)
 }
 
-function usage(): never {
-  console.error(`usage:
+function usage(exitCode = 2): never {
+  printUsage(`usage:
   bro provider serve [--port <n>]   host-level provider listener — /v1/* only,
                                     state at $XDG_STATE_HOME/bro/provider.json
                                     (default port ${DEFAULT_PROVIDER_PORT})
@@ -675,17 +675,19 @@ function usage(): never {
   bro provider env [--json]         eval-able exports, or the settings.json block
 
 Resolution is cwd-aware: ANTHROPIC_BASE_URL pins by exact url, else the
-live host listener, else the cwd repo's provider-wired serve.`)
-  process.exit(2)
+live host listener, else the cwd repo's provider-wired serve.`, exitCode)
 }
 
 export async function runProviderCommand(argv: string[]): Promise<void> {
   const [sub, ...rest] = argv
-  if (sub === '--help' || sub === '-h' || sub === undefined) {
+  if (sub === '--help' || sub === '-h') {
+    usage(0)
+  }
+  if (sub === undefined) {
     usage()
   }
   if (rest.includes('--help') || rest.includes('-h')) {
-    usage()
+    usage(0)
   }
   switch (sub) {
     case 'serve':

@@ -23,6 +23,7 @@ import {
   dataRefPush,
   dataRefRoot,
   gitTry,
+  printUsage,
   taskStore,
   type TaskRow,
 } from '@broject/core'
@@ -394,6 +395,12 @@ function cmdRun(dir: string, dryRun: boolean, force: boolean, flatten: boolean):
 }
 
 export function runSweepCommand(argv: string[]): void {
+  if (argv.includes('--help') || argv.includes('-h')) {
+    printUsage(
+      'usage: bro sweep status | distill [--dry-run] | run [--dry-run] [--force] [--no-flatten]',
+      0
+    )
+  }
   const [sub, ...rest] = positionals(argv, new Set())
   if (rest.length > 0) {
     fail(`unexpected args: ${rest.join(' ')}`)

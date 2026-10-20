@@ -33,7 +33,14 @@
  * warnings say so once, and the metronome still beats.
  */
 import { spawnSync } from 'node:child_process'
-import { dropMailbox, holdFileLock, loadConfig, LockTimeout, mailboxDir } from '@broject/core'
+import {
+  dropMailbox,
+  holdFileLock,
+  loadConfig,
+  LockTimeout,
+  mailboxDir,
+  printUsage,
+} from '@broject/core'
 import { positionals } from './args.ts'
 import { MAX_INTERVAL_SEC, MIN_INTERVAL_SEC } from './drive-config.ts'
 import { writeHeartbeat } from './watch-heartbeat.ts'
@@ -224,6 +231,9 @@ export async function pulseTick(
 }
 
 export async function runPulseCommand(argv: string[]): Promise<void> {
+  if (argv.includes('--help') || argv.includes('-h')) {
+    printUsage('usage: bro pulse [<seconds>] [--notify|--no-notify] [-- <cmd>…]', 0)
+  }
   let args: PulseArgs
   try {
     args = pulseArgs(argv)

@@ -38,6 +38,7 @@ import {
   loadConfig,
   LockTimeout,
   mailboxDir,
+  printUsage,
   shQuote,
   withFileLock,
   worktreeGitDir,
@@ -434,16 +435,15 @@ function printStatus(s: RigStatus): void {
 
 // --- dispatch -----------------------------------------------------------------
 
-function usage(): never {
-  console.error(`usage:
+function usage(exitCode = 2): never {
+  printUsage(`usage:
   bro rig sync [--repo <dir>]       fetch → merge --ff-only @{upstream} → refresh
   bro rig status [--repo <dir>] [--json]
   bro rig next [<item>] [--json]    the engine's re-entry verdict: step|gate|wait|done|blocked
   bro rig watch [--repo <dir>] [--every SEC] [--for SEC]
   bro rig install [--repo <dir>] [--every SEC] [--print]
   bro rig uninstall [--repo <dir>]
-  install arms the session pulse — no OS timer is written`)
-  process.exit(2)
+  install arms the session pulse — no OS timer is written`, exitCode)
 }
 
 const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms))
@@ -604,6 +604,9 @@ function cmdUninstall(resolved: RigRepo | { error: string }): never {
 }
 
 export async function runRigCommand(argv: string[]): Promise<void> {
+  if (argv.includes('--help') || argv.includes('-h')) {
+    usage(0)
+  }
   const pos = positionals(argv, new Set(['--repo', '--every', '--for']), {
     boolFlags: new Set(['--json', '--print']),
   })

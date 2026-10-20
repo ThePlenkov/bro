@@ -21,7 +21,7 @@ import { randomBytes } from 'node:crypto'
 import { mkdirSync, rmSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { stringify } from 'smol-toml'
-import { checkBeads, taskStore } from '@broject/core'
+import { checkBeads, printUsage, taskStore } from '@broject/core'
 import {
   beadsDir,
   claimStep,
@@ -49,8 +49,8 @@ import { flag, flagAll, positionals } from './args.ts'
 import { publishGate, runConvoyRun, RUN_KNOWN_FLAGS } from './convoy-run.ts'
 import { MAX_INTERVAL_SEC, MIN_INTERVAL_SEC } from './drive-config.ts'
 
-function usage(exitCode = 1): never {
-  console.error(`Usage: bro convoy <command> [args…]
+function usage(exitCode = 2): never {
+  printUsage(`Usage: bro convoy <command> [args…]
 
 Commands:
   status [mol] [--mol ID]         Render the DAG — done/ready/blocked per step
@@ -67,8 +67,7 @@ Commands:
                                 The queue runner — spawn a convoy agent per mol
                                 through the facade, sequential, to 'complete'
 
-  With no mol id, the single open molecule is used; ambiguity is an error.`)
-  process.exit(exitCode)
+  With no mol id, the single open molecule is used; ambiguity is an error.`, exitCode)
 }
 
 const VALUE_FLAGS: ReadonlySet<string> = new Set(['--result', '--var', '--mol'])
@@ -192,12 +191,14 @@ function rollbackPoured(poured: string[]): string[] {
 
 export async function runConvoyCommand(argv: string[]): Promise<void> {
   const [sub, ...rest] = argv
-  if (!sub || sub === '--help' || sub === '-h') usage()
+  if (sub === '--help' || sub === '-h') usage(0)
+  if (!sub) usage()
   const SUBS = new Set(['list', 'status', 'next', 'done', 'claim', 'pour', 'wait', 'run'])
   if (!SUBS.has(sub)) {
     console.error(`unknown convoy command: ${sub}`)
     usage()
   }
+  if (rest.includes('--help') || rest.includes('-h')) usage(0)
   // reject unknown options — a misspelled flag (e.g. --reslut) must not
   // silently degrade a `done` into a close with no reason
   const KNOWN_FLAGS = new Set(

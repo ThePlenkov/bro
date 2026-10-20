@@ -7,7 +7,16 @@
  */
 import { existsSync } from 'node:fs'
 import { join } from 'node:path'
-import { bd, bdAt, facade, gitCommonDir, loadConfig, taskStore, taskStoreAt } from '@broject/core'
+import {
+  bd,
+  bdAt,
+  facade,
+  gitCommonDir,
+  loadConfig,
+  printUsage,
+  taskStore,
+  taskStoreAt,
+} from '@broject/core'
 import {
   acceptWanted,
   claimWanted,
@@ -802,6 +811,8 @@ export function runMeshCommand(argv: string[]): void {
     default:
       break
   }
-  console.error(USAGE)
-  process.exit(verb === undefined || verb === 'help' ? 0 : 2)
+  printUsage(
+    USAGE,
+    verb === undefined || verb === 'help' || verb === '--help' || verb === '-h' ? 0 : 2,
+  )
 }

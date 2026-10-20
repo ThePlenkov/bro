@@ -13,7 +13,7 @@ import { createHash } from 'node:crypto'
 import { existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from 'node:fs'
 import { basename, dirname, join } from 'node:path'
 import { hooksDir, safeId } from '@broject/learn'
-import { withFileLock } from '@broject/core'
+import { printUsage, withFileLock } from '@broject/core'
 import { VERSION } from '../version.ts'
 import { loadBroConfig } from '../plugins.ts'
 import {
@@ -579,8 +579,7 @@ export async function runTraceCommand(argv: string[]): Promise<void> {
   const [verb, ...rest] = argv
   const args = verb === 'export' ? parseExportArgs(rest) : null
   if (args === null) {
-    console.error(EXPORT_USAGE)
-    process.exit(2)
+    printUsage(EXPORT_USAGE, verb === '--help' || verb === '-h' ? 0 : 2)
   }
   const r = await exportTraces({ dir: process.cwd(), session: args.session, dryRun: args.dryRun })
   const code = reportExport(r, args)

@@ -28,7 +28,7 @@
 import { execFileSync } from 'node:child_process'
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { isAbsolute, join, resolve } from 'node:path'
-import { LockTimeout, withFileLock, type JudgeAnswer } from '@broject/core'
+import { LockTimeout, printUsage, withFileLock, type JudgeAnswer } from '@broject/core'
 import { appendRow, judgeConfig, judgeFacade } from '@broject/judge'
 import { loadBroConfig } from '../plugins.ts'
 import type { GoalConfig } from './goal-config.ts'
@@ -409,6 +409,12 @@ function report(target: string, goal: GoalRecord, asJson: boolean, text: string)
 }
 
 export function runGoalCommand(argv: string[]): void {
+  if (argv.includes('--help') || argv.includes('-h')) {
+    printUsage(
+      'usage: bro goal [<condition> | clear|pause|resume|status] [--session <id>] [--turns <n>] [--json]',
+      0
+    )
+  }
   const dir = process.cwd()
   const { session, turns, asJson, positional } = parseGoalArgs(argv)
   const target = session ?? SEED

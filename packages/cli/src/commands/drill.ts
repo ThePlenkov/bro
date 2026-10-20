@@ -13,7 +13,7 @@
  */
 import { createInterface } from 'node:readline/promises'
 import { relative, resolve } from 'node:path'
-import { gitTry, loadConfig } from '@broject/core'
+import { gitTry, loadConfig, printUsage } from '@broject/core'
 import {
   checkBeads,
   childrenOf,
@@ -37,8 +37,8 @@ import {
 } from '@broject/drill'
 import { flag, flagAll, positionals } from './args.ts'
 
-function usage(exitCode = 1): never {
-  console.error(`Usage: bro drill <command> [args…]
+function usage(exitCode = 2): never {
+  printUsage(`Usage: bro drill <command> [args…]
 
 Commands:
   down <title> [--under ID] [--ephemeral]        New child frame under current leaf (or root)
@@ -53,8 +53,7 @@ Commands:
   report                                         List published drill reports
   distill ID                                     Extract a reusable proto from a drill epic
 
-  bro unwind …                                   alias for \`bro drill up\``)
-  process.exit(exitCode)
+  bro unwind …                                   alias for \`bro drill up\``, exitCode)
 }
 
 const VALUE_FLAGS: ReadonlySet<string> = new Set([

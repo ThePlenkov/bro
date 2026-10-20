@@ -48,6 +48,7 @@ import {
   mailboxDir,
   prOwnership,
   prOwnershipMark,
+  printUsage,
   reviewHost,
   runJanitor,
   sweepOrphanProcs,
@@ -1004,6 +1005,12 @@ export async function tickOnce(dir: string): Promise<{ snap: WatchSnapshot; text
 }
 
 export async function runWatchCommand(argv: string[]): Promise<void> {
+  if (argv.includes('--help') || argv.includes('-h')) {
+    printUsage(
+      'usage: bro watch [--every SEC] [--for SEC] [--json] [--notify] | bro watch install|uninstall',
+      0
+    )
+  }
   if (argv[0] === 'install' || argv[0] === 'uninstall') {
     runWatchSched(argv.slice(1))
     return

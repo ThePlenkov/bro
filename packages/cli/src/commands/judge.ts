@@ -21,7 +21,13 @@
  * not explicit invocation.
  */
 import { readFileSync } from 'node:fs'
-import { ensureAuth, JudgeUnavailable, requireProviderSurface, reviewHost } from '@broject/core'
+import {
+  ensureAuth,
+  JudgeUnavailable,
+  printUsage,
+  requireProviderSurface,
+  reviewHost,
+} from '@broject/core'
 import type { DecideResult, JudgeAnswer, JudgeQuestion } from '@broject/core'
 import {
   appendRow,
@@ -434,6 +440,9 @@ const JUDGE_USAGE =
 
 export async function runJudgeCommand(argv: string[]): Promise<void> {
   const sub = argv[0]
+  if (sub === '--help' || sub === '-h') {
+    printUsage(JUDGE_USAGE, 0)
+  }
   if (sub === 'decide') {
     await decide(argv.slice(1))
     return
@@ -446,8 +455,8 @@ export async function runJudgeCommand(argv: string[]): Promise<void> {
     await replay(argv.slice(1))
     return
   }
-  console.error(
-    sub === undefined ? JUDGE_USAGE : `unknown judge subcommand: ${sub}\n${JUDGE_USAGE}`
+  printUsage(
+    sub === undefined ? JUDGE_USAGE : `unknown judge subcommand: ${sub}\n${JUDGE_USAGE}`,
+    2
   )
-  process.exit(2)
 }

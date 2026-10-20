@@ -29,6 +29,7 @@ import {
   gitCommonDir,
   lockHolderPid,
   pidAlive,
+  printUsage,
   procStat,
   staleLock,
 } from '@broject/core'
@@ -43,15 +44,15 @@ import { loadBroConfig } from '../plugins.ts'
 
 const errText = (e: unknown): string => (e instanceof Error ? e.message : String(e))
 
-function usage(): never {
-  console.error(
+function usage(exitCode = 2): never {
+  printUsage(
     'Usage: bro daemon <up|status|down|run> [--every SEC]\n' +
       '  up      spawn the detached supervisor (orchestrator sessions only)\n' +
       '  status  supervisor liveness — lock holder, armer record, log path\n' +
       '  down    SIGTERM the supervisor and clear the armer record\n' +
-      '  run     the supervised loop itself — spawned by `up`, not for direct use'
+      '  run     the supervised loop itself — spawned by `up`, not for direct use',
+    exitCode,
   )
-  process.exit(2)
 }
 
 export interface DaemonRecord {
@@ -621,7 +622,10 @@ export function uninstallDrive(dir: string, deps: DriveSchedDeps = {}): DriveIns
 
 export async function runDaemonCommand(argv: string[]): Promise<void> {
   const verb = argv[0]
-  if (verb === undefined || argv.includes('--help') || argv.includes('-h')) {
+  if (argv.includes('--help') || argv.includes('-h')) {
+    usage(0)
+  }
+  if (verb === undefined) {
     usage()
   }
   const main = mainWorktree().path

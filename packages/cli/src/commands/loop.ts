@@ -89,6 +89,7 @@ import {
   type SpawnWorker,
   type TaskStore,
   BATCH_MARKER_ENV,
+  printUsage,
 } from '@broject/core'
 import {
   ACT_STATE_TTL_MS,
@@ -244,8 +245,8 @@ interface Ctx {
 /** Clickable PR ref for this repo — user-facing lines never print bare #N. */
 const prRef = (ctx: Ctx, pr: number): string => ctx.rev.prLink(ctx.repo, pr)
 
-function usage(): never {
-  console.error(`Usage: bro loop [--max N] [--dry-run] [--json] [--label a,b] [--stack NAME]
+function usage(exitCode = 2): never {
+  printUsage(`Usage: bro loop [--max N] [--dry-run] [--json] [--label a,b] [--stack NAME]
   --agent '<cmd {promptFile}>'   agent template (config: loop.agent) —
                                 a value naming a configured providers.<name>
                                 spawns through the provider registry instead
@@ -272,8 +273,7 @@ function usage(): never {
                                 lead's affinity key (spec/epic/area/path),
                                 one worktree, one worker, one PR
                                 (loop.batch, 1 = solo)
-  --interval SEC                 gate poll interval, ≥0.1s (60)`)
-  process.exit(2)
+  --interval SEC                 gate poll interval, ≥0.1s (60)`, exitCode)
 }
 
 const num = (v: string | undefined, dflt: number, min = 1, max?: number): number => {
@@ -2255,7 +2255,7 @@ const LOOP_BOOL_FLAGS = new Set(['--json', '--dry-run', '--help', '--auto-approv
 
 export async function runLoopCommand(argv: string[]): Promise<void> {
   if (argv.includes('--help') || argv.includes('-h')) {
-    usage()
+    usage(0)
   }
   rejectStrayArgs(argv)
   const root = gitTry(['rev-parse', '--show-toplevel']).out.trim()

@@ -48,6 +48,7 @@ import {
   gitTry,
   loadConfigLayers,
   LockTimeout,
+  printUsage,
   taskStoreAt,
   type AgentInfo,
   type ProviderEntry,
@@ -58,13 +59,12 @@ import { flag, positionals } from './args.ts'
 import { isOrchestratorSession } from './watch-pulse.ts'
 
 
-function usage(): never {
-  console.error(`usage:
+function usage(exitCode = 2): never {
+  printUsage(`usage:
   bro self dogfood scenarios
   bro self dogfood run <name> [--backend <c>] [--analyst <c|same|none>] [--provider <p>] [--keep]
   bro self dogfood status [run-id] [--json]
-  bro self dogfood report <run-id>`)
-  process.exit(2)
+  bro self dogfood report <run-id>`, exitCode)
 }
 
 function die(msg: string): never {
@@ -828,7 +828,10 @@ function cmdReport(dir: string, argv: string[]): void {
 export async function runDogfoodCommand(argv: string[]): Promise<void> {
   const verb = argv[0]
   const rest = argv.slice(1)
-  if (verb === undefined || argv.includes('--help') || argv.includes('-h')) {
+  if (argv.includes('--help') || argv.includes('-h')) {
+    usage(0)
+  }
+  if (verb === undefined) {
     usage()
   }
   // scenarios resolve against the CURRENT checkout — a scenario still

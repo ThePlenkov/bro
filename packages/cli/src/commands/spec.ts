@@ -45,6 +45,7 @@ import {
   getTasks,
   isOwnClaim,
   loadConfig,
+  printUsage,
   sessionTaskClaims,
   specStore,
   tasksAsync,
@@ -218,8 +219,8 @@ export const sddConnector: Connector = {
 
 // --- commands -----------------------------------------------------------------
 
-function usage(): never {
-  console.error(`Usage: bro spec <command> [args…]
+function usage(exitCode = 2): never {
+  printUsage(`Usage: bro spec <command> [args…]
 
 Commands:
   check [id…]   spec coverage for in_progress beads (or the given ids);
@@ -240,8 +241,7 @@ Commands:
   init          bootstrap SDD: detect the project's tool (.specify/,
                 openspec/) and write connectors.specs + sdd.mode;
                 --tool overrides detection. On a bare repo scaffolds a
-                native specs/ root spec-of-specs.`)
-  process.exit(2)
+                native specs/ root spec-of-specs.`, exitCode)
 }
 
 function cmdNew(dir: string, id: string | undefined, parent: string | undefined): void {
@@ -547,6 +547,9 @@ export function runSpecCommand(argv: string[]): void {
   const dir = process.cwd()
   const { mode } = loadConfig(dir).sdd
   const [sub, ...rest] = argv
+  if (sub === '--help' || sub === '-h') {
+    usage(0)
+  }
   // own-key lookup — an inherited key like `toString` is not a
   // subcommand; bare `bro spec` dispatches to check
   const key = sub ?? 'check'

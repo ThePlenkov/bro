@@ -18,6 +18,7 @@ import {
   busStatus,
   busSubscribe,
   deliverSinks,
+  printUsage,
   startBusBroker,
   type BusEnvelope,
   type BusFilter,
@@ -49,8 +50,8 @@ const KNOWN_FLAGS: Record<string, ReadonlySet<string>> = {
 // a function declaration, not a const arrow — tsc only treats calls to
 // never-returning function declarations as terminating the control flow,
 // so the call sites below narrow correctly
-function usage(): never {
-  console.error(`usage: bro bus <serve|publish|subscribe|status> [options]
+function usage(exitCode = 2): never {
+  printUsage(`usage: bro bus <serve|publish|subscribe|status> [options]
 
   serve                       run the broker (SIGINT/SIGTERM to stop)
   publish                     publish one event and exit — connect, write, close
@@ -70,8 +71,7 @@ function usage(): never {
                               a keyless event does not pass
     --since N                 replay from seq N; a cursor outside the
                               broker's window reports a gap
-  status                      liveness and counters (exit 0 even when down)`)
-  process.exit(2)
+  status                      liveness and counters (exit 0 even when down)`, exitCode)
 }
 
 // Same reason as agents.ts's die(): declared so tsc narrows.
@@ -287,11 +287,11 @@ async function cmdStatus(rest: string[]): Promise<void> {
 
 export async function runBusCommand(argv: string[]): Promise<void> {
   const [cmd, ...rest] = argv
-  if (cmd === undefined || cmd === '--help' || cmd === '-h') {
-    usage()
+  if (cmd === '--help' || cmd === '-h') {
+    usage(0)
   }
   // own-key lookup — an inherited key like `toString` is not a subcommand
-  if (!Object.hasOwn(KNOWN_FLAGS, cmd)) {
+  if (cmd === undefined || !Object.hasOwn(KNOWN_FLAGS, cmd)) {
     usage()
   }
   // validate the verb's own input before touching the broker: a missing

@@ -5,7 +5,7 @@
  * SHAs intersected with local branches. The remote side is opt-in —
  * merge --delete-branch already covers PRs merged through the UI/CLI.
  */
-import { facadeAuth, git, gitTry, reviewHost } from '@broject/core'
+import { facadeAuth, git, gitTry, printUsage, reviewHost } from '@broject/core'
 import { loadBroConfig } from '../plugins.ts'
 import { positionals } from './args.ts'
 import { isAncestor } from './work.ts'
@@ -111,6 +111,9 @@ function remoteTips(): Map<string, string> {
 }
 
 export function runCleanupCommand(argv: string[]): void {
+  if (argv.includes('--help') || argv.includes('-h')) {
+    printUsage('usage: bro cleanup [--remote] [--dry-run]', 0)
+  }
   const pos = positionals(argv, new Set())
   if (pos.length > 0 || argv.some((a) => a.startsWith('--') && !['--remote', '--dry-run'].includes(a))) {
     console.error('usage: bro cleanup [--remote] [--dry-run]')

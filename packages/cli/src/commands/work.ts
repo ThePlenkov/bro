@@ -48,6 +48,7 @@ import {
   loadConfig,
   LockTimeout,
   pidAlive,
+  printUsage,
   readAgentRegistry,
   reviewHost,
   stackSection,
@@ -304,13 +305,12 @@ export function claimWorktree(
 
 const SLUG_RE = /^\w[\w.-]*$/
 
-function usage(): never {
-  console.error(`usage:
+function usage(exitCode = 2): never {
+  printUsage(`usage:
   bro work enter <slug> [--branch <name>] [--base <ref>] [--stack]
   bro work leave [slug] [--force] [--delete-branch]
   bro work list [--sizes]
-  bro work prune [--loop] [--dry-run]`)
-  process.exit(2)
+  bro work prune [--loop] [--dry-run]`, exitCode)
 }
 
 export function mainWorktree(): WorktreeInfo {
@@ -2042,6 +2042,9 @@ function releaseOrphanedRuns(cands: LitterCandidate[], ctx: LitterCtx): void {
 
 export function runWorkCommand(argv: string[]): void {
   const [sub, ...rest] = argv
+  if (sub === '--help' || sub === '-h') {
+    usage(0)
+  }
   switch (sub) {
     case 'enter':
       return cmdEnter(rest)

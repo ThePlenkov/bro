@@ -18,6 +18,7 @@ import {
   facade,
   facadeName,
   gitTry,
+  printUsage,
   taskStore,
   type TaskStore,
 } from '@broject/core'
@@ -114,6 +115,9 @@ function syncPull(root: string, cfg: ReturnType<typeof loadBroConfig>): void {
  *  a failed data-ref push or store sync is best-effort (offline must
  *  not block local work), not a throw. */
 export function runSyncCommand(argv: string[]): void {
+  if (argv.includes('--help') || argv.includes('-h')) {
+    printUsage('usage: bro sync [--pull]', 0)
+  }
   const pull = argv.includes('--pull')
   const root = dataRefRoot()
   if (root === null) {

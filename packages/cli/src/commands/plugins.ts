@@ -29,7 +29,7 @@ import {
 import { homedir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
-import { gitTry, type BroPlugin } from '@broject/core'
+import { gitTry, printUsage, type BroPlugin } from '@broject/core'
 import { positionals } from './args.ts'
 
 export type PluginScope = 'global' | 'local'
@@ -672,9 +672,9 @@ export function runPluginsCommand(argv: string[], plugins: BroPlugin[]): void {
       return
     }
     default:
-      console.error(
-        'usage: bro plugins [list [--json] | install <client> [--global] [--local] [--dry-run] | uninstall <client> [--global] [--local] [--dry-run] [--force]]'
+      printUsage(
+        'usage: bro plugins [list [--json] | install <client> [--global] [--local] [--dry-run] | uninstall <client> [--global] [--local] [--dry-run] [--force]]',
+        sub === '--help' || sub === '-h' ? 0 : 2
       )
-      process.exit(2)
   }
 }

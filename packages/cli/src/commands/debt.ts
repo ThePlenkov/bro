@@ -17,6 +17,7 @@ import {
   facadeAuth,
   gitTry,
   isBdCompatError,
+  printUsage,
   reviewHost,
   type MergedPrScan,
   type PrLabelOp,
@@ -79,8 +80,8 @@ function readOption(argv: string[], index: number): string | null {
   return value
 }
 
-function usage(): never {
-  console.error(`Usage: bro debt <command> [args…]
+function usage(exitCode = 2): never {
+  printUsage(`Usage: bro debt <command> [args…]
 
 Commands:
   collect [OWNER REPO] [filters]  Collect findings from unprocessed merged PRs
@@ -107,8 +108,7 @@ Commands:
   next [--json] [--claim]         Top open finding for an agent to fix
         [--area A] [--author U]   (--claim marks it claimed atomically)
   watch [collect flags]           Collect on an interval until Ctrl-C
-        [--interval SEC=300]`)
-  process.exit(1)
+        [--interval SEC=300]`, exitCode)
 }
 
 // --- collect ---------------------------------------------------------------
@@ -1405,7 +1405,7 @@ export async function runDebtCommand(argv: string[]): Promise<void> {
     return
   }
   if (cmd === '--help' || cmd === '-h') {
-    usage()
+    usage(0)
   }
   const handler = COMMANDS[cmd!]
   if (!handler) {
