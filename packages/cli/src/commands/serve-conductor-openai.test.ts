@@ -629,7 +629,10 @@ describe('output caps + loud input failures', () => {
         stop: ['MARK'],
         stream: true,
       }
-      await post('/v1/chat/completions', body)
+      // drain the first stream — post() resolves at headers; the resend
+      // must wait for the turn to record or it opens a second ACP turn
+      const r1 = await post('/v1/chat/completions', body)
+      await r1.text()
       // the resend replays the recorded view — the cut text, not the raw
       const r2 = await post('/v1/chat/completions', { ...body, stream: false })
       const b2 = await r2.json()
@@ -651,6 +654,68 @@ describe('output caps + loud input failures', () => {
       const body = await r.json()
       assert.equal(body.error.type, 'invalid_request_error')
       assert.match(body.error.message, /stop/)
+    } finally {
+      await close()
+    }
+  })
+
+  test('a function tool_choice without a name answers 400', async () => {
+    const fake = fakeAcpAgent({ replyText: 'ok' })
+    const { post, close } = await boot(fake)
+    try {
+      const r1 = await post('/v1/chat/completions', {
+        messages: [{ role: 'user', content: 'x' }],
+        tool_choice: { type: 'function', function: {} },
+      })
+      assert.equal(r1.status, 400)
+      assert.match(
+        ((await r1.json()) as { error: { message: string } }).error.message,
+        /tool_choice/
+      )
+      const r2 = await post('/v1/responses', {
+        input: 'x',
+        tool_choice: { type: 'function' },
+      })
+      assert.equal(r2.status, 400)
+      // and nothing reached the agent — no turn was paid for
+      assert.equal(fake.prompts.length, 0)
+    } finally {
+      await close()
+    }
+  })
+
+  test('a stop marker after a tool call keeps finish_reason tool_calls', async () => {
+    const fake = fakeAcpAgent({
+      replyText: '<tool_call>{"name":"ls","input":{"d":"/tmp"}}</tool_call>MARK',
+      configOptions: [MODEL_OPTION],
+    })
+    const { r, close } = await postChat(fake, {
+      messages: [{ role: 'user', content: 'x' }],
+      tools: [{ type: 'function', function: { name: 'ls', description: 'list', parameters: {} } }],
+      stop: 'MARK',
+    })
+    try {
+      const body = await r.json()
+      assert.equal(body.choices[0].message.tool_calls[0].function.name, 'ls')
+      assert.equal(body.choices[0].finish_reason, 'tool_calls')
+    } finally {
+      await close()
+    }
+  })
+
+  test('buffered stop picks the marker a stream would complete first', async () => {
+    const fake = fakeAcpAgent({ replyText: 'abcd tail', configOptions: [MODEL_OPTION] })
+    const { r, close } = await postChat(fake, {
+      messages: [{ role: 'user', content: 'x' }],
+      stop: ['abcd', 'bc'],
+    })
+    try {
+      assert.equal(r.status, 200)
+      const body = await r.json()
+      // chunked streaming hits 'bc' the moment 'abc' lands — the buffered
+      // cut must answer the same 'a', not the longer marker's ''
+      assert.equal(body.choices[0].message.content, 'a')
+      assert.equal(body.choices[0].finish_reason, 'stop')
     } finally {
       await close()
     }

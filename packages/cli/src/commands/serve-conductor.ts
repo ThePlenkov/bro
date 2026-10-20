@@ -248,7 +248,12 @@ function wireToolChoice(
   if (kind === 'required' || kind === 'any') return { type: 'any' }
   if (kind === 'none') return { type: 'none' }
   if (kind === 'function') {
-    return name === undefined ? { type: 'any' } : { type: 'tool', name }
+    // a named-function choice without the name is a malformed request —
+    // folding it to 'any' would let the agent call anything instead
+    if (typeof name !== 'string' || name === '') {
+      throw new Error("tool_choice: a 'function' choice requires the tool's name")
+    }
+    return { type: 'tool', name }
   }
   return undefined
 }
@@ -732,19 +737,26 @@ class StopFilter {
       return this.hit === undefined ? s : ''
     }
     const buf = this.tail + s
-    let best = -1
+    // the first marker to COMPLETE wins — the order a delta-fed stream
+    // hits them is end-index order, not start (a long marker starting
+    // earlier can finish after a short one nested inside it)
+    let at = -1
+    let end = -1
     let seq: string | undefined
     for (const q of this.seqs) {
       const i = buf.indexOf(q)
-      if (i !== -1 && (best === -1 || i < best)) {
-        best = i
+      if (i === -1) continue
+      const e = i + q.length
+      if (end === -1 || e < end) {
+        at = i
+        end = e
         seq = q
       }
     }
-    if (best !== -1) {
+    if (at !== -1) {
       this.hit = seq
       this.tail = ''
-      return buf.slice(0, best)
+      return buf.slice(0, at)
     }
     const hold = this.seqs.reduce((n, q) => Math.max(n, tagSuffix(buf, q)), 0)
     this.tail = buf.slice(buf.length - hold)
@@ -3069,10 +3081,12 @@ function chatDeliver(
   const blocks = capped.blocks
   // the cap reports the same canonical reason the acp's own ceiling
   // would — a resend replays the cut, not the uncut original; a stop
-  // hit is its own reason
-  const stopReason =
-    capped.capped ? 'max_tokens' : d.stops.hit !== undefined ? 'stop_sequence' : o.stopReason
-  const finish = capped.capped ? 'length' : d.stops.hit !== undefined ? 'stop' : o.finish
+  // hit is its own reason — unless the cut left a tool call behind:
+  // the client dispatches on tool_calls, 'stop' would strand the call
+  const hasCall = blocks.some((b) => b.type === 'tool_use')
+  const stopHit = d.stops.hit !== undefined && !hasCall
+  const stopReason = capped.capped ? 'max_tokens' : stopHit ? 'stop_sequence' : o.stopReason
+  const finish = capped.capped ? 'length' : stopHit ? 'stop' : o.finish
   const outTokens =
     capped.capped ? blocksTokens(blocks) : settled !== undefined ? estTokens(settled) : o.outTokens
   if (!o.replay && d.out.conv !== undefined) {
