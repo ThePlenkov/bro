@@ -3,6 +3,7 @@ import assert from 'node:assert/strict'
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import type { AuthMethod, SessionConfigOption } from '@agentclientprotocol/sdk'
+import { RequestError } from '@agentclientprotocol/sdk'
 import { JudgeUnavailable } from '@broject/core'
 import type { JudgeQuestion, ProviderEntry } from '@broject/core'
 import {
@@ -977,6 +978,73 @@ describe('acpSessionRetain — one session, many turns', () => {
     } finally {
       peer.close()
     }
+  })
+
+  test('a wrapped upstream error keeps its cause — the wire code survives', async () => {
+    const fake = fakeAcpAgent({ failPrompt: 'auth' })
+    const peer = await acpOpen('conductor:t', ENTRY, { acp: { peer: fake.app } }, deadline())
+    try {
+      const live = await acpSessionRetain(peer, ENTRY, { acp: { peer: fake.app } }, deadline())
+      await assert.rejects(live.prompt('x', deadline()), (e: unknown) => {
+        // AcpConfigError wraps the agent's auth_required — the brokered
+        // transport's asWireError unwraps by cause
+        for (let c: unknown = e; c instanceof Error; c = c.cause) {
+          if (c instanceof RequestError && c.code === -32000) return true
+        }
+        return false
+      })
+    } finally {
+      peer.close()
+    }
+  })
+
+  test('acpPooledTurn forwards a verbatim sessionRequest too', async () => {
+    const fake = fakeAcpAgent({ replyText: 'ok' })
+    const peer = await acpOpen('conductor:t', ENTRY, { acp: { peer: fake.app } }, deadline())
+    try {
+      await acpPooledTurn(peer, ENTRY, { acp: { peer: fake.app } }, 'p', deadline(), {
+        sessionRequest: { cwd: '/client/dir', mcpServers: [] },
+      })
+      // the field can't promise a verbatim open on one path and drop it
+      // on the other
+      assert.equal(fake.sessionRequests[0]?.cwd, '/client/dir')
+    } finally {
+      peer.close()
+    }
+  })
+
+  test('fs clientCapabilities without a bridge are refused, never advertised', async () => {
+    const fake = fakeAcpAgent()
+    await assert.rejects(
+      acpOpen(
+        'conductor:t',
+        ENTRY,
+        {
+          acp: {
+            peer: fake.app,
+            clientCapabilities: {
+              fs: { readTextFile: true, writeTextFile: false },
+              terminal: true,
+            },
+          },
+        },
+        deadline()
+      ),
+      /clientCapabilities advertises fs without acp\.bridge/
+    )
+    // terminal:true unbridged is legal — AcpTerminals serves it locally
+    const peer = await acpOpen(
+      'conductor:t',
+      ENTRY,
+      {
+        acp: {
+          peer: fake.app,
+          clientCapabilities: { fs: { readTextFile: false, writeTextFile: false }, terminal: true },
+        },
+      },
+      deadline()
+    )
+    peer.close()
   })
 })
 

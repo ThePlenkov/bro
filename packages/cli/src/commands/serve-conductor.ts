@@ -466,17 +466,6 @@ function conversationKey(req: IncomingMessage, body: MessagesRequest): string | 
   return `f:${fp}`
 }
 
-/** Drop a session handle without surfacing transport noise — the
- *  dispose is bookkeeping (eviction, teardown, failure cleanup), never
- *  an error path worth reporting. */
-function disposeQuiet(live: { dispose(): void }): void {
-  try {
-    live.dispose()
-  } catch {
-    // dead transport — the drop is the point
-  }
-}
-
 /** Retired sessions must be disposed — a leaked session holds agent
  *  context (and its cost) for nothing. TTL first, then oldest-out to
  *  the cap; the overflow count is captured BEFORE the loop so a live
@@ -505,6 +494,109 @@ function dropSessions(sessions: Map<string, ConvSession>): void {
     disposeQuiet(s.live)
   }
   sessions.clear()
+}
+
+/** Drop a session handle without surfacing transport noise — the
+ *  dispose is bookkeeping (eviction, teardown, failure cleanup), never
+ *  an error path worth reporting. Exported for the acp transport's
+ *  brokered-session map (spec bro-ymbq1). */
+export function disposeQuiet(live: { dispose(): void }): void {
+  try {
+    live.dispose()
+  } catch {
+    // dead transport — the drop is the point
+  }
+}
+
+/** One consumer's lazy pooled link — spawn-once, respawn-on-death,
+ *  close-on-process-exit. The conductor's `/v1/*` plane and the
+ *  `/api/v1/acp` transport each hold one (spec bro-ymbq1 §pool): the
+ *  machinery is shared, the LINK is not — a peer's initialize fixes
+ *  clientCapabilities for the connection's lifetime and the two
+ *  transports advertise opposite postures. */
+export interface AcpLinkPool {
+  /** The warm peer — spawned lazily, shared until its transport dies. */
+  link(parent?: OtelCtx): Promise<AcpPeer>
+  /** The resolved peer behind `link` — undefined before the first
+   *  spawn resolves and after death until the respawn. The
+   *  /api/v1/terminals plane reads the peer's registry through it
+   *  (bro-eua0d). */
+  live(): AcpPeer | undefined
+  /** `cb` runs when the pooled transport dies — the caller drops every
+   *  session the dead link carried before the next link() respawns. */
+  onDeath(cb: () => void): void
+}
+
+/** Every live pooled peer, process-wide. The pooled child outlives any
+ *  request — without a close on process exit serve shutdown orphans it
+ *  on a dead transport (the zombie acp worker of the original
+ *  incident). ONE registry + ONE 'exit' hook serve all pool instances:
+ *  a per-pool `process.once` leaked a listener per instantiation
+ *  (amazon-q #581); dead peers drop out as their abort fires. */
+const pooledPeers = new Set<AcpPeer>()
+let poolExitArmed = false
+
+export function acpLinkPool(
+  by: string,
+  entry: AcpEntry,
+  opts: ProviderWireOpts,
+  timeoutMs: number
+): AcpLinkPool {
+  let link: Promise<AcpPeer> | undefined
+  let live: AcpPeer | undefined
+  const deathHooks: Array<() => void> = []
+  // close() is sync, safe in an 'exit' handler; an in-flight link
+  // resolve is a ms-scale window.
+  if (!poolExitArmed) {
+    poolExitArmed = true
+    process.once('exit', () => {
+      for (const p of pooledPeers) {
+        try {
+          p.close()
+        } catch {
+          // the drop is the point — one stubborn peer can't block the rest
+        }
+      }
+    })
+  }
+  return {
+    onDeath: (cb) => deathHooks.push(cb),
+    live: () => live,
+    link(parent) {
+      if (link === undefined) {
+        otelEvent('acp.spawn', { backend: by })
+        link = acpOpen(by, entry, opts, Date.now() + timeoutMs, parent)
+        link.then(
+          (p) => {
+            live = p
+            pooledPeers.add(p)
+            // a peer aborted BEFORE the listener attaches never fires
+            // it — replay the dead state or the pool keeps serving a
+            // corpse and the session cleanup never runs (amazon-q #581)
+            let dead = false
+            const onDead = (): void => {
+              if (dead) {
+                return
+              }
+              dead = true
+              link = undefined
+              live = undefined
+              pooledPeers.delete(p)
+              for (const cb of deathHooks) {
+                cb()
+              }
+            }
+            p.signal.addEventListener('abort', onDead, { once: true })
+            if (p.signal.aborted) {
+              onDead()
+            }
+          },
+          () => (link = undefined)
+        )
+      }
+      return link
+    },
+  }
 }
 
 /** The turns a reused session has NOT seen: everything past the
@@ -3108,12 +3200,12 @@ export function conductorProxy(
   // initialize is paid once per listener; session/new per request is
   // cheap and concurrent sessions multiplex on the same connection.
   // A dead transport drops the link so the next request respawns.
-  let link: Promise<AcpPeer> | undefined
-  let live: AcpPeer | undefined
+  const pool = acpLinkPool(`conductor:${cfg.backend}`, cfg.entry, wireOpts, cfg.timeoutMs)
   // retained conversations — one acp session per client conversation
   // (x-bro-session pin or history fingerprint). Transport death kills
-  // every session it carried, so the abort listener drops the map.
+  // every session it carried, so the death hook drops the map.
   const sessions = new Map<string, ConvSession>()
+  pool.onDeath(() => dropSessions(sessions))
   // keys whose first session/new is in flight — a concurrent same-key
   // request must not open a twin (the loser would leak unmapped)
   const pendingOpens = new Set<string>()
@@ -3122,39 +3214,7 @@ export function conductorProxy(
   // previous_response_id a real predecessor: a session that moved
   // past it means the caller branched — rejected, not resumed.
   const chains = new Map<string, { key: string; consumed: number }>()
-  const getLink = (parent?: OtelCtx): Promise<AcpPeer> => {
-    if (link === undefined) {
-      otelEvent('acp.spawn', { backend: cfg.backend })
-      link = acpOpen(
-        `conductor:${cfg.backend}`,
-        cfg.entry,
-        wireOpts,
-        Date.now() + cfg.timeoutMs,
-        parent
-      )
-      link.then(
-        (p) => {
-          live = p
-          p.signal.addEventListener(
-            'abort',
-            () => {
-              link = undefined
-              live = undefined
-              dropSessions(sessions)
-            },
-            { once: true }
-          )
-        },
-        () => (link = undefined)
-      )
-    }
-    return link
-  }
-  // the pooled child outlives any request — without a close on process
-  // exit serve shutdown orphans it on a dead transport (the zombie
-  // acp worker of the original incident). close() is sync, safe in an
-  // 'exit' handler; an in-flight link resolve is a ms-scale window.
-  process.once('exit', () => live?.close())
+  const getLink = (parent?: OtelCtx): Promise<AcpPeer> => pool.link(parent)
   const wire: WireCtx = { cfg, opts: wireOpts, link: getLink, sessions, pendingOpens }
   const routes = new Map<
     string,
@@ -3178,7 +3238,7 @@ export function conductorProxy(
       }
       await route(req, res, httpSpan.ctx)
     },
-    { terminals: () => live?.terminals }
+    { terminals: () => pool.live()?.terminals }
   )
 }
 
