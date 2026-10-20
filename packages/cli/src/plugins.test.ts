@@ -36,8 +36,11 @@ describe('plugin registry', () => {
 
   test('every visible plugin is grouped or meta (specs/cli)', () => {
     // the blessed top-level row — operator/meta commands that stay
-    // ungrouped by design; everything else must claim a group
-    const META = new Set(['check', 'setup', 'doctor', 'plugins'])
+    // ungrouped by design; everything else must claim a group.
+    // `wait` is dep-plane, not thread-plane — a `mesh` membership
+    // would shadow the mesh host's own `wait` subcommand (the
+    // specs/cross-repo spelling is `bro wait`, top-level by design)
+    const META = new Set(['check', 'setup', 'doctor', 'plugins', 'wait'])
     const groups = pluginGroups()
     for (const p of PLUGINS) {
       if (p.hidden || p.external) continue
