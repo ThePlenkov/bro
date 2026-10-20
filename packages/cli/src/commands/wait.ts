@@ -448,7 +448,7 @@ async function watchLoop(
   // a --timeout past its elapsed budget
   const deadline = o.timeout > 0 ? performance.now() + o.timeout * 1000 : Number.POSITIVE_INFINITY
   const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms))
-  for (;;) {
+  while (performance.now() < deadline) {
     for (const w of watches) {
       if (w.settled !== undefined) {
         continue
@@ -468,15 +468,6 @@ async function watchLoop(
       emit(watches, { ...out, json: o.json })
       return
     }
-    if (performance.now() >= deadline) {
-      emit(watches, {
-        code: 4,
-        verdict: 'timeout',
-        json: o.json,
-        extra: { unsettled: watches.filter((w) => w.settled === undefined).map((w) => w.arg) },
-      })
-      return
-    }
     // cap the poll sleep at the remaining budget — a short --timeout
     // exits on its boundary, not one full interval late
     try {
@@ -486,6 +477,13 @@ async function watchLoop(
       // the stores and the deadline either way
     }
   }
+  // the bound held — every unsettled ref rides out for re-arming
+  emit(watches, {
+    code: 4,
+    verdict: 'timeout',
+    json: o.json,
+    extra: { unsettled: watches.filter((w) => w.settled === undefined).map((w) => w.arg) },
+  })
 }
 
 export async function runWaitCommand(argv: string[]): Promise<void> {
