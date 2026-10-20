@@ -717,7 +717,9 @@ describe('bro doctor', () => {
         config: {
           mesh: {
             peers: {
-              rigb: { rig: 'mesh://acme/rigb', remote: 'https://github.com/acme/rigb.git' },
+              // a github.com remote now derives the `github` plane —
+              // a non-github host keeps this a beads-remote census
+              rigb: { rig: 'mesh://acme/rigb', remote: 'https://gitlab.com/acme/rigb.git' },
               local: { rig: 'mesh://acme/local', remote: '/nonexistent' },
             },
           },

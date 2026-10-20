@@ -97,9 +97,22 @@ function resolveAlias(arg: string, peers: MeshPeer[]): ResolveResult | null {
   return localCheckoutTarget(byAlias, arg)
 }
 
-function resolveUri(arg: string): ResolveResult | null {
+function resolveUri(arg: string, peers: MeshPeer[]): ResolveResult | null {
   const uri = parseRigUri(arg)
-  return uri === null ? null : { target: { rig: formatRigUri(uri) } }
+  if (uri === null) {
+    return null
+  }
+  const rig = formatRigUri(uri)
+  // a URI naming a bound rig rides the binding's transport — same as
+  // addressing the peer by its alias (a github/wasteland peer routes
+  // to its plane, a local one delivers into the checkout)
+  const bound = peers.find((p) => p.rig === rig)
+  if (bound !== undefined) {
+    return bound.transport === 'local'
+      ? localCheckoutTarget(bound, arg)
+      : { target: { rig, peer: bound } }
+  }
+  return { target: { rig } }
 }
 
 function resolveExplicit(dir: string, arg: string): ResolveResult | null {
@@ -161,7 +174,7 @@ function resolveSibling(dir: string, arg: string): ResolveResult {
 export function resolveTarget(dir: string, arg: string, peers: MeshPeer[]): ResolveResult {
   return (
     resolveAlias(arg, peers) ??
-    resolveUri(arg) ??
+    resolveUri(arg, peers) ??
     resolveExplicit(dir, arg) ??
     resolveBasename(arg, peers) ??
     resolveSibling(dir, arg)
@@ -189,7 +202,10 @@ export function deliverRequest(
 }
 
 export interface MeshConfigFile {
-  mesh?: { rig?: string; peers?: Record<string, { rig: string; remote: string }> }
+  mesh?: {
+    rig?: string
+    peers?: Record<string, { rig: string; remote: string; transport?: string; login?: string }>
+  }
   [k: string]: unknown
 }
 

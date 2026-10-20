@@ -9,12 +9,14 @@
  * store holds, with provenance. `meshInbox` is the request filter on
  * top; thread tracking (thread.ts) consumes the scan directly.
  */
-import { taskStore } from '@broject/core'
+import { taskStore, gitTry } from '@broject/core'
 import { storeFor } from './post.ts'
 import { envelopeFromBead, type BeadLike, type MeshEnvelope } from './envelope.ts'
 import { existsSync } from 'node:fs'
 import { localCheckout, type MeshPeer, type MeshTransport } from './peers.ts'
 import { issueLabels, meshIssues, replicaDir, syncReplica } from './pull.ts'
+import { parseGithubRemote, scanGithub, selfLogin } from './github.ts'
+import { browseWanted, projectWanted } from './wasteland.ts'
 
 export interface PeerRecord {
   /** The peer alias the record arrived over — the provenance. */
@@ -27,6 +29,13 @@ export interface PeerRecord {
   transport: MeshTransport
   envelope: MeshEnvelope
   beadId: string
+  /** the authenticated account that authored the record — github
+   *  comments only; the binding's `login` is what it's checked
+   *  against (specs/cross-repo/bro-kim1e Trust). */
+  author?: string
+  /** the record's author matched no peer binding's `login` and is not
+   *  this account — surfaced flagged, never silently dropped */
+  unbound?: boolean
 }
 
 export interface InboundRequest extends PeerRecord {
@@ -136,30 +145,172 @@ function scanLocal(
   }
 }
 
+/** github: every mesh record across the request-labelled issues on
+ *  the peer's repo — the comment author IS the provenance material
+ *  (thread.ts checks it against the binding's `login`). There is no
+ *  replica to pull — every read is a live `gh` call, `pull:false`
+ *  changes nothing. */
+function scanGithubPeer(peer: MeshPeer, out: PeerRecord[], errors: string[]): void {
+  const scan = scanGithub({ remote: peer.remote })
+  for (const e of scan.errors) {
+    errors.push(`${peer.alias}: ${e}`)
+  }
+  for (const r of scan.records) {
+    out.push({
+      peer: peer.alias,
+      peerRig: peer.rig,
+      transport: 'github',
+      envelope: r.envelope,
+      beadId: r.issue,
+      author: r.author,
+    })
+  }
+}
+
+/** wasteland: the open board over the commons — a row projects to the
+ *  records its state implies (request + lifecycle). `selfRig` feeds
+ *  the projection's `to` — an open row is addressed to the reader. */
+function scanWastelandPeer(
+  peer: MeshPeer,
+  selfRig: string | undefined,
+  out: PeerRecord[],
+  errors: string[],
+): void {
+  const board = browseWanted(peer.remote)
+  if (board.error !== undefined) {
+    errors.push(`${peer.alias}: ${board.error}`)
+    return
+  }
+  for (const row of board.rows) {
+    const projected = projectWanted(row, selfRig)
+    for (const e of projected.errors) {
+      errors.push(`${peer.alias}: ${e}`)
+    }
+    for (const env of projected.envelopes) {
+      out.push({ peer: peer.alias, peerRig: peer.rig, transport: 'wasteland', envelope: env, beadId: row.id })
+    }
+  }
+}
+
+/** github's own-repo half: inbound requests are issues filed on MY
+ *  repo — nothing pulls them into a store, so the inbox scans the
+ *  repo the rig's origin names (when it is github-hosted). Author →
+ *  rig attribution runs through bound `login`s first, then this
+ *  account; anything left is surfaced flagged `unbound`. */
+/** One own-repo github record → the inbound row it earns. A bound
+ *  `login` attests its peer; this account attests us; anything else
+ *  lands flagged `unbound`. */
+function admitOwnGithubRecord(
+  r: { issue: string; author: string; envelope: PeerRecord['envelope'] },
+  ctx: { peers: MeshPeer[]; selfRig: string; selfLogin: string | undefined },
+  out: PeerRecord[],
+): void {
+  const bound = ctx.peers.find(
+    (p) => p.login !== undefined && p.login.toLowerCase() === r.author.toLowerCase(),
+  )
+  // verdicts land as comments on the request's own issue — they count
+  // only from an authenticated bound author, and they feed the
+  // terminal set so a verdicted github request leaves the inbox
+  const isVerdict = r.envelope.kind === 'accept' || r.envelope.kind === 'reject'
+  if (r.envelope.kind !== 'request' && !isVerdict) {
+    return
+  }
+  if (bound !== undefined) {
+    out.push({ peer: bound.alias, peerRig: bound.rig, transport: 'github', envelope: r.envelope, beadId: r.issue, author: r.author })
+    return
+  }
+  if (isVerdict) {
+    return
+  }
+  out.push(unboundGithubRow(r, ctx))
+}
+
+/** An unattributed request: ours when the authenticated author is this
+ *  account (github logins match case-insensitively), else flagged
+ *  `unbound` and attributed to the envelope's claimed origin. */
+function unboundGithubRow(
+  r: { issue: string; author: string; envelope: PeerRecord['envelope'] },
+  ctx: { selfRig: string; selfLogin: string | undefined },
+): PeerRecord {
+  const self =
+    ctx.selfLogin !== undefined && r.author.toLowerCase() === ctx.selfLogin.toLowerCase()
+  return {
+    peer: 'github',
+    peerRig: self ? ctx.selfRig : r.envelope.from,
+    transport: 'github',
+    envelope: r.envelope,
+    beadId: r.issue,
+    author: r.author,
+    unbound: self ? undefined : true,
+  }
+}
+
+function scanOwnGithub(
+  ctx: { dir: string; peers: MeshPeer[]; selfRig: string },
+  out: PeerRecord[],
+  errors: string[],
+): void {
+  const origin = gitTry(['-C', ctx.dir, 'remote', 'get-url', 'origin'])
+  const repo = origin.code === 0 ? parseGithubRemote({ remote: origin.out }) : null
+  if (repo === null) {
+    return
+  }
+  const scan = scanGithub({ remote: `https://github.com/${repo.owner}/${repo.repo}` })
+  for (const e of scan.errors) {
+    errors.push(`self: ${e}`)
+  }
+  const admission = { peers: ctx.peers, selfRig: ctx.selfRig, selfLogin: selfLogin().login }
+  for (const r of scan.records) {
+    admitOwnGithubRecord(r, admission, out)
+  }
+}
+
+/** One peer → its scan leg. Pull topology peers read their replica;
+ *  `pull:false` serves replica contents as they stand — an absent
+ *  replica is simply empty. */
+function scanPeer(
+  peer: MeshPeer,
+  ctx: { gitCommon: string; pull?: boolean; closedLocal?: boolean; selfRig?: string },
+  out: PeerRecord[],
+  errors: string[],
+): void {
+  if (peer.transport === 'local') {
+    scanLocal(peer, out, errors, ctx.closedLocal === true)
+    return
+  }
+  if (peer.transport === 'github') {
+    scanGithubPeer(peer, out, errors)
+    return
+  }
+  if (peer.transport === 'wasteland') {
+    scanWastelandPeer(peer, ctx.selfRig, out, errors)
+    return
+  }
+  if (ctx.pull === false) {
+    const dir = replicaDir(ctx.gitCommon, peer.alias)
+    if (existsSync(dir)) {
+      scanReplica(dir, peer, out, errors)
+    }
+    return
+  }
+  scanRemote(ctx.gitCommon, peer, out, errors)
+}
+
 /** Pull + scan every configured peer — every mesh envelope, every
  *  kind. `pull:false` serves replica contents as they stand.
  *  `closedLocal:true` admits closed rows on `local` peers — the
- *  thread path needs the anchor past the worker's `bd close`. */
+ *  thread path needs the anchor past the worker's `bd close`.
+ *  `selfRig` feeds the wasteland projection's `to`. */
 export function meshScan(
   dir: string,
   peers: MeshPeer[],
   gitCommon: string,
-  opts: { pull?: boolean; closedLocal?: boolean } = {},
+  opts: { pull?: boolean; closedLocal?: boolean; selfRig?: string } = {},
 ): ScanResult {
   const out: PeerRecord[] = []
   const errors: string[] = []
   for (const peer of peers) {
-    if (peer.transport === 'local') {
-      scanLocal(peer, out, errors, opts.closedLocal === true)
-    } else if (opts.pull === false) {
-      // serve the existing replica — an absent one is simply empty
-      const dir = replicaDir(gitCommon, peer.alias)
-      if (existsSync(dir)) {
-        scanReplica(dir, peer, out, errors)
-      }
-    } else {
-      scanRemote(gitCommon, peer, out, errors)
-    }
+    scanPeer(peer, { gitCommon, pull: opts.pull, closedLocal: opts.closedLocal, selfRig: opts.selfRig }, out, errors)
   }
   return { records: out, errors }
 }
@@ -170,19 +321,12 @@ export function meshScan(
  *  counts only when its from matches the peer binding — the same
  *  impersonation rule the thread reduction applies, so a forged
  *  accept can't quietly close somebody else's request. */
-export function meshInbox(
-  dir: string,
-  peers: MeshPeer[],
-  selfRig: string,
-  gitCommon: string,
-  opts: { pull?: boolean } = {},
-): InboxResult {
-  const { records, errors } = meshScan(dir, peers, gitCommon, opts)
-
-  // own-store pass — `bro request` delivers the bead straight into the
-  // recipient's store; no peer transport carries it, so a `from`
-  // matching no binding is surfaced flagged `unbound`, like mismatch
-  const bound = new Set(peers.map((p) => p.rig))
+/** Own-store pass — `bro request` delivers the bead straight into the
+ *  recipient's store; no peer transport carries it. Only INBOUND-shaped
+ *  envelopes count — requests delivered to me and verdicts addressed
+ *  back to me. My own outbound posts live in the same store but are
+ *  not inbox material — and must never feed the terminal set. */
+function scanOwnStore(dir: string, selfRig: string, records: PeerRecord[], errors: string[]): void {
   try {
     const rows = taskStore(dir).list<BeadLike & { status?: string }>({ limit: 0 })
     for (const row of rows) {
@@ -190,11 +334,6 @@ export function meshInbox(
         continue
       }
       const env = envelopeFromBead(row)
-      // own-store records are only INBOUND-shaped envelopes — requests
-      // delivered to me and verdicts addressed back to me. My own
-      // outbound posts (requests I posted to peers, results I shipped)
-      // live in the same store but are not inbox material — and must
-      // never feed the terminal set
       if (env?.to !== selfRig) {
         continue
       }
@@ -209,33 +348,68 @@ export function meshInbox(
   } catch (err) {
     errors.push(`self: store list failed — ${err instanceof Error ? err.message : String(err)}`)
   }
+}
 
+/** Verdict threads → the terminal set. own-store records carry
+ *  peerRig=env.from — `from === peerRig` is vacuous there, so an
+ *  unbound inbound verdict would close any same-id thread it names;
+ *  only peer-bound verdicts count. Thread ids are per-store — a
+ *  verdict only closes requests that arrived over the same binding. */
+function isBoundVerdict(r: PeerRecord): boolean {
+  if (r.peer === 'self' || r.envelope.from !== r.peerRig) {
+    return false
+  }
+  return r.envelope.kind === 'accept' || r.envelope.kind === 'reject'
+}
+
+function terminalThreads(records: PeerRecord[]): Set<string> {
   const terminal = new Set<string>()
   for (const r of records) {
-    if (
-      // own-store records carry peerRig=env.from — `from === peerRig`
-      // is vacuous there, so an unbound inbound verdict would close
-      // any same-id thread it names. Only peer-bound verdicts count.
-      r.peer !== 'self' &&
-      (r.envelope.kind === 'accept' || r.envelope.kind === 'reject') &&
-      r.envelope.from === r.peerRig
-    ) {
-      // thread ids are per-store — a verdict only closes requests that
-      // arrived over the same binding, never a same-id thread on a peer
+    if (isBoundVerdict(r)) {
       terminal.add(`${r.peer}:${r.envelope.thread}`)
     }
   }
-  const requests = records
-    .filter(
-      (r) =>
-        r.envelope.kind === 'request' &&
-        r.envelope.to === selfRig &&
-        !terminal.has(`${r.peer}:${r.envelope.thread}`),
-    )
-    .map((r) => ({
-      ...r,
-      mismatch: r.peer !== 'self' && r.envelope.from !== r.peerRig,
-      unbound: r.peer === 'self' && !bound.has(r.envelope.from) ? true : undefined,
-    }))
-  return { requests, errors }
+  return terminal
+}
+
+/** kind=request, addressed to me, and no bound verdict already
+ *  closed the thread on this binding. */
+function isPendingRequest(r: PeerRecord, selfRig: string, terminal: Set<string>): boolean {
+  if (r.envelope.kind !== 'request' || r.envelope.to !== selfRig) {
+    return false
+  }
+  return !terminal.has(`${r.peer}:${r.envelope.thread}`)
+}
+
+/** `mismatch` flags from≠binding (wasteland rows carry their own
+ *  poster — that shape is not impersonation); `unbound` flags
+ *  own-store rows matching no peer rig. */
+function inboundFlags(r: PeerRecord, bound: Set<string>): { mismatch: boolean; unbound?: boolean } {
+  const attested = r.peer !== 'self' && r.transport !== 'wasteland'
+  const unbound = r.unbound === true || (r.peer === 'self' && !bound.has(r.envelope.from))
+  return { mismatch: attested && r.envelope.from !== r.peerRig, unbound: unbound ? true : undefined }
+}
+
+/** Pending requests, verdict-filtered, with provenance flags. */
+function reduceInbox(records: PeerRecord[], selfRig: string, bound: Set<string>): InboundRequest[] {
+  const terminal = terminalThreads(records)
+  return records
+    .filter((r) => isPendingRequest(r, selfRig, terminal))
+    .map((r) => ({ ...r, ...inboundFlags(r, bound) }))
+}
+
+export function meshInbox(
+  dir: string,
+  peers: MeshPeer[],
+  ctx: { selfRig: string; gitCommon: string; pull?: boolean },
+): InboxResult {
+  const { selfRig, gitCommon } = ctx
+  const { records, errors } = meshScan(dir, peers, gitCommon, { pull: ctx.pull, selfRig })
+  // a `from` matching no binding is surfaced flagged `unbound`, like mismatch
+  const bound = new Set(peers.map((p) => p.rig))
+  scanOwnStore(dir, selfRig, records, errors)
+  // the github plane's inbound half — issues filed on MY repo; `to`
+  //  filtering below keeps only what was actually addressed to me
+  scanOwnGithub({ dir, peers, selfRig }, records, errors)
+  return { requests: reduceInbox(records, selfRig, bound), errors }
 }

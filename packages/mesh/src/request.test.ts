@@ -60,6 +60,36 @@ describe('resolveTarget', () => {
     }
   })
 
+  test('a mesh:// uri naming a bound peer rides its transport', () => {
+    const dir = root()
+    try {
+      const localDir = checkout(join(dir, 'near'), 'mesh://acme/near')
+      const ghPeer: MeshPeer = {
+        alias: 'gh',
+        rig: 'mesh://acme/far',
+        remote: 'https://github.com/acme/far',
+        transport: 'github',
+        login: 'acme-bot',
+      }
+      const localPeer: MeshPeer = {
+        alias: 'near',
+        rig: 'mesh://acme/near',
+        remote: localDir,
+        transport: 'local',
+      }
+      // remote-plane peer by URI — same resolution as naming the alias
+      const gh = resolveTarget(dir, 'mesh://ACME/Far', [ghPeer, localPeer])
+      assert.equal(gh.target?.rig, 'mesh://acme/far')
+      assert.equal(gh.target?.peer?.alias, 'gh')
+      // local peer by URI — delivers into the checkout, same as the alias
+      const near = resolveTarget(dir, 'mesh://acme/NEAR', [ghPeer, localPeer])
+      assert.equal(near.target?.checkout, localDir)
+      assert.equal(near.target?.peer?.alias, 'near')
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
   test('an explicit path delivers into the checkout', () => {
     const dir = root()
     try {

@@ -9,17 +9,26 @@ import { existsSync } from 'node:fs'
 import { join } from 'node:path'
 import { bd, bdAt, facade, gitCommonDir, loadConfig, taskStore, taskStoreAt } from '@broject/core'
 import {
+  acceptWanted,
+  claimWanted,
+  completeWanted,
   formatRigUri,
+  issueKey,
   localCheckout,
+  MESH_VERSION,
   meshInbox,
   meshThread,
+  parseGithubRemote,
   parsePeer,
   parseRigUri,
+  postComment,
   postEnvelope,
+  rejectWanted,
   selfRig,
   wireDep,
   syncReplica,
   withMeshConfig,
+  type MeshEnvelope,
   type MeshKind,
   type MeshRef,
   type MeshPeer,
@@ -31,11 +40,14 @@ Commands:
   me                      this rig's mesh:// URI — config pin or derived
                           from origin (exits 2 when unresolvable)
   peers list              configured peers (alias, rig, remote)
-  peers add <alias> <rig> <remote>
+  peers add <alias> <rig> <remote> [--login L]
                           bind a peer rig — a filesystem path is the
                           'local' binding (live store via bd -C), a git
                           URL is 'beads-remote' (dolt replica of
-                          refs/dolt/data)
+                          refs/dolt/data), a github repo url is 'github'
+                          (issue+comment transport; --login pins the
+                          account whose records prove the peer), a
+                          wl:// board is 'wasteland'
   peers remove <alias>    drop a peer binding
   pull                    refresh every beads-remote replica
   inbox [--json] [--no-pull]
@@ -64,13 +76,34 @@ function cmdPeersList(dir: string): void {
   }
   for (const alias of aliases) {
     const p = peers[alias]!
-    console.log(`${alias}\t${p.rig}\t${p.remote}`)
+    console.log(`${alias}\t${p.rig}\t${p.remote}${p.login !== undefined ? `\tlogin:${p.login}` : ''}`)
+  }
+}
+
+/** The binding write — refuses an occupied alias inside the same
+ *  config mutation so the check and the set stay atomic. */
+function bindPeer(dir: string, b: { alias: string; rig: string; remote: string; login?: string }): void {
+  try {
+    withMeshConfig(dir, (cfg) => {
+      const mesh = cfg.mesh ?? {}
+      const peers = { ...mesh.peers }
+      if (peers[b.alias] !== undefined) {
+        console.error(`error: peer "${b.alias}" already bound — remove it first`)
+        process.exit(2)
+      }
+      peers[b.alias] = { rig: b.rig, remote: b.remote, ...(b.login !== undefined ? { login: b.login } : {}) }
+      cfg.mesh = { ...mesh, peers }
+    })
+  } catch (e) {
+    console.error(`error: ${e instanceof Error ? e.message : e}`)
+    process.exit(2)
   }
 }
 
 function cmdPeersAdd(dir: string, args: string[]): void {
-  const [alias, rig, remote] = args
-  if (alias === undefined || rig === undefined || remote === undefined) {
+  const [alias = '', rig = '', remote = ''] = args
+  // positional — a non-empty <remote> implies the two before it
+  if (remote === '') {
     console.error('usage: bro mesh peers add <alias> <rig> <remote>')
     process.exit(2)
   }
@@ -82,21 +115,7 @@ function cmdPeersAdd(dir: string, args: string[]): void {
     console.error(`error: peer rig "${rig}" is not a mesh://<org>/<repo> uri`)
     process.exit(2)
   }
-  try {
-    withMeshConfig(dir, (cfg) => {
-      const mesh = cfg.mesh ?? {}
-      const peers = { ...mesh.peers }
-      if (peers[alias] !== undefined) {
-        console.error(`error: peer "${alias}" already bound — remove it first`)
-        process.exit(2)
-      }
-      peers[alias] = { rig, remote }
-      cfg.mesh = { ...mesh, peers }
-    })
-  } catch (e) {
-    console.error(`error: ${e instanceof Error ? e.message : e}`)
-    process.exit(2)
-  }
+  bindPeer(dir, { alias, rig, remote, login: flagValue(args, '--login') })
   console.log(`peer ${alias} → ${rig} (${remote})`)
 }
 
@@ -195,7 +214,7 @@ function cmdPull(dir: string): void {
   console.log(`pulled ${ok}/${peers.length} peer(s)`)
   const rig = selfRig(dir)
   if (rig !== null) {
-    announceInbox(dir, rig, meshInbox(dir, meshPeers(dir), rig, common, { pull: false }).requests.length)
+    announceInbox(dir, rig, meshInbox(dir, meshPeers(dir), { selfRig: rig, gitCommon: common, pull: false }).requests.length)
   }
 }
 
@@ -210,7 +229,9 @@ function cmdInbox(dir: string, args: string[]): void {
     console.error('this rig is unaddressed — set mesh.rig or a forge-url origin (see `bro mesh me`)')
     process.exit(2)
   }
-  const result = meshInbox(dir, meshPeers(dir), rig, common, {
+  const result = meshInbox(dir, meshPeers(dir), {
+    selfRig: rig,
+    gitCommon: common,
     pull: !args.includes('--no-pull'),
   })
   for (const e of result.errors) {
@@ -337,7 +358,7 @@ function cmdRequest(dir: string, args: string[]): void {
  *  The `to` a reply needs is always the other side's `from`. */
 function threadAnchor(dir: string, thread: string, pull: boolean) {
   const { rig, common, peers } = commonSetup(dir)
-  const state = meshThread(dir, peers, thread, common, { pull })
+  const state = meshThread(dir, peers, thread, { gitCommon: common, pull })
   if (state.request === undefined) {
     for (const e of state.errors) {
       console.error(`! ${e}`)
@@ -354,31 +375,38 @@ function threadAnchor(dir: string, thread: string, pull: boolean) {
  *  envelope's own `from` for own-store rows. Exits 2 with a precise
  *  reason when the verb is illegal for the thread's stage or this
  *  rig's role. */
-function lifecycleTarget(
-  kind: MeshKind,
-  rig: string,
-  state: ReturnType<typeof meshThread>,
+/** The role/stage checks share one context — kind, this rig, the
+ *  reduced thread state, and the anchor request the verb acts on. */
+interface LifecycleCtx {
+  kind: MeshKind
+  rig: string
+  state: ReturnType<typeof meshThread>
   thread: string
-): string {
-  const request = state.request!
-  if (state.stage === 'accepted' || state.stage === 'rejected') {
-    console.error(`error: thread "${thread}" is already ${state.stage}`)
+  request: MeshEnvelope
+}
+
+/** `claim`/`result` are the worker's verbs — only the addressed rig
+ *  may run them, and only at the matching stage. */
+function workerTarget(ctx: LifecycleCtx): string {
+  const { kind, rig, state, thread, request } = ctx
+  if (request.to !== rig) {
+    console.error(`error: thread "${thread}" is addressed to ${request.to}, not this rig (${rig})`)
     process.exit(2)
   }
-  const senderOf = (e: { id: string; from: string }): string => state.provenance[e.id] ?? e.from
-  const verb = kind === 'result' ? 'done' : kind
-  if (kind === 'claim' || kind === 'result') {
-    if (request.to !== rig) {
-      console.error(`error: thread "${thread}" is addressed to ${request.to}, not this rig (${rig})`)
-      process.exit(2)
-    }
-    const expected = kind === 'claim' ? 'posted' : 'claimed'
-    if (state.stage !== expected) {
-      console.error(`error: cannot ${verb} thread "${thread}" in stage "${state.stage}"`)
-      process.exit(2)
-    }
-    return senderOf(request)
+  const expected = kind === 'claim' ? 'posted' : 'claimed'
+  if (state.stage !== expected) {
+    const verb = kind === 'result' ? 'done' : kind
+    console.error(`error: cannot ${verb} thread "${thread}" in stage "${state.stage}"`)
+    process.exit(2)
   }
+  return state.provenance[request.id] ?? request.from
+}
+
+/** `accept`/`reject` are the requester's verbs — only the request's
+ *  sender may run them, and only once a result is submitted. */
+function requesterTarget(ctx: LifecycleCtx): string {
+  const { kind, rig, state, thread, request } = ctx
+  const senderOf = (e: { id: string; from: string }): string => state.provenance[e.id] ?? e.from
   if (senderOf(request) !== rig) {
     console.error(`error: only the requester (${senderOf(request)}) can ${kind} thread "${thread}"`)
     process.exit(2)
@@ -387,8 +415,31 @@ function lifecycleTarget(
     console.error(`error: nothing to ${kind} — no result submitted on thread "${thread}" yet`)
     process.exit(2)
   }
-  const worker = [...state.envelopes].reverse().find((e) => e.kind === 'result')!
+  const worker = [...state.envelopes].reverse().find((e) => e.kind === 'result')
+  if (worker === undefined) {
+    console.error(`error: no result record on thread "${thread}"`)
+    process.exit(2)
+  }
   return senderOf(worker)
+}
+
+function lifecycleTarget(
+  kind: MeshKind,
+  rig: string,
+  state: ReturnType<typeof meshThread>,
+  thread: string
+): string {
+  const request = state.request
+  if (request === undefined) {
+    console.error(`error: no request for thread "${thread}" — not in own store or any peer replica`)
+    process.exit(2)
+  }
+  if (state.stage === 'accepted' || state.stage === 'rejected') {
+    console.error(`error: thread "${thread}" is already ${state.stage}`)
+    process.exit(2)
+  }
+  const ctx: LifecycleCtx = { kind, rig, state, thread, request }
+  return kind === 'claim' || kind === 'result' ? workerTarget(ctx) : requesterTarget(ctx)
 }
 
 /** A foreign anchor's `.beads` pins over ambient BEADS_DIR — the
@@ -463,6 +514,186 @@ function bdAnchor(anchor: string, dir: string, args: string[]): void {
   bd(args, anchor)
 }
 
+/** Github side of the remote write — the envelope rides an issue
+ *  comment on the thread's issue; the bound peer is what the far
+ *  side provenance-checks against, so a missing binding warns. */
+function ghLifecycle(ctx: {
+  peers: MeshPeer[]
+  thread: string
+  repo: { owner: string; repo: string }
+  env: MeshEnvelope
+}): string | undefined {
+  const peer = ctx.peers.find((p) => {
+    const r = parseGithubRemote({ remote: p.remote })
+    return p.transport === 'github' && r?.owner === ctx.repo.owner && r?.repo === ctx.repo.repo
+  })
+  if (peer === undefined) {
+    console.error(
+      `! ${ctx.repo.owner}/${ctx.repo.repo}: no github peer binding — the far side can't provenance-check this record`
+    )
+  }
+  return postComment({ thread: ctx.thread, env: ctx.env }).error
+}
+
+/** Wasteland side of the remote write — the matching `wl` move on
+ *  the board the request's record arrived over (first binding only
+ *  as fallback). */
+function wlLifecycle(ctx: {
+  kind: MeshKind
+  wl: string
+  peers: MeshPeer[]
+  requestPeer?: MeshPeer
+  evidence?: MeshRef[]
+  body?: string
+}): string | undefined {
+  const wlPeer =
+    ctx.requestPeer?.transport === 'wasteland'
+      ? ctx.requestPeer
+      : ctx.peers.find((p) => p.transport === 'wasteland')
+  if (wlPeer === undefined) {
+    console.error('! no wasteland peer binding — writing to the default commons')
+  }
+  const t = { remote: wlPeer?.remote ?? '', id: ctx.wl }
+  if (ctx.kind === 'claim') {
+    return claimWanted(t).error
+  }
+  if (ctx.kind === 'result') {
+    return completeWanted({ ...t, evidence: ctx.evidence }).error
+  }
+  return ctx.kind === 'accept' ? acceptWanted(t).error : rejectWanted({ ...t, body: ctx.body }).error
+}
+
+/** The remote leg's plumbing in one record — callers build it once,
+ *  the transport branches read fields off it. */
+interface RemoteCtx {
+  dir: string
+  kind: MeshKind
+  rig: string
+  state: ReturnType<typeof meshThread>
+  thread: string
+  to: string
+  peers: MeshPeer[]
+  rest: string[]
+}
+
+/** The remote envelope — id/thread name the remote plane's record,
+ *  title/body/evidence inherit the verb's flags. */
+function remoteEnv(ctx: {
+  kind: MeshKind
+  rig: string
+  to: string
+  remoteThread: string
+  title?: string
+  body?: string
+  evidence?: MeshRef[]
+}): MeshEnvelope {
+  return {
+    v: MESH_VERSION,
+    id: `${ctx.remoteThread}#${ctx.kind}`,
+    kind: ctx.kind,
+    thread: ctx.remoteThread,
+    from: ctx.rig,
+    to: ctx.to,
+    title: `${ctx.kind === 'result' ? 'result' : ctx.kind}: ${ctx.title}`,
+    body: ctx.body ?? '',
+    refs: [],
+    terms: {},
+    evidence: ctx.evidence ?? [],
+  }
+}
+
+/** Everything a remote write needs — the caller's plumbing plus the
+ *  verb flags and the envelope it just built. */
+interface RemoteWrite {
+  ctx: RemoteCtx
+  plane: { gh?: string; wl?: string }
+  env: MeshEnvelope
+  evidence?: MeshRef[]
+  body?: string
+}
+
+/** The transport write — github takes precedence when the thread has
+ *  both planes. Exits 1 on a remote error, before any mirror. */
+function writeRemote(w: RemoteWrite): void {
+  const { ctx, plane, env, evidence, body } = w
+  const ghRepo = plane.gh === undefined ? null : issueKey({ thread: plane.gh }).repo
+  let remoteErr: string | undefined
+  if (plane.gh !== undefined && ghRepo !== null) {
+    remoteErr = ghLifecycle({ peers: ctx.peers, thread: plane.gh, repo: ghRepo, env })
+  } else if (plane.wl !== undefined) {
+    remoteErr = wlLifecycle({
+      kind: ctx.kind,
+      wl: plane.wl,
+      peers: ctx.peers,
+      requestPeer: ctx.state.requestPeer,
+      evidence,
+      body,
+    })
+  }
+  if (remoteErr !== undefined) {
+    console.error(`error: ${remoteErr}`)
+    process.exit(1)
+  }
+}
+
+/** Own-store mirror of the remote write — the beads-side alias
+ *  anchors it into the same reduction. */
+function mirrorRemote(w: RemoteWrite): void {
+  const { ctx, plane, env, evidence, body } = w
+  const anchorThread = ctx.state.threads.find((t) => t !== plane.gh && t !== plane.wl) ?? ctx.thread
+  const mirror = postEnvelope({
+    dir: ctx.dir,
+    kind: ctx.kind,
+    thread: anchorThread,
+    from: ctx.rig,
+    to: ctx.to,
+    title: env.title,
+    body,
+    evidence,
+  })
+  if (mirror.error !== undefined) {
+    console.error(`! remote record posted but the mirror bead failed: ${mirror.error}`)
+  }
+  console.log(
+    `${ctx.kind} → ${env.thread}${mirror.id !== undefined ? ` (mirror ${mirror.id})` : ''}`
+  )
+}
+
+function postRemote(ctx: RemoteCtx, plane: { gh?: string; wl?: string }): void {
+  const { kind, rig, state, to, rest } = ctx
+  const evidence = kind === 'result' ? parseRefs(rest, '--ev') : undefined
+  const body = flagValue(rest, '--body')
+  const env = remoteEnv({
+    kind,
+    rig,
+    to,
+    remoteThread: plane.gh ?? plane.wl ?? '',
+    title: state.request?.title,
+    body,
+    evidence,
+  })
+  writeRemote({ ctx, plane, env, evidence, body })
+  mirrorRemote({ ctx, plane, env, evidence, body })
+}
+
+/** Remote planes (specs/cross-repo/bro-kim1e) — the record lands on
+ *  the transport's own channel: an issue comment carrying the
+ *  envelope on github, the matching `wl` move on wasteland. A mirror
+ *  bead still lands in OUR store so the local reduction keeps a
+ *  complete record of what we wrote. Returns false when the thread
+ *  anchors on no remote plane — the caller runs the store leg. */
+function remoteLifecycle(ctx: RemoteCtx): boolean {
+  const plane = {
+    gh: ctx.state.threads.find((t) => issueKey({ thread: t }).repo !== null),
+    wl: ctx.state.threads.find((t) => /^w-\w+$/i.test(t)),
+  }
+  if (plane.gh === undefined && plane.wl === undefined) {
+    return false
+  }
+  postRemote(ctx, plane)
+  return true
+}
+
 function cmdLifecycle(dir: string, kind: MeshKind, args: string[]): void {
   const [thread, ...rest] = args
   if (thread === undefined) {
@@ -470,8 +701,17 @@ function cmdLifecycle(dir: string, kind: MeshKind, args: string[]): void {
     process.exit(2)
   }
   const { rig, state } = threadAnchor(dir, thread, !args.includes('--no-pull'))
-  const request = state.request!
+  const peers = meshPeers(dir)
+  const request = state.request
+  if (request === undefined) {
+    console.error(`error: no request for thread "${thread}" — not in own store or any peer replica`)
+    process.exit(2)
+  }
   const to = lifecycleTarget(kind, rig, state, thread)
+  if (remoteLifecycle({ dir, kind, rig, state, thread, to, peers, rest })) {
+    return
+  }
+
   const anchor = resolveAnchor(dir, state, thread)
 
   const posted = postEnvelope({
@@ -503,7 +743,7 @@ function cmdWait(dir: string, args: string[]): void {
     process.exit(2)
   }
   const { common, peers } = commonSetup(dir)
-  const state = meshThread(dir, peers, thread, common, { pull: !args.includes('--no-pull') })
+  const state = meshThread(dir, peers, thread, { gitCommon: common, pull: !args.includes('--no-pull') })
   for (const e of state.errors) {
     console.error(`! ${e}`)
   }
