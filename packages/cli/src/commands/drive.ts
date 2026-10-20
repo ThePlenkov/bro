@@ -2402,7 +2402,7 @@ async function driveOnce(ctx: Ctx): Promise<void> {
       verdict: 'error',
       detail: errText(err),
     }))
-    await signalForeignPush(ctx, pr, ctx.rev.prLink(ctx.repo, pr), work.heads.get(pr))
+    await signalForeignPush(ctx, pr, ctx.rev.prLink(ctx.repo, pr), work.heads.get(pr)) // NOSONAR — the pass settles one PR before judging the next
     // the human edge: unmovable verdicts and silent-reviewer alerts —
     // dedup keys make a repeated pass quiet, not absent
     if (ALERT_VERDICTS.has(v.verdict)) {
