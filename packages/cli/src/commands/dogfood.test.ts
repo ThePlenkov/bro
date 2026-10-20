@@ -496,7 +496,9 @@ describe('committed dogfood scenario tree', () => {
   })
 
   test('every claude-* .files carries claude client wiring', () => {
-    for (const s of listScenarios(repoRoot).filter((s) => s.startsWith('claude-'))) {
+    const claude = listScenarios(repoRoot).filter((s) => s.startsWith('claude-'))
+    assert.ok(claude.length > 0, 'no claude-* scenarios committed')
+    for (const s of claude) {
       const files = join(dogfoodDir, `${s}.files`)
       assert.ok(existsSync(files), `${s}.files missing`)
       const settings = JSON.parse(
@@ -514,7 +516,9 @@ describe('committed dogfood scenario tree', () => {
   })
 
   test('every codex-* .files carries codex client wiring', () => {
-    for (const s of listScenarios(repoRoot).filter((s) => s.startsWith('codex-'))) {
+    const codex = listScenarios(repoRoot).filter((s) => s.startsWith('codex-'))
+    assert.ok(codex.length > 0, 'no codex-* scenarios committed')
+    for (const s of codex) {
       const files = join(dogfoodDir, `${s}.files`)
       assert.ok(existsSync(files), `${s}.files missing`)
       const toml = readFileSync(join(files, '.codex', 'config.toml'), 'utf8')
@@ -536,7 +540,9 @@ describe('committed dogfood scenario tree', () => {
   })
 
   test('every scenario asserts its own dialect on the wire', () => {
-    for (const s of listScenarios(repoRoot)) {
+    const scenarios = listScenarios(repoRoot)
+    assert.ok(scenarios.length > 0, 'no scenarios committed')
+    for (const s of scenarios) {
       const text = readFileSync(join(dogfoodDir, `${s}.md`), 'utf8')
       if (s === 'core-workflow') {
         // the workflow scenario is client-agnostic — no payload, no
