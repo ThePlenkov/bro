@@ -92,6 +92,9 @@ describe('bro provider e2e', () => {
 
     const env = {
       XDG_STATE_HOME: stateDir,
+      // isolate the global config layer — a dev machine's real
+      // ~/.config/bro (serve.backend etc.) must not pick the conductor
+      XDG_CONFIG_HOME: tmpDir('bro-provider-e2e-config-'),
       BRO_PROVIDER_API_KEY: 'sk-e2e',
       BRO_PROVIDER_UPSTREAM: upstreamUrl,
     }
@@ -152,7 +155,7 @@ describe('bro provider e2e', () => {
       const block = runCli(['provider', 'env', '--json'], { cwd, env })
       assert.deepEqual(JSON.parse(block.stdout), {
         env: { ANTHROPIC_BASE_URL: url },
-        apiKeyHelper: 'bro provider token',
+        apiKeyHelper: 'bro provider ensure',
       })
 
       // a second listener refuses while the first is live
@@ -163,15 +166,173 @@ describe('bro provider e2e', () => {
       await stop(child)
       // shutdown retracts the discovery file
       assert.equal(existsSync(stateFile), false)
-      // and with nothing live, token fails closed — never a wrong key
-      const dead = runCli(['provider', 'token'], { cwd, env })
+      // a dead listener self-heals through token — but a REMOTE base pin
+      // can never be spawned locally: fail closed, never a wrong key
+      const dead = runCli(['provider', 'token'], {
+        cwd,
+        env: { ...env, ANTHROPIC_BASE_URL: 'https://api.anthropic.com' },
+      })
       assert.equal(dead.code, 1)
-      assert.match(dead.stderr, /no live provider/)
+      assert.match(dead.stderr, /no live bro provider listener/)
+      // a portless loopback pin names no listener either — the implied
+      // 80/443 would be a privileged bind, so it fails closed the same
+      const portless = runCli(['provider', 'token'], {
+        cwd,
+        env: { ...env, ANTHROPIC_BASE_URL: 'http://127.0.0.1' },
+      })
+      assert.equal(portless.code, 1)
+      assert.match(portless.stderr, /no live bro provider listener/)
+      // https, ipv6, and path-carrying pins name endpoints a plain-HTTP
+      // IPv4 listener can never serve — the helper fails closed rather
+      // than spawn a listener and print a token for an unusable URL
+      for (const bad of [
+        'https://127.0.0.1:4545',
+        'http://[::1]:4545',
+        'http://127.0.0.1:4545/custom',
+      ]) {
+        const r = runCli(['provider', 'token'], {
+          cwd,
+          env: { ...env, ANTHROPIC_BASE_URL: bad },
+        })
+        assert.equal(r.code, 1, bad)
+        assert.match(r.stderr, /no live bro provider listener/, bad)
+      }
     } finally {
       if (child.exitCode === null && !child.killed) {
         child.kill('SIGKILL')
       }
       upstream.close()
+    }
+  })
+
+  test('ensure self-starts the host listener — no dedicated serve step', async () => {
+    const stateDir = tmpDir('bro-provider-ensure-state-')
+    const cwd = tmpDir('bro-provider-ensure-cwd-')
+    // grab a free port, release it for the spawned listener
+    const probe = createServer()
+    await new Promise<void>((r) => probe.listen(0, '127.0.0.1', r))
+    const port = (probe.address() as AddressInfo).port
+    await new Promise<void>((r) => probe.close(() => r()))
+
+    const env = {
+      XDG_STATE_HOME: stateDir,
+      XDG_CONFIG_HOME: tmpDir('bro-provider-ensure-config-'),
+      BRO_PROVIDER_API_KEY: 'sk-e2e',
+      // never contacted — ensure proves the listener, not the proxy
+      BRO_PROVIDER_UPSTREAM: 'http://127.0.0.1:1',
+    }
+    const r = runCli(['provider', 'ensure', '--port', String(port)], { cwd, env })
+    // the detached listener outlives runCli — a failed assertion before
+    // st exists must still kill it, so the recorded pid is re-read in
+    // the finally rather than trusted from the happy-path parse
+    let st: { pid: number; url: string; token: string } | undefined
+    try {
+      assert.equal(r.code, 0, r.stderr)
+      const token = r.stdout.trim()
+      assert.match(token, /^[0-9a-f]{64}$/)
+      st = JSON.parse(readFileSync(join(stateDir, 'bro', 'provider.json'), 'utf8')) as {
+        pid: number
+        url: string
+        token: string
+      }
+      assert.equal(st.url, `http://127.0.0.1:${port}`)
+      assert.equal(st.token, token)
+      assert.equal((await fetch(`${st.url}/api/v1/health`)).status, 200)
+      // the second ensure is a resolve — same token, no respawn
+      const again = runCli(['provider', 'ensure', '--port', String(port)], { cwd, env })
+      assert.equal(again.stdout.trim(), token)
+      // and a pinned token resolves to the self-started listener
+      const tok = runCli(['provider', 'token'], {
+        cwd,
+        env: { ...env, ANTHROPIC_BASE_URL: st.url },
+      })
+      assert.equal(tok.stdout.trim(), token)
+    } finally {
+      let pid = st?.pid
+      try {
+        pid ??= (
+          JSON.parse(readFileSync(join(stateDir, 'bro', 'provider.json'), 'utf8')) as {
+            pid: number
+          }
+        ).pid
+      } catch {
+        /* no state file */
+      }
+      if (pid !== undefined) {
+        try {
+          process.kill(pid, 'SIGTERM')
+        } catch {
+          /* already gone */
+        }
+        await new Promise((r) => setTimeout(r, 500))
+      }
+    }
+  })
+
+  test('a stale recorded pid is not live — ensure re-probes and re-spawns', async () => {
+    const stateDir = tmpDir('bro-provider-stale-state-')
+    const cwd = tmpDir('bro-provider-stale-cwd-')
+    mkdirSync(join(stateDir, 'bro'), { recursive: true })
+    // provider.json surviving an unclean shutdown: the pid is alive
+    // (this process stands in for a recycled pid) but nothing listens —
+    // pidAlive alone would accept it and hand out the dead token
+    writeFileSync(
+      join(stateDir, 'bro', 'provider.json'),
+      JSON.stringify({
+        pid: process.pid,
+        url: 'http://127.0.0.1:1',
+        dir: cwd,
+        startedAt: 't',
+        token: 'stale-tok',
+      }),
+      { mode: 0o600 }
+    )
+    // grab a free port, release it for the spawned listener
+    const probe = createServer()
+    await new Promise<void>((r) => probe.listen(0, '127.0.0.1', r))
+    const port = (probe.address() as AddressInfo).port
+    await new Promise<void>((r) => probe.close(() => r()))
+    const env = {
+      XDG_STATE_HOME: stateDir,
+      XDG_CONFIG_HOME: tmpDir('bro-provider-stale-config-'),
+      BRO_PROVIDER_API_KEY: 'sk-e2e',
+      BRO_PROVIDER_UPSTREAM: 'http://127.0.0.1:1',
+    }
+    let st: { pid: number; url: string; token: string } | undefined
+    try {
+      const r = runCli(['provider', 'ensure', '--port', String(port)], { cwd, env })
+      assert.equal(r.code, 0, r.stderr)
+      // the stale token must not come back — a fresh listener spawned
+      st = JSON.parse(readFileSync(join(stateDir, 'bro', 'provider.json'), 'utf8')) as {
+        pid: number
+        url: string
+        token: string
+      }
+      assert.equal(st.url, `http://127.0.0.1:${port}`)
+      assert.equal(st.token, r.stdout.trim())
+      assert.notEqual(st.pid, process.pid)
+    } finally {
+      // the respawned listener is detached — stop it via the recorded
+      // pid; the pre-spawn stale record names THIS test's pid, which
+      // must never be signaled
+      let pid = st?.pid
+      try {
+        pid ??= (
+          JSON.parse(readFileSync(join(stateDir, 'bro', 'provider.json'), 'utf8')) as {
+            pid: number
+          }
+        ).pid
+      } catch {
+        /* no state file */
+      }
+      if (pid !== undefined && pid !== process.pid) {
+        try {
+          process.kill(pid, 'SIGTERM')
+        } catch {
+          /* already gone */
+        }
+        await new Promise((r) => setTimeout(r, 500))
+      }
     }
   })
 
@@ -195,7 +356,10 @@ describe('bro provider e2e', () => {
         })
       )
       // no host listener live — the repo serve is the pick
-      const env = { XDG_STATE_HOME: stateDir }
+      const env = {
+        XDG_STATE_HOME: stateDir,
+        XDG_CONFIG_HOME: tmpDir('bro-provider-repo-config-'),
+      }
       const tok = runCli(['provider', 'token'], { cwd: main, env })
       assert.equal(tok.code, 0)
       assert.equal(tok.stdout.trim(), 'repo-tok')
@@ -205,10 +369,10 @@ describe('bro provider e2e', () => {
         env: { ...env, ANTHROPIC_BASE_URL: 'http://127.0.0.1:9100' },
       })
       assert.equal(pinned.stdout.trim(), 'repo-tok')
-      // …and names no listener → fail closed
+      // …and a REMOTE pin names no spawnable listener → fail closed
       const miss = runCli(['provider', 'token'], {
         cwd: main,
-        env: { ...env, ANTHROPIC_BASE_URL: 'http://127.0.0.1:6666' },
+        env: { ...env, ANTHROPIC_BASE_URL: 'https://api.anthropic.com' },
       })
       assert.equal(miss.code, 1)
       assert.match(miss.stderr, /no live bro provider listener/)
@@ -217,14 +381,17 @@ describe('bro provider e2e', () => {
     }
   })
 
-  test('serve refuses to start with no upstream credential', () => {
+  test('serve refuses to start with nothing configured to serve', () => {
     const stateDir = tmpDir('bro-provider-nokey-')
     const cwd = tmpDir('bro-provider-nokey-cwd-')
     const r = runCli(['provider', 'serve', '--port', '0'], {
       cwd,
-      env: { XDG_STATE_HOME: stateDir },
+      env: {
+        XDG_STATE_HOME: stateDir,
+        XDG_CONFIG_HOME: tmpDir('bro-provider-nokey-config-'),
+      },
     })
     assert.equal(r.code, 1)
-    assert.match(r.stderr, /no upstream credential/)
+    assert.match(r.stderr, /nothing to serve/)
   })
 })

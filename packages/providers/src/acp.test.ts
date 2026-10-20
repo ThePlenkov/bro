@@ -2,6 +2,7 @@ import { describe, test } from 'node:test'
 import assert from 'node:assert/strict'
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
+import { agent } from '@agentclientprotocol/sdk'
 import type { AuthMethod, SessionConfigOption } from '@agentclientprotocol/sdk'
 import { JudgeUnavailable } from '@broject/core'
 import type { JudgeQuestion, ProviderEntry } from '@broject/core'
@@ -617,6 +618,42 @@ await agent({ name: 'fake' })
         deadline()
       ),
       /cannot exec acp command/
+    )
+  })
+})
+
+describe('acpOpen teardown — the pool abort seam', () => {
+  test('an abort cancels a pending handshake — no wait for the deadline', async () => {
+    const ctl = new AbortController()
+    // an agent whose initialize never answers — the open settles only
+    // through the signal, never the reply
+    const hanging = agent({ name: 'hang' }).onRequest(
+      'initialize',
+      () => new Promise<never>(() => {})
+    )
+    const t0 = Date.now()
+    const pending = acpOpen(
+      'conductor:hang',
+      { type: 'acp', command: 'x' },
+      { acp: { peer: hanging, signal: ctl.signal } },
+      deadline(30_000)
+    )
+    ctl.abort()
+    await assert.rejects(pending, /closed|cancelled/i)
+    assert.ok(Date.now() - t0 < 10_000, 'the open waited out its deadline')
+  })
+
+  test('an already-aborted signal refuses the open outright', async () => {
+    const ctl = new AbortController()
+    ctl.abort()
+    await assert.rejects(
+      acpOpen(
+        'conductor:x',
+        { type: 'acp', command: 'x' },
+        { acp: { peer: fakeAcpAgent().app, signal: ctl.signal } },
+        deadline()
+      ),
+      /cancelled/
     )
   })
 })

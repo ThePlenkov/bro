@@ -119,13 +119,20 @@ function resolveCatalog(
 export function conductorConfig(
   env: NodeJS.ProcessEnv,
   dir: string,
-  providers?: Record<string, ProviderEntry>
+  providers?: Record<string, ProviderEntry>,
+  /** 'global' restricts the file scan to the global layer — the host
+   *  gateway's backend must never be re-rooted by a checkout enclosing
+   *  the state dir (dotfiles $HOME, XDG_STATE_HOME inside a repo). */
+  scope?: 'global'
 ): ConductorConfig | undefined {
-  const cfg = loadConfig(dir)
+  const cfg = loadConfig(dir, {}, scope === 'global' ? ['global'] : undefined)
   // env pins the backend explicitly; a repo whose conductor is not
   // ambient (an apiKeyHelper-spawned serve never sees settings.env)
-  // carries it as serve.backend — env still wins over config
-  const backend = resolveBackend(env, cfg.serve.backend)
+  // carries it as serve.backend — env still wins over config. An
+  // injected providers registry owns the whole name space — the file
+  // layer's serve.backend must not leak a name it does not define.
+  const configured = providers === undefined ? cfg.serve.backend : undefined
+  const backend = resolveBackend(env, configured)
   if (backend === undefined) {
     return undefined
   }
@@ -1096,6 +1103,25 @@ function openaiTooLarge(req: IncomingMessage, res: ServerResponse): void {
   res.setHeader('connection', 'close')
   openaiError(res, 413, 'invalid_request_error', 'request body exceeds 32MB')
   res.once('finish', () => req.destroy())
+}
+
+/** Pooled-peer close hooks share ONE process exit listener — a
+ *  `process.once('exit', …)` per conductorProxy() call stacks listeners
+ *  in any process that builds several proxies (tests hit
+ *  MaxListenersExceeded at ten). dispose() untracks its own hook. */
+const pooledPeerCloses = new Set<() => void>()
+let pooledExitArmed = false
+function trackPooledPeerClose(close: () => void): () => void {
+  pooledPeerCloses.add(close)
+  if (!pooledExitArmed) {
+    pooledExitArmed = true
+    process.once('exit', () => {
+      for (const close of pooledPeerCloses) close()
+    })
+  }
+  return () => {
+    pooledPeerCloses.delete(close)
+  }
 }
 
 const AVAIL = /unavailable|timeout|timed out/i
@@ -3081,10 +3107,15 @@ async function models(
 /** The conductor's `(req, res)` handler PLUS the live link's terminal
  *  registry — the /api/v1/terminals surface reads through it
  *  (bro-eua0d). `terminals()` is undefined until the first link is
- *  up and stays undefined on a dead transport until the respawn. */
+ *  up and stays undefined on a dead transport until the respawn.
+ *  `dispose()` tears the pooled acp transport down synchronously: call
+ *  it on server shutdown — the process-'exit' backstop cannot fire
+ *  while the child's handles pin the loop, so SIGTERM alone strands a
+ *  live devin session. */
 export interface ConductorProxy {
   (req: IncomingMessage, res: ServerResponse): Promise<void>
   terminals(): AcpTerminals | undefined
+  dispose(): void
 }
 
 /** `(req, res)` handler for `/v1/*` — the conductor's answer when
@@ -3094,10 +3125,14 @@ export function conductorProxy(
   cfg: ConductorConfig,
   opts: ProviderWireOpts = {}
 ): ConductorProxy {
+  // teardown handle for a link still mid-handshake — dispose aborts it
+  // (an aborted signal only reaches acpOpen; the request-level seams
+  // ignore it), since a pending init holds no `live` peer to close
+  const poolAbort = new AbortController()
   const wireOpts: ProviderWireOpts = {
     ...opts,
     model: opts.model ?? cfg.model,
-    acp: { cwd: cfg.cwd, ...opts.acp },
+    acp: { cwd: cfg.cwd, signal: poolAbort.signal, ...opts.acp },
   }
   // the store-side evidence trail — every conductor.* event lands as a
   // JSONL row next to serve.json so a dogfood analyst can read routing,
@@ -3110,6 +3145,9 @@ export function conductorProxy(
   // A dead transport drops the link so the next request respawns.
   let link: Promise<AcpPeer> | undefined
   let live: AcpPeer | undefined
+  // a link resolving after dispose must not resurrect the pool — the
+  // peer is killed on sight instead of being retained unowned
+  let disposed = false
   // retained conversations — one acp session per client conversation
   // (x-bro-session pin or history fingerprint). Transport death kills
   // every session it carried, so the abort listener drops the map.
@@ -3134,6 +3172,10 @@ export function conductorProxy(
       )
       link.then(
         (p) => {
+          if (disposed) {
+            p.close()
+            return
+          }
           live = p
           p.signal.addEventListener(
             'abort',
@@ -3154,31 +3196,51 @@ export function conductorProxy(
   // exit serve shutdown orphans it on a dead transport (the zombie
   // acp worker of the original incident). close() is sync, safe in an
   // 'exit' handler; an in-flight link resolve is a ms-scale window.
-  process.once('exit', () => live?.close())
+  // One shared exit hook for every proxy — see trackPooledPeerClose.
+  const untrackPeerClose = trackPooledPeerClose(() => live?.close())
   const wire: WireCtx = { cfg, opts: wireOpts, link: getLink, sessions, pendingOpens }
-  const routes = new Map<
-    string,
-    (r: IncomingMessage, s: ServerResponse, p: OtelCtx | undefined) => void | Promise<void>
-  >([
-    ['POST /v1/messages', (r, s, p) => messages(r, s, wire, p)],
-    ['POST /v1/responses', (r, s, p) => responses(r, s, wire, chains, p)],
-    ['POST /v1/chat/completions', (r, s, p) => chatCompletions(r, s, wire, p)],
-    ['POST /v1/messages/count_tokens', (r, s) => countTokens(r, s)],
-    ['GET /v1/models', (_r, s) => models(s, cfg, wireOpts)],
-  ])
   return Object.assign(
     async (req: IncomingMessage, res: ServerResponse): Promise<void> => {
       const path = (req.url ?? '/').split('?')[0]
       const method = req.method ?? 'GET'
       const httpSpan = httpTap(req, res, cfg, method, path)
-      const route = routes.get(`${method} ${path}`)
-      if (route === undefined) {
-        apiError(res, 404, 'not_found_error', `bro conductor: no route ${method} ${path}`)
-        return
+      // literal dispatch — a Map.get(requestInput)() call reads to CodeQL
+      // as an unvalidated dynamic method call; the fixed case list IS the
+      // allowlist guard it wants to see
+      switch (`${method} ${path}`) {
+        case 'POST /v1/messages':
+          await messages(req, res, wire, httpSpan.ctx)
+          return
+        case 'POST /v1/responses':
+          await responses(req, res, wire, chains, httpSpan.ctx)
+          return
+        case 'POST /v1/chat/completions':
+          await chatCompletions(req, res, wire, httpSpan.ctx)
+          return
+        case 'POST /v1/messages/count_tokens':
+          await countTokens(req, res)
+          return
+        case 'GET /v1/models':
+          await models(res, cfg, wireOpts)
+          return
+        default:
+          apiError(res, 404, 'not_found_error', `bro conductor: no route ${method} ${path}`)
+          return
       }
-      await route(req, res, httpSpan.ctx)
     },
-    { terminals: () => live?.terminals }
+    {
+      terminals: () => live?.terminals,
+      dispose: (): void => {
+        disposed = true
+        // a getLink still inside acpOpen holds no `live` peer to close
+        // — aborting rejects its init and frees the deadline timer
+        // that would otherwise pin the loop past server close
+        poolAbort.abort()
+        untrackPeerClose()
+        live?.close()
+        live = undefined
+      },
+    }
   )
 }
 

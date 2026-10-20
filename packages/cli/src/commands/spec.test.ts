@@ -15,10 +15,22 @@ import { runSpecCommand, sddConnector, specState } from './spec.ts'
 import { hasSpecFile, SPEC_CONNECTORS } from '../spec-connectors.ts'
 import { loadConfig, registerConnector, scrubEnv, specStore, testGit } from '@broject/core'
 import type { ConnectorCtx, SpecNode, SpecStore, TaskRow, TaskStore } from '@broject/core'
+import { tmpDir } from './testrepo.ts'
 
 // ambient repo/agent/store pins must not reach fixture git children
 // or the code-under-test spawns — scrub once, restore after the file
 after(scrubEnv())
+
+// the global layer reads $XDG_CONFIG_HOME/bro — pin it to an empty tmp
+// for the whole file so a dev machine's real user config can't leak in
+// (tmpDir is the swept fixture dir — removed on exit, pass or fail)
+const XDG = tmpDir('bro-xdg-')
+const prevXdg = process.env.XDG_CONFIG_HOME
+process.env.XDG_CONFIG_HOME = XDG
+process.on('exit', () => {
+  if (prevXdg === undefined) delete process.env.XDG_CONFIG_HOME
+  else process.env.XDG_CONFIG_HOME = prevXdg
+})
 
 for (const c of SPEC_CONNECTORS) {
   registerConnector(c)

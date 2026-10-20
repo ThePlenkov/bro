@@ -785,6 +785,13 @@ export async function acpOpen(
     }
     const proc = spawn(bin, argv.slice(1), { stdio: 'pipe', env: acpChildEnv() })
     child = proc
+    // a pooled transport must not pin the host's event loop — the
+    // server closing drains the process, 'exit' still fires, and the
+    // conductor's close() hook reaps the child on the way out
+    proc.unref()
+    for (const s of proc.stdio) {
+      ;(s as unknown as { unref?: () => void } | null)?.unref?.()
+    }
     proc.once('error', (e) => {
       spawnError = e.message
     })
@@ -804,6 +811,15 @@ export async function acpOpen(
   // peer refs on abort — without this, terminals the agent spawned (and
   // the child) outlive the dead connection they were created under
   conn.signal.addEventListener('abort', close, { once: true })
+  // the pool's teardown signal: a close here rejects the pending init
+  // below, which releases the ref'd deadline timer — a half-open link
+  // can no longer pin the event loop past serve shutdown
+  const cancel = opts.acp?.signal
+  if (cancel?.aborted === true) {
+    close()
+    fail(new JudgeUnavailable(`${by}: acp open cancelled`))
+  }
+  cancel?.addEventListener('abort', close, { once: true })
   try {
     const { asAuthError, req, caps } = await withDeadline(deadline, () =>
       acpInit(conn.agent, by, deadline)

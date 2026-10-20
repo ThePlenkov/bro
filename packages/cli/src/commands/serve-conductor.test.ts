@@ -5,7 +5,7 @@ import assert from 'node:assert/strict'
 import { mkdtempSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import type { SessionConfigOption, SessionUpdate } from '@agentclientprotocol/sdk'
+import { agent, type SessionConfigOption, type SessionUpdate } from '@agentclientprotocol/sdk'
 import { fakeAcpAgent } from '@broject/providers/testkit'
 import { conductorConfig, conductorProxy, parseReply } from './serve-conductor.ts'
 import type { ConductorConfig } from './serve-conductor.ts'
@@ -1036,6 +1036,64 @@ describe('serve /v1/* — retained acp sessions', () => {
       assert.equal(r.status, 200)
       assert.deepEqual(fake.configSets, [{ configId: 'model', value: 'swe-y' }])
     }))
+
+  test('dispose() tears down the pooled transport — the shutdown path the exit hook cannot reach', async () => {
+    const fake = fakeAcpAgent({ replyText: 'x', configOptions: [MODEL_OPTION] })
+    const proxy = conductorProxy(CFG, { acp: { peer: fake.app } })
+    // an unused pool — dispose before the first turn must not throw
+    proxy.dispose()
+    const { url, close } = await listen(deps({ provider: proxy }))
+    try {
+      // disposed-before-link: the resolve guard kills the fresh peer on
+      // arrival — the request reports unavailable, never a half-dead 200
+      const r1 = await post(url, [{ role: 'user', content: 'a' }])
+      assert.notEqual(r1.status, 200)
+      await r1.text()
+    } finally {
+      await close()
+    }
+
+    // live pool: a turn first, then dispose — the next request must not
+    // silently succeed on the dead transport
+    const fake2 = fakeAcpAgent({ replyText: 'x', configOptions: [MODEL_OPTION] })
+    const proxy2 = conductorProxy(CFG, { acp: { peer: fake2.app } })
+    const { url: url2, close: close2 } = await listen(deps({ provider: proxy2 }))
+    try {
+      assert.equal((await post(url2, [{ role: 'user', content: 'a' }])).status, 200)
+      proxy2.dispose()
+      proxy2.dispose() // idempotent — double-dispose is not an error
+      const r2 = await post(url2, [{ role: 'user', content: 'a' }])
+      assert.notEqual(r2.status, 200)
+      await r2.text()
+    } finally {
+      await close2()
+    }
+
+    // a link still mid-handshake holds no live peer — dispose aborts
+    // the open itself, so the request settles now instead of riding
+    // out cfg.timeoutMs on a deadline the shutdown capped at 2s
+    const hanging = agent({ name: 'hang' }).onRequest(
+      'initialize',
+      () => new Promise<never>(() => {})
+    )
+    const proxy3 = conductorProxy(CFG, { acp: { peer: hanging } })
+    const { url: url3, close: close3 } = await listen(deps({ provider: proxy3 }))
+    try {
+      const t0 = Date.now()
+      const inflight = post(url3, [{ role: 'user', content: 'a' }])
+      await new Promise((r) => setTimeout(r, 50))
+      proxy3.dispose()
+      const r3 = await inflight
+      assert.notEqual(r3.status, 200)
+      await r3.text()
+      assert.ok(
+        Date.now() - t0 < CFG.timeoutMs,
+        'the pending open waited out the request deadline'
+      )
+    } finally {
+      await close3()
+    }
+  })
 })
 
 // bro-bvipw.1 — the anthropic surface beyond the happy path:
