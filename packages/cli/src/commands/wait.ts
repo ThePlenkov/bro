@@ -26,11 +26,13 @@ import {
   parseExternalRef,
   readDepState,
   resolveWaitPlane,
+  type DepRead,
   type ExternalRef,
+  type MeshPeer,
   type WaitPlane,
 } from '@broject/mesh'
 import { MAX_INTERVAL_SEC, MIN_INTERVAL_SEC } from './drive-config.ts'
-import { flagValue, meshPeers } from './mesh.ts'
+import { meshPeers } from './mesh.ts'
 
 const USAGE = `Usage: bro wait external:<rig>:<id>… [--every SEC] [--timeout SEC] [--json]
 
@@ -46,6 +48,17 @@ const DEFAULT_TIMEOUT_SEC = 45 * 60
 const DEFAULT_EVERY_SEC = 30
 const MAX_FETCH_ERRORS = 3
 
+type VerdictKind = 'free' | 'actionable' | 'unresolved' | 'unreadable'
+
+interface Verdict {
+  verdict: VerdictKind
+  reason?: string
+  stage?: string
+  turn?: string
+  source: 'live' | 'replica'
+  replicaAgeMs?: number
+}
+
 interface Watch {
   /** the arg verbatim — verdicts and re-arm summaries carry it */
   arg: string
@@ -55,13 +68,17 @@ interface Watch {
   settled?: Verdict
 }
 
-interface Verdict {
-  verdict: 'free' | 'actionable'
-  reason?: string
-  stage?: string
-  turn?: string
-  source: 'live' | 'replica'
-  replicaAgeMs?: number
+/** poll-time context — the requester's own repo the thread read
+ *  and the posting-store split both key off */
+interface WaitCtx {
+  dir: string
+  peers: MeshPeer[]
+  common: string
+}
+
+function fail(message: string): never {
+  console.error(`error: ${message}`)
+  process.exit(2)
 }
 
 function fmtAge(ms: number): string {
@@ -75,129 +92,258 @@ function fmtAge(ms: number): string {
   return `${Math.round(m / 60)}h`
 }
 
-function parseArgs(args: string[]): {
+/** `--every SEC` / `--timeout SEC` — a missing or non-numeric value is
+ *  a usage error, not a silent default (a swallowed flag would wait
+ *  on bounds the operator never set) */
+function secondsArg(args: string[], i: number): number {
+  const raw = args[i + 1]
+  if (raw === undefined || raw.startsWith('--')) {
+    fail(`${args[i]} needs a seconds value`)
+  }
+  const n = Number(raw)
+  if (!Number.isFinite(n)) {
+    fail(`${args[i]} needs a numeric seconds value, got "${raw}"`)
+  }
+  return n
+}
+
+interface WaitArgs {
   refs: string[]
   every: number
   timeout: number
   json: boolean
-} {
-  const refs: string[] = []
+}
+
+function parseArgs(args: string[]): WaitArgs {
+  const out: WaitArgs = {
+    refs: [],
+    every: DEFAULT_EVERY_SEC,
+    timeout: DEFAULT_TIMEOUT_SEC,
+    json: false,
+  }
   for (let i = 0; i < args.length; i++) {
     const a = args[i]!
     if (a === '--every' || a === '--timeout') {
+      const n = secondsArg(args, i)
+      if (a === '--every') {
+        out.every = n
+      } else {
+        out.timeout = n
+      }
       i++
-      continue
-    }
-    if (a === '--json') {
-      continue
-    }
-    if (a.startsWith('--')) {
+    } else if (a === '--json') {
+      out.json = true
+    } else if (a.startsWith('--')) {
       console.error(`error: unknown flag "${a}"`)
       console.error(USAGE)
       process.exit(2)
+    } else {
+      out.refs.push(a)
     }
-    refs.push(a)
   }
-  if (refs.length === 0) {
+  if (out.refs.length === 0) {
     console.error(USAGE)
     process.exit(2)
   }
-  const everyRaw = flagValue(args, '--every') ?? String(DEFAULT_EVERY_SEC)
-  const timeoutRaw = flagValue(args, '--timeout') ?? String(DEFAULT_TIMEOUT_SEC)
-  const every = Number(everyRaw)
-  const timeout = Number(timeoutRaw)
-  // a NaN --every spins the timer at ~0ms — a busy loop, not a poll
-  if (!Number.isFinite(every) || every < MIN_INTERVAL_SEC || every > MAX_INTERVAL_SEC) {
-    console.error(`error: --every needs ${MIN_INTERVAL_SEC}..${MAX_INTERVAL_SEC}s, got "${everyRaw}"`)
-    process.exit(2)
+  // a sub-floor --every spins the timer at ~0ms — a busy loop, not a poll
+  if (out.every < MIN_INTERVAL_SEC || out.every > MAX_INTERVAL_SEC) {
+    fail(`--every needs ${MIN_INTERVAL_SEC}..${MAX_INTERVAL_SEC}s, got ${out.every}`)
   }
-  if (!Number.isFinite(timeout) || timeout < 0 || !Number.isFinite(timeout * 1000)) {
-    console.error(`error: --timeout needs a finite non-negative seconds value, got "${timeoutRaw}"`)
-    process.exit(2)
+  if (out.timeout < 0 || !Number.isFinite(out.timeout * 1000)) {
+    fail(`--timeout needs a finite non-negative seconds value, got ${out.timeout}`)
   }
-  return { refs, every, timeout, json: args.includes('--json') }
+  return out
 }
 
-/** A verdict line/object — `free` and `actionable` outrank the
- *  deadline, so emit happens mid-loop, never only at the end. */
-function emit(
-  json: boolean,
-  code: number,
-  verdict: string,
-  watches: Watch[],
-  extra: Record<string, unknown> = {},
-): void {
-  const refs = Object.fromEntries(
-    watches.map((w) => [
-      w.arg,
-      {
-        verdict: w.settled?.verdict ?? 'waiting',
-        ...(w.settled?.reason !== undefined ? { reason: w.settled.reason } : {}),
-        ...(w.settled?.stage !== undefined ? { stage: w.settled.stage } : {}),
-        ...(w.settled?.turn !== undefined ? { turn: w.settled.turn } : {}),
-        source: w.plane.replica ? 'replica' : 'live',
-        ...(w.settled?.replicaAgeMs !== undefined ? { replicaAgeMs: w.settled.replicaAgeMs } : {}),
-      },
-    ]),
-  )
-  if (json) {
-    console.log(JSON.stringify({ verdict, refs, ...extra }))
+/** the per-ref JSON shape — settled verdicts carry reason and stage
+ *  annotation; waiting refs read as 'waiting' */
+function refEntry(w: Watch): Record<string, unknown> {
+  return {
+    verdict: w.settled?.verdict ?? 'waiting',
+    ...(w.settled?.reason !== undefined ? { reason: w.settled.reason } : {}),
+    ...(w.settled?.stage !== undefined ? { stage: w.settled.stage } : {}),
+    ...(w.settled?.turn !== undefined ? { turn: w.settled.turn } : {}),
+    source: w.plane.replica ? 'replica' : 'live',
+    ...(w.settled?.replicaAgeMs !== undefined ? { replicaAgeMs: w.settled.replicaAgeMs } : {}),
+  }
+}
+
+/** `arg: verdict (reason) — replica <alias>, synced <age> ago` — the
+ *  human line's per-ref detail; live sources carry no annotation */
+function detailLine(w: Watch): string {
+  const v = w.settled!
+  const src =
+    v.source === 'replica'
+      ? ` — replica ${w.plane.peer.alias}` +
+        (v.replicaAgeMs !== undefined ? `, synced ${fmtAge(v.replicaAgeMs)} ago` : ', never synced')
+      : ''
+  return `${w.arg}: ${v.verdict}${v.reason !== undefined ? ` (${v.reason})` : ''}${src}`
+}
+
+interface EmitOpts {
+  code: number
+  verdict: string
+  json: boolean
+  extra?: Record<string, unknown>
+}
+
+/** A verdict line/object — terminal verdicts outrank the deadline,
+ *  so emit happens mid-loop, never only at the end. */
+function emit(watches: Watch[], o: EmitOpts): void {
+  if (o.json) {
+    const refs = Object.fromEntries(watches.map((w) => [w.arg, refEntry(w)]))
+    console.log(JSON.stringify({ verdict: o.verdict, refs, ...o.extra }))
   } else {
     const detail = watches
       .filter((w) => w.settled !== undefined)
-      .map((w) => {
-        const v = w.settled!
-        const src =
-          v.source === 'replica'
-            ? ` — replica ${w.plane.peer.alias}` +
-              (v.replicaAgeMs !== undefined ? `, synced ${fmtAge(v.replicaAgeMs)} ago` : ', never synced')
-            : ''
-        return `${w.arg}: ${v.verdict}${v.reason !== undefined ? ` (${v.reason})` : ''}${src}`
-      })
+      .map(detailLine)
       .join('; ')
     const unsettled = watches.filter((w) => w.settled === undefined).map((w) => w.arg)
     console.log(
-      `wait: ${verdict}` +
+      `wait: ${o.verdict}` +
         (detail !== '' ? ` — ${detail}` : '') +
         (unsettled.length > 0 ? ` (unsettled: ${unsettled.join(' ')})` : ''),
     )
   }
-  process.exitCode = code
+  process.exitCode = o.code
+}
+
+/** refs + planes resolve once, before the loop — a bad ref or an
+ *  unbound rig is a config verdict, not something a poll can outwait */
+function resolveWatches(refs: string[], ctx: WaitCtx): Watch[] {
+  return refs.map((arg) => {
+    const ref = parseExternalRef(arg)
+    if (ref === null) {
+      fail(
+        `"${arg}" is not an external:<rig>:<id> dep ref — ` +
+          'the thread-plane read is `bro mesh wait <thread>`',
+      )
+    }
+    const plane = resolveWaitPlane(ctx.dir, ctx.peers, ref.rig, ctx.common)
+    if (plane === undefined) {
+      fail(`no peer binding for ${ref.rig} — ` + '`bro mesh peers add <alias> <rig> <remote>` binds one')
+    }
+    return { arg, ref, plane, errors: 0 }
+  })
+}
+
+function srcOf(w: Watch): 'live' | 'replica' {
+  return w.plane.replica ? 'replica' : 'live'
+}
+
+/** a failed read is a different answer from a read that found
+ *  nothing — tolerate blips, settle `unreadable` on a streak */
+function noteReadErrors(w: Watch, errors: string[]): void {
+  for (const e of errors) {
+    console.error(`! wait ${w.arg}: ${e}`)
+  }
+  if (++w.errors >= MAX_FETCH_ERRORS) {
+    w.settled = {
+      verdict: 'unreadable',
+      reason: `${w.plane.peer.alias} unreadable ${MAX_FETCH_ERRORS} polls running`,
+      source: srcOf(w),
+    }
+  }
+}
+
+/** the posting-store facts: absent is a bad ref (unresolved), shipped
+ *  is free, closed-unshipped is actionable. Returns true when the
+ *  watch settled — the open case falls through to the thread read. */
+function settleFromRequest(w: Watch, read: DepRead): boolean {
+  if (read.request === null) {
+    console.error(`error: ${w.arg} — ${w.ref.id} is absent on its posting store`)
+    w.settled = {
+      verdict: 'unresolved',
+      reason: 'absent on its posting store',
+      source: srcOf(w),
+      replicaAgeMs: read.replicaAgeMs,
+    }
+    return true
+  }
+  if (read.shipped === true) {
+    w.settled = { verdict: 'free', source: srcOf(w), replicaAgeMs: read.replicaAgeMs }
+    return true
+  }
+  if (read.request!.status !== 'closed') {
+    return false
+  }
+  w.settled = {
+    verdict: 'actionable',
+    reason:
+      `closed-unshipped — ${w.ref.id} closed without provides:${w.ref.id}; ` +
+      'the dep will not release on its own',
+    source: srcOf(w),
+    replicaAgeMs: read.replicaAgeMs,
+  }
+  return true
+}
+
+/** the thread read annotates progress and carries the one actionable
+ *  lifecycle fact: a reject envelope means re-post — the verdict is
+ *  the envelope SET, not the reduced stage */
+function settleFromThread(w: Watch, ctx: WaitCtx, read: DepRead): void {
+  const thread = meshThread(ctx.dir, ctx.peers, w.ref.id, ctx.common, { pull: false })
+  for (const e of thread.errors) {
+    console.error(`! wait ${w.arg}: ${e}`)
+  }
+  if (thread.envelopes.some((e) => e.kind === 'reject')) {
+    w.settled = {
+      verdict: 'actionable',
+      reason: 'rejected — re-post the request',
+      stage: thread.stage,
+      source: srcOf(w),
+      replicaAgeMs: read.replicaAgeMs,
+    }
+    return
+  }
+  console.error(
+    `wait ${w.arg}: stage=${thread.stage ?? 'none'} shipped=no` +
+      (thread.turn !== undefined ? ` — ${thread.turn}'s move` : ''),
+  )
+}
+
+/** one poll of one unsettled watch — records a verdict or bumps the
+ *  blip counter; the watch carries the state */
+function pollWatch(w: Watch, ctx: WaitCtx): void {
+  const read = readDepState(w.plane, w.ref.id)
+  if (read.errors.length > 0) {
+    noteReadErrors(w, read.errors)
+    return
+  }
+  w.errors = 0
+  if (settleFromRequest(w, read)) {
+    return
+  }
+  settleFromThread(w, ctx, read)
+}
+
+/** terminal verdicts by precedence — a bad ref (2) outranks a dead
+ *  plane (1), which outranks a lifecycle verdict (3). All-settled is
+ *  the only free exit; anything still waiting returns undefined and
+ *  the loop turns again. */
+function aggregate(watches: Watch[]): { code: number; verdict: string } | undefined {
+  const precedence: [VerdictKind, number][] = [
+    ['unresolved', 2],
+    ['unreadable', 1],
+    ['actionable', 3],
+  ]
+  for (const [kind, code] of precedence) {
+    if (watches.some((w) => w.settled?.verdict === kind)) {
+      return { code, verdict: kind }
+    }
+  }
+  return watches.every((w) => w.settled !== undefined) ? { code: 0, verdict: 'free' } : undefined
 }
 
 export async function runWaitCommand(argv: string[]): Promise<void> {
   const dir = process.cwd()
   const { refs, every, timeout, json } = parseArgs(argv)
-
   const common = gitCommonDir(dir)
   if (common === null) {
-    console.error('bro wait: not inside a git repository')
-    process.exit(2)
+    fail('bro wait: not inside a git repository')
   }
-  const peers = meshPeers(dir)
-
-  // refs + planes resolve once, before the loop — a bad ref or an
-  // unbound rig is a config verdict, not something a poll can outwait
-  const watches: Watch[] = []
-  for (const arg of refs) {
-    const ref = parseExternalRef(arg)
-    if (ref === null) {
-      console.error(
-        `error: "${arg}" is not an external:<rig>:<id> dep ref — ` +
-          'the thread-plane read is `bro mesh wait <thread>`',
-      )
-      process.exit(2)
-    }
-    const plane = resolveWaitPlane(dir, peers, ref.rig, common)
-    if (plane === undefined) {
-      console.error(
-        `error: no peer binding for ${ref.rig} — ` +
-          '`bro mesh peers add <alias> <rig> <remote>` binds one',
-      )
-      process.exit(2)
-    }
-    watches.push({ arg, ref, plane, errors: 0 })
-  }
+  const ctx: WaitCtx = { dir, peers: meshPeers(dir), common }
+  const watches = resolveWatches(refs, ctx)
 
   // monotonic clock for the bound — a wall-clock step must not stretch
   // a --timeout past its elapsed budget
@@ -206,85 +352,21 @@ export async function runWaitCommand(argv: string[]): Promise<void> {
 
   for (;;) {
     for (const w of watches) {
-      if (w.settled !== undefined) {
-        continue
+      if (w.settled === undefined) {
+        pollWatch(w, ctx)
       }
-      const read = readDepState(w.plane, w.ref.id)
-      // a failed read is a different answer from a read that found
-      // nothing — tolerate blips, settle `unreadable` on a streak
-      if (read.errors.length > 0) {
-        w.errors += 1
-        for (const e of read.errors) {
-          console.error(`! wait ${w.arg}: ${e}`)
-        }
-        if (w.errors >= MAX_FETCH_ERRORS) {
-          emit(json, 1, 'unreadable', watches)
-          return
-        }
-        continue
-      }
-      w.errors = 0
-
-      // absent on the posting store is a bad ref, not a transient —
-      // the transport says where the bead must land, and it is not there
-      if (read.request === null) {
-        console.error(`error: ${w.arg} — ${w.ref.id} is absent on its posting store`)
-        emit(json, 2, 'unresolved', watches)
-        return
-      }
-
-      const source = w.plane.replica ? 'replica' : 'live'
-      if (read.shipped === true) {
-        w.settled = { verdict: 'free', source, replicaAgeMs: read.replicaAgeMs }
-        continue
-      }
-
-      if (read.request!.status === 'closed') {
-        w.settled = {
-          verdict: 'actionable',
-          reason:
-            `closed-unshipped — ${w.ref.id} closed without provides:${w.ref.id}; ` +
-            `the dep will not release on its own`,
-          source,
-          replicaAgeMs: read.replicaAgeMs,
-        }
-        continue
-      }
-
-      // the thread read annotates progress and carries the one
-      // actionable lifecycle fact: a reject envelope means re-post
-      const thread = meshThread(dir, peers, w.ref.id, common, { pull: false })
-      for (const e of thread.errors) {
-        console.error(`! wait ${w.arg}: ${e}`)
-      }
-      if (thread.envelopes.some((e) => e.kind === 'reject')) {
-        w.settled = {
-          verdict: 'actionable',
-          reason: `rejected — re-post the request`,
-          stage: thread.stage,
-          source,
-          replicaAgeMs: read.replicaAgeMs,
-        }
-        continue
-      }
-      console.error(
-        `wait ${w.arg}: stage=${thread.stage ?? 'none'} shipped=no` +
-          (thread.turn !== undefined ? ` — ${thread.turn}'s move` : ''),
-      )
     }
-
-    const actionable = watches.find((w) => w.settled?.verdict === 'actionable')
-    if (actionable !== undefined) {
-      emit(json, 3, 'actionable', watches)
-      return
-    }
-    if (watches.every((w) => w.settled !== undefined)) {
-      emit(json, 0, 'free', watches)
+    const out = aggregate(watches)
+    if (out !== undefined) {
+      emit(watches, { ...out, json })
       return
     }
     if (performance.now() >= deadline) {
-      emit(json, 4, 'timeout', watches, {
-        unsettled: watches.filter((w) => w.settled === undefined).map((w) => w.arg),
+      emit(watches, {
+        code: 4,
+        verdict: 'timeout',
+        json,
+        extra: { unsettled: watches.filter((w) => w.settled === undefined).map((w) => w.arg) },
       })
       return
     }

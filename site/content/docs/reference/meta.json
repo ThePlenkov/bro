@@ -58,6 +58,7 @@
     "check",
     "setup",
     "doctor",
+    "wait",
     "plugins"
   ]
 }

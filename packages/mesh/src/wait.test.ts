@@ -36,6 +36,10 @@ describe('parseExternalRef', () => {
       'external::fx-1',
       'beads://acme/sverka/fx-1',
       'external:mesh://acme/sverka',
+      // the capability interpolates into replica SQL — non-token
+      // chars make it a bad ref, never a query
+      "external:mesh://acme/sverka:x' or '1'='1",
+      'external:mesh://acme/sverka:two words',
       '',
     ]) {
       assert.equal(parseExternalRef(bad), null, bad)

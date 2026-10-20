@@ -19,9 +19,9 @@ import { existsSync } from 'node:fs'
 import { join } from 'node:path'
 import { taskStore } from '@broject/core'
 import { formatRigUri, parseRigUri } from './identity.ts'
-import { localCheckout, type MeshPeer } from './peers.ts'
+import { type MeshPeer } from './peers.ts'
 import { storeFor } from './post.ts'
-import { replicaAgeMs, replicaDir, shippedIssues } from './pull.ts'
+import { CAPABILITY_RE, replicaAgeMs, replicaDir, shippedIssues } from './pull.ts'
 
 export interface ExternalRef {
   /** the dep's project slot — a canonical mesh:// rig uri */
@@ -45,7 +45,14 @@ export function parseExternalRef(arg: string): ExternalRef | null {
     return null
   }
   const rig = parseRigUri(rest.slice(0, colon))
-  return rig === null ? null : { rig: formatRigUri(rig), id: rest.slice(colon + 1) }
+  const id = rest.slice(colon + 1)
+  // the capability interpolates into replica SQL (shippedIssues) — a
+  // token charset keeps the ref honest at the boundary: anything
+  // wilder is a bad ref, not something a poll could ever settle
+  if (rig === null || !CAPABILITY_RE.test(id)) {
+    return null
+  }
+  return { rig: formatRigUri(rig), id }
 }
 
 export interface WaitPlane {

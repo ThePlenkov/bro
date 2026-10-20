@@ -85,14 +85,23 @@ export function meshIssues(dir: string): { rows: IssueRow[]; error?: string } {
  *  inbox path cannot return (scanReplica drops closed rows), and dolt
  *  sql is how a raw replica answers it — it is not a beads project, so
  *  `bd` cannot address it. */
+/** a provides:<capability> id is a bead-id token — the charset is the
+ *  allowlist the SQL interpolation boundary checks against */
+export const CAPABILITY_RE = /^[A-Za-z0-9][A-Za-z0-9._~-]*$/
+
 export function shippedIssues(dir: string, capability: string): { shipped?: boolean; error?: string } {
-  const cap = capability.replaceAll("'", "''")
+  // allowlist at the SQL boundary — the value is interpolated raw,
+  // so anything outside the bead-id token charset refuses to query
+  // rather than leaning on quote-escaping alone
+  if (!CAPABILITY_RE.test(capability)) {
+    return { error: `unsafe capability "${capability}" — refusing the query` }
+  }
   const r = dolt(
     [
       'sql',
       '-q',
       `select i.id from issues i inner join labels l on l.issue_id = i.id ` +
-        `where l.label = 'provides:${cap}' and i.status = 'closed'`,
+        `where l.label = 'provides:${capability}' and i.status = 'closed'`,
       '-r',
       'json',
     ],

@@ -19,7 +19,7 @@ export {
 export type { BeadLike, MeshEnvelope, MeshKind, MeshRef, MeshTerms } from './envelope.ts'
 export { localCheckout, parsePeer, transportOf, TRANSPORTS } from './peers.ts'
 export type { MeshPeer, MeshTransport } from './peers.ts'
-export { issueLabels, meshIssues, replicaAgeMs, replicaDir, shippedIssues, syncReplica } from './pull.ts'
+export { CAPABILITY_RE, issueLabels, meshIssues, replicaAgeMs, replicaDir, shippedIssues, syncReplica } from './pull.ts'
 export type { IssueRow } from './pull.ts'
 export { meshInbox, meshScan } from './inbox.ts'
 export type { InboundRequest, InboxResult, PeerRecord, ScanResult } from './inbox.ts'

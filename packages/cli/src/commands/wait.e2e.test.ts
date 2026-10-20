@@ -29,17 +29,17 @@ const FAR = (id: string) => `external:mesh://acme/far:${id}`
 
 /** A mesh/1 envelope row for a fixture store — label-only record, the
  *  shape `postEnvelope` stamps via envelopeLabels. */
-function envelope(id: string, kind: string, thread: string, from: string, to: string) {
+function envelope(e: { id: string; kind: string; thread: string; from: string; to: string }) {
   return {
-    id,
-    title: `${kind} ${id}`,
+    id: e.id,
+    title: `${e.kind} ${e.id}`,
     status: 'open',
     labels: [
       'mesh:v:1',
-      `mesh:kind:${kind}`,
-      `mesh:thread:${thread}`,
-      `mesh:from:${from}`,
-      `mesh:to:${to}`,
+      `mesh:kind:${e.kind}`,
+      `mesh:thread:${e.thread}`,
+      `mesh:from:${e.from}`,
+      `mesh:to:${e.to}`,
     ],
   }
 }
@@ -124,7 +124,7 @@ describe('bro wait', () => {
       // author (delivered threads carry the requester's records)
       writeBeads(target.db, [
         ...readBeads(target.db),
-        envelope('v-rej', 'reject', thread, me, 'mesh://acme/sibling'),
+        envelope({ id: 'v-rej', kind: 'reject', thread, from: me, to: 'mesh://acme/sibling' }),
       ])
       const rej = runCli(['wait', ref, '--every', '0.1', '--timeout', '1'], { cwd: main, env })
       assert.equal(rej.code, 3, rej.stderr)
@@ -134,7 +134,7 @@ describe('bro wait', () => {
       // is the envelope SET, not the reduced stage (a human untangles)
       writeBeads(target.db, [
         ...readBeads(target.db),
-        envelope('v-acc', 'accept', thread, me, 'mesh://acme/sibling'),
+        envelope({ id: 'v-acc', kind: 'accept', thread, from: me, to: 'mesh://acme/sibling' }),
       ])
       const both = runCli(['wait', ref, '--every', '0.1', '--timeout', '1'], { cwd: main, env })
       assert.equal(both.code, 3, both.stderr)
