@@ -15,11 +15,9 @@
  *   thread plane — `bro mesh wait`'s reduction, reused for the
  *     stage/turn annotation and the reject-verdict check
  */
-import { statSync } from 'node:fs'
-import { join } from 'node:path'
 import { taskStore } from '@broject/core'
 import { formatRigUri, parseRigUri } from './identity.ts'
-import { type MeshPeer } from './peers.ts'
+import { localCheckout, type MeshPeer } from './peers.ts'
 import { storeFor } from './post.ts'
 import { CAPABILITY_RE, replicaAgeMs, replicaDir, shippedIssues } from './pull.ts'
 
@@ -130,22 +128,14 @@ export interface DepRead {
   errors: string[]
 }
 
-/** a directory probe that answers false on any stat error — the same
- *  question existsSync asks, through the audited stat path */
-function dirExists(p: string): boolean {
-  try {
-    return statSync(p).isDirectory()
-  } catch {
-    return false
-  }
-}
-
 /** The ship rule on a `local` peer: `bd -C <checkout>` answers the
  *  closed `provides:<id>` row the inbox scan structurally cannot
- *  return (it drops closed rows). */
-function shippedOnCheckout(checkout: string, id: string): { shipped?: boolean; error?: string } {
-  if (!dirExists(checkout)) {
-    return { error: `local checkout ${checkout} does not resolve` }
+ *  return (it drops closed rows). localCheckout's null is the
+ *  gone-checkout probe — a deleted dir is unreadable, not unshipped. */
+function shippedOnCheckout(peer: MeshPeer, id: string): { shipped?: boolean; error?: string } {
+  const checkout = localCheckout(peer.remote)
+  if (checkout === null) {
+    return { error: `local checkout ${peer.remote} does not resolve` }
   }
   try {
     const rows = storeFor(checkout).list<{ id: string; status?: string }>({
@@ -182,18 +172,26 @@ export function readDepState(plane: WaitPlane, id: string): DepRead {
     )
   }
 
-  const shipped = plane.replica
-    ? dirExists(join(plane.peerDir, '.dolt'))
-      ? shippedIssues(plane.peerDir, id)
-      : { error: `replica ${plane.peerDir} absent — \`bro mesh pull\` materializes it` }
-    : shippedOnCheckout(plane.peerDir, id)
+  if (plane.replica) {
+    // the replica answers its own presence — no manifest/.dolt/root
+    // stamp means nothing materialized yet; `bro mesh pull` is the fix
+    out.replicaAgeMs = replicaAgeMs(plane.peerDir)
+    const shipped =
+      out.replicaAgeMs === undefined
+        ? { error: `replica ${plane.peerDir} absent — \`bro mesh pull\` materializes it` }
+        : shippedIssues(plane.peerDir, id)
+    if (shipped.error !== undefined) {
+      out.errors.push(`${plane.peer.alias}: ${shipped.error}`)
+    } else {
+      out.shipped = shipped.shipped === true
+    }
+    return out
+  }
+  const shipped = shippedOnCheckout(plane.peer, id)
   if (shipped.error !== undefined) {
     out.errors.push(`${plane.peer.alias}: ${shipped.error}`)
   } else {
     out.shipped = shipped.shipped === true
-  }
-  if (plane.replica) {
-    out.replicaAgeMs = replicaAgeMs(plane.peerDir)
   }
   return out
 }

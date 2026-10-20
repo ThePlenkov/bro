@@ -479,7 +479,12 @@ async function watchLoop(
     }
     // cap the poll sleep at the remaining budget — a short --timeout
     // exits on its boundary, not one full interval late
-    await sleep(Math.min(o.every * 1000, deadline - performance.now()))
+    try {
+      await sleep(Math.min(o.every * 1000, deadline - performance.now()))
+    } catch {
+      // a rejected timer is not a verdict — the next turn re-reads
+      // the stores and the deadline either way
+    }
   }
 }
 
