@@ -1,6 +1,7 @@
 /**
- * The local twin of the CodeScene App's review — same analysis, same
- * verdict, before the push instead of after it.
+ * The same delta analysis as the CodeScene App's review, before the push
+ * instead of after it. The verdict can differ because the App applies
+ * branch-specific gates and PR finding suppressions.
  *
  *   node scripts/codescene-check.ts [base-ref] [--strict]
  *
@@ -15,26 +16,26 @@
  */
 import { execFileSync } from 'node:child_process'
 import { existsSync } from 'node:fs'
-import { homedir } from 'node:os'
-import { join } from 'node:path'
-import { gateReport, renderGate } from './codescene-gate.ts'
+import { gateReport } from './codescene-gate'
 
-/** The CLI's install target, plus whatever the PATH already carries. */
-function csBinary(): string | undefined {
-  const local = join(homedir(), '.local', 'bin', 'cs')
-  if (existsSync(local)) return local
-  for (const dir of (process.env['PATH'] ?? '').split(':')) {
-    const candidate = join(dir, 'cs')
-    if (dir !== '' && existsSync(candidate)) return candidate
+function findCs(): string | null {
+  for (const candidate of ['cs', '/usr/local/bin/cs', `${process.env.HOME}/.local/bin/cs`]) {
+    try {
+      execFileSync(candidate, ['version'], { stdio: 'ignore' })
+      return candidate
+    } catch {
+      // try next candidate
+    }
   }
-  return undefined
+  return null
 }
 
 function main(argv: string[]): void {
-  const strict = argv.includes('--strict')
-  const base = argv.find((a) => !a.startsWith('--')) ?? 'origin/main'
-  const cs = csBinary()
-  if (cs === undefined) {
+  const args = argv.slice(2)
+  const strict = args.includes('--strict')
+  const base = args.find((a) => !a.startsWith('-')) ?? 'origin/main'
+  const cs = findCs()
+  if (!cs) {
     console.log('codescene-check: skipped — the `cs` CLI is not installed (see the codescene skill)')
     return
   }
@@ -50,34 +51,34 @@ function main(argv: string[]): void {
       )
       for (const f of files) console.log(`  ${f}`)
     }
-  } catch {
-    // no git context — the delta below will report it
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err)
+    console.log(`codescene-check: could not determine git status (${message})`)
   }
   let report: string
   try {
     report = execFileSync(cs, ['delta', base, 'HEAD', '--output-format', 'json'], {
       encoding: 'utf8',
-      maxBuffer: 64 * 1024 * 1024,
-      env: { ...process.env },
+      stdio: ['ignore', 'pipe', 'pipe'],
     })
-  } catch (err) {
-    const e = err as { status?: number; stdout?: string; stderr?: string; message?: string }
-    if (typeof e.stdout === 'string' && e.stdout.trim() !== '') {
-      report = e.stdout
+  } catch (err: any) {
+    if (err.stdout && typeof err.stdout === 'string' && err.stdout.trim() !== '') {
+      report = err.stdout
     } else {
-      console.error(`codescene-check: the delta analysis failed — ${e.stderr ?? e.message}`)
-      process.exit(2)
+      console.error(err.stderr?.toString?.() ?? err.message)
+      process.exit(err.status ?? 2)
     }
   }
-  let result
-  try {
-    result = gateReport(report, strict)
-  } catch (err) {
-    console.error(`codescene-check: ${(err as Error).message}`)
-    process.exit(2)
+  const result = gateReport(report, strict)
+  if (result.ok) {
+    console.log(`codescene-check: OK (${result.summary})`)
+    process.exit(0)
   }
-  renderGate(result)
-  if (!result.ok) process.exit(1)
+  console.log(`codescene-check: BLOCKED (${result.summary})`)
+  for (const v of result.violations) {
+    console.log(`  ${v.file}:${v.line} ${v.function} [${v.changeType}] ${v.rule}`)
+  }
+  process.exit(1)
 }
 
-main(process.argv.slice(2))
+main(process.argv)
