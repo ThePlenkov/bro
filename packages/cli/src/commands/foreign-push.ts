@@ -36,7 +36,12 @@ export function headMemoryPath(root: string, repo: string, pr: number): string |
   if (common === null || common === '') {
     return null
   }
-  return join(common, 'bro', 'drive', 'heads', `${repo.replace('/', '%2F')}-${pr}.json`)
+  // injective on purpose, like the act-state cache's slug: a
+  // sanitizing one maps distinct valid names together ('a-b/c' and
+  // 'a/b-c' both → 'a-b-c'), handing one repo's head memory to the
+  // other at the same PR number
+  const slug = encodeURIComponent(repo)
+  return join(common, 'bro', 'drive', 'heads', `${slug}-${pr}.json`)
 }
 
 /** The last head SHA the drive saw for a PR — undefined on the first
@@ -47,7 +52,7 @@ export function readHeadMemory(root: string, repo: string, pr: number): string |
     return undefined
   }
   try {
-    const parsed: unknown = JSON.parse(readFileSync(path, 'utf8'))
+    const parsed: unknown = JSON.parse(readFileSync(path, 'utf8')) // NOSONAR — the path is bro's own common dir plus an encoded repo slug and a numeric PR
     const sha = (parsed as { sha?: unknown } | null)?.sha
     return typeof sha === 'string' && sha !== '' ? sha : undefined
   } catch {
@@ -63,10 +68,10 @@ export function writeHeadMemory(root: string, repo: string, pr: number, sha: str
     return
   }
   try {
-    mkdirSync(dirname(path), { recursive: true })
+    mkdirSync(dirname(path), { recursive: true }) // NOSONAR — the path is bro's own common dir plus an encoded repo slug and a numeric PR
     const tmp = `${path}.${process.pid}.tmp`
-    writeFileSync(tmp, JSON.stringify({ sha, at: new Date().toISOString() }))
-    renameSync(tmp, path)
+    writeFileSync(tmp, JSON.stringify({ sha, at: new Date().toISOString() })) // NOSONAR — the path is bro's own common dir plus an encoded repo slug and a numeric PR
+    renameSync(tmp, path) // NOSONAR — the path is bro's own common dir plus an encoded repo slug and a numeric PR
   } catch {
     // fail-open — the signal is advisory
   }

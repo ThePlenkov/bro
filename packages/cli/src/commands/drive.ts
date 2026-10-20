@@ -852,6 +852,12 @@ interface PassWork {
   /** Fresh decide() calls the pass may still pay for — the shadow
    *  judge's `maxDecisionsPerRun` bound is per run, not per PR. */
   judgeBudget: { remaining: number }
+  /** The head SHA the pass fetched per PR — the foreign-push signal
+   *  compares it with the drive's memory. It rides the pass work, not
+   *  the act-state cache: the cache entry is invalidated by half the
+   *  verdicts (ci-resolved, settled, …), so a read after the pass
+   *  would miss the very head the pass acted on. */
+  heads: Map<number, string>
 }
 
 export interface PrVerdict {
@@ -910,9 +916,12 @@ async function publishDriveAlert(
 /** The foreign-push signal — a PR a live session armed moved under it
  *  (spec bro-cqjd0). The bus REPORTS the move; it does not coordinate:
  *  nothing is blocked, no branch is protected, the session decides. */
-async function signalForeignPush(ctx: Ctx, pr: number, link: string): Promise<void> {
-  const state = ctx.stateCache?.read({ repo: ctx.repo, pr })
-  const head = state?.headSha
+async function signalForeignPush(
+  ctx: Ctx,
+  pr: number,
+  link: string,
+  head: string | undefined
+): Promise<void> {
   if (head === undefined || head === '') {
     return
   }
@@ -2188,6 +2197,11 @@ async function drivePr(ctx: Ctx, pr: number, work: PassWork): Promise<PrVerdict>
   } catch (err) {
     return { pr, link, verdict: 'probe-failed', detail: errText(err) }
   }
+  // the head this pass acted on — the foreign-push signal's new side. It
+  // rides the pass work, not the act-state cache: half the verdicts
+  // invalidate the cache entry, so a read after the pass would miss the
+  // very head the pass saw.
+  work.heads.set(pr, state.headSha)
   const fixer = fixerBeadFor(ctx.store, pr)
   if (state.state !== 'OPEN') {
     if (fixer) {
@@ -2370,6 +2384,7 @@ async function driveOnce(ctx: Ctx): Promise<void> {
     workDetails: hooks === null ? [] : liveWorkEntries(hooks),
     watches: listWatches(ctx.mainRoot),
     judgeBudget: { remaining: judgeConfig(ctx.mainRoot).judge.maxDecisionsPerRun },
+    heads: new Map<number, string>(),
   }
   const { prs, complete } = openFleetPrs(ctx)
   if (ctx.everySec !== undefined) {
@@ -2387,7 +2402,7 @@ async function driveOnce(ctx: Ctx): Promise<void> {
       verdict: 'error',
       detail: errText(err),
     }))
-    await signalForeignPush(ctx, pr, ctx.rev.prLink(ctx.repo, pr))
+    await signalForeignPush(ctx, pr, ctx.rev.prLink(ctx.repo, pr), work.heads.get(pr))
     // the human edge: unmovable verdicts and silent-reviewer alerts —
     // dedup keys make a repeated pass quiet, not absent
     if (ALERT_VERDICTS.has(v.verdict)) {
