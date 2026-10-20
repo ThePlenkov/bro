@@ -41,6 +41,15 @@ export interface SessionPlane {
    *  landed `.slot` reservations inside its count — the admission
    *  tally runs after it, so a landed spawn is not counted twice. */
   countWorkers?(bag: Record<string, unknown>, workerEnv?: Record<string, string>): number
+  /** The BATCH subset of countWorkers — the workers the fleet owns
+   *  (a drive fixer, a loop member). The split is by the supervisor
+   *  marker the spawn's env carries (BRO_PR, BRO_MOL_ID): the marker
+   *  rides into the worker process, so a plane that can read its
+   *  workers' environment can tell the fleet's workers from the
+   *  operator's own sessions. `agents.<kind>.maxBatchWorkers` gates
+   *  this population; a plane that cannot split refuses 'config' when
+   *  that cap is armed, never silently unguards it (spec bro-9h86l). */
+  countBatchWorkers?(bag: Record<string, unknown>, workerEnv?: Record<string, string>): number
   /** The live sessions as rows — the same lock/scan semantics countLive
    *  runs, kept per-session so a board names the session, not just the
    *  count. Optional: a plane without it contributes counts but no
@@ -123,6 +132,13 @@ export function clearSessionPlanes(): void {
 export interface SessionQuota {
   maxSessions: number
   maxWorkers?: number
+  /** The BATCH lane's own worker cap — the fleet's share of the worker
+   *  budget. The interactive lane keeps the rest of `maxWorkers`. A
+   *  batch spawn is one carrying a supervisor marker (BRO_PR for a drive
+   *  fixer, BRO_MOL_ID for a loop member) — the marker rides into the
+   *  worker process, so the plane can tell the two populations apart.
+   *  Unset = one budget for everyone (spec bro-9h86l). */
+  maxBatchWorkers?: number
   reservationsDir?: string
   invalid?: boolean
   invalidKey?: string
@@ -139,7 +155,7 @@ export function sessionQuotaConfig(
   const reservationsDir =
     typeof bag['reservationsDir'] === 'string' ? bag['reservationsDir'] : undefined
   const lane = (
-    key: 'maxSessions' | 'maxWorkers'
+    key: 'maxSessions' | 'maxWorkers' | 'maxBatchWorkers'
   ): { n: number } | { invalid: true } | undefined => {
     const v = bag[key]
     if (v === undefined || v === 0) {
@@ -152,14 +168,17 @@ export function sessionQuotaConfig(
   }
   const sessions = lane('maxSessions')
   const workers = lane('maxWorkers')
-  if (sessions === undefined && workers === undefined) {
+  const batchWorkers = lane('maxBatchWorkers')
+  if (sessions === undefined && workers === undefined && batchWorkers === undefined) {
     return undefined
   }
   const bad = sessions !== undefined && 'invalid' in sessions
     ? 'maxSessions'
     : workers !== undefined && 'invalid' in workers
       ? 'maxWorkers'
-      : undefined
+      : batchWorkers !== undefined && 'invalid' in batchWorkers
+        ? 'maxBatchWorkers'
+        : undefined
   if (bad !== undefined) {
     return { maxSessions: 0, reservationsDir, invalid: true, invalidKey: bad }
   }
@@ -169,6 +188,9 @@ export function sessionQuotaConfig(
   }
   if (workers !== undefined && 'n' in workers) {
     quota.maxWorkers = workers.n
+  }
+  if (batchWorkers !== undefined && 'n' in batchWorkers) {
+    quota.maxBatchWorkers = batchWorkers.n
   }
   return quota
 }
@@ -248,6 +270,22 @@ export function releaseSessionSlot(path: string): void {
   rmSync(path, { force: true })
 }
 
+/** The BATCH lane — a spawn the fleet owns. A drive fixer carries
+ *  `BRO_PR`; a loop member carries `BRO_MOL_ID`. Both are in the
+ *  spawn's env, and the child's env is `{ ...process.env, ...spec.env }`
+ *  — so the marker rides into the worker process and a plane can
+ *  classify a live worker from its environment. An interactive spawn
+ *  (a person at a terminal) carries neither. */
+export function isBatchSpawn(env: Record<string, string> | undefined): boolean {
+  if (env === undefined) {
+    return false
+  }
+  return (
+    (env['BRO_PR'] !== undefined && env['BRO_PR'] !== '') ||
+    (env['BRO_MOL_ID'] !== undefined && env['BRO_MOL_ID'] !== '')
+  )
+}
+
 /** The lane checks inside the admission mutex. The plane counts run
  *  BEFORE the reservation tally: a plane that can see its own session
  *  marks retires a landed spawn's still-fresh `.slot` inside its own
@@ -267,6 +305,8 @@ function checkSessionLanes(
 ): void {
   const refused = opts.molStep !== undefined ? ` — spawn of ${opts.molStep} refused` : ''
   const maxWorkers = quota.maxWorkers ?? 0
+  const maxBatchWorkers = quota.maxBatchWorkers ?? 0
+  const batch = isBatchSpawn(opts.workerEnv)
   const sessions = quota.maxSessions > 0 ? plane.countLive(bag, opts.workerEnv) : 0
   const workers =
     maxWorkers > 0 && plane.countWorkers !== undefined
@@ -280,6 +320,26 @@ function checkSessionLanes(
         refused,
       'cap'
     )
+  }
+  if (maxBatchWorkers > 0 && batch) {
+    // the fleet's own share of the worker budget
+    if (plane.countBatchWorkers === undefined) {
+      throw new SpawnError(
+        `agents.${plane.kind}.maxBatchWorkers is set but the '${plane.kind}' session plane ` +
+          `cannot distinguish batch workers from interactive sessions` +
+          refused,
+        'config'
+      )
+    }
+    const batchWorkers = plane.countBatchWorkers(bag, opts.workerEnv)
+    if (batchWorkers + reservations >= maxBatchWorkers) {
+      throw new SpawnError(
+        `${plane.kind} batch worker quota reached — ${batchWorkers + reservations}/${maxBatchWorkers} live batch workers ` +
+          `(agents.${plane.kind}.maxBatchWorkers in bro.config)` +
+          refused,
+        'cap'
+      )
+    }
   }
   if (maxWorkers > 0) {
     if (plane.countWorkers === undefined) {

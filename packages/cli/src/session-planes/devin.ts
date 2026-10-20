@@ -216,6 +216,41 @@ export function devinPidIsWorker(pid: number, procDir = '/proc'): boolean {
   }
 }
 
+/** Is this worker the FLEET's — a batch spawn (a drive fixer, a loop
+ *  member) rather than the operator's own session? The supervisor
+ *  marker rides in the spawn's env and the child's env is
+ *  `{ ...process.env, ...spec.env }`, so the worker's own environment
+ *  answers the question (spec bro-9h86l). Unreadable environ = not a
+ *  batch worker: the count then UNDERcounts, and an undercount refuses
+ *  fewer real spawns — never a phantom that starves the lane. */
+export function devinPidIsBatch(pid: number, procDir = '/proc'): boolean {
+  try {
+    const environ = readFileSync(join(procDir, String(pid), 'environ'), 'utf8')
+    // NUL-anchored, like the worker predicate — an unanchored match
+    // would take XBRO_PR= (the AGENT_ENV_RE convention)
+    return /(?:^|\0)BRO_(?:PR|MOL_ID)=/.test(environ)
+  } catch {
+    return false
+  }
+}
+
+/** Live BATCH workers — the fleet's share of the worker pool. The
+ *  same live set as countDevinWorkers, filtered by the supervisor
+ *  marker in each worker's environment. */
+export function countDevinBatchWorkers(
+  dirs: string[],
+  isBatch: (pid: number) => boolean = devinPidIsBatch,
+  procDir = '/proc'
+): number {
+  let batch = 0
+  for (const pid of liveDevinLockPids(dirs)) {
+    if (isBatch(pid)) {
+      batch++
+    }
+  }
+  return batch
+}
+
 /** Live worker sessions — the spawned subset of liveDevinLockPids.
  *  `isWorker` injectable for tests; the default is the /proc
  *  classifier, and a host with no procDir at all cannot tell ONE
@@ -514,6 +549,13 @@ export const devinSessionPlane: SessionPlane = {
       devinSessionDirs(bag, workerEnv),
       devinPidIsWorker,
       devinSlotsDir(bag)
+    )
+  },
+  countBatchWorkers(bag, workerEnv) {
+    return countDevinBatchWorkers(
+      devinSessionDirs(bag, workerEnv),
+      devinPidIsBatch,
+      devinProcDir(bag)
     )
   },
   listLive(bag, workerEnv) {

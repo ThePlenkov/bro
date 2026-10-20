@@ -38,6 +38,7 @@ import {
   agentsSection,
   bdActor,
   admitSessionSlot,
+  isBatchSpawn,
   claimStep,
   classifyExitCause,
   cliCommandModel,
@@ -1402,6 +1403,38 @@ function guardClaim(
  *  can never be rebound. `opts.isLive` is the backend's liveness probe
  *  on an existing entry; `opts.entry` merges backend-private fields
  *  (tmux's session name) into the patch. */
+/** The refusal a BATCH spawn gets when its provider is walled.
+ *
+ * A rate-limited death is a fact about the ACCOUNT, not about the agent
+ * that died: the per-agent respawn guard only covers that molStep, so
+ * the next fleet spawn walks into the same wall (observed 2026-10-20 —
+ * five fixers died `rate_limited` in a row, each a fresh step). The wall
+ * is DERIVED from the registry (spec bro-1x7p: walls derived, not
+ * stored) and it is the fleet's problem: the interactive lane is not
+ * blocked (spec bro-9h86l).
+ *
+ * Returns undefined when the spawn may proceed. */
+export function batchWallRefusal(
+  registry: Record<string, AgentRegistryEntry>,
+  spec: { provider?: string; env?: Record<string, string>; molStep?: string },
+  now: number = Date.now()
+): SpawnError | undefined {
+  if (spec.provider === undefined || !isBatchSpawn(spec.env)) {
+    return undefined
+  }
+  const wall = deriveProviderWalls(registry, now).find((w) => w.provider === spec.provider)
+  if (wall === undefined) {
+    return undefined
+  }
+  const til = wall.until !== undefined ? ` til ${wall.until}` : ''
+  return new SpawnError(
+    `${wall.provider} walled — ${wall.cause}${til} ` +
+      `(the batch lane waits; an interactive spawn is not blocked)` +
+      (spec.molStep !== undefined ? ` — spawn of ${spec.molStep} refused` : ''),
+    'cap'
+  )
+}
+
 function prepareSpawn(
   dir: string,
   home: string,
@@ -1433,6 +1466,16 @@ function prepareSpawn(
 ): { agentId: string; promptFile: string; log: string; exitFile: string; reservation?: string } {
   const registry = readAgentRegistry(dir)
   const existing = registry[spec.molStep]
+  // A batch spawn must not walk into a provider wall the fleet already
+  // hit. The wall is DERIVED from the registry (spec bro-1x7p: walls
+  // derived, not stored) and it is an ACCOUNT fact: one rate-limited
+  // death walls the provider for every fleet spawn, not just the agent
+  // that died. The interactive lane is not blocked — a wall the fleet hit
+  // is the fleet's problem (spec bro-9h86l).
+  const wallRefusal = batchWallRefusal(registry, spec)
+  if (wallRefusal !== undefined) {
+    throw wallRefusal
+  }
   guardExistingEntry(dir, home, backend, spec, existing, opts)
   const { claimed, actor, phantom } = guardClaim(spec, existing !== undefined, opts.claimAs)
   // fleet admission — before the registry write + claim land, so a

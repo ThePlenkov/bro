@@ -16,6 +16,7 @@ import {
   admitSessionSlot,
   clearSessionPlanes,
   countSessionReservations,
+  isBatchSpawn,
   registerSessionPlane,
   releaseSessionSlot,
   reserveSessionSlot,
@@ -181,6 +182,74 @@ describe('session slot reservations', () => {
         rmSync(join(dir, 'admission.mutex'), { force: true })
       }
     })
+  })
+})
+
+describe('the batch lane (spec bro-9h86l)', () => {
+  /** A plane that can split its workers into the fleet's and the
+   *  operator's — the split the batch cap gates. */
+  const splittingPlane = (kind: string, live: number, batch: number): SessionPlane => ({
+    kind,
+    detectsCli: (cli) => cli === `${kind}-cli`,
+    countLive: () => live,
+    countWorkers: () => live,
+    countBatchWorkers: () => batch,
+  })
+
+  test('a batch spawn is the one carrying a supervisor marker', () => {
+    assert.equal(isBatchSpawn({ BRO_PR: '599' }), true)
+    assert.equal(isBatchSpawn({ BRO_MOL_ID: 'bro-mol-x' }), true)
+    assert.equal(isBatchSpawn({}), false)
+    assert.equal(isBatchSpawn(undefined), false)
+    // a marker with an empty value is not a marker
+    assert.equal(isBatchSpawn({ BRO_PR: '' }), false)
+  })
+
+  test('the batch lane is capped apart from the interactive one', () => {
+    withDir((resv) => {
+      const agents = { testkind: { maxWorkers: 4, maxBatchWorkers: 1, reservationsDir: resv } }
+      // one batch worker live — the fleet's share is full
+      const plane = splittingPlane('testkind', 3, 1)
+      assert.throws(
+        () => admitSessionSlot(plane, agents, { key: 'native-aa', molStep: 'fx-1', workerEnv: { BRO_PR: '599' } }),
+        (e: unknown) =>
+          e instanceof SpawnError &&
+          e.kind === 'cap' &&
+          /batch worker quota reached — 1\/1 live batch workers.*fx-1/.test(e.message)
+      )
+      // the interactive lane still has room: 3 live of 4, no batch marker
+      assert.doesNotThrow(() =>
+        admitSessionSlot(plane, agents, { key: 'native-bb', workerEnv: {} })
+      )
+    })
+  })
+
+  test('a plane that cannot split refuses config when the batch cap is armed', () => {
+    withDir((resv) => {
+      const agents = { testkind: { maxBatchWorkers: 1, reservationsDir: resv } }
+      // no countBatchWorkers — the cap cannot be enforced, so it refuses
+      // loudly instead of silently unguard-ing the lane
+      assert.throws(
+        () => admitSessionSlot(testPlane('testkind'), agents, { key: 'native-aa', molStep: 'fx-2', workerEnv: { BRO_PR: '1' } }),
+        (e: unknown) =>
+          e instanceof SpawnError &&
+          e.kind === 'config' &&
+          /maxBatchWorkers is set.*cannot distinguish batch workers.*fx-2/.test(e.message)
+      )
+      // the interactive lane is not gated by a cap it does not consume
+      assert.doesNotThrow(() => admitSessionSlot(testPlane('testkind'), agents, { key: 'native-bb' }))
+    })
+  })
+
+  test('the batch cap is parsed like every other lane knob', () => {
+    const ok = sessionQuotaConfig({ testkind: { maxBatchWorkers: 2 } }, 'testkind')
+    assert.equal(ok?.maxBatchWorkers, 2)
+    // absent = one budget for everyone
+    assert.equal(sessionQuotaConfig({ testkind: { maxWorkers: 4 } }, 'testkind')?.maxBatchWorkers, undefined)
+    // a typo refuses loudly at admission, never a silent admit
+    const bad = sessionQuotaConfig({ testkind: { maxBatchWorkers: 'x' } }, 'testkind')
+    assert.equal(bad?.invalid, true)
+    assert.equal(bad?.invalidKey, 'maxBatchWorkers')
   })
 })
 

@@ -390,6 +390,7 @@ export {
   admitSessionSlot,
   clearSessionPlanes,
   countSessionReservations,
+  isBatchSpawn,
   registerSessionPlane,
   releaseSessionSlot,
   reserveSessionSlot,

@@ -18,6 +18,7 @@ import {
   countDevinWorkers,
   devinLocksDir,
   devinLogsDir,
+  devinPidIsBatch,
   devinPidIsWorker,
   devinSessionPlane,
   devinSessionTranscript,
@@ -167,6 +168,36 @@ describe('devinPidIsWorker', () => {
       assert.equal(devinPidIsWorker(301, procDir), false)
       mk(302, 'PATH=/bin\0', null) // environ read, no badge, stdin unknown
       assert.equal(devinPidIsWorker(302, procDir), false)
+    })
+  })
+})
+
+describe('devinPidIsBatch (spec bro-9h86l)', () => {
+  test('the supervisor marker in the worker env classifies the fleet lane', () => {
+    withProc((procDir, mk) => {
+      // a drive fixer — the spawn env carries BRO_PR
+      mk(501, 'PATH=/bin\0BRO_PR=599\0BRO_PR_URL=https://gh\0', 'pipe:[1]')
+      assert.equal(devinPidIsBatch(501, procDir), true)
+      // a loop member — BRO_MOL_ID
+      mk(502, 'PATH=/bin\0BRO_MOL_ID=bro-mol-x\0', 'pipe:[1]')
+      assert.equal(devinPidIsBatch(502, procDir), true)
+      // the operator's own session — no marker
+      mk(503, 'PATH=/bin\0HOME=/h\0', 'pipe:[1]')
+      assert.equal(devinPidIsBatch(503, procDir), false)
+    })
+  })
+
+  test('NUL-anchored — a lookalike suffix does not classify', () => {
+    withProc((procDir, mk) => {
+      mk(504, 'PATH=/bin\0XBRO_PR=spoof\0', 'pipe:[1]')
+      assert.equal(devinPidIsBatch(504, procDir), false)
+    })
+  })
+
+  test('no readable environ is not a batch worker — undercount, never phantom', () => {
+    withProc((procDir, mk) => {
+      mk(505, null, null)
+      assert.equal(devinPidIsBatch(505, procDir), false)
     })
   })
 })

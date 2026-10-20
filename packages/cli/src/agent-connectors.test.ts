@@ -50,6 +50,7 @@ import {
   makeTmuxConnector,
   pidAlive,
   registerAgentConnector,
+  batchWallRefusal,
   resolveAgentConnector,
   resolveSpawnProvider,
   sessionKindOf,
@@ -2240,5 +2241,57 @@ describe('devin connector', () => {
     } finally {
       rmSync(root, { recursive: true, force: true })
     }
+  })
+})
+
+describe('the provider wall blocks the batch lane only (spec bro-9h86l)', () => {
+  const future = '2099-01-01T00:00:00Z'
+  const past = '2020-01-01T00:00:00Z'
+  const walled = (resetAt: string): Record<string, AgentRegistryEntry> => ({
+    'fx-dead': {
+      agentId: 'native-dead',
+      backend: 'native',
+      spawnedAt: '2026-10-20T00:00:00Z',
+      provider: 'devin',
+      cause: 'rate_limited',
+      resetAt,
+    },
+  })
+
+  test('a batch spawn is refused while the provider is walled', () => {
+    const err = batchWallRefusal(walled(future), {
+      provider: 'devin',
+      env: { BRO_PR: '599' },
+      molStep: 'fx-2',
+    })
+    assert.ok(err !== undefined)
+    assert.equal(err.kind, 'cap')
+    assert.match(err.message, /devin walled — rate_limited til/)
+    assert.match(err.message, /spawn of fx-2 refused/)
+  })
+
+  test('the interactive lane is not blocked by the fleet\'s wall', () => {
+    // no supervisor marker — a person at a terminal
+    assert.equal(
+      batchWallRefusal(walled(future), { provider: 'devin', env: {} }),
+      undefined
+    )
+    assert.equal(batchWallRefusal(walled(future), { provider: 'devin' }), undefined)
+  })
+
+  test('another provider is not this wall', () => {
+    assert.equal(
+      batchWallRefusal(walled(future), { provider: 'kilo-free', env: { BRO_PR: '1' } }),
+      undefined
+    )
+    // and a spawn with no provider provenance cannot map to a wall
+    assert.equal(batchWallRefusal(walled(future), { env: { BRO_PR: '1' } }), undefined)
+  })
+
+  test('an expired wall admits again', () => {
+    assert.equal(
+      batchWallRefusal(walled(past), { provider: 'devin', env: { BRO_PR: '599' } }),
+      undefined
+    )
   })
 })
