@@ -92,11 +92,13 @@ export interface ProviderEndpoint {
  *  trailing slash); URL parsing normalizes all three. The path
  *  survives — a base carrying one (/custom) is not a listener that
  *  serves root-anchored /v1/*, so the pin misses (fails closed)
- *  instead of returning a token for a URL that would only 404. */
+ *  instead of returning a token for a URL that would only 404.
+ *  [::1] stays unfolded: the bind is IPv4-only, so an ipv6 pin is an
+ *  endpoint the listener never serves and must miss like a remote. */
 function normalizeBase(raw: string): string {
   try {
     const u = new URL(raw.trim())
-    if (u.hostname === 'localhost' || u.hostname === '[::1]') {
+    if (u.hostname === 'localhost') {
       u.hostname = '127.0.0.1'
     }
     return u.origin + u.pathname.replace(/\/+$/, '')
@@ -520,13 +522,21 @@ export async function ensureProvider(
 }
 
 /** Which port a token self-heal may spawn on: unset base → the
- *  well-known default; a loopback pin → its port; a portless or remote
- *  base can never be a local spawn — fail closed, never bind it. */
+ *  well-known default; a loopback pin → its port; anything else can
+ *  never be a local spawn — fail closed, never bind it. */
 function ensurePort(base: string | undefined): number | undefined {
   if (base === undefined || base.trim() === '') return DEFAULT_PROVIDER_PORT
   try {
     const u = new URL(base.trim())
-    if (u.hostname !== '127.0.0.1' && u.hostname !== 'localhost' && u.hostname !== '[::1]') {
+    // the spawned listener serves plain HTTP on IPv4 loopback at root
+    // only — an https, [::1], or path-carrying pin names an endpoint it
+    // can never satisfy, so it fails closed like a remote target
+    // rather than print a token for a URL the client cannot use
+    if (
+      u.protocol !== 'http:' ||
+      (u.hostname !== '127.0.0.1' && u.hostname !== 'localhost') ||
+      u.pathname !== '/'
+    ) {
       return undefined
     }
     // a portless base names no listener — the implied 80/443 is a
@@ -570,7 +580,7 @@ async function cmdEnsure(argv: string[]): Promise<void> {
     const port = flagPort !== -1 ? flagPort : ensurePort(process.env.ANTHROPIC_BASE_URL)
     if (port === undefined) {
       throw new Error(
-        'ANTHROPIC_BASE_URL is not a usable loopback target (remote, portless, or :0) — refusing to bind a local listener for it'
+        'ANTHROPIC_BASE_URL names an endpoint the listener cannot serve (non-http, non-loopback, path-carrying, portless, or :0) — refusing to bind a local listener for it'
       )
     }
     // apiKeyHelper contract: the token alone on stdout — no decoration

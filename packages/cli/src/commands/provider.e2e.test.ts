@@ -182,6 +182,21 @@ describe('bro provider e2e', () => {
       })
       assert.equal(portless.code, 1)
       assert.match(portless.stderr, /no live bro provider listener/)
+      // https, ipv6, and path-carrying pins name endpoints a plain-HTTP
+      // IPv4 listener can never serve — the helper fails closed rather
+      // than spawn a listener and print a token for an unusable URL
+      for (const bad of [
+        'https://127.0.0.1:4545',
+        'http://[::1]:4545',
+        'http://127.0.0.1:4545/custom',
+      ]) {
+        const r = runCli(['provider', 'token'], {
+          cwd,
+          env: { ...env, ANTHROPIC_BASE_URL: bad },
+        })
+        assert.equal(r.code, 1, bad)
+        assert.match(r.stderr, /no live bro provider listener/, bad)
+      }
     } finally {
       if (child.exitCode === null && !child.killed) {
         child.kill('SIGKILL')
