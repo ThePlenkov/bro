@@ -517,6 +517,11 @@ export function disposeQuiet(live: { dispose(): void }): void {
 export interface AcpLinkPool {
   /** The warm peer — spawned lazily, shared until its transport dies. */
   link(parent?: OtelCtx): Promise<AcpPeer>
+  /** The resolved peer behind `link` — undefined before the first
+   *  spawn resolves and after death until the respawn. The
+   *  /api/v1/terminals plane reads the peer's registry through it
+   *  (bro-eua0d). */
+  live(): AcpPeer | undefined
   /** `cb` runs when the pooled transport dies — the caller drops every
    *  session the dead link carried before the next link() respawns. */
   onDeath(cb: () => void): void
@@ -538,6 +543,7 @@ export function acpLinkPool(
   timeoutMs: number
 ): AcpLinkPool {
   let link: Promise<AcpPeer> | undefined
+  let live: AcpPeer | undefined
   const deathHooks: Array<() => void> = []
   // close() is sync, safe in an 'exit' handler; an in-flight link
   // resolve is a ms-scale window.
@@ -555,12 +561,14 @@ export function acpLinkPool(
   }
   return {
     onDeath: (cb) => deathHooks.push(cb),
+    live: () => live,
     link(parent) {
       if (link === undefined) {
         otelEvent('acp.spawn', { backend: by })
         link = acpOpen(by, entry, opts, Date.now() + timeoutMs, parent)
         link.then(
           (p) => {
+            live = p
             pooledPeers.add(p)
             // a peer aborted BEFORE the listener attaches never fires
             // it — replay the dead state or the pool keeps serving a
@@ -572,6 +580,7 @@ export function acpLinkPool(
               }
               dead = true
               link = undefined
+              live = undefined
               pooledPeers.delete(p)
               for (const cb of deathHooks) {
                 cb()
@@ -3229,7 +3238,7 @@ export function conductorProxy(
       }
       await route(req, res, httpSpan.ctx)
     },
-    { terminals: () => live?.terminals }
+    { terminals: () => pool.live()?.terminals }
   )
 }
 

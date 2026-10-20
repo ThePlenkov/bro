@@ -278,10 +278,67 @@ describe('serve /api/v1/acp — the native ACP transport', () => {
           sessionId: 'sess-1',
           prompt: [{ type: 'text', text: 'two' }],
         }),
-        (e: unknown) => e instanceof RequestError && /mid-turn/.test(e.message)
+        (e: unknown) =>
+          e instanceof RequestError && e.code === -32001 && /mid-turn/.test(e.message)
       )
       gate.resolve()
       await p
+    } finally {
+      await c.conn.close()
+      await close()
+    }
+  })
+
+  test('upstream auth_required survives the wrap — session/new and prompt keep -32000', async () => {
+    const fake = fakeAcpAgent({
+      failNew: 'auth',
+      authMethods: [{ id: 'oauth', name: 'OAuth' }],
+    })
+    const { url, close } = await listen(
+      deps({ acp: acpTransport(CFG, { acp: { peer: fake.app } }) })
+    )
+    const c = openClient(url)
+    try {
+      await c.agent.request('initialize', INIT_PARAMS)
+      // a client that can't tell auth_required from internal-error can
+      // never drive the forwarded `authenticate` recovery
+      await assert.rejects(
+        c.agent.request('session/new', { cwd: '/w', mcpServers: [] }),
+        (e: unknown) => e instanceof RequestError && e.code === -32000
+      )
+    } finally {
+      await c.conn.close()
+      await close()
+    }
+  })
+
+  test('a failed prompt closes upstream and evicts the brokered session', async () => {
+    const fake = fakeAcpAgent({ failPrompt: 'auth' })
+    const { url, close } = await listen(
+      deps({ acp: acpTransport(CFG, { acp: { peer: fake.app } }) })
+    )
+    const c = openClient(url)
+    try {
+      await c.agent.request('initialize', INIT_PARAMS)
+      await c.agent.request('session/new', { cwd: '/w', mcpServers: [] })
+      await assert.rejects(
+        c.agent.request('session/prompt', {
+          sessionId: 'sess-1',
+          prompt: [{ type: 'text', text: 'go' }],
+        }),
+        (e: unknown) => e instanceof RequestError && e.code === -32000
+      )
+      // evicted + closed upstream — a retry gets session-not-found,
+      // not a stale handle talking to a dead session
+      await until(() => fake.closes.includes('sess-1'), 'upstream session/close')
+      await assert.rejects(
+        c.agent.request('session/prompt', {
+          sessionId: 'sess-1',
+          prompt: [{ type: 'text', text: 'again' }],
+        }),
+        (e: unknown) => e instanceof RequestError && e.code === -32002
+      )
+      assert.deepEqual(fake.prompts, ['go'])
     } finally {
       await c.conn.close()
       await close()

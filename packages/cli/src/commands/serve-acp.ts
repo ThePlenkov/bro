@@ -60,6 +60,9 @@ interface BrokeredSession {
    *  error: the update queue is per-session single-reader, a second
    *  pump would steal the first turn's updates (spec §wire table). */
   busy: boolean
+  /** The sweep's TTL + LRU cursor — touched on every hit so an idle
+   *  session ages out but a working one doesn't. */
+  lastSeen: number
 }
 
 /** Per-connection state — minted inside `buildAgent` so it is exactly
@@ -84,13 +87,35 @@ const BROKER_CLIENT_CAPS: ClientCapabilities = {
   terminal: true,
 }
 
+/** Server-defined (-32000..-32099 is implementation's): the session
+ *  exists but is mid-turn — a caller-side conflict a client can retry,
+ *  not the broker breaking (-32603) and not auth_required (-32000) or
+ *  resource_not_found (-32002), which the SDK already assigns. */
+const SESSION_BUSY = -32001
+
+/** A brokered turn is session-scoped — thinking, tool calls, subagents
+ *  routinely run past the per-request `timeoutMs` the conductor gives
+ *  one Messages-API call. The floor keeps a wedged agent from parking
+ *  the turn forever; client cancel/disconnect still cuts it short. */
+const TURN_TIMEOUT_MS = 30 * 60_000
+
+/** The conductor's conversation-map posture, mirrored: a brokered
+ *  session pins real upstream context + cost, so the map can't grow
+ *  unbounded — TTL first, then oldest-out to the cap. */
+const SESS_TTL_MS = 10 * 60_000
+const SESS_CAP = 32
+
 /** Thrown handler errors land on the wire as JSON-RPC errors — a plain
- *  Error becomes "Internal error" and loses the detail. Preserve the
- *  message (and any RequestError code) so the client sees what
- *  happened. */
+ *  Error becomes "Internal error" and loses the detail. Provider
+ *  wrappers (AcpConfigError, JudgeUnavailable) keep the upstream error
+ *  as `cause`: the FIRST RequestError down the chain is the agent's
+ *  own answer — its code is what a client recovers on (auth_required
+ *  → authenticate), so rethrow it verbatim. */
 function asWireError(err: unknown): never {
-  if (err instanceof RequestError) {
-    throw err
+  for (let e: unknown = err; e instanceof Error; e = e.cause) {
+    if (e instanceof RequestError) {
+      throw e
+    }
   }
   throw new RequestError(-32603, err instanceof Error ? err.message : String(err))
 }
@@ -119,6 +144,10 @@ export function acpTransport(
     if (sess === undefined || (conn !== undefined && sess.conn !== conn)) {
       return undefined
     }
+    // hits re-insert — insertion order IS the sweep's LRU order
+    sess.lastSeen = Date.now()
+    sessions.delete(sid as string)
+    sessions.set(sid as string, sess)
     return sess
   }
 
@@ -172,6 +201,41 @@ export function acpTransport(
     disposeQuiet(sess.retained)
   }
 
+  /** Best-effort upstream close, then release — shared by disconnect
+   *  teardown, the sweep, a failed turn's eviction, and a session that
+   *  landed after its conn died. Fire-and-forget: a dead upstream must
+   *  not stall the drop, but even a wedged one answers inside the
+   *  request budget (peer.req is a deadline, not a hang). */
+  const closeUpstream = (sess: BrokeredSession, sid: string): void => {
+    void sess.peer.ctx
+      .request(
+        'session/close',
+        { sessionId: sid },
+        sess.peer.req(Date.now() + cfg.timeoutMs)
+      )
+      .catch(() => {
+        // dead upstream — the local drop is the point
+      })
+    release(sid)
+  }
+
+  /** Idle-beyond-TTL and oldest-over-cap eviction — the same posture
+   *  the conductor's sweepSessions takes. Runs where the map grows
+   *  (session/new); a mid-turn session is off-limits — its own failure
+   *  path evicts it. */
+  const sweep = (): void => {
+    const now = Date.now()
+    let overflow = Math.max(0, sessions.size - SESS_CAP)
+    for (const [sid, s] of sessions) {
+      if (s.busy) {
+        continue
+      }
+      if (now - s.lastSeen > SESS_TTL_MS || overflow-- > 0) {
+        closeUpstream(s, sid)
+      }
+    }
+  }
+
   /** Client disconnect (DELETE, socket death, the SDK's output-stall
    *  close) → close each owned session upstream best-effort, then drop
    *  the local handles — a disconnect never leaks a peer session. */
@@ -187,12 +251,7 @@ export function acpTransport(
       if (sess === undefined) {
         continue
       }
-      sessions.delete(sid)
-      st.sessions.delete(sid)
-      void sess.peer.ctx.request('session/close', { sessionId: sid }).catch(() => {
-        // dead upstream — the local drop is the point
-      })
-      disposeQuiet(sess.retained)
+      closeUpstream(sess, sid)
     }
     st.sessions.clear()
   }
@@ -220,7 +279,16 @@ export function acpTransport(
       throw RequestError.resourceNotFound(idOf(params))
     }
     try {
-      return (await sess.peer.ctx.request(method, params)) ?? {}
+      // every forwarded request rides the same per-request budget the
+      // provider mints — a wedged peer fails fast instead of parking
+      // the JSON-RPC call forever
+      return (
+        (await sess.peer.ctx.request(
+          method,
+          params,
+          sess.peer.req(Date.now() + cfg.timeoutMs)
+        )) ?? {}
+      )
     } catch (err) {
       asWireError(err)
     }
@@ -280,6 +348,9 @@ export function acpTransport(
         raw,
         async (ctx) => {
           try {
+            // the map grows only here — TTL + cap evictions run at the
+            // point a new session would push past them
+            sweep()
             const peer = await pool.link()
             // the client's session/new params verbatim (cwd, mcpServers,
             // _meta) + the configured model pin inside acpSessionRetain
@@ -299,24 +370,21 @@ export function acpTransport(
               prev.conn.sessions.delete(retained.sessionId)
               disposeQuiet(prev.retained)
             }
-            sessions.set(retained.sessionId, {
+            const brokered: BrokeredSession = {
               retained,
               peer,
               client: ctx.client,
               conn: st,
               busy: false,
-            })
+              lastSeen: Date.now(),
+            }
+            sessions.set(retained.sessionId, brokered)
             st.sessions.add(retained.sessionId)
             // conn.closed may have settled mid-retain — dropConn already
             // ran and can never see this session: close it upstream +
             // drop the handle now or it orphans on a dead connection
             if (st.dropped) {
-              void peer.ctx
-                .request('session/close', { sessionId: retained.sessionId })
-                .catch(() => {
-                  // dead upstream — the local drop is the point
-                })
-              release(retained.sessionId)
+              closeUpstream(brokered, retained.sessionId)
             }
             // a bro--<bead-id>-shaped session cwd attributes the
             // session (dirs are named <repo>--<beadId>, the bead id
@@ -346,7 +414,7 @@ export function acpTransport(
           }
           if (sess.busy) {
             throw new RequestError(
-              -32603,
+              SESSION_BUSY,
               `session ${sid} is mid-turn — one prompt at a time`
             )
           }
@@ -354,7 +422,10 @@ export function acpTransport(
           try {
             const r = await sess.retained.prompt(
               ctx.params.prompt as ContentBlock[],
-              Date.now() + cfg.timeoutMs,
+              // a turn's budget is session-scoped, not the per-request
+              // timeoutMs — thinking + tools + subagents legitimately
+              // outrun the conductor's HTTP budget
+              Date.now() + Math.max(cfg.timeoutMs, TURN_TIMEOUT_MS),
               {
                 signal: ctx.signal,
                 by,
@@ -374,9 +445,20 @@ export function acpTransport(
             )
             return r.response
           } catch (err) {
+            // retained.prompt already dropped its handle — the brokered
+            // entry is dead weight: close upstream best-effort and
+            // unindex it or the next call on this id talks to a session
+            // whose context the agent already forgot
+            if (sid !== undefined && sessions.get(sid) === sess) {
+              closeUpstream(sess, sid)
+            }
             asWireError(err)
           } finally {
             sess.busy = false
+            // a just-finished turn isn't "idle since prompt start" —
+            // reset the TTL cursor or the next sweep evicts a live
+            // session that merely ran long
+            sess.lastSeen = Date.now()
           }
         }
       )
@@ -394,7 +476,13 @@ export function acpTransport(
             throw RequestError.resourceNotFound(sid)
           }
           try {
-            return (await sess.peer.ctx.request('session/close', ctx.params)) ?? {}
+            return (
+              (await sess.peer.ctx.request(
+                'session/close',
+                ctx.params,
+                sess.peer.req(Date.now() + cfg.timeoutMs)
+              )) ?? {}
+            )
           } catch (err) {
             asWireError(err)
           } finally {
@@ -422,7 +510,13 @@ export function acpTransport(
         async (ctx) => {
           try {
             const peer = await pool.link()
-            return (await peer.ctx.request('authenticate', ctx.params)) ?? {}
+            return (
+              (await peer.ctx.request(
+                'authenticate',
+                ctx.params,
+                peer.req(Date.now() + cfg.timeoutMs)
+              )) ?? {}
+            )
           } catch (err) {
             asWireError(err)
           }

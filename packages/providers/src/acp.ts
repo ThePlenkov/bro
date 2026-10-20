@@ -359,7 +359,11 @@ async function acpInit(
       (!avail && err instanceof Error && /auth|login|credential/i.test(err.message))
     throw isAuth
       ? new AcpConfigError(
-          `${by}: agent requires interactive auth${authHint()} — a judge call can't log in; authenticate the agent CLI itself`
+          `${by}: agent requires interactive auth${authHint()} — a judge call can't log in; authenticate the agent CLI itself`,
+          // the brokered transport's asWireError unwraps the chain — a
+          // downstream client recovers through `authenticate` only if
+          // the upstream auth_required code survives
+          { cause: err }
         )
       : err
   }
@@ -505,7 +509,9 @@ async function withAcp<T>(
     }
     const stderr = tail()
     const detail = stderr === '' ? '' : ` (${stderr})`
-    throw new JudgeUnavailable(`acp ${by} unavailable — ${errMsg(err)}${detail}`)
+    throw new JudgeUnavailable(`acp ${by} unavailable — ${errMsg(err)}${detail}`, {
+      cause: err,
+    })
   } finally {
     terminals.dispose()
     child?.kill('SIGKILL')
@@ -832,6 +838,21 @@ export async function acpOpen(
     span.end({ error: errMsg(err) }, 'error')
     throw err
   }
+  // fs has no local handler — the unbridged app serves only
+  // request_permission(deny) + terminal/*(AcpTerminals); advertising it
+  // anyway makes every agent fs call answer method-not-found. Terminal
+  // is served locally either way, so it never factors here.
+  const caps = opts.acp?.clientCapabilities
+  if (
+    opts.acp?.bridge === undefined &&
+    (caps?.fs?.readTextFile === true || caps?.fs?.writeTextFile === true)
+  ) {
+    fail(
+      new AcpConfigError(
+        `${by}: clientCapabilities advertises fs without acp.bridge — the unbridged link cannot serve it`
+      )
+    )
+  }
   const terminals = new AcpTerminals()
   const app = pooledClientApp(opts, terminals)
   const peer = opts.acp?.peer
@@ -1074,7 +1095,13 @@ export async function acpPooledTurn(
   }
   try {
     const sessSpan = otelSpan('acp.session', { 'acp.by': by }, { parent: span.ctx })
-    const session = await acpSessionOpen(ctx, opts, peer.asAuthError, req)
+    const session = await acpSessionOpen(
+      ctx,
+      opts,
+      peer.asAuthError,
+      req,
+      turn.sessionRequest
+    )
     const endSession = (a: Record<string, string | number | boolean> = {}): void =>
       sessSpan.end({ 'acp.session_id': session.sessionId, ...a })
     try {
@@ -1129,7 +1156,9 @@ export async function acpPooledTurn(
     const tail = peer.tail()
     const detail = tail === '' ? '' : ` (${tail})`
     end({ error: errMsg(err) }, 'error')
-    throw new JudgeUnavailable(`acp ${by} unavailable — ${errMsg(err)}${detail}`)
+    throw new JudgeUnavailable(`acp ${by} unavailable — ${errMsg(err)}${detail}`, {
+      cause: err,
+    })
   }
 }
 
@@ -1238,7 +1267,9 @@ export async function acpSessionRetain(
       }
       const tail = peer.tail()
       const detail = tail === '' ? '' : ` (${tail})`
-      return new JudgeUnavailable(`acp ${by} unavailable — ${errMsg(err)}${detail}`)
+      return new JudgeUnavailable(`acp ${by} unavailable — ${errMsg(err)}${detail}`, {
+        cause: err,
+      })
     }
     /** Resolve a request pin on the live session and move the cursor —
      *  shared by prompt() and repin(); a refused pin surfaces config
@@ -1312,7 +1343,9 @@ export async function acpSessionRetain(
     }
     const tail = peer.tail()
     const detail = tail === '' ? '' : ` (${tail})`
-    throw new JudgeUnavailable(`acp ${by} unavailable — ${errMsg(err)}${detail}`)
+    throw new JudgeUnavailable(`acp ${by} unavailable — ${errMsg(err)}${detail}`, {
+      cause: err,
+    })
   }
 }
 
