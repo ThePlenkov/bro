@@ -496,7 +496,9 @@ describe('committed dogfood scenario tree', () => {
   })
 
   test('every claude-* .files carries claude client wiring', () => {
-    for (const s of listScenarios(repoRoot).filter((s) => s.startsWith('claude-'))) {
+    const claude = listScenarios(repoRoot).filter((s) => s.startsWith('claude-'))
+    assert.ok(claude.length > 0, 'no claude-* scenarios committed')
+    for (const s of claude) {
       const files = join(dogfoodDir, `${s}.files`)
       assert.ok(existsSync(files), `${s}.files missing`)
       const settings = JSON.parse(
@@ -514,7 +516,9 @@ describe('committed dogfood scenario tree', () => {
   })
 
   test('every codex-* .files carries codex client wiring', () => {
-    for (const s of listScenarios(repoRoot).filter((s) => s.startsWith('codex-'))) {
+    const codex = listScenarios(repoRoot).filter((s) => s.startsWith('codex-'))
+    assert.ok(codex.length > 0, 'no codex-* scenarios committed')
+    for (const s of codex) {
       const files = join(dogfoodDir, `${s}.files`)
       assert.ok(existsSync(files), `${s}.files missing`)
       const toml = readFileSync(join(files, '.codex', 'config.toml'), 'utf8')
@@ -535,8 +539,21 @@ describe('committed dogfood scenario tree', () => {
     assert.doesNotMatch(effort('codex-basics'), /model_reasoning_effort/)
   })
 
+  test('every .files payload belongs to a committed scenario', () => {
+    // a renamed or lost scenario must not strand its client wiring —
+    // payload dirs and the scenario list agree or the tree fails
+    const scenarios = listScenarios(repoRoot)
+    for (const d of readdirSync(dogfoodDir)) {
+      if (!d.endsWith('.files')) continue
+      const name = d.slice(0, -'.files'.length)
+      assert.ok(scenarios.includes(name), `${d} orphaned — no ${name}.md scenario`)
+    }
+  })
+
   test('every scenario asserts its own dialect on the wire', () => {
-    for (const s of listScenarios(repoRoot)) {
+    const scenarios = listScenarios(repoRoot)
+    assert.ok(scenarios.length > 0, 'no scenarios committed')
+    for (const s of scenarios) {
       const text = readFileSync(join(dogfoodDir, `${s}.md`), 'utf8')
       if (s === 'core-workflow') {
         // the workflow scenario is client-agnostic — no payload, no
