@@ -88,6 +88,7 @@ import {
   type ReviewFacade,
   type SpawnWorker,
   type TaskStore,
+  BATCH_MARKER_ENV,
 } from '@broject/core'
 import {
   checkHistory,
@@ -339,6 +340,7 @@ function agentEnv(ctx: Ctx, extra: Record<string, string>): NodeJS.ProcessEnv {
     'BRO_AGENT_CLASS',
     'BRO_SESSION_ID',
     'BRO_MOL_ID',
+    BATCH_MARKER_ENV,
   ]) {
     delete env[k]
   }
@@ -375,6 +377,11 @@ function provenancePins(ctx: Ctx, beadId: string, lane: LoopLane): Record<string
   if (mol !== undefined) {
     pins.BRO_MOL_ID = mol
   }
+  // the fleet's marker rides on every spawn the loop owns — the raw
+  // template arm included: it runs a fleet worker, and the devin plane
+  // counts it as one (the template arm reserves no quota slot of its
+  // own — bro-3xwvu tracks that gap)
+  pins[BATCH_MARKER_ENV] = '1'
   return pins
 }
 
@@ -798,6 +805,9 @@ async function spawnWorker(ctx: Ctx, m: GateMember, prompt: string, lane: LoopLa
     env: specEnv(ctx, {
       BRO_BEAD_IDS: m.beads.map((b) => b.id).join(','),
       BRO_BEAD_TITLE: clumpTitle(m.beads),
+      // the fleet's own budget must see this worker — the marker rides
+      // on every loop spawn, root bead or not (spec bro-9h86l)
+      [BATCH_MARKER_ENV]: '1',
     }),
     provider: lane.provider,
     model: lane.model,

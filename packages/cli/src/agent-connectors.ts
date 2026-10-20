@@ -38,6 +38,8 @@ import {
   agentsSection,
   bdActor,
   admitSessionSlot,
+  BATCH_MARKER_ENV,
+  isBatchSpawn,
   claimStep,
   classifyExitCause,
   cliCommandModel,
@@ -1402,6 +1404,38 @@ function guardClaim(
  *  can never be rebound. `opts.isLive` is the backend's liveness probe
  *  on an existing entry; `opts.entry` merges backend-private fields
  *  (tmux's session name) into the patch. */
+/** The refusal a BATCH spawn gets when its provider is walled.
+ *
+ * A rate-limited death is a fact about the ACCOUNT, not about the agent
+ * that died: the per-agent respawn guard only covers that molStep, so
+ * the next fleet spawn walks into the same wall (observed 2026-10-20 —
+ * five fixers died `rate_limited` in a row, each a fresh step). The wall
+ * is DERIVED from the registry (spec bro-1x7p: walls derived, not
+ * stored) and it is the fleet's problem: the interactive lane is not
+ * blocked (spec bro-9h86l).
+ *
+ * Returns undefined when the spawn may proceed. */
+export function batchWallRefusal(
+  registry: Record<string, AgentRegistryEntry>,
+  spec: { provider?: string; env?: Record<string, string>; molStep?: string },
+  now: number = Date.now()
+): SpawnError | undefined {
+  if (spec.provider === undefined || !isBatchSpawn(spec.env)) {
+    return undefined
+  }
+  const wall = deriveProviderWalls(registry, now).find((w) => w.provider === spec.provider)
+  if (wall === undefined) {
+    return undefined
+  }
+  const til = wall.until !== undefined ? ` til ${wall.until}` : ''
+  return new SpawnError(
+    `${wall.provider} walled — ${wall.cause}${til} ` +
+      `(the batch lane waits; an interactive spawn is not blocked)` +
+      (spec.molStep !== undefined ? ` — spawn of ${spec.molStep} refused` : ''),
+    'cap'
+  )
+}
+
 function prepareSpawn(
   dir: string,
   home: string,
@@ -1433,8 +1467,30 @@ function prepareSpawn(
 ): { agentId: string; promptFile: string; log: string; exitFile: string; reservation?: string } {
   const registry = readAgentRegistry(dir)
   const existing = registry[spec.molStep]
+  // A batch spawn must not walk into a provider wall the fleet already
+  // hit. The wall is DERIVED from the registry (spec bro-1x7p: walls
+  // derived, not stored) and it is an ACCOUNT fact: one rate-limited
+  // death walls the provider for every fleet spawn, not just the agent
+  // that died. The interactive lane is not blocked — a wall the fleet hit
+  // is the fleet's problem (spec bro-9h86l).
   guardExistingEntry(dir, home, backend, spec, existing, opts)
+  // The wall is derived from the registry — so the registry must carry
+  // the CAUSE: an agent that died with a rate limit but whose .exit
+  // was not harvested yet reads as cause-less, and the fleet walks into
+  // the wall it just hit. Harvest first, then derive.
+  for (const [step, entry] of Object.entries(registry)) {
+    ensureExitCause(dir, home, step, entry)
+  }
+  // the wall refusal comes AFTER the live-agent and claim guards: a
+  // respawn of an agent that is already running is a CONFLICT, and so is
+  // a step another owner already claimed — the caller reads those kinds,
+  // and a 'cap' here would say "the provider is walled" about a spawn
+  // that never needed a provider slot
   const { claimed, actor, phantom } = guardClaim(spec, existing !== undefined, opts.claimAs)
+  const wallRefusal = batchWallRefusal(registry, spec)
+  if (wallRefusal !== undefined) {
+    throw wallRefusal
+  }
   // fleet admission — before the registry write + claim land, so a
   // refusal leaves no half-spawned state
   enforceFleetCap(dir, home, registry, spec, opts.cap)
@@ -2023,8 +2079,22 @@ export function makeNativeConnector(ctx: ConnectorCtx, env: AgentConnectorEnv): 
                 // agents up`/`bro loop` would bleed the parent's
                 // BRO_AGENT_*/BRO_MOL_ID provenance into the child's
                 // commit trailers (bro-fzot's exact bug shape)
+                // The ambient env and the caller's env are filtered
+                // SEPARATELY: the fleet's marker may only come from the
+                // caller (spec.env). Inherited from the ambient env it
+                // would charge a worker's own children — an interactive
+                // session — to the fleet's budget.
                 ...Object.fromEntries(
-                  Object.entries({ ...process.env, ...spec.env }).filter(
+                  Object.entries(process.env).filter(
+                    (e): e is [string, string] =>
+                      e[1] !== undefined &&
+                      !AGENT_PIN_KEYS.has(e[0]) &&
+                      !GIT_REPOSITORY_ENV_KEYS.has(e[0]) &&
+                      e[0] !== BATCH_MARKER_ENV
+                  )
+                ),
+                ...Object.fromEntries(
+                  Object.entries(spec.env ?? {}).filter(
                     (e): e is [string, string] =>
                       e[1] !== undefined &&
                       !AGENT_PIN_KEYS.has(e[0]) &&

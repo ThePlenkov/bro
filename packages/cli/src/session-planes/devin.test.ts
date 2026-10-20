@@ -18,6 +18,7 @@ import {
   countDevinWorkers,
   devinLocksDir,
   devinLogsDir,
+  devinPidIsBatch,
   devinPidIsWorker,
   devinSessionPlane,
   devinSessionTranscript,
@@ -167,6 +168,52 @@ describe('devinPidIsWorker', () => {
       assert.equal(devinPidIsWorker(301, procDir), false)
       mk(302, 'PATH=/bin\0', null) // environ read, no badge, stdin unknown
       assert.equal(devinPidIsWorker(302, procDir), false)
+    })
+  })
+})
+
+describe('devinPidIsBatch (spec bro-9h86l)', () => {
+  test('the supervisor marker in the worker env classifies the fleet lane', () => {
+    withProc((procDir, mk) => {
+      // a fleet spawn — the marker the fleet sets on every spawn
+      mk(501, 'PATH=/bin\0BRO_BATCH=1\0BRO_PR=599\0', 'pipe:[1]')
+      assert.equal(devinPidIsBatch(501, procDir), true)
+      mk(502, 'PATH=/bin\0BRO_BATCH=1\0', 'pipe:[1]')
+      assert.equal(devinPidIsBatch(502, procDir), true)
+      // an EMPTY marker is not a marker — the spawn side says so too
+      mk(506, 'PATH=/bin\0BRO_BATCH=\0', 'pipe:[1]')
+      assert.equal(devinPidIsBatch(506, procDir), false)
+      // the operator's own session — no marker
+      mk(503, 'PATH=/bin\0HOME=/h\0', 'pipe:[1]')
+      assert.equal(devinPidIsBatch(503, procDir), false)
+    })
+  })
+
+  test('NUL-anchored — a lookalike suffix does not classify', () => {
+    withProc((procDir, mk) => {
+      mk(504, 'PATH=/bin\0XBRO_BATCH=spoof\0', 'pipe:[1]')
+      assert.equal(devinPidIsBatch(504, procDir), false)
+    })
+  })
+
+  test('an unclassifiable live worker counts as the fleet\'s — the cap fails closed', () => {
+    withProc((procDir, mk) => {
+      // the environ EXISTS but cannot be read: the pid is a live session
+      // it cannot classify, and a quota that cannot be established must
+      // not be passed silently. (A directory where the file belongs
+      // gives EISDIR — "present, unreadable", not "gone".)
+      mk(505, null, null)
+      mkdirSync(join(procDir, '505', 'environ'), { recursive: true })
+      assert.equal(devinPidIsBatch(505, procDir), true)
+    })
+  })
+
+  test('a pid that is GONE counts for nobody', () => {
+    withProc((procDir, mk) => {
+      // no environ file at all: the process exited between the liveness
+      // check and the read — it holds no slot
+      mk(507, null, null)
+      assert.equal(devinPidIsBatch(507, procDir), false)
     })
   })
 })

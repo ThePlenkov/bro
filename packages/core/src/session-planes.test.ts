@@ -16,6 +16,7 @@ import {
   admitSessionSlot,
   clearSessionPlanes,
   countSessionReservations,
+  isBatchSpawn,
   registerSessionPlane,
   releaseSessionSlot,
   reserveSessionSlot,
@@ -143,7 +144,7 @@ describe('session slot reservations', () => {
   test('reserve counts, release frees, a missing dir reads as zero', () => {
     assert.equal(countSessionReservations(join(tmpdir(), 'bro-resv-absent-')), 0)
     withDir((dir) => {
-      const key = reserveSessionSlot(dir, 'native-abc123')
+      const key = reserveSessionSlot(dir, 'native-abc123', 'interactive')
       assert.equal(countSessionReservations(dir), 1)
       releaseSessionSlot(key)
       assert.equal(countSessionReservations(dir), 0)
@@ -152,7 +153,7 @@ describe('session slot reservations', () => {
 
   test('expired reservations are reaped, not counted', () => {
     withDir((dir) => {
-      reserveSessionSlot(dir, 'native-old')
+      reserveSessionSlot(dir, 'native-old', 'interactive')
       const [f] = readdirSync(dir)
       const stale = join(dir, f)
       const past = new Date(Date.now() - SESSION_SLOT_TTL_MS - 60_000)
@@ -166,8 +167,8 @@ describe('session slot reservations', () => {
     withDir((dir) => {
       // two bro processes minting the same agentId in different repos
       // must each hold a slot — a shared filename would double-admit
-      reserveSessionSlot(dir, 'native-abc123')
-      reserveSessionSlot(dir, 'native-abc123')
+      reserveSessionSlot(dir, 'native-abc123', 'interactive')
+      reserveSessionSlot(dir, 'native-abc123', 'interactive')
       assert.equal(countSessionReservations(dir), 2)
     })
   })
@@ -181,6 +182,92 @@ describe('session slot reservations', () => {
         rmSync(join(dir, 'admission.mutex'), { force: true })
       }
     })
+  })
+})
+
+describe('the batch lane (spec bro-9h86l)', () => {
+  /** A plane that can split its workers into the fleet's and the
+   *  operator's — the split the batch cap gates. */
+  const splittingPlane = (kind: string, live: number, batch: number): SessionPlane => ({
+    kind,
+    detectsCli: (cli) => cli === `${kind}-cli`,
+    countLive: () => live,
+    countWorkers: () => live,
+    countBatchWorkers: () => batch,
+  })
+
+  test('a batch spawn is the one carrying the fleet marker', () => {
+    assert.equal(isBatchSpawn({ BRO_BATCH: '1' }), true)
+    assert.equal(isBatchSpawn({}), false)
+    assert.equal(isBatchSpawn(undefined), false)
+    // a marker with an empty value is not a marker
+    assert.equal(isBatchSpawn({ BRO_BATCH: '' }), false)
+  })
+
+  test('the batch lane is capped apart from the interactive one', () => {
+    withDir((resv) => {
+      const agents = { testkind: { maxWorkers: 4, maxBatchWorkers: 1, reservationsDir: resv } }
+      // one batch worker live — the fleet's share is full
+      const plane = splittingPlane('testkind', 3, 1)
+      assert.throws(
+        () => admitSessionSlot(plane, agents, { key: 'native-aa', molStep: 'fx-1', workerEnv: { BRO_BATCH: '1' } }),
+        (e: unknown) =>
+          e instanceof SpawnError &&
+          e.kind === 'cap' &&
+          /batch worker quota reached — 1\/1 live batch workers.*fx-1/.test(e.message)
+      )
+      // the interactive lane still has room: 3 live of 4, no batch marker
+      assert.doesNotThrow(() =>
+        admitSessionSlot(plane, agents, { key: 'native-bb', workerEnv: {} })
+      )
+    })
+  })
+
+  test('a plane that cannot split refuses config when the batch cap is armed', () => {
+    withDir((resv) => {
+      const agents = { testkind: { maxBatchWorkers: 1, reservationsDir: resv } }
+      // no countBatchWorkers — the cap cannot be enforced, so it refuses
+      // loudly instead of silently unguard-ing the lane
+      assert.throws(
+        () => admitSessionSlot(testPlane('testkind'), agents, { key: 'native-aa', molStep: 'fx-2', workerEnv: { BRO_BATCH: '1' } }),
+        (e: unknown) =>
+          e instanceof SpawnError &&
+          e.kind === 'config' &&
+          /maxBatchWorkers is set.*cannot distinguish batch workers.*fx-2/.test(e.message)
+      )
+      // the interactive lane is not gated by a cap it does not consume
+      assert.doesNotThrow(() => admitSessionSlot(testPlane('testkind'), agents, { key: 'native-bb' }))
+    })
+  })
+
+  test('the batch cap counts the fleet\'s reservations only', () => {
+    withDir((resv) => {
+      const agents = { testkind: { maxBatchWorkers: 1, reservationsDir: resv } }
+      const plane = splittingPlane('testkind', 0, 0)
+      // an INTERACTIVE spawn in flight holds a reservation — it is the
+      // operator's, so it must not eat the fleet's share
+      reserveSessionSlot(resv, 'native-aa', 'interactive')
+      assert.doesNotThrow(() =>
+        admitSessionSlot(plane, agents, { key: 'native-bb', workerEnv: { BRO_BATCH: '1' } })
+      )
+      // a BATCH reservation does count
+      reserveSessionSlot(resv, 'native-cc', 'batch')
+      assert.throws(
+        () => admitSessionSlot(plane, agents, { key: 'native-dd', workerEnv: { BRO_BATCH: '1' } }),
+        (e: unknown) => e instanceof SpawnError && e.kind === 'cap'
+      )
+    })
+  })
+
+  test('the batch cap is parsed like every other lane knob', () => {
+    const ok = sessionQuotaConfig({ testkind: { maxBatchWorkers: 2 } }, 'testkind')
+    assert.equal(ok?.maxBatchWorkers, 2)
+    // absent = one budget for everyone
+    assert.equal(sessionQuotaConfig({ testkind: { maxWorkers: 4 } }, 'testkind')?.maxBatchWorkers, undefined)
+    // a typo refuses loudly at admission, never a silent admit
+    const bad = sessionQuotaConfig({ testkind: { maxBatchWorkers: 'x' } }, 'testkind')
+    assert.equal(bad?.invalid, true)
+    assert.equal(bad?.invalidKey, 'maxBatchWorkers')
   })
 })
 
@@ -231,7 +318,7 @@ describe('admitSessionSlot', () => {
       // sits in the reservations dir. The plane retires it inside its
       // own count, so the tally must run AFTER the plane — counted
       // before, it would read 2/2 and refuse a rightful admit
-      const landed = reserveSessionSlot(resv, 'native-aa')
+      const landed = reserveSessionSlot(resv, 'native-aa', 'interactive')
       const sweeping: SessionPlane = {
         kind: 'testkind',
         detectsCli: () => true,

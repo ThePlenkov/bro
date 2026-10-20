@@ -115,7 +115,9 @@ function liveDevinLockPids(dirs: string[]): Set<number> {
 
 /** A reservation file is `<key>-<8hex>.slot`; for bro spawns the key
  *  IS the worker's `BRO_AGENT_ID` pin. */
-const SLOT_KEY_RE = /^(.+)-[0-9a-f]{8}\.slot$/
+// the lane tag rides the name — the sweep must recognise a batch
+// reservation too, or a landed batch worker stays in the count twice
+const SLOT_KEY_RE = /^(.+)-[0-9a-f]{8}(?:\.batch)?\.slot$/
 
 /** Retire slot claims whose session mark already landed — a live
  *  pid's environ carrying `BRO_AGENT_ID=<key>` proves that spawn's
@@ -214,6 +216,80 @@ export function devinPidIsWorker(pid: number, procDir = '/proc'): boolean {
   } catch {
     return false
   }
+}
+
+/** Is this worker the FLEET's — a batch spawn (a drive fixer, a loop
+ *  member) rather than the operator's own session? The fleet's marker
+ *  rides in the spawn's env and the child's env is
+ *  `{ ...process.env, ...spec.env }`, so the worker's own environment
+ *  answers the question (spec bro-9h86l).
+ *
+ *  An UNREADABLE environ counts as the fleet's: the pid is a real live
+ *  session it simply cannot be classified, and a quota that cannot be
+ *  established must fail closed — the fleet yields a slot it may not
+ *  have used, rather than a cap the fleet can walk past. A pid that is
+ *  GONE (the process exited between the liveness check and this read)
+ *  is not a live session at all, so it counts for nobody. */
+export function devinPidIsBatch(pid: number, procDir = '/proc'): boolean {
+  try {
+    const environ = readFileSync(join(procDir, String(pid), 'environ'), 'utf8')
+    // NUL-anchored, like the worker predicate — an unanchored match
+    // would take XBRO_BATCH= (the AGENT_ENV_RE convention). The value
+    // must be non-empty: an empty marker is not a marker, and the
+    // spawn-side detection says so too.
+    return /(?:^|\0)BRO_BATCH=[^\0]+/.test(environ)
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === 'ENOENT') {
+      // the process exited between the liveness check and this read —
+      // it is gone, not unclassifiable, and a dead pid holds no slot
+      return false
+    }
+    // The environ is unreadable — the pid cannot be classified. It is
+    // a REAL live session (not a phantom), so it is counted as the
+    // fleet's: the batch cap is the fleet's own share, and a quota
+    // must fail closed. The cost is the fleet yields a slot it may not
+    // have used; the alternative is a cap the fleet can pass.
+    return true
+  }
+}
+
+/** Live BATCH workers — the fleet's share of the worker pool. The
+ *  same live set as countDevinWorkers, filtered by the supervisor
+ *  marker in each worker's environment. */
+export function countDevinBatchWorkers(
+  dirs: string[],
+  isBatch?: (pid: number) => boolean,
+  procDir = '/proc',
+  slotsDir?: string
+): number {
+  // the default predicate reads the SAME procDir the scan uses — a
+  // caller with a scripted /proc tree must not be counted against the
+  // real one
+  const predicate = isBatch ?? ((pid: number) => devinPidIsBatch(pid, procDir))
+  const live = liveDevinLockPids(dirs)
+  if (isBatch === undefined && live.size > 0 && !existsSync(procDir)) {
+    // a host without /proc cannot tell the fleet's workers from the
+    // operator's — an armed maxBatchWorkers must refuse there like an
+    // uncountable plane, never silently count zero and admit freely
+    throw new SpawnError(
+      `cannot verify devin batch worker count — ${procDir} absent; ` +
+        'agents.devin.maxBatchWorkers is unenforceable on this host',
+      'unavailable'
+    )
+  }
+  if (slotsDir !== undefined) {
+    // a landed spawn's own session mark retires its still-fresh slot —
+    // without the sweep the batch lane counts a live worker AND its
+    // reservation, and refuses capacity that is free
+    sweepLandedSlots(slotsDir, live, procDir)
+  }
+  let batch = 0
+  for (const pid of live) {
+    if (predicate(pid)) {
+      batch++
+    }
+  }
+  return batch
 }
 
 /** Live worker sessions — the spawned subset of liveDevinLockPids.
@@ -513,6 +589,17 @@ export const devinSessionPlane: SessionPlane = {
     return countDevinWorkers(
       devinSessionDirs(bag, workerEnv),
       devinPidIsWorker,
+      devinSlotsDir(bag)
+    )
+  },
+  countBatchWorkers(bag, workerEnv) {
+    // the predicate reads the SAME procDir the scan uses — a scripted
+    // /proc tree would be counted against the real one otherwise
+    const procDir = devinProcDir(bag)
+    return countDevinBatchWorkers(
+      devinSessionDirs(bag, workerEnv),
+      undefined,
+      procDir,
       devinSlotsDir(bag)
     )
   },

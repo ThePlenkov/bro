@@ -388,8 +388,10 @@ export type {
 } from './agents.ts'
 export {
   admitSessionSlot,
+  BATCH_MARKER_ENV,
   clearSessionPlanes,
   countSessionReservations,
+  isBatchSpawn,
   registerSessionPlane,
   releaseSessionSlot,
   reserveSessionSlot,
@@ -400,7 +402,12 @@ export {
   sessionQuotaConfig,
   sessionSlotsDir,
 } from './session-planes.ts'
-export type { DiscoveredSession, SessionPlane, SessionQuota } from './session-planes.ts'
+export type {
+  DiscoveredSession,
+  ReservationLane,
+  SessionPlane,
+  SessionQuota,
+} from './session-planes.ts'
 export {
   clearPlanes,
   planeNames,

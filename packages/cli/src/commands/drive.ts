@@ -82,6 +82,7 @@ import {
   type ReviewThread,
   type TaskRow,
   type TaskStore,
+  BATCH_MARKER_ENV,
 } from '@broject/core'
 import {
   checkHistory,
@@ -1449,7 +1450,7 @@ async function spawnFixerAgent(
         worktree: s.wt,
         prompt: s.prompt,
         connector: ctx.connector,
-        env: { BRO_PR: String(pr), BRO_PR_URL: link },
+        env: { BRO_PR: String(pr), BRO_PR_URL: link, [BATCH_MARKER_ENV]: '1' },
       })
       if (s.attempt !== undefined) {
         recordFixerAttempt(ctx.mainRoot, bead.id, prevEntry, s.attempt.head, s.attempt.cls)
