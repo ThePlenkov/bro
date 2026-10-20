@@ -97,7 +97,15 @@ Developing bro itself: see CONTRIBUTING.md.
   never a foreground idle. The dep edge in bd is the truth that
   frees the work; the watcher is a convenience, and its exit code
   is the verdict (0 free · 1 unreadable · 2 unresolved ·
-  3 actionable · 4 timeout).
+  3 actionable · 4 timeout). A rig with no checkout is reached over
+  the remote planes (specs/cross-repo/bro-kim1e): a `github` peer
+  binding (github.com remote + `login`) delivers `bro request` as a
+  prose issue + `request` record comment and reads replies back
+  through issue comments; a `wasteland` binding (`wl://`) posts a
+  wanted row onto the commons board. Both mirror a bead into the
+  requester's own store — never wire `external:` deps on these
+  planes (bd can't resolve a github issue or board row), and never
+  patch the foreign repo's code in place.
 
 ## Convoy fan-out — detach + pins
 

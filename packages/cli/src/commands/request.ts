@@ -10,7 +10,9 @@
 import { basename } from 'node:path'
 import { gitCommonDir } from '@broject/core'
 import {
+  deliverGithub,
   deliverRequest,
+  deliverWasteland,
   ensurePeerBinding,
   resolveTarget,
   selfRig,
@@ -108,6 +110,35 @@ export function runRequestCommand(argv: string[]): void {
   }
 
   const t = resolveOrExit(dir, target)
+
+  // remote planes (specs/cross-repo/bro-kim1e) — the peer has no
+  // checkout to clone into: the request posts over the transport's
+  // own channel (issue + record comment, or a wanted row) and a
+  // mirror bead lands in OUR store, external_ref = the remote thread.
+  // No `external:` dep is wired — bd can't resolve a github/wasteland
+  // ref, so `--for` is advisory-only here, said so, never silent.
+  if (t.peer?.transport === 'github' || t.peer?.transport === 'wasteland') {
+    const rig = selfRigOrExit(dir)
+    const deliver = t.peer.transport === 'github' ? deliverGithub : deliverWasteland
+    const posted = deliver(dir, t.peer, {
+      from: rig,
+      title: titleText,
+      body: flagValue(rest, '--body'),
+      refs: parseRefs(rest, '--ref'),
+      priority: parsePriority(rest),
+    })
+    if (posted.error !== undefined) {
+      console.error(`error: ${posted.error}`)
+      process.exit(1)
+    }
+    console.log(`request ${posted.mirror} → ${t.peer.alias} (${t.peer.transport})`)
+    console.log(`  remote thread ${posted.thread}`)
+    if (flagValue(rest, '--for') !== undefined) {
+      console.error(`! --for not wired on ${t.peer.transport} planes — track with \`bro mesh wait\` instead`)
+    }
+    console.log(`thread: ${posted.thread} — track it with \`bro mesh wait ${posted.thread}\``)
+    return
+  }
 
   // no live checkout → the own-store post, flag-for-flag `bro mesh request`
   if (t.checkout === undefined) {

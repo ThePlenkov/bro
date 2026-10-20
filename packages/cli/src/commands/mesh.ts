@@ -9,17 +9,26 @@ import { existsSync } from 'node:fs'
 import { join } from 'node:path'
 import { bd, bdAt, facade, gitCommonDir, loadConfig, taskStore, taskStoreAt } from '@broject/core'
 import {
+  acceptWanted,
+  claimWanted,
+  completeWanted,
   formatRigUri,
+  issueRepo,
   localCheckout,
+  MESH_VERSION,
   meshInbox,
   meshThread,
+  parseGithubRemote,
   parsePeer,
   parseRigUri,
+  postComment,
   postEnvelope,
+  rejectWanted,
   selfRig,
   wireDep,
   syncReplica,
   withMeshConfig,
+  type MeshEnvelope,
   type MeshKind,
   type MeshRef,
   type MeshPeer,
@@ -31,11 +40,14 @@ Commands:
   me                      this rig's mesh:// URI — config pin or derived
                           from origin (exits 2 when unresolvable)
   peers list              configured peers (alias, rig, remote)
-  peers add <alias> <rig> <remote>
+  peers add <alias> <rig> <remote> [--login L]
                           bind a peer rig — a filesystem path is the
                           'local' binding (live store via bd -C), a git
                           URL is 'beads-remote' (dolt replica of
-                          refs/dolt/data)
+                          refs/dolt/data), a github repo url is 'github'
+                          (issue+comment transport; --login pins the
+                          account whose records prove the peer), a
+                          wl:// board is 'wasteland'
   peers remove <alias>    drop a peer binding
   pull                    refresh every beads-remote replica
   inbox [--json] [--no-pull]
@@ -64,7 +76,7 @@ function cmdPeersList(dir: string): void {
   }
   for (const alias of aliases) {
     const p = peers[alias]!
-    console.log(`${alias}\t${p.rig}\t${p.remote}`)
+    console.log(`${alias}\t${p.rig}\t${p.remote}${p.login !== undefined ? `\tlogin:${p.login}` : ''}`)
   }
 }
 
@@ -90,7 +102,8 @@ function cmdPeersAdd(dir: string, args: string[]): void {
         console.error(`error: peer "${alias}" already bound — remove it first`)
         process.exit(2)
       }
-      peers[alias] = { rig, remote }
+      const login = flagValue(args, '--login')
+      peers[alias] = { rig, remote, ...(login !== undefined ? { login } : {}) }
       cfg.mesh = { ...mesh, peers }
     })
   } catch (e) {
@@ -470,8 +483,94 @@ function cmdLifecycle(dir: string, kind: MeshKind, args: string[]): void {
     process.exit(2)
   }
   const { rig, state } = threadAnchor(dir, thread, !args.includes('--no-pull'))
+  const peers = meshPeers(dir)
   const request = state.request!
   const to = lifecycleTarget(kind, rig, state, thread)
+
+  // remote planes (specs/cross-repo/bro-kim1e) — the record lands on
+  // the transport's own channel: an issue comment carrying the
+  // envelope on github, the matching `wl` move on wasteland. A mirror
+  // bead still lands in OUR store so the local reduction keeps a
+  // complete record of what we wrote.
+  const ghThread = state.threads.find((t) => issueRepo(t) !== null)
+  const wlThread = state.threads.find((t) => /^w-\w+$/i.test(t))
+  if (ghThread !== undefined || wlThread !== undefined) {
+    const remoteThread = ghThread ?? wlThread!
+    const evidence = kind === 'result' ? parseRefs(rest, '--ev') : undefined
+    const body = flagValue(rest, '--body')
+    const env: MeshEnvelope = {
+      v: MESH_VERSION,
+      id: `${remoteThread}#${kind}`,
+      kind,
+      thread: remoteThread,
+      from: rig,
+      to,
+      title: `${kind === 'result' ? 'result' : kind}: ${request.title}`,
+      body: body ?? '',
+      refs: [],
+      terms: {},
+      evidence: evidence ?? [],
+    }
+    let remoteErr: string | undefined
+    if (ghThread !== undefined) {
+      const ri = issueRepo(ghThread)!
+      const peer = peers.find((p) => {
+        const r = parseGithubRemote(p.remote)
+        return p.transport === 'github' && r?.owner === ri.owner && r?.repo === ri.repo
+      })
+      if (peer === undefined) {
+        console.error(
+          `! ${ri.owner}/${ri.repo}: no github peer binding — the far side can't provenance-check this record`
+        )
+      }
+      remoteErr = postComment(
+        peer?.remote ?? `https://github.com/${ri.owner}/${ri.repo}`,
+        ghThread,
+        env,
+      ).error
+    } else {
+      const wl = wlThread!
+      const wlPeer = peers.find((p) => p.transport === 'wasteland')
+      if (wlPeer === undefined) {
+        console.error('! no wasteland peer binding — writing to the default commons')
+      }
+      const wlRemote = wlPeer?.remote ?? ''
+      remoteErr =
+        kind === 'claim'
+          ? claimWanted(wlRemote, wl).error
+          : kind === 'result'
+            ? completeWanted(wlRemote, wl, evidence).error
+            : kind === 'accept'
+              ? acceptWanted(wlRemote, wl).error
+              : rejectWanted(wlRemote, wl, body).error
+    }
+    if (remoteErr !== undefined) {
+      console.error(`error: ${remoteErr}`)
+      process.exit(1)
+    }
+    // own-store mirror of the remote write — the beads-side alias
+    // anchors it into the same reduction
+    const anchorThread =
+      state.threads.find((t) => t !== ghThread && t !== wlThread) ?? thread
+    const mirror = postEnvelope({
+      dir,
+      kind,
+      thread: anchorThread,
+      from: rig,
+      to,
+      title: env.title,
+      body,
+      evidence,
+    })
+    if (mirror.error !== undefined) {
+      console.error(`! remote record posted but the mirror bead failed: ${mirror.error}`)
+    }
+    console.log(
+      `${kind} → ${env.thread}${mirror.id !== undefined ? ` (mirror ${mirror.id})` : ''}`
+    )
+    return
+  }
+
   const anchor = resolveAnchor(dir, state, thread)
 
   const posted = postEnvelope({

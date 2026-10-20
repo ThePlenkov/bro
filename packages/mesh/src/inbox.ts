@@ -9,12 +9,14 @@
  * store holds, with provenance. `meshInbox` is the request filter on
  * top; thread tracking (thread.ts) consumes the scan directly.
  */
-import { taskStore } from '@broject/core'
+import { taskStore, gitTry } from '@broject/core'
 import { storeFor } from './post.ts'
 import { envelopeFromBead, type BeadLike, type MeshEnvelope } from './envelope.ts'
 import { existsSync } from 'node:fs'
 import { localCheckout, type MeshPeer, type MeshTransport } from './peers.ts'
 import { issueLabels, meshIssues, replicaDir, syncReplica } from './pull.ts'
+import { parseGithubRemote, scanGithub, selfLogin } from './github.ts'
+import { browseWanted, projectWanted } from './wasteland.ts'
 
 export interface PeerRecord {
   /** The peer alias the record arrived over — the provenance. */
@@ -27,6 +29,13 @@ export interface PeerRecord {
   transport: MeshTransport
   envelope: MeshEnvelope
   beadId: string
+  /** the authenticated account that authored the record — github
+   *  comments only; the binding's `login` is what it's checked
+   *  against (specs/cross-repo/bro-kim1e Trust). */
+  author?: string
+  /** the record's author matched no peer binding's `login` and is not
+   *  this account — surfaced flagged, never silently dropped */
+  unbound?: boolean
 }
 
 export interface InboundRequest extends PeerRecord {
@@ -136,21 +145,125 @@ function scanLocal(
   }
 }
 
+/** github: every mesh record across the request-labelled issues on
+ *  the peer's repo — the comment author IS the provenance material
+ *  (thread.ts checks it against the binding's `login`). There is no
+ *  replica to pull — every read is a live `gh` call, `pull:false`
+ *  changes nothing. */
+function scanGithubPeer(peer: MeshPeer, out: PeerRecord[], errors: string[]): void {
+  const scan = scanGithub(peer.remote)
+  for (const e of scan.errors) {
+    errors.push(`${peer.alias}: ${e}`)
+  }
+  for (const r of scan.records) {
+    out.push({
+      peer: peer.alias,
+      peerRig: peer.rig,
+      transport: 'github',
+      envelope: r.envelope,
+      beadId: r.issue,
+      author: r.author,
+    })
+  }
+}
+
+/** wasteland: the open board over the commons — a row projects to the
+ *  records its state implies (request + lifecycle). `selfRig` feeds
+ *  the projection's `to` — an open row is addressed to the reader. */
+function scanWastelandPeer(
+  peer: MeshPeer,
+  selfRig: string | undefined,
+  out: PeerRecord[],
+  errors: string[],
+): void {
+  const board = browseWanted(peer.remote)
+  if (board.error !== undefined) {
+    errors.push(`${peer.alias}: ${board.error}`)
+    return
+  }
+  for (const row of board.rows) {
+    const projected = projectWanted(row, selfRig)
+    for (const e of projected.errors) {
+      errors.push(`${peer.alias}: ${e}`)
+    }
+    for (const env of projected.envelopes) {
+      out.push({ peer: peer.alias, peerRig: peer.rig, transport: 'wasteland', envelope: env, beadId: row.id })
+    }
+  }
+}
+
+/** github's own-repo half: inbound requests are issues filed on MY
+ *  repo — nothing pulls them into a store, so the inbox scans the
+ *  repo the rig's origin names (when it is github-hosted). Author →
+ *  rig attribution runs through bound `login`s first, then this
+ *  account; anything left is surfaced flagged `unbound`. */
+function scanOwnGithub(
+  dir: string,
+  peers: MeshPeer[],
+  selfRig: string,
+  out: PeerRecord[],
+  errors: string[],
+): void {
+  const origin = gitTry(['-C', dir, 'remote', 'get-url', 'origin'])
+  const repo = origin.code === 0 ? parseGithubRemote(origin.out) : null
+  if (repo === null) {
+    return
+  }
+  const scan = scanGithub(`https://github.com/${repo.owner}/${repo.repo}`)
+  for (const e of scan.errors) {
+    errors.push(`self: ${e}`)
+  }
+  const self = selfLoginGithub()
+  for (const r of scan.records) {
+    if (r.envelope.kind !== 'request') {
+      continue
+    }
+    const bound = peers.find((p) => p.login !== undefined && p.login === r.author)
+    if (bound !== undefined) {
+      out.push({ peer: bound.alias, peerRig: bound.rig, transport: 'github', envelope: r.envelope, beadId: r.issue, author: r.author })
+    } else {
+      out.push({
+        peer: 'github',
+        peerRig: r.author === self ? selfRig : r.envelope.from,
+        transport: 'github',
+        envelope: r.envelope,
+        beadId: r.issue,
+        author: r.author,
+        unbound: r.author === self ? undefined : true,
+      })
+    }
+  }
+}
+
+let selfLoginCache: { login?: string } | undefined
+function selfLoginGithub(): string | undefined {
+  // one `gh api user` per process — the login never changes mid-run
+  if (selfLoginCache === undefined) {
+    selfLoginCache = selfLogin()
+  }
+  return selfLoginCache.login
+}
+
 /** Pull + scan every configured peer — every mesh envelope, every
  *  kind. `pull:false` serves replica contents as they stand.
  *  `closedLocal:true` admits closed rows on `local` peers — the
- *  thread path needs the anchor past the worker's `bd close`. */
+ *  thread path needs the anchor past the worker's `bd close`.
+ *  `selfRig` feeds the wasteland projection's `to`. */
 export function meshScan(
   dir: string,
   peers: MeshPeer[],
   gitCommon: string,
-  opts: { pull?: boolean; closedLocal?: boolean } = {},
+  opts: { pull?: boolean; closedLocal?: boolean; selfRig?: string } = {},
 ): ScanResult {
   const out: PeerRecord[] = []
   const errors: string[] = []
   for (const peer of peers) {
     if (peer.transport === 'local') {
       scanLocal(peer, out, errors, opts.closedLocal === true)
+    } else if (peer.transport === 'github') {
+      scanGithubPeer(peer, out, errors)
+    } else if (peer.transport === 'wasteland') {
+      scanWastelandPeer(peer, opts.selfRig, out, errors)
     } else if (opts.pull === false) {
       // serve the existing replica — an absent one is simply empty
       const dir = replicaDir(gitCommon, peer.alias)
@@ -177,7 +290,7 @@ export function meshInbox(
   gitCommon: string,
   opts: { pull?: boolean } = {},
 ): InboxResult {
-  const { records, errors } = meshScan(dir, peers, gitCommon, opts)
+  const { records, errors } = meshScan(dir, peers, gitCommon, { ...opts, selfRig })
 
   // own-store pass — `bro request` delivers the bead straight into the
   // recipient's store; no peer transport carries it, so a `from`
@@ -210,6 +323,10 @@ export function meshInbox(
     errors.push(`self: store list failed — ${err instanceof Error ? err.message : String(err)}`)
   }
 
+  // the github plane's inbound half — issues filed on MY repo; `to`
+  //  filtering below keeps only what was actually addressed to me
+  scanOwnGithub(dir, peers, selfRig, records, errors)
+
   const terminal = new Set<string>()
   for (const r of records) {
     if (
@@ -234,8 +351,11 @@ export function meshInbox(
     )
     .map((r) => ({
       ...r,
-      mismatch: r.peer !== 'self' && r.envelope.from !== r.peerRig,
-      unbound: r.peer === 'self' && !bound.has(r.envelope.from) ? true : undefined,
+      // wasteland rows carry their own poster — `from` ≠ the board's
+      //  rig is the shape, not impersonation, so no mismatch flag
+      mismatch: r.peer !== 'self' && r.transport !== 'wasteland' && r.envelope.from !== r.peerRig,
+      unbound:
+        r.unbound === true || (r.peer === 'self' && !bound.has(r.envelope.from)) ? true : undefined,
     }))
   return { requests, errors }
 }

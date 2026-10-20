@@ -693,11 +693,11 @@ export const querySection: ConfigSection<{
 /** One `mesh.peers.<alias>` entry — rig must be a mesh:// URI, remote a
  *  non-empty string; transport survives verbatim (parsePeer judges it —
  *  stripping it here would silently downgrade explicit bindings). */
-function meshPeerEntry(entry: unknown): { rig: string; remote: string; transport?: string } | null {
+function meshPeerEntry(entry: unknown): { rig: string; remote: string; transport?: string; login?: string } | null {
   if (typeof entry !== 'object' || entry === null) {
     return null
   }
-  const e = entry as { rig?: unknown; remote?: unknown; transport?: unknown }
+  const e = entry as { rig?: unknown; remote?: unknown; transport?: unknown; login?: unknown }
   if (
     typeof e.rig !== 'string' ||
     !e.rig.startsWith('mesh://') ||
@@ -706,9 +706,12 @@ function meshPeerEntry(entry: unknown): { rig: string; remote: string; transport
   ) {
     return null
   }
-  const p: { rig: string; remote: string; transport?: string } = { rig: e.rig, remote: e.remote }
+  const p: { rig: string; remote: string; transport?: string; login?: string } = { rig: e.rig, remote: e.remote }
   if (typeof e.transport === 'string' && e.transport !== '') {
     p.transport = e.transport
+  }
+  if (typeof e.login === 'string' && e.login !== '') {
+    p.login = e.login
   }
   return p
 }
@@ -720,13 +723,13 @@ function meshPeerEntry(entry: unknown): { rig: string; remote: string; transport
  *  over (beads-remote binding). */
 export const meshSection: ConfigSection<{
   rig?: string
-  peers: Record<string, { rig: string; remote: string; transport?: string }>
+  peers: Record<string, { rig: string; remote: string; transport?: string; login?: string }>
 }> = (raw) => {
   const obj = (typeof raw === 'object' && raw !== null ? raw : {}) as {
     rig?: unknown
     peers?: unknown
   }
-  const peers: Record<string, { rig: string; remote: string; transport?: string }> = {}
+  const peers: Record<string, { rig: string; remote: string; transport?: string; login?: string }> = {}
   if (typeof obj.peers === 'object' && obj.peers !== null) {
     for (const [alias, entry] of Object.entries(obj.peers)) {
       // __proto__ is a setter on Object.prototype, not an own-property
@@ -740,7 +743,7 @@ export const meshSection: ConfigSection<{
       }
     }
   }
-  const out: { rig?: string; peers: Record<string, { rig: string; remote: string; transport?: string }> } = { peers }
+  const out: { rig?: string; peers: Record<string, { rig: string; remote: string; transport?: string; login?: string }> } = { peers }
   if (typeof obj.rig === 'string' && obj.rig.startsWith('mesh://')) {
     out.rig = obj.rig
   }
@@ -899,7 +902,7 @@ export interface BroConfig {
    *  { rig, remote, transport? } — remote is the git URL the peer's
    *  beads store federates over (read-only pulls, sovereignty rule),
    *  transport overrides derivation. */
-  mesh: { rig?: string; peers: Record<string, { rig: string; remote: string; transport?: string }> }
+  mesh: { rig?: string; peers: Record<string, { rig: string; remote: string; transport?: string; login?: string }> }
   /** `bro mcp` plane exposure. `planes` undefined = every read plane
    *  (the default — spawning the server IS the consent), `[]` = none,
    *  a list = allowlist. Backend selection stays on connectors.*. */

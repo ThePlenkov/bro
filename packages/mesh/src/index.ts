@@ -19,6 +19,37 @@ export {
 export type { BeadLike, MeshEnvelope, MeshKind, MeshRef, MeshTerms } from './envelope.ts'
 export { localCheckout, parsePeer, transportOf, TRANSPORTS } from './peers.ts'
 export type { MeshPeer, MeshTransport } from './peers.ts'
+export {
+  GITHUB_LABEL_MAX,
+  githubProvenance,
+  issueComments,
+  issueNumber,
+  issueRepo,
+  parseComment,
+  parseGithubRemote,
+  postComment,
+  postRequest,
+  renderComment,
+  renderIssueBody,
+  routingLabels,
+  scanGithub,
+  selfLogin,
+} from './github.ts'
+export type { GhRecord, GithubRepo } from './github.ts'
+export {
+  acceptWanted,
+  boardPriority,
+  browseWanted,
+  claimWanted,
+  completeWanted,
+  handleToRig,
+  postWanted,
+  projectWanted,
+  rejectWanted,
+  termPriority,
+  wantedStatus,
+} from './wasteland.ts'
+export type { WantedRow } from './wasteland.ts'
 export { CAPABILITY_RE, issueLabels, meshIssues, replicaAgeMs, replicaDir, shippedIssues, syncReplica } from './pull.ts'
 export type { IssueRow } from './pull.ts'
 export { meshInbox, meshScan } from './inbox.ts'
@@ -36,3 +67,4 @@ export {
   withMeshConfig,
 } from './request.ts'
 export type { MeshConfigFile, ResolvedTarget, ResolveResult } from './request.ts'
+export { deliverGithub, deliverWasteland } from './deliver.ts'

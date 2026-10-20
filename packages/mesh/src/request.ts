@@ -189,7 +189,10 @@ export function deliverRequest(
 }
 
 export interface MeshConfigFile {
-  mesh?: { rig?: string; peers?: Record<string, { rig: string; remote: string }> }
+  mesh?: {
+    rig?: string
+    peers?: Record<string, { rig: string; remote: string; transport?: string; login?: string }>
+  }
   [k: string]: unknown
 }
 

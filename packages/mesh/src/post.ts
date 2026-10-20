@@ -49,6 +49,11 @@ export interface PostInput {
    *  bead lives in the TARGET's store, so its beads:// address is the
    *  target's, not the requester's. */
   beadRig?: string
+  /** external_ref override — on non-beads planes (github, wasteland)
+   *  the mirror bead's foreign address is the issue url / board id,
+   *  not a beads:// uri; the single field the remote thread is
+   *  recovered through. */
+  externalRef?: string
 }
 
 export interface PostResult {
@@ -96,7 +101,7 @@ export function postEnvelope(input: PostInput): PostResult {
   try {
     store.update(id, {
       'set-labels': labels.join(','),
-      'external-ref': beadUri(input.beadRig ?? input.from, id),
+      'external-ref': input.externalRef ?? beadUri(input.beadRig ?? input.from, id),
     })
   } catch (err) {
     return {
