@@ -558,6 +558,8 @@ describe('output caps + loud input failures', () => {
       // included) is serialized whole, so its context IS the client's view
       assert.equal(fake.sessions.length, 2)
       assert.match(fake.prompts[1] ?? '', /first/)
+      // the trimmed echo seeds the new context — it IS the client's view
+      assert.match(fake.prompts[1] ?? '', /zzzzz/)
       assert.match(fake.prompts[1] ?? '', /second/)
     } finally {
       await close()

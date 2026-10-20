@@ -1303,19 +1303,8 @@ async function continuationTurn(env: TurnEnv, cand: ConvSession): Promise<TurnOu
     return { reused: true, inputTokens: 0, replay: true, conv: cand }
   }
   // a trimmed reply left the session holding text the client never
-  // received — continuing would generate off hidden context. Retire it:
-  // a fingerprinted request re-seeds fresh from the resent history (the
-  // trimmed echo included); a chained request fails loud — its delta
-  // alone cannot rebuild what the session lost (bro-vfbyc).
-  if (cand.divergent === true) {
-    evict(env.sessions, env.key, cand)
-    if (env.chained === true) {
-      throw new ChainBroken(
-        'previous_response_id was trimmed at the wire — the session holds more than the client received'
-      )
-    }
-    return freshTurn(env, false)
-  }
+  // received — continuing would generate off hidden context (bro-vfbyc)
+  if (cand.divergent === true) return retireDivergent(env, cand)
   // the delta only — prior turns live in the session's own context
   const prompt = tailBlocks(tail, env.imageOk)
   const inputTokens = inputTokensOf(prompt)
@@ -1338,6 +1327,20 @@ async function continuationTurn(env: TurnEnv, cand: ConvSession): Promise<TurnOu
   } finally {
     cand.busy = false
   }
+}
+
+/** A divergent session retires: a fingerprinted request re-seeds fresh
+ *  from the resent history (the trimmed echo included); a chained
+ *  request fails loud — its delta alone cannot rebuild what the
+ *  session lost (bro-vfbyc). */
+function retireDivergent(env: TurnEnv, cand: ConvSession): Promise<TurnOutcome> {
+  evict(env.sessions, env.key, cand)
+  if (env.chained === true) {
+    throw new ChainBroken(
+      'previous_response_id was trimmed at the wire — the session holds more than the client received'
+    )
+  }
+  return freshTurn(env, false)
 }
 
 /** A first (or restarted) turn — a keyed request retains a session;
