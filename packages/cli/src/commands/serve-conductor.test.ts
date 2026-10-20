@@ -822,8 +822,13 @@ describe('serve /v1/* — the conductor plane', () => {
           (e.data.delta as { type: string }).type === 'input_json_delta'
       )
       assert.ok(tu, 'the replay still carries the tool_use — not broken markup')
-      assert.doesNotMatch(textDeltas(re).join(''), /<tool_call>/)
+      // the exact replayed text: narration in place, no markup shards —
+      // a mid-tag corruption splits the literal into <tool_ca…ll>, which
+      // a doesNotMatch on the full tag would evade
+      assert.deepEqual(textDeltas(re), ['work \n⏺ exec: ls\n', ' end'])
       assert.equal(stopReason(re), 'tool_use')
+      // one prompt total — the resend replayed, never re-ran the turn
+      assert.equal(fake.prompts.length, 1)
     } finally {
       await close()
     }
