@@ -98,6 +98,7 @@ import { runProviderCommand } from './commands/provider.ts'
 import { runSetupCommand } from './commands/setup.ts'
 import { runMeshCommand } from './commands/mesh.ts'
 import { runRequestCommand } from './commands/request.ts'
+import { runWaitCommand } from './commands/wait.ts'
 import { runProvidersCommand } from './commands/providers.ts'
 import { runSpecCommand, sddConnector } from './commands/spec.ts'
 import { runStackCommand } from './commands/stack.ts'
@@ -587,6 +588,15 @@ export const PLUGINS: BroPlugin[] = [
     group: 'mesh',
     summary: 'Post a request to a repo or peer — delivers into same-machine checkouts (specs/cross-repo)',
     run: runRequestCommand,
+  }),
+  definePlugin({
+    // top-level on purpose: `bro wait` is the dep-plane watcher —
+    // a `group: 'mesh'` membership would steal `bro mesh wait` from
+    // the mesh host's own thread subcommand
+    name: 'wait',
+    summary:
+      'Dep-plane watcher — `bro wait external:<rig>:<id>` polls the dep stores, verdict = exit code (specs/cross-repo)',
+    run: runWaitCommand,
   }),
   definePlugin({
     name: 'run',

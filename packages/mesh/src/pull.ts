@@ -7,7 +7,7 @@
  * has no write verb.
  */
 import { spawnSync } from 'node:child_process'
-import { existsSync } from 'node:fs'
+import { existsSync, statSync } from 'node:fs'
 import { join } from 'node:path'
 
 export interface DoltResult {
@@ -78,6 +78,59 @@ export function meshIssues(dir: string): { rows: IssueRow[]; error?: string } {
   } catch {
     return { rows: [], error: `replica query returned unparseable json` }
   }
+}
+
+/** bd's ship rule restated on a replica: a CLOSED issue labelled
+ *  provides:<capability> releases the dep. This is the one record the
+ *  inbox path cannot return (scanReplica drops closed rows), and dolt
+ *  sql is how a raw replica answers it — it is not a beads project, so
+ *  `bd` cannot address it. */
+/** a provides:<capability> id is a bead-id token — the charset is the
+ *  allowlist the SQL interpolation boundary checks against */
+export const CAPABILITY_RE = /^[A-Za-z0-9][A-Za-z0-9._~-]*$/
+
+export function shippedIssues(dir: string, capability: string): { shipped?: boolean; error?: string } {
+  // allowlist at the SQL boundary — the value is interpolated raw,
+  // so anything outside the bead-id token charset refuses to query
+  // rather than leaning on quote-escaping alone
+  if (!CAPABILITY_RE.test(capability)) {
+    return { error: `unsafe capability "${capability}" — refusing the query` }
+  }
+  const r = dolt(
+    [
+      'sql',
+      '-q',
+      `select i.id from issues i inner join labels l on l.issue_id = i.id ` +
+        `where l.label = 'provides:${capability}' and i.status = 'closed'`,
+      '-r',
+      'json',
+    ],
+    dir,
+  )
+  if (r.code !== 0) {
+    return { error: r.err || r.out }
+  }
+  try {
+    const parsed = JSON.parse(r.out) as { rows?: { id?: string }[] }
+    return { shipped: (parsed.rows ?? []).length > 0 }
+  } catch {
+    return { error: `replica query returned unparseable json` }
+  }
+}
+
+/** ms since the replica last materialized — `.dolt/noms/manifest`'s
+ *  mtime is the sync stamp (dolt rewrites it on clone/pull); missing
+ *  pieces fall back to `.dolt`, then the replica root. undefined when
+ *  nothing stats — the caller treats that as "no replica". */
+export function replicaAgeMs(dir: string, now: number = Date.now()): number | undefined {
+  for (const p of [join(dir, '.dolt', 'noms', 'manifest'), join(dir, '.dolt'), dir]) {
+    try {
+      return Math.max(0, now - statSync(p).mtimeMs)
+    } catch {
+      // absent — try the shallower stamp
+    }
+  }
+  return undefined
 }
 
 export function issueLabels(dir: string, id: string): { labels: string[]; error?: string } {
