@@ -144,6 +144,41 @@ export interface SessionQuota {
   invalidKey?: string
 }
 
+/** One admission lane's parsed knob: a count, a malformed marker, or
+ *  absent (uncapped). A present-but-malformed value is a config bug —
+ *  it flags `invalid` and admission refuses loudly. */
+type QuotaLane = { n: number } | { invalid: true } | undefined
+
+function quotaLane(
+  bag: Record<string, unknown>,
+  key: 'maxSessions' | 'maxWorkers' | 'maxBatchWorkers'
+): QuotaLane {
+  const v = bag[key]
+  if (v === undefined || v === 0) {
+    return undefined
+  }
+  if (typeof v !== 'number' || !Number.isInteger(v) || v < 0) {
+    return { invalid: true }
+  }
+  return { n: v }
+}
+
+/** The first malformed lane's knob name — the one admission names when
+ *  it refuses a typo. */
+function firstBadLane(...lanes: Array<[string, QuotaLane]>): string | undefined {
+  for (const [key, lane] of lanes) {
+    if (lane !== undefined && 'invalid' in lane) {
+      return key
+    }
+  }
+  return undefined
+}
+
+/** A lane's count — undefined when the knob is absent. */
+function laneCount(lane: QuotaLane): number | undefined {
+  return lane !== undefined && 'n' in lane ? lane.n : undefined
+}
+
 export function sessionQuotaConfig(
   agents: Record<string, Record<string, unknown>> | undefined,
   kind: string
@@ -154,43 +189,31 @@ export function sessionQuotaConfig(
   }
   const reservationsDir =
     typeof bag['reservationsDir'] === 'string' ? bag['reservationsDir'] : undefined
-  const lane = (
-    key: 'maxSessions' | 'maxWorkers' | 'maxBatchWorkers'
-  ): { n: number } | { invalid: true } | undefined => {
-    const v = bag[key]
-    if (v === undefined || v === 0) {
-      return undefined
-    }
-    if (typeof v !== 'number' || !Number.isInteger(v) || v < 0) {
-      return { invalid: true }
-    }
-    return { n: v }
-  }
-  const sessions = lane('maxSessions')
-  const workers = lane('maxWorkers')
-  const batchWorkers = lane('maxBatchWorkers')
+  const sessions = quotaLane(bag, 'maxSessions')
+  const workers = quotaLane(bag, 'maxWorkers')
+  const batchWorkers = quotaLane(bag, 'maxBatchWorkers')
   if (sessions === undefined && workers === undefined && batchWorkers === undefined) {
     return undefined
   }
-  const bad = sessions !== undefined && 'invalid' in sessions
-    ? 'maxSessions'
-    : workers !== undefined && 'invalid' in workers
-      ? 'maxWorkers'
-      : batchWorkers !== undefined && 'invalid' in batchWorkers
-        ? 'maxBatchWorkers'
-        : undefined
+  const bad = firstBadLane(
+    ['maxSessions', sessions],
+    ['maxWorkers', workers],
+    ['maxBatchWorkers', batchWorkers]
+  )
   if (bad !== undefined) {
     return { maxSessions: 0, reservationsDir, invalid: true, invalidKey: bad }
   }
   const quota: SessionQuota = {
-    maxSessions: sessions !== undefined && 'n' in sessions ? sessions.n : 0,
+    maxSessions: laneCount(sessions) ?? 0,
     reservationsDir,
   }
-  if (workers !== undefined && 'n' in workers) {
-    quota.maxWorkers = workers.n
+  const maxWorkers = laneCount(workers)
+  if (maxWorkers !== undefined) {
+    quota.maxWorkers = maxWorkers
   }
-  if (batchWorkers !== undefined && 'n' in batchWorkers) {
-    quota.maxBatchWorkers = batchWorkers.n
+  const maxBatchWorkers = laneCount(batchWorkers)
+  if (maxBatchWorkers !== undefined) {
+    quota.maxBatchWorkers = maxBatchWorkers
   }
   return quota
 }
@@ -308,9 +331,18 @@ function checkSessionLanes(
   const maxBatchWorkers = quota.maxBatchWorkers ?? 0
   const batch = isBatchSpawn(opts.workerEnv)
   const sessions = quota.maxSessions > 0 ? plane.countLive(bag, opts.workerEnv) : 0
+  // The plane counts run BEFORE the reservation tally: a plane that
+  // retires a landed spawn's still-fresh `.slot` inside its own count
+  // must have that sweep VISIBLE to the tally, or a landed worker
+  // counts twice (live + reservation) and the cap refuses a rightful
+  // admit. The batch count rides the same rule.
   const workers =
     maxWorkers > 0 && plane.countWorkers !== undefined
       ? plane.countWorkers(bag, opts.workerEnv)
+      : 0
+  const batchWorkers =
+    maxBatchWorkers > 0 && batch && plane.countBatchWorkers !== undefined
+      ? plane.countBatchWorkers(bag, opts.workerEnv)
       : 0
   const reservations = countSessionReservations(resDir)
   if (quota.maxSessions > 0 && sessions + reservations >= quota.maxSessions) {
@@ -323,44 +355,83 @@ function checkSessionLanes(
   }
   if (maxBatchWorkers > 0 && batch) {
     // the fleet's own share of the worker budget
-    if (plane.countBatchWorkers === undefined) {
-      throw new SpawnError(
-        `agents.${plane.kind}.maxBatchWorkers is set but the '${plane.kind}' session plane ` +
-          `cannot distinguish batch workers from interactive sessions` +
-          refused,
-        'config'
-      )
-    }
-    const batchWorkers = plane.countBatchWorkers(bag, opts.workerEnv)
-    if (batchWorkers + reservations >= maxBatchWorkers) {
-      throw new SpawnError(
-        `${plane.kind} batch worker quota reached — ${batchWorkers + reservations}/${maxBatchWorkers} live batch workers ` +
-          `(agents.${plane.kind}.maxBatchWorkers in bro.config)` +
-          refused,
-        'cap'
-      )
-    }
+    checkWorkerCap(plane, workerCap(plane, 'maxBatchWorkers', maxBatchWorkers, batchWorkers), reservations, refused)
   }
   if (maxWorkers > 0) {
-    if (plane.countWorkers === undefined) {
-      // arming a worker cap on a plane that cannot tell workers
-      // from interactive sessions is a config bug — refuse
-      // loudly rather than spawn past it
-      throw new SpawnError(
-        `agents.${plane.kind}.maxWorkers is set but the '${plane.kind}' session plane ` +
-          `cannot distinguish worker sessions` +
-          refused,
-        'config'
-      )
-    }
-    if (workers + reservations >= maxWorkers) {
-      throw new SpawnError(
-        `${plane.kind} worker quota reached — ${workers + reservations}/${maxWorkers} live workers ` +
-          `(agents.${plane.kind}.maxWorkers in bro.config)` +
-          refused,
-        'cap'
-      )
-    }
+    checkWorkerCap(plane, workerCap(plane, 'maxWorkers', maxWorkers, workers), reservations, refused)
+  }
+}
+
+/**
+ * One worker lane's cap — the whole budget (`maxWorkers`) or the fleet's
+ * share of it (`maxBatchWorkers`). The two lanes differ in the knob,
+ * the population and the wording; the check itself is one shape, so a
+ * change to the rule lands in one place.
+ */
+interface WorkerCap {
+  /** the config knob (`agents.<kind>.<knob>`) */
+  knob: 'maxWorkers' | 'maxBatchWorkers'
+  /** the subject in the refusal — "worker" / "batch worker" */
+  subject: 'worker' | 'batch worker'
+  /** the counted population — "workers" / "batch workers" */
+  population: 'workers' | 'batch workers'
+  /** what a plane that cannot split would be unable to tell apart */
+  undistinguishable: 'worker sessions' | 'batch workers'
+  /** the cap */
+  cap: number
+  /** the lane's live count (the plane counted it before the tally) */
+  live: number
+  /** can the plane tell this population apart at all? */
+  countable: boolean
+}
+
+/** One lane's cap — the whole budget (`maxWorkers`) or the fleet's
+ *  share of it (`maxBatchWorkers`). One shape for both: the wording
+ *  differs, the rule does not. */
+function workerCap(
+  plane: SessionPlane,
+  lane: 'maxWorkers' | 'maxBatchWorkers',
+  cap: number,
+  live: number
+): WorkerCap {
+  const batch = lane === 'maxBatchWorkers'
+  return {
+    knob: lane,
+    subject: batch ? 'batch worker' : 'worker',
+    population: batch ? 'batch workers' : 'workers',
+    undistinguishable: batch ? 'batch workers' : 'worker sessions',
+    cap,
+    live,
+    countable: batch
+      ? plane.countBatchWorkers !== undefined
+      : plane.countWorkers !== undefined,
+  }
+}
+
+/** The lane's cap: a plane that cannot tell the population apart
+ *  refuses 'config' rather than silently unguard-ing the cap the
+ *  operator armed. */
+function checkWorkerCap(
+  plane: SessionPlane,
+  cap: WorkerCap,
+  reservations: number,
+  refused: string
+): void {
+  if (!cap.countable) {
+    throw new SpawnError(
+      `agents.${plane.kind}.${cap.knob} is set but the '${plane.kind}' session plane ` +
+        `cannot distinguish ${cap.undistinguishable} from interactive sessions` +
+        refused,
+      'config'
+    )
+  }
+  if (cap.live + reservations >= cap.cap) {
+    throw new SpawnError(
+      `${plane.kind} ${cap.subject} quota reached — ${cap.live + reservations}/${cap.cap} live ${cap.population} ` +
+        `(agents.${plane.kind}.${cap.knob} in bro.config)` +
+        refused,
+      'cap'
+    )
   }
 }
 
