@@ -7,6 +7,7 @@
  */
 import { randomUUID } from 'node:crypto'
 import { spawn, type ChildProcess, type SpawnOptions } from 'node:child_process'
+import { StringDecoder } from 'node:string_decoder'
 import type {
   ClientApp,
   ClientRequestHandler,
@@ -43,6 +44,32 @@ interface TerminalEntry {
    *  an in-flight spawn-error fallback must not start new work. */
   stopped?: boolean
   limit: number
+  /** Live taps (bro-eua0d) — the serve SSE route subscribes through
+   *  `follow`. `decoder` folds split multi-byte characters across pipe
+   *  chunks so a live `data` never surfaces a U+FFFD boundary. */
+  listeners: Set<TerminalFollower>
+  decoder: StringDecoder
+}
+
+/** A follower's taps — `data` per appended chunk (utf8), `exit` once
+ *  when the entry goes final. Followers are observers: a throwing tap
+ *  is the consumer's bug, not the terminal's. */
+export interface TerminalFollower {
+  data(chunk: string): void
+  exit(status: TerminalExitStatus): void
+}
+
+/** The atomic snapshot+stream a follow route needs — `snapshot` is the
+ *  buffer at registration (no gap, no replay), `stop` drops the taps
+ *  without touching the terminal. `completed` says whether the taps
+ *  attached: a final terminal fires nothing and the snapshot is the
+ *  whole story, while `snapshot.exitStatus` alone can't say that — it's
+ *  set at the child's 'exit', before 'close' drains the pipe, so a
+ *  subscriber in that gap still owns live taps for the tail bytes. */
+export interface TerminalFollow {
+  snapshot: TerminalOutputResponse
+  completed: boolean
+  stop(): void
 }
 
 /** Grace between 'exit' and a still-pending 'close' before waiters
@@ -146,6 +173,8 @@ export class AcpTerminals {
       completed: false,
       waiters: [],
       limit: ctx.params.outputByteLimit ?? this.defaultLimit,
+      listeners: new Set(),
+      decoder: new StringDecoder('utf8'),
     }
     const settle = (exitCode: number | null, signal: string | null): void => {
       entry.exitStatus ??= { exitCode, signal }
@@ -164,6 +193,16 @@ export class AcpTerminals {
         entry.truncated = true
       }
       entry.out = buf
+      const text = entry.decoder.write(d)
+      if (text !== '') {
+        for (const l of entry.listeners) {
+          try {
+            l.data(text)
+          } catch {
+            // a broken follower is an observer bug, not the terminal's
+          }
+        }
+      }
     }
     const wire = (c: ChildProcess): void => {
       c.stdout?.on('data', append)
@@ -210,16 +249,53 @@ export class AcpTerminals {
     return { terminalId }
   }
 
-  readonly output: ClientRequestHandler<TerminalOutputRequest, TerminalOutputResponse> = (
-    ctx
-  ) => {
-    const entry = this.get(ctx.params.terminalId)
+  /** The retained tail plus the exit status — the `terminal/output`
+   *  wire shape, also the serve route's plain-GET answer. */
+  snapshot(id: TerminalId): TerminalOutputResponse {
+    const entry = this.get(id)
     return {
       output: entry.out.toString('utf8'),
       truncated: entry.truncated,
       exitStatus: entry.exitStatus,
     }
   }
+
+  /** Snapshot + live taps in one registration — the return IS the
+   *  buffer at tap time, so a chunk can't slip between the read and
+   *  the subscribe. A completed terminal still follows: the snapshot
+   *  carries its exitStatus and no events fire (the id stays valid
+   *  until release, per the wire contract). On a live entry the buffer
+   *  decodes through a scratch decoder — the entry's own decoder may
+   *  still hold a split character's head bytes, and re-emitting them
+   *  here as '\uFFFD' would double them when the tap delivers the
+   *  completed character. */
+  follow(id: TerminalId, listener: TerminalFollower): TerminalFollow {
+    const entry = this.get(id)
+    if (entry.completed) {
+      return {
+        snapshot: this.snapshot(id),
+        completed: true,
+        // no taps were attached — the stop hook is honestly a no-op
+        stop: () => {},
+      }
+    }
+    entry.listeners.add(listener)
+    const output = new StringDecoder('utf8').write(entry.out)
+    return {
+      snapshot: { output, truncated: entry.truncated, exitStatus: entry.exitStatus },
+      completed: false,
+      stop: () => entry.listeners.delete(listener),
+    }
+  }
+
+  /** Live count — the serve snapshot/debug surface. */
+  get size(): number {
+    return this.entries.size
+  }
+
+  readonly output: ClientRequestHandler<TerminalOutputRequest, TerminalOutputResponse> = (
+    ctx
+  ) => this.snapshot(ctx.params.terminalId)
 
   readonly waitForExit: ClientRequestHandler<
     WaitForTerminalExitRequest,
@@ -250,6 +326,26 @@ export class AcpTerminals {
   private flushEntry(entry: TerminalEntry): void {
     entry.completed = true
     const status = entry.exitStatus ?? { exitCode: null, signal: null }
+    // a trailing partial character flushes out of the decoder before
+    // the exit tap — listeners see the terminal's complete output
+    const rest = entry.decoder.end()
+    if (rest !== '') {
+      for (const l of entry.listeners) {
+        try {
+          l.data(rest)
+        } catch {
+          // observer rule — same as append
+        }
+      }
+    }
+    for (const l of entry.listeners) {
+      try {
+        l.exit(status)
+      } catch {
+        // observer rule — same as append
+      }
+    }
+    entry.listeners.clear()
     for (const w of entry.waiters.splice(0)) {
       w(status)
     }

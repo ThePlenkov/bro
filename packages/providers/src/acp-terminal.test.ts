@@ -294,4 +294,82 @@ describe('AcpTerminals', () => {
       await t.waitForExit(ctx(wait(missing)))
     }, /Unknown terminal/)
   })
+
+  test('follow returns the atomic snapshot, then live data and exit (bro-eua0d)', async () => {
+    const t = new AcpTerminals()
+    try {
+      assert.equal(t.size, 0)
+      const { terminalId } = await t.create(
+        ctx(create('sh', ['-c', 'echo first; sleep 60']))
+      )
+      assert.equal(t.size, 1)
+      const chunks: string[] = []
+      const exits: unknown[] = []
+      const f = t.follow(terminalId, {
+        data: (c) => chunks.push(c),
+        exit: (s) => exits.push(s),
+      })
+      assert.equal(f.completed, false, 'live terminal — taps attached')
+      // wait for 'first' — either already in the snapshot or a live chunk
+      for (let i = 0; i < 100 && ![f.snapshot.output, ...chunks].join('').includes('first'); i++) {
+        await new Promise((r) => setTimeout(r, 10))
+      }
+      assert.match([f.snapshot.output, ...chunks].join(''), /first/)
+      await t.kill(ctx(kil(terminalId)))
+      for (let i = 0; i < 100 && exits.length === 0; i++) {
+        await new Promise((r) => setTimeout(r, 10))
+      }
+      assert.equal(exits.length, 1, 'the exit tap fires once')
+      assert.equal((exits[0] as { signal: string }).signal, 'SIGTERM')
+      // a completed terminal still follows — snapshot carries the verdict,
+      // no callbacks fire, stop is a no-op
+      const dead = t.follow(terminalId, {
+        data: () => assert.fail('no data on a completed terminal'),
+        exit: () => assert.fail('no exit on a completed terminal'),
+      })
+      assert.equal(dead.completed, true, 'final terminal — no taps, snapshot is the verdict')
+      assert.equal(dead.snapshot.exitStatus?.signal, 'SIGTERM')
+      dead.stop()
+      f.stop()
+      assert.throws(() => t.follow('term-nope' as TerminalId, { data: () => {}, exit: () => {} }), /Unknown terminal/)
+      assert.throws(() => t.snapshot('term-nope' as TerminalId), /Unknown terminal/)
+    } finally {
+      t.dispose()
+    }
+  })
+
+  test('a follow mid-character skips decoder-pending bytes — no doubled U+FFFD', async () => {
+    const t = new AcpTerminals()
+    try {
+      // 😀 is f0 9f 98 80 — the lead byte lands alone, the rest after a
+      // delay, so the entry decoder sits mid-character at follow() time
+      const { terminalId } = await t.create(
+        ctx(create('sh', ['-c', "printf '\\360'; sleep 0.5; printf '\\237\\230\\200'"]))
+      )
+      // poll until the lead byte is buffered — through snapshot()'s
+      // plain toString a lone pending byte reads as U+FFFD
+      for (let i = 0; i < 100 && !t.snapshot(terminalId).output.includes('\uFFFD'); i++) {
+        await new Promise((r) => setTimeout(r, 10))
+      }
+      assert.match(t.snapshot(terminalId).output, /\uFFFD/, 'setup — the decoder holds a partial char')
+      const chunks: string[] = []
+      const f = t.follow(terminalId, {
+        data: (c) => chunks.push(c),
+        exit: () => {},
+      })
+      assert.equal(f.completed, false)
+      assert.equal(
+        f.snapshot.output,
+        '',
+        'the pending byte stays with the live decoder — the tap emits the whole char once'
+      )
+      for (let i = 0; i < 200 && !chunks.join('').includes('😀'); i++) {
+        await new Promise((r) => setTimeout(r, 10))
+      }
+      assert.equal(chunks.join(''), '😀')
+      f.stop()
+    } finally {
+      t.dispose()
+    }
+  })
 })

@@ -744,6 +744,11 @@ export interface AcpPeer {
    *  Optional: external peers built before the field existed are
    *  treated as image-incapable (codeant #558). */
   caps?: { image: boolean }
+  /** The link's terminal registry — the agent's shells run as this
+   *  process's children, and the serve surface reads their buffers
+   *  through it (bro-eua0d). Optional: peers built outside acpOpen
+   *  carry no registry. */
+  terminals?: AcpTerminals
 }
 
 export async function acpOpen(
@@ -804,7 +809,7 @@ export async function acpOpen(
       acpInit(conn.agent, by, deadline)
     )
     span.end({ 'acp.pid': child?.pid ?? 0 })
-    return { ctx: conn.agent, signal: conn.signal, close, tail, req, asAuthError, caps }
+    return { ctx: conn.agent, signal: conn.signal, close, tail, req, asAuthError, caps, terminals }
   } catch (err) {
     close()
     // spawn's 'error' event is async — a binary that can't exec is only

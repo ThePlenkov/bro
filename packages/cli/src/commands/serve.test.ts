@@ -3,6 +3,7 @@ import assert from 'node:assert/strict'
 import { existsSync, mkdirSync, mkdtempSync, rmSync, statSync, utimesSync, writeFileSync } from 'node:fs'
 import { createServer, request, type IncomingMessage } from 'node:http'
 import type { AddressInfo } from 'node:net'
+import type { AcpTerminals } from '@broject/providers'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { Readable } from 'node:stream'
@@ -911,6 +912,236 @@ describe('serve handler over a real socket', () => {
     } finally {
       await new Promise<void>((r) => server.close(() => r()))
       rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  test('GET /api/v1/terminals/<id>/output — token-gated snapshot and SSE follow', async () => {
+    const TOKEN = 'test-session-token'
+    const auth = { authorization: `Bearer ${TOKEN}` }
+    // a fake registry over the same surface AcpTerminals exposes —
+    // `live` lets the test push output/exit like a real child would
+    let live: { data(chunk: string): void; exit(status: unknown): void } | undefined
+    // past the backlog cap as one JSON frame — a follower that reads
+    // must still get it all, sliced through the drain loop
+    const BIG = `${'x'.repeat(1_500_000)}\r\nend\n`
+    const fakeReg = {
+      snapshot: (id: string) => {
+        if (id === 'term-done')
+          return { output: 'done\n', truncated: false, exitStatus: { exitCode: 0, signal: null } }
+        if (id === 'term-big')
+          return { output: BIG, truncated: false, exitStatus: { exitCode: 7, signal: null } }
+        if (id === 'term-gap')
+          // exited but not closed — the pipe still owes its last bytes
+          return { output: 'head\n', truncated: false, exitStatus: { exitCode: 0, signal: null } }
+        if (id === 'term-trunc')
+          return { output: 'tail\n', truncated: true, exitStatus: null }
+        if (id === 'term-boom')
+          return { output: '', truncated: false, exitStatus: null }
+        if (id !== 'term-1') throw new Error(`Unknown terminal '${id}'`)
+        return { output: 'hello\n', truncated: false, exitStatus: null }
+      },
+      follow: (id: string, l: { data(c: string): void; exit(s: unknown): void }) => {
+        if (id === 'term-done')
+          return {
+            snapshot: { output: 'done\n', truncated: false, exitStatus: { exitCode: 0, signal: null } },
+            completed: true,
+            stop: () => {},
+          }
+        if (id === 'term-big')
+          return {
+            snapshot: { output: BIG, truncated: false, exitStatus: { exitCode: 7, signal: null } },
+            completed: true,
+            stop: () => {},
+          }
+        if (id === 'term-boom') throw new Error('registry exploded')
+        if (id === 'term-gap') {
+          live = l
+          return {
+            snapshot: { output: 'head\n', truncated: false, exitStatus: { exitCode: 0, signal: null } },
+            completed: false,
+            stop: () => {},
+          }
+        }
+        if (id === 'term-trunc') {
+          live = l
+          return {
+            snapshot: { output: 'tail\n', truncated: true, exitStatus: null },
+            completed: false,
+            stop: () => {},
+          }
+        }
+        if (id !== 'term-1') throw new Error(`Unknown terminal '${id}'`)
+        live = l
+        return {
+          snapshot: { output: 'hello\n', truncated: false, exitStatus: null },
+          completed: false,
+          stop: () => {},
+        }
+      },
+    }
+    const d = deps({ terminals: () => fakeReg as unknown as AcpTerminals })
+    const server = createServer(createServeHandler(d, { dir: '/repo', startedAt: 't0' }, TOKEN))
+    await new Promise<void>((r) => server.listen(0, '127.0.0.1', r))
+    const port = (server.address() as AddressInfo).port
+    const base = `http://127.0.0.1:${port}`
+    try {
+      const path = '/api/v1/terminals/term-1/output'
+      // output is potentially secret — same credential rule as the log route
+      assert.equal((await fetch(`${base}${path}`)).status, 401)
+      assert.equal((await fetch(`${base}${path}?token=nope`)).status, 401)
+      assert.equal(
+        (await fetch(`${base}${path}`, { method: 'POST', headers: auth })).status,
+        405
+      )
+      // unknown id and a missing registry are both 404 — but a malformed
+      // id is a 400 about the id itself, ahead of any registry probe
+      assert.equal(
+        (await fetch(`${base}/api/v1/terminals/nope/output`, { headers: auth })).status,
+        404
+      )
+      const bad = await fetch(`${base}/api/v1/terminals/%ZZ/output`, { headers: auth })
+      assert.equal(bad.status, 400)
+      assert.match((await bad.json() as { error: string }).error, /invalid terminal id/)
+      const bare = createServer(
+        createServeHandler(deps(), { dir: '/repo', startedAt: 't0' }, TOKEN)
+      )
+      await new Promise<void>((r) => bare.listen(0, '127.0.0.1', r))
+      try {
+        const p2 = `http://127.0.0.1:${(bare.address() as AddressInfo).port}`
+        assert.equal(
+          (await fetch(`${p2}${path}`, { headers: auth })).status,
+          404,
+          'no conductor registry — the unwired answer'
+        )
+        assert.equal(
+          (await fetch(`${p2}/api/v1/terminals/%ZZ/output`, { headers: auth })).status,
+          400,
+          'a malformed id answers 400 even with no registry wired'
+        )
+      } finally {
+        await new Promise<void>((r) => bare.close(() => r()))
+      }
+
+      // plain GET — the terminal/output wire shape
+      const snap = await fetch(`${base}${path}`, { headers: auth })
+      assert.equal(snap.status, 200)
+      assert.deepEqual(await snap.json(), {
+        output: 'hello\n',
+        truncated: false,
+        exitStatus: null,
+      })
+
+      // ?follow — meta frame, JSON-encoded snapshot/live data, `event: exit`
+      const follow = await fetch(`${base}${path}?follow`, { headers: auth })
+      assert.equal(follow.status, 200)
+      assert.match(follow.headers.get('content-type') ?? '', /text\/event-stream/)
+      const reader = follow.body!.getReader()
+      const dec = new TextDecoder()
+      let stream = ''
+      const pump = async (): Promise<void> => {
+        const { value, done } = await reader.read()
+        if (!done && value !== undefined) stream += dec.decode(value)
+      }
+      await pump()
+      assert.match(stream, /event: meta\ndata: \{"truncated":false\}/)
+      assert.match(stream, /data: "hello\\n"/)
+      live!.data('world\n')
+      for (let i = 0; i < 10 && !stream.includes('world'); i++) {
+        await pump()
+      }
+      assert.match(stream, /data: "world\\n"/)
+      // a carriage return can't break framing — JSON keeps it inside the
+      // data line instead of letting an SSE reader drop it as junk
+      live!.data('50%\r60%\n')
+      for (let i = 0; i < 10 && !stream.includes('60%'); i++) {
+        await pump()
+      }
+      assert.match(stream, /data: "50%\\r60%\\n"/)
+      live!.exit({ exitCode: 0, signal: null })
+      for (let i = 0; i < 10 && !stream.includes('event: exit'); i++) {
+        await pump()
+      }
+      assert.match(stream, /event: exit\ndata: \{"exitCode":0/)
+      await reader.cancel()
+
+      // a truncated buffer flags it on the meta frame — the same signal
+      // plain GET's `truncated` field carries
+      const trunc = await fetch(`${base}/api/v1/terminals/term-trunc/output?follow`, {
+        headers: auth,
+      })
+      assert.equal(trunc.status, 200)
+      const truncReader = trunc.body!.getReader()
+      let truncStream = ''
+      {
+        const { value } = await truncReader.read()
+        if (value !== undefined) truncStream += dec.decode(value)
+      }
+      assert.match(truncStream, /event: meta\ndata: \{"truncated":true\}/)
+      assert.match(truncStream, /data: "tail\\n"/)
+      await truncReader.cancel()
+
+      // a follow() fault that isn't the release race gets a verdict the
+      // client can act on — never a silent empty 200
+      const boom = await fetch(`${base}/api/v1/terminals/term-boom/output?follow`, {
+        headers: auth,
+      })
+      assert.equal(boom.status, 200)
+      assert.match(await boom.text(), /event: error\ndata: \{"error":"registry exploded"\}/)
+
+      // an already-final terminal emits snapshot + exit immediately
+      const done = await fetch(`${base}/api/v1/terminals/term-done/output?follow`, {
+        headers: auth,
+      })
+      assert.equal(done.status, 200)
+      const text = await done.text()
+      assert.match(text, /data: "done\\n"/)
+      assert.match(text, /event: exit\ndata: \{"exitCode":0/)
+
+      // a snapshot bigger than the backlog cap still streams whole —
+      // sliced frames pace through drain instead of dropping the reader
+      const big = await fetch(`${base}/api/v1/terminals/term-big/output?follow`, {
+        headers: auth,
+      })
+      assert.equal(big.status, 200)
+      const bigText = await big.text()
+      let rebuilt = ''
+      let bigExit = ''
+      for (const frame of bigText.split('\n\n')) {
+        if (frame.startsWith('event: exit')) {
+          bigExit = frame
+        } else if (!frame.startsWith('event:')) {
+          const dm = /^data: (.*)$/m.exec(frame)
+          if (dm !== null) rebuilt += JSON.parse(dm[1]!) as string
+        }
+      }
+      assert.equal(rebuilt, BIG, 'sliced data frames reassemble byte-exact')
+      assert.match(bigExit, /exitCode":7/)
+
+      // a snapshot with exitStatus but pending 'close' keeps streaming —
+      // ending on exitStatus alone would drop bytes still on the pipe
+      const gap = await fetch(`${base}/api/v1/terminals/term-gap/output?follow`, {
+        headers: auth,
+      })
+      assert.equal(gap.status, 200)
+      const gapReader = gap.body!.getReader()
+      const gapDec = new TextDecoder()
+      let gapStream = ''
+      const gapPump = async (): Promise<void> => {
+        const { value, done: d } = await gapReader.read()
+        if (!d && value !== undefined) gapStream += gapDec.decode(value)
+      }
+      await gapPump()
+      assert.match(gapStream, /data: "head\\n"/)
+      live!.data('tail\n')
+      live!.exit({ exitCode: 0, signal: null })
+      for (let i = 0; i < 10 && !gapStream.includes('event: exit'); i++) {
+        await gapPump()
+      }
+      assert.match(gapStream, /data: "tail\\n"/)
+      assert.match(gapStream, /event: exit\ndata: \{"exitCode":0/)
+      await gapReader.cancel()
+    } finally {
+      await new Promise<void>((r) => server.close(() => r()))
     }
   })
 
