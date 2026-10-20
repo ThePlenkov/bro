@@ -951,6 +951,9 @@ class LiveTurn extends TagPump {
     // a call first seen already-terminal gets a synthesized open edge —
     // carrying its terminal status on 'open' lies about the edge
     if (synthesizedOpen) delete p['status']
+    // titles can carry whole command strings — the stream bounds them
+    // like the narration label does (the bus keeps full fidelity)
+    if (typeof p['title'] === 'string') p['title'] = shortLabel(p['title'])
     this.toolEvents.push({ type: 'tool_activity', ...p })
   }
 

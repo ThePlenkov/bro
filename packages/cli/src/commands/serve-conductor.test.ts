@@ -873,6 +873,33 @@ describe('serve /v1/* — the conductor plane', () => {
     }
   })
 
+  test('tool_activity bounds titles like the narration label does', async () => {
+    const longTitle = `exec: ${'x'.repeat(300)}\nsecond line ignored`
+    const fake = fakeAcpAgent({
+      updates: [
+        {
+          sessionUpdate: 'tool_call',
+          toolCallId: 'tc-t',
+          title: longTitle,
+          kind: 'execute',
+          status: 'in_progress',
+        } as SessionUpdate,
+        ...chunks('x'),
+      ],
+      configOptions: [MODEL_OPTION],
+    })
+    const { r, close } = await postStream(fake)
+    try {
+      const ev = await sseEvents(r)
+      const open = ev.find((e) => e.event === 'tool_activity')?.data
+      assert.equal((open?.title as string).length, 118)
+      assert.ok((open?.title as string).endsWith('…'))
+      assert.ok(!(open?.title as string).includes('second line'))
+    } finally {
+      await close()
+    }
+  })
+
   test('narration landing mid partial-tag keeps stream order — held tail completes into the block', async () => {
     const fake = fakeAcpAgent({
       updates: [

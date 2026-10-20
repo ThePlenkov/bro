@@ -179,6 +179,19 @@ describe('agentTurnPlane', () => {
         title: 'bash pwd',
         status: 'completed',
       } as SessionUpdate)
+      // a duped terminal edge re-announces a landing, not a new edge —
+      // LiveTurn dedupes identically (bro-btccj finish-count parity)
+      plane.update({
+        sessionUpdate: 'tool_call_update',
+        toolCallId: 'tc-other',
+        status: 'failed',
+      } as SessionUpdate)
+      plane.update({
+        sessionUpdate: 'tool_call',
+        toolCallId: 'tc-late',
+        title: 'bash pwd',
+        status: 'completed',
+      } as SessionUpdate)
       plane.stop('end_turn')
       await plane.drain()
       const events = await probeAgent(dir)

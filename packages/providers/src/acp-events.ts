@@ -120,6 +120,7 @@ export function agentTurnPlane(opts: AgentTurnPlaneOpts): AgentTurnPlane {
 
   let queue: Promise<unknown> = Promise.resolve()
   const seenTools = new Set<string>()
+  const doneTools = new Set<string>()
   const seenSubs = new Set<string>()
   let lastUsageAt = 0
   let pendingUsage: Record<string, unknown> | undefined
@@ -194,6 +195,9 @@ export function agentTurnPlane(opts: AgentTurnPlaneOpts): AgentTurnPlane {
 
   const onToolCall = (u: Toolish): void => {
     const terminal = u.status !== undefined && u.status !== null && TERMINAL_STATUS.has(u.status)
+    // a duped terminal edge re-announces a landing, never a new edge —
+    // the conductor's LiveTurn dedupes identically (one finish per call)
+    if (terminal && doneTools.has(u.toolCallId)) return
     const fresh = !seenTools.has(u.toolCallId)
     if (fresh) seenTools.add(u.toolCallId)
     // a mid-flight repeat of an already-open call is churn — only
@@ -206,13 +210,15 @@ export function agentTurnPlane(opts: AgentTurnPlaneOpts): AgentTurnPlane {
       delete openEdge['status']
       emit('tool_call', openEdge)
     }
+    if (terminal) doneTools.add(u.toolCallId)
     emit('tool_call', toolPayload(u, terminal ? 'finish' : 'open'))
   }
 
   const onToolCallUpdate = (u: Toolish): void => {
     const terminal = u.status != null && TERMINAL_STATUS.has(u.status)
-    if (!terminal) return
+    if (!terminal || doneTools.has(u.toolCallId)) return
     seenTools.add(u.toolCallId)
+    doneTools.add(u.toolCallId)
     emit('tool_call', toolPayload(u, 'finish'))
   }
 

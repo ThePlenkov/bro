@@ -22,7 +22,7 @@ conductor's client-facing SSE stream is the last surface still blind.
 Emit a named SSE event — `tool_activity` — on each tool lifecycle
 edge, alongside (never instead of) the text narration:
 
-```
+```text
 event: tool_activity
 data: {"type":"tool_activity","phase":"open","toolCallId":"tc-1","title":"exec: ls","kind":"execute","status":"in_progress"}
 ```
