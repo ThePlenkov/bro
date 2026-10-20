@@ -16,10 +16,10 @@ import { meshScan, type PeerRecord } from './inbox.ts'
 import {
   githubProvenance,
   issueComments,
-  issueNumber,
-  issueRepo,
+  issueKey,
   parseGithubRemote,
   selfLogin as ghSelfLogin,
+  type GhRecord,
 } from './github.ts'
 
 export type ThreadStage = 'posted' | 'claimed' | 'submitted' | 'accepted' | 'rejected'
@@ -98,54 +98,213 @@ function ownBeads(dir: string): { rows: BeadLike[]; error?: string } {
  *  wasteland: the binding attests the BOARD — a row in the commons
  *  carries its own poster (`posted_by`/`claimed_by`), so `from` is
  *  the record's real field and provenance is `from`. */
-function admitPeerRecord(
+/** The transport's say on who a record is from — a provenance rig, or
+ *  the error explaining why the record is dropped. */
+function peerProvenance(
   r: PeerRecord,
-  threads: Set<string>,
-  seen: Set<string>,
-  state: ThreadState,
-  own: string | null,
-  peers: MeshPeer[],
-  selfLogin: string | undefined,
-): void {
-  if (!threads.has(r.envelope.thread)) {
+  ctx: ReduceCtx,
+): { provenance?: string; error?: string } {
+  if (r.transport === 'github') {
+    const v = githubProvenance({
+      author: r.author ?? '',
+      peer: ctx.peers.find((p) => p.alias === r.peer),
+      selfLogin: ctx.login.get(),
+      ownRig: ctx.ownRig,
+    })
+    return v.provenance === undefined
+      ? { error: v.error ?? 'unauthenticated' }
+      : { provenance: v.provenance }
+  }
+  if (r.transport === 'wasteland') {
+    return { provenance: r.envelope.from }
+  }
+  return ownRecordAdmits(r, ctx)
+}
+
+/** beads-remote and local peers — the `from` attests the binding rig;
+ *  on `local` checkouts the store can carry OUR records too. */
+function ownRecordAdmits(r: PeerRecord, ctx: ReduceCtx): { provenance?: string; error?: string } {
+  const admitted =
+    r.envelope.from === r.peerRig ||
+    (r.transport === 'local' && ctx.ownRig !== null && r.envelope.from === ctx.ownRig)
+  return admitted
+    ? { provenance: r.transport === 'local' ? r.envelope.from : r.peerRig }
+    : { error: `from ${r.envelope.from} doesn't match peer rig ${r.peerRig}` }
+}
+
+function admitPeerRecord(r: PeerRecord, ctx: ReduceCtx): void {
+  if (!ctx.threads.has(r.envelope.thread) || ctx.seen.has(r.envelope.id)) {
     return
   }
-  let provenance: string
-  if (r.transport === 'github') {
-    const v = githubProvenance(
-      r.author ?? '',
-      peers.find((p) => p.alias === r.peer),
-      selfLogin,
-      own,
+  const v = peerProvenance(r, ctx)
+  if (v.provenance === undefined) {
+    ctx.state.errors.push(
+      `${r.peer}: ignoring ${r.envelope.kind} ${r.envelope.id} — ${v.error}`
     )
-    if (v.provenance === undefined) {
-      state.errors.push(
-        `${r.peer}: ignoring ${r.envelope.kind} ${r.envelope.id} — ${v.error ?? 'unauthenticated'}`
-      )
-      return
-    }
-    provenance = v.provenance
-  } else if (r.transport === 'wasteland') {
-    provenance = r.envelope.from
-  } else {
-    const admitted =
-      r.envelope.from === r.peerRig ||
-      (r.transport === 'local' && own !== null && r.envelope.from === own)
-    if (!admitted) {
-      state.errors.push(
-        `${r.peer}: ignoring ${r.envelope.kind} ${r.envelope.id} — from ${r.envelope.from} doesn't match peer rig ${r.peerRig}`
-      )
-      return
-    }
-    provenance = r.transport === 'local' ? r.envelope.from : r.peerRig
+    return
   }
-  if (!seen.has(r.envelope.id)) {
-    seen.add(r.envelope.id)
-    state.envelopes.push(r.envelope)
-    state.provenance[r.envelope.id] = provenance
-    if (r.envelope.kind === 'request') {
-      state.requestPeer = peers.find((p) => p.alias === r.peer)
+  ctx.seen.add(r.envelope.id)
+  ctx.state.envelopes.push(r.envelope)
+  ctx.state.provenance[r.envelope.id] = v.provenance
+  if (r.envelope.kind === 'request') {
+    ctx.state.requestPeer = ctx.peers.find((p) => p.alias === r.peer)
+  }
+}
+
+/** github admission needs this account's login — `gh api user` is a
+ *  network call, so it runs once per reduction at most, and only when
+ *  a github record actually needs it. */
+/** The reduction's working set — every admit leg shares it; one record
+ *  keeps each helper's arg list under the repo's max-4 ceiling. */
+interface ReduceCtx {
+  threads: Set<string>
+  seen: Set<string>
+  state: ThreadState
+  ownRig: string | null
+  peers: MeshPeer[]
+  login: { get: () => string | undefined }
+}
+
+function lazyLogin(): ReduceCtx['login'] {
+  let ready = false
+  let login: string | undefined
+  const get = (): string | undefined => {
+    if (!ready) {
+      ready = true
+      login = ghSelfLogin().login
     }
+    return login
+  }
+  return { get }
+}
+
+/** Own-store leg: mirror beads carry the remote thread in
+ *  `external_ref` — the asked thread aliases both ways (wait on the
+ *  bead id and the issue's comments still join; wait on the issue url
+ *  and the mirror still anchors it). Admits every own envelope whose
+ *  thread or alias is in the set. */
+function aliasOf(row: BeadLike): string | null {
+  return typeof row.external_ref === 'string' && row.external_ref !== ''
+    ? row.external_ref
+    : null
+}
+
+/** First pass over own beads — alias recovery only (the asked thread
+ *  names both directions through `external_ref`). */
+function collectAliases(
+  ownEnvs: { row: BeadLike; env: MeshEnvelope | null }[],
+  thread: string,
+  ctx: ReduceCtx,
+): void {
+  for (const { row, env } of ownEnvs) {
+    const ext = aliasOf(row)
+    if (env !== null && env.thread === thread && ext !== null) {
+      ctx.threads.add(ext)
+    }
+    if (env !== null && ext === thread) {
+      ctx.threads.add(env.thread)
+    }
+  }
+}
+
+/** The envelope joins the reduction when its thread OR its
+ *  `external_ref` alias is in the asked set. */
+function ownAdmits(env: MeshEnvelope, ext: string | null, ctx: ReduceCtx): boolean {
+  if (ctx.threads.has(env.thread)) {
+    return true
+  }
+  return ext !== null && ctx.threads.has(ext)
+}
+
+function admitOwnBeads(rows: BeadLike[], thread: string, ctx: ReduceCtx): void {
+  const ownEnvs = rows.map((row) => ({ row, env: envelopeFromBead(row) }))
+  collectAliases(ownEnvs, thread, ctx)
+  for (const { row, env } of ownEnvs) {
+    if (env !== null && ownAdmits(env, aliasOf(row), ctx)) {
+      ctx.seen.add(env.id)
+      ctx.state.envelopes.push(env)
+    }
+  }
+}
+
+/** github's own-repo half — a request to THIS rig is an issue on MY
+ *  repo; nothing pulled it into a store, so a thread alias naming a
+ *  url on the repo origin points at gets its comments read directly.
+ *  Same provenance rule as the peer scan: a bound login attests the
+ *  peer, this account attests us, anything else drops flagged. */
+function admitSelfRepoGithub(dir: string, ctx: ReduceCtx): void {
+  const origin = gitTry(['-C', dir, 'remote', 'get-url', 'origin'])
+  const selfRepo = origin.code === 0 ? parseGithubRemote(origin.out) : null
+  if (selfRepo === null) {
+    return
+  }
+  for (const t of ctx.threads) {
+    admitIssueComments(t, selfRepo, ctx)
+  }
+}
+
+/** One thread alias → its issue comments, admitted when they name the
+ *  origin's repo. */
+function admitIssueComments(t: string, selfRepo: { owner: string; repo: string }, ctx: ReduceCtx): void {
+  const k = issueKey(t)
+  if (k.repo === null || k.n === null) {
+    return
+  }
+  const { repo, n } = k
+  if (repo.owner !== selfRepo.owner || repo.repo !== selfRepo.repo) {
+    return
+  }
+  const cs = issueComments(repo, { number: n })
+  for (const e of cs.errors) {
+    ctx.state.errors.push(`self: ${e}`)
+  }
+  for (const r of cs.records) {
+    admitSelfRepoRecord(r, ctx)
+  }
+}
+
+function admitSelfRepoRecord(r: GhRecord, ctx: ReduceCtx): void {
+  if (!ctx.threads.has(r.envelope.thread) || ctx.seen.has(r.envelope.id)) {
+    return
+  }
+  const bound = ctx.peers.find((p) => p.login !== undefined && p.login === r.author)
+  const v = githubProvenance({
+    author: r.author,
+    peer: bound,
+    selfLogin: ctx.login.get(),
+    ownRig: ctx.ownRig,
+  })
+  if (v.provenance === undefined) {
+    ctx.state.errors.push(
+      `self: ignoring ${r.envelope.kind} ${r.envelope.id} — ${v.error ?? 'unauthenticated'}`
+    )
+    return
+  }
+  ctx.seen.add(r.envelope.id)
+  ctx.state.envelopes.push(r.envelope)
+  ctx.state.provenance[r.envelope.id] = v.provenance
+  if (r.envelope.kind === 'request' && bound !== undefined) {
+    ctx.state.requestPeer = bound
+  }
+}
+
+/** Highest-stage envelope wins; the turn is the side that owes the
+ *  next move — both verdicts are terminal (a revised result re-opens
+ *  as a new request thread, not a turn). */
+function reduceStage(state: ThreadState): void {
+  state.request = state.envelopes.find((e) => e.kind === 'request')
+  let stage: ThreadStage | undefined
+  for (const e of state.envelopes) {
+    const s = STAGE_OF[e.kind]
+    if (stage === undefined || STAGE_RANK[s] > STAGE_RANK[stage]) {
+      stage = s
+    }
+  }
+  state.stage = stage
+  if (stage === 'posted' || stage === 'claimed') {
+    state.turn = 'worker'
+  } else if (stage === 'submitted') {
+    state.turn = 'requester'
   }
 }
 
@@ -156,129 +315,41 @@ export function meshThread(
   dir: string,
   peers: MeshPeer[],
   thread: string,
-  gitCommon: string,
-  opts: { pull?: boolean } = {},
+  call: { gitCommon: string; pull?: boolean },
 ): ThreadState {
   const state: ThreadState = { envelopes: [], provenance: {}, threads: [], errors: [] }
-  const seen = new Set<string>()
+  const ownRig = selfRig(dir)
+  const ctx: ReduceCtx = {
+    threads: new Set([thread]),
+    seen: new Set(),
+    state,
+    ownRig,
+    peers,
+    login: lazyLogin(),
+  }
 
   const own = ownBeads(dir)
   if (own.error !== undefined) {
     state.errors.push(`self: ${own.error}`)
   }
-  // mirror beads carry the remote thread in `external_ref` — the
-  // asked thread aliases both ways: wait on the bead id and the
-  // issue's comments still join the reduction; wait on the issue url
-  // and the mirror still anchors it
-  const threads = new Set([thread])
-  const ownEnvs = own.rows.map((row) => ({ row, env: envelopeFromBead(row) }))
-  for (const { row, env } of ownEnvs) {
-    const ext = typeof row.external_ref === 'string' && row.external_ref !== '' ? row.external_ref : null
-    if (env !== null && env.thread === thread && ext !== null) {
-      threads.add(ext)
-    }
-    if (env !== null && ext === thread) {
-      threads.add(env.thread)
-    }
-  }
-  for (const { row, env } of ownEnvs) {
-    const ext = typeof row.external_ref === 'string' ? row.external_ref : null
-    if (env !== null && (threads.has(env.thread) || (ext !== null && threads.has(ext)))) {
-      seen.add(env.id)
-      state.envelopes.push(env)
-    }
-  }
-  state.threads = [...threads]
+  admitOwnBeads(own.rows, thread, ctx)
+  state.threads = [...ctx.threads]
 
   // `closedLocal` — the request anchor's `bd close` is `done`'s ship
   // precondition, so a closed request bead is a healthy thread's
   // terminal state, not absence; an open-only scan loses the anchor
   // the moment `done` lands
-  const ownRig = selfRig(dir)
-  const scan = meshScan(dir, peers, gitCommon, {
-    pull: opts.pull,
+  const scan = meshScan(dir, peers, call.gitCommon, {
+    pull: call.pull,
     closedLocal: true,
     selfRig: ownRig ?? undefined,
   })
   state.errors.push(...scan.errors)
-  // github admission needs this account's login — `gh api user` is a
-  // network call, so it runs once per reduction at most, and only
-  // when a github record actually needs it
-  let ghLogin: string | undefined
-  let ghLoginReady = false
-  const loginOnce = (): string | undefined => {
-    if (!ghLoginReady) {
-      ghLoginReady = true
-      ghLogin = ghSelfLogin().login
-    }
-    return ghLogin
-  }
-  const self = scan.records.some((r) => r.transport === 'github') ? loginOnce() : undefined
   for (const r of scan.records) {
-    admitPeerRecord(r, threads, seen, state, ownRig, peers, self)
+    admitPeerRecord(r, ctx)
   }
 
-  // github's own-repo half — a request to THIS rig is an issue on MY
-  // repo; nothing pulled it into a store, so a thread alias naming a
-  // url on the repo origin points at gets its comments read directly.
-  // Same provenance rule as the peer scan: a bound login attests the
-  // peer, this account attests us, anything else drops flagged.
-  const origin = gitTry(['-C', dir, 'remote', 'get-url', 'origin'])
-  const selfRepo = origin.code === 0 ? parseGithubRemote(origin.out) : null
-  if (selfRepo !== null) {
-    for (const t of threads) {
-      const ri = issueRepo(t)
-      const n = issueNumber(t)
-      if (
-        ri === null ||
-        n === null ||
-        ri.owner !== selfRepo.owner ||
-        ri.repo !== selfRepo.repo
-      ) {
-        continue
-      }
-      const cs = issueComments(ri, { number: Number(n) })
-      for (const e of cs.errors) {
-        state.errors.push(`self: ${e}`)
-      }
-      const self2 = self ?? loginOnce()
-      for (const r of cs.records) {
-        if (!threads.has(r.envelope.thread) || seen.has(r.envelope.id)) {
-          continue
-        }
-        const bound = peers.find((p) => p.login !== undefined && p.login === r.author)
-        const v = githubProvenance(r.author, bound, self2, ownRig)
-        if (v.provenance === undefined) {
-          state.errors.push(
-            `self: ignoring ${r.envelope.kind} ${r.envelope.id} — ${v.error ?? 'unauthenticated'}`
-          )
-          continue
-        }
-        seen.add(r.envelope.id)
-        state.envelopes.push(r.envelope)
-        state.provenance[r.envelope.id] = v.provenance
-        if (r.envelope.kind === 'request' && bound !== undefined) {
-          state.requestPeer = bound
-        }
-      }
-    }
-  }
-
-  state.request = state.envelopes.find((e) => e.kind === 'request')
-  let stage: ThreadStage | undefined
-  for (const e of state.envelopes) {
-    const s = STAGE_OF[e.kind]
-    if (stage === undefined || STAGE_RANK[s] > STAGE_RANK[stage]) {
-      stage = s
-    }
-  }
-  state.stage = stage
-  // both verdicts are terminal — a rejected thread is done, not the
-  // worker's turn; a revised result re-opens as a new request thread
-  if (stage === 'posted' || stage === 'claimed') {
-    state.turn = 'worker'
-  } else if (stage === 'submitted') {
-    state.turn = 'requester'
-  }
+  admitSelfRepoGithub(dir, ctx)
+  reduceStage(state)
   return state
 }

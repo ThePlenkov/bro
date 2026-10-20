@@ -296,7 +296,7 @@ function settleAbsent(w: Watch, read: DepRead): void {
  *  the envelope SET, not the reduced stage — a ship followed by a
  *  reject is contradictory lifecycle history, not a free dep. */
 function threadOf(w: Watch, ctx: WaitCtx): ReturnType<typeof meshThread> {
-  const thread = meshThread(ctx.dir, ctx.peers, w.ref.id, ctx.common, { pull: false })
+  const thread = meshThread(ctx.dir, ctx.peers, w.ref.id, { gitCommon: ctx.common, pull: false })
   for (const e of thread.errors) {
     console.error(`! wait ${w.arg}: ${e}`)
   }

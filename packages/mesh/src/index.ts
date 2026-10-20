@@ -23,8 +23,7 @@ export {
   GITHUB_LABEL_MAX,
   githubProvenance,
   issueComments,
-  issueNumber,
-  issueRepo,
+  issueKey,
   parseComment,
   parseGithubRemote,
   postComment,
@@ -49,7 +48,7 @@ export {
   termPriority,
   wantedStatus,
 } from './wasteland.ts'
-export type { WantedRow } from './wasteland.ts'
+export type { WantedRow, WlTarget } from './wasteland.ts'
 export { CAPABILITY_RE, issueLabels, meshIssues, replicaAgeMs, replicaDir, shippedIssues, syncReplica } from './pull.ts'
 export type { IssueRow } from './pull.ts'
 export { meshInbox, meshScan } from './inbox.ts'

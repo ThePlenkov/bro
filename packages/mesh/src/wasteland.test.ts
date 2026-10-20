@@ -179,15 +179,15 @@ describe('wasteland e2e (gated)', () => {
       return
     }
     const { postWanted, claimWanted, completeWanted, wantedStatus } = await import('./wasteland.ts')
-    const posted = postWanted(WL_E2E, { title: `mesh e2e ${Date.now()}`, body: 'scratch', priority: 2 })
+    const posted = postWanted({ remote: WL_E2E, title: `mesh e2e ${Date.now()}`, body: 'scratch', priority: 2 })
     assert.ok(posted.id, posted.error)
     assert.match(posted.id!, /^w-/)
-    assert.equal(claimWanted(WL_E2E, posted.id!).error, undefined)
+    assert.equal(claimWanted({ remote: WL_E2E, id: posted.id! }).error, undefined)
     assert.equal(
-      completeWanted(WL_E2E, posted.id!, [{ kind: 'url', ref: 'https://example.com/e2e' }]).error,
+      completeWanted({ remote: WL_E2E, id: posted.id!, evidence: [{ kind: 'url', ref: 'https://example.com/e2e' }] }).error,
       undefined,
     )
-    const row = wantedStatus(WL_E2E, posted.id!)
+    const row = wantedStatus({ remote: WL_E2E, id: posted.id! })
     assert.ok(row.row, row.error)
     assert.notEqual(row.row!.status, 'open')
   })

@@ -62,8 +62,12 @@ function selfRigOrExit(dir: string): string {
 
 function parsePriority(rest: string[]): number | undefined {
   const prio = flagValue(rest, '--priority')
-  const priority = prio === undefined ? undefined : Number(prio)
-  if (priority !== undefined && (!Number.isInteger(priority) || priority < 0 || priority > 4)) {
+  if (prio === undefined) {
+    return undefined
+  }
+  const priority = Number(prio)
+  const inRange = priority >= 0 && priority <= 4
+  if (!Number.isInteger(priority) || !inRange) {
     console.error('error: --priority wants 0-4')
     process.exit(2)
   }
@@ -101,42 +105,51 @@ function wireFor(dir: string, rest: string[], rig: string, id?: string): void {
   }
 }
 
+/** Remote planes (specs/cross-repo/bro-kim1e) — the peer has no
+ *  checkout to clone into: the request posts over the transport's
+ *  own channel (issue + record comment, or a wanted row) and a
+ *  mirror bead lands in OUR store, external_ref = the remote thread.
+ *  No `external:` dep is wired — bd can't resolve a github/wasteland
+ *  ref, so `--for` is advisory-only here, said so, never silent.
+ *  Returns false when the target isn't a remote-plane peer. */
+function remoteRequest(dir: string, t: ResolvedTarget, titleText: string, rest: string[]): boolean {
+  const peer = t.peer
+  if (peer?.transport !== 'github' && peer?.transport !== 'wasteland') {
+    return false
+  }
+  const rig = selfRigOrExit(dir)
+  const deliver = peer.transport === 'github' ? deliverGithub : deliverWasteland
+  const posted = deliver(dir, peer, {
+    from: rig,
+    title: titleText,
+    body: flagValue(rest, '--body'),
+    refs: parseRefs(rest, '--ref'),
+    priority: parsePriority(rest),
+  })
+  if (posted.error !== undefined) {
+    console.error(`error: ${posted.error}`)
+    process.exit(1)
+  }
+  console.log(`request ${posted.mirror} → ${peer.alias} (${peer.transport})`)
+  console.log(`  remote thread ${posted.thread}`)
+  if (flagValue(rest, '--for') !== undefined) {
+    console.error(`! --for not wired on ${peer.transport} planes — track with \`bro mesh wait\` instead`)
+  }
+  console.log(`thread: ${posted.thread} — track it with \`bro mesh wait ${posted.thread}\``)
+  return true
+}
+
 export function runRequestCommand(argv: string[]): void {
   const dir = process.cwd()
   const [target, titleText, ...rest] = argv
-  if (target === undefined || titleText === undefined || titleText.startsWith('--')) {
+  const titleBad = titleText === undefined || titleText.startsWith('--')
+  if (target === undefined || titleBad) {
     console.error(USAGE)
     process.exit(2)
   }
 
   const t = resolveOrExit(dir, target)
-
-  // remote planes (specs/cross-repo/bro-kim1e) — the peer has no
-  // checkout to clone into: the request posts over the transport's
-  // own channel (issue + record comment, or a wanted row) and a
-  // mirror bead lands in OUR store, external_ref = the remote thread.
-  // No `external:` dep is wired — bd can't resolve a github/wasteland
-  // ref, so `--for` is advisory-only here, said so, never silent.
-  if (t.peer?.transport === 'github' || t.peer?.transport === 'wasteland') {
-    const rig = selfRigOrExit(dir)
-    const deliver = t.peer.transport === 'github' ? deliverGithub : deliverWasteland
-    const posted = deliver(dir, t.peer, {
-      from: rig,
-      title: titleText,
-      body: flagValue(rest, '--body'),
-      refs: parseRefs(rest, '--ref'),
-      priority: parsePriority(rest),
-    })
-    if (posted.error !== undefined) {
-      console.error(`error: ${posted.error}`)
-      process.exit(1)
-    }
-    console.log(`request ${posted.mirror} → ${t.peer.alias} (${t.peer.transport})`)
-    console.log(`  remote thread ${posted.thread}`)
-    if (flagValue(rest, '--for') !== undefined) {
-      console.error(`! --for not wired on ${t.peer.transport} planes — track with \`bro mesh wait\` instead`)
-    }
-    console.log(`thread: ${posted.thread} — track it with \`bro mesh wait ${posted.thread}\``)
+  if (remoteRequest(dir, t, titleText, rest)) {
     return
   }
 

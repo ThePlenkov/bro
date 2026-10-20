@@ -58,7 +58,7 @@ export function deliverGithub(
   peer: MeshPeer,
   input: RemoteDeliverInput,
 ): RemoteDeliverResult {
-  const posted = postRequest(peer.remote, { ...input, to: peer.rig })
+  const posted = postRequest({ remote: peer.remote, ...input, to: peer.rig })
   if (posted.error !== undefined || posted.issue === undefined) {
     return { error: posted.error ?? 'issue posted but returned no url' }
   }
@@ -76,7 +76,7 @@ export function deliverWasteland(
   peer: MeshPeer,
   input: RemoteDeliverInput,
 ): RemoteDeliverResult {
-  const posted = postWanted(peer.remote, input)
+  const posted = postWanted({ remote: peer.remote, ...input })
   if (posted.error !== undefined || posted.id === undefined) {
     return { error: posted.error ?? 'wanted posted but returned no id' }
   }

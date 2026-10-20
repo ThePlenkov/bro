@@ -10,8 +10,7 @@ import { describe, test } from 'node:test'
 import { MESH_VERSION, type MeshEnvelope } from './envelope.ts'
 import {
   githubProvenance,
-  issueNumber,
-  issueRepo,
+  issueKey,
   parseComment,
   parseGithubRemote,
   renderComment,
@@ -69,21 +68,21 @@ describe('parseGithubRemote', () => {
 })
 
 describe('issue thread ids', () => {
-  test('issueRepo strips the /issues/<n> tail; issueNumber reads it', () => {
+  test('issueKey strips the /issues/<n> tail and reads it', () => {
     const url = 'https://github.com/acme/rig/issues/42'
-    assert.deepEqual(issueRepo(url), { owner: 'acme', repo: 'rig' })
-    assert.equal(issueNumber(url), '42')
-    assert.equal(issueNumber('https://github.com/acme/rig'), null)
+    assert.deepEqual(issueKey(url).repo, { owner: 'acme', repo: 'rig' })
+    assert.equal(issueKey(url).n, 42)
+    assert.equal(issueKey('https://github.com/acme/rig').n, null)
     // a bare repo url has no /issues tail — the repo still parses
-    assert.deepEqual(issueRepo('https://github.com/acme/rig'), { owner: 'acme', repo: 'rig' })
-    assert.equal(issueRepo('https://gitlab.com/acme/rig/issues/1'), null)
+    assert.deepEqual(issueKey('https://github.com/acme/rig').repo, { owner: 'acme', repo: 'rig' })
+    assert.equal(issueKey('https://gitlab.com/acme/rig/issues/1').repo, null)
   })
 })
 
 describe('comment records', () => {
   test('render → parse round-trips the envelope', () => {
     const e = env({ refs: [{ kind: 'url', ref: 'https://x' }], terms: { priority: 'p2' } })
-    const parsed = parseComment(renderComment(e))
+    const parsed = parseComment({ body: renderComment(e) })
     // toEnvelope materializes absent optional fields as undefined —
     // compare on the wire shape
     assert.deepEqual(JSON.parse(JSON.stringify(parsed.envelope)), e)
@@ -103,7 +102,7 @@ describe('comment records', () => {
       '',
       'cross-reference footer added by github',
     ].join('\n')
-    const parsed = parseComment(body)
+    const parsed = parseComment({ body })
     assert.equal(parsed.envelope?.id, 'new')
   })
 
@@ -114,13 +113,13 @@ describe('comment records', () => {
       '```json\nnot json\n```',
       '```\n{"v":"mesh/1"}\n```', // unlabelled fence — not a record block
     ]) {
-      assert.match(parseComment(body).error ?? '', /no valid mesh\/1 record/, body)
+      assert.match(parseComment({ body }).error ?? '', /no valid mesh\/1 record/, body)
     }
   })
 
   test('a non-request mesh kind still parses — admission (kind==="request") is the caller\'s filter', () => {
     for (const kind of ['claim', 'result', 'accept', 'reject'] as const) {
-      const parsed = parseComment(renderComment(env({ kind })))
+      const parsed = parseComment({ body: renderComment(env({ kind })) })
       assert.equal(parsed.envelope?.kind, kind)
     }
   })
@@ -129,7 +128,7 @@ describe('comment records', () => {
     const body = renderIssueBody({ from: 'mesh://acme/one', to: 'mesh://acme/two', body: 'please fix the thing' })
     assert.match(body, /please fix the thing/)
     assert.match(body, /first comment/)
-    assert.match(parseComment(body).error ?? '', /no valid mesh\/1 record/)
+    assert.match(parseComment({ body }).error ?? '', /no valid mesh\/1 record/)
   })
 })
 
@@ -163,42 +162,42 @@ describe('githubProvenance', () => {
   const peer = { rig: 'mesh://acme/far', login: 'acme-bot' }
 
   test('the bound login attests the peer rig', () => {
-    assert.deepEqual(githubProvenance('acme-bot', peer, 'me', 'mesh://acme/mine'), {
+    assert.deepEqual(githubProvenance({ author: 'acme-bot', peer, selfLogin: 'me', ownRig: 'mesh://acme/mine' }), {
       provenance: 'mesh://acme/far',
     })
   })
 
   test('this account attests the own rig — and fails loud when it cannot resolve', () => {
-    assert.deepEqual(githubProvenance('me', peer, 'me', 'mesh://acme/mine'), {
+    assert.deepEqual(githubProvenance({ author: 'me', peer, selfLogin: 'me', ownRig: 'mesh://acme/mine' }), {
       provenance: 'mesh://acme/mine',
     })
     assert.match(
-      githubProvenance('me', peer, 'me', null).error ?? '',
+      githubProvenance({ author: 'me', peer, selfLogin: 'me', ownRig: null }).error ?? '',
       /identity doesn't resolve/,
     )
   })
 
   test('a mismatch is flagged, never admitted', () => {
-    const v = githubProvenance('intruder', peer, 'me', 'mesh://acme/mine')
+    const v = githubProvenance({ author: 'intruder', peer, selfLogin: 'me', ownRig: 'mesh://acme/mine' })
     assert.equal(v.provenance, undefined)
     assert.match(v.error ?? '', /neither peer login acme-bot nor this account/)
   })
 
   test('a binding with no login admits nothing — never falls back to `from`', () => {
-    const v = githubProvenance('acme-bot', { rig: 'mesh://acme/far' }, 'me', 'mesh://acme/mine')
+    const v = githubProvenance({ author: 'acme-bot', peer: { rig: 'mesh://acme/far' }, selfLogin: 'me', ownRig: 'mesh://acme/mine' })
     assert.equal(v.provenance, undefined)
     assert.match(v.error ?? '', /no login/)
     // …even for the OWN account's records: the binding itself is broken
-    const own = githubProvenance('me', { rig: 'mesh://acme/far' }, 'me', 'mesh://acme/mine')
+    const own = githubProvenance({ author: 'me', peer: { rig: 'mesh://acme/far' }, selfLogin: 'me', ownRig: 'mesh://acme/mine' })
     assert.equal(own.provenance, undefined)
   })
 
   test('own-repo plane: no bound peer, self attests, strangers flag', () => {
-    assert.deepEqual(githubProvenance('me', undefined, 'me', 'mesh://acme/mine'), {
+    assert.deepEqual(githubProvenance({ author: 'me', peer: undefined, selfLogin: 'me', ownRig: 'mesh://acme/mine' }), {
       provenance: 'mesh://acme/mine',
     })
     assert.match(
-      githubProvenance('stranger', undefined, 'me', 'mesh://acme/mine').error ?? '',
+      githubProvenance({ author: 'stranger', peer: undefined, selfLogin: 'me', ownRig: 'mesh://acme/mine' }).error ?? '',
       /neither a bound login nor this account/,
     )
   })
@@ -240,11 +239,12 @@ describe('github e2e (gated)', () => {
       t.skip('gh not authenticated')
       return
     }
-    const { postRequest, postComment, issueComments, parseGithubRemote, issueNumber } = await import('./github.ts')
+    const { postRequest, postComment, issueComments, parseGithubRemote, issueKey } = await import('./github.ts')
     const repo = parseGithubRemote(E2E_REPO)
     assert.ok(repo, `BRO_MESH_E2E_REPO "${E2E_REPO}" is not a github repo`)
 
-    const posted = postRequest(E2E_REPO, {
+    const posted = postRequest({
+      remote: E2E_REPO,
       from: 'mesh://e2e/a',
       to: 'mesh://e2e/b',
       title: `mesh e2e ${Date.now()}`,
@@ -252,7 +252,8 @@ describe('github e2e (gated)', () => {
     })
     assert.ok(posted.issue, posted.error)
     const issue = posted.issue
-    const n = Number(issueNumber(issue))
+    const n = issueKey(issue).n
+    assert.ok(n !== null)
     const read = () =>
       issueComments(repo, { number: n }).records.map((r) => r.envelope)
 
@@ -260,8 +261,9 @@ describe('github e2e (gated)', () => {
     assert.deepEqual(read().map((e) => e.kind), ['request'])
 
     for (const kind of ['claim', 'result', 'accept'] as const) {
-      const r = postComment(issue, {
-        ...env({ id: `${issue}#${kind}`, kind, thread: issue }),
+      const r = postComment({
+        thread: issue,
+        env: { ...env({ id: `${issue}#${kind}`, kind, thread: issue }) },
       })
       assert.equal(r.error, undefined)
     }
