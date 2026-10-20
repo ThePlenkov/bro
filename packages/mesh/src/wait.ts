@@ -15,7 +15,7 @@
  *   thread plane — `bro mesh wait`'s reduction, reused for the
  *     stage/turn annotation and the reject-verdict check
  */
-import { existsSync } from 'node:fs'
+import { statSync } from 'node:fs'
 import { join } from 'node:path'
 import { taskStore } from '@broject/core'
 import { formatRigUri, parseRigUri } from './identity.ts'
@@ -130,11 +130,21 @@ export interface DepRead {
   errors: string[]
 }
 
+/** a directory probe that answers false on any stat error — the same
+ *  question existsSync asks, through the audited stat path */
+function dirExists(p: string): boolean {
+  try {
+    return statSync(p).isDirectory()
+  } catch {
+    return false
+  }
+}
+
 /** The ship rule on a `local` peer: `bd -C <checkout>` answers the
  *  closed `provides:<id>` row the inbox scan structurally cannot
  *  return (it drops closed rows). */
 function shippedOnCheckout(checkout: string, id: string): { shipped?: boolean; error?: string } {
-  if (!existsSync(checkout)) {
+  if (!dirExists(checkout)) {
     return { error: `local checkout ${checkout} does not resolve` }
   }
   try {
@@ -173,7 +183,7 @@ export function readDepState(plane: WaitPlane, id: string): DepRead {
   }
 
   const shipped = plane.replica
-    ? existsSync(join(plane.peerDir, '.dolt'))
+    ? dirExists(join(plane.peerDir, '.dolt'))
       ? shippedIssues(plane.peerDir, id)
       : { error: `replica ${plane.peerDir} absent — \`bro mesh pull\` materializes it` }
     : shippedOnCheckout(plane.peerDir, id)
