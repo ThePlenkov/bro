@@ -497,6 +497,115 @@ describe('output caps + loud input failures', () => {
     }
   })
 
+  // bro-vfbyc — a trimmed reply leaves the retained session holding text
+  // the client never received: it may replay, never continue.
+
+  test('a capped response id refuses to chain — the session diverged', async () => {
+    const fake = fakeAcpAgent({ replyText: 'x'.repeat(400), configOptions: [MODEL_OPTION] })
+    const { post, close } = await boot(fake)
+    try {
+      const t1 = await post('/v1/responses', { input: 'first', max_output_tokens: 5 })
+      const id1 = ((await t1.json()) as { id: string }).id
+      const t2 = await post('/v1/responses', {
+        input: [{ type: 'message', role: 'user', content: [{ type: 'input_text', text: 'second' }] }],
+        previous_response_id: id1,
+      })
+      assert.equal(t2.status, 400)
+      const body = (await t2.json()) as { error: { message: string } }
+      assert.match(body.error.message, /trimmed at the wire/)
+      // the delta never reached the divergent session
+      assert.equal(fake.prompts.length, 1)
+      assert.equal(fake.sessions.length, 1)
+    } finally {
+      await close()
+    }
+  })
+
+  test('a capped turn still replays on an identical resend', async () => {
+    const fake = fakeAcpAgent({ replyText: 'x'.repeat(400), configOptions: [MODEL_OPTION] })
+    const { post, close } = await boot(fake)
+    try {
+      const body = { input: 'first', max_output_tokens: 5 }
+      await post('/v1/responses', body)
+      const t2 = await post('/v1/responses', body)
+      assert.equal(t2.status, 200)
+      const b2 = (await t2.json()) as { status: string; output: { content: { text: string }[] }[] }
+      assert.equal(b2.status, 'incomplete')
+      // the recorded cut answer replays — no second turn reaches the agent
+      assert.equal(fake.prompts.length, 1)
+    } finally {
+      await close()
+    }
+  })
+
+  test('a capped chat turn retires the session — the trimmed echo reseeds fresh', async () => {
+    const fake = fakeAcpAgent({ replyText: 'z'.repeat(400), configOptions: [MODEL_OPTION] })
+    const { post, close } = await boot(fake)
+    try {
+      const t1 = await post('/v1/chat/completions', {
+        messages: [{ role: 'user', content: 'first' }],
+        max_tokens: 5,
+      })
+      // the echo is the wire reply itself — exactly what the client saw
+      const echo =
+        ((await t1.json()) as { choices: { message: { content: string } }[] }).choices[0]?.message
+          .content ?? ''
+      assert.notEqual(echo, '')
+      const cont = await post('/v1/chat/completions', {
+        messages: [
+          { role: 'user', content: 'first' },
+          { role: 'assistant', content: echo },
+          { role: 'user', content: 'second' },
+        ],
+      })
+      assert.equal(cont.status, 200)
+      // a NEW session opened — the resent history (trimmed echo
+      // included) is serialized whole, so its context IS the client's view
+      assert.equal(fake.sessions.length, 2)
+      assert.match(fake.prompts[1] ?? '', /first/)
+      assert.ok(fake.prompts[1]?.includes(echo) === true)
+      assert.match(fake.prompts[1] ?? '', /second/)
+    } finally {
+      await close()
+    }
+  })
+
+  test('concurrent same-key continuations never twin a session mid-settle', async () => {
+    const fake = fakeAcpAgent({ replyText: 'z'.repeat(400), configOptions: [MODEL_OPTION] })
+    const { post, close } = await boot(fake)
+    try {
+      await post('/v1/chat/completions', {
+        messages: [{ role: 'user', content: 'first' }],
+        max_tokens: 5,
+      })
+      const cont = {
+        messages: [
+          { role: 'user', content: 'first' },
+          { role: 'assistant', content: 'zzzzz' },
+          { role: 'user', content: 'second' },
+        ],
+      }
+      // two continuations race the same conversation — the loser takes
+      // the one-shot path (or replays, if the winner's settle lands
+      // first) rather than prompting a session whose wire verdict
+      // (divergent) is still unwritten
+      const [a, b] = await Promise.all([
+        post('/v1/chat/completions', cont),
+        post('/v1/chat/completions', cont),
+      ])
+      assert.equal(a.status, 200)
+      assert.equal(b.status, 200)
+      // nobody prompted mid-settle with a bare delta — every prompt
+      // after the first carries the full client-visible history
+      assert.ok(
+        fake.prompts.slice(1).every((p) => p.includes('first') && p.includes('second')),
+        `a continuation prompted hidden context: ${JSON.stringify(fake.prompts)}`
+      )
+    } finally {
+      await close()
+    }
+  })
+
   test('a stream:true resend answers SSE, never a JSON snapshot', async () => {
     const fake = fakeAcpAgent({ replyText: 'r1' })
     const { post, close } = await boot(fake)

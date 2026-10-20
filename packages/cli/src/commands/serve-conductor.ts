@@ -412,6 +412,12 @@ interface ConvSession {
    *  a chained request carrying changed instructions injects them
    *  instead of silently answering under the old ones. */
   prefixHash?: string
+  /** Set once the wire trimmed a reply (output cap / stop cut): the
+   *  session's own context now holds text the client never received.
+   *  Replay still answers the recorded view; a continuation would
+   *  generate off hidden context, so the session retires instead
+   *  (bro-vfbyc). */
+  divergent?: true
   lastReply: ReplyView
   busy: boolean
   lastSeen: number
@@ -1296,6 +1302,9 @@ async function continuationTurn(env: TurnEnv, cand: ConvSession): Promise<TurnOu
     cand.lastSeen = Date.now()
     return { reused: true, inputTokens: 0, replay: true, conv: cand }
   }
+  // a trimmed reply left the session holding text the client never
+  // received — continuing would generate off hidden context (bro-vfbyc)
+  if (cand.divergent === true) return retireDivergent(env, cand)
   // the delta only — prior turns live in the session's own context
   const prompt = tailBlocks(tail, env.imageOk)
   const inputTokens = inputTokensOf(prompt)
@@ -1315,9 +1324,21 @@ async function continuationTurn(env: TurnEnv, cand: ConvSession): Promise<TurnOu
     // open a fresh session rather than pile onto unknown state
     evict(env.sessions, env.key, cand)
     throw err
-  } finally {
-    cand.busy = false
   }
+}
+
+/** A divergent session retires: a fingerprinted request re-seeds fresh
+ *  from the resent history (the trimmed echo included); a chained
+ *  request fails loud — its delta alone cannot rebuild what the
+ *  session lost (bro-vfbyc). */
+function retireDivergent(env: TurnEnv, cand: ConvSession): Promise<TurnOutcome> {
+  evict(env.sessions, env.key, cand)
+  if (env.chained === true) {
+    throw new ChainBroken(
+      'previous_response_id was trimmed at the wire — the session holds more than the client received'
+    )
+  }
+  return freshTurn(env, false)
 }
 
 /** A first (or restarted) turn — a keyed request retains a session;
@@ -1509,7 +1530,8 @@ function settleConv(
   body: MessagesRequest,
   view: ReplyView,
   stopKey: string,
-  chained?: boolean
+  chained?: boolean,
+  divergent?: boolean
 ): void {
   const all = body.messages ?? []
   if (chained === true) {
@@ -1523,6 +1545,15 @@ function settleConv(
     conv.historyHash = hashTurns(prefixText(body), all, all.length, stopKey)
   }
   conv.prefixHash = prefixSha(prefixText(body))
+  // a trimmed wire answer diverges the session from the client's view —
+  // once set it never clears: the hidden text stays in context until
+  // the session is retired
+  if (divergent === true) conv.divergent = true
+  // the turn's own settlement releases the session — busy spans prompt
+  // AND settle so a same-key request can never slip into the window
+  // where the wire verdict (divergent, historyHash, lastReply) is
+  // still unwritten (coderabbit #610)
+  conv.busy = false
   conv.lastReply = view
   if (key === undefined) return
   wire.sessions.delete(key)
@@ -1700,7 +1731,9 @@ async function messages(
     view.stopReason = settledStopReason(view.blocks, reply, stops.hit)
   }
   if (out.conv !== undefined) {
-    settleConv(wire, key, out.conv, body, view, stopKey)
+    // a stop hit swallowed post-marker output the session still holds —
+    // the conversation diverged from the client's view (bro-vfbyc)
+    settleConv(wire, key, out.conv, body, view, stopKey, undefined, stops.hit !== undefined)
   }
   otelEvent('conductor.turn', {
     backend: wire.cfg.backend,
@@ -1968,7 +2001,9 @@ class RespLive extends TagPump {
    *  client can match the final snapshot to the items it streamed. */
   private readonly items: Record<string, unknown>[] = []
 
-  private capped = false
+  /** The cap cut the stream — the session generated past what the
+   *  client saw; settle reads it to flag the conversation divergent. */
+  capped = false
 
   constructor(
     private readonly res: ServerResponse,
@@ -2589,7 +2624,10 @@ function responsesDeliver(
         inputTokens,
       },
       stopKeyOf(stopSeqsOf(d.body) ?? []),
-      d.chained
+      d.chained,
+      // a capped answer left hidden text in the session — it diverged
+      // from the client's view (bro-vfbyc)
+      capped.capped || d.live?.capped === true
     )
     if (d.store) {
       d.chains.set(d.respId, { key: d.key, consumed: d.out.conv.consumed })
@@ -2813,7 +2851,9 @@ class ChatLive extends TagPump {
   private callIdx = 0
   private first = true
   private accLen = 0
-  private capped = false
+  /** The cap cut the stream — the session generated past what the
+   *  client saw; settle reads it to flag the conversation divergent. */
+  capped = false
 
   constructor(
     private readonly res: ServerResponse,
@@ -3112,7 +3152,11 @@ function chatDeliver(
         stopSequence: d.stops.hit,
         inputTokens: o.inputTokens,
       },
-      stopKeyOf(stopSeqsOf(d.body) ?? [])
+      stopKeyOf(stopSeqsOf(d.body) ?? []),
+      undefined,
+      // a cap cut or a swallowed post-stop tail left hidden text in the
+      // session — it diverged from the client's view (bro-vfbyc)
+      capped.capped || d.stops.hit !== undefined || d.live?.capped === true
     )
   }
   const usage = {

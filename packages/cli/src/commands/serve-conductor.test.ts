@@ -1293,6 +1293,45 @@ describe('serve /v1/* — tool_choice, stop_sequences, error taxonomy, keepalive
     }
   })
 
+  // bro-vfbyc — a trimmed reply leaves the retained session holding
+  // text the client never received: it may replay, never continue.
+  test('a stop-cut turn retires the session — the trimmed echo reseeds fresh', async () => {
+    const fake = fakeAcpAgent({ replyText: 'abc MARK tail', configOptions: [MODEL_OPTION] })
+    const { post, close } = await boot(fake)
+    try {
+      const stop_sequences = ['MARK']
+      assert.equal(
+        (
+          await post({
+            messages: [{ role: 'user', content: 'first' }],
+            stop_sequences,
+            stream: false,
+          })
+        ).status,
+        200
+      )
+      const cont = await post({
+        messages: [
+          { role: 'user', content: 'first' },
+          // the client's own trimmed echo — what it actually received
+          { role: 'assistant', content: 'abc ' },
+          { role: 'user', content: 'second' },
+        ],
+        stop_sequences,
+        stream: false,
+      })
+      assert.equal(cont.status, 200)
+      // a NEW session re-serialized the resent history whole — the
+      // trimmed echo included — so its context IS the client's view
+      assert.equal(fake.sessions.length, 2)
+      assert.match(fake.prompts[1] ?? '', /first/)
+      assert.match(fake.prompts[1] ?? '', /abc /)
+      assert.match(fake.prompts[1] ?? '', /second/)
+    } finally {
+      await close()
+    }
+  })
+
   test('a cross-chunk stop hit records the streamed cut, not a full-text re-match', async () => {
     const fake = fakeAcpAgent({
       updates: chunks('abc', 'd'),
