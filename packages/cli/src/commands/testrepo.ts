@@ -20,6 +20,7 @@ import {
 import { devNull, tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
+import { usageWriter } from '@broject/core'
 
 /** Ambient env that must not reach a fixture's git children. The
  *  repo-location pins retarget the child outright; the GIT_CONFIG*
@@ -1520,10 +1521,13 @@ export async function capture(
   const origExit = process.exit
   const origLog = console.log
   const origErr = console.error
+  const origUsageWrite = usageWriter.write
   const out: string[] = []
   const err: string[] = []
   console.log = (...a: unknown[]) => out.push(a.join(' '))
   console.error = (...a: unknown[]) => err.push(a.join(' '))
+  // printUsage bypasses console.* via writeSync — capture through its seam
+  usageWriter.write = (fd, t) => (fd === 1 ? out : err).push(t.replace(/\n$/, ''))
   process.exit = ((code?: number) => {
     throw new Exit(code ?? 0)
   }) as typeof process.exit
@@ -1539,6 +1543,7 @@ export async function capture(
     process.exit = origExit
     console.log = origLog
     console.error = origErr
+    usageWriter.write = origUsageWrite
   }
 }
 

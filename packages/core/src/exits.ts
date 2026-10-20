@@ -86,6 +86,15 @@ export function hasHelpFlag(argv: readonly string[]): boolean {
   return head.includes('--help') || head.includes('-h')
 }
 
+/** The fd write behind printUsage — a mutable holder so in-process
+ *  command tests can capture usage text (hooking console.* cannot see
+ *  writeSync). Production never reassigns it. */
+export const usageWriter = {
+  write(fd: 1 | 2, text: string): void {
+    writeSync(fd, text)
+  },
+}
+
 /** Print usage/help text on the stream its exit code owns — 0 stdout,
  *  non-zero stderr — then exit. Every `usage()`/USAGE site routes
  *  through here so the stream contract holds mechanically instead of
@@ -93,6 +102,6 @@ export function hasHelpFlag(argv: readonly string[]): boolean {
  *  write must be flushed before process.exit, never pending behind it.
  *  The code is typed ExitCode — only the documented taxonomy may exit. */
 export function printUsage(text: string, code: ExitCode): never {
-  writeSync(code === EXIT.ok ? 1 : 2, text.endsWith('\n') ? text : `${text}\n`)
+  usageWriter.write(code === EXIT.ok ? 1 : 2, text.endsWith('\n') ? text : `${text}\n`)
   process.exit(code)
 }
