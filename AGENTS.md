@@ -87,6 +87,18 @@ Developing bro itself: see CONTRIBUTING.md.
   mirrors the merge target: draft iff a human merges (`merge=human`);
   the convoy default (`merge=auto`) opens a ready PR — the act gate is
   the merge mechanism. A dirty tree at session end is lost work.
+- **One executor per unit of work** — an interactive session (opencode,
+  claude, a terminal) owns what it plans and executes it *there*; bro is
+  the bus — the claim, the ledger, the mailbox, the supervision — plus a
+  batch lane that takes only work nobody owns. The occupancy plane skips
+  a worktree a live session armed (`green-occupied — session armed work
+  on <slug>`), so bro's fixers never land where a session is working.
+  Two writers on one tree is the conflict this rule exists to prevent:
+  the lanes race for the same branch, the same PR, the same account's
+  rate limit — a batch fixer that burns the whole devin worker budget
+  starves the operator's own sessions, and a review bot's auto-fix push
+  rewrites a branch mid-edit. Plan it in opencode → run it in opencode;
+  plan it in bro → let bro run it. Never both.
 - **Foreign findings become requests, never patches** — work that
   belongs to another repo is posted to that rig's inbox, never
   edited in place: `bro request <repo> <title> --for <bead>` drops
