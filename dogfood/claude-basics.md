@@ -17,7 +17,8 @@ conductor listener (`apiKeyHelper` → `bro serve ensure`, model
 2. Report your model: state plainly which model you believe you are
    running on and where the setting came from (your settings file).
 3. Set up work: `npx bro task new "add a greeting.txt"`, then
-   `npx bro work enter <bead>`, `npx bro spec new <bead>`,
+   `npx bro work enter <bead>` and `cd` into the worktree it prints,
+   then `npx bro spec new <bead>`,
    `npx bro task set <bead> --description='spec: specs/<bead>.md'`.
 4. Multi-turn proof: ask yourself nothing — instead do two dependent
    actions in sequence (claim the bead, THEN edit the spec) and note
