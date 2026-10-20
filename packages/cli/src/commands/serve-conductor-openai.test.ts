@@ -497,6 +497,73 @@ describe('output caps + loud input failures', () => {
     }
   })
 
+  // bro-vfbyc — a trimmed reply leaves the retained session holding text
+  // the client never received: it may replay, never continue.
+
+  test('a capped response id refuses to chain — the session diverged', async () => {
+    const fake = fakeAcpAgent({ replyText: 'x'.repeat(400), configOptions: [MODEL_OPTION] })
+    const { post, close } = await boot(fake)
+    try {
+      const t1 = await post('/v1/responses', { input: 'first', max_output_tokens: 5 })
+      const id1 = ((await t1.json()) as { id: string }).id
+      const t2 = await post('/v1/responses', {
+        input: [{ type: 'message', role: 'user', content: [{ type: 'input_text', text: 'second' }] }],
+        previous_response_id: id1,
+      })
+      assert.equal(t2.status, 400)
+      const body = (await t2.json()) as { error: { message: string } }
+      assert.match(body.error.message, /trimmed at the wire/)
+      // the delta never reached the divergent session
+      assert.equal(fake.prompts.length, 1)
+      assert.equal(fake.sessions.length, 1)
+    } finally {
+      await close()
+    }
+  })
+
+  test('a capped turn still replays on an identical resend', async () => {
+    const fake = fakeAcpAgent({ replyText: 'x'.repeat(400), configOptions: [MODEL_OPTION] })
+    const { post, close } = await boot(fake)
+    try {
+      const body = { input: 'first', max_output_tokens: 5 }
+      await post('/v1/responses', body)
+      const t2 = await post('/v1/responses', body)
+      assert.equal(t2.status, 200)
+      const b2 = (await t2.json()) as { status: string; output: { content: { text: string }[] }[] }
+      assert.equal(b2.status, 'incomplete')
+      // the recorded cut answer replays — no second turn reaches the agent
+      assert.equal(fake.prompts.length, 1)
+    } finally {
+      await close()
+    }
+  })
+
+  test('a capped chat turn retires the session — the trimmed echo reseeds fresh', async () => {
+    const fake = fakeAcpAgent({ replyText: 'z'.repeat(400), configOptions: [MODEL_OPTION] })
+    const { post, close } = await boot(fake)
+    try {
+      await post('/v1/chat/completions', {
+        messages: [{ role: 'user', content: 'first' }],
+        max_tokens: 5,
+      })
+      const cont = await post('/v1/chat/completions', {
+        messages: [
+          { role: 'user', content: 'first' },
+          { role: 'assistant', content: 'zzzzz' },
+          { role: 'user', content: 'second' },
+        ],
+      })
+      assert.equal(cont.status, 200)
+      // a NEW session opened — the resent history (trimmed echo
+      // included) is serialized whole, so its context IS the client's view
+      assert.equal(fake.sessions.length, 2)
+      assert.match(fake.prompts[1] ?? '', /first/)
+      assert.match(fake.prompts[1] ?? '', /second/)
+    } finally {
+      await close()
+    }
+  })
+
   test('a stream:true resend answers SSE, never a JSON snapshot', async () => {
     const fake = fakeAcpAgent({ replyText: 'r1' })
     const { post, close } = await boot(fake)
