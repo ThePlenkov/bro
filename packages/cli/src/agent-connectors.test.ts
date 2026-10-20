@@ -554,24 +554,42 @@ function connectorContract(b: BackendCase): void {
     }
   })
 
-  test('the devin session quota refuses a spawn at maxSessions — nothing half-lands', async () => {
-    const f = fx([{ id: 'fx-1', status: 'open' }])
+  /** One scripted devin world for the quota tests: temp lock/reservation/
+   *  proc dirs, this process locked in as a live devin session (cmdline
+   *  scripted — pidAlive passes, the pid-identity probe sees `devin acp`),
+   *  and every backend claiming sessionKind 'devin' so the quota engages. */
+  const devinQuotaWorld = (f: { env: AgentConnectorEnv }, maxSessions: number) => {
     const lockDir = mkdtempSync(join(tmpdir(), 'bro-devin-locks-'))
     const reservationsDir = mkdtempSync(join(tmpdir(), 'bro-devin-resv-'))
-    // one live devin session (this process) fills the cap of 1
+    const procDir = mkdtempSync(join(tmpdir(), 'bro-devin-proc-'))
     writeFileSync(join(lockDir, 'me.lock'), String(process.pid))
+    mkdirSync(join(procDir, String(process.pid)))
+    writeFileSync(join(procDir, String(process.pid), 'cmdline'), 'devin\0acp\0')
     const env: AgentConnectorEnv = {
       ...f.env,
       agents: {
         ...f.env.agents,
-        // whichever backend this suite's connector is — it claims a
-        // devin session, so the quota applies
         native: { ...f.env.agents['native'], sessionKind: 'devin' },
         tmux: { ...f.env.agents['tmux'], sessionKind: 'devin' },
         docker: { ...f.env.agents['docker'], sessionKind: 'devin' },
-        devin: { maxSessions: 1, lockDir, reservationsDir },
+        devin: { maxSessions, lockDir, reservationsDir, procDir },
       },
     }
+    return {
+      env,
+      reservationsDir,
+      cleanupDirs: () => {
+        for (const d of [lockDir, reservationsDir, procDir]) {
+          rmSync(d, { recursive: true, force: true })
+        }
+      },
+    }
+  }
+
+  test('the devin session quota refuses a spawn at maxSessions — nothing half-lands', async () => {
+    const f = fx([{ id: 'fx-1', status: 'open' }])
+    // one live devin session (this process) fills the cap of 1
+    const { env, cleanupDirs } = devinQuotaWorld(f, 1)
     try {
       const c = b.make({ dir: f.main }, env)
       await assert.rejects(
@@ -582,8 +600,7 @@ function connectorContract(b: BackendCase): void {
       assert.equal(f.dbRows().find((r) => r.id === 'fx-1')!.status, 'open')
       assert.equal(readAgentRegistry(f.main)['fx-1'], undefined)
     } finally {
-      rmSync(lockDir, { recursive: true, force: true })
-      rmSync(reservationsDir, { recursive: true, force: true })
+      cleanupDirs()
       cleanup(f)
     }
   })
@@ -593,21 +610,9 @@ function connectorContract(b: BackendCase): void {
       { id: 'fx-1', status: 'open' },
       { id: 'fx-2', status: 'open' },
     ])
-    const lockDir = mkdtempSync(join(tmpdir(), 'bro-devin-locks-'))
-    const reservationsDir = mkdtempSync(join(tmpdir(), 'bro-devin-resv-'))
     // cap 2: one live lock + one reservation = full — the second devin
     // spawn must refuse even though its own repo registry is empty
-    writeFileSync(join(lockDir, 'other.lock'), String(process.pid))
-    const env: AgentConnectorEnv = {
-      ...f.env,
-      agents: {
-        ...f.env.agents,
-        native: { ...f.env.agents['native'], sessionKind: 'devin' },
-        tmux: { ...f.env.agents['tmux'], sessionKind: 'devin' },
-        docker: { ...f.env.agents['docker'], sessionKind: 'devin' },
-        devin: { maxSessions: 2, lockDir, reservationsDir },
-      },
-    }
+    const { env, reservationsDir, cleanupDirs } = devinQuotaWorld(f, 2)
     try {
       const c = b.make({ dir: f.main }, env)
       const first = await c.spawn(SPEC(f.main, f.beadsDir, 'fx-1', 'setTimeout(() => {}, 30000)'))
@@ -623,8 +628,7 @@ function connectorContract(b: BackendCase): void {
       assert.equal(readAgentRegistry(f.main)['fx-2'], undefined)
       await c.stop(first.id)
     } finally {
-      rmSync(lockDir, { recursive: true, force: true })
-      rmSync(reservationsDir, { recursive: true, force: true })
+      cleanupDirs()
       cleanup(f)
     }
   })
@@ -2036,7 +2040,11 @@ describe('devin connector', () => {
   const withDevinWorld = async <T>(
     fn: (w: {
       bag: Record<string, unknown>
-      mk: (pid: number, name: string, opts?: { environ?: string; cwd?: string; log?: boolean }) => void
+      mk: (
+        pid: number,
+        name: string,
+        opts?: { environ?: string; cwd?: string; log?: boolean; cmdline?: string | null }
+      ) => void
     }) => T | Promise<T>
   ): Promise<T> => {
     const root = mkdtempSync(join(tmpdir(), 'bro-devin-conn-'))
@@ -2049,12 +2057,16 @@ describe('devin connector', () => {
     const mk = (
       pid: number,
       name: string,
-      opts: { environ?: string; cwd?: string; log?: boolean } = {}
+      opts: { environ?: string; cwd?: string; log?: boolean; cmdline?: string | null } = {}
     ): void => {
       writeFileSync(join(lockDir, `${name}.lock`), String(pid))
       const p = join(procDir, String(pid))
       mkdirSync(join(p, 'fd'), { recursive: true })
       writeFileSync(join(p, 'environ'), opts.environ ?? 'PATH=/bin\0')
+      const cmdline = opts.cmdline === undefined ? 'devin\0acp\0' : opts.cmdline
+      if (cmdline !== null) {
+        writeFileSync(join(p, 'cmdline'), cmdline)
+      }
       symlinkSync(opts.cwd ?? root, join(p, 'cwd'))
       if (opts.log === true) {
         writeFileSync(join(logsDir, `devin_2026_${pid}.log`), 'log bytes')

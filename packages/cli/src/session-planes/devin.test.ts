@@ -18,6 +18,7 @@ import {
   countDevinWorkers,
   devinLocksDir,
   devinLogsDir,
+  devinPidIsSession,
   devinPidIsWorker,
   devinSessionPlane,
   devinSessionTranscript,
@@ -35,11 +36,18 @@ const withLockDir = (fn: (dir: string) => void): void => {
   }
 }
 
-/** A fake /proc tree — <pid>/environ and <pid>/fd/0 as the test
- *  scripts them; absent files read as "no data" like on macOS. */
-const withProc = (fn: (procDir: string, mk: (pid: number, environ: string | null, stdinTo: string | null) => void) => void): void => {
+/** A fake /proc tree — <pid>/environ, <pid>/fd/0 and <pid>/cmdline as
+ *  the test scripts them; absent files read as "no data" like on
+ *  macOS. cmdline defaults to a devin-looking argv so identity checks
+ *  pass unless the test scripts otherwise. */
+const withProc = (fn: (procDir: string, mk: (pid: number, environ: string | null, stdinTo: string | null, cmdline?: string | null) => void) => void): void => {
   const procDir = mkdtempSync(join(tmpdir(), 'bro-proc-'))
-  const mk = (pid: number, environ: string | null, stdinTo: string | null): void => {
+  const mk = (
+    pid: number,
+    environ: string | null,
+    stdinTo: string | null,
+    cmdline: string | null = 'devin\0acp\0'
+  ): void => {
     const dir = join(procDir, String(pid))
     mkdirSync(join(dir, 'fd'), { recursive: true })
     if (environ !== null) {
@@ -47,6 +55,11 @@ const withProc = (fn: (procDir: string, mk: (pid: number, environ: string | null
     }
     if (stdinTo !== null) {
       symlinkSync(stdinTo, join(dir, 'fd', '0'))
+    }
+    if (cmdline !== null) {
+      writeFileSync(join(dir, 'cmdline'), cmdline)
+    } else {
+      rmSync(join(dir, 'cmdline'), { force: true })
     }
   }
   try {
@@ -64,48 +77,86 @@ describe('devinSessionPlane', () => {
   })
 
   test('countLive scans the configured lockDir plus the worker env dir', () => {
-    withLockDir((dir) => {
-      writeFileSync(join(dir, 'a.lock'), String(process.pid))
-      assert.equal(devinSessionPlane.countLive({ lockDir: dir }), 1)
+    withProc((procDir, mk) => {
+      mk(process.pid, null, null)
+      withLockDir((dir) => {
+        writeFileSync(join(dir, 'a.lock'), String(process.pid))
+        assert.equal(devinSessionPlane.countLive({ lockDir: dir, procDir }), 1)
+      })
     })
   })
 
   test('a spec.env XDG override makes countLive scan BOTH dirs', () => {
-    withLockDir((dir) => {
-      const xdg = mkdtempSync(join(tmpdir(), 'bro-devin-xdg-'))
-      try {
-        const workerDir = join(xdg, 'devin', 'cli', 'session_locks')
-        mkdirSync(workerDir, { recursive: true })
-        // one lock in the spawner's dir, one in the worker's — both count
-        writeFileSync(join(dir, 'a.lock'), String(process.pid))
-        writeFileSync(join(workerDir, 'b.lock'), String(process.pid))
-        assert.equal(
-          devinSessionPlane.countLive({ lockDir: dir }, { XDG_DATA_HOME: xdg }),
-          1 // same pid — dedupes
-        )
-      } finally {
-        rmSync(xdg, { recursive: true, force: true })
-      }
+    withProc((procDir, mk) => {
+      mk(process.pid, null, null)
+      withLockDir((dir) => {
+        const xdg = mkdtempSync(join(tmpdir(), 'bro-devin-xdg-'))
+        try {
+          const workerDir = join(xdg, 'devin', 'cli', 'session_locks')
+          mkdirSync(workerDir, { recursive: true })
+          // one lock in the spawner's dir, one in the worker's — both count
+          writeFileSync(join(dir, 'a.lock'), String(process.pid))
+          writeFileSync(join(workerDir, 'b.lock'), String(process.pid))
+          assert.equal(
+            devinSessionPlane.countLive(
+              { lockDir: dir, procDir },
+              { XDG_DATA_HOME: xdg }
+            ),
+            1 // same pid — dedupes
+          )
+        } finally {
+          rmSync(xdg, { recursive: true, force: true })
+        }
+      })
     })
   })
 })
 
 describe('countDevinSessions', () => {
   test('counts unique live pids — duped locks and dead pids collapse', () => {
+    withProc((procDir, mk) => {
+      mk(process.pid, null, null)
+      withLockDir((dir) => {
+        // two locks, one live process (a resumed session's residue) — counts once
+        writeFileSync(join(dir, 'a.lock'), String(process.pid))
+        writeFileSync(join(dir, 'b.lock'), String(process.pid))
+        // a pid guaranteed dead — the just-reaped child's pid
+        const dead = spawnSync('true', [], { stdio: 'ignore' }).pid
+        writeFileSync(join(dir, 'dead.lock'), String(dead))
+        // non-numeric content and non-lock files are skipped entirely
+        writeFileSync(join(dir, 'junk.lock'), 'not-a-pid')
+        writeFileSync(join(dir, 'note.txt'), String(process.pid))
+        // strict pid parse — '123abc' is NOT 123; a trailing-garbage lock
+        // must not collapse onto an innocent process's pid
+        writeFileSync(join(dir, 'partial.lock'), `${process.pid}garbage`)
+        assert.equal(countDevinSessions([dir], undefined, procDir), 1)
+      })
+    })
+  })
+
+  test('a live pid that is not devin is a recycled lock — not counted', () => {
+    withProc((procDir, mk) => {
+      withLockDir((dir) => {
+        writeFileSync(join(dir, 'stale.lock'), String(process.pid))
+        // the pid is alive but belongs to an unrelated process —
+        // pid-reuse after reboot/crash leaves the lock pointing at it
+        mk(process.pid, null, null, 'snapfuse\0mount\0/var/lib/snapd\0')
+        assert.equal(countDevinSessions([dir], undefined, procDir), 0)
+        // the same pid carrying the devin cli counts again
+        mk(process.pid, null, null, 'devin\0acp\0--model\0swe-2-max\0')
+        assert.equal(countDevinSessions([dir], undefined, procDir), 1)
+        // an unreadable cmdline (no file) cannot prove devin either
+        mk(process.pid, null, null, null)
+        assert.equal(countDevinSessions([dir], undefined, procDir), 0)
+      })
+    })
+  })
+
+  test('a host with no procDir keeps pidAlive-only liveness — fail-open', () => {
     withLockDir((dir) => {
-      // two locks, one live process (a resumed session's residue) — counts once
       writeFileSync(join(dir, 'a.lock'), String(process.pid))
-      writeFileSync(join(dir, 'b.lock'), String(process.pid))
-      // a pid guaranteed dead — the just-reaped child's pid
-      const dead = spawnSync('true', [], { stdio: 'ignore' }).pid
-      writeFileSync(join(dir, 'dead.lock'), String(dead))
-      // non-numeric content and non-lock files are skipped entirely
-      writeFileSync(join(dir, 'junk.lock'), 'not-a-pid')
-      writeFileSync(join(dir, 'note.txt'), String(process.pid))
-      // strict pid parse — '123abc' is NOT 123; a trailing-garbage lock
-      // must not collapse onto an innocent process's pid
-      writeFileSync(join(dir, 'partial.lock'), `${process.pid}garbage`)
-      assert.equal(countDevinSessions([dir]), 1)
+      const absent = join(tmpdir(), 'bro-proc-absent-')
+      assert.equal(countDevinSessions([dir], undefined, absent), 1)
     })
   })
 
@@ -171,15 +222,46 @@ describe('devinPidIsWorker', () => {
   })
 })
 
+describe('devinPidIsSession', () => {
+  test('devin argv identifies the cli; foreign cmdlines do not', () => {
+    withProc((procDir, mk) => {
+      mk(501, null, null, 'devin\0acp\0--model\0swe-2-max\0')
+      assert.equal(devinPidIsSession(501, procDir), true)
+      // versioned binary path as argv0
+      mk(502, null, null, '/home/u/.local/share/devin/cli/bin/devin\0-p\0hi\0')
+      assert.equal(devinPidIsSession(502, procDir), true)
+      // node/bun launching the script inside the devin install tree
+      mk(503, null, null, 'node\0/home/u/.local/share/devin/cli/_versions/1/dist/index.js\0acp\0')
+      assert.equal(devinPidIsSession(503, procDir), true)
+      // recycled pids — the observed phantoms
+      mk(504, null, null, 'snapfuse\0mount\0/var/lib/snapd\0')
+      assert.equal(devinPidIsSession(504, procDir), false)
+      mk(505, null, null, '/usr/bin/herdr\0server\0')
+      assert.equal(devinPidIsSession(505, procDir), false)
+      // a /devin/ path in a later argv element is not the binary
+      mk(507, null, null, 'git\0-C\0/home/u/devin/repo\0status\0')
+      assert.equal(devinPidIsSession(507, procDir), false)
+      mk(508, null, null, 'cat\0/tmp/devin/config.json\0')
+      assert.equal(devinPidIsSession(508, procDir), false)
+      // no cmdline file — unverifiable, not devin
+      mk(506, null, null, null)
+      assert.equal(devinPidIsSession(506, procDir), false)
+    })
+  })
+})
+
 describe('countDevinWorkers', () => {
   test('counts only worker-classified live pids', () => {
-    withLockDir((dir) => {
-      writeFileSync(join(dir, 'a.lock'), String(process.pid))
-      const workers = new Set<number>()
-      const isWorker = (pid: number): boolean => workers.has(pid)
-      assert.equal(countDevinWorkers([dir], isWorker), 0)
-      workers.add(process.pid)
-      assert.equal(countDevinWorkers([dir], isWorker), 1)
+    withProc((procDir, mk) => {
+      mk(process.pid, null, null)
+      withLockDir((dir) => {
+        writeFileSync(join(dir, 'a.lock'), String(process.pid))
+        const workers = new Set<number>()
+        const isWorker = (pid: number): boolean => workers.has(pid)
+        assert.equal(countDevinWorkers([dir], isWorker, undefined, procDir), 0)
+        workers.add(process.pid)
+        assert.equal(countDevinWorkers([dir], isWorker, undefined, procDir), 1)
+      })
     })
   })
 
@@ -190,9 +272,22 @@ describe('countDevinWorkers', () => {
     })
     if (!child.pid) throw new Error('spawn failed to create child process')
     try {
-      withLockDir((dir) => {
-        writeFileSync(join(dir, 'w.lock'), String(child.pid))
-        assert.equal(countDevinWorkers([dir]), 1)
+      // scripted /proc for BOTH probes — the real child's environ races
+      // execve, and a `sleep` cmdline is not the devin cli's
+      withProc((procDir, mk) => {
+        mk(child.pid!, 'PATH=/bin\0BRO_AGENT_ID=native-test\0HOME=/h\0', 'pipe:[1]')
+        withLockDir((dir) => {
+          writeFileSync(join(dir, 'w.lock'), String(child.pid))
+          assert.equal(
+            countDevinWorkers(
+              [dir],
+              (pid) => devinPidIsWorker(pid, procDir),
+              undefined,
+              procDir
+            ),
+            1
+          )
+        })
       })
     } finally {
       child.kill('SIGKILL')
@@ -294,24 +389,42 @@ describe('listDevinSessions', () => {
     })
     if (!child.pid) throw new Error('spawn failed to create child process')
     try {
-      withLockDir((dir) => {
-        writeFileSync(join(dir, 'w.lock'), String(child.pid))
-        const rows = listDevinSessions([dir])
-        assert.equal(rows.length, 1)
-        assert.equal(rows[0]!.worker, true)
-        assert.equal(rows[0]!.agentId, 'native-xyz')
+      // scripted /proc — real environ races execve, and `sleep` is not
+      // the devin cli's cmdline
+      withProc((procDir, mk) => {
+        mk(child.pid!, 'PATH=/bin\0BRO_AGENT_ID=native-xyz\0HOME=/h\0', 'pipe:[1]')
+        withLockDir((dir) => {
+          writeFileSync(join(dir, 'w.lock'), String(child.pid))
+          const rows = listDevinSessions([dir], procDir)
+          assert.equal(rows.length, 1)
+          assert.equal(rows[0]!.worker, true)
+          assert.equal(rows[0]!.agentId, 'native-xyz')
+        })
       })
     } finally {
       child.kill('SIGKILL')
     }
   })
 
+  test('a recycled pid yields no row — the stale lock folds out', () => {
+    withProc((procDir, mk) => {
+      mk(process.pid, null, null, 'herdr\0server\0')
+      withLockDir((dir) => {
+        writeFileSync(join(dir, 'stale.lock'), String(process.pid))
+        assert.equal(listDevinSessions([dir], procDir).length, 0)
+      })
+    })
+  })
+
   test('the plane wires listLive over the configured lockDir', () => {
-    withLockDir((dir) => {
-      writeFileSync(join(dir, 'x.lock'), String(process.pid))
-      const rows = devinSessionPlane.listLive!({ lockDir: dir })
-      assert.equal(rows.length, 1)
-      assert.equal(rows[0]!.name, 'x')
+    withProc((procDir, mk) => {
+      mk(process.pid, null, null)
+      withLockDir((dir) => {
+        writeFileSync(join(dir, 'x.lock'), String(process.pid))
+        const rows = devinSessionPlane.listLive!({ lockDir: dir, procDir })
+        assert.equal(rows.length, 1)
+        assert.equal(rows[0]!.name, 'x')
+      })
     })
   })
 })
