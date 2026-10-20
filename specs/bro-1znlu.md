@@ -80,7 +80,7 @@ unknown flags with `2` on stderr.
 | code | name | generic meaning | shipped verdict meanings (frozen) |
 | ---- | ---- | --------------- | --------------------------------- |
 | `0` | `ok` | success — including explicit `--help` | `act wait` gate OK · `convoy wait` complete · `wait` free |
-| `1` | `error` | failure / negative verdict | `act wait` blocked|timeout · `wait` unreadable |
+| `1` | `error` | failure / negative verdict | `act wait` blocked/timeout · `wait` unreadable |
 | `2` | `usage` | usage error (bad flag, missing arg, unknown command) | `convoy wait` stuck / unknown mol · `wait` unresolved (bad ref) |
 | `3` | `actionable` | the wait settled on work only a caller can do | `convoy wait` human gate ready · `wait` actionable (reject/closed-unshipped) |
 | `4` | `timeout` | bounded wait hit its deadline | `convoy wait` · `wait` — same meaning |
