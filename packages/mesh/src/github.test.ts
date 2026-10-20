@@ -88,6 +88,13 @@ describe('comment records', () => {
     assert.deepEqual(JSON.parse(JSON.stringify(parsed.envelope)), e)
   })
 
+  test('a field carrying a literal ``` fence survives the round-trip', () => {
+    const body = 'stack:\n```\nTypeError: x\n```\nmore'
+    const e = env({ body })
+    const parsed = parseComment({ body: renderComment(e) })
+    assert.equal(parsed.envelope?.body, body)
+  })
+
   test('the LAST fenced json block wins — footers and appended text do not hide it', () => {
     const first = env({ id: 'old', thread: 'old', title: 'old' })
     const last = env({ id: 'new', thread: 'new', title: 'new' })
@@ -240,11 +247,14 @@ describe('github e2e (gated)', () => {
       return
     }
     const { postRequest, postComment, issueComments, parseGithubRemote, issueKey } = await import('./github.ts')
-    const repo = parseGithubRemote({ remote: E2E_REPO })
+    const e2eRemote = E2E_REPO.includes('://') || E2E_REPO.startsWith('git@')
+      ? E2E_REPO
+      : `https://github.com/${E2E_REPO}`
+    const repo = parseGithubRemote({ remote: e2eRemote })
     assert.ok(repo, `BRO_MESH_E2E_REPO "${E2E_REPO}" is not a github repo`)
 
     const posted = postRequest({
-      remote: E2E_REPO,
+      remote: e2eRemote,
       from: 'mesh://e2e/a',
       to: 'mesh://e2e/b',
       title: `mesh e2e ${Date.now()}`,

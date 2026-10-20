@@ -193,7 +193,9 @@ export function renderIssueBody(input: { from: string; to: string; body?: string
 }
 
 export function renderComment(env: MeshEnvelope): string {
-  return '```json\n' + JSON.stringify(env) + '\n```'
+  // a literal backtick-fence inside a string field would close the
+  //  fence early — the JSON unicode escape restores it on parse
+  return '```json\n' + JSON.stringify(env).replace(/`/g, '\\u0060') + '\n```'
 }
 
 /** fenced ```json block bodies, in document order — indexOf scanning,
@@ -326,7 +328,11 @@ export function issueComments(repo: GithubRepo, issue: GhIssue): { records: GhRe
   const records: GhRecord[] = []
   const errors: string[] = []
   for (const c of (r.data ?? []).flat()) {
-    const parsed = parseComment({ body: typeof c.body === 'string' ? c.body : '' })
+    const text = typeof c.body === 'string' ? c.body : ''
+    if (!text.includes('```json')) {
+      continue
+    }
+    const parsed = parseComment({ body: text })
     if (parsed.error !== undefined || parsed.envelope === undefined) {
       errors.push(`${repo.owner}/${repo.repo}#${issue.number}: ${parsed.error ?? 'no record'} (comment skipped)`)
       continue
@@ -459,11 +465,11 @@ export function githubProvenance(rec: {
     if (rec.peer.login === undefined) {
       return { error: `github binding has no login — records on this plane can't be authenticated` }
     }
-    if (rec.author === rec.peer.login) {
+    if (rec.author.toLowerCase() === rec.peer.login.toLowerCase()) {
       return { provenance: rec.peer.rig }
     }
   }
-  if (rec.selfLogin !== undefined && rec.author === rec.selfLogin) {
+  if (rec.selfLogin !== undefined && rec.author.toLowerCase() === rec.selfLogin.toLowerCase()) {
     return rec.ownRig === null
       ? { error: `own record, but this rig's identity doesn't resolve` }
       : { provenance: rec.ownRig }

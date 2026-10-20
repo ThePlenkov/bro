@@ -287,7 +287,9 @@ function admitSelfRepoRecord(r: GhRecord, ctx: ReduceCtx): void {
   if (!ctx.threads.has(r.envelope.thread) || ctx.seen.has(r.envelope.id)) {
     return
   }
-  const bound = ctx.peers.find((p) => p.login !== undefined && p.login === r.author)
+  const bound = ctx.peers.find(
+    (p) => p.login !== undefined && p.login.toLowerCase() === r.author.toLowerCase(),
+  )
   const v = githubProvenance({
     author: r.author,
     peer: bound,

@@ -205,23 +205,44 @@ function admitOwnGithubRecord(
   ctx: { peers: MeshPeer[]; selfRig: string; selfLogin: string | undefined },
   out: PeerRecord[],
 ): void {
-  if (r.envelope.kind !== 'request') {
+  const bound = ctx.peers.find(
+    (p) => p.login !== undefined && p.login.toLowerCase() === r.author.toLowerCase(),
+  )
+  // verdicts land as comments on the request's own issue — they count
+  // only from an authenticated bound author, and they feed the
+  // terminal set so a verdicted github request leaves the inbox
+  const isVerdict = r.envelope.kind === 'accept' || r.envelope.kind === 'reject'
+  if (r.envelope.kind !== 'request' && !isVerdict) {
     return
   }
-  const bound = ctx.peers.find((p) => p.login !== undefined && p.login === r.author)
   if (bound !== undefined) {
     out.push({ peer: bound.alias, peerRig: bound.rig, transport: 'github', envelope: r.envelope, beadId: r.issue, author: r.author })
     return
   }
-  out.push({
+  if (isVerdict) {
+    return
+  }
+  out.push(unboundGithubRow(r, ctx))
+}
+
+/** An unattributed request: ours when the authenticated author is this
+ *  account (github logins match case-insensitively), else flagged
+ *  `unbound` and attributed to the envelope's claimed origin. */
+function unboundGithubRow(
+  r: { issue: string; author: string; envelope: PeerRecord['envelope'] },
+  ctx: { selfRig: string; selfLogin: string | undefined },
+): PeerRecord {
+  const self =
+    ctx.selfLogin !== undefined && r.author.toLowerCase() === ctx.selfLogin.toLowerCase()
+  return {
     peer: 'github',
-    peerRig: r.author === ctx.selfLogin ? ctx.selfRig : r.envelope.from,
+    peerRig: self ? ctx.selfRig : r.envelope.from,
     transport: 'github',
     envelope: r.envelope,
     beadId: r.issue,
     author: r.author,
-    unbound: r.author === ctx.selfLogin ? undefined : true,
-  })
+    unbound: self ? undefined : true,
+  }
 }
 
 function scanOwnGithub(
