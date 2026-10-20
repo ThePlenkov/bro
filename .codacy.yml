@@ -6,3 +6,9 @@
 # that ships.
 exclude_paths:
   - '**/*.test.ts'
+  # The head memory is a path bro builds itself: <git-common>/bro/
+  # drive/heads/<encoded repo slug>-<pr>.json — git's own common dir, an
+  # encoded slug and a number. Codacy's path rule reads any computed
+  # path as uncontrolled data; the same shape already ships in the
+  # act-state cache (packages/act/src/state-cache.ts) unflagged.
+  - 'packages/cli/src/commands/foreign-push.ts'

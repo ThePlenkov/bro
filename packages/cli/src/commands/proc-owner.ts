@@ -322,6 +322,11 @@ export function detailMatches(
 export interface WorkEntry {
   detail: string
   mtimeMs?: number
+  /** The session that wrote the marker — the marker's file name minus
+   *  its aspect suffix. The detail lines do not name their writer, and
+   *  a caller that must address a session needs to know whose marker
+   *  this is. */
+  session?: string
 }
 
 /** Every detail line of every live session marker WITH its stamp —
@@ -342,24 +347,33 @@ export function liveWorkEntries(
     if (!suffixes.some((s) => f.endsWith(s))) {
       continue
     }
-    try {
-      const path = join(dir, f)
-      const mtimeMs = statSync(path).mtimeMs
-      const lines = readFileSync(path, 'utf8').split('\n')
-      if (!markerLive(lines[0], mtimeMs, LIVE_MARKER_MS, now)) {
-        continue
-      }
-      for (const line of lines.slice(1)) {
-        const d = line.trim()
-        if (d !== '') {
-          entries.push({ detail: d, mtimeMs })
-        }
-      }
-    } catch {
-      // unreadable marker — skip
-    }
+    entries.push(...markerEntries(dir, f, now))
   }
   return entries
+}
+
+/** One marker file's detail lines — empty when the marker is not live or
+ *  unreadable. The session is the file's name minus its aspect suffix:
+ *  the detail lines do not name their writer. */
+function markerEntries(dir: string, file: string, now: number): WorkEntry[] {
+  try {
+    const path = join(dir, file)
+    const mtimeMs = statSync(path).mtimeMs
+    const lines = readFileSync(path, 'utf8').split('\n')
+    if (!markerLive(lines[0], mtimeMs, LIVE_MARKER_MS, now)) {
+      return []
+    }
+    const dot = file.lastIndexOf('.')
+    const session = dot > 0 ? file.slice(0, dot) : undefined
+    return lines
+      .slice(1)
+      .map((line) => line.trim())
+      .filter((d) => d !== '')
+      .map((detail) => ({ detail, mtimeMs, session }))
+  } catch {
+    // unreadable marker — skip
+    return []
+  }
 }
 
 /** Every detail line of every live session marker — a session claiming

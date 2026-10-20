@@ -636,8 +636,17 @@ export function armDetail(cmd: string, aspect: GateAspect): string {
     return add ? worktreeTarget(c.slice(add.index + add[0].length)) : ''
   }
   if (aspect === 'act') {
-    const m = /\b(\d{1,7})\b/.exec(c)
-    return m ? `#${m[1]}` : ''
+    // The PR the command names — and ONLY that. The first number in the
+    // command is not it: `bro act wait --interval 60` names a poll
+    // interval, and a marker that claims PR #60 for it is a lie the
+    // bus would act on.
+    // both spellings: `bro act wait 599` and `bro act wait --pr 599`
+    const m = /\bact\s+(?:status|wait|threads|resolve|reply|merge|rearm)(?:\s+(\d{1,7})|\b[^\n]*?--pr\s+(\d{1,7}))/.exec(c)
+    if (m !== null) {
+      return `#${m[1] ?? m[2]}`
+    }
+    const gh = /\bgh\s+pr\s+(?:view|checks|diff|merge|comment|edit|ready|close|reopen)\s+(\d{1,7})\b/.exec(c)
+    return gh !== null ? `#${gh[1]}` : ''
   }
   return ''
 }

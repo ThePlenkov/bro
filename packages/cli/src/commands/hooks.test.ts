@@ -251,6 +251,16 @@ describe('armDetail', () => {
     ['bro act merge 89 --cleanup', 'act', '#89'],
     ['gh pr merge 42 --squash', 'act', '#42'],
     ['git push', 'act', ''],
+    // a poll interval is not a PR: the first number in the command used
+    // to be taken as one, and a marker claiming PR #60 for it is a lie
+    // the bus would act on (spec bro-cqjd0)
+    ['bro act wait --interval 60', 'act', ''],
+    ['bro act wait 599 --interval 60', 'act', '#599'],
+    ['bro act status', 'act', ''],
+    ['bro act wait --pr 599', 'act', '#599'],
+    ['bro act status --pr 42', 'act', '#42'],
+    ['gh pr checks 42', 'act', '#42'],
+    ['gh pr create --fill', 'act', ''],
     ['bro drill down bro-x', 'drill', ''],
     ['bd update bro-x1 --claim', 'task', 'bro-x1'],
     ['npm test', 'work', ''],
