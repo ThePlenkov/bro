@@ -2942,6 +2942,23 @@ function chatStopReason(
   return STOP_REASON[reply?.stopReason ?? ''] ?? 'end_turn'
 }
 
+/** Terminal reasons for a chat turn: the cap reports the same reason the
+ *  acp's own ceiling would; a stop hit is its own reason — unless the cut
+ *  left a tool call behind (the client dispatches on tool_calls, 'stop'
+ *  would strand the call). Anything else keeps the outcome's own. */
+function chatReasons(
+  capped: boolean,
+  stopHit: string | undefined,
+  blocks: OutBlock[],
+  o: { stopReason: string; finish: string }
+): { stopReason: string; finish: string } {
+  if (capped) return { stopReason: 'max_tokens', finish: 'length' }
+  if (stopHit !== undefined && !blocks.some((b) => b.type === 'tool_use')) {
+    return { stopReason: 'stop_sequence', finish: 'stop' }
+  }
+  return { stopReason: o.stopReason, finish: o.finish }
+}
+
 /** Chat outcome materialization — a replay reads the recorded reply;
  *  a fresh turn parses live text. Either way the caller gets one
  *  normalized bundle. */
@@ -3079,14 +3096,7 @@ function chatDeliver(
     cap
   )
   const blocks = capped.blocks
-  // the cap reports the same canonical reason the acp's own ceiling
-  // would — a resend replays the cut, not the uncut original; a stop
-  // hit is its own reason — unless the cut left a tool call behind:
-  // the client dispatches on tool_calls, 'stop' would strand the call
-  const hasCall = blocks.some((b) => b.type === 'tool_use')
-  const stopHit = d.stops.hit !== undefined && !hasCall
-  const stopReason = capped.capped ? 'max_tokens' : stopHit ? 'stop_sequence' : o.stopReason
-  const finish = capped.capped ? 'length' : stopHit ? 'stop' : o.finish
+  const { stopReason, finish } = chatReasons(capped.capped, d.stops.hit, blocks, o)
   const outTokens =
     capped.capped ? blocksTokens(blocks) : settled !== undefined ? estTokens(settled) : o.outTokens
   if (!o.replay && d.out.conv !== undefined) {
