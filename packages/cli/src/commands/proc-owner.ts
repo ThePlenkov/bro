@@ -322,6 +322,11 @@ export function detailMatches(
 export interface WorkEntry {
   detail: string
   mtimeMs?: number
+  /** The session that wrote the marker — the marker's file name minus
+   *  its aspect suffix. The detail lines do not name their writer, and
+   *  a caller that must address a session needs to know whose marker
+   *  this is. */
+  session?: string
 }
 
 /** Every detail line of every live session marker WITH its stamp —
@@ -352,7 +357,8 @@ export function liveWorkEntries(
       for (const line of lines.slice(1)) {
         const d = line.trim()
         if (d !== '') {
-          entries.push({ detail: d, mtimeMs })
+          const dot = f.lastIndexOf('.')
+          entries.push({ detail: d, mtimeMs, session: dot > 0 ? f.slice(0, dot) : undefined })
         }
       }
     } catch {

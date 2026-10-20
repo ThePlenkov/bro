@@ -109,6 +109,12 @@ import {
 import { loadAgentEnv, type AgentConnectorEnv } from '../agent-connectors.ts'
 import { flag } from './args.ts'
 import { defaultBranch, runActCommand } from './act.ts'
+import {
+  foreignPushEvent,
+  readHeadMemory,
+  sessionArmedPrs,
+  writeHeadMemory,
+} from './foreign-push.ts'
 import { spawnStepAgent } from './agents.ts'
 import { collectAgents } from './fleet.ts'
 import {
@@ -898,6 +904,35 @@ async function publishDriveAlert(
     })
   } catch {
     // fail-open
+  }
+}
+
+/** The foreign-push signal — a PR a live session armed moved under it
+ *  (spec bro-cqjd0). The bus REPORTS the move; it does not coordinate:
+ *  nothing is blocked, no branch is protected, the session decides. */
+async function signalForeignPush(ctx: Ctx, pr: number, link: string): Promise<void> {
+  const state = ctx.stateCache?.read({ repo: ctx.repo, pr })
+  const head = state?.headSha
+  if (head === undefined || head === '') {
+    return
+  }
+  const before = readHeadMemory(ctx.mainRoot, ctx.repo, pr)
+  writeHeadMemory(ctx.mainRoot, ctx.repo, pr, head)
+  if (before === undefined || before === head) {
+    // the first sight of a PR is not a change, and a held head is not one
+    return
+  }
+  const hooks = hooksDirOf(ctx.mainRoot)
+  if (hooks === null) {
+    return
+  }
+  for (const session of sessionArmedPrs(hooks, pr)) {
+    try {
+      await facade('events', { dir: ctx.mainRoot }, { prefer: loadBroConfig(ctx.mainRoot).connectors })
+        .publish(foreignPushEvent({ pr, link, from: before, to: head, session })) // NOSONAR — an advisory event, never a gate
+    } catch {
+      // fail-open — a delivery problem never becomes a pass failure
+    }
   }
 }
 
@@ -2352,6 +2387,7 @@ async function driveOnce(ctx: Ctx): Promise<void> {
       verdict: 'error',
       detail: errText(err),
     }))
+    await signalForeignPush(ctx, pr, ctx.rev.prLink(ctx.repo, pr))
     // the human edge: unmovable verdicts and silent-reviewer alerts —
     // dedup keys make a repeated pass quiet, not absent
     if (ALERT_VERDICTS.has(v.verdict)) {
