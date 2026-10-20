@@ -21,13 +21,16 @@ const withDir = (fn: (dir: string) => void): void => {
 }
 
 /** A git repo with a common dir — the memory lives under it. */
-const withRepo = (fn: (dir: string) => void): void => {
-  withDir((root) => {
+const withRepo = async (fn: (dir: string) => Promise<void>): Promise<void> => {
+  const root = mkdtempSync(join(tmpdir(), 'bro-fpush-repo-'))
+  try {
     execFileSync('git', ['init', '-q', root], { stdio: 'ignore' })
     execFileSync('git', ['-C', root, 'config', 'user.email', 't@t'], { stdio: 'ignore' })
     execFileSync('git', ['-C', root, 'config', 'user.name', 't'], { stdio: 'ignore' })
-    fn(root)
-  })
+    await fn(root)
+  } finally {
+    rmSync(root, { recursive: true, force: true })
+  }
 }
 
 /** A live session marker: `<millis> [<pid> <start>]` then the details. */
@@ -38,30 +41,30 @@ const marker = (dir: string, session: string, aspect: string, details: string[])
 }
 
 describe('the head memory', () => {
-  test('round-trips a head', () => {
-    withRepo((root) => {
-      assert.equal(readHeadMemory(root, 'o/r', 7), undefined)
-      writeHeadMemory(root, 'o/r', 7, 'abc1234')
-      assert.equal(readHeadMemory(root, 'o/r', 7), 'abc1234')
+  test('round-trips a head', async () => {
+    await withRepo(async (root) => {
+      assert.equal(await readHeadMemory(root, 'o/r', 7), undefined)
+      await writeHeadMemory(root, 'o/r', 7, 'abc1234')
+      assert.equal(await readHeadMemory(root, 'o/r', 7), 'abc1234')
     })
   })
 
-  test('a second PR keeps its own head', () => {
-    withRepo((root) => {
-      writeHeadMemory(root, 'o/r', 7, 'aaa')
-      writeHeadMemory(root, 'o/r', 8, 'bbb')
-      assert.equal(readHeadMemory(root, 'o/r', 7), 'aaa')
-      assert.equal(readHeadMemory(root, 'o/r', 8), 'bbb')
+  test('a second PR keeps its own head', async () => {
+    await withRepo(async (root) => {
+      await writeHeadMemory(root, 'o/r', 7, 'aaa')
+      await writeHeadMemory(root, 'o/r', 8, 'bbb')
+      assert.equal(await readHeadMemory(root, 'o/r', 7), 'aaa')
+      assert.equal(await readHeadMemory(root, 'o/r', 8), 'bbb')
     })
   })
 
-  test('an unreadable memory is a miss, not a crash', () => {
-    withRepo((root) => {
-      writeHeadMemory(root, 'o/r', 7, 'abc1234')
+  test('an unreadable memory is a miss, not a crash', async () => {
+    await withRepo(async (root) => {
+      await writeHeadMemory(root, 'o/r', 7, 'abc1234')
       // corrupt it
       const path = join(root, '.git', 'bro', 'drive', 'heads', 'o%2Fr-7.json')
       writeFileSync(path, '{oops')
-      assert.equal(readHeadMemory(root, 'o/r', 7), undefined)
+      assert.equal(await readHeadMemory(root, 'o/r', 7), undefined)
     })
   })
 })

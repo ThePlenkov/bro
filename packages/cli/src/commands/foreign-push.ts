@@ -23,7 +23,7 @@
  * is written, no branch is protected — the session knows what it pushed,
  * the bus only knows the branch moved.
  */
-import { mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs'
+import { mkdir, readFile, rename, writeFile } from 'node:fs/promises'
 import { dirname, join } from 'node:path'
 import { gitCommonDir } from '@broject/core'
 import type { EventInput } from '@broject/core'
@@ -46,14 +46,17 @@ export function headMemoryPath(root: string, repo: string, pr: number): string |
 
 /** The last head SHA the drive saw for a PR — undefined on the first
  *  sight (that is not a change) or when the memory is unreadable. */
-export function readHeadMemory(root: string, repo: string, pr: number): string | undefined {
+export async function readHeadMemory(
+  root: string,
+  repo: string,
+  pr: number
+): Promise<string | undefined> {
   const path = headMemoryPath(root, repo, pr)
   if (path === null) {
     return undefined
   }
   try {
-    // codacy-disable-next-line
-    const parsed: unknown = JSON.parse(readFileSync(path, 'utf8')) // NOSONAR — the path is bro's own common dir plus an encoded repo slug and a numeric PR
+    const parsed: unknown = JSON.parse(await readFile(path, 'utf8'))
     const sha = (parsed as { sha?: unknown } | null)?.sha
     return typeof sha === 'string' && sha !== '' ? sha : undefined
   } catch {
@@ -63,19 +66,21 @@ export function readHeadMemory(root: string, repo: string, pr: number): string |
 
 /** Remember the head the drive just saw. Fail-open: a memory that
  *  cannot be written costs the NEXT comparison, never the pass. */
-export function writeHeadMemory(root: string, repo: string, pr: number, sha: string): void {
+export async function writeHeadMemory(
+  root: string,
+  repo: string,
+  pr: number,
+  sha: string
+): Promise<void> {
   const path = headMemoryPath(root, repo, pr)
   if (path === null) {
     return
   }
   try {
-    // codacy-disable-next-line
-    mkdirSync(dirname(path), { recursive: true }) // NOSONAR — the path is bro's own common dir plus an encoded repo slug and a numeric PR
+    await mkdir(dirname(path), { recursive: true })
     const tmp = `${path}.${process.pid}.tmp`
-    // codacy-disable-next-line
-    writeFileSync(tmp, JSON.stringify({ sha, at: new Date().toISOString() })) // NOSONAR — the path is bro's own common dir plus an encoded repo slug and a numeric PR
-    // codacy-disable-next-line
-    renameSync(tmp, path) // NOSONAR — the path is bro's own common dir plus an encoded repo slug and a numeric PR
+    await writeFile(tmp, JSON.stringify({ sha, at: new Date().toISOString() }))
+    await rename(tmp, path)
   } catch {
     // fail-open — the signal is advisory
   }

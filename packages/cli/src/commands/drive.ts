@@ -925,8 +925,8 @@ async function signalForeignPush(
   if (head === undefined || head === '') {
     return
   }
-  const before = readHeadMemory(ctx.mainRoot, ctx.repo, pr)
-  writeHeadMemory(ctx.mainRoot, ctx.repo, pr, head)
+  const before = await readHeadMemory(ctx.mainRoot, ctx.repo, pr)
+  await writeHeadMemory(ctx.mainRoot, ctx.repo, pr, head)
   if (before === undefined || before === head) {
     // the first sight of a PR is not a change, and a held head is not one
     return
