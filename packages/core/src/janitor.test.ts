@@ -398,6 +398,20 @@ describe('janitor — size caps', () => {
     })
   })
 
+  test('an oversized serve-turns journal at the bro root tail-caps — the conductor\'s journal is janitor-covered', () => {
+    withBro((bro) => {
+      const line = `{"ts":1,"event":"conductor.turn","pad":"${'y'.repeat(100)}"}\n`
+      const big = join(bro, 'serve-turns.jsonl')
+      writeFileSync(big, line.repeat(12000)) // ~1.4 MiB
+      const r = janitorBroDir(bro, deps(bro))
+      assert.equal(r.truncated.length, 1)
+      const after = readFileSync(big, 'utf8')
+      assert.ok(after.length <= 600 * 1024)
+      assert.ok(after.split('\n')[0]!.startsWith('{"ts"'), 'tail starts on a line boundary')
+      assert.ok(after.endsWith('}\n'), 'newest line survives')
+    })
+  })
+
   test('a live agent .log caps; an orphan .log reaps instead', () => {
     withBro((bro) => {
       const agents = mkdir(bro, 'agents')
