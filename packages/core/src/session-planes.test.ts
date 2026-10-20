@@ -241,6 +241,25 @@ describe('the batch lane (spec bro-9h86l)', () => {
     })
   })
 
+  test('the batch cap counts the fleet\'s reservations only', () => {
+    withDir((resv) => {
+      const agents = { testkind: { maxBatchWorkers: 1, reservationsDir: resv } }
+      const plane = splittingPlane('testkind', 0, 0)
+      // an INTERACTIVE spawn in flight holds a reservation — it is the
+      // operator's, so it must not eat the fleet's share
+      reserveSessionSlot(resv, 'native-aa')
+      assert.doesNotThrow(() =>
+        admitSessionSlot(plane, agents, { key: 'native-bb', workerEnv: { BRO_PR: '599' } })
+      )
+      // a BATCH reservation does count
+      reserveSessionSlot(resv, 'native-cc', 'maxBatchWorkers')
+      assert.throws(
+        () => admitSessionSlot(plane, agents, { key: 'native-dd', workerEnv: { BRO_PR: '599' } }),
+        (e: unknown) => e instanceof SpawnError && e.kind === 'cap'
+      )
+    })
+  })
+
   test('the batch cap is parsed like every other lane knob', () => {
     const ok = sessionQuotaConfig({ testkind: { maxBatchWorkers: 2 } }, 'testkind')
     assert.equal(ok?.maxBatchWorkers, 2)

@@ -244,7 +244,7 @@ export function sessionSlotsDir(kind: string, resDir?: string): string {
  *  slots; stale files are reaped in passing. A missing dir is zero
  *  reservations; other read failures throw 'unavailable' — an
  *  unverifiable count fails closed, never silently admits. */
-export function countSessionReservations(resDir: string): number {
+export function countSessionReservations(resDir: string, lane?: WorkerLane): number {
   let names: string[]
   try {
     names = readdirSync(resDir)
@@ -261,6 +261,10 @@ export function countSessionReservations(resDir: string): number {
   let fresh = 0
   for (const name of names) {
     if (!name.endsWith('.slot')) {
+      continue
+    }
+    // the batch lane counts only the fleet's reservations
+    if (lane === 'maxBatchWorkers' && !name.endsWith('.batch.slot')) {
       continue
     }
     const path = join(resDir, name)
@@ -280,9 +284,18 @@ export function countSessionReservations(resDir: string): number {
 /** Claim a host-wide slot — `wx` exclusive create plus a random suffix,
  *  so a same-named spawn from another repo never overwrites a live
  *  claim. Returns the reservation path for release on failure. */
-export function reserveSessionSlot(resDir: string, key: string): string {
+export function reserveSessionSlot(
+  resDir: string,
+  key: string,
+  lane?: WorkerLane
+): string {
   mkdirSync(resDir, { recursive: true })
-  const path = join(resDir, `${key}-${randomBytes(4).toString('hex')}.slot`)
+  // the lane rides the file name: a batch reservation is one the fleet
+  // holds, an interactive one is the operator's — the batch cap counts
+  // only the fleet's, so an in-flight interactive spawn never eats the
+  // fleet's share
+  const tag = lane === 'maxBatchWorkers' ? '.batch' : ''
+  const path = join(resDir, `${key}-${randomBytes(4).toString('hex')}${tag}.slot`)
   writeFileSync(path, String(Date.now()), { flag: 'wx' })
   return path
 }
@@ -345,6 +358,9 @@ function checkSessionLanes(
       ? plane.countBatchWorkers(bag, opts.workerEnv)
       : 0
   const reservations = countSessionReservations(resDir)
+  // the fleet's share counts the fleet's reservations only — an
+  // interactive spawn in flight must not eat the batch lane's cap
+  const batchReservations = countSessionReservations(resDir, 'maxBatchWorkers')
   if (quota.maxSessions > 0 && sessions + reservations >= quota.maxSessions) {
     throw new SpawnError(
       `${plane.kind} session quota reached — ${sessions + reservations}/${quota.maxSessions} live sessions ` +
@@ -353,15 +369,14 @@ function checkSessionLanes(
       'cap'
     )
   }
-  const ctx = { reservations, refused }
   if (maxBatchWorkers > 0 && batch) {
     // the fleet's own share of the worker budget
     const budget: LaneBudget = { lane: 'maxBatchWorkers', cap: maxBatchWorkers, live: batchWorkers }
-    checkWorkerCap(plane, workerCap(plane, budget), ctx)
+    checkWorkerCap(plane, workerCap(plane, budget), { reservations: batchReservations, refused })
   }
   if (maxWorkers > 0) {
     const budget: LaneBudget = { lane: 'maxWorkers', cap: maxWorkers, live: workers }
-    checkWorkerCap(plane, workerCap(plane, budget), ctx)
+    checkWorkerCap(plane, workerCap(plane, budget), { reservations, refused })
   }
 }
 
@@ -482,7 +497,11 @@ export function admitSessionSlot(
           )
         }
         checkSessionLanes(plane, bag, quota, resDir, opts)
-        return reserveSessionSlot(resDir, opts.key)
+        return reserveSessionSlot(
+          resDir,
+          opts.key,
+          isBatchSpawn(opts.workerEnv) ? 'maxBatchWorkers' : undefined
+        )
       },
       { label: `${plane.kind} session quota admission` }
     )

@@ -242,8 +242,19 @@ export function countDevinBatchWorkers(
   isBatch: (pid: number) => boolean = devinPidIsBatch,
   procDir = '/proc'
 ): number {
+  const live = liveDevinLockPids(dirs)
+  if (isBatch === devinPidIsBatch && live.size > 0 && !existsSync(procDir)) {
+    // a host without /proc cannot tell the fleet's workers from the
+    // operator's — an armed maxBatchWorkers must refuse there like an
+    // uncountable plane, never silently count zero and admit freely
+    throw new SpawnError(
+      `cannot verify devin batch worker count — ${procDir} absent; ` +
+        'agents.devin.maxBatchWorkers is unenforceable on this host',
+      'unavailable'
+    )
+  }
   let batch = 0
-  for (const pid of liveDevinLockPids(dirs)) {
+  for (const pid of live) {
     if (isBatch(pid)) {
       batch++
     }
@@ -552,10 +563,13 @@ export const devinSessionPlane: SessionPlane = {
     )
   },
   countBatchWorkers(bag, workerEnv) {
+    // the predicate reads the SAME procDir the scan uses — a scripted
+    // /proc tree would be counted against the real one otherwise
+    const procDir = devinProcDir(bag)
     return countDevinBatchWorkers(
       devinSessionDirs(bag, workerEnv),
-      devinPidIsBatch,
-      devinProcDir(bag)
+      (pid) => devinPidIsBatch(pid, procDir),
+      procDir
     )
   },
   listLive(bag, workerEnv) {

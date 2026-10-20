@@ -1472,11 +1472,15 @@ function prepareSpawn(
   // death walls the provider for every fleet spawn, not just the agent
   // that died. The interactive lane is not blocked — a wall the fleet hit
   // is the fleet's problem (spec bro-9h86l).
+  guardExistingEntry(dir, home, backend, spec, existing, opts)
+  // the wall refusal comes AFTER the live-agent and claim guards: a
+  // respawn of an agent that is already running is a CONFLICT, and the
+  // caller reads that kind — a 'cap' here would say "the provider is
+  // walled" about a spawn that never needed a provider slot
   const wallRefusal = batchWallRefusal(registry, spec)
   if (wallRefusal !== undefined) {
     throw wallRefusal
   }
-  guardExistingEntry(dir, home, backend, spec, existing, opts)
   const { claimed, actor, phantom } = guardClaim(spec, existing !== undefined, opts.claimAs)
   // fleet admission — before the registry write + claim land, so a
   // refusal leaves no half-spawned state
