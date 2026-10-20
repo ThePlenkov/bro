@@ -19,15 +19,52 @@ import { homedir } from 'node:os'
 import { join } from 'node:path'
 import { gateReport, renderGate } from './codescene-gate.ts'
 
-/** The CLI's install target, plus whatever the PATH already carries. */
+/** The CLI's install target, or wherever the shell would find it. */
 function csBinary(): string | undefined {
   const local = join(homedir(), '.local', 'bin', 'cs')
   if (existsSync(local)) return local
-  for (const dir of (process.env['PATH'] ?? '').split(':')) {
-    const candidate = join(dir, 'cs')
-    if (dir !== '' && existsSync(candidate)) return candidate
+  try {
+    return execFileSync('which', ['cs'], { encoding: 'utf8' }).trim() || undefined
+  } catch {
+    return undefined
   }
-  return undefined
+}
+
+/** The delta covers a COMMIT RANGE (what the App analyzes for a PR) —
+ *  the CLI's uncommitted mode comes back empty. Say so when the tree is
+ *  dirty, or the check silently covers less than the user thinks. */
+function reportDirtyTree(): void {
+  let dirty: string
+  try {
+    dirty = execFileSync('git', ['status', '--porcelain'], { encoding: 'utf8' }).trim()
+  } catch {
+    return // no git context — the delta below will report it
+  }
+  if (dirty === '') return
+  const files = dirty.split('\n').map((l) => l.slice(3).trim())
+  console.log(
+    `codescene-check: ${files.length} uncommitted file(s) — the delta covers COMMITTED changes only:`
+  )
+  for (const f of files) console.log(`  ${f}`)
+}
+
+/** Run the delta analysis, tolerating a non-zero exit that still carried
+ *  a report (the CLI exits 1 when it found findings). */
+function deltaReport(cs: string, base: string): string {
+  try {
+    return execFileSync(cs, ['delta', base, 'HEAD', '--output-format', 'json'], {
+      encoding: 'utf8',
+      maxBuffer: 64 * 1024 * 1024,
+      env: { ...process.env },
+    })
+  } catch (err) {
+    const e = err as { status?: number; stdout?: string; stderr?: string; message?: string }
+    if (typeof e.stdout === 'string' && e.stdout.trim() !== '') {
+      return e.stdout
+    }
+    console.error(`codescene-check: the delta analysis failed — ${e.stderr ?? e.message}`)
+    process.exit(2)
+  }
 }
 
 function main(argv: string[]): void {
@@ -38,37 +75,8 @@ function main(argv: string[]): void {
     console.log('codescene-check: skipped — the `cs` CLI is not installed (see the codescene skill)')
     return
   }
-  // The delta covers a COMMIT RANGE (what the App analyzes for a PR) —
-  // the CLI's uncommitted mode comes back empty. Say so when the tree is
-  // dirty, or the check silently covers less than the user thinks.
-  try {
-    const dirty = execFileSync('git', ['status', '--porcelain'], { encoding: 'utf8' }).trim()
-    if (dirty !== '') {
-      const files = dirty.split('\n').map((l) => l.slice(3).trim())
-      console.log(
-        `codescene-check: ${files.length} uncommitted file(s) — the delta covers COMMITTED changes only:`
-      )
-      for (const f of files) console.log(`  ${f}`)
-    }
-  } catch {
-    // no git context — the delta below will report it
-  }
-  let report: string
-  try {
-    report = execFileSync(cs, ['delta', base, 'HEAD', '--output-format', 'json'], {
-      encoding: 'utf8',
-      maxBuffer: 64 * 1024 * 1024,
-      env: { ...process.env },
-    })
-  } catch (err) {
-    const e = err as { status?: number; stdout?: string; stderr?: string; message?: string }
-    if (typeof e.stdout === 'string' && e.stdout.trim() !== '') {
-      report = e.stdout
-    } else {
-      console.error(`codescene-check: the delta analysis failed — ${e.stderr ?? e.message}`)
-      process.exit(2)
-    }
-  }
+  reportDirtyTree()
+  const report = deltaReport(cs, base)
   let result
   try {
     result = gateReport(report, strict)
