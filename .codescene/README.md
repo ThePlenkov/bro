@@ -25,8 +25,8 @@ recommends for a codebase that already carries debt — and graduates files one
 rung at a time. A rung-3 file is a file that already meets the strictest bar;
 a rung-1 file is a file that has not been cleaned yet.
 
-The App's PR review posts the findings and enforces this file; the CI job
-(`.github/workflows/codescene.yml`) is the reproducible half of the same bar.
+The CodeScene GitHub App posts the findings and enforces this policy from the
+branch under review.
 
 ## Running a wave
 
