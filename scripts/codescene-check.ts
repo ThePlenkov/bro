@@ -27,6 +27,7 @@ function csBinary(): string | undefined {
   const local = join(homedir(), '.local', 'bin', 'cs')
   if (existsSync(local)) return local
   try {
+    // NOSONAR — PATH lookup is the contract
     return execFileSync('which', ['cs'], { encoding: 'utf8' }).trim() || undefined
   } catch {
     return undefined
@@ -39,7 +40,7 @@ function csBinary(): string | undefined {
 function reportDirtyTree(): void {
   let dirty: string
   try {
-    dirty = execFileSync('git', ['status', '--porcelain'], { encoding: 'utf8' }).trim()
+    dirty = execFileSync('git', ['status', '--porcelain'], { encoding: 'utf8' }).trim() // NOSONAR — PATH lookup is the contract
   } catch (err) {
     // the state is UNKNOWN — say so, or the user reads a green check as
     // "the delta covered everything"
@@ -66,6 +67,7 @@ function reportDirtyTree(): void {
  *  a report (the CLI exits 1 when it found findings). */
 function deltaReport(cs: string, base: string): string {
   try {
+    // NOSONAR — the command is the CodeScene CLI; execFileSync never goes through a shell
     return execFileSync(cs, ['delta', base, 'HEAD', '--output-format', 'json'], {
       encoding: 'utf8',
       maxBuffer: 64 * 1024 * 1024,
@@ -87,6 +89,7 @@ function deltaReport(cs: string, base: string): string {
  *  yours. */
 function defaultBase(): string {
   try {
+    // NOSONAR — PATH lookup is the contract
     return execFileSync('git', ['merge-base', 'origin/main', 'HEAD'], { encoding: 'utf8' }).trim()
   } catch {
     return 'origin/main'
