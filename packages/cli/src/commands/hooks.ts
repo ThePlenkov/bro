@@ -640,9 +640,10 @@ export function armDetail(cmd: string, aspect: GateAspect): string {
     // command is not it: `bro act wait --interval 60` names a poll
     // interval, and a marker that claims PR #60 for it is a lie the
     // bus would act on.
-    const m = /\bact\s+(?:status|wait|threads|resolve|reply|merge|rearm)\s+(\d{1,7})\b/.exec(c)
+    // both spellings: `bro act wait 599` and `bro act wait --pr 599`
+    const m = /\bact\s+(?:status|wait|threads|resolve|reply|merge|rearm)(?:\s+(\d{1,7})|\b[^\n]*?--pr\s+(\d{1,7}))/.exec(c)
     if (m !== null) {
-      return `#${m[1]}`
+      return `#${m[1] ?? m[2]}`
     }
     const gh = /\bgh\s+pr\s+(?:view|checks|diff|merge|comment|edit|ready|close|reopen)\s+(\d{1,7})\b/.exec(c)
     return gh !== null ? `#${gh[1]}` : ''

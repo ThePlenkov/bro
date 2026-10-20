@@ -52,6 +52,7 @@ export function readHeadMemory(root: string, repo: string, pr: number): string |
     return undefined
   }
   try {
+    // codacy-disable-next-line
     const parsed: unknown = JSON.parse(readFileSync(path, 'utf8')) // NOSONAR — the path is bro's own common dir plus an encoded repo slug and a numeric PR
     const sha = (parsed as { sha?: unknown } | null)?.sha
     return typeof sha === 'string' && sha !== '' ? sha : undefined
@@ -68,9 +69,12 @@ export function writeHeadMemory(root: string, repo: string, pr: number, sha: str
     return
   }
   try {
+    // codacy-disable-next-line
     mkdirSync(dirname(path), { recursive: true }) // NOSONAR — the path is bro's own common dir plus an encoded repo slug and a numeric PR
     const tmp = `${path}.${process.pid}.tmp`
+    // codacy-disable-next-line
     writeFileSync(tmp, JSON.stringify({ sha, at: new Date().toISOString() })) // NOSONAR — the path is bro's own common dir plus an encoded repo slug and a numeric PR
+    // codacy-disable-next-line
     renameSync(tmp, path) // NOSONAR — the path is bro's own common dir plus an encoded repo slug and a numeric PR
   } catch {
     // fail-open — the signal is advisory

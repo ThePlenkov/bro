@@ -257,6 +257,8 @@ describe('armDetail', () => {
     ['bro act wait --interval 60', 'act', ''],
     ['bro act wait 599 --interval 60', 'act', '#599'],
     ['bro act status', 'act', ''],
+    ['bro act wait --pr 599', 'act', '#599'],
+    ['bro act status --pr 42', 'act', '#42'],
     ['gh pr checks 42', 'act', '#42'],
     ['gh pr create --fill', 'act', ''],
     ['bro drill down bro-x', 'drill', ''],
