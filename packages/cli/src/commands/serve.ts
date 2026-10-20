@@ -1359,6 +1359,19 @@ async function routeTerminalOutput(
     send(res, 200, snap, { contentType: 'application/json' })
     return true
   }
+  followTerminalOutput(res, reg, id)
+  return true
+}
+
+/** The `?follow` half of the output route — held apart so the route
+ *  stays under the complexity cap. Headers precede `reg.follow()` so a
+ *  synchronous `exit` can never end a headerless response; the snapshot
+ *  then streams through the drain-fed queue at the reader's pace. */
+function followTerminalOutput(
+  res: ServerResponse,
+  reg: AcpTerminals,
+  id: string
+): void {
   let handle: TerminalFollow | undefined
   const gone = (): boolean => res.writableEnded || res.destroyed
   // Outbound frames park in `queue`, not the socket's own buffer — when
@@ -1441,7 +1454,7 @@ async function routeTerminalOutput(
       // released between the probe and here — the stream just opened, so
       // close it; the client's reconnect lands on the 404 above
       res.end()
-      return true
+      return
     }
     // a registry fault is not an empty terminal — answer a verdict the
     // client can act on instead of a silent 200 it would retry forever
@@ -1449,7 +1462,7 @@ async function routeTerminalOutput(
       `event: error\ndata: ${JSON.stringify({ error: err instanceof Error ? err.message : String(err) })}\n\n`
     )
     finish()
-    return true
+    return
   }
   // `truncated` rides ahead of the output — a follower that starts
   // mid-buffer must know bytes are missing, exactly like plain GET
@@ -1462,10 +1475,9 @@ async function routeTerminalOutput(
     // ending here would drop them plus leak the registered listener
     enqueue(`event: exit\ndata: ${JSON.stringify(handle.snapshot.exitStatus)}\n\n`)
     finish()
-    return true
+    return
   }
   res.on('close', () => handle?.stop())
-  return true
 }
 
 async function routeAgentEventsImpl(
