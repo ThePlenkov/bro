@@ -251,15 +251,10 @@ function worktreeListMain(
 export function gitWorktreeRoots(dir: string): string[] {
   const z = gitTry(['-C', dir, 'worktree', 'list', '--porcelain', '-z'])
   if (z.code === 0) {
-    const roots: string[] = []
-    for (const rec of z.out.split('\0\0')) {
-      const fields = rec.split('\0').filter((f) => f !== '')
-      if (!fields[0]?.startsWith('worktree ') || fields.includes('bare')) {
-        continue
-      }
-      roots.push(fields[0].slice('worktree '.length))
-    }
-    return roots
+    return z.out
+      .split('\0\0')
+      .map(worktreeRootZ)
+      .filter((r): r is string => r !== null)
   }
   // no -z support (pre-2.36 git): records split on blank lines, paths
   // C-quoted when they carry specials
@@ -267,16 +262,32 @@ export function gitWorktreeRoots(dir: string): string[] {
   if (p.code !== 0) {
     return []
   }
-  const roots: string[] = []
-  for (const rec of p.out.split(/\r?\n\r?\n/)) {
-    const m = /^worktree (.+)$/m.exec(rec)
-    if (m === null || rec.split(/\r?\n/).includes('bare')) {
-      continue
-    }
-    const raw = m[1]!.trim()
-    roots.push(raw.startsWith('"') && raw.endsWith('"') ? unquoteGitPath(raw) : raw)
+  return p.out
+    .split(/\r?\n\r?\n/)
+    .map(worktreeRootPlain)
+    .filter((r): r is string => r !== null)
+}
+
+/** One `-z` porcelain record (fields NUL-joined) → its checkout root;
+ *  null for a bare record or a fragment that isn't a record head. */
+function worktreeRootZ(rec: string): string | null {
+  const fields = rec.split('\0')
+  const head = fields.find((f) => f !== '')
+  if (head === undefined || !head.startsWith('worktree ') || fields.includes('bare')) {
+    return null
   }
-  return roots
+  return head.slice('worktree '.length)
+}
+
+/** One plain porcelain record → its checkout root — the bare record
+ *  drops out; the `worktree` line's C-quoting decodes. */
+function worktreeRootPlain(rec: string): string | null {
+  const m = /^worktree (.+)$/m.exec(rec)
+  if (m === null || rec.split(/\r?\n/).includes('bare')) {
+    return null
+  }
+  const raw = m[1]!.trim()
+  return raw.startsWith('"') && raw.endsWith('"') ? unquoteGitPath(raw) : raw
 }
 
 /** Depth-bounded search under `root` for a directory whose `.git` FILE
