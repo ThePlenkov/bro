@@ -108,8 +108,16 @@ export function resolveWaitPlane(
 export interface DepRead {
   /** the request bead on the posting store: a row, `null` when absent
    *  (a bad ref — the transport says where it must land and it is not
-   *  there), `undefined` when the store itself could not be read */
-  request?: { id: string; status?: string; labels?: string[] } | null
+   *  there), `undefined` when the store itself could not be read.
+   *  `closed_at`/`updated_at` ride along when the store carries them —
+   *  the watcher compares the replica's age against the close stamp */
+  request?: {
+    id: string
+    status?: string
+    labels?: string[]
+    closed_at?: string
+    updated_at?: string
+  } | null
   /** closed `provides:<id>` on the peer plane — undefined when the
    *  plane could not be read */
   shipped?: boolean
@@ -150,7 +158,13 @@ export function readDepState(plane: WaitPlane, id: string): DepRead {
   try {
     const store = plane.postForeign ? storeFor(plane.postDir) : taskStore(plane.postDir)
     out.request =
-      store.get<{ id: string; status?: string; labels?: string[] }>(id) ?? null
+      store.get<{
+        id: string
+        status?: string
+        labels?: string[]
+        closed_at?: string
+        updated_at?: string
+      }>(id) ?? null
   } catch (err) {
     out.errors.push(
       `${plane.peer.alias}: posting store unreadable — ` +
