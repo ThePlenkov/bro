@@ -1,5 +1,8 @@
 /**
- * CodeScene delta gate — fails a build when a diff made code health worse.
+ * CodeScene delta gate — fails when a diff made code health worse.
+ *
+ * The CodeScene App is the gate on a PR; this is the same rule offline,
+ * so a push never has to be the first time you see what it did.
  *
  * `cs delta --output-format json` reports every finding in the touched
  * files with a `change-type`:
@@ -96,6 +99,12 @@ function collect(
 /** Evaluate a delta report. `strict` also fails on pre-existing
  *  (`unchanged`) findings — the bar a graduated file carries. */
 export function gateReport(raw: string, strict: boolean): GateResult {
+  // No diff — the CLI writes nothing. Nothing was introduced, so nothing
+  // is violated. (An empty report is an evaluated verdict; an UNREADABLE
+  // one is not, and stays an error below.)
+  if (raw.trim() === '') {
+    return { ok: true, files: 0, summary: 'no changes', violations: [] }
+  }
   let parsed: unknown
   try {
     parsed = JSON.parse(raw)
