@@ -83,6 +83,7 @@ import {
   type TaskRow,
   type TaskStore,
   BATCH_MARKER_ENV,
+  hasHelpFlag,
   printUsage,
 } from '@broject/core'
 import {
@@ -2494,7 +2495,7 @@ function runDriveSched(argv: string[], dir: string, drive: DriveConfig): void {
 }
 
 export async function runDriveCommand(argv: string[]): Promise<void> {
-  if (argv.includes('--help') || argv.includes('-h')) {
+  if (hasHelpFlag(argv)) {
     usage(0)
   }
   const main = mainWorktree()

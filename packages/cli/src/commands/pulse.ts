@@ -35,6 +35,7 @@
 import { spawnSync } from 'node:child_process'
 import {
   dropMailbox,
+  hasHelpFlag,
   holdFileLock,
   loadConfig,
   LockTimeout,
@@ -231,7 +232,7 @@ export async function pulseTick(
 }
 
 export async function runPulseCommand(argv: string[]): Promise<void> {
-  if (argv.includes('--help') || argv.includes('-h')) {
+  if (hasHelpFlag(argv)) {
     printUsage('usage: bro pulse [<seconds>] [--notify|--no-notify] [-- <cmd>…]', 0)
   }
   let args: PulseArgs

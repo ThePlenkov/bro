@@ -21,7 +21,7 @@ import { randomBytes } from 'node:crypto'
 import { mkdirSync, rmSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { stringify } from 'smol-toml'
-import { checkBeads, printUsage, taskStore } from '@broject/core'
+import { checkBeads, hasHelpFlag, printUsage, taskStore } from '@broject/core'
 import {
   beadsDir,
   claimStep,
@@ -198,7 +198,7 @@ export async function runConvoyCommand(argv: string[]): Promise<void> {
     console.error(`unknown convoy command: ${sub}`)
     usage()
   }
-  if (rest.includes('--help') || rest.includes('-h')) usage(0)
+  if (hasHelpFlag(rest)) usage(0)
   // reject unknown options — a misspelled flag (e.g. --reslut) must not
   // silently degrade a `done` into a close with no reason
   const KNOWN_FLAGS = new Set(

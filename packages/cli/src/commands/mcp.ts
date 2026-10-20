@@ -8,7 +8,7 @@
  *  Plane exposure rides `mcp.planes`: absent/empty `mcp` section =
  *  every read plane (spawning the server IS the consent), `[]` = none,
  *  a list = allowlist. Backend selection stays on `connectors.*`. */
-import { planes, printUsage } from '@broject/core'
+import { hasHelpFlag, planes, printUsage } from '@broject/core'
 import { catalogTools, serveMcp } from '@broject/mcp'
 import '../planes/index.ts'
 import { loadBroConfig } from '../plugins.ts'
@@ -26,7 +26,7 @@ function usage(exitCode = 2): never {
 }
 
 export async function runMcpCommand(argv: string[]): Promise<void> {
-  if (argv.includes('--help') || argv.includes('-h')) {
+  if (hasHelpFlag(argv)) {
     usage(0)
   }
   const dir = process.cwd()

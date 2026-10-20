@@ -48,6 +48,7 @@ import {
   gitTry,
   loadConfigLayers,
   LockTimeout,
+  hasHelpFlag,
   printUsage,
   taskStoreAt,
   type AgentInfo,
@@ -828,7 +829,7 @@ function cmdReport(dir: string, argv: string[]): void {
 export async function runDogfoodCommand(argv: string[]): Promise<void> {
   const verb = argv[0]
   const rest = argv.slice(1)
-  if (argv.includes('--help') || argv.includes('-h')) {
+  if (hasHelpFlag(argv)) {
     usage(0)
   }
   if (verb === undefined) {

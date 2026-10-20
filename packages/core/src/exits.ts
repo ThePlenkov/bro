@@ -76,6 +76,15 @@ export const EXIT_CODES: readonly ExitCodeRow[] = [
   },
 ]
 
+/** Is this argv asking for help? `--help`/`-h` count only before a
+ *  `--` separator — everything after it is verbatim payload (notify
+ *  text, pulse commands, goal conditions), never a flag. */
+export function hasHelpFlag(argv: readonly string[]): boolean {
+  const sep = argv.indexOf('--')
+  const head = sep === -1 ? argv : argv.slice(0, sep)
+  return head.includes('--help') || head.includes('-h')
+}
+
 /** Print usage/help text on the stream its exit code owns — 0 stdout,
  *  non-zero stderr — then exit. Every `usage()`/USAGE site routes
  *  through here so the stream contract holds mechanically instead of

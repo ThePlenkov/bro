@@ -44,7 +44,7 @@ import { closeSync, mkdirSync, openSync, statSync } from 'node:fs'
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http'
 import { homedir } from 'node:os'
 import { dirname, join, resolve } from 'node:path'
-import { holdFileLock, LockTimeout, pidAlive, printUsage } from '@broject/core'
+import { hasHelpFlag, holdFileLock, LockTimeout, pidAlive, printUsage } from '@broject/core'
 import { flag, positionals } from './args.ts'
 import {
   clearStateFile,
@@ -686,7 +686,7 @@ export async function runProviderCommand(argv: string[]): Promise<void> {
   if (sub === undefined) {
     usage()
   }
-  if (rest.includes('--help') || rest.includes('-h')) {
+  if (hasHelpFlag(rest)) {
     usage(0)
   }
   switch (sub) {

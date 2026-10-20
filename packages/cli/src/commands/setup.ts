@@ -16,7 +16,7 @@ import { basename, dirname, join } from 'node:path'
 import { createRequire } from 'node:module'
 import { fileURLToPath } from 'node:url'
 import { execFileSync } from 'node:child_process'
-import { initBeadsStealth, PERSONALITIES, printUsage, type BroConfig } from '@broject/core'
+import { initBeadsStealth, PERSONALITIES, hasHelpFlag, printUsage, type BroConfig } from '@broject/core'
 import { loadBroConfig } from '../plugins.ts'
 import {
   cliVersion,
@@ -262,7 +262,7 @@ function checkPrereqs(needBeads: boolean): void {
 }
 
 export async function runSetupCommand(argv: string[]): Promise<void> {
-  if (argv.includes('--help') || argv.includes('-h')) {
+  if (hasHelpFlag(argv)) {
     printUsage(
       'usage: bro setup [--beads] [--skills] [--pack <name|off>] [--personality <name>]',
       0

@@ -27,7 +27,7 @@
  * The default stays the mailbox: this command works with no broker, no
  * config and no daemon, and it must keep doing so.
  */
-import { facade, loadConfig, printUsage } from '@broject/core'
+import { facade, hasHelpFlag, loadConfig, printUsage } from '@broject/core'
 import { flag, positionals } from './args.ts'
 
 const KINDS = new Set(['note', 'info', 'ask', 'result', 'block'])
@@ -40,7 +40,7 @@ const sourceOf = (): string | undefined => {
 }
 
 export function runNotifyCommand(argv: string[]): void {
-  if (argv.includes('--help') || argv.includes('-h')) {
+  if (hasHelpFlag(argv)) {
     printUsage(
       'usage: bro notify [--to <addr>] [--kind <k>] [--in-reply-to <r>] [--key <k>] [--] <text>',
       0

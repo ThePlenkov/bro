@@ -23,7 +23,7 @@
  * queue is scoped to this checkout's issue_prefix — foreign-prefix
  * beads are reported, never claimed. scope = "all" opts out in plans.
  */
-import { emitLifecycle, ensureTasksBackend, facade, getTasks, gitTry, printUsage, type FacadeOpts, type TaskStore } from '@broject/core'
+import { emitLifecycle, ensureTasksBackend, facade, getTasks, gitTry, hasHelpFlag, printUsage, type FacadeOpts, type TaskStore } from '@broject/core'
 import { flag } from './args.ts'
 import type { NextFilters, NextOrder, NextPlan } from './next-plan.ts'
 import { requireGlobalStore } from '../doctypes/store.ts'
@@ -400,7 +400,7 @@ export function applyNextPlan(plan: NextPlan): void {
 }
 
 export async function runNextCommand(argv: string[]): Promise<void> {
-  if (argv.includes('--help') || argv.includes('-h')) {
+  if (hasHelpFlag(argv)) {
     printUsage(`Usage: bro next [--list] [--json] [--global] [--label a,b]
 
   Claims the top ready bead and prints the work order. Human gates,

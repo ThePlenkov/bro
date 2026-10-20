@@ -38,6 +38,7 @@ import {
   loadConfig,
   LockTimeout,
   mailboxDir,
+  hasHelpFlag,
   printUsage,
   shQuote,
   withFileLock,
@@ -604,7 +605,7 @@ function cmdUninstall(resolved: RigRepo | { error: string }): never {
 }
 
 export async function runRigCommand(argv: string[]): Promise<void> {
-  if (argv.includes('--help') || argv.includes('-h')) {
+  if (hasHelpFlag(argv)) {
     usage(0)
   }
   const pos = positionals(argv, new Set(['--repo', '--every', '--for']), {

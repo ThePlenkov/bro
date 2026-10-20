@@ -48,6 +48,7 @@ import {
   mailboxDir,
   prOwnership,
   prOwnershipMark,
+  hasHelpFlag,
   printUsage,
   reviewHost,
   runJanitor,
@@ -1005,7 +1006,7 @@ export async function tickOnce(dir: string): Promise<{ snap: WatchSnapshot; text
 }
 
 export async function runWatchCommand(argv: string[]): Promise<void> {
-  if (argv.includes('--help') || argv.includes('-h')) {
+  if (hasHelpFlag(argv)) {
     printUsage(
       'usage: bro watch [--every SEC] [--for SEC] [--json] [--notify] | bro watch install|uninstall',
       0

@@ -89,6 +89,7 @@ import {
   type SpawnWorker,
   type TaskStore,
   BATCH_MARKER_ENV,
+  hasHelpFlag,
   printUsage,
 } from '@broject/core'
 import {
@@ -2254,7 +2255,7 @@ const LOOP_VALUE_FLAGS = new Set([
 const LOOP_BOOL_FLAGS = new Set(['--json', '--dry-run', '--help', '--auto-approve'])
 
 export async function runLoopCommand(argv: string[]): Promise<void> {
-  if (argv.includes('--help') || argv.includes('-h')) {
+  if (hasHelpFlag(argv)) {
     usage(0)
   }
   rejectStrayArgs(argv)

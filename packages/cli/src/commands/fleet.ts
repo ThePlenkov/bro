@@ -26,6 +26,7 @@ import { basename } from 'node:path'
 import {
   git,
   gitTry,
+  hasHelpFlag,
   printUsage,
   reviewHost,
   wallText,
@@ -571,7 +572,7 @@ async function runFleetLive(
 }
 
 export async function runFleetCommand(argv: string[]): Promise<void> {
-  if (argv.includes('--help') || argv.includes('-h')) {
+  if (hasHelpFlag(argv)) {
     printUsage('usage: bro fleet [--live] [--every SEC] [--json]', 0)
   }
   let args: FleetArgs

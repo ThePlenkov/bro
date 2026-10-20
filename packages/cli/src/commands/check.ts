@@ -22,7 +22,7 @@ import { accessSync, existsSync, statSync } from 'node:fs'
 import { delimiter, dirname, isAbsolute, join, resolve, sep } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { X_OK } from 'node:constants'
-import { printUsage } from '@broject/core'
+import { hasHelpFlag, printUsage } from '@broject/core'
 import { flag } from './args.ts'
 import { CHECK_EXECUTORS, checkSection, type CheckConfig } from './check-config.ts'
 import { loadBroConfig } from '../plugins.ts'
@@ -542,7 +542,7 @@ function parseCheckArgs(argv: string[]): CheckArgs {
 }
 
 export function runCheckCommand(argv: string[]): void {
-  if (argv.includes('--help') || argv.includes('-h')) {
+  if (hasHelpFlag(argv)) {
     usage(0)
   }
   const { root, format, opts, cfgBin } = parseCheckArgs(argv)

@@ -13,7 +13,7 @@
  *   capture [--source drill|retro|act|mol|all] [--mol ID] [--dry-run] [--json]
  *   probe <question> [--lesson "…" --on … --match-… …] [--session ID] [--json]
  */
-import { checkBeads, printUsage } from '@broject/core'
+import { checkBeads, hasHelpFlag, printUsage } from '@broject/core'
 import {
   CAPTURE_SOURCES,
   captureLessons,
@@ -525,7 +525,7 @@ export function runLearnCommand(argv: string[]): void {
     console.error(`error: unknown learn command "${cmd}"`)
     usage()
   }
-  if (rest.includes('--help') || rest.includes('-h')) {
+  if (hasHelpFlag(rest)) {
     usage(0)
   }
   rejectUnknownFlags(cmd, rest)

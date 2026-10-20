@@ -152,6 +152,7 @@ import {
   type EventInput,
   type HeldLockOptions,
   type PlaneDescriptor,
+  hasHelpFlag,
   printUsage,
   type SpawnErrorKind,
 } from '@broject/core'
@@ -2102,7 +2103,7 @@ export async function ensureServe(
 }
 
 async function cmdEnsure(argv: string[]): Promise<void> {
-  if (argv.includes('--help') || argv.includes('-h')) usage(0)
+  if (hasHelpFlag(argv)) usage(0)
   const pos = positionals(argv, new Set(['--port']))
   if (pos.length > 0) usage()
   for (const a of argv) {
@@ -2243,7 +2244,7 @@ async function cmdWatchdog(argv: string[]): Promise<void> {
  *  `usage()` on any malformed input — a mistyped flag must never
  *  silently serve. */
 function parseServePort(argv: string[]): number {
-  if (argv.includes('--help') || argv.includes('-h')) {
+  if (hasHelpFlag(argv)) {
     usage(0)
   }
   const pos = positionals(argv, new Set(['--port']))

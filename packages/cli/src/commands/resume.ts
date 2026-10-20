@@ -24,6 +24,7 @@ import {
   janitorLine,
   lockHolderPid,
   pidAlive,
+  hasHelpFlag,
   printUsage,
   readAgentRegistry,
   runJanitor,
@@ -302,7 +303,7 @@ function reportLines(rep: ResumeReport): string[] {
 }
 
 export async function runResumeCommand(argv: string[]): Promise<void> {
-  if (argv.includes('--help') || argv.includes('-h')) {
+  if (hasHelpFlag(argv)) {
     printUsage(
       'Usage: bro fleet resume [--dry-run] [--json]\n' +
         '  Post-restart recovery: rearm dead watches, revive a recorded-but-dead\n' +

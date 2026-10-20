@@ -23,6 +23,7 @@ import {
   dataRefPush,
   dataRefRoot,
   gitTry,
+  hasHelpFlag,
   printUsage,
   taskStore,
   type TaskRow,
@@ -395,7 +396,7 @@ function cmdRun(dir: string, dryRun: boolean, force: boolean, flatten: boolean):
 }
 
 export function runSweepCommand(argv: string[]): void {
-  if (argv.includes('--help') || argv.includes('-h')) {
+  if (hasHelpFlag(argv)) {
     printUsage(
       'usage: bro sweep status | distill [--dry-run] | run [--dry-run] [--force] [--no-flatten]',
       0

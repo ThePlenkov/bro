@@ -29,6 +29,7 @@ import {
   gitCommonDir,
   lockHolderPid,
   pidAlive,
+  hasHelpFlag,
   printUsage,
   procStat,
   staleLock,
@@ -622,7 +623,7 @@ export function uninstallDrive(dir: string, deps: DriveSchedDeps = {}): DriveIns
 
 export async function runDaemonCommand(argv: string[]): Promise<void> {
   const verb = argv[0]
-  if (argv.includes('--help') || argv.includes('-h')) {
+  if (hasHelpFlag(argv)) {
     usage(0)
   }
   if (verb === undefined) {
