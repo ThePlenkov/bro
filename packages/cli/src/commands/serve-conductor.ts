@@ -1324,8 +1324,6 @@ async function continuationTurn(env: TurnEnv, cand: ConvSession): Promise<TurnOu
     // open a fresh session rather than pile onto unknown state
     evict(env.sessions, env.key, cand)
     throw err
-  } finally {
-    cand.busy = false
   }
 }
 
@@ -1551,6 +1549,11 @@ function settleConv(
   // once set it never clears: the hidden text stays in context until
   // the session is retired
   if (divergent === true) conv.divergent = true
+  // the turn's own settlement releases the session — busy spans prompt
+  // AND settle so a same-key request can never slip into the window
+  // where the wire verdict (divergent, historyHash, lastReply) is
+  // still unwritten (coderabbit #610)
+  conv.busy = false
   conv.lastReply = view
   if (key === undefined) return
   wire.sessions.delete(key)

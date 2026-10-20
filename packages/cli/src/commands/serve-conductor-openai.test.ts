@@ -542,14 +542,19 @@ describe('output caps + loud input failures', () => {
     const fake = fakeAcpAgent({ replyText: 'z'.repeat(400), configOptions: [MODEL_OPTION] })
     const { post, close } = await boot(fake)
     try {
-      await post('/v1/chat/completions', {
+      const t1 = await post('/v1/chat/completions', {
         messages: [{ role: 'user', content: 'first' }],
         max_tokens: 5,
       })
+      // the echo is the wire reply itself — exactly what the client saw
+      const echo =
+        ((await t1.json()) as { choices: { message: { content: string } }[] }).choices[0]?.message
+          .content ?? ''
+      assert.notEqual(echo, '')
       const cont = await post('/v1/chat/completions', {
         messages: [
           { role: 'user', content: 'first' },
-          { role: 'assistant', content: 'zzzzz' },
+          { role: 'assistant', content: echo },
           { role: 'user', content: 'second' },
         ],
       })
@@ -558,9 +563,44 @@ describe('output caps + loud input failures', () => {
       // included) is serialized whole, so its context IS the client's view
       assert.equal(fake.sessions.length, 2)
       assert.match(fake.prompts[1] ?? '', /first/)
-      // the trimmed echo seeds the new context — it IS the client's view
-      assert.match(fake.prompts[1] ?? '', /zzzzz/)
+      assert.ok(fake.prompts[1]?.includes(echo) === true)
       assert.match(fake.prompts[1] ?? '', /second/)
+    } finally {
+      await close()
+    }
+  })
+
+  test('concurrent same-key continuations never twin a session mid-settle', async () => {
+    const fake = fakeAcpAgent({ replyText: 'z'.repeat(400), configOptions: [MODEL_OPTION] })
+    const { post, close } = await boot(fake)
+    try {
+      await post('/v1/chat/completions', {
+        messages: [{ role: 'user', content: 'first' }],
+        max_tokens: 5,
+      })
+      const cont = {
+        messages: [
+          { role: 'user', content: 'first' },
+          { role: 'assistant', content: 'zzzzz' },
+          { role: 'user', content: 'second' },
+        ],
+      }
+      // two continuations race the same conversation — the loser takes
+      // the one-shot path (or replays, if the winner's settle lands
+      // first) rather than prompting a session whose wire verdict
+      // (divergent) is still unwritten
+      const [a, b] = await Promise.all([
+        post('/v1/chat/completions', cont),
+        post('/v1/chat/completions', cont),
+      ])
+      assert.equal(a.status, 200)
+      assert.equal(b.status, 200)
+      // nobody prompted mid-settle with a bare delta — every prompt
+      // after the first carries the full client-visible history
+      assert.ok(
+        fake.prompts.slice(1).every((p) => p.includes('first') && p.includes('second')),
+        `a continuation prompted hidden context: ${JSON.stringify(fake.prompts)}`
+      )
     } finally {
       await close()
     }
