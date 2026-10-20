@@ -12,8 +12,8 @@
  * resolvePlanDoc is the shared resolve step — `bro run` (plugins.ts)
  * calls it too, so validate can never disagree with execute.
  */
-import { checkPlanVersion, planKind, printUsage, readPlanDoc } from '@broject/core'
-import type { BroPlugin } from '@broject/core'
+import { checkPlanVersion, hasHelpFlag, planKind, printUsage, readPlanDoc } from '@broject/core'
+import type { BroPlugin, ExitCode } from '@broject/core'
 
 /** Parse + route + schema-validate a plan file — the `bro run` pipeline
  *  minus execution. Returns the owning plugin and the validated plan;
@@ -45,7 +45,7 @@ export function resolvePlanDoc(
   return { plugin, plan: plugin.planSchema(doc, file) }
 }
 
-function usage(exitCode = 2): never {
+function usage(exitCode: ExitCode = 2): never {
   printUsage(`Usage: bro plan [command]
 
 Commands:
@@ -56,7 +56,7 @@ Commands:
 export function runPlanCommand(argv: string[], plugins: readonly BroPlugin[]): void {
   const [sub, ...rest] = argv
   const positional = rest.filter((a) => !a.startsWith('-'))
-  if (sub === '--help' || sub === '-h') {
+  if (sub === '--help' || sub === '-h' || hasHelpFlag(rest)) {
     usage(0)
   }
   if (sub === undefined || sub === 'list') {

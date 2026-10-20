@@ -45,6 +45,7 @@ import { createServer, type IncomingMessage, type Server, type ServerResponse } 
 import { homedir } from 'node:os'
 import { dirname, join, resolve } from 'node:path'
 import { hasHelpFlag, holdFileLock, LockTimeout, pidAlive, printUsage } from '@broject/core'
+import type { ExitCode } from '@broject/core'
 import { flag, positionals } from './args.ts'
 import {
   clearStateFile,
@@ -663,7 +664,7 @@ function cmdEnv(argv: string[]): void {
   console.log(`# ${JSON.stringify(block)}`)
 }
 
-function usage(exitCode = 2): never {
+function usage(exitCode: ExitCode = 2): never {
   printUsage(`usage:
   bro provider serve [--port <n>]   host-level provider listener — /v1/* only,
                                     state at $XDG_STATE_HOME/bro/provider.json

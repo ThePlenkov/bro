@@ -14,6 +14,7 @@
  * 1 and 2 (see {@link EXIT_CODES}) are documented exceptions, not a
  * license for new ones.
  */
+import { writeSync } from 'node:fs'
 
 /** The taxonomy as constants — new code reads names, never digits. */
 export const EXIT = {
@@ -88,12 +89,10 @@ export function hasHelpFlag(argv: readonly string[]): boolean {
 /** Print usage/help text on the stream its exit code owns — 0 stdout,
  *  non-zero stderr — then exit. Every `usage()`/USAGE site routes
  *  through here so the stream contract holds mechanically instead of
- *  by per-site convention. */
-export function printUsage(text: string, code: number): never {
-  if (code === EXIT.ok) {
-    console.log(text)
-  } else {
-    console.error(text)
-  }
+ *  by per-site convention. writeSync, not console.*: a buffered pipe
+ *  write must be flushed before process.exit, never pending behind it.
+ *  The code is typed ExitCode — only the documented taxonomy may exit. */
+export function printUsage(text: string, code: ExitCode): never {
+  writeSync(code === EXIT.ok ? 1 : 2, text.endsWith('\n') ? text : `${text}\n`)
   process.exit(code)
 }

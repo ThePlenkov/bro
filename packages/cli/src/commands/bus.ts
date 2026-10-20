@@ -24,6 +24,7 @@ import {
   type BusFilter,
   type EventInput,
 } from '@broject/core'
+import type { ExitCode } from '@broject/core'
 import { flag, flagAll, positionals } from './args.ts'
 
 const VALUE_FLAGS: ReadonlySet<string> = new Set([
@@ -50,7 +51,7 @@ const KNOWN_FLAGS: Record<string, ReadonlySet<string>> = {
 // a function declaration, not a const arrow — tsc only treats calls to
 // never-returning function declarations as terminating the control flow,
 // so the call sites below narrow correctly
-function usage(exitCode = 2): never {
+function usage(exitCode: ExitCode = 2): never {
   printUsage(`usage: bro bus <serve|publish|subscribe|status> [options]
 
   serve                       run the broker (SIGINT/SIGTERM to stop)

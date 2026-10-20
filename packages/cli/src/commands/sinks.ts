@@ -18,8 +18,9 @@ import {
   type SinkDef,
   type SinkDelivery,
 } from '@broject/core'
+import type { ExitCode } from '@broject/core'
 
-function usage(exitCode = 2): never {
+function usage(exitCode: ExitCode = 2): never {
   printUsage(`Usage: bro sinks <command> [args…]
 
 Commands:

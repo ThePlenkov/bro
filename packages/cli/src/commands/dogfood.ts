@@ -54,13 +54,14 @@ import {
   type AgentInfo,
   type ProviderEntry,
 } from '@broject/core'
+import type { ExitCode } from '@broject/core'
 import { loadAgentEnv, type AgentConnectorEnv } from '../agent-connectors.ts'
 import { collectAgentBackends, spawnStepAgent } from './agents.ts'
 import { flag, positionals } from './args.ts'
 import { isOrchestratorSession } from './watch-pulse.ts'
 
 
-function usage(exitCode = 2): never {
+function usage(exitCode: ExitCode = 2): never {
   printUsage(`usage:
   bro self dogfood scenarios
   bro self dogfood run <name> [--backend <c>] [--analyst <c|same|none>] [--provider <p>] [--keep]

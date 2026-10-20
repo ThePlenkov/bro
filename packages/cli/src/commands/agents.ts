@@ -75,6 +75,7 @@ import {
   type DiscoveredSession,
   type SpawnSpec,
 } from '@broject/core'
+import type { ExitCode } from '@broject/core'
 import type { AcpSeam, FetchFn } from '@broject/providers'
 import { otelHeader, otelSpan } from '@broject/providers'
 import { beadsDir } from '@broject/convoy'
@@ -99,7 +100,7 @@ import {
 import { flag, positionals } from './args.ts'
 import { mainWorktree, worktreePathFor } from './work.ts'
 
-function usage(exitCode = 2): never {
+function usage(exitCode: ExitCode = 2): never {
   printUsage(`usage:
   bro agents status [<id|step>] [--json] [--connector <name>]
   bro agents up [<step>] [--connector <name>] [--worktree <path>] [--prompt-file <file>] [--beads-dir <dir>]

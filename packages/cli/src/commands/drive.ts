@@ -86,6 +86,7 @@ import {
   hasHelpFlag,
   printUsage,
 } from '@broject/core'
+import type { ExitCode } from '@broject/core'
 import {
   checkHistory,
   evaluateExitGate,
@@ -144,7 +145,7 @@ import { rigNext, type RigNext } from './rig-next.ts'
 import { isOrchestratorSession } from './watch-pulse.ts'
 export { LIVE_MARKER_MS, worktreeClaim, worktreeClaimInfo, worktreeIdleMs } from './work.ts'
 
-function usage(exitCode = 2): never {
+function usage(exitCode: ExitCode = 2): never {
   printUsage(
     'Usage: bro drive [--once] [--every [SEC]] [--no-merge] [--connector <name>] [--json]\n' +
       '       bro drive install [--every N] [--print]\n' +

@@ -92,6 +92,7 @@ import {
   hasHelpFlag,
   printUsage,
 } from '@broject/core'
+import type { ExitCode } from '@broject/core'
 import {
   ACT_STATE_TTL_MS,
   checkHistory,
@@ -246,7 +247,7 @@ interface Ctx {
 /** Clickable PR ref for this repo — user-facing lines never print bare #N. */
 const prRef = (ctx: Ctx, pr: number): string => ctx.rev.prLink(ctx.repo, pr)
 
-function usage(exitCode = 2): never {
+function usage(exitCode: ExitCode = 2): never {
   printUsage(`Usage: bro loop [--max N] [--dry-run] [--json] [--label a,b] [--stack NAME]
   --agent '<cmd {promptFile}>'   agent template (config: loop.agent) —
                                 a value naming a configured providers.<name>

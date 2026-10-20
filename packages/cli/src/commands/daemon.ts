@@ -34,6 +34,7 @@ import {
   procStat,
   staleLock,
 } from '@broject/core'
+import type { ExitCode } from '@broject/core'
 import { flag } from './args.ts'
 import { driveLockPath, runDriveCommand } from './drive.ts'
 import { driveSection, MAX_INTERVAL_SEC, MIN_INTERVAL_SEC } from './drive-config.ts'
@@ -45,7 +46,7 @@ import { loadBroConfig } from '../plugins.ts'
 
 const errText = (e: unknown): string => (e instanceof Error ? e.message : String(e))
 
-function usage(exitCode = 2): never {
+function usage(exitCode: ExitCode = 2): never {
   printUsage(
     'Usage: bro daemon <up|status|down|run> [--every SEC]\n' +
       '  up      spawn the detached supervisor (orchestrator sessions only)\n' +

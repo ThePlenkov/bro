@@ -6,7 +6,7 @@
  * (subcommand + skill + config section); see plugins.ts for the list
  * and `bro plugins` for the live registry.
  */
-import { EXIT, printUsage, warnDeprecated, type BroPlugin } from '@broject/core'
+import { EXIT, printUsage, warnDeprecated, type BroPlugin, type ExitCode } from '@broject/core'
 import { journalCommand } from './commands/hooks.ts'
 import { registerTelegramSink } from './commands/sinks-telegram.ts'
 import { otelSpan, setAmbient } from '@broject/providers'
@@ -106,10 +106,10 @@ async function dispatchGroup(cmd: string, rest: string[]): Promise<boolean> {
   }
   // bare `bro <group>` and `--help` ask for the member table (stdout,
   // 0); anything else is an unknown member — the canonical usage error
-  printUsage(groupTable(cmd, group), rest.length === 0 || rest[0] === '-h' || rest[0] === '--help' ? EXIT.ok : EXIT.usage)
+  return printUsage(groupTable(cmd, group), rest.length === 0 || rest[0] === '-h' || rest[0] === '--help' ? EXIT.ok : EXIT.usage)
 }
 
-function usage(exitCode = 1): never {
+function usage(exitCode: ExitCode = 1): never {
   const groups = pluginGroups()
   const groupRows = GROUP_META.filter(([g]) =>
     groups.get(g)?.some((p) => !p.hidden)
@@ -149,7 +149,7 @@ async function main(): Promise<void> {
   // one spelling for explicit help whichever side of the command it sits on
   let argv = process.argv.slice(2)
   if (argv[0] === 'help') {
-    argv = argv.length === 1 ? ['--help'] : [argv[1]!, '--help', ...argv.slice(2)]
+    argv = argv.length === 1 ? ['--help'] : [...argv.slice(1), '--help']
   }
   const [cmd, ...rest] = argv
 

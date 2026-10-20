@@ -12,6 +12,7 @@ import {
   bdAt,
   facade,
   gitCommonDir,
+  hasHelpFlag,
   loadConfig,
   printUsage,
   taskStore,
@@ -771,6 +772,9 @@ function cmdWait(dir: string, args: string[]): void {
 export function runMeshCommand(argv: string[]): void {
   const dir = process.cwd()
   const [verb, ...rest] = argv
+  if (verb !== undefined && hasHelpFlag(rest)) {
+    printUsage(USAGE, 0)
+  }
   switch (verb) {
     case 'me':
       return cmdMe(dir)

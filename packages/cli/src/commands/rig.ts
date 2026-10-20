@@ -44,6 +44,7 @@ import {
   withFileLock,
   worktreeGitDir,
 } from '@broject/core'
+import type { ExitCode } from '@broject/core'
 import { flag, positionals } from './args.ts'
 import { MIN_INTERVAL_SEC, MAX_INTERVAL_SEC } from './drive-config.ts'
 import {
@@ -436,7 +437,7 @@ function printStatus(s: RigStatus): void {
 
 // --- dispatch -----------------------------------------------------------------
 
-function usage(exitCode = 2): never {
+function usage(exitCode: ExitCode = 2): never {
   printUsage(`usage:
   bro rig sync [--repo <dir>]       fetch → merge --ff-only @{upstream} → refresh
   bro rig status [--repo <dir>] [--json]

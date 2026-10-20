@@ -45,6 +45,7 @@ import {
   getTasks,
   isOwnClaim,
   loadConfig,
+  hasHelpFlag,
   printUsage,
   sessionTaskClaims,
   specStore,
@@ -57,6 +58,7 @@ import {
   type TaskStore,
   type TaskStoreAsync,
 } from '@broject/core'
+import type { ExitCode } from '@broject/core'
 import { specDirAbs, validBeadId } from '../spec-connectors.ts'
 import { driftEnv, driftRow, specLinkPath, SPEC_LINK } from '../spec-drift.ts'
 import { flag, positionals } from './args.ts'
@@ -219,7 +221,7 @@ export const sddConnector: Connector = {
 
 // --- commands -----------------------------------------------------------------
 
-function usage(exitCode = 2): never {
+function usage(exitCode: ExitCode = 2): never {
   printUsage(`Usage: bro spec <command> [args…]
 
 Commands:
@@ -545,11 +547,13 @@ const KNOWN_FLAGS: Record<string, Set<string>> = {
 
 export function runSpecCommand(argv: string[]): void {
   const dir = process.cwd()
-  const { mode } = loadConfig(dir).sdd
   const [sub, ...rest] = argv
-  if (sub === '--help' || sub === '-h') {
+  // help before config load — a malformed config's stderr warning must
+  // never pollute a help request's clean stdout+0 contract
+  if (sub === '--help' || sub === '-h' || hasHelpFlag(rest)) {
     usage(0)
   }
+  const { mode } = loadConfig(dir).sdd
   // own-key lookup — an inherited key like `toString` is not a
   // subcommand; bare `bro spec` dispatches to check
   const key = sub ?? 'check'

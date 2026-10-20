@@ -194,6 +194,7 @@ import {
 } from '../planes/stream.ts'
 import { providerConfig, providerProxy, type ProviderConfig } from './serve-provider.ts'
 import { conductorConfig, conductorProxy, type ConductorConfig } from './serve-conductor.ts'
+import type { ExitCode } from '@broject/core'
 import type { AcpTerminals, TerminalFollow } from '@broject/providers'
 import { readBeads } from './status.ts'
 import { collectSnapshot } from './watch.ts'
@@ -1893,7 +1894,7 @@ function realDeps(
   }
 }
 
-function usage(exitCode = 2): never {
+function usage(exitCode: ExitCode = 2): never {
   printUsage(`usage:
   bro serve [--port <n>]
   bro serve ensure --port <n>

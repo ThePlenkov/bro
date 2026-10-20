@@ -50,6 +50,24 @@ describe('help → stdout + 0', () => {
     ['providers', '--help'],
     ['check', '--help'],
     ['convoy', 'wait', '--help'],
+    ['doctor', '--help'],
+    // nested help — the flag after a subcommand shows help, it never
+    // runs the command (worktree creation, sync cascade, span export,
+    // request delivery are all side effects, not usage text)
+    ['help', 'convoy', 'wait'],
+    ['help', 'review', 'act'],
+    ['help', 'doctor'],
+    ['work', 'enter', 'slug', '--help'],
+    ['stack', 'sync', '--help'],
+    ['trace', 'export', '--help'],
+    ['request', 'rig', 'title', '--help'],
+    ['act', 'wait', '--help'],
+    ['spec', 'check', '--help'],
+    ['plan', 'validate', '--help'],
+    ['mesh', 'peers', '--help'],
+    ['providers', 'models', '--help'],
+    ['drill', 'down', '--help'],
+    ['retrospect', 'list', '--help'],
   ]) {
     test(`bro ${args.join(' ')}`, () => {
       const r = cli(args)

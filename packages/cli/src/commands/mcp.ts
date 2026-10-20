@@ -9,12 +9,13 @@
  *  every read plane (spawning the server IS the consent), `[]` = none,
  *  a list = allowlist. Backend selection stays on `connectors.*`. */
 import { hasHelpFlag, planes, printUsage } from '@broject/core'
+import type { ExitCode } from '@broject/core'
 import { catalogTools, serveMcp } from '@broject/mcp'
 import '../planes/index.ts'
 import { loadBroConfig } from '../plugins.ts'
 import { VERSION } from '../version.ts'
 
-function usage(exitCode = 2): never {
+function usage(exitCode: ExitCode = 2): never {
   printUsage(`usage:
   bro mcp                 stdio MCP server over the read planes
                           (register it in any MCP-capable client:

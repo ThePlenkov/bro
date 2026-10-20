@@ -21,7 +21,7 @@ import { randomBytes } from 'node:crypto'
 import { mkdirSync, rmSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { stringify } from 'smol-toml'
-import { checkBeads, hasHelpFlag, printUsage, taskStore } from '@broject/core'
+import { checkBeads, hasHelpFlag, printUsage, taskStore, type ExitCode } from '@broject/core'
 import {
   beadsDir,
   claimStep,
@@ -49,7 +49,7 @@ import { flag, flagAll, positionals } from './args.ts'
 import { publishGate, runConvoyRun, RUN_KNOWN_FLAGS } from './convoy-run.ts'
 import { MAX_INTERVAL_SEC, MIN_INTERVAL_SEC } from './drive-config.ts'
 
-function usage(exitCode = 2): never {
+function usage(exitCode: ExitCode = 2): never {
   printUsage(`Usage: bro convoy <command> [args…]
 
 Commands:

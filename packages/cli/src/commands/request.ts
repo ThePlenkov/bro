@@ -8,7 +8,7 @@
  * is the plain own-store post — `bro mesh request` verbatim.
  */
 import { basename } from 'node:path'
-import { gitCommonDir, printUsage } from '@broject/core'
+import { gitCommonDir, hasHelpFlag, printUsage } from '@broject/core'
 import {
   deliverGithub,
   deliverRequest,
@@ -181,7 +181,7 @@ function checkoutRequest(input: { dir: string; t: ResolvedTarget; titleText: str
 export function runRequestCommand(argv: string[]): void {
   const dir = process.cwd()
   const [target, titleText, ...rest] = argv
-  if (target === '--help' || target === '-h') {
+  if (hasHelpFlag(argv)) {
     printUsage(USAGE, 0)
   }
   const titleBad = titleText === undefined || titleText.startsWith('--')

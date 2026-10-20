@@ -222,7 +222,8 @@ function parseSetupArgs(argv: string[]): SetupArgs {
   let pack: SetupArgs['pack'] = false
   if (kIdx >= 0) {
     const kVal = argv[kIdx + 1]
-    pack = kVal !== undefined && !kVal.startsWith('--') ? kVal : ''
+    // `--pack off` disables pack install — same false sentinel as bare
+    pack = kVal === 'off' ? false : kVal !== undefined && !kVal.startsWith('--') ? kVal : ''
   }
   return {
     beads: argv.includes('--beads'),

@@ -17,7 +17,7 @@
  */
 import { execFile as execFileCb } from 'node:child_process'
 import { promisify } from 'node:util'
-import { loadConfig, printUsage } from '@broject/core'
+import { hasHelpFlag, loadConfig, printUsage } from '@broject/core'
 import type { ProviderEntry } from '@broject/core'
 import type { AcpSeam } from '@broject/providers'
 
@@ -112,8 +112,8 @@ async function providerModels(
 
 export async function runProvidersCommand(argv: string[], opts: Opts = {}): Promise<void> {
   const [verb, ...names] = argv
-  if (verb !== 'models') {
-    printUsage(USAGE, verb === undefined || verb === '--help' || verb === '-h' ? 0 : 2)
+  if (verb !== 'models' || hasHelpFlag(names)) {
+    printUsage(USAGE, verb === undefined || hasHelpFlag(argv) ? 0 : 2)
   }
   const providers = opts.providers ?? loadConfig(process.cwd()).providers ?? {}
   const wanted =

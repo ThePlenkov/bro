@@ -28,6 +28,7 @@ import {
   gitBranchLog,
   gitCommonDir,
   gitTry,
+  hasHelpFlag,
   mergeQueueHost,
   printUsage,
   prOwnership,
@@ -39,6 +40,7 @@ import {
   type ReviewThread,
   type TaskRow,
 } from '@broject/core'
+import type { ExitCode } from '@broject/core'
 import { loadBroConfig } from '../plugins.ts'
 import { flag } from './args.ts'
 import { SELF_ENTRY } from './self-entry.ts'
@@ -76,7 +78,7 @@ import {
 import { coveredBeadIds } from '@broject/loop'
 import { githubPrWake } from '@broject/github'
 
-function usage(exitCode = 2): never {
+function usage(exitCode: ExitCode = 2): never {
   printUsage(`Usage: bro act <command> [args…]
 
 Commands:
@@ -1605,6 +1607,9 @@ export async function runActCommand(argv: string[]): Promise<void> {
   if (!handler) {
     console.error(`unknown command: ${cmd}`)
     usage()
+  }
+  if (hasHelpFlag(rest)) {
+    usage(0)
   }
   await handler(rest)
 }

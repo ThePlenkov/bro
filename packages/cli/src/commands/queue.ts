@@ -10,13 +10,14 @@
  *   bro queue rm <id>               dequeue (bead stays open)
  */
 import { printUsage } from '@broject/core'
+import type { ExitCode } from '@broject/core'
 import { checkBeads, queueAdd, queueBump, queueDrill, queueDrop, queueItems, queueScope } from '@broject/drill'
 import { flag, positionals } from './args.ts'
 
 const VALUE_FLAGS = new Set(['--under', '--to', '--description', '--priority'])
 const positionalsOf = (argv: string[]): string[] => positionals(argv, VALUE_FLAGS)
 
-function usage(exitCode = 2): never {
+function usage(exitCode: ExitCode = 2): never {
   printUsage(`Usage: bro queue <command> [args…]
 
 Commands:

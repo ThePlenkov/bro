@@ -23,6 +23,7 @@ import {
   type PrLabelOp,
   type ReviewFacade,
 } from '@broject/core'
+import type { ExitCode } from '@broject/core'
 import { loadBroConfig } from '../plugins.ts'
 import {
   applyCollectLabel,
@@ -80,7 +81,7 @@ function readOption(argv: string[], index: number): string | null {
   return value
 }
 
-function usage(exitCode = 2): never {
+function usage(exitCode: ExitCode = 2): never {
   printUsage(`Usage: bro debt <command> [args…]
 
 Commands:

@@ -13,7 +13,8 @@
  */
 import { createInterface } from 'node:readline/promises'
 import { relative, resolve } from 'node:path'
-import { gitTry, loadConfig, printUsage } from '@broject/core'
+import { gitTry, hasHelpFlag, loadConfig, printUsage } from '@broject/core'
+import type { ExitCode } from '@broject/core'
 import {
   checkBeads,
   childrenOf,
@@ -37,7 +38,7 @@ import {
 } from '@broject/drill'
 import { flag, flagAll, positionals } from './args.ts'
 
-function usage(exitCode = 2): never {
+function usage(exitCode: ExitCode = 2): never {
   printUsage(`Usage: bro drill <command> [args…]
 
 Commands:
@@ -392,6 +393,9 @@ export async function runDrillCommand(argv: string[]): Promise<void> {
   // error even where beads isn't initialized.
   if (!Object.hasOwn(KNOWN_FLAGS, sub)) {
     usage()
+  }
+  if (hasHelpFlag(rest)) {
+    usage(0)
   }
   rejectUnknownFlags(sub, rest)
   // these subs take no positional args — a stray one is a typo, not input

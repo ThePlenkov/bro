@@ -13,7 +13,7 @@
  *   capture [--source drill|retro|act|mol|all] [--mol ID] [--dry-run] [--json]
  *   probe <question> [--lesson "…" --on … --match-… …] [--session ID] [--json]
  */
-import { checkBeads, hasHelpFlag, printUsage } from '@broject/core'
+import { checkBeads, hasHelpFlag, printUsage, type ExitCode } from '@broject/core'
 import {
   CAPTURE_SOURCES,
   captureLessons,
@@ -43,7 +43,7 @@ import type {
 } from '@broject/learn'
 import { flag, flagAll, positionals } from './args.ts'
 
-function usage(exitCode = 2): never {
+function usage(exitCode: ExitCode = 2): never {
   printUsage(`Usage: bro learn <command> [args…]
 
 Commands:

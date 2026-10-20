@@ -23,6 +23,7 @@ import { delimiter, dirname, isAbsolute, join, resolve, sep } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { X_OK } from 'node:constants'
 import { hasHelpFlag, printUsage } from '@broject/core'
+import type { ExitCode } from '@broject/core'
 import { flag } from './args.ts'
 import { CHECK_EXECUTORS, checkSection, type CheckConfig } from './check-config.ts'
 import { loadBroConfig } from '../plugins.ts'
@@ -430,7 +431,7 @@ export function renderText(report: CheckReport): string[] {
 
 // --- command -------------------------------------------------------------------
 
-function usage(exitCode = 2): never {
+function usage(exitCode: ExitCode = 2): never {
   printUsage(`Usage: bro check [options]
 
 Run the repo's sverka workflow and report per-step stats + findings.
