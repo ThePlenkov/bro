@@ -161,7 +161,7 @@ function scanGithubPeer(peer: MeshPeer, out: PeerRecord[], errors: string[]): vo
       peerRig: peer.rig,
       transport: 'github',
       envelope: r.envelope,
-      beadId: r.issueHtmlUrl,
+      beadId: r.issue,
       author: r.author,
     })
   }
@@ -220,14 +220,14 @@ function scanOwnGithub(
     }
     const bound = peers.find((p) => p.login !== undefined && p.login === r.author)
     if (bound !== undefined) {
-      out.push({ peer: bound.alias, peerRig: bound.rig, transport: 'github', envelope: r.envelope, beadId: r.issueHtmlUrl, author: r.author })
+      out.push({ peer: bound.alias, peerRig: bound.rig, transport: 'github', envelope: r.envelope, beadId: r.issue, author: r.author })
     } else {
       out.push({
         peer: 'github',
         peerRig: r.author === self ? selfRig : r.envelope.from,
         transport: 'github',
         envelope: r.envelope,
-        beadId: r.issueHtmlUrl,
+        beadId: r.issue,
         author: r.author,
         unbound: r.author === self ? undefined : true,
       })

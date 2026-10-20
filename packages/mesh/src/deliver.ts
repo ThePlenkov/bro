@@ -59,14 +59,14 @@ export function deliverGithub(
   input: RemoteDeliverInput,
 ): RemoteDeliverResult {
   const posted = postRequest(peer.remote, { ...input, to: peer.rig })
-  if (posted.error !== undefined || posted.issueHtmlUrl === undefined) {
+  if (posted.error !== undefined || posted.issue === undefined) {
     return { error: posted.error ?? 'issue posted but returned no url' }
   }
-  const m = mirror(dir, { ...input, to: peer.rig }, posted.issueHtmlUrl)
+  const m = mirror(dir, { ...input, to: peer.rig }, posted.issue)
   if (m.error !== undefined) {
-    return { error: `issue ${posted.issueHtmlUrl} posted but the mirror bead failed — ${m.error}` }
+    return { error: `issue ${posted.issue} posted but the mirror bead failed — ${m.error}` }
   }
-  return { thread: posted.issueHtmlUrl, mirror: m.id }
+  return { thread: posted.issue, mirror: m.id }
 }
 
 /** wasteland: `wl post` onto the commons board (fork-and-propose),

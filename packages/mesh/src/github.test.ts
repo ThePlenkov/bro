@@ -250,20 +250,20 @@ describe('github e2e (gated)', () => {
       title: `mesh e2e ${Date.now()}`,
       body: 'e2e scratch — close me',
     })
-    assert.ok(posted.issueHtmlUrl, posted.error)
-    const issueHtmlUrl = posted.issueHtmlUrl
-    const n = Number(issueNumber(issueHtmlUrl))
+    assert.ok(posted.issue, posted.error)
+    const issue = posted.issue
+    const n = Number(issueNumber(issue))
     const read = () =>
-      issueComments(repo, { number: n, html_url: issueHtmlUrl }).records.map((r) => r.envelope)
+      issueComments(repo, { number: n }).records.map((r) => r.envelope)
 
     // the request record landed as the first comment
     assert.deepEqual(read().map((e) => e.kind), ['request'])
 
     for (const kind of ['claim', 'result', 'accept'] as const) {
-      const r = postComment(issueHtmlUrl, {
-        ...env({ id: `${issueHtmlUrl}#${kind}`, kind, thread: issueHtmlUrl }),
+      const r = postComment(issue, {
+        ...env({ id: `${issue}#${kind}`, kind, thread: issue }),
       })
-      assert.ok(r.commentHtmlUrl, r.error)
+      assert.equal(r.error, undefined)
     }
     assert.deepEqual(read().map((e) => e.kind), ['request', 'claim', 'result', 'accept'])
   })

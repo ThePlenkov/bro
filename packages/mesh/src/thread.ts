@@ -237,7 +237,7 @@ export function meshThread(
       ) {
         continue
       }
-      const cs = issueComments(ri, { number: Number(n), html_url: t })
+      const cs = issueComments(ri, { number: Number(n) })
       for (const e of cs.errors) {
         state.errors.push(`self: ${e}`)
       }

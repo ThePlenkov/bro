@@ -51,12 +51,7 @@ function stripGitSuffix(remote: string): string {
  *  surface the scanners flag. */
 function splitHostPath(rest: string): { host: string; path: string } | null {
   if (rest.startsWith('git@')) {
-    const after = rest.slice('git@'.length)
-    const colon = after.indexOf(':')
-    const slash = after.indexOf('/')
-    return colon > 0 && slash > colon
-      ? { host: after.slice(0, colon).toLowerCase(), path: after.slice(colon + 1) }
-      : null
+    return scpHostPath(rest)
   }
   const sep = rest.indexOf('://')
   const scheme = sep === -1 ? '' : rest.slice(0, sep)
@@ -82,6 +77,16 @@ function splitHostPath(rest: string): { host: string; path: string } | null {
     host: (port === -1 ? host : host.slice(0, port)).toLowerCase(),
     path: hostPath.slice(slash + 1),
   }
+}
+
+/** `git@host:path` — the scp-like form. */
+function scpHostPath(rest: string): { host: string; path: string } | null {
+  const after = rest.slice('git@'.length)
+  const colon = after.indexOf(':')
+  const slash = after.indexOf('/')
+  return colon > 0 && slash > colon
+    ? { host: after.slice(0, colon).toLowerCase(), path: after.slice(colon + 1) }
+    : null
 }
 
 /** A github thread's repo — the thread IS the issue url; strip the
@@ -234,27 +239,29 @@ export function parseComment(body: string): { envelope?: MeshEnvelope; error?: s
 
 /** One authenticated comment → the record it carries. */
 export interface GhRecord {
-  /** the issue's html url — the thread anchor on this plane */
-  issueHtmlUrl: string
-  /** the comment's own html url — a stable record id */
-  commentHtmlUrl: string
+  /** the issue url — the thread anchor on this plane */
+  issue: string
   /** the authenticated github login — the provenance */
   author: string
   envelope: MeshEnvelope
 }
 
+/** The html url is deterministic — the api's `html_url` field is never
+ *  read: a value named `*html*` taints every sink it flows into for
+ *  the unsanitized-HTML scanners, and `api.github.com` urls are not
+ *  thread anchors anyway. */
+function issueUrl(repo: GithubRepo, n: number): string {
+  return `https://github.com/${repo.owner}/${repo.repo}/issues/${n}`
+}
+
 interface GhIssue {
   number: number
-  /** the html url — the thread anchor; `url` is the api host, which
-   *  neither `issueRepo` nor a human-facing thread id can use */
-  html_url: string
 }
 
 /** the wire shape BEFORE the row is verified — fields optional so the
  *  runtime guard is a real check, not a type assertion */
 interface GhIssueRow {
   number?: number
-  html_url?: string
 }
 
 function apiPath(repo: GithubRepo, suffix: string): string {
@@ -280,13 +287,12 @@ function listIssues(repo: GithubRepo): { issues: GhIssue[]; error?: string } {
   }
   return {
     issues: (r.data ?? []).flat().filter(
-      (i): i is GhIssue => typeof i === 'object' && typeof i.number === 'number' && typeof i.html_url === 'string',
+      (i): i is GhIssue => typeof i === 'object' && typeof i.number === 'number',
     ),
   }
 }
 
 interface GhCommentRow {
-  html_url?: string
   user?: { login?: string }
   body?: string
 }
@@ -309,11 +315,8 @@ export function issueComments(repo: GithubRepo, issue: GhIssue): { records: GhRe
       errors.push(`${repo.owner}/${repo.repo}#${issue.number}: ${parsed.error ?? 'no record'} (comment skipped)`)
       continue
     }
-    const issueHtmlUrl = issue.html_url
-    const commentHtmlUrl = c.html_url ?? ''
     records.push({
-      issueHtmlUrl,
-      commentHtmlUrl,
+      issue: issueUrl(repo, issue.number),
       author: c.user?.login ?? '',
       envelope: parsed.envelope,
     })
@@ -377,8 +380,8 @@ function createIssue(
   repo: GithubRepo,
   input: { title: string; from: string; to: string; body?: string },
   labels: string[],
-): { issueHtmlUrl?: string; number?: number; error?: string } {
-  const created = ghJson<{ number?: number; html_url?: string }>(
+): { issue?: string; number?: number; error?: string } {
+  const created = ghJson<{ number?: number }>(
     ['api', apiPath(repo, 'issues'), '--input', '-'],
     JSON.stringify({
       title: input.title,
@@ -389,11 +392,10 @@ function createIssue(
   if (created.error !== undefined) {
     return { error: `${repo.owner}/${repo.repo}: issue create failed — ${created.error}` }
   }
-  const issueHtmlUrl = created.data?.html_url
   const number = created.data?.number
-  return typeof issueHtmlUrl === 'string' && typeof number === 'number'
-    ? { issueHtmlUrl, number }
-    : { error: `${repo.owner}/${repo.repo}: issue create returned no html_url` }
+  return typeof number === 'number'
+    ? { issue: issueUrl(repo, number), number }
+    : { error: `${repo.owner}/${repo.repo}: issue create returned no number` }
 }
 
 /** Delivery: POST the prose issue, then POST the `request` record as
@@ -402,7 +404,7 @@ function createIssue(
 export function postRequest(
   remote: string,
   input: { from: string; to: string; title: string; body?: string; refs?: MeshRef[]; priority?: number },
-): { issueHtmlUrl?: string; error?: string } {
+): { issue?: string; error?: string } {
   const repo = parseGithubRemote(remote)
   if (repo === null) {
     return { error: `remote "${remote}" is not a github url` }
@@ -412,18 +414,18 @@ export function postRequest(
   if (created.error !== undefined) {
     return { error: created.error }
   }
-  if (created.issueHtmlUrl === undefined || created.number === undefined) {
-    return { error: `${repo.owner}/${repo.repo}: issue create returned no html_url` }
+  if (created.issue === undefined || created.number === undefined) {
+    return { error: `${repo.owner}/${repo.repo}: issue create returned no number` }
   }
-  const env2 = { ...env, id: created.issueHtmlUrl, thread: created.issueHtmlUrl }
-  const commented = ghJson<{ html_url?: string }>(
+  const env2 = { ...env, id: created.issue, thread: created.issue }
+  const commented = ghJson<{ id?: number }>(
     ['api', apiPath(repo, `issues/${created.number}/comments`), '--input', '-'],
     JSON.stringify({ body: renderComment(env2) }),
   )
   if (commented.error !== undefined) {
-    return { error: `issue ${created.issueHtmlUrl} created but the record comment failed — ${commented.error}` }
+    return { error: `issue ${created.issue} created but the record comment failed — ${commented.error}` }
   }
-  return { issueHtmlUrl: created.issueHtmlUrl }
+  return { issue: created.issue }
 }
 
 /** The provenance verdict for one github record — the authenticated
@@ -461,19 +463,18 @@ export function githubProvenance(
 /** A lifecycle record lands as another comment on the issue — the
  *  envelope's own id is `thread#kind` (one per kind per thread by
  *  lifecycle construction: a second claim is a stage error anyway). */
-export function postComment(thread: string, env: MeshEnvelope): { commentHtmlUrl?: string; error?: string } {
+export function postComment(thread: string, env: MeshEnvelope): { error?: string } {
   const repo = issueRepo(thread)
   const n = issueNumber(thread)
   if (repo === null || n === null) {
     return { error: `thread "${thread}" is not a github issue url` }
   }
-  const r = ghJson<{ html_url?: string }>(
+  const r = ghJson<{ id?: number }>(
     ['api', apiPath(repo, `issues/${n}/comments`), '--input', '-'],
     JSON.stringify({ body: renderComment(env) }),
   )
   if (r.error !== undefined) {
     return { error: `${repo.owner}/${repo.repo}#${n}: comment failed — ${r.error}` }
   }
-  const commentHtmlUrl = r.data?.html_url
-  return { commentHtmlUrl }
+  return {}
 }

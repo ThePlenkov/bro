@@ -109,11 +109,11 @@ export function projectWanted(row: WantedRow, selfRig: string | undefined): { en
   if (poster === null) {
     return { envelopes: [], errors: [`${row.id}: posted_by "${row.posted_by ?? ''}" is not a rig handle`] }
   }
-  const errors: string[] = []
   const claimer = handleToRig(row.claimed_by)
-  if (row.claimed_by !== undefined && row.claimed_by !== '' && claimer === null) {
-    errors.push(`${row.id}: claimed_by "${row.claimed_by}" is not a rig handle`)
-  }
+  const errors =
+    row.claimed_by !== undefined && row.claimed_by !== '' && claimer === null
+      ? [`${row.id}: claimed_by "${row.claimed_by}" is not a rig handle`]
+      : []
   const base = {
     v: MESH_VERSION,
     thread: row.id,
@@ -133,12 +133,23 @@ export function projectWanted(row: WantedRow, selfRig: string | undefined): { en
       to: open && selfRig !== undefined ? selfRig : poster,
       terms: priority === undefined ? {} : { priority },
     },
+    ...projectClaim(row, base, poster, claimer),
+    ...projectCompletion(row, base, poster, claimer),
   ]
-  if (claimer !== null) {
-    envelopes.push({ ...base, id: `${row.id}#claim`, kind: 'claim', from: claimer, to: poster, terms: {} })
-  }
-  envelopes.push(...projectCompletion(row, base, poster, claimer))
   return { envelopes, errors }
+}
+
+type BoardBase = Pick<MeshEnvelope, 'v' | 'thread' | 'title' | 'body' | 'refs' | 'evidence'>
+
+function projectClaim(
+  row: WantedRow,
+  base: BoardBase,
+  poster: string,
+  claimer: string | null,
+): MeshEnvelope[] {
+  return claimer === null
+    ? []
+    : [{ ...base, id: `${row.id}#claim`, kind: 'claim' as const, from: claimer, to: poster, terms: {} }]
 }
 
 /** The post-claim rows: a completion carrying evidence is the result
@@ -146,33 +157,44 @@ export function projectWanted(row: WantedRow, selfRig: string | undefined): { en
  *  completed board status with no verdict row reads as the accept. */
 function projectCompletion(
   row: WantedRow,
-  base: Pick<MeshEnvelope, 'v' | 'thread' | 'title' | 'body' | 'refs' | 'evidence'>,
+  base: BoardBase,
   poster: string,
   claimer: string | null,
 ): MeshEnvelope[] {
-  const envelopes: MeshEnvelope[] = []
   const evidence = (row.completions ?? [])
     .flatMap((c) => (typeof c.evidence === 'string' && c.evidence !== '' ? [c.evidence] : []))
     .at(0)
-  if (evidence !== undefined && claimer !== null) {
-    envelopes.push({
-      ...base,
-      id: `${row.id}#result`,
-      kind: 'result',
-      from: claimer,
-      to: poster,
-      terms: {},
-      evidence: [{ kind: 'url', ref: evidence }],
-    })
-  }
+  const result =
+    evidence !== undefined && claimer !== null
+      ? [{
+          ...base,
+          id: `${row.id}#result`,
+          kind: 'result' as const,
+          from: claimer,
+          to: poster,
+          terms: {},
+          evidence: [{ kind: 'url' as const, ref: evidence }],
+        }]
+      : []
+  return [...result, ...projectVerdict(row, base, poster, claimer)]
+}
+
+/** The verdict row: an accepted/rejected completion is it; a
+ *  `completed` status with none still reads as the accept. */
+function projectVerdict(
+  row: WantedRow,
+  base: BoardBase,
+  poster: string,
+  claimer: string | null,
+): MeshEnvelope[] {
   const verdict = (row.completions ?? []).find((c) => c.state === 'accepted' || c.state === 'rejected')
   if (verdict !== undefined) {
     const kind = verdict.state === 'accepted' ? 'accept' : 'reject'
-    envelopes.push({ ...base, id: `${row.id}#${kind}`, kind, from: poster, to: claimer ?? poster, terms: {} })
-  } else if (row.status === 'completed' && claimer !== null) {
-    envelopes.push({ ...base, id: `${row.id}#accept`, kind: 'accept', from: poster, to: claimer, terms: {} })
+    return [{ ...base, id: `${row.id}#${kind}`, kind, from: poster, to: claimer ?? poster, terms: {} }]
   }
-  return envelopes
+  return row.status === 'completed' && claimer !== null
+    ? [{ ...base, id: `${row.id}#accept`, kind: 'accept' as const, from: poster, to: claimer, terms: {} }]
+    : []
 }
 
 function wlJson<T>(args: string[]): { data?: T; error?: string } {
@@ -193,14 +215,17 @@ export function postWanted(
   remote: string,
   input: { title: string; body?: string; priority?: number },
 ): { id?: string; error?: string } {
-  const args = [...remoteArgs(remote), 'post', '--title', input.title]
-  if (input.body !== undefined && input.body !== '') {
-    args.push('--description', input.body)
-  }
-  if (input.priority !== undefined) {
-    args.push('--priority', String(Math.max(0, Math.min(4, Math.trunc(input.priority)))))
-  }
-  args.push('--json')
+  const args = [
+    ...remoteArgs(remote),
+    'post',
+    '--title',
+    input.title,
+    ...(input.body !== undefined && input.body !== '' ? ['--description', input.body] : []),
+    ...(input.priority === undefined
+      ? []
+      : ['--priority', String(Math.max(0, Math.min(4, Math.trunc(input.priority))))]),
+    '--json',
+  ]
   const r = wlJson<{ id?: string }>(args)
   if (r.error !== undefined) {
     return { error: `wl post failed — ${r.error}` }
