@@ -38,8 +38,7 @@ code nobody edits by hand.
   interactive session and bro's batch lane must not execute the same
   unit of work. bro's occupancy plane already skips session-owned
   worktrees; a review bot pushing into an occupied branch is the same
-  conflict from a third lane, and a shared account quota that one lane
-  drains is the same conflict in the budget.
+  conflict from a third lane.
 - `packages/core` is vendor-neutral: it holds contracts, registries, and
   generic mechanics only (`agents.<kind>` knob bags, `sessionPlanes`,
   `connectors.*` seam). An import, path, identifier, or hard-coded state
