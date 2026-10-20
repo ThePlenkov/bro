@@ -567,6 +567,24 @@ export function readBeads(db: string): Array<Record<string, unknown>> {
   return (readJsonRetry(db) as { rows: Array<Record<string, unknown>> }).rows
 }
 
+/** A second git checkout beside `main` — git-initialized so
+ *  gitCommonDir resolves, origin-derived rig `mesh://acme/<name>`, own
+ *  beads store (`<dir>/.beads/beads.json` — the fake bd's per-checkout
+ *  discovery picks it over FAKE_BD_DB). The cross-repo mesh/request
+ *  fixtures' target side. */
+export function initTarget(root: string, name: string): { dir: string; db: string } {
+  const dir = join(root, name)
+  git(['init', '-q', '-b', 'main', dir], root)
+  git(['config', 'user.email', 't@t'], dir)
+  git(['config', 'user.name', 't'], dir)
+  git(['remote', 'add', 'origin', `https://github.com/acme/${name}.git`], dir)
+  git(['commit', '-qm', 'init', '--allow-empty'], dir)
+  const db = join(dir, '.beads', 'beads.json')
+  mkdirSync(join(dir, '.beads'), { recursive: true })
+  writeBeads(db, [])
+  return { dir, db }
+}
+
 export function bead(db: string, id: string): Record<string, unknown> | undefined {
   return readBeads(db).find((r) => r.id === id)
 }

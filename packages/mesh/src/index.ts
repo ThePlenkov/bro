@@ -19,7 +19,7 @@ export {
 export type { BeadLike, MeshEnvelope, MeshKind, MeshRef, MeshTerms } from './envelope.ts'
 export { localCheckout, parsePeer, transportOf, TRANSPORTS } from './peers.ts'
 export type { MeshPeer, MeshTransport } from './peers.ts'
-export { issueLabels, meshIssues, replicaDir, syncReplica } from './pull.ts'
+export { issueLabels, meshIssues, replicaAgeMs, replicaDir, shippedIssues, syncReplica } from './pull.ts'
 export type { IssueRow } from './pull.ts'
 export { meshInbox, meshScan } from './inbox.ts'
 export type { InboundRequest, InboxResult, PeerRecord, ScanResult } from './inbox.ts'
@@ -27,6 +27,8 @@ export { postEnvelope, storeFor, wireDep } from './post.ts'
 export type { PostInput, PostResult } from './post.ts'
 export { meshThread } from './thread.ts'
 export type { ThreadStage, ThreadState } from './thread.ts'
+export { parseExternalRef, readDepState, resolveWaitPlane } from './wait.ts'
+export type { DepRead, ExternalRef, WaitPlane } from './wait.ts'
 export {
   deliverRequest,
   ensurePeerBinding,

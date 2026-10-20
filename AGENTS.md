@@ -92,7 +92,12 @@ Developing bro itself: see CONTRIBUTING.md.
   edited in place: `bro request <repo> <title> --for <bead>` drops
   the request bead and pins an `external:<rig>:<id>` edge on mine —
   a marker, not a gate; `bro mesh wait <id>` point-checks the
-  answer.
+  answer between turns, and `bro wait external:<rig>:<id>` is the
+  bounded watcher when the wait must block — armed like `act wait`,
+  never a foreground idle. The dep edge in bd is the truth that
+  frees the work; the watcher is a convenience, and its exit code
+  is the verdict (0 free · 1 unreadable · 2 unresolved ·
+  3 actionable · 4 timeout).
 
 ## Convoy fan-out — detach + pins
 

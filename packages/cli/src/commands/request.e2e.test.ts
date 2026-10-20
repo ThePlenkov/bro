@@ -10,6 +10,7 @@ import { join } from 'node:path'
 import {
   initRepo,
   inside,
+  initTarget,
   installFakeBd,
   readBeads,
   runCli,
@@ -20,21 +21,6 @@ import { scrubEnv, testGit } from '@broject/core'
 // ambient repo/agent/store pins must not reach fixture git children
 // or the code-under-test spawns — scrub once, restore after the file
 after(scrubEnv())
-
-/** A second checkout beside `main`: git-initialized so gitCommonDir
- *  resolves, origin-derived rig `mesh://acme/<name>`, own beads store. */
-function initTarget(root: string, name: string): { dir: string; db: string } {
-  const dir = join(root, name)
-  testGit(['init', '-q', '-b', 'main', dir], { cwd: root })
-  testGit(['config', 'user.email', 't@t'], { cwd: dir })
-  testGit(['config', 'user.name', 't'], { cwd: dir })
-  testGit(['remote', 'add', 'origin', `https://github.com/acme/${name}.git`], { cwd: dir })
-  testGit(['commit', '-qm', 'init', '--allow-empty'], { cwd: dir })
-  const db = join(dir, '.beads', 'beads.json')
-  mkdirSync(join(dir, '.beads'), { recursive: true })
-  writeBeads(db, [])
-  return { dir, db }
-}
 
 describe('bro request', () => {
   test('request → target bd ready → claim → close → done ships provides:<id> → wait resolves the closed anchor → accept', () => {
