@@ -38,6 +38,7 @@ import {
   agentsSection,
   bdActor,
   admitSessionSlot,
+  BATCH_MARKER_ENV,
   isBatchSpawn,
   claimStep,
   classifyExitCause,
@@ -2077,8 +2078,22 @@ export function makeNativeConnector(ctx: ConnectorCtx, env: AgentConnectorEnv): 
                 // agents up`/`bro loop` would bleed the parent's
                 // BRO_AGENT_*/BRO_MOL_ID provenance into the child's
                 // commit trailers (bro-fzot's exact bug shape)
+                // The ambient env and the caller's env are filtered
+                // SEPARATELY: the fleet's marker may only come from the
+                // caller (spec.env). Inherited from the ambient env it
+                // would charge a worker's own children — an interactive
+                // session — to the fleet's budget.
                 ...Object.fromEntries(
-                  Object.entries({ ...process.env, ...spec.env }).filter(
+                  Object.entries(process.env).filter(
+                    (e): e is [string, string] =>
+                      e[1] !== undefined &&
+                      !AGENT_PIN_KEYS.has(e[0]) &&
+                      !GIT_REPOSITORY_ENV_KEYS.has(e[0]) &&
+                      e[0] !== BATCH_MARKER_ENV
+                  )
+                ),
+                ...Object.fromEntries(
+                  Object.entries(spec.env ?? {}).filter(
                     (e): e is [string, string] =>
                       e[1] !== undefined &&
                       !AGENT_PIN_KEYS.has(e[0]) &&

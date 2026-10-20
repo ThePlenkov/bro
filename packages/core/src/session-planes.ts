@@ -240,10 +240,6 @@ export function sessionSlotsDir(kind: string, resDir?: string): string {
   return join(base, 'bro', 'session-slots', kind)
 }
 
-/** Fresh reservations — files younger than the TTL count as claimed
- *  slots; stale files are reaped in passing. A missing dir is zero
- *  reservations; other read failures throw 'unavailable' — an
- *  unverifiable count fails closed, never silently admits. */
 /** Does this reservation file belong to the asked lane? The fleet's
  *  carry a `.batch` tag, the operator's do not; no lane asks for all of
  *  them. */
@@ -255,6 +251,10 @@ function reservationInLane(name: string, lane: ReservationLane | undefined): boo
   return lane === 'batch' ? batch : !batch
 }
 
+/** Fresh reservations — files younger than the TTL count as claimed
+ *  slots; stale files are reaped in passing. A missing dir is zero
+ *  reservations; other read failures throw 'unavailable' — an
+ *  unverifiable count fails closed, never silently admits. */
 export function countSessionReservations(resDir: string, lane?: ReservationLane): number {
   let names: string[]
   try {

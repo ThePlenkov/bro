@@ -402,7 +402,12 @@ export {
   sessionQuotaConfig,
   sessionSlotsDir,
 } from './session-planes.ts'
-export type { DiscoveredSession, SessionPlane, SessionQuota } from './session-planes.ts'
+export type {
+  DiscoveredSession,
+  ReservationLane,
+  SessionPlane,
+  SessionQuota,
+} from './session-planes.ts'
 export {
   clearPlanes,
   planeNames,

@@ -377,9 +377,10 @@ function provenancePins(ctx: Ctx, beadId: string, lane: LoopLane): Record<string
   if (mol !== undefined) {
     pins.BRO_MOL_ID = mol
   }
-  // the batch marker rides on EVERY loop spawn — a root bead has no
-  // molecule parent, so BRO_MOL_ID alone would leave those workers
-  // outside the fleet's own budget (spec bro-9h86l)
+  // the fleet's marker rides on every spawn the loop owns — the raw
+  // template arm included: it runs a fleet worker, and the devin plane
+  // counts it as one (the template arm reserves no quota slot of its
+  // own — bro-3xwvu tracks that gap)
   pins[BATCH_MARKER_ENV] = '1'
   return pins
 }

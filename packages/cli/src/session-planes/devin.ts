@@ -115,7 +115,9 @@ function liveDevinLockPids(dirs: string[]): Set<number> {
 
 /** A reservation file is `<key>-<8hex>.slot`; for bro spawns the key
  *  IS the worker's `BRO_AGENT_ID` pin. */
-const SLOT_KEY_RE = /^(.+)-[0-9a-f]{8}\.slot$/
+// the lane tag rides the name — the sweep must recognise a batch
+// reservation too, or a landed batch worker stays in the count twice
+const SLOT_KEY_RE = /^(.+)-[0-9a-f]{8}(?:\.batch)?\.slot$/
 
 /** Retire slot claims whose session mark already landed — a live
  *  pid's environ carrying `BRO_AGENT_ID=<key>` proves that spawn's
