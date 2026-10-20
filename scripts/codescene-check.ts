@@ -5,7 +5,8 @@
  *   node scripts/codescene-check.ts [base-ref] [--strict]
  *
  * Runs `cs delta <base> HEAD --output-format json` and hands the report to
- * the gate. Defaults to `origin/main`. Without the `cs` CLI on PATH the
+ * the gate. The base defaults to the MERGE-BASE with origin/main — the
+ * range a PR is actually diffed against. Without the `cs` CLI on PATH the
  * check SKIPS (exit 0): a machine without CodeScene must not be blocked.
  *
  * The App is the gate on the PR itself (it authenticates itself and reads
@@ -67,9 +68,21 @@ function deltaReport(cs: string, base: string): string {
   }
 }
 
+/** The base a PR is diffed against: the MERGE-BASE with origin/main, not
+ *  origin/main itself. When main has moved ahead, comparing against it
+ *  walks the other direction and reports their commits as regressions of
+ *  yours. */
+function defaultBase(): string {
+  try {
+    return execFileSync('git', ['merge-base', 'origin/main', 'HEAD'], { encoding: 'utf8' }).trim()
+  } catch {
+    return 'origin/main'
+  }
+}
+
 function main(argv: string[]): void {
   const strict = argv.includes('--strict')
-  const base = argv.find((a) => !a.startsWith('--')) ?? 'origin/main'
+  const base = argv.find((a) => !a.startsWith('--')) ?? defaultBase()
   const cs = csBinary()
   if (cs === undefined) {
     console.log('codescene-check: skipped — the `cs` CLI is not installed (see the codescene skill)')
