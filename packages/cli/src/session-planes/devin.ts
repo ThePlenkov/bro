@@ -227,8 +227,10 @@ export function devinPidIsBatch(pid: number, procDir = '/proc'): boolean {
   try {
     const environ = readFileSync(join(procDir, String(pid), 'environ'), 'utf8')
     // NUL-anchored, like the worker predicate — an unanchored match
-    // would take XBRO_PR= (the AGENT_ENV_RE convention)
-    return /(?:^|\0)BRO_(?:PR|MOL_ID)=/.test(environ)
+    // would take XBRO_BATCH= (the AGENT_ENV_RE convention). The value
+    // must be non-empty: an empty marker is not a marker, and the
+    // spawn-side detection says so too.
+    return /(?:^|\0)BRO_BATCH=[^\0]+/.test(environ)
   } catch {
     return false
   }
@@ -239,11 +241,16 @@ export function devinPidIsBatch(pid: number, procDir = '/proc'): boolean {
  *  marker in each worker's environment. */
 export function countDevinBatchWorkers(
   dirs: string[],
-  isBatch: (pid: number) => boolean = devinPidIsBatch,
-  procDir = '/proc'
+  isBatch?: (pid: number) => boolean,
+  procDir = '/proc',
+  slotsDir?: string
 ): number {
+  // the default predicate reads the SAME procDir the scan uses — a
+  // caller with a scripted /proc tree must not be counted against the
+  // real one
+  const predicate = isBatch ?? ((pid: number) => devinPidIsBatch(pid, procDir))
   const live = liveDevinLockPids(dirs)
-  if (isBatch === devinPidIsBatch && live.size > 0 && !existsSync(procDir)) {
+  if (isBatch === undefined && live.size > 0 && !existsSync(procDir)) {
     // a host without /proc cannot tell the fleet's workers from the
     // operator's — an armed maxBatchWorkers must refuse there like an
     // uncountable plane, never silently count zero and admit freely
@@ -253,9 +260,15 @@ export function countDevinBatchWorkers(
       'unavailable'
     )
   }
+  if (slotsDir !== undefined) {
+    // a landed spawn's own session mark retires its still-fresh slot —
+    // without the sweep the batch lane counts a live worker AND its
+    // reservation, and refuses capacity that is free
+    sweepLandedSlots(slotsDir, live, procDir)
+  }
   let batch = 0
   for (const pid of live) {
-    if (isBatch(pid)) {
+    if (predicate(pid)) {
       batch++
     }
   }
@@ -568,8 +581,9 @@ export const devinSessionPlane: SessionPlane = {
     const procDir = devinProcDir(bag)
     return countDevinBatchWorkers(
       devinSessionDirs(bag, workerEnv),
-      (pid) => devinPidIsBatch(pid, procDir),
-      procDir
+      undefined,
+      procDir,
+      devinSlotsDir(bag)
     )
   },
   listLive(bag, workerEnv) {

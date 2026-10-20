@@ -1473,6 +1473,13 @@ function prepareSpawn(
   // that died. The interactive lane is not blocked — a wall the fleet hit
   // is the fleet's problem (spec bro-9h86l).
   guardExistingEntry(dir, home, backend, spec, existing, opts)
+  // The wall is derived from the registry — so the registry must carry
+  // the CAUSE: an agent that died with a rate limit but whose .exit
+  // was not harvested yet reads as cause-less, and the fleet walks into
+  // the wall it just hit. Harvest first, then derive.
+  for (const [step, entry] of Object.entries(registry)) {
+    ensureExitCause(dir, home, step, entry)
+  }
   // the wall refusal comes AFTER the live-agent and claim guards: a
   // respawn of an agent that is already running is a CONFLICT, and the
   // caller reads that kind — a 'cap' here would say "the provider is

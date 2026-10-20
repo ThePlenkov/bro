@@ -2261,7 +2261,7 @@ describe('the provider wall blocks the batch lane only (spec bro-9h86l)', () => 
   test('a batch spawn is refused while the provider is walled', () => {
     const err = batchWallRefusal(walled(future), {
       provider: 'devin',
-      env: { BRO_PR: '599' },
+      env: { BRO_BATCH: '1' },
       molStep: 'fx-2',
     })
     assert.ok(err !== undefined)
@@ -2281,16 +2281,16 @@ describe('the provider wall blocks the batch lane only (spec bro-9h86l)', () => 
 
   test('another provider is not this wall', () => {
     assert.equal(
-      batchWallRefusal(walled(future), { provider: 'kilo-free', env: { BRO_PR: '1' } }),
+      batchWallRefusal(walled(future), { provider: 'kilo-free', env: { BRO_BATCH: '1' } }),
       undefined
     )
     // and a spawn with no provider provenance cannot map to a wall
-    assert.equal(batchWallRefusal(walled(future), { env: { BRO_PR: '1' } }), undefined)
+    assert.equal(batchWallRefusal(walled(future), { env: { BRO_BATCH: '1' } }), undefined)
   })
 
   test('an expired wall admits again', () => {
     assert.equal(
-      batchWallRefusal(walled(past), { provider: 'devin', env: { BRO_PR: '599' } }),
+      batchWallRefusal(walled(past), { provider: 'devin', env: { BRO_BATCH: '1' } }),
       undefined
     )
   })

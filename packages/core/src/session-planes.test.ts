@@ -144,7 +144,7 @@ describe('session slot reservations', () => {
   test('reserve counts, release frees, a missing dir reads as zero', () => {
     assert.equal(countSessionReservations(join(tmpdir(), 'bro-resv-absent-')), 0)
     withDir((dir) => {
-      const key = reserveSessionSlot(dir, 'native-abc123')
+      const key = reserveSessionSlot(dir, 'native-abc123', 'interactive')
       assert.equal(countSessionReservations(dir), 1)
       releaseSessionSlot(key)
       assert.equal(countSessionReservations(dir), 0)
@@ -153,7 +153,7 @@ describe('session slot reservations', () => {
 
   test('expired reservations are reaped, not counted', () => {
     withDir((dir) => {
-      reserveSessionSlot(dir, 'native-old')
+      reserveSessionSlot(dir, 'native-old', 'interactive')
       const [f] = readdirSync(dir)
       const stale = join(dir, f)
       const past = new Date(Date.now() - SESSION_SLOT_TTL_MS - 60_000)
@@ -167,8 +167,8 @@ describe('session slot reservations', () => {
     withDir((dir) => {
       // two bro processes minting the same agentId in different repos
       // must each hold a slot — a shared filename would double-admit
-      reserveSessionSlot(dir, 'native-abc123')
-      reserveSessionSlot(dir, 'native-abc123')
+      reserveSessionSlot(dir, 'native-abc123', 'interactive')
+      reserveSessionSlot(dir, 'native-abc123', 'interactive')
       assert.equal(countSessionReservations(dir), 2)
     })
   })
@@ -196,13 +196,12 @@ describe('the batch lane (spec bro-9h86l)', () => {
     countBatchWorkers: () => batch,
   })
 
-  test('a batch spawn is the one carrying a supervisor marker', () => {
-    assert.equal(isBatchSpawn({ BRO_PR: '599' }), true)
-    assert.equal(isBatchSpawn({ BRO_MOL_ID: 'bro-mol-x' }), true)
+  test('a batch spawn is the one carrying the fleet marker', () => {
+    assert.equal(isBatchSpawn({ BRO_BATCH: '1' }), true)
     assert.equal(isBatchSpawn({}), false)
     assert.equal(isBatchSpawn(undefined), false)
     // a marker with an empty value is not a marker
-    assert.equal(isBatchSpawn({ BRO_PR: '' }), false)
+    assert.equal(isBatchSpawn({ BRO_BATCH: '' }), false)
   })
 
   test('the batch lane is capped apart from the interactive one', () => {
@@ -211,7 +210,7 @@ describe('the batch lane (spec bro-9h86l)', () => {
       // one batch worker live — the fleet's share is full
       const plane = splittingPlane('testkind', 3, 1)
       assert.throws(
-        () => admitSessionSlot(plane, agents, { key: 'native-aa', molStep: 'fx-1', workerEnv: { BRO_PR: '599' } }),
+        () => admitSessionSlot(plane, agents, { key: 'native-aa', molStep: 'fx-1', workerEnv: { BRO_BATCH: '1' } }),
         (e: unknown) =>
           e instanceof SpawnError &&
           e.kind === 'cap' &&
@@ -230,7 +229,7 @@ describe('the batch lane (spec bro-9h86l)', () => {
       // no countBatchWorkers — the cap cannot be enforced, so it refuses
       // loudly instead of silently unguard-ing the lane
       assert.throws(
-        () => admitSessionSlot(testPlane('testkind'), agents, { key: 'native-aa', molStep: 'fx-2', workerEnv: { BRO_PR: '1' } }),
+        () => admitSessionSlot(testPlane('testkind'), agents, { key: 'native-aa', molStep: 'fx-2', workerEnv: { BRO_BATCH: '1' } }),
         (e: unknown) =>
           e instanceof SpawnError &&
           e.kind === 'config' &&
@@ -249,12 +248,12 @@ describe('the batch lane (spec bro-9h86l)', () => {
       // operator's, so it must not eat the fleet's share
       reserveSessionSlot(resv, 'native-aa')
       assert.doesNotThrow(() =>
-        admitSessionSlot(plane, agents, { key: 'native-bb', workerEnv: { BRO_PR: '599' } })
+        admitSessionSlot(plane, agents, { key: 'native-bb', workerEnv: { BRO_BATCH: '1' } })
       )
       // a BATCH reservation does count
-      reserveSessionSlot(resv, 'native-cc', 'maxBatchWorkers')
+      reserveSessionSlot(resv, 'native-cc', 'batch')
       assert.throws(
-        () => admitSessionSlot(plane, agents, { key: 'native-dd', workerEnv: { BRO_PR: '599' } }),
+        () => admitSessionSlot(plane, agents, { key: 'native-dd', workerEnv: { BRO_BATCH: '1' } }),
         (e: unknown) => e instanceof SpawnError && e.kind === 'cap'
       )
     })

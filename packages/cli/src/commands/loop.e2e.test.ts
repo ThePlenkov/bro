@@ -156,6 +156,8 @@ retry(() => fs.appendFileSync(
     promptOk: fs.existsSync(pf),
     bead: process.env.BRO_BEAD_ID || null,
     provider: process.env.BRO_AGENT_PROVIDER || null,
+    batch: process.env.BRO_BATCH || null,
+    broEnv: Object.keys(process.env).filter((k) => k.startsWith('BRO')).sort().join(','),
     agent: process.env.BRO_AGENT || null,
     model: process.env.BRO_AGENT_MODEL || null,
     class: process.env.BRO_AGENT_CLASS || null,
@@ -904,6 +906,7 @@ describe('bro loop provider lane', () => {
         provider: string
         agent: string
         model: string
+        batch: string | null
       }
       // `bro acp-worker --command <cmd> --model <m> --auto-approve <pf>`
       assert.equal(rec.args[0], 'acp-worker')
@@ -918,6 +921,9 @@ describe('bro loop provider lane', () => {
       assert.equal(rec.bead, 'fx-a')
       // provenance pins: provider lane identity, agent cli badge
       assert.equal(rec.provider, 'devin')
+      // the batch marker rides on EVERY loop spawn — a root bead has no
+      // molecule parent, so the fleet's own budget must still see it
+      assert.equal(rec.batch, '1')
       assert.equal(rec.agent, 'devin')
       assert.equal(rec.model, 'swe-2')
       assert.equal(bead(f.db, 'fx-a')?.status, 'closed')

@@ -388,6 +388,7 @@ export type {
 } from './agents.ts'
 export {
   admitSessionSlot,
+  BATCH_MARKER_ENV,
   clearSessionPlanes,
   countSessionReservations,
   isBatchSpawn,

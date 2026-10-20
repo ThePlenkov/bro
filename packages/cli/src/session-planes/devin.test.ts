@@ -175,12 +175,14 @@ describe('devinPidIsWorker', () => {
 describe('devinPidIsBatch (spec bro-9h86l)', () => {
   test('the supervisor marker in the worker env classifies the fleet lane', () => {
     withProc((procDir, mk) => {
-      // a drive fixer — the spawn env carries BRO_PR
-      mk(501, 'PATH=/bin\0BRO_PR=599\0BRO_PR_URL=https://gh\0', 'pipe:[1]')
+      // a fleet spawn — the marker the fleet sets on every spawn
+      mk(501, 'PATH=/bin\0BRO_BATCH=1\0BRO_PR=599\0', 'pipe:[1]')
       assert.equal(devinPidIsBatch(501, procDir), true)
-      // a loop member — BRO_MOL_ID
-      mk(502, 'PATH=/bin\0BRO_MOL_ID=bro-mol-x\0', 'pipe:[1]')
+      mk(502, 'PATH=/bin\0BRO_BATCH=1\0', 'pipe:[1]')
       assert.equal(devinPidIsBatch(502, procDir), true)
+      // an EMPTY marker is not a marker — the spawn side says so too
+      mk(506, 'PATH=/bin\0BRO_BATCH=\0', 'pipe:[1]')
+      assert.equal(devinPidIsBatch(506, procDir), false)
       // the operator's own session — no marker
       mk(503, 'PATH=/bin\0HOME=/h\0', 'pipe:[1]')
       assert.equal(devinPidIsBatch(503, procDir), false)
@@ -189,7 +191,7 @@ describe('devinPidIsBatch (spec bro-9h86l)', () => {
 
   test('NUL-anchored — a lookalike suffix does not classify', () => {
     withProc((procDir, mk) => {
-      mk(504, 'PATH=/bin\0XBRO_PR=spoof\0', 'pipe:[1]')
+      mk(504, 'PATH=/bin\0XBRO_BATCH=spoof\0', 'pipe:[1]')
       assert.equal(devinPidIsBatch(504, procDir), false)
     })
   })
