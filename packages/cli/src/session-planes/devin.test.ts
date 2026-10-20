@@ -198,10 +198,22 @@ describe('devinPidIsBatch (spec bro-9h86l)', () => {
 
   test('an unclassifiable live worker counts as the fleet\'s — the cap fails closed', () => {
     withProc((procDir, mk) => {
-      // the environ is unreadable: the pid cannot be classified, and a
-      // quota that cannot be established must not be passed silently
+      // the environ EXISTS but cannot be read: the pid is a live session
+      // it cannot classify, and a quota that cannot be established must
+      // not be passed silently. (A directory where the file belongs
+      // gives EISDIR — "present, unreadable", not "gone".)
       mk(505, null, null)
+      mkdirSync(join(procDir, '505', 'environ'), { recursive: true })
       assert.equal(devinPidIsBatch(505, procDir), true)
+    })
+  })
+
+  test('a pid that is GONE counts for nobody', () => {
+    withProc((procDir, mk) => {
+      // no environ file at all: the process exited between the liveness
+      // check and the read — it holds no slot
+      mk(507, null, null)
+      assert.equal(devinPidIsBatch(507, procDir), false)
     })
   })
 })

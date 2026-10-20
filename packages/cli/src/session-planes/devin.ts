@@ -219,12 +219,17 @@ export function devinPidIsWorker(pid: number, procDir = '/proc'): boolean {
 }
 
 /** Is this worker the FLEET's — a batch spawn (a drive fixer, a loop
- *  member) rather than the operator's own session? The supervisor
- *  marker rides in the spawn's env and the child's env is
+ *  member) rather than the operator's own session? The fleet's marker
+ *  rides in the spawn's env and the child's env is
  *  `{ ...process.env, ...spec.env }`, so the worker's own environment
- *  answers the question (spec bro-9h86l). Unreadable environ = not a
- *  batch worker: the count then UNDERcounts, and an undercount refuses
- *  fewer real spawns — never a phantom that starves the lane. */
+ *  answers the question (spec bro-9h86l).
+ *
+ *  An UNREADABLE environ counts as the fleet's: the pid is a real live
+ *  session it simply cannot be classified, and a quota that cannot be
+ *  established must fail closed — the fleet yields a slot it may not
+ *  have used, rather than a cap the fleet can walk past. A pid that is
+ *  GONE (the process exited between the liveness check and this read)
+ *  is not a live session at all, so it counts for nobody. */
 export function devinPidIsBatch(pid: number, procDir = '/proc'): boolean {
   try {
     const environ = readFileSync(join(procDir, String(pid), 'environ'), 'utf8')
@@ -233,7 +238,12 @@ export function devinPidIsBatch(pid: number, procDir = '/proc'): boolean {
     // must be non-empty: an empty marker is not a marker, and the
     // spawn-side detection says so too.
     return /(?:^|\0)BRO_BATCH=[^\0]+/.test(environ)
-  } catch {
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === 'ENOENT') {
+      // the process exited between the liveness check and this read —
+      // it is gone, not unclassifiable, and a dead pid holds no slot
+      return false
+    }
     // The environ is unreadable — the pid cannot be classified. It is
     // a REAL live session (not a phantom), so it is counted as the
     // fleet's: the batch cap is the fleet's own share, and a quota
