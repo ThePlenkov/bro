@@ -14,7 +14,7 @@
  * (project / type / effort / tags) stay board-local.
  */
 import { spawnSync } from 'node:child_process'
-import { MESH_VERSION, type MeshEnvelope, type MeshRef } from './envelope.ts'
+import { MESH_VERSION, priorityTerm, type MeshEnvelope, type MeshRef } from './envelope.ts'
 import { formatRigUri, parseRigUri } from './identity.ts'
 
 export interface WlResult {
@@ -30,10 +30,12 @@ function wl(args: string[]): WlResult {
     timeout: 120_000,
     maxBuffer: 32 * 1024 * 1024,
   })
-  const err = (p.stderr ?? p.error?.message ?? '').trim()
+  const stdout: unknown = p.stdout
+  const stderr: unknown = p.stderr
+  const err = (p.error !== undefined ? p.error.message : typeof stderr === 'string' ? stderr : '').trim()
   return {
     code: p.status ?? 1,
-    out: p.stdout ?? '',
+    out: typeof stdout === 'string' ? stdout : '',
     err: p.error !== undefined ? `wl unreachable — ${err || 'binary not found'}` : err,
   }
 }
@@ -59,7 +61,7 @@ export function boardPriority(term: string | undefined): number | undefined {
 }
 
 export function termPriority(priority: number | undefined): string | undefined {
-  return priority === undefined ? undefined : `p${Math.max(0, Math.min(4, Math.trunc(priority)))}`
+  return priority === undefined ? undefined : priorityTerm(priority)
 }
 
 /** `posted_by`/`claimed_by` are wasteland rig handles — `org/name`
@@ -103,15 +105,15 @@ export interface WantedRow {
  *  anything past open is addressed back to the poster, who owes the
  *  verdict. */
 export function projectWanted(row: WantedRow, selfRig: string | undefined): { envelopes: MeshEnvelope[]; errors: string[] } {
-  const envelopes: MeshEnvelope[] = []
-  const errors: string[] = []
   const poster = handleToRig(row.posted_by)
   if (poster === null) {
-    errors.push(`${row.id}: posted_by "${row.posted_by ?? ''}" is not a rig handle`)
-    return { envelopes, errors }
+    return { envelopes: [], errors: [`${row.id}: posted_by "${row.posted_by ?? ''}" is not a rig handle`] }
   }
-  const open = row.status === undefined || row.status === 'open'
-  const addressedTo = open && selfRig !== undefined ? selfRig : poster
+  const errors: string[] = []
+  const claimer = handleToRig(row.claimed_by)
+  if (row.claimed_by !== undefined && row.claimed_by !== '' && claimer === null) {
+    errors.push(`${row.id}: claimed_by "${row.claimed_by}" is not a rig handle`)
+  }
   const base = {
     v: MESH_VERSION,
     thread: row.id,
@@ -120,48 +122,57 @@ export function projectWanted(row: WantedRow, selfRig: string | undefined): { en
     refs: [] as MeshRef[],
     evidence: [] as MeshRef[],
   }
-  envelopes.push({
-    ...base,
-    id: row.id,
-    kind: 'request',
-    from: poster,
-    to: addressedTo,
-    terms: termPriority(row.priority) === undefined ? {} : { priority: termPriority(row.priority) },
-  })
-  const claimer = handleToRig(row.claimed_by)
-  if (row.claimed_by !== undefined && row.claimed_by !== '') {
-    if (claimer === null) {
-      errors.push(`${row.id}: claimed_by "${row.claimed_by}" is not a rig handle`)
-    } else {
-      envelopes.push({ ...base, id: `${row.id}#claim`, kind: 'claim', from: claimer, to: poster, terms: {} })
-    }
+  const priority = termPriority(row.priority)
+  const open = row.status === undefined || row.status === 'open'
+  const envelopes: MeshEnvelope[] = [
+    {
+      ...base,
+      id: row.id,
+      kind: 'request',
+      from: poster,
+      to: open && selfRig !== undefined ? selfRig : poster,
+      terms: priority === undefined ? {} : { priority },
+    },
+  ]
+  if (claimer !== null) {
+    envelopes.push({ ...base, id: `${row.id}#claim`, kind: 'claim', from: claimer, to: poster, terms: {} })
   }
-  const done = (row.completions ?? []).find((c) => c.evidence !== undefined)
-  const verdict = (row.completions ?? []).find((c) => c.state === 'accepted' || c.state === 'rejected')
-  if (done !== undefined && claimer !== null) {
+  envelopes.push(...projectCompletion(row, base, poster, claimer))
+  return { envelopes, errors }
+}
+
+/** The post-claim rows: a completion carrying evidence is the result
+ *  record; an accepted/rejected completion row is the verdict; a
+ *  completed board status with no verdict row reads as the accept. */
+function projectCompletion(
+  row: WantedRow,
+  base: Pick<MeshEnvelope, 'v' | 'thread' | 'title' | 'body' | 'refs' | 'evidence'>,
+  poster: string,
+  claimer: string | null,
+): MeshEnvelope[] {
+  const envelopes: MeshEnvelope[] = []
+  const evidence = (row.completions ?? [])
+    .flatMap((c) => (typeof c.evidence === 'string' && c.evidence !== '' ? [c.evidence] : []))
+    .at(0)
+  if (evidence !== undefined && claimer !== null) {
     envelopes.push({
       ...base,
       id: `${row.id}#result`,
       kind: 'result',
-      from: claimer!,
+      from: claimer,
       to: poster,
       terms: {},
-      evidence: [{ kind: 'url', ref: done.evidence! }],
+      evidence: [{ kind: 'url', ref: evidence }],
     })
   }
+  const verdict = (row.completions ?? []).find((c) => c.state === 'accepted' || c.state === 'rejected')
   if (verdict !== undefined) {
-    envelopes.push({
-      ...base,
-      id: `${row.id}#${verdict.state === 'accepted' ? 'accept' : 'reject'}`,
-      kind: verdict.state === 'accepted' ? 'accept' : 'reject',
-      from: poster,
-      to: claimer ?? poster,
-      terms: {},
-    })
+    const kind = verdict.state === 'accepted' ? 'accept' : 'reject'
+    envelopes.push({ ...base, id: `${row.id}#${kind}`, kind, from: poster, to: claimer ?? poster, terms: {} })
   } else if (row.status === 'completed' && claimer !== null) {
-    envelopes.push({ ...base, id: `${row.id}#accept`, kind: 'accept', from: poster, to: claimer!, terms: {} })
+    envelopes.push({ ...base, id: `${row.id}#accept`, kind: 'accept', from: poster, to: claimer, terms: {} })
   }
-  return { envelopes, errors }
+  return envelopes
 }
 
 function wlJson<T>(args: string[]): { data?: T; error?: string } {
@@ -187,7 +198,7 @@ export function postWanted(
     args.push('--description', input.body)
   }
   if (input.priority !== undefined) {
-    args.push('--priority', String(input.priority))
+    args.push('--priority', String(Math.max(0, Math.min(4, Math.trunc(input.priority)))))
   }
   args.push('--json')
   const r = wlJson<{ id?: string }>(args)

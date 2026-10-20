@@ -14,7 +14,7 @@
  * that has never carried a mesh issue.
  */
 import { spawnSync } from 'node:child_process'
-import { envelopeLabels, toEnvelope, validateEnvelope, MESH_VERSION, type MeshEnvelope, type MeshRef } from './envelope.ts'
+import { envelopeLabels, priorityTerm, toEnvelope, validateEnvelope, MESH_VERSION, type MeshEnvelope, type MeshRef } from './envelope.ts'
 
 export const GITHUB_LABEL_MAX = 50
 
@@ -28,38 +28,60 @@ export interface GithubRepo {
  *  Other hosts and non-URL remotes return null: the caller reports
  *  the gap, never guesses. */
 export function parseGithubRemote(remote: string): GithubRepo | null {
-  let rest = remote.trim()
+  const hp = splitHostPath(stripGitSuffix(remote.trim()))
+  if (hp === null || hp.host !== 'github.com') {
+    return null
+  }
+  const parts = hp.path.split('/').filter((p) => p !== '')
+  return parts.length === 2
+    ? { owner: parts[0].toLowerCase(), repo: parts[1].toLowerCase() }
+    : null
+}
+
+function stripGitSuffix(remote: string): string {
+  let rest = remote
   while (rest.endsWith('/')) {
     rest = rest.slice(0, -1)
   }
-  if (rest.endsWith('.git')) {
-    rest = rest.slice(0, -'.git'.length)
+  return rest.endsWith('.git') ? rest.slice(0, -'.git'.length) : rest
+}
+
+/** url-shaped and git@ remotes → {host, path}; everything else null.
+ *  String ops only — an uncontrolled-input regex here is a ReDoS
+ *  surface the scanners flag. */
+function splitHostPath(rest: string): { host: string; path: string } | null {
+  if (rest.startsWith('git@')) {
+    const after = rest.slice('git@'.length)
+    const colon = after.indexOf(':')
+    const slash = after.indexOf('/')
+    return colon > 0 && slash > colon
+      ? { host: after.slice(0, colon).toLowerCase(), path: after.slice(colon + 1) }
+      : null
   }
-  let host: string
-  if (/^https?:\/\//.test(rest) || rest.startsWith('ssh://')) {
-    const m = /^[a-z]+:\/\/(?:[^@/]+@)?([^/:]+)(?::\d+)?\/(.+)$/.exec(rest)
-    if (m === null) {
-      return null
-    }
-    host = m[1]!
-    rest = m[2]!
-  } else if (rest.startsWith('git@')) {
-    const m = /^git@([^:]+):(.+)$/.exec(rest)
-    if (m === null) {
-      return null
-    }
-    host = m[1]!
-    rest = m[2]!
-  } else {
+  const sep = rest.indexOf('://')
+  const scheme = sep === -1 ? '' : rest.slice(0, sep)
+  if (scheme !== 'http' && scheme !== 'https' && scheme !== 'ssh') {
     return null
   }
-  if (host.toLowerCase() !== 'github.com') {
+  const after = rest.slice(sep + '://'.length)
+  const at = after.indexOf('@')
+  const firstSlash = after.indexOf('/')
+  if (firstSlash === -1) {
     return null
   }
-  const parts = rest.split('/').filter((p) => p !== '')
-  return parts.length === 2 && parts[0] !== undefined && parts[1] !== undefined
-    ? { owner: parts[0].toLowerCase(), repo: parts[1].toLowerCase() }
-    : null
+  // an @ is userinfo only before the first slash — inside the path
+  // it's just a character
+  const hostPath = at !== -1 && at < firstSlash ? after.slice(at + 1) : after
+  const slash = hostPath.indexOf('/')
+  if (slash === -1) {
+    return null
+  }
+  const host = hostPath.slice(0, slash)
+  const port = host.indexOf(':')
+  return {
+    host: (port === -1 ? host : host.slice(0, port)).toLowerCase(),
+    path: hostPath.slice(slash + 1),
+  }
 }
 
 /** A github thread's repo — the thread IS the issue url; strip the
@@ -70,7 +92,7 @@ export function issueRepo(thread: string): GithubRepo | null {
 
 export function issueNumber(thread: string): string | null {
   const m = /\/issues\/(\d+)$/.exec(thread.trim())
-  return m === null ? null : m[1]!
+  return m === null ? null : m[1]
 }
 
 export interface GhResult {
@@ -87,10 +109,15 @@ function gh(args: string[], input?: string): GhResult {
     timeout: 120_000,
     maxBuffer: 32 * 1024 * 1024,
   })
-  const err = (p.stderr ?? p.error?.message ?? '').trim()
+  // spawnSync's types swear stdout/stderr are strings; on a spawn
+  // error they are null at runtime — widen through unknown so the
+  // guard is a real check in both worlds
+  const stdout: unknown = p.stdout
+  const stderr: unknown = p.stderr
+  const err = (p.error !== undefined ? p.error.message : typeof stderr === 'string' ? stderr : '').trim()
   return {
     code: p.status ?? 1,
-    out: p.stdout ?? '',
+    out: typeof stdout === 'string' ? stdout : '',
     err: p.error !== undefined ? `gh unreachable — ${err || 'binary not found'}` : err,
   }
 }
@@ -149,7 +176,35 @@ export function renderComment(env: MeshEnvelope): string {
   return '```json\n' + JSON.stringify(env) + '\n```'
 }
 
-const JSON_FENCE = /```json\s*\n([\s\S]*?)```/g
+/** fenced ```json block bodies, in document order — indexOf scanning,
+ *  not a regex: the fence pattern on uncontrolled comment text is a
+ *  polynomial-backtracking surface (CodeQL). A fence is ```json,
+ *  whitespace up to the newline, payload to the next ```. */
+function* fencedJsonBodies(body: string): Generator<string> {
+  let i = 0
+  for (;;) {
+    const open = body.indexOf('```json', i)
+    if (open === -1) {
+      return
+    }
+    const after = open + '```json'.length
+    const eol = body.indexOf('\n', after)
+    if (eol === -1) {
+      return
+    }
+    if (body.slice(after, eol).trim() !== '') {
+      // ```json <junk> — not a record fence; keep scanning past it
+      i = after
+      continue
+    }
+    const close = body.indexOf('```', eol + 1)
+    if (close === -1) {
+      return
+    }
+    yield body.slice(eol + 1, close)
+    i = close + '```'.length
+  }
+}
 
 /** The LAST fenced ```json block that satisfies validateEnvelope — a
  *  comment is a shared editable document: authors append checklists,
@@ -157,30 +212,32 @@ const JSON_FENCE = /```json\s*\n([\s\S]*?)```/g
  *  the read never anchors on offsets. A comment with no qualifying
  *  block is not a mesh record — surfaced as an error line. */
 export function parseComment(body: string): { envelope?: MeshEnvelope; error?: string } {
-  const blocks = [...body.matchAll(JSON_FENCE)]
-  for (const b of blocks.reverse()) {
+  let last: MeshEnvelope | undefined
+  for (const b of fencedJsonBodies(body)) {
     let raw: unknown
     try {
-      raw = JSON.parse(b[1]!)
+      raw = JSON.parse(b)
     } catch {
       continue
     }
     if (validateEnvelope(raw).length === 0) {
       const env = toEnvelope(raw)
       if (env !== null) {
-        return { envelope: env }
+        last = env
       }
     }
   }
-  return { error: 'comment carries no valid mesh/1 record block' }
+  return last === undefined
+    ? { error: 'comment carries no valid mesh/1 record block' }
+    : { envelope: last }
 }
 
 /** One authenticated comment → the record it carries. */
 export interface GhRecord {
-  /** the issue url — the thread anchor on this plane */
-  issue: string
-  /** the comment's own url — a stable record id */
-  url: string
+  /** the issue's html url — the thread anchor on this plane */
+  issueHtmlUrl: string
+  /** the comment's own html url — a stable record id */
+  commentHtmlUrl: string
   /** the authenticated github login — the provenance */
   author: string
   envelope: MeshEnvelope
@@ -193,15 +250,24 @@ interface GhIssue {
   html_url: string
 }
 
+/** the wire shape BEFORE the row is verified — fields optional so the
+ *  runtime guard is a real check, not a type assertion */
+interface GhIssueRow {
+  number?: number
+  html_url?: string
+}
+
 function apiPath(repo: GithubRepo, suffix: string): string {
   return `repos/${repo.owner}/${repo.repo}/${suffix}`
 }
 
 /** Issues carrying the request label — the label is an index, so a
  *  miss means "no mesh traffic", not a crash; the API failure is the
- *  error line. */
+ *  error line. `--paginate --slurp` wraps every page in its own array
+ *  — the wire shape is pages-of-rows, so the read flattens before
+ *  iterating. */
 function listIssues(repo: GithubRepo): { issues: GhIssue[]; error?: string } {
-  const r = ghJson<GhIssue[]>(
+  const r = ghJson<(GhIssueRow | GhIssueRow[])[]>(
     [
       'api',
       `${apiPath(repo, 'issues')}?labels=mesh:kind:request&state=all&per_page=100`,
@@ -212,14 +278,24 @@ function listIssues(repo: GithubRepo): { issues: GhIssue[]; error?: string } {
   if (r.error !== undefined) {
     return { issues: [], error: `${repo.owner}/${repo.repo}: issue list failed — ${r.error}` }
   }
-  return { issues: (r.data ?? []).filter((i) => typeof i.number === 'number' && typeof i.html_url === 'string') }
+  return {
+    issues: (r.data ?? []).flat().filter(
+      (i): i is GhIssue => typeof i === 'object' && typeof i.number === 'number' && typeof i.html_url === 'string',
+    ),
+  }
+}
+
+interface GhCommentRow {
+  html_url?: string
+  user?: { login?: string }
+  body?: string
 }
 
 /** Every envelope-bearing comment on one issue — comments that parse
  *  to nothing are error lines (a comment is not a record unless the
  *  last validating block says so). */
 export function issueComments(repo: GithubRepo, issue: GhIssue): { records: GhRecord[]; errors: string[] } {
-  const r = ghJson<{ html_url?: string; user?: { login?: string }; body?: string }[]>(
+  const r = ghJson<(GhCommentRow | GhCommentRow[])[]>(
     ['api', apiPath(repo, `issues/${issue.number}/comments`), '--paginate', '--slurp'],
   )
   if (r.error !== undefined) {
@@ -227,17 +303,19 @@ export function issueComments(repo: GithubRepo, issue: GhIssue): { records: GhRe
   }
   const records: GhRecord[] = []
   const errors: string[] = []
-  for (const c of r.data ?? []) {
+  for (const c of (r.data ?? []).flat()) {
     const parsed = parseComment(typeof c.body === 'string' ? c.body : '')
-    if (parsed.error !== undefined) {
-      errors.push(`${repo.owner}/${repo.repo}#${issue.number}: ${parsed.error} (${c.html_url ?? 'comment'})`)
+    if (parsed.error !== undefined || parsed.envelope === undefined) {
+      errors.push(`${repo.owner}/${repo.repo}#${issue.number}: ${parsed.error ?? 'no record'} (comment skipped)`)
       continue
     }
+    const issueHtmlUrl = issue.html_url
+    const commentHtmlUrl = c.html_url ?? ''
     records.push({
-      issue: issue.html_url,
-      url: c.html_url ?? '',
+      issueHtmlUrl,
+      commentHtmlUrl,
       author: c.user?.login ?? '',
-      envelope: parsed.envelope!,
+      envelope: parsed.envelope,
     })
   }
   return { records, errors }
@@ -264,21 +342,17 @@ export function scanGithub(remote: string): { records: GhRecord[]; errors: strin
   return { records, errors }
 }
 
-/** Delivery: POST the prose issue, then POST the `request` record as
- *  the first comment — id = thread = the issue url, so every later
- *  lifecycle comment threads to it. REST `labels[]` (not `gh issue
- *  create --label`) because the API creates missing labels on first
- *  use and a repo that never carried mesh labels must not fail its
- *  first delivery. */
-export function postRequest(
-  remote: string,
-  input: { from: string; to: string; title: string; body?: string; refs?: MeshRef[]; priority?: number },
-): { issue?: string; error?: string } {
-  const repo = parseGithubRemote(remote)
-  if (repo === null) {
-    return { error: `remote "${remote}" is not a github url` }
-  }
-  const env: MeshEnvelope = {
+/** The wire envelope for a posted request — id/thread are filled by
+ *  the caller once the issue url exists. */
+function requestEnvelope(input: {
+  from: string
+  to: string
+  title: string
+  body?: string
+  refs?: MeshRef[]
+  priority?: number
+}): MeshEnvelope {
+  return {
     v: MESH_VERSION,
     id: '',
     kind: 'request',
@@ -288,35 +362,68 @@ export function postRequest(
     title: input.title,
     body: input.body ?? '',
     refs: input.refs ?? [],
-    terms: input.priority === undefined ? {} : { priority: `p${input.priority}` },
+    // out-of-band input clamps into the p0–p4 vocabulary — an
+    // unclamped p9 fails validation on the receiving side
+    terms: input.priority === undefined ? {} : { priority: priorityTerm(input.priority) },
     evidence: [],
   }
+}
+
+/** POST the prose issue; REST `labels[]` (not `gh issue create
+ *  --label`) because the API creates missing labels on first use and
+ *  a repo that never carried mesh labels must not fail its first
+ *  delivery. */
+function createIssue(
+  repo: GithubRepo,
+  input: { title: string; from: string; to: string; body?: string },
+  labels: string[],
+): { issueHtmlUrl?: string; number?: number; error?: string } {
   const created = ghJson<{ number?: number; html_url?: string }>(
     ['api', apiPath(repo, 'issues'), '--input', '-'],
     JSON.stringify({
       title: input.title,
       body: renderIssueBody(input),
-      labels: routingLabels(env),
+      labels,
     }),
   )
   if (created.error !== undefined) {
     return { error: `${repo.owner}/${repo.repo}: issue create failed — ${created.error}` }
   }
-  const issue = created.data?.html_url
+  const issueHtmlUrl = created.data?.html_url
   const number = created.data?.number
-  if (typeof issue !== 'string' || typeof number !== 'number') {
+  return typeof issueHtmlUrl === 'string' && typeof number === 'number'
+    ? { issueHtmlUrl, number }
+    : { error: `${repo.owner}/${repo.repo}: issue create returned no html_url` }
+}
+
+/** Delivery: POST the prose issue, then POST the `request` record as
+ *  the first comment — id = thread = the issue url, so every later
+ *  lifecycle comment threads to it. */
+export function postRequest(
+  remote: string,
+  input: { from: string; to: string; title: string; body?: string; refs?: MeshRef[]; priority?: number },
+): { issueHtmlUrl?: string; error?: string } {
+  const repo = parseGithubRemote(remote)
+  if (repo === null) {
+    return { error: `remote "${remote}" is not a github url` }
+  }
+  const env = requestEnvelope(input)
+  const created = createIssue(repo, input, routingLabels(env))
+  if (created.error !== undefined) {
+    return { error: created.error }
+  }
+  if (created.issueHtmlUrl === undefined || created.number === undefined) {
     return { error: `${repo.owner}/${repo.repo}: issue create returned no html_url` }
   }
-  env.id = issue
-  env.thread = issue
+  const env2 = { ...env, id: created.issueHtmlUrl, thread: created.issueHtmlUrl }
   const commented = ghJson<{ html_url?: string }>(
-    ['api', apiPath(repo, `issues/${number}/comments`), '--input', '-'],
-    JSON.stringify({ body: renderComment(env) }),
+    ['api', apiPath(repo, `issues/${created.number}/comments`), '--input', '-'],
+    JSON.stringify({ body: renderComment(env2) }),
   )
   if (commented.error !== undefined) {
-    return { error: `issue ${issue} created but the record comment failed — ${commented.error}` }
+    return { error: `issue ${created.issueHtmlUrl} created but the record comment failed — ${commented.error}` }
   }
-  return { issue }
+  return { issueHtmlUrl: created.issueHtmlUrl }
 }
 
 /** The provenance verdict for one github record — the authenticated
@@ -354,8 +461,8 @@ export function githubProvenance(
 /** A lifecycle record lands as another comment on the issue — the
  *  envelope's own id is `thread#kind` (one per kind per thread by
  *  lifecycle construction: a second claim is a stage error anyway). */
-export function postComment(remote: string, thread: string, env: MeshEnvelope): { url?: string; error?: string } {
-  const repo = issueRepo(thread) ?? parseGithubRemote(remote)
+export function postComment(thread: string, env: MeshEnvelope): { commentHtmlUrl?: string; error?: string } {
+  const repo = issueRepo(thread)
   const n = issueNumber(thread)
   if (repo === null || n === null) {
     return { error: `thread "${thread}" is not a github issue url` }
@@ -367,5 +474,6 @@ export function postComment(remote: string, thread: string, env: MeshEnvelope): 
   if (r.error !== undefined) {
     return { error: `${repo.owner}/${repo.repo}#${n}: comment failed — ${r.error}` }
   }
-  return { url: r.data?.html_url }
+  const commentHtmlUrl = r.data?.html_url
+  return { commentHtmlUrl }
 }

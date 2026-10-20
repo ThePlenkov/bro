@@ -73,6 +73,13 @@ export const MESH_VERSION_LABEL = L.v('1')
 
 const PRIORITY_NAMES = ['p0', 'p1', 'p2', 'p3', 'p4'] as const
 
+/** The `pN` term for an out-of-band numeric priority — clamps into
+ *  the 0–4 vocabulary so a caller-side 9 or -1 still validates on the
+ *  receiving side. */
+export function priorityTerm(priority: number): string {
+  return `p${Math.max(0, Math.min(4, Math.trunc(priority)))}`
+}
+
 const REF_KINDS = ['bead', 'url', 'pr'] as const
 
 /** `mesh:ref:<kind>:<ref>` / `mesh:ev:<kind>:<ref>` — ref values may

@@ -161,7 +161,7 @@ function scanGithubPeer(peer: MeshPeer, out: PeerRecord[], errors: string[]): vo
       peerRig: peer.rig,
       transport: 'github',
       envelope: r.envelope,
-      beadId: r.issue,
+      beadId: r.issueHtmlUrl,
       author: r.author,
     })
   }
@@ -213,35 +213,26 @@ function scanOwnGithub(
   for (const e of scan.errors) {
     errors.push(`self: ${e}`)
   }
-  const self = selfLoginGithub()
+  const self = selfLogin().login
   for (const r of scan.records) {
     if (r.envelope.kind !== 'request') {
       continue
     }
     const bound = peers.find((p) => p.login !== undefined && p.login === r.author)
     if (bound !== undefined) {
-      out.push({ peer: bound.alias, peerRig: bound.rig, transport: 'github', envelope: r.envelope, beadId: r.issue, author: r.author })
+      out.push({ peer: bound.alias, peerRig: bound.rig, transport: 'github', envelope: r.envelope, beadId: r.issueHtmlUrl, author: r.author })
     } else {
       out.push({
         peer: 'github',
         peerRig: r.author === self ? selfRig : r.envelope.from,
         transport: 'github',
         envelope: r.envelope,
-        beadId: r.issue,
+        beadId: r.issueHtmlUrl,
         author: r.author,
         unbound: r.author === self ? undefined : true,
       })
     }
   }
-}
-
-let selfLoginCache: { login?: string } | undefined
-function selfLoginGithub(): string | undefined {
-  // one `gh api user` per process — the login never changes mid-run
-  if (selfLoginCache === undefined) {
-    selfLoginCache = selfLogin()
-  }
-  return selfLoginCache.login
 }
 
 /** Pull + scan every configured peer — every mesh envelope, every

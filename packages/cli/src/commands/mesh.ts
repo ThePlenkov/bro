@@ -373,7 +373,11 @@ function lifecycleTarget(
   state: ReturnType<typeof meshThread>,
   thread: string
 ): string {
-  const request = state.request!
+  const request = state.request
+  if (request === undefined) {
+    console.error(`error: no request for thread "${thread}" — not in own store or any peer replica`)
+    process.exit(2)
+  }
   if (state.stage === 'accepted' || state.stage === 'rejected') {
     console.error(`error: thread "${thread}" is already ${state.stage}`)
     process.exit(2)
@@ -400,7 +404,11 @@ function lifecycleTarget(
     console.error(`error: nothing to ${kind} — no result submitted on thread "${thread}" yet`)
     process.exit(2)
   }
-  const worker = [...state.envelopes].reverse().find((e) => e.kind === 'result')!
+  const worker = [...state.envelopes].reverse().find((e) => e.kind === 'result')
+  if (worker === undefined) {
+    console.error(`error: no result record on thread "${thread}"`)
+    process.exit(2)
+  }
   return senderOf(worker)
 }
 
@@ -484,7 +492,11 @@ function cmdLifecycle(dir: string, kind: MeshKind, args: string[]): void {
   }
   const { rig, state } = threadAnchor(dir, thread, !args.includes('--no-pull'))
   const peers = meshPeers(dir)
-  const request = state.request!
+  const request = state.request
+  if (request === undefined) {
+    console.error(`error: no request for thread "${thread}" — not in own store or any peer replica`)
+    process.exit(2)
+  }
   const to = lifecycleTarget(kind, rig, state, thread)
 
   // remote planes (specs/cross-repo/bro-kim1e) — the record lands on
@@ -494,8 +506,9 @@ function cmdLifecycle(dir: string, kind: MeshKind, args: string[]): void {
   // complete record of what we wrote.
   const ghThread = state.threads.find((t) => issueRepo(t) !== null)
   const wlThread = state.threads.find((t) => /^w-\w+$/i.test(t))
-  if (ghThread !== undefined || wlThread !== undefined) {
-    const remoteThread = ghThread ?? wlThread!
+  const ghRepo = ghThread === undefined ? null : issueRepo(ghThread)
+  if (ghRepo !== null || wlThread !== undefined) {
+    const remoteThread = ghThread ?? wlThread ?? ''
     const evidence = kind === 'result' ? parseRefs(rest, '--ev') : undefined
     const body = flagValue(rest, '--body')
     const env: MeshEnvelope = {
@@ -512,25 +525,25 @@ function cmdLifecycle(dir: string, kind: MeshKind, args: string[]): void {
       evidence: evidence ?? [],
     }
     let remoteErr: string | undefined
-    if (ghThread !== undefined) {
-      const ri = issueRepo(ghThread)!
+    if (ghRepo !== null && ghThread !== undefined) {
       const peer = peers.find((p) => {
         const r = parseGithubRemote(p.remote)
-        return p.transport === 'github' && r?.owner === ri.owner && r?.repo === ri.repo
+        return p.transport === 'github' && r?.owner === ghRepo.owner && r?.repo === ghRepo.repo
       })
       if (peer === undefined) {
         console.error(
-          `! ${ri.owner}/${ri.repo}: no github peer binding — the far side can't provenance-check this record`
+          `! ${ghRepo.owner}/${ghRepo.repo}: no github peer binding — the far side can't provenance-check this record`
         )
       }
-      remoteErr = postComment(
-        peer?.remote ?? `https://github.com/${ri.owner}/${ri.repo}`,
-        ghThread,
-        env,
-      ).error
-    } else {
-      const wl = wlThread!
-      const wlPeer = peers.find((p) => p.transport === 'wasteland')
+      remoteErr = postComment(ghThread, env).error
+    } else if (wlThread !== undefined) {
+      const wl = wlThread
+      // the peer that carried the request's record is the board the
+      // lifecycle move belongs on — first binding only as fallback
+      const wlPeer =
+        state.requestPeer?.transport === 'wasteland'
+          ? state.requestPeer
+          : peers.find((p) => p.transport === 'wasteland')
       if (wlPeer === undefined) {
         console.error('! no wasteland peer binding — writing to the default commons')
       }

@@ -59,14 +59,14 @@ export function deliverGithub(
   input: RemoteDeliverInput,
 ): RemoteDeliverResult {
   const posted = postRequest(peer.remote, { ...input, to: peer.rig })
-  if (posted.error !== undefined) {
-    return { error: posted.error }
+  if (posted.error !== undefined || posted.issueHtmlUrl === undefined) {
+    return { error: posted.error ?? 'issue posted but returned no url' }
   }
-  const m = mirror(dir, { ...input, to: peer.rig }, posted.issue!)
+  const m = mirror(dir, { ...input, to: peer.rig }, posted.issueHtmlUrl)
   if (m.error !== undefined) {
-    return { error: `issue ${posted.issue} posted but the mirror bead failed — ${m.error}` }
+    return { error: `issue ${posted.issueHtmlUrl} posted but the mirror bead failed — ${m.error}` }
   }
-  return { thread: posted.issue, mirror: m.id }
+  return { thread: posted.issueHtmlUrl, mirror: m.id }
 }
 
 /** wasteland: `wl post` onto the commons board (fork-and-propose),
@@ -77,10 +77,10 @@ export function deliverWasteland(
   input: RemoteDeliverInput,
 ): RemoteDeliverResult {
   const posted = postWanted(peer.remote, input)
-  if (posted.error !== undefined) {
-    return { error: posted.error }
+  if (posted.error !== undefined || posted.id === undefined) {
+    return { error: posted.error ?? 'wanted posted but returned no id' }
   }
-  const m = mirror(dir, { ...input, to: peer.rig }, posted.id!)
+  const m = mirror(dir, { ...input, to: peer.rig }, posted.id)
   if (m.error !== undefined) {
     return { error: `wanted ${posted.id} posted but the mirror bead failed — ${m.error}` }
   }

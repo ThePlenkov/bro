@@ -201,9 +201,19 @@ export function meshThread(
     selfRig: ownRig ?? undefined,
   })
   state.errors.push(...scan.errors)
-  // github admission needs this account's login — one `gh api user`
-  // per reduction, only when github records actually arrived
-  const self = scan.records.some((r) => r.transport === 'github') ? ghSelfLogin().login : undefined
+  // github admission needs this account's login — `gh api user` is a
+  // network call, so it runs once per reduction at most, and only
+  // when a github record actually needs it
+  let ghLogin: string | undefined
+  let ghLoginReady = false
+  const loginOnce = (): string | undefined => {
+    if (!ghLoginReady) {
+      ghLoginReady = true
+      ghLogin = ghSelfLogin().login
+    }
+    return ghLogin
+  }
+  const self = scan.records.some((r) => r.transport === 'github') ? loginOnce() : undefined
   for (const r of scan.records) {
     admitPeerRecord(r, threads, seen, state, ownRig, peers, self)
   }
@@ -231,7 +241,7 @@ export function meshThread(
       for (const e of cs.errors) {
         state.errors.push(`self: ${e}`)
       }
-      const self2 = self ?? ghSelfLogin().login
+      const self2 = self ?? loginOnce()
       for (const r of cs.records) {
         if (!threads.has(r.envelope.thread) || seen.has(r.envelope.id)) {
           continue
