@@ -1482,14 +1482,15 @@ function prepareSpawn(
     ensureExitCause(dir, home, step, entry)
   }
   // the wall refusal comes AFTER the live-agent and claim guards: a
-  // respawn of an agent that is already running is a CONFLICT, and the
-  // caller reads that kind — a 'cap' here would say "the provider is
-  // walled" about a spawn that never needed a provider slot
+  // respawn of an agent that is already running is a CONFLICT, and so is
+  // a step another owner already claimed — the caller reads those kinds,
+  // and a 'cap' here would say "the provider is walled" about a spawn
+  // that never needed a provider slot
+  const { claimed, actor, phantom } = guardClaim(spec, existing !== undefined, opts.claimAs)
   const wallRefusal = batchWallRefusal(registry, spec)
   if (wallRefusal !== undefined) {
     throw wallRefusal
   }
-  const { claimed, actor, phantom } = guardClaim(spec, existing !== undefined, opts.claimAs)
   // fleet admission — before the registry write + claim land, so a
   // refusal leaves no half-spawned state
   enforceFleetCap(dir, home, registry, spec, opts.cap)
