@@ -534,4 +534,125 @@ describe('output caps + loud input failures', () => {
       await close()
     }
   })
+
+  test('a null body answers 400 in the openai envelope, never a 500', async () => {
+    const fake = fakeAcpAgent({ replyText: 'x' })
+    const { post, close } = await boot(fake)
+    try {
+      for (const path of ['/v1/responses', '/v1/chat/completions']) {
+        const r = await post(path, null)
+        assert.equal(r.status, 400)
+        const body = await r.json()
+        assert.equal(body.error.type, 'invalid_request_error')
+      }
+    } finally {
+      await close()
+    }
+  })
+
+  test('a non-function tool answers 400 — the agent cannot lose it silently', async () => {
+    const fake = fakeAcpAgent({ replyText: 'ok' })
+    const { post, close } = await boot(fake)
+    try {
+      const r1 = await post('/v1/responses', {
+        input: 'x',
+        tools: [{ type: 'web_search' }],
+      })
+      assert.equal(r1.status, 400)
+      assert.match(((await r1.json()) as { error: { message: string } }).error.message, /web_search/)
+      const r2 = await post('/v1/chat/completions', {
+        messages: [{ role: 'user', content: 'x' }],
+        tools: [{ type: 'web_search_preview' }],
+      })
+      assert.equal(r2.status, 400)
+      assert.match(
+        ((await r2.json()) as { error: { message: string } }).error.message,
+        /web_search_preview/
+      )
+      // and nothing reached the agent — no turn was paid for
+      assert.equal(fake.prompts.length, 0)
+    } finally {
+      await close()
+    }
+  })
+
+  test('chat stop truncates the buffered reply at the marker', async () => {
+    const fake = fakeAcpAgent({ replyText: 'abc MARK tail', configOptions: [MODEL_OPTION] })
+    const { r, close } = await postChat(fake, {
+      messages: [{ role: 'user', content: 'x' }],
+      stop: 'MARK',
+    })
+    try {
+      assert.equal(r.status, 200)
+      const body = await r.json()
+      assert.equal(body.choices[0].message.content, 'abc ')
+      assert.equal(body.choices[0].finish_reason, 'stop')
+    } finally {
+      await close()
+    }
+  })
+
+  test('chat stop cuts streamed deltas at a marker split across chunks', async () => {
+    const fake = fakeAcpAgent({
+      updates: chunks('hello ST', 'OP world'),
+      configOptions: [MODEL_OPTION],
+    })
+    const { r, close } = await postChat(fake, {
+      messages: [{ role: 'user', content: 'x' }],
+      stop: ['STOP'],
+      stream: true,
+    })
+    try {
+      const raw = await r.text()
+      const deltas = raw
+        .split('\n\n')
+        .filter((f) => f.trim() !== '')
+        .map((f) => f.replace(/^data: /, ''))
+        .filter((d) => d !== '[DONE]')
+        .map((d) => JSON.parse(d) as Record<string, unknown>)
+      const text = deltas
+        .flatMap((d) => (d.choices as { delta: { content?: string } }[]))
+        .map((c) => c.delta.content ?? '')
+        .join('')
+      assert.equal(text, 'hello ')
+    } finally {
+      await close()
+    }
+  })
+
+  test('a streamed chat stop hit records the cut reply — a resend replays it', async () => {
+    const fake = fakeAcpAgent({ replyText: 'abc MARK tail', configOptions: [MODEL_OPTION] })
+    const { post, close } = await boot(fake)
+    try {
+      const body = {
+        messages: [{ role: 'user', content: 'x' }],
+        stop: ['MARK'],
+        stream: true,
+      }
+      await post('/v1/chat/completions', body)
+      // the resend replays the recorded view — the cut text, not the raw
+      const r2 = await post('/v1/chat/completions', { ...body, stream: false })
+      const b2 = await r2.json()
+      assert.equal(b2.choices[0].message.content, 'abc ')
+      assert.equal(fake.prompts.length, 1)
+    } finally {
+      await close()
+    }
+  })
+
+  test('a malformed chat stop answers 400', async () => {
+    const fake = fakeAcpAgent({ replyText: 'ok' })
+    const { r, close } = await postChat(fake, {
+      messages: [{ role: 'user', content: 'x' }],
+      stop: 5,
+    })
+    try {
+      assert.equal(r.status, 400)
+      const body = await r.json()
+      assert.equal(body.error.type, 'invalid_request_error')
+      assert.match(body.error.message, /stop/)
+    } finally {
+      await close()
+    }
+  })
 })

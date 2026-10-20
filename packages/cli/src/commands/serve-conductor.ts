@@ -216,12 +216,7 @@ function toolContract(
         `- ${t.name}: ${t.description ?? ''} input_schema: ${JSON.stringify(t.input_schema ?? {})}`
     )
     .join('\n')
-  let must: string | undefined
-  if (choice?.type === 'any') {
-    must = 'You MUST respond with a tool call.'
-  } else if (choice?.type === 'tool' && typeof choice.name === 'string') {
-    must = `You MUST call the tool "${choice.name}".`
-  }
+  const must = mustText(choice)
   return [
     '<tools>',
     'Call tools by emitting exactly, one per call:',
@@ -232,11 +227,28 @@ function toolContract(
   ].join('\n')
 }
 
-/** tool_choice → the MUST clause of the injected contract. */
+/** tool_choice → the MUST clause of the injected contract — the one
+ *  source of truth toolContract delegates to. */
 function mustText(choice: MessagesRequest['tool_choice']): string | undefined {
   if (choice?.type === 'any') return 'You MUST respond with a tool call.'
   if (choice?.type === 'tool' && typeof choice.name === 'string') {
     return `You MUST call the tool "${choice.name}".`
+  }
+  return undefined
+}
+
+/** tool_choice → canonical choice. The openai dialects differ only in
+ *  WHERE the named tool lives (responses: choice.name; chat:
+ *  choice.function.name) — the kind→choice mapping itself is this one
+ *  helper so the dialects cannot drift. */
+function wireToolChoice(
+  kind: string | undefined,
+  name: string | undefined
+): MessagesRequest['tool_choice'] {
+  if (kind === 'required' || kind === 'any') return { type: 'any' }
+  if (kind === 'none') return { type: 'none' }
+  if (kind === 'function') {
+    return name === undefined ? { type: 'any' } : { type: 'tool', name }
   }
   return undefined
 }
@@ -1837,14 +1849,10 @@ function itemToMessages(it: RespItem): ClientMessage[] {
 }
 
 function respToolChoice(c: ResponsesRequest['tool_choice']): MessagesRequest['tool_choice'] {
-  const t = typeof c === 'string' ? c : c?.type
-  if (t === 'required' || t === 'any') return { type: 'any' }
-  if (t === 'none') return { type: 'none' }
-  if (t === 'function') {
-    const name = typeof c === 'object' ? c.name : undefined
-    return name === undefined ? { type: 'any' } : { type: 'tool', name }
-  }
-  return undefined
+  return wireToolChoice(
+    typeof c === 'string' ? c : c?.type,
+    typeof c === 'object' ? c.name : undefined
+  )
 }
 
 /** A bare-string input is one user turn. */
@@ -1883,9 +1891,15 @@ function responsesToBody(r: ResponsesRequest): MessagesRequest {
     typeof r.input === 'string'
       ? stringInput(r.input)
       : items.filter((i) => !isDev(i)).flatMap(itemToMessages)
-  const tools = (r.tools ?? [])
-    .filter((t) => t.type === 'function' || t.type === undefined)
-    .map((t) => ({ name: t.name, description: t.description, input_schema: t.parameters }))
+  // a non-function tool (web_search, file_search, …) can't reach the
+  // agent — reject it loudly instead of silently dropping a paid-for
+  // capability the caller thinks the agent has
+  const tools = (r.tools ?? []).map((t) => {
+    if (t.type !== 'function' && t.type !== undefined) {
+      throw new Error(`tools: unsupported tool type '${t.type}' — only function tools are supported`)
+    }
+    return { name: t.name, description: t.description, input_schema: t.parameters }
+  })
   return {
     model: effortModel(r.model, r.reasoning?.effort),
     system: systemText === '' ? undefined : [{ text: systemText }],
@@ -2143,6 +2157,12 @@ async function parseDialect<T>(
     } else {
       openaiError(res, 400, 'invalid_request_error', 'malformed JSON body')
     }
+    return undefined
+  }
+  // a valid-JSON scalar ('null', '5', '"x"') is a client error, not a
+  // 500 — shape() reads properties and would throw outside any guard
+  if (rreq === null || typeof rreq !== 'object') {
+    openaiError(res, 400, 'invalid_request_error', 'request body must be a JSON object')
     return undefined
   }
   const bad = shape(rreq)
@@ -2618,6 +2638,7 @@ interface ChatRequest {
   messages?: ChatMessage[]
   tools?: { type?: string; function?: { name?: string; description?: string; parameters?: unknown } }[]
   tool_choice?: string | { type?: string; function?: { name?: string } }
+  stop?: string | string[] | null
   reasoning_effort?: string
   stream?: boolean
   stream_options?: { include_usage?: boolean }
@@ -2647,7 +2668,9 @@ function chatContent(c: ChatMessage['content']): InBlock[] {
 
 /** One chat message → canonical rows. assistant.tool_calls ride as
  *  tool_use blocks (history replays verbatim); role:'tool' is the
- *  caller's own tool result — a user-side tool_result. */
+ *  caller's own tool result — a user-side tool_result. The
+ *  system/developer gate lives HERE — chatToBody already claimed
+ *  those roles for the system slot, so they never become turns. */
 function chatToMessages(m: ChatMessage): ClientMessage[] {
   if (m.role === 'system' || m.role === 'developer') return []
   if (m.role === 'tool') {
@@ -2689,14 +2712,10 @@ function chatToMessages(m: ChatMessage): ClientMessage[] {
 }
 
 function chatToolChoice(c: ChatRequest['tool_choice']): MessagesRequest['tool_choice'] {
-  const t = typeof c === 'string' ? c : c?.type
-  if (t === 'required') return { type: 'any' }
-  if (t === 'none') return { type: 'none' }
-  if (t === 'function') {
-    const name = typeof c === 'object' ? c.function?.name : undefined
-    return name === undefined ? { type: 'any' } : { type: 'tool', name }
-  }
-  return undefined
+  return wireToolChoice(
+    typeof c === 'string' ? c : c?.type,
+    typeof c === 'object' ? c.function?.name : undefined
+  )
 }
 
 function chatToBody(r: ChatRequest): MessagesRequest {
@@ -2712,24 +2731,40 @@ function chatToBody(r: ChatRequest): MessagesRequest {
         })
         .join(''),
     }))
-  const messages = (r.messages ?? [])
-    .filter((m) => m.role !== 'system' && m.role !== 'developer')
-    .flatMap(chatToMessages)
-  const tools = (r.tools ?? [])
-    .filter((t) => t.type === 'function' || t.type === undefined)
-    .map((t) => ({
+  const messages = (r.messages ?? []).flatMap(chatToMessages)
+  // same contract as responsesToBody — a non-function tool can't reach
+  // the agent, so it answers 400 instead of vanishing silently
+  const tools = (r.tools ?? []).map((t) => {
+    if (t.type !== 'function' && t.type !== undefined) {
+      throw new Error(`tools: unsupported tool type '${t.type}' — only function tools are supported`)
+    }
+    return {
       name: t.function?.name,
       description: t.function?.description,
       input_schema: t.function?.parameters,
-    }))
+    }
+  })
   return {
     model: effortModel(r.model, r.reasoning_effort),
     system: system.length === 0 ? undefined : system,
     messages,
     tools: tools.length === 0 ? undefined : tools,
     tool_choice: chatToolChoice(r.tool_choice),
+    stop_sequences: chatStopSeqs(r.stop),
     stream: r.stream,
   }
+}
+
+/** chat `stop` → canonical stop_sequences — a bare string is one
+ *  marker; a malformed value is a 400-class translation error, never
+ *  a silent drop. */
+function chatStopSeqs(s: ChatRequest['stop']): string[] | undefined {
+  if (s === undefined || s === null) return undefined
+  const seqs = typeof s === 'string' ? [s] : s
+  if (!Array.isArray(seqs) || seqs.some((q) => typeof q !== 'string' || q === '')) {
+    throw new Error('stop: a string or an array of non-empty strings is required')
+  }
+  return seqs
 }
 
 /** Canonical reply blocks → the assistant message row —
@@ -2774,7 +2809,8 @@ class ChatLive extends TagPump {
     private readonly model: string,
     private readonly created: number,
     tools = true,
-    private readonly cap?: number
+    private readonly cap?: number,
+    private readonly stops?: StopFilter
   ) {
     super(tools)
   }
@@ -2798,7 +2834,8 @@ class ChatLive extends TagPump {
 
   readonly onUpdate: NonNullable<PooledTurnOpts['onUpdate']> = (u) => {
     if (u.sessionUpdate === 'agent_message_chunk' && u.content.type === 'text') {
-      this.feed(u.content.text)
+      // a stop_sequence hit cuts the wire here — later chunks swallow
+      this.feed(this.stops?.feed(u.content.text) ?? u.content.text)
     }
   }
 
@@ -2841,8 +2878,11 @@ class ChatLive extends TagPump {
     this.callIdx++
   }
 
-  /** Final delta + optional usage chunk + [DONE]. */
+  /** Final delta + optional usage chunk + [DONE]. The stop filter's
+   *  held tail flushes through the pump first — a non-marker tail is
+   *  real content the wire still owes the client. */
   finish(stopReason: string, usage?: Record<string, unknown>): void {
+    if (this.stops !== undefined) this.feed(this.stops.flush())
     this.drainAll()
     this.head()
     const finishReason = this.capped
@@ -2936,6 +2976,10 @@ async function chatCompletions(
   const created = Math.floor(Date.now() / 1000)
   const model = servedModel(requestModelOf(body), wire.opts, wire.cfg, body)
   const tools = body.tool_choice?.type !== 'none'
+  // one filter per turn — the streamed leg feeds it delta-by-delta,
+  // the buffered leg cuts the settled text post-hoc; the recorded
+  // reply is stops.emitted either way, byte-identical to the wire
+  const stops = new StopFilter(stopSeqsOf(body) ?? [])
   let live: ChatLive | undefined
   let out: TurnOutcome
   try {
@@ -2969,7 +3013,8 @@ async function chatCompletions(
                 model,
                 created,
                 tools,
-                capCharsOf(creq.max_completion_tokens ?? creq.max_tokens)
+                capCharsOf(creq.max_completion_tokens ?? creq.max_tokens),
+                stops
               )
               return live.onUpdate
             }
@@ -2979,7 +3024,7 @@ async function chatCompletions(
     openaiFail(res, err, live)
     return
   }
-  chatDeliver(res, wire, { creq, body, out, key, chatId, created, model, tools, live, t0 })
+  chatDeliver(res, wire, { creq, body, out, key, chatId, created, model, tools, live, stops, t0 })
 }
 
 /** Post-turn settlement for /v1/chat/completions — replay → recorded
@@ -2999,18 +3044,37 @@ function chatDeliver(
     model: string
     tools: boolean
     live: ChatLive | undefined
+    stops: StopFilter
     t0: number
   }
 ): void {
   const o = chatOutcome(d.out, d.tools)
   const cap = capCharsOf(d.creq.max_completion_tokens ?? d.creq.max_tokens)
-  const capped = capBlocks(o.blocks, cap)
+  // the buffered leg's stop cut lands post-hoc through the same filter
+  // the streamed leg fed delta-by-delta. On a live-leg hit emitted is
+  // already final (post-hit deltas swallow); without a hit the held
+  // tail is only the prefix-check buffer — the raw text stands.
+  if (!o.replay && d.live === undefined) {
+    d.stops.feed((d.out.reply as PooledReply | undefined)?.text ?? '')
+    d.stops.flush()
+  }
+  const settled =
+    !o.replay && (d.live === undefined || d.stops.hit !== undefined)
+      ? d.stops.emitted
+      : undefined
+  const capped = capBlocks(
+    settled === undefined ? o.blocks : parseReply(settled, d.tools),
+    cap
+  )
   const blocks = capped.blocks
   // the cap reports the same canonical reason the acp's own ceiling
-  // would — a resend replays the cut, not the uncut original
-  const stopReason = capped.capped ? 'max_tokens' : o.stopReason
-  const finish = capped.capped ? 'length' : o.finish
-  const outTokens = capped.capped ? blocksTokens(blocks) : o.outTokens
+  // would — a resend replays the cut, not the uncut original; a stop
+  // hit is its own reason
+  const stopReason =
+    capped.capped ? 'max_tokens' : d.stops.hit !== undefined ? 'stop_sequence' : o.stopReason
+  const finish = capped.capped ? 'length' : d.stops.hit !== undefined ? 'stop' : o.finish
+  const outTokens =
+    capped.capped ? blocksTokens(blocks) : settled !== undefined ? estTokens(settled) : o.outTokens
   if (!o.replay && d.out.conv !== undefined) {
     settleConv(
       wire,
@@ -3021,6 +3085,7 @@ function chatDeliver(
         blocks,
         model: (o.reply as PooledReply).model,
         stopReason,
+        stopSequence: d.stops.hit,
         inputTokens: o.inputTokens,
       },
       stopKeyOf(stopSeqsOf(d.body) ?? [])
