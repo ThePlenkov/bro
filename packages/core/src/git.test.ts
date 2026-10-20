@@ -10,6 +10,7 @@ import {
   gitLogPathRecords,
   gitLogStamp,
   gitUpstreamBehind,
+  gitWorktreeRoots,
   mainWorktreeRoot,
   unquoteGitPath,
 } from './git.ts'
@@ -459,6 +460,52 @@ describe('mainWorktreeRoot', () => {
     const dir = mkdtempSync(join(tmpdir(), 'bro-git-norepo-'))
     try {
       assert.equal(mainWorktreeRoot(dir), null)
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+})
+
+describe('gitWorktreeRoots', () => {
+  test('a solo repo lists just its own root', () => {
+    withRepo((dir) => {
+      assert.deepEqual(gitWorktreeRoots(dir), [dir])
+    })
+  })
+
+  test('linked worktrees follow the main record', () => {
+    withRepo((dir) => {
+      const linked = mkdtempSync(join(tmpdir(), 'bro-git-roots-'))
+      try {
+        git(dir, ['worktree', 'add', '-q', linked, '-b', 'work/roots'])
+        assert.deepEqual(gitWorktreeRoots(dir), [dir, linked])
+        // from inside the linked checkout the set is the same
+        assert.deepEqual(gitWorktreeRoots(linked), [dir, linked])
+      } finally {
+        rmSync(linked, { recursive: true, force: true })
+      }
+    })
+  })
+
+  test('a bare repo record is dropped, its linked worktrees kept', () => {
+    const root = mkdtempSync(join(tmpdir(), 'bro-git-rootbare-'))
+    const linked = mkdtempSync(join(tmpdir(), 'bro-git-rootbarew-'))
+    try {
+      const bare = join(root, 'repo.git')
+      git(root, ['init', '-q', '--bare', '-b', 'main', bare])
+      git(bare, ['worktree', 'add', '-q', linked, '-b', 'work/bare'])
+      assert.deepEqual(gitWorktreeRoots(bare), [linked])
+      assert.deepEqual(gitWorktreeRoots(linked), [linked])
+    } finally {
+      rmSync(root, { recursive: true, force: true })
+      rmSync(linked, { recursive: true, force: true })
+    }
+  })
+
+  test('outside a repository resolves empty, never a throw', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'bro-git-norepo-'))
+    try {
+      assert.deepEqual(gitWorktreeRoots(dir), [])
     } finally {
       rmSync(dir, { recursive: true, force: true })
     }

@@ -241,6 +241,44 @@ function worktreeListMain(
   return real(answer) === real(common) ? null : answer
 }
 
+/** Every worktree checkout's root — `git worktree list` records, main
+ *  first, bare records dropped (a bare repo's own entry is git storage,
+ *  not a checkout; its LINKED worktrees still count). `-z` terminates
+ *  fields with NUL so a path carrying specials survives verbatim; the
+ *  plain form C-quotes them — unquoteGitPath decodes. [] outside a
+ *  repository or on git failure — callers read "no siblings" and keep
+ *  their own dir. */
+export function gitWorktreeRoots(dir: string): string[] {
+  const z = gitTry(['-C', dir, 'worktree', 'list', '--porcelain', '-z'])
+  if (z.code === 0) {
+    const roots: string[] = []
+    for (const rec of z.out.split('\0\0')) {
+      const fields = rec.split('\0').filter((f) => f !== '')
+      if (!fields[0]?.startsWith('worktree ') || fields.includes('bare')) {
+        continue
+      }
+      roots.push(fields[0].slice('worktree '.length))
+    }
+    return roots
+  }
+  // no -z support (pre-2.36 git): records split on blank lines, paths
+  // C-quoted when they carry specials
+  const p = gitTry(['-C', dir, 'worktree', 'list', '--porcelain'])
+  if (p.code !== 0) {
+    return []
+  }
+  const roots: string[] = []
+  for (const rec of p.out.split(/\r?\n\r?\n/)) {
+    const m = /^worktree (.+)$/m.exec(rec)
+    if (m === null || rec.split(/\r?\n/).includes('bare')) {
+      continue
+    }
+    const raw = m[1]!.trim()
+    roots.push(raw.startsWith('"') && raw.endsWith('"') ? unquoteGitPath(raw) : raw)
+  }
+  return roots
+}
+
 /** Depth-bounded search under `root` for a directory whose `.git` FILE
  *  claims `gitdir: <common>` — the marker a moved gitdir's real
  *  checkout carries. Directories holding their own `.git` entry (some

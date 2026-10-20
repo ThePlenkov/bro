@@ -448,6 +448,50 @@ describe('specs facade resolution', () => {
   })
 })
 
+describe('spec coverage across linked worktrees', () => {
+  /** Coverage asks "does this bead have a spec anywhere in the
+   *  project's checkouts" — a spec on the bead's feature branch in a
+   *  sibling worktree counts (bro-3rhzs; the bro-zkpju nag was the
+   *  false positive this kills). */
+  test('a spec in a linked worktree counts — and silences the nag', async () => {
+    await withRepo({ claims: ['b1'] }, async (dir) => {
+      // worktree add needs one commit — the fixture repo is init-only
+      testGit(['-C', dir, 'commit', '-qm', 'init', '--allow-empty'])
+      const wt = mkdtempSync(join(tmpdir(), 'bro-spec-wt-'))
+      try {
+        testGit(['-C', dir, 'worktree', 'add', '-q', wt, '-b', 'work/b1'])
+        // the spec exists ONLY in the sibling worktree's specs/ dir —
+        // this checkout's own specs/ stays empty
+        writeSpecs(wt, { 'b1.md': '# b1\n' })
+        const spec = specStore(dir)
+        assert.equal(spec.hasSpec('b1'), true)
+        assert.equal(spec.hasSpec('b2'), false)
+        // the probe path: an own claim whose spec lives in the sibling
+        // worktree is coverage, not a nag
+        const h = sddConnector.hooks!(ctx(dir))!
+        assert.deepEqual(await h.promptSubmit!(ctx(dir), 'p'), [])
+        assert.deepEqual(await h.stopGate!(ctx(dir)), [])
+        const r = await capture(dir, ['check'])
+        assert.equal(r.exit, 0)
+        assert.match(r.out.join('\n'), /^b1\tspec\t/m)
+      } finally {
+        rmSync(wt, { recursive: true, force: true })
+      }
+    })
+  })
+
+  test('a stale worktree admin entry fails open to a plain miss', async () => {
+    await withRepo({ claims: ['b1'] }, async (dir) => {
+      testGit(['-C', dir, 'commit', '-qm', 'init', '--allow-empty'])
+      const wt = mkdtempSync(join(tmpdir(), 'bro-spec-wt-'))
+      testGit(['-C', dir, 'worktree', 'add', '-q', wt, '-b', 'work/b1'])
+      // dir gone but the admin record remains — resolution must not throw
+      rmSync(wt, { recursive: true, force: true })
+      assert.equal(specStore(dir).hasSpec('b1'), false)
+    })
+  })
+})
+
 describe('native spec tree', () => {
   test('tree() links children via parent frontmatter', async () => {
     await withRepo({ config: {} }, (dir) => {
