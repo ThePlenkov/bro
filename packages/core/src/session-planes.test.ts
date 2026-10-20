@@ -246,7 +246,7 @@ describe('the batch lane (spec bro-9h86l)', () => {
       const plane = splittingPlane('testkind', 0, 0)
       // an INTERACTIVE spawn in flight holds a reservation — it is the
       // operator's, so it must not eat the fleet's share
-      reserveSessionSlot(resv, 'native-aa')
+      reserveSessionSlot(resv, 'native-aa', 'interactive')
       assert.doesNotThrow(() =>
         admitSessionSlot(plane, agents, { key: 'native-bb', workerEnv: { BRO_BATCH: '1' } })
       )
@@ -318,7 +318,7 @@ describe('admitSessionSlot', () => {
       // sits in the reservations dir. The plane retires it inside its
       // own count, so the tally must run AFTER the plane — counted
       // before, it would read 2/2 and refuse a rightful admit
-      const landed = reserveSessionSlot(resv, 'native-aa')
+      const landed = reserveSessionSlot(resv, 'native-aa', 'interactive')
       const sweeping: SessionPlane = {
         kind: 'testkind',
         detectsCli: () => true,
