@@ -92,7 +92,9 @@ node scripts/codescene-gate.ts <report> --strict   # also fail on pre-existing f
 ```
 
 It reads the same `change-type` the App's analysis reports, so a local
-"green" and the App's verdict agree. `--strict` is the wave-N bar for a
+"green" and the App's verdict usually agree — they can differ, because the
+App applies the branch's quality gates and its own PR finding suppressions,
+while this only reads the delta. `--strict` is the wave-N bar for a
 graduated file: it fails on findings the diff did not cause, so a file can
 only climb a rung by getting cleaner.
 

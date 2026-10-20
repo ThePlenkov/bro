@@ -1,6 +1,8 @@
 /**
- * The local twin of the CodeScene App's review — same analysis, same
- * verdict, before the push instead of after it.
+ * The same delta analysis as the CodeScene App's review, before the push
+ * instead of after it. The verdict CAN differ: the App applies the
+ * branch's quality gates and its own PR finding suppressions, this only
+ * reads the delta.
  *
  *   node scripts/codescene-check.ts [base-ref] [--strict]
  *
@@ -38,11 +40,22 @@ function reportDirtyTree(): void {
   let dirty: string
   try {
     dirty = execFileSync('git', ['status', '--porcelain'], { encoding: 'utf8' }).trim()
-  } catch {
-    return // no git context — the delta below will report it
+  } catch (err) {
+    // the state is UNKNOWN — say so, or the user reads a green check as
+    // "the delta covered everything"
+    console.log(
+      `codescene-check: warning — could not read the working-tree state (${(err as Error).message}); ` +
+        'the delta covers committed changes only'
+    )
+    return
   }
   if (dirty === '') return
-  const files = dirty.split('\n').map((l) => l.slice(3).trim())
+  const files = dirty.split('\n').map((l) => {
+    const path = l.slice(3).trim()
+    // a rename/copy entry reads "old -> new" — the new path is the one that exists
+    const arrow = path.indexOf(' -> ')
+    return arrow === -1 ? path : path.slice(arrow + 4)
+  })
   console.log(
     `codescene-check: ${files.length} uncommitted file(s) — the delta covers COMMITTED changes only:`
   )
