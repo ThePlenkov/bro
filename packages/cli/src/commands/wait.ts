@@ -352,6 +352,33 @@ function closedUnshipped(w: Watch, read: DepRead): boolean {
   return true
 }
 
+/** closed provides:<id> on the peer plane — the dep's own release
+ *  rule fired, the wait is over */
+function shipped(w: Watch, read: DepRead): boolean {
+  if (read.shipped !== true) {
+    return false
+  }
+  w.settled = { verdict: 'free', source: srcOf(w), replicaAgeMs: read.replicaAgeMs }
+  return true
+}
+
+/** posting store read clean — thread verdicts outrank ship ones
+ *  (reject beats free), the still-open case is just a progress line */
+function settleFromPlanes(w: Watch, ctx: WaitCtx, read: DepRead): void {
+  const thread = threadOf(w, ctx)
+  if (rejected(w, read, thread) || shipped(w, read)) {
+    return
+  }
+  if (read.request!.status === 'closed') {
+    closedUnshipped(w, read)
+    return
+  }
+  console.error(
+    `wait ${w.arg}: stage=${thread.stage ?? 'none'} shipped=no` +
+      (thread.turn !== undefined ? ` — ${thread.turn}'s move` : ''),
+  )
+}
+
 /** one poll of one unsettled watch — records a verdict or bumps the
  *  blip counter; the watch carries the state */
 function pollWatch(w: Watch, ctx: WaitCtx): void {
@@ -365,23 +392,7 @@ function pollWatch(w: Watch, ctx: WaitCtx): void {
     settleAbsent(w, read)
     return
   }
-  const thread = threadOf(w, ctx)
-  if (rejected(w, read, thread)) {
-    return
-  }
-  if (read.shipped === true) {
-    w.settled = { verdict: 'free', source: srcOf(w), replicaAgeMs: read.replicaAgeMs }
-    return
-  }
-  if (read.request!.status === 'closed' && closedUnshipped(w, read)) {
-    return
-  }
-  if (read.request!.status !== 'closed') {
-    console.error(
-      `wait ${w.arg}: stage=${thread.stage ?? 'none'} shipped=no` +
-        (thread.turn !== undefined ? ` — ${thread.turn}'s move` : ''),
-    )
-  }
+  settleFromPlanes(w, ctx, read)
 }
 
 /** terminal verdicts by precedence — a bad ref (2) outranks a dead
@@ -402,21 +413,17 @@ function aggregate(watches: Watch[]): { code: number; verdict: string } | undefi
   return watches.every((w) => w.settled !== undefined) ? { code: 0, verdict: 'free' } : undefined
 }
 
-export async function runWaitCommand(argv: string[]): Promise<void> {
-  const dir = process.cwd()
-  const { refs, every, timeout, json } = parseArgs(argv)
-  const common = gitCommonDir(dir)
-  if (common === null) {
-    fail('bro wait: not inside a git repository')
-  }
-  const ctx: WaitCtx = { dir, peers: meshPeers(dir), common }
-  const watches = resolveWatches(refs, ctx)
-
+/** the bounded poll — each turn polls every unsettled watch, emits
+ *  a terminal verdict, or sleeps until the next tick/deadline */
+async function watchLoop(
+  watches: Watch[],
+  ctx: WaitCtx,
+  o: { every: number; timeout: number; json: boolean },
+): Promise<void> {
   // monotonic clock for the bound — a wall-clock step must not stretch
   // a --timeout past its elapsed budget
-  const deadline = timeout > 0 ? performance.now() + timeout * 1000 : Number.POSITIVE_INFINITY
+  const deadline = o.timeout > 0 ? performance.now() + o.timeout * 1000 : Number.POSITIVE_INFINITY
   const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms))
-
   for (;;) {
     for (const w of watches) {
       if (w.settled === undefined) {
@@ -425,20 +432,31 @@ export async function runWaitCommand(argv: string[]): Promise<void> {
     }
     const out = aggregate(watches)
     if (out !== undefined) {
-      emit(watches, { ...out, json })
+      emit(watches, { ...out, json: o.json })
       return
     }
     if (performance.now() >= deadline) {
       emit(watches, {
         code: 4,
         verdict: 'timeout',
-        json,
+        json: o.json,
         extra: { unsettled: watches.filter((w) => w.settled === undefined).map((w) => w.arg) },
       })
       return
     }
     // cap the poll sleep at the remaining budget — a short --timeout
     // exits on its boundary, not one full interval late
-    await sleep(Math.min(every * 1000, deadline - performance.now()))
+    await sleep(Math.min(o.every * 1000, deadline - performance.now()))
   }
+}
+
+export async function runWaitCommand(argv: string[]): Promise<void> {
+  const dir = process.cwd()
+  const args = parseArgs(argv)
+  const common = gitCommonDir(dir)
+  if (common === null) {
+    fail('bro wait: not inside a git repository')
+  }
+  const ctx: WaitCtx = { dir, peers: meshPeers(dir), common }
+  await watchLoop(resolveWatches(args.refs, ctx), ctx, args)
 }
