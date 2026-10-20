@@ -234,7 +234,12 @@ export function devinPidIsBatch(pid: number, procDir = '/proc'): boolean {
     // spawn-side detection says so too.
     return /(?:^|\0)BRO_BATCH=[^\0]+/.test(environ)
   } catch {
-    return false
+    // The environ is unreadable — the pid cannot be classified. It is
+    // a REAL live session (not a phantom), so it is counted as the
+    // fleet's: the batch cap is the fleet's own share, and a quota
+    // must fail closed. The cost is the fleet yields a slot it may not
+    // have used; the alternative is a cap the fleet can pass.
+    return true
   }
 }
 

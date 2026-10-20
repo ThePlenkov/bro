@@ -97,9 +97,11 @@ papered over.
   `countBatchWorkers` refuses `'config'` when the cap is armed; the cap
   parses like every other lane knob (a typo refuses, never admits).
 - `packages/cli/src/session-planes/devin.test.ts` — a live worker whose
-  `/proc/<pid>/environ` carries `BRO_PR` (or `BRO_MOL_ID`) counts as
-  batch; a lookalike suffix does not; an unreadable environ is not a
-  batch worker (undercount, never a phantom).
+  `/proc/<pid>/environ` carries `BRO_BATCH` counts as batch; a lookalike
+  suffix does not; an UNREADABLE environ counts as the fleet's — the
+  pid is a real live session it simply cannot be classified, and a quota
+  that cannot be established must fail closed (the fleet yields a slot
+  it may not have used; the alternative is a cap the fleet can pass).
 - `packages/cli/src/agent-connectors.test.ts` — `batchWallRefusal`
   refuses a batch spawn while the provider is walled, leaves the
   interactive lane alone, ignores another provider, and admits again

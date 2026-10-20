@@ -196,10 +196,12 @@ describe('devinPidIsBatch (spec bro-9h86l)', () => {
     })
   })
 
-  test('no readable environ is not a batch worker — undercount, never phantom', () => {
+  test('an unclassifiable live worker counts as the fleet\'s — the cap fails closed', () => {
     withProc((procDir, mk) => {
+      // the environ is unreadable: the pid cannot be classified, and a
+      // quota that cannot be established must not be passed silently
       mk(505, null, null)
-      assert.equal(devinPidIsBatch(505, procDir), false)
+      assert.equal(devinPidIsBatch(505, procDir), true)
     })
   })
 })
