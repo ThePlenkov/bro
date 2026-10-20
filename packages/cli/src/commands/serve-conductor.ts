@@ -26,8 +26,8 @@ import type { IncomingMessage, ServerResponse } from 'node:http'
 import { join } from 'node:path'
 import { gitCommonDir, loadConfig } from '@broject/core'
 import type { ProviderEntry } from '@broject/core'
-import { acpOpen, acpPooledTurn, acpSessionRetain, otelEvent, otelJournal, otelParent, otelSpan } from '@broject/providers'
-import type { AcpTerminals } from '@broject/providers'
+import { acpOpen, acpPooledTurn, acpSessionRetain, otelEvent, otelJournal, otelParent, otelSpan, toolPayload } from '@broject/providers'
+import type { AcpTerminals, Toolish } from '@broject/providers'
 import type { AcpContentBlock, AcpPeer, AcpRetainedSession, OtelCtx, PooledTurnOpts, ProviderWireOpts } from '@broject/providers'
 import { peerAttrs } from './peer.ts'
 import { catalogModels } from './providers.ts'
@@ -924,6 +924,10 @@ class LiveTurn extends TagPump {
       // text (drain still holds a live tag prefix; that tail completes
       // into a block later, so text order is preserved either way)
       this.drain(false)
+      // structured edges ride between the drained text and the
+      // narration line — wire order stays "text so far, then the
+      // tool edge", and a stop-gate hit never swallows a real event
+      this.flushToolEvents()
       // narration rides the same stop gate — a marker inside a tool
       // label cuts identically, and post-hit lines emit nothing
       const kept = this.stops?.feed(line) ?? line
@@ -934,6 +938,28 @@ class LiveTurn extends TagPump {
   private readonly toolStarted = new Set<string>()
   private readonly toolDone = new Set<string>()
   private readonly toolLabels = new Map<string, string>()
+
+  /** Structured twin of the narration edges (bro-btccj): a named
+   *  `tool_activity` SSE frame per lifecycle edge, payload shared with
+   *  the 'agent' bus topic's normalizer (one shape, both surfaces).
+   *  Queued at the edge decision — narrate* marks where an edge fires —
+   *  and flushed after the text drain so wire order stays honest. */
+  private readonly toolEvents: Record<string, unknown>[] = []
+
+  private toolActivity(u: Toolish, phase: 'open' | 'finish', synthesizedOpen = false): void {
+    const p = toolPayload(u, phase)
+    // a call first seen already-terminal gets a synthesized open edge —
+    // carrying its terminal status on 'open' lies about the edge
+    if (synthesizedOpen) delete p['status']
+    // titles can carry whole command strings — the stream bounds them
+    // like the narration label does (the bus keeps full fidelity)
+    if (typeof p['title'] === 'string') p['title'] = shortLabel(p['title'])
+    this.toolEvents.push({ type: 'tool_activity', ...p })
+  }
+
+  private flushToolEvents(): void {
+    for (const p of this.toolEvents.splice(0)) sse(this.res, 'tool_activity', p)
+  }
 
   /** The session's own tool_call lifecycle — the client's only view of
    *  agent-side work (exec, file ops, subagent spawns): narrated as
@@ -964,17 +990,20 @@ class LiveTurn extends TagPump {
       // a repeated tool_call can carry the terminal edge (the provider
       // layer emits it as finish) — narrate it once, with the cached label
       if (!terminal || !this.once(u.toolCallId, this.toolDone)) return undefined
+      this.toolActivity(u, 'finish')
       const known = u.toolCallId !== undefined ? this.toolLabels.get(u.toolCallId) : undefined
       const label = shortLabel(u.title ?? u.name ?? known ?? 'tool call')
       return `\n${u.status === 'failed' ? '✗' : '✓'} ${label}\n`
     }
     const label = shortLabel(u.title ?? u.name ?? u.kind ?? 'tool call')
     if (u.toolCallId !== undefined) this.toolLabels.set(u.toolCallId, label)
+    this.toolActivity(u, 'open', terminal)
     const start = `\n⏺ ${label}\n`
     // a tool_call can itself arrive already terminal — open and close
     // the edge in one update so nothing stays mid-flight forever
     if (!terminal) return start
     if (u.toolCallId !== undefined) this.toolDone.add(u.toolCallId)
+    this.toolActivity(u, 'finish')
     return `${start}${u.status === 'failed' ? '✗' : '✓'} ${label}\n`
   }
 
@@ -986,6 +1015,7 @@ class LiveTurn extends TagPump {
       return undefined
     }
     if (!this.once(u.toolCallId, this.toolDone)) return undefined
+    this.toolActivity(u, 'finish')
     const known = u.toolCallId !== undefined ? this.toolLabels.get(u.toolCallId) : undefined
     const label = shortLabel(u.title ?? u.name ?? known ?? 'tool call')
     return `\n${u.status === 'failed' ? '✗' : '✓'} ${label}\n`
