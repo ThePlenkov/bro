@@ -353,12 +353,15 @@ function checkSessionLanes(
       'cap'
     )
   }
+  const ctx = { reservations, refused }
   if (maxBatchWorkers > 0 && batch) {
     // the fleet's own share of the worker budget
-    checkWorkerCap(plane, workerCap(plane, 'maxBatchWorkers', maxBatchWorkers, batchWorkers), reservations, refused)
+    const budget: LaneBudget = { lane: 'maxBatchWorkers', cap: maxBatchWorkers, live: batchWorkers }
+    checkWorkerCap(plane, workerCap(plane, budget), ctx)
   }
   if (maxWorkers > 0) {
-    checkWorkerCap(plane, workerCap(plane, 'maxWorkers', maxWorkers, workers), reservations, refused)
+    const budget: LaneBudget = { lane: 'maxWorkers', cap: maxWorkers, live: workers }
+    checkWorkerCap(plane, workerCap(plane, budget), ctx)
   }
 }
 
@@ -368,9 +371,21 @@ function checkSessionLanes(
  * the population and the wording; the check itself is one shape, so a
  * change to the rule lands in one place.
  */
+/** Which lane a budget belongs to — the whole worker pool or the
+ *  fleet's share of it. A named lane, not a loose string: the knob,
+ *  the wording and the countable check all follow from it. */
+type WorkerLane = 'maxWorkers' | 'maxBatchWorkers'
+
+/** A lane's numbers — the cap and what is live against it. */
+interface LaneBudget {
+  lane: WorkerLane
+  cap: number
+  live: number
+}
+
 interface WorkerCap {
   /** the config knob (`agents.<kind>.<knob>`) */
-  knob: 'maxWorkers' | 'maxBatchWorkers'
+  knob: WorkerLane
   /** the subject in the refusal — "worker" / "batch worker" */
   subject: 'worker' | 'batch worker'
   /** the counted population — "workers" / "batch workers" */
@@ -388,20 +403,15 @@ interface WorkerCap {
 /** One lane's cap — the whole budget (`maxWorkers`) or the fleet's
  *  share of it (`maxBatchWorkers`). One shape for both: the wording
  *  differs, the rule does not. */
-function workerCap(
-  plane: SessionPlane,
-  lane: 'maxWorkers' | 'maxBatchWorkers',
-  cap: number,
-  live: number
-): WorkerCap {
-  const batch = lane === 'maxBatchWorkers'
+function workerCap(plane: SessionPlane, budget: LaneBudget): WorkerCap {
+  const batch = budget.lane === 'maxBatchWorkers'
   return {
-    knob: lane,
+    knob: budget.lane,
     subject: batch ? 'batch worker' : 'worker',
     population: batch ? 'batch workers' : 'workers',
     undistinguishable: batch ? 'batch workers' : 'worker sessions',
-    cap,
-    live,
+    cap: budget.cap,
+    live: budget.live,
     countable: batch
       ? plane.countBatchWorkers !== undefined
       : plane.countWorkers !== undefined,
@@ -414,22 +424,21 @@ function workerCap(
 function checkWorkerCap(
   plane: SessionPlane,
   cap: WorkerCap,
-  reservations: number,
-  refused: string
+  ctx: { reservations: number; refused: string }
 ): void {
   if (!cap.countable) {
     throw new SpawnError(
       `agents.${plane.kind}.${cap.knob} is set but the '${plane.kind}' session plane ` +
         `cannot distinguish ${cap.undistinguishable} from interactive sessions` +
-        refused,
+        ctx.refused,
       'config'
     )
   }
-  if (cap.live + reservations >= cap.cap) {
+  if (cap.live + ctx.reservations >= cap.cap) {
     throw new SpawnError(
-      `${plane.kind} ${cap.subject} quota reached — ${cap.live + reservations}/${cap.cap} live ${cap.population} ` +
+      `${plane.kind} ${cap.subject} quota reached — ${cap.live + ctx.reservations}/${cap.cap} live ${cap.population} ` +
         `(agents.${plane.kind}.${cap.knob} in bro.config)` +
-        refused,
+        ctx.refused,
       'cap'
     )
   }
