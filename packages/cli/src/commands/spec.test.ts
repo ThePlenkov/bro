@@ -14,7 +14,7 @@ import { dirname, join } from 'node:path'
 import { runSpecCommand, sddConnector, specState } from './spec.ts'
 import { hasSpecFile, SPEC_CONNECTORS } from '../spec-connectors.ts'
 import { loadConfig, registerConnector, scrubEnv, specStore, testGit } from '@broject/core'
-import type { ConnectorCtx, SpecStore, TaskRow, TaskStore } from '@broject/core'
+import type { ConnectorCtx, SpecNode, SpecStore, TaskRow, TaskStore } from '@broject/core'
 import { tmpDir } from './testrepo.ts'
 
 // ambient repo/agent/store pins must not reach fixture git children
@@ -456,6 +456,97 @@ describe('specs facade resolution', () => {
       const spec = specStore(dir, loadConfig(dir).connectors)
       assert.match(spec.policy(), /write the design down first/)
       assert.equal(spec.hasSpec('b1'), false)
+    })
+  })
+})
+
+describe('spec coverage across linked worktrees', () => {
+  /** Coverage asks "does this bead have a spec anywhere in the
+   *  project's checkouts" — a spec on the bead's feature branch in a
+   *  sibling worktree counts (bro-3rhzs; the bro-zkpju nag was the
+   *  false positive this kills). */
+  test('a spec in a linked worktree counts — and silences the nag', async () => {
+    await withRepo({ claims: ['b1'] }, async (dir) => {
+      // worktree add needs one commit — the fixture repo is init-only
+      testGit(['-C', dir, 'commit', '-qm', 'init', '--allow-empty'])
+      const wt = mkdtempSync(join(tmpdir(), 'bro-spec-wt-'))
+      try {
+        testGit(['-C', dir, 'worktree', 'add', '-q', wt, '-b', 'work/b1'])
+        // the spec exists ONLY in the sibling worktree's specs/ dir —
+        // this checkout's own specs/ stays empty
+        writeSpecs(wt, { 'b1.md': '# b1\n' })
+        const spec = specStore(dir)
+        assert.equal(spec.hasSpec('b1'), true)
+        assert.equal(spec.hasSpec('b2'), false)
+        // the probe path: an own claim whose spec lives in the sibling
+        // worktree is coverage, not a nag
+        const h = sddConnector.hooks!(ctx(dir))!
+        assert.deepEqual(await h.promptSubmit!(ctx(dir), 'p'), [])
+        assert.deepEqual(await h.stopGate!(ctx(dir)), [])
+        const r = await capture(dir, ['check'])
+        assert.equal(r.exit, 0)
+        assert.match(r.out.join('\n'), /^b1\tspec\t/m)
+      } finally {
+        rmSync(wt, { recursive: true, force: true })
+      }
+    })
+  })
+
+  test('a stale worktree admin entry fails open to a plain miss', async () => {
+    await withRepo({ claims: ['b1'] }, async (dir) => {
+      testGit(['-C', dir, 'commit', '-qm', 'init', '--allow-empty'])
+      const wt = mkdtempSync(join(tmpdir(), 'bro-spec-wt-'))
+      testGit(['-C', dir, 'worktree', 'add', '-q', wt, '-b', 'work/b1'])
+      // dir gone but the admin record remains — resolution must not throw
+      rmSync(wt, { recursive: true, force: true })
+      assert.equal(specStore(dir).hasSpec('b1'), false)
+    })
+  })
+
+  test('a bare dir owns no checkout — its one linked worktree is scanned', async () => {
+    await withRepo({ config: {} }, async (dir) => {
+      testGit(['-C', dir, 'commit', '-qm', 'init', '--allow-empty'])
+      const holder = mkdtempSync(join(tmpdir(), 'bro-spec-bare-'))
+      const wt = mkdtempSync(join(tmpdir(), 'bro-spec-barewt-'))
+      try {
+        const bare = join(holder, 'repo.git')
+        testGit(['clone', '-q', '--bare', dir, bare])
+        testGit(['-C', bare, 'worktree', 'add', '-q', wt, '-b', 'work/b1'])
+        writeSpecs(wt, { 'b1.md': '# b1\n' })
+        // the bare record itself is not a checkout — the sole linked
+        // root is a sibling and must still be scanned
+        assert.equal(specStore(bare).hasSpec('b1'), true)
+      } finally {
+        rmSync(wt, { recursive: true, force: true })
+        rmSync(holder, { recursive: true, force: true })
+      }
+    })
+  })
+
+  test('a class-instance store keeps its prototype methods through the wrap', async () => {
+    class ClassySpecs implements SpecStore {
+      hasSpec(): boolean {
+        return false
+      }
+      remedy(id: string): string {
+        return `fix ${id}`
+      }
+      policy(): string {
+        return 'pol'
+      }
+      tree(): SpecNode[] {
+        return []
+      }
+    }
+    registerConnector({ name: 'classy-specs', specs: () => new ClassySpecs() })
+    await withRepo({ config: {} }, (dir) => {
+      const spec = specStore(dir, { specs: 'classy-specs' })
+      assert.equal(spec.hasSpec('b1'), false)
+      assert.equal(spec.remedy('b1'), 'fix b1')
+      assert.equal(spec.policy(), 'pol')
+      assert.deepEqual(spec.tree(), [])
+      assert.equal(spec.scaffold, undefined)
+      assert.equal(spec.scope, undefined)
     })
   })
 })

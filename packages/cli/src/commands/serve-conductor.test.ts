@@ -1,6 +1,6 @@
 /** `bro serve` conductor — /v1/messages answers from an acp provider
  *  session instead of an HTTP upstream (spec bro-xeozo). */
-import { describe, test } from 'node:test'
+import { after, describe, test } from 'node:test'
 import assert from 'node:assert/strict'
 import { mkdtempSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
@@ -105,6 +105,15 @@ const CFG: ConductorConfig = {
 }
 
 describe('conductorConfig', () => {
+  // loadConfig merges the GLOBAL layer — a dev box pinning serve.backend
+  // in ~/.config/bro would leak a backend into the 'unset env' assertions;
+  // this suite reads an empty global config dir instead
+  const prevXdg = process.env.XDG_CONFIG_HOME
+  process.env.XDG_CONFIG_HOME = mkdtempSync(join(tmpdir(), 'bro-conductor-xdg-'))
+  after(() => {
+    if (prevXdg === undefined) delete process.env.XDG_CONFIG_HOME
+    else process.env.XDG_CONFIG_HOME = prevXdg
+  })
   const providers = {
     'dv-acp': { type: 'acp' as const, command: 'dv acp', model: 'swe-y' },
     cli1: { type: 'cli' as const, command: 'x run' },
@@ -789,6 +798,41 @@ describe('serve /v1/* — the conductor plane', () => {
       // wire's own name for a backend outage mid-stream
       assert.equal((err.data.error as { type: string }).type, 'overloaded_error')
       assert.match((err.data.error as { message: string }).message, /conductor/)
+    } finally {
+      await close()
+    }
+  })
+
+  test('the conductor surfaces the live link terminal registry (bro-eua0d)', async () => {
+    const fake = fakeAcpAgent({ replyText: 'x' })
+    const proxy = conductorProxy(CFG, { acp: { peer: fake.app } })
+    // no request yet — the pooled link doesn't exist, so no registry
+    assert.equal(proxy.terminals(), undefined)
+    const { url, close } = await listen(deps({ provider: proxy }))
+    try {
+      const r = await fetch(`${url}/v1/messages`, {
+        method: 'POST',
+        headers: { ...auth, 'content-type': 'application/json' },
+        body: JSON.stringify({ messages: [{ role: 'user', content: 'x' }], stream: false }),
+      })
+      assert.equal(r.status, 200)
+      const reg = proxy.terminals()
+      assert.ok(reg, 'the pooled acp link carries its terminal registry')
+      // the registry is the live one — an agent terminal/create call
+      // over the link lands in it
+      const { terminalId } = await reg.create({
+        params: { command: 'sh', args: ['-c', 'echo via-conductor'], env: [] },
+      } as never)
+      for (let i = 0; i < 100; i++) {
+        const snap = await reg.output({ params: { terminalId } } as never)
+        if (snap.output.includes('via-conductor')) {
+          break
+        }
+        await new Promise((r2) => setTimeout(r2, 10))
+      }
+      const snap = await reg.output({ params: { terminalId } } as never)
+      assert.match(snap.output, /via-conductor/)
+      await reg.release({ params: { terminalId } } as never)
     } finally {
       await close()
     }

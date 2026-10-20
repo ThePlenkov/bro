@@ -493,6 +493,7 @@ export function listDevinSessions(dirs: string[], procDir = '/proc'): Discovered
       out.push({
         pid,
         name: name.slice(0, -'.lock'.length),
+        cwd: devinPidCwd(pid, procDir),
         worker: devinPidIsWorker(pid, procDir),
         agentId: devinPidAgentId(pid, procDir),
       })

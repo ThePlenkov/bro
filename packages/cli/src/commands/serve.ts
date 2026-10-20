@@ -52,6 +52,12 @@
  *                               agent; plain GET tails the durable
  *                               .events.jsonl archive as NDJSON. Same
  *                               credential boundary as the log route.
+ *   GET    /api/v1/terminals/<id>/output[?follow]
+ *                               the conductor's acp terminal registry
+ *                               (bro-eua0d) — a REAL shell the agent ran:
+ *                               {output, truncated, exitStatus} JSON, or
+ *                               `follow` → SSE data: chunks + `event: exit`.
+ *                               Same credential rule as the log route.
  *   GET    /api/v1/queue        the beads queue — claimed (in-progress)
  *                               work + ready depth (`bro status` shape)
  *   GET    /api/v1/ticks        supervision — the watch heartbeat file,
@@ -186,6 +192,7 @@ import {
 } from '../planes/stream.ts'
 import { providerConfig, providerProxy, type ProviderConfig } from './serve-provider.ts'
 import { conductorConfig, conductorProxy, type ConductorConfig } from './serve-conductor.ts'
+import type { AcpTerminals, TerminalFollow } from '@broject/providers'
 import { readBeads } from './status.ts'
 import { collectSnapshot } from './watch.ts'
 import { readHeartbeat, type HeartbeatSummary } from './watch-heartbeat.ts'
@@ -439,6 +446,10 @@ export interface ServeDeps {
   provider?: ((req: IncomingMessage, res: ServerResponse) => Promise<void>) & {
     dispose?: () => void
   }
+  /** `/api/v1/terminals/<id>/output` — the conductor's live acp
+   *  terminal registry (bro-eua0d). Absent → the route 404s like any
+   *  unwired plane (no conductor, no agent shells to read). */
+  terminals?: () => AcpTerminals | undefined
 }
 
 export interface ServeResponse {
@@ -470,6 +481,7 @@ const ROUTES = [
   'GET /api/v1/agents/<ref>',
   'GET /api/v1/agents/<ref>/log',
   'GET /api/v1/agents/<ref>/events',
+  'GET /api/v1/terminals/<id>/output',
   'DELETE /api/v1/agents/<ref>',
   'POST /api/v1/webhooks/github',
   'ALL /v1/*',
@@ -510,17 +522,17 @@ function isLoopbackOrigin(origin: string): boolean {
   }
 }
 
-function parseRef(seg: string): string {
+function parseRef(seg: string, noun = 'agent ref'): string {
   let ref: string
   try {
     ref = decodeURIComponent(seg)
   } catch {
     // malformed % escapes throw URIError — that's bad input, a 400,
     // not a 500
-    throw new HttpError(400, `invalid agent ref "${seg}"`)
+    throw new HttpError(400, `invalid ${noun} "${seg}"`)
   }
   if (!SAFE_REF.test(ref)) {
-    throw new HttpError(400, `invalid agent ref "${ref}"`)
+    throw new HttpError(400, `invalid ${noun} "${ref}"`)
   }
   return ref
 }
@@ -1068,6 +1080,7 @@ async function handleRequest(
       (await routeProvider(req, res, url.pathname, deps, token, statePathHint)) ||
       (await routeAgentLog(req, res, url, deps, token, statePathHint)) ||
       (await routeAgentEvents(req, res, url, deps, token, statePathHint)) ||
+      (await routeTerminalOutput(req, res, url, deps, token, statePathHint)) ||
       (await routeEventsStream(req, res, url.pathname, deps.eventsBus?.()))
     if (routed) {
       return
@@ -1269,6 +1282,219 @@ async function routeAgentEvents(
   if (m === null) {
     return false
   }
+  return routeAgentEventsImpl(req, res, url, deps, token, statePathHint, m)
+}
+
+/** A follower's queued-bytes ceiling — a reader this far behind is
+ *  dropped rather than letting one slow client grow `bro serve`'s
+ *  buffered output without bound. The reconnect lands on a fresh
+ *  snapshot, so a dropped follower loses nothing but a retry. */
+const SSE_FOLLOW_BACKLOG = 1_048_576
+
+/** Output slices this size pace a big snapshot through the drain loop —
+ *  one JSON frame can never single-handedly blow the backlog cap. */
+const SSE_SNAPSHOT_SLICE = 65_536
+
+/** `GET /api/v1/terminals/<id>/output` — the conductor's acp terminal
+ *  registry (bro-eua0d): the agent's shells spawn inside THIS process,
+ *  so the buffer a `terminal/output` poll reads is a real shell, not a
+ *  transcript line. Same raw-stream seat and credential rule as the
+ *  agent-log route (bearer or `?token=` — output can carry secrets;
+ *  route()/routeRequest carry no headers, so the check lives here).
+ *  Plain GET answers the `terminal/output` wire shape as JSON;
+ *  `?follow` upgrades to SSE: `event: meta` carries `truncated`, then
+ *  the buffer at subscribe time lands as `data:` frames (atomic with
+ *  the taps, nothing slips between), live chunks follow, `event: exit`
+ *  carries the TerminalExitStatus JSON. Every data frame is a JSON
+ *  string — SSE treats '\r' as a line ending, so raw chunks would lose
+ *  bytes; JSON keeps the stream byte-exact against plain GET's `output`.
+ *  True once the path matches — false lets other paths through. */
+async function routeTerminalOutput(
+  req: IncomingMessage,
+  res: ServerResponse,
+  url: URL,
+  deps: ServeDeps,
+  token: string,
+  statePathHint: string
+): Promise<boolean> {
+  const m = /^\/api\/v1\/terminals\/([^/]+)\/output$/.exec(url.pathname)
+  if (m === null) {
+    return false
+  }
+  if (req.method !== 'GET') {
+    send(res, 405, { error: 'method not allowed' })
+    return true
+  }
+  const credentialed =
+    bearerMatch(req.headers.authorization, token) ||
+    tokenEq(url.searchParams.get('token') ?? '', token)
+  if (!credentialed) {
+    send(
+      res,
+      401,
+      { error: `session token required — read it from ${statePathHint}` },
+      { headers: { 'www-authenticate': 'Bearer' } }
+    )
+    return true
+  }
+  let id: string
+  try {
+    id = parseRef(m[1]!, 'terminal id')
+  } catch (err) {
+    if (err instanceof HttpError) {
+      send(res, err.status, { error: err.message })
+      return true
+    }
+    throw err
+  }
+  const reg = deps.terminals?.()
+  if (reg === undefined) {
+    // no live link yet (or a non-conductor serve) — same answer the
+    // other unwired planes give
+    send(res, 404, { error: 'no conductor terminal registry' })
+    return true
+  }
+  let snap: ReturnType<AcpTerminals['snapshot']>
+  try {
+    snap = reg.snapshot(id)
+  } catch {
+    send(res, 404, { error: `no terminal "${id}"` })
+    return true
+  }
+  if (!url.searchParams.has('follow')) {
+    send(res, 200, snap, { contentType: 'application/json' })
+    return true
+  }
+  followTerminalOutput(res, reg, id)
+  return true
+}
+
+/** The `?follow` half of the output route — held apart so the route
+ *  stays under the complexity cap. Headers precede `reg.follow()` so a
+ *  synchronous `exit` can never end a headerless response; the snapshot
+ *  then streams through the drain-fed queue at the reader's pace. */
+function followTerminalOutput(
+  res: ServerResponse,
+  reg: AcpTerminals,
+  id: string
+): void {
+  let handle: TerminalFollow | undefined
+  const gone = (): boolean => res.writableEnded || res.destroyed
+  // Outbound frames park in `queue`, not the socket's own buffer — when
+  // `res.write` back-pressures, the tail waits for 'drain' instead of
+  // inflating res internals. A snapshot then streams at the reader's
+  // pace; only a genuinely stuck follower (queue past the cap) drops.
+  const queue: string[] = []
+  let queued = 0
+  let waitingDrain = false
+  let endAfterQueue = false
+  const drop = (): void => {
+    queue.length = 0
+    queued = 0
+    handle?.stop()
+    res.end()
+  }
+  const pump = (): void => {
+    while (queue.length > 0 && !gone()) {
+      // write() never refuses the frame — `false` is advisory ("over
+      // high-water"), so the head is off the queue either way; on false
+      // we just stop feeding it more until 'drain'
+      const frame = queue.shift()!
+      queued -= Buffer.byteLength(frame)
+      if (!res.write(frame)) {
+        if (!waitingDrain) {
+          waitingDrain = true
+          res.once('drain', () => {
+            waitingDrain = false
+            pump()
+          })
+        }
+        return
+      }
+    }
+    if (queue.length === 0 && endAfterQueue && !gone()) {
+      res.end()
+    }
+  }
+  const enqueue = (frame: string): void => {
+    if (gone()) {
+      return
+    }
+    queued += Buffer.byteLength(frame)
+    queue.push(frame)
+    if (queued > SSE_FOLLOW_BACKLOG) {
+      drop()
+      return
+    }
+    pump()
+  }
+  const finish = (): void => {
+    endAfterQueue = true
+    if (queue.length === 0 && !gone()) {
+      res.end()
+    }
+  }
+  const sse = (chunk: string): void => {
+    for (let i = 0; i < chunk.length; i += SSE_SNAPSHOT_SLICE) {
+      enqueue(`data: ${JSON.stringify(chunk.slice(i, i + SSE_SNAPSHOT_SLICE))}\n\n`)
+    }
+  }
+  // headers before follow() — a registry that fires `exit` at subscribe
+  // time must never res.end() ahead of them, and the snapshot probe
+  // above keeps the unknown-id 404 reachable now that writeHead is first
+  res.writeHead(200, {
+    'content-type': 'text/event-stream; charset=utf-8',
+    'cache-control': 'no-cache',
+    connection: 'keep-alive',
+  })
+  try {
+    handle = reg.follow(id, {
+      data: sse,
+      exit: (status) => {
+        enqueue(`event: exit\ndata: ${JSON.stringify(status)}\n\n`)
+        finish()
+      },
+    })
+  } catch (err) {
+    if (err instanceof Error && err.message.startsWith('Unknown terminal')) {
+      // released between the probe and here — the stream just opened, so
+      // close it; the client's reconnect lands on the 404 above
+      res.end()
+      return
+    }
+    // a registry fault is not an empty terminal — answer a verdict the
+    // client can act on instead of a silent 200 it would retry forever
+    enqueue(
+      `event: error\ndata: ${JSON.stringify({ error: err instanceof Error ? err.message : String(err) })}\n\n`
+    )
+    finish()
+    return
+  }
+  // `truncated` rides ahead of the output — a follower that starts
+  // mid-buffer must know bytes are missing, exactly like plain GET
+  enqueue(`event: meta\ndata: ${JSON.stringify({ truncated: handle.snapshot.truncated })}\n\n`)
+  sse(handle.snapshot.output)
+  if (handle.completed) {
+    // already-final terminal — no taps attached, the snapshot carries
+    // the verdict. exitStatus alone can't gate this: it lands at the
+    // child's 'exit' while 'close' still owes the last piped bytes, and
+    // ending here would drop them plus leak the registered listener
+    enqueue(`event: exit\ndata: ${JSON.stringify(handle.snapshot.exitStatus)}\n\n`)
+    finish()
+    return
+  }
+  res.on('close', () => handle?.stop())
+}
+
+async function routeAgentEventsImpl(
+  req: IncomingMessage,
+  res: ServerResponse,
+  url: URL,
+  deps: ServeDeps,
+  token: string,
+  statePathHint: string,
+  m: RegExpExecArray
+): Promise<boolean> {
   if (req.method !== 'GET') {
     send(res, 405, { error: 'method not allowed' })
     return true
@@ -1547,6 +1773,9 @@ function realDeps(
 ): ServeDeps {
   const socketPath = busSocketPath(dir)
   const { conductorCfg, providerCfg } = provider
+  // the conductor's proxy carries the live link's terminal registry —
+  // the /api/v1/terminals plane reads through it (bro-eua0d)
+  const conductor = conductorCfg !== undefined ? conductorProxy(conductorCfg) : undefined
   return {
     snapshot: () => collectSnapshot(dir),
     agents: async () => {
@@ -1599,8 +1828,8 @@ function realDeps(
         },
       }),
     },
-    ...(conductorCfg !== undefined
-      ? { provider: conductorProxy(conductorCfg) }
+    ...(conductor !== undefined
+      ? { provider: conductor, terminals: conductor.terminals }
       : providerCfg !== undefined
         ? { provider: providerProxy(providerCfg) }
         : {}),

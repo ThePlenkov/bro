@@ -1358,14 +1358,17 @@ function guardExistingEntry(
  *  ids are random (a real bead can't collide), and when the store is
  *  down no claim could land anyway — probeStep can't tell "missing"
  *  from "store down" (its catch is silent), so for every OTHER step
- *  the claim write still fails loud. */
+ *  the claim write still fails loud. `spec.claimRequired` (`run --for`,
+ *  spec bro-7dila) disables the shortcut entirely: the caller promised
+ *  a real bead, so a probe miss falls through to the claim write and
+ *  fails on the missing id instead of minting unclaimed work. */
 function guardClaim(
   spec: SpawnSpec,
   hasEntry: boolean,
   claimAs: string | undefined
 ): { claimed: boolean; actor: string | undefined; phantom: boolean } {
   const step = probeStep(spec.beadsDir, spec.molStep)
-  if (spec.molStep.startsWith('adhoc-') && step === undefined) {
+  if (spec.claimRequired !== true && spec.molStep.startsWith('adhoc-') && step === undefined) {
     return { claimed: false, actor: undefined, phantom: true }
   }
   if (step?.status !== 'in_progress') {

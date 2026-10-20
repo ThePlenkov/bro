@@ -21,11 +21,11 @@
  * contract). New facades join FacadeMap + Connector together, and only
  * when a real consumer exists.
  */
-import { readdirSync, readFileSync } from 'node:fs'
+import { readdirSync, readFileSync, realpathSync } from 'node:fs'
 import { join, resolve } from 'node:path'
 import { checkBeads } from './bd.ts'
 import { loadConfig } from './config.ts'
-import { gitTry } from './git.ts'
+import { gitTry, gitWorktreeRoots } from './git.ts'
 import { markerOwner } from './proc.ts'
 import type { EventsFacade } from './events.ts'
 import type { QueryFacade } from './queries.ts'
@@ -689,12 +689,74 @@ export function mergeQueueHost(
   return facade('mergeQueue', { dir }, { prefer })
 }
 
-/** facade('specs') bound to a dir — the SDD tool this project runs. */
+/** facade('specs') bound to a dir — the SDD tool this project runs.
+ *  hasSpec is coverage over the WHOLE checkout set: a spec living in a
+ *  linked worktree counts (a bead's spec committed on its feature
+ *  branch reads MISSING from the main checkout otherwise — recurring
+ *  false-positive nags, bro-3rhzs). The wrap stays connector-agnostic —
+ *  each sibling answers with the same resolved tool (prefer rides
+ *  along); tree/scope/scaffold stay single-checkout, drift resolves
+ *  where the file actually lives. */
 export function specStore(
   dir: string = process.cwd(),
   prefer?: Record<string, string>
 ): SpecStore {
-  return facade('specs', { dir }, { prefer })
+  const store = facade('specs', { dir }, { prefer })
+  // delegate, never spread — a class-instance store's prototype methods
+  // must survive the wrap (spread copies own enumerable props only)
+  const wrapped: SpecStore = {
+    hasSpec: (id) => store.hasSpec(id) || siblingHasSpec(dir, prefer, id),
+    remedy: (id) => store.remedy(id),
+    policy: () => store.policy(),
+    tree: () => store.tree(),
+  }
+  if (store.scaffold !== undefined) {
+    wrapped.scaffold = (id, opts) => store.scaffold!(id, opts)
+  }
+  if (store.scope !== undefined) {
+    wrapped.scope = (id) => store.scope!(id)
+  }
+  return wrapped
+}
+
+/** The worktree-scan half of coverage — runs only on a local miss, so
+ *  a found spec never pays the `worktree list` spawn. The caller's own
+ *  checkout is skipped (its connector already answered); a bare dir
+ *  owns no checkout, so every listed root is a sibling there. A sibling
+ *  whose dir vanished or whose resolution throws fails open — a stale
+ *  admin entry never flips a verdict. Raw facade per sibling, not
+ *  specStore — the wrapped form would rescan siblings recursively. */
+function siblingHasSpec(
+  dir: string,
+  prefer: Record<string, string> | undefined,
+  id: string
+): boolean {
+  const roots = gitWorktreeRoots(dir)
+  if (roots.length === 0) {
+    return false
+  }
+  const real = (p: string): string => {
+    try {
+      return realpathSync(p)
+    } catch {
+      return p
+    }
+  }
+  const top = gitTry(['-C', dir, 'rev-parse', '--show-toplevel'])
+  const own = top.code === 0 ? real(top.out.trim()) : null
+  for (const wt of roots) {
+    if (own !== null && real(wt) === own) {
+      continue
+    }
+    try {
+      if (facade('specs', { dir: wt }, { prefer }).hasSpec(id)) {
+        return true
+      }
+    } catch {
+      // fail-open per worktree
+    }
+  }
+  return false
 }
 
 /** facade('stacks') bound to a dir — stack ops dispatch (sync cascade

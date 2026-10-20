@@ -59,9 +59,19 @@ export function gitTry(args: string[], timeoutMs?: number): { code: number; out:
  *  a repository, and on git failure: callers treat "no repo" as an
  *  ordinary state, never a throw. Canonical probe for the several
  *  features that keep re-inlining it (agents registry, mailbox, serve
- *  state, broker socket). */
-export function gitCommonDir(dir: string): string | null {
-  const r = gitTry(['-C', dir, 'rev-parse', '--path-format=absolute', '--git-common-dir'])
+ *  state, broker socket). `timeoutMs` bounds the CALL, not each probe —
+ *  an advisory caller pointing at a possibly-stalled mount passes one
+ *  so the check degrades instead of hanging (a timed-out probe reads
+ *  as failure → null, same contract). The deadline is shared: a
+ *  primary probe that burns the whole budget buys no fallback. */
+export function gitCommonDir(dir: string, timeoutMs?: number): string | null {
+  const deadline = timeoutMs === undefined ? undefined : Date.now() + timeoutMs
+  const remaining = (): number | undefined =>
+    deadline === undefined ? undefined : deadline - Date.now()
+  const r = gitTry(
+    ['-C', dir, 'rev-parse', '--path-format=absolute', '--git-common-dir'],
+    remaining()
+  )
   if (r.code === 0) {
     const common = r.out.trim()
     return common === '' ? null : common
@@ -71,7 +81,11 @@ export function gitCommonDir(dir: string): string | null {
   // is relative to `dir`, so resolve() absolutizes it the same way —
   // but keeps a symlinked dir's alias, and callers hash the result
   // (busSocketPath) — canonicalize so one repo yields one socket.
-  const fallback = gitTry(['-C', dir, 'rev-parse', '--git-common-dir'])
+  const rem = remaining()
+  if (rem !== undefined && rem <= 0) {
+    return null
+  }
+  const fallback = gitTry(['-C', dir, 'rev-parse', '--git-common-dir'], rem)
   const common = fallback.code === 0 ? fallback.out.trim() : ''
   if (common === '') {
     return null
@@ -225,6 +239,55 @@ function worktreeListMain(
   const raw = m[1]!.trim()
   const answer = raw.startsWith('"') && raw.endsWith('"') ? unquoteGitPath(raw) : raw
   return real(answer) === real(common) ? null : answer
+}
+
+/** Every worktree checkout's root — `git worktree list` records, main
+ *  first, bare records dropped (a bare repo's own entry is git storage,
+ *  not a checkout; its LINKED worktrees still count). `-z` terminates
+ *  fields with NUL so a path carrying specials survives verbatim; the
+ *  plain form C-quotes them — unquoteGitPath decodes. [] outside a
+ *  repository or on git failure — callers read "no siblings" and keep
+ *  their own dir. */
+export function gitWorktreeRoots(dir: string): string[] {
+  const z = gitTry(['-C', dir, 'worktree', 'list', '--porcelain', '-z'])
+  if (z.code === 0) {
+    return z.out
+      .split('\0\0')
+      .map(worktreeRootZ)
+      .filter((r): r is string => r !== null)
+  }
+  // no -z support (pre-2.36 git): records split on blank lines, paths
+  // C-quoted when they carry specials
+  const p = gitTry(['-C', dir, 'worktree', 'list', '--porcelain'])
+  if (p.code !== 0) {
+    return []
+  }
+  return p.out
+    .split(/\r?\n\r?\n/)
+    .map(worktreeRootPlain)
+    .filter((r): r is string => r !== null)
+}
+
+/** One `-z` porcelain record (fields NUL-joined) → its checkout root;
+ *  null for a bare record or a fragment that isn't a record head. */
+function worktreeRootZ(rec: string): string | null {
+  const fields = rec.split('\0')
+  const head = fields.find((f) => f !== '')
+  if (head === undefined || !head.startsWith('worktree ') || fields.includes('bare')) {
+    return null
+  }
+  return head.slice('worktree '.length)
+}
+
+/** One plain porcelain record → its checkout root — the bare record
+ *  drops out; the `worktree` line's C-quoting decodes. */
+function worktreeRootPlain(rec: string): string | null {
+  const m = /^worktree (.+)$/m.exec(rec)
+  if (m === null || rec.split(/\r?\n/).includes('bare')) {
+    return null
+  }
+  const raw = m[1]!.trim()
+  return raw.startsWith('"') && raw.endsWith('"') ? unquoteGitPath(raw) : raw
 }
 
 /** Depth-bounded search under `root` for a directory whose `.git` FILE

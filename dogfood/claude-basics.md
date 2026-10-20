@@ -16,12 +16,13 @@ conductor listener (`apiKeyHelper` → `bro serve ensure`, model
 1. Orient: `npx bro status` — reconcile with session context.
 2. Report your model: state plainly which model you believe you are
    running on and where the setting came from (your settings file).
-3. Multi-turn proof: ask yourself nothing — instead do two dependent
+3. Set up work: `npx bro task new "add a greeting.txt"`, then
+   `npx bro work enter <bead>` and `cd` into the worktree it prints,
+   then `npx bro spec new <bead>`,
+   `npx bro task set <bead> --description='spec: specs/<bead>.md'`.
+4. Multi-turn proof: ask yourself nothing — instead do two dependent
    actions in sequence (claim the bead, THEN edit the spec) and note
    that context carried across them naturally.
-4. Claim work: `npx bro task new "add a greeting.txt"`, then
-   `npx bro work enter <bead>`, `npx bro spec new <bead>`,
-   `npx bro task set <bead> --description='spec: specs/<bead>.md'`.
 5. Implement: create `greeting.txt` with `hello from claude basics`,
    commit it on the work branch.
 6. Prove the wire yourself: the conductor journals every turn as a

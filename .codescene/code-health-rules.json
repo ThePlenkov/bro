@@ -1,0 +1,193 @@
+{
+  "usage": "Code Health bar for bro, version-controlled with the code. The warning thresholds pinned here are bro's ceilings: constructor_max_arguments = 5, file_mean_cyclomatic_complexity_warning = 4, file_primitive_obsession_percentage_for_warning = 30, function_bumpy_road_bumps_for_warning = 2, function_bumpy_road_nesting_level_depth = 2, function_complex_conditional_branches_warning = 2, function_cyclomatic_complexity_warning = 9, function_duplication_min_lines_of_code_for_check = 10, function_duplication_min_similarity_percentage = 75, function_lines_of_code_warning = 50, function_max_arguments = 4, function_nesting_depth_warning = 4, unit_test_consecutive_asserts_for_large_block = 4, unit_test_suite_number_of_large_assertion_blocks = 4. The alert thresholds (and every threshold bro does not name) stay at CodeScene's configured value: the alerts are what the PR integration gates on, and moving them moves the gate for the whole repo — a deliberate wave decision, not a default. The rule weights are listed at their default (1.0) so a CodeScene default change cannot silently move bro's bar either. Keep this list COMPLETE: an omitted threshold falls back to a stricter value, not the default (measured: serve-conductor.ts scored 3.80 without this file and 1.84 with 8 thresholds left out). Keep in sync with the ceilings in the codescene skill.",
+  "rule_sets": [
+    {
+      "matching_content_path": "**/*",
+      "matching_content_path_doc": "All bro source — one bar for the whole repo, so a file's rung in .codescene/custom-quality-gates.json measures the file, not its directory.",
+      "rules": [
+        {
+          "name": "Brain Method",
+          "weight": 1.0
+        },
+        {
+          "name": "Bumpy Road Ahead",
+          "weight": 1.0
+        },
+        {
+          "name": "Code Duplication",
+          "weight": 1.0
+        },
+        {
+          "name": "Complex Conditional",
+          "weight": 1.0
+        },
+        {
+          "name": "Complex Method",
+          "weight": 1.0
+        },
+        {
+          "name": "Constructor Over-Injection",
+          "weight": 1.0
+        },
+        {
+          "name": "Deep, Global Nested Complexity",
+          "weight": 1.0
+        },
+        {
+          "name": "Deep, Nested Complexity",
+          "weight": 1.0
+        },
+        {
+          "name": "Duplicated Assertion Blocks",
+          "weight": 1.0
+        },
+        {
+          "name": "Excess Number of Function Arguments",
+          "weight": 1.0
+        },
+        {
+          "name": "Global Conditionals",
+          "weight": 1.0
+        },
+        {
+          "name": "Large Assertion Blocks",
+          "weight": 1.0
+        },
+        {
+          "name": "Large Embedded Code Block",
+          "weight": 1.0
+        },
+        {
+          "name": "Large Method",
+          "weight": 1.0
+        },
+        {
+          "name": "Lines of Code in a Single File",
+          "weight": 1.0
+        },
+        {
+          "name": "Lines of Declarations in a Single File",
+          "weight": 1.0
+        },
+        {
+          "name": "Low Cohesion",
+          "weight": 1.0
+        },
+        {
+          "name": "Missing Arguments Abstractions",
+          "weight": 1.0
+        },
+        {
+          "name": "Number of Functions in a Single Module",
+          "weight": 1.0
+        },
+        {
+          "name": "Overall Code Complexity",
+          "weight": 1.0
+        },
+        {
+          "name": "Overall Function Size",
+          "weight": 1.0
+        },
+        {
+          "name": "Primitive Obsession",
+          "weight": 1.0
+        },
+        {
+          "name": "String Heavy Function Arguments",
+          "weight": 1.0
+        }
+      ],
+      "thresholds": [
+        {
+          "name": "constructor_max_arguments",
+          "value": "5"
+        },
+        {
+          "name": "file_lines_of_code_for_alert",
+          "value": "-"
+        },
+        {
+          "name": "file_lines_of_code_for_critical_alert",
+          "value": "-"
+        },
+        {
+          "name": "file_lines_of_code_for_warning",
+          "value": "-"
+        },
+        {
+          "name": "file_mean_cyclomatic_complexity_warning",
+          "value": "4"
+        },
+        {
+          "name": "file_primitive_obsession_percentage_for_warning",
+          "value": "30"
+        },
+        {
+          "name": "function_bumpy_road_bumps_for_warning",
+          "value": "2"
+        },
+        {
+          "name": "function_bumpy_road_nesting_level_depth",
+          "value": "2"
+        },
+        {
+          "name": "function_complex_conditional_branches_alert",
+          "value": "-"
+        },
+        {
+          "name": "function_complex_conditional_branches_warning",
+          "value": "2"
+        },
+        {
+          "name": "function_cyclomatic_complexity_alert",
+          "value": "-"
+        },
+        {
+          "name": "function_cyclomatic_complexity_warning",
+          "value": "9"
+        },
+        {
+          "name": "function_duplication_min_lines_of_code_for_check",
+          "value": "10"
+        },
+        {
+          "name": "function_duplication_min_similarity_percentage",
+          "value": "75"
+        },
+        {
+          "name": "function_embedded_content_lines_of_code_alert",
+          "value": "-"
+        },
+        {
+          "name": "function_embedded_content_lines_of_code_warning",
+          "value": "-"
+        },
+        {
+          "name": "function_lines_of_code_alert",
+          "value": "-"
+        },
+        {
+          "name": "function_lines_of_code_warning",
+          "value": "50"
+        },
+        {
+          "name": "function_max_arguments",
+          "value": "4"
+        },
+        {
+          "name": "function_nesting_depth_warning",
+          "value": "4"
+        },
+        {
+          "name": "unit_test_consecutive_asserts_for_large_block",
+          "value": "4"
+        },
+        {
+          "name": "unit_test_suite_number_of_large_assertion_blocks",
+          "value": "4"
+        }
+      ]
+    }
+  ]
+}
