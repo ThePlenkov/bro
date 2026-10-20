@@ -437,6 +437,24 @@ function aggregate(watches: Watch[]): { code: number; verdict: string } | undefi
   return watches.every((w) => w.settled !== undefined) ? { code: 0, verdict: 'free' } : undefined
 }
 
+/** one turn of the loop — poll every unsettled watch. A throw is a
+ *  read failure, not a crash — a long-lived watcher spends it against
+ *  the same blip budget */
+function pollUnsettled(watches: Watch[], ctx: WaitCtx): void {
+  for (const w of watches) {
+    if (w.settled !== undefined) {
+      continue
+    }
+    try {
+      pollWatch(w, ctx)
+    } catch (err) {
+      noteReadErrors(w, [
+        `unexpected poll failure — ${err instanceof Error ? err.message : String(err)}`,
+      ])
+    }
+  }
+}
+
 /** the bounded poll — each turn polls every unsettled watch, emits
  *  a terminal verdict, or sleeps until the next tick/deadline */
 async function watchLoop(
@@ -449,20 +467,7 @@ async function watchLoop(
   const deadline = o.timeout > 0 ? performance.now() + o.timeout * 1000 : Number.POSITIVE_INFINITY
   const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms))
   while (performance.now() < deadline) {
-    for (const w of watches) {
-      if (w.settled !== undefined) {
-        continue
-      }
-      try {
-        pollWatch(w, ctx)
-      } catch (err) {
-        // a throw is a read failure, not a crash — a long-lived
-        // watcher spends it against the same blip budget
-        noteReadErrors(w, [
-          `unexpected poll failure — ${err instanceof Error ? err.message : String(err)}`,
-        ])
-      }
-    }
+    pollUnsettled(watches, ctx)
     const out = aggregate(watches)
     if (out !== undefined) {
       emit(watches, { ...out, json: o.json })
