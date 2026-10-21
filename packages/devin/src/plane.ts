@@ -614,22 +614,7 @@ export function listDevinSessions(dirs: string[], procDir = '/proc'): Discovered
   const seen = new Set<number>()
   const out: DiscoveredSession[] = []
   for (const dir of dirs) {
-    let names: string[]
-    try {
-      names = readdirSync(dir)
-    } catch (err) {
-      if ((err as NodeJS.ErrnoException).code === 'ENOENT') {
-        continue
-      }
-      throw new SpawnError(
-        `cannot verify devin session list — ${dir}: ${(err as Error).message}`,
-        'unavailable'
-      )
-    }
-    for (const name of names) {
-      if (!name.endsWith('.lock')) {
-        continue
-      }
+    for (const name of lockNames(dir)) {
       const pid = lockPid(dir, name)
       if (pid === undefined || seen.has(pid)) {
         continue
@@ -640,16 +625,40 @@ export function listDevinSessions(dirs: string[], procDir = '/proc'): Discovered
         continue
       }
       seen.add(pid)
-      out.push({
-        pid,
-        name: name.slice(0, -'.lock'.length),
-        cwd: devinPidCwd(pid, procDir),
-        worker: devinPidIsWorker(pid, procDir),
-        agentId: devinPidAgentId(pid, procDir),
-      })
+      out.push(sessionRow(pid, name, procDir))
     }
   }
   return out
+}
+
+/** The lock files of a dir — a missing dir means no sessions; any OTHER
+ *  read failure is an unverifiable list (fails closed). */
+function lockNames(dir: string): string[] {
+  let names: string[]
+  try {
+    names = readdirSync(dir)
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === 'ENOENT') {
+      return []
+    }
+    throw new SpawnError(
+      `cannot verify devin session list — ${dir}: ${(err as Error).message}`,
+      'unavailable'
+    )
+  }
+  return names.filter((name) => name.endsWith('.lock'))
+}
+
+/** One session's row — the lock's name, the pid's working directory and
+ *  the /proc classifier's verdicts. */
+function sessionRow(pid: number, lockName: string, procDir: string): DiscoveredSession {
+  return {
+    pid,
+    name: lockName.slice(0, -'.lock'.length),
+    cwd: devinPidCwd(pid, procDir),
+    worker: devinPidIsWorker(pid, procDir),
+    agentId: devinPidAgentId(pid, procDir),
+  }
 }
 
 /** The builtin plane — registers on import. */
