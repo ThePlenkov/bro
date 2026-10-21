@@ -134,11 +134,21 @@ minutes. That is the right direction for a shared account.
 
 - the admission and the ACP surface **fail closed**: a cap that cannot be
   established refuses (the house rule — a quota that cannot be verified
-  must not be walked past);
+  must not be walked past), and a slot the ACP surface cannot claim
+  refuses the request too — a session whose claim the budget never saw
+  is exactly the unbudgeted session this change exists to stop;
 - the guard plane **fails open**: a hook must never stall a client
   (REVIEW.md §"Hooks and launchers must fail open"). An unreadable count
   lets the call through; the admission and the ACP surface are the hard
   gates.
+
+The wire contract of a refusal: a request that has not answered yet gets
+**429** (the quota line matches the conductor's rate-limit mapping). A
+**streamed** request has already sent its 200 and its preamble — the
+stream IS the response — so the refusal arrives as the stream's error
+event, the wire's own way of saying the same thing. The status line
+cannot be rewritten after the body started; the spec says so instead of
+pretending otherwise.
 
 ### The vendor's knowledge moves to its own package
 

@@ -92,15 +92,54 @@ function invocationStartsSession(toks: Token[], at: number): boolean {
   return !NON_SESSION_COMMANDS.has(verb)
 }
 
-/** Is the token at this position a command (not an argument)? An
- *  assignment in front of a binary (`FOO=bar devin`) does not make the
- *  binary an argument. */
-function atCommandPosition(toks: Token[], at: number): boolean {
-  if (at === 0) {
-    return true
+/** The wrappers that take a bare operand before the command
+ *  (`timeout 30 devin`). */
+const WRAPPER_OPERANDS = new Set(['chrt', 'stdbuf', 'taskset', 'timeout'])
+
+/** The options that take a value (`sudo -u root`, `nice -n 5`) — the
+ *  value is not the command. */
+const VALUE_OPTIONS = new Set(['-U', '-c', '-m', '-n', '-o', '-u'])
+
+/** The index of the segment's command — the assignments and the
+ *  wrappers (with their options, their values and the operand some of
+ *  them take) are skipped; what is left is the command. */
+function commandIndex(toks: Token[]): number {
+  let i = 0
+  while (i < toks.length) {
+    const text = toks[i]!.text
+    if (isAssignment(text)) {
+      i++
+      continue
+    }
+    const name = base(text)
+    if (!WRAPPERS.has(name)) {
+      return i
+    }
+    i++
+    let operands = WRAPPER_OPERANDS.has(name) ? 1 : 0
+    while (i < toks.length) {
+      const next = toks[i]!.text
+      if (next.startsWith('-')) {
+        i++
+        if (VALUE_OPTIONS.has(next) && i < toks.length && !toks[i]!.text.startsWith('-')) {
+          i++
+        }
+        continue
+      }
+      if (operands > 0) {
+        operands--
+        i++
+        continue
+      }
+      break
+    }
   }
-  const prev = toks[at - 1]!.text
-  return isAssignment(prev) || WRAPPERS.has(base(prev))
+  return i
+}
+
+/** Is the token at this position a command (not an argument)? */
+function atCommandPosition(toks: Token[], at: number): boolean {
+  return at === commandIndex(toks)
 }
 
 /** The positions in a segment's tokens where a devin binary sits at a
@@ -122,13 +161,25 @@ function devinCommandPositions(toks: Token[]): number[] {
 /** The command a shell wrapper runs: `sh -c 'devin -p x'` — the string
  *  is a command of its own, so its starts count too. */
 function wrappedCommand(toks: Token[]): string | undefined {
-  if (toks.length < 3 || toks[1]!.text !== '-c') {
+  const at = commandIndex(toks)
+  const shell = toks[at]
+  if (shell === undefined || !SHELLS.has(base(shell.text))) {
     return undefined
   }
-  if (!SHELLS.has(base(toks[0]!.text))) {
+  if (!isShellCommandFlag(toks[at + 1]?.text)) {
     return undefined
   }
-  return toks[2]!.quoted ? toks[2]!.text : undefined
+  const script = toks[at + 2]
+  return script !== undefined && script.quoted ? script.text : undefined
+}
+
+/** Is this the shell's command flag? `-c` alone, or a combined short
+ *  flag that carries it (`-lc`, `-ic`). */
+function isShellCommandFlag(flag: string | undefined): boolean {
+  if (flag === undefined) {
+    return false
+  }
+  return flag === '-c' || /^-[a-z]*c[a-z]*$/.test(flag)
 }
 
 /** The starts one shell segment opens. */

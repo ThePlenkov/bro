@@ -99,6 +99,30 @@ describe('countDevinSessionStarts', () => {
     assert.equal(countDevinSessionStarts('PATH=/opt/bin:$PATH devin'), 1)
   })
 
+  test('a wrapper with options and operands still reaches the command', () => {
+    assert.equal(countDevinSessionStarts('timeout 30 devin -p a'), 1)
+    assert.equal(countDevinSessionStarts('sudo -u root devin -p a'), 1)
+    assert.equal(countDevinSessionStarts('nice -n 5 devin -p a'), 1)
+    assert.equal(countDevinSessionStarts('env -i devin -p a'), 1)
+    assert.equal(countDevinSessionStarts('sudo devin -p a'), 1)
+  })
+
+  test('the shell is found at the command position, with a combined flag', () => {
+    assert.equal(countDevinSessionStarts("FOO=1 bash -c 'devin -p a'"), 1)
+    assert.equal(countDevinSessionStarts("env bash -c 'devin -p a'"), 1)
+    assert.equal(countDevinSessionStarts("sudo sh -c 'devin -p a'"), 1)
+    assert.equal(countDevinSessionStarts("bash -lc 'devin -p a'"), 1)
+  })
+
+  test('a quote inside a quoted run is text, and both readers agree', () => {
+    // the inner command is valid: the apostrophe opens a run that
+    // closes — the `;` inside it is text
+    assert.equal(countDevinSessionStarts("sh -c \"devin -p a; echo 'done'\""), 1)
+    // an unterminated quote is a syntax error in the inner shell — no
+    // session starts
+    assert.equal(countDevinSessionStarts("sh -c \"echo it's done; devin -p a\""), 0)
+  })
+
   test('a separator inside a quoted prompt does not split the command', () => {
     // the prompt is ONE argument — the `;` inside it is text
     assert.equal(countDevinSessionStarts('devin -p "run devin later; then stop"'), 1)

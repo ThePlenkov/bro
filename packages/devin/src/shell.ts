@@ -69,6 +69,8 @@ export function tokens(segment: string): Token[] {
   let quote: string | null = null
   for (const ch of segment) {
     if (quote !== null) {
+      // only the MATCHING quote closes the run — an apostrophe inside
+      // a double-quoted run is text
       if (ch === quote) {
         quote = null
         continue

@@ -1441,16 +1441,18 @@ function assertSessionCap(env: TurnEnv, claimKey: string): void {
     // the operator needs (a quota that cannot be verified is not walked
     // past)
     throw new Error(
-      `bro conductor: the session cap could not be established — ${(err as Error).message}`
+      `bro conductor: the session cap could not be established (count unavailable) — ${(err as Error).message}`
     )
   }
-  const refusal = conductorSessionRefusal(views[0], env.sessions.size)
+  const view = views[0]
+  const refusal = conductorSessionRefusal(view, env.sessions.size, view?.starts ?? 1)
   if (refusal !== undefined) {
     throw new Error(refusal)
   }
   // the slot is claimed, not just counted: a burst of parallel requests
-  // would otherwise all see the same headroom (spec bro-bww9v)
-  const view = views[0]
+  // would otherwise all see the same headroom (spec bro-bww9v). The ACP
+  // surface fails CLOSED here — a request that cannot record its claim
+  // must not open a session the budget does not know about.
   if (view !== undefined) {
     try {
       reserveSessionStart({
@@ -1459,8 +1461,10 @@ function assertSessionCap(env: TurnEnv, claimKey: string): void {
         key: claimKey,
         count: view.starts,
       })
-    } catch {
-      // the claim is a brake, not a gate — the request still runs
+    } catch (err) {
+      throw new Error(
+        `bro conductor: the session slot could not be claimed — ${(err as Error).message}`
+      )
     }
   }
 }
