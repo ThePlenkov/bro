@@ -109,6 +109,7 @@ import {
 import { loadAgentEnv, type AgentConnectorEnv } from '../agent-connectors.ts'
 import { flag } from './args.ts'
 import { defaultBranch, runActCommand } from './act.ts'
+import { emitDevinUsage } from '../session-planes/devin-usage.ts'
 import {
   foreignPushEvent,
   readHeadMemory,
@@ -2371,8 +2372,23 @@ function emitWatchHeartbeats(
   }
 }
 
+/** The devin lane's telemetry: the account's request rate per model and
+ *  the lane's live counts. The pass is the fleet's heartbeat, so it is
+ *  where the numbers belong (spec bro-g0izo). */
+async function emitLaneUsage(ctx: Ctx): Promise<void> {
+  try {
+    const bag = loadAgentEnv(ctx.mainRoot).agents['devin'] ?? {}
+    // the drive's own env IS the effective worker env: the connector
+    // builds the child's environment from it (plus the pins)
+    await emitDevinUsage(ctx.mainRoot, bag, process.env)
+  } catch {
+    // telemetry must not stall the pass
+  }
+}
+
 /** One pass: enumerate, probe every open PR, act per verdict. */
 async function driveOnce(ctx: Ctx): Promise<void> {
+  await emitLaneUsage(ctx)
   const { byStep, degraded } = await collectAgents(ctx.mainRoot)
   for (const d of degraded) {
     say(ctx, `warning: backend degraded — ${d}`)

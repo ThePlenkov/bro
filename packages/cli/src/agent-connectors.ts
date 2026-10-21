@@ -92,6 +92,7 @@ import {
   type SpawnSpec,
   type SpawnWorker,
 } from '@broject/core'
+import { otelEvent } from '@broject/providers'
 import type { AcpSeam, FetchFn } from '@broject/providers'
 import { expandAgentCmd, loopSection, type LoopConfig } from '@broject/loop'
 // builtin session planes self-register on import — the connector layer
@@ -1773,6 +1774,34 @@ function readLogTail(log: unknown, from?: unknown): string {
  *  (pre-taxonomy runs, or a harvested entry whose patch failed). The
  *  registry write is advisory — the entry object is updated either way
  *  so callers decide on THIS read's verdict, not the store's health. */
+/** The provider's wall — an ACCOUNT fact, not this agent's: every lane
+ *  member shares the budget, so the fleet must see it (spec bro-g0izo).
+ *  Only the devin lane — another provider's wall is not this lane's. */
+function emitProviderWall(
+  entry: AgentRegistryEntry,
+  molStep: string,
+  cause: string,
+  resetAt: string | undefined
+): void {
+  if (cause !== 'rate_limited' && cause !== 'quota') {
+    return
+  }
+  if (entry.sessionKind !== 'devin') {
+    return
+  }
+  try {
+    otelEvent('lane.devin.wall', {
+      provider: typeof entry.provider === 'string' ? entry.provider : 'unknown',
+      cause,
+      until: resetAt ?? '',
+      agent: entry.agentId,
+      step: molStep,
+    })
+  } catch {
+    // telemetry must not stall the harvest
+  }
+}
+
 function ensureExitCause(
   dir: string,
   home: string | null,
@@ -1811,6 +1840,7 @@ function ensureExitCause(
   }
   entry.cause = c.cause
   entry.resetAt = c.resetAt
+  emitProviderWall(entry, molStep, c.cause, c.resetAt)
   // lifecycle — the agent-exit transition, emitted once per run at the
   // harvest (the early return above skips re-emit on a carried cause).
   // The .exit file's mtime is the honest wall-clock; the harvest's own
