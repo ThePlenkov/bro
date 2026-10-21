@@ -16,4 +16,4 @@ exclude_paths:
   # bro's cursor beside it: both paths are bro's own (the store path
   # comes from XDG_DATA_HOME/HOME, the cursor from the git common dir).
   # The dynamic node:sqlite import is the read-only, fail-open path.
-  - 'packages/cli/src/session-planes/devin-usage.ts'
+  - 'packages/devin/src/usage.ts'
