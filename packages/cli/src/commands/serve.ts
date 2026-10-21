@@ -362,15 +362,25 @@ const MAX_BODY_BYTES = 256 * 1024
 export async function readBody(stream: Readable, limit = MAX_BODY_BYTES): Promise<string> {
   const chunks: Buffer[] = []
   let size = 0
+  let over = false
   for await (const chunk of stream) {
     // IncomingMessage yields Buffers, but tests feed string chunks —
     // normalize so the cap counts bytes either way
     const buf = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk as string)
     size += buf.length
     if (size > limit) {
-      throw new HttpError(413, `request body over ${limit} bytes`)
+      // keep draining to end: answering 413 while the upload is still
+      // in flight leaves unread data on the socket — the kernel RSTs
+      // under the response and the client can read ECONNRESET (bro-df1xf)
+      over = true
+      continue
     }
-    chunks.push(buf)
+    if (!over) {
+      chunks.push(buf)
+    }
+  }
+  if (over) {
+    throw new HttpError(413, `request body over ${limit} bytes`)
   }
   return Buffer.concat(chunks).toString('utf8')
 }
