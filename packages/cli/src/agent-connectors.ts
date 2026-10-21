@@ -92,6 +92,7 @@ import {
   type SpawnSpec,
   type SpawnWorker,
 } from '@broject/core'
+import { otelEvent } from '@broject/providers'
 import type { AcpSeam, FetchFn } from '@broject/providers'
 import { expandAgentCmd, loopSection, type LoopConfig } from '@broject/loop'
 // builtin session planes self-register on import — the connector layer
@@ -1811,6 +1812,21 @@ function ensureExitCause(
   }
   entry.cause = c.cause
   entry.resetAt = c.resetAt
+  if (c.cause === 'rate_limited' || c.cause === 'quota') {
+    // the provider's wall — an ACCOUNT fact, not this agent's. Every lane
+    // member shares the budget, so the fleet must see it (spec bro-g0izo)
+    try {
+      otelEvent('lane.devin.wall', {
+        provider: typeof entry.provider === 'string' ? entry.provider : 'unknown',
+        cause: c.cause,
+        until: c.resetAt ?? '',
+        agent: entry.agentId,
+        step: molStep,
+      })
+    } catch {
+      // telemetry must not stall the harvest
+    }
+  }
   // lifecycle — the agent-exit transition, emitted once per run at the
   // harvest (the early return above skips re-emit on a carried cause).
   // The .exit file's mtime is the honest wall-clock; the harvest's own
