@@ -24,6 +24,12 @@ export function isAssignment(token: string): boolean {
   return /^[A-Za-z_][A-Za-z0-9_]*=/.test(token)
 }
 
+/** The characters that end a shell segment. */
+const SEPARATORS = new Set([';', '&', '|', '\n'])
+
+/** The quote characters. */
+const QUOTES = new Set(['"', "'"])
+
 /** The shell segments of a command — the split happens OUTSIDE quotes,
  *  the way a shell would. */
 export function segments(command: string): string[] {
@@ -38,12 +44,12 @@ export function segments(command: string): string[] {
       }
       continue
     }
-    if (ch === '"' || ch === "'") {
+    if (QUOTES.has(ch)) {
       quote = ch
       current += ch
       continue
     }
-    if (ch === ';' || ch === '&' || ch === '|' || ch === '\n') {
+    if (SEPARATORS.has(ch)) {
       out.push(current)
       current = ''
       continue
@@ -60,34 +66,34 @@ export function tokens(segment: string): Token[] {
   const out: Token[] = []
   let current = ''
   let quoted = false
-  let inQuote = false
-  const push = (): void => {
-    if (current !== '') {
-      out.push({ text: current, quoted })
-    }
-    current = ''
-    quoted = false
-  }
+  let quote: string | null = null
   for (const ch of segment) {
-    if (inQuote) {
-      if (ch === '"' || ch === "'") {
-        inQuote = false
+    if (quote !== null) {
+      if (ch === quote) {
+        quote = null
         continue
       }
       current += ch
       continue
     }
-    if (ch === '"' || ch === "'") {
-      inQuote = true
+    if (QUOTES.has(ch)) {
+      quote = ch
       quoted = true
       continue
     }
     if (/\s/.test(ch)) {
-      push()
+      out.push(...token(current, quoted))
+      current = ''
+      quoted = false
       continue
     }
     current += ch
   }
-  push()
+  out.push(...token(current, quoted))
   return out
+}
+
+/** One token — an empty run is no token at all. */
+function token(text: string, quoted: boolean): Token[] {
+  return text === '' ? [] : [{ text, quoted }]
 }

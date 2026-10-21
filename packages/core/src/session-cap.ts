@@ -82,36 +82,50 @@ export function sessionCapViews(
   }
   const views: SessionCapView[] = []
   for (const plane of sessionPlanes()) {
-    if (plane.startsSessions === undefined) {
-      continue
+    const view = capViewFor(plane, command, agents, workerEnv)
+    if (view !== undefined) {
+      views.push(view)
     }
-    const starts = plane.startsSessions(command)
-    if (starts <= 0) {
-      continue
-    }
-    const quota = sessionQuotaConfig(agents, plane.kind)
-    if (quota === undefined) {
-      continue
-    }
-    if (quota.invalid === true) {
-      // a present-but-malformed cap is a config bug: the admission
-      // refuses it loudly, and the cap must not read as UNCAPPED here
-      throw new SpawnError(
-        `agents.${plane.kind}.${quota.invalidKey ?? 'maxSessions'} must be a positive integer`,
-        'config'
-      )
-    }
-    if (quota.maxSessions <= 0) {
-      continue
-    }
-    const bag = agents?.[plane.kind] ?? {}
-    const live = plane.countLive(bag, workerEnv)
-    const reservations = countSessionReservations(
-      sessionSlotsDir(plane.kind, quota.reservationsDir)
-    )
-    views.push({ kind: plane.kind, live: live + reservations, cap: quota.maxSessions, starts })
   }
   return views
+}
+
+/** One plane's budget for a command — undefined when the plane does not
+ *  claim the command, or when no cap is armed for its kind. */
+function capViewFor(
+  plane: SessionPlane,
+  command: string,
+  agents: Record<string, Record<string, unknown>> | undefined,
+  workerEnv?: Record<string, string>
+): SessionCapView | undefined {
+  if (plane.startsSessions === undefined) {
+    return undefined
+  }
+  const starts = plane.startsSessions(command)
+  if (starts <= 0) {
+    return undefined
+  }
+  const quota = sessionQuotaConfig(agents, plane.kind)
+  if (quota === undefined) {
+    return undefined
+  }
+  if (quota.invalid === true) {
+    // a present-but-malformed cap is a config bug: the admission
+    // refuses it loudly, and the cap must not read as UNCAPPED here
+    throw new SpawnError(
+      `agents.${plane.kind}.${quota.invalidKey ?? 'maxSessions'} must be a positive integer`,
+      'config'
+    )
+  }
+  if (quota.maxSessions <= 0) {
+    return undefined
+  }
+  const bag = agents?.[plane.kind] ?? {}
+  const live = plane.countLive(bag, workerEnv)
+  const reservations = countSessionReservations(
+    sessionSlotsDir(plane.kind, quota.reservationsDir)
+  )
+  return { kind: plane.kind, live: live + reservations, cap: quota.maxSessions, starts }
 }
 
 /** The first refusal among the kinds a command touches, or undefined. */
