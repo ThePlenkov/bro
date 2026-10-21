@@ -127,11 +127,28 @@ export function writeDevinUsageState(root: string, state: DevinUsageState): void
   }
 }
 
+/** The usage query — the tail of the store, the rows after the cursor,
+ *  counted by DISTINCT request id (a request is a request id, not a
+ *  prompt row: a session makes dozens of requests per prompt). */
+const USAGE_SQL = `SELECT s.model AS model,
+                COUNT(DISTINCT json_extract(m.chat_message, '$.metadata.request_id')) AS requests,
+                COUNT(DISTINCT m.session_id) AS sessions
+           FROM (SELECT row_id, session_id, chat_message FROM message_nodes
+                  ORDER BY row_id DESC LIMIT ?) m
+           JOIN sessions s ON s.id = m.session_id
+          WHERE m.row_id > ?
+            AND m.row_id <= ?
+            AND json_extract(m.chat_message, '$.metadata.request_id') IS NOT NULL
+          GROUP BY s.model`
+
 /** One sample: the distinct requests and sessions per model among the
  *  rows AFTER `sinceRowId`, plus the newest row id seen. */
 export interface DevinUsageSample {
   lastRowId: number
   usage: DevinModelUsage[]
+  /** false when the store could not be read at all — 'no requests' and
+   *  'could not look' are different facts and must not look alike. */
+  ok: boolean
 }
 
 export async function sampleDevinUsage(opts: {
@@ -164,7 +181,7 @@ export async function sampleDevinUsage(opts: {
     }
     DatabaseSync = mod.DatabaseSync as never
   } catch {
-    return { lastRowId: since, usage: [] }
+    return { lastRowId: since, usage: [], ok: false }
   }
   let db: InstanceType<typeof DatabaseSync> | undefined
   try {
@@ -184,37 +201,26 @@ export async function sampleDevinUsage(opts: {
       .get(limit) as { last_row: number | null } | undefined
     const boundary = tail?.last_row ?? since
     if (boundary <= since) {
-      return { lastRowId: since, usage: [] }
+      return { lastRowId: since, usage: [], ok: true }
     }
     const rows = db
-      .prepare(
-        `SELECT s.model AS model,
-                COUNT(DISTINCT json_extract(m.chat_message, '$.metadata.request_id')) AS requests,
-                COUNT(DISTINCT m.session_id) AS sessions
-           FROM (SELECT row_id, session_id, chat_message FROM message_nodes
-                  ORDER BY row_id DESC LIMIT ?) m
-           JOIN sessions s ON s.id = m.session_id
-          WHERE m.row_id > ?
-            AND m.row_id <= ?
-            AND json_extract(m.chat_message, '$.metadata.request_id') IS NOT NULL
-          GROUP BY s.model`
-      )
+      .prepare(USAGE_SQL)
       .all(limit, since, boundary) as Array<{
       model: string | null
       requests: number
       sessions: number
     }>
-    const lastRowId = boundary
     return {
-      lastRowId,
+      lastRowId: boundary,
       usage: rows.map((r) => ({
         model: r.model ?? '(none)',
         requests: Number(r.requests),
         sessions: Number(r.sessions),
       })),
+      ok: true,
     }
   } catch {
-    return { lastRowId: since, usage: [] }
+    return { lastRowId: since, usage: [], ok: false }
   } finally {
     try {
       db?.close()
@@ -255,6 +261,13 @@ export async function emitDevinUsage(
   try {
     const state = readDevinUsageState(root)
     const sample = await sampleDevinUsage({ sinceRowId: state.lastRowId })
+    if (!sample.ok) {
+      // the store could not be read — the numbers are UNKNOWN, and the
+      // cursor must not advance (or the next sample would skip the rows
+      // in between). Say so instead of reporting a rate of zero.
+      otelEvent('lane.devin.usage.unavailable', { since_row_id: state.lastRowId })
+      return
+    }
     for (const u of sample.usage) {
       const prior = state.models[u.model] ?? { requests: 0, sessions: 0 }
       const cumulative = {

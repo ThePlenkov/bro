@@ -41,6 +41,9 @@ describe('the sampler', () => {
       })
       assert.deepEqual(sample.usage, [])
       assert.equal(sample.lastRowId, 7)
+      // 'could not look' is not 'no requests' — the caller must be able
+      // to tell them apart
+      assert.equal(sample.ok, false)
     } finally {
       rmSync(dir, { recursive: true, force: true })
     }
@@ -88,6 +91,7 @@ describe('the sampler', () => {
         env: { XDG_DATA_HOME: dir, HOME: dir },
         limit: 100,
       })
+      assert.equal(sample.ok, true)
       const swe = sample.usage.find((u) => u.model === 'swe-2-max')
       assert.equal(swe?.requests, 2, 'two distinct request ids, not five rows')
       assert.equal(swe?.sessions, 1)
