@@ -19,16 +19,18 @@ buffered but the stream is consumed to end — then throws 413. The
 socket is clean when `send(res, 413)` runs: no unread request data, no
 RST race, keep-alive stays usable.
 
-Bounded in both directions: the drain runs at most `limit` further
-bytes past the cap — an upload still streaming beyond that is abusive
-(a hosted tunnel exposes webhook routes unauthenticated, before HMAC
-verification), so the socket is destroyed rather than holding the
-handler for the whole body. A client that never finishes is held by
-Node's `requestTimeout`, same as any slow request today. The memory
-cap itself is unchanged — over-limit bytes are never buffered, so at
-most `2 * limit` bytes cross the transport per request. `send()`
-no-ops on a destroyed response — the 413 write after a socket kill
-must not throw a second error.
+Bounded in both directions: the drain stops after `limit` further
+bytes past the trip chunk — ~2·limit on the wire at chunk granularity
+(the contract is boundedness, not exact bytes). An upload still
+streaming past that is abusive — a hosted tunnel exposes webhook
+routes unauthenticated, before HMAC verification — so the stream is
+paused and the handler answers `413` with `Connection: close`: the
+status goes out on a live socket, then Node tears the connection down
+on the response's tail (destroying the request mid-read would kill
+the socket under the response, which is the ECONNRESET this spec
+exists to remove). A client that never finishes inside the bound is
+held by Node's `requestTimeout`, same as any slow request today. The
+memory cap itself is unchanged — over-limit bytes are never buffered.
 
 Scope: the fix lives in `readBody`, the single chokepoint for JSON
 write bodies. Guard refusals that answer before `readBody` (401/403/415)
