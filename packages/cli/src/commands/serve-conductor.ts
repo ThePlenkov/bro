@@ -631,6 +631,12 @@ const STOP_REASON: Record<string, string> = {
   cancelled: 'cancelled',
 }
 
+/** Own-key map read — a raw backend token matching an inherited Object
+ *  member ('constructor', 'toString') must never resolve through the
+ *  prototype into a fake mapping or status. */
+const ownKey = (map: Record<string, string>, key: string): string | undefined =>
+  Object.hasOwn(map, key) ? map[key] : undefined
+
 /** Canonicalize the acp stop_reason once for every dialect — an
  *  unmapped backend reason ('error', 'auth_required', a newer acp
  *  value) forwards raw so the client can branch on it, never a silent
@@ -638,7 +644,7 @@ const STOP_REASON: Record<string, string> = {
  *  server-side (bro-6fk80). */
 function canonicalStopReason(raw: string | undefined): string {
   if (raw === undefined || raw === '') return 'end_turn'
-  const mapped = STOP_REASON[raw]
+  const mapped = ownKey(STOP_REASON, raw)
   if (mapped !== undefined) return mapped
   otelEvent('conductor.stop_reason.unmapped', { reason: raw.slice(0, 80) })
   return raw
@@ -1677,15 +1683,18 @@ async function parseMessagesBody(
 }
 
 /** stop_reason for the settled record — a parsed tool_use or a stop
- *  hit outrank the transport's raw code. */
+ *  hit outrank the transport's raw code. The backend reason still
+ *  canonicalizes first: an unmapped one overridden by precedence keeps
+ *  its otel breadcrumb (bro-6fk80). */
 function settledStopReason(
   blocks: OutBlock[],
   reply: PooledReply,
   stopHit: string | undefined
 ): string {
+  const canonical = canonicalStopReason(reply.stopReason)
   if (blocks.some((b) => b.type === 'tool_use')) return 'tool_use'
   if (stopHit !== undefined) return 'stop_sequence'
-  return canonicalStopReason(reply.stopReason)
+  return canonical
 }
 
 async function messages(
@@ -2232,11 +2241,13 @@ class RespLive extends TagPump {
   /** The settled reply — the terminal event reports the same items
    *  the wire streamed, ids and order intact; a cut-off answer ends
    *  as response.incomplete, a cancelled/failed turn under its own
-   *  response.<status> event — never a silent completed (bro-6fk80). */
+   *  response.<status> event — never a silent completed (bro-6fk80).
+   *  The message item carries the same status: 'incomplete' on a
+   *  cancelled turn would read as a token cap, not the cancel it was. */
   finish(status: string, usageOut: number, reason?: string): void {
     this.drainAll()
     const st = this.capped ? 'incomplete' : status
-    this.closeItem(st === 'completed' ? 'completed' : 'incomplete')
+    this.closeItem(st)
     this.ev(`response.${st}`, {
       response: {
         ...this.respObj(st, reason),
@@ -2414,7 +2425,7 @@ const RESP_STATUS: Record<string, string> = {
   cancelled: 'cancelled',
 }
 const respStatus = (canonicalReason: string): string =>
-  RESP_STATUS[canonicalReason] ?? 'failed'
+  ownKey(RESP_STATUS, canonicalReason) ?? 'failed'
 
 /** The envelope's `error` field — a failed response names the raw acp
  *  reason that ended the turn; anything else reports null. */
@@ -2694,9 +2705,11 @@ function responsesDeliver(
   // would — replay and status agree the answer was cut
   const capped = capBlocks(parseReply(reply.text, tools), capCharsOf(d.rreq.max_output_tokens))
   const outBlocks = capped.blocks
-  const canonicalReason = capped.capped ? 'max_tokens' : canonicalStopReason(reply.stopReason)
+  // canonicalize before precedence applies — an unmapped backend reason
+  // overridden by a cap or a tool_use still earns its otel breadcrumb
+  const backendReason = canonicalStopReason(reply.stopReason)
   const outTokens = capped.capped ? blocksTokens(outBlocks) : estTokens(reply.text)
-  const wireReason = finalRespReason(capped.capped, outBlocks, canonicalReason)
+  const wireReason = finalRespReason(capped.capped, outBlocks, backendReason)
   const status = respStatus(wireReason)
   if (d.out.conv !== undefined && d.key !== undefined) {
     settleConv(
@@ -2707,7 +2720,10 @@ function responsesDeliver(
       {
         blocks: outBlocks,
         model: reply.model,
-        stopReason: canonicalReason,
+        // the wire verdict, not the raw canonical — a replay derives
+        // its status from this record and must answer what the client
+        // originally saw (tool_use outranks a backend 'cancelled')
+        stopReason: wireReason,
         inputTokens,
       },
       stopKeyOf(stopSeqsOf(d.body) ?? []),
@@ -2932,6 +2948,11 @@ const CHAT_FINISH = {
   tool_use: 'tool_calls',
   stop_sequence: 'stop',
   max_tokens: 'length',
+  // mapped canonicals still land on a real chat finish — 'pause_turn'
+  // is a clean end on this wire, 'refusal' the safety stop; only a
+  // genuinely unmapped reason forwards raw (bro-6fk80)
+  pause_turn: 'stop',
+  refusal: 'content_filter',
 } as const
 
 /** Live chat-completion SSE — the same pending/drain pump rendered
@@ -3030,7 +3051,7 @@ class ChatLive extends TagPump {
       ? 'length'
       : // the enum can't carry a cancelled/backend reason — forward it
         // raw rather than a silent 'stop' (bro-6fk80)
-        (CHAT_FINISH[stopReason as keyof typeof CHAT_FINISH] ?? stopReason)
+        (ownKey(CHAT_FINISH, stopReason) ?? stopReason)
     this.ev({}, finishReason)
     if (usage !== undefined) {
       this.res.write(
@@ -3061,7 +3082,9 @@ const chatShape = (r: ChatRequest): string | undefined =>
     : undefined
 
 /** The canonical stop reason over a turn outcome — a replay reports
- *  the recorded reason, a live turn reads the reply's own. */
+ *  the recorded reason, a live turn reads the reply's own. The backend
+ *  reason canonicalizes before tool_use precedence: an unmapped one
+ *  keeps its otel breadcrumb (bro-6fk80). */
 function chatStopReason(
   replay: boolean,
   lr: ConvSession['lastReply'] | undefined,
@@ -3069,8 +3092,9 @@ function chatStopReason(
   reply: PooledReply | undefined
 ): string {
   if (replay) return lr?.stopReason ?? 'end_turn'
+  const canonical = canonicalStopReason(reply?.stopReason)
   if (blocks.some((b) => b.type === 'tool_use')) return 'tool_use'
-  return canonicalStopReason(reply?.stopReason)
+  return canonical
 }
 
 /** Terminal reasons for a chat turn: the cap reports the same reason the
@@ -3114,7 +3138,7 @@ function chatOutcome(
   const outTokens = replay ? blocksTokens(blocks) : estTokens(reply?.text ?? '')
   const stopReason = chatStopReason(replay, lr, blocks, reply)
   const finish =
-    CHAT_FINISH[stopReason as keyof typeof CHAT_FINISH] ??
+    ownKey(CHAT_FINISH, stopReason) ??
     (blocks.some((b) => b.type === 'tool_use') ? 'tool_calls' : stopReason)
   return { replay, lr, reply, inputTokens, blocks, outTokens, stopReason, finish }
 }
