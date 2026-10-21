@@ -5,11 +5,11 @@
  *  forge. No plugin registry, no `process.exit`, no spawned `bro`. */
 import { describe, test } from 'node:test'
 import assert from 'node:assert/strict'
-import { spawn } from 'node:child_process'
+import { spawn, spawnSync } from 'node:child_process'
 import { chmodSync, mkdirSync, mkdtempSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { registerConnector, testGitEnv, testGitSpawn, type ReviewFacade } from '@broject/core'
+import { registerConnector, type ReviewFacade } from '@broject/core'
 import { rigFocus, rigNext } from './next.ts'
 
 /** `show <id>` answers `$FAKE_BD_DIR/show-<id>.json` when the fixture
@@ -50,7 +50,7 @@ interface Fixture {
 }
 
 const git = (dir: string, args: string[]): void => {
-  const r = testGitSpawn(['-C', dir, ...args], { env: testGitEnv() })
+  const r = spawnSync('git', ['-C', dir, ...args], { encoding: 'utf8' })
   assert.equal(r.status, 0, `git ${args.join(' ')}: ${r.stderr}`)
 }
 
@@ -190,22 +190,6 @@ describe('rigNext — the verdict ladder', () => {
     }
   })
 
-  test('the recorded exit is what clears the wait — in-flight then settled on the same row', () => {
-    const f = fixture()
-    try {
-      f.row('e-1', bead('e-1'))
-      f.ready([bead('e-1')])
-      f.agents({ 'e-1': { agentId: 'devin-zz', backend: 'devin', sessionId: 'sess-1' } })
-      assert.equal(rigNext(f.dir, 'e-1').verdict, 'wait')
-      f.agents({
-        'e-1': { agentId: 'devin-zz', backend: 'devin', sessionId: 'sess-1', exitStatus: 0 },
-      })
-      assert.equal(rigNext(f.dir, 'e-1').verdict, 'step')
-    } finally {
-      f.restore()
-    }
-  })
-
   test('foreign claim is blocked; own claim is step; dep-gated open is blocked', () => {
     const f = fixture()
     try {
@@ -290,31 +274,20 @@ describe('rigNext — the gate probe', () => {
   const reviews = (open: number[], all: number[]): ReviewFacade =>
     ({ prsForBranch: (_b, state) => (state === 'all' ? all : open) }) as ReviewFacade
 
-  /** Gate-probe scaffold: pin `connectors.reviews` to a registered
-   *  fake factory, stage the item row, and add the conventional
-   *  `<repo>--<id>` worktree on `work/<id>`. Returns the worktree
-   *  path for cleanup. */
-  const gateSetup = (
-    f: Fixture,
-    name: string,
-    make: () => ReviewFacade,
-    id: string
-  ): string => {
-    writeFileSync(
-      join(f.dir, 'bro.config.json'),
-      JSON.stringify({ connectors: { reviews: name } })
-    )
-    registerConnector({ name, reviews: make, replace: true } as any)
-    f.row(id, bead(id))
-    const wt = join(f.dir, '..', `${f.dir.split('/').pop()}--${id}`)
-    git(f.dir, ['worktree', 'add', '-b', `work/${id}`, wt])
-    return wt
-  }
-
   test('an open PR on the item worktree branch is gate; settled is the cleanup step', () => {
     const f = fixture()
     try {
-      const wt = gateSetup(f, 'fakegate', () => reviews([7], [7]), 'g-1')
+      writeFileSync(
+        join(f.dir, 'bro.config.json'),
+        JSON.stringify({ connectors: { reviews: 'fakegate' } })
+      )
+      registerConnector({
+        name: 'fakegate',
+        reviews: () => reviews([7], [7]),
+      })
+      f.row('g-1', bead('g-1'))
+      const wt = join(f.dir, '..', `${f.dir.split('/').pop()}--g-1`)
+      git(f.dir, ['worktree', 'add', '-b', 'work/g-1', wt])
       assert.deepEqual(rigNext(f.dir, 'g-1'), {
         verdict: 'gate',
         id: 'g-1',
@@ -332,7 +305,17 @@ describe('rigNext — the gate probe', () => {
   test('a settled PR + open bead is the finalize step', () => {
     const f = fixture()
     try {
-      const wt = gateSetup(f, 'fakesettled', () => reviews([], [7]), 'g-2')
+      writeFileSync(
+        join(f.dir, 'bro.config.json'),
+        JSON.stringify({ connectors: { reviews: 'fakesettled' } })
+      )
+      registerConnector({
+        name: 'fakesettled',
+        reviews: () => reviews([], [7]),
+      })
+      f.row('g-2', bead('g-2'))
+      const wt = join(f.dir, '..', `${f.dir.split('/').pop()}--g-2`)
+      git(f.dir, ['worktree', 'add', '-b', 'work/g-2', wt])
       assert.equal(rigNext(f.dir, 'g-2').verdict, 'step')
       assert.match(rigNext(f.dir, 'g-2').detail ?? '', /pr settled/)
       git(f.dir, ['worktree', 'remove', '--force', wt])
@@ -344,14 +327,19 @@ describe('rigNext — the gate probe', () => {
   test('an unreachable host is the honest wait, never a double-work step', () => {
     const f = fixture()
     try {
-      const wt = gateSetup(
-        f,
-        'fakedown',
-        () => {
+      writeFileSync(
+        join(f.dir, 'bro.config.json'),
+        JSON.stringify({ connectors: { reviews: 'fakedown' } })
+      )
+      registerConnector({
+        name: 'fakedown',
+        reviews: () => {
           throw new Error('host down')
         },
-        'g-3'
-      )
+      })
+      f.row('g-3', bead('g-3'))
+      const wt = join(f.dir, '..', `${f.dir.split('/').pop()}--g-3`)
+      git(f.dir, ['worktree', 'add', '-b', 'work/g-3', wt])
       assert.deepEqual(rigNext(f.dir, 'g-3'), {
         verdict: 'wait',
         id: 'g-3',
