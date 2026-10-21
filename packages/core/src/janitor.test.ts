@@ -456,6 +456,38 @@ describe('janitor — size caps', () => {
     })
   })
 
+  test('a cap shifts the entry\'s logFrom/stderrFrom by the dropped bytes', () => {
+    withBro((bro) => {
+      const agents = mkdir(bro, 'agents')
+      const big = 'x'.repeat(200) + '\n'
+      const liveLog = join(agents, 'native-live.log')
+      const liveCap = join(agents, 'native-live.stderr')
+      writeFileSync(liveLog, big.repeat(6000))
+      writeFileSync(liveCap, big.repeat(6000))
+      // a fresh run stamps its offset at the file size — after the cap
+      // that same position is the new EOF, not a stale past-EOF read
+      writeRegistry(bro, {
+        'step-live': {
+          agentId: 'native-live',
+          backend: 'native',
+          spawnedAt: new Date().toISOString(),
+          log: liveLog,
+          logFrom: statSync(liveLog).size,
+          stderrLog: liveCap,
+          stderrFrom: statSync(liveCap).size,
+        },
+      })
+      const r = janitorBroDir(bro, deps(bro))
+      assert.equal(r.truncated.length, 2)
+      const reg = JSON.parse(readFileSync(join(bro, 'agents.json'), 'utf8')) as Record<
+        string,
+        { logFrom?: number; stderrFrom?: number }
+      >
+      assert.equal(reg['step-live']!.logFrom, statSync(liveLog).size)
+      assert.equal(reg['step-live']!.stderrFrom, statSync(liveCap).size)
+    })
+  })
+
   test('a file under the cap is untouched', () => {
     withBro((bro) => {
       const trace = mkdir(bro, 'hooks', 'trace')

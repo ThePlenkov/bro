@@ -513,17 +513,17 @@ function sweepLocks(ctx: Ctx): void {
  *  every later byte on a dead inode. A held-fd writer's next write
  *  lands past the new EOF as a sparse hole — a bounded, legible scar
  *  vs unbounded growth. */
-function capFile(ctx: Ctx, path: string, size: number): void {
+function capFile(ctx: Ctx, path: string, size: number): number {
   const keep = Math.min(LOG_KEEP_BYTES, size)
   if (ctx.dryRun) {
     ctx.report.truncated.push({ path, bytes: size - keep })
-    return
+    return size - keep
   }
   let fd: number
   try {
     fd = openSync(path, 'r+')
   } catch {
-    return
+    return 0
   }
   try {
     // fstat inside the open, not the caller's stat — records appended
@@ -541,8 +541,10 @@ function capFile(ctx: Ctx, path: string, size: number): void {
     writeSync(fd, tail, 0, tail.length, 0)
     ftruncateSync(fd, tail.length)
     ctx.report.truncated.push({ path, bytes: sz - tail.length })
+    return sz - tail.length
   } catch {
     // a racing writer or a read error — skip; the cap retries next tick
+    return 0
   } finally {
     try {
       closeSync(fd)
@@ -571,12 +573,12 @@ function capLogs(ctx: Ctx): void {
   }
   for (const f of listDir(join(ctx.bro, 'agents'))) {
     if (f.endsWith('.log') && ctx.liveAgentIds.has(f.slice(0, -'.log'.length))) {
-      capIfLarge(ctx, join(ctx.bro, 'agents', f), true)
+      capAgentTail(ctx, join(ctx.bro, 'agents', f), f.slice(0, -'.log'.length), 'logFrom')
     }
     // <agentId>.stderr is the worker's stderr capture (spec bro-e2ec0) —
     // same append-only shape and same live-only bound as the .log
     if (f.endsWith('.stderr') && ctx.liveAgentIds.has(f.slice(0, -'.stderr'.length))) {
-      capIfLarge(ctx, join(ctx.bro, 'agents', f), true)
+      capAgentTail(ctx, join(ctx.bro, 'agents', f), f.slice(0, -'.stderr'.length), 'stderrFrom')
     }
   }
 }
@@ -588,6 +590,43 @@ function capIfLarge(ctx: Ctx, path: string, capped: boolean): void {
   const st = statOf(path)
   if (st !== null && st.isFile && st.size > LOG_MAX_BYTES) {
     capFile(ctx, path, st.size)
+  }
+}
+
+/** A live agent's log/.stderr cap. The entry's `logFrom`/`stderrFrom`
+ *  is an append-file byte offset — the cap rewrites the file from
+ *  offset 0, so an unmoved offset would point past the new EOF and the
+ *  classifier would read nothing (a provider-wall exit mislabels as
+ *  crash, PR #620). Truncate under the registry lock and shift the
+ *  offset by the dropped byte count in the same hold — a respawn's
+ *  re-stamp then serializes before or after the cap, never inside. */
+function capAgentTail(
+  ctx: Ctx,
+  path: string,
+  agentId: string,
+  field: 'logFrom' | 'stderrFrom'
+): void {
+  const st = statOf(path)
+  if (st === null || !st.isFile || st.size <= LOG_MAX_BYTES) {
+    return
+  }
+  const release = ctx.deps.registryLock()
+  try {
+    const removed = capFile(ctx, path, st.size)
+    if (ctx.dryRun || removed === 0) {
+      return
+    }
+    const reg = ctx.deps.readRegistry()
+    const hit = Object.values(reg).find((e) => e.agentId === agentId)
+    if (hit !== undefined) {
+      const from = hit[field]
+      if (typeof from === 'number' && from > 0) {
+        hit[field] = Math.max(0, from - removed)
+        ctx.deps.writeRegistry(reg)
+      }
+    }
+  } finally {
+    release()
   }
 }
 

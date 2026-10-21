@@ -42,6 +42,7 @@ import {
   isBatchSpawn,
   claimStep,
   classifyExitCause,
+  classifyExitCauseParts,
   cliCommandModel,
   commandCliName,
   DEFAULT_CONFIG,
@@ -1789,11 +1790,25 @@ function ensureExitCause(
   }
   // classification input = this run's .log tail + .stderr tail (spec
   // bro-e2ec0) — provider walls the child prints on stderr classify from
-  // the capture, the event stream no longer carries them
-  const c = classifyExitCause(
-    readLogTail(entry.log, entry.logFrom) + readLogTail(entry.stderrLog, entry.stderrFrom),
+  // the capture, the event stream no longer carries them. The tails
+  // classify INDEPENDENTLY — a joined read could fabricate a wall token
+  // across the boundary ('…4' + '29…' → '429')
+  const c = classifyExitCauseParts(
+    [readLogTail(entry.log, entry.logFrom), readLogTail(entry.stderrLog, entry.stderrFrom)],
     entry.exitStatus
   )
+  // the tails were read off-lock — a respawn stamping the entry between
+  // the two reads feeds the old run new-run bytes; a DIFFERENT
+  // generation owning the step now suppresses classify + emit. A
+  // missing row (reaped, or a caller's synthesized snapshot) can't
+  // inject new bytes — classify anyway
+  const cur = readAgentRegistry(dir)[molStep]
+  if (
+    cur !== undefined &&
+    (cur.agentId !== entry.agentId || cur.spawnedAt !== entry.spawnedAt)
+  ) {
+    return
+  }
   entry.cause = c.cause
   entry.resetAt = c.resetAt
   // lifecycle — the agent-exit transition, emitted once per run at the
@@ -2058,13 +2073,17 @@ export function makeNativeConnector(ctx: ConnectorCtx, env: AgentConnectorEnv): 
             sessionQuota: sessionQuotaOf(env, 'native', spec, command),
           }
         )
-        const fd = openSync(log, 'a')
         // the worker's stderr gets its own append fd — the .log stays
         // the agent-updates stream; the child/agent noise (and every
-        // template worker's diagnostics) lands in .stderr (bro-e2ec0)
-        const errFd = openSync(stderrLog, 'a')
+        // template worker's diagnostics) lands in .stderr (bro-e2ec0).
+        // Both open INSIDE the guard — a throw must hand the session
+        // reservation back like any other spawn failure, not strand it.
+        let fd: number | undefined
+        let errFd: number | undefined
         let spawned: AgentRegistryEntry
         try {
+          fd = openSync(log, 'a')
+          errFd = openSync(stderrLog, 'a')
           // the wrapper captures $? into the .exit file — the only exit
           // record a detached process can leave once the parent is gone.
           // Worker payloads (spec bro-5hx1.1): a 'template' worker's
@@ -2177,8 +2196,12 @@ export function makeNativeConnector(ctx: ConnectorCtx, env: AgentConnectorEnv): 
           }
           throw err
         } finally {
-          closeSync(fd)
-          closeSync(errFd)
+          if (fd !== undefined) {
+            closeSync(fd)
+          }
+          if (errFd !== undefined) {
+            closeSync(errFd)
+          }
         }
         return toInfo(dir, home, spec.molStep, spawned)
       })

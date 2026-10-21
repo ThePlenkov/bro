@@ -1688,6 +1688,38 @@ describe('budgetSnapshot', () => {
     }
   })
 
+  test('a respawn mid-walk suppresses the old run\'s classification', () => {
+    const { root, main } = initRepo('bro-budget-')
+    try {
+      const home = agentsHomeOf(main)
+      mkdirSync(home, { recursive: true })
+      const log = join(home, 'native-9.log')
+      writeFileSync(join(home, 'native-9.exit'), '1')
+      writeFileSync(log, 'boom\nReached free model rate limit — resets at 2999-01-01T00:00:00Z\n')
+      // the on-disk row is a NEWER generation — native-9 exited and a
+      // respawn owned the step before the walk's tail reads landed;
+      // the old run's wall must not classify onto or from it
+      patchAgentRegistry(main, 'step-x', {
+        agentId: 'native-10',
+        backend: 'native',
+        spawnedAt: '2026-10-05T15:00:00Z',
+      })
+      const registry: Record<string, AgentRegistryEntry> = {
+        'step-x': {
+          agentId: 'native-9',
+          backend: 'native',
+          spawnedAt: '2026-10-05T14:00:00Z',
+          log,
+        },
+      }
+      const snap = budgetSnapshot(main, home, registry, ENV, NOW)
+      assert.equal(snap.blocked, 0)
+      assert.equal(registry['step-x']!.cause, undefined)
+    } finally {
+      rmSync(root, { recursive: true, force: true })
+    }
+  })
+
   test('an unparseable spawnedAt skips the histogram but keeps the row', () => {
     const { root, main } = initRepo('bro-budget-')
     try {

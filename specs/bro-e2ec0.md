@@ -34,11 +34,15 @@ The split happens at the fd layer, so it covers every worker kind
 - Remote backends (gascity, copilot, devin) run no local worker — nothing
   to split; copilot's entry clears the fields the way it clears `log`.
 
-`ensureExitCause` classifies on **`.log` tail + `.stderr` tail** —
-provider walls (rate-limit/quota text) still classify, they just arrive
-via the capture instead of the stream. This narrows bro-5hx1.1 §6's
-"must reach the `.log`" to "must reach the classifier input"; the
-observability plane is `.log`, the diagnosis plane is both tails.
+`ensureExitCause` classifies on **`.log` tail and `.stderr` tail,
+independently** — provider walls (rate-limit/quota text) still
+classify, they just arrive via the capture instead of the stream.
+Concatenating the tails would let the join fabricate a wall token
+('…4' + '29…' → '429'), and no separator is safe against `\s`- and
+`.`-spanning patterns — each tail matches on its own, first cause in
+pattern order wins. This narrows bro-5hx1.1 §6's "must reach the
+`.log`" to "must reach the classifier input"; the observability plane
+is `.log`, the diagnosis plane is both tails.
 
 Retention: the janitor's live-agent cap covers `.stderr` with the same
 whole-line tail-keep it applies to `.log`; orphan reaping already
