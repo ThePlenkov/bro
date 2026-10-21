@@ -25,7 +25,7 @@
  */
 import { join } from 'node:path'
 import { bd, BdCompatError, bdAt, BD_NO_STORE, bdJson, bdJsonAsync, bdTry, bdTryAsync, isBdNotFound } from './bd.ts'
-import { bridgeFetch, bridgePublish, doltSyncPlan } from './dolt-bridge.ts'
+import { bridgeFetch, bridgePublish, doltHeadHealth, DOLT_DATA_REF, doltSyncPlan } from './dolt-bridge.ts'
 import { gitTry } from './git.ts'
 
 /** Resolved probe results per dir — hook surfaces ask for the actor
@@ -714,6 +714,24 @@ function makeStore(x: StoreExec): TaskStore {
         throw new Error(`task store sync failed — ${r.err || `bd exited ${r.code}`}`)
       }
       for (const b of plan.bridges) {
+        // dolt can write a manifest naming tables it never uploaded —
+        // publishing that head corrupts the store for every replica's
+        // next bootstrap (spec: specs/bro-orcdv.md). Withhold the
+        // publish; upstream keeps its last bootstrappable head. An
+        // unverifiable/absent manifest warns but publishes — an unknown
+        // format must not wedge replication.
+        const health = doltHeadHealth(b.mirror, DOLT_DATA_REF)
+        if (health.missing.length > 0) {
+          notes.push(
+            `warning: ${b.mirror} manifest names ${health.missing.length} missing table(s) ` +
+              `(${health.missing.slice(0, 3).join(', ')}) — publish withheld; re-push from a ` +
+              `healthy store or restore per docs/restore.md`
+          )
+          continue
+        }
+        if (health.error !== undefined && health.head !== '') {
+          notes.push(`warning: ${b.mirror} head unverifiable — ${health.error}; publishing as-is`)
+        }
         const err = bridgePublish(b)
         if (err !== null) {
           notes.push(`warning: bridge publish ${b.mirror} failed — ${err}`)

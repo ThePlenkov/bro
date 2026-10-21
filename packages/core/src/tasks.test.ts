@@ -4,7 +4,7 @@ import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync 
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { getTasks, getTasksAsync, taskStore, type TaskStore, type TaskStoreAsync } from './tasks.ts'
-import { scrubEnv, testGit } from './testkit.ts'
+import { doltManifest, doltStoreCommit, scrubEnv, testGit } from './testkit.ts'
 
 // ambient repo/agent/store pins must not reach fixture git children
 // or the code-under-test spawns — scrub once, restore after the file
@@ -393,6 +393,57 @@ describe('taskStore', { skip: WIN32 }, () => {
         assert.equal(call, 'sync --remote origin')
         // the dead upstream's fetch leg warns without breaking the sync
         assert.match(out, /bridge fetch .* failed|repointed origin/)
+      })
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  test('sync withholds a mirror head whose manifest names missing tables', () => {
+    // spec bro-orcdv — publishing an unbootstrappable head corrupts the
+    // store for every replica's next bootstrap
+    const dir = mkdtempSync(join(tmpdir(), 'bro-sync-corrupt-'))
+    try {
+      const upstream = join(dir, 'upstream.git')
+      const mirror = join(dir, 'mirror.git')
+      const git = (...a: string[]) => testGit(a, { encoding: 'utf8' })
+      git('init', '--bare', '-q', upstream)
+      git('init', '--bare', '-q', mirror)
+      git('-C', mirror, 'remote', 'add', 'origin', upstream)
+      // what a buggy dolt push leaves behind: manifest names a table
+      // the tree lacks
+      const t = 'a'.repeat(32)
+      const gone = 'b'.repeat(32)
+      doltStoreCommit(mirror, { manifest: doltManifest({ [t]: 1, [gone]: 1 }), [t]: 'x' })
+      const remotes = JSON.stringify([{ name: 'origin', url: `git+file://${mirror}` }])
+      withFakeBd({ FAKE_BD_REMOTES: remotes, FAKE_BD_SYNC_OUT: 'synced', FAKE_BD_BEADS: dir }, () => {
+        const out = taskStore().sync?.() ?? ''
+        assert.match(out, /publish withheld/)
+        assert.ok(out.includes(gone), out)
+        // the corrupt head never reached upstream
+        assert.equal(git('ls-remote', upstream, 'refs/dolt/data'), '')
+      })
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  test('sync publishes a mirror head whose manifest verifies', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'bro-sync-healthy-'))
+    try {
+      const upstream = join(dir, 'upstream.git')
+      const mirror = join(dir, 'mirror.git')
+      const git = (...a: string[]) => testGit(a, { encoding: 'utf8' })
+      git('init', '--bare', '-q', upstream)
+      git('init', '--bare', '-q', mirror)
+      git('-C', mirror, 'remote', 'add', 'origin', upstream)
+      const t = 'a'.repeat(32)
+      const head = doltStoreCommit(mirror, { manifest: doltManifest({ [t]: 1 }), [t]: 'x' })
+      const remotes = JSON.stringify([{ name: 'origin', url: `git+file://${mirror}` }])
+      withFakeBd({ FAKE_BD_REMOTES: remotes, FAKE_BD_SYNC_OUT: 'synced', FAKE_BD_BEADS: dir }, () => {
+        const out = taskStore().sync?.() ?? ''
+        assert.doesNotMatch(out, /withheld|unverifiable/)
+        assert.equal(git('ls-remote', upstream, 'refs/dolt/data').split(/\s+/)[0], head)
       })
     } finally {
       rmSync(dir, { recursive: true, force: true })

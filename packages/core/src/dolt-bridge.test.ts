@@ -1,19 +1,25 @@
 import { after, describe, test } from 'node:test'
 import assert from 'node:assert/strict'
-import { existsSync, mkdirSync, mkdtempSync, rmSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import {
   bridgeFetch,
   bridgePublish,
+  doltDirHealth,
+  doltHeadHealth,
+  doltRemoteSrc,
   doltSyncPlan,
   fileTargetPath,
   gitUpstream,
+  lastGoodDoltHead,
   listDoltRemotes,
+  manifestTables,
   mirrorPathFor,
+  probeDoltRemote,
   type BdProbe,
 } from './dolt-bridge.ts'
-import { scrubEnv, testGit } from './testkit.ts'
+import { doltManifest, doltStoreCommit, scrubEnv, testGit } from './testkit.ts'
 
 // ambient repo/agent/store pins must not reach fixture git children
 // or the code-under-test spawns — scrub once, restore after the file
@@ -335,9 +341,144 @@ describe('bridge legs', { skip: WIN32 }, () => {
   })
 })
 
-describe('mirrorPathFor', () => {
-  test('names the mirror after the remote under the beads dir', () => {
-    assert.equal(mirrorPathFor('/b', 'origin'), '/b/dolt-mirror-origin.git')
-    assert.equal(mirrorPathFor('/b', 'we ird'), '/b/dolt-mirror-we_ird.git')
+describe('manifest integrity (bro-orcdv)', { skip: WIN32 }, () => {
+  const T1 = 'a'.repeat(32)
+  const T2 = 'b'.repeat(32)
+  const GONE = 'c'.repeat(32)
+
+  test('manifestTables parses the v5 pair tail', () => {
+    assert.deepEqual(manifestTables(doltManifest({ [T1]: 2, [T2]: 5 })), [T1, T2])
+  })
+
+  test('manifestTables throws on anything but the v5 layout', () => {
+    for (const bad of [
+      '',
+      'junk',
+      '4:__DOLT__:a:b:c',
+      '5:__OTHER__:a:b:c:d:e',
+      '5:__DOLT__:a:b:c:d', // odd tail — a name with no count
+      '5:__DOLT__:a:b',
+      `5:__DOLT__:lock:root:${'0'.repeat(32)}:`, // trailing colon, no pairs
+    ]) {
+      assert.throws(() => manifestTables(bad), /unrecognized/, bad)
+    }
+  })
+
+  test('doltHeadHealth — a self-consistent head verifies; .darc satisfies a name', () => {
+    const dir = tmp()
+    git('init', '--bare', '-q', dir)
+    const head = doltStoreCommit(dir, {
+      manifest: doltManifest({ [T1]: 2, [T2]: 7 }),
+      [T1]: 'x',
+      [`${T2}.darc`]: 'y',
+    })
+    assert.deepEqual(doltHeadHealth(dir, 'refs/dolt/data'), { head, tables: 2, missing: [] })
+  })
+
+  test('doltHeadHealth — a manifest naming an absent table reports exactly it', () => {
+    const dir = tmp()
+    git('init', '--bare', '-q', dir)
+    const head = doltStoreCommit(dir, {
+      manifest: doltManifest({ [T1]: 2, [GONE]: 3 }),
+      [T1]: 'x',
+    })
+    const h = doltHeadHealth(dir, 'refs/dolt/data')
+    assert.equal(h.head, head)
+    assert.deepEqual(h.missing, [GONE])
+  })
+
+  test('doltHeadHealth — absent ref or manifest is an error, not corruption', () => {
+    const dir = tmp()
+    git('init', '--bare', '-q', dir)
+    assert.match(doltHeadHealth(dir, 'refs/dolt/data').error ?? '', /no refs\/dolt\/data/)
+    doltStoreCommit(dir, { 'only-file': 'x' }) // a head with no manifest blob
+    const h = doltHeadHealth(dir, 'refs/dolt/data')
+    assert.match(h.error ?? '', /no manifest/)
+    assert.deepEqual(h.missing, [])
+  })
+
+  test('doltDirHealth verifies a plain noms dir on the filesystem', () => {
+    const dir = tmp()
+    writeFileSync(join(dir, 'manifest'), doltManifest({ [T1]: 1, [GONE]: 2 }))
+    writeFileSync(join(dir, T1), 'x')
+    const h = doltDirHealth(dir)
+    assert.equal(h.head, '')
+    assert.deepEqual(h.missing, [GONE])
+    writeFileSync(join(dir, `${GONE}.darc`), 'y') // archive form satisfies it
+    assert.deepEqual(doltDirHealth(dir).missing, [])
+  })
+
+  test('doltDirHealth — no manifest file is unverifiable', () => {
+    assert.match(doltDirHealth(tmp()).error ?? '', /no manifest/)
+  })
+
+  test('doltRemoteSrc — upstream for git schemes, mirror origin for bridges, path else', () => {
+    assert.equal(
+      doltRemoteSrc({ name: 'o', url: 'git+https://x/y' }),
+      'https://x/y'
+    )
+    const mirror = join(tmp(), 'm.git')
+    git('init', '--bare', '-q', mirror)
+    git('-C', mirror, 'remote', 'add', 'origin', 'https://u/r.git')
+    assert.equal(doltRemoteSrc({ name: 'o', url: `git+file://${mirror}` }), 'https://u/r.git')
+    assert.equal(doltRemoteSrc({ name: 'o', url: 'git+file:///plain/dir' }), '/plain/dir')
+    assert.equal(doltRemoteSrc({ name: 'o', url: 'dolthub://org/db' }), null)
+  })
+
+  test('lastGoodDoltHead walks to the nearest self-consistent ancestor', () => {
+    const dir = tmp()
+    git('init', '--bare', '-q', dir)
+    const good = doltStoreCommit(dir, { manifest: doltManifest({ [T1]: 1 }), [T1]: 'x' })
+    const bad = doltStoreCommit(
+      dir,
+      { manifest: doltManifest({ [T1]: 1, [GONE]: 1 }), [T1]: 'x' },
+      good
+    )
+    assert.equal(lastGoodDoltHead(dir, bad), good)
+    // a lone corrupt head finds nothing
+    const solo = tmp()
+    git('init', '--bare', '-q', solo)
+    const only = doltStoreCommit(solo, { manifest: doltManifest({ [GONE]: 1 }) })
+    assert.equal(lastGoodDoltHead(solo, only), null)
+  })
+
+  test('probeDoltRemote — a healthy remote verifies over a shallow fetch', () => {
+    const src = tmp()
+    git('init', '-q', src)
+    const head = doltStoreCommit(src, { manifest: doltManifest({ [T1]: 2 }), [T1]: 'x' })
+    const h = probeDoltRemote(src)
+    assert.equal(h.error, undefined)
+    assert.equal(h.head, head)
+    assert.deepEqual(h.missing, [])
+  })
+
+  test('probeDoltRemote — corruption reports missing ids and the last good head', () => {
+    const src = tmp()
+    git('init', '-q', src)
+    const good = doltStoreCommit(src, { manifest: doltManifest({ [T1]: 1 }), [T1]: 'x' })
+    const bad = doltStoreCommit(
+      src,
+      { manifest: doltManifest({ [T1]: 1, [GONE]: 1 }), [T1]: 'x' },
+      good
+    )
+    const h = probeDoltRemote(src)
+    assert.equal(h.head, bad)
+    assert.deepEqual(h.missing, [GONE])
+    assert.equal(h.lastGood, good)
+  })
+
+  test('probeDoltRemote — no data ref published is healthy, not missing', () => {
+    const src = tmp()
+    git('init', '-q', src)
+    const h = probeDoltRemote(src)
+    assert.equal(h.error, undefined)
+    assert.equal(h.head, '')
+    assert.deepEqual(h.missing, [])
+  })
+
+  test('probeDoltRemote — an unreachable source is transport error, not corruption', () => {
+    const h = probeDoltRemote(join(tmp(), 'gone.git'))
+    assert.ok(h.error !== undefined && h.error !== '')
+    assert.deepEqual(h.missing, [])
   })
 })

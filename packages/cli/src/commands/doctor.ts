@@ -19,20 +19,26 @@ import {
   CONFIG_SECTION_LAYERS,
   connectors,
   CORE_CONFIG_SECTIONS,
+  displayUrl,
+  doltDirHealth,
+  doltRemoteSrc,
   facadeAuth,
   facadeName,
+  fileTargetPath,
   gitCommonDir,
   gitTry,
   isEnvName,
   janitorDidWork,
   janitorLine,
+  listDoltRemotes,
   loadConfigLayers,
   pidAlive,
   probeBdCompat,
+  probeDoltRemote,
   PROVIDER_REGISTRY,
   runJanitor,
 } from '@broject/core'
-import type { BdCompat, ProviderEntry, ProviderSurface } from '@broject/core'
+import type { BdCompat, BdProbe, DoltHeadHealth, DoltRemote, ProviderEntry, ProviderSurface } from '@broject/core'
 import { formatRigUri, parsePeer, rigFromRemoteUrl } from '@broject/mesh'
 import {
   assertSonarHostTrusted,
@@ -700,16 +706,13 @@ function remoteChecks(
     out.push(check('dolt-remote', 'skip', 'needs bd'))
     return out
   }
-  const remotes = bdTry(['dolt', 'remote', 'list'], 15_000, dir)
-  if (remotes.code !== 0) {
+  const probe: BdProbe = (a, ms) => bdTry(a, ms, dir)
+  const remotes = listDoltRemotes(probe)
+  if (remotes === null) {
     out.push(check('dolt-remote', 'skip', '`bd dolt remote list` failed'))
     return out
   }
-  const names = remotes.out
-    .split('\n')
-    .map((l) => l.trim())
-    .filter((l) => l !== '')
-  if (names.length === 0) {
+  if (remotes.length === 0) {
     out.push(
       check(
         'dolt-remote',
@@ -720,8 +723,66 @@ function remoteChecks(
     )
     return out
   }
-  out.push(check('dolt-remote', 'ok', names.join(', ')))
+  out.push(
+    check('dolt-remote', 'ok', remotes.map((r) => `${r.name} → ${displayUrl(r.url)}`).join(', '))
+  )
+  for (const r of remotes) {
+    out.push(doltStoreCheck(r))
+  }
   return out
+}
+
+/** One remote's `dolt-store` row — the refs/dolt/data head verified:
+ *  the manifest's table list against the tree real git fetched (spec:
+ *  specs/bro-orcdv.md). A file remote pointing at a plain noms dir
+ *  verifies in place; everything git-shaped probes over `doltRemoteSrc`
+ *  (the bridge mirror's upstream, not its cache). */
+function doltStoreCheck(r: DoltRemote): DoctorCheck {
+  const target = fileTargetPath(r.url)
+  if (
+    target !== null &&
+    isDir(target) &&
+    existsSync(join(target, 'manifest')) &&
+    !existsSync(join(target, 'HEAD')) &&
+    !existsSync(join(target, '.git'))
+  ) {
+    return doltStoreRow(r.name, doltDirHealth(target))
+  }
+  const src = doltRemoteSrc(r)
+  if (src === null) {
+    return check('dolt-store', 'skip', `${r.name} — non-git remote, nothing to verify`)
+  }
+  return doltStoreRow(r.name, probeDoltRemote(src))
+}
+
+/** Health → row. `missing` fails — that head boots no replica (`bd
+ *  bootstrap` → 'Blob not found'). `error` only warns: unreachable /
+ *  unparseable is transport or format, not corruption. A healthy head
+ *  reports the verified table count; a dir probe has no sha. */
+function doltStoreRow(
+  name: string,
+  h: DoltHeadHealth & { lastGood?: string },
+): DoctorCheck {
+  if (h.missing.length > 0) {
+    const shown =
+      h.missing.slice(0, 3).join(', ') + (h.missing.length > 3 ? `, +${h.missing.length - 3} more` : '')
+    return check(
+      'dolt-store',
+      'fail',
+      `${name}: head ${h.head === '' ? '?' : h.head.slice(0, 12)} names ${h.missing.length} missing table(s): ${shown}` +
+        (h.lastGood !== undefined ? ` — last good head ${h.lastGood.slice(0, 12)}` : ''),
+      'unbootstrappable store — re-push refs/dolt/data from a healthy replica' +
+        (h.lastGood !== undefined ? ` or reset it to ${h.lastGood.slice(0, 12)}` : '') +
+        ' (docs/restore.md)'
+    )
+  }
+  if (h.error !== undefined) {
+    return check('dolt-store', 'warn', `${name}: unverifiable — ${h.error}`)
+  }
+  if (h.head === '') {
+    return check('dolt-store', 'ok', `${name}: nothing published yet`)
+  }
+  return check('dolt-store', 'ok', `${name}: ${h.head.slice(0, 12)} — ${h.tables} table(s) verified`)
 }
 
 // --- providers (specs/bro-ribc.1.md milestone 6) ----------------------

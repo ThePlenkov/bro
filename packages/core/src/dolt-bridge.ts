@@ -17,7 +17,8 @@
  * provisioning failure leaves the remote untouched — `bd sync` then
  * fails exactly as it did before the bridge existed.
  */
-import { existsSync } from 'node:fs'
+import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync } from 'node:fs'
+import { tmpdir } from 'node:os'
 import { dirname, isAbsolute, join } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import { gitTry } from './git.ts'
@@ -147,7 +148,7 @@ const safeName = (name: string): string => name.replace(/[^\w.-]/g, '_')
 /** Redact embedded userinfo before a URL lands in sync output — the
  *  remote needs the raw URL, notes and warnings do not. Global because
  *  git/bd stderr embeds the failing URL mid-line, not at offset 0. */
-const displayUrl = (u: string): string => u.replace(/(:\/\/)[^@/\s]+@/g, '$1***@')
+export const displayUrl = (u: string): string => u.replace(/(:\/\/)[^@/\s]+@/g, '$1***@')
 
 export function mirrorPathFor(beadsDir: string, remoteName: string): string {
   return join(beadsDir, `dolt-mirror-${safeName(remoteName)}.git`)
@@ -368,4 +369,199 @@ export function bridgePublish(bridge: DoltBridge): string | null {
   }
   const r = gitTry(['-C', bridge.mirror, 'push', 'origin', ...names.map((n) => `${n}:${n}`)], GIT_NET_MS)
   return r.code === 0 ? null : displayUrl(firstLine(r.err || `exit ${r.code}`))
+}
+
+// --- manifest integrity (spec: specs/bro-orcdv.md) -------------------------
+// A dolt git remote publishes the noms store as a flat tree under
+// refs/dolt/data — a `manifest` file plus one file per table, named by
+// hash (archive tables carry a `.darc` suffix). Dolt's git push path can
+// write a manifest naming tables it never uploaded: that head boots no
+// replica — `bd bootstrap` dies 'Blob not found'. Observed 2026-10-16 on
+// this repo's own origin (head 67b62f4 listed b9rv3prlplb1q1oqh06aevausvdnccgv,
+// absent from the tree; kept under refs/dolt/backup/67b62f4). These probes
+// read the tree real git already fetched — the mirror post-push, or a
+// scratch repo's FETCH_HEAD in doctor.
+
+export const DOLT_DATA_REF = 'refs/dolt/data'
+
+/** Verdict on one dolt store head (git ref or plain noms dir). `missing`
+ *  is the corruption signal; `error` means the head can't be verified —
+ *  absent ref, unreadable/foreign manifest — never proof of corruption. */
+export interface DoltHeadHealth {
+  /** resolved head sha — '' for an absent ref or a plain-dir probe */
+  head: string
+  /** tables the manifest lists — 0 when unreadable */
+  tables: number
+  /** manifest ids absent from the file set */
+  missing: string[]
+  /** why the head can't be verified */
+  error?: string
+}
+
+/** The v5 manifest's table names — `5:__DOLT__:<lock>:<root>:<extra>:`
+ *  then name:count pairs. Any other layout throws: an unverifiable
+ *  format is reported as `error`, never as corruption. */
+export function manifestTables(text: string): string[] {
+  const f = text.trim().split(':')
+  if (f[0] !== '5' || f[1] !== '__DOLT__' || f.length < 7 || (f.length - 5) % 2 !== 0) {
+    throw new Error('unrecognized manifest layout')
+  }
+  return f.slice(5).filter((_, i) => i % 2 === 0)
+}
+
+/** Manifest-vs-file-set diff — `<id>` is satisfied by `<id>` or its
+ *  `.darc` archive (dolt may upload either form). */
+function missingTables(tables: string[], files: Set<string>): string[] {
+  return tables.filter((t) => !files.has(t) && !files.has(`${t}.darc`))
+}
+
+/** A dolt data ref already local in gitDir — rev-parse + one ls-tree +
+ *  the manifest blob. Zero network: sync checks the mirror post-push,
+ *  doctor checks FETCH_HEAD after its own fetch. */
+export function doltHeadHealth(gitDir: string, ref: string): DoltHeadHealth {
+  const head = gitTry(['-C', gitDir, 'rev-parse', '--verify', `${ref}^{commit}`], PROBE_MS)
+  if (head.code !== 0) {
+    return { head: '', tables: 0, missing: [], error: `no ${ref}` }
+  }
+  const sha = head.out.trim()
+  const tree = gitTry(['-C', gitDir, 'ls-tree', '--name-only', sha], PROBE_MS)
+  if (tree.code !== 0) {
+    return { head: sha, tables: 0, missing: [], error: firstLine(tree.err) || 'ls-tree failed' }
+  }
+  const man = gitTry(['-C', gitDir, 'show', `${sha}:manifest`], PROBE_MS)
+  if (man.code !== 0) {
+    return { head: sha, tables: 0, missing: [], error: 'head carries no manifest' }
+  }
+  let tables: string[]
+  try {
+    tables = manifestTables(man.out)
+  } catch (err) {
+    return {
+      head: sha,
+      tables: 0,
+      missing: [],
+      error: err instanceof Error ? err.message : String(err),
+    }
+  }
+  const files = new Set(tree.out.split('\n').map((l) => l.trim()).filter((l) => l !== ''))
+  return { head: sha, tables: tables.length, missing: missingTables(tables, files) }
+}
+
+/** A file remote pointing at a plain noms dir (manifest at top level,
+ *  no git plumbing) — verified on the filesystem, same verdict shape. */
+export function doltDirHealth(dir: string): DoltHeadHealth {
+  let text: string
+  try {
+    text = readFileSync(join(dir, 'manifest'), 'utf8')
+  } catch {
+    return { head: '', tables: 0, missing: [], error: 'no manifest' }
+  }
+  let tables: string[]
+  try {
+    tables = manifestTables(text)
+  } catch (err) {
+    return {
+      head: '',
+      tables: 0,
+      missing: [],
+      error: err instanceof Error ? err.message : String(err),
+    }
+  }
+  let files: Set<string>
+  try {
+    files = new Set(readdirSync(dir))
+  } catch {
+    return { head: '', tables: tables.length, missing: [], error: `unreadable ${dir}` }
+  }
+  return { head: '', tables: tables.length, missing: missingTables(tables, files) }
+}
+
+/** The nearest ancestor of `from` whose manifest is self-consistent —
+ *  the report's last-good head. History must already be local (deepen
+ *  first); an unverifiable ancestor is skipped, never trusted. `cap`
+ *  bounds the walk. */
+export function lastGoodDoltHead(gitDir: string, from: string, cap = 64): string | null {
+  const list = gitTry(['-C', gitDir, 'rev-list', from, `--max-count=${cap + 1}`], PROBE_MS)
+  if (list.code !== 0) {
+    return null
+  }
+  for (const sha of list.out.split('\n').map((l) => l.trim()).filter((l) => l !== '').slice(1)) {
+    const h = doltHeadHealth(gitDir, sha)
+    if (h.error === undefined && h.missing.length === 0) {
+      return sha
+    }
+  }
+  return null
+}
+
+/** Where a dolt remote's data actually lives, fetchable by real git:
+ *  the stripped URL for git schemes; for a file-shaped target that is a
+ *  bare repo carrying `origin` (the bridge mirror), that upstream —
+ *  the mirror's cache is not the truth; else the path itself. null for
+ *  non-git schemes (dolthub:, aws:, …). */
+export function doltRemoteSrc(remote: DoltRemote): string | null {
+  const upstream = gitUpstream(remote.url)
+  if (upstream !== null) {
+    return upstream
+  }
+  const target = fileTargetPath(remote.url)
+  if (target === null) {
+    return null
+  }
+  return mirrorUpstream(target) ?? target
+}
+
+const DOLT_DEEPEN = 64
+
+/** Probe a remote's data ref over real git. `ls-remote` first — no ref
+ *  means nothing was published (healthy, nothing to verify); a failure
+ *  is transport (offline/auth), surfaced as `error`. The fetch is a
+ *  scratch bare repo at `--depth=1 --filter=blob:none` — commit + tree
+ *  objects only, the manifest blob lazy-fetches on read — so the check
+ *  costs ~1 RTT regardless of store size. On a corrupt head, deepens
+ *  and walks ancestors for `lastGood`. */
+export function probeDoltRemote(
+  src: string,
+  opts?: { deepen?: number }
+): DoltHeadHealth & { lastGood?: string } {
+  const ls = gitTry(['ls-remote', src, DOLT_DATA_REF], GIT_NET_MS)
+  if (ls.code !== 0) {
+    return { head: '', tables: 0, missing: [], error: displayUrl(firstLine(ls.err)) }
+  }
+  if (!ls.out.split(/\s+/)[0]?.trim()) {
+    return { head: '', tables: 0, missing: [] } // no data ref — nothing published yet
+  }
+  const scratch = mkdtempSync(join(tmpdir(), 'bro-dolt-probe-'))
+  try {
+    const init = gitTry(['init', '--bare', '-q', scratch], PROBE_MS)
+    // a NAMED remote — blob:none lazy fetches need promisor wiring,
+    // which exists only as remote.<name>.promisor
+    const add = gitTry(['-C', scratch, 'remote', 'add', 'origin', src], PROBE_MS)
+    if (init.code !== 0 || add.code !== 0) {
+      return { head: '', tables: 0, missing: [], error: firstLine(init.err || add.err) }
+    }
+    const f = gitTry(
+      ['-C', scratch, 'fetch', '--depth=1', '--filter=blob:none', '--no-tags', 'origin', DOLT_DATA_REF],
+      GIT_NET_MS
+    )
+    if (f.code !== 0) {
+      return { head: '', tables: 0, missing: [], error: displayUrl(firstLine(f.err)) }
+    }
+    const health = doltHeadHealth(scratch, 'FETCH_HEAD')
+    if (health.missing.length === 0) {
+      return health
+    }
+    const deepen = opts?.deepen ?? DOLT_DEEPEN
+    const d = gitTry(
+      ['-C', scratch, 'fetch', `--deepen=${deepen}`, '--filter=blob:none', '--no-tags', 'origin', DOLT_DATA_REF],
+      GIT_NET_MS
+    )
+    if (d.code === 0) {
+      const lastGood = lastGoodDoltHead(scratch, health.head, deepen)
+      return lastGood === null ? health : { ...health, lastGood }
+    }
+    return health
+  } finally {
+    rmSync(scratch, { recursive: true, force: true })
+  }
 }

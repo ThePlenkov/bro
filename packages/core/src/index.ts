@@ -171,13 +171,21 @@ export type {
 export {
   bridgeFetch,
   bridgePublish,
+  displayUrl,
+  DOLT_DATA_REF,
+  doltDirHealth,
+  doltHeadHealth,
+  doltRemoteSrc,
   doltSyncPlan,
   fileTargetPath,
   gitUpstream,
+  lastGoodDoltHead,
   listDoltRemotes,
+  manifestTables,
   mirrorPathFor,
+  probeDoltRemote,
 } from './dolt-bridge.ts'
-export type { BdProbe, DoltBridge, DoltRemote, DoltSyncPlan } from './dolt-bridge.ts'
+export type { BdProbe, DoltBridge, DoltHeadHealth, DoltRemote, DoltSyncPlan } from './dolt-bridge.ts'
 export { emitLifecycle, LIFECYCLE_KINDS, lifecyclePath, readLifecycle } from './lifecycle.ts'
 export type {
   LifecycleEvent,
@@ -503,4 +511,4 @@ export {
 export type { OrphanSweepReport, ProcRow } from './live-procs.ts'
 // test seam — scrubbed fixture git spawns + the ambient-env guard,
 // shared by every package's suites (same role as providers' testkit)
-export { AMBIENT_GIT, scrubEnv, testGit, testGitEnv, testGitSpawn } from './testkit.ts'
+export { AMBIENT_GIT, doltManifest, doltStoreCommit, scrubEnv, testGit, testGitEnv, testGitSpawn } from './testkit.ts'
