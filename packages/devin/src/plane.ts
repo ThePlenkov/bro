@@ -355,6 +355,24 @@ function workerPredicate(
   return isWorker
 }
 
+/** A host with no /proc cannot tell ONE worker from an interactive
+ *  session — an armed maxWorkers must refuse there, never silently
+ *  unguard. Zero live sessions stay verifiably zero workers anywhere. */
+function assertWorkerCountVerifiable(
+  isWorker: (pid: number) => boolean,
+  liveCount: number,
+  procDir: string
+): void {
+  if (isWorker !== devinPidIsWorker || liveCount === 0 || existsSync(procDir)) {
+    return
+  }
+  throw new SpawnError(
+    `cannot verify devin worker count — ${procDir} absent; ` +
+      'agents.devin.maxWorkers is unenforceable on this host',
+    'unavailable'
+  )
+}
+
 export function countDevinWorkers(
   dirs: string[],
   isWorker: (pid: number) => boolean = devinPidIsWorker,
@@ -363,13 +381,7 @@ export function countDevinWorkers(
 ): number {
   const live = liveDevinLockPids(dirs, procDir)
   const predicate = workerPredicate(isWorker, procDir)
-  if (isWorker === devinPidIsWorker && live.size > 0 && !existsSync(procDir)) {
-    throw new SpawnError(
-      `cannot verify devin worker count — ${procDir} absent; ` +
-        'agents.devin.maxWorkers is unenforceable on this host',
-      'unavailable'
-    )
-  }
+  assertWorkerCountVerifiable(isWorker, live.size, procDir)
   if (slotsDir !== undefined) {
     sweepLandedSlots(slotsDir, live, procDir)
   }
