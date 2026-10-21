@@ -360,6 +360,7 @@ export {
   agentsSection,
   claimStep,
   classifyExitCause,
+  classifyExitCauseParts,
   commandCliName,
   isAgentCause,
   mintAgentId,

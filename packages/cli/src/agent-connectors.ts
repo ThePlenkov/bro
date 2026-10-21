@@ -42,6 +42,7 @@ import {
   isBatchSpawn,
   claimStep,
   classifyExitCause,
+  classifyExitCauseParts,
   cliCommandModel,
   commandCliName,
   DEFAULT_CONFIG,
@@ -1464,7 +1465,14 @@ function prepareSpawn(
      *  half-state. */
     sessionQuota?: SessionQuotaLane | undefined
   }
-): { agentId: string; promptFile: string; log: string; exitFile: string; reservation?: string } {
+): {
+  agentId: string
+  promptFile: string
+  log: string
+  stderrLog: string
+  exitFile: string
+  reservation?: string
+} {
   const registry = readAgentRegistry(dir)
   const existing = registry[spec.molStep]
   // A batch spawn must not walk into a provider wall the fleet already
@@ -1552,14 +1560,16 @@ function commitSpawn(
   },
   agentId: string,
   guard: { claimed: boolean; actor: string | undefined; phantom: boolean }
-): { promptFile: string; log: string; exitFile: string } {
+): { promptFile: string; log: string; stderrLog: string; exitFile: string } {
   mkdirSync(home, { recursive: true })
   const promptFile = join(home, `${agentId}.prompt.md`)
   const log = join(home, `${agentId}.log`)
+  const stderrLog = join(home, `${agentId}.stderr`)
   const exitFile = join(home, `${agentId}.exit`)
   rmSync(exitFile, { force: true })
   writeFileSync(promptFile, spec.prompt)
   const logFrom = logSizeOrZero(log)
+  const stderrFrom = logSizeOrZero(stderrLog)
   // exitStatus: undefined clears a respawned entry's stale harvest — the
   // new run must not read as already-exited (undefined keys drop out of
   // the serialized registry). pid/pidStart/spawnError likewise — a claim
@@ -1574,6 +1584,11 @@ function commitSpawn(
     worktree: resolve(spec.repoRoot),
     log,
     logFrom,
+    // the worker's stderr lands in a sibling capture, never the .log —
+    // the .log stays the agent-updates stream; the classifier still
+    // reads this tail so provider walls classify (spec bro-e2ec0)
+    stderrLog,
+    stderrFrom,
     stopped: false,
     exitStatus: undefined,
     // a respawned entry's cause/resetAt belonged to the PREVIOUS run —
@@ -1601,7 +1616,7 @@ function commitSpawn(
     ...opts.entry?.(agentId),
   })
   recordSpawnClaim(dir, spec, agentId, backend, guard, opts.claimAs)
-  return { promptFile, log, exitFile }
+  return { promptFile, log, stderrLog, exitFile }
 }
 
 /** The byte offset a fresh run's log starts at — the log is append-mode
@@ -1773,7 +1788,27 @@ function ensureExitCause(
   if (typeof entry.exitStatus !== 'number' || isAgentCause(entry.cause)) {
     return
   }
-  const c = classifyExitCause(readLogTail(entry.log, entry.logFrom), entry.exitStatus)
+  // classification input = this run's .log tail + .stderr tail (spec
+  // bro-e2ec0) — provider walls the child prints on stderr classify from
+  // the capture, the event stream no longer carries them. The tails
+  // classify INDEPENDENTLY — a joined read could fabricate a wall token
+  // across the boundary ('…4' + '29…' → '429')
+  const c = classifyExitCauseParts(
+    [readLogTail(entry.log, entry.logFrom), readLogTail(entry.stderrLog, entry.stderrFrom)],
+    entry.exitStatus
+  )
+  // the tails were read off-lock — a respawn stamping the entry between
+  // the two reads feeds the old run new-run bytes; a DIFFERENT
+  // generation owning the step now suppresses classify + emit. A
+  // missing row (reaped, or a caller's synthesized snapshot) can't
+  // inject new bytes — classify anyway
+  const cur = readAgentRegistry(dir)[molStep]
+  if (
+    cur !== undefined &&
+    (cur.agentId !== entry.agentId || cur.spawnedAt !== entry.spawnedAt)
+  ) {
+    return
+  }
   entry.cause = c.cause
   entry.resetAt = c.resetAt
   // lifecycle — the agent-exit transition, emitted once per run at the
@@ -1950,6 +1985,7 @@ function toInfo(dir: string, home: string | null, molStep: string, entry: AgentR
     ...infoProvenance(entry),
     worktree: typeof entry.worktree === 'string' ? entry.worktree : undefined,
     log: typeof entry.log === 'string' ? entry.log : undefined,
+    stderrLog: typeof entry.stderrLog === 'string' ? entry.stderrLog : undefined,
   }
 }
 
@@ -2026,7 +2062,7 @@ export function makeNativeConnector(ctx: ConnectorCtx, env: AgentConnectorEnv): 
       // fleet memo exists: a slow beads store must not hold the lock.
       const mol = stepParent(spec.beadsDir, spec.molStep)
       return withAgentRegistryLock(dir, () => {
-        const { agentId, promptFile, log, exitFile, reservation } = prepareSpawn(
+        const { agentId, promptFile, log, stderrLog, exitFile, reservation } = prepareSpawn(
           dir,
           home,
           'native',
@@ -2037,9 +2073,17 @@ export function makeNativeConnector(ctx: ConnectorCtx, env: AgentConnectorEnv): 
             sessionQuota: sessionQuotaOf(env, 'native', spec, command),
           }
         )
-        const fd = openSync(log, 'a')
+        // the worker's stderr gets its own append fd — the .log stays
+        // the agent-updates stream; the child/agent noise (and every
+        // template worker's diagnostics) lands in .stderr (bro-e2ec0).
+        // Both open INSIDE the guard — a throw must hand the session
+        // reservation back like any other spawn failure, not strand it.
+        let fd: number | undefined
+        let errFd: number | undefined
         let spawned: AgentRegistryEntry
         try {
+          fd = openSync(log, 'a')
+          errFd = openSync(stderrLog, 'a')
           // the wrapper captures $? into the .exit file — the only exit
           // record a detached process can leave once the parent is gone.
           // Worker payloads (spec bro-5hx1.1): a 'template' worker's
@@ -2107,7 +2151,7 @@ export function makeNativeConnector(ctx: ConnectorCtx, env: AgentConnectorEnv): 
                   agentEnvPins(spec, agentId, promptFile, cliBadge, mol)
                 ),
               },
-              stdio: ['ignore', fd, fd],
+              stdio: ['ignore', fd, errFd],
               detached: true,
             }
           )
@@ -2152,7 +2196,12 @@ export function makeNativeConnector(ctx: ConnectorCtx, env: AgentConnectorEnv): 
           }
           throw err
         } finally {
-          closeSync(fd)
+          if (fd !== undefined) {
+            closeSync(fd)
+          }
+          if (errFd !== undefined) {
+            closeSync(errFd)
+          }
         }
         return toInfo(dir, home, spec.molStep, spawned)
       })
@@ -2369,6 +2418,7 @@ function toTmuxInfo(
     ...infoProvenance(entry),
     worktree: typeof entry.worktree === 'string' ? entry.worktree : undefined,
     log: typeof entry.log === 'string' ? entry.log : undefined,
+    stderrLog: typeof entry.stderrLog === 'string' ? entry.stderrLog : undefined,
   }
 }
 
@@ -2411,7 +2461,7 @@ export function makeTmuxConnector(ctx: ConnectorCtx, env: AgentConnectorEnv): Ag
         // the session name derives from the agentId prepareSpawn
         // resolves — entry callback, not a precomputed name, because a
         // tampered entry's unsafe id is reminted inside
-        const { agentId, promptFile, log, exitFile, reservation } = prepareSpawn(
+        const { agentId, promptFile, log, stderrLog, exitFile, reservation } = prepareSpawn(
           dir,
           home,
           'tmux',
@@ -2481,7 +2531,7 @@ export function makeTmuxConnector(ctx: ConnectorCtx, env: AgentConnectorEnv): Ag
         // re-parses into a different program.
         warnNoPromptFile(worker, command)
         const runLine = workerRunLine(worker, command, promptFile)
-        const paneScript = `. ${shQuote(envFile)}; rm -f ${shQuote(envFile)}; { ${runLine}; s=$?; printf %s "$s" > ${shQuote(exitFile)}; } 2>&1 | tee -a ${shQuote(log)}`
+        const paneScript = `. ${shQuote(envFile)}; rm -f ${shQuote(envFile)}; { ${runLine}; s=$?; printf %s "$s" > ${shQuote(exitFile)}; } 2>> ${shQuote(stderrLog)} | tee -a ${shQuote(log)}`
         const paneCmd = `sh -c ${shQuote(paneScript)}` // NOSONAR — operator-configured agent command (same contract as native/loop)
         const res = tmuxRun(socket, [
           'new-session',
@@ -2983,6 +3033,7 @@ export function makeGascityConnector(ctx: ConnectorCtx, env: AgentConnectorEnv):
       ...infoProvenance(entry),
       worktree: typeof entry.worktree === 'string' ? entry.worktree : undefined,
       log: typeof entry.log === 'string' ? entry.log : undefined,
+      stderrLog: typeof entry.stderrLog === 'string' ? entry.stderrLog : undefined,
     }
   }
 
@@ -3685,6 +3736,7 @@ function toDockerInfo(
     ...infoProvenance(entry),
     worktree: typeof entry.worktree === 'string' ? entry.worktree : undefined,
     log: typeof entry.log === 'string' ? entry.log : undefined,
+    stderrLog: typeof entry.stderrLog === 'string' ? entry.stderrLog : undefined,
   }
 }
 
@@ -3827,7 +3879,7 @@ export function makeDockerConnector(ctx: ConnectorCtx, env: AgentConnectorEnv): 
       const image = dockerImageFor(spec, knobs)
       const mol = stepParent(spec.beadsDir, spec.molStep)
       return withAgentRegistryLock(dir, () => {
-        const { agentId, promptFile, log, exitFile, reservation } = prepareSpawn(
+        const { agentId, promptFile, log, stderrLog, exitFile, reservation } = prepareSpawn(
           dir,
           home,
           'docker',
@@ -3876,7 +3928,7 @@ export function makeDockerConnector(ctx: ConnectorCtx, env: AgentConnectorEnv): 
           // worker a reaper so grandchildren can't zombie inside; --rm
           // removes the corpse on exit so `docker ps -a` doesn't fill
           // with bro litter and the name frees for a respawn.
-          const wrapper = `{ ${runLine}; s=$?; printf %s "$s" > ${shQuote(exitFile)}; } >> ${shQuote(log)} 2>&1`
+          const wrapper = `{ ${runLine}; s=$?; printf %s "$s" > ${shQuote(exitFile)}; } >> ${shQuote(log)} 2>> ${shQuote(stderrLog)}`
           const res = dockerRun(
             dockerRunArgv(name, spec, dockerMounts(spec), envFile, agentId, promptFile, cliBadge, mol, runArgs, image, wrapper)
           )
@@ -4739,6 +4791,10 @@ export function makeCopilotConnector(ctx: ConnectorCtx, env: AgentConnectorEnv):
               prUrl: undefined,
               attach: undefined,
               log: undefined,
+              // no local worker — nothing splits into the capture, so
+              // the entry must not name a .stderr nobody will write
+              stderrLog: undefined,
+              stderrFrom: undefined,
             }),
             cap: { max: fleetCapOf(env), env },
             sessionQuota: copilotSessionQuota(env),
