@@ -348,7 +348,10 @@ export class HttpError extends Error {
   override name = 'HttpError'
   constructor(
     public status: number,
-    message: string
+    message: string,
+    /** close the connection after the response is sent — the terminal
+     *  verdict for an over-bound upload: status out, socket behind it */
+    public close = false
   ) {
     super(message)
   }
@@ -362,17 +365,48 @@ const MAX_BODY_BYTES = 256 * 1024
 export async function readBody(stream: Readable, limit = MAX_BODY_BYTES): Promise<string> {
   const chunks: Buffer[] = []
   let size = 0
-  for await (const chunk of stream) {
+  // destroyOnReturn: false — an early `for await` exit must NOT destroy
+  // the stream: on an IncomingMessage that kills the socket under the
+  // 413 the client is still owed
+  const it = stream.iterator({ destroyOnReturn: false })
+  for await (const chunk of it) {
     // IncomingMessage yields Buffers, but tests feed string chunks —
     // normalize so the cap counts bytes either way
     const buf = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk as string)
     size += buf.length
     if (size > limit) {
-      throw new HttpError(413, `request body over ${limit} bytes`)
+      // answering 413 while the upload is still in flight leaves unread
+      // data on the socket — the kernel RSTs under the response and the
+      // client reads ECONNRESET (bro-df1xf), so drain first
+      const bound = await drainBounded(stream, it, limit)
+      throw new HttpError(413, `request body over ${limit} bytes`, bound)
     }
     chunks.push(buf)
   }
   return Buffer.concat(chunks).toString('utf8')
+}
+
+/** Consume the rest of an over-cap body so the 413 meets a clean
+ *  socket. Bounded: a client still streaming past `limit` more bytes is
+ *  abusive (a hosted tunnel exposes webhook routes unauthenticated) —
+ *  the read pauses rather than destroys (a socket kill here would eat
+ *  the response), and the caller answers 413 + Connection: close.
+ *  Returns whether the bound tripped. */
+async function drainBounded(
+  stream: Readable,
+  it: AsyncIterableIterator<unknown>,
+  limit: number
+): Promise<boolean> {
+  let drained = 0
+  for await (const chunk of it) {
+    const buf = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk as string)
+    drained += buf.length
+    if (drained > limit) {
+      stream.pause()
+      return true
+    }
+  }
+  return false
 }
 
 // --- routing -----------------------------------------------------------------------
@@ -921,8 +955,17 @@ export function send(
   res: ServerResponse,
   status: number,
   body: unknown,
-  opts: { contentType?: string; headers?: Record<string, string> } = {}
+  opts: {
+    contentType?: string
+    headers?: Record<string, string>
+    /** terminal verdict — emit `Connection: close` and let Node tear
+     *  the socket down on the response's tail, never under it */
+    close?: boolean
+  } = {}
 ): void {
+  if (opts.close) {
+    res.shouldKeepAlive = false
+  }
   const contentType = opts.contentType ?? 'application/json'
   res.writeHead(status, { 'content-type': contentType, ...opts.headers })
   res.end(contentType === 'application/json' ? `${JSON.stringify(body)}\n` : String(body))
@@ -1106,11 +1149,23 @@ async function handleRequest(
     )
     send(res, r.status, r.body, r)
   } catch (err) {
-    const status = err instanceof HttpError ? err.status : 500
-    send(res, status, {
-      error: err instanceof Error ? err.message : String(err),
-    })
+    sendError(res, err)
   }
+}
+
+/** Error → response mapping: HttpError is fail-closed input
+ *  validation — a status, never a crash. An error asking to close the
+ *  connection (an over-bound upload) gets its status, then the socket
+ *  dies on the response's tail. */
+function sendError(res: ServerResponse, err: unknown): void {
+  send(
+    res,
+    err instanceof HttpError ? err.status : 500,
+    {
+      error: err instanceof Error ? err.message : String(err),
+    },
+    { close: err instanceof HttpError && err.close }
+  )
 }
 
 /** The provider plane owns its own stream — a Messages request can

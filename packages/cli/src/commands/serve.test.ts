@@ -584,6 +584,36 @@ describe('readBody', () => {
       (err: unknown) => err instanceof HttpError && err.status === 413
     )
   })
+
+  test('drains to end under the bound, pauses over it', async () => {
+    // an over-cap upload finishing inside the bound is consumed whole —
+    // 'end' firing is what makes the 413 socket clean
+    const under = Readable.from(['x'.repeat(300 * 1024), 'y'.repeat(100 * 1024)])
+    let underEnded = false
+    under.on('end', () => {
+      underEnded = true
+    })
+    await assert.rejects(
+      readBody(under),
+      (err: unknown) => err instanceof HttpError && err.status === 413 && !err.close
+    )
+    assert.equal(underEnded, true)
+
+    // streaming past another limit's worth is abusive: the read stops
+    // (paused, never destroyed — a socket kill would eat the 413) and
+    // the error asks the caller to close the connection after answering
+    const over = Readable.from(['x'.repeat(300 * 1024), 'y'.repeat(300 * 1024)])
+    let overEnded = false
+    over.on('end', () => {
+      overEnded = true
+    })
+    await assert.rejects(
+      readBody(over),
+      (err: unknown) => err instanceof HttpError && err.status === 413 && err.close
+    )
+    assert.equal(overEnded, false)
+    assert.equal(over.destroyed, false)
+  })
 })
 
 describe('serve state discovery', () => {
@@ -1212,6 +1242,15 @@ describe('serve handler over a real socket', () => {
         body: 'x'.repeat(300 * 1024),
       })
       assert.equal(tooBig.status, 413)
+
+      // an upload streaming far past the drain bound still reads the
+      // status — the 413 goes out first, the connection closes behind it
+      const abusive = await fetch(`${base}/api/v1/agents`, {
+        method: 'POST',
+        headers: { ...json, ...auth },
+        body: 'x'.repeat(600 * 1024),
+      })
+      assert.equal(abusive.status, 413)
 
       // writes that aren't application/json are refused outright — the
       // loopback CSRF guard; a browser simple-request can't set it
