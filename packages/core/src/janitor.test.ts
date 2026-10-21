@@ -435,6 +435,27 @@ describe('janitor — size caps', () => {
     })
   })
 
+  test('a live agent .stderr caps; an orphan .stderr reaps instead', () => {
+    withBro((bro) => {
+      const agents = mkdir(bro, 'agents')
+      writeRegistry(bro, {
+        'step-live': { agentId: 'native-live', backend: 'native', spawnedAt: new Date().toISOString() },
+      })
+      const big = 'x'.repeat(200) + '\n'
+      const liveCap = join(agents, 'native-live.stderr')
+      const orphanCap = join(agents, 'native-orphan.stderr')
+      writeFileSync(liveCap, big.repeat(6000))
+      writeFileSync(orphanCap, big.repeat(6000))
+      const old = new Date(Date.now() - DAY)
+      utimesSync(orphanCap, old, old)
+      const r = janitorBroDir(bro, deps(bro))
+      assert.ok(statSync(liveCap).size <= 600 * 1024)
+      assert.equal(existsSync(liveCap), true)
+      assert.equal(existsSync(orphanCap), false)
+      assert.equal(r.truncated.length, 1)
+    })
+  })
+
   test('a file under the cap is untouched', () => {
     withBro((bro) => {
       const trace = mkdir(bro, 'hooks', 'trace')

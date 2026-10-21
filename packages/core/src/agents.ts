@@ -264,6 +264,10 @@ export interface AgentInfo {
   class?: string
   worktree?: string
   log?: string
+  /** The worker's stderr capture beside `log` — local backends split fd
+   *  2 into `<agentId>.stderr` so `log` stays the agent-updates stream
+   *  (spec bro-e2ec0); absent on remote backends and pre-split entries. */
+  stderrLog?: string
 }
 
 export interface AgentCapabilities {

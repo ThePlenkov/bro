@@ -573,6 +573,11 @@ function capLogs(ctx: Ctx): void {
     if (f.endsWith('.log') && ctx.liveAgentIds.has(f.slice(0, -'.log'.length))) {
       capIfLarge(ctx, join(ctx.bro, 'agents', f), true)
     }
+    // <agentId>.stderr is the worker's stderr capture (spec bro-e2ec0) —
+    // same append-only shape and same live-only bound as the .log
+    if (f.endsWith('.stderr') && ctx.liveAgentIds.has(f.slice(0, -'.stderr'.length))) {
+      capIfLarge(ctx, join(ctx.bro, 'agents', f), true)
+    }
   }
 }
 
