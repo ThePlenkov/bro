@@ -61,6 +61,12 @@ code nobody edits by hand.
   inherits that facade — it does not re-implement it. The same vendor
   logic split across the CLI, the core and a plugin is **major**: the
   duplicate drifts, and the drift is invisible until the vendor moves.
+- `packages/rig` is the lifecycle engine — usable by planes/ACP without
+  a CLI spawn. An import of `plugins.ts` or `commands/*`, or a
+  `process.exit`/`console.log` call in `packages/rig` is a **major**
+  finding — argv, stdout, and exit codes are the adapter's job and live
+  in `packages/cli`. Connector resolution goes through core's `facade`
+  + `loadConfig` only.
 
 ## Verification expectations
 
