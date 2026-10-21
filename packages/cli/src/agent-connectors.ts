@@ -1812,9 +1812,13 @@ function ensureExitCause(
   }
   entry.cause = c.cause
   entry.resetAt = c.resetAt
-  if (c.cause === 'rate_limited' || c.cause === 'quota') {
+  if (
+    (c.cause === 'rate_limited' || c.cause === 'quota') &&
+    entry.sessionKind === 'devin'
+  ) {
     // the provider's wall — an ACCOUNT fact, not this agent's. Every lane
-    // member shares the budget, so the fleet must see it (spec bro-g0izo)
+    // member shares the budget, so the fleet must see it (spec bro-g0izo).
+    // Only the devin lane: another provider's wall is not this lane's.
     try {
       otelEvent('lane.devin.wall', {
         provider: typeof entry.provider === 'string' ? entry.provider : 'unknown',

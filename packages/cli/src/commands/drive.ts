@@ -2379,7 +2379,7 @@ async function driveOnce(ctx: Ctx): Promise<void> {
   // where the numbers belong (spec bro-g0izo)
   try {
     const bag = loadAgentEnv(ctx.mainRoot).agents['devin'] ?? {}
-    await emitDevinUsage(bag)
+    await emitDevinUsage(ctx.mainRoot, bag)
   } catch {
     // telemetry must not stall the pass
   }

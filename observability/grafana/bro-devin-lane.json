@@ -30,12 +30,12 @@
             "type": "loki",
             "uid": "loki"
           },
-          "expr": "max(sum by (model) (count_over_time({service_name=\"bro\"} | event_name=\"lane.devin.model.usage\" | window_ms=\"60000\" | unwrap requests [$__range])))",
+          "expr": "max(sum by (model) (sum_over_time({service_name=\"bro\"} | event_name=\"lane.devin.model.usage\" | unwrap requests [$__range])))",
           "queryType": "instant",
           "refId": "A"
         }
       ],
-      "title": "Requests / min (burst tier)",
+      "title": "Requests / sample window (per model, max)",
       "type": "stat"
     },
     {
@@ -60,12 +60,12 @@
             "type": "loki",
             "uid": "loki"
           },
-          "expr": "max(sum by (model) (count_over_time({service_name=\"bro\"} | event_name=\"lane.devin.model.usage\" | window_ms=\"3600000\" | unwrap requests [$__range])))",
+          "expr": "last_over_time({service_name=\"bro\"} | event_name=\"lane.devin.lane\" | unwrap sessions [$__interval])",
           "queryType": "instant",
           "refId": "A"
         }
       ],
-      "title": "Requests / hour (hourly tier)",
+      "title": "Open devin sessions",
       "type": "stat"
     },
     {
@@ -90,12 +90,12 @@
             "type": "loki",
             "uid": "loki"
           },
-          "expr": "max_over_time({service_name=\"bro\"} | event_name=\"lane.devin.lane\" | unwrap sessions [$__interval])",
+          "expr": "last_over_time({service_name=\"bro\"} | event_name=\"lane.devin.lane\" | unwrap workers [$__interval])",
           "queryType": "instant",
           "refId": "A"
         }
       ],
-      "title": "Open devin sessions",
+      "title": "Live devin workers",
       "type": "stat"
     },
     {
@@ -120,12 +120,12 @@
             "type": "loki",
             "uid": "loki"
           },
-          "expr": "max_over_time({service_name=\"bro\"} | event_name=\"lane.devin.lane\" | unwrap workers [$__interval])",
+          "expr": "last_over_time({service_name=\"bro\"} | event_name=\"lane.devin.lane\" | unwrap batch_workers [$__interval])",
           "queryType": "instant",
           "refId": "A"
         }
       ],
-      "title": "Live devin workers",
+      "title": "Batch workers (the fleet's share)",
       "type": "stat"
     },
     {
@@ -156,12 +156,12 @@
             "type": "loki",
             "uid": "loki"
           },
-          "expr": "sum by (model) (count_over_time({service_name=\"bro\"} | event_name=\"lane.devin.model.usage\" | window_ms=\"60000\" | unwrap requests [$__interval]))",
+          "expr": "sum by (model) (sum_over_time({service_name=\"bro\"} | event_name=\"lane.devin.model.usage\" | unwrap requests [$__interval]))",
           "queryType": "range",
           "refId": "A"
         }
       ],
-      "title": "Request rate per model (burst, 60s window)",
+      "title": "Request rate per model (deltas summed)",
       "type": "timeseries"
     },
     {
@@ -192,12 +192,12 @@
             "type": "loki",
             "uid": "loki"
           },
-          "expr": "sum by (model) (count_over_time({service_name=\"bro\"} | event_name=\"lane.devin.model.usage\" | window_ms=\"3600000\" | unwrap requests [$__interval]))",
+          "expr": "sum by (model) (max_over_time({service_name=\"bro\"} | event_name=\"lane.devin.model.usage\" | unwrap total_requests [$__interval]))",
           "queryType": "range",
           "refId": "A"
         }
       ],
-      "title": "Request rate per model (hour, 60m window)",
+      "title": "Cumulative requests per model",
       "type": "timeseries"
     },
     {
@@ -228,12 +228,12 @@
             "type": "loki",
             "uid": "loki"
           },
-          "expr": "max_over_time({service_name=\"bro\"} | event_name=\"lane.devin.lane\" | unwrap sessions [$__interval])",
+          "expr": "last_over_time({service_name=\"bro\"} | event_name=\"lane.devin.lane\" | unwrap sessions [$__interval])",
           "queryType": "range",
           "refId": "A"
         }
       ],
-      "title": "Live lane counts",
+      "title": "Open devin sessions (live)",
       "type": "timeseries"
     },
     {
@@ -264,12 +264,12 @@
             "type": "loki",
             "uid": "loki"
           },
-          "expr": "sum by (cause) (count_over_time({service_name=\"bro\"} | event_name=\"lane.devin.wall\" [$__interval]))",
+          "expr": "last_over_time({service_name=\"bro\"} | event_name=\"lane.devin.lane\" | unwrap workers [$__interval])",
           "queryType": "range",
           "refId": "A"
         }
       ],
-      "title": "Provider walls (rate_limited / quota)",
+      "title": "Live workers (fleet vs interactive)",
       "type": "timeseries"
     },
     {
@@ -300,12 +300,48 @@
             "type": "loki",
             "uid": "loki"
           },
-          "expr": "max_over_time({service_name=\"bro\"} | event_name=\"lane.devin.lane\" | unwrap batch_workers [$__interval])",
+          "expr": "count(sum by (agent) (count_over_time({service_name=\"bro\"} | event_name=\"lane.devin.wall\" [$__interval])))",
           "queryType": "range",
           "refId": "A"
         }
       ],
-      "title": "Batch workers (the fleet's share)",
+      "title": "Provider walls (distinct agents)",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "loki",
+        "uid": "loki"
+      },
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 5,
+        "w": 12,
+        "x": 0,
+        "y": 15
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "loki",
+            "uid": "loki"
+          },
+          "expr": "sum by (cause) (count_over_time({service_name=\"bro\"} | event_name=\"lane.devin.wall\" [$__interval]))",
+          "queryType": "range",
+          "refId": "A"
+        }
+      ],
+      "title": "Provider walls by cause",
       "type": "timeseries"
     }
   ],
@@ -314,7 +350,8 @@
   "tags": [
     "bro",
     "devin",
-    "lane"
+    "lane",
+    "rate-limit"
   ],
   "templating": {
     "list": []
