@@ -5,7 +5,7 @@ import assert from 'node:assert/strict'
 import { mkdtempSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { agent, type SessionConfigOption, type SessionUpdate } from '@agentclientprotocol/sdk'
+import { agent, type SessionConfigOption, type SessionUpdate, type StopReason } from '@agentclientprotocol/sdk'
 import { fakeAcpAgent } from '@broject/providers/testkit'
 import { conductorConfig, conductorProxy, parseReply } from './serve-conductor.ts'
 import type { ConductorConfig } from './serve-conductor.ts'
@@ -334,6 +334,50 @@ describe('serve /v1/* — the conductor plane', () => {
         d: '/tmp',
       })
       assert.equal(stopReason(ev), 'tool_use')
+    } finally {
+      await close()
+    }
+  })
+
+  // bro-6fk80 — a cancelled or backend-ended turn must never read as a
+  // clean end_turn; the acp reason surfaces as a non-standard
+  // stop_reason the client can branch on.
+  test('a cancelled turn reports stop_reason cancelled, not end_turn', async () => {
+    const fake = fakeAcpAgent({
+      replyText: 'partial',
+      configOptions: [MODEL_OPTION],
+      stopReason: 'cancelled',
+    })
+    const { r, close } = await postStream(fake, {
+      messages: [{ role: 'user', content: 'x' }],
+      stream: true,
+    })
+    try {
+      const ev = await sseEvents(r)
+      assert.equal(stopReason(ev), 'cancelled')
+    } finally {
+      await close()
+    }
+  })
+
+  test('a non-enum acp reason forwards raw — buffered, then replayed', async () => {
+    // devin's adapter emits error/auth_required outside the acp enum —
+    // those used to fall back to a silent 'end_turn'
+    const fake = fakeAcpAgent({
+      replyText: 'partial',
+      configOptions: [MODEL_OPTION],
+      stopReason: 'auth_required' as StopReason,
+    })
+    const { post, close } = await boot(fake)
+    try {
+      const body = { messages: [{ role: 'user', content: 'x' }], stream: false }
+      const first = await (await post(body)).json()
+      assert.equal(first.stop_reason, 'auth_required')
+      // the recorded reply replays the same reason — no second turn,
+      // no silent end_turn
+      const re = await (await post(body)).json()
+      assert.equal(re.stop_reason, 'auth_required')
+      assert.equal(fake.prompts.length, 1)
     } finally {
       await close()
     }
