@@ -84,7 +84,7 @@ export function sessionCapVerdict(
   const key = `guard-${ctx.sessionId ?? 'nosession'}`
   for (const view of views) {
     try {
-      reserveSessionStart(view.kind, bags, key, view.starts)
+      reserveSessionStart({ kind: view.kind, agents: bags, key, count: view.starts })
     } catch {
       // the claim is a brake, not a gate — the call still runs
     }

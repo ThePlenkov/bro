@@ -161,23 +161,24 @@ export function sessionReservationsDir(
  *  the session's own mark joins the count when it lands — so the
  *  budget errs LOW for a couple of minutes, never high. That is the
  *  right direction for a shared account. */
-export function reserveSessionStart(
-  kind: string,
-  agents: Record<string, Record<string, unknown>> | undefined,
-  key: string,
-  count: number,
+export function reserveSessionStart(claim: {
+  kind: string
+  agents: Record<string, Record<string, unknown>> | undefined
+  key: string
+  count: number
   /** The lane the claim belongs to — the batch cap counts only the
    *  fleet's claims, so an interactive start never eats the fleet's
    *  share. */
-  lane: ReservationLane = 'interactive'
-): string[] {
-  if (count <= 0) {
+  lane?: ReservationLane
+}): string[] {
+  if (claim.count <= 0) {
     return []
   }
-  const dir = sessionReservationsDir(kind, agents)
+  const dir = sessionReservationsDir(claim.kind, claim.agents)
+  const lane = claim.lane ?? 'interactive'
   const paths: string[] = []
-  for (let i = 0; i < count; i++) {
-    paths.push(reserveSessionSlot(dir, key, lane))
+  for (let i = 0; i < claim.count; i++) {
+    paths.push(reserveSessionSlot(dir, claim.key, lane))
   }
   return paths
 }

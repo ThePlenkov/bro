@@ -1453,7 +1453,12 @@ function assertSessionCap(env: TurnEnv, claimKey: string): void {
   const view = views[0]
   if (view !== undefined) {
     try {
-      reserveSessionStart(view.kind, env.cfg.agents, claimKey, view.starts)
+      reserveSessionStart({
+        kind: view.kind,
+        agents: env.cfg.agents,
+        key: claimKey,
+        count: view.starts,
+      })
     } catch {
       // the claim is a brake, not a gate — the request still runs
     }
