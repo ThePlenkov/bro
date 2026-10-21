@@ -115,7 +115,7 @@ function isDevinProcess(pid: number, procDir = '/proc'): boolean {
 /** Is this lock a live devin session? A lock names a pid; the pid
  *  must be alive AND still be the devin cli (a recycled number is a
  *  stale lock). */
-function lockIsLiveSession(pid: number | undefined, procDir: string): boolean {
+function lockIsLiveSession(pid: number | undefined, procDir: string): pid is number {
   if (pid === undefined) {
     return false
   }
