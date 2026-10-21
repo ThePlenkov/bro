@@ -2372,17 +2372,21 @@ function emitWatchHeartbeats(
   }
 }
 
-/** One pass: enumerate, probe every open PR, act per verdict. */
-async function driveOnce(ctx: Ctx): Promise<void> {
-  // the devin lane's telemetry: the account's request rate per model and
-  // the lane's live counts. The pass is the fleet's heartbeat, so it is
-  // where the numbers belong (spec bro-g0izo)
+/** The devin lane's telemetry: the account's request rate per model and
+ *  the lane's live counts. The pass is the fleet's heartbeat, so it is
+ *  where the numbers belong (spec bro-g0izo). */
+async function emitLaneUsage(ctx: Ctx): Promise<void> {
   try {
     const bag = loadAgentEnv(ctx.mainRoot).agents['devin'] ?? {}
     await emitDevinUsage(ctx.mainRoot, bag)
   } catch {
     // telemetry must not stall the pass
   }
+}
+
+/** One pass: enumerate, probe every open PR, act per verdict. */
+async function driveOnce(ctx: Ctx): Promise<void> {
+  await emitLaneUsage(ctx)
   const { byStep, degraded } = await collectAgents(ctx.mainRoot)
   for (const d of degraded) {
     say(ctx, `warning: backend degraded — ${d}`)

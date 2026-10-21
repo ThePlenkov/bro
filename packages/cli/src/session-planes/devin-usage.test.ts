@@ -10,15 +10,6 @@ import {
   sampleDevinUsage,
 } from './devin-usage.ts'
 
-const withDir = (fn: (dir: string) => void | Promise<void>): void => {
-  const dir = mkdtempSync(join(tmpdir(), 'bro-devin-usage-'))
-  try {
-    void fn(dir)
-  } finally {
-    rmSync(dir, { recursive: true, force: true })
-  }
-}
-
 /** A store shaped like devin's: sessions plus message nodes carrying a
  *  request_id in the chat message's metadata. */
 async function fakeStore(dir: string): Promise<{
@@ -116,9 +107,14 @@ describe('the sampler', () => {
 
 describe('the sampler state', () => {
   test('no git repo — no state file, no crash', () => {
-    withDir((dir) => {
+    // the assertion lives in the test body, not in a callback — a
+    // static analyzer does not see an assert it cannot reach
+    const dir = mkdtempSync(join(tmpdir(), 'bro-devin-usage-'))
+    try {
       assert.equal(devinUsageStatePath(dir), null)
-    })
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
   })
 
   test('a missing state is an empty state, never a throw', () => {

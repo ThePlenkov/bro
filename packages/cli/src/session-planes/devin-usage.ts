@@ -64,14 +64,8 @@ export function devinStorePath(
   env: Record<string, string | undefined> = process.env
 ): string {
   const xdg = env['XDG_DATA_HOME']
-  const base =
-    xdg !== undefined && xdg.trim() !== ''
-      ? xdg
-      : join(
-          env['HOME'] !== undefined && env['HOME'] !== '' ? env['HOME'] : homedir(),
-          '.local',
-          'share'
-        )
+  const home = env['HOME'] !== undefined && env['HOME'] !== '' ? env['HOME'] : homedir()
+  const base = xdg !== undefined && xdg.trim() !== '' ? xdg : join(home, '.local', 'share')
   return join(base, 'devin', 'cli', 'sessions.db')
 }
 
