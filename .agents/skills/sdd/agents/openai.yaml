@@ -1,7 +1,0 @@
-interface:
-  display_name: "Bro SDD"
-  short_description: "Spec-driven development policy — spec before code for claimed beads"
-  brand_color: "#0E8A16"
-  default_prompt: "Use $sdd to check spec coverage."
-policy:
-  allow_implicit_invocation: false

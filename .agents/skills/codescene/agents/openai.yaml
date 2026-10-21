@@ -1,0 +1,5 @@
+interface:
+  display_name: "Codescene"
+  short_description: "Help with Codescene tasks and workflows"
+  brand_color: "#3B82F6"
+  default_prompt: "Use $codescene to get started."
