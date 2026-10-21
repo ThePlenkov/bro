@@ -8,7 +8,6 @@ import {
   devinUsageStatePath,
   readDevinUsageState,
   sampleDevinUsage,
-  writeDevinUsageState,
 } from './devin-usage.ts'
 
 const withDir = (fn: (dir: string) => void | Promise<void>): void => {
@@ -101,11 +100,9 @@ describe('the sampler', () => {
 })
 
 describe('the sampler state', () => {
-  test('round-trips the cursor and the cumulative counters', () => {
+  test('no git repo — no state file, no crash', () => {
     withDir((dir) => {
-      const path = devinUsageStatePath(dir)
-      assert.equal(path, null, 'no git repo — no state file')
-      void path
+      assert.equal(devinUsageStatePath(dir), null)
     })
   })
 
