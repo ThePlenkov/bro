@@ -363,10 +363,23 @@ export async function readBody(stream: Readable, limit = MAX_BODY_BYTES): Promis
   const chunks: Buffer[] = []
   let size = 0
   let over = false
+  let drained = 0
   for await (const chunk of stream) {
     // IncomingMessage yields Buffers, but tests feed string chunks —
     // normalize so the cap counts bytes either way
     const buf = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk as string)
+    if (over) {
+      // the drain is bounded too — a client still uploading far past
+      // the limit is abusive (a hosted tunnel exposes webhook routes
+      // unauthenticated); destroy the socket rather than hold the
+      // handler for its whole body
+      drained += buf.length
+      if (drained > limit) {
+        stream.destroy()
+        break
+      }
+      continue
+    }
     size += buf.length
     if (size > limit) {
       // keep draining to end: answering 413 while the upload is still
@@ -375,9 +388,7 @@ export async function readBody(stream: Readable, limit = MAX_BODY_BYTES): Promis
       over = true
       continue
     }
-    if (!over) {
-      chunks.push(buf)
-    }
+    chunks.push(buf)
   }
   if (over) {
     throw new HttpError(413, `request body over ${limit} bytes`)
@@ -933,6 +944,11 @@ export function send(
   body: unknown,
   opts: { contentType?: string; headers?: Record<string, string> } = {}
 ): void {
+  // readBody's over-bound socket destroy can precede this write —
+  // answering a destroyed response throws instead of no-opping
+  if (res.destroyed) {
+    return
+  }
   const contentType = opts.contentType ?? 'application/json'
   res.writeHead(status, { 'content-type': contentType, ...opts.headers })
   res.end(contentType === 'application/json' ? `${JSON.stringify(body)}\n` : String(body))

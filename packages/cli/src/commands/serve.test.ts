@@ -584,6 +584,18 @@ describe('readBody', () => {
       (err: unknown) => err instanceof HttpError && err.status === 413
     )
   })
+
+  test('drains past the cap only so far, then destroys the stream', async () => {
+    // uploads streaming further than the cap past the trip are killed
+    // instead of held open — a hosted tunnel exposes webhook routes
+    // unauthenticated, so the drain must be bounded too
+    const stream = Readable.from(['x'.repeat(300 * 1024), 'y'.repeat(300 * 1024)])
+    await assert.rejects(
+      readBody(stream),
+      (err: unknown) => err instanceof HttpError && err.status === 413
+    )
+    assert.equal(stream.destroyed, true)
+  })
 })
 
 describe('serve state discovery', () => {

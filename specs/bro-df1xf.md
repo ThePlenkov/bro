@@ -19,11 +19,16 @@ buffered but the stream is consumed to end — then throws 413. The
 socket is clean when `send(res, 413)` runs: no unread request data, no
 RST race, keep-alive stays usable.
 
-Bounded by the transport: the drain ends when the declared body ends
-(content-length or chunked terminator); a client that never finishes
-is held by Node's `requestTimeout`, same as any slow request today.
-The memory cap itself is unchanged — over-limit bytes are never
-buffered.
+Bounded in both directions: the drain runs at most `limit` further
+bytes past the cap — an upload still streaming beyond that is abusive
+(a hosted tunnel exposes webhook routes unauthenticated, before HMAC
+verification), so the socket is destroyed rather than holding the
+handler for the whole body. A client that never finishes is held by
+Node's `requestTimeout`, same as any slow request today. The memory
+cap itself is unchanged — over-limit bytes are never buffered, so at
+most `2 * limit` bytes cross the transport per request. `send()`
+no-ops on a destroyed response — the 413 write after a socket kill
+must not throw a second error.
 
 Scope: the fix lives in `readBody`, the single chokepoint for JSON
 write bodies. Guard refusals that answer before `readBody` (401/403/415)
