@@ -25,6 +25,7 @@ export {
   mainWorktreeRoot,
   unquoteGitPath,
   worktreeGitDir,
+  worktreePathFor,
 } from './git.ts'
 export type { GitLogPathRecord, GitStamp, GitLogStamp } from './git.ts'
 export {
