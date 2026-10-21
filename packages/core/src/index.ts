@@ -410,6 +410,15 @@ export type {
   SessionQuota,
 } from './session-planes.ts'
 export {
+  planeStartingSessions,
+  reserveSessionStart,
+  sessionCapRefusal,
+  sessionCapRefusalFor,
+  sessionCapViews,
+  sessionReservationsDir,
+} from './session-cap.ts'
+export type { SessionCapView } from './session-cap.ts'
+export {
   clearPlanes,
   planeNames,
   planes,

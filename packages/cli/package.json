@@ -1,8 +1,19 @@
 {
   "name": "@broject/bro",
   "version": "0.2.5",
-  "description": "bro — agent's sidekick CLI: the rig that owns the PR-to-merge loop — fleet, convoy, review gates, mesh, debt sweep",
-  "keywords": ["agent-rig", "orchestration", "fleet", "convoy", "mesh", "pr-review", "merge-gate", "review-debt", "beads", "agent-workflow"],
+  "description": "bro \u2014 agent's sidekick CLI: the rig that owns the PR-to-merge loop \u2014 fleet, convoy, review gates, mesh, debt sweep",
+  "keywords": [
+    "agent-rig",
+    "orchestration",
+    "fleet",
+    "convoy",
+    "mesh",
+    "pr-review",
+    "merge-gate",
+    "review-debt",
+    "beads",
+    "agent-workflow"
+  ],
   "type": "module",
   "bin": {
     "bro": "dist/index.js"
@@ -59,10 +70,11 @@
   },
   "dependencies": {
     "@broject/bro-pack": "^0.2.0",
+    "@broject/devin": "^0.2.5",
     "@broject/mcp": "^0.2.5",
     "@modelcontextprotocol/sdk": "^1.31.0",
-    "sverka": "^0.2.10",
-    "smol-toml": "^1.9.0"
+    "smol-toml": "^1.9.0",
+    "sverka": "^0.2.10"
   },
   "devDependencies": {
     "@kilocode/plugin": "^7.8.3",

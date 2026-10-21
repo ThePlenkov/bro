@@ -27,6 +27,8 @@ import { join } from 'node:path'
 import { gitCommonDir, loadConfig } from '@broject/core'
 import type { ProviderEntry } from '@broject/core'
 import { acpOpen, acpPooledTurn, acpSessionRetain, otelEvent, otelJournal, otelParent, otelSpan, toolPayload } from '@broject/providers'
+import { sessionCapViews } from '@broject/core'
+import { conductorSessionRefusal } from './session-cap.ts'
 import type { AcpTerminals, Toolish } from '@broject/providers'
 import type { AcpContentBlock, AcpPeer, AcpRetainedSession, OtelCtx, PooledTurnOpts, ProviderWireOpts } from '@broject/providers'
 import { peerAttrs } from './peer.ts'
@@ -48,6 +50,10 @@ export interface ConductorConfig {
   /** SSE ping cadence while a streamed turn is open — claude's read
    *  timeout is the real constraint on slow acp turns. */
   keepaliveMs?: number
+  /** The `agents.<kind>` bags — the session cap's knobs (spec
+   *  bro-bww9v). Read once at startup: the cap is a policy, not a
+   *  per-request config reload. */
+  agents: Record<string, Record<string, unknown>>
 }
 
 /** A positive-int env pin, else the fallback — 0, negative and NaN are
@@ -146,6 +152,7 @@ export function conductorConfig(
     cwd: dir,
     timeoutMs: positiveEnvInt(env, 'BRO_PROVIDER_TIMEOUT_MS', 120_000),
     keepaliveMs: positiveEnvInt(env, 'BRO_CONDUCTOR_KEEPALIVE_MS', 10_000),
+    agents: (cfg.agents ?? {}) as Record<string, Record<string, unknown>>,
   }
 }
 
@@ -1413,6 +1420,26 @@ function retireDivergent(env: TurnEnv, cand: ConvSession): Promise<TurnOutcome> 
 
 /** A first (or restarted) turn — a keyed request retains a session;
  *  a keyless, busy, or already-opening key takes the one-shot path. */
+/** The ACP surface's session facade — the cap before a session is
+ *  opened (spec bro-bww9v).
+ *
+ *  Every request opens a session on the shared peer, and a retained
+ *  conversation keeps one alive — so the conductor's own count is part
+ *  of the host's budget. The plane counts live devin PROCESSES; the
+ *  conductor's conversations share one peer, so the plane sees one
+ *  where the conductor holds many: the conductor adds its own count.
+ *
+ *  Fails CLOSED: a cap that cannot be established is not walked past.
+ *  The refusal names the cap, and the conductor's failure mapping
+ *  answers it with 429 (the message carries "quota"). */
+function assertSessionCap(env: TurnEnv): void {
+  const views = sessionCapViews(env.cfg.entry.command, env.cfg.agents)
+  const refusal = conductorSessionRefusal(views[0], env.sessions.size)
+  if (refusal !== undefined) {
+    throw new Error(refusal)
+  }
+}
+
 async function freshTurn(env: TurnEnv, candBusy: boolean): Promise<TurnOutcome> {
   // image blocks ride the wire only when the agent advertised the
   // prompt capability — serialize after link() so the negotiated
@@ -1420,6 +1447,8 @@ async function freshTurn(env: TurnEnv, candBusy: boolean): Promise<TurnOutcome> 
   const prompt = serializeBlocks(env.body, env.imageOk)
   const inputTokens = inputTokensOf(prompt)
   const key = env.key
+  // the cap before a session is opened — both paths open one
+  assertSessionCap(env)
   if (key === undefined || candBusy || env.pendingOpens.has(key)) {
     // a keyless request, or the conversation's own turn is still in
     // flight — one-shot over the same link, nothing stored

@@ -94,7 +94,7 @@ import {
   devinSessionTranscript,
   devinTranscriptsDir,
   renderDevinTranscript,
-} from '../session-planes/devin.ts'
+} from '@broject/devin'
 import { flag, positionals } from './args.ts'
 import { mainWorktree, worktreePathFor } from './work.ts'
 

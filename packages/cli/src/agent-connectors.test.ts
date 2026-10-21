@@ -60,7 +60,7 @@ import {
   type BudgetSnapshot,
 } from './agent-connectors.ts'
 import { initRepo, installFakeBd, readBeads, writeBeads } from './commands/testrepo.ts'
-import { devinSessionPlane } from './session-planes/devin.ts'
+import { devinSessionPlane } from '@broject/devin'
 import { VERSION } from './version.ts'
 
 // ambient repo/agent/store pins must not reach fixture git children
@@ -555,10 +555,22 @@ function connectorContract(b: BackendCase): void {
     }
   })
 
+
+/** A fake /proc where this process reads as the devin cli — the live
+ *  session count checks the process identity (argv[0]): a lock's pid
+ *  must still BE the cli that wrote it. */
+const devinProc = (): string => {
+  const dir = mkdtempSync(join(tmpdir(), 'bro-devin-proc-'))
+  mkdirSync(join(dir, String(process.pid)), { recursive: true })
+  writeFileSync(join(dir, String(process.pid), 'cmdline'), 'devin\0')
+  return dir
+}
+
   test('the devin session quota refuses a spawn at maxSessions — nothing half-lands', async () => {
     const f = fx([{ id: 'fx-1', status: 'open' }])
     const lockDir = mkdtempSync(join(tmpdir(), 'bro-devin-locks-'))
     const reservationsDir = mkdtempSync(join(tmpdir(), 'bro-devin-resv-'))
+    const procDir = devinProc()
     // one live devin session (this process) fills the cap of 1
     writeFileSync(join(lockDir, 'me.lock'), String(process.pid))
     const env: AgentConnectorEnv = {
@@ -570,7 +582,7 @@ function connectorContract(b: BackendCase): void {
         native: { ...f.env.agents['native'], sessionKind: 'devin' },
         tmux: { ...f.env.agents['tmux'], sessionKind: 'devin' },
         docker: { ...f.env.agents['docker'], sessionKind: 'devin' },
-        devin: { maxSessions: 1, lockDir, reservationsDir },
+        devin: { maxSessions: 1, lockDir, reservationsDir, procDir },
       },
     }
     try {
@@ -585,6 +597,7 @@ function connectorContract(b: BackendCase): void {
     } finally {
       rmSync(lockDir, { recursive: true, force: true })
       rmSync(reservationsDir, { recursive: true, force: true })
+      rmSync(procDir, { recursive: true, force: true })
       cleanup(f)
     }
   })
@@ -596,6 +609,7 @@ function connectorContract(b: BackendCase): void {
     ])
     const lockDir = mkdtempSync(join(tmpdir(), 'bro-devin-locks-'))
     const reservationsDir = mkdtempSync(join(tmpdir(), 'bro-devin-resv-'))
+    const procDir = devinProc()
     // cap 2: one live lock + one reservation = full — the second devin
     // spawn must refuse even though its own repo registry is empty
     writeFileSync(join(lockDir, 'other.lock'), String(process.pid))
@@ -606,7 +620,7 @@ function connectorContract(b: BackendCase): void {
         native: { ...f.env.agents['native'], sessionKind: 'devin' },
         tmux: { ...f.env.agents['tmux'], sessionKind: 'devin' },
         docker: { ...f.env.agents['docker'], sessionKind: 'devin' },
-        devin: { maxSessions: 2, lockDir, reservationsDir },
+        devin: { maxSessions: 2, lockDir, reservationsDir, procDir },
       },
     }
     try {
@@ -626,6 +640,7 @@ function connectorContract(b: BackendCase): void {
     } finally {
       rmSync(lockDir, { recursive: true, force: true })
       rmSync(reservationsDir, { recursive: true, force: true })
+      rmSync(procDir, { recursive: true, force: true })
       cleanup(f)
     }
   })

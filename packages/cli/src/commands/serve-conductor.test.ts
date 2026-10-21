@@ -102,6 +102,7 @@ const CFG: ConductorConfig = {
   },
   cwd: '/repo',
   timeoutMs: 10_000,
+  agents: {},
 }
 
 describe('conductorConfig', () => {

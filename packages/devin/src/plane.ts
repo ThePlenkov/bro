@@ -21,6 +21,7 @@ import {
   type DiscoveredSession,
   type SessionPlane,
 } from '@broject/core'
+import { countDevinSessionStarts } from './starts.ts'
 
 /** Devin's session-lock dir — `agents.devin.lockDir` overrides for odd
  *  installs/tests; `env` is the environment the derivation reads (a
@@ -80,12 +81,44 @@ function devinSessionDirs(
   return dirs
 }
 
+/** Is this pid still a devin session? The lock file carries a pid and
+ *  nothing else, so a pid that was RECYCLED (the devin session died,
+ *  the number now belongs to something else) reads as a live session —
+ *  observed on this host: a `tailscaled` pid holding a devin lock.
+ *
+ *  The identity check reads the process's own command line: a live
+ *  devin session's argv[0] is the devin CLI. A lock whose pid belongs
+ *  to another program is STALE — the session it named is gone.
+ *
+ *  The lock dir is not devin's alone: another CLI (`pi`) writes
+ *  devin-shaped session locks into the same directory, and those
+ *  sessions draw on a different account — counting them would charge
+ *  the devin cap for someone else's sessions.
+ *
+ *  An unreadable /proc entry cannot clear a lock (the count fails
+ *  closed — a quota that cannot be established is not walked past), so
+ *  it counts as live. */
+function isDevinProcess(pid: number, procDir = '/proc'): boolean {
+  let cmdline: string
+  try {
+    cmdline = readFileSync(join(procDir, String(pid), 'cmdline'), 'utf8')
+  } catch {
+    return true // cannot prove it stale — count it
+  }
+  const argv0 = cmdline.split('\0')[0] ?? ''
+  if (argv0 === '') {
+    return true
+  }
+  return argv0.slice(argv0.lastIndexOf('/') + 1) === 'devin'
+}
+
 /** Live devin session pids across the dirs — lock files whose pid is
- *  alive, deduplicated (a resumed session leaves a second lock for the
- *  same process). A missing dir means no devin install → empty; any
- *  OTHER read failure throws SpawnError('unavailable') — an
- *  unverifiable count fails closed, never silently admits. */
-function liveDevinLockPids(dirs: string[]): Set<number> {
+ *  alive AND still a devin process, deduplicated (a resumed session
+ *  leaves a second lock for the same process). A missing dir means no
+ *  devin install → empty; any OTHER read failure throws
+ *  SpawnError('unavailable') — an unverifiable count fails closed,
+ *  never silently admits. */
+function liveDevinLockPids(dirs: string[], procDir = '/proc'): Set<number> {
   const live = new Set<number>()
   for (const dir of dirs) {
     let names: string[]
@@ -105,7 +138,7 @@ function liveDevinLockPids(dirs: string[]): Set<number> {
         continue
       }
       const pid = lockPid(dir, name)
-      if (pid !== undefined && pidAlive(pid)) {
+      if (pid !== undefined && pidAlive(pid) && isDevinProcess(pid, procDir)) {
         live.add(pid)
       }
     }
@@ -172,7 +205,7 @@ export function countDevinSessions(
   slotsDir?: string,
   procDir = '/proc'
 ): number {
-  const live = liveDevinLockPids(dirs)
+  const live = liveDevinLockPids(dirs, procDir)
   if (slotsDir !== undefined) {
     sweepLandedSlots(slotsDir, live, procDir)
   }
@@ -266,7 +299,7 @@ export function countDevinBatchWorkers(
   // caller with a scripted /proc tree must not be counted against the
   // real one
   const predicate = isBatch ?? ((pid: number) => devinPidIsBatch(pid, procDir))
-  const live = liveDevinLockPids(dirs)
+  const live = liveDevinLockPids(dirs, procDir)
   if (isBatch === undefined && live.size > 0 && !existsSync(procDir)) {
     // a host without /proc cannot tell the fleet's workers from the
     // operator's — an armed maxBatchWorkers must refuse there like an
@@ -305,7 +338,10 @@ export function countDevinWorkers(
   slotsDir?: string,
   procDir = '/proc'
 ): number {
-  const live = liveDevinLockPids(dirs)
+  const live = liveDevinLockPids(dirs, procDir)
+  // the default predicate reads the SAME procDir the scan uses — a
+  // scripted /proc tree must not be classified against the real one
+  const predicate = isWorker === devinPidIsWorker ? (pid: number) => devinPidIsWorker(pid, procDir) : isWorker
   if (isWorker === devinPidIsWorker && live.size > 0 && !existsSync(procDir)) {
     throw new SpawnError(
       `cannot verify devin worker count — ${procDir} absent; ` +
@@ -318,7 +354,7 @@ export function countDevinWorkers(
   }
   let workers = 0
   for (const pid of live) {
-    if (isWorker(pid)) {
+    if (predicate(pid)) {
       workers++
     }
   }
@@ -565,6 +601,11 @@ export function listDevinSessions(dirs: string[], procDir = '/proc'): Discovered
       if (pid === undefined || !pidAlive(pid) || seen.has(pid)) {
         continue
       }
+      // the same identity the count applies — a board that lists a
+      // recycled pid's session contradicts the count beside it
+      if (!isDevinProcess(pid, procDir)) {
+        continue
+      }
       seen.add(pid)
       out.push({
         pid,
@@ -582,14 +623,22 @@ export function listDevinSessions(dirs: string[], procDir = '/proc'): Discovered
 export const devinSessionPlane: SessionPlane = {
   kind: 'devin',
   detectsCli: (cliName) => cliName === 'devin',
+  startsSessions(command) {
+    return countDevinSessionStarts(command)
+  },
   countLive(bag, workerEnv) {
-    return countDevinSessions(devinSessionDirs(bag, workerEnv), devinSlotsDir(bag))
+    return countDevinSessions(
+      devinSessionDirs(bag, workerEnv),
+      devinSlotsDir(bag),
+      devinProcDir(bag)
+    )
   },
   countWorkers(bag, workerEnv) {
     return countDevinWorkers(
       devinSessionDirs(bag, workerEnv),
       devinPidIsWorker,
-      devinSlotsDir(bag)
+      devinSlotsDir(bag),
+      devinProcDir(bag)
     )
   },
   countBatchWorkers(bag, workerEnv) {

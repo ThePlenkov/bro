@@ -1467,16 +1467,26 @@ describe('bro agents down <target>', () => {
 })
 
 describe('discoverSessions', () => {
-  const envFor = (lockDir: string): AgentConnectorEnv => ({
-    agents: { devin: { lockDir } },
+  /** A fake /proc where this process reads as the devin cli — the live
+   *  session count checks the process identity (argv[0]). */
+  const devinProc = (): string => {
+    const dir = mkdtempSync(join(tmpdir(), 'bro-devin-proc-'))
+    mkdirSync(join(dir, String(process.pid)), { recursive: true })
+    writeFileSync(join(dir, String(process.pid), 'cmdline'), 'devin\0')
+    return dir
+  }
+
+  const envFor = (lockDir: string, procDir?: string): AgentConnectorEnv => ({
+    agents: { devin: procDir === undefined ? { lockDir } : { lockDir, procDir } },
     connectors: {},
   })
 
   test('session-plane rows arrive tagged with the kind that saw them', () => {
     const dir = mkdtempSync(join(tmpdir(), 'bro-disc-'))
+    const procDir = devinProc()
     try {
       writeFileSync(join(dir, 'sess.lock'), String(process.pid))
-      const { sessions, degraded } = discoverSessions(envFor(dir))
+      const { sessions, degraded } = discoverSessions(envFor(dir, procDir))
       assert.equal(sessions.length, 1)
       assert.equal(sessions[0]!.kind, 'devin')
       assert.equal(sessions[0]!.name, 'sess')
@@ -1484,6 +1494,7 @@ describe('discoverSessions', () => {
       assert.deepEqual(degraded, [])
     } finally {
       rmSync(dir, { recursive: true, force: true })
+      rmSync(procDir, { recursive: true, force: true })
     }
   })
 

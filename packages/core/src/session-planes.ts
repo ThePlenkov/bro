@@ -22,6 +22,17 @@ export interface SessionPlane {
    *  start one of this plane's sessions? Called with the worker's
    *  wrapped cliName for argv workers — never the driver argv[0]. */
   detectsCli(cliName: string): boolean
+  /** How many sessions of this kind does this COMMAND start? The plane
+   *  owns its CLI's grammar — one vendor's CLI opens a session with the
+   *  bare binary, another's only with a subcommand, a third never (a
+   *  read-only listing is not a session). Optional: a plane that does
+   *  not implement it never claims a command, so a caller asks the
+   *  registry rather than guessing (spec bro-bww9v).
+   *
+   *  The answer is the START count, not a boolean: one command can open
+   *  several sessions (`devin a & devin b`), and the cap is judged
+   *  against `live + starts`. */
+  startsSessions?(command: string): number
   /** Live sessions of this kind on the host, per the plane's own state
    *  plane (lock dir, socket listing, local API). `bag` is the
    *  `agents.<kind>` config section — plane-local knobs (like a lockDir
