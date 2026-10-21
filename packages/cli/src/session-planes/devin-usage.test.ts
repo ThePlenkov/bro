@@ -19,6 +19,44 @@ const withDir = (fn: (dir: string) => void | Promise<void>): void => {
   }
 }
 
+/** A store shaped like devin's: sessions plus message nodes carrying a
+ *  request_id in the chat message's metadata. */
+async function fakeStore(dir: string): Promise<{
+  node: (rowId: number, requestId: string | null) => void
+  close: () => void
+}> {
+  const { DatabaseSync } = (await import('node:sqlite')) as unknown as {
+    DatabaseSync: new (path: string) => {
+      exec: (sql: string) => void
+      prepare: (sql: string) => { run: (...p: unknown[]) => void }
+      close: () => void
+    }
+  }
+  const { mkdirSync } = await import('node:fs')
+  mkdirSync(join(dir, 'devin', 'cli'), { recursive: true })
+  const db = new DatabaseSync(join(dir, 'devin', 'cli', 'sessions.db'))
+  db.exec('CREATE TABLE sessions (id TEXT PRIMARY KEY, model TEXT)')
+  db.exec(
+    'CREATE TABLE message_nodes (row_id INTEGER PRIMARY KEY, session_id TEXT, chat_message TEXT)'
+  )
+  db.exec("INSERT INTO sessions VALUES ('s1', 'swe-2-max')")
+  const insert = db.prepare('INSERT INTO message_nodes VALUES (?, ?, ?)')
+  return {
+    node: (rowId: number, requestId: string | null) =>
+      insert.run(
+        rowId,
+        's1',
+        JSON.stringify({
+          message_id: `m${rowId}`,
+          role: 'assistant',
+          content: 'x',
+          metadata: requestId === null ? {} : { request_id: requestId },
+        })
+      ),
+    close: () => db.close(),
+  }
+}
+
 describe('the devin store path', () => {
   test('is the sibling of the session-locks dir the plane derives', () => {
     const p = devinStorePath({ HOME: '/home/x', XDG_DATA_HOME: '' })
@@ -52,41 +90,14 @@ describe('the sampler', () => {
   test('counts DISTINCT request ids, not prompt rows', async () => {
     const dir = mkdtempSync(join(tmpdir(), 'bro-devin-store-'))
     try {
-      const { DatabaseSync } = (await import('node:sqlite')) as unknown as {
-        DatabaseSync: new (path: string) => {
-          exec: (sql: string) => void
-          prepare: (sql: string) => { run: (...p: unknown[]) => void }
-          close: () => void
-        }
-      }
-      const path = join(dir, 'devin', 'cli', 'sessions.db')
-      const { mkdirSync } = await import('node:fs')
-      mkdirSync(join(dir, 'devin', 'cli'), { recursive: true })
-      const db = new DatabaseSync(path)
-      db.exec('CREATE TABLE sessions (id TEXT PRIMARY KEY, model TEXT)')
-      db.exec(
-        'CREATE TABLE message_nodes (row_id INTEGER PRIMARY KEY, session_id TEXT, chat_message TEXT)'
-      )
-      db.exec("INSERT INTO sessions VALUES ('s1', 'swe-2-max')")
-      const insert = db.prepare('INSERT INTO message_nodes VALUES (?, ?, ?)')
-      const node = (rowId: number, requestId: string | null) =>
-        insert.run(
-          rowId,
-          's1',
-          JSON.stringify({
-            message_id: `m${rowId}`,
-            role: 'assistant',
-            content: 'x',
-            metadata: requestId === null ? {} : { request_id: requestId },
-          })
-        )
+      const db = await fakeStore(dir)
       // one request, three message rows (the tool loop) — a prompt-row
       // count would say three requests
-      node(1, 'req-a')
-      node(2, 'req-a')
-      node(3, 'req-a')
-      node(4, 'req-b')
-      node(5, null)
+      db.node(1, 'req-a')
+      db.node(2, 'req-a')
+      db.node(3, 'req-a')
+      db.node(4, 'req-b')
+      db.node(5, null)
       const sample = await sampleDevinUsage({
         env: { XDG_DATA_HOME: dir, HOME: dir },
         limit: 100,

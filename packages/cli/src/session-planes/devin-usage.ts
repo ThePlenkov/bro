@@ -141,6 +141,32 @@ const USAGE_SQL = `SELECT s.model AS model,
             AND json_extract(m.chat_message, '$.metadata.request_id') IS NOT NULL
           GROUP BY s.model`
 
+/** The sqlite handle — node:sqlite's shape, narrowed to what the
+ *  sampler uses. */
+type SqliteDatabase = {
+  prepare: (sql: string) => {
+    all: (...p: unknown[]) => unknown[]
+    get: (...p: unknown[]) => unknown
+  }
+  close: () => void
+}
+
+/** Open the store read-only. node:sqlite is unflagged from Node 23 on;
+ *  on 22.x it needs a flag, so the import is dynamic and its failure is
+ *  a missing number, not a crash. */
+async function openSqlite(
+  env: Record<string, string | undefined>
+): Promise<SqliteDatabase | undefined> {
+  try {
+    const mod = (await import('node:sqlite')) as unknown as {
+      DatabaseSync: new (path: string, opts?: { readOnly?: boolean }) => SqliteDatabase
+    }
+    return new mod.DatabaseSync(devinStorePath(env), { readOnly: true })
+  } catch {
+    return undefined
+  }
+}
+
 /** One sample: the distinct requests and sessions per model among the
  *  rows AFTER `sinceRowId`, plus the newest row id seen. */
 export interface DevinUsageSample {
@@ -159,35 +185,11 @@ export async function sampleDevinUsage(opts: {
   const env = opts.env ?? process.env
   const since = opts.sinceRowId ?? 0
   const limit = opts.limit ?? SAMPLE_ROWS
-  const path = devinStorePath(env)
-  let DatabaseSync: new (
-    path: string,
-    opts?: { readOnly?: boolean }
-  ) => {
-    prepare: (sql: string) => {
-      all: (...p: unknown[]) => unknown[]
-      get: (...p: unknown[]) => unknown
-    }
-    close: () => void
-  }
-  try {
-    // node:sqlite is unflagged from Node 23 on; on 22.x it needs a flag,
-    // so the import is dynamic and its failure is a missing number.
-    const mod = (await import('node:sqlite')) as unknown as {
-      DatabaseSync: new (
-        path: string,
-        opts?: { readOnly?: boolean }
-      ) => InstanceType<typeof DatabaseSync>
-    }
-    DatabaseSync = mod.DatabaseSync as never
-  } catch {
+  const db = await openSqlite(env)
+  if (db === undefined) {
     return { lastRowId: since, usage: [], ok: false }
   }
-  let db: InstanceType<typeof DatabaseSync> | undefined
   try {
-    db = new DatabaseSync(path, { readOnly: true })
-    // the tail by row_id DESC (autoincrement → the recent rows are last),
-    // then the rows after the cursor, counted by DISTINCT request id
     // The cursor is the TAIL's boundary — every row scanned, including
     // the ones without a request id. A cursor that only advanced over
     // the request-bearing rows would never move past a tail of plain
@@ -223,7 +225,7 @@ export async function sampleDevinUsage(opts: {
     return { lastRowId: since, usage: [], ok: false }
   } finally {
     try {
-      db?.close()
+      db.close()
     } catch {
       // closing a read-only handle never fails the read
     }
