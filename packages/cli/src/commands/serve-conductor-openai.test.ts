@@ -3,7 +3,7 @@
  *  as /v1/messages (spec bro-zkpju, epic bro-bvipw). */
 import { describe, test } from 'node:test'
 import assert from 'node:assert/strict'
-import type { SessionConfigOption, SessionUpdate } from '@agentclientprotocol/sdk'
+import type { SessionConfigOption, SessionUpdate, StopReason } from '@agentclientprotocol/sdk'
 import { fakeAcpAgent } from '@broject/providers/testkit'
 import { conductorProxy } from './serve-conductor.ts'
 import type { ConductorConfig } from './serve-conductor.ts'
@@ -104,6 +104,58 @@ describe('serve /v1/responses — the openai dialect', () => {
       assert.equal(body.usage.total_tokens, body.usage.input_tokens + body.usage.output_tokens)
       // the prompt reached the agent as a canonical user turn
       assert.match(fake.prompts[0] ?? '', /<turn role="user">ping/)
+    } finally {
+      await close()
+    }
+  })
+
+  // bro-6fk80 — a cancelled or backend-ended turn reports its own
+  // Response status, never a silent 'completed'.
+  test('a cancelled turn answers status cancelled', async () => {
+    const fake = fakeAcpAgent({
+      replyText: 'partial',
+      configOptions: [MODEL_OPTION],
+      stopReason: 'cancelled',
+    })
+    const { r, close } = await postResponses(fake, { input: 'x', stream: false })
+    try {
+      assert.equal(r.status, 200)
+      const body = await r.json()
+      assert.equal(body.status, 'cancelled')
+    } finally {
+      await close()
+    }
+  })
+
+  test('a streamed cancelled turn ends on response.cancelled, not completed', async () => {
+    const fake = fakeAcpAgent({
+      replyText: 'partial',
+      configOptions: [MODEL_OPTION],
+      stopReason: 'cancelled',
+    })
+    const { r, close } = await postResponses(fake, { input: 'x', stream: true })
+    try {
+      const ev = await evs(r)
+      assert.equal(ev.filter((e) => e.event === 'response.cancelled').length, 1)
+      assert.equal(ev.filter((e) => e.event === 'response.completed').length, 0)
+    } finally {
+      await close()
+    }
+  })
+
+  test('a non-enum acp reason answers status failed naming the reason', async () => {
+    // devin's adapter emits error/auth_required outside the acp enum —
+    // those used to report a clean 'completed'
+    const fake = fakeAcpAgent({
+      replyText: 'partial',
+      configOptions: [MODEL_OPTION],
+      stopReason: 'auth_required' as StopReason,
+    })
+    const { r, close } = await postResponses(fake, { input: 'x', stream: false })
+    try {
+      const body = await r.json()
+      assert.equal(body.status, 'failed')
+      assert.match(body.error?.message ?? '', /auth_required/)
     } finally {
       await close()
     }
@@ -300,6 +352,38 @@ describe('serve /v1/chat/completions — the stateless chat dialect', () => {
       assert.equal(body.choices[0].finish_reason, 'stop')
       assert.ok(body.usage.total_tokens > 0)
       assert.match(fake.prompts[0] ?? '', /<turn role="user">x/)
+    } finally {
+      await close()
+    }
+  })
+
+  // bro-6fk80 — the finish_reason enum can't carry a cancelled/backend
+  // reason, so it forwards raw: a marker, never a silent 'stop'.
+  test('a cancelled turn reports finish_reason cancelled, not stop', async () => {
+    const fake = fakeAcpAgent({
+      replyText: 'partial',
+      configOptions: [MODEL_OPTION],
+      stopReason: 'cancelled',
+    })
+    const { r, close } = await postChat(fake)
+    try {
+      const body = await r.json()
+      assert.equal(body.choices[0].finish_reason, 'cancelled')
+    } finally {
+      await close()
+    }
+  })
+
+  test('a non-enum acp reason forwards raw as finish_reason', async () => {
+    const fake = fakeAcpAgent({
+      replyText: 'partial',
+      configOptions: [MODEL_OPTION],
+      stopReason: 'error' as StopReason,
+    })
+    const { r, close } = await postChat(fake)
+    try {
+      const body = await r.json()
+      assert.equal(body.choices[0].finish_reason, 'error')
     } finally {
       await close()
     }

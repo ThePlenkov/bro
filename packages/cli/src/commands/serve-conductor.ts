@@ -619,14 +619,29 @@ export function parseReply(text: string, parseTools = true): OutBlock[] {
 
 // --- response emission -------------------------------------------------
 
-/** Anthropic stop_reasons only — acp reasons outside the enum map to the
- *  nearest honest one, never forwarded raw. */
+/** acp stop_reason → the wire's canonical reason. The mapped entries
+ *  land on the anthropic enum; 'cancelled' forwards as the
+ *  non-standard stop_reason 'cancelled' — a cancelled turn is not a
+ *  clean 'end_turn' (bro-6fk80). */
 const STOP_REASON: Record<string, string> = {
   end_turn: 'end_turn',
   max_tokens: 'max_tokens',
   max_turn_requests: 'pause_turn',
   refusal: 'refusal',
-  cancelled: 'end_turn',
+  cancelled: 'cancelled',
+}
+
+/** Canonicalize the acp stop_reason once for every dialect — an
+ *  unmapped backend reason ('error', 'auth_required', a newer acp
+ *  value) forwards raw so the client can branch on it, never a silent
+ *  'end_turn', plus an otel breadcrumb so the anomaly is observable
+ *  server-side (bro-6fk80). */
+function canonicalStopReason(raw: string | undefined): string {
+  if (raw === undefined || raw === '') return 'end_turn'
+  const mapped = STOP_REASON[raw]
+  if (mapped !== undefined) return mapped
+  otelEvent('conductor.stop_reason.unmapped', { reason: raw.slice(0, 80) })
+  return raw
 }
 
 /** chars/4 underestimates CJK several-fold — count wide codepoints
@@ -1670,7 +1685,7 @@ function settledStopReason(
 ): string {
   if (blocks.some((b) => b.type === 'tool_use')) return 'tool_use'
   if (stopHit !== undefined) return 'stop_sequence'
-  return STOP_REASON[reply.stopReason] ?? 'end_turn'
+  return canonicalStopReason(reply.stopReason)
 }
 
 async function messages(
@@ -1763,7 +1778,7 @@ async function messages(
   // a live stream pushed the wire deltas as they landed — finish()
   // closes the event shape; the recorded reply is whatever the filter
   // let through — byte-identical to the client's own view
-  live?.finish(STOP_REASON[reply.stopReason] ?? 'end_turn')
+  live?.finish(canonicalStopReason(reply.stopReason))
   if (live === undefined) {
     // the buffered leg's cut lands post-hoc through the same filter
     stops.feed(reply.text)
@@ -2074,7 +2089,7 @@ class RespLive extends TagPump {
     })
   }
 
-  private respObj(status: string): Record<string, unknown> {
+  private respObj(status: string, reason?: string): Record<string, unknown> {
     return {
       id: this.respId,
       object: 'response',
@@ -2084,7 +2099,7 @@ class RespLive extends TagPump {
       output: this.items,
       store: this.store,
       usage: { input_tokens: this.inputTokens, output_tokens: 0, total_tokens: this.inputTokens },
-      error: null,
+      error: respError(status, reason),
       ...(status === 'incomplete'
         ? { incomplete_details: { reason: 'max_output_tokens' } }
         : {}),
@@ -2216,14 +2231,15 @@ class RespLive extends TagPump {
 
   /** The settled reply — the terminal event reports the same items
    *  the wire streamed, ids and order intact; a cut-off answer ends
-   *  as response.incomplete, not a silent completed. */
-  finish(status: string, usageOut: number): void {
+   *  as response.incomplete, a cancelled/failed turn under its own
+   *  response.<status> event — never a silent completed (bro-6fk80). */
+  finish(status: string, usageOut: number, reason?: string): void {
     this.drainAll()
     const st = this.capped ? 'incomplete' : status
-    this.closeItem(st === 'incomplete' ? 'incomplete' : 'completed')
-    this.ev(st === 'incomplete' ? 'response.incomplete' : 'response.completed', {
+    this.closeItem(st === 'completed' ? 'completed' : 'incomplete')
+    this.ev(`response.${st}`, {
       response: {
-        ...this.respObj(st),
+        ...this.respObj(st, reason),
         usage: {
           input_tokens: this.inputTokens,
           output_tokens: usageOut,
@@ -2364,7 +2380,8 @@ function respEnvelope(
   output: unknown[],
   store: boolean,
   inputTokens: number,
-  outTokens: number
+  outTokens: number,
+  reason?: string
 ): Record<string, unknown> {
   return {
     id: respId,
@@ -2379,15 +2396,32 @@ function respEnvelope(
       output_tokens: outTokens,
       total_tokens: inputTokens + outTokens,
     },
-    error: null,
+    error: respError(status, reason),
     ...(status === 'incomplete' ? { incomplete_details: { reason: 'max_output_tokens' } } : {}),
   }
 }
 
-/** acp stop_reason → Response.status — a truncated answer is
- *  incomplete, never a silent success. */
+/** canonical stop_reason → Response.status — a truncated answer is
+ *  incomplete, a cancelled turn cancelled, a backend-ended turn
+ *  (unmapped reason) failed; never a silent success (bro-6fk80). */
+const RESP_STATUS: Record<string, string> = {
+  end_turn: 'completed',
+  tool_use: 'completed',
+  stop_sequence: 'completed',
+  pause_turn: 'completed',
+  refusal: 'completed',
+  max_tokens: 'incomplete',
+  cancelled: 'cancelled',
+}
 const respStatus = (canonicalReason: string): string =>
-  canonicalReason === 'max_tokens' ? 'incomplete' : 'completed'
+  RESP_STATUS[canonicalReason] ?? 'failed'
+
+/** The envelope's `error` field — a failed response names the raw acp
+ *  reason that ended the turn; anything else reports null. */
+const respError = (status: string, reason?: string): unknown =>
+  status === 'failed'
+    ? { code: 'server_error', message: `bro conductor: turn ended — ${reason ?? 'unknown'}` }
+    : null
 
 /** A caller's output-token budget expressed in chars — the inverse of
  *  estTokens' ~4-chars-per-token estimate. Honored, not authoritative. */
@@ -2482,7 +2516,7 @@ function responsesReplay(res: ServerResponse, wire: WireCtx, ctx: RespReplayCtx)
       capCharsOf(rreq.max_output_tokens)
     )
     rl.replay(blocks)
-    rl.finish(status, blocksTokens(blocks))
+    rl.finish(status, blocksTokens(blocks), lr?.stopReason)
     res.end()
     return
   }
@@ -2496,7 +2530,8 @@ function responsesReplay(res: ServerResponse, wire: WireCtx, ctx: RespReplayCtx)
         blocksToOutput(blocks),
         store,
         lr?.inputTokens ?? 0,
-        blocksTokens(blocks)
+        blocksTokens(blocks),
+        lr?.stopReason
       )
     )
   )
@@ -2659,11 +2694,10 @@ function responsesDeliver(
   // would — replay and status agree the answer was cut
   const capped = capBlocks(parseReply(reply.text, tools), capCharsOf(d.rreq.max_output_tokens))
   const outBlocks = capped.blocks
-  const canonicalReason = capped.capped
-    ? 'max_tokens'
-    : (STOP_REASON[reply.stopReason] ?? 'end_turn')
+  const canonicalReason = capped.capped ? 'max_tokens' : canonicalStopReason(reply.stopReason)
   const outTokens = capped.capped ? blocksTokens(outBlocks) : estTokens(reply.text)
-  const status = respStatus(finalRespReason(capped.capped, outBlocks, canonicalReason))
+  const wireReason = finalRespReason(capped.capped, outBlocks, canonicalReason)
+  const status = respStatus(wireReason)
   if (d.out.conv !== undefined && d.key !== undefined) {
     settleConv(
       wire,
@@ -2691,6 +2725,7 @@ function responsesDeliver(
     backend: wire.cfg.backend,
     dialect: 'responses',
     model: reply.model,
+    stop_reason: wireReason,
     stream: d.rreq.stream === true,
     session_reused: d.out.reused,
     input_tokens: inputTokens,
@@ -2698,7 +2733,7 @@ function responsesDeliver(
     duration_ms: Date.now() - d.t0,
   })
   if (d.live !== undefined) {
-    d.live.finish(status, outTokens)
+    d.live.finish(status, outTokens, wireReason)
     res.end()
     return
   }
@@ -2712,7 +2747,8 @@ function responsesDeliver(
         blocksToOutput(outBlocks),
         d.store,
         inputTokens,
-        outTokens
+        outTokens,
+        wireReason
       )
     )
   )
@@ -2992,7 +3028,9 @@ class ChatLive extends TagPump {
     this.head()
     const finishReason = this.capped
       ? 'length'
-      : (CHAT_FINISH[stopReason as keyof typeof CHAT_FINISH] ?? 'stop')
+      : // the enum can't carry a cancelled/backend reason — forward it
+        // raw rather than a silent 'stop' (bro-6fk80)
+        (CHAT_FINISH[stopReason as keyof typeof CHAT_FINISH] ?? stopReason)
     this.ev({}, finishReason)
     if (usage !== undefined) {
       this.res.write(
@@ -3032,7 +3070,7 @@ function chatStopReason(
 ): string {
   if (replay) return lr?.stopReason ?? 'end_turn'
   if (blocks.some((b) => b.type === 'tool_use')) return 'tool_use'
-  return STOP_REASON[reply?.stopReason ?? ''] ?? 'end_turn'
+  return canonicalStopReason(reply?.stopReason)
 }
 
 /** Terminal reasons for a chat turn: the cap reports the same reason the
@@ -3077,7 +3115,7 @@ function chatOutcome(
   const stopReason = chatStopReason(replay, lr, blocks, reply)
   const finish =
     CHAT_FINISH[stopReason as keyof typeof CHAT_FINISH] ??
-    (blocks.some((b) => b.type === 'tool_use') ? 'tool_calls' : 'stop')
+    (blocks.some((b) => b.type === 'tool_use') ? 'tool_calls' : stopReason)
   return { replay, lr, reply, inputTokens, blocks, outTokens, stopReason, finish }
 }
 
@@ -3221,6 +3259,7 @@ function chatDeliver(
     backend: wire.cfg.backend,
     dialect: 'chat_completions',
     model: o.reply?.model ?? o.lr?.model ?? '',
+    stop_reason: stopReason,
     stream: d.creq.stream === true,
     session_reused: d.out.reused,
     input_tokens: o.inputTokens,
