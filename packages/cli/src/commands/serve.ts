@@ -1149,16 +1149,23 @@ async function handleRequest(
     )
     send(res, r.status, r.body, r)
   } catch (err) {
-    const status = err instanceof HttpError ? err.status : 500
-    send(
-      res,
-      status,
-      {
-        error: err instanceof Error ? err.message : String(err),
-      },
-      { close: err instanceof HttpError && err.close }
-    )
+    sendError(res, err)
   }
+}
+
+/** Error → response mapping: HttpError is fail-closed input
+ *  validation — a status, never a crash. An error asking to close the
+ *  connection (an over-bound upload) gets its status, then the socket
+ *  dies on the response's tail. */
+function sendError(res: ServerResponse, err: unknown): void {
+  send(
+    res,
+    err instanceof HttpError ? err.status : 500,
+    {
+      error: err instanceof Error ? err.message : String(err),
+    },
+    { close: err instanceof HttpError && err.close }
+  )
 }
 
 /** The provider plane owns its own stream — a Messages request can
