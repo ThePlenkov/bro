@@ -179,10 +179,23 @@ describe('countDevinSessions', () => {
   test('an unreadable pid entry counts — the count fails closed', () => {
     withProc((procDir) => {
       withLockDir((dir) => {
-        // no cmdline file at all: the identity cannot be disproved
+        // present but unreadable (a directory where the file belongs):
+        // the identity cannot be disproved — count it
         rmSync(join(procDir, String(process.pid), 'cmdline'), { force: true })
+        mkdirSync(join(procDir, String(process.pid), 'cmdline'), { recursive: true })
         writeFileSync(join(dir, 'blind.lock'), String(process.pid))
         assert.equal(countDevinSessions([dir], undefined, procDir), 1)
+      })
+    })
+  })
+
+  test('a pid that is GONE is not a session — the lock outlived it', () => {
+    withProc((procDir) => {
+      withLockDir((dir) => {
+        // no /proc entry for the pid: the session died, the lock stayed
+        rmSync(join(procDir, String(process.pid)), { recursive: true, force: true })
+        writeFileSync(join(dir, 'gone.lock'), String(process.pid))
+        assert.equal(countDevinSessions([dir], undefined, procDir), 0)
       })
     })
   })

@@ -102,12 +102,25 @@ function isDevinProcess(pid: number, procDir = '/proc'): boolean {
   let cmdline: string
   try {
     cmdline = readFileSync(join(procDir, String(pid), 'cmdline'), 'utf8')
-  } catch {
-    return true // cannot prove it stale — count it
+  } catch (err) {
+    // the pid is GONE when its /proc entry is gone — a stale lock,
+    // proven stale
+    if (
+      (err as NodeJS.ErrnoException).code === 'ENOENT' &&
+      existsSync(procDir) &&
+      !existsSync(join(procDir, String(pid)))
+    ) {
+      return false
+    }
+    // no /proc at all (a host without it), an unreadable entry, or an
+    // entry without a command line: the identity cannot be disproved —
+    // count it
+    return true
   }
   const argv0 = cmdline.split('\0')[0] ?? ''
   if (argv0 === '') {
-    return true
+    // a zombie: the session is gone, the number is only still there
+    return false
   }
   return argv0.slice(argv0.lastIndexOf('/') + 1) === 'devin'
 }

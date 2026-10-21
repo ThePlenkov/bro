@@ -1433,7 +1433,17 @@ function retireDivergent(env: TurnEnv, cand: ConvSession): Promise<TurnOutcome> 
  *  The refusal names the cap, and the conductor's failure mapping
  *  answers it with 429 (the message carries "quota"). */
 function assertSessionCap(env: TurnEnv): void {
-  const views = sessionCapViews(env.cfg.entry.command, env.cfg.agents)
+  let views
+  try {
+    views = sessionCapViews(env.cfg.entry.command, env.cfg.agents)
+  } catch (err) {
+    // the count could not be established — fail closed, with the reason
+    // the operator needs (a quota that cannot be verified is not walked
+    // past)
+    throw new Error(
+      `bro conductor: the session cap could not be established — ${(err as Error).message}`
+    )
+  }
   const refusal = conductorSessionRefusal(views[0], env.sessions.size)
   if (refusal !== undefined) {
     throw new Error(refusal)

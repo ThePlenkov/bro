@@ -13,6 +13,7 @@ import { SpawnError } from './agents.ts'
 import {
   clearSessionPlanes,
   registerSessionPlane,
+  reserveSessionSlot,
   type SessionPlane,
 } from './session-planes.ts'
 import {
@@ -108,7 +109,22 @@ describe('sessionCapViews', () => {
         })
         // no reservation files yet — the count is the live one
         assert.equal(views[0]?.live, 1)
+        // a claimed slot (a start in flight) counts with it
+        reserveSessionSlot(dir, 'alpha-guard', 'interactive')
+        const claimed = sessionCapViews('alpha-run', {
+          alpha: { maxSessions: 5, reservationsDir: dir },
+        })
+        assert.equal(claimed[0]?.live, 2)
       })
+    })
+  })
+
+  test('a malformed cap refuses — a typo is never an uncapped kind', () => {
+    withPlane(testPlane('alpha', { live: 0 }), () => {
+      assert.throws(
+        () => sessionCapViews('alpha-run', { alpha: { maxSessions: 'six' } }),
+        (err: unknown) => err instanceof SpawnError && err.kind === 'config'
+      )
     })
   })
 

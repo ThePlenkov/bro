@@ -81,4 +81,27 @@ describe('countDevinSessionStarts', () => {
     assert.equal(countDevinSessionStarts(''), 0)
     assert.equal(countDevinSessionStarts('ls -la'), 0)
   })
+
+  test('the printing flags open nothing', () => {
+    assert.equal(countDevinSessionStarts('devin --help'), 0)
+    assert.equal(countDevinSessionStarts('devin -h'), 0)
+    assert.equal(countDevinSessionStarts('devin --version'), 0)
+  })
+
+  test('a shell wrapper runs the command it carries', () => {
+    assert.equal(countDevinSessionStarts("sh -c 'devin -p a'"), 1)
+    assert.equal(countDevinSessionStarts('bash -c "devin -p a"'), 1)
+    assert.equal(countDevinSessionStarts("sh -c 'devin -p a' & devin -p b"), 2)
+  })
+
+  test('an environment assignment in front of the binary is not an argument', () => {
+    assert.equal(countDevinSessionStarts('FOO=bar devin -p a'), 1)
+    assert.equal(countDevinSessionStarts('PATH=/opt/bin:$PATH devin'), 1)
+  })
+
+  test('a separator inside a quoted prompt does not split the command', () => {
+    // the prompt is ONE argument — the `;` inside it is text
+    assert.equal(countDevinSessionStarts('devin -p "run devin later; then stop"'), 1)
+    assert.equal(countDevinSessionStarts('devin -p "a && devin b"'), 1)
+  })
 })

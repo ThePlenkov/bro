@@ -20,12 +20,14 @@
  * headroom" and "the session wrote its own mark" (the same mechanism the
  * admission uses — spec bro-9vmx's reservation lifecycle).
  */
+import { SpawnError } from './agents.ts'
 import {
   countSessionReservations,
   reserveSessionSlot,
   sessionPlanes,
   sessionQuotaConfig,
   sessionSlotsDir,
+  type ReservationLane,
   type SessionPlane,
 } from './session-planes.ts'
 
@@ -88,7 +90,18 @@ export function sessionCapViews(
       continue
     }
     const quota = sessionQuotaConfig(agents, plane.kind)
-    if (quota === undefined || quota.maxSessions <= 0) {
+    if (quota === undefined) {
+      continue
+    }
+    if (quota.invalid === true) {
+      // a present-but-malformed cap is a config bug: the admission
+      // refuses it loudly, and the cap must not read as UNCAPPED here
+      throw new SpawnError(
+        `agents.${plane.kind}.${quota.invalidKey ?? 'maxSessions'} must be a positive integer`,
+        'config'
+      )
+    }
+    if (quota.maxSessions <= 0) {
       continue
     }
     const bag = agents?.[plane.kind] ?? {}
@@ -152,7 +165,11 @@ export function reserveSessionStart(
   kind: string,
   agents: Record<string, Record<string, unknown>> | undefined,
   key: string,
-  count: number
+  count: number,
+  /** The lane the claim belongs to — the batch cap counts only the
+   *  fleet's claims, so an interactive start never eats the fleet's
+   *  share. */
+  lane: ReservationLane = 'interactive'
 ): string[] {
   if (count <= 0) {
     return []
@@ -160,7 +177,7 @@ export function reserveSessionStart(
   const dir = sessionReservationsDir(kind, agents)
   const paths: string[] = []
   for (let i = 0; i < count; i++) {
-    paths.push(reserveSessionSlot(dir, key, 'interactive'))
+    paths.push(reserveSessionSlot(dir, key, lane))
   }
   return paths
 }
