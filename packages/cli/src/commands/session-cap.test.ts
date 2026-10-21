@@ -9,6 +9,7 @@ import {
   clearSessionPlanes,
   registerSessionPlane,
   sessionCapViews,
+  type PreToolVerdict,
   type SessionPlane,
 } from '@broject/core'
 import { conductorSessionRefusal, sessionCapVerdict } from './session-cap.ts'
@@ -32,6 +33,13 @@ const testPlane = (
 })
 
 const ctx = { dir: process.cwd(), sessionId: 'sess-1' } as never
+
+/** The guard's verdict for a command, under a given config. */
+const verdictFor = (
+  command: string,
+  bags: Record<string, Record<string, unknown>>
+): PreToolVerdict[] =>
+  sessionCapVerdict(ctx, { tool: 'bash', input: { command } }, bags)
 
 const withPlane = (plane: SessionPlane, fn: () => void): void => {
   clearSessionPlanes()
@@ -63,11 +71,7 @@ const withDataHome = (fn: (home: string) => void): void => {
 describe('sessionCapVerdict', () => {
   test('a start at the cap is vetoed', () => {
     withPlane(testPlane('fake', { live: 3 }), () => {
-      const verdicts = sessionCapVerdict(
-        ctx,
-        { tool: 'bash', input: { command: 'fake-run --now' } },
-        { fake: { maxSessions: 3 } }
-      )
+      const verdicts = verdictFor('fake-run --now', { fake: { maxSessions: 3 } })
       assert.equal(verdicts.length, 1)
       assert.match(verdicts[0]!.block ?? '', /fake session quota reached/)
     })
@@ -75,22 +79,14 @@ describe('sessionCapVerdict', () => {
 
   test('a start below the cap is allowed', () => {
     withPlane(testPlane('fake', { live: 1 }), () => {
-      const verdicts = sessionCapVerdict(
-        ctx,
-        { tool: 'bash', input: { command: 'fake-run --now' } },
-        { fake: { maxSessions: 3 } }
-      )
+      const verdicts = verdictFor('fake-run --now', { fake: { maxSessions: 3 } })
       assert.deepEqual(verdicts, [])
     })
   })
 
   test('a command no plane claims is never touched', () => {
     withPlane(testPlane('fake', { live: 99 }), () => {
-      const verdicts = sessionCapVerdict(
-        ctx,
-        { tool: 'bash', input: { command: 'ls -la' } },
-        { fake: { maxSessions: 3 } }
-      )
+      const verdicts = verdictFor('ls -la', { fake: { maxSessions: 3 } })
       assert.deepEqual(verdicts, [])
     })
   })
@@ -108,11 +104,7 @@ describe('sessionCapVerdict', () => {
 
   test('an unverifiable count fails OPEN — a hook never stalls the client', () => {
     withPlane(testPlane('fake', { fail: true }), () => {
-      const verdicts = sessionCapVerdict(
-        ctx,
-        { tool: 'bash', input: { command: 'fake-run --now' } },
-        { fake: { maxSessions: 3 } }
-      )
+      const verdicts = verdictFor('fake-run --now', { fake: { maxSessions: 3 } })
       assert.deepEqual(verdicts, [])
     })
   })
@@ -121,18 +113,10 @@ describe('sessionCapVerdict', () => {
     withDataHome(() => {
       withPlane(testPlane('burst', { live: 0 }), () => {
         // the cap is 1: the first start is allowed and claims the slot
-        const first = sessionCapVerdict(
-          ctx,
-          { tool: 'bash', input: { command: 'burst-run --now' } },
-          { burst: { maxSessions: 1 } }
-        )
+        const first = verdictFor('burst-run --now', { burst: { maxSessions: 1 } })
         assert.deepEqual(first, [])
         // the second start sees the claim and is refused
-        const second = sessionCapVerdict(
-          ctx,
-          { tool: 'bash', input: { command: 'burst-run --now' } },
-          { burst: { maxSessions: 1 } }
-        )
+        const second = verdictFor('burst-run --now', { burst: { maxSessions: 1 } })
         assert.equal(second.length, 1)
         assert.match(second[0]!.block ?? '', /burst session quota reached/)
       })

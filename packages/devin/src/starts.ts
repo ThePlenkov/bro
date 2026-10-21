@@ -66,35 +66,18 @@ function segments(command: string): string[] {
     .filter((s) => s !== '' && !/^(\|\||&&|;|\||&)$/.test(s))
 }
 
-/** The tokens of a shell segment, quotes honoured. */
+/** A shell token — a quoted run or a bare word. */
+const TOKEN_RE = /"[^"]*"|'[^']*'|\S+/g
+
+/** The tokens of a shell segment, quotes honoured (a quoted run is ONE
+ *  token — `bro --command 'devin acp'` is three tokens, and the quoted
+ *  one names a command, it does not start one). */
 function tokens(segment: string): string[] {
   const out: string[] = []
-  let current = ''
-  let quote: string | null = null
-  for (const ch of segment) {
-    if (quote !== null) {
-      if (ch === quote) {
-        quote = null
-      } else {
-        current += ch
-      }
-      continue
-    }
-    if (ch === '"' || ch === "'") {
-      quote = ch
-      continue
-    }
-    if (/\s/.test(ch)) {
-      if (current !== '') {
-        out.push(current)
-        current = ''
-      }
-      continue
-    }
-    current += ch
-  }
-  if (current !== '') {
-    out.push(current)
+  for (const match of segment.matchAll(TOKEN_RE)) {
+    const raw = match[0]
+    const quoted = raw.startsWith('"') || raw.startsWith("'")
+    out.push(quoted ? raw.slice(1, -1) : raw)
   }
   return out
 }
@@ -121,22 +104,30 @@ function invocationStartsSession(toks: string[], at: number): boolean {
   return !NON_SESSION_COMMANDS.has(verb)
 }
 
-/** How many devin sessions would this command open?
- *
- *  A devin binary mentioned as an ARGUMENT (`grep devin`, `echo devin`)
- *  is not a session start — the binary must sit at a command position. */
+/** The positions in a segment's tokens where a devin binary sits at a
+ *  COMMAND position — a devin mentioned as an argument (`grep devin`)
+ *  is not a start. */
+function devinCommandPositions(toks: string[]): number[] {
+  const out: number[] = []
+  for (let i = 0; i < toks.length; i++) {
+    if (base(toks[i]!) !== 'devin') {
+      continue
+    }
+    if (i > 0 && !WRAPPERS.has(base(toks[i - 1]!))) {
+      continue
+    }
+    out.push(i)
+  }
+  return out
+}
+
+/** How many devin sessions would this command open? */
 export function countDevinSessionStarts(command: string): number {
   let count = 0
   for (const segment of segments(command)) {
     const toks = tokens(segment)
-    for (let i = 0; i < toks.length; i++) {
-      if (base(toks[i]!) !== 'devin') {
-        continue
-      }
-      if (i > 0 && !WRAPPERS.has(base(toks[i - 1]!))) {
-        continue
-      }
-      if (invocationStartsSession(toks, i)) {
+    for (const at of devinCommandPositions(toks)) {
+      if (invocationStartsSession(toks, at)) {
         count++
       }
     }

@@ -1440,6 +1440,22 @@ function assertSessionCap(env: TurnEnv): void {
   }
 }
 
+/** The one-shot path — a session on the shared peer, nothing retained. */
+async function oneShotTurn(
+  env: TurnEnv,
+  prompt: string | AcpContentBlock[],
+  inputTokens: number
+): Promise<TurnOutcome> {
+  const reply = await acpPooledTurn(env.peer, env.cfg.entry, env.opts, prompt, env.deadline, {
+    signal: env.signal,
+    by: env.by,
+    requestModel: env.requestModel,
+    parent: env.parent,
+    onUpdate: env.openStream?.(inputTokens),
+  })
+  return { reply, reused: false, inputTokens, replay: false }
+}
+
 async function freshTurn(env: TurnEnv, candBusy: boolean): Promise<TurnOutcome> {
   // image blocks ride the wire only when the agent advertised the
   // prompt capability — serialize after link() so the negotiated
@@ -1452,14 +1468,7 @@ async function freshTurn(env: TurnEnv, candBusy: boolean): Promise<TurnOutcome> 
   if (key === undefined || candBusy || env.pendingOpens.has(key)) {
     // a keyless request, or the conversation's own turn is still in
     // flight — one-shot over the same link, nothing stored
-    const reply = await acpPooledTurn(env.peer, env.cfg.entry, env.opts, prompt, env.deadline, {
-      signal: env.signal,
-      by: env.by,
-      requestModel: env.requestModel,
-      parent: env.parent,
-      onUpdate: env.openStream?.(inputTokens),
-    })
-    return { reply, reused: false, inputTokens, replay: false }
+    return oneShotTurn(env, prompt, inputTokens)
   }
   // mark BEFORE the await — a concurrent first request on the same key
   // takes the one-shot path instead of opening a twin session whose

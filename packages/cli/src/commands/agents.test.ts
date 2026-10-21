@@ -1476,8 +1476,8 @@ describe('discoverSessions', () => {
     return dir
   }
 
-  const envFor = (lockDir: string, procDir?: string): AgentConnectorEnv => ({
-    agents: { devin: procDir === undefined ? { lockDir } : { lockDir, procDir } },
+  const envFor = (bag: { lockDir: string; procDir?: string }): AgentConnectorEnv => ({
+    agents: { devin: bag },
     connectors: {},
   })
 
@@ -1486,7 +1486,7 @@ describe('discoverSessions', () => {
     const procDir = devinProc()
     try {
       writeFileSync(join(dir, 'sess.lock'), String(process.pid))
-      const { sessions, degraded } = discoverSessions(envFor(dir, procDir))
+      const { sessions, degraded } = discoverSessions(envFor({ lockDir: dir, procDir }))
       assert.equal(sessions.length, 1)
       assert.equal(sessions[0]!.kind, 'devin')
       assert.equal(sessions[0]!.name, 'sess')
@@ -1505,7 +1505,7 @@ describe('discoverSessions', () => {
     const file = join(root, 'notdir')
     try {
       writeFileSync(file, 'x')
-      const { sessions, degraded } = discoverSessions(envFor(file))
+      const { sessions, degraded } = discoverSessions(envFor({ lockDir: file }))
       assert.deepEqual(sessions, [])
       assert.equal(degraded.length, 1)
       assert.match(degraded[0]!, /^devin: /)

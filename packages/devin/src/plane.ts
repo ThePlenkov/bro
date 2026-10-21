@@ -112,6 +112,16 @@ function isDevinProcess(pid: number, procDir = '/proc'): boolean {
   return argv0.slice(argv0.lastIndexOf('/') + 1) === 'devin'
 }
 
+/** Is this lock a live devin session? A lock names a pid; the pid
+ *  must be alive AND still be the devin cli (a recycled number is a
+ *  stale lock). */
+function lockIsLiveSession(pid: number | undefined, procDir: string): boolean {
+  if (pid === undefined) {
+    return false
+  }
+  return pidAlive(pid) && isDevinProcess(pid, procDir)
+}
+
 /** Live devin session pids across the dirs — lock files whose pid is
  *  alive AND still a devin process, deduplicated (a resumed session
  *  leaves a second lock for the same process). A missing dir means no
@@ -138,7 +148,7 @@ function liveDevinLockPids(dirs: string[], procDir = '/proc'): Set<number> {
         continue
       }
       const pid = lockPid(dir, name)
-      if (pid !== undefined && pidAlive(pid) && isDevinProcess(pid, procDir)) {
+      if (lockIsLiveSession(pid, procDir)) {
         live.add(pid)
       }
     }
@@ -332,6 +342,19 @@ export function countDevinBatchWorkers(
  *  refuse there like an uncountable plane, never silently unguard
  *  (zero live sessions stay verifiably zero workers on any host).
  *  `slotsDir` sweeps landed reservations like countDevinSessions. */
+/** The worker predicate a scan runs — the default one reads the SAME
+ *  procDir the scan uses, so a scripted /proc tree is not classified
+ *  against the real one. */
+function workerPredicate(
+  isWorker: (pid: number) => boolean,
+  procDir: string
+): (pid: number) => boolean {
+  if (isWorker === devinPidIsWorker) {
+    return (pid: number) => devinPidIsWorker(pid, procDir)
+  }
+  return isWorker
+}
+
 export function countDevinWorkers(
   dirs: string[],
   isWorker: (pid: number) => boolean = devinPidIsWorker,
@@ -339,9 +362,7 @@ export function countDevinWorkers(
   procDir = '/proc'
 ): number {
   const live = liveDevinLockPids(dirs, procDir)
-  // the default predicate reads the SAME procDir the scan uses — a
-  // scripted /proc tree must not be classified against the real one
-  const predicate = isWorker === devinPidIsWorker ? (pid: number) => devinPidIsWorker(pid, procDir) : isWorker
+  const predicate = workerPredicate(isWorker, procDir)
   if (isWorker === devinPidIsWorker && live.size > 0 && !existsSync(procDir)) {
     throw new SpawnError(
       `cannot verify devin worker count — ${procDir} absent; ` +
@@ -598,12 +619,12 @@ export function listDevinSessions(dirs: string[], procDir = '/proc'): Discovered
         continue
       }
       const pid = lockPid(dir, name)
-      if (pid === undefined || !pidAlive(pid) || seen.has(pid)) {
+      if (pid === undefined || seen.has(pid)) {
         continue
       }
       // the same identity the count applies — a board that lists a
       // recycled pid's session contradicts the count beside it
-      if (!isDevinProcess(pid, procDir)) {
+      if (!lockIsLiveSession(pid, procDir)) {
         continue
       }
       seen.add(pid)
