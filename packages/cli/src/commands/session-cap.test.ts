@@ -51,36 +51,39 @@ const withPlane = (plane: SessionPlane, fn: () => void): void => {
   }
 }
 
-/** A scratch data home — the reservation dir lives under it. */
-const withDataHome = (fn: (home: string) => void): void => {
-  const home = mkdtempSync(join(tmpdir(), 'bro-cap-home-'))
-  const prev = process.env['XDG_DATA_HOME']
-  process.env['XDG_DATA_HOME'] = home
+/** A scratch reservations dir — the claim files live here, never in the
+ *  developer's real data home (a claim that outlives the test would
+ *  count against the next run). */
+const withReservations = (fn: (dir: string) => void): void => {
+  const dir = mkdtempSync(join(tmpdir(), 'bro-cap-resv-'))
   try {
-    fn(home)
+    fn(dir)
   } finally {
-    if (prev === undefined) {
-      delete process.env['XDG_DATA_HOME']
-    } else {
-      process.env['XDG_DATA_HOME'] = prev
-    }
-    rmSync(home, { recursive: true, force: true })
+    rmSync(dir, { recursive: true, force: true })
   }
 }
 
 describe('sessionCapVerdict', () => {
   test('a start at the cap is vetoed', () => {
+    withReservations((dir) => {
     withPlane(testPlane('fake', { live: 3 }), () => {
-      const verdicts = verdictFor('fake-run --now', { fake: { maxSessions: 3 } })
+      const verdicts = verdictFor('fake-run --now', {
+        fake: { maxSessions: 3, reservationsDir: dir },
+      })
       assert.equal(verdicts.length, 1)
       assert.match(verdicts[0]!.block ?? '', /fake session quota reached/)
+    })
     })
   })
 
   test('a start below the cap is allowed', () => {
-    withPlane(testPlane('fake', { live: 1 }), () => {
-      const verdicts = verdictFor('fake-run --now', { fake: { maxSessions: 3 } })
-      assert.deepEqual(verdicts, [])
+    withReservations((dir) => {
+      withPlane(testPlane('fake', { live: 1 }), () => {
+        const verdicts = verdictFor('fake-run --now', {
+          fake: { maxSessions: 3, reservationsDir: dir },
+        })
+        assert.deepEqual(verdicts, [])
+      })
     })
   })
 
@@ -110,13 +113,14 @@ describe('sessionCapVerdict', () => {
   })
 
   test('an allowed start claims the slot — a burst shares one budget', () => {
-    withDataHome(() => {
+    withReservations((dir) => {
       withPlane(testPlane('burst', { live: 0 }), () => {
+        const bags = { burst: { maxSessions: 1, reservationsDir: dir } }
         // the cap is 1: the first start is allowed and claims the slot
-        const first = verdictFor('burst-run --now', { burst: { maxSessions: 1 } })
+        const first = verdictFor('burst-run --now', bags)
         assert.deepEqual(first, [])
         // the second start sees the claim and is refused
-        const second = verdictFor('burst-run --now', { burst: { maxSessions: 1 } })
+        const second = verdictFor('burst-run --now', bags)
         assert.equal(second.length, 1)
         assert.match(second[0]!.block ?? '', /burst session quota reached/)
       })

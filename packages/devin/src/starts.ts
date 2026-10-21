@@ -54,15 +54,22 @@ const NON_SESSION_FLAGS = new Set(['-h', '--help', '--version', '-V'])
 /** The wrappers a vendor binary may sit behind — the token before the
  *  binary decides whether the binary is a command or an argument. */
 const WRAPPERS = new Set([
+  'bunx',
+  'chrt',
   'command',
   'env',
   'exec',
+  'ionice',
+  'nice',
   'nohup',
   'npx',
-  'bunx',
   'pnpm',
+  'setsid',
+  'stdbuf',
   'sudo',
+  'taskset',
   'time',
+  'timeout',
   'xargs',
   'yarn',
 ])

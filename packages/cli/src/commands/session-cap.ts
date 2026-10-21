@@ -60,7 +60,13 @@ export function sessionCapVerdict(
   if (command.trim() === '') {
     return []
   }
-  const bags = agents ?? loadAgentEnv(ctx.dir).agents
+  let bags: Record<string, Record<string, unknown>>
+  try {
+    bags = agents ?? loadAgentEnv(ctx.dir).agents
+  } catch {
+    // the config could not be read — a hook fails OPEN
+    return []
+  }
   let views: SessionCapView[]
   try {
     views = sessionCapViews(command, bags)

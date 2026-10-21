@@ -27,7 +27,7 @@ import { join } from 'node:path'
 import { gitCommonDir, loadConfig } from '@broject/core'
 import type { ProviderEntry } from '@broject/core'
 import { acpOpen, acpPooledTurn, acpSessionRetain, otelEvent, otelJournal, otelParent, otelSpan, toolPayload } from '@broject/providers'
-import { sessionCapViews } from '@broject/core'
+import { reserveSessionStart, sessionCapViews } from '@broject/core'
 import { conductorSessionRefusal } from './session-cap.ts'
 import type { AcpTerminals, Toolish } from '@broject/providers'
 import type { AcpContentBlock, AcpPeer, AcpRetainedSession, OtelCtx, PooledTurnOpts, ProviderWireOpts } from '@broject/providers'
@@ -1432,7 +1432,7 @@ function retireDivergent(env: TurnEnv, cand: ConvSession): Promise<TurnOutcome> 
  *  Fails CLOSED: a cap that cannot be established is not walked past.
  *  The refusal names the cap, and the conductor's failure mapping
  *  answers it with 429 (the message carries "quota"). */
-function assertSessionCap(env: TurnEnv): void {
+function assertSessionCap(env: TurnEnv, claimKey: string): void {
   let views
   try {
     views = sessionCapViews(env.cfg.entry.command, env.cfg.agents)
@@ -1447,6 +1447,16 @@ function assertSessionCap(env: TurnEnv): void {
   const refusal = conductorSessionRefusal(views[0], env.sessions.size)
   if (refusal !== undefined) {
     throw new Error(refusal)
+  }
+  // the slot is claimed, not just counted: a burst of parallel requests
+  // would otherwise all see the same headroom (spec bro-bww9v)
+  const view = views[0]
+  if (view !== undefined) {
+    try {
+      reserveSessionStart(view.kind, env.cfg.agents, claimKey, view.starts)
+    } catch {
+      // the claim is a brake, not a gate — the request still runs
+    }
   }
 }
 
@@ -1474,7 +1484,7 @@ async function freshTurn(env: TurnEnv, candBusy: boolean): Promise<TurnOutcome> 
   const inputTokens = inputTokensOf(prompt)
   const key = env.key
   // the cap before a session is opened — both paths open one
-  assertSessionCap(env)
+  assertSessionCap(env, `conductor-${env.by}`)
   if (key === undefined || candBusy || env.pendingOpens.has(key)) {
     // a keyless request, or the conversation's own turn is still in
     // flight — one-shot over the same link, nothing stored
