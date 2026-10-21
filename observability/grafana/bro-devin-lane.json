@@ -35,7 +35,7 @@
           "refId": "A"
         }
       ],
-      "title": "Requests / sample window (per model, max)",
+      "title": "Requests over the range (max per model)",
       "type": "stat"
     },
     {

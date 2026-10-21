@@ -2378,7 +2378,9 @@ function emitWatchHeartbeats(
 async function emitLaneUsage(ctx: Ctx): Promise<void> {
   try {
     const bag = loadAgentEnv(ctx.mainRoot).agents['devin'] ?? {}
-    await emitDevinUsage(ctx.mainRoot, bag)
+    // the drive's own env IS the effective worker env: the connector
+    // builds the child's environment from it (plus the pins)
+    await emitDevinUsage(ctx.mainRoot, bag, process.env)
   } catch {
     // telemetry must not stall the pass
   }

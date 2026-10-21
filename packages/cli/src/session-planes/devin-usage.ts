@@ -235,6 +235,7 @@ export async function sampleDevinUsage(opts: {
 export async function emitDevinUsage(
   root: string,
   bag: Record<string, unknown>,
+  env: Record<string, string | undefined> = process.env,
   now: number = Date.now()
 ): Promise<void> {
   // the live counts — the plane already knows them
@@ -256,7 +257,11 @@ export async function emitDevinUsage(
   // the account's request rate — an incremental sample of devin's store
   try {
     const state = readDevinUsageState(root)
-    const sample = await sampleDevinUsage({ sinceRowId: state.lastRowId })
+    // the env the WORKERS run under — the bag is devin's config, not the
+    // environment: a worker with its own XDG_DATA_HOME writes its
+    // requests to its own store, and sampling the wrong one reports
+    // someone else's account
+    const sample = await sampleDevinUsage({ sinceRowId: state.lastRowId, env })
     if (!sample.ok) {
       // the store could not be read — the numbers are UNKNOWN, and the
       // cursor must not advance (or the next sample would skip the rows
