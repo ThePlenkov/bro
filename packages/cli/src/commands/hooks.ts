@@ -567,6 +567,13 @@ function hookCtx(sessionId: string, toolUseId?: string): ConnectorCtx {
   return { dir: process.cwd(), sessionId, owner: agentOwner(), toolUseId }
 }
 
+/** The host client's id for this tool call — the two hook events of
+ *  ONE call (a pre-tool and a permission request) share it, and a
+ *  guard that budgets per call keys its slot on it. */
+function callIdOf(input: HookInput): string | undefined {
+  return typeof input.tool_use_id === 'string' ? input.tool_use_id : undefined
+}
+
 function liveSessionLines(dir: string, selfId: string): string[] {
   return otherLiveWork(dir, selfId).map((w) => {
     const on = w.detail ? ` on ${w.detail}` : ''
@@ -1448,7 +1455,7 @@ async function emitPreTool(input: HookInput): Promise<void> {
   const sessionId = typeof input.session_id === 'string' ? input.session_id : ''
   const tool = typeof input.tool_name === 'string' ? input.tool_name : ''
   const verdicts = await preToolVerdicts(
-    hookCtx(sessionId, typeof input.tool_use_id === 'string' ? input.tool_use_id : undefined),
+    hookCtx(sessionId, callIdOf(input)),
     tool,
     (input.tool_input ?? {}) as Record<string, unknown>
   )
@@ -1505,7 +1512,7 @@ function emitPermission(input: HookInput): boolean {
     process.cwd(),
     typeof input.session_id === 'string' ? input.session_id : undefined,
     undefined,
-    typeof input.tool_use_id === 'string' ? input.tool_use_id : undefined
+    callIdOf(input)
   )
   if (capRefusal !== undefined) {
     emit({
