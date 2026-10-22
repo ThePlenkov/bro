@@ -92,4 +92,12 @@ description = """
 After the fix PR merges: `bro debt sync`. Ledger statuses flow into beads —
 done/wontfix rows close their beads, open ones stay in `bd ready -l debt`.
 Idempotent; safe to re-run.
+
+The fix branch goes with the PR — locally AND on the remote:
+
+    git switch <base> && git pull --ff-only
+    git branch -D <fix-branch>
+    git push origin --delete <fix-branch>
+
+Never delete a branch you did not merge — another PR or agent may own it.
 """

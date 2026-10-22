@@ -122,6 +122,18 @@ default store, so standard installs already have it).
   decides: fresh findings land on every push, so the loop exits only on
   `exit_gate=OK` or hands off to `bro review act wait --merge`. Never report a
   PR as done from the resolve output alone.
+- **A merged PR leaves nothing behind — the branch goes with it.** After
+  the merge lands: switch to the base branch (`git switch <base>` +
+  `git pull --ff-only`), delete the merged branch **locally and on the
+  remote** (`git branch -D <branch>`, `git push origin --delete <branch>`),
+  and remove the worktree the PR was worked in (`git worktree remove
+  <path>`, `git worktree prune`). `bro review act merge --cleanup` retires
+  the checkout and the local ref; the *remote* branch is still yours to
+  delete (or let the repo's `delete_branch_on_merge` setting do it). A PR
+  closed without merging gets the same cleanup — the PR is gone, so its
+  branch goes with it. **Never delete a branch you did not merge** — another
+  PR or another session may own it. Report the cleanup in the closing
+  summary.
 - **A pushed PR is merged, watched, or handed off — never unwatched.**
   `bro review act wait <PR> --merge` in the background is the default end-state —
   `--detach` when the watch must outlive the session;

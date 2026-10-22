@@ -86,7 +86,7 @@ decision; agents carry, humans ship.
 
 [[steps]]
 id = "cleanup"
-title = "Close out — worktree, bead, sync"
+title = "Close out — worktree, branch, bead, sync"
 type = "agent"
 needs = ["merge", "merge-human"]
 description = """
@@ -94,4 +94,16 @@ After merge: `git pull` main, `bro work leave` / `git worktree remove` the
 linked worktree, delete the merged branch, `bd close {{bead}}` (and parent
 epic if its children are all closed), `bd dolt push`, `bro debt collect`.
 Verify with `git worktree list` and `bd ready` — nothing left dangling.
+
+The branch goes with the PR — locally AND on the remote:
+
+    git switch main && git pull --ff-only
+    git branch -D <merged-branch>
+    git push origin --delete <merged-branch>
+
+`bro act wait --merge --cleanup` already retires the linked worktree and the
+local branch; the remote branch is still yours to delete (or let the repo's
+`delete_branch_on_merge` setting do it). A PR closed without merging is the
+same cleanup: the PR is gone, so its branch goes with it. Never delete a
+branch you did not merge — another PR or agent may own it.
 """
