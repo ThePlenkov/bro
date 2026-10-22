@@ -98,6 +98,7 @@ import {
 import type { MatchContext } from '@broject/learn'
 import type { GuardEvent } from '@broject/core'
 import { loadBroConfig } from '../plugins.ts'
+import { sessionCapRefusalForHook } from './session-cap.ts'
 import {
   cliVersion,
   emitCommitTrailers,
@@ -125,6 +126,10 @@ import {
 
 interface HookInput {
   tool_name?: unknown
+  /** The client's id for this tool call — the two hook events of ONE
+   *  call (a pre-tool and a permission request) share it, and the
+   *  guard's slot claim is keyed by it (spec bro-bww9v). */
+  tool_use_id?: unknown
   tool_input?: {
     command?: unknown
     file_path?: unknown
@@ -558,8 +563,15 @@ function formatAge(ageMs: number): string {
 /** Connector ctx for hook events — sessionId plus this process's
  *  agent-root owner so claim probes treat markers stamped by the same
  *  agent tree under a rotated session id as own work (bro-7022c). */
-function hookCtx(sessionId: string): ConnectorCtx {
-  return { dir: process.cwd(), sessionId, owner: agentOwner() }
+function hookCtx(sessionId: string, toolUseId?: string): ConnectorCtx {
+  return { dir: process.cwd(), sessionId, owner: agentOwner(), toolUseId }
+}
+
+/** The host client's id for this tool call — the two hook events of
+ *  ONE call (a pre-tool and a permission request) share it, and a
+ *  guard that budgets per call keys its slot on it. */
+function callIdOf(input: HookInput): string | undefined {
+  return typeof input.tool_use_id === 'string' ? input.tool_use_id : undefined
 }
 
 function liveSessionLines(dir: string, selfId: string): string[] {
@@ -1443,7 +1455,7 @@ async function emitPreTool(input: HookInput): Promise<void> {
   const sessionId = typeof input.session_id === 'string' ? input.session_id : ''
   const tool = typeof input.tool_name === 'string' ? input.tool_name : ''
   const verdicts = await preToolVerdicts(
-    hookCtx(sessionId),
+    hookCtx(sessionId, callIdOf(input)),
     tool,
     (input.tool_input ?? {}) as Record<string, unknown>
   )
@@ -1491,6 +1503,26 @@ async function emitPreTool(input: HookInput): Promise<void> {
  * and land here; they are not self-tool calls, so they stay a prompt. */
 function emitPermission(input: HookInput): boolean {
   const cmd = typeof input.tool_input?.command === 'string' ? input.tool_input.command : ''
+  // the session cap — the devin client sends no pre-tool event, so its
+  // permission request is where a session start is caught (spec
+  // bro-bww9v). The refusal denies the call; the hook fails OPEN when
+  // the count cannot be established.
+  const capRefusal = sessionCapRefusalForHook(
+    cmd,
+    process.cwd(),
+    typeof input.session_id === 'string' ? input.session_id : undefined,
+    undefined,
+    callIdOf(input)
+  )
+  if (capRefusal !== undefined) {
+    emit({
+      hookSpecificOutput: {
+        hookEventName: 'PermissionRequest',
+        decision: { behavior: 'deny', message: capRefusal },
+      },
+    })
+    return true
+  }
   if (isSelfToolCommand(cmd)) {
     if (codexClient) {
       emit({

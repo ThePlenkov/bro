@@ -109,7 +109,7 @@ import {
 import { loadAgentEnv, type AgentConnectorEnv } from '../agent-connectors.ts'
 import { flag } from './args.ts'
 import { defaultBranch, runActCommand } from './act.ts'
-import { emitDevinUsage } from '../session-planes/devin-usage.ts'
+import { emitDevinUsage } from '@broject/devin'
 import {
   foreignPushEvent,
   readHeadMemory,

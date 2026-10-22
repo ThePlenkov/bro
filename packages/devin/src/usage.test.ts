@@ -8,7 +8,7 @@ import {
   devinUsageStatePath,
   readDevinUsageState,
   sampleDevinUsage,
-} from './devin-usage.ts'
+} from './usage.ts'
 
 /** A store shaped like devin's: sessions plus message nodes carrying a
  *  request_id in the chat message's metadata. */

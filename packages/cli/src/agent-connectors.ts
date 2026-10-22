@@ -98,7 +98,7 @@ import { expandAgentCmd, loopSection, type LoopConfig } from '@broject/loop'
 // builtin session planes self-register on import — the connector layer
 // is the plugin host for agent backends, and admission planes ride the
 // same surface
-import './session-planes/devin.ts'
+import '@broject/devin'
 import {
   devinLogsDir,
   devinPidBead,
@@ -106,7 +106,7 @@ import {
   devinPidLog,
   devinProcDir,
   devinSessionPlane,
-} from './session-planes/devin.ts'
+} from '@broject/devin'
 import './session-planes/copilot.ts'
 import { writeCopilotCount } from './session-planes/copilot.ts'
 import { enterWorktree } from './commands/work.ts'
