@@ -23,7 +23,7 @@
 import { SpawnError } from './agents.ts'
 import {
   countSessionReservations,
-  reserveSessionSlot,
+  reserveSessionSlotOnce,
   sessionPlanes,
   sessionQuotaConfig,
   sessionSlotsDir,
@@ -192,7 +192,7 @@ export function reserveSessionStart(claim: {
   const lane = claim.lane ?? 'interactive'
   const paths: string[] = []
   for (let i = 0; i < claim.count; i++) {
-    paths.push(reserveSessionSlot(dir, claim.key, lane))
+    paths.push(reserveSessionSlotOnce(dir, `${claim.key}-${i}`, lane))
   }
   return paths
 }

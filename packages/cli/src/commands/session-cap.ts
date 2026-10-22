@@ -20,6 +20,7 @@
  * module) and the vendor knowledge in the vendor's package; this file
  * is the wiring — which config, which call site, which failure mode.
  */
+import { createHash } from 'node:crypto'
 import {
   reserveSessionStart,
   sessionCapRefusal,
@@ -80,8 +81,10 @@ export function sessionCapVerdict(
       return [{ block: refusal }]
     }
   }
-  // allowed — claim the slots this start will take
-  const key = `guard-${ctx.sessionId ?? 'nosession'}`
+  // allowed — claim the slots this start will take. The key carries the
+  // command, so a client that asks twice (a pre-tool AND a permission
+  // event for the same call) claims ONE slot, not two.
+  const key = `guard-${ctx.sessionId ?? 'nosession'}-${commandKey(command)}`
   for (const view of views) {
     try {
       reserveSessionStart({ kind: view.kind, agents: bags, key, count: view.starts })
@@ -90,6 +93,37 @@ export function sessionCapVerdict(
     }
   }
   return []
+}
+
+/** A short digest of a command — the claim's key half. The same
+ *  command claims the same slot; a different one claims its own. */
+function commandKey(command: string): string {
+  return createHash('sha1').update(command).digest('hex').slice(0, 12)
+}
+
+/** The refusal for a command, from the hook's point of view.
+ *
+ *  The devin client sends no pre-tool event: its veto point is the
+ *  PERMISSION request (the plugin's PermissionRequest hook). The cap
+ *  has to run there too, or the very population the incident came
+ *  from — an agent starting vendor sessions in its own worktree — walks
+ *  past the cap untouched.
+ *
+ *  Fails OPEN: a hook must never stall the client (REVIEW.md). */
+export function sessionCapRefusalForHook(
+  command: string,
+  dir: string,
+  sessionId?: string,
+  /** The `agents.<kind>` bags — injectable for tests. */
+  agents?: Record<string, Record<string, unknown>>
+): string | undefined {
+  try {
+    const ctx = { dir, sessionId } as ConnectorCtx
+    const verdicts = sessionCapVerdict(ctx, { tool: 'exec', input: { command } }, agents)
+    return verdicts[0]?.block
+  } catch {
+    return undefined
+  }
 }
 
 /** The conductor's own budget — the ACP surface's session facade.

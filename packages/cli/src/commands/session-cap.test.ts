@@ -12,7 +12,11 @@ import {
   type PreToolVerdict,
   type SessionPlane,
 } from '@broject/core'
-import { conductorSessionRefusal, sessionCapVerdict } from './session-cap.ts'
+import {
+  conductorSessionRefusal,
+  sessionCapRefusalForHook,
+  sessionCapVerdict,
+} from './session-cap.ts'
 
 /** A plane that claims a command by a marker word and counts a
  *  scripted number of live sessions. */
@@ -123,6 +127,36 @@ describe('sessionCapVerdict', () => {
         const second = verdictFor('burst-run --now', bags)
         assert.equal(second.length, 1)
         assert.match(second[0]!.block ?? '', /burst session quota reached/)
+      })
+    })
+  })
+})
+
+describe('sessionCapRefusalForHook', () => {
+  test('the devin client vetoes a session start at the cap', () => {
+    withReservations((dir) => {
+      withPlane(testPlane('devin', { live: 3 }), () => {
+        const refusal = sessionCapRefusalForHook(
+          'devin-run --now',
+          process.cwd(),
+          'sess-1',
+          { devin: { maxSessions: 3, reservationsDir: dir } }
+        )
+        assert.ok(refusal !== undefined)
+        assert.match(refusal, /devin session quota reached/)
+      })
+    })
+  })
+
+  test('a command that starts nothing is never refused', () => {
+    withReservations((dir) => {
+      withPlane(testPlane('devin', { live: 3 }), () => {
+        assert.equal(
+          sessionCapRefusalForHook('ls -la', process.cwd(), 'sess-1', {
+            devin: { maxSessions: 3, reservationsDir: dir },
+          }),
+          undefined
+        )
       })
     })
   })

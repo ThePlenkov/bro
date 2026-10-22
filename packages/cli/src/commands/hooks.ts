@@ -98,6 +98,7 @@ import {
 import type { MatchContext } from '@broject/learn'
 import type { GuardEvent } from '@broject/core'
 import { loadBroConfig } from '../plugins.ts'
+import { sessionCapRefusalForHook } from './session-cap.ts'
 import {
   cliVersion,
   emitCommitTrailers,
@@ -1491,6 +1492,24 @@ async function emitPreTool(input: HookInput): Promise<void> {
  * and land here; they are not self-tool calls, so they stay a prompt. */
 function emitPermission(input: HookInput): boolean {
   const cmd = typeof input.tool_input?.command === 'string' ? input.tool_input.command : ''
+  // the session cap — the devin client sends no pre-tool event, so its
+  // permission request is where a session start is caught (spec
+  // bro-bww9v). The refusal denies the call; the hook fails OPEN when
+  // the count cannot be established.
+  const capRefusal = sessionCapRefusalForHook(
+    cmd,
+    process.cwd(),
+    typeof input.session_id === 'string' ? input.session_id : undefined
+  )
+  if (capRefusal !== undefined) {
+    emit({
+      hookSpecificOutput: {
+        hookEventName: 'PermissionRequest',
+        decision: { behavior: 'deny', message: capRefusal },
+      },
+    })
+    return true
+  }
   if (isSelfToolCommand(cmd)) {
     if (codexClient) {
       emit({

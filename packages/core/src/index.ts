@@ -396,6 +396,7 @@ export {
   registerSessionPlane,
   releaseSessionSlot,
   reserveSessionSlot,
+  reserveSessionSlotOnce,
   SESSION_SLOT_TTL_MS,
   sessionPlane,
   sessionPlaneForCli,

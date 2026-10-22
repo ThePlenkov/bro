@@ -19,6 +19,10 @@ export function base(token: Token): string {
   return token.text.slice(token.text.lastIndexOf('/') + 1)
 }
 
+/** The shell keywords that sit where a command sits (`then devin …`) —
+ *  they are not commands themselves. */
+const SHELL_KEYWORDS = new Set(['do', 'done', 'else', 'elif', 'fi', 'then', '{', '}'])
+
 /** Is this token an environment assignment (`FOO=bar`)? */
 export function isAssignment(token: Token): boolean {
   return /^[A-Za-z_][A-Za-z0-9_]*=/.test(token.text)
@@ -138,7 +142,7 @@ export function commandIndex(toks: Token[]): number {
   let i = 0
   while (i < toks.length) {
     const token = toks.at(i)
-    if (token === undefined || isAssignment(token)) {
+    if (token === undefined || isSkipped(token)) {
       i++
       continue
     }
@@ -146,9 +150,28 @@ export function commandIndex(toks: Token[]): number {
     if (!WRAPPERS.has(name)) {
       return i
     }
+    if (isLookup(toks, i)) {
+      // `command -v devin` LOOKS the binary up — it does not run it
+      return i
+    }
     i = skipWrapperArgs(toks, i + 1, token)
   }
   return i
+}
+
+/** Is this token skipped on the way to the command? An assignment and
+ *  a shell keyword are not commands. */
+function isSkipped(token: Token): boolean {
+  return isAssignment(token) || SHELL_KEYWORDS.has(token.text)
+}
+
+/** Is this wrapper a lookup (`command -v X`) rather than a runner? */
+function isLookup(toks: Token[], at: number): boolean {
+  if (base(toks.at(at) as Token) !== 'command') {
+    return false
+  }
+  const flag = toks.at(at + 1)?.text
+  return flag === '-v' || flag === '-V'
 }
 
 /** The index after a wrapper's own arguments — its options (with the
@@ -162,10 +185,7 @@ function skipWrapperArgs(toks: Token[], from: number, wrapper: Token): number {
       break
     }
     if (next.text.startsWith('-')) {
-      i++
-      if (optionTakesNext(toks, i, next)) {
-        i++
-      }
+      i = skipOption(toks, i, next)
       continue
     }
     if (operands > 0) {
@@ -176,6 +196,12 @@ function skipWrapperArgs(toks: Token[], from: number, wrapper: Token): number {
     break
   }
   return i
+}
+
+/** The index after an option — with the value it takes, if any. */
+function skipOption(toks: Token[], at: number, option: Token): number {
+  const next = at + 1
+  return optionTakesNext(toks, next, option) ? next + 1 : next
 }
 
 /** Does this option take the next token as its value? */

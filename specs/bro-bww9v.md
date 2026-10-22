@@ -113,9 +113,18 @@ The same policy is applied wherever a session of a kind can start:
    A refusal throws the quota line, which the conductor's existing
    failure mapping already answers with 429;
 3. **the guard plane** — a tool call about to start a vendor session (an
-   agent running the CLI in its worktree). The pre-tool guard vetoes the
-   call when the kind is at its cap. This is the population the incident
+   agent running the CLI in its worktree). The guard vetoes the call
+   when the kind is at its cap. This is the population the incident
    came from.
+
+   The veto point differs per client: the clients that send a pre-tool
+   event are vetoed there, and the devin client — whose plugin
+   registers no pre-tool event — is vetoed at its PERMISSION request
+   (the plugin's PermissionRequest hook). Without the second, the cap
+   would guard every agent except the one the incident came from. The
+   claim is keyed by the command, so a client that asks twice (a
+   pre-tool AND a permission event for the same call) claims ONE slot,
+   not two.
 
 ### One budget, not three counters
 

@@ -99,6 +99,16 @@ describe('countDevinSessionStarts', () => {
     assert.equal(countDevinSessionStarts('PATH=/opt/bin:$PATH devin'), 1)
   })
 
+  test('a shell keyword sits where a command sits', () => {
+    assert.equal(countDevinSessionStarts('if true; then devin -p a; fi'), 1)
+    assert.equal(countDevinSessionStarts('for f in a; do devin -p a; done'), 1)
+  })
+
+  test('a lookup is not a start', () => {
+    assert.equal(countDevinSessionStarts('command -v devin'), 0)
+    assert.equal(countDevinSessionStarts('command devin -p a'), 1)
+  })
+
   test('a wrapper with options and operands still reaches the command', () => {
     assert.equal(countDevinSessionStarts('timeout 30 devin -p a'), 1)
     assert.equal(countDevinSessionStarts('sudo -u root devin -p a'), 1)

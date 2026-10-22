@@ -324,6 +324,32 @@ export function releaseSessionSlot(path: string): void {
   rmSync(path, { force: true })
 }
 
+/** Claim a slot ONCE — the same key never claims twice.
+ *
+ *  The guard plane runs on more than one hook (a client that sends
+ *  both a pre-tool and a permission event would otherwise claim the
+ *  slot twice, and the budget would read one session as two). The
+ *  deterministic name makes the second claim a no-op: the file is
+ *  there, the slot is already held. */
+export function reserveSessionSlotOnce(
+  resDir: string,
+  key: string,
+  lane: ReservationLane
+): string {
+  mkdirSync(resDir, { recursive: true })
+  const tag = lane === 'batch' ? '.batch' : ''
+  const path = join(resDir, `${key}${tag}.slot`)
+  try {
+    writeFileSync(path, String(Date.now()), { flag: 'wx' })
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === 'EEXIST') {
+      return path
+    }
+    throw err
+  }
+  return path
+}
+
 /** The env var that marks a spawn as the FLEET's. The fleet sets it
  *  on every spawn it owns — a drive fixer, a loop member (root bead or
  *  molecule child) — so the marker does not depend on a molecule
