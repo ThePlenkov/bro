@@ -413,7 +413,7 @@ export async function resolveSpawnRoute(
   namedBy: 'flag' | 'profile' | 'backend' = 'backend'
 ): Promise<NonNullable<SpawnSpec['route']>> {
   const candidates = await Promise.all(
-    route.chain.map(async (entry) => {
+    route.chain.map(async (entry, index) => {
       const label = `fleet.routing.${route.class} provider "${entry.provider}"`
       try {
         const pick = await resolveSpawnProvider(
@@ -421,7 +421,7 @@ export async function resolveSpawnRoute(
           backend,
           {
             provider: entry.provider,
-            model: sel.model ?? entry.model ?? sel.modelFallback,
+            model: index === 0 ? (sel.model ?? entry.model ?? sel.modelFallback) : entry.model,
             autoApprove: sel.autoApprove,
           },
           namedBy

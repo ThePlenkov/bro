@@ -31,6 +31,7 @@ import {
   type AgentInfo,
   type AgentRegistryEntry,
   type ConnectorCtx,
+  type ResolvedClass,
   type SpawnSpec,
 } from '@broject/core'
 import {
@@ -1890,6 +1891,29 @@ describe('resolveSpawnProvider', () => {
     )
   })
 
+  test('a model selection applies to the chain head, not fallback provider pins', async () => {
+    const routeEnv: AgentConnectorEnv = {
+      ...env,
+      providers: {
+        A: { type: 'cli', command: 'node {promptFile} --model {model}', model: 'a-default' },
+        B: { type: 'cli', command: 'node {promptFile} --model {model}', model: 'b-default' },
+        C: { type: 'cli', command: 'node {promptFile} --model {model}', model: 'c-default' },
+      },
+    }
+    const resolved: ResolvedClass = {
+      class: 'free',
+      chain: [{ provider: 'A', model: 'a1' }, { provider: 'B' }, { provider: 'C', model: 'c1' }],
+      onWall: 'fallthrough',
+      provider: 'A',
+      model: 'a1',
+    }
+    const route = await resolveSpawnRoute(routeEnv, 'native', resolved, { model: 'x' })
+    assert.deepEqual(
+      route.candidates.map((candidate) => candidate.model),
+      ['x', 'b-default', 'c1']
+    )
+  })
+
   test('cli {model} placeholder wires the resolved model into the worker command', async () => {
     const pin = await resolveSpawnProvider(env, 'native', { provider: 'zen' }, 'flag')
     assert.equal(pin.model, 'zen/free')
@@ -2453,6 +2477,46 @@ describe('fleet chain walk spawn integration', () => {
         deriveProviderWalls(registry, Date.now()).find((wall) => wall.provider === 'A')?.cause,
         'rate_limited'
       )
+      await c.stop(info.id)
+    } finally {
+      cleanup(f)
+    }
+  })
+
+  test('fallback provider uses its own model instead of the chain-head selection', async () => {
+    const f = fx([{ id: 'fx-1', status: 'open' }])
+    f.env.providers = {
+      A: { type: 'cli', command: 'node {promptFile} --model {model}', model: 'a-default' },
+      B: { type: 'cli', command: 'node {promptFile} --model {model}', model: 'b-default' },
+      C: { type: 'cli', command: 'node {promptFile} --model {model}', model: 'c-default' },
+    }
+    try {
+      patchAgentRegistry(f.main, 'fx-1', death('A'))
+      const resolved: ResolvedClass = {
+        class: 'free',
+        chain: [
+          { provider: 'A', model: 'a1' },
+          { provider: 'B' },
+          { provider: 'C', model: 'c1' },
+        ],
+        onWall: 'fallthrough',
+        provider: 'A',
+        model: 'a1',
+      }
+      const route = await resolveSpawnRoute(f.env, 'native', resolved, { model: 'x' })
+      assert.deepEqual(
+        route.candidates.map((candidate) => candidate.model),
+        ['x', 'b-default', 'c1']
+      )
+      const c = conn(f)
+      const info = await c.spawn({
+        ...SPEC(f.main, f.beadsDir, 'fx-1', 'setTimeout(() => {}, 30000)'),
+        route,
+      })
+      const entry = readAgentRegistry(f.main)['fx-1']!
+      assert.equal(entry.provider, 'B')
+      assert.equal(entry.model, 'b-default')
+      assert.notEqual(entry.model, 'x')
       await c.stop(info.id)
     } finally {
       cleanup(f)
