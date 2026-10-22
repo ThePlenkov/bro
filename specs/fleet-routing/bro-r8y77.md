@@ -121,10 +121,14 @@ own. Phase 2 can put the ledger on a git ref if a real need shows up.
 
 ### Project identity
 
-`projectId = sha256(normalizeRemote(origin))[:16]`, where normalize does
-lowercase host, strip `.git`, scp→url, drop userinfo/token, and drop the
-proxy prefix (`git-manager…/proxy/`). With no origin, it falls back to
-`sha256(realpath(git-common))`. Every clone of one repo gets one id.
+`normalizeRemote(url)` lowercases the host, strips a trailing `.git` and
+trailing slash, converts scp remotes such as `git@h:o/r` to `h/o/r`, and
+drops the scheme, userinfo, query credentials, and proxy prefix (for
+example `http://git-manager…/proxy/github.com/o/r` becomes
+`github.com/o/r`). `projectId(dir) = sha256(normalizeRemote(origin))[:16]`.
+It reuses core's existing origin-URL helper; with no origin it falls back
+to `sha256(realpath(git-common))[:16]`. No new git-spawn path is added.
+Every clone of one repo gets one id.
 
 ### Store (interface first, local impl now)
 
@@ -136,55 +140,81 @@ interface LeaseStore {
   renew(lease: Lease, ttlMs: number): Lease | undefined   // undefined = lost
   release(lease: Lease): void                             // token-checked, idempotent
   read(key: string): Lease | undefined                    // live leases only
+  rebind(lease: Lease, holderPatch: Partial<LeaseHolder>): Lease | undefined // token-checked, same expiry
+  forceRelease(key: string): boolean                      // whether a row existed
+  list(): Lease[]                                          // live leases only
 }
 ```
 
-- Local impl: `$XDG_STATE_HOME/bro/projects/<projectId>/leases/<enc(key)>.json`.
-  Each acquire, renew, or release is a read-check-write under
-  `withFileLock` on that file. `enc` must be injective (encodeURIComponent).
-- A lease is dead once `expiresAt` passes, **or** once `holder.host`
-  is this host and `holder.pid` is dead. A crashed holder on the same
-  host frees its lease right away, and the TTL is the backstop.
-- Keys: `bead/<id>`, `pr/<owner>/<repo>/<n>`, `role/loop`, `role/drive`,
-  `role/dispatch`.
+- Local impl: `localLeaseStore(projectId, opts?)` at
+  `$XDG_STATE_HOME/bro/projects/<projectId>/leases/<encodeURIComponent(key)>.json`;
+  an unset or empty `XDG_STATE_HOME` uses `~/.local/state`. `opts` injects
+  `stateHome`, `now`, `host`, and `pidAlive` for tests.
+- Every operation is a read-check-write under `withFileLock(<file>.lock)`.
+  Writes use a same-directory temp file and atomic rename; directories are
+  mode 0700 and lease files mode 0600. Tokens are `randomUUID()` values.
+- A lease is dead once `expiresAt` passes, **or** when
+  `holder.host === os.hostname()` and `process.kill(pid, 0)` reports
+  `ESRCH`; `EPERM` counts as alive. A foreign-host pid is ignored until
+  TTL expiry. `renew`, `release`, and `rebind` are token-checked;
+  `release` is idempotent, while `forceRelease` is the admin override.
+- Keys: `bead/<id>`, `pr/<owner>/<repo>/<n>`, `role/loop`, `role/drive`.
+
+### Lease configuration
+
+`fleet.leases: { roleTtlSeconds?: number (default 60),
+workTtlMinutes?: number (default 360) }`. Invalid values are dropped
+with the usual `bro.config` field error.
 
 ### Uses
 
-1. **Work lease in the spawn critical section.** Right after the claim
-   guard, `prepareSpawn` acquires `bead/<molStep>` with the worker's
-   identity: the pid after start, rebound from the spawning pid. If
-   another holder has it, that's a `SpawnError` ("bead X leased by
-   `<rig>@<host>` pid N until T"). `bro agents run --for`, `bro flow
-   next`, and the loop's pick all try the lease before `bd --claim`, so
-   when a bead is held they skip it and pick the next ready one. The
-   lease is released on the exit record. `agents down` force-releases
-   it.
-2. **PR fixer lease.** `drive` takes `pr/<…>/<n>` before it spawns a
-   fixer. If another bro already leases that PR, the PR is skipped and
-   shown as `leased`.
-3. **Role leases.** `bro loop` and `bro drive` (and the daemon's drive
-   supervisor) acquire `role/loop` or `role/drive`. The holder renews
-   every ttl/3, with ttl defaulting to 60s. An instance that loses the
-   lease or finds it held runs in standby the way the second loop does
-   behind `loop.lock` today: it polls `read()` and takes over once the
-   lease expires. The existing git-common locks stay as the inner
-   guard.
-4. Interactive sessions: `bro work enter` / `bd --claim` through the
-   hook acquire `bead/<id>` as a **soft** lease. The ambient-detection
-   rule ("never a block") holds for interactive sessions. A bro batch
-   spawn treats a soft lease as held.
+1. **Work lease in the spawn critical section.** Immediately after the
+   claim guard and before the registry write, `prepareSpawn` acquires a
+   work lease with `{host, pid, rig, agentId}` and
+   `workTtlMinutes`. Drive fixers use the shared `spawnStepAgent` /
+   `prepareSpawn` path and carry `BRO_PR` plus `BRO_PR_URL`, so their key
+   is `pr/<owner>/<repo>/<n>`; other spawns use `bead/<molStep>`. If
+   another live holder owns the key, spawn throws a `SpawnError` of kind
+   `cap` naming the key, holder (`<rig>@<host>`), pid, and expiry. A
+   respawn reuses or rebinds its lease when the existing registry entry's
+   token matches the live lease. Once the worker starts, the holder pid
+   is rebound to the worker pid. Spawn failure and exit classification
+   release the lease; `agents down <step>` force-releases its key.
+2. **Pick skip.** `bro loop`'s existing ready-bead pick skips a bead
+   whose `bead/<id>` lease is held by another live holder and logs the
+   holder. `bro flow next` and `agents run --for` do not share that pick
+   helper and do not add a separate pick path.
+3. **Role leases.** `bro loop` acquires `role/loop`; `bro drive` (also
+   the daemon's in-process drive command) acquires `role/drive`. Both
+   acquire before their existing `loop.lock`/`drive.lock`, which remain
+   the inner guard. `holdRoleLease(store, role, holder, ttl, {signal})`
+   waits behind a live lease, logging
+   `standby — role/<x> held by <rig>@<host> pid N`, polling at
+   `min(5s, ttl/3)`. The leader renews at `ttl/3` on an unref'd interval.
+   A lost lease logs `role/<x> lease lost — exiting`, releases the inner
+   lock, and exits 75; normal exit and SIGINT/SIGTERM release the lease.
+   The daemon/operator restarts a lost leader, which re-enters standby.
+4. **Fleet CLI.** `bro fleet leases [--json]` lists live leases with key,
+   holder rig/host/pid, agent id, acquired time, and expiry.
+   `bro fleet leases release <key>` force-releases and reports whether
+   a row existed.
 
 ### Tests
 
-acquire/renew/release; expiry; dead-pid reclaim; token mismatch;
-encode collisions (`a/b` vs `a%2Fb`); two processes racing acquire
-(exactly one wins, child_process fork test); two clones with the same
-origin → same projectId; a proxy/scp/https remote → same id; prepareSpawn
-refuses a leased bead; loop standby → takeover after release.
+Lease acquire/renew/release; expiry; dead-pid reclaim; foreign-host pid
+ignored until TTL; token mismatch on renew/release/rebind; encoded-key
+separation (`a/b` vs `a%2Fb`); force-release; live list; two forked
+processes racing acquire (exactly one wins). Project identity covers
+https, scp, ssh, token/userinfo, proxy-prefixed, and trailing-`.git`
+forms of one repo, another repo, and no-origin git-common fallback.
+Spawn coverage includes a foreign-held bead error, same-step respawn
+reuse, exit-classification release, and `agents down` force-release.
+Role coverage includes standby/takeover and renewal loss; loop picking
+skips a leased bead. Fleet leases CLI covers list/release and argv errors.
 
 ### Phase 2 (not now)
 
-A git CAS store: `refs/bro/leases/<enc(key)>` on origin, using
-`git push --force-with-lease=<ref>:<expected>` like `refs/bro/data`
-(dataref.ts). It's selected with `fleet.leases.store: "git"` for
-multiple hosts (Devin cloud, CI, a second laptop).
+Soft leases for interactive `bro work enter` / `bd --claim` hook flows
+and a git CAS store at `refs/bro/leases/<enc(key)>` on origin (using
+`git push --force-with-lease=<ref>:<expected>` like `refs/bro/data`)
+are tracked in child bead `bro-r8y77.4`; neither is implemented here.

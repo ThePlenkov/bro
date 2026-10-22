@@ -82,6 +82,10 @@ applies at spawn.
   `parked`/`stopped` verdicts — reported, never retried.
 - A mol already claimed by a live worker reads `occupied` — skipped,
   never double-run. A mol that ends on a human gate reads `gated`.
+- `bro loop` and `bro drive` coordinate through project-scoped role
+  leases; work leases prevent another clone from spawning the same bead
+  or PR. Inspect them with `bro fleet leases [--json]`; force-release a
+  stale lease with `bro fleet leases release <key>`.
 - Run it detached for real queues (`nohup`/`systemd-run`/tmux) — it is
   a supervisor loop like `bro review drive --every`, and exit 1 means some mol
   exhausted attempts.

@@ -5,7 +5,9 @@ import { tmpdir } from 'node:os'
 import { join, relative, sep } from 'node:path'
 import {
   patchAgentRegistry,
+  localLeaseStore,
   procStat,
+  projectId,
   readAgentRegistry,
   type AgentInfo,
   type TaskRow,
@@ -36,6 +38,7 @@ import {
   recordFixerAttempt,
   registryAgents,
   registryEntryState,
+  runDriveCommand,
   supervisedBy,
   supervisorFresh,
   worktreeClaim,
@@ -43,7 +46,7 @@ import {
   type WorkEntry,
 } from './drive.ts'
 import { driveSection } from './drive-config.ts'
-import { git, initRepo, inside } from './testrepo.ts'
+import { git, initRepo, inside, insideAsync, installFakeBd, scrubEnv } from './testrepo.ts'
 
 const agent = (over: Partial<AgentInfo> = {}): AgentInfo => ({
   id: 'native-aaa',
@@ -80,6 +83,57 @@ describe('driveArgs', () => {
     // the floor fleet already enforces — below it is a busy loop
     assert.equal(driveArgs(['--every', '0.1']).everySec, 0.1)
   })
+})
+
+test('drive removes its exit listener when role-lease acquisition is aborted', async () => {
+  const { root, main } = initRepo('bro-drive-lease-abort-')
+  const { binDir, db } = installFakeBd(root)
+  const stateHome = mkdtempSync(join(tmpdir(), 'bro-drive-lease-state-'))
+  const path = process.env.PATH ?? ''
+  const restoreEnv = scrubEnv(['PATH', 'HOME', 'XDG_STATE_HOME', 'FAKE_BD_DB'])
+  try {
+    process.env.PATH = `${binDir}:${path}`
+    process.env.HOME = root
+    process.env.XDG_STATE_HOME = stateHome
+    process.env.FAKE_BD_DB = db
+    await insideAsync(main, root, async () => {
+      const store = localLeaseStore(projectId(main))
+      assert.equal(
+        store.acquire('role/drive', { host: 'other-host', pid: 1, rig: 'other' }, 60_000).ok,
+        true
+      )
+
+      const listenersBefore = {
+        exit: process.listenerCount('exit'),
+        sigint: new Set(process.listeners('SIGINT')),
+        sigterm: process.listenerCount('SIGTERM'),
+      }
+      const originalKill = process.kill
+      process.kill = ((pid, signal) => {
+        if (pid === process.pid && signal === 'SIGINT') return true
+        return originalKill(pid, signal)
+      }) as typeof process.kill
+      try {
+        const running = runDriveCommand([])
+        await new Promise<void>((resolve) => setImmediate(resolve))
+        const abortHandler = process
+          .listeners('SIGINT')
+          .find((listener) => !listenersBefore.sigint.has(listener))
+        assert.ok(abortHandler, 'drive SIGINT listener was not installed')
+        assert.equal(process.listenerCount('exit'), listenersBefore.exit + 1)
+        abortHandler.call(process, 'SIGINT')
+        await assert.rejects(running, /aborted/i)
+        assert.equal(process.listenerCount('exit'), listenersBefore.exit)
+        assert.equal(process.listenerCount('SIGINT'), listenersBefore.sigint.size)
+        assert.equal(process.listenerCount('SIGTERM'), listenersBefore.sigterm)
+      } finally {
+        process.kill = originalKill
+      }
+    })
+  } finally {
+    restoreEnv()
+    rmSync(stateHome, { recursive: true, force: true })
+  }
 })
 
 describe('driveSection', () => {

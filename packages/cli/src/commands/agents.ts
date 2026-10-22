@@ -59,6 +59,8 @@ import { randomBytes } from 'node:crypto'
 import {
   countSessionReservations,
   gitCommonDir,
+  localLeaseStore,
+  projectId,
   readAgentRegistry,
   SESSION_SLOT_TTL_MS,
   removeAgentRegistryEntries,
@@ -792,6 +794,16 @@ export async function stopAgent(
   const respawned =
     current.pid !== hit.agent.pid ? { from: hit.agent.pid, to: current.pid } : undefined
   await hit.conn.stop(hit.agent.id)
+  const leaseKey = readAgentRegistry(dir)[current.molStep]?.leaseKey
+  if (typeof leaseKey === 'string') {
+    try {
+      localLeaseStore(projectId(dir)).forceRelease(leaseKey)
+    } catch (err) {
+      console.error(
+        `warning: work lease release failed — ${err instanceof Error ? err.message : String(err)}`
+      )
+    }
+  }
   return {
     found: true,
     degraded,
@@ -1211,6 +1223,7 @@ async function cmdDown(dir: string, env: AgentConnectorEnv, argv: string[]): Pro
         `down: no agent "${target}" found — backend(s) degraded: ${outcome.degraded.join('; ')}`
       )
     }
+    forceReleaseStepLease(dir, target)
     // stop() is idempotent — a gone agent is the desired end state
     console.log(`down: no agent "${target}" — nothing to stop`)
     return
@@ -1233,6 +1246,20 @@ async function cmdDown(dir: string, env: AgentConnectorEnv, argv: string[]): Pro
     )
   }
   console.log(`stopped ${agent.id} (${agent.molStep}, ${outcome.backend})`)
+}
+
+function forceReleaseStepLease(dir: string, target: string): void {
+  const registry = readAgentRegistry(dir)
+  const entry =
+    registry[target] ?? Object.values(registry).find((candidate) => candidate.agentId === target)
+  const key = typeof entry?.leaseKey === 'string' ? entry.leaseKey : `bead/${target}`
+  try {
+    localLeaseStore(projectId(dir)).forceRelease(key)
+  } catch (err) {
+    console.error(
+      `warning: work lease release failed — ${err instanceof Error ? err.message : String(err)}`
+    )
+  }
 }
 
 /** States prune reaps — 'blocked' stays: a wall-parked worker is

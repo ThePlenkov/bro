@@ -481,7 +481,7 @@ export function connectors(): readonly Connector[] {
 
 // --- resolution ----------------------------------------------------------------
 
-function remoteUrl(dir: string): string | undefined {
+export function remoteUrl(dir: string): string | undefined {
   const r = gitTry(['-C', dir, 'remote', 'get-url', 'origin'])
   return r.code === 0 && r.out.trim() !== '' ? r.out.trim() : undefined
 }

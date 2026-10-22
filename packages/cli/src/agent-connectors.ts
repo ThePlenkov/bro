@@ -14,6 +14,7 @@
  */
 import { spawn, spawnSync } from 'node:child_process'
 import { createHash } from 'node:crypto'
+import { hostname } from 'node:os'
 import {
   accessSync,
   closeSync,
@@ -54,9 +55,11 @@ import {
   isAgentCause,
   JudgeUnavailable,
   loadConfig,
+  localLeaseStore,
   mintAgentId,
   patchAgentRegistry,
   pidAlive,
+  projectId,
   probeStep,
   procStat,
   providerCallGrade,
@@ -88,10 +91,13 @@ import {
   type AccountWall,
   type ConnectorCtx,
   type DiscoveredSession,
+  type FleetLeaseTtls,
   type FleetProfile,
   type FleetRouter,
   type FleetWallTtls,
   type ListResult,
+  type Lease,
+  type LeaseStore,
   type ProviderEntry,
   type ProviderWall,
   type ResolvedClass,
@@ -136,6 +142,7 @@ export interface AgentConnectorEnv {
     profiles?: Record<string, FleetProfile>
     routing?: RoutingTable
     walls?: FleetWallTtls
+    leases?: FleetLeaseTtls
     router?: FleetRouter
   }
   /** The named provider registry — spawn resolution reads entries by
@@ -232,6 +239,7 @@ export function loadAgentEnv(dir: string): AgentConnectorEnv {
       profiles?: Record<string, FleetProfile>
       routing?: RoutingTable
       walls?: FleetWallTtls
+      leases?: FleetLeaseTtls
       router?: FleetRouter
     }
     providers?: Record<string, ProviderEntry>
@@ -1613,6 +1621,92 @@ function applySpawnRoute(
   spec.class = route.class
 }
 
+interface SpawnWorkLease {
+  store: LeaseStore
+  lease: Lease
+}
+
+function pullRequestLeaseKey(spec: SpawnSpec): string | undefined {
+  const pr = spec.env?.BRO_PR
+  const url = spec.env?.BRO_PR_URL
+  if (pr === undefined || url === undefined) {
+    return undefined
+  }
+  if (!/^\d+$/.test(pr)) {
+    return undefined
+  }
+  let pathname: string
+  try {
+    pathname = new URL(url).pathname
+  } catch {
+    return undefined
+  }
+  const match = /\/([^/]+)\/([^/]+)\/pull\/(\d+)\/?$/.exec(pathname)
+  if (match === null || match[3] !== pr) {
+    return undefined
+  }
+  return `pr/${match[1]}/${match[2]}/${pr}`
+}
+
+function spawnLeaseKey(spec: SpawnSpec): string {
+  return pullRequestLeaseKey(spec) ?? `bead/${spec.molStep}`
+}
+
+function acquireSpawnLease(
+  dir: string,
+  spec: SpawnSpec,
+  agentId: string,
+  existing: AgentRegistryEntry | undefined,
+  env: AgentConnectorEnv
+): SpawnWorkLease {
+  const store = localLeaseStore(projectId(dir))
+  const key = spawnLeaseKey(spec)
+  const holder = { host: hostname(), pid: process.pid, rig: basename(resolve(dir)), agentId }
+  if (existing?.leaseKey === key && typeof existing.leaseToken === 'string') {
+    const current = store.read(key)
+    if (current?.token === existing.leaseToken) {
+      const rebound = store.rebind(current, holder)
+      if (rebound !== undefined) {
+        return { store, lease: rebound }
+      }
+    }
+  }
+  const ttlMinutes =
+    env.fleet?.leases?.workTtlMinutes ?? DEFAULT_CONFIG.fleet.leases.workTtlMinutes
+  const result = store.acquire(key, holder, ttlMinutes * 60_000)
+  if (!result.ok) {
+    const owner = result.held.holder
+    throw new SpawnError(
+      `${key} leased by ${owner.rig}@${owner.host} pid ${owner.pid} until ${result.held.expiresAt}`,
+      'cap'
+    )
+  }
+  return { store, lease: result.lease }
+}
+
+function rebindSpawnLease(dir: string, lease: Lease, pid: number | undefined): void {
+  if (pid === undefined || pid <= 0) {
+    return
+  }
+  try {
+    localLeaseStore(projectId(dir)).rebind(lease, { pid })
+  } catch (err) {
+    console.error(
+      `warning: work lease rebind failed — ${err instanceof Error ? err.message : String(err)}`
+    )
+  }
+}
+
+function releaseSpawnLease(dir: string, lease: Lease): void {
+  try {
+    localLeaseStore(projectId(dir)).release(lease)
+  } catch (err) {
+    console.error(
+      `warning: work lease release failed — ${err instanceof Error ? err.message : String(err)}`
+    )
+  }
+}
+
 function prepareSpawn(
   dir: string,
   home: string,
@@ -1647,6 +1741,7 @@ function prepareSpawn(
   log: string
   stderrLog: string
   exitFile: string
+  lease: Lease
   reservation?: string
 } {
   const registry = readAgentRegistry(dir)
@@ -1683,32 +1778,40 @@ function prepareSpawn(
   // and a 'cap' here would say "the provider is walled" about a spawn
   // that never needed a provider slot
   const { claimed, actor, phantom } = guardClaim(spec, existing !== undefined, opts.claimAs)
-  const wallRefusal = batchWallRefusal(registry, spec, now, walls)
-  if (wallRefusal !== undefined) {
-    throw wallRefusal
-  }
-  // fleet admission — before the registry write + claim land, so a
-  // refusal leaves no half-spawned state
-  enforceFleetCap(dir, home, registry, spec, opts.cap)
   // a reused id must stay filename-safe — a tampered entry gets a fresh
   // mint, not a path escape into <home>/
   const agentId =
     existing !== undefined && SAFE_AGENT_ID.test(existing.agentId)
       ? existing.agentId
       : mintAgentId(backend)
+  const workLease = acquireSpawnLease(
+    dir,
+    spec,
+    agentId,
+    existing,
+    opts.cap?.env ?? loadAgentEnv(dir)
+  )
   // session-kind admission — count + slot claim under ONE host-wide
   // mutex: the registry lock above is per-repo and cannot serialize a
   // cross-repo check-then-reserve. A refusal leaves no half-spawned
   // state; an admit means the next spawn anywhere sees the slot taken.
-  const reservation =
-    opts.sessionQuota === undefined
-      ? undefined
-      : admitSessionSlot(opts.sessionQuota.plane, opts.sessionQuota.agents, {
-          key: agentId,
-          molStep: spec.molStep,
-          workerEnv: spec.env,
-        })
+  let reservation: string | undefined
   try {
+    const wallRefusal = batchWallRefusal(registry, spec, now, walls)
+    if (wallRefusal !== undefined) {
+      throw wallRefusal
+    }
+    // fleet admission — before the registry write + claim land, so a
+    // refusal leaves no half-spawned state
+    enforceFleetCap(dir, home, registry, spec, opts.cap)
+    reservation =
+      opts.sessionQuota === undefined
+        ? undefined
+        : admitSessionSlot(opts.sessionQuota.plane, opts.sessionQuota.agents, {
+            key: agentId,
+            molStep: spec.molStep,
+            workerEnv: spec.env,
+          })
     // enter half of the rig transition — inside the try so an enter
     // failure also hands the session-quota reservation back via the
     // catch below
@@ -1719,7 +1822,8 @@ function prepareSpawn(
         claimed,
         actor,
         phantom,
-      }, existing),
+      }, existing, workLease.lease),
+      lease: workLease.lease,
       reservation,
     }
   } catch (err) {
@@ -1727,6 +1831,13 @@ function prepareSpawn(
     // the key, so this is the only place that can hand the slot back
     if (reservation !== undefined) {
       releaseSessionSlot(reservation)
+    }
+    try {
+      workLease.store.release(workLease.lease)
+    } catch (releaseError) {
+      console.error(
+        `warning: work lease release failed — ${releaseError instanceof Error ? releaseError.message : String(releaseError)}`
+      )
     }
     throw err
   }
@@ -1771,7 +1882,8 @@ function commitSpawn(
   },
   agentId: string,
   guard: { claimed: boolean; actor: string | undefined; phantom: boolean },
-  existing: AgentRegistryEntry | undefined
+  existing: AgentRegistryEntry | undefined,
+  lease: Lease
 ): { promptFile: string; log: string; stderrLog: string; exitFile: string } {
   mkdirSync(home, { recursive: true })
   const promptFile = join(home, `${agentId}.prompt.md`)
@@ -1818,6 +1930,9 @@ function commitSpawn(
     // keeping the previous run's provider
     provider: spec.provider,
     account: spec.account ?? spec.provider,
+    leaseKey: lease.key,
+    leaseToken: lease.token,
+    leaseRecord: lease,
     model: spec.model,
     // the routing lane the spawn resolved to (fleet.routing class) —
     // same provenance write as provider/model; a respawn re-stamps it
@@ -2131,6 +2246,7 @@ function persistClassifiedExit(
       ) {
         return
       }
+      releaseClassifiedLease(dir, current)
       reg[molStep] = {
         ...current,
         exitStatus,
@@ -2142,6 +2258,23 @@ function persistClassifiedExit(
     })
   } catch {
     // the registry write is advisory — .exit still proves the exit
+  }
+}
+
+function releaseClassifiedLease(dir: string, entry: AgentRegistryEntry): void {
+  const lease = entry.leaseRecord
+  if (lease === undefined) {
+    return
+  }
+  if (lease.key !== entry.leaseKey || lease.token !== entry.leaseToken) {
+    return
+  }
+  try {
+    localLeaseStore(projectId(dir)).release(lease)
+  } catch (err) {
+    console.error(
+      `warning: work lease release failed — ${err instanceof Error ? err.message : String(err)}`
+    )
   }
 }
 
@@ -2385,7 +2518,7 @@ export function makeNativeConnector(ctx: ConnectorCtx, env: AgentConnectorEnv): 
       // fleet memo exists: a slow beads store must not hold the lock.
       const mol = stepParent(spec.beadsDir, spec.molStep)
       return withAgentRegistryLock(dir, () => {
-        const { agentId, promptFile, log, stderrLog, exitFile, reservation } = prepareSpawn(
+        const { agentId, promptFile, log, stderrLog, exitFile, lease, reservation } = prepareSpawn(
           dir,
           home,
           'native',
@@ -2496,6 +2629,7 @@ export function makeNativeConnector(ctx: ConnectorCtx, env: AgentConnectorEnv): 
               if (reservation !== undefined) {
                 releaseSessionSlot(reservation)
               }
+              releaseSpawnLease(dir, lease)
             } catch {
               // the entry may not have landed yet — nothing else to do
             }
@@ -2509,14 +2643,16 @@ export function makeNativeConnector(ctx: ConnectorCtx, env: AgentConnectorEnv): 
             pidStart:
               typeof child.pid === 'number'
                 ? (procStat(child.pid)?.start ?? null)
-                : null,
+              : null,
           })
+          rebindSpawnLease(dir, lease, child.pid)
           writeWorkMarker(dir, agentId, spec.molStep, child.pid)
         } catch (err) {
           // sync failure after the reservation — hand the slot back
           if (reservation !== undefined) {
             releaseSessionSlot(reservation)
           }
+          releaseSpawnLease(dir, lease)
           throw err
         } finally {
           if (fd !== undefined) {
@@ -2780,11 +2916,13 @@ export function makeTmuxConnector(ctx: ConnectorCtx, env: AgentConnectorEnv): Ag
       // pid-patch under the registry lock, all synchronous shell-outs;
       // the molecule pin's bd show resolves before the lock is taken
       const mol = stepParent(spec.beadsDir, spec.molStep)
-      return withAgentRegistryLock(dir, () => {
+      let spawnLease: Lease | undefined
+      try {
+        return withAgentRegistryLock(dir, () => {
         // the session name derives from the agentId prepareSpawn
         // resolves — entry callback, not a precomputed name, because a
         // tampered entry's unsafe id is reminted inside
-        const { agentId, promptFile, log, stderrLog, exitFile, reservation } = prepareSpawn(
+        const { agentId, promptFile, log, stderrLog, exitFile, lease, reservation } = prepareSpawn(
           dir,
           home,
           'tmux',
@@ -2812,6 +2950,7 @@ export function makeTmuxConnector(ctx: ConnectorCtx, env: AgentConnectorEnv): Ag
             sessionQuota: sessionQuotaOf(env, 'tmux', spec, command),
           }
         )
+        spawnLease = lease
         const session = `bro-${agentId}`
         // a leftover session with our name (crash between entry and
         // kill, a respawn over a zombie) would make new-session fail
@@ -2871,6 +3010,7 @@ export function makeTmuxConnector(ctx: ConnectorCtx, env: AgentConnectorEnv): Ag
           if (reservation !== undefined) {
             releaseSessionSlot(reservation)
           }
+          releaseSpawnLease(dir, lease)
           try {
             patchAgentRegistry(dir, spec.molStep, { spawnError: res.err })
           } catch {
@@ -2891,9 +3031,16 @@ export function makeTmuxConnector(ctx: ConnectorCtx, env: AgentConnectorEnv): Ag
           spec.molStep,
           hasPanePid ? { pid: panePid, pidStart: procStat(panePid)?.start ?? null } : {}
         )
+        rebindSpawnLease(dir, lease, hasPanePid ? panePid : undefined)
         writeWorkMarker(dir, agentId, spec.molStep, hasPanePid ? panePid : undefined)
         return toTmuxInfo(socket, dir, home, spec.molStep, spawned)
-      })
+        })
+      } catch (err) {
+        if (spawnLease !== undefined) {
+          releaseSpawnLease(dir, spawnLease)
+        }
+        throw err
+      }
     },
 
     async list() { // NOSONAR — connector contract is async; the body is sync
@@ -3487,7 +3634,7 @@ export function makeGascityConnector(ctx: ConnectorCtx, env: AgentConnectorEnv):
       const mol = stepParent(spec.beadsDir, spec.molStep)
       return withAgentRegistryLock(dir, () => {
         const existing = readAgentRegistry(dir)[spec.molStep]
-        const { agentId, promptFile, reservation } = prepareSpawn(dir, home, 'gascity', spec, {
+        const { agentId, promptFile, lease, reservation } = prepareSpawn(dir, home, 'gascity', spec, {
           isLive: (e) => {
             const { sessions, err } = listGcSessions(city)
             if (sessions === undefined) {
@@ -3521,6 +3668,7 @@ export function makeGascityConnector(ctx: ConnectorCtx, env: AgentConnectorEnv):
           if (reservation !== undefined) {
             releaseSessionSlot(reservation)
           }
+          releaseSpawnLease(dir, lease)
           patchAgentRegistry(dir, spec.molStep, {
             sessionId,
             spawnError: err instanceof Error ? err.message : String(err),
@@ -4202,7 +4350,7 @@ export function makeDockerConnector(ctx: ConnectorCtx, env: AgentConnectorEnv): 
       const image = dockerImageFor(spec, knobs)
       const mol = stepParent(spec.beadsDir, spec.molStep)
       return withAgentRegistryLock(dir, () => {
-        const { agentId, promptFile, log, stderrLog, exitFile, reservation } = prepareSpawn(
+        const { agentId, promptFile, log, stderrLog, exitFile, lease, reservation } = prepareSpawn(
           dir,
           home,
           'docker',
@@ -4271,6 +4419,7 @@ export function makeDockerConnector(ctx: ConnectorCtx, env: AgentConnectorEnv): 
           if (reservation !== undefined) {
             releaseSessionSlot(reservation)
           }
+          releaseSpawnLease(dir, lease)
           try {
             patchAgentRegistry(dir, spec.molStep, {
               spawnError: err instanceof Error ? err.message : String(err),
@@ -4290,6 +4439,9 @@ export function makeDockerConnector(ctx: ConnectorCtx, env: AgentConnectorEnv): 
               { pid: insp.pid, pidStart: null }
             : {}),
         })
+        const dockerPidIsLocal =
+          process.env.DOCKER_HOST === undefined && process.env.DOCKER_CONTEXT === undefined
+        rebindSpawnLease(dir, lease, dockerPidIsLocal ? insp.pid : undefined)
         writeWorkMarker(dir, agentId, spec.molStep, insp.pid)
         return toDockerInfo(dir, home, spec.molStep, spawned)
       })
@@ -5081,7 +5233,7 @@ export function makeCopilotConnector(ctx: ConnectorCtx, env: AgentConnectorEnv):
         // claim-on-behalf is prepareSpawn's claimStep inside this lock —
         // the remote runner can never reach the shared store, so the
         // orchestrator pins the claim BEFORE the task exists
-        const { agentId, promptFile: _promptFile, reservation } = prepareSpawn(
+        const { agentId, promptFile: _promptFile, lease, reservation } = prepareSpawn(
           dir,
           home,
           'copilot',
@@ -5157,6 +5309,7 @@ export function makeCopilotConnector(ctx: ConnectorCtx, env: AgentConnectorEnv):
           if (reservation !== undefined) {
             releaseSessionSlot(reservation)
           }
+          releaseSpawnLease(dir, lease)
           try {
             patchAgentRegistry(dir, spec.molStep, {
               spawnError: err instanceof Error ? err.message : String(err),
