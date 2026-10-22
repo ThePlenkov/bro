@@ -86,29 +86,29 @@ function isOptionalString(value: unknown): boolean {
   return value === undefined || isString(value)
 }
 
-type FieldCheck = readonly [field: string, validate: (value: unknown) => boolean]
+type FieldCheck = (value: Record<string, unknown>) => boolean
 
 function matchesFields(value: Record<string, unknown>, checks: readonly FieldCheck[]): boolean {
-  return checks.every(([field, validate]) => validate(value[field]))
+  return checks.every((validate) => validate(value))
 }
 
 const ledgerRowChecks: readonly FieldCheck[] = [
-  ['cause', isWallCause],
-  ['observedAt', isTimestamp],
-  ['provider', isString],
-  ['rig', isString],
-  ['resetAt', isOptionalTimestamp],
-  ['step', isOptionalString],
+  (value) => isWallCause(value.cause),
+  (value) => isTimestamp(value.observedAt),
+  (value) => isString(value.provider),
+  (value) => isString(value.rig),
+  (value) => isOptionalTimestamp(value.resetAt),
+  (value) => isOptionalString(value.step),
 ]
 
 const observationChecks: readonly FieldCheck[] = [
-  ['account', isString],
-  ['cause', isWallCause],
-  ['observedAt', isTimestamp],
-  ['provider', isString],
-  ['rig', isString],
-  ['resetAt', isOptionalTimestamp],
-  ['step', isOptionalString],
+  (value) => isString(value.account),
+  (value) => isWallCause(value.cause),
+  (value) => isTimestamp(value.observedAt),
+  (value) => isString(value.provider),
+  (value) => isString(value.rig),
+  (value) => isOptionalTimestamp(value.resetAt),
+  (value) => isOptionalString(value.step),
 ]
 
 function isLedgerRow(value: unknown): value is ParsedLedgerRow {
