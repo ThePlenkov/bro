@@ -68,6 +68,41 @@ function isTimestamp(value: unknown): value is string {
   return typeof value === 'string' && Number.isFinite(Date.parse(value))
 }
 
+type ParsedLedgerRow = Record<string, unknown> & LedgerRow
+
+function hasObservationFields(value: Record<string, unknown>): boolean {
+  return isWallCause(value.cause) && isTimestamp(value.observedAt)
+}
+
+function hasProviderFields(value: Record<string, unknown>): boolean {
+  return typeof value.provider === 'string' && typeof value.rig === 'string'
+}
+
+function isOptionalTimestamp(value: unknown): boolean {
+  return value === undefined || isTimestamp(value)
+}
+
+function isOptionalString(value: unknown): boolean {
+  return value === undefined || typeof value === 'string'
+}
+
+function hasOptionalFields(value: Record<string, unknown>): boolean {
+  return isOptionalTimestamp(value.resetAt) && isOptionalString(value.step)
+}
+
+function isLedgerRow(value: unknown): value is ParsedLedgerRow {
+  if (!isObject(value)) {
+    return false
+  }
+  if (!hasObservationFields(value)) {
+    return false
+  }
+  if (!hasProviderFields(value)) {
+    return false
+  }
+  return hasOptionalFields(value)
+}
+
 function setLedgerRow(state: LedgerState, account: string, row: LedgerRow): void {
   Object.defineProperty(state.walls, account, {
     configurable: true,
@@ -82,19 +117,7 @@ function removeLedgerRow(state: LedgerState, account: string): void {
 }
 
 function parseRow(value: unknown): LedgerRow | undefined {
-  if (!isObject(value)) {
-    return undefined
-  }
-  if (!isWallCause(value.cause) || !isTimestamp(value.observedAt)) {
-    return undefined
-  }
-  if (typeof value.provider !== 'string' || typeof value.rig !== 'string') {
-    return undefined
-  }
-  if (value.resetAt !== undefined && !isTimestamp(value.resetAt)) {
-    return undefined
-  }
-  if (value.step !== undefined && typeof value.step !== 'string') {
+  if (!isLedgerRow(value)) {
     return undefined
   }
   return {
@@ -228,7 +251,7 @@ export function recordWall(obs: WallObservation, opts: WallLedgerOptions = {}): 
     const current = state.walls[obs.account]
     const currentLive = current !== undefined && expiryMs(current, ttls) > now
     const quotaHolds =
-      currentLive && current?.cause === 'quota' && obs.cause === 'rate_limited'
+      currentLive && current.cause === 'quota' && obs.cause === 'rate_limited'
     const newer =
       current === undefined || Date.parse(obs.observedAt) >= Date.parse(current.observedAt)
     if (!quotaHolds && newer) {
