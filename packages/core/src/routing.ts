@@ -513,49 +513,73 @@ export function deriveProviderWalls(
 
 /** Fold the same live registry deaths by account identity. Legacy rows
  *  use their provider name, preserving provider-scoped walls. */
+type AccountWallRecord = WallRecord & { provider: string; step: string }
+
+interface AccountWallAccumulator {
+  acc: WallAcc
+  latest?: AccountWallRecord
+}
+
+function foldAccountWallRecord(
+  byAccount: Map<string, AccountWallAccumulator>,
+  step: string,
+  record: WallRecord
+): void {
+  if (!wallable(record)) {
+    return
+  }
+  const account = typeof record.account === 'string' ? record.account : record.provider
+  const row = byAccount.get(account) ?? { acc: {} }
+  const tagged = { ...record, step }
+  foldEntry(row.acc, tagged)
+  if (row.latest === undefined || stamp(tagged) > stamp(row.latest)) {
+    row.latest = tagged
+  }
+  byAccount.set(account, row)
+}
+
+function accountWallFrom(
+  account: string,
+  { acc, latest }: AccountWallAccumulator,
+  now: number
+): AccountWall | undefined {
+  const wall = accWall(account, acc, now)
+  if (wall === undefined) {
+    return undefined
+  }
+  const source = acc.quota ?? acc.rate ?? latest
+  let observedAt: string | undefined
+  if (typeof source?.observedAt === 'string') {
+    observedAt = source.observedAt
+  } else if (typeof source?.spawnedAt === 'string') {
+    observedAt = source.spawnedAt
+  }
+  return {
+    account,
+    provider: source?.provider ?? latest?.provider,
+    cause: wall.cause,
+    ...(wall.until === undefined ? {} : { until: wall.until }),
+    ...(typeof source?.step === 'string' ? { step: source.step } : {}),
+    ...(observedAt === undefined ? {} : { observedAt }),
+    ...(typeof source?.rig === 'string' ? { rig: source.rig } : {}),
+  }
+}
+
 export function deriveAccountWalls(
   registry: Record<string, AgentRegistryEntry>,
   now = Date.now()
 ): AccountWall[] {
-  const byAccount = new Map<string, { acc: WallAcc; latest?: WallRecord & { provider: string; step: string } }>()
+  const byAccount = new Map<string, AccountWallAccumulator>()
   for (const [step, entry] of Object.entries(registry)) {
     const records: WallRecord[] = Array.isArray(entry.attempts)
       ? [entry, ...(entry.attempts as WallRecord[])]
       : [entry]
     for (const rec of records) {
-      if (!wallable(rec)) {
-        continue
-      }
-      const account = typeof rec.account === 'string' ? rec.account : rec.provider
-      const row = byAccount.get(account) ?? { acc: {} }
-      const tagged = { ...rec, step }
-      foldEntry(row.acc, tagged)
-      if (row.latest === undefined || stamp(tagged) > stamp(row.latest)) {
-        row.latest = tagged
-      }
-      byAccount.set(account, row)
+      foldAccountWallRecord(byAccount, step, rec)
     }
   }
-  const result: AccountWall[] = []
-  for (const [account, { acc, latest }] of byAccount) {
-    const wall = accWall(account, acc, now)
-    if (wall === undefined) {
-      continue
-    }
-    const source = acc.quota ?? acc.rate ?? latest
-    result.push({
-      account,
-      provider: source?.provider ?? latest?.provider,
-      cause: wall.cause,
-      ...(wall.until === undefined ? {} : { until: wall.until }),
-      ...(typeof source?.step === 'string' ? { step: source.step } : {}),
-      ...(typeof source?.observedAt === 'string'
-        ? { observedAt: source.observedAt }
-        : source?.spawnedAt === undefined
-          ? {}
-          : { observedAt: String(source.spawnedAt) }),
-      ...(typeof source?.rig === 'string' ? { rig: source.rig } : {}),
-    })
-  }
-  return result.sort((a, b) => a.account.localeCompare(b.account))
+  return [...byAccount]
+    .map(([account, row]) => accountWallFrom(account, row, now))
+    .filter((wall): wall is AccountWall => wall !== undefined)
+    .sort((a, b) => a.account.localeCompare(b.account))
 }

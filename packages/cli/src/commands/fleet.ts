@@ -617,11 +617,11 @@ export async function runFleetCommand(argv: string[]): Promise<void> {
   printFleetTable(rows, degraded, conflicts, prErrors, walls, wallsError)
 }
 
-export async function runFleetWallsCommand(
+export function runFleetWallsCommand(
   dir: string,
   argv: string[],
   ledgerPath?: string
-): Promise<void> {
+): void {
   const env = loadAgentEnv(dir)
   if (argv[0] === 'clear') {
     if (argv.length !== 2) {

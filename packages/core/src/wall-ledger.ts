@@ -37,7 +37,7 @@ export interface WallLedgerOptions {
 interface LedgerRow extends Omit<WallObservation, 'account'> {}
 interface LedgerState {
   version: 1
-  walls: Record<string, LedgerRow>
+  walls: Partial<Record<string, LedgerRow>>
 }
 
 let warnedUnreadable = false
@@ -50,7 +50,7 @@ const isObject = (value: unknown): value is Record<string, unknown> =>
   typeof value === 'object' && value !== null && !Array.isArray(value)
 
 function emptyState(): LedgerState {
-  return { version: 1, walls: Object.create(null) as Record<string, LedgerRow> }
+  return { version: 1, walls: Object.create(null) as Partial<Record<string, LedgerRow>> }
 }
 
 function warnUnreadable(): void {
@@ -60,18 +60,41 @@ function warnUnreadable(): void {
   }
 }
 
+function isWallCause(value: unknown): value is WallObservation['cause'] {
+  return value === 'rate_limited' || value === 'quota'
+}
+
+function isTimestamp(value: unknown): value is string {
+  return typeof value === 'string' && Number.isFinite(Date.parse(value))
+}
+
+function setLedgerRow(state: LedgerState, account: string, row: LedgerRow): void {
+  Object.defineProperty(state.walls, account, {
+    configurable: true,
+    enumerable: true,
+    value: row,
+    writable: true,
+  })
+}
+
+function removeLedgerRow(state: LedgerState, account: string): void {
+  Reflect.deleteProperty(state.walls, account)
+}
+
 function parseRow(value: unknown): LedgerRow | undefined {
-  if (
-    !isObject(value) ||
-    (value.cause !== 'rate_limited' && value.cause !== 'quota') ||
-    typeof value.observedAt !== 'string' ||
-    !Number.isFinite(Date.parse(value.observedAt)) ||
-    typeof value.provider !== 'string' ||
-    typeof value.rig !== 'string' ||
-    (value.resetAt !== undefined &&
-      (typeof value.resetAt !== 'string' || !Number.isFinite(Date.parse(value.resetAt)))) ||
-    (value.step !== undefined && typeof value.step !== 'string')
-  ) {
+  if (!isObject(value)) {
+    return undefined
+  }
+  if (!isWallCause(value.cause) || !isTimestamp(value.observedAt)) {
+    return undefined
+  }
+  if (typeof value.provider !== 'string' || typeof value.rig !== 'string') {
+    return undefined
+  }
+  if (value.resetAt !== undefined && !isTimestamp(value.resetAt)) {
+    return undefined
+  }
+  if (value.step !== undefined && typeof value.step !== 'string') {
     return undefined
   }
   return {
@@ -87,6 +110,7 @@ function parseRow(value: unknown): LedgerRow | undefined {
 function readState(path: string): LedgerState {
   let text: string
   try {
+    // eslint-disable-next-line security/detect-non-literal-fs-filename -- path is local operator state
     text = readFileSync(path, 'utf8')
   } catch (err) {
     if ((err as NodeJS.ErrnoException).code !== 'ENOENT') {
@@ -105,7 +129,7 @@ function readState(path: string): LedgerState {
       if (row === undefined) {
         throw new SyntaxError('invalid wall ledger row')
       }
-      state.walls[account] = row
+      setLedgerRow(state, account, row)
     }
     return state
   } catch {
@@ -129,15 +153,17 @@ function expiryMs(row: LedgerRow, ttls: FleetWallTtls): number {
 
 function pruneExpired(state: LedgerState, now: number, ttls: FleetWallTtls): void {
   for (const [account, row] of Object.entries(state.walls)) {
-    if (expiryMs(row, ttls) <= now) {
-      delete state.walls[account]
+    if (row !== undefined && expiryMs(row, ttls) <= now) {
+      removeLedgerRow(state, account)
     }
   }
 }
 
 function prepareDirectory(path: string): void {
   const dir = dirname(path)
+  // eslint-disable-next-line security/detect-non-literal-fs-filename -- ledger directory is local operator state
   mkdirSync(dir, { recursive: true, mode: 0o700 })
+  // eslint-disable-next-line security/detect-non-literal-fs-filename -- ledger directory is local operator state
   chmodSync(dir, 0o700)
 }
 
@@ -145,11 +171,15 @@ function writeState(path: string, state: LedgerState): void {
   const tmp = `${path}.${process.pid}.${randomBytes(6).toString('hex')}.tmp`
   let fd: number | undefined
   try {
+    // eslint-disable-next-line security/detect-non-literal-fs-filename -- temporary file is beside local ledger state
     fd = openSync(tmp, 'wx', 0o600)
+    // eslint-disable-next-line security/detect-non-literal-fs-filename -- file descriptor belongs to the local ledger temp file
     writeFileSync(fd, JSON.stringify(state))
     closeSync(fd)
     fd = undefined
+    // eslint-disable-next-line security/detect-non-literal-fs-filename -- temporary file is beside local ledger state
     chmodSync(tmp, 0o600)
+    // eslint-disable-next-line security/detect-non-literal-fs-filename -- paths are the local ledger and its temporary sibling
     renameSync(tmp, path)
   } catch (err) {
     if (fd !== undefined) {
@@ -168,18 +198,23 @@ function updateLedger<T>(
   return withFileLock(`${path}.lock`, () => update(readState(path)))
 }
 
-function validObservation(obs: WallObservation): boolean {
-  return (
-    typeof obs.account === 'string' &&
-    typeof obs.provider === 'string' &&
-    typeof obs.rig === 'string' &&
-    (obs.cause === 'rate_limited' || obs.cause === 'quota') &&
-    typeof obs.observedAt === 'string' &&
-    Number.isFinite(Date.parse(obs.observedAt)) &&
-    (obs.resetAt === undefined ||
-      (typeof obs.resetAt === 'string' && Number.isFinite(Date.parse(obs.resetAt)))) &&
-    (obs.step === undefined || typeof obs.step === 'string')
-  )
+function validObservation(obs: unknown): obs is WallObservation {
+  if (!isObject(obs)) {
+    return false
+  }
+  if (
+    typeof obs.account !== 'string' ||
+    !isWallCause(obs.cause) ||
+    !isTimestamp(obs.observedAt) ||
+    typeof obs.provider !== 'string' ||
+    typeof obs.rig !== 'string'
+  ) {
+    return false
+  }
+  if (obs.resetAt !== undefined && !isTimestamp(obs.resetAt)) {
+    return false
+  }
+  return obs.step === undefined || typeof obs.step === 'string'
 }
 
 export function recordWall(obs: WallObservation, opts: WallLedgerOptions = {}): void {
@@ -198,7 +233,7 @@ export function recordWall(obs: WallObservation, opts: WallLedgerOptions = {}): 
       current === undefined || Date.parse(obs.observedAt) >= Date.parse(current.observedAt)
     if (!quotaHolds && newer) {
       const { account: _account, ...row } = obs
-      state.walls[obs.account] = row
+      setLedgerRow(state, obs.account, row)
     }
     pruneExpired(state, now, ttls)
     writeState(opts.path ?? wallLedgerPath(), state)
@@ -214,8 +249,11 @@ export function readLedgerWalls(
   const state = readState(opts.path ?? wallLedgerPath())
   return Object.entries(state.walls)
     .flatMap(([account, row]) => {
+      if (row === undefined) {
+        return []
+      }
       const expiry = expiryMs(row, effectiveTtls)
-      if (!(expiry > now) || !Number.isFinite(expiry)) {
+      if (expiry <= now || !Number.isFinite(expiry)) {
         return []
       }
       return [{
@@ -233,7 +271,7 @@ export function readLedgerWalls(
 }
 
 export function clearLedgerWalls(
-  account: string | 'all',
+  account: string,
   opts: WallLedgerOptions = {}
 ): number {
   const path = opts.path ?? wallLedgerPath()
@@ -241,13 +279,15 @@ export function clearLedgerWalls(
   const ttls = ttlsOf(opts.ttls)
   return updateLedger(path, (state) => {
     pruneExpired(state, now, ttls)
-    const removed = account === 'all'
-      ? Object.keys(state.walls).length
-      : Object.hasOwn(state.walls, account) ? 1 : 0
+    let removed = 0
     if (account === 'all') {
-      state.walls = Object.create(null) as Record<string, LedgerRow>
+      removed = Object.keys(state.walls).length
+      state.walls = Object.create(null) as Partial<Record<string, LedgerRow>>
     } else {
-      delete state.walls[account]
+      if (Object.hasOwn(state.walls, account)) {
+        removed = 1
+      }
+      removeLedgerRow(state, account)
     }
     writeState(path, state)
     return removed

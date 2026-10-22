@@ -154,7 +154,7 @@ interface LeaseStore {
    guard, `prepareSpawn` acquires `bead/<molStep>` with the worker's
    identity: the pid after start, rebound from the spawning pid. If
    another holder has it, that's a `SpawnError` ("bead X leased by
-   <rig>@<host> pid N until T"). `bro agents run --for`, `bro flow
+   `<rig>@<host>` pid N until T"). `bro agents run --for`, `bro flow
    next`, and the loop's pick all try the lease before `bd --claim`, so
    when a bead is held they skip it and pick the next ready one. The
    lease is released on the exit record. `agents down` force-releases

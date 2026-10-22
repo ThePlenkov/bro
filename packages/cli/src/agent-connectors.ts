@@ -2021,73 +2021,64 @@ function emitProviderWall(
   }
 }
 
-function ensureExitCause(
+function isCurrentExitGeneration(
+  dir: string,
+  molStep: string,
+  entry: AgentRegistryEntry
+): boolean {
+  const current = readAgentRegistry(dir)[molStep]
+  return (
+    current === undefined ||
+    (current.agentId === entry.agentId && current.spawnedAt === entry.spawnedAt)
+  )
+}
+
+function recordClassifiedWall(
+  dir: string,
+  molStep: string,
+  entry: AgentRegistryEntry,
+  cause: string,
+  resetAt: string | undefined
+): void {
+  if (
+    (cause !== 'rate_limited' && cause !== 'quota') ||
+    typeof entry.provider !== 'string'
+  ) {
+    return
+  }
+  const observedAt = new Date().toISOString()
+  entry.observedAt = observedAt
+  try {
+    recordWall(
+      {
+        account: entry.account ?? entry.provider,
+        provider: entry.provider,
+        cause,
+        ...(resetAt === undefined ? {} : { resetAt }),
+        observedAt,
+        rig: basename(resolve(dir)),
+        step: molStep,
+      },
+      {
+        now: Date.parse(observedAt),
+        ttls: loadAgentEnv(dir).fleet?.walls,
+      }
+    )
+  } catch (err) {
+    console.error(
+      `warning: host wall ledger write failed — ${err instanceof Error ? err.message : String(err)}`
+    )
+  }
+}
+
+function emitClassifiedExitLifecycle(
   dir: string,
   home: string | null,
   molStep: string,
-  entry: AgentRegistryEntry
+  entry: AgentRegistryEntry,
+  exitStatus: number,
+  cause: string
 ): void {
-  if (entry.exitStatus === undefined && home !== null) {
-    const code = readExitFile(home, entry.agentId)
-    if (code !== undefined) {
-      entry.exitStatus = code
-    }
-  }
-  if (typeof entry.exitStatus !== 'number' || isAgentCause(entry.cause)) {
-    return
-  }
-  // classification input = this run's .log tail + .stderr tail (spec
-  // bro-e2ec0) — provider walls the child prints on stderr classify from
-  // the capture, the event stream no longer carries them. The tails
-  // classify INDEPENDENTLY — a joined read could fabricate a wall token
-  // across the boundary ('…4' + '29…' → '429')
-  const c = classifyExitCauseParts(
-    [readLogTail(entry.log, entry.logFrom), readLogTail(entry.stderrLog, entry.stderrFrom)],
-    entry.exitStatus
-  )
-  // the tails were read off-lock — a respawn stamping the entry between
-  // the two reads feeds the old run new-run bytes; a DIFFERENT
-  // generation owning the step now suppresses classify + emit. A
-  // missing row (reaped, or a caller's synthesized snapshot) can't
-  // inject new bytes — classify anyway
-  const cur = readAgentRegistry(dir)[molStep]
-  if (
-    cur !== undefined &&
-    (cur.agentId !== entry.agentId || cur.spawnedAt !== entry.spawnedAt)
-  ) {
-    return
-  }
-  entry.cause = c.cause
-  entry.resetAt = c.resetAt
-  emitProviderWall(entry, molStep, c.cause, c.resetAt)
-  if (
-    (c.cause === 'rate_limited' || c.cause === 'quota') &&
-    typeof entry.provider === 'string'
-  ) {
-    const observedAt = new Date().toISOString()
-    entry.observedAt = observedAt
-    try {
-      recordWall(
-        {
-          account: entry.account ?? entry.provider,
-          provider: entry.provider,
-          cause: c.cause,
-          ...(c.resetAt === undefined ? {} : { resetAt: c.resetAt }),
-          observedAt,
-          rig: basename(resolve(dir)),
-          step: molStep,
-        },
-        {
-          now: Date.parse(observedAt),
-          ttls: loadAgentEnv(dir).fleet?.walls,
-        }
-      )
-    } catch (err) {
-      console.error(
-        `warning: host wall ledger write failed — ${err instanceof Error ? err.message : String(err)}`
-      )
-    }
-  }
   // lifecycle — the agent-exit transition, emitted once per run at the
   // harvest (the early return above skips re-emit on a carried cause).
   // The .exit file's mtime is the honest wall-clock; the harvest's own
@@ -2112,25 +2103,39 @@ function ensureExitCause(
       via: 'agents',
       agent: entry.agentId,
       backend: entry.backend,
-      code: entry.exitStatus,
-      cause: c.cause,
+      code: exitStatus,
+      cause,
     },
   })
+}
+
+function persistClassifiedExit(
+  dir: string,
+  molStep: string,
+  entry: AgentRegistryEntry,
+  exitStatus: number,
+  cause: string,
+  resetAt: string | undefined
+): void {
   try {
     // the merge must bind to the SAME generation we classified — a
     // respawn between our snapshot read and this patch owns the entry
     // now, and the old run's exit fields would mislabel it
     withAgentRegistryLock(dir, () => {
       const reg = readAgentRegistry(dir)
-      const cur = reg[molStep]
-      if (cur === undefined || cur.agentId !== entry.agentId || cur.spawnedAt !== entry.spawnedAt) {
+      const current = reg[molStep]
+      if (
+        current === undefined ||
+        current.agentId !== entry.agentId ||
+        current.spawnedAt !== entry.spawnedAt
+      ) {
         return
       }
       reg[molStep] = {
-        ...cur,
-        exitStatus: entry.exitStatus,
-        cause: c.cause,
-        resetAt: c.resetAt,
+        ...current,
+        exitStatus,
+        cause,
+        resetAt,
         ...(entry.observedAt === undefined ? {} : { observedAt: entry.observedAt }),
       }
       writeAgentRegistry(dir, reg)
@@ -2138,6 +2143,46 @@ function ensureExitCause(
   } catch {
     // the registry write is advisory — .exit still proves the exit
   }
+}
+
+function ensureExitCause(
+  dir: string,
+  home: string | null,
+  molStep: string,
+  entry: AgentRegistryEntry
+): void {
+  if (entry.exitStatus === undefined && home !== null) {
+    const exitStatus = readExitFile(home, entry.agentId)
+    if (exitStatus !== undefined) {
+      entry.exitStatus = exitStatus
+    }
+  }
+  if (typeof entry.exitStatus !== 'number' || isAgentCause(entry.cause)) {
+    return
+  }
+  // classification input = this run's .log tail + .stderr tail (spec
+  // bro-e2ec0) — provider walls the child prints on stderr classify from
+  // the capture, the event stream no longer carries them. The tails
+  // classify INDEPENDENTLY — a joined read could fabricate a wall token
+  // across the boundary ('…4' + '29…' → '429')
+  const c = classifyExitCauseParts(
+    [readLogTail(entry.log, entry.logFrom), readLogTail(entry.stderrLog, entry.stderrFrom)],
+    entry.exitStatus
+  )
+  // the tails were read off-lock — a respawn stamping the entry between
+  // the two reads feeds the old run new-run bytes; a DIFFERENT
+  // generation owning the step now suppresses classify + emit. A
+  // missing row (reaped, or a caller's synthesized snapshot) can't
+  // inject new bytes — classify anyway
+  if (!isCurrentExitGeneration(dir, molStep, entry)) {
+    return
+  }
+  entry.cause = c.cause
+  entry.resetAt = c.resetAt
+  emitProviderWall(entry, molStep, c.cause, c.resetAt)
+  recordClassifiedWall(dir, molStep, entry, c.cause, c.resetAt)
+  emitClassifiedExitLifecycle(dir, home, molStep, entry, entry.exitStatus, c.cause)
+  persistClassifiedExit(dir, molStep, entry, entry.exitStatus, c.cause, c.resetAt)
 }
 
 /** The recorded-death ladder both backends walk once liveness fails —

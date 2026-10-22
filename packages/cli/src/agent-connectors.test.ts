@@ -2472,6 +2472,48 @@ describe('fleet chain walk spawn integration', () => {
       else process.env.XDG_STATE_HOME = previous
     }
   }
+  const withLedgerFixture = async <T>(fn: (f: Fixture) => Promise<T>): Promise<T> => {
+    const f = fx([{ id: 'fx-1', status: 'open' }])
+    return withStateHome(f.root, async () => {
+      try {
+        return await fn(f)
+      } finally {
+        cleanup(f)
+      }
+    })
+  }
+  const routeForAccounts = (
+    candidates: Array<{ provider: string; account: string }>
+  ): NonNullable<SpawnSpec['route']> => ({
+    class: 'free',
+    onWall: 'fallthrough',
+    candidates: candidates.map(({ provider, account }) => ({
+      provider,
+      account,
+      worker: { kind: 'template', command: 'node {promptFile}' },
+    })),
+  })
+  const spawnRouted = (
+    f: Fixture,
+    route: NonNullable<SpawnSpec['route']>,
+    prompt = 'setTimeout(() => {}, 30000)'
+  ) => conn(f).spawn({ ...SPEC(f.main, f.beadsDir, 'fx-1', prompt), route })
+  const recordTestWall = (
+    overrides: Partial<Parameters<typeof recordWall>[0]> = {},
+    opts?: Parameters<typeof recordWall>[1]
+  ) =>
+    recordWall(
+      {
+        account: overrides.account ?? 'shared-account',
+        cause: overrides.cause ?? 'quota',
+        observedAt: overrides.observedAt ?? new Date().toISOString(),
+        provider: overrides.provider ?? 'A',
+        rig: overrides.rig ?? 'repo',
+        ...(overrides.resetAt === undefined ? {} : { resetAt: overrides.resetAt }),
+        ...(overrides.step === undefined ? {} : { step: overrides.step }),
+      },
+      opts
+    )
   const death = (provider: string): AgentRegistryEntry => ({
     agentId: `native-${provider.toLowerCase()}-dead`,
     backend: 'native',
@@ -2683,19 +2725,14 @@ describe('fleet chain walk spawn integration', () => {
     ])
     try {
       patchAgentRegistry(f.main, 'fx-2', { ...death('kiloA'), account: 'kilo' })
-      const route: NonNullable<SpawnSpec['route']> = {
-        class: 'free',
-        onWall: 'fallthrough',
-        candidates: ['kiloA', 'kiloB', 'or'].map((provider, index) => ({
-          provider,
-          account: index < 2 ? 'kilo' : 'or',
-          worker: { kind: 'template', command: 'node {promptFile}' },
-        })),
-      }
-      const info = await conn(f).spawn({
-        ...SPEC(f.main, f.beadsDir, 'fx-1', 'setTimeout(() => {}, 30000)'),
-        route,
-      })
+      const info = await spawnRouted(
+        f,
+        routeForAccounts([
+          { provider: 'kiloA', account: 'kilo' },
+          { provider: 'kiloB', account: 'kilo' },
+          { provider: 'or', account: 'or' },
+        ])
+      )
       assert.equal(readAgentRegistry(f.main)['fx-1']!.provider, 'or')
       await conn(f).stop(info.id)
     } finally {
@@ -2704,182 +2741,104 @@ describe('fleet chain walk spawn integration', () => {
   })
 
   test('a host ledger wall skips an account with no local registry entry', async () => {
-    const f = fx([{ id: 'fx-1', status: 'open' }])
-    await withStateHome(f.root, async () => {
-      try {
-        recordWall({
-          account: 'openrouter',
-          cause: 'rate_limited',
-          resetAt: future,
-          observedAt: new Date().toISOString(),
-          provider: 'other-repo-provider',
-          rig: 'other-repo',
-        })
-        const route: NonNullable<SpawnSpec['route']> = {
-          class: 'free',
-          onWall: 'fallthrough',
-          candidates: [
-            {
-              provider: 'openrouter',
-              account: 'openrouter',
-              worker: { kind: 'template', command: 'node {promptFile}' },
-            },
-            {
-              provider: 'backup',
-              account: 'backup',
-              worker: { kind: 'template', command: 'node {promptFile}' },
-            },
-          ],
-        }
-        const info = await conn(f).spawn({
-          ...SPEC(f.main, f.beadsDir, 'fx-1', 'setTimeout(() => {}, 30000)'),
-          route,
-        })
-        assert.equal(readAgentRegistry(f.main)['fx-1']!.provider, 'backup')
-        await conn(f).stop(info.id)
-      } finally {
-        cleanup(f)
-      }
+    await withLedgerFixture(async (f) => {
+      recordTestWall({
+        account: 'openrouter',
+        cause: 'rate_limited',
+        resetAt: future,
+        provider: 'other-repo-provider',
+        rig: 'other-repo',
+      })
+      const info = await spawnRouted(
+        f,
+        routeForAccounts([
+          { provider: 'openrouter', account: 'openrouter' },
+          { provider: 'backup', account: 'backup' },
+        ])
+      )
+      assert.equal(readAgentRegistry(f.main)['fx-1']!.provider, 'backup')
+      await conn(f).stop(info.id)
     })
   })
 
   test('an expired host ledger wall does not skip its provider', async () => {
-    const f = fx([{ id: 'fx-1', status: 'open' }])
-    await withStateHome(f.root, async () => {
-      try {
-        recordWall(
-          {
-            account: 'openrouter',
-            cause: 'rate_limited',
-            resetAt: '2020-01-01T00:00:00.000Z',
-            observedAt: '2019-01-01T00:00:00.000Z',
-            provider: 'other-repo-provider',
-            rig: 'other-repo',
-          },
-          { now: Date.parse('2019-01-01T00:00:00.000Z') }
-        )
-        const route: NonNullable<SpawnSpec['route']> = {
-          class: 'free',
-          onWall: 'fallthrough',
-          candidates: [
-            {
-              provider: 'openrouter',
-              account: 'openrouter',
-              worker: { kind: 'template', command: 'node {promptFile}' },
-            },
-            {
-              provider: 'backup',
-              account: 'backup',
-              worker: { kind: 'template', command: 'node {promptFile}' },
-            },
-          ],
-        }
-        const info = await conn(f).spawn({
-          ...SPEC(f.main, f.beadsDir, 'fx-1', 'setTimeout(() => {}, 30000)'),
-          route,
-        })
-        assert.equal(readAgentRegistry(f.main)['fx-1']!.provider, 'openrouter')
-        await conn(f).stop(info.id)
-      } finally {
-        cleanup(f)
-      }
+    await withLedgerFixture(async (f) => {
+      recordTestWall(
+        {
+          account: 'openrouter',
+          cause: 'rate_limited',
+          resetAt: '2020-01-01T00:00:00.000Z',
+          observedAt: '2019-01-01T00:00:00.000Z',
+          provider: 'other-repo-provider',
+          rig: 'other-repo',
+        },
+        { now: Date.parse('2019-01-01T00:00:00.000Z') }
+      )
+      const info = await spawnRouted(
+        f,
+        routeForAccounts([
+          { provider: 'openrouter', account: 'openrouter' },
+          { provider: 'backup', account: 'backup' },
+        ])
+      )
+      assert.equal(readAgentRegistry(f.main)['fx-1']!.provider, 'openrouter')
+      await conn(f).stop(info.id)
     })
   })
 
   test('classification writes a wall to the host ledger using entry account', async () => {
-    const f = fx([{ id: 'fx-1', status: 'open' }])
-    await withStateHome(f.root, async () => {
-      try {
-        const log = join(f.root, 'rate-limit.log')
-        writeFileSync(log, 'HTTP 429 Too Many Requests')
-        patchAgentRegistry(f.main, 'fx-1', {
-          ...death('A'),
-          account: 'shared-account',
-          cause: undefined,
-          resetAt: undefined,
-          exitStatus: 1,
-          log,
-        })
-        const route: NonNullable<SpawnSpec['route']> = {
-          class: 'free',
-          onWall: 'fallthrough',
-          candidates: [
-            {
-              provider: 'A',
-              account: 'shared-account',
-              worker: { kind: 'template', command: 'node {promptFile}' },
-            },
-            {
-              provider: 'B',
-              account: 'backup',
-              worker: { kind: 'template', command: 'node {promptFile}' },
-            },
-          ],
-        }
-        const info = await conn(f).spawn({
-          ...SPEC(f.main, f.beadsDir, 'fx-1', 'setTimeout(() => {}, 30000)'),
-          route,
-        })
-        const row = readLedgerWalls().find((wall) => wall.account === 'shared-account')
-        assert.equal(row?.provider, 'A')
-        assert.equal(row?.cause, 'rate_limited')
-        assert.equal(row?.step, 'fx-1')
-        await conn(f).stop(info.id)
-      } finally {
-        cleanup(f)
-      }
+    await withLedgerFixture(async (f) => {
+      const log = join(f.root, 'rate-limit.log')
+      writeFileSync(log, 'HTTP 429 Too Many Requests')
+      patchAgentRegistry(f.main, 'fx-1', {
+        ...death('A'),
+        account: 'shared-account',
+        cause: undefined,
+        resetAt: undefined,
+        exitStatus: 1,
+        log,
+      })
+      const info = await spawnRouted(
+        f,
+        routeForAccounts([
+          { provider: 'A', account: 'shared-account' },
+          { provider: 'B', account: 'backup' },
+        ])
+      )
+      const row = readLedgerWalls().find((wall) => wall.account === 'shared-account')
+      assert.equal(row?.provider, 'A')
+      assert.equal(row?.cause, 'rate_limited')
+      assert.equal(row?.step, 'fx-1')
+      await conn(f).stop(info.id)
     })
   })
 
   test('stopping an agent does not clear its host ledger wall', async () => {
-    const f = fx([{ id: 'fx-1', status: 'open' }])
-    await withStateHome(f.root, async () => {
-      try {
-        recordWall({
-          account: 'shared-account',
-          cause: 'quota',
-          observedAt: new Date().toISOString(),
-          provider: 'A',
-          rig: 'repo',
-          step: 'fx-1',
-        })
-        const info = await conn(f).spawn(
-          SPEC(f.main, f.beadsDir, 'fx-1', 'setTimeout(() => {}, 30000)')
-        )
-        await conn(f).stop(info.id)
-        assert.equal(readLedgerWalls().some((wall) => wall.account === 'shared-account'), true)
-      } finally {
-        cleanup(f)
-      }
+    await withLedgerFixture(async (f) => {
+      recordTestWall({ step: 'fx-1' })
+      const info = await conn(f).spawn(
+        SPEC(f.main, f.beadsDir, 'fx-1', 'setTimeout(() => {}, 30000)')
+      )
+      await conn(f).stop(info.id)
+      assert.equal(readLedgerWalls().some((wall) => wall.account === 'shared-account'), true)
     })
   })
 
   test('an unrouted batch spawn refuses a ledger-walled account', async () => {
-    const f = fx([{ id: 'fx-1', status: 'open' }])
-    await withStateHome(f.root, async () => {
-      try {
-        recordWall({
+    await withLedgerFixture(async (f) => {
+      recordTestWall({ provider: 'other-repo-provider' })
+      await assert.rejects(
+        conn(f).spawn({
+          ...SPEC(f.main, f.beadsDir, 'fx-1', 'true'),
+          provider: 'candidate',
           account: 'shared-account',
-          cause: 'quota',
-          observedAt: new Date().toISOString(),
-          provider: 'other-repo-provider',
-          rig: 'other-repo',
-        })
-        await assert.rejects(
-          conn(f).spawn({
-            ...SPEC(f.main, f.beadsDir, 'fx-1', 'true'),
-            provider: 'candidate',
-            account: 'shared-account',
-            env: { [BATCH_MARKER_ENV]: '1' },
-          }),
-          (err: unknown) =>
-            err instanceof SpawnError &&
-            err.kind === 'cap' &&
-            /candidate \(account shared-account\) walled/.test(err.message)
-        )
-      } finally {
-        cleanup(f)
-      }
+          env: { [BATCH_MARKER_ENV]: '1' },
+        }),
+        (err: unknown) =>
+          err instanceof SpawnError &&
+          err.kind === 'cap' &&
+          /candidate \(account shared-account\) walled/.test(err.message)
+      )
     })
   })
 
