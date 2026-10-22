@@ -574,7 +574,7 @@ async function runFleetLive(
 export async function runFleetCommand(argv: string[]): Promise<void> {
   if (argv[0] === 'walls') {
     try {
-      await runFleetWallsCommand(process.cwd(), argv.slice(1))
+      runFleetWallsCommand(process.cwd(), argv.slice(1))
     } catch (err) {
       console.error(`error: ${err instanceof Error ? err.message : String(err)}`)
       process.exit(2)
