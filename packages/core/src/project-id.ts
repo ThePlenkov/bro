@@ -53,21 +53,34 @@ function urlRemote(value: string): RemoteParts {
   }
 }
 
+function proxyTargetHost(path: string[]): string | undefined {
+  if (path[0] !== 'proxy') {
+    return undefined
+  }
+  if (path.length < 4) {
+    return undefined
+  }
+  const host = path.at(1)
+  if (host === undefined) {
+    return undefined
+  }
+  if (!host.includes('.')) {
+    return undefined
+  }
+  return host.toLowerCase()
+}
+
 function dropProxyPrefix(parts: RemoteParts): RemoteParts {
   if (!parts.host.includes('git-manager')) {
     return parts
   }
-  const index = parts.path.indexOf('proxy')
-  if (index < 0) {
-    return parts
-  }
-  const host = parts.path.at(index + 1)
+  const host = proxyTargetHost(parts.path)
   if (host === undefined) {
     return parts
   }
   return {
-    host: host.toLowerCase(),
-    path: parts.path.slice(index + 2),
+    host,
+    path: parts.path.slice(2),
   }
 }
 

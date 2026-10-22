@@ -2556,10 +2556,10 @@ export async function runDriveCommand(argv: string[]): Promise<void> {
   const onInt = (): void => onSignal('SIGINT')
   const onTerm = (): void => onSignal('SIGTERM')
   const onExit = (): void => releaseAll()
-  process.on('SIGINT', onInt)
-  process.on('SIGTERM', onTerm)
-  process.on('exit', onExit)
   try {
+    process.on('SIGINT', onInt)
+    process.on('SIGTERM', onTerm)
+    process.on('exit', onExit)
     roleLease = await holdRoleLease(
       store,
       'drive',

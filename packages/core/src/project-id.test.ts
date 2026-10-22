@@ -32,6 +32,22 @@ describe('project identity', () => {
     assert.notEqual(projectId(repo('https://github.com/Owner/Other.git')), projectId(repo(remotes[0])))
   })
 
+  test('only strips a leading proxy prefix with a host and repository path', () => {
+    const middleProxy = 'https://git-manager.mycompany.com/team/proxy/repo'
+    assert.equal(
+      normalizeRemote(middleProxy),
+      'git-manager.mycompany.com/team/proxy/repo'
+    )
+
+    const collisionShape =
+      'https://git-manager.mycompany.com/team/proxy/mycompany.com/repo'
+    assert.notEqual(projectId(repo(collisionShape)), projectId(repo('https://mycompany.com/repo')))
+
+    const proxied = 'http://git-manager.devin.ai/proxy/github.com/o/r'
+    assert.equal(normalizeRemote(proxied), 'github.com/o/r')
+    assert.equal(projectId(repo(proxied)), projectId(repo('https://github.com/o/r')))
+  })
+
   test('uses the real git common directory when no origin exists', () => {
     const dir = repo()
     const common = gitCommonDir(dir)
