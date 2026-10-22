@@ -137,8 +137,8 @@ const WRAPPERS = new Set([
 export function commandIndex(toks: Token[]): number {
   let i = 0
   while (i < toks.length) {
-    const token = toks[i]!
-    if (isAssignment(token)) {
+    const token = toks.at(i)
+    if (token === undefined || isAssignment(token)) {
       i++
       continue
     }
@@ -157,7 +157,10 @@ function skipWrapperArgs(toks: Token[], from: number, wrapper: Token): number {
   let i = from
   let operands = WRAPPER_OPERANDS.has(base(wrapper)) ? 1 : 0
   while (i < toks.length) {
-    const next = toks[i]!
+    const next = toks.at(i)
+    if (next === undefined) {
+      break
+    }
     if (next.text.startsWith('-')) {
       i++
       if (optionTakesNext(toks, i, next)) {
@@ -180,7 +183,7 @@ function optionTakesNext(toks: Token[], at: number, option: Token): boolean {
   if (!VALUE_OPTIONS.has(option.text)) {
     return false
   }
-  const next = toks[at]
+  const next = toks.at(at)
   return next !== undefined && !next.text.startsWith('-')
 }
 

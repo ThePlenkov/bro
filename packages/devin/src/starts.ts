@@ -55,7 +55,7 @@ const SHELLS = new Set(['sh', 'bash', 'zsh', 'dash', 'ksh', 'fish'])
  *  one-shot, `acp` opens a served session, and the read-only verbs
  *  open none. */
 function invocationStartsSession(toks: Token[], at: number): boolean {
-  const verb = toks[at + 1]?.text
+  const verb = toks.at(at + 1)?.text
   if (verb === undefined) {
     return true
   }
@@ -63,7 +63,7 @@ function invocationStartsSession(toks: Token[], at: number): boolean {
     return !NON_SESSION_FLAGS.has(verb)
   }
   if (verb === 'cloud') {
-    const sub = toks[at + 2]?.text
+    const sub = toks.at(at + 2)?.text
     return sub === undefined || !CLOUD_RESOURCE_COMMANDS.has(sub)
   }
   return !NON_SESSION_COMMANDS.has(verb)
@@ -75,7 +75,8 @@ function invocationStartsSession(toks: Token[], at: number): boolean {
 function devinCommandPositions(toks: Token[]): number[] {
   const out: number[] = []
   for (let i = 0; i < toks.length; i++) {
-    if (base(toks[i]!) !== 'devin') {
+    const token = toks.at(i)
+    if (token === undefined || base(token) !== 'devin') {
       continue
     }
     if (atCommandPosition(toks, i)) {
@@ -89,14 +90,14 @@ function devinCommandPositions(toks: Token[]): number[] {
  *  is a command of its own, so its starts count too. */
 function wrappedCommand(toks: Token[]): string | undefined {
   const at = commandIndex(toks)
-  const shell = toks[at]
+  const shell = toks.at(at)
   if (shell === undefined || !SHELLS.has(base(shell))) {
     return undefined
   }
-  if (!isShellCommandFlag(toks[at + 1]?.text)) {
+  if (!isShellCommandFlag(toks.at(at + 1)?.text)) {
     return undefined
   }
-  const script = toks[at + 2]
+  const script = toks.at(at + 2)
   return script !== undefined && script.quoted ? script.text : undefined
 }
 
