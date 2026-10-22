@@ -99,3 +99,88 @@ export function tokens(segment: string): Token[] {
 function token(text: string, quoted: boolean): Token[] {
   return text === '' ? [] : [{ text, quoted }]
 }
+
+/** The wrappers that take a bare operand before the command
+ *  (`timeout 30 devin`). */
+const WRAPPER_OPERANDS = new Set(['chrt', 'stdbuf', 'taskset', 'timeout'])
+
+/** The options that take a value (`sudo -u root`, `nice -n 5`) — the
+ *  value is not the command. */
+const VALUE_OPTIONS = new Set(['-U', '-c', '-m', '-n', '-o', '-u'])
+
+/** The wrappers a binary may sit behind — the token before the binary
+ *  decides whether the binary is a command or an argument. */
+const WRAPPERS = new Set([
+  'bunx',
+  'chrt',
+  'command',
+  'env',
+  'exec',
+  'ionice',
+  'nice',
+  'nohup',
+  'npx',
+  'pnpm',
+  'setsid',
+  'stdbuf',
+  'sudo',
+  'taskset',
+  'time',
+  'timeout',
+  'xargs',
+  'yarn',
+])
+
+/** The index of the segment's command — the assignments and the
+ *  wrappers (with their options, their values and the operand some of
+ *  them take) are skipped; what is left is the command. */
+export function commandIndex(toks: Token[]): number {
+  let i = 0
+  while (i < toks.length) {
+    const text = toks[i]!.text
+    if (isAssignment(text)) {
+      i++
+      continue
+    }
+    const name = base(text)
+    if (!WRAPPERS.has(name)) {
+      return i
+    }
+    i = skipWrapperArgs(toks, i + 1, name)
+  }
+  return i
+}
+
+/** The index after a wrapper's own arguments — its options (with the
+ *  value some of them take) and the operand some of them need. */
+function skipWrapperArgs(toks: Token[], from: number, name: string): number {
+  let i = from
+  let operands = WRAPPER_OPERANDS.has(name) ? 1 : 0
+  while (i < toks.length) {
+    const next = toks[i]!.text
+    if (next.startsWith('-')) {
+      i++
+      if (takesValue(next) && i < toks.length && !toks[i]!.text.startsWith('-')) {
+        i++
+      }
+      continue
+    }
+    if (operands > 0) {
+      operands--
+      i++
+      continue
+    }
+    break
+  }
+  return i
+}
+
+/** Does this option take a value? */
+function takesValue(option: string): boolean {
+  return VALUE_OPTIONS.has(option)
+}
+
+/** Is the token at this position a command (not an argument)? */
+export function atCommandPosition(toks: Token[], at: number): boolean {
+  return at === commandIndex(toks)
+}

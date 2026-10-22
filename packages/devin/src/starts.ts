@@ -12,7 +12,7 @@
  * plane, and the plane answers in devin's terms. The shell reading it
  * leans on lives in `shell.ts`.
  */
-import { base, isAssignment, segments, tokens, type Token } from './shell.ts'
+import { atCommandPosition, base, commandIndex, segments, tokens, type Token } from './shell.ts'
 
 /** The devin CLI's subcommands that never open a session: they read or
  *  manage what already exists. */
@@ -46,29 +46,6 @@ const CLOUD_RESOURCE_COMMANDS = new Set(['list', 'ls', 'rm', 'ssh', 'forward'])
 /** The flags that only print — they open nothing. */
 const NON_SESSION_FLAGS = new Set(['-h', '--help', '--version', '-V'])
 
-/** The wrappers a vendor binary may sit behind — the token before the
- *  binary decides whether the binary is a command or an argument. */
-const WRAPPERS = new Set([
-  'bunx',
-  'chrt',
-  'command',
-  'env',
-  'exec',
-  'ionice',
-  'nice',
-  'nohup',
-  'npx',
-  'pnpm',
-  'setsid',
-  'stdbuf',
-  'sudo',
-  'taskset',
-  'time',
-  'timeout',
-  'xargs',
-  'yarn',
-])
-
 /** The shells whose `-c` argument is a command of its own. */
 const SHELLS = new Set(['sh', 'bash', 'zsh', 'dash', 'ksh', 'fish'])
 
@@ -90,63 +67,6 @@ function invocationStartsSession(toks: Token[], at: number): boolean {
     return sub === undefined || !CLOUD_RESOURCE_COMMANDS.has(sub)
   }
   return !NON_SESSION_COMMANDS.has(verb)
-}
-
-/** The wrappers that take a bare operand before the command
- *  (`timeout 30 devin`). */
-const WRAPPER_OPERANDS = new Set(['chrt', 'stdbuf', 'taskset', 'timeout'])
-
-/** The options that take a value (`sudo -u root`, `nice -n 5`) — the
- *  value is not the command. */
-const VALUE_OPTIONS = new Set(['-U', '-c', '-m', '-n', '-o', '-u'])
-
-/** The index of the segment's command — the assignments and the
- *  wrappers (with their options, their values and the operand some of
- *  them take) are skipped; what is left is the command. */
-function commandIndex(toks: Token[]): number {
-  let i = 0
-  while (i < toks.length) {
-    const text = toks[i]!.text
-    if (isAssignment(text)) {
-      i++
-      continue
-    }
-    const name = base(text)
-    if (!WRAPPERS.has(name)) {
-      return i
-    }
-    i = skipWrapperArgs(toks, i + 1, name)
-  }
-  return i
-}
-
-/** The index after a wrapper's own arguments — its options (with the
- *  value some of them take) and the operand some of them need. */
-function skipWrapperArgs(toks: Token[], from: number, name: string): number {
-  let i = from
-  let operands = WRAPPER_OPERANDS.has(name) ? 1 : 0
-  while (i < toks.length) {
-    const next = toks[i]!.text
-    if (next.startsWith('-')) {
-      i++
-      if (VALUE_OPTIONS.has(next) && i < toks.length && !toks[i]!.text.startsWith('-')) {
-        i++
-      }
-      continue
-    }
-    if (operands > 0) {
-      operands--
-      i++
-      continue
-    }
-    break
-  }
-  return i
-}
-
-/** Is the token at this position a command (not an argument)? */
-function atCommandPosition(toks: Token[], at: number): boolean {
-  return at === commandIndex(toks)
 }
 
 /** The positions in a segment's tokens where a devin binary sits at a
