@@ -75,7 +75,7 @@ function invocationStartsSession(toks: Token[], at: number): boolean {
 function devinCommandPositions(toks: Token[]): number[] {
   const out: number[] = []
   for (let i = 0; i < toks.length; i++) {
-    if (base(toks[i]!.text) !== 'devin') {
+    if (base(toks[i]!) !== 'devin') {
       continue
     }
     if (atCommandPosition(toks, i)) {
@@ -90,7 +90,7 @@ function devinCommandPositions(toks: Token[]): number[] {
 function wrappedCommand(toks: Token[]): string | undefined {
   const at = commandIndex(toks)
   const shell = toks[at]
-  if (shell === undefined || !SHELLS.has(base(shell.text))) {
+  if (shell === undefined || !SHELLS.has(base(shell))) {
     return undefined
   }
   if (!isShellCommandFlag(toks[at + 1]?.text)) {

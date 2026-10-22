@@ -15,13 +15,13 @@ export interface Token {
 }
 
 /** The basename of a path-like token. */
-export function base(token: string): string {
-  return token.slice(token.lastIndexOf('/') + 1)
+export function base(token: Token): string {
+  return token.text.slice(token.text.lastIndexOf('/') + 1)
 }
 
 /** Is this token an environment assignment (`FOO=bar`)? */
-export function isAssignment(token: string): boolean {
-  return /^[A-Za-z_][A-Za-z0-9_]*=/.test(token)
+export function isAssignment(token: Token): boolean {
+  return /^[A-Za-z_][A-Za-z0-9_]*=/.test(token.text)
 }
 
 /** The characters that end a shell segment. */
@@ -137,30 +137,30 @@ const WRAPPERS = new Set([
 export function commandIndex(toks: Token[]): number {
   let i = 0
   while (i < toks.length) {
-    const text = toks[i]!.text
-    if (isAssignment(text)) {
+    const token = toks[i]!
+    if (isAssignment(token)) {
       i++
       continue
     }
-    const name = base(text)
+    const name = base(token)
     if (!WRAPPERS.has(name)) {
       return i
     }
-    i = skipWrapperArgs(toks, i + 1, name)
+    i = skipWrapperArgs(toks, i + 1, token)
   }
   return i
 }
 
 /** The index after a wrapper's own arguments — its options (with the
  *  value some of them take) and the operand some of them need. */
-function skipWrapperArgs(toks: Token[], from: number, name: string): number {
+function skipWrapperArgs(toks: Token[], from: number, wrapper: Token): number {
   let i = from
-  let operands = WRAPPER_OPERANDS.has(name) ? 1 : 0
+  let operands = WRAPPER_OPERANDS.has(base(wrapper)) ? 1 : 0
   while (i < toks.length) {
-    const next = toks[i]!.text
-    if (next.startsWith('-')) {
+    const next = toks[i]!
+    if (next.text.startsWith('-')) {
       i++
-      if (takesValue(next) && i < toks.length && !toks[i]!.text.startsWith('-')) {
+      if (optionTakesNext(toks, i, next)) {
         i++
       }
       continue
@@ -175,9 +175,13 @@ function skipWrapperArgs(toks: Token[], from: number, name: string): number {
   return i
 }
 
-/** Does this option take a value? */
-function takesValue(option: string): boolean {
-  return VALUE_OPTIONS.has(option)
+/** Does this option take the next token as its value? */
+function optionTakesNext(toks: Token[], at: number, option: Token): boolean {
+  if (!VALUE_OPTIONS.has(option.text)) {
+    return false
+  }
+  const next = toks[at]
+  return next !== undefined && !next.text.startsWith('-')
 }
 
 /** Is the token at this position a command (not an argument)? */
