@@ -20,6 +20,8 @@ import {
   DEFAULT_CONFIG,
   BATCH_MARKER_ENV,
   deriveProviderWalls,
+  localLeaseStore,
+  projectId,
   readLedgerWalls,
   recordWall,
   patchAgentRegistry,
@@ -73,6 +75,14 @@ import { VERSION } from './version.ts'
 // ambient repo/agent/store pins must not reach fixture git children
 // or the code-under-test spawns — scrub once, restore after the file
 after(scrubEnv())
+const previousLeaseStateHome = process.env.XDG_STATE_HOME
+const leaseStateHome = mkdtempSync(join(tmpdir(), 'bro-agent-lease-state-'))
+process.env.XDG_STATE_HOME = leaseStateHome
+after(() => {
+  if (previousLeaseStateHome === undefined) delete process.env.XDG_STATE_HOME
+  else process.env.XDG_STATE_HOME = previousLeaseStateHome
+  rmSync(leaseStateHome, { recursive: true, force: true })
+})
 
 /** tmux shim — a state file per socket at $TMUX_FAKE_HOME/<socket>.json
  *  maps session → pid; new-session spawns the pane command detached like
@@ -472,6 +482,59 @@ function connectorContract(b: BackendCase): void {
     fixture(rows, undefined, { tmux: b.tmux === true, docker: b.docker === true })
   const conn = (f: Fixture) => b.make({ dir: f.main }, f.env)
   const kill = (info: AgentInfo) => process.kill(-info.pid!, 'SIGKILL')
+
+  if (b.name === 'native') {
+    test('a project work lease refuses a spawn held by another clone', async () => {
+      const f = fx([{ id: 'fx-1', status: 'open' }])
+      try {
+        const held = localLeaseStore(projectId(f.main)).acquire(
+          'bead/fx-1',
+          { host: 'other-host', pid: 9876, rig: 'other-rig', agentId: 'other-agent' },
+          60_000
+        )
+        assert.equal(held.ok, true)
+        await assert.rejects(
+          conn(f).spawn(SPEC(f.main, f.beadsDir, 'fx-1', 'setTimeout(() => {}, 30000)')),
+          (err: unknown) => {
+            assert.ok(err instanceof SpawnError)
+            assert.equal(err.kind, 'cap')
+            assert.match(
+              err.message,
+              /bead\/fx-1 leased by other-rig@other-host pid 9876 until/
+            )
+            return true
+          }
+        )
+      } finally {
+        cleanup(f)
+      }
+    })
+
+    test('a respawn reuses its matching live lease token', async () => {
+      const f = fx([{ id: 'fx-1', status: 'open' }])
+      const c = conn(f)
+      const store = localLeaseStore(projectId(f.main))
+      try {
+        const first = await c.spawn(
+          SPEC(f.main, f.beadsDir, 'fx-1', 'setTimeout(() => {}, 30000)')
+        )
+        const entry = readAgentRegistry(f.main)['fx-1']!
+        const lease = store.read('bead/fx-1')
+        assert.equal(entry.leaseToken, lease?.token)
+        kill(first)
+        await until(() => !pidAlive(first.pid!))
+        assert.ok(lease !== undefined)
+        assert.ok(store.rebind(lease, { pid: process.pid }))
+        const second = await c.spawn(
+          SPEC(f.main, f.beadsDir, 'fx-1', 'setTimeout(() => {}, 30000)')
+        )
+        assert.equal(readAgentRegistry(f.main)['fx-1']!.leaseToken, lease.token)
+        await c.stop(second.id)
+      } finally {
+        cleanup(f)
+      }
+    })
+  }
 
   test('spawn claims the step, registers the agent, leaves a .work marker', async () => {
     const f = fx([{ id: 'fx-1', status: 'open' }])
@@ -937,6 +1000,7 @@ function connectorContract(b: BackendCase): void {
       assert.equal(st.state, 'blocked')
       assert.equal(st.cause, 'rate_limited')
       assert.ok(st.resetAt !== undefined && Date.parse(st.resetAt) > Date.now())
+      assert.equal(localLeaseStore(projectId(f.main)).forceRelease('bead/fx-1'), false)
       // the registry carries the cause
       const entry = readAgentRegistry(f.main)['fx-1']!
       assert.equal(entry.cause, 'rate_limited')

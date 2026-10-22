@@ -55,6 +55,7 @@
  * takes over when it exits, never runs concurrently (spec bro-2duu9).
  */
 import { existsSync, statSync } from 'node:fs'
+import { hostname } from 'node:os'
 import { basename, dirname, join, resolve } from 'node:path'
 import {
   acquireAgentRegistryLock,
@@ -68,6 +69,9 @@ import {
   facadeName,
   gitCommonDir,
   gitTry,
+  holdRoleLease,
+  localLeaseStore,
+  projectId,
   patchAgentRegistry,
   readAgentRegistry,
   reviewHost,
@@ -2533,21 +2537,52 @@ export async function runDriveCommand(argv: string[]): Promise<void> {
   // the same PRs raced fixer spawns and merge probes overnight
   // (retro bro-l63ji). Taken before auth/facade planes so a standby
   // stays a cheap local wait.
-  const driveLock = driveLockPath(main.path)
-  const releaseSupervisor =
-    driveLock === null
-      ? () => {}
-      : await awaitFileLock(driveLock, {
+  const env = loadAgentEnv(main.path)
+  const store = localLeaseStore(projectId(main.path))
+  const abort = new AbortController()
+  let roleLease: { release: () => void } | undefined
+  let releaseSupervisor = () => {}
+  const releaseAll = (): void => {
+    releaseSupervisor()
+    roleLease?.release()
+  }
+  const onSignal = (signal: NodeJS.Signals): void => {
+    abort.abort()
+    releaseAll()
+    process.removeListener('SIGINT', onInt)
+    process.removeListener('SIGTERM', onTerm)
+    process.kill(process.pid, signal)
+  }
+  const onInt = (): void => onSignal('SIGINT')
+  const onTerm = (): void => onSignal('SIGTERM')
+  const onExit = (): void => releaseAll()
+  process.on('SIGINT', onInt)
+  process.on('SIGTERM', onTerm)
+  process.on('exit', onExit)
+  try {
+    roleLease = await holdRoleLease(
+      store,
+      'drive',
+      { host: hostname(), pid: process.pid, rig: basename(main.path) },
+      (env.fleet?.leases?.roleTtlSeconds ?? 60) * 1000,
+      { signal: abort.signal, onLost: () => releaseSupervisor() }
+    )
+    const driveLock = driveLockPath(main.path)
+    if (driveLock !== null) {
+      releaseSupervisor = await awaitFileLock(driveLock, {
           label: 'drive supervisor lock',
           onStandby: (pid) =>
             console.error(
               `bro drive: already supervised${pid === null ? '' : ` by pid ${pid}`} — standing by`
             ),
         })
-  try {
+    }
     await runDrive(main.path, broCfg, drive, args)
   } finally {
-    releaseSupervisor()
+    process.removeListener('SIGINT', onInt)
+    process.removeListener('SIGTERM', onTerm)
+    process.removeListener('exit', onExit)
+    releaseAll()
   }
 }
 

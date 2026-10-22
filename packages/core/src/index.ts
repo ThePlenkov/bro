@@ -115,8 +115,10 @@ export {
   deriveProviderWalls,
   fleetRouter,
   fleetRouting,
+  fleetLeases,
   fleetWalls,
   deriveAccountWalls,
+  DEFAULT_FLEET_LEASE_TTLS,
   ON_WALL,
   resolveStepClass,
   routeStepClass,
@@ -135,6 +137,7 @@ export type {
   ChainEntry,
   ChainWalk,
   AccountWall,
+  FleetLeaseTtls,
   FleetWallTtls,
   FleetRouter,
   OnWall,
@@ -277,9 +280,20 @@ export {
   stackHost,
   stopGateContributions,
   tasksAsync,
+  remoteUrl,
 } from './connectors.ts'
 export { PROBE_TIMEOUT_MS } from './connectors.ts'
 export type { CollectedGuard } from './connectors.ts'
+export { holdRoleLease, localLeaseStore, RoleLeaseAbortedError } from './leases.ts'
+export type {
+  HoldRoleLeaseOptions,
+  Lease,
+  LeaseAcquire,
+  LeaseHolder,
+  LeaseStore,
+  LocalLeaseStoreOptions,
+} from './leases.ts'
+export { normalizeRemote, projectId } from './project-id.ts'
 export {
   GUARD_DEFAULT_BUDGET,
   GUARD_EVENTS,

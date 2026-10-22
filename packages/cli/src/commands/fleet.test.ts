@@ -5,7 +5,13 @@ import { tmpdir } from 'node:os'
 import { basename, join } from 'node:path'
 import type { ConvoyStep, Molecule } from '@broject/convoy'
 import type { AgentConnector, AgentInfo, ListResult, ReviewFacade } from '@broject/core'
-import { readLedgerWalls, recordWall, writeAgentRegistry } from '@broject/core'
+import {
+  localLeaseStore,
+  projectId,
+  readLedgerWalls,
+  recordWall,
+  writeAgentRegistry,
+} from '@broject/core'
 import {
   agentCell,
   collectAgents,
@@ -13,6 +19,7 @@ import {
   fleetRows,
   liveFrame,
   runFleetWallsCommand,
+  runFleetLeasesCommand,
   worktreeOf,
   type FleetPayload,
   type FleetRow,
@@ -604,6 +611,69 @@ describe('fleet walls command', () => {
     assert.throws(
       () => runFleetWallsCommand(process.cwd(), ['--json', '--verbose']),
       /usage: bro fleet walls/
+    )
+  })
+})
+
+describe('fleet leases command', () => {
+  test('lists live lease provenance and force-releases a key', () => {
+    const f = initRepo('bro-fleet-leases-')
+    const store = localLeaseStore(projectId(f.main), { stateHome: f.root })
+    const result = store.acquire(
+      'bead/bro-step',
+      { host: 'other-host', pid: 123, rig: 'other-rig', agentId: 'agent' },
+      60_000
+    )
+    assert.equal(result.ok, true)
+    if (!result.ok) return
+    const output: string[] = []
+    const original = console.log
+    console.log = (...args: unknown[]) => output.push(args.join(' '))
+    try {
+      runFleetLeasesCommand(f.main, ['--json'], f.root)
+      const rows = JSON.parse(output[0]!) as Array<Record<string, unknown>>
+      assert.deepEqual(rows, [
+        {
+          key: 'bead/bro-step',
+          rig: 'other-rig',
+          host: 'other-host',
+          pid: 123,
+          agentId: 'agent',
+          acquiredAt: result.lease.acquiredAt,
+          expiresAt: result.lease.expiresAt,
+        },
+      ])
+      runFleetLeasesCommand(f.main, ['release', 'bead/bro-step'], f.root)
+    } finally {
+      console.log = original
+    }
+    assert.deepEqual(output, [
+      JSON.stringify(
+        [
+          {
+            key: 'bead/bro-step',
+            rig: 'other-rig',
+            host: 'other-host',
+            pid: 123,
+            agentId: 'agent',
+            acquiredAt: result.lease.acquiredAt,
+            expiresAt: result.lease.expiresAt,
+          },
+        ],
+        null,
+        2
+      ),
+      'released lease bead/bro-step',
+    ])
+    assert.equal(store.read('bead/bro-step'), undefined)
+  })
+
+  test('rejects arguments outside the explicit allowlist', () => {
+    const dir = initRepo('bro-fleet-leases-args-').main
+    assert.throws(() => runFleetLeasesCommand(dir, ['release', '']), /usage: bro fleet leases/)
+    assert.throws(
+      () => runFleetLeasesCommand(dir, ['--json', '--verbose']),
+      /usage: bro fleet leases/
     )
   })
 })

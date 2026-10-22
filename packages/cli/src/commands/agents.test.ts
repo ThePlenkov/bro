@@ -24,6 +24,8 @@ import {
   readAgentRegistry,
   readLedgerWalls,
   recordWall,
+  localLeaseStore,
+  projectId,
   writeAgentRegistry,
   type Verdict,
 } from '@broject/core'
@@ -1421,6 +1423,7 @@ describe('bro agents down <target>', () => {
       assert.equal(up.code, 0)
       const down = await agents(['down', 'fx-1'])
       assert.equal(down.code, 0)
+      assert.equal(localLeaseStore(projectId(fx.main)).forceRelease('bead/fx-1'), false)
       assert.equal(readLedgerWalls().some((wall) => wall.account === 'shared-account'), true)
     } finally {
       if (previous === undefined) delete process.env.XDG_STATE_HOME
