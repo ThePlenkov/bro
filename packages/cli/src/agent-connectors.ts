@@ -1641,7 +1641,7 @@ function pullRequestLeaseKey(spec: SpawnSpec): string | undefined {
   } catch {
     return undefined
   }
-  const match = pathname.match(/\/([^/]+)\/([^/]+)\/pull\/(\d+)\/?$/)
+  const match = /\/([^/]+)\/([^/]+)\/pull\/(\d+)\/?$/.exec(pathname)
   if (match === null || match[3] !== pr) {
     return undefined
   }

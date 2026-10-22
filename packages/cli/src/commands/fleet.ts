@@ -575,22 +575,8 @@ async function runFleetLive(
 }
 
 export async function runFleetCommand(argv: string[]): Promise<void> {
-  if (argv[0] === 'leases') {
-    try {
-      runFleetLeasesCommand(process.cwd(), argv.slice(1))
-    } catch (err) {
-      console.error(err instanceof Error ? err.message : String(err))
-      process.exitCode = 2
-    }
-    return
-  }
-  if (argv[0] === 'walls') {
-    try {
-      runFleetWallsCommand(process.cwd(), argv.slice(1))
-    } catch (err) {
-      console.error(`error: ${err instanceof Error ? err.message : String(err)}`)
-      process.exit(2)
-    }
+  const dir = process.cwd()
+  if (dispatchFleetSubcommand(dir, argv)) {
     return
   }
   let args: FleetArgs
@@ -600,7 +586,6 @@ export async function runFleetCommand(argv: string[]): Promise<void> {
     console.error(`error: ${err instanceof Error ? err.message : String(err)}`)
     process.exit(2)
   }
-  const dir = process.cwd()
   const prefer = loadBroConfig(dir).connectors
 
   if (args.live) {
@@ -627,6 +612,28 @@ export async function runFleetCommand(argv: string[]): Promise<void> {
     return
   }
   printFleetTable(rows, degraded, conflicts, prErrors, walls, wallsError)
+}
+
+function dispatchFleetSubcommand(dir: string, argv: string[]): boolean {
+  if (argv[0] === 'leases') {
+    try {
+      runFleetLeasesCommand(dir, argv.slice(1))
+    } catch (err) {
+      console.error(err instanceof Error ? err.message : String(err))
+      process.exitCode = 2
+    }
+    return true
+  }
+  if (argv[0] === 'walls') {
+    try {
+      runFleetWallsCommand(dir, argv.slice(1))
+    } catch (err) {
+      console.error(`error: ${err instanceof Error ? err.message : String(err)}`)
+      process.exit(2)
+    }
+    return true
+  }
+  return false
 }
 
 type FleetLeasesAction =

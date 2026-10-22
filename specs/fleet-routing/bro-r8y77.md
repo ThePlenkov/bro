@@ -160,7 +160,7 @@ interface LeaseStore {
   `release` is idempotent, while `forceRelease` is the admin override.
 - Keys: `bead/<id>`, `pr/<owner>/<repo>/<n>`, `role/loop`, `role/drive`.
 
-### Config
+### Lease configuration
 
 `fleet.leases: { roleTtlSeconds?: number (default 60),
 workTtlMinutes?: number (default 360) }`. Invalid values are dropped

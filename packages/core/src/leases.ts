@@ -69,27 +69,52 @@ function isString(value: unknown): value is string {
   return typeof value === 'string'
 }
 
+function optionalString(value: unknown): boolean {
+  if (value === undefined) {
+    return true
+  }
+  return isString(value)
+}
+
 function isTimestamp(value: unknown): value is string {
   return isString(value) && Number.isFinite(Date.parse(value))
+}
+
+function holderIdentityIsValid(value: Record<string, unknown>): boolean {
+  if (!isString(value.host)) {
+    return false
+  }
+  return isString(value.rig)
+}
+
+function holderPidIsValid(value: Record<string, unknown>): boolean {
+  if (typeof value.pid !== 'number') {
+    return false
+  }
+  if (!Number.isInteger(value.pid)) {
+    return false
+  }
+  return value.pid > 0
+}
+
+function holderOptionalIdsAreValid(value: Record<string, unknown>): boolean {
+  if (!optionalString(value.agentId)) {
+    return false
+  }
+  return optionalString(value.sessionId)
 }
 
 function isHolder(value: unknown): value is LeaseHolder {
   if (!isObject(value)) {
     return false
   }
-  if (!isString(value.host) || !isString(value.rig)) {
+  if (!holderIdentityIsValid(value)) {
     return false
   }
-  if (typeof value.pid !== 'number' || !Number.isInteger(value.pid)) {
+  if (!holderPidIsValid(value)) {
     return false
   }
-  if (value.pid <= 0) {
-    return false
-  }
-  if (value.agentId !== undefined && !isString(value.agentId)) {
-    return false
-  }
-  return value.sessionId === undefined || isString(value.sessionId)
+  return holderOptionalIdsAreValid(value)
 }
 
 function isLease(value: unknown): value is Lease {
@@ -107,6 +132,7 @@ function isLease(value: unknown): value is Lease {
 
 function readLease(path: string): Lease | undefined {
   try {
+    // eslint-disable-next-line security/detect-non-literal-fs-filename -- path is a project-scoped lease file
     const parsed: unknown = JSON.parse(readFileSync(path, 'utf8'))
     return isLease(parsed) ? parsed : undefined
   } catch {
@@ -154,7 +180,9 @@ function leasePath(deps: LocalDependencies, key: string): string {
 }
 
 function ensureDirectory(path: string): void {
+  // eslint-disable-next-line security/detect-non-literal-fs-filename -- directory is derived from local XDG state
   mkdirSync(path, { recursive: true, mode: 0o700 })
+  // eslint-disable-next-line security/detect-non-literal-fs-filename -- directory is derived from local XDG state
   chmodSync(path, 0o700)
 }
 
@@ -167,9 +195,13 @@ function ensureDirectories(deps: LocalDependencies): void {
 function writeLease(path: string, lease: Lease): void {
   const temporary = `${path}.${process.pid}.${randomUUID()}.tmp`
   try {
+    // eslint-disable-next-line security/detect-non-literal-fs-filename -- temporary file is beside a project-scoped lease
     writeFileSync(temporary, `${JSON.stringify(lease)}\n`, { mode: 0o600 })
+    // eslint-disable-next-line security/detect-non-literal-fs-filename -- temporary file is beside a project-scoped lease
     chmodSync(temporary, 0o600)
+    // eslint-disable-next-line security/detect-non-literal-fs-filename -- paths are the lease and its temporary sibling
     renameSync(temporary, path)
+    // eslint-disable-next-line security/detect-non-literal-fs-filename -- path is a project-scoped lease file
     chmodSync(path, 0o600)
   } finally {
     rmSync(temporary, { force: true })
@@ -191,7 +223,7 @@ function removeLease(path: string): void {
 }
 
 function tokenMatches(current: Lease | undefined, lease: Lease): current is Lease {
-  return current !== undefined && current.token === lease.token
+  return current?.token === lease.token
 }
 
 export function localLeaseStore(
@@ -266,6 +298,7 @@ export function localLeaseStore(
     },
     forceRelease(key) {
       return withKeyLock(key, (path) => {
+        // eslint-disable-next-line security/detect-non-literal-fs-filename -- path is a project-scoped lease file
         const existed = existsSync(path)
         removeLease(path)
         return existed
@@ -274,6 +307,7 @@ export function localLeaseStore(
     list() {
       let names: string[]
       try {
+        // eslint-disable-next-line security/detect-non-literal-fs-filename -- directory is derived from local XDG state
         names = readdirSync(deps.directory)
       } catch {
         return []
@@ -336,7 +370,7 @@ function delay(ms: number, signal?: AbortSignal): Promise<void> {
   })
 }
 
-async function waitForRole(
+function waitForRole(
   store: LeaseStore,
   key: string,
   ttlMs: number,
@@ -344,28 +378,33 @@ async function waitForRole(
 ): Promise<void> {
   const log = options.log ?? console.error
   const interval = Math.min(5000, ttlMs / 3)
-  let current = store.read(key)
-  while (current !== undefined) {
+  const poll = (): Promise<void> => {
+    const current = store.read(key)
+    if (current === undefined) {
+      return Promise.resolve()
+    }
     log(roleHolderLine(key, current))
-    await delay(interval, options.signal)
-    current = store.read(key)
+    return delay(interval, options.signal).then(poll)
   }
+  return poll()
 }
 
-async function acquireRole(
+function acquireRole(
   store: LeaseStore,
   key: string,
   holder: LeaseHolder,
   ttlMs: number,
   options: HoldRoleLeaseOptions
 ): Promise<Lease> {
-  while (true) {
-    await waitForRole(store, key, ttlMs, options)
-    const acquired = store.acquire(key, holder, ttlMs)
-    if (acquired.ok) {
-      return acquired.lease
-    }
-  }
+  const attempt = (): Promise<Lease> =>
+    waitForRole(store, key, ttlMs, options).then(() => {
+      const acquired = store.acquire(key, holder, ttlMs)
+      if (acquired.ok) {
+        return acquired.lease
+      }
+      return attempt()
+    })
+  return attempt()
 }
 
 export async function holdRoleLease(
@@ -413,7 +452,7 @@ export async function holdRoleLease(
     }
     lease = renewed
   }, Math.max(1, ttlMs / 3))
-  timer.unref?.()
+  timer.unref()
   options.signal?.addEventListener('abort', aborted, { once: true })
   if (options.signal?.aborted) {
     aborted()

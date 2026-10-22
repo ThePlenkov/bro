@@ -16,13 +16,23 @@ function scpRemote(value: string): RemoteParts | undefined {
   if (value.includes('://')) {
     return undefined
   }
-  const match = stripSuffix(value).match(/^(?:[^@/]+@)?([^/:]+):(.+)$/)
-  if (match === null) {
+  const remote = stripSuffix(value)
+  const at = remote.indexOf('@')
+  const userSeparator = at < 0 ? -1 : remote.indexOf(':', at + 1)
+  const hostStart = userSeparator < 0 ? 0 : at + 1
+  const separator = userSeparator < 0 ? remote.indexOf(':') : userSeparator
+  if (separator < 0) {
+    return undefined
+  }
+  const authority = remote.slice(0, separator)
+  const host = authority.slice(hostStart)
+  const path = remote.slice(separator + 1)
+  if (authority.includes('/') || host === '' || path === '') {
     return undefined
   }
   return {
-    host: match[1]!.toLowerCase(),
-    path: match[2]!.split('/').filter((part) => part !== ''),
+    host: host.toLowerCase(),
+    path: path.split('/').filter((part) => part !== ''),
   }
 }
 
@@ -42,15 +52,19 @@ function dropProxyPrefix(parts: RemoteParts): RemoteParts {
   if (index < 0 || index + 1 >= parts.path.length) {
     return parts
   }
+  const host = parts.path[index + 1]
+  if (host === undefined) {
+    return parts
+  }
   return {
-    host: parts.path[index + 1]!.toLowerCase(),
+    host: host.toLowerCase(),
     path: parts.path.slice(index + 2),
   }
 }
 
 function canonicalRemote(parts: RemoteParts): string {
   const path = parts.path.join('/').replace(/\.git$/i, '')
-  return `${parts.host}/${path}`.replace(/\/+$/, '')
+  return path === '' ? parts.host : `${parts.host}/${path}`
 }
 
 export function normalizeRemote(url: string): string {
@@ -73,5 +87,6 @@ export function projectId(dir: string): string {
   if (common === null) {
     throw new Error(`cannot identify project in ${dir} — no origin or git common dir`)
   }
+  // eslint-disable-next-line security/detect-non-literal-fs-filename -- path comes from the repository's git common dir
   return digest(realpathSync(common))
 }
