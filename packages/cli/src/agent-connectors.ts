@@ -63,6 +63,8 @@ import {
   releaseSessionSlot,
   requireProviderSurface,
   resolveStepClass,
+  walkChain,
+  wallText,
   sessionPlane,
   sessionPlaneForCli,
   sessionQuotaConfig,
@@ -401,6 +403,40 @@ export async function resolveSpawnProvider(
         'config'
       )
   }
+}
+
+export async function resolveSpawnRoute(
+  env: AgentConnectorEnv,
+  backend: string,
+  route: ResolvedClass,
+  sel: { model?: string; modelFallback?: string; autoApprove?: boolean },
+  namedBy: 'flag' | 'profile' | 'backend' = 'backend'
+): Promise<NonNullable<SpawnSpec['route']>> {
+  const candidates = await Promise.all(
+    route.chain.map(async (entry) => {
+      const label = `fleet.routing.${route.class} provider "${entry.provider}"`
+      try {
+        const pick = await resolveSpawnProvider(
+          env,
+          backend,
+          {
+            provider: entry.provider,
+            model: sel.model ?? entry.model ?? sel.modelFallback,
+            autoApprove: sel.autoApprove,
+          },
+          namedBy
+        )
+        if (pick.provider === undefined || pick.worker === undefined) {
+          throw new SpawnError('provider did not resolve a spawn worker', 'config')
+        }
+        return { provider: pick.provider, model: pick.model, worker: pick.worker }
+      } catch (err) {
+        const detail = err instanceof Error ? err.message : String(err)
+        throw new SpawnError(`${label} — ${detail}`, 'config')
+      }
+    })
+  )
+  return { class: route.class, onWall: route.onWall, candidates }
 }
 
 /** The fleet router's spawn seam (spec bro-1x7p, M7) — fires only on
@@ -1323,6 +1359,7 @@ function guardExistingEntry(
   opts: {
     isLive: (existing: AgentRegistryEntry) => boolean
     liveDetail?: (existing: AgentRegistryEntry) => string
+    allowBlocked?: boolean
   }
 ): void {
   if (existing === undefined) {
@@ -1343,7 +1380,7 @@ function guardExistingEntry(
   // (backends whose isLive doesn't walk the death ladder never saw it)
   // and refuse respawn into the same exhausted budget (bro-7xgk.2)
   ensureExitCause(dir, home, spec.molStep, existing)
-  if (agentEntryBlocked(existing)) {
+  if (opts.allowBlocked !== true && agentEntryBlocked(existing)) {
     throw new SpawnError(
       `respawn of ${spec.molStep} refused — ${blockedRespawnDetail(existing)}; \`bro agents down ${spec.molStep}\` clears the block`
     )
@@ -1420,12 +1457,13 @@ function guardClaim(
 export function batchWallRefusal(
   registry: Record<string, AgentRegistryEntry>,
   spec: { provider?: string; env?: Record<string, string>; molStep?: string },
-  now: number = Date.now()
+  now: number = Date.now(),
+  walls?: ProviderWall[]
 ): SpawnError | undefined {
   if (spec.provider === undefined || !isBatchSpawn(spec.env)) {
     return undefined
   }
-  const wall = deriveProviderWalls(registry, now).find((w) => w.provider === spec.provider)
+  const wall = (walls ?? deriveProviderWalls(registry, now)).find((w) => w.provider === spec.provider)
   if (wall === undefined) {
     return undefined
   }
@@ -1436,6 +1474,14 @@ export function batchWallRefusal(
       (spec.molStep !== undefined ? ` — spawn of ${spec.molStep} refused` : ''),
     'cap'
   )
+}
+
+function spawnWalls(
+  _dir: string,
+  registry: Record<string, AgentRegistryEntry>,
+  now: number
+): ProviderWall[] {
+  return deriveProviderWalls(registry, now)
 }
 
 function prepareSpawn(
@@ -1482,7 +1528,11 @@ function prepareSpawn(
   // death walls the provider for every fleet spawn, not just the agent
   // that died. The interactive lane is not blocked — a wall the fleet hit
   // is the fleet's problem (spec bro-9h86l).
-  guardExistingEntry(dir, home, backend, spec, existing, opts)
+  guardExistingEntry(dir, home, backend, spec, existing, {
+    isLive: opts.isLive,
+    liveDetail: opts.liveDetail,
+    allowBlocked: spec.route !== undefined,
+  })
   // The wall is derived from the registry — so the registry must carry
   // the CAUSE: an agent that died with a rate limit but whose .exit
   // was not harvested yet reads as cause-less, and the fleet walks into
@@ -1490,13 +1540,35 @@ function prepareSpawn(
   for (const [step, entry] of Object.entries(registry)) {
     ensureExitCause(dir, home, step, entry)
   }
+  const routeNow = spec.route === undefined ? undefined : Date.now()
+  const walls = routeNow === undefined ? undefined : spawnWalls(dir, registry, routeNow)
+  if (spec.route !== undefined && walls !== undefined) {
+    const chain = spec.route.candidates.map(({ provider, model }) => ({ provider, model }))
+    const walk = walkChain(chain, spec.route.onWall, walls, existing?.provider)
+    if (walk.verdict === 'park') {
+      const verdict = walk.reason === 'policy' ? 'parked — onWall park' : 'chain exhausted'
+      throw new SpawnError(
+        `${spec.molStep} class "${spec.route.class}" ${verdict} — ${wallText(walk.wall)}; ` +
+          `\`bro agents down ${spec.molStep}\` lifts the block`,
+        'cap'
+      )
+    }
+    const picked = spec.route.candidates[walk.index]!
+    spec.provider = picked.provider
+    spec.model = picked.model
+    spec.worker = picked.worker
+    spec.class = spec.route.class
+  }
   // the wall refusal comes AFTER the live-agent and claim guards: a
   // respawn of an agent that is already running is a CONFLICT, and so is
   // a step another owner already claimed — the caller reads those kinds,
   // and a 'cap' here would say "the provider is walled" about a spawn
   // that never needed a provider slot
   const { claimed, actor, phantom } = guardClaim(spec, existing !== undefined, opts.claimAs)
-  const wallRefusal = batchWallRefusal(registry, spec)
+  const wallRefusal =
+    routeNow === undefined
+      ? batchWallRefusal(registry, spec)
+      : batchWallRefusal(registry, spec, routeNow, walls)
   if (wallRefusal !== undefined) {
     throw wallRefusal
   }
@@ -1532,7 +1604,7 @@ function prepareSpawn(
         claimed,
         actor,
         phantom,
-      }),
+      }, existing),
       reservation,
     }
   } catch (err) {
@@ -1560,7 +1632,8 @@ function commitSpawn(
     sessionQuota?: SessionQuotaLane | undefined
   },
   agentId: string,
-  guard: { claimed: boolean; actor: string | undefined; phantom: boolean }
+  guard: { claimed: boolean; actor: string | undefined; phantom: boolean },
+  existing: AgentRegistryEntry | undefined
 ): { promptFile: string; log: string; stderrLog: string; exitFile: string } {
   mkdirSync(home, { recursive: true })
   const promptFile = join(home, `${agentId}.prompt.md`)
@@ -1571,6 +1644,18 @@ function commitSpawn(
   writeFileSync(promptFile, spec.prompt)
   const logFrom = logSizeOrZero(log)
   const stderrFrom = logSizeOrZero(stderrLog)
+  const outgoingAttempt =
+    spec.route !== undefined && existing !== undefined && isAgentCause(existing.cause)
+      ? {
+          provider: existing.provider,
+          model: existing.model,
+          cause: existing.cause,
+          resetAt: existing.resetAt,
+          spawnedAt: existing.spawnedAt,
+          stopped: existing.stopped,
+        }
+      : undefined
+  const attempts = Array.isArray(existing?.attempts) ? (existing.attempts as unknown[]) : []
   // exitStatus: undefined clears a respawned entry's stale harvest — the
   // new run must not read as already-exited (undefined keys drop out of
   // the serialized registry). pid/pidStart/spawnError likewise — a claim
@@ -1611,6 +1696,11 @@ function commitSpawn(
     // the acp driver patches the real session id after session/new —
     // clear the previous run's so it never masquerades as this run's
     acpSessionId: undefined,
+    resumeSessionId:
+      spec.route !== undefined && existing !== undefined && existing.provider !== spec.provider
+        ? undefined
+        : existing?.resumeSessionId,
+    ...(outgoingAttempt === undefined ? {} : { attempts: [...attempts, outgoingAttempt] }),
     // the session kind this run consumed — the quota lane it was
     // admitted under; absent for non-kind spawns
     sessionKind: opts.sessionQuota?.plane.kind,

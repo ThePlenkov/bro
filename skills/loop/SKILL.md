@@ -49,8 +49,8 @@ class picks its own provider chain, same as `bro agents up`: the
 }
 ```
 
-The chain head supplies the provider (and its inline `model` pin) unless
-a flag-tier pick already named one — explicit `--provider`,
+The chain head supplies the initial provider (and its inline `model` pin)
+unless a flag-tier pick already named one — explicit `--provider`,
 `--agent <provider>`, `--profile` still pin the lane for every bead,
 with the resolved class stamped as provenance (`BRO_AGENT_CLASS`); the
 config picks (`loop.provider`, `loop.profile`, `agents.native.provider`)
@@ -58,7 +58,11 @@ are standing defaults the declared table outranks. A resolved class
 missing from the table is a config error — `default` is preflighted
 before the first claim, a bad `class:` label parks its bead instead of
 silently falling through. `fleet.router` (shadow/enforce) classifies
-unclassed beads by judge verdict, same as `agents up`.
+unclassed beads by judge verdict, same as `agents up`. For a registry
+spawn, a fresh step walks from the chain head; a respawn walks from its
+current provider. `fallthrough` moves forward to the first un-walled
+provider without wrapping; `park` keeps the step blocked on its current
+provider.
 
 **Raw template** — `loop.agent` (or an `--agent` value that names no
 provider) is the escape hatch:

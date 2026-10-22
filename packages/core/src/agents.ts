@@ -27,6 +27,7 @@ import {
 } from 'node:fs'
 import { dirname, join } from 'node:path'
 import type { ConfigSection } from './config.ts'
+import type { OnWall } from './routing.ts'
 import { acquireFileLock } from './filelock.ts'
 import { BD_NO_STORE } from './bd.ts'
 import { gitTry } from './git.ts'
@@ -234,6 +235,13 @@ export interface SpawnSpec {
   class?: string
   /** Provider-resolved spawn payload — see SpawnWorker. */
   worker?: SpawnWorker
+  /** Pre-resolved fleet-routing candidates, in declared chain order.
+   *  prepareSpawn selects one under the registry lock. */
+  route?: {
+    class: string
+    onWall: OnWall
+    candidates: Array<{ provider: string; model?: string; worker: SpawnWorker }>
+  }
   /** Spawn owns the enter transition (rig bro-oy3k1.4): when set,
    *  `repoRoot` doesn't exist yet — prepareSpawn mints it as a
    *  worktree under the registry lock before the claim lands, so
