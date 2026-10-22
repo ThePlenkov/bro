@@ -1631,6 +1631,26 @@ function prepareSpawn(
   }
 }
 
+function outgoingAttemptOf(
+  spec: SpawnSpec,
+  existing: AgentRegistryEntry | undefined
+): Record<string, unknown> | undefined {
+  if (spec.route === undefined || existing === undefined) {
+    return undefined
+  }
+  if (!isAgentCause(existing.cause) && existing.provider === spec.provider) {
+    return undefined
+  }
+  return {
+    ...(existing.provider === undefined ? {} : { provider: existing.provider }),
+    ...(existing.model === undefined ? {} : { model: existing.model }),
+    ...(existing.cause === undefined ? {} : { cause: existing.cause }),
+    ...(existing.resetAt === undefined ? {} : { resetAt: existing.resetAt }),
+    ...(existing.spawnedAt === undefined ? {} : { spawnedAt: existing.spawnedAt }),
+    ...(existing.stopped === undefined ? {} : { stopped: existing.stopped }),
+  }
+}
+
 /** The write phase of a spawn — prompt/log/exit files, the registry
  *  row, then claim bookkeeping. Split from the guard/admission phase
  *  so a refused spawn leaves no half-state and a caller-side
@@ -1658,19 +1678,7 @@ function commitSpawn(
   writeFileSync(promptFile, spec.prompt)
   const logFrom = logSizeOrZero(log)
   const stderrFrom = logSizeOrZero(stderrLog)
-  const outgoingAttempt =
-    spec.route !== undefined &&
-    existing !== undefined &&
-    (isAgentCause(existing.cause) || existing.provider !== spec.provider)
-      ? {
-          ...(existing.provider === undefined ? {} : { provider: existing.provider }),
-          ...(existing.model === undefined ? {} : { model: existing.model }),
-          ...(existing.cause === undefined ? {} : { cause: existing.cause }),
-          ...(existing.resetAt === undefined ? {} : { resetAt: existing.resetAt }),
-          ...(existing.spawnedAt === undefined ? {} : { spawnedAt: existing.spawnedAt }),
-          ...(existing.stopped === undefined ? {} : { stopped: existing.stopped }),
-        }
-      : undefined
+  const outgoingAttempt = outgoingAttemptOf(spec, existing)
   const attempts = Array.isArray(existing?.attempts) ? (existing.attempts as unknown[]) : []
   // exitStatus: undefined clears a respawned entry's stale harvest — the
   // new run must not read as already-exited (undefined keys drop out of
