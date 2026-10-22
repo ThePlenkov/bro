@@ -20,7 +20,13 @@ import {
   pidAlive,
   type AgentConnectorEnv,
 } from '../agent-connectors.ts'
-import { readAgentRegistry, writeAgentRegistry, type Verdict } from '@broject/core'
+import {
+  readAgentRegistry,
+  readLedgerWalls,
+  recordWall,
+  writeAgentRegistry,
+  type Verdict,
+} from '@broject/core'
 import { readJournal, ROUTE_CLASS_KIND } from '@broject/judge'
 import { fakeFetch } from '@broject/providers/testkit'
 import { capture, initRepo, installFakeBd, readBeads } from './testrepo.ts'
@@ -1038,7 +1044,11 @@ describe('bro agents up — class routing', () => {
       JSON.stringify({
         agents: { native: { command: 'node {promptFile}' } },
         providers: {
-          local: { type: 'cli', command: 'node {promptFile} -m {model}' },
+          local: {
+            type: 'cli',
+            command: 'node {promptFile} -m {model}',
+            account: 'local-account',
+          },
           alt: { type: 'cli', command: 'node {promptFile}' },
         },
         fleet: {
@@ -1064,6 +1074,7 @@ describe('bro agents up — class routing', () => {
       const entry = readAgentRegistry(fx.main)['fx-1']!
       assert.equal(entry.class, 'sweep')
       assert.equal(entry.provider, 'local')
+      assert.equal(entry.account, 'local-account')
       assert.equal(entry.model, 'sweep-1')
       const st = await agents(['status', 'fx-1'])
       assert.match(st.out.join('\n'), /class\s+sweep/)
@@ -1390,6 +1401,34 @@ describe('bro agents up — fleet.router (spec bro-1x7p M7)', () => {
 })
 
 describe('bro agents down <target>', () => {
+  test('down updates the local entry without clearing a host ledger wall', async () => {
+    const fx = fixture([{ id: 'fx-1', status: 'open' }])
+    const previous = process.env.XDG_STATE_HOME
+    process.env.XDG_STATE_HOME = join(fx.root, 'state')
+    try {
+      recordWall({
+        account: 'shared-account',
+        cause: 'quota',
+        observedAt: new Date().toISOString(),
+        provider: 'router',
+        rig: 'other-repo',
+        step: 'fx-1',
+      })
+      const up = await agents([
+        'up', 'fx-1', '--worktree', fx.main, '--beads-dir', fx.beads,
+        '--prompt-file', fx.promptFile(LONG_RUN),
+      ])
+      assert.equal(up.code, 0)
+      const down = await agents(['down', 'fx-1'])
+      assert.equal(down.code, 0)
+      assert.equal(readLedgerWalls().some((wall) => wall.account === 'shared-account'), true)
+    } finally {
+      if (previous === undefined) delete process.env.XDG_STATE_HOME
+      else process.env.XDG_STATE_HOME = previous
+      fx.restore()
+    }
+  })
+
   test('stops by molStep and is idempotent for gone agents', async () => {
     const fx = fixture([{ id: 'fx-1', status: 'open' }])
     try {

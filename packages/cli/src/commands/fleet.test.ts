@@ -5,12 +5,14 @@ import { tmpdir } from 'node:os'
 import { basename, join } from 'node:path'
 import type { ConvoyStep, Molecule } from '@broject/convoy'
 import type { AgentConnector, AgentInfo, ListResult, ReviewFacade } from '@broject/core'
+import { readLedgerWalls, recordWall, writeAgentRegistry } from '@broject/core'
 import {
   agentCell,
   collectAgents,
   fleetArgs,
   fleetRows,
   liveFrame,
+  runFleetWallsCommand,
   worktreeOf,
   type FleetPayload,
   type FleetRow,
@@ -475,5 +477,133 @@ describe('collectAgents', () => {
       }
       rmSync(root, { recursive: true, force: true })
     }
+  })
+})
+
+describe('fleet walls command', () => {
+  test('lists ledger rows with the JSON source and provenance shape', async () => {
+    const f = initRepo('bro-fleet-walls-list-')
+    const ledgerPath = join(f.root, 'state', 'bro', 'walls.json')
+    const observedAt = '2026-10-20T12:00:00.000Z'
+    const resetAt = '2099-01-01T00:00:00.000Z'
+    recordWall(
+      {
+        account: 'shared',
+        cause: 'rate_limited',
+        resetAt,
+        observedAt,
+        provider: 'router',
+        rig: 'other-repo',
+        step: 'bro-step',
+      },
+      { path: ledgerPath, now: Date.parse(observedAt) }
+    )
+    writeAgentRegistry(f.main, {
+      'local-step': {
+        agentId: 'native-local',
+        backend: 'native',
+        spawnedAt: observedAt,
+        provider: 'local-provider',
+        account: 'local-account',
+        cause: 'quota',
+        observedAt,
+      },
+    })
+    const output: string[] = []
+    const original = console.log
+    console.log = (...args: unknown[]) => output.push(args.join(' '))
+    try {
+      await runFleetWallsCommand(f.main, ['--json'], ledgerPath)
+    } finally {
+      console.log = original
+    }
+    const rows = JSON.parse(output[0]!) as Array<Record<string, unknown>>
+    assert.deepEqual(rows.map((row) => row.source), ['registry', 'ledger'])
+    assert.deepEqual(rows[0], {
+      account: 'local-account',
+      cause: 'quota',
+      provider: 'local-provider',
+      rig: basename(f.main),
+      step: 'local-step',
+      observedAt,
+      source: 'registry',
+    })
+    assert.deepEqual(rows[1], {
+      account: 'shared',
+      cause: 'rate_limited',
+      resetAt,
+      until: resetAt,
+      observedAt,
+      provider: 'router',
+      rig: 'other-repo',
+      step: 'bro-step',
+      source: 'ledger',
+    })
+  })
+
+  test('clears one account and all host ledger rows', async () => {
+    const f = initRepo('bro-fleet-walls-clear-')
+    const ledgerPath = join(f.root, 'state', 'bro', 'walls.json')
+    const now = Date.now()
+    const observedAt = new Date(now - 500 * 60_000).toISOString()
+    writeFileSync(
+      join(f.main, 'bro.config.json'),
+      JSON.stringify({ fleet: { walls: { quotaTtlMinutes: 720 } } })
+    )
+    for (const account of ['one', 'two']) {
+      recordWall(
+        {
+          account,
+          cause: 'quota',
+          observedAt,
+          provider: account,
+          rig: 'repo',
+        },
+        { path: ledgerPath, now, ttls: { quotaTtlMinutes: 720 } }
+      )
+    }
+    const output: string[] = []
+    const original = console.log
+    console.log = (...args: unknown[]) => output.push(args.join(' '))
+    try {
+      await runFleetWallsCommand(f.main, ['clear', 'one'], ledgerPath)
+      assert.deepEqual(
+        readLedgerWalls(Date.now(), { quotaTtlMinutes: 720 }, { path: ledgerPath }).map(
+          (row) => row.account
+        ),
+        ['two']
+      )
+      const expiredAt = new Date(now - 60 * 60_000).toISOString()
+      recordWall(
+        {
+          account: 'expired',
+          cause: 'rate_limited',
+          observedAt: expiredAt,
+          provider: 'expired',
+          rig: 'repo',
+        },
+        {
+          path: ledgerPath,
+          now: Date.parse(expiredAt),
+          ttls: { quotaTtlMinutes: 720 },
+        }
+      )
+      await runFleetWallsCommand(f.main, ['clear', '--all'], ledgerPath)
+      assert.deepEqual(readLedgerWalls(Date.now(), undefined, { path: ledgerPath }), [])
+    } finally {
+      console.log = original
+    }
+    assert.deepEqual(output, ['cleared 1 host wall', 'cleared 2 host walls'])
+  })
+
+  test('rejects wall arguments outside the allowlist', () => {
+    assert.throws(
+      () => runFleetWallsCommand(process.cwd(), ['clear', '']),
+      /usage: bro fleet walls/
+    )
+    assert.throws(
+      () => runFleetWallsCommand(process.cwd(), ['--json', '--verbose']),
+      /usage: bro fleet walls/
+    )
   })
 })

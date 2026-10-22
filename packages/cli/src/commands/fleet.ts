@@ -26,6 +26,7 @@ import { basename } from 'node:path'
 import {
   git,
   gitTry,
+  clearLedgerWalls,
   reviewHost,
   wallText,
   type AgentInfo,
@@ -38,6 +39,7 @@ import {
   eachAgentConnector,
   loadAgentEnv,
   providerWallsFor,
+  fleetWallRowsFor,
   type AgentConnectorEnv,
   type BudgetSnapshot,
 } from '../agent-connectors.ts'
@@ -570,6 +572,15 @@ async function runFleetLive(
 }
 
 export async function runFleetCommand(argv: string[]): Promise<void> {
+  if (argv[0] === 'walls') {
+    try {
+      runFleetWallsCommand(process.cwd(), argv.slice(1))
+    } catch (err) {
+      console.error(`error: ${err instanceof Error ? err.message : String(err)}`)
+      process.exit(2)
+    }
+    return
+  }
   let args: FleetArgs
   try {
     args = fleetArgs(argv)
@@ -604,4 +615,61 @@ export async function runFleetCommand(argv: string[]): Promise<void> {
     return
   }
   printFleetTable(rows, degraded, conflicts, prErrors, walls, wallsError)
+}
+
+type FleetWallsAction =
+  | { kind: 'list'; json: boolean }
+  | { kind: 'clear'; account: string }
+
+function fleetWallsAction(argv: string[]): FleetWallsAction {
+  if (argv.length === 0) {
+    return { kind: 'list', json: false }
+  }
+  if (argv.length === 1 && argv[0] === '--json') {
+    return { kind: 'list', json: true }
+  }
+  if (argv[0] !== 'clear' || argv.length !== 2) {
+    throw new Error('usage: bro fleet walls [--json] | clear <account>|--all')
+  }
+  const account = argv[1]!
+  if (account === '--all') {
+    return { kind: 'clear', account: 'all' }
+  }
+  const trimmed = account.trim()
+  if (trimmed === '' || trimmed.startsWith('-')) {
+    throw new Error('usage: bro fleet walls [--json] | clear <account>|--all')
+  }
+  return { kind: 'clear', account }
+}
+
+export function runFleetWallsCommand(
+  dir: string,
+  argv: string[],
+  ledgerPath?: string
+): void {
+  const action = fleetWallsAction(argv)
+  const env = loadAgentEnv(dir)
+  if (action.kind === 'clear') {
+    const count = clearLedgerWalls(action.account, {
+      ttls: env.fleet?.walls,
+      ...(ledgerPath === undefined ? {} : { path: ledgerPath }),
+    })
+    console.log(`cleared ${count} host wall${count === 1 ? '' : 's'}`)
+    return
+  }
+  const rows = fleetWallRowsFor(dir, env, ledgerPath)
+  if (action.json) {
+    console.log(JSON.stringify(rows, null, 2))
+    return
+  }
+  if (rows.length === 0) {
+    console.log('no live provider walls')
+    return
+  }
+  for (const row of rows) {
+    const until = row.until === undefined ? '' : ` til ${row.until}`
+    console.log(
+      `${row.account} (${row.provider ?? row.account}) walled — ${row.cause}${until} [${row.source}]`
+    )
+  }
 }

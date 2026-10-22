@@ -91,6 +91,7 @@ export {
   modelBase,
   parseProviderEntry,
   providerCallGrade,
+  providerAccount,
   PROVIDER_KINDS,
   PROVIDER_REGISTRY,
   ProviderSurfaceError,
@@ -114,6 +115,8 @@ export {
   deriveProviderWalls,
   fleetRouter,
   fleetRouting,
+  fleetWalls,
+  deriveAccountWalls,
   ON_WALL,
   resolveStepClass,
   routeStepClass,
@@ -121,9 +124,18 @@ export {
   walkChain,
   wallText,
 } from './routing.ts'
+export {
+  clearLedgerWalls,
+  readLedgerWalls,
+  recordWall,
+  wallLedgerPath,
+} from './wall-ledger.ts'
+export type { WallLedgerOptions, WallObservation } from './wall-ledger.ts'
 export type {
   ChainEntry,
   ChainWalk,
+  AccountWall,
+  FleetWallTtls,
   FleetRouter,
   OnWall,
   ProviderWall,
