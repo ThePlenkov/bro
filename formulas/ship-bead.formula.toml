@@ -95,19 +95,27 @@ linked worktree, delete the merged branch, `bd close {{bead}}` (and parent
 epic if its children are all closed), `bd dolt push`, `bro debt collect`.
 Verify with `git worktree list` and `bd ready` — nothing left dangling.
 
-The branch goes with the PR — locally AND on the remote. Order matters
-(git refuses to delete a branch that is checked out):
+The merged branch goes with the PR — locally AND on the remote. Only when
+the branch is provably the PR's: its tip is the merged head (commits landed
+after the merge still carry work) and no other open PR is based on it (a
+stacked PR needs its base). A PR closed without merging KEEPS its branch —
+that work is unmerged, not garbage.
 
-    git switch main && git pull --ff-only   # or: git worktree remove <path>
-    git branch -D <merged-branch>
-    git ls-remote --exit-code --heads origin <merged-branch> >/dev/null 2>&1 \
-      && git push origin --delete <merged-branch>
+Order matters (git refuses to delete a checked-out branch, and `git switch`
+fails when the target is checked out in another worktree):
 
+    git worktree remove <path> && git worktree prune   # if the PR used one
+    git switch <base> && git pull --ff-only           # the PR's base branch
+    git branch -D "<merged-branch>"                    # tip == merged head
+    git ls-remote --exit-code --heads "<head-repo>" "<merged-branch>" >/dev/null 2>&1 \
+      && git push "<head-repo>" --delete "<merged-branch>"
+
+Quote every branch name — a PR head ref is attacker-controlled input and
+reaches a shell. The remote is the PR's HEAD repo: for a fork PR, `origin`
+can be the base repo, and deleting there would hit an unrelated branch.
 `bro act wait --merge --cleanup` already retires the linked worktree and the
 local branch; the remote branch is still yours to delete — and only if it is
 still there (`delete_branch_on_merge` removes it on merge, and deleting an
-already-removed ref exits non-zero). A PR closed without merging is the same
-cleanup: the PR is gone, so its branch goes with it. You may clean up the
-branch of the PR you worked — never another branch, another PR or agent may
-own it.
+already-removed ref exits non-zero). Never touch another branch — another
+PR or agent may own it.
 """

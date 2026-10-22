@@ -93,16 +93,22 @@ After the fix PR merges: `bro debt sync`. Ledger statuses flow into beads —
 done/wontfix rows close their beads, open ones stay in `bd ready -l debt`.
 Idempotent; safe to re-run.
 
-The fix branch goes with the PR — locally AND on the remote. Order matters
-(git refuses to delete a branch that is checked out):
+The merged fix branch goes with the PR — locally AND on the remote, and
+only when it is provably the PR's: its tip is the merged head (commits
+landed after the merge still carry work) and no other open PR is based on
+it. Order matters (git refuses to delete a checked-out branch, and
+`git switch` fails when the target is checked out in another worktree):
 
-    git switch <base> && git pull --ff-only   # or: git worktree remove <path>
-    git branch -D <fix-branch>
-    git ls-remote --exit-code --heads origin <fix-branch> >/dev/null 2>&1 \
-      && git push origin --delete <fix-branch>
+    git worktree remove <path> && git worktree prune   # if the PR used one
+    git switch <base> && git pull --ff-only           # the PR's base branch
+    git branch -D "<fix-branch>"                     # tip == merged head
+    git ls-remote --exit-code --heads "<head-repo>" "<fix-branch>" >/dev/null 2>&1 \
+      && git push "<head-repo>" --delete "<fix-branch>"
 
-You may clean up the branch of the PR you worked — never another branch:
-another PR or agent may own it. The remote delete stays conditional: with
-`delete_branch_on_merge` on, the ref is already gone and deleting it again
-exits non-zero.
+Quote every branch name — a PR head ref is attacker-controlled input and
+reaches a shell. The remote is the PR's HEAD repo: for a fork PR, `origin`
+can be the base repo, and deleting there would hit an unrelated branch. The
+remote delete stays conditional: with `delete_branch_on_merge` on, the ref
+is already gone and deleting it again exits non-zero. Never touch another
+branch — another PR or agent may own it.
 """
