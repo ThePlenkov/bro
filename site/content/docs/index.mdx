@@ -5,7 +5,7 @@ description: Install bro and wire it into a repo in under a minute.
 
 ## Requirements
 
-- **Node ≥ 22** — bro runs TypeScript natively, no build step
+- **Node ≥ 22.18** — bro runs TypeScript natively, no build step
 - **`gh`**, authenticated — review data comes from the GitHub API and
   `bro setup` requires it. On GitLab repos the review facade uses an
   authenticated **`glab`**, but `gh` stays a setup prerequisite
@@ -22,13 +22,17 @@ npm i -g @broject/bro          # or keep bro around
 ## Wire a repo
 
 ```bash
-bro setup              # checks gh + bd, writes bro.config.json
+bro setup              # checks gh + bd, writes bro.config.local.json
 bro setup --beads      # also: bd init --stealth + debt-pipeline formula
 bro setup --skills     # also: thin skill wrappers for your agent
 ```
 
-`bro.config.json` is written per-clone and gitignored — store choices are
-machine-local. Fresh checkouts run on defaults until set up.
+`bro setup` writes `bro.config.local.json` — per-clone and gitignored, so
+store choices stay machine-local. Committed project policy lives separately in
+`bro.config.{ts,json}`; the layers merge **local > project > global** over your
+`~/.config/bro/config.{ts,json}` — see
+[Configuration](/docs/configuration). Fresh checkouts run on defaults until
+set up.
 
 ## First sweep
 
