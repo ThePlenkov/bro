@@ -115,24 +115,31 @@ function commandIndex(toks: Token[]): number {
     if (!WRAPPERS.has(name)) {
       return i
     }
-    i++
-    let operands = WRAPPER_OPERANDS.has(name) ? 1 : 0
-    while (i < toks.length) {
-      const next = toks[i]!.text
-      if (next.startsWith('-')) {
+    i = skipWrapperArgs(toks, i + 1, name)
+  }
+  return i
+}
+
+/** The index after a wrapper's own arguments — its options (with the
+ *  value some of them take) and the operand some of them need. */
+function skipWrapperArgs(toks: Token[], from: number, name: string): number {
+  let i = from
+  let operands = WRAPPER_OPERANDS.has(name) ? 1 : 0
+  while (i < toks.length) {
+    const next = toks[i]!.text
+    if (next.startsWith('-')) {
+      i++
+      if (VALUE_OPTIONS.has(next) && i < toks.length && !toks[i]!.text.startsWith('-')) {
         i++
-        if (VALUE_OPTIONS.has(next) && i < toks.length && !toks[i]!.text.startsWith('-')) {
-          i++
-        }
-        continue
       }
-      if (operands > 0) {
-        operands--
-        i++
-        continue
-      }
-      break
+      continue
     }
+    if (operands > 0) {
+      operands--
+      i++
+      continue
+    }
+    break
   }
   return i
 }
@@ -179,7 +186,16 @@ function isShellCommandFlag(flag: string | undefined): boolean {
   if (flag === undefined) {
     return false
   }
-  return flag === '-c' || /^-[a-z]*c[a-z]*$/.test(flag)
+  if (flag === '-c') {
+    return true
+  }
+  // a combined short flag that carries the command ('-lc', '-ic') —
+  // read as letters, not as a polynomial pattern
+  if (!flag.startsWith('-') || flag.length < 2) {
+    return false
+  }
+  const letters = flag.slice(1)
+  return letters.includes('c') && /^[a-z]+$/.test(letters)
 }
 
 /** The starts one shell segment opens. */
