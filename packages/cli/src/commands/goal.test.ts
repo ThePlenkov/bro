@@ -111,6 +111,19 @@ describe('goalStopLines', () => {
     assert.equal(lines.length, 1)
     assert.match(lines[0]!, /goal: "tests pass"/)
   })
+
+  test('a pause landing mid-eval stays silent — the fail-open reminder re-reads first', async () => {
+    const dir = repo()
+    // judge.mode: shadow enters the judged path; decide() throws without
+    // a provider, so the eval lands in the fail-open recheck
+    writeFileSync(join(dir, 'bro.config.json'), JSON.stringify({ judge: { mode: 'shadow' } }))
+    writeRaw(dir, 's1', ACTIVE)
+    const pause = Promise.resolve().then(() => {
+      writeRaw(dir, 's1', { ...ACTIVE, status: 'paused' })
+      return 'ctx'
+    })
+    assert.deepEqual(await goalStopLines(dir, 's1', { trace: 't', context: pause }), [])
+  })
 })
 
 describe('goalContextLines', () => {
@@ -185,6 +198,9 @@ describe('runGoalCommand', () => {
       process.env = { ...prev, CLAUDE_CODE_SESSION_ID: 'cc-1' }
       delete process.env.BRO_SESSION_ID
       delete process.env.DEVIN_SESSION_ID
+      delete process.env.CLAUDE_SESSION_ID
+      delete process.env.CODEX_SESSION_ID
+      delete process.env.OPENCODE_SESSION_ID
       try {
         capture(() => runGoalCommand(['ship', 'it']))
         assert.equal(readGoal(process.cwd(), 'cc-1')?.condition, 'ship it')
