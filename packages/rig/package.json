@@ -1,0 +1,47 @@
+{
+  "name": "@broject/rig",
+  "version": "0.2.5",
+  "type": "module",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
+  },
+  "scripts": {
+    "test": "tsx --test src/**/*.test.ts",
+    "typecheck": "tsc --noEmit"
+  },
+  "devDependencies": {
+    "tsdown": "^0.15.0",
+    "tsx": "^4.20.0",
+    "typescript": "^5.9.0"
+  },
+  "files": [
+    "dist"
+  ],
+  "engines": {
+    "node": ">=22"
+  },
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/ThePlenkov/bro.git",
+    "directory": "packages/rig"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "dependencies": {
+    "@broject/core": "^0.2.0",
+    "@broject/drill": "^0.2.5"
+  },
+  "description": "bro lifecycle engine — the stateless re-entry verdict over durable state (specs bro-oy3k1)",
+  "keywords": [
+    "automation",
+    "lifecycle",
+    "agent",
+    "bro"
+  ],
+  "homepage": "https://broject.dev/docs"
+}

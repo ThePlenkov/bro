@@ -51,6 +51,7 @@ import {
   readAgentRegistry,
   reviewHost,
   stackSection,
+  worktreePathFor,
   type AgentRegistryEntry,
   type Connector,
   type ReviewFacade,
@@ -141,11 +142,9 @@ export function isLinkedGitDir(gitDir: string): boolean {
   return /(?:^|\/)\.git\/worktrees\/[^/]+$/.test(norm)
 }
 
-/** Slug → sibling path next to the main checkout: `bro` + `fix-x` →
- *  `../bro--fix-x`. */
-export function worktreePathFor(mainRoot: string, slug: string): string {
-  return join(dirname(mainRoot), `${basename(mainRoot)}--${slug}`)
-}
+// worktreePathFor lives in @broject/core next to mainWorktreeRoot —
+// the sibling-checkout convention is git-plane plumbing (bro-jamp7).
+export { worktreePathFor }
 
 /** A worktree's real git dir — a linked worktree's `.git` is a FILE
  *  naming `<common>/worktrees/<name>`; the main checkout's `.git` is the

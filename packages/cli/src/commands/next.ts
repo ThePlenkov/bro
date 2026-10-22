@@ -23,37 +23,22 @@
  * queue is scoped to this checkout's issue_prefix — foreign-prefix
  * beads are reported, never claimed. scope = "all" opts out in plans.
  */
-import { emitLifecycle, ensureTasksBackend, facade, getTasks, gitTry, type FacadeOpts, type TaskStore } from '@broject/core'
+import { emitLifecycle, ensureTasksBackend, getTasks, gitTry, type FacadeOpts } from '@broject/core'
+// The ready-set read (storeFor/readyBeads/ReadyBead/NEVER_CLAIM_LABELS)
+// lives in @broject/rig — the engine's dep-gate shares the contract
+// (bro-jamp7); re-exported so `bro next`'s surface is unchanged.
+import {
+  readyBeads,
+  storeFor,
+  NEVER_CLAIM_LABELS,
+  type ReadyBead,
+} from '@broject/rig'
 import { flag } from './args.ts'
 import type { NextFilters, NextOrder, NextPlan } from './next-plan.ts'
 import { requireGlobalStore } from '../doctypes/store.ts'
 import { loadBroConfig } from '../plugins.ts'
 
-/** The serving tasks backend for `dir` — `connectors.tasks` in
- *  bro.config selects it (beads by default, github when pinned). The
- *  config lookup anchors at the git root so a run from a subdirectory
- *  resolves the same backend; the global store is beads-only by
- *  construction — its dir carries no bro.config, so resolution falls
- *  to the registry default anyway. */
-function storeFor(dir?: string, opts?: FacadeOpts): TaskStore {
-  const root =
-    dir ?? (gitTry(['rev-parse', '--show-toplevel']).out.trim() || process.cwd())
-  return facade('tasks', { dir: root }, opts ?? { prefer: loadBroConfig(root).connectors })
-}
-
-export interface ReadyBead {
-  id: string
-  title: string
-  description?: string
-  status: string
-  priority: number
-  issue_type: string
-  created_at: string
-  parent?: string
-  /** bd labels — present on `bd ready --json` rows; the labels scope
-   *  filter in plans/argv only claims beads carrying a declared label. */
-  labels?: string[]
-}
+export { readyBeads, NEVER_CLAIM_LABELS, type ReadyBead }
 
 interface NextResult {
   state: 'task' | 'gated' | 'idle'
@@ -74,18 +59,6 @@ interface NextResult {
 }
 
 const HUMAN_GATE = /human.?gate/i
-
-/** Labels that mark coordination primitives, not work — excluded bd-side
- *  so a shared queue's semaphores can never look claimable. Gas Town's
- *  merge-slot bead (<prefix>-merge-slot) is the known instance. */
-export const NEVER_CLAIM_LABELS = ['gt:slot']
-
-/** The single `bd ready` contract for next and loop: coordination
- *  primitives are filtered out by bd itself, before classification.
- *  `dir` retargets the query at another store — `bro next --global`. */
-export function readyBeads(dir?: string, opts?: FacadeOpts): ReadyBead[] {
-  return storeFor(dir, opts).ready<ReadyBead>({ excludeLabels: NEVER_CLAIM_LABELS })
-}
 
 /** This checkout's bead id scope — what `bd init` recorded as
  *  issue_prefix. An explicitly unset prefix means the db cannot tell

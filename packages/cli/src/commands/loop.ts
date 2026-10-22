@@ -156,7 +156,7 @@ import {
 } from './next.ts'
 import type { NextPlan } from './next-plan.ts'
 import { processesRootedIn } from './proc-owner.ts'
-import { rigNext } from './rig-next.ts'
+import { rigNext } from '@broject/rig'
 
 interface Ctx {
   /** Review facade bound to the main checkout — host calls follow the

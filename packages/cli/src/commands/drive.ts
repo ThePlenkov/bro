@@ -137,7 +137,7 @@ import {
   type WorktreeClaimInfo,
 } from './work.ts'
 import { installDrive, uninstallDrive } from './daemon.ts'
-import { rigNext, type RigNext } from './rig-next.ts'
+import { rigNext, type RigNext } from '@broject/rig'
 import { isOrchestratorSession } from './watch-pulse.ts'
 export { LIVE_MARKER_MS, worktreeClaim, worktreeClaimInfo, worktreeIdleMs } from './work.ts'
 
