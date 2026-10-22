@@ -81,36 +81,56 @@ export function sessionCapVerdict(
   // call claim ONE slot, and two separate calls with the same command
   // claim their own.
   const key = `guard-${ctx.sessionId ?? 'nosession'}-${callKey(command, ctx)}`
+  return judgeViews(views, bags, key)
+}
+
+/** Judge the kinds a command would start — claim the slot, then hold
+ *  the call to the cap. */
+function judgeViews(
+  views: SessionCapView[],
+  bags: Record<string, Record<string, unknown>>,
+  key: string
+): PreToolVerdict[] {
   for (const view of views) {
-    let claimed: { paths: string[]; fresh: boolean }
-    try {
-      claimed = reserveSessionStart({
-        kind: view.kind,
-        agents: bags,
-        key,
-        count: view.starts,
-      })
-    } catch {
-      // the claim could not be written — the count IS established, so
-      // the cap still judges this call (a claim that cannot be taken
-      // must not open a session the budget does not know about)
-      const refusal = sessionCapRefusal(view)
-      if (refusal !== undefined) {
-        return [{ block: refusal }]
-      }
-      continue
-    }
-    // A claim that was already there means this call is a repeat (the
-    // other hook event for the same call): its start is counted once.
-    const refusal = sessionCapRefusal(claimed.fresh ? view : { ...view, starts: 0 })
-    if (refusal !== undefined) {
-      if (claimed.fresh) {
-        releaseSessionStart(claimed.paths)
-      }
-      return [{ block: refusal }]
+    const verdict = judgeView(view, bags, key)
+    if (verdict !== undefined) {
+      return [verdict]
     }
   }
   return []
+}
+
+/** One kind's verdict — the claim, then the cap. */
+function judgeView(
+  view: SessionCapView,
+  bags: Record<string, Record<string, unknown>>,
+  key: string
+): PreToolVerdict | undefined {
+  let claimed: { paths: string[]; fresh: boolean }
+  try {
+    claimed = reserveSessionStart({
+      kind: view.kind,
+      agents: bags,
+      key,
+      count: view.starts,
+    })
+  } catch {
+    // the claim could not be written — the count IS established, so
+    // the cap still judges this call (a claim that cannot be taken
+    // must not open a session the budget does not know about)
+    const refusal = sessionCapRefusal(view)
+    return refusal === undefined ? undefined : { block: refusal }
+  }
+  // A claim that was already there means this call is a repeat (the
+  // other hook event for the same call): its start is counted once.
+  const refusal = sessionCapRefusal(claimed.fresh ? view : { ...view, starts: 0 })
+  if (refusal === undefined) {
+    return undefined
+  }
+  if (claimed.fresh) {
+    releaseSessionStart(claimed.paths)
+  }
+  return { block: refusal }
 }
 
 /** The claim's key for one call — the tool-use id when the client
