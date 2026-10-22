@@ -8,7 +8,10 @@ import {
   fleetRouting,
   resolveStepClass,
   routeStepClass,
+  walkChain,
   wallText,
+  type ChainEntry,
+  type ProviderWall,
   type RoutingTable,
 } from './routing.ts'
 
@@ -98,7 +101,7 @@ describe('resolveStepClass', () => {
     assert.equal(resolveStepClass(routing, providers, {}).class, 'default')
   })
 
-  test('the spawn lands on chain[0] — provider + inline model pin', () => {
+  test('class resolution exposes the chain head provider + inline model pin', () => {
     const r = resolveStepClass(routing, providers, { class: 'sweep' })
     assert.equal(r.provider, 'kilo-free')
     assert.equal(r.model, 'auto/free')
@@ -305,5 +308,127 @@ describe('wallText', () => {
       'kilo walled — rate_limited til 2026-01-03T00:00:00Z'
     )
     assert.equal(wallText({ provider: 'devin', cause: 'quota' }), 'devin walled — quota')
+  })
+})
+
+describe('walkChain', () => {
+  const chain = (...providers: string[]): ChainEntry[] => providers.map((provider) => ({ provider }))
+  const wall = (provider: string, cause: ProviderWall['cause'] = 'rate_limited'): ProviderWall => ({
+    provider,
+    cause,
+  })
+
+  test('an un-walled head spawns there', () => {
+    assert.deepEqual(walkChain(chain('a', 'b'), 'fallthrough', []), {
+      verdict: 'spawn',
+      index: 0,
+      entry: { provider: 'a' },
+      skipped: [],
+    })
+  })
+
+  test('a walled head falls through to the next provider', () => {
+    assert.deepEqual(walkChain(chain('a', 'b'), 'fallthrough', [wall('a')]), {
+      verdict: 'spawn',
+      index: 1,
+      entry: { provider: 'b' },
+      skipped: [wall('a')],
+    })
+  })
+
+  test('fallthrough records multiple walls passed', () => {
+    assert.deepEqual(walkChain(chain('a', 'b', 'c'), 'fallthrough', [wall('a'), wall('b')]), {
+      verdict: 'spawn',
+      index: 2,
+      entry: { provider: 'c' },
+      skipped: [wall('a'), wall('b')],
+    })
+  })
+
+  test('a walled head parks by policy', () => {
+    assert.deepEqual(walkChain(chain('a', 'b'), 'park', [wall('a')]), {
+      verdict: 'park',
+      reason: 'policy',
+      index: 0,
+      entry: { provider: 'a' },
+      wall: wall('a'),
+    })
+  })
+
+  test('all walled exhausts on the final entry', () => {
+    assert.deepEqual(walkChain(chain('a', 'b'), 'fallthrough', [wall('a'), wall('b')]), {
+      verdict: 'park',
+      reason: 'exhausted',
+      index: 1,
+      entry: { provider: 'b' },
+      wall: wall('b'),
+    })
+  })
+
+  test('from a middle provider walks forward without wrapping', () => {
+    assert.deepEqual(
+      walkChain(chain('a', 'b', 'c'), 'fallthrough', [wall('b'), wall('c')], 'b'),
+      {
+        verdict: 'park',
+        reason: 'exhausted',
+        index: 2,
+        entry: { provider: 'c' },
+        wall: wall('c'),
+      }
+    )
+  })
+
+  test('a rate-limit wall cleared by its past reset keeps the current provider eligible', () => {
+    const walls = deriveProviderWalls(
+      {
+        current: entry({
+          provider: 'b',
+          cause: 'rate_limited',
+          resetAt: '2026-01-01T12:00:00Z',
+        }),
+      },
+      Date.parse('2026-01-02T00:00:00Z')
+    )
+    assert.deepEqual(walkChain(chain('a', 'b'), 'fallthrough', walls, 'b'), {
+      verdict: 'spawn',
+      index: 1,
+      entry: { provider: 'b' },
+      skipped: [],
+    })
+  })
+
+  test('an unknown current provider starts at the head', () => {
+    assert.deepEqual(walkChain(chain('a', 'b'), 'fallthrough', [], 'other'), {
+      verdict: 'spawn',
+      index: 0,
+      entry: { provider: 'a' },
+      skipped: [],
+    })
+  })
+
+  test('a single walled entry exhausts under fallthrough and parks by policy', () => {
+    assert.deepEqual(walkChain(chain('a'), 'fallthrough', [wall('a')]), {
+      verdict: 'park',
+      reason: 'exhausted',
+      index: 0,
+      entry: { provider: 'a' },
+      wall: wall('a'),
+    })
+    assert.deepEqual(walkChain(chain('a'), 'park', [wall('a')]), {
+      verdict: 'park',
+      reason: 'policy',
+      index: 0,
+      entry: { provider: 'a' },
+      wall: wall('a'),
+    })
+  })
+
+  test('quota walls count as walls', () => {
+    assert.deepEqual(walkChain(chain('a', 'b'), 'fallthrough', [wall('a', 'quota')]), {
+      verdict: 'spawn',
+      index: 1,
+      entry: { provider: 'b' },
+      skipped: [wall('a', 'quota')],
+    })
   })
 })

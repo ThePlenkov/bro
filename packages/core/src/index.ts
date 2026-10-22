@@ -118,10 +118,12 @@ export {
   resolveStepClass,
   routeStepClass,
   stepClassInfo,
+  walkChain,
   wallText,
 } from './routing.ts'
 export type {
   ChainEntry,
+  ChainWalk,
   FleetRouter,
   OnWall,
   ProviderWall,

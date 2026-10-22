@@ -1,10 +1,9 @@
 /**
  * Fleet routing — task-class → ordered provider chain plus provider
  * walls derived from the agent registry (spec:
- * specs/fleet-routing/bro-1x7p.md). M2 scope: the routing config
- * sections, step-class resolution, and wall derivation rendered by
- * `bro fleet`/`bro watch`. The re-dispatch chain walk is M3 — an M2
- * spawn always lands on chain[0].
+ * specs/fleet-routing/bro-1x7p.md). The re-dispatch chain walk is
+ * performed under the spawn registry lock from provider walls derived
+ * from the registry.
  */
 import { SpawnError, type AgentRegistryEntry } from './agents.ts'
 import { taskStoreAt } from './tasks.ts'
@@ -192,17 +191,16 @@ export function stepClassInfo(
 }
 
 /** The resolution verdict — the lane name, its declared chain, the
- *  effective wall policy, and where THIS spawn lands (chain[0] —
- *  the fallthrough walk is M3). */
+ *  effective wall policy, and the chain head's initial provider/model
+ *  pair. The spawn may walk forward from its current provider. */
 export interface ResolvedClass {
   class: string
   chain: ChainEntry[]
   /** `entry.onWall` ?? priority default — P0/P1 park, P2+ fallthrough. */
   onWall: OnWall
-  /** chain[0]'s slot — `provider`/`model` are a PAIR: the pin applies
-   *  only when the routed provider is the one used; a provider
-   *  override must not inherit this model (it belongs to chain[0]'s
-   *  provider, not the override's). */
+  /** The chain head's slot — `provider`/`model` are a PAIR: the pin
+   *  applies only when that provider is selected; an override must not
+   *  inherit this model. */
   provider: string
   model?: string
 }
@@ -282,6 +280,55 @@ export interface ProviderWall {
   /** rate_limited only — the provider-reported reset the wall holds
    *  until; absent when none was reported (indefinite). */
   until?: string
+}
+
+export type ChainWalk =
+  | { verdict: 'spawn'; index: number; entry: ChainEntry; skipped: ProviderWall[] }
+  | {
+      verdict: 'park'
+      reason: 'policy' | 'exhausted'
+      index: number
+      entry: ChainEntry
+      wall: ProviderWall
+    }
+
+export function walkChain(
+  chain: ChainEntry[],
+  onWall: OnWall,
+  walls: ProviderWall[],
+  from?: string
+): ChainWalk {
+  if (chain.length === 0) {
+    throw new SpawnError('fleet.routing chain must not be empty', 'config')
+  }
+  const found = from === undefined ? -1 : chain.findIndex((entry) => entry.provider === from)
+  const start = found < 0 ? 0 : found
+  const wallFor = (entry: ChainEntry) => walls.find((wall) => wall.provider === entry.provider)
+  const startEntry = chain[start]!
+  const startWall = wallFor(startEntry)
+  if (startWall === undefined) {
+    return { verdict: 'spawn', index: start, entry: startEntry, skipped: [] }
+  }
+  if (onWall === 'park') {
+    return { verdict: 'park', reason: 'policy', index: start, entry: startEntry, wall: startWall }
+  }
+  const skipped = [startWall]
+  for (let index = start + 1; index < chain.length; index++) {
+    const entry = chain[index]!
+    const wall = wallFor(entry)
+    if (wall === undefined) {
+      return { verdict: 'spawn', index, entry, skipped }
+    }
+    skipped.push(wall)
+  }
+  const index = chain.length - 1
+  return {
+    verdict: 'park',
+    reason: 'exhausted',
+    index,
+    entry: chain[index]!,
+    wall: wallFor(chain[index]!) ?? startWall,
+  }
 }
 
 /** The spec's render: `<provider> walled — <cause>[ til <resetAt>]`. */
