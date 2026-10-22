@@ -17,7 +17,8 @@
  * trace/, perf/).
  *
  * Session resolution: `--session` > env (BRO_SESSION_ID, DEVIN_SESSION_ID,
- * CLAUDE_SESSION_ID, CODEX_SESSION_ID, OPENCODE_SESSION_ID) > the repo
+ * CLAUDE_CODE_SESSION_ID, CLAUDE_SESSION_ID, CODEX_SESSION_ID,
+ * OPENCODE_SESSION_ID) > the repo
  * seed `_default` — what a bare-shell `bro goal` writes, materialized as
  * the NEXT session's goal when its hook first evaluates it.
  *
@@ -60,6 +61,7 @@ const SEED = '_default'
 const SESSION_ENV = [
   'BRO_SESSION_ID',
   'DEVIN_SESSION_ID',
+  'CLAUDE_CODE_SESSION_ID',
   'CLAUDE_SESSION_ID',
   'CODEX_SESSION_ID',
   'OPENCODE_SESSION_ID',
@@ -197,9 +199,8 @@ export async function goalStopLines(
   if (goal === null) {
     return []
   }
-  if (goal.status === 'paused') {
-    return [`paused goal: "${goal.condition}" — \`bro goal resume\` reactivates`]
-  }
+  // A paused goal stays silent: any per-stop context re-wakes the host,
+  // so a reminder here turns an idle wait into an unbounded turn loop.
   if (goal.status !== 'active') {
     return []
   }

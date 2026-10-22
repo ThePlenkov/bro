@@ -96,10 +96,10 @@ describe('goalStopLines', () => {
     assert.match(lines[0]!, /bro goal clear/)
   })
 
-  test('paused goal → resume hint; resolved goal → silence', async () => {
+  test('paused goal → silence (a per-stop reminder re-wakes the host in a loop); resolved goal → silence', async () => {
     const dir = repo()
     writeRaw(dir, 's1', { ...ACTIVE, status: 'paused' })
-    assert.match((await goalStopLines(dir, 's1', { trace: 't' }))[0]!, /paused goal/)
+    assert.deepEqual(await goalStopLines(dir, 's1', { trace: 't' }), [])
     writeRaw(dir, 's1', { ...ACTIVE, status: 'achieved' })
     assert.deepEqual(await goalStopLines(dir, 's1', { trace: 't' }), [])
   })
@@ -156,7 +156,7 @@ describe('runGoalCommand', () => {
   test('set → status → clear lifecycle on the repo seed', () => {
     inRepo(() => {
       const env = { ...process.env }
-      for (const k of ['BRO_SESSION_ID', 'DEVIN_SESSION_ID', 'CLAUDE_SESSION_ID', 'CODEX_SESSION_ID', 'OPENCODE_SESSION_ID']) {
+      for (const k of ['BRO_SESSION_ID', 'DEVIN_SESSION_ID', 'CLAUDE_CODE_SESSION_ID', 'CLAUDE_SESSION_ID', 'CODEX_SESSION_ID', 'OPENCODE_SESSION_ID']) {
         delete env[k]
       }
       process.env = env
@@ -176,6 +176,24 @@ describe('runGoalCommand', () => {
       capture(() => runGoalCommand(['ship', 'it', '--session', 'abc123']))
       assert.equal(readGoal(process.cwd(), 'abc123')?.condition, 'ship it')
       assert.equal(readGoal(process.cwd(), '_default'), null)
+    })
+  })
+
+  test('CLAUDE_CODE_SESSION_ID resolves the Claude Code session, not the repo seed', () => {
+    inRepo(() => {
+      const prev = process.env
+      process.env = { ...prev, CLAUDE_CODE_SESSION_ID: 'cc-1' }
+      delete process.env.BRO_SESSION_ID
+      delete process.env.DEVIN_SESSION_ID
+      try {
+        capture(() => runGoalCommand(['ship', 'it']))
+        assert.equal(readGoal(process.cwd(), 'cc-1')?.condition, 'ship it')
+        capture(() => runGoalCommand(['clear']))
+        assert.equal(readGoal(process.cwd(), 'cc-1')?.status, 'cleared')
+        assert.equal(readGoal(process.cwd(), '_default'), null)
+      } finally {
+        process.env = prev
+      }
     })
   })
 
