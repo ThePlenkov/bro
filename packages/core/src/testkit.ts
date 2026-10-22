@@ -102,3 +102,38 @@ export function scrubEnv(extra: string[] = []): () => void {
     }
   }
 }
+
+/** The noms manifest line for a fixture dolt store — v5 layout
+ *  `5:__DOLT__:<lock>:<root>:<extra>:` then name:count pairs (spec:
+ *  specs/bro-orcdv.md). */
+export function doltManifest(tables: Record<string, number> = {}): string {
+  const pairs = Object.entries(tables).flatMap(([n, c]) => [n, String(c)])
+  return `${['5', '__DOLT__', '0'.repeat(32), '1'.repeat(32), '0'.repeat(32), ...pairs].join(':')}\n`
+}
+
+/** Commit `files` into `dir`'s repo (bare or not) as the next
+ *  `refs/dolt/data` head — pure plumbing, no worktree needed. `parent`
+ *  chains history for last-good walks. Returns the head sha. */
+export function doltStoreCommit(
+  dir: string,
+  files: Record<string, string>,
+  parent?: string
+): string {
+  const blob = (content: string): string =>
+    testGit(['-C', dir, 'hash-object', '-w', '--stdin'], { input: content }).trim()
+  const entries = Object.entries(files)
+    .map(([name, c]) => `100644 blob ${blob(c)}\t${name}\0`)
+    .join('')
+  const tree = testGit(['-C', dir, 'mktree', '-z'], { input: entries }).trim()
+  const head = testGit(
+    [
+      '-C', dir,
+      '-c', 'user.email=t@t', '-c', 'user.name=t',
+      'commit-tree', tree,
+      ...(parent === undefined ? [] : ['-p', parent]),
+      '-m', 'store',
+    ]
+  ).trim()
+  testGit(['-C', dir, 'update-ref', 'refs/dolt/data', head])
+  return head
+}
