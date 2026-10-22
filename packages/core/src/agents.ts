@@ -236,7 +236,9 @@ export interface SpawnSpec {
   /** Provider-resolved spawn payload — see SpawnWorker. */
   worker?: SpawnWorker
   /** Pre-resolved fleet-routing candidates, in declared chain order.
-   *  prepareSpawn selects one under the registry lock. */
+   *  prepareSpawn rewrites provider/model/worker/class from the walked
+   *  candidate under the registry lock; callers read them only after
+   *  prepareSpawn returns. */
   route?: {
     class: string
     onWall: OnWall

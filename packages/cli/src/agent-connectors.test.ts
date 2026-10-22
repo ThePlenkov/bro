@@ -1891,6 +1891,27 @@ describe('resolveSpawnProvider', () => {
     )
   })
 
+  test('a route candidate preserves an input error kind', async () => {
+    await assert.rejects(
+      resolveSpawnRoute(
+        env,
+        'native',
+        {
+          class: 'free',
+          chain: [{ provider: 'missing' }],
+          onWall: 'fallthrough',
+          provider: 'missing',
+        },
+        {},
+        'flag'
+      ),
+      (err: unknown) =>
+        err instanceof SpawnError &&
+        err.kind === 'input' &&
+        /fleet\.routing\.free provider "missing"/.test(err.message)
+    )
+  })
+
   test('a model selection applies to the chain head, not fallback provider pins', async () => {
     const routeEnv: AgentConnectorEnv = {
       ...env,
@@ -2477,6 +2498,40 @@ describe('fleet chain walk spawn integration', () => {
         deriveProviderWalls(registry, Date.now()).find((wall) => wall.provider === 'A')?.cause,
         'rate_limited'
       )
+      await c.stop(info.id)
+    } finally {
+      cleanup(f)
+    }
+  })
+
+  test('a cause-less routed respawn records its outgoing provider when it moves', async () => {
+    const f = fx([
+      { id: 'fx-1', status: 'open' },
+      { id: 'fx-2', status: 'open' },
+    ])
+    try {
+      patchAgentRegistry(f.main, 'fx-1', {
+        agentId: 'native-a-lost',
+        backend: 'native',
+        spawnedAt: oldSpawn,
+        provider: 'A',
+        model: 'model-A',
+        stopped: false,
+      })
+      patchAgentRegistry(f.main, 'fx-2', death('A'))
+      const c = conn(f)
+      const info = await c.spawn({
+        ...SPEC(f.main, f.beadsDir, 'fx-1', 'setTimeout(() => {}, 30000)'),
+        route: routeFor('fallthrough'),
+      })
+      const entry = readAgentRegistry(f.main)['fx-1']!
+      assert.equal(entry.provider, 'B')
+      assert.deepEqual((entry.attempts as unknown[])[0], {
+        provider: 'A',
+        model: 'model-A',
+        spawnedAt: oldSpawn,
+        stopped: false,
+      })
       await c.stop(info.id)
     } finally {
       cleanup(f)

@@ -432,7 +432,8 @@ export async function resolveSpawnRoute(
         return { provider: pick.provider, model: pick.model, worker: pick.worker }
       } catch (err) {
         const detail = err instanceof Error ? err.message : String(err)
-        throw new SpawnError(`${label} — ${detail}`, 'config')
+        const kind = err instanceof SpawnError ? err.kind : 'config'
+        throw new SpawnError(`${label} — ${detail}`, kind)
       }
     })
   )
@@ -1484,6 +1485,37 @@ function spawnWalls(
   return deriveProviderWalls(registry, now)
 }
 
+function applySpawnRoute(
+  dir: string,
+  spec: SpawnSpec,
+  registry: Record<string, AgentRegistryEntry>,
+  existing: AgentRegistryEntry | undefined
+): { now: number; walls: ProviderWall[] } | undefined {
+  const route = spec.route
+  if (route === undefined) {
+    return undefined
+  }
+  const now = Date.now()
+  const walls = spawnWalls(dir, registry, now)
+  const chain = route.candidates.map(({ provider, model }) => ({ provider, model }))
+  const walk = walkChain(chain, route.onWall, walls, existing?.provider)
+  if (walk.verdict === 'park') {
+    const verdict = walk.reason === 'policy' ? 'parked — onWall park' : 'chain exhausted'
+    throw new SpawnError(
+      `${spec.molStep} class "${route.class}" ${verdict} — ${wallText(walk.wall)}; ` +
+        `\`bro agents down ${spec.molStep}\` lifts the block`,
+      'cap'
+    )
+  }
+  const picked = route.candidates[walk.index]!
+  // prepareSpawn rewrites these under the registry lock; callers read them only after it returns.
+  spec.provider = picked.provider
+  spec.model = picked.model
+  spec.worker = picked.worker
+  spec.class = route.class
+  return { now, walls }
+}
+
 function prepareSpawn(
   dir: string,
   home: string,
@@ -1540,25 +1572,7 @@ function prepareSpawn(
   for (const [step, entry] of Object.entries(registry)) {
     ensureExitCause(dir, home, step, entry)
   }
-  const routeNow = spec.route === undefined ? undefined : Date.now()
-  const walls = routeNow === undefined ? undefined : spawnWalls(dir, registry, routeNow)
-  if (spec.route !== undefined && walls !== undefined) {
-    const chain = spec.route.candidates.map(({ provider, model }) => ({ provider, model }))
-    const walk = walkChain(chain, spec.route.onWall, walls, existing?.provider)
-    if (walk.verdict === 'park') {
-      const verdict = walk.reason === 'policy' ? 'parked — onWall park' : 'chain exhausted'
-      throw new SpawnError(
-        `${spec.molStep} class "${spec.route.class}" ${verdict} — ${wallText(walk.wall)}; ` +
-          `\`bro agents down ${spec.molStep}\` lifts the block`,
-        'cap'
-      )
-    }
-    const picked = spec.route.candidates[walk.index]!
-    spec.provider = picked.provider
-    spec.model = picked.model
-    spec.worker = picked.worker
-    spec.class = spec.route.class
-  }
+  const routed = applySpawnRoute(dir, spec, registry, existing)
   // the wall refusal comes AFTER the live-agent and claim guards: a
   // respawn of an agent that is already running is a CONFLICT, and so is
   // a step another owner already claimed — the caller reads those kinds,
@@ -1566,9 +1580,9 @@ function prepareSpawn(
   // that never needed a provider slot
   const { claimed, actor, phantom } = guardClaim(spec, existing !== undefined, opts.claimAs)
   const wallRefusal =
-    routeNow === undefined
+    routed === undefined
       ? batchWallRefusal(registry, spec)
-      : batchWallRefusal(registry, spec, routeNow, walls)
+      : batchWallRefusal(registry, spec, routed.now, routed.walls)
   if (wallRefusal !== undefined) {
     throw wallRefusal
   }
@@ -1645,14 +1659,16 @@ function commitSpawn(
   const logFrom = logSizeOrZero(log)
   const stderrFrom = logSizeOrZero(stderrLog)
   const outgoingAttempt =
-    spec.route !== undefined && existing !== undefined && isAgentCause(existing.cause)
+    spec.route !== undefined &&
+    existing !== undefined &&
+    (isAgentCause(existing.cause) || existing.provider !== spec.provider)
       ? {
-          provider: existing.provider,
-          model: existing.model,
-          cause: existing.cause,
-          resetAt: existing.resetAt,
-          spawnedAt: existing.spawnedAt,
-          stopped: existing.stopped,
+          ...(existing.provider === undefined ? {} : { provider: existing.provider }),
+          ...(existing.model === undefined ? {} : { model: existing.model }),
+          ...(existing.cause === undefined ? {} : { cause: existing.cause }),
+          ...(existing.resetAt === undefined ? {} : { resetAt: existing.resetAt }),
+          ...(existing.spawnedAt === undefined ? {} : { spawnedAt: existing.spawnedAt }),
+          ...(existing.stopped === undefined ? {} : { stopped: existing.stopped }),
         }
       : undefined
   const attempts = Array.isArray(existing?.attempts) ? (existing.attempts as unknown[]) : []
