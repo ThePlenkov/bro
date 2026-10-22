@@ -335,19 +335,19 @@ export function reserveSessionSlotOnce(
   resDir: string,
   key: string,
   lane: ReservationLane
-): string {
+): { path: string; fresh: boolean } {
   mkdirSync(resDir, { recursive: true })
   const tag = lane === 'batch' ? '.batch' : ''
   const path = join(resDir, `${key}${tag}.slot`)
   try {
     writeFileSync(path, String(Date.now()), { flag: 'wx' })
+    return { path, fresh: true }
   } catch (err) {
     if ((err as NodeJS.ErrnoException).code === 'EEXIST') {
-      return path
+      return { path, fresh: false }
     }
     throw err
   }
-  return path
 }
 
 /** The env var that marks a spawn as the FLEET's. The fleet sets it

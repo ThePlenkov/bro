@@ -22,11 +22,11 @@
  */
 import { createHash } from 'node:crypto'
 import {
+  releaseSessionStart,
   reserveSessionStart,
   sessionCapRefusal,
   sessionCapRefusalFor,
   sessionCapViews,
-  sessionStartClaimed,
   type Connector,
   type ConnectorCtx,
   type PreToolVerdict,
@@ -76,29 +76,43 @@ export function sessionCapVerdict(
     // the count could not be established — a hook fails OPEN
     return []
   }
-  // The claim's key carries the command, so a client that asks twice
-  // (a pre-tool AND a permission event for the same call) claims ONE
-  // slot, not two — and the second run does not count its own start
-  // again (the claim is already in the live count).
-  const key = `guard-${ctx.sessionId ?? 'nosession'}-${commandKey(command)}`
+  // The claim's key carries the CALL (its tool-use id when the client
+  // sends one, the command otherwise), so the two hook events of one
+  // call claim ONE slot, and two separate calls with the same command
+  // claim their own.
+  const key = `guard-${ctx.sessionId ?? 'nosession'}-${callKey(command, ctx)}`
   for (const view of views) {
-    const claimed = sessionStartClaimed(view.kind, bags, key)
-    const refusal = sessionCapRefusal(
-      claimed ? { ...view, starts: 0 } : view
-    )
+    let claimed: { paths: string[]; fresh: boolean }
+    try {
+      claimed = reserveSessionStart({
+        kind: view.kind,
+        agents: bags,
+        key,
+        count: view.starts,
+      })
+    } catch {
+      // the claim is a brake, not a gate — the call still runs
+      continue
+    }
+    // A claim that was already there means this call is a repeat (the
+    // other hook event for the same call): its start is counted once.
+    const refusal = sessionCapRefusal(claimed.fresh ? view : { ...view, starts: 0 })
     if (refusal !== undefined) {
+      if (claimed.fresh) {
+        releaseSessionStart(claimed.paths)
+      }
       return [{ block: refusal }]
     }
   }
-  // allowed — claim the slots this start will take
-  for (const view of views) {
-    try {
-      reserveSessionStart({ kind: view.kind, agents: bags, key, count: view.starts })
-    } catch {
-      // the claim is a brake, not a gate — the call still runs
-    }
-  }
   return []
+}
+
+/** The claim's key for one call — the tool-use id when the client
+ *  sends one (the two hook events of one call share it), the command
+ *  otherwise. */
+function callKey(command: string, ctx: ConnectorCtx): string {
+  const id = (ctx as { toolUseId?: string }).toolUseId
+  return id === undefined || id === '' ? commandKey(command) : `id-${id}`
 }
 
 /** A short digest of a command — the claim's key half. The same
@@ -121,10 +135,13 @@ export function sessionCapRefusalForHook(
   dir: string,
   sessionId?: string,
   /** The `agents.<kind>` bags — injectable for tests. */
-  agents?: Record<string, Record<string, unknown>>
+  agents?: Record<string, Record<string, unknown>>,
+  /** The client's id for this tool call — the two hook events of one
+   *  call share it, so they claim one slot. */
+  toolUseId?: string
 ): string | undefined {
   try {
-    const ctx = { dir, sessionId } as ConnectorCtx
+    const ctx = { dir, sessionId, toolUseId } as ConnectorCtx
     const verdicts = sessionCapVerdict(ctx, { tool: 'exec', input: { command } }, agents)
     return verdicts[0]?.block
   } catch {

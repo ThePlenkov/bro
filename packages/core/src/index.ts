@@ -412,12 +412,12 @@ export type {
 } from './session-planes.ts'
 export {
   planeStartingSessions,
+  releaseSessionStart,
   reserveSessionStart,
   sessionCapRefusal,
   sessionCapRefusalFor,
   sessionCapViews,
   sessionReservationsDir,
-  sessionStartClaimed,
 } from './session-cap.ts'
 export type { SessionCapView } from './session-cap.ts'
 export {

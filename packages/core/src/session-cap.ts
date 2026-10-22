@@ -20,11 +20,10 @@
  * headroom" and "the session wrote its own mark" (the same mechanism the
  * admission uses — spec bro-9vmx's reservation lifecycle).
  */
-import { existsSync } from 'node:fs'
-import { join } from 'node:path'
 import { SpawnError } from './agents.ts'
 import {
   countSessionReservations,
+  releaseSessionSlot,
   reserveSessionSlotOnce,
   sessionPlanes,
   sessionQuotaConfig,
@@ -157,19 +156,12 @@ export function planeStartingSessions(command: string): SessionPlane | undefined
   return undefined
 }
 
-/** Has this call already claimed its slot?
- *
- *  The guard runs on more than one hook (a client that sends BOTH a
- *  pre-tool and a permission event for the same call), and the second
- *  run must not count its own start twice: the claim is already in the
- *  live count, so the second run judges the start as zero. */
-export function sessionStartClaimed(
-  kind: string,
-  agents: Record<string, Record<string, unknown>> | undefined,
-  key: string
-): boolean {
-  const dir = sessionReservationsDir(kind, agents)
-  return existsSync(join(dir, `${key}-0.slot`))
+/** Drop the claims a refused start took — the budget must not keep
+ *  a slot for a call that never ran. */
+export function releaseSessionStart(paths: string[]): void {
+  for (const path of paths) {
+    releaseSessionSlot(path)
+  }
 }
 
 /** The dir a kind's in-flight starts are claimed in — the same files
@@ -201,15 +193,18 @@ export function reserveSessionStart(claim: {
    *  fleet's claims, so an interactive start never eats the fleet's
    *  share. */
   lane?: ReservationLane
-}): string[] {
+}): { paths: string[]; fresh: boolean } {
   if (claim.count <= 0) {
-    return []
+    return { paths: [], fresh: false }
   }
   const dir = sessionReservationsDir(claim.kind, claim.agents)
   const lane = claim.lane ?? 'interactive'
   const paths: string[] = []
+  let fresh = false
   for (let i = 0; i < claim.count; i++) {
-    paths.push(reserveSessionSlotOnce(dir, `${claim.key}-${i}`, lane))
+    const claimed = reserveSessionSlotOnce(dir, `${claim.key}-${i}`, lane)
+    paths.push(claimed.path)
+    fresh = fresh || claimed.fresh
   }
-  return paths
+  return { paths, fresh }
 }

@@ -126,6 +126,10 @@ import {
 
 interface HookInput {
   tool_name?: unknown
+  /** The client's id for this tool call — the two hook events of ONE
+   *  call (a pre-tool and a permission request) share it, and the
+   *  guard's slot claim is keyed by it (spec bro-bww9v). */
+  tool_use_id?: unknown
   tool_input?: {
     command?: unknown
     file_path?: unknown
@@ -1499,7 +1503,9 @@ function emitPermission(input: HookInput): boolean {
   const capRefusal = sessionCapRefusalForHook(
     cmd,
     process.cwd(),
-    typeof input.session_id === 'string' ? input.session_id : undefined
+    typeof input.session_id === 'string' ? input.session_id : undefined,
+    undefined,
+    typeof input.tool_use_id === 'string' ? input.tool_use_id : undefined
   )
   if (capRefusal !== undefined) {
     emit({
