@@ -59,6 +59,7 @@ export const isSystemoneFamily = (model: string | undefined): boolean =>
 export type ProviderEntry =
   | {
       type: 'api'
+      account?: string
       /** Host root — every model is served under it on its own wire. */
       baseUrl: string
       /** The allowlist: served model id → resolved wire. Values in
@@ -75,6 +76,7 @@ export type ProviderEntry =
     }
   | {
       type: 'acp'
+      account?: string
       command: string
       profile?: string
       model?: string
@@ -94,6 +96,7 @@ export type ProviderEntry =
     }
   | {
       type: 'cli'
+      account?: string
       command: string
       model?: string
       /** Shell template emitting one model id per line — the catalog
@@ -146,16 +149,21 @@ export const PROVIDER_REGISTRY: Record<ProviderKind, ProviderKindSpec> = {
     call: 'auto',
     spawn: false,
     required: ['baseUrl'],
-    optional: ['model', 'apiKeyEnv', 'apiKeyCommand'],
+    optional: ['model', 'apiKeyEnv', 'apiKeyCommand', 'account'],
   },
   acp: {
     call: 'auto',
     spawn: true,
     required: ['command'],
-    optional: ['profile', 'model', 'apiKeyEnv', 'sessionRm'],
+    optional: ['profile', 'model', 'apiKeyEnv', 'sessionRm', 'account'],
     optionalBool: ['autoApprove'],
   },
-  cli: { call: 'prose', spawn: true, required: ['command'], optional: ['model', 'models'] },
+  cli: {
+    call: 'prose',
+    spawn: true,
+    required: ['command'],
+    optional: ['model', 'models', 'account'],
+  },
 }
 
 /** A consumer named a provider no entry resolves to — startup error,
@@ -523,6 +531,16 @@ export function getProvider(
     throw new UnknownProviderError(name)
   }
   return entry
+}
+
+/** Account identity is opaque to core; an omitted label keeps the
+ *  provider name as the account key. */
+export function providerAccount(
+  providers: Record<string, ProviderEntry>,
+  name: string
+): string {
+  const entry = Object.hasOwn(providers, name) ? providers[name] : undefined
+  return entry?.account ?? name
 }
 
 /** Lookup + surface assertion in one — `requireProviderSurface(cfg,

@@ -3,6 +3,7 @@ import assert from 'node:assert/strict'
 import { SpawnError } from './agents.ts'
 import type { AgentRegistryEntry, ProviderEntry } from './index.ts'
 import {
+  deriveAccountWalls,
   deriveProviderWalls,
   fleetRouter,
   fleetRouting,
@@ -197,8 +198,8 @@ describe('deriveProviderWalls', () => {
       now
     )
     assert.deepEqual(w, [
-      { provider: 'devin', cause: 'rate_limited' },
-      { provider: 'kilo', cause: 'rate_limited', until: '2026-01-03T00:00:00Z' },
+      { provider: 'devin', account: 'devin', cause: 'rate_limited' },
+      { provider: 'kilo', account: 'kilo', cause: 'rate_limited', until: '2026-01-03T00:00:00Z' },
     ])
   })
 
@@ -219,7 +220,7 @@ describe('deriveProviderWalls', () => {
       },
       now
     )
-    assert.deepEqual(w, [{ provider: 'p', cause: 'quota' }])
+    assert.deepEqual(w, [{ provider: 'p', account: 'p', cause: 'quota' }])
   })
 
   test('stopping the only quota entry lifts the wall', () => {
@@ -260,7 +261,7 @@ describe('deriveProviderWalls', () => {
       },
       now
     )
-    assert.deepEqual(w, [{ provider: 'kilo', cause: 'rate_limited' }])
+    assert.deepEqual(w, [{ provider: 'kilo', account: 'kilo', cause: 'rate_limited' }])
   })
 
   test('a stopped attempt clears with its entry; a live quota attempt dominates', () => {
@@ -276,7 +277,7 @@ describe('deriveProviderWalls', () => {
       },
       now
     )
-    assert.deepEqual(w, [{ provider: 'p', cause: 'quota' }])
+    assert.deepEqual(w, [{ provider: 'p', account: 'p', cause: 'quota' }])
   })
 
   test('the newest rate_limited death owns the wall horizon', () => {
@@ -298,6 +299,54 @@ describe('deriveProviderWalls', () => {
       now
     )
     assert.deepEqual(w, [])
+  })
+})
+
+describe('deriveAccountWalls', () => {
+  test('folds aliases by account and falls back to provider for legacy entries', () => {
+    const walls = deriveAccountWalls(
+      {
+        first: entry({
+          provider: 'kiloA',
+          account: 'kilo',
+          cause: 'rate_limited',
+          resetAt: '2026-01-03T00:00:00Z',
+          spawnedAt: '2026-01-01T00:00:00Z',
+          observedAt: '2026-01-01T00:00:00Z',
+        }),
+        second: entry({
+          provider: 'kiloB',
+          account: 'kilo',
+          cause: 'rate_limited',
+          resetAt: '2026-01-04T00:00:00Z',
+          spawnedAt: '2026-01-01T12:00:00Z',
+          observedAt: '2026-01-01T12:00:00Z',
+        }),
+        legacy: entry({
+          provider: 'openrouter',
+          cause: 'quota',
+          observedAt: '2026-01-01T00:00:00Z',
+        }),
+      },
+      Date.parse('2026-01-02T00:00:00Z')
+    )
+    assert.deepEqual(walls, [
+      {
+        account: 'kilo',
+        provider: 'kiloB',
+        cause: 'rate_limited',
+        until: '2026-01-04T00:00:00Z',
+        step: 'second',
+        observedAt: '2026-01-01T12:00:00Z',
+      },
+      {
+        account: 'openrouter',
+        provider: 'openrouter',
+        cause: 'quota',
+        step: 'legacy',
+        observedAt: '2026-01-01T00:00:00Z',
+      },
+    ])
   })
 })
 

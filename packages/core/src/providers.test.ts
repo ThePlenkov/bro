@@ -9,6 +9,7 @@ import {
   isEnvName,
   parseProviderEntry,
   providerCallGrade,
+  providerAccount,
   PROVIDER_KINDS,
   PROVIDER_REGISTRY,
   ProviderSurfaceError,
@@ -91,6 +92,25 @@ describe('providers section', () => {
     })
     assert.equal(cfg.providers['kilo-cli'].type, 'acp')
     assert.equal(cfg.providers.local.type, 'cli')
+  })
+
+  test('account parses on every provider kind and falls back to provider name', () => {
+    const cfg = load({
+      providers: {
+        api: { type: 'api', baseUrl: 'https://x', models: { m: 'openai-compat' }, account: 'shared' },
+        acp: { type: 'acp', command: 'worker', account: 'shared' },
+        cli: { type: 'cli', command: 'worker', account: 'cli-account' },
+        legacy: { type: 'cli', command: 'worker' },
+        invalid: { type: 'cli', command: 'worker', account: 42 },
+      },
+    })
+    assert.equal(cfg.providers.api?.account, 'shared')
+    assert.equal(cfg.providers.acp?.account, 'shared')
+    assert.equal(cfg.providers.cli?.account, 'cli-account')
+    assert.equal(cfg.providers.invalid?.account, undefined)
+    assert.equal(providerAccount(cfg.providers, 'api'), 'shared')
+    assert.equal(providerAccount(cfg.providers, 'legacy'), 'legacy')
+    assert.equal(providerAccount(cfg.providers, 'missing'), 'missing')
   })
 
   test('api models map: bare wire, {wire} object, and null all resolve — null infers by family', () => {
@@ -338,7 +358,7 @@ describe('PROVIDER_REGISTRY capability matrix', () => {
       call: 'auto',
       spawn: false,
       required: ['baseUrl'],
-      optional: ['model', 'apiKeyEnv', 'apiKeyCommand'],
+      optional: ['model', 'apiKeyEnv', 'apiKeyCommand', 'account'],
     })
     assert.equal(PROVIDER_REGISTRY.acp.call, 'auto')
     assert.equal(PROVIDER_REGISTRY.acp.spawn, true)

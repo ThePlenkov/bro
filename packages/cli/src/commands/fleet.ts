@@ -26,6 +26,7 @@ import { basename } from 'node:path'
 import {
   git,
   gitTry,
+  clearLedgerWalls,
   reviewHost,
   wallText,
   type AgentInfo,
@@ -38,6 +39,7 @@ import {
   eachAgentConnector,
   loadAgentEnv,
   providerWallsFor,
+  fleetWallRowsFor,
   type AgentConnectorEnv,
   type BudgetSnapshot,
 } from '../agent-connectors.ts'
@@ -570,6 +572,15 @@ async function runFleetLive(
 }
 
 export async function runFleetCommand(argv: string[]): Promise<void> {
+  if (argv[0] === 'walls') {
+    try {
+      await runFleetWallsCommand(process.cwd(), argv.slice(1))
+    } catch (err) {
+      console.error(`error: ${err instanceof Error ? err.message : String(err)}`)
+      process.exit(2)
+    }
+    return
+  }
   let args: FleetArgs
   try {
     args = fleetArgs(argv)
@@ -604,4 +615,42 @@ export async function runFleetCommand(argv: string[]): Promise<void> {
     return
   }
   printFleetTable(rows, degraded, conflicts, prErrors, walls, wallsError)
+}
+
+export async function runFleetWallsCommand(
+  dir: string,
+  argv: string[],
+  ledgerPath?: string
+): Promise<void> {
+  const env = loadAgentEnv(dir)
+  if (argv[0] === 'clear') {
+    if (argv.length !== 2) {
+      throw new Error('usage: bro fleet walls clear <account>|--all')
+    }
+    const target = argv[1] === '--all' ? 'all' : argv[1]!
+    const count = clearLedgerWalls(target, {
+      ttls: env.fleet?.walls,
+      ...(ledgerPath === undefined ? {} : { path: ledgerPath }),
+    })
+    console.log(`cleared ${count} host wall${count === 1 ? '' : 's'}`)
+    return
+  }
+  if (argv.some((arg) => arg !== '--json') || argv.filter((arg) => arg === '--json').length > 1) {
+    throw new Error('usage: bro fleet walls [--json] | clear <account>|--all')
+  }
+  const rows = fleetWallRowsFor(dir, env, ledgerPath)
+  if (argv.includes('--json')) {
+    console.log(JSON.stringify(rows, null, 2))
+    return
+  }
+  if (rows.length === 0) {
+    console.log('no live provider walls')
+    return
+  }
+  for (const row of rows) {
+    const until = row.until === undefined ? '' : ` til ${row.until}`
+    console.log(
+      `${row.account} (${row.provider ?? row.account}) walled — ${row.cause}${until} [${row.source}]`
+    )
+  }
 }

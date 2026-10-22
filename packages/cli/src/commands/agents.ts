@@ -722,6 +722,7 @@ export function spawnStepAgent(
             ...(ep !== undefined && ep !== '' ? { OTEL_EXPORTER_OTLP_ENDPOINT: ep } : {}),
           },
           provider: pick.provider,
+          account: pick.account,
           model: pick.model,
           class: route?.class,
           worker: pick.worker,

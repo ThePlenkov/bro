@@ -82,6 +82,9 @@ a failed provider warns and never stops the rest.
 
 ## Consumer wiring
 
+- Any provider kind may set `account` to an opaque identity shared by
+  aliases; when omitted it defaults to the provider name. Fleet walls
+  follow that account across repos on this host.
 - **Judge**: `judge.provider: '<name>'` + `judge.model: '<allowed-id>'`
   (+ `judge.fallback: '<name>'`). The resolved model's wire picks the
   adapter — `systemone` → typed judgments, `openai-compat` → prose.

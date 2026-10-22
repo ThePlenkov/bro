@@ -227,6 +227,8 @@ export interface SpawnSpec {
    *  spawn resolved to. Recorded into the registry and pinned into
    *  the worker's env; never set for the legacy template path. */
   provider?: string
+  /** Opaque provider-account identity; defaults to the provider name. */
+  account?: string
   /** The effective model (spawn flag > profile > provider entry). */
   model?: string
   /** The routing lane the spawn resolved to (fleet.routing class —
@@ -236,13 +238,18 @@ export interface SpawnSpec {
   /** Provider-resolved spawn payload — see SpawnWorker. */
   worker?: SpawnWorker
   /** Pre-resolved fleet-routing candidates, in declared chain order.
-   *  prepareSpawn rewrites provider/model/worker/class from the walked
-   *  candidate under the registry lock; callers read them only after
-   *  prepareSpawn returns. */
+   *  prepareSpawn rewrites provider/account/model/worker/class from the
+   *  walked candidate under the registry lock; callers read them only
+   *  after prepareSpawn returns. */
   route?: {
     class: string
     onWall: OnWall
-    candidates: Array<{ provider: string; model?: string; worker: SpawnWorker }>
+    candidates: Array<{
+      provider: string
+      account: string
+      model?: string
+      worker: SpawnWorker
+    }>
   }
   /** Spawn owns the enter transition (rig bro-oy3k1.4): when set,
    *  `repoRoot` doesn't exist yet — prepareSpawn mints it as a
@@ -378,6 +385,9 @@ export interface AgentRegistryEntry {
   backend: string
   spawnedAt: string
   provider?: string
+  /** Opaque account identity; legacy rows fall back to provider. */
+  account?: string
+  observedAt?: string
   model?: string
   acpSessionId?: string
   /** Session-kind lane the run was admitted under — written at spawn so

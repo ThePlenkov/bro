@@ -31,7 +31,7 @@ import {
   utimesSync,
   writeFileSync,
 } from 'node:fs'
-import { delimiter, dirname, isAbsolute, join, resolve } from 'node:path'
+import { basename, delimiter, dirname, isAbsolute, join, resolve } from 'node:path'
 import {
   AgentNotFound,
   agentEntryBlocked,
@@ -46,6 +46,7 @@ import {
   cliCommandModel,
   commandCliName,
   DEFAULT_CONFIG,
+  deriveAccountWalls,
   deriveProviderWalls,
   emitLifecycle,
   ghHost,
@@ -59,6 +60,9 @@ import {
   probeStep,
   procStat,
   providerCallGrade,
+  providerAccount,
+  readLedgerWalls,
+  recordWall,
   rebindStep,
   releaseSessionSlot,
   requireProviderSurface,
@@ -81,10 +85,12 @@ import {
   type AgentInfo,
   type AgentRegistryEntry,
   type AgentState,
+  type AccountWall,
   type ConnectorCtx,
   type DiscoveredSession,
   type FleetProfile,
   type FleetRouter,
+  type FleetWallTtls,
   type ListResult,
   type ProviderEntry,
   type ProviderWall,
@@ -129,6 +135,7 @@ export interface AgentConnectorEnv {
     maxConcurrent: number
     profiles?: Record<string, FleetProfile>
     routing?: RoutingTable
+    walls?: FleetWallTtls
     router?: FleetRouter
   }
   /** The named provider registry — spawn resolution reads entries by
@@ -224,6 +231,7 @@ export function loadAgentEnv(dir: string): AgentConnectorEnv {
       maxConcurrent: number
       profiles?: Record<string, FleetProfile>
       routing?: RoutingTable
+      walls?: FleetWallTtls
       router?: FleetRouter
     }
     providers?: Record<string, ProviderEntry>
@@ -308,6 +316,7 @@ export function broSpawnArgv(env: NodeJS.ProcessEnv = process.env): string[] {
  *  `worker` is the only backend-visible piece. */
 export interface SpawnProviderPick {
   provider?: string
+  account?: string
   model?: string
   worker?: SpawnWorker
 }
@@ -373,7 +382,12 @@ export async function resolveSpawnProvider(
             'config'
           )
       )
-      return { provider: providerName, model, worker: { kind: 'template', command } }
+      return {
+        provider: providerName,
+        account: providerAccount(env.providers ?? {}, providerName),
+        model,
+        worker: { kind: 'template', command },
+      }
     }
     case 'acp': {
       // the providers package owns the argv render — a lazy import keeps
@@ -383,6 +397,7 @@ export async function resolveSpawnProvider(
       const autoApprove = sel.autoApprove ?? entry.autoApprove
       return {
         provider: providerName,
+        account: providerAccount(env.providers ?? {}, providerName),
         model,
         worker: {
           kind: 'argv',
@@ -429,7 +444,12 @@ export async function resolveSpawnRoute(
         if (pick.provider === undefined || pick.worker === undefined) {
           throw new SpawnError('provider did not resolve a spawn worker', 'config')
         }
-        return { provider: pick.provider, model: pick.model, worker: pick.worker }
+        return {
+          provider: pick.provider,
+          account: pick.account ?? pick.provider,
+          model: pick.model,
+          worker: pick.worker,
+        }
       } catch (err) {
         const detail = err instanceof Error ? err.message : String(err)
         const kind = err instanceof SpawnError ? err.kind : 'config'
@@ -1213,13 +1233,62 @@ export function budgetSnapshotFor(dir: string, env: AgentConnectorEnv): BudgetSn
  *  unharvested .exit still counts as a death (the harvest is a no-op
  *  on already-classified entries). One registry read per call, the
  *  per-plane convention. */
-export function providerWallsFor(dir: string): ProviderWall[] {
+export function providerWallsFor(
+  dir: string,
+  env: AgentConnectorEnv = loadAgentEnv(dir)
+): ProviderWall[] {
   const registry = readAgentRegistry(dir)
   const home = agentsHome(dir)
   for (const [molStep, entry] of Object.entries(registry)) {
     ensureExitCause(dir, home, molStep, entry)
   }
-  return deriveProviderWalls(registry)
+  const walls = [
+    ...deriveProviderWalls(registry),
+    ...deriveAccountWalls(registry).map((w) => ({
+      provider: w.provider ?? w.account,
+      account: w.account,
+      cause: w.cause,
+      ...(w.until === undefined ? {} : { until: w.until }),
+    })),
+    ...readLedgerWalls(Date.now(), env.fleet?.walls).map((w) => ({
+      provider: w.provider ?? w.account,
+      account: w.account,
+      cause: w.cause,
+      until: w.until,
+    })),
+  ]
+  return [...new Map(walls.map((wall) => [
+    `${wall.provider}\0${wall.account ?? ''}\0${wall.cause}\0${wall.until ?? ''}`,
+    wall,
+  ])).values()]
+}
+
+export interface FleetWallRow extends AccountWall {
+  source: 'registry' | 'ledger'
+}
+
+export function fleetWallRowsFor(
+  dir: string,
+  env: AgentConnectorEnv = loadAgentEnv(dir),
+  ledgerPath?: string
+): FleetWallRow[] {
+  const registry = readAgentRegistry(dir)
+  const home = agentsHome(dir)
+  for (const [step, entry] of Object.entries(registry)) {
+    ensureExitCause(dir, home, step, entry)
+  }
+  const now = Date.now()
+  const local = deriveAccountWalls(registry, now).map((wall) => ({
+    ...wall,
+    source: 'registry' as const,
+    provider: wall.provider ?? wall.account,
+    rig: wall.rig ?? basename(resolve(dir)),
+    observedAt: wall.observedAt ?? '',
+  }))
+  const ledger = readLedgerWalls(now, env.fleet?.walls, {
+    ...(ledgerPath === undefined ? {} : { path: ledgerPath }),
+  }).map((wall) => ({ ...wall, source: 'ledger' as const }))
+  return [...local, ...ledger]
 }
 
 /** The snapshot as section lines — `bro doctor` renders them under a
@@ -1457,20 +1526,29 @@ function guardClaim(
  * Returns undefined when the spawn may proceed. */
 export function batchWallRefusal(
   registry: Record<string, AgentRegistryEntry>,
-  spec: { provider?: string; env?: Record<string, string>; molStep?: string },
+  spec: {
+    provider?: string
+    account?: string
+    env?: Record<string, string>
+    molStep?: string
+  },
   now: number = Date.now(),
   walls?: ProviderWall[]
 ): SpawnError | undefined {
   if (spec.provider === undefined || !isBatchSpawn(spec.env)) {
     return undefined
   }
-  const wall = (walls ?? deriveProviderWalls(registry, now)).find((w) => w.provider === spec.provider)
+  const wall = (walls ?? deriveProviderWalls(registry, now)).find(
+    (w) => w.provider === spec.provider || (spec.account !== undefined && w.account === spec.account)
+  )
   if (wall === undefined) {
     return undefined
   }
   const til = wall.until !== undefined ? ` til ${wall.until}` : ''
+  const account =
+    wall.account === undefined || wall.account === wall.provider ? '' : ` (account ${wall.account})`
   return new SpawnError(
-    `${wall.provider} walled — ${wall.cause}${til} ` +
+    `${wall.provider}${account} walled — ${wall.cause}${til} ` +
       `(the batch lane waits; an interactive spawn is not blocked)` +
       (spec.molStep !== undefined ? ` — spawn of ${spec.molStep} refused` : ''),
     'cap'
@@ -1480,23 +1558,42 @@ export function batchWallRefusal(
 function spawnWalls(
   _dir: string,
   registry: Record<string, AgentRegistryEntry>,
-  now: number
+  now: number,
+  env: AgentConnectorEnv,
+  candidates: Array<{ provider: string; account: string }>
 ): ProviderWall[] {
-  return deriveProviderWalls(registry, now)
+  const walls = deriveProviderWalls(registry, now)
+  const accounts = [
+    ...deriveAccountWalls(registry, now),
+    ...readLedgerWalls(now, env.fleet?.walls),
+  ]
+  const byProvider = new Map(walls.map((wall) => [wall.provider, wall]))
+  for (const candidate of candidates) {
+    if (byProvider.has(candidate.provider)) {
+      continue
+    }
+    const accountWall = accounts.find((wall) => wall.account === candidate.account)
+    if (accountWall !== undefined) {
+      byProvider.set(candidate.provider, {
+        provider: candidate.provider,
+        account: candidate.account,
+        cause: accountWall.cause,
+        ...(accountWall.until === undefined ? {} : { until: accountWall.until }),
+      })
+    }
+  }
+  return [...byProvider.values()]
 }
 
 function applySpawnRoute(
-  dir: string,
   spec: SpawnSpec,
-  registry: Record<string, AgentRegistryEntry>,
+  walls: ProviderWall[],
   existing: AgentRegistryEntry | undefined
-): { now: number; walls: ProviderWall[] } | undefined {
+): void {
   const route = spec.route
   if (route === undefined) {
-    return undefined
+    return
   }
-  const now = Date.now()
-  const walls = spawnWalls(dir, registry, now)
   const chain = route.candidates.map(({ provider, model }) => ({ provider, model }))
   const walk = walkChain(chain, route.onWall, walls, existing?.provider)
   if (walk.verdict === 'park') {
@@ -1508,12 +1605,12 @@ function applySpawnRoute(
     )
   }
   const picked = route.candidates[walk.index]!
-  // prepareSpawn rewrites these under the registry lock; callers read them only after it returns.
+  // prepareSpawn rewrites provider/account/model/worker/class under the registry lock; callers read only after it returns.
   spec.provider = picked.provider
+  spec.account = picked.account
   spec.model = picked.model
   spec.worker = picked.worker
   spec.class = route.class
-  return { now, walls }
 }
 
 function prepareSpawn(
@@ -1572,17 +1669,21 @@ function prepareSpawn(
   for (const [step, entry] of Object.entries(registry)) {
     ensureExitCause(dir, home, step, entry)
   }
-  const routed = applySpawnRoute(dir, spec, registry, existing)
+  const now = Date.now()
+  const candidates =
+    spec.route?.candidates ??
+    (spec.provider === undefined
+      ? []
+      : [{ provider: spec.provider, account: spec.account ?? spec.provider }])
+  const walls = spawnWalls(dir, registry, now, opts.cap?.env ?? loadAgentEnv(dir), candidates)
+  applySpawnRoute(spec, walls, existing)
   // the wall refusal comes AFTER the live-agent and claim guards: a
   // respawn of an agent that is already running is a CONFLICT, and so is
   // a step another owner already claimed — the caller reads those kinds,
   // and a 'cap' here would say "the provider is walled" about a spawn
   // that never needed a provider slot
   const { claimed, actor, phantom } = guardClaim(spec, existing !== undefined, opts.claimAs)
-  const wallRefusal =
-    routed === undefined
-      ? batchWallRefusal(registry, spec)
-      : batchWallRefusal(registry, spec, routed.now, routed.walls)
+  const wallRefusal = batchWallRefusal(registry, spec, now, walls)
   if (wallRefusal !== undefined) {
     throw wallRefusal
   }
@@ -1643,6 +1744,9 @@ function outgoingAttemptOf(
   }
   return {
     ...(existing.provider === undefined ? {} : { provider: existing.provider }),
+    ...((existing.account ?? existing.provider) === undefined
+      ? {}
+      : { account: existing.account ?? existing.provider }),
     ...(existing.model === undefined ? {} : { model: existing.model }),
     ...(existing.cause === undefined ? {} : { cause: existing.cause }),
     ...(existing.resetAt === undefined ? {} : { resetAt: existing.resetAt }),
@@ -1713,6 +1817,7 @@ function commitSpawn(
     // re-stamps it, so a legacy respawn clears a stale pin instead of
     // keeping the previous run's provider
     provider: spec.provider,
+    account: spec.account ?? spec.provider,
     model: spec.model,
     // the routing lane the spawn resolved to (fleet.routing class) —
     // same provenance write as provider/model; a respawn re-stamps it
@@ -1955,6 +2060,34 @@ function ensureExitCause(
   entry.cause = c.cause
   entry.resetAt = c.resetAt
   emitProviderWall(entry, molStep, c.cause, c.resetAt)
+  if (
+    (c.cause === 'rate_limited' || c.cause === 'quota') &&
+    typeof entry.provider === 'string'
+  ) {
+    const observedAt = new Date().toISOString()
+    entry.observedAt = observedAt
+    try {
+      recordWall(
+        {
+          account: entry.account ?? entry.provider,
+          provider: entry.provider,
+          cause: c.cause,
+          ...(c.resetAt === undefined ? {} : { resetAt: c.resetAt }),
+          observedAt,
+          rig: basename(resolve(dir)),
+          step: molStep,
+        },
+        {
+          now: Date.parse(observedAt),
+          ttls: loadAgentEnv(dir).fleet?.walls,
+        }
+      )
+    } catch (err) {
+      console.error(
+        `warning: host wall ledger write failed — ${err instanceof Error ? err.message : String(err)}`
+      )
+    }
+  }
   // lifecycle — the agent-exit transition, emitted once per run at the
   // harvest (the early return above skips re-emit on a carried cause).
   // The .exit file's mtime is the honest wall-clock; the harvest's own
@@ -1998,6 +2131,7 @@ function ensureExitCause(
         exitStatus: entry.exitStatus,
         cause: c.cause,
         resetAt: c.resetAt,
+        ...(entry.observedAt === undefined ? {} : { observedAt: entry.observedAt }),
       }
       writeAgentRegistry(dir, reg)
     })

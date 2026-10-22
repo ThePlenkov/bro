@@ -127,6 +127,7 @@ Full reference: [broject.dev/docs](https://broject.dev/docs).
 | `bro flow loop [--max N] [--dry-run] [--stack NAME] [--label a,b]` | Claim, work, pass the gate, close, and repeat |
 | `bro flow convoy pour\|status\|next\|claim\|done\|list\|run` | Run a beads formula as a claimable molecule — `run` is the molecule queue |
 | `bro fleet [--json\|--live]` | View molecules, steps, agents, worktrees, and PRs |
+| `bro fleet walls [--json]` / `bro fleet walls clear <account>\|--all` | Inspect or clear host-wide provider account walls |
 | `bro fleet agents status\|up\|down\|prune` | Inspect, spawn, respawn, stop, or reap detached agents |
 | `bro review watch [--once\|--every N\|--notify]`, `watch install\|uninstall` | Read-only heartbeat; `--every` is the session pulse (`bro/pulse.lock`, one per repo); `install` arms the want-marker (`bro/pulse.json`) — OS timers retired |
 | `bro comms notify <text>` | Drop an event into the session mailbox — addressed, typed, coalesced |

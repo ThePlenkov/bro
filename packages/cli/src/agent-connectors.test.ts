@@ -18,7 +18,10 @@ import {
   bdActor,
   countSessionReservations,
   DEFAULT_CONFIG,
+  BATCH_MARKER_ENV,
   deriveProviderWalls,
+  readLedgerWalls,
+  recordWall,
   patchAgentRegistry,
   procStat,
   readAgentRegistry,
@@ -2454,10 +2457,21 @@ describe('fleet chain walk spawn integration', () => {
     onWall,
     candidates: ['A', 'B'].map((provider) => ({
       provider,
+      account: provider,
       model: `model-${provider}`,
       worker: { kind: 'template', command: 'node {promptFile}' },
     })),
   })
+  const withStateHome = async <T>(root: string, fn: () => Promise<T>): Promise<T> => {
+    const previous = process.env.XDG_STATE_HOME
+    process.env.XDG_STATE_HOME = join(root, 'state')
+    try {
+      return await fn()
+    } finally {
+      if (previous === undefined) delete process.env.XDG_STATE_HOME
+      else process.env.XDG_STATE_HOME = previous
+    }
+  }
   const death = (provider: string): AgentRegistryEntry => ({
     agentId: `native-${provider.toLowerCase()}-dead`,
     backend: 'native',
@@ -2486,6 +2500,7 @@ describe('fleet chain walk spawn integration', () => {
       const attempts = entry.attempts as unknown[]
       assert.deepEqual(attempts[0], {
         provider: 'A',
+        account: 'A',
         model: 'model-A',
         cause: 'rate_limited',
         resetAt: future,
@@ -2528,6 +2543,7 @@ describe('fleet chain walk spawn integration', () => {
       assert.equal(entry.provider, 'B')
       assert.deepEqual((entry.attempts as unknown[])[0], {
         provider: 'A',
+        account: 'A',
         model: 'model-A',
         spawnedAt: oldSpawn,
         stopped: false,
@@ -2541,9 +2557,24 @@ describe('fleet chain walk spawn integration', () => {
   test('fallback provider uses its own model instead of the chain-head selection', async () => {
     const f = fx([{ id: 'fx-1', status: 'open' }])
     f.env.providers = {
-      A: { type: 'cli', command: 'node {promptFile} --model {model}', model: 'a-default' },
-      B: { type: 'cli', command: 'node {promptFile} --model {model}', model: 'b-default' },
-      C: { type: 'cli', command: 'node {promptFile} --model {model}', model: 'c-default' },
+      A: {
+        type: 'cli',
+        command: 'node {promptFile} --model {model}',
+        model: 'a-default',
+        account: 'acct-a',
+      },
+      B: {
+        type: 'cli',
+        command: 'node {promptFile} --model {model}',
+        model: 'b-default',
+        account: 'acct-b',
+      },
+      C: {
+        type: 'cli',
+        command: 'node {promptFile} --model {model}',
+        model: 'c-default',
+        account: 'acct-c',
+      },
     }
     try {
       patchAgentRegistry(f.main, 'fx-1', death('A'))
@@ -2559,6 +2590,10 @@ describe('fleet chain walk spawn integration', () => {
         model: 'a1',
       }
       const route = await resolveSpawnRoute(f.env, 'native', resolved, { model: 'x' })
+      assert.deepEqual(
+        route.candidates.map((candidate) => candidate.account),
+        ['acct-a', 'acct-b', 'acct-c']
+      )
       assert.deepEqual(
         route.candidates.map((candidate) => candidate.model),
         ['x', 'b-default', 'c1']
@@ -2639,6 +2674,213 @@ describe('fleet chain walk spawn integration', () => {
     } finally {
       cleanup(f)
     }
+  })
+
+  test('provider aliases sharing an account are skipped together', async () => {
+    const f = fx([
+      { id: 'fx-1', status: 'open' },
+      { id: 'fx-2', status: 'open' },
+    ])
+    try {
+      patchAgentRegistry(f.main, 'fx-2', { ...death('kiloA'), account: 'kilo' })
+      const route: NonNullable<SpawnSpec['route']> = {
+        class: 'free',
+        onWall: 'fallthrough',
+        candidates: ['kiloA', 'kiloB', 'or'].map((provider, index) => ({
+          provider,
+          account: index < 2 ? 'kilo' : 'or',
+          worker: { kind: 'template', command: 'node {promptFile}' },
+        })),
+      }
+      const info = await conn(f).spawn({
+        ...SPEC(f.main, f.beadsDir, 'fx-1', 'setTimeout(() => {}, 30000)'),
+        route,
+      })
+      assert.equal(readAgentRegistry(f.main)['fx-1']!.provider, 'or')
+      await conn(f).stop(info.id)
+    } finally {
+      cleanup(f)
+    }
+  })
+
+  test('a host ledger wall skips an account with no local registry entry', async () => {
+    const f = fx([{ id: 'fx-1', status: 'open' }])
+    await withStateHome(f.root, async () => {
+      try {
+        recordWall({
+          account: 'openrouter',
+          cause: 'rate_limited',
+          resetAt: future,
+          observedAt: new Date().toISOString(),
+          provider: 'other-repo-provider',
+          rig: 'other-repo',
+        })
+        const route: NonNullable<SpawnSpec['route']> = {
+          class: 'free',
+          onWall: 'fallthrough',
+          candidates: [
+            {
+              provider: 'openrouter',
+              account: 'openrouter',
+              worker: { kind: 'template', command: 'node {promptFile}' },
+            },
+            {
+              provider: 'backup',
+              account: 'backup',
+              worker: { kind: 'template', command: 'node {promptFile}' },
+            },
+          ],
+        }
+        const info = await conn(f).spawn({
+          ...SPEC(f.main, f.beadsDir, 'fx-1', 'setTimeout(() => {}, 30000)'),
+          route,
+        })
+        assert.equal(readAgentRegistry(f.main)['fx-1']!.provider, 'backup')
+        await conn(f).stop(info.id)
+      } finally {
+        cleanup(f)
+      }
+    })
+  })
+
+  test('an expired host ledger wall does not skip its provider', async () => {
+    const f = fx([{ id: 'fx-1', status: 'open' }])
+    await withStateHome(f.root, async () => {
+      try {
+        recordWall(
+          {
+            account: 'openrouter',
+            cause: 'rate_limited',
+            resetAt: '2020-01-01T00:00:00.000Z',
+            observedAt: '2019-01-01T00:00:00.000Z',
+            provider: 'other-repo-provider',
+            rig: 'other-repo',
+          },
+          { now: Date.parse('2019-01-01T00:00:00.000Z') }
+        )
+        const route: NonNullable<SpawnSpec['route']> = {
+          class: 'free',
+          onWall: 'fallthrough',
+          candidates: [
+            {
+              provider: 'openrouter',
+              account: 'openrouter',
+              worker: { kind: 'template', command: 'node {promptFile}' },
+            },
+            {
+              provider: 'backup',
+              account: 'backup',
+              worker: { kind: 'template', command: 'node {promptFile}' },
+            },
+          ],
+        }
+        const info = await conn(f).spawn({
+          ...SPEC(f.main, f.beadsDir, 'fx-1', 'setTimeout(() => {}, 30000)'),
+          route,
+        })
+        assert.equal(readAgentRegistry(f.main)['fx-1']!.provider, 'openrouter')
+        await conn(f).stop(info.id)
+      } finally {
+        cleanup(f)
+      }
+    })
+  })
+
+  test('classification writes a wall to the host ledger using entry account', async () => {
+    const f = fx([{ id: 'fx-1', status: 'open' }])
+    await withStateHome(f.root, async () => {
+      try {
+        const log = join(f.root, 'rate-limit.log')
+        writeFileSync(log, 'HTTP 429 Too Many Requests')
+        patchAgentRegistry(f.main, 'fx-1', {
+          ...death('A'),
+          account: 'shared-account',
+          cause: undefined,
+          resetAt: undefined,
+          exitStatus: 1,
+          log,
+        })
+        const route: NonNullable<SpawnSpec['route']> = {
+          class: 'free',
+          onWall: 'fallthrough',
+          candidates: [
+            {
+              provider: 'A',
+              account: 'shared-account',
+              worker: { kind: 'template', command: 'node {promptFile}' },
+            },
+            {
+              provider: 'B',
+              account: 'backup',
+              worker: { kind: 'template', command: 'node {promptFile}' },
+            },
+          ],
+        }
+        const info = await conn(f).spawn({
+          ...SPEC(f.main, f.beadsDir, 'fx-1', 'setTimeout(() => {}, 30000)'),
+          route,
+        })
+        const row = readLedgerWalls().find((wall) => wall.account === 'shared-account')
+        assert.equal(row?.provider, 'A')
+        assert.equal(row?.cause, 'rate_limited')
+        assert.equal(row?.step, 'fx-1')
+        await conn(f).stop(info.id)
+      } finally {
+        cleanup(f)
+      }
+    })
+  })
+
+  test('stopping an agent does not clear its host ledger wall', async () => {
+    const f = fx([{ id: 'fx-1', status: 'open' }])
+    await withStateHome(f.root, async () => {
+      try {
+        recordWall({
+          account: 'shared-account',
+          cause: 'quota',
+          observedAt: new Date().toISOString(),
+          provider: 'A',
+          rig: 'repo',
+          step: 'fx-1',
+        })
+        const info = await conn(f).spawn(
+          SPEC(f.main, f.beadsDir, 'fx-1', 'setTimeout(() => {}, 30000)')
+        )
+        await conn(f).stop(info.id)
+        assert.equal(readLedgerWalls().some((wall) => wall.account === 'shared-account'), true)
+      } finally {
+        cleanup(f)
+      }
+    })
+  })
+
+  test('an unrouted batch spawn refuses a ledger-walled account', async () => {
+    const f = fx([{ id: 'fx-1', status: 'open' }])
+    await withStateHome(f.root, async () => {
+      try {
+        recordWall({
+          account: 'shared-account',
+          cause: 'quota',
+          observedAt: new Date().toISOString(),
+          provider: 'other-repo-provider',
+          rig: 'other-repo',
+        })
+        await assert.rejects(
+          conn(f).spawn({
+            ...SPEC(f.main, f.beadsDir, 'fx-1', 'true'),
+            provider: 'candidate',
+            account: 'shared-account',
+            env: { [BATCH_MARKER_ENV]: '1' },
+          }),
+          (err: unknown) =>
+            err instanceof SpawnError &&
+            err.kind === 'cap' &&
+            /candidate \(account shared-account\) walled/.test(err.message)
+        )
+      } finally {
+        cleanup(f)
+      }
+    })
   })
 
   test('a live entry still refuses a routed spawn', async () => {

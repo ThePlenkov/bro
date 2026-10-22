@@ -36,6 +36,41 @@ export interface RoutingClass {
 /** `fleet.routing` — task class → routing row. */
 export type RoutingTable = Record<string, RoutingClass>
 
+export interface FleetWallTtls {
+  rateTtlMinutes: number
+  quotaTtlMinutes: number
+}
+
+export const DEFAULT_FLEET_WALL_TTLS: FleetWallTtls = {
+  rateTtlMinutes: 15,
+  quotaTtlMinutes: 360,
+}
+
+/** `fleet.walls` TTLs — invalid fields fall back independently. */
+export function fleetWalls(raw: unknown): FleetWallTtls {
+  const out = { ...DEFAULT_FLEET_WALL_TTLS }
+  if (raw === undefined) {
+    return out
+  }
+  if (typeof raw !== 'object' || raw === null || Array.isArray(raw)) {
+    console.error('bro.config: fleet.walls must be an object — section dropped')
+    return out
+  }
+  const obj = raw as Record<string, unknown>
+  for (const key of ['rateTtlMinutes', 'quotaTtlMinutes'] as const) {
+    const value = obj[key]
+    if (value === undefined) {
+      continue
+    }
+    if (typeof value !== 'number' || !Number.isFinite(value) || value <= 0) {
+      console.error(`bro.config: fleet.walls.${key} must be a positive number — field dropped`)
+      continue
+    }
+    out[key] = value
+  }
+  return out
+}
+
 /** `fleet.router` — the optional judge classifier (M7): a call-surface
  *  provider that picks which lane an unclassed step takes. `off` is
  *  the spelled-out absent — static classes only, same as no section. */
@@ -276,10 +311,22 @@ export function routeStepClass(
  *  derived, not stored"). */
 export interface ProviderWall {
   provider: string
+  account?: string
   cause: 'rate_limited' | 'quota'
   /** rate_limited only — the provider-reported reset the wall holds
    *  until; absent when none was reported (indefinite). */
   until?: string
+}
+
+export interface AccountWall {
+  account: string
+  cause: 'rate_limited' | 'quota'
+  until?: string
+  resetAt?: string
+  provider?: string
+  rig?: string
+  step?: string
+  observedAt?: string
 }
 
 export type ChainWalk =
@@ -331,17 +378,19 @@ export function walkChain(
   }
 }
 
-/** The spec's render: `<provider> walled — <cause>[ til <resetAt>]`. */
+/** The spec's render: `<provider> [(account <account>)] walled — <cause>[ til <resetAt>]`. */
 export function wallText(w: ProviderWall): string {
   const til = w.until === undefined ? '' : ` til ${w.until}`
-  return `${w.provider} walled — ${w.cause}${til}`
+  const account =
+    w.account === undefined || w.account === w.provider ? '' : ` (account ${w.account})`
+  return `${w.provider}${account} walled — ${w.cause}${til}`
 }
 
 /** Provider walls accumulate per provider — `quota` sticks (a stopped
  *  entry clears it, nothing else does); `rate` keeps the newest
  *  unstopped rate_limited death (spawnedAt — a respawn re-stamps it). */
 interface WallAcc {
-  quota: boolean
+  quota?: WallRecord & { provider: string }
   rate?: WallRecord & { provider: string }
 }
 
@@ -351,10 +400,14 @@ interface WallAcc {
  *  contracted — everything else rides untyped. */
 interface WallRecord {
   provider?: unknown
+  account?: unknown
   stopped?: unknown
   cause?: unknown
   resetAt?: unknown
   spawnedAt?: unknown
+  observedAt?: unknown
+  rig?: unknown
+  step?: unknown
 }
 
 /** A wallable death with provider provenance — `crash`/`auth`/`ok` say
@@ -377,7 +430,9 @@ function stamp(e: WallRecord): string {
 
 function foldEntry(acc: WallAcc, e: WallRecord & { provider: string }): void {
   if (e.cause === 'quota') {
-    acc.quota = true
+    if (acc.quota === undefined || stamp(e) > stamp(acc.quota)) {
+      acc.quota = e
+    }
   } else if (acc.rate === undefined || stamp(e) > stamp(acc.rate)) {
     acc.rate = e
   }
@@ -388,8 +443,9 @@ function foldEntry(acc: WallAcc, e: WallRecord & { provider: string }): void {
  *  unparseable one was reported); a passed resetAt is the proof of
  *  lift. */
 function accWall(provider: string, acc: WallAcc, now: number): ProviderWall | undefined {
-  if (acc.quota) {
-    return { provider, cause: 'quota' }
+  if (acc.quota !== undefined) {
+    const account = typeof acc.quota.account === 'string' ? acc.quota.account : acc.quota.provider
+    return { provider, account, cause: 'quota' }
   }
   const e = acc.rate
   if (e === undefined) {
@@ -401,8 +457,17 @@ function accWall(provider: string, acc: WallAcc, now: number): ProviderWall | un
     return undefined
   }
   return until === undefined
-    ? { provider, cause: 'rate_limited' }
-    : { provider, cause: 'rate_limited', until }
+    ? {
+        provider,
+        account: typeof e.account === 'string' ? e.account : e.provider,
+        cause: 'rate_limited',
+      }
+      : {
+          provider,
+          account: typeof e.account === 'string' ? e.account : e.provider,
+          cause: 'rate_limited',
+          until,
+        }
 }
 
 /** Derive walls from registry entries — `rate_limited`/`quota` deaths
@@ -435,7 +500,7 @@ export function deriveProviderWalls(
       if (!wallable(rec)) {
         continue
       }
-      const acc = byProvider.get(rec.provider) ?? { quota: false }
+      const acc = byProvider.get(rec.provider) ?? {}
       foldEntry(acc, rec)
       byProvider.set(rec.provider, acc)
     }
@@ -444,4 +509,53 @@ export function deriveProviderWalls(
     .map(([provider, acc]) => accWall(provider, acc, now))
     .filter((w): w is ProviderWall => w !== undefined)
     .sort((a, b) => a.provider.localeCompare(b.provider))
+}
+
+/** Fold the same live registry deaths by account identity. Legacy rows
+ *  use their provider name, preserving provider-scoped walls. */
+export function deriveAccountWalls(
+  registry: Record<string, AgentRegistryEntry>,
+  now = Date.now()
+): AccountWall[] {
+  const byAccount = new Map<string, { acc: WallAcc; latest?: WallRecord & { provider: string; step: string } }>()
+  for (const [step, entry] of Object.entries(registry)) {
+    const records: WallRecord[] = Array.isArray(entry.attempts)
+      ? [entry, ...(entry.attempts as WallRecord[])]
+      : [entry]
+    for (const rec of records) {
+      if (!wallable(rec)) {
+        continue
+      }
+      const account = typeof rec.account === 'string' ? rec.account : rec.provider
+      const row = byAccount.get(account) ?? { acc: {} }
+      const tagged = { ...rec, step }
+      foldEntry(row.acc, tagged)
+      if (row.latest === undefined || stamp(tagged) > stamp(row.latest)) {
+        row.latest = tagged
+      }
+      byAccount.set(account, row)
+    }
+  }
+  const result: AccountWall[] = []
+  for (const [account, { acc, latest }] of byAccount) {
+    const wall = accWall(account, acc, now)
+    if (wall === undefined) {
+      continue
+    }
+    const source = acc.quota ?? acc.rate ?? latest
+    result.push({
+      account,
+      provider: source?.provider ?? latest?.provider,
+      cause: wall.cause,
+      ...(wall.until === undefined ? {} : { until: wall.until }),
+      ...(typeof source?.step === 'string' ? { step: source.step } : {}),
+      ...(typeof source?.observedAt === 'string'
+        ? { observedAt: source.observedAt }
+        : source?.spawnedAt === undefined
+          ? {}
+          : { observedAt: String(source.spawnedAt) }),
+      ...(typeof source?.rig === 'string' ? { rig: source.rig } : {}),
+    })
+  }
+  return result.sort((a, b) => a.account.localeCompare(b.account))
 }

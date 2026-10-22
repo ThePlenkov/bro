@@ -26,7 +26,7 @@ and member is the plugin that already exists today:
 ```text
 bro review   act | debt | drive | watch | cleanup
 bro flow     next | loop | convoy | stack
-bro fleet    agents | fleet | serve | status | telemetry*
+bro fleet    agents | fleet (walls) | serve | status | telemetry*
 bro work     work | drill | goal | sweep | sync
 bro self     retrospect | learn | judge | guard
 bro comms    bus | notify

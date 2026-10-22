@@ -32,8 +32,10 @@ import {
   type ProviderEntry,
 } from './providers.ts'
 import {
+  fleetWalls,
   fleetRouter,
   fleetRouting,
+  type FleetWallTtls,
   type FleetRouter,
   type RoutingTable,
 } from './routing.ts'
@@ -636,12 +638,14 @@ export const fleetSection: ConfigSection<{
   maxConcurrent: number
   profiles: Record<string, FleetProfile>
   routing: RoutingTable
+  walls: FleetWallTtls
   router?: FleetRouter
 }> = (raw) => {
   const obj = (typeof raw === 'object' && raw !== null ? raw : {}) as {
     maxConcurrent?: unknown
     profiles?: unknown
     routing?: unknown
+    walls?: unknown
     router?: unknown
   }
   const router = fleetRouter(obj.router)
@@ -654,6 +658,7 @@ export const fleetSection: ConfigSection<{
         : DEFAULT_CONFIG.fleet.maxConcurrent,
     profiles: fleetProfiles(obj.profiles),
     routing: fleetRouting(obj.routing),
+    walls: fleetWalls(obj.walls),
     ...(router === undefined ? {} : { router }),
   }
 }
@@ -891,6 +896,7 @@ export interface BroConfig {
     maxConcurrent: number
     profiles: Record<string, FleetProfile>
     routing: RoutingTable
+    walls: FleetWallTtls
     router?: FleetRouter
   }
   /** `query` plan defaults — `concurrency` is the fan-out cap a plan's
@@ -952,7 +958,12 @@ export const DEFAULT_CONFIG: BroConfig = {
   connectors: {},
   providers: {},
   sdd: { mode: 'off', dir: 'specs' },
-  fleet: { maxConcurrent: 3, profiles: {}, routing: {} },
+  fleet: {
+    maxConcurrent: 3,
+    profiles: {},
+    routing: {},
+    walls: { rateTtlMinutes: 15, quotaTtlMinutes: 360 },
+  },
   query: { concurrency: 4, env: {} },
   mesh: { peers: {} },
   mcp: {},

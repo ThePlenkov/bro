@@ -396,6 +396,7 @@ export interface LoopLane {
   /** Resolved provider name + model — provenance pins and reporting
    *  (`bro agents up` prints the same pair). */
   provider?: string
+  account?: string
   model?: string
   /** The routing lane the spawn resolved to (fleet.routing class — spec
    *  bro-1x7p). Provenance like provider/model; absent on unrouted
@@ -561,7 +562,12 @@ function providerLaneOrEmpty(
   autoApprove: boolean | undefined
 ): LoopLane {
   if (pick.worker !== undefined) {
-    return { worker: pick.worker, provider: pick.provider, model: pick.model }
+    return {
+      worker: pick.worker,
+      provider: pick.provider,
+      account: pick.account,
+      model: pick.model,
+    }
   }
   if (model !== undefined || autoApprove === true) {
     throw new SpawnError(
@@ -836,6 +842,7 @@ async function spawnWorker(ctx: Ctx, m: GateMember, prompt: string, lane: LoopLa
       [BATCH_MARKER_ENV]: '1',
     }),
     provider: lane.provider,
+    account: lane.account,
     model: lane.model,
     // the routing lane the spawn resolved to — provenance the registry
     // records and the BRO_AGENT_CLASS env pin both read spec.class
