@@ -8,6 +8,7 @@ import {
   mkdtempSync,
   readFileSync,
   rmSync,
+  statSync,
   symlinkSync,
   writeFileSync,
 } from 'node:fs'
@@ -487,6 +488,59 @@ function connectorContract(b: BackendCase): void {
       assert.ok(existsSync(marker))
       assert.match(readFileSync(marker, 'utf8'), /fx-1/)
       await c.stop(info.id)
+    } finally {
+      cleanup(f)
+    }
+  })
+
+  test('prompt, log and stderr are owner-only 0600 under umask 022 — a new home is 0700', async () => {
+    const f = fx([{ id: 'fx-1', status: 'open' }])
+    const prevUmask = process.umask(0o022)
+    try {
+      const c = conn(f)
+      const info = await c.spawn(SPEC(f.main, f.beadsDir, 'fx-1', 'setTimeout(() => {}, 30000)'))
+      const entry = readAgentRegistry(f.main)['fx-1']!
+      if (entry.log === undefined || entry.stderrLog === undefined) {
+        assert.fail(`${b.name}: entry must name its log and stderr capture`)
+      }
+      const mode = (p: string): number => statSync(p).mode & 0o777
+      const home = join(f.main, '.git', 'bro', 'agents')
+      // a 022 umask must not widen anything bro writes (spec bro-l8c4f.4)
+      assert.equal(mode(join(home, `${entry.agentId}.prompt.md`)), 0o600)
+      assert.equal(mode(entry.log), 0o600)
+      assert.equal(mode(entry.stderrLog), 0o600)
+      assert.equal(mode(home), 0o700)
+      await c.stop(info.id)
+    } finally {
+      process.umask(prevUmask)
+      cleanup(f)
+    }
+  })
+
+  test('a pre-existing 0644 prompt/log/stderr is repaired by the next write', async () => {
+    const f = fx([{ id: 'fx-1', status: 'open' }])
+    try {
+      const c = conn(f)
+      const first = await c.spawn(SPEC(f.main, f.beadsDir, 'fx-1', 'setTimeout(() => {}, 30000)'))
+      kill(first)
+      await until(() => !pidAlive(first.pid!))
+      const entry = readAgentRegistry(f.main)['fx-1']!
+      if (entry.log === undefined || entry.stderrLog === undefined) {
+        assert.fail(`${b.name}: entry must name its log and stderr capture`)
+      }
+      // a pre-fix artifact — wide until a write repairs it (spec bro-l8c4f.4)
+      const prompt = join(f.main, '.git', 'bro', 'agents', `${first.id}.prompt.md`)
+      chmodSync(prompt, 0o644)
+      chmodSync(entry.log, 0o644)
+      chmodSync(entry.stderrLog, 0o644)
+      // a respawn reuses the agentId — the same three files get written again
+      const second = await c.spawn(SPEC(f.main, f.beadsDir, 'fx-1', 'setTimeout(() => {}, 30000)'))
+      assert.equal(second.id, first.id)
+      const mode = (p: string): number => statSync(p).mode & 0o777
+      assert.equal(mode(prompt), 0o600)
+      assert.equal(mode(entry.log), 0o600)
+      assert.equal(mode(entry.stderrLog), 0o600)
+      await c.stop(second.id)
     } finally {
       cleanup(f)
     }
@@ -2042,6 +2096,11 @@ describe('provider-resolved spawns', () => {
       const entry = readAgentRegistry(f.main)['fx-1']!
       const out = readFileSync(join(f.main, 'argv.out'), 'utf8')
       assert.ok(out.endsWith(`${entry.agentId}.prompt.md`), out)
+      // ACP-shaped pathway — the prompt file `bro acp-worker` execs is owner-only
+      assert.equal(
+        statSync(join(f.main, '.git', 'bro', 'agents', `${entry.agentId}.prompt.md`)).mode & 0o777,
+        0o600
+      )
       await until(() => !pidAlive(info.pid!))
     } finally {
       cleanup(f)
