@@ -41,7 +41,7 @@ import {
   PROVIDER_REGISTRY,
   runJanitor,
 } from '@broject/core'
-import type { BdCompat, BdProbe, DoltHeadHealth, DoltRemote, ProviderEntry, ProviderSurface } from '@broject/core'
+import type { BdCompat, BdProbe, ConfigDiagnostic, DoltHeadHealth, DoltRemote, ProviderEntry, ProviderSurface } from '@broject/core'
 import { formatRigUri, parsePeer, rigFromRemoteUrl } from '@broject/mesh'
 import {
   assertSonarHostTrusted,
@@ -53,7 +53,7 @@ import {
 } from '@broject/debt'
 import { judgeConfig, synthesizedProviders } from '@broject/judge'
 import type { JudgeConfig } from '@broject/judge'
-import { loadBroConfig, pluginConfigSections } from '../plugins.ts'
+import { broConfigDiagnostics, loadBroConfig, pluginConfigSections } from '../plugins.ts'
 import { pluginRows } from './plugins.ts'
 import { readStamp, stampAgo, stampSession } from './buildstamp.ts'
 import {
@@ -422,6 +422,7 @@ function selfDistChecks(): DoctorCheck[] {
  *  certainly a typo'd section that silently no-ops. */
 function knownConfigKeys(): Set<string> {
   return new Set([
+    '$schema',
     'stores',
     'store', // legacy v0.1.0
     'personality',
@@ -547,6 +548,33 @@ function configOwnershipChecks(
     )
   }
   return checks
+}
+
+/** Schema-validation rows (spec: bro-d9dmx) — one row per layer FILE
+ *  carrying violations, naming the layer + path + rule. Values that
+ *  failed schema look absent downstream (defaults substitute), so the
+ *  default verdict is warn; `--strict` promotes to fail. */
+function configSchemaChecks(dir: string, strict: boolean): DoctorCheck[] {
+  const diags = broConfigDiagnostics(dir)
+  if (diags.length === 0) {
+    return [check('config-schema', 'ok', 'all layers validate')]
+  }
+  const byFile = new Map<string, ConfigDiagnostic[]>()
+  for (const d of diags) {
+    const list = byFile.get(d.file) ?? []
+    list.push(d)
+    byFile.set(d.file, list)
+  }
+  return [...byFile.values()].map((ds) => {
+    const first = ds[0] as ConfigDiagnostic
+    return check(
+      'config-schema',
+      strict ? 'fail' : 'warn',
+      `${first.layer} ${basename(first.file)} — ` +
+        ds.map((d) => `${d.path}: ${d.message}`).join('; '),
+      'invalid values silently read as defaults — fix the file'
+    )
+  })
 }
 
 /** Compat probe — verifies the contract bro calls (read-path --json
@@ -1635,7 +1663,10 @@ function meshChecks(dir: string, mesh: { rig?: string; peers: Record<string, { r
   return out
 }
 
-export function runDoctorChecks(dir: string = process.cwd()): DoctorCheck[] {
+export function runDoctorChecks(
+  dir: string = process.cwd(),
+  opts: { strict?: boolean } = {}
+): DoctorCheck[] {
   const checks: DoctorCheck[] = [checkNode()]
 
   const git = probeBin('git')
@@ -1670,6 +1701,7 @@ export function runDoctorChecks(dir: string = process.cwd()): DoctorCheck[] {
     checkHooks(dir),
     ...selfDistChecks(),
     ...checkConfig(dir),
+    ...configSchemaChecks(dir, opts.strict === true),
     ...providerChecks(dir),
     ...conductorClassifierChecks(dir, root),
     ...queryCliChecks(dir, cfg.connectors),
@@ -1735,8 +1767,10 @@ export function runDoctorCommand(argv: string[]): void {
     printUsage('usage: bro doctor [--json]', 0)
   }
   const json = argv.includes('--json')
+  // --strict: schema violations are failures, not warnings — the CI gate
+  const strict = argv.includes('--strict')
   const dir = process.cwd()
-  const checks = runDoctorChecks(dir)
+  const checks = runDoctorChecks(dir, { strict })
   const budget = readBudget(dir)
   if (json) {
     console.log(

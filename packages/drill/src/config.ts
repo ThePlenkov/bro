@@ -1,5 +1,5 @@
 import { isAbsolute } from 'node:path'
-import type { ConfigSection } from '@broject/core'
+import { js, type ConfigSection } from '@broject/core'
 
 export const DRILL_REPORT_MODES = ['off', 'prompt', 'always'] as const
 export type DrillReportMode = (typeof DRILL_REPORT_MODES)[number]
@@ -52,3 +52,9 @@ export const drillSection: ConfigSection<DrillConfig> = (raw) => {
     },
   }
 }
+
+// the repo-relative rule on `dir` (no absolute, no `..`) is code-level
+// — the schema can't express path containment
+drillSection.jsonSchema = js.obj({
+  report: js.obj({ dir: js.str, mode: { enum: DRILL_REPORT_MODES } }),
+})

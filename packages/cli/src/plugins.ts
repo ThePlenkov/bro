@@ -11,6 +11,8 @@ import {
   agentsSection,
   beadsSection,
   checkBeads,
+  configDiagnostics,
+  configPolicyErrors,
   debtSection,
   definePlugin,
   loadConfig,
@@ -26,6 +28,7 @@ import {
   sweepSection,
   syncSection,
   type BroPlugin,
+  type ConfigDiagnostic,
   type ConfigSection,
   type DocType,
 } from '@broject/core'
@@ -810,6 +813,46 @@ export function pluginConfigSections(): Record<string, ConfigSection<unknown>> {
 /** loadConfig + registered plugin sections — the CLI's config entrypoint. */
 export function loadBroConfig(cwd: string = process.cwd()) {
   return loadConfig(cwd, pluginConfigSections())
+}
+
+/** configDiagnostics over the full registry — core sections merged with
+ *  every plugin's declared configKey schema (spec: specs/bro-d9dmx.md). */
+export function broConfigDiagnostics(cwd: string = process.cwd()) {
+  return configDiagnostics(cwd, pluginConfigSections())
+}
+
+/** Invalid *policy* config refused a mutation — the audit's
+ *  "authoritative paths validate before side effects". Carries the
+ *  diagnostics so the caller renders paths + layers, not a summary. */
+export class ConfigPolicyError extends Error {
+  readonly diagnostics: ConfigDiagnostic[]
+  constructor(diagnostics: ConfigDiagnostic[]) {
+    const first = diagnostics[0] as ConfigDiagnostic
+    super(
+      `invalid ${first.layer} config — ${first.path}: ${first.message} (${first.file})` +
+        (diagnostics.length > 1 ? ` (+${diagnostics.length - 1} more)` : '') +
+        '\nfix the config or set BRO_CONFIG_FORCE=1 to proceed anyway'
+    )
+    this.name = 'ConfigPolicyError'
+    this.diagnostics = diagnostics
+  }
+}
+
+/** Fail-closed gate for authoritative mutations (spawn claims, queue
+ *  claims): policy sections are the committed config everyone shares,
+ *  so an invalid value there is refused BEFORE the side effect.
+ *  Operator sections (providers/fleet/agents/…) warn via doctor but
+ *  never gate — they're machine-local by definition. Hooks and
+ *  read-only paths never call this. `BRO_CONFIG_FORCE=1` is the
+ *  deliberate escape hatch (spec: specs/bro-d9dmx.md). */
+export function assertMutableConfig(dir: string): void {
+  if (process.env.BRO_CONFIG_FORCE === '1') {
+    return
+  }
+  const errors = configPolicyErrors(dir, pluginConfigSections())
+  if (errors.length > 0) {
+    throw new ConfigPolicyError(errors)
+  }
 }
 
 function isPlugin(p: unknown): p is BroPlugin {

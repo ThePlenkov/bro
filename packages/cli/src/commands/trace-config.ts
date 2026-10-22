@@ -2,7 +2,7 @@
  *  register the schema without importing the command's dependency tree
  *  (same pattern as drive-config.ts). Holds the OTLP exporter knobs;
  *  the perf journals need no config. */
-import type { ConfigSection } from '@broject/core'
+import { js, type ConfigSection } from '@broject/core'
 
 export interface OtlpConfig {
   /** Collector base URL — `http://host:4318` or a full `/v1/traces`
@@ -62,6 +62,18 @@ export const telemetrySection: ConfigSection<TelemetryConfig> = (raw) => {
     },
   }
 }
+
+telemetrySection.jsonSchema = js.obj({
+  otlp: js.obj({
+    // '' is the honest "off" — no minLength
+    endpoint: { type: 'string' },
+    signalUrl: js.bool,
+    headers: js.map({ type: 'string' }),
+    serviceName: js.str,
+    flushMs: js.num(1),
+    timeoutMs: js.num(1),
+  }),
+})
 
 /** `k=v,k2=v2` — the OTEL_EXPORTER_OTLP_HEADERS wire shape. Bare or
  *  empty items drop silently; a malformed env must not kill telemetry

@@ -1,7 +1,7 @@
 /** `watch` config section — a separate module so plugins.ts can register
  *  the schema without importing the command's dependency tree (same
  *  pattern as drive-config.ts). */
-import type { ConfigSection } from '@broject/core'
+import { js, type ConfigSection } from '@broject/core'
 import { MAX_INTERVAL_SEC, MIN_INTERVAL_SEC } from './drive-config.ts'
 
 export interface WatchConfig {
@@ -26,3 +26,7 @@ export const watchSection: ConfigSection<WatchConfig> = (raw) => {
     pulseSec: bounded(obj.pulseSec) ? obj.pulseSec : 900,
   }
 }
+
+const boundedSec = { type: 'number', minimum: MIN_INTERVAL_SEC, maximum: MAX_INTERVAL_SEC }
+
+watchSection.jsonSchema = js.obj({ intervalSec: boundedSec, pulseSec: boundedSec })

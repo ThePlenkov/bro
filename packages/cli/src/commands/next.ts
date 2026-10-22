@@ -27,7 +27,7 @@ import { emitLifecycle, ensureTasksBackend, facade, getTasks, gitTry, hasHelpFla
 import { flag } from './args.ts'
 import type { NextFilters, NextOrder, NextPlan } from './next-plan.ts'
 import { requireGlobalStore } from '../doctypes/store.ts'
-import { loadBroConfig } from '../plugins.ts'
+import { assertMutableConfig, loadBroConfig } from '../plugins.ts'
 
 /** The serving tasks backend for `dir` — `connectors.tasks` in
  *  bro.config selects it (beads by default, github when pinned). The
@@ -352,11 +352,12 @@ export function applyNextPlan(plan: NextPlan): void {
   // the global queue at a project backend the gate never checked
   const storeOpts: FacadeOpts | undefined = dir === undefined ? undefined : { connector: 'beads' }
   let backend: string
+  let projectRoot: string | undefined
   if (dir === undefined) {
     // gate on the serving backend — beads gets the compat probe, a
     // pinned connector gets its own auth check
-    const root = gitTry(['rev-parse', '--show-toplevel']).out.trim() || process.cwd()
-    backend = ensureTasksBackend(root, loadBroConfig(root).connectors)
+    projectRoot = gitTry(['rev-parse', '--show-toplevel']).out.trim() || process.cwd()
+    backend = ensureTasksBackend(projectRoot, loadBroConfig(projectRoot).connectors)
   } else {
     // the global store is beads by construction
     backend = ensureTasksBackend(dir, {})
@@ -368,6 +369,12 @@ export function applyNextPlan(plan: NextPlan): void {
   } catch (err) {
     console.error(`error: ${err instanceof Error ? err.message : String(err)}`)
     process.exit(1)
+  }
+  // a project-scope claim is an authoritative mutation — invalid
+  // committed config refuses BEFORE `bd update --claim` writes
+  // (spec: bro-d9dmx). The global store carries no project policy.
+  if (plan.claim && projectRoot !== undefined) {
+    assertMutableConfig(projectRoot)
   }
   const beads = plan.claim ? claimUpTo(c.queue, plan.limit, dir, storeOpts) : c.queue.slice(0, plan.limit)
   const picked = new Set(beads.map((b) => b.id))
