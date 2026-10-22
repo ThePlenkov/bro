@@ -521,10 +521,11 @@ function connectorContract(b: BackendCase): void {
         const entry = readAgentRegistry(f.main)['fx-1']!
         const lease = store.read('bead/fx-1')
         assert.equal(entry.leaseToken, lease?.token)
-        kill(first)
-        await until(() => !pidAlive(first.pid!))
         assert.ok(lease !== undefined)
         assert.ok(store.rebind(lease, { pid: process.pid }))
+        kill(first)
+        await until(() => !pidAlive(first.pid!))
+        assert.equal(store.read('bead/fx-1')?.token, lease.token)
         const second = await c.spawn(
           SPEC(f.main, f.beadsDir, 'fx-1', 'setTimeout(() => {}, 30000)')
         )

@@ -345,6 +345,14 @@ export interface HoldRoleLeaseOptions {
   log?: (line: string) => void
 }
 
+interface RoleAcquisition {
+  store: LeaseStore
+  key: string
+  holder: LeaseHolder
+  ttlMs: number
+  options: HoldRoleLeaseOptions
+}
+
 function roleHolderLine(key: string, lease: Lease): string {
   const holder = lease.holder
   return `standby — ${key} held by ${holder.rig}@${holder.host} pid ${holder.pid}`
@@ -389,13 +397,13 @@ function waitForRole(
   return poll()
 }
 
-function acquireRole(
-  store: LeaseStore,
-  key: string,
-  holder: LeaseHolder,
-  ttlMs: number,
-  options: HoldRoleLeaseOptions
-): Promise<Lease> {
+function acquireRole({
+  store,
+  key,
+  holder,
+  ttlMs,
+  options,
+}: RoleAcquisition): Promise<Lease> {
   const attempt = (): Promise<Lease> =>
     waitForRole(store, key, ttlMs, options).then(() => {
       const acquired = store.acquire(key, holder, ttlMs)
@@ -415,7 +423,7 @@ export async function holdRoleLease(
   options: HoldRoleLeaseOptions = {}
 ): Promise<{ release: () => void }> {
   const key = `role/${role}`
-  let lease = await acquireRole(store, key, holder, ttlMs, options)
+  let lease = await acquireRole({ store, key, holder, ttlMs, options })
   let released = false
   const log = options.log ?? console.error
   const exit = options.exit ?? ((code: number) => process.exit(code))

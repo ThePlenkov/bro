@@ -12,11 +12,7 @@ function stripSuffix(value: string): string {
   return value.split(/[?#]/, 1)[0] ?? ''
 }
 
-function scpRemote(value: string): RemoteParts | undefined {
-  if (value.includes('://')) {
-    return undefined
-  }
-  const remote = stripSuffix(value)
+function parseScpAddress(remote: string): RemoteParts | undefined {
   const at = remote.indexOf('@')
   const userSeparator = at < 0 ? -1 : remote.indexOf(':', at + 1)
   const hostStart = userSeparator < 0 ? 0 : at + 1
@@ -27,13 +23,26 @@ function scpRemote(value: string): RemoteParts | undefined {
   const authority = remote.slice(0, separator)
   const host = authority.slice(hostStart)
   const path = remote.slice(separator + 1)
-  if (authority.includes('/') || host === '' || path === '') {
+  if (authority.includes('/')) {
+    return undefined
+  }
+  if (host === '') {
+    return undefined
+  }
+  if (path === '') {
     return undefined
   }
   return {
     host: host.toLowerCase(),
     path: path.split('/').filter((part) => part !== ''),
   }
+}
+
+function scpRemote(value: string): RemoteParts | undefined {
+  if (value.includes('://')) {
+    return undefined
+  }
+  return parseScpAddress(stripSuffix(value))
 }
 
 function urlRemote(value: string): RemoteParts {
@@ -49,7 +58,7 @@ function dropProxyPrefix(parts: RemoteParts): RemoteParts {
     return parts
   }
   const index = parts.path.indexOf('proxy')
-  if (index < 0 || index + 1 >= parts.path.length) {
+  if (index < 0) {
     return parts
   }
   const host = parts.path[index + 1]
