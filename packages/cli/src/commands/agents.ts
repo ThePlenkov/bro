@@ -59,6 +59,7 @@ import { randomBytes } from 'node:crypto'
 import {
   countSessionReservations,
   gitCommonDir,
+  hasHelpFlag,
   printUsage,
   readAgentRegistry,
   SESSION_SLOT_TTL_MS,
@@ -1591,6 +1592,9 @@ async function cmdLog(dir: string, env: AgentConnectorEnv, argv: string[]): Prom
 }
 
 export async function runAgentsCommand(argv: string[]): Promise<void> {
+  if (hasHelpFlag(argv)) {
+    usage(0)
+  }
   const dir = process.cwd()
   const env = loadAgentEnv(dir)
   const sub = argv[0]
@@ -1612,10 +1616,6 @@ export async function runAgentsCommand(argv: string[]): Promise<void> {
       return
     case 'prune':
       await cmdPrune(dir, env, argv.slice(1))
-      return
-    case '--help':
-    case '-h':
-      usage(0)
       return
     case undefined:
       usage()

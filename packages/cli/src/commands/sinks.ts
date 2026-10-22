@@ -12,6 +12,7 @@
 import { randomBytes } from 'node:crypto'
 import {
   deliverSinks,
+  hasHelpFlag,
   loadConfig,
   printUsage,
   sinkSecrets,
@@ -141,7 +142,7 @@ async function cmdTest(json: boolean): Promise<void> {
 
 export async function runSinksCommand(argv: string[]): Promise<void> {
   const [sub, ...rest] = argv
-  if (sub === undefined || sub === '--help' || sub === '-h') {
+  if (sub === undefined || hasHelpFlag(argv)) {
     usage(sub === undefined ? 2 : 0)
   }
   switch (sub) {

@@ -1015,7 +1015,7 @@ function dispatchWatchPrelude(argv: string[]): boolean {
     )
   }
   if (argv[0] === 'install' || argv[0] === 'uninstall') {
-    runWatchSched(argv.slice(1))
+    runWatchSched(argv)
     return true
   }
   return false

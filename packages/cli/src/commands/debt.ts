@@ -16,6 +16,7 @@ import {
   ensureAuth,
   facadeAuth,
   gitTry,
+  hasHelpFlag,
   isBdCompatError,
   printUsage,
   reviewHost,
@@ -1405,7 +1406,7 @@ export async function runDebtCommand(argv: string[]): Promise<void> {
     cmdStatus()
     return
   }
-  if (cmd === '--help' || cmd === '-h') {
+  if (hasHelpFlag(argv)) {
     usage(0)
   }
   const handler = COMMANDS[cmd!]

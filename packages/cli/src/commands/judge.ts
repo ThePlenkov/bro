@@ -23,6 +23,7 @@
 import { readFileSync } from 'node:fs'
 import {
   ensureAuth,
+  hasHelpFlag,
   JudgeUnavailable,
   printUsage,
   requireProviderSurface,
@@ -440,7 +441,7 @@ const JUDGE_USAGE =
 
 export async function runJudgeCommand(argv: string[]): Promise<void> {
   const sub = argv[0]
-  if (sub === '--help' || sub === '-h') {
+  if (hasHelpFlag(argv)) {
     printUsage(JUDGE_USAGE, 0)
   }
   if (sub === 'decide') {

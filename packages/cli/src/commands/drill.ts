@@ -378,6 +378,27 @@ function rejectUnknownFlags(sub: string, argv: string[]): void {
   }
 }
 
+/** Every syntax error must surface before checkBeads() can mask it
+ *  with a setup error — flag names, stray positionals, and the
+ *  command-specific operand/flag-value parses. */
+function validateDrillSyntax(sub: string, rest: string[]): void {
+  rejectUnknownFlags(sub, rest)
+  // these subs take no positional args — a stray one is a typo, not input
+  const noPositionals = new Set(['up', 'current', 'tree', 'list', 'report', 'park', 'waiting'])
+  const extras = drillPositionals(rest)
+  if (noPositionals.has(sub) && extras.length > 0) {
+    console.error(`error: unexpected argument "${extras[0]}"`)
+    process.exit(2)
+  }
+  if (sub === 'down') {
+    parseDown(rest)
+  } else if (sub === 'up') {
+    parseUp(rest)
+  } else if (sub === 'distill') {
+    parseDistill(rest)
+  }
+}
+
 export async function runDrillCommand(argv: string[]): Promise<void> {
   const [sub, ...rest] = argv
   // zero-arg magic: bare `bro drill` shows where the descent stands
@@ -397,23 +418,7 @@ export async function runDrillCommand(argv: string[]): Promise<void> {
   if (hasHelpFlag(rest)) {
     usage(0)
   }
-  rejectUnknownFlags(sub, rest)
-  // these subs take no positional args — a stray one is a typo, not input
-  const noPositionals = new Set(['up', 'current', 'tree', 'list', 'report', 'park', 'waiting'])
-  const extras = drillPositionals(rest)
-  if (noPositionals.has(sub) && extras.length > 0) {
-    console.error(`error: unexpected argument "${extras[0]}"`)
-    process.exit(2)
-  }
-  // command-specific operands/flag values too — all syntax errors must
-  // surface before checkBeads() can mask them with a setup error
-  if (sub === 'down') {
-    parseDown(rest)
-  } else if (sub === 'up') {
-    parseUp(rest)
-  } else if (sub === 'distill') {
-    parseDistill(rest)
-  }
+  validateDrillSyntax(sub, rest)
   // `report` lists files only — a missing/uninitialized bd must not
   // block reading published reports
   if (sub !== 'report') {

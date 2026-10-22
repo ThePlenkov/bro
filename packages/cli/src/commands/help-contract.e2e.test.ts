@@ -1,6 +1,8 @@
 import { describe, test } from 'node:test'
 import assert from 'node:assert/strict'
-import { runCli, tmpDir } from './testrepo.ts'
+import { existsSync } from 'node:fs'
+import { join } from 'node:path'
+import { initRepo, inside, runCli, tmpDir } from './testrepo.ts'
 
 /** The stream+code contract (spec bro-1znlu): the exit code picks the
  *  stream — explicit help exits 0 so its text lands on stdout; usage
@@ -68,6 +70,19 @@ describe('help → stdout + 0', () => {
     ['providers', 'models', '--help'],
     ['drill', 'down', '--help'],
     ['retrospect', 'list', '--help'],
+    // nested help ahead of side effects — spawning, ledger labels, the
+    // judge provider, client (un)install, sink probes, and a scheduler
+    // disarm must never run on a help request
+    ['agents', 'up', 'fx-abc', '--help'],
+    ['debt', 'mark', '123', 'collected', '--help'],
+    ['guard', 'test', 'some-guard', '--help'],
+    ['judge', 'decide', '--state', 's.json', '--help'],
+    ['plugins', 'uninstall', 'kilo', '--help'],
+    ['help', 'plugins', 'uninstall', 'kilo'],
+    ['sinks', 'test', '--help'],
+    ['watch', 'uninstall', '--help'],
+    // a `--` payload after `help <cmd>` is not help — drop it, show help
+    ['help', 'act', '--', 'payload'],
   ]) {
     test(`bro ${args.join(' ')}`, () => {
       const r = cli(args)
@@ -94,6 +109,23 @@ describe('usage errors → stderr + non-zero', () => {
       assert.ok(r.stderr.length > 0, 'usage text lands on stderr')
     })
   }
+})
+
+describe('watch sched dispatch', () => {
+  test('bro watch uninstall never falls through to install', () => {
+    const { root, main } = initRepo('bro-watch-uninstall-')
+    inside(main, root, () => {
+      const r = runCli(['watch', 'uninstall'], { cwd: main })
+      assert.equal(r.code, 0, `stderr: ${r.stderr}`)
+      // the buggy dispatch fed runWatchSched an empty argv — installWatch
+      // armed the pulse instead of reporting the disarm path
+      assert.match(r.stdout, /no pulse marker|pulse disarmed/)
+      assert.ok(
+        !existsSync(join(main, '.git', 'bro', 'pulse.json')),
+        'uninstall must not write the pulse marker'
+      )
+    })
+  })
 })
 
 describe('frozen verdict meanings', () => {

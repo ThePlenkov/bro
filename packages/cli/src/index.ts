@@ -149,7 +149,10 @@ async function main(): Promise<void> {
   // one spelling for explicit help whichever side of the command it sits on
   let argv = process.argv.slice(2)
   if (argv[0] === 'help') {
-    argv = argv.length === 1 ? ['--help'] : [...argv.slice(1), '--help']
+    const tail = argv.slice(1)
+    const sep = tail.indexOf('--')
+    const head = sep === -1 ? tail : tail.slice(0, sep)
+    argv = head.length === 0 ? ['--help'] : [...head, '--help']
   }
   const [cmd, ...rest] = argv
 

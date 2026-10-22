@@ -12,6 +12,7 @@
 import {
   collectGuards,
   GUARD_DEFAULT_BUDGET,
+  hasHelpFlag,
   isGuardEvent,
   printUsage,
   type CollectedGuard,
@@ -172,9 +173,21 @@ async function cmdTest(argv: string[]): Promise<void> {
   process.exit(1)
 }
 
+const GUARD_USAGE = `Usage: bro guard <command> [args…]
+
+Commands:
+  list     Every resolved guard — name, source, on-events, budget,
+           validation state [--json]
+  test     Per-clause verdicts then FIRE|SKIP — a read on the engine:
+           bro guard test <name> [--event E] [--prompt T] [--session ID]
+           exit 0 = FIRE, 1 = SKIP, 2 = usage`
+
 export function runGuardCommand(argv: string[]): void | Promise<void> {
   const sub = argv[0]
   const rest = argv.slice(1)
+  if (hasHelpFlag(argv)) {
+    printUsage(GUARD_USAGE, 0)
+  }
   if (sub === 'list') {
     cmdList(rest)
     return
@@ -182,15 +195,5 @@ export function runGuardCommand(argv: string[]): void | Promise<void> {
   if (sub === 'test') {
     return cmdTest(rest)
   }
-  printUsage(
-    `Usage: bro guard <command> [args…]
-
-Commands:
-  list     Every resolved guard — name, source, on-events, budget,
-           validation state [--json]
-  test     Per-clause verdicts then FIRE|SKIP — a read on the engine:
-           bro guard test <name> [--event E] [--prompt T] [--session ID]
-           exit 0 = FIRE, 1 = SKIP, 2 = usage`,
-    sub === '--help' || sub === '-h' ? 0 : 2
-  )
+  printUsage(GUARD_USAGE, 2)
 }

@@ -43,5 +43,5 @@ Documented overloads — preserved, not renumbered:
   error, not a help request. An unknown command exits `2`.
 
 Machine-readable: the table lives as `EXIT_CODES` in `@broject/core`
-(`packages/core/src/exits.ts`); `bro contract dump --json` serializes
-it (bro-k9ces).
+(`packages/core/src/exits.ts`); `bro contract dump --json` (planned —
+bro-k9ces) will serialize it.
