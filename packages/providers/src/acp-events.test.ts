@@ -1,6 +1,6 @@
 import { after, describe, test } from 'node:test'
 import assert from 'node:assert/strict'
-import { existsSync, mkdtempSync, readdirSync, readFileSync } from 'node:fs'
+import { existsSync, mkdtempSync, readdirSync, readFileSync, statSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import {
@@ -117,6 +117,12 @@ describe('agentTurnPlane', () => {
       assert.deepEqual(usages.map((e) => (e.payload as { used: number }).used), [100, 200])
 
       const rows = readArchive(dir, 'native-t1')
+      // the archive carries raw ACP prompts/replies — owner-only 0600,
+      // no umask can widen it (spec bro-l8c4f.4)
+      assert.equal(
+        statSync(join(gitCommonDir(dir)!, 'bro', 'agents', 'native-t1.events.jsonl')).mode & 0o777,
+        0o600
+      )
       assert.equal(rows[0]!.kind, 'turn')
       assert.equal(rows[0]!.phase, 'start')
       const updates = rows.filter((r) => r.kind === 'update')

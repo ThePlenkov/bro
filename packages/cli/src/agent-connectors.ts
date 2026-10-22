@@ -16,6 +16,7 @@ import { spawn, spawnSync } from 'node:child_process'
 import { createHash } from 'node:crypto'
 import {
   accessSync,
+  chmodSync,
   closeSync,
   constants,
   existsSync,
@@ -1545,6 +1546,21 @@ function prepareSpawn(
   }
 }
 
+/** Owner-only (0600) write of a bro-managed agent artifact — the prompt
+ *  and the log/stderr capture carry instructions and model output, so a
+ *  022 umask must never leave them readable by every local account
+ *  (spec bro-l8c4f.4). Order is the contract: a `mode` flag only pins a
+ *  NEW file, so a pre-existing 0644 artifact is chmod'd FIRST — no byte
+ *  of this write ever lands in a file that is still wide. `append`
+ *  never truncates: it is for paths a shell `>>`/`tee -a` opens right
+ *  after, creating them empty at 0600 when they are not there yet. */
+function writePrivate(path: string, data: string, append = false): void {
+  if (existsSync(path)) {
+    chmodSync(path, 0o600)
+  }
+  writeFileSync(path, data, { mode: 0o600, flag: append ? 'a' : 'w' })
+}
+
 /** The write phase of a spawn — prompt/log/exit files, the registry
  *  row, then claim bookkeeping. Split from the guard/admission phase
  *  so a refused spawn leaves no half-state and a caller-side
@@ -1562,13 +1578,16 @@ function commitSpawn(
   agentId: string,
   guard: { claimed: boolean; actor: string | undefined; phantom: boolean }
 ): { promptFile: string; log: string; stderrLog: string; exitFile: string } {
-  mkdirSync(home, { recursive: true })
+  // owner-only home for a NEW agents dir — an existing one keeps the
+  // mode it was created with (file modes below carry confidentiality
+  // either way; spec bro-l8c4f.4)
+  mkdirSync(home, { recursive: true, mode: 0o700 })
   const promptFile = join(home, `${agentId}.prompt.md`)
   const log = join(home, `${agentId}.log`)
   const stderrLog = join(home, `${agentId}.stderr`)
   const exitFile = join(home, `${agentId}.exit`)
   rmSync(exitFile, { force: true })
-  writeFileSync(promptFile, spec.prompt)
+  writePrivate(promptFile, spec.prompt)
   const logFrom = logSizeOrZero(log)
   const stderrFrom = logSizeOrZero(stderrLog)
   // exitStatus: undefined clears a respawned entry's stale harvest — the
@@ -2112,6 +2131,10 @@ export function makeNativeConnector(ctx: ConnectorCtx, env: AgentConnectorEnv): 
         let errFd: number | undefined
         let spawned: AgentRegistryEntry
         try {
+          // owner-only before the append: the fds must open on 0600
+          // files, never on umask-made 0644 ones (spec bro-l8c4f.4)
+          writePrivate(log, '', true)
+          writePrivate(stderrLog, '', true)
           fd = openSync(log, 'a')
           errFd = openSync(stderrLog, 'a')
           // the wrapper captures $? into the .exit file — the only exit
@@ -2561,6 +2584,10 @@ export function makeTmuxConnector(ctx: ConnectorCtx, env: AgentConnectorEnv): Ag
         // re-parses into a different program.
         warnNoPromptFile(worker, command)
         const runLine = workerRunLine(worker, command, promptFile)
+        // the pane's `tee -a`/`2>>` would create both with the shell's
+        // umask — pre-create owner-only so they append to 0600 files
+        writePrivate(log, '', true)
+        writePrivate(stderrLog, '', true)
         const paneScript = `. ${shQuote(envFile)}; rm -f ${shQuote(envFile)}; { ${runLine}; s=$?; printf %s "$s" > ${shQuote(exitFile)}; } 2>> ${shQuote(stderrLog)} | tee -a ${shQuote(log)}`
         const paneCmd = `sh -c ${shQuote(paneScript)}` // NOSONAR — operator-configured agent command (same contract as native/loop)
         const res = tmuxRun(socket, [
@@ -3953,6 +3980,11 @@ export function makeDockerConnector(ctx: ConnectorCtx, env: AgentConnectorEnv): 
           warnNoPromptFile(worker, command)
           const cliBadge = workerCliBadge(worker, command)
           const runLine = workerRunLine(worker, command, promptFile)
+          // the container's `>>`/`2>>` write the mounted host paths —
+          // pre-create owner-only (docker defaults --user to the host
+          // uid, so the worker is the owner; spec bro-l8c4f.4)
+          writePrivate(log, '', true)
+          writePrivate(stderrLog, '', true)
           // the native wrapper, verbatim — the mounted paths make .exit/
           // log land where the host ladder reads them. --init gives the
           // worker a reaper so grandchildren can't zombie inside; --rm
