@@ -57,6 +57,7 @@ import {
 import { basename } from 'node:path'
 import { randomBytes } from 'node:crypto'
 import {
+  AgentNotFound,
   countSessionReservations,
   gitCommonDir,
   readAgentRegistry,
@@ -729,10 +730,21 @@ export interface StopOutcome {
   /** live state at stop time — can differ from the list() snapshot */
   agent?: AgentInfo
   backend?: string
-  /** true when stop() ran — always true on a found agent; the connector
-   *  binds to the CURRENT registry entry, so the call also stops a
-   *  respawn that landed between our status read and here */
+  /** true when the backend CONFIRMED the worker is gone after stop() —
+   *  probe verdict (bro-l8c4f.3): always true on an already-terminal
+   *  agent (nothing was live; no probe runs, verdict stays undefined),
+   *  and on a live stop only when the post-stop status() read says so.
+   *  stop() itself is the request landing, not proof of death: a
+   *  TERM-resistant worker survives the bounded kill-wait */
   stopped: boolean
+  /** post-stop truth from one status() re-probe (absent when the
+   *  pre-stop read was already terminal — nothing live to verify):
+   *  'stopped' the backend confirms the worker is gone/terminal;
+   *  'still-running' the worker survived stop() (TERM-resistant, the
+   *  connector's bounded wait expired);
+   *  'unverified' the probe cannot confirm death either way (no death
+   *  record, or the backend failed to answer) */
+  verdict?: 'stopped' | 'still-running' | 'unverified'
   /** the agent already read terminal when we looked — stop() still ran
    *  (idempotent), the flag just says there was nothing live to kill */
   terminal?: boolean
@@ -777,12 +789,37 @@ export async function stopAgent(
   const respawned =
     current.pid !== hit.agent.pid ? { from: hit.agent.pid, to: current.pid } : undefined
   await hit.conn.stop(hit.agent.id)
+  // stop() returning proves the REQUEST landed, not the death — a
+  // TERM-resistant worker survives the connector's bounded kill-wait,
+  // so `stopped` is re-probed from the backend before anyone reports
+  // it (bro-l8c4f.3). The already-terminal path skips the probe:
+  // nothing was live to verify and its message/exit contract stands.
+  let verdict: StopOutcome['verdict']
+  if (terminal) {
+    verdict = undefined
+  } else {
+    try {
+      const after = await hit.conn.status(hit.agent.id)
+      verdict =
+        after.state === 'exited' || after.state === 'stopped'
+          ? 'stopped'
+          : after.state === 'running' || after.state === 'spawned'
+            ? 'still-running'
+            : 'unverified' // lost/blocked — no death record to confirm
+    } catch (err) {
+      // gone is the desired end state; any OTHER probe failure is
+      // unverified — a backend that cannot answer must not be read as
+      // a kill confirmation
+      verdict = err instanceof AgentNotFound ? 'stopped' : 'unverified'
+    }
+  }
   return {
     found: true,
     degraded,
     agent: current,
     backend: hit.conn.name,
-    stopped: true,
+    stopped: verdict === undefined || verdict === 'stopped',
+    verdict,
     terminal,
     cleared: current.state === 'blocked' ? true : undefined,
     respawned,
@@ -1215,6 +1252,19 @@ async function cmdDown(dir: string, env: AgentConnectorEnv, argv: string[]): Pro
     const fmt = (p: number | undefined) => (p === undefined ? 'unknown' : String(p))
     console.error(
       `note: ${agent.id} respawned since lookup (pid ${fmt(outcome.respawned.from)} → ${fmt(outcome.respawned.to)}) — stopping current instance`
+    )
+  }
+  // truthfulness (bro-l8c4f.3): only a confirmed-dead worker may read
+  // as `stopped` — a survivor or an unverifiable death is an error the
+  // operator must see before respawning anything
+  if (outcome.verdict === 'still-running') {
+    die(
+      `${agent.id} (${agent.molStep}, ${outcome.backend}) survived the stop signal — still running (pid ${agent.pid ?? 'unknown'}) — not safe to respawn`
+    )
+  }
+  if (outcome.verdict === 'unverified') {
+    die(
+      `${agent.id} (${agent.molStep}, ${outcome.backend}) — stop unconfirmed: the backend reports ${agent.state}, death not verified — not safe to respawn`
     )
   }
   console.log(`stopped ${agent.id} (${agent.molStep}, ${outcome.backend})`)

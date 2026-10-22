@@ -1968,6 +1968,53 @@ const entryPidStart = (entry: AgentRegistryEntry): string | undefined =>
     ? entry.pidStart
     : undefined
 
+/** The wrapper's death is not its unit's death: a TERM-resistant
+ *  descendant survives the group signal, so the stop may only record
+ *  `stopped` when the WHOLE execution unit is gone, not the sh-wrapper
+ *  alone (bro-l8c4f.3). kill(-pgid, 0) gates — ESRCH is a group that
+ *  no longer exists (ESRCH-or-hard-failure reads dead, the rule
+ *  pidAlive applies; EPERM is a live group we cannot signal) — but it
+ *  also counts the unreaped wrapper's own zombie, so live members are
+ *  read from /proc the way procStat reads one process: state 'Z' is
+ *  nobody. A pgid with no readable /proc reads as ALIVE (fail-open,
+ *  pidAlive's rule): never a false "the unit is dead". */
+function groupMemberAlive(pgid: number): boolean {
+  if (!Number.isInteger(pgid) || pgid <= 0) {
+    return false
+  }
+  try {
+    process.kill(-pgid, 0)
+  } catch (e) {
+    if ((e as NodeJS.ErrnoException).code !== 'EPERM') {
+      return false
+    }
+  }
+  let names: string[]
+  try {
+    names = readdirSync('/proc')
+  } catch {
+    return true
+  }
+  for (const name of names) {
+    const pid = Number(name)
+    if (!Number.isInteger(pid) || pid <= 0) {
+      continue
+    }
+    let stat: string
+    try {
+      stat = readFileSync(`/proc/${pid}/stat`, 'utf8')
+    } catch {
+      continue // vanished mid-scan
+    }
+    const rest = stat.slice(stat.lastIndexOf(')') + 2).split(' ')
+    // rest: state, ppid, pgrp, … — the same split procStat uses
+    if ((rest[0] ?? '') !== 'Z' && Number(rest[2]) === pgid) {
+      return true
+    }
+  }
+  return false
+}
+
 /** Live state for a registry entry under this backend. */
 function nativeState(dir: string, home: string | null, molStep: string, entry: AgentRegistryEntry): AgentState {
   // liveness first: a 'stopped' marker on a pid that is still alive means
@@ -2278,9 +2325,16 @@ export function makeNativeConnector(ctx: ConnectorCtx, env: AgentConnectorEnv): 
         }
         // let the signal land before recording the stop — `stopped` on a
         // still-living pid would let a respawn run alongside the dying
-        // agent (nativeState reports live pids as running regardless)
+        // agent (nativeState reports live pids as running regardless).
+        // The unit, not the wrapper, is the wait: a TERM-resistant
+        // descendant outlives the sh-wrapper it was spawned under, and
+        // `stopped` over it would free a respawn onto a live writer
+        // (bro-l8c4f.3)
         const deadline = Date.now() + 2_000
-        while (pidAlive(pid, entryPidStart(entry)) && Date.now() < deadline) {
+        while (
+          (pidAlive(pid, entryPidStart(entry)) || groupMemberAlive(pid)) &&
+          Date.now() < deadline
+        ) {
           await new Promise((r) => setTimeout(r, 25))
         }
       }
@@ -2293,9 +2347,10 @@ export function makeNativeConnector(ctx: ConnectorCtx, env: AgentConnectorEnv): 
           cur === undefined ||
           cur.agentId !== entry.agentId ||
           cur.spawnedAt !== entry.spawnedAt ||
-          (pid !== undefined && pidAlive(pid, entryPidStart(entry)))
+          (pid !== undefined &&
+            (pidAlive(pid, entryPidStart(entry)) || groupMemberAlive(pid)))
         ) {
-          return // respawned or still alive — the live run owns the entry
+          return // respawned, or the unit (wrapper/descendant) lives — the live run owns the entry
         }
         try {
           patchAgentRegistry(dir, molStep, { stopped: true })
