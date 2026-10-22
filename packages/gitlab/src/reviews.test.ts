@@ -45,7 +45,7 @@ case "$1 $2" in
       *"/pipelines"*) echo '[{"id":11,"sha":"abc123","status":"success"}]' ;;
       *"/versions"*) echo '[{"head_commit_sha":"a1"},{"head_commit_sha":"a2"},{"head_commit_sha":"a1"}]' ;;
       *"/discussions"*) echo '${DISCUSSIONS}' ;;
-      *"/approvals"*) echo "\${FAKE_GLAB_APPROVALS:-{\}}" ;;
+      *"/approvals"*) echo "\${FAKE_GLAB_APPROVALS:-{\\}}" ;;
       *"/merge_requests/"*)
         iid=$(echo "$2" | sed 's/.*merge_requests\\///; s/[^0-9].*//')
         case ",$FAKE_GLAB_MR_FAIL," in *",$iid,"*) echo 'glab api failed: 404 Not Found' >&2; exit 1 ;; esac

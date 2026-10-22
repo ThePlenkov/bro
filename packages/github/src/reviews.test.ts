@@ -51,8 +51,8 @@ case "$1 $2" in
       *"s0: pullRequest"*) echo '{"data":{"repository":{"s0":${SCAN_NODE},"s1":${SCAN_NODE}}}}' ;;
       *"u0: pullRequest"*) echo '{"data":{"repository":{"u0":{"updatedAt":"2026-02-02T00:00:00Z"},"u1":{"updatedAt":"2026-02-02T00:00:00Z"}}}}' ;;
       *"reviews(first:100"*) case "$@" in
-          *'after: "'*) echo "${FAKE_GH_REVIEWS_P2:-{\}}";;
-          *) echo "${FAKE_GH_REVIEWS_P1:-{\}}";;
+          *'after: "'*) echo "\${FAKE_GH_REVIEWS_P2:-{\\}}";;
+          *) echo "\${FAKE_GH_REVIEWS_P1:-{\\}}";;
         esac ;;
       *) echo '{"data":{"repository":{"pullRequest":{"reviewThreads":{"pageInfo":{"hasNextPage":false,"endCursor":null},"nodes":[{"id":"THR_1","isResolved":false,"isOutdated":false,"comments":{"nodes":[{"author":{"login":"reviewer-bot","__typename":"Bot"},"path":"a.ts","line":3,"body":"fix this","createdAt":"2026-01-01"}]}}]}}}}}' ;;
     esac ;;
