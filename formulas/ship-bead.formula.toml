@@ -95,15 +95,19 @@ linked worktree, delete the merged branch, `bd close {{bead}}` (and parent
 epic if its children are all closed), `bd dolt push`, `bro debt collect`.
 Verify with `git worktree list` and `bd ready` — nothing left dangling.
 
-The branch goes with the PR — locally AND on the remote:
+The branch goes with the PR — locally AND on the remote. Order matters
+(git refuses to delete a branch that is checked out):
 
-    git switch main && git pull --ff-only
+    git switch main && git pull --ff-only   # or: git worktree remove <path>
     git branch -D <merged-branch>
-    git push origin --delete <merged-branch>
+    git ls-remote --exit-code --heads origin <merged-branch> >/dev/null 2>&1 \
+      && git push origin --delete <merged-branch>
 
 `bro act wait --merge --cleanup` already retires the linked worktree and the
-local branch; the remote branch is still yours to delete (or let the repo's
-`delete_branch_on_merge` setting do it). A PR closed without merging is the
-same cleanup: the PR is gone, so its branch goes with it. Never delete a
-branch you did not merge — another PR or agent may own it.
+local branch; the remote branch is still yours to delete — and only if it is
+still there (`delete_branch_on_merge` removes it on merge, and deleting an
+already-removed ref exits non-zero). A PR closed without merging is the same
+cleanup: the PR is gone, so its branch goes with it. You may clean up the
+branch of the PR you worked — never another branch, another PR or agent may
+own it.
 """

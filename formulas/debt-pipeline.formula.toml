@@ -93,11 +93,16 @@ After the fix PR merges: `bro debt sync`. Ledger statuses flow into beads —
 done/wontfix rows close their beads, open ones stay in `bd ready -l debt`.
 Idempotent; safe to re-run.
 
-The fix branch goes with the PR — locally AND on the remote:
+The fix branch goes with the PR — locally AND on the remote. Order matters
+(git refuses to delete a branch that is checked out):
 
-    git switch <base> && git pull --ff-only
+    git switch <base> && git pull --ff-only   # or: git worktree remove <path>
     git branch -D <fix-branch>
-    git push origin --delete <fix-branch>
+    git ls-remote --exit-code --heads origin <fix-branch> >/dev/null 2>&1 \
+      && git push origin --delete <fix-branch>
 
-Never delete a branch you did not merge — another PR or agent may own it.
+You may clean up the branch of the PR you worked — never another branch:
+another PR or agent may own it. The remote delete stays conditional: with
+`delete_branch_on_merge` on, the ref is already gone and deleting it again
+exits non-zero.
 """
