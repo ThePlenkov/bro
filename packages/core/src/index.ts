@@ -417,6 +417,7 @@ export {
   sessionCapRefusalFor,
   sessionCapViews,
   sessionReservationsDir,
+  sessionStartClaimed,
 } from './session-cap.ts'
 export type { SessionCapView } from './session-cap.ts'
 export {

@@ -27,6 +27,7 @@ import { join } from 'node:path'
 import { gitCommonDir, loadConfig } from '@broject/core'
 import type { ProviderEntry } from '@broject/core'
 import { acpOpen, acpPooledTurn, acpSessionRetain, otelEvent, otelJournal, otelParent, otelSpan, toolPayload } from '@broject/providers'
+import { randomUUID } from 'node:crypto'
 import { reserveSessionStart, sessionCapViews } from '@broject/core'
 import { conductorSessionRefusal } from './session-cap.ts'
 import type { AcpTerminals, Toolish } from '@broject/providers'
@@ -1493,7 +1494,9 @@ async function freshTurn(env: TurnEnv, candBusy: boolean): Promise<TurnOutcome> 
   const inputTokens = inputTokensOf(prompt)
   const key = env.key
   // the cap before a session is opened — both paths open one
-  assertSessionCap(env, `conductor-${env.by}`)
+  // each request opens its own session — the claim is per request, not
+  // per backend (one shared claim would let every request reuse it)
+  assertSessionCap(env, `conductor-${env.by}-${randomUUID()}`)
   if (key === undefined || candBusy || env.pendingOpens.has(key)) {
     // a keyless request, or the conversation's own turn is still in
     // flight — one-shot over the same link, nothing stored

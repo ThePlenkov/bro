@@ -26,6 +26,7 @@ import {
   sessionCapRefusal,
   sessionCapRefusalFor,
   sessionCapViews,
+  sessionStartClaimed,
   type Connector,
   type ConnectorCtx,
   type PreToolVerdict,
@@ -75,16 +76,21 @@ export function sessionCapVerdict(
     // the count could not be established — a hook fails OPEN
     return []
   }
+  // The claim's key carries the command, so a client that asks twice
+  // (a pre-tool AND a permission event for the same call) claims ONE
+  // slot, not two — and the second run does not count its own start
+  // again (the claim is already in the live count).
+  const key = `guard-${ctx.sessionId ?? 'nosession'}-${commandKey(command)}`
   for (const view of views) {
-    const refusal = sessionCapRefusal(view)
+    const claimed = sessionStartClaimed(view.kind, bags, key)
+    const refusal = sessionCapRefusal(
+      claimed ? { ...view, starts: 0 } : view
+    )
     if (refusal !== undefined) {
       return [{ block: refusal }]
     }
   }
-  // allowed — claim the slots this start will take. The key carries the
-  // command, so a client that asks twice (a pre-tool AND a permission
-  // event for the same call) claims ONE slot, not two.
-  const key = `guard-${ctx.sessionId ?? 'nosession'}-${commandKey(command)}`
+  // allowed — claim the slots this start will take
   for (const view of views) {
     try {
       reserveSessionStart({ kind: view.kind, agents: bags, key, count: view.starts })

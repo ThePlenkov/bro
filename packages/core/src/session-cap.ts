@@ -20,6 +20,8 @@
  * headroom" and "the session wrote its own mark" (the same mechanism the
  * admission uses — spec bro-9vmx's reservation lifecycle).
  */
+import { existsSync } from 'node:fs'
+import { join } from 'node:path'
 import { SpawnError } from './agents.ts'
 import {
   countSessionReservations,
@@ -153,6 +155,21 @@ export function planeStartingSessions(command: string): SessionPlane | undefined
     }
   }
   return undefined
+}
+
+/** Has this call already claimed its slot?
+ *
+ *  The guard runs on more than one hook (a client that sends BOTH a
+ *  pre-tool and a permission event for the same call), and the second
+ *  run must not count its own start twice: the claim is already in the
+ *  live count, so the second run judges the start as zero. */
+export function sessionStartClaimed(
+  kind: string,
+  agents: Record<string, Record<string, unknown>> | undefined,
+  key: string
+): boolean {
+  const dir = sessionReservationsDir(kind, agents)
+  return existsSync(join(dir, `${key}-0.slot`))
 }
 
 /** The dir a kind's in-flight starts are claimed in — the same files

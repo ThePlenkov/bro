@@ -123,10 +123,24 @@ describe('sessionCapVerdict', () => {
         // the cap is 1: the first start is allowed and claims the slot
         const first = verdictFor('burst-run --now', bags)
         assert.deepEqual(first, [])
-        // the second start sees the claim and is refused
-        const second = verdictFor('burst-run --now', bags)
+        // a second start (a different command, a different claim) sees
+        // the first claim and is refused
+        const second = verdictFor('burst-run --later', bags)
         assert.equal(second.length, 1)
         assert.match(second[0]!.block ?? '', /burst session quota reached/)
+      })
+    })
+  })
+
+  test('the same call asked twice claims ONE slot and is not refused', () => {
+    withReservations((dir) => {
+      withPlane(testPlane('twice', { live: 0 }), () => {
+        const bags = { twice: { maxSessions: 1, reservationsDir: dir } }
+        // the pre-tool event claims the slot...
+        assert.deepEqual(verdictFor('twice-run --now', bags), [])
+        // ...and the permission event for the SAME call must not count
+        // its start twice (the claim is already in the live count)
+        assert.deepEqual(verdictFor('twice-run --now', bags), [])
       })
     })
   })
