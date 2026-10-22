@@ -52,7 +52,8 @@ async function stateOf(
     maxRounds: act.maxRounds,
     docsPaths: act.docsPaths,
     docsMaxRounds: act.docsMaxRounds,
-      requireApproval: act.requireApproval,
+    requireApproval: act.requireApproval,
+    approvers: act.approvers,
     stateCache: cache,
   })
   return { state, gate: evaluateExitGate(state, { requireApproval: act.requireApproval }) }

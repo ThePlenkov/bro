@@ -6,6 +6,7 @@
  */
 import { gitTry } from '@broject/core'
 import type {
+  ApprovalVerdict,
   CheckInfo,
   MergedPr,
   MergedPrInfo,
@@ -32,7 +33,7 @@ const api = (repo: string, path: string): string =>
  *  an absent flag is a normal account). */
 type ApprovalsDoc = {
   approved?: boolean
-  approved_by?: { user?: { bot?: boolean } }[]
+  approved_by?: { user?: { bot?: boolean; username?: string } }[]
 }
 
 const approvalsArgs = (t: PrTarget): string[] => [
@@ -40,13 +41,37 @@ const approvalsArgs = (t: PrTarget): string[] => [
   api(t.repo, `merge_requests/${t.pr}/approvals`),
 ]
 
-/** 'approved by a human' — the aggregate verdict counts bot/service
- *  approvals, so act.requireApproval keeps only non-bot approvers. */
-function humanApproval(res: ApprovalsDoc): boolean {
-  return (
-    res.approved === true &&
-    (res.approved_by ?? []).some((a) => a.user?.bot !== true)
+/** 'approved by a trusted human' — the aggregate verdict counts
+ *  bot/service approvals, so act.requireApproval keeps only non-bot
+ *  approvers (and only `approvers` logins when the allowlist is set).
+ *  Per-approval SHAs are not exposed: current-head binding is the
+ *  project's reset-approvals-on-push rule — the documented
+ *  server-side boundary, same class as branch protection. */
+function approvalVerdict(res: ApprovalsDoc, approvers: readonly string[]): ApprovalVerdict {
+  const trusted = new Set(
+    approvers.map((a) => a.trim().toLowerCase()).filter((a) => a !== '')
   )
+  const records = res.approved_by ?? []
+  const humans = records.filter(
+    (a) => a.user?.bot !== true && typeof a.user?.username === 'string'
+  )
+  const qualifying = humans.filter((a) => {
+    const login = a.user?.username?.toLowerCase() ?? ''
+    return trusted.size === 0 || trusted.has(login)
+  })
+  if (res.approved === true && qualifying.length > 0) {
+    return { approved: true }
+  }
+  if (humans.length === 0) {
+    return {
+      approved: false,
+      reason: records.length === 0 ? 'no attributable approvals' : 'bot-only approvals',
+    }
+  }
+  if (qualifying.length === 0) {
+    return { approved: false, reason: 'approvals only from logins outside act.approvers' }
+  }
+  return { approved: false, reason: 'approval rules unmet — the MR is not fully approved' }
 }
 
 // --- repo / host ------------------------------------------------------------
@@ -625,23 +650,24 @@ export function gitlabReview(dir: string = process.cwd()): ReviewFacade {
         return undefined
       }
     },
-    humanApproved(t) {
+    humanApproved(t, opts) {
       // the aggregate `approved` counts bot/service accounts — a human
       // sign-off needs at least one approved_by entry whose user is not
-      // flagged bot (absent flag reads as a normal account)
+      // flagged bot (absent flag reads as a normal account); a failed
+      // read is 'unanswerable', which the gate never reads as a pass
       try {
         const res = glabJson<ApprovalsDoc>(approvalsArgs(t), gopts())
-        return humanApproval(res)
+        return approvalVerdict(res, opts?.approvers ?? [])
       } catch {
-        return false
+        return { approved: false, reason: 'unanswerable — approvals probe failed' }
       }
     },
-    async humanApprovedAsync(t) {
+    async humanApprovedAsync(t, opts) {
       try {
         const res = await glabJsonAsync<ApprovalsDoc>(approvalsArgs(t), gopts())
-        return humanApproval(res)
+        return approvalVerdict(res, opts?.approvers ?? [])
       } catch {
-        return false
+        return { approved: false, reason: 'unanswerable — approvals probe failed' }
       }
     },
     mergedPrInfo,

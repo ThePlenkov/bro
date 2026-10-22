@@ -9,6 +9,8 @@ import {
   DEFAULT_IGNORE_THREAD_WINDOW_DAYS,
 } from '@broject/core'
 import type {
+  ApprovalProbeOpts,
+  ApprovalVerdict,
   CheckInfo,
   IgnoreCheckEntry,
   IgnoreCheckRule,
@@ -263,6 +265,9 @@ export interface FetchPrActStateOpts {
   /** act.requireApproval — when true the gate also requires an
    *  approving review verdict before auto-merge may land (bro-3vy93). */
   requireApproval?: boolean
+  /** act.approvers — trusted reviewer logins; the approval probe counts
+   *  only these when non-empty (any human actor when empty). */
+  approvers?: readonly string[]
   /** The shared gate-state feed (bro-0tcrl): observe-path callers pass
    *  `prStateCache(dir)` so concurrent pollers share one fetch per
    *  target per TTL window instead of each paying the full 5-7 host
@@ -422,16 +427,21 @@ async function fetchState(
           target
         ).catch((): undefined => undefined)
       : undefined)
-  // the human-approval probe — a bot-only APPROVED verdict must not
-  // satisfy act.requireApproval; unanswerable stays undefined, which
-  // the gate reads as "not approved" (never a pass)
-  const humanApproval = requireApproval
+  // the human-approval probe — the verdict behind act.requireApproval:
+  // a trusted human's approval on the current head, latest review per
+  // reviewer. A host without the probe is 'unanswerable' — undefined,
+  // which the gate reads as "not approved" (never a pass)
+  const approvalProbe = requireApproval
     ? await orSync(
         rev.humanApprovedAsync?.bind(rev),
-        (t: PrTarget) => rev.humanApproved?.(t) ?? false,
-        target
+        (t: PrTarget, o?: ApprovalProbeOpts): ApprovalVerdict | undefined =>
+          rev.humanApproved?.(t, o),
+        target,
+        { approvers: opts?.approvers ?? [] }
       ).catch((): undefined => undefined)
     : undefined
+  const humanApproval = approvalProbe?.approved
+  const humanApprovalReason = approvalProbe?.reason
 
   // A "fix round" is a reviewed push after the first — counting distinct
   // reviewed head SHAs, not commits: one push can carry many commits, and
@@ -477,5 +487,6 @@ async function fetchState(
     alerts,
     reviewDecision,
     humanApproval,
+    humanApprovalReason,
   }
 }

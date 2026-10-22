@@ -120,10 +120,16 @@ describe('evaluateExitGate — requireApproval (bro-3vy93)', () => {
     // a human approval passes — the probe, not the host's aggregate
     // verdict (bot approvals don't satisfy it)
     assert.equal(evaluateExitGate(open({ humanApproval: true }), on).ok, true)
-    // no human approval — bot-only reviews land here too
-    const denied = evaluateExitGate(open({ humanApproval: false }), on)
+    // no qualifying approval — the probe's reason rides the blocker so
+    // the operator sees why (stale head, bot-only, standing objection)
+    const denied = evaluateExitGate(
+      open({ humanApproval: false, humanApprovalReason: 'changes requested by bob' }),
+      on
+    )
     assert.equal(denied.ok, false)
-    assert.match(denied.blockers.at(-1)!, /none\/bot-only/)
+    assert.match(denied.blockers.at(-1)!, /changes requested by bob/)
+    const bare = evaluateExitGate(open({ humanApproval: false }), on)
+    assert.match(bare.blockers.at(-1)!, /not approved/)
     // an unanswerable probe reads as "not approved", never a pass
     const unknown = evaluateExitGate(open(), on)
     assert.equal(unknown.ok, false)

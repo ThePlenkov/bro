@@ -192,3 +192,59 @@ describe('fetchPrActState — conditional ignoreChecks', () => {
     assert.deepEqual(s.alerts, [])
   })
 })
+
+describe('fetchPrActState — the human-approval probe (bro-3vy93)', () => {
+  test('a true verdict lands on state with no reason', async () => {
+    const rev = fakeRev([], [])
+    let seen: readonly string[] | undefined
+    rev.humanApprovedAsync = async (_t, o) => {
+      seen = o?.approvers
+      return { approved: true }
+    }
+    const s = await fetchPrActState(rev, target, {
+      requireApproval: true,
+      approvers: ['alice'],
+    })
+    assert.equal(s.humanApproval, true)
+    assert.equal(s.humanApprovalReason, undefined)
+    assert.deepEqual(seen, ['alice']) // the allowlist reaches the host probe
+  })
+
+  test('a refused verdict carries its reason for the blocker', async () => {
+    const rev = fakeRev([], [])
+    rev.humanApprovedAsync = async () => ({
+      approved: false,
+      reason: 'changes requested by bob',
+    })
+    const s = await fetchPrActState(rev, target, { requireApproval: true })
+    assert.equal(s.humanApproval, false)
+    assert.equal(s.humanApprovalReason, 'changes requested by bob')
+  })
+
+  test('a host without the probe reads unanswerable — undefined, never a pass', async () => {
+    const s = await fetchPrActState(fakeRev([], []), target, { requireApproval: true })
+    assert.equal(s.humanApproval, undefined)
+    assert.equal(s.humanApprovalReason, undefined)
+  })
+
+  test('a throwing probe is unanswerable, not a crash', async () => {
+    const rev = fakeRev([], [])
+    rev.humanApprovedAsync = async () => {
+      throw new Error('host unreachable')
+    }
+    const s = await fetchPrActState(rev, target, { requireApproval: true })
+    assert.equal(s.humanApproval, undefined)
+  })
+
+  test('requireApproval off → the probe never runs (lazy)', async () => {
+    const rev = fakeRev([], [])
+    let calls = 0
+    rev.humanApprovedAsync = async () => {
+      calls += 1
+      return { approved: true }
+    }
+    const s = await fetchPrActState(rev, target, {})
+    assert.equal(calls, 0)
+    assert.equal(s.humanApproval, undefined)
+  })
+})

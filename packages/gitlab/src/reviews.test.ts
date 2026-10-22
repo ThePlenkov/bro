@@ -45,6 +45,7 @@ case "$1 $2" in
       *"/pipelines"*) echo '[{"id":11,"sha":"abc123","status":"success"}]' ;;
       *"/versions"*) echo '[{"head_commit_sha":"a1"},{"head_commit_sha":"a2"},{"head_commit_sha":"a1"}]' ;;
       *"/discussions"*) echo '${DISCUSSIONS}' ;;
+      *"/approvals"*) echo "\${FAKE_GLAB_APPROVALS:-{\}}" ;;
       *"/merge_requests/"*)
         iid=$(echo "$2" | sed 's/.*merge_requests\\///; s/[^0-9].*//')
         case ",$FAKE_GLAB_MR_FAIL," in *",$iid,"*) echo 'glab api failed: 404 Not Found' >&2; exit 1 ;; esac
@@ -496,6 +497,62 @@ describe('gitlabReview', { skip: WIN32 }, () => {
       )
       // merge_method is project config, not a merge-endpoint param
       assert.doesNotMatch(lines, /merge_method/)
+    })
+  })
+})
+
+describe('gitlabReview humanApproved', { skip: WIN32 }, () => {
+  const approvals = (approved: boolean, users: { bot?: boolean; username?: string }[]) =>
+    JSON.stringify({ approved, approved_by: users.map((user) => ({ user })) })
+
+  test('a non-bot approver on the aggregate verdict satisfies the gate', () => {
+    withFakeGlab(
+      { FAKE_GLAB_APPROVALS: approvals(true, [{ username: 'alice' }]) },
+      () => {
+        assert.deepEqual(gitlabReview().humanApproved!(target), { approved: true })
+      }
+    )
+  })
+
+  test('bot-only approvals never satisfy it', () => {
+    withFakeGlab(
+      { FAKE_GLAB_APPROVALS: approvals(true, [{ bot: true, username: 'ci-bot' }]) },
+      () => {
+        const v = gitlabReview().humanApproved!(target)
+        assert.equal(v.approved, false)
+        assert.match(v.reason!, /bot-only/)
+      }
+    )
+  })
+
+  test('the approvers allowlist narrows who counts', () => {
+    const env = {
+      FAKE_GLAB_APPROVALS: approvals(true, [
+        { username: 'bob' },
+        { bot: true, username: 'ci-bot' },
+      ]),
+    }
+    withFakeGlab(env, () => {
+      const denied = gitlabReview().humanApproved!(target, { approvers: ['alice'] })
+      assert.equal(denied.approved, false)
+      assert.match(denied.reason!, /outside act\.approvers/)
+      assert.equal(
+        gitlabReview().humanApproved!(target, { approvers: ['BOB'] }).approved,
+        true
+      )
+    })
+  })
+
+  test('an unapproved MR and a failed probe both read as not approved', () => {
+    withFakeGlab({ FAKE_GLAB_APPROVALS: approvals(false, [{ username: 'alice' }]) }, () => {
+      const v = gitlabReview().humanApproved!(target)
+      assert.equal(v.approved, false)
+      assert.match(v.reason!, /unmet/)
+    })
+    // {} from the fake — an empty/absent verdict is unanswerable, not a pass
+    withFakeGlab({}, () => {
+      const v = gitlabReview().humanApproved!(target)
+      assert.equal(v.approved, false)
     })
   })
 })

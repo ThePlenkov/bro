@@ -49,6 +49,21 @@ export interface ReviewComment {
   createdAt: string
 }
 
+/** The human-approval probe's answer (bro-3vy93). `approved` is the
+ *  gate input; `reason` is the one-line 'why not' the blocker names —
+ *  'changes requested by <login>', 'bot-only approvals', 'approval
+ *  predates the head', 'unanswerable'. */
+export interface ApprovalVerdict {
+  approved: boolean
+  reason?: string
+}
+
+/** Knobs the approval probe reads — `approvers` is the trusted-login
+ *  allowlist (act.approvers): empty means any human actor counts. */
+export interface ApprovalProbeOpts {
+  approvers?: readonly string[]
+}
+
 /** One review thread — consumers only ever read the first comment, so
  *  the facade exposes it directly rather than a comments array. */
 export interface ReviewThread {
@@ -195,13 +210,17 @@ export interface ReviewFacade {
    *  gate needs it (act.requireApproval, bro-3vy93). */
   reviewDecision?(t: PrTarget): string | undefined
   reviewDecisionAsync?(t: PrTarget): Promise<string | undefined>
-  /** 'at least one approving review authored by a human actor' — the
-   *  aggregate host verdict (GitHub reviewDecision, GitLab approved)
-   *  counts bot/service approvals, and act.requireApproval means a
-   *  human sign-off. Optional + lazy like reviewDecisionAsync — a
-   *  host without the probe reads "unanswerable" → not approved. */
-  humanApproved?(t: PrTarget): boolean
-  humanApprovedAsync?(t: PrTarget): Promise<boolean>
+  /** 'a trusted human's approving review stands on the current head' —
+   *  the verdict behind act.requireApproval. Latest decision review per
+   *  reviewer: an approval counts only against the head being merged
+   *  (bot approvals never count; `opts.approvers`, when non-empty,
+   *  narrows "trusted" to those logins), and a standing
+   *  CHANGES_REQUESTED vetoes regardless of which head it reviewed.
+   *  `reason` names the refusal for the blocker text. Optional + lazy
+   *  like reviewDecisionAsync — a host without the probe reads
+   *  "unanswerable" → not approved (bro-3vy93). */
+  humanApproved?(t: PrTarget, opts?: ApprovalProbeOpts): ApprovalVerdict
+  humanApprovedAsync?(t: PrTarget, opts?: ApprovalProbeOpts): Promise<ApprovalVerdict>
   /** Merged-PR detail for harvest — throws when the PR isn't merged or a
    *  MERGED PR reports no mergedAt. */
   mergedPrInfo(t: PrTarget, mergeSha?: string): MergedPrInfo

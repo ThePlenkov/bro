@@ -156,6 +156,7 @@ async function cmdStatus(argv: string[]): Promise<void> {
     docsPaths: act.docsPaths,
     docsMaxRounds: act.docsMaxRounds,
     requireApproval: act.requireApproval,
+    approvers: act.approvers,
     stateCache: prStateCache(process.cwd()),
   })
   const gate = evaluateExitGate(state, { requireApproval: act.requireApproval })
@@ -250,6 +251,7 @@ async function cmdWait(argv: string[]): Promise<void> {
         docsPaths: act.docsPaths,
         docsMaxRounds: act.docsMaxRounds,
         requireApproval: act.requireApproval,
+        approvers: act.approvers,
         stateCache: cache,
       })
       return { state, gate: evaluateExitGate(state, { requireApproval: act.requireApproval }) }
@@ -1004,6 +1006,7 @@ async function cmdMerge(argv: string[]): Promise<void> {
       docsPaths: act.docsPaths,
       docsMaxRounds: act.docsMaxRounds,
       requireApproval: act.requireApproval,
+      approvers: act.approvers,
     })
 
     // a closed/merged PR can pass the gate (threads resolved, checks
