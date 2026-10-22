@@ -19,6 +19,7 @@ export default defineConfig({
   entry: [
     'src/index.ts',
     'src/plugin.ts',
+    'src/config-schema.ts',
     'src/opencode.ts',
     'src/opencode-tui.ts',
     'src/kilo.ts',

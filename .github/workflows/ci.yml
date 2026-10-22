@@ -37,6 +37,9 @@ jobs:
       - name: Check command reference is fresh
         run: npm run check:command-docs
 
+      - name: Check config schema is fresh
+        run: npm run check:config-schema
+
       - name: Typecheck
         run: npm run typecheck
 

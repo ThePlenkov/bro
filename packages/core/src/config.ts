@@ -27,6 +27,7 @@ import { basename, dirname, join, resolve, sep } from 'node:path'
 import { pathToFileURL } from 'node:url'
 import { gitTry } from './git.ts'
 import {
+  API_WIRES,
   parseProviderEntry,
   type FleetProfile,
   type ProviderEntry,
@@ -34,6 +35,7 @@ import {
 import {
   fleetRouter,
   fleetRouting,
+  ON_WALL,
   type FleetRouter,
   type RoutingTable,
 } from './routing.ts'
@@ -43,10 +45,81 @@ export type StoreBackend = (typeof STORE_BACKENDS)[number]
 export const PERSONALITIES = ['terse', 'mentor', 'sarcastic'] as const
 export type Personality = (typeof PERSONALITIES)[number]
 
+/** A JSON Schema (draft-07 subset — `validateSchemaValue` in
+ *  config-schema.ts honors exactly these keywords) describing a config
+ *  section's ACCEPTED INPUT: every value the parser accepts validates,
+ *  everything it would drop or fall back on is a diagnostic. Extra
+ *  draft keywords are legal in the emitted document; the validator
+ *  ignores them. */
+export interface JsonSchema {
+  type?: string | readonly string[]
+  enum?: readonly unknown[]
+  const?: unknown
+  required?: readonly string[]
+  properties?: Record<string, JsonSchema>
+  patternProperties?: Record<string, JsonSchema>
+  additionalProperties?: boolean | JsonSchema
+  items?: JsonSchema | readonly JsonSchema[]
+  anyOf?: readonly JsonSchema[]
+  oneOf?: readonly JsonSchema[]
+  minimum?: number
+  maximum?: number
+  exclusiveMinimum?: number
+  exclusiveMaximum?: number
+  minLength?: number
+  maxLength?: number
+  minItems?: number
+  maxItems?: number
+  pattern?: string
+  title?: string
+  description?: string
+  $id?: string
+  $schema?: string
+  [k: string]: unknown
+}
+
 /** A plugin-owned config section: raw JSON value in, normalized section
  *  out. `schema(undefined)` MUST return the section default — that's the
- *  fallback when the raw value is missing or the schema throws. */
-export type ConfigSection<T> = (raw: unknown) => T
+ *  fallback when the raw value is missing or the schema throws.
+ *  `.jsonSchema` (spec: specs/bro-d9dmx.md) is the section's declared
+ *  input shape — IDE/agent autocompletion plus the diagnostics doctor,
+ *  `bro doctor --strict`, and the mutation gate read. */
+export type ConfigSection<T> = ((raw: unknown) => T) & { jsonSchema?: JsonSchema }
+
+/** Compact builders for the `.jsonSchema` literals — keep each schema
+ *  a few lines next to its parser (spec: specs/bro-d9dmx.md). `obj`
+ *  defaults to a CLOSED shape: a key the parser ignores is a typo the
+ *  diagnostics should name, so only true maps (connectors, providers,
+ *  agents.<backend>) stay open. */
+export const js: {
+  str: JsonSchema
+  bool: JsonSchema
+  strList: JsonSchema
+  int: (minimum?: number) => JsonSchema
+  num: (minimum?: number) => JsonSchema
+  obj: (
+    properties: Record<string, JsonSchema>,
+    opts?: { additional?: boolean | JsonSchema; required?: readonly string[] }
+  ) => JsonSchema
+  map: (values: JsonSchema) => JsonSchema
+  oneOf: (...variants: JsonSchema[]) => JsonSchema
+  anyOf: (...variants: JsonSchema[]) => JsonSchema
+} = {
+  str: { type: 'string', minLength: 1 },
+  bool: { type: 'boolean' },
+  strList: { type: 'array', items: { type: 'string', minLength: 1 } },
+  int: (minimum = 0) => ({ type: 'integer', minimum }),
+  num: (minimum) => (minimum === undefined ? { type: 'number' } : { type: 'number', minimum }),
+  obj: (properties, opts) => ({
+    type: 'object',
+    properties,
+    additionalProperties: opts?.additional ?? false,
+    ...(opts?.required === undefined ? {} : { required: [...opts.required] }),
+  }),
+  map: (values) => ({ type: 'object', additionalProperties: values }),
+  oneOf: (...variants) => ({ oneOf: variants }),
+  anyOf: (...variants) => ({ anyOf: variants }),
+}
 
 export const debtSection: ConfigSection<{
   dir: string
@@ -92,6 +165,14 @@ export const debtSection: ConfigSection<{
   }
 }
 
+debtSection.jsonSchema = js.obj({
+  dir: js.str,
+  sources: { type: 'array', items: js.str, minItems: 1 },
+  stale_days: { type: 'number', exclusiveMinimum: 0 },
+  // per-source knob bags pass through verbatim — core stays vendor-neutral
+  sourceConfig: js.map({ type: 'object' }),
+})
+
 export const syncSection: ConfigSection<{
   ref: string
   remote: string
@@ -112,6 +193,14 @@ export const syncSection: ConfigSection<{
     ),
     beads: typeof obj.beads === 'boolean' ? obj.beads : DEFAULT_CONFIG.sync.beads,
   }
+}
+
+// every non-empty-string key merges through — the passthrough is the
+// contract, so unknown keys are legal iff string-valued
+syncSection.jsonSchema = {
+  type: 'object',
+  properties: { ref: js.str, remote: js.str, beads: js.bool },
+  additionalProperties: js.str,
 }
 
 export const sweepSection: ConfigSection<{
@@ -137,6 +226,12 @@ export const sweepSection: ConfigSection<{
     flatten: typeof obj.flatten === 'boolean' ? obj.flatten : DEFAULT_CONFIG.sweep.flatten,
   }
 }
+
+sweepSection.jsonSchema = js.obj({
+  olderThanDays: { type: 'number', exclusiveMinimum: 0 },
+  dir: js.str,
+  flatten: js.bool,
+})
 
 /** A conditional ignoreChecks entry — `name` keeps the bare-string
  *  substring match; the two knobs say when a *failing* check has earned
@@ -249,6 +344,30 @@ export const actSection: ConfigSection<{
   }
 }
 
+actSection.jsonSchema = js.obj({
+  ignoreChecks: {
+    type: 'array',
+    items: {
+      anyOf: [
+        js.str,
+        js.obj(
+          {
+            name: js.str,
+            consecutiveFailures: js.int(1),
+            threadWindowDays: js.int(1),
+          },
+          { required: ['name'] }
+        ),
+      ],
+    },
+  },
+  maxRounds: js.int(),
+  docsPaths: js.strList,
+  docsMaxRounds: js.int(),
+  requireApproval: js.bool,
+  mergeQueue: js.obj({ label: js.str, comment: js.str }),
+})
+
 /** bro.config.json `providers` section — the typed provider registry
  *  (spec: specs/bro-ribc.1.md). A name → entry map, kind-validated via
  *  PROVIDER_REGISTRY with apiKeyEnv checked by isEnvName: unknown types
@@ -273,6 +392,51 @@ export const providersSection: ConfigSection<Record<string, ProviderEntry>> = (r
   return out
 }
 
+const providerApiSchema = js.obj(
+  {
+    type: { const: 'api' },
+    baseUrl: js.str,
+    model: js.str,
+    apiKeyEnv: { type: 'string', pattern: '^[A-Z_][A-Z0-9_]*$' },
+    apiKeyCommand: js.str,
+    // model → wire: a wire name, {wire}, or null (wire inferred)
+    models: js.map({
+      anyOf: [
+        { enum: API_WIRES },
+        { type: 'null' },
+        js.obj({ wire: { enum: API_WIRES } }),
+      ],
+    }),
+  },
+  { required: ['type', 'baseUrl', 'models'] }
+)
+
+const providerAcpSchema = js.obj(
+  {
+    type: { const: 'acp' },
+    command: js.str,
+    profile: js.str,
+    model: js.str,
+    apiKeyEnv: { type: 'string', pattern: '^[A-Z_][A-Z0-9_]*$' },
+    sessionRm: js.str,
+    autoApprove: js.bool,
+  },
+  { required: ['type', 'command'] }
+)
+
+const providerCliSchema = js.obj(
+  {
+    type: { const: 'cli' },
+    command: js.str,
+    model: js.str,
+    // a model-catalog command, not a map — one id per line on stdout
+    models: js.str,
+  },
+  { required: ['type', 'command'] }
+)
+
+providersSection.jsonSchema = js.map(js.oneOf(providerApiSchema, providerAcpSchema, providerCliSchema))
+
 /** bro.config.json `connectors` section — facade → connector precedence,
  *  e.g. { "reviews": "gitlab", "tasks": "jira" }. Only string→string
  *  entries survive; anything else is dropped. */
@@ -287,6 +451,8 @@ export const connectorsSection: ConfigSection<Record<string, string>> = (raw) =>
   }
   return out
 }
+
+connectorsSection.jsonSchema = js.map(js.str)
 
 /** Default global-beads store — XDG data dir, not a repo path. */
 export const DEFAULT_GLOBAL_BEADS_DIR = join(homedir(), '.local', 'share', 'bro', 'beads')
@@ -313,6 +479,8 @@ export const beadsSection: ConfigSection<{ global: string }> = (raw) => {
   }
   return { global: dir }
 }
+
+beadsSection.jsonSchema = js.obj({ global: js.str })
 
 export const SINK_TYPES = ['slack', 'telegram', 'webhook'] as const
 export type SinkType = (typeof SINK_TYPES)[number]
@@ -459,6 +627,29 @@ export const notifySection: ConfigSection<{ sinks: SinkDef[] }> = (raw) => {
   return { sinks }
 }
 
+notifySection.jsonSchema = js.obj({
+  sinks: {
+    type: 'array',
+    items: js.obj(
+      {
+        name: js.str,
+        type: { enum: SINK_TYPES },
+        url: js.str,
+        urlEnv: js.str,
+        tokenEnv: js.str,
+        chatId: js.str,
+        chatIdEnv: js.str,
+        apiBase: js.str,
+        // an explicitly empty list is the no-narrowing rule — no minItems
+        events: { type: 'array', items: js.str },
+        timeoutMs: js.num(0),
+        minIntervalMs: js.num(0),
+      },
+      { required: ['type'] }
+    ),
+  },
+})
+
 /** bro.config.json `stack` section — how `bro work enter` picks the base
  *  for a new worktree when a session already produced a PR branch.
  *  'manual' (default): stack only on explicit --stack/--base.
@@ -473,6 +664,8 @@ export const stackSection: ConfigSection<{ mode: 'auto' | 'manual' }> = (raw) =>
   }
   return { mode: m ?? 'manual' }
 }
+
+stackSection.jsonSchema = js.obj({ mode: { enum: ['auto', 'manual'] } })
 
 export const SDD_MODES = ['off', 'remind', 'gate'] as const
 export type SddMode = (typeof SDD_MODES)[number]
@@ -509,6 +702,8 @@ export const sddSection: ConfigSection<{ mode: SddMode; dir: string }> = (raw) =
   }
 }
 
+sddSection.jsonSchema = js.obj({ mode: { enum: SDD_MODES }, dir: js.str })
+
 /** bro.config.json `serve` section — the facade host's own knobs.
  *  `backend` names the acp provider `BRO_PROVIDER_BACKEND` falls back
  *  to: a repo that always wants its conductor can pin it in config
@@ -525,6 +720,8 @@ export const serveSection: ConfigSection<{ backend?: string }> = (raw) => {
   // an unset backend reads as an empty bag — same shape as providers:{}
   return backend === undefined ? {} : { backend }
 }
+
+serveSection.jsonSchema = js.obj({ backend: js.str })
 
 /** bro.config.json `mirror` section — the bead→tracker projection
  *  policy (spec specs/backends/bro-z2z7f): which beads materialize as
@@ -561,6 +758,13 @@ export const mirrorSection: ConfigSection<MirrorPolicy> = (raw) => {
     specLinked: obj.specLinked !== false,
   }
 }
+
+mirrorSection.jsonSchema = js.obj({
+  labels: js.strList,
+  excludeLabels: js.strList,
+  types: js.strList,
+  specLinked: js.bool,
+})
 
 const strField = (v: unknown): string | undefined =>
   typeof v === 'string' && v.trim() !== '' ? v.trim() : undefined
@@ -658,6 +862,33 @@ export const fleetSection: ConfigSection<{
   }
 }
 
+const fleetChainEntry: JsonSchema = {
+  anyOf: [js.str, js.obj({ provider: js.str, model: js.str }, { required: ['provider'] })],
+}
+
+fleetSection.jsonSchema = js.obj({
+  maxConcurrent: js.int(),
+  profiles: js.map(
+    js.obj(
+      { provider: js.str, model: js.str, backend: js.str, autoApprove: js.bool },
+      { required: ['provider'] }
+    )
+  ),
+  routing: js.map(
+    js.obj(
+      {
+        chain: { type: 'array', items: fleetChainEntry, minItems: 1 },
+        onWall: { enum: ON_WALL },
+      },
+      { required: ['chain'] }
+    )
+  ),
+  router: js.obj(
+    { provider: js.str, mode: { enum: ['shadow', 'enforce', 'off'] } },
+    { required: ['provider', 'mode'] }
+  ),
+})
+
 /** bro.config.json `query` section — `query`-plan defaults (spec
  *  bro-14h8.1). `concurrency` is the plan-level default a plan's own
  *  `concurrency` overrides; `env` is a literal overlay applied UNDER
@@ -689,6 +920,8 @@ export const querySection: ConfigSection<{
     env,
   }
 }
+
+querySection.jsonSchema = js.obj({ concurrency: js.int(1), env: js.map(js.str) })
 
 /** One `mesh.peers.<alias>` entry — rig must be a mesh:// URI, remote a
  *  non-empty string; transport survives verbatim (parsePeer judges it —
@@ -750,6 +983,18 @@ export const meshSection: ConfigSection<{
   return out
 }
 
+const meshUri: JsonSchema = { type: 'string', pattern: '^mesh://' }
+
+meshSection.jsonSchema = js.obj({
+  rig: meshUri,
+  peers: js.map(
+    js.obj(
+      { rig: meshUri, remote: js.str, transport: js.str, login: js.str },
+      { required: ['rig', 'remote'] }
+    )
+  ),
+})
+
 /** bro.config.json `mcp` section — the `bro mcp` stdio server's plane
  *  exposure (specs/bro-9rls.1.md). Absent/empty section = every read
  *  plane; `planes: []` disables all; a non-empty list is an allowlist.
@@ -771,9 +1016,13 @@ export const mcpSection: ConfigSection<{ planes?: string[] }> = (raw) => {
   return out
 }
 
+mcpSection.jsonSchema = js.obj({ planes: js.strList })
+
 /** Sections core normalizes itself — identical to what the built-in
- *  plugins declare as their configSchema. */
-const CORE_SECTIONS: Record<string, ConfigSection<unknown>> = {
+ *  plugins declare as their configSchema. Exported for the schema
+ *  registry in config-schema.ts (spec: bro-d9dmx) — the .jsonSchema
+ *  slot on each is the machine-readable contract. */
+export const CORE_SECTIONS: Record<string, ConfigSection<unknown>> = {
   debt: debtSection as ConfigSection<unknown>,
   sync: syncSection as ConfigSection<unknown>,
   sweep: sweepSection as ConfigSection<unknown>,

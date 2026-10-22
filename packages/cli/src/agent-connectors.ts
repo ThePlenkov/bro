@@ -108,6 +108,7 @@ import {
 import './session-planes/copilot.ts'
 import { writeCopilotCount } from './session-planes/copilot.ts'
 import { enterWorktree } from './commands/work.ts'
+import { assertMutableConfig } from './plugins.ts'
 import { VERSION } from './version.ts'
 
 /** Everything a factory needs: the repo ctx + the resolved config
@@ -1465,6 +1466,10 @@ function prepareSpawn(
     sessionQuota?: SessionQuotaLane | undefined
   }
 ): { agentId: string; promptFile: string; log: string; exitFile: string; reservation?: string } {
+  // spawn is the authoritative mutation the audit gates on — invalid
+  // committed (policy) config refuses before registry/claim writes,
+  // ahead of even the exit-cause harvest (spec: bro-d9dmx)
+  assertMutableConfig(dir)
   const registry = readAgentRegistry(dir)
   const existing = registry[spec.molStep]
   // A batch spawn must not walk into a provider wall the fleet already

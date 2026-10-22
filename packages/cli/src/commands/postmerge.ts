@@ -36,11 +36,13 @@ import { homedir } from 'node:os'
 import { join } from 'node:path'
 import {
   gitTry,
+  js,
   loadConfig,
   LockTimeout,
   withFileLock,
   worktreeGitDir,
   type ConfigSection,
+  type JsonSchema,
 } from '@broject/core'
 import { writeStamp } from './buildstamp.ts'
 import { SELF_ENTRY } from './self-entry.ts'
@@ -73,6 +75,14 @@ export const freshnessSection: ConfigSection<FreshnessConfig> = (raw) => {
   >
   return { install: step(o.install), build: step(o.build), patch: step(o.patch) }
 }
+
+const freshnessStep: JsonSchema = { anyOf: [js.str, { const: false }] }
+
+freshnessSection.jsonSchema = js.obj({
+  install: freshnessStep,
+  build: freshnessStep,
+  patch: freshnessStep,
+})
 
 /** Files whose move between two commits means node_modules is stale —
  *  matched at any depth so workspace members count too. */

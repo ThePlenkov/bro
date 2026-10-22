@@ -1,4 +1,4 @@
-import type { ConfigSection } from '@broject/core'
+import { js, type ConfigSection } from '@broject/core'
 
 // the SCREAMING_SNAKE rule moved to core with the providers registry —
 // re-exported here so `import { isEnvName } from './config.ts'` keeps working
@@ -134,3 +134,20 @@ export const judgeSection: ConfigSection<JudgeConfig> = (raw) => {
     provided: Object.keys(obj).filter((k) => k !== 'model' || str(obj.model) !== undefined),
   }
 }
+
+judgeSection.jsonSchema = js.obj({
+  mode: { enum: JUDGE_MODES },
+  model: js.str,
+  baseUrl: js.str,
+  apiKeyEnv: js.str,
+  confidence: { type: 'number', minimum: 0, maximum: 1 },
+  fallback: js.str,
+  timeoutMs: { type: 'number', minimum: 1 },
+  maxDecisionsPerRun: { type: 'number', minimum: 1 },
+  llm: js.obj(
+    { baseUrl: js.str, model: js.str, apiKeyEnv: js.str },
+    { required: ['baseUrl', 'model'] }
+  ),
+  provider: js.str,
+  // `provided` is parser output, never user input
+})

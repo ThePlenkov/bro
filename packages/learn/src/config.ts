@@ -1,4 +1,4 @@
-import type { ConfigSection } from '@broject/core'
+import { js, type ConfigSection } from '@broject/core'
 import { LESSON_SOURCES } from './lesson.ts'
 
 export interface LearnConfig {
@@ -57,3 +57,9 @@ export const learnSection: ConfigSection<LearnConfig> = (raw) => {
     sources,
   }
 }
+
+learnSection.jsonSchema = js.obj({
+  enabled: js.bool,
+  maxInject: js.int(1),
+  sources: { type: 'array', items: { enum: LESSON_SOURCES } },
+})

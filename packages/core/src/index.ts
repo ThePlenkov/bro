@@ -60,6 +60,7 @@ export {
   defineConfig,
   fleetSection,
   globalConfigDir,
+  js,
   loadConfig,
   loadConfigLayers,
   mcpSection,
@@ -136,7 +137,16 @@ export {
   dataRefPush,
   dataRefRoot,
 } from './dataref.ts'
-export type { BroConfig, ConfigLayerHit, ConfigLayerName, ConfigLayersResult, ConfigSection, MirrorPolicy, Personality, SddMode, StoreBackend } from './config.ts'
+export type { BroConfig, ConfigLayerHit, ConfigLayerName, ConfigLayersResult, ConfigSection, JsonSchema, MirrorPolicy, Personality, SddMode, StoreBackend } from './config.ts'
+export {
+  configDiagnostics,
+  configPolicyErrors,
+  CONFIG_SCHEMA_URL,
+  configSchemaDocument,
+  jsonSchemasFor,
+  validateSchemaValue,
+} from './config-schema.ts'
+export type { ConfigDiagnostic, SchemaError } from './config-schema.ts'
 export type { QueryFacade, QueryOpts, QueryResult } from './queries.ts'
 export { definePlugin } from './plugin.ts'
 export type { BroPlugin } from './plugin.ts'

@@ -11,6 +11,8 @@
     "check:docs": "node scripts/check-docs.ts",
     "check:command-docs": "node scripts/gen-command-docs.ts --check",
     "gen:command-docs": "node scripts/gen-command-docs.ts",
+    "check:config-schema": "node scripts/gen-config-schema.ts --check",
+    "gen:config-schema": "node scripts/gen-config-schema.ts",
     "check:embedded": "node scripts/check-embedded.ts",
     "check:codescene": "node scripts/codescene-check.ts",
     "gen:plugins": "node scripts/gen-plugins.ts",

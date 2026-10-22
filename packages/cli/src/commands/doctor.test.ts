@@ -1063,4 +1063,39 @@ describe('bro doctor', () => {
       assert.equal(c.status, 'ok', JSON.stringify(c))
       assert.match(c.detail, /no acp-backed serve endpoint/)
     }))
+
+  test('config-schema: a clean config reports one ok row', () =>
+    withEnv({ config: { sdd: { mode: 'gate' } }, bins: ['gh'] }, (dir) => {
+      const rows = runDoctorChecks(dir).filter((c) => c.name === 'config-schema')
+      assert.equal(rows.length, 1)
+      assert.equal(rows[0]?.status, 'ok')
+    }))
+
+  test('config-schema: malformed values warn by default, fail under --strict', () =>
+    withEnv(
+      { config: { sdd: { mode: 'gtae' }, fleet: { maxConcurrent: '1' } }, bins: ['gh'] },
+      (dir) => {
+        const rows = runDoctorChecks(dir).filter((c) => c.name === 'config-schema')
+        assert.ok(rows.length > 0)
+        assert.ok(rows.every((r) => r.status === 'warn'), JSON.stringify(rows))
+        // the file+layer is named, the exact path pinpoints the bad value
+        const detail = rows.map((r) => r.detail).join('\n')
+        assert.match(detail, /bro\.config\.json/)
+        assert.match(detail, /sdd\.mode/)
+        assert.match(detail, /fleet\.maxConcurrent/)
+        const strict = runDoctorChecks(dir, { strict: true }).filter((c) => c.name === 'config-schema')
+        assert.ok(strict.every((r) => r.status === 'fail'), JSON.stringify(strict))
+      }
+    ))
+
+  test('config-schema: $schema is a known key, not an unknown-key warn', () =>
+    withEnv(
+      { config: { $schema: 'https://unpkg.com/@broject/bro/schemas/bro.config.schema.json', sdd: { mode: 'gate' } }, bins: ['gh'] },
+      (dir) => {
+        const warns = runDoctorChecks(dir).filter(
+          (c) => c.name === 'config' && c.status === 'warn'
+        )
+        assert.ok(!warns.some((c) => c.detail.includes('$schema')), JSON.stringify(warns))
+      }
+    ))
 })

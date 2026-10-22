@@ -16,7 +16,12 @@ import { basename, dirname, join } from 'node:path'
 import { createRequire } from 'node:module'
 import { fileURLToPath } from 'node:url'
 import { execFileSync } from 'node:child_process'
-import { initBeadsStealth, PERSONALITIES, type BroConfig } from '@broject/core'
+import {
+  CONFIG_SCHEMA_URL,
+  initBeadsStealth,
+  PERSONALITIES,
+  type BroConfig,
+} from '@broject/core'
 import { loadBroConfig } from '../plugins.ts'
 import {
   cliVersion,
@@ -69,7 +74,8 @@ function readExistingConfig(path: string): Partial<BroConfig> | null {
   return parsed as Partial<BroConfig>
 }
 
-function writeConfig(opts: { beads: boolean; personality?: string }): string {
+/** Exported for tests — writes/merges the gitignored local layer. */
+export function writeConfig(opts: { beads: boolean; personality?: string }): string {
   // setup's keys (stores, personality) are operator config — they land in
   // the gitignored local layer, never the committed bro.config.* files
   // (spec: specs/bro-9vmx.md). bro.config.local.ts shadows the .json —
@@ -97,10 +103,15 @@ function writeConfig(opts: { beads: boolean; personality?: string }): string {
   if (opts.personality) {
     merged.personality = opts.personality as BroConfig['personality']
   }
-  if (existed && JSON.stringify(existing) === JSON.stringify(merged)) {
+  // $schema first — IDEs/agents get completion+validation for free;
+  // an existing $schema pin wins the spread (never clobbered). Compare
+  // the RAW file keys against the output — a file lacking $schema is a
+  // diff, so the upgrade lands on the next setup run
+  const out = { $schema: CONFIG_SCHEMA_URL, ...merged }
+  if (existed && JSON.stringify(existing) === JSON.stringify(out)) {
     return 'bro.config.local.json already up to date'
   }
-  writeFileSync(path, `${JSON.stringify(merged, null, 2)}\n`, 'utf8')
+  writeFileSync(path, `${JSON.stringify(out, null, 2)}\n`, 'utf8')
   const stores = merged.stores ?? effective.stores
   const hint = existed ? '' : ' — gitignored (machine-local overrides live here)'
   return `${existed ? 'updated' : 'wrote'} bro.config.local.json (stores: ${stores.join(', ')})${hint}`

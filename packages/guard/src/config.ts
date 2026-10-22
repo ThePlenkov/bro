@@ -1,5 +1,5 @@
-import type { ConfigSection, Guard } from '@broject/core'
-import { guardProblems } from '@broject/core'
+import type { ConfigSection, Guard, JsonSchema } from '@broject/core'
+import { GUARD_EVENTS, guardProblems, js } from '@broject/core'
 
 export interface GuardConfig {
   /** Kill switch — off emits nothing. Default on: no guards declared
@@ -52,3 +52,50 @@ export const guardSection: ConfigSection<GuardConfig> = (raw) => {
     defs,
   }
 }
+
+// mirrors guardProblems — the two faces stay aligned (config defs fail
+// closed, the schema is what the agent validates against in an IDE)
+const guardDefSchema: JsonSchema = js.obj(
+  {
+    name: { type: 'string', pattern: String.raw`^\w[\w.-]*$` },
+    when: js.obj(
+      {
+        on: { type: 'array', items: { enum: GUARD_EVENTS }, minItems: 1 },
+        match: js.obj({
+          terms: js.strList,
+          commands: js.strList,
+          paths: js.strList,
+          tools: js.strList,
+          errors: js.bool,
+        }),
+        state: js.obj({
+          diff: js.obj({ changed: js.strList, without: js.strList }),
+          branch: js.str,
+          armed: js.strList,
+          exists: js.strList,
+          probes: {
+            type: 'array',
+            items: js.obj(
+              { name: js.str, args: { type: 'object' } },
+              { required: ['name'] }
+            ),
+          },
+        }),
+        judge: js.obj(
+          { question: js.str, threshold: { type: 'number', minimum: 0, maximum: 1 } },
+          { required: ['question'] }
+        ),
+        budget: js.int(1),
+      },
+      { required: ['on'] }
+    ),
+    say: js.str,
+  },
+  { required: ['name', 'when', 'say'] }
+)
+
+guardSection.jsonSchema = js.obj({
+  enabled: js.bool,
+  maxPerEvent: js.int(1),
+  defs: { type: 'array', items: guardDefSchema },
+})
