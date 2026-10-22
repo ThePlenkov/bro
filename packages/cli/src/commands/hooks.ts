@@ -563,8 +563,8 @@ function formatAge(ageMs: number): string {
 /** Connector ctx for hook events — sessionId plus this process's
  *  agent-root owner so claim probes treat markers stamped by the same
  *  agent tree under a rotated session id as own work (bro-7022c). */
-function hookCtx(sessionId: string): ConnectorCtx {
-  return { dir: process.cwd(), sessionId, owner: agentOwner() }
+function hookCtx(sessionId: string, toolUseId?: string): ConnectorCtx {
+  return { dir: process.cwd(), sessionId, owner: agentOwner(), toolUseId }
 }
 
 function liveSessionLines(dir: string, selfId: string): string[] {
@@ -1448,7 +1448,7 @@ async function emitPreTool(input: HookInput): Promise<void> {
   const sessionId = typeof input.session_id === 'string' ? input.session_id : ''
   const tool = typeof input.tool_name === 'string' ? input.tool_name : ''
   const verdicts = await preToolVerdicts(
-    hookCtx(sessionId),
+    hookCtx(sessionId, typeof input.tool_use_id === 'string' ? input.tool_use_id : undefined),
     tool,
     (input.tool_input ?? {}) as Record<string, unknown>
   )

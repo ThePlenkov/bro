@@ -91,7 +91,13 @@ export function sessionCapVerdict(
         count: view.starts,
       })
     } catch {
-      // the claim is a brake, not a gate — the call still runs
+      // the claim could not be written — the count IS established, so
+      // the cap still judges this call (a claim that cannot be taken
+      // must not open a session the budget does not know about)
+      const refusal = sessionCapRefusal(view)
+      if (refusal !== undefined) {
+        return [{ block: refusal }]
+      }
       continue
     }
     // A claim that was already there means this call is a repeat (the
@@ -111,7 +117,7 @@ export function sessionCapVerdict(
  *  sends one (the two hook events of one call share it), the command
  *  otherwise. */
 function callKey(command: string, ctx: ConnectorCtx): string {
-  const id = (ctx as { toolUseId?: string }).toolUseId
+  const id = ctx.toolUseId
   return id === undefined || id === '' ? commandKey(command) : `id-${id}`
 }
 
