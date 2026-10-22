@@ -52,12 +52,20 @@ import {
   runJanitor,
   sweepOrphanProcs,
   wallText,
+  type BroConfig,
   type JanitorReport,
   type PrOwnership,
   type ProviderWall,
   type ReviewFacade,
 } from '@broject/core'
-import { checkHistory, evaluateExitGate, fetchPrActState, prStateCache } from '@broject/act'
+import {
+  checkHistory,
+  evaluateExitGate,
+  fetchPrActState,
+  prStateCache,
+  type FetchPrActStateOpts,
+  type PrStateCache,
+} from '@broject/act'
 import { listMolecules, loadMolecule, nextStep } from '@broject/convoy'
 import { loopSection } from '@broject/loop'
 import { loadBroConfig } from '../plugins.ts'
@@ -457,6 +465,26 @@ export function openPrTargets(
   return [...seen.entries()].map(([pr, link]) => ({ pr, link }))
 }
 
+/** The act section's fetch options for one heartbeat pass — hoisted so
+ *  every PR in the fan-out shares one literal (and the gate loop stays
+ *  small). */
+function gateStateOpts(
+  act: BroConfig['act'],
+  dir: string,
+  cache: PrStateCache | null
+): FetchPrActStateOpts {
+  return {
+    ignoreChecks: act.ignoreChecks,
+    checkHistory: checkHistory(dir),
+    maxRounds: act.maxRounds,
+    docsPaths: act.docsPaths,
+    docsMaxRounds: act.docsMaxRounds,
+    requireApproval: act.requireApproval,
+    approvers: act.approvers,
+    stateCache: cache,
+  }
+}
+
 /** The act exit gate per distinct fleet PR — probed in parallel so a
  *  large fleet doesn't serialize one heartbeat into a long blocking
  *  sequence. A failed probe is recorded per-PR (`error`), not folded
@@ -472,6 +500,7 @@ async function gateFleetPrs(
   // the shared feed — a heartbeat overlapping loop/drive/act-wait
   // passes serves the one in-flight fetch instead of duplicating it
   const cache = prStateCache(dir)
+  const stateOpts = gateStateOpts(act, dir, cache)
   const candidates = candidateBranches(dir)
   if (!candidates.complete) {
     lookupErrors.push('branch enumeration failed — the open-PR set may under-count')
@@ -480,16 +509,7 @@ async function gateFleetPrs(
   return Promise.all(
     targets.map(async ({ pr, link }) => {
       try {
-        const state = await fetchPrActState(rev, { repo, pr }, {
-          ignoreChecks: act.ignoreChecks,
-          checkHistory: checkHistory(dir),
-          maxRounds: act.maxRounds,
-          docsPaths: act.docsPaths,
-          docsMaxRounds: act.docsMaxRounds,
-          requireApproval: act.requireApproval,
-          approvers: act.approvers,
-          stateCache: cache,
-        })
+        const state = await fetchPrActState(rev, { repo, pr }, stateOpts)
         const gate = evaluateExitGate(state, { requireApproval: act.requireApproval })
         // ownership marker — one extra labels read per PR; a failure
         // degrades the marker, never the gate row it rides on

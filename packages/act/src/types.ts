@@ -64,6 +64,10 @@ export interface PrActState {
    *  'approval predates the head', 'bot-only', 'outside act.approvers'.
    *  Undefined when the verdict is true or unanswerable. */
   humanApprovalReason?: string
+  /** The allowlist the verdict was probed under — cache/dedup paths
+   *  compare it against the caller's act.approvers so a verdict probed
+   *  under a different trust set never serves a stricter caller. */
+  humanApprovalApprovers?: string[]
 }
 
 export interface ExitGate {

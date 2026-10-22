@@ -8,6 +8,8 @@ import type {
   ReviewThread,
 } from '@broject/core'
 import type { CheckHistory } from './check-history.ts'
+import type { PrStateCache } from './state-cache.ts'
+import type { PrActState } from './types.ts'
 import { fetchPrActState } from './state.ts'
 
 const SHA = 'a'.repeat(40)
@@ -246,5 +248,92 @@ describe('fetchPrActState — the human-approval probe (bro-3vy93)', () => {
     const s = await fetchPrActState(rev, target, {})
     assert.equal(calls, 0)
     assert.equal(s.humanApproval, undefined)
+  })
+})
+
+describe('fetchPrActState — approval probe identity (PR 636 review)', () => {
+  const memCache = (): PrStateCache => {
+    let entry: PrActState | null = null
+    return {
+      read: () => entry,
+      write: (_t, s) => {
+        entry = s
+      },
+      invalidate: () => {
+        entry = null
+      },
+      invalidateAll: () => {
+        entry = null
+      },
+      acquire: () => () => {},
+      acquireAsync: async () => () => {},
+    }
+  }
+
+  test('a verdict probed under a different allowlist is not served', async () => {
+    const rev = fakeRev([], [])
+    const seen: string[][] = []
+    rev.humanApprovedAsync = async (_t, o) => {
+      seen.push([...(o?.approvers ?? [])])
+      return { approved: true }
+    }
+    const cache = memCache()
+    await fetchPrActState(rev, target, {
+      requireApproval: true,
+      approvers: ['alice'],
+      stateCache: cache,
+    })
+    // second caller, different trust set — the cached verdict was
+    // probed under ['alice'] and must not serve ['bob']
+    await fetchPrActState(rev, target, {
+      requireApproval: true,
+      approvers: ['bob'],
+      stateCache: cache,
+    })
+    assert.deepEqual(seen, [['alice'], ['bob']])
+  })
+
+  test('a verdict probed under the same allowlist serves from cache', async () => {
+    const rev = fakeRev([], [])
+    let calls = 0
+    rev.humanApprovedAsync = async () => {
+      calls += 1
+      return { approved: true }
+    }
+    const cache = memCache()
+    const opts = { requireApproval: true, approvers: ['alice'], stateCache: cache }
+    await fetchPrActState(rev, target, opts)
+    // case/format variants of the same set share the probe identity
+    await fetchPrActState(rev, target, { ...opts, approvers: ['ALICE'] })
+    assert.equal(calls, 1)
+  })
+
+  test('in-flight dedup splits on the probe inputs, not just the target', async () => {
+    const rev = fakeRev([], [])
+    const releases: (() => void)[] = []
+    rev.prMetaAsync = async () => {
+      await new Promise<void>((r) => {
+        releases.push(r)
+      })
+      return meta
+    }
+    const seen: string[][] = []
+    rev.humanApprovedAsync = async (_t, o) => {
+      seen.push([...(o?.approvers ?? [])])
+      return { approved: true }
+    }
+    const p1 = fetchPrActState(rev, target, { requireApproval: true, approvers: ['a'] })
+    const p2 = fetchPrActState(rev, target, { requireApproval: true, approvers: ['b'] })
+    // let both fetch chains reach their meta gate — two fetches means
+    // the dedup key split on the probe inputs; one means a shared
+    // fetch would smuggle one caller's trust set into the other's
+    // verdict. Release before asserting so a regression can't hang.
+    for (let i = 0; i < 50 && releases.length < 2; i++) {
+      await new Promise((r) => setTimeout(r, 0))
+    }
+    for (const release of releases) release()
+    assert.equal(releases.length, 2)
+    await Promise.all([p1, p2])
+    assert.deepEqual(seen.sort(), [['a'], ['b']])
   })
 })

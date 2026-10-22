@@ -276,13 +276,36 @@ export interface FetchPrActStateOpts {
   stateCache?: PrStateCache | null
 }
 
-/** In-flight fetches by `repo#pr` — same-process concurrency (a
- *  Promise.all sweep, overlapping hook probes) shares the one running
- *  fetch rather than duplicating it. Keyed on the target only: two
- *  callers asking for the same PR at the same instant want the same
- *  state — an opts delta between them is config-level, which is
- *  repo-shared anyway. */
+/** In-flight fetches by `repo#pr` + approval-probe inputs — same-process
+ *  concurrency (a Promise.all sweep, overlapping hook probes) shares
+ *  the one running fetch rather than duplicating it. The probe inputs
+ *  ride the key: requireApproval/approvers decide whether the probe ran
+ *  and under which trust set, so a verdict probed for different
+ *  gate semantics must never serve this caller. Other opts stay
+ *  outside the key — they're config-level and repo-shared. */
 const inflight = new Map<string, Promise<PrActState>>()
+
+/** The inflight/cache identity of an approval probe — normalized so
+ *  ['a','B'] and ['B','a'] share a fetch. */
+const approvalProbeKey = (opts?: FetchPrActStateOpts): string =>
+  opts?.requireApproval === true
+    ? `+${[...(opts.approvers ?? [])].map((a) => a.toLowerCase()).sort().join(',')}`
+    : ''
+
+/** A cached entry serves only when it answers what the caller asked —
+ *  requireApproval needs the humanApproval probe run under the SAME
+ *  allowlist; an entry fetched without it carries no verdict (the
+ *  probe is lazy). */
+const entryUsable = (s: PrActState, probeKey: string): boolean => {
+  if (probeKey === '') {
+    return true
+  }
+  if (s.humanApproval === undefined) {
+    return false
+  }
+  const theirs = [...(s.humanApprovalApprovers ?? [])].map((a) => a.toLowerCase()).sort().join(',')
+  return theirs === probeKey.slice(1)
+}
 
 /** Full open-PR state for the act loop — threads + checks + mergeability. */
 export async function fetchPrActState(
@@ -291,16 +314,12 @@ export async function fetchPrActState(
   opts?: FetchPrActStateOpts
 ): Promise<PrActState> {
   const cache = opts?.stateCache ?? null
-  // a cached entry serves only when it answers what THIS caller asked —
-  // requireApproval needs the humanApproval probe, and an entry fetched
-  // without it carries no verdict (the probe is lazy)
-  const usable = (s: PrActState): boolean =>
-    !(opts?.requireApproval === true && s.humanApproval === undefined)
+  const probeKey = approvalProbeKey(opts)
   const hit = cache?.read(target)
-  if (hit != null && usable(hit)) {
+  if (hit != null && entryUsable(hit, probeKey)) {
     return hit
   }
-  const key = `${target.repo}#${target.pr}`
+  const key = `${target.repo}#${target.pr}${probeKey}`
   const flying = inflight.get(key)
   if (flying !== undefined) {
     return flying
@@ -327,10 +346,7 @@ async function fetchShared(
   try {
     if (release !== null && cache !== null) {
       const hit = cache.read(target)
-      if (
-        hit != null &&
-        !(opts?.requireApproval === true && hit.humanApproval === undefined)
-      ) {
+      if (hit != null && entryUsable(hit, approvalProbeKey(opts))) {
         return hit
       }
     }
@@ -442,6 +458,11 @@ async function fetchState(
     : undefined
   const humanApproval = approvalProbe?.approved
   const humanApprovalReason = approvalProbe?.reason
+  // the allowlist the verdict was probed under — cached entries must
+  // not serve a caller trusting a different set (usable() compares)
+  const humanApprovalApprovers = requireApproval
+    ? [...(opts?.approvers ?? [])]
+    : undefined
 
   // A "fix round" is a reviewed push after the first — counting distinct
   // reviewed head SHAs, not commits: one push can carry many commits, and
@@ -488,5 +509,6 @@ async function fetchState(
     reviewDecision,
     humanApproval,
     humanApprovalReason,
+    humanApprovalApprovers,
   }
 }

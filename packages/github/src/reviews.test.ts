@@ -1000,6 +1000,25 @@ describe('headApprovalVerdict', () => {
     )
   })
 
+  test('a stale approval from an untrusted login names the allowlist, not the head', () => {
+    // telling the operator "re-approve" would be wrong — bob's
+    // re-approval still falls outside act.approvers
+    const v = headApprovalVerdict(
+      [review('bob', 'User', 'APPROVED', STALE_SHA, T('02'))],
+      HEAD_SHA,
+      ['alice']
+    )
+    assert.equal(v.approved, false)
+    assert.match(v.reason!, /outside act\.approvers/)
+    // but a stale approval from a TRUSTED login still names the head
+    const t = headApprovalVerdict(
+      [review('alice', 'User', 'APPROVED', STALE_SHA, T('02'))],
+      HEAD_SHA,
+      ['alice']
+    )
+    assert.match(t.reason!, /predates the current head/)
+  })
+
   test('unattributable and non-decision reviews are ignored', () => {
     const v = headApprovalVerdict(
       [

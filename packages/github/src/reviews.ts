@@ -569,9 +569,11 @@ export function headApprovalVerdict(
     return { approved: true }
   }
   // name the refusal in the order a user would act on it — a stale
-  // human approval is the "but it WAS approved" case, so it leads
+  // TRUSTED human approval is the "but it WAS approved" case, so it
+  // leads; an untrusted one falls through to the allowlist reason
+  // (re-approval from an untrusted login fixes nothing)
   const stale = [...latest.values()].find(
-    (v) => v.state === 'APPROVED' && v.human && v.sha !== headSha
+    (v) => v.state === 'APPROVED' && v.sha !== headSha && counts(v)
   )
   if (stale !== undefined) {
     return {
@@ -579,10 +581,13 @@ export function headApprovalVerdict(
       reason: `approval by ${stale.login} predates the current head — re-approve after the latest push`,
     }
   }
-  if (trusted.size > 0 && headApprovals.some((v) => v.human)) {
+  if (
+    trusted.size > 0 &&
+    [...latest.values()].some((v) => v.state === 'APPROVED' && v.human)
+  ) {
     return {
       approved: false,
-      reason: 'current-head approvals only from logins outside act.approvers',
+      reason: 'approvals only from logins outside act.approvers',
     }
   }
   if (headApprovals.length > 0) {
@@ -633,7 +638,10 @@ function humanApproved(t: PrTarget, opts?: ApprovalProbeOpts): ApprovalVerdict {
     if (page === undefined) {
       throw new Error(`pull request #${t.pr} not found`)
     }
-    headSha = page.headRefOid ?? ''
+    // bind to the FRESHEST head seen — a push mid-pagination turns old
+    // approvals stale (fail-closed); binding to page 1's head would
+    // under-bind the verdict to a head that is already gone
+    headSha = page.headRefOid ?? headSha
     nodes.push(...(page.reviews?.nodes ?? []))
     if (page.reviews?.pageInfo?.hasNextPage !== true || !page.reviews.pageInfo.endCursor) {
       break
@@ -672,7 +680,10 @@ async function humanApprovedAsync(
     if (page === undefined) {
       throw new Error(`pull request #${t.pr} not found`)
     }
-    headSha = page.headRefOid ?? ''
+    // bind to the FRESHEST head seen — a push mid-pagination turns old
+    // approvals stale (fail-closed); binding to page 1's head would
+    // under-bind the verdict to a head that is already gone
+    headSha = page.headRefOid ?? headSha
     nodes.push(...(page.reviews?.nodes ?? []))
     if (page.reviews?.pageInfo?.hasNextPage !== true || !page.reviews.pageInfo.endCursor) {
       break
