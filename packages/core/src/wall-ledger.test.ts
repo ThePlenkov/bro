@@ -123,6 +123,19 @@ describe('host wall ledger', () => {
     }
   })
 
+  test('counts expired rows removed from the ledger', () => {
+    const t = tempLedger()
+    try {
+      recordWall(observation('one'), { path: t.path, now: base })
+      assert.equal(clearLedgerWalls('one', { path: t.path, now: base + 16 * 60_000 }), 1)
+      recordWall(observation('two'), { path: t.path, now: base })
+      recordWall(observation('three'), { path: t.path, now: base })
+      assert.equal(clearLedgerWalls('all', { path: t.path, now: base + 16 * 60_000 }), 2)
+    } finally {
+      t.done()
+    }
+  })
+
   test('resolves XDG override and treats an empty XDG state home as unset', () => {
     assert.equal(wallLedgerPath('/state'), '/state/bro/walls.json')
     assert.equal(wallLedgerPath(''), join(homedir(), '.local', 'state', 'bro', 'walls.json'))
@@ -149,6 +162,32 @@ describe('host wall ledger', () => {
       assert.equal(JSON.parse(readFileSync(t.path, 'utf8')).version, 1)
       assert.equal(readLedgerWalls(base, undefined, { path: t.path })[0]?.account, 'repaired')
     } finally {
+      t.done()
+    }
+  })
+
+  test('warns again after a corrupt ledger is repaired', () => {
+    const t = tempLedger()
+    const warnings: string[] = []
+    const original = console.error
+    try {
+      recordWall(observation('seed'), { path: t.path, now: base })
+      assert.equal(readLedgerWalls(base, undefined, { path: t.path }).length, 1)
+      console.error = (...args: unknown[]) => warnings.push(args.join(' '))
+      writeFileSync(t.path, '{')
+      assert.deepEqual(readLedgerWalls(base, undefined, { path: t.path }), [])
+      assert.equal(warnings.length, 1)
+      recordWall(observation('repaired'), { path: t.path, now: base })
+      assert.equal(warnings.length, 1)
+      writeFileSync(t.path, '{')
+      assert.deepEqual(readLedgerWalls(base, undefined, { path: t.path }), [])
+      assert.equal(warnings.length, 2)
+      assert.deepEqual(warnings, [
+        'bro: host wall ledger is unreadable or corrupt — treating it as empty',
+        'bro: host wall ledger is unreadable or corrupt — treating it as empty',
+      ])
+    } finally {
+      console.error = original
       t.done()
     }
   })

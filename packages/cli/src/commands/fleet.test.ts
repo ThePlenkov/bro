@@ -573,11 +573,37 @@ describe('fleet walls command', () => {
         ),
         ['two']
       )
+      const expiredAt = new Date(now - 60 * 60_000).toISOString()
+      recordWall(
+        {
+          account: 'expired',
+          cause: 'rate_limited',
+          observedAt: expiredAt,
+          provider: 'expired',
+          rig: 'repo',
+        },
+        {
+          path: ledgerPath,
+          now: Date.parse(expiredAt),
+          ttls: { quotaTtlMinutes: 720 },
+        }
+      )
       await runFleetWallsCommand(f.main, ['clear', '--all'], ledgerPath)
       assert.deepEqual(readLedgerWalls(Date.now(), undefined, { path: ledgerPath }), [])
     } finally {
       console.log = original
     }
-    assert.deepEqual(output, ['cleared 1 host wall', 'cleared 1 host wall'])
+    assert.deepEqual(output, ['cleared 1 host wall', 'cleared 2 host walls'])
+  })
+
+  test('rejects wall arguments outside the allowlist', () => {
+    assert.throws(
+      () => runFleetWallsCommand(process.cwd(), ['clear', '']),
+      /usage: bro fleet walls/
+    )
+    assert.throws(
+      () => runFleetWallsCommand(process.cwd(), ['--json', '--verbose']),
+      /usage: bro fleet walls/
+    )
   })
 })

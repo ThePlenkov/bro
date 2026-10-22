@@ -513,11 +513,8 @@ export function deriveProviderWalls(
 
 /** Fold the same live registry deaths by account identity. Legacy rows
  *  use their provider name, preserving provider-scoped walls. */
-type AccountWallRecord = WallRecord & { provider: string; step: string }
-
 interface AccountWallAccumulator {
   acc: WallAcc
-  latest?: AccountWallRecord
 }
 
 function foldAccountWallRecord(
@@ -530,38 +527,65 @@ function foldAccountWallRecord(
   }
   const account = typeof record.account === 'string' ? record.account : record.provider
   const row = byAccount.get(account) ?? { acc: {} }
-  const tagged = { ...record, step }
-  foldEntry(row.acc, tagged)
-  if (row.latest === undefined || stamp(tagged) > stamp(row.latest)) {
-    row.latest = tagged
-  }
+  foldEntry(row.acc, { ...record, step })
   byAccount.set(account, row)
 }
 
 function accountWallFrom(
   account: string,
-  { acc, latest }: AccountWallAccumulator,
+  { acc }: AccountWallAccumulator,
   now: number
 ): AccountWall | undefined {
-  const wall = accWall(account, acc, now)
-  if (wall === undefined) {
+  const source = acc.quota ?? acc.rate
+  if (source === undefined) {
     return undefined
   }
-  const source = acc.quota ?? acc.rate ?? latest
-  let observedAt: string | undefined
-  if (typeof source?.observedAt === 'string') {
-    observedAt = source.observedAt
-  } else if (typeof source?.spawnedAt === 'string') {
-    observedAt = source.spawnedAt
+  const cause = acc.quota === undefined ? 'rate_limited' : 'quota'
+  const until = accountWallUntil(source, cause, now)
+  if (until === null) {
+    return undefined
   }
   return {
     account,
-    provider: source?.provider ?? latest?.provider,
-    cause: wall.cause,
-    ...(wall.until === undefined ? {} : { until: wall.until }),
-    ...(typeof source?.step === 'string' ? { step: source.step } : {}),
+    provider: source.provider,
+    cause,
+    ...(until === undefined ? {} : { until }),
+    ...accountWallMetadata(source),
+  }
+}
+
+function accountWallUntil(
+  source: WallRecord & { provider: string },
+  cause: AccountWall['cause'],
+  now: number
+): string | null | undefined {
+  if (cause === 'quota') {
+    return undefined
+  }
+  const resetAt = source.resetAt
+  if (typeof resetAt !== 'string' || resetAt === '') {
+    return undefined
+  }
+  const resetMs = Date.parse(resetAt)
+  if (Number.isFinite(resetMs) && resetMs <= now) {
+    return null
+  }
+  return resetAt
+}
+
+function accountWallMetadata(
+  source: WallRecord & { provider: string }
+): Pick<AccountWall, 'step' | 'observedAt' | 'rig'> {
+  const observedAt =
+    typeof source.observedAt === 'string'
+      ? source.observedAt
+      : typeof source.spawnedAt === 'string'
+        ? source.spawnedAt
+        : undefined
+  return {
+    ...(typeof source.step === 'string' ? { step: source.step } : {}),
     ...(observedAt === undefined ? {} : { observedAt }),
-    ...(typeof source?.rig === 'string' ? { rig: source.rig } : {}),
+    ...(typeof source.rig === 'string' ? { rig: source.rig } : {}),
   }
 }
 

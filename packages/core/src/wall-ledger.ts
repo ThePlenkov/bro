@@ -46,8 +46,12 @@ export function wallLedgerPath(stateHome = process.env.XDG_STATE_HOME): string {
   return join(stateHome || join(homedir(), '.local', 'state'), 'bro', 'walls.json')
 }
 
-const isObject = (value: unknown): value is Record<string, unknown> =>
-  typeof value === 'object' && value !== null && !Array.isArray(value)
+function isObject(value: unknown): value is Record<string, unknown> {
+  if (typeof value !== 'object' || value === null) {
+    return false
+  }
+  return !Array.isArray(value)
+}
 
 function emptyState(): LedgerState {
   return { version: 1, walls: Object.create(null) as Partial<Record<string, LedgerRow>> }
@@ -68,39 +72,47 @@ function isTimestamp(value: unknown): value is string {
   return typeof value === 'string' && Number.isFinite(Date.parse(value))
 }
 
+function isString(value: unknown): value is string {
+  return typeof value === 'string'
+}
+
 type ParsedLedgerRow = Record<string, unknown> & LedgerRow
-
-function hasObservationFields(value: Record<string, unknown>): boolean {
-  return isWallCause(value.cause) && isTimestamp(value.observedAt)
-}
-
-function hasProviderFields(value: Record<string, unknown>): boolean {
-  return typeof value.provider === 'string' && typeof value.rig === 'string'
-}
 
 function isOptionalTimestamp(value: unknown): boolean {
   return value === undefined || isTimestamp(value)
 }
 
 function isOptionalString(value: unknown): boolean {
-  return value === undefined || typeof value === 'string'
+  return value === undefined || isString(value)
 }
 
-function hasOptionalFields(value: Record<string, unknown>): boolean {
-  return isOptionalTimestamp(value.resetAt) && isOptionalString(value.step)
+type FieldCheck = readonly [field: string, validate: (value: unknown) => boolean]
+
+function matchesFields(value: Record<string, unknown>, checks: readonly FieldCheck[]): boolean {
+  return checks.every(([field, validate]) => validate(value[field]))
 }
+
+const ledgerRowChecks: readonly FieldCheck[] = [
+  ['cause', isWallCause],
+  ['observedAt', isTimestamp],
+  ['provider', isString],
+  ['rig', isString],
+  ['resetAt', isOptionalTimestamp],
+  ['step', isOptionalString],
+]
+
+const observationChecks: readonly FieldCheck[] = [
+  ['account', isString],
+  ['cause', isWallCause],
+  ['observedAt', isTimestamp],
+  ['provider', isString],
+  ['rig', isString],
+  ['resetAt', isOptionalTimestamp],
+  ['step', isOptionalString],
+]
 
 function isLedgerRow(value: unknown): value is ParsedLedgerRow {
-  if (!isObject(value)) {
-    return false
-  }
-  if (!hasObservationFields(value)) {
-    return false
-  }
-  if (!hasProviderFields(value)) {
-    return false
-  }
-  return hasOptionalFields(value)
+  return isObject(value) && matchesFields(value, ledgerRowChecks)
 }
 
 function setLedgerRow(state: LedgerState, account: string, row: LedgerRow): void {
@@ -130,35 +142,64 @@ function parseRow(value: unknown): LedgerRow | undefined {
   }
 }
 
-function readState(path: string): LedgerState {
-  let text: string
+function readLedgerText(path: string): string | undefined {
   try {
     // eslint-disable-next-line security/detect-non-literal-fs-filename -- path is local operator state
-    text = readFileSync(path, 'utf8')
+    return readFileSync(path, 'utf8')
   } catch (err) {
     if ((err as NodeJS.ErrnoException).code !== 'ENOENT') {
       warnUnreadable()
     }
+    return undefined
+  }
+}
+
+function parseJson(text: string): unknown | undefined {
+  try {
+    return JSON.parse(text)
+  } catch {
+    return undefined
+  }
+}
+
+function parseLedger(json: unknown): LedgerState | undefined {
+  if (!isObject(json)) {
+    return undefined
+  }
+  if (json.version !== 1) {
+    return undefined
+  }
+  if (!isObject(json.walls)) {
+    return undefined
+  }
+  const state = emptyState()
+  for (const [account, raw] of Object.entries(json.walls)) {
+    const row = parseRow(raw)
+    if (row === undefined) {
+      return undefined
+    }
+    setLedgerRow(state, account, row)
+  }
+  return state
+}
+
+function readState(path: string): LedgerState {
+  const text = readLedgerText(path)
+  if (text === undefined) {
     return emptyState()
   }
-  try {
-    const parsed: unknown = JSON.parse(text)
-    if (!isObject(parsed) || parsed.version !== 1 || !isObject(parsed.walls)) {
-      throw new SyntaxError('invalid wall ledger shape')
-    }
-    const state = emptyState()
-    for (const [account, raw] of Object.entries(parsed.walls)) {
-      const row = parseRow(raw)
-      if (row === undefined) {
-        throw new SyntaxError('invalid wall ledger row')
-      }
-      setLedgerRow(state, account, row)
-    }
-    return state
-  } catch {
+  const json = parseJson(text)
+  if (json === undefined) {
     warnUnreadable()
     return emptyState()
   }
+  const state = parseLedger(json)
+  if (state === undefined) {
+    warnUnreadable()
+    return emptyState()
+  }
+  warnedUnreadable = false
+  return state
 }
 
 function ttlsOf(ttls?: Partial<FleetWallTtls>): FleetWallTtls {
@@ -204,6 +245,7 @@ function writeState(path: string, state: LedgerState): void {
     chmodSync(tmp, 0o600)
     // eslint-disable-next-line security/detect-non-literal-fs-filename -- paths are the local ledger and its temporary sibling
     renameSync(tmp, path)
+    warnedUnreadable = false
   } catch (err) {
     if (fd !== undefined) {
       closeSync(fd)
@@ -222,22 +264,25 @@ function updateLedger<T>(
 }
 
 function validObservation(obs: unknown): obs is WallObservation {
-  if (!isObject(obs)) {
+  return isObject(obs) && matchesFields(obs, observationChecks)
+}
+
+function shouldReplace(
+  current: LedgerRow | undefined,
+  obs: WallObservation,
+  now: number,
+  ttls: FleetWallTtls
+): boolean {
+  if (current === undefined) {
+    return true
+  }
+  if (expiryMs(current, ttls) <= now) {
+    return true
+  }
+  if (current.cause === 'quota' && obs.cause === 'rate_limited') {
     return false
   }
-  if (
-    typeof obs.account !== 'string' ||
-    !isWallCause(obs.cause) ||
-    !isTimestamp(obs.observedAt) ||
-    typeof obs.provider !== 'string' ||
-    typeof obs.rig !== 'string'
-  ) {
-    return false
-  }
-  if (obs.resetAt !== undefined && !isTimestamp(obs.resetAt)) {
-    return false
-  }
-  return obs.step === undefined || typeof obs.step === 'string'
+  return Date.parse(obs.observedAt) >= Date.parse(current.observedAt)
 }
 
 export function recordWall(obs: WallObservation, opts: WallLedgerOptions = {}): void {
@@ -246,20 +291,16 @@ export function recordWall(obs: WallObservation, opts: WallLedgerOptions = {}): 
   }
   const now = opts.now ?? Date.now()
   const ttls = ttlsOf(opts.ttls)
-  updateLedger(opts.path ?? wallLedgerPath(), (state) => {
+  const ledgerPath = opts.path ?? wallLedgerPath()
+  updateLedger(ledgerPath, (state) => {
     pruneExpired(state, now, ttls)
     const current = state.walls[obs.account]
-    const currentLive = current !== undefined && expiryMs(current, ttls) > now
-    const quotaHolds =
-      currentLive && current.cause === 'quota' && obs.cause === 'rate_limited'
-    const newer =
-      current === undefined || Date.parse(obs.observedAt) >= Date.parse(current.observedAt)
-    if (!quotaHolds && newer) {
+    if (shouldReplace(current, obs, now, ttls)) {
       const { account: _account, ...row } = obs
       setLedgerRow(state, obs.account, row)
     }
     pruneExpired(state, now, ttls)
-    writeState(opts.path ?? wallLedgerPath(), state)
+    writeState(ledgerPath, state)
   })
 }
 
@@ -301,17 +342,18 @@ export function clearLedgerWalls(
   const now = opts.now ?? Date.now()
   const ttls = ttlsOf(opts.ttls)
   return updateLedger(path, (state) => {
-    pruneExpired(state, now, ttls)
-    let removed = 0
+    const removed =
+      account === 'all'
+        ? Object.keys(state.walls).length
+        : Object.hasOwn(state.walls, account)
+          ? 1
+          : 0
     if (account === 'all') {
-      removed = Object.keys(state.walls).length
       state.walls = Object.create(null) as Partial<Record<string, LedgerRow>>
     } else {
-      if (Object.hasOwn(state.walls, account)) {
-        removed = 1
-      }
       removeLedgerRow(state, account)
     }
+    pruneExpired(state, now, ttls)
     writeState(path, state)
     return removed
   })

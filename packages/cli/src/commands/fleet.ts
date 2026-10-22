@@ -617,29 +617,48 @@ export async function runFleetCommand(argv: string[]): Promise<void> {
   printFleetTable(rows, degraded, conflicts, prErrors, walls, wallsError)
 }
 
+type FleetWallsAction =
+  | { kind: 'list'; json: boolean }
+  | { kind: 'clear'; account: string }
+
+function fleetWallsAction(argv: string[]): FleetWallsAction {
+  if (argv.length === 0) {
+    return { kind: 'list', json: false }
+  }
+  if (argv.length === 1 && argv[0] === '--json') {
+    return { kind: 'list', json: true }
+  }
+  if (argv[0] !== 'clear' || argv.length !== 2) {
+    throw new Error('usage: bro fleet walls [--json] | clear <account>|--all')
+  }
+  const account = argv[1]!
+  if (account === '--all') {
+    return { kind: 'clear', account: 'all' }
+  }
+  const trimmed = account.trim()
+  if (trimmed === '' || trimmed.startsWith('-')) {
+    throw new Error('usage: bro fleet walls [--json] | clear <account>|--all')
+  }
+  return { kind: 'clear', account }
+}
+
 export function runFleetWallsCommand(
   dir: string,
   argv: string[],
   ledgerPath?: string
 ): void {
+  const action = fleetWallsAction(argv)
   const env = loadAgentEnv(dir)
-  if (argv[0] === 'clear') {
-    if (argv.length !== 2) {
-      throw new Error('usage: bro fleet walls clear <account>|--all')
-    }
-    const target = argv[1] === '--all' ? 'all' : argv[1]!
-    const count = clearLedgerWalls(target, {
+  if (action.kind === 'clear') {
+    const count = clearLedgerWalls(action.account, {
       ttls: env.fleet?.walls,
       ...(ledgerPath === undefined ? {} : { path: ledgerPath }),
     })
     console.log(`cleared ${count} host wall${count === 1 ? '' : 's'}`)
     return
   }
-  if (argv.some((arg) => arg !== '--json') || argv.filter((arg) => arg === '--json').length > 1) {
-    throw new Error('usage: bro fleet walls [--json] | clear <account>|--all')
-  }
   const rows = fleetWallRowsFor(dir, env, ledgerPath)
-  if (argv.includes('--json')) {
+  if (action.json) {
     console.log(JSON.stringify(rows, null, 2))
     return
   }

@@ -303,6 +303,21 @@ describe('deriveProviderWalls', () => {
 })
 
 describe('deriveAccountWalls', () => {
+  test('keeps the provider that observed an account-scoped wall', () => {
+    const [wall] = deriveAccountWalls({
+      step: entry({
+        provider: 'kilo-cli',
+        account: 'kilo',
+        cause: 'quota',
+        observedAt: '2026-01-01T00:00:00Z',
+      }),
+    })
+    assert.deepEqual(
+      { account: wall?.account, provider: wall?.provider },
+      { account: 'kilo', provider: 'kilo-cli' }
+    )
+  })
+
   test('folds aliases by account and falls back to provider for legacy entries', () => {
     const walls = deriveAccountWalls(
       {
