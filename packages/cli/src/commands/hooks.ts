@@ -735,6 +735,32 @@ function hintedPath(sessionId: string, skill: string): string | null {
   return dir && safe ? join(dir, 'hinted', `${safe}.${skill}`) : null
 }
 
+/** Records this stop's gate hints and reports whether they differ from
+ *  what the session was last told. An empty set is recorded too, so a
+ *  hint that clears and later returns is shown again. Fail-open: an
+ *  unreadable or unwritable marker reports a change. */
+function stopHintsChanged(sessionId: string, hints: string[]): boolean {
+  const path = hintedPath(sessionId, 'stop-gate')
+  if (!path) {
+    return hints.length > 0
+  }
+  const digest = createHash('sha256').update(hints.join('\n')).digest('hex')
+  try {
+    if (readFileSync(path, 'utf8').trim() === digest) {
+      return false
+    }
+  } catch {
+    // no marker yet — first stop of the session
+  }
+  try {
+    mkdirSync(dirname(path), { recursive: true })
+    writeFileSync(path, `${digest}\n`)
+  } catch {
+    // dedup is best-effort — a failed marker must never stall the hook
+  }
+  return hints.length > 0
+}
+
 /** True when this session was already pointed at the skill — a marker
  *  younger than MARKER_TTL_MS counts; older re-hints (a week-old session
  *  is a new session). */
@@ -1421,11 +1447,11 @@ async function emitStopGateBody(sessionId: string, goalP: Promise<string[]>): Pr
       return { text: tail.raw, trace: relativize(dir, tail.entries) }
     }),
   ])
-  const hints: string[] = [...goal]
+  const gateHints: string[] = []
   for (const c of contributions) {
     if (!armed.has(c.aspect)) {
       if (c.passive) {
-        hints.push(c.passive)
+        gateHints.push(c.passive)
       }
       continue
     }
@@ -1435,9 +1461,12 @@ async function emitStopGateBody(sessionId: string, goalP: Promise<string[]>): Pr
     }
     const hint = c.armedHint ?? c.passive
     if (hint) {
-      hints.push(hint)
+      gateHints.push(hint)
     }
   }
+  // any Stop context re-wakes the host as a new turn — repeating an
+  // unchanged gate hint every stop turns an idle wait into a loop
+  const hints: string[] = [...goal, ...(stopHintsChanged(sessionId, gateHints) ? gateHints : [])]
   // stop guards are passive hints — additionalContext only; a guard is
   // a nudge, never a `decision: block` (spec: bro-nkn6)
   hints.push(...guards)

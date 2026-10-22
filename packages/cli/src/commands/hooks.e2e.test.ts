@@ -164,6 +164,23 @@ describe('hooks e2e — stop gate', () => {
       assert.equal(armed.code, 0)
       assert.doesNotMatch(armed.stdout, BLOCK)
       assert.match(armed.stdout, /claimed beads open: fx-9/)
+      // the same hint on the next stop would re-wake the host in a loop
+      assert.doesNotMatch(stop('s1').stdout, /claimed beads/)
+    })
+  })
+
+  test('an unchanged gate hint is not repeated on the next stop — no re-wake loop', () => {
+    const f = hookFixture()
+    inside(f.main, f.root, () => {
+      const wt = linked(f, false)
+      arm(f, 's1', 'work')
+      assert.match(hook(f, 'stop', { session_id: 's1' }, wt).stdout, /bro work leave/)
+      const again = hook(f, 'stop', { session_id: 's1' }, wt)
+      assert.equal(again.code, 0, again.stderr)
+      assert.doesNotMatch(again.stdout, /bro work leave/)
+      // another session has its own memory of what it was told
+      arm(f, 's3', 'work')
+      assert.match(hook(f, 'stop', { session_id: 's3' }, wt).stdout, /bro work leave/)
     })
   })
 })
