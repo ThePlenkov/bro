@@ -61,7 +61,7 @@ function dropProxyPrefix(parts: RemoteParts): RemoteParts {
   if (index < 0) {
     return parts
   }
-  const host = parts.path[index + 1]
+  const host = parts.path.at(index + 1)
   if (host === undefined) {
     return parts
   }
