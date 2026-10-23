@@ -109,6 +109,7 @@ import { runSyncCommand } from './commands/sync.ts'
 import { runTraceCommand } from './commands/trace.ts'
 import { telemetrySection } from './commands/trace-config.ts'
 import { runWorkCommand, workConnector } from './commands/work.ts'
+import { runContractCommand } from './commands/contract.ts'
 
 // Built-in connectors register at module load, ahead of external
 // plugins — registry order is the fallback precedence, and an external
@@ -169,6 +170,26 @@ export const PLUGINS: BroPlugin[] = [
     run: runDebtCommand,
     skill: 'debt',
     configKey: 'debt',
+    contract: {
+      subs: {
+        status: {
+          exits: { 0: 'ledger summary printed', 1: 'usage (debt usage exits 1 today)' },
+        },
+        next: {
+          flags: {
+            '--json': 'the finding row as JSON',
+            '--claim': 'mark the finding claimed atomically (CAS)',
+            '--area <a>': 'only findings in this area',
+            '--author <u>': 'only findings from this thread author',
+          },
+          exits: {
+            0: 'top open finding emitted',
+            1: 'no open findings, or the claim CAS lost',
+            2: 'usage',
+          },
+        },
+      },
+    },
     configSchema: debtSection,
     planSchema: (doc, source) => parseDebtPlan(doc, source),
     planVersion: DEBT_PLAN_VERSION,
@@ -181,6 +202,18 @@ export const PLUGINS: BroPlugin[] = [
     run: runActCommand,
     skill: 'act',
     configKey: 'act',
+    contract: {
+      subs: {
+        status: {
+          flags: { '--json': 'PR state + exit gate as one JSON document' },
+          exits: {
+            0: 'exit gate green',
+            1: 'gate blocked — threads/failures remain (usage errors also exit 1 today)',
+            2: 'no open PR for the current branch',
+          },
+        },
+      },
+    },
     configSchema: actSection,
     planSchema: (doc, source) => parseActPlan(doc, source),
     planVersion: ACT_PLAN_VERSION,
@@ -202,6 +235,19 @@ export const PLUGINS: BroPlugin[] = [
     summary: 'Claim + emit the top ready bead — the autonomous backlog loop',
     run: runNextCommand,
     skill: 'next',
+    contract: {
+      flags: {
+        '--list': 'emit the work order without claiming',
+        '--json': 'the verdict as JSON — {state: task|gated|idle, bead, beads, queue, …}',
+        '--global': 'read the user-level store instead of the project',
+        '--label <a,b>': 'only beads carrying one of these labels are claimable',
+      },
+      exits: {
+        0: 'verdict emitted — task | gated | idle',
+        1: 'task store unreachable or classify failed',
+        2: 'usage',
+      },
+    },
     planSchema: (doc, source) => parseNextPlan(doc, source),
     planVersion: NEXT_PLAN_VERSION,
     runPlan: (plan) => applyNextPlan(plan as NextPlan),
@@ -221,6 +267,17 @@ export const PLUGINS: BroPlugin[] = [
     summary:
       'Fleet view — mols × steps × agents × worktrees × PRs [--json|--live|--every N]',
     run: runFleetCommand,
+    contract: {
+      flags: {
+        '--json': 'fleet payload as JSON — rows, degraded, conflicts, prErrors, occupancy, budget, walls',
+        '--live': 'TTY dashboard repaint loop (needs a TTY)',
+        '--every N': 'repaint cadence seconds — implies --live',
+      },
+      exits: {
+        0: 'fleet printed',
+        2: 'usage — --live without TTY, --every out of range, --json + --live',
+      },
+    },
   }),
   definePlugin({
     name: 'agents',
@@ -229,6 +286,21 @@ export const PLUGINS: BroPlugin[] = [
     run: runAgentsCommand,
     skill: 'agents',
     configKey: 'agents',
+    contract: {
+      subs: {
+        status: {
+          flags: {
+            '--json': 'agent rows + occupancy + session quota as JSON',
+            '--connector <name>': 'pin the agents facade connector',
+          },
+          exits: {
+            0: 'agent plane printed',
+            1: 'backend collection failed',
+            2: 'usage',
+          },
+        },
+      },
+    },
     configSchema: agentsSection,
   }),
   definePlugin({
@@ -237,6 +309,13 @@ export const PLUGINS: BroPlugin[] = [
     summary: 'The compact live board — beads + fleet + drill + git [--json|--deep]',
     run: runStatusCommand,
     skill: 'status',
+    contract: {
+      flags: {
+        '--json': 'the board as one JSON document',
+        '--deep': 'add the act exit gate for the current branch PR — the fast path stays local-only',
+      },
+      exits: { 0: 'board printed' },
+    },
   }),
   definePlugin({
     name: 'notify',
@@ -538,6 +617,25 @@ export const PLUGINS: BroPlugin[] = [
     run: runRigCommand,
     skill: 'rig',
     configKey: 'rig',
+    contract: {
+      subs: {
+        status: {
+          flags: {
+            '--repo <dir>': 'rig checkout to inspect (default: this repo)',
+            '--json': 'rig status as JSON',
+          },
+          exits: { 0: 'rig fresh — no error surfaced', 1: 'a status error was found', 2: 'usage' },
+        },
+        next: {
+          flags: { '--json': 'the re-entry verdict as JSON' },
+          exits: {
+            0: 'verdict — step | gate | wait | done',
+            1: 'verdict blocked',
+            2: 'usage',
+          },
+        },
+      },
+    },
     configSchema: rigSection,
   }),
   definePlugin({
@@ -614,6 +712,14 @@ export const PLUGINS: BroPlugin[] = [
     name: 'plugins',
     summary: 'Plugin registry + client adapters: install|uninstall|list <client>',
     run: (argv) => runPluginsCommand(argv, PLUGINS),
+  }),
+  definePlugin({
+    // consumer surface (agents/transports), not an operator one —
+    // hidden like hooks/acp-worker; spec bro-k9ces
+    name: 'contract',
+    summary: 'The CLI surface as data — dump|check|gen over the registry',
+    run: (argv) => runContractCommand(argv, PLUGINS, GROUP_META),
+    hidden: true,
   }),
 ]
 
@@ -714,6 +820,7 @@ const PLUGIN_FIELD_CHECKS: ReadonlyArray<
   ['argvPrefix', (v) => Array.isArray(v)],
   ['docs', (v) => Array.isArray(v) && v.every(isDocType)],
   ['connectors', (v) => Array.isArray(v) && v.every(isConnector)],
+  ['contract', (v) => v !== null && typeof v === 'object' && !Array.isArray(v)],
 ]
 
 /** A connectors entry must be a Connector — name + at least the shape

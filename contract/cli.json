@@ -1,0 +1,959 @@
+{
+  "version": 1,
+  "groups": {
+    "review": {
+      "summary": "PR review loop — gates, threads, debt",
+      "members": [
+        "debt",
+        "act",
+        "watch",
+        "drive",
+        "cleanup"
+      ]
+    },
+    "flow": {
+      "summary": "scheduling & work chains — claims, loops, stacks",
+      "members": [
+        "convoy",
+        "next",
+        "loop",
+        "stack"
+      ]
+    },
+    "fleet": {
+      "summary": "agent plane — workers, serve, the board",
+      "members": [
+        "fleet",
+        "agents",
+        "status",
+        "daemon",
+        "resume",
+        "serve",
+        "provider",
+        "mcp",
+        "pulse",
+        "telemetry",
+        "trace",
+        "rig"
+      ]
+    },
+    "work": {
+      "summary": "worktree & session mechanics",
+      "members": [
+        "drill",
+        "unwind",
+        "queue",
+        "goal",
+        "work",
+        "stamp",
+        "sync",
+        "sweep"
+      ]
+    },
+    "self": {
+      "summary": "self-correction — retro, lessons, judgment, guards",
+      "members": [
+        "retrospect",
+        "wtf",
+        "learn",
+        "judge",
+        "dogfood",
+        "guard",
+        "providers"
+      ]
+    },
+    "comms": {
+      "summary": "events & session mailbox",
+      "members": [
+        "notify",
+        "sinks",
+        "bus"
+      ]
+    },
+    "plan": {
+      "summary": "versioned plans",
+      "members": [
+        "query",
+        "run",
+        "plan"
+      ]
+    },
+    "mesh": {
+      "summary": "inter-rig federation",
+      "members": [
+        "mesh",
+        "request"
+      ]
+    },
+    "spec": {
+      "summary": "spec-driven development",
+      "members": [
+        "spec"
+      ]
+    }
+  },
+  "commands": {
+    "debt": {
+      "name": "debt",
+      "group": "review",
+      "summary": "Review-debt pipeline: collect|status|prs|list|mark|sync|set",
+      "spellings": [
+        "debt",
+        "review debt"
+      ],
+      "aliases": [],
+      "hidden": false,
+      "skill": "debt",
+      "configKey": "debt",
+      "plan": true,
+      "planVersion": 1,
+      "contract": {
+        "subs": {
+          "status": {
+            "exits": {
+              "0": "ledger summary printed",
+              "1": "usage (debt usage exits 1 today)"
+            }
+          },
+          "next": {
+            "flags": {
+              "--json": "the finding row as JSON",
+              "--claim": "mark the finding claimed atomically (CAS)",
+              "--area <a>": "only findings in this area",
+              "--author <u>": "only findings from this thread author"
+            },
+            "exits": {
+              "0": "top open finding emitted",
+              "1": "no open findings, or the claim CAS lost",
+              "2": "usage"
+            }
+          }
+        }
+      },
+      "external": false
+    },
+    "act": {
+      "name": "act",
+      "group": "review",
+      "summary": "Open-PR loop: status|threads|resolve|reply|merge",
+      "spellings": [
+        "act",
+        "review act"
+      ],
+      "aliases": [],
+      "hidden": false,
+      "skill": "act",
+      "configKey": "act",
+      "plan": true,
+      "planVersion": 1,
+      "contract": {
+        "subs": {
+          "status": {
+            "flags": {
+              "--json": "PR state + exit gate as one JSON document"
+            },
+            "exits": {
+              "0": "exit gate green",
+              "1": "gate blocked — threads/failures remain (usage errors also exit 1 today)",
+              "2": "no open PR for the current branch"
+            }
+          }
+        }
+      },
+      "external": false
+    },
+    "convoy": {
+      "name": "convoy",
+      "group": "flow",
+      "summary": "Convoy execution over beads molecules: status|next|done|pour|list|run",
+      "spellings": [
+        "convoy",
+        "flow convoy"
+      ],
+      "aliases": [],
+      "hidden": false,
+      "skill": "convoy",
+      "plan": true,
+      "planVersion": 1,
+      "external": false
+    },
+    "next": {
+      "name": "next",
+      "group": "flow",
+      "summary": "Claim + emit the top ready bead — the autonomous backlog loop",
+      "spellings": [
+        "next",
+        "flow next"
+      ],
+      "aliases": [],
+      "hidden": false,
+      "skill": "next",
+      "plan": true,
+      "planVersion": 1,
+      "contract": {
+        "flags": {
+          "--list": "emit the work order without claiming",
+          "--json": "the verdict as JSON — {state: task|gated|idle, bead, beads, queue, …}",
+          "--global": "read the user-level store instead of the project",
+          "--label <a,b>": "only beads carrying one of these labels are claimable"
+        },
+        "exits": {
+          "0": "verdict emitted — task | gated | idle",
+          "1": "task store unreachable or classify failed",
+          "2": "usage"
+        }
+      },
+      "external": false
+    },
+    "loop": {
+      "name": "loop",
+      "group": "flow",
+      "summary": "Autonomous backlog runner — claim → agent → gate → close → repeat",
+      "spellings": [
+        "loop",
+        "flow loop"
+      ],
+      "aliases": [],
+      "hidden": false,
+      "skill": "loop",
+      "configKey": "loop",
+      "plan": false,
+      "external": false
+    },
+    "fleet": {
+      "name": "fleet",
+      "group": "fleet",
+      "summary": "Fleet view — mols × steps × agents × worktrees × PRs [--json|--live|--every N]",
+      "spellings": [
+        "fleet"
+      ],
+      "aliases": [],
+      "hidden": false,
+      "plan": false,
+      "contract": {
+        "flags": {
+          "--json": "fleet payload as JSON — rows, degraded, conflicts, prErrors, occupancy, budget, walls",
+          "--live": "TTY dashboard repaint loop (needs a TTY)",
+          "--every N": "repaint cadence seconds — implies --live"
+        },
+        "exits": {
+          "0": "fleet printed",
+          "2": "usage — --live without TTY, --every out of range, --json + --live"
+        }
+      },
+      "external": false
+    },
+    "agents": {
+      "name": "agents",
+      "group": "fleet",
+      "summary": "Agent supervisor — status|up|down over the orchestrator connectors",
+      "spellings": [
+        "agents",
+        "fleet agents"
+      ],
+      "aliases": [],
+      "hidden": false,
+      "skill": "agents",
+      "configKey": "agents",
+      "plan": false,
+      "contract": {
+        "subs": {
+          "status": {
+            "flags": {
+              "--json": "agent rows + occupancy + session quota as JSON",
+              "--connector <name>": "pin the agents facade connector"
+            },
+            "exits": {
+              "0": "agent plane printed",
+              "1": "backend collection failed",
+              "2": "usage"
+            }
+          }
+        }
+      },
+      "external": false
+    },
+    "status": {
+      "name": "status",
+      "group": "fleet",
+      "summary": "The compact live board — beads + fleet + drill + git [--json|--deep]",
+      "spellings": [
+        "status",
+        "fleet status"
+      ],
+      "aliases": [],
+      "hidden": false,
+      "skill": "status",
+      "plan": false,
+      "contract": {
+        "flags": {
+          "--json": "the board as one JSON document",
+          "--deep": "add the act exit gate for the current branch PR — the fast path stays local-only"
+        },
+        "exits": {
+          "0": "board printed"
+        }
+      },
+      "external": false
+    },
+    "notify": {
+      "name": "notify",
+      "group": "comms",
+      "summary": "Drop an event into the session mailbox — drained into context by the next postTool probe",
+      "spellings": [
+        "notify",
+        "comms notify"
+      ],
+      "aliases": [],
+      "hidden": false,
+      "skill": "notify",
+      "plan": false,
+      "external": false
+    },
+    "sinks": {
+      "name": "sinks",
+      "group": "comms",
+      "summary": "Outbound event sinks — list configured webhooks, send a probe [list|test]",
+      "spellings": [
+        "sinks",
+        "comms sinks"
+      ],
+      "aliases": [],
+      "hidden": false,
+      "plan": false,
+      "external": false
+    },
+    "watch": {
+      "name": "watch",
+      "group": "review",
+      "summary": "Orchestrator heartbeat — mols × act gates × fleet snapshot [--once|--every N|--notify|--json|install|uninstall]",
+      "spellings": [
+        "watch",
+        "review watch"
+      ],
+      "aliases": [],
+      "hidden": false,
+      "skill": "watch",
+      "configKey": "watch",
+      "plan": false,
+      "external": false
+    },
+    "drive": {
+      "name": "drive",
+      "group": "review",
+      "summary": "Post-PR review driver — poll act gates, spawn fixer agents, merge on green [--once|--every N|--no-merge]",
+      "spellings": [
+        "drive",
+        "review drive"
+      ],
+      "aliases": [],
+      "hidden": false,
+      "skill": "drive",
+      "configKey": "drive",
+      "plan": false,
+      "external": false
+    },
+    "daemon": {
+      "name": "daemon",
+      "group": "fleet",
+      "summary": "Project-scoped supervisor — owns the drive pass long-term [up|status|down|run --every N]",
+      "spellings": [
+        "daemon",
+        "fleet daemon"
+      ],
+      "aliases": [],
+      "hidden": false,
+      "skill": "daemon",
+      "plan": false,
+      "external": false
+    },
+    "resume": {
+      "name": "resume",
+      "group": "fleet",
+      "summary": "Post-restart recovery — rearm dead watches, revive the daemon, audit survivors [--dry-run|--json]",
+      "spellings": [
+        "resume",
+        "fleet resume"
+      ],
+      "aliases": [],
+      "hidden": false,
+      "skill": "resume",
+      "plan": false,
+      "external": false
+    },
+    "serve": {
+      "name": "serve",
+      "group": "fleet",
+      "summary": "Facade host for thin clients — HTTP/JSON on 127.0.0.1 [--port N]",
+      "spellings": [
+        "serve",
+        "fleet serve"
+      ],
+      "aliases": [],
+      "hidden": false,
+      "skill": "serve",
+      "configKey": "serve",
+      "plan": false,
+      "external": false
+    },
+    "provider": {
+      "name": "provider",
+      "group": "fleet",
+      "summary": "Claude-facing Messages-API plane — host listener + url|token|env wiring helpers",
+      "spellings": [
+        "provider",
+        "fleet provider"
+      ],
+      "aliases": [],
+      "hidden": false,
+      "skill": "provider",
+      "plan": false,
+      "external": false
+    },
+    "mcp": {
+      "name": "mcp",
+      "group": "fleet",
+      "summary": "Stdio MCP server over the read planes — bro_<plane>_<read> tools",
+      "spellings": [
+        "mcp",
+        "fleet mcp"
+      ],
+      "aliases": [],
+      "hidden": false,
+      "skill": "mcp",
+      "plan": false,
+      "external": false
+    },
+    "pulse": {
+      "name": "pulse",
+      "group": "fleet",
+      "summary": "Session-owned metronome — tick + mailbox beat every S seconds [S|--no-notify|--json|-- <cmd>…]",
+      "spellings": [
+        "pulse",
+        "fleet pulse"
+      ],
+      "aliases": [],
+      "hidden": false,
+      "skill": "pulse",
+      "plan": false,
+      "external": false
+    },
+    "bus": {
+      "name": "bus",
+      "group": "comms",
+      "summary": "Local event bus — serve/publish/subscribe agent events by topic",
+      "spellings": [
+        "bus",
+        "comms bus"
+      ],
+      "aliases": [],
+      "hidden": false,
+      "plan": false,
+      "external": false
+    },
+    "check": {
+      "name": "check",
+      "summary": "Run the repo sverka workflow — per-step stats + findings [--json]",
+      "spellings": [
+        "check"
+      ],
+      "aliases": [],
+      "hidden": false,
+      "skill": "check",
+      "configKey": "check",
+      "plan": false,
+      "external": false
+    },
+    "cleanup": {
+      "name": "cleanup",
+      "group": "review",
+      "summary": "Delete local branches whose PR merged [--remote] [--dry-run]",
+      "spellings": [
+        "cleanup",
+        "review cleanup"
+      ],
+      "aliases": [],
+      "hidden": false,
+      "plan": false,
+      "external": false
+    },
+    "drill": {
+      "name": "drill",
+      "group": "work",
+      "summary": "Scoped descent over beads: down|up|current|tree|list|report|distill",
+      "spellings": [
+        "drill",
+        "work drill"
+      ],
+      "aliases": [
+        "unwind"
+      ],
+      "hidden": false,
+      "skill": "drill",
+      "configKey": "drill",
+      "plan": true,
+      "planVersion": 1,
+      "external": false
+    },
+    "unwind": {
+      "name": "unwind",
+      "group": "work",
+      "summary": "Alias for `drill up`",
+      "spellings": [
+        "unwind",
+        "work unwind"
+      ],
+      "aliases": [],
+      "aliasOf": "drill up",
+      "hidden": false,
+      "plan": false,
+      "external": false
+    },
+    "queue": {
+      "name": "queue",
+      "group": "work",
+      "summary": "Frame-scoped intake queue: ls|drill|bump|rm — rank-ordered items that promote to frames",
+      "spellings": [
+        "queue",
+        "work queue"
+      ],
+      "aliases": [],
+      "hidden": false,
+      "plan": false,
+      "external": false
+    },
+    "retrospect": {
+      "name": "retrospect",
+      "group": "self",
+      "summary": "Self-correction: capture|record|status|list|schema",
+      "spellings": [
+        "retrospect",
+        "self retrospect"
+      ],
+      "aliases": [
+        "wtf"
+      ],
+      "hidden": false,
+      "skill": "wtf",
+      "plan": true,
+      "planVersion": 1,
+      "external": false
+    },
+    "wtf": {
+      "name": "wtf",
+      "group": "self",
+      "summary": "Alias for `retrospect capture` — vent, verbatim",
+      "spellings": [
+        "wtf",
+        "self wtf"
+      ],
+      "aliases": [],
+      "aliasOf": "retrospect capture",
+      "hidden": false,
+      "plan": false,
+      "external": false
+    },
+    "learn": {
+      "name": "learn",
+      "group": "self",
+      "summary": "Self-improvement loop — lessons: add|list|show|forget|capture|probe",
+      "spellings": [
+        "learn",
+        "self learn"
+      ],
+      "aliases": [],
+      "hidden": false,
+      "skill": "learn",
+      "configKey": "learn",
+      "plan": false,
+      "external": false
+    },
+    "goal": {
+      "name": "goal",
+      "group": "work",
+      "summary": "Session-scoped completion goal — set|status|pause|resume|clear; hooks remind + judge-verdict",
+      "spellings": [
+        "goal",
+        "work goal"
+      ],
+      "aliases": [],
+      "hidden": false,
+      "skill": "goal",
+      "configKey": "goal",
+      "plan": false,
+      "external": false
+    },
+    "judge": {
+      "name": "judge",
+      "group": "self",
+      "summary": "Calibrated decision judge — decide smoke test over systemone + llm-judge",
+      "spellings": [
+        "judge",
+        "self judge"
+      ],
+      "aliases": [],
+      "hidden": false,
+      "skill": "judge",
+      "configKey": "judge",
+      "plan": false,
+      "external": false
+    },
+    "dogfood": {
+      "name": "dogfood",
+      "group": "self",
+      "summary": "Scenario-driven e2e self-test — markdown runbook, fresh-agent runner, analyst verdict",
+      "spellings": [
+        "dogfood",
+        "self dogfood"
+      ],
+      "aliases": [],
+      "hidden": false,
+      "skill": "dogfood",
+      "plan": false,
+      "external": false
+    },
+    "guard": {
+      "name": "guard",
+      "group": "self",
+      "summary": "Declarative prompt guards — list resolved declarations [--json]",
+      "spellings": [
+        "guard",
+        "self guard"
+      ],
+      "aliases": [],
+      "hidden": false,
+      "configKey": "guard",
+      "plan": false,
+      "external": false
+    },
+    "docs": {
+      "name": "docs",
+      "summary": "Doc-type dispatch — `bro <verb> <noun|ref>` (bro <verb> store|task)",
+      "spellings": [
+        "docs"
+      ],
+      "aliases": [],
+      "hidden": true,
+      "skill": "docs",
+      "configKey": "beads",
+      "plan": false,
+      "external": false
+    },
+    "work": {
+      "name": "work",
+      "group": "work",
+      "summary": "Parallel-friendly worktrees: enter|leave|list|prune",
+      "spellings": [
+        "work"
+      ],
+      "aliases": [],
+      "hidden": false,
+      "skill": "work",
+      "configKey": "stack",
+      "plan": false,
+      "external": false
+    },
+    "stack": {
+      "name": "stack",
+      "group": "flow",
+      "summary": "Stacked bead→worktree→PR chains: push|list|sync|publish|merge",
+      "spellings": [
+        "stack",
+        "flow stack"
+      ],
+      "aliases": [],
+      "hidden": false,
+      "skill": "stack",
+      "plan": false,
+      "external": false
+    },
+    "stamp": {
+      "name": "stamp",
+      "group": "work",
+      "summary": "Attribute shared-output writes — record/read the last build stamp",
+      "spellings": [
+        "stamp",
+        "work stamp"
+      ],
+      "aliases": [],
+      "hidden": false,
+      "plan": false,
+      "external": false
+    },
+    "spec": {
+      "name": "spec",
+      "group": "spec",
+      "summary": "Spec-driven development policy: check|new (sdd.mode gates hooks)",
+      "spellings": [
+        "spec"
+      ],
+      "aliases": [],
+      "hidden": false,
+      "skill": "sdd",
+      "configKey": "sdd",
+      "plan": false,
+      "external": false
+    },
+    "hooks": {
+      "name": "hooks",
+      "summary": "Agent lifecycle hooks",
+      "spellings": [
+        "hooks"
+      ],
+      "aliases": [
+        "telemetry"
+      ],
+      "hidden": true,
+      "configKey": "freshness",
+      "plan": false,
+      "external": false
+    },
+    "telemetry": {
+      "name": "telemetry",
+      "group": "fleet",
+      "summary": "Hook + command latency report — perf journal rollup [--session <id>] [--json]",
+      "spellings": [
+        "telemetry",
+        "fleet telemetry"
+      ],
+      "aliases": [],
+      "aliasOf": "hooks perf",
+      "hidden": false,
+      "plan": false,
+      "external": false
+    },
+    "trace": {
+      "name": "trace",
+      "group": "fleet",
+      "summary": "OTLP export of the session trace journals — export [--session|--dry-run|--json]",
+      "spellings": [
+        "trace",
+        "fleet trace"
+      ],
+      "aliases": [],
+      "hidden": false,
+      "skill": "trace",
+      "configKey": "telemetry",
+      "plan": false,
+      "external": false
+    },
+    "acp-worker": {
+      "name": "acp-worker",
+      "summary": "ACP provider spawn unit — backends exec this; never typed",
+      "spellings": [
+        "acp-worker"
+      ],
+      "aliases": [],
+      "hidden": true,
+      "plan": false,
+      "external": false
+    },
+    "providers": {
+      "name": "providers",
+      "group": "self",
+      "summary": "Provider registry — models catalog as <provider>/<model> [name…]",
+      "spellings": [
+        "providers",
+        "self providers"
+      ],
+      "aliases": [],
+      "hidden": false,
+      "skill": "providers",
+      "plan": false,
+      "external": false
+    },
+    "setup": {
+      "name": "setup",
+      "summary": "Wire bro into the current repo",
+      "spellings": [
+        "setup"
+      ],
+      "aliases": [],
+      "hidden": false,
+      "plan": false,
+      "external": false
+    },
+    "doctor": {
+      "name": "doctor",
+      "summary": "Environment diagnostics: node, git, gh auth, bd, hooks, config, remotes [--json]",
+      "spellings": [
+        "doctor"
+      ],
+      "aliases": [],
+      "hidden": false,
+      "plan": false,
+      "external": false
+    },
+    "rig": {
+      "name": "rig",
+      "group": "fleet",
+      "summary": "Rig freshness — main checkout tracks upstream, rebuilt + hotpatched: sync|status|watch|install",
+      "spellings": [
+        "rig",
+        "fleet rig"
+      ],
+      "aliases": [],
+      "hidden": false,
+      "skill": "rig",
+      "configKey": "rig",
+      "plan": false,
+      "contract": {
+        "subs": {
+          "status": {
+            "flags": {
+              "--repo <dir>": "rig checkout to inspect (default: this repo)",
+              "--json": "rig status as JSON"
+            },
+            "exits": {
+              "0": "rig fresh — no error surfaced",
+              "1": "a status error was found",
+              "2": "usage"
+            }
+          },
+          "next": {
+            "flags": {
+              "--json": "the re-entry verdict as JSON"
+            },
+            "exits": {
+              "0": "verdict — step | gate | wait | done",
+              "1": "verdict blocked",
+              "2": "usage"
+            }
+          }
+        }
+      },
+      "external": false
+    },
+    "sync": {
+      "name": "sync",
+      "group": "work",
+      "summary": "Push/pull artifact dirs on refs/bro/data [--pull]",
+      "spellings": [
+        "sync",
+        "work sync"
+      ],
+      "aliases": [],
+      "hidden": false,
+      "skill": "sync",
+      "configKey": "sync",
+      "plan": false,
+      "external": false
+    },
+    "sweep": {
+      "name": "sweep",
+      "group": "work",
+      "summary": "Gated disposal for closed beads: status|distill|run — gate → archive → prune",
+      "spellings": [
+        "sweep",
+        "work sweep"
+      ],
+      "aliases": [],
+      "hidden": false,
+      "skill": "sweep",
+      "configKey": "sweep",
+      "plan": false,
+      "external": false
+    },
+    "query": {
+      "name": "query",
+      "group": "plan",
+      "summary": "Cross-provider GraphQL plan — `bro query <plan.toml>` or `kind = \"query\"` via `bro run`",
+      "spellings": [
+        "query",
+        "plan query"
+      ],
+      "aliases": [],
+      "hidden": false,
+      "skill": "query",
+      "configKey": "query",
+      "plan": true,
+      "planVersion": 1,
+      "external": false
+    },
+    "mesh": {
+      "name": "mesh",
+      "group": "mesh",
+      "summary": "Inter-rig work federation: me|peers|pull|inbox|request|claim|done|accept|reject|wait (specs/mesh)",
+      "spellings": [
+        "mesh"
+      ],
+      "aliases": [],
+      "hidden": false,
+      "configKey": "mesh",
+      "plan": false,
+      "external": false
+    },
+    "request": {
+      "name": "request",
+      "group": "mesh",
+      "summary": "Post a request to a repo or peer — delivers into same-machine checkouts (specs/cross-repo)",
+      "spellings": [
+        "request",
+        "mesh request"
+      ],
+      "aliases": [],
+      "hidden": false,
+      "plan": false,
+      "external": false
+    },
+    "wait": {
+      "name": "wait",
+      "summary": "Dep-plane watcher — `bro wait external:<rig>:<id>` polls the dep stores, verdict = exit code (specs/cross-repo)",
+      "spellings": [
+        "wait"
+      ],
+      "aliases": [],
+      "hidden": false,
+      "plan": false,
+      "external": false
+    },
+    "run": {
+      "name": "run",
+      "group": "plan",
+      "summary": "Execute a plan file — `kind` routes to the owning plugin",
+      "spellings": [
+        "run",
+        "plan run"
+      ],
+      "aliases": [],
+      "hidden": false,
+      "plan": false,
+      "external": false
+    },
+    "plan": {
+      "name": "plan",
+      "group": "plan",
+      "summary": "Plan contract: list kinds + schema versions, validate a file",
+      "spellings": [
+        "plan"
+      ],
+      "aliases": [],
+      "hidden": false,
+      "plan": false,
+      "external": false
+    },
+    "plugins": {
+      "name": "plugins",
+      "summary": "Plugin registry + client adapters: install|uninstall|list <client>",
+      "spellings": [
+        "plugins"
+      ],
+      "aliases": [],
+      "hidden": false,
+      "plan": false,
+      "external": false
+    },
+    "contract": {
+      "name": "contract",
+      "summary": "The CLI surface as data — dump|check|gen over the registry",
+      "spellings": [
+        "contract"
+      ],
+      "aliases": [],
+      "hidden": true,
+      "plan": false,
+      "external": false
+    }
+  },
+  "removed": {}
+}

@@ -139,7 +139,7 @@ export {
 export type { BroConfig, ConfigLayerHit, ConfigLayerName, ConfigLayersResult, ConfigSection, MirrorPolicy, Personality, SddMode, StoreBackend } from './config.ts'
 export type { QueryFacade, QueryOpts, QueryResult } from './queries.ts'
 export { definePlugin } from './plugin.ts'
-export type { BroPlugin } from './plugin.ts'
+export type { BroPlugin, CliContract, CliSubContract } from './plugin.ts'
 export { docTypeNamed, docVerbs, STANDARD_VERBS, verbMethod } from './docs.ts'
 export type { DocAdapter, DocCtx, DocFlags, DocType, DocVerb, Scope } from './docs.ts'
 export {
