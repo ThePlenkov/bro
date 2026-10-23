@@ -907,11 +907,17 @@ function collectConnectorGuards(
   try {
     declared = c.guards?.(ctx)
   } catch (err) {
-    console.error(`bro: connector '${c.name}' guards() threw — skipped: ${err instanceof Error ? err.message : err}`)
+    const detail = err instanceof Error ? err.message : String(err)
+    console.error(`bro: connector '${c.name}' guards() threw — skipped: ${detail}`)
+    // a problems row marks the collection degraded — consumers that
+    // record resolved coverage (the hook fast-path's guards/ dir) must
+    // not mistake "skipped" for "contributes nothing"
+    push(c.name, undefined, [`guards() threw: ${detail}`])
     return
   }
   if (declared !== undefined && !Array.isArray(declared)) {
     console.error(`bro: connector '${c.name}' guards() returned a non-array — skipped`)
+    push(c.name, undefined, ['guards() returned a non-array'])
     return
   }
   for (const raw of declared ?? []) {

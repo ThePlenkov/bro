@@ -36,6 +36,8 @@ export {
   bdJsonAsync,
   bdTry,
   bdTryAsync,
+  beadsDir,
+  beadsStoreStamp,
   checkBeads,
   evidenceKind,
   initBeadsStealth,
