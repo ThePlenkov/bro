@@ -76,20 +76,29 @@ function parseTimeout(argv: string[], mode: 'wait' | 'detach'): number | undefin
   return sec
 }
 
-function parseArgv(argv: string[]): DelegateRequest {
-  const pos = positionals(argv, VALUE_FLAGS)
+function parseMode(argv: string[]): 'wait' | 'detach' {
   const wait = argv.includes('--wait')
   const detach = argv.includes('--detach')
   if (wait && detach) {
     die('--wait and --detach are mutually exclusive')
   }
-  const mode: 'wait' | 'detach' = detach ? 'detach' : 'wait'
-  if (mode !== 'detach') {
-    const used = DETACH_ONLY.filter(([, present]) => present(argv)).map(([f]) => f)
-    if (used.length > 0) {
-      die(`${used.join(', ')} only apply to --detach`)
-    }
+  return detach ? 'detach' : 'wait'
+}
+
+function checkModeFlags(argv: string[], mode: 'wait' | 'detach'): void {
+  if (mode === 'detach') {
+    return
   }
+  const used = DETACH_ONLY.filter(([, present]) => present(argv)).map(([f]) => f)
+  if (used.length > 0) {
+    die(`${used.join(', ')} only apply to --detach`)
+  }
+}
+
+function parseArgv(argv: string[]): DelegateRequest {
+  const pos = positionals(argv, VALUE_FLAGS)
+  const mode = parseMode(argv)
+  checkModeFlags(argv, mode)
   const promptFlag = flag(argv, '--prompt')
   if (promptFlag !== undefined && pos.length > 0) {
     die('positional text and --prompt are the same channel — pick one')
