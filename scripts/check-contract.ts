@@ -25,19 +25,19 @@ if (!existsSync(distCli)) {
 const write = process.argv.includes('--write')
 const passthrough = process.argv.slice(2).filter((a) => a !== '--write')
 
+// scalar flags are single-occurrence in the CLI — supply the repo
+// defaults only when the caller did not override them in passthrough
+const given = (name: string): boolean =>
+  passthrough.some((a) => a === name || a.startsWith(`${name}=`))
+const defaults = [
+  ...(given('--contract') ? [] : ['--contract', join(root, 'contract', 'cli.json')]),
+  ...(given('--breaking') ? [] : ['--breaking', join(root, 'contract', 'BREAKING.md')]),
+]
+
 try {
   execFileSync(
     process.execPath,
-    [
-      distCli,
-      'contract',
-      write ? 'gen' : 'check',
-      '--contract',
-      join(root, 'contract', 'cli.json'),
-      '--breaking',
-      join(root, 'contract', 'BREAKING.md'),
-      ...passthrough,
-    ],
+    [distCli, 'contract', write ? 'gen' : 'check', ...defaults, ...passthrough],
     { stdio: 'inherit' }
   )
 } catch (err) {

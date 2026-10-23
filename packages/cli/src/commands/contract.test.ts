@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict'
-import { mkdirSync, readFileSync, writeFileSync } from 'node:fs'
+import { mkdirSync, readdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { describe, test } from 'node:test'
 import type { BroPlugin } from '@broject/core'
@@ -40,7 +40,7 @@ const REGISTRY: BroPlugin[] = [
     },
   }),
   fakePlugin({ name: 'work', group: 'work', skill: 'work' }),
-  fakePlugin({ name: 'unwind', group: 'work', aliasOf: 'drill up' }),
+  fakePlugin({ name: 'unwind', group: 'work', aliasOf: 'drill up', argvPrefix: ['up'] }),
   fakePlugin({ name: 'drill', group: 'work' }),
   fakePlugin({ name: 'doctor' }),
   fakePlugin({ name: 'hooks', hidden: true }),
@@ -82,6 +82,7 @@ describe('buildDump', () => {
     })
     // alias entries carry aliasOf; the target collects the reverse map
     assert.equal(dump.commands.unwind!.aliasOf, 'drill up')
+    assert.deepEqual(dump.commands.unwind!.argvPrefix, ['up'])
     assert.deepEqual(dump.commands.drill!.aliases, ['unwind'])
     assert.deepEqual(dump.commands.act!.aliases, [])
     assert.equal(dump.commands.hooks!.hidden, true)
@@ -188,8 +189,28 @@ describe('reconcileContract', () => {
     const { doc: next, problems } = reconcileContract(doc(live), live2, new Set(['act']))
     // no breaking — the flag's removal is announced; the file itself is
     // stale until the tombstone write lands
-    assert.equal(problems.every((p) => p.kind === 'stale'), true)
+    assert.deepEqual(
+      problems.map((p) => [p.kind, p.path]),
+      [['stale', 'act'], ['stale', 'removed']]
+    )
     assert.deepEqual(next.removed['act.subs.status.flags.--json'], 'gate JSON')
+  })
+
+  test('a vanished flags map reports each leaf — a leaf bullet covers it', () => {
+    const live2 = structuredClone(live)
+    delete live2.commands.act!.contract!.subs!.status!.flags
+    // announce the leaf, not the map — the removal is reported at the
+    // leaf's canonical path so the bullet covers it
+    const { doc: next, problems } = reconcileContract(
+      doc(live),
+      live2,
+      new Set(['act.subs.status.flags.--json'])
+    )
+    assert.equal(problems.some((p) => p.kind === 'breaking'), false)
+    assert.deepEqual(next.removed['act.subs.status.flags.--json'], 'gate JSON')
+    // …and announcing the map itself still covers every leaf under it
+    const covered = reconcileContract(doc(live), live2, new Set(['act.subs.status.flags']))
+    assert.equal(covered.problems.some((p) => p.kind === 'breaking'), false)
   })
 
   test('an unannounced flag removal is breaking at its dotted path', () => {
@@ -263,6 +284,26 @@ describe('reconcileContract', () => {
     const breaking = problems.filter((p) => p.kind === 'breaking')
     assert.deepEqual(breaking.map((p) => p.path), ['groups.extra'])
   })
+
+  test('an argvPrefix change is breaking — same spelling, different verb', () => {
+    const reg2 = REGISTRY.map((p) =>
+      p.name === 'unwind' ? { ...p, argvPrefix: ['down'] } : p
+    )
+    const live2 = buildDump(reg2, GROUPS)
+    const { problems } = reconcileContract(doc(live), live2, new Set())
+    const breaking = problems.filter((p) => p.kind === 'breaking')
+    assert.deepEqual(breaking.map((p) => p.path), ['unwind.argvPrefix'])
+  })
+
+  test('a malformed committed row degrades to stale, never a crash', () => {
+    const committed = doc(live)
+    ;(committed.commands as Record<string, unknown>).act = 'garbage'
+    ;(committed.commands as Record<string, unknown>).hooks = { contract: 'not-an-object' }
+    const { problems } = reconcileContract(committed, live, new Set())
+    assert.equal(problems.some((p) => p.kind === 'breaking'), false)
+    assert.ok(problems.some((p) => p.kind === 'stale' && p.path === 'act'))
+    assert.ok(problems.some((p) => p.kind === 'stale' && p.path === 'hooks'))
+  })
 })
 
 describe('parseBreaking', () => {
@@ -299,21 +340,46 @@ describe('runContractCommand', () => {
   test('dump --json emits the parseable registry doc', () => {
     const out = captured(() => runContractCommand(['dump', '--json'], REGISTRY, GROUPS))
     const dump = JSON.parse(out) as ContractDump
-    assert.deepEqual(Object.keys(dump.commands), REGISTRY.map((p) => p.name))
+    // the JSON IS the dump — every field, not just the command keys
+    assert.deepEqual(dump, JSON.parse(JSON.stringify(buildDump(REGISTRY, GROUPS))))
+  })
+
+  test('a __proto__-named plugin still lands as an own enumerable key', () => {
+    const dump = buildDump(
+      [...REGISTRY, fakePlugin({ name: '__proto__', group: '__proto__' })],
+      GROUPS
+    )
+    assert.equal(
+      Object.prototype.hasOwnProperty.call(dump.commands, '__proto__'),
+      true
+    )
+    assert.equal(
+      Object.prototype.hasOwnProperty.call(dump.groups, '__proto__'),
+      true
+    )
+    // and it survives the JSON round trip the snapshot takes
+    const back = JSON.parse(JSON.stringify(dump)) as ContractDump
+    assert.equal(back.commands['__proto__']!.name, '__proto__')
   })
 
   test('check reads --contract/--dump/--breaking overrides from files', () => {
     const dir = tmpDir('bro-contract-')
     const live = buildDump(REGISTRY, GROUPS)
-    const committed = doc(live)
+    // a tombstone that must be announced — if --breaking were ignored the
+    // ledger problem would exit 1; if --dump were ignored the live
+    // registry (a different one is passed below) would exit 1 too
+    const committed = doc(live, { ghost: { name: 'ghost' } })
     const contractFile = join(dir, 'cli.json')
     const breakingFile = join(dir, 'BREAKING.md')
+    const dumpFile = join(dir, 'dump.json')
     writeFileSync(contractFile, JSON.stringify(committed, null, 2))
-    writeFileSync(breakingFile, '# ledger\n')
+    writeFileSync(breakingFile, '# ledger\n- ghost — removed in the fixture\n')
+    writeFileSync(dumpFile, JSON.stringify(live, null, 2))
     const out = captured(() =>
       runContractCommand(
-        ['check', '--contract', contractFile, '--breaking', breakingFile],
-        REGISTRY,
+        ['check', '--contract', contractFile, '--dump', dumpFile, '--breaking', breakingFile],
+        // a deliberately different registry — only --dump can make this fresh
+        [fakePlugin({ name: 'unrelated' })],
         GROUPS
       )
     )
@@ -337,6 +403,8 @@ describe('runContractCommand', () => {
     const doc1 = JSON.parse(first) as ContractDoc
     assert.deepEqual(Object.keys(doc1.commands), REGISTRY.map((p) => p.name))
     assert.deepEqual(doc1.removed, {})
+    // atomic write — the tmp file is renamed away, never left behind
+    assert.deepEqual(readdirSync(join(dir, 'nested')), ['cli.json'])
     captured(() =>
       runContractCommand(
         ['gen', '--contract', contractFile, '--breaking', breakingFile],

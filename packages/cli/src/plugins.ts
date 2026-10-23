@@ -205,7 +205,10 @@ export const PLUGINS: BroPlugin[] = [
     contract: {
       subs: {
         status: {
-          flags: { '--json': 'PR state + exit gate as one JSON document' },
+          flags: {
+            '--json': 'PR state + exit gate as one JSON document',
+            '--pr <n>': 'the PR to inspect — default: the current branch',
+          },
           exits: {
             0: 'exit gate green',
             1: 'gate blocked — threads/failures remain (usage errors also exit 1 today)',
@@ -820,8 +823,31 @@ const PLUGIN_FIELD_CHECKS: ReadonlyArray<
   ['argvPrefix', (v) => Array.isArray(v)],
   ['docs', (v) => Array.isArray(v) && v.every(isDocType)],
   ['connectors', (v) => Array.isArray(v) && v.every(isConnector)],
-  ['contract', (v) => v !== null && typeof v === 'object' && !Array.isArray(v)],
+  ['contract', isCliContract],
 ]
+
+/** `contract` must be the declared shape at every level — a malformed
+ *  nested map (flags: 5, subs: "x") would otherwise reach the
+ *  dump/reconcile engine and crash or corrupt the snapshot. */
+const isRecord = (v: unknown): v is Record<string, unknown> =>
+  v !== null && typeof v === 'object' && !Array.isArray(v)
+
+const isStrMap = (v: unknown): boolean =>
+  isRecord(v) && Object.values(v).every((x) => typeof x === 'string')
+
+const isSubContract = (v: unknown): boolean =>
+  isRecord(v) &&
+  (v.flags === undefined || isStrMap(v.flags)) &&
+  (v.exits === undefined || isStrMap(v.exits)) &&
+  (v.json === undefined || typeof v.json === 'string')
+
+function isCliContract(v: unknown): boolean {
+  return (
+    isSubContract(v) &&
+    isRecord(v) &&
+    (v.subs === undefined || (isRecord(v.subs) && Object.values(v.subs).every(isSubContract)))
+  )
+}
 
 /** A connectors entry must be a Connector — name + at least the shape
  *  registerConnector relies on — else facade resolution would crash. */

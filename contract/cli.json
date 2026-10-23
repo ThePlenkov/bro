@@ -150,7 +150,8 @@
         "subs": {
           "status": {
             "flags": {
-              "--json": "PR state + exit gate as one JSON document"
+              "--json": "PR state + exit gate as one JSON document",
+              "--pr <n>": "the PR to inspect — default: the current branch"
             },
             "exits": {
               "0": "exit gate green",
@@ -507,6 +508,9 @@
       "aliasOf": "drill up",
       "hidden": false,
       "plan": false,
+      "argvPrefix": [
+        "up"
+      ],
       "external": false
     },
     "queue": {

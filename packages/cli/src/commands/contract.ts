@@ -11,19 +11,31 @@
  *
  * check/gen take --contract/--dump/--breaking file overrides — the
  * reconcile engine is pure, so fixtures keep git and the network out.
+ * They also build the live dump from core plugins only — external
+ * plugins come from machine-local config and must not leak into the
+ * committed snapshot.
  *
  * Canonical key paths (what BREAKING.md bullets and `removed`
  * tombstones name): a command is `<name>`, a group `groups.<g>`,
- * inside a command `<name>.contract|.group|.aliasOf|.json` and
- * `<name>[.subs.<s>].flags.<f>|.exits.<e>`. Announcing a path covers
- * everything under it.
+ * inside a command `<name>.contract|.group|.aliasOf|.argvPrefix|.json`
+ * and `<name>[.subs.<s>].flags.<f>|.exits.<e>`. Announcing a path
+ * covers everything under it.
  */
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs'
 import { dirname } from 'node:path'
 import type { BroPlugin, CliContract, CliSubContract } from '@broject/core'
 import { flag } from './args.ts'
 
 export const CONTRACT_VERSION = 1
+
+/** The committed file and any --dump override are untrusted input —
+ *  every walk guards record shape so a malformed file reports drift
+ *  instead of crashing. */
+const isRecord = (v: unknown): v is Record<string, unknown> =>
+  typeof v === 'object' && v !== null && !Array.isArray(v)
+
+const eqJson = (a: unknown, b: unknown): boolean =>
+  JSON.stringify(a) === JSON.stringify(b)
 
 // --- the dump --------------------------------------------------------------
 
@@ -45,6 +57,9 @@ export interface ContractCommandRow {
   configKey?: string
   plan: boolean
   planVersion?: number
+  /** Argv spliced ahead of the user's args — a reroute as real as
+   *  aliasOf (`unwind` → `drill up`). */
+  argvPrefix?: string[]
   contract?: CliContract
   external: boolean
 }
@@ -61,8 +76,56 @@ function spellings(p: BroPlugin): string[] {
     : [p.name]
 }
 
+function commandRow(p: BroPlugin, aliases: string[]): ContractCommandRow {
+  return {
+    name: p.name,
+    group: p.group,
+    summary: p.summary,
+    spellings: spellings(p),
+    aliases,
+    aliasOf: p.aliasOf,
+    deprecated: p.deprecated,
+    flatDeprecated: p.flatDeprecated,
+    hidden: p.hidden === true,
+    skill: p.skill,
+    configKey: p.configKey,
+    plan: p.planSchema !== undefined,
+    planVersion: p.planSchema !== undefined ? (p.planVersion ?? 1) : undefined,
+    argvPrefix: p.argvPrefix,
+    contract: p.contract,
+    external: p.external === true,
+  }
+}
+
+/** Groups in declared-meta order first, then groups only external
+ *  plugins add; every plugin lands in its group's members. */
+function groupRows(
+  plugins: readonly BroPlugin[],
+  groupMeta: ReadonlyArray<readonly [string, string]>
+): Map<string, { summary?: string; members: string[] }> {
+  const meta = new Map(groupMeta)
+  const order = [
+    ...meta.keys(),
+    ...plugins
+      .map((p) => p.group)
+      .filter((g): g is string => g !== undefined && !meta.has(g)),
+  ]
+  const rows = new Map<string, { summary?: string; members: string[] }>()
+  for (const g of order) {
+    rows.set(g, { summary: meta.get(g), members: [] })
+  }
+  for (const p of plugins) {
+    if (p.group !== undefined) {
+      rows.get(p.group)?.members.push(p.name)
+    }
+  }
+  return rows
+}
+
 /** The live registry as the contract document — deterministic: key
- *  order is registry/group order, no timestamps, no tool version. */
+ *  order is registry/group order, no timestamps, no tool version.
+ *  Maps → Object.fromEntries, so a plugin named `__proto__` still
+ *  lands as an own enumerable key. */
 export function buildDump(
   plugins: readonly BroPlugin[],
   groupMeta: ReadonlyArray<readonly [string, string]>
@@ -70,50 +133,20 @@ export function buildDump(
   // name → the commands that alias to it (registry order)
   const aliasTo = new Map<string, string[]>()
   for (const p of plugins) {
-    if (p.aliasOf === undefined) {
-      continue
-    }
-    const target = p.aliasOf.split(' ')[0]!
-    aliasTo.set(target, [...(aliasTo.get(target) ?? []), p.name])
-  }
-  const commands: Record<string, ContractCommandRow> = {}
-  const groups: ContractDump['groups'] = {}
-  // declared group order first, then groups only external plugins add
-  const groupOrder = [
-    ...groupMeta.map(([g]) => g),
-    ...plugins
-      .map((p) => p.group)
-      .filter((g): g is string => g !== undefined && !groupMeta.some(([m]) => m === g)),
-  ]
-  for (const g of groupOrder) {
-    groups[g] = {
-      summary: groupMeta.find(([m]) => m === g)?.[1],
-      members: [],
+    if (p.aliasOf !== undefined) {
+      const target = p.aliasOf.split(' ')[0] ?? ''
+      aliasTo.set(target, [...(aliasTo.get(target) ?? []), p.name])
     }
   }
+  const commands = new Map<string, ContractCommandRow>()
   for (const p of plugins) {
-    commands[p.name] = {
-      name: p.name,
-      group: p.group,
-      summary: p.summary,
-      spellings: spellings(p),
-      aliases: aliasTo.get(p.name) ?? [],
-      aliasOf: p.aliasOf,
-      deprecated: p.deprecated,
-      flatDeprecated: p.flatDeprecated,
-      hidden: p.hidden === true,
-      skill: p.skill,
-      configKey: p.configKey,
-      plan: p.planSchema !== undefined,
-      planVersion: p.planSchema !== undefined ? (p.planVersion ?? 1) : undefined,
-      contract: p.contract,
-      external: p.external === true,
-    }
-    if (p.group !== undefined) {
-      groups[p.group]!.members.push(p.name)
-    }
+    commands.set(p.name, commandRow(p, aliasTo.get(p.name) ?? []))
   }
-  return { version: CONTRACT_VERSION, groups, commands }
+  return {
+    version: CONTRACT_VERSION,
+    groups: Object.fromEntries(groupRows(plugins, groupMeta)),
+    commands: Object.fromEntries(commands),
+  }
 }
 
 // --- the reconcile engine ----------------------------------------------------
@@ -135,14 +168,38 @@ interface Removal {
   value: unknown
 }
 
+const emptyDoc = (): ContractDoc => ({
+  version: CONTRACT_VERSION,
+  groups: {},
+  commands: {},
+  removed: {},
+})
+
+/** Coerce parsed JSON into the doc shape — unknown fields ride along
+ *  only inside commands/groups/removed; anything else degrades to the
+ *  empty-doc default (drift, not a crash). */
+function asDoc(parsed: unknown): ContractDoc {
+  if (!isRecord(parsed)) {
+    return emptyDoc()
+  }
+  return {
+    version: typeof parsed.version === 'number' ? parsed.version : CONTRACT_VERSION,
+    groups: isRecord(parsed.groups) ? (parsed.groups as ContractDump['groups']) : {},
+    commands: isRecord(parsed.commands)
+      ? (parsed.commands as ContractDoc['commands'])
+      : {},
+    removed: isRecord(parsed.removed) ? parsed.removed : {},
+  }
+}
+
 /** `- <path> — reason` bullets → the announced path set. A trailing
  *  colon on the token is punctuation, not part of the path. */
 export function parseBreaking(md: string): Set<string> {
   const out = new Set<string>()
   for (const line of md.split('\n')) {
     const m = /^\s*[-*]\s+(\S+)/.exec(line)
-    if (m !== null) {
-      out.add(m[1]!.replace(/:$/, ''))
+    if (m !== null && m[1] !== undefined) {
+      out.add(m[1].replace(/:$/, ''))
     }
   }
   return out
@@ -159,30 +216,36 @@ function covered(path: string, announced: ReadonlySet<string>): boolean {
   return false
 }
 
-/** Keys present in a committed map but absent live are removals; a key
- *  surviving in both descends when the values are sub-contracts. */
+/** Keys present in a committed map but absent live are removals. When
+ *  the whole map is gone, each committed leaf is still reported at its
+ *  own dotted path — a bullet may name the map OR a single entry.
+ *  Non-record committed values degrade to stale drift via eqJson,
+ *  never a walk over garbage. */
 function diffMap(
   prefix: string,
-  committed: Record<string, unknown> | undefined,
-  live: Record<string, unknown> | undefined,
-  out: Removal[],
-  descend?: (key: string, c: CliSubContract, l: CliSubContract) => void
-): void {
-  if (committed === undefined) {
-    return
+  committed: unknown,
+  live: unknown,
+  descend?: (key: string, c: CliSubContract, l: CliSubContract) => Removal[]
+): Removal[] {
+  if (!isRecord(committed)) {
+    return []
   }
-  if (live === undefined) {
-    out.push({ path: prefix, value: committed })
-    return
+  if (!isRecord(live)) {
+    return Object.entries(committed).map(([k, v]) => ({
+      path: `${prefix}.${k}`,
+      value: v,
+    }))
   }
+  const out: Removal[] = []
   for (const [k, cv] of Object.entries(committed)) {
     const lv = live[k]
     if (lv === undefined) {
       out.push({ path: `${prefix}.${k}`, value: cv })
-    } else {
-      descend?.(k, cv as CliSubContract, lv as CliSubContract)
+    } else if (descend !== undefined && isRecord(cv) && isRecord(lv)) {
+      out.push(...descend(k, cv as CliSubContract, lv as CliSubContract))
     }
   }
+  return out
 }
 
 /** Removals inside one contract level — the bare command and each sub
@@ -190,62 +253,105 @@ function diffMap(
 function diffSub(
   prefix: string,
   committed: CliSubContract,
-  live: CliSubContract,
-  out: Removal[]
-): void {
-  diffMap(`${prefix}.flags`, committed.flags, live.flags, out)
-  diffMap(`${prefix}.exits`, committed.exits, live.exits, out)
+  live: CliSubContract
+): Removal[] {
+  const out = [
+    ...diffMap(`${prefix}.flags`, committed.flags, live.flags),
+    ...diffMap(`${prefix}.exits`, committed.exits, live.exits),
+  ]
   if (committed.json !== undefined && live.json === undefined) {
     out.push({ path: `${prefix}.json`, value: committed.json })
   }
+  return out
 }
 
 function diffContract(
   name: string,
-  committed: CliContract | undefined,
-  live: CliContract | undefined,
-  out: Removal[]
-): void {
-  if (committed === undefined) {
-    return
+  committed: unknown,
+  live: CliContract | undefined
+): Removal[] {
+  if (!isRecord(committed)) {
+    return []
   }
   if (live === undefined) {
-    out.push({ path: `${name}.contract`, value: committed })
-    return
+    return [{ path: `${name}.contract`, value: committed }]
   }
-  diffSub(name, committed, live, out)
-  diffMap(`${name}.subs`, committed.subs, live.subs, out, (sub, c, l) =>
-    diffSub(`${name}.subs.${sub}`, c, l, out)
-  )
+  return [
+    ...diffSub(name, committed as CliSubContract, live),
+    ...diffMap(`${name}.subs`, committed.subs, live.subs, (sub, c, l) =>
+      diffSub(`${name}.subs.${sub}`, c, l)
+    ),
+  ]
+}
+
+/** Invocation-meaning scalars on a surviving command — a difference
+ *  reroutes `bro <name>` under the same spelling. */
+function commandRemovals(
+  name: string,
+  committed: Record<string, unknown>,
+  live: ContractCommandRow
+): Removal[] {
+  const out: Removal[] = []
+  // a group change kills the `bro <old-group> <name>` spelling; a group
+  // ADDED to a formerly top-level command only adds one
+  if (committed.group !== live.group && committed.group !== undefined) {
+    out.push({ path: `${name}.group`, value: committed.group })
+  }
+  // aliasOf and argvPrefix differences reroute the invocation — added,
+  // changed, or removed, the spelling runs different code
+  if (committed.aliasOf !== live.aliasOf) {
+    out.push({ path: `${name}.aliasOf`, value: committed.aliasOf })
+  }
+  if (!eqJson(committed.argvPrefix, live.argvPrefix)) {
+    out.push({ path: `${name}.argvPrefix`, value: committed.argvPrefix })
+  }
+  out.push(...diffContract(name, committed.contract, live.contract))
+  return out
 }
 
 /** Paths present in the committed doc whose removal changes the
  *  invocation surface — commands, groups, invocation-spelling scalars
- *  (group/aliasOf), and every declared contract leaf. */
+ *  (group/aliasOf/argvPrefix), and every declared contract leaf. */
 function removals(committed: ContractDoc, live: ContractDump): Removal[] {
   const out: Removal[] = []
-  for (const [g, v] of Object.entries(committed.groups)) {
+  const committedGroups = isRecord(committed.groups) ? committed.groups : {}
+  const committedCommands = isRecord(committed.commands) ? committed.commands : {}
+  for (const [g, v] of Object.entries(committedGroups)) {
     if (live.groups[g] === undefined) {
       out.push({ path: `groups.${g}`, value: v })
     }
   }
-  for (const [name, c] of Object.entries(committed.commands)) {
+  for (const [name, c] of Object.entries(committedCommands)) {
     const l = live.commands[name]
     if (l === undefined) {
       out.push({ path: name, value: c })
-      continue
+    } else if (isRecord(c)) {
+      out.push(...commandRemovals(name, c, l))
     }
-    // a group change kills the `bro <old-group> <name>` spelling; a
-    // group ADDED to a formerly top-level command only adds one
-    if (c.group !== l.group && c.group !== undefined) {
-      out.push({ path: `${name}.group`, value: c.group })
+    // a non-record committed row is drift — the stale pass reports it
+  }
+  return out
+}
+
+/** Additions and value edits inside one map — `(added)` marks keys the
+ *  committed doc never had. */
+function mapStale(
+  prefix: string,
+  committed: unknown,
+  doc: unknown
+): string[] {
+  if (!isRecord(doc)) {
+    return []
+  }
+  const committedMap = isRecord(committed) ? committed : {}
+  const out: string[] = []
+  for (const [k, v] of Object.entries(doc)) {
+    const c = committedMap[k]
+    if (c === undefined) {
+      out.push(`${prefix === '' ? k : `${prefix}.${k}`} (added)`)
+    } else if (!eqJson(c, v)) {
+      out.push(prefix === '' ? k : `${prefix}.${k}`)
     }
-    // any aliasOf difference reroutes `bro <name>` — becoming an alias
-    // and ceasing to be one both rewrite what the spelling does
-    if (c.aliasOf !== l.aliasOf) {
-      out.push({ path: `${name}.aliasOf`, value: c.aliasOf })
-    }
-    diffContract(name, c.contract, l.contract, out)
   }
   return out
 }
@@ -257,24 +363,9 @@ function stalePaths(committed: ContractDoc, doc: ContractDoc): string[] {
   if (committed.version !== doc.version) {
     out.push('version')
   }
-  const eq = (a: unknown, b: unknown): boolean => JSON.stringify(a) === JSON.stringify(b)
-  for (const [g, v] of Object.entries(doc.groups)) {
-    const c = committed.groups[g]
-    if (c === undefined) {
-      out.push(`groups.${g} (added)`)
-    } else if (!eq(c, v)) {
-      out.push(`groups.${g}`)
-    }
-  }
-  for (const [name, v] of Object.entries(doc.commands)) {
-    const c = committed.commands[name]
-    if (c === undefined) {
-      out.push(`${name} (added)`)
-    } else if (!eq(c, v)) {
-      out.push(name)
-    }
-  }
-  if (!eq(committed.removed ?? {}, doc.removed)) {
+  out.push(...mapStale('groups', committed.groups, doc.groups))
+  out.push(...mapStale('', committed.commands, doc.commands))
+  if (!eqJson(committed.removed, doc.removed)) {
     out.push('removed')
   }
   return out
@@ -290,7 +381,7 @@ export function reconcileContract(
   announced: ReadonlySet<string>
 ): { doc: ContractDoc; problems: ContractProblem[] } {
   const problems: ContractProblem[] = []
-  const removed: Record<string, unknown> = { ...(committed.removed ?? {}) }
+  const removed = new Map<string, unknown>(Object.entries(committed.removed))
   for (const r of removals(committed, live)) {
     if (!covered(r.path, announced)) {
       problems.push({
@@ -300,9 +391,9 @@ export function reconcileContract(
       })
       continue
     }
-    removed[r.path] = r.value
+    removed.set(r.path, r.value)
   }
-  for (const k of Object.keys(removed)) {
+  for (const k of removed.keys()) {
     if (!covered(k, announced)) {
       problems.push({
         kind: 'ledger',
@@ -315,7 +406,7 @@ export function reconcileContract(
     version: live.version,
     groups: live.groups,
     commands: live.commands,
-    removed,
+    removed: Object.fromEntries(removed),
   }
   for (const path of stalePaths(committed, doc)) {
     problems.push({ kind: 'stale', path, message: 'run `npm run gen:contract`' })
@@ -325,9 +416,12 @@ export function reconcileContract(
 
 // --- the command -------------------------------------------------------------
 
-function readJsonFile(path: string): unknown {
+/** A JSON fixture/snapshot — read + parse, exit 2 on garbage. Typed at
+ *  the parse site so no call-site cast can smuggle `undefined` through
+ *  when process.exit is stubbed. */
+function readJsonFile<T>(path: string): T {
   try {
-    return JSON.parse(readFileSync(path, 'utf8'))
+    return JSON.parse(readFileSync(path, 'utf8')) as T
   } catch (err) {
     console.error(
       `contract: ${path} — ${err instanceof Error ? err.message : String(err)}`
@@ -336,16 +430,27 @@ function readJsonFile(path: string): unknown {
   }
 }
 
+/** tmp + rename — a `check` racing a `gen`, or a crash mid-write, never
+ *  sees a truncated snapshot. */
+function writeDocAtomic(path: string, doc: ContractDoc): void {
+  mkdirSync(dirname(path), { recursive: true })
+  const tmp = `${path}.${process.pid}.tmp`
+  writeFileSync(tmp, `${JSON.stringify(doc, null, 2)}\n`)
+  renameSync(tmp, path)
+}
+
 function printTable(dump: ContractDump): void {
   for (const c of Object.values(dump.commands)) {
-    const flags = Object.keys(c.contract?.flags ?? {}).length +
+    const flags =
+      Object.keys(c.contract?.flags ?? {}).length +
       Object.values(c.contract?.subs ?? {}).reduce(
         (n, s) => n + Object.keys(s.flags ?? {}).length,
         0
       )
+    const marker = c.aliasOf !== undefined ? `→ ${c.aliasOf}` : c.hidden ? 'hidden' : String(flags)
     console.log(
       `${c.name.padEnd(12)} ${(c.group ?? '-').padEnd(8)} ${(c.skill ?? '-').padEnd(10)} ` +
-        `${(c.aliasOf !== undefined ? `→ ${c.aliasOf}` : c.hidden ? 'hidden' : String(flags)).padEnd(10)} ${c.summary}`
+        `${marker.padEnd(10)} ${c.summary}`
     )
   }
 }
@@ -354,6 +459,86 @@ function reportProblems(problems: ContractProblem[]): void {
   for (const p of problems) {
     console.error(`  ${p.kind.padEnd(8)} ${p.path} — ${p.message}`)
   }
+}
+
+interface GatePaths {
+  contractPath: string
+  breakingPath: string
+  dumpPath?: string
+}
+
+function gatePaths(rest: string[]): GatePaths {
+  return {
+    contractPath: flag(rest, '--contract') ?? 'contract/cli.json',
+    breakingPath: flag(rest, '--breaking') ?? 'contract/BREAKING.md',
+    dumpPath: flag(rest, '--dump'),
+  }
+}
+
+function cmdGen(
+  contractPath: string,
+  committedRaw: string | undefined,
+  doc: ContractDoc,
+  problems: ContractProblem[]
+): void {
+  const fatal = problems.filter((p) => p.kind !== 'stale')
+  if (fatal.length > 0) {
+    console.error(
+      `contract: refusing to regenerate — ${fatal.length} unannounced breaking change(s)`
+    )
+    reportProblems(fatal)
+    process.exit(1)
+  }
+  // optimistic CAS — a second gen or a hand edit landing mid-run must
+  // not be silently clobbered
+  if (existsSync(contractPath) && readFileSync(contractPath, 'utf8') !== committedRaw) {
+    console.error(`contract: ${contractPath} changed mid-gen — rerun`)
+    process.exit(1)
+  }
+  writeDocAtomic(contractPath, doc)
+  console.log(
+    `${contractPath}: regenerated — ${Object.keys(doc.commands).length} commands, ${Object.keys(doc.removed).length} tombstone(s)`
+  )
+}
+
+function cmdGate(
+  sub: 'check' | 'gen',
+  plugins: readonly BroPlugin[],
+  groupMeta: ReadonlyArray<readonly [string, string]>,
+  rest: string[]
+): void {
+  const { contractPath, breakingPath, dumpPath } = gatePaths(rest)
+  const live =
+    dumpPath !== undefined
+      ? readJsonFile<ContractDump>(dumpPath)
+      : buildDump(
+          // the committed surface is the repo's registry — external
+          // plugins are machine-local config and must not drift it
+          plugins.filter((p) => p.external !== true),
+          groupMeta
+        )
+  const committedRaw = existsSync(contractPath)
+    ? readFileSync(contractPath, 'utf8')
+    : undefined
+  const committed =
+    committedRaw === undefined
+      ? emptyDoc()
+      : asDoc(readJsonFile<ContractDoc>(contractPath))
+  const announced = parseBreaking(
+    existsSync(breakingPath) ? readFileSync(breakingPath, 'utf8') : ''
+  )
+  const { doc, problems } = reconcileContract(committed, live, announced)
+  if (sub === 'gen') {
+    cmdGen(contractPath, committedRaw, doc, problems)
+    return
+  }
+  if (problems.length === 0) {
+    console.log(`${contractPath}: fresh`)
+    return
+  }
+  console.error(`contract: ${problems.length} problem(s) in ${contractPath}`)
+  reportProblems(problems)
+  process.exit(1)
 }
 
 export function runContractCommand(
@@ -372,41 +557,8 @@ export function runContractCommand(
     return
   }
   if (sub === 'check' || sub === 'gen') {
-    const contractPath = flag(rest, '--contract') ?? 'contract/cli.json'
-    const breakingPath = flag(rest, '--breaking') ?? 'contract/BREAKING.md'
-    const dumpPath = flag(rest, '--dump')
-    const live =
-      dumpPath !== undefined
-        ? (readJsonFile(dumpPath) as ContractDump)
-        : buildDump(plugins, groupMeta)
-    const committed: ContractDoc = existsSync(contractPath)
-      ? (readJsonFile(contractPath) as ContractDoc)
-      : { version: CONTRACT_VERSION, groups: {}, commands: {}, removed: {} }
-    const announced = parseBreaking(
-      existsSync(breakingPath) ? readFileSync(breakingPath, 'utf8') : ''
-    )
-    const { doc, problems } = reconcileContract(committed, live, announced)
-    if (sub === 'gen') {
-      const fatal = problems.filter((p) => p.kind !== 'stale')
-      if (fatal.length > 0) {
-        console.error(`contract: refusing to regenerate — ${fatal.length} unannounced breaking change(s)`)
-        reportProblems(fatal)
-        process.exit(1)
-      }
-      mkdirSync(dirname(contractPath), { recursive: true })
-      writeFileSync(contractPath, `${JSON.stringify(doc, null, 2)}\n`)
-      console.log(
-        `${contractPath}: regenerated — ${Object.keys(doc.commands).length} commands, ${Object.keys(doc.removed).length} tombstone(s)`
-      )
-      return
-    }
-    if (problems.length === 0) {
-      console.log(`${contractPath}: fresh`)
-      return
-    }
-    console.error(`contract: ${problems.length} problem(s) in ${contractPath}`)
-    reportProblems(problems)
-    process.exit(1)
+    cmdGate(sub, plugins, groupMeta, rest)
+    return
   }
   console.error(
     'usage: bro contract dump [--json] | check [--contract f] [--dump f] [--breaking f] | gen [same flags]'

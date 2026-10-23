@@ -3,18 +3,18 @@
 `bro contract` freezes the machine-readable CLI surface in
 `contract/cli.json`. A change that removes or respells an invocation —
 a command, a group, a subcommand, a flag, an exit code, or a
-`group`/`aliasOf` reroute — is breaking and only passes
+`group`/`aliasOf`/`argvPrefix` reroute — is breaking and only passes
 `npm run check:contract` when a bullet below names it.
 
 Format — one bullet per breaking change:
 
-```
+```text
 - <command-or-dotted-path> — reason
 ```
 
 Paths are the canonical ones the check prints: a command is `<name>`,
 a group `groups.<g>`, inside a command
-`<name>.contract|.group|.aliasOf|.json` or
+`<name>.contract|.group|.aliasOf|.argvPrefix|.json` or
 `<name>[.subs.<s>].flags.<f>|.exits.<e>`. Announcing a command covers
 everything under it. Announced removals move to the `removed` map in
 `cli.json` on `npm run gen:contract`; every tombstone must keep its
@@ -24,3 +24,6 @@ bullet here — the ledger cannot be quietly edited around.
 removal is itself the announcement.
 
 ## Changes
+
+- unwind.argvPrefix — the dump now surfaces argv reroutes; `unwind`
+  already ran `drill up` before the field was part of the contract
