@@ -25,14 +25,8 @@ function promptFileText(path: string): string {
   return readFileSync(path, 'utf8')
 }
 
-/** The prompt text the request carries — whitespace-only is no prompt
- *  at all. */
-export function delegatePrompt(req: DelegateRequest): string {
-  if (req.prompt !== undefined && req.promptFile !== undefined) {
-    throw new SpawnInputError('prompt and promptFile are mutually exclusive')
-  }
-  const text =
-    req.prompt ?? (req.promptFile === undefined ? undefined : promptFileText(req.promptFile))
+/** Absent or whitespace is no prompt at all — both refuse. */
+function requirePrompt(text: string | undefined): string {
   if (text === undefined) {
     throw new SpawnInputError('delegate requires a prompt — --prompt <text> or --prompt-file <file>')
   }
@@ -40,4 +34,14 @@ export function delegatePrompt(req: DelegateRequest): string {
     throw new SpawnInputError('prompt must not be empty')
   }
   return text
+}
+
+/** The prompt text the request carries. */
+export function delegatePrompt(req: DelegateRequest): string {
+  if (req.prompt !== undefined && req.promptFile !== undefined) {
+    throw new SpawnInputError('prompt and promptFile are mutually exclusive')
+  }
+  const text =
+    req.prompt ?? (req.promptFile === undefined ? undefined : promptFileText(req.promptFile))
+  return requirePrompt(text)
 }
