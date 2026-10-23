@@ -9,6 +9,7 @@ import assert from 'node:assert/strict'
 import { spawn, spawnSync } from 'node:child_process'
 import {
   existsSync,
+  lstatSync,
   mkdirSync,
   mkdtempSync,
   readdirSync,
@@ -16,6 +17,7 @@ import {
   rmSync,
   rmdirSync,
   statSync,
+  symlinkSync,
   unlinkSync,
   utimesSync,
   writeFileSync,
@@ -67,6 +69,9 @@ describe('filelock', () => {
       plantHold(lock, 99999999, '99999999:gone') // a pid that cannot be alive
       // a wait this short proves no stale window was waited out
       const release = acquireFileLock(lock, { waitMs: 500 })
+      // the hold is real — a steal that skipped acquisition would pass
+      // the "path absent after release" assertion without owning it
+      assert.equal(lockHolderPid(lock), process.pid)
       release()
       assert.equal(existsSync(lock), false)
     } finally {
@@ -80,6 +85,7 @@ describe('filelock', () => {
       const lock = join(dir, 'x.lock')
       writeFileSync(lock, '99999999:gone')
       const release = acquireFileLock(lock, { waitMs: 500 })
+      assert.equal(lockHolderPid(lock), process.pid)
       release()
       assert.equal(existsSync(lock), false)
     } finally {
@@ -115,6 +121,32 @@ describe('filelock', () => {
     }
   })
 
+  test('a live OLD-DEBT dir hold (`pid` entry) is honored, a dead one stolen', () => {
+    const { dir, done } = tmp()
+    try {
+      const lock = join(dir, 'x.lock')
+      // the retired debt-store shape: a dir whose hold is a `pid` file
+      // carrying the owner pid — a live one must block a new-version
+      // acquirer, a dead one is stolen like any dead entry
+      mkdirSync(lock)
+      writeFileSync(join(lock, 'pid'), String(process.pid))
+      const ino = statSync(lock).ino
+      assert.equal(lockHolderPid(lock), process.pid)
+      assert.throws(() => acquireFileLock(lock, { waitMs: 300 }), /held over/)
+      assert.equal(statSync(lock).ino, ino)
+      assert.deepEqual(readdirSync(lock), ['pid'])
+      assert.equal(readFileSync(join(lock, 'pid'), 'utf8'), String(process.pid))
+      // dead owner — stolen on liveness, not age
+      writeFileSync(join(lock, 'pid'), '99999999')
+      const release = acquireFileLock(lock, { waitMs: 500 })
+      assert.equal(lockHolderPid(lock), process.pid)
+      release()
+      assert.equal(existsSync(lock), false)
+    } finally {
+      done()
+    }
+  })
+
   test('a foreign live token survives a stale reap — reapStaleLock refuses', () => {
     const { dir, done } = tmp()
     try {
@@ -124,6 +156,33 @@ describe('filelock', () => {
       assert.equal(reapStaleLock(lock), false)
       assert.equal(statSync(lock).ino, ino)
       assert.deepEqual(readdirSync(lock), [`h-${process.pid}`])
+    } finally {
+      done()
+    }
+  })
+
+  test('a symlinked lock path is foreign — steal/reap never descend it', () => {
+    const { dir, done } = tmp()
+    try {
+      const lock = join(dir, 'x.lock')
+      // the link target carries a dead-pid-named entry plus ordinary
+      // files — a stat-following stealer would classify them as lock
+      // junk and delete them through the link
+      const target = join(dir, 'unrelated')
+      mkdirSync(target)
+      writeFileSync(join(target, 'h-99999999'), '99999999:dead')
+      writeFileSync(join(target, 'keep.txt'), 'precious')
+      symlinkSync(target, lock)
+      assert.equal(lstatSync(lock).isSymbolicLink(), true)
+      // stale judgement refuses it, reap refuses it, and an acquirer
+      // times out rather than descend into the target
+      assert.equal(staleLock(lock), false)
+      assert.equal(reapStaleLock(lock), false)
+      assert.throws(() => acquireFileLock(lock, { waitMs: 200 }), /held over/)
+      // byte-for-byte: the link and every target file survive
+      assert.equal(lstatSync(lock).isSymbolicLink(), true)
+      assert.deepEqual(readdirSync(target).sort(), ['h-99999999', 'keep.txt'])
+      assert.equal(readFileSync(join(target, 'keep.txt'), 'utf8'), 'precious')
     } finally {
       done()
     }
@@ -240,13 +299,17 @@ describe('filelock', () => {
     try {
       const lock = join(dir, 'x.lock')
       // fs.linkSync is mutable on the CJS exports object; assigning it
-      // BEFORE the filelock import makes the module's own named binding
-      // capture the patch — a real no-hardlink fs, simulated
+      // then calling syncBuiltinESMExports pushes the patch into the
+      // builtin's ESM named bindings — the shape filelock.ts imports
+      // (a bare mutation never reaches a named `import { linkSync }`)
       const script = join(dir, 'nolink.ts')
       writeFileSync(
         script,
         `import fs from 'node:fs'\n` +
-          `fs.linkSync = () => { throw Object.assign(new Error('link unsupported'), { code: 'EPERM' }) }\n` +
+          `import { syncBuiltinESMExports } from 'node:module'\n` +
+          `fs.linkSync = () => { console.log('LINKTRIED'); throw Object.assign(new Error('link unsupported'), { code: 'EPERM' }) }\n` +
+          `syncBuiltinESMExports()\n` +
+          `import('node:fs').then((ns) => console.log('patch-visible:' + (ns.linkSync === fs.linkSync)))\n` +
           `import(${JSON.stringify(join(here, 'filelock.ts'))}).then((m) => {\n` +
           `  const release = m.acquireFileLock(${JSON.stringify(lock)}, { waitMs: 500 })\n` +
           `  console.log('held:' + fs.readdirSync(${JSON.stringify(lock)})[0])\n` +
@@ -256,6 +319,7 @@ describe('filelock', () => {
       )
       const child = spawnSync('npx', ['tsx', script], { encoding: 'utf8', timeout: 30_000 })
       assert.equal(child.status, 0, child.stderr)
+      assert.match(child.stdout, /patch-visible:true/)
       assert.match(child.stdout, /held:h-\d+/)
       assert.match(child.stdout, /released/)
       assert.equal(existsSync(lock), false)
@@ -273,7 +337,10 @@ describe('filelock', () => {
       writeFileSync(
         script,
         `import fs from 'node:fs'\n` +
-          `fs.linkSync = () => { throw Object.assign(new Error('link unsupported'), { code: 'ENOSYS' }) }\n` +
+          `import { syncBuiltinESMExports } from 'node:module'\n` +
+          `fs.linkSync = () => { console.log('LINKTRIED'); throw Object.assign(new Error('link unsupported'), { code: 'ENOSYS' }) }\n` +
+          `syncBuiltinESMExports()\n` +
+          `import('node:fs').then((ns) => console.log('patch-visible:' + (ns.linkSync === fs.linkSync)))\n` +
           `import(${JSON.stringify(join(here, 'filelock.ts'))}).then((m) => {\n` +
           `  const release = m.acquireFileLock(${JSON.stringify(lock)}, { waitMs: 2_000 })\n` +
           `  console.log('held')\n` +
@@ -283,6 +350,10 @@ describe('filelock', () => {
       )
       const child = spawnSync('npx', ['tsx', script], { encoding: 'utf8', timeout: 30_000 })
       assert.equal(child.status, 0, child.stderr)
+      // LINKTRIED proves the patch reached filelock's named import —
+      // the steal then fell back to the no-link(2) degraded path
+      assert.match(child.stdout, /patch-visible:true/)
+      assert.match(child.stdout, /LINKTRIED/)
       assert.match(child.stdout, /held/)
       assert.equal(existsSync(lock), false)
     } finally {
@@ -299,7 +370,10 @@ describe('filelock', () => {
       writeFileSync(
         script,
         `import fs from 'node:fs'\n` +
+          `import { syncBuiltinESMExports } from 'node:module'\n` +
           `fs.linkSync = () => { throw Object.assign(new Error('link unsupported'), { code: 'EPERM' }) }\n` +
+          `syncBuiltinESMExports()\n` +
+          `import('node:fs').then((ns) => console.log('patch-visible:' + (ns.linkSync === fs.linkSync)))\n` +
           `import(${JSON.stringify(join(here, 'filelock.ts'))}).then((m) => {\n` +
           `  try { m.acquireFileLock(${JSON.stringify(lock)}, { waitMs: 300 }); console.log('ACQUIRED') }\n` +
           `  catch (e) { console.log('ERR:' + e.name) }\n` +
@@ -307,6 +381,7 @@ describe('filelock', () => {
       )
       const child = spawnSync('npx', ['tsx', script], { encoding: 'utf8', timeout: 30_000 })
       assert.equal(child.status, 0, child.stderr)
+      assert.match(child.stdout, /patch-visible:true/)
       assert.match(child.stdout, /ERR:LockTimeout/)
       assert.equal(readFileSync(lock, 'utf8'), `${process.pid}:alien`)
     } finally {
@@ -558,27 +633,34 @@ describe('filelock', () => {
     const { dir, done } = tmp()
     try {
       const lock = join(dir, 'x.lock')
-      // deterministic mid-publish swap: the child's own statSync patch
+      // deterministic mid-publish swap: the child's own lstatSync patch
       // swaps the dir the instant our entry exists inside it — the
-      // end-state of "our fresh dir was swept and re-bought mid-write"
+      // end-state of "our fresh dir was swept and re-bought mid-write".
+      // lstatSync because that is the stat the lock code now uses;
+      // syncBuiltinESMExports pushes the mutation into filelock's
+      // named ESM binding.
       const script = join(dir, 'swap.ts')
       writeFileSync(
         script,
         `import fs from 'node:fs'\n` +
+          `import { syncBuiltinESMExports } from 'node:module'\n` +
           `import { join } from 'node:path'\n` +
           `const lock = ${JSON.stringify(lock)}\n` +
-          `const origStat = fs.statSync\n` +
+          `const origLstat = fs.lstatSync\n` +
           `let swapped = false\n` +
-          `fs.statSync = (p, o) => {\n` +
+          `fs.lstatSync = (p, o) => {\n` +
           `  if (!swapped && String(p) === lock && fs.existsSync(join(lock, 'h-' + process.pid))) {\n` +
           `    swapped = true\n` +
+          `    console.log('swapped')\n` +
           `    fs.rmSync(lock, { recursive: true, force: true })\n` +
           `    fs.mkdirSync(lock)\n` +
           `    fs.writeFileSync(join(lock, 'h-99999999'), '99999999:dead')\n` + // the foreign dir's own (dead) entry
           `    fs.writeFileSync(join(lock, 'h-' + process.pid), process.pid + ':stray')\n` + // our publish, landed foreign
           `  }\n` +
-          `  return origStat(p, o)\n` +
+          `  return origLstat(p, o)\n` +
           `}\n` +
+          `syncBuiltinESMExports()\n` +
+          `import('node:fs').then((ns) => console.log('patch-visible:' + (ns.lstatSync === fs.lstatSync)))\n` +
           `import(${JSON.stringify(join(here, 'filelock.ts'))}).then((m) => {\n` +
           `  const release = m.acquireFileLock(lock, { waitMs: 5_000 })\n` +
           `  // we hold: verify the stray was pulled from the foreign dir\n` +
@@ -589,6 +671,10 @@ describe('filelock', () => {
       )
       const child = spawnSync('npx', ['tsx', script], { encoding: 'utf8', timeout: 30_000 })
       assert.equal(child.status, 0, child.stderr)
+      // 'swapped' proves the interleaving actually ran — without the
+      // patch reaching filelock the test would pass unexercised
+      assert.match(child.stdout, /patch-visible:true/)
+      assert.match(child.stdout, /swapped/)
       assert.match(child.stdout, /held/)
       assert.match(child.stdout, /released/)
       assert.equal(existsSync(lock), false)
@@ -655,6 +741,9 @@ describe('filelock', () => {
         waitMs: 500,
         onStandby: (pid) => standby.push(pid),
       })
+      // prove the resolve actually holds — a steal-without-acquire
+      // would pass the no-standby assertion while owning nothing
+      assert.equal(lockHolderPid(lock), process.pid)
       release()
       assert.deepEqual(standby, [])
       assert.equal(existsSync(lock), false)

@@ -32,6 +32,7 @@ import {
   writeAgentRegistry,
 } from './agents.ts'
 import { bdAt } from './bd.ts'
+import { lockHolderPid } from './filelock.ts'
 import { scrubEnv, testGit } from './testkit.ts'
 
 // ambient repo/agent/store pins must not reach fixture git children
@@ -362,6 +363,7 @@ describe('registry lock', () => {
       const past = new Date(Date.now() - 120_000)
       utimesSync(lock, past, past)
       const release = acquireAgentRegistryLock(dir, { waitMs: 5_000 })
+      assert.equal(lockHolderPid(lock), process.pid)
       release()
       assert.equal(existsSync(lock), false)
     })
@@ -374,6 +376,9 @@ describe('registry lock', () => {
       const dead = spawnSync(process.execPath, ['-e', '']).pid!
       writeFileSync(join(lock, `h-${dead}`), `${dead}:cafe`)
       const release = acquireAgentRegistryLock(dir, { waitMs: 5_000 })
+      // the recovery must actually hold — a steal that skipped
+      // acquisition would pass the absent-after-release check anyway
+      assert.equal(lockHolderPid(lock), process.pid)
       release()
       assert.equal(existsSync(lock), false)
     })

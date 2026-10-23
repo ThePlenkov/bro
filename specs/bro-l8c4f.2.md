@@ -42,34 +42,56 @@ mkdir primitive hardened so removal is name-precise:
   Once an entry exists inside `X.lock`, no actor can make the `lock`
   name go absent or rebind — the instance at `lock` is pinned while
   occupied, which is exactly what a lock file could never guarantee.
-- **Release**: `unlink(X.lock/h-<pid>)`, then `rmdir(X.lock)` — but
-  only when this process actually removed a name or still owns the
-  inode. Entry names are unique to their holder, so release can never
-  hit a successor's entry: a stolen-then-reacquired hold's release
-  finds its name absent and leaves the foreign dir strictly alone.
+- **Release**: verify `lstat(X.lock).ino === hold.dirIno` FIRST, then
+  `unlink(X.lock/h-<pid>)` + `rmdir(X.lock)`. The inode check must
+  lead because `h-<pid>` is per-process — a re-acquired successor can
+  legitimately carry the same entry name, and unlink-before-verify
+  would strip it. The release closure also gates on
+  `heldLocks.get(lock) === hold`, so a stale closure is a no-op: it
+  can never strip a re-acquired hold under a matching name.
 - **Steal / reap**: `readdir` → every `h-<pid>` entry carries its
-  owner in the name — no file read, no capture. Entries whose pid is
-  dead are unlinked; when no live entry remains (or the dir aged past
-  the abandoned bound) the dir is `rmdir`'d — conditional on empty,
-  so a concurrent publish aborts the steal instead of being clobbered.
+  owner in the name — no file read, no capture. The judged dir is
+  **pinned by inode for the whole steal**: each entry's inode is
+  recorded at scan and re-checked before its unlink (a heartbeat
+  re-publish is a new inode under the same name → a pass, not a
+  strip), and `lock`'s dir-inode is re-validated before every removal
+  and before `rmdir` — a mid-steal swap to a successor instance stops
+  the steal outright. The steal then ends in `rmdir` — conditional on
+  empty, so a concurrent publish aborts instead of being clobbered.
   A live owner whose entry was stolen under the abandoned bound
   re-publishes via its heartbeat, making the stealer's rmdir fail —
-  self-healing, same contract as today's re-link.
+  self-healing. `stealDir` reports "the judged instance is gone", so
+  the janitor never counts a survivor as reaped.
+- **Symlinks are never followed**: every shape check is `lstat` — a
+  symlinked `X.lock` classifies as neither dir nor file, so steal/
+  release/reap can never descend a link into an unrelated directory
+  and delete its contents. The janitor classifies by `lstat` too.
 - **Legacy files**: an `X.lock` that is a regular file (created by a
   pre-change binary or a hand-rolled hold) is still honored — a live
-  token blocks; a dead one is stolen through an inode-pinned probe
-  (`link(2)`), capture, inode compare, and a **non-clobbering**
-  `link(2)` restore — never a rename that can replace. On filesystems
-  without `link(2)` the legacy-steal degrades to verify-then-unlink.
-  New holds never create files, so the residual capture window exists
-  only against locks a previous version minted.
+  token blocks; a dead one is pinned by a `link(2)` probe (while
+  pinned the inode cannot recycle, so an inode match at `lock` IS the
+  verified instance), re-verified, and dropped by **compare-then-
+  `unlink`** — no rename at all: `unlink(2)` refuses directories, so
+  a dir-lock successor that lands mid-steal cannot be captured. On
+  filesystems without `link(2)` the same compare-then-unlink runs
+  unpinned — the documented degradation leaves only a stat→unlink
+  gap, and a dir successor is still unreachable.
+- **fs faults are not contention**: only ENOENT/ENOTDIR inside an
+  acquire attempt mean "the instance moved" and retry; real fs errors
+  (EACCES, ENOSPC, EROFS…) clean up our own instance and throw —
+  `LockTimeout` never mislabels a broken filesystem, and
+  `awaitFileLock` never retries one forever.
 - **Stale rules unchanged**: liveness is the staleness signal
   (dead pid → steal at once), the abandoned bound still bounds a live
   hold (15 min), and a fresh empty dir is an in-flight publisher —
   wait, never break (the old empty-FILE grace becomes an empty-DIR
   grace).
-- **`heldLocks`**: the re-entrancy map now records `{entry, dirIno}` —
-  release and the heartbeat consult it.
+- **`heldLocks`**: the re-entrancy map records `{entry, dirIno,
+  token}` — release, heartbeat, and the stale-closure gate consult it.
+- **Heartbeat**: re-asserts the entry and freshens the dir mtime on
+  its own inode; after every publish it re-verifies the dir inode and
+  pulls its entry back out if `lock` swapped to a successor mid-beat,
+  so a stray name never blocks a foreign instance.
 
 A second copy of the buggy scheme lives in
 `packages/debt/src/store.ts` (`acquireFileLock`/`releaseFileLock`/
@@ -78,19 +100,21 @@ primitive in the same change; its `<path>.lock` is already a dir.
 
 ## Plan
 
-- [ ] `packages/core/src/filelock.ts`: dir-lock acquire/publish/verify,
-      entry-name release, readdir-based steal/reap, heartbeat on dir
-      inode, legacy-file read/steal path; delete `removeCaptured`, the
-      `wx` fallback, `NO_HARDLINK_CODES`; keep `sweepStaged` for
-      pre-change `.tmp` debris.
-- [ ] `packages/core/src/janitor.ts`: `*.lock` sweep accepts
+- [x] `packages/core/src/filelock.ts`: dir-lock acquire/publish/verify,
+      inode-pinned release/steal/reap, lstat-only classification,
+      heartbeat on dir inode, legacy-file read/steal path; delete
+      `removeCaptured`, the `wx` fallback, and every rename in steal
+      paths; keep `sweepStaged` for pre-change `.tmp` debris.
+- [x] `packages/core/src/janitor.ts`: `*.lock` sweep accepts
       directories (dead-entry reaping + empty-dir reap), keeps
-      legacy-file reaping.
-- [ ] `packages/debt/src/store.ts`: drop the local capture/restore
+      legacy-file reaping, classifies by `lstat`.
+- [x] `packages/debt/src/store.ts`: drop the local capture/restore
       lock, use `withFileLock`/`acquireFileLock` from `@broject/core`.
-- [ ] `packages/core/src/filelock.test.ts`: rewrite around the dir
-      primitive + deterministic multi-process barrier tests.
-- [ ] `packages/core/src/janitor.test.ts`: dir-lock reap rows.
+- [x] `packages/core/src/filelock.test.ts`: rewrite around the dir
+      primitive + deterministic multi-process barrier tests;
+      `syncBuiltinESMExports`-propagated fs patches for the fallback
+      tests.
+- [x] `packages/core/src/janitor.test.ts`: dir-lock reap rows.
 
 ## Acceptance
 

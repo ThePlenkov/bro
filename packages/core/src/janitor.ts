@@ -30,13 +30,13 @@ import {
   existsSync,
   fstatSync,
   ftruncateSync,
+  lstatSync,
   openSync,
   readdirSync,
   readFileSync,
   readSync,
   renameSync,
   rmSync,
-  statSync,
   writeFileSync,
   writeSync,
 } from 'node:fs'
@@ -178,7 +178,9 @@ function statOf(
   path: string
 ): { mtimeMs: number; size: number; isFile: boolean; isDirectory: boolean } | null {
   try {
-    const st = statSync(path)
+    // lstat — a reaper never follows a link: a symlinked `*.lock` or
+    // debris name is foreign, not an instance to open or descend into
+    const st = lstatSync(path)
     return { mtimeMs: st.mtimeMs, size: st.size, isFile: st.isFile(), isDirectory: st.isDirectory() }
   } catch {
     return null
@@ -486,9 +488,10 @@ function sweepAgents(ctx: Ctx): void {
 /** `*.lock` reaps by the filelock's own steal rule — dead owner or a
  *  hold past the abandoned bound — through `reapStaleLock`'s
  *  conditional removal over both instance shapes: a dead dir's
- *  entries are unlinked by name and it goes down only if empty; a
- *  legacy file is pinned by hardlink and re-verified before the drop.
- *  A live instance is never moved, renamed, or unlinked — a plain
+ *  entries are unlinked by pinned name and it goes down only if
+ *  empty; a legacy file is pinned by hardlink and re-verified before
+ *  an unlink that can never take a directory. A live instance inside
+ *  the abandoned bound is never moved, renamed, or unlinked — a plain
  *  check-then-rm would let a live replacement be deleted and put two
  *  writers inside the same section (bro-l8c4f.2). `*.cap-`/`.pin-`/
  *  `.tomb-` captures, `.stale-`/`.release-` captures from the retired
