@@ -101,5 +101,5 @@ Call sites:
       `acp-events.ts` constant
 - [x] `agent-connectors.test.ts` contract test: per-backend `0600` on
       prompt/log/stderr/exit + `0644` repair across a respawn
-- [ ] `npm run build`, `npm run typecheck`, `npm test` (exact CI
+- [x] `npm run build`, `npm run typecheck`, `npm test` (exact CI
       commands)
