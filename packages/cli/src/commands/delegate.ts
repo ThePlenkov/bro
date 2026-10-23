@@ -125,6 +125,27 @@ interface DelegateSel {
 
 type DelegateOpts = { fetch?: FetchFn; acp?: AcpSeam }
 
+/** Read a --prompt-file — size + regularity gate before the read: a
+ *  prompt file is one turn's payload, never an unbounded stream or a
+ *  device. */
+function promptFileText(path: string): string {
+  let st: Stats
+  try {
+    st = statSync(path)
+  } catch {
+    throw new SpawnInputError(`prompt file ${path} does not exist or is not a regular file`)
+  }
+  if (!st.isFile()) {
+    throw new SpawnInputError(`prompt file ${path} is not a regular file`)
+  }
+  if (st.size > MAX_PROMPT_FILE_BYTES) {
+    throw new SpawnInputError(
+      `prompt file ${path} is ${st.size} bytes — a turn payload caps at ${MAX_PROMPT_FILE_BYTES}`
+    )
+  }
+  return readFileSync(path, 'utf8')
+}
+
 /** The prompt text the request carries — --prompt and --prompt-file
  *  are the same channel (mutually exclusive), whitespace-only is no
  *  prompt at all. */
@@ -132,29 +153,10 @@ function delegatePrompt(req: DelegateRequest): string {
   if (req.prompt !== undefined && req.promptFile !== undefined) {
     throw new SpawnInputError('prompt and promptFile are mutually exclusive')
   }
-  let text = req.prompt
+  const text =
+    req.prompt ?? (req.promptFile === undefined ? undefined : promptFileText(req.promptFile))
   if (text === undefined) {
-    if (req.promptFile === undefined) {
-      throw new SpawnInputError('delegate requires a prompt — --prompt <text> or --prompt-file <file>')
-    }
-    // size + regularity gate before the read — a prompt file is one
-    // turn's payload, never an unbounded stream or a device
-    const st = ((): Stats | undefined => {
-      try {
-        return statSync(req.promptFile as string)
-      } catch {
-        return undefined
-      }
-    })()
-    if (st === undefined || !st.isFile()) {
-      throw new SpawnInputError(`prompt file ${req.promptFile} does not exist or is not a regular file`)
-    }
-    if (st.size > MAX_PROMPT_FILE_BYTES) {
-      throw new SpawnInputError(
-        `prompt file ${req.promptFile} is ${st.size} bytes — a turn payload caps at ${MAX_PROMPT_FILE_BYTES}`
-      )
-    }
-    text = readFileSync(req.promptFile, 'utf8')
+    throw new SpawnInputError('delegate requires a prompt — --prompt <text> or --prompt-file <file>')
   }
   if (text.trim() === '') {
     throw new SpawnInputError('prompt must not be empty')
@@ -191,26 +193,29 @@ function routedLane(env: AgentConnectorEnv, req: DelegateRequest): ResolvedClass
   return resolveStepClass(routing, env.providers ?? {}, { class: req.class })
 }
 
-/** --wait's provider entry: the pin wins, else the routed chain head.
- *  The entry must be acp-typed — a pooled turn needs an ACP peer;
- *  api/cli kinds have no session to converse over. */
-function waitProvider(
-  env: AgentConnectorEnv,
-  req: DelegateRequest,
-  routed: ResolvedClass | undefined
-): { name: string; entry: Extract<ProviderEntry, { type: 'acp' }> } {
+/** --wait's provider name: the pin wins, else the routed chain head. */
+function waitProviderName(req: DelegateRequest, routed: ResolvedClass | undefined): string {
   const name = req.provider ?? routed?.provider
   if (name === undefined) {
     throw new SpawnInputError(
       'delegate --wait needs a provider — pass --provider <name> or declare fleet.routing.<class>.chain'
     )
   }
+  return name
+}
+
+/** The provider's entry — must be acp-typed: a pooled turn needs an
+ *  ACP peer, api/cli kinds have no session to converse over. A
+ *  missing entry is the caller's bug when they pinned it, config when
+ *  the lane resolved to it. */
+function acpEntry(
+  env: AgentConnectorEnv,
+  name: string,
+  pinned: boolean
+): Extract<ProviderEntry, { type: 'acp' }> {
   const entry = env.providers?.[name]
   if (entry === undefined) {
-    throw new SpawnError(
-      `providers.${name} is not configured`,
-      req.provider !== undefined ? 'input' : 'config'
-    )
+    throw new SpawnError(`providers.${name} is not configured`, pinned ? 'input' : 'config')
   }
   if (entry.type !== 'acp') {
     throw new SpawnError(
@@ -218,28 +223,20 @@ function waitProvider(
       'config'
     )
   }
-  return { name, entry }
+  return entry
 }
 
 /** Provider walls live in the repo registry — a non-repo dir reads as
  *  no walls (readAgentRegistry returns {} for ENOENT/no-common-dir), so
  *  any throw IS registry corruption: fail the wait closed rather than
  *  spend against a provider whose wall status is unknown. */
-function wallsFor(dir: string, provider: string): void {
-  let walls: ReturnType<typeof providerWallsFor>
+function wallsFor(dir: string): ReturnType<typeof providerWallsFor> {
   try {
-    walls = providerWallsFor(dir)
+    return providerWallsFor(dir)
   } catch (err) {
     throw new SpawnError(
       `provider walls unreadable — refusing the delegate turn closed: ${err instanceof Error ? err.message : String(err)}`,
       'unavailable'
-    )
-  }
-  const wall = walls.find((w) => w.provider === provider)
-  if (wall !== undefined) {
-    throw new SpawnError(
-      `${wallText(wall)} — the delegate lane waits; retry after the reset or --detach to a different lane`,
-      'cap'
     )
   }
 }
@@ -263,8 +260,15 @@ async function delegateWait(
   sel: DelegateSel,
   opts: DelegateOpts
 ): Promise<DelegateWaitResult> {
-  const { name, entry } = waitProvider(env, sel.req, sel.routed)
-  wallsFor(dir, name)
+  const name = waitProviderName(sel.req, sel.routed)
+  const entry = acpEntry(env, name, sel.req.provider !== undefined)
+  const wall = wallsFor(dir).find((w) => w.provider === name)
+  if (wall !== undefined) {
+    throw new SpawnError(
+      `${wallText(wall)} — the delegate lane waits; retry after the reset or --detach to a different lane`,
+      'cap'
+    )
+  }
   const deadline = waitDeadline(sel.req.timeoutSec)
   // --model is the request pin: it outranks the chain's and the
   // entry's configured model but the reported model stays honest
