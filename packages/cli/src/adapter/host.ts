@@ -109,6 +109,9 @@ export interface BroHostShape<Ctx extends BroContext> {
   refuseStop(reason: string): unknown
   /** Whether the stop event says the host already refused once. */
   stopAlreadyRefused(event: unknown): boolean
+  /** Whether this stop event is an abort/error the gate must not
+   *  resurrect — pi's settle gate is the only host with outcomes. */
+  stopAborted?(event: unknown): boolean
 }
 
 /**
@@ -143,6 +146,7 @@ export function sharedBinding<Ctx extends BroContext>(
     notify: host.notify,
     refuseStop: host.refuseStop,
     stopAlreadyRefused: host.stopAlreadyRefused,
+    stopAborted: host.stopAborted,
     promptOf(event) {
       const turn = event as { prompt?: string }
       return typeof turn.prompt === 'string' ? turn.prompt : ''
