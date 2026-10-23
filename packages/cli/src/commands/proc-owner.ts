@@ -33,6 +33,190 @@ export interface ProcHit {
   cmd: string
 }
 
+/** A live process inside a spawned unit. `inGroup` marks the
+ *  kill(-pgid) cohort — same-session members in another pgrp are
+ *  setpgid'd descendants the group signal never reached (bro-l8c4f.3). */
+export interface UnitMember {
+  pid: number
+  inGroup: boolean
+}
+
+/** The whole-table picture behind one spawned unit: session members
+ *  (sid === leader — only the leader's own descendants can carry it,
+ *  setpgid never crosses sessions) plus `escapees` — procs still
+ *  carrying the inherited BRO_AGENT_ID pin after setsid broke the
+ *  session link. `unverified` marks entries that existed but could not
+ *  be attributed: an unreadable live proc may BE ours, so it must never
+ *  read as absent. 'unknown' return = the scan itself could not run
+ *  (no /proc) — same fail-open rule pidAlive documents. */
+export interface UnitScan {
+  members: UnitMember[]
+  escapees: number[]
+  unverified: boolean
+}
+
+/** The post-comm fields of one /proc/<pid>/stat — the same split
+ *  procStat uses: (state ppid pgrp session …). Undefined when the
+ *  entry can't be read or parsed. */
+function procStatFields(
+  dir: string
+): { state: string; pgrp: number; sid: number } | undefined {
+  const stat = readProcText(dir, 'stat')
+  const close = stat.lastIndexOf(')')
+  if (close < 0) {
+    return undefined
+  }
+  const rest = stat.slice(close + 2).split(' ')
+  const pgrp = Number(rest[2])
+  const sid = Number(rest[3])
+  return Number.isInteger(pgrp) && Number.isInteger(sid)
+    ? { state: rest[0] ?? '', pgrp, sid }
+    : undefined
+}
+
+/** sid of a live proc — undefined when dead or unreadable. The
+ *  signal-time identity re-check: a pid may recycle between the scan
+ *  and the kill, so the membership proof is re-read immediately before
+ *  the signal. */
+export function procSessionId(pid: number, procDir = '/proc'): number | undefined {
+  const f = procStatFields(join(procDir, String(pid)))
+  return f !== undefined && f.state !== 'Z' ? f.sid : undefined
+}
+
+/** Does a live proc still carry `BRO_AGENT_ID=<agentId>` — the same
+ *  re-verify rule as procSessionId, for escapees. */
+export function procHasBadge(pid: number, agentId: string, procDir = '/proc'): boolean {
+  let env: string
+  try {
+    env = readFileSync(join(procDir, String(pid), 'environ'), 'utf8')
+  } catch {
+    return false
+  }
+  return env.split('\0').includes(`BRO_AGENT_ID=${agentId}`)
+}
+
+/** One /proc pass answering both unit questions: who is still in the
+ *  leader's session, and who outside it still carries the agent badge.
+ *  The leader itself counts as a member while it lives. Our own pid is
+ *  excluded — a `bro` run inside the worker inherits the badge and the
+ *  session, and is not the unit's member to count or signal. */
+export function procUnitScan(
+  leader: number | undefined,
+  agentId: string | undefined,
+  procDir = '/proc'
+): UnitScan | 'unknown' {
+  let names: string[]
+  try {
+    names = readdirSync(procDir)
+  } catch {
+    return 'unknown'
+  }
+  const scan: UnitScan = { members: [], escapees: [], unverified: false }
+  const pin = agentId === undefined || agentId === '' ? undefined : `BRO_AGENT_ID=${agentId}`
+  for (const name of names) {
+    if (!/^\d+$/.test(name)) {
+      continue
+    }
+    const pid = Number(name)
+    if (pid === process.pid) {
+      continue
+    }
+    const dir = join(procDir, name)
+    let member = false
+    if (leader !== undefined) {
+      const f = procStatFields(dir)
+      if (f === undefined) {
+        // a vanished entry is nobody; a present-but-unreadable one
+        // cannot be attributed — it may be ours
+        try {
+          statSync(dir)
+          scan.unverified = true
+        } catch {
+          // gone mid-scan — dead already
+        }
+      } else if (f.state !== 'Z' && f.sid === leader) {
+        member = true
+        scan.members.push({ pid, inGroup: f.pgrp === leader })
+      }
+    }
+    if (pin !== undefined && !member) {
+      let env: string
+      try {
+        env = readFileSync(join(dir, 'environ'), 'utf8')
+      } catch (e) {
+        // EACCES is a foreign-owned (or non-dumpable) proc — it cannot
+        // be our worker's descendant; ENOENT/ESRCH vanished mid-scan.
+        // Anything else cannot be attributed — flag it unverified.
+        const code = (e as NodeJS.ErrnoException).code
+        if (code !== 'ENOENT' && code !== 'EACCES' && code !== 'ESRCH' && code !== 'ENOTDIR') {
+          scan.unverified = true
+        }
+        continue
+      }
+      if (env.split('\0').includes(pin)) {
+        scan.escapees.push(pid)
+      }
+    }
+  }
+  return scan
+}
+
+/** Whole-unit liveness for a detached spawn — the pinned leader, its
+ *  session members, and badged escapees; 'unknown' when the process
+ *  table cannot answer (bro-l8c4f.3). `pidStart` is the reuse pin from
+ *  the registry; `agentId` is the BRO_AGENT_ID escapee badge. On a
+ *  host without /proc the kill(-pgid, 0) group probe is the whole
+ *  answer — a live group counts, escapees are undetectable (documented
+ *  platform limit, never a silent "dead"). */
+export function procUnitState(
+  pid: number | undefined,
+  pidStart: string | undefined,
+  agentId: string | undefined,
+  procDir = '/proc'
+): 'dead' | 'alive' | 'unknown' {
+  if (pid !== undefined && pidAlive(pid, pidStart)) {
+    return 'alive'
+  }
+  let groupExists = false
+  if (pid !== undefined) {
+    try {
+      process.kill(-pid, 0)
+      groupExists = true
+    } catch (e) {
+      // ESRCH is a group that no longer exists; EPERM is a live group
+      // we cannot signal — both are verdicts, not silence
+      groupExists = (e as NodeJS.ErrnoException).code === 'EPERM'
+    }
+  }
+  const procPresent = existsSyncProc()
+  if (groupExists) {
+    const scan = procUnitScan(pid, agentId, procDir)
+    if (scan === 'unknown') {
+      // no /proc: group existence is all the platform offers (a
+      // zombie-held group resolves on the next poll); with /proc an
+      // incomplete scan is genuinely 'unknown'
+      return procPresent ? 'unknown' : 'alive'
+    }
+    if (scan.members.length > 0 || scan.escapees.length > 0) {
+      return 'alive'
+    }
+    return scan.unverified ? 'unknown' : 'dead'
+  }
+  // the group is gone — only a setsid'd escapee can still carry the
+  // unit, and only /proc can find it
+  if (procPresent && agentId !== undefined && agentId !== '') {
+    const scan = procUnitScan(undefined, agentId, procDir)
+    if (scan === 'unknown') {
+      return 'unknown'
+    }
+    if (scan.escapees.length > 0) {
+      return 'alive'
+    }
+    return scan.unverified ? 'unknown' : 'dead'
+  }
+  return 'dead'
+}
+
 /** Agent-shaped executable name — the fallback for sessions that never
  *  armed a marker. Checked against argv[0] (and argv[1] when argv[0] is
  *  a launcher like npx/node): matching inside arbitrary arguments would
@@ -421,6 +605,20 @@ export function registryEntryState(
   const start = typeof e.pidStart === 'string' && e.pidStart !== '' ? e.pidStart : undefined
   if (pid !== undefined && pidAlive(pid, start)) {
     return 'running'
+  }
+  // the unit outlives the wrapper: session members and badged escapees
+  // keep the claim occupied — only a verified-dead unit falls through
+  // to the death ladder (bro-l8c4f.3)
+  const unit = procUnitState(
+    pid,
+    start,
+    typeof e.agentId === 'string' ? e.agentId : undefined
+  )
+  if (unit === 'alive') {
+    return 'running'
+  }
+  if (unit === 'unknown') {
+    return 'spawned' // unverifiable is the conservative live read
   }
   if (e.stopped === true) {
     return 'stopped'

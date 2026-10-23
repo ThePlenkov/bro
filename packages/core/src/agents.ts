@@ -299,6 +299,31 @@ export interface ListResult {
   degraded?: string
 }
 
+/** The truth a connector can stand behind after the stop request
+ *  landed (bro-l8c4f.3) — stop() is the request, the verdict is the
+ *  result. Only the backend knows what "the unit is gone" means: a
+ *  missing tmux session is a corpse, a missing registry row may just
+ *  be pruned, a remote cancel is unconfirmable by construction. */
+export type StopVerdict =
+  /** the execution unit is verifiably gone (registry-backed backends
+   *  also landed the `stopped` marker) */
+  | 'stopped'
+  /** the bounded wait expired with the unit still verifiably live */
+  | 'timeout'
+  /** the request landed but the backend cannot confirm death itself —
+   *  a best-effort remote cancel, a supervisor-owned reap */
+  | 'stopping'
+  /** the connector cannot say either way — a failed probe, an
+   *  unreadable process table, a thrown signal */
+  | 'unverified'
+
+export interface StopResult {
+  verdict: StopVerdict
+  /** Operator-facing detail — surviving pids, a session URL, the
+   *  probe's error. Rides into CLI/HTTP output. */
+  detail?: string
+}
+
 export interface AgentConnector {
   readonly name: string
   /** Remote-URL matcher — same precedence role as Connector.matchRemote. */
@@ -311,8 +336,13 @@ export interface AgentConnector {
   list(): Promise<ListResult>
   /** Throws AgentNotFound for an id the registry doesn't know. */
   status(id: string): Promise<AgentInfo>
-  /** Idempotent — a gone agent is the desired end state, not an error. */
-  stop(id: string): Promise<void>
+  /** Idempotent — a gone agent is the desired end state, not an error.
+   *  The verdict is the connector's post-stop truth: 'stopped' only
+   *  when the execution unit is verifiably gone, never because the
+   *  signal was merely delivered. Connectors predating StopResult
+   *  resolve void — the facade reads that as the old "stop() ran ==
+   *  done" contract. */
+  stop(id: string): Promise<StopResult | void>
   /** Supervisor lifecycle, capability-declared: `supervisor: 'none'`
    *  backends (native) never implement these — `bro agents up|down` with
    *  no target reports them as no-ops. A supervised backend WITHOUT the

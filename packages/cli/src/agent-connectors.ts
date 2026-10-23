@@ -91,6 +91,7 @@ import {
   type SessionPlane,
   type SpawnSpec,
   type SpawnWorker,
+  type StopResult,
 } from '@broject/core'
 import { otelEvent } from '@broject/providers'
 import type { AcpSeam, FetchFn } from '@broject/providers'
@@ -110,6 +111,12 @@ import {
 import './session-planes/copilot.ts'
 import { writeCopilotCount } from './session-planes/copilot.ts'
 import { enterWorktree } from './commands/work.ts'
+import {
+  procHasBadge,
+  procSessionId,
+  procUnitScan,
+  procUnitState,
+} from './commands/proc-owner.ts'
 import { VERSION } from './version.ts'
 
 /** Everything a factory needs: the repo ctx + the resolved config
@@ -1968,13 +1975,30 @@ const entryPidStart = (entry: AgentRegistryEntry): string | undefined =>
     ? entry.pidStart
     : undefined
 
+/** Operator-facing tail of a 'timeout'/'unverified' native verdict —
+ *  name the survivors when the process table can. */
+function nativeSurvivors(pid: number | undefined, agentId: string | undefined): string {
+  const scan = procUnitScan(pid, agentId)
+  if (scan === 'unknown') {
+    return 'the process table is unreadable — cannot name survivors'
+  }
+  const pids = [...scan.members.map((m) => m.pid), ...scan.escapees]
+  return pids.length > 0 ? `surviving pids: ${pids.join(', ')}` : 'the unit still reads live'
+}
+
 /** Live state for a registry entry under this backend. */
 function nativeState(dir: string, home: string | null, molStep: string, entry: AgentRegistryEntry): AgentState {
   // liveness first: a 'stopped' marker on a pid that is still alive means
   // SIGTERM hasn't landed yet — the agent IS still running, and dedup
-  // must keep refusing a respawn that would run alongside it
+  // must keep refusing a respawn that would run alongside it. The unit
+  // outlives the wrapper: a dead leader with live session members or
+  // badged setsid-escapees is still occupied work — the entry reads
+  // 'running', never 'lost', so dedup stays closed and no respawn races
+  // a live writer (bro-l8c4f.3). 'unknown' is the same fail-open read
+  // pidAlive documents.
   const pid = typeof entry.pid === 'number' ? entry.pid : undefined
-  if (pid !== undefined && pidAlive(pid, entryPidStart(entry))) {
+  const unit = procUnitState(pid, entryPidStart(entry), entry.agentId)
+  if (unit !== 'dead') {
     touchWorkMarker(dir, entry.agentId)
     return 'running'
   }
@@ -2260,42 +2284,113 @@ export function makeNativeConnector(ctx: ConnectorCtx, env: AgentConnectorEnv): 
       return toInfo(dir, agentsHome(dir), hit[0], hit[1])
     },
 
-    async stop(id: string): Promise<void> {
+    async stop(id: string): Promise<StopResult> {
       const hit = findEntry(id)
       if (!hit) {
-        return // idempotent — gone is the desired end state
+        return { verdict: 'stopped' } // idempotent — gone is the desired end state
       }
       const [molStep, entry] = hit
       const pid = typeof entry.pid === 'number' ? entry.pid : undefined
-      if (pid !== undefined && pidAlive(pid, entryPidStart(entry))) {
-        try {
-          process.kill(-pid, 'SIGTERM') // detached → own process group
-        } catch {
-          // No fallback to kill(pid): a native child is always its own
-          // group leader, so a failed group signal means the pid was
-          // recycled by a non-leader — signaling it would hit an
-          // unrelated process.
-        }
+      const start = entryPidStart(entry)
+      const agentId = typeof entry.agentId === 'string' ? entry.agentId : undefined
+      const unit = () => procUnitState(pid, start, agentId)
+      let signalErr: string | undefined
+      if (unit() !== 'dead') {
+        // signals run inside the registry lock: the generation check
+        // and the kills are one critical section — a respawn cannot
+        // land between them and catch a signal meant for the old run,
+        // and dedup cannot admit a spawn while the unit reads live
+        // (bro-l8c4f.3)
+        withAgentRegistryLock(dir, () => {
+          const cur = readAgentRegistry(dir)[molStep]
+          if (
+            cur === undefined ||
+            cur.agentId !== entry.agentId ||
+            cur.spawnedAt !== entry.spawnedAt
+          ) {
+            return // a new generation owns the step — nothing of ours to signal
+          }
+          const scan = procUnitScan(pid, agentId)
+          const members = scan === 'unknown' ? [] : scan.members
+          // the group signal only goes to a group proven ours — the
+          // pinned leader alive, or members still sitting in its
+          // process group. A recycled pgid could satisfy
+          // kill(-pid, 0) without being this unit; a sid-matched
+          // member cannot lie.
+          if (pid !== undefined && (pidAlive(pid, start) || members.some((m) => m.inGroup))) {
+            try {
+              process.kill(-pid, 'SIGTERM') // detached → own process group
+            } catch (err) {
+              // ESRCH raced dead — the wait below decides; anything
+              // else is a signal that did not land and must be reported
+              if ((err as NodeJS.ErrnoException).code !== 'ESRCH') {
+                signalErr = err instanceof Error ? err.message : String(err)
+              }
+            }
+          }
+          for (const m of members) {
+            // same-session members in another pgrp never felt the
+            // group signal — re-verify sid immediately before the
+            // per-pid kill so a recycled pid never eats our TERM
+            if (!m.inGroup && pid !== undefined && procSessionId(m.pid) === pid) {
+              try {
+                process.kill(m.pid, 'SIGTERM')
+              } catch {
+                // raced dead — the unit probe is the verdict
+              }
+            }
+          }
+          for (const p of scan === 'unknown' ? [] : scan.escapees) {
+            // setsid'd descendants keep the inherited BRO_AGENT_ID
+            // pin — re-verify it before signaling for the same
+            // pid-reuse reason
+            if (agentId !== undefined && procHasBadge(p, agentId)) {
+              try {
+                process.kill(p, 'SIGTERM')
+              } catch {
+                // raced dead — the unit probe is the verdict
+              }
+            }
+          }
+        })
         // let the signal land before recording the stop — `stopped` on a
-        // still-living pid would let a respawn run alongside the dying
-        // agent (nativeState reports live pids as running regardless)
+        // still-living unit would let a respawn run alongside the dying
+        // agent. The unit, not the wrapper, is the wait (bro-l8c4f.3).
         const deadline = Date.now() + 2_000
-        while (pidAlive(pid, entryPidStart(entry)) && Date.now() < deadline) {
+        let probe = unit()
+        while (probe !== 'dead' && Date.now() < deadline) {
           await new Promise((r) => setTimeout(r, 25))
+          probe = unit()
+        }
+        if (probe !== 'dead') {
+          return {
+            verdict: probe === 'unknown' ? 'unverified' : 'timeout',
+            detail: signalErr ?? nativeSurvivors(pid, agentId),
+          }
         }
       }
-      // a respawn during the kill wait re-probes and re-pins the entry
-      // under the registry lock — re-verify under the SAME lock or
-      // 'stopped' + the marker drop land on a live, respawned entry
-      withAgentRegistryLock(dir, () => {
+      // generation + unit re-verified under the SAME lock as the stamp —
+      // a respawn during the wait re-pins the entry and must not inherit
+      // the marker. If the generation changed, the unit we watched is
+      // provably dead: dedup cannot admit a spawn while it reads live.
+      return withAgentRegistryLock(dir, (): StopResult => {
         const cur = readAgentRegistry(dir)[molStep]
         if (
           cur === undefined ||
           cur.agentId !== entry.agentId ||
-          cur.spawnedAt !== entry.spawnedAt ||
-          (pid !== undefined && pidAlive(pid, entryPidStart(entry)))
+          cur.spawnedAt !== entry.spawnedAt
         ) {
-          return // respawned or still alive — the live run owns the entry
+          return {
+            verdict: 'stopped',
+            detail: 'the step respawned during the stop — the new run owns the entry',
+          }
+        }
+        const probe = unit()
+        if (probe !== 'dead') {
+          return {
+            verdict: probe === 'unknown' ? 'unverified' : 'timeout',
+            detail: signalErr ?? nativeSurvivors(pid, agentId),
+          }
         }
         try {
           patchAgentRegistry(dir, molStep, { stopped: true })
@@ -2303,6 +2398,7 @@ export function makeNativeConnector(ctx: ConnectorCtx, env: AgentConnectorEnv): 
           // the marker removal below still records intent
         }
         dropWorkMarker(dir, molStep, entry)
+        return { verdict: 'stopped' }
       })
     },
 
@@ -2642,10 +2738,10 @@ export function makeTmuxConnector(ctx: ConnectorCtx, env: AgentConnectorEnv): Ag
       return toTmuxInfo(socket, dir, agentsHome(dir), hit[0], hit[1])
     },
 
-    async stop(id: string): Promise<void> {
+    async stop(id: string): Promise<StopResult> {
       const hit = findEntry(id)
       if (!hit) {
-        return // idempotent — gone is the desired end state
+        return { verdict: 'stopped' } // idempotent — gone is the desired end state
       }
       const [molStep, entry] = hit
       const name = tmuxSessionName(entry)
@@ -2663,25 +2759,37 @@ export function makeTmuxConnector(ctx: ConnectorCtx, env: AgentConnectorEnv): Ag
       }
       // a respawn during the kill wait re-probes and re-pins the entry
       // under the registry lock — re-verify under the SAME lock or
-      // 'stopped' + the marker drop land on a live, respawned entry
-      withAgentRegistryLock(dir, () => {
+      // 'stopped' + the marker drop land on a live, respawned entry.
+      // The verdict rides the return (bro-l8c4f.3): a live or
+      // unverifiable session must not report a clean stop.
+      return withAgentRegistryLock(dir, (): StopResult => {
         const cur = readAgentRegistry(dir)[molStep]
         if (
           cur === undefined ||
           cur.agentId !== entry.agentId ||
           cur.spawnedAt !== entry.spawnedAt
         ) {
-          return // respawned — the live run owns the entry
+          return {
+            verdict: 'stopped',
+            detail: 'the step respawned during the stop — the new run owns the entry',
+          }
         }
         if (name !== undefined) {
           const p = tmuxProbe(socket, name)
           if (p.live === 'running') {
-            return // still alive — the live run owns the entry
+            return {
+              verdict: 'timeout',
+              detail: `session ${name} survived kill-session`,
+            }
           }
           if (p.live === 'unknown') {
             // an unverifiable probe must not record 'stopped' on a
-            // session that may still be live — fail loudly instead
-            throw new Error(`cannot verify ${id}'s tmux session stopped — ${p.err}`)
+            // session that may still be live — the verdict, not a
+            // stamp, says so
+            return {
+              verdict: 'unverified',
+              detail: `cannot verify ${id}'s tmux session stopped — ${p.err}`,
+            }
           }
         }
         try {
@@ -2690,6 +2798,7 @@ export function makeTmuxConnector(ctx: ConnectorCtx, env: AgentConnectorEnv): Ag
           // the marker removal below still records intent
         }
         dropWorkMarker(dir, molStep, entry)
+        return { verdict: 'stopped' }
       })
     },
 
@@ -3300,25 +3409,44 @@ export function makeGascityConnector(ctx: ConnectorCtx, env: AgentConnectorEnv):
       return toInfo(molStep, entry, sessions, 'lost')
     },
 
-    async stop(id: string): Promise<void> {
+    async stop(id: string): Promise<StopResult> {
       const hit = findEntry(id)
       if (!hit) {
-        return // idempotent — gone is the desired end state
+        return { verdict: 'stopped' } // idempotent — gone is the desired end state
       }
       const [molStep, entry] = hit
       const city = configDir()
+      let res: StopResult = { verdict: 'stopped' }
       if (city !== null && entry.stopped !== true) {
         closeGcSession(
           city,
           typeof entry.sessionId === 'string' ? entry.sessionId : molStep,
           molStep
         )
+        // `session close` is delivered, the supervisor owns the reap —
+        // the session list decides what is confirmable (bro-l8c4f.3)
+        const { sessions, err } = listGcSessions(city)
+        if (sessions === undefined) {
+          res = {
+            verdict: 'unverified',
+            detail: `cannot read gc sessions after close — ${err ?? 'unreachable'}`,
+          }
+        } else {
+          const s = gcSessionFor(entry, molStep, sessions)
+          if (s !== undefined && gcState(s) !== 'exited') {
+            res = {
+              verdict: 'stopping',
+              detail: 'session close accepted — the gc supervisor owns the reap',
+            }
+          }
+        }
       }
       try {
         patchAgentRegistry(dir, molStep, { stopped: true })
       } catch {
         // stop intent is recorded best-effort, same as native
       }
+      return res
     },
 
     /** supervisor:'required' ⇒ up/down are `gc start`/`gc stop <city>`
@@ -4038,10 +4166,10 @@ export function makeDockerConnector(ctx: ConnectorCtx, env: AgentConnectorEnv): 
       return toDockerInfo(dir, agentsHome(dir), hit[0], hit[1])
     },
 
-    async stop(id: string): Promise<void> {
+    async stop(id: string): Promise<StopResult> {
       const hit = findEntry(id)
       if (!hit) {
-        return // idempotent — gone is the desired end state
+        return { verdict: 'stopped' } // idempotent — gone is the desired end state
       }
       const [molStep, entry] = hit
       const name = dockerContainerName(entry)
@@ -4063,25 +4191,37 @@ export function makeDockerConnector(ctx: ConnectorCtx, env: AgentConnectorEnv): 
       }
       // a respawn during the rm re-probes and re-pins the entry under
       // the registry lock — re-verify under the SAME lock or 'stopped'
-      // lands on a live, respawned entry
-      withAgentRegistryLock(dir, () => {
+      // lands on a live, respawned entry. The verdict rides the return
+      // (bro-l8c4f.3): a live or unverifiable container must not
+      // report a clean stop.
+      return withAgentRegistryLock(dir, (): StopResult => {
         const cur = readAgentRegistry(dir)[molStep]
         if (
           cur === undefined ||
           cur.agentId !== entry.agentId ||
           cur.spawnedAt !== entry.spawnedAt
         ) {
-          return // respawned — the live run owns the entry
+          return {
+            verdict: 'stopped',
+            detail: 'the step respawned during the stop — the new run owns the entry',
+          }
         }
         if (name !== undefined) {
           const p = dockerInspect(name)
           if (p.live === 'running') {
-            return // still alive — the live run owns the entry
+            return {
+              verdict: 'timeout',
+              detail: `container ${name} survived docker rm -f`,
+            }
           }
           if (p.live === 'unknown') {
             // an unverifiable probe must not record 'stopped' on a
-            // container that may still be live — fail loudly instead
-            throw new Error(`cannot verify ${id}'s container stopped — ${p.err}`)
+            // container that may still be live — the verdict, not a
+            // stamp, says so
+            return {
+              verdict: 'unverified',
+              detail: `cannot verify ${id}'s container stopped — ${p.err}`,
+            }
           }
         }
         try {
@@ -4090,6 +4230,7 @@ export function makeDockerConnector(ctx: ConnectorCtx, env: AgentConnectorEnv): 
           // the marker removal below still records intent
         }
         dropWorkMarker(dir, molStep, entry)
+        return { verdict: 'stopped' }
       })
     },
 
@@ -4722,39 +4863,45 @@ export function makeCopilotConnector(ctx: ConnectorCtx, env: AgentConnectorEnv):
    *  cancel exists, the backing Actions run is the only handle. A live
    *  task with a workflow run gets POST cancel; the re-read then
    *  reports a survivor or an unverifiable read (cancel is async
-   *  server-side) — silence would hide it. */
-  const copilotCancelRemote = (molStep: string, entry: AgentRegistryEntry, taskId: string): void => {
+   *  server-side) — silence would hide it. The verdict names what we
+   *  can confirm: 'stopped' is a verified non-live task, 'stopping' a
+   *  delivered cancel we cannot confirm, 'unverified' a read that
+   *  never answered (bro-l8c4f.3). */
+  const copilotCancelRemote = (molStep: string, entry: AgentRegistryEntry, taskId: string): StopResult => {
     const f = copilotFetchTask(taskId)
     if (!f.ok) {
-      console.error(
-        `warning: cannot verify copilot task ${taskId} — ${f.err ?? 'gh api failed'}; ` +
-          `the registry still records stopped; if the session survives, stop it in ` +
-          `the web UI (https://${ghHost()}/copilot/agents)`
-      )
-      return
+      const detail =
+        `cannot verify copilot task ${taskId} — ${f.err ?? 'gh api failed'}; ` +
+        `if the session survives, stop it in the web UI (https://${ghHost()}/copilot/agents)`
+      console.error(`warning: ${detail}`)
+      return { verdict: 'unverified', detail }
     }
     if (!COPILOT_LIVE_STATES.has(copilotTaskState(f.task!))) {
-      return
+      return { verdict: 'stopped' }
     }
     const repo = copilotEntryRepo(entry)
     const runId = copilotLatestSession(f.task!)?.workflow_run_id
-    if (repo !== undefined && typeof runId === 'number') {
-      ghRun(['api', '-X', 'POST', `repos/${repo}/actions/runs/${runId}/cancel`])
-    }
+    const cancelSent =
+      repo !== undefined &&
+      typeof runId === 'number' &&
+      ghRun(['api', '-X', 'POST', `repos/${repo}/actions/runs/${runId}/cancel`]).code === 0
     const after = copilotFetchTask(taskId)
-    if (!after.ok || COPILOT_LIVE_STATES.has(copilotTaskState(after.task!))) {
-      const url =
-        copilotSessionUrl(repo, entry.pr, entry.sessionId) ??
-        `https://${ghHost()}/copilot/agents`
-      console.error(
-        after.ok
-          ? `warning: copilot session for ${molStep} is still live — there is no ` +
-            `CLI/REST cancel; stop it in the web UI (${url})`
-          : `warning: cannot re-check copilot task ${taskId} after cancel — ` +
-            `${after.err ?? 'gh api failed'}; the session may still be live — ` +
-            `stop it in the web UI (${url})`
-      )
+    if (after.ok && !COPILOT_LIVE_STATES.has(copilotTaskState(after.task!))) {
+      return { verdict: 'stopped' }
     }
+    const url =
+      copilotSessionUrl(repo, entry.pr, entry.sessionId) ??
+      `https://${ghHost()}/copilot/agents`
+    const detail = after.ok
+      ? `copilot session for ${molStep} is still live — there is no ` +
+        `CLI/REST cancel; stop it in the web UI (${url})`
+      : `cannot re-check copilot task ${taskId} after cancel — ` +
+        `${after.err ?? 'gh api failed'}; the session may still be live — ` +
+        `stop it in the web UI (${url})`
+    console.error(`warning: ${detail}`)
+    // 'stopping' when the cancel POST landed — 'unverified' when even
+    // the request cannot be shown to have reached GitHub
+    return { verdict: after.ok || cancelSent ? 'stopping' : 'unverified', detail }
   }
 
   return {
@@ -4921,22 +5068,23 @@ export function makeCopilotConnector(ctx: ConnectorCtx, env: AgentConnectorEnv):
       return toCopilotInfo(dir, agentsHome(dir), hit[0], hit[1])
     },
 
-    async stop(id: string): Promise<void> {
+    async stop(id: string): Promise<StopResult> {
       const hit = findEntry(id)
       if (!hit) {
-        return // idempotent — gone is the desired end state
+        return { verdict: 'stopped' } // idempotent — gone is the desired end state
       }
       const [molStep, entry] = hit
       const taskId = copilotTaskIdOf(entry)
+      let res: StopResult = { verdict: 'stopped' }
       if (entry.stopped !== true && taskId !== undefined) {
-        copilotCancelRemote(molStep, entry, taskId)
+        res = copilotCancelRemote(molStep, entry, taskId)
       }
       // a respawn during the cancel re-probes and re-pins the entry
       // under the registry lock — re-verify under the SAME lock or
       // 'stopped' lands on a live, respawned entry. Remote-liveness
       // can't gate the stamp the way docker's container probe does —
       // cancel is best-effort by contract, so the stamp records intent
-      // and the warn above reports the survivor
+      // and the VERDICT reports the survivor (bro-l8c4f.3)
       withAgentRegistryLock(dir, () => {
         const cur = readAgentRegistry(dir)[molStep]
         if (
@@ -4953,6 +5101,7 @@ export function makeCopilotConnector(ctx: ConnectorCtx, env: AgentConnectorEnv):
         }
         dropWorkMarker(dir, molStep, entry)
       })
+      return res
     },
 
     capabilities: () => ({ attach: true, respawn: true, supervisor: 'none' }),
@@ -5055,27 +5204,44 @@ export function makeDevinConnector(ctx: ConnectorCtx, env: AgentConnectorEnv): A
       return Promise.resolve(hit)
     },
 
-    stop(id: string): Promise<void> { // NOSONAR — connector contract is async; the signal is sync
+    async stop(id: string): Promise<StopResult> {
       const hit = find(id)
       if (hit === undefined) {
-        return Promise.resolve() // idempotent — gone is the desired end state
+        return { verdict: 'stopped' } // idempotent — gone is the desired end state
+      }
+      if (hit.pid === undefined) {
+        return {
+          verdict: 'unverified',
+          detail: `session ${id} has no local pid to signal`,
+        }
       }
       // the session process itself — devin sessions are not detached
       // group leaders the way native spawns are, so no -pid group signal
       try {
-        if (hit.pid !== undefined) {
-          process.kill(hit.pid, 'SIGTERM')
-        }
+        process.kill(hit.pid, 'SIGTERM')
       } catch (err) {
         // ESRCH — already dead between the scan and the signal, the
         // desired end. Anything else (EPERM: alive but not ours to
         // signal) is a stop that did NOT happen — report it, don't
         // claim it
-        if ((err as NodeJS.ErrnoException).code !== 'ESRCH') {
-          return Promise.reject(err as Error)
+        if ((err as NodeJS.ErrnoException).code === 'ESRCH') {
+          return { verdict: 'stopped' }
+        }
+        return {
+          verdict: 'unverified',
+          detail: `cannot signal ${id}: ${err instanceof Error ? err.message : String(err)}`,
         }
       }
-      return Promise.resolve()
+      // TERM landing is not death — wait the same bounded budget the
+      // local connectors use, then say what the pid actually did
+      // (bro-l8c4f.3)
+      const deadline = Date.now() + 2_000
+      while (pidAlive(hit.pid) && Date.now() < deadline) {
+        await new Promise((r) => setTimeout(r, 25))
+      }
+      return pidAlive(hit.pid)
+        ? { verdict: 'timeout', detail: `session pid ${hit.pid} survived SIGTERM` }
+        : { verdict: 'stopped' }
     },
 
     capabilities: () => ({ supervisor: 'none' }),

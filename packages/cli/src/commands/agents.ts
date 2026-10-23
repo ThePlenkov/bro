@@ -75,6 +75,8 @@ import {
   type AgentState,
   type DiscoveredSession,
   type SpawnSpec,
+  type StopResult,
+  type StopVerdict,
 } from '@broject/core'
 import type { ExitCode } from '@broject/core'
 import type { AcpSeam, FetchFn } from '@broject/providers'
@@ -728,13 +730,25 @@ export function spawnStepAgent(
 export interface StopOutcome {
   found: boolean
   degraded: string[]
-  /** live state at stop time — can differ from the list() snapshot */
+  /** live state at stop time — can differ from the list() snapshot;
+   *  post-stop truth when the backend re-reads after a failed verdict */
   agent?: AgentInfo
   backend?: string
-  /** true when stop() ran — always true on a found agent; the connector
-   *  binds to the CURRENT registry entry, so the call also stops a
-   *  respawn that landed between our status read and here */
+  /** true iff the connector CONFIRMED the execution unit is gone —
+   *  verdict 'stopped'. A connector's stop() resolving means the
+   *  request landed, not that the worker died: a TERM-resistant unit
+   *  survives the bounded kill-wait (bro-l8c4f.3) */
   stopped: boolean
+  /** the connector's post-stop verdict: 'stopped' the unit is
+   *  verifiably gone; 'timeout' it survived the bounded wait;
+   *  'stopping' the request landed but this backend cannot confirm
+   *  death; 'unverified' the connector cannot say either way. Absent
+   *  only from connectors predating StopResult — their resolved stop()
+   *  is the old "ran == done" contract */
+  verdict?: StopVerdict
+  /** connector-side detail — surviving pids, a session URL, a probe
+   *  error — for the operator surfaces */
+  detail?: string
   /** the agent already read terminal when we looked — stop() still ran
    *  (idempotent), the flag just says there was nothing live to kill */
   terminal?: boolean
@@ -778,13 +792,35 @@ export async function stopAgent(
     current.state === 'blocked'
   const respawned =
     current.pid !== hit.agent.pid ? { from: hit.agent.pid, to: current.pid } : undefined
-  await hit.conn.stop(hit.agent.id)
+  // the verdict belongs to the connector — only the backend knows what
+  // "the unit is gone" means for its unit (bro-l8c4f.3). A THROWN
+  // stop is a request that may not have landed — unverified, so the
+  // surfaces refuse a clean verdict instead of crashing to a 500.
+  const res: StopResult | void = await hit.conn.stop(hit.agent.id).catch(
+    (err: unknown): StopResult => ({
+      verdict: 'unverified',
+      detail: err instanceof Error ? err.message : String(err),
+    })
+  )
+  const verdict: StopVerdict = res === undefined ? 'stopped' : res.verdict
+  // on a non-clean verdict the reported row should be the post-stop
+  // truth where the backend can still answer — the survivor's state,
+  // not the stale pre-stop snapshot
+  if (verdict !== 'stopped') {
+    try {
+      current = await hit.conn.status(hit.agent.id)
+    } catch {
+      // gone or unreadable — the verdict already decided
+    }
+  }
   return {
     found: true,
     degraded,
     agent: current,
     backend: hit.conn.name,
-    stopped: true,
+    stopped: verdict === 'stopped',
+    verdict,
+    detail: res === undefined ? undefined : res.detail,
     terminal,
     cleared: current.state === 'blocked' ? true : undefined,
     respawned,
@@ -1203,6 +1239,25 @@ async function cmdDown(dir: string, env: AgentConnectorEnv, argv: string[]): Pro
     return
   }
   const agent = outcome.agent!
+  // truthfulness (bro-l8c4f.3): only a verified-dead unit may read as
+  // `stopped` — a survivor or an unverifiable death is an error the
+  // operator must see before respawning anything. These checks run
+  // BEFORE the terminal path: a stale 'lost'/'exited' pre-stop read
+  // must not mask a unit that is actually still live.
+  if (outcome.verdict === 'timeout') {
+    die(
+      `down: ${agent.id} (${agent.molStep}, ${outcome.backend}) survived the stop signal — still running` +
+        (outcome.detail !== undefined ? ` (${outcome.detail})` : '') +
+        ` — not safe to respawn`
+    )
+  }
+  if (outcome.verdict === 'unverified') {
+    die(
+      `down: ${agent.id} (${agent.molStep}, ${outcome.backend}) — stop unverified: ` +
+        (outcome.detail ?? `the backend reports ${agent.state}`) +
+        ` — not safe to respawn`
+    )
+  }
   if (outcome.terminal) {
     // a blocked entry is terminal BUT the stop was the manual clear —
     // confirm that, don't report "nothing to stop"
@@ -1218,6 +1273,14 @@ async function cmdDown(dir: string, env: AgentConnectorEnv, argv: string[]): Pro
     console.error(
       `note: ${agent.id} respawned since lookup (pid ${fmt(outcome.respawned.from)} → ${fmt(outcome.respawned.to)}) — stopping current instance`
     )
+  }
+  if (outcome.verdict === 'stopping') {
+    // delivered but unconfirmable by this backend — accepted, not dead
+    console.log(
+      `stopping ${agent.id} (${agent.molStep}, ${outcome.backend})` +
+        (outcome.detail !== undefined ? ` — ${outcome.detail}` : '')
+    )
+    return
   }
   console.log(`stopped ${agent.id} (${agent.molStep}, ${outcome.backend})`)
 }

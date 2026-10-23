@@ -388,6 +388,8 @@ export type {
   SpawnErrorKind,
   SpawnSpec,
   SpawnWorker,
+  StopResult,
+  StopVerdict,
 } from './agents.ts'
 export {
   admitSessionSlot,

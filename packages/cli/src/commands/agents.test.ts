@@ -1414,6 +1414,120 @@ describe('bro agents down <target>', () => {
     }
   })
 
+  test('a TERM-resistant unit is refused `stopped` — and the signal is proven delivered', async () => {
+    // the unit ignores TERM but records receipt: `stopped` must never
+    // print over a live worker, and termseen.txt proves the verdict is
+    // a real delivery, not a no-op stop (bro-l8c4f.3)
+    const fx = fixture([{ id: 'fx-1', status: 'open' }])
+    try {
+      writeFileSync(
+        join(fx.main, 'bro.config.json'),
+        JSON.stringify({
+          agents: {
+            native: {
+              command: `trap 'touch termseen.txt' TERM; while :; do sleep 60; done # {promptFile}`,
+            },
+          },
+        })
+      )
+      const up = await agents([
+        'up', 'fx-1', '--worktree', fx.main, '--beads-dir', fx.beads,
+        '--prompt-file', fx.promptFile(LONG_RUN),
+      ])
+      assert.equal(up.code, 0)
+
+      const down = await agents(['down', 'fx-1'])
+      assert.equal(down.code, 1)
+      assert.match(down.err.join('\n'), /survived the stop signal — still running/)
+      assert.doesNotMatch(down.out.join('\n'), /^stopped /m)
+      // the bounded wait expired with the unit live — the TERM really
+      // landed (the trap wrote its receipt), it just did not kill
+      assert.ok(existsSync(join(fx.main, 'termseen.txt')))
+      // no stopped marker — the live unit still owns the entry
+      assert.notEqual(readAgentRegistry(fx.main)['fx-1']?.stopped, true)
+      const st = await agents(['status', 'fx-1'])
+      assert.match(st.out.join('\n'), /state\s+running/)
+      // a second down is the same verdict, not a stale success
+      const again = await agents(['down', 'fx-1'])
+      assert.equal(again.code, 1)
+      assert.match(again.err.join('\n'), /survived the stop signal/)
+    } finally {
+      fx.restore()
+    }
+  })
+
+  test('a dead wrapper with a live descendant is not respawn-safe', async () => {
+    // the wrapper dies on TERM while the descendant ignored it before
+    // exec — the whole unit, not the leader pid, stands between this
+    // step and a `stopped` marker (bro-l8c4f.3)
+    const fx = fixture([{ id: 'fx-1', status: 'open' }])
+    try {
+      writeFileSync(
+        join(fx.main, 'bro.config.json'),
+        JSON.stringify({
+          agents: { native: { command: `(trap '' TERM; exec sleep 30) & wait $! # {promptFile}` } },
+        })
+      )
+      const up = await agents([
+        'up', 'fx-1', '--worktree', fx.main, '--beads-dir', fx.beads,
+        '--prompt-file', fx.promptFile(LONG_RUN),
+      ])
+      assert.equal(up.code, 0)
+
+      const down = await agents(['down', 'fx-1'])
+      assert.equal(down.code, 1)
+      assert.match(down.err.join('\n'), /survived the stop signal|stop unverified/)
+      assert.doesNotMatch(down.out.join('\n'), /^stopped /m)
+      assert.notEqual(readAgentRegistry(fx.main)['fx-1']?.stopped, true)
+      // the entry reads the unit: 'running', never 'lost' — so a
+      // respawn refuses to run beside the survivor
+      const st = await agents(['status', 'fx-1'])
+      assert.match(st.out.join('\n'), /state\s+running/)
+      const again = await agents([
+        'up', 'fx-1', '--worktree', fx.main, '--beads-dir', fx.beads,
+        '--prompt-file', fx.promptFile(LONG_RUN),
+      ])
+      assert.equal(again.code, 1)
+      assert.match(again.err.join('\n'), /already has a live agent/)
+    } finally {
+      fx.restore()
+    }
+  })
+
+  test(
+    'a setsid-escaped descendant still holds the unit occupied',
+    { skip: !existsSync('/proc') || process.platform !== 'linux' },
+    async () => {
+      // setsid broke the session link — only the inherited BRO_AGENT_ID
+      // badge still attributes the escapee to this run (bro-l8c4f.3)
+      const fx = fixture([{ id: 'fx-1', status: 'open' }])
+      try {
+        writeFileSync(
+          join(fx.main, 'bro.config.json'),
+          JSON.stringify({
+            agents: {
+              native: { command: `(trap '' TERM; setsid sleep 30) & wait $! # {promptFile}` },
+            },
+          })
+        )
+        const up = await agents([
+          'up', 'fx-1', '--worktree', fx.main, '--beads-dir', fx.beads,
+          '--prompt-file', fx.promptFile(LONG_RUN),
+        ])
+        assert.equal(up.code, 0)
+
+        const down = await agents(['down', 'fx-1'])
+        assert.equal(down.code, 1)
+        assert.match(down.err.join('\n'), /survived the stop signal|stop unverified/)
+        assert.notEqual(readAgentRegistry(fx.main)['fx-1']?.stopped, true)
+        const st = await agents(['status', 'fx-1'])
+        assert.match(st.out.join('\n'), /state\s+running/)
+      } finally {
+        fx.restore()
+      }
+    }
+  )
+
   test("a status() that drops the pid renders 'unknown' in the respawn note", async () => {
     // a respawn between list() and status() reuses the agentId with a new
     // handle — but a connector can also just stop reporting a pid; the

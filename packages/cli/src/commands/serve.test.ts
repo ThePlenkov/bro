@@ -309,6 +309,86 @@ describe('serve — routes', () => {
     assert.equal(blind.status, 503)
   })
 
+  test('DELETE /api/v1/agents/<ref> — verdict refuses 200 on an unconfirmed stop', async () => {
+    // the unit survived the signal — 409, never a 200 success envelope
+    const alive = await route(
+      'DELETE',
+      '/api/v1/agents/native-aa11',
+      undefined,
+      deps({
+        stop: async () => ({
+          found: true,
+          degraded: [],
+          agent: fakeAgent,
+          stopped: false,
+          verdict: 'timeout' as const,
+          detail: 'pid 4242 survived the stop signal',
+        }),
+      })
+    )
+    assert.equal(alive.status, 409)
+    const aliveBody = alive.body as { stopped: boolean; verdict?: string; error: string; detail?: string }
+    assert.equal(aliveBody.stopped, false)
+    assert.equal(aliveBody.verdict, 'timeout')
+    assert.match(aliveBody.error, /survived the stop signal|stop unverified/)
+
+    // same shape for a connector that cannot say what happened
+    const unverified = await route(
+      'DELETE',
+      '/api/v1/agents/native-aa11',
+      undefined,
+      deps({
+        stop: async () => ({
+          found: true,
+          degraded: [],
+          agent: fakeAgent,
+          stopped: false,
+          verdict: 'unverified' as const,
+          detail: 'probe failed',
+        }),
+      })
+    )
+    assert.equal(unverified.status, 409)
+
+    // a delivered-but-unconfirmed stop is accepted, not failed
+    const stopping = await route(
+      'DELETE',
+      '/api/v1/agents/native-aa11',
+      undefined,
+      deps({
+        stop: async () => ({
+          found: true,
+          degraded: [],
+          agent: fakeAgent,
+          stopped: false,
+          verdict: 'stopping' as const,
+          detail: 'cancel requested',
+        }),
+      })
+    )
+    assert.equal(stopping.status, 202)
+    const stoppingBody = stopping.body as { stopped: boolean; verdict?: string }
+    assert.equal(stoppingBody.stopped, false)
+    assert.equal(stoppingBody.verdict, 'stopping')
+
+    // a legacy verdict-less stop keeps the old contract — resolved = stopped
+    const legacy = await route(
+      'DELETE',
+      '/api/v1/agents/native-aa11',
+      undefined,
+      deps({
+        stop: async () => ({
+          found: true,
+          degraded: [],
+          agent: fakeAgent,
+          stopped: true,
+        }),
+      })
+    )
+    assert.equal(legacy.status, 200)
+    assert.equal((legacy.body as { stopped: boolean }).stopped, true)
+  })
+
   test('POST /api/v1/agents — 201 on spawn, 409 on SpawnError, 400 on input errors', async () => {
     const ok = await route('POST', '/api/v1/agents', JSON.stringify({ molStep: 'fx-1' }))
     assert.equal(ok.status, 201)

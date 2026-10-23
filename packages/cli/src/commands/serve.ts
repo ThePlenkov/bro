@@ -770,6 +770,47 @@ async function routeAgentGet(ref: string, deps: ServeDeps): Promise<ServeRespons
   }
 }
 
+/** A stop that did not reach verified death is not a 200 a client
+ *  could read as safe-to-respawn (bro-l8c4f.3): a survivor or an
+ *  unverifiable death is 409; a delivered-but-unconfirmable stop is
+ *  202 — accepted, not enacted. */
+function stopVerdictResponse(ref: string, outcome: StopOutcome): ServeResponse | undefined {
+  if (outcome.verdict === 'timeout' || outcome.verdict === 'unverified') {
+    return {
+      status: 409,
+      body: {
+        error:
+          outcome.verdict === 'timeout'
+            ? `"${ref}" survived the stop signal — still running`
+            : `"${ref}" — stop unverified` +
+              (outcome.detail !== undefined
+                ? `: ${outcome.detail}`
+                : outcome.agent !== undefined
+                  ? `, the backend reports ${outcome.agent.state}`
+                  : ''),
+        agent: outcome.agent,
+        stopped: false,
+        verdict: outcome.verdict,
+        ...(outcome.detail !== undefined ? { detail: outcome.detail } : {}),
+        ...(outcome.respawned !== undefined ? { respawned: outcome.respawned } : {}),
+      },
+    }
+  }
+  if (outcome.verdict === 'stopping') {
+    return {
+      status: 202,
+      body: {
+        agent: outcome.agent,
+        stopped: false,
+        verdict: 'stopping',
+        ...(outcome.detail !== undefined ? { detail: outcome.detail } : {}),
+        ...(outcome.respawned !== undefined ? { respawned: outcome.respawned } : {}),
+      },
+    }
+  }
+  return undefined
+}
+
 async function routeAgentDelete(ref: string, deps: ServeDeps): Promise<ServeResponse> {
   const outcome = await deps.stop(ref)
   if (!outcome.found) {
@@ -784,6 +825,10 @@ async function routeAgentDelete(ref: string, deps: ServeDeps): Promise<ServeResp
       }
     }
     return { status: 404, body: { error: `no agent "${ref}"` } }
+  }
+  const refused = stopVerdictResponse(ref, outcome)
+  if (refused !== undefined) {
+    return refused
   }
   return {
     status: 200,
