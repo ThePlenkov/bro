@@ -55,13 +55,17 @@ export async function bundleAdapter(entry: string): Promise<string> {
       input: { bro: entry },
       platform: 'node',
     })
-    await bundle.write({
-      dir: outDir,
-      format: 'esm',
-      entryFileNames: '[name].ts',
-      banner: SENTINEL,
-    })
-    await bundle.close()
+    try {
+      await bundle.write({
+        dir: outDir,
+        format: 'esm',
+        entryFileNames: '[name].ts',
+        banner: SENTINEL,
+      })
+    } finally {
+      // a rejected write must not leak the bundle handle
+      await bundle.close()
+    }
     return readFileSync(join(outDir, 'bro.ts'), 'utf8')
   } finally {
     rmSync(outDir, { recursive: true, force: true })
