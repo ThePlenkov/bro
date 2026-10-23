@@ -952,13 +952,18 @@ export async function acpOpen(
     close()
     // spawn's 'error' event is async — a binary that can't exec is only
     // knowable here, once the handshake on the dead transport has failed
-    if (err instanceof AcpConfigError) {
+    if (err instanceof JudgeUnavailable || err instanceof AcpConfigError) {
       fail(err)
     }
     if (spawnError() !== undefined) {
       fail(new AcpConfigError(`${by}: cannot exec acp command — ${spawnError()}`))
     }
-    fail(err)
+    // a live child that still failed the handshake — dead transport,
+    // protocol violation — is an availability fault, same vocabulary
+    // withAcp/acpPooledTurn use: JudgeUnavailable, never a raw error
+    const stderr = tail()
+    const detail = stderr === '' ? '' : ` (${stderr})`
+    fail(new JudgeUnavailable(`acp ${by} unavailable — ${errMsg(err)}${detail}`))
   }
 }
 

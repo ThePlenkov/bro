@@ -43,13 +43,17 @@ export async function delegateWait(
   const name = waitProviderName(sel.req, sel.routed)
   const entry = acpEntry(env, name, sel.req.provider !== undefined)
   refuseWalled(dir, name)
+  // resolve the prompt before the peer exists — a bad request must not
+  // spawn (and then tear down) a provider process, nor burn the
+  // shared deadline on acpOpen for an ask that can never run
+  const prompt = delegatePrompt(sel.req)
   const deadline = waitDeadline(sel.req.timeoutSec)
   const wire = waitWire(sel, dir, opts)
   const peer = await acpOpen(`delegate:${name}`, entry, wire, deadline)
   const onExit = (): void => peer.close()
   process.once('exit', onExit)
   try {
-    const r = await acpPooledTurn(peer, entry, wire, delegatePrompt(sel.req), deadline, {
+    const r = await acpPooledTurn(peer, entry, wire, prompt, deadline, {
       by: 'delegate',
       requestModel: sel.req.model,
       signal: opts.acp?.signal,

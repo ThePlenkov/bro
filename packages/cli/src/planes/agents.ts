@@ -17,6 +17,7 @@ import {
   type PlaneDescriptor,
   type Worker,
 } from '@broject/core'
+import { realpathSync } from 'node:fs'
 import { resolve, sep } from 'node:path'
 import { loadAgentEnv } from '../agent-connectors.ts'
 import { collectAgentBackends, findInBackends, SpawnInputError } from '../commands/agents.ts'
@@ -109,13 +110,22 @@ const isUnavailableErr = (err: unknown): boolean =>
 
 /** The exec boundary reads files with the server's privileges — a
  *  promptFile must resolve inside the project dir or it is an exfil
- *  channel, not a prompt. Rewrites the field to the resolved path. */
+ *  channel, not a prompt. realpath both sides: resolve() normalizes
+ *  `..` but a symlink inside the project still points outside it, and
+ *  readFileSync follows the link. Rewrites the field to the canonical
+ *  path. */
 function promptFileUnder(dir: string, req: DelegateRequest): void {
   if (req.promptFile === undefined) {
     return
   }
-  const resolved = resolve(dir, req.promptFile)
-  const root = resolve(dir)
+  let resolved: string
+  let root: string
+  try {
+    resolved = realpathSync(resolve(dir, req.promptFile))
+    root = realpathSync(dir)
+  } catch {
+    throw new PlaneVerbError('agents', DELEGATE, 'promptFile does not exist or is unreadable')
+  }
   if (resolved !== root && !resolved.startsWith(`${root}${sep}`)) {
     throw new PlaneVerbError('agents', DELEGATE, 'promptFile must resolve inside the project directory')
   }
