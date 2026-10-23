@@ -1986,6 +1986,71 @@ function nativeSurvivors(pid: number | undefined, agentId: string | undefined): 
   return pids.length > 0 ? `surviving pids: ${pids.join(', ')}` : 'the unit still reads live'
 }
 
+/** The non-clean verdict a live or unreadable unit earns — the same
+ *  shape from the post-wait probe and the under-lock re-probe. */
+function nativeUnitRefusal(
+  probe: 'alive' | 'unknown',
+  signalErr: string | undefined,
+  pid: number | undefined,
+  agentId: string | undefined
+): StopResult {
+  return {
+    verdict: probe === 'unknown' ? 'unverified' : 'timeout',
+    detail: signalErr ?? nativeSurvivors(pid, agentId),
+  }
+}
+
+/** One SIGTERM pass over a generation-checked unit — the caller holds
+ *  the registry lock and has proven the entry is still ours, so the
+ *  kills and the check are one critical section a respawn cannot split
+ *  (bro-l8c4f.3). Returns a signal that failed to land, for the
+ *  verdict's detail. */
+function termNativeUnit(
+  pid: number | undefined,
+  start: string | undefined,
+  agentId: string | undefined
+): string | undefined {
+  const scan = procUnitScan(pid, agentId)
+  const members = scan === 'unknown' ? [] : scan.members
+  // the group signal only goes to a group proven ours — the pinned
+  // leader alive, or members still sitting in its process group. A
+  // recycled pgid could satisfy kill(-pid, 0) without being this
+  // unit; a sid-matched member cannot lie.
+  if (pid !== undefined && (pidAlive(pid, start) || members.some((m) => m.inGroup))) {
+    try {
+      process.kill(-pid, 'SIGTERM') // detached → own process group
+    } catch (err) {
+      // ESRCH raced dead — the wait decides; anything else is a
+      // signal that did not land and must be reported
+      if ((err as NodeJS.ErrnoException).code !== 'ESRCH') {
+        return err instanceof Error ? err.message : String(err)
+      }
+    }
+  }
+  // same-session members in another pgrp never felt the group signal,
+  // and setsid'd escapees keep the inherited BRO_AGENT_ID pin — each
+  // per-pid kill re-verifies identity immediately before signaling so
+  // a recycled pid never eats a TERM meant for a dead member
+  const strays = [
+    ...members.filter((m) => !m.inGroup).map((m) => m.pid),
+    ...(scan === 'unknown' ? [] : scan.escapees),
+  ]
+  for (const p of strays) {
+    const ours =
+      pid !== undefined
+        ? procSessionId(p) === pid || (agentId !== undefined && procHasBadge(p, agentId))
+        : agentId !== undefined && procHasBadge(p, agentId)
+    if (ours) {
+      try {
+        process.kill(p, 'SIGTERM')
+      } catch {
+        // raced dead — the unit probe is the verdict
+      }
+    }
+  }
+  return undefined
+}
+
 /** Live state for a registry entry under this backend. */
 function nativeState(dir: string, home: string | null, molStep: string, entry: AgentRegistryEntry): AgentState {
   // liveness first: a 'stopped' marker on a pid that is still alive means
@@ -2294,6 +2359,8 @@ export function makeNativeConnector(ctx: ConnectorCtx, env: AgentConnectorEnv): 
       const start = entryPidStart(entry)
       const agentId = typeof entry.agentId === 'string' ? entry.agentId : undefined
       const unit = () => procUnitState(pid, start, agentId)
+      const sameGeneration = (cur: AgentRegistryEntry | undefined) =>
+        cur !== undefined && cur.agentId === entry.agentId && cur.spawnedAt === entry.spawnedAt
       let signalErr: string | undefined
       if (unit() !== 'dead') {
         // signals run inside the registry lock: the generation check
@@ -2302,55 +2369,8 @@ export function makeNativeConnector(ctx: ConnectorCtx, env: AgentConnectorEnv): 
         // and dedup cannot admit a spawn while the unit reads live
         // (bro-l8c4f.3)
         withAgentRegistryLock(dir, () => {
-          const cur = readAgentRegistry(dir)[molStep]
-          if (
-            cur === undefined ||
-            cur.agentId !== entry.agentId ||
-            cur.spawnedAt !== entry.spawnedAt
-          ) {
-            return // a new generation owns the step — nothing of ours to signal
-          }
-          const scan = procUnitScan(pid, agentId)
-          const members = scan === 'unknown' ? [] : scan.members
-          // the group signal only goes to a group proven ours — the
-          // pinned leader alive, or members still sitting in its
-          // process group. A recycled pgid could satisfy
-          // kill(-pid, 0) without being this unit; a sid-matched
-          // member cannot lie.
-          if (pid !== undefined && (pidAlive(pid, start) || members.some((m) => m.inGroup))) {
-            try {
-              process.kill(-pid, 'SIGTERM') // detached → own process group
-            } catch (err) {
-              // ESRCH raced dead — the wait below decides; anything
-              // else is a signal that did not land and must be reported
-              if ((err as NodeJS.ErrnoException).code !== 'ESRCH') {
-                signalErr = err instanceof Error ? err.message : String(err)
-              }
-            }
-          }
-          for (const m of members) {
-            // same-session members in another pgrp never felt the
-            // group signal — re-verify sid immediately before the
-            // per-pid kill so a recycled pid never eats our TERM
-            if (!m.inGroup && pid !== undefined && procSessionId(m.pid) === pid) {
-              try {
-                process.kill(m.pid, 'SIGTERM')
-              } catch {
-                // raced dead — the unit probe is the verdict
-              }
-            }
-          }
-          for (const p of scan === 'unknown' ? [] : scan.escapees) {
-            // setsid'd descendants keep the inherited BRO_AGENT_ID
-            // pin — re-verify it before signaling for the same
-            // pid-reuse reason
-            if (agentId !== undefined && procHasBadge(p, agentId)) {
-              try {
-                process.kill(p, 'SIGTERM')
-              } catch {
-                // raced dead — the unit probe is the verdict
-              }
-            }
+          if (sameGeneration(readAgentRegistry(dir)[molStep])) {
+            signalErr = termNativeUnit(pid, start, agentId)
           }
         })
         // let the signal land before recording the stop — `stopped` on a
@@ -2363,10 +2383,7 @@ export function makeNativeConnector(ctx: ConnectorCtx, env: AgentConnectorEnv): 
           probe = unit()
         }
         if (probe !== 'dead') {
-          return {
-            verdict: probe === 'unknown' ? 'unverified' : 'timeout',
-            detail: signalErr ?? nativeSurvivors(pid, agentId),
-          }
+          return nativeUnitRefusal(probe, signalErr, pid, agentId)
         }
       }
       // generation + unit re-verified under the SAME lock as the stamp —
@@ -2375,11 +2392,7 @@ export function makeNativeConnector(ctx: ConnectorCtx, env: AgentConnectorEnv): 
       // provably dead: dedup cannot admit a spawn while it reads live.
       return withAgentRegistryLock(dir, (): StopResult => {
         const cur = readAgentRegistry(dir)[molStep]
-        if (
-          cur === undefined ||
-          cur.agentId !== entry.agentId ||
-          cur.spawnedAt !== entry.spawnedAt
-        ) {
+        if (!sameGeneration(cur)) {
           return {
             verdict: 'stopped',
             detail: 'the step respawned during the stop — the new run owns the entry',
@@ -2387,10 +2400,7 @@ export function makeNativeConnector(ctx: ConnectorCtx, env: AgentConnectorEnv): 
         }
         const probe = unit()
         if (probe !== 'dead') {
-          return {
-            verdict: probe === 'unknown' ? 'unverified' : 'timeout',
-            detail: signalErr ?? nativeSurvivors(pid, agentId),
-          }
+          return nativeUnitRefusal(probe, signalErr, pid, agentId)
         }
         try {
           patchAgentRegistry(dir, molStep, { stopped: true })

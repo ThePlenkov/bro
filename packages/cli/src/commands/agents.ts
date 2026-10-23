@@ -1244,19 +1244,13 @@ async function cmdDown(dir: string, env: AgentConnectorEnv, argv: string[]): Pro
   // operator must see before respawning anything. These checks run
   // BEFORE the terminal path: a stale 'lost'/'exited' pre-stop read
   // must not mask a unit that is actually still live.
-  if (outcome.verdict === 'timeout') {
-    die(
-      `down: ${agent.id} (${agent.molStep}, ${outcome.backend}) survived the stop signal — still running` +
-        (outcome.detail !== undefined ? ` (${outcome.detail})` : '') +
-        ` — not safe to respawn`
-    )
-  }
-  if (outcome.verdict === 'unverified') {
-    die(
-      `down: ${agent.id} (${agent.molStep}, ${outcome.backend}) — stop unverified: ` +
-        (outcome.detail ?? `the backend reports ${agent.state}`) +
-        ` — not safe to respawn`
-    )
+  if (outcome.verdict === 'timeout' || outcome.verdict === 'unverified') {
+    const why =
+      outcome.verdict === 'timeout'
+        ? 'survived the stop signal — still running'
+        : 'stop unverified'
+    const detail = outcome.detail ?? `the backend reports ${agent.state}`
+    die(`down: ${agent.id} (${agent.molStep}, ${outcome.backend}) ${why} (${detail}) — not safe to respawn`)
   }
   if (outcome.terminal) {
     // a blocked entry is terminal BUT the stop was the manual clear —

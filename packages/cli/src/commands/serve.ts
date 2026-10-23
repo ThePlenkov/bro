@@ -775,40 +775,29 @@ async function routeAgentGet(ref: string, deps: ServeDeps): Promise<ServeRespons
  *  unverifiable death is 409; a delivered-but-unconfirmable stop is
  *  202 — accepted, not enacted. */
 function stopVerdictResponse(ref: string, outcome: StopOutcome): ServeResponse | undefined {
-  if (outcome.verdict === 'timeout' || outcome.verdict === 'unverified') {
-    return {
-      status: 409,
-      body: {
-        error:
-          outcome.verdict === 'timeout'
-            ? `"${ref}" survived the stop signal — still running`
-            : `"${ref}" — stop unverified` +
-              (outcome.detail !== undefined
-                ? `: ${outcome.detail}`
-                : outcome.agent !== undefined
-                  ? `, the backend reports ${outcome.agent.state}`
-                  : ''),
-        agent: outcome.agent,
-        stopped: false,
-        verdict: outcome.verdict,
-        ...(outcome.detail !== undefined ? { detail: outcome.detail } : {}),
-        ...(outcome.respawned !== undefined ? { respawned: outcome.respawned } : {}),
-      },
-    }
+  const verdict = outcome.verdict
+  if (verdict !== 'timeout' && verdict !== 'unverified' && verdict !== 'stopping') {
+    return undefined
   }
-  if (outcome.verdict === 'stopping') {
-    return {
-      status: 202,
-      body: {
-        agent: outcome.agent,
-        stopped: false,
-        verdict: 'stopping',
-        ...(outcome.detail !== undefined ? { detail: outcome.detail } : {}),
-        ...(outcome.respawned !== undefined ? { respawned: outcome.respawned } : {}),
-      },
-    }
+  const detail =
+    outcome.detail ??
+    (outcome.agent !== undefined ? `the backend reports ${outcome.agent.state}` : undefined)
+  const body = {
+    agent: outcome.agent,
+    stopped: false,
+    verdict,
+    ...(detail !== undefined ? { detail } : {}),
+    ...(outcome.respawned !== undefined ? { respawned: outcome.respawned } : {}),
   }
-  return undefined
+  if (verdict === 'stopping') {
+    // delivered but unconfirmable by this backend — accepted, not dead
+    return { status: 202, body }
+  }
+  const error =
+    verdict === 'timeout'
+      ? `"${ref}" survived the stop signal — still running`
+      : `"${ref}" — stop unverified` + (detail !== undefined ? `: ${detail}` : '')
+  return { status: 409, body: { error, ...body } }
 }
 
 async function routeAgentDelete(ref: string, deps: ServeDeps): Promise<ServeResponse> {
