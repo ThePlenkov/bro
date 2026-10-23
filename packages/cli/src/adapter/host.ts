@@ -54,6 +54,18 @@ import {
 /** The board's widget key — one slot, owned by bro. */
 export const BOARD_KEY = 'bro'
 
+/** A hung CLI must not wedge the driver: `/bro`, `bro_status` and the
+ *  board refresh are interactive reads, and a wedged dolt lock can
+ *  stall them forever. The kill takes the detached process group
+ *  down, so a dolt child dies with its parent. */
+export const RUN_TIMEOUT_MS = 60_000
+
+/** How long a failed CLI resolution stays cached before a retry —
+ *  PATH, a local install or npx can appear mid-session, but
+ *  re-probing the npx rung on every keystroke would be worse than
+ *  the outage. */
+export const RESOLVE_RETRY_MS = 60_000
+
 /** The context shape this API lineage shares.
  *
  *  pi and omp are the same extension API lineage: the same `ctx.ui`,
@@ -189,6 +201,11 @@ export interface BroHostBinding<Ctx = unknown> {
   refuseStop(reason: string): unknown
   /** Whether the stop event says the host already refused once. */
   stopAlreadyRefused(event: unknown): boolean
+  /** Whether this stop event is an abort/error the gate must not
+   *  resurrect — pi settles carry an outcome, and refusing an
+   *  aborted turn would resume a turn the user already cancelled.
+   *  Hosts without outcomes omit it. */
+  stopAborted?(event: unknown): boolean
   /** The prompt behind a turn. */
   promptOf(event: unknown): string
   /** Build the result that injects a hidden context message. */
@@ -243,6 +260,9 @@ export interface BroRunResult {
 export interface BroDriver {
   /** Run a bro subcommand and capture its output. */
   run(args: string[], cwd: string): Promise<BroRunResult>
+  /** Refresh + repaint the board for a context — the repaint path a
+   *  host-only settle/turn event can call. */
+  refresh(ctx: unknown): Promise<void>
   /** The last board snapshot. */
   readonly board: BoardStatus | null
   /** The host's own extension API, passed through untouched. */
@@ -255,22 +275,50 @@ export interface BroDriver {
  * tools without a second channel.
  */
 export function createBroDriver<Ctx>(host: BroHostBinding<Ctx>, api: BroHostApi<Ctx>): BroDriver {
-  let resolved: Promise<Command | null> | undefined
   let board: BoardStatus | null = null
+  /** Monotonic token — a refresh that finishes after a newer one
+   *  started must not overwrite the newer snapshot. */
+  let refreshSeq = 0
 
-  /** Cached hydration text — primed on session start (the only window
-   *  where the 20-40s probe cost overlaps the user's first prompt),
-   *  then injected once into context and re-primed across compaction. */
-  let hydration: Promise<string> | undefined
-  let injected = false
+  /** Hydration text + the session it belongs to. Sessions can overlap
+   *  (a replaced session's handler still pending while the new one
+   *  starts), so the cache and the "already injected" claim are keyed
+   *  by session id — one session's context never lands in another,
+   *  and the claim is taken synchronously so two concurrent
+   *  before-agent handlers cannot both inject. */
+  let hydration: { sessionId: string; promise: Promise<string> } | undefined
+  let hydrated: string | undefined
+  /** Pre-compaction carry — kept apart from the hydration probe so a
+   *  post-compaction re-probe cannot overwrite what must survive the
+   *  summary. Consumed (cleared) by the next hydrate() that runs. */
+  let carry: { sessionId: string; text: string } | undefined
   /** Set when the stop gate already refused this session — gates, not
-   *  loops: the blocker goes back once, a later stop is let through. */
-  let gated = false
+   *  loops: the blocker goes back once per session, a later stop is
+   *  let through, and a NEW session starts with a fresh gate (the
+   *  flag dies with its session instead of leaking into the next). */
+  let gatedSession: string | undefined
 
   /** Resolve the CLI once. Probing costs a spawn even where bro is
-   *  inert, so it stays lazy. */
+   *  inert, so it stays lazy. A *failed* resolution is not permanent:
+   *  PATH, a local install or npx can appear mid-session, so a null
+   *  answer expires after RESOLVE_RETRY_MS instead of poisoning the
+   *  whole extension instance. */
+  let resolved: Promise<Command | null> | undefined
+  let resolvedFailedAt: number | undefined
   const command = (): Promise<Command | null> => {
-    resolved ??= resolveCommand({ npxPin: host.npxPin })
+    if (
+      resolved !== undefined &&
+      (resolvedFailedAt === undefined || Date.now() - resolvedFailedAt < RESOLVE_RETRY_MS)
+    ) {
+      return resolved
+    }
+    resolvedFailedAt = undefined
+    resolved = resolveCommand({ npxPin: host.npxPin }).then((cmd) => {
+      if (cmd === null) {
+        resolvedFailedAt = Date.now()
+      }
+      return cmd
+    })
     return resolved
   }
 
@@ -301,33 +349,51 @@ export function createBroDriver<Ctx>(host: BroHostBinding<Ctx>, api: BroHostApi<
 
   const refreshBoard = async (ctx: Ctx): Promise<void> => {
     const cwd = host.cwd(ctx)
+    const seq = ++refreshSeq
     if (!broEnabled(cwd)) {
+      // another repo's board must not leak into this session
+      board = null
+      paint(ctx)
       return
     }
     const cmd = await command()
-    if (cmd === null) {
+    if (cmd === null || seq !== refreshSeq) {
       return
     }
-    board = await statusJson(cmd, cwd)
+    const next = await statusJson(cmd, cwd)
+    // a newer refresh superseded this one while it was in flight —
+    // the slower, older answer must not overwrite it
+    if (seq !== refreshSeq) {
+      return
+    }
+    board = next
     paint(ctx)
   }
 
   /** Hydration runs once per session (re-primed on compaction); the
    *  answer is injected at the next turn start, not pushed into the
-   *  transcript eagerly — the user may sit at the prompt for minutes. */
+   *  transcript eagerly — the user may sit at the prompt for minutes.
+   *  A pre-compaction carry rides along: it was already shown to the
+   *  model once, so it must survive the summary re-probe. */
   const hydrate = (ctx: Ctx, event: 'session-start' | 'post-compaction'): void => {
     const cwd = host.cwd(ctx)
     const sessionId = host.sessionId(ctx)
-    const started = probe(event, { session_id: sessionId }, cwd, REHYDRATION_TIMEOUT_MS).then(
-      contextOf
-    )
-    hydration = started
-    injected = false
+    const priorCarry = carry?.sessionId === sessionId ? carry.text : ''
+    carry = undefined
+    const started = probe(event, { session_id: sessionId }, cwd, REHYDRATION_TIMEOUT_MS)
+      .then(contextOf)
+      .then((text) => (priorCarry === '' ? text : text === '' ? priorCarry : `${priorCarry}\n\n${text}`))
+    hydration = { sessionId, promise: started }
+    // re-priming (compaction) earns a fresh inject for this session;
+    // a different session's claim is untouched
+    if (hydrated === sessionId) {
+      hydrated = undefined
+    }
     // a failed probe is not the session's verdict — drop the cache entry
     // so the next turn deserves a retry rather than sticking on ''
     void started
       .then((text) => {
-        if (hydration === started && text === '') {
+        if (hydration?.promise === started && text === '') {
           hydration = undefined
         }
       })
@@ -346,29 +412,40 @@ export function createBroDriver<Ctx>(host: BroHostBinding<Ctx>, api: BroHostApi<
   }
 
   bind(host.events.sessionStart, (_event, ctx) => {
+    // a fresh session starts with a fresh gate — the prior session's
+    // refusal must not skip this one's exit gate
+    gatedSession = undefined
     hydrate(ctx, 'session-start')
     void refreshBoard(ctx).catch(() => {})
   })
 
   bind(host.events.sessionCompact, (_event, ctx) => {
-    gated = false
     hydrate(ctx, 'post-compaction')
     void refreshBoard(ctx).catch(() => {})
   })
 
-  // pre-compact context is what must survive the summary — carry it into
-  // the hydration cache so the post-compaction inject keeps it
+  // pre-compact context is what must survive the summary — park it in
+  // the carry slot so the next hydrate() for the same session appends
+  // it instead of the post-compaction probe overwriting it
   bind(host.events.sessionBeforeCompact, async (_event, ctx) => {
     const cwd = host.cwd(ctx)
+    const sessionId = host.sessionId(ctx)
     const text = contextOf(
-      await probe('pre-compact', { session_id: host.sessionId(ctx) }, cwd, REHYDRATION_TIMEOUT_MS)
+      await probe('pre-compact', { session_id: sessionId }, cwd, REHYDRATION_TIMEOUT_MS)
     )
     if (text === '') {
       return
     }
-    const carry = text
-    const prior = hydration ?? Promise.resolve('')
-    hydration = prior.then((base) => (base === '' ? carry : `${base}\n\n${carry}`))
+    carry = { sessionId, text }
+    // if this session's hydration already ran (compaction beat the
+    // probe), splice the carry into the live promise — the next inject
+    // must still carry it
+    const pending = hydration
+    if (pending !== undefined && pending.sessionId === sessionId) {
+      const merged = pending.promise.then((base) => (base === '' ? text : `${base}\n\n${text}`))
+      hydration = { sessionId, promise: merged }
+      carry = undefined
+    }
   })
 
   // The turn's entry point: bro's prompt-submit nudge and the cached
@@ -385,12 +462,15 @@ export function createBroDriver<Ctx>(host: BroHostBinding<Ctx>, api: BroHostApi<
     ).then(contextOf)
 
     const parts: string[] = []
-    if (!injected && hydration !== undefined) {
-      const text = (await hydration).trim()
+    const pending = hydration
+    if (pending !== undefined && hydrated !== sessionId && pending.sessionId === sessionId) {
+      // claim synchronously, before the await — two concurrent
+      // before-agent handlers must not both inject this text
+      hydrated = sessionId
+      const text = (await pending.promise).trim()
       if (text !== '') {
         parts.push(text)
       }
-      injected = true
     }
     const nudgeText = (await nudge).trim()
     if (nudgeText !== '') {
@@ -424,10 +504,19 @@ export function createBroDriver<Ctx>(host: BroHostBinding<Ctx>, api: BroHostApi<
   // the stop gate: bro decides, the host refuses. The host's own
   // "already refused" flag goes back to bro so bro's one-shot rule
   // applies — the driver never loops the gate itself.
-  bind(host.events.stop, async (event, ctx) => {
-    const already = gated || host.stopAlreadyRefused(event)
+  const stopGate = async (
+    event: unknown,
+    ctx: Ctx,
+    sessionId: string
+  ): Promise<unknown> => {
+    // an aborted or errored turn ends — the gate exists to keep
+    // unfinished WORK in the session, never to resurrect a cancelled turn
+    if (host.stopAborted?.(event) === true) {
+      return undefined
+    }
+    const already = gatedSession === sessionId || host.stopAlreadyRefused(event)
     const control = await probe('stop', {
-      session_id: host.sessionId(ctx),
+      session_id: sessionId,
       stop_hook_active: already,
     }, host.cwd(ctx))
     if (control?.decision !== 'block') {
@@ -437,10 +526,28 @@ export function createBroDriver<Ctx>(host: BroHostBinding<Ctx>, api: BroHostApi<
       }
       return undefined
     }
-    gated = true
+    gatedSession = sessionId
     const reason = typeof control.reason === 'string' ? control.reason.trim() : ''
     void refreshBoard(ctx).catch(() => {})
     return host.refuseStop(reason === '' ? 'unfinished bro work' : reason)
+  }
+
+  /** In-flight stop probes by session id — two concurrent stops must
+   *  not both run the probe and both block: the second awaits the
+   *  first's verdict, by which point `already` is true and bro's
+   *  one-shot rule lets it through. */
+  const stopsInFlight = new Map<string, Promise<unknown>>()
+  bind(host.events.stop, (event, ctx) => {
+    const sessionId = host.sessionId(ctx)
+    const inFlight = stopsInFlight.get(sessionId)
+    if (inFlight !== undefined) {
+      return inFlight
+    }
+    const run = stopGate(event, ctx, sessionId).finally(() => {
+      stopsInFlight.delete(sessionId)
+    })
+    stopsInFlight.set(sessionId, run)
+    return run
   })
 
   bind(host.events.turnEnd, (_event, ctx) => {
@@ -464,7 +571,9 @@ export function createBroDriver<Ctx>(host: BroHostBinding<Ctx>, api: BroHostApi<
     async handler(args: string, ctx: Ctx) {
       const trimmed = args.trim()
       if (trimmed === '') {
-        await run(['status', '--json'], host.cwd(ctx))
+        // refresh + repaint — the old path spawned the CLI and threw
+        // the answer away, so bare /bro never updated the widget
+        await refreshBoard(ctx)
         host.notify(ctx, 'bro: board refreshed', 'info')
         return
       }
@@ -505,16 +614,21 @@ export function createBroDriver<Ctx>(host: BroHostBinding<Ctx>, api: BroHostApi<
       return board
     },
     run,
+    refresh: (ctx: unknown) => refreshBoard(ctx as Ctx),
     api,
   }
 }
 
 /** Run a bro subcommand and capture its output — the read side of the
- *  CLI, used by the client's own command and tools. */
+ *  CLI, used by the client's own command and tools. A hung CLI must
+ *  not wedge the driver: the child gets RUN_TIMEOUT_MS and then the
+ *  whole process group dies (it is detached, so -pid takes dolt
+ *  descendants with it). */
 async function runBro(
   command: Command | null,
   args: string[],
-  cwd: string
+  cwd: string,
+  timeoutMs = RUN_TIMEOUT_MS
 ): Promise<BroRunResult> {
   if (command === null) {
     return { code: 127, stdout: '', stderr: 'bro CLI not found' }
@@ -533,6 +647,27 @@ async function runBro(
   }
   let out = ''
   let err = ''
+  let settled = false
+  const settle = (result: BroRunResult): void => {
+    if (settled) {
+      return
+    }
+    settled = true
+    clearTimeout(timer)
+    resolve(result)
+  }
+  const timer = setTimeout(() => {
+    try {
+      if (child.pid !== undefined && process.platform !== 'win32') {
+        process.kill(-child.pid, 'SIGKILL')
+      } else {
+        child.kill('SIGKILL')
+      }
+    } catch {
+      // already dead — the close handler settles
+    }
+    settle({ code: 1, stdout: out, stderr: `${err}\nbro CLI timed out after ${timeoutMs}ms`.trim() })
+  }, timeoutMs)
   child.stdout?.setEncoding('utf8')
   child.stderr?.setEncoding('utf8')
   child.stdout?.on('data', (chunk: string) => {
@@ -541,7 +676,7 @@ async function runBro(
   child.stderr?.on('data', (chunk: string) => {
     if (err.length < 1 << 20) err += chunk
   })
-  child.on('error', () => resolve({ code: 127, stdout: '', stderr: 'spawn failed' }))
-  child.on('close', (code) => resolve({ code: code ?? 1, stdout: out, stderr: err }))
+  child.on('error', () => settle({ code: 127, stdout: '', stderr: 'spawn failed' }))
+  child.on('close', (code) => settle({ code: code ?? 1, stdout: out, stderr: err }))
   return promise
 }

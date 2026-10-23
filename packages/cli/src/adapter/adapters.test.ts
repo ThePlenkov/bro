@@ -134,9 +134,23 @@ test('the omp guard hook blocks a force push and nothing else', async () => {
   const short = call('git push -f origin main') as { block?: boolean } | undefined
   assert.equal(short?.block, true, 'the -f form must be blocked too')
 
+  // the review-found bypass forms must be blocked too: git global
+  // options before push, and the leading-`+` refspec
+  const withGlobalOpt = call('git -C /repo push --force') as { block?: boolean } | undefined
+  assert.equal(withGlobalOpt?.block, true, 'git -C <dir> push --force must be blocked')
+  const withConfig = call('git -c key=val push -f') as { block?: boolean } | undefined
+  assert.equal(withConfig?.block, true, 'git -c k=v push -f must be blocked')
+  const plusRef = call('git push origin +main') as { block?: boolean } | undefined
+  assert.equal(plusRef?.block, true, 'a leading-+ refspec is a force push')
+  const behindSeparator = call('git push -f origin main; echo done') as { block?: boolean } | undefined
+  assert.equal(behindSeparator?.block, true, 'a separator after the flag hides nothing')
+
   // a normal push, and the safe force form, are not the rule
   assert.equal(call('git push origin main'), undefined)
   assert.equal(call('git push --force-with-lease origin main'), undefined)
+  // a force flag in ANOTHER segment must not trip the guard — the
+  // old [^\n]* pattern matched across shell separators
+  assert.equal(call('echo --force && git push origin main'), undefined)
   // another tool, and another command, are not the rule
   assert.equal(guard({ toolName: 'read', input: { command: 'git push --force' } }), undefined)
   assert.equal(call('git commit --amend'), undefined)

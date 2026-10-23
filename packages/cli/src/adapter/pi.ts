@@ -153,10 +153,6 @@ function binding(pi: PiApi): BroHostBinding<ExtContext> {
       on(event, handler) {
         pi.on(event as never, handler as never)
       },
-      paint(ctx, lines, crumb) {
-        ctx.ui.setWidget(BOARD_KEY, lines, { placement: 'aboveEditor' })
-        ctx.ui.setStatus(BOARD_KEY, crumb)
-      },
       notify(ctx, text, level) {
         try {
           ctx.ui.notify(text, level)
@@ -184,6 +180,22 @@ function binding(pi: PiApi): BroHostBinding<ExtContext> {
         // driver tracks the one-shot rule instead.
         return false
       },
+      stopAborted(event) {
+        // an aborted or errored settle must end, not be resumed by
+        // the gate's custom-message continuation
+        const settle = event as { outcome?: string }
+        const outcome = settle.outcome
+        return outcome === 'aborted' || outcome === 'error'
+      },
+      paint(ctx, lines, crumb) {
+        try {
+          ctx.ui.setWidget(BOARD_KEY, lines, { placement: 'aboveEditor' })
+          ctx.ui.setStatus(BOARD_KEY, crumb)
+        } catch {
+          // pi invalidates the ctx on session replacement — a stale
+          // widget paint is advisory, never worth a throw
+        }
+      },
     }),
     npxPin: NPX_PIN,
   }
@@ -195,8 +207,10 @@ export default function broExtension(pi: PiApi): void {
 
   // pi's board also refreshes when the agent settles — a settle can
   // follow a turn without a turn_end, and the board must not go stale.
+  // driver.refresh repaints; driver.run alone spawned the CLI and
+  // discarded the answer, leaving the widget stale.
   pi.on('agent_settled', (_e: never, ctx: ExtContext) => {
-    void driver.run(['status', '--json'], ctx.cwd).catch(() => {})
+    void driver.refresh(ctx).catch(() => {})
   })
 }
 

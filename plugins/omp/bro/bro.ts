@@ -305,6 +305,16 @@ function statusCrumb(s) {
 //#region packages/cli/src/adapter/host.ts
 /** The board's widget key — one slot, owned by bro. */
 const BOARD_KEY = "bro";
+/** A hung CLI must not wedge the driver: `/bro`, `bro_status` and the
+*  board refresh are interactive reads, and a wedged dolt lock can
+*  stall them forever. The kill takes the detached process group
+*  down, so a dolt child dies with its parent. */
+const RUN_TIMEOUT_MS = 6e4;
+/** How long a failed CLI resolution stays cached before a retry —
+*  PATH, a local install or npx can appear mid-session, but
+*  re-probing the npx rung on every keystroke would be worse than
+*  the outage. */
+const RESOLVE_RETRY_MS = 6e4;
 /** The event names this lineage shares. A host that spells one
 *  differently overrides it — pi's settle gate is not omp's stop. */
 const LINEAGE_EVENTS = {
@@ -377,20 +387,41 @@ function sharedBinding(host) {
 * tools without a second channel.
 */
 function createBroDriver(host, api) {
-	let resolved;
 	let board = null;
-	/** Cached hydration text — primed on session start (the only window
-	*  where the 20-40s probe cost overlaps the user's first prompt),
-	*  then injected once into context and re-primed across compaction. */
+	/** Monotonic token — a refresh that finishes after a newer one
+	*  started must not overwrite the newer snapshot. */
+	let refreshSeq = 0;
+	/** Hydration text + the session it belongs to. Sessions can overlap
+	*  (a replaced session's handler still pending while the new one
+	*  starts), so the cache and the "already injected" claim are keyed
+	*  by session id — one session's context never lands in another,
+	*  and the claim is taken synchronously so two concurrent
+	*  before-agent handlers cannot both inject. */
 	let hydration;
-	let injected = false;
+	let hydrated;
+	/** Pre-compaction carry — kept apart from the hydration probe so a
+	*  post-compaction re-probe cannot overwrite what must survive the
+	*  summary. Consumed (cleared) by the next hydrate() that runs. */
+	let carry;
 	/** Set when the stop gate already refused this session — gates, not
-	*  loops: the blocker goes back once, a later stop is let through. */
-	let gated = false;
+	*  loops: the blocker goes back once per session, a later stop is
+	*  let through, and a NEW session starts with a fresh gate (the
+	*  flag dies with its session instead of leaking into the next). */
+	let gatedSession;
 	/** Resolve the CLI once. Probing costs a spawn even where bro is
-	*  inert, so it stays lazy. */
+	*  inert, so it stays lazy. A *failed* resolution is not permanent:
+	*  PATH, a local install or npx can appear mid-session, so a null
+	*  answer expires after RESOLVE_RETRY_MS instead of poisoning the
+	*  whole extension instance. */
+	let resolved;
+	let resolvedFailedAt;
 	const command = () => {
-		resolved ??= resolveCommand({ npxPin: host.npxPin });
+		if (resolved !== void 0 && (resolvedFailedAt === void 0 || Date.now() - resolvedFailedAt < RESOLVE_RETRY_MS)) return resolved;
+		resolvedFailedAt = void 0;
+		resolved = resolveCommand({ npxPin: host.npxPin }).then((cmd) => {
+			if (cmd === null) resolvedFailedAt = Date.now();
+			return cmd;
+		});
 		return resolved;
 	};
 	/** Probe one bro hook. Fail-open: every failure is "no opinion". */
@@ -409,22 +440,37 @@ function createBroDriver(host, api) {
 	};
 	const refreshBoard = async (ctx) => {
 		const cwd = host.cwd(ctx);
-		if (!broEnabled(cwd)) return;
+		const seq = ++refreshSeq;
+		if (!broEnabled(cwd)) {
+			board = null;
+			paint(ctx);
+			return;
+		}
 		const cmd = await command();
-		if (cmd === null) return;
-		board = await statusJson(cmd, cwd);
+		if (cmd === null || seq !== refreshSeq) return;
+		const next = await statusJson(cmd, cwd);
+		if (seq !== refreshSeq) return;
+		board = next;
 		paint(ctx);
 	};
 	/** Hydration runs once per session (re-primed on compaction); the
 	*  answer is injected at the next turn start, not pushed into the
-	*  transcript eagerly — the user may sit at the prompt for minutes. */
+	*  transcript eagerly — the user may sit at the prompt for minutes.
+	*  A pre-compaction carry rides along: it was already shown to the
+	*  model once, so it must survive the summary re-probe. */
 	const hydrate = (ctx, event) => {
 		const cwd = host.cwd(ctx);
-		const started = probe(event, { session_id: host.sessionId(ctx) }, cwd, REHYDRATION_TIMEOUT_MS).then(contextOf);
-		hydration = started;
-		injected = false;
+		const sessionId = host.sessionId(ctx);
+		const priorCarry = carry?.sessionId === sessionId ? carry.text : "";
+		carry = void 0;
+		const started = probe(event, { session_id: sessionId }, cwd, REHYDRATION_TIMEOUT_MS).then(contextOf).then((text) => priorCarry === "" ? text : text === "" ? priorCarry : `${priorCarry}\n\n${text}`);
+		hydration = {
+			sessionId,
+			promise: started
+		};
+		if (hydrated === sessionId) hydrated = void 0;
 		started.then((text) => {
-			if (hydration === started && text === "") hydration = void 0;
+			if (hydration?.promise === started && text === "") hydration = void 0;
 		}).catch(() => {});
 	};
 	/** Register one handler if the host has that event. */
@@ -433,32 +479,45 @@ function createBroDriver(host, api) {
 		host.on(name, handler);
 	};
 	bind(host.events.sessionStart, (_event, ctx) => {
+		gatedSession = void 0;
 		hydrate(ctx, "session-start");
 		refreshBoard(ctx).catch(() => {});
 	});
 	bind(host.events.sessionCompact, (_event, ctx) => {
-		gated = false;
 		hydrate(ctx, "post-compaction");
 		refreshBoard(ctx).catch(() => {});
 	});
 	bind(host.events.sessionBeforeCompact, async (_event, ctx) => {
 		const cwd = host.cwd(ctx);
-		const text = contextOf(await probe("pre-compact", { session_id: host.sessionId(ctx) }, cwd, REHYDRATION_TIMEOUT_MS));
+		const sessionId = host.sessionId(ctx);
+		const text = contextOf(await probe("pre-compact", { session_id: sessionId }, cwd, REHYDRATION_TIMEOUT_MS));
 		if (text === "") return;
-		const carry = text;
-		hydration = (hydration ?? Promise.resolve("")).then((base) => base === "" ? carry : `${base}\n\n${carry}`);
+		carry = {
+			sessionId,
+			text
+		};
+		const pending = hydration;
+		if (pending !== void 0 && pending.sessionId === sessionId) {
+			hydration = {
+				sessionId,
+				promise: pending.promise.then((base) => base === "" ? text : `${base}\n\n${text}`)
+			};
+			carry = void 0;
+		}
 	});
 	bind(host.events.beforeAgentStart, async (event, ctx) => {
 		const cwd = host.cwd(ctx);
+		const sessionId = host.sessionId(ctx);
 		const nudge = probe("prompt-submit", {
-			session_id: host.sessionId(ctx),
+			session_id: sessionId,
 			prompt: host.promptOf(event)
 		}, cwd).then(contextOf);
 		const parts = [];
-		if (!injected && hydration !== void 0) {
-			const text = (await hydration).trim();
+		const pending = hydration;
+		if (pending !== void 0 && hydrated !== sessionId && pending.sessionId === sessionId) {
+			hydrated = sessionId;
+			const text = (await pending.promise).trim();
 			if (text !== "") parts.push(text);
-			injected = true;
 		}
 		const nudgeText = (await nudge).trim();
 		if (nudgeText !== "") parts.push(nudgeText);
@@ -477,21 +536,36 @@ function createBroDriver(host, api) {
 		if (text === "") return;
 		return host.appendToolResult(event, text);
 	});
-	bind(host.events.stop, async (event, ctx) => {
-		const already = gated || host.stopAlreadyRefused(event);
+	const stopGate = async (event, ctx, sessionId) => {
+		if (host.stopAborted?.(event) === true) return;
 		const control = await probe("stop", {
-			session_id: host.sessionId(ctx),
-			stop_hook_active: already
+			session_id: sessionId,
+			stop_hook_active: gatedSession === sessionId || host.stopAlreadyRefused(event)
 		}, host.cwd(ctx));
 		if (control?.decision !== "block") {
 			const hint = contextOf(control);
 			if (hint !== "") host.notify(ctx, hint, "info");
 			return;
 		}
-		gated = true;
+		gatedSession = sessionId;
 		const reason = typeof control.reason === "string" ? control.reason.trim() : "";
 		refreshBoard(ctx).catch(() => {});
 		return host.refuseStop(reason === "" ? "unfinished bro work" : reason);
+	};
+	/** In-flight stop probes by session id — two concurrent stops must
+	*  not both run the probe and both block: the second awaits the
+	*  first's verdict, by which point `already` is true and bro's
+	*  one-shot rule lets it through. */
+	const stopsInFlight = /* @__PURE__ */ new Map();
+	bind(host.events.stop, (event, ctx) => {
+		const sessionId = host.sessionId(ctx);
+		const inFlight = stopsInFlight.get(sessionId);
+		if (inFlight !== void 0) return inFlight;
+		const run$1 = stopGate(event, ctx, sessionId).finally(() => {
+			stopsInFlight.delete(sessionId);
+		});
+		stopsInFlight.set(sessionId, run$1);
+		return run$1;
 	});
 	bind(host.events.turnEnd, (_event, ctx) => {
 		refreshBoard(ctx).catch(() => {});
@@ -510,7 +584,7 @@ function createBroDriver(host, api) {
 		async handler(args, ctx) {
 			const trimmed = args.trim();
 			if (trimmed === "") {
-				await run(["status", "--json"], host.cwd(ctx));
+				await refreshBoard(ctx);
 				host.notify(ctx, "bro: board refreshed", "info");
 				return;
 			}
@@ -549,12 +623,16 @@ function createBroDriver(host, api) {
 			return board;
 		},
 		run,
+		refresh: (ctx) => refreshBoard(ctx),
 		api
 	};
 }
 /** Run a bro subcommand and capture its output — the read side of the
-*  CLI, used by the client's own command and tools. */
-async function runBro(command, args, cwd) {
+*  CLI, used by the client's own command and tools. A hung CLI must
+*  not wedge the driver: the child gets RUN_TIMEOUT_MS and then the
+*  whole process group dies (it is detached, so -pid takes dolt
+*  descendants with it). */
+async function runBro(command, args, cwd, timeoutMs = RUN_TIMEOUT_MS) {
 	if (command === null) return {
 		code: 127,
 		stdout: "",
@@ -582,6 +660,24 @@ async function runBro(command, args, cwd) {
 	}
 	let out = "";
 	let err = "";
+	let settled = false;
+	const settle = (result) => {
+		if (settled) return;
+		settled = true;
+		clearTimeout(timer);
+		resolve(result);
+	};
+	const timer = setTimeout(() => {
+		try {
+			if (child.pid !== void 0 && process.platform !== "win32") process.kill(-child.pid, "SIGKILL");
+			else child.kill("SIGKILL");
+		} catch {}
+		settle({
+			code: 1,
+			stdout: out,
+			stderr: `${err}\nbro CLI timed out after ${timeoutMs}ms`.trim()
+		});
+	}, timeoutMs);
 	child.stdout?.setEncoding("utf8");
 	child.stderr?.setEncoding("utf8");
 	child.stdout?.on("data", (chunk) => {
@@ -590,12 +686,12 @@ async function runBro(command, args, cwd) {
 	child.stderr?.on("data", (chunk) => {
 		if (err.length < 1 << 20) err += chunk;
 	});
-	child.on("error", () => resolve({
+	child.on("error", () => settle({
 		code: 127,
 		stdout: "",
 		stderr: "spawn failed"
 	}));
-	child.on("close", (code) => resolve({
+	child.on("close", (code) => settle({
 		code: code ?? 1,
 		stdout: out,
 		stderr: err

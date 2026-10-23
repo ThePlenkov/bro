@@ -31,8 +31,30 @@
  */
 import type { OmpApi } from './omp-api.ts'
 
-/** A force push rewrites shared history — never allowed. */
-const FORCE_PUSH = /\bgit\s+push\b[^\n]*(?:--force(?:\s|$)|(?:^|\s)-f(?:\s|$))/
+/** A force push rewrites shared history — never allowed. The command
+ *  is split on shell separators first: a flag-looking word in another
+ *  command must not trip the guard, and a real force push must not
+ *  hide behind one. */
+const SHELL_SPLIT = /&&|\|\||[;|\n|]/
+
+/** `git [global opts] push …` — git's global options (`-C dir`,
+ *  `-c k=v`, `--git-dir=…`) may sit between `git` and `push`. An
+ *  option's separate value never consumes the `push` word itself. */
+const PUSH_CALL = /(?:^|\s)git(?:\s+-{1,2}[^\s]+(?:\s+(?!push\b)[^\s]+)?)*\s+push\b(.*)/
+
+/** Force spellings in the push arguments: `--force` as a whole word
+ *  (never `--force-with-lease` / `--force-if-includes` — a following
+ *  hyphen disqualifies), bare `-f`, or a leading-`+` refspec
+ *  (`git push origin +main`). */
+const FORCE_FLAG = /(?:^|\s)--force(?!-)|(?:^|\s)-f(?![\w-])|(?:^|\s)\+\S+/
+
+/** Does any shell segment of this command force-push? */
+export function isForcePush(command: string): boolean {
+  return command.split(SHELL_SPLIT).some((segment) => {
+    const push = PUSH_CALL.exec(segment)
+    return push !== null && FORCE_FLAG.test(push[1] ?? '')
+  })
+}
 
 export default function broGuard(pi: OmpApi): void {
   pi.on('tool_call', (event: unknown) => {
@@ -49,7 +71,7 @@ export default function broGuard(pi: OmpApi): void {
       const raw = input.command
       command = typeof raw === 'string' ? raw : ''
     }
-    if (command === '' || !FORCE_PUSH.test(command)) {
+    if (command === '' || !isForcePush(command)) {
       return undefined
     }
     return {
