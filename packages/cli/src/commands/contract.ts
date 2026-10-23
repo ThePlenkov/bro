@@ -216,33 +216,50 @@ function covered(path: string, announced: ReadonlySet<string>): boolean {
   return false
 }
 
-/** Keys present in a committed map but absent live are removals. When
- *  the whole map is gone, each committed leaf is still reported at its
- *  own dotted path — a bullet may name the map OR a single entry.
- *  Non-record committed values degrade to stale drift via eqJson,
- *  never a walk over garbage. */
-function diffMap(
-  prefix: string,
-  committed: unknown,
-  live: unknown,
-  descend?: (key: string, c: CliSubContract, l: CliSubContract) => Removal[]
-): Removal[] {
+/** When a whole committed map is gone, each leaf is still reported at
+ *  its own dotted path — a bullet may name the map OR a single entry. */
+function removedLeaves(prefix: string, committed: Record<string, unknown>): Removal[] {
+  return Object.entries(committed).map(([k, v]) => ({
+    path: `${prefix}.${k}`,
+    value: v,
+  }))
+}
+
+/** Keys present in a committed scalar map (flags/exits) but absent
+ *  live are removals. Non-record committed values degrade to stale
+ *  drift via eqJson, never a walk over garbage. */
+function diffMap(prefix: string, committed: unknown, live: unknown): Removal[] {
   if (!isRecord(committed)) {
     return []
   }
   if (!isRecord(live)) {
-    return Object.entries(committed).map(([k, v]) => ({
-      path: `${prefix}.${k}`,
-      value: v,
-    }))
+    return removedLeaves(prefix, committed)
   }
   const out: Removal[] = []
   for (const [k, cv] of Object.entries(committed)) {
-    const lv = live[k]
-    if (lv === undefined) {
+    if (live[k] === undefined) {
       out.push({ path: `${prefix}.${k}`, value: cv })
-    } else if (descend !== undefined && isRecord(cv) && isRecord(lv)) {
-      out.push(...descend(k, cv as CliSubContract, lv as CliSubContract))
+    }
+  }
+  return out
+}
+
+/** The subs map — same leaf semantics, but each surviving key descends
+ *  into its own sub-contract for flag/exit/json diffs. */
+function diffSubs(prefix: string, committed: unknown, live: unknown): Removal[] {
+  if (!isRecord(committed)) {
+    return []
+  }
+  if (!isRecord(live)) {
+    return removedLeaves(prefix, committed)
+  }
+  const out: Removal[] = []
+  for (const [sub, cv] of Object.entries(committed)) {
+    const lv = live[sub]
+    if (lv === undefined) {
+      out.push({ path: `${prefix}.${sub}`, value: cv })
+    } else if (isRecord(cv) && isRecord(lv)) {
+      out.push(...diffSub(`${prefix}.${sub}`, cv as CliSubContract, lv as CliSubContract))
     }
   }
   return out
@@ -278,9 +295,7 @@ function diffContract(
   }
   return [
     ...diffSub(name, committed as CliSubContract, live),
-    ...diffMap(`${name}.subs`, committed.subs, live.subs, (sub, c, l) =>
-      diffSub(`${name}.subs.${sub}`, c, l)
-    ),
+    ...diffSubs(`${name}.subs`, committed.subs, live.subs),
   ]
 }
 
@@ -309,18 +324,24 @@ function commandRemovals(
   return out
 }
 
-/** Paths present in the committed doc whose removal changes the
- *  invocation surface — commands, groups, invocation-spelling scalars
- *  (group/aliasOf/argvPrefix), and every declared contract leaf. */
-function removals(committed: ContractDoc, live: ContractDump): Removal[] {
+function groupRemovals(
+  committedGroups: Record<string, unknown>,
+  live: ContractDump
+): Removal[] {
   const out: Removal[] = []
-  const committedGroups = isRecord(committed.groups) ? committed.groups : {}
-  const committedCommands = isRecord(committed.commands) ? committed.commands : {}
   for (const [g, v] of Object.entries(committedGroups)) {
     if (live.groups[g] === undefined) {
       out.push({ path: `groups.${g}`, value: v })
     }
   }
+  return out
+}
+
+function commandRowRemovals(
+  committedCommands: Record<string, unknown>,
+  live: ContractDump
+): Removal[] {
+  const out: Removal[] = []
   for (const [name, c] of Object.entries(committedCommands)) {
     const l = live.commands[name]
     if (l === undefined) {
@@ -331,6 +352,18 @@ function removals(committed: ContractDoc, live: ContractDump): Removal[] {
     // a non-record committed row is drift — the stale pass reports it
   }
   return out
+}
+
+/** Paths present in the committed doc whose removal changes the
+ *  invocation surface — commands, groups, invocation-spelling scalars
+ *  (group/aliasOf/argvPrefix), and every declared contract leaf. */
+function removals(committed: ContractDoc, live: ContractDump): Removal[] {
+  const committedGroups = isRecord(committed.groups) ? committed.groups : {}
+  const committedCommands = isRecord(committed.commands) ? committed.commands : {}
+  return [
+    ...groupRemovals(committedGroups, live),
+    ...commandRowRemovals(committedCommands, live),
+  ]
 }
 
 /** Additions and value edits inside one map — `(added)` marks keys the
