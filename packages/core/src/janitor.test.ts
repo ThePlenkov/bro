@@ -379,6 +379,73 @@ describe('janitor — locks', () => {
       assert.equal(r.reaped.debris, 2)
     })
   })
+
+  test('a lock dir with a dead owner entry reaps — instance and entry both gone', () => {
+    withBro((bro) => {
+      const lock = join(bro, 'stale.json.lock')
+      mkdirSync(lock)
+      writeFileSync(join(lock, 'h-99999999'), '99999999:deadbeef')
+      // a live dir holder inside the abandoned bound keeps its instance
+      const live = join(bro, 'other.json.lock')
+      mkdirSync(live)
+      writeFileSync(join(live, `h-${process.pid}`), `${process.pid}:livebeef`)
+      const r = janitorBroDir(bro, deps(bro))
+      assert.equal(existsSync(lock), false)
+      assert.equal(existsSync(live), true)
+      assert.equal(existsSync(join(live, `h-${process.pid}`)), true)
+      assert.equal(r.reaped.locks, 1)
+    })
+  })
+
+  test('a live dir holder past the abandoned bound reaps — same verdict as a contender steal', () => {
+    withBro((bro) => {
+      const lock = join(bro, 'abandoned-dir.json.lock')
+      mkdirSync(lock)
+      writeFileSync(join(lock, `h-${process.pid}`), `${process.pid}:livebeef`)
+      const past = new Date(Date.now() - 20 * 60_000)
+      utimesSync(lock, past, past)
+      const r = janitorBroDir(bro, deps(bro))
+      assert.equal(existsSync(lock), false)
+      assert.equal(r.reaped.locks, 1)
+    })
+  })
+
+  test('an empty lock dir keeps while fresh, reaps when aged past the grace', () => {
+    withBro((bro) => {
+      const fresh = join(bro, 'inflight.json.lock')
+      const aged = join(bro, 'crashed.json.lock')
+      mkdirSync(fresh)
+      mkdirSync(aged)
+      const past = new Date(Date.now() - 60_000)
+      utimesSync(aged, past, past)
+      const r = janitorBroDir(bro, deps(bro))
+      assert.equal(existsSync(fresh), true) // a publisher mid-write — never break it
+      assert.equal(existsSync(aged), false)
+      assert.equal(r.reaped.locks, 1)
+    })
+  })
+
+  test('junk-only and pin/tomb/capture debris reap — files and dirs alike', () => {
+    withBro((bro) => {
+      const junkLock = join(bro, 'junk.json.lock')
+      mkdirSync(junkLock)
+      writeFileSync(join(junkLock, 'pid'), '123') // debt-store shape — not an h- entry
+      touch(join(bro, 'y.lock.pin-1-ab12'), '1:x', 2 * 60_000)
+      touch(join(bro, 'z.lock.tomb-2-cd34'), '2:y', 2 * 60_000)
+      const staleDir = join(bro, 'w.lock.stale-3-ef56')
+      mkdirSync(staleDir)
+      writeFileSync(join(staleDir, 'pid'), '3')
+      const past = new Date(Date.now() - 2 * 60_000)
+      utimesSync(staleDir, past, past)
+      const r = janitorBroDir(bro, deps(bro))
+      assert.equal(existsSync(junkLock), false) // junk-only dir — no live hold
+      assert.equal(existsSync(join(bro, 'y.lock.pin-1-ab12')), false)
+      assert.equal(existsSync(join(bro, 'z.lock.tomb-2-cd34')), false)
+      assert.equal(existsSync(staleDir), false) // dir debris reaps recursively
+      assert.equal(r.reaped.locks, 1)
+      assert.equal(r.reaped.debris, 3)
+    })
+  })
 })
 
 describe('janitor — size caps', () => {

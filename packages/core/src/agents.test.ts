@@ -7,6 +7,7 @@ import {
   mkdtempSync,
   readFileSync,
   rmSync,
+  statSync,
   utimesSync,
   writeFileSync,
 } from 'node:fs'
@@ -299,7 +300,7 @@ describe('registry lock', () => {
     })
   })
 
-  test('a stale lock file (crashed holder) is broken, not waited on', () => {
+  test('a stale LEGACY lock file (crashed holder) is broken, not waited on', () => {
     withRepo((dir) => {
       const lock = `${agentRegistryPath(dir)!}.lock`
       mkdirSync(dirname(lock), { recursive: true })
@@ -312,7 +313,18 @@ describe('registry lock', () => {
     })
   })
 
-  test('a live holder’s lock is never stolen — the contender fails, the lock survives', () => {
+  test('a stale lock DIR (crashed holder) is broken, not waited on', () => {
+    withRepo((dir) => {
+      const lock = `${agentRegistryPath(dir)!}.lock`
+      mkdirSync(lock, { recursive: true })
+      writeFileSync(join(lock, 'h-99999999'), '99999999:gone')
+      const release = acquireAgentRegistryLock(dir)
+      release()
+      assert.equal(existsSync(lock), false)
+    })
+  })
+
+  test('a live holder’s LEGACY lock file is never stolen — the contender fails, the lock survives', () => {
     withRepo((dir) => {
       const lock = `${agentRegistryPath(dir)!}.lock`
       mkdirSync(dirname(lock), { recursive: true })
@@ -328,7 +340,19 @@ describe('registry lock', () => {
     })
   })
 
-  test('a dead-pid lock is broken — the contender recovers the section', () => {
+  test('a live holder’s lock DIR is never stolen — the contender fails, the dir survives', () => {
+    withRepo((dir) => {
+      const lock = `${agentRegistryPath(dir)!}.lock`
+      mkdirSync(lock, { recursive: true })
+      writeFileSync(join(lock, `h-${process.pid}`), `${process.pid}:alien`)
+      const ino = statSync(lock).ino
+      assert.throws(() => acquireAgentRegistryLock(dir, { waitMs: 200 }), /lock held/)
+      assert.equal(statSync(lock).ino, ino)
+      assert.equal(readFileSync(join(lock, `h-${process.pid}`), 'utf8'), `${process.pid}:alien`)
+    })
+  })
+
+  test('a dead-pid LEGACY lock file is broken — the contender recovers the section', () => {
     withRepo((dir) => {
       const lock = `${agentRegistryPath(dir)!}.lock`
       mkdirSync(dirname(lock), { recursive: true })
@@ -343,17 +367,46 @@ describe('registry lock', () => {
     })
   })
 
-  test('release never removes a lock a contender re-acquired', () => {
+  test('a dead-pid lock DIR is broken — the contender recovers the section', () => {
+    withRepo((dir) => {
+      const lock = `${agentRegistryPath(dir)!}.lock`
+      mkdirSync(lock, { recursive: true })
+      const dead = spawnSync(process.execPath, ['-e', '']).pid!
+      writeFileSync(join(lock, `h-${dead}`), `${dead}:cafe`)
+      const release = acquireAgentRegistryLock(dir, { waitMs: 5_000 })
+      release()
+      assert.equal(existsSync(lock), false)
+    })
+  })
+
+  test('release never removes a lock a contender re-acquired — legacy file successor', () => {
     withRepo((dir) => {
       const lock = `${agentRegistryPath(dir)!}.lock`
       mkdirSync(dirname(lock), { recursive: true })
       const release = acquireAgentRegistryLock(dir)
-      // our section overran the stale window: the file was broken and
-      // re-created by another holder — releasing must not delete THEIRS
-      rmSync(lock)
+      // our section overran the stale window: the dir was broken and
+      // the path re-claimed as a legacy file by another holder —
+      // releasing must not delete THEIRS
+      rmSync(lock, { recursive: true })
       writeFileSync(lock, 'other-holder')
       release()
       assert.equal(readFileSync(lock, 'utf8'), 'other-holder')
+    })
+  })
+
+  test('release never removes a lock a contender re-acquired — dir successor', () => {
+    withRepo((dir) => {
+      const lock = `${agentRegistryPath(dir)!}.lock`
+      mkdirSync(dirname(lock), { recursive: true })
+      const release = acquireAgentRegistryLock(dir)
+      // same race, successor is a dir instance: our release's
+      // unlink-by-name misses inside a foreign dir and its conditional
+      // rmdir refuses a non-empty, foreign-inode instance
+      rmSync(lock, { recursive: true })
+      mkdirSync(lock)
+      writeFileSync(join(lock, 'h-99999999'), '99999999:other')
+      release()
+      assert.equal(readFileSync(join(lock, 'h-99999999'), 'utf8'), '99999999:other')
     })
   })
 
