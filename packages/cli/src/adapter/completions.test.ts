@@ -128,11 +128,13 @@ test('drift: every listed subcommand is advertised in its verb summary', () => {
   for (const [verb, subs] of Object.entries(VERB_SUBS)) {
     const plugin = PLUGINS.find((p) => p.name === verb)
     assert.ok(plugin !== undefined, `${verb} is not a plugin`)
-    const summary = plugin.summary
+    // word-ish tokens of the summary — same boundary rule the regex
+    // had (hyphens stay inside a token), no RegExp constructor
+    const words = plugin.summary.split(/[^\w-]+/).filter(Boolean)
     for (const sub of subs) {
       assert.ok(
-        new RegExp(`(^|[^\\w-])${sub}([^\\w-]|$)`).test(summary),
-        `'${verb} ${sub}' — '${sub}' is not advertised in the summary: ${summary}`
+        words.includes(sub),
+        `'${verb} ${sub}' — '${sub}' is not advertised in the summary: ${plugin.summary}`
       )
     }
   }
