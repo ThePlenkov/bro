@@ -22,7 +22,6 @@
  * queue and drain() is capped, file writes are swallowed whole — an
  * observer that throws is a dead observer, not a dead agent.
  */
-import { appendFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import {
   appendPrivateFileSync,
@@ -181,20 +180,18 @@ export function agentTurnPlane(opts: AgentTurnPlaneOpts): AgentTurnPlane {
       return
     }
     try {
-      // mkdir + repair once — the dir is stable for the plane's life, so
-      // per-row syscalls are dead weight. The archive carries raw ACP
-      // prompts and replies: pinned owner-only (spec bro-l8c4f.4) like
-      // the bus socket and state files — a 022 umask would leave it
-      // 0644, readable by every local user without the token-gated route
+      // mkdir once — the dir is stable for the plane's life. The
+      // archive carries raw ACP prompts and replies: pinned owner-only
+      // (spec bro-l8c4f.4) like the bus socket and state files — a 022
+      // umask would leave it 0644, readable by every local user without
+      // the token-gated route. Repair rides EVERY row, not just the
+      // first — in a dir another user can write, a swapped-in
+      // permissive file between rows must never collect the next row
       if (!dirReady) {
         mkdirPrivateSync(dirname(file))
-        // appendPrivateFileSync repairs a pre-existing archive's mode —
-        // afterwards plain append inherits the pin (spec bro-l8c4f.4)
-        appendPrivateFileSync(file, `${JSON.stringify(row)}\n`)
         dirReady = true
-      } else {
-        appendFileSync(file, `${JSON.stringify(row)}\n`)
       }
+      appendPrivateFileSync(file, `${JSON.stringify(row)}\n`)
     } catch {
       /* the archive is telemetry — a disk failure never fails a turn */
     }
