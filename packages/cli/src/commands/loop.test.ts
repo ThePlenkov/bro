@@ -13,7 +13,7 @@ import {
 import { DEFAULT_LOOP_CONFIG, type LoopConfig } from '@broject/loop'
 import { loopRefTails, loopWatch, resolveBeadsDir, resolveLoopLane } from './loop.ts'
 import type { AgentConnectorEnv } from '../agent-connectors.ts'
-import { git, initRepo, inside } from './testrepo.ts'
+import { bdStoreBlocker, git, initRepo, inside } from './testrepo.ts'
 
 // --- resolveLoopLane — the provider-registry vs raw-template pick -------------
 
@@ -354,8 +354,11 @@ describe('resolveBeadsDir', () => {
   })
 
   test('an initialized repo resolves its .beads dir', (t) => {
-    if (bdTry(['--version']).code !== 0) {
-      t.skip('bd not installed')
+    // needs-bd: the probe is a real init — a CGO-less bd passes
+    // --version and dies here, so capability, not presence, gates
+    const blocked = bdStoreBlocker()
+    if (blocked !== undefined) {
+      t.skip(blocked)
       return
     }
     const { root, main } = initRepo('bro-loop-beads-')

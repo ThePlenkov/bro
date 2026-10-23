@@ -91,6 +91,7 @@ import {
   BATCH_MARKER_ENV,
 } from '@broject/core'
 import {
+  ACT_STATE_TTL_MS,
   checkHistory,
   evaluateExitGate,
   fetchPrActState,
@@ -157,6 +158,7 @@ import {
 import type { NextPlan } from './next-plan.ts'
 import { processesRootedIn } from './proc-owner.ts'
 import { rigNext } from './rig-next.ts'
+import { MIN_INTERVAL_SEC } from './drive-config.ts'
 
 interface Ctx {
   /** Review facade bound to the main checkout — host calls follow the
@@ -270,7 +272,7 @@ function usage(): never {
                                 lead's affinity key (spec/epic/area/path),
                                 one worktree, one worker, one PR
                                 (loop.batch, 1 = solo)
-  --interval SEC                 gate poll interval (60)`)
+  --interval SEC                 gate poll interval, ≥0.1s (60)`)
   process.exit(2)
 }
 
@@ -1803,6 +1805,15 @@ type ServiceVerdict = 'kept' | 'active' | ItemResult
  *  of its exit landing (spec bro-zpa93). */
 const WORKER_POLL_MS = 1_000
 
+/** Alive-line floor: the heartbeat surfaces a STUCK run, so a fast
+ *  --interval tick must not turn it into per-poll noise — a sub-floor
+ *  interval (the e2e's fake clock) would heartbeat constantly through
+ *  every healthy run. The floor still beats inside a bounded hold —
+ *  a stalled run must name its stall promptly, and the e2e's 4s
+ *  kill-windows rely on seeing the line. Production is unchanged:
+ *  the default 60s interval sits far above the floor. */
+const HEARTBEAT_MIN_MS = 2_000
+
 /** The worker stage — a spawned member's FIRST gate, before its PR
  *  gate is even meaningful (spec bro-zpa93). It polls the agents
  *  registry, never the review host: 'running'/'spawned' keeps the
@@ -1960,7 +1971,12 @@ async function serviceMember(ctx: Ctx, m: GateMember): Promise<ServiceVerdict> {
     m.worker !== undefined ? await serviceWorker(ctx, m) : await serviceGate(ctx, m)
   if (verdict === 'kept') {
     m.nextPollAt =
-      Date.now() + (m.worker !== undefined ? WORKER_POLL_MS : ctx.intervalS * 1000)
+      Date.now() +
+      // a run that ticks below the worker poll's real-time second
+      // services .exit reads on its own cadence — never slower than it
+      (m.worker !== undefined
+        ? Math.min(WORKER_POLL_MS, ctx.intervalS * 1000)
+        : ctx.intervalS * 1000)
   }
   return verdict
 }
@@ -2451,6 +2467,9 @@ function buildCtx(
 ): Ctx {
   const { env, sel, lane, agent, routing, flagPin } = run
   const rev = reviewHost(root, broCfg.connectors)
+  // the shared poll floor, not 1: a fractional interval is the e2e's
+  // clock — the run polls fast without anyone faking the wall clock
+  const intervalS = num(flag(argv, '--interval'), 60, MIN_INTERVAL_SEC, Math.floor(TIMER_MAX_MS / 1000))
   const ctx: Ctx = {
     rev,
     tasks: facade('tasks', { dir: root }, { prefer: broCfg.connectors }),
@@ -2467,13 +2486,19 @@ function buildCtx(
       batch: num(flag(argv, '--batch'), cfg.batch, 1),
     },
     act: broCfg.act,
-    stateCache: prStateCache(root),
+    // the feed dedup's freshness contract is "at most one poll window
+    // stale" — under a fast tick a full ACT_STATE_TTL_MS window serves
+    // a gate's pending snapshot for 30s of polls. Cap it at the run's
+    // own cadence; the default interval keeps the production 30s.
+    stateCache: prStateCache(root, {
+      ttlMs: Math.min(ACT_STATE_TTL_MS, intervalS * 1000),
+    }),
     agent,
     lane,
     env,
     sel,
     routing,
-    intervalS: num(flag(argv, '--interval'), 60, 1, Math.floor(TIMER_MAX_MS / 1000)),
+    intervalS,
     json: argv.includes('--json'),
     selection: {
       filters: labelSelection(argv),
@@ -3417,7 +3442,7 @@ async function guardedRun(ctx: Ctx): Promise<void> {
   let open = true
   const heartbeat = setInterval(() => {
     console.error(`loop: alive — ${ctx.stage}${ctx.bead ? ` on ${ctx.bead}` : ''}`)
-  }, ctx.intervalS * 1000)
+  }, Math.max(ctx.intervalS * 1000, HEARTBEAT_MIN_MS))
   const auditDeath = (why: string): void => {
     try {
       writeSync(

@@ -87,6 +87,7 @@ import {
 import {
   checkHistory,
   evaluateExitGate,
+  ACT_STATE_TTL_MS,
   failingCiChecks,
   fetchPrActState,
   isSast,
@@ -2568,7 +2569,12 @@ async function runDrive(
     // which CLI syntax the fixer prompts write
     host: facadeName('reviews', { dir: mainPath }, { prefer: broCfg.connectors }),
     repo: rev.resolveRepo([]),
-    stateCache: prStateCache(mainPath),
+    // same freshness contract as the loop's: the feed dedup caps
+    // staleness at one poll window — a supervised pass's own cadence,
+    // never more than the production 30s
+    stateCache: prStateCache(mainPath, {
+      ttlMs: Math.min(ACT_STATE_TTL_MS, (args.everySec ?? drive.intervalSec) * 1000),
+    }),
     act: broCfg.act,
     merge: args.merge && drive.merge === 'auto',
     json: args.json,
