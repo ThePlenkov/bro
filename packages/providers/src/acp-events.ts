@@ -122,7 +122,15 @@ export function agentTurnPlane(opts: AgentTurnPlaneOpts): AgentTurnPlane {
   const file =
     scope === 'proxy'
       ? common !== null
-        ? join(common, 'bro', 'proxy', `acp-${opts.sessionId.replace(/[^\w.-]/g, '_')}.events.jsonl`)
+        ? // `-p<pid>` keeps two concurrent proxy runs of the same session
+          // id (a reconnect, a duplicated client) from mixing their rows
+          // in one archive
+          join(
+            common,
+            'bro',
+            'proxy',
+            `acp-${opts.sessionId.replace(/[^\w.-]/g, '_')}-p${process.pid}.events.jsonl`
+          )
         : undefined
       : agentId !== undefined && common !== null
         ? join(common, 'bro', 'agents', `${agentId}.events.jsonl`)

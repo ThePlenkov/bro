@@ -90,10 +90,11 @@ Intercepted, all inside the upstream catch-all (direction C→A):
 | Wire point | What bro does |
 | ---------- | ------------- |
 | `initialize` | Forward verbatim both ways — the downstream negotiates; the proxy never claims caps it won't serve. |
-| `session/new` · `session/fork` · `session/load` · `session/resume` | Forward verbatim. On a successful response carrying `sessionId`, stamp a pending-context buffer `{cwd}` for that session (`cwd` from request params — absent on load/resume/fork the session stamps cwd-less and the seam skips it; the proxy's own cwd is never a fallback). |
-| `session/prompt` | Claim the session's pending buffer atomically; run the prompt-submit seam on the flattened prompt text; prepend ONE `text` content block combining session-start context (first prompt only) + prompt-submit context (every prompt); forward the rewritten params. |
+| `session/new` · `session/fork` · `session/load` · `session/resume` | Forward verbatim. On a SUCCESSFUL response, stamp a pending-context buffer `{cwd}` under the session id — preferring the RESPONSE's `sessionId` (`session/fork`'s params carry the source id; the fork's own id only exists in the result) and falling back to the request param when the result omits one. An error response stamps nothing — a failed open must not register a session the client's retry would collide with. `cwd` comes from request params — absent on load/resume the session stamps cwd-less and the seam skips it; the proxy's own cwd is never a fallback. |
+| `session/prompt` | Queue the prompt behind the session's serialized write; inside the queue, decide "first" as *first prompt to actually cross* (a cancelled held prompt never claims the slot, and two queued prompts can't both take it). While the session owes start context, run the session seam; a SETTLED collection contributes its text and marks the slot done, an unsettled one (probe timeout/error) injects nothing and retries on the next prompt — partial output is never presented as complete. Run the prompt-submit seam on the flattened prompt text on every prompt; prepend ONE `text` content block combining whatever context exists; forward the rewritten params. |
 | `session/cancel` | Held prompts (injection queued or computing) are answered upstream with `{stopReason:'cancelled'}` and never cross — the wire never shows a prompt after its cancel. The cancel itself crosses only while crossed work still runs downstream — it is session-scoped, in-flight prompts are its real targets; a cancel whose whole target set was held prompts is fully handled by the proxy, so the wire never shows a cancel without its prompt either. |
-| everything else | Verbatim — `session/set_*`, `authenticate`, `providers/*`, `nes/*`, `document/*`, unknown `_`-methods. |
+| `session/close` | Forward verbatim (queued with the session's other writes). On a successful response the session is released — held prompts answered `stopReason:'cancelled'`, session entry dropped, span ended, plane drained — so a reused session id can't see stale state. A failed close leaves the session live. |
+| everything else | Verbatim — `session/set_*`, `session/delete`, `session/list`, `authenticate`, `providers/*`, `nes/*`, `document/*`, unknown `_`-methods. |
 
 And the downstream catch-all (direction A→C): everything verbatim —
 `session/update`, `session/request_permission` (policy is bro-9qopj),
@@ -116,11 +117,14 @@ collectPromptContext(dir, sessionId, prompt)
 
 `emitSessionContext`/`emitPromptContext` keep the stdin→stdout CLI
 contract — they delegate to the collectors and stay the semantic spec.
-The CLI wires the seam:
+The CLI wires the seam — `settled` crosses into the proxy so an
+unsettled probe set is retried, not presented as complete:
 
 ```ts
-seam.sessionContext = async (cwd, sessionId) =>
-  (await collectSessionContext(cwd, sessionId)).lines.join('\n') || undefined
+seam.sessionContext = async (cwd, sessionId) => {
+  const r = await collectSessionContext(cwd, sessionId)
+  return { text: r.lines.join('\n') || undefined, settled: r.settled }
+}
 seam.promptContext = async (cwd, sessionId, text) =>
   (await collectPromptContext(cwd, sessionId, text)).lines.join('\n') || undefined
 ```
@@ -129,10 +133,12 @@ seam.promptContext = async (cwd, sessionId, text) =>
 never the proxy process's cwd — a client that opens a session in
 another repo gets THAT repo's context or nothing, and a session whose
 params carry no `cwd` at all (`session/load`/`resume`/`fork`) skips the
-seam rather than probing the wrong repo. `hooksStateDir`
-execs `git rev-parse --git-common-dir` with `cwd: dir` so markers,
+seam rather than probing the wrong repo. `hooksStateDir` resolves the
+session's common dir through `gitCommonDir(dir)` — the canonical
+probe resolves relative `.git` output against `dir` and scrubs an
+inherited `GIT_DIR`/`GIT_WORK_TREE`/`GIT_COMMON_DIR`, so markers,
 trace tails, and the context cache all resolve inside the session's
-repo. The pending buffer records `cwd` at `session/new`; the prompt
+repo and never retarget at whatever repository spawned the proxy. The pending buffer records `cwd` at `session/new`; the prompt
 seam uses it; a session whose cwd hosts no bro-enabled repo simply
 collects zero lines (fail-open, same as the hook).
 
@@ -142,6 +148,15 @@ wins — honesty about injection is a client-compat tradeoff the seam
 defers). Prompt content blocks flatten to text for the prompt-submit
 probe input (text blocks join; non-text blocks contribute nothing —
 the probes read prompt text today, not images).
+
+**Trust model on the session cwd.** `bro acp proxy` is spawned *by*
+the ACP client over stdio — the client already executes with the
+proxy's privileges (it could exec the same file directly), so a
+client-supplied `cwd` is input inside the client's own trust domain,
+not a privilege boundary. The seam therefore executes the session
+repo's `bro.config.ts` exactly as the hook path does in its own
+project — repo config is code by design. A client pointing at a
+hostile directory can only trigger what it could already run itself.
 
 ### Lifecycle and failure contract
 
@@ -164,11 +179,17 @@ the probes read prompt text today, not images).
   with `{sessionId, injected, stopReason}` — same `otelSpan` tree the
   acp provider uses.
 - `session/update` observations feed `agentTurnPlane` keyed by the
-  upstream session id — `by: 'acp proxy'`. The plane already degrades
-  unbadged (no `BRO_AGENT_ID`) runs to bus-only; the proxy-scoped
-  archive dir lands with the turn-observation wiring (an unbadged
-  human-run `bro acp proxy` journals under
-  `<common>/bro/proxy/<session>.events.jsonl`, not the agents dir).
+  upstream session id — `by: 'acp proxy'`. The plane's
+  `start()`/`stop()` bookend each turn: `start` when a prompt crosses
+  downstream, `stop` when its response lands (a held prompt aborted by
+  cancel/close never started a downstream turn and emits neither). The
+  plane already degrades unbadged (no `BRO_AGENT_ID`) runs to
+  bus-only; the proxy-scoped archive dir lands with the
+  turn-observation wiring (an unbadged human-run `bro acp proxy`
+  journals under
+  `<common>/bro/proxy/acp-<session>-p<pid>.events.jsonl`, not the
+  agents dir — the pid keeps concurrent runs of one session id from
+  sharing an archive).
 
 ### CLI surface
 
@@ -197,7 +218,14 @@ errors (no `proxy`, no `--`, empty tail) exit 2.
     crosses verbatim.
   - `session/cancel` arriving while the seam is computing answers the
     held prompt `stopReason:'cancelled'` — the downstream never sees
-    that prompt.
+    that prompt, and the retry that crosses next is still the
+    session's "first" prompt (session context rides it).
+  - An unsettled session collection injects nothing and retries on the
+    next prompt; a settled one (even empty) marks the slot done.
+  - `session/fork` registers under the RESPONSE's sessionId —
+    prompting the fork gets the seam.
+  - `session/close` releases the session — a later prompt on the same
+    id crosses un-stamped (no seam, no injection).
   - A downstream request error (`failPrompt`) surfaces upstream with
     the peer's code/message — no rewrite.
   - Downstream spawn argv: `BRO_HOOKS=0` pinned on the child env.

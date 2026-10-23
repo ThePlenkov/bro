@@ -35,9 +35,17 @@ import { otelSpan, type OtelSpan } from './otel.ts'
  *  context text or undefined — the proxy never learns what a connector
  *  is; it only knows a seam call may yield a text block. */
 export interface AcpProxySeam {
-  /** Session-start context — runs at most once per session, on the
-   *  first session/prompt. `cwd` is the session/new-supplied repo. */
-  sessionContext?(cwd: string, sessionId: string): Promise<string | undefined>
+  /** Session-start context — runs once per session on the first
+   *  session/prompt whose collection SETTLES. `settled:false` means
+   *  the probes timed out or errored: nothing injects that turn and
+   *  the next prompt retries; a settled run (even an empty one) marks
+   *  the session's start-context slot done so a timed-out probe is
+   *  never presented as complete. `cwd` is the session/new-supplied
+   *  repo. */
+  sessionContext?(
+    cwd: string,
+    sessionId: string
+  ): Promise<{ text?: string; settled?: boolean } | undefined>
   /** Prompt-submit context — runs per prompt on the flattened text. */
   promptContext?(
     cwd: string,
@@ -61,8 +69,17 @@ export interface AcpProxyOptions {
  *  proxy's own cwd, which is never a substitute (spec bro-bhyo1). */
 interface ProxySession {
   cwd: string | undefined
-  /** The session's first prompt has crossed (injection claim made). */
+  /** A prompt has actually crossed downstream — set at write time
+   *  inside the serialized writeQ, so "first prompt" means first to
+   *  cross: a cancelled held prompt never claims the slot, and two
+   *  queued prompts can't both take it. */
   seenPrompt: boolean
+  /** Session-start context collection settled — true while no
+   *  sessionContext seam exists, on a cwd-less session's first check,
+   *  and after a settled collection (even an empty one). An UNSETTLED
+   *  collection leaves it false so the next prompt retries — partial
+   *  probe output is never presented as the session's start context. */
+  sessionCtxDone: boolean
   /** session/prompt ids held in the writeQ — seam collection queued or
    *  in flight. A session/cancel answers exactly these upstream
    *  `stopReason:'cancelled'` and they never cross; a prompt already
@@ -84,12 +101,17 @@ interface ProxySession {
  *  dead agent the pending entries fail visibly, never vanish. */
 interface PendingRequest {
   method: string
-  /** session/prompt bookkeeping — the turn span and its session. */
-  prompt?: { sessionId: string; span: OtelSpan }
+  /** session/prompt bookkeeping — the turn span and its session.
+   *  `first` stamps at cross time (first prompt to actually write
+   *  downstream) for the span's first_prompt attr. */
+  prompt?: { sessionId: string; span: OtelSpan; first?: boolean }
   /** session/new|load|fork bookkeeping — the cwd/sessionId to stamp
    *  onto the response's session id. `cwd` stays undefined when the
    *  params carried none — never the proxy's own cwd. */
   bind?: { cwd: string | undefined; sessionId?: string }
+  /** session/close bookkeeping — the session id to release on a
+   *  successful close response. */
+  close?: string
 }
 
 /** Latch — resolves once; the winner decides the proxy's verdict. */
@@ -220,29 +242,57 @@ export async function acpProxy(
     }
   }
 
-  /** The one rewrite the wire ever sees: a session's first prompt gets
-   *  ONE prepended text block combining session-start + prompt-submit
-   *  context; later prompts carry prompt-submit context only. An empty
-   *  join injects nothing — byte-identical forwarding is the default. */
+  /** The sessionContext leg — same fail-open rule, but a throw is an
+   *  UNSETTLED collection (retry next prompt) while a cwd-less session
+   *  or absent seam settles immediately: nothing can ever collect. */
+  const seamSessionCall = async (
+    fn: AcpProxySeam['sessionContext'],
+    session: ProxySession,
+    sessionId: string
+  ): Promise<{ text?: string; settled: boolean }> => {
+    if (fn === undefined || session.cwd === undefined) return { settled: true }
+    try {
+      const r = await fn(session.cwd, sessionId)
+      return { text: r?.text ?? undefined, settled: r?.settled ?? true }
+    } catch {
+      return { settled: false }
+    }
+  }
+
+  /** The one rewrite the wire ever sees: while the session's start
+   *  context is still owed, the session seam runs — a settled
+   *  collection contributes its text, an unsettled one (timeout/error)
+   *  injects nothing and retries on the next prompt. The slot only
+   *  closes when a settled collection actually CROSSES downstream —
+   *  the caller marks it at write time, so a prompt cancelled
+   *  mid-collection doesn't lose the session's start context. An
+   *  empty join injects nothing — byte-identical forwarding is the
+   *  default. */
   const injectPrompt = async (
     m: AnyMessage,
     params: Record<string, unknown>,
     sessionId: string,
-    ses: ProxySession,
-    first: boolean
-  ): Promise<AnyMessage> => {
+    ses: ProxySession
+  ): Promise<{ m: AnyMessage; sessionCtxSettled: boolean }> => {
     const text = promptText(params)
     const [sessionCtx, promptCtx] = await Promise.all([
-      first
-        ? seamCall(opts.seam?.sessionContext, ses, sessionId, text)
-        : Promise.resolve(undefined),
+      ses.sessionCtxDone
+        ? Promise.resolve<{ text?: string; settled: boolean }>({ settled: true })
+        : seamSessionCall(opts.seam?.sessionContext, ses, sessionId),
       seamCall(opts.seam?.promptContext, ses, sessionId, text),
     ])
-    const combined = [sessionCtx, promptCtx].filter((s) => s !== undefined && s !== '').join('\n')
-    if (combined === '') return m
+    // an unsettled collection contributes nothing — partial probe
+    // output is never presented as the session's start context
+    const combined = [sessionCtx.settled ? sessionCtx.text : undefined, promptCtx]
+      .filter((s) => s !== undefined && s !== '')
+      .join('\n')
+    if (combined === '') return { m, sessionCtxSettled: sessionCtx.settled }
     const blocks = Array.isArray(params['prompt']) ? params['prompt'] : []
     const block: ContentBlock = { type: 'text', text: combined }
-    return { ...m, params: { ...params, prompt: [block, ...blocks] } }
+    return {
+      m: { ...m, params: { ...params, prompt: [block, ...blocks] } },
+      sessionCtxSettled: sessionCtx.settled,
+    }
   }
 
   /** c2a request — verbatim forward plus the session/prompt seam. */
@@ -254,11 +304,8 @@ export async function acpProxy(
     const ses = sessionId === undefined ? undefined : sessions.get(sessionId)
 
     if (method === 'session/prompt' && sessionId !== undefined && ses !== undefined && params !== undefined) {
-      const first = !ses.seenPrompt
-      ses.seenPrompt = true
       const turn = otelSpan('acp.proxy.turn', {
         'acp.session': sessionId,
-        'acp.proxy.first_prompt': first,
       }, { parent: ses.span?.ctx })
       pending.set(id, { method, prompt: { sessionId, span: turn } })
       // The injection is a held write — it must not stall the read
@@ -276,11 +323,22 @@ export async function acpProxy(
           if (!pending.has(id) || downDead.fired) {
             return
           }
-          const rewritten = await injectPrompt(m, params, sessionId, ses, first)
+          // "first prompt" = first to actually CROSS, decided here
+          // under the serialized writeQ: a cancelled held prompt never
+          // claims the slot, and two queued prompts can't both take it
+          const first = !ses.seenPrompt
+          const injected = await injectPrompt(m, params, sessionId, ses)
           if (!pending.has(id) || downDead.fired) {
             return
           }
-          writeDown(rewritten)
+          const p = pending.get(id)
+          if (p?.prompt !== undefined) p.prompt.first = first
+          ses.seenPrompt = true
+          // a settled collection that crosses closes the slot; an
+          // unsettled one stays owed — the next prompt retries
+          ses.sessionCtxDone = ses.sessionCtxDone || injected.sessionCtxSettled
+          ses.plane?.start()
+          writeDown(injected.m)
         } finally {
           ses.held.delete(id)
         }
@@ -303,8 +361,42 @@ export async function acpProxy(
       method === 'session/resume'
         ? { cwd: str(params?.['cwd']), sessionId: str(params?.['sessionId']) }
         : undefined
-    pending.set(id, { method, ...(bind !== undefined ? { bind } : {}) })
+    const close = method === 'session/close' ? sessionId : undefined
+    pending.set(id, {
+      method,
+      ...(bind !== undefined ? { bind } : {}),
+      ...(close !== undefined ? { close } : {}),
+    })
     writeDownFor(sessionId, m)
+  }
+
+  /** Answer every held prompt of the session upstream with
+   *  `stopReason:'cancelled'` — held prompts never cross, so the wire
+   *  never shows a prompt after its cancel/close. No plane events here:
+   *  a held prompt never started a downstream turn (the plane's
+   *  start/stop bookends only crossed work). Returns the abort count. */
+  const abortHeld = (ses: ProxySession, sessionId: string): number => {
+    let aborted = 0
+    for (const [id, p] of pending) {
+      const pr = p.prompt
+      if (pr !== undefined && pr.sessionId === sessionId && ses.held.has(id)) {
+        pending.delete(id)
+        aborted++
+        pr.span.end({ 'acp.stop_reason': 'cancelled' })
+        answerUpstream(id, { stopReason: 'cancelled' })
+      }
+    }
+    return aborted
+  }
+
+  /** Release a session — held prompts answered, state dropped, span
+   *  ended, plane drained. Runs on a successful session/close response
+   *  (a failed close leaves the session live — the close never took). */
+  const releaseSession = (sessionId: string, ses: ProxySession): void => {
+    abortHeld(ses, sessionId)
+    sessions.delete(sessionId)
+    ses.span?.end({ 'acp.proxy.close': true })
+    void ses.plane?.drain().then(undefined, () => {})
   }
 
   /** c2a notification — verbatim; session/cancel first answers every
@@ -319,18 +411,8 @@ export async function acpProxy(
     if (wire(m).method === 'session/cancel') {
       const sessionId = sessionIdOf(m)
       const ses = sessionId === undefined ? undefined : sessions.get(sessionId)
-      if (ses !== undefined) {
-        let heldAborted = 0
-        for (const [id, p] of pending) {
-          const pr = p.prompt
-          if (pr !== undefined && pr.sessionId === sessionId && ses.held.has(id)) {
-            pending.delete(id)
-            heldAborted++
-            pr.span.end({ 'acp.stop_reason': 'cancelled' })
-            ses.plane?.stop('cancelled')
-            answerUpstream(id, { stopReason: 'cancelled' })
-          }
-        }
+      if (ses !== undefined && sessionId !== undefined) {
+        const heldAborted = abortHeld(ses, sessionId)
         const inFlight = [...pending.values()].some(
           (p) => p.prompt?.sessionId === sessionId
         )
@@ -366,14 +448,21 @@ export async function acpProxy(
     const id = wire(m).id as JsonRpcId
     const req = pending.get(id)
     pending.delete(id)
-    if (req?.bind !== undefined) {
+    if (req?.bind !== undefined && wire(m).error === undefined) {
       const result = wire(m).result
-      const sid = req.bind.sessionId ?? (isRecord(result) ? str(result['sessionId']) : undefined)
+      // the RESPONSE's sessionId wins — session/fork's params carry
+      // the SOURCE id, the fork's own id only exists in the result.
+      // load/resume responses may omit it → the request param is the
+      // fallback. An error response stamps nothing — a failed open
+      // must not register a session the next attempt would collide with.
+      const sid =
+        (isRecord(result) ? str(result['sessionId']) : undefined) ?? req.bind.sessionId
       if (sid !== undefined && !sessions.has(sid)) {
         const cwd = req.bind.cwd
         sessions.set(sid, {
           cwd,
           seenPrompt: false,
+          sessionCtxDone: opts.seam?.sessionContext === undefined,
           held: new Set(),
           writeQ: Promise.resolve(),
           plane:
@@ -389,6 +478,12 @@ export async function acpProxy(
         })
       }
     }
+    if (req?.close !== undefined && wire(m).error === undefined) {
+      const ses = sessions.get(req.close)
+      if (ses !== undefined) {
+        releaseSession(req.close, ses)
+      }
+    }
     if (req?.prompt !== undefined) {
       const ses = sessions.get(req.prompt.sessionId)
       const result = wire(m).result
@@ -396,6 +491,9 @@ export async function acpProxy(
       const failed = wire(m).error !== undefined
       req.prompt.span.end(
         {
+          ...(req.prompt.first !== undefined
+            ? { 'acp.proxy.first_prompt': req.prompt.first }
+            : {}),
           ...(stopReason !== undefined ? { 'acp.stop_reason': stopReason } : {}),
           ...(failed ? { 'acp.error': true } : {}),
         },
@@ -516,18 +614,30 @@ export async function runAcpProxy(
     stdio: ['pipe', 'pipe', 'inherit'],
     env: acpChildEnv(),
   })
-  child.once('error', (e) => {
-    log(`acp proxy: cannot exec '${bin}' — ${e.message}`)
+  // a failed exec answers 'error' ASYNC — the stream wrap below must
+  // not synchronously unwrap null stdio first, and the proxy must not
+  // wait for the client's EOF to report a spawn that never happened:
+  // the exit race ends the run with the downstream-dead verdict.
+  const execFailed = new Promise<number>((resolve) => {
+    child.once('error', (e) => {
+      log(`acp proxy: cannot exec '${bin}' — ${e.message}`)
+      resolve(1)
+    })
   })
+  if (child.stdin === null || child.stdout === null) {
+    log(`acp proxy: cannot exec '${bin}' — no stdio pipes`)
+    child.kill()
+    return 1
+  }
   const downstream = ndJsonStream(
-    Writable.toWeb(child.stdin!) as WritableStream<Uint8Array>,
-    Readable.toWeb(child.stdout!) as ReadableStream<Uint8Array>
+    Writable.toWeb(child.stdin) as WritableStream<Uint8Array>,
+    Readable.toWeb(child.stdout) as ReadableStream<Uint8Array>
   )
   const upstream = ndJsonStream(
     Writable.toWeb(process.stdout) as WritableStream<Uint8Array>,
     Readable.toWeb(process.stdin) as ReadableStream<Uint8Array>
   )
-  const code = await acpProxy(upstream, downstream, opts)
+  const code = await Promise.race([acpProxy(upstream, downstream, opts), execFailed])
   // upstream end → close the agent; a wedged child still dies on the
   // process exit that follows
   try {

@@ -50,7 +50,7 @@
  * Cloud agents do not fire sessionStart, so the first Cursor prompt
  * rehydrates once; preCompact clears that mark.
  */
-import { execFileSync } from 'node:child_process'
+
 import { createHash } from 'node:crypto'
 import {
   appendFileSync,
@@ -67,6 +67,7 @@ import { dirname, isAbsolute, join } from 'node:path'
 import { setTimeout as nodeSetTimeout } from 'node:timers'
 import {
   acquireFileLock,
+  gitCommonDir,
   parallelWorkProbe,
   postToolLines,
   preToolVerdicts,
@@ -444,16 +445,12 @@ const LIVE_SESSION_MS = 24 * 60 * 60 * 1000
  *  `dir` is the repo the question is about — hook events pass their own
  *  project root, the ACP proxy passes the session's `session/new` cwd. */
 function hooksStateDir(dir: string = process.cwd()): string | null {
-  try {
-    const gd = execFileSync('git', ['rev-parse', '--git-common-dir'], { // NOSONAR
-      cwd: dir,
-      encoding: 'utf8',
-      stdio: ['ignore', 'pipe', 'ignore'],
-    }).trim()
-    return gd ? join(gd, 'bro', 'hooks') : null
-  } catch {
-    return null
-  }
+  // gitCommonDir resolves the relative `.git` forms against `dir` and
+  // scrubs inherited GIT_DIR/GIT_WORK_TREE/GIT_COMMON_DIR — an inline
+  // rev-parse would let git output (or the proxy's ambient env) point
+  // marker reads/writes at a different repository's state
+  const gd = gitCommonDir(dir)
+  return gd !== null ? join(gd, 'bro', 'hooks') : null
 }
 
 /** One marker file per aspect (<session>.<aspect>) — arming is a pure file

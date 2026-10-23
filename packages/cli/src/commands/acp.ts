@@ -42,7 +42,13 @@ export async function runAcpCommand(argv: string[]): Promise<void> {
     seam: {
       sessionContext: async (cwd, sessionId) => {
         const r = await collectSessionContext(cwd, sessionId)
-        return r.lines.length === 0 ? undefined : r.lines.join('\n')
+        // `settled` must cross the seam — an unsettled probe set is
+        // incomplete context: the proxy retries it on the next prompt
+        // rather than presenting partial output as the session start
+        return {
+          text: r.lines.length === 0 ? undefined : r.lines.join('\n'),
+          settled: r.settled,
+        }
       },
       promptContext: async (cwd, sessionId, prompt) => {
         const r = await collectPromptContext(cwd, sessionId, prompt)

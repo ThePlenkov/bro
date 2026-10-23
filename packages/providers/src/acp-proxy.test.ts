@@ -49,6 +49,9 @@ interface Rig {
   agentConn: AgentConnection
   acp: ClientContext
   proxyDone: Promise<number>
+  /** session/update notifications the client leg received — verbatim
+   *  forwarding assertions read this, not just the agent's emit. */
+  updates: unknown[]
   /** The process ends the test rig — closing a stream's WRITABLE is the
    *  stdin-EOF the real proxy sees (conn.close() only cancels its own
    *  receive reader; it leaves the outgoing side open). */
@@ -61,6 +64,7 @@ interface Rig {
  *  failPrompt, …). */
 function rig(fakeOpts: Parameters<typeof fakeAcpAgent>[0], seam?: AcpProxySeam): Rig {
   const fake = fakeAcpAgent(fakeOpts)
+  const updates: unknown[] = []
   const [clientSide, proxyUp] = streamPair()
   const [proxyDown, agentSide] = streamPair()
   const agentConn = fake.app.connect(agentSide)
@@ -68,9 +72,12 @@ function rig(fakeOpts: Parameters<typeof fakeAcpAgent>[0], seam?: AcpProxySeam):
     .onRequest('session/request_permission', (ctx) => ({
       outcome: { outcome: 'selected', optionId: ctx.params.options[0]!.optionId },
     }))
+    .onNotification('session/update', (ctx) => {
+      updates.push(ctx.params)
+    })
     .connect(clientSide)
   const proxyDone = acpProxy(proxyUp, proxyDown, { seam, log: () => {} })
-  return { fake, conn, agentConn, acp: conn.agent, proxyDone, clientSide, agentSide }
+  return { fake, conn, agentConn, acp: conn.agent, proxyDone, updates, clientSide, agentSide }
 }
 
 /** Client hangup — EOF on the wire the proxy reads. */
@@ -151,6 +158,17 @@ describe('acpProxy — verbatim forwarding', () => {
         outcome: 'selected',
         optionId: 'allow-once',
       })
+      // the agent's session/update chunk crossed verbatim — captured
+      // client-side, not just emitted downstream
+      assert.deepEqual(r.updates, [
+        {
+          sessionId: 'sess-1',
+          update: {
+            sessionUpdate: 'agent_message_chunk',
+            content: { type: 'text', text: 'chunk' },
+          },
+        },
+      ])
     } finally {
       assert.equal(await close(r), 0)
     }
@@ -255,7 +273,7 @@ describe('acpProxy — verbatim forwarding', () => {
 
 describe('acpProxy — context injection seam', () => {
   const seam = (sessionCtx?: string, promptCtx?: string): AcpProxySeam => ({
-    sessionContext: async () => sessionCtx,
+    sessionContext: async () => ({ text: sessionCtx, settled: true }),
     promptContext: async () => promptCtx,
   })
 
@@ -264,7 +282,7 @@ describe('acpProxy — context injection seam', () => {
     const r = rig({ replyText: 'ok' }, {
       sessionContext: async (cwd, sessionId) => {
         calls.push({ cwd, sessionId })
-        return 'SESSION CTX'
+        return { text: 'SESSION CTX', settled: true }
       },
       promptContext: async () => 'PROMPT CTX',
     })
@@ -296,21 +314,38 @@ describe('acpProxy — context injection seam', () => {
     }
   })
 
-  test('a second session re-injects session context; absent seam stays byte-identical', async () => {
-    const r = rig({ replyText: 'ok' }, seam('S', 'P'))
+  test('each session injects session context on ITS first prompt — state is per session, not global', async () => {
+    const sessionCalls: string[] = []
+    const r = rig({ replyText: 'ok', uniqueSessions: true }, {
+      sessionContext: async (_cwd, sessionId) => {
+        sessionCalls.push(sessionId)
+        return { text: `S(${sessionId})`, settled: true }
+      },
+      promptContext: async () => 'P',
+    })
     try {
       const a = await openSession(r.acp)
+      const b = await openSession(r.acp)
+      assert.notEqual(a, b)
       await r.acp.request('session/prompt', {
         sessionId: a,
         prompt: [{ type: 'text', text: 'p1' }],
       })
-      // the fake always returns sess-1 — the proxy keys on whatever the
-      // downstream answered, same as the wire
-      assert.equal(r.fake.blocks[0]![0]!.type, 'text')
-      assert.equal((r.fake.blocks[0]![0] as { text: string }).text, 'S\nP')
+      await r.acp.request('session/prompt', {
+        sessionId: b,
+        prompt: [{ type: 'text', text: 'p2' }],
+      })
+      // both sessions' first prompts got their own session block —
+      // a session-keyed flag, not a global "already injected" one
+      assert.deepEqual(r.fake.blocks[0]![0], { type: 'text', text: `S(${a})\nP` })
+      assert.deepEqual(r.fake.blocks[1]![0], { type: 'text', text: `S(${b})\nP` })
+      assert.deepEqual(sessionCalls, [a, b])
     } finally {
       assert.equal(await close(r), 0)
     }
+  })
+
+  test('absent seam stays byte-identical', async () => {
     const bare = rig({ replyText: 'ok' })
     try {
       await openSession(bare.acp)
@@ -322,6 +357,129 @@ describe('acpProxy — context injection seam', () => {
       assert.deepEqual(bare.fake.blocks[0]![0], { type: 'text', text: 'p1' })
     } finally {
       assert.equal(await close(bare), 0)
+    }
+  })
+
+  test('an unsettled session collection injects nothing and retries on the next prompt', async () => {
+    let calls = 0
+    const r = rig({ replyText: 'ok' }, {
+      sessionContext: async () => {
+        calls++
+        // first attempt times out partial — unsettled; the retry settles
+        return calls === 1
+          ? { text: 'PARTIAL', settled: false }
+          : { text: 'SETTLED', settled: true }
+      },
+      promptContext: async () => 'P',
+    })
+    try {
+      const sessionId = await openSession(r.acp)
+      await r.acp.request('session/prompt', {
+        sessionId,
+        prompt: [{ type: 'text', text: 'one' }],
+      })
+      await r.acp.request('session/prompt', {
+        sessionId,
+        prompt: [{ type: 'text', text: 'two' }],
+      })
+      // prompt 1: unsettled → only prompt ctx, no PARTIAL block
+      assert.deepEqual(r.fake.blocks[0]![0], { type: 'text', text: 'P' })
+      // prompt 2: the retry settled → session ctx finally rides along
+      assert.deepEqual(r.fake.blocks[1]![0], { type: 'text', text: 'SETTLED\nP' })
+      assert.equal(calls, 2)
+    } finally {
+      assert.equal(await close(r), 0)
+    }
+  })
+
+  test('a cancelled held first prompt yields the slot — the retry gets session context', async () => {
+    let release!: () => void
+    const gate = new Promise<void>((r2) => { release = r2 })
+    const r = rig({ replyText: 'ok' }, {
+      sessionContext: async () => {
+        await gate
+        return { text: 'S', settled: true }
+      },
+      promptContext: async () => 'P',
+    })
+    try {
+      const sessionId = await openSession(r.acp)
+      const a = r.acp.request<{ stopReason: string }>('session/prompt', {
+        sessionId,
+        prompt: [{ type: 'text', text: 'a' }],
+      })
+      // cancel while A's seam collection is held → answered upstream,
+      // never crosses, and does NOT burn the session's first-prompt slot
+      await new Promise((r2) => setTimeout(r2, 50))
+      await r.acp.notify('session/cancel', { sessionId })
+      release()
+      assert.equal((await a).stopReason, 'cancelled')
+      assert.equal(r.fake.prompts.length, 0)
+      // the next prompt IS the first to cross — session ctx must ride it
+      const res = await r.acp.request<{ stopReason: string }>('session/prompt', {
+        sessionId,
+        prompt: [{ type: 'text', text: 'b' }],
+      })
+      assert.equal(res.stopReason, 'end_turn')
+      assert.deepEqual(r.fake.blocks[0]![0], { type: 'text', text: 'S\nP' })
+    } finally {
+      assert.equal(await close(r), 0)
+    }
+  })
+
+  test('session/fork registers the fork by its RESPONSE id — prompts on it get the seam', async () => {
+    const r = rig({ replyText: 'ok' }, seam('S', 'P'))
+    try {
+      const a = await openSession(r.acp)
+      const fork = (await r.acp.request('session/fork', {
+        sessionId: a,
+        cwd: '/tmp/proxy-repo',
+        mcpServers: [],
+      })) as { sessionId: string }
+      assert.equal(fork.sessionId, 'sess-fork-1')
+      assert.deepEqual(r.fake.forks, [a])
+      const res = await r.acp.request<{ stopReason: string }>('session/prompt', {
+        sessionId: fork.sessionId,
+        prompt: [{ type: 'text', text: 'x' }],
+      })
+      assert.equal(res.stopReason, 'end_turn')
+      // stamped by the response id → the fork is a real session with
+      // its own first-prompt slot, not a bypass around the seam
+      assert.deepEqual(r.fake.blocks[0]![0], { type: 'text', text: 'S\nP' })
+    } finally {
+      assert.equal(await close(r), 0)
+    }
+  })
+
+  test('session/close releases the session — a later prompt on the id skips the seam', async () => {
+    const promptCalls: string[] = []
+    const r = rig({ replyText: 'ok' }, {
+      sessionContext: async () => ({ text: 'S', settled: true }),
+      promptContext: async (cwd, sessionId) => {
+        promptCalls.push(sessionId)
+        return 'P'
+      },
+    })
+    try {
+      const sessionId = await openSession(r.acp)
+      await r.acp.request('session/prompt', {
+        sessionId,
+        prompt: [{ type: 'text', text: 'one' }],
+      })
+      assert.deepEqual(promptCalls, [sessionId])
+      await r.acp.request('session/close', { sessionId })
+      assert.deepEqual(r.fake.closes, [sessionId])
+      // after close the session entry is gone — this prompt takes the
+      // un-stamped path: verbatim forward, no seam calls, no injection
+      await r.acp.request('session/prompt', {
+        sessionId,
+        prompt: [{ type: 'text', text: 'two' }],
+      })
+      assert.deepEqual(promptCalls, [sessionId])
+      assert.equal(r.fake.blocks[1]!.length, 1)
+      assert.deepEqual(r.fake.blocks[1]![0], { type: 'text', text: 'two' })
+    } finally {
+      assert.equal(await close(r), 0)
     }
   })
 
@@ -353,7 +511,7 @@ describe('acpProxy — context injection seam', () => {
       sessionContext: async () => {
         entered()
         await gate
-        return 'LATE CTX'
+        return { text: 'LATE CTX', settled: true }
       },
     })
     try {
@@ -386,7 +544,7 @@ describe('acpProxy — context injection seam', () => {
     const seamGate = new Promise<void>((r2) => { releaseSeam = r2 })
     const entered = new Promise<void>((r2) => { seamEntered = r2 })
     const r = rig({ replyText: 'ok', holdEnd: () => turnGate }, {
-      sessionContext: async () => 'S',
+      sessionContext: async () => ({ text: 'S', settled: true }),
       promptContext: async (_c, _s, text) => {
         if (text === 'b-text') {
           seamEntered()
@@ -433,7 +591,7 @@ describe('acpProxy — context injection seam', () => {
     let release!: () => void
     const gate = new Promise<void>((r2) => { release = r2 })
     const r = rig({ replyText: 'ok' }, {
-      sessionContext: async () => { await gate; return 'S' },
+      sessionContext: async () => { await gate; return { text: 'S', settled: true } },
       promptContext: async () => 'P',
     })
     try {
@@ -489,7 +647,7 @@ describe('acpProxy — context injection seam', () => {
     const conn = client({ name: 'test-client' }).connect(clientSide)
     const proxyDone = acpProxy(proxyUp, proxyDown, {
       seam: {
-        sessionContext: async (cwd) => { calls.push(cwd); return 'S' },
+        sessionContext: async (cwd) => { calls.push(cwd); return { text: 'S', settled: true } },
         promptContext: async (cwd) => { calls.push(cwd); return 'P' },
       },
       log: () => {},
