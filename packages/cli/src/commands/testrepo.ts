@@ -535,6 +535,9 @@ export function bdStoreBlocker(): string | undefined {
   if (bdTry(['--version'], 10_000, dir).code !== 0) {
     return 'bd not installed'
   }
+  // a checkout-shaped scratch: a bd build that insists on a git
+  // worktree for init must probe "store works", never "dir had no git"
+  git(['init', '-q', dir])
   const r = bdTry(['init', '--stealth', '--skip-agents', '--skip-hooks', '--quiet'], 30_000, dir)
   return r.code === 0
     ? undefined
