@@ -469,6 +469,8 @@ export {
 export type { JanitorDeps, JanitorOpts, JanitorReaped, JanitorReport } from './janitor.ts'
 export type { SpecNode, SpecStore } from './specs.ts'
 export { warnDeprecated } from './deprecation.ts'
+export { EXIT, EXIT_CODES, hasHelpFlag, printUsage, usageWriter } from './exits.ts'
+export type { ExitCode, ExitCodeRow } from './exits.ts'
 export { markerLive, markerOwner, pidAlive, procStat } from './proc.ts'
 export { checkPlanVersion, planKind, readPlanDoc } from './plan.ts'
 export type { PlanSchema } from './plan.ts'

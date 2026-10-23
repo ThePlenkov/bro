@@ -28,7 +28,7 @@
 import { execFileSync } from 'node:child_process'
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { isAbsolute, join, resolve } from 'node:path'
-import { LockTimeout, withFileLock, type JudgeAnswer } from '@broject/core'
+import { hasHelpFlag, LockTimeout, printUsage, withFileLock, type JudgeAnswer } from '@broject/core'
 import { appendRow, judgeConfig, judgeFacade } from '@broject/judge'
 import { loadBroConfig } from '../plugins.ts'
 import type { GoalConfig } from './goal-config.ts'
@@ -98,6 +98,24 @@ function goalPath(dir: string, session: string): string | null {
 function goalLock(dir: string, session: string): string | null {
   const p = goalPath(dir, session)
   return p === null ? null : `${p}.lock`
+}
+
+/** A mutating verb serializes against an in-flight stop-hook eval —
+ *  its read-modify-write must never interleave the eval's recheck+write.
+ *  A wedged lock fails open: `bro goal` must keep working. */
+const withGoalLock = <T>(dir: string, target: string, fn: () => T): T => {
+  const lock = goalLock(dir, target)
+  if (lock === null) {
+    return fn()
+  }
+  try {
+    return withFileLock(lock, fn, { waitMs: 5_000, label: 'goal update lock' })
+  } catch (err) {
+    if (err instanceof LockTimeout) {
+      return fn()
+    }
+    throw err
+  }
 }
 
 export function readGoal(dir: string, session: string): GoalRecord | null {
@@ -408,75 +426,44 @@ function report(target: string, goal: GoalRecord, asJson: boolean, text: string)
   console.log(text)
 }
 
-export function runGoalCommand(argv: string[]): void {
-  const dir = process.cwd()
-  const { session, turns, asJson, positional } = parseGoalArgs(argv)
-  const target = session ?? SEED
-  const verb = positional[0]
-  // a session-scoped verb binds the session's materialized goal — the
-  // seed is consumed, not left behind to re-seed the next session
-  const verbGoal = () => (session === undefined ? readGoal(dir, SEED) : sessionGoal(dir, target))
-  // a mutating verb serializes against an in-flight stop-hook eval —
-  // its read-modify-write must never interleave the eval's recheck+write.
-  // A wedged lock fails open: `bro goal` must keep working.
-  const lock = goalLock(dir, target)
-  const locked = <T>(fn: () => T): T => {
-    if (lock === null) {
-      return fn()
-    }
-    try {
-      return withFileLock(lock, fn, { waitMs: 5_000, label: 'goal update lock' })
-    } catch (err) {
-      if (err instanceof LockTimeout) {
-        return fn()
-      }
-      throw err
-    }
+function clearGoal(dir: string, target: string, goal: GoalRecord | null, asJson: boolean): void {
+  if (goal === null) {
+    console.log('No goal set')
+    return
   }
+  goal.status = 'cleared'
+  goal.resolvedAt = Date.now()
+  writeGoal(dir, target, goal)
+  report(target, goal, asJson, `Goal cleared: ${goal.condition}`)
+}
 
-  if (verb !== undefined && CLEAR_ALIASES.has(verb)) {
-    const goal = locked(() => {
-      const g = verbGoal()
-      if (g !== null) {
-        g.status = 'cleared'
-        g.resolvedAt = Date.now()
-        writeGoal(dir, target, g)
-      }
-      return g
-    })
-    if (goal === null) {
-      console.log('No goal set')
-      return
-    }
-    report(target, goal, asJson, `Goal cleared: ${goal.condition}`)
+function pauseResumeGoal(
+  dir: string,
+  target: string,
+  verb: 'pause' | 'resume',
+  goal: GoalRecord | null,
+  asJson: boolean
+): void {
+  if (goal === null) {
+    console.log('No goal set')
     return
   }
-  if (verb === 'pause' || verb === 'resume') {
-    const goal = locked(() => {
-      const g = verbGoal()
-      if (g !== null) {
-        g.status = verb === 'pause' ? 'paused' : 'active'
-        if (verb === 'resume') {
-          g.evals = 0
-          g.resolvedAt = undefined
-        }
-        writeGoal(dir, target, g)
-      }
-      return g
-    })
-    if (goal === null) {
-      console.log('No goal set')
-      return
-    }
-    report(target, goal, asJson, `goal ${verb}d: "${goal.condition}"`)
-    return
+  goal.status = verb === 'pause' ? 'paused' : 'active'
+  if (verb === 'resume') {
+    goal.evals = 0
+    goal.resolvedAt = undefined
   }
-  if (verb === 'status' || verb === undefined) {
-    printStatus(verbGoal(), target, asJson)
-    return
-  }
+  writeGoal(dir, target, goal)
+  report(target, goal, asJson, `goal ${verb}d: "${goal.condition}"`)
+}
 
-  const condition = positional.join(' ')
+function setGoal(
+  dir: string,
+  target: string,
+  condition: string,
+  turns: number | undefined,
+  asJson: boolean
+): void {
   if (condition.length > 4000) {
     console.error('error: goal condition is capped at 4000 characters')
     process.exit(2)
@@ -488,7 +475,7 @@ export function runGoalCommand(argv: string[]): void {
     evals: 0,
     maxTurns: turns ?? goalConfig(dir).maxTurns,
   }
-  locked(() => writeGoal(dir, target, goal))
+  withGoalLock(dir, target, () => writeGoal(dir, target, goal))
   report(
     target,
     goal,
@@ -496,4 +483,34 @@ export function runGoalCommand(argv: string[]): void {
     `goal set (${target === SEED ? 'repo — binds to next session' : `session ${target.slice(0, 12)}`}): ` +
       `"${condition}"${goal.maxTurns > 0 ? ` · ${goal.maxTurns} turns` : ''}`
   )
+}
+
+export function runGoalCommand(argv: string[]): void {
+  if (hasHelpFlag(argv)) {
+    printUsage(
+      'usage: bro goal [<condition> | clear|pause|resume|status] [--session <id>] [--turns <n>] [--json]',
+      0
+    )
+  }
+  const dir = process.cwd()
+  const { session, turns, asJson, positional } = parseGoalArgs(argv)
+  const target = session ?? SEED
+  const verb = positional[0]
+  // a session-scoped verb binds the session's materialized goal — the
+  // seed is consumed, not left behind to re-seed the next session
+  const verbGoal = () => (session === undefined ? readGoal(dir, SEED) : sessionGoal(dir, target))
+
+  if (verb !== undefined && CLEAR_ALIASES.has(verb)) {
+    withGoalLock(dir, target, () => clearGoal(dir, target, verbGoal(), asJson))
+    return
+  }
+  if (verb === 'pause' || verb === 'resume') {
+    withGoalLock(dir, target, () => pauseResumeGoal(dir, target, verb, verbGoal(), asJson))
+    return
+  }
+  if (verb === 'status' || verb === undefined) {
+    printStatus(verbGoal(), target, asJson)
+    return
+  }
+  setGoal(dir, target, positional.join(' '), turns, asJson)
 }

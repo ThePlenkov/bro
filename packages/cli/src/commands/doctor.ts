@@ -23,11 +23,13 @@ import {
   facadeName,
   gitCommonDir,
   gitTry,
+  hasHelpFlag,
   isEnvName,
   janitorDidWork,
   janitorLine,
   loadConfigLayers,
   pidAlive,
+  printUsage,
   probeBdCompat,
   PROVIDER_REGISTRY,
   runJanitor,
@@ -1647,6 +1649,9 @@ function printDoctor(checks: DoctorCheck[], budget: ReturnType<typeof readBudget
 }
 
 export function runDoctorCommand(argv: string[]): void {
+  if (hasHelpFlag(argv)) {
+    printUsage('usage: bro doctor [--json]', 0)
+  }
   const json = argv.includes('--json')
   const dir = process.cwd()
   const checks = runDoctorChecks(dir)

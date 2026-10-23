@@ -28,7 +28,9 @@ import {
   gitBranchLog,
   gitCommonDir,
   gitTry,
+  hasHelpFlag,
   mergeQueueHost,
+  printUsage,
   prOwnership,
   reviewHost,
   taskStore,
@@ -38,6 +40,7 @@ import {
   type ReviewThread,
   type TaskRow,
 } from '@broject/core'
+import type { ExitCode } from '@broject/core'
 import { loadBroConfig } from '../plugins.ts'
 import { flag } from './args.ts'
 import { SELF_ENTRY } from './self-entry.ts'
@@ -75,8 +78,8 @@ import {
 import { coveredBeadIds } from '@broject/loop'
 import { githubPrWake } from '@broject/github'
 
-function usage(): never {
-  console.error(`Usage: bro act <command> [args…]
+function usage(exitCode: ExitCode = 2): never {
+  printUsage(`Usage: bro act <command> [args…]
 
 Commands:
   status [PR] [--json]              PR state + exit gate JSON
@@ -99,8 +102,7 @@ Commands:
                                     reject/defer reasons
   reply --thread ID --comment T     Reply without resolving
         --file TSV                  Batch reply: <thread_id>\t<body> per line
-        --unresolve                 resolve → unresolve instead`)
-  process.exit(1)
+        --unresolve                 resolve → unresolve instead`, exitCode)
 }
 
 const VALUE_FLAGS = new Set(['--pr', '--thread', '--comment', '--file', '--interval', '--timeout', '--bead'])
@@ -1599,12 +1601,15 @@ export async function runActCommand(argv: string[]): Promise<void> {
     return
   }
   if (cmd === '--help' || cmd === '-h') {
-    usage()
+    usage(0)
   }
   const handler = COMMANDS[cmd]
   if (!handler) {
     console.error(`unknown command: ${cmd}`)
     usage()
+  }
+  if (hasHelpFlag(rest)) {
+    usage(0)
   }
   await handler(rest)
 }

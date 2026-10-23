@@ -152,6 +152,8 @@ import {
   type EventInput,
   type HeldLockOptions,
   type PlaneDescriptor,
+  hasHelpFlag,
+  printUsage,
   type SpawnErrorKind,
 } from '@broject/core'
 import { GITHUB_WEBHOOK_SECRET_ENV, githubWebhookHandler } from '@broject/github'
@@ -192,6 +194,7 @@ import {
 } from '../planes/stream.ts'
 import { providerConfig, providerProxy, type ProviderConfig } from './serve-provider.ts'
 import { conductorConfig, conductorProxy, type ConductorConfig } from './serve-conductor.ts'
+import type { ExitCode } from '@broject/core'
 import type { AcpTerminals, TerminalFollow } from '@broject/providers'
 import { readBeads } from './status.ts'
 import { collectSnapshot } from './watch.ts'
@@ -1891,8 +1894,8 @@ function realDeps(
   }
 }
 
-function usage(): never {
-  console.error(`usage:
+function usage(exitCode: ExitCode = 2): never {
+  printUsage(`usage:
   bro serve [--port <n>]
   bro serve ensure --port <n>
   bro serve watchdog --port <n> --pid <p>   (internal — armed by serve)
@@ -1905,8 +1908,7 @@ port, spawn \`bro serve\` detached when dead, then print this repo's
 serve.json token on stdout. Failures are stderr + nonzero; stdout never
 carries an empty key.
 
-Routes: ${ROUTES.join(', ')}`)
-  process.exit(2)
+Routes: ${ROUTES.join(', ')}`, exitCode)
 }
 
 // --- ensure ----------------------------------------------------------------
@@ -2102,7 +2104,7 @@ export async function ensureServe(
 }
 
 async function cmdEnsure(argv: string[]): Promise<void> {
-  if (argv.includes('--help') || argv.includes('-h')) usage()
+  if (hasHelpFlag(argv)) usage(0)
   const pos = positionals(argv, new Set(['--port']))
   if (pos.length > 0) usage()
   for (const a of argv) {
@@ -2243,8 +2245,8 @@ async function cmdWatchdog(argv: string[]): Promise<void> {
  *  `usage()` on any malformed input — a mistyped flag must never
  *  silently serve. */
 function parseServePort(argv: string[]): number {
-  if (argv.includes('--help') || argv.includes('-h')) {
-    usage()
+  if (hasHelpFlag(argv)) {
+    usage(0)
   }
   const pos = positionals(argv, new Set(['--port']))
   if (pos.length > 0) {

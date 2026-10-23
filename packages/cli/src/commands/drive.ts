@@ -83,7 +83,10 @@ import {
   type TaskRow,
   type TaskStore,
   BATCH_MARKER_ENV,
+  hasHelpFlag,
+  printUsage,
 } from '@broject/core'
+import type { ExitCode } from '@broject/core'
 import {
   checkHistory,
   evaluateExitGate,
@@ -142,13 +145,13 @@ import { rigNext, type RigNext } from './rig-next.ts'
 import { isOrchestratorSession } from './watch-pulse.ts'
 export { LIVE_MARKER_MS, worktreeClaim, worktreeClaimInfo, worktreeIdleMs } from './work.ts'
 
-function usage(): never {
-  console.error(
+function usage(exitCode: ExitCode = 2): never {
+  printUsage(
     'Usage: bro drive [--once] [--every [SEC]] [--no-merge] [--connector <name>] [--json]\n' +
       '       bro drive install [--every N] [--print]\n' +
-      '       bro drive uninstall'
+      '       bro drive uninstall',
+    exitCode,
   )
-  process.exit(2)
 }
 
 // --- args ------------------------------------------------------------------------
@@ -2493,8 +2496,8 @@ function runDriveSched(argv: string[], dir: string, drive: DriveConfig): void {
 }
 
 export async function runDriveCommand(argv: string[]): Promise<void> {
-  if (argv.includes('--help') || argv.includes('-h')) {
-    usage()
+  if (hasHelpFlag(argv)) {
+    usage(0)
   }
   const main = mainWorktree()
   const broCfg = loadBroConfig(main.path)
