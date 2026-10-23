@@ -14,7 +14,7 @@
  * session quotas, claim artifacts), returning an agentId. The caller's
  * BRO_AGENT_ID rides as delegatedBy provenance on both.
  */
-import { existsSync, readFileSync } from 'node:fs'
+import { readFileSync, statSync, type Stats } from 'node:fs'
 import { randomBytes } from 'node:crypto'
 import {
   BATCH_MARKER_ENV,
@@ -45,6 +45,11 @@ import {
 import { SpawnInputError, spawnStepAgent } from './agents.ts'
 
 const DEFAULT_TIMEOUT_SEC = 120
+/** A pooled-turn payload — generous for diffs/specs, never a stream. */
+const MAX_PROMPT_FILE_BYTES = 1024 * 1024
+/** 24h — beyond that a "sync ask" isn't one, and the deadline math
+ *  approaches the runtime timer ceiling (~24.8d). */
+const MAX_TIMEOUT_SEC = 86_400
 
 function usage(exitCode: ExitCode = 2): never {
   printUsage(`usage:
@@ -132,8 +137,22 @@ function delegatePrompt(req: DelegateRequest): string {
     if (req.promptFile === undefined) {
       throw new SpawnInputError('delegate requires a prompt — --prompt <text> or --prompt-file <file>')
     }
-    if (!existsSync(req.promptFile)) {
-      throw new SpawnInputError(`prompt file ${req.promptFile} does not exist`)
+    // size + regularity gate before the read — a prompt file is one
+    // turn's payload, never an unbounded stream or a device
+    const st = ((): Stats | undefined => {
+      try {
+        return statSync(req.promptFile as string)
+      } catch {
+        return undefined
+      }
+    })()
+    if (st === undefined || !st.isFile()) {
+      throw new SpawnInputError(`prompt file ${req.promptFile} does not exist or is not a regular file`)
+    }
+    if (st.size > MAX_PROMPT_FILE_BYTES) {
+      throw new SpawnInputError(
+        `prompt file ${req.promptFile} is ${st.size} bytes — a turn payload caps at ${MAX_PROMPT_FILE_BYTES}`
+      )
     }
     text = readFileSync(req.promptFile, 'utf8')
   }
@@ -152,6 +171,12 @@ function delegatePrompt(req: DelegateRequest): string {
 function routedLane(env: AgentConnectorEnv, req: DelegateRequest): ResolvedClass | undefined {
   if (req.provider !== undefined && req.class !== undefined) {
     throw new SpawnInputError('--provider and --class are mutually exclusive')
+  }
+  // an explicit provider pin bypasses lane resolution entirely — the
+  // pin IS the lane, and a routing table with no usable default must
+  // not reject a request that never asked for one
+  if (req.provider !== undefined) {
+    return undefined
   }
   const routing = env.fleet?.routing
   if (routing === undefined || Object.keys(routing).length === 0) {
@@ -196,14 +221,19 @@ function waitProvider(
   return { name, entry }
 }
 
-/** Provider walls live in the repo registry — a non-repo dir simply
- *  has none (a delegate ask works wherever config resolves). */
+/** Provider walls live in the repo registry — a non-repo dir reads as
+ *  no walls (readAgentRegistry returns {} for ENOENT/no-common-dir), so
+ *  any throw IS registry corruption: fail the wait closed rather than
+ *  spend against a provider whose wall status is unknown. */
 function wallsFor(dir: string, provider: string): void {
   let walls: ReturnType<typeof providerWallsFor>
   try {
     walls = providerWallsFor(dir)
-  } catch {
-    return
+  } catch (err) {
+    throw new SpawnError(
+      `provider walls unreadable — refusing the delegate turn closed: ${err instanceof Error ? err.message : String(err)}`,
+      'unavailable'
+    )
   }
   const wall = walls.find((w) => w.provider === provider)
   if (wall !== undefined) {
@@ -216,8 +246,8 @@ function wallsFor(dir: string, provider: string): void {
 
 function waitDeadline(timeoutSec: number | undefined): number {
   const sec = timeoutSec ?? DEFAULT_TIMEOUT_SEC
-  if (!Number.isFinite(sec) || sec <= 0) {
-    throw new SpawnInputError('--timeout must be a positive number of seconds')
+  if (!Number.isFinite(sec) || sec <= 0 || sec > MAX_TIMEOUT_SEC) {
+    throw new SpawnInputError(`--timeout must be 1..${MAX_TIMEOUT_SEC} seconds`)
   }
   return Date.now() + sec * 1000
 }
@@ -308,6 +338,22 @@ async function delegateDetach(
   }
 }
 
+/** Mode-shape gate the CLI and the plane share — the exec boundary
+ *  would otherwise accept mode-foreign fields the CLI's parser dies
+ *  on, silently ignoring a caller's intent. */
+function checkModeFields(req: DelegateRequest): void {
+  const mode = req.mode ?? 'wait'
+  const foreign =
+    mode === 'wait'
+      ? (['connector', 'worktree', 'autoApprove'] as const).filter((k) => req[k] !== undefined)
+      : req.timeoutSec === undefined
+        ? []
+        : ['timeoutSec' as const]
+  if (foreign.length > 0) {
+    throw new SpawnInputError(`${foreign.join(', ')} only appl${foreign.length > 1 ? 'y' : 'ies'} to --${mode === 'wait' ? 'detach' : 'wait'}`)
+  }
+}
+
 /** The delegate contract — both CLI and the agents plane's
  *  exec('delegate') run it. Throws SpawnInputError on bad input,
  *  SpawnError on refusal/config/availability — callers render. */
@@ -317,6 +363,7 @@ export async function delegate(
   req: DelegateRequest,
   opts: DelegateOpts = {}
 ): Promise<DelegateResult> {
+  checkModeFields(req)
   const sel: DelegateSel = {
     req,
     routed: routedLane(env, req),
@@ -356,8 +403,8 @@ function parseTimeout(argv: string[], mode: 'wait' | 'detach'): number | undefin
     die('--timeout only applies to --wait')
   }
   const sec = Number(raw)
-  if (!Number.isFinite(sec) || sec <= 0) {
-    die('--timeout must be a positive number of seconds')
+  if (!Number.isFinite(sec) || sec <= 0 || sec > MAX_TIMEOUT_SEC) {
+    die(`--timeout must be 1..${MAX_TIMEOUT_SEC} seconds`)
   }
   return sec
 }
@@ -407,20 +454,17 @@ function printDetach(result: DelegateDetachResult): void {
   const info = result.agent
   const pid = info.pid === undefined ? '' : ` pid ${info.pid}`
   console.log(`agent ${info.id} ${info.state} for ${info.molStep} (${info.backend}${pid})`)
-  for (const [label, v] of [
-    ['delegatedBy', result.delegatedBy],
-    [
-      'provider',
-      info.provider === undefined
-        ? undefined
-        : `${info.provider}${info.model === undefined ? '' : ` · model ${info.model}`}`,
-    ],
-    ['log', info.log],
-    ['worktree', info.worktree],
-  ] as const) {
-    if (v !== undefined) {
-      console.log(`  ${label}: ${v}`)
-    }
+  if (result.delegatedBy !== undefined) {
+    console.log(`  delegatedBy: ${result.delegatedBy}`)
+  }
+  if (info.provider !== undefined) {
+    console.log(`  provider: ${info.provider}${info.model === undefined ? '' : ` · model ${info.model}`}`)
+  }
+  if (info.log !== undefined) {
+    console.log(`  log: ${info.log}`)
+  }
+  if (info.worktree !== undefined) {
+    console.log(`  worktree: ${info.worktree}`)
   }
 }
 
