@@ -42,6 +42,10 @@
     "./pi": {
       "types": "./dist/pi.d.ts",
       "default": "./dist/pi.js"
+    },
+    "./omp": {
+      "types": "./dist/omp.d.ts",
+      "default": "./dist/omp.js"
     }
   },
   "files": [

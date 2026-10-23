@@ -223,17 +223,46 @@ function kiloArtifact(cwd: string): string | null {
   ])
 }
 
-/** Same artifact ladder as opencode — source, bundled dist, the repo
- *  adapter. jiti loads the raw .ts, so the source entry is the real
- *  artifact; the dist bundle is the tarball fallback. */
+/** The pi adapter artifact — the generated plugin bundle, the bundled
+ *  dist, or the source entry. Every rung is self-contained (the shared
+ *  adapter core is folded in), so jiti loads it with no node_modules to
+ *  resolve against. */
 function piArtifact(cwd: string): string | null {
   const pkg = packageRoot()
   const root = gitRoot(cwd)
   return firstExisting([
-    pkg === null ? null : join(pkg, 'src', 'pi.ts'),
-    pkg === null ? null : join(pkg, 'dist', 'pi.js'),
     root === null ? null : join(root, 'plugins', 'pi', 'bro', 'bro.ts'),
+    pkg === null ? null : join(pkg, 'dist', 'pi.js'),
+    pkg === null ? null : join(pkg, 'src', 'pi.ts'),
   ])
+}
+
+/** The omp adapter artifact — the generated plugin bundle, the bundled
+ *  dist, or the source entry. The bundle is self-contained (the shared
+ *  adapter core is folded in) and carries the `bro-adapter` sentinel, so
+ *  it loads with no node_modules and stays recognizable as ours. */
+function ompArtifact(cwd: string): string | null {
+  const pkg = packageRoot()
+  const root = gitRoot(cwd)
+  return firstExisting([
+    root === null ? null : join(root, 'plugins', 'omp', 'bro', 'bro.ts'),
+    pkg === null ? null : join(pkg, 'dist', 'omp.js'),
+    pkg === null ? null : join(pkg, 'src', 'omp.ts'),
+  ])
+}
+
+/** omp's active agent directory — the user profile's config root.
+ *  `PI_CODING_AGENT_DIR` relocates the default profile's directory;
+ *  a named profile lives under `~/.omp/profiles/<name>/agent`. */
+function ompAgentDir(env: NodeJS.ProcessEnv): string {
+  if (env.PI_CODING_AGENT_DIR !== undefined && env.PI_CODING_AGENT_DIR !== '') {
+    return env.PI_CODING_AGENT_DIR
+  }
+  const profile = env.OMP_PROFILE
+  if (profile !== undefined && profile !== '') {
+    return join(homedir(), '.omp', 'profiles', profile, 'agent')
+  }
+  return join(homedir(), '.omp', 'agent')
 }
 
 const CLIENTS: Record<string, ClientSpec> = {
@@ -286,6 +315,17 @@ const CLIENTS: Record<string, ClientSpec> = {
       local: join(gitRoot(cwd) ?? cwd, '.pi', 'extensions', 'bro.ts'),
     }),
   },
+  omp: {
+    artifact: ompArtifact,
+    // omp discovers <cwd>/.omp/extensions/ locally and
+    // <agentDir>/extensions/ globally — the same loose-extension shape
+    // pi uses. The full plugin (skills, hooks, commands, WATCHDOG) is
+    // omp's own package surface: `omp plugin install ./plugins/omp/bro`.
+    targets: (cwd, env) => ({
+      global: join(ompAgentDir(env), 'extensions', 'bro.ts'),
+      local: join(gitRoot(cwd) ?? cwd, '.omp', 'extensions', 'bro.ts'),
+    }),
+  },
 }
 
 export function clientNames(): string[] {
@@ -312,6 +352,7 @@ export function isBroAdapter(text: string): boolean {
     text.includes('bro-adapter') ||
     /\bserver:\s*\w+/.test(text) ||
     /\bkind:\s*["']pi-extension["']/.test(text) ||
+    /\bkind:\s*["']omp-extension["']/.test(text) ||
     /\bkind:\s*["']opencode-tui["']/.test(text)
   )
 }

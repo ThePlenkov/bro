@@ -135,10 +135,10 @@ agent_root_pid() {
   while [ "${_p:-0}" -gt 1 ] && [ "$_d" -lt 16 ]; do
     _c=$(cat "/proc/$_p/comm" 2>/dev/null) || break
     case "${_c%%.*}" in
-      devin|claude|codex|gemini|aider|opencode|amp) _top=$_p ;;
+      devin|claude|codex|gemini|aider|opencode|amp|omp) _top=$_p ;;
       node|npx|bun|bunx|tsx|uvx|deno)
         _a1=$(tr '\0' '\n' <"/proc/$_p/cmdline" 2>/dev/null | sed -n '2{s|.*/||;s|\..*||;p}')
-        case "$_a1" in devin|claude|codex|gemini|aider|opencode|amp) _top=$_p ;; *) ;; esac ;;
+        case "$_a1" in devin|claude|codex|gemini|aider|opencode|amp|omp) _top=$_p ;; *) ;; esac ;;
       *) ;;
     esac
     tr '\0' '\n' <"/proc/$_p/environ" 2>/dev/null \
