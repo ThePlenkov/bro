@@ -35,12 +35,22 @@ exported alongside the other fs helpers:
   never left readable with new content inside.
 - `openPrivateAppendSync` — same fd contract for callers that keep the
   descriptor (native's spawn stdio).
-- `mkdirPrivateSync` — `mkdirSync(recursive, mode: 0o700)`: the managed
-  dir is pinned on creation; an **existing** dir keeps its mode (file
-  modes carry the guarantee, and a shared-rig dir another user must
-  also write into stays usable).
+- `mkdirPrivateSync` — per-level `mkdir` + `chmod 0700`: mkdir applies
+  the umask, so a bit-masking umask (e.g. `0177`) strips owner-x off
+  `0700` and recursive mkdir then EACCES's descending through its own
+  unsearchable intermediate — the pin rides between levels. An
+  **existing** dir keeps its mode (file modes carry the guarantee, and
+  a shared-rig dir another user must also write into stays usable).
 - `PRIVATE_FILE_MODE` / `PRIVATE_DIR_MODE` constants so call sites stop
   re-deriving the literal.
+
+Two planted-artifact shapes in a dir another local user can write are
+**refused**, not warned through:
+
+- an artifact path swapped for a symlink — `O_NOFOLLOW` on every open
+  (ELOOP fails the spawn loudly);
+- a foreign-owned regular file — `fstat` uid check after open
+  (appending would feed the attacker's file once `fchmod` EPERMs).
 
 A `chmod`/`fchmod` failure warns on stderr and does not abort the
 write — filesystems without POSIX modes (Windows, FAT mounts) must
@@ -75,18 +85,21 @@ Call sites:
   artifact class, different directory.
 - `serve.ts` `writeStateFile`: the hand-rolled `writeFileSync` +
   `chmodSync` pair swaps to the writer (identical semantics).
-- `acp-events.ts`: adopts `PRIVATE_FILE_MODE`; the once-per-plane
-  repair chmod stays — per-row cost must remain a Map lookup + queued
-  socket write.
+- `acp-events.ts`: every archive row goes through
+  `appendPrivateFileSync` — a repair-once-then-plain-append split left a
+  window where a permissive file swapped in between rows collects
+  events. Per-row cost is one open+fstat+fchmod at turn-event cadence —
+  cheap next to a process spawn.
 
 ## Non-goals
 
 - `bro/hooks/*.work` markers, the `agents.json` registry, daemon /
   provider / act-wait logs — operational metadata, not prompt/env
   content; unchanged.
-- No fail-closed ownership check on the agents home (the bus socket's
-  `assertPrivateDir` refuses a shared dir; artifacts keep writing on
-  non-POSIX filesystems).
+- No fail-closed mode check on the agents home itself (an existing
+  group/other-writable dir is not rejected — shared-rig compatibility;
+  the file-level refusals above are the hard boundary, and shell `>>`
+  appends by wrappers remain a documented residual there).
 - No retro-fix sweep over historical artifacts — repair rides the next
   write/append, which is exactly when content re-enters them.
 
@@ -100,6 +113,10 @@ Call sites:
 - [x] `loop.ts` `writePrompt`, `serve.ts` `writeStateFile`,
       `acp-events.ts` constant
 - [x] `agent-connectors.test.ts` contract test: per-backend `0600` on
-      prompt/log/stderr/exit + `0644` repair across a respawn
+      prompt/log/stderr/exit + `0644` repair across a respawn (skipped
+      on win32 — POSIX mode bits don't exist there)
+- [x] review-round hardening (PR #659): `O_NOFOLLOW`, foreign-owner
+      refusal, per-level mkdir pin under masking umask, per-row ACP
+      repair, pin-before-write ordering test via `fs` instrumentation
 - [x] `npm run build`, `npm run typecheck`, `npm test` (exact CI
       commands)

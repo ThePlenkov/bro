@@ -2,7 +2,16 @@
  *  inherited permissive files (spec bro-l8c4f.4). POSIX-only semantics:
  *  skipped on win32 where modes map onto the read-only attribute. */
 import assert from 'node:assert/strict'
-import { chmodSync, closeSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs'
+import fs, {
+  chmodSync,
+  closeSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  statSync,
+  symlinkSync,
+  writeFileSync,
+} from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { describe, test } from 'node:test'
@@ -102,6 +111,105 @@ describe('private-files', { skip: process.platform === 'win32' }, () => {
       chmodSync(shared, 0o755)
       mkdirPrivateSync(shared)
       assert.equal(mode(shared), 0o755)
+    } finally {
+      done()
+    }
+  })
+
+  test('mkdirPrivateSync stays owner-usable under a bit-masking umask', () => {
+    const { dir, done } = tmp()
+    try {
+      const prev = process.umask(0o177)
+      const fresh = join(dir, 'x', 'y')
+      try {
+        mkdirPrivateSync(fresh)
+      } finally {
+        process.umask(prev)
+      }
+      // 0700 & ~0177 = 0600 — a masked intermediate has no owner-x, so
+      // recursive mkdir cannot even descend; each level is pinned as
+      // it is created
+      assert.equal(mode(fresh), 0o700)
+      assert.equal(mode(join(dir, 'x')), 0o700)
+      writePrivateFileSync(join(fresh, 'prompt.md'), 'x')
+    } finally {
+      done()
+    }
+  })
+
+  test('the mode pin lands on the fd before the first byte', () => {
+    const { dir, done } = tmp()
+    try {
+      const f = join(dir, 'prompt.md')
+      writeFileSync0164(f)
+      const calls: Array<[string, number]> = []
+      const origChmod = fs.fchmodSync
+      const origWrite = fs.writeFileSync
+      fs.fchmodSync = (fd: number, m: string | number) => {
+        calls.push(['fchmod', fd])
+        origChmod(fd, m)
+      }
+      fs.writeFileSync = ((file: number, data: string | Uint8Array) => {
+        if (typeof file === 'number') {
+          calls.push(['write', file])
+        }
+        return origWrite(file, data)
+      }) as typeof fs.writeFileSync
+      try {
+        writePrivateFileSync(f, 'secret')
+        appendPrivateFileSync(f, 'more')
+      } finally {
+        fs.fchmodSync = origChmod
+        fs.writeFileSync = origWrite
+      }
+      // a write-before-pin implementation is detectable only in the
+      // call stream — end-state assertions can't see the window
+      assert.ok(calls.length > 0)
+      const last = new Map<number, string>()
+      for (const [op, fd] of calls) {
+        if (op === 'write') {
+          assert.equal(last.get(fd), 'fchmod', `write on fd ${fd} preceded the pin`)
+        }
+        last.set(fd, op)
+      }
+    } finally {
+      done()
+    }
+  })
+
+  test('a symlinked artifact path fails the open, never follows', () => {
+    const { dir, done } = tmp()
+    try {
+      const target = join(dir, 'planted')
+      writeFileSync(target, 'theirs')
+      const link = join(dir, 'agent.log')
+      symlinkSync(target, link)
+      assert.throws(() => writePrivateFileSync(link, 'secret'), { code: 'ELOOP' })
+      assert.throws(() => appendPrivateFileSync(link, 'secret'), { code: 'ELOOP' })
+      assert.equal(readFileSync(target, 'utf8'), 'theirs')
+    } finally {
+      done()
+    }
+  })
+
+  test('a foreign-owned artifact is refused instead of fed', () => {
+    const { dir, done } = tmp()
+    try {
+      const f = join(dir, 'agent.log')
+      writeFileSync0164(f)
+      const origFstat = fs.fstatSync
+      fs.fstatSync = ((fd: number) => {
+        const st = origFstat(fd)
+        return { ...st, uid: st.uid + 1 }
+      }) as typeof fs.fstatSync
+      try {
+        assert.throws(() => appendPrivateFileSync(f, 'x'), /foreign-owned/)
+        assert.throws(() => writePrivateFileSync(f, 'x'), /foreign-owned/)
+      } finally {
+        fs.fstatSync = origFstat
+      }
+      // the refusal closed the fd and threw before a byte could land
+      assert.equal(readFileSync(f, 'utf8'), '')
     } finally {
       done()
     }

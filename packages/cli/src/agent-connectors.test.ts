@@ -914,8 +914,13 @@ const devinProc = (): string => {
 
   // owner-only artifacts (spec bro-l8c4f.4) — prompt/log/stderr land
   // 0600 even under umask 022, the wrapper's scoped `umask 077` pins
-  // .exit, and a permissive legacy file is repaired on the next spawn
-  test('agent artifacts are owner-only — create pins 0600, respawn repairs 0644', async () => {
+  // .exit, and a permissive legacy file is repaired on the next spawn.
+  // POSIX mode bits don't exist on win32 — there the profile ACL is the
+  // owner-only boundary and statSync().mode reports nothing meaningful
+  test(
+    'agent artifacts are owner-only — create pins 0600, respawn repairs 0644',
+    { skip: process.platform === 'win32' },
+    async () => {
     const f = fx([{ id: 'fx-1', status: 'open' }])
     try {
       const home = join(f.main, '.git', 'bro', 'agents')
@@ -943,7 +948,8 @@ const devinProc = (): string => {
     } finally {
       cleanup(f)
     }
-  })
+    }
+  )
 
   // the taxonomy contract (bro-7xgk.2): the same rc=1 splits on the log
   // tail — a crash is respawnable, a budget wall reads 'blocked' and
