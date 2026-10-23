@@ -543,6 +543,10 @@ const ADAPTER_OPTS: Record<string, { skills?: boolean; runSh?: boolean }> = {
   'plugins/opencode/bro': { skills: false, runSh: false },
   'plugins/kilo/bro': { skills: false, runSh: false },
   'plugins/pi/bro': { skills: false, runSh: false },
+  // omp loads hook modules, not the shell launcher: the omp plugin's
+  // hook is hooks/pre/permission.ts, and omp discovers .ts/.js children
+  // of hooks/pre and hooks/post. A run.sh there is dead weight.
+  'plugins/omp/bro': { runSh: false },
   // Claude and Codex install the repo root. A skills entry in the
   // adapter would be a second package. Claude's hook map stays in the
   // adapter; the shared hooks/ dir is only run.sh.

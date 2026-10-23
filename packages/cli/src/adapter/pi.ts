@@ -234,7 +234,7 @@ export default function broExtension(pi: PiApi): void {
   // pi's board also refreshes when the agent settles — a settle can
   // follow a turn without a turn_end, and the board must not go stale.
   pi.on('agent_settled', (_e: never, ctx: ExtContext) => {
-    void driver.run(['status', '--json'], ctx.cwd)
+    void driver.run(['status', '--json'], ctx.cwd).catch(() => {})
   })
 
   /** `/bro <args>` — the CLI without leaving the editor. Bare `/bro`
@@ -290,4 +290,4 @@ export default function broExtension(pi: PiApi): void {
  * foreign file holding this slot; the marker survives generation into
  * plugins/pi/bro/bro.ts.
  */
-export const adapter = { id: 'bro', kind: 'pi-extension' } as const
+export const adapter = { id: 'bro', kind: 'pi-extension' } as const // NOSONAR typescript:S7734 — the sentinel is a published marker, not a second entry point

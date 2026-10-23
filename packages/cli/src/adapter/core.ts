@@ -145,7 +145,7 @@ export function killAfter(
 /** Does this command exit zero? Used to probe whether a candidate CLI
  *  actually speaks bro's hook protocol — an older bro on PATH fails the
  *  probe instead of failing every hook. */
-export function exitsZero(cmd: string, args: string[]): Promise<boolean> {
+export function exitsZero(cmd: string, args: string[]): Promise<boolean> { // NOSONAR typescript:S3516 — the resolved value varies (true only on exit 0); the rule reads the returned promise, not what it settles to
   const { promise, resolve } = Promise.withResolvers<boolean>()
   let child: ChildProcess
   try {
@@ -209,7 +209,7 @@ export async function resolveCommand(opts: ResolveOptions = {}): Promise<Command
  * Run one `bro hooks <event>` with the payload on stdin; resolve null on
  * every failure mode — spawn error, timeout, nonzero exit, garbage out.
  */
-export function callHook(
+export function callHook( // NOSONAR typescript:S3516 — the resolved value varies (the parsed control, or null); the rule reads the returned promise, not what it settles to
   command: Command,
   event: string,
   payload: unknown,
@@ -317,7 +317,7 @@ export function broEnabled(startDir: string): boolean {
 
 /** `bro status --json` — the board the widget renders. Null on any
  *  failure; the board is a convenience, never a gate. */
-export function statusJson(command: Command, cwd: string): Promise<BoardStatus | null> {
+export function statusJson(command: Command, cwd: string): Promise<BoardStatus | null> { // NOSONAR typescript:S3516 — the resolved value varies (the parsed board, or null); the rule reads the returned promise, not what it settles to
   const { promise, resolve } = Promise.withResolvers<BoardStatus | null>()
   let child: ChildProcess
   try {

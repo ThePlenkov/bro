@@ -43,27 +43,11 @@
  * that is bro's exit gate as code, and it belongs to the adapter's
  * `session_stop` handler, not here.
  */
-import type { OmpApi, OmpContext } from './omp-api.ts'
+import type { OmpApi } from './omp-api.ts'
 
-/** The structural shape of the events this bridge reads. */
-interface PlanReviewEvent {
-  reviewId: string
-  sessionId: string
-  title: string
-  planFilePath?: string
-  planContent: string
-}
-
+/** The structural shape of the goal event this bridge reads. */
 interface GoalUpdatedEvent {
   goal: { objective?: string; text?: string } | null
-}
-
-interface BeforeSubagentSpawnEvent {
-  agent: string
-  invocationKind: 'task' | 'eval'
-  modelRole?: string
-  patterns: string[]
-  spawnKey?: string
 }
 
 /** The board read — one aggregated call, never N shell-outs. */
@@ -102,8 +86,7 @@ export function installModeBridges(pi: OmpApi, source: ModeBridgeSource): void {
    * The facts ride back through the review's own feedback channel — the
    * review surface stays omp's, and the user still chooses.
    */
-  pi.on('plan_review_requested', (event: unknown) => {
-    const review = event as PlanReviewEvent
+  pi.on('plan_review_requested', () => {
     const board = source.board()
     if (board === null) {
       return undefined
@@ -113,7 +96,7 @@ export function installModeBridges(pi: OmpApi, source: ModeBridgeSource): void {
       return undefined
     }
     const named = claims
-      .map((b) => `${b.id ?? '?'}${b.title ? ` (${b.title})` : ''}`)
+      .map((b) => (b.title ? `${b.id ?? '?'} (${b.title})` : (b.id ?? '?')))
       .join(', ')
     return {
       additionalContext: `bro: ${claims.length} bead(s) in flight — ${named}. The plan must answer the claimed bead's spec; check it with \`bro spec check\`.`,
@@ -151,8 +134,7 @@ export function installModeBridges(pi: OmpApi, source: ModeBridgeSource): void {
    * work. omp's `before_subagent_spawn` is the seam: bro can see the
    * claim list before a worker starts.
    */
-  pi.on('before_subagent_spawn', (event: unknown) => {
-    const spawn = event as BeforeSubagentSpawnEvent
+  pi.on('before_subagent_spawn', () => {
     const board = source.board()
     if (board === null) {
       return undefined

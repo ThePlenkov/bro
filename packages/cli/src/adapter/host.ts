@@ -190,11 +190,13 @@ export function createBroDriver<Ctx>(host: BroHostBinding<Ctx>, api: unknown): B
     injected = false
     // a failed probe is not the session's verdict — drop the cache entry
     // so the next turn deserves a retry rather than sticking on ''
-    void started.then((text) => {
-      if (hydration === started && text === '') {
-        hydration = undefined
-      }
-    })
+    void started
+      .then((text) => {
+        if (hydration === started && text === '') {
+          hydration = undefined
+        }
+      })
+      .catch(() => {})
   }
 
   /** Register one handler if the host has that event. */
@@ -210,13 +212,13 @@ export function createBroDriver<Ctx>(host: BroHostBinding<Ctx>, api: unknown): B
 
   bind(host.events.sessionStart, (_event, ctx) => {
     hydrate(ctx, 'session-start')
-    void refreshBoard(ctx)
+    void refreshBoard(ctx).catch(() => {})
   })
 
   bind(host.events.sessionCompact, (_event, ctx) => {
     gated = false
     hydrate(ctx, 'post-compaction')
-    void refreshBoard(ctx)
+    void refreshBoard(ctx).catch(() => {})
   })
 
   // pre-compact context is what must survive the summary — carry it into
@@ -302,12 +304,12 @@ export function createBroDriver<Ctx>(host: BroHostBinding<Ctx>, api: unknown): B
     }
     gated = true
     const reason = typeof control.reason === 'string' ? control.reason.trim() : ''
-    void refreshBoard(ctx)
+    void refreshBoard(ctx).catch(() => {})
     return host.refuseStop(reason === '' ? 'unfinished bro work' : reason)
   })
 
   bind(host.events.turnEnd, (_event, ctx) => {
-    void refreshBoard(ctx)
+    void refreshBoard(ctx).catch(() => {})
   })
 
   bind(host.events.sessionShutdown, (_event, ctx) => {

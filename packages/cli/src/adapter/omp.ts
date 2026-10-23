@@ -152,7 +152,7 @@ export default function broExtension(pi: OmpApi): void {
     async handler(args: string, ctx: OmpContext) {
       const trimmed = args.trim()
       if (trimmed === '') {
-        driver.run(['status', '--json'], ctx.cwd)
+        void driver.run(['status', '--json'], ctx.cwd).catch(() => {})
         ctx.ui.notify('bro: board refreshed', 'info')
         return
       }
@@ -196,4 +196,4 @@ export default function broExtension(pi: OmpApi): void {
  * foreign file holding this slot; the marker survives generation into
  * plugins/omp/bro/bro.ts.
  */
-export const adapter = { id: 'bro', kind: 'omp-extension' } as const
+export const adapter = { id: 'bro', kind: 'omp-extension' } as const // NOSONAR typescript:S7734 — the sentinel is a published marker, not a second entry point

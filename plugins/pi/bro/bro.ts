@@ -360,7 +360,7 @@ function createBroDriver(host, api) {
 		injected = false;
 		started.then((text) => {
 			if (hydration === started && text === "") hydration = void 0;
-		});
+		}).catch(() => {});
 	};
 	/** Register one handler if the host has that event. */
 	const bind = (name, handler) => {
@@ -369,12 +369,12 @@ function createBroDriver(host, api) {
 	};
 	bind(host.events.sessionStart, (_event, ctx) => {
 		hydrate(ctx, "session-start");
-		refreshBoard(ctx);
+		refreshBoard(ctx).catch(() => {});
 	});
 	bind(host.events.sessionCompact, (_event, ctx) => {
 		gated = false;
 		hydrate(ctx, "post-compaction");
-		refreshBoard(ctx);
+		refreshBoard(ctx).catch(() => {});
 	});
 	bind(host.events.sessionBeforeCompact, async (_event, ctx) => {
 		const cwd = host.cwd(ctx);
@@ -425,11 +425,11 @@ function createBroDriver(host, api) {
 		}
 		gated = true;
 		const reason = typeof control.reason === "string" ? control.reason.trim() : "";
-		refreshBoard(ctx);
+		refreshBoard(ctx).catch(() => {});
 		return host.refuseStop(reason === "" ? "unfinished bro work" : reason);
 	});
 	bind(host.events.turnEnd, (_event, ctx) => {
-		refreshBoard(ctx);
+		refreshBoard(ctx).catch(() => {});
 	});
 	bind(host.events.sessionShutdown, (_event, ctx) => {
 		host.clear(ctx);
@@ -585,7 +585,7 @@ function binding(pi) {
 function broExtension(pi) {
 	const driver = createBroDriver(binding(pi), pi);
 	pi.on("agent_settled", (_e, ctx) => {
-		driver.run(["status", "--json"], ctx.cwd);
+		driver.run(["status", "--json"], ctx.cwd).catch(() => {});
 	});
 	/** `/bro <args>` — the CLI without leaving the editor. Bare `/bro`
 	*  repaints the board; a real subcommand runs it and drops stdout into

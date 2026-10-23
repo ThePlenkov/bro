@@ -360,7 +360,7 @@ function createBroDriver(host, api) {
 		injected = false;
 		started.then((text) => {
 			if (hydration === started && text === "") hydration = void 0;
-		});
+		}).catch(() => {});
 	};
 	/** Register one handler if the host has that event. */
 	const bind = (name, handler) => {
@@ -369,12 +369,12 @@ function createBroDriver(host, api) {
 	};
 	bind(host.events.sessionStart, (_event, ctx) => {
 		hydrate(ctx, "session-start");
-		refreshBoard(ctx);
+		refreshBoard(ctx).catch(() => {});
 	});
 	bind(host.events.sessionCompact, (_event, ctx) => {
 		gated = false;
 		hydrate(ctx, "post-compaction");
-		refreshBoard(ctx);
+		refreshBoard(ctx).catch(() => {});
 	});
 	bind(host.events.sessionBeforeCompact, async (_event, ctx) => {
 		const cwd = host.cwd(ctx);
@@ -425,11 +425,11 @@ function createBroDriver(host, api) {
 		}
 		gated = true;
 		const reason = typeof control.reason === "string" ? control.reason.trim() : "";
-		refreshBoard(ctx);
+		refreshBoard(ctx).catch(() => {});
 		return host.refuseStop(reason === "" ? "unfinished bro work" : reason);
 	});
 	bind(host.events.turnEnd, (_event, ctx) => {
-		refreshBoard(ctx);
+		refreshBoard(ctx).catch(() => {});
 	});
 	bind(host.events.sessionShutdown, (_event, ctx) => {
 		host.clear(ctx);
@@ -512,12 +512,12 @@ function installModeBridges(pi, source) {
 	* The facts ride back through the review's own feedback channel — the
 	* review surface stays omp's, and the user still chooses.
 	*/
-	pi.on("plan_review_requested", (event) => {
+	pi.on("plan_review_requested", () => {
 		const board = source.board();
 		if (board === null) return;
 		const claims = board.beads?.inProgress ?? [];
 		if (claims.length === 0) return;
-		const named = claims.map((b) => `${b.id ?? "?"}${b.title ? ` (${b.title})` : ""}`).join(", ");
+		const named = claims.map((b) => b.title ? `${b.id ?? "?"} (${b.title})` : b.id ?? "?").join(", ");
 		return { additionalContext: `bro: ${claims.length} bead(s) in flight — ${named}. The plan must answer the claimed bead's spec; check it with \`bro spec check\`.` };
 	});
 	/**
@@ -538,7 +538,7 @@ function installModeBridges(pi, source) {
 	* work. omp's `before_subagent_spawn` is the seam: bro can see the
 	* claim list before a worker starts.
 	*/
-	pi.on("before_subagent_spawn", (event) => {
+	pi.on("before_subagent_spawn", () => {
 		const board = source.board();
 		if (board === null) return;
 		const running = (board.fleet?.agents ?? []).filter((a) => a.state === "running");
@@ -644,7 +644,7 @@ function broExtension(pi) {
 		async handler(args, ctx) {
 			const trimmed = args.trim();
 			if (trimmed === "") {
-				driver.run(["status", "--json"], ctx.cwd);
+				driver.run(["status", "--json"], ctx.cwd).catch(() => {});
 				ctx.ui.notify("bro: board refreshed", "info");
 				return;
 			}

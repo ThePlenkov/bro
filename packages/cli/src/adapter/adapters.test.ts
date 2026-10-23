@@ -96,6 +96,38 @@ test('the omp adapter registers the mode bridges on omp events', async () => {
   assert.ok(events.includes('before_subagent_spawn'))
 })
 
+test('the omp guard hook blocks a force push and nothing else', async () => {
+  const mod = await loadAdapter('plugins/omp/bro/hooks/pre/permission.ts')
+  const handlers = new Map<string, (event: unknown) => unknown>()
+  const pi = { on: (name: string, handler: (event: unknown) => unknown) => handlers.set(name, handler) }
+  mod.default(pi)
+
+  const guard = handlers.get('tool_call')
+  assert.ok(guard, 'the guard registers no tool_call handler')
+
+  const call = (command: unknown): unknown =>
+    guard({ toolName: 'bash', input: { command } })
+
+  // the rule: a force push rewrites the branch history bro's occupancy
+  // plane depends on
+  const blocked = call('git push --force origin main') as { block?: boolean } | undefined
+  assert.equal(blocked?.block, true, 'a force push must be blocked')
+
+  const short = call('git push -f origin main') as { block?: boolean } | undefined
+  assert.equal(short?.block, true, 'the -f form must be blocked too')
+
+  // a normal push, and the safe force form, are not the rule
+  assert.equal(call('git push origin main'), undefined)
+  assert.equal(call('git push --force-with-lease origin main'), undefined)
+  // another tool, and another command, are not the rule
+  assert.equal(guard({ toolName: 'read', input: { command: 'git push --force' } }), undefined)
+  assert.equal(call('git commit --amend'), undefined)
+  // a non-string command is not a command — it must not be stringified
+  // into a truthy value that hides the real shape
+  assert.equal(call({ nested: 'git push --force' }), undefined)
+  assert.equal(call(undefined), undefined)
+})
+
 test('the shipped adapters carry the ownership sentinel', async () => {
   // `bro plugins install` refuses to overwrite a foreign file that
   // holds the slot — the sentinel is how bro recognizes its own, and
