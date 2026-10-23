@@ -304,6 +304,24 @@ describe('reconcileContract', () => {
     assert.ok(problems.some((p) => p.kind === 'stale' && p.path === 'act'))
     assert.ok(problems.some((p) => p.kind === 'stale' && p.path === 'hooks'))
   })
+
+  test('a malformed live row reads as the command gone — breaking', () => {
+    // the --dump fixture is untrusted like the committed file — a
+    // coerced garbage row must not reach commandRemovals as a row
+    const live2 = structuredClone(live)
+    ;(live2.commands as Record<string, unknown>).doctor = 'junk'
+    const { problems } = reconcileContract(doc(live), live2, new Set())
+    const breaking = problems.filter((p) => p.kind === 'breaking')
+    assert.deepEqual(breaking.map((p) => p.path), ['doctor'])
+  })
+
+  test('a bullet announcing nothing is a ledger problem — no hall-passes', () => {
+    const { problems } = reconcileContract(doc(live), live, new Set(['ghost']))
+    assert.deepEqual(
+      problems.filter((p) => p.kind === 'ledger').map((p) => p.path),
+      ['announce.ghost']
+    )
+  })
 })
 
 describe('parseBreaking', () => {
@@ -312,6 +330,9 @@ describe('parseBreaking', () => {
       '# CLI breaking changes',
       '',
       'Some paragraph mentioning act.status — not a bullet.',
+      '```text',
+      '- <command-or-dotted-path> — the doc example, not a real bullet',
+      '```',
       '- act — renamed to review-gate',
       '- wtf.aliasOf:',
       '  - nested.bullet also counts',

@@ -175,12 +175,13 @@ const emptyDoc = (): ContractDoc => ({
   removed: {},
 })
 
-/** Coerce parsed JSON into the doc shape — unknown fields ride along
- *  only inside commands/groups/removed; anything else degrades to the
- *  empty-doc default (drift, not a crash). */
-function asDoc(parsed: unknown): ContractDoc {
+/** Coerce parsed JSON into the dump shape — a --dump fixture is as
+ *  untrusted as the committed file; unknown members ride along inside
+ *  groups/commands, the rest degrades to defaults (drift, not a
+ *  crash). */
+function asDump(parsed: unknown): ContractDump {
   if (!isRecord(parsed)) {
-    return emptyDoc()
+    return { version: CONTRACT_VERSION, groups: {}, commands: {} }
   }
   return {
     version: typeof parsed.version === 'number' ? parsed.version : CONTRACT_VERSION,
@@ -188,15 +189,31 @@ function asDoc(parsed: unknown): ContractDoc {
     commands: isRecord(parsed.commands)
       ? (parsed.commands as ContractDoc['commands'])
       : {},
-    removed: isRecord(parsed.removed) ? parsed.removed : {},
+  }
+}
+
+/** The committed file — the dump plus the tombstone ledger. */
+function asDoc(parsed: unknown): ContractDoc {
+  return {
+    ...asDump(parsed),
+    removed: isRecord(parsed) && isRecord(parsed.removed) ? parsed.removed : {},
   }
 }
 
 /** `- <path> — reason` bullets → the announced path set. A trailing
- *  colon on the token is punctuation, not part of the path. */
+ *  colon on the token is punctuation, not part of the path; bullets
+ *  inside fenced code blocks are doc examples, not announcements. */
 export function parseBreaking(md: string): Set<string> {
   const out = new Set<string>()
+  let inFence = false
   for (const line of md.split('\n')) {
+    if (/^\s*```/.test(line)) {
+      inFence = !inFence
+      continue
+    }
+    if (inFence) {
+      continue
+    }
     const m = /^\s*[-*]\s+(\S+)/.exec(line)
     if (m !== null && m[1] !== undefined) {
       out.add(m[1].replace(/:$/, ''))
@@ -330,7 +347,7 @@ function groupRemovals(
 ): Removal[] {
   const out: Removal[] = []
   for (const [g, v] of Object.entries(committedGroups)) {
-    if (live.groups[g] === undefined) {
+    if (!isRecord(live.groups[g])) {
       out.push({ path: `groups.${g}`, value: v })
     }
   }
@@ -344,7 +361,8 @@ function commandRowRemovals(
   const out: Removal[] = []
   for (const [name, c] of Object.entries(committedCommands)) {
     const l = live.commands[name]
-    if (l === undefined) {
+    if (!isRecord(l)) {
+      // absent or garbage live row — invocation-wise the command is gone
       out.push({ path: name, value: c })
     } else if (isRecord(c)) {
       out.push(...commandRemovals(name, c, l))
@@ -414,8 +432,9 @@ export function reconcileContract(
   announced: ReadonlySet<string>
 ): { doc: ContractDoc; problems: ContractProblem[] } {
   const problems: ContractProblem[] = []
+  const removalPaths = removals(committed, live)
   const removed = new Map<string, unknown>(Object.entries(committed.removed))
-  for (const r of removals(committed, live)) {
+  for (const r of removalPaths) {
     if (!covered(r.path, announced)) {
       problems.push({
         kind: 'breaking',
@@ -432,6 +451,22 @@ export function reconcileContract(
         kind: 'ledger',
         path: `removed.${k}`,
         message: 'tombstone has no BREAKING.md bullet — the ledger cannot be quietly edited around',
+      })
+    }
+  }
+  // a bullet that covers no pending removal and no tombstone is a
+  // permanent hall-pass on that path — delete it when spent
+  const announcedList = [...announced]
+  for (const a of announcedList) {
+    const single = new Set([a])
+    const used =
+      removalPaths.some((r) => covered(r.path, single)) ||
+      [...removed.keys()].some((k) => covered(k, single))
+    if (!used) {
+      problems.push({
+        kind: 'ledger',
+        path: `announce.${a}`,
+        message: 'bullet announces nothing — remove it; a stale bullet waives future changes',
       })
     }
   }
@@ -543,7 +578,7 @@ function cmdGate(
   const { contractPath, breakingPath, dumpPath } = gatePaths(rest)
   const live =
     dumpPath !== undefined
-      ? readJsonFile<ContractDump>(dumpPath)
+      ? asDump(readJsonFile<unknown>(dumpPath))
       : buildDump(
           // the committed surface is the repo's registry — external
           // plugins are machine-local config and must not drift it
