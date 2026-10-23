@@ -27,4 +27,5 @@ bullets get deleted.
 removal is itself the announcement.
 
 ## Changes
+
 - delegate.exits.2 — usage errors exit 1 today; the documented 2 was aspirational, the table now documents reality
