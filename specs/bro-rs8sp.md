@@ -141,9 +141,39 @@ subprocess: the connector probes behind `emitSessionContext` /
 `emitPromptContext` / `emitPermission` extract into a callable surface
 returning `{ context?: string; verdict?: 'allow'|'ask'|'deny' }`. The
 CLI stdin→stdout contract stays the semantic spec; the library is the
-same code without the pipe. `BRO_HOOKS=0` must NOT be pinned — the
-proxy serves a human-facing client, the opposite of `acpChildEnv`'s
-machine-backend mark.
+same code without the pipe.
+
+The seam contract pins five things the table alone doesn't:
+
+- **cwd is per-session.** Every probe runs against the session's
+  `session/new.cwd`, never the proxy process's cwd — a client that
+  opens a session in another repo must not get this repo's context or
+  gates.
+- **Payloads normalize to the hook shapes.** ACP `session/prompt`
+  content blocks flatten to the `input.prompt` text probes already
+  read; `tool_call`/`tool_call_update` map to
+  `tool_name`/`tool_input`/`tool_response` (id → name, kind+locations
+  → input, terminal status+content → response) before journaling —
+  `traceEntry` consumes hook fields, not ACP ones.
+- **The pending-context buffer is claimed atomically** per session —
+  the first `session/prompt` consumes it; overlapping first prompts
+  cannot each prepend it.
+- **Cancel ordering.** A `session/cancel` that arrives while the
+  prompt seam is still pending wins: the proxy answers the held
+  `session/prompt` itself with `stopReason: cancelled` and never
+  forwards it downstream — the wire never shows a prompt after its
+  cancel. A forwarded prompt's cancel passes through verbatim.
+- **`BRO_HOOKS=0` pins on the spawned downstream's env** (the
+  `acpChildEnv` mark — the child tree is a machine backend, and the
+  proxy seam must be the sole hook executor, never double-run), while
+  the proxy's *own* process env never pins it — the proxy serves a
+  human-facing client.
+
+Permission option selection prefers the `*_once` variant of the
+verdict's polarity; an offered `*_always` variant is selected only
+when it is the sole offered option of that polarity — the option set
+is the agent's own choice space, and refusing a sole offered option
+fails an answerable request.
 
 ## Hook ↔ ACP event mapping (the contract)
 
@@ -153,11 +183,11 @@ machine-backend mark.
 | `post-compaction` | none in v1 | A→C | **Gap**: fires only if the downstream emits the `compaction_update`/`session_info_update` variants the schema carries — stable in the current v1 schema but gated on the *client* advertising `sessionCapabilities.compaction`, which the proxy forwards verbatim. | Recorded gap, not emulated. |
 | `pre-compact` | none in v1 | A→C | Same gap. | — |
 | `prompt-submit` | `session/prompt` | C→A | Prompt content blocks are the hook input; returned context prepends to the same prompt. | Faithful. |
-| `pre-tool` | `tool_call` update (non-terminal); veto only via `session/request_permission` | A→C | **Advise-only on updates** — a `tool_call` announcement means the agent already committed; the wire's only veto point is answering the permission request with a reject. Pre-tool guard verdicts map onto the permission path, never onto `tool_call` rewriting. | Semantics narrowed vs Claude's PreToolUse — recorded, not papered over. |
-| `post-tool` | `tool_call` / `tool_call_update` reaching terminal status (`completed`/`failed`) | A→C | Post-execution report — journal/trace lines same as today. | Faithful. |
-| `permission` | `session/request_permission` | A→C | `allow` → `allow_once`; `ask` → forward upstream; `deny` → `reject_once` (or `cancelled` when no reject option is offered — the `denyPermission`/`autoApprove` shapes already proven in acp.ts/acp-worker). The `*_always` kinds are deliberately unmapped: bro's `allow`/`deny` are per-invocation verdicts, while `allow_always`/`reject_always` are sticky, client-persisted decisions. A sticky verdict needs a `deny_always`/`allow_always` hook vocabulary that does not exist — that policy is bro-9qopj's seam, not this spec. | Faithful. |
+| `pre-tool` | `tool_call` update (non-terminal); veto only via `session/request_permission` | A→C | **Advise-only on updates** — a `tool_call` announcement means the agent already committed; the wire's only veto point is answering the permission request with a reject. Pre-tool guard verdicts map onto the permission path, never onto `tool_call` rewriting — and `input` overrides a `preToolVerdicts` probe can return today have no wire path at all (the tool already announced its input): **input rewrite is unsupported in proxy mode**, a probe returning one degrades to its verdict. | Semantics narrowed vs Claude's PreToolUse — recorded, not papered over. |
+| `post-tool` | `tool_call` / `tool_call_update` reaching terminal status (`completed`/`failed`) | A→C | Post-execution report — journal/trace lines same as today. Output has **no agent-bound channel**: `session/update` flows the other way, so context a post-tool probe returns journals locally and may join the *next* prompt's injected context — it never reaches the agent mid-turn the way a host's post-tool hook can. | Report-only toward the agent — recorded gap, not faithful. |
+| `permission` | `session/request_permission` | A→C | `allow` → `allow_once`; `ask` → forward upstream; `deny` → `reject_once` (or `cancelled` when no reject option is offered — the `denyPermission`/`autoApprove` shapes already proven in acp.ts/acp-worker). The `*_always` kinds are deliberately unmapped: bro's `allow`/`deny` are per-invocation verdicts, while `allow_always`/`reject_always` are sticky, client-persisted decisions. A sticky verdict needs a `deny_always`/`allow_always` hook vocabulary that does not exist — that policy is bro-9qopj's seam, not this spec; among *offered* options the selection rule above applies. | Faithful. |
 | `stop` | `session/prompt` response (`stopReason`) | A→C | **v1: observe and record** (`turn stop` on the agent plane, stop-gate verdict logged). A gate that wants continuation would hold the upstream request open and issue one more downstream `session/prompt` — that semantic change is bro-u2eps's spec decision, not this one's. | Report-only in v1 of the proxy. |
-| (cancel) | `session/cancel` notification | C→A | Forward; record as an interrupted turn. | Faithful. |
+| (cancel) | `session/cancel` notification | C→A | Forward (or suppress a still-held prompt — ordering rule above); records an interrupted-turn *marker*, not a terminal stop — the turn's single terminal record is the prompt response's `stopReason: cancelled`, so one cancel never yields two stop entries. | Faithful. |
 | (elicitation) | `elicitation/create` | A→C | Forward; no bro hook exists for it. | Faithful. |
 
 ## Agent mode (`bro acp`) — shape deferred to bro-tegz2
@@ -180,7 +210,10 @@ contract as slash commands.
   chunk. Text deltas must not pay a hook probe.
 - Telemetry: `acp.proxy.session` / `acp.proxy.turn` spans under the
   existing `otelSpan` tree; updates reuse `agentTurnPlane` (bus topic +
-  `.events.jsonl`) keyed by the upstream session id.
+  `.events.jsonl`) keyed by the upstream session id. `BRO_AGENT_ID` is
+  worker-registry bookkeeping, not a precondition for archiving — an
+  unbadged proxy run (a human's `bro acp proxy`) journals under a
+  proxy-scoped plane dir rather than skipping the archive.
 - Per-turn overhead is measured and documented in bro-bhyo1's
   acceptance, not asserted here.
 
