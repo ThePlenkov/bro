@@ -2,7 +2,6 @@
  *  turn on a providers.<name> acp entry, bounded by --timeout, refused
  *  by provider walls before any spend. Reply text + provenance back;
  *  no registry entry. (spec bro-z8tng) */
-import { readFileSync, statSync, type Stats } from 'node:fs'
 import {
   SpawnError,
   wallText,
@@ -19,54 +18,15 @@ import {
   type AgentConnectorEnv,
 } from '../agent-connectors.ts'
 import { SpawnInputError } from './agents.ts'
+import { delegatePrompt } from './delegate-prompt.ts'
 import {
   DEFAULT_TIMEOUT_SEC,
-  MAX_PROMPT_FILE_BYTES,
   MAX_TIMEOUT_SEC,
   type DelegateOpts,
   type DelegateRequest,
   type DelegateSel,
   type DelegateWaitResult,
 } from './delegate.ts'
-
-/** Read a --prompt-file — size + regularity gate before the read: a
- *  prompt file is one turn's payload, never an unbounded stream or a
- *  device. */
-function promptFileText(path: string): string {
-  let st: Stats
-  try {
-    st = statSync(path)
-  } catch {
-    throw new SpawnInputError(`prompt file ${path} does not exist or is not a regular file`)
-  }
-  if (!st.isFile()) {
-    throw new SpawnInputError(`prompt file ${path} is not a regular file`)
-  }
-  if (st.size > MAX_PROMPT_FILE_BYTES) {
-    throw new SpawnInputError(
-      `prompt file ${path} is ${st.size} bytes — a turn payload caps at ${MAX_PROMPT_FILE_BYTES}`
-    )
-  }
-  return readFileSync(path, 'utf8')
-}
-
-/** The prompt text the request carries — --prompt and --prompt-file
- *  are the same channel (mutually exclusive), whitespace-only is no
- *  prompt at all. */
-function delegatePrompt(req: DelegateRequest): string {
-  if (req.prompt !== undefined && req.promptFile !== undefined) {
-    throw new SpawnInputError('prompt and promptFile are mutually exclusive')
-  }
-  const text =
-    req.prompt ?? (req.promptFile === undefined ? undefined : promptFileText(req.promptFile))
-  if (text === undefined) {
-    throw new SpawnInputError('delegate requires a prompt — --prompt <text> or --prompt-file <file>')
-  }
-  if (text.trim() === '') {
-    throw new SpawnInputError('prompt must not be empty')
-  }
-  return text
-}
 
 /** --wait's provider name: the pin wins, else the routed chain head. */
 function waitProviderName(req: DelegateRequest, routed: ResolvedClass | undefined): string {
@@ -145,15 +105,7 @@ export async function delegateWait(
     )
   }
   const deadline = waitDeadline(sel.req.timeoutSec)
-  // --model is the request pin: it outranks the chain's and the
-  // entry's configured model but the reported model stays honest
-  // (resolveTurnModel reports what the agent actually runs); a routed
-  // model only applies to an unpinned ask
-  const model = sel.req.model ?? (sel.req.provider === undefined ? sel.routed?.model : undefined)
-  const wire: ProviderWireOpts = {
-    model,
-    acp: { ...opts.acp, cwd: opts.acp?.cwd ?? dir },
-  }
+  const wire = waitWire(sel, dir, opts)
   const peer = await acpOpen(`delegate:${name}`, entry, wire, deadline)
   const onExit = (): void => peer.close()
   process.once('exit', onExit)
@@ -164,17 +116,36 @@ export async function delegateWait(
       signal: opts.acp?.signal,
       onUpdate: opts.acp?.onUpdate,
     })
-    return {
-      mode: 'wait',
-      provider: name,
-      model: r.model,
-      ...(sel.routed?.class !== undefined ? { class: sel.routed.class } : {}),
-      stopReason: r.stopReason,
-      text: r.text,
-      ...(sel.delegatedBy !== undefined ? { delegatedBy: sel.delegatedBy } : {}),
-    }
+    return waitResult(name, sel, r)
   } finally {
     process.removeListener('exit', onExit)
     peer.close()
+  }
+}
+
+/** --model is the request pin: it outranks the chain's and the
+ *  entry's configured model but the reported model stays honest
+ *  (resolveTurnModel reports what the agent actually runs); a routed
+ *  model only applies to an unpinned ask. */
+function waitWire(sel: DelegateSel, dir: string, opts: DelegateOpts): ProviderWireOpts {
+  const model = sel.req.model ?? (sel.req.provider === undefined ? sel.routed?.model : undefined)
+  return { model, acp: { ...opts.acp, cwd: opts.acp?.cwd ?? dir } }
+}
+
+/** The wait contract's result — class/delegatedBy ride as optional
+ *  provenance, absent fields omitted honestly. */
+function waitResult(
+  name: string,
+  sel: DelegateSel,
+  r: { model: string; stopReason: string; text: string }
+): DelegateWaitResult {
+  return {
+    mode: 'wait',
+    provider: name,
+    model: r.model,
+    ...(sel.routed?.class !== undefined ? { class: sel.routed.class } : {}),
+    stopReason: r.stopReason,
+    text: r.text,
+    ...(sel.delegatedBy !== undefined ? { delegatedBy: sel.delegatedBy } : {}),
   }
 }
