@@ -8,6 +8,7 @@
  * should change. (Same convention as the pi and opencode adapters.)
  */
 import type { BroContext } from './host.ts'
+import type { BroCompletion } from './completions.ts'
 
 /** A UI notification level. */
 export type OmpLevel = 'info' | 'warning' | 'error'
@@ -58,6 +59,9 @@ export interface OmpApi {
     name: string,
     options: {
       description?: string
+      /** Upstream: extensions/types.ts `RegisteredCommand` — the
+       *  slash dropdown's argument completer. */
+      getArgumentCompletions?: (argumentPrefix: string) => BroCompletion[] | null
       handler: (args: string, ctx: OmpContext) => Promise<void> | void
     }
   ): void
