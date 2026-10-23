@@ -117,6 +117,12 @@ Call sites:
       on win32 — POSIX mode bits don't exist there)
 - [x] review-round hardening (PR #659): `O_NOFOLLOW`, foreign-owner
       refusal, per-level mkdir pin under masking umask, per-row ACP
-      repair, pin-before-write ordering test via `fs` instrumentation
+      repair, pin-before-write ordering test via the `privateFs` seam
+- [x] SAST placement: `private-files.ts` lands at `bare_minimum` in
+      `.codescene/custom-quality-gates.json` (advisory ratio findings
+      inherent to a path-helper module — contorting the public API for
+      a metric is worse engineering) and `.codacy.yml` `exclude_paths`
+      (the module's job IS computed paths — same class as the store /
+      contract / plane exclusions already there)
 - [x] `npm run build`, `npm run typecheck`, `npm test` (exact CI
       commands)
