@@ -1174,7 +1174,7 @@ function boundedMs<T>(p: Promise<T>, ms: number): Promise<T | undefined> {
  *  mid-write sees a stale stamp or a stale extra file, both of which
  *  only defer to Node. Skipped on a degraded collection: an
  *  incomplete map must never masquerade as "nothing armed". */
-function recordGuardEvents(coverage: GuardRun['coverage']): void {
+export function recordGuardEvents(coverage: GuardRun['coverage']): void {
   if (coverage?.complete !== true) {
     return
   }

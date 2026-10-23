@@ -1,10 +1,10 @@
 import { describe, test } from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdirSync, utimesSync, writeFileSync } from 'node:fs'
-import { join } from 'node:path'
-import { classifyArmCommand, classifyArmCommands, classifyExecCommand, classifySkillMutation, isSelfToolCommand, readArmed, readCodexInstructions, armDetail, otherLiveWork, traceEntry } from './hooks.ts'
+import { existsSync, mkdirSync, readdirSync, utimesSync, writeFileSync } from 'node:fs'
+import { join, resolve } from 'node:path'
+import { classifyArmCommand, classifyArmCommands, classifyExecCommand, classifySkillMutation, isSelfToolCommand, readArmed, readCodexInstructions, armDetail, otherLiveWork, recordGuardEvents, traceEntry } from './hooks.ts'
 import { procStat } from '@broject/core'
-import { tmpDir } from './testrepo.ts'
+import { git, initRepo, inside, tmpDir } from './testrepo.ts'
 
 describe('readCodexInstructions', () => {
   test('reads the plugin file and ignores a missing or relative root', () => {
@@ -357,5 +357,36 @@ describe('otherLiveWork', () => {
     const found = otherLiveWork(dir, 'self', Date.now(), { pid: process.pid, start: st.start })
     assert.equal(found.length, 1)
     assert.equal(found[0]!.detail, 'bro-theirs')
+  })
+})
+
+describe('recordGuardEvents (bro-arm83)', () => {
+  /** run.sh fast-paths only on complete coverage — the record is the
+   *  contract: presence files first, .stamp second, deletes last. */
+  const guardsDir = (main: string): string =>
+    join(resolve(main, git(['rev-parse', '--git-common-dir'], main).trim()), 'bro', 'hooks', 'guards')
+
+  test('complete coverage writes a file per event plus .stamp and prunes stale ones', () => {
+    const { root, main } = initRepo('bro-guards-unit-')
+    inside(main, root, () => {
+      const gdir = guardsDir(main)
+      recordGuardEvents({ events: ['stop', 'post-tool'], complete: true })
+      assert.deepEqual(readdirSync(gdir).sort(), ['.stamp', 'post-tool', 'stop'])
+
+      recordGuardEvents({ events: ['stop'], complete: true })
+      assert.equal(existsSync(join(gdir, 'post-tool')), false, 'stale event file not pruned')
+      assert.equal(existsSync(join(gdir, 'stop')), true)
+      assert.equal(existsSync(join(gdir, '.stamp')), true)
+    })
+  })
+
+  test('incomplete coverage writes nothing — doubt always defers to node', () => {
+    const { root, main } = initRepo('bro-guards-unit-')
+    inside(main, root, () => {
+      recordGuardEvents({ events: ['stop'], complete: false })
+      assert.equal(existsSync(guardsDir(main)), false)
+      recordGuardEvents(undefined)
+      assert.equal(existsSync(guardsDir(main)), false)
+    })
   })
 })
