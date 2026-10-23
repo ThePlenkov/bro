@@ -34,10 +34,9 @@ ACP server:
   same argv shape — the client's own config syntax for a stdio ACP
   server.
 
-Run the proxy inside the repo you want context from — actually, run it
-anywhere: the seam probes `session/new`'s `cwd`, not the proxy's own,
-so a session opened in another repo gets THAT repo's context or
-nothing (fail-open, same as the hook).
+Run the proxy anywhere — the seam probes `session/new`'s `cwd`, not
+the proxy's own, so a session opened in another repo gets THAT repo's
+context or nothing (fail-open, same as the hook).
 
 ## What crosses the seam — and what doesn't
 

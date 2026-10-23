@@ -1318,6 +1318,12 @@ export async function collectSessionContext(
   sessionId: string,
   cliEvent = 'session-start'
 ): Promise<{ lines: string[]; settled: boolean }> {
+  // the runHooksCommand gate doesn't cover direct callers — the seam's
+  // documented contract (a dir outside a bro-enabled repo yields
+  // lines: []) has to live here
+  if (!broEnabled(dir)) {
+    return { lines: [], settled: true }
+  }
   // probes and the guard sweep are independent reads — overlapping them
   // keeps the total at the slowest single probe, not their sum
   // (spec: specs/bro-wc0i6.md)
@@ -1348,6 +1354,9 @@ export async function collectPromptContext(
   sessionId: string,
   prompt: string
 ): Promise<{ lines: string[] }> {
+  if (!broEnabled(dir)) {
+    return { lines: [] }
+  }
   const [promptLines, guards] = await Promise.all([
     promptContextLines(
       hookCtx(dir, sessionId),
