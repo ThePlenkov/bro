@@ -135,6 +135,10 @@ describe('bro fleet delegate — --wait', () => {
         { prompt: 'ask the review lane', class: 'review', mode: 'wait' },
         { acp: { peer: fake.app } }
       )
+      assert.equal(r.mode, 'wait')
+      if (r.mode !== 'wait') {
+        return assert.fail('wait mode expected')
+      }
       assert.equal(r.provider, 'p')
       assert.equal(r.class, 'review')
       assert.equal(r.model, 'm-chain')

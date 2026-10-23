@@ -9,6 +9,7 @@
 import {
   PlaneUnavailable,
   PlaneVerbError,
+  SpawnError,
   verbsNotWired,
   type AgentInfo,
   type PlaneCtx,
@@ -16,7 +17,7 @@ import {
   type Worker,
 } from '@broject/core'
 import { loadAgentEnv } from '../agent-connectors.ts'
-import { collectAgentBackends, findInBackends } from '../commands/agents.ts'
+import { collectAgentBackends, findInBackends, SpawnInputError } from '../commands/agents.ts'
 import { delegate, type DelegateRequest } from '../commands/delegate.ts'
 import { collectFleet } from '../commands/fleet.ts'
 import { bounded, dispatchRead } from './helpers.ts'
@@ -167,10 +168,26 @@ export function agentsPlane(ctx: PlaneCtx): PlaneDescriptor {
     },
     read: (name, args) => dispatchRead('agents', reads, name, args),
     exec: async (verb, args) => {
-      if (verb === DELEGATE) {
-        return delegate(dir, env(), delegateArgs(args))
+      if (verb !== DELEGATE) {
+        return verbsNotWired('agents', VERBS)(verb, args)
       }
-      return verbsNotWired('agents', VERBS)(verb, args)
+      // the plane error vocabulary: caller input is a client bug
+      // (PlaneVerbError → REST 400), a refusal/unavailable backend is
+      // PlaneUnavailable (→ 503) — never a bare 500
+      try {
+        return await delegate(dir, env(), delegateArgs(args))
+      } catch (err) {
+        if (err instanceof SpawnInputError) {
+          throw new PlaneVerbError('agents', verb, err.message)
+        }
+        if (err instanceof SpawnError) {
+          if (err.kind === 'input') {
+            throw new PlaneVerbError('agents', verb, err.message)
+          }
+          throw new PlaneUnavailable('agents', err.message)
+        }
+        throw err
+      }
     },
   }
 }
