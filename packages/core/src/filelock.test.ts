@@ -485,7 +485,7 @@ describe('filelock', () => {
       await new Promise((r) => a.once('exit', r))
       assert.equal(statSync(lock).ino, bIno, 'B instance moved or replaced by the loser release')
       assert.deepEqual(readdirSync(lock), [`h-${bPid}`])
-      assert.match(readFileSync(join(lock, `h-${bPid}`), 'utf8'), new RegExp(`^${bPid}:`))
+      assert.ok(readFileSync(join(lock, `h-${bPid}`), 'utf8').startsWith(`${bPid}:`))
       b.kill('SIGKILL')
       await new Promise((r) => b.once('exit', r))
     } finally {
