@@ -380,13 +380,29 @@ describe('recordGuardEvents (bro-arm83)', () => {
     })
   })
 
-  test('incomplete coverage writes nothing — doubt always defers to node', () => {
+  test('incomplete coverage writes nothing and invalidates a stale stamp', () => {
     const { root, main } = initRepo('bro-guards-unit-')
     inside(main, root, () => {
+      const gdir = guardsDir(main)
+      recordGuardEvents({ events: ['stop'], complete: true })
+      assert.equal(existsSync(join(gdir, '.stamp')), true)
+      // a degraded collection must not leave the old record readable —
+      // the shell would trust stale coverage and skip dropped guards
       recordGuardEvents({ events: ['stop'], complete: false })
-      assert.equal(existsSync(guardsDir(main)), false)
+      assert.equal(existsSync(join(gdir, '.stamp')), false, 'stale stamp not invalidated')
       recordGuardEvents(undefined)
-      assert.equal(existsSync(guardsDir(main)), false)
+      assert.equal(existsSync(join(gdir, '.stamp')), false)
+    })
+  })
+
+  test('trace coverage persists .trace so post-tool keeps journaling', () => {
+    const { root, main } = initRepo('bro-guards-unit-')
+    inside(main, root, () => {
+      const gdir = guardsDir(main)
+      recordGuardEvents({ events: ['prompt-submit'], complete: true, trace: true })
+      assert.equal(existsSync(join(gdir, '.trace')), true)
+      recordGuardEvents({ events: ['prompt-submit'], complete: true, trace: false })
+      assert.equal(existsSync(join(gdir, '.trace')), false, 'stale .trace not pruned')
     })
   })
 })

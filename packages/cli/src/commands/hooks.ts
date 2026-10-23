@@ -1175,24 +1175,37 @@ function boundedMs<T>(p: Promise<T>, ms: number): Promise<T | undefined> {
  *  only defer to Node. Skipped on a degraded collection: an
  *  incomplete map must never masquerade as "nothing armed". */
 export function recordGuardEvents(coverage: GuardRun['coverage']): void {
-  if (coverage?.complete !== true) {
-    return
-  }
   const dir = hooksStateDir()
   if (dir === null) {
     return
   }
   try {
     const gdir = join(dir, 'guards')
+    if (coverage?.complete !== true) {
+      // a degraded collection must invalidate the last good record —
+      // leaving the old stamp would masquerade stale coverage as
+      // current, and the shell would skip guards the failed
+      // collection dropped
+      rmSync(join(gdir, '.stamp'), { force: true })
+      return
+    }
     mkdirSync(gdir, { recursive: true })
     for (const ev of coverage.events) {
       writeFileSync(join(gdir, ev), '')
+    }
+    // .trace marks a def reading the journaled tail — post-tool then
+    // defers so the journal stays complete for later evaluations
+    if (coverage.trace) {
+      writeFileSync(join(gdir, '.trace'), '')
     }
     writeFileSync(join(gdir, '.stamp'), '')
     for (const ev of GUARD_EVENTS) {
       if (!coverage.events.includes(ev)) {
         rmSync(join(gdir, ev), { force: true })
       }
+    }
+    if (!coverage.trace) {
+      rmSync(join(gdir, '.trace'), { force: true })
     }
   } catch {
     // a failed record only costs future spawns — never stall a hook

@@ -57,8 +57,10 @@ mailbox_pending() {
   _mb=$1
   [ -d "$_mb" ] || return 1
   # -mmin -60 mirrors DROP_TTL_MS on mtime — expired drops are reaped
-  # by the drain, never delivered, so they cost no spawn here
-  for _f in $(find "$_mb" -maxdepth 1 -type f -name '*.txt' ! -name '.*' -mmin -60 2>/dev/null); do
+  # by the drain, never delivered, so they cost no spawn here. The read
+  # loop must not word-split — a space in the mailbox dir or a drop name
+  # would fragment paths and hide a pending drop (under-trigger).
+  _hit=$(find "$_mb" -maxdepth 1 -type f -name '*.txt' ! -name '.*' -mmin -60 -print 2>/dev/null | while IFS= read -r _f; do
     _b=${_f##*/}
     _unseen=0
     for _s in ${SIDS:-unknown}; do
@@ -68,7 +70,7 @@ mailbox_pending() {
     # an empty drop is consumed silently, never emitted
     [ -s "$_f" ] || continue
     # non-'{'-shaped text drains verbatim → broadcast → ours
-    head -c 1 "$_f" 2>/dev/null | grep -q '{' || return 0
+    head -c 1 "$_f" 2>/dev/null | grep -q '{' || { echo p; exit 0; }
     # '{'-shaped drops are addressed only as single-line envelopes
     # carrying the contract's required keys — anything else (verbatim
     # text, pretty-printed JSON, a malformed note) drains verbatim to
@@ -77,10 +79,10 @@ mailbox_pending() {
     # second line of content — doubt delivers)
     _ll=$(wc -l <"$_f" 2>/dev/null)
     [ "$_ll" = 1 ] && [ -z "$(tail -c 1 "$_f" 2>/dev/null)" ] && _ll=0
-    [ "$_ll" = 0 ] || return 0
-    grep -qE '"topic"[[:space:]]*:' "$_f" || return 0
-    grep -qE '"kind"[[:space:]]*:' "$_f" || return 0
-    grep -qE '"to"[[:space:]]*:' "$_f" || return 0
+    [ "$_ll" = 0 ] || { echo p; exit 0; }
+    grep -qE '"topic"[[:space:]]*:' "$_f" || { echo p; exit 0; }
+    grep -qE '"kind"[[:space:]]*:' "$_f" || { echo p; exit 0; }
+    grep -qE '"to"[[:space:]]*:' "$_f" || { echo p; exit 0; }
     # addressed-looking — every string recipient must be provably
     # foreign before the drop stops mattering; a "to" no extraction
     # covers (non-string, empty, nested-only) is doubt, and doubt
@@ -89,23 +91,33 @@ mailbox_pending() {
     # addressedTo() in core/notify.ts.
     _nk=$(grep -oE '"to"[[:space:]]*:' "$_f" | wc -l)
     _to=$(grep -oE '"to"[[:space:]]*:[[:space:]]*"[^"]+"' "$_f" 2>/dev/null | sed 's/.*"\([^"]*\)"$/\1/' | grep .)
-    [ -n "$_to" ] || return 0
-    [ "$(printf '%s\n' "$_to" | wc -l)" -lt "$_nk" ] && return 0
+    [ -n "$_to" ] || { echo p; exit 0; }
+    [ "$(printf '%s\n' "$_to" | wc -l)" -lt "$_nk" ] && { echo p; exit 0; }
     _ours=0
-    for _t in $_to; do
+    # line-wise — a recipient may itself contain spaces; word-splitting
+    # would compare fragments and misread "my agent" as foreign
+    while IFS= read -r _t; do
+      [ -n "$_t" ] || continue
+      # an escaped recipient (\uXXXX, \/) can't be compared raw — doubt
+      # delivers; otherwise compare the sanitized form, the same
+      # normalize addressedTo's caller-side identity goes through
+      case "$_t" in *\\*) _ours=1; break ;; esac
+      _tn=$(printf %s "$_t" | sed 's/[^A-Za-z0-9_.-]/_/g')
       for _s in $SIDS; do
-        [ "$_t" = "$_s" ] && { _ours=1; break 2; }
+        [ "$_tn" = "$_s" ] && { _ours=1; break 2; }
       done
       if [ -n "${BRO_AGENT_ID:-}" ]; then
         [ "$_t" = "$BRO_AGENT_ID" ] && { _ours=1; break; }
       else
         [ "$_t" = orchestrator ] && { _ours=1; break; }
       fi
-    done
-    [ "$_ours" = 1 ] && return 0
+    done <<EOF
+$_to
+EOF
+    [ "$_ours" = 1 ] && { echo p; exit 0; }
     # every extracted recipient is foreign — stays pending for them
-  done
-  return 1
+  done)
+  [ -n "$_hit" ]
 }
 
 # This process's topmost agent-shaped ancestor pid — mirrors
@@ -144,59 +156,73 @@ post-tool|prompt-submit)
   BASE=${DEVIN_PROJECT_DIR:-$PWD}
   NEED_NODE=
 
+  # foreign-schema payload — cursor/codex need schema translation, the
+  # hydrate leg, and CURSOR_PROJECT_DIR/workspace_roots resolution;
+  # never fast-pathed. Checked BEFORE the opt-in walk: a cursor payload
+  # names its project in fields the walk cannot see, so exiting on the
+  # cwd's opt-in would drop real hook work.
+  case "$PAYLOAD" in
+    *'"cursor_version"'*|*'"hook_event_name"'*|*'"turn_id"'*|*'"workspace_roots"'*) NEED_NODE=1 ;;
+  esac
+
   # the repo opt-in gate (core's repoOptedIn — `bro hooks` exits
   # silent on it, so this is exact parity, not an approximation): any
   # bro.config*/.beads walking up from the base, else nothing emits
-  _opted=0
-  _d=$BASE
-  while :; do
-    for _n in bro.config.ts bro.config.json bro.config.local.ts bro.config.local.json .beads; do
-      [ -e "$_d/$_n" ] && { _opted=1; break; }
+  if [ -z "$NEED_NODE" ]; then
+    _opted=0
+    _d=$BASE
+    while :; do
+      for _n in bro.config.ts bro.config.json bro.config.local.ts bro.config.local.json .beads; do
+        [ -e "$_d/$_n" ] && { _opted=1; break; }
+      done
+      [ "$_opted" = 1 ] && break
+      [ "$_d" = / ] && break
+      _p=${_d%/*}; [ -z "$_p" ] && _p=/
+      [ "$_p" = "$_d" ] && break
+      _d=$_p
     done
-    [ "$_opted" = 1 ] && break
-    [ "$_d" = / ] && break
-    _p=${_d%/*}; [ -z "$_p" ] && _p=/
-    [ "$_p" = "$_d" ] && break
-    _d=$_p
-  done
-  [ "$_opted" = 0 ] && exit 0
+    [ "$_opted" = 0 ] && exit 0
+  fi
 
   # session-id candidates — every value offered, sanitized the same
   # way markerPath()/seenPath() do ([^\w.-] → _). None extractable is
   # not "no session": a missed extraction would skip marker checks the
   # real sid would have failed, so sid-less payloads defer entirely.
-  SIDS=$(printf %s "$PAYLOAD" | grep -oE '"(session_id|conversation_id)"[[:space:]]*:[[:space:]]*"[^"]*"' | sed 's/.*"\([^"]*\)"$/\1/;s/[^A-Za-z0-9_.-]/_/g' | sort -u)
+  # A raw value still carrying a JSON escape (\uXXXX, \/) sanitizes to
+  # a different marker name than Node's decoded sid — doubt defers.
+  _raw_sids=$(printf %s "$PAYLOAD" | grep -oE '"(session_id|conversation_id)"[[:space:]]*:[[:space:]]*"[^"]*"' | sed 's/.*"\([^"]*\)"$/\1/' | sort -u)
+  case "$_raw_sids" in *\\*) NEED_NODE=1 ;; esac
+  SIDS=$(printf %s "$_raw_sids" | sed 's/[^A-Za-z0-9_.-]/_/g')
   [ -z "$SIDS" ] && NEED_NODE=1
-
-  # foreign-schema payload — cursor/codex need schema translation, the
-  # hydrate leg, and CURSOR_PROJECT_DIR/workspace_roots resolution;
-  # never fast-pathed
-  if [ -z "$NEED_NODE" ]; then
-    case "$PAYLOAD" in
-      *'"cursor_version"'*|*'"hook_event_name"'*|*'"turn_id"'*|*'"workspace_roots"'*) NEED_NODE=1 ;;
-    esac
-  fi
 
   # payload content that names work: supersets of the real classifiers —
   # a string that merely contains the tokens defers to Node, where
-  # command-position parsing decides. False positives are the safe side.
+  # command-position parsing decides. The [^;&|]* window is unbounded —
+  # classifyArmCommand accepts flags of any length between binary and
+  # subcommand. False positives are the safe side.
   if [ -z "$NEED_NODE" ]; then
     _W='[^[:alnum:]_-]'
     if [ "$EVENT" = post-tool ]; then
       printf %s "$PAYLOAD" | grep -qE \
-        -e "(^|$_W)(bro|npx)($_W|$)[^;&|]{0,60}(act|drill|wtf|work|retrospect|debt|convoy|spec|next|loop|sync|unwind)" \
-        -e "(^|$_W)gh($_W|$)[^;&|]{0,30}pr($_W|$)" \
-        -e "(^|$_W)git($_W|$)[^;&|]{0,40}(push|worktree)($_W|$)" \
-        -e "(^|$_W)bd($_W|$)[^;&|]{0,60}(--claim|worktree($_W|$))" \
+        -e "(^|$_W)(bro|npx)($_W|$)[^;&|]*(act|drill|wtf|work|retrospect|debt|convoy|spec|next|loop|sync|unwind)" \
+        -e "(^|$_W)gh($_W|$)[^;&|]*pr($_W|$)" \
+        -e "(^|$_W)git($_W|$)[^;&|]*(push|worktree)($_W|$)" \
+        -e "(^|$_W)bd($_W|$)[^;&|]*(--claim|worktree($_W|$))" \
         && NEED_NODE=1
     else
-      printf %s "$PAYLOAD" | grep -qE 'pull/[0-9]|merge_requests/[0-9]' && NEED_NODE=1
+      printf %s "$PAYLOAD" | grep -qE 'pull/[0-9]|[Mm][Ee][Rr][Gg][Ee]_[Rr][Ee][Qq][Uu][Ee][Ss][Tt][Ss]/[0-9]' && NEED_NODE=1
     fi
   fi
 
-  # the user-level mailbox drains even outside a repo — git-independent
+  # the user-level mailbox drains even outside a repo — git-independent.
+  # With neither XDG_STATE_HOME nor HOME set Node still resolves the OS
+  # home; the shell cannot — doubt defers.
   if [ -z "$NEED_NODE" ]; then
-    mailbox_pending "${XDG_STATE_HOME:-${HOME:-}/.local/state}/bro/notify" && NEED_NODE=1
+    if [ -n "${XDG_STATE_HOME:-}${HOME:-}" ]; then
+      mailbox_pending "${XDG_STATE_HOME:-$HOME/.local/state}/bro/notify" && NEED_NODE=1
+    else
+      NEED_NODE=1
+    fi
   fi
 
   # git-dir state — without a common dir Node resolves hooksDir/
@@ -275,7 +301,9 @@ ${COMMON%/*}/.beads"
       while [ -n "$_w" ] && [ "$_w" != / ]; do
         [ -d "$_w/.beads" ] && _beads="$_beads
 $_w/.beads"
-        _w=${_w%/*}
+        _p=${_w%/*}
+        [ "$_p" = "$_w" ] && break
+        _w=$_p
       done
       _manifest=0
       while IFS= read -r _b; do
@@ -288,39 +316,65 @@ $_beads
 EOF
       [ -n "$_beads" ] && [ "$_manifest" = 0 ] && NEED_NODE=1
 
-      # 0 when a store manifest is newer than snapshot file $1 —
-      # the probe would re-read live, so its cached answer no longer
-      # proves this event a no-op
-      _snap_stale() {
+      # 1 when snapshot file $1 provably keys to the CURRENT store —
+      # the probe stamps each snapshot with beadsStoreStamp()
+      # (<beads>|<root>/<db>:<mtimeMs>:<size>|…), so a snapshot taken
+      # against another BEADS_DIR or an older manifest set can't pass
+      # for fresh. ms↔s gets a 1s tolerance; size is exact — doubt
+      # (missing stat, torn field) counts as stale.
+      _snap_fresh() {
+        _st=$(sed -n 's/.*"stamp"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$1" 2>/dev/null)
+        [ -n "$_st" ] || return 1
+        _sb=${_st%%|*}
+        [ "$_sb" = "$_st" ] && return 1
         while IFS= read -r _b; do
-          [ -n "$_b" ] || continue
-          for _m in "$_b"/embeddeddolt/*/.dolt/noms/manifest "$_b"/dolt/*/.dolt/noms/manifest; do
-            [ -f "$_m" ] && [ "$_m" -nt "$1" ] && return 0
-          done
+          [ -n "$_b" ] && [ "$_b" = "$_sb" ] && break
         done <<EOF
 $_beads
 EOF
-        return 1
+        [ "$_b" = "$_sb" ] || return 1
+        _rest=${_st#*|}
+        while [ -n "$_rest" ]; do
+          _seg=${_rest%%|*}
+          [ "$_rest" = "$_seg" ] && _rest= || _rest=${_rest#*|}
+          _db=${_seg%%:*}
+          _ms=${_seg#*:}; _ms=${_ms%%:*}
+          _sz=${_seg##*:}
+          _f="$_sb/$_db/.dolt/noms/manifest"
+          [ -f "$_f" ] || return 1
+          _ys=$(stat -c %Y "$_f" 2>/dev/null || stat -f %m "$_f" 2>/dev/null) || return 1
+          _ss=$(stat -c %s "$_f" 2>/dev/null || stat -f %z "$_f" 2>/dev/null) || return 1
+          _sec=${_ms%%.*}
+          _d=$((_sec - _ys)); [ "$_d" -lt 0 ] && _d=$((-_d))
+          [ "$_d" -gt 1 ] && return 1
+          [ "$_ss" = "$_sz" ] || return 1
+        done
+        return 0
       }
 
-      # lessons — a fresh [] snapshot is the only "no lessons" proof
+      # lessons — a fresh [] snapshot keyed to this store is the only
+      # "no lessons" proof
       if [ -z "$NEED_NODE" ] && [ "$_learn_off" = 0 ]; then
         SNAP=$HOOKS/cache/lessons.json
         if [ -f "$SNAP" ]; then
           grep -q '"lessons"[[:space:]]*:[[:space:]]*\[\]' "$SNAP" || NEED_NODE=1
-          [ -z "$NEED_NODE" ] && _snap_stale "$SNAP" && NEED_NODE=1
+          if [ -z "$NEED_NODE" ]; then
+            _snap_fresh "$SNAP" || NEED_NODE=1
+          fi
         elif [ "$_manifest" = 1 ]; then
           NEED_NODE=1
         fi
       fi
 
       # open drill frames nudge every session's prompt-submit — a
-      # fresh null snapshot is the only "no open frame" proof
+      # fresh null snapshot keyed to this store is the only proof
       if [ -z "$NEED_NODE" ] && [ "$EVENT" = prompt-submit ]; then
         SNAP=$HOOKS/cache/drills.json
         if [ -f "$SNAP" ]; then
           grep -q '"frame"[[:space:]]*:[[:space:]]*null' "$SNAP" || NEED_NODE=1
-          [ -z "$NEED_NODE" ] && _snap_stale "$SNAP" && NEED_NODE=1
+          if [ -z "$NEED_NODE" ]; then
+            _snap_fresh "$SNAP" || NEED_NODE=1
+          fi
         elif [ "$_manifest" = 1 ]; then
           NEED_NODE=1
         fi
@@ -330,7 +384,9 @@ EOF
     # guard defs for this event — the hook records resolved presence
     # itself (connector guards() and computed defs are invisible to a
     # config grep): .stamp is the freshness anchor, guards/<event>
-    # exists while a collected def targets that event
+    # exists while a collected def targets that event, and .trace marks
+    # a def whose match clause reads the session trace — post-tool must
+    # then reach Node so the journal it evaluates stays complete.
     if [ -z "$NEED_NODE" ]; then
       GUARDSD=$HOOKS/guards
       if [ ! -f "$GUARDSD/.stamp" ]; then
@@ -342,6 +398,29 @@ EOF
 $CFGS
 EOF
         [ -z "$NEED_NODE" ] && [ -f "$GUARDSD/$EVENT" ] && NEED_NODE=1
+        if [ -z "$NEED_NODE" ] && [ "$EVENT" = post-tool ] && [ -f "$GUARDSD/.trace" ]; then
+          NEED_NODE=1
+        fi
+      fi
+    fi
+
+    # config shapes a grep can't evaluate defer — a TypeScript config
+    # that imports, computes, or reads env can change guard defs, sdd,
+    # or telemetry behind an unchanged file, and a non-empty plugins
+    # section registers connectors whose probes the fast path cannot
+    # see. Static literal configs keep the fast path.
+    if [ -z "$NEED_NODE" ]; then
+      while IFS= read -r _c; do
+        [ -n "$_c" ] || continue
+        case "$_c" in
+          *.ts) grep -qE '(^|[^[:alnum:]_])(import|require|process\.env|=>|\|\||&&)' "$_c" 2>/dev/null && NEED_NODE=1 && break ;;
+        esac
+      done <<EOF
+$CFGS
+EOF
+      if [ -z "$NEED_NODE" ] && cfg_grep '"?plugins"?[[:space:]]*:' \
+                             && ! cfg_grep '"?plugins"?[[:space:]]*:[[:space:]]*\[[[:space:]]*\]'; then
+        NEED_NODE=1
       fi
     fi
 

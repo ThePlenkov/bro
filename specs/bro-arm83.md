@@ -66,11 +66,14 @@ The shell check mirrors exactly that state inventory:
 #### shared checks (both events)
 
 1. **Foreign-schema payload** → Node. Payloads carrying
-   `hook_event_name` / `turn_id` / `workspace_roots` are Cursor or
-   Codex shaped: they need schema translation, the hydrate leg, and
-   `CURSOR_PROJECT_DIR`/`workspace_roots` resolution — all logic the
-   shell must not reimplement. Devin/Claude payloads carry none of
-   these keys and take the fast path.
+   `hook_event_name` / `turn_id` / `workspace_roots` /
+   `cursor_version` are Cursor or Codex shaped: they need schema
+   translation, the hydrate leg, and `CURSOR_PROJECT_DIR`/
+   `workspace_roots` resolution — all logic the shell must not
+   reimplement. This runs **before** the opt-in walk: a cursor
+   payload names its project in payload fields, so gating on the
+   cwd's opt-in would drop real hook work. Devin/Claude payloads
+   carry none of these keys and take the fast path.
 
 2. **Mailbox pending** → Node. Both drained dirs are checked:
    `<git-common>/bro/notify` and `$XDG_STATE_HOME/bro/notify`
@@ -88,11 +91,14 @@ The shell check mirrors exactly that state inventory:
 3. **Lessons possibly live** → Node. Learn's probes inject only when
    the store has lessons, and the probe itself is the expensive part
    (`bd kv list` spawn). The cheap proxy uses the cache learn already
-   maintains: `<git-common>/bro/hooks/cache/lessons.json`.
-   A non-empty `"lessons"` array in the snapshot → Node. Otherwise,
-   any `.beads/{embeddeddolt,dolt}/<db>/.dolt/noms/manifest` newer
-   than the snapshot — or a store present with no snapshot at all —
-   means the live read could find new lessons → Node. Beads dirs
+   maintains: `<git-common>/bro/hooks/cache/lessons.json`, whose
+   `"stamp"` field carries `beadsStoreStamp()`
+   (`<beads>|<root>/<db>:<mtimeMs>:<size>|…`). The shell re-verifies
+   that stamp against live `stat` — store path ∈ the discovered
+   `.beads` set, size exact, mtime within 1 s — so a snapshot from
+   another `BEADS_DIR` or an older manifest set can't pass for fresh.
+   A non-empty `"lessons"` array → Node; a missing stamp field, a
+   stat miss, or a store with no manifest → Node. Beads dirs
    checked: `$BEADS_DIR` (agent spawns pin it), `dirname(<git-common>)/.beads`
    (what `beadsDir()` resolves), and every `.beads` found walking up
    from the base dir (what `bd`'s own discovery would find for
@@ -115,13 +121,21 @@ The shell check mirrors exactly that state inventory:
    - `.stamp` is the freshness anchor; incomplete coverage writes
      nothing, so the next call sees no stamp and defers.
 
+   Incomplete coverage removes `.stamp` — a stale record must never
+   masquerade as current after a failed collection.
+
+   `coverage.trace` marks any def declaring `when.match` — match
+   clauses read the journaled trace tail, so while one exists
+   post-tool must still reach Node to keep the journal complete.
+   Recorded as `guards/.trace`.
+
    Shell rule: `.stamp` absent → Node (never computed, or last
    collection was partial); any config file newer than `.stamp` →
-   Node (defs may have changed); `guards/<event>` present → Node.
-   A `guard.enabled:false` config yields an empty event set — the
-   stamp still lands, so guard-off repos keep the fast path;
-   flipping it back makes config newer than the stamp and Node
-   recomputes.
+   Node (defs may have changed); `guards/<event>` present → Node;
+   `guards/.trace` + post-tool → Node. A `guard.enabled:false`
+   config yields an empty event set — the stamp still lands, so
+   guard-off repos keep the fast path; flipping it back makes
+   config newer than the stamp and Node recomputes.
 
    Config files considered (mirroring `loadConfigLayers`): the base
    dir and `dirname(<git-common>)` (the main worktree root a linked
@@ -230,10 +244,13 @@ permission excepted, exactly as before.
   - a non-git dir and garbage stdin → exit 0 (fail-open);
   - armed-marker coverage: `.task` marker for the payload's session +
     `sdd` in config → prompt-submit reaches Node.
-- **Bench**: `time`/`hyperfine`-style loop over
-  `sh hooks/run.sh post-tool </dev/null` in a quiet fixture —
-  no-op p50 < 50 ms (E1). The CI budget row lands when the sibling
-  bench (bro-qbnre) merges — this PR records the number in the body.
+- **Bench**: `time`-loop over `sh hooks/run.sh post-tool` in a
+  **primed** quiet fixture — a real `post-tool` run first (writes
+  `guards/.stamp`), then 60 iterations of a session-bearing payload
+  (`{"session_id":"s1","tool_input":{"command":"ls"},…}`) with node
+  absent from PATH. `</dev/null` alone doesn't exercise the lane —
+  a sid-less payload defers by design. No-op p50 < 50 ms (E1); this
+  PR measures p50 ≈ 10 ms / p95 ≈ 30 ms.
 - `sh -n hooks/run.sh`, `npm test` (the repo's real CI command).
 
 ## Known gaps (accepted, documented)

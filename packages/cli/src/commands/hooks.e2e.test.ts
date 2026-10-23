@@ -1276,4 +1276,50 @@ describe('hooks e2e — run.sh fast path (bro-arm83)', () => {
       assert.equal(g.status, 0)
     })
   })
+
+  test('garbage stdin reaches node — exit 0 alone is not proof', () => {
+    const f = hookFixture()
+    inside(f.main, f.root, () => {
+      prime(f)
+      const { canary, env } = canaryEnv(f.root)
+      const g = launch(f.main, 'post-tool', 'this is not json at all', env)
+      assert.equal(g.status, 0)
+      assert.ok(existsSync(canary), 'malformed payload skipped node')
+    })
+  })
+
+  test('a cursor-shaped payload reaches node even outside an opted repo', () => {
+    const f = hookFixture()
+    inside(f.main, f.root, () => {
+      // foreign-schema detection precedes the opt-in walk — the payload
+      // names its own project, so gating on cwd would drop real work
+      const nogit = join(f.root, 'nogit')
+      mkdirSync(nogit)
+      const { canary, env } = canaryEnv(f.root)
+      const r = launch(nogit, 'post-tool', {
+        hook_event_name: 'postToolUse',
+        cursor_version: '1.0',
+        workspace_roots: [f.main],
+        turn_id: 't1',
+      }, env)
+      assert.equal(r.status, 0)
+      assert.ok(existsSync(canary), 'cursor payload skipped node in a non-opted cwd')
+    })
+  })
+
+  test('a pending drop with spaces in its name still reaches node', () => {
+    const f = hookFixture()
+    inside(f.main, f.root, () => {
+      prime(f)
+      const notify = join(f.markerDir, '..', 'notify')
+      mkdirSync(notify, { recursive: true })
+      // the find loop must not word-split — a split path reads as
+      // absent and the pending drop is silently skipped
+      writeFileSync(join(notify, `${Date.now()}-a b.txt`), 'hello session\n')
+      const { canary, env } = canaryEnv(f.root)
+      const r = launch(f.main, 'post-tool', postTool, env)
+      assert.equal(r.status, 0)
+      assert.ok(existsSync(canary), 'spaced-name drop did not reach node')
+    })
+  })
 })

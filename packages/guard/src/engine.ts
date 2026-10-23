@@ -102,7 +102,7 @@ export interface GuardRun {
    *  when a connector `guards()` threw or a declaration was dropped,
    *  meaning the event list may be partial and must not be recorded
    *  as authoritative. */
-  coverage?: { events: GuardEvent[]; complete: boolean }
+  coverage?: { events: GuardEvent[]; complete: boolean; trace: boolean }
 }
 
 const guardId = (name: string): string => `guard:${name}`
@@ -285,13 +285,17 @@ async function evalJudge(
 export async function runGuards(opts: GuardEvalOpts): Promise<GuardRun> {
   const cfg = opts.cfg ?? DEFAULT_GUARD_CONFIG
   if (!cfg.enabled) {
-    return { lines: [], verdicts: [], coverage: { events: [], complete: true } }
+    return { lines: [], verdicts: [], coverage: { events: [], complete: true, trace: false } }
   }
   const collected = collectGuards({ dir: opts.dir, sessionId: opts.sessionId } as ConnectorCtx, opts.defs ?? [])
   const guards = collected.filter((c): c is { source: string; guard: Guard } => c.guard !== undefined)
   const coverage = {
     events: [...new Set(guards.flatMap(({ guard }) => guard.when.on))],
     complete: collected.every((r) => r.problems === undefined),
+    // a match clause reads the journaled trace tail — post-tool events
+    // must keep journaling while any collected def declares one, or a
+    // later guard evaluates a trace with gaps (spec: bro-arm83)
+    trace: guards.some(({ guard }) => guard.when.match !== undefined),
   }
   if (guards.length === 0) {
     return { lines: [], verdicts: [], coverage }
