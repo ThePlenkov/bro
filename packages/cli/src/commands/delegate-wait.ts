@@ -3,78 +3,23 @@
  *  by provider walls before any spend. Reply text + provenance back;
  *  no registry entry. (spec bro-z8tng) */
 import {
-  SpawnError,
-  wallText,
-  type ProviderEntry,
-  type ResolvedClass,
-} from '@broject/core'
-import {
   acpOpen,
   acpPooledTurn,
   type ProviderWireOpts,
 } from '@broject/providers'
 import {
-  providerWallsFor,
   type AgentConnectorEnv,
 } from '../agent-connectors.ts'
 import { SpawnInputError } from './agents.ts'
 import { delegatePrompt } from './delegate-prompt.ts'
+import { acpEntry, refuseWalled, waitProviderName } from './delegate-provider.ts'
 import {
   DEFAULT_TIMEOUT_SEC,
   MAX_TIMEOUT_SEC,
   type DelegateOpts,
-  type DelegateRequest,
   type DelegateSel,
   type DelegateWaitResult,
 } from './delegate.ts'
-
-/** --wait's provider name: the pin wins, else the routed chain head. */
-function waitProviderName(req: DelegateRequest, routed: ResolvedClass | undefined): string {
-  const name = req.provider ?? routed?.provider
-  if (name === undefined) {
-    throw new SpawnInputError(
-      'delegate --wait needs a provider — pass --provider <name> or declare fleet.routing.<class>.chain'
-    )
-  }
-  return name
-}
-
-/** The provider's entry — must be acp-typed: a pooled turn needs an
- *  ACP peer, api/cli kinds have no session to converse over. A
- *  missing entry is the caller's bug when they pinned it, config when
- *  the lane resolved to it. */
-function acpEntry(
-  env: AgentConnectorEnv,
-  name: string,
-  pinned: boolean
-): Extract<ProviderEntry, { type: 'acp' }> {
-  const entry = env.providers?.[name]
-  if (entry === undefined) {
-    throw new SpawnError(`providers.${name} is not configured`, pinned ? 'input' : 'config')
-  }
-  if (entry.type !== 'acp') {
-    throw new SpawnError(
-      `providers.${name} (type '${entry.type}') cannot serve a delegate turn — --wait needs an 'acp' provider`,
-      'config'
-    )
-  }
-  return entry
-}
-
-/** Provider walls live in the repo registry — a non-repo dir reads as
- *  no walls (readAgentRegistry returns {} for ENOENT/no-common-dir), so
- *  any throw IS registry corruption: fail the wait closed rather than
- *  spend against a provider whose wall status is unknown. */
-function wallsFor(dir: string): ReturnType<typeof providerWallsFor> {
-  try {
-    return providerWallsFor(dir)
-  } catch (err) {
-    throw new SpawnError(
-      `provider walls unreadable — refusing the delegate turn closed: ${err instanceof Error ? err.message : String(err)}`,
-      'unavailable'
-    )
-  }
-}
 
 function waitDeadline(timeoutSec: number | undefined): number {
   const sec = timeoutSec ?? DEFAULT_TIMEOUT_SEC
@@ -97,13 +42,7 @@ export async function delegateWait(
 ): Promise<DelegateWaitResult> {
   const name = waitProviderName(sel.req, sel.routed)
   const entry = acpEntry(env, name, sel.req.provider !== undefined)
-  const wall = wallsFor(dir).find((w) => w.provider === name)
-  if (wall !== undefined) {
-    throw new SpawnError(
-      `${wallText(wall)} — the delegate lane waits; retry after the reset or --detach to a different lane`,
-      'cap'
-    )
-  }
+  refuseWalled(dir, name)
   const deadline = waitDeadline(sel.req.timeoutSec)
   const wire = waitWire(sel, dir, opts)
   const peer = await acpOpen(`delegate:${name}`, entry, wire, deadline)
