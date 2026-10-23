@@ -1987,6 +1987,16 @@ function nativeSurvivors(pid: number | undefined, agentId: string | undefined): 
   return pids.length > 0 ? `surviving pids: ${pids.join(', ')}` : 'the unit still reads live'
 }
 
+/** The registry row still names the generation this stop targets —
+ *  agentId + spawnedAt pin the run; a respawn reuses agentId under a
+ *  new spawnedAt (bro-l8c4f.3). */
+function sameRegistryGeneration(
+  cur: AgentRegistryEntry | undefined,
+  entry: AgentRegistryEntry
+): boolean {
+  return cur !== undefined && cur.agentId === entry.agentId && cur.spawnedAt === entry.spawnedAt
+}
+
 /** The shared stop tail for the registry backends — under the SAME
  *  registry lock: re-verify the generation (a respawned step answers
  *  'stopped' — the new run owns its entry, and the old unit is
@@ -2000,12 +2010,7 @@ function lockedStopVerdict(
   probe: () => StopResult | undefined
 ): StopResult {
   return withAgentRegistryLock(dir, (): StopResult => {
-    const cur = readAgentRegistry(dir)[molStep]
-    if (
-      cur === undefined ||
-      cur.agentId !== entry.agentId ||
-      cur.spawnedAt !== entry.spawnedAt
-    ) {
+    if (!sameRegistryGeneration(readAgentRegistry(dir)[molStep], entry)) {
       return {
         verdict: 'stopped',
         detail: 'the step respawned during the stop — the new run owns the entry',
@@ -2440,8 +2445,6 @@ export function makeNativeConnector(ctx: ConnectorCtx, env: AgentConnectorEnv): 
       const start = entryPidStart(entry)
       const agentId = typeof entry.agentId === 'string' ? entry.agentId : undefined
       const unit = () => procUnitState(pid, start, agentId)
-      const sameGeneration = (cur: AgentRegistryEntry | undefined) =>
-        cur !== undefined && cur.agentId === entry.agentId && cur.spawnedAt === entry.spawnedAt
       let signalErr: string | undefined
       if (unit() !== 'dead') {
         // signals run inside the registry lock: the generation check
@@ -2449,11 +2452,11 @@ export function makeNativeConnector(ctx: ConnectorCtx, env: AgentConnectorEnv): 
         // land between them and catch a signal meant for the old run,
         // and dedup cannot admit a spawn while the unit reads live
         // (bro-l8c4f.3)
-        withAgentRegistryLock(dir, () => {
-          if (sameGeneration(readAgentRegistry(dir)[molStep])) {
-            signalErr = termNativeUnit(pid, start, agentId)
-          }
-        })
+        signalErr = withAgentRegistryLock(dir, () =>
+          sameRegistryGeneration(readAgentRegistry(dir)[molStep], entry)
+            ? termNativeUnit(pid, start, agentId)
+            : undefined
+        )
         // let the signal land before recording the stop — `stopped` on a
         // still-living unit would let a respawn run alongside the dying
         // agent. The unit, not the wrapper, is the wait (bro-l8c4f.3).
@@ -3620,6 +3623,15 @@ function dockerContainerName(entry: AgentRegistryEntry): string | undefined {
  *  proof of a corpse (or a removed one), not an unreachable daemon. */
 const DOCKER_NO_SUCH = /no such (?:object|container)/i
 
+/** rm by the immutable container ID when recorded — respawns reuse
+ *  agentId (and thus the name), so a name-targeted rm landing after a
+ *  respawn's run would kill the NEW worker (bro-l8c4f.3). */
+function dockerRmTarget(entry: AgentRegistryEntry, name: string): string {
+  return typeof entry.containerId === 'string' && entry.containerId !== ''
+    ? entry.containerId
+    : name
+}
+
 /** Tri-state liveness — 'running' proves life, 'dead' proves a corpse
  *  (`--rm` containers self-remove on exit, so dead IS absent; a
  *  present-but-stopped one reads the same either way). 'unknown' is a
@@ -4221,14 +4233,7 @@ export function makeDockerConnector(ctx: ConnectorCtx, env: AgentConnectorEnv): 
       const [molStep, entry] = hit
       const name = dockerContainerName(entry)
       if (name !== undefined && entry.stopped !== true) {
-        // rm by the immutable container ID when recorded — respawns
-        // reuse agentId (and thus the name), so a name-targeted rm
-        // landing after a respawn's run would kill the NEW worker
-        const target =
-          typeof entry.containerId === 'string' && entry.containerId !== ''
-            ? entry.containerId
-            : name
-        dockerRun(['rm', '-f', target])
+        dockerRun(['rm', '-f', dockerRmTarget(entry, name)])
         // let the rm land before recording the stop — 'stopped' on a
         // still-live container would let a respawn run beside it
         const deadline = Date.now() + 2_000
