@@ -88,7 +88,14 @@ function loopFixture(
     agent: host.agent,
     worktree: join(root, 'main--fx-a'),
     env,
-    run: (extra = []) => runCli(['loop', ...extra], { cwd: main, env }),
+    run: (extra = []) =>
+      // the test clock: a fractional interval is the fixture's fake
+      // time — every poll/sleep the run derives scales to 100ms
+      // instead of the production 60s/1s cadences
+      runCli(
+        ['loop', ...(extra.includes('--interval') ? [] : ['--interval', '0.1']), ...extra],
+        { cwd: main, env }
+      ),
   }
 }
 
@@ -197,6 +204,9 @@ describe('bro loop e2e', () => {
   test('land: claim → agent → green gate → merge → close → cleanup', () => {
     const f = loopFixture([{ ...FAKE_BEAD, id: 'fx-a', title: 'ship it' }])
     inside(f.main, f.root, () => {
+      // the default 0.1s test tick lands the run inside the heartbeat
+      // floor — the liveness guard staying quiet still proves a clean
+      // run (the heartbeat's floor, not its interval, is what bounds it)
       const r = f.run()
       assert.match(r.stdout, /loop: fx-a landed/)
       assert.match(r.stdout, /1 landed, 0 closed, 0 parked, 0 failed/)
@@ -405,11 +415,11 @@ describe('bro loop e2e', () => {
       // a holding run is correct-by-design non-terminating — the test's
       // own timeout (not runCli's 60s) bounds it and the captured
       // output is the evidence
-      const proc = spawnSync(process.execPath, [CLI_DIST, 'loop', '--interval', '1'], {
+      const proc = spawnSync(process.execPath, [CLI_DIST, 'loop', '--interval', '0.1'], {
         cwd: f.main,
         env: e2eEnv(f.env),
         encoding: 'utf8',
-        timeout: 8_000,
+        timeout: 4_000,
       })
       assert.equal(proc.status, null, 'run should have held until the test timeout')
       const stdout = proc.stdout ?? ''
@@ -798,7 +808,7 @@ describe('bro loop liveness', () => {
 
   test('a hung agent stalls visibly — heartbeat names the stage, SIGTERM exits audited', async () => {
     const f = loopFixture([{ ...FAKE_BEAD, id: 'fx-a', title: 'hangs' }], {}, 'hang')
-    const proc = spawnLoop(f, ['--interval', '1'])
+    const proc = spawnLoop(f, ['--interval', '0.1'])
     let stderr = ''
     proc.stderr!.on('data', (d: Buffer) => (stderr += d))
     let workerPid = 0
@@ -1270,7 +1280,7 @@ describe('bro loop gate-stack round-robin', () => {
     ])
     writeHostState(f.hostState, { prs: {}, delays: { 'fx-a': 5000 } })
     inside(f.main, f.root, () => {
-      const r = f.run(['--interval', '1'])
+      const r = f.run()
       assert.match(r.stdout, /2 landed/, r.stderr)
       const prs = readHostState(f.hostState).prs as Record<string, { number: number }>
       const a = prs['loop/fx-a']!.number
@@ -1304,7 +1314,7 @@ describe('bro loop gate-stack round-robin', () => {
       },
     })
     inside(f.main, f.root, () => {
-      const r = f.run(['--interval', '1'])
+      const r = f.run()
       assert.match(r.stdout, /2 landed/, r.stderr)
       assert.deepEqual(events(f), [
         { spawn: 'fx-a', branch: 'loop/fx-a' },
@@ -1329,7 +1339,7 @@ describe('bro loop gate-stack round-robin', () => {
     )
     writeHostState(f.hostState, { prs: {} })
     inside(f.main, f.root, () => {
-      const r = f.run(['--interval', '1'])
+      const r = f.run()
       assert.match(r.stdout, /2 landed/, r.stderr)
       assert.deepEqual(events(f), [
         { spawn: 'fx-a', branch: 'loop/fx-a' },
@@ -1346,7 +1356,7 @@ describe('bro loop gate-stack round-robin', () => {
       prs: { 'loop/fx-a': { mergeable: 'CONFLICTING' } },
     })
     inside(f.main, f.root, () => {
-      const r = f.run(['--interval', '1'])
+      const r = f.run()
       assert.match(r.stdout, /rebase round 1 onto main/, r.stderr)
       assert.match(r.stdout, /loop: fx-a landed/)
       assert.deepEqual(events(f), [
@@ -1364,7 +1374,7 @@ describe('bro loop gate-stack round-robin', () => {
       prs: { 'loop/fx-a': { mergeState: 'BEHIND' } },
     })
     inside(f.main, f.root, () => {
-      const r = f.run(['--interval', '1'])
+      const r = f.run()
       assert.match(r.stdout, /loop: fx-a landed/)
       assert.deepEqual(events(f), [
         { spawn: 'fx-a', branch: 'loop/fx-a' },
@@ -1384,7 +1394,7 @@ describe('bro loop gate-stack round-robin', () => {
       },
     })
     inside(f.main, f.root, () => {
-      const r = f.run(['--interval', '1'])
+      const r = f.run()
       assert.match(r.stdout, /1 parked/)
       const row = bead(f.db, 'fx-a')
       assert.equal(row?.status, 'deferred')

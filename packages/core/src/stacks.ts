@@ -262,13 +262,39 @@ export function gitStacks(dir: string): StackFacade {
         if (opts.method === 'rebase') {
           // rebase-merge replays the member's commits onto the trunk tip —
           // cherry-pick is the local equivalent: `git rebase` would move
-          // the member's ref, and a worktree may be holding it. --empty=drop
-          // skips commits the trunk already carries patch-for-patch.
+          // the member's ref, and a worktree may be holding it. `git cherry`
+          // filters the replay set by patch-id — the drop rule --empty=drop
+          // wrapped, without needing a git new enough to parse that flag;
+          // `+` rows are the commits trunk does not already carry
+          // patch-for-patch, and cherry prints newest-first so the pick
+          // argv walks oldest-first.
           const fork = gitTry(['-C', main.path, 'merge-base', trunk, m.branch]).out.trim()
-          const r =
+          const ch =
             fork === ''
               ? { code: 1, out: '', err: `no merge-base with ${trunk}` }
-              : gitTry(['-C', main.path, 'cherry-pick', '--empty=drop', `${fork}..${m.branch}`])
+              : gitTry(['-C', main.path, 'cherry', trunk, m.branch])
+          const picks =
+            ch.code !== 0
+              ? []
+              : ch.out
+                  .split('\n')
+                  .filter((l) => l.startsWith('+ '))
+                  .map((l) => l.slice(2).trim())
+                  .reverse()
+                  // --empty=drop's other half: a commit that is empty on
+                  // its own (e.g. a fixture's --allow-empty) still lands
+                  // a `+` row — diff-tree --quiet spots them, since the
+                  // bare pick they would hit exits mid-sequence
+                  .filter(
+                    (sha) =>
+                      gitTry(['-C', main.path, 'diff-tree', '--quiet', '-r', sha]).code !== 0
+                  )
+          const r =
+            ch.code !== 0
+              ? { code: 1, out: '', err: ch.err }
+              : picks.length === 0
+                ? { code: 0, out: '', err: '' }
+                : gitTry(['-C', main.path, 'cherry-pick', ...picks])
           if (r.code !== 0) {
             gitTry(['-C', main.path, 'cherry-pick', '--abort'])
             lines.push(
