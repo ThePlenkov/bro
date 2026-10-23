@@ -64,6 +64,8 @@ const DELEGATE_ARG_TYPES: Record<string, 'string' | 'number' | 'boolean'> = {
 const argOk = (v: unknown, kind: 'string' | 'number' | 'boolean'): boolean =>
   typeof v === kind && v !== '' && (kind !== 'number' || Number.isFinite(v))
 
+const isDelegateMode = (v: unknown): boolean => v === 'wait' || v === 'detach'
+
 /** exec args → DelegateRequest — PlaneVerbError on a mistyped field
  *  (client bug), the core's SpawnInputError on a semantically bad one. */
 function delegateArgs(args: Record<string, unknown>): DelegateRequest {
@@ -78,7 +80,7 @@ function delegateArgs(args: Record<string, unknown>): DelegateRequest {
     }
     req[k] = v
   }
-  if (req['mode'] !== undefined && req['mode'] !== 'wait' && req['mode'] !== 'detach') {
+  if (req['mode'] !== undefined && !isDelegateMode(req['mode'])) {
     throw new PlaneVerbError('agents', DELEGATE, `mode must be 'wait' or 'detach'`)
   }
   if (args['delegatedBy'] !== undefined) {
