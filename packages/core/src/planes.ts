@@ -122,6 +122,9 @@ export interface Worker extends PlaneRow {
   worktree?: string
   provider?: string
   model?: string
+  /** agentId of the delegating agent — `bro fleet delegate --detach`
+   *  provenance; absent on direct spawns. */
+  delegatedBy?: string
 }
 
 /** queue — one molecule/run with its DAG posture. */

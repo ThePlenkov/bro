@@ -410,6 +410,7 @@ function statusDetail(
   if (a.provider !== undefined) console.log(`provider  ${a.provider}`)
   if (a.model !== undefined) console.log(`model     ${a.model}`)
   if (a.class !== undefined) console.log(`class     ${a.class}`)
+  if (a.delegatedBy !== undefined) console.log(`delegatedBy ${a.delegatedBy}`)
   if (a.cause !== undefined) console.log(`cause     ${a.cause}`)
   if (a.resetAt !== undefined) console.log(`resetAt   ${a.resetAt}`)
   if (a.pid !== undefined) console.log(`pid       ${a.pid}`)

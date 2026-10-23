@@ -7,6 +7,7 @@
  *  /api/v1/planes/agents/delegate and the MCP bro_agents_delegate tool
  *  serve the identical contract. */
 import {
+  JudgeUnavailable,
   PlaneUnavailable,
   PlaneVerbError,
   SpawnError,
@@ -16,6 +17,7 @@ import {
   type PlaneDescriptor,
   type Worker,
 } from '@broject/core'
+import { resolve, sep } from 'node:path'
 import { loadAgentEnv } from '../agent-connectors.ts'
 import { collectAgentBackends, findInBackends, SpawnInputError } from '../commands/agents.ts'
 import { delegate, type DelegateRequest } from '../commands/delegate.ts'
@@ -37,65 +39,66 @@ const workerRow = (a: AgentInfo): Worker => ({
   worktree: a.worktree,
   provider: a.provider,
   model: a.model,
+  delegatedBy: a.delegatedBy,
 })
 
-const DELEGATE_STR_KEYS = [
-  'prompt',
-  'promptFile',
-  'provider',
-  'class',
-  'model',
-  'connector',
-  'worktree',
-  'delegatedBy',
-  'beadsDir',
-] as const
+/** The exec surface — prompt shape is `verbArgs`'s schema; types are
+ *  checked here so a mistyped field is a client bug, not a silent
+ *  cast. `delegatedBy` is deliberately absent: provenance derives from
+ *  the caller's authenticated identity (BRO_AGENT_ID), never from a
+ *  self-declared request field. */
+const DELEGATE_ARG_TYPES: Record<string, 'string' | 'number' | 'boolean'> = {
+  prompt: 'string',
+  promptFile: 'string',
+  provider: 'string',
+  class: 'string',
+  model: 'string',
+  connector: 'string',
+  worktree: 'string',
+  beadsDir: 'string',
+  mode: 'string',
+  timeoutSec: 'number',
+  autoApprove: 'boolean',
+}
 
 /** exec args → DelegateRequest — PlaneVerbError on a mistyped field
  *  (client bug), the core's SpawnInputError on a semantically bad one. */
 function delegateArgs(args: Record<string, unknown>): DelegateRequest {
   const req: Record<string, unknown> = {}
-  for (const k of DELEGATE_STR_KEYS) {
+  for (const [k, kind] of Object.entries(DELEGATE_ARG_TYPES)) {
     const v = args[k]
     if (v === undefined) {
       continue
     }
-    if (typeof v !== 'string' || v === '') {
-      throw new PlaneVerbError('agents', DELEGATE, `${k} must be a non-empty string`)
+    if (typeof v !== kind || v === '' || (kind === 'number' && !Number.isFinite(v))) {
+      throw new PlaneVerbError('agents', DELEGATE, `${k} must be a non-empty ${kind}`)
     }
     req[k] = v
   }
-  const mode = args['mode']
-  if (mode !== undefined && mode !== 'wait' && mode !== 'detach') {
+  if (req['mode'] !== undefined && req['mode'] !== 'wait' && req['mode'] !== 'detach') {
     throw new PlaneVerbError('agents', DELEGATE, `mode must be 'wait' or 'detach'`)
   }
-  req['mode'] = mode
-  const timeoutSec = args['timeoutSec']
-  if (timeoutSec !== undefined) {
-    if (typeof timeoutSec !== 'number' || !Number.isFinite(timeoutSec)) {
-      throw new PlaneVerbError('agents', DELEGATE, 'timeoutSec must be a number')
-    }
-    req['timeoutSec'] = timeoutSec
-  }
-  const autoApprove = args['autoApprove']
-  if (autoApprove !== undefined) {
-    if (typeof autoApprove !== 'boolean') {
-      throw new PlaneVerbError('agents', DELEGATE, 'autoApprove must be a boolean')
-    }
-    req['autoApprove'] = autoApprove
+  if (args['delegatedBy'] !== undefined) {
+    throw new PlaneVerbError(
+      'agents',
+      DELEGATE,
+      'delegatedBy is stamped from the caller identity (BRO_AGENT_ID) — it is not a request arg'
+    )
   }
   return req as unknown as DelegateRequest
 }
 
 /** delegate()'s error vocabulary → the plane's: caller input is a
  *  client bug (PlaneVerbError → REST 400), a refusal or unreachable
- *  backend is PlaneUnavailable (→ 503) — never a bare 500. */
+ *  backend — including an ACP peer that never answered — is
+ *  PlaneUnavailable (→ 503). Never a bare 500. */
 function execOrPlaneError(err: unknown): never {
+  const msg = err instanceof Error ? err.message : String(err)
   if (err instanceof SpawnInputError || (err instanceof SpawnError && err.kind === 'input')) {
-    throw new PlaneVerbError('agents', DELEGATE, err instanceof Error ? err.message : String(err))
+    throw new PlaneVerbError('agents', DELEGATE, msg)
   }
-  if (err instanceof SpawnError) {
-    throw new PlaneUnavailable('agents', err.message)
+  if (err instanceof SpawnError || err instanceof JudgeUnavailable) {
+    throw new PlaneUnavailable('agents', msg)
   }
   throw err
 }
@@ -152,9 +155,9 @@ export function agentsPlane(ctx: PlaneCtx): PlaneDescriptor {
           connector: { type: 'string', description: 'detach-mode backend pin' },
           worktree: { type: 'string', description: 'detach-mode worktree path' },
           autoApprove: { type: 'boolean', description: 'detach-mode ACP permission policy' },
-          delegatedBy: { type: 'string', description: 'agentId of the asking agent — defaults to the caller pin' },
           beadsDir: { type: 'string', description: 'shared store override' },
         },
+        anyOf: [{ required: ['prompt'] }, { required: ['promptFile'] }],
       },
     },
     /** spawn-able means ≥1 backend answers list() non-degraded — the
@@ -192,7 +195,19 @@ export function agentsPlane(ctx: PlaneCtx): PlaneDescriptor {
         return verbsNotWired('agents', VERBS)(verb, args)
       }
       try {
-        return await delegate(dir, env(), delegateArgs(args))
+        const req = delegateArgs(args)
+        // the exec boundary reads files with the server's privileges —
+        // a promptFile must resolve inside the project dir or it is an
+        // exfil channel, not a prompt
+        if (req.promptFile !== undefined) {
+          const resolved = resolve(dir, req.promptFile)
+          const root = resolve(dir)
+          if (resolved !== root && !resolved.startsWith(`${root}${sep}`)) {
+            throw new PlaneVerbError('agents', DELEGATE, 'promptFile must resolve inside the project directory')
+          }
+          req.promptFile = resolved
+        }
+        return await delegate(dir, env(), req)
       } catch (err) {
         execOrPlaneError(err)
       }

@@ -28,19 +28,24 @@ interface Fixture {
  *  registry still points at before the tmpdir goes away (tests fake
  *  'running' with their own pid — never kill self or the runner). */
 function killRegistered(main: string): void {
-  try {
-    for (const e of Object.values(readAgentRegistry(main))) {
-      const pid = typeof e.pid === 'number' ? e.pid : 0
-      if (pid > 0 && pid !== process.pid && pid !== process.ppid) {
-        try {
-          process.kill(-pid, 'SIGKILL') // detached → own process group
-        } catch {
-          // already gone
-        }
-      }
+  const pids = (() => {
+    try {
+      return Object.values(readAgentRegistry(main)).map((e) =>
+        typeof e.pid === 'number' ? e.pid : 0
+      )
+    } catch {
+      return [] // no readable registry — nothing spawned
     }
-  } catch {
-    // no readable registry — nothing spawned
+  })()
+  for (const pid of pids) {
+    if (pid <= 0 || pid === process.pid || pid === process.ppid) {
+      continue
+    }
+    try {
+      process.kill(-pid, 'SIGKILL') // detached → own process group
+    } catch {
+      // already gone
+    }
   }
 }
 

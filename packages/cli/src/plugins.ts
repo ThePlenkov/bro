@@ -311,8 +311,7 @@ export const PLUGINS: BroPlugin[] = [
       },
       exits: {
         0: 'delegation served — reply printed (--wait) or agent spawned (--detach)',
-        1: 'provider walled/unavailable, spawn refused, or prompt/pin error',
-        2: 'usage — --wait + --detach, --provider + --class, mode-foreign flags, no prompt',
+        1: 'provider walled/unavailable, spawn refused, prompt/pin error, or usage (usage errors also exit 1 today)',
       },
     },
   }),
