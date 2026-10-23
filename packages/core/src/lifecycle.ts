@@ -99,6 +99,7 @@ export function lifecyclePath(dir: string): string | null {
 const SESSION_ENV = [
   'BRO_SESSION_ID',
   'DEVIN_SESSION_ID',
+  'CLAUDE_CODE_SESSION_ID',
   'CLAUDE_SESSION_ID',
   'CODEX_SESSION_ID',
   'OPENCODE_SESSION_ID',

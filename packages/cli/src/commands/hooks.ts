@@ -98,6 +98,7 @@ import {
 import type { MatchContext } from '@broject/learn'
 import type { GuardEvent } from '@broject/core'
 import { loadBroConfig } from '../plugins.ts'
+import { sessionCapRefusalForHook } from './session-cap.ts'
 import {
   cliVersion,
   emitCommitTrailers,
@@ -125,6 +126,10 @@ import {
 
 interface HookInput {
   tool_name?: unknown
+  /** The client's id for this tool call — the two hook events of ONE
+   *  call (a pre-tool and a permission request) share it, and the
+   *  guard's slot claim is keyed by it (spec bro-bww9v). */
+  tool_use_id?: unknown
   tool_input?: {
     command?: unknown
     file_path?: unknown
@@ -558,8 +563,15 @@ function formatAge(ageMs: number): string {
 /** Connector ctx for hook events — sessionId plus this process's
  *  agent-root owner so claim probes treat markers stamped by the same
  *  agent tree under a rotated session id as own work (bro-7022c). */
-function hookCtx(sessionId: string): ConnectorCtx {
-  return { dir: process.cwd(), sessionId, owner: agentOwner() }
+function hookCtx(sessionId: string, toolUseId?: string): ConnectorCtx {
+  return { dir: process.cwd(), sessionId, owner: agentOwner(), toolUseId }
+}
+
+/** The host client's id for this tool call — the two hook events of
+ *  ONE call (a pre-tool and a permission request) share it, and a
+ *  guard that budgets per call keys its slot on it. */
+function callIdOf(input: HookInput): string | undefined {
+  return typeof input.tool_use_id === 'string' ? input.tool_use_id : undefined
 }
 
 function liveSessionLines(dir: string, selfId: string): string[] {
@@ -721,6 +733,32 @@ function hintedPath(sessionId: string, skill: string): string | null {
   const dir = hooksStateDir()
   const safe = sessionId.replace(/[^\w.-]/g, '_')
   return dir && safe ? join(dir, 'hinted', `${safe}.${skill}`) : null
+}
+
+/** Records this stop's gate hints and reports whether they differ from
+ *  what the session was last told. An empty set is recorded too, so a
+ *  hint that clears and later returns is shown again. Fail-open: an
+ *  unreadable or unwritable marker reports a change. */
+function stopHintsChanged(sessionId: string, hints: string[]): boolean {
+  const path = hintedPath(sessionId, 'stop-gate')
+  if (!path) {
+    return hints.length > 0
+  }
+  const digest = createHash('sha256').update(hints.join('\n')).digest('hex')
+  try {
+    if (readFileSync(path, 'utf8').trim() === digest) {
+      return false
+    }
+  } catch {
+    // no marker yet — first stop of the session
+  }
+  try {
+    mkdirSync(dirname(path), { recursive: true })
+    writeFileSync(path, `${digest}\n`)
+  } catch {
+    // dedup is best-effort — a failed marker must never stall the hook
+  }
+  return hints.length > 0
 }
 
 /** True when this session was already pointed at the skill — a marker
@@ -1409,11 +1447,11 @@ async function emitStopGateBody(sessionId: string, goalP: Promise<string[]>): Pr
       return { text: tail.raw, trace: relativize(dir, tail.entries) }
     }),
   ])
-  const hints: string[] = [...goal]
+  const gateHints: string[] = []
   for (const c of contributions) {
     if (!armed.has(c.aspect)) {
       if (c.passive) {
-        hints.push(c.passive)
+        gateHints.push(c.passive)
       }
       continue
     }
@@ -1423,9 +1461,12 @@ async function emitStopGateBody(sessionId: string, goalP: Promise<string[]>): Pr
     }
     const hint = c.armedHint ?? c.passive
     if (hint) {
-      hints.push(hint)
+      gateHints.push(hint)
     }
   }
+  // any Stop context re-wakes the host as a new turn — repeating an
+  // unchanged gate hint every stop turns an idle wait into a loop
+  const hints: string[] = [...goal, ...(stopHintsChanged(sessionId, gateHints) ? gateHints : [])]
   // stop guards are passive hints — additionalContext only; a guard is
   // a nudge, never a `decision: block` (spec: bro-nkn6)
   hints.push(...guards)
@@ -1443,7 +1484,7 @@ async function emitPreTool(input: HookInput): Promise<void> {
   const sessionId = typeof input.session_id === 'string' ? input.session_id : ''
   const tool = typeof input.tool_name === 'string' ? input.tool_name : ''
   const verdicts = await preToolVerdicts(
-    hookCtx(sessionId),
+    hookCtx(sessionId, callIdOf(input)),
     tool,
     (input.tool_input ?? {}) as Record<string, unknown>
   )
@@ -1491,6 +1532,26 @@ async function emitPreTool(input: HookInput): Promise<void> {
  * and land here; they are not self-tool calls, so they stay a prompt. */
 function emitPermission(input: HookInput): boolean {
   const cmd = typeof input.tool_input?.command === 'string' ? input.tool_input.command : ''
+  // the session cap — the devin client sends no pre-tool event, so its
+  // permission request is where a session start is caught (spec
+  // bro-bww9v). The refusal denies the call; the hook fails OPEN when
+  // the count cannot be established.
+  const capRefusal = sessionCapRefusalForHook(
+    cmd,
+    process.cwd(),
+    typeof input.session_id === 'string' ? input.session_id : undefined,
+    undefined,
+    callIdOf(input)
+  )
+  if (capRefusal !== undefined) {
+    emit({
+      hookSpecificOutput: {
+        hookEventName: 'PermissionRequest',
+        decision: { behavior: 'deny', message: capRefusal },
+      },
+    })
+    return true
+  }
   if (isSelfToolCommand(cmd)) {
     if (codexClient) {
       emit({

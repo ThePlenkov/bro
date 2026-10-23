@@ -101,6 +101,7 @@ import { runRequestCommand } from './commands/request.ts'
 import { runWaitCommand } from './commands/wait.ts'
 import { runProvidersCommand } from './commands/providers.ts'
 import { runSpecCommand, sddConnector } from './commands/spec.ts'
+import { sessionCapConnector } from './commands/session-cap.ts'
 import { runStackCommand } from './commands/stack.ts'
 import { runStampCommand } from './commands/buildstamp.ts'
 import { SPEC_CONNECTORS } from './spec-connectors.ts'
@@ -143,6 +144,8 @@ registerConnector(driveConnector)
 registerConnector(rigConnector)
 registerConnector(debtConnector)
 registerConnector(sddConnector)
+// the host-wide session cap — refuses a session start at the cap
+registerConnector(sessionCapConnector)
 registerConnector(notifyConnector)
 registerConnector(learnConnector)
 registerConnector(systemoneConnector)

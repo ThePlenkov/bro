@@ -5,6 +5,7 @@
  *  duplication on new code. */
 import assert from 'node:assert/strict'
 import { execFileSync, spawnSync } from 'node:child_process'
+import { bdTry } from '@broject/core'
 import {
   chmodSync,
   existsSync,
@@ -523,6 +524,25 @@ if [ "$1" = version ]; then echo "25.0.0-fake"; exit 0; fi
 if [ "$1" = ps ]; then exit 0; fi
 echo "Error: No such object" >&2; exit 1
 `
+
+/** Capability probe for bd-dependent tests — the "needs-bd" gate.
+ *  `bd --version` alone can't tell a CGO-less build: it prints fine,
+ *  then `bd init` dies mid-test on the missing store backend. Probe a
+ *  real init in a scratch dir instead; the returned string is what
+ *  `t.skip` should print. `undefined` means bd fully works. */
+export function bdStoreBlocker(): string | undefined {
+  const dir = tmpDir('bro-bd-probe-')
+  if (bdTry(['--version'], 10_000, dir).code !== 0) {
+    return 'bd not installed'
+  }
+  // a checkout-shaped scratch: a bd build that insists on a git
+  // worktree for init must probe "store works", never "dir had no git"
+  git(['init', '-q'], dir)
+  const r = bdTry(['init', '--stealth', '--skip-agents', '--skip-hooks', '--quiet'], 30_000, dir)
+  return r.code === 0
+    ? undefined
+    : `bd cannot init a store (CGO-less build?): ${r.err.trim().split('\n')[0] ?? r.code}`
+}
 
 /** Install the fake bd into <dir>/bin and seed its store. Rows take the
  *  `fx-` prefix — the store's configured issue_prefix. */

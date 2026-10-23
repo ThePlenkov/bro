@@ -60,7 +60,7 @@ import {
   type BudgetSnapshot,
 } from './agent-connectors.ts'
 import { initRepo, installFakeBd, readBeads, writeBeads } from './commands/testrepo.ts'
-import { devinSessionPlane } from './session-planes/devin.ts'
+import { devinSessionPlane } from '@broject/devin'
 import { VERSION } from './version.ts'
 
 // ambient repo/agent/store pins must not reach fixture git children
@@ -555,10 +555,22 @@ function connectorContract(b: BackendCase): void {
     }
   })
 
+
+/** A fake /proc where this process reads as the devin cli — the live
+ *  session count checks the process identity (argv[0]): a lock's pid
+ *  must still BE the cli that wrote it. */
+const devinProc = (): string => {
+  const dir = mkdtempSync(join(tmpdir(), 'bro-devin-proc-'))
+  mkdirSync(join(dir, String(process.pid)), { recursive: true })
+  writeFileSync(join(dir, String(process.pid), 'cmdline'), 'devin\0')
+  return dir
+}
+
   test('the devin session quota refuses a spawn at maxSessions — nothing half-lands', async () => {
     const f = fx([{ id: 'fx-1', status: 'open' }])
     const lockDir = mkdtempSync(join(tmpdir(), 'bro-devin-locks-'))
     const reservationsDir = mkdtempSync(join(tmpdir(), 'bro-devin-resv-'))
+    const procDir = devinProc()
     // one live devin session (this process) fills the cap of 1
     writeFileSync(join(lockDir, 'me.lock'), String(process.pid))
     const env: AgentConnectorEnv = {
@@ -570,7 +582,7 @@ function connectorContract(b: BackendCase): void {
         native: { ...f.env.agents['native'], sessionKind: 'devin' },
         tmux: { ...f.env.agents['tmux'], sessionKind: 'devin' },
         docker: { ...f.env.agents['docker'], sessionKind: 'devin' },
-        devin: { maxSessions: 1, lockDir, reservationsDir },
+        devin: { maxSessions: 1, lockDir, reservationsDir, procDir },
       },
     }
     try {
@@ -585,6 +597,7 @@ function connectorContract(b: BackendCase): void {
     } finally {
       rmSync(lockDir, { recursive: true, force: true })
       rmSync(reservationsDir, { recursive: true, force: true })
+      rmSync(procDir, { recursive: true, force: true })
       cleanup(f)
     }
   })
@@ -596,6 +609,7 @@ function connectorContract(b: BackendCase): void {
     ])
     const lockDir = mkdtempSync(join(tmpdir(), 'bro-devin-locks-'))
     const reservationsDir = mkdtempSync(join(tmpdir(), 'bro-devin-resv-'))
+    const procDir = devinProc()
     // cap 2: one live lock + one reservation = full — the second devin
     // spawn must refuse even though its own repo registry is empty
     writeFileSync(join(lockDir, 'other.lock'), String(process.pid))
@@ -606,7 +620,7 @@ function connectorContract(b: BackendCase): void {
         native: { ...f.env.agents['native'], sessionKind: 'devin' },
         tmux: { ...f.env.agents['tmux'], sessionKind: 'devin' },
         docker: { ...f.env.agents['docker'], sessionKind: 'devin' },
-        devin: { maxSessions: 2, lockDir, reservationsDir },
+        devin: { maxSessions: 2, lockDir, reservationsDir, procDir },
       },
     }
     try {
@@ -626,6 +640,7 @@ function connectorContract(b: BackendCase): void {
     } finally {
       rmSync(lockDir, { recursive: true, force: true })
       rmSync(reservationsDir, { recursive: true, force: true })
+      rmSync(procDir, { recursive: true, force: true })
       cleanup(f)
     }
   })
@@ -966,6 +981,54 @@ function connectorContract(b: BackendCase): void {
       assert.equal(second.id, info.id)
       assert.equal(second.state, 'running')
       await c.stop(second.id)
+    } finally {
+      cleanup(f)
+    }
+  })
+
+  test('worker stderr lands in .stderr — .log stays the agent-updates stream', async () => {
+    const f = fx([{ id: 'fx-1', status: 'open' }])
+    try {
+      const c = conn(f)
+      const { info } = await spawnRun(
+        f,
+        c,
+        "console.log('STREAM-OUT-7f3a'); console.error('STREAM-ERR-9b2c'); process.exit(0)"
+      )
+      assert.ok(typeof info.log === 'string' && existsSync(info.log))
+      assert.ok(
+        typeof info.stderrLog === 'string' && existsSync(info.stderrLog),
+        'spawn records a .stderr capture beside the .log'
+      )
+      const log = readFileSync(info.log, 'utf8')
+      const stderr = readFileSync(info.stderrLog, 'utf8')
+      assert.match(log, /STREAM-OUT-7f3a/)
+      assert.doesNotMatch(log, /STREAM-ERR-9b2c/)
+      assert.match(stderr, /STREAM-ERR-9b2c/)
+      assert.doesNotMatch(stderr, /STREAM-OUT-7f3a/)
+      // the registry entry pins the capture with the same append-offset
+      // semantics log/logFrom carry
+      const entry = readAgentRegistry(f.main)['fx-1']!
+      assert.equal(entry.stderrLog, info.stderrLog)
+      assert.equal(typeof entry.stderrFrom, 'number')
+      await c.stop(info.id)
+    } finally {
+      cleanup(f)
+    }
+  })
+
+  test('rate-limit text on stderr still classifies — the capture feeds the classifier', async () => {
+    const f = fx([{ id: 'fx-1', status: 'open' }])
+    try {
+      const c = conn(f)
+      const { info, status: st } = await spawnRun(
+        f,
+        c,
+        "console.error('Reached free model rate limit — try again in 90 minutes'); process.exit(1)"
+      )
+      assert.equal(st.state, 'blocked')
+      assert.equal(st.cause, 'rate_limited')
+      await c.stop(info.id)
     } finally {
       cleanup(f)
     }
@@ -1635,6 +1698,38 @@ describe('budgetSnapshot', () => {
         [['step-wall', '2999-01-01T00:00:00.000Z', true]]
       )
       assert.equal(registry['step-wall']!.cause, 'rate_limited')
+    } finally {
+      rmSync(root, { recursive: true, force: true })
+    }
+  })
+
+  test('a respawn mid-walk suppresses the old run\'s classification', () => {
+    const { root, main } = initRepo('bro-budget-')
+    try {
+      const home = agentsHomeOf(main)
+      mkdirSync(home, { recursive: true })
+      const log = join(home, 'native-9.log')
+      writeFileSync(join(home, 'native-9.exit'), '1')
+      writeFileSync(log, 'boom\nReached free model rate limit — resets at 2999-01-01T00:00:00Z\n')
+      // the on-disk row is a NEWER generation — native-9 exited and a
+      // respawn owned the step before the walk's tail reads landed;
+      // the old run's wall must not classify onto or from it
+      patchAgentRegistry(main, 'step-x', {
+        agentId: 'native-10',
+        backend: 'native',
+        spawnedAt: '2026-10-05T15:00:00Z',
+      })
+      const registry: Record<string, AgentRegistryEntry> = {
+        'step-x': {
+          agentId: 'native-9',
+          backend: 'native',
+          spawnedAt: '2026-10-05T14:00:00Z',
+          log,
+        },
+      }
+      const snap = budgetSnapshot(main, home, registry, ENV, NOW)
+      assert.equal(snap.blocked, 0)
+      assert.equal(registry['step-x']!.cause, undefined)
     } finally {
       rmSync(root, { recursive: true, force: true })
     }

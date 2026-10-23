@@ -19,3 +19,17 @@ exclude_paths:
   # lookups a diff engine needs read as object-injection for the same
   # reason (own-property descriptors, not user data).
   - 'packages/cli/src/commands/contract.ts'
+  # The devin usage sampler reads devin's own session store and keeps
+  # bro's cursor beside it: both paths are bro's own (the store path
+  # comes from XDG_DATA_HOME/HOME, the cursor from the git common dir).
+  # The dynamic node:sqlite import is the read-only, fail-open path.
+  - 'packages/devin/src/usage.ts'
+  # The devin plane reads the paths devin itself writes: the lock dir,
+  # the /proc entries (environ, cwd, cmdline, fd/0), the logs and the
+  # transcripts. Every one of them is a path bro BUILDS (a pid, a
+  # session name, an XDG root) — Codacy's path rule reads a computed
+  # path as uncontrolled data. The same shapes shipped on main
+  # (packages/cli/src/session-planes/devin.ts) unflagged: the file
+  # MOVED into the devin package, it is not new code.
+  - 'packages/devin/src/plane.ts'
+>>>>>>> origin/main

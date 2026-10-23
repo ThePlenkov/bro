@@ -94,7 +94,7 @@ import {
   devinSessionTranscript,
   devinTranscriptsDir,
   renderDevinTranscript,
-} from '../session-planes/devin.ts'
+} from '@broject/devin'
 import { flag, positionals } from './args.ts'
 import { mainWorktree, worktreePathFor } from './work.ts'
 
@@ -413,6 +413,7 @@ function statusDetail(
   if (a.pid !== undefined) console.log(`pid       ${a.pid}`)
   if (a.worktree !== undefined) console.log(`worktree  ${a.worktree}`)
   if (a.log !== undefined) console.log(`log       ${a.log}`)
+  if (a.stderrLog !== undefined) console.log(`stderr    ${a.stderrLog}`)
 }
 
 async function cmdStatus(dir: string, env: AgentConnectorEnv, argv: string[]): Promise<void> {

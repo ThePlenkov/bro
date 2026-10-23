@@ -87,6 +87,7 @@ import {
 import {
   checkHistory,
   evaluateExitGate,
+  ACT_STATE_TTL_MS,
   failingCiChecks,
   fetchPrActState,
   isSast,
@@ -109,6 +110,7 @@ import {
 import { loadAgentEnv, type AgentConnectorEnv } from '../agent-connectors.ts'
 import { flag } from './args.ts'
 import { defaultBranch, runActCommand } from './act.ts'
+import { emitDevinUsage } from '@broject/devin'
 import {
   foreignPushEvent,
   readHeadMemory,
@@ -2371,8 +2373,23 @@ function emitWatchHeartbeats(
   }
 }
 
+/** The devin lane's telemetry: the account's request rate per model and
+ *  the lane's live counts. The pass is the fleet's heartbeat, so it is
+ *  where the numbers belong (spec bro-g0izo). */
+async function emitLaneUsage(ctx: Ctx): Promise<void> {
+  try {
+    const bag = loadAgentEnv(ctx.mainRoot).agents['devin'] ?? {}
+    // the drive's own env IS the effective worker env: the connector
+    // builds the child's environment from it (plus the pins)
+    await emitDevinUsage(ctx.mainRoot, bag, process.env)
+  } catch {
+    // telemetry must not stall the pass
+  }
+}
+
 /** One pass: enumerate, probe every open PR, act per verdict. */
 async function driveOnce(ctx: Ctx): Promise<void> {
+  await emitLaneUsage(ctx)
   const { byStep, degraded } = await collectAgents(ctx.mainRoot)
   for (const d of degraded) {
     say(ctx, `warning: backend degraded — ${d}`)
@@ -2552,7 +2569,12 @@ async function runDrive(
     // which CLI syntax the fixer prompts write
     host: facadeName('reviews', { dir: mainPath }, { prefer: broCfg.connectors }),
     repo: rev.resolveRepo([]),
-    stateCache: prStateCache(mainPath),
+    // same freshness contract as the loop's: the feed dedup caps
+    // staleness at one poll window — a supervised pass's own cadence,
+    // never more than the production 30s
+    stateCache: prStateCache(mainPath, {
+      ttlMs: Math.min(ACT_STATE_TTL_MS, (args.everySec ?? drive.intervalSec) * 1000),
+    }),
     act: broCfg.act,
     merge: args.merge && drive.merge === 'auto',
     json: args.json,

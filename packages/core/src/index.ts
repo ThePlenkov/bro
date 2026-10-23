@@ -360,6 +360,7 @@ export {
   agentsSection,
   claimStep,
   classifyExitCause,
+  classifyExitCauseParts,
   commandCliName,
   isAgentCause,
   mintAgentId,
@@ -395,6 +396,7 @@ export {
   registerSessionPlane,
   releaseSessionSlot,
   reserveSessionSlot,
+  reserveSessionSlotOnce,
   SESSION_SLOT_TTL_MS,
   sessionPlane,
   sessionPlaneForCli,
@@ -408,6 +410,16 @@ export type {
   SessionPlane,
   SessionQuota,
 } from './session-planes.ts'
+export {
+  planeStartingSessions,
+  releaseSessionStart,
+  reserveSessionStart,
+  sessionCapRefusal,
+  sessionCapRefusalFor,
+  sessionCapViews,
+  sessionReservationsDir,
+} from './session-cap.ts'
+export type { SessionCapView } from './session-cap.ts'
 export {
   clearPlanes,
   planeNames,
@@ -503,4 +515,4 @@ export {
 export type { OrphanSweepReport, ProcRow } from './live-procs.ts'
 // test seam — scrubbed fixture git spawns + the ambient-env guard,
 // shared by every package's suites (same role as providers' testkit)
-export { AMBIENT_GIT, scrubEnv, testGit, testGitEnv, testGitSpawn } from './testkit.ts'
+export { AMBIENT_GIT, scrubEnv, testGit, testGitEnv, testGitSpawn, testRepoInit } from './testkit.ts'

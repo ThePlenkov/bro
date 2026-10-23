@@ -43,6 +43,11 @@ export interface ConnectorCtx {
   /** Working dir — repo root for project-scoped facades, the resolved
    *  global dir for user-level ones (same contract as taskStore(dir)). */
   dir: string
+  /** The host client's id for the tool call being judged — the two
+   *  hook events of ONE call (a pre-tool and a permission request)
+   *  share it. A guard that budgets per call keys its slot on it
+   *  (spec bro-bww9v). */
+  toolUseId?: string
   /** Firing session's id — lets probes distinguish this session's claims
    *  (recorded in `<git-common-dir>/bro/hooks/<session>.<aspect>` markers)
    *  from foreign live work. Absent outside hook events. */
