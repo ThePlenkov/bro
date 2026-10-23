@@ -221,12 +221,31 @@ function pick(entries: ReadonlyArray<Entry>, token: string, head: string | undef
   for (const e of entries) {
     if (!e.name.startsWith(token)) continue
     out.push({
-      value: head === undefined ? e.name : `${head} ${e.name}`,
+      value: head ? `${head} ${e.name}` : e.name,
       label: e.name,
       description: e.description,
     })
   }
   return out
+}
+
+/** Position 1 — groups and flat verbs. An empty token stays null so
+ *  bare `/bro ` keeps submitting the board refresh. */
+function firstPosition(token: string): BroCompletion[] | null {
+  if (token.length === 0) return null
+  return [...pick(GROUPS, token, undefined), ...pick(VERBS, token, undefined)]
+}
+
+/** Position 2 — the head's group members, else the verb's
+ *  subcommands; an unknown head offers nothing. */
+function secondPosition(head: string, token: string): BroCompletion[] | null {
+  const members = GROUP_MEMBERS[head]
+  if (members !== undefined) return pick(members, token, head)
+  const subs = VERB_SUBS[head]
+  if (subs === undefined) return null
+  return subs
+    .filter((s) => s.startsWith(token))
+    .map((s) => ({ value: `${head} ${s}`, label: s }))
 }
 
 /**
@@ -239,31 +258,11 @@ function pick(entries: ReadonlyArray<Entry>, token: string, head: string | undef
 export function broArgumentCompletions(argumentPrefix: string): BroCompletion[] | null {
   const tokens = argumentPrefix.split(' ')
   const token = tokens[tokens.length - 1] ?? ''
-  const head = tokens.length > 1 ? tokens[tokens.length - 2] : undefined
-
-  // quotes are the handler's business, not the dropdown's
-  if (token.startsWith('"') || token.startsWith("'")) return null
-  // flags: the vocabulary is verbs and subcommands, not --options
-  if (token.startsWith('-')) return null
-
-  if (head === undefined) {
-    // position 1: an empty token must not hijack bare `/bro ` submit
-    if (token === '') return null
-    return [...pick(GROUPS, token, undefined), ...pick(VERBS, token, undefined)]
-  }
-
+  // quotes are the handler's business, not the dropdown's; flags are
+  // never vocabulary
+  if (token.startsWith('"') || token.startsWith("'") || token.startsWith('-')) return null
+  if (tokens.length < 2) return firstPosition(token)
   // position 3+: no guessing
   if (tokens.length > 2) return null
-
-  const members = GROUP_MEMBERS[head]
-  if (members !== undefined) return pick(members, token, head)
-
-  const subs = VERB_SUBS[head]
-  if (subs !== undefined) {
-    return subs
-      .filter((s) => s.startsWith(token))
-      .map((s) => ({ value: `${head} ${s}`, label: s }))
-  }
-
-  return null
+  return secondPosition(tokens[tokens.length - 2] ?? '', token)
 }

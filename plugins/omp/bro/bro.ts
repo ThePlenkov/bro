@@ -575,12 +575,30 @@ function pick(entries, token, head) {
 	for (const e of entries) {
 		if (!e.name.startsWith(token)) continue;
 		out.push({
-			value: head === void 0 ? e.name : `${head} ${e.name}`,
+			value: head ? `${head} ${e.name}` : e.name,
 			label: e.name,
 			description: e.description
 		});
 	}
 	return out;
+}
+/** Position 1 — groups and flat verbs. An empty token stays null so
+*  bare `/bro ` keeps submitting the board refresh. */
+function firstPosition(token) {
+	if (token.length === 0) return null;
+	return [...pick(GROUPS, token, void 0), ...pick(VERBS, token, void 0)];
+}
+/** Position 2 — the head's group members, else the verb's
+*  subcommands; an unknown head offers nothing. */
+function secondPosition(head, token) {
+	const members = GROUP_MEMBERS[head];
+	if (members !== void 0) return pick(members, token, head);
+	const subs = VERB_SUBS[head];
+	if (subs === void 0) return null;
+	return subs.filter((s) => s.startsWith(token)).map((s) => ({
+		value: `${head} ${s}`,
+		label: s
+	}));
 }
 /**
 * `/bro` argument completion. Returns the items for the current
@@ -592,22 +610,10 @@ function pick(entries, token, head) {
 function broArgumentCompletions(argumentPrefix) {
 	const tokens = argumentPrefix.split(" ");
 	const token = tokens[tokens.length - 1] ?? "";
-	const head = tokens.length > 1 ? tokens[tokens.length - 2] : void 0;
-	if (token.startsWith("\"") || token.startsWith("'")) return null;
-	if (token.startsWith("-")) return null;
-	if (head === void 0) {
-		if (token === "") return null;
-		return [...pick(GROUPS, token, void 0), ...pick(VERBS, token, void 0)];
-	}
+	if (token.startsWith("\"") || token.startsWith("'") || token.startsWith("-")) return null;
+	if (tokens.length < 2) return firstPosition(token);
 	if (tokens.length > 2) return null;
-	const members = GROUP_MEMBERS[head];
-	if (members !== void 0) return pick(members, token, head);
-	const subs = VERB_SUBS[head];
-	if (subs !== void 0) return subs.filter((s) => s.startsWith(token)).map((s) => ({
-		value: `${head} ${s}`,
-		label: s
-	}));
-	return null;
+	return secondPosition(tokens[tokens.length - 2] ?? "", token);
 }
 
 //#endregion
