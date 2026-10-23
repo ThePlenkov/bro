@@ -46,12 +46,9 @@ import { spawnSync, spawn } from 'node:child_process'
 import {
   closeSync,
   existsSync,
-  mkdirSync,
-  openSync,
   readFileSync,
   statfsSync,
   statSync,
-  writeFileSync,
   writeSync,
 } from 'node:fs'
 import { tmpdir } from 'node:os'
@@ -71,6 +68,8 @@ import {
   gitCommonDir,
   gitTry,
   LockTimeout,
+  mkdirPrivateSync,
+  openPrivateAppendSync,
   procStat,
   reviewHost,
   routeStepClass,
@@ -80,6 +79,7 @@ import {
   stepClassInfo,
   stepParent,
   withFileLock,
+  writePrivateFileSync,
   type AgentConnector,
   type AgentInfo,
   type AgentState,
@@ -707,8 +707,8 @@ function spawnAgent(
     let logFd: number | null = null
     if (log !== null) {
       try {
-        mkdirSync(dirname(log), { recursive: true })
-        logFd = openSync(log, 'a')
+        mkdirPrivateSync(dirname(log))
+        logFd = openPrivateAppendSync(log)
       } catch {
         logFd = null
       }
@@ -1364,10 +1364,12 @@ function runBootstrap(ctx: Ctx, beads: ReadyBead[], item: LoopItem): boolean {
 }
 
 /** The work-order file lives outside the worktree (see planItem) —
- *  its parent dir may not exist yet. */
+ *  its parent dir may not exist yet. Owner-only like the agents-home
+ *  prompt (spec bro-l8c4f.4) — the order can embed secrets and thread
+ *  context. */
 function writePrompt(item: LoopItem, text: string): void {
-  mkdirSync(dirname(item.promptFile), { recursive: true })
-  writeFileSync(item.promptFile, text)
+  mkdirPrivateSync(dirname(item.promptFile))
+  writePrivateFileSync(item.promptFile, text)
 }
 
 interface StackSlot {

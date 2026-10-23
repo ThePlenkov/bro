@@ -8,6 +8,7 @@ import {
   mkdtempSync,
   readFileSync,
   rmSync,
+  statSync,
   symlinkSync,
   writeFileSync,
 } from 'node:fs'
@@ -906,6 +907,39 @@ const devinProc = (): string => {
       const st = await c.status(info.id)
       assert.equal(st.state, 'exited')
       assert.equal(readAgentRegistry(f.main)['fx-1']!.exitStatus, 3)
+    } finally {
+      cleanup(f)
+    }
+  })
+
+  // owner-only artifacts (spec bro-l8c4f.4) — prompt/log/stderr land
+  // 0600 even under umask 022, the wrapper's scoped `umask 077` pins
+  // .exit, and a permissive legacy file is repaired on the next spawn
+  test('agent artifacts are owner-only — create pins 0600, respawn repairs 0644', async () => {
+    const f = fx([{ id: 'fx-1', status: 'open' }])
+    try {
+      const home = join(f.main, '.git', 'bro', 'agents')
+      const modeOf = (p: string) => statSync(p).mode & 0o777
+      const artifact = (id: string, n: string) => join(home, `${id}.${n}`)
+      const prev = process.umask(0o022)
+      const c = conn(f)
+      const info = await c.spawn(SPEC(f.main, f.beadsDir, 'fx-1', 'process.exit(0)'))
+      process.umask(prev)
+      await until(() => existsSync(artifact(info.id, 'exit')))
+      for (const n of ['prompt.md', 'log', 'stderr', 'exit']) {
+        assert.equal(modeOf(artifact(info.id, n)), 0o600, `${n}`)
+      }
+      assert.equal(modeOf(home), 0o700, 'agents home')
+      // legacy permissive artifacts — repair rides the next write/append
+      for (const n of ['prompt.md', 'log', 'stderr', 'exit']) {
+        chmodSync(artifact(info.id, n), 0o644)
+      }
+      const again = await c.spawn(SPEC(f.main, f.beadsDir, 'fx-1', 'process.exit(0)'))
+      assert.equal(again.id, info.id)
+      await until(() => existsSync(artifact(info.id, 'exit')))
+      for (const n of ['prompt.md', 'log', 'stderr', 'exit']) {
+        assert.equal(modeOf(artifact(info.id, n)), 0o600, `${n} repaired`)
+      }
     } finally {
       cleanup(f)
     }
