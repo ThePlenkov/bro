@@ -37,10 +37,10 @@ import { otelSpan, type OtelSpan } from './otel.ts'
 export interface AcpProxySeam {
   /** Session-start context — runs once per session on the first
    *  session/prompt whose collection SETTLES. `settled:false` means
-   *  the probes timed out or errored: nothing injects that turn and
-   *  the next prompt retries; a settled run (even an empty one) marks
-   *  the session's start-context slot done so a timed-out probe is
-   *  never presented as complete. `cwd` is the session/new-supplied
+   *  the probes timed out or errored: the partial text still rides
+   *  that prompt (the hook emits partial output the same way), but
+   *  the slot stays open and the next prompt retries; a settled run
+   *  that crosses closes it. `cwd` is the session/new-supplied
    *  repo. */
   sessionContext?(
     cwd: string,
@@ -260,14 +260,13 @@ export async function acpProxy(
   }
 
   /** The one rewrite the wire ever sees: while the session's start
-   *  context is still owed, the session seam runs — a settled
-   *  collection contributes its text, an unsettled one (timeout/error)
-   *  injects nothing and retries on the next prompt. The slot only
-   *  closes when a settled collection actually CROSSES downstream —
-   *  the caller marks it at write time, so a prompt cancelled
-   *  mid-collection doesn't lose the session's start context. An
-   *  empty join injects nothing — byte-identical forwarding is the
-   *  default. */
+   *  context is still owed, the session seam runs — an unsettled
+   *  collection (timeout/error) contributes what it has, but the slot
+   *  stays open so the next prompt retries; the slot closes only when
+   *  a settled collection actually CROSSES downstream — the caller
+   *  marks it at write time, so a prompt cancelled mid-collection
+   *  doesn't lose the session's start context. An empty join injects
+   *  nothing — byte-identical forwarding is the default. */
   const injectPrompt = async (
     m: AnyMessage,
     params: Record<string, unknown>,
@@ -281,9 +280,11 @@ export async function acpProxy(
         : seamSessionCall(opts.seam?.sessionContext, ses, sessionId),
       seamCall(opts.seam?.promptContext, ses, sessionId, text),
     ])
-    // an unsettled collection contributes nothing — partial probe
-    // output is never presented as the session's start context
-    const combined = [sessionCtx.settled ? sessionCtx.text : undefined, promptCtx]
+    // an unsettled collection still contributes what it has — the hook
+    // emits partial output the same way — but the slot stays open so
+    // the next prompt retries a full collection (the session's start
+    // context closes only when a settled run crosses downstream)
+    const combined = [sessionCtx.text, promptCtx]
       .filter((s) => s !== undefined && s !== '')
       .join('\n')
     if (combined === '') return { m, sessionCtxSettled: sessionCtx.settled }

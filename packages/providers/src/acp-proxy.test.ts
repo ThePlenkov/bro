@@ -382,9 +382,11 @@ describe('acpProxy — context injection seam', () => {
         sessionId,
         prompt: [{ type: 'text', text: 'two' }],
       })
-      // prompt 1: unsettled → only prompt ctx, no PARTIAL block
-      assert.deepEqual(r.fake.blocks[0]![0], { type: 'text', text: 'P' })
-      // prompt 2: the retry settled → session ctx finally rides along
+      // prompt 1: unsettled → partial text rides (the hook emits
+      // partial output the same way) but the slot stays open
+      assert.deepEqual(r.fake.blocks[0]![0], { type: 'text', text: 'PARTIAL\nP' })
+      // prompt 2: the retry settled → full session ctx lands and the
+      // slot closes
       assert.deepEqual(r.fake.blocks[1]![0], { type: 'text', text: 'SETTLED\nP' })
       assert.equal(calls, 2)
     } finally {
