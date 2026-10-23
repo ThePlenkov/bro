@@ -29,6 +29,8 @@ import {
   LockTimeout,
   MANUAL_CASCADE,
   mergeChainPerLayer,
+  hasHelpFlag,
+  printUsage,
   reviewHost,
   shQuote,
   stackHost,
@@ -39,6 +41,7 @@ import {
   type StackFacade,
   type StackMergeOpts,
 } from '@broject/core'
+import type { ExitCode } from '@broject/core'
 import {
   acquireMergeSlot,
   checkHistory,
@@ -80,14 +83,13 @@ import {
 
 const NAME_FLAGS = new Set(['--name'])
 
-function usage(): never {
-  console.error(`usage:
+function usage(exitCode: ExitCode = 2): never {
+  printUsage(`usage:
   bro stack push <bead> [--name <stack>]
   bro stack list [<name>]
   bro stack sync [<name>]
   bro stack publish [<name>]
-  bro stack merge [<name>] [--squash|--merge|--rebase] [--admin]`)
-  process.exit(2)
+  bro stack merge [<name>] [--squash|--merge|--rebase] [--admin]`, exitCode)
 }
 
 function allBranches(dir: string): string[] {
@@ -1027,6 +1029,9 @@ async function cmdMerge(argv: string[]): Promise<void> {
 
 export async function runStackCommand(argv: string[]): Promise<void> {
   const [sub, ...rest] = argv
+  if (sub === '--help' || sub === '-h' || hasHelpFlag(rest)) {
+    usage(0)
+  }
   switch (sub) {
     case 'push':
       return cmdPush(rest)

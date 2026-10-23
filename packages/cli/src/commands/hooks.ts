@@ -84,7 +84,7 @@ import type {
   ProbeTiming,
 } from '@broject/core'
 import { agentOwner, markerLive, markerOwner, ownerTag } from './proc-owner.ts'
-import { runGuards, type GuardConfig, type GuardJudgeInput } from '@broject/guard'
+import { runGuards, type GuardConfig, type GuardJudgeInput, type GuardRun } from '@broject/guard'
 import { GUARD_PROBES } from '../guard-probes.ts'
 import { appendRow, judgeConfig, judgeFacade } from '@broject/judge'
 import { otelSpan } from '@broject/providers'
@@ -96,8 +96,9 @@ import {
   sessionContextText,
 } from '@broject/learn'
 import type { MatchContext } from '@broject/learn'
-import type { GuardEvent } from '@broject/core'
+import { GUARD_EVENTS, type GuardEvent } from '@broject/core'
 import { loadBroConfig } from '../plugins.ts'
+import { sessionCapRefusalForHook } from './session-cap.ts'
 import {
   cliVersion,
   emitCommitTrailers,
@@ -125,6 +126,10 @@ import {
 
 interface HookInput {
   tool_name?: unknown
+  /** The client's id for this tool call — the two hook events of ONE
+   *  call (a pre-tool and a permission request) share it, and the
+   *  guard's slot claim is keyed by it (spec bro-bww9v). */
+  tool_use_id?: unknown
   tool_input?: {
     command?: unknown
     file_path?: unknown
@@ -558,8 +563,15 @@ function formatAge(ageMs: number): string {
 /** Connector ctx for hook events — sessionId plus this process's
  *  agent-root owner so claim probes treat markers stamped by the same
  *  agent tree under a rotated session id as own work (bro-7022c). */
-function hookCtx(sessionId: string): ConnectorCtx {
-  return { dir: process.cwd(), sessionId, owner: agentOwner() }
+function hookCtx(sessionId: string, toolUseId?: string): ConnectorCtx {
+  return { dir: process.cwd(), sessionId, owner: agentOwner(), toolUseId }
+}
+
+/** The host client's id for this tool call — the two hook events of
+ *  ONE call (a pre-tool and a permission request) share it, and a
+ *  guard that budgets per call keys its slot on it. */
+function callIdOf(input: HookInput): string | undefined {
+  return typeof input.tool_use_id === 'string' ? input.tool_use_id : undefined
 }
 
 function liveSessionLines(dir: string, selfId: string): string[] {
@@ -721,6 +733,32 @@ function hintedPath(sessionId: string, skill: string): string | null {
   const dir = hooksStateDir()
   const safe = sessionId.replace(/[^\w.-]/g, '_')
   return dir && safe ? join(dir, 'hinted', `${safe}.${skill}`) : null
+}
+
+/** Records this stop's gate hints and reports whether they differ from
+ *  what the session was last told. An empty set is recorded too, so a
+ *  hint that clears and later returns is shown again. Fail-open: an
+ *  unreadable or unwritable marker reports a change. */
+function stopHintsChanged(sessionId: string, hints: string[]): boolean {
+  const path = hintedPath(sessionId, 'stop-gate')
+  if (!path) {
+    return hints.length > 0
+  }
+  const digest = createHash('sha256').update(hints.join('\n')).digest('hex')
+  try {
+    if (readFileSync(path, 'utf8').trim() === digest) {
+      return false
+    }
+  } catch {
+    // no marker yet — first stop of the session
+  }
+  try {
+    mkdirSync(dirname(path), { recursive: true })
+    writeFileSync(path, `${digest}\n`)
+  } catch {
+    // dedup is best-effort — a failed marker must never stall the hook
+  }
+  return hints.length > 0
 }
 
 /** True when this session was already pointed at the skill — a marker
@@ -1127,6 +1165,59 @@ function boundedMs<T>(p: Promise<T>, ms: number): Promise<T | undefined> {
   ])
 }
 
+/** Resolved guard coverage for the shell fast-path (spec: bro-arm83).
+ *  run.sh can't see connector `guards()` or computed defs, so the hook
+ *  that ran the engine writes which events any collected def targets —
+ *  `guards/<event>` marker files plus a `.stamp` freshness anchor under
+ *  the hooks state dir. Write order is the consistency contract:
+ *  presence files first, `.stamp` second, deletes last — a reader
+ *  mid-write sees a stale stamp or a stale extra file, both of which
+ *  only defer to Node. Skipped on a degraded collection: an
+ *  incomplete map must never masquerade as "nothing armed". */
+export function recordGuardEvents(coverage: GuardRun['coverage']): void {
+  const dir = hooksStateDir()
+  if (dir === null) {
+    return
+  }
+  try {
+    const gdir = join(dir, 'guards')
+    if (coverage?.complete !== true) {
+      // a degraded collection must invalidate the last good record —
+      // leaving the old stamp would masquerade stale coverage as
+      // current, and the shell would skip guards the failed
+      // collection dropped
+      rmSync(join(gdir, '.stamp'), { force: true })
+      return
+    }
+    mkdirSync(gdir, { recursive: true })
+    for (const ev of coverage.events) {
+      writeFileSync(join(gdir, ev), '')
+    }
+    // .trace marks a def reading the journaled tail — post-tool then
+    // defers so the journal stays complete for later evaluations
+    if (coverage.trace) {
+      writeFileSync(join(gdir, '.trace'), '')
+    }
+    // .stamp lands last via rename — atomic, and its body carries the
+    // same coverage list so a pruned event file can never hide a def
+    // from a concurrent reader pair
+    const body = [...coverage.events, ...(coverage.trace ? ['.trace'] : [])].join('\n') + '\n'
+    const tmp = join(gdir, `.stamp-${process.pid}`)
+    writeFileSync(tmp, body)
+    renameSync(tmp, join(gdir, '.stamp'))
+    for (const ev of GUARD_EVENTS) {
+      if (!coverage.events.includes(ev)) {
+        rmSync(join(gdir, ev), { force: true })
+      }
+    }
+    if (!coverage.trace) {
+      rmSync(join(gdir, '.trace'), { force: true })
+    }
+  } catch {
+    // a failed record only costs future spawns — never stall a hook
+  }
+}
+
 /** One guard-engine call per emit path (spec: bro-nkn6). Declarations
  *  resolve here — connectors only contribute `guards()`, evaluation is
  *  centralized. Fail-open like every probe: a wedged engine emits
@@ -1166,6 +1257,7 @@ async function guardLines(
         return input
       },
     })
+    recordGuardEvents(run.coverage)
     return run.lines
   } catch {
     return []
@@ -1409,11 +1501,11 @@ async function emitStopGateBody(sessionId: string, goalP: Promise<string[]>): Pr
       return { text: tail.raw, trace: relativize(dir, tail.entries) }
     }),
   ])
-  const hints: string[] = [...goal]
+  const gateHints: string[] = []
   for (const c of contributions) {
     if (!armed.has(c.aspect)) {
       if (c.passive) {
-        hints.push(c.passive)
+        gateHints.push(c.passive)
       }
       continue
     }
@@ -1423,9 +1515,12 @@ async function emitStopGateBody(sessionId: string, goalP: Promise<string[]>): Pr
     }
     const hint = c.armedHint ?? c.passive
     if (hint) {
-      hints.push(hint)
+      gateHints.push(hint)
     }
   }
+  // any Stop context re-wakes the host as a new turn — repeating an
+  // unchanged gate hint every stop turns an idle wait into a loop
+  const hints: string[] = [...goal, ...(stopHintsChanged(sessionId, gateHints) ? gateHints : [])]
   // stop guards are passive hints — additionalContext only; a guard is
   // a nudge, never a `decision: block` (spec: bro-nkn6)
   hints.push(...guards)
@@ -1443,7 +1538,7 @@ async function emitPreTool(input: HookInput): Promise<void> {
   const sessionId = typeof input.session_id === 'string' ? input.session_id : ''
   const tool = typeof input.tool_name === 'string' ? input.tool_name : ''
   const verdicts = await preToolVerdicts(
-    hookCtx(sessionId),
+    hookCtx(sessionId, callIdOf(input)),
     tool,
     (input.tool_input ?? {}) as Record<string, unknown>
   )
@@ -1491,6 +1586,26 @@ async function emitPreTool(input: HookInput): Promise<void> {
  * and land here; they are not self-tool calls, so they stay a prompt. */
 function emitPermission(input: HookInput): boolean {
   const cmd = typeof input.tool_input?.command === 'string' ? input.tool_input.command : ''
+  // the session cap — the devin client sends no pre-tool event, so its
+  // permission request is where a session start is caught (spec
+  // bro-bww9v). The refusal denies the call; the hook fails OPEN when
+  // the count cannot be established.
+  const capRefusal = sessionCapRefusalForHook(
+    cmd,
+    process.cwd(),
+    typeof input.session_id === 'string' ? input.session_id : undefined,
+    undefined,
+    callIdOf(input)
+  )
+  if (capRefusal !== undefined) {
+    emit({
+      hookSpecificOutput: {
+        hookEventName: 'PermissionRequest',
+        decision: { behavior: 'deny', message: capRefusal },
+      },
+    })
+    return true
+  }
   if (isSelfToolCommand(cmd)) {
     if (codexClient) {
       emit({

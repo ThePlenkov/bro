@@ -13,7 +13,8 @@
  */
 import { createInterface } from 'node:readline/promises'
 import { relative, resolve } from 'node:path'
-import { gitTry, loadConfig } from '@broject/core'
+import { gitTry, hasHelpFlag, loadConfig, printUsage } from '@broject/core'
+import type { ExitCode } from '@broject/core'
 import {
   checkBeads,
   childrenOf,
@@ -37,8 +38,8 @@ import {
 } from '@broject/drill'
 import { flag, flagAll, positionals } from './args.ts'
 
-function usage(exitCode = 1): never {
-  console.error(`Usage: bro drill <command> [args…]
+function usage(exitCode: ExitCode = 2): never {
+  printUsage(`Usage: bro drill <command> [args…]
 
 Commands:
   down <title> [--under ID] [--ephemeral]        New child frame under current leaf (or root)
@@ -53,8 +54,7 @@ Commands:
   report                                         List published drill reports
   distill ID                                     Extract a reusable proto from a drill epic
 
-  bro unwind …                                   alias for \`bro drill up\``)
-  process.exit(exitCode)
+  bro unwind …                                   alias for \`bro drill up\``, exitCode)
 }
 
 const VALUE_FLAGS: ReadonlySet<string> = new Set([
@@ -378,6 +378,27 @@ function rejectUnknownFlags(sub: string, argv: string[]): void {
   }
 }
 
+/** Every syntax error must surface before checkBeads() can mask it
+ *  with a setup error — flag names, stray positionals, and the
+ *  command-specific operand/flag-value parses. */
+function validateDrillSyntax(sub: string, rest: string[]): void {
+  rejectUnknownFlags(sub, rest)
+  // these subs take no positional args — a stray one is a typo, not input
+  const noPositionals = new Set(['up', 'current', 'tree', 'list', 'report', 'park', 'waiting'])
+  const extras = drillPositionals(rest)
+  if (noPositionals.has(sub) && extras.length > 0) {
+    console.error(`error: unexpected argument "${extras[0]}"`)
+    process.exit(2)
+  }
+  if (sub === 'down') {
+    parseDown(rest)
+  } else if (sub === 'up') {
+    parseUp(rest)
+  } else if (sub === 'distill') {
+    parseDistill(rest)
+  }
+}
+
 export async function runDrillCommand(argv: string[]): Promise<void> {
   const [sub, ...rest] = argv
   // zero-arg magic: bare `bro drill` shows where the descent stands
@@ -394,23 +415,10 @@ export async function runDrillCommand(argv: string[]): Promise<void> {
   if (!Object.hasOwn(KNOWN_FLAGS, sub)) {
     usage()
   }
-  rejectUnknownFlags(sub, rest)
-  // these subs take no positional args — a stray one is a typo, not input
-  const noPositionals = new Set(['up', 'current', 'tree', 'list', 'report', 'park', 'waiting'])
-  const extras = drillPositionals(rest)
-  if (noPositionals.has(sub) && extras.length > 0) {
-    console.error(`error: unexpected argument "${extras[0]}"`)
-    process.exit(2)
+  if (hasHelpFlag(rest)) {
+    usage(0)
   }
-  // command-specific operands/flag values too — all syntax errors must
-  // surface before checkBeads() can mask them with a setup error
-  if (sub === 'down') {
-    parseDown(rest)
-  } else if (sub === 'up') {
-    parseUp(rest)
-  } else if (sub === 'distill') {
-    parseDistill(rest)
-  }
+  validateDrillSyntax(sub, rest)
   // `report` lists files only — a missing/uninitialized bd must not
   // block reading published reports
   if (sub !== 'report') {

@@ -16,7 +16,7 @@ import { basename, dirname, join } from 'node:path'
 import { createRequire } from 'node:module'
 import { fileURLToPath } from 'node:url'
 import { execFileSync } from 'node:child_process'
-import { initBeadsStealth, PERSONALITIES, type BroConfig } from '@broject/core'
+import { initBeadsStealth, PERSONALITIES, hasHelpFlag, printUsage, type BroConfig } from '@broject/core'
 import { loadBroConfig } from '../plugins.ts'
 import {
   cliVersion,
@@ -222,7 +222,8 @@ function parseSetupArgs(argv: string[]): SetupArgs {
   let pack: SetupArgs['pack'] = false
   if (kIdx >= 0) {
     const kVal = argv[kIdx + 1]
-    pack = kVal !== undefined && !kVal.startsWith('--') ? kVal : ''
+    // `--pack off` disables pack install — same false sentinel as bare
+    pack = kVal === 'off' ? false : kVal !== undefined && !kVal.startsWith('--') ? kVal : ''
   }
   return {
     beads: argv.includes('--beads'),
@@ -262,6 +263,12 @@ function checkPrereqs(needBeads: boolean): void {
 }
 
 export async function runSetupCommand(argv: string[]): Promise<void> {
+  if (hasHelpFlag(argv)) {
+    printUsage(
+      'usage: bro setup [--beads] [--skills] [--pack <name|off>] [--personality <name>]',
+      0
+    )
+  }
   const { beads, skills, pack, personality } = parseSetupArgs(argv)
   // A malformed config file must fail BEFORE any mutation (bd init,
   // file installs) — readExistingConfig exits on a parse error; loadConfig

@@ -27,6 +27,9 @@ import { join } from 'node:path'
 import { gitCommonDir, loadConfig } from '@broject/core'
 import type { ProviderEntry } from '@broject/core'
 import { acpOpen, acpPooledTurn, acpSessionRetain, otelEvent, otelJournal, otelParent, otelSpan, toolPayload } from '@broject/providers'
+import { randomUUID } from 'node:crypto'
+import { reserveSessionStart, sessionCapViews } from '@broject/core'
+import { conductorSessionRefusal } from './session-cap.ts'
 import type { AcpTerminals, Toolish } from '@broject/providers'
 import type { AcpContentBlock, AcpPeer, AcpRetainedSession, OtelCtx, PooledTurnOpts, ProviderWireOpts } from '@broject/providers'
 import { peerAttrs } from './peer.ts'
@@ -48,6 +51,10 @@ export interface ConductorConfig {
   /** SSE ping cadence while a streamed turn is open — claude's read
    *  timeout is the real constraint on slow acp turns. */
   keepaliveMs?: number
+  /** The `agents.<kind>` bags — the session cap's knobs (spec
+   *  bro-bww9v). Read once at startup: the cap is a policy, not a
+   *  per-request config reload. */
+  agents: Record<string, Record<string, unknown>>
 }
 
 /** A positive-int env pin, else the fallback — 0, negative and NaN are
@@ -146,6 +153,7 @@ export function conductorConfig(
     cwd: dir,
     timeoutMs: positiveEnvInt(env, 'BRO_PROVIDER_TIMEOUT_MS', 120_000),
     keepaliveMs: positiveEnvInt(env, 'BRO_CONDUCTOR_KEEPALIVE_MS', 10_000),
+    agents: (cfg.agents ?? {}) as Record<string, Record<string, unknown>>,
   }
 }
 
@@ -1413,6 +1421,71 @@ function retireDivergent(env: TurnEnv, cand: ConvSession): Promise<TurnOutcome> 
 
 /** A first (or restarted) turn — a keyed request retains a session;
  *  a keyless, busy, or already-opening key takes the one-shot path. */
+/** The ACP surface's session facade — the cap before a session is
+ *  opened (spec bro-bww9v).
+ *
+ *  Every request opens a session on the shared peer, and a retained
+ *  conversation keeps one alive — so the conductor's own count is part
+ *  of the host's budget. The plane counts live devin PROCESSES; the
+ *  conductor's conversations share one peer, so the plane sees one
+ *  where the conductor holds many: the conductor adds its own count.
+ *
+ *  Fails CLOSED: a cap that cannot be established is not walked past.
+ *  The refusal names the cap, and the conductor's failure mapping
+ *  answers it with 429 (the message carries "quota"). */
+function assertSessionCap(env: TurnEnv, claimKey: string): void {
+  let views
+  try {
+    views = sessionCapViews(env.cfg.entry.command, env.cfg.agents)
+  } catch (err) {
+    // the count could not be established — fail closed, with the reason
+    // the operator needs (a quota that cannot be verified is not walked
+    // past)
+    throw new Error(
+      `bro conductor: the session cap could not be established (count unavailable) — ${(err as Error).message}`
+    )
+  }
+  const view = views[0]
+  const refusal = conductorSessionRefusal(view, env.sessions.size, view?.starts ?? 1)
+  if (refusal !== undefined) {
+    throw new Error(refusal)
+  }
+  // the slot is claimed, not just counted: a burst of parallel requests
+  // would otherwise all see the same headroom (spec bro-bww9v). The ACP
+  // surface fails CLOSED here — a request that cannot record its claim
+  // must not open a session the budget does not know about.
+  if (view !== undefined) {
+    try {
+      reserveSessionStart({
+        kind: view.kind,
+        agents: env.cfg.agents,
+        key: claimKey,
+        count: view.starts,
+      })
+    } catch (err) {
+      throw new Error(
+        `bro conductor: the session slot could not be claimed — ${(err as Error).message}`
+      )
+    }
+  }
+}
+
+/** The one-shot path — a session on the shared peer, nothing retained. */
+async function oneShotTurn(
+  env: TurnEnv,
+  prompt: string | AcpContentBlock[],
+  inputTokens: number
+): Promise<TurnOutcome> {
+  const reply = await acpPooledTurn(env.peer, env.cfg.entry, env.opts, prompt, env.deadline, {
+    signal: env.signal,
+    by: env.by,
+    requestModel: env.requestModel,
+    parent: env.parent,
+    onUpdate: env.openStream?.(inputTokens),
+  })
+  return { reply, reused: false, inputTokens, replay: false }
+}
+
 async function freshTurn(env: TurnEnv, candBusy: boolean): Promise<TurnOutcome> {
   // image blocks ride the wire only when the agent advertised the
   // prompt capability — serialize after link() so the negotiated
@@ -1420,17 +1493,14 @@ async function freshTurn(env: TurnEnv, candBusy: boolean): Promise<TurnOutcome> 
   const prompt = serializeBlocks(env.body, env.imageOk)
   const inputTokens = inputTokensOf(prompt)
   const key = env.key
+  // the cap before a session is opened — both paths open one
+  // each request opens its own session — the claim is per request, not
+  // per backend (one shared claim would let every request reuse it)
+  assertSessionCap(env, `conductor-${env.by}-${randomUUID()}`)
   if (key === undefined || candBusy || env.pendingOpens.has(key)) {
     // a keyless request, or the conversation's own turn is still in
     // flight — one-shot over the same link, nothing stored
-    const reply = await acpPooledTurn(env.peer, env.cfg.entry, env.opts, prompt, env.deadline, {
-      signal: env.signal,
-      by: env.by,
-      requestModel: env.requestModel,
-      parent: env.parent,
-      onUpdate: env.openStream?.(inputTokens),
-    })
-    return { reply, reused: false, inputTokens, replay: false }
+    return oneShotTurn(env, prompt, inputTokens)
   }
   // mark BEFORE the await — a concurrent first request on the same key
   // takes the one-shot path instead of opening a twin session whose

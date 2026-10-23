@@ -5,7 +5,7 @@
  * SHAs intersected with local branches. The remote side is opt-in —
  * merge --delete-branch already covers PRs merged through the UI/CLI.
  */
-import { facadeAuth, git, gitTry, reviewHost } from '@broject/core'
+import { facadeAuth, git, gitTry, hasHelpFlag, printUsage, reviewHost } from '@broject/core'
 import { loadBroConfig } from '../plugins.ts'
 import { positionals } from './args.ts'
 import { isAncestor } from './work.ts'
@@ -94,6 +94,28 @@ function checkedOutBranches(): Set<string> {
   return out
 }
 
+/** Host unreachable (offline, auth, no connector match) → an empty map:
+ *  every branch reads "no merged PR" and is kept — cleanup never deletes
+ *  on absent evidence. */
+function mergedPrEvidence(prefer: Record<string, string> | undefined): Map<string, string> {
+  try {
+    const rev = reviewHost(undefined, prefer)
+    const mergedPrs = rev.mergedPrs(rev.resolveRepo([]), { limit: MERGED_LIMIT })
+    if (mergedPrs.length === MERGED_LIMIT) {
+      console.error(`cleanup: scanned the last ${MERGED_LIMIT} merged PRs — older branches may be missed`)
+    }
+    return new Map(
+      mergedPrs.filter((pr) => pr.headRef !== '').map((pr) => [pr.headRef, pr.headSha])
+    )
+  } catch (err) {
+    console.error(
+      `cleanup: review host unreachable (${err instanceof Error ? err.message : err}) — ` +
+        'no merged-PR evidence, keeping all branches'
+    )
+    return new Map()
+  }
+}
+
 function remoteTips(): Map<string, string> {
   const out = new Map<string, string>()
   for (const line of git([
@@ -111,6 +133,9 @@ function remoteTips(): Map<string, string> {
 }
 
 export function runCleanupCommand(argv: string[]): void {
+  if (hasHelpFlag(argv)) {
+    printUsage('usage: bro cleanup [--remote] [--dry-run]', 0)
+  }
   const pos = positionals(argv, new Set())
   if (pos.length > 0 || argv.some((a) => a.startsWith('--') && !['--remote', '--dry-run'].includes(a))) {
     console.error('usage: bro cleanup [--remote] [--dry-run]')
@@ -141,25 +166,7 @@ export function runCleanupCommand(argv: string[]): void {
     console.error(`cleanup: fetch --prune failed (${fetch.err || 'offline?'}) — planning from local state`)
   }
 
-  // Host unreachable (offline, auth, no connector match) → an empty map:
-  // every branch reads "no merged PR" and is kept — cleanup never deletes
-  // on absent evidence.
-  let merged = new Map<string, string>()
-  try {
-    const rev = reviewHost(undefined, prefer)
-    const mergedPrs = rev.mergedPrs(rev.resolveRepo([]), { limit: MERGED_LIMIT })
-    merged = new Map(
-      mergedPrs.filter((pr) => pr.headRef !== '').map((pr) => [pr.headRef, pr.headSha])
-    )
-    if (mergedPrs.length === MERGED_LIMIT) {
-      console.error(`cleanup: scanned the last ${MERGED_LIMIT} merged PRs — older branches may be missed`)
-    }
-  } catch (err) {
-    console.error(
-      `cleanup: review host unreachable (${err instanceof Error ? err.message : err}) — ` +
-        'no merged-PR evidence, keeping all branches'
-    )
-  }
+  const merged = mergedPrEvidence(prefer)
 
   const plan = planCleanup(localBranches(), merged, {
     current: git(['branch', '--show-current']).trim() || undefined,

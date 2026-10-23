@@ -96,10 +96,10 @@ describe('goalStopLines', () => {
     assert.match(lines[0]!, /bro goal clear/)
   })
 
-  test('paused goal → resume hint; resolved goal → silence', async () => {
+  test('paused goal → silence (a per-stop reminder re-wakes the host in a loop); resolved goal → silence', async () => {
     const dir = repo()
     writeRaw(dir, 's1', { ...ACTIVE, status: 'paused' })
-    assert.match((await goalStopLines(dir, 's1', { trace: 't' }))[0]!, /paused goal/)
+    assert.deepEqual(await goalStopLines(dir, 's1', { trace: 't' }), [])
     writeRaw(dir, 's1', { ...ACTIVE, status: 'achieved' })
     assert.deepEqual(await goalStopLines(dir, 's1', { trace: 't' }), [])
   })
@@ -110,6 +110,19 @@ describe('goalStopLines', () => {
     const lines = await goalStopLines(dir, '', { trace: 'trace' })
     assert.equal(lines.length, 1)
     assert.match(lines[0]!, /goal: "tests pass"/)
+  })
+
+  test('a pause landing mid-eval stays silent — the fail-open reminder re-reads first', async () => {
+    const dir = repo()
+    // judge.mode: shadow enters the judged path; decide() throws without
+    // a provider, so the eval lands in the fail-open recheck
+    writeFileSync(join(dir, 'bro.config.json'), JSON.stringify({ judge: { mode: 'shadow' } }))
+    writeRaw(dir, 's1', ACTIVE)
+    const pause = Promise.resolve().then(() => {
+      writeRaw(dir, 's1', { ...ACTIVE, status: 'paused' })
+      return 'ctx'
+    })
+    assert.deepEqual(await goalStopLines(dir, 's1', { trace: 't', context: pause }), [])
   })
 })
 
@@ -156,7 +169,7 @@ describe('runGoalCommand', () => {
   test('set → status → clear lifecycle on the repo seed', () => {
     inRepo(() => {
       const env = { ...process.env }
-      for (const k of ['BRO_SESSION_ID', 'DEVIN_SESSION_ID', 'CLAUDE_SESSION_ID', 'CODEX_SESSION_ID', 'OPENCODE_SESSION_ID']) {
+      for (const k of ['BRO_SESSION_ID', 'DEVIN_SESSION_ID', 'CLAUDE_CODE_SESSION_ID', 'CLAUDE_SESSION_ID', 'CODEX_SESSION_ID', 'OPENCODE_SESSION_ID']) {
         delete env[k]
       }
       process.env = env
@@ -176,6 +189,27 @@ describe('runGoalCommand', () => {
       capture(() => runGoalCommand(['ship', 'it', '--session', 'abc123']))
       assert.equal(readGoal(process.cwd(), 'abc123')?.condition, 'ship it')
       assert.equal(readGoal(process.cwd(), '_default'), null)
+    })
+  })
+
+  test('CLAUDE_CODE_SESSION_ID resolves the Claude Code session, not the repo seed', () => {
+    inRepo(() => {
+      const prev = process.env
+      process.env = { ...prev, CLAUDE_CODE_SESSION_ID: 'cc-1' }
+      delete process.env.BRO_SESSION_ID
+      delete process.env.DEVIN_SESSION_ID
+      delete process.env.CLAUDE_SESSION_ID
+      delete process.env.CODEX_SESSION_ID
+      delete process.env.OPENCODE_SESSION_ID
+      try {
+        capture(() => runGoalCommand(['ship', 'it']))
+        assert.equal(readGoal(process.cwd(), 'cc-1')?.condition, 'ship it')
+        capture(() => runGoalCommand(['clear']))
+        assert.equal(readGoal(process.cwd(), 'cc-1')?.status, 'cleared')
+        assert.equal(readGoal(process.cwd(), '_default'), null)
+      } finally {
+        process.env = prev
+      }
     })
   })
 

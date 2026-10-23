@@ -59,6 +59,8 @@ import { randomBytes } from 'node:crypto'
 import {
   countSessionReservations,
   gitCommonDir,
+  hasHelpFlag,
+  printUsage,
   readAgentRegistry,
   SESSION_SLOT_TTL_MS,
   removeAgentRegistryEntries,
@@ -74,6 +76,7 @@ import {
   type DiscoveredSession,
   type SpawnSpec,
 } from '@broject/core'
+import type { ExitCode } from '@broject/core'
 import type { AcpSeam, FetchFn } from '@broject/providers'
 import { otelHeader, otelSpan } from '@broject/providers'
 import { beadsDir } from '@broject/convoy'
@@ -94,12 +97,12 @@ import {
   devinSessionTranscript,
   devinTranscriptsDir,
   renderDevinTranscript,
-} from '../session-planes/devin.ts'
+} from '@broject/devin'
 import { flag, positionals } from './args.ts'
 import { mainWorktree, worktreePathFor } from './work.ts'
 
-function usage(): never {
-  console.error(`usage:
+function usage(exitCode: ExitCode = 2): never {
+  printUsage(`usage:
   bro agents status [<id|step>] [--json] [--connector <name>]
   bro agents up [<step>] [--connector <name>] [--worktree <path>] [--prompt-file <file>] [--beads-dir <dir>]
                 [--provider <name>] [--model <m>] [--profile <name>] [--class <name>] [--auto-approve]
@@ -118,8 +121,7 @@ function usage(): never {
   bro agents log <id|step> [--follow] [--lines <N>] [--connector <name>]
   bro agents prune [--connector <name>] [--older-than <N>d] [--json]
                 reap terminal registry entries (exited/lost/stopped —
-                'blocked' is respawn-able debt, never litter)`)
-  process.exit(2)
+                'blocked' is respawn-able debt, never litter)`, exitCode)
 }
 
 // a function declaration, not a const arrow — tsc only treats calls to
@@ -1590,6 +1592,9 @@ async function cmdLog(dir: string, env: AgentConnectorEnv, argv: string[]): Prom
 }
 
 export async function runAgentsCommand(argv: string[]): Promise<void> {
+  if (hasHelpFlag(argv)) {
+    usage(0)
+  }
   const dir = process.cwd()
   const env = loadAgentEnv(dir)
   const sub = argv[0]
@@ -1613,8 +1618,6 @@ export async function runAgentsCommand(argv: string[]): Promise<void> {
       await cmdPrune(dir, env, argv.slice(1))
       return
     case undefined:
-    case '--help':
-    case '-h':
       usage()
       return
     default:

@@ -164,6 +164,23 @@ describe('hooks e2e — stop gate', () => {
       assert.equal(armed.code, 0)
       assert.doesNotMatch(armed.stdout, BLOCK)
       assert.match(armed.stdout, /claimed beads open: fx-9/)
+      // the same hint on the next stop would re-wake the host in a loop
+      assert.doesNotMatch(stop('s1').stdout, /claimed beads/)
+    })
+  })
+
+  test('an unchanged gate hint is not repeated on the next stop — no re-wake loop', () => {
+    const f = hookFixture()
+    inside(f.main, f.root, () => {
+      const wt = linked(f, false)
+      arm(f, 's1', 'work')
+      assert.match(hook(f, 'stop', { session_id: 's1' }, wt).stdout, /bro work leave/)
+      const again = hook(f, 'stop', { session_id: 's1' }, wt)
+      assert.equal(again.code, 0, again.stderr)
+      assert.doesNotMatch(again.stdout, /bro work leave/)
+      // another session has its own memory of what it was told
+      arm(f, 's3', 'work')
+      assert.match(hook(f, 'stop', { session_id: 's3' }, wt).stdout, /bro work leave/)
     })
   })
 })
@@ -1034,6 +1051,275 @@ describe('hooks e2e — guard injection', () => {
       assert.equal(r2.code, 0, r2.stderr)
       const second = JSON.parse(readFileSync(path, 'utf8'))
       assert.ok(second.ts > first.ts, `expired entry not refreshed: ${second.ts}`)
+    })
+  })
+})
+
+describe('hooks e2e — run.sh fast path (bro-arm83)', () => {
+  /** A fake `node` earlier on PATH is the canary: run.sh resolves the
+   *  built dist before PATH `bro`, so any fast-path miss reaching
+   *  resolution touches it. XDG pins isolate the user mailbox and the
+   *  global config layer from the host's own state. */
+  function canaryEnv(
+    root: string,
+    extra: Record<string, string> = {}
+  ): { canary: string; env: Record<string, string> } {
+    const bin = join(root, 'fakebin')
+    mkdirSync(bin, { recursive: true })
+    const canary = join(root, 'node-ran')
+    writeFileSync(join(bin, 'node'), `#!/bin/sh\ntouch "${canary}"\n`)
+    spawnSync('chmod', ['+x', join(bin, 'node')])
+    return {
+      canary,
+      env: {
+        PATH: `${bin}:${process.env.PATH}`,
+        XDG_STATE_HOME: join(root, 'xdg-state'),
+        XDG_CONFIG_HOME: join(root, 'xdg-config'),
+        ...extra,
+      },
+    }
+  }
+
+  const launch = (cwd: string, event: string, payload: unknown, env: Record<string, string>) =>
+    spawnSync('sh', [RUN_SH, event], {
+      cwd,
+      input: typeof payload === 'string' ? payload : JSON.stringify(payload),
+      env: e2eEnv(env),
+      encoding: 'utf8',
+    })
+
+  const postTool = {
+    session_id: 's1',
+    tool_input: { command: 'ls -la' },
+    tool_response: { success: true },
+  }
+  const promptSubmit = { session_id: 's1', prompt: 'hello there' }
+
+  const isolated = (root: string) => ({
+    XDG_STATE_HOME: join(root, 'xdg-state'),
+    XDG_CONFIG_HOME: join(root, 'xdg-config'),
+  })
+
+  /** One real-node run records the guard-coverage stamp the fast path
+   *  keys on — without it every event defers to Node. */
+  function prime(f: Fixture): void {
+    const r = launch(f.main, 'post-tool', postTool, isolated(f.root))
+    assert.equal(r.status, 0, r.stderr)
+    assert.ok(existsSync(join(f.markerDir, 'guards', '.stamp')), 'prime wrote no guard stamp')
+  }
+
+  test('a no-op post-tool and prompt-submit exit 0 without reaching node', () => {
+    const f = hookFixture()
+    inside(f.main, f.root, () => {
+      prime(f)
+      const { canary, env } = canaryEnv(f.root)
+      for (const [event, payload] of [
+        ['post-tool', postTool],
+        ['prompt-submit', promptSubmit],
+      ] as const) {
+        const r = launch(f.main, event, payload, env)
+        assert.equal(r.status, 0, r.stderr)
+        assert.equal(r.stdout, '')
+        assert.equal(existsSync(canary), false, `${event} reached node`)
+      }
+    })
+  })
+
+  test('a repo without the opt-in never reaches node', () => {
+    const f = hookFixture()
+    inside(f.main, f.root, () => {
+      const nogit = join(f.root, 'nogit')
+      mkdirSync(nogit)
+      const { canary, env } = canaryEnv(f.root)
+      const r = launch(nogit, 'post-tool', postTool, env)
+      assert.equal(r.status, 0)
+      assert.equal(existsSync(canary), false)
+    })
+  })
+
+  test('a mutating command, a pending drop, or live guard state reach node', () => {
+    const f = hookFixture()
+    inside(f.main, f.root, () => {
+      prime(f)
+
+      // mutating payload
+      let c = canaryEnv(join(f.root, 'c1'))
+      let r = launch(
+        f.main,
+        'post-tool',
+        { ...postTool, tool_input: { command: 'bro work enter fx-9' } },
+        c.env
+      )
+      assert.equal(r.status, 0)
+      assert.ok(existsSync(c.canary), 'mutating command did not reach node')
+
+      // a pending broadcast drop in the repo mailbox
+      const notify = join(f.markerDir, '..', 'notify')
+      mkdirSync(notify, { recursive: true })
+      writeFileSync(join(notify, `${Date.now()}-x.txt`), 'hello session\n')
+      c = canaryEnv(join(f.root, 'c2'))
+      r = launch(f.main, 'post-tool', postTool, c.env)
+      assert.ok(existsSync(c.canary), 'pending drop did not reach node')
+
+      // a guard def covering this event
+      writeFileSync(join(f.markerDir, 'guards', 'post-tool'), 'x')
+      c = canaryEnv(join(f.root, 'c3'))
+      r = launch(f.main, 'post-tool', postTool, c.env)
+      assert.ok(existsSync(c.canary), 'guards/post-tool did not reach node')
+    })
+  })
+
+  test('a missing guard stamp defers to node', () => {
+    const f = hookFixture()
+    inside(f.main, f.root, () => {
+      const { canary, env } = canaryEnv(f.root)
+      const r = launch(f.main, 'post-tool', postTool, env)
+      assert.equal(r.status, 0)
+      assert.ok(existsSync(canary), 'unstamped repo skipped node')
+    })
+  })
+
+  test('an open drill frame and an sdd claim reach node on prompt-submit', () => {
+    const f = hookFixture()
+    inside(f.main, f.root, () => {
+      // sdd config before priming — a config newer than .stamp defers on
+      // its own and would mask the legs under test
+      writeFileSync(join(f.main, 'bro.config.json'), '{"sdd":{"mode":"nudge"}}')
+      prime(f)
+
+      // open frame in the snapshot — only "frame":null proves none
+      mkdirSync(join(f.markerDir, 'cache'), { recursive: true })
+      writeFileSync(join(f.markerDir, 'cache', 'drills.json'), '{"frame":{"id":"fx-1"}}')
+      let c = canaryEnv(join(f.root, 'c1'))
+      let r = launch(f.main, 'prompt-submit', promptSubmit, c.env)
+      assert.ok(existsSync(c.canary), 'open drill frame did not reach node')
+
+      // frame closed but this session claims a bead under sdd
+      writeFileSync(join(f.markerDir, 'cache', 'drills.json'), '{"frame":null}')
+      arm(f, 's1', 'task')
+      c = canaryEnv(join(f.root, 'c2'))
+      r = launch(f.main, 'prompt-submit', promptSubmit, c.env)
+      assert.ok(existsSync(c.canary), 'sdd claim did not reach node')
+
+      // env-pinned claim instead of a marker
+      spawnSync('rm', ['-f', join(f.markerDir, 's1.task')])
+      c = canaryEnv(join(f.root, 'c3'), { BRO_BEAD_ID: 'fx-9' })
+      r = launch(f.main, 'prompt-submit', promptSubmit, c.env)
+      assert.ok(existsSync(c.canary), 'env-pinned claim did not reach node')
+    })
+  })
+
+  test('a drop addressed only to a foreign session stays on the fast path', () => {
+    const f = hookFixture()
+    inside(f.main, f.root, () => {
+      prime(f)
+      const notify = join(f.markerDir, '..', 'notify')
+      mkdirSync(notify, { recursive: true })
+      writeFileSync(
+        join(notify, `${Date.now()}-x.txt`),
+        '{"kind":"nudge","topic":"t","to":"other-session"}'
+      )
+      const { canary, env } = canaryEnv(f.root)
+      const r = launch(f.main, 'post-tool', postTool, env)
+      assert.equal(r.status, 0)
+      assert.equal(existsSync(canary), false, 'foreign drop reached node')
+    })
+  })
+
+  test('an interior-newline drop is verbatim broadcast — it reaches node', () => {
+    const f = hookFixture()
+    inside(f.main, f.root, () => {
+      prime(f)
+      const notify = join(f.markerDir, '..', 'notify')
+      mkdirSync(notify, { recursive: true })
+      writeFileSync(
+        join(notify, `${Date.now()}-x.txt`),
+        '{"kind":"nudge","topic":"t","to":"other-session"}\nSECOND-LINE'
+      )
+      const { canary, env } = canaryEnv(f.root)
+      const r = launch(f.main, 'post-tool', postTool, env)
+      assert.equal(r.status, 0)
+      assert.ok(existsSync(canary), 'interior-newline drop did not reach node')
+    })
+  })
+
+  test('a foreign-addressed envelope with a trailing newline stays fast', () => {
+    const f = hookFixture()
+    inside(f.main, f.root, () => {
+      prime(f)
+      const notify = join(f.markerDir, '..', 'notify')
+      mkdirSync(notify, { recursive: true })
+      writeFileSync(
+        join(notify, `${Date.now()}-x.txt`),
+        '{"kind":"nudge","topic":"t","to":"other-session"}\n'
+      )
+      const { canary, env } = canaryEnv(f.root)
+      const r = launch(f.main, 'post-tool', postTool, env)
+      assert.equal(r.status, 0)
+      assert.equal(existsSync(canary), false, 'trailing-newline foreign drop reached node')
+    })
+  })
+
+  test('permission always reaches node; garbage stdin fails open', () => {
+    const f = hookFixture()
+    inside(f.main, f.root, () => {
+      const { canary, env } = canaryEnv(f.root)
+      const p = launch(f.main, 'permission', {
+        session_id: 's1',
+        tool_name: 'exec',
+        tool_input: { command: 'bd ready' },
+      }, env)
+      assert.equal(p.status, 0)
+      assert.ok(existsSync(canary), 'permission did not reach node')
+
+      const g = launch(f.main, 'post-tool', 'this is not json at all', env)
+      assert.equal(g.status, 0)
+    })
+  })
+
+  test('garbage stdin reaches node — exit 0 alone is not proof', () => {
+    const f = hookFixture()
+    inside(f.main, f.root, () => {
+      prime(f)
+      const { canary, env } = canaryEnv(f.root)
+      const g = launch(f.main, 'post-tool', 'this is not json at all', env)
+      assert.equal(g.status, 0)
+      assert.ok(existsSync(canary), 'malformed payload skipped node')
+    })
+  })
+
+  test('a cursor-shaped payload reaches node even outside an opted repo', () => {
+    const f = hookFixture()
+    inside(f.main, f.root, () => {
+      // foreign-schema detection precedes the opt-in walk — the payload
+      // names its own project, so gating on cwd would drop real work
+      const nogit = join(f.root, 'nogit')
+      mkdirSync(nogit)
+      const { canary, env } = canaryEnv(f.root)
+      const r = launch(nogit, 'post-tool', {
+        hook_event_name: 'postToolUse',
+        cursor_version: '1.0',
+        workspace_roots: [f.main],
+        turn_id: 't1',
+      }, env)
+      assert.equal(r.status, 0)
+      assert.ok(existsSync(canary), 'cursor payload skipped node in a non-opted cwd')
+    })
+  })
+
+  test('a pending drop with spaces in its name still reaches node', () => {
+    const f = hookFixture()
+    inside(f.main, f.root, () => {
+      prime(f)
+      const notify = join(f.markerDir, '..', 'notify')
+      mkdirSync(notify, { recursive: true })
+      // the find loop must not word-split — a split path reads as
+      // absent and the pending drop is silently skipped
+      writeFileSync(join(notify, `${Date.now()}-a b.txt`), 'hello session\n')
+      const { canary, env } = canaryEnv(f.root)
+      const r = launch(f.main, 'post-tool', postTool, env)
+      assert.equal(r.status, 0)
+      assert.ok(existsSync(canary), 'spaced-name drop did not reach node')
     })
   })
 })

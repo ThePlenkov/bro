@@ -48,6 +48,8 @@ import {
   mailboxDir,
   prOwnership,
   prOwnershipMark,
+  hasHelpFlag,
+  printUsage,
   reviewHost,
   runJanitor,
   sweepOrphanProcs,
@@ -1003,9 +1005,24 @@ export async function tickOnce(dir: string): Promise<{ snap: WatchSnapshot; text
   return { snap, text: renderSnapshot(snap) }
 }
 
-export async function runWatchCommand(argv: string[]): Promise<void> {
+/** The help/install prelude — routed before the ticker path so
+ *  runWatchCommand stays a snapshot loop, not a dispatcher. */
+function dispatchWatchPrelude(argv: string[]): boolean {
+  if (hasHelpFlag(argv)) {
+    printUsage(
+      'usage: bro watch [--every SEC] [--for SEC] [--json] [--notify] | bro watch install|uninstall',
+      0
+    )
+  }
   if (argv[0] === 'install' || argv[0] === 'uninstall') {
-    runWatchSched(argv.slice(1))
+    runWatchSched(argv)
+    return true
+  }
+  return false
+}
+
+export async function runWatchCommand(argv: string[]): Promise<void> {
+  if (dispatchWatchPrelude(argv)) {
     return
   }
   let args: ReturnType<typeof watchArgs>

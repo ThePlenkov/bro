@@ -32,7 +32,7 @@ import { homedir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { otelEvent } from '@broject/providers'
 import { gitCommonDir } from '@broject/core'
-import { devinSessionPlane } from './devin.ts'
+import { devinSessionPlane } from './plane.ts'
 
 /** One model's usage in a sample. */
 export interface DevinModelUsage {

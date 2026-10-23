@@ -12,8 +12,24 @@ exclude_paths:
   # path as uncontrolled data; the same shape already ships in the
   # act-state cache (packages/act/src/state-cache.ts) unflagged.
   - 'packages/cli/src/commands/foreign-push.ts'
+  # The contract gate's fs paths ARE the input — --contract/--dump/
+  # --breaking exist so fixtures never touch git (spec bro-k9ces).
+  # Every read/write goes to an operator-named path, so Codacy's
+  # non-literal-path rule flags the file's whole job; the keyed map
+  # lookups a diff engine needs read as object-injection for the same
+  # reason (own-property descriptors, not user data).
+  - 'packages/cli/src/commands/contract.ts'
   # The devin usage sampler reads devin's own session store and keeps
   # bro's cursor beside it: both paths are bro's own (the store path
   # comes from XDG_DATA_HOME/HOME, the cursor from the git common dir).
   # The dynamic node:sqlite import is the read-only, fail-open path.
-  - 'packages/cli/src/session-planes/devin-usage.ts'
+  - 'packages/devin/src/usage.ts'
+  # The devin plane reads the paths devin itself writes: the lock dir,
+  # the /proc entries (environ, cwd, cmdline, fd/0), the logs and the
+  # transcripts. Every one of them is a path bro BUILDS (a pid, a
+  # session name, an XDG root) — Codacy's path rule reads a computed
+  # path as uncontrolled data. The same shapes shipped on main
+  # (packages/cli/src/session-planes/devin.ts) unflagged: the file
+  # MOVED into the devin package, it is not new code.
+  - 'packages/devin/src/plane.ts'
+>>>>>>> origin/main
