@@ -370,10 +370,10 @@ describe('recordGuardEvents (bro-arm83)', () => {
     const { root, main } = initRepo('bro-guards-unit-')
     inside(main, root, () => {
       const gdir = guardsDir(main)
-      recordGuardEvents({ events: ['stop', 'post-tool'], complete: true })
+      recordGuardEvents({ events: ['stop', 'post-tool'], complete: true, trace: false })
       assert.deepEqual(readdirSync(gdir).sort(), ['.stamp', 'post-tool', 'stop'])
 
-      recordGuardEvents({ events: ['stop'], complete: true })
+      recordGuardEvents({ events: ['stop'], complete: true, trace: false })
       assert.equal(existsSync(join(gdir, 'post-tool')), false, 'stale event file not pruned')
       assert.equal(existsSync(join(gdir, 'stop')), true)
       assert.equal(existsSync(join(gdir, '.stamp')), true)
@@ -384,11 +384,11 @@ describe('recordGuardEvents (bro-arm83)', () => {
     const { root, main } = initRepo('bro-guards-unit-')
     inside(main, root, () => {
       const gdir = guardsDir(main)
-      recordGuardEvents({ events: ['stop'], complete: true })
+      recordGuardEvents({ events: ['stop'], complete: true, trace: false })
       assert.equal(existsSync(join(gdir, '.stamp')), true)
       // a degraded collection must not leave the old record readable —
       // the shell would trust stale coverage and skip dropped guards
-      recordGuardEvents({ events: ['stop'], complete: false })
+      recordGuardEvents({ events: ['stop'], complete: false, trace: false })
       assert.equal(existsSync(join(gdir, '.stamp')), false, 'stale stamp not invalidated')
       recordGuardEvents(undefined)
       assert.equal(existsSync(join(gdir, '.stamp')), false)
