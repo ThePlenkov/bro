@@ -152,7 +152,7 @@ The shell check mirrors exactly that state inventory:
 
 #### post-tool-only checks
 
-6. **Mutating command in payload** → Node. One `grep -E` superset of
+1. **Mutating command in payload** → Node. One `grep -E` superset of
    `classifyArmCommands` ∪ `classifySkillMutation` ∪
    `classifyExecCommand`: `bro`/`npx … bro` near any mutating
    subcommand (`act|drill|wtf|work|retrospect|debt|convoy|spec|next|loop|sync|unwind`),
@@ -161,7 +161,7 @@ The shell check mirrors exactly that state inventory:
    a string that merely *contains* the tokens goes to Node, where the
    real classifiers decide. False positives are the safe direction.
 
-7. **Orchestrator want-markers** → Node, only when `BRO_AGENT_ID` is
+2. **Orchestrator want-markers** → Node, only when `BRO_AGENT_ID` is
    unset (the same `isOrchestratorSession` guard the connectors use):
    `<git-common>/bro/pulse.json`, `rig-pulse.json`, or `drive.json`
    mean a checkpoint probe could rearm a dead pulse/supervisor — that
@@ -169,17 +169,17 @@ The shell check mirrors exactly that state inventory:
 
 #### prompt-submit-only checks
 
-8. **PR reference in the prompt** → Node: `pull/[0-9]` or
+1. **PR reference in the prompt** → Node: `pull/[0-9]` or
    `merge_requests/[0-9]` — the superset of both review hosts'
    `parsePrRef`.
 
-9. **Open drill frame** → Node: the drill connector's own
+2. **Open drill frame** → Node: the drill connector's own
    `drills.json` snapshot in `<git-common>/bro/hooks/cache/` is the
    proxy — `"frame":null` is the only "no frame" proof; a missing or
    store-stale snapshot defers. Snapshot-keyed coverage (unlike
    `.drill` markers) also sees frames opened outside hooked sessions.
 
-10. **SDD claims** → Node: `sdd` token in any config file AND either
+3. **SDD claims** → Node: `sdd` token in any config file AND either
     a `<sid>.task` marker for any extracted session id, a `.task`
     marker owned by this session's agent-root pid (mirroring
     `procAgentRoot`/`markerOwner` — a same-tree worker's claim folds
