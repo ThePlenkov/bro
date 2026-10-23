@@ -82,6 +82,21 @@ function verbTools(plane: PlaneDescriptor): PlaneTool[] {
     }))
 }
 
+/** A name that is both a declared read and an exposed verb makes
+ *  `bro_<plane>_<op>` ambiguous — reads and execs are different
+ *  contracts under one tool name, so the descriptor fails loud
+ *  instead of silently picking a side. */
+function assertUnambiguousOps(plane: PlaneDescriptor): void {
+  const overlap = (plane.mcpVerbs ?? []).filter((v) => plane.reads.includes(v))
+  if (overlap.length > 0) {
+    throw new PlaneVerbError(
+      plane.name,
+      overlap[0] as string,
+      `plane '${plane.name}' declares ${overlap.join(', ')} as both read and mcpVerb — ambiguous op name`
+    )
+  }
+}
+
 /** One live-capability probe per plane — catalog and dispatch share
  *  the verdict: `read` gates the read tools, each `mcpVerbs` entry its
  *  own capability. A throwing probe certifies nothing. */
@@ -94,6 +109,7 @@ async function capabilities(plane: PlaneDescriptor): Promise<Record<string, bool
 export async function catalogTools(catalog: PlaneDescriptor[]): Promise<PlaneTool[]> {
   const out: PlaneTool[] = []
   for (const plane of catalog) {
+    assertUnambiguousOps(plane)
     const caps = await capabilities(plane)
     if (caps['read'] === true) {
       out.push(...planeTools(plane))
@@ -122,6 +138,7 @@ export async function callTool(
     if (!name.startsWith(prefix)) {
       continue
     }
+    assertUnambiguousOps(plane)
     const caps = await capabilities(plane)
     const op = name.slice(prefix.length)
     // the same gate tools/list applies — a capability-false op's tool

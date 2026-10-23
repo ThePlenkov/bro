@@ -235,4 +235,21 @@ describe('callTool — dispatch', () => {
       }
     )
   })
+
+  test('an op declared as both read and mcpVerb fails loud — never silently dispatched', async () => {
+    const plane = fakePlane({
+      verbs: ['ready'],
+      mcpVerbs: ['ready'],
+      capabilities: async () => ({ read: true, ready: true }),
+    })
+    await assert.rejects(
+      () => callTool([plane], 'bro_work_ready', {}),
+      (err: unknown) => {
+        assert.ok(err instanceof PlaneVerbError)
+        assert.match(err.message, /both read and mcpVerb/)
+        return true
+      }
+    )
+    await assert.rejects(() => catalogTools([plane]), PlaneVerbError)
+  })
 })
