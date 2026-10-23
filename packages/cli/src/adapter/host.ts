@@ -36,6 +36,7 @@
  * one-shot rule decides.
  */
 import { spawn, type ChildProcess } from 'node:child_process'
+import { broArgumentCompletions, type BroCompletion } from './completions.ts'
 import {
   HOOK_TIMEOUT_MS,
   REHYDRATION_TIMEOUT_MS,
@@ -231,6 +232,11 @@ export interface BroHostApi<Ctx = unknown> {
     name: string,
     options: {
       description?: string
+      /** The slash dropdown's argument completer — both upstreams
+       *  (omp's extensions/types.ts, pi's extensions/types.ts) carry
+       *  the same hook; a host that predates it just ignores the
+       *  field. */
+      getArgumentCompletions?: (argumentPrefix: string) => BroCompletion[] | null
       handler: (args: string, ctx: Ctx) => Promise<void> | void
     }
   ): void
@@ -572,6 +578,7 @@ export function createBroDriver<Ctx>(host: BroHostBinding<Ctx>, api: BroHostApi<
    *  renders. Both are the same on every host, so both live here. */
   api.registerCommand('bro', {
     description: 'bro — board refresh, or run `bro <args>` (act|next|fleet|drill|…)',
+    getArgumentCompletions: broArgumentCompletions,
     async handler(args: string, ctx: Ctx) {
       const trimmed = args.trim()
       if (trimmed === '') {

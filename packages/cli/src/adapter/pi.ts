@@ -60,6 +60,7 @@ import {
   type BroContext,
   type BroHostBinding,
 } from './host.ts'
+import type { BroCompletion } from './completions.ts'
 
 // --- structural pi surface ----------------------------------------------
 // Declared, never imported — pi loads this module at runtime and nobody
@@ -107,6 +108,9 @@ interface PiApi {
     name: string,
     options: {
       description?: string
+      /** Upstream: extensions/types.ts `RegisteredCommand` — the
+       *  slash dropdown's argument completer. */
+      getArgumentCompletions?: (argumentPrefix: string) => BroCompletion[] | null
       handler: (args: string, ctx: ExtContext) => Promise<void> | void
     }
   ): void
