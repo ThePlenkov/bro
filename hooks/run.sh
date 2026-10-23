@@ -227,7 +227,11 @@ post-tool|prompt-submit)
 
   # git-dir state — without a common dir Node resolves hooksDir/
   # mailboxDir/beadsDir to null in the same spots, so the checks below
-  # can only fail the same way: nothing there exists to miss
+  # can only fail the same way: nothing there exists to miss.
+  # GIT_DIR/GIT_WORK_TREE/GIT_COMMON_DIR are unset the same way core's
+  # repoEnv() strips them for `-C` calls — an inherited pin would
+  # silently retarget the probe at the parent's repository.
+  unset GIT_DIR GIT_WORK_TREE GIT_COMMON_DIR
   COMMON=$(git -C "$BASE" rev-parse --git-common-dir 2>/dev/null | sed -n 1p)
   case "$COMMON" in
     /*) ;;
@@ -397,9 +401,14 @@ EOF
         done <<EOF
 $CFGS
 EOF
-        [ -z "$NEED_NODE" ] && [ -f "$GUARDSD/$EVENT" ] && NEED_NODE=1
-        if [ -z "$NEED_NODE" ] && [ "$EVENT" = post-tool ] && [ -f "$GUARDSD/.trace" ]; then
-          NEED_NODE=1
+        # the stamp's own body lists covered events (written atomically)
+        # — checked alongside the per-event files so a concurrent prune
+        # can only over-trigger, never hide a def
+        if [ -z "$NEED_NODE" ]; then
+          { [ -f "$GUARDSD/$EVENT" ] || grep -qx "$EVENT" "$GUARDSD/.stamp" 2>/dev/null; } && NEED_NODE=1
+        fi
+        if [ -z "$NEED_NODE" ] && [ "$EVENT" = post-tool ]; then
+          { [ -f "$GUARDSD/.trace" ] || grep -qx '\.trace' "$GUARDSD/.stamp" 2>/dev/null; } && NEED_NODE=1
         fi
       fi
     fi

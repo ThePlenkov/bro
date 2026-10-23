@@ -115,11 +115,11 @@ The shell check mirrors exactly that state inventory:
    set into `<git-common>/bro/hooks/guards/` — but only when coverage
    is complete:
 
-   - `<event>` exists ⇔ at least one collected def targets that event
-     (files written first, then `.stamp`, deletes last — a partial
-     read can only defer to Node, never skip),
-   - `.stamp` is the freshness anchor; incomplete coverage writes
-     nothing, so the next call sees no stamp and defers.
+   - `<event>` exists ⇔ at least one collected def targets that event,
+   - `.stamp` is the freshness anchor and lands last via atomic
+     rename; its body carries the same coverage list (`.trace`
+     included), so a concurrent prune can only over-trigger, never
+     hide a def.
 
    Incomplete coverage removes `.stamp` — a stale record must never
    masquerade as current after a failed collection.

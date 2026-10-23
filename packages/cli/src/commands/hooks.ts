@@ -1198,7 +1198,13 @@ export function recordGuardEvents(coverage: GuardRun['coverage']): void {
     if (coverage.trace) {
       writeFileSync(join(gdir, '.trace'), '')
     }
-    writeFileSync(join(gdir, '.stamp'), '')
+    // .stamp lands last via rename — atomic, and its body carries the
+    // same coverage list so a pruned event file can never hide a def
+    // from a concurrent reader pair
+    const body = [...coverage.events, ...(coverage.trace ? ['.trace'] : [])].join('\n') + '\n'
+    const tmp = join(gdir, `.stamp-${process.pid}`)
+    writeFileSync(tmp, body)
+    renameSync(tmp, join(gdir, '.stamp'))
     for (const ev of GUARD_EVENTS) {
       if (!coverage.events.includes(ev)) {
         rmSync(join(gdir, ev), { force: true })
