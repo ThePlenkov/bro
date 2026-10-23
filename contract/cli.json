@@ -34,6 +34,7 @@
         "pulse",
         "telemetry",
         "trace",
+        "acp",
         "rig"
       ]
     },
@@ -750,6 +751,31 @@
       "aliases": [],
       "hidden": true,
       "plan": false,
+      "external": false
+    },
+    "acp": {
+      "name": "acp",
+      "group": "fleet",
+      "summary": "ACP edge — `proxy -- <agent cmd>` puts bro on the wire (spec bro-bhyo1)",
+      "spellings": [
+        "acp",
+        "fleet acp"
+      ],
+      "aliases": [],
+      "hidden": false,
+      "skill": "acp",
+      "plan": false,
+      "contract": {
+        "subs": {
+          "proxy": {
+            "exits": {
+              "0": "client closed the wire — clean session end",
+              "1": "downstream agent died first — abnormal end",
+              "2": "usage — missing subcommand, missing `--`, or empty agent argv"
+            }
+          }
+        }
+      },
       "external": false
     },
     "providers": {

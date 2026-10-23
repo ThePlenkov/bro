@@ -50,7 +50,7 @@
  * Cloud agents do not fire sessionStart, so the first Cursor prompt
  * rehydrates once; preCompact clears that mark.
  */
-import { execFileSync } from 'node:child_process'
+
 import { createHash } from 'node:crypto'
 import {
   appendFileSync,
@@ -67,6 +67,7 @@ import { dirname, isAbsolute, join } from 'node:path'
 import { setTimeout as nodeSetTimeout } from 'node:timers'
 import {
   acquireFileLock,
+  gitCommonDir,
   parallelWorkProbe,
   postToolLines,
   preToolVerdicts,
@@ -440,17 +441,16 @@ const LIVE_SESSION_MS = 24 * 60 * 60 * 1000
 
 /** Markers live under the common git dir — shared across all linked
  *  worktrees of the repo, so a session in one worktree can detect work
- *  armed by a session in another. `--git-dir` would be per-worktree. */
-function hooksStateDir(): string | null {
-  try {
-    const gd = execFileSync('git', ['rev-parse', '--git-common-dir'], { // NOSONAR
-      encoding: 'utf8',
-      stdio: ['ignore', 'pipe', 'ignore'],
-    }).trim()
-    return gd ? join(gd, 'bro', 'hooks') : null
-  } catch {
-    return null
-  }
+ *  armed by a session in another. `--git-dir` would be per-worktree.
+ *  `dir` is the repo the question is about — hook events pass their own
+ *  project root, the ACP proxy passes the session's `session/new` cwd. */
+function hooksStateDir(dir: string = process.cwd()): string | null {
+  // gitCommonDir resolves the relative `.git` forms against `dir` and
+  // scrubs inherited GIT_DIR/GIT_WORK_TREE/GIT_COMMON_DIR — an inline
+  // rev-parse would let git output (or the proxy's ambient env) point
+  // marker reads/writes at a different repository's state
+  const gd = gitCommonDir(dir)
+  return gd !== null ? join(gd, 'bro', 'hooks') : null
 }
 
 /** One marker file per aspect (<session>.<aspect>) — arming is a pure file
@@ -467,9 +467,9 @@ function markerPath(sessionId: string, aspect: GateAspect): string | null {
  * suffix, so connector-owned aspects (armed by external tooling that
  * writes the same marker shape) are armed without a CLI-side list.
  * Markers older than MARKER_TTL_MS count as unarmed even if on disk. */
-export function readArmed(sessionId: string): Set<string> {
+export function readArmed(sessionId: string, repoDir: string = process.cwd()): Set<string> {
   const armed = new Set<string>()
-  const dir = hooksStateDir()
+  const dir = hooksStateDir(repoDir)
   const safe = sessionId.replace(/[^\w.-]/g, '_')
   if (!dir || !safe) {
     return armed
@@ -562,9 +562,10 @@ function formatAge(ageMs: number): string {
 
 /** Connector ctx for hook events — sessionId plus this process's
  *  agent-root owner so claim probes treat markers stamped by the same
- *  agent tree under a rotated session id as own work (bro-7022c). */
-function hookCtx(sessionId: string, toolUseId?: string): ConnectorCtx {
-  return { dir: process.cwd(), sessionId, owner: agentOwner(), toolUseId }
+ *  agent tree under a rotated session id as own work (bro-7022c).
+ *  `dir` is the session's repo root — every probe resolves inside it. */
+function hookCtx(dir: string, sessionId: string, toolUseId?: string): ConnectorCtx {
+  return { dir, sessionId, owner: agentOwner(), toolUseId }
 }
 
 /** The host client's id for this tool call — the two hook events of
@@ -585,14 +586,18 @@ function liveSessionLines(dir: string, selfId: string): string[] {
  *  work here, or a connector reports live work (claimed beads, sibling
  *  worktrees, held slots) — passive context naming what's occupied,
  *  never a block. */
-async function parallelLines(sessionId: string, onProbe?: ProbeReporter): Promise<ProbeResult> {
+async function parallelLines(
+  dir: string,
+  sessionId: string,
+  onProbe?: ProbeReporter
+): Promise<ProbeResult> {
   try {
     const parts: string[] = []
-    const dir = hooksStateDir()
-    if (dir) {
-      parts.push(...liveSessionLines(dir, sessionId))
+    const stateDir = hooksStateDir(dir)
+    if (stateDir) {
+      parts.push(...liveSessionLines(stateDir, sessionId))
     }
-    const work = await parallelWorkProbe(hookCtx(sessionId), onProbe)
+    const work = await parallelWorkProbe(hookCtx(dir, sessionId), onProbe)
     parts.push(...work.lines)
     if (parts.length === 0) {
       return { lines: [], settled: work.settled }
@@ -851,10 +856,10 @@ export function traceEntry(
 
 /** `<git-common>/bro/hooks/trace/<session>.jsonl` — null without a git
  *  dir or session id (untraceable events degrade to nothing). */
-function traceFile(sessionId: string): string | null {
-  const dir = hooksStateDir()
+function traceFile(dir: string, sessionId: string): string | null {
+  const stateDir = hooksStateDir(dir)
   const safe = sessionId.replace(/[^\w.-]/g, '_')
-  return dir && safe ? join(dir, 'trace', `${safe}.jsonl`) : null
+  return stateDir && safe ? join(stateDir, 'trace', `${safe}.jsonl`) : null
 }
 
 /** Journal bound — a long session must not grow a file every probe
@@ -873,7 +878,7 @@ const TRACE_JOURNAL_KEEP_LINES = 500
  *  like arming: a failed append must never stall the hook. */
 function journalTrace(input: HookInput, sessionId: string): void {
   try {
-    const path = traceFile(sessionId)
+    const path = traceFile(process.cwd(), sessionId)
     if (!path) {
       return
     }
@@ -1067,8 +1072,11 @@ function flushPerf(sessionId: string, event: string, t0: number): void {
 
 /** Trace tail for this session — the MatchContext's structured half.
  *  No hooks dir or session id means an empty tail, never a throw. */
-function sessionTail(sessionId: string): { entries: ReturnType<typeof readTraceTail>['entries']; raw: string } {
-  const path = traceFile(sessionId)
+function sessionTail(
+  dir: string,
+  sessionId: string
+): { entries: ReturnType<typeof readTraceTail>['entries']; raw: string } {
+  const path = traceFile(dir, sessionId)
   return path === null ? { entries: [], raw: '' } : readTraceTail(path)
 }
 
@@ -1130,7 +1138,7 @@ function cachedContextWrite(file: string, text: string, t0: number): void {
 }
 
 async function sessionContextTextCached(dir: string, sessionId: string): Promise<string> {
-  const base = hooksStateDir()
+  const base = hooksStateDir(dir)
   const file =
     base === null
       ? null
@@ -1174,8 +1182,11 @@ function boundedMs<T>(p: Promise<T>, ms: number): Promise<T | undefined> {
  *  mid-write sees a stale stamp or a stale extra file, both of which
  *  only defer to Node. Skipped on a degraded collection: an
  *  incomplete map must never masquerade as "nothing armed". */
-export function recordGuardEvents(coverage: GuardRun['coverage']): void {
-  const dir = hooksStateDir()
+export function recordGuardEvents(
+  coverage: GuardRun['coverage'],
+  repoDir: string = process.cwd()
+): void {
+  const dir = hooksStateDir(repoDir)
   if (dir === null) {
     return
   }
@@ -1223,12 +1234,12 @@ export function recordGuardEvents(coverage: GuardRun['coverage']): void {
  *  centralized. Fail-open like every probe: a wedged engine emits
  *  nothing rather than stall a hook. */
 async function guardLines(
+  dir: string,
   event: GuardEvent,
   sessionId: string,
   mctx: () => Promise<MatchContext>
 ): Promise<string[]> {
   try {
-    const dir = process.cwd()
     const cfg = (loadBroConfig(dir) as Record<string, unknown>).guard as GuardConfig
     const run = await runGuards({
       dir,
@@ -1238,7 +1249,7 @@ async function guardLines(
       defs: cfg.defs,
       cfg,
       record: true,
-      armed: () => readArmed(sessionId),
+      armed: () => readArmed(sessionId, dir),
       probes: GUARD_PROBES,
       // the veto seam — resolved lazily and only when a judge-clause
       // guard's deterministic clauses pass. mode:'off' abstains here;
@@ -1257,29 +1268,71 @@ async function guardLines(
         return input
       },
     })
-    recordGuardEvents(run.coverage)
+    recordGuardEvents(run.coverage, dir)
     return run.lines
   } catch {
     return []
   }
 }
 
-async function emitSessionContext(
-  event: 'SessionStart' | 'PostCompaction' | 'PostCompact' | 'PreCompact',
-  sessionId = '',
-  cliEvent: string = event
-): Promise<boolean> {
-  // sessionStart probes collect from every connector — beads reports
-  // the ready queue, drill the open frame, act the PR gate + merge slot,
-  // debt the open findings; a jira connector would add assigned issues
+/** The session-start probe set minus the guard sweep — sessionStart
+ *  probes collect from every connector (beads reports the ready queue,
+ *  drill the open frame, act the PR gate + merge slot, debt the open
+ *  findings; a jira connector would add assigned issues), parallelLines
+ *  covers the occupancy nudge, and the goal/heartbeat lines ride along.
+ *  Shared by the session-start collector and the cursor-hydrate leg of
+ *  prompt-submit — cloud agents never fire SessionStart, so their
+ *  first prompt carries the same rehydration. */
+async function rehydrateLines(
+  dir: string,
+  sessionId: string,
+  cliEvent: string
+): Promise<ProbeResult> {
+  const [start, par] = await Promise.all([
+    sessionStartProbe(hookCtx(dir, sessionId), probeReporter(cliEvent, 'sessionStart')),
+    parallelLines(dir, sessionId, probeReporter(cliEvent, 'parallelWork')),
+  ])
+  const parts = [...start.lines, ...par.lines]
+  // the session's active goal rehydrates like every other durable state —
+  // resume/compaction restores it (spec: specs/goal/bro-6vcll.md)
+  parts.push(...goalContextLines(dir, sessionId))
+  // rig liveness comes from the durable heartbeat file, not from whether
+  // a session happened to poll — mailbox drops expire in an hour
+  // (bro-dxoa5); absent file contributes nothing
+  const hb = heartbeatLine(dir)
+  if (hb !== null) {
+    parts.push(`watch heartbeat: ${hb}`)
+  }
+  return { lines: parts, settled: start.settled && par.settled }
+}
+
+/** Session-start context as a library — the emit path's collection
+ *  half minus the hook envelope, for the `bro acp proxy` seam
+ *  (specs/bro-bhyo1.md). `dir` is the session's repo root — hook events
+ *  pass their project dir, the proxy passes `session/new`'s cwd —
+ *  every probe, marker read, trace tail, and cache key resolves inside
+ *  it. Fail-open identical to the hook: a dir outside a bro-enabled
+ *  repo yields `lines: []`. */
+export async function collectSessionContext(
+  dir: string,
+  sessionId: string,
+  cliEvent = 'session-start'
+): Promise<{ lines: string[]; settled: boolean }> {
+  // the runHooksCommand gate doesn't cover direct callers — the seam's
+  // documented contract (a dir outside a bro-enabled repo yields
+  // lines: []) has to live here
+  if (!broEnabled(dir)) {
+    return { lines: [], settled: true }
+  }
   // probes and the guard sweep are independent reads — overlapping them
-  // keeps the hook total at the slowest single probe, not their sum
+  // keeps the total at the slowest single probe, not their sum
   // (spec: specs/bro-wc0i6.md)
-  const [start, par, guards] = await Promise.all([
-    sessionStartProbe(hookCtx(sessionId), probeReporter(cliEvent, 'sessionStart')),
-    parallelLines(sessionId, probeReporter(cliEvent, 'parallelWork')),
-    guardLines('session-start', sessionId, async () => {
-      const dir = process.cwd()
+  const [rehydrate, guards] = await Promise.all([
+    rehydrateLines(dir, sessionId, cliEvent),
+    // 'session-start' covers all three rehydrate events; the match
+    // haystack is the same session-context text + previous-session trace
+    // tail the learn connector assembles
+    guardLines(dir, 'session-start', sessionId, async () => {
       const hooks = hooksDir(dir)
       const prev = hooks !== null && sessionId !== '' ? previousTraceFile(hooks, sessionId) : null
       const tail = prev !== null ? readTraceTail(prev) : { entries: [], raw: '' }
@@ -1289,21 +1342,44 @@ async function emitSessionContext(
       }
     }),
   ])
-  const parts = [...start.lines, ...par.lines]
-  // the session's active goal rehydrates like every other durable state —
-  // resume/compaction restores it (spec: specs/goal/bro-6vcll.md)
-  parts.push(...goalContextLines(process.cwd(), sessionId))
-  // rig liveness comes from the durable heartbeat file, not from whether
-  // a session happened to poll — mailbox drops expire in an hour
-  // (bro-dxoa5); absent file contributes nothing
-  const hb = heartbeatLine(process.cwd())
-  if (hb !== null) {
-    parts.push(`watch heartbeat: ${hb}`)
+  return { lines: [...rehydrate.lines, ...guards], settled: rehydrate.settled }
+}
+
+/** Prompt-submit context as a library — the prompt probes plus the
+ *  prompt-submit guard sweep, minus the hook envelope (specs/bro-bhyo1.md).
+ *  `dir` is the session's repo root; `prompt` is the flattened prompt
+ *  text the probes match against. */
+export async function collectPromptContext(
+  dir: string,
+  sessionId: string,
+  prompt: string
+): Promise<{ lines: string[] }> {
+  if (!broEnabled(dir)) {
+    return { lines: [] }
   }
-  // 'session-start' covers all three rehydrate events; the match
-  // haystack is the same session-context text + previous-session trace
-  // tail the learn connector assembles
-  parts.push(...guards)
+  const [promptLines, guards] = await Promise.all([
+    promptContextLines(
+      hookCtx(dir, sessionId),
+      prompt,
+      probeReporter('prompt-submit', 'promptSubmit')
+    ),
+    // guards on prompt-submit: match.terms sees the raw prompt, trace
+    // keys see this session's tail, state sees the live repo
+    guardLines(dir, 'prompt-submit', sessionId, async () => {
+      const tail = sessionTail(dir, sessionId)
+      return { text: prompt, trace: relativize(dir, tail.entries) }
+    }),
+  ])
+  return { lines: [...promptLines, ...guards] }
+}
+
+async function emitSessionContext(
+  event: 'SessionStart' | 'PostCompaction' | 'PostCompact' | 'PreCompact',
+  sessionId = '',
+  cliEvent: string = event
+): Promise<boolean> {
+  const { lines, settled } = await collectSessionContext(process.cwd(), sessionId, cliEvent)
+  const parts = [...lines]
   if (codexClient && (event === 'SessionStart' || event === 'PostCompact')) {
     const steer = readCodexInstructions(process.env.PLUGIN_ROOT)
     if (steer) {
@@ -1313,7 +1389,7 @@ async function emitSessionContext(
   if (parts.length > 0) {
     context(event, `bro state — resume from here:\n${parts.join('\n')}`)
   }
-  return start.settled && par.settled
+  return settled
 }
 
 async function emitPromptContext(input: HookInput): Promise<void> {
@@ -1324,47 +1400,21 @@ async function emitPromptContext(input: HookInput): Promise<void> {
   // rehydration; a later prompt does not repeat it. preCompact drops the
   // mark so the summary's successor turn loads fresh state. Mark only
   // after the probes return — a throw retries next prompt.
+  const dir = process.cwd()
   const hydrate = cursorClient && sessionId && !skillHinted(sessionId, CURSOR_HYDRATED_SKILL)
   let settled = true
   // hydrate probes, prompt probes, and the guard sweep are independent
   // reads — one parallel flight, emission order unchanged below
-  const [hydratePair, promptLines, guards] = await Promise.all([
-    hydrate
-      ? Promise.all([
-          sessionStartProbe(
-            hookCtx(sessionId),
-            probeReporter('prompt-submit', 'sessionStart')
-          ),
-          parallelLines(sessionId, probeReporter('prompt-submit', 'parallelWork')),
-        ])
-      : undefined,
-    promptContextLines(
-      hookCtx(sessionId),
-      prompt,
-      probeReporter('prompt-submit', 'promptSubmit')
-    ),
-    // guards on prompt-submit: match.terms sees the raw prompt, trace
-    // keys see this session's tail, state sees the live repo
-    guardLines('prompt-submit', sessionId, async () => {
-      const dir = process.cwd()
-      const tail = sessionTail(sessionId)
-      return { text: prompt, trace: relativize(dir, tail.entries) }
-    }),
+  const [hydratePair, promptCtx] = await Promise.all([
+    hydrate ? rehydrateLines(dir, sessionId, 'prompt-submit') : undefined,
+    collectPromptContext(dir, sessionId, prompt),
   ])
   if (hydratePair) {
-    const [start, par] = hydratePair
-    parts.push(...start.lines, ...par.lines)
-    // Cursor's session-start runs here (cloud agents never fire
-    // SessionStart) — the goal line must hydrate on this path too
-    parts.push(...goalContextLines(process.cwd(), sessionId))
-    const hb = heartbeatLine(process.cwd())
-    if (hb !== null) {
-      parts.push(`watch heartbeat: ${hb}`)
-    }
-    settled = start.settled && par.settled
+    parts.push(...hydratePair.lines)
+    settled = hydratePair.settled
   }
   const sessionCount = parts.length
-  parts.push(...promptLines, ...guards)
+  parts.push(...promptCtx.lines)
   // a timed-out or thrown probe masquerades as "no state" — mark only
   // when every probe answered, else the marker suppresses a retry for
   // the marker's whole TTL
@@ -1422,13 +1472,13 @@ async function emitPostTool(input: HookInput): Promise<void> {
   // connector postTool probes run on every event — a failed exec is
   // still a delivery tick for a drained mailbox (notify). Guards read
   // the same journaled tail — one parallel flight with the probes
+  const dir = process.cwd()
   const [postLines, guards] = await Promise.all([
-    postToolLines(hookCtx(sessionId), probeReporter('post-tool', 'postTool')),
+    postToolLines(hookCtx(dir, sessionId), probeReporter('post-tool', 'postTool')),
     // guards on post-tool: match sees the journaled trace tail (this
     // landing included — journalTrace ran first), state sees live repo
-    guardLines('post-tool', sessionId, async () => {
-      const dir = process.cwd()
-      const tail = sessionTail(sessionId)
+    guardLines(dir, 'post-tool', sessionId, async () => {
+      const tail = sessionTail(dir, sessionId)
       return { text: tail.raw, trace: relativize(dir, tail.entries) }
     }),
   ])
@@ -1456,7 +1506,7 @@ async function emitStopGate(input: HookInput): Promise<void> {
   // exempt from the once-per-session block budget (context, never
   // `decision: block`; spec: specs/goal/bro-6vcll.md)
   const goalP = goalStopLines(process.cwd(), sessionId, {
-    trace: sessionTail(sessionId).raw,
+    trace: sessionTail(process.cwd(), sessionId).raw,
     // the judge's checkable surface — beads/gate/tree state, not just
     // tool metadata (fail-open inside; a slow probe → undefined)
     context: boundedMs(
@@ -1490,14 +1540,14 @@ async function emitStopGateBody(sessionId: string, goalP: Promise<string[]>): Pr
   // independent reads — overlap them; the total is the slowest probe,
   // not their sum (spec: specs/bro-wc0i6.md). Guards fire eagerly — on
   // a block their lines are dropped but the verdict rows still journal.
+  const dir = process.cwd()
   const [goal, contributions, guards] = await Promise.all([
     goalP,
-    stopGateContributions(hookCtx(sessionId), probeReporter('stop', 'stopGate')).then(
+    stopGateContributions(hookCtx(dir, sessionId), probeReporter('stop', 'stopGate')).then(
       (rows) => rows.sort((a, b) => rank(a.aspect) - rank(b.aspect))
     ),
-    guardLines('stop', sessionId, async () => {
-      const dir = process.cwd()
-      const tail = sessionTail(sessionId)
+    guardLines(dir, 'stop', sessionId, async () => {
+      const tail = sessionTail(dir, sessionId)
       return { text: tail.raw, trace: relativize(dir, tail.entries) }
     }),
   ])
@@ -1538,7 +1588,7 @@ async function emitPreTool(input: HookInput): Promise<void> {
   const sessionId = typeof input.session_id === 'string' ? input.session_id : ''
   const tool = typeof input.tool_name === 'string' ? input.tool_name : ''
   const verdicts = await preToolVerdicts(
-    hookCtx(sessionId, callIdOf(input)),
+    hookCtx(process.cwd(), sessionId, callIdOf(input)),
     tool,
     (input.tool_input ?? {}) as Record<string, unknown>
   )

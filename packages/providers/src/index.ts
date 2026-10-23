@@ -18,6 +18,8 @@ export { newSpanId, newTraceId, otelEvent, otelHeader, otelJournal, otelParent, 
 export type { OtelCtx, OtelSpan } from './otel.ts'
 export { AcpWorkerError, renderAcpUpdate, runAcpWorker } from './acp-worker.ts'
 export type { AcpWorkerSpec } from './acp-worker.ts'
+export { acpProxy, runAcpProxy } from './acp-proxy.ts'
+export type { AcpProxyOptions, AcpProxySeam } from './acp-proxy.ts'
 export { cliChat, expandPromptFile } from './cli.ts'
 export { openaiCompatChat } from './openai.ts'
 export { providerClient } from './registry.ts'

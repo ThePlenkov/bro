@@ -45,6 +45,12 @@ export interface FakeAcpAgent {
   configSets: Array<{ configId: string; value: unknown }>
   /** session/new requests (cwd recorded). */
   sessions: Array<{ cwd: string }>
+  /** session/cancel notifications the agent received (session ids). */
+  cancels: string[]
+  /** session/close requests the agent received (session ids). */
+  closes: string[]
+  /** session/fork requests the agent received (source session ids). */
+  forks: string[]
   /** The client's answer to a scripted session/request_permission. */
   permissionOutcome?: unknown
   /** What the agent got back from a scripted terminal/* round-trip. */
@@ -90,6 +96,9 @@ export function fakeAcpAgent(
      *  real gate for an agent whose advertised authMethods are not
      *  covered by stored credentials. */
     failNew?: 'auth'
+    /** Mint a distinct `sess-N` per session/new instead of always
+     *  'sess-1' — multi-session tests need real distinct ids. */
+    uniqueSessions?: boolean
     /** advertise promptCapabilities.image — the conductor only sends
      *  image blocks when the agent says it can consume them (bro-7izjx). */
     imageCapable?: boolean
@@ -104,6 +113,9 @@ export function fakeAcpAgent(
     blocks: [],
     configSets: [],
     sessions: [],
+    cancels: [],
+    closes: [],
+    forks: [],
   }
   const app = agent({ name: 'fake-acp' })
     .onRequest('initialize', (ctx) => {
@@ -122,7 +134,18 @@ export function fakeAcpAgent(
         throw RequestError.authRequired()
       }
       seen.sessions.push({ cwd: ctx.params.cwd })
-      return { sessionId: 'sess-1', configOptions: opts.configOptions ?? [] }
+      return {
+        sessionId: `sess-${opts.uniqueSessions === true ? seen.sessions.length : 1}`,
+        configOptions: opts.configOptions ?? [],
+      }
+    })
+    .onRequest('session/fork', (ctx) => {
+      seen.forks.push(ctx.params.sessionId)
+      return { sessionId: `sess-fork-${seen.forks.length}` }
+    })
+    .onRequest('session/close', (ctx) => {
+      seen.closes.push(ctx.params.sessionId)
+      return {}
     })
     .onRequest('session/set_config_option', (ctx) => {
       seen.configSets.push({ configId: ctx.params.configId, value: ctx.params.value })
@@ -140,6 +163,9 @@ export function fakeAcpAgent(
             : o
         ),
       }
+    })
+    .onNotification('session/cancel', (ctx) => {
+      seen.cancels.push(ctx.params.sessionId)
     })
     .onRequest('session/prompt', async (ctx) => {
       seen.blocks.push(ctx.params.prompt)
