@@ -537,7 +537,7 @@ export function bdStoreBlocker(): string | undefined {
   }
   // a checkout-shaped scratch: a bd build that insists on a git
   // worktree for init must probe "store works", never "dir had no git"
-  git(['init', '-q', dir], dir)
+  git(['init', '-q'], dir)
   const r = bdTry(['init', '--stealth', '--skip-agents', '--skip-hooks', '--quiet'], 30_000, dir)
   return r.code === 0
     ? undefined
