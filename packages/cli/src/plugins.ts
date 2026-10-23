@@ -49,6 +49,7 @@ import {
 } from '@broject/query'
 import { guardConnector, guardSection } from '@broject/guard'
 import { judgeSection, llmJudgeConnector, systemoneConnector } from '@broject/judge'
+import { runAcpCommand } from './commands/acp.ts'
 import { runAcpWorkerCommand } from './commands/acp-worker.ts'
 import { applyActPlan, runActCommand } from './commands/act.ts'
 import { runBusCommand } from './commands/bus.ts'
@@ -597,6 +598,24 @@ export const PLUGINS: BroPlugin[] = [
     summary: 'ACP provider spawn unit — backends exec this; never typed',
     run: runAcpWorkerCommand,
     hidden: true,
+  }),
+  definePlugin({
+    name: 'acp',
+    group: 'fleet',
+    summary: 'ACP edge — `proxy -- <agent cmd>` puts bro on the wire (spec bro-bhyo1)',
+    run: runAcpCommand,
+    skill: 'acp',
+    contract: {
+      subs: {
+        proxy: {
+          exits: {
+            0: 'client closed the wire — clean session end',
+            1: 'downstream agent died first — abnormal end',
+            2: 'usage — missing subcommand, missing `--`, or empty agent argv',
+          },
+        },
+      },
+    },
   }),
   definePlugin({
     name: 'providers',

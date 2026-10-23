@@ -58,6 +58,11 @@ export interface AgentTurnPlaneOpts {
   /** The ACP session id — part of the payload, and the fallback event
    *  `key` when no BRO_AGENT_ID badge is pinned. */
   sessionId: string
+  /** Archive scope — 'agents' (default) keys on the BRO_AGENT_ID badge
+   *  and writes `<common>/bro/agents/`; 'proxy' keys on the session id
+   *  and writes `<common>/bro/proxy/` even unbadged — a human-run
+   *  `bro acp proxy` carries no agent badge (specs/bro-bhyo1.md). */
+  plane?: 'agents' | 'proxy'
 }
 
 /** The per-turn observer pumpTurn drives: update() per session/update,
@@ -112,11 +117,16 @@ export function agentTurnPlane(opts: AgentTurnPlaneOpts): AgentTurnPlane {
   // the 'acp:' prefix keeps the namespace from colliding with real ids
   const key = agentId ?? `acp:${opts.sessionId}`
   const socket = busSocketPath(cwd)
-  const common = agentId === undefined ? null : gitCommonDir(cwd)
+  const scope = opts.plane ?? 'agents'
+  const common = agentId !== undefined || scope === 'proxy' ? gitCommonDir(cwd) : null
   const file =
-    agentId !== undefined && common !== null
-      ? join(common, 'bro', 'agents', `${agentId}.events.jsonl`)
-      : undefined
+    scope === 'proxy'
+      ? common !== null
+        ? join(common, 'bro', 'proxy', `acp-${opts.sessionId.replace(/[^\w.-]/g, '_')}.events.jsonl`)
+        : undefined
+      : agentId !== undefined && common !== null
+        ? join(common, 'bro', 'agents', `${agentId}.events.jsonl`)
+        : undefined
 
   let queue: Promise<unknown> = Promise.resolve()
   const seenTools = new Set<string>()
