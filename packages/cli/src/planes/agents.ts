@@ -61,6 +61,9 @@ const DELEGATE_ARG_TYPES: Record<string, 'string' | 'number' | 'boolean'> = {
   autoApprove: 'boolean',
 }
 
+const argOk = (v: unknown, kind: 'string' | 'number' | 'boolean'): boolean =>
+  typeof v === kind && v !== '' && (kind !== 'number' || Number.isFinite(v))
+
 /** exec args → DelegateRequest — PlaneVerbError on a mistyped field
  *  (client bug), the core's SpawnInputError on a semantically bad one. */
 function delegateArgs(args: Record<string, unknown>): DelegateRequest {
@@ -70,7 +73,7 @@ function delegateArgs(args: Record<string, unknown>): DelegateRequest {
     if (v === undefined) {
       continue
     }
-    if (typeof v !== kind || v === '' || (kind === 'number' && !Number.isFinite(v))) {
+    if (!argOk(v, kind)) {
       throw new PlaneVerbError('agents', DELEGATE, `${k} must be a non-empty ${kind}`)
     }
     req[k] = v
@@ -88,16 +91,37 @@ function delegateArgs(args: Record<string, unknown>): DelegateRequest {
   return req as unknown as DelegateRequest
 }
 
+const isInputErr = (err: unknown): boolean =>
+  err instanceof SpawnInputError || (err instanceof SpawnError && err.kind === 'input')
+
+const isUnavailableErr = (err: unknown): boolean =>
+  err instanceof SpawnError || err instanceof JudgeUnavailable
+
+/** The exec boundary reads files with the server's privileges — a
+ *  promptFile must resolve inside the project dir or it is an exfil
+ *  channel, not a prompt. Rewrites the field to the resolved path. */
+function promptFileUnder(dir: string, req: DelegateRequest): void {
+  if (req.promptFile === undefined) {
+    return
+  }
+  const resolved = resolve(dir, req.promptFile)
+  const root = resolve(dir)
+  if (resolved !== root && !resolved.startsWith(`${root}${sep}`)) {
+    throw new PlaneVerbError('agents', DELEGATE, 'promptFile must resolve inside the project directory')
+  }
+  req.promptFile = resolved
+}
+
 /** delegate()'s error vocabulary → the plane's: caller input is a
  *  client bug (PlaneVerbError → REST 400), a refusal or unreachable
  *  backend — including an ACP peer that never answered — is
  *  PlaneUnavailable (→ 503). Never a bare 500. */
 function execOrPlaneError(err: unknown): never {
   const msg = err instanceof Error ? err.message : String(err)
-  if (err instanceof SpawnInputError || (err instanceof SpawnError && err.kind === 'input')) {
+  if (isInputErr(err)) {
     throw new PlaneVerbError('agents', DELEGATE, msg)
   }
-  if (err instanceof SpawnError || err instanceof JudgeUnavailable) {
+  if (isUnavailableErr(err)) {
     throw new PlaneUnavailable('agents', msg)
   }
   throw err
@@ -196,17 +220,7 @@ export function agentsPlane(ctx: PlaneCtx): PlaneDescriptor {
       }
       try {
         const req = delegateArgs(args)
-        // the exec boundary reads files with the server's privileges —
-        // a promptFile must resolve inside the project dir or it is an
-        // exfil channel, not a prompt
-        if (req.promptFile !== undefined) {
-          const resolved = resolve(dir, req.promptFile)
-          const root = resolve(dir)
-          if (resolved !== root && !resolved.startsWith(`${root}${sep}`)) {
-            throw new PlaneVerbError('agents', DELEGATE, 'promptFile must resolve inside the project directory')
-          }
-          req.promptFile = resolved
-        }
+        promptFileUnder(dir, req)
         return await delegate(dir, env(), req)
       } catch (err) {
         execOrPlaneError(err)

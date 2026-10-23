@@ -27,18 +27,22 @@ interface Fixture {
 /** Detached workers outlive a failed assertion — kill whatever the
  *  registry still points at before the tmpdir goes away (tests fake
  *  'running' with their own pid — never kill self or the runner). */
+function registeredPids(main: string): number[] {
+  try {
+    return Object.values(readAgentRegistry(main)).map((e) =>
+      typeof e.pid === 'number' ? e.pid : 0
+    )
+  } catch {
+    return [] // no readable registry — nothing spawned
+  }
+}
+
+const killable = (pid: number): boolean =>
+  pid > 0 && pid !== process.pid && pid !== process.ppid
+
 function killRegistered(main: string): void {
-  const pids = (() => {
-    try {
-      return Object.values(readAgentRegistry(main)).map((e) =>
-        typeof e.pid === 'number' ? e.pid : 0
-      )
-    } catch {
-      return [] // no readable registry — nothing spawned
-    }
-  })()
-  for (const pid of pids) {
-    if (pid <= 0 || pid === process.pid || pid === process.ppid) {
+  for (const pid of registeredPids(main)) {
+    if (!killable(pid)) {
       continue
     }
     try {
