@@ -55,21 +55,28 @@ export interface AcpProxyOptions {
 
 /** One proxied ACP session — stamped when a session/new|load|fork
  *  response crosses with a session id. `cwd` is the client-supplied
- *  repo root every seam call and the turn plane resolve inside. */
+ *  repo root every seam call and the turn plane resolve inside —
+ *  undefined when the params carried none (load/resume/fork have no
+ *  cwd field): the seam skips that session rather than probe the
+ *  proxy's own cwd, which is never a substitute (spec bro-bhyo1). */
 interface ProxySession {
-  cwd: string
+  cwd: string | undefined
   /** The session's first prompt has crossed (injection claim made). */
   seenPrompt: boolean
-  /** A first prompt whose seam collection is still in flight — a
-   *  session/cancel landing here aborts the forward and answers the
-   *  prompt upstream `stopReason:'cancelled'`: the wire never shows a
-   *  prompt after its cancel (spec bro-bhyo1 §lifecycle). */
-  injecting?: { aborted: boolean }
+  /** session/prompt ids held in the writeQ — seam collection queued or
+   *  in flight. A session/cancel answers exactly these upstream
+   *  `stopReason:'cancelled'` and they never cross; a prompt already
+   *  crossed keeps its pending entry so the agent's own answer still
+   *  lands — answering a crossed prompt here would fork two responses
+   *  for one wire id. */
+  held: Set<JsonRpcId>
   /** Session-scoped c2a writes queue behind a pending injection so a
    *  following set_mode/cancel can't overtake the held prompt on the
    *  downstream wire. */
   writeQ: Promise<void>
-  plane: AgentTurnPlane
+  /** undefined when the session has no cwd — the plane resolves inside
+   *  the session repo or doesn't exist. */
+  plane: AgentTurnPlane | undefined
   span: OtelSpan | undefined
 }
 
@@ -80,8 +87,9 @@ interface PendingRequest {
   /** session/prompt bookkeeping — the turn span and its session. */
   prompt?: { sessionId: string; span: OtelSpan }
   /** session/new|load|fork bookkeeping — the cwd/sessionId to stamp
-   *  onto the response's session id. */
-  bind?: { cwd: string; sessionId?: string }
+   *  onto the response's session id. `cwd` stays undefined when the
+   *  params carried none — never the proxy's own cwd. */
+  bind?: { cwd: string | undefined; sessionId?: string }
 }
 
 /** Latch — resolves once; the winner decides the proxy's verdict. */
@@ -193,7 +201,9 @@ export async function acpProxy(
   }
 
   /** One seam call — both seam legs are optional and fail-open: a
-   *  throwing collector is an unsettled probe, never a dead prompt. */
+   *  throwing collector is an unsettled probe, never a dead prompt. A
+   *  session without a cwd skips the seam entirely — the proxy's own
+   *  cwd is not a fallback, it is a different repo. */
   const seamCall = async (
     fn:
       | ((cwd: string, sessionId: string, prompt: string) => Promise<string | undefined>)
@@ -202,7 +212,7 @@ export async function acpProxy(
     sessionId: string,
     prompt: string
   ): Promise<string | undefined> => {
-    if (fn === undefined) return undefined
+    if (fn === undefined || session.cwd === undefined) return undefined
     try {
       return (await fn(session.cwd, sessionId, prompt)) ?? undefined
     } catch {
@@ -253,22 +263,26 @@ export async function acpProxy(
       pending.set(id, { method, prompt: { sessionId, span: turn } })
       // The injection is a held write — it must not stall the read
       // loop (session/cancel lands during collection), but it must not
-      // be overtaken by later session writes either.
-      const injecting: { aborted: boolean } = { aborted: false }
-      ses.injecting = injecting
+      // be overtaken by later session writes either. `held` marks it
+      // from enqueue until the write attempt — a per-prompt flag would
+      // lose every prompt queued behind the first (the cancel path
+      // aborts held prompts by deleting their pending entry).
+      ses.held.add(id)
       ses.writeQ = ses.writeQ.then(async () => {
         try {
+          // pending discharged → the cancel path already answered this
+          // prompt upstream; it must not cross now. Checked twice —
+          // the seam collection between them is the abortable window.
+          if (!pending.has(id) || downDead.fired) {
+            return
+          }
           const rewritten = await injectPrompt(m, params, sessionId, ses, first)
-          // aborted → the cancel path already answered this prompt
-          // upstream and ended its turn span; dead → the teardown
-          // pass answers everything still pending. Either way this
-          // prompt must not cross now.
-          if (injecting.aborted || downDead.fired) {
+          if (!pending.has(id) || downDead.fired) {
             return
           }
           writeDown(rewritten)
         } finally {
-          ses.injecting = undefined
+          ses.held.delete(id)
         }
       })
       return
@@ -287,29 +301,41 @@ export async function acpProxy(
       method === 'session/load' ||
       method === 'session/fork' ||
       method === 'session/resume'
-        ? { cwd: str(params?.['cwd']) ?? process.cwd(), sessionId: str(params?.['sessionId']) }
+        ? { cwd: str(params?.['cwd']), sessionId: str(params?.['sessionId']) }
         : undefined
     pending.set(id, { method, ...(bind !== undefined ? { bind } : {}) })
     writeDownFor(sessionId, m)
   }
 
-  /** c2a notification — verbatim; session/cancel also aborts a held
-   *  first prompt so the wire never shows a prompt after its cancel. */
+  /** c2a notification — verbatim; session/cancel first answers every
+   *  held prompt of the session upstream `stopReason:'cancelled'`
+   *  (held prompts never cross — the wire never shows a prompt after
+   *  its cancel). The cancel itself crosses only while crossed work
+   *  still runs downstream — it is session-scoped, so in-flight prompts
+   *  are its real targets; a cancel whose whole target set was held
+   *  prompts is fully handled by the proxy, and forwarding it would
+   *  show a cancel without its prompt. */
   const onClientNotification = (m: AnyMessage): void => {
     if (wire(m).method === 'session/cancel') {
       const sessionId = sessionIdOf(m)
       const ses = sessionId === undefined ? undefined : sessions.get(sessionId)
-      if (ses?.injecting !== undefined) {
-        ses.injecting.aborted = true
-        // the held prompt is answered by us — downstream never sees it
+      if (ses !== undefined) {
+        let heldAborted = 0
         for (const [id, p] of pending) {
           const pr = p.prompt
-          if (pr !== undefined && pr.sessionId === sessionId) {
+          if (pr !== undefined && pr.sessionId === sessionId && ses.held.has(id)) {
             pending.delete(id)
+            heldAborted++
             pr.span.end({ 'acp.stop_reason': 'cancelled' })
-            ses.plane.stop('cancelled')
+            ses.plane?.stop('cancelled')
             answerUpstream(id, { stopReason: 'cancelled' })
           }
+        }
+        const inFlight = [...pending.values()].some(
+          (p) => p.prompt?.sessionId === sessionId
+        )
+        if (heldAborted > 0 && !inFlight) {
+          return
         }
       }
     }
@@ -325,7 +351,7 @@ export async function acpProxy(
       const ses = sessionId === undefined ? undefined : sessions.get(sessionId)
       if (ses !== undefined && update !== undefined) {
         try {
-          ses.plane.update(update as SessionUpdate)
+          ses.plane?.update(update as SessionUpdate)
         } catch {
           // telemetry is advisory — a malformed update must not cost the wire
         }
@@ -344,17 +370,21 @@ export async function acpProxy(
       const result = wire(m).result
       const sid = req.bind.sessionId ?? (isRecord(result) ? str(result['sessionId']) : undefined)
       if (sid !== undefined && !sessions.has(sid)) {
-        const plane = agentTurnPlane({
-          cwd: req.bind.cwd,
-          by: 'acp proxy',
-          sessionId: sid,
-          plane: 'proxy',
-        })
+        const cwd = req.bind.cwd
         sessions.set(sid, {
-          cwd: req.bind.cwd,
+          cwd,
           seenPrompt: false,
+          held: new Set(),
           writeQ: Promise.resolve(),
-          plane,
+          plane:
+            cwd === undefined
+              ? undefined
+              : agentTurnPlane({
+                  cwd,
+                  by: 'acp proxy',
+                  sessionId: sid,
+                  plane: 'proxy',
+                }),
           span: otelSpan('acp.proxy.session', { 'acp.session': sid }),
         })
       }
@@ -371,7 +401,7 @@ export async function acpProxy(
         },
         failed ? 'error' : 'ok'
       )
-      ses?.plane.stop(stopReason, failed ? { error: 'session/prompt error' } : {})
+      ses?.plane?.stop(stopReason, failed ? { error: 'session/prompt error' } : {})
     }
     writeUp(m)
   }
@@ -453,7 +483,7 @@ export async function acpProxy(
     // endDetached — the process exits right after this return, an
     // in-flight fetch here never lands (spec bro-huy5o.11 §endDetached)
     ses.span?.endDetached({ 'acp.proxy.verdict': verdict })
-    await ses.plane.drain()
+    await ses.plane?.drain()
   }
   // both legs close — the writer locks release and the streams settle
   for (const w of [upWriter, downWriter]) {

@@ -45,6 +45,8 @@ export interface FakeAcpAgent {
   configSets: Array<{ configId: string; value: unknown }>
   /** session/new requests (cwd recorded). */
   sessions: Array<{ cwd: string }>
+  /** session/cancel notifications the agent received (session ids). */
+  cancels: string[]
   /** The client's answer to a scripted session/request_permission. */
   permissionOutcome?: unknown
   /** What the agent got back from a scripted terminal/* round-trip. */
@@ -104,6 +106,7 @@ export function fakeAcpAgent(
     blocks: [],
     configSets: [],
     sessions: [],
+    cancels: [],
   }
   const app = agent({ name: 'fake-acp' })
     .onRequest('initialize', (ctx) => {
@@ -140,6 +143,9 @@ export function fakeAcpAgent(
             : o
         ),
       }
+    })
+    .onNotification('session/cancel', (ctx) => {
+      seen.cancels.push(ctx.params.sessionId)
     })
     .onRequest('session/prompt', async (ctx) => {
       seen.blocks.push(ctx.params.prompt)

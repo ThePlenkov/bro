@@ -90,9 +90,9 @@ Intercepted, all inside the upstream catch-all (direction C→A):
 | Wire point | What bro does |
 | ---------- | ------------- |
 | `initialize` | Forward verbatim both ways — the downstream negotiates; the proxy never claims caps it won't serve. |
-| `session/new` · `session/fork` · `session/load` · `session/resume` | Forward verbatim. On a successful response carrying `sessionId`, stamp a pending-context buffer `{cwd}` for that session (`cwd` from request params for new/fork; `params.sessionId` keyed for load/resume). |
+| `session/new` · `session/fork` · `session/load` · `session/resume` | Forward verbatim. On a successful response carrying `sessionId`, stamp a pending-context buffer `{cwd}` for that session (`cwd` from request params — absent on load/resume/fork the session stamps cwd-less and the seam skips it; the proxy's own cwd is never a fallback). |
 | `session/prompt` | Claim the session's pending buffer atomically; run the prompt-submit seam on the flattened prompt text; prepend ONE `text` content block combining session-start context (first prompt only) + prompt-submit context (every prompt); forward the rewritten params. |
-| `session/cancel` | Forward verbatim; if the session has a held first-prompt still computing its injection, answer that prompt upstream with `{stopReason:'cancelled'}` ourselves — the wire never shows a prompt after its cancel. |
+| `session/cancel` | Held prompts (injection queued or computing) are answered upstream with `{stopReason:'cancelled'}` and never cross — the wire never shows a prompt after its cancel. The cancel itself crosses only while crossed work still runs downstream — it is session-scoped, in-flight prompts are its real targets; a cancel whose whole target set was held prompts is fully handled by the proxy, so the wire never shows a cancel without its prompt either. |
 | everything else | Verbatim — `session/set_*`, `authenticate`, `providers/*`, `nes/*`, `document/*`, unknown `_`-methods. |
 
 And the downstream catch-all (direction A→C): everything verbatim —
@@ -127,7 +127,9 @@ seam.promptContext = async (cwd, sessionId, text) =>
 
 **cwd is per-session.** Every probe runs against `session/new.cwd`,
 never the proxy process's cwd — a client that opens a session in
-another repo gets THAT repo's context or nothing. `hooksStateDir`
+another repo gets THAT repo's context or nothing, and a session whose
+params carry no `cwd` at all (`session/load`/`resume`/`fork`) skips the
+seam rather than probing the wrong repo. `hooksStateDir`
 execs `git rev-parse --git-common-dir` with `cwd: dir` so markers,
 trace tails, and the context cache all resolve inside the session's
 repo. The pending buffer records `cwd` at `session/new`; the prompt

@@ -21,6 +21,7 @@ import type {
   AnyMessage,
   ClientConnection,
   ClientContext,
+  JsonRpcId,
   Stream,
 } from '@agentclientprotocol/sdk'
 import { acpProxy, type AcpProxySeam } from './acp-proxy.ts'
@@ -369,8 +370,150 @@ describe('acpProxy — context injection seam', () => {
       // the prompt was answered by the proxy — the downstream wire
       // never carried it (the wire never shows a prompt after its cancel)
       assert.equal(r.fake.prompts.length, 0)
+      // and the cancel itself never crossed either — its whole target
+      // set was held prompts the proxy already answered
+      assert.deepEqual(r.fake.cancels, [])
     } finally {
       assert.equal(await close(r), 0)
+    }
+  })
+
+  test('cancel crosses while crossed work still runs — held sibling aborted, in-flight prompt keeps its own answer', async () => {
+    let releaseTurn!: () => void
+    let releaseSeam!: () => void
+    let seamEntered!: () => void
+    const turnGate = new Promise<void>((r2) => { releaseTurn = r2 })
+    const seamGate = new Promise<void>((r2) => { releaseSeam = r2 })
+    const entered = new Promise<void>((r2) => { seamEntered = r2 })
+    const r = rig({ replyText: 'ok', holdEnd: () => turnGate }, {
+      sessionContext: async () => 'S',
+      promptContext: async (_c, _s, text) => {
+        if (text === 'b-text') {
+          seamEntered()
+          await seamGate
+        }
+        return 'P'
+      },
+    })
+    try {
+      const sessionId = await openSession(r.acp)
+      // A crosses (fast seam) and runs — the fake's holdEnd keeps its
+      // turn open downstream
+      const a = r.acp.request<{ stopReason: string }>('session/prompt', {
+        sessionId,
+        prompt: [{ type: 'text', text: 'a-text' }],
+      })
+      await new Promise((r2) => setTimeout(r2, 50))
+      assert.equal(r.fake.prompts.length, 1)
+      // B queues behind its gated prompt-submit collection — held
+      const b = r.acp.request<{ stopReason: string }>('session/prompt', {
+        sessionId,
+        prompt: [{ type: 'text', text: 'b-text' }],
+      })
+      await entered
+      await r.acp.notify('session/cancel', { sessionId })
+      releaseSeam()
+      releaseTurn()
+      // B was held → the proxy answered it; A was crossed → the
+      // agent's own answer still lands (no duplicate/forked response)
+      assert.equal((await b).stopReason, 'cancelled')
+      assert.equal((await a).stopReason, 'end_turn')
+      // the cancel's downstream write settles a few microtasks behind
+      // A's upstream answer — give the wire a tick, then assert: the
+      // cancel crossed exactly once, A was its real target
+      await new Promise((r2) => setTimeout(r2, 30))
+      assert.deepEqual(r.fake.cancels, ['sess-1'])
+      assert.equal(r.fake.prompts.length, 1)
+    } finally {
+      assert.equal(await close(r), 0)
+    }
+  })
+
+  test('two prompts held behind one collection are both aborted — the second never crosses after its upstream answer', async () => {
+    let release!: () => void
+    const gate = new Promise<void>((r2) => { release = r2 })
+    const r = rig({ replyText: 'ok' }, {
+      sessionContext: async () => { await gate; return 'S' },
+      promptContext: async () => 'P',
+    })
+    try {
+      const sessionId = await openSession(r.acp)
+      const a = r.acp.request<{ stopReason: string }>('session/prompt', {
+        sessionId,
+        prompt: [{ type: 'text', text: 'a' }],
+      })
+      // B arrives while A is still held — it is held too, not just
+      // tracked by a single-slot injecting flag
+      const b = r.acp.request<{ stopReason: string }>('session/prompt', {
+        sessionId,
+        prompt: [{ type: 'text', text: 'b' }],
+      })
+      await new Promise((r2) => setTimeout(r2, 50))
+      await r.acp.notify('session/cancel', { sessionId })
+      release()
+      assert.equal((await a).stopReason, 'cancelled')
+      assert.equal((await b).stopReason, 'cancelled')
+      assert.equal(r.fake.prompts.length, 0)
+      assert.deepEqual(r.fake.cancels, [])
+    } finally {
+      assert.equal(await close(r), 0)
+    }
+  })
+
+  test('a session without a cwd skips the seam — byte-identical forwarding, no proxy-cwd fallback', async () => {
+    const calls: string[] = []
+    const seen: { prompts?: unknown } = {}
+    const [clientSide, proxyUp] = streamPair()
+    const [proxyDown, agentSide] = streamPair()
+    // bespoke downstream as a RAW responder — a typed agent() app
+    // schema-validates inbound and rejects a cwd-less session before
+    // the wire question is even asked
+    const agentReader = agentSide.readable.getReader()
+    const agentWriter = agentSide.writable.getWriter()
+    const responder = (async () => {
+      for (;;) {
+        const { value, done } = await agentReader.read()
+        if (done) return
+        const m = value as { id?: JsonRpcId; method?: string; params?: { prompt?: unknown } }
+        if (m.method === 'initialize') {
+          await agentWriter.write({ jsonrpc: '2.0', id: m.id, result: { protocolVersion: 1 } } as AnyMessage)
+        } else if (m.method === 'session/new') {
+          // malformed but plausible — no cwd field
+          await agentWriter.write({ jsonrpc: '2.0', id: m.id, result: { sessionId: 's-nc' } } as AnyMessage)
+        } else if (m.method === 'session/prompt') {
+          seen.prompts = m.params?.prompt
+          await agentWriter.write({ jsonrpc: '2.0', id: m.id, result: { stopReason: 'end_turn' } } as AnyMessage)
+        }
+      }
+    })()
+    const conn = client({ name: 'test-client' }).connect(clientSide)
+    const proxyDone = acpProxy(proxyUp, proxyDown, {
+      seam: {
+        sessionContext: async (cwd) => { calls.push(cwd); return 'S' },
+        promptContext: async (cwd) => { calls.push(cwd); return 'P' },
+      },
+      log: () => {},
+    })
+    try {
+      await conn.agent.request('initialize', INIT_PARAMS)
+      const ses = (await conn.agent.request('session/new', { mcpServers: [] } as never)) as {
+        sessionId: string
+      }
+      assert.equal(ses.sessionId, 's-nc')
+      const res = await conn.agent.request<{ stopReason: string }>('session/prompt', {
+        sessionId: 's-nc',
+        prompt: [{ type: 'text', text: 'x' }],
+      })
+      assert.equal(res.stopReason, 'end_turn')
+      assert.deepEqual(seen.prompts, [{ type: 'text', text: 'x' }])
+      // the seam never ran — cwd-less session, not the proxy's cwd
+      assert.deepEqual(calls, [])
+    } finally {
+      conn.close()
+      await clientSide.writable.getWriter().close().catch(() => {})
+      assert.equal(await proxyDone, 0)
+      agentWriter.close().catch(() => {})
+      await responder
     }
   })
 })
