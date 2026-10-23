@@ -15,7 +15,8 @@ import {
 import { readAgentRegistry, writeAgentRegistry } from '@broject/core'
 import { fakeAcpAgent } from '@broject/providers/testkit'
 import { capture, initRepo, installFakeBd } from './testrepo.ts'
-import { delegate, runDelegateCommand } from './delegate.ts'
+import { delegate } from './delegate.ts'
+import { runDelegateCommand } from './delegate-cli.ts'
 
 interface Fixture {
   root: string

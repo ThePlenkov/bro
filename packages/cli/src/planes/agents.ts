@@ -83,6 +83,15 @@ function delegateArgs(args: Record<string, unknown>): DelegateRequest {
   if (req['mode'] !== undefined && !isDelegateMode(req['mode'])) {
     throw new PlaneVerbError('agents', DELEGATE, `mode must be 'wait' or 'detach'`)
   }
+  checkNoProvenanceArg(args)
+  return req as unknown as DelegateRequest
+}
+
+/** delegatedBy is stamped from the caller identity (BRO_AGENT_ID),
+ *  never a self-declared request field — a remote caller cannot
+ *  authenticate as an agent, so the arg itself is a forgery attempt
+ *  and refuses loud. */
+function checkNoProvenanceArg(args: Record<string, unknown>): void {
   if (args['delegatedBy'] !== undefined) {
     throw new PlaneVerbError(
       'agents',
@@ -90,7 +99,6 @@ function delegateArgs(args: Record<string, unknown>): DelegateRequest {
       'delegatedBy is stamped from the caller identity (BRO_AGENT_ID) — it is not a request arg'
     )
   }
-  return req as unknown as DelegateRequest
 }
 
 const isInputErr = (err: unknown): boolean =>
