@@ -22,11 +22,22 @@ directory:
 Clients: `opencode` (global `$XDG_CONFIG_HOME/opencode/plugins/bro.ts` +
 the TUI `bro-cli.ts`, local `<repo>/.opencode/plugins/`), `kilo` (module
 plus a `file:///` entry in `kilo.json`'s `plugin` array on global
-installs), `pi` (`<agentDir>/extensions/bro.ts`). Every adapter carries a
-`bro-adapter` sentinel comment so detection survives a rename.
+installs), `pi` (`<agentDir>/extensions/bro.ts`), `omp`
+(`<agentDir>/extensions/bro.ts`, or `<repo>/.omp/extensions/`). Every
+adapter carries a `bro-adapter` sentinel comment so detection survives a
+rename.
 Marketplace clients — Devin, Claude Code, Codex, Cursor — install from
 the repo's plugin manifests instead; see
 [Getting started](/docs).
+
+The `omp` client has a second, richer form: `plugins/omp/bro` is a
+full omp plugin package — the adapter plus bro's skills, a pre-tool
+guard hook, and `WATCHDOG.md` (the advisor's review priorities).
+Install it with `omp plugin install ./plugins/omp/bro`. Its mode
+bridges hand omp's native Plan, Goal, Vibe, Prewalk and Advisor the
+durable state they lack — claims, specs, the judge, the review-debt
+ledger — without reimplementing any of them. See
+[specs/bro-omp-plugin.md](https://github.com/ThePlenkov/bro/blob/main/specs/bro-omp-plugin.md).
 
 ## The contract
 

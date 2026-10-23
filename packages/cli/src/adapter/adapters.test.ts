@@ -1,0 +1,118 @@
+/**
+ * The bundled adapters must load, register their surfaces, and speak
+ * their host's event vocabulary.
+ *
+ * These tests run against the *generated* artifacts under plugins/ —
+ * the files a host actually loads. A bundle that splits into a chunk,
+ * loses its default export, or drops the ownership sentinel breaks the
+ * install silently: the host loads a file that registers nothing.
+ */
+import { strict as assert } from 'node:assert'
+import { existsSync, readFileSync } from 'node:fs'
+import { dirname, join } from 'node:path'
+import { fileURLToPath } from 'node:url'
+import { test } from 'node:test'
+
+const repoRoot = join(dirname(fileURLToPath(import.meta.url)), '..', '..', '..', '..')
+
+interface LoadedAdapter {
+  default: (pi: unknown) => void
+  adapter?: { id: string; kind: string }
+}
+
+/** A host stub that records what the adapter registers. */
+function hostStub(): {
+  pi: unknown
+  events: string[]
+  commands: string[]
+  tools: string[]
+} {
+  const events: string[] = []
+  const commands: string[] = []
+  const tools: string[] = []
+  const pi = {
+    on: (name: string) => events.push(name),
+    registerCommand: (name: string) => commands.push(name),
+    registerTool: (tool: { name: string }) => tools.push(tool.name),
+    exec: async () => ({ stdout: '', stderr: '', code: 0, killed: false }),
+    sendMessage: () => {},
+  }
+  return { pi, events, commands, tools }
+}
+
+async function loadAdapter(rel: string): Promise<LoadedAdapter> {
+  const path = join(repoRoot, rel)
+  assert.ok(existsSync(path), `${rel} is missing — run npm run gen:plugins`)
+  return (await import(path)) as LoadedAdapter
+}
+
+test('the pi adapter loads, registers its surfaces, and speaks pi events', async () => {
+  const mod = await loadAdapter('plugins/pi/bro/bro.ts')
+  const { pi, events, commands, tools } = hostStub()
+  mod.default(pi)
+
+  // pi's lifecycle vocabulary — the settle gate is pi's own
+  assert.ok(events.includes('session_start'))
+  assert.ok(events.includes('agent_before_settle'))
+  assert.ok(events.includes('before_agent_start'))
+  assert.ok(events.includes('tool_result'))
+  assert.ok(events.includes('session_compact'))
+  // omp's vocabulary must NOT leak into pi's adapter
+  assert.ok(!events.includes('session_stop'))
+
+  assert.deepEqual(commands, ['bro'])
+  assert.deepEqual(tools, ['bro_status'])
+  assert.deepEqual(mod.adapter, { id: 'bro', kind: 'pi-extension' })
+})
+
+test('the omp adapter loads, registers its surfaces, and speaks omp events', async () => {
+  const mod = await loadAdapter('plugins/omp/bro/bro.ts')
+  const { pi, events, commands, tools } = hostStub()
+  mod.default(pi)
+
+  // omp's own vocabulary — the native stop gate is session_stop
+  assert.ok(events.includes('session_start'))
+  assert.ok(events.includes('session_stop'))
+  assert.ok(events.includes('before_agent_start'))
+  assert.ok(events.includes('tool_result'))
+  assert.ok(events.includes('session_compact'))
+  // pi's settle gate is pi's own — it must not leak into omp's adapter
+  assert.ok(!events.includes('agent_before_settle'))
+
+  assert.deepEqual(commands, ['bro'])
+  assert.deepEqual(tools, ['bro_status'])
+  assert.deepEqual(mod.adapter, { id: 'bro', kind: 'omp-extension' })
+})
+
+test('the omp adapter registers the mode bridges on omp events', async () => {
+  const mod = await loadAdapter('plugins/omp/bro/bro.ts')
+  const { pi, events } = hostStub()
+  mod.default(pi)
+
+  // the bridges are the reason bro is on omp at all — Plan, Goal and
+  // Vibe each get bro's durable state
+  assert.ok(events.includes('plan_review_requested'))
+  assert.ok(events.includes('goal_updated'))
+  assert.ok(events.includes('before_subagent_spawn'))
+})
+
+test('the shipped adapters carry the ownership sentinel', async () => {
+  // `bro plugins install` refuses to overwrite a foreign file that
+  // holds the slot — the sentinel is how bro recognizes its own, and
+  // the bundler re-emits it as a banner (rolldown drops module
+  // leading comments).
+  for (const rel of ['plugins/pi/bro/bro.ts', 'plugins/omp/bro/bro.ts']) {
+    const text = readFileSync(join(repoRoot, rel), 'utf8')
+    assert.ok(text.includes('bro-adapter'), `${rel} lost the bro-adapter sentinel`)
+  }
+})
+
+test('the shipped adapters resolve no sibling module', async () => {
+  // a host loads the file with no node_modules — a relative import
+  // would fail at load time, silently, in the host's session
+  for (const rel of ['plugins/pi/bro/bro.ts', 'plugins/omp/bro/bro.ts']) {
+    const text = readFileSync(join(repoRoot, rel), 'utf8')
+    const relative = [...text.matchAll(/from\s+['"](\.[^'"]*)['"]/g)].map((m) => m[1] ?? '')
+    assert.deepEqual(relative, [], `${rel} imports a sibling module: ${relative.join(', ')}`)
+  }
+})

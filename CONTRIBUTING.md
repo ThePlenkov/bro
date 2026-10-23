@@ -76,6 +76,35 @@ stdin/stdout contract as `hooks/run.sh` rather than importing bro, so the
 plugin and the CLI can never be different versions. Any bro policy added to
 that contract lands in every adapter at once.
 
+### The adapter framework (pi, omp)
+
+The pi and omp adapters share a core under `packages/cli/src/adapter/`:
+
+- `core.ts` — the host-agnostic half: the CLI resolution ladder, the
+  `bro hooks` spawn-and-parse protocol, the board read. No host types and
+  no `@broject/*` imports — a bundle would drag a package's worth of
+  unrelated code into a two-hundred-line artifact.
+- `host.ts` — the driver: when to probe, what to cache, when to inject. One
+  copy, so it cannot drift from itself.
+- `pi.ts` / `omp.ts` — the bindings: the host's event names, its UI calls,
+  how it spells "refuse to stop". That is the whole difference between
+  hosts.
+
+A host loads an adapter as a **single file** with no `node_modules` to
+resolve against, so the shared core cannot be imported at runtime —
+`scripts/bundle-adapter.ts` folds it in at build time and `gen-plugins.ts`
+emits the result. The copies still exist; what is gone is the chance for
+them to disagree. (Before the split, three adapters carried a near-verbatim
+copy of the same 120 lines, and the copies drifted: pi had no
+`options.command` tier in its ladder, and kilo's header documented an npx
+fallback its code never implemented.)
+
+Adding a host means writing one binding file and one line in
+`gen-plugins.ts`. `packages/cli/src/adapter/adapters.test.ts` pins the
+contract: the shipped artifact loads, registers its surfaces, speaks its
+host's event vocabulary, keeps the `bro-adapter` sentinel, and resolves no
+sibling module.
+
 ## Setup
 
 Prereqs: `node >= 22.18` (native TS type-stripping) and `gh` authenticated.

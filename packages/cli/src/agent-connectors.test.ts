@@ -1970,17 +1970,18 @@ describe('broSpawnArgv', () => {
   test('bro on PATH wins; an empty PATH falls back to the npx shim', () => {
     const npxFallback = ['npx', '-y', `@broject/bro@${VERSION.split('.')[0]}`]
     assert.deepEqual(broSpawnArgv({ PATH: '' }), npxFallback)
-    // whatever dir holds this test's node binary doubles as a fake bin dir
-    const binDir = join(process.execPath, '..')
-    assert.deepEqual(broSpawnArgv({ PATH: binDir }), npxFallback)
-    // drop a `bro` shim next to it — PATH-first picks the plain name
-    const dir = mkdtempSync(join(tmpdir(), 'bro-bin-'))
+    // a dir with no bro in it falls back too — an empty temp dir, not
+    // the node bin dir: a developer machine may have bro installed
+    // globally, and the PATH scan would then find it
+    const emptyDir = mkdtempSync(join(tmpdir(), 'bro-bin-'))
     try {
-      writeFileSync(join(dir, 'bro'), '#!/bin/sh\n')
-      chmodSync(join(dir, 'bro'), 0o755)
-      assert.deepEqual(broSpawnArgv({ PATH: dir }), ['bro'])
+      assert.deepEqual(broSpawnArgv({ PATH: emptyDir }), npxFallback)
+      // drop a `bro` shim next to it — PATH-first picks the plain name
+      writeFileSync(join(emptyDir, 'bro'), '#!/bin/sh\n')
+      chmodSync(join(emptyDir, 'bro'), 0o755)
+      assert.deepEqual(broSpawnArgv({ PATH: emptyDir }), ['bro'])
     } finally {
-      rmSync(dir, { recursive: true, force: true })
+      rmSync(emptyDir, { recursive: true, force: true })
     }
   })
 })

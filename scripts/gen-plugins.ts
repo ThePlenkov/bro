@@ -29,6 +29,7 @@ import { cpSync, existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, re
 import { dirname, join, relative, sep } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { CURSOR_SELF_TOOL_MATCHER } from '../packages/cli/src/cursor-hook.ts'
+import { bundleAdapter } from './bundle-adapter.ts'
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..')
 const CHECK = process.argv.includes('--check')
@@ -58,6 +59,7 @@ const cliVersion = readJson('packages/cli/package.json').version
 const MARKETPLACES = [
   '.claude-plugin/marketplace.json',
   '.agents/plugins/marketplace.json',
+  '.omp-plugin/marketplace.json',
 ]
 if (SYNC_VERSION) {
   // surgical replace — reserializing churns unrelated formatting
@@ -181,6 +183,16 @@ if (cursorMarketplace.name !== 'bro' || cursorEntry?.source !== 'plugins/cursor/
 if (cursorEntry.version !== undefined && cursorEntry.version !== cliVersion) {
   console.error(
     `.cursor-plugin/marketplace.json: version ${cursorEntry.version} != packages/cli version ${cliVersion}`
+  )
+  process.exit(1)
+}
+// omp's marketplace points at the plugin package, not the repo root —
+// the omp plugin carries its own manifest and skills tree.
+const ompMarketplace = readJson('.omp-plugin/marketplace.json')
+const ompEntry = (ompMarketplace.plugins ?? []).find((p) => p?.name === 'bro')
+if (ompEntry?.source !== './plugins/omp/bro') {
+  console.error(
+    '.omp-plugin/marketplace.json: bro source must be "./plugins/omp/bro" — the omp plugin is its own package'
   )
   process.exit(1)
 }
@@ -380,6 +392,102 @@ never an error.
 `
 }
 
+/** The omp plugin manifest — the `omp.extensions` entry point plus the
+ *  metadata omp's plugin manager and marketplace show. */
+function ompManifest() {
+  return `${JSON.stringify(
+    {
+      name: 'bro',
+      version: manifest.version,
+      description:
+        "Agent's sidekick — the rig that owns the PR-to-merge loop: beads claims, fleet workers, review gates, cross-repo mesh — all mechanics in the bro CLI over gh + beads",
+      author: { name: 'Petr Plenkov' },
+      homepage: 'https://broject.dev',
+      repository: {
+        type: 'git',
+        url: 'git+https://github.com/ThePlenkov/bro.git',
+        directory: 'plugins/omp/bro',
+      },
+      license: 'MIT',
+      keywords: [
+        'agent-rig',
+        'orchestration',
+        'fleet',
+        'convoy',
+        'mesh',
+        'pr-review',
+        'merge-gate',
+        'review-debt',
+        'beads',
+        'agent-workflow',
+      ],
+      omp: { extensions: ['./bro.ts'] },
+    },
+    null,
+    2
+  )}\n`
+}
+
+function ompReadme() {
+  return `# bro — omp plugin
+
+Agent's sidekick for omp: the live project board on omp's TUI plus the
+same lifecycle mechanics the shell adapters carry, over omp's in-process
+extension API. \`bro.ts\` is generated from
+\`packages/cli/src/adapter/omp.ts\` — the shared adapter core folded into
+one self-contained module (node builtins only) by
+\`npm run gen:plugins\`; \`check:plugins\` fails when it drifts.
+
+## What it wires
+
+- **board widget** — \`bro status --json\` rendered via
+  \`ctx.ui.setWidget\`/\`setStatus\`, refreshed on session start, turn
+  end, and after a gate.
+- **lifecycle** — omp events → \`bro hooks <event>\`: session-start and
+  post-compaction rehydration injected once as a hidden context message,
+  pre-compact carried across, prompt-submit nudges, post-tool arming,
+  and \`session_stop\` → the stop gate.
+- **the stop gate is native** — omp's \`session_stop\` accepts
+  \`{decision:"block", reason}\` and re-fires with
+  \`stop_hook_active: true\`. bro's gate maps straight onto it, and
+  omp's flag goes straight back into bro's hook payload. No synthetic
+  re-prompt, no hand-rolled continuation.
+- **\`/bro\`** — bare refreshes the board; \`/bro act|next|fleet|…\`
+  runs the CLI and drops the output into the transcript.
+- **\`bro_status\` tool** — the board JSON as a model-callable read.
+
+## The mode bridges
+
+omp already has Plan, Goal, Vibe, Prewalk and Advisor. bro does not
+reimplement them — it supplies the state they cannot have. See
+\`modes.ts\` for the full mapping; the short version:
+
+| omp mode | what bro adds |
+| --- | --- |
+| Plan | the bead and spec the plan must answer, plus the claims in flight |
+| Goal | the bead the objective belongs to, and the judge that says "met" |
+| Vibe | the claims — who owns which bead, so two workers never edit one |
+| Prewalk | the provider routing that says which model is fast *here* |
+| Advisor | \`WATCHDOG.md\` — bro's review priorities, plus the debt ledger |
+
+## Install
+
+\`\`\`sh
+omp plugin install ./plugins/omp/bro     # from a checkout
+omp plugin install bro@bro               # from the marketplace
+\`\`\`
+
+Or load it ad hoc: \`omp --extension ./plugins/omp/bro/bro.ts\`.
+
+The module resolves the CLI as local dist (bundled sibling or the
+checkout's \`packages/cli/dist/index.js\` found walking up), then \`bro\`
+on PATH passing the \`bro hooks\` probe, then \`npx -y --prefer-offline
+@broject/bro@${manifest.version}\`. Every call is async and fail-open —
+a missing CLI or a non-bro directory means no widget and no context,
+never an error.
+`
+}
+
 function cursorReadme() {
   return `# bro — Cursor plugin
 
@@ -442,7 +550,8 @@ const ADAPTER_OPTS: Record<string, { skills?: boolean; runSh?: boolean }> = {
   'plugins/claude/bro': { skills: false, runSh: false },
 }
 
-// files written per adapter — value is source path, or [text] literal content
+// files written per adapter — value is source path, [text] literal
+// content, or null for a hand-written file that must already exist
 const ADAPTERS = {
   'plugins/opencode/bro': {
     'bro.ts': 'packages/cli/src/opencode.ts',
@@ -454,8 +563,23 @@ const ADAPTERS = {
     'README.md': [kiloReadme()],
   },
   'plugins/pi/bro': {
-    'bro.ts': 'packages/cli/src/pi.ts',
+    // BUNDLED, not copied: the adapter imports the shared core
+    // (packages/cli/src/adapter/), and the shipped file has to stand
+    // alone — jiti loads it with no node_modules to resolve against.
+    'bro.ts': [await bundleAdapter('packages/cli/src/adapter/pi.ts')],
     'README.md': [piReadme()],
+  },
+  'plugins/omp/bro': {
+    // BUNDLED, not copied: the adapter imports the shared core
+    // (packages/cli/src/adapter/), and the shipped file has to stand
+    // alone — the host loads it with no node_modules to resolve
+    // against. The bundle folds the core in; see scripts/bundle-adapter.ts.
+    'bro.ts': [await bundleAdapter('packages/cli/src/adapter/omp.ts')],
+    'modes.ts': 'packages/cli/src/adapter/omp-modes.ts',
+    'package.json': [ompManifest()],
+    'WATCHDOG.md': 'packages/cli/src/adapter/omp-assets/WATCHDOG.md',
+    'hooks/pre/permission.ts': 'packages/cli/src/adapter/omp-hook.ts',
+    'README.md': [ompReadme()],
   },
   'plugins/devin/bro': {
     'plugin.json': 'plugin.json',

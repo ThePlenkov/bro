@@ -8,21 +8,19 @@ import { collectEmbedded } from './src/embedded.ts'
 // sibling URL when the module runs from an installed package.
 const root = fileURLToPath(new URL('../..', import.meta.url))
 
-export default defineConfig({
-  // src/opencode.ts is the opencode plugin entry — its loader reads the
-  // package's exports["./server"] (see packages/cli/package.json), and it
-  // spawns the sibling dist/index.js rather than importing bro, so the two
-  // never share a process. src/opencode-tui.ts is the opencode CLI/TUI
-  // plugin (exports["./tui"]). src/kilo.ts and src/pi.ts are the kilo/pi
-  // adapters — same standalone module contract (pi's jiti loader reads
-  // the raw .ts or the bundle).
+// src/opencode.ts is the opencode plugin entry — its loader reads the
+// package's exports["./server"] (see packages/cli/package.json), and it
+// spawns the sibling dist/index.js rather than importing bro, so the two
+// never share a process. src/opencode-tui.ts is the opencode CLI/TUI
+// plugin (exports["./tui"]). src/kilo.ts is the kilo adapter — the same
+// standalone module contract.
+const main = defineConfig({
   entry: [
     'src/index.ts',
     'src/plugin.ts',
     'src/opencode.ts',
     'src/opencode-tui.ts',
     'src/kilo.ts',
-    'src/pi.ts',
   ],
   format: ['esm'],
   dts: true,
@@ -41,3 +39,34 @@ export default defineConfig({
     },
   ],
 })
+
+/**
+ * The pi and omp adapters each get their OWN build.
+ *
+ * Both import the shared adapter core (src/adapter/), and a host loads
+ * them as a single file: pi's jiti reads the raw .ts, omp resolves a
+ * relative import inside a plugin package — neither has a `node_modules`
+ * to resolve a code-split chunk against. Sharing one build would emit
+ * `dist/host-<hash>.js` next to `dist/pi.js` and the installed adapter
+ * would fail to load.
+ *
+ * A separate config per adapter keeps each graph self-contained: one
+ * entry, one file, nothing to resolve.
+ */
+const pi = defineConfig({
+  entry: ['src/pi.ts'],
+  outDir: 'dist',
+  format: ['esm'],
+  dts: true,
+  noExternal: [/^@broject\//],
+})
+
+const omp = defineConfig({
+  entry: ['src/omp.ts'],
+  outDir: 'dist',
+  format: ['esm'],
+  dts: true,
+  noExternal: [/^@broject\//],
+})
+
+export default [main, pi, omp]
