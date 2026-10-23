@@ -58,6 +58,7 @@ import { tmpdir } from 'node:os'
 import { basename, dirname, join } from 'node:path'
 import {
   AgentNotFound,
+  agentExitFileName,
   agentRegistryPath,
   awaitFileLock,
   CLASS_LABEL_PREFIX,
@@ -828,6 +829,7 @@ async function spawnWorker(ctx: Ctx, m: GateMember, prompt: string, lane: LoopLa
     spawnedAt: info.spawnedAt,
     spawnedMs: Date.now(),
     pid: info.pid,
+    runId: info.runId,
   }
   // the run record stays and rides the worker (bro-wg896): custody of
   // the CLAIM transfers to the registry entry at spawn, but retiring
@@ -876,7 +878,7 @@ function workerExit(ctx: Ctx, w: WorkerRef): { code: number | null; at: number }
   if (log !== '') {
     const home = dirname(log)
     try {
-      const f = join(home, `${w.agentId}.exit`)
+      const f = join(home, agentExitFileName(w.agentId, w.runId))
       const n = Number(readFileSync(f, 'utf8').trim())
       return { code: Number.isInteger(n) ? n : null, at: statSync(f).mtimeMs }
     } catch {
@@ -1529,6 +1531,10 @@ interface WorkerRef {
   /** ms stamp at our spawn call — the crash window's start. */
   spawnedMs: number
   pid?: number
+  /** the attempt token — its .exit is `<id>.<runId>.exit`, never the
+   *  shared legacy path a respawn's late write could alias (spec
+   *  bro-l8c4f.5) */
+  runId?: string
 }
 
 /** The push half of the alternation: claim → worktree → agent → PR.

@@ -256,6 +256,11 @@ export interface AgentInfo {
    *  spawnedAt, so a liveness verdict probed for one generation must
    *  not be inherited by the next. */
   spawnedAt?: string
+  /** Per-attempt token — a respawn mints a fresh one, scoping the
+   *  attempt's artifacts (`<agentId>.<runId>.{handle,go,exit}`) so a
+   *  dead generation's late writes can't alias the live run's (spec
+   *  bro-l8c4f.5). Absent on pre-runId entries and remote backends. */
+  runId?: string
   /** Backend-liveness handle; absent for remote backends. */
   pid?: number
   molStep: string
@@ -376,6 +381,11 @@ export interface AgentRegistryEntry {
   /** Routing lane the run resolved to (fleet.routing class) — same
    *  provenance role as provider/model (spec bro-1x7p). */
   class?: string
+  /** Per-attempt token minted at commitSpawn — names the attempt's
+   *  artifacts (`<agentId>.<runId>.{handle,go,exit}`, spec
+   *  bro-l8c4f.5). A respawn mints a fresh one; entries written before
+   *  the handshake contract carry none. */
+  runId?: string
   [key: string]: unknown
 }
 
@@ -561,6 +571,31 @@ export function removeAgentRegistryEntries(
  *  entry's id instead of minting again. */
 export function mintAgentId(backend: string): string {
   return `${backend}-${randomBytes(4).toString('hex')}`
+}
+
+/** Fresh attempt id — minted on EVERY spawn (respawns included): it
+ *  scopes the attempt's artifacts (`<agentId>.<runId>.{handle,go,exit}`)
+ *  so a previous attempt's late writes land in files the live run never
+ *  reads (spec bro-l8c4f.5). */
+export function mintRunId(): string {
+  return randomBytes(4).toString('hex')
+}
+
+/** The attempt-scoped `.exit` name — `<agentId>.<runId>.exit` for a
+ *  runId'd entry, the legacy `<agentId>.exit` for entries written
+ *  before the handshake contract. */
+export function agentExitFileName(agentId: string, runId: string | undefined): string {
+  return runId === undefined ? `${agentId}.exit` : `${agentId}.${runId}.exit`
+}
+
+/** The entry's attempt token — undefined on pre-handshake rows, which
+ *  keep the legacy `<agentId>.*` artifact names. Anything path-unsafe
+ *  (a hand-edited `'../x'` or a dotted value) reads as absent so the
+ *  scoped filenames it builds can never escape the agents home. */
+export function entryRunId(entry: AgentRegistryEntry): string | undefined {
+  return typeof entry.runId === 'string' && /^[A-Za-z0-9][A-Za-z0-9_-]*$/.test(entry.runId)
+    ? entry.runId
+    : undefined
 }
 
 // --- shared-store claims -------------------------------------------------------

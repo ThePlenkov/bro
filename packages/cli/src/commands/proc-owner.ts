@@ -20,6 +20,8 @@ import {
 import { basename, dirname, join, resolve, sep } from 'node:path'
 import {
   agentEntryBlocked,
+  agentExitFileName,
+  entryRunId,
   gitTry,
   markerLive,
   pidAlive,
@@ -398,7 +400,10 @@ function exitFileProves(home: string | null, e: AgentRegistryEntry): boolean {
     return false
   }
   try {
-    const v = readFileSync(join(home, `${e.agentId}.exit`), 'utf8').trim()
+    const v = readFileSync(
+      join(home, agentExitFileName(e.agentId, entryRunId(e))),
+      'utf8'
+    ).trim()
     return v !== '' && Number.isInteger(Number(v))
   } catch {
     // no exit file — not proof
