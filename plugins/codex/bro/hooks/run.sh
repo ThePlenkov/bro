@@ -72,8 +72,12 @@ mailbox_pending() {
     # '{'-shaped drops are addressed only as single-line envelopes
     # carrying the contract's required keys — anything else (verbatim
     # text, pretty-printed JSON, a malformed note) drains verbatim to
-    # everyone
-    [ "$(wc -l <"$_f" 2>/dev/null)" = 0 ] || return 0
+    # everyone. wc -l counts newlines: 0 = one line, 1 = one line iff
+    # that newline is the last byte (an interior newline means a
+    # second line of content — doubt delivers)
+    _ll=$(wc -l <"$_f" 2>/dev/null)
+    [ "$_ll" = 1 ] && [ -z "$(tail -c 1 "$_f" 2>/dev/null)" ] && _ll=0
+    [ "$_ll" = 0 ] || return 0
     grep -qE '"topic"[[:space:]]*:' "$_f" || return 0
     grep -qE '"kind"[[:space:]]*:' "$_f" || return 0
     grep -qE '"to"[[:space:]]*:' "$_f" || return 0
@@ -246,7 +250,9 @@ EOF
     # orchestrator want-markers — a dead pulse/drive/rig gets respawned
     # by the post-tool checkpoint; workers (BRO_AGENT_ID) never rearm
     if [ -z "$NEED_NODE" ] && [ "$EVENT" = post-tool ] && [ -z "${BRO_AGENT_ID:-}" ]; then
-      [ -f "$BRODIR/pulse.json" ] || [ -f "$BRODIR/rig-pulse.json" ] || [ -f "$BRODIR/drive.json" ] && NEED_NODE=1
+      if [ -f "$BRODIR/pulse.json" ] || [ -f "$BRODIR/rig-pulse.json" ] || [ -f "$BRODIR/drive.json" ]; then
+        NEED_NODE=1
+      fi
     fi
 
     # bead-store barometer — lessons and open drill frames are bead

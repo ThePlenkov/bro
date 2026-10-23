@@ -1226,6 +1226,40 @@ describe('hooks e2e — run.sh fast path (bro-arm83)', () => {
     })
   })
 
+  test('an interior-newline drop is verbatim broadcast — it reaches node', () => {
+    const f = hookFixture()
+    inside(f.main, f.root, () => {
+      prime(f)
+      const notify = join(f.markerDir, '..', 'notify')
+      mkdirSync(notify, { recursive: true })
+      writeFileSync(
+        join(notify, `${Date.now()}-x.txt`),
+        '{"kind":"nudge","topic":"t","to":"other-session"}\nSECOND-LINE'
+      )
+      const { canary, env } = canaryEnv(f.root)
+      const r = launch(f.main, 'post-tool', postTool, env)
+      assert.equal(r.status, 0)
+      assert.ok(existsSync(canary), 'interior-newline drop did not reach node')
+    })
+  })
+
+  test('a foreign-addressed envelope with a trailing newline stays fast', () => {
+    const f = hookFixture()
+    inside(f.main, f.root, () => {
+      prime(f)
+      const notify = join(f.markerDir, '..', 'notify')
+      mkdirSync(notify, { recursive: true })
+      writeFileSync(
+        join(notify, `${Date.now()}-x.txt`),
+        '{"kind":"nudge","topic":"t","to":"other-session"}\n'
+      )
+      const { canary, env } = canaryEnv(f.root)
+      const r = launch(f.main, 'post-tool', postTool, env)
+      assert.equal(r.status, 0)
+      assert.equal(existsSync(canary), false, 'trailing-newline foreign drop reached node')
+    })
+  })
+
   test('permission always reaches node; garbage stdin fails open', () => {
     const f = hookFixture()
     inside(f.main, f.root, () => {
