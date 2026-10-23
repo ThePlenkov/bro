@@ -24,6 +24,7 @@
       "summary": "agent plane — workers, serve, the board",
       "members": [
         "fleet",
+        "delegate",
         "agents",
         "status",
         "daemon",
@@ -240,6 +241,42 @@
         "exits": {
           "0": "fleet printed",
           "2": "usage — --live without TTY, --every out of range, --json + --live"
+        }
+      },
+      "external": false
+    },
+    "delegate": {
+      "name": "delegate",
+      "group": "fleet",
+      "summary": "Activate another agent — sync ask (--wait, pooled ACP turn) or detached registry spawn (--detach)",
+      "spellings": [
+        "delegate",
+        "fleet delegate"
+      ],
+      "aliases": [],
+      "hidden": false,
+      "skill": "delegate",
+      "plan": false,
+      "contract": {
+        "flags": {
+          "--wait": "sync short ask — one pooled ACP turn; reply text on stdout (default)",
+          "--detach": "real work — the registry spawn `bro agents run` takes; returns the agentId",
+          "--prompt <text>": "literal prompt (positional text is the same channel)",
+          "--prompt-file <file>": "prompt from a file",
+          "--provider <name>": "providers.<name> pin — --wait needs an acp entry",
+          "--class <name>": "fleet.routing lane — chain[0] supplies the provider (exclusive with --provider)",
+          "--model <m>": "model override — --wait pins it on the ACP session",
+          "--timeout <sec>": "--wait deadline (default 120)",
+          "--connector <name>": "--detach backend pin",
+          "--worktree <path>": "--detach worktree (default: minted <repo>--adhoc-*)",
+          "--auto-approve": "--detach ACP permission policy",
+          "--beads-dir <dir>": "shared store override",
+          "--json": "{mode,provider,model,class?,stopReason,text,delegatedBy?} for wait; {mode,delegatedBy?,agent} for detach"
+        },
+        "exits": {
+          "0": "delegation served — reply printed (--wait) or agent spawned (--detach)",
+          "1": "provider walled/unavailable, spawn refused, or prompt/pin error",
+          "2": "usage — --wait + --detach, --provider + --class, mode-foreign flags, no prompt"
         }
       },
       "external": false

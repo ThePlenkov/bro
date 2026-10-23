@@ -608,6 +608,10 @@ export interface StepSpawnRequest {
    *  (spec bro-1x7p). Read only when `fleet.routing` is declared; a
    *  resolved class with no routing entry is a config error. */
   class?: string
+  /** The delegating agent's agentId — `bro fleet delegate --detach`
+   *  provenance (spec bro-z8tng). Stamped into the registry and pinned
+   *  into the worker's env as BRO_DELEGATED_BY. */
+  delegatedBy?: string
 }
 
 /** The spawn behind `up <step>` and POST /api/v1/agents — resolve the
@@ -713,6 +717,7 @@ export function spawnStepAgent(
           provider: pick.provider,
           model: pick.model,
           class: route?.class,
+          delegatedBy: req.delegatedBy,
           worker: pick.worker,
           enter: resolved.enter,
         })
