@@ -101,7 +101,7 @@ mailbox_pending() {
       # an escaped recipient (\uXXXX, \/) can't be compared raw — doubt
       # delivers; otherwise compare the sanitized form, the same
       # normalize addressedTo's caller-side identity goes through
-      case "$_t" in *\\*) _ours=1; break ;; esac
+      case "$_t" in *\\*) _ours=1; break ;; *) ;; esac
       _tn=$(printf %s "$_t" | sed 's/[^A-Za-z0-9_.-]/_/g')
       for _s in $SIDS; do
         [ "$_tn" = "$_s" ] && { _ours=1; break 2; }
@@ -138,7 +138,8 @@ agent_root_pid() {
       devin|claude|codex|gemini|aider|opencode|amp) _top=$_p ;;
       node|npx|bun|bunx|tsx|uvx|deno)
         _a1=$(tr '\0' '\n' <"/proc/$_p/cmdline" 2>/dev/null | sed -n '2{s|.*/||;s|\..*||;p}')
-        case "$_a1" in devin|claude|codex|gemini|aider|opencode|amp) _top=$_p ;; esac ;;
+        case "$_a1" in devin|claude|codex|gemini|aider|opencode|amp) _top=$_p ;; *) ;; esac ;;
+      *) ;;
     esac
     tr '\0' '\n' <"/proc/$_p/environ" 2>/dev/null \
       | grep -qE '^(BRO_AGENT_ID|AI_AGENT)=' && _top=$_p
@@ -163,6 +164,7 @@ post-tool|prompt-submit)
   # cwd's opt-in would drop real hook work.
   case "$PAYLOAD" in
     *'"cursor_version"'*|*'"hook_event_name"'*|*'"turn_id"'*|*'"workspace_roots"'*) NEED_NODE=1 ;;
+    *) ;;
   esac
 
   # the repo opt-in gate (core's repoOptedIn — `bro hooks` exits
@@ -191,7 +193,7 @@ post-tool|prompt-submit)
   # A raw value still carrying a JSON escape (\uXXXX, \/) sanitizes to
   # a different marker name than Node's decoded sid — doubt defers.
   _raw_sids=$(printf %s "$PAYLOAD" | grep -oE '"(session_id|conversation_id)"[[:space:]]*:[[:space:]]*"[^"]*"' | sed 's/.*"\([^"]*\)"$/\1/' | sort -u)
-  case "$_raw_sids" in *\\*) NEED_NODE=1 ;; esac
+  case "$_raw_sids" in *\\*) NEED_NODE=1 ;; *) ;; esac
   SIDS=$(printf %s "$_raw_sids" | sed 's/[^A-Za-z0-9_.-]/_/g')
   [ -z "$SIDS" ] && NEED_NODE=1
 
@@ -423,6 +425,7 @@ EOF
         [ -n "$_c" ] || continue
         case "$_c" in
           *.ts) grep -qE '(^|[^[:alnum:]_])(import|require|process\.env|=>|\|\||&&)' "$_c" 2>/dev/null && NEED_NODE=1 && break ;;
+          *) ;;
         esac
       done <<EOF
 $CFGS
@@ -481,6 +484,7 @@ EOF
 
   [ -z "$NEED_NODE" ] && exit 0
   ;;
+*) ;;
 esac
 
 # each client exports its own plugin-root var — take whichever exists
