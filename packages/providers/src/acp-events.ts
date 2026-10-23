@@ -105,6 +105,34 @@ export function toolPayload(u: Toolish, phase: 'open' | 'finish'): Record<string
   return p
 }
 
+/** The turn-plane archive path — 'proxy' keys on the session id under
+ *  `bro/proxy/` (`-p<pid>` keeps two concurrent proxy runs of the same
+ *  session id — a reconnect, a duplicated client — from mixing rows in
+ *  one archive); 'agents' keys on the agent badge under `bro/agents/`.
+ *  Undefined when the run can't resolve a git common dir or (agents
+ *  scope) carries no badge. */
+const archiveFile = (
+  scope: 'agents' | 'proxy',
+  common: string | null,
+  agentId: string | undefined,
+  sessionId: string
+): string | undefined => {
+  if (common === null) {
+    return undefined
+  }
+  if (scope === 'proxy') {
+    return join(
+      common,
+      'bro',
+      'proxy',
+      `acp-${sessionId.replace(/[^\w.-]/g, '_')}-p${process.pid}.events.jsonl`
+    )
+  }
+  return agentId === undefined
+    ? undefined
+    : join(common, 'bro', 'agents', `${agentId}.events.jsonl`)
+}
+
 /** The plane for one turn — resolved sinks are computed once so the
  *  per-update cost is a Map lookup plus a queued socket write. */
 export function agentTurnPlane(opts: AgentTurnPlaneOpts): AgentTurnPlane {
@@ -119,22 +147,7 @@ export function agentTurnPlane(opts: AgentTurnPlaneOpts): AgentTurnPlane {
   const socket = busSocketPath(cwd)
   const scope = opts.plane ?? 'agents'
   const common = agentId !== undefined || scope === 'proxy' ? gitCommonDir(cwd) : null
-  const file =
-    scope === 'proxy'
-      ? common !== null
-        ? // `-p<pid>` keeps two concurrent proxy runs of the same session
-          // id (a reconnect, a duplicated client) from mixing their rows
-          // in one archive
-          join(
-            common,
-            'bro',
-            'proxy',
-            `acp-${opts.sessionId.replace(/[^\w.-]/g, '_')}-p${process.pid}.events.jsonl`
-          )
-        : undefined
-      : agentId !== undefined && common !== null
-        ? join(common, 'bro', 'agents', `${agentId}.events.jsonl`)
-        : undefined
+  const file = archiveFile(scope, common, agentId, opts.sessionId)
 
   let queue: Promise<unknown> = Promise.resolve()
   const seenTools = new Set<string>()

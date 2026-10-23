@@ -296,79 +296,118 @@ export async function acpProxy(
     }
   }
 
+  /** Session-open methods — a successful response stamps session state
+   *  (the response's sessionId wins — session/fork's params carry the
+   *  source id). */
+  const OPEN_METHODS = new Set([
+    'session/new',
+    'session/load',
+    'session/fork',
+    'session/resume',
+  ])
+
   /** c2a request — verbatim forward plus the session/prompt seam. */
-  const onClientRequest = async (m: AnyMessage): Promise<void> => {
+  const onClientRequest = (m: AnyMessage): void => {
     const method = wire(m).method as string
     const id = wire(m).id as JsonRpcId
-    const params = paramsOf(m)
-    const sessionId = sessionIdOf(m)
-    const ses = sessionId === undefined ? undefined : sessions.get(sessionId)
-
-    if (method === 'session/prompt' && sessionId !== undefined && ses !== undefined && params !== undefined) {
-      const turn = otelSpan('acp.proxy.turn', {
-        'acp.session': sessionId,
-      }, { parent: ses.span?.ctx })
-      pending.set(id, { method, prompt: { sessionId, span: turn } })
-      // The injection is a held write — it must not stall the read
-      // loop (session/cancel lands during collection), but it must not
-      // be overtaken by later session writes either. `held` marks it
-      // from enqueue until the write attempt — a per-prompt flag would
-      // lose every prompt queued behind the first (the cancel path
-      // aborts held prompts by deleting their pending entry).
-      ses.held.add(id)
-      ses.writeQ = ses.writeQ.then(async () => {
-        try {
-          // pending discharged → the cancel path already answered this
-          // prompt upstream; it must not cross now. Checked twice —
-          // the seam collection between them is the abortable window.
-          if (!pending.has(id) || downDead.fired) {
-            return
-          }
-          // "first prompt" = first to actually CROSS, decided here
-          // under the serialized writeQ: a cancelled held prompt never
-          // claims the slot, and two queued prompts can't both take it
-          const first = !ses.seenPrompt
-          const injected = await injectPrompt(m, params, sessionId, ses)
-          if (!pending.has(id) || downDead.fired) {
-            return
-          }
-          const p = pending.get(id)
-          if (p?.prompt !== undefined) p.prompt.first = first
-          ses.seenPrompt = true
-          // a settled collection that crosses closes the slot; an
-          // unsettled one stays owed — the next prompt retries
-          ses.sessionCtxDone = ses.sessionCtxDone || injected.sessionCtxSettled
-          ses.plane?.start()
-          writeDown(injected.m)
-        } finally {
-          ses.held.delete(id)
-        }
-      })
+    if (method === 'session/prompt') {
+      onPromptRequest(m, id)
       return
     }
+    const params = paramsOf(m)
+    const sessionId = sessionIdOf(m)
+    pending.set(id, {
+      method,
+      ...(OPEN_METHODS.has(method)
+        ? { bind: { cwd: str(params?.['cwd']), sessionId: str(params?.['sessionId']) } }
+        : {}),
+      ...(method === 'session/close' && sessionId !== undefined
+        ? { close: sessionId }
+        : {}),
+    })
+    writeDownFor(sessionId, m)
+  }
 
-    if (method === 'session/prompt') {
-      // no stamped session — the client skipped session/new; forward
-      // untouched, no seam (there is no cwd to probe inside)
-      pending.set(id, { method })
+  /** The stamped session a prompt rides — undefined when the client
+   *  skipped session/new, named an unknown session, or sent no params:
+   *  an unstamped prompt forwards untouched (there is no cwd to probe
+   *  inside). */
+  const promptSession = (
+    m: AnyMessage
+  ): { params: Record<string, unknown>; sessionId: string; ses: ProxySession } | undefined => {
+    const params = paramsOf(m)
+    const sessionId = sessionIdOf(m)
+    if (params === undefined || sessionId === undefined) {
+      return undefined
+    }
+    const ses = sessions.get(sessionId)
+    return ses === undefined ? undefined : { params, sessionId, ses }
+  }
+
+  /** c2a session/prompt — on a stamped session the prompt is a HELD
+   *  write: queued behind the session's serialized writeQ so the seam
+   *  collection can't stall the read loop (session/cancel lands during
+   *  collection) and nothing overtakes it on the downstream wire.
+   *  `held` marks it from enqueue until the write attempt — a
+   *  per-prompt flag would lose every prompt queued behind the first
+   *  (the cancel path aborts held prompts by deleting their pending
+   *  entry). */
+  const onPromptRequest = (m: AnyMessage, id: JsonRpcId): void => {
+    const target = promptSession(m)
+    if (target === undefined) {
+      pending.set(id, { method: 'session/prompt' })
       writeDown(m)
       return
     }
-
-    const bind =
-      method === 'session/new' ||
-      method === 'session/load' ||
-      method === 'session/fork' ||
-      method === 'session/resume'
-        ? { cwd: str(params?.['cwd']), sessionId: str(params?.['sessionId']) }
-        : undefined
-    const close = method === 'session/close' ? sessionId : undefined
+    const turn = otelSpan('acp.proxy.turn', {
+      'acp.session': target.sessionId,
+    }, { parent: target.ses.span?.ctx })
     pending.set(id, {
-      method,
-      ...(bind !== undefined ? { bind } : {}),
-      ...(close !== undefined ? { close } : {}),
+      method: 'session/prompt',
+      prompt: { sessionId: target.sessionId, span: turn },
     })
-    writeDownFor(sessionId, m)
+    target.ses.held.add(id)
+    target.ses.writeQ = target.ses.writeQ.then(() => crossPrompt({ m, id, ...target }))
+  }
+
+  /** Still writable? pending discharged → the cancel path already
+   *  answered this prompt upstream; downstream dead → nothing crosses
+   *  anyway. The two check points bracket the seam collection — the
+   *  abortable window. */
+  const crossable = (id: JsonRpcId): boolean => pending.has(id) && !downDead.fired
+
+  /** The held write, run inside the session's writeQ: "first prompt" =
+   *  first to actually CROSS, decided here under the serialized queue —
+   *  a cancelled held prompt never claims the slot, and two queued
+   *  prompts can't both take it. */
+  const crossPrompt = async (held: {
+    m: AnyMessage
+    id: JsonRpcId
+    params: Record<string, unknown>
+    sessionId: string
+    ses: ProxySession
+  }): Promise<void> => {
+    const { m, id, params, sessionId, ses } = held
+    try {
+      if (!crossable(id)) {
+        return
+      }
+      const first = !ses.seenPrompt
+      const injected = await injectPrompt(m, params, sessionId, ses)
+      if (!crossable(id)) {
+        return
+      }
+      const p = pending.get(id)
+      if (p?.prompt !== undefined) p.prompt.first = first
+      ses.seenPrompt = true
+      // a settled collection that crosses closes the slot; an
+      // unsettled one stays owed — the next prompt retries
+      ses.sessionCtxDone = ses.sessionCtxDone || injected.sessionCtxSettled
+      ses.plane?.start()
+      writeDown(injected.m)
+    } finally {
+      ses.held.delete(id)
+    }
   }
 
   /** Answer every held prompt of the session upstream with
@@ -378,14 +417,17 @@ export async function acpProxy(
    *  start/stop bookends only crossed work). Returns the abort count. */
   const abortHeld = (ses: ProxySession, sessionId: string): number => {
     let aborted = 0
-    for (const [id, p] of pending) {
-      const pr = p.prompt
-      if (pr !== undefined && pr.sessionId === sessionId && ses.held.has(id)) {
-        pending.delete(id)
-        aborted++
-        pr.span.end({ 'acp.stop_reason': 'cancelled' })
-        answerUpstream(id, { stopReason: 'cancelled' })
+    // held is the session's own prompt-id set — iterating it touches
+    // only this session's held writes, never a sibling session's
+    for (const id of ses.held) {
+      const pr = pending.get(id)?.prompt
+      if (pr === undefined || pr.sessionId !== sessionId) {
+        continue
       }
+      pending.delete(id)
+      aborted++
+      pr.span.end({ 'acp.stop_reason': 'cancelled' })
+      answerUpstream(id, { stopReason: 'cancelled' })
     }
     return aborted
   }
@@ -400,47 +442,132 @@ export async function acpProxy(
     void ses.plane?.drain().then(undefined, () => {})
   }
 
-  /** c2a notification — verbatim; session/cancel first answers every
-   *  held prompt of the session upstream `stopReason:'cancelled'`
-   *  (held prompts never cross — the wire never shows a prompt after
-   *  its cancel). The cancel itself crosses only while crossed work
-   *  still runs downstream — it is session-scoped, so in-flight prompts
-   *  are its real targets; a cancel whose whole target set was held
+  /** Should this session/cancel cross? It first answers every held
+   *  prompt of the session upstream `stopReason:'cancelled'` (held
+   *  prompts never cross — the wire never shows a prompt after its
+   *  cancel). The cancel itself crosses only while crossed work still
+   *  runs downstream — it is session-scoped, so in-flight prompts are
+   *  its real targets; a cancel whose whole target set was held
    *  prompts is fully handled by the proxy, and forwarding it would
    *  show a cancel without its prompt. */
-  const onClientNotification = (m: AnyMessage): void => {
-    if (wire(m).method === 'session/cancel') {
-      const sessionId = sessionIdOf(m)
-      const ses = sessionId === undefined ? undefined : sessions.get(sessionId)
-      if (ses !== undefined && sessionId !== undefined) {
-        const heldAborted = abortHeld(ses, sessionId)
-        const inFlight = [...pending.values()].some(
-          (p) => p.prompt?.sessionId === sessionId
-        )
-        if (heldAborted > 0 && !inFlight) {
-          return
-        }
-      }
+  const cancelCrosses = (m: AnyMessage): boolean => {
+    const sessionId = sessionIdOf(m)
+    const ses = sessionId === undefined ? undefined : sessions.get(sessionId)
+    if (ses === undefined || sessionId === undefined) {
+      return true
     }
-    writeDownFor(sessionIdOf(m), m)
+    if (abortHeld(ses, sessionId) === 0) {
+      return true
+    }
+    return [...pending.values()].some((p) => p.prompt?.sessionId === sessionId)
+  }
+
+  /** c2a notification — verbatim modulo the cancel check. */
+  const onClientNotification = (m: AnyMessage): void => {
+    if (wire(m).method !== 'session/cancel' || cancelCrosses(m)) {
+      writeDownFor(sessionIdOf(m), m)
+    }
+  }
+
+  /** Feed one session/update to the session's turn plane — telemetry
+   *  is advisory: a malformed update must not cost the wire. */
+  const feedPlane = (m: AnyMessage): void => {
+    const sessionId = sessionIdOf(m)
+    const update = paramsOf(m)?.['update']
+    const ses = sessionId === undefined ? undefined : sessions.get(sessionId)
+    if (ses === undefined || update === undefined) {
+      return
+    }
+    try {
+      ses.plane?.update(update as SessionUpdate)
+    } catch {
+      /* telemetry is advisory */
+    }
   }
 
   /** a2c notification — verbatim; session/update feeds the turn plane
    *  (hook probes never fire here — the seam maps to prompts only). */
   const onAgentNotification = (m: AnyMessage): void => {
     if (wire(m).method === 'session/update') {
-      const sessionId = sessionIdOf(m)
-      const update = paramsOf(m)?.['update']
-      const ses = sessionId === undefined ? undefined : sessions.get(sessionId)
-      if (ses !== undefined && update !== undefined) {
-        try {
-          ses.plane?.update(update as SessionUpdate)
-        } catch {
-          // telemetry is advisory — a malformed update must not cost the wire
-        }
-      }
+      feedPlane(m)
     }
     writeUp(m)
+  }
+
+  /** Stamp session state on a successful session-open response — the
+   *  RESPONSE's sessionId wins: session/fork's params carry the SOURCE
+   *  id, the fork's own id only exists in the result. load/resume
+   *  responses may omit it → the request param is the fallback. */
+  const stampSession = (bind: PendingRequest['bind'], result: unknown): void => {
+    if (bind === undefined) {
+      return
+    }
+    const sid =
+      (isRecord(result) ? str(result['sessionId']) : undefined) ?? bind.sessionId
+    if (sid === undefined || sessions.has(sid)) {
+      return
+    }
+    const cwd = bind.cwd
+    sessions.set(sid, {
+      cwd,
+      seenPrompt: false,
+      sessionCtxDone: opts.seam?.sessionContext === undefined,
+      held: new Set(),
+      writeQ: Promise.resolve(),
+      plane:
+        cwd === undefined
+          ? undefined
+          : agentTurnPlane({
+              cwd,
+              by: 'acp proxy',
+              sessionId: sid,
+              plane: 'proxy',
+            }),
+      span: otelSpan('acp.proxy.session', { 'acp.session': sid }),
+    })
+  }
+
+  /** Release the session a successful session/close named — a failed
+   *  close never ran, so the session stays live. */
+  const releaseOnClose = (closeId: string | undefined): void => {
+    if (closeId === undefined) {
+      return
+    }
+    const ses = sessions.get(closeId)
+    if (ses !== undefined) {
+      releaseSession(closeId, ses)
+    }
+  }
+
+  /** Span attrs for a finished turn — first_prompt only when the
+   *  prompt actually crossed (a cancelled held prompt never got the
+   *  slot), stop_reason/error when the wire carried them. */
+  const turnAttrs = (
+    pr: NonNullable<PendingRequest['prompt']>,
+    stopReason: string | undefined,
+    failed: boolean
+  ): Record<string, string | number | boolean> => ({
+    ...(pr.first !== undefined ? { 'acp.proxy.first_prompt': pr.first } : {}),
+    ...(stopReason !== undefined ? { 'acp.stop_reason': stopReason } : {}),
+    ...(failed ? { 'acp.error': true } : {}),
+  })
+
+  /** Land the turn's bookkeeping — span attrs + plane stop — for the
+   *  prompt a response discharges. Runs on error responses too: a
+   *  failed prompt still ends its turn. */
+  const finishTurn = (req: PendingRequest, m: AnyMessage): void => {
+    const pr = req.prompt
+    if (pr === undefined) {
+      return
+    }
+    const result = wire(m).result
+    const stopReason = isRecord(result) ? str(result['stopReason']) : undefined
+    const failed = wire(m).error !== undefined
+    pr.span.end(turnAttrs(pr, stopReason, failed), failed ? 'error' : 'ok')
+    sessions.get(pr.sessionId)?.plane?.stop(
+      stopReason,
+      failed ? { error: 'session/prompt error' } : {}
+    )
   }
 
   /** a2c response — route verbatim; the bookkeeping it lands (session
@@ -449,114 +576,68 @@ export async function acpProxy(
     const id = wire(m).id as JsonRpcId
     const req = pending.get(id)
     pending.delete(id)
-    if (req?.bind !== undefined && wire(m).error === undefined) {
-      const result = wire(m).result
-      // the RESPONSE's sessionId wins — session/fork's params carry
-      // the SOURCE id, the fork's own id only exists in the result.
-      // load/resume responses may omit it → the request param is the
-      // fallback. An error response stamps nothing — a failed open
-      // must not register a session the next attempt would collide with.
-      const sid =
-        (isRecord(result) ? str(result['sessionId']) : undefined) ?? req.bind.sessionId
-      if (sid !== undefined && !sessions.has(sid)) {
-        const cwd = req.bind.cwd
-        sessions.set(sid, {
-          cwd,
-          seenPrompt: false,
-          sessionCtxDone: opts.seam?.sessionContext === undefined,
-          held: new Set(),
-          writeQ: Promise.resolve(),
-          plane:
-            cwd === undefined
-              ? undefined
-              : agentTurnPlane({
-                  cwd,
-                  by: 'acp proxy',
-                  sessionId: sid,
-                  plane: 'proxy',
-                }),
-          span: otelSpan('acp.proxy.session', { 'acp.session': sid }),
-        })
-      }
+    if (req !== undefined && wire(m).error === undefined) {
+      // an error response stamps nothing — a failed open must not
+      // register a session the next attempt would collide with, and a
+      // failed close never ran
+      stampSession(req.bind, wire(m).result)
+      releaseOnClose(req.close)
     }
-    if (req?.close !== undefined && wire(m).error === undefined) {
-      const ses = sessions.get(req.close)
-      if (ses !== undefined) {
-        releaseSession(req.close, ses)
-      }
-    }
-    if (req?.prompt !== undefined) {
-      const ses = sessions.get(req.prompt.sessionId)
-      const result = wire(m).result
-      const stopReason = isRecord(result) ? str(result['stopReason']) : undefined
-      const failed = wire(m).error !== undefined
-      req.prompt.span.end(
-        {
-          ...(req.prompt.first !== undefined
-            ? { 'acp.proxy.first_prompt': req.prompt.first }
-            : {}),
-          ...(stopReason !== undefined ? { 'acp.stop_reason': stopReason } : {}),
-          ...(failed ? { 'acp.error': true } : {}),
-        },
-        failed ? 'error' : 'ok'
-      )
-      ses?.plane?.stop(stopReason, failed ? { error: 'session/prompt error' } : {})
+    if (req !== undefined) {
+      finishTurn(req, m)
     }
     writeUp(m)
   }
 
-  /** The client→agent leg — requests hold pending entries until the
-   *  answer crosses; notifications pass through the cancel check. */
-  const pumpC2A = async (): Promise<void> => {
-    const reader = upstream.readable.getReader()
-    for (;;) {
-      const { value, done } = await reader.read()
-      if (done) return
-      const m = value
-      try {
-        if (isRequest(m)) {
-          await onClientRequest(m)
-        } else if (isNotification(m)) {
-          onClientNotification(m)
-        } else if (isResponse(m)) {
-          writeDownFor(undefined, m)
-        }
-        // a malformed message is dropped, never answered — the proxy
-        // is not a peer, it is the wire
-      } catch (e) {
-        log(`acp proxy: dropped c→a ${wire(m).method ?? 'message'}: ${(e as Error).message}`)
-      }
+  /** c2a routing — a malformed message is dropped, never answered:
+   *  the proxy is not a peer, it is the wire. */
+  const routeC2A = (m: AnyMessage): void => {
+    if (isRequest(m)) {
+      onClientRequest(m)
+    } else if (isNotification(m)) {
+      onClientNotification(m)
+    } else if (isResponse(m)) {
+      writeDownFor(undefined, m)
     }
   }
 
-  /** The agent→client leg — everything crosses untouched; only the
-   *  bookkeeping that rides a response needs the pending table. */
-  const pumpA2C = async (): Promise<void> => {
-    const reader = downstream.readable.getReader()
+  /** a2c routing — everything crosses untouched; only the bookkeeping
+   *  that rides a response needs the pending table. */
+  const routeA2C = (m: AnyMessage): void => {
+    if (isNotification(m)) {
+      onAgentNotification(m)
+    } else if (isResponse(m)) {
+      onAgentResponse(m)
+    } else if (isRequest(m)) {
+      writeUp(m)
+    }
+  }
+
+  /** Read `stream` until EOF, routing each message through `route`. */
+  const pump = async (
+    stream: Stream,
+    route: (m: AnyMessage) => void,
+    tag: string
+  ): Promise<void> => {
+    const reader = stream.readable.getReader()
     for (;;) {
       const { value, done } = await reader.read()
       if (done) return
       const m = value
       try {
-        if (isNotification(m)) {
-          onAgentNotification(m)
-        } else if (isResponse(m)) {
-          onAgentResponse(m)
-        } else if (isRequest(m)) {
-          writeUp(m)
-        }
+        route(m)
       } catch (e) {
-        log(`acp proxy: dropped a→c ${wire(m).method ?? 'message'}: ${(e as Error).message}`)
+        log(`acp proxy: dropped ${tag} ${wire(m).method ?? 'message'}: ${(e as Error).message}`)
       }
     }
   }
 
   const verdict = await Promise.race([
-    pumpC2A().then(
+    pump(upstream, routeC2A, 'c→a').then(
       () => 'up' as const, // client closed its side of the wire
       () => 'up' as const
     ),
-    pumpA2C().then(
+    pump(downstream, routeA2C, 'a→c').then(
       () => 'down' as const, // agent closed its side of the wire
       () => 'down' as const
     ),

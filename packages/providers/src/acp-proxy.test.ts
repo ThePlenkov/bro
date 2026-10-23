@@ -109,6 +109,61 @@ async function openSession(acp: ClientContext, cwd = '/tmp/proxy-repo'): Promise
   return ses.sessionId
 }
 
+/** A bespoke typed `agent()` for the _-methods test — serves the
+ *  standard open methods plus `_acpx/echo`, and probes the client back
+ *  over `_acpx/client-probe` inside session/prompt. */
+function bespokeAgent(stream: Stream, seen: { clientProbe?: unknown; echoParams?: unknown }) {
+  return agent({ name: 'bespoke' })
+    .onRequest('initialize', (ctx) => ({
+      protocolVersion: ctx.params.protocolVersion,
+      authMethods: [],
+    }))
+    .onRequest('session/new', () => ({ sessionId: 's-custom' }))
+    .onRequest<{ q: number }, { echoed: unknown }>(
+      '_acpx/echo',
+      (p) => p as { q: number },
+      (ctx) => {
+        seen.echoParams = ctx.params
+        return { echoed: ctx.params }
+      }
+    )
+    .onRequest('session/prompt', async (ctx) => {
+      seen.clientProbe = await ctx.client.request('_acpx/client-probe', { n: 1 })
+      return { stopReason: 'end_turn' }
+    })
+    .connect(stream)
+}
+
+/** A raw object-level responder — the wire's echo agent minus schema
+ *  narrowing: answers by method shape, records each prompt's params.
+ *  Used where a typed agent() app's inbound validation would reject
+ *  the wire shape under test before the pump's behavior is even
+ *  observable (a cwd-less session/new). */
+function rawEchoAgent(stream: Stream, seen: { prompts?: unknown }): Promise<void> {
+  const reader = stream.readable.getReader()
+  const writer = stream.writable.getWriter()
+  const answer = (id: JsonRpcId | undefined, result: unknown) =>
+    writer.write({ jsonrpc: '2.0', id, result } as AnyMessage)
+  return (async () => {
+    for (;;) {
+      const { value, done } = await reader.read()
+      if (done) {
+        await writer.close().catch(() => {})
+        return
+      }
+      const m = value as { id?: JsonRpcId; method?: string; params?: { prompt?: unknown } }
+      if (m.method === 'initialize') {
+        await answer(m.id, { protocolVersion: 1 })
+      } else if (m.method === 'session/new') {
+        await answer(m.id, { sessionId: 's-nc' })
+      } else if (m.method === 'session/prompt') {
+        seen.prompts = m.params?.prompt
+        await answer(m.id, { stopReason: 'end_turn' })
+      }
+    }
+  })()
+}
+
 describe('acpProxy — verbatim forwarding', () => {
   test('initialize/session/new/session/prompt round-trip with no seam — byte-identical params', async () => {
     const r = rig({ replyText: 'hello' })
@@ -178,25 +233,7 @@ describe('acpProxy — verbatim forwarding', () => {
     const seen: { clientProbe?: unknown; echoParams?: unknown } = {}
     const [clientSide, proxyUp] = streamPair()
     const [proxyDown, agentSide] = streamPair()
-    const agentConn = agent({ name: 'bespoke' })
-      .onRequest('initialize', (ctx) => ({
-        protocolVersion: ctx.params.protocolVersion,
-        authMethods: [],
-      }))
-      .onRequest('session/new', () => ({ sessionId: 's-custom' }))
-      .onRequest<{ q: number }, { echoed: unknown }>(
-        '_acpx/echo',
-        (p) => p as { q: number },
-        (ctx) => {
-          seen.echoParams = ctx.params
-          return { echoed: ctx.params }
-        }
-      )
-      .onRequest('session/prompt', async (ctx) => {
-        seen.clientProbe = await ctx.client.request('_acpx/client-probe', { n: 1 })
-        return { stopReason: 'end_turn' }
-      })
-      .connect(agentSide)
+    const agentConn = bespokeAgent(agentSide, seen)
     const conn = client({ name: 'test-client' })
       .onRequest<{ n: number }, { ok: boolean; got: unknown }>(
         '_acpx/client-probe',
@@ -628,24 +665,7 @@ describe('acpProxy — context injection seam', () => {
     // bespoke downstream as a RAW responder — a typed agent() app
     // schema-validates inbound and rejects a cwd-less session before
     // the wire question is even asked
-    const agentReader = agentSide.readable.getReader()
-    const agentWriter = agentSide.writable.getWriter()
-    const responder = (async () => {
-      for (;;) {
-        const { value, done } = await agentReader.read()
-        if (done) return
-        const m = value as { id?: JsonRpcId; method?: string; params?: { prompt?: unknown } }
-        if (m.method === 'initialize') {
-          await agentWriter.write({ jsonrpc: '2.0', id: m.id, result: { protocolVersion: 1 } } as AnyMessage)
-        } else if (m.method === 'session/new') {
-          // malformed but plausible — no cwd field
-          await agentWriter.write({ jsonrpc: '2.0', id: m.id, result: { sessionId: 's-nc' } } as AnyMessage)
-        } else if (m.method === 'session/prompt') {
-          seen.prompts = m.params?.prompt
-          await agentWriter.write({ jsonrpc: '2.0', id: m.id, result: { stopReason: 'end_turn' } } as AnyMessage)
-        }
-      }
-    })()
+    const responder = rawEchoAgent(agentSide, seen)
     const conn = client({ name: 'test-client' }).connect(clientSide)
     const proxyDone = acpProxy(proxyUp, proxyDown, {
       seam: {
@@ -672,7 +692,6 @@ describe('acpProxy — context injection seam', () => {
       conn.close()
       await clientSide.writable.getWriter().close().catch(() => {})
       assert.equal(await proxyDone, 0)
-      agentWriter.close().catch(() => {})
       await responder
     }
   })
