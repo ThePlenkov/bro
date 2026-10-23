@@ -41,6 +41,8 @@ import {
 } from 'node:fs'
 import { isAbsolute, join, resolve } from 'node:path'
 import {
+  agentExitFileName,
+  entryRunId,
   readAgentRegistry,
   writeAgentRegistry,
   acquireAgentRegistryLock,
@@ -384,7 +386,9 @@ function deadSince(agentsDir: string, entry: AgentRegistryEntry): number | null 
   if (!SAFE_AGENT_ID.test(entry.agentId)) {
     return null // a tampered id can't be trusted to locate its own files
   }
-  const exitSt = statOf(join(agentsDir, `${entry.agentId}.exit`))
+  const exitSt = statOf(
+    join(agentsDir, agentExitFileName(entry.agentId, entryRunId(entry)))
+  )
   if (exitSt !== null) {
     return exitSt.mtimeMs
   }
