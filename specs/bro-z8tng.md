@@ -23,7 +23,7 @@ to prevent.
 
 ### CLI: `bro fleet delegate`
 
-```
+```text
 bro fleet delegate [prompt…]
   --prompt <text>          literal prompt (positional equivalent)
   --prompt-file <file>     prompt from a file

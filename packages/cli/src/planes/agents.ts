@@ -39,45 +39,65 @@ const workerRow = (a: AgentInfo): Worker => ({
   model: a.model,
 })
 
+const DELEGATE_STR_KEYS = [
+  'prompt',
+  'promptFile',
+  'provider',
+  'class',
+  'model',
+  'connector',
+  'worktree',
+  'delegatedBy',
+  'beadsDir',
+] as const
+
 /** exec args → DelegateRequest — PlaneVerbError on a mistyped field
  *  (client bug), the core's SpawnInputError on a semantically bad one. */
 function delegateArgs(args: Record<string, unknown>): DelegateRequest {
-  const str = (k: keyof DelegateRequest): string | undefined => {
-    const v = args[k as string]
+  const req: Record<string, unknown> = {}
+  for (const k of DELEGATE_STR_KEYS) {
+    const v = args[k]
     if (v === undefined) {
-      return undefined
+      continue
     }
     if (typeof v !== 'string' || v === '') {
-      throw new PlaneVerbError('agents', DELEGATE, `${String(k)} must be a non-empty string`)
+      throw new PlaneVerbError('agents', DELEGATE, `${k} must be a non-empty string`)
     }
-    return v
+    req[k] = v
   }
-  const modeRaw = args['mode']
-  if (modeRaw !== undefined && modeRaw !== 'wait' && modeRaw !== 'detach') {
+  const mode = args['mode']
+  if (mode !== undefined && mode !== 'wait' && mode !== 'detach') {
     throw new PlaneVerbError('agents', DELEGATE, `mode must be 'wait' or 'detach'`)
   }
-  const timeoutRaw = args['timeoutSec']
-  if (timeoutRaw !== undefined && (typeof timeoutRaw !== 'number' || !Number.isFinite(timeoutRaw))) {
-    throw new PlaneVerbError('agents', DELEGATE, 'timeoutSec must be a number')
+  req['mode'] = mode
+  const timeoutSec = args['timeoutSec']
+  if (timeoutSec !== undefined) {
+    if (typeof timeoutSec !== 'number' || !Number.isFinite(timeoutSec)) {
+      throw new PlaneVerbError('agents', DELEGATE, 'timeoutSec must be a number')
+    }
+    req['timeoutSec'] = timeoutSec
   }
   const autoApprove = args['autoApprove']
-  if (autoApprove !== undefined && typeof autoApprove !== 'boolean') {
-    throw new PlaneVerbError('agents', DELEGATE, 'autoApprove must be a boolean')
+  if (autoApprove !== undefined) {
+    if (typeof autoApprove !== 'boolean') {
+      throw new PlaneVerbError('agents', DELEGATE, 'autoApprove must be a boolean')
+    }
+    req['autoApprove'] = autoApprove
   }
-  return {
-    prompt: str('prompt'),
-    promptFile: str('promptFile'),
-    mode: modeRaw as 'wait' | 'detach' | undefined,
-    provider: str('provider'),
-    class: str('class'),
-    model: str('model'),
-    timeoutSec: timeoutRaw as number | undefined,
-    connector: str('connector'),
-    worktree: str('worktree'),
-    autoApprove,
-    delegatedBy: str('delegatedBy'),
-    beadsDir: str('beadsDir'),
+  return req as unknown as DelegateRequest
+}
+
+/** delegate()'s error vocabulary → the plane's: caller input is a
+ *  client bug (PlaneVerbError → REST 400), a refusal or unreachable
+ *  backend is PlaneUnavailable (→ 503) — never a bare 500. */
+function execOrPlaneError(err: unknown): never {
+  if (err instanceof SpawnInputError || (err instanceof SpawnError && err.kind === 'input')) {
+    throw new PlaneVerbError('agents', DELEGATE, err instanceof Error ? err.message : String(err))
   }
+  if (err instanceof SpawnError) {
+    throw new PlaneUnavailable('agents', err.message)
+  }
+  throw err
 }
 
 export function agentsPlane(ctx: PlaneCtx): PlaneDescriptor {
@@ -171,22 +191,10 @@ export function agentsPlane(ctx: PlaneCtx): PlaneDescriptor {
       if (verb !== DELEGATE) {
         return verbsNotWired('agents', VERBS)(verb, args)
       }
-      // the plane error vocabulary: caller input is a client bug
-      // (PlaneVerbError → REST 400), a refusal/unavailable backend is
-      // PlaneUnavailable (→ 503) — never a bare 500
       try {
         return await delegate(dir, env(), delegateArgs(args))
       } catch (err) {
-        if (err instanceof SpawnInputError) {
-          throw new PlaneVerbError('agents', verb, err.message)
-        }
-        if (err instanceof SpawnError) {
-          if (err.kind === 'input') {
-            throw new PlaneVerbError('agents', verb, err.message)
-          }
-          throw new PlaneUnavailable('agents', err.message)
-        }
-        throw err
+        execOrPlaneError(err)
       }
     },
   }

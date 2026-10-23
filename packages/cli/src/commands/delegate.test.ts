@@ -24,6 +24,36 @@ interface Fixture {
   restore(): void
 }
 
+/** Detached workers outlive a failed assertion — kill whatever the
+ *  registry still points at before the tmpdir goes away (tests fake
+ *  'running' with their own pid — never kill self or the runner). */
+function killRegistered(main: string): void {
+  try {
+    for (const e of Object.values(readAgentRegistry(main))) {
+      const pid = typeof e.pid === 'number' ? e.pid : 0
+      if (pid > 0 && pid !== process.pid && pid !== process.ppid) {
+        try {
+          process.kill(-pid, 'SIGKILL') // detached → own process group
+        } catch {
+          // already gone
+        }
+      }
+    }
+  } catch {
+    // no readable registry — nothing spawned
+  }
+}
+
+function restoreEnv(scrubbed: Record<string, string | undefined>): void {
+  for (const [k, v] of Object.entries(scrubbed)) {
+    if (v === undefined) {
+      delete process.env[k]
+    } else {
+      process.env[k] = v
+    }
+  }
+}
+
 /** Real git repo + fake bd on PATH + agents.native.command — the
  *  agents.test fixture pattern: wait tests only need the repo (the
  *  registry wall read is real); detach spawns `node {promptFile}` so
@@ -58,28 +88,10 @@ function fixture(): Fixture {
     main,
     beads,
     restore() {
-      try {
-        for (const e of Object.values(readAgentRegistry(main))) {
-          if (typeof e.pid === 'number' && e.pid > 0 && e.pid !== process.pid && e.pid !== process.ppid) {
-            try {
-              process.kill(-e.pid, 'SIGKILL')
-            } catch {
-              // already gone
-            }
-          }
-        }
-      } catch {
-        // no readable registry
-      }
+      killRegistered(main)
       process.chdir(prev.cwd)
       process.env.PATH = prev.PATH
-      for (const [k, v] of Object.entries(prev.scrubbed)) {
-        if (v === undefined) {
-          delete process.env[k]
-        } else {
-          process.env[k] = v
-        }
-      }
+      restoreEnv(prev.scrubbed)
       rmSync(root, { recursive: true, force: true })
     },
   }
@@ -114,6 +126,27 @@ describe('bro fleet delegate — --wait', () => {
       assert.equal(r.stopReason, 'end_turn')
       assert.equal(r.text, 'answer from B')
       assert.deepEqual(fake.prompts, ['review this diff'])
+    } finally {
+      fx.restore()
+    }
+  })
+
+  test('BRO_AGENT_ID on the caller pins delegatedBy into the wait result', async () => {
+    const fx = fixture()
+    try {
+      process.env.BRO_AGENT_ID = 'native-asker'
+      const fake = fakeAcpAgent({ replyText: 'with provenance' })
+      const r = await delegate(
+        fx.main,
+        env(),
+        { prompt: 'who asked', provider: 'p', mode: 'wait' },
+        { acp: { peer: fake.app } }
+      )
+      assert.equal(r.mode, 'wait')
+      if (r.mode !== 'wait') {
+        return assert.fail('wait mode expected')
+      }
+      assert.equal(r.delegatedBy, 'native-asker')
     } finally {
       fx.restore()
     }

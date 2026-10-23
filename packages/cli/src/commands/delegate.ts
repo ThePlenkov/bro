@@ -25,6 +25,7 @@ import {
   wallText,
   type AgentInfo,
   type ExitCode,
+  type ProviderEntry,
   type ResolvedClass,
 } from '@broject/core'
 import {
@@ -109,6 +110,16 @@ export interface DelegateDetachResult {
 
 export type DelegateResult = DelegateWaitResult | DelegateDetachResult
 
+/** The resolved side of a request — the routing lane verdict plus the
+ *  provenance stamp (BRO_AGENT_ID fallback already applied). */
+interface DelegateSel {
+  req: DelegateRequest
+  routed?: ResolvedClass
+  delegatedBy?: string
+}
+
+type DelegateOpts = { fetch?: FetchFn; acp?: AcpSeam }
+
 /** The prompt text the request carries — --prompt and --prompt-file
  *  are the same channel (mutually exclusive), whitespace-only is no
  *  prompt at all. */
@@ -143,7 +154,6 @@ function routedLane(env: AgentConnectorEnv, req: DelegateRequest): ResolvedClass
     throw new SpawnInputError('--provider and --class are mutually exclusive')
   }
   const routing = env.fleet?.routing
-  const providers = env.providers ?? {}
   if (routing === undefined || Object.keys(routing).length === 0) {
     if (req.class !== undefined) {
       throw new SpawnInputError('--class names a fleet.routing lane — no fleet.routing is declared')
@@ -153,30 +163,24 @@ function routedLane(env: AgentConnectorEnv, req: DelegateRequest): ResolvedClass
   // a delegate spawn/ask has no bead to read a class: label off — the
   // phantom molStep is minted per request, so the lane resolves the
   // same way routeStepClass would for a label-less step
-  return resolveStepClass(routing, providers, { class: req.class })
+  return resolveStepClass(routing, env.providers ?? {}, { class: req.class })
 }
 
-/** --wait — one pooled ACP turn. Provider walls refuse first: a
- *  delegate turn is automated spend, not the interactive lane. The
- *  peer is per-request (no pool to keep warm across CLI invocations)
- *  and always closes — the 'exit' hook covers a mid-turn kill so the
- *  acp child can never orphan. */
-async function delegateWait(
-  dir: string,
+/** --wait's provider entry: the pin wins, else the routed chain head.
+ *  The entry must be acp-typed — a pooled turn needs an ACP peer;
+ *  api/cli kinds have no session to converse over. */
+function waitProvider(
   env: AgentConnectorEnv,
   req: DelegateRequest,
-  routed: ResolvedClass | undefined,
-  prompt: string,
-  opts: { fetch?: FetchFn; acp?: AcpSeam }
-): Promise<DelegateWaitResult> {
-  const providers = env.providers ?? {}
+  routed: ResolvedClass | undefined
+): { name: string; entry: Extract<ProviderEntry, { type: 'acp' }> } {
   const name = req.provider ?? routed?.provider
   if (name === undefined) {
     throw new SpawnInputError(
       'delegate --wait needs a provider — pass --provider <name> or declare fleet.routing.<class>.chain'
     )
   }
-  const entry = providers[name]
+  const entry = env.providers?.[name]
   if (entry === undefined) {
     throw new SpawnError(
       `providers.${name} is not configured`,
@@ -189,30 +193,54 @@ async function delegateWait(
       'config'
     )
   }
-  // walls live in the repo registry — a non-repo dir simply has none
-  const walls = ((): ReturnType<typeof providerWallsFor> => {
-    try {
-      return providerWallsFor(dir)
-    } catch {
-      return []
-    }
-  })()
-  const wall = walls.find((w) => w.provider === name)
+  return { name, entry }
+}
+
+/** Provider walls live in the repo registry — a non-repo dir simply
+ *  has none (a delegate ask works wherever config resolves). */
+function wallsFor(dir: string, provider: string): void {
+  let walls: ReturnType<typeof providerWallsFor>
+  try {
+    walls = providerWallsFor(dir)
+  } catch {
+    return
+  }
+  const wall = walls.find((w) => w.provider === provider)
   if (wall !== undefined) {
     throw new SpawnError(
       `${wallText(wall)} — the delegate lane waits; retry after the reset or --detach to a different lane`,
       'cap'
     )
   }
-  const timeoutSec = req.timeoutSec ?? DEFAULT_TIMEOUT_SEC
-  if (!Number.isFinite(timeoutSec) || timeoutSec <= 0) {
+}
+
+function waitDeadline(timeoutSec: number | undefined): number {
+  const sec = timeoutSec ?? DEFAULT_TIMEOUT_SEC
+  if (!Number.isFinite(sec) || sec <= 0) {
     throw new SpawnInputError('--timeout must be a positive number of seconds')
   }
-  const deadline = Date.now() + timeoutSec * 1000
+  return Date.now() + sec * 1000
+}
+
+/** --wait — one pooled ACP turn. Provider walls refuse first: a
+ *  delegate turn is automated spend, not the interactive lane. The
+ *  peer is per-request (no pool to keep warm across CLI invocations)
+ *  and always closes — the 'exit' hook covers a mid-turn kill so the
+ *  acp child can never orphan. */
+async function delegateWait(
+  dir: string,
+  env: AgentConnectorEnv,
+  sel: DelegateSel,
+  opts: DelegateOpts
+): Promise<DelegateWaitResult> {
+  const { name, entry } = waitProvider(env, sel.req, sel.routed)
+  wallsFor(dir, name)
+  const deadline = waitDeadline(sel.req.timeoutSec)
   // --model is the request pin: it outranks the chain's and the
   // entry's configured model but the reported model stays honest
   // (resolveTurnModel reports what the agent actually runs)
-  const model = req.model ?? (req.provider === undefined ? routed?.model : undefined)
+  const model =
+    sel.req.model ?? (sel.req.provider === undefined ? sel.routed?.model : undefined)
   const wire: ProviderWireOpts = {
     model,
     acp: { ...opts.acp, cwd: opts.acp?.cwd ?? dir },
@@ -221,9 +249,9 @@ async function delegateWait(
   const onExit = (): void => peer.close()
   process.once('exit', onExit)
   try {
-    const r = await acpPooledTurn(peer, entry, wire, prompt, deadline, {
+    const r = await acpPooledTurn(peer, entry, wire, delegatePrompt(sel.req), deadline, {
       by: 'delegate',
-      requestModel: req.model,
+      requestModel: sel.req.model,
       signal: opts.acp?.signal,
       onUpdate: opts.acp?.onUpdate,
     })
@@ -231,10 +259,10 @@ async function delegateWait(
       mode: 'wait',
       provider: name,
       model: r.model,
-      ...(routed?.class !== undefined ? { class: routed.class } : {}),
+      ...(sel.routed?.class !== undefined ? { class: sel.routed.class } : {}),
       stopReason: r.stopReason,
       text: r.text,
-      ...(req.delegatedBy !== undefined ? { delegatedBy: req.delegatedBy } : {}),
+      ...(sel.delegatedBy !== undefined ? { delegatedBy: sel.delegatedBy } : {}),
     }
   } finally {
     process.removeListener('exit', onExit)
@@ -242,31 +270,23 @@ async function delegateWait(
   }
 }
 
-/** The delegate contract — both CLI and the agents plane's
- *  exec('delegate') run it. Throws SpawnInputError on bad input,
- *  SpawnError on refusal/config/availability — callers render. */
-export async function delegate(
+/** --detach — the same spawn 'bro agents run' resolves: routing,
+ *  walls, fleet.maxConcurrent, session quotas and the claim artifacts
+ *  all ride spawnStepAgent. BRO_BATCH marks the fleet's lane (wall
+ *  refusal + batch budget); delegatedBy stamps via the spec's
+ *  provenance pin. */
+async function delegateDetach(
   dir: string,
   env: AgentConnectorEnv,
-  req: DelegateRequest,
-  opts: { fetch?: FetchFn; acp?: AcpSeam } = {}
-): Promise<DelegateResult> {
-  const mode = req.mode ?? 'wait'
-  const delegatedBy = req.delegatedBy ?? (process.env.BRO_AGENT_ID?.trim() || undefined)
-  const routed = routedLane(env, req)
-  if (mode === 'wait') {
-    return delegateWait(dir, env, req, routed, delegatePrompt(req), opts)
-  }
-  // detach — the same spawn 'bro agents run' resolves: routing, walls,
-  // fleet.maxConcurrent, session quotas and the claim artifacts all
-  // ride spawnStepAgent. BRO_BATCH marks the fleet's lane (wall refusal
-  // + batch budget); delegatedBy stamps via the spec's provenance pin.
-  const molStep = `adhoc-${randomBytes(4).toString('hex')}`
+  sel: DelegateSel,
+  opts: DelegateOpts
+): Promise<DelegateDetachResult> {
+  const { req, delegatedBy } = sel
   const agent = await spawnStepAgent(
     dir,
     env,
     {
-      molStep,
+      molStep: `adhoc-${randomBytes(4).toString('hex')}`,
       connector: req.connector,
       worktree: req.worktree,
       prompt: req.prompt,
@@ -288,62 +308,131 @@ export async function delegate(
   }
 }
 
-export async function runDelegateCommand(
-  argv: string[],
-  opts: { fetch?: FetchFn; acp?: AcpSeam } = {}
-): Promise<void> {
-  if (hasHelpFlag(argv)) {
-    usage(0)
+/** The delegate contract — both CLI and the agents plane's
+ *  exec('delegate') run it. Throws SpawnInputError on bad input,
+ *  SpawnError on refusal/config/availability — callers render. */
+export async function delegate(
+  dir: string,
+  env: AgentConnectorEnv,
+  req: DelegateRequest,
+  opts: DelegateOpts = {}
+): Promise<DelegateResult> {
+  const sel: DelegateSel = {
+    req,
+    routed: routedLane(env, req),
+    delegatedBy: req.delegatedBy ?? (process.env.BRO_AGENT_ID?.trim() || undefined),
   }
-  const dir = process.cwd()
-  const pos = positionals(
-    argv,
-    new Set([
-      '--prompt',
-      '--prompt-file',
-      '--provider',
-      '--class',
-      '--model',
-      '--timeout',
-      '--connector',
-      '--worktree',
-      '--beads-dir',
-    ])
-  )
+  return (req.mode ?? 'wait') === 'wait'
+    ? delegateWait(dir, env, sel, opts)
+    : delegateDetach(dir, env, sel, opts)
+}
+
+// --- CLI surface ------------------------------------------------------------------
+
+const VALUE_FLAGS = new Set([
+  '--prompt',
+  '--prompt-file',
+  '--provider',
+  '--class',
+  '--model',
+  '--timeout',
+  '--connector',
+  '--worktree',
+  '--beads-dir',
+])
+
+const DETACH_ONLY: Array<[flag: string, present: (argv: string[]) => boolean]> = [
+  ['--connector', (argv) => flag(argv, '--connector') !== undefined],
+  ['--worktree', (argv) => flag(argv, '--worktree') !== undefined],
+  ['--auto-approve', (argv) => argv.includes('--auto-approve')],
+]
+
+function parseTimeout(argv: string[], mode: 'wait' | 'detach'): number | undefined {
+  const raw = flag(argv, '--timeout')
+  if (raw === undefined) {
+    return undefined
+  }
+  if (mode !== 'wait') {
+    die('--timeout only applies to --wait')
+  }
+  const sec = Number(raw)
+  if (!Number.isFinite(sec) || sec <= 0) {
+    die('--timeout must be a positive number of seconds')
+  }
+  return sec
+}
+
+function parseArgv(argv: string[]): DelegateRequest {
+  const pos = positionals(argv, VALUE_FLAGS)
   const wait = argv.includes('--wait')
   const detach = argv.includes('--detach')
   if (wait && detach) {
     die('--wait and --detach are mutually exclusive')
   }
   const mode: 'wait' | 'detach' = detach ? 'detach' : 'wait'
+  if (mode !== 'detach') {
+    const used = DETACH_ONLY.filter(([, present]) => present(argv)).map(([f]) => f)
+    if (used.length > 0) {
+      die(`${used.join(', ')} only apply to --detach`)
+    }
+  }
   const promptFlag = flag(argv, '--prompt')
   if (promptFlag !== undefined && pos.length > 0) {
     die('positional text and --prompt are the same channel — pick one')
   }
-  const timeoutRaw = flag(argv, '--timeout')
-  if (mode !== 'wait' && timeoutRaw !== undefined) {
-    die('--timeout only applies to --wait')
-  }
-  if (mode !== 'detach' && (argv.includes('--auto-approve') || flag(argv, '--connector') !== undefined || flag(argv, '--worktree') !== undefined)) {
-    die('--connector, --worktree and --auto-approve only apply to --detach')
-  }
-  const timeoutSec = timeoutRaw === undefined ? undefined : Number(timeoutRaw)
-  if (timeoutRaw !== undefined && (!Number.isFinite(timeoutSec) || timeoutSec! <= 0)) {
-    die('--timeout must be a positive number of seconds')
-  }
-  const req: DelegateRequest = {
+  return {
     prompt: promptFlag ?? (pos.length > 0 ? pos.join(' ') : undefined),
     promptFile: flag(argv, '--prompt-file'),
     mode,
     provider: flag(argv, '--provider'),
     class: flag(argv, '--class'),
     model: flag(argv, '--model'),
-    timeoutSec,
+    timeoutSec: parseTimeout(argv, mode),
     connector: flag(argv, '--connector'),
     worktree: flag(argv, '--worktree'),
     autoApprove: argv.includes('--auto-approve') ? true : undefined,
     beadsDir: flag(argv, '--beads-dir'),
   }
+}
+
+function printWait(result: DelegateWaitResult): void {
+  // the reply IS the output — provenance rides stderr so a pipeline
+  // consumer never parses badge text out of the answer
+  const cls = result.class === undefined ? '' : ` · class ${result.class}`
+  console.error(`provider ${result.provider} · model ${result.model}${cls} · ${result.stopReason}`)
+  console.log(result.text)
+}
+
+function printDetach(result: DelegateDetachResult): void {
+  const info = result.agent
+  const pid = info.pid === undefined ? '' : ` pid ${info.pid}`
+  console.log(`agent ${info.id} ${info.state} for ${info.molStep} (${info.backend}${pid})`)
+  for (const [label, v] of [
+    ['delegatedBy', result.delegatedBy],
+    [
+      'provider',
+      info.provider === undefined
+        ? undefined
+        : `${info.provider}${info.model === undefined ? '' : ` · model ${info.model}`}`,
+    ],
+    ['log', info.log],
+    ['worktree', info.worktree],
+  ] as const) {
+    if (v !== undefined) {
+      console.log(`  ${label}: ${v}`)
+    }
+  }
+}
+
+export async function runDelegateCommand(
+  argv: string[],
+  opts: DelegateOpts = {}
+): Promise<void> {
+  if (hasHelpFlag(argv)) {
+    usage(0)
+  }
+  const dir = process.cwd()
+  const req = parseArgv(argv)
   let result: DelegateResult
   try {
     result = await delegate(dir, loadAgentEnv(dir), req, opts)
@@ -355,28 +444,8 @@ export async function runDelegateCommand(
     return
   }
   if (result.mode === 'wait') {
-    // the reply IS the output — provenance rides stderr so a pipeline
-    // consumer never parses badge text out of the answer
-    console.error(
-      `provider ${result.provider} · model ${result.model}` +
-        `${result.class === undefined ? '' : ` · class ${result.class}`} · ${result.stopReason}`
-    )
-    console.log(result.text)
-    return
-  }
-  const info = result.agent
-  const pid = info.pid === undefined ? '' : ` pid ${info.pid}`
-  console.log(`agent ${info.id} ${info.state} for ${info.molStep} (${info.backend}${pid})`)
-  if (result.delegatedBy !== undefined) {
-    console.log(`  delegatedBy: ${result.delegatedBy}`)
-  }
-  if (info.provider !== undefined) {
-    console.log(`  provider: ${info.provider}${info.model === undefined ? '' : ` · model ${info.model}`}`)
-  }
-  if (info.log !== undefined) {
-    console.log(`  log: ${info.log}`)
-  }
-  if (info.worktree !== undefined) {
-    console.log(`  worktree: ${info.worktree}`)
+    printWait(result)
+  } else {
+    printDetach(result)
   }
 }
