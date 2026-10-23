@@ -1808,9 +1808,11 @@ const WORKER_POLL_MS = 1_000
 /** Alive-line floor: the heartbeat surfaces a STUCK run, so a fast
  *  --interval tick must not turn it into per-poll noise — a sub-floor
  *  interval (the e2e's fake clock) would heartbeat constantly through
- *  every healthy run. Production is unchanged: the default 60s
- *  interval sits far above the floor. */
-const HEARTBEAT_MIN_MS = 10_000
+ *  every healthy run. The floor still beats inside a bounded hold —
+ *  a stalled run must name its stall promptly, and the e2e's 4s
+ *  kill-windows rely on seeing the line. Production is unchanged:
+ *  the default 60s interval sits far above the floor. */
+const HEARTBEAT_MIN_MS = 2_000
 
 /** The worker stage — a spawned member's FIRST gate, before its PR
  *  gate is even meaningful (spec bro-zpa93). It polls the agents
