@@ -37,6 +37,11 @@ const isRecord = (v: unknown): v is Record<string, unknown> =>
 const eqJson = (a: unknown, b: unknown): boolean =>
   JSON.stringify(a) === JSON.stringify(b)
 
+/** Own-property lookup — unlike `map[k]` this never reads inherited
+ *  properties (a plugin named `toString` still resolves to its row). */
+const own = (map: Record<string, unknown>, key: string): unknown =>
+  Object.getOwnPropertyDescriptor(map, key)?.value
+
 // --- the dump --------------------------------------------------------------
 
 export interface ContractCommandRow {
@@ -215,8 +220,9 @@ export function parseBreaking(md: string): Set<string> {
       continue
     }
     const m = /^\s*[-*]\s+(\S+)/.exec(line)
-    if (m !== null && m[1] !== undefined) {
-      out.add(m[1].replace(/:$/, ''))
+    const tok = m?.[1]
+    if (tok) {
+      out.add(tok.replace(/:$/, ''))
     }
   }
   return out
@@ -254,7 +260,7 @@ function diffMap(prefix: string, committed: unknown, live: unknown): Removal[] {
   }
   const out: Removal[] = []
   for (const [k, cv] of Object.entries(committed)) {
-    if (live[k] === undefined) {
+    if (own(live, k) === undefined) {
       out.push({ path: `${prefix}.${k}`, value: cv })
     }
   }
@@ -272,7 +278,7 @@ function diffSubs(prefix: string, committed: unknown, live: unknown): Removal[] 
   }
   const out: Removal[] = []
   for (const [sub, cv] of Object.entries(committed)) {
-    const lv = live[sub]
+    const lv = own(live, sub)
     if (lv === undefined) {
       out.push({ path: `${prefix}.${sub}`, value: cv })
     } else if (isRecord(cv) && isRecord(lv)) {
@@ -347,7 +353,7 @@ function groupRemovals(
 ): Removal[] {
   const out: Removal[] = []
   for (const [g, v] of Object.entries(committedGroups)) {
-    if (!isRecord(live.groups[g])) {
+    if (!isRecord(own(live.groups, g))) {
       out.push({ path: `groups.${g}`, value: v })
     }
   }
@@ -360,12 +366,12 @@ function commandRowRemovals(
 ): Removal[] {
   const out: Removal[] = []
   for (const [name, c] of Object.entries(committedCommands)) {
-    const l = live.commands[name]
+    const l = own(live.commands, name)
     if (!isRecord(l)) {
       // absent or garbage live row — invocation-wise the command is gone
       out.push({ path: name, value: c })
     } else if (isRecord(c)) {
-      out.push(...commandRemovals(name, c, l))
+      out.push(...commandRemovals(name, c, l as unknown as ContractCommandRow))
     }
     // a non-record committed row is drift — the stale pass reports it
   }
@@ -397,7 +403,7 @@ function mapStale(
   const committedMap = isRecord(committed) ? committed : {}
   const out: string[] = []
   for (const [k, v] of Object.entries(doc)) {
-    const c = committedMap[k]
+    const c = own(committedMap, k)
     if (c === undefined) {
       out.push(`${prefix === '' ? k : `${prefix}.${k}`} (added)`)
     } else if (!eqJson(c, v)) {
@@ -422,6 +428,71 @@ function stalePaths(committed: ContractDoc, doc: ContractDoc): string[] {
   return out
 }
 
+/** Announced removals tombstone into `removed`; unannounced ones are
+ *  breaking problems. Mutates `removed`. */
+function removalProblems(
+  removalPaths: Removal[],
+  announced: ReadonlySet<string>,
+  removed: Map<string, unknown>
+): ContractProblem[] {
+  const out: ContractProblem[] = []
+  for (const r of removalPaths) {
+    if (!covered(r.path, announced)) {
+      out.push({
+        kind: 'breaking',
+        path: r.path,
+        message: 'surface removed or respelled — announce it in contract/BREAKING.md',
+      })
+    } else {
+      removed.set(r.path, r.value)
+    }
+  }
+  return out
+}
+
+/** Every tombstone keeps its bullet — the ledger cannot be quietly
+ *  edited around. */
+function ledgerProblems(
+  removed: Map<string, unknown>,
+  announced: ReadonlySet<string>
+): ContractProblem[] {
+  const out: ContractProblem[] = []
+  for (const k of removed.keys()) {
+    if (!covered(k, announced)) {
+      out.push({
+        kind: 'ledger',
+        path: `removed.${k}`,
+        message: 'tombstone has no BREAKING.md bullet — the ledger cannot be quietly edited around',
+      })
+    }
+  }
+  return out
+}
+
+/** A bullet covering no pending removal and no tombstone is a
+ *  permanent hall-pass on that path — delete it when spent. */
+function spentBulletProblems(
+  announced: ReadonlySet<string>,
+  removalPaths: Removal[],
+  removed: Map<string, unknown>
+): ContractProblem[] {
+  const out: ContractProblem[] = []
+  for (const a of announced) {
+    const single = new Set([a])
+    const used =
+      removalPaths.some((r) => covered(r.path, single)) ||
+      [...removed.keys()].some((k) => covered(k, single))
+    if (!used) {
+      out.push({
+        kind: 'ledger',
+        path: `announce.${a}`,
+        message: 'bullet announces nothing — remove it; a stale bullet waives future changes',
+      })
+    }
+  }
+  return out
+}
+
 /** The gate as data: what the committed file should become and why it
  *  can't yet. Announced removals move to `removed` (old value kept);
  *  unannounced ones are breaking problems; everything else different
@@ -431,45 +502,13 @@ export function reconcileContract(
   live: ContractDump,
   announced: ReadonlySet<string>
 ): { doc: ContractDoc; problems: ContractProblem[] } {
-  const problems: ContractProblem[] = []
   const removalPaths = removals(committed, live)
   const removed = new Map<string, unknown>(Object.entries(committed.removed))
-  for (const r of removalPaths) {
-    if (!covered(r.path, announced)) {
-      problems.push({
-        kind: 'breaking',
-        path: r.path,
-        message: 'surface removed or respelled — announce it in contract/BREAKING.md',
-      })
-      continue
-    }
-    removed.set(r.path, r.value)
-  }
-  for (const k of removed.keys()) {
-    if (!covered(k, announced)) {
-      problems.push({
-        kind: 'ledger',
-        path: `removed.${k}`,
-        message: 'tombstone has no BREAKING.md bullet — the ledger cannot be quietly edited around',
-      })
-    }
-  }
-  // a bullet that covers no pending removal and no tombstone is a
-  // permanent hall-pass on that path — delete it when spent
-  const announcedList = [...announced]
-  for (const a of announcedList) {
-    const single = new Set([a])
-    const used =
-      removalPaths.some((r) => covered(r.path, single)) ||
-      [...removed.keys()].some((k) => covered(k, single))
-    if (!used) {
-      problems.push({
-        kind: 'ledger',
-        path: `announce.${a}`,
-        message: 'bullet announces nothing — remove it; a stale bullet waives future changes',
-      })
-    }
-  }
+  const problems = [
+    ...removalProblems(removalPaths, announced, removed),
+    ...ledgerProblems(removed, announced),
+    ...spentBulletProblems(announced, removalPaths, removed),
+  ]
   const doc: ContractDoc = {
     version: live.version,
     groups: live.groups,
@@ -509,9 +548,10 @@ function writeDocAtomic(path: string, doc: ContractDoc): void {
 
 function printTable(dump: ContractDump): void {
   for (const c of Object.values(dump.commands)) {
+    const subs: Record<string, CliSubContract> = c.contract?.subs ?? {}
     const flags =
       Object.keys(c.contract?.flags ?? {}).length +
-      Object.values(c.contract?.subs ?? {}).reduce(
+      Object.values(subs).reduce<number>(
         (n, s) => n + Object.keys(s.flags ?? {}).length,
         0
       )

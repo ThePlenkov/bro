@@ -12,3 +12,10 @@ exclude_paths:
   # path as uncontrolled data; the same shape already ships in the
   # act-state cache (packages/act/src/state-cache.ts) unflagged.
   - 'packages/cli/src/commands/foreign-push.ts'
+  # The contract gate's fs paths ARE the input — --contract/--dump/
+  # --breaking exist so fixtures never touch git (spec bro-k9ces).
+  # Every read/write goes to an operator-named path, so Codacy's
+  # non-literal-path rule flags the file's whole job; the keyed map
+  # lookups a diff engine needs read as object-injection for the same
+  # reason (own-property descriptors, not user data).
+  - 'packages/cli/src/commands/contract.ts'
