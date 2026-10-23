@@ -76,18 +76,19 @@ loop poll stack gets a single "tick" the operator can shrink:
 
 ## Plan
 
-- [ ] `testkit.ts`: `testRepoInit(dir)` helper — init + first commit
+- [x] `testkit.ts`: `testRepoInit(dir)` helper — init + first commit
   with inline `-c` identity/signing pins (no config files touched).
-- [ ] `notify.test.ts`: `withRepo` gains the initial commit — the
+- [x] `notify.test.ts`: `withRepo` gains the initial commit — the
   worktree test stops being version-dependent.
-- [ ] `stacks.ts`: rebase path replays `git cherry`-filtered commits —
+- [x] `stacks.ts`: rebase path replays `git cherry`-filtered commits —
   no `--empty` flag on the wire.
-- [ ] `testrepo.ts`: `bdStoreBlocker()` capability probe; `loop.test.ts`
+- [x] `testrepo.ts`: `bdStoreBlocker()` capability probe; `loop.test.ts`
   skips on "cannot init" not "no binary".
-- [ ] `loop.ts`: fractional `--interval` (floor `MIN_INTERVAL_SEC`),
-  worker poll `min(1 s, interval)`; e2e `f.run` defaults
-  `--interval 0.1`.
-- [ ] `drive.ts`: `--every` accepts the same fractional floor.
+- [x] `loop.ts`: fractional `--interval` (floor `MIN_INTERVAL_SEC`),
+  worker poll `min(1 s, interval)`, heartbeat floor 2 s; e2e `f.run`
+  defaults `--interval 0.1`.
+- [x] `drive.ts`: `--every` accepts the same fractional floor (already
+  enforced; the state-cache ttl now caps at the run's cadence).
 - [ ] Re-run: `npm test` green under a scrubbed env (empty HOME, no bd
   on PATH); `loop.e2e` suite < 15 s.
 
