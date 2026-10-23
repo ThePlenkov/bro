@@ -309,7 +309,7 @@ describe('serve — routes', () => {
     assert.equal(blind.status, 503)
   })
 
-  test('DELETE /api/v1/agents/<ref> — verdict refuses 200 on an unconfirmed stop', async () => {
+  test('DELETE /api/v1/agents/<ref> — timeout/unverified verdicts refuse 200', async () => {
     // the unit survived the signal — 409, never a 200 success envelope
     const alive = await route(
       'DELETE',
@@ -349,7 +349,9 @@ describe('serve — routes', () => {
       })
     )
     assert.equal(unverified.status, 409)
+  })
 
+  test('DELETE /api/v1/agents/<ref> — stopping is 202; a verdict-less stop keeps the old 200', async () => {
     // a delivered-but-unconfirmed stop is accepted, not failed
     const stopping = await route(
       'DELETE',

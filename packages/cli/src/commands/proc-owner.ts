@@ -590,6 +590,26 @@ function exitFileProves(home: string | null, e: AgentRegistryEntry): boolean {
   }
 }
 
+/** The unit leg of the death ladder: 'running' when members or
+ *  badged escapees live, 'spawned' when the probe cannot answer —
+ *  unverifiable is the conservative occupied read — undefined when
+ *  the unit is verified dead and the recorded-cause ladder applies. */
+function unitOccupiedState(
+  e: { agentId?: unknown },
+  pid: number | undefined,
+  start: string | undefined
+): 'running' | 'spawned' | undefined {
+  const unit = procUnitState(
+    pid,
+    start,
+    typeof e.agentId === 'string' ? e.agentId : undefined
+  )
+  if (unit === 'alive') {
+    return 'running'
+  }
+  return unit === 'unknown' ? 'spawned' : undefined
+}
+
 /** Agent liveness derived from the registry entry alone — no backend
  *  list() probes. A live pid is running; a recorded or on-disk death is
  *  terminal; anything unproven counts as live ('spawned') — occupied is
@@ -609,16 +629,9 @@ export function registryEntryState(
   // the unit outlives the wrapper: session members and badged escapees
   // keep the claim occupied — only a verified-dead unit falls through
   // to the death ladder (bro-l8c4f.3)
-  const unit = procUnitState(
-    pid,
-    start,
-    typeof e.agentId === 'string' ? e.agentId : undefined
-  )
-  if (unit === 'alive') {
-    return 'running'
-  }
-  if (unit === 'unknown') {
-    return 'spawned' // unverifiable is the conservative live read
+  const occupied = unitOccupiedState(e, pid, start)
+  if (occupied !== undefined) {
+    return occupied
   }
   if (e.stopped === true) {
     return 'stopped'

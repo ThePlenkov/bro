@@ -116,6 +116,7 @@ import {
   procSessionId,
   procUnitScan,
   procUnitState,
+  type UnitMember,
 } from './commands/proc-owner.ts'
 import { VERSION } from './version.ts'
 
@@ -1986,6 +1987,21 @@ function nativeSurvivors(pid: number | undefined, agentId: string | undefined): 
   return pids.length > 0 ? `surviving pids: ${pids.join(', ')}` : 'the unit still reads live'
 }
 
+/** Poll the unit probe until 'dead' or the budget expires — the
+ *  connector's bounded wait (bro-l8c4f.3). */
+async function waitUnitDead(
+  unit: () => 'dead' | 'alive' | 'unknown',
+  budgetMs: number
+): Promise<'dead' | 'alive' | 'unknown'> {
+  const deadline = Date.now() + budgetMs
+  let probe = unit()
+  while (probe !== 'dead' && Date.now() < deadline) {
+    await new Promise((r) => setTimeout(r, 25))
+    probe = unit()
+  }
+  return probe
+}
+
 /** The non-clean verdict a live or unreadable unit earns — the same
  *  shape from the post-wait probe and the under-lock re-probe. */
 function nativeUnitRefusal(
@@ -2000,11 +2016,52 @@ function nativeUnitRefusal(
   }
 }
 
+/** The group signal only goes to a group proven ours — the pinned
+ *  leader alive, or members still sitting in its process group. A
+ *  recycled pgid could satisfy kill(-pid, 0) without being this unit;
+ *  a sid-matched member cannot lie. */
+function termNativeGroup(
+  pid: number,
+  start: string | undefined,
+  members: UnitMember[]
+): string | undefined {
+  if (!pidAlive(pid, start) && !members.some((m) => m.inGroup)) {
+    return undefined
+  }
+  try {
+    process.kill(-pid, 'SIGTERM') // detached → own process group
+    return undefined
+  } catch (err) {
+    // ESRCH raced dead — the wait decides; anything else is a signal
+    // that did not land and must be reported
+    const code = (err as NodeJS.ErrnoException).code
+    return code === 'ESRCH' ? undefined : err instanceof Error ? err.message : String(err)
+  }
+}
+
+/** Per-pid TERM with the identity re-read inline — a pid may recycle
+ *  between the scan and the kill, so sid/badge proof happens
+ *  immediately before the signal. */
+function termUnitPid(p: number, leader: number | undefined, agentId: string | undefined): void {
+  const sameSession = leader !== undefined && procSessionId(p) === leader
+  const badged = agentId !== undefined && procHasBadge(p, agentId)
+  if (!sameSession && !badged) {
+    return
+  }
+  try {
+    process.kill(p, 'SIGTERM')
+  } catch {
+    // raced dead — the unit probe is the verdict
+  }
+}
+
 /** One SIGTERM pass over a generation-checked unit — the caller holds
  *  the registry lock and has proven the entry is still ours, so the
  *  kills and the check are one critical section a respawn cannot split
- *  (bro-l8c4f.3). Returns a signal that failed to land, for the
- *  verdict's detail. */
+ *  (bro-l8c4f.3). Same-session members in another pgrp never felt the
+ *  group signal, and setsid'd escapees keep the inherited
+ *  BRO_AGENT_ID pin — both get per-pid TERM. Returns a signal that
+ *  failed to land, for the verdict's detail. */
 function termNativeUnit(
   pid: number | undefined,
   start: string | undefined,
@@ -2012,43 +2069,15 @@ function termNativeUnit(
 ): string | undefined {
   const scan = procUnitScan(pid, agentId)
   const members = scan === 'unknown' ? [] : scan.members
-  // the group signal only goes to a group proven ours — the pinned
-  // leader alive, or members still sitting in its process group. A
-  // recycled pgid could satisfy kill(-pid, 0) without being this
-  // unit; a sid-matched member cannot lie.
-  if (pid !== undefined && (pidAlive(pid, start) || members.some((m) => m.inGroup))) {
-    try {
-      process.kill(-pid, 'SIGTERM') // detached → own process group
-    } catch (err) {
-      // ESRCH raced dead — the wait decides; anything else is a
-      // signal that did not land and must be reported
-      if ((err as NodeJS.ErrnoException).code !== 'ESRCH') {
-        return err instanceof Error ? err.message : String(err)
-      }
-    }
-  }
-  // same-session members in another pgrp never felt the group signal,
-  // and setsid'd escapees keep the inherited BRO_AGENT_ID pin — each
-  // per-pid kill re-verifies identity immediately before signaling so
-  // a recycled pid never eats a TERM meant for a dead member
+  const err = pid === undefined ? undefined : termNativeGroup(pid, start, members)
   const strays = [
     ...members.filter((m) => !m.inGroup).map((m) => m.pid),
     ...(scan === 'unknown' ? [] : scan.escapees),
   ]
   for (const p of strays) {
-    const ours =
-      pid !== undefined
-        ? procSessionId(p) === pid || (agentId !== undefined && procHasBadge(p, agentId))
-        : agentId !== undefined && procHasBadge(p, agentId)
-    if (ours) {
-      try {
-        process.kill(p, 'SIGTERM')
-      } catch {
-        // raced dead — the unit probe is the verdict
-      }
-    }
+    termUnitPid(p, pid, agentId)
   }
-  return undefined
+  return err
 }
 
 /** Live state for a registry entry under this backend. */
@@ -2376,12 +2405,7 @@ export function makeNativeConnector(ctx: ConnectorCtx, env: AgentConnectorEnv): 
         // let the signal land before recording the stop — `stopped` on a
         // still-living unit would let a respawn run alongside the dying
         // agent. The unit, not the wrapper, is the wait (bro-l8c4f.3).
-        const deadline = Date.now() + 2_000
-        let probe = unit()
-        while (probe !== 'dead' && Date.now() < deadline) {
-          await new Promise((r) => setTimeout(r, 25))
-          probe = unit()
-        }
+        const probe = await waitUnitDead(unit, 2_000)
         if (probe !== 'dead') {
           return nativeUnitRefusal(probe, signalErr, pid, agentId)
         }
@@ -3274,6 +3298,29 @@ export function makeGascityConnector(ctx: ConnectorCtx, env: AgentConnectorEnv):
     }
   }
 
+  /** `session close` is delivered, the supervisor owns the reap — the
+   *  post-close session list decides what is confirmable
+   *  (bro-l8c4f.3). A thrown close means the request never landed —
+   *  the facade reads it as 'unverified'. */
+  const gcStopVerdict = (city: string, entry: AgentRegistryEntry, molStep: string): StopResult => {
+    closeGcSession(
+      city,
+      typeof entry.sessionId === 'string' ? entry.sessionId : molStep,
+      molStep
+    )
+    const { sessions, err } = listGcSessions(city)
+    if (sessions === undefined) {
+      return {
+        verdict: 'unverified',
+        detail: `cannot read gc sessions after close — ${err ?? 'unreachable'}`,
+      }
+    }
+    const s = gcSessionFor(entry, molStep, sessions)
+    return s !== undefined && gcState(s) !== 'exited'
+      ? { verdict: 'stopping', detail: 'session close accepted — the gc supervisor owns the reap' }
+      : { verdict: 'stopped' }
+  }
+
   return {
     name: 'gascity',
 
@@ -3426,31 +3473,10 @@ export function makeGascityConnector(ctx: ConnectorCtx, env: AgentConnectorEnv):
       }
       const [molStep, entry] = hit
       const city = configDir()
-      let res: StopResult = { verdict: 'stopped' }
-      if (city !== null && entry.stopped !== true) {
-        closeGcSession(
-          city,
-          typeof entry.sessionId === 'string' ? entry.sessionId : molStep,
-          molStep
-        )
-        // `session close` is delivered, the supervisor owns the reap —
-        // the session list decides what is confirmable (bro-l8c4f.3)
-        const { sessions, err } = listGcSessions(city)
-        if (sessions === undefined) {
-          res = {
-            verdict: 'unverified',
-            detail: `cannot read gc sessions after close — ${err ?? 'unreachable'}`,
-          }
-        } else {
-          const s = gcSessionFor(entry, molStep, sessions)
-          if (s !== undefined && gcState(s) !== 'exited') {
-            res = {
-              verdict: 'stopping',
-              detail: 'session close accepted — the gc supervisor owns the reap',
-            }
-          }
-        }
-      }
+      const res: StopResult =
+        city !== null && entry.stopped !== true
+          ? gcStopVerdict(city, entry, molStep)
+          : { verdict: 'stopped' }
       try {
         patchAgentRegistry(dir, molStep, { stopped: true })
       } catch {
@@ -4877,6 +4903,31 @@ export function makeCopilotConnector(ctx: ConnectorCtx, env: AgentConnectorEnv):
    *  can confirm: 'stopped' is a verified non-live task, 'stopping' a
    *  delivered cancel we cannot confirm, 'unverified' a read that
    *  never answered (bro-l8c4f.3). */
+
+  /** The warn + verdict for a task the re-read cannot confirm dead —
+   *  'stopping' when the cancel POST (or a live re-read) shows the
+   *  request reached GitHub, 'unverified' when nothing proves it did. */
+  const copilotPendingVerdict = (
+    molStep: string,
+    entry: AgentRegistryEntry,
+    taskId: string,
+    after: ReturnType<typeof copilotFetchTask>,
+    cancelSent: boolean,
+    repo: string | undefined
+  ): StopResult => {
+    const url =
+      copilotSessionUrl(repo, entry.pr, entry.sessionId) ??
+      `https://${ghHost()}/copilot/agents`
+    const detail = after.ok
+      ? `copilot session for ${molStep} is still live — there is no ` +
+        `CLI/REST cancel; stop it in the web UI (${url})`
+      : `cannot re-check copilot task ${taskId} after cancel — ` +
+        `${after.err ?? 'gh api failed'}; the session may still be live — ` +
+        `stop it in the web UI (${url})`
+    console.error(`warning: ${detail}`)
+    return { verdict: after.ok || cancelSent ? 'stopping' : 'unverified', detail }
+  }
+
   const copilotCancelRemote = (molStep: string, entry: AgentRegistryEntry, taskId: string): StopResult => {
     const f = copilotFetchTask(taskId)
     if (!f.ok) {
@@ -4899,19 +4950,7 @@ export function makeCopilotConnector(ctx: ConnectorCtx, env: AgentConnectorEnv):
     if (after.ok && !COPILOT_LIVE_STATES.has(copilotTaskState(after.task!))) {
       return { verdict: 'stopped' }
     }
-    const url =
-      copilotSessionUrl(repo, entry.pr, entry.sessionId) ??
-      `https://${ghHost()}/copilot/agents`
-    const detail = after.ok
-      ? `copilot session for ${molStep} is still live — there is no ` +
-        `CLI/REST cancel; stop it in the web UI (${url})`
-      : `cannot re-check copilot task ${taskId} after cancel — ` +
-        `${after.err ?? 'gh api failed'}; the session may still be live — ` +
-        `stop it in the web UI (${url})`
-    console.error(`warning: ${detail}`)
-    // 'stopping' when the cancel POST landed — 'unverified' when even
-    // the request cannot be shown to have reached GitHub
-    return { verdict: after.ok || cancelSent ? 'stopping' : 'unverified', detail }
+    return copilotPendingVerdict(molStep, entry, taskId, after, cancelSent, repo)
   }
 
   return {

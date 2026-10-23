@@ -793,20 +793,12 @@ export async function stopAgent(
   const respawned =
     current.pid !== hit.agent.pid ? { from: hit.agent.pid, to: current.pid } : undefined
   // the verdict belongs to the connector — only the backend knows what
-  // "the unit is gone" means for its unit (bro-l8c4f.3). A THROWN
-  // stop is a request that may not have landed — unverified, so the
-  // surfaces refuse a clean verdict instead of crashing to a 500.
-  const res: StopResult | void = await hit.conn.stop(hit.agent.id).catch(
-    (err: unknown): StopResult => ({
-      verdict: 'unverified',
-      detail: err instanceof Error ? err.message : String(err),
-    })
-  )
-  const verdict: StopVerdict = res === undefined ? 'stopped' : res.verdict
+  // "the unit is gone" means for its unit (bro-l8c4f.3)
+  const res = await callConnectorStop(hit.conn, hit.agent.id)
   // on a non-clean verdict the reported row should be the post-stop
   // truth where the backend can still answer — the survivor's state,
   // not the stale pre-stop snapshot
-  if (verdict !== 'stopped') {
+  if (res.verdict !== 'stopped') {
     try {
       current = await hit.conn.status(hit.agent.id)
     } catch {
@@ -818,12 +810,27 @@ export async function stopAgent(
     degraded,
     agent: current,
     backend: hit.conn.name,
-    stopped: verdict === 'stopped',
-    verdict,
-    detail: res === undefined ? undefined : res.detail,
+    stopped: res.verdict === 'stopped',
+    verdict: res.verdict,
+    detail: res.detail,
     terminal,
     cleared: current.state === 'blocked' ? true : undefined,
     respawned,
+  }
+}
+
+/** stop() is a request, not a result — the connector's StopResult is
+ *  the truth. A void resolve is the legacy "ran == done" contract; a
+ *  THROWN stop is a request that may not have landed — unverified, so
+ *  the surfaces refuse a clean verdict instead of crashing to a 500. */
+async function callConnectorStop(conn: AgentConnector, id: string): Promise<StopResult> {
+  try {
+    return (await conn.stop(id)) ?? { verdict: 'stopped' }
+  } catch (err) {
+    return {
+      verdict: 'unverified',
+      detail: err instanceof Error ? err.message : String(err),
+    }
   }
 }
 
@@ -1238,12 +1245,17 @@ async function cmdDown(dir: string, env: AgentConnectorEnv, argv: string[]): Pro
     console.log(`down: no agent "${target}" — nothing to stop`)
     return
   }
+  reportStopOutcome(outcome)
+}
+
+/** The operator-facing tail of `down <target>` on a found agent.
+ *  Truthfulness (bro-l8c4f.3): only a verified-dead unit may read as
+ *  `stopped` — a survivor or an unverifiable death is an error the
+ *  operator must see before respawning anything, and the check runs
+ *  BEFORE the terminal path so a stale 'lost'/'exited' pre-stop read
+ *  cannot mask a unit that is actually still live. */
+function reportStopOutcome(outcome: StopOutcome): void {
   const agent = outcome.agent!
-  // truthfulness (bro-l8c4f.3): only a verified-dead unit may read as
-  // `stopped` — a survivor or an unverifiable death is an error the
-  // operator must see before respawning anything. These checks run
-  // BEFORE the terminal path: a stale 'lost'/'exited' pre-stop read
-  // must not mask a unit that is actually still live.
   if (outcome.verdict === 'timeout' || outcome.verdict === 'unverified') {
     const why =
       outcome.verdict === 'timeout'

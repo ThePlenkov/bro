@@ -775,8 +775,7 @@ async function routeAgentGet(ref: string, deps: ServeDeps): Promise<ServeRespons
  *  unverifiable death is 409; a delivered-but-unconfirmable stop is
  *  202 — accepted, not enacted. */
 function stopVerdictResponse(ref: string, outcome: StopOutcome): ServeResponse | undefined {
-  const verdict = outcome.verdict
-  if (verdict !== 'timeout' && verdict !== 'unverified' && verdict !== 'stopping') {
+  if (outcome.verdict === undefined || outcome.verdict === 'stopped') {
     return undefined
   }
   const detail =
@@ -785,60 +784,62 @@ function stopVerdictResponse(ref: string, outcome: StopOutcome): ServeResponse |
   const body = {
     agent: outcome.agent,
     stopped: false,
-    verdict,
+    verdict: outcome.verdict,
     ...(detail !== undefined ? { detail } : {}),
     ...(outcome.respawned !== undefined ? { respawned: outcome.respawned } : {}),
   }
-  if (verdict === 'stopping') {
+  if (outcome.verdict === 'stopping') {
     // delivered but unconfirmable by this backend — accepted, not dead
     return { status: 202, body }
   }
   const error =
-    verdict === 'timeout'
+    outcome.verdict === 'timeout'
       ? `"${ref}" survived the stop signal — still running`
       : `"${ref}" — stop unverified` + (detail !== undefined ? `: ${detail}` : '')
   return { status: 409, body: { error, ...body } }
 }
 
-async function routeAgentDelete(ref: string, deps: ServeDeps): Promise<ServeResponse> {
-  const outcome = await deps.stop(ref)
+/** The full DELETE response — the miss ladder, the verdict refusal,
+ *  then the verified-stop 200. */
+function agentDeleteResponse(ref: string, outcome: StopOutcome): ServeResponse {
   if (!outcome.found) {
     // a degraded read can't confirm "gone" — unverifiable is not 404
-    if (outcome.degraded.length > 0) {
-      return {
-        status: 503,
-        body: {
-          error: `cannot verify "${ref}" — backend(s) degraded`,
-          degraded: outcome.degraded,
-        },
-      }
+    return outcome.degraded.length > 0
+      ? {
+          status: 503,
+          body: {
+            error: `cannot verify "${ref}" — backend(s) degraded`,
+            degraded: outcome.degraded,
+          },
+        }
+      : { status: 404, body: { error: `no agent "${ref}"` } }
+  }
+  return (
+    stopVerdictResponse(ref, outcome) ?? {
+      status: 200,
+      body: {
+        agent: outcome.agent,
+        stopped: outcome.stopped,
+        // machine-readable "was already terminal" — clients shouldn't
+        // string-match the note to tell it from a live stop
+        ...(outcome.terminal === true ? { terminal: true } : {}),
+        ...(outcome.cleared === true ? { cleared: true } : {}),
+        ...(outcome.terminal === true && outcome.agent !== undefined
+          ? {
+              note:
+                outcome.cleared === true
+                  ? 'blocked — cleared'
+                  : `already ${outcome.agent.state}`,
+            }
+          : {}),
+        ...(outcome.respawned !== undefined ? { respawned: outcome.respawned } : {}),
+      },
     }
-    return { status: 404, body: { error: `no agent "${ref}"` } }
-  }
-  const refused = stopVerdictResponse(ref, outcome)
-  if (refused !== undefined) {
-    return refused
-  }
-  return {
-    status: 200,
-    body: {
-      agent: outcome.agent,
-      stopped: outcome.stopped,
-      // machine-readable "was already terminal" — clients shouldn't
-      // string-match the note to tell it from a live stop
-      ...(outcome.terminal === true ? { terminal: true } : {}),
-      ...(outcome.cleared === true ? { cleared: true } : {}),
-      ...(outcome.terminal === true && outcome.agent !== undefined
-        ? {
-            note:
-              outcome.cleared === true
-                ? 'blocked — cleared'
-                : `already ${outcome.agent.state}`,
-          }
-        : {}),
-      ...(outcome.respawned !== undefined ? { respawned: outcome.respawned } : {}),
-    },
-  }
+  )
+}
+
+async function routeAgentDelete(ref: string, deps: ServeDeps): Promise<ServeResponse> {
+  return agentDeleteResponse(ref, await deps.stop(ref))
 }
 
 async function routeAgentRef(
