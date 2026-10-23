@@ -481,8 +481,14 @@ const sweepStaged = (lock: string): void => {
  *  and rmdir — a stolen-then-reacquired lock is a foreign instance
  *  and is left strictly alone, byte for byte. */
 const releaseLock = (lock: string, hold: Hold): void => {
-  const st = lstatOrNull(lock)
-  if (st === null || !st.isDirectory() || st.ino !== hold.dirIno) {
+  // the inode check is re-run immediately before each destructive
+  // step: between any two syscalls the path can swap to a successor's
+  // fresh (empty) instance, and rmdir must only ever drop OUR dir
+  const ours = (): boolean => {
+    const st = lstatOrNull(lock)
+    return st !== null && st.isDirectory() && st.ino === hold.dirIno
+  }
+  if (!ours()) {
     return // vanished, rebound, or a foreign instance — not ours
   }
   let removed = false
@@ -494,7 +500,9 @@ const releaseLock = (lock: string, hold: Hold): void => {
   }
   if (removed) {
     try {
-      rmdirSync(lock)
+      if (ours()) {
+        rmdirSync(lock)
+      }
     } catch {
       // ENOTEMPTY — a republished or stray entry stands; its instance decides
     }
@@ -503,7 +511,7 @@ const releaseLock = (lock: string, hold: Hold): void => {
   // our instance, but our entry is already gone — drop the dir only
   // when nothing stands inside; a republished entry keeps it pinned
   try {
-    if (readdirSync(lock).length === 0) {
+    if (ours() && readdirSync(lock).length === 0 && ours()) {
       rmdirSync(lock)
     }
   } catch {
