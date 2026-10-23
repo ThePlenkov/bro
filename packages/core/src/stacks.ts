@@ -275,7 +275,17 @@ export function gitStacks(dir: string): StackFacade {
           const picks =
             fork === ''
               ? []
-              : gitTry(['-C', main.path, 'rev-list', '--reverse', '--no-merges', `${fork}..${m.branch}`])
+              : // --topo-order, not default date order — skewed
+                // timestamps would replay a child before its parent
+                gitTry([
+                  '-C',
+                  main.path,
+                  'rev-list',
+                  '--topo-order',
+                  '--reverse',
+                  '--no-merges',
+                  `${fork}..${m.branch}`,
+                ])
                   .out.split('\n')
                   .filter(Boolean)
           let r =

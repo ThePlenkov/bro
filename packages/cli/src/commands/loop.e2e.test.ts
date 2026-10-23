@@ -93,7 +93,13 @@ function loopFixture(
       // time — every poll/sleep the run derives scales to 100ms
       // instead of the production 60s/1s cadences
       runCli(
-        ['loop', ...(extra.includes('--interval') ? [] : ['--interval', '0.1']), ...extra],
+        [
+          'loop',
+          ...(extra.some((a) => a === '--interval' || a.startsWith('--interval='))
+            ? []
+            : ['--interval', '0.1']),
+          ...extra,
+        ],
         { cwd: main, env }
       ),
   }
