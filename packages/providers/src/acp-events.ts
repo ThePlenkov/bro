@@ -22,12 +22,13 @@
  * queue and drain() is capped, file writes are swallowed whole — an
  * observer that throws is a dead observer, not a dead agent.
  */
-import { appendFileSync, chmodSync, mkdirSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import {
+  appendPrivateFileSync,
   busPublish,
   busSocketPath,
   gitCommonDir,
+  mkdirPrivateSync,
   type EventInput,
 } from '@broject/core'
 import type { SessionUpdate } from '@agentclientprotocol/sdk'
@@ -148,21 +149,18 @@ export function agentTurnPlane(opts: AgentTurnPlaneOpts): AgentTurnPlane {
       return
     }
     try {
-      // mkdir + chmod once — the dir is stable for the plane's life, so
-      // per-row syscalls are dead weight. The archive carries raw ACP
-      // prompts and replies: pinned owner-only (0600) like the bus
-      // socket and state files — a 022 umask would leave it 0644,
-      // readable by every local user without the token-gated route
+      // mkdir once — the dir is stable for the plane's life. The
+      // archive carries raw ACP prompts and replies: pinned owner-only
+      // (spec bro-l8c4f.4) like the bus socket and state files — a 022
+      // umask would leave it 0644, readable by every local user without
+      // the token-gated route. Repair rides EVERY row, not just the
+      // first — in a dir another user can write, a swapped-in
+      // permissive file between rows must never collect the next row
       if (!dirReady) {
-        mkdirSync(dirname(file), { recursive: true })
-      }
-      appendFileSync(file, `${JSON.stringify(row)}\n`, { mode: 0o600 })
-      if (!dirReady) {
-        // appendFileSync mode only pins a NEW file — a pre-existing
-        // archive keeps its old mode without this one-time chmod
-        chmodSync(file, 0o600)
+        mkdirPrivateSync(dirname(file))
         dirReady = true
       }
+      appendPrivateFileSync(file, `${JSON.stringify(row)}\n`)
     } catch {
       /* the archive is telemetry — a disk failure never fails a turn */
     }
