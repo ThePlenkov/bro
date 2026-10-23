@@ -16,22 +16,39 @@
  *  on the user profile / checkout, which is already the default; no
  *  code path branches on platform. A repair failure warns and the write
  *  proceeds — a filesystem without POSIX modes (FAT, some fuse mounts)
- *  must not break spawns.
- *
- *  Calls ride the `fs` object rather than named imports — the bindings
- *  snapshot at link time and a test cannot observe call order through
- *  them (spec: the pin-before-write ordering is asserted). */
-import fs from 'node:fs'
+ *  must not break spawns. */
+import {
+  chmodSync,
+  closeSync,
+  constants,
+  existsSync,
+  fchmodSync,
+  fstatSync,
+  mkdirSync,
+  openSync,
+  writeFileSync,
+} from 'node:fs'
 import { dirname } from 'node:path'
 
 export const PRIVATE_FILE_MODE = 0o600
 export const PRIVATE_DIR_MODE = 0o700
 
+/** The instrumented seam — the pin-before-write ordering and the
+ *  foreign-owner refusal are asserted by patching these slots, and a
+ *  named import's binding snapshots at link time: a patched
+ *  `fs.writeFileSync` never reaches a caller that imported it by name.
+ *  Internal — not part of the package's API surface. */
+export const privateFs = {
+  fchmod: fchmodSync,
+  fstat: fstatSync,
+  write: writeFileSync,
+}
+
 /** O_NOFOLLOW where the platform has it — an artifact path swapped for
  *  a symlink must fail the open, never be followed to a target another
  *  local user reads. Absent on win32, where the profile ACL is the
  *  guard and the constant is undefined. */
-const NOFOLLOW = fs.constants.O_NOFOLLOW ?? 0
+const NOFOLLOW = constants.O_NOFOLLOW ?? 0
 
 function warn(path: string, err: unknown): void {
   console.error(
@@ -44,7 +61,7 @@ function warn(path: string, err: unknown): void {
  *  lands. Best-effort: warn, never fail (non-POSIX filesystems). */
 function pinPrivateFile(fd: number, path: string): void {
   try {
-    fs.fchmodSync(fd, PRIVATE_FILE_MODE)
+    privateFs.fchmod(fd, PRIVATE_FILE_MODE)
   } catch (err) {
     warn(path, err)
   }
@@ -58,7 +75,7 @@ function refuseForeignFile(fd: number, path: string): void {
   if (typeof process.getuid !== 'function') {
     return
   }
-  const { uid } = fs.fstatSync(fd)
+  const { uid } = privateFs.fstat(fd)
   if (uid !== process.getuid()) {
     throw Object.assign(
       new Error(`refusing foreign-owned artifact ${path} (uid ${uid})`),
@@ -71,12 +88,12 @@ function refuseForeignFile(fd: number, path: string): void {
  *  descriptor before the caller's first byte. A refusal closes the fd
  *  and throws — a planted artifact fails the spawn loudly. */
 function openPrivateSync(path: string, flags: number): number {
-  const fd = fs.openSync(path, flags | NOFOLLOW, PRIVATE_FILE_MODE)
+  const fd = openSync(path, flags | NOFOLLOW, PRIVATE_FILE_MODE)
   try {
     refuseForeignFile(fd, path)
     pinPrivateFile(fd, path)
   } catch (err) {
-    fs.closeSync(fd)
+    closeSync(fd)
     throw err
   }
   return fd
@@ -87,12 +104,12 @@ function openPrivateSync(path: string, flags: number): number {
 export function writePrivateFileSync(path: string, data: string | Uint8Array): void {
   const fd = openPrivateSync(
     path,
-    fs.constants.O_WRONLY | fs.constants.O_CREAT | fs.constants.O_TRUNC
+    constants.O_WRONLY | constants.O_CREAT | constants.O_TRUNC
   )
   try {
-    fs.writeFileSync(fd, data)
+    privateFs.write(fd, data)
   } finally {
-    fs.closeSync(fd)
+    closeSync(fd)
   }
 }
 
@@ -103,9 +120,9 @@ export function writePrivateFileSync(path: string, data: string | Uint8Array): v
 export function appendPrivateFileSync(path: string, data: string | Uint8Array): void {
   const fd = openPrivateAppendSync(path)
   try {
-    fs.writeFileSync(fd, data)
+    privateFs.write(fd, data)
   } finally {
-    fs.closeSync(fd)
+    closeSync(fd)
   }
 }
 
@@ -115,7 +132,7 @@ export function appendPrivateFileSync(path: string, data: string | Uint8Array): 
 export function openPrivateAppendSync(path: string): number {
   return openPrivateSync(
     path,
-    fs.constants.O_WRONLY | fs.constants.O_CREAT | fs.constants.O_APPEND
+    constants.O_WRONLY | constants.O_CREAT | constants.O_APPEND
   )
 }
 
@@ -127,16 +144,16 @@ export function openPrivateAppendSync(path: string): number {
  *  own unsearchable intermediate. The pin has to ride between levels,
  *  not after the whole call. */
 export function mkdirPrivateSync(path: string): void {
-  if (fs.existsSync(path)) {
+  if (existsSync(path)) {
     return
   }
   const missing: string[] = []
-  for (let d = path; !fs.existsSync(d); d = dirname(d)) {
+  for (let d = path; !existsSync(d); d = dirname(d)) {
     missing.push(d)
   }
   for (const d of missing.reverse()) {
     try {
-      fs.mkdirSync(d, PRIVATE_DIR_MODE)
+      mkdirSync(d, PRIVATE_DIR_MODE)
     } catch (err) {
       if ((err as NodeJS.ErrnoException).code === 'EEXIST') {
         continue // creation race — the winner's mode stands
@@ -144,7 +161,7 @@ export function mkdirPrivateSync(path: string): void {
       throw err
     }
     try {
-      fs.chmodSync(d, PRIVATE_DIR_MODE)
+      chmodSync(d, PRIVATE_DIR_MODE)
     } catch (err) {
       warn(d, err)
     }

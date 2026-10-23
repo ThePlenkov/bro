@@ -32,4 +32,9 @@ exclude_paths:
   # (packages/cli/src/session-planes/devin.ts) unflagged: the file
   # MOVED into the devin package, it is not new code.
   - 'packages/devin/src/plane.ts'
+  # The private-artifact helper IS path construction: every call is an
+  # fs op on a path bro builds itself (<git-common>/bro/agents/<id>.*)
+  # — the module's function reads to the path rule as uncontrolled data,
+  # same as the store/contract files above.
+  - 'packages/core/src/private-files.ts'
 >>>>>>> origin/main

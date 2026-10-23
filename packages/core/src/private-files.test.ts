@@ -2,7 +2,7 @@
  *  inherited permissive files (spec bro-l8c4f.4). POSIX-only semantics:
  *  skipped on win32 where modes map onto the read-only attribute. */
 import assert from 'node:assert/strict'
-import fs, {
+import {
   chmodSync,
   closeSync,
   mkdtempSync,
@@ -20,6 +20,7 @@ import {
   mkdirPrivateSync,
   openPrivateAppendSync,
   PRIVATE_FILE_MODE,
+  privateFs,
   writePrivateFileSync,
 } from './private-files.ts'
 
@@ -143,24 +144,27 @@ describe('private-files', { skip: process.platform === 'win32' }, () => {
       const f = join(dir, 'prompt.md')
       writeFileSync0164(f)
       const calls: Array<[string, number]> = []
-      const origChmod = fs.fchmodSync
-      const origWrite = fs.writeFileSync
-      fs.fchmodSync = (fd: number, m: string | number) => {
+      const origChmod = privateFs.fchmod
+      const origWrite = privateFs.write
+      privateFs.fchmod = (fd: number, m: string | number) => {
         calls.push(['fchmod', fd])
         origChmod(fd, m)
       }
-      fs.writeFileSync = ((file: number, data: string | Uint8Array) => {
+      privateFs.write = (
+        file: Parameters<typeof origWrite>[0],
+        data: Parameters<typeof origWrite>[1]
+      ) => {
         if (typeof file === 'number') {
           calls.push(['write', file])
         }
         return origWrite(file, data)
-      }) as typeof fs.writeFileSync
+      }
       try {
         writePrivateFileSync(f, 'secret')
         appendPrivateFileSync(f, 'more')
       } finally {
-        fs.fchmodSync = origChmod
-        fs.writeFileSync = origWrite
+        privateFs.fchmod = origChmod
+        privateFs.write = origWrite
       }
       // a write-before-pin implementation is detectable only in the
       // call stream — end-state assertions can't see the window
@@ -197,16 +201,16 @@ describe('private-files', { skip: process.platform === 'win32' }, () => {
     try {
       const f = join(dir, 'agent.log')
       writeFileSync0164(f)
-      const origFstat = fs.fstatSync
-      fs.fstatSync = ((fd: number) => {
+      const origFstat = privateFs.fstat
+      privateFs.fstat = ((fd: number) => {
         const st = origFstat(fd)
         return { ...st, uid: st.uid + 1 }
-      }) as typeof fs.fstatSync
+      }) as typeof privateFs.fstat
       try {
         assert.throws(() => appendPrivateFileSync(f, 'x'), /foreign-owned/)
         assert.throws(() => writePrivateFileSync(f, 'x'), /foreign-owned/)
       } finally {
-        fs.fstatSync = origFstat
+        privateFs.fstat = origFstat
       }
       // the refusal closed the fd and threw before a byte could land
       assert.equal(readFileSync(f, 'utf8'), '')

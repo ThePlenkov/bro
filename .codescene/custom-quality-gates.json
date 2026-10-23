@@ -679,6 +679,11 @@
     {
       "quality_gates": "bare_minimum",
       "quality_gates_doc": "Rung 2 — advisory findings only (no critical rule fires): the critical-rule safety net.",
+      "matching_content_path": "packages/core/src/private-files.ts"
+    },
+    {
+      "quality_gates": "bare_minimum",
+      "quality_gates_doc": "Rung 2 — advisory findings only (no critical rule fires): the critical-rule safety net.",
       "matching_content_path": "packages/core/src/proc.ts"
     },
     {
