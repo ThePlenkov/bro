@@ -164,6 +164,13 @@ function delegatePrompt(req: DelegateRequest): string {
   return text
 }
 
+/** fleet.routing is "declared" only when it holds at least one lane —
+ *  an empty table reads the same as none. */
+function declaredRouting(env: AgentConnectorEnv): NonNullable<AgentConnectorEnv['fleet']>['routing'] {
+  const routing = env.fleet?.routing
+  return routing !== undefined && Object.keys(routing).length > 0 ? routing : undefined
+}
+
 /** Shared provider/lane resolution: --provider pins directly, --class
  *  names a fleet.routing lane whose chain[0] supplies provider (+model);
  *  an unclassed request falls to the 'default' lane when routing is
@@ -180,8 +187,8 @@ function routedLane(env: AgentConnectorEnv, req: DelegateRequest): ResolvedClass
   if (req.provider !== undefined) {
     return undefined
   }
-  const routing = env.fleet?.routing
-  if (routing === undefined || Object.keys(routing).length === 0) {
+  const routing = declaredRouting(env)
+  if (routing === undefined) {
     if (req.class !== undefined) {
       throw new SpawnInputError('--class names a fleet.routing lane — no fleet.routing is declared')
     }
@@ -272,9 +279,9 @@ async function delegateWait(
   const deadline = waitDeadline(sel.req.timeoutSec)
   // --model is the request pin: it outranks the chain's and the
   // entry's configured model but the reported model stays honest
-  // (resolveTurnModel reports what the agent actually runs)
-  const model =
-    sel.req.model ?? (sel.req.provider === undefined ? sel.routed?.model : undefined)
+  // (resolveTurnModel reports what the agent actually runs); a routed
+  // model only applies to an unpinned ask
+  const model = sel.req.model ?? (sel.req.provider === undefined ? sel.routed?.model : undefined)
   const wire: ProviderWireOpts = {
     model,
     acp: { ...opts.acp, cwd: opts.acp?.cwd ?? dir },
@@ -342,19 +349,22 @@ async function delegateDetach(
   }
 }
 
+/** Fields that only make sense under one mode — the other mode
+ *  refuses them rather than silently ignoring a caller's intent. */
+const DETACH_ONLY_FIELDS = ['connector', 'worktree', 'autoApprove'] as const
+const WAIT_ONLY_FIELDS = ['timeoutSec'] as const
+
 /** Mode-shape gate the CLI and the plane share — the exec boundary
  *  would otherwise accept mode-foreign fields the CLI's parser dies
- *  on, silently ignoring a caller's intent. */
+ *  on. */
 function checkModeFields(req: DelegateRequest): void {
   const mode = req.mode ?? 'wait'
-  const foreign =
-    mode === 'wait'
-      ? (['connector', 'worktree', 'autoApprove'] as const).filter((k) => req[k] !== undefined)
-      : req.timeoutSec === undefined
-        ? []
-        : ['timeoutSec' as const]
+  const foreign = (mode === 'wait' ? DETACH_ONLY_FIELDS : WAIT_ONLY_FIELDS).filter(
+    (k) => req[k] !== undefined
+  )
   if (foreign.length > 0) {
-    throw new SpawnInputError(`${foreign.join(', ')} only appl${foreign.length > 1 ? 'y' : 'ies'} to --${mode === 'wait' ? 'detach' : 'wait'}`)
+    const other = mode === 'wait' ? 'detach' : 'wait'
+    throw new SpawnInputError(`${foreign.join(', ')} only apply to --${other}`)
   }
 }
 
