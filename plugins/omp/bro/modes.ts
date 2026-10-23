@@ -120,10 +120,10 @@ export function installModeBridges(pi: OmpApi, source: ModeBridgeSource): void {
     }
     const board = source.board()
     const drill = board?.drill?.frame
-    const scope =
-      drill === undefined || drill === null
-        ? ''
-        : `bro scope: drill frame ${drill.id ?? '?'} — ${drill.title ?? '(untitled)'}. `
+    let scope = ''
+    if (drill !== undefined && drill !== null) {
+      scope = `bro scope: drill frame ${drill.id ?? '?'} — ${drill.title ?? '(untitled)'}. `
+    }
     return {
       additionalContext: `${scope}bro: claim a bead for this objective (\`bro flow next\`) so the exit gate can judge it; \`bro work goal\` carries the condition across sessions.`,
     }

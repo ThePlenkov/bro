@@ -7,6 +7,7 @@
  * guarantees. Field names are verbatim; upstream is the only place they
  * should change. (Same convention as the pi and opencode adapters.)
  */
+import type { BroContext } from './host.ts'
 
 /** A UI notification level. */
 export type OmpLevel = 'info' | 'warning' | 'error'
@@ -23,12 +24,10 @@ export interface OmpSessionReader {
   getSessionId(): string | undefined
 }
 
-/** The context every handler receives. */
-export interface OmpContext {
+/** The context every handler receives — the lineage's shape, spelled
+ *  out here so the shipped plugin carries no import of its own. */
+export interface OmpContext extends BroContext {
   ui: OmpUi
-  cwd: string
-  mode: 'tui' | 'rpc' | 'json' | 'print'
-  hasUI: boolean
   sessionManager: OmpSessionReader
 }
 

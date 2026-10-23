@@ -63,7 +63,7 @@ function killAfter(child, ms, onTimeout) {
 /** Does this command exit zero? Used to probe whether a candidate CLI
 *  actually speaks bro's hook protocol — an older bro on PATH fails the
 *  probe instead of failing every hook. */
-function exitsZero(cmd, args) {
+async function exitsZero(cmd, args) {
 	const { promise, resolve } = Promise.withResolvers();
 	let child;
 	try {
@@ -76,8 +76,7 @@ function exitsZero(cmd, args) {
 			detached: process.platform !== "win32"
 		});
 	} catch {
-		resolve(false);
-		return promise;
+		return false;
 	}
 	const timer = killAfter(child, HOOK_TIMEOUT_MS, () => resolve(false));
 	child.on("error", () => {
@@ -129,7 +128,7 @@ async function resolveCommand(opts = {}) {
 * Run one `bro hooks <event>` with the payload on stdin; resolve null on
 * every failure mode — spawn error, timeout, nonzero exit, garbage out.
 */
-function callHook(command, event, payload, cwd, timeoutMs) {
+async function callHook(command, event, payload, cwd, timeoutMs) {
 	const { promise, resolve } = Promise.withResolvers();
 	let child;
 	try {
@@ -147,8 +146,7 @@ function callHook(command, event, payload, cwd, timeoutMs) {
 			detached: process.platform !== "win32"
 		});
 	} catch {
-		resolve(null);
-		return promise;
+		return null;
 	}
 	let settled = false;
 	const settle = (value) => {
@@ -223,7 +221,7 @@ function broEnabled(startDir) {
 }
 /** `bro status --json` — the board the widget renders. Null on any
 *  failure; the board is a convenience, never a gate. */
-function statusJson(command, cwd) {
+async function statusJson(command, cwd) {
 	const { promise, resolve } = Promise.withResolvers();
 	let child;
 	try {
@@ -241,8 +239,7 @@ function statusJson(command, cwd) {
 			detached: process.platform !== "win32"
 		});
 	} catch {
-		resolve(null);
-		return promise;
+		return null;
 	}
 	const timer = killAfter(child, HOOK_TIMEOUT_MS, () => resolve(null));
 	let out = "";
@@ -306,6 +303,74 @@ function statusCrumb(s) {
 
 //#endregion
 //#region packages/cli/src/adapter/host.ts
+/** The board's widget key — one slot, owned by bro. */
+const BOARD_KEY = "bro";
+/** The event names this lineage shares. A host that spells one
+*  differently overrides it — pi's settle gate is not omp's stop. */
+const LINEAGE_EVENTS = {
+	sessionStart: "session_start",
+	sessionBeforeCompact: "session_before_compact",
+	sessionCompact: "session_compact",
+	beforeAgentStart: "before_agent_start",
+	toolResult: "tool_result",
+	turnEnd: "turn_end",
+	sessionShutdown: "session_shutdown"
+};
+/**
+* Build a binding for a host in this lineage.
+*
+* Everything the lineage agrees on — the session id, the cwd, the paint
+* check, the message shapes, the event names — is filled in here. A
+* binding is left holding only what its host actually spells
+* differently, which is the whole point: a binding that re-copies the
+* lineage's shape is a binding that will drift.
+*/
+function sharedBinding(host) {
+	return {
+		events: {
+			...LINEAGE_EVENTS,
+			stop: host.stop
+		},
+		on: host.on,
+		sessionId(ctx) {
+			return ctx.sessionManager.getSessionId() ?? "";
+		},
+		cwd(ctx) {
+			return ctx.cwd;
+		},
+		canPaint(ctx) {
+			return ctx.mode === "tui";
+		},
+		paint: host.paint,
+		clear(ctx) {
+			ctx.ui.setWidget(BOARD_KEY, void 0);
+			ctx.ui.setStatus(BOARD_KEY, void 0);
+		},
+		notify: host.notify,
+		refuseStop: host.refuseStop,
+		stopAlreadyRefused: host.stopAlreadyRefused,
+		promptOf(event) {
+			const turn = event;
+			return typeof turn.prompt === "string" ? turn.prompt : "";
+		},
+		inject(text) {
+			return { message: {
+				customType: "bro-context",
+				content: text,
+				display: false
+			} };
+		},
+		appendToolResult(event, text) {
+			const result = event;
+			const content = Array.isArray(result.content) ? [...result.content] : [];
+			content.push({
+				type: "text",
+				text
+			});
+			return { content };
+		}
+	};
+}
 /**
 * Wire bro into a host. `api` is the host's own extension API — the
 * driver passes it through so the client can register commands and
@@ -436,6 +501,49 @@ function createBroDriver(host, api) {
 	});
 	/** Run a bro subcommand — resolve the CLI first, then hand off. */
 	const run = async (args, cwd) => runBro(await command(), args, cwd);
+	/** The shared surfaces. `/bro` is a thin passthrough — `bro
+	*  act|next|fleet|drill` reachable without leaving the editor — and
+	*  `bro_status` hands the model the same board JSON the widget
+	*  renders. Both are the same on every host, so both live here. */
+	api.registerCommand("bro", {
+		description: "bro — board refresh, or run `bro <args>` (act|next|fleet|drill|…)",
+		async handler(args, ctx) {
+			const trimmed = args.trim();
+			if (trimmed === "") {
+				await run(["status", "--json"], host.cwd(ctx));
+				host.notify(ctx, "bro: board refreshed", "info");
+				return;
+			}
+			const result = await run(trimmed.split(/\s+/), host.cwd(ctx));
+			const text = (result.stdout || result.stderr).trim();
+			if (result.code !== 0) {
+				host.notify(ctx, `bro ${trimmed}: exit ${result.code}`, "error");
+				return;
+			}
+			api.sendMessage({
+				customType: "bro-output",
+				content: `$ bro ${trimmed}\n${text}`,
+				display: true
+			}, { triggerTurn: false });
+		}
+	});
+	api.registerTool({
+		name: "bro_status",
+		label: "bro status",
+		description: "Read the bro project board: in-progress beads, ready count, fleet agents, drill frame, branch/dirty state. Read-only.",
+		parameters: {
+			type: "object",
+			properties: {},
+			additionalProperties: false
+		},
+		async execute(_id, _params, _signal, _onUpdate, ctx) {
+			const result = await run(["status", "--json"], host.cwd(ctx));
+			return { content: [{
+				type: "text",
+				text: result.code === 0 ? result.stdout : "bro status unavailable"
+			}] };
+		}
+	});
 	return {
 		get board() {
 			return board;
@@ -531,7 +639,9 @@ function installModeBridges(pi, source) {
 		if (update.goal === null) return;
 		if ((update.goal.objective ?? update.goal.text ?? "") === "") return;
 		const drill = source.board()?.drill?.frame;
-		return { additionalContext: `${drill === void 0 || drill === null ? "" : `bro scope: drill frame ${drill.id ?? "?"} — ${drill.title ?? "(untitled)"}. `}bro: claim a bead for this objective (\`bro flow next\`) so the exit gate can judge it; \`bro work goal\` carries the condition across sessions.` };
+		let scope = "";
+		if (drill !== void 0 && drill !== null) scope = `bro scope: drill frame ${drill.id ?? "?"} — ${drill.title ?? "(untitled)"}. `;
+		return { additionalContext: `${scope}bro: claim a bead for this objective (\`bro flow next\`) so the exit gate can judge it; \`bro work goal\` carries the condition across sessions.` };
 	});
 	/**
 	* **Vibe mode / subagents.** Two workers must never edit one unit of
@@ -553,8 +663,6 @@ function installModeBridges(pi, source) {
 /** The published version of this adapter — the npx fallback pin. The
 *  pin is rewritten by gen-plugins on every gen/release run. */
 const NPX_PIN = "@broject/bro@0.2.5";
-/** The board's widget key — one slot, owned by bro. */
-const BOARD_KEY = "bro";
 /**
 * The omp binding: the host's own shape, nothing else. Every
 * behavioral decision lives in the shared driver, so this file is the
@@ -564,69 +672,29 @@ const BOARD_KEY = "bro";
 */
 function binding(pi) {
 	return {
-		events: {
-			sessionStart: "session_start",
-			sessionBeforeCompact: "session_before_compact",
-			sessionCompact: "session_compact",
-			beforeAgentStart: "before_agent_start",
-			toolResult: "tool_result",
+		...sharedBinding({
 			stop: "session_stop",
-			turnEnd: "turn_end",
-			sessionShutdown: "session_shutdown"
-		},
-		npxPin: NPX_PIN,
-		on(event, handler) {
-			pi.on(event, handler);
-		},
-		sessionId(ctx) {
-			return ctx.sessionManager.getSessionId() ?? "";
-		},
-		cwd(ctx) {
-			return ctx.cwd;
-		},
-		canPaint(ctx) {
-			return ctx.mode === "tui";
-		},
-		paint(ctx, lines, crumb) {
-			ctx.ui.setWidget(BOARD_KEY, lines);
-			ctx.ui.setStatus(BOARD_KEY, crumb);
-		},
-		clear(ctx) {
-			ctx.ui.setWidget(BOARD_KEY, void 0);
-			ctx.ui.setStatus(BOARD_KEY, void 0);
-		},
-		notify(ctx, text, level) {
-			ctx.ui.notify(text, level);
-		},
-		refuseStop(reason) {
-			return {
-				decision: "block",
-				reason
-			};
-		},
-		stopAlreadyRefused(event) {
-			return event.stop_hook_active === true;
-		},
-		promptOf(event) {
-			const turn = event;
-			return typeof turn.prompt === "string" ? turn.prompt : "";
-		},
-		inject(text) {
-			return { message: {
-				customType: "bro-context",
-				content: text,
-				display: false
-			} };
-		},
-		appendToolResult(event, text) {
-			const result = event;
-			const content = Array.isArray(result.content) ? [...result.content] : [];
-			content.push({
-				type: "text",
-				text
-			});
-			return { content };
-		}
+			on(event, handler) {
+				pi.on(event, handler);
+			},
+			paint(ctx, lines, crumb) {
+				ctx.ui.setWidget(BOARD_KEY, lines);
+				ctx.ui.setStatus(BOARD_KEY, crumb);
+			},
+			notify(ctx, text, level) {
+				ctx.ui.notify(text, level);
+			},
+			refuseStop(reason) {
+				return {
+					decision: "block",
+					reason
+				};
+			},
+			stopAlreadyRefused(event) {
+				return event.stop_hook_active === true;
+			}
+		}),
+		npxPin: NPX_PIN
 	};
 }
 /** The extension entry point — omp calls this with its API. */
@@ -636,50 +704,6 @@ function broExtension(pi) {
 	*  Goal and Vibe modes. See omp-modes.ts for why bro adds state
 	*  rather than a second implementation of each mode. */
 	installModeBridges(pi, { board: () => driver.board });
-	/** `/bro <args>` — the CLI without leaving the editor. Bare `/bro`
-	*  repaints the board; a real subcommand runs it and drops stdout into
-	*  the transcript as a visible custom message. */
-	pi.registerCommand("bro", {
-		description: "bro — board refresh, or run `bro <args>` (act|next|fleet|drill|…)",
-		async handler(args, ctx) {
-			const trimmed = args.trim();
-			if (trimmed === "") {
-				driver.run(["status", "--json"], ctx.cwd).catch(() => {});
-				ctx.ui.notify("bro: board refreshed", "info");
-				return;
-			}
-			const result = await driver.run(trimmed.split(/\s+/), ctx.cwd);
-			const text = (result.stdout || result.stderr).trim();
-			if (result.code !== 0) {
-				ctx.ui.notify(`bro ${trimmed}: exit ${result.code}`, "error");
-				return;
-			}
-			pi.sendMessage({
-				customType: "bro-output",
-				content: `$ bro ${trimmed}\n${text}`,
-				display: true
-			}, { triggerTurn: false });
-		}
-	});
-	/** `bro_status` — the board JSON as a model-callable read. The model
-	*  gets the same object the widget renders. */
-	pi.registerTool({
-		name: "bro_status",
-		label: "bro status",
-		description: "Read the bro project board: in-progress beads, ready count, fleet agents, drill frame, branch/dirty state. Read-only.",
-		parameters: {
-			type: "object",
-			properties: {},
-			additionalProperties: false
-		},
-		async execute(_id, _params, _signal, _onUpdate, ctx) {
-			const result = await driver.run(["status", "--json"], ctx.cwd);
-			return { content: [{
-				type: "text",
-				text: result.code === 0 ? result.stdout : "bro status unavailable"
-			}] };
-		}
-	});
 }
 /**
 * Adapter ownership sentinel — `bro plugins install|uninstall` refuses a

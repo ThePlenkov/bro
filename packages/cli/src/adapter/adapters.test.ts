@@ -46,22 +46,44 @@ async function loadAdapter(rel: string): Promise<LoadedAdapter> {
   return (await import(path)) as LoadedAdapter
 }
 
+/** The lifecycle events every adapter in this lineage registers. */
+const LINEAGE_EVENTS = [
+  'session_start',
+  'session_before_compact',
+  'session_compact',
+  'before_agent_start',
+  'tool_result',
+  'turn_end',
+  'session_shutdown',
+]
+
+/** Assert the surfaces every adapter registers, and the lifecycle
+ *  events the lineage shares. The stop gate is the host's own — it is
+ *  the one event whose name differs, so it is asserted separately. */
+function assertLineageSurfaces(
+  events: string[],
+  commands: string[],
+  tools: string[]
+): void {
+  for (const event of LINEAGE_EVENTS) {
+    assert.ok(events.includes(event), `the adapter does not register ${event}`)
+  }
+  assert.deepEqual(commands, ['bro'])
+  assert.deepEqual(tools, ['bro_status'])
+}
+
 test('the pi adapter loads, registers its surfaces, and speaks pi events', async () => {
   const mod = await loadAdapter('plugins/pi/bro/bro.ts')
   const { pi, events, commands, tools } = hostStub()
   mod.default(pi)
 
+  assertLineageSurfaces(events, commands, tools)
+
   // pi's lifecycle vocabulary — the settle gate is pi's own
-  assert.ok(events.includes('session_start'))
   assert.ok(events.includes('agent_before_settle'))
-  assert.ok(events.includes('before_agent_start'))
-  assert.ok(events.includes('tool_result'))
-  assert.ok(events.includes('session_compact'))
   // omp's vocabulary must NOT leak into pi's adapter
   assert.ok(!events.includes('session_stop'))
 
-  assert.deepEqual(commands, ['bro'])
-  assert.deepEqual(tools, ['bro_status'])
   assert.deepEqual(mod.adapter, { id: 'bro', kind: 'pi-extension' })
 })
 
@@ -70,17 +92,13 @@ test('the omp adapter loads, registers its surfaces, and speaks omp events', asy
   const { pi, events, commands, tools } = hostStub()
   mod.default(pi)
 
+  assertLineageSurfaces(events, commands, tools)
+
   // omp's own vocabulary — the native stop gate is session_stop
-  assert.ok(events.includes('session_start'))
   assert.ok(events.includes('session_stop'))
-  assert.ok(events.includes('before_agent_start'))
-  assert.ok(events.includes('tool_result'))
-  assert.ok(events.includes('session_compact'))
   // pi's settle gate is pi's own — it must not leak into omp's adapter
   assert.ok(!events.includes('agent_before_settle'))
 
-  assert.deepEqual(commands, ['bro'])
-  assert.deepEqual(tools, ['bro_status'])
   assert.deepEqual(mod.adapter, { id: 'bro', kind: 'omp-extension' })
 })
 

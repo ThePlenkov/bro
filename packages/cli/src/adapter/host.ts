@@ -51,6 +51,108 @@ import {
   type HookControl,
 } from './core.ts'
 
+/** The board's widget key — one slot, owned by bro. */
+export const BOARD_KEY = 'bro'
+
+/** The context shape this API lineage shares.
+ *
+ *  pi and omp are the same extension API lineage: the same `ctx.ui`,
+ *  the same `ctx.mode`, the same `ctx.sessionManager`. Only the
+ *  *vocabulary* differs — the event names and the stop refusal. */
+export interface BroContext {
+  ui: {
+    notify(message: string, type?: 'info' | 'warning' | 'error'): void
+    setStatus(key: string, text: string | undefined): void
+    setWidget(key: string, content: string[] | undefined): void
+  }
+  cwd: string
+  mode: 'tui' | 'rpc' | 'json' | 'print'
+  hasUI: boolean
+  sessionManager: { getSessionId(): string | undefined }
+}
+
+/** The event names this lineage shares. A host that spells one
+ *  differently overrides it — pi's settle gate is not omp's stop. */
+const LINEAGE_EVENTS = {
+  sessionStart: 'session_start',
+  sessionBeforeCompact: 'session_before_compact',
+  sessionCompact: 'session_compact',
+  beforeAgentStart: 'before_agent_start',
+  toolResult: 'tool_result',
+  turnEnd: 'turn_end',
+  sessionShutdown: 'session_shutdown',
+} as const
+
+/** What a host must supply: the parts that are genuinely its own. */
+export interface BroHostShape<Ctx extends BroContext> {
+  /** The host's stop event. */
+  stop: string
+  /** Register a handler. */
+  on(event: string, handler: (event: unknown, ctx: Ctx) => unknown): void
+  /** Paint the board. */
+  paint(ctx: Ctx, lines: string[], crumb: string): void
+  /** Tell the user something. */
+  notify(ctx: Ctx, text: string, level: 'info' | 'warning' | 'error'): void
+  /** Build the result that refuses to stop, with the reason. */
+  refuseStop(reason: string): unknown
+  /** Whether the stop event says the host already refused once. */
+  stopAlreadyRefused(event: unknown): boolean
+}
+
+/**
+ * Build a binding for a host in this lineage.
+ *
+ * Everything the lineage agrees on — the session id, the cwd, the paint
+ * check, the message shapes, the event names — is filled in here. A
+ * binding is left holding only what its host actually spells
+ * differently, which is the whole point: a binding that re-copies the
+ * lineage's shape is a binding that will drift.
+ */
+export function sharedBinding<Ctx extends BroContext>(
+  host: BroHostShape<Ctx>
+): BroHostBinding<Ctx> {
+  return {
+    events: { ...LINEAGE_EVENTS, stop: host.stop },
+    on: host.on,
+    sessionId(ctx) {
+      return ctx.sessionManager.getSessionId() ?? ''
+    },
+    cwd(ctx) {
+      return ctx.cwd
+    },
+    canPaint(ctx) {
+      return ctx.mode === 'tui'
+    },
+    paint: host.paint,
+    clear(ctx) {
+      ctx.ui.setWidget(BOARD_KEY, undefined)
+      ctx.ui.setStatus(BOARD_KEY, undefined)
+    },
+    notify: host.notify,
+    refuseStop: host.refuseStop,
+    stopAlreadyRefused: host.stopAlreadyRefused,
+    promptOf(event) {
+      const turn = event as { prompt?: string }
+      return typeof turn.prompt === 'string' ? turn.prompt : ''
+    },
+    inject(text) {
+      return {
+        message: {
+          customType: 'bro-context',
+          content: text,
+          display: false,
+        },
+      }
+    },
+    appendToolResult(event, text) {
+      const result = event as { content?: Array<{ type: 'text'; text: string }> }
+      const content = Array.isArray(result.content) ? [...result.content] : []
+      content.push({ type: 'text', text })
+      return { content }
+    },
+  }
+}
+
 /** How a host spells the things the driver needs.
  *
  *  Generic over the host's context type: the driver passes the host's
@@ -97,6 +199,39 @@ export interface BroHostBinding<Ctx = unknown> {
   readonly npxPin?: string
 }
 
+/** The host API surface the shared surfaces need.
+ *
+ *  pi and omp are the same extension API lineage — `registerCommand`,
+ *  `registerTool` and `sendMessage` have the same shapes — so `/bro`
+ *  and `bro_status` are written once, here, instead of copied into
+ *  every binding. A copied command is a drifted command. */
+export interface BroHostApi<Ctx = unknown> {
+  registerCommand(
+    name: string,
+    options: {
+      description?: string
+      handler: (args: string, ctx: Ctx) => Promise<void> | void
+    }
+  ): void
+  registerTool(tool: {
+    name: string
+    label: string
+    description: string
+    parameters: Record<string, unknown>
+    execute(
+      toolCallId: string,
+      params: unknown,
+      signal: AbortSignal | undefined,
+      onUpdate: unknown,
+      ctx: Ctx
+    ): Promise<{ content: Array<{ type: 'text'; text: string }> }>
+  }): void
+  sendMessage(
+    message: { customType: string; content: string; display: boolean; details?: unknown },
+    options?: { deliverAs?: 'steer' | 'followUp' | 'nextTurn'; triggerTurn?: boolean }
+  ): void
+}
+
 /** A finished bro invocation's result. */
 export interface BroRunResult {
   code: number
@@ -119,7 +254,7 @@ export interface BroDriver {
  * driver passes it through so the client can register commands and
  * tools without a second channel.
  */
-export function createBroDriver<Ctx>(host: BroHostBinding<Ctx>, api: unknown): BroDriver {
+export function createBroDriver<Ctx>(host: BroHostBinding<Ctx>, api: BroHostApi<Ctx>): BroDriver {
   let resolved: Promise<Command | null> | undefined
   let board: BoardStatus | null = null
 
@@ -319,6 +454,51 @@ export function createBroDriver<Ctx>(host: BroHostBinding<Ctx>, api: unknown): B
   /** Run a bro subcommand — resolve the CLI first, then hand off. */
   const run = async (args: string[], cwd: string): Promise<BroRunResult> =>
     runBro(await command(), args, cwd)
+
+  /** The shared surfaces. `/bro` is a thin passthrough — `bro
+   *  act|next|fleet|drill` reachable without leaving the editor — and
+   *  `bro_status` hands the model the same board JSON the widget
+   *  renders. Both are the same on every host, so both live here. */
+  api.registerCommand('bro', {
+    description: 'bro — board refresh, or run `bro <args>` (act|next|fleet|drill|…)',
+    async handler(args: string, ctx: Ctx) {
+      const trimmed = args.trim()
+      if (trimmed === '') {
+        await run(['status', '--json'], host.cwd(ctx))
+        host.notify(ctx, 'bro: board refreshed', 'info')
+        return
+      }
+      const result = await run(trimmed.split(/\s+/), host.cwd(ctx))
+      const text = (result.stdout || result.stderr).trim()
+      if (result.code !== 0) {
+        host.notify(ctx, `bro ${trimmed}: exit ${result.code}`, 'error')
+        return
+      }
+      api.sendMessage(
+        { customType: 'bro-output', content: `$ bro ${trimmed}\n${text}`, display: true },
+        { triggerTurn: false }
+      )
+    },
+  })
+
+  api.registerTool({
+    name: 'bro_status',
+    label: 'bro status',
+    description:
+      'Read the bro project board: in-progress beads, ready count, fleet agents, drill frame, branch/dirty state. Read-only.',
+    parameters: { type: 'object', properties: {}, additionalProperties: false },
+    async execute(_id, _params, _signal, _onUpdate, ctx) {
+      const result = await run(['status', '--json'], host.cwd(ctx))
+      return {
+        content: [
+          {
+            type: 'text' as const,
+            text: result.code === 0 ? result.stdout : 'bro status unavailable',
+          },
+        ],
+      }
+    },
+  })
 
   return {
     get board() {

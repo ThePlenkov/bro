@@ -53,7 +53,13 @@
  * synchronously at event time (see snapshot()) and every ui touch is
  * wrapped — a stale ctx mid-flight degrades to "no paint".
  */
-import { createBroDriver, type BroHostBinding } from './host.ts'
+import {
+  BOARD_KEY,
+  createBroDriver,
+  sharedBinding,
+  type BroContext,
+  type BroHostBinding,
+} from './host.ts'
 
 // --- structural pi surface ----------------------------------------------
 // Declared, never imported — pi loads this module at runtime and nobody
@@ -78,11 +84,10 @@ interface SessionReader {
   getSessionId(): string | undefined
 }
 
-interface ExtContext {
+// the lineage's context shape, with pi's one addition: setWidget takes a
+// placement option
+interface ExtContext extends BroContext {
   ui: UIContext
-  cwd: string
-  mode: 'tui' | 'rpc' | 'json' | 'print'
-  hasUI: boolean
   sessionManager: SessionReader
 }
 
@@ -136,9 +141,6 @@ interface ExecResult {
  *  pin is rewritten by gen-plugins on every gen/release run. */
 const NPX_PIN = '@broject/bro@0.2.5'
 
-/** The board's widget key — one slot, owned by bro. */
-const BOARD_KEY = 'bro'
-
 /**
  * The pi binding: the host's own shape, nothing else. Every behavioral
  * decision lives in the shared driver, so this file is the whole of
@@ -146,84 +148,44 @@ const BOARD_KEY = 'bro'
  */
 function binding(pi: PiApi): BroHostBinding<ExtContext> {
   return {
-    events: {
-      sessionStart: 'session_start',
-      sessionBeforeCompact: 'session_before_compact',
-      sessionCompact: 'session_compact',
-      beforeAgentStart: 'before_agent_start',
-      toolResult: 'tool_result',
+    ...sharedBinding<ExtContext>({
       stop: 'agent_before_settle',
-      turnEnd: 'turn_end',
-      sessionShutdown: 'session_shutdown',
-    },
+      on(event, handler) {
+        pi.on(event as never, handler as never)
+      },
+      paint(ctx, lines, crumb) {
+        ctx.ui.setWidget(BOARD_KEY, lines, { placement: 'aboveEditor' })
+        ctx.ui.setStatus(BOARD_KEY, crumb)
+      },
+      notify(ctx, text, level) {
+        try {
+          ctx.ui.notify(text, level)
+        } catch {
+          // stale ctx — a hint is advisory, never worth a throw
+        }
+      },
+      refuseStop(reason) {
+        // pi has no native stop refusal: the settle gate continues the
+        // turn with the blocker as a visible custom message.
+        return {
+          continue: true,
+          entries: [
+            {
+              type: 'custom_message' as const,
+              customType: 'bro-stop-gate',
+              content: reason,
+              display: true,
+            },
+          ],
+        } satisfies BoundaryResult
+      },
+      stopAlreadyRefused() {
+        // pi's settle gate has no stop_hook_active of its own — the
+        // driver tracks the one-shot rule instead.
+        return false
+      },
+    }),
     npxPin: NPX_PIN,
-
-    on(event, handler) {
-      pi.on(event as never, handler as never)
-    },
-    sessionId(ctx) {
-      return ctx.sessionManager.getSessionId() ?? ''
-    },
-    cwd(ctx) {
-      return ctx.cwd
-    },
-    canPaint(ctx) {
-      return ctx.mode === 'tui'
-    },
-    paint(ctx, lines, crumb) {
-      ctx.ui.setWidget(BOARD_KEY, lines, { placement: 'aboveEditor' })
-      ctx.ui.setStatus(BOARD_KEY, crumb)
-    },
-    clear(ctx) {
-      ctx.ui.setWidget(BOARD_KEY, undefined)
-      ctx.ui.setStatus(BOARD_KEY, undefined)
-    },
-    notify(ctx, text, level) {
-      try {
-        ctx.ui.notify(text, level)
-      } catch {
-        // stale ctx — a hint is advisory, never worth a throw
-      }
-    },
-    refuseStop(reason) {
-      // pi has no native stop refusal: the settle gate continues the
-      // turn with the blocker as a visible custom message.
-      return {
-        continue: true,
-        entries: [
-          {
-            type: 'custom_message' as const,
-            customType: 'bro-stop-gate',
-            content: reason,
-            display: true,
-          },
-        ],
-      } satisfies BoundaryResult
-    },
-    stopAlreadyRefused() {
-      // pi's settle gate has no stop_hook_active of its own — the
-      // driver tracks the one-shot rule instead.
-      return false
-    },
-    promptOf(event) {
-      const turn = event as { prompt?: string }
-      return typeof turn.prompt === 'string' ? turn.prompt : ''
-    },
-    inject(text) {
-      return {
-        message: {
-          customType: 'bro-context',
-          content: text,
-          display: false,
-        },
-      }
-    },
-    appendToolResult(event, text) {
-      const result = event as { content?: Array<{ type: 'text'; text: string }> }
-      const content = Array.isArray(result.content) ? [...result.content] : []
-      content.push({ type: 'text', text })
-      return { content }
-    },
   }
 }
 
@@ -235,53 +197,6 @@ export default function broExtension(pi: PiApi): void {
   // follow a turn without a turn_end, and the board must not go stale.
   pi.on('agent_settled', (_e: never, ctx: ExtContext) => {
     void driver.run(['status', '--json'], ctx.cwd).catch(() => {})
-  })
-
-  /** `/bro <args>` — the CLI without leaving the editor. Bare `/bro`
-   *  repaints the board; a real subcommand runs it and drops stdout into
-   *  the transcript as a visible custom message. */
-  pi.registerCommand('bro', {
-    description: 'bro — board refresh, or run `bro <args>` (act|next|fleet|drill|…)',
-    async handler(args: string, ctx: ExtContext) {
-      const trimmed = args.trim()
-      if (trimmed === '') {
-        await driver.run(['status', '--json'], ctx.cwd)
-        ctx.ui.notify('bro: board refreshed', 'info')
-        return
-      }
-      const result = await driver.run(trimmed.split(/\s+/), ctx.cwd)
-      const text = (result.stdout || result.stderr).trim()
-      if (result.code !== 0) {
-        ctx.ui.notify(`bro ${trimmed}: exit ${result.code}`, 'error')
-        return
-      }
-      pi.sendMessage(
-        { customType: 'bro-output', content: `$ bro ${trimmed}\n${text}`, display: true },
-        { triggerTurn: false }
-      )
-    },
-  })
-
-  /** `bro_status` — the board JSON as a model-callable read. The model
-   *  gets the same object the widget renders; schema is a plain empty
-   *  object (a TypeBox-compatible literal — no dependency dragged in). */
-  pi.registerTool({
-    name: 'bro_status',
-    label: 'bro status',
-    description:
-      'Read the bro project board: in-progress beads, ready count, fleet agents, drill frame, branch/dirty state. Read-only.',
-    parameters: { type: 'object', properties: {}, additionalProperties: false },
-    async execute(_id, _params, _signal, _onUpdate, ctx) {
-      const result = await driver.run(['status', '--json'], ctx.cwd)
-      return {
-        content: [
-          {
-            type: 'text' as const,
-            text: result.code === 0 ? result.stdout : 'bro status unavailable',
-          },
-        ],
-      }
-    },
   })
 }
 

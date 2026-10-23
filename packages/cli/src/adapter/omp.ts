@@ -47,16 +47,18 @@
  * non-bro repo yields no widget, no context, no gate — never an error
  * thrown into omp.
  */
-import { createBroDriver, type BroHostBinding } from './host.ts'
+import {
+  BOARD_KEY,
+  createBroDriver,
+  sharedBinding,
+  type BroHostBinding,
+} from './host.ts'
 import { installModeBridges, type BoardSnapshot } from './omp-modes.ts'
 import type { OmpApi, OmpContext } from './omp-api.ts'
 
 /** The published version of this adapter — the npx fallback pin. The
  *  pin is rewritten by gen-plugins on every gen/release run. */
 const NPX_PIN = '@broject/bro@0.2.5'
-
-/** The board's widget key — one slot, owned by bro. */
-const BOARD_KEY = 'bro'
 
 /**
  * The omp binding: the host's own shape, nothing else. Every
@@ -67,69 +69,29 @@ const BOARD_KEY = 'bro'
  */
 function binding(pi: OmpApi): BroHostBinding<OmpContext> {
   return {
-    events: {
-      sessionStart: 'session_start',
-      sessionBeforeCompact: 'session_before_compact',
-      sessionCompact: 'session_compact',
-      beforeAgentStart: 'before_agent_start',
-      toolResult: 'tool_result',
+    ...sharedBinding<OmpContext>({
       stop: 'session_stop',
-      turnEnd: 'turn_end',
-      sessionShutdown: 'session_shutdown',
-    },
+      on(event, handler) {
+        pi.on(event, handler)
+      },
+      paint(ctx, lines, crumb) {
+        ctx.ui.setWidget(BOARD_KEY, lines)
+        ctx.ui.setStatus(BOARD_KEY, crumb)
+      },
+      notify(ctx, text, level) {
+        ctx.ui.notify(text, level)
+      },
+      refuseStop(reason) {
+        // omp's native stop refusal: the reason is handed back to the
+        // model, which continues the turn with the blocker in hand.
+        return { decision: 'block' as const, reason }
+      },
+      stopAlreadyRefused(event) {
+        const stop = event as { stop_hook_active?: boolean }
+        return stop.stop_hook_active === true
+      },
+    }),
     npxPin: NPX_PIN,
-
-    on(event, handler) {
-      pi.on(event, handler)
-    },
-    sessionId(ctx) {
-      return ctx.sessionManager.getSessionId() ?? ''
-    },
-    cwd(ctx) {
-      return ctx.cwd
-    },
-    canPaint(ctx) {
-      return ctx.mode === 'tui'
-    },
-    paint(ctx, lines, crumb) {
-      ctx.ui.setWidget(BOARD_KEY, lines)
-      ctx.ui.setStatus(BOARD_KEY, crumb)
-    },
-    clear(ctx) {
-      ctx.ui.setWidget(BOARD_KEY, undefined)
-      ctx.ui.setStatus(BOARD_KEY, undefined)
-    },
-    notify(ctx, text, level) {
-      ctx.ui.notify(text, level)
-    },
-    refuseStop(reason) {
-      // omp's native stop refusal: the reason is handed back to the
-      // model, which continues the turn with the blocker in hand.
-      return { decision: 'block' as const, reason }
-    },
-    stopAlreadyRefused(event) {
-      const stop = event as { stop_hook_active?: boolean }
-      return stop.stop_hook_active === true
-    },
-    promptOf(event) {
-      const turn = event as { prompt?: string }
-      return typeof turn.prompt === 'string' ? turn.prompt : ''
-    },
-    inject(text) {
-      return {
-        message: {
-          customType: 'bro-context',
-          content: text,
-          display: false,
-        },
-      }
-    },
-    appendToolResult(event, text) {
-      const result = event as { content?: Array<{ type: 'text'; text: string }> }
-      const content = Array.isArray(result.content) ? [...result.content] : []
-      content.push({ type: 'text', text })
-      return { content }
-    },
   }
 }
 
@@ -142,52 +104,6 @@ export default function broExtension(pi: OmpApi): void {
    *  rather than a second implementation of each mode. */
   installModeBridges(pi, {
     board: () => driver.board as BoardSnapshot | null,
-  })
-
-  /** `/bro <args>` — the CLI without leaving the editor. Bare `/bro`
-   *  repaints the board; a real subcommand runs it and drops stdout into
-   *  the transcript as a visible custom message. */
-  pi.registerCommand('bro', {
-    description: 'bro — board refresh, or run `bro <args>` (act|next|fleet|drill|…)',
-    async handler(args: string, ctx: OmpContext) {
-      const trimmed = args.trim()
-      if (trimmed === '') {
-        void driver.run(['status', '--json'], ctx.cwd).catch(() => {})
-        ctx.ui.notify('bro: board refreshed', 'info')
-        return
-      }
-      const result = await driver.run(trimmed.split(/\s+/), ctx.cwd)
-      const text = (result.stdout || result.stderr).trim()
-      if (result.code !== 0) {
-        ctx.ui.notify(`bro ${trimmed}: exit ${result.code}`, 'error')
-        return
-      }
-      pi.sendMessage(
-        { customType: 'bro-output', content: `$ bro ${trimmed}\n${text}`, display: true },
-        { triggerTurn: false }
-      )
-    },
-  })
-
-  /** `bro_status` — the board JSON as a model-callable read. The model
-   *  gets the same object the widget renders. */
-  pi.registerTool({
-    name: 'bro_status',
-    label: 'bro status',
-    description:
-      'Read the bro project board: in-progress beads, ready count, fleet agents, drill frame, branch/dirty state. Read-only.',
-    parameters: { type: 'object', properties: {}, additionalProperties: false },
-    async execute(_id, _params, _signal, _onUpdate, ctx) {
-      const result = await driver.run(['status', '--json'], ctx.cwd)
-      return {
-        content: [
-          {
-            type: 'text' as const,
-            text: result.code === 0 ? result.stdout : 'bro status unavailable',
-          },
-        ],
-      }
-    },
   })
 }
 

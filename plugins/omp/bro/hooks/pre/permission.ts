@@ -44,12 +44,11 @@ export default function broGuard(pi: OmpApi): void {
     // a non-string command is not a command — String() on an object would
     // produce '[object Object]' and match nothing, but it would also hide
     // the real shape behind a truthy string
-    const command =
-      typeof input === 'object' && input !== null && 'command' in input
-        ? typeof input.command === 'string'
-          ? input.command
-          : ''
-        : ''
+    let command = ''
+    if (typeof input === 'object' && input !== null && 'command' in input) {
+      const raw = input.command
+      command = typeof raw === 'string' ? raw : ''
+    }
     if (command === '' || !FORCE_PUSH.test(command)) {
       return undefined
     }

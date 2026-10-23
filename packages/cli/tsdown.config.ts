@@ -54,7 +54,7 @@ const main = defineConfig({
  * entry, one file, nothing to resolve.
  */
 const pi = defineConfig({
-  entry: ['src/pi.ts'],
+  entry: ['src/adapter/pi.ts'],
   outDir: 'dist',
   format: ['esm'],
   dts: true,
@@ -62,7 +62,7 @@ const pi = defineConfig({
 })
 
 const omp = defineConfig({
-  entry: ['src/omp.ts'],
+  entry: ['src/adapter/omp.ts'],
   outDir: 'dist',
   format: ['esm'],
   dts: true,
