@@ -267,3 +267,11 @@ permission excepted, exactly as before.
 - `BRO_AGENT_ID`-addressed drops whose JSON `"to"` is string-shaped
   unusually (nested quoting) resolve toward Node — always the safe
   side.
+- Guard coverage is recorded repo-wide, not per session: a connector
+  `guards()` that varies by `sessionId` could let one session's record
+  mask another's. Such connectors only arrive via a non-empty
+  `plugins` section, which defers to Node wholesale — builtin defs
+  are session-independent.
+- `.stamp` files written by an older build carry no coverage list;
+  the shell reads both the body and the per-event files, so a mixed
+  install can only over-trigger.
