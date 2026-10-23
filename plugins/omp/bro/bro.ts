@@ -359,6 +359,7 @@ function sharedBinding(host) {
 		notify: host.notify,
 		refuseStop: host.refuseStop,
 		stopAlreadyRefused: host.stopAlreadyRefused,
+		stopAborted: host.stopAborted,
 		promptOf(event) {
 			const turn = event;
 			return typeof turn.prompt === "string" ? turn.prompt : "";
