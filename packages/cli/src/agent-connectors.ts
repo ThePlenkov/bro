@@ -1987,6 +1987,58 @@ function nativeSurvivors(pid: number | undefined, agentId: string | undefined): 
   return pids.length > 0 ? `surviving pids: ${pids.join(', ')}` : 'the unit still reads live'
 }
 
+/** The shared stop tail for the registry backends — under the SAME
+ *  registry lock: re-verify the generation (a respawned step answers
+ *  'stopped' — the new run owns its entry, and the old unit is
+ *  provably dead since dedup cannot admit a spawn beside a live
+ *  one), run the backend's post-stop liveness probe, then stamp +
+ *  marker-drop only when nothing refuses (bro-l8c4f.3). */
+function lockedStopVerdict(
+  dir: string,
+  molStep: string,
+  entry: AgentRegistryEntry,
+  probe: () => StopResult | undefined
+): StopResult {
+  return withAgentRegistryLock(dir, (): StopResult => {
+    const cur = readAgentRegistry(dir)[molStep]
+    if (
+      cur === undefined ||
+      cur.agentId !== entry.agentId ||
+      cur.spawnedAt !== entry.spawnedAt
+    ) {
+      return {
+        verdict: 'stopped',
+        detail: 'the step respawned during the stop — the new run owns the entry',
+      }
+    }
+    const refused = probe()
+    if (refused !== undefined) {
+      return refused
+    }
+    try {
+      patchAgentRegistry(dir, molStep, { stopped: true })
+    } catch {
+      // the marker removal below still records intent
+    }
+    dropWorkMarker(dir, molStep, entry)
+    return { verdict: 'stopped' }
+  })
+}
+
+/** The live-probe → verdict shape shared by tmux and docker —
+ *  'running' means the kill was refused, 'unknown' means we cannot
+ *  prove either way; both refuse the stamp (bro-l8c4f.3). */
+function liveProbeRefusal(
+  live: 'running' | 'dead' | 'unknown',
+  timeoutDetail: string,
+  unverifiedDetail: string
+): StopResult | undefined {
+  if (live === 'running') {
+    return { verdict: 'timeout', detail: timeoutDetail }
+  }
+  return live === 'unknown' ? { verdict: 'unverified', detail: unverifiedDetail } : undefined
+}
+
 /** Poll the unit probe until 'dead' or the budget expires — the
  *  connector's bounded wait (bro-l8c4f.3). */
 async function waitUnitDead(
@@ -2414,25 +2466,11 @@ export function makeNativeConnector(ctx: ConnectorCtx, env: AgentConnectorEnv): 
       // a respawn during the wait re-pins the entry and must not inherit
       // the marker. If the generation changed, the unit we watched is
       // provably dead: dedup cannot admit a spawn while it reads live.
-      return withAgentRegistryLock(dir, (): StopResult => {
-        const cur = readAgentRegistry(dir)[molStep]
-        if (!sameGeneration(cur)) {
-          return {
-            verdict: 'stopped',
-            detail: 'the step respawned during the stop — the new run owns the entry',
-          }
-        }
+      return lockedStopVerdict(dir, molStep, entry, () => {
         const probe = unit()
-        if (probe !== 'dead') {
-          return nativeUnitRefusal(probe, signalErr, pid, agentId)
-        }
-        try {
-          patchAgentRegistry(dir, molStep, { stopped: true })
-        } catch {
-          // the marker removal below still records intent
-        }
-        dropWorkMarker(dir, molStep, entry)
-        return { verdict: 'stopped' }
+        return probe === 'dead'
+          ? undefined
+          : nativeUnitRefusal(probe, signalErr, pid, agentId)
       })
     },
 
@@ -2796,43 +2834,16 @@ export function makeTmuxConnector(ctx: ConnectorCtx, env: AgentConnectorEnv): Ag
       // 'stopped' + the marker drop land on a live, respawned entry.
       // The verdict rides the return (bro-l8c4f.3): a live or
       // unverifiable session must not report a clean stop.
-      return withAgentRegistryLock(dir, (): StopResult => {
-        const cur = readAgentRegistry(dir)[molStep]
-        if (
-          cur === undefined ||
-          cur.agentId !== entry.agentId ||
-          cur.spawnedAt !== entry.spawnedAt
-        ) {
-          return {
-            verdict: 'stopped',
-            detail: 'the step respawned during the stop — the new run owns the entry',
-          }
+      return lockedStopVerdict(dir, molStep, entry, () => {
+        if (name === undefined) {
+          return undefined
         }
-        if (name !== undefined) {
-          const p = tmuxProbe(socket, name)
-          if (p.live === 'running') {
-            return {
-              verdict: 'timeout',
-              detail: `session ${name} survived kill-session`,
-            }
-          }
-          if (p.live === 'unknown') {
-            // an unverifiable probe must not record 'stopped' on a
-            // session that may still be live — the verdict, not a
-            // stamp, says so
-            return {
-              verdict: 'unverified',
-              detail: `cannot verify ${id}'s tmux session stopped — ${p.err}`,
-            }
-          }
-        }
-        try {
-          patchAgentRegistry(dir, molStep, { stopped: true })
-        } catch {
-          // the marker removal below still records intent
-        }
-        dropWorkMarker(dir, molStep, entry)
-        return { verdict: 'stopped' }
+        const p = tmuxProbe(socket, name)
+        return liveProbeRefusal(
+          p.live,
+          `session ${name} survived kill-session`,
+          `cannot verify ${id}'s tmux session stopped — ${p.err}`
+        )
       })
     },
 
@@ -4230,43 +4241,16 @@ export function makeDockerConnector(ctx: ConnectorCtx, env: AgentConnectorEnv): 
       // lands on a live, respawned entry. The verdict rides the return
       // (bro-l8c4f.3): a live or unverifiable container must not
       // report a clean stop.
-      return withAgentRegistryLock(dir, (): StopResult => {
-        const cur = readAgentRegistry(dir)[molStep]
-        if (
-          cur === undefined ||
-          cur.agentId !== entry.agentId ||
-          cur.spawnedAt !== entry.spawnedAt
-        ) {
-          return {
-            verdict: 'stopped',
-            detail: 'the step respawned during the stop — the new run owns the entry',
-          }
+      return lockedStopVerdict(dir, molStep, entry, () => {
+        if (name === undefined) {
+          return undefined
         }
-        if (name !== undefined) {
-          const p = dockerInspect(name)
-          if (p.live === 'running') {
-            return {
-              verdict: 'timeout',
-              detail: `container ${name} survived docker rm -f`,
-            }
-          }
-          if (p.live === 'unknown') {
-            // an unverifiable probe must not record 'stopped' on a
-            // container that may still be live — the verdict, not a
-            // stamp, says so
-            return {
-              verdict: 'unverified',
-              detail: `cannot verify ${id}'s container stopped — ${p.err}`,
-            }
-          }
-        }
-        try {
-          patchAgentRegistry(dir, molStep, { stopped: true })
-        } catch {
-          // the marker removal below still records intent
-        }
-        dropWorkMarker(dir, molStep, entry)
-        return { verdict: 'stopped' }
+        const p = dockerInspect(name)
+        return liveProbeRefusal(
+          p.live,
+          `container ${name} survived docker rm -f`,
+          `cannot verify ${id}'s container stopped — ${p.err}`
+        )
       })
     },
 

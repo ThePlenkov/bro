@@ -633,6 +633,16 @@ export function registryEntryState(
   if (occupied !== undefined) {
     return occupied
   }
+  return recordedDeathState(home, e, pid)
+}
+
+/** The recorded-death ladder for a unit already verified gone —
+ *  marker, recorded cause, exit file, then the unproven tail. */
+function recordedDeathState(
+  home: string | null,
+  e: AgentRegistryEntry,
+  pid: number | undefined
+): AgentState {
   if (e.stopped === true) {
     return 'stopped'
   }
