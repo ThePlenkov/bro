@@ -104,15 +104,23 @@ interface StatusReport {
   sink?: string
 }
 
-function cmdStatus(dir: string, json: boolean): void {
-  const cfg = otelConfig(dir)
-  const target =
-    cfg.exporter.type === 'file'
-      ? otelSinkPath(cfg, dir)
-      : cfg.exporter.type === 'otlp'
-        ? (cfg.exporter.endpoint === '' ? otelEndpoint() : cfg.exporter.endpoint) ??
-          '(no endpoint — OTEL_EXPORTER_OTLP_ENDPOINT unset)'
-        : 'stderr'
+/** Where the resolved exporter sends rows — path, endpoint, or the
+ *  literal 'stderr' marker the status line already used. */
+function statusTarget(cfg: ResolvedOtelConfig, dir: string): string {
+  if (cfg.exporter.type === 'file') {
+    return otelSinkPath(cfg, dir)
+  }
+  if (cfg.exporter.type === 'stdout') {
+    return 'stderr'
+  }
+  return (
+    (cfg.exporter.endpoint === '' ? otelEndpoint() : cfg.exporter.endpoint) ??
+    '(no endpoint — OTEL_EXPORTER_OTLP_ENDPOINT unset)'
+  )
+}
+
+function buildStatusReport(cfg: ResolvedOtelConfig, dir: string): StatusReport {
+  const target = statusTarget(cfg, dir)
   const report: StatusReport = {
     enabled: cfg.enabled,
     exporter: { type: cfg.exporter.type, target },
@@ -129,11 +137,11 @@ function cmdStatus(dir: string, json: boolean): void {
     }
     report.counts = counts
   }
-  if (json) {
-    console.log(JSON.stringify(report, null, 2))
-    return
-  }
-  console.log(`otel: ${cfg.enabled ? 'enabled' : 'DISABLED'}  exporter=${report.exporter.type} → ${target}`)
+  return report
+}
+
+function printStatusReport(report: StatusReport, cfg: ResolvedOtelConfig): void {
+  console.log(`otel: ${cfg.enabled ? 'enabled' : 'DISABLED'}  exporter=${report.exporter.type} → ${report.exporter.target}`)
   if (cfg.armedByCommitted) {
     console.log(
       'note: a committed otel.enabled=true is ignored — arming, exporter and collect are operator decisions; `bro otel on` writes the trusted local layer'
@@ -154,6 +162,16 @@ function cmdStatus(dir: string, json: boolean): void {
   )
   console.log(`events${report.sink === undefined ? '' : ` (${report.sink})`}:`)
   console.log(rows.join('\n'))
+}
+
+function cmdStatus(dir: string, json: boolean): void {
+  const cfg = otelConfig(dir)
+  const report = buildStatusReport(cfg, dir)
+  if (json) {
+    console.log(JSON.stringify(report, null, 2))
+    return
+  }
+  printStatusReport(report, cfg)
 }
 
 // --- test ----------------------------------------------------------------------

@@ -227,6 +227,65 @@ function untrackedInRepo(dir: string, file: string): boolean {
   return r.code === 1 && r.out.trim() === ''
 }
 
+/** One policy per hook name across both views — the operator view's
+ *  enable AND'd with the merged view's (a repo may narrow, never
+ *  widen), the lower sample, and the operator's collect alone. */
+function combineHookPolicies(
+  operator: OtelConfig,
+  merged: OtelConfig
+): Record<string, OtelHookPolicy> {
+  const hooks: Record<string, OtelHookPolicy> = {}
+  for (const name of new Set([
+    ...Object.keys(merged.hooks),
+    ...Object.keys(operator.hooks),
+  ])) {
+    const mine = resolveHookPolicy(operator, name)
+    const theirs = resolveHookPolicy(merged, name)
+    hooks[name] = {
+      enabled: mine.enabled && theirs.enabled,
+      sample: Math.min(mine.sample, theirs.sample),
+      collect: mine.collect,
+    }
+  }
+  return hooks
+}
+
+/** The two raw merges the trust split needs — `everything` across all
+ *  layers (narrows allowed) and `own` across operator-owned layers
+ *  only (arming, exporter, collect). */
+function otelLayerViews(dir: string): {
+  everything: Record<string, unknown>
+  own: Record<string, unknown>
+} {
+  let everything: Record<string, unknown> = {}
+  let own: Record<string, unknown> = {}
+  for (const hit of loadConfigLayers(dir).layers) {
+    const raw = hit.raw.otel
+    // no otel section → no merge work AND no provenance probe — the
+    // default-off path must not cost a git spawn per layer
+    if (raw === undefined) {
+      continue
+    }
+    everything = mergeOtel(everything, raw)
+    if (hit.layer === 'global' || untrackedInRepo(hit.dir, hit.file)) {
+      own = mergeOtel(own, raw)
+    }
+  }
+  return { everything, own }
+}
+
+function resolveOtelConfig(dir: string): ResolvedOtelConfig {
+  const { everything, own } = otelLayerViews(dir)
+  const merged = otelSection(everything)
+  const operator = otelSection(own)
+  return {
+    enabled: merged.enabled && operator.enabled,
+    exporter: operator.exporter,
+    hooks: combineHookPolicies(operator, merged),
+    armedByCommitted: merged.enabled && !operator.enabled,
+  }
+}
+
 /** Resolved `otel` section for dir, memoized for the process — hook
  *  invocations are one-shot; long-lived hosts (serve) pay one read.
  *
@@ -243,42 +302,7 @@ export function otelConfigFor(dir: string): ResolvedOtelConfig {
   const key = resolve(dir)
   let cfg = cfgMemo.get(key)
   if (cfg === undefined) {
-    let everything: Record<string, unknown> = {}
-    let own: Record<string, unknown> = {}
-    for (const hit of loadConfigLayers(key).layers) {
-      const raw = hit.raw.otel
-      // no otel section → no merge work AND no provenance probe — the
-      // default-off path must not cost a git spawn per layer
-      if (raw === undefined) {
-        continue
-      }
-      everything = mergeOtel(everything, raw)
-      if (hit.layer === 'global' || untrackedInRepo(hit.dir, hit.file)) {
-        own = mergeOtel(own, raw)
-      }
-    }
-    const merged = otelSection(everything)
-    const operator = otelSection(own)
-    const hooks: Record<string, OtelHookPolicy> = {}
-    for (const name of new Set([
-      ...Object.keys(merged.hooks),
-      ...Object.keys(operator.hooks),
-    ])) {
-      const mine = resolveHookPolicy(operator, name)
-      const theirs = resolveHookPolicy(merged, name)
-      hooks[name] = {
-        // narrowing only — a repo can turn a hook off, never on
-        enabled: mine.enabled && theirs.enabled,
-        sample: Math.min(mine.sample, theirs.sample),
-        collect: mine.collect,
-      }
-    }
-    cfg = {
-      enabled: merged.enabled && operator.enabled,
-      exporter: operator.exporter,
-      hooks,
-      armedByCommitted: merged.enabled && !operator.enabled,
-    }
+    cfg = resolveOtelConfig(key)
     cfgMemo.set(key, cfg)
   }
   return cfg
