@@ -381,7 +381,7 @@ async function readAct(dir: string): Promise<BroStatus['act']> {
       url: state.url,
       gate: gate.ok ? 'GREEN' : 'BLOCKED',
       openThreads: state.openThreads,
-      reopenedThreads: state.reopenedThreads.length,
+      reopenedThreads: state.reopenedThreads?.length ?? 0,
       ciPending: state.ciPending,
       ciFailing: state.ciFailing,
       reviewersPending: state.reviewersPending,

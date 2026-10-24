@@ -64,8 +64,14 @@ bro has `resolveThread(id, unresolve)` and `unresolveReviewThread` — the
 *mechanism* to unresolve exists. What is missing is the *detection*: a thread
 that was resolved and then received a new comment must block the gate.
 
-This becomes a `ReviewFacade` capability (`threadHistory` / `reopenedThreads`),
-implemented per connector, and a new blocker in `evaluateExitGate`.
+**This does not become a `ReviewFacade` method.** The facade carries the
+*host's* view — what a thread looks like now — and "was it resolved before"
+is bro's own history, not the host's: the host does not expose a resolve
+timestamp on a review thread (GitHub's GraphQL has no `resolvedAt` on
+`ReviewThread`). So the record lives in bro, in a resolve ledger under
+`<git-common>/bro/act-resolves.jsonl`, written when bro performs the
+resolve. `ReviewThread` gains the comment *history* (what the host does
+know), and the ledger answers the rest.
 
 **2. The same-rule-2× guard becomes mechanical.**
 
@@ -116,11 +122,31 @@ loses what is host-specific (the scripts). bro gains the two guards that were
 prose and are now mechanical — which is the point: **prose that reached the agent
 and did not bind; the mechanism must.**
 
+## What this change actually ships
+
+Only the **reopened-thread** guard. The same-rule and empty-loop guards
+described above are **not** in this change — bro has a round cap
+(`fixRounds` / `maxRounds`) but not a per-rule counter, and "no new product
+commits" is a different signal from a round count. They are named here as
+separate work so the port scope is not mistaken for the port itself.
+
+- `packages/act`: a resolve ledger (`resolve-log.ts`) under
+  `<git-common>/bro/act-resolves.jsonl`, keyed by `(repo, pr, thread)`;
+  `detectReopenedThreads` asks it whether a thread was resolved before; a
+  new blocker in `evaluateExitGate`.
+- `packages/core`: `ReviewThread` carries the comment history (optional — a
+  host that cannot answer it leaves it `undefined`).
+- `packages/github` / `packages/gitlab`: the thread query asks for the full
+  comment list, and every discussion note is mapped.
+- `packages/loop` / `packages/cli`: a reopened thread **parks** the member
+  instead of spawning a fixer — the earlier resolution was wrong, and a
+  fixer would re-resolve it and hide that.
+
 ## Verification
 
-- `packages/act`: `evaluateExitGate` gains the reopened-thread and same-rule
-  blockers; existing gate tests stay green.
-- `packages/github` / `packages/gitlab`: the new facade method is implemented
-  for both hosts — a connector that cannot answer it must not silently pass.
-- The skills repo's `act` SKILL.md keeps its four exit conditions; the two that
-  became mechanical are annotated as such, so the documents do not drift.
+- `packages/act`: the ledger and the detector are covered; the gate blocks
+  on a reopen; existing gate tests stay green.
+- `packages/loop`: a reopened thread parks the member — verified to fail
+  with the park disabled.
+- The skills repo's `act` SKILL.md keeps its four exit conditions; the one
+  that became mechanical is annotated as such, so the documents do not drift.

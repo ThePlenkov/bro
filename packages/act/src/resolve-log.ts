@@ -80,14 +80,8 @@ function parseEvents(file: string): ResolveEvent[] {
     }
     try {
       const e = JSON.parse(line) as Partial<ResolveEvent>
-      if (
-        typeof e.ts === 'number' &&
-        Number.isFinite(e.ts) &&
-        typeof e.repo === 'string' &&
-        typeof e.pr === 'number' &&
-        typeof e.thread === 'string'
-      ) {
-        out.push(e as ResolveEvent)
+      if (isResolveEvent(e)) {
+        out.push(e)
       }
     } catch {
       // a torn line (crash mid-append) is skipped, not fatal
@@ -96,17 +90,31 @@ function parseEvents(file: string): ResolveEvent[] {
   return out
 }
 
+/** A well-formed ledger row — every field present and of the right
+ *  type. A malformed row is skipped, not fatal. */
+function isResolveEvent(e: Partial<ResolveEvent>): e is ResolveEvent {
+  if (typeof e.ts !== 'number' || !Number.isFinite(e.ts)) {
+    return false
+  }
+  if (typeof e.repo !== 'string' || typeof e.thread !== 'string') {
+    return false
+  }
+  return typeof e.pr === 'number'
+}
+
 /** Keep the ledger bounded — a long-lived repo dir must not grow
- *  without limit. The tail is what the read needs. */
+ *  without limit. The tail is what the read needs: the newest resolves
+ *  are the ones a recent-reopen question is about. */
 function compact(file: string): void {
   try {
     if (statSync(file).size <= MAX_LEDGER_BYTES) {
       return
     }
-    const events = parseEvents(file)
-    const kept = events.slice(-Math.ceil(events.length / 2))
-    const body = kept.map((e) => JSON.stringify(e)).join('\n')
-    writeFileSync(`${file}.tmp`, body === '' ? '' : `${body}\n`, 'utf8')
+    const raw = readFileSync(file, 'utf8')
+    const tail = raw.slice(raw.length - KEEP_LEDGER_BYTES)
+    // cut to the first whole line — a half-line is not a record
+    const cut = tail.indexOf('\n')
+    writeFileSync(`${file}.tmp`, cut >= 0 ? tail.slice(cut + 1) : tail)
     renameSync(`${file}.tmp`, file)
   } catch {
     // compaction is best-effort — a failure leaves the ledger as it was
