@@ -17,6 +17,7 @@
     "pulse",
     "telemetry",
     "trace",
+    "otel",
     "acp",
     "rig",
     "---Review---",

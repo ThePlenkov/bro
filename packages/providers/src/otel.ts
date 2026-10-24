@@ -70,8 +70,8 @@ const resource = (): { attributes: { key: string; value: Record<string, unknown>
   ],
 })
 
-function post(path: string, body: unknown): void {
-  const ep = ENDPOINT()
+function post(path: string, body: unknown, endpoint?: string): void {
+  const ep = endpoint ?? ENDPOINT()
   if (ep === undefined) return
   void fetch(`${ep}${path}`, {
     method: 'POST',
@@ -84,8 +84,8 @@ function post(path: string, body: unknown): void {
 /** Emit AFTER the caller is gone — a detached node child carries the
  *  payload out while the parent exits. For `process.on('exit')` spans:
  *  the loop is already closing, an in-flight fetch there never runs. */
-export function postDetached(path: string, body: unknown): void {
-  const ep = ENDPOINT()
+export function postDetached(path: string, body: unknown, endpoint?: string): void {
+  const ep = endpoint ?? ENDPOINT()
   if (ep === undefined) return
   try {
     const child = spawn(
@@ -125,11 +125,26 @@ function journal(name: string, a: Record<string, AttrValue>): void {
   }
 }
 
+/** The resolved OTLP endpoint for reporters — env first, then the
+ *  provider env file (the same ENDPOINT() resolution every emit uses,
+ *  exposed so status surfaces can say where telemetry would go). */
+export function otelEndpoint(): string | undefined {
+  return ENDPOINT()
+}
+
 /** Push one OTEL log record. `a` becomes structured metadata —
- *  filterable in loki via `| key="value"` and unwrappable for metrics. */
-export function otelEvent(name: string, a: Record<string, AttrValue> = {}): void {
+ *  filterable in loki via `| key="value"` and unwrappable for metrics.
+ *  `opts.endpoint` overrides env/file resolution (a configured exporter
+ *  wins over ambient); `opts.detached` hands the POST to a detached
+ *  child — the only safe shape on a hook/exit path, where an in-flight
+ *  fetch would either stall the close or die with the process. */
+export function otelEvent(
+  name: string,
+  a: Record<string, AttrValue> = {},
+  opts: { endpoint?: string; detached?: boolean } = {}
+): void {
   journal(name, a)
-  post('/v1/logs', {
+  const body = {
     resourceLogs: [
       {
         resource: resource(),
@@ -147,7 +162,12 @@ export function otelEvent(name: string, a: Record<string, AttrValue> = {}): void
         ],
       },
     ],
-  })
+  }
+  if (opts.detached === true) {
+    postDetached('/v1/logs', body, opts.endpoint)
+  } else {
+    post('/v1/logs', body, opts.endpoint)
+  }
 }
 
 /** Span context — a trace/span id pair handed down the call tree.
