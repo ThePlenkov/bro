@@ -46,11 +46,13 @@ bro drive install           # (0.3.0) re-arms the merge path and brings the supe
 from dead markers under `<git-common>/bro/watches/` — machine-local
 files a clone never carried — so on a fresh machine there is nothing to
 rearm. The lost machine's open PRs get their supervision back from `bro
-drive` instead, which discovers them from local branches, not
-markers — hence the fetch step. A watch armed on a branch outside
-`work/`/`loop/`/`stack/` has no such enumeration: that promise died with
-the machine — arm a fresh `bro act wait <PR> --merge` if the PR
-still needs one.
+drive --every` instead, which discovers them from local branches, not
+markers — hence the fetch step. On 0.2.5 that supervisor is
+foreground-only: it drives while the command runs and installs no
+durable marker — that is what `bro drive install` adds in 0.3.0. A
+watch armed on a branch outside `work/`/`loop/`/`stack/` has no such
+enumeration: that promise died with the machine — arm a fresh
+`bro act wait <PR> --merge` if the PR still needs one.
 
 Stack edges ride the same loss: `<git-common>/bro/stack/` maps each
 `stack/<name>/<n>-<slug>` branch to the base it forked from, and a

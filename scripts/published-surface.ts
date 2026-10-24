@@ -90,6 +90,13 @@ export function installPublished(spec: string): { bin: string; dir: string } {
  *  failing commands still print their usage. */
 export function runBin(bin: string, args: string[], cwd: string, timeoutMs = 30000): string {
   const r = spawnSync(bin, args, { cwd, encoding: 'utf8', timeout: timeoutMs })
+  // a failed spawn or a timeout kill returns near-empty output that
+  // downstream parsers would silently read as "no such surface" — a
+  // dead probe must fail loudly. A plain non-zero exit is fine:
+  // dispatched-but-failing commands still print usage to stderr.
+  if (r.error !== undefined || r.signal !== null) {
+    throw new Error(`${bin} ${args.join(' ')}: ${r.error?.message ?? `killed by ${r.signal}`}`)
+  }
   return `${r.stdout ?? ''}\n${r.stderr ?? ''}`
 }
 
@@ -188,21 +195,72 @@ function pushAlt(acc: Subs, alt: string, sure: boolean): void {
   }
 }
 
+/** `<word>` followed by a non-word char — the boundary a `\b` pattern
+ *  asserts, without a dynamic `RegExp` constructor (non-literal patterns
+ *  read as user-controlled regex builds to static analysis). */
+export function hasFlagWord(text: string, word: string): boolean {
+  for (let i = text.indexOf(word); i !== -1; i = text.indexOf(word, i + 1)) {
+    const after = text[i + word.length]
+    if (after === undefined || !/\w/.test(after)) {
+      return true
+    }
+  }
+  return false
+}
+
+/** Slot shapes anchored right after the command name — literal
+ *  patterns, applied to the text following each `bro <name>` hit. */
+const ANGLED_SLOT = /^\s+<([a-z0-9][a-z0-9|-]*)>/
+const SPACED_SLOT = /^\s+((?:[a-z][\w-]*\s*\|\s*)+[a-z][\w-]*)/
+const WORD_SLOT = /^\s+([a-z][a-z0-9-]*)\b/
+
+/** Every `bro <name>` usage occurrence — `bro` plus whitespace plus a
+ *  word-bounded name. The command name is dynamic, so the anchor is
+ *  indexOf + boundary checks, not `new RegExp(name)`. `line` is the
+ *  matched line's remainder; `tail` the remainder of the whole help
+ *  text (a slot alternation may wrap to the next line). */
+function forEachUsage(
+  helpOut: string,
+  name: string,
+  take: (line: string, tail: string) => void,
+): void {
+  for (let i = helpOut.indexOf(name); i !== -1; i = helpOut.indexOf(name, i + 1)) {
+    if (i === 0 || !/\s/.test(helpOut[i - 1]!)) {
+      continue
+    }
+    let s = i - 1
+    while (s > 0 && /\s/.test(helpOut[s - 1]!)) {
+      s--
+    }
+    if (s < 3 || helpOut.slice(s - 3, s) !== 'bro' || /\w/.test(helpOut[s - 4] ?? '')) {
+      continue
+    }
+    const end = i + name.length
+    if (/\w/.test(helpOut[end] ?? '')) {
+      continue
+    }
+    const nl = helpOut.indexOf('\n', end)
+    take(helpOut.slice(end, nl === -1 ? undefined : nl), helpOut.slice(end))
+  }
+}
+
 /** Anchored usage slots: `bro <name> <a|b>`, `bro <name> a | b`,
  *  and `bro <name> <word>` — every hit confirms the subcommand. */
 function collectUsageSlots(acc: Subs, name: string, helpOut: string): void {
-  const angled = new RegExp(String.raw`\bbro\s+${name}\s+<([a-z0-9][a-z0-9|-]*)>`, 'g')
-  for (const m of helpOut.matchAll(angled)) {
-    pushAlt(acc, m[1]!, true)
-  }
-  const spaced = new RegExp(String.raw`\bbro\s+${name}\s+((?:[a-z][\w-]*\s*\|\s*)+[a-z][\w-]*)`, 'g')
-  for (const m of helpOut.matchAll(spaced)) {
-    pushAlt(acc, m[1]!, true)
-  }
-  const word = new RegExp(String.raw`\bbro\s+${name}\s+([a-z][a-z0-9-]*)\b`, 'g')
-  for (const m of helpOut.matchAll(word)) {
-    pushSub(acc, m[1]!, true)
-  }
+  forEachUsage(helpOut, name, (_line, tail) => {
+    const angled = ANGLED_SLOT.exec(tail)
+    if (angled) {
+      pushAlt(acc, angled[1]!, true)
+    }
+    const spaced = SPACED_SLOT.exec(tail)
+    if (spaced) {
+      pushAlt(acc, spaced[1]!, true)
+    }
+    const word = WORD_SLOT.exec(tail)
+    if (word) {
+      pushSub(acc, word[1]!, true)
+    }
+  })
 }
 
 /** ` | sub` followers inside one `bro <name>` line — `status |
@@ -219,10 +277,7 @@ function collectFollowerLine(acc: Subs, text: string): void {
 }
 
 function collectFollowers(acc: Subs, name: string, helpOut: string): void {
-  const line = new RegExp(String.raw`\bbro\s+${name}\b[^\n]*`, 'g')
-  for (const l of helpOut.matchAll(line)) {
-    collectFollowerLine(acc, l[0])
-  }
+  forEachUsage(helpOut, name, (line) => collectFollowerLine(acc, line))
 }
 
 /** The `Commands:` block of a command's own help — each row's first
@@ -254,7 +309,7 @@ function collectCommandsBlock(acc: Subs, helpOut: string): void {
  *  subcommands. */
 function dropFlagLeaks(acc: Subs, flagText: string): void {
   for (const w of acc.subs) {
-    if (!acc.confirmed.has(w) && new RegExp(String.raw`--${w}\b`).test(flagText)) {
+    if (!acc.confirmed.has(w) && hasFlagWord(flagText, `--${w}`)) {
       acc.subs.delete(w)
     }
   }

@@ -15,7 +15,7 @@ import { execFileSync } from 'node:child_process'
 import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { loadPublishedSurface } from './published-surface.ts'
+import { hasFlagWord, loadPublishedSurface } from './published-surface.ts'
 
 const root = join(fileURLToPath(import.meta.url), '..', '..')
 const outDir = join(root, 'site/content/docs/reference')
@@ -142,7 +142,7 @@ function currentSubs(r: Row): string[] {
   if (m === null) {
     return []
   }
-  return m[0].split('|').filter((s) => !new RegExp(String.raw`--${s}\b`).test(r.summary))
+  return m[0].split('|').filter((s) => !hasFlagWord(r.summary, `--${s}`))
 }
 
 /** The npm version boundary for this command: the published version

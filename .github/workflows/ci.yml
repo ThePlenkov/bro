@@ -37,9 +37,6 @@ jobs:
       - name: Check command reference is fresh
         run: npm run check:command-docs
 
-      - name: Check onboarding dispatches on npm latest
-        run: npm run check:onboarding
-
       - name: Check CLI contract snapshot is fresh
         run: npm run check:contract
 
@@ -48,3 +45,8 @@ jobs:
 
       - name: Test
         run: npm test
+
+      # network-bound (npm registry) — hermetic gates report first, a
+      # registry outage can never hide a cheap local failure
+      - name: Check onboarding dispatches on npm latest
+        run: npm run check:onboarding
