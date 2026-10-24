@@ -8,6 +8,7 @@
  *  on the session's critical path — telemetry must never stall, throw,
  *  or change a hook's answer. When `otel.enabled` is false (the
  *  default) the cost is one memoized config read and a boolean. */
+import { randomInt } from 'node:crypto'
 import { appendFileSync, existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { dirname, join, resolve } from 'node:path'
@@ -51,7 +52,12 @@ function dig(payload: unknown, path: string): { hit: boolean; v?: Scalar } {
   let cur: unknown = payload
   for (const seg of path.split('.')) {
     if (!isObj(cur)) return { hit: false }
-    cur = cur[seg]
+    // own-property descriptor — a `__proto__`/`constructor` segment in a
+    // collect path reads the prototype chain on a bracket access; the
+    // descriptor form keeps the payload a pure data walk.
+    const d = Object.getOwnPropertyDescriptor(cur, seg)
+    if (d === undefined) return { hit: false }
+    cur = d.value
   }
   if (typeof cur === 'string' || typeof cur === 'boolean') return { hit: true, v: cur }
   if (typeof cur === 'number' && Number.isFinite(cur)) return { hit: true, v: cur }
@@ -116,8 +122,9 @@ export function otelSinkPath(cfg: OtelConfig, dir: string): string {
     : join(homedir(), '.local', 'state', 'bro', 'otel-hooks.jsonl')
 }
 
-function writeFileSink(path: string, line: string): void {
+function writeFileSink(path: string, record: OtelHookRecord): void {
   mkdirSync(dirname(path), { recursive: true })
+  const line = `${JSON.stringify(record)}\n`
   const append = (): void => {
     appendFileSync(path, line)
     if (statSync(path).size > SINK_MAX_BYTES) {
@@ -152,7 +159,7 @@ function recordAttrs(record: OtelHookRecord): Record<string, Scalar> {
 function writeSink(cfg: OtelConfig, record: OtelHookRecord, dir: string): void {
   switch (cfg.exporter.type) {
     case 'file':
-      writeFileSink(otelSinkPath(cfg, dir), `${JSON.stringify(record)}\n`)
+      writeFileSink(otelSinkPath(cfg, dir), record)
       return
     case 'otlp':
       // detached delivery — a dead collector cannot stall the hook's
@@ -193,28 +200,32 @@ export function otelConfigReset(): void {
 
 // --- entry -----------------------------------------------------------------------
 
+/** The repo the hook fired for — config + git anchor. */
+function anchorDir(meta: HookMeta): string {
+  return meta.dir ?? process.cwd()
+}
+
+/** Every early gate — global kill switch, master switch, per-hook
+ *  policy, sample roll — before any record work happens. */
+function shouldEmit(cfg: OtelConfig, policy: OtelHookPolicy): boolean {
+  if (process.env.BRO_TELEMETRY === '0' || !cfg.enabled || !policy.enabled) {
+    return false
+  }
+  return policy.sample >= 1 || randomInt(1_000_000) / 1_000_000 < policy.sample
+}
+
 /** Emit one hook event through the telemetry pipeline. Never throws,
  *  never awaits — a telemetry bug loses one row at worst. `enabled=false`
  *  short-circuits before any payload work. */
 export function emitHook(name: string, payload: unknown, meta: HookMeta = {}): void {
   try {
-    if (process.env.BRO_TELEMETRY === '0') {
-      return
-    }
-    const dir = meta.dir ?? process.cwd()
+    const dir = anchorDir(meta)
     const cfg = otelConfigFor(dir)
-    if (!cfg.enabled) {
-      return
-    }
     const policy = resolveHookPolicy(cfg, name)
-    if (!policy.enabled) {
+    if (!shouldEmit(cfg, policy)) {
       return
     }
-    if (policy.sample < 1 && Math.random() >= policy.sample) {
-      return
-    }
-    const { record } = hookRecord(name, payload, meta, policy)
-    writeSink(cfg, record, dir)
+    writeSink(cfg, hookRecord(name, payload, meta, policy).record, dir)
   } catch {
     // drop-on-error — telemetry must never stall or fail the caller
   }
