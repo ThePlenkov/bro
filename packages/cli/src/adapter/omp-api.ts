@@ -8,6 +8,8 @@
  * should change. (Same convention as the pi and opencode adapters.)
  */
 import type { BroContext } from './host.ts'
+import type { BroCompletion } from './completions.ts'
+import type { BoardPanelFactory } from './board-panel.ts'
 
 /** A UI notification level. */
 export type OmpLevel = 'info' | 'warning' | 'error'
@@ -17,6 +19,10 @@ export interface OmpUi {
   notify(message: string, type?: OmpLevel): void
   setStatus(key: string, text: string | undefined): void
   setWidget(key: string, content: string[] | undefined): void
+  /** Upstream `ExtensionUIContext.custom` (extensions/types.ts) — the
+   *  keyboard-focused mount the board panel runs on; interactive mode
+   *  only. */
+  custom?(factory: BoardPanelFactory, options?: { overlay?: boolean }): Promise<undefined>
 }
 
 /** The session reader — the id is what bro's markers are keyed by. */
@@ -58,6 +64,9 @@ export interface OmpApi {
     name: string,
     options: {
       description?: string
+      /** Upstream: extensions/types.ts `RegisteredCommand` — the
+       *  slash dropdown's argument completer. */
+      getArgumentCompletions?: (argumentPrefix: string) => BroCompletion[] | null
       handler: (args: string, ctx: OmpContext) => Promise<void> | void
     }
   ): void

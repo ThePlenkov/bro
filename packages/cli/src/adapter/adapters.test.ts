@@ -144,10 +144,21 @@ test('the omp guard hook blocks a force push and nothing else', async () => {
   assert.equal(plusRef?.block, true, 'a leading-+ refspec is a force push')
   const behindSeparator = call('git push -f origin main; echo done') as { block?: boolean } | undefined
   assert.equal(behindSeparator?.block, true, 'a separator after the flag hides nothing')
+  // the review-found forms: a grouped short cluster, a force inside a
+  // shell's command string, and an env-prefixed invocation
+  const grouped = call('git push -fu origin main') as { block?: boolean } | undefined
+  assert.equal(grouped?.block, true, 'a grouped short cluster (-fu) is a force push')
+  const nested = call("bash -c 'git push -f'") as { block?: boolean } | undefined
+  assert.equal(nested?.block, true, 'a force in a shell -c string is a force')
+  const prefixed = call('A=b git push -f') as { block?: boolean } | undefined
+  assert.equal(prefixed?.block, true, 'env assignments do not hide the push')
 
   // a normal push, and the safe force form, are not the rule
   assert.equal(call('git push origin main'), undefined)
   assert.equal(call('git push --force-with-lease origin main'), undefined)
+  // a quoted example is text, not a command — the tokenizer keeps it
+  // in one word, and one word that is not `git` pushes nothing
+  assert.equal(call('echo "git push --force"'), undefined)
   // a force flag in ANOTHER segment must not trip the guard — the
   // old [^\n]* pattern matched across shell separators
   assert.equal(call('echo --force && git push origin main'), undefined)

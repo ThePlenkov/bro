@@ -50,19 +50,63 @@ export interface Command {
 }
 
 /** Minimal structural read of `bro status --json` — fields the widget
- *  renders; everything else passes through unread. */
+ *  and the interactive board panel render; everything else passes
+ *  through unread. */
 export interface BoardStatus {
+  dir?: string
   branch?: string
   dirty?: number
+  worktrees?: Array<{
+    name?: string
+    path?: string
+    main?: boolean
+    branch?: string
+    state?: string
+  }>
   beads?: {
-    inProgress?: Array<{ id?: string; title?: string }>
+    inProgress?: Array<{
+      id?: string
+      title?: string
+      priority?: string | number
+      issue_type?: string
+      assignee?: string
+    }>
+    ready?: Array<{
+      id?: string
+      title?: string
+      priority?: string | number
+      issue_type?: string
+    }>
     readyTotal?: number
   }
   fleet?: {
     maxConcurrent?: number
-    agents?: Array<{ id?: string; backend?: string; state?: string; step?: string }>
+    agents?: Array<{
+      id?: string
+      backend?: string
+      state?: string
+      step?: string
+      cause?: string
+      pid?: number
+      worktree?: string
+      provider?: string
+    }>
+  }
+  loop?: {
+    stallMin?: number
+    runs?: Array<{
+      beadId?: string
+      slug?: string
+      pid?: number
+      state?: string
+      startedAt?: string
+      worktree?: string
+      log?: string
+      silentMs?: number
+    }>
   }
   drill?: { frame?: { id?: string; title?: string; depth?: number } | null }
+  watch?: { ts?: string; ageMs?: number; attention?: number }
 }
 
 /** How long a normal hook probe may take. */
@@ -368,9 +412,106 @@ export function clip(text: string, width: number): string {
 }
 
 /**
+ * Strip terminal control sequences from untrusted board text — bead
+ * titles, worktree names, agent steps and drill titles are task-store
+ * data, and a title carrying ANSI/OSC bytes would drive the user's
+ * terminal (erase rows, forge content, OSC-52 clipboard writes) instead
+ * of being displayed. Applied at both sinks: the widget's `boardLines`
+ * and the interactive panel's render, before clipping so control bytes
+ * cannot spend the width budget either.
+ */
+/** Control-byte codes, spelled numerically so this source carries no
+ *  control character and no regex at all — Sonar flags ESC in both
+ *  literal and constructor form, and a sanitizer must not look like
+ *  the payload it strips. */
+const ESC_CODE = 27
+const BEL_CODE = 7
+const TAB_CODE = 9
+const DEL_CODE = 127
+
+/** True for `c` in `[lo, hi]` — three call sites keep the bounds. */
+function inRange(c: number, lo: number, hi: number): boolean {
+  return c >= lo && c <= hi
+}
+
+/** Index just past a CSI sequence starting at `j` (the byte after ESC[). */
+function afterCsi(text: string, j: number): number {
+  while (j < text.length && inRange(text.charCodeAt(j), 0x20, 0x3f)) {
+    j++ // parameter and intermediate bytes
+  }
+  if (j < text.length && inRange(text.charCodeAt(j), 0x40, 0x7e)) {
+    j++ // final byte
+  }
+  return j
+}
+
+/** Index just past an OSC sequence starting at `j` (the byte after ESC]). */
+function afterOsc(text: string, j: number): number {
+  while (j < text.length) {
+    const c = text.charCodeAt(j)
+    if (c === BEL_CODE) {
+      return j + 1
+    }
+    if (c === ESC_CODE && text[j + 1] === '\\') {
+      return j + 2
+    }
+    j++
+  }
+  return j
+}
+
+/** Index just past the escape sequence starting at `i` (an ESC byte):
+ *  CSI = ESC [ params… final; OSC = ESC ] … BEL | ESC \; anything else
+ *  is ESC + one byte; a dangling ESC consumes itself. */
+function afterEscape(text: string, i: number): number {
+  const lead = text[i + 1]
+  if (lead === '[') {
+    return afterCsi(text, i + 2)
+  }
+  if (lead === ']') {
+    return afterOsc(text, i + 2)
+  }
+  return lead === undefined ? i + 1 : i + 2
+}
+
+/**
+ * Strip terminal control sequences from untrusted board text — bead
+ * titles, worktree names, agent steps and drill titles are task-store
+ * data, and a title carrying ANSI/OSC bytes would drive the user's
+ * terminal (erase rows, forge content, OSC-52 clipboard writes) instead
+ * of being displayed. Applied at both sinks: the widget's `boardLines`
+ * and the interactive panel's render, before clipping so control bytes
+ * cannot spend the width budget either.
+ */
+export function sanitizeTerminalText(text: string): string {
+  let out = ''
+  let i = 0
+  while (i < text.length) {
+    const code = text.charCodeAt(i)
+    if (code === TAB_CODE) {
+      out += ' ' // a tab still spends width — map it instead of dropping
+      i++
+      continue
+    }
+    if (code === ESC_CODE) {
+      i = afterEscape(text, i)
+      continue
+    }
+    if (code < 32 || code === DEL_CODE) {
+      i++ // C0 controls and DEL — newlines would smuggle rows
+      continue
+    }
+    out += text[i]
+    i++
+  }
+  return out
+}
+
+/**
  * The widget board — one compact summary line, then the top in-progress
  * beads and running fleet agents. A string array is the simplest board
- * any host can render.
+ * any host can render. Lines pass the sanitizer: board fields are
+ * untrusted task-store text.
  */
 export function boardLines(s: BoardStatus): string[] {
   const beads = s.beads?.inProgress ?? []
@@ -395,7 +536,7 @@ export function boardLines(s: BoardStatus): string[] {
     const step = a.step ? `  ${a.step}` : ''
     lines.push(`  ▶ ${a.id ?? '?'}  ${a.backend ?? ''}${step}`)
   }
-  return lines
+  return lines.map((line) => sanitizeTerminalText(line))
 }
 
 /** The footer crumb — the one-glance form of the same board. */

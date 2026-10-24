@@ -18,6 +18,7 @@ import {
   clip,
   contextOf,
   parseControl,
+  sanitizeTerminalText,
   statusCrumb,
   type BoardStatus,
 } from './core.ts'
@@ -133,4 +134,23 @@ test('statusCrumb: the one-glance form of the same board', () => {
     fleet: { agents: [{ id: 'x', state: 'running' }] },
   })
   assert.equal(crumb, 'bro ◐2 ⬢1')
+})
+
+test('sanitizeTerminalText: untrusted board text cannot drive the terminal', () => {
+  const dirty = 'title\x1b[2J\x07\x1b]0;pwned\x07\nnext\ttab'
+  const clean = sanitizeTerminalText(dirty)
+  assert.ok(!clean.includes('\x1b'), 'no escape survives')
+  // eslint-disable-next-line no-control-regex -- the point of the sanitizer
+  assert.ok(!/[\x00-\x1f]/.test(clean), 'no control byte survives')
+  assert.ok(clean.includes('title') && clean.includes('next tab'), 'visible text stays')
+})
+
+test('boardLines: every line passes the sanitizer', () => {
+  const lines = boardLines({
+    beads: { inProgress: [{ id: 'x', title: 'a\x1b[31mred\x1b[0m' }] },
+  })
+  for (const line of lines) {
+    assert.ok(!line.includes('\x1b'), `control leaked: ${JSON.stringify(line)}`)
+  }
+  assert.ok(lines[1].includes('ared'), 'the title stays readable')
 })

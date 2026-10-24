@@ -21,8 +21,15 @@ one self-contained module (node builtins only) by
   `stop_hook_active: true`. bro's gate maps straight onto it, and
   omp's flag goes straight back into bro's hook payload. No synthetic
   re-prompt, no hand-rolled continuation.
-- **`/bro`** — bare refreshes the board; `/bro act|next|fleet|…`
-  runs the CLI and drops the output into the transcript.
+- **`/bro`** — bare opens the interactive board panel (collapsible
+  sections, ↑↓/←→ navigation, `r` refresh, `q` close — an overlay over
+  the transcript; a plain refresh where no TUI can mount);
+  `/bro act|next|fleet|…`
+  runs the CLI and drops the output into the transcript. The slash
+  dropdown completes arguments: verbs and groups at position 1,
+  group members / verb subcommands at position 2
+  (`getArgumentCompletions`, table drift-tested against the plugin
+  registry).
 - **`bro_status` tool** — the board JSON as a model-callable read.
 
 ## The mode bridges
