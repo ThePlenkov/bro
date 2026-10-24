@@ -785,6 +785,24 @@ async function routeAgentDelete(ref: string, deps: ServeDeps): Promise<ServeResp
     }
     return { status: 404, body: { error: `no agent "${ref}"` } }
   }
+  // truthfulness (bro-l8c4f.3): a worker that survived the stop, or a
+  // death the backend cannot confirm, is not an HTTP success — a 200
+  // here would let the client treat the step as safe to respawn
+  if (outcome.verdict === 'still-running' || outcome.verdict === 'unverified') {
+    return {
+      status: 409,
+      body: {
+        error:
+          outcome.verdict === 'still-running'
+            ? `"${ref}" survived the stop signal — still running`
+            : `"${ref}" — stop unconfirmed, the backend reports ${outcome.agent?.state ?? 'unknown'}`,
+        agent: outcome.agent,
+        stopped: false,
+        verdict: outcome.verdict,
+        ...(outcome.respawned !== undefined ? { respawned: outcome.respawned } : {}),
+      },
+    }
+  }
   return {
     status: 200,
     body: {
