@@ -639,7 +639,10 @@ export function runCheckCommand(argv: string[]): void {
     console.log(
       JSON.stringify({
         command: 'check',
-        ...(data !== undefined ? { data } : {}),
+        // `data` is always an object — the envelope shape is the
+        // contract; on a run whose report didn't survive it's empty,
+        // its fields absent, never fabricated
+        data: data ?? {},
         ...(report !== undefined ? { durationMs: report.durationMs } : {}),
         ...(evaluation !== undefined
           ? {
