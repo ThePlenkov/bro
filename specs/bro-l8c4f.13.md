@@ -65,12 +65,12 @@ code pass through exactly as before.
 ## Plan
 
 - [x] spec (this file)
-- [ ] `check.ts`: delete the retry; `COLLECTION_FAILED` → error +
+- [x] `check.ts`: delete the retry; `COLLECTION_FAILED` → error +
       `evaluationStatus:failed`, recover `data`/`report` from
       `.sverka/runs/*/report.json` when fresh
-- [ ] `check.test.ts`: one-spawn counter, evaluationStatus marker, report
+- [x] `check.test.ts`: one-spawn counter, evaluationStatus marker, report
       recovery, stale-report guard, policy-fail verdict/exit passthrough
-- [ ] `skills/check/SKILL.md`: retry policy line → evaluation-failure
+- [x] `skills/check/SKILL.md`: retry policy line → evaluation-failure
       contract
-- [ ] `npm run build`, `npm run typecheck`, `npm test` (CI parity)
+- [x] `npm run build`, `npm run typecheck`, `npm test` (CI parity)
 - [ ] PR
