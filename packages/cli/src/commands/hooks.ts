@@ -139,6 +139,10 @@ interface HookInput {
     files?: unknown
   }
   tool_response?: { success?: unknown }
+  /** The firing event verbatim — Claude requires emitted
+   *  `hookSpecificOutput.hookEventName` to match it (PostToolUse and
+   *  PostToolUseFailure reach the same bro event). */
+  hook_event_name?: unknown
   prompt?: unknown
   stop_hook_active?: unknown
   session_id?: unknown
@@ -1495,7 +1499,12 @@ async function emitPostTool(input: HookInput): Promise<void> {
   ])
   lines.push(...postLines, ...guards)
   if (lines.length > 0) {
-    context('PostToolUse', lines.join('\n'))
+    // Claude validates hookEventName against the triggering event — a
+    // PostToolUseFailure trigger needs its own name back, not
+    // 'PostToolUse'. Hosts without the field get the default.
+    const eventName =
+      typeof input.hook_event_name === 'string' ? input.hook_event_name : 'PostToolUse'
+    context(eventName, lines.join('\n'))
   }
 }
 
@@ -1510,6 +1519,11 @@ const GATE_PRIORITY = ['drill', 'work', 'act', 'task']
 
 async function emitStopGate(input: HookInput): Promise<void> {
   const sessionId = typeof input.session_id === 'string' ? input.session_id : ''
+  // as in emitPostTool — the emitted event name must match the firing
+  // one; Stop is the only wired trigger today, but SubagentStop arrives
+  // on the same bro event wherever a host wires it
+  const eventName =
+    typeof input.hook_event_name === 'string' ? input.hook_event_name : 'Stop'
   // session tail — the last post-tool lines only ship if a flush fires
   // here; a stop's spawn is the same detached, throttled respawn
   maybeSpawnTraceFlush(process.cwd())
@@ -1528,17 +1542,21 @@ async function emitStopGate(input: HookInput): Promise<void> {
   if (input.stop_hook_active === true) {
     const goal = await goalP
     if (goal.length > 0) {
-      context('Stop', goal.join('\n'))
+      context(eventName, goal.join('\n'))
     }
     return
   }
-  await emitStopGateBody(sessionId, goalP)
+  await emitStopGateBody(sessionId, goalP, eventName)
 }
 
 /** The armed-gate half of the stop event — split from emitStopGate so
  *  the goal preamble's branches don't push the gate over the complexity
  *  budget (SAST counts them together otherwise). */
-async function emitStopGateBody(sessionId: string, goalP: Promise<string[]>): Promise<void> {
+async function emitStopGateBody(
+  sessionId: string,
+  goalP: Promise<string[]>,
+  eventName: string
+): Promise<void> {
   const armed = sessionId ? readArmed(sessionId) : new Set<string>()
   // Block priority is aspect order, not registry order — a beads gate
   // (registry-first) must not shadow a dirty-worktree block: abandoning
@@ -1586,7 +1604,7 @@ async function emitStopGateBody(sessionId: string, goalP: Promise<string[]>): Pr
   // a nudge, never a `decision: block` (spec: bro-nkn6)
   hints.push(...guards)
   if (hints.length > 0) {
-    context('Stop', hints.join('\n'))
+    context(eventName, hints.join('\n'))
   }
 }
 

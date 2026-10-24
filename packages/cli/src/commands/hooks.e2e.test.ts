@@ -1391,6 +1391,13 @@ describe('hooks e2e — native payload conformance (bro-l8c4f.8)', () => {
       assert.equal(r.code, 0)
       assert.equal(markerExists(f, 's1', 'act'), false, 'a failure event must not arm')
       assert.match(r.stdout, /watcher: convoy landed/, 'the failure event is still a delivery tick')
+      // Claude validates hookSpecificOutput.hookEventName against the
+      // firing event — a PostToolUseFailure trigger must get its own
+      // name back, not 'PostToolUse'
+      const out = JSON.parse(r.stdout.trim().split('\n').at(-1)!) as {
+        hookSpecificOutput?: { hookEventName?: string }
+      }
+      assert.equal(out.hookSpecificOutput?.hookEventName, 'PostToolUseFailure')
       const rows = traceRows(f, 's1')
       assert.equal(rows.length, 1)
       assert.equal(rows[0]!.ok, false)
