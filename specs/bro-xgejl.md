@@ -110,6 +110,32 @@ construction.
   subscription, same class as `providers`/`notify`; `bro doctor` warns
   if a repo commits it.
 
+#### Trust — which layer may say what
+
+A committed `bro.config.*` is repo-controlled content — it arrives via
+`git clone`/`pull` without operator review, so it must never be able to
+aim telemetry at an attacker-chosen collector or widen what gets
+shipped (prompt text, command lines). The facade therefore resolves
+config as TWO merges over `loadConfigLayers`:
+
+- **Operator-owned** — the global layer plus any project/local config
+  file git reports **untracked** (`git ls-files --error-unmatch` →
+  exit 1 + empty stdout; every other answer — tracked, non-repo dir,
+  stalled git — fails closed to untrusted). These layers alone decide:
+  arming (`enabled`), `exporter` (type/path/endpoint/headers), and
+  every `collect` allowlist. `.gitignore` is advisory — a committed
+  `bro.config.local.json` is just another tracked file, so the index,
+  not the filename, is the verdict.
+- **Every layer (committed included)** — may only *narrow*: AND on
+  `enabled`/`hooks.<name>.enabled`, MIN on `sample`. A repo can
+  silence telemetry or sample harder; it cannot arm it, redirect it,
+  or add a payload field. `hooks` policies combine per hook name as
+  `{enabled: mine && theirs, sample: min, collect: mine}`.
+
+`bro otel status` surfaces `armedByCommitted` — a committed
+`enabled=true` the operator layers never confirmed prints a hint naming
+the opt-in step rather than reading as broken.
+
 ### Sinks
 
 - **file** (default) — one JSONL row per event to `exporter.path`, or

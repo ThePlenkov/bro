@@ -19,18 +19,20 @@ import {
   hookEventName,
   hookRecord,
   OTEL_HOOK_EVENTS,
+  otelConfigFor,
   otelSinkPath,
   readSinkRows,
   resolveHookPolicy,
-  type OtelConfig,
+  type ResolvedOtelConfig,
 } from '@broject/otel'
-import { loadBroConfig } from '../plugins.ts'
 
 const isObj = (v: unknown): v is Record<string, unknown> =>
   typeof v === 'object' && v !== null && !Array.isArray(v)
 
-function otelConfig(dir: string): OtelConfig {
-  return loadBroConfig(dir).otel as OtelConfig
+/** The facade's resolved config — operator provenance applied, so
+ *  status/test report what hooks will actually do, not the raw merge. */
+function otelConfig(dir: string): ResolvedOtelConfig {
+  return otelConfigFor(dir)
 }
 
 function usage(exitCode: ExitCode = EXIT.usage): never {
@@ -132,6 +134,11 @@ function cmdStatus(dir: string, json: boolean): void {
     return
   }
   console.log(`otel: ${cfg.enabled ? 'enabled' : 'DISABLED'}  exporter=${report.exporter.type} → ${target}`)
+  if (cfg.armedByCommitted) {
+    console.log(
+      'note: a committed otel.enabled=true is ignored — arming, exporter and collect are operator decisions; `bro otel on` writes the trusted local layer'
+    )
+  }
   const p = report.defaultPolicy
   console.log(
     `policy "*": ${p.enabled ? 'on' : 'off'}  sample=${p.sample}  collect=[${p.collect.join(', ')}]`

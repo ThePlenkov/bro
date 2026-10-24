@@ -11,8 +11,8 @@
 import { randomInt } from 'node:crypto'
 import { appendFileSync, existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from 'node:fs'
 import { homedir } from 'node:os'
-import { dirname, join, resolve } from 'node:path'
-import { gitCommonDir, loadConfig, withFileLock } from '@broject/core'
+import { basename, dirname, join, resolve } from 'node:path'
+import { gitCommonDir, gitTry, loadConfigLayers, withFileLock } from '@broject/core'
 import { otelEvent } from '@broject/providers'
 import { otelSection, resolveHookPolicy, type OtelConfig, type OtelHookPolicy } from './config.ts'
 
@@ -116,7 +116,7 @@ export function otelSinkPath(cfg: OtelConfig, dir: string): string {
   if (cfg.exporter.path !== '') {
     return resolve(dir, cfg.exporter.path)
   }
-  const common = gitCommonDir(dir)
+  const common = gitCommonDir(dir, 2_000)
   return common !== null
     ? join(common, 'bro', 'otel', 'hooks.jsonl')
     : join(homedir(), '.local', 'state', 'bro', 'otel-hooks.jsonl')
@@ -180,15 +180,105 @@ function writeSink(cfg: OtelConfig, record: OtelHookRecord, dir: string): void {
 
 // --- config ---------------------------------------------------------------------
 
-const cfgMemo = new Map<string, OtelConfig>()
+const cfgMemo = new Map<string, ResolvedOtelConfig>()
+
+/** The facade's resolved config — OtelConfig plus provenance notes
+ *  `bro otel status` surfaces (a committed `otel.enabled` the operator
+ *  layers never confirmed reads as ignored, not broken). */
+export interface ResolvedOtelConfig extends OtelConfig {
+  /** A git-unattributable layer asked to arm telemetry — the operator
+   *  layers didn't, so the request is ignored. */
+  armedByCommitted: boolean
+}
+
+/** Merge two raw `otel` sections in layer order — objects merge per
+ *  key, arrays and scalars replace (`__proto__` skipped, exactly like
+ *  the core layer merge). Done over the raw section so the merged and
+ *  the operator-only views come from ONE read of the config files. */
+function mergeOtel(
+  base: Record<string, unknown>,
+  overlay: unknown
+): Record<string, unknown> {
+  if (!isObj(overlay)) {
+    return base
+  }
+  const out: Record<string, unknown> = { ...base }
+  for (const [k, v] of Object.entries(overlay)) {
+    if (k === '__proto__') {
+      continue
+    }
+    const cur = out[k]
+    out[k] = isObj(v) && isObj(cur) ? mergeOtel(cur, v) : v
+  }
+  return out
+}
+
+/** Does git vouch for `file` as NOT part of the repository? Provenance
+ *  is an index question, never a name question: `.gitignore` is
+ *  advisory, so a repository can commit `bro.config.local.json` as
+ *  easily as `bro.config.json`, and then the "local" layer is just
+ *  another committed file. `ls-files --error-unmatch` answering 1 +
+ *  empty stdout is the only verdict that reads as untracked; a tracked
+ *  path, a non-repository dir, a missing or stalled git — every other
+ *  answer leaves the file unattributable, and unattributable config
+ *  never gets to choose where records go or what they carry. */
+function untrackedInRepo(dir: string, file: string): boolean {
+  const r = gitTry(['-C', dir, 'ls-files', '--error-unmatch', '--', basename(file)], 2_000)
+  return r.code === 1 && r.out.trim() === ''
+}
 
 /** Resolved `otel` section for dir, memoized for the process — hook
- *  invocations are one-shot; long-lived hosts (serve) pay one read. */
-export function otelConfigFor(dir: string): OtelConfig {
+ *  invocations are one-shot; long-lived hosts (serve) pay one read.
+ *
+ *  Trust split: narrowing decisions merge through EVERY layer — a
+ *  repository may switch telemetry off, drop a hook, or sample harder.
+ *  What a repo may never do is decide WHERE records go or WHAT they
+ *  carry: `enabled`-to-arm, `exporter`, and every `collect` allowlist
+ *  rebuild from the layers the operator owns — the global config plus
+ *  any project/local config file git reports untracked (the file
+ *  `bro otel on` writes in a real checkout). A committed `otel` block
+ *  therefore cannot arm telemetry, name a collector, add a payload
+ *  field, or supply request headers (spec bro-xgejl §Trust). */
+export function otelConfigFor(dir: string): ResolvedOtelConfig {
   const key = resolve(dir)
   let cfg = cfgMemo.get(key)
   if (cfg === undefined) {
-    cfg = loadConfig(key, { otel: otelSection }).otel as OtelConfig
+    let everything: Record<string, unknown> = {}
+    let own: Record<string, unknown> = {}
+    for (const hit of loadConfigLayers(key).layers) {
+      const raw = hit.raw.otel
+      // no otel section → no merge work AND no provenance probe — the
+      // default-off path must not cost a git spawn per layer
+      if (raw === undefined) {
+        continue
+      }
+      everything = mergeOtel(everything, raw)
+      if (hit.layer === 'global' || untrackedInRepo(hit.dir, hit.file)) {
+        own = mergeOtel(own, raw)
+      }
+    }
+    const merged = otelSection(everything)
+    const operator = otelSection(own)
+    const hooks: Record<string, OtelHookPolicy> = {}
+    for (const name of new Set([
+      ...Object.keys(merged.hooks),
+      ...Object.keys(operator.hooks),
+    ])) {
+      const mine = resolveHookPolicy(operator, name)
+      const theirs = resolveHookPolicy(merged, name)
+      hooks[name] = {
+        // narrowing only — a repo can turn a hook off, never on
+        enabled: mine.enabled && theirs.enabled,
+        sample: Math.min(mine.sample, theirs.sample),
+        collect: mine.collect,
+      }
+    }
+    cfg = {
+      enabled: merged.enabled && operator.enabled,
+      exporter: operator.exporter,
+      hooks,
+      armedByCommitted: merged.enabled && !operator.enabled,
+    }
     cfgMemo.set(key, cfg)
   }
   return cfg

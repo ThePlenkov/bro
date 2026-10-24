@@ -73,6 +73,20 @@ always explicit opt-in via `collect`.
   **operator** section — `bro doctor` warns if a repo commits it; use
   `bro.config.local.*` or `~/.config/bro/config.json`.
 
+**Trust model (why a repo cannot aim your telemetry).** Arming
+(`enabled`), the exporter (type/path/endpoint/headers), and every
+`collect` allowlist are read from operator-owned layers only: the
+global config plus any project/local config file `git ls-files` reports
+**untracked** — the file `bro otel on` writes in a real checkout. A
+*committed* `otel` block is repo-controlled, so the facade ignores it
+for everything except narrowing: it can turn telemetry off, drop a
+hook, or lower a sample, but never arm, redirect, or collect. A
+committed `bro.config.local.json` is still committed — the git index,
+not the filename, is the verdict. In a directory git doesn't know,
+every file is unattributable and only the global layer can arm. `bro
+otel status` prints a note when a committed `enabled=true` is ignored —
+that is the opt-in step, not a bug.
+
 ## Hook catalog
 
 | bro event | host events | payload fields worth collecting |
