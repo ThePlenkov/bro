@@ -38,6 +38,25 @@ describe('collectFields', () => {
     assert.deepEqual(collectFields('junk', ['a']), { fields: {}, skipped: ['a'] })
     assert.deepEqual(collectFields(undefined, ['a']), { fields: {}, skipped: ['a'] })
   })
+
+  test('prototype segments are not traversed — __proto__ paths skip', () => {
+    const { fields, skipped } = collectFields(PAYLOAD, [
+      '__proto__',
+      'constructor',
+      'tool_input.__proto__.polluted',
+      'hasOwnProperty',
+    ])
+    assert.deepEqual(fields, {})
+    assert.equal(skipped.length, 4)
+    // a literal __proto__ key in the payload is own data — the
+    // descriptor walk reads it as data, never through the chain; a
+    // scalar leaf under it still collects under its literal dotted key
+    const own = JSON.parse('{"__proto__": {"x": 1}, "a": "b"}')
+    assert.deepEqual(collectFields(own, ['a']).fields, { a: 'b' })
+    assert.deepEqual(collectFields(own, ['__proto__.x']).fields, {
+      '__proto__.x': 1,
+    })
+  })
 })
 
 describe('hookRecord', () => {
@@ -210,20 +229,54 @@ describe('emitHook — stdout sink', () => {
   })
 })
 
+/** Throwaway OTLP collector — returns the captured request and the
+ *  port the detached poster should hit. */
+async function otlpCollector(): Promise<{
+  got: { path?: string; body?: string }
+  port: number
+  close: () => void
+}> {
+  const got: { path?: string; body?: string } = {}
+  const server: Server = createServer((req, res) => {
+    let body = ''
+    req.on('data', (c) => { body += c })
+    req.on('end', () => {
+      got.path = req.url
+      got.body = body
+      res.end()
+    })
+  })
+  await new Promise<void>((r) => server.listen(0, '127.0.0.1', r))
+  return {
+    got,
+    port: (server.address() as AddressInfo).port,
+    close: () => server.close(),
+  }
+}
+
+/** resourceLogs[0].scopeLogs[0].logRecords[0] → body + flattened attrs. */
+function firstLogRecord(body: string): {
+  body: string | undefined
+  attrs: Record<string, unknown>
+} {
+  const parsed = JSON.parse(body)
+  const rec = parsed.resourceLogs?.[0]?.scopeLogs?.[0]?.logRecords?.[0]
+  return {
+    body: rec?.body?.stringValue,
+    attrs: Object.fromEntries(
+      (rec?.attributes ?? []).map(
+        (a: { key: string; value: Record<string, unknown> }) => [
+          a.key,
+          Object.values(a.value)[0],
+        ]
+      )
+    ),
+  }
+}
+
 describe('emitHook — otlp sink', () => {
   test('detached POST carries the OTLP log record to the configured endpoint', async () => {
-    const got: { path?: string; body?: string } = {}
-    const server: Server = createServer((req, res) => {
-      let body = ''
-      req.on('data', (c) => { body += c })
-      req.on('end', () => {
-        got.path = req.url
-        got.body = body
-        res.end()
-      })
-    })
-    await new Promise<void>((r) => server.listen(0, '127.0.0.1', r))
-    const port = (server.address() as AddressInfo).port
+    const { got, port, close } = await otlpCollector()
     const dir = tmpDir('otel-facade-')
     writeFileSync(
       join(dir, 'bro.config.json'),
@@ -242,19 +295,12 @@ describe('emitHook — otlp sink', () => {
         await new Promise((r) => setTimeout(r, 50))
       }
       assert.equal(got.path, '/v1/logs')
-      const parsed = JSON.parse(got.body ?? '{}')
-      const rec = parsed.resourceLogs?.[0]?.scopeLogs?.[0]?.logRecords?.[0]
-      assert.equal(rec?.body?.stringValue, 'bro.hook.session-start')
-      const attrs = Object.fromEntries(
-        (rec?.attributes ?? []).map((a: { key: string; value: Record<string, unknown> }) => [
-          a.key,
-          Object.values(a.value)[0],
-        ])
-      )
-      assert.equal(attrs['event.name'], 'hook.session-start')
-      assert.equal(attrs.session, 's')
+      const rec = firstLogRecord(got.body ?? '{}')
+      assert.equal(rec.body, 'bro.hook.session-start')
+      assert.equal(rec.attrs['event.name'], 'hook.session-start')
+      assert.equal(rec.attrs.session, 's')
     } finally {
-      server.close()
+      close()
     }
   })
 })

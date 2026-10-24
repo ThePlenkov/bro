@@ -26,6 +26,9 @@ import {
 } from '@broject/otel'
 import { loadBroConfig } from '../plugins.ts'
 
+const isObj = (v: unknown): v is Record<string, unknown> =>
+  typeof v === 'object' && v !== null && !Array.isArray(v)
+
 function otelConfig(dir: string): OtelConfig {
   return loadBroConfig(dir).otel as OtelConfig
 }
@@ -65,16 +68,11 @@ function cmdSetEnabled(dir: string, enabled: boolean): void {
   let cfg: Record<string, unknown> = {}
   try {
     const raw: unknown = JSON.parse(readFileSync(path, 'utf8'))
-    if (typeof raw === 'object' && raw !== null && !Array.isArray(raw)) {
-      cfg = raw as Record<string, unknown>
-    }
+    if (isObj(raw)) cfg = raw
   } catch {
     // absent or unreadable local config — start fresh
   }
-  const section =
-    typeof cfg.otel === 'object' && cfg.otel !== null && !Array.isArray(cfg.otel)
-      ? (cfg.otel as Record<string, unknown>)
-      : {}
+  const section = isObj(cfg.otel) ? cfg.otel : {}
   cfg.otel = { ...section, enabled }
   writeFileSync(path, `${JSON.stringify(cfg, null, 2)}\n`)
   console.log(`otel.enabled=${enabled} → ${path}`)
@@ -206,7 +204,7 @@ function cmdTest(dir: string, rawName: string | undefined, json: boolean): void 
 
 export function runOtelCommand(argv: string[]): void {
   const [sub, ...rest] = argv
-  if (sub === '--help' || sub === '-h' || hasHelpFlag(rest)) {
+  if (hasHelpFlag(argv)) {
     usage(EXIT.ok)
   }
   const dir = process.cwd()

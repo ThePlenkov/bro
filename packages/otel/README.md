@@ -30,6 +30,6 @@ Requires Node ≥ 22. ESM only.
 
 ## Links
 
-- Spec: https://github.com/ThePlenkov/bro/tree/main/specs/bro-xgejl.md
-- Source: https://github.com/ThePlenkov/bro/tree/main/packages/otel
-- CLI: https://www.npmjs.com/package/@broject/bro
+- Spec: <https://github.com/ThePlenkov/bro/tree/main/specs/bro-xgejl.md>
+- Source: <https://github.com/ThePlenkov/bro/tree/main/packages/otel>
+- CLI: <https://www.npmjs.com/package/@broject/bro>

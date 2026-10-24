@@ -90,36 +90,37 @@ function hookPolicy(raw: unknown): OtelHookPolicy {
   }
 }
 
-/** bro.config `otel` section. */
-export const otelSection: ConfigSection<OtelConfig> = (raw) => {
-  const obj = isObj(raw) ? raw : {}
-  const exporter = isObj(obj.exporter) ? obj.exporter : {}
-  const hooks = isObj(obj.hooks) ? obj.hooks : {}
+/** `exporter` subsection — unknown types fall back to the file sink. */
+function exporterConfig(raw: unknown): OtelExporterConfig {
+  const exporter = isObj(raw) ? raw : {}
   const type: OtelExporterType = OTEL_EXPORTER_TYPES.includes(
     exporter.type as OtelExporterType
   )
     ? (exporter.type as OtelExporterType)
     : 'file'
+  const str = (v: unknown): string =>
+    typeof v === 'string' && v.trim() !== '' ? v.trim() : ''
+  return {
+    type,
+    path: str(exporter.path),
+    endpoint: str(exporter.endpoint),
+    headers: isObj(exporter.headers)
+      ? Object.fromEntries(
+          Object.entries(exporter.headers).filter(
+            (e): e is [string, string] => typeof e[1] === 'string'
+          )
+        )
+      : {},
+  }
+}
+
+/** bro.config `otel` section. */
+export const otelSection: ConfigSection<OtelConfig> = (raw) => {
+  const obj = isObj(raw) ? raw : {}
+  const hooks = isObj(obj.hooks) ? obj.hooks : {}
   return {
     enabled: obj.enabled === true,
-    exporter: {
-      type,
-      path:
-        typeof exporter.path === 'string' && exporter.path.trim() !== ''
-          ? exporter.path.trim()
-          : '',
-      endpoint:
-        typeof exporter.endpoint === 'string' && exporter.endpoint.trim() !== ''
-          ? exporter.endpoint.trim()
-          : '',
-      headers: isObj(exporter.headers)
-        ? Object.fromEntries(
-            Object.entries(exporter.headers).filter(
-              (e): e is [string, string] => typeof e[1] === 'string'
-            )
-          )
-        : {},
-    },
+    exporter: exporterConfig(obj.exporter),
     hooks: Object.fromEntries(
       Object.entries(hooks).map(([name, v]) => [name, hookPolicy(v)])
     ),
