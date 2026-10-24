@@ -26,6 +26,27 @@ function reopenedThreadsOf(state: PrActState): ReopenedThread[] {
   return state.reopenedThreads ?? []
 }
 
+/** The reopened-thread cycle-guard report lines — extracted so the
+ *  gate function stays under the cognitive-complexity ceiling. */
+function reopenedBlockers(state: PrActState): string[] {
+  const out: string[] = []
+  // a thread that was resolved and then commented on again: the earlier
+  // resolution was wrong, and a blind re-resolve hides that — the user
+  // confirms instead
+  for (const t of reopenedThreadsOf(state)) {
+    out.push(`reopened thread ${t.id} — resolved before, commented on again by ${t.author}`)
+  }
+  return out
+}
+
+/** Why the approval probe failed — a ternary the gate need not own. */
+function approvalReason(state: PrActState): string {
+  if (state.humanApproval === false) {
+    return state.humanApprovalReason ?? 'not approved'
+  }
+  return 'approval probe unanswerable'
+}
+
 export function evaluateExitGate(
   state: PrActState,
   opts?: { requireApproval?: boolean }
@@ -78,17 +99,9 @@ export function evaluateExitGate(
   if (state.sastUnknown > 0) {
     blockers.push(`${state.sastUnknown} SAST check(s) with unknown annotation status`)
   }
-  // The reopened-thread cycle-guard: a thread that was resolved and then
-  // commented on again. The earlier resolution was wrong, and a blind
-  // re-resolve hides that — the user confirms instead.
-  const reopened = reopenedThreadsOf(state)
-  if (reopened.length > 0) {
-    for (const t of reopened) {
-      blockers.push(
-        `reopened thread ${t.id} — resolved before, commented on again by ${t.author}`
-      )
-    }
-  }
+  // The reopened-thread cycle-guard rides the report (see
+  // reopenedBlockers) — it blocks, and its lines are part of blockers
+  blockers.push(...reopenedBlockers(state))
   if (state.mergeable === 'CONFLICTING') {
     blockers.push('merge conflicts')
   }
@@ -116,7 +129,7 @@ export function evaluateExitGate(
     blockers.push(
       `no trusted human approval on the current head — act.requireApproval ` +
         `requires a human's approving review on the latest head ` +
-        `(${state.humanApproval === false ? (state.humanApprovalReason ?? 'not approved') : 'approval probe unanswerable'})`
+        `(${approvalReason(state)})`
     )
   }
   return { ok: blockers.length === 0, blockers, ...base }
