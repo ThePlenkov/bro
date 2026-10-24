@@ -19,7 +19,7 @@
  */
 import { existsSync, realpathSync } from 'node:fs'
 import { basename, resolve } from 'node:path'
-import { evaluateExitGate, fetchPrActState, prStateCache } from '@broject/act'
+import { evaluateExitGate, fetchPrActState, prStateCache, resolveLedger } from '@broject/act'
 import {
   facade,
   gitTry,
@@ -135,6 +135,9 @@ interface BroStatus {
     url: string
     gate: string
     openThreads: number
+    /** Threads resolved before and commented on again — the act loop's
+     *  reopened-thread cycle-guard. */
+    reopenedThreads: number
     ciPending: number
     ciFailing: number
     reviewersPending: number
@@ -365,6 +368,7 @@ async function readAct(dir: string): Promise<BroStatus['act']> {
       requireApproval: act.requireApproval,
       approvers: act.approvers,
       stateCache: prStateCache(dir),
+      resolveLedger: resolveLedger(dir),
     })
     const gate = evaluateExitGate(state, { requireApproval: act.requireApproval })
     // ownership marker — advisory read, a failure degrades the marker,
@@ -378,6 +382,7 @@ async function readAct(dir: string): Promise<BroStatus['act']> {
       url: state.url,
       gate: gate.ok ? 'GREEN' : 'BLOCKED',
       openThreads: state.openThreads,
+      reopenedThreads: state.reopenedThreads?.length ?? 0,
       ciPending: state.ciPending,
       ciFailing: state.ciFailing,
       reviewersPending: state.reviewersPending,

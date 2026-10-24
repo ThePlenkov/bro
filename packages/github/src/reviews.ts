@@ -29,6 +29,7 @@ import type {
   PrLabelOp,
   PrMeta,
   PrTarget,
+  ReviewComment,
   ReviewFacade,
   ReviewThread,
   ScanOpts,
@@ -214,7 +215,7 @@ function reviewThreadsQuery(afterClause: string): string {
               id
               isResolved
               isOutdated
-              comments(first: 1) {
+              comments(first: 100) {
                 nodes { author { login __typename } path line body createdAt }
               }
             }
@@ -241,23 +242,27 @@ function parseThreadPage(raw: string, repo: string, pr: number): ThreadPage {
 
 /** GraphQL thread nodes → domain threads — shared by the paginated
  *  per-PR fetch and the bulk scan's inlined first page. */
+/** One GraphQL comment node → the facade's shape. */
+function toComment(x: ThreadPage['nodes'][number]['comments']['nodes'][number]): ReviewComment {
+  return {
+    author: x.author?.login ?? 'unknown',
+    bot: x.author?.__typename === 'Bot',
+    path: x.path ?? null,
+    line: x.line ?? null,
+    body: x.body ?? '',
+    createdAt: x.createdAt ?? '',
+  }
+}
+
 function toReviewThreads(nodes: ThreadPage['nodes']): ReviewThread[] {
   return nodes.map((n) => {
-    const c = n.comments.nodes[0]
+    const comments = n.comments.nodes.map(toComment)
     return {
       id: n.id,
       resolved: n.isResolved,
       outdated: n.isOutdated,
-      comment: c
-        ? {
-            author: c.author?.login ?? 'unknown',
-            bot: c.author?.__typename === 'Bot',
-            path: c.path ?? null,
-            line: c.line ?? null,
-            body: c.body ?? '',
-            createdAt: c.createdAt ?? '',
-          }
-        : null,
+      comment: comments[0] ?? null,
+      comments,
     }
   })
 }
@@ -1254,7 +1259,7 @@ const SCAN_PR_FIELDS = `
   labels(first: 50) { nodes { name } }
   reviewThreads(first: 100) {
     pageInfo { hasNextPage }
-    nodes { id isResolved isOutdated comments(first: 1) { nodes { author { login __typename } path line body createdAt } } }
+    nodes { id isResolved isOutdated comments(first: 100) { nodes { author { login __typename } path line body createdAt } } }
   }`
 
 /** Aliased-GraphQL probe: one `gh api graphql` call per ~15 PRs covers

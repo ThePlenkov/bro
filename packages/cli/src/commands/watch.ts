@@ -64,6 +64,7 @@ import {
   checkHistory,
   evaluateExitGate,
   fetchPrActState,
+  resolveLedger,
   prStateCache,
   type FetchPrActStateOpts,
   type PrStateCache,
@@ -484,6 +485,7 @@ function gateStateOpts(
     requireApproval: act.requireApproval,
     approvers: act.approvers,
     stateCache: cache,
+    resolveLedger: resolveLedger(dir),
   }
 }
 
@@ -528,6 +530,7 @@ async function gateFleetPrs(
           mergeable: state.mergeable,
           mergeState: state.mergeState,
           openThreads: state.openThreads,
+          reopenedThreads: state.reopenedThreads?.length ?? 0,
           ciPending: state.ciPending,
           ciFailing: state.ciFailing,
           reviewersPending: state.reviewersPending,
