@@ -55,7 +55,8 @@ pinned install (`node_modules/sverka`, then the deprecated
   same execution, bro-shaped output, and the exit code already mirrors
   the gate (nonzero on step failure or failing policy verdict).
 - `evaluate: true` only for configs whose steps declare SARIF artifact
-  outputs — otherwise sverka has nothing to collect (bro retries without
-  it once and warns; fix the config, don't rely on the retry).
+  outputs — otherwise sverka has nothing to collect and the run fails
+  `COLLECTION_FAILED` (exit 3, `evaluationStatus: failed` in the JSON
+  envelope; the run is never retried — fix the config).
 - Findings→beads dedup is not wired yet — `bro check` reports findings;
   it does not file them.

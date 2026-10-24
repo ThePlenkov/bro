@@ -18,7 +18,7 @@
  * executor; usage errors exit 2.
  */
 import { spawnSync } from 'node:child_process'
-import { accessSync, existsSync, statSync } from 'node:fs'
+import { accessSync, existsSync, readdirSync, readFileSync, statSync } from 'node:fs'
 import { delimiter, dirname, isAbsolute, join, resolve, sep } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { X_OK } from 'node:constants'
@@ -59,8 +59,18 @@ export interface CheckReport {
   findings?: number
   verdict?: string
   summary?: unknown
+  /** set when the requested evaluation did not run cleanly */
+  evaluation?: CheckEvaluation
   /** sverka's own exit code — bro check propagates it. */
   exitCode: number
+}
+
+/** The evaluation gate's outcome when it did not run cleanly — `failed`
+ *  (collection errored) or `unavailable` (the evaluator could not run).
+ *  Never a verdict: a failed evaluation is not a pass. */
+export interface CheckEvaluation {
+  status: 'failed' | 'unavailable'
+  reason: string
 }
 
 /** A spawn target — `[file, ...prefixArgs]`: binaries run directly, the
@@ -277,31 +287,53 @@ function spawnRun(bin: SverkaBin, root: string, args: string[]) {
   })
 }
 
-interface RunOutcome {
-  proc: ReturnType<typeof spawnRun>
-  parsed: ParsedRun | null
-}
-
-/** One spawn + envelope parse — the COLLECTION_FAILED retry lives here:
- *  `--evaluate` against a config whose steps emit no SARIF artifacts
- *  makes sverka drop the whole run report, so bro retries once without
- *  it and the stats still land. */
-function executeSverka(
-  bin: SverkaBin,
+/** sverka ≥ Spec 53 writes `.sverka/runs/<runId>/report.json`
+ *  (`sverka.run/v1`) before reporting COLLECTION_FAILED — the step stats
+ *  survive on disk even though stdout drops them. Returns the freshest
+ *  report written at-or-after `sinceMs`: an older file is a previous
+ *  run's, never attributed to this one. sverka 0.2.x writes no report —
+ *  recovery is opportunistic and degrades to an empty data. */
+function readRunReport(
   root: string,
-  opts: Parameters<typeof sverkaArgs>[0],
-  err: (msg: string) => void
-): RunOutcome {
-  const first = spawnRun(bin, root, sverkaArgs(opts))
-  const parsed = first.stdout ? parseRunJson(first.stdout) : null
-  if (parsed?.error !== 'COLLECTION_FAILED') {
-    return { proc: first, parsed }
+  sinceMs: number
+): { data: SverkaRunData; durationMs?: number } | undefined {
+  let entries: string[]
+  try {
+    entries = readdirSync(join(root, '.sverka', 'runs'))
+  } catch {
+    return undefined
   }
-  err(
-    `warning: sverka evaluate failed (${parsed.message ?? 'collection failed'}) — retrying without --evaluate; drop it from flags/config or declare SARIF artifact outputs`
-  )
-  const retry = spawnRun(bin, root, sverkaArgs({ ...opts, evaluate: false }))
-  return { proc: retry, parsed: retry.stdout ? parseRunJson(retry.stdout) : null }
+  let best: { mtimeMs: number; file: string } | undefined
+  for (const entry of entries) {
+    const file = join(root, '.sverka', 'runs', entry, 'report.json')
+    try {
+      const mtimeMs = statSync(file).mtimeMs
+      if (mtimeMs >= sinceMs && (best === undefined || mtimeMs > best.mtimeMs)) {
+        best = { mtimeMs, file }
+      }
+    } catch {
+      // not a report-bearing run dir
+    }
+  }
+  if (best === undefined) {
+    return undefined
+  }
+  try {
+    const parsed = JSON.parse(readFileSync(best.file, 'utf8')) as {
+      schema?: string
+      data?: SverkaRunData
+      durationMs?: number
+    }
+    if (parsed.schema !== 'sverka.run/v1' || typeof parsed.data !== 'object') {
+      return undefined
+    }
+    return {
+      data: parsed.data ?? {},
+      ...(parsed.durationMs !== undefined ? { durationMs: parsed.durationMs } : {}),
+    }
+  } catch {
+    return undefined
+  }
 }
 
 /** parsed data → the normalized text-render view; absent fields stay
@@ -318,17 +350,27 @@ function toReport(data: SverkaRunData, durationMs: number, code: number): CheckR
   }
 }
 
-/** Execute sverka and normalize to a CheckReport. `data` is sverka's raw
- *  payload — the `--json` output passes it through verbatim (planId and
- *  future fields included); `report` is the normalized text-render view.
- *  Neither is set when the output can't be parsed (details on err). */
+/** Execute sverka once and normalize to a CheckReport. `data` is
+ *  sverka's raw payload — the `--json` output passes it through verbatim
+ *  (planId and future fields included); `report` is the normalized
+ *  text-render view. Neither is set when the output can't be parsed
+ *  (details on err). `evaluation` is set only when the requested policy
+ *  gate did not run cleanly — a failed evaluation is never a pass.
+ *  (spec: specs/bro-l8c4f.13.md) */
 export function runCheck(
   bin: SverkaBin,
   root: string,
   opts: Parameters<typeof sverkaArgs>[0],
   err: (msg: string) => void = (m) => console.error(m)
-): { report?: CheckReport; data?: SverkaRunData; exitCode: number } {
-  const { proc, parsed } = executeSverka(bin, root, opts, err)
+): {
+  report?: CheckReport
+  data?: SverkaRunData
+  evaluation?: CheckEvaluation
+  exitCode: number
+} {
+  const startedMs = Date.now()
+  const proc = spawnRun(bin, root, sverkaArgs(opts))
+  const parsed = proc.stdout ? parseRunJson(proc.stdout) : null
   if (proc.error) {
     err(`error: failed to run sverka (${proc.error.message})`)
     return { exitCode: 1 }
@@ -343,6 +385,31 @@ export function runCheck(
     return { exitCode: code === 0 ? 1 : code }
   }
   if (parsed.error !== undefined) {
+    if (parsed.error === 'COLLECTION_FAILED') {
+      // the run executed once — evaluation is the failure, never the
+      // verdict. Recover the step stats from the run report sverka
+      // wrote before failing (absent on sverka 0.2.x).
+      const reason = parsed.message ?? 'collection failed'
+      err(
+        `error: sverka COLLECTION_FAILED: ${reason} — evaluation skipped (declare SARIF artifact outputs or drop --evaluate)`
+      )
+      const evaluation: CheckEvaluation = { status: 'failed', reason }
+      const recovered =
+        parsed.data === undefined ? readRunReport(root, startedMs) : undefined
+      const data = parsed.data ?? recovered?.data
+      if (data === undefined) {
+        return { evaluation, exitCode: code === 0 ? 1 : code }
+      }
+      return {
+        report: {
+          ...toReport(data, recovered?.durationMs ?? parsed.durationMs ?? 0, code),
+          evaluation,
+        },
+        data,
+        evaluation,
+        exitCode: code === 0 ? 1 : code,
+      }
+    }
     err(`error: sverka ${parsed.error}: ${parsed.message ?? 'run failed'}`)
     return { exitCode: code === 0 ? 1 : code }
   }
@@ -425,6 +492,9 @@ export function renderText(report: CheckReport): string[] {
   if (report.findings !== undefined || report.verdict !== undefined) {
     const verdict = report.verdict !== undefined ? ` · verdict: ${report.verdict}` : ''
     lines.push(`findings: ${report.findings ?? 0}${verdict}`)
+  }
+  if (report.evaluation !== undefined) {
+    lines.push(`evaluation: ${report.evaluation.status} — ${report.evaluation.reason}`)
   }
   return lines
 }
@@ -555,17 +625,29 @@ export function runCheckCommand(argv: string[]): void {
     process.exit(1)
   }
 
-  const { report, data, exitCode } = runCheck(bin, root, opts)
-  if (report === undefined || data === undefined) {
+  const { report, data, evaluation, exitCode } = runCheck(bin, root, opts)
+  if (report === undefined && data === undefined && evaluation === undefined) {
     process.exit(exitCode)
   }
   if (format === 'json') {
     // passthrough — sverka's `data` verbatim under bro's envelope name;
-    // a projection here would silently drop fields (planId, …)
+    // a projection here would silently drop fields (planId, …).
+    // evaluationStatus is bro's own marker: a failed evaluation is not a
+    // verdict (spec: specs/bro-l8c4f.13.md)
     console.log(
-      JSON.stringify({ command: 'check', data, durationMs: report.durationMs })
+      JSON.stringify({
+        command: 'check',
+        ...(data !== undefined ? { data } : {}),
+        ...(report !== undefined ? { durationMs: report.durationMs } : {}),
+        ...(evaluation !== undefined
+          ? {
+              evaluationStatus: evaluation.status,
+              evaluationError: evaluation.reason,
+            }
+          : {}),
+      })
     )
-  } else {
+  } else if (report !== undefined) {
     for (const line of renderText(report)) {
       console.log(line)
     }

@@ -1,8 +1,8 @@
 import { describe, test } from 'node:test'
 import assert from 'node:assert/strict'
-import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, utimesSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { dirname, join } from 'node:path'
 import {
   checkSection,
   renderText,
@@ -12,15 +12,29 @@ import {
 } from './check.ts'
 
 /** Scripted sverka — a node shim (shebang + chmod like testrepo's fake
- *  bd). MODE env picks the payload; SVERKA_ARGS_LOG records argv so
- *  flag pass-through is assertable. */
+ *  bd). MODE env picks the payload; SVERKA_ARGS_LOG appends argv as one
+ *  JSON line per spawn so the spawn count is assertable. */
 const FAKE_SVERKA = `#!/usr/bin/env node
 const fs = require('node:fs')
+const path = require('node:path')
 if (process.env.SVERKA_ARGS_LOG) {
-  fs.writeFileSync(process.env.SVERKA_ARGS_LOG, JSON.stringify(process.argv.slice(2)))
+  fs.appendFileSync(process.env.SVERKA_ARGS_LOG, JSON.stringify(process.argv.slice(2)) + '\\n')
 }
 const mode = process.env.FAKE_SVERKA_MODE || 'success'
 if (process.argv.includes('--evaluate') && mode === 'collect-fails') {
+  // sverka ≥ Spec 53 writes .sverka/runs/<runId>/report.json before
+  // reporting the collection failure — FAKE_SVERKA_RUNID opts in
+  if (process.env.FAKE_SVERKA_RUNID) {
+    const dir = path.join(process.cwd(), '.sverka', 'runs', process.env.FAKE_SVERKA_RUNID)
+    fs.mkdirSync(dir, { recursive: true })
+    fs.writeFileSync(path.join(dir, 'report.json'), JSON.stringify({
+      schema: 'sverka.run/v1',
+      data: { planId: 'rp-4', status: 'success', steps: [
+        { stepId: 'scan/a', status: 'succeeded', durationMs: 5, exitCode: 0 },
+      ], findings: 0 },
+      durationMs: 6,
+    }))
+  }
   console.log(JSON.stringify({ command: 'run', error: 'COLLECTION_FAILED', message: 'artifact directory not found' }))
   process.exit(3)
 }
@@ -47,6 +61,12 @@ switch (mode) {
     console.log(JSON.stringify({ command: 'run', data: { planId: 'rp-4', status: 'success', steps: [
       { stepId: 'scan/a', status: 'succeeded', durationMs: 5, exitCode: 0 },
     ] }, durationMs: 6 }))
+    break
+  case 'policy-fail':
+    console.log(JSON.stringify({ command: 'run', data: { planId: 'rp-5', status: 'success', steps: [
+      { stepId: 'lint', status: 'succeeded', durationMs: 10, exitCode: 0 },
+    ], findings: 1, verdict: 'fail', summary: { error: 1, warning: 0 } }, durationMs: 20 }))
+    process.exit(1)
     break
   case 'garbage':
     console.log('not json at all')
@@ -276,28 +296,119 @@ describe('runCheck', () => {
     }
   })
 
-  test('COLLECTION_FAILED retries once without --evaluate and warns', () => {
+  // spec bro-l8c4f.13: one bro check = one sverka run; an evaluation
+  // failure is marked, never retried into a pass
+  test('COLLECTION_FAILED does not respawn; evaluationStatus is failed', () => {
     const { dir, bin } = fixture('collect-fails')
     const log = join(dir, 'args.json')
     process.env.SVERKA_ARGS_LOG = log
     const errs: string[] = []
     try {
-      const { report, exitCode } = runCheck(
+      const { report, data, evaluation, exitCode } = runCheck(
         bin,
         dir,
         { ...baseOpts, evaluate: true },
         (m) => errs.push(m)
       )
-      assert.equal(exitCode, 0)
-      assert.equal(report?.status, 'success')
-      assert.equal(report?.steps.length, 1)
+      // sverka's RuntimeError (3) propagates — no false pass
+      assert.equal(exitCode, 3)
+      // sverka 0.2.x drops the run report and writes none on disk
+      assert.equal(report, undefined)
+      assert.equal(data, undefined)
+      assert.deepEqual(evaluation, {
+        status: 'failed',
+        reason: 'artifact directory not found',
+      })
       assert.equal(errs.length, 1)
-      assert.match(errs[0]!, /retrying without --evaluate/)
-      // the retry's argv is the last write — --evaluate must be gone
-      const argv = JSON.parse(readFileSync(log, 'utf8')) as string[]
-      assert.ok(!argv.includes('--evaluate'))
+      assert.match(errs[0]!, /COLLECTION_FAILED/)
+      // exactly one spawn — the workflow's side effects ran once
+      const spawns = readFileSync(log, 'utf8').trim().split('\n')
+      assert.equal(spawns.length, 1)
+      assert.ok((JSON.parse(spawns[0]!) as string[]).includes('--evaluate'))
     } finally {
       delete process.env.SVERKA_ARGS_LOG
+      delete process.env.FAKE_SVERKA_MODE
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  test('COLLECTION_FAILED recovers the on-disk sverka.run/v1 report', () => {
+    const { dir, bin } = fixture('collect-fails')
+    process.env.FAKE_SVERKA_RUNID = 'run-1'
+    const errs: string[] = []
+    try {
+      const { report, data, evaluation, exitCode } = runCheck(
+        bin,
+        dir,
+        { ...baseOpts, evaluate: true },
+        (m) => errs.push(m)
+      )
+      assert.equal(exitCode, 3)
+      // execution status survives separately from the evaluation marker
+      assert.equal(report?.status, 'success')
+      assert.equal(report?.steps.length, 1)
+      assert.equal(report?.evaluation?.status, 'failed')
+      assert.equal(data?.planId, 'rp-4')
+      assert.equal(data?.status, 'success')
+      assert.equal(evaluation?.status, 'failed')
+      assert.match(evaluation?.reason ?? '', /artifact directory/)
+    } finally {
+      delete process.env.FAKE_SVERKA_RUNID
+      delete process.env.FAKE_SVERKA_MODE
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  test('a run report older than the spawn is never attributed', () => {
+    const { dir, bin } = fixture('collect-fails')
+    const stale = join(dir, '.sverka', 'runs', 'old', 'report.json')
+    mkdirSync(dirname(stale), { recursive: true })
+    writeFileSync(
+      stale,
+      JSON.stringify({
+        schema: 'sverka.run/v1',
+        data: {
+          planId: 'old',
+          status: 'failure',
+          steps: [{ stepId: 'x', status: 'failed' }],
+        },
+        durationMs: 1,
+      })
+    )
+    const back = new Date(Date.now() - 60_000)
+    utimesSync(stale, back, back)
+    try {
+      const { report, data, evaluation, exitCode } = runCheck(
+        bin,
+        dir,
+        { ...baseOpts, evaluate: true },
+        silent
+      )
+      assert.equal(exitCode, 3)
+      assert.equal(report, undefined)
+      assert.equal(data, undefined)
+      assert.equal(evaluation?.status, 'failed')
+    } finally {
+      delete process.env.FAKE_SVERKA_MODE
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  test('a real policy failure keeps sverka verdict and exit code', () => {
+    const { dir, bin } = fixture('policy-fail')
+    try {
+      const { report, evaluation, exitCode } = runCheck(
+        bin,
+        dir,
+        { ...baseOpts, evaluate: true },
+        silent
+      )
+      assert.equal(exitCode, 1)
+      assert.equal(report?.verdict, 'fail')
+      assert.equal(report?.findings, 1)
+      // evaluation ran — no failure marker
+      assert.equal(evaluation, undefined)
+    } finally {
       delete process.env.FAKE_SVERKA_MODE
       rmSync(dir, { recursive: true, force: true })
     }
