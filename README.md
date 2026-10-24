@@ -63,7 +63,7 @@ Requires: `node >= 22.18`, `gh` authenticated, `bd`
 ([beads](https://github.com/gastownhall/beads)) — it's a default store, so
 it's required unless you opt out. That's it. No tokens to babysit, no
 config files to confess to. (Zero-beads fallback: `"stores": ["jsonl"]`
-in `bro.config.json`.)
+in `bro.config.local.json`.)
 
 ## Install as an agent plugin
 

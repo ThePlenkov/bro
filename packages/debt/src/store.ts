@@ -33,7 +33,7 @@ const excludedDebtDirs = new Set<string>()
 
 /**
  * The ledger is machine-local state — same contract as the gitignored
- * bro.config.json and `bd init --stealth`. When the debt dir sits inside a
+ * bro.config.local.json and `bd init --stealth`. When the debt dir sits inside a
  * git worktree that doesn't already ignore it, append it to
  * .git/info/exclude so harvest evidence can't be committed by accident.
  * Local-only — never a repo diff.
@@ -97,7 +97,10 @@ function ensureDebtDirExcluded(dir: string): void {
     const path = isAbsolute(excludePath) ? excludePath : join(dir, excludePath)
     // Concurrent writers can race the read-modify-write — everything that
     // decides whether to append runs under the same lock the ledger uses.
-    withFileLock(path, () => {
+    // The lock lives on a sibling path: `path` is the exclude DATA file —
+    // locking on it would let a pre-existing exclude be stolen as a stale
+    // lock and deleted (same flaw reviewers caught on bro-l8c4f.18).
+    withFileLock(`${path}.lock`, () => {
       try {
         // Query from the repo root — pathspecs resolve against cwd, and
         // `dir` is the ledger dir itself, not the root.

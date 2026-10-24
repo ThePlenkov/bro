@@ -168,8 +168,8 @@ skipped: a plugin cannot shadow a built-in.
 
 ## Conventions
 
-- **Node-native only.** The published CLI runs on `node >= 22` — no `Bun.*`
-  APIs anywhere in `packages/`.
+- **Node-native only.** The published CLI runs on `node >= 22.18` — no
+  `Bun.*` APIs anywhere in `packages/`.
 - **The review host's CLI is a runtime dep of that connector** — GitHub
   shells out to `gh`, GitLab to `glab`. Domain code and skills call the
   facade, never the CLI. Don't add an HTTP client for either forge.

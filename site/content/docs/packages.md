@@ -32,5 +32,5 @@ can build on the same primitives instead of forking them.
 | `@broject/stack` | Stacked bead→worktree→PR chains — branch-namespace parsing + sync planning |
 | `@broject/retro` | Retrospect engine — TOML retro plans → prevention actions |
 
-All packages are ESM-only and require Node ≥ 22. Versions release in
+All packages are ESM-only and require Node ≥ 22.18. Versions release in
 lockstep; each package page on npm carries its own README.

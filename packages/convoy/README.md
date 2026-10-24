@@ -15,7 +15,7 @@ runnable molecule (a DAG of steps) and schedules it inside the agent:
 npm i @broject/convoy
 ```
 
-Requires Node ≥ 22 and `bd`. ESM only.
+Requires Node ≥ 22.18 and `bd`. ESM only.
 
 ## Surface
 
