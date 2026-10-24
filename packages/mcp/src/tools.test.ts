@@ -90,6 +90,43 @@ describe('catalogTools — capability gating', () => {
     const names = (await catalogTools(catalog)).map((t) => t.name)
     assert.deepEqual(names, ['bro_debt_list', 'bro_debt_get'])
   })
+
+  test('mcpVerbs emit verb tools gated on the verb capability — read:false does not hide them', async () => {
+    const plane = fakePlane({
+      verbs: ['claim', 'delegate'],
+      mcpVerbs: ['delegate'],
+      verbArgs: { delegate: { type: 'object', properties: { prompt: { type: 'string' } } } },
+      capabilities: async () => ({ read: false, delegate: true }),
+    })
+    const tools = await catalogTools([plane])
+    assert.deepEqual(
+      tools.map((t) => t.name),
+      ['bro_work_delegate']
+    )
+    assert.deepEqual(tools[0]!.inputSchema, {
+      type: 'object',
+      properties: { prompt: { type: 'string' } },
+    })
+  })
+
+  test('a verb not in mcpVerbs never becomes a tool — declared stays unwired', async () => {
+    const plane = fakePlane({
+      verbs: ['claim'],
+      capabilities: async () => ({ read: true, claim: true }),
+    })
+    const names = (await catalogTools([plane])).map((t) => t.name)
+    assert.ok(!names.includes('bro_work_claim'))
+  })
+
+  test('an mcpVerbs entry missing from verbs is skipped — the allowlist selects, never extends', async () => {
+    const plane = fakePlane({
+      verbs: ['claim'],
+      mcpVerbs: ['delegate'],
+      capabilities: async () => ({ read: false, delegate: true }),
+    })
+    const names = (await catalogTools([plane])).map((t) => t.name)
+    assert.deepEqual(names, [])
+  })
 })
 
 describe('callTool — dispatch', () => {
@@ -154,5 +191,65 @@ describe('callTool — dispatch', () => {
       },
     })
     await assert.rejects(() => callTool([p], 'bro_work_ready', {}), PlaneUnavailable)
+  })
+
+  test('bro_<plane>_<verb> dispatches to exec — the verb capability gates', async () => {
+    const calls: Array<{ verb: string; args: Record<string, unknown> }> = []
+    const plane = fakePlane({
+      verbs: ['delegate'],
+      mcpVerbs: ['delegate'],
+      capabilities: async () => ({ read: false, delegate: true }),
+      exec: async (verb, args) => {
+        calls.push({ verb, args })
+        return { mode: 'wait', text: 'answer' }
+      },
+    })
+    const res = await callTool([plane], 'bro_work_delegate', { prompt: 'hi' })
+    assert.deepEqual(res, { mode: 'wait', text: 'answer' })
+    assert.deepEqual(calls, [{ verb: 'delegate', args: { prompt: 'hi' } }])
+  })
+
+  test('a call against a capability-false verb is PlaneUnavailable — never dispatched', async () => {
+    const plane = fakePlane({
+      verbs: ['delegate'],
+      mcpVerbs: ['delegate'],
+      capabilities: async () => ({ read: true, delegate: false }),
+      exec: async () => {
+        throw new Error('exec must not run')
+      },
+    })
+    await assert.rejects(() => callTool([plane], 'bro_work_delegate', {}), PlaneUnavailable)
+  })
+
+  test('a declared-but-unlisted verb is PlaneVerbError — the allowlist selects', async () => {
+    const plane = fakePlane({
+      verbs: ['claim'],
+      capabilities: async () => ({ read: true, claim: true }),
+    })
+    await assert.rejects(
+      () => callTool([plane], 'bro_work_claim', {}),
+      (err: unknown) => {
+        assert.ok(err instanceof PlaneVerbError)
+        assert.match(err.message, /unknown tool/)
+        return true
+      }
+    )
+  })
+
+  test('an op declared as both read and mcpVerb fails loud — never silently dispatched', async () => {
+    const plane = fakePlane({
+      verbs: ['ready'],
+      mcpVerbs: ['ready'],
+      capabilities: async () => ({ read: true, ready: true }),
+    })
+    await assert.rejects(
+      () => callTool([plane], 'bro_work_ready', {}),
+      (err: unknown) => {
+        assert.ok(err instanceof PlaneVerbError)
+        assert.match(err.message, /both read and mcpVerb/)
+        return true
+      }
+    )
+    await assert.rejects(() => catalogTools([plane]), PlaneVerbError)
   })
 })

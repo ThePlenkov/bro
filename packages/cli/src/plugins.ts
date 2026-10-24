@@ -77,6 +77,7 @@ import { runResumeCommand } from './commands/resume.ts'
 import { runDriveCommand } from './commands/drive.ts'
 import { applyDrillPlan, runDrillCommand } from './commands/drill.ts'
 import { runFleetCommand } from './commands/fleet.ts'
+import { runDelegateCommand } from './commands/delegate-cli.ts'
 import { runGoalCommand } from './commands/goal.ts'
 import { runDogfoodCommand } from './commands/dogfood.ts'
 import { goalSection } from './commands/goal-config.ts'
@@ -283,6 +284,35 @@ export const PLUGINS: BroPlugin[] = [
       exits: {
         0: 'fleet printed',
         2: 'usage — --live without TTY, --every out of range, --json + --live',
+      },
+    },
+  }),
+  definePlugin({
+    name: 'delegate',
+    group: 'fleet',
+    summary:
+      'Activate another agent — sync ask (--wait, pooled ACP turn) or detached registry spawn (--detach)',
+    run: runDelegateCommand,
+    skill: 'delegate',
+    contract: {
+      flags: {
+        '--wait': 'sync short ask — one pooled ACP turn; reply text on stdout (default)',
+        '--detach': 'real work — the registry spawn `bro agents run` takes; returns the agentId',
+        '--prompt <text>': 'literal prompt (positional text is the same channel)',
+        '--prompt-file <file>': 'prompt from a file',
+        '--provider <name>': 'providers.<name> pin — --wait needs an acp entry',
+        '--class <name>': 'fleet.routing lane — chain[0] supplies the provider (exclusive with --provider)',
+        '--model <m>': 'model override — --wait pins it on the ACP session',
+        '--timeout <sec>': '--wait deadline (default 120)',
+        '--connector <name>': '--detach backend pin',
+        '--worktree <path>': '--detach worktree (default: minted <repo>--adhoc-*)',
+        '--auto-approve': '--detach ACP permission policy',
+        '--beads-dir <dir>': 'shared store override',
+        '--json': '{mode,provider,model,class?,stopReason,text,delegatedBy?} for wait; {mode,delegatedBy?,agent} for detach',
+      },
+      exits: {
+        0: 'delegation served — reply printed (--wait) or agent spawned (--detach)',
+        1: 'provider walled/unavailable, spawn refused, prompt/pin error, or usage (usage errors also exit 1 today)',
       },
     },
   }),

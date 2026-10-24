@@ -770,6 +770,9 @@ const AGENT_PIN_KEYS = new Set([
   'BRO_AGENT_PROVIDER',
   'BRO_AGENT_MODEL',
   'BRO_AGENT_CLASS',
+  // delegation provenance is connector-owned too — a caller-supplied
+  // BRO_DELEGATED_BY would let a spawn forge which agent asked for it
+  'BRO_DELEGATED_BY',
 ])
 
 /** Repo-retarget env keys — same triple core's git.ts strips for
@@ -822,6 +825,9 @@ const agentEnvPins = (
   }
   if (spec.class !== undefined) {
     pins.push(['BRO_AGENT_CLASS', spec.class])
+  }
+  if (spec.delegatedBy !== undefined) {
+    pins.push(['BRO_DELEGATED_BY', spec.delegatedBy])
   }
   return pins
 }
@@ -1608,6 +1614,9 @@ function commitSpawn(
     // the routing lane the spawn resolved to (fleet.routing class) —
     // same provenance write as provider/model; a respawn re-stamps it
     class: spec.class,
+    // which agent asked for this spawn — same provenance write; a
+    // respawn re-stamps (clears when the respawn wasn't delegated)
+    delegatedBy: spec.delegatedBy,
     // the acp driver patches the real session id after session/new —
     // clear the previous run's so it never masquerades as this run's
     acpSessionId: undefined,
@@ -1997,10 +2006,11 @@ const infoCause = (entry: AgentRegistryEntry): Pick<AgentInfo, 'cause' | 'resetA
  *  (or unrouted) spawn (the row says so by omission, honestly). */
 const infoProvenance = (
   entry: AgentRegistryEntry
-): Pick<AgentInfo, 'provider' | 'model' | 'class'> => ({
+): Pick<AgentInfo, 'provider' | 'model' | 'class' | 'delegatedBy'> => ({
   provider: typeof entry.provider === 'string' ? entry.provider : undefined,
   model: typeof entry.model === 'string' ? entry.model : undefined,
   class: typeof entry.class === 'string' ? entry.class : undefined,
+  delegatedBy: typeof entry.delegatedBy === 'string' ? entry.delegatedBy : undefined,
 })
 
 function toInfo(dir: string, home: string | null, molStep: string, entry: AgentRegistryEntry): AgentInfo {

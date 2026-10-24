@@ -63,7 +63,7 @@ describe('plane catalog', () => {
     }
   })
 
-  test('v1 is read-only — declared verbs are unwired, undeclared are client bugs', async () => {
+  test('verbs stay closed — unwired are unavailable, wired want real args, undeclared are client bugs', async () => {
     const { dir, rm } = tmp()
     try {
       for (const plane of planes(dir)) {
@@ -72,7 +72,14 @@ describe('plane catalog', () => {
           await assert.rejects(
             () => plane.exec(verb, {}),
             (err: unknown) => {
-              assert.ok(err instanceof PlaneUnavailable, `${plane.name}.${verb}: ${String(err)}`)
+              // unwired verbs answer PlaneUnavailable; a wired verb
+              // (agents.delegate — spec bro-z8tng) answers the client
+              // bug it validates first: missing args, never a silent
+              // success on an empty call
+              assert.ok(
+                err instanceof PlaneUnavailable || err instanceof PlaneVerbError,
+                `${plane.name}.${verb}: ${String(err)}`
+              )
               return true
             },
             `${plane.name}.exec('${verb}')`
