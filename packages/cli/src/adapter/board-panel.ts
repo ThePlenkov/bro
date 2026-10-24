@@ -182,9 +182,10 @@ function agentSections(s: BoardStatus): Section[] {
   const agents = s.fleet?.agents ?? []
   const running = agents.filter((a) => a.state === 'running').length
   const max = s.fleet?.maxConcurrent ?? 0
+  const cap = max > 0 ? `/${max}` : ''
   sections.push({
     id: 'fleet',
-    title: `fleet (${running}${max > 0 ? `/${max}` : ''})`,
+    title: `fleet (${running}${cap})`,
     rows: agents.length === 0 ? ['— no agents —'] : agents.map(fleetRow),
   })
   // a configured loop with zero runs shows its empty state — hiding it
@@ -214,14 +215,12 @@ function checkoutSections(s: BoardStatus): Section[] {
   }
   const frame = s.drill?.frame
   if (frame) {
+    const title = frame.title ? `  — ${clip(frame.title, 96)}` : ''
+    const depth = typeof frame.depth === 'number' ? `  (depth ${frame.depth})` : ''
     sections.push({
       id: 'drill',
       title: 'drill',
-      rows: [
-        `⌄ ${frame.id ?? '?'}${frame.title ? `  — ${clip(frame.title, 96)}` : ''}${
-          typeof frame.depth === 'number' ? `  (depth ${frame.depth})` : ''
-        }`,
-      ],
+      rows: [`⌄ ${frame.id ?? '?'}${title}${depth}`],
     })
   }
   const repoRows = [`branch  ${s.branch ?? '?'}`]
@@ -240,12 +239,30 @@ function summaryOf(s: BoardStatus | null, pending: boolean): string {
   }
   const attention = s.watch?.attention ?? 0
   const base = boardLines(s)[0]
-  return `${base}${attention > 0 ? ` · ⚠ ${attention} attention` : ''}${
-    pending ? ' · refreshing…' : ''
-  }`
+  const attentionSuffix = attention > 0 ? ` · ⚠ ${attention} attention` : ''
+  const pendingSuffix = pending ? ' · refreshing…' : ''
+  return `${base}${attentionSuffix}${pendingSuffix}`
 }
 
 const FOOTER = ' ↑↓/jk move · ←→/enter collapse · r refresh · q close'
+
+/** End index of the escape sequence starting at `data[i]` (an ESC): a
+ *  CSI/SS3 sequence runs to its final byte, an alt+<char> pair eats two
+ *  bytes, a lone ESC is one. A run that never reaches a final byte
+ *  falls back to the two-byte form. */
+function escapeEnd(data: string, i: number): number {
+  const next = data[i + 1]
+  if (next === '[' || next === 'O') {
+    let j = i + 2
+    while (j < data.length && data[j] >= ' ' && data[j] <= '?') {
+      j++ // parameter and intermediate bytes
+    }
+    if (j < data.length) {
+      return j + 1
+    }
+  }
+  return next === undefined ? i + 1 : i + 2
+}
 
 /**
  * Split a raw input chunk into key tokens. pi-tui hands the focused
@@ -259,27 +276,13 @@ export function splitKeys(data: string): string[] {
   const keys: string[] = []
   let i = 0
   while (i < data.length) {
-    const ch = data[i]
-    if (ch === '\x1b') {
-      const next = data[i + 1]
-      if (next === '[' || next === 'O') {
-        let j = i + 2
-        while (j < data.length && data[j] >= ' ' && data[j] <= '?') {
-          j++ // parameter and intermediate bytes
-        }
-        if (j < data.length) {
-          keys.push(data.slice(i, j + 1))
-          i = j + 1
-          continue
-        }
-      }
-      if (next !== undefined) {
-        keys.push(data.slice(i, i + 2)) // alt+<char> — no action knows it
-        i += 2
-        continue
-      }
+    if (data[i] === '\x1b') {
+      const end = escapeEnd(data, i)
+      keys.push(data.slice(i, end))
+      i = end
+      continue
     }
-    keys.push(ch)
+    keys.push(data[i])
     i++
   }
   return keys
@@ -294,7 +297,35 @@ class BoardPanelImpl implements BoardPanelComponent {
   private lastWidth = -1
   private cached: readonly string[] = []
 
-  constructor(private readonly options: BoardPanelOptions) {}
+  /** Key → action. A table keeps the keymap's cyclomatic cost flat —
+   *  a switch over a dozen keys reads the same and measures the same. */
+  private readonly actions: Record<string, () => void>
+
+  constructor(private readonly options: BoardPanelOptions) {
+    const moveUp = (): void => this.move(-1)
+    const moveDown = (): void => this.move(1)
+    const collapse = (): void => this.setUnderCursor(true)
+    const expand = (): void => this.setUnderCursor(false)
+    const toggle = (): void => this.toggleUnderCursor()
+    const refresh = (): void => this.refresh()
+    const close = (): void => this.close()
+    this.actions = {
+      '\x1b[A': moveUp,
+      k: moveUp,
+      '\x1b[B': moveDown,
+      j: moveDown,
+      '\x1b[D': collapse,
+      h: collapse,
+      '\x1b[C': expand,
+      l: expand,
+      '\r': toggle,
+      '\n': toggle,
+      ' ': toggle,
+      r: refresh,
+      q: close,
+      '\x1b': close,
+    }
+  }
 
   /** Flatten visible sections into cursor rows; the footer is never a
    *  cursor target. */
@@ -340,16 +371,8 @@ class BoardPanelImpl implements BoardPanelComponent {
         text = `${mark} ${summaryOf(board, this.pending)}`
       } else if (row.kind === 'footer') {
         text = FOOTER
-      } else if (row.kind === 'section') {
-        const sec = sections.find((x) => x.id === row.section)
-        const arrow = sec !== undefined && this.collapsed.has(sec.id) ? '▸' : '▾'
-        text = `${mark} ${arrow} ${sec?.title ?? ''}`
       } else {
-        const id = row.section ?? ''
-        const n = itemCounts.get(id) ?? 0
-        itemCounts.set(id, n + 1)
-        const body = sections.find((x) => x.id === id)?.rows[n] ?? ''
-        text = `${mark}   ${body}`
+        text = this.rowBody(row, sections, itemCounts, mark)
       }
       // strip board text first — escape sequences would drive the
       // terminal and would also spend the width budget — then clip
@@ -366,6 +389,25 @@ class BoardPanelImpl implements BoardPanelComponent {
     return this.cached
   }
 
+  /** The section-arrow or item-body line — extracted so render's loop
+   *  stays inside the cognitive-complexity ceiling. */
+  private rowBody(
+    row: Row,
+    sections: Section[],
+    itemCounts: Map<string, number>,
+    mark: string
+  ): string {
+    const sec = sections.find((x) => x.id === row.section)
+    if (row.kind === 'section') {
+      const arrow = sec !== undefined && this.collapsed.has(sec.id) ? '▸' : '▾'
+      return `${mark} ${arrow} ${sec?.title ?? ''}`
+    }
+    const id = row.section ?? ''
+    const n = itemCounts.get(id) ?? 0
+    itemCounts.set(id, n + 1)
+    return `${mark}   ${sec?.rows[n] ?? ''}`
+  }
+
   handleInput(data: string): void {
     for (const key of splitKeys(data)) {
       if (this.closed) {
@@ -380,38 +422,7 @@ class BoardPanelImpl implements BoardPanelComponent {
       this.close()
       return
     }
-    switch (data) {
-      case '\x1b[A':
-      case 'k':
-        this.move(-1)
-        return
-      case '\x1b[B':
-      case 'j':
-        this.move(1)
-        return
-      case '\x1b[D':
-      case 'h':
-        this.setUnderCursor(true)
-        return
-      case '\x1b[C':
-      case 'l':
-        this.setUnderCursor(false)
-        return
-      case '\r':
-      case '\n':
-      case ' ':
-        this.toggleUnderCursor()
-        return
-      case 'r':
-        this.refresh()
-        return
-      case 'q':
-      case '\x1b':
-        this.close()
-        return
-      default:
-        return
-    }
+    this.actions[data]?.()
   }
 
   private move(delta: number): void {

@@ -75,11 +75,14 @@ const WRAPPERS: Record<string, true> = {
 }
 
 /** `NAME=value` leading assignments — `A=b git push -f` runs git. */
-const ASSIGNMENT = /^[A-Za-z_][A-Za-z0-9_]*=/
+const ASSIGNMENT = /^[A-Za-z_]\w*=/
 
 /** Shell words: whitespace separates, quotes group (`"-f"` → `-f`,
  *  `"git push"` → one word), a backslash escapes the next character.
  *  An unterminated quote swallows the rest — a longer word, no crash. */
+const QUOTES: Record<string, true> = { '"': true, "'": true }
+const SEPARATORS: Record<string, true> = { ' ': true, '\t': true }
+
 function words(segment: string): string[] {
   const out: string[] = []
   let cur = ''
@@ -95,18 +98,19 @@ function words(segment: string): string[] {
       }
       continue
     }
-    if (ch === '"' || ch === "'") {
+    if (ch in QUOTES) {
       quote = ch
       started = true
       continue
     }
-    if (ch === '\\' && i + 1 < segment.length) {
-      cur += segment[i + 1]
+    const escaped = segment[i + 1]
+    if (ch === '\\' && escaped !== undefined) {
+      cur += escaped
       started = true
       i++
       continue
     }
-    if (ch === ' ' || ch === '\t') {
+    if (ch in SEPARATORS) {
       if (started) {
         out.push(cur)
         cur = ''

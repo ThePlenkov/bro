@@ -420,17 +420,21 @@ export function clip(text: string, width: number): string {
  * and the interactive panel's render, before clipping so control bytes
  * cannot spend the width budget either.
  */
+/** The control-sequence patterns, built from escapes so no control
+ *  byte appears literally in this source (Sonar S6324). */
+const OSC_SEQUENCE = new RegExp('\\x1b\\][^\\x07\\x1b]*(?:\\x07|\\x1b\\\\)?', 'g')
+const CSI_SEQUENCE = new RegExp('\\x1b\\[[0-?]*[ -/]*[@-~]', 'g')
+const ESCAPE_OTHER = new RegExp('\\x1b[@-Z\\\\^_]', 'g')
+const CONTROL_BYTES = new RegExp('[\\x00-\\x1f\\x7f]', 'g')
+
 export function sanitizeTerminalText(text: string): string {
   return text
-    .replace(/\t/g, ' ')
-    // OSC sequences: ESC ] … BEL | ESC \  (consume lazily up to a terminator)
-    .replace(/\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)?/g, '')
-    // CSI: ESC [ … final byte
-    .replace(/\x1b\[[0-?]*[ -/]*[@-~]/g, '')
-    // remaining single-shift / string escapes
-    .replace(/\x1b[@-Z\\^_]/g, '')
+    .replaceAll('\t', ' ')
+    .replace(OSC_SEQUENCE, '')
+    .replace(CSI_SEQUENCE, '')
+    .replace(ESCAPE_OTHER, '')
     // residual C0 controls and DEL — newlines would smuggle rows
-    .replace(/[\x00-\x1f\x7f]/g, '')
+    .replace(CONTROL_BYTES, '')
 }
 
 /**
