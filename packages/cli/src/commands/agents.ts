@@ -759,6 +759,32 @@ export interface StopOutcome {
   respawned?: { from?: number; to?: number }
 }
 
+/** One post-stop status() re-probe — the verdict ladder (bro-l8c4f.3):
+ *  a terminal read confirms death, a live read proves survival, anything
+ *  else (lost, blocked, or a probe failure — AgentNotFound included: a
+ *  missing row is the registry's silence, not a death record) stays
+ *  unverified. */
+async function probeStopVerdict(
+  conn: AgentConnector,
+  id: string
+): Promise<{ verdict: NonNullable<StopOutcome['verdict']>; after?: AgentInfo }> {
+  let after: AgentInfo
+  try {
+    after = await conn.status(id)
+  } catch {
+    // a backend that cannot answer must not be read as a kill
+    // confirmation — and a worker can outlive a pruned entry
+    return { verdict: 'unverified' }
+  }
+  if (after.state === 'exited' || after.state === 'stopped') {
+    return { verdict: 'stopped', after }
+  }
+  if (after.state === 'running' || after.state === 'spawned') {
+    return { verdict: 'still-running', after }
+  }
+  return { verdict: 'unverified', after }
+}
+
 /** Stop one agent by agentId or molStep. Idempotent by contract — a
  *  gone agent is the desired end state (`found:false`), not an error;
  *  `degraded` tells the caller the miss is unverified, not confirmed.
@@ -808,28 +834,14 @@ export async function stopAgent(
   // stop() returning proves the REQUEST landed, not the death — a
   // TERM-resistant worker survives the connector's bounded kill-wait,
   // so `stopped` is re-probed from the backend before anyone reports
-  // it (bro-l8c4f.3).
+  // it (bro-l8c4f.3). `blocked` alone skips the probe — the clear IS
+  // the result.
   let verdict: StopOutcome['verdict']
   let after: typeof current | undefined
-  if (current.state === 'blocked') {
-    verdict = undefined
-  } else {
-    try {
-      after = await hit.conn.status(hit.agent.id)
-      verdict =
-        after.state === 'exited' || after.state === 'stopped'
-          ? 'stopped'
-          : after.state === 'running' || after.state === 'spawned'
-            ? 'still-running'
-            : 'unverified' // lost/blocked — no death record to confirm
-    } catch {
-      // AgentNotFound included: a missing row is the registry's silence,
-      // not proof the unit is gone — a worker can outlive a pruned or
-      // concurrently removed entry. Any other probe failure likewise:
-      // a backend that cannot answer must not be read as a kill
-      // confirmation.
-      verdict = 'unverified'
-    }
+  if (current.state !== 'blocked') {
+    const probe = await probeStopVerdict(hit.conn, hit.agent.id)
+    after = probe.after
+    verdict = probe.verdict
     // an already-terminal snapshot that still probes terminal keeps its
     // "nothing was live" contract — the probe exists to catch the
     // snapshot going stale (running/spawned above → still-running)

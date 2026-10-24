@@ -789,12 +789,10 @@ function agentDeleteConflict(ref: string, outcome: StopOutcome): ServeResponse {
  *  client never string-matches the note to tell "already dead" from a
  *  live stop. */
 function agentDeleteOk(outcome: StopOutcome): ServeResponse {
-  const note =
-    outcome.terminal === true && outcome.agent !== undefined
-      ? outcome.cleared === true
-        ? 'blocked — cleared'
-        : `already ${outcome.agent.state}`
-      : undefined
+  let note: string | undefined
+  if (outcome.terminal === true && outcome.agent !== undefined) {
+    note = outcome.cleared === true ? 'blocked — cleared' : `already ${outcome.agent.state}`
+  }
   return {
     status: 200,
     body: {
