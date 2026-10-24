@@ -19,7 +19,7 @@ status/duration lines, totals, findings + verdict when evaluated.
 | Command | What it does |
 | ------- | ------------ |
 | `bro check` | Run the repo's sverka workflow (default entry, text report). Exit code mirrors sverka — CI-able |
-| `bro check --json` | Structured output: `{command:"check", data:{planId,status,steps[],findings?,verdict?}, durationMs}` |
+| `bro check --json` | Structured output: `{command:"check", data:{planId,status,steps[],findings?,verdict?}, durationMs}`; on evaluation failure also `evaluationStatus:"failed", evaluationError` |
 | `bro check --evaluate` | Also collect `*.sarif` artifacts and run sverka's policy gate (verdict→exit code) |
 | `bro check --root <dir>` | Run against another checkout — its bro.config and node_modules apply |
 
