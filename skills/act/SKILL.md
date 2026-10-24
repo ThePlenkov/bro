@@ -61,6 +61,13 @@ default store, so standard installs already have it).
   Docs-only PRs (every changed file matches `act.docsPaths`) cap tighter —
   `act.docsMaxRounds` (default 2): doc threads churn per push, so the
   tail belongs in debt, not another round.
+- **A reopened thread stops the loop — the user confirms.** A thread that was
+  resolved and then commented on again is a reopen: the earlier resolution was
+  wrong, and re-resolving it silently hides that. The gate names it as a
+  blocker (`reopened thread <id> ...`), `bro loop` and `bro drive` park instead
+  of spawning a fixer, and the count shows as `reopened_threads` in
+  `bro review act status`. Report it and let the user decide — do not re-resolve
+  it on your own.
 - **Contradictory cross-round findings resolve by judgment, not push.**
   Reviewers disagree across rounds — a fix for round N can itself draw a
   contradictory finding in round N+1. Don't push a flip-flop: pick the
