@@ -83,6 +83,7 @@ import {
   type AgentConnector,
   type AgentInfo,
   type AgentState,
+  type ClaimCapability,
   type MirrorPolicy,
   type ResolvedClass,
   type ReviewFacade,
@@ -2536,7 +2537,46 @@ function buildCtx(
     }
   }
   sayLaneNotes(ctx, flagPin)
+  // the claim-authority advisory: outside the registry path the loop
+  // claims through the tasks facade, whose claim() may be best-effort
+  // assignment rather than a lease. The registry path claims on the
+  // pinned beads store (exclusive) and needs no note; an
+  // exclusive-claiming facade needs none either.
+  if (ctx.agents === undefined) {
+    const note = claimAuthorityNote(ctx.backend, ctx.tasks.claimCapability?.())
+    if (note !== undefined) {
+      say(ctx, note)
+    }
+  }
   return ctx
+}
+
+/** The startup advisory for a claims plane that cannot promise a single
+ *  winner (spec specs/bro-l8c4f.12). Returns undefined when the store
+ *  declares exclusive claims — or when a third-party store declares
+ *  'exclusive' itself (its word is taken at face value; the honesty
+ *  burden is the connector's). An UNDECLARED capability still warns:
+ *  absent is not a promise either way, and a competitive runner fails
+ *  closed on unknowns. The note names the consequence and the remedy —
+ *  it is a diagnostic, not an enforcement gate: assignment flows stay
+ *  legal on best-effort stores. */
+export function claimAuthorityNote(
+  backend: string,
+  cap: ClaimCapability | undefined
+): string | undefined {
+  if (cap?.strength === 'exclusive') {
+    return undefined
+  }
+  const shared =
+    cap?.identity === 'viewer'
+      ? ' — and every worker behind one credential claims as the same identity'
+      : ''
+  return (
+    `loop: tasks backend '${backend}' offers best-effort claims only — ` +
+    `claim() is an assignment, not a lease${shared}. A second issuer ` +
+    `(another loop or rig on the same tracker) can seat the same item; ` +
+    `keep one loop on this backlog or run on an exclusive-claim store (beads).`
+  )
 }
 
 // announce the resolved lane once — agents.native.provider picking up

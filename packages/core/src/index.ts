@@ -158,6 +158,7 @@ export {
   taskStoreAt,
 } from './tasks.ts'
 export type {
+  ClaimCapability,
   DepOpts,
   PublishResult,
   SlotAcquire,

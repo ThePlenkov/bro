@@ -11,7 +11,7 @@ import {
   type SpawnWorker,
 } from '@broject/core'
 import { DEFAULT_LOOP_CONFIG, type LoopConfig } from '@broject/loop'
-import { loopRefTails, loopWatch, resolveBeadsDir, resolveLoopLane } from './loop.ts'
+import { claimAuthorityNote, loopRefTails, loopWatch, resolveBeadsDir, resolveLoopLane } from './loop.ts'
 import type { AgentConnectorEnv } from '../agent-connectors.ts'
 import { bdStoreBlocker, git, initRepo, inside } from './testrepo.ts'
 
@@ -367,5 +367,41 @@ describe('resolveBeadsDir', () => {
       assert.equal(init.code, 0, init.err)
       assert.equal(resolveBeadsDir(main), join(main, '.beads'))
     })
+  })
+})
+
+// --- claimAuthorityNote — the best-effort claims-plane advisory (spec bro-l8c4f.12)
+
+describe('claimAuthorityNote', () => {
+  test('an exclusive-claiming backend needs no advisory', () => {
+    assert.equal(
+      claimAuthorityNote('beads', {
+        strength: 'exclusive',
+        identity: 'actor',
+        authority: 'store',
+      }),
+      undefined
+    )
+  })
+
+  test('an undeclared capability still warns — absent is not a promise', () => {
+    const note = claimAuthorityNote('custom', undefined)
+    assert.ok(note !== undefined)
+    assert.match(note, /'custom'/)
+    assert.match(note, /assignment, not a lease/)
+  })
+
+  test('a best-effort viewer backend names the shared-identity caveat and the remedy', () => {
+    const note = claimAuthorityNote('linear', {
+      strength: 'best-effort',
+      identity: 'viewer',
+      authority: 'service',
+    })
+    assert.ok(note !== undefined)
+    assert.match(note, /'linear'/)
+    assert.match(note, /not a lease/)
+    assert.match(note, /one credential claims as the same identity/)
+    assert.match(note, /one loop on this backlog/)
+    assert.match(note, /exclusive-claim store/)
   })
 })

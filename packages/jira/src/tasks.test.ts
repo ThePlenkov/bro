@@ -1,6 +1,6 @@
 import { describe, test } from 'node:test'
 import assert from 'node:assert/strict'
-import { chmodSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { facade, facadeName, registerConnector } from '@broject/core'
@@ -23,6 +23,9 @@ const WIN32 = process.platform === 'win32'
  *    FAKE_JIRA_ISSUE_2    — scripted override for every LATER issue read
  *                           (claim's verify); falls back to _1 — an
  *                           issue doesn't vanish after one read
+ *    FAKE_JIRA_ISSUE_SEQ  — dir of <n>.json bodies: the Nth /issue/<k>
+ *                           GET (transitions reads excluded) answers
+ *                           file <n> — deterministic interleavings
  *    FAKE_JIRA_TRANSITIONS — /issue/<k>/transitions body
  *    FAKE_JIRA_USERS      — /user/assignable/search body
  *    FAKE_JIRA_CREATE     — POST /issue body
@@ -72,8 +75,12 @@ case "$ep" in
   */issue/*)
     case "$method" in
       GET)
-        n=$(grep -c "GET.*\\/issue\\/" "$FAKE_ATL_ARGV" || true)
-        if [ "$n" -gt 1 ] && [ -n "$FAKE_JIRA_ISSUE_2" ]; then
+        # transitions GETs ride /issue/<k>/ too — exclude them so n
+        # counts issue READS only (a claim costs exactly two)
+        n=$(grep "GET.*\\/issue\\/" "$FAKE_ATL_ARGV" | grep -vc 'transitions' || true)
+        if [ -n "$FAKE_JIRA_ISSUE_SEQ" ] && [ -f "$FAKE_JIRA_ISSUE_SEQ/$n.json" ]; then
+          cat "$FAKE_JIRA_ISSUE_SEQ/$n.json"
+        elif [ "$n" -gt 1 ] && [ -n "$FAKE_JIRA_ISSUE_2" ]; then
           printf '%s\\n' "$FAKE_JIRA_ISSUE_2"
         else
           printf '%s\\n' "$FAKE_JIRA_ISSUE_1"
@@ -506,6 +513,80 @@ describe('jiraTasks', { skip: WIN32 }, () => {
         assert.throws(() => jiraTasks(dir).claim('PROJ-5'), /claim contested — rival holds it/)
       }
     )
+  })
+
+  test('claimCapability declares best-effort assignment — never a lease', () => {
+    withJira({}, (_logs, dir) => {
+      assert.deepEqual(jiraTasks(dir).claimCapability?.(), {
+        strength: 'best-effort',
+        identity: 'viewer',
+        authority: 'service',
+      })
+    })
+  })
+
+  /** Script a read sequence into FAKE_JIRA_ISSUE_SEQ — file <n>.json is
+   *  the Nth /issue/<k> GET's body (transitions reads don't count). */
+  const seqDir = (dir: string, bodies: string[]): string => {
+    const seq = join(dir, 'seq')
+    mkdirSync(seq, { recursive: true })
+    bodies.forEach((b, i) => writeFileSync(join(seq, `${i + 1}.json`), b))
+    return seq
+  }
+
+  test('claim interleaving: two viewers both win the residual window', () => {
+    // the deterministic double-seat the capability exists to admit —
+    // A.read/write/verify pass; B's reads land on snapshots taken
+    // BEFORE A's write, so B's verify sees "mine" and returns too
+    // (spec specs/bro-l8c4f.12). The fixture derives accountId from
+    // the display name — 'bob' → 'acct-bob'.
+    withJira({}, (logs, dir) => {
+      const seq = seqDir(dir, [
+        JSON.stringify(issue({ key: 'PROJ-5', assignee: null })), // 1: A pre-read — free
+        JSON.stringify(issue({ key: 'PROJ-5', assignee: 'me' })), // 2: A verify — mine
+        JSON.stringify(issue({ key: 'PROJ-5', assignee: null })), // 3: B pre-read — A's write unseen
+        JSON.stringify(issue({ key: 'PROJ-5', assignee: 'bob' })), // 4: B verify — mine
+      ])
+      process.env.FAKE_JIRA_ISSUE_SEQ = seq
+      try {
+        jiraTasks(dir).claim('PROJ-5')
+        // the rival racer is a different site credential — the viewer
+        // cache keys on surface+base, so /myself re-runs for 'bob'
+        process.env.JIRA_BASE_URL = 'https://jira-test-race-b.example.com'
+        process.env.FAKE_JIRA_VIEWER = JSON.stringify({
+          accountId: 'acct-bob',
+          displayName: 'Bob',
+          emailAddress: 'bob@x',
+        })
+        jiraTasks(dir).claim('PROJ-5')
+      } finally {
+        delete process.env.FAKE_JIRA_ISSUE_SEQ
+      }
+      const assigns = bodiesMatching(logs.body, /accountId/)
+      assert.equal(assigns.length, 2)
+      assert.equal(assigns[0]!.accountId, 'acct-me')
+      assert.equal(assigns[1]!.accountId, 'acct-bob')
+    })
+  })
+
+  test('claim interleaving: two workers on one viewer both pass — one identity', () => {
+    // one credential = one identity: worker B is indistinguishable from
+    // worker A on the wire — BOTH verify "assigned to me" and return.
+    withJira({}, (_logs, dir) => {
+      const seq = seqDir(dir, [
+        JSON.stringify(issue({ key: 'PROJ-5', assignee: null })), // 1: A pre-read — free
+        JSON.stringify(issue({ key: 'PROJ-5', assignee: 'me' })), // 2: A verify — me
+        JSON.stringify(issue({ key: 'PROJ-5', assignee: null })), // 3: B pre-read — A's write unseen
+        JSON.stringify(issue({ key: 'PROJ-5', assignee: 'me' })), // 4: B verify — same identity
+      ])
+      process.env.FAKE_JIRA_ISSUE_SEQ = seq
+      try {
+        jiraTasks(dir).claim('PROJ-5')
+        jiraTasks(dir).claim('PROJ-5')
+      } finally {
+        delete process.env.FAKE_JIRA_ISSUE_SEQ
+      }
+    })
   })
 
   test('close comments the reason then transitions to done', () => {

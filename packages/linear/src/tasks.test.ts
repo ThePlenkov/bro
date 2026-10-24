@@ -1,6 +1,6 @@
 import { after, describe, test } from 'node:test'
 import assert from 'node:assert/strict'
-import { chmodSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { facade, facadeName, registerConnector, scrubEnv, testGit } from '@broject/core'
@@ -24,6 +24,9 @@ const WIN32 = process.platform === 'win32'
  *    FAKE_LINEAR_ISSUE_2   — scripted override for every LATER BroIssue
  *                            read (claim's verify); falls back to _1 —
  *                            an issue doesn't vanish after one read
+ *    FAKE_LINEAR_ISSUE_SEQ — dir of <n>.json bodies: the Nth BroIssue
+ *                            read answers file <n> when present —
+ *                            deterministic interleavings (claim races)
  *    FAKE_LINEAR_CHILDREN  — BroChildren body
  *    FAKE_LINEAR_CREATE    — BroIssueCreate body
  *    FAKE_LINEAR_USERS     — BroUsers body
@@ -53,7 +56,9 @@ case "$body" in
   # collide with the single-issue read's read-count switch
   *"BroIssue("*)
     n=$(grep -c 'BroIssue(' "$FAKE_CURL_LOG")
-    if [ "$n" -gt 1 ] && [ -n "$FAKE_LINEAR_ISSUE_2" ]; then
+    if [ -n "$FAKE_LINEAR_ISSUE_SEQ" ] && [ -f "$FAKE_LINEAR_ISSUE_SEQ/$n.json" ]; then
+      cat "$FAKE_LINEAR_ISSUE_SEQ/$n.json"
+    elif [ "$n" -gt 1 ] && [ -n "$FAKE_LINEAR_ISSUE_2" ]; then
       printf '%s\\n' "$FAKE_LINEAR_ISSUE_2"
     else
       printf '%s\\n' "$FAKE_LINEAR_ISSUE_1"
@@ -319,6 +324,77 @@ describe('linearTasks', { skip: WIN32 }, () => {
         assert.throws(() => linearTasks(dir).claim('ENG-42'), /claim contested — rival holds it/)
       }
     )
+  })
+
+  test('claimCapability declares best-effort assignment — never a lease', () => {
+    withLinear({}, (_log, dir) => {
+      assert.deepEqual(linearTasks(dir).claimCapability?.(), {
+        strength: 'best-effort',
+        identity: 'viewer',
+        authority: 'service',
+      })
+    })
+  })
+
+  /** Script a read sequence into FAKE_LINEAR_ISSUE_SEQ — file <n>.json
+   *  is the Nth BroIssue read's body. */
+  const seqDir = (dir: string, bodies: string[]): string => {
+    const seq = join(dir, 'seq')
+    mkdirSync(seq, { recursive: true })
+    bodies.forEach((b, i) => writeFileSync(join(seq, `${i + 1}.json`), b))
+    return seq
+  }
+
+  test('claim interleaving: two viewers both win the residual window', () => {
+    // the deterministic double-seat the capability exists to admit —
+    // A.read/write/verify pass; B's reads land on snapshots taken
+    // BEFORE A's write, so B's verify sees "mine" and returns too
+    // (spec specs/bro-l8c4f.12).
+    withLinear({}, (log, dir) => {
+      const seq = seqDir(dir, [
+        issueRead(node({ ident: 'ENG-42' })), // 1: A pre-read — free
+        issueRead(node({ ident: 'ENG-42', assignee: 'me' })), // 2: A verify — mine
+        issueRead(node({ ident: 'ENG-42' })), // 3: B pre-read — A's write unseen
+        issueRead(node({ ident: 'ENG-42', assignee: 'bob' })), // 4: B verify — mine
+      ])
+      process.env.FAKE_LINEAR_ISSUE_SEQ = seq
+      try {
+        linearTasks(dir).claim('ENG-42')
+        // the rival racer is a different credential — the viewer cache
+        // keys on it, so the /myself probe re-runs for 'bob'
+        process.env.LINEAR_API_KEY = `lin_api_race_${keySeq++}`
+        process.env.FAKE_LINEAR_VIEWER = JSON.stringify({
+          data: { viewer: { id: 'u-bob', displayName: 'bob', email: 'bob@x' } },
+        })
+        linearTasks(dir).claim('ENG-42')
+      } finally {
+        delete process.env.FAKE_LINEAR_ISSUE_SEQ
+      }
+      const updates = callsMatching(log, /BroIssueUpdate/)
+      assert.equal(updates.length, 2)
+      assert.match(updates[0]!, /"assigneeId":"u-me"/)
+      assert.match(updates[1]!, /"assigneeId":"u-bob"/)
+    })
+  })
+
+  test('claim interleaving: two workers on one viewer both pass — one identity', () => {
+    // one credential = one identity: worker B is indistinguishable from
+    // worker A on the wire — BOTH verify "assigned to me" and return.
+    withLinear({}, (_log, dir) => {
+      const seq = seqDir(dir, [
+        issueRead(node({ ident: 'ENG-42' })), // 1: A pre-read — free
+        issueRead(node({ ident: 'ENG-42', assignee: 'me' })), // 2: A verify — me
+        issueRead(node({ ident: 'ENG-42' })), // 3: B pre-read — A's write unseen
+        issueRead(node({ ident: 'ENG-42', assignee: 'me' })), // 4: B verify — same identity
+      ])
+      process.env.FAKE_LINEAR_ISSUE_SEQ = seq
+      try {
+        linearTasks(dir).claim('ENG-42')
+        linearTasks(dir).claim('ENG-42')
+      } finally {
+        delete process.env.FAKE_LINEAR_ISSUE_SEQ
+      }
+    })
   })
 
   test('claim refuses a triage issue — unapproved work is not claimable', () => {
