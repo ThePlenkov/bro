@@ -3,6 +3,11 @@ title: bro flow loop
 description: The autonomous backlog runner — claim, spawn, gate, close, repeat.
 ---
 
+*Command examples track the upcoming **0.3.0** — grouped
+`bro <group> <member>` spellings and `0.3.0` marks are not yet on npm
+`latest` (**0.2.5**); use the flat names (`bro convoy run`,
+`bro debt status`).*
+
 `bro flow next` is one scheduling step. `bro flow loop` IS the loop — it claims
 each ready bead, spawns the configured agent in a fresh worktree, drives
 the act gate, closes the bead, and repeats until the queue is idle or

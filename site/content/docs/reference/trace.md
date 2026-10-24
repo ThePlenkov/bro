@@ -8,6 +8,7 @@ description: "OTLP export of the session trace journals — export [--session|--
 | | |
 | --- | --- |
 | group | `fleet` |
+| npm latest | unreleased — lands in `0.3.0` |
 | skill | `trace` |
 | config | `telemetry` in bro.config |
 

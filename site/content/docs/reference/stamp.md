@@ -8,5 +8,6 @@ description: "Attribute shared-output writes — record/read the last build stam
 | | |
 | --- | --- |
 | group | `work` |
+| npm latest | unreleased — lands in `0.3.0` |
 | guide | [commands/utility](/docs/commands/utility) |
 

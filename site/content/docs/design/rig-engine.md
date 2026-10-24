@@ -3,6 +3,11 @@ title: The rig engine
 description: One lifecycle state machine per work item — loop, drive and convoy are policies over it, not daemons of their own.
 ---
 
+*Command examples track the upcoming **0.3.0** — grouped
+`bro <group> <member>` spellings and `0.3.0` marks are not yet on npm
+`latest` (**0.2.5**); use the flat names (`bro convoy run`,
+`bro debt status`).*
+
 bro used to run three supervisors that each owned a fragment of the
 same lifecycle: **loop** claimed and spawned work, **drive** supervised
 open PRs, **convoy** drained molecule DAGs. Every seam between them
@@ -17,7 +22,7 @@ forge are the authority; `events.jsonl` is history, never the source.
 
 Bead dotted-ids are WBS codes. A worktree per bead is a node, a stack
 branch is an edge. Frames are `{context, own queue, result}` and nest:
-drill pushes a frame, `bro queue` enqueues into the current frame's
+drill pushes a frame, `bro queue` *(0.3.0)* enqueues into the current frame's
 queue, a queue item can be promoted into a frame of its own.
 
 Two traversal orders share the structure: a **queue of stacks**
@@ -35,7 +40,7 @@ next item — the pipeline owns the waiter, never the session.
 
 ## `rig next` — the one re-entry point
 
-`bro rig next [<item>]` recomputes the verdict from durable state on
+`bro rig next [<item>]` *(0.3.0)* recomputes the verdict from durable state on
 every call — stateless, idempotent, safe to invoke from any signal or
 timer. It returns exactly one of:
 

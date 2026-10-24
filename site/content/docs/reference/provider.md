@@ -10,5 +10,6 @@ description: "Claude-facing Messages-API plane — host listener + url|token|env
 | | |
 | --- | --- |
 | group | `fleet` |
+| npm latest | unreleased — lands in `0.3.0` |
 | skill | `provider` |
 

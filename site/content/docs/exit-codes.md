@@ -3,6 +3,11 @@ title: Exit codes
 description: The shared exit-code taxonomy every bro command follows — and the stream rule that pairs with it.
 ---
 
+*Command examples track the upcoming **0.3.0** — grouped
+`bro <group> <member>` spellings and `0.3.0` marks are not yet on npm
+`latest` (**0.2.5**); use the flat names (`bro convoy run`,
+`bro debt status`).*
+
 ## The stream rule
 
 **The exit code picks the stream.**
@@ -27,16 +32,17 @@ their usage text to stderr.
 | `4` | timeout | a bounded wait hit its deadline | `convoy wait` · `wait` — same meaning |
 
 Codes `3` and `4` are **watcher-verdict codes** — a command only uses
-them when its exit is a poll verdict (`bro wait`, `bro convoy wait`,
+them when its exit is a poll verdict (`bro wait` *(0.3.0)*, `bro convoy
+wait` *(0.3.0)*,
 `bro act wait`, `bro mesh wait`). New code never invents new generic
 meanings for them, and shipped numbers are frozen: a "change" that
 renumbers a shipped meaning is a contract break.
 
 Documented overloads — preserved, not renumbered:
 
-- `bro wait` overloads `1` (unreadable) and `2` (unresolved — a bad
+- `bro wait` *(0.3.0)* overloads `1` (unreadable) and `2` (unresolved — a bad
   ref is a usage-shaped failure).
-- `bro convoy wait` overloads `2` (stuck / unknown molecule).
+- `bro convoy wait` *(0.3.0)* overloads `2` (stuck / unknown molecule).
 - `bro act wait` reports both blocked and timeout as `1`; `4` stays
   reserved for the deadline verdict elsewhere.
 - Bare `bro` exits `1` with usage on stderr — no input is a generic

@@ -37,6 +37,9 @@ jobs:
       - name: Check command reference is fresh
         run: npm run check:command-docs
 
+      - name: Check onboarding dispatches on npm latest
+        run: npm run check:onboarding
+
       - name: Check CLI contract snapshot is fresh
         run: npm run check:contract
 

@@ -1,0 +1,174 @@
+{
+  "package": "@broject/bro",
+  "spec": "latest",
+  "version": "0.2.5",
+  "next": "0.3.0",
+  "generatedAt": "2026-10-24T12:15:22.910Z",
+  "commands": {
+    "debt": [
+      "collect",
+      "list",
+      "mark",
+      "next",
+      "prs",
+      "set",
+      "stats",
+      "status",
+      "sync",
+      "trend",
+      "watch"
+    ],
+    "act": [
+      "merge",
+      "rearm",
+      "reply",
+      "resolve",
+      "status",
+      "threads",
+      "wait"
+    ],
+    "convoy": [
+      "claim",
+      "done",
+      "list",
+      "next",
+      "pour",
+      "run",
+      "status"
+    ],
+    "next": [],
+    "loop": [],
+    "fleet": [],
+    "agents": [
+      "down",
+      "prune",
+      "status",
+      "up"
+    ],
+    "status": [],
+    "notify": [],
+    "watch": [
+      "install",
+      "uninstall"
+    ],
+    "drive": [],
+    "serve": [],
+    "bus": [
+      "publish",
+      "serve",
+      "status",
+      "subscribe"
+    ],
+    "check": [],
+    "cleanup": [],
+    "drill": [
+      "current",
+      "distill",
+      "down",
+      "list",
+      "report",
+      "tree",
+      "up"
+    ],
+    "unwind": [],
+    "retrospect": [
+      "capture",
+      "list",
+      "record",
+      "schema",
+      "status"
+    ],
+    "wtf": [
+      "capture",
+      "list",
+      "record",
+      "schema",
+      "status"
+    ],
+    "learn": [
+      "add",
+      "capture",
+      "forget",
+      "list",
+      "probe",
+      "show"
+    ],
+    "judge": [
+      "decide",
+      "replay",
+      "stats"
+    ],
+    "guard": [
+      "list",
+      "test"
+    ],
+    "work": [
+      "enter",
+      "leave",
+      "list",
+      "prune"
+    ],
+    "stack": [
+      "list",
+      "push",
+      "sync"
+    ],
+    "spec": [
+      "check",
+      "drift",
+      "init",
+      "new",
+      "tree"
+    ],
+    "setup": [
+      "bd"
+    ],
+    "doctor": [],
+    "sync": [],
+    "sweep": [
+      "distill",
+      "run",
+      "status"
+    ],
+    "query": [],
+    "mesh": [
+      "accept",
+      "claim",
+      "done",
+      "inbox",
+      "me",
+      "peers",
+      "pull",
+      "reject",
+      "request",
+      "wait"
+    ],
+    "run": [],
+    "plan": [
+      "list",
+      "validate"
+    ],
+    "plugins": [
+      "install",
+      "list",
+      "uninstall"
+    ]
+  },
+  "docNouns": [
+    "task",
+    "store"
+  ],
+  "docVerbs": [
+    "close",
+    "create",
+    "exec",
+    "get",
+    "list",
+    "new",
+    "remove",
+    "rm",
+    "set",
+    "show",
+    "update"
+  ]
+}

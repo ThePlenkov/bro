@@ -3,6 +3,11 @@ title: Packages
 description: The @broject/* package map — what to install, what stays internal.
 ---
 
+*Command examples track the upcoming **0.3.0** — grouped
+`bro <group> <member>` spellings and `0.3.0` marks are not yet on npm
+`latest` (**0.2.5**); use the flat names (`bro convoy run`,
+`bro debt status`).*
+
 # Packages
 
 `@broject/bro` is the product. Everything else is the library surface it

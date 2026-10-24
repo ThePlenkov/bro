@@ -10,4 +10,5 @@ description: "Frame-scoped intake queue: ls|drill|bump|rm — rank-ordered items
 | | |
 | --- | --- |
 | group | `work` |
+| npm latest | unreleased — lands in `0.3.0` |
 

@@ -3,6 +3,11 @@ title: bro self guard
 description: Declarative prompt contributions — nudges conditioned on worktree state, session markers, or a judge veto.
 ---
 
+*Command examples track the upcoming **0.3.0** — grouped
+`bro <group> <member>` spellings and `0.3.0` marks are not yet on npm
+`latest` (**0.2.5**); use the flat names (`bro convoy run`,
+`bro debt status`).*
+
 Guards are one-line nudges the hook evaluates at `session-start`,
 `prompt-submit`, `post-tool`, and `stop`. A guard fires when its `when`
 clause — event name, match keys, state probes, optional `judge` veto —

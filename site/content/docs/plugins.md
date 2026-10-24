@@ -3,6 +3,11 @@ title: Plugins
 description: bro is a host — definePlugin, external loading, custom components.
 ---
 
+*Command examples track the upcoming **0.3.0** — grouped
+`bro <group> <member>` spellings and `0.3.0` marks are not yet on npm
+`latest` (**0.2.5**); use the flat names (`bro convoy run`,
+`bro debt status`).*
+
 bro is a plugin system on top of beads and `gh`. Every built-in command
 is a plugin in one registry; external plugins load from config and get
 the same contract — command, skill, config section, plan schema.

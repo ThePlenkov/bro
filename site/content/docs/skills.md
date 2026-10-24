@@ -3,6 +3,11 @@ title: Skills
 description: Skills are policy; the CLI is mechanics.
 ---
 
+*Command examples track the upcoming **0.3.0** — grouped
+`bro <group> <member>` spellings and `0.3.0` marks are not yet on npm
+`latest` (**0.2.5**); use the flat names (`bro convoy run`,
+`bro debt status`).*
+
 Each bro capability ships a skill: a markdown policy file that says when
 and why to use the command. The CLI owns how.
 

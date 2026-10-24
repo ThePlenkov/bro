@@ -3,6 +3,11 @@ title: bro self judge
 description: A calibrated decision judge for agent loops — typed questions in, typed answers with confidence out.
 ---
 
+*Command examples track the upcoming **0.3.0** — grouped
+`bro <group> <member>` spellings and `0.3.0` marks are not yet on npm
+`latest` (**0.2.5**); use the flat names (`bro convoy run`,
+`bro debt status`).*
+
 The judge answers typed questions (`choice` / `score` / `noul`) over a
 compact state and returns typed answers with confidence — sub-second,
 priced in fractions of a cent. The resolved chain is a primary backend

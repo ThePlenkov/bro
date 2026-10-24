@@ -3,6 +3,11 @@ title: bro review act
 description: The open-PR review loop — exit gate as code, merge only when green.
 ---
 
+*Command examples track the upcoming **0.3.0** — grouped
+`bro <group> <member>` spellings and `0.3.0` marks are not yet on npm
+`latest` (**0.2.5**); use the flat names (`bro convoy run`,
+`bro debt status`).*
+
 `bro review act` answers the question an agent can't: *"can I stop now?"* The
 gate is code, not a prompt instruction — it counts open threads, pending
 checks, SAST annotations, mergeability, and fix rounds.
