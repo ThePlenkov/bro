@@ -2543,12 +2543,22 @@ function buildCtx(
   // pinned beads store (exclusive) and needs no note; an
   // exclusive-claiming facade needs none either.
   if (ctx.agents === undefined) {
-    const note = claimAuthorityNote(ctx.backend, ctx.tasks.claimCapability?.())
+    const note = claimAuthorityNote(ctx.backend, declaredClaimCapability(ctx.tasks))
     if (note !== undefined) {
       say(ctx, note)
     }
   }
   return ctx
+}
+
+/** A third-party store whose capability getter throws reads as
+ *  undeclared — the advisory must never abort the loop. */
+export function declaredClaimCapability(store: TaskStore): ClaimCapability | undefined {
+  try {
+    return store.claimCapability?.()
+  } catch {
+    return undefined
+  }
 }
 
 /** The startup advisory for a claims plane that cannot promise a single
@@ -2571,9 +2581,16 @@ export function claimAuthorityNote(
     cap?.identity === 'viewer'
       ? ' — and every worker behind one credential claims as the same identity'
       : ''
+  // undeclared names what is unknown rather than claiming best-effort —
+  // the store may be exclusive, the loop just cannot verify it
+  const promise =
+    cap === undefined
+      ? `loop: tasks backend '${backend}' declares no claim capability — ` +
+        `exclusivity is unverified, so claim() may be an assignment, not a lease`
+      : `loop: tasks backend '${backend}' offers best-effort claims only — ` +
+        `claim() is an assignment, not a lease`
   return (
-    `loop: tasks backend '${backend}' offers best-effort claims only — ` +
-    `claim() is an assignment, not a lease${shared}. A second issuer ` +
+    `${promise}${shared}. A second issuer ` +
     `(another loop or rig on the same tracker) can seat the same item; ` +
     `keep one loop on this backlog or run on an exclusive-claim store (beads).`
   )

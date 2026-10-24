@@ -525,31 +525,34 @@ describe('jiraTasks', { skip: WIN32 }, () => {
     })
   })
 
-  /** Script a read sequence into FAKE_JIRA_ISSUE_SEQ — file <n>.json is
-   *  the Nth /issue/<k> GET's body (transitions reads don't count). */
-  const seqDir = (dir: string, bodies: string[]): string => {
+  /** Bodies for the reads of a scripted claim race — each entry is the
+   *  assignee the Nth /issue/PROJ-5 GET reports (null = unassigned;
+   *  transitions reads don't count). A contested race reads
+   *  raceReads(null, 'me', null, 'bob'): B's pre-read is a stale
+   *  snapshot, its verify shows B's own write. */
+  const raceReads = (...who: (string | null)[]): string[] =>
+    who.map((a) => JSON.stringify(issue({ key: 'PROJ-5', assignee: a })))
+
+  /** Run the scripted race: claim A, then `second()` — a viewer flip
+   *  goes inside the closure (spec specs/bro-l8c4f.12). */
+  const claimRace = (dir: string, bodies: string[], second: () => void): void => {
     const seq = join(dir, 'seq')
     mkdirSync(seq, { recursive: true })
     bodies.forEach((b, i) => writeFileSync(join(seq, `${i + 1}.json`), b))
-    return seq
+    process.env.FAKE_JIRA_ISSUE_SEQ = seq
+    try {
+      jiraTasks(dir).claim('PROJ-5')
+      second()
+    } finally {
+      delete process.env.FAKE_JIRA_ISSUE_SEQ
+    }
   }
 
   test('claim interleaving: two viewers both win the residual window', () => {
-    // the deterministic double-seat the capability exists to admit —
-    // A.read/write/verify pass; B's reads land on snapshots taken
-    // BEFORE A's write, so B's verify sees "mine" and returns too
-    // (spec specs/bro-l8c4f.12). The fixture derives accountId from
-    // the display name — 'bob' → 'acct-bob'.
+    // the fixture derives accountId from the display name —
+    // 'bob' → 'acct-bob'
     withJira({}, (logs, dir) => {
-      const seq = seqDir(dir, [
-        JSON.stringify(issue({ key: 'PROJ-5', assignee: null })), // 1: A pre-read — free
-        JSON.stringify(issue({ key: 'PROJ-5', assignee: 'me' })), // 2: A verify — mine
-        JSON.stringify(issue({ key: 'PROJ-5', assignee: null })), // 3: B pre-read — A's write unseen
-        JSON.stringify(issue({ key: 'PROJ-5', assignee: 'bob' })), // 4: B verify — mine
-      ])
-      process.env.FAKE_JIRA_ISSUE_SEQ = seq
-      try {
-        jiraTasks(dir).claim('PROJ-5')
+      claimRace(dir, raceReads(null, 'me', null, 'bob'), () => {
         // the rival racer is a different site credential — the viewer
         // cache keys on surface+base, so /myself re-runs for 'bob'
         process.env.JIRA_BASE_URL = 'https://jira-test-race-b.example.com'
@@ -559,9 +562,7 @@ describe('jiraTasks', { skip: WIN32 }, () => {
           emailAddress: 'bob@x',
         })
         jiraTasks(dir).claim('PROJ-5')
-      } finally {
-        delete process.env.FAKE_JIRA_ISSUE_SEQ
-      }
+      })
       const assigns = bodiesMatching(logs.body, /accountId/)
       assert.equal(assigns.length, 2)
       assert.equal(assigns[0]!.accountId, 'acct-me')
@@ -573,19 +574,7 @@ describe('jiraTasks', { skip: WIN32 }, () => {
     // one credential = one identity: worker B is indistinguishable from
     // worker A on the wire — BOTH verify "assigned to me" and return.
     withJira({}, (logs, dir) => {
-      const seq = seqDir(dir, [
-        JSON.stringify(issue({ key: 'PROJ-5', assignee: null })), // 1: A pre-read — free
-        JSON.stringify(issue({ key: 'PROJ-5', assignee: 'me' })), // 2: A verify — me
-        JSON.stringify(issue({ key: 'PROJ-5', assignee: null })), // 3: B pre-read — A's write unseen
-        JSON.stringify(issue({ key: 'PROJ-5', assignee: 'me' })), // 4: B verify — same identity
-      ])
-      process.env.FAKE_JIRA_ISSUE_SEQ = seq
-      try {
-        jiraTasks(dir).claim('PROJ-5')
-        jiraTasks(dir).claim('PROJ-5')
-      } finally {
-        delete process.env.FAKE_JIRA_ISSUE_SEQ
-      }
+      claimRace(dir, raceReads(null, 'me', null, 'me'), () => jiraTasks(dir).claim('PROJ-5'))
       // both workers' writes landed — under ONE identity
       const assigns = bodiesMatching(logs.body, /accountId/)
       assert.equal(assigns.length, 2)

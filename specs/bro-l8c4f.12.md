@@ -119,7 +119,10 @@ the capability says so.
   `tasks` facade. A non-exclusive store gets a startup advisory —
   backend name, what the claim means (assignment, not a lease; one
   viewer = one identity), and the remedy (one loop on this backlog, or
-  an exclusive-claim store). `say()` keeps it on stderr under `--json`.
+  an exclusive-claim store). An undeclared capability warns as
+  unverified rather than presumed best-effort, and a throwing
+  capability getter reads as undeclared — the advisory never aborts
+  the loop. `say()` keeps it on stderr under `--json`.
 - **`bro next` / `bro work enter` / `bro task claim`** — single-session
   assignment flows; unchanged. Their `claim()` calls were never
   presented as leases to the session.

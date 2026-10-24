@@ -676,13 +676,16 @@ function tasksBackendCheck(
   if (auth !== null) {
     return check('tasks', 'warn', `${name}${tag} — ${auth}`, 'fix it or repoint connectors.tasks')
   }
-  // the claims plane's own word (spec bro-l8c4f.12): a best-effort or
-  // undeclared claim() is assignment, not a lease — a competitive
-  // runner on this tracker needs an exclusive-claiming store
-  let capNote = ' — claims best-effort (assignment, not a lease)'
+  // the claims plane's own word (spec bro-l8c4f.12): a best-effort
+  // claim() is assignment, not a lease, and undeclared is unverified —
+  // a competitive runner on this tracker needs an exclusive-claiming store
+  let capNote = ' — claim exclusivity undeclared'
   try {
-    if (facade('tasks', { dir }, { prefer }).claimCapability?.().strength === 'exclusive') {
+    const cap = facade('tasks', { dir }, { prefer }).claimCapability?.()
+    if (cap?.strength === 'exclusive') {
       capNote = ''
+    } else if (cap !== undefined) {
+      capNote = ' — claims best-effort (assignment, not a lease)'
     }
   } catch { /* resolution already proved by facadeName above */ }
   return check('tasks', 'ok', `${name}${tag}${capNote}`)

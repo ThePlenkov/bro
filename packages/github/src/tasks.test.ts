@@ -305,36 +305,41 @@ describe('githubTasks', { skip: WIN32 }, () => {
     })
   })
 
-  /** Script a read sequence into FAKE_GH_ISSUE_SEQ — file <n>.json is
-   *  the Nth issue(number:) read's body. */
-  const seqDir = (dir: string, bodies: string[]): string => {
+  /** Bodies for the reads of a scripted claim race — each entry is the
+   *  assignee the Nth issue(42) read reports (null = unassigned). A
+   *  contested race reads raceReads(null, 'alice', null, 'bob'): B's
+   *  pre-read is a stale snapshot, its verify shows B's own write. */
+  const raceReads = (...who: (string | null)[]): string[] =>
+    who.map((a) =>
+      issueRead(node({ number: 42, ...(a === null ? {} : { assignees: [a] }) }))
+    )
+
+  /** Run the scripted race: claim A, then `second()` — a viewer flip
+   *  goes inside the closure (spec specs/bro-l8c4f.12). */
+  const claimRace = (dir: string, bodies: string[], second: () => void): void => {
     const seq = join(dir, 'seq')
     mkdirSync(seq, { recursive: true })
     bodies.forEach((b, i) => writeFileSync(join(seq, `${i + 1}.json`), b))
-    return seq
+    process.env.FAKE_GH_ISSUE_SEQ = seq
+    try {
+      githubTasks(dir).claim('42')
+      second()
+    } finally {
+      delete process.env.FAKE_GH_ISSUE_SEQ
+    }
   }
 
   test('claim interleaving: two viewers both win the residual window', () => {
-    // the deterministic double-seat the capability exists to admit —
-    // A.read/write/verify pass; B's reads land on snapshots taken
-    // BEFORE A's write, so B's verify sees "mine" and returns too
-    // (spec specs/bro-l8c4f.12). ghActor caches per dir, so the rival
-    // racer claims through a second store dir.
     withFakeGh({ FAKE_GH_ACTOR: 'alice' }, (log, dir) => {
-      const seq = seqDir(dir, [
-        issueRead(node({ number: 42 })), // 1: A pre-read — free
-        issueRead(node({ number: 42, assignees: ['alice'] })), // 2: A verify — mine
-        issueRead(node({ number: 42 })), // 3: B pre-read — A's write unseen
-        issueRead(node({ number: 42, assignees: ['bob'] })), // 4: B verify — mine
-      ])
       const dirB = mkdtempSync(join(tmpdir(), 'bro-gh-tasks-b-'))
-      process.env.FAKE_GH_ISSUE_SEQ = seq
       try {
-        githubTasks(dir).claim('42')
-        process.env.FAKE_GH_ACTOR = 'bob'
-        githubTasks(dirB).claim('42')
+        // ghActor caches per dir — the rival racer claims through a
+        // second store dir
+        claimRace(dir, raceReads(null, 'alice', null, 'bob'), () => {
+          process.env.FAKE_GH_ACTOR = 'bob'
+          githubTasks(dirB).claim('42')
+        })
       } finally {
-        delete process.env.FAKE_GH_ISSUE_SEQ
         rmSync(dirB, { recursive: true, force: true })
       }
       // both claims returned — each wrote its assignee and the commit flag
@@ -348,19 +353,7 @@ describe('githubTasks', { skip: WIN32 }, () => {
     // one credential = one identity: worker B is indistinguishable from
     // worker A on the wire — BOTH verify "assigned to me" and return.
     withFakeGh({ FAKE_GH_ACTOR: 'me' }, (log, dir) => {
-      const seq = seqDir(dir, [
-        issueRead(node({ number: 42 })), // 1: A pre-read — free
-        issueRead(node({ number: 42, assignees: ['me'] })), // 2: A verify — me
-        issueRead(node({ number: 42 })), // 3: B pre-read — A's write unseen
-        issueRead(node({ number: 42, assignees: ['me'] })), // 4: B verify — same identity
-      ])
-      process.env.FAKE_GH_ISSUE_SEQ = seq
-      try {
-        githubTasks(dir).claim('42')
-        githubTasks(dir).claim('42')
-      } finally {
-        delete process.env.FAKE_GH_ISSUE_SEQ
-      }
+      claimRace(dir, raceReads(null, 'me', null, 'me'), () => githubTasks(dir).claim('42'))
       // both workers' writes landed — under ONE identity
       assert.equal(callsMatching(log, /--add-assignee me/).length, 2)
       assert.equal(callsMatching(log, /--add-label bro:claimed/).length, 2)
