@@ -55,9 +55,11 @@ human approval on the current head with the latest review per
 reviewer**:
 
 - The GitHub probe pages `reviews(first:100,
-  states:[APPROVED,CHANGES_REQUESTED])` to exhaustion and folds to the
-  latest decision review per reviewer (dismissed/comment reviews are
-  not decisions; DISMISSED never enters the set).
+  states:[APPROVED,CHANGES_REQUESTED,DISMISSED])` to exhaustion and
+  folds to the latest review per reviewer (comment reviews are not
+  decisions and never enter the set). A DISMISSED latest is a
+  revocation — it suppresses that reviewer's earlier approvals rather
+  than letting an older approval resurface beneath it.
 - An approval counts only when the review's `commit.oid` equals the
   current `headRefOid` — an approval on a pushed-past head is stale,
   not a sign-off.

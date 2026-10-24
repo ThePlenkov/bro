@@ -267,9 +267,7 @@ async function reviewThreads(t: PrTarget): Promise<ReviewThread[]> {
   const nodes: ReviewThread[] = []
   let cursor = ''
   for (;;) {
-    const afterClause = cursor
-      ? `, after: "${cursor.replace(/\\/g, '\\\\').replace(/"/g, '\\"')}"`
-      : ''
+    const afterClause = cursor ? gqlAfter(cursor) : ''
     const raw = await ghAsync([
       'api',
       'graphql',
@@ -511,13 +509,15 @@ export interface PrReviewNode {
 
 /** 'a trusted human APPROVED the current head' — the verdict behind
  *  act.requireApproval (bro-3vy93 round 2, principal audit). Each
- *  reviewer's newest APPROVED | CHANGES_REQUESTED is their standing
- *  verdict — dismissed and comment reviews never enter the set. An
- *  approval counts only when it names `headSha` (a pre-push approval
- *  is stale, not a sign-off), its author is a `User` (bots never
- *  satisfy the gate), and — when `approvers` is non-empty — the login
- *  is trusted. A standing CHANGES_REQUESTED vetoes no matter which
- *  head it reviewed: an unanswered objection survives pushes. */
+ *  reviewer's newest APPROVED | CHANGES_REQUESTED | DISMISSED is their
+ *  standing verdict — a dismissal is a revocation, so when it is a
+ *  reviewer's latest review the reviewer's older approvals are
+ *  suppressed rather than resurfacing (comment reviews never enter the
+ *  set). An approval counts only when it names `headSha` (a pre-push
+ *  approval is stale, not a sign-off), its author is a `User` (bots
+ *  never satisfy the gate), and — when `approvers` is non-empty — the
+ *  login is trusted. A standing CHANGES_REQUESTED vetoes no matter
+ *  which head it reviewed: an unanswered objection survives pushes. */
 export function headApprovalVerdict(
   reviews: readonly PrReviewNode[],
   headSha: string,
@@ -531,8 +531,14 @@ export function headApprovalVerdict(
     const login = r.author?.login
     const state = r.state
     // an unattributable author (deleted account) neither approves nor
-    // vetoes — it cannot be proven human either way
-    if (!login || (state !== 'APPROVED' && state !== 'CHANGES_REQUESTED')) {
+    // vetoes — it cannot be proven human either way. DISMISSED enters
+    // the fold: a dismissed review is a revocation action on that
+    // reviewer's standing, so as the latest entry it means "no standing
+    // decision" — not "the previous approval still counts"
+    if (
+      !login ||
+      (state !== 'APPROVED' && state !== 'CHANGES_REQUESTED' && state !== 'DISMISSED')
+    ) {
       return
     }
     const key = login.toLowerCase()
@@ -597,8 +603,13 @@ export function headApprovalVerdict(
 }
 
 function reviewsQuery(afterClause: string): string {
-  return `query($o:String!,$r:String!,$pr:Int!){repository(owner:$o,name:$r){pullRequest(number:$pr){headRefOid reviews(first:100,states:[APPROVED,CHANGES_REQUESTED]${afterClause}){pageInfo{hasNextPage endCursor} nodes{state submittedAt commit{oid} author{__typename login}}}}}}`
+  return `query($o:String!,$r:String!,$pr:Int!){repository(owner:$o,name:$r){pullRequest(number:$pr){headRefOid reviews(first:100,states:[APPROVED,CHANGES_REQUESTED,DISMISSED]${afterClause}){pageInfo{hasNextPage endCursor} nodes{state submittedAt commit{oid} author{__typename login}}}}}}`
 }
+
+/** `, after: "…"` — the cursor is host data interpolated into a GraphQL
+ *  string; JSON.stringify does the escaping (quotes, backslashes, and
+ *  the control chars a two-step regex would miss). */
+const gqlAfter = (cursor: string): string => `, after: ${JSON.stringify(cursor)}`
 
 type ReviewsPage = {
   data?: {
@@ -620,9 +631,7 @@ function humanApproved(t: PrTarget, opts?: ApprovalProbeOpts): ApprovalVerdict {
   const nodes: PrReviewNode[] = []
   let cursor = ''
   for (;;) {
-    const afterClause = cursor
-      ? `, after: "${cursor.replace(/\\/g, '\\\\').replace(/"/g, '\\"')}"`
-      : ''
+    const afterClause = cursor ? gqlAfter(cursor) : ''
     const page = ghJson<ReviewsPage>([
       'api',
       'graphql',
@@ -648,7 +657,10 @@ function humanApproved(t: PrTarget, opts?: ApprovalProbeOpts): ApprovalVerdict {
     }
     cursor = page.reviews.pageInfo.endCursor
   }
-  return headApprovalVerdict(nodes, headSha, opts?.approvers ?? [])
+  // the bound head rides the verdict so the caller can prove the
+  // approval was evaluated against the head it is about to merge —
+  // a mid-probe push is a refusal, not a pass
+  return { ...headApprovalVerdict(nodes, headSha, opts?.approvers ?? []), headSha }
 }
 
 async function humanApprovedAsync(
@@ -660,9 +672,7 @@ async function humanApprovedAsync(
   const nodes: PrReviewNode[] = []
   let cursor = ''
   for (;;) {
-    const afterClause = cursor
-      ? `, after: "${cursor.replace(/\\/g, '\\\\').replace(/"/g, '\\"')}"`
-      : ''
+    const afterClause = cursor ? gqlAfter(cursor) : ''
     const page = (
       await ghJsonAsync<ReviewsPage>([
         'api',
@@ -690,7 +700,7 @@ async function humanApprovedAsync(
     }
     cursor = page.reviews.pageInfo.endCursor
   }
-  return headApprovalVerdict(nodes, headSha, opts?.approvers ?? [])
+  return { ...headApprovalVerdict(nodes, headSha, opts?.approvers ?? []), headSha }
 }
 
 async function prMetaAsync(t: PrTarget): Promise<PrMeta> {

@@ -285,11 +285,20 @@ export interface FetchPrActStateOpts {
  *  outside the key — they're config-level and repo-shared. */
 const inflight = new Map<string, Promise<PrActState>>()
 
+/** The humanApproved probe's generation — bump on any semantic change
+ *  (what counts as an approver, how reviews fold). Cached/in-flight
+ *  verdicts from another generation answered a different question and
+ *  never serve. */
+const APPROVAL_PROBE_VERSION = '2'
+
 /** The inflight/cache identity of an approval probe — normalized so
  *  ['a','B'] and ['B','a'] share a fetch. */
 const approvalProbeKey = (opts?: FetchPrActStateOpts): string =>
   opts?.requireApproval === true
-    ? `+${[...(opts.approvers ?? [])].map((a) => a.toLowerCase()).sort().join(',')}`
+    ? `+${[...(opts.approvers ?? [])]
+        .map((a) => a.toLowerCase())
+        .sort((a, b) => a.localeCompare(b))
+        .join(',')}`
     : ''
 
 /** A cached entry serves only when it answers what the caller asked —
@@ -303,7 +312,19 @@ const entryUsable = (s: PrActState, probeKey: string): boolean => {
   if (s.humanApproval === undefined) {
     return false
   }
-  const theirs = [...(s.humanApprovalApprovers ?? [])].map((a) => a.toLowerCase()).sort().join(',')
+  // provenance: a verdict from another probe generation answered a
+  // different question; a verdict bound to a head that isn't this
+  // snapshot's was answered against a different head — neither serves
+  if (s.humanApprovalProbe !== APPROVAL_PROBE_VERSION) {
+    return false
+  }
+  if (s.humanApprovalHeadSha !== undefined && s.humanApprovalHeadSha !== s.headSha) {
+    return false
+  }
+  const theirs = [...(s.humanApprovalApprovers ?? [])]
+    .map((a) => a.toLowerCase())
+    .sort((a, b) => a.localeCompare(b))
+    .join(',')
   return theirs === probeKey.slice(1)
 }
 
@@ -431,31 +452,48 @@ async function fetchState(
   const sastUnknown = sast.unknown
 
   // The approval verdict is lazy: prMeta carries it for free on hosts
-  // that expose it (GitHub), and the separate approvals probe (GitLab)
-  // only pays its call when the gate is on (bro-3vy93)
-  const requireApproval = opts?.requireApproval === true
-  const reviewDecision =
-    meta.reviewDecision ??
-    (requireApproval
-      ? await orSync(
-          rev.reviewDecisionAsync?.bind(rev),
-          (t: PrTarget) => rev.reviewDecision?.(t),
-          target
-        ).catch((): undefined => undefined)
-      : undefined)
+  // that expose it (GitHub), and the approvals probe only pays its call
+  // when the gate is on (bro-3vy93). One probe answers both questions —
+  // `hostApproved` is the host's aggregate verdict, so a host where the
+  // two share an endpoint (GitLab approvals) never pays a second call.
   // the human-approval probe — the verdict behind act.requireApproval:
   // a trusted human's approval on the current head, latest review per
   // reviewer. A host without the probe is 'unanswerable' — undefined,
   // which the gate reads as "not approved" (never a pass)
-  const approvalProbe = requireApproval
+  const requireApproval = opts?.requireApproval === true
+  const rawProbe = requireApproval
     ? await orSync(
         rev.humanApprovedAsync?.bind(rev),
-        (t: PrTarget, o?: ApprovalProbeOpts): ApprovalVerdict | undefined =>
+        (t: PrTarget, o?: ApprovalProbeOpts): ApprovalVerdict | boolean | undefined =>
           rev.humanApproved?.(t, o),
         target,
         { approvers: opts?.approvers ?? [] }
       ).catch((): undefined => undefined)
     : undefined
+  // the #561 contract answered a bare boolean — the union type keeps
+  // those connectors compiling; normalize it away here
+  const verdict: ApprovalVerdict | undefined =
+    rawProbe === undefined
+      ? undefined
+      : typeof rawProbe === 'boolean'
+        ? { approved: rawProbe }
+        : rawProbe
+  const reviewDecision =
+    meta.reviewDecision ?? (verdict?.hostApproved === true ? 'APPROVED' : undefined)
+  // a verdict is only as fresh as the head it was read against — the
+  // probe binds to ITS fetch's head; when that isn't meta's head a push
+  // landed mid-fetch and the verdict answers a different question.
+  // Refuse it (fail closed) — the next pass re-probes the moved head. A
+  // probe that can't report its head can't be checked; the host's own
+  // boundary applies there.
+  const staleProbe =
+    verdict !== undefined && verdict.headSha !== undefined && verdict.headSha !== meta.headSha
+  const approvalProbe: ApprovalVerdict | undefined = staleProbe
+    ? {
+        approved: false,
+        reason: 'the head moved while the approval probe ran — re-probe on the next pass',
+      }
+    : verdict
   const humanApproval = approvalProbe?.approved
   const humanApprovalReason = approvalProbe?.reason
   // the allowlist the verdict was probed under — cached entries must
@@ -463,6 +501,10 @@ async function fetchState(
   const humanApprovalApprovers = requireApproval
     ? [...(opts?.approvers ?? [])]
     : undefined
+  // provenance pins the verdict to this snapshot's head and this probe
+  // generation — cached/in-flight reuse checks both before serving
+  const humanApprovalHeadSha = requireApproval ? approvalProbe?.headSha : undefined
+  const humanApprovalProbe = requireApproval ? APPROVAL_PROBE_VERSION : undefined
 
   // A "fix round" is a reviewed push after the first — counting distinct
   // reviewed head SHAs, not commits: one push can carry many commits, and
@@ -510,5 +552,7 @@ async function fetchState(
     humanApproval,
     humanApprovalReason,
     humanApprovalApprovers,
+    humanApprovalHeadSha,
+    humanApprovalProbe,
   }
 }

@@ -247,13 +247,21 @@ export const actSection: ConfigSection<{
     // opt-in human-signoff gate — off by default, auto-merge stays
     // bot-only until a rig asks for the APPROVED verdict (bro-3vy93)
     requireApproval: obj.requireApproval === true,
-    // trusted-reviewer allowlist for the same gate — empty means any
-    // human account's current-head approval counts
-    approvers: Array.isArray(obj.approvers)
-      ? obj.approvers.filter(
-          (v): v is string => typeof v === 'string' && v.trim() !== ''
-        )
-      : [],
+    // trusted-reviewer allowlist for the same gate — absent/empty
+    // means any human account's current-head approval counts. A
+    // CONFIGURED list that yields zero usable logins is the opposite
+    // intent — 'trust nobody', not 'trust anybody': one entry no host
+    // login can ever equal keeps the allowlist non-empty and the gate
+    // fails closed (PR #636 review).
+    approvers: (() => {
+      if (!Array.isArray(obj.approvers)) {
+        return []
+      }
+      const valid = obj.approvers
+        .map((v) => (typeof v === 'string' ? v.trim() : ''))
+        .filter((v) => v !== '')
+      return obj.approvers.length > 0 && valid.length === 0 ? ['!'] : valid
+    })(),
     mergeQueue,
   }
 }

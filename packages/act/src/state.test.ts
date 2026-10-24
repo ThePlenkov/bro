@@ -245,9 +245,43 @@ describe('fetchPrActState — the human-approval probe (bro-3vy93)', () => {
       calls += 1
       return { approved: true }
     }
+    // the SYNC twin counts too — an accidental sync call escapes an
+    // async-only spy
+    rev.humanApproved = () => {
+      calls += 1
+      return { approved: true }
+    }
     const s = await fetchPrActState(rev, target, {})
     assert.equal(calls, 0)
     assert.equal(s.humanApproval, undefined)
+  })
+
+  test('a legacy boolean probe answer normalizes to the verdict', async () => {
+    const rev = fakeRev([], [])
+    rev.humanApproved = () => true // the #561 contract — still valid
+    const s = await fetchPrActState(rev, target, { requireApproval: true })
+    assert.equal(s.humanApproval, true)
+  })
+
+  test('a verdict bound to a superseded head refuses — it answered a different question', async () => {
+    const rev = fakeRev([], [])
+    rev.humanApprovedAsync = async () => ({ approved: true, headSha: 'b'.repeat(40) })
+    const s = await fetchPrActState(rev, target, { requireApproval: true })
+    assert.equal(s.humanApproval, false)
+    assert.match(s.humanApprovalReason!, /head moved/)
+  })
+
+  test('the probe payload answers reviewDecision — no second host call', async () => {
+    const rev = fakeRev([], [])
+    let decisionCalls = 0
+    rev.reviewDecisionAsync = async () => {
+      decisionCalls += 1
+      return 'APPROVED'
+    }
+    rev.humanApprovedAsync = async () => ({ approved: false, hostApproved: true })
+    const s = await fetchPrActState(rev, target, { requireApproval: true })
+    assert.equal(decisionCalls, 0)
+    assert.equal(s.reviewDecision, 'APPROVED')
   })
 })
 
@@ -306,6 +340,42 @@ describe('fetchPrActState — approval probe identity (PR 636 review)', () => {
     // case/format variants of the same set share the probe identity
     await fetchPrActState(rev, target, { ...opts, approvers: ['ALICE'] })
     assert.equal(calls, 1)
+  })
+
+  test('a verdict from another probe generation never serves', async () => {
+    const rev = fakeRev([], [])
+    let calls = 0
+    rev.humanApprovedAsync = async () => {
+      calls += 1
+      return { approved: true }
+    }
+    const cache = memCache()
+    const opts = { requireApproval: true, approvers: ['alice'], stateCache: cache }
+    const first = await fetchPrActState(rev, target, opts)
+    assert.equal(calls, 1)
+    // an entry written by an older probe — same allowlist, different
+    // generation — answered a different question and must not serve
+    cache.write(target, { ...first, humanApprovalProbe: '1' })
+    await fetchPrActState(rev, target, opts)
+    assert.equal(calls, 2)
+  })
+
+  test('a cached verdict bound to a different head never serves', async () => {
+    const rev = fakeRev([], [])
+    let calls = 0
+    rev.humanApprovedAsync = async () => {
+      calls += 1
+      return { approved: true, headSha: meta.headSha }
+    }
+    const cache = memCache()
+    const opts = { requireApproval: true, approvers: ['alice'], stateCache: cache }
+    const first = await fetchPrActState(rev, target, opts)
+    assert.equal(calls, 1)
+    // a verdict naming a head that isn't the snapshot's head was
+    // answered against a different question — never serve it
+    cache.write(target, { ...first, humanApprovalHeadSha: 'f'.repeat(40) })
+    await fetchPrActState(rev, target, opts)
+    assert.equal(calls, 2)
   })
 
   test('in-flight dedup splits on the probe inputs, not just the target', async () => {

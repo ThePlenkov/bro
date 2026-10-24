@@ -68,6 +68,14 @@ export interface PrActState {
    *  compare it against the caller's act.approvers so a verdict probed
    *  under a different trust set never serves a stricter caller. */
   humanApprovalApprovers?: string[]
+  /** The head the verdict was evaluated against — when set it must
+   *  equal headSha; a mismatch means the verdict answers a different
+   *  head's question (a mid-fetch push) and never serves. */
+  humanApprovalHeadSha?: string
+  /** The probe generation that produced the verdict — cached entries
+   *  written by a different APPROVAL_PROBE_VERSION answered a different
+   *  question and never serve. */
+  humanApprovalProbe?: string
 }
 
 export interface ExitGate {

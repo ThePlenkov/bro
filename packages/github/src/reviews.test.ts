@@ -3,7 +3,7 @@ import assert from 'node:assert/strict'
 import { chmodSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { facade, registerConnector } from '@broject/core'
+import { facade, registerConnector, type ApprovalVerdict } from '@broject/core'
 import { githubConnector, githubReview } from './index.ts'
 import { headApprovalVerdict, mergeAsync, type PrReviewNode } from './reviews.ts'
 
@@ -1032,6 +1032,41 @@ describe('headApprovalVerdict', () => {
     assert.equal(v.reason, 'no approving reviews')
   })
 
+  test('a later comment never disturbs a standing approval', () => {
+    const v = headApprovalVerdict(
+      [
+        review('alice', 'User', 'APPROVED', HEAD_SHA, T('01')),
+        review('alice', 'User', 'COMMENTED', HEAD_SHA, T('02')),
+      ],
+      HEAD_SHA
+    )
+    assert.equal(v.approved, true)
+  })
+
+  test('a dismissed latest review suppresses that reviewer — an older approval cannot resurface', () => {
+    const v = headApprovalVerdict(
+      [
+        review('alice', 'User', 'APPROVED', HEAD_SHA, T('01')),
+        review('alice', 'User', 'APPROVED', HEAD_SHA, T('02')),
+        review('alice', 'User', 'DISMISSED', HEAD_SHA, T('03')),
+      ],
+      HEAD_SHA
+    )
+    assert.equal(v.approved, false)
+  })
+
+  test('a re-approval after a dismissal stands again', () => {
+    const v = headApprovalVerdict(
+      [
+        review('alice', 'User', 'APPROVED', HEAD_SHA, T('01')),
+        review('alice', 'User', 'DISMISSED', HEAD_SHA, T('02')),
+        review('alice', 'User', 'APPROVED', HEAD_SHA, T('03')),
+      ],
+      HEAD_SHA
+    )
+    assert.equal(v.approved, true)
+  })
+
   test('no reviews is not approved', () => {
     const v = headApprovalVerdict([], HEAD_SHA)
     assert.equal(v.approved, false)
@@ -1061,7 +1096,7 @@ describe('githubReview humanApproved', { skip: WIN32 }, () => {
     const p1 = page(HEAD_SHA, [review('ci-bot', 'Bot', 'APPROVED', HEAD_SHA, T('01'))], 'cur2')
     const p2 = page(HEAD_SHA, [review('alice', 'User', 'APPROVED', HEAD_SHA, T('02'))], null)
     withFakeGh({ FAKE_GH_REVIEWS_P1: p1, FAKE_GH_REVIEWS_P2: p2 }, (log) => {
-      const v = githubReview().humanApproved!(target)
+      const v = githubReview().humanApproved!(target) as ApprovalVerdict
       assert.equal(v.approved, true)
       const calls = readFileSync(log, 'utf8')
       assert.match(calls, /after: "cur2"/)
@@ -1071,9 +1106,12 @@ describe('githubReview humanApproved', { skip: WIN32 }, () => {
   test('binds the approval to the live headSha — a stale approval refuses', () => {
     const p1 = page(HEAD_SHA, [review('alice', 'User', 'APPROVED', STALE_SHA, T('01'))], null)
     withFakeGh({ FAKE_GH_REVIEWS_P1: p1 }, () => {
-      const v = githubReview().humanApproved!(target)
+      const v = githubReview().humanApproved!(target) as ApprovalVerdict
       assert.equal(v.approved, false)
       assert.match(v.reason!, /predates the current head/)
+      // and the bound head rides the verdict so the fetch can prove the
+      // approval named the head being merged
+      assert.equal(v.headSha, HEAD_SHA)
     })
   })
 })
