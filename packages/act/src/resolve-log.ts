@@ -26,9 +26,10 @@
  * reads as "no resolve recorded" — never a crash, never a false
  * block.
  */
-import { appendFileSync, mkdirSync, readFileSync, renameSync, statSync, writeFileSync } from 'node:fs'
+import { appendFileSync, mkdirSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { gitCommonDir, withFileLock } from '@broject/core'
+import { compactLedger, parseLedger } from './ledger.ts'
 
 export interface ResolveEvent {
   /** Epoch ms — when the resolve happened. */
@@ -40,12 +41,6 @@ export interface ResolveEvent {
   /** The thread id (host-native). */
   thread: string
 }
-
-/** How long a resolve record stays relevant. A thread resolved months
- *  ago and reopened today is still a reopen, but the ledger must stay
- *  bounded — the tail is what a recent-reopen read needs. */
-const MAX_LEDGER_BYTES = 256 * 1024
-const KEEP_LEDGER_BYTES = 128 * 1024
 
 export interface ResolveLedger {
   /** Record a resolve. Idempotent per (repo, pr, thread) inside one
@@ -67,58 +62,23 @@ export function resolveLogPath(dir: string): string | null {
 }
 
 function parseEvents(file: string): ResolveEvent[] {
-  let raw: string
-  try {
-    raw = readFileSync(file, 'utf8')
-  } catch {
-    return []
-  }
-  const out: ResolveEvent[] = []
-  for (const line of raw.split('\n')) {
-    if (line.trim() === '') {
-      continue
-    }
-    try {
-      const e = JSON.parse(line) as Partial<ResolveEvent>
-      if (isResolveEvent(e)) {
-        out.push(e)
-      }
-    } catch {
-      // a torn line (crash mid-append) is skipped, not fatal
-    }
-  }
-  return out
+  return parseLedger(file, isResolveEvent)
 }
 
 /** A well-formed ledger row — every field present and of the right
  *  type. A malformed row is skipped, not fatal. */
-function isResolveEvent(e: Partial<ResolveEvent>): e is ResolveEvent {
-  if (typeof e.ts !== 'number' || !Number.isFinite(e.ts)) {
+function isResolveEvent(e: unknown): e is ResolveEvent {
+  if (typeof e !== 'object' || e === null) {
     return false
   }
-  if (typeof e.repo !== 'string' || typeof e.thread !== 'string') {
+  const o = e as Partial<ResolveEvent>
+  if (typeof o.ts !== 'number' || !Number.isFinite(o.ts)) {
     return false
   }
-  return typeof e.pr === 'number'
-}
-
-/** Keep the ledger bounded — a long-lived repo dir must not grow
- *  without limit. The tail is what the read needs: the newest resolves
- *  are the ones a recent-reopen question is about. */
-function compact(file: string): void {
-  try {
-    if (statSync(file).size <= MAX_LEDGER_BYTES) {
-      return
-    }
-    const raw = readFileSync(file, 'utf8')
-    const tail = raw.slice(raw.length - KEEP_LEDGER_BYTES)
-    // cut to the first whole line — a half-line is not a record
-    const cut = tail.indexOf('\n')
-    writeFileSync(`${file}.tmp`, cut >= 0 ? tail.slice(cut + 1) : tail)
-    renameSync(`${file}.tmp`, file)
-  } catch {
-    // compaction is best-effort — a failure leaves the ledger as it was
+  if (typeof o.repo !== 'string' || typeof o.thread !== 'string') {
+    return false
   }
+  return typeof o.pr === 'number'
 }
 
 export function fileResolveLog(file: string): ResolveLedger {
@@ -141,7 +101,7 @@ export function fileResolveLog(file: string): ResolveLedger {
           },
           { label: 'act-resolve-ledger' }
         )
-        compact(file)
+        compactLedger(file)
       } catch {
         // recording is best-effort — a failed write means the reopen
         // is not detected, never a crash
