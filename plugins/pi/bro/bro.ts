@@ -613,10 +613,13 @@ function createBroDriver(host, api) {
 		},
 		async execute(_id, _params, _signal, _onUpdate, ctx) {
 			const result = await run(["status", "--json"], host.cwd(ctx));
-			return { content: [{
-				type: "text",
-				text: result.code === 0 ? result.stdout : "bro status unavailable"
-			}] };
+			return {
+				content: [{
+					type: "text",
+					text: result.code === 0 ? result.stdout : "bro status unavailable"
+				}],
+				details: void 0
+			};
 		}
 	});
 	return {
