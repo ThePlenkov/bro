@@ -1509,8 +1509,10 @@ export function assertOrphanMerged(f: DriveFixture, r: CliResult, fixerId: unkno
 
 /** process.exit interceptor — die()/usage() becomes a value, not a kill. */
 export class Exit extends Error {
-  constructor(public code: number) {
+  code: number
+  constructor(code: number) {
     super(`exit ${code}`)
+    this.code = code
   }
 }
 
