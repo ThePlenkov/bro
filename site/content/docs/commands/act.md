@@ -51,13 +51,14 @@ the gate additionally requires a trusted **human's approving review on
 the PR's current head** — available since bro 0.3.0. Semantics:
 
 - **Latest decision review per reviewer.** Each reviewer's newest
-  `APPROVED`/`CHANGES_REQUESTED` is their standing verdict — a
-  `CHANGES_REQUESTED` that was never re-approve vetoes the gate no
-  matter which head it reviewed.
+  `APPROVED`/`CHANGES_REQUESTED`/`DISMISSED` review is their standing
+  verdict — a `CHANGES_REQUESTED` that was never re-approved vetoes the
+  gate no matter which head it reviewed (GitHub; on GitLab the veto is
+  an unresolved discussion).
 - **Head-bound.** An approval counts only on the head being merged; a
   push after approval makes it stale, not a sign-off.
-- **Bots never count.** The host's aggregate "approved" verdict is not
-  consulted — a bot `APPROVED` review never satisfies the gate.
+- **Bots never count.** A bot `APPROVED` review never satisfies the
+  gate; the host's aggregate "approved" flag alone is never enough.
 - **Trusted logins.** `act.approvers` (a login allowlist, empty = any
   human account) narrows "trusted" so a machine `User` account can't
   sign off on the agent's own output.
