@@ -31,7 +31,7 @@ import type {
 import broExtension from './pi.ts'
 
 type Assert<T extends true> = T
-type Extends<A, B> = A extends B ? true : never
+type Extends<A, B> = [A] extends [B] ? true : false
 
 // --- event vocabulary -------------------------------------------------------
 // Every event name the adapter registers must exist in the real

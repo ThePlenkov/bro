@@ -223,10 +223,27 @@ test('matrix shape — versioned, dated, every host documented', () => {
     assert.ok(host.upstream.doc !== '', `${name}: missing upstream doc reference`)
     assert.match(host.upstream.checked, /^\d{4}-\d{2}-\d{2}$/, `${name}: checked must be a date`)
     assert.ok(
-      host.stop === 'block' || host.stop === 'reprompt' || host.stop === 'none',
-      `${name}: unknown stop refusal ${host.stop}`
+      host.stopRefusal === 'block' || host.stopRefusal === 'reprompt' || host.stopRefusal === 'none',
+      `${name}: unknown stop refusal ${host.stopRefusal}`
+    )
+    assert.ok(
+      host.background === 'sync' || host.background === 'async',
+      `${name}: unknown background ${host.background}`
     )
   }
+})
+
+test('matrix shape — the boundaries object states the three separations', () => {
+  const b = HOOK_MATRIX.boundaries
+  assert.ok(b.advisory.length > 0, 'the advisory ≠ enforcement boundary must be stated')
+  assert.ok(
+    b.policyVsPermissions.length > 0,
+    'the bro-policy ≠ host-permissions boundary must be stated'
+  )
+  assert.ok(
+    b.optInApproval.length > 0,
+    'the opt-in self-tool approval boundary must be stated'
+  )
 })
 
 // --- outcome derivation ----------------------------------------------------------

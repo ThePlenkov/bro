@@ -123,6 +123,11 @@ from `isError`; Codex cannot observe it (`PostToolUse` fires on
 non-zero exits), so Codex arms on the hint and the journal records no
 `ok`.
 
+**Completion** is `sync` on the manifest hosts — `run.sh` blocks the
+event, bounded by its timeout — and `async` on the extension/plugin
+adapters, whose handlers resolve while work (a settle refresh, a
+notification lane) continues in the background.
+
 Three boundaries, stated once:
 
 - **Advisory ≠ enforcement.** Nudges, context injection, re-prompts and

@@ -100,6 +100,13 @@ export interface EventCell {
   via?: string
 }
 
+/** Whether the host waits on the hook or the adapter may keep working
+ *  after the event returns. `sync` — manifest hosts block the event on
+ *  run.sh, bounded by the hook timeout; `async` — the extension/plugin
+ *  handler resolves while adapter work (settle refresh, notification
+ *  lanes) continues in the background. */
+export type HookBackground = 'sync' | 'async'
+
 export interface HostEntry {
   surface: HookSurface
   /** The adapter dir — '' when the repo root itself is the plugin. */
@@ -110,15 +117,36 @@ export interface HostEntry {
   /** Native surfaces the adapter wires beyond the shared vocabulary —
    *  tools, mode bridges, UI chrome. */
   nativeOnly?: string[]
-  stop: StopRefusal
+  stopRefusal: StopRefusal
+  background: HookBackground
   upstream: { doc: string; checked: string }
+}
+
+/** The three separations the matrix encodes, stated once so docs and
+ *  tests cite this source instead of paraphrasing it. Advisory
+ *  surfaces are never enforcement; bro's repo-state policy is not the
+ *  host's permission plane; bro/bd auto-approval is a scoped opt-in,
+ *  not a permission grant. */
+export interface HookBoundaries {
+  advisory: string
+  policyVsPermissions: string
+  optInApproval: string
 }
 
 export const HOOK_MATRIX: {
   version: number
+  boundaries: HookBoundaries
   hosts: Record<string, HostEntry>
 } = {
   version: HOOK_MATRIX_VERSION,
+  boundaries: {
+    advisory:
+      'nudges, context injection, re-prompts and toasts are UX — never compliance enforcement',
+    policyVsPermissions:
+      "bro's merge/stop policy is authoritative over repo state; the host permission plane stays the user's security surface",
+    optInApproval:
+      'bro/bd auto-approval is an opt-in scoped to bro self-tools — it is not the host permission system',
+  },
   hosts: {
     claude: {
       surface: 'manifest',
@@ -143,7 +171,8 @@ export const HOOK_MATRIX: {
         stop: { native: ['Stop'], effects: ['block', 'context'] },
         // PermissionRequest exists upstream — declared gap, unwired
       },
-      stop: 'block',
+      stopRefusal: 'block',
+      background: 'sync',
       upstream: { doc: 'https://code.claude.com/docs/en/hooks', checked: '2026-10-24' },
     },
 
@@ -178,7 +207,8 @@ export const HOOK_MATRIX: {
         },
         stop: { native: ['Stop'], effects: ['block', 'context'] },
       },
-      stop: 'block',
+      stopRefusal: 'block',
+      background: 'sync',
       upstream: { doc: 'https://developers.openai.com/codex/hooks', checked: '2026-10-24' },
     },
 
@@ -203,7 +233,8 @@ export const HOOK_MATRIX: {
         },
         stop: { native: ['Stop'], effects: ['block', 'context'] },
       },
-      stop: 'block',
+      stopRefusal: 'block',
+      background: 'sync',
       upstream: { doc: 'plugins/devin/bro/README.md', checked: '2026-10-24' },
     },
 
@@ -229,7 +260,8 @@ export const HOOK_MATRIX: {
           effects: ['approve'],
         },
       },
-      stop: 'reprompt',
+      stopRefusal: 'reprompt',
+      background: 'sync',
       upstream: { doc: 'https://cursor.com/docs/agent/hooks', checked: '2026-10-24' },
     },
 
@@ -266,7 +298,8 @@ export const HOOK_MATRIX: {
         stop: { native: ['event'], effects: ['reprompt', 'context'] },
       },
       nativeOnly: ['shell.env'],
-      stop: 'reprompt',
+      stopRefusal: 'reprompt',
+      background: 'async',
       upstream: { doc: 'https://opencode.ai/docs/plugins/', checked: '2026-10-24' },
     },
 
@@ -289,7 +322,8 @@ export const HOOK_MATRIX: {
         stop: { native: ['event'], effects: ['notify'] },
       },
       nativeOnly: ['session.created', 'session.deleted', 'tool.bro'],
-      stop: 'none',
+      stopRefusal: 'none',
+      background: 'async',
       upstream: { doc: 'https://kilo.ai/docs', checked: '2026-10-24' },
     },
 
@@ -313,7 +347,8 @@ export const HOOK_MATRIX: {
         // pre-tool lane is input-override — a block-only slot would lie
       },
       nativeOnly: ['turn_end', 'session_shutdown', 'agent_settled'],
-      stop: 'reprompt',
+      stopRefusal: 'reprompt',
+      background: 'async',
       upstream: {
         doc: '@earendil-works/pi-coding-agent extension API',
         checked: '2026-10-24',
@@ -350,7 +385,8 @@ export const HOOK_MATRIX: {
         'goal_updated',
         'before_subagent_spawn',
       ],
-      stop: 'block',
+      stopRefusal: 'block',
+      background: 'async',
       upstream: { doc: 'packages/cli/src/adapter/omp-api.ts', checked: '2026-10-24' },
     },
   },
