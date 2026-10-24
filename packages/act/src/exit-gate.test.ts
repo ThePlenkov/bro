@@ -1,32 +1,9 @@
 import assert from 'node:assert/strict'
 import { describe, it } from 'node:test'
 import { evaluateExitGate } from './exit-gate.ts'
-import type { PrActState } from './types.ts'
+import { openActState as open } from './test-fixtures.ts'
 
-const open = (over: Partial<PrActState> = {}): PrActState => ({
-  pr: 1,
-  url: '',
-  headSha: 'a'.repeat(40),
-  headRef: 'feat/x',
-  state: 'OPEN',
-  isDraft: false,
-  mergeable: 'MERGEABLE',
-  mergeState: 'CLEAN',
-  openThreads: 0,
-  threads: [],
-  ciPending: 0,
-  ciFailing: 0,
-  reviewersPending: 0,
-  reviewersFailing: 0,
-  sastPending: 0,
-  sastUnknown: 0,
-  fixRounds: 0,
-  maxRounds: 3,
-  docsOnly: false,
-  alerts: [],
-  reopenedThreads: [],
-  ...over,
-})
+
 
 describe('evaluateExitGate', () => {
   it('passes a clean open PR', () => {

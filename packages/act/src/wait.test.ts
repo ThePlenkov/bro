@@ -2,32 +2,10 @@ import assert from 'node:assert/strict'
 import { test } from 'node:test'
 import { evaluateExitGate } from './exit-gate.ts'
 import type { PrActState } from './types.ts'
+import { openActState as open } from './test-fixtures.ts'
 import { gatePending, waitForGate } from './wait.ts'
 
-const open = (over: Partial<PrActState> = {}): PrActState => ({
-  pr: 1,
-  headRef: 'x',
-  headSha: 'abc',
-  url: '',
-  state: 'OPEN',
-  mergeable: 'MERGEABLE',
-  mergeState: 'CLEAN',
-  isDraft: false,
-  openThreads: 0,
-  threads: [],
-  ciPending: 0,
-  ciFailing: 0,
-  reviewersPending: 0,
-  reviewersFailing: 0,
-  sastPending: 0,
-  sastUnknown: 0,
-  fixRounds: 0,
-  maxRounds: 3,
-  docsOnly: false,
-  alerts: [],
-  reopenedThreads: [],
-  ...over,
-})
+
 
 const fetcher = (states: PrActState[]) => {
   let i = 0
