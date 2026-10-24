@@ -11,12 +11,12 @@
  * formulas/ trees) from an npm package — the repo's own node_modules
  * first, then the CLI's — instead of the embedded snapshot.
  */
-import { existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, statSync, writeFileSync } from 'node:fs'
-import { basename, dirname, join } from 'node:path'
+import { existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, renameSync, statSync, writeFileSync } from 'node:fs'
+import { basename, dirname, isAbsolute, join } from 'node:path'
 import { createRequire } from 'node:module'
 import { fileURLToPath } from 'node:url'
 import { execFileSync } from 'node:child_process'
-import { initBeadsStealth, PERSONALITIES, hasHelpFlag, printUsage, type BroConfig } from '@broject/core'
+import { initBeadsStealth, PERSONALITIES, hasHelpFlag, printUsage, withFileLock, type BroConfig } from '@broject/core'
 import { loadBroConfig } from '../plugins.ts'
 import {
   cliVersion,
@@ -69,7 +69,73 @@ function readExistingConfig(path: string): Partial<BroConfig> | null {
   return parsed as Partial<BroConfig>
 }
 
-function writeConfig(opts: { beads: boolean; personality?: string }): string {
+/** The local layer is machine-local state — the same `.git/info/exclude`
+ *  contract the debt ledger and `bd init --stealth` already keep (spec:
+ *  specs/bro-9vmx.md): what setup writes must never be committable by
+ *  accident. Appends `bro.config.local.*` once; a repo already covering
+ *  the pattern (.gitignore / global excludes) is left alone. Outside a
+ *  worktree there is nothing to exclude from — quiet skip. */
+function ensureLocalConfigExcluded(): void {
+  const git = (args: string[]): string =>
+    execFileSync('git', ['-C', process.cwd(), ...args], { // NOSONAR — PATH lookup is the contract
+      encoding: 'utf8',
+      stdio: ['ignore', 'pipe', 'pipe'],
+    }).trim()
+  let root: string
+  try {
+    root = git(['rev-parse', '--show-toplevel'])
+  } catch {
+    return // not a worktree (or no git) — nothing to exclude from
+  }
+  try {
+    execFileSync('git', ['-C', root, 'check-ignore', '-q', 'bro.config.local.json'], {
+      stdio: 'ignore',
+    }) // NOSONAR
+    return // already covered by .gitignore / info/exclude / global excludes
+  } catch {
+    /* not ignored — exclude it locally */
+  }
+  try {
+    const excludePath = git(['rev-parse', '--git-path', 'info/exclude'])
+    const path = isAbsolute(excludePath) ? excludePath : join(root, excludePath)
+    withFileLock(path, () => {
+      const existing = existsSync(path) ? readFileSync(path, 'utf8') : ''
+      const entry = 'bro.config.local.*'
+      if (!existing.split('\n').includes(entry)) {
+        const nl = existing === '' || existing.endsWith('\n') ? '' : '\n'
+        // atomic write inside the lock — a truncated exclude would drop
+        // unrelated local rules, not just ours
+        const tmpPath = `${path}.tmp.${process.pid}`
+        writeFileSync(tmpPath, `${existing}${nl}${entry}\n`, 'utf8')
+        renameSync(tmpPath, path)
+      }
+    })
+    // Ignores never override the index — an already-tracked local config
+    // stays tracked and the exclusion is a no-op for it. Surface it;
+    // untracking is a staged change only the repo owner should make.
+    const tracked = execFileSync('git', ['-C', root, 'ls-files', '--', 'bro.config.local.*'], { // NOSONAR — git PATH lookup is the contract
+      encoding: 'utf8',
+      stdio: ['ignore', 'pipe', 'ignore'],
+    }).trim()
+    if (tracked !== '') {
+      console.error(
+        'warning: bro.config.local.* has tracked files — .git/info/exclude ' +
+          "can't hide index entries; run `git rm --cached` to untrack"
+      )
+    }
+  } catch (err) {
+    console.error(
+      `warning: could not git-exclude bro.config.local.* — ` +
+        `${err instanceof Error ? err.message : err}; the local config may be trackable`
+    )
+  }
+}
+
+export function writeConfig(opts: { beads: boolean; personality?: string }): string {
+  // The written file is called "gitignored" by every doc that mentions
+  // it — make that true here, not only in repos whose .gitignore
+  // already carries the pattern.
+  ensureLocalConfigExcluded()
   // setup's keys (stores, personality) are operator config — they land in
   // the gitignored local layer, never the committed bro.config.* files
   // (spec: specs/bro-9vmx.md). bro.config.local.ts shadows the .json —

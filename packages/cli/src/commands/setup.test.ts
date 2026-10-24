@@ -1,9 +1,9 @@
 import { describe, test } from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdirSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
-import { readPackTree, resolvePackDir } from './setup.ts'
-import { tmpDir } from './testrepo.ts'
+import { readPackTree, resolvePackDir, writeConfig } from './setup.ts'
+import { git, initRepo, inside, tmpDir } from './testrepo.ts'
 
 const tmp = (p: string) => tmpDir(p)
 
@@ -47,5 +47,85 @@ describe('readPackTree', () => {
     writeFileSync(join(root, 'a/b/x.md'), 'x')
     writeFileSync(join(root, 'y.md'), 'y')
     assert.deepEqual(readPackTree(root), { 'a/b/x.md': 'x', 'y.md': 'y' })
+  })
+})
+
+describe('writeConfig', () => {
+  /** The global layer must not leak the dev machine's real user config
+   *  into the fixture — pin XDG to a dir that stays empty. */
+  function withPinnedXdg<T>(dir: string, fn: () => T): T {
+    const prev = process.env.XDG_CONFIG_HOME
+    process.env.XDG_CONFIG_HOME = join(dir, 'xdg')
+    try {
+      return fn()
+    } finally {
+      if (prev === undefined) {
+        delete process.env.XDG_CONFIG_HOME
+      } else {
+        process.env.XDG_CONFIG_HOME = prev
+      }
+    }
+  }
+
+  test('writes bro.config.local.json — git-excluded, never the committed file', () => {
+    const { root, main } = initRepo('bro-setup-wc-')
+    inside(main, root, () =>
+      withPinnedXdg(main, () => {
+        const msg = writeConfig({ beads: false })
+        assert.match(msg, /wrote bro\.config\.local\.json/)
+        assert.ok(
+          existsSync(join(main, 'bro.config.local.json')),
+          'the local-layer file is what lands'
+        )
+        assert.ok(
+          !existsSync(join(main, 'bro.config.json')),
+          'the committed project file is never created'
+        )
+        // exclusion: the written name is check-ignore clean and the cover
+        // is .git/info/exclude — machine-local, never a repo diff
+        git(['check-ignore', '-q', 'bro.config.local.json'], main)
+        const exclude = readFileSync(join(main, '.git', 'info', 'exclude'), 'utf8')
+        assert.ok(
+          exclude.split('\n').includes('bro.config.local.*'),
+          `info/exclude missing the pattern: ${exclude}`
+        )
+      })
+    )
+  })
+
+  test('a committed bro.config.json survives byte-for-byte; only local keys land locally', () => {
+    const policy = `${JSON.stringify({ stores: ['jsonl'], sdd: { mode: 'gate' } }, null, 2)}\n`
+    const { root, main } = initRepo('bro-setup-wc-', (m) =>
+      writeFileSync(join(m, 'bro.config.json'), policy)
+    )
+    inside(main, root, () =>
+      withPinnedXdg(main, () => {
+        writeConfig({ beads: true })
+        assert.equal(readFileSync(join(main, 'bro.config.json'), 'utf8'), policy)
+        const local = JSON.parse(readFileSync(join(main, 'bro.config.local.json'), 'utf8')) as Record<
+          string,
+          unknown
+        >
+        assert.deepEqual(local.stores, ['jsonl', 'beads'])
+        assert.equal(local.sdd, undefined, 'project policy must not be pinned into the local layer')
+      })
+    )
+  })
+
+  test('a .gitignore already covering the pattern gets no duplicate info/exclude entry', () => {
+    const { root, main } = initRepo('bro-setup-wc-', (m) =>
+      writeFileSync(join(m, '.gitignore'), 'bro.config.local.*\n')
+    )
+    inside(main, root, () =>
+      withPinnedXdg(main, () => {
+        writeConfig({ beads: false })
+        const path = join(main, '.git', 'info', 'exclude')
+        const content = existsSync(path) ? readFileSync(path, 'utf8') : ''
+        assert.ok(
+          !content.split('\n').includes('bro.config.local.*'),
+          `already-covered pattern must not be re-appended: ${content}`
+        )
+      })
+    )
   })
 })

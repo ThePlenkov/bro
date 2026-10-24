@@ -33,7 +33,7 @@ const excludedDebtDirs = new Set<string>()
 
 /**
  * The ledger is machine-local state — same contract as the gitignored
- * bro.config.json and `bd init --stealth`. When the debt dir sits inside a
+ * bro.config.local.json and `bd init --stealth`. When the debt dir sits inside a
  * git worktree that doesn't already ignore it, append it to
  * .git/info/exclude so harvest evidence can't be committed by accident.
  * Local-only — never a repo diff.
