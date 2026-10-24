@@ -17,69 +17,69 @@
  * `sverka` bundled with @broject/bro. Exit code mirrors the
  * executor; usage errors exit 2.
  */
-import { spawnSync } from 'node:child_process';
-import { accessSync, existsSync, readdirSync, readFileSync, statSync } from 'node:fs';
-import { delimiter, dirname, isAbsolute, join, resolve, sep } from 'node:path';
-import { fileURLToPath } from 'node:url';
-import { X_OK } from 'node:constants';
-import { hasHelpFlag, printUsage } from '@broject/core';
-import type { ExitCode } from '@broject/core';
-import { flag } from './args.ts';
-import { CHECK_EXECUTORS, checkSection, type CheckConfig } from './check-config.ts';
-import { loadBroConfig } from '../plugins.ts';
+import { spawnSync } from 'node:child_process'
+import { accessSync, existsSync, readdirSync, readFileSync, statSync } from 'node:fs'
+import { delimiter, dirname, isAbsolute, join, resolve, sep } from 'node:path'
+import { fileURLToPath } from 'node:url'
+import { X_OK } from 'node:constants'
+import { hasHelpFlag, printUsage } from '@broject/core'
+import type { ExitCode } from '@broject/core'
+import { flag } from './args.ts'
+import { CHECK_EXECUTORS, checkSection, type CheckConfig } from './check-config.ts'
+import { loadBroConfig } from '../plugins.ts'
 
-export { checkSection, type CheckConfig } from './check-config.ts';
+export { checkSection, type CheckConfig } from './check-config.ts'
 
 // --- sverka contract -----------------------------------------------------------
 
 export interface SverkaStep {
-  stepId: string;
-  status: string;
-  durationMs?: number;
-  exitCode?: number;
-  error?: string;
-  stdout?: string;
-  stderr?: string;
-  cacheKey?: string;
+  stepId: string
+  status: string
+  durationMs?: number
+  exitCode?: number
+  error?: string
+  stdout?: string
+  stderr?: string
+  cacheKey?: string
 }
 
 export interface SverkaRunData {
-  planId?: string;
-  status?: string;
-  steps?: SverkaStep[];
-  findings?: number;
-  verdict?: string;
-  summary?: unknown;
+  planId?: string
+  status?: string
+  steps?: SverkaStep[]
+  findings?: number
+  verdict?: string
+  summary?: unknown
 }
 
 export interface CheckReport {
-  status: string;
-  durationMs: number;
-  steps: SverkaStep[];
-  findings?: number;
-  verdict?: string;
-  summary?: unknown;
+  status: string
+  durationMs: number
+  steps: SverkaStep[]
+  findings?: number
+  verdict?: string
+  summary?: unknown
   /** set when the requested evaluation did not run cleanly */
-  evaluation?: CheckEvaluation;
+  evaluation?: CheckEvaluation
   /** sverka's own exit code — bro check propagates it. */
-  exitCode: number;
+  exitCode: number
 }
 
 /** The evaluation gate's outcome when it did not run cleanly — `failed`
  *  (collection errored) or `unavailable` (the evaluator could not run).
  *  Never a verdict: a failed evaluation is not a pass. */
 export interface CheckEvaluation {
-  status: 'failed' | 'unavailable';
-  reason: string;
+  status: 'failed' | 'unavailable'
+  reason: string
 }
 
 /** A spawn target — `[file, ...prefixArgs]`: binaries run directly, the
  *  bundled sverka runs as `node dist/bin.mjs`. */
 export interface SverkaBin {
-  file: string;
-  args: string[];
+  file: string
+  args: string[]
   /** for error/verbose reporting — where this resolution came from */
-  via?: string;
+  via?: string
 }
 
 /** A runnable regular file — existsSync alone lets a stale or
@@ -87,19 +87,19 @@ export interface SverkaBin {
 function runnableFile(p: string): boolean {
   try {
     if (!statSync(p).isFile()) {
-      return false;
+      return false
     }
-    accessSync(p, X_OK);
-    return true;
+    accessSync(p, X_OK)
+    return true
   } catch {
-    return false;
+    return false
   }
 }
 
-const IS_WIN = process.platform === 'win32';
+const IS_WIN = process.platform === 'win32'
 /** npm bin shims are extensionless shell scripts on POSIX and `.cmd`
  *  launchers on Windows; `.exe` covers non-npm installs. */
-const PATH_NAMES = IS_WIN ? ['sverka.exe', 'sverka.cmd', 'sverka.bat', 'sverka'] : ['sverka'];
+const PATH_NAMES = IS_WIN ? ['sverka.exe', 'sverka.cmd', 'sverka.bat', 'sverka'] : ['sverka']
 
 /** sverka package entries, current package first. `@sverka/cli` is the
  *  deprecated pre-rename name — kept because a consumer repo may still
@@ -107,49 +107,49 @@ const PATH_NAMES = IS_WIN ? ['sverka.exe', 'sverka.cmd', 'sverka.bat', 'sverka']
 const PKG_ENTRIES = [
   ['sverka', 'dist', 'bin.mjs'],
   ['@sverka', 'cli', 'dist', 'bin.mjs'],
-] as const;
+] as const
 
 /** `<dir>/node_modules` sverka walking up — the repo's own pinned
  *  install wins over PATH and the bundled copy. The package entry
  *  (`sverka/dist/bin.mjs`) is preferred: it spawns through
  *  `process.execPath`, sidestepping shim/shebang/.cmd exec rules. */
 function repoLocalBin(root: string): SverkaBin | undefined {
-  let dir = resolve(root);
+  let dir = resolve(root)
   for (;;) {
-    const nm = join(dir, 'node_modules');
+    const nm = join(dir, 'node_modules')
     for (const parts of PKG_ENTRIES) {
-      const entry = join(nm, ...parts);
+      const entry = join(nm, ...parts)
       if (existsSync(entry)) {
-        return { file: process.execPath, args: [entry], via: 'repo' };
+        return { file: process.execPath, args: [entry], via: 'repo' }
       }
     }
     for (const name of PATH_NAMES) {
-      const shim = join(nm, '.bin', name);
+      const shim = join(nm, '.bin', name)
       if (runnableFile(shim)) {
-        return { file: shim, args: [], via: 'repo' };
+        return { file: shim, args: [], via: 'repo' }
       }
     }
-    const parent = dirname(dir);
+    const parent = dirname(dir)
     if (parent === dir) {
-      return undefined;
+      return undefined
     }
-    dir = parent;
+    dir = parent
   }
 }
 
 function pathBin(): SverkaBin | undefined {
   for (const dir of (process.env.PATH ?? '').split(delimiter)) {
     if (dir === '') {
-      continue;
+      continue
     }
     for (const name of PATH_NAMES) {
-      const p = join(dir, name);
+      const p = join(dir, name)
       if (runnableFile(p)) {
-        return { file: p, args: [], via: 'PATH' };
+        return { file: p, args: [], via: 'PATH' }
       }
     }
   }
-  return undefined;
+  return undefined
 }
 
 /** The sverka bundled with @broject/bro — walk up from this module's own
@@ -159,19 +159,19 @@ function pathBin(): SverkaBin | undefined {
  *  guaranteed under every loader). The legacy `@sverka/cli` path stays
  *  in the probe list for installs predating the rename. */
 function bundledBin(): string | undefined {
-  let dir = dirname(fileURLToPath(import.meta.url));
+  let dir = dirname(fileURLToPath(import.meta.url))
   for (;;) {
     for (const parts of PKG_ENTRIES) {
-      const bin = join(dir, 'node_modules', ...parts);
+      const bin = join(dir, 'node_modules', ...parts)
       if (existsSync(bin)) {
-        return bin;
+        return bin
       }
     }
-    const parent = dirname(dir);
+    const parent = dirname(dir)
     if (parent === dir) {
-      return undefined;
+      return undefined
     }
-    dir = parent;
+    dir = parent
   }
 }
 
@@ -182,85 +182,85 @@ function bundledBin(): string | undefined {
 export function resolveSverka(root: string, cfgBin?: string): SverkaBin | null {
   if (cfgBin !== undefined) {
     if (cfgBin.includes('/') || cfgBin.includes(sep)) {
-      const p = isAbsolute(cfgBin) ? cfgBin : resolve(root, cfgBin);
-      return existsSync(p) ? { file: p, args: [], via: 'config' } : null;
+      const p = isAbsolute(cfgBin) ? cfgBin : resolve(root, cfgBin)
+      return existsSync(p) ? { file: p, args: [], via: 'config' } : null
     }
     // bare command name — trust PATH like gh/bd resolution does
-    return { file: cfgBin, args: [], via: 'config' };
+    return { file: cfgBin, args: [], via: 'config' }
   }
-  const local = repoLocalBin(root);
+  const local = repoLocalBin(root)
   if (local !== undefined) {
-    return local;
+    return local
   }
-  const onPath = pathBin();
+  const onPath = pathBin()
   if (onPath !== undefined) {
-    return onPath;
+    return onPath
   }
-  const bundled = bundledBin();
+  const bundled = bundledBin()
   if (bundled !== undefined) {
-    return { file: process.execPath, args: [bundled], via: 'bundled' };
+    return { file: process.execPath, args: [bundled], via: 'bundled' }
   }
-  return null;
+  return null
 }
 
 // --- run ---------------------------------------------------------------------
 
 interface ParsedRun {
-  data?: SverkaRunData;
-  error?: string;
-  message?: string;
-  durationMs?: number;
+  data?: SverkaRunData
+  error?: string
+  message?: string
+  durationMs?: number
 }
 
 /** sverka writes one JSON line on stdout under `-f json`; warnings may
  *  precede it, so scan from the end for the envelope. */
 function parseRunJson(stdout: string): ParsedRun | null {
-  const lines = stdout.split('\n').filter(l => l.trim() !== '');
+  const lines = stdout.split('\n').filter((l) => l.trim() !== '')
   for (let i = lines.length - 1; i >= 0; i -= 1) {
-    const line = lines[i]!.trim();
+    const line = lines[i]!.trim()
     if (!line.startsWith('{')) {
-      continue;
+      continue
     }
     try {
-      const parsed = JSON.parse(line) as ParsedRun & { command?: string };
+      const parsed = JSON.parse(line) as ParsedRun & { command?: string }
       if (parsed.command === 'run') {
-        return parsed;
+        return parsed
       }
     } catch {
       // not the envelope — keep scanning
     }
   }
-  return null;
+  return null
 }
 
 function sverkaArgs(opts: {
-  config?: string;
-  entry?: string;
-  executor?: string;
-  evaluate: boolean;
-  quiet: boolean;
-  verbose: boolean;
+  config?: string
+  entry?: string
+  executor?: string
+  evaluate: boolean
+  quiet: boolean
+  verbose: boolean
 }): string[] {
-  const args = ['run', '--format', 'json'];
+  const args = ['run', '--format', 'json']
   if (opts.config !== undefined) {
-    args.push('--config', opts.config);
+    args.push('--config', opts.config)
   }
   if (opts.entry !== undefined) {
-    args.push('--entry', opts.entry);
+    args.push('--entry', opts.entry)
   }
   if (opts.executor !== undefined) {
-    args.push('--executor', opts.executor);
+    args.push('--executor', opts.executor)
   }
   if (opts.evaluate) {
-    args.push('--evaluate');
+    args.push('--evaluate')
   }
   if (opts.quiet) {
-    args.push('--quiet');
+    args.push('--quiet')
   }
   if (opts.verbose) {
-    args.push('--verbose');
+    args.push('--verbose')
   }
-  return args;
+  return args
 }
 
 /** `.cmd`/`.bat` shims (Windows npm bins, a `check.bin` pointing at one)
@@ -270,13 +270,13 @@ function spawnTarget(bin: SverkaBin): { file: string; args: string[] } {
     return {
       file: process.env.ComSpec ?? 'cmd.exe',
       args: ['/d', '/s', '/c', bin.file, ...bin.args],
-    };
+    }
   }
-  return bin;
+  return bin
 }
 
 function spawnRun(bin: SverkaBin, root: string, args: string[]) {
-  const target = spawnTarget(bin);
+  const target = spawnTarget(bin)
   return spawnSync(target.file, [...target.args, ...args], {
     cwd: root,
     encoding: 'utf8',
@@ -284,57 +284,55 @@ function spawnRun(bin: SverkaBin, root: string, args: string[]) {
     // chatty checks
     maxBuffer: 64 * 1024 * 1024,
     env: { ...process.env, NO_COLOR: '1' },
-  });
+  })
 }
 
 /** sverka ≥ Spec 53 writes `.sverka/runs/<runId>/report.json`
  *  (`sverka.run/v1`) before reporting COLLECTION_FAILED — the step stats
- *  survive on disk even though stdout drops them. Recovers the report
- *  only when it is unambiguously this run's: exactly one report written
- *  at-or-after `sinceMs`. Older files are previous runs, and two fresh
- *  reports mean a concurrent sverka run in the same root — the envelope
- *  carries no runId to correlate by, so ambiguity attributes nothing
- *  rather than another run's stats. sverka 0.2.x writes no report —
+ *  survive on disk even though stdout drops them. Returns the freshest
+ *  report written at-or-after `sinceMs`: an older file is a previous
+ *  run's, never attributed to this one. sverka 0.2.x writes no report —
  *  recovery is opportunistic and degrades to an empty data. */
 function readRunReport(
   root: string,
   sinceMs: number
 ): { data: SverkaRunData; durationMs?: number } | undefined {
-  let entries: string[];
+  let entries: string[]
   try {
-    entries = readdirSync(join(root, '.sverka', 'runs'));
+    entries = readdirSync(join(root, '.sverka', 'runs'))
   } catch {
-    return undefined;
+    return undefined
   }
-  const fresh: string[] = [];
+  let best: { mtimeMs: number; file: string } | undefined
   for (const entry of entries) {
-    const file = join(root, '.sverka', 'runs', entry, 'report.json');
+    const file = join(root, '.sverka', 'runs', entry, 'report.json')
     try {
-      if (statSync(file).mtimeMs >= sinceMs) {
-        fresh.push(file);
+      const mtimeMs = statSync(file).mtimeMs
+      if (mtimeMs >= sinceMs && (best === undefined || mtimeMs > best.mtimeMs)) {
+        best = { mtimeMs, file }
       }
     } catch {
       // not a report-bearing run dir
     }
   }
-  if (fresh.length !== 1) {
-    return undefined;
+  if (best === undefined) {
+    return undefined
   }
   try {
-    const parsed = JSON.parse(readFileSync(fresh[0]!, 'utf8')) as {
-      schema?: string;
-      data?: SverkaRunData;
-      durationMs?: number;
-    };
+    const parsed = JSON.parse(readFileSync(best.file, 'utf8')) as {
+      schema?: string
+      data?: SverkaRunData
+      durationMs?: number
+    }
     if (parsed.schema !== 'sverka.run/v1' || typeof parsed.data !== 'object') {
-      return undefined;
+      return undefined
     }
     return {
       data: parsed.data ?? {},
       ...(parsed.durationMs !== undefined ? { durationMs: parsed.durationMs } : {}),
-    };
+    }
   } catch {
-    return undefined;
+    return undefined
   }
 }
 
@@ -349,39 +347,7 @@ function toReport(data: SverkaRunData, durationMs: number, code: number): CheckR
     ...(data.verdict !== undefined ? { verdict: data.verdict } : {}),
     ...(data.summary !== undefined ? { summary: data.summary } : {}),
     exitCode: code,
-  };
-}
-
-/** COLLECTION_FAILED: the run executed once — evaluation is the failure,
- *  never the verdict. Recover the step stats from the run report sverka
- *  wrote before failing (absent on sverka 0.2.x). */
-function collectionFailedRun(
-  parsed: ParsedRun,
-  root: string,
-  sinceMs: number,
-  code: number,
-  err: (msg: string) => void
-): ReturnType<typeof runCheck> {
-  const reason = parsed.message ?? 'collection failed';
-  err(
-    `error: sverka COLLECTION_FAILED: ${reason} — evaluation skipped (declare SARIF artifact outputs or drop --evaluate)`
-  );
-  const evaluation: CheckEvaluation = { status: 'failed', reason };
-  const recovered = parsed.data === undefined ? readRunReport(root, sinceMs) : undefined;
-  const data = parsed.data ?? recovered?.data;
-  const exitCode = code === 0 ? 1 : code;
-  if (data === undefined) {
-    return { evaluation, exitCode };
   }
-  return {
-    report: {
-      ...toReport(data, recovered?.durationMs ?? parsed.durationMs ?? 0, code),
-      evaluation,
-    },
-    data,
-    evaluation,
-    exitCode,
-  };
 }
 
 /** Execute sverka once and normalize to a CheckReport. `data` is
@@ -395,42 +361,64 @@ export function runCheck(
   bin: SverkaBin,
   root: string,
   opts: Parameters<typeof sverkaArgs>[0],
-  err: (msg: string) => void = m => console.error(m)
+  err: (msg: string) => void = (m) => console.error(m)
 ): {
-  report?: CheckReport;
-  data?: SverkaRunData;
-  evaluation?: CheckEvaluation;
-  exitCode: number;
+  report?: CheckReport
+  data?: SverkaRunData
+  evaluation?: CheckEvaluation
+  exitCode: number
 } {
-  const startedMs = Date.now();
-  const proc = spawnRun(bin, root, sverkaArgs(opts));
-  const parsed = proc.stdout ? parseRunJson(proc.stdout) : null;
+  const startedMs = Date.now()
+  const proc = spawnRun(bin, root, sverkaArgs(opts))
+  const parsed = proc.stdout ? parseRunJson(proc.stdout) : null
   if (proc.error) {
-    err(`error: failed to run sverka (${proc.error.message})`);
-    return { exitCode: 1 };
+    err(`error: failed to run sverka (${proc.error.message})`)
+    return { exitCode: 1 }
   }
-  const code = proc.status ?? 1;
-  const failCode = code === 0 ? 1 : code;
+  const code = proc.status ?? 1
   if (parsed === null) {
-    const tail = (proc.stderr ?? '').trim().split('\n').slice(-5).join('\n');
+    const tail = (proc.stderr ?? '').trim().split('\n').slice(-5).join('\n')
     err(
-      `error: sverka exited ${code} without a JSON run report` + (tail !== '' ? `\n${tail}` : '')
-    );
-    return { exitCode: failCode };
-  }
-  if (parsed.error === 'COLLECTION_FAILED') {
-    return collectionFailedRun(parsed, root, startedMs, code, err);
+      `error: sverka exited ${code} without a JSON run report` +
+        (tail !== '' ? `\n${tail}` : '')
+    )
+    return { exitCode: code === 0 ? 1 : code }
   }
   if (parsed.error !== undefined) {
-    err(`error: sverka ${parsed.error}: ${parsed.message ?? 'run failed'}`);
-    return { exitCode: failCode };
+    if (parsed.error === 'COLLECTION_FAILED') {
+      // the run executed once — evaluation is the failure, never the
+      // verdict. Recover the step stats from the run report sverka
+      // wrote before failing (absent on sverka 0.2.x).
+      const reason = parsed.message ?? 'collection failed'
+      err(
+        `error: sverka COLLECTION_FAILED: ${reason} — evaluation skipped (declare SARIF artifact outputs or drop --evaluate)`
+      )
+      const evaluation: CheckEvaluation = { status: 'failed', reason }
+      const recovered =
+        parsed.data === undefined ? readRunReport(root, startedMs) : undefined
+      const data = parsed.data ?? recovered?.data
+      if (data === undefined) {
+        return { evaluation, exitCode: code === 0 ? 1 : code }
+      }
+      return {
+        report: {
+          ...toReport(data, recovered?.durationMs ?? parsed.durationMs ?? 0, code),
+          evaluation,
+        },
+        data,
+        evaluation,
+        exitCode: code === 0 ? 1 : code,
+      }
+    }
+    err(`error: sverka ${parsed.error}: ${parsed.message ?? 'run failed'}`)
+    return { exitCode: code === 0 ? 1 : code }
   }
-  const data = parsed.data ?? {};
+  const data = parsed.data ?? {}
   return {
     report: toReport(data, parsed.durationMs ?? 0, code),
     data,
     exitCode: code,
-  };
+  }
 }
 
 // --- render --------------------------------------------------------------------
@@ -442,78 +430,79 @@ const STEP_ICON: Record<string, string> = {
   skipped: '-',
   cancelled: '-',
   suspended: '-',
-};
+}
 
 function fmtMs(ms: number | undefined): string {
   if (ms === undefined) {
-    return '';
+    return ''
   }
-  return ms >= 1000 ? `${(ms / 1000).toFixed(1)}s` : `${Math.round(ms)}ms`;
+  return ms >= 1000 ? `${(ms / 1000).toFixed(1)}s` : `${Math.round(ms)}ms`
 }
 
 /** Last few non-empty stderr lines — the useful part of a failed step. */
 function stderrTail(stderr: string | undefined, n = 4): string[] {
   if (!stderr) {
-    return [];
+    return []
   }
   return stderr
     .split('\n')
-    .filter(l => l.trim() !== '')
-    .slice(-n);
+    .filter((l) => l.trim() !== '')
+    .slice(-n)
 }
 
 /** One step → its rendered line(s): the status line, plus the indented
  *  stderr tail when it failed. */
 function stepLines(s: SverkaStep): string[] {
-  const icon = STEP_ICON[s.status] ?? '?';
-  const dur = s.durationMs !== undefined ? ` ${fmtMs(s.durationMs)}` : '';
-  let detail = '';
+  const icon = STEP_ICON[s.status] ?? '?'
+  const dur = s.durationMs !== undefined ? ` ${fmtMs(s.durationMs)}` : ''
+  let detail = ''
   if (s.status === 'failed') {
-    detail = s.error ?? (s.exitCode !== undefined ? `exit ${s.exitCode}` : '');
+    detail = s.error ?? (s.exitCode !== undefined ? `exit ${s.exitCode}` : '')
   } else if (s.status === 'cache-hit' && s.cacheKey) {
-    detail = `cache ${s.cacheKey.slice(0, 12)}`;
+    detail = `cache ${s.cacheKey.slice(0, 12)}`
   }
-  const suffix = detail !== '' ? ` — ${detail}` : '';
-  const line = `${icon} ${s.stepId}${dur}${suffix}`;
+  const suffix = detail !== '' ? ` — ${detail}` : ''
+  const line = `${icon} ${s.stepId}${dur}${suffix}`
   if (s.status !== 'failed') {
-    return [line];
+    return [line]
   }
-  return [line, ...stderrTail(s.stderr).map(l => `    ${l}`)];
+  return [line, ...stderrTail(s.stderr).map((l) => `    ${l}`)]
 }
 
 function totalsLine(report: CheckReport): string {
-  const ok = report.steps.filter(s => s.status === 'succeeded' || s.status === 'cache-hit').length;
-  const failed = report.steps.filter(s => s.status === 'failed').length;
-  const other = report.steps.length - ok - failed;
-  const parts = [`${report.steps.length} steps · ${ok} ok`];
+  const ok = report.steps.filter(
+    (s) => s.status === 'succeeded' || s.status === 'cache-hit'
+  ).length
+  const failed = report.steps.filter((s) => s.status === 'failed').length
+  const other = report.steps.length - ok - failed
+  const parts = [`${report.steps.length} steps · ${ok} ok`]
   if (failed > 0) {
-    parts.push(`${failed} failed`);
+    parts.push(`${failed} failed`)
   }
   if (other > 0) {
-    parts.push(`${other} other`);
+    parts.push(`${other} other`)
   }
-  const dur = fmtMs(report.durationMs);
-  return `${parts.join(' · ')} — ${dur !== '' ? dur : '?'}`;
+  const dur = fmtMs(report.durationMs)
+  return `${parts.join(' · ')} — ${dur !== '' ? dur : '?'}`
 }
 
 export function renderText(report: CheckReport): string[] {
-  const lines = report.steps.flatMap(stepLines);
-  lines.push(totalsLine(report));
+  const lines = report.steps.flatMap(stepLines)
+  lines.push(totalsLine(report))
   if (report.findings !== undefined || report.verdict !== undefined) {
-    const verdict = report.verdict !== undefined ? ` · verdict: ${report.verdict}` : '';
-    lines.push(`findings: ${report.findings ?? 0}${verdict}`);
+    const verdict = report.verdict !== undefined ? ` · verdict: ${report.verdict}` : ''
+    lines.push(`findings: ${report.findings ?? 0}${verdict}`)
   }
   if (report.evaluation !== undefined) {
-    lines.push(`evaluation: ${report.evaluation.status} — ${report.evaluation.reason}`);
+    lines.push(`evaluation: ${report.evaluation.status} — ${report.evaluation.reason}`)
   }
-  return lines;
+  return lines
 }
 
 // --- command -------------------------------------------------------------------
 
 function usage(exitCode: ExitCode = 2): never {
-  printUsage(
-    `Usage: bro check [options]
+  printUsage(`Usage: bro check [options]
 
 Run the repo's sverka workflow and report per-step stats + findings.
 
@@ -530,15 +519,13 @@ Options:
   --help             this text
 
 Config (bro.config.json "check"): bin, config, entry, executor, evaluate.
-Flags win over config. Exit code mirrors sverka's.`,
-    exitCode
-  );
+Flags win over config. Exit code mirrors sverka's.`, exitCode)
 }
 
 /** Known argv surface — a typo'd flag (`--evalute`) silently doing
  *  nothing is a usage error, not a pass. Value flags consume the next
  *  token. */
-const VALUE_FLAGS = new Set(['--root', '--config', '--entry', '--executor', '--format']);
+const VALUE_FLAGS = new Set(['--root', '--config', '--entry', '--executor', '--format'])
 const BOOL_FLAGS = new Set([
   '--evaluate',
   '--json',
@@ -548,64 +535,67 @@ const BOOL_FLAGS = new Set([
   '--verbose',
   '--help',
   '-h',
-]);
+])
 
 function argError(a: string, kind: 'option' | 'argument'): never {
   console.error(
     `error: ${kind === 'option' ? 'unknown option' : 'unexpected argument'} ${JSON.stringify(a)} — see \`bro check --help\``
-  );
-  process.exit(2);
+  )
+  process.exit(2)
 }
 
 /** A value flag's value is a separate token — but only when the next
  *  token isn't itself a flag (`--root --json` is a missing value, and
  *  flag() reports it; skipping the flag here would eat that error). */
 function nextIsValue(argv: string[], i: number): boolean {
-  const a = argv[i]!;
-  return !a.includes('=') && argv[i + 1] !== undefined && !argv[i + 1]!.startsWith('-');
+  const a = argv[i]!
+  return !a.includes('=') && argv[i + 1] !== undefined && !argv[i + 1]!.startsWith('-')
 }
 
 function rejectUnknownArgs(argv: string[]): void {
   for (let i = 0; i < argv.length; i += 1) {
-    const a = argv[i]!;
+    const a = argv[i]!
     if (!a.startsWith('-')) {
-      argError(a, 'argument');
+      argError(a, 'argument')
     }
-    const name = a.includes('=') ? a.slice(0, a.indexOf('=')) : a;
+    const name = a.includes('=') ? a.slice(0, a.indexOf('=')) : a
     if (VALUE_FLAGS.has(name)) {
       if (nextIsValue(argv, i)) {
-        i += 1;
+        i += 1
       }
     } else if (!BOOL_FLAGS.has(a)) {
-      argError(a, 'option');
+      argError(a, 'option')
     }
   }
 }
 
 interface CheckArgs {
-  root: string;
-  format: 'text' | 'json';
-  opts: Parameters<typeof sverkaArgs>[0];
+  root: string
+  format: 'text' | 'json'
+  opts: Parameters<typeof sverkaArgs>[0]
   /** check.bin from config — resolveSverka's first resolution step */
-  cfgBin?: string;
+  cfgBin?: string
 }
 
 /** argv + the repo's `check` section → run parameters. Usage failures
  *  exit 2 here. Config loads from the run root — `--root <other-repo>`
  *  picks up that repo's section (and node_modules for resolution). */
 function parseCheckArgs(argv: string[]): CheckArgs {
-  rejectUnknownArgs(argv);
-  const root = resolve(flag(argv, '--root') ?? process.cwd());
-  const cfg = (loadBroConfig(root).check ?? checkSection(undefined)) as CheckConfig;
-  const format = flag(argv, '--format') ?? (argv.includes('--json') ? 'json' : 'text');
+  rejectUnknownArgs(argv)
+  const root = resolve(flag(argv, '--root') ?? process.cwd())
+  const cfg = (loadBroConfig(root).check ?? checkSection(undefined)) as CheckConfig
+  const format = flag(argv, '--format') ?? (argv.includes('--json') ? 'json' : 'text')
   if (format !== 'text' && format !== 'json') {
-    console.error(`error: --format must be text|json — got ${JSON.stringify(format)}`);
-    process.exit(2);
+    console.error(`error: --format must be text|json — got ${JSON.stringify(format)}`)
+    process.exit(2)
   }
-  const executor = flag(argv, '--executor') ?? cfg.executor;
-  if (executor !== undefined && !(CHECK_EXECUTORS as readonly string[]).includes(executor)) {
-    console.error(`error: --executor must be host|docker — got ${JSON.stringify(executor)}`);
-    process.exit(2);
+  const executor = flag(argv, '--executor') ?? cfg.executor
+  if (
+    executor !== undefined &&
+    !(CHECK_EXECUTORS as readonly string[]).includes(executor)
+  ) {
+    console.error(`error: --executor must be host|docker — got ${JSON.stringify(executor)}`)
+    process.exit(2)
   }
   return {
     root,
@@ -619,25 +609,25 @@ function parseCheckArgs(argv: string[]): CheckArgs {
       verbose: argv.includes('-v') || argv.includes('--verbose'),
     },
     ...(cfg.bin !== undefined ? { cfgBin: cfg.bin } : {}),
-  };
+  }
 }
 
 export function runCheckCommand(argv: string[]): void {
   if (hasHelpFlag(argv)) {
-    usage(0);
+    usage(0)
   }
-  const { root, format, opts, cfgBin } = parseCheckArgs(argv);
-  const bin = resolveSverka(root, cfgBin);
+  const { root, format, opts, cfgBin } = parseCheckArgs(argv)
+  const bin = resolveSverka(root, cfgBin)
   if (bin === null) {
     console.error(
       'error: sverka not found — install sverka in the repo (npm i -D sverka), put sverka on PATH, or set "check": {"bin": …} in bro.config.json'
-    );
-    process.exit(1);
+    )
+    process.exit(1)
   }
 
-  const { report, data, evaluation, exitCode } = runCheck(bin, root, opts);
+  const { report, data, evaluation, exitCode } = runCheck(bin, root, opts)
   if (report === undefined && data === undefined && evaluation === undefined) {
-    process.exit(exitCode);
+    process.exit(exitCode)
   }
   if (format === 'json') {
     // passthrough — sverka's `data` verbatim under bro's envelope name;
@@ -647,10 +637,7 @@ export function runCheckCommand(argv: string[]): void {
     console.log(
       JSON.stringify({
         command: 'check',
-        // `data` is always an object — the envelope shape is the
-        // contract; on a run whose report didn't survive it's empty,
-        // its fields absent, never fabricated
-        data: data ?? {},
+        ...(data !== undefined ? { data } : {}),
         ...(report !== undefined ? { durationMs: report.durationMs } : {}),
         ...(evaluation !== undefined
           ? {
@@ -659,13 +646,13 @@ export function runCheckCommand(argv: string[]): void {
             }
           : {}),
       })
-    );
+    )
   } else if (report !== undefined) {
     for (const line of renderText(report)) {
-      console.log(line);
+      console.log(line)
     }
   }
   // process.exitCode, not exit(): a piped --json report can still have
   // buffered stdout writes pending — exiting would truncate it
-  process.exitCode = exitCode;
+  process.exitCode = exitCode
 }

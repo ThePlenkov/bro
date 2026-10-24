@@ -33,14 +33,12 @@ exactly one `sverka run` and parses its stdout envelope.
 **Recover the on-disk run report.** Newer sverka (Spec 53,
 `sverka.run/v1`) writes `.sverka/runs/<runId>/report.json` **before**
 returning the collection failure — the step stats survive on disk even
-though stdout drops them. On `COLLECTION_FAILED`, bro reads the report
-only when it is **unambiguously this run's**: exactly one `report.json`
-with mtime ≥ the spawn's start — an older file is a previous run, and
-two fresh files mean a concurrent sverka run (the envelope carries no
-runId to correlate by, so ambiguity attributes nothing). Verified by
+though stdout drops them. On `COLLECTION_FAILED`, bro reads the newest
+`report.json` whose mtime ≥ the spawn's start (freshness guard: a report
+older than the spawn is a previous run, never attributed). Verified by
 `schema === "sverka.run/v1"` and an object `data`. sverka 0.2.10 (the
 pinned floor) writes no report — recovery is opportunistic, absence
-degrades to a marker-only envelope.
+degrades to an empty `data`.
 
 **Marked evaluation, honest exit.** The check envelope and the runCheck
 result gain an `evaluationStatus` marker:
@@ -67,12 +65,12 @@ code pass through exactly as before.
 ## Plan
 
 - [x] spec (this file)
-- [x] `check.ts`: delete the retry; `COLLECTION_FAILED` → error +
-  `evaluationStatus:failed`, recover `data`/`report` from
-  `.sverka/runs/*/report.json` when fresh
-- [x] `check.test.ts`: one-spawn counter, evaluationStatus marker, report
-  recovery, stale-report guard, policy-fail verdict/exit passthrough
-- [x] `skills/check/SKILL.md`: retry policy line → evaluation-failure
-  contract
-- [x] `npm run build`, `npm run typecheck`, `npm test` (CI parity)
+- [ ] `check.ts`: delete the retry; `COLLECTION_FAILED` → error +
+      `evaluationStatus:failed`, recover `data`/`report` from
+      `.sverka/runs/*/report.json` when fresh
+- [ ] `check.test.ts`: one-spawn counter, evaluationStatus marker, report
+      recovery, stale-report guard, policy-fail verdict/exit passthrough
+- [ ] `skills/check/SKILL.md`: retry policy line → evaluation-failure
+      contract
+- [ ] `npm run build`, `npm run typecheck`, `npm test` (CI parity)
 - [ ] PR
