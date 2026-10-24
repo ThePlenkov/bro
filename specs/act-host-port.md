@@ -1,3 +1,7 @@
+---
+parent: project
+---
+
 # act-host-port — move the GitHub/GitLab host scripts into the bro connectors
 
 ## Problem
