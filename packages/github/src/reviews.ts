@@ -611,18 +611,44 @@ function reviewsQuery(afterClause: string): string {
  *  the control chars a two-step regex would miss). */
 const gqlAfter = (cursor: string): string => `, after: ${JSON.stringify(cursor)}`
 
-type ReviewsPage = {
-  data?: {
-    repository?: {
-      pullRequest?: {
-        headRefOid?: string
-        reviews?: {
-          pageInfo?: { hasNextPage?: boolean; endCursor?: string | null }
-          nodes?: PrReviewNode[]
-        }
-      }
-    }
+type ReviewsPullRequest = {
+  headRefOid?: string
+  reviews?: {
+    pageInfo?: { hasNextPage?: boolean; endCursor?: string | null }
+    nodes?: PrReviewNode[]
   }
+}
+
+type ReviewsPage = {
+  data?: { repository?: { pullRequest?: ReviewsPullRequest } }
+}
+
+/** One page of the reviews connection folded into the probe — shared by
+ *  the sync and async loops so they cannot diverge. FAIL CLOSED: a page
+ *  missing reviews/nodes/pageInfo, or a next cursor that is empty or
+ *  equal to the one just consumed, throws — a truncated or stuck
+ *  history is "unanswerable" (fetchState maps a thrown probe to
+ *  undefined), never "complete" with an unread CHANGES_REQUESTED. */
+function reviewsPageStep(
+  pr: number,
+  cursor: string,
+  page: ReviewsPullRequest | undefined
+): { headSha?: string; nodes: PrReviewNode[]; next: string | null } {
+  if (page === undefined) {
+    throw new Error(`pull request #${pr} not found`)
+  }
+  const reviews = page.reviews
+  if (reviews?.nodes === undefined || reviews.pageInfo === undefined) {
+    throw new Error(`pull request #${pr}: reviews page incomplete — approval unanswerable`)
+  }
+  if (reviews.pageInfo.hasNextPage !== true) {
+    return { headSha: page.headRefOid, nodes: reviews.nodes, next: null }
+  }
+  const next = reviews.pageInfo.endCursor
+  if (next === undefined || next === null || next === '' || next === cursor) {
+    throw new Error(`pull request #${pr}: reviews pagination did not advance`)
+  }
+  return { headSha: page.headRefOid, nodes: reviews.nodes, next }
 }
 
 function humanApproved(t: PrTarget, opts?: ApprovalProbeOpts): ApprovalVerdict {
@@ -644,18 +670,16 @@ function humanApproved(t: PrTarget, opts?: ApprovalProbeOpts): ApprovalVerdict {
       '-F',
       `pr=${t.pr}`,
     ]).data?.repository?.pullRequest
-    if (page === undefined) {
-      throw new Error(`pull request #${t.pr} not found`)
-    }
+    const step = reviewsPageStep(t.pr, cursor, page)
     // bind to the FRESHEST head seen — a push mid-pagination turns old
     // approvals stale (fail-closed); binding to page 1's head would
     // under-bind the verdict to a head that is already gone
-    headSha = page.headRefOid ?? headSha
-    nodes.push(...(page.reviews?.nodes ?? []))
-    if (page.reviews?.pageInfo?.hasNextPage !== true || !page.reviews.pageInfo.endCursor) {
+    headSha = step.headSha ?? headSha
+    nodes.push(...step.nodes)
+    if (step.next === null) {
       break
     }
-    cursor = page.reviews.pageInfo.endCursor
+    cursor = step.next
   }
   // the bound head rides the verdict so the caller can prove the
   // approval was evaluated against the head it is about to merge —
@@ -687,18 +711,16 @@ async function humanApprovedAsync(
         `pr=${t.pr}`,
       ])
     ).data?.repository?.pullRequest
-    if (page === undefined) {
-      throw new Error(`pull request #${t.pr} not found`)
-    }
+    const step = reviewsPageStep(t.pr, cursor, page)
     // bind to the FRESHEST head seen — a push mid-pagination turns old
     // approvals stale (fail-closed); binding to page 1's head would
     // under-bind the verdict to a head that is already gone
-    headSha = page.headRefOid ?? headSha
-    nodes.push(...(page.reviews?.nodes ?? []))
-    if (page.reviews?.pageInfo?.hasNextPage !== true || !page.reviews.pageInfo.endCursor) {
+    headSha = step.headSha ?? headSha
+    nodes.push(...step.nodes)
+    if (step.next === null) {
       break
     }
-    cursor = page.reviews.pageInfo.endCursor
+    cursor = step.next
   }
   return { ...headApprovalVerdict(nodes, headSha, opts?.approvers ?? []), headSha }
 }

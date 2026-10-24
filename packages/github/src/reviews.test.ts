@@ -95,7 +95,10 @@ case "$1 $2" in
 esac
 `
 
-function withFakeGh(env: Record<string, string>, fn: (log: string) => void): void {
+/** Arms the fake gh + env, returns the log path and the teardown. The
+ *  async probes' spawned child must still find the script on PATH when
+ *  it settles, so callers awaiting a promise hold the fixture open. */
+function armFakeGh(env: Record<string, string>): { log: string; restore: () => void } {
   const dir = mkdtempSync(join(tmpdir(), 'bro-fake-gh-'))
   const log = join(dir, 'gh.log')
   writeFileSync(log, '')
@@ -110,16 +113,26 @@ function withFakeGh(env: Record<string, string>, fn: (log: string) => void): voi
   process.env.PATH = `${dir}:${prevPath}`
   const prevEnv = Object.fromEntries(Object.keys(vars).map((k) => [k, process.env[k]]))
   Object.assign(process.env, { FAKE_GH_LOG: log, ...vars })
+  return {
+    log,
+    restore: () => {
+      process.env.PATH = prevPath
+      for (const [k, v] of Object.entries(prevEnv)) {
+        if (v === undefined) delete process.env[k]
+        else process.env[k] = v
+      }
+      delete process.env.FAKE_GH_LOG
+      rmSync(dir, { recursive: true, force: true })
+    },
+  }
+}
+
+function withFakeGh(env: Record<string, string>, fn: (log: string) => void): void {
+  const { log, restore } = armFakeGh(env)
   try {
     fn(log)
   } finally {
-    process.env.PATH = prevPath
-    for (const [k, v] of Object.entries(prevEnv)) {
-      if (v === undefined) delete process.env[k]
-      else process.env[k] = v
-    }
-    delete process.env.FAKE_GH_LOG
-    rmSync(dir, { recursive: true, force: true })
+    restore()
   }
 }
 
@@ -1113,5 +1126,64 @@ describe('githubReview humanApproved', { skip: WIN32 }, () => {
       // approval named the head being merged
       assert.equal(v.headSha, HEAD_SHA)
     })
+  })
+
+  test('a page without the reviews connection throws — incomplete, not complete', () => {
+    // a missing `reviews` field used to read as "history complete" —
+    // a CHANGES_REQUESTED sitting on the unread connection would pass
+    const p1 = JSON.stringify({
+      data: { repository: { pullRequest: { headRefOid: HEAD_SHA } } },
+    })
+    withFakeGh({ FAKE_GH_REVIEWS_P1: p1 }, () => {
+      assert.throws(() => githubReview().humanApproved!(target), /reviews page incomplete/)
+    })
+  })
+
+  test('hasNextPage with no endCursor throws — it cannot read the rest', () => {
+    const p1 = JSON.stringify({
+      data: {
+        repository: {
+          pullRequest: {
+            headRefOid: HEAD_SHA,
+            reviews: { pageInfo: { hasNextPage: true, endCursor: null }, nodes: [] },
+          },
+        },
+      },
+    })
+    withFakeGh({ FAKE_GH_REVIEWS_P1: p1 }, () => {
+      assert.throws(
+        () => githubReview().humanApproved!(target),
+        /pagination did not advance/
+      )
+    })
+  })
+
+  test('a cursor that repeats the one just consumed throws instead of spinning', () => {
+    // p2 claims another page but hands back the same cursor — the loop
+    // would otherwise request page 2 forever (the sync probe blocking
+    // the event loop on a hostile/stuck host)
+    const p1 = page(HEAD_SHA, [], 'cur2')
+    const p2 = page(HEAD_SHA, [], 'cur2')
+    withFakeGh({ FAKE_GH_REVIEWS_P1: p1, FAKE_GH_REVIEWS_P2: p2 }, () => {
+      assert.throws(
+        () => githubReview().humanApproved!(target),
+        /pagination did not advance/
+      )
+    })
+  })
+
+  test('the async loop fails closed the same way — one shared page step', async () => {
+    const p1 = JSON.stringify({
+      data: { repository: { pullRequest: { headRefOid: HEAD_SHA } } },
+    })
+    const fake = armFakeGh({ FAKE_GH_REVIEWS_P1: p1 })
+    try {
+      await assert.rejects(
+        githubReview().humanApprovedAsync!(target) as Promise<unknown>,
+        /reviews page incomplete/
+      )
+    } finally {
+      fake.restore()
+    }
   })
 })
