@@ -1414,6 +1414,28 @@ describe('bro agents down <target>', () => {
     }
   })
 
+  /** Shared skeleton of the TERM-survival scenarios (bro-l8c4f.3):
+   *  spawn a native agent running `command`, run `down`, and assert the
+   *  common invariants — exit 1, no `stopped` line, no `stopped`
+   *  marker — before the caller checks its scenario-specific output. */
+  const surviveDown = async (fx: Fixture, command: string) => {
+    writeFileSync(
+      join(fx.main, 'bro.config.json'),
+      JSON.stringify({ agents: { native: { command } } })
+    )
+    const up = await agents([
+      'up', 'fx-1', '--worktree', fx.main, '--beads-dir', fx.beads,
+      '--prompt-file', fx.promptFile(LONG_RUN),
+    ])
+    assert.equal(up.code, 0)
+    const down = await agents(['down', 'fx-1'])
+    assert.equal(down.code, 1)
+    assert.doesNotMatch(down.out.join('\n'), /^stopped /m)
+    // no stopped marker — the live unit still owns the entry
+    assert.notEqual(readAgentRegistry(fx.main)['fx-1']?.stopped, true)
+    return { down, status: await agents(['status', 'fx-1']) }
+  }
+
   test('a TERM-resistant wrapper survives — down exits 1, never `stopped`', async () => {
     // the wrapper records receipt of SIGTERM and keeps running — the
     // marker file proves the signal actually landed, so a no-op stop()
@@ -1421,35 +1443,14 @@ describe('bro agents down <target>', () => {
     const fx = fixture([{ id: 'fx-1', status: 'open' }])
     try {
       const hitFile = join(fx.main, 'term-received')
-      writeFileSync(
-        join(fx.main, 'bro.config.json'),
-        JSON.stringify({
-          agents: {
-            native: {
-              command: `trap 'touch "${hitFile}"' TERM; while :; do sleep 1; done # {promptFile}`,
-            },
-          },
-        })
-      )
-      const up = await agents([
-        'up', 'fx-1', '--worktree', fx.main, '--beads-dir', fx.beads,
-        '--prompt-file', fx.promptFile(LONG_RUN),
-      ])
-      assert.equal(up.code, 0)
-
-      const down = await agents(['down', 'fx-1'])
-      assert.equal(down.code, 1)
+      const { down, status } = await surviveDown(
+        fx, `trap 'touch "${hitFile}"' TERM; while :; do sleep 1; done # {promptFile}`)
       assert.match(down.err.join('\n'), /survived the stop signal — still running/)
-      assert.doesNotMatch(down.out.join('\n'), /^stopped /m)
-      // the signal provably landed — a stop() that never signaled fails here
       for (let i = 0; i < 40 && !existsSync(hitFile); i++) {
         await new Promise((r) => setTimeout(r, 50))
       }
       assert.ok(existsSync(hitFile), 'the wrapper never received SIGTERM')
-      // no stopped marker — the live run still owns the entry
-      assert.notEqual(readAgentRegistry(fx.main)['fx-1']?.stopped, true)
-      const st = await agents(['status', 'fx-1'])
-      assert.match(st.out.join('\n'), /state\s+running/)
+      assert.match(status.out.join('\n'), /state\s+running/)
     } finally {
       fx.restore()
     }
@@ -1461,27 +1462,11 @@ describe('bro agents down <target>', () => {
     // stands between this unit and a `stopped` marker (bro-l8c4f.3)
     const fx = fixture([{ id: 'fx-1', status: 'open' }])
     try {
-      writeFileSync(
-        join(fx.main, 'bro.config.json'),
-        JSON.stringify({
-          agents: { native: { command: '(trap "" TERM; exec sleep 30) & wait $! # {promptFile}' } },
-        })
-      )
-      const up = await agents([
-        'up', 'fx-1', '--worktree', fx.main, '--beads-dir', fx.beads,
-        '--prompt-file', fx.promptFile(LONG_RUN),
-      ])
-      assert.equal(up.code, 0)
-
-      const down = await agents(['down', 'fx-1'])
-      assert.equal(down.code, 1)
+      const { down, status } = await surviveDown(
+        fx, '(trap "" TERM; exec sleep 30) & wait $! # {promptFile}')
       assert.match(down.err.join('\n'), /survived the stop signal — still running/)
-      assert.doesNotMatch(down.out.join('\n'), /^stopped /m)
-      // the marker must NOT land over a live descendant — and the live
-      // group member keeps the whole unit reading `running`
-      assert.notEqual(readAgentRegistry(fx.main)['fx-1']?.stopped, true)
-      const st = await agents(['status', 'fx-1'])
-      assert.match(st.out.join('\n'), /state\s+running/)
+      // the live group member keeps the whole unit reading `running`
+      assert.match(status.out.join('\n'), /state\s+running/)
     } finally {
       fx.restore()
     }
@@ -1495,28 +1480,13 @@ describe('bro agents down <target>', () => {
     // read then says `lost`, so the verdict is unverified.
     const fx = fixture([{ id: 'fx-1', status: 'open' }])
     try {
-      writeFileSync(
-        join(fx.main, 'bro.config.json'),
-        JSON.stringify({
-          agents: { native: { command: 'setsid sleep 30 & wait $! # {promptFile}' } },
-        })
-      )
-      const up = await agents([
-        'up', 'fx-1', '--worktree', fx.main, '--beads-dir', fx.beads,
-        '--prompt-file', fx.promptFile(LONG_RUN),
-      ])
-      assert.equal(up.code, 0)
-
-      const down = await agents(['down', 'fx-1'])
-      assert.equal(down.code, 1)
+      const { down, status } = await surviveDown(
+        fx, 'setsid sleep 30 & wait $! # {promptFile}')
       assert.match(down.err.join('\n'), /stop unconfirmed/)
-      assert.doesNotMatch(down.out.join('\n'), /^stopped /m)
-      assert.notEqual(readAgentRegistry(fx.main)['fx-1']?.stopped, true)
       // the escapee lives on in its own session — the state read is
       // lost (no death record), which is exactly why the verdict stays
       // unverified; it exits on its own ~30 s out
-      const st = await agents(['status', 'fx-1'])
-      assert.match(st.out.join('\n'), /state\s+lost/)
+      assert.match(status.out.join('\n'), /state\s+lost/)
     } finally {
       fx.restore()
     }
