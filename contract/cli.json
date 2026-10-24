@@ -35,6 +35,7 @@
         "pulse",
         "telemetry",
         "trace",
+        "otel",
         "acp",
         "rig"
       ]
@@ -776,6 +777,58 @@
       "skill": "trace",
       "configKey": "telemetry",
       "plan": false,
+      "external": false
+    },
+    "otel": {
+      "name": "otel",
+      "group": "fleet",
+      "summary": "Hook-first telemetry — status|test|on|off; every dispatched hook exports through the emitHook facade (spec bro-xgejl)",
+      "spellings": [
+        "otel",
+        "fleet otel"
+      ],
+      "aliases": [],
+      "hidden": false,
+      "skill": "otel",
+      "configKey": "otel",
+      "plan": false,
+      "contract": {
+        "subs": {
+          "status": {
+            "flags": {
+              "--json": "machine-readable report"
+            },
+            "exits": {
+              "0": "report printed"
+            }
+          },
+          "test": {
+            "flags": {
+              "--json": "machine-readable report"
+            },
+            "exits": {
+              "0": "would-be record printed",
+              "2": "missing hook name"
+            }
+          },
+          "on": {
+            "exits": {
+              "0": "otel.enabled=true written to bro.config.local.json",
+              "2": "bro.config.local.ts shadows"
+            }
+          },
+          "off": {
+            "exits": {
+              "0": "otel.enabled=false written to bro.config.local.json",
+              "2": "bro.config.local.ts shadows"
+            }
+          }
+        },
+        "exits": {
+          "0": "status (bare `bro otel`)",
+          "2": "usage — unknown subcommand"
+        }
+      },
       "external": false
     },
     "acp-worker": {
