@@ -88,9 +88,9 @@ function ensureLocalConfigExcluded(): void {
     return // not a worktree (or no git) — nothing to exclude from
   }
   try {
-    execFileSync('git', ['-C', root, 'check-ignore', '-q', 'bro.config.local.json'], {
+    execFileSync('git', ['-C', root, 'check-ignore', '-q', 'bro.config.local.json'], { // NOSONAR — git PATH lookup is the contract
       stdio: 'ignore',
-    }) // NOSONAR
+    })
     return // already covered by .gitignore / info/exclude / global excludes
   } catch {
     /* not ignored — exclude it locally */

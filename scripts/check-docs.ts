@@ -79,13 +79,12 @@ for (const name of readdirSync(join(root, 'packages'))) {
 }
 const docsSite = join(root, 'site', 'content', 'docs')
 const walk = (dir: string): string[] =>
-  readdirSync(dir, { withFileTypes: true }).flatMap((e) =>
-    e.isDirectory()
-      ? walk(join(dir, e.name))
-      : /\.mdx?$/.test(e.name)
-        ? [join(dir, e.name)]
-        : []
-  )
+  readdirSync(dir, { withFileTypes: true }).flatMap((e) => {
+    if (e.isDirectory()) {
+      return walk(join(dir, e.name))
+    }
+    return /\.mdx?$/.test(e.name) ? [join(dir, e.name)] : []
+  })
 DOCS.push(
   ...walk(docsSite).map((p) => p.slice(root.length + 1))
 )
@@ -111,7 +110,8 @@ const sameVersion = (claimed: number[]): boolean => {
   }
   return true
 }
-const NODE_RE = /[Nn]ode(?:\.js)?\s*(?:≥|>=)\s*(\d+(?:\.\d+){0,2})|node-%3E%3D(\d+(?:\.\d+){0,2})/g
+const NODE_TEXT_RE = /[Nn]ode(?:\.js)?\s*(?:≥|>=)\s*(\d+(?:\.\d+){0,2})/g
+const NODE_BADGE_RE = /node-%3E%3D(\d+(?:\.\d+){0,2})/g
 
 // --- setup contract: the committed bro.config.json is never setup-written
 //     or gitignored in prose — those claims belong to bro.config.local.*.
@@ -124,8 +124,8 @@ const NEGATED = /(?:never|not|n't)\b/
 
 for (const doc of DOCS) {
   const text = readFileSync(join(root, doc), 'utf8')
-  for (const m of text.matchAll(NODE_RE)) {
-    const claimed = (m[1] ?? m[2]!).split('.').map(Number)
+  for (const m of [...text.matchAll(NODE_TEXT_RE), ...text.matchAll(NODE_BADGE_RE)]) {
+    const claimed = m[1]!.split('.').map(Number)
     if (!sameVersion(claimed)) {
       console.error(
         `${doc}: claims Node ${m[0].replace(/node-%3E%3D/, '>= ')} — engines floor is ${engines}`
