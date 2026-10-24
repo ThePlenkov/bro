@@ -147,6 +147,12 @@ interface ExecResult {
  *  pin is rewritten by gen-plugins on every gen/release run. */
 const NPX_PIN = '@broject/bro@0.2.5'
 
+/** pi hands the submitted prompt to its `input` event rather than to
+ *  the turn event — cached so the shared prompt-submit probe still
+ *  carries prompt-specific nudges. Absent event → '' → same behavior
+ *  as before the cache existed (fail-open). */
+let inputPrompt = ''
+
 /**
  * The pi binding: the host's own shape, nothing else. Every behavioral
  * decision lives in the shared driver, so this file is the whole of
@@ -203,6 +209,13 @@ function binding(pi: PiApi): BroHostBinding<ExtContext> {
         }
       },
     }),
+    promptOf(event) {
+      // the turn event carries a prompt when it has one; pi's `input`
+      // cache is the fallback for turn events without one
+      const payload = event as { prompt?: string }
+      const own = payload.prompt
+      return typeof own === 'string' && own !== '' ? own : inputPrompt
+    },
     npxPin: NPX_PIN,
   }
 }
@@ -210,6 +223,16 @@ function binding(pi: PiApi): BroHostBinding<ExtContext> {
 /** The extension entry point — pi calls this with its API. */
 export default function broExtension(pi: PiApi): void {
   const driver = createBroDriver(binding(pi), pi)
+
+  // pi's prompt arrives on its `input` event, not on the turn event —
+  // cache it for the binding's promptOf fallback
+  pi.on('input', (event: never) => {
+    // pi's event payload: the submitted prompt rides `input`
+    const payload = event as { prompt?: string }
+    if (typeof payload.prompt === 'string') {
+      inputPrompt = payload.prompt
+    }
+  })
 
   // pi's board also refreshes when the agent settles — a settle can
   // follow a turn without a turn_end, and the board must not go stale.

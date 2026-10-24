@@ -15,7 +15,7 @@
  * structural, mirroring upstream `packages/tui/src/tui.ts` and
  * `extensions/types.ts`.
  */
-import { boardLines, clip, type BoardStatus } from './core.ts'
+import { boardLines, clip, sanitizeTerminalText, type BoardStatus } from './core.ts'
 
 /** Where the panel reads its board — the driver's snapshot and refresh
  *  paths, so the widget and the panel never diverge on data. */
@@ -87,6 +87,67 @@ interface Row {
 const READY_SHOWN = 8
 const SILENT_MS = 60_000
 
+type InProgressBead = NonNullable<NonNullable<BoardStatus['beads']>['inProgress']>[number]
+type ReadyBead = NonNullable<NonNullable<BoardStatus['beads']>['ready']>[number]
+type FleetAgent = NonNullable<NonNullable<BoardStatus['fleet']>['agents']>[number]
+type LoopRun = NonNullable<NonNullable<BoardStatus['loop']>['runs']>[number]
+type Worktree = NonNullable<BoardStatus['worktrees']>[number]
+
+/** One in-progress bead's row. */
+function beadRow(b: InProgressBead): string {
+  const assignee = b.assignee ? `  [${b.assignee}]` : ''
+  return `◐ ${b.id ?? '?'}  ${clip(b.title ?? '', 96)}${assignee}`
+}
+
+/** One ready bead's row. */
+function readyRow(b: ReadyBead): string {
+  return `✓ ${b.id ?? '?'}  ${clip(b.title ?? '', 96)}`
+}
+
+/** One fleet agent's row: id, backend, state, then what it is doing. */
+function fleetRow(a: FleetAgent): string {
+  const parts = [`▶ ${a.id ?? '?'}  ${a.backend ?? ''}  ${a.state ?? '?'}`]
+  if (a.state === 'running' && a.step) {
+    parts.push(a.step)
+  }
+  if (a.state !== 'running' && a.cause) {
+    parts.push(`(${a.cause})`)
+  }
+  if (a.worktree) {
+    parts.push(a.worktree)
+  }
+  return parts.join('  ')
+}
+
+/** One loop run's row: bead, state, pid, silence, worktree. */
+function loopRow(r: LoopRun): string {
+  const parts = [`${r.state === 'running' ? '▶' : '·'} ${r.beadId ?? r.slug ?? '?'}`]
+  parts.push(r.state ?? '?')
+  if (typeof r.pid === 'number') {
+    parts.push(`pid ${r.pid}`)
+  }
+  const silent = r.silentMs ?? 0
+  if (silent > SILENT_MS) {
+    parts.push(`silent ${Math.round(silent / 60_000)}m`)
+  }
+  if (r.worktree) {
+    parts.push(r.worktree)
+  }
+  return parts.join('  ')
+}
+
+/** One worktree's row: name, branch, state, main marker. */
+function worktreeRow(w: Worktree): string {
+  const parts = [`⎇ ${w.name ?? w.path ?? '?'}  ${w.branch ?? '?'}`]
+  if (w.state) {
+    parts.push(w.state)
+  }
+  if (w.main) {
+    parts.push('(main)')
+  }
+  return parts.join('  ')
+}
+
 /** Build the panel's sections from a snapshot. Absent data hides its
  *  section; present-but-empty data shows it with a placeholder — the
  *  difference between "no loop configured" and "loop with 0 runs" is
@@ -101,17 +162,11 @@ function buildSections(s: BoardStatus | null): Section[] {
 /** beads + ready — what is claimed and what is queued. */
 function workSections(s: BoardStatus): Section[] {
   const inProgress = s.beads?.inProgress ?? []
-  const beadRows =
-    inProgress.length === 0
-      ? ['— none in progress —']
-      : inProgress.map(
-          (b) =>
-            `◐ ${b.id ?? '?'}  ${clip(b.title ?? '', 96)}${b.assignee ? `  [${b.assignee}]` : ''}`
-        )
+  const beadRows = inProgress.length === 0 ? ['— none in progress —'] : inProgress.map(beadRow)
   const ready = s.beads?.ready ?? []
   const readyTotal = s.beads?.readyTotal ?? ready.length
   const shown = ready.slice(0, READY_SHOWN)
-  const readyRows = shown.map((b) => `✓ ${b.id ?? '?'}  ${clip(b.title ?? '', 96)}`)
+  const readyRows = shown.map(readyRow)
   if (readyTotal - shown.length > 0) {
     readyRows.push(`… ${readyTotal - shown.length} more ready`)
   }
@@ -130,43 +185,16 @@ function agentSections(s: BoardStatus): Section[] {
   sections.push({
     id: 'fleet',
     title: `fleet (${running}${max > 0 ? `/${max}` : ''})`,
-    rows:
-      agents.length === 0
-        ? ['— no agents —']
-        : agents.map((a) => {
-            const parts = [`▶ ${a.id ?? '?'}  ${a.backend ?? ''}  ${a.state ?? '?'}`]
-            if (a.state === 'running' && a.step) {
-              parts.push(a.step)
-            }
-            if (a.state !== 'running' && a.cause) {
-              parts.push(`(${a.cause})`)
-            }
-            if (a.worktree) {
-              parts.push(a.worktree)
-            }
-            return parts.join('  ')
-          }),
+    rows: agents.length === 0 ? ['— no agents —'] : agents.map(fleetRow),
   })
-  const runs = s.loop?.runs ?? []
-  if (runs.length > 0) {
+  // a configured loop with zero runs shows its empty state — hiding it
+  // would make "no runs" indistinguishable from "no loop"
+  if (s.loop !== undefined) {
+    const runs = s.loop.runs ?? []
     sections.push({
       id: 'loop',
       title: `loop (${runs.filter((r) => r.state === 'running').length})`,
-      rows: runs.map((r) => {
-        const parts = [`${r.state === 'running' ? '▶' : '·'} ${r.beadId ?? r.slug ?? '?'}`]
-        parts.push(r.state ?? '?')
-        if (typeof r.pid === 'number') {
-          parts.push(`pid ${r.pid}`)
-        }
-        const silent = r.silentMs ?? 0
-        if (silent > SILENT_MS) {
-          parts.push(`silent ${Math.round(silent / 60_000)}m`)
-        }
-        if (r.worktree) {
-          parts.push(r.worktree)
-        }
-        return parts.join('  ')
-      }),
+      rows: runs.length === 0 ? ['— no runs —'] : runs.map(loopRow),
     })
   }
   return sections
@@ -175,21 +203,13 @@ function agentSections(s: BoardStatus): Section[] {
 /** worktrees + drill + repo — the checkout around the session. */
 function checkoutSections(s: BoardStatus): Section[] {
   const sections: Section[] = []
-  const trees = s.worktrees ?? []
-  if (trees.length > 0) {
+  // an empty list shows its empty state (see the loop note above)
+  if (s.worktrees !== undefined) {
+    const trees = s.worktrees
     sections.push({
       id: 'worktrees',
       title: `worktrees (${trees.length})`,
-      rows: trees.map((w) => {
-        const parts = [`⎇ ${w.name ?? w.path ?? '?'}  ${w.branch ?? '?'}`]
-        if (w.state) {
-          parts.push(w.state)
-        }
-        if (w.main) {
-          parts.push('(main)')
-        }
-        return parts.join('  ')
-      }),
+      rows: trees.length === 0 ? ['— none —'] : trees.map(worktreeRow),
     })
   }
   const frame = s.drill?.frame
@@ -331,8 +351,10 @@ class BoardPanelImpl implements BoardPanelComponent {
         const body = sections.find((x) => x.id === id)?.rows[n] ?? ''
         text = `${mark}   ${body}`
       }
-      // clip before coloring: clip() is length-based and ANSI-blind
-      let line = clip(text, width)
+      // strip board text first — escape sequences would drive the
+      // terminal and would also spend the width budget — then clip
+      // before coloring: clip() is length-based and ANSI-blind
+      let line = clip(sanitizeTerminalText(text), width)
       if (row.kind === 'header' || row.kind === 'footer' || current) {
         line = this.color(row.kind === 'footer' ? 'muted' : 'accent', line)
       }

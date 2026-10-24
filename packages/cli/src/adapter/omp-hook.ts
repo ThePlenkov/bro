@@ -32,28 +32,168 @@
 import type { OmpApi } from './omp-api.ts'
 
 /** A force push rewrites shared history — never allowed. The command
- *  is split on shell separators first: a flag-looking word in another
- *  command must not trip the guard, and a real force push must not
- *  hide behind one. */
-const SHELL_SPLIT = /&&|\|\||[;|\n|]/
+ *  is tokenized shell-wise before judgment: flags live in words, not
+ *  raw text — a quoted example inside `echo` is not a push, while a
+ *  grouped short cluster (`git push -fu`) still is one. Segments split
+ *  on shell separators first, so a flag-looking word in another
+ *  command never trips the guard and a real force never hides behind
+ *  one. */
+const SHELL_SPLIT = /&&|[;&|\n]/
 
-/** `git [global opts] push …` — git's global options (`-C dir`,
- *  `-c k=v`, `--git-dir=…`) may sit between `git` and `push`. An
- *  option's separate value never consumes the `push` word itself. */
-const PUSH_CALL = /(?:^|\s)git(?:\s+-{1,2}[^\s]+(?:\s+(?!push\b)[^\s]+)?)*\s+push\b(.*)/
+/** git global options that take a separate value word — they sit
+ *  between `git` and `push` and must not eat the `push` word. */
+const GLOBAL_VALUE_OPTS: Record<string, true> = {
+  '-C': true,
+  '-c': true,
+  '--git-dir': true,
+  '--work-tree': true,
+  '--exec-path': true,
+  '--namespace': true,
+  '--config-env': true,
+}
 
-/** Force spellings in the push arguments: `--force` as a whole word
- *  (never `--force-with-lease` / `--force-if-includes` — a following
- *  hyphen disqualifies), bare `-f`, or a leading-`+` refspec
- *  (`git push origin +main`). */
-const FORCE_FLAG = /(?:^|\s)--force(?!-)|(?:^|\s)-f(?![\w-])|(?:^|\s)\+\S+/
+/** Shells that re-parse their arguments: a force push can hide inside *  their command string (`bash -c 'git push -f'`, `eval git push -f`). */
+const NESTED_SHELLS: Record<string, true> = {
+  sh: true,
+  bash: true,
+  zsh: true,
+  dash: true,
+  ksh: true,
+  fish: true,
+  eval: true,
+  source: true,
+  '.': true,
+}
+
+/** Wrappers that still run their argument as a command. */
+const WRAPPERS: Record<string, true> = {
+  command: true,
+  nohup: true,
+  nice: true,
+  stdbuf: true,
+  env: true,
+}
+
+/** `NAME=value` leading assignments — `A=b git push -f` runs git. */
+const ASSIGNMENT = /^[A-Za-z_][A-Za-z0-9_]*=/
+
+/** Shell words: whitespace separates, quotes group (`"-f"` → `-f`,
+ *  `"git push"` → one word), a backslash escapes the next character.
+ *  An unterminated quote swallows the rest — a longer word, no crash. */
+function words(segment: string): string[] {
+  const out: string[] = []
+  let cur = ''
+  let started = false
+  let quote = ''
+  for (let i = 0; i < segment.length; i++) {
+    const ch = segment[i]
+    if (quote !== '') {
+      if (ch === quote) {
+        quote = ''
+      } else {
+        cur += ch
+      }
+      continue
+    }
+    if (ch === '"' || ch === "'") {
+      quote = ch
+      started = true
+      continue
+    }
+    if (ch === '\\' && i + 1 < segment.length) {
+      cur += segment[i + 1]
+      started = true
+      i++
+      continue
+    }
+    if (ch === ' ' || ch === '\t') {
+      if (started) {
+        out.push(cur)
+        cur = ''
+        started = false
+      }
+      continue
+    }
+    cur += ch
+    started = true
+  }
+  if (started) {
+    out.push(cur)
+  }
+  return out
+}
+
+/** One push-argument word forces history: `--force` (never
+ *  `--force-with-lease` — the safe form the block reason points to), a
+ *  short-flag cluster carrying `f` (`-f`, `-fu`, `-uf`), or a
+ *  leading-`+` refspec. */
+function isForceWord(word: string): boolean {
+  if (word === '--force' || word.startsWith('+')) {
+    return true
+  }
+  return word.startsWith('-') && !word.startsWith('--') && word.slice(1).includes('f')
+}
+
+/** Does `git [wrappers/global opts] push <args>` in this word list
+ *  force? */
+function gitPushForces(toks: string[]): boolean {
+  let i = 0
+  while (i < toks.length && (ASSIGNMENT.test(toks[i]) || toks[i] in WRAPPERS)) {
+    i++
+  }
+  if (toks[i] !== 'git') {
+    return false
+  }
+  i++
+  while (i < toks.length && toks[i].startsWith('-')) {
+    const opt = toks[i]
+    i++
+    if (opt in GLOBAL_VALUE_OPTS && i < toks.length && !toks[i].startsWith('-')) {
+      i++
+    }
+  }
+  if (toks[i] !== 'push') {
+    return false
+  }
+  return toks.slice(i + 1).some(isForceWord)
+}
+
+/** The command string a shell receives: skip its flags, join the rest. */
+function nestedCommand(toks: string[]): string {
+  let i = 0
+  while (i < toks.length && toks[i].startsWith('-')) {
+    i++
+  }
+  return toks.slice(i).join(' ')
+}
+
+/** Segment judgment: a shell re-parses (recurse into its string),
+ *  anything else must be `git … push … force` itself. */
+function segmentForces(toks: string[], depth: number): boolean {
+  const head = (toks[0] ?? '').split('/').pop() ?? ''
+  if (head in NESTED_SHELLS) {
+    return pushesForce(nestedCommand(toks.slice(1)), depth - 1)
+  }
+  return gitPushForces(toks)
+}
+
+/** Does any shell segment of this command force-push? Command
+ *  substitutions (`$(…)`, backticks) execute too — unpack them before
+ *  splitting. `depth` bounds nesting (`sh -c 'sh -c "…"'`). */
+function pushesForce(command: string, depth: number): boolean {
+  if (depth <= 0) {
+    return false
+  }
+  const unpacked = command.replace(/\$\(([^)]*)\)/g, ' $1 ').replace(/`([^`]*)`/g, ' $1 ')
+  return unpacked.split(SHELL_SPLIT).some((segment) => {
+    const toks = words(segment)
+    return toks.length > 0 && segmentForces(toks, depth)
+  })
+}
 
 /** Does any shell segment of this command force-push? */
 export function isForcePush(command: string): boolean {
-  return command.split(SHELL_SPLIT).some((segment) => {
-    const push = PUSH_CALL.exec(segment)
-    return push !== null && FORCE_FLAG.test(push[1] ?? '')
-  })
+  return pushesForce(command, 3)
 }
 
 export default function broGuard(pi: OmpApi): void {

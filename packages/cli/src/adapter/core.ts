@@ -412,9 +412,32 @@ export function clip(text: string, width: number): string {
 }
 
 /**
+ * Strip terminal control sequences from untrusted board text — bead
+ * titles, worktree names, agent steps and drill titles are task-store
+ * data, and a title carrying ANSI/OSC bytes would drive the user's
+ * terminal (erase rows, forge content, OSC-52 clipboard writes) instead
+ * of being displayed. Applied at both sinks: the widget's `boardLines`
+ * and the interactive panel's render, before clipping so control bytes
+ * cannot spend the width budget either.
+ */
+export function sanitizeTerminalText(text: string): string {
+  return text
+    .replace(/\t/g, ' ')
+    // OSC sequences: ESC ] … BEL | ESC \  (consume lazily up to a terminator)
+    .replace(/\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)?/g, '')
+    // CSI: ESC [ … final byte
+    .replace(/\x1b\[[0-?]*[ -/]*[@-~]/g, '')
+    // remaining single-shift / string escapes
+    .replace(/\x1b[@-Z\\^_]/g, '')
+    // residual C0 controls and DEL — newlines would smuggle rows
+    .replace(/[\x00-\x1f\x7f]/g, '')
+}
+
+/**
  * The widget board — one compact summary line, then the top in-progress
  * beads and running fleet agents. A string array is the simplest board
- * any host can render.
+ * any host can render. Lines pass the sanitizer: board fields are
+ * untrusted task-store text.
  */
 export function boardLines(s: BoardStatus): string[] {
   const beads = s.beads?.inProgress ?? []
@@ -439,7 +462,7 @@ export function boardLines(s: BoardStatus): string[] {
     const step = a.step ? `  ${a.step}` : ''
     lines.push(`  ▶ ${a.id ?? '?'}  ${a.backend ?? ''}${step}`)
   }
-  return lines
+  return lines.map((line) => sanitizeTerminalText(line))
 }
 
 /** The footer crumb — the one-glance form of the same board. */

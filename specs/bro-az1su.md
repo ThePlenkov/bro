@@ -39,8 +39,10 @@ structural).
   `done(undefined)` and closes. Footer line documents the keys.
 - Render contract from docs/tui.md: return the **same array reference**
   while nothing changed (cache keyed by width + dirty flag); clip every
-  line with `clip()` from `core.ts`; theme colors applied only after
-  clipping (ANSI-safe), header accent / footer muted.
+  line with `clip()` from `core.ts` **after** `sanitizeTerminalText()`
+  (board fields are untrusted task-store text — ANSI/OSC bytes must not
+  drive the terminal nor spend the width budget); theme colors applied
+  only after clipping (ANSI-safe), header accent / footer muted.
 - `BoardStatus` in `core.ts` gains the structural fields the panel reads
   (`worktrees`, `beads.ready`, `loop.runs`, `watch.attention`, …) — the
   JSON already flows through; only the typed window widens.

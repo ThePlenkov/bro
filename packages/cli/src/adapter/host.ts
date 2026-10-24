@@ -163,8 +163,13 @@ export function sharedBinding<Ctx extends BroContext>(
     },
     paint: host.paint,
     clear(ctx) {
-      ctx.ui.setWidget(BOARD_KEY, undefined)
-      ctx.ui.setStatus(BOARD_KEY, undefined)
+      try {
+        ctx.ui.setWidget(BOARD_KEY, undefined)
+        ctx.ui.setStatus(BOARD_KEY, undefined)
+      } catch {
+        // a host that invalidated its context (pi session swap) makes
+        // cleanup a no-op — an advisory clear is never worth a throw
+      }
     },
     notify: host.notify,
     refuseStop: host.refuseStop,
@@ -404,7 +409,11 @@ export function createBroDriver<Ctx>(host: BroHostBinding<Ctx>, api: BroHostApi<
     if (seq !== refreshSeq) {
       return board
     }
-    board = next
+    // fail-open: a failed probe is "no opinion", not "no board" — keep
+    // the last usable snapshot instead of blanking the widget
+    if (next !== null) {
+      board = next
+    }
     paint(ctx)
     return board
   }
@@ -652,6 +661,10 @@ export function createBroDriver<Ctx>(host: BroHostBinding<Ctx>, api: BroHostApi<
         { customType: 'bro-output', content: `$ bro ${trimmed}\n${text}`, display: true },
         { triggerTurn: false }
       )
+      // a state-changing command must not leave the widget and the
+      // mode bridges on the pre-command snapshot until some unrelated
+      // lifecycle event repaints
+      await refreshBoard(ctx).catch(() => {})
     },
   })
 

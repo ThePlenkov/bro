@@ -235,3 +235,14 @@ test('one chunk carries every key: moves, collapse, expand in order', () => {
   panel.handleInput('\x1b[Bj') // arrow + j in one chunk = two moves
   assert.equal(cursorLine(panel.render(120)), 3)
 })
+
+test('present-but-empty loop and worktrees show their empty state', () => {
+  const { panel } = harness({
+    branch: 'x',
+    loop: { stallMin: 5, runs: [] },
+    worktrees: [],
+  })
+  const text = panel.render(120).join('\n')
+  assert.match(text, /— no runs —/, 'a configured loop with no runs is visible')
+  assert.match(text, /— none —/, 'an empty worktree list is visible')
+})

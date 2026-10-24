@@ -273,9 +273,22 @@ function clip(text, width) {
 	return text.length > width ? `${text.slice(0, Math.max(0, width - 1))}${ELLIPSIS}` : text;
 }
 /**
+* Strip terminal control sequences from untrusted board text — bead
+* titles, worktree names, agent steps and drill titles are task-store
+* data, and a title carrying ANSI/OSC bytes would drive the user's
+* terminal (erase rows, forge content, OSC-52 clipboard writes) instead
+* of being displayed. Applied at both sinks: the widget's `boardLines`
+* and the interactive panel's render, before clipping so control bytes
+* cannot spend the width budget either.
+*/
+function sanitizeTerminalText(text) {
+	return text.replace(/\t/g, " ").replace(/\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)?/g, "").replace(/\x1b\[[0-?]*[ -/]*[@-~]/g, "").replace(/\x1b[@-Z\\^_]/g, "").replace(/[\x00-\x1f\x7f]/g, "");
+}
+/**
 * The widget board — one compact summary line, then the top in-progress
 * beads and running fleet agents. A string array is the simplest board
-* any host can render.
+* any host can render. Lines pass the sanitizer: board fields are
+* untrusted task-store text.
 */
 function boardLines(s) {
 	const beads = s.beads?.inProgress ?? [];
@@ -294,7 +307,7 @@ function boardLines(s) {
 		const step = a.step ? `  ${a.step}` : "";
 		lines.push(`  ▶ ${a.id ?? "?"}  ${a.backend ?? ""}${step}`);
 	}
-	return lines;
+	return lines.map((line) => sanitizeTerminalText(line));
 }
 /** The footer crumb — the one-glance form of the same board. */
 function statusCrumb(s) {
@@ -305,6 +318,40 @@ function statusCrumb(s) {
 //#region packages/cli/src/adapter/board-panel.ts
 const READY_SHOWN = 8;
 const SILENT_MS = 6e4;
+/** One in-progress bead's row. */
+function beadRow(b) {
+	const assignee = b.assignee ? `  [${b.assignee}]` : "";
+	return `◐ ${b.id ?? "?"}  ${clip(b.title ?? "", 96)}${assignee}`;
+}
+/** One ready bead's row. */
+function readyRow(b) {
+	return `✓ ${b.id ?? "?"}  ${clip(b.title ?? "", 96)}`;
+}
+/** One fleet agent's row: id, backend, state, then what it is doing. */
+function fleetRow(a) {
+	const parts = [`▶ ${a.id ?? "?"}  ${a.backend ?? ""}  ${a.state ?? "?"}`];
+	if (a.state === "running" && a.step) parts.push(a.step);
+	if (a.state !== "running" && a.cause) parts.push(`(${a.cause})`);
+	if (a.worktree) parts.push(a.worktree);
+	return parts.join("  ");
+}
+/** One loop run's row: bead, state, pid, silence, worktree. */
+function loopRow(r) {
+	const parts = [`${r.state === "running" ? "▶" : "·"} ${r.beadId ?? r.slug ?? "?"}`];
+	parts.push(r.state ?? "?");
+	if (typeof r.pid === "number") parts.push(`pid ${r.pid}`);
+	const silent = r.silentMs ?? 0;
+	if (silent > SILENT_MS) parts.push(`silent ${Math.round(silent / 6e4)}m`);
+	if (r.worktree) parts.push(r.worktree);
+	return parts.join("  ");
+}
+/** One worktree's row: name, branch, state, main marker. */
+function worktreeRow(w) {
+	const parts = [`⎇ ${w.name ?? w.path ?? "?"}  ${w.branch ?? "?"}`];
+	if (w.state) parts.push(w.state);
+	if (w.main) parts.push("(main)");
+	return parts.join("  ");
+}
 /** Build the panel's sections from a snapshot. Absent data hides its
 *  section; present-but-empty data shows it with a placeholder — the
 *  difference between "no loop configured" and "loop with 0 runs" is
@@ -324,11 +371,11 @@ function buildSections(s) {
 /** beads + ready — what is claimed and what is queued. */
 function workSections(s) {
 	const inProgress = s.beads?.inProgress ?? [];
-	const beadRows = inProgress.length === 0 ? ["— none in progress —"] : inProgress.map((b) => `◐ ${b.id ?? "?"}  ${clip(b.title ?? "", 96)}${b.assignee ? `  [${b.assignee}]` : ""}`);
+	const beadRows = inProgress.length === 0 ? ["— none in progress —"] : inProgress.map(beadRow);
 	const ready = s.beads?.ready ?? [];
 	const readyTotal = s.beads?.readyTotal ?? ready.length;
 	const shown = ready.slice(0, READY_SHOWN);
-	const readyRows = shown.map((b) => `✓ ${b.id ?? "?"}  ${clip(b.title ?? "", 96)}`);
+	const readyRows = shown.map(readyRow);
 	if (readyTotal - shown.length > 0) readyRows.push(`… ${readyTotal - shown.length} more ready`);
 	return [{
 		id: "beads",
@@ -349,44 +396,29 @@ function agentSections(s) {
 	sections.push({
 		id: "fleet",
 		title: `fleet (${running}${max > 0 ? `/${max}` : ""})`,
-		rows: agents.length === 0 ? ["— no agents —"] : agents.map((a) => {
-			const parts = [`▶ ${a.id ?? "?"}  ${a.backend ?? ""}  ${a.state ?? "?"}`];
-			if (a.state === "running" && a.step) parts.push(a.step);
-			if (a.state !== "running" && a.cause) parts.push(`(${a.cause})`);
-			if (a.worktree) parts.push(a.worktree);
-			return parts.join("  ");
-		})
+		rows: agents.length === 0 ? ["— no agents —"] : agents.map(fleetRow)
 	});
-	const runs = s.loop?.runs ?? [];
-	if (runs.length > 0) sections.push({
-		id: "loop",
-		title: `loop (${runs.filter((r) => r.state === "running").length})`,
-		rows: runs.map((r) => {
-			const parts = [`${r.state === "running" ? "▶" : "·"} ${r.beadId ?? r.slug ?? "?"}`];
-			parts.push(r.state ?? "?");
-			if (typeof r.pid === "number") parts.push(`pid ${r.pid}`);
-			const silent = r.silentMs ?? 0;
-			if (silent > SILENT_MS) parts.push(`silent ${Math.round(silent / 6e4)}m`);
-			if (r.worktree) parts.push(r.worktree);
-			return parts.join("  ");
-		})
-	});
+	if (s.loop !== void 0) {
+		const runs = s.loop.runs ?? [];
+		sections.push({
+			id: "loop",
+			title: `loop (${runs.filter((r) => r.state === "running").length})`,
+			rows: runs.length === 0 ? ["— no runs —"] : runs.map(loopRow)
+		});
+	}
 	return sections;
 }
 /** worktrees + drill + repo — the checkout around the session. */
 function checkoutSections(s) {
 	const sections = [];
-	const trees = s.worktrees ?? [];
-	if (trees.length > 0) sections.push({
-		id: "worktrees",
-		title: `worktrees (${trees.length})`,
-		rows: trees.map((w) => {
-			const parts = [`⎇ ${w.name ?? w.path ?? "?"}  ${w.branch ?? "?"}`];
-			if (w.state) parts.push(w.state);
-			if (w.main) parts.push("(main)");
-			return parts.join("  ");
-		})
-	});
+	if (s.worktrees !== void 0) {
+		const trees = s.worktrees;
+		sections.push({
+			id: "worktrees",
+			title: `worktrees (${trees.length})`,
+			rows: trees.length === 0 ? ["— none —"] : trees.map(worktreeRow)
+		});
+	}
 	const frame = s.drill?.frame;
 	if (frame) sections.push({
 		id: "drill",
@@ -504,7 +536,7 @@ var BoardPanelImpl = class {
 				itemCounts.set(id, n + 1);
 				text = `${mark}   ${sections.find((x) => x.id === id)?.rows[n] ?? ""}`;
 			}
-			let line = clip(text, width);
+			let line = clip(sanitizeTerminalText(text), width);
 			if (row.kind === "header" || row.kind === "footer" || current) line = this.color(row.kind === "footer" ? "muted" : "accent", line);
 			lines.push(line);
 		}
@@ -1285,8 +1317,10 @@ function sharedBinding(host) {
 		},
 		paint: host.paint,
 		clear(ctx) {
-			ctx.ui.setWidget(BOARD_KEY, void 0);
-			ctx.ui.setStatus(BOARD_KEY, void 0);
+			try {
+				ctx.ui.setWidget(BOARD_KEY, void 0);
+				ctx.ui.setStatus(BOARD_KEY, void 0);
+			} catch {}
 		},
 		notify: host.notify,
 		refuseStop: host.refuseStop,
@@ -1385,7 +1419,7 @@ function createBroDriver(host, api) {
 		if (cmd === null || seq !== refreshSeq) return board;
 		const next = await statusJson(cmd, cwd);
 		if (seq !== refreshSeq) return board;
-		board = next;
+		if (next !== null) board = next;
 		paint(ctx);
 		return board;
 	};
@@ -1556,6 +1590,7 @@ function createBroDriver(host, api) {
 				content: `$ bro ${trimmed}\n${text}`,
 				display: true
 			}, { triggerTurn: false });
+			await refreshBoard(ctx).catch(() => {});
 		}
 	});
 	api.registerTool({
