@@ -4,6 +4,739 @@ import { existsSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
+//#region packages/cli/src/adapter/core.ts
+/** How long a normal hook probe may take. */
+const HOOK_TIMEOUT_MS = 15e3;
+/** session-start/post-compaction list `bd ready` and scan worktrees —
+*  measured at 20-40s in a loaded repo. */
+const REHYDRATION_TIMEOUT_MS = 45e3;
+/** Cap on a hook's stdout — a runaway child must not eat the heap. */
+const MAX_OUTPUT = 1 << 20;
+/**
+* `node` on PATH, not process.execPath — a host may ship as a compiled
+* binary whose execPath IS that binary, so running it with our own
+* entry script would re-enter the host instead of running the script.
+*/
+function jsRuntime() {
+	return process.platform === "win32" ? "node.exe" : "node";
+}
+/** The bro CLI bundled next to this adapter (`dist/index.js`). */
+function siblingCli() {
+	for (const rel of ["./index.js", "../dist/index.js"]) {
+		const candidate = fileURLToPath(new URL(rel, import.meta.url));
+		if (existsSync(candidate)) return candidate;
+	}
+	return null;
+}
+/** The bro CLI of the checkout this adapter was loaded from — the
+*  development path: the adapter's own source tree wins over any
+*  published package, so a local edit is live without a rebuild. */
+function checkoutCli() {
+	let dir = dirname(fileURLToPath(import.meta.url));
+	for (;;) {
+		const candidate = join(dir, "packages", "cli", "dist", "index.js");
+		if (existsSync(candidate)) return candidate;
+		const parent = dirname(dir);
+		if (parent === dir) return null;
+		dir = parent;
+	}
+}
+/**
+* SIGKILL a hung child on a timer. The child is spawned detached, so
+* killing the pid's group takes the grandchildren down too — a hook
+* that spawns `bd` must not leave a dolt server behind.
+*/
+function killAfter(child, ms, onTimeout) {
+	const timer = setTimeout(() => {
+		try {
+			if (child.pid !== void 0) process.kill(-child.pid, "SIGKILL");
+		} catch {
+			try {
+				child.kill("SIGKILL");
+			} catch {}
+		}
+		onTimeout();
+	}, ms);
+	timer.unref?.();
+	return timer;
+}
+/** Does this command exit zero? Used to probe whether a candidate CLI
+*  actually speaks bro's hook protocol — an older bro on PATH fails the
+*  probe instead of failing every hook. */
+async function exitsZero(cmd, args) {
+	const { promise, resolve } = Promise.withResolvers();
+	let child;
+	try {
+		child = spawn(cmd, args, {
+			stdio: [
+				"pipe",
+				"ignore",
+				"ignore"
+			],
+			detached: process.platform !== "win32"
+		});
+	} catch {
+		return false;
+	}
+	const timer = killAfter(child, HOOK_TIMEOUT_MS, () => resolve(false));
+	child.on("error", () => {
+		clearTimeout(timer);
+		resolve(false);
+	});
+	child.on("close", (code) => {
+		clearTimeout(timer);
+		resolve(code === 0);
+	});
+	child.stdin?.on("error", () => {});
+	child.stdin?.end("");
+	return promise;
+}
+/**
+* The CLI ladder, in order: the pinned command, the bundled sibling,
+* the checkout's dist, `bro` on PATH, and finally the pinned npx
+* package. Every tier is probed with `bro hooks` — the silent
+* capability probe — so a tier that resolves to something that is not
+* bro is skipped rather than failing every hook.
+*/
+async function resolveCommand(opts = {}) {
+	if (opts.command !== void 0 && opts.command !== "") {
+		const [cmd, ...args] = opts.command.split(/\s+/).filter((p) => p !== "");
+		if (cmd !== void 0 && await exitsZero(cmd, [...args, "hooks"])) return {
+			cmd,
+			args
+		};
+	}
+	for (const entry of [siblingCli(), checkoutCli()]) if (entry !== null && await exitsZero(jsRuntime(), [entry, "hooks"])) return {
+		cmd: jsRuntime(),
+		args: [entry]
+	};
+	if (await exitsZero("bro", ["hooks"])) return {
+		cmd: "bro",
+		args: []
+	};
+	if (opts.npxPin !== void 0 && await exitsZero("npx", ["--version"])) return {
+		cmd: "npx",
+		args: [
+			"-y",
+			"--prefer-offline",
+			opts.npxPin
+		]
+	};
+	return null;
+}
+/**
+* Run one `bro hooks <event>` with the payload on stdin; resolve null on
+* every failure mode — spawn error, timeout, nonzero exit, garbage out.
+*/
+async function callHook(command, event, payload, cwd, timeoutMs) {
+	const { promise, resolve } = Promise.withResolvers();
+	let child;
+	try {
+		child = spawn(command.cmd, [
+			...command.args,
+			"hooks",
+			event
+		], {
+			cwd,
+			stdio: [
+				"pipe",
+				"pipe",
+				"ignore"
+			],
+			detached: process.platform !== "win32"
+		});
+	} catch {
+		return null;
+	}
+	let settled = false;
+	const settle = (value) => {
+		if (!settled) {
+			settled = true;
+			resolve(value);
+		}
+	};
+	const timer = killAfter(child, timeoutMs, () => settle(null));
+	let out = "";
+	child.stdout?.setEncoding("utf8");
+	child.stdout?.on("data", (chunk) => {
+		const remaining = MAX_OUTPUT - out.length;
+		if (remaining > 0) out += chunk.slice(0, remaining);
+	});
+	child.on("error", () => {
+		clearTimeout(timer);
+		settle(null);
+	});
+	child.on("close", (code) => {
+		clearTimeout(timer);
+		settle(code === 0 ? parseControl(out) : null);
+	});
+	child.stdin?.on("error", () => {});
+	child.stdin?.end(JSON.stringify(payload));
+	return promise;
+}
+/**
+* Scan for the first parseable control line — unrelated chatter on
+* stdout must not swallow the answer.
+*/
+function parseControl(out) {
+	for (const line of out.split("\n")) {
+		const text = line.trim();
+		if (text === "") continue;
+		try {
+			const parsed = JSON.parse(text);
+			if (parsed !== null && typeof parsed === "object" && !Array.isArray(parsed)) return parsed;
+		} catch {}
+	}
+	return null;
+}
+/**
+* The context half of a control object: bro's "here is what you should
+* know" text. Empty means the hook had nothing to add.
+*/
+function contextOf(control) {
+	const text = control?.hookSpecificOutput?.additionalContext;
+	return typeof text === "string" ? text.trim() : "";
+}
+/**
+* The repo opts in by carrying any project/local bro.config.* or
+* .beads/ — the same gate `bro hooks` applies (core's repoOptedIn).
+* Duplicated here because a shipped adapter cannot import @broject/core;
+* keep the list in sync with CONFIG_LAYER_FILES.
+*/
+function broEnabled(startDir) {
+	const markers = [
+		"bro.config.ts",
+		"bro.config.json",
+		"bro.config.local.ts",
+		"bro.config.local.json",
+		".beads"
+	];
+	let dir = startDir;
+	for (;;) {
+		if (markers.some((m) => existsSync(join(dir, m)))) return true;
+		const parent = dirname(dir);
+		if (parent === dir) return false;
+		dir = parent;
+	}
+}
+/** `bro status --json` — the board the widget renders. Null on any
+*  failure; the board is a convenience, never a gate. */
+async function statusJson(command, cwd) {
+	const { promise, resolve } = Promise.withResolvers();
+	let child;
+	try {
+		child = spawn(command.cmd, [
+			...command.args,
+			"status",
+			"--json"
+		], {
+			cwd,
+			stdio: [
+				"ignore",
+				"pipe",
+				"ignore"
+			],
+			detached: process.platform !== "win32"
+		});
+	} catch {
+		return null;
+	}
+	const timer = killAfter(child, HOOK_TIMEOUT_MS, () => resolve(null));
+	let out = "";
+	child.stdout?.setEncoding("utf8");
+	child.stdout?.on("data", (chunk) => {
+		const remaining = MAX_OUTPUT - out.length;
+		if (remaining > 0) out += chunk.slice(0, remaining);
+	});
+	child.on("error", () => {
+		clearTimeout(timer);
+		resolve(null);
+	});
+	child.on("close", (code) => {
+		clearTimeout(timer);
+		if (code !== 0) {
+			resolve(null);
+			return;
+		}
+		try {
+			const parsed = JSON.parse(out);
+			resolve(parsed !== null && typeof parsed === "object" && !Array.isArray(parsed) ? parsed : null);
+		} catch {
+			resolve(null);
+		}
+	});
+	return promise;
+}
+const ELLIPSIS = "…";
+/** Clip to a width, marking the cut. */
+function clip(text, width) {
+	return text.length > width ? `${text.slice(0, Math.max(0, width - 1))}${ELLIPSIS}` : text;
+}
+/**
+* Strip terminal control sequences from untrusted board text — bead
+* titles, worktree names, agent steps and drill titles are task-store
+* data, and a title carrying ANSI/OSC bytes would drive the user's
+* terminal (erase rows, forge content, OSC-52 clipboard writes) instead
+* of being displayed. Applied at both sinks: the widget's `boardLines`
+* and the interactive panel's render, before clipping so control bytes
+* cannot spend the width budget either.
+*/
+/** Control-byte codes, spelled numerically so this source carries no
+*  control character and no regex at all — Sonar flags ESC in both
+*  literal and constructor form, and a sanitizer must not look like
+*  the payload it strips. */
+const ESC_CODE = 27;
+const BEL_CODE = 7;
+const TAB_CODE = 9;
+const DEL_CODE = 127;
+/** True for `c` in `[lo, hi]` — three call sites keep the bounds. */
+function inRange(c, lo, hi) {
+	return c >= lo && c <= hi;
+}
+/** Index just past a CSI sequence starting at `j` (the byte after ESC[). */
+function afterCsi(text, j) {
+	while (j < text.length && inRange(text.charCodeAt(j), 32, 63)) j++;
+	if (j < text.length && inRange(text.charCodeAt(j), 64, 126)) j++;
+	return j;
+}
+/** Index just past an OSC sequence starting at `j` (the byte after ESC]). */
+function afterOsc(text, j) {
+	while (j < text.length) {
+		const c = text.charCodeAt(j);
+		if (c === BEL_CODE) return j + 1;
+		if (c === ESC_CODE && text[j + 1] === "\\") return j + 2;
+		j++;
+	}
+	return j;
+}
+/** Index just past the escape sequence starting at `i` (an ESC byte):
+*  CSI = ESC [ params… final; OSC = ESC ] … BEL | ESC \; anything else
+*  is ESC + one byte; a dangling ESC consumes itself. */
+function afterEscape(text, i) {
+	const lead = text[i + 1];
+	if (lead === "[") return afterCsi(text, i + 2);
+	if (lead === "]") return afterOsc(text, i + 2);
+	return lead === void 0 ? i + 1 : i + 2;
+}
+/**
+* Strip terminal control sequences from untrusted board text — bead
+* titles, worktree names, agent steps and drill titles are task-store
+* data, and a title carrying ANSI/OSC bytes would drive the user's
+* terminal (erase rows, forge content, OSC-52 clipboard writes) instead
+* of being displayed. Applied at both sinks: the widget's `boardLines`
+* and the interactive panel's render, before clipping so control bytes
+* cannot spend the width budget either.
+*/
+function sanitizeTerminalText(text) {
+	let out = "";
+	let i = 0;
+	while (i < text.length) {
+		const code = text.charCodeAt(i);
+		if (code === TAB_CODE) {
+			out += " ";
+			i++;
+			continue;
+		}
+		if (code === ESC_CODE) {
+			i = afterEscape(text, i);
+			continue;
+		}
+		if (code < 32 || code === DEL_CODE) {
+			i++;
+			continue;
+		}
+		out += text[i];
+		i++;
+	}
+	return out;
+}
+/**
+* The widget board — one compact summary line, then the top in-progress
+* beads and running fleet agents. A string array is the simplest board
+* any host can render. Lines pass the sanitizer: board fields are
+* untrusted task-store text.
+*/
+function boardLines(s) {
+	const beads = s.beads?.inProgress ?? [];
+	const running = (s.fleet?.agents ?? []).filter((a) => a.state === "running");
+	const cap = (s.fleet?.maxConcurrent ?? 0) > 0 ? `/${s.fleet?.maxConcurrent}` : "";
+	const parts = [
+		`◐ ${beads.length} bead${beads.length === 1 ? "" : "s"}`,
+		`fleet ${running.length}${cap}`,
+		`ready ${s.beads?.readyTotal ?? 0}`
+	];
+	if (s.drill?.frame) parts.push(`drill ${s.drill.frame.id}`);
+	if ((s.dirty ?? 0) > 0) parts.push(`dirty ${s.dirty}`);
+	const lines = [`bro · ${parts.join(" · ")}`];
+	for (const b of beads.slice(0, 3)) lines.push(`  ◐ ${b.id ?? "?"}  ${clip(b.title ?? "", 64)}`);
+	for (const a of running.slice(0, 2)) {
+		const step = a.step ? `  ${a.step}` : "";
+		lines.push(`  ▶ ${a.id ?? "?"}  ${a.backend ?? ""}${step}`);
+	}
+	return lines.map((line) => sanitizeTerminalText(line));
+}
+/** The footer crumb — the one-glance form of the same board. */
+function statusCrumb(s) {
+	return `bro ◐${s.beads?.inProgress?.length ?? 0} ⬢${(s.fleet?.agents ?? []).filter((a) => a.state === "running").length}`;
+}
+
+//#endregion
+//#region packages/cli/src/adapter/board-panel.ts
+/** Rows that keep their color without the cursor; the cursor always
+* highlights. */
+const HIGHLIGHTED = {
+	header: true,
+	footer: true,
+	section: false,
+	item: false
+};
+const READY_SHOWN = 8;
+const SILENT_MS = 6e4;
+/** One in-progress bead's row. */
+function beadRow(b) {
+	const assignee = b.assignee ? `  [${b.assignee}]` : "";
+	return `◐ ${b.id ?? "?"}  ${clip(b.title ?? "", 96)}${assignee}`;
+}
+/** One ready bead's row. */
+function readyRow(b) {
+	return `✓ ${b.id ?? "?"}  ${clip(b.title ?? "", 96)}`;
+}
+/** One fleet agent's row: id, backend, state, then what it is doing. */
+function fleetRow(a) {
+	const parts = [`▶ ${a.id ?? "?"}  ${a.backend ?? ""}  ${a.state ?? "?"}`];
+	if (a.state === "running" && a.step) parts.push(a.step);
+	if (a.state !== "running" && a.cause) parts.push(`(${a.cause})`);
+	if (a.worktree) parts.push(a.worktree);
+	return parts.join("  ");
+}
+/** One loop run's row: bead, state, pid, silence, worktree. */
+function loopRow(r) {
+	const parts = [`${r.state === "running" ? "▶" : "·"} ${r.beadId ?? r.slug ?? "?"}`];
+	parts.push(r.state ?? "?");
+	if (typeof r.pid === "number") parts.push(`pid ${r.pid}`);
+	const silent = r.silentMs ?? 0;
+	if (silent > SILENT_MS) parts.push(`silent ${Math.round(silent / 6e4)}m`);
+	if (r.worktree) parts.push(r.worktree);
+	return parts.join("  ");
+}
+/** One worktree's row: name, branch, state, main marker. */
+function worktreeRow(w) {
+	const parts = [`⎇ ${w.name ?? w.path ?? "?"}  ${w.branch ?? "?"}`];
+	if (w.state) parts.push(w.state);
+	if (w.main) parts.push("(main)");
+	return parts.join("  ");
+}
+/** Build the panel's sections from a snapshot. Absent data hides its
+*  section; present-but-empty data shows it with a placeholder — the
+*  difference between "no loop configured" and "loop with 0 runs" is
+*  worth one row. */
+function buildSections(s) {
+	if (s === null) return [{
+		id: "board",
+		title: "board",
+		rows: ["no board yet — press r to load"]
+	}];
+	return [
+		...workSections(s),
+		...agentSections(s),
+		...checkoutSections(s)
+	];
+}
+/** beads + ready — what is claimed and what is queued. */
+function workSections(s) {
+	const inProgress = s.beads?.inProgress ?? [];
+	const beadRows = inProgress.length === 0 ? ["— none in progress —"] : inProgress.map(beadRow);
+	const ready = s.beads?.ready ?? [];
+	const readyTotal = s.beads?.readyTotal ?? ready.length;
+	const shown = ready.slice(0, READY_SHOWN);
+	const readyRows = shown.map(readyRow);
+	if (readyTotal - shown.length > 0) readyRows.push(`… ${readyTotal - shown.length} more ready`);
+	return [{
+		id: "beads",
+		title: `beads (${inProgress.length})`,
+		rows: beadRows
+	}, {
+		id: "ready",
+		title: `ready (${readyTotal})`,
+		rows: readyRows
+	}];
+}
+/** fleet + loop — the agent plane: who runs, who exited, who is loud. */
+function agentSections(s) {
+	const sections = [];
+	const agents = s.fleet?.agents ?? [];
+	const running = agents.filter((a) => a.state === "running").length;
+	const max = s.fleet?.maxConcurrent ?? 0;
+	const cap = max > 0 ? `/${max}` : "";
+	sections.push({
+		id: "fleet",
+		title: `fleet (${running}${cap})`,
+		rows: agents.length === 0 ? ["— no agents —"] : agents.map(fleetRow)
+	});
+	if (s.loop !== void 0) {
+		const runs = s.loop.runs ?? [];
+		sections.push({
+			id: "loop",
+			title: `loop (${runs.filter((r) => r.state === "running").length})`,
+			rows: runs.length === 0 ? ["— no runs —"] : runs.map(loopRow)
+		});
+	}
+	return sections;
+}
+/** worktrees + drill + repo — the checkout around the session. */
+function checkoutSections(s) {
+	const sections = [];
+	if (s.worktrees !== void 0) {
+		const trees = s.worktrees;
+		sections.push({
+			id: "worktrees",
+			title: `worktrees (${trees.length})`,
+			rows: trees.length === 0 ? ["— none —"] : trees.map(worktreeRow)
+		});
+	}
+	const frame = s.drill?.frame;
+	if (frame) {
+		const title = frame.title ? `  — ${clip(frame.title, 96)}` : "";
+		const depth = typeof frame.depth === "number" ? `  (depth ${frame.depth})` : "";
+		sections.push({
+			id: "drill",
+			title: "drill",
+			rows: [`⌄ ${frame.id ?? "?"}${title}${depth}`]
+		});
+	}
+	const repoRows = [`branch  ${s.branch ?? "?"}`];
+	if ((s.dirty ?? 0) > 0) repoRows.push(`dirty   ${s.dirty} file(s)`);
+	sections.push({
+		id: "repo",
+		title: "repo",
+		rows: repoRows
+	});
+	return sections;
+}
+const FOOTER = " ↑↓/jk move · ←→/enter collapse · r refresh · q close";
+/** Bytes that continue an escape sequence after its ESC. */
+const SEQUENCE_LEADS = {
+	"[": true,
+	O: true
+};
+/** End index of the escape sequence starting at `data[i]` (an ESC): a
+*  CSI/SS3 sequence runs to its final byte, an alt+<char> pair eats two
+*  bytes, a lone ESC is one. A run that never reaches a final byte
+*  falls back to the two-byte form. */
+function escapeEnd(data, i) {
+	const next = data[i + 1];
+	if (next in SEQUENCE_LEADS) {
+		let j = i + 2;
+		while (data[j] >= " " && data[j] <= "?") j++;
+		if (j < data.length) return j + 1;
+	}
+	return next === void 0 ? i + 1 : i + 2;
+}
+/**
+* Split a raw input chunk into key tokens. pi-tui hands the focused
+* component whatever bytes arrived together — one key during typing, a
+* whole run during paste/autorepeat — and the action map must see every
+* key in it. CSI/SS3 escape sequences stay intact as one token; a bare
+* ESC followed by a non-sequence char is alt+<char> (unknown, ignored);
+* an ESC alone is the escape key.
+*/
+function splitKeys(data) {
+	const keys = [];
+	let i = 0;
+	while (i < data.length) {
+		if (data[i] === "\x1B") {
+			const end = escapeEnd(data, i);
+			keys.push(data.slice(i, end));
+			i = end;
+			continue;
+		}
+		keys.push(data[i]);
+		i++;
+	}
+	return keys;
+}
+var BoardPanelImpl = class {
+	collapsed = /* @__PURE__ */ new Set();
+	cursor = 0;
+	pending = false;
+	closed = false;
+	dirty = true;
+	lastWidth = -1;
+	cached = [];
+	/** Key → action, as a Map: the lookup key is raw terminal input, and
+	*  a Map lookup never reads a prototype chain (a Record index on
+	*  external data reads as object injection to static analysis). */
+	actions;
+	constructor(options) {
+		this.options = options;
+		const moveUp = () => this.move(-1);
+		const moveDown = () => this.move(1);
+		const collapse = () => this.collapseUnderCursor();
+		const expand = () => this.expandUnderCursor();
+		const toggle = () => this.toggleUnderCursor();
+		const refresh = () => this.refresh();
+		const close = () => this.close();
+		this.actions = new Map([
+			["\x1B[A", moveUp],
+			["k", moveUp],
+			["\x1B[B", moveDown],
+			["j", moveDown],
+			["\x1B[D", collapse],
+			["h", collapse],
+			["\x1B[C", expand],
+			["l", expand],
+			["\r", toggle],
+			["\n", toggle],
+			[" ", toggle],
+			["r", refresh],
+			["q", close],
+			["\x1B", close]
+		]);
+	}
+	/** The always-visible summary — the widget's own words (boardLines),
+	*  so panel header and widget line never drift apart; the refresh
+	*  state is the panel's own. */
+	summaryOf(s) {
+		if (s === null) return "bro · no board";
+		let out = boardLines(s)[0];
+		const attention = s.watch?.attention ?? 0;
+		if (attention > 0) out += ` · ⚠ ${attention} attention`;
+		if (this.pending) out += " · refreshing…";
+		return out;
+	}
+	/** Flatten visible sections into cursor rows; the footer is never a
+	*  cursor target. */
+	rows(sections) {
+		const rows = [{ kind: "header" }];
+		for (const sec of sections) {
+			rows.push({
+				kind: "section",
+				section: sec.id
+			});
+			if (!this.collapsed.has(sec.id)) for (const _ of sec.rows) rows.push({
+				kind: "item",
+				section: sec.id
+			});
+		}
+		rows.push({ kind: "footer" });
+		return rows;
+	}
+	render(width) {
+		if (!this.dirty && width === this.lastWidth) return this.cached;
+		const board = this.options.host.snapshot();
+		const sections = buildSections(board);
+		const rows = this.rows(sections);
+		const footerIndex = rows.length - 1;
+		this.cursor = Math.min(this.cursor, Math.max(0, footerIndex - 1));
+		const lines = [];
+		/** Which row of its section each item line shows — items are
+		*  emitted in section order, so a per-section counter suffices. */
+		const itemCounts = /* @__PURE__ */ new Map();
+		for (let i = 0; i < rows.length; i++) {
+			const row = rows[i];
+			const current = i === this.cursor && row.kind !== "footer";
+			const mark = current ? "›" : " ";
+			let text;
+			if (row.kind === "header") text = `${mark} ${this.summaryOf(board)}`;
+			else if (row.kind === "footer") text = FOOTER;
+			else text = `${mark} ${this.rowBody(row, sections, itemCounts)}`;
+			lines.push(this.renderLine(row, text, width, current));
+		}
+		this.cached = lines;
+		this.lastWidth = width;
+		this.dirty = false;
+		return this.cached;
+	}
+	/** Clip, sanitize, and color one line: header/footer keep their
+	*  color, the cursor highlights, everything else stays plain. */
+	renderLine(row, text, width, current) {
+		const line = clip(sanitizeTerminalText(text), width);
+		let role = "";
+		if (row.kind === "footer") role = "muted";
+		else if (HIGHLIGHTED[row.kind] || current) role = "accent";
+		const theme = this.options.theme;
+		return role === "" || theme === void 0 ? line : theme.fg(role, line);
+	}
+	/** The section-arrow or item-body payload — the cursor mark and its
+	*  space are the caller's prefix; extracted so render's loop stays
+	*  inside the cognitive-complexity ceiling. */
+	rowBody(row, sections, itemCounts) {
+		const sec = sections.find((x) => x.id === row.section);
+		if (row.kind === "section") return `${sec !== void 0 && this.collapsed.has(sec.id) ? "▸" : "▾"} ${sec?.title ?? ""}`;
+		const id = row.section ?? "";
+		const n = itemCounts.get(id) ?? 0;
+		itemCounts.set(id, n + 1);
+		return `  ${sec?.rows[n] ?? ""}`;
+	}
+	handleInput(data) {
+		for (const key of splitKeys(data)) {
+			if (this.closed) return;
+			if (this.options.keybindings?.matches(key, "app.interrupt")) {
+				this.close();
+				return;
+			}
+			this.actions.get(key)?.();
+		}
+	}
+	move(delta) {
+		const rows = this.rows(buildSections(this.options.host.snapshot()));
+		const last = Math.max(0, rows.length - 2);
+		this.cursor = Math.min(Math.max(this.cursor + delta, 0), last);
+		this.dirty = true;
+	}
+	currentSection() {
+		const rows = this.rows(buildSections(this.options.host.snapshot()));
+		this.cursor = Math.min(this.cursor, Math.max(0, rows.length - 2));
+		return rows[this.cursor]?.section;
+	}
+	setCollapsed(sectionId, collapsed) {
+		if (sectionId === void 0) return;
+		if (collapsed) this.collapsed.add(sectionId);
+		else this.collapsed.delete(sectionId);
+		this.dirty = true;
+	}
+	/** ←/h — collapse the section under the cursor. */
+	collapseUnderCursor() {
+		this.setCollapsed(this.currentSection(), true);
+	}
+	/** →/l — expand the section under the cursor. */
+	expandUnderCursor() {
+		this.setCollapsed(this.currentSection(), false);
+	}
+	toggleUnderCursor() {
+		const id = this.currentSection();
+		if (id !== void 0) this.setCollapsed(id, !this.collapsed.has(id));
+	}
+	refresh() {
+		if (this.pending || this.closed) return;
+		this.pending = true;
+		this.dirty = true;
+		this.options.tui?.requestRender?.();
+		const settle = () => {
+			this.pending = false;
+			this.dirty = true;
+			this.options.tui?.requestRender?.();
+		};
+		this.options.host.refresh().then(settle, settle);
+	}
+	close() {
+		if (this.closed) return;
+		this.closed = true;
+		this.options.done(void 0);
+	}
+	invalidate() {
+		this.dirty = true;
+	}
+	dispose() {
+		this.closed = true;
+	}
+};
+/** Build the board panel for `ui.custom(..., { overlay: true })`. */
+function createBoardPanel(options) {
+	return new BoardPanelImpl(options);
+}
+
+//#endregion
 //#region packages/cli/src/adapter/completions.ts
 /** Group blurbs — GROUP_META in plugins.ts, mirrored for the bundle. */
 const GROUPS = [
@@ -583,7 +1316,7 @@ function pick(entries, token, head) {
 	return out;
 }
 /** Position 1 — groups and flat verbs. An empty token stays null so
-*  bare `/bro ` keeps submitting the board refresh. */
+*  bare `/bro ` keeps submitting the command (the board panel). */
 function firstPosition(token) {
 	if (token.length === 0) return null;
 	return [...pick(GROUPS, token, void 0), ...pick(VERBS, token, void 0)];
@@ -603,7 +1336,7 @@ function secondPosition(head, token) {
 /**
 * `/bro` argument completion. Returns the items for the current
 * argument prefix, or null when there is nothing honest to offer:
-* an empty first token (bare submit stays a board refresh), a quoted
+* an empty first token (bare submit stays the command), a quoted
 * token (never shred quotes), a flag (flags are not guessed), an
 * unknown head, or anything past position 2.
 */
@@ -614,304 +1347,6 @@ function broArgumentCompletions(argumentPrefix) {
 	if (tokens.length < 2) return firstPosition(token);
 	if (tokens.length > 2) return null;
 	return secondPosition(tokens[tokens.length - 2] ?? "", token);
-}
-
-//#endregion
-//#region packages/cli/src/adapter/core.ts
-/** How long a normal hook probe may take. */
-const HOOK_TIMEOUT_MS = 15e3;
-/** session-start/post-compaction list `bd ready` and scan worktrees —
-*  measured at 20-40s in a loaded repo. */
-const REHYDRATION_TIMEOUT_MS = 45e3;
-/** Cap on a hook's stdout — a runaway child must not eat the heap. */
-const MAX_OUTPUT = 1 << 20;
-/**
-* `node` on PATH, not process.execPath — a host may ship as a compiled
-* binary whose execPath IS that binary, so running it with our own
-* entry script would re-enter the host instead of running the script.
-*/
-function jsRuntime() {
-	return process.platform === "win32" ? "node.exe" : "node";
-}
-/** The bro CLI bundled next to this adapter (`dist/index.js`). */
-function siblingCli() {
-	for (const rel of ["./index.js", "../dist/index.js"]) {
-		const candidate = fileURLToPath(new URL(rel, import.meta.url));
-		if (existsSync(candidate)) return candidate;
-	}
-	return null;
-}
-/** The bro CLI of the checkout this adapter was loaded from — the
-*  development path: the adapter's own source tree wins over any
-*  published package, so a local edit is live without a rebuild. */
-function checkoutCli() {
-	let dir = dirname(fileURLToPath(import.meta.url));
-	for (;;) {
-		const candidate = join(dir, "packages", "cli", "dist", "index.js");
-		if (existsSync(candidate)) return candidate;
-		const parent = dirname(dir);
-		if (parent === dir) return null;
-		dir = parent;
-	}
-}
-/**
-* SIGKILL a hung child on a timer. The child is spawned detached, so
-* killing the pid's group takes the grandchildren down too — a hook
-* that spawns `bd` must not leave a dolt server behind.
-*/
-function killAfter(child, ms, onTimeout) {
-	const timer = setTimeout(() => {
-		try {
-			if (child.pid !== void 0) process.kill(-child.pid, "SIGKILL");
-		} catch {
-			try {
-				child.kill("SIGKILL");
-			} catch {}
-		}
-		onTimeout();
-	}, ms);
-	timer.unref?.();
-	return timer;
-}
-/** Does this command exit zero? Used to probe whether a candidate CLI
-*  actually speaks bro's hook protocol — an older bro on PATH fails the
-*  probe instead of failing every hook. */
-async function exitsZero(cmd, args) {
-	const { promise, resolve } = Promise.withResolvers();
-	let child;
-	try {
-		child = spawn(cmd, args, {
-			stdio: [
-				"pipe",
-				"ignore",
-				"ignore"
-			],
-			detached: process.platform !== "win32"
-		});
-	} catch {
-		return false;
-	}
-	const timer = killAfter(child, HOOK_TIMEOUT_MS, () => resolve(false));
-	child.on("error", () => {
-		clearTimeout(timer);
-		resolve(false);
-	});
-	child.on("close", (code) => {
-		clearTimeout(timer);
-		resolve(code === 0);
-	});
-	child.stdin?.on("error", () => {});
-	child.stdin?.end("");
-	return promise;
-}
-/**
-* The CLI ladder, in order: the pinned command, the bundled sibling,
-* the checkout's dist, `bro` on PATH, and finally the pinned npx
-* package. Every tier is probed with `bro hooks` — the silent
-* capability probe — so a tier that resolves to something that is not
-* bro is skipped rather than failing every hook.
-*/
-async function resolveCommand(opts = {}) {
-	if (opts.command !== void 0 && opts.command !== "") {
-		const [cmd, ...args] = opts.command.split(/\s+/).filter((p) => p !== "");
-		if (cmd !== void 0 && await exitsZero(cmd, [...args, "hooks"])) return {
-			cmd,
-			args
-		};
-	}
-	for (const entry of [siblingCli(), checkoutCli()]) if (entry !== null && await exitsZero(jsRuntime(), [entry, "hooks"])) return {
-		cmd: jsRuntime(),
-		args: [entry]
-	};
-	if (await exitsZero("bro", ["hooks"])) return {
-		cmd: "bro",
-		args: []
-	};
-	if (opts.npxPin !== void 0 && await exitsZero("npx", ["--version"])) return {
-		cmd: "npx",
-		args: [
-			"-y",
-			"--prefer-offline",
-			opts.npxPin
-		]
-	};
-	return null;
-}
-/**
-* Run one `bro hooks <event>` with the payload on stdin; resolve null on
-* every failure mode — spawn error, timeout, nonzero exit, garbage out.
-*/
-async function callHook(command, event, payload, cwd, timeoutMs) {
-	const { promise, resolve } = Promise.withResolvers();
-	let child;
-	try {
-		child = spawn(command.cmd, [
-			...command.args,
-			"hooks",
-			event
-		], {
-			cwd,
-			stdio: [
-				"pipe",
-				"pipe",
-				"ignore"
-			],
-			detached: process.platform !== "win32"
-		});
-	} catch {
-		return null;
-	}
-	let settled = false;
-	const settle = (value) => {
-		if (!settled) {
-			settled = true;
-			resolve(value);
-		}
-	};
-	const timer = killAfter(child, timeoutMs, () => settle(null));
-	let out = "";
-	child.stdout?.setEncoding("utf8");
-	child.stdout?.on("data", (chunk) => {
-		const remaining = MAX_OUTPUT - out.length;
-		if (remaining > 0) out += chunk.slice(0, remaining);
-	});
-	child.on("error", () => {
-		clearTimeout(timer);
-		settle(null);
-	});
-	child.on("close", (code) => {
-		clearTimeout(timer);
-		settle(code === 0 ? parseControl(out) : null);
-	});
-	child.stdin?.on("error", () => {});
-	child.stdin?.end(JSON.stringify(payload));
-	return promise;
-}
-/**
-* Scan for the first parseable control line — unrelated chatter on
-* stdout must not swallow the answer.
-*/
-function parseControl(out) {
-	for (const line of out.split("\n")) {
-		const text = line.trim();
-		if (text === "") continue;
-		try {
-			const parsed = JSON.parse(text);
-			if (parsed !== null && typeof parsed === "object" && !Array.isArray(parsed)) return parsed;
-		} catch {}
-	}
-	return null;
-}
-/**
-* The context half of a control object: bro's "here is what you should
-* know" text. Empty means the hook had nothing to add.
-*/
-function contextOf(control) {
-	const text = control?.hookSpecificOutput?.additionalContext;
-	return typeof text === "string" ? text.trim() : "";
-}
-/**
-* The repo opts in by carrying any project/local bro.config.* or
-* .beads/ — the same gate `bro hooks` applies (core's repoOptedIn).
-* Duplicated here because a shipped adapter cannot import @broject/core;
-* keep the list in sync with CONFIG_LAYER_FILES.
-*/
-function broEnabled(startDir) {
-	const markers = [
-		"bro.config.ts",
-		"bro.config.json",
-		"bro.config.local.ts",
-		"bro.config.local.json",
-		".beads"
-	];
-	let dir = startDir;
-	for (;;) {
-		if (markers.some((m) => existsSync(join(dir, m)))) return true;
-		const parent = dirname(dir);
-		if (parent === dir) return false;
-		dir = parent;
-	}
-}
-/** `bro status --json` — the board the widget renders. Null on any
-*  failure; the board is a convenience, never a gate. */
-async function statusJson(command, cwd) {
-	const { promise, resolve } = Promise.withResolvers();
-	let child;
-	try {
-		child = spawn(command.cmd, [
-			...command.args,
-			"status",
-			"--json"
-		], {
-			cwd,
-			stdio: [
-				"ignore",
-				"pipe",
-				"ignore"
-			],
-			detached: process.platform !== "win32"
-		});
-	} catch {
-		return null;
-	}
-	const timer = killAfter(child, HOOK_TIMEOUT_MS, () => resolve(null));
-	let out = "";
-	child.stdout?.setEncoding("utf8");
-	child.stdout?.on("data", (chunk) => {
-		const remaining = MAX_OUTPUT - out.length;
-		if (remaining > 0) out += chunk.slice(0, remaining);
-	});
-	child.on("error", () => {
-		clearTimeout(timer);
-		resolve(null);
-	});
-	child.on("close", (code) => {
-		clearTimeout(timer);
-		if (code !== 0) {
-			resolve(null);
-			return;
-		}
-		try {
-			const parsed = JSON.parse(out);
-			resolve(parsed !== null && typeof parsed === "object" && !Array.isArray(parsed) ? parsed : null);
-		} catch {
-			resolve(null);
-		}
-	});
-	return promise;
-}
-const ELLIPSIS = "…";
-/** Clip to a width, marking the cut. */
-function clip(text, width) {
-	return text.length > width ? `${text.slice(0, Math.max(0, width - 1))}${ELLIPSIS}` : text;
-}
-/**
-* The widget board — one compact summary line, then the top in-progress
-* beads and running fleet agents. A string array is the simplest board
-* any host can render.
-*/
-function boardLines(s) {
-	const beads = s.beads?.inProgress ?? [];
-	const running = (s.fleet?.agents ?? []).filter((a) => a.state === "running");
-	const cap = (s.fleet?.maxConcurrent ?? 0) > 0 ? `/${s.fleet?.maxConcurrent}` : "";
-	const parts = [
-		`◐ ${beads.length} bead${beads.length === 1 ? "" : "s"}`,
-		`fleet ${running.length}${cap}`,
-		`ready ${s.beads?.readyTotal ?? 0}`
-	];
-	if (s.drill?.frame) parts.push(`drill ${s.drill.frame.id}`);
-	if ((s.dirty ?? 0) > 0) parts.push(`dirty ${s.dirty}`);
-	const lines = [`bro · ${parts.join(" · ")}`];
-	for (const b of beads.slice(0, 3)) lines.push(`  ◐ ${b.id ?? "?"}  ${clip(b.title ?? "", 64)}`);
-	for (const a of running.slice(0, 2)) {
-		const step = a.step ? `  ${a.step}` : "";
-		lines.push(`  ▶ ${a.id ?? "?"}  ${a.backend ?? ""}${step}`);
-	}
-	return lines;
-}
-/** The footer crumb — the one-glance form of the same board. */
-function statusCrumb(s) {
-	return `bro ◐${s.beads?.inProgress?.length ?? 0} ⬢${(s.fleet?.agents ?? []).filter((a) => a.state === "running").length}`;
 }
 
 //#endregion
@@ -964,10 +1399,22 @@ function sharedBinding(host) {
 		canPaint(ctx) {
 			return ctx.mode === "tui";
 		},
+		async mountPanel(ctx, factory) {
+			const custom = ctx.ui.custom;
+			if (!ctx.hasUI || ctx.mode !== "tui" || typeof custom !== "function") return false;
+			try {
+				await custom.call(ctx.ui, factory, { overlay: true });
+				return true;
+			} catch {
+				return false;
+			}
+		},
 		paint: host.paint,
 		clear(ctx) {
-			ctx.ui.setWidget(BOARD_KEY, void 0);
-			ctx.ui.setStatus(BOARD_KEY, void 0);
+			try {
+				ctx.ui.setWidget(BOARD_KEY, void 0);
+				ctx.ui.setStatus(BOARD_KEY, void 0);
+			} catch {}
 		},
 		notify: host.notify,
 		refuseStop: host.refuseStop,
@@ -1052,20 +1499,23 @@ function createBroDriver(host, api) {
 		}
 		host.paint(ctx, boardLines(board), statusCrumb(board));
 	};
+	/** Re-probe the board and repaint. Fail-open: an unavailable bro
+	*  leaves the last snapshot in place; resolves whatever is current. */
 	const refreshBoard = async (ctx) => {
 		const cwd = host.cwd(ctx);
 		const seq = ++refreshSeq;
 		if (!broEnabled(cwd)) {
 			board = null;
 			paint(ctx);
-			return;
+			return board;
 		}
 		const cmd = await command();
-		if (cmd === null || seq !== refreshSeq) return;
+		if (cmd === null || seq !== refreshSeq) return board;
 		const next = await statusJson(cmd, cwd);
-		if (seq !== refreshSeq) return;
-		board = next;
+		if (seq !== refreshSeq) return board;
+		if (next !== null) board = next;
 		paint(ctx);
+		return board;
 	};
 	/** Hydration runs once per session (re-primed on compaction); the
 	*  answer is injected at the next turn start, not pushed into the
@@ -1189,16 +1639,36 @@ function createBroDriver(host, api) {
 	});
 	/** Run a bro subcommand — resolve the CLI first, then hand off. */
 	const run = async (args, cwd) => runBro(await command(), args, cwd);
-	/** The shared surfaces. `/bro` is a thin passthrough — `bro
-	*  act|next|fleet|drill` reachable without leaving the editor — and
-	*  `bro_status` hands the model the same board JSON the widget
-	*  renders. Both are the same on every host, so both live here. */
+	/** Bare `/bro`: mount the interactive board panel where the host can
+	*  give a component keyboard focus — an overlay over the transcript,
+	*  editor untouched (docs/tui.md). Headless, non-TUI modes and hosts
+	*  without `custom` fall back to the plain refresh. */
+	const openBoardPanel = async (ctx) => host.mountPanel(ctx, async (tui, theme, keybindings, done) => {
+		if (board === null) await refreshBoard(ctx).catch(() => {});
+		return createBoardPanel({
+			host: {
+				snapshot: () => board,
+				refresh: () => refreshBoard(ctx)
+			},
+			done,
+			theme,
+			keybindings,
+			tui
+		});
+	});
+	/** The shared surfaces. Bare `/bro` mounts the interactive board
+	*  panel (a plain refresh where no UI can mount); `bro act|next|
+	*  fleet|drill` is a thin passthrough reachable without leaving the
+	*  editor, and `bro_status` hands the model the same board JSON the
+	*  widget renders. Both are the same on every host, so both live
+	*  here. */
 	api.registerCommand("bro", {
-		description: "bro — board refresh, or run `bro <args>` (act|next|fleet|drill|…)",
+		description: "bro — interactive board (panel), or run `bro <args>` (act|next|fleet|drill|…)",
 		getArgumentCompletions: broArgumentCompletions,
 		async handler(args, ctx) {
 			const trimmed = args.trim();
 			if (trimmed === "") {
+				if (await openBoardPanel(ctx)) return;
 				await refreshBoard(ctx);
 				host.notify(ctx, "bro: board refreshed", "info");
 				return;
@@ -1214,6 +1684,7 @@ function createBroDriver(host, api) {
 				content: `$ bro ${trimmed}\n${text}`,
 				display: true
 			}, { triggerTurn: false });
+			await refreshBoard(ctx).catch(() => {});
 		}
 	});
 	api.registerTool({
@@ -1319,6 +1790,11 @@ async function runBro(command, args, cwd, timeoutMs = RUN_TIMEOUT_MS) {
 /** The published version of this adapter — the npx fallback pin. The
 *  pin is rewritten by gen-plugins on every gen/release run. */
 const NPX_PIN = "@broject/bro@0.2.5";
+/** pi hands the submitted prompt to its `input` event rather than to
+*  the turn event — cached so the shared prompt-submit probe still
+*  carries prompt-specific nudges. Absent event → '' → same behavior
+*  as before the cache existed (fail-open). */
+let inputPrompt = "";
 /**
 * The pi binding: the host's own shape, nothing else. Every behavioral
 * decision lives in the shared driver, so this file is the whole of
@@ -1361,12 +1837,20 @@ function binding(pi) {
 				} catch {}
 			}
 		}),
+		promptOf(event) {
+			const own = event.prompt;
+			return typeof own === "string" && own !== "" ? own : inputPrompt;
+		},
 		npxPin: NPX_PIN
 	};
 }
 /** The extension entry point — pi calls this with its API. */
 function broExtension(pi) {
 	const driver = createBroDriver(binding(pi), pi);
+	pi.on("input", (event) => {
+		const payload = event;
+		if (typeof payload.prompt === "string") inputPrompt = payload.prompt;
+	});
 	pi.on("agent_settled", (_e, ctx) => {
 		driver.refresh(ctx).catch(() => {});
 	});

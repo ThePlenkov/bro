@@ -36,6 +36,7 @@
  * one-shot rule decides.
  */
 import { spawn, type ChildProcess } from 'node:child_process'
+import { createBoardPanel, type BoardPanelFactory } from './board-panel.ts'
 import { broArgumentCompletions, type BroCompletion } from './completions.ts'
 import {
   HOOK_TIMEOUT_MS,
@@ -77,6 +78,11 @@ export interface BroContext {
     notify(message: string, type?: 'info' | 'warning' | 'error'): void
     setStatus(key: string, text: string | undefined): void
     setWidget(key: string, content: string[] | undefined): void
+    /** Mount a keyboard-focused component (interactive TUI) — upstream
+     *  `ExtensionUIContext.custom` (extensions/types.ts), the shape the
+     *  board panel runs on. Optional: absent headless and on older
+     *  hosts; callers must guard with `typeof === 'function'`. */
+    custom?(factory: BoardPanelFactory, options?: { overlay?: boolean }): Promise<undefined>
   }
   cwd: string
   mode: 'tui' | 'rpc' | 'json' | 'print'
@@ -139,10 +145,31 @@ export function sharedBinding<Ctx extends BroContext>(
     canPaint(ctx) {
       return ctx.mode === 'tui'
     },
+    async mountPanel(ctx, factory) {
+      const custom = ctx.ui.custom
+      // the lineage's canPaint rule (mode === 'tui') plus the mount
+      // itself — RPC hosts may report hasUI yet not mount components
+      if (!ctx.hasUI || ctx.mode !== 'tui' || typeof custom !== 'function') {
+        return false
+      }
+      try {
+        await custom.call(ctx.ui, factory, { overlay: true })
+        return true
+      } catch {
+        // mount rejected (older host, aborted flow) — the caller's
+        // plain refresh keeps the command useful
+        return false
+      }
+    },
     paint: host.paint,
     clear(ctx) {
-      ctx.ui.setWidget(BOARD_KEY, undefined)
-      ctx.ui.setStatus(BOARD_KEY, undefined)
+      try {
+        ctx.ui.setWidget(BOARD_KEY, undefined)
+        ctx.ui.setStatus(BOARD_KEY, undefined)
+      } catch {
+        // a host that invalidated its context (pi session swap) makes
+        // cleanup a no-op — an advisory clear is never worth a throw
+      }
     },
     notify: host.notify,
     refuseStop: host.refuseStop,
@@ -196,6 +223,9 @@ export interface BroHostBinding<Ctx = unknown> {
   cwd(ctx: Ctx): string
   /** Whether the host can paint UI right now. */
   canPaint(ctx: Ctx): boolean
+  /** Mount the board panel as a keyboard-focused component; resolves
+   *  false when the host cannot mount one (headless, no `custom`). */
+  mountPanel(ctx: Ctx, factory: BoardPanelFactory): Promise<boolean>
   /** Paint the board. */
   paint(ctx: Ctx, lines: string[], crumb: string): void
   /** Remove the board. */
@@ -271,8 +301,9 @@ export interface BroDriver {
   /** Run a bro subcommand and capture its output. */
   run(args: string[], cwd: string): Promise<BroRunResult>
   /** Refresh + repaint the board for a context — the repaint path a
-   *  host-only settle/turn event can call. */
-  refresh(ctx: unknown): Promise<void>
+   *  host-only settle/turn event can call. Resolves the current
+   *  snapshot (null where bro is unavailable). */
+  refresh(ctx: unknown): Promise<BoardStatus | null>
   /** The last board snapshot. */
   readonly board: BoardStatus | null
   /** The host's own extension API, passed through untouched. */
@@ -357,27 +388,34 @@ export function createBroDriver<Ctx>(host: BroHostBinding<Ctx>, api: BroHostApi<
     host.paint(ctx, boardLines(board), statusCrumb(board))
   }
 
-  const refreshBoard = async (ctx: Ctx): Promise<void> => {
+  /** Re-probe the board and repaint. Fail-open: an unavailable bro
+   *  leaves the last snapshot in place; resolves whatever is current. */
+  const refreshBoard = async (ctx: Ctx): Promise<BoardStatus | null> => {
     const cwd = host.cwd(ctx)
     const seq = ++refreshSeq
     if (!broEnabled(cwd)) {
       // another repo's board must not leak into this session
       board = null
       paint(ctx)
-      return
+      return board
     }
     const cmd = await command()
     if (cmd === null || seq !== refreshSeq) {
-      return
+      return board
     }
     const next = await statusJson(cmd, cwd)
     // a newer refresh superseded this one while it was in flight —
     // the slower, older answer must not overwrite it
     if (seq !== refreshSeq) {
-      return
+      return board
     }
-    board = next
+    // fail-open: a failed probe is "no opinion", not "no board" — keep
+    // the last usable snapshot instead of blanking the widget
+    if (next !== null) {
+      board = next
+    }
     paint(ctx)
+    return board
   }
 
   /** Hydration runs once per session (re-primed on compaction); the
@@ -572,16 +610,41 @@ export function createBroDriver<Ctx>(host: BroHostBinding<Ctx>, api: BroHostApi<
   const run = async (args: string[], cwd: string): Promise<BroRunResult> =>
     runBro(await command(), args, cwd)
 
-  /** The shared surfaces. `/bro` is a thin passthrough — `bro
-   *  act|next|fleet|drill` reachable without leaving the editor — and
-   *  `bro_status` hands the model the same board JSON the widget
-   *  renders. Both are the same on every host, so both live here. */
+  /** Bare `/bro`: mount the interactive board panel where the host can
+   *  give a component keyboard focus — an overlay over the transcript,
+   *  editor untouched (docs/tui.md). Headless, non-TUI modes and hosts
+   *  without `custom` fall back to the plain refresh. */
+  const openBoardPanel = async (ctx: Ctx): Promise<boolean> =>
+    host.mountPanel(ctx, async (tui, theme, keybindings, done) => {
+      // the factory runs only where the host is actually mounting —
+      // probe first so the panel's first render has data
+      if (board === null) {
+        await refreshBoard(ctx).catch(() => {})
+      }
+      return createBoardPanel({
+        host: { snapshot: () => board, refresh: () => refreshBoard(ctx) },
+        done,
+        theme,
+        keybindings,
+        tui,
+      })
+    })
+
+  /** The shared surfaces. Bare `/bro` mounts the interactive board
+   *  panel (a plain refresh where no UI can mount); `bro act|next|
+   *  fleet|drill` is a thin passthrough reachable without leaving the
+   *  editor, and `bro_status` hands the model the same board JSON the
+   *  widget renders. Both are the same on every host, so both live
+   *  here. */
   api.registerCommand('bro', {
-    description: 'bro — board refresh, or run `bro <args>` (act|next|fleet|drill|…)',
+    description: 'bro — interactive board (panel), or run `bro <args>` (act|next|fleet|drill|…)',
     getArgumentCompletions: broArgumentCompletions,
     async handler(args: string, ctx: Ctx) {
       const trimmed = args.trim()
       if (trimmed === '') {
+        if (await openBoardPanel(ctx)) {
+          return
+        }
         // refresh + repaint — the old path spawned the CLI and threw
         // the answer away, so bare /bro never updated the widget
         await refreshBoard(ctx)
@@ -598,6 +661,10 @@ export function createBroDriver<Ctx>(host: BroHostBinding<Ctx>, api: BroHostApi<
         { customType: 'bro-output', content: `$ bro ${trimmed}\n${text}`, display: true },
         { triggerTurn: false }
       )
+      // a state-changing command must not leave the widget and the
+      // mode bridges on the pre-command snapshot until some unrelated
+      // lifecycle event repaints
+      await refreshBoard(ctx).catch(() => {})
     },
   })
 

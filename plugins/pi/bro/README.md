@@ -17,7 +17,10 @@ one self-contained module (node builtins only) by
   pre-compact carried across, prompt-submit nudges, post-tool arming,
   and `agent_before_settle` → the stop gate (a real gate: block lands
   the blocker as a message and continues the turn, once per session).
-- **`/bro`** — bare refreshes the board; `/bro act|next|fleet|…`
+- **`/bro`** — bare opens the interactive board panel (collapsible
+  sections, ↑↓/←→ navigation, `r` refresh, `q` close — an overlay over
+  the transcript; a plain refresh where no TUI can mount);
+  `/bro act|next|fleet|…`
   runs the CLI and drops the output into the transcript. The slash
   dropdown completes arguments: verbs and groups at position 1,
   group members / verb subcommands at position 2

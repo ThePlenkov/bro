@@ -37,7 +37,9 @@
  *             payload on stdin — the same contract hooks/run.sh and the
  *             other adapters speak. The control object on stdout is
  *             translated into omp's own result slots.
- *   /bro      the CLI without leaving the editor.
+ *   /bro      the interactive board panel on the TUI (a `ui.custom`
+ *             overlay); a plain refresh where no UI can mount — and
+ *             the CLI without leaving the editor.
  *   bro_* tools  the board and the PR gate as model-callable reads.
  *
  * ## Fail-open
