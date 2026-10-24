@@ -38,11 +38,6 @@ const version = publishedVersion(spec)
 const existing = loadPublishedSurface()
 const next = flag('--next') ?? existing?.next ?? '0.3.0'
 
-if (check && existing && existing.version === version) {
-  console.log(`published.json already at ${spec} → ${version}`)
-  process.exit(0)
-}
-
 const { bin } = installPublished(spec)
 // non-git scratch — `bro <name> --help` executes on some commands
 // (sync/watch/doctor/fleet) and a repo cwd would give them side effects

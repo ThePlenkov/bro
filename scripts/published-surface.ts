@@ -126,65 +126,71 @@ const ALT_SIG = /[a-z][a-z0-9-]*(?:\|[a-z0-9][a-z0-9-]*)+/
 /** Usage grammar tokens that are not subcommands. */
 const STOPWORDS = new Set(['command', 'commands', 'subcommand', 'args', 'arg'])
 
-/** Subcommand words for one command, from its summary signature and
- *  its own help output. Only four shapes count — all anchored, so
- *  flag-value alternations and `<id|step>` placeholders stay out:
- *  the registry summary's `a|b` signature, `<a|b|c>` or `a | b`
- *  alternations directly in the subcommand slot, `bro <name> <sub>`
- *  words, and `Commands:` block first tokens. Advisory by design —
- *  consumers treat absence as "unverified", not "absent". */
-export function subsOf(name: string, helpOut: string, topSummary?: string): string[] {
-  const subs = new Set<string>()
-  // a token is "confirmed" when an anchored usage source names it —
-  // `bro <n> <sub>` or a Commands: row. Unconfirmed words that also
-  // appear as `--word` flags (`--json` inside `install|uninstall|--json`
-  // alternations) are flag-name leaks, not subs.
-  const confirmed = new Set<string>()
-  const push = (w: string, sure: boolean) => {
-    if (w === '' || STOPWORDS.has(w)) {
-      return
-    }
-    subs.add(w)
-    if (sure) {
-      confirmed.add(w)
-    }
+/** Candidate subcommand words: `subs` is every word an extraction
+ *  shape saw; `confirmed` is the subset an anchored usage source
+ *  (`bro <n> <sub>` slot or a Commands: row) named outright. */
+interface Subs {
+  subs: Set<string>
+  confirmed: Set<string>
+}
+
+function pushSub(acc: Subs, w: string, sure: boolean): void {
+  if (w === '' || STOPWORDS.has(w)) {
+    return
   }
-  const addAlt = (alt: string, sure: boolean) => {
-    for (const s of alt.split('|')) {
-      push(s.trim(), sure)
-    }
+  acc.subs.add(w)
+  if (sure) {
+    acc.confirmed.add(w)
   }
-  const sig = ALT_SIG.exec(topSummary ?? '')
-  if (sig) {
-    addAlt(sig[0], false)
+}
+
+function pushAlt(acc: Subs, alt: string, sure: boolean): void {
+  for (const s of alt.split('|')) {
+    pushSub(acc, s.trim(), sure)
   }
+}
+
+/** Anchored usage slots: `bro <name> <a|b>`, `bro <name> a | b`,
+ *  and `bro <name> <word>` — every hit confirms the subcommand. */
+function collectUsageSlots(acc: Subs, name: string, helpOut: string): void {
   const angled = new RegExp(`\\bbro\\s+${name}\\s+<([a-z0-9][a-z0-9|-]*)>`, 'g')
   for (const m of helpOut.matchAll(angled)) {
-    addAlt(m[1]!, true)
+    pushAlt(acc, m[1]!, true)
   }
   const spaced = new RegExp(`\\bbro\\s+${name}\\s+((?:[a-z][\\w-]*\\s*\\|\\s*)+[a-z][\\w-]*)`, 'g')
   for (const m of helpOut.matchAll(spaced)) {
-    addAlt(m[1]!, true)
+    pushAlt(acc, m[1]!, true)
   }
   const word = new RegExp(`\\bbro\\s+${name}\\s+([a-z][a-z0-9-]*)\\b`, 'g')
   for (const m of helpOut.matchAll(word)) {
-    push(m[1]!, true)
+    pushSub(acc, m[1]!, true)
   }
-  // ` | sub` followers on `bro <name>` lines — `status | distill | run`;
-  // `(?!-)` keeps flag alternations (`--json|--live`) out. Not an
-  // anchored slot on its own — `<id|step>` followers stay unconfirmed.
-  const follower = new RegExp(`\\bbro\\s+${name}\\b[^\\n]*`, 'g')
-  for (const line of helpOut.matchAll(follower)) {
-    const text = line[0]
-    for (const m of text.matchAll(/\|\s*(?!-)([a-z][\w-]*)/g)) {
-      // `<id|step>` placeholders — the `|` sits inside angle brackets
-      const before = text.slice(0, m.index)
-      if (before.split('<').length > before.split('>').length) {
-        continue
-      }
-      push(m[1]!, false)
+}
+
+/** ` | sub` followers inside one `bro <name>` line — `status |
+ *  distill | run`. `(?!-)` keeps flag alternations (`--json|--live`)
+ *  out, and the `<`-balance keeps `<id|step>` placeholders out. Not an
+ *  anchored slot on its own — followers stay unconfirmed. */
+function collectFollowerLine(acc: Subs, text: string): void {
+  for (const m of text.matchAll(/\|\s*(?!-)([a-z][\w-]*)/g)) {
+    const before = text.slice(0, m.index)
+    if (before.split('<').length <= before.split('>').length) {
+      pushSub(acc, m[1]!, false)
     }
   }
+}
+
+function collectFollowers(acc: Subs, name: string, helpOut: string): void {
+  const line = new RegExp(`\\bbro\\s+${name}\\b[^\\n]*`, 'g')
+  for (const l of helpOut.matchAll(line)) {
+    collectFollowerLine(acc, l[0])
+  }
+}
+
+/** The `Commands:` block of a command's own help — each row's first
+ *  token is a confirmed subcommand. Same indentation walk as
+ *  parseTopLevelHelp, at one level down. */
+function collectCommandsBlock(acc: Subs, helpOut: string): void {
   let inCmds = false
   for (const line of helpOut.split('\n')) {
     if (/^\s*Commands:\s*$/.test(line)) {
@@ -196,20 +202,44 @@ export function subsOf(name: string, helpOut: string, topSummary?: string): stri
     }
     const m = /^\s{2}([a-z][\w-]*)\s/.exec(line)
     if (m) {
-      push(m[1]!, true)
+      pushSub(acc, m[1]!, true)
       continue
     }
     if (line.trim() === '') {
       inCmds = false
     }
   }
-  const flagText = `${topSummary ?? ''}\n${helpOut}`
-  for (const w of subs) {
-    if (!confirmed.has(w) && new RegExp(`--${w}\\b`).test(flagText)) {
-      subs.delete(w)
+}
+
+/** Unconfirmed words that also appear as `--word` (`--json` inside
+ *  `install|uninstall|--json` alternations) are flag-name leaks, not
+ *  subcommands. */
+function dropFlagLeaks(acc: Subs, flagText: string): void {
+  for (const w of acc.subs) {
+    if (!acc.confirmed.has(w) && new RegExp(`--${w}\\b`).test(flagText)) {
+      acc.subs.delete(w)
     }
   }
-  return [...subs].sort()
+}
+
+/** Subcommand words for one command, from its summary signature and
+ *  its own help output. Only four shapes count — all anchored, so
+ *  flag-value alternations and `<id|step>` placeholders stay out:
+ *  the registry summary's `a|b` signature, `<a|b|c>` or `a | b`
+ *  alternations directly in the subcommand slot, `bro <name> <sub>`
+ *  words, and `Commands:` block first tokens. Advisory by design —
+ *  consumers treat absence as "unverified", not "absent". */
+export function subsOf(name: string, helpOut: string, topSummary?: string): string[] {
+  const acc: Subs = { subs: new Set(), confirmed: new Set() }
+  const sig = ALT_SIG.exec(topSummary ?? '')
+  if (sig) {
+    pushAlt(acc, sig[0], false)
+  }
+  collectUsageSlots(acc, name, helpOut)
+  collectFollowers(acc, name, helpOut)
+  collectCommandsBlock(acc, helpOut)
+  dropFlagLeaks(acc, `${topSummary ?? ''}\n${helpOut}`)
+  return [...acc.subs].sort()
 }
 
 export interface DocLine {
