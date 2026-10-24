@@ -488,8 +488,21 @@ reimplement them — it supplies the state they cannot have. See
 ## Install
 
 \`\`\`sh
-omp plugin install ./plugins/omp/bro     # from a checkout
-omp plugin install bro@bro               # from the marketplace
+omp plugin marketplace add ThePlenkov/bro      # once — the catalog
+omp plugin install bro@theplenkov              # user scope: every project
+omp plugin install --scope project bro@theplenkov
+                                               # project copy shadows the user one
+\`\`\`
+
+Scope is a marketplace concept: a project-scoped install records
+\`.omp/plugins/installed_plugins.json\` in the project and shadows the
+user-scoped copy of the same \`name@marketplace\` — that is how a
+checkout diverges from the released plugin without touching the global
+one. For a live dev loop the plain local install still wins once:
+
+\`\`\`sh
+omp plugin install ./plugins/omp/bro           # symlinked — edits are live
+omp plugin install bro@theplenkov              # back to the marketplace copy
 \`\`\`
 
 Or load it ad hoc: \`omp --extension ./plugins/omp/bro/bro.ts\`.
