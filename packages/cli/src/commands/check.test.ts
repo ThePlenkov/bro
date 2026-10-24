@@ -359,6 +359,45 @@ describe('runCheck', () => {
     }
   })
 
+  test('two fresh reports are ambiguous — nothing is attributed', () => {
+    const { dir, bin } = fixture('collect-fails')
+    process.env.FAKE_SVERKA_RUNID = 'run-1'
+    // a concurrent sverka run's report — forward-dated so it reads as
+    // written inside this run's window, like a real concurrent writer
+    const other = join(dir, '.sverka', 'runs', 'run-2', 'report.json')
+    mkdirSync(dirname(other), { recursive: true })
+    writeFileSync(
+      other,
+      JSON.stringify({
+        schema: 'sverka.run/v1',
+        data: {
+          planId: 'other',
+          status: 'failure',
+          steps: [{ stepId: 'x', status: 'failed' }],
+        },
+        durationMs: 1,
+      })
+    )
+    const ahead = new Date(Date.now() + 60_000)
+    utimesSync(other, ahead, ahead)
+    try {
+      const { report, data, evaluation, exitCode } = runCheck(
+        bin,
+        dir,
+        { ...baseOpts, evaluate: true },
+        silent
+      )
+      assert.equal(exitCode, 3)
+      assert.equal(report, undefined)
+      assert.equal(data, undefined)
+      assert.equal(evaluation?.status, 'failed')
+    } finally {
+      delete process.env.FAKE_SVERKA_RUNID
+      delete process.env.FAKE_SVERKA_MODE
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
   test('a run report older than the spawn is never attributed', () => {
     const { dir, bin } = fixture('collect-fails')
     const stale = join(dir, '.sverka', 'runs', 'old', 'report.json')
