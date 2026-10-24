@@ -1,7 +1,6 @@
 {
-  "$schema": "https://omp.sh/schemas/marketplace.json",
-  "name": "bro",
-  "description": "Agent's sidekick — the rig that owns the PR-to-merge loop: beads claims, fleet workers, review gates, cross-repo mesh — mechanics in the bro CLI",
+  "name": "theplenkov",
+  "description": "Agent's sidekick — the rig that owns the PR-to-merge loop: fleet, convoy, review gates, mesh, self-correction — mechanics in the bro CLI",
   "owner": {
     "name": "Petr Plenkov"
   },
@@ -9,7 +8,7 @@
     {
       "name": "bro",
       "source": "./plugins/omp/bro",
-      "description": "Agent's sidekick for omp — the project board, the lifecycle mechanics, and the mode bridges: bro's durable state handed to omp's native Plan, Goal, Vibe, Prewalk and Advisor.",
+      "description": "Agent's sidekick — the rig that owns the PR-to-merge loop: beads claims, fleet workers, review gates, cross-repo mesh — all mechanics in the bro CLI over gh + beads",
       "version": "0.2.5",
       "license": "MIT",
       "keywords": [

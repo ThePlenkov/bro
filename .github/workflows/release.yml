@@ -87,6 +87,7 @@ jobs:
           git add CHANGELOG.md packages/*/package.json package.json package-lock.json \
             plugin.json .claude-plugin/marketplace.json \
             .agents/plugins/marketplace.json .cursor-plugin/marketplace.json \
+            .omp-plugin/marketplace.json \
             plugins/ hooks.json hooks/run.sh
           if git diff --cached --quiet; then
             echo "no version change — nothing to release"
