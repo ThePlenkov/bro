@@ -102,12 +102,12 @@ interface BoundaryResult {
 }
 
 interface PiApi {
-  on(event: string, handler: (event: never, ctx: ExtContext) => unknown): () => void
+  on(event: string, handler: (event: unknown, ctx: ExtContext) => unknown): () => void
   registerCommand(
     name: string,
     options: {
       description?: string
-      handler: (args: string, ctx: ExtContext) => Promise<void> | void
+      handler: (args: string, ctx: ExtContext) => Promise<void>
     }
   ): void
   registerTool(tool: {
@@ -121,7 +121,7 @@ interface PiApi {
       signal: AbortSignal | undefined,
       onUpdate: unknown,
       ctx: ExtContext
-    ): Promise<{ content: Array<{ type: 'text'; text: string }> }>
+    ): Promise<{ content: Array<{ type: 'text'; text: string }>; details: unknown }>
   }): void
   exec(command: string, args: string[], options?: { timeout?: number; cwd?: string }): Promise<ExecResult>
   sendMessage(
@@ -209,7 +209,7 @@ export default function broExtension(pi: PiApi): void {
   // follow a turn without a turn_end, and the board must not go stale.
   // driver.refresh repaints; driver.run alone spawned the CLI and
   // discarded the answer, leaving the widget stale.
-  pi.on('agent_settled', (_e: never, ctx: ExtContext) => {
+  pi.on('agent_settled', (_e: unknown, ctx: ExtContext) => {
     void driver.refresh(ctx).catch(() => {})
   })
 }

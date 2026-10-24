@@ -124,6 +124,7 @@ import {
   isCursorHookPayload,
   toCursorHookOutput,
 } from '../cursor-hook.ts'
+import { deriveToolSuccess } from '../host-matrix.ts'
 
 interface HookInput {
   tool_name?: unknown
@@ -1439,8 +1440,14 @@ async function emitPostTool(input: HookInput): Promise<void> {
   // collector can lose spans, never stall the hook (spec:
   // specs/telemetry/bro-huy5o.11.md)
   maybeSpawnTraceFlush(process.cwd())
-  if (input.tool_response?.success === true) {
-    const cmd = typeof input.tool_input?.command === 'string' ? input.tool_input.command : ''
+  const outcome = input.tool_response?.success
+  const cmd = typeof input.tool_input?.command === 'string' ? input.tool_input.command : ''
+  // arming is a "probe live state once" hint the stop gate re-verifies,
+  // not a verdict — so it fires on every outcome except a proven
+  // failure. A host that cannot observe outcomes (Codex PostToolUse
+  // fires on non-zero exits) over-approximates: a false arm costs one
+  // probe that finds nothing, a missed arm loses the gate entirely.
+  if (outcome !== false) {
     const aspects = classifyArmCommands(cmd)
     if (sessionId) {
       for (const aspect of aspects) {
@@ -1457,6 +1464,10 @@ async function emitPostTool(input: HookInput): Promise<void> {
           `— read skills/${mutation.skill}/SKILL.md before continuing`
       )
     }
+  }
+  // world-state nudges are statements of fact — they fire only where
+  // the host proved the call succeeded
+  if (outcome === true) {
     switch (classifyExecCommand(cmd)) {
       case 'pr-merge':
         lines.push('PR merged — sweep review debt with `bro debt collect`; queue: `bro debt prs`')
@@ -2000,7 +2011,20 @@ export async function runHooksCommand(argv: string[]): Promise<void> {
     !Array.isArray(raw) &&
     typeof (raw as { turn_id?: unknown }).turn_id === 'string'
   const root = hookProjectDir(raw)
-  const input = cursorClient ? cursorToHookInput(raw) : asHookInput(raw)
+  let input = cursorClient ? cursorToHookInput(raw) : asHookInput(raw)
+  // the post-tool outcome normalizes at this edge — hosts encode
+  // success differently (a boolean field, split event names, or not at
+  // all), and policy below must not know which host sent the payload
+  if (event === 'post-tool' && !cursorClient) {
+    const success = deriveToolSuccess(raw)
+    if (success !== undefined) {
+      const response =
+        typeof input.tool_response === 'object' && input.tool_response !== null
+          ? input.tool_response
+          : {}
+      input = { ...input, tool_response: { ...response, success } }
+    }
+  }
   // BRO_HOOKS=0 marks a machine-backend tree — the acp provider pins it
   // on the agent it spawns (spec bro-ddksm): session hooks rehydrate and
   // gate for a human session that isn't there, so every event is pure

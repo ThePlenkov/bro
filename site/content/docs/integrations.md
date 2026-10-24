@@ -91,6 +91,52 @@ state; it does not decide whether ambient repository state should block this
 session. Probes are bounded and fail-open, so a missing or wedged backend
 does not wedge the agent.
 
+### Capability matrix
+
+Not every host can do everything — the matrix below is the declared
+contract, enforced cell-by-cell against the shipped manifests and
+adapters by `host-matrix.test.ts`. Bump `HOOK_MATRIX_VERSION` in
+`packages/cli/src/host-matrix.ts` when any cell changes; the table here
+is its rendering.
+
+| bro event | Claude | Codex | Devin | Cursor | OpenCode | Kilo | pi | OMP |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| session-start | `SessionStart` | `SessionStart` | `SessionStart` | `sessionStart` | `chat.system.transform` | `chat.system.transform` | `session_start` | `session_start` |
+| post-compaction | — | `PostCompact` | `PostCompaction` | — | — | — | `session_compact` | `session_compact` |
+| pre-compact | `PreCompact` | `PreCompact` | — | `preCompact` | `session.compacting` | — | `session_before_compact` | `session_before_compact` |
+| prompt-submit | `UserPromptSubmit` | `UserPromptSubmit` | `UserPromptSubmit` | `beforeSubmitPrompt` | `chat.message` | `chat.system.transform` | `before_agent_start` | `before_agent_start` |
+| post-tool | `PostToolUse` + `PostToolUseFailure` (`Bash`) | `PostToolUse` (`Bash`) | `PostToolUse` (`exec`) | `postToolUse` + `postToolUseFailure` (`Shell`) | `tool.execute.after` | — | `tool_result` | `tool_result` |
+| pre-tool | `PreToolUse` (`Bash`) | `PreToolUse` (`Bash`) | — | — | `tool.execute.before` (V2) | — | — | `tool_call` |
+| permission | — | `PermissionRequest` | `PermissionRequest` | `beforeShellExecution` | `permission.ask` | `permission.ask` | — | — |
+| stop | `Stop` → **block** | `Stop` → **block** | `Stop` → **block** | `stop` → one follow-up | `session.idle` → re-prompt | `session.idle` → warn log | `agent_before_settle` → re-prompt | `session_stop` → **block** |
+
+`—` is a declared gap: the host lacks the surface or bro deliberately
+does not wire it (Claude's `PostCompact`/`PermissionRequest`, OMP's
+permission plane, pi's block-only `tool_call`). Hosts that cannot halt
+a stop turn bro's `decision:block` into UX — a follow-up prompt or a
+log line — never enforcement.
+
+**Post-tool outcome** is normalized per host: Claude splits success and
+failure into two events; Devin sends `tool_response.success`; Cursor's
+translator maps its split events; the extension adapters synthesize it
+from `isError`; Codex cannot observe it (`PostToolUse` fires on
+non-zero exits), so Codex arms on the hint and the journal records no
+`ok`.
+
+Three boundaries, stated once:
+
+- **Advisory ≠ enforcement.** Nudges, context injection, re-prompts and
+  toasts are UX. They are never a compliance or merge gate — the only
+  enforced decisions are the ones a host's own `block`/`rewrite`/
+  `approve` slots apply.
+- **bro policy ≠ host permissions.** The stop gate and merge policy own
+  *repo state* (markers, beads, PR gates). The host's permission plane
+  stays the user's security surface; bro answers permission events, it
+  does not widen them.
+- **Opt-in approval is scoped.** The `approve` column approves only
+  `bro`/`bd` self-tools — a workspace opting in to bro calling itself
+  unprompted, not a statement about any other tool.
+
 ## The data ref
 
 `bro work sync` keeps runtime artifacts outside the review surface on
