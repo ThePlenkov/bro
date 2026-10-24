@@ -598,8 +598,11 @@ var BoardPanelImpl = class {
 	*  state is the panel's own. */
 	summaryOf(s) {
 		if (s === null) return "bro · no board";
+		let out = boardLines(s)[0];
 		const attention = s.watch?.attention ?? 0;
-		return `${boardLines(s)[0]}${attention > 0 ? ` · ⚠ ${attention} attention` : ""}${this.pending ? " · refreshing…" : ""}`;
+		if (attention > 0) out += ` · ⚠ ${attention} attention`;
+		if (this.pending) out += " · refreshing…";
+		return out;
 	}
 	/** Flatten visible sections into cursor rows; the footer is never a
 	*  cursor target. */

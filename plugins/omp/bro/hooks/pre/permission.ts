@@ -102,20 +102,21 @@ function words(segment: string): string[] {
   const out: string[] = []
   let cur = ''
   let started = false
-  for (let i = 0; i < segment.length; i++) {
+  let i = 0
+  while (i < segment.length) {
     const ch = segment[i]
     if (ch in QUOTES) {
       const quoted = quotedWord(segment, i)
       cur += quoted.text
       started = true
-      i = quoted.end - 1
+      i = quoted.end
       continue
     }
     const escaped = segment[i + 1]
     if (ch === '\\' && escaped !== undefined) {
       cur += escaped
       started = true
-      i++
+      i += 2
       continue
     }
     if (ch in SEPARATORS) {
@@ -124,10 +125,12 @@ function words(segment: string): string[] {
         cur = ''
         started = false
       }
+      i++
       continue
     }
     cur += ch
     started = true
+    i++
   }
   if (started) {
     out.push(cur)

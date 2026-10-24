@@ -336,11 +336,17 @@ class BoardPanelImpl implements BoardPanelComponent {
     if (s === null) {
       return 'bro · no board'
     }
+    // no ternaries here: the bundler inlines one-shot ternary consts
+    // back into the template, and the bundle is what Sonar reads
+    let out = boardLines(s)[0]
     const attention = s.watch?.attention ?? 0
-    const base = boardLines(s)[0]
-    const attentionSuffix = attention > 0 ? ` · ⚠ ${attention} attention` : ''
-    const pendingSuffix = this.pending ? ' · refreshing…' : ''
-    return `${base}${attentionSuffix}${pendingSuffix}`
+    if (attention > 0) {
+      out += ` · ⚠ ${attention} attention`
+    }
+    if (this.pending) {
+      out += ' · refreshing…'
+    }
+    return out
   }
 
   /** Flatten visible sections into cursor rows; the footer is never a
