@@ -41,6 +41,8 @@ export function evaluateExitGate(
     // advisory-check alerts are a report, not a gate — a silent reviewer
     // must surface everywhere the verdict does without ever blocking it
     alerts: state.alerts,
+    // reopened threads DO block — the count rides along for the report
+    reopened_threads: state.reopenedThreads.length,
   }
   if (state.state !== 'OPEN') {
     return { ok: true, blockers: [], ...base }
@@ -68,6 +70,16 @@ export function evaluateExitGate(
   }
   if (state.sastUnknown > 0) {
     blockers.push(`${state.sastUnknown} SAST check(s) with unknown annotation status`)
+  }
+  // The reopened-thread cycle-guard: a thread that was resolved and then
+  // commented on again. The earlier resolution was wrong, and a blind
+  // re-resolve hides that — the user confirms instead.
+  if (state.reopenedThreads.length > 0) {
+    for (const t of state.reopenedThreads) {
+      blockers.push(
+        `reopened thread ${t.id} — resolved before, commented on again by ${t.author}`
+      )
+    }
   }
   if (state.mergeable === 'CONFLICTING') {
     blockers.push('merge conflicts')

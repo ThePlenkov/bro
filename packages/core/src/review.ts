@@ -80,13 +80,20 @@ export interface ApprovalProbeOpts {
   approvers?: readonly string[]
 }
 
-/** One review thread — consumers only ever read the first comment, so
- *  the facade exposes it directly rather than a comments array. */
+/** One review thread — `comment` is the thread's first comment (what
+ *  consumers read); `comments` is the full ordered history, which the
+ *  act gate needs to tell a thread that was resolved and then
+ *  re-commented from one that was never touched. Hosts that cannot
+ *  answer the history leave `comments` undefined rather than empty —
+ *  "no history" and "no comments" are different facts. */
 export interface ReviewThread {
   id: string
   resolved: boolean
   outdated: boolean
   comment: ReviewComment | null
+  /** Every comment in the thread, oldest first. Undefined when the host
+   *  does not expose the history. */
+  comments?: ReviewComment[]
 }
 
 export interface MergedPr {

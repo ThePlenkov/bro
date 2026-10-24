@@ -184,7 +184,8 @@ function printStatus(state: PrActState, gate: ExitGate): void {
       `reviewers_pending=${gate.reviewers_pending} ` +
       `reviewers_failing=${gate.reviewers_failing} ` +
       `sast_pending=${gate.sast_pending} sast_unknown=${gate.sast_unknown} ` +
-      `fix_rounds=${gate.fix_rounds} docs_only=${gate.docs_only}`
+      `fix_rounds=${gate.fix_rounds} docs_only=${gate.docs_only} ` +
+      `reopened_threads=${gate.reopened_threads}`
   )
   console.log(`exit_gate=${gate.ok ? 'OK' : 'BLOCKED'}`)
   const live = listWatches(process.cwd()).filter(
