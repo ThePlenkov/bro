@@ -2,7 +2,7 @@ import assert from 'node:assert/strict'
 import { test } from 'node:test'
 import { evaluateExitGate } from './exit-gate.ts'
 import type { PrActState } from './types.ts'
-import { openActState as open } from './test-fixtures.ts'
+import { openActState as open } from './test-fixtures.test.ts'
 import { gatePending, waitForGate } from './wait.ts'
 
 

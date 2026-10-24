@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict'
 import { describe, it } from 'node:test'
 import { evaluateExitGate } from './exit-gate.ts'
-import { openActState as open } from './test-fixtures.ts'
+import { openActState as open } from './test-fixtures.test.ts'
 
 
 
