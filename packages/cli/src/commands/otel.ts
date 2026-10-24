@@ -13,7 +13,7 @@
  */
 import { existsSync, readFileSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
-import { EXIT, hasHelpFlag, printUsage } from '@broject/core'
+import { EXIT, hasHelpFlag, printUsage, type ExitCode } from '@broject/core'
 import { otelEndpoint } from '@broject/providers'
 import {
   hookEventName,
@@ -30,7 +30,7 @@ function otelConfig(dir: string): OtelConfig {
   return loadBroConfig(dir).otel as OtelConfig
 }
 
-function usage(exitCode: number = EXIT.usage): never {
+function usage(exitCode: ExitCode = EXIT.usage): never {
   printUsage(
     `Usage: bro otel <command> [args…]
 
