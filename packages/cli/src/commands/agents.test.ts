@@ -1415,15 +1415,21 @@ describe('bro agents down <target>', () => {
   })
 
   test('a TERM-resistant wrapper survives — down exits 1, never `stopped`', async () => {
-    // the wrapper traps SIGTERM (the child inherits the ignore through
-    // fork/exec) — stop()'s bounded kill-wait expires with the pid
-    // still alive, and the verdict must say so instead of printing
-    // `stopped` over a live worker (bro-l8c4f.3)
+    // the wrapper records receipt of SIGTERM and keeps running — the
+    // marker file proves the signal actually landed, so a no-op stop()
+    // can't pass by never signaling (bro-l8c4f.3)
     const fx = fixture([{ id: 'fx-1', status: 'open' }])
     try {
+      const hitFile = join(fx.main, 'term-received')
       writeFileSync(
         join(fx.main, 'bro.config.json'),
-        JSON.stringify({ agents: { native: { command: 'trap "" TERM; sleep 30 # {promptFile}' } } })
+        JSON.stringify({
+          agents: {
+            native: {
+              command: `trap 'touch "${hitFile}"' TERM; while :; do sleep 1; done # {promptFile}`,
+            },
+          },
+        })
       )
       const up = await agents([
         'up', 'fx-1', '--worktree', fx.main, '--beads-dir', fx.beads,
@@ -1435,6 +1441,11 @@ describe('bro agents down <target>', () => {
       assert.equal(down.code, 1)
       assert.match(down.err.join('\n'), /survived the stop signal — still running/)
       assert.doesNotMatch(down.out.join('\n'), /^stopped /m)
+      // the signal provably landed — a stop() that never signaled fails here
+      for (let i = 0; i < 40 && !existsSync(hitFile); i++) {
+        await new Promise((r) => setTimeout(r, 50))
+      }
+      assert.ok(existsSync(hitFile), 'the wrapper never received SIGTERM')
       // no stopped marker — the live run still owns the entry
       assert.notEqual(readAgentRegistry(fx.main)['fx-1']?.stopped, true)
       const st = await agents(['status', 'fx-1'])
@@ -1444,7 +1455,7 @@ describe('bro agents down <target>', () => {
     }
   })
 
-  test('a dead wrapper with a live descendant is unverified, not stopped', async () => {
+  test('a dead wrapper with a live descendant is still-running, not stopped', async () => {
     // the wrapper dies on SIGTERM while its descendant had TERM
     // ignored before exec — a group probe, not the wrapper pid, is what
     // stands between this unit and a `stopped` marker (bro-l8c4f.3)
@@ -1464,11 +1475,46 @@ describe('bro agents down <target>', () => {
 
       const down = await agents(['down', 'fx-1'])
       assert.equal(down.code, 1)
+      assert.match(down.err.join('\n'), /survived the stop signal — still running/)
+      assert.doesNotMatch(down.out.join('\n'), /^stopped /m)
+      // the marker must NOT land over a live descendant — and the live
+      // group member keeps the whole unit reading `running`
+      assert.notEqual(readAgentRegistry(fx.main)['fx-1']?.stopped, true)
+      const st = await agents(['status', 'fx-1'])
+      assert.match(st.out.join('\n'), /state\s+running/)
+    } finally {
+      fx.restore()
+    }
+  })
+
+  test('a setsid-escaped descendant leaves the stop unverified, not stopped', async () => {
+    // setsid moves the child into its own session AND process group —
+    // the group probe cannot see it; the pre-signal tree snapshot is
+    // what stops the marker landing over a live writer (bro-l8c4f.3).
+    // Once the wrapper dies the survivor reparents to init — the state
+    // read then says `lost`, so the verdict is unverified.
+    const fx = fixture([{ id: 'fx-1', status: 'open' }])
+    try {
+      writeFileSync(
+        join(fx.main, 'bro.config.json'),
+        JSON.stringify({
+          agents: { native: { command: 'setsid sleep 30 & wait $! # {promptFile}' } },
+        })
+      )
+      const up = await agents([
+        'up', 'fx-1', '--worktree', fx.main, '--beads-dir', fx.beads,
+        '--prompt-file', fx.promptFile(LONG_RUN),
+      ])
+      assert.equal(up.code, 0)
+
+      const down = await agents(['down', 'fx-1'])
+      assert.equal(down.code, 1)
       assert.match(down.err.join('\n'), /stop unconfirmed/)
       assert.doesNotMatch(down.out.join('\n'), /^stopped /m)
-      // the marker must NOT land over a live descendant — the entry
-      // reads lost (dead wrapper, no death record), never stopped
       assert.notEqual(readAgentRegistry(fx.main)['fx-1']?.stopped, true)
+      // the escapee lives on in its own session — the state read is
+      // lost (no death record), which is exactly why the verdict stays
+      // unverified; it exits on its own ~30 s out
       const st = await agents(['status', 'fx-1'])
       assert.match(st.out.join('\n'), /state\s+lost/)
     } finally {

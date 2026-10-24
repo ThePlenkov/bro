@@ -767,59 +767,67 @@ async function routeAgentGet(ref: string, deps: ServeDeps): Promise<ServeRespons
   }
 }
 
-async function routeAgentDelete(ref: string, deps: ServeDeps): Promise<ServeResponse> {
-  const outcome = await deps.stop(ref)
-  if (!outcome.found) {
-    // a degraded read can't confirm "gone" — unverifiable is not 404
-    if (outcome.degraded.length > 0) {
-      return {
-        status: 503,
-        body: {
-          error: `cannot verify "${ref}" — backend(s) degraded`,
-          degraded: outcome.degraded,
-        },
-      }
-    }
-    return { status: 404, body: { error: `no agent "${ref}"` } }
+/** 409 for a stop the backend could not confirm — a 200 here would let
+ *  the client treat the step as safe to respawn over a survivor. */
+function agentDeleteConflict(ref: string, outcome: StopOutcome): ServeResponse {
+  return {
+    status: 409,
+    body: {
+      error:
+        outcome.verdict === 'still-running'
+          ? `"${ref}" survived the stop signal — still running`
+          : `"${ref}" — stop unconfirmed, the backend reports ${outcome.agent?.state ?? 'unknown'}`,
+      agent: outcome.agent,
+      stopped: false,
+      verdict: outcome.verdict,
+      ...(outcome.respawned !== undefined ? { respawned: outcome.respawned } : {}),
+    },
   }
-  // truthfulness (bro-l8c4f.3): a worker that survived the stop, or a
-  // death the backend cannot confirm, is not an HTTP success — a 200
-  // here would let the client treat the step as safe to respawn
-  if (outcome.verdict === 'still-running' || outcome.verdict === 'unverified') {
-    return {
-      status: 409,
-      body: {
-        error:
-          outcome.verdict === 'still-running'
-            ? `"${ref}" survived the stop signal — still running`
-            : `"${ref}" — stop unconfirmed, the backend reports ${outcome.agent?.state ?? 'unknown'}`,
-        agent: outcome.agent,
-        stopped: false,
-        verdict: outcome.verdict,
-        ...(outcome.respawned !== undefined ? { respawned: outcome.respawned } : {}),
-      },
-    }
-  }
+}
+
+/** The 200 row — `terminal`/`cleared`/`note` are machine-readable so a
+ *  client never string-matches the note to tell "already dead" from a
+ *  live stop. */
+function agentDeleteOk(outcome: StopOutcome): ServeResponse {
+  const note =
+    outcome.terminal === true && outcome.agent !== undefined
+      ? outcome.cleared === true
+        ? 'blocked — cleared'
+        : `already ${outcome.agent.state}`
+      : undefined
   return {
     status: 200,
     body: {
       agent: outcome.agent,
       stopped: outcome.stopped,
-      // machine-readable "was already terminal" — clients shouldn't
-      // string-match the note to tell it from a live stop
       ...(outcome.terminal === true ? { terminal: true } : {}),
       ...(outcome.cleared === true ? { cleared: true } : {}),
-      ...(outcome.terminal === true && outcome.agent !== undefined
-        ? {
-            note:
-              outcome.cleared === true
-                ? 'blocked — cleared'
-                : `already ${outcome.agent.state}`,
-          }
-        : {}),
+      ...(note !== undefined ? { note } : {}),
       ...(outcome.respawned !== undefined ? { respawned: outcome.respawned } : {}),
     },
   }
+}
+
+async function routeAgentDelete(ref: string, deps: ServeDeps): Promise<ServeResponse> {
+  const outcome = await deps.stop(ref)
+  if (!outcome.found) {
+    // a degraded read can't confirm "gone" — unverifiable is not 404
+    return outcome.degraded.length > 0
+      ? {
+          status: 503,
+          body: {
+            error: `cannot verify "${ref}" — backend(s) degraded`,
+            degraded: outcome.degraded,
+          },
+        }
+      : { status: 404, body: { error: `no agent "${ref}"` } }
+  }
+  // truthfulness (bro-l8c4f.3): a worker that survived the stop, or a
+  // death the backend cannot confirm, is not an HTTP success
+  if (outcome.verdict === 'still-running' || outcome.verdict === 'unverified') {
+    return agentDeleteConflict(ref, outcome)
+  }
+  return agentDeleteOk(outcome)
 }
 
 async function routeAgentRef(

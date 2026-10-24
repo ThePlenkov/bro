@@ -33,9 +33,16 @@ the timeout instead of silence.
 
 `stopAgent` keeps its pre-stop read (terminal detection, the respawn
 note — unchanged), then after `await conn.stop(id)` re-reads
-`conn.status(id)` — unless the pre-stop state was already terminal
-(there was nothing live to verify; those paths behave exactly as
-before).
+`conn.status(id)`. `lost` is deliberately NOT terminal — it is the
+absence of a death record, not a record of death, and a live
+process-group descendant can sit under it; `blocked` is the only state
+that skips the probe (stop() IS the clear). Recorded-terminal reads
+(exited/stopped) still probe: a terminal snapshot can go stale
+between the read and stop(), and `running`/`spawned` then reads
+`still-running` instead of a stale-snapshot success. A `conn.stop()`
+that throws lands in the same probe — a connector whose own liveness
+check fails produces an unconfirmed verdict, never an exception
+escaping past the 409 contract.
 
 `StopOutcome` gains one field and `stopped` becomes its projection:
 
@@ -46,13 +53,16 @@ verdict?: 'stopped' | 'still-running' | 'unverified'
 
 The ladder (one probe):
 
-| post-stop read                  | verdict       |
-| ------------------------------- | ------------- |
-| `AgentNotFound` (gone — the desired end state) | `stopped` |
-| `exited`, `stopped`             | `stopped`     |
-| `running`, `spawned`            | `still-running` |
+| post-stop read | verdict |
+|---|---|
+| `exited`, `stopped` | `stopped` (undefined on a terminal pre-read) |
+| `running`, `spawned` | `still-running` |
 | `lost`, `blocked` (no death record) | `unverified` |
+| `AgentNotFound` (a missing row is the registry's silence, not a death record) | `unverified` |
 | any other probe error (the backend cannot answer) | `unverified` |
+
+`outcome.agent` carries the post-stop read when one ran — error text
+reports the verified state, never the stale pre-stop snapshot.
 
 ### Both surfaces tell it
 
@@ -69,30 +79,46 @@ The ladder (one probe):
 ### The native connector verifies the unit, not the wrapper
 
 The wait loop and the registry-lock skip-patch guard in native
-`stop()` become `pidAlive(wrapper) || groupMemberAlive(wrapper)`:
+`stop()` become `pidAlive(wrapper) || groupMemberAlive(wrapper) ||
+descendantAlive(snapshot)`:
 
-- `groupMemberAlive(pgid)` gates on `kill(-pgid, 0)` — no such group
-  (ESRCH) is dead without touching /proc; EPERM is a live group we
-  cannot signal;
+- `groupMemberAlive(pgid, minStart)` gates on `kill(-pgid, 0)` — no
+  such group (ESRCH) is dead without touching /proc; EPERM is a live
+  group we cannot signal;
 - a live group still counts the unreaped wrapper's own zombie, so the
   members are read from `/proc/<pid>/stat`: a non-zombie process whose
   pgrp (field 5, the split `procStat` already uses) equals `pgid`;
-- no readable `/proc` reads as **alive** — fail-open, the rule
-  `pidAlive` documents: never a false "the unit is dead".
+- `minStart` (the wrapper's pidStart) bounds a member's starttime —
+  our descendants forked after the wrapper, so a member older than it
+  is a recycled pgid's citizen, not ours;
+- a member stat that fails for any reason but ENOENT reads as
+  **alive** — fail-open, the rule `pidAlive` documents: never a false
+  "the unit is dead". Off Linux `/proc` never exists at all, so the
+  probe cannot tell the wrapper's zombie from a live member — there
+  the wrapper-pid check is the probe, and a descendant outliving its
+  wrapper is a documented blind spot;
+- `descendantsOf(wrapper)` snapshots the process TREE (pid + starttime
+  per node) BEFORE the signal — a descendant that escaped the group
+  (setsid, own session) is invisible to the group probe and reparents
+  to init once the wrapper dies; the pre-signal pid+starttime pin is
+  the only handle left on it.
+
+`nativeState` runs the same unit check on reads, not just in `stop()`:
+a dead wrapper with a live group member reports `running` — the spawn
+dedup's `isLive` rides `nativeState`, so a survivor holds its step
+against a respawn for as long as it lives, not just for the stop call.
 
 Consequences: a live leader waits out the bounded 2 s and skips the
 patch (status stays `running` → verdict `still-running`); a dead
-wrapper with a live descendant also skips the patch (status reads
-`lost` → verdict `unverified` — no `stopped` marker ever lands, the
-entry stays unconfirmed instead of respawnable-as-stopped); a unit
-that is actually gone gets the marker → `stopped` → verdict
-`stopped`.
+wrapper with a live group descendant also skips the patch and reads
+`running` → `still-running`; a setsid-escaped descendant blocks the
+patch through the snapshot and reads `lost` → `unverified` (the tree
+link is gone — no read can re-find it); a unit that is actually gone
+gets the marker → `stopped` → verdict `stopped`.
 
 Signals are unchanged: the TERM still targets the wrapper's own group
 (identity-checked by pidStart), and the lock re-verify still refuses a
 respawned entry — the racing replacement receives no foreign signal.
-A second `down` on a `lost` entry is the terminal "nothing to stop"
-path: idempotent, no new kill beyond `stop()`'s own bound.
 
 ### Scope
 
@@ -107,16 +133,22 @@ path: idempotent, no new kill beyond `stop()`'s own bound.
 ## Verify
 
 - `packages/cli/src/commands/agents.test.ts` (`bro agents down`):
-  - **live worker → not stopped**: `trap "" TERM; sleep 30` (wrapper
-    ignores TERM) — `down` exits 1, stderr says the worker is still
-    running after SIGTERM, stdout carries no `stopped <id>` line, no
-    `stopped` marker lands in the registry;
+  - **live worker → not stopped**: `trap 'touch <file>' TERM; while :;
+    do sleep 1; done` — the marker file proves the signal landed (a
+    no-op stop() fails the test), `down` exits 1, stderr says the
+    worker is still running after SIGTERM, stdout carries no
+    `stopped <id>` line, no `stopped` marker lands in the registry;
   - **dead worker → stopped**: the ordinary TERM'd spawn still exits 0
     with `stopped <id>` (the existing idempotency test, unchanged);
   - **wrapper dead, descendant alive**: `(trap "" TERM; exec sleep 30)
-    & wait $!` — `down` exits 1 as `unconfirmed`/unverified, the
-    `stopped` marker is not written, and `fixture.restore()`'s group
-    SIGKILL reaps the survivor;
+    & wait $!` — `down` exits 1 as `still-running`, the `stopped`
+    marker is not written, `status` reads `running` (the live group
+    member), and `fixture.restore()`'s group SIGKILL reaps the
+    survivor;
+  - **group-escaped descendant**: `setsid sleep 30 & wait $!` — the
+    pre-signal tree snapshot blocks the patch, `down` exits 1 as
+    `stop unconfirmed`, `status` reads `lost` (the reparented survivor
+    is unreachable), and the escapee exits on its own;
   - the flaky-pid fake (bro-8ltl): a status that still reads `running`
     after `stop()` exits 1 — its respawn note stays asserted.
 - `packages/cli/src/commands/serve.test.ts`: `deps.stop` returning

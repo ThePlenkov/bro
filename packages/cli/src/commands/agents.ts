@@ -57,7 +57,6 @@ import {
 import { basename } from 'node:path'
 import { randomBytes } from 'node:crypto'
 import {
-  AgentNotFound,
   countSessionReservations,
   gitCommonDir,
   readAgentRegistry,
@@ -727,23 +726,27 @@ export function spawnStepAgent(
 export interface StopOutcome {
   found: boolean
   degraded: string[]
-  /** live state at stop time — can differ from the list() snapshot */
+  /** the state the verdict was probed on — the post-stop status() read
+   *  when one ran, else the pre-stop snapshot (either can differ from
+   *  the list() snapshot) */
   agent?: AgentInfo
   backend?: string
   /** true when the backend CONFIRMED the worker is gone after stop() —
-   *  probe verdict (bro-l8c4f.3): always true on an already-terminal
-   *  agent (nothing was live; no probe runs, verdict stays undefined),
-   *  and on a live stop only when the post-stop status() read says so.
+   *  probe verdict (bro-l8c4f.3): true on a recorded-terminal agent
+   *  that still probes terminal, and on a live stop only when the
+   *  post-stop status() read says so.
    *  stop() itself is the request landing, not proof of death: a
    *  TERM-resistant worker survives the bounded kill-wait */
   stopped: boolean
-  /** post-stop truth from one status() re-probe (absent when the
-   *  pre-stop read was already terminal — nothing live to verify):
+  /** post-stop truth from one status() re-probe (absent only on a
+   *  `blocked` read — the clear IS the result, and on a recorded-
+   *  terminal read that still probes terminal):
    *  'stopped' the backend confirms the worker is gone/terminal;
    *  'still-running' the worker survived stop() (TERM-resistant, the
-   *  connector's bounded wait expired);
+   *  connector's bounded wait expired) — including a terminal
+   *  snapshot that went stale;
    *  'unverified' the probe cannot confirm death either way (no death
-   *  record, or the backend failed to answer) */
+   *  record, a missing entry, or the backend failed to answer) */
   verdict?: 'stopped' | 'still-running' | 'unverified'
   /** the agent already read terminal when we looked — stop() still ran
    *  (idempotent), the flag just says there was nothing live to kill */
@@ -781,42 +784,65 @@ export async function stopAgent(
   } catch {
     // the read failed — stop() still binds to the observed id
   }
+  // 'lost' is NOT terminal: it is the absence of a death record, not a
+  // record of death — a live process-group descendant can sit under it,
+  // and the post-stop probe is what separates a real corpse from that
+  // survivor. 'blocked' carries no running unit at all (stop() IS the
+  // clear), and recorded deaths (exited/stopped) still probe — a
+  // terminal snapshot can go stale between the read and stop() (a
+  // respawn, or a descendant the pre-read hadn't surfaced yet).
   const terminal =
     current.state === 'exited' ||
     current.state === 'stopped' ||
-    current.state === 'lost' ||
     current.state === 'blocked'
   const respawned =
     current.pid !== hit.agent.pid ? { from: hit.agent.pid, to: current.pid } : undefined
-  await hit.conn.stop(hit.agent.id)
+  try {
+    await hit.conn.stop(hit.agent.id)
+  } catch {
+    // a connector whose own liveness probe fails must not crash the
+    // verdict path — the post-stop status read below carries the
+    // outcome, and serve's 409 contract needs a verdict, not an
+    // exception escaping
+  }
   // stop() returning proves the REQUEST landed, not the death — a
   // TERM-resistant worker survives the connector's bounded kill-wait,
   // so `stopped` is re-probed from the backend before anyone reports
-  // it (bro-l8c4f.3). The already-terminal path skips the probe:
-  // nothing was live to verify and its message/exit contract stands.
+  // it (bro-l8c4f.3).
   let verdict: StopOutcome['verdict']
-  if (terminal) {
+  let after: typeof current | undefined
+  if (current.state === 'blocked') {
     verdict = undefined
   } else {
     try {
-      const after = await hit.conn.status(hit.agent.id)
+      after = await hit.conn.status(hit.agent.id)
       verdict =
         after.state === 'exited' || after.state === 'stopped'
           ? 'stopped'
           : after.state === 'running' || after.state === 'spawned'
             ? 'still-running'
             : 'unverified' // lost/blocked — no death record to confirm
-    } catch (err) {
-      // gone is the desired end state; any OTHER probe failure is
-      // unverified — a backend that cannot answer must not be read as
-      // a kill confirmation
-      verdict = err instanceof AgentNotFound ? 'stopped' : 'unverified'
+    } catch {
+      // AgentNotFound included: a missing row is the registry's silence,
+      // not proof the unit is gone — a worker can outlive a pruned or
+      // concurrently removed entry. Any other probe failure likewise:
+      // a backend that cannot answer must not be read as a kill
+      // confirmation.
+      verdict = 'unverified'
+    }
+    // an already-terminal snapshot that still probes terminal keeps its
+    // "nothing was live" contract — the probe exists to catch the
+    // snapshot going stale (running/spawned above → still-running)
+    if (terminal && verdict === 'stopped') {
+      verdict = undefined
     }
   }
   return {
     found: true,
     degraded,
-    agent: current,
+    // the post-stop read when we have it — error text reports the state
+    // the probe verified, never the stale pre-stop snapshot
+    agent: after ?? current,
     backend: hit.conn.name,
     stopped: verdict === undefined || verdict === 'stopped',
     verdict,
