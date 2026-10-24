@@ -2620,10 +2620,9 @@ function responsesReplay(res: ServerResponse, wire: WireCtx, ctx: RespReplayCtx)
 
 /** The retained-conversation key a responses turn writes under — a
  *  chained predecessor wins; else store:true (or an explicit session
- *  pin) fingerprints this request. An unknown predecessor just starts
- *  fresh (fingerprint), never an invention; a KNOWN-but-broken one
- *  fails inside acpTurn rather than answering from history-less
- *  state. */
+ *  pin) fingerprints this request. An unknown predecessor already
+ *  400'd in responses() — a KNOWN-but-broken one fails inside acpTurn
+ *  rather than answering from history-less state. */
 function respConvKey(
   req: IncomingMessage,
   rreq: ResponsesRequest,
@@ -2688,6 +2687,15 @@ async function responses(
   const respId = `resp_${randomBytes(12).toString('hex')}`
   const hit =
     rreq.previous_response_id !== undefined ? chains.get(rreq.previous_response_id) : undefined
+  if (rreq.previous_response_id !== undefined && hit === undefined) {
+    openaiError(
+      res,
+      400,
+      'invalid_request_error',
+      `previous_response_id ${rreq.previous_response_id} not found (expired or evicted)`
+    )
+    return
+  }
   const key = respConvKey(req, rreq, body, hit, store)
   const tools = body.tool_choice?.type !== 'none'
   let live: RespLive | undefined

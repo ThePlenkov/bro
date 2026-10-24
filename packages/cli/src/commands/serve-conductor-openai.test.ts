@@ -369,6 +369,39 @@ describe('serve /v1/responses — the openai dialect', () => {
     }
   })
 
+  // bro-d63hu — an unknown predecessor must 400, never answer the bare
+  // delta history-less as if it were a fresh fingerprinted turn.
+
+  test('an unknown previous_response_id answers 400 — never a history-less turn', async () => {
+    const fake = fakeAcpAgent({ replyText: 'ok', configOptions: [MODEL_OPTION] })
+    const { post, close } = await boot(fake)
+    try {
+      const gone = await post('/v1/responses', {
+        input: 'x',
+        previous_response_id: 'resp_gone',
+        stream: false,
+      })
+      assert.equal(gone.status, 400)
+      const err = (await gone.json()) as { error: { type: string; message: string } }
+      assert.equal(err.error.type, 'invalid_request_error')
+      assert.match(err.error.message, /resp_gone.*expired or evicted/)
+      // a non-stored response registers no chain id either — chaining
+      // from it is equally refused, not a fresh fingerprint
+      const a = await post('/v1/responses', { input: 'one', store: false })
+      const idA = ((await a.json()) as { id: string }).id
+      const b = await post('/v1/responses', {
+        input: 'two',
+        previous_response_id: idA,
+        stream: false,
+      })
+      assert.equal(b.status, 400)
+      // the refused turns never reached the agent — only 'one' did
+      assert.equal(fake.prompts.length, 1)
+    } finally {
+      await close()
+    }
+  })
+
   test('missing input answers 400 in the openai error envelope', async () => {
     const fake = fakeAcpAgent({ replyText: 'x' })
     const { r, close } = await postResponses(fake, { stream: false })
