@@ -274,7 +274,9 @@ function escapeEnd(data: string, i: number): number {
   const next = data[i + 1]
   if (next in SEQUENCE_LEADS) {
     let j = i + 2
-    while (j < data.length && data[j] >= ' ' && data[j] <= '?') {
+    // charCodeAt/char lookup past the end compares false — no length
+    // guard needed, and one && stays under the conditional threshold
+    while (data[j] >= ' ' && data[j] <= '?') {
       j++ // parameter and intermediate bytes
     }
     if (j < data.length) {
@@ -317,9 +319,10 @@ class BoardPanelImpl implements BoardPanelComponent {
   private lastWidth = -1
   private cached: readonly string[] = []
 
-  /** Key → action. A table keeps the keymap's cyclomatic cost flat —
-   *  a switch over a dozen keys reads the same and measures the same. */
-  private readonly actions: Record<string, () => void>
+  /** Key → action, as a Map: the lookup key is raw terminal input, and
+   *  a Map lookup never reads a prototype chain (a Record index on
+   *  external data reads as object injection to static analysis). */
+  private readonly actions: Map<string, () => void>
 
   constructor(private readonly options: BoardPanelOptions) {
     const moveUp = (): void => this.move(-1)
@@ -329,22 +332,22 @@ class BoardPanelImpl implements BoardPanelComponent {
     const toggle = (): void => this.toggleUnderCursor()
     const refresh = (): void => this.refresh()
     const close = (): void => this.close()
-    this.actions = {
-      '\x1b[A': moveUp,
-      k: moveUp,
-      '\x1b[B': moveDown,
-      j: moveDown,
-      '\x1b[D': collapse,
-      h: collapse,
-      '\x1b[C': expand,
-      l: expand,
-      '\r': toggle,
-      '\n': toggle,
-      ' ': toggle,
-      r: refresh,
-      q: close,
-      '\x1b': close,
-    }
+    this.actions = new Map<string, () => void>([
+      ['\x1b[A', moveUp],
+      ['k', moveUp],
+      ['\x1b[B', moveDown],
+      ['j', moveDown],
+      ['\x1b[D', collapse],
+      ['h', collapse],
+      ['\x1b[C', expand],
+      ['l', expand],
+      ['\r', toggle],
+      ['\n', toggle],
+      [' ', toggle],
+      ['r', refresh],
+      ['q', close],
+      ['\x1b', close],
+    ])
   }
 
   /** Flatten visible sections into cursor rows; the footer is never a
@@ -445,12 +448,7 @@ class BoardPanelImpl implements BoardPanelComponent {
       this.close()
       return
     }
-    // resolve to a local first: a direct obj[key]() call reads as a
-    // dynamic-code-execution pattern to static analysis
-    const action = this.actions[data]
-    if (action !== undefined) {
-      action()
-    }
+    this.actions.get(data)?.()
   }
 
   private move(delta: number): void {

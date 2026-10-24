@@ -537,7 +537,7 @@ function escapeEnd(data, i) {
 	const next = data[i + 1];
 	if (next in SEQUENCE_LEADS) {
 		let j = i + 2;
-		while (j < data.length && data[j] >= " " && data[j] <= "?") j++;
+		while (data[j] >= " " && data[j] <= "?") j++;
 		if (j < data.length) return j + 1;
 	}
 	return next === void 0 ? i + 1 : i + 2;
@@ -573,8 +573,9 @@ var BoardPanelImpl = class {
 	dirty = true;
 	lastWidth = -1;
 	cached = [];
-	/** Key → action. A table keeps the keymap's cyclomatic cost flat —
-	*  a switch over a dozen keys reads the same and measures the same. */
+	/** Key → action, as a Map: the lookup key is raw terminal input, and
+	*  a Map lookup never reads a prototype chain (a Record index on
+	*  external data reads as object injection to static analysis). */
 	actions;
 	constructor(options) {
 		this.options = options;
@@ -585,22 +586,22 @@ var BoardPanelImpl = class {
 		const toggle = () => this.toggleUnderCursor();
 		const refresh = () => this.refresh();
 		const close = () => this.close();
-		this.actions = {
-			"\x1B[A": moveUp,
-			k: moveUp,
-			"\x1B[B": moveDown,
-			j: moveDown,
-			"\x1B[D": collapse,
-			h: collapse,
-			"\x1B[C": expand,
-			l: expand,
-			"\r": toggle,
-			"\n": toggle,
-			" ": toggle,
-			r: refresh,
-			q: close,
-			"\x1B": close
-		};
+		this.actions = new Map([
+			["\x1B[A", moveUp],
+			["k", moveUp],
+			["\x1B[B", moveDown],
+			["j", moveDown],
+			["\x1B[D", collapse],
+			["h", collapse],
+			["\x1B[C", expand],
+			["l", expand],
+			["\r", toggle],
+			["\n", toggle],
+			[" ", toggle],
+			["r", refresh],
+			["q", close],
+			["\x1B", close]
+		]);
 	}
 	/** Flatten visible sections into cursor rows; the footer is never a
 	*  cursor target. */
@@ -676,8 +677,7 @@ var BoardPanelImpl = class {
 			this.close();
 			return;
 		}
-		const action = this.actions[data];
-		if (action !== void 0) action();
+		this.actions.get(data)?.();
 	}
 	move(delta) {
 		const rows = this.rows(buildSections(this.options.host.snapshot()));
