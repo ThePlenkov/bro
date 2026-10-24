@@ -19,7 +19,7 @@
  */
 import { existsSync, realpathSync } from 'node:fs'
 import { basename, resolve } from 'node:path'
-import { evaluateExitGate, fetchPrActState, prStateCache } from '@broject/act'
+import { evaluateExitGate, fetchPrActState, prStateCache, resolveLedger } from '@broject/act'
 import {
   facade,
   gitTry,
@@ -368,6 +368,7 @@ async function readAct(dir: string): Promise<BroStatus['act']> {
       requireApproval: act.requireApproval,
       approvers: act.approvers,
       stateCache: prStateCache(dir),
+      resolveLedger: resolveLedger(dir),
     })
     const gate = evaluateExitGate(state, { requireApproval: act.requireApproval })
     // ownership marker — advisory read, a failure degrades the marker,

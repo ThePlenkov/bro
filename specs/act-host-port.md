@@ -73,22 +73,23 @@ timestamp on a review thread (GitHub's GraphQL has no `resolvedAt` on
 resolve. `ReviewThread` gains the comment *history* (what the host does
 know), and the ledger answers the rest.
 
-**2. The same-rule-2× guard becomes mechanical.**
+### Not in this change — future work
 
-> **Same rule 2+ times** — same rule ID flagged again after a fix commit → verify
-> fix is on current HEAD; do not re-merge blindly.
+The other two cycle-guards from the same policy are **not** part of this
+change. They are named here so the port scope is not mistaken for the port
+itself.
 
+**The same-rule-2× guard** — *"same rule 2+ times: same rule ID flagged again
+after a fix commit → verify fix is on current HEAD; do not re-merge blindly."*
 bro has `fixRounds` / `maxRounds` — a round cap, not a per-rule counter. The
 per-rule notion needs the findings that produced the blockers, which bro's
-`checkAnnotations` already yields.
+`checkAnnotations` already yields, so the raw material is there — but no
+counter, no gate condition, no test.
 
-**3. The empty-loop guard becomes mechanical.**
-
-> **Empty /act loop** — 2+ `/act` invocations on the same PR with no new product
-> commits → stop and report cycle.
-
-bro has `fixRounds` but counts rounds, not *productive* rounds. "No new product
-commits" is a different signal.
+**The empty-loop guard** — *"2+ `/act` invocations on the same PR with no new
+product commits → stop and report cycle."* bro has `fixRounds` but counts
+rounds, not *productive* rounds. "No new product commits" is a different
+signal.
 
 ### What does not move (and why)
 

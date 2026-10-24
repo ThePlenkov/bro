@@ -93,6 +93,7 @@ import {
   ACT_STATE_TTL_MS,
   failingCiChecks,
   fetchPrActState,
+  resolveLedger,
   isSast,
   listWatches,
   liveSastChecks,
@@ -1970,6 +1971,7 @@ async function mergeAndRetire(
         docsMaxRounds: ctx.act.docsMaxRounds,
         requireApproval: ctx.act.requireApproval,
         approvers: ctx.act.approvers,
+        resolveLedger: resolveLedger(ctx.mainRoot),
       }
   ).catch(() => undefined)
   // exit-0 + OPEN IS the enqueue contract — act merge exits 0 only on a
@@ -2211,6 +2213,7 @@ async function drivePr(ctx: Ctx, pr: number, work: PassWork): Promise<PrVerdict>
         requireApproval: ctx.act.requireApproval,
         approvers: ctx.act.approvers,
         stateCache: ctx.stateCache,
+        resolveLedger: resolveLedger(ctx.mainRoot),
       }
     )
   } catch (err) {
@@ -2331,6 +2334,7 @@ async function sweepSettledFixers(ctx: Ctx, prs: Set<number>): Promise<void> {
         requireApproval: ctx.act.requireApproval,
         approvers: ctx.act.approvers,
         stateCache: ctx.stateCache,
+        resolveLedger: resolveLedger(ctx.mainRoot),
       }
       )
       if (st.state !== 'OPEN') {

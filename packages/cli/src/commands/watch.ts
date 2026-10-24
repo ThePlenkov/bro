@@ -64,6 +64,7 @@ import {
   checkHistory,
   evaluateExitGate,
   fetchPrActState,
+  resolveLedger,
   prStateCache,
   type FetchPrActStateOpts,
   type PrStateCache,
@@ -484,6 +485,7 @@ function gateStateOpts(
     requireApproval: act.requireApproval,
     approvers: act.approvers,
     stateCache: cache,
+    resolveLedger: resolveLedger(dir),
   }
 }
 

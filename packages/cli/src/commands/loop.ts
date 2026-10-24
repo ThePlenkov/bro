@@ -99,6 +99,7 @@ import {
   checkHistory,
   evaluateExitGate,
   fetchPrActState,
+  resolveLedger,
   gatePending,
   prStateCache,
   watchBegin,
@@ -2007,6 +2008,7 @@ async function serviceGate(ctx: Ctx, m: GateMember): Promise<ServiceVerdict> {
         requireApproval: ctx.act.requireApproval,
         approvers: ctx.act.approvers,
         stateCache: ctx.stateCache,
+        resolveLedger: resolveLedger(ctx.root),
       }
     )
     const gate = evaluateExitGate(state, { requireApproval: ctx.act.requireApproval })
