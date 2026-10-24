@@ -49,6 +49,37 @@ export interface ReviewComment {
   createdAt: string
 }
 
+/** The human-approval probe's answer (bro-3vy93). `approved` is the
+ *  gate input; `reason` is the one-line 'why not' the blocker names —
+ *  'changes requested by <login>', 'bot-only approvals', 'approval
+ *  predates the head', 'unanswerable'. Point-in-time by nature: a
+ *  review revocation on an unchanged head between this probe and the
+ *  merge call can't be pinned client-side — the atomic boundary is the
+ *  host's required-reviews rule (branch protection / merge queue).
+ *  This gate is the pre-merge check, not a substitute for it. */
+export interface ApprovalVerdict {
+  approved: boolean
+  reason?: string
+  /** The head sha the verdict was evaluated against — the state fetch
+   *  discards a verdict whose bound head differs from the metadata
+   *  read's (a push mid-fetch means it answers a different question).
+   *  Optional: a host without per-read head visibility leaves it
+   *  unbound, and the host's own boundary applies (GitLab's
+   *  reset-approvals-on-push rule). */
+  headSha?: string
+  /** The host's aggregate approval verdict BEFORE the human/trust
+   *  filter — one probe answers both the gate's `humanApproval` and
+   *  the informational `reviewDecision` on hosts where they share an
+   *  endpoint (GitLab approvals), so the fetch never pays for both. */
+  hostApproved?: boolean
+}
+
+/** Knobs the approval probe reads — `approvers` is the trusted-login
+ *  allowlist (act.approvers): empty means any human actor counts. */
+export interface ApprovalProbeOpts {
+  approvers?: readonly string[]
+}
+
 /** One review thread — consumers only ever read the first comment, so
  *  the facade exposes it directly rather than a comments array. */
 export interface ReviewThread {
@@ -195,13 +226,19 @@ export interface ReviewFacade {
    *  gate needs it (act.requireApproval, bro-3vy93). */
   reviewDecision?(t: PrTarget): string | undefined
   reviewDecisionAsync?(t: PrTarget): Promise<string | undefined>
-  /** 'at least one approving review authored by a human actor' — the
-   *  aggregate host verdict (GitHub reviewDecision, GitLab approved)
-   *  counts bot/service approvals, and act.requireApproval means a
-   *  human sign-off. Optional + lazy like reviewDecisionAsync — a
-   *  host without the probe reads "unanswerable" → not approved. */
-  humanApproved?(t: PrTarget): boolean
-  humanApprovedAsync?(t: PrTarget): Promise<boolean>
+  /** 'a trusted human's approving review stands on the current head' —
+   *  the verdict behind act.requireApproval. Latest decision review per
+   *  reviewer: an approval counts only against the head being merged
+   *  (bot approvals never count; `opts.approvers`, when non-empty,
+   *  narrows "trusted" to those logins), and a standing
+   *  CHANGES_REQUESTED vetoes regardless of which head it reviewed.
+   *  `reason` names the refusal for the blocker text. Optional + lazy
+   *  like reviewDecisionAsync — a host without the probe reads
+   *  "unanswerable" → not approved (bro-3vy93). The #561 contract
+   *  returned a bare boolean — the union keeps connectors on the old
+   *  shape typechecking, and the fetch normalizes it away. */
+  humanApproved?(t: PrTarget, opts?: ApprovalProbeOpts): ApprovalVerdict | boolean
+  humanApprovedAsync?(t: PrTarget, opts?: ApprovalProbeOpts): Promise<ApprovalVerdict | boolean>
   /** Merged-PR detail for harvest — throws when the PR isn't merged or a
    *  MERGED PR reports no mergedAt. */
   mergedPrInfo(t: PrTarget, mergeSha?: string): MergedPrInfo

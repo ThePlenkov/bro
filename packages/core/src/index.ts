@@ -209,6 +209,8 @@ export type {
   Verdict,
 } from './judge.ts'
 export type {
+  ApprovalProbeOpts,
+  ApprovalVerdict,
   CheckInfo,
   EnqueueOpts,
   MergeOpts,

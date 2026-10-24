@@ -230,6 +230,21 @@ describe('loadConfig root shape', () => {
       )
     }
   })
+
+  test('act.requireApproval stays opt-in — only literal true counts', () => {
+    assert.equal(load().act.requireApproval, false)
+    assert.equal(load({ act: { requireApproval: true } }).act.requireApproval, true)
+    for (const bad of [1, 'yes', {}, []]) {
+      assert.equal(load({ act: { requireApproval: bad } }).act.requireApproval, false)
+    }
+  })
+
+  test('act.approvers keeps only non-blank strings', () => {
+    assert.deepEqual(load().act.approvers, [])
+    const cfg = load({ act: { approvers: ['alice', 42, '', '  ', 'bob'] } })
+    assert.deepEqual(cfg.act.approvers, ['alice', 'bob'])
+    assert.deepEqual(load({ act: { approvers: 'alice' } }).act.approvers, [])
+  })
 })
 
 describe('loadConfig mirror', () => {

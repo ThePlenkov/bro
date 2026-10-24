@@ -85,14 +85,18 @@ export function evaluateExitGate(
     blockers.push('PR is a draft')
   }
   // act.requireApproval — the hostile-input hardening: agent output
-  // never auto-lands without a HUMAN approving review. The flag is a
+  // never auto-lands without a trusted human's approving review on the
+  // CURRENT head (latest review per reviewer; a standing
+  // CHANGES_REQUESTED vetoes — bro-3vy93 round 2). The flag is a
   // gate-time option, not cached state — a stale cached `false` must
   // never slip the check (state.ts usable() re-fetches entries that
-  // predate the probe). Bot approvals don't count; an unanswerable
-  // probe reads as "not approved" — never a pass (bro-3vy93)
+  // predate the probe). An unanswerable probe reads as "not approved"
+  // — never a pass.
   if (opts?.requireApproval === true && state.humanApproval !== true) {
     blockers.push(
-      `no human approval — act.requireApproval requires an approving review from a human (got ${state.humanApproval === false ? 'none/bot-only' : 'unanswerable'})`
+      `no trusted human approval on the current head — act.requireApproval ` +
+        `requires a human's approving review on the latest head ` +
+        `(${state.humanApproval === false ? (state.humanApprovalReason ?? 'not approved') : 'approval probe unanswerable'})`
     )
   }
   return { ok: blockers.length === 0, blockers, ...base }

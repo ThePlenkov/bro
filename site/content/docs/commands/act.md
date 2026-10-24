@@ -38,6 +38,46 @@ ignore: a failing advisory check stays quiet only while it keeps failing
 *and* producing thread output, otherwise `alerts` carries a
 silent-reviewer line (still non-blocking).
 
+## Requiring human sign-off
+
+A green gate is **not** a human approval — by default it means threads,
+CI, and mergeability settled; a bot-only review thread satisfies the
+review dimension. For hostile-input threat models (a malicious bead, a
+prompt-injected agent) that's a hole: `bro review drive` can auto-merge
+agent output with zero human sign-off.
+
+[`act.requireApproval`](/docs/configuration#act) closes it. When `true`,
+the gate additionally requires a trusted **human's approving review on
+the PR's current head** — available since bro 0.3.0. Semantics:
+
+- **Latest decision review per reviewer.** Each reviewer's newest
+  `APPROVED`/`CHANGES_REQUESTED`/`DISMISSED` review is their standing
+  verdict — a `CHANGES_REQUESTED` that was never re-approved vetoes the
+  gate no matter which head it reviewed (GitHub; on GitLab the veto is
+  an unresolved discussion).
+- **Head-bound.** An approval counts only on the head being merged; a
+  push after approval makes it stale, not a sign-off.
+- **Bots never count.** A bot `APPROVED` review never satisfies the
+  gate; the host's aggregate "approved" flag alone is never enough.
+- **Trusted logins.** `act.approvers` (a login allowlist, empty = any
+  human account) narrows "trusted" so a machine `User` account can't
+  sign off on the agent's own output.
+- **Fail-closed.** A probe that can't answer — host unreachable, API
+  error, connector without the capability — blocks as *unanswerable*,
+  never a pass. The blocker names the probe's reason (`changes
+  requested by …`, `approval predates the current head`, `bot-only`,
+  `outside act.approvers`).
+
+The flag defaults to `false`: with it off, auto-merge semantics are
+unchanged. If you don't opt in, the documented hardening is
+[`drive.merge: "never"`](/docs/configuration#drive) plus host branch
+protection — the merge decision stays with a human.
+
+GitLab note: the approvals endpoint doesn't expose per-approval head
+SHAs, so current-head binding there is the project's
+**reset-approvals-on-push** rule — set it alongside `requireApproval`
+(same class of server-side boundary as branch protection).
+
 ## The severity-aware loop
 
 Every push re-triggers reviewers — endless inline fixing is a treadmill.

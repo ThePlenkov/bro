@@ -2004,6 +2004,7 @@ async function serviceGate(ctx: Ctx, m: GateMember): Promise<ServiceVerdict> {
         docsPaths: ctx.act.docsPaths,
         docsMaxRounds: ctx.act.docsMaxRounds,
         requireApproval: ctx.act.requireApproval,
+        approvers: ctx.act.approvers,
         stateCache: ctx.stateCache,
       }
     )

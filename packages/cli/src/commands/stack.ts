@@ -963,6 +963,7 @@ async function cmdMerge(argv: string[]): Promise<void> {
             docsPaths: act.docsPaths,
             docsMaxRounds: act.docsMaxRounds,
             requireApproval: act.requireApproval,
+            approvers: act.approvers,
           }
         )
         const gate = evaluateExitGate(state, { requireApproval: act.requireApproval })

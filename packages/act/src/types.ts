@@ -51,14 +51,31 @@ export interface PrActState {
    *  can't say. Probed lazily via the facade's optional reviewDecision
    *  when meta doesn't carry it (GitLab approvals are a second call). */
   reviewDecision?: string
-  /** 'at least one approving review by a human actor' — the probe
-   *  behind act.requireApproval. Aggregate host verdicts count bot
-   *  approvals; this one doesn't. Probed lazily via the facade's
+  /** 'a trusted human's approving review stands on the current head' —
+   *  the probe behind act.requireApproval. Latest decision review per
+   *  reviewer: head-bound approval, bots excluded, standing
+   *  CHANGES_REQUESTED vetoed upstream. Probed lazily via the facade's
    *  optional humanApproved — undefined = unanswerable, which the
    *  gate reads as "not approved" (bro-3vy93). Data, not policy —
    *  the requireApproval flag itself lives on the gate call so a
    *  cached state can never smuggle a stale option through. */
   humanApproval?: boolean
+  /** The probe's one-line 'why not' — 'changes requested by …',
+   *  'approval predates the head', 'bot-only', 'outside act.approvers'.
+   *  Undefined when the verdict is true or unanswerable. */
+  humanApprovalReason?: string
+  /** The allowlist the verdict was probed under — cache/dedup paths
+   *  compare it against the caller's act.approvers so a verdict probed
+   *  under a different trust set never serves a stricter caller. */
+  humanApprovalApprovers?: string[]
+  /** The head the verdict was evaluated against — when set it must
+   *  equal headSha; a mismatch means the verdict answers a different
+   *  head's question (a mid-fetch push) and never serves. */
+  humanApprovalHeadSha?: string
+  /** The probe generation that produced the verdict — cached entries
+   *  written by a different APPROVAL_PROBE_VERSION answered a different
+   *  question and never serve. */
+  humanApprovalProbe?: string
 }
 
 export interface ExitGate {
