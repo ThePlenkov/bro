@@ -11,34 +11,23 @@
  * observable shape of a reopened thread is:
  *
  *   - the thread is unresolved NOW, and
- *   - it carries more than one comment — the first is the original
- *     finding, the rest are the re-comments that reopened it.
+ *   - bro resolved it earlier (the resolve is in the ledger).
  *
- * A thread that was never resolved has exactly one comment too (the
- * original finding) unless someone replied to it — and a reply to an
- * *open* thread is a discussion, not a reopen. So "more than one
- * comment" alone would misfire.
+ * The second fact comes from the resolve ledger, not from a cache: the
+ * act state cache has a 30-second TTL and its entry is deleted when it
+ * expires, so a "previous observation" baseline is gone before the next
+ * poll arrives. The ledger records the resolve at the moment bro
+ * performs it and survives.
  *
- * The reliable discriminator is the *resolved* thread's comment count
- * against the host's own re-resolve semantics: a thread that bro
- * resolved and that now carries a comment authored after the resolve
- * is the reopen. bro resolves threads itself, so the resolve is
- * observable in the thread's own history only for hosts that record it
- * (GitHub does not expose a resolve timestamp on the thread).
+ * The ledger is per (repo, pr, thread) — a thread resolved on one PR
+ * says nothing about another PR's thread with the same id.
  *
- * So the detector takes the previous observed state — the act state
- * cache holds exactly that — and compares:
- *
- *   thread was resolved in the previous observation, is unresolved now,
- *   and carries a comment newer than the previous observation.
- *
- * That is the honest signal, and it is fail-open: with no previous
- * observation the detector reports nothing rather than guessing. A
- * reopen that happens between two observations (a poll that missed the
- * resolved window) is not detected — the cost is a missed cycle-guard,
- * never a false block on a healthy PR.
+ * Fail-open throughout: no ledger, an unreadable file, or a thread with
+ * no resolve recorded reads as "not reopened" — never a crash, never a
+ * false block on a healthy PR.
  */
-import type { ReviewThread } from '@broject/core'
+import type { ReviewComment, ReviewThread } from '@broject/core'
+import type { ResolveLedger } from './resolve-log.ts'
 
 export interface ReopenedThread {
   id: string
@@ -51,36 +40,36 @@ export interface ReopenedThread {
 }
 
 /**
- * Threads that were resolved in `previous` and are open in `current`
- * with a comment newer than the previous observation.
+ * Threads that are open now but were resolved before — the ledger is the
+ * only source of "before".
  *
- * `previous` is null when there is no earlier observation — the
- * detector then reports nothing (fail-open).
+ * `ledger` may be null: with no ledger there is no history and the
+ * detector reports nothing (fail-open).
  */
 export function detectReopenedThreads(
-  previous: ReviewThread[] | null | undefined,
+  ledger: ResolveLedger | null | undefined,
+  repo: string,
+  pr: number,
   current: ReviewThread[]
 ): ReopenedThread[] {
-  if (!previous || previous.length === 0) {
+  if (!ledger) {
     return []
   }
-  const before = new Map(previous.map((t) => [t.id, t]))
   const reopened: ReopenedThread[] = []
 
   for (const thread of current) {
-    const was = before.get(thread.id)
-    if (!was || !was.resolved || thread.resolved) {
-      // not previously resolved, or still resolved — not a reopen
+    if (thread.resolved) {
+      // still resolved — not a reopen
       continue
     }
-    const comments = thread.comments ?? (thread.comment ? [thread.comment] : [])
-    if (comments.length === 0) {
+    if (!ledger.wasResolved(repo, pr, thread.id)) {
+      // never resolved by bro — an ordinary open thread
       continue
     }
-    // The newest comment is the one that reopened it.
-    const newest = comments.reduce((a, b) =>
-      Date.parse(b.createdAt) > Date.parse(a.createdAt) ? b : a
-    )
+    const newest = newestComment(thread)
+    if (newest === null) {
+      continue
+    }
     reopened.push({
       id: thread.id,
       author: newest.author,
@@ -90,4 +79,14 @@ export function detectReopenedThreads(
   }
 
   return reopened
+}
+
+/** The newest comment in the thread — the one that reopened it. Null when
+ *  the thread carries no comment at all. */
+function newestComment(thread: ReviewThread): ReviewComment | null {
+  const comments = thread.comments ?? (thread.comment ? [thread.comment] : [])
+  if (comments.length === 0) {
+    return null
+  }
+  return comments.reduce((a, b) => (Date.parse(b.createdAt) > Date.parse(a.createdAt) ? b : a))
 }

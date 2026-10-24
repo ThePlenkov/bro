@@ -528,6 +528,7 @@ async function gateFleetPrs(
           mergeable: state.mergeable,
           mergeState: state.mergeState,
           openThreads: state.openThreads,
+          reopenedThreads: state.reopenedThreads.length,
           ciPending: state.ciPending,
           ciFailing: state.ciFailing,
           reviewersPending: state.reviewersPending,
