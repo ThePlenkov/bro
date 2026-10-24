@@ -380,7 +380,7 @@ describe('linearTasks', { skip: WIN32 }, () => {
   test('claim interleaving: two workers on one viewer both pass — one identity', () => {
     // one credential = one identity: worker B is indistinguishable from
     // worker A on the wire — BOTH verify "assigned to me" and return.
-    withLinear({}, (_log, dir) => {
+    withLinear({}, (log, dir) => {
       const seq = seqDir(dir, [
         issueRead(node({ ident: 'ENG-42' })), // 1: A pre-read — free
         issueRead(node({ ident: 'ENG-42', assignee: 'me' })), // 2: A verify — me
@@ -394,6 +394,11 @@ describe('linearTasks', { skip: WIN32 }, () => {
       } finally {
         delete process.env.FAKE_LINEAR_ISSUE_SEQ
       }
+      // both workers' writes landed — under ONE identity
+      const updates = callsMatching(log, /BroIssueUpdate/)
+      assert.equal(updates.length, 2)
+      assert.match(updates[0]!, /"assigneeId":"u-me"/)
+      assert.match(updates[1]!, /"assigneeId":"u-me"/)
     })
   })
 

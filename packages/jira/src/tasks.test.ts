@@ -572,7 +572,7 @@ describe('jiraTasks', { skip: WIN32 }, () => {
   test('claim interleaving: two workers on one viewer both pass — one identity', () => {
     // one credential = one identity: worker B is indistinguishable from
     // worker A on the wire — BOTH verify "assigned to me" and return.
-    withJira({}, (_logs, dir) => {
+    withJira({}, (logs, dir) => {
       const seq = seqDir(dir, [
         JSON.stringify(issue({ key: 'PROJ-5', assignee: null })), // 1: A pre-read — free
         JSON.stringify(issue({ key: 'PROJ-5', assignee: 'me' })), // 2: A verify — me
@@ -586,6 +586,11 @@ describe('jiraTasks', { skip: WIN32 }, () => {
       } finally {
         delete process.env.FAKE_JIRA_ISSUE_SEQ
       }
+      // both workers' writes landed — under ONE identity
+      const assigns = bodiesMatching(logs.body, /accountId/)
+      assert.equal(assigns.length, 2)
+      assert.equal(assigns[0]!.accountId, 'acct-me')
+      assert.equal(assigns[1]!.accountId, 'acct-me')
     })
   })
 

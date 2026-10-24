@@ -347,7 +347,7 @@ describe('githubTasks', { skip: WIN32 }, () => {
   test('claim interleaving: two workers on one viewer both pass — one identity', () => {
     // one credential = one identity: worker B is indistinguishable from
     // worker A on the wire — BOTH verify "assigned to me" and return.
-    withFakeGh({ FAKE_GH_ACTOR: 'me' }, (_log, dir) => {
+    withFakeGh({ FAKE_GH_ACTOR: 'me' }, (log, dir) => {
       const seq = seqDir(dir, [
         issueRead(node({ number: 42 })), // 1: A pre-read — free
         issueRead(node({ number: 42, assignees: ['me'] })), // 2: A verify — me
@@ -361,6 +361,9 @@ describe('githubTasks', { skip: WIN32 }, () => {
       } finally {
         delete process.env.FAKE_GH_ISSUE_SEQ
       }
+      // both workers' writes landed — under ONE identity
+      assert.equal(callsMatching(log, /--add-assignee me/).length, 2)
+      assert.equal(callsMatching(log, /--add-label bro:claimed/).length, 2)
     })
   })
 
