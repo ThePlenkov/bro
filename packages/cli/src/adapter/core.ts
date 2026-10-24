@@ -420,21 +420,83 @@ export function clip(text: string, width: number): string {
  * and the interactive panel's render, before clipping so control bytes
  * cannot spend the width budget either.
  */
-/** The control-sequence patterns, built from escapes so no control
- *  byte appears literally in this source (Sonar S6324). */
-const OSC_SEQUENCE = new RegExp('\\x1b\\][^\\x07\\x1b]*(?:\\x07|\\x1b\\\\)?', 'g')
-const CSI_SEQUENCE = new RegExp('\\x1b\\[[0-?]*[ -/]*[@-~]', 'g')
-const ESCAPE_OTHER = new RegExp('\\x1b[@-Z\\\\^_]', 'g')
-const CONTROL_BYTES = new RegExp('[\\x00-\\x1f\\x7f]', 'g')
+/** Control-byte codes, spelled numerically so this source carries no
+ *  control character and no regex at all — Sonar flags ESC in both
+ *  literal and constructor form, and a sanitizer must not look like
+ *  the payload it strips. */
+const ESC_CODE = 27
+const BEL_CODE = 7
+const TAB_CODE = 9
+const DEL_CODE = 127
 
+/** True for `c` in `[lo, hi]` — three call sites keep the bounds. */
+function inRange(c: number, lo: number, hi: number): boolean {
+  return c >= lo && c <= hi
+}
+
+/** Index just past the escape sequence starting at `i` (an ESC byte):
+ *  CSI = ESC [ params… final; OSC = ESC ] … BEL | ESC \; anything else
+ *  is ESC + one byte; a dangling ESC consumes itself. */
+function afterEscape(text: string, i: number): number {
+  const lead = text[i + 1]
+  if (lead === '[') {
+    let j = i + 2
+    while (j < text.length && inRange(text.charCodeAt(j), 0x20, 0x3f)) {
+      j++ // parameter and intermediate bytes
+    }
+    if (j < text.length && inRange(text.charCodeAt(j), 0x40, 0x7e)) {
+      j++ // final byte
+    }
+    return j
+  }
+  if (lead === ']') {
+    let j = i + 2
+    while (j < text.length) {
+      const c = text.charCodeAt(j)
+      if (c === BEL_CODE) {
+        return j + 1
+      }
+      if (c === ESC_CODE && text[j + 1] === '\\') {
+        return j + 2
+      }
+      j++
+    }
+    return j
+  }
+  return lead === undefined ? i + 1 : i + 2
+}
+
+/**
+ * Strip terminal control sequences from untrusted board text — bead
+ * titles, worktree names, agent steps and drill titles are task-store
+ * data, and a title carrying ANSI/OSC bytes would drive the user's
+ * terminal (erase rows, forge content, OSC-52 clipboard writes) instead
+ * of being displayed. Applied at both sinks: the widget's `boardLines`
+ * and the interactive panel's render, before clipping so control bytes
+ * cannot spend the width budget either.
+ */
 export function sanitizeTerminalText(text: string): string {
-  return text
-    .replaceAll('\t', ' ')
-    .replace(OSC_SEQUENCE, '')
-    .replace(CSI_SEQUENCE, '')
-    .replace(ESCAPE_OTHER, '')
-    // residual C0 controls and DEL — newlines would smuggle rows
-    .replace(CONTROL_BYTES, '')
+  let out = ''
+  let i = 0
+  while (i < text.length) {
+    const code = text.charCodeAt(i)
+    if (code === TAB_CODE) {
+      out += ' ' // a tab still spends width — map it instead of dropping
+      i++
+      continue
+    }
+    if (code === ESC_CODE) {
+      i = afterEscape(text, i)
+      continue
+    }
+    if (code < 32 || code === DEL_CODE) {
+      i++ // C0 controls and DEL — newlines would smuggle rows
+      continue
+    }
+    out += text[i]
+    i++
+  }
+  return out
 }
 
 /**

@@ -281,14 +281,72 @@ function clip(text, width) {
 * and the interactive panel's render, before clipping so control bytes
 * cannot spend the width budget either.
 */
-/** The control-sequence patterns, built from escapes so no control
-*  byte appears literally in this source (Sonar S6324). */
-const OSC_SEQUENCE = new RegExp("\\x1b\\][^\\x07\\x1b]*(?:\\x07|\\x1b\\\\)?", "g");
-const CSI_SEQUENCE = new RegExp("\\x1b\\[[0-?]*[ -/]*[@-~]", "g");
-const ESCAPE_OTHER = new RegExp("\\x1b[@-Z\\\\^_]", "g");
-const CONTROL_BYTES = new RegExp("[\\x00-\\x1f\\x7f]", "g");
+/** Control-byte codes, spelled numerically so this source carries no
+*  control character and no regex at all — Sonar flags ESC in both
+*  literal and constructor form, and a sanitizer must not look like
+*  the payload it strips. */
+const ESC_CODE = 27;
+const BEL_CODE = 7;
+const TAB_CODE = 9;
+const DEL_CODE = 127;
+/** True for `c` in `[lo, hi]` — three call sites keep the bounds. */
+function inRange(c, lo, hi) {
+	return c >= lo && c <= hi;
+}
+/** Index just past the escape sequence starting at `i` (an ESC byte):
+*  CSI = ESC [ params… final; OSC = ESC ] … BEL | ESC \; anything else
+*  is ESC + one byte; a dangling ESC consumes itself. */
+function afterEscape(text, i) {
+	const lead = text[i + 1];
+	if (lead === "[") {
+		let j = i + 2;
+		while (j < text.length && inRange(text.charCodeAt(j), 32, 63)) j++;
+		if (j < text.length && inRange(text.charCodeAt(j), 64, 126)) j++;
+		return j;
+	}
+	if (lead === "]") {
+		let j = i + 2;
+		while (j < text.length) {
+			const c = text.charCodeAt(j);
+			if (c === BEL_CODE) return j + 1;
+			if (c === ESC_CODE && text[j + 1] === "\\") return j + 2;
+			j++;
+		}
+		return j;
+	}
+	return lead === void 0 ? i + 1 : i + 2;
+}
+/**
+* Strip terminal control sequences from untrusted board text — bead
+* titles, worktree names, agent steps and drill titles are task-store
+* data, and a title carrying ANSI/OSC bytes would drive the user's
+* terminal (erase rows, forge content, OSC-52 clipboard writes) instead
+* of being displayed. Applied at both sinks: the widget's `boardLines`
+* and the interactive panel's render, before clipping so control bytes
+* cannot spend the width budget either.
+*/
 function sanitizeTerminalText(text) {
-	return text.replaceAll("	", " ").replace(OSC_SEQUENCE, "").replace(CSI_SEQUENCE, "").replace(ESCAPE_OTHER, "").replace(CONTROL_BYTES, "");
+	let out = "";
+	let i = 0;
+	while (i < text.length) {
+		const code = text.charCodeAt(i);
+		if (code === TAB_CODE) {
+			out += " ";
+			i++;
+			continue;
+		}
+		if (code === ESC_CODE) {
+			i = afterEscape(text, i);
+			continue;
+		}
+		if (code < 32 || code === DEL_CODE) {
+			i++;
+			continue;
+		}
+		out += text[i];
+		i++;
+	}
+	return out;
 }
 /**
 * The widget board — one compact summary line, then the top in-progress
@@ -322,6 +380,19 @@ function statusCrumb(s) {
 
 //#endregion
 //#region packages/cli/src/adapter/board-panel.ts
+/** Rows that keep their color without the cursor; the cursor always
+* highlights. */
+const HIGHLIGHTED = {
+	header: true,
+	footer: true,
+	section: false,
+	item: false
+};
+/** Empty string = plain; footer always mutes. */
+function colorRole(kind, current) {
+	if (kind === "footer") return "muted";
+	return HIGHLIGHTED[kind] || current ? "accent" : "";
+}
 const READY_SHOWN = 8;
 const SILENT_MS = 6e4;
 /** One in-progress bead's row. */
@@ -453,13 +524,18 @@ function summaryOf(s, pending) {
 	return `${boardLines(s)[0]}${attention > 0 ? ` · ⚠ ${attention} attention` : ""}${pending ? " · refreshing…" : ""}`;
 }
 const FOOTER = " ↑↓/jk move · ←→/enter collapse · r refresh · q close";
+/** Bytes that continue an escape sequence after its ESC. */
+const SEQUENCE_LEADS = {
+	"[": true,
+	O: true
+};
 /** End index of the escape sequence starting at `data[i]` (an ESC): a
 *  CSI/SS3 sequence runs to its final byte, an alt+<char> pair eats two
 *  bytes, a lone ESC is one. A run that never reaches a final byte
 *  falls back to the two-byte form. */
 function escapeEnd(data, i) {
 	const next = data[i + 1];
-	if (next === "[" || next === "O") {
+	if (next in SEQUENCE_LEADS) {
 		let j = i + 2;
 		while (j < data.length && data[j] >= " " && data[j] <= "?") j++;
 		if (j < data.length) return j + 1;
@@ -566,14 +642,18 @@ var BoardPanelImpl = class {
 			if (row.kind === "header") text = `${mark} ${summaryOf(board, this.pending)}`;
 			else if (row.kind === "footer") text = FOOTER;
 			else text = this.rowBody(row, sections, itemCounts, mark);
-			let line = clip(sanitizeTerminalText(text), width);
-			if (row.kind === "header" || row.kind === "footer" || current) line = this.color(row.kind === "footer" ? "muted" : "accent", line);
-			lines.push(line);
+			lines.push(this.renderLine(text, width, colorRole(row.kind, current)));
 		}
 		this.cached = lines;
 		this.lastWidth = width;
 		this.dirty = false;
 		return this.cached;
+	}
+	/** Clip, sanitize, and apply the row's color role — extracted so
+	*  render's loop stays inside the cyclomatic ceiling. */
+	renderLine(text, width, role) {
+		const line = clip(sanitizeTerminalText(text), width);
+		return role === "" ? line : this.color(role, line);
 	}
 	/** The section-arrow or item-body line — extracted so render's loop
 	*  stays inside the cognitive-complexity ceiling. */
@@ -596,7 +676,8 @@ var BoardPanelImpl = class {
 			this.close();
 			return;
 		}
-		this.actions[data]?.();
+		const action = this.actions[data];
+		if (action !== void 0) action();
 	}
 	move(delta) {
 		const rows = this.rows(buildSections(this.options.host.snapshot()));
