@@ -8,7 +8,8 @@
  * install silently: the host loads a file that registers nothing.
  */
 import { strict as assert } from 'node:assert'
-import { existsSync, readFileSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { test } from 'node:test'
@@ -189,5 +190,34 @@ test('the shipped adapters resolve no sibling module', async () => {
     const text = readFileSync(join(repoRoot, rel), 'utf8')
     const relative = [...text.matchAll(/from\s+['"](\.[^'"]*)['"]/g)].map((m) => m[1] ?? '')
     assert.deepEqual(relative, [], `${rel} imports a sibling module: ${relative.join(', ')}`)
+  }
+})
+
+test('the omp adapter defers to the checkout the session runs in', async () => {
+  const mod = await loadAdapter('plugins/omp/bro/bro.ts')
+  const base = mkdtempSync(join(tmpdir(), 'bro-dev-omp-'))
+  const priorCwd = process.cwd()
+  try {
+    const repo = join(base, 'repo')
+    mkdirSync(join(repo, 'plugins', 'omp', 'bro'), { recursive: true })
+    mkdirSync(join(repo, 'packages', 'cli', 'src', 'adapter'), { recursive: true })
+    const marker = join(base, 'local-ran')
+    writeFileSync(
+      join(repo, 'plugins', 'omp', 'bro', 'bro.ts'),
+      `import { writeFileSync } from 'node:fs'\nexport default () => { writeFileSync(${JSON.stringify(marker)}, 'ran') }\n`
+    )
+    writeFileSync(join(repo, 'packages', 'cli', 'src', 'adapter', 'core.ts'), '')
+    process.chdir(repo)
+    const { pi, events, commands } = hostStub()
+    mod.default(pi)
+    // the installed copy wired nothing — the local bundle owns the host
+    assert.equal(events.length, 0)
+    assert.equal(commands.length, 0)
+    await new Promise((resolve) => setImmediate(resolve))
+    await new Promise((resolve) => setImmediate(resolve))
+    assert.equal(readFileSync(marker, 'utf8'), 'ran')
+  } finally {
+    process.chdir(priorCwd)
+    rmSync(base, { recursive: true, force: true })
   }
 })

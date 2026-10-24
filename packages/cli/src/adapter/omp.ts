@@ -40,6 +40,9 @@
  *   /bro      the interactive board panel on the TUI (a `ui.custom`
  *             overlay); a plain refresh where no UI can mount — and
  *             the CLI without leaving the editor.
+ *   dev path  a session started inside the bro repo (or a worktree)
+ *             defers to THAT checkout's adapter — local edits live
+ *             without reinstalling the plugin (devAdapter in core).
  *   bro_* tools  the board and the PR gate as model-callable reads.
  *
  * ## Fail-open
@@ -49,12 +52,14 @@
  * non-bro repo yields no widget, no context, no gate — never an error
  * thrown into omp.
  */
+import { pathToFileURL } from 'node:url'
 import {
   BOARD_KEY,
   createBroDriver,
   sharedBinding,
   type BroHostBinding,
 } from './host.ts'
+import { devAdapter } from './core.ts'
 import { installModeBridges, type BoardSnapshot } from './omp-modes.ts'
 import type { OmpApi, OmpContext } from './omp-api.ts'
 
@@ -99,6 +104,17 @@ function binding(pi: OmpApi): BroHostBinding<OmpContext> {
 
 /** The extension entry point — omp calls this with its API. */
 export default function broExtension(pi: OmpApi): void {
+  // the checkout the session runs in wins over the installed plugin —
+  // the same ladder checkoutCli heads for the CLI; the local bundle is
+  // self-contained, so delegation is one dynamic import (its wiring
+  // lands a tick later — the first turn's board refresh covers it)
+  const local = devAdapter(process.cwd(), 'omp', import.meta.url)
+  if (local !== null) {
+    void import(pathToFileURL(local).href).then((entry) => {
+      (entry.default as (api: OmpApi) => void)(pi)
+    })
+    return
+  }
   const driver = createBroDriver(binding(pi), pi)
 
   /** The mode bridges — bro's durable state handed to omp's native Plan,

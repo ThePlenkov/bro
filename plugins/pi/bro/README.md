@@ -26,6 +26,12 @@ one self-contained module (node builtins only) by
   group members / verb subcommands at position 2
   (`getArgumentCompletions`, table drift-tested against the plugin
   registry).
+- **local checkout wins** — a session started inside the bro repo (or
+  one of its worktrees) runs THAT checkout's adapter: `devAdapter`
+  resolves `plugins/<client>/bro/bro.ts` up from the session cwd (both
+  adapter and framework markers required) and the installed plugin
+  defers to it, so local edits are live without reinstalling. Every
+  other directory gets the installed plugin, unchanged.
 - **`bro_status` tool** — the board JSON as a model-callable read.
 
 ## Install

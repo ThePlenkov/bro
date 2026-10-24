@@ -12,11 +12,13 @@ import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { test } from 'node:test'
+import { pathToFileURL } from 'node:url'
 import {
   boardLines,
   broEnabled,
   clip,
   contextOf,
+  devAdapter,
   parseControl,
   sanitizeTerminalText,
   statusCrumb,
@@ -153,4 +155,36 @@ test('boardLines: every line passes the sanitizer', () => {
     assert.ok(!line.includes('\x1b'), `control leaked: ${JSON.stringify(line)}`)
   }
   assert.ok(lines[1].includes('ared'), 'the title stays readable')
+})
+
+test('devAdapter: the checkout around cwd wins, worktrees included', () => {
+  const base = mkdtempSync(join(tmpdir(), 'bro-dev-'))
+  try {
+    const repo = join(base, 'repo')
+    mkdirSync(join(repo, 'plugins', 'omp', 'bro'), { recursive: true })
+    mkdirSync(join(repo, 'packages', 'cli', 'src', 'adapter'), { recursive: true })
+    mkdirSync(join(repo, 'packages', 'cli', 'src', 'session'), { recursive: true })
+    const adapter = join(repo, 'plugins', 'omp', 'bro', 'bro.ts')
+    writeFileSync(adapter, 'export default () => {}')
+    writeFileSync(join(repo, 'packages', 'cli', 'src', 'adapter', 'core.ts'), '')
+    const installed = pathToFileURL(join(base, 'installed.ts')).href
+    // a session started in a subdirectory still resolves the checkout
+    assert.equal(devAdapter(join(repo, 'packages', 'cli', 'src', 'session'), 'omp', installed), adapter)
+    // the framework marker is required — a stray plugin file in a
+    // foreign repo is not a bro checkout
+    const foreign = join(base, 'foreign')
+    mkdirSync(join(foreign, 'plugins', 'omp', 'bro'), { recursive: true })
+    writeFileSync(join(foreign, 'plugins', 'omp', 'bro', 'bro.ts'), 'x')
+    assert.equal(devAdapter(foreign, 'omp', installed), null)
+    // the pi kind resolves its own client
+    mkdirSync(join(repo, 'plugins', 'pi', 'bro'), { recursive: true })
+    const piAdapter = join(repo, 'plugins', 'pi', 'bro', 'bro.ts')
+    writeFileSync(piAdapter, 'export default () => {}')
+    assert.equal(devAdapter(repo, 'pi', installed), piAdapter)
+    // a local bundle resolving to itself is the normal load — no
+    // recursion into its own file
+    assert.equal(devAdapter(repo, 'omp', pathToFileURL(adapter).href), null)
+  } finally {
+    rmSync(base, { recursive: true, force: true })
+  }
 })

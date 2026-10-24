@@ -32,8 +32,8 @@
  *     advisory everywhere except the stop gate.
  */
 import { spawn, type ChildProcess } from 'node:child_process'
-import { existsSync } from 'node:fs'
-import { dirname, join } from 'node:path'
+import { existsSync, realpathSync } from 'node:fs'
+import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 /** The one control object `bro hooks <event>` prints. */
@@ -157,6 +157,40 @@ export function checkoutCli(): string | null {
 
 /** A kill timer — cleared once the child settles. */
 export type KillTimer = ReturnType<typeof setTimeout>
+
+/**
+ * The bundled adapter for this client in the checkout around `cwd` —
+ * the adapter half of the same ladder `checkoutCli` heads: a session
+ * started inside the bro repo (or one of its worktrees) runs THAT
+ * checkout's adapter instead of the installed plugin, so local edits
+ * are live without reinstalling the plugin. Both markers must exist —
+ * the client's bundled adapter AND the adapter framework — a foreign
+ * repo with a stray file is not a bro checkout. `selfUrl` is the file
+ * doing the resolving: a local bundle that IS this file is the normal
+ * load, not a dev path, so nothing recurses into itself.
+ */
+export function devAdapter(cwd: string, kind: 'omp' | 'pi', selfUrl: string): string | null {
+  let self: string
+  try {
+    self = realpathSync(fileURLToPath(selfUrl))
+  } catch {
+    self = fileURLToPath(selfUrl)
+  }
+  let dir = resolve(cwd)
+  for (;;) {
+    const candidate = join(dir, 'plugins', kind, 'bro', 'bro.ts')
+    const framework = join(dir, 'packages', 'cli', 'src', 'adapter', 'core.ts')
+    if (existsSync(candidate) && existsSync(framework)) {
+      const found = realpathSync(candidate)
+      return found === self ? null : found
+    }
+    const parent = dirname(dir)
+    if (parent === dir) {
+      return null
+    }
+    dir = parent
+  }
+}
 
 /**
  * SIGKILL a hung child on a timer. The child is spawned detached, so

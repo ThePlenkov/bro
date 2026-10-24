@@ -1,8 +1,8 @@
 // bro-adapter — ownership sentinel for `bro plugins` (isBroAdapter); do not remove
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { spawn } from "node:child_process";
-import { existsSync } from "node:fs";
-import { dirname, join } from "node:path";
-import { fileURLToPath } from "node:url";
+import { existsSync, realpathSync } from "node:fs";
+import { dirname, join, resolve } from "node:path";
 
 //#region packages/cli/src/adapter/core.ts
 /** How long a normal hook probe may take. */
@@ -42,6 +42,37 @@ function checkoutCli() {
 	}
 }
 /**
+* The bundled adapter for this client in the checkout around `cwd` —
+* the adapter half of the same ladder `checkoutCli` heads: a session
+* started inside the bro repo (or one of its worktrees) runs THAT
+* checkout's adapter instead of the installed plugin, so local edits
+* are live without reinstalling the plugin. Both markers must exist —
+* the client's bundled adapter AND the adapter framework — a foreign
+* repo with a stray file is not a bro checkout. `selfUrl` is the file
+* doing the resolving: a local bundle that IS this file is the normal
+* load, not a dev path, so nothing recurses into itself.
+*/
+function devAdapter(cwd, kind, selfUrl) {
+	let self;
+	try {
+		self = realpathSync(fileURLToPath(selfUrl));
+	} catch {
+		self = fileURLToPath(selfUrl);
+	}
+	let dir = resolve(cwd);
+	for (;;) {
+		const candidate = join(dir, "plugins", kind, "bro", "bro.ts");
+		const framework = join(dir, "packages", "cli", "src", "adapter", "core.ts");
+		if (existsSync(candidate) && existsSync(framework)) {
+			const found = realpathSync(candidate);
+			return found === self ? null : found;
+		}
+		const parent = dirname(dir);
+		if (parent === dir) return null;
+		dir = parent;
+	}
+}
+/**
 * SIGKILL a hung child on a timer. The child is spawned detached, so
 * killing the pid's group takes the grandchildren down too — a hook
 * that spawns `bd` must not leave a dolt server behind.
@@ -64,7 +95,7 @@ function killAfter(child, ms, onTimeout) {
 *  actually speaks bro's hook protocol — an older bro on PATH fails the
 *  probe instead of failing every hook. */
 async function exitsZero(cmd, args) {
-	const { promise, resolve } = Promise.withResolvers();
+	const { promise, resolve: resolve$1 } = Promise.withResolvers();
 	let child;
 	try {
 		child = spawn(cmd, args, {
@@ -78,14 +109,14 @@ async function exitsZero(cmd, args) {
 	} catch {
 		return false;
 	}
-	const timer = killAfter(child, HOOK_TIMEOUT_MS, () => resolve(false));
+	const timer = killAfter(child, HOOK_TIMEOUT_MS, () => resolve$1(false));
 	child.on("error", () => {
 		clearTimeout(timer);
-		resolve(false);
+		resolve$1(false);
 	});
 	child.on("close", (code) => {
 		clearTimeout(timer);
-		resolve(code === 0);
+		resolve$1(code === 0);
 	});
 	child.stdin?.on("error", () => {});
 	child.stdin?.end("");
@@ -129,7 +160,7 @@ async function resolveCommand(opts = {}) {
 * every failure mode — spawn error, timeout, nonzero exit, garbage out.
 */
 async function callHook(command, event, payload, cwd, timeoutMs) {
-	const { promise, resolve } = Promise.withResolvers();
+	const { promise, resolve: resolve$1 } = Promise.withResolvers();
 	let child;
 	try {
 		child = spawn(command.cmd, [
@@ -152,7 +183,7 @@ async function callHook(command, event, payload, cwd, timeoutMs) {
 	const settle = (value) => {
 		if (!settled) {
 			settled = true;
-			resolve(value);
+			resolve$1(value);
 		}
 	};
 	const timer = killAfter(child, timeoutMs, () => settle(null));
@@ -222,7 +253,7 @@ function broEnabled(startDir) {
 /** `bro status --json` — the board the widget renders. Null on any
 *  failure; the board is a convenience, never a gate. */
 async function statusJson(command, cwd) {
-	const { promise, resolve } = Promise.withResolvers();
+	const { promise, resolve: resolve$1 } = Promise.withResolvers();
 	let child;
 	try {
 		child = spawn(command.cmd, [
@@ -241,7 +272,7 @@ async function statusJson(command, cwd) {
 	} catch {
 		return null;
 	}
-	const timer = killAfter(child, HOOK_TIMEOUT_MS, () => resolve(null));
+	const timer = killAfter(child, HOOK_TIMEOUT_MS, () => resolve$1(null));
 	let out = "";
 	child.stdout?.setEncoding("utf8");
 	child.stdout?.on("data", (chunk) => {
@@ -250,19 +281,19 @@ async function statusJson(command, cwd) {
 	});
 	child.on("error", () => {
 		clearTimeout(timer);
-		resolve(null);
+		resolve$1(null);
 	});
 	child.on("close", (code) => {
 		clearTimeout(timer);
 		if (code !== 0) {
-			resolve(null);
+			resolve$1(null);
 			return;
 		}
 		try {
 			const parsed = JSON.parse(out);
-			resolve(parsed !== null && typeof parsed === "object" && !Array.isArray(parsed) ? parsed : null);
+			resolve$1(parsed !== null && typeof parsed === "object" && !Array.isArray(parsed) ? parsed : null);
 		} catch {
-			resolve(null);
+			resolve$1(null);
 		}
 	});
 	return promise;
@@ -1724,7 +1755,7 @@ async function runBro(command, args, cwd, timeoutMs = RUN_TIMEOUT_MS) {
 		stdout: "",
 		stderr: "bro CLI not found"
 	};
-	const { promise, resolve } = Promise.withResolvers();
+	const { promise, resolve: resolve$1 } = Promise.withResolvers();
 	let child;
 	try {
 		child = spawn(command.cmd, [...command.args, ...args], {
@@ -1737,7 +1768,7 @@ async function runBro(command, args, cwd, timeoutMs = RUN_TIMEOUT_MS) {
 			detached: process.platform !== "win32"
 		});
 	} catch {
-		resolve({
+		resolve$1({
 			code: 127,
 			stdout: "",
 			stderr: "spawn failed"
@@ -1751,7 +1782,7 @@ async function runBro(command, args, cwd, timeoutMs = RUN_TIMEOUT_MS) {
 		if (settled) return;
 		settled = true;
 		clearTimeout(timer);
-		resolve(result);
+		resolve$1(result);
 	};
 	const timer = setTimeout(() => {
 		try {
@@ -1846,6 +1877,13 @@ function binding(pi) {
 }
 /** The extension entry point — pi calls this with its API. */
 function broExtension(pi) {
+	const local = devAdapter(process.cwd(), "pi", import.meta.url);
+	if (local !== null) {
+		import(pathToFileURL(local).href).then((entry) => {
+			entry.default(pi);
+		});
+		return;
+	}
 	const driver = createBroDriver(binding(pi), pi);
 	pi.on("input", (event) => {
 		const payload = event;

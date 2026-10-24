@@ -41,7 +41,9 @@
  * where no UI can mount); `/bro <args>` is a thin passthrough — `bro
  * act|next|fleet|drill` reachable without leaving the editor. The
  * `bro_status` tool hands the model the same board JSON the widget
- * renders.
+ * renders. A session started inside the bro repo (or a worktree)
+ * defers to THAT checkout's adapter — local edits live without
+ * reinstalling the plugin (devAdapter in core).
  *
  * Fail-open is the whole contract: the CLI resolves lazily (sibling
  * dist → checkout walk-up → PATH probe → npx pin), every spawn is async,
@@ -55,6 +57,7 @@
  * synchronously at event time (see snapshot()) and every ui touch is
  * wrapped — a stale ctx mid-flight degrades to "no paint".
  */
+import { pathToFileURL } from 'node:url'
 import {
   BOARD_KEY,
   createBroDriver,
@@ -62,6 +65,7 @@ import {
   type BroContext,
   type BroHostBinding,
 } from './host.ts'
+import { devAdapter } from './core.ts'
 import type { BroCompletion } from './completions.ts'
 
 // --- structural pi surface ----------------------------------------------
@@ -222,6 +226,17 @@ function binding(pi: PiApi): BroHostBinding<ExtContext> {
 
 /** The extension entry point — pi calls this with its API. */
 export default function broExtension(pi: PiApi): void {
+  // the checkout the session runs in wins over the installed plugin —
+  // the same ladder checkoutCli heads for the CLI; the local bundle is
+  // self-contained, so delegation is one dynamic import (its wiring
+  // lands a tick later — the first turn's board refresh covers it)
+  const local = devAdapter(process.cwd(), 'pi', import.meta.url)
+  if (local !== null) {
+    void import(pathToFileURL(local).href).then((entry) => {
+      (entry.default as (api: PiApi) => void)(pi)
+    })
+    return
+  }
   const driver = createBroDriver(binding(pi), pi)
 
   // pi's prompt arrives on its `input` event, not on the turn event —
