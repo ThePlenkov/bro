@@ -86,6 +86,7 @@ import { runGuards, type GuardConfig, type GuardJudgeInput, type GuardRun } from
 import { GUARD_PROBES } from '../guard-probes.ts';
 import { appendRow, judgeConfig, judgeFacade } from '@broject/judge';
 import { otelSpan } from '@broject/providers';
+import { emitHook } from '@broject/otel';
 import {
   hooksDir,
   previousTraceFile,
@@ -1784,6 +1785,7 @@ function runPrepareCommitMsg(argv: string[]): void {
   } catch {
     // fail-open — provenance must never block a commit
   }
+  emitHook('prepare-commit-msg', {}, { dir: process.cwd() })
 }
 
 /** The ref guard reads its update list from stdin — but only when a
@@ -1796,6 +1798,7 @@ function runRefGuard(argv: string[]): void {
   } catch {
     // fail-open — the guard must never wedge git
   }
+  emitHook('reference-transaction', {}, { dir: process.cwd() })
 }
 
 /** bd/gh probes inherit cwd — run them in the project the hook fired for. */
@@ -2000,6 +2003,9 @@ function runPostMergeEvent(event: string | undefined): boolean {
   } catch {
     // fail-open
   }
+  if (event !== undefined) {
+    emitHook(event, {}, { dir: process.cwd() });
+  }
   return true;
 }
 
@@ -2116,11 +2122,13 @@ export async function runHooksCommand(argv: string[]): Promise<void> {
     'hook.event': event,
     'hook.session': typeof input.session_id === 'string' ? input.session_id : '',
   });
+  let hookErr = false;
   try {
     await dispatchHook(event, raw, input);
     evSpan.end();
   } catch {
     evSpan.end({}, 'error');
+    hookErr = true;
     // hooks fail open — a bro bug must never break the session.
     // A permission hook that already answered returned above; this
     // covers a throw before that answer.
@@ -2129,6 +2137,17 @@ export async function runHooksCommand(argv: string[]): Promise<void> {
     clearTimeout(deadlineTimer);
     const sessionId = typeof input.session_id === 'string' ? input.session_id : '';
     flushPerf(sessionId, event, t0);
+    // hook-first telemetry (spec bro-xgejl) — every dispatched event
+    // emits one facade record; enabled=false in config means this is a
+    // memoized config read and a boolean, nothing more.
+    emitHook(event, input, {
+      sessionId,
+      client: cursorClient ? 'cursor' : codexClient ? 'codex' : 'default',
+      durationMs: Date.now() - t0,
+      ok: !hookErr,
+      error: hookErr ? 'dispatch threw' : undefined,
+      dir: root,
+    });
     // A probe that raced past its budget leaves its bd/gh child running —
     // unref the stragglers so the hook exits with the answer it sent,
     // not when the last subprocess closes.
