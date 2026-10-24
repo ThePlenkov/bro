@@ -68,10 +68,10 @@ function runTemplate(by: string, command: string, promptFile: string, deadline: 
     // loop.agent / agents.*.command everywhere: PATH lookup, sh -c).
     // The prompt path rides BRO_PROMPT_FILE in the child env — argv is
     // untouched ($0 stays 'sh'), and nested shells inherit the var.
-    const child = spawn('sh', ['-c', command], {
+    const child = spawn('sh', ['-c', command], { // NOSONAR — operator-authored command template; the prompt path rides the env, not the line
       stdio: ['ignore', 'pipe', 'pipe'],
       env: { ...process.env, BRO_PROMPT_FILE: promptFile },
-    }) // NOSONAR — operator-authored command template; the prompt path rides the env
+    })
     const out: Buffer[] = []
     let tail = ''
     child.stdout?.on('data', (d: Buffer) => out.push(d))
