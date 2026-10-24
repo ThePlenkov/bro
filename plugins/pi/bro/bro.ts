@@ -315,30 +315,40 @@ function buildSections(s) {
 		title: "board",
 		rows: ["no board yet — press r to load"]
 	}];
-	const sections = [];
+	return [
+		...workSections(s),
+		...agentSections(s),
+		...checkoutSections(s)
+	];
+}
+/** beads + ready — what is claimed and what is queued. */
+function workSections(s) {
 	const inProgress = s.beads?.inProgress ?? [];
-	sections.push({
-		id: "beads",
-		title: `beads (${inProgress.length})`,
-		rows: inProgress.length === 0 ? ["— none in progress —"] : inProgress.map((b) => `◐ ${b.id ?? "?"}  ${clip(b.title ?? "", 96)}${b.assignee ? `  [${b.assignee}]` : ""}`)
-	});
+	const beadRows = inProgress.length === 0 ? ["— none in progress —"] : inProgress.map((b) => `◐ ${b.id ?? "?"}  ${clip(b.title ?? "", 96)}${b.assignee ? `  [${b.assignee}]` : ""}`);
 	const ready = s.beads?.ready ?? [];
 	const readyTotal = s.beads?.readyTotal ?? ready.length;
 	const shown = ready.slice(0, READY_SHOWN);
 	const readyRows = shown.map((b) => `✓ ${b.id ?? "?"}  ${clip(b.title ?? "", 96)}`);
 	if (readyTotal - shown.length > 0) readyRows.push(`… ${readyTotal - shown.length} more ready`);
-	sections.push({
+	return [{
+		id: "beads",
+		title: `beads (${inProgress.length})`,
+		rows: beadRows
+	}, {
 		id: "ready",
 		title: `ready (${readyTotal})`,
 		rows: readyRows
-	});
+	}];
+}
+/** fleet + loop — the agent plane: who runs, who exited, who is loud. */
+function agentSections(s) {
+	const sections = [];
 	const agents = s.fleet?.agents ?? [];
 	const running = agents.filter((a) => a.state === "running").length;
 	const max = s.fleet?.maxConcurrent ?? 0;
-	const cap = max > 0 ? `/${max}` : "";
 	sections.push({
 		id: "fleet",
-		title: `fleet (${running}${cap})`,
+		title: `fleet (${running}${max > 0 ? `/${max}` : ""})`,
 		rows: agents.length === 0 ? ["— no agents —"] : agents.map((a) => {
 			const parts = [`▶ ${a.id ?? "?"}  ${a.backend ?? ""}  ${a.state ?? "?"}`];
 			if (a.state === "running" && a.step) parts.push(a.step);
@@ -361,6 +371,11 @@ function buildSections(s) {
 			return parts.join("  ");
 		})
 	});
+	return sections;
+}
+/** worktrees + drill + repo — the checkout around the session. */
+function checkoutSections(s) {
+	const sections = [];
 	const trees = s.worktrees ?? [];
 	if (trees.length > 0) sections.push({
 		id: "worktrees",

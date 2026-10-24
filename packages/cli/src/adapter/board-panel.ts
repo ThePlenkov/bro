@@ -95,23 +95,19 @@ function buildSections(s: BoardStatus | null): Section[] {
   if (s === null) {
     return [{ id: 'board', title: 'board', rows: ['no board yet — press r to load'] }]
   }
-  const sections: Section[] = []
+  return [...workSections(s), ...agentSections(s), ...checkoutSections(s)]
+}
 
+/** beads + ready — what is claimed and what is queued. */
+function workSections(s: BoardStatus): Section[] {
   const inProgress = s.beads?.inProgress ?? []
-  sections.push({
-    id: 'beads',
-    title: `beads (${inProgress.length})`,
-    rows:
-      inProgress.length === 0
-        ? ['— none in progress —']
-        : inProgress.map(
-            (b) =>
-              `◐ ${b.id ?? '?'}  ${clip(b.title ?? '', 96)}${
-                b.assignee ? `  [${b.assignee}]` : ''
-              }`
-          ),
-  })
-
+  const beadRows =
+    inProgress.length === 0
+      ? ['— none in progress —']
+      : inProgress.map(
+          (b) =>
+            `◐ ${b.id ?? '?'}  ${clip(b.title ?? '', 96)}${b.assignee ? `  [${b.assignee}]` : ''}`
+        )
   const ready = s.beads?.ready ?? []
   const readyTotal = s.beads?.readyTotal ?? ready.length
   const shown = ready.slice(0, READY_SHOWN)
@@ -119,15 +115,21 @@ function buildSections(s: BoardStatus | null): Section[] {
   if (readyTotal - shown.length > 0) {
     readyRows.push(`… ${readyTotal - shown.length} more ready`)
   }
-  sections.push({ id: 'ready', title: `ready (${readyTotal})`, rows: readyRows })
+  return [
+    { id: 'beads', title: `beads (${inProgress.length})`, rows: beadRows },
+    { id: 'ready', title: `ready (${readyTotal})`, rows: readyRows },
+  ]
+}
 
+/** fleet + loop — the agent plane: who runs, who exited, who is loud. */
+function agentSections(s: BoardStatus): Section[] {
+  const sections: Section[] = []
   const agents = s.fleet?.agents ?? []
   const running = agents.filter((a) => a.state === 'running').length
   const max = s.fleet?.maxConcurrent ?? 0
-  const cap = max > 0 ? `/${max}` : ''
   sections.push({
     id: 'fleet',
-    title: `fleet (${running}${cap})`,
+    title: `fleet (${running}${max > 0 ? `/${max}` : ''})`,
     rows:
       agents.length === 0
         ? ['— no agents —']
@@ -145,7 +147,6 @@ function buildSections(s: BoardStatus | null): Section[] {
             return parts.join('  ')
           }),
   })
-
   const runs = s.loop?.runs ?? []
   if (runs.length > 0) {
     sections.push({
@@ -168,7 +169,12 @@ function buildSections(s: BoardStatus | null): Section[] {
       }),
     })
   }
+  return sections
+}
 
+/** worktrees + drill + repo — the checkout around the session. */
+function checkoutSections(s: BoardStatus): Section[] {
+  const sections: Section[] = []
   const trees = s.worktrees ?? []
   if (trees.length > 0) {
     sections.push({
@@ -186,7 +192,6 @@ function buildSections(s: BoardStatus | null): Section[] {
       }),
     })
   }
-
   const frame = s.drill?.frame
   if (frame) {
     sections.push({
@@ -199,13 +204,11 @@ function buildSections(s: BoardStatus | null): Section[] {
       ],
     })
   }
-
   const repoRows = [`branch  ${s.branch ?? '?'}`]
   if ((s.dirty ?? 0) > 0) {
     repoRows.push(`dirty   ${s.dirty} file(s)`)
   }
   sections.push({ id: 'repo', title: 'repo', rows: repoRows })
-
   return sections
 }
 

@@ -30,7 +30,7 @@ structural).
   ready (top N + total), fleet agents, loop runs, worktrees, drill frame,
   attention count. Each section is a collapsible element (the collapsed
   set is component state; all sections start expanded).
-- Cursor over every visible line; the rendered line carries a `› ` marker
+- Cursor over every visible line; the rendered line carries a `›` marker
   under the cursor.
 - Keys: `↑`/`↓` and `j`/`k` move; `←`/`→` collapse/expand the section under
   the cursor; `Enter`/`Space` toggle it; `r` re-probes `bro status --json`
