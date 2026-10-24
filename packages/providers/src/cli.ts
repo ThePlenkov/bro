@@ -1,10 +1,12 @@
 /**
  * The `cli` provider binding — a bare command template as a prose call
  * (spec: specs/bro-ribc.1.md §cli, milestone 6). The contract is
- * loop.agent's generalized: `{promptFile}` expands to `"$1"` — the path
- * of a temp file holding the prompt travels as a positional arg, never
- * inside the command line (appended as the last arg when the template
- * doesn't name it). The expanded line runs under `sh -c`, the process
+ * loop.agent's generalized: `{promptFile}` expands to
+ * `"$BRO_PROMPT_FILE"` — the path of a temp file holding the prompt
+ * travels via the child's environment, never inside the command line
+ * (appended as the last arg when the template doesn't name it; env
+ * inheritance means even a nested `sh -c` inside the template still
+ * sees it). The expanded line runs under `sh -c`, the process
  * exits, and stdout IS the answer — the consumer (the judge's
  * proseDecide) prompt-and-parses it, so a cli answer is always
  * prose-grade. The spawn surface is the fleet connector's template
@@ -33,20 +35,21 @@ class CliConfigError extends Error {
   override name = 'CliConfigError'
 }
 
-/** The loop.agent expansion contract — `{promptFile}` becomes `"$1"`;
- *  no placeholder → `"$1"` appends as the last arg. The path itself rides
- *  the positional arg `runTemplate` passes to `sh -c` — nothing derived
- *  from the file's name is ever concatenated into the command line, so
- *  no quoting is needed at all (the same "$1" positional exec the native
- *  agent connector uses). Kept local: expandAgentCmd lives in
- *  @broject/loop and the providers package must not grow a dep edge on
- *  the loop for seven lines of expansion. */
+/** The loop.agent expansion contract — `{promptFile}` becomes
+ *  `"$BRO_PROMPT_FILE"`; no placeholder → the reference appends as the
+ *  last arg. The path itself rides the child's environment — nothing
+ *  derived from the file's name is ever concatenated into the command
+ *  line, so no quoting is needed at all, and a nested `sh -c` inside
+ *  the template still resolves it (env inherits, positionals don't).
+ *  Kept local: expandAgentCmd lives in @broject/loop and the providers
+ *  package must not grow a dep edge on the loop for seven lines of
+ *  expansion. */
 export function expandPromptFile(command: string): string {
   if (command.includes('{promptFile}')) {
     // fn replacer — keeps the substitution literal whatever it becomes
-    return command.replaceAll('{promptFile}', () => '"$1"')
+    return command.replaceAll('{promptFile}', () => '"$BRO_PROMPT_FILE"')
   }
-  return `${command} "$1"`
+  return `${command} "$BRO_PROMPT_FILE"`
 }
 
 /** One `sh -c` round-trip under the caller's budget — an expired
@@ -63,8 +66,12 @@ function runTemplate(by: string, command: string, promptFile: string, deadline: 
     }
     // operator-configured provider command (same contract as
     // loop.agent / agents.*.command everywhere: PATH lookup, sh -c).
-    // `bro-cli` becomes $0; the prompt file is $1 — argv, not the line.
-    const child = spawn('sh', ['-c', command, 'bro-cli', promptFile], { stdio: ['ignore', 'pipe', 'pipe'] }) // NOSONAR — operator-authored command template; the prompt path rides argv
+    // The prompt path rides BRO_PROMPT_FILE in the child env — argv is
+    // untouched ($0 stays 'sh'), and nested shells inherit the var.
+    const child = spawn('sh', ['-c', command], {
+      stdio: ['ignore', 'pipe', 'pipe'],
+      env: { ...process.env, BRO_PROMPT_FILE: promptFile },
+    }) // NOSONAR — operator-authored command template; the prompt path rides the env
     const out: Buffer[] = []
     let tail = ''
     child.stdout?.on('data', (d: Buffer) => out.push(d))
