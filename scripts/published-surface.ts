@@ -35,6 +35,26 @@ export interface PublishedSurface {
 
 export const NPM = process.platform === 'win32' ? 'npm.cmd' : 'npm'
 
+/** `-flag value` lookup for the two registry-facing scripts. */
+export function argFlag(argv: string[], name: string): string | undefined {
+  const i = argv.indexOf(name)
+  return i === -1 ? undefined : argv[i + 1]
+}
+
+/** The npm spec to probe: `--spec`, then `BRO_PUBLISHED_SPEC`, then latest. */
+export function resolveSpec(argv: string[]): string {
+  return argFlag(argv, '--spec') ?? process.env.BRO_PUBLISHED_SPEC ?? '@broject/bro@latest'
+}
+
+/** `pkg@<resolved-version>` — the install must pin what `publishedVersion`
+ *  resolved: a floating dist-tag (`latest`) could move between the version
+ *  probe and `npm i`, recording one version's help under another. */
+export function pinSpec(spec: string, version: string): string {
+  const at = spec.lastIndexOf('@')
+  const pkg = at > 0 ? spec.slice(0, at) : spec
+  return `${pkg}@${version}`
+}
+
 /** `npm view <spec> version` — resolved semver for a dist-tag or range. */
 export function publishedVersion(spec: string): string {
   const out = execFileSync(NPM, ['view', spec, 'version'], { encoding: 'utf8' }).trim()
@@ -78,6 +98,24 @@ export interface TopHelp {
   commands: Map<string, string>
   docNouns: string[]
   docVerbs: string[]
+}
+
+/** Resolve the spec, install it version-pinned, and probe `bro --help` —
+ *  the shared fixture for `gen-published.ts` and `check-onboarding.ts`.
+ *  `scratch` is a non-git dir inside the fixture: several published
+ *  commands run on `--help`, and a repo cwd would give them a store. */
+export function probePublished(spec: string): {
+  bin: string
+  dir: string
+  scratch: string
+  top: TopHelp
+  version: string
+} {
+  const version = publishedVersion(spec)
+  const { bin, dir } = installPublished(pinSpec(spec, version))
+  const scratch = mkdtempSync(join(dir, 'scratch-'))
+  const top = parseTopLevelHelp(runBin(bin, ['--help'], scratch))
+  return { bin, dir, scratch, top, version }
 }
 
 /** `bro --help` → the Commands: rows plus `doc types:`/`shorthand:`
@@ -153,15 +191,15 @@ function pushAlt(acc: Subs, alt: string, sure: boolean): void {
 /** Anchored usage slots: `bro <name> <a|b>`, `bro <name> a | b`,
  *  and `bro <name> <word>` — every hit confirms the subcommand. */
 function collectUsageSlots(acc: Subs, name: string, helpOut: string): void {
-  const angled = new RegExp(`\\bbro\\s+${name}\\s+<([a-z0-9][a-z0-9|-]*)>`, 'g')
+  const angled = new RegExp(String.raw`\bbro\s+${name}\s+<([a-z0-9][a-z0-9|-]*)>`, 'g')
   for (const m of helpOut.matchAll(angled)) {
     pushAlt(acc, m[1]!, true)
   }
-  const spaced = new RegExp(`\\bbro\\s+${name}\\s+((?:[a-z][\\w-]*\\s*\\|\\s*)+[a-z][\\w-]*)`, 'g')
+  const spaced = new RegExp(String.raw`\bbro\s+${name}\s+((?:[a-z][\w-]*\s*\|\s*)+[a-z][\w-]*)`, 'g')
   for (const m of helpOut.matchAll(spaced)) {
     pushAlt(acc, m[1]!, true)
   }
-  const word = new RegExp(`\\bbro\\s+${name}\\s+([a-z][a-z0-9-]*)\\b`, 'g')
+  const word = new RegExp(String.raw`\bbro\s+${name}\s+([a-z][a-z0-9-]*)\b`, 'g')
   for (const m of helpOut.matchAll(word)) {
     pushSub(acc, m[1]!, true)
   }
@@ -181,7 +219,7 @@ function collectFollowerLine(acc: Subs, text: string): void {
 }
 
 function collectFollowers(acc: Subs, name: string, helpOut: string): void {
-  const line = new RegExp(`\\bbro\\s+${name}\\b[^\\n]*`, 'g')
+  const line = new RegExp(String.raw`\bbro\s+${name}\b[^\n]*`, 'g')
   for (const l of helpOut.matchAll(line)) {
     collectFollowerLine(acc, l[0])
   }
@@ -216,7 +254,7 @@ function collectCommandsBlock(acc: Subs, helpOut: string): void {
  *  subcommands. */
 function dropFlagLeaks(acc: Subs, flagText: string): void {
   for (const w of acc.subs) {
-    if (!acc.confirmed.has(w) && new RegExp(`--${w}\\b`).test(flagText)) {
+    if (!acc.confirmed.has(w) && new RegExp(String.raw`--${w}\b`).test(flagText)) {
       acc.subs.delete(w)
     }
   }
@@ -239,7 +277,7 @@ export function subsOf(name: string, helpOut: string, topSummary?: string): stri
   collectFollowers(acc, name, helpOut)
   collectCommandsBlock(acc, helpOut)
   dropFlagLeaks(acc, `${topSummary ?? ''}\n${helpOut}`)
-  return [...acc.subs].sort()
+  return [...acc.subs].sort((a, b) => a.localeCompare(b))
 }
 
 export interface DocLine {

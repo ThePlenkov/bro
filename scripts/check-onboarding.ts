@@ -18,24 +18,18 @@
  * refreshing the manifest is a release chore (`npm run gen:published`),
  * not a PR blocker.
  */
-import { mkdirSync } from 'node:fs'
 import { join } from 'node:path'
 import {
   extractDocLines,
-  installPublished,
   loadPublishedSurface,
-  parseTopLevelHelp,
-  publishedVersion,
+  probePublished,
+  resolveSpec,
   root,
   runBin,
 } from './published-surface.ts'
 
 const argv = process.argv.slice(2)
-const flag = (name: string): string | undefined => {
-  const i = argv.indexOf(name)
-  return i === -1 ? undefined : argv[i + 1]
-}
-const spec = flag('--spec') ?? process.env.BRO_PUBLISHED_SPEC ?? '@broject/bro@latest'
+const spec = resolveSpec(argv)
 const files = argv
   .filter((a) => a.endsWith('.md') || a.endsWith('.mdx'))
   .map((f) => (f.startsWith('/') ? f : join(root, f)))
@@ -44,11 +38,7 @@ const pages =
     ? files
     : [join(root, 'site/content/docs/index.mdx'), join(root, 'README.md')]
 
-const version = publishedVersion(spec)
-const { bin, dir } = installPublished(spec)
-// non-git scratch — --version/--help probes must never see a repo store
-const scratch = join(dir, 'scratch')
-mkdirSync(scratch, { recursive: true })
+const { bin, scratch, top, version } = probePublished(spec)
 
 // the literal install steps — --version and --help are the two
 // invocations every onboarding page leads with
@@ -57,7 +47,6 @@ if (!vout.includes(version)) {
   console.error(`${spec}: \`bro --version\` printed ${vout.trim() || '(nothing)'}, expected ${version}`)
   process.exit(1)
 }
-const top = parseTopLevelHelp(runBin(bin, ['--help'], scratch))
 if (top.commands.size === 0) {
   console.error(`${spec}: no Commands: block parsed from \`bro --help\``)
   process.exit(1)
@@ -120,6 +109,5 @@ if (failed > 0) {
   console.error(`check-onboarding: ${failed} doc line(s) do not dispatch on ${spec} (${version})`)
   process.exit(1)
 }
-console.log(
-  `check-onboarding: ${checked} doc line(s) dispatch on ${spec} (${version})${warned > 0 ? ` — ${warned} warning(s)` : ''}`
-)
+const tail = warned === 0 ? '' : ` — ${warned} warning(s)`
+console.log(`check-onboarding: ${checked} doc line(s) dispatch on ${spec} (${version})${tail}`)

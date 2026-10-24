@@ -13,36 +13,25 @@
  * Refresh after every release — the snapshot is the docs' version
  * boundary.
  */
-import { mkdtempSync, writeFileSync } from 'node:fs'
-import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { writeFileSync } from 'node:fs'
 import {
-  installPublished,
+  argFlag,
   loadPublishedSurface,
-  parseTopLevelHelp,
+  probePublished,
   PUBLISHED_PATH,
-  publishedVersion,
+  resolveSpec,
   runBin,
   subsOf,
   type PublishedSurface,
 } from './published-surface.ts'
 
 const argv = process.argv.slice(2)
-const flag = (name: string): string | undefined => {
-  const i = argv.indexOf(name)
-  return i === -1 ? undefined : argv[i + 1]
-}
 const check = argv.includes('--check')
-const spec = flag('--spec') ?? process.env.BRO_PUBLISHED_SPEC ?? '@broject/bro@latest'
-const version = publishedVersion(spec)
+const spec = resolveSpec(argv)
 const existing = loadPublishedSurface()
-const next = flag('--next') ?? existing?.next ?? '0.3.0'
+const next = argFlag(argv, '--next') ?? existing?.next ?? '0.3.0'
 
-const { bin } = installPublished(spec)
-// non-git scratch — `bro <name> --help` executes on some commands
-// (sync/watch/doctor/fleet) and a repo cwd would give them side effects
-const scratch = mkdtempSync(join(tmpdir(), 'bro-published-scratch-'))
-const top = parseTopLevelHelp(runBin(bin, ['--help'], scratch))
+const { bin, scratch, top, version } = probePublished(spec)
 if (top.commands.size === 0) {
   console.error(`no Commands: block parsed from ${spec} --help`)
   process.exit(1)
@@ -66,8 +55,9 @@ const surface: PublishedSurface = {
 }
 
 if (check) {
-  const have = JSON.stringify({ ...(existing ?? {}), generatedAt: undefined }, null, 2)
-  const want = JSON.stringify({ ...surface, generatedAt: undefined }, null, 2)
+  const strip = (s: PublishedSurface) => ({ ...s, generatedAt: undefined })
+  const have = existing === undefined ? undefined : JSON.stringify(strip(existing), null, 2)
+  const want = JSON.stringify(strip(surface), null, 2)
   if (have === want) {
     console.log(`published.json in sync with ${spec} (${version})`)
     process.exit(0)

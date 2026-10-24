@@ -42,10 +42,10 @@ the commands `daemon`, `resume`, `provider`, `mcp`, `pulse`, `rig`,
 
 2. **Generated reference pages carry the release boundary** —
    `scripts/gen-command-docs.ts` reads `contract/published.json` and
-   emits an `npm` row on every command page: `` `0.2.5` ``,
-   `` `0.2.5` — new in `0.3.0`: publish, merge `` when the current
-   surface grew subs, or `unreleased — lands in `0.3.0``. Unparseable
-   subs degrade to a command-level verdict.
+   emits an `npm` row on every command page: `0.2.5`, `0.2.5 — new in
+   0.3.0: publish, merge` when the current surface grew subs, or
+   `unreleased — lands in 0.3.0`. Unparseable subs degrade to a
+   command-level verdict.
 
 3. **Stable onboarding pages run on the published tarball** —
    `site/content/docs/index.mdx` and `README.md` copy/paste paths switch

@@ -142,7 +142,7 @@ function currentSubs(r: Row): string[] {
   if (m === null) {
     return []
   }
-  return m[0].split('|').filter((s) => !new RegExp(`--${s}\\b`).test(r.summary))
+  return m[0].split('|').filter((s) => !new RegExp(String.raw`--${s}\b`).test(r.summary))
 }
 
 /** The npm version boundary for this command: the published version
