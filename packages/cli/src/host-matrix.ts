@@ -356,6 +356,13 @@ export const HOOK_MATRIX: {
   },
 }
 
+/** A stdin payload is a flat JSON object or nothing — every reader
+ *  starts from the same narrowing. */
+const asPayload = (raw: unknown): Record<string, unknown> | undefined =>
+  typeof raw === 'object' && raw !== null && !Array.isArray(raw)
+    ? (raw as Record<string, unknown>)
+    : undefined
+
 /** The shell-hook host a verbatim stdin payload belongs to. Cursor
  *  payloads divert to cursorToHookInput before this is asked; the
  *  in-process adapters send the normalized shape themselves. The one
@@ -364,15 +371,8 @@ export const HOOK_MATRIX: {
  *  success. Every other Claude-vocabulary payload (claude, devin, an
  *  unpinned install, a manual invocation) gets the shared reading. */
 export function shellHostOf(raw: unknown): 'claude' | 'codex' {
-  if (
-    typeof raw === 'object' &&
-    raw !== null &&
-    !Array.isArray(raw) &&
-    typeof (raw as { turn_id?: unknown }).turn_id === 'string'
-  ) {
-    return 'codex'
-  }
-  return 'claude'
+  const p = asPayload(raw)
+  return typeof p?.turn_id === 'string' ? 'codex' : 'claude'
 }
 
 /** Normalize the native post-tool payload into the internal outcome
@@ -394,18 +394,27 @@ export function shellHostOf(raw: unknown): 'claude' | 'codex' {
  *  once" hint the stop gate re-verifies, not a verdict, so an
  *  unobservable outcome arms where an observed failure does not. */
 export function deriveToolSuccess(raw: unknown): boolean | undefined {
-  if (typeof raw !== 'object' || raw === null || Array.isArray(raw)) {
+  return explicitSuccess(raw) ?? eventNameOutcome(raw)
+}
+
+/** The explicit boolean field — Devin sends it natively, the in-process
+ *  adapters synthesize it — is authoritative wherever it appears. */
+function explicitSuccess(raw: unknown): boolean | undefined {
+  const response = asPayload(raw)?.tool_response
+  if (typeof response !== 'object' || response === null) {
     return undefined
   }
-  const p = raw as {
-    tool_response?: { success?: unknown }
-    hook_event_name?: unknown
-  }
-  if (typeof p.tool_response?.success === 'boolean') {
-    return p.tool_response.success
-  }
-  const name = typeof p.hook_event_name === 'string' ? p.hook_event_name : ''
-  if (name === '') {
+  const success = (response as { success?: unknown }).success
+  return typeof success === 'boolean' ? success : undefined
+}
+
+/** Event-name semantics: a `*Failure`/`*Error` event is failure on
+ *  every host that has one; `PostToolUse` documents success in Claude's
+ *  vocabulary — Codex fires it on non-zero exits too, so there it
+ *  proves nothing. */
+function eventNameOutcome(raw: unknown): boolean | undefined {
+  const name = asPayload(raw)?.hook_event_name
+  if (typeof name !== 'string' || name === '') {
     return undefined
   }
   if (/fail|error/i.test(name)) {
