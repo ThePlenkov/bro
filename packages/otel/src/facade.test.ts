@@ -9,6 +9,18 @@ import { collectFields, emitHook, hookRecord, otelSinkPath, readSinkRows, type O
 import { otelSection } from './config.ts'
 import { tmpDir } from './testtmp.ts'
 
+// Provenance reads the global layer too — pin it at an empty dir so the
+// developer machine's ~/.config/bro/config.json can't leak config in.
+process.env.XDG_CONFIG_HOME = tmpDir('otel-xdg-')
+
+/** A real checkout — untracked config files are the operator-owned
+ *  layer; provenance is git's verdict, so fixtures must be repos. */
+function repo(): string {
+  const dir = tmpDir('otel-facade-')
+  execFileSync('git', ['init', '-q'], { cwd: dir })
+  return dir
+}
+
 const PAYLOAD = {
   session_id: 'sess-1',
   tool_name: 'exec',
@@ -102,7 +114,7 @@ describe('emitHook — file sink', () => {
   })
 
   test('enabled + default * policy → one meta-only row per event', () => {
-    const dir = tmpDir('otel-facade-')
+    const dir = repo()
     writeFileSync(
       join(dir, 'bro.config.json'),
       JSON.stringify({ otel: { enabled: true, exporter: { type: 'file', path: 'out/sink.jsonl' } } })
@@ -120,7 +132,7 @@ describe('emitHook — file sink', () => {
   })
 
   test('collect allowlist exports only named fields', () => {
-    const dir = tmpDir('otel-facade-')
+    const dir = repo()
     writeFileSync(
       join(dir, 'bro.config.json'),
       JSON.stringify({
@@ -137,7 +149,7 @@ describe('emitHook — file sink', () => {
   })
 
   test('hook:false drops the event, * policy still covers the rest', () => {
-    const dir = tmpDir('otel-facade-')
+    const dir = repo()
     writeFileSync(
       join(dir, 'bro.config.json'),
       JSON.stringify({
@@ -158,7 +170,7 @@ describe('emitHook — file sink', () => {
   })
 
   test('sample 0 keeps nothing', () => {
-    const dir = tmpDir('otel-facade-')
+    const dir = repo()
     writeFileSync(
       join(dir, 'bro.config.json'),
       JSON.stringify({
@@ -174,7 +186,7 @@ describe('emitHook — file sink', () => {
   })
 
   test('BRO_TELEMETRY=0 kills emission outright', () => {
-    const dir = tmpDir('otel-facade-')
+    const dir = repo()
     writeFileSync(
       join(dir, 'bro.config.json'),
       JSON.stringify({ otel: { enabled: true, exporter: { type: 'file', path: 'sink.jsonl' } } })
@@ -191,8 +203,7 @@ describe('emitHook — file sink', () => {
   })
 
   test('default file path lands under <git-common>/bro/otel/', () => {
-    const dir = tmpDir('otel-facade-')
-    execFileSync('git', ['init', '-q'], { cwd: dir })
+    const dir = repo()
     writeFileSync(
       join(dir, 'bro.config.json'),
       JSON.stringify({ otel: { enabled: true } })
@@ -206,7 +217,7 @@ describe('emitHook — file sink', () => {
 
 describe('emitHook — stdout sink', () => {
   test('rows go to stderr, never stdout (hook protocol channel)', () => {
-    const dir = tmpDir('otel-facade-')
+    const dir = repo()
     writeFileSync(
       join(dir, 'bro.config.json'),
       JSON.stringify({ otel: { enabled: true, exporter: { type: 'stdout' } } })
@@ -291,7 +302,7 @@ function firstLogRecord(body: string): {
 describe('emitHook — otlp sink', () => {
   test('detached POST carries the OTLP log record to the configured endpoint', async () => {
     const { got, port, close } = await otlpCollector()
-    const dir = tmpDir('otel-facade-')
+    const dir = repo()
     writeFileSync(
       join(dir, 'bro.config.json'),
       JSON.stringify({
@@ -322,6 +333,113 @@ describe('emitHook — otlp sink', () => {
     } finally {
       close()
     }
+  })
+})
+
+describe('emitHook — provenance (committed config cannot decide where records go)', () => {
+  /** Commit the given config so git tracks it — the attacker-controlled
+   *  layer in the threat model. */
+  function commit(dir: string, file: string): void {
+    execFileSync('git', ['add', file], { cwd: dir })
+    execFileSync(
+      'git',
+      ['-c', 'user.email=t@t', '-c', 'user.name=t', 'commit', '-qm', 'cfg'],
+      { cwd: dir }
+    )
+  }
+
+  test('committed otel.enabled=true arms nothing', () => {
+    const dir = repo()
+    writeFileSync(
+      join(dir, 'bro.config.json'),
+      JSON.stringify({ otel: { enabled: true, exporter: { type: 'file', path: 'sink.jsonl' } } })
+    )
+    commit(dir, 'bro.config.json')
+    emitHook('session-start', PAYLOAD, { dir })
+    assert.equal(existsSync(join(dir, 'sink.jsonl')), false)
+  })
+
+  test('committed exporter/collect are ignored — local layer owns where records go', () => {
+    const dir = repo()
+    writeFileSync(
+      join(dir, 'bro.config.json'),
+      JSON.stringify({
+        otel: {
+          enabled: true,
+          exporter: { type: 'file', path: 'evil.jsonl' },
+          hooks: { '*': { collect: ['prompt', 'tool_input.command'] } },
+        },
+      })
+    )
+    commit(dir, 'bro.config.json')
+    writeFileSync(
+      join(dir, 'bro.config.local.json'),
+      JSON.stringify({ otel: { enabled: true, exporter: { type: 'file', path: 'mine.jsonl' } } })
+    )
+    emitHook('session-start', PAYLOAD, { dir })
+    // the committed sink path never sees a byte
+    assert.equal(existsSync(join(dir, 'evil.jsonl')), false)
+    const row = readSinkRows(join(dir, 'mine.jsonl'))[0]
+    assert.equal(row?.event, 'hook.session-start')
+    // and the committed collect allowlist collected nothing
+    assert.equal(row?.payload, undefined)
+  })
+
+  test('committed layers may still narrow — hooks."*":false silences', () => {
+    const dir = repo()
+    writeFileSync(
+      join(dir, 'bro.config.json'),
+      JSON.stringify({ otel: { hooks: { '*': false } } })
+    )
+    commit(dir, 'bro.config.json')
+    writeFileSync(
+      join(dir, 'bro.config.local.json'),
+      JSON.stringify({ otel: { enabled: true, exporter: { type: 'file', path: 'sink.jsonl' } } })
+    )
+    emitHook('session-start', PAYLOAD, { dir })
+    assert.equal(existsSync(join(dir, 'sink.jsonl')), false)
+  })
+
+  test('committed per-hook disable narrows; committed sample only lowers', () => {
+    const dir = repo()
+    writeFileSync(
+      join(dir, 'bro.config.json'),
+      JSON.stringify({ otel: { hooks: { 'prompt-submit': false } } })
+    )
+    commit(dir, 'bro.config.json')
+    writeFileSync(
+      join(dir, 'bro.config.local.json'),
+      JSON.stringify({ otel: { enabled: true, exporter: { type: 'file', path: 'sink.jsonl' } } })
+    )
+    emitHook('session-start', PAYLOAD, { dir })
+    emitHook('prompt-submit', PAYLOAD, { dir })
+    assert.deepEqual(
+      readSinkRows(join(dir, 'sink.jsonl')).map((r) => r.event),
+      ['hook.session-start']
+    )
+  })
+
+  test('a committed bro.config.local.json is NOT operator-owned', () => {
+    const dir = repo()
+    // .gitignore is advisory — a repo can commit the "local" name; git's
+    // index is the verdict, not the filename
+    writeFileSync(
+      join(dir, 'bro.config.local.json'),
+      JSON.stringify({ otel: { enabled: true, exporter: { type: 'file', path: 'sink.jsonl' } } })
+    )
+    commit(dir, 'bro.config.local.json')
+    emitHook('session-start', PAYLOAD, { dir })
+    assert.equal(existsSync(join(dir, 'sink.jsonl')), false)
+  })
+
+  test('non-repository dir: every config file is unattributable', () => {
+    const dir = tmpDir('otel-facade-')
+    writeFileSync(
+      join(dir, 'bro.config.local.json'),
+      JSON.stringify({ otel: { enabled: true, exporter: { type: 'file', path: 'sink.jsonl' } } })
+    )
+    emitHook('session-start', PAYLOAD, { dir })
+    assert.equal(existsSync(join(dir, 'sink.jsonl')), false)
   })
 })
 

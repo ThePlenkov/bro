@@ -100,11 +100,13 @@ function exporterConfig(raw: unknown): OtelExporterConfig {
     : 'file'
   const str = (v: unknown): string =>
     typeof v === 'string' && v.trim() !== '' ? v.trim() : ''
+  // trailing slashes would double the path join — `${ep}/v1/logs`
+  let endpoint = str(exporter.endpoint)
+  while (endpoint.endsWith('/')) endpoint = endpoint.slice(0, -1)
   return {
     type,
     path: str(exporter.path),
-    // trailing slashes would double the path join — `${ep}/v1/logs`
-    endpoint: str(exporter.endpoint).replace(/\/+$/, ''),
+    endpoint,
     headers: isObj(exporter.headers)
       ? Object.fromEntries(
           Object.entries(exporter.headers).filter(
