@@ -434,34 +434,42 @@ function inRange(c: number, lo: number, hi: number): boolean {
   return c >= lo && c <= hi
 }
 
+/** Index just past a CSI sequence starting at `j` (the byte after ESC[). */
+function afterCsi(text: string, j: number): number {
+  while (j < text.length && inRange(text.charCodeAt(j), 0x20, 0x3f)) {
+    j++ // parameter and intermediate bytes
+  }
+  if (j < text.length && inRange(text.charCodeAt(j), 0x40, 0x7e)) {
+    j++ // final byte
+  }
+  return j
+}
+
+/** Index just past an OSC sequence starting at `j` (the byte after ESC]). */
+function afterOsc(text: string, j: number): number {
+  while (j < text.length) {
+    const c = text.charCodeAt(j)
+    if (c === BEL_CODE) {
+      return j + 1
+    }
+    if (c === ESC_CODE && text[j + 1] === '\\') {
+      return j + 2
+    }
+    j++
+  }
+  return j
+}
+
 /** Index just past the escape sequence starting at `i` (an ESC byte):
  *  CSI = ESC [ params… final; OSC = ESC ] … BEL | ESC \; anything else
  *  is ESC + one byte; a dangling ESC consumes itself. */
 function afterEscape(text: string, i: number): number {
   const lead = text[i + 1]
   if (lead === '[') {
-    let j = i + 2
-    while (j < text.length && inRange(text.charCodeAt(j), 0x20, 0x3f)) {
-      j++ // parameter and intermediate bytes
-    }
-    if (j < text.length && inRange(text.charCodeAt(j), 0x40, 0x7e)) {
-      j++ // final byte
-    }
-    return j
+    return afterCsi(text, i + 2)
   }
   if (lead === ']') {
-    let j = i + 2
-    while (j < text.length) {
-      const c = text.charCodeAt(j)
-      if (c === BEL_CODE) {
-        return j + 1
-      }
-      if (c === ESC_CODE && text[j + 1] === '\\') {
-        return j + 2
-      }
-      j++
-    }
-    return j
+    return afterOsc(text, i + 2)
   }
   return lead === undefined ? i + 1 : i + 2
 }

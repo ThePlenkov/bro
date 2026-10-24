@@ -83,24 +83,32 @@ const ASSIGNMENT = /^[A-Za-z_]\w*=/
 const QUOTES: Record<string, true> = { '"': true, "'": true }
 const SEPARATORS: Record<string, true> = { ' ': true, '\t': true }
 
+/** The text of a quoted run starting at `i` (data[i] is the quote) and
+ *  the index after its closing quote; an unterminated quote swallows
+ *  the rest. Backslash stays literal inside quotes — the guard needs
+ *  words, not full shell semantics. */
+function quotedWord(segment: string, i: number): { text: string; end: number } {
+  const quote = segment[i]
+  let text = ''
+  let j = i + 1
+  while (j < segment.length && segment[j] !== quote) {
+    text += segment[j]
+    j++
+  }
+  return { text, end: j < segment.length ? j + 1 : j }
+}
+
 function words(segment: string): string[] {
   const out: string[] = []
   let cur = ''
   let started = false
-  let quote = ''
   for (let i = 0; i < segment.length; i++) {
     const ch = segment[i]
-    if (quote !== '') {
-      if (ch === quote) {
-        quote = ''
-      } else {
-        cur += ch
-      }
-      continue
-    }
     if (ch in QUOTES) {
-      quote = ch
+      const quoted = quotedWord(segment, i)
+      cur += quoted.text
       started = true
+      i = quoted.end - 1
       continue
     }
     const escaped = segment[i + 1]

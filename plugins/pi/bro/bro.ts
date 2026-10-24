@@ -293,27 +293,29 @@ const DEL_CODE = 127;
 function inRange(c, lo, hi) {
 	return c >= lo && c <= hi;
 }
+/** Index just past a CSI sequence starting at `j` (the byte after ESC[). */
+function afterCsi(text, j) {
+	while (j < text.length && inRange(text.charCodeAt(j), 32, 63)) j++;
+	if (j < text.length && inRange(text.charCodeAt(j), 64, 126)) j++;
+	return j;
+}
+/** Index just past an OSC sequence starting at `j` (the byte after ESC]). */
+function afterOsc(text, j) {
+	while (j < text.length) {
+		const c = text.charCodeAt(j);
+		if (c === BEL_CODE) return j + 1;
+		if (c === ESC_CODE && text[j + 1] === "\\") return j + 2;
+		j++;
+	}
+	return j;
+}
 /** Index just past the escape sequence starting at `i` (an ESC byte):
 *  CSI = ESC [ params… final; OSC = ESC ] … BEL | ESC \; anything else
 *  is ESC + one byte; a dangling ESC consumes itself. */
 function afterEscape(text, i) {
 	const lead = text[i + 1];
-	if (lead === "[") {
-		let j = i + 2;
-		while (j < text.length && inRange(text.charCodeAt(j), 32, 63)) j++;
-		if (j < text.length && inRange(text.charCodeAt(j), 64, 126)) j++;
-		return j;
-	}
-	if (lead === "]") {
-		let j = i + 2;
-		while (j < text.length) {
-			const c = text.charCodeAt(j);
-			if (c === BEL_CODE) return j + 1;
-			if (c === ESC_CODE && text[j + 1] === "\\") return j + 2;
-			j++;
-		}
-		return j;
-	}
+	if (lead === "[") return afterCsi(text, i + 2);
+	if (lead === "]") return afterOsc(text, i + 2);
 	return lead === void 0 ? i + 1 : i + 2;
 }
 /**
@@ -646,7 +648,9 @@ var BoardPanelImpl = class {
 	*  color, the cursor highlights, everything else stays plain. */
 	renderLine(row, text, width, current) {
 		const line = clip(sanitizeTerminalText(text), width);
-		const role = row.kind === "footer" ? "muted" : HIGHLIGHTED[row.kind] || current ? "accent" : "";
+		let role = "";
+		if (row.kind === "footer") role = "muted";
+		else if (HIGHLIGHTED[row.kind] || current) role = "accent";
 		const theme = this.options.theme;
 		return role === "" || theme === void 0 ? line : theme.fg(role, line);
 	}

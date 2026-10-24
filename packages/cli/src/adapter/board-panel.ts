@@ -400,7 +400,12 @@ class BoardPanelImpl implements BoardPanelComponent {
    *  color, the cursor highlights, everything else stays plain. */
   private renderLine(row: Row, text: string, width: number, current: boolean): string {
     const line = clip(sanitizeTerminalText(text), width)
-    const role = row.kind === 'footer' ? 'muted' : HIGHLIGHTED[row.kind] || current ? 'accent' : ''
+    let role = ''
+    if (row.kind === 'footer') {
+      role = 'muted'
+    } else if (HIGHLIGHTED[row.kind] || current) {
+      role = 'accent'
+    }
     const theme = this.options.theme
     return role === '' || theme === undefined ? line : theme.fg(role, line)
   }
