@@ -289,9 +289,12 @@ function spawnRun(bin: SverkaBin, root: string, args: string[]) {
 
 /** sverka ≥ Spec 53 writes `.sverka/runs/<runId>/report.json`
  *  (`sverka.run/v1`) before reporting COLLECTION_FAILED — the step stats
- *  survive on disk even though stdout drops them. Returns the freshest
- *  report written at-or-after `sinceMs`: an older file is a previous
- *  run's, never attributed to this one. sverka 0.2.x writes no report —
+ *  survive on disk even though stdout drops them. Recovers the report
+ *  only when it is unambiguously this run's: exactly one report written
+ *  at-or-after `sinceMs`. Older files are previous runs, and two fresh
+ *  reports mean a concurrent sverka run in the same root — the envelope
+ *  carries no runId to correlate by, so ambiguity attributes nothing
+ *  rather than another run's stats. sverka 0.2.x writes no report —
  *  recovery is opportunistic and degrades to an empty data. */
 function readRunReport(
   root: string,
@@ -303,23 +306,22 @@ function readRunReport(
   } catch {
     return undefined
   }
-  let best: { mtimeMs: number; file: string } | undefined
+  const fresh: string[] = []
   for (const entry of entries) {
     const file = join(root, '.sverka', 'runs', entry, 'report.json')
     try {
-      const mtimeMs = statSync(file).mtimeMs
-      if (mtimeMs >= sinceMs && (best === undefined || mtimeMs > best.mtimeMs)) {
-        best = { mtimeMs, file }
+      if (statSync(file).mtimeMs >= sinceMs) {
+        fresh.push(file)
       }
     } catch {
       // not a report-bearing run dir
     }
   }
-  if (best === undefined) {
+  if (fresh.length !== 1) {
     return undefined
   }
   try {
-    const parsed = JSON.parse(readFileSync(best.file, 'utf8')) as {
+    const parsed = JSON.parse(readFileSync(fresh[0]!, 'utf8')) as {
       schema?: string
       data?: SverkaRunData
       durationMs?: number
