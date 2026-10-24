@@ -1,4 +1,6 @@
 export type { ExitGate, PrActState, PrCheck } from './types.ts'
+export type { ReopenedThread } from './reopened.ts'
+export { detectReopenedThreads } from './reopened.ts'
 export { fetchPrActState } from './state.ts'
 export { failingCiChecks, gatedCiChecks, isSast, liveSastChecks } from './state.ts'
 export type { FetchPrActStateOpts } from './state.ts'
