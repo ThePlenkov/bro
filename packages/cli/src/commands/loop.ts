@@ -2018,6 +2018,7 @@ async function serviceGate(ctx: Ctx, m: GateMember): Promise<ServiceVerdict> {
       mergeable: state.mergeable,
       mergeState: state.mergeState,
       openThreads: state.openThreads,
+      reopenedThreads: state.reopenedThreads?.length ?? 0,
       fixRounds: state.fixRounds,
       maxRounds: state.maxRounds,
       ok: gate.ok,

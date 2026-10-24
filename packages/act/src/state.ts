@@ -21,6 +21,8 @@ import type {
 import type { CheckHistory } from './check-history.ts'
 import { docsOnlyPr, effectiveMaxRounds } from './docs.ts'
 import type { PrStateCache } from './state-cache.ts'
+import { detectReopenedThreads } from './reopened.ts'
+import type { ResolveLedger } from './resolve-log.ts'
 import type { PrActState } from './types.ts'
 
 // Word boundaries: a check merely *containing* "kilo"/"gemini" (e.g.
@@ -274,6 +276,11 @@ export interface FetchPrActStateOpts {
    *  calls. Decision points (merge gates, post-merge re-probes) omit
    *  it — they act on the state, so it must be this fetch's own. */
   stateCache?: PrStateCache | null
+  /** The resolve ledger — the source of "this thread was resolved
+   *  before", which the reopened-thread cycle-guard needs. Null when the
+   *  caller has no ledger (no git dir): the guard then detects nothing
+   *  (fail-open). */
+  resolveLedger?: ResolveLedger | null
 }
 
 /** In-flight fetches by `repo#pr` + approval-probe inputs — same-process
@@ -382,7 +389,7 @@ async function fetchShared(
 async function fetchState(
   rev: ReviewFacade,
   target: PrTarget,
-  opts?: FetchPrActStateOpts
+  opts: FetchPrActStateOpts | undefined
 ): Promise<PrActState> {
   // The reads are independent — overlap them. Inside a hook sweep each
   // sync variant would serialize AND block the probe-timeout timers.
@@ -515,6 +522,17 @@ async function fetchState(
   // the reviews fetch — a flaky endpoint degraded to [] above.
   const fixRounds = Math.max(0, shas.length - 1)
 
+  // The cycle-guard's reopened-thread signal: a thread the resolve ledger
+  // says bro resolved before and that is open now. The ledger — not the
+  // state cache — is the source of "before": the cache TTL is 30s, so
+  // its entry is gone between polls (see reopened.ts).
+  const reopenedThreads = detectReopenedThreads(
+    opts?.resolveLedger ?? null,
+    target.repo,
+    target.pr,
+    threads
+  )
+
   // A docs-only PR churns reviewer threads on every push — the tighter
   // docsMaxRounds cap moves the tail to debt sooner. The file list is
   // only probed while threads are open: that's the cap's sole consumer,
@@ -538,6 +556,7 @@ async function fetchState(
     mergeState: meta.mergeState,
     openThreads: threads.filter((t) => !t.resolved).length,
     threads,
+    reopenedThreads,
     ciPending,
     ciFailing,
     reviewersPending,

@@ -2043,6 +2043,17 @@ async function classSpawn(
  *  cognitive-complexity cap. */
 async function blockedVerdict(ctx: Ctx, b: BlockedWork): Promise<PrVerdict> {
   const { pr, link, state, gate, occ, worktree, fixer, work } = b
+  if (gate.reopened_threads > 0) {
+    // A reopened thread was resolved and then commented on again — the
+    // earlier resolution was wrong. A fixer would re-resolve it and
+    // hide that, so the work parks for the user instead.
+    return {
+      pr,
+      link,
+      verdict: 'blocked',
+      detail: `${gate.reopened_threads} reopened thread(s) — resolved before, commented on again; the user confirms`,
+    }
+  }
   if (gate.open_threads > 0) {
     if (occ !== undefined) {
       return { pr, link, verdict: 'occupied', detail: occ }

@@ -283,6 +283,14 @@ function toThreads(discussions: GlDiscussion[], t: PrTarget, headSha?: string): 
         body: first.body ?? '',
         createdAt: first.created_at ?? '',
       },
+      comments: notes.map((n) => ({
+        author: n.author?.username ?? 'unknown',
+        bot: isBotName(n.author?.username ?? ''),
+        path: n.position?.new_path ?? n.position?.old_path ?? null,
+        line: n.position?.new_line ?? n.position?.old_line ?? null,
+        body: n.body ?? '',
+        createdAt: n.created_at ?? '',
+      })),
     })
   }
   return out

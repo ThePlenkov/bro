@@ -16,6 +16,11 @@ export interface GateSnapshot {
   /** 'BEHIND', 'CLEAN', … */
   mergeState: string
   openThreads: number
+  /** Threads that were resolved before and are open again — the act
+   *  loop's reopened-thread cycle-guard. A reopened thread must NOT be
+   *  auto-fixed: the earlier resolution was wrong and a blind
+   *  re-resolve hides that, so the member parks for the user. */
+  reopenedThreads: number
   /** The act loop's round counter (pushes since first review). */
   fixRounds: number
   /** Effective round cap — act.maxRounds, docs-tightened. */
@@ -73,12 +78,23 @@ function terminalAction(s: GateSnapshot): MemberAction | undefined {
 }
 
 /** Open threads preempt every other gate event while the member still
- *  has respawn budget — unless the act cap already mandates debt-defer. */
+ *  has respawn budget — unless the act cap already mandates debt-defer.
+ *
+ *  A REOPENED thread is the exception: it was resolved and then
+ *  commented on again, which means the earlier resolution was wrong. A
+ *  fixer would re-resolve it and hide that, so the member parks for
+ *  the user instead. */
 function threadsAction(
   s: GateSnapshot,
   m: MemberClock,
   fixRounds: number
 ): MemberAction | undefined {
+  if (s.reopenedThreads > 0) {
+    return {
+      kind: 'park',
+      why: `${s.reopenedThreads} reopened thread(s) — resolved before, commented on again; the user confirms`,
+    }
+  }
   const capHit = s.maxRounds > 0 && s.fixRounds > s.maxRounds
   return s.openThreads > 0 && !capHit && m.rounds < fixRounds
     ? { kind: 'fix' }

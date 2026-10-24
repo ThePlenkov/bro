@@ -3,6 +3,7 @@
  * ok=false carries named blockers so an agent loop can decide, not guess.
  */
 import type { ExitGate, PrActState } from './types.ts'
+import type { ReopenedThread } from './reopened.ts'
 
 /** Thread blocker text — the cap-hit variant mandates debt-defer, the
  *  plain one just counts. */
@@ -17,6 +18,12 @@ function threadsBlocker(state: PrActState): string {
     )
   }
   return `${state.openThreads} unresolved review thread(s)`
+}
+
+/** The reopened threads on a state — tolerant of a record written
+ *  by an older bro, which has no such field. */
+function reopenedThreadsOf(state: PrActState): ReopenedThread[] {
+  return state.reopenedThreads ?? []
 }
 
 export function evaluateExitGate(
@@ -41,6 +48,8 @@ export function evaluateExitGate(
     // advisory-check alerts are a report, not a gate — a silent reviewer
     // must surface everywhere the verdict does without ever blocking it
     alerts: state.alerts,
+    // reopened threads DO block — the count rides along for the report
+    reopened_threads: reopenedThreadsOf(state).length,
   }
   if (state.state !== 'OPEN') {
     return { ok: true, blockers: [], ...base }
@@ -68,6 +77,17 @@ export function evaluateExitGate(
   }
   if (state.sastUnknown > 0) {
     blockers.push(`${state.sastUnknown} SAST check(s) with unknown annotation status`)
+  }
+  // The reopened-thread cycle-guard: a thread that was resolved and then
+  // commented on again. The earlier resolution was wrong, and a blind
+  // re-resolve hides that — the user confirms instead.
+  const reopened = reopenedThreadsOf(state)
+  if (reopened.length > 0) {
+    for (const t of reopened) {
+      blockers.push(
+        `reopened thread ${t.id} — resolved before, commented on again by ${t.author}`
+      )
+    }
   }
   if (state.mergeable === 'CONFLICTING') {
     blockers.push('merge conflicts')
