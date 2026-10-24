@@ -2553,7 +2553,9 @@ function buildCtx(
 
 /** A third-party store whose capability getter throws reads as
  *  undeclared — the advisory must never abort the loop. */
-export function declaredClaimCapability(store: TaskStore): ClaimCapability | undefined {
+export function declaredClaimCapability(
+  store: Pick<TaskStore, 'claimCapability'>
+): ClaimCapability | undefined {
   try {
     return store.claimCapability?.()
   } catch {

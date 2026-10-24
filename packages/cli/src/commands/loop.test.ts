@@ -9,7 +9,6 @@ import {
   type ProviderEntry,
   type RoutingTable,
   type SpawnWorker,
-  type TaskStore,
 } from '@broject/core'
 import { DEFAULT_LOOP_CONFIG, type LoopConfig } from '@broject/loop'
 import { claimAuthorityNote, declaredClaimCapability, loopRefTails, loopWatch, resolveBeadsDir, resolveLoopLane } from './loop.ts'
@@ -398,11 +397,8 @@ describe('claimAuthorityNote', () => {
         throw new Error('broken connector')
       },
     }
-    assert.equal(declaredClaimCapability(store as TaskStore), undefined)
-    assert.match(
-      claimAuthorityNote('broken', declaredClaimCapability(store as TaskStore))!,
-      /unverified/
-    )
+    assert.equal(declaredClaimCapability(store), undefined)
+    assert.match(claimAuthorityNote('broken', declaredClaimCapability(store))!, /unverified/)
   })
 
   test('a best-effort viewer backend names the shared-identity caveat and the remedy', () => {
