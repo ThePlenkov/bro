@@ -63,6 +63,7 @@ one. For a live dev loop the plain local install still wins once:
 
 ```sh
 omp plugin install ./plugins/omp/bro           # symlinked — edits are live
+omp plugin uninstall bro                       # unlink the dev copy
 omp plugin install bro@theplenkov              # back to the marketplace copy
 ```
 
