@@ -54,7 +54,7 @@ verdict?: 'stopped' | 'still-running' | 'unverified'
 The ladder (one probe):
 
 | post-stop read | verdict |
-|---|---|
+| --- | --- |
 | `exited`, `stopped` | `stopped` (undefined on a terminal pre-read) |
 | `running`, `spawned` | `still-running` |
 | `lost`, `blocked` (no death record) | `unverified` |

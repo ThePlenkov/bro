@@ -1990,6 +1990,58 @@ const entryPidStart = (entry: AgentRegistryEntry): string | undefined =>
  *  descendant that outlives its wrapper is a documented blind spot
  *  (failing open would spin the whole kill-wait on EVERY stop and the
  *  `stopped` marker would never land). */
+/** One parsed row of /proc/<pid>/stat — post-comm fields split the way
+ *  procStat does (index 0 = state/field 3). */
+interface ProcEntry {
+  pid: number
+  state: string
+  ppid: number
+  pgrp: number
+  start: string
+}
+
+/** One shared scan of /proc for the group and tree probes — `null`
+ *  when /proc itself is unreadable; `unverified` marks at least one
+ *  non-ENOENT stat failure (a process we could not inspect). */
+function scanProc(): { entries: ProcEntry[]; unverified: boolean } | null {
+  let names: string[]
+  try {
+    names = readdirSync('/proc')
+  } catch {
+    return null
+  }
+  const entries: ProcEntry[] = []
+  let unverified = false
+  for (const name of names) {
+    const pid = Number(name)
+    if (!Number.isInteger(pid) || pid <= 0) {
+      continue
+    }
+    let stat: string
+    try {
+      stat = readFileSync(`/proc/${pid}/stat`, 'utf8')
+    } catch (e) {
+      // ENOENT/ENOTDIR is the process vanishing mid-scan — anything
+      // else (EACCES under hidepid, …) is a process we could not inspect
+      const code = (e as NodeJS.ErrnoException).code
+      if (code !== 'ENOENT' && code !== 'ENOTDIR') {
+        unverified = true
+      }
+      continue
+    }
+    const rest = stat.slice(stat.lastIndexOf(')') + 2).split(' ')
+    // rest: state, ppid, pgrp, … — the same split procStat uses
+    entries.push({
+      pid,
+      state: rest[0] ?? '',
+      ppid: Number(rest[1]),
+      pgrp: Number(rest[2]),
+      start: rest[19] ?? '',
+    })
+  }
+  return { entries, unverified }
+}
+
 function groupMemberAlive(pgid: number, minStart?: string): boolean {
   if (!Number.isInteger(pgid) || pgid <= 0) {
     return false
@@ -2001,41 +2053,23 @@ function groupMemberAlive(pgid: number, minStart?: string): boolean {
       return false
     }
   }
-  let names: string[]
-  try {
-    names = readdirSync('/proc')
-  } catch {
+  const scan = scanProc()
+  if (scan === null) {
     return process.platform === 'linux'
   }
-  const min = minStart === undefined ? undefined : Number(minStart)
-  for (const name of names) {
-    const pid = Number(name)
-    if (!Number.isInteger(pid) || pid <= 0) {
+  const min = minStart === undefined ? Number.NaN : Number(minStart)
+  for (const e of scan.entries) {
+    if (e.state === 'Z' || e.pgrp !== pgid) {
       continue
     }
-    let stat: string
-    try {
-      stat = readFileSync(`/proc/${pid}/stat`, 'utf8')
-    } catch (e) {
-      // ENOENT/ENOTDIR is the process vanishing mid-scan — skip it;
-      // anything else (EACCES under hidepid, …) is a member we cannot
-      // verify — fail open, never a false "the unit is dead"
-      if ((e as NodeJS.ErrnoException).code !== 'ENOENT' && (e as NodeJS.ErrnoException).code !== 'ENOTDIR') {
-        return true
-      }
-      continue
-    }
-    const rest = stat.slice(stat.lastIndexOf(')') + 2).split(' ')
-    // rest: state, ppid, pgrp, … — the same split procStat uses
-    if ((rest[0] ?? '') === 'Z' || Number(rest[2]) !== pgid) {
-      continue
-    }
-    const start = Number(rest[19])
-    if (min === undefined || !Number.isFinite(min) || !Number.isFinite(start) || start >= min) {
+    const start = Number(e.start)
+    if (!Number.isFinite(min) || !(start > 0) || start >= min) {
       return true
     }
   }
-  return false
+  // no confirmed member — but a process we could not inspect might be
+  // one: fail open, never a false "the unit is dead"
+  return scan.unverified
 }
 
 /** The wrapper's process-TREE snapshot — every descendant pid plus its
@@ -2047,36 +2081,21 @@ function groupMemberAlive(pgid: number, minStart?: string): boolean {
  *  pid+starttime identity is what keeps a recycled pid from faking
  *  death. Empty where /proc is absent (non-Linux). */
 function descendantsOf(root: number): Array<{ pid: number; start?: string }> {
-  let names: string[]
-  try {
-    names = readdirSync('/proc')
-  } catch {
+  const scan = scanProc()
+  if (scan === null) {
     return []
   }
   const children = new Map<number, number[]>()
   const starts = new Map<number, string>()
-  for (const name of names) {
-    const pid = Number(name)
-    if (!Number.isInteger(pid) || pid <= 0) {
-      continue
-    }
-    let stat: string
-    try {
-      stat = readFileSync(`/proc/${pid}/stat`, 'utf8')
-    } catch {
-      continue // vanished mid-scan
-    }
-    const rest = stat.slice(stat.lastIndexOf(')') + 2).split(' ')
-    const ppid = Number(rest[1])
-    const list = children.get(ppid)
+  for (const e of scan.entries) {
+    const list = children.get(e.ppid)
     if (list === undefined) {
-      children.set(ppid, [pid])
+      children.set(e.ppid, [e.pid])
     } else {
-      list.push(pid)
+      list.push(e.pid)
     }
-    const start = rest[19] ?? ''
-    if (start !== '') {
-      starts.set(pid, start)
+    if (e.start !== '') {
+      starts.set(e.pid, e.start)
     }
   }
   const out: Array<{ pid: number; start?: string }> = []
