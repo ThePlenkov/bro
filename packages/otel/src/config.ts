@@ -115,7 +115,7 @@ export const otelSection: ConfigSection<OtelConfig> = (raw) => {
       headers: isObj(exporter.headers)
         ? Object.fromEntries(
             Object.entries(exporter.headers).filter(
-              ([k, v]) => typeof k === 'string' && typeof v === 'string'
+              (e): e is [string, string] => typeof e[1] === 'string'
             )
           )
         : {},

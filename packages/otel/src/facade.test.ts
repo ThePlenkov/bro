@@ -5,7 +5,7 @@ import { execFileSync } from 'node:child_process'
 import { existsSync, readFileSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import type { AddressInfo } from 'node:net'
-import { collectFields, emitHook, hookRecord, otelSinkPath, readSinkRows } from './facade.ts'
+import { collectFields, emitHook, hookRecord, otelSinkPath, readSinkRows, type OtelHookRecord } from './facade.ts'
 import { otelSection } from './config.ts'
 import { tmpDir } from './testtmp.ts'
 
@@ -68,7 +68,7 @@ describe('hookRecord', () => {
 })
 
 describe('emitHook — file sink', () => {
-  function rowsOf(sink: string): { event?: string }[] {
+  function rowsOf(sink: string): OtelHookRecord[] {
     return readSinkRows(sink)
   }
 

@@ -234,7 +234,7 @@ export function readSinkRows(path: string): OtelHookRecord[] {
     try {
       const r: unknown = JSON.parse(line)
       if (isObj(r) && typeof r.event === 'string') {
-        rows.push(r as OtelHookRecord)
+        rows.push(r as unknown as OtelHookRecord)
       }
     } catch {
       // torn write — skip the row, keep the report

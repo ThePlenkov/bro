@@ -1,0 +1,7 @@
+interface:
+  display_name: "Bro Otel"
+  short_description: "Hook-first telemetry — every dispatched bro hook exports via emitHook to file/OTLP/stdout sinks"
+  brand_color: "#0E8A16"
+  default_prompt: "Use $otel to get started."
+policy:
+  allow_implicit_invocation: true
