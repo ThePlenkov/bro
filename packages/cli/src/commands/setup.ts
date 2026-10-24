@@ -98,41 +98,59 @@ function ensureLocalConfigExcluded(): void {
     )
     return
   }
-  try {
-    // both supported local extensions must be covered — a repo ignoring
-    // only the .json still leaves the .ts override trackable
-    for (const name of ['bro.config.local.json', 'bro.config.local.ts']) {
-      execFileSync('git', ['-C', root, 'check-ignore', '-q', name], { stdio: 'ignore' }) // NOSONAR — git PATH lookup is the contract
+  // The config lands in cwd — possibly a repo subdir a root-anchored
+  // .gitignore rule doesn't reach — so coverage is checked at the write
+  // location, and BOTH supported local extensions must be covered
+  // before the exclusion step is skipped.
+  const isIgnored = (name: string): boolean => {
+    try {
+      execFileSync('git', ['-C', process.cwd(), 'check-ignore', '-q', '--', name], { // NOSONAR — git PATH lookup is the contract
+        stdio: 'ignore',
+      })
+      return true
+    } catch {
+      return false
     }
-    return // already covered by .gitignore / info/exclude / global excludes
-  } catch {
-    /* a local name not ignored — exclude the pattern locally */
   }
+  const names = ['bro.config.local.json', 'bro.config.local.ts']
   try {
-    // --git-path answers relative to the -C dir: run it from the root so
-    // a relative result is root-relative. From a subdir cwd git would
-    // answer ../… and join(root, …) would land outside the repo.
-    const excludePath = git(['rev-parse', '--git-path', 'info/exclude'], root)
-    const path = isAbsolute(excludePath) ? excludePath : join(root, excludePath)
-    // The exclude file is DATA — the lock lives on a sibling path.
-    // withFileLock's contract is create-if-absent + stale-lock steal: a
-    // pre-existing exclude file at the lock path would be judged a dead
-    // hold, renamed aside and deleted, then rewritten as a lock token.
-    withFileLock(`${path}.lock`, () => {
-      const existing = existsSync(path) ? readFileSync(path, 'utf8') : ''
-      const entry = 'bro.config.local.*'
-      if (!existing.split('\n').includes(entry)) {
-        const nl = existing === '' || existing.endsWith('\n') ? '' : '\n'
-        // atomic write inside the lock — a truncated exclude would drop
-        // unrelated local rules, not just ours
-        const tmpPath = `${path}.tmp.${process.pid}`
-        writeFileSync(tmpPath, `${existing}${nl}${entry}\n`, 'utf8')
-        renameSync(tmpPath, path)
+    if (!names.every(isIgnored)) {
+      // --git-path answers relative to the -C dir: run it from the root so
+      // a relative result is root-relative. From a subdir cwd git would
+      // answer ../… and join(root, …) would land outside the repo.
+      const excludePath = git(['rev-parse', '--git-path', 'info/exclude'], root)
+      const path = isAbsolute(excludePath) ? excludePath : join(root, excludePath)
+      // The exclude file is DATA — the lock lives on a sibling path.
+      // withFileLock's contract is create-if-absent + stale-lock steal: a
+      // pre-existing exclude file at the lock path would be judged a dead
+      // hold, renamed aside and deleted, then rewritten as a lock token.
+      withFileLock(`${path}.lock`, () => {
+        const existing = existsSync(path) ? readFileSync(path, 'utf8') : ''
+        const entry = 'bro.config.local.*'
+        if (!existing.split('\n').includes(entry)) {
+          const nl = existing === '' || existing.endsWith('\n') ? '' : '\n'
+          // atomic write inside the lock — a truncated exclude would drop
+          // unrelated local rules, not just ours
+          const tmpPath = `${path}.tmp.${process.pid}`
+          writeFileSync(tmpPath, `${existing}${nl}${entry}\n`, 'utf8')
+          renameSync(tmpPath, path)
+        }
+      })
+      // .gitignore outranks info/exclude — a `!pattern` negation keeps the
+      // file trackable even after the write. Re-check at the write
+      // location instead of reporting "gitignored" on faith.
+      if (!names.every(isIgnored)) {
+        console.error(
+          'warning: bro.config.local.* still trackable — a .gitignore ' +
+            '"!pattern" negation overrides .git/info/exclude; fix the rule manually'
+        )
       }
-    })
+    }
     // Ignores never override the index — an already-tracked local config
-    // stays tracked and the exclusion is a no-op for it. Surface it;
-    // untracking is a staged change only the repo owner should make.
+    // stays tracked and any exclusion is a no-op for it. The check runs
+    // whether or not a rule covers the name: ignored-but-tracked is the
+    // silent case this warning exists for. Untracking is a staged change
+    // only the repo owner should make.
     const tracked = execFileSync('git', ['-C', root, 'ls-files', '--', 'bro.config.local.*'], { // NOSONAR — git PATH lookup is the contract
       encoding: 'utf8',
       stdio: ['ignore', 'pipe', 'ignore'],

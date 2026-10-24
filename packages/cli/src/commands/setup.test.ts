@@ -51,6 +51,21 @@ describe('readPackTree', () => {
 })
 
 describe('writeConfig', () => {
+  /** The exclusion guard's verdict travels on console.error — capture it
+   *  per call instead of asserting on process stderr. */
+  function capturingWarnings<T>(fn: () => T): { result: T; warnings: string[] } {
+    const warnings: string[] = []
+    const orig = console.error
+    console.error = (msg: unknown) => {
+      warnings.push(String(msg))
+    }
+    try {
+      return { result: fn(), warnings }
+    } finally {
+      console.error = orig
+    }
+  }
+
   /** The global layer must not leak the dev machine's real user config
    *  into the fixture — pin XDG to a dir that stays empty. */
   function withPinnedXdg<T>(dir: string, fn: () => T): T {
@@ -188,6 +203,64 @@ describe('writeConfig', () => {
         assert.ok(
           exclude.split('\n').includes('bro.config.local.*'),
           `partial coverage must not skip the pattern: ${exclude}`
+        )
+      })
+    )
+  })
+
+  test('a root-anchored .gitignore rule does not cover a subdir write location', () => {
+    // coverage is judged where the file lands — checking at the toplevel
+    // would see /bro.config.local.* as covered while the subdir write
+    // escapes every rule
+    const { root, main } = initRepo('bro-setup-wc-', (m) =>
+      writeFileSync(join(m, '.gitignore'), '/bro.config.local.*\n')
+    )
+    const sub = join(main, 'sub')
+    mkdirSync(sub, { recursive: true })
+    inside(sub, root, () =>
+      withPinnedXdg(main, () => {
+        writeConfig({ beads: false })
+        const exclude = readFileSync(join(main, '.git', 'info', 'exclude'), 'utf8')
+        assert.ok(
+          exclude.split('\n').includes('bro.config.local.*'),
+          `root-anchored coverage must not skip the pattern: ${exclude}`
+        )
+        git(['check-ignore', '-q', 'sub/bro.config.local.json'], main)
+      })
+    )
+  })
+
+  test('an ignored-but-tracked local config still warns — rules never cover the index', () => {
+    // the file is committed in the fixture seed; adding the ignore rule
+    // afterwards is exactly the ignored-but-tracked mix the early-return
+    // used to skip past without warning
+    const { root, main } = initRepo('bro-setup-wc-', (m) =>
+      writeFileSync(join(m, 'bro.config.local.json'), '{}\n')
+    )
+    inside(main, root, () =>
+      withPinnedXdg(main, () => {
+        writeFileSync(join(main, '.gitignore'), 'bro.config.local.*\n')
+        const { warnings } = capturingWarnings(() => writeConfig({ beads: false }))
+        assert.ok(
+          warnings.some((w) => w.includes('tracked files')),
+          `tracked-but-ignored must warn: ${warnings.join(' | ')}`
+        )
+      })
+    )
+  })
+
+  test('a .gitignore negation outranking info/exclude warns instead of claiming gitignored', () => {
+    const { root, main } = initRepo('bro-setup-wc-', (m) =>
+      writeFileSync(join(m, '.gitignore'), 'bro.config.local.*\n!bro.config.local.json\n')
+    )
+    inside(main, root, () =>
+      withPinnedXdg(main, () => {
+        const { warnings } = capturingWarnings(() => writeConfig({ beads: false }))
+        // the negation keeps the .json trackable — info/exclude can't
+        // fix precedence, so the guard re-checks and says so
+        assert.ok(
+          warnings.some((w) => w.includes('still trackable')),
+          `a negation override must warn: ${warnings.join(' | ')}`
         )
       })
     )
