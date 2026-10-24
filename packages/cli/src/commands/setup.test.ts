@@ -128,4 +128,68 @@ describe('writeConfig', () => {
       })
     )
   })
+
+  test('a pre-existing info/exclude survives — the lock never eats repo data', () => {
+    const { root, main } = initRepo('bro-setup-wc-')
+    inside(main, root, () =>
+      withPinnedXdg(main, () => {
+        const path = join(main, '.git', 'info', 'exclude')
+        writeFileSync(path, '.env.local\n*.pem\n')
+        writeConfig({ beads: false })
+        const after = readFileSync(path, 'utf8')
+        assert.ok(
+          after.includes('.env.local') && after.includes('*.pem'),
+          `existing exclude rules must survive the append: ${after}`
+        )
+        assert.ok(after.split('\n').includes('bro.config.local.*'))
+        // the lock is a sibling file — the exclude must never carry a
+        // lock token, and no capture/staging leftovers may linger
+        assert.ok(
+          !/\d+:[0-9a-f]{16}/.test(after),
+          `lock token leaked into the exclude file: ${after}`
+        )
+        assert.ok(!existsSync(`${path}.lock`))
+      })
+    )
+  })
+
+  test('run from a subdir — the exclude lands on the repo gitdir, nothing escapes', () => {
+    const { root, main } = initRepo('bro-setup-wc-')
+    const sub = join(main, 'sub')
+    mkdirSync(sub, { recursive: true })
+    inside(sub, root, () =>
+      withPinnedXdg(main, () => {
+        writeConfig({ beads: false })
+        const exclude = readFileSync(join(main, '.git', 'info', 'exclude'), 'utf8')
+        assert.ok(
+          exclude.split('\n').includes('bro.config.local.*'),
+          `exclude entry must land on the repo gitdir: ${exclude}`
+        )
+        // --git-path answers relative to its -C dir — the pre-fix code
+        // ran it from cwd and joined to the toplevel, so a ../ answer
+        // wrote an exclude file outside the repository
+        assert.ok(
+          !existsSync(join(root, '.git', 'info', 'exclude')),
+          'a stray exclude must not be created outside the repo'
+        )
+        git(['check-ignore', '-q', 'sub/bro.config.local.json'], main)
+      })
+    )
+  })
+
+  test('a repo ignoring only the .json still gains the pattern for the .ts override', () => {
+    const { root, main } = initRepo('bro-setup-wc-', (m) =>
+      writeFileSync(join(m, '.gitignore'), 'bro.config.local.json\n')
+    )
+    inside(main, root, () =>
+      withPinnedXdg(main, () => {
+        writeConfig({ beads: false })
+        const exclude = readFileSync(join(main, '.git', 'info', 'exclude'), 'utf8')
+        assert.ok(
+          exclude.split('\n').includes('bro.config.local.*'),
+          `partial coverage must not skip the pattern: ${exclude}`
+        )
+      })
+    )
+  })
 })

@@ -76,29 +76,49 @@ function readExistingConfig(path: string): Partial<BroConfig> | null {
  *  the pattern (.gitignore / global excludes) is left alone. Outside a
  *  worktree there is nothing to exclude from — quiet skip. */
 function ensureLocalConfigExcluded(): void {
-  const git = (args: string[]): string =>
-    execFileSync('git', ['-C', process.cwd(), ...args], { // NOSONAR — PATH lookup is the contract
+  const git = (args: string[], cwd = process.cwd()): string =>
+    execFileSync('git', ['-C', cwd, ...args], { // NOSONAR — PATH lookup is the contract
       encoding: 'utf8',
       stdio: ['ignore', 'pipe', 'pipe'],
     }).trim()
   let root: string
   try {
     root = git(['rev-parse', '--show-toplevel'])
-  } catch {
-    return // not a worktree (or no git) — nothing to exclude from
+  } catch (err) {
+    // Quiet skip only on a proven "not a worktree" (or missing git) — a
+    // transient git/perm failure warns instead, since a silently
+    // trackable local config is exactly what this guard prevents.
+    const e = err as NodeJS.ErrnoException & { stderr?: string }
+    if (e.code === 'ENOENT' || (e.stderr ?? '').includes('not a git repository')) {
+      return
+    }
+    console.error(
+      `warning: could not resolve git root — ` +
+        `${(e.stderr ?? '').trim() || e.message}; the local config may be trackable`
+    )
+    return
   }
   try {
-    execFileSync('git', ['-C', root, 'check-ignore', '-q', 'bro.config.local.json'], { // NOSONAR — git PATH lookup is the contract
-      stdio: 'ignore',
-    })
+    // both supported local extensions must be covered — a repo ignoring
+    // only the .json still leaves the .ts override trackable
+    for (const name of ['bro.config.local.json', 'bro.config.local.ts']) {
+      execFileSync('git', ['-C', root, 'check-ignore', '-q', name], { stdio: 'ignore' }) // NOSONAR — git PATH lookup is the contract
+    }
     return // already covered by .gitignore / info/exclude / global excludes
   } catch {
-    /* not ignored — exclude it locally */
+    /* a local name not ignored — exclude the pattern locally */
   }
   try {
-    const excludePath = git(['rev-parse', '--git-path', 'info/exclude'])
+    // --git-path answers relative to the -C dir: run it from the root so
+    // a relative result is root-relative. From a subdir cwd git would
+    // answer ../… and join(root, …) would land outside the repo.
+    const excludePath = git(['rev-parse', '--git-path', 'info/exclude'], root)
     const path = isAbsolute(excludePath) ? excludePath : join(root, excludePath)
-    withFileLock(path, () => {
+    // The exclude file is DATA — the lock lives on a sibling path.
+    // withFileLock's contract is create-if-absent + stale-lock steal: a
+    // pre-existing exclude file at the lock path would be judged a dead
+    // hold, renamed aside and deleted, then rewritten as a lock token.
+    withFileLock(`${path}.lock`, () => {
       const existing = existsSync(path) ? readFileSync(path, 'utf8') : ''
       const entry = 'bro.config.local.*'
       if (!existing.split('\n').includes(entry)) {
