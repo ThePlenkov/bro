@@ -2024,7 +2024,10 @@ function runPostMergeEvent(event: string | undefined): boolean {
   } catch {
     // fail-open
   }
-  if (event !== undefined) {
+  // telemetry on the dispatch, not the worker — `post-merge-run` is an
+  // internal spawn, not a hook event: its row would duplicate the
+  // `hook.post-merge` one and dodge the `post-merge` policy name.
+  if (event === 'post-merge') {
     emitHook(event, {}, { dir: process.cwd() })
   }
   return true

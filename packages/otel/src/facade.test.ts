@@ -232,17 +232,18 @@ describe('emitHook — stdout sink', () => {
 /** Throwaway OTLP collector — returns the captured request and the
  *  port the detached poster should hit. */
 async function otlpCollector(): Promise<{
-  got: { path?: string; body?: string }
+  got: { path?: string; body?: string; auth?: string }
   port: number
   close: () => void
 }> {
-  const got: { path?: string; body?: string } = {}
+  const got: { path?: string; body?: string; auth?: string } = {}
   const server: Server = createServer((req, res) => {
     let body = ''
     req.on('data', (c) => { body += c })
     req.on('end', () => {
       got.path = req.url
       got.body = body
+      got.auth = req.headers.authorization
       res.end()
     })
   })
@@ -254,23 +255,36 @@ async function otlpCollector(): Promise<{
   }
 }
 
+/** OTLP attributes [{key, value:{<type>:v}}] → a flat lookup map. */
+function flatAttrs(attributes: unknown): Record<string, unknown> {
+  const list = Array.isArray(attributes) ? attributes : []
+  return Object.fromEntries(
+    list.map((a: { key: string; value: Record<string, unknown> }) => [
+      a.key,
+      Object.values(a.value)[0],
+    ])
+  )
+}
+
 /** resourceLogs[0].scopeLogs[0].logRecords[0] → body + flattened attrs. */
 function firstLogRecord(body: string): {
   body: string | undefined
   attrs: Record<string, unknown>
 } {
-  const parsed = JSON.parse(body)
+  const parsed: {
+    resourceLogs?: {
+      scopeLogs?: {
+        logRecords?: {
+          body?: { stringValue?: string }
+          attributes?: unknown
+        }[]
+      }[]
+    }[]
+  } = JSON.parse(body)
   const rec = parsed.resourceLogs?.[0]?.scopeLogs?.[0]?.logRecords?.[0]
   return {
     body: rec?.body?.stringValue,
-    attrs: Object.fromEntries(
-      (rec?.attributes ?? []).map(
-        (a: { key: string; value: Record<string, unknown> }) => [
-          a.key,
-          Object.values(a.value)[0],
-        ]
-      )
-    ),
+    attrs: flatAttrs(rec?.attributes),
   }
 }
 
@@ -283,7 +297,11 @@ describe('emitHook — otlp sink', () => {
       JSON.stringify({
         otel: {
           enabled: true,
-          exporter: { type: 'otlp', endpoint: `http://127.0.0.1:${port}` },
+          exporter: {
+            type: 'otlp',
+            endpoint: `http://127.0.0.1:${port}`,
+            headers: { authorization: 'Bearer test-token' },
+          },
         },
       })
     )
@@ -299,6 +317,8 @@ describe('emitHook — otlp sink', () => {
       assert.equal(rec.body, 'bro.hook.session-start')
       assert.equal(rec.attrs['event.name'], 'hook.session-start')
       assert.equal(rec.attrs.session, 's')
+      // configured headers ride env → child → fetch (never argv)
+      assert.equal(got.auth, 'Bearer test-token')
     } finally {
       close()
     }

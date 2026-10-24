@@ -166,6 +166,7 @@ function writeSink(cfg: OtelConfig, record: OtelHookRecord, dir: string): void {
       // exit behind an in-flight fetch (same shape as exit-path spans).
       otelEvent(record.event, recordAttrs(record), {
         endpoint: cfg.exporter.endpoint === '' ? undefined : cfg.exporter.endpoint,
+        headers: cfg.exporter.headers,
         detached: true,
       })
       return
@@ -208,10 +209,11 @@ function anchorDir(meta: HookMeta): string {
 /** Every early gate — global kill switch, master switch, per-hook
  *  policy, sample roll — before any record work happens. */
 function shouldEmit(cfg: OtelConfig, policy: OtelHookPolicy): boolean {
-  if (process.env.BRO_TELEMETRY === '0' || !cfg.enabled || !policy.enabled) {
-    return false
-  }
-  return policy.sample >= 1 || randomInt(1_000_000) / 1_000_000 < policy.sample
+  if (process.env.BRO_TELEMETRY === '0') return false
+  if (!cfg.enabled) return false
+  if (!policy.enabled) return false
+  if (policy.sample >= 1) return true
+  return randomInt(1_000_000) / 1_000_000 < policy.sample
 }
 
 /** Emit one hook event through the telemetry pipeline. Never throws,

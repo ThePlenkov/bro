@@ -78,9 +78,13 @@ const resource = (): { attributes: { key: string; value: Record<string, unknown>
  *  storm. Emissions therefore queue here and ride out on ONE detached
  *  `node -e` child per drain: a dead endpoint can only cost the child,
  *  and the child is wall-clock bounded so it can't accumulate either.
- *  The optional third tuple slot is a per-item endpoint override — a
- *  configured exporter wins over the ambient env/file endpoint. */
-const emitQueue: Array<[path: string, body: unknown, endpoint?: string]> = [];
+ *  The optional trailing tuple slots carry a per-item endpoint
+ *  override (a configured exporter wins over the ambient env/file
+ *  endpoint) and per-item headers — both ride inside the emit env
+ *  payload, never argv, so auth tokens stay out of `ps`. */
+const emitQueue: Array<
+  [path: string, body: unknown, endpoint?: string, headers?: Record<string, string>]
+> = [];
 let flushTimer: NodeJS.Timeout | undefined;
 let exitArmed = false;
 
@@ -100,13 +104,13 @@ const EMIT_PAYLOAD_MAX = 96 * 1024;
 const EMIT_PAYLOAD_ENV = 'BRO_OTLP_EMIT';
 
 /** The emit child's script: `BRO_OTLP_EMIT` a JSON array of
- *  `[url, body]` — the parent resolves the endpoint per item at drain
- *  (override ?? ambient), so a mid-life env repoint still moves the
- *  ambient lane. POSTs each concurrently with a per-request abort,
- *  then force-exits — `process.exit` is what drops undici's pinned
- *  handles when an aborted connect refuses to clean up. The wall
- *  clock bounds even a fetch that never settles. */
-const EMIT_SCRIPT = `setTimeout(()=>process.exit(0),${CHILD_WALL_MS});Promise.allSettled(JSON.parse(process.env.${EMIT_PAYLOAD_ENV}??'[]').map(([u,b])=>fetch(u,{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify(b),signal:AbortSignal.timeout(${PER_REQUEST_MS})}))).then(()=>process.exit(0))`;
+ *  `[url, body, headers?]` — the parent resolves the endpoint per item
+ *  at drain (override ?? ambient), so a mid-life env repoint still
+ *  moves the ambient lane. POSTs each concurrently with a per-request
+ *  abort, then force-exits — `process.exit` is what drops undici's
+ *  pinned handles when an aborted connect refuses to clean up. The
+ *  wall clock bounds even a fetch that never settles. */
+const EMIT_SCRIPT = `setTimeout(()=>process.exit(0),${CHILD_WALL_MS});Promise.allSettled(JSON.parse(process.env.${EMIT_PAYLOAD_ENV}??'[]').map(([u,b,h])=>fetch(u,{method:'POST',headers:{'content-type':'application/json',...h},body:JSON.stringify(b),signal:AbortSignal.timeout(${PER_REQUEST_MS})}))).then(()=>process.exit(0))`;
 
 /** Drain the queue into env-chunked detached children. Never throws —
  *  a spawn failure loses the chunk it couldn't carry. */
@@ -139,12 +143,12 @@ function emit(): void {
     chunk = [];
     size = 2;
   };
-  for (const [p, b, e] of items) {
+  for (const [p, b, e, h] of items) {
     const base = e ?? ep;
     if (base === undefined) {
       continue; // no ambient endpoint and no per-item override — drop
     }
-    const s = JSON.stringify([`${base}${p}`, b]);
+    const s = JSON.stringify(h === undefined ? [`${base}${p}`, b] : [`${base}${p}`, b, h]);
     // the env-string ceiling is bytes — .length counts UTF-16 code
     // units and multibyte error text would undercount past E2BIG
     const n = Buffer.byteLength(s);
@@ -157,7 +161,12 @@ function emit(): void {
   ship();
 }
 
-function enqueue(path: string, body: unknown, endpoint?: string): void {
+function enqueue(
+  path: string,
+  body: unknown,
+  endpoint?: string,
+  headers?: Record<string, string>
+): void {
   // same boundary rule as emit() — an explicit override must not
   // bypass BRO_TELEMETRY=0, and dropping early keeps rows with no
   // resolvable endpoint from filling the queue.
@@ -167,7 +176,7 @@ function enqueue(path: string, body: unknown, endpoint?: string): void {
   if (endpoint === undefined && ENDPOINT() === undefined) {
     return;
   }
-  emitQueue.push([path, body, endpoint]);
+  emitQueue.push([path, body, endpoint, headers]);
   flushTimer ??= setTimeout(() => {
     flushTimer = undefined;
     emit();
@@ -181,23 +190,34 @@ function enqueue(path: string, body: unknown, endpoint?: string): void {
   }
 }
 
-function post(path: string, body: unknown, endpoint?: string): void {
-  enqueue(path, body, endpoint);
+function post(
+  path: string,
+  body: unknown,
+  endpoint?: string,
+  headers?: Record<string, string>
+): void {
+  enqueue(path, body, endpoint, headers);
 }
 
 /** Emit AFTER the caller is gone — a detached node child carries the
  *  payload out while the parent exits. For `process.on('exit')` spans:
  *  the loop is already closing, an in-flight fetch there never runs.
  *  Flushes the whole pending queue — the caller's last span rides with
- *  everything it outlived. */
-export function postDetached(path: string, body: unknown, endpoint?: string): void {
+ *  everything it outlived. `headers` ride inside the emit env payload,
+ *  never argv — auth tokens must not be readable in `ps`. */
+export function postDetached(
+  path: string,
+  body: unknown,
+  endpoint?: string,
+  headers?: Record<string, string>
+): void {
   if (process.env.BRO_TELEMETRY === '0') {
     return;
   }
   if (endpoint === undefined && ENDPOINT() === undefined) {
     return;
   }
-  emitQueue.push([path, body, endpoint]);
+  emitQueue.push([path, body, endpoint, headers]);
   emit();
 }
 
@@ -237,11 +257,13 @@ export function otelEndpoint(): string | undefined {
  *  `opts.endpoint` overrides env/file resolution (a configured exporter
  *  wins over ambient); `opts.detached` drains the queue immediately —
  *  the only shape that lands on a hook/exit path, where the timed
- *  flush would die with the process. */
+ *  flush would die with the process. `opts.headers` merges over the
+ *  content-type — configured auth headers for collectors that
+ *  require them. */
 export function otelEvent(
   name: string,
   a: Record<string, AttrValue> = {},
-  opts: { endpoint?: string; detached?: boolean } = {}
+  opts: { endpoint?: string; detached?: boolean; headers?: Record<string, string> } = {}
 ): void {
   journal(name, a);
   const body = {
@@ -264,9 +286,9 @@ export function otelEvent(
     ],
   };
   if (opts.detached === true) {
-    postDetached('/v1/logs', body, opts.endpoint);
+    postDetached('/v1/logs', body, opts.endpoint, opts.headers);
   } else {
-    post('/v1/logs', body, opts.endpoint);
+    post('/v1/logs', body, opts.endpoint, opts.headers);
   }
 }
 

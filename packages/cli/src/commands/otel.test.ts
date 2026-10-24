@@ -94,6 +94,25 @@ describe('bro otel on|off', () => {
     assert.match(r.err.join('\n'), /bro\.config\.local\.ts shadows/)
     assert.equal(existsSync(join(dir, 'bro.config.local.json')), false)
   })
+
+  test('malformed local config refuses — never silently overwritten', () => {
+    const dir = repo()
+    const path = join(dir, 'bro.config.local.json')
+    writeFileSync(path, '{ "providers": { "a": 1 }, broken,')
+    const r = capture(dir, ['on'])
+    assert.equal(r.exit, 2)
+    assert.match(r.err.join('\n'), /does not parse/)
+    // the malformed file is untouched — operator data survived
+    assert.equal(readFileSync(path, 'utf8'), '{ "providers": { "a": 1 }, broken,')
+  })
+
+  test('valid-JSON non-object local config refuses too', () => {
+    const dir = repo()
+    writeFileSync(join(dir, 'bro.config.local.json'), '[1,2,3]')
+    const r = capture(dir, ['off'])
+    assert.equal(r.exit, 2)
+    assert.equal(readFileSync(join(dir, 'bro.config.local.json'), 'utf8'), '[1,2,3]')
+  })
 })
 
 describe('bro otel status', () => {

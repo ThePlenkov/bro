@@ -11,7 +11,7 @@
  *                              (telemetry is operator config — the toggle
  *                              lands local, never the committed file)
  */
-import { existsSync, readFileSync, writeFileSync } from 'node:fs'
+import { existsSync, readFileSync, renameSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { EXIT, hasHelpFlag, printUsage, type ExitCode } from '@broject/core'
 import { otelEndpoint } from '@broject/providers'
@@ -55,7 +55,9 @@ Commands:
 
 /** Write otel.enabled into bro.config.local.json — create or merge,
  *  never clobber sibling keys. A .ts sibling shadows the json, so its
- *  presence refuses the write (same rule as `bro setup`). */
+ *  presence refuses the write (same rule as `bro setup`). An existing
+ *  file that does not parse is operator data — refuse rather than
+ *  overwrite it with only the toggle. */
 function cmdSetEnabled(dir: string, enabled: boolean): void {
   const tsPath = join(dir, 'bro.config.local.ts')
   if (existsSync(tsPath)) {
@@ -66,15 +68,25 @@ function cmdSetEnabled(dir: string, enabled: boolean): void {
   }
   const path = join(dir, 'bro.config.local.json')
   let cfg: Record<string, unknown> = {}
-  try {
-    const raw: unknown = JSON.parse(readFileSync(path, 'utf8'))
-    if (isObj(raw)) cfg = raw
-  } catch {
-    // absent or unreadable local config — start fresh
+  if (existsSync(path)) {
+    try {
+      const raw: unknown = JSON.parse(readFileSync(path, 'utf8'))
+      if (!isObj(raw)) throw new Error('top-level value is not an object')
+      cfg = raw
+    } catch (e) {
+      console.error(
+        `error: ${path} exists but does not parse — fix or remove it first (${e instanceof Error ? e.message : e})`
+      )
+      process.exit(EXIT.usage)
+    }
   }
   const section = isObj(cfg.otel) ? cfg.otel : {}
   cfg.otel = { ...section, enabled }
-  writeFileSync(path, `${JSON.stringify(cfg, null, 2)}\n`)
+  // temp + rename — a direct overwrite can leave a truncated file on a
+  // mid-write crash; operator config loses every sibling section.
+  const tmp = `${path}.tmp-${process.pid}`
+  writeFileSync(tmp, `${JSON.stringify(cfg, null, 2)}\n`)
+  renameSync(tmp, path)
   console.log(`otel.enabled=${enabled} → ${path}`)
 }
 

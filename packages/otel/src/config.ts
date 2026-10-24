@@ -103,7 +103,8 @@ function exporterConfig(raw: unknown): OtelExporterConfig {
   return {
     type,
     path: str(exporter.path),
-    endpoint: str(exporter.endpoint),
+    // trailing slashes would double the path join — `${ep}/v1/logs`
+    endpoint: str(exporter.endpoint).replace(/\/+$/, ''),
     headers: isObj(exporter.headers)
       ? Object.fromEntries(
           Object.entries(exporter.headers).filter(
@@ -122,7 +123,10 @@ export const otelSection: ConfigSection<OtelConfig> = (raw) => {
     enabled: obj.enabled === true,
     exporter: exporterConfig(obj.exporter),
     hooks: Object.fromEntries(
-      Object.entries(hooks).map(([name, v]) => [name, hookPolicy(v)])
+      Object.entries(hooks).map(([name, v]) => [
+        name === '*' ? name : hookEventName(name),
+        hookPolicy(v),
+      ])
     ),
   }
 }

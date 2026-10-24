@@ -33,6 +33,30 @@ describe('otelSection', () => {
     assert.deepEqual(cfg.exporter.headers, { a: '1' })
   })
 
+  test('endpoint trailing slashes strip — the transport joins `${ep}/v1/*`', () => {
+    assert.equal(
+      otelSection({ exporter: { endpoint: 'http://x:4318/' } }).exporter.endpoint,
+      'http://x:4318'
+    )
+    assert.equal(
+      otelSection({ exporter: { endpoint: 'http://x:4318///' } }).exporter.endpoint,
+      'http://x:4318'
+    )
+  })
+
+  test('hooks keys normalize through hookEventName — host spellings match the bro name', () => {
+    const cfg = otelSection({
+      hooks: { PostToolUse: false, ' SessionStart ': { collect: ['a'] }, '*': true },
+    })
+    assert.deepEqual(cfg.hooks['post-tool'], { enabled: false, sample: 1, collect: [] })
+    assert.deepEqual(cfg.hooks['session-start'], {
+      enabled: true,
+      sample: 1,
+      collect: ['a'],
+    })
+    assert.equal(cfg.hooks['PostToolUse'], undefined)
+  })
+
   test('hook policies: false / true / object', () => {
     const cfg = otelSection({
       hooks: {
