@@ -12,7 +12,7 @@ two hosts. It works, and it works *without* bro — but it re-derives, by hand,
 the abstractions bro already owns:
 
 | skills repo script | lines | bro equivalent |
-|---|---|---|
+| --- | --- | --- |
 | `lib/platform.ts` | 411 | the host connectors themselves (`packages/github`, `packages/gitlab`) |
 | `review-resolve.ts` | 89 | `ReviewFacade.resolveThread` |
 | `review-reply.ts` | 152 | `ReviewFacade.replyThread` |
