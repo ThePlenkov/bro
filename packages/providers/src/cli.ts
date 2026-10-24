@@ -1,10 +1,11 @@
 /**
  * The `cli` provider binding — a bare command template as a prose call
  * (spec: specs/bro-ribc.1.md §cli, milestone 6). The contract is
- * loop.agent's generalized: `{promptFile}` expands to the quoted path
- * of a temp file holding the prompt (appended as the last arg when the
- * template doesn't name it), the expanded line runs under `sh -c`, the
- * process exits, and stdout IS the answer — the consumer (the judge's
+ * loop.agent's generalized: `{promptFile}` expands to `"$1"` — the path
+ * of a temp file holding the prompt travels as a positional arg, never
+ * inside the command line (appended as the last arg when the template
+ * doesn't name it). The expanded line runs under `sh -c`, the process
+ * exits, and stdout IS the answer — the consumer (the judge's
  * proseDecide) prompt-and-parses it, so a cli answer is always
  * prose-grade. The spawn surface is the fleet connector's template
  * worker over the same entry.command — this file is the call surface.
@@ -32,29 +33,20 @@ class CliConfigError extends Error {
   override name = 'CliConfigError'
 }
 
-/** The loop.agent expansion contract — `{promptFile}` becomes the
- *  quoted path; no placeholder → the path appends, quoted, as the last
- *  arg. Kept local: expandAgentCmd lives in @broject/loop and the
- *  providers package must not grow a dep edge on the loop for seven
- *  lines of quoting.
- *
- *  The codeql[] suppressions below are the verdict inline: the command
- *  is an operator-authored template (config-owned, same trust as
- *  agents.*.command) and the path is a bro-minted mkdtemp file, quoted —
- *  the expansion IS the feature. */
-export function expandPromptFile(command: string, promptFile: string): string {
-  // ' → '\'' — the only character with meaning inside single quotes
-  // codeql[js/shell-command-constructed-from-input] — see doc comment
-  const esc = promptFile.replaceAll("'", String.raw`'\''`)
-  // codeql[js/shell-command-constructed-from-input] — see doc comment
-  const q = `'${esc}'`
+/** The loop.agent expansion contract — `{promptFile}` becomes `"$1"`;
+ *  no placeholder → `"$1"` appends as the last arg. The path itself rides
+ *  the positional arg `runTemplate` passes to `sh -c` — nothing derived
+ *  from the file's name is ever concatenated into the command line, so
+ *  no quoting is needed at all (the same "$1" positional exec the native
+ *  agent connector uses). Kept local: expandAgentCmd lives in
+ *  @broject/loop and the providers package must not grow a dep edge on
+ *  the loop for seven lines of expansion. */
+export function expandPromptFile(command: string): string {
   if (command.includes('{promptFile}')) {
-    // codeql[js/shell-command-constructed-from-input] — see doc comment
-    // fn replacer — a string replacement would expand $&/$' tokens in q
-    return command.replaceAll('{promptFile}', () => q)
+    // fn replacer — keeps the substitution literal whatever it becomes
+    return command.replaceAll('{promptFile}', () => '"$1"')
   }
-  // codeql[js/shell-command-constructed-from-input] — see doc comment
-  return `${command} ${q}`
+  return `${command} "$1"`
 }
 
 /** One `sh -c` round-trip under the caller's budget — an expired
@@ -62,7 +54,7 @@ export function expandPromptFile(command: string, promptFile: string): string {
  *  exit 127 names the config bug (the command isn't there); any other
  *  non-zero exit is availability — the command ran and failed, the
  *  stderr tail says why. */
-function runTemplate(by: string, command: string, deadline: number): Promise<string> {
+function runTemplate(by: string, command: string, promptFile: string, deadline: number): Promise<string> {
   return new Promise((resolve, reject) => {
     const left = remaining(deadline)
     if (left <= 0) {
@@ -70,9 +62,9 @@ function runTemplate(by: string, command: string, deadline: number): Promise<str
       return
     }
     // operator-configured provider command (same contract as
-    // loop.agent / agents.*.command everywhere: PATH lookup, sh -c)
-    // codeql[js/shell-command-constructed-from-input] — see expandPromptFile
-    const child = spawn('sh', ['-c', command], { stdio: ['ignore', 'pipe', 'pipe'] }) // NOSONAR — see expandPromptFile
+    // loop.agent / agents.*.command everywhere: PATH lookup, sh -c).
+    // `bro-cli` becomes $0; the prompt file is $1 — argv, not the line.
+    const child = spawn('sh', ['-c', command, 'bro-cli', promptFile], { stdio: ['ignore', 'pipe', 'pipe'] }) // NOSONAR — operator-authored command template; the prompt path rides argv
     const out: Buffer[] = []
     let tail = ''
     child.stdout?.on('data', (d: Buffer) => out.push(d))
@@ -129,7 +121,7 @@ export function cliChat(
     try {
       const promptFile = join(dir, 'prompt.md')
       writeFileSync(promptFile, prompt)
-      const content = await runTemplate(by, expandPromptFile(command, promptFile), deadline)
+      const content = await runTemplate(by, expandPromptFile(command), promptFile, deadline)
       return { content, model: reported }
     } finally {
       rmSync(dir, { recursive: true, force: true })

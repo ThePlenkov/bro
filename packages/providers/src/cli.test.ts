@@ -11,20 +11,17 @@ const ENTRY: CliEntry = { type: 'cli', command: 'cat {promptFile}', model: 'devi
 const DEADLINE = () => Date.now() + 10_000
 
 describe('expandPromptFile', () => {
-  test('{promptFile} expands to the quoted path', () => {
-    assert.equal(expandPromptFile('devin -p --prompt-file {promptFile} -x', '/tmp/p.md'), "devin -p --prompt-file '/tmp/p.md' -x")
+  test('{promptFile} expands to the "$1" positional — the path never enters the line', () => {
+    assert.equal(expandPromptFile('devin -p --prompt-file {promptFile} -x'), 'devin -p --prompt-file "$1" -x')
   })
 
-  test('no placeholder appends the quoted path as the last arg', () => {
-    assert.equal(expandPromptFile('my-agent run', '/tmp/p.md'), "my-agent run '/tmp/p.md'")
+  test('no placeholder appends "$1" as the last arg', () => {
+    assert.equal(expandPromptFile('my-agent run'), 'my-agent run "$1"')
   })
 
-  test('a quote in the path escapes shell-style', () => {
-    assert.equal(expandPromptFile('cat {promptFile}', "/tmp/it's.md"), "cat '/tmp/it'\\''s.md'")
-  })
-
-  test('$ tokens in the path substitute literally, not as replaceAll patterns', () => {
-    assert.equal(expandPromptFile('cat {promptFile}', '/tmp/$&-$`.md'), "cat '/tmp/$&-$`.md'")
+  test('the expansion is a fixed token — no path characters reach the command line', () => {
+    // whatever the mkdtemp path holds, the command line only ever sees "$1"
+    assert.equal(expandPromptFile('cat {promptFile}'), 'cat "$1"')
   })
 })
 
