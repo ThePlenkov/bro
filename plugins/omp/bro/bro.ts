@@ -388,11 +388,6 @@ const HIGHLIGHTED = {
 	section: false,
 	item: false
 };
-/** Empty string = plain; footer always mutes. */
-function colorRole(kind, current) {
-	if (kind === "footer") return "muted";
-	return HIGHLIGHTED[kind] || current ? "accent" : "";
-}
 const READY_SHOWN = 8;
 const SILENT_MS = 6e4;
 /** One in-progress bead's row. */
@@ -516,13 +511,6 @@ function checkoutSections(s) {
 	});
 	return sections;
 }
-/** The always-visible summary — the widget's own words (boardLines),
-*  so panel header and widget line never drift apart. */
-function summaryOf(s, pending) {
-	if (s === null) return "bro · no board";
-	const attention = s.watch?.attention ?? 0;
-	return `${boardLines(s)[0]}${attention > 0 ? ` · ⚠ ${attention} attention` : ""}${pending ? " · refreshing…" : ""}`;
-}
 const FOOTER = " ↑↓/jk move · ←→/enter collapse · r refresh · q close";
 /** Bytes that continue an escape sequence after its ESC. */
 const SEQUENCE_LEADS = {
@@ -581,8 +569,8 @@ var BoardPanelImpl = class {
 		this.options = options;
 		const moveUp = () => this.move(-1);
 		const moveDown = () => this.move(1);
-		const collapse = () => this.setUnderCursor(true);
-		const expand = () => this.setUnderCursor(false);
+		const collapse = () => this.collapseUnderCursor();
+		const expand = () => this.expandUnderCursor();
 		const toggle = () => this.toggleUnderCursor();
 		const refresh = () => this.refresh();
 		const close = () => this.close();
@@ -603,6 +591,14 @@ var BoardPanelImpl = class {
 			["\x1B", close]
 		]);
 	}
+	/** The always-visible summary — the widget's own words (boardLines),
+	*  so panel header and widget line never drift apart; the refresh
+	*  state is the panel's own. */
+	summaryOf(s) {
+		if (s === null) return "bro · no board";
+		const attention = s.watch?.attention ?? 0;
+		return `${boardLines(s)[0]}${attention > 0 ? ` · ⚠ ${attention} attention` : ""}${this.pending ? " · refreshing…" : ""}`;
+	}
 	/** Flatten visible sections into cursor rows; the footer is never a
 	*  cursor target. */
 	rows(sections) {
@@ -620,10 +616,6 @@ var BoardPanelImpl = class {
 		rows.push({ kind: "footer" });
 		return rows;
 	}
-	color(role, text) {
-		const theme = this.options.theme;
-		return theme ? theme.fg(role, text) : text;
-	}
 	render(width) {
 		if (!this.dirty && width === this.lastWidth) return this.cached;
 		const board = this.options.host.snapshot();
@@ -640,44 +632,44 @@ var BoardPanelImpl = class {
 			const current = i === this.cursor && row.kind !== "footer";
 			const mark = current ? "›" : " ";
 			let text;
-			if (row.kind === "header") text = `${mark} ${summaryOf(board, this.pending)}`;
+			if (row.kind === "header") text = `${mark} ${this.summaryOf(board)}`;
 			else if (row.kind === "footer") text = FOOTER;
-			else text = this.rowBody(row, sections, itemCounts, mark);
-			lines.push(this.renderLine(text, width, colorRole(row.kind, current)));
+			else text = `${mark} ${this.rowBody(row, sections, itemCounts)}`;
+			lines.push(this.renderLine(row, text, width, current));
 		}
 		this.cached = lines;
 		this.lastWidth = width;
 		this.dirty = false;
 		return this.cached;
 	}
-	/** Clip, sanitize, and apply the row's color role — extracted so
-	*  render's loop stays inside the cyclomatic ceiling. */
-	renderLine(text, width, role) {
+	/** Clip, sanitize, and color one line: header/footer keep their
+	*  color, the cursor highlights, everything else stays plain. */
+	renderLine(row, text, width, current) {
 		const line = clip(sanitizeTerminalText(text), width);
-		return role === "" ? line : this.color(role, line);
+		const role = row.kind === "footer" ? "muted" : HIGHLIGHTED[row.kind] || current ? "accent" : "";
+		const theme = this.options.theme;
+		return role === "" || theme === void 0 ? line : theme.fg(role, line);
 	}
-	/** The section-arrow or item-body line — extracted so render's loop
-	*  stays inside the cognitive-complexity ceiling. */
-	rowBody(row, sections, itemCounts, mark) {
+	/** The section-arrow or item-body payload — the cursor mark and its
+	*  space are the caller's prefix; extracted so render's loop stays
+	*  inside the cognitive-complexity ceiling. */
+	rowBody(row, sections, itemCounts) {
 		const sec = sections.find((x) => x.id === row.section);
-		if (row.kind === "section") return `${mark} ${sec !== void 0 && this.collapsed.has(sec.id) ? "▸" : "▾"} ${sec?.title ?? ""}`;
+		if (row.kind === "section") return `${sec !== void 0 && this.collapsed.has(sec.id) ? "▸" : "▾"} ${sec?.title ?? ""}`;
 		const id = row.section ?? "";
 		const n = itemCounts.get(id) ?? 0;
 		itemCounts.set(id, n + 1);
-		return `${mark}   ${sec?.rows[n] ?? ""}`;
+		return `  ${sec?.rows[n] ?? ""}`;
 	}
 	handleInput(data) {
 		for (const key of splitKeys(data)) {
 			if (this.closed) return;
-			this.dispatch(key);
+			if (this.options.keybindings?.matches(key, "app.interrupt")) {
+				this.close();
+				return;
+			}
+			this.actions.get(key)?.();
 		}
-	}
-	dispatch(data) {
-		if (this.options.keybindings?.matches(data, "app.interrupt")) {
-			this.close();
-			return;
-		}
-		this.actions.get(data)?.();
 	}
 	move(delta) {
 		const rows = this.rows(buildSections(this.options.host.snapshot()));
@@ -696,9 +688,13 @@ var BoardPanelImpl = class {
 		else this.collapsed.delete(sectionId);
 		this.dirty = true;
 	}
-	/** ←/h and →/l — collapse/expand the section under the cursor. */
-	setUnderCursor(collapsed) {
-		this.setCollapsed(this.currentSection(), collapsed);
+	/** ←/h — collapse the section under the cursor. */
+	collapseUnderCursor() {
+		this.setCollapsed(this.currentSection(), true);
+	}
+	/** →/l — expand the section under the cursor. */
+	expandUnderCursor() {
+		this.setCollapsed(this.currentSection(), false);
 	}
 	toggleUnderCursor() {
 		const id = this.currentSection();

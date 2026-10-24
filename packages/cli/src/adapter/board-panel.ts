@@ -79,14 +79,6 @@ const HIGHLIGHTED: Record<RowKind, boolean> = {
   item: false,
 }
 
-/** Empty string = plain; footer always mutes. */
-function colorRole(kind: RowKind, current: boolean): string {
-  if (kind === 'footer') {
-    return 'muted'
-  }
-  return HIGHLIGHTED[kind] || current ? 'accent' : ''
-}
-
 /** One collapsible group of board rows. */
 interface Section {
   id: string
@@ -248,19 +240,6 @@ function checkoutSections(s: BoardStatus): Section[] {
   return sections
 }
 
-/** The always-visible summary — the widget's own words (boardLines),
- *  so panel header and widget line never drift apart. */
-function summaryOf(s: BoardStatus | null, pending: boolean): string {
-  if (s === null) {
-    return 'bro · no board'
-  }
-  const attention = s.watch?.attention ?? 0
-  const base = boardLines(s)[0]
-  const attentionSuffix = attention > 0 ? ` · ⚠ ${attention} attention` : ''
-  const pendingSuffix = pending ? ' · refreshing…' : ''
-  return `${base}${attentionSuffix}${pendingSuffix}`
-}
-
 const FOOTER = ' ↑↓/jk move · ←→/enter collapse · r refresh · q close'
 
 /** Bytes that continue an escape sequence after its ESC. */
@@ -327,8 +306,8 @@ class BoardPanelImpl implements BoardPanelComponent {
   constructor(private readonly options: BoardPanelOptions) {
     const moveUp = (): void => this.move(-1)
     const moveDown = (): void => this.move(1)
-    const collapse = (): void => this.setUnderCursor(true)
-    const expand = (): void => this.setUnderCursor(false)
+    const collapse = (): void => this.collapseUnderCursor()
+    const expand = (): void => this.expandUnderCursor()
     const toggle = (): void => this.toggleUnderCursor()
     const refresh = (): void => this.refresh()
     const close = (): void => this.close()
@@ -350,6 +329,20 @@ class BoardPanelImpl implements BoardPanelComponent {
     ])
   }
 
+  /** The always-visible summary — the widget's own words (boardLines),
+   *  so panel header and widget line never drift apart; the refresh
+   *  state is the panel's own. */
+  private summaryOf(s: BoardStatus | null): string {
+    if (s === null) {
+      return 'bro · no board'
+    }
+    const attention = s.watch?.attention ?? 0
+    const base = boardLines(s)[0]
+    const attentionSuffix = attention > 0 ? ` · ⚠ ${attention} attention` : ''
+    const pendingSuffix = this.pending ? ' · refreshing…' : ''
+    return `${base}${attentionSuffix}${pendingSuffix}`
+  }
+
   /** Flatten visible sections into cursor rows; the footer is never a
    *  cursor target. */
   private rows(sections: Section[]): Row[] {
@@ -364,11 +357,6 @@ class BoardPanelImpl implements BoardPanelComponent {
     }
     rows.push({ kind: 'footer' })
     return rows
-  }
-
-  private color(role: string, text: string): string {
-    const theme = this.options.theme
-    return theme ? theme.fg(role, text) : text
   }
 
   render(width: number): readonly string[] {
@@ -391,16 +379,16 @@ class BoardPanelImpl implements BoardPanelComponent {
       const mark = current ? '›' : ' '
       let text: string
       if (row.kind === 'header') {
-        text = `${mark} ${summaryOf(board, this.pending)}`
+        text = `${mark} ${this.summaryOf(board)}`
       } else if (row.kind === 'footer') {
         text = FOOTER
       } else {
-        text = this.rowBody(row, sections, itemCounts, mark)
+        text = `${mark} ${this.rowBody(row, sections, itemCounts)}`
       }
       // strip board text first — escape sequences would drive the
       // terminal and would also spend the width budget — then clip
       // before coloring: clip() is length-based and ANSI-blind
-      lines.push(this.renderLine(text, width, colorRole(row.kind, current)))
+      lines.push(this.renderLine(row, text, width, current))
     }
     this.cached = lines
     this.lastWidth = width
@@ -408,30 +396,28 @@ class BoardPanelImpl implements BoardPanelComponent {
     return this.cached
   }
 
-  /** Clip, sanitize, and apply the row's color role — extracted so
-   *  render's loop stays inside the cyclomatic ceiling. */
-  private renderLine(text: string, width: number, role: string): string {
+  /** Clip, sanitize, and color one line: header/footer keep their
+   *  color, the cursor highlights, everything else stays plain. */
+  private renderLine(row: Row, text: string, width: number, current: boolean): string {
     const line = clip(sanitizeTerminalText(text), width)
-    return role === '' ? line : this.color(role, line)
+    const role = row.kind === 'footer' ? 'muted' : HIGHLIGHTED[row.kind] || current ? 'accent' : ''
+    const theme = this.options.theme
+    return role === '' || theme === undefined ? line : theme.fg(role, line)
   }
 
-  /** The section-arrow or item-body line — extracted so render's loop
-   *  stays inside the cognitive-complexity ceiling. */
-  private rowBody(
-    row: Row,
-    sections: Section[],
-    itemCounts: Map<string, number>,
-    mark: string
-  ): string {
+  /** The section-arrow or item-body payload — the cursor mark and its
+   *  space are the caller's prefix; extracted so render's loop stays
+   *  inside the cognitive-complexity ceiling. */
+  private rowBody(row: Row, sections: Section[], itemCounts: Map<string, number>): string {
     const sec = sections.find((x) => x.id === row.section)
     if (row.kind === 'section') {
       const arrow = sec !== undefined && this.collapsed.has(sec.id) ? '▸' : '▾'
-      return `${mark} ${arrow} ${sec?.title ?? ''}`
+      return `${arrow} ${sec?.title ?? ''}`
     }
     const id = row.section ?? ''
     const n = itemCounts.get(id) ?? 0
     itemCounts.set(id, n + 1)
-    return `${mark}   ${sec?.rows[n] ?? ''}`
+    return `  ${sec?.rows[n] ?? ''}`
   }
 
   handleInput(data: string): void {
@@ -439,16 +425,12 @@ class BoardPanelImpl implements BoardPanelComponent {
       if (this.closed) {
         return
       }
-      this.dispatch(key)
+      if (this.options.keybindings?.matches(key, 'app.interrupt')) {
+        this.close()
+        return
+      }
+      this.actions.get(key)?.()
     }
-  }
-
-  private dispatch(data: string): void {
-    if (this.options.keybindings?.matches(data, 'app.interrupt')) {
-      this.close()
-      return
-    }
-    this.actions.get(data)?.()
   }
 
   private move(delta: number): void {
@@ -476,9 +458,14 @@ class BoardPanelImpl implements BoardPanelComponent {
     this.dirty = true
   }
 
-  /** ←/h and →/l — collapse/expand the section under the cursor. */
-  private setUnderCursor(collapsed: boolean): void {
-    this.setCollapsed(this.currentSection(), collapsed)
+  /** ←/h — collapse the section under the cursor. */
+  private collapseUnderCursor(): void {
+    this.setCollapsed(this.currentSection(), true)
+  }
+
+  /** →/l — expand the section under the cursor. */
+  private expandUnderCursor(): void {
+    this.setCollapsed(this.currentSection(), false)
   }
 
   private toggleUnderCursor(): void {
