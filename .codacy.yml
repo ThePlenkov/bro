@@ -32,4 +32,3 @@ exclude_paths:
   # (packages/cli/src/session-planes/devin.ts) unflagged: the file
   # MOVED into the devin package, it is not new code.
   - 'packages/devin/src/plane.ts'
->>>>>>> origin/main

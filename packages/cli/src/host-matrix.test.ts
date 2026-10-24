@@ -32,9 +32,12 @@ interface HookCommand {
 }
 
 /** The manifest entry is a hook command when it shells out to
- *  `run.sh <broEvent>` — the launcher's argv is the wiring. */
+ *  `run.sh <broEvent>` — the launcher's argv is the wiring. A literal
+ *  substring check, not a RegExp — the event list is closed and a
+ *  non-literal pattern is what SAST flags. */
 function wiredTo(entry: HookCommand, broEvent: BroHookEvent): boolean {
-  return new RegExp(`run\\.sh" ${broEvent}(?:\\s|$)`).test(entry.command ?? '')
+  const after = entry.command?.split('run.sh" ').slice(1) ?? []
+  return after.some((rest) => rest === broEvent || rest.startsWith(`${broEvent} `))
 }
 
 /** Read a host manifest into { nativeEvent: [{command, matcher}] }.
