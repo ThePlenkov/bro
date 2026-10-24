@@ -37,9 +37,11 @@
  * `permission` plane answers approve/ask — neither maps to a block.
  * When the guard plane lands (bro guard spec) it slots in here.
  *
- * `/bro <args>` is a thin passthrough — `bro act|next|fleet|drill`
- * reachable without leaving the editor. The `bro_status` tool hands the
- * model the same board JSON the widget renders.
+ * Bare `/bro` mounts the interactive board panel (a plain refresh
+ * where no UI can mount); `/bro <args>` is a thin passthrough — `bro
+ * act|next|fleet|drill` reachable without leaving the editor. The
+ * `bro_status` tool hands the model the same board JSON the widget
+ * renders.
  *
  * Fail-open is the whole contract: the CLI resolves lazily (sibling
  * dist → checkout walk-up → PATH probe → npx pin), every spawn is async,

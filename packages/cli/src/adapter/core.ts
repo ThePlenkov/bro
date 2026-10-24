@@ -50,19 +50,63 @@ export interface Command {
 }
 
 /** Minimal structural read of `bro status --json` — fields the widget
- *  renders; everything else passes through unread. */
+ *  and the interactive board panel render; everything else passes
+ *  through unread. */
 export interface BoardStatus {
+  dir?: string
   branch?: string
   dirty?: number
+  worktrees?: Array<{
+    name?: string
+    path?: string
+    main?: boolean
+    branch?: string
+    state?: string
+  }>
   beads?: {
-    inProgress?: Array<{ id?: string; title?: string }>
+    inProgress?: Array<{
+      id?: string
+      title?: string
+      priority?: string | number
+      issue_type?: string
+      assignee?: string
+    }>
+    ready?: Array<{
+      id?: string
+      title?: string
+      priority?: string | number
+      issue_type?: string
+    }>
     readyTotal?: number
   }
   fleet?: {
     maxConcurrent?: number
-    agents?: Array<{ id?: string; backend?: string; state?: string; step?: string }>
+    agents?: Array<{
+      id?: string
+      backend?: string
+      state?: string
+      step?: string
+      cause?: string
+      pid?: number
+      worktree?: string
+      provider?: string
+    }>
+  }
+  loop?: {
+    stallMin?: number
+    runs?: Array<{
+      beadId?: string
+      slug?: string
+      pid?: number
+      state?: string
+      startedAt?: string
+      worktree?: string
+      log?: string
+      silentMs?: number
+    }>
   }
   drill?: { frame?: { id?: string; title?: string; depth?: number } | null }
+  watch?: { ts?: string; ageMs?: number; attention?: number }
 }
 
 /** How long a normal hook probe may take. */

@@ -22,7 +22,8 @@ The host hook (`getArgumentCompletions`) is synchronous — there is no
  *    position 3+                   null — flags are not guessed
  *
  *  An empty token at position 1 stays null so bare `/bro ` keeps
- *  submitting (board refresh) instead of accepting the first verb —
+ *  submitting (the command itself — the board panel in a TUI) instead
+ *  of accepting the first verb —
  *  the same rule omp's builtin optional subcommands follow. At
  *  position 2 an empty token opens the member list: the discovery
  *  moment is exactly why the dropdown exists.
@@ -230,7 +231,7 @@ function pick(entries: ReadonlyArray<Entry>, token: string, head: string | undef
 }
 
 /** Position 1 — groups and flat verbs. An empty token stays null so
- *  bare `/bro ` keeps submitting the board refresh. */
+ *  bare `/bro ` keeps submitting the command (the board panel). */
 function firstPosition(token: string): BroCompletion[] | null {
   if (token.length === 0) return null
   return [...pick(GROUPS, token, undefined), ...pick(VERBS, token, undefined)]
@@ -251,7 +252,7 @@ function secondPosition(head: string, token: string): BroCompletion[] | null {
 /**
  * `/bro` argument completion. Returns the items for the current
  * argument prefix, or null when there is nothing honest to offer:
- * an empty first token (bare submit stays a board refresh), a quoted
+ * an empty first token (bare submit stays the command), a quoted
  * token (never shred quotes), a flag (flags are not guessed), an
  * unknown head, or anything past position 2.
  */
