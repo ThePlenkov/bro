@@ -245,7 +245,7 @@ export interface BroHostApi<Ctx = unknown> {
       signal: AbortSignal | undefined,
       onUpdate: unknown,
       ctx: Ctx
-    ): Promise<{ content: Array<{ type: 'text'; text: string }> }>
+    ): Promise<{ content: Array<{ type: 'text'; text: string }>; details: unknown }>
   }): void
   sendMessage(
     message: { customType: string; content: string; display: boolean; details?: unknown },
@@ -609,6 +609,7 @@ export function createBroDriver<Ctx>(host: BroHostBinding<Ctx>, api: BroHostApi<
             text: result.code === 0 ? result.stdout : 'bro status unavailable',
           },
         ],
+        details: undefined,
       }
     },
   })

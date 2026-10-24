@@ -1323,3 +1323,196 @@ describe('hooks e2e — run.sh fast path (bro-arm83)', () => {
     })
   })
 })
+
+/** Native-payload conformance (spec bro-l8c4f.8): the fixtures below are
+ *  shaped like the payloads each host actually sends — field names and
+ *  event names from the upstream docs, and NO artificial `success`
+ *  where the host doesn't send one. The contract under test is the
+ *  normalization edge: a documented success event must arm, a failure
+ *  event must journal without arming, and a host that cannot observe
+ *  outcomes (Codex) must still arm while journaling no `ok`. */
+describe('hooks e2e — native payload conformance (bro-l8c4f.8)', () => {
+  const tracePath = (f: Fixture, sessionId: string): string =>
+    join(f.markerDir, 'trace', `${sessionId}.jsonl`)
+  const traceRows = (f: Fixture, sessionId: string): Record<string, unknown>[] =>
+    readFileSync(tracePath(f, sessionId), 'utf8')
+      .trim()
+      .split('\n')
+      .map((l) => JSON.parse(l) as Record<string, unknown>)
+
+  /** Claude's documented PostToolUse — fires only after a call
+   *  succeeds; tool_response is tool-specific and carries no success
+   *  boolean. */
+  const claudePostTool = (extra: Record<string, unknown> = {}) => ({
+    session_id: 's1',
+    transcript_path: '/tmp/transcript.jsonl',
+    cwd: '',
+    permission_mode: 'default',
+    hook_event_name: 'PostToolUse',
+    tool_name: 'Bash',
+    tool_input: { command: 'git push -u origin feat/x', description: 'Push branch' },
+    tool_response: { stdout: 'Everything up-to-date', stderr: '', interrupted: false },
+    tool_use_id: 'toolu_01',
+    duration_ms: 12,
+    ...extra,
+  })
+
+  test('claude PostToolUse without a success field still arms and journals ok', () => {
+    const f = hookFixture()
+    inside(f.main, f.root, () => {
+      const r = hook(f, 'post-tool', claudePostTool({ cwd: f.main }))
+      assert.equal(r.code, 0)
+      assert.equal(markerExists(f, 's1', 'act'), true, 'a documented success event must arm')
+      const rows = traceRows(f, 's1')
+      assert.equal(rows.length, 1)
+      assert.equal(rows[0]!.ok, true)
+      assert.equal(rows[0]!.command, 'git push -u origin feat/x')
+    })
+  })
+
+  test('claude PostToolUseFailure journals ok:false, drains the mailbox, never arms', () => {
+    const f = hookFixture()
+    inside(f.main, f.root, () => {
+      const notify = join(f.markerDir, '..', 'notify')
+      mkdirSync(notify, { recursive: true })
+      writeFileSync(join(notify, 'note-1-x.txt'), 'watcher: convoy landed')
+      const r = hook(f, 'post-tool', {
+        session_id: 's1',
+        transcript_path: '/tmp/t.jsonl',
+        cwd: f.main,
+        hook_event_name: 'PostToolUseFailure',
+        tool_name: 'Bash',
+        tool_input: { command: 'gh pr create --fill', description: 'Create PR' },
+        tool_use_id: 'toolu_02',
+        error: 'Exit code 1\ngh: must be on a branch',
+        is_interrupt: false,
+        duration_ms: 4187,
+      })
+      assert.equal(r.code, 0)
+      assert.equal(markerExists(f, 's1', 'act'), false, 'a failure event must not arm')
+      assert.match(r.stdout, /watcher: convoy landed/, 'the failure event is still a delivery tick')
+      // Claude validates hookSpecificOutput.hookEventName against the
+      // firing event — a PostToolUseFailure trigger must get its own
+      // name back, not 'PostToolUse'
+      const out = JSON.parse(r.stdout.trim().split('\n').at(-1)!) as {
+        hookSpecificOutput?: { hookEventName?: string }
+      }
+      assert.equal(out.hookSpecificOutput?.hookEventName, 'PostToolUseFailure')
+      const rows = traceRows(f, 's1')
+      assert.equal(rows.length, 1)
+      assert.equal(rows[0]!.ok, false)
+      assert.equal(rows[0]!.command, 'gh pr create --fill')
+    })
+  })
+
+  test('codex PostToolUse arms on fire and honestly records no outcome', () => {
+    const f = hookFixture()
+    inside(f.main, f.root, () => {
+      // Codex's PostToolUse fires on non-zero exits too and there is no
+      // failure event — turn_id is the codex-specific field; the arm is
+      // the documented over-approximation (the gate re-verifies), and
+      // the journal must not invent an `ok`
+      const r = hook(f, 'post-tool', {
+        session_id: 's1',
+        turn_id: 'turn-1',
+        cwd: f.main,
+        permission_mode: 'default',
+        hook_event_name: 'PostToolUse',
+        tool_name: 'Bash',
+        tool_input: { command: 'git push' },
+        tool_response: 'Everything up-to-date',
+        tool_use_id: 'x',
+      })
+      assert.equal(r.code, 0)
+      assert.equal(markerExists(f, 's1', 'act'), true, 'codex must still arm — the gate re-verifies')
+      const rows = traceRows(f, 's1')
+      assert.equal(rows.length, 1)
+      assert.equal('ok' in rows[0]!, false, 'codex outcome is unobservable — no ok field')
+    })
+  })
+
+  test('devin PostToolUse with success:false journals ok:false and does not arm', () => {
+    const f = hookFixture()
+    inside(f.main, f.root, () => {
+      const r = hook(f, 'post-tool', {
+        session_id: 's1',
+        hook_event_name: 'PostToolUse',
+        tool_name: 'exec',
+        tool_input: { command: 'git push' },
+        tool_response: { success: false, output: 'rejected', error: 'exit 1' },
+      })
+      assert.equal(r.code, 0)
+      assert.equal(markerExists(f, 's1', 'act'), false)
+      const rows = traceRows(f, 's1')
+      assert.equal(rows[0]!.ok, false)
+      assert.equal(rows[0]!.tool, 'exec')
+    })
+  })
+
+  test('an edit payload journals paths, never a command, and never arms', () => {
+    const f = hookFixture()
+    inside(f.main, f.root, () => {
+      // the pi/omp lineage shape — what host.ts emits from a native
+      // tool_result: synthesized success, tool-scoped input fields
+      const r = hook(f, 'post-tool', {
+        session_id: 's1',
+        tool_name: 'edit',
+        tool_input: { file_path: join(f.main, 'src/x.ts'), old_string: 'a', new_string: 'b' },
+        tool_response: { success: true },
+      })
+      assert.equal(r.code, 0)
+      const rows = traceRows(f, 's1')
+      assert.equal(rows.length, 1)
+      assert.equal(rows[0]!.tool, 'edit')
+      assert.deepEqual(rows[0]!.paths, [join(f.main, 'src/x.ts')])
+      assert.equal('command' in rows[0]!, false, 'an edit must not read as a shell command')
+      assert.equal(markerExists(f, 's1', 'act'), false, 'edits do not arm command aspects')
+    })
+  })
+
+  test('claude Stop blocks an armed session once, then stop_hook_active fails open', () => {
+    const f = hookFixture()
+    inside(f.main, f.root, () => {
+      const wt = linked(f, true)
+      arm(f, 's1', 'work')
+      const first = hook(f, 'stop', {
+        session_id: 's1',
+        hook_event_name: 'Stop',
+        stop_hook_active: false,
+        last_assistant_message: 'done',
+      }, wt)
+      assert.equal(first.code, 0)
+      assert.match(first.stdout, BLOCK)
+      // the host re-fires with stop_hook_active — the second stop must
+      // pass: gates, not loops
+      const again = hook(f, 'stop', {
+        session_id: 's1',
+        hook_event_name: 'Stop',
+        stop_hook_active: true,
+        last_assistant_message: 'still done',
+      }, wt)
+      assert.equal(again.code, 0)
+      assert.equal(again.stdout.trim(), '')
+    })
+  })
+
+  test('a SubagentStop-shaped payload is tolerated, never a session stall', () => {
+    const f = hookFixture()
+    inside(f.main, f.root, () => {
+      // SubagentStop is deliberately unwired on claude — but the shape
+      // must fail open if it ever arrives: stop_hook_active honored,
+      // exit 0, no decision block on an already-continued event
+      const r = hook(f, 'stop', {
+        session_id: 's1',
+        hook_event_name: 'SubagentStop',
+        stop_hook_active: true,
+        agent_id: 'a-1',
+        agent_type: 'worker',
+        agent_transcript_path: '/tmp/sub.jsonl',
+        last_assistant_message: 'subtask done',
+      })
+      assert.equal(r.code, 0)
+      assert.doesNotMatch(r.stdout, BLOCK)
+    })
+  })
+})

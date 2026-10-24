@@ -124,6 +124,7 @@ import {
   isCursorHookPayload,
   toCursorHookOutput,
 } from '../cursor-hook.ts'
+import { deriveToolSuccess } from '../host-matrix.ts'
 
 interface HookInput {
   tool_name?: unknown
@@ -138,6 +139,10 @@ interface HookInput {
     files?: unknown
   }
   tool_response?: { success?: unknown }
+  /** The firing event verbatim — Claude requires emitted
+   *  `hookSpecificOutput.hookEventName` to match it (PostToolUse and
+   *  PostToolUseFailure reach the same bro event). */
+  hook_event_name?: unknown
   prompt?: unknown
   stop_hook_active?: unknown
   session_id?: unknown
@@ -1429,6 +1434,41 @@ async function emitPromptContext(input: HookInput): Promise<void> {
   context('UserPromptSubmit', text)
 }
 
+/** Arm the session aspects a command implies, plus the once-per-session
+ *  governing-skill citation for mutating bro subcommands (bro-d8s). */
+function armPostTool(cmd: string, sessionId: string): string[] {
+  const aspects = classifyArmCommands(cmd)
+  if (sessionId) {
+    for (const aspect of aspects) {
+      armSession(sessionId, aspect, armDetail(cmd, aspect))
+    }
+  }
+  const mutation = classifySkillMutation(cmd)
+  if (mutation && sessionId && !skillHinted(sessionId, mutation.skill)) {
+    markSkillHinted(sessionId, mutation.skill)
+    return [
+      `bro ${mutation.plugin} mutations are governed by the ${mutation.skill} skill ` +
+        `— read skills/${mutation.skill}/SKILL.md before continuing`,
+    ]
+  }
+  return []
+}
+
+/** World-state nudges are statements of fact — emitPostTool reads them
+ *  only where the host proved the call succeeded. */
+function execNudges(cmd: string): string[] {
+  switch (classifyExecCommand(cmd)) {
+    case 'pr-merge':
+      return ['PR merged — sweep review debt with `bro debt collect`; queue: `bro debt prs`']
+    case 'pr-create':
+      return [
+        'PR created — `bro act status` is the review gate; `bro act threads` lists open threads',
+      ]
+    default:
+      return []
+  }
+}
+
 async function emitPostTool(input: HookInput): Promise<void> {
   const sessionId = typeof input.session_id === 'string' ? input.session_id : ''
   const lines: string[] = []
@@ -1439,35 +1479,18 @@ async function emitPostTool(input: HookInput): Promise<void> {
   // collector can lose spans, never stall the hook (spec:
   // specs/telemetry/bro-huy5o.11.md)
   maybeSpawnTraceFlush(process.cwd())
-  if (input.tool_response?.success === true) {
-    const cmd = typeof input.tool_input?.command === 'string' ? input.tool_input.command : ''
-    const aspects = classifyArmCommands(cmd)
-    if (sessionId) {
-      for (const aspect of aspects) {
-        armSession(sessionId, aspect, armDetail(cmd, aspect))
-      }
-    }
-    // a mutating bro subcommand cites its governing skill once per session —
-    // the SKILL.md never loads on a bare CLI call (bro-d8s)
-    const mutation = classifySkillMutation(cmd)
-    if (mutation && sessionId && !skillHinted(sessionId, mutation.skill)) {
-      markSkillHinted(sessionId, mutation.skill)
-      lines.push(
-        `bro ${mutation.plugin} mutations are governed by the ${mutation.skill} skill ` +
-          `— read skills/${mutation.skill}/SKILL.md before continuing`
-      )
-    }
-    switch (classifyExecCommand(cmd)) {
-      case 'pr-merge':
-        lines.push('PR merged — sweep review debt with `bro debt collect`; queue: `bro debt prs`')
-        break
-      case 'pr-create':
-        lines.push(
-          'PR created — `bro act status` is the review gate; `bro act threads` lists open threads'
-        )
-        break
-      default:
-    }
+  const outcome = input.tool_response?.success
+  const cmd = typeof input.tool_input?.command === 'string' ? input.tool_input.command : ''
+  // arming is a "probe live state once" hint the stop gate re-verifies,
+  // not a verdict — so it fires on every outcome except a proven
+  // failure. A host that cannot observe outcomes (Codex PostToolUse
+  // fires on non-zero exits) over-approximates: a false arm costs one
+  // probe that finds nothing, a missed arm loses the gate entirely.
+  if (outcome !== false) {
+    lines.push(...armPostTool(cmd, sessionId))
+  }
+  if (outcome === true) {
+    lines.push(...execNudges(cmd))
   }
   // connector postTool probes run on every event — a failed exec is
   // still a delivery tick for a drained mailbox (notify). Guards read
@@ -1484,7 +1507,12 @@ async function emitPostTool(input: HookInput): Promise<void> {
   ])
   lines.push(...postLines, ...guards)
   if (lines.length > 0) {
-    context('PostToolUse', lines.join('\n'))
+    // Claude validates hookEventName against the triggering event — a
+    // PostToolUseFailure trigger needs its own name back, not
+    // 'PostToolUse'. Hosts without the field get the default.
+    const eventName =
+      typeof input.hook_event_name === 'string' ? input.hook_event_name : 'PostToolUse'
+    context(eventName, lines.join('\n'))
   }
 }
 
@@ -1499,6 +1527,11 @@ const GATE_PRIORITY = ['drill', 'work', 'act', 'task']
 
 async function emitStopGate(input: HookInput): Promise<void> {
   const sessionId = typeof input.session_id === 'string' ? input.session_id : ''
+  // as in emitPostTool — the emitted event name must match the firing
+  // one; Stop is the only wired trigger today, but SubagentStop arrives
+  // on the same bro event wherever a host wires it
+  const eventName =
+    typeof input.hook_event_name === 'string' ? input.hook_event_name : 'Stop'
   // session tail — the last post-tool lines only ship if a flush fires
   // here; a stop's spawn is the same detached, throttled respawn
   maybeSpawnTraceFlush(process.cwd())
@@ -1517,17 +1550,21 @@ async function emitStopGate(input: HookInput): Promise<void> {
   if (input.stop_hook_active === true) {
     const goal = await goalP
     if (goal.length > 0) {
-      context('Stop', goal.join('\n'))
+      context(eventName, goal.join('\n'))
     }
     return
   }
-  await emitStopGateBody(sessionId, goalP)
+  await emitStopGateBody(sessionId, goalP, eventName)
 }
 
 /** The armed-gate half of the stop event — split from emitStopGate so
  *  the goal preamble's branches don't push the gate over the complexity
  *  budget (SAST counts them together otherwise). */
-async function emitStopGateBody(sessionId: string, goalP: Promise<string[]>): Promise<void> {
+async function emitStopGateBody(
+  sessionId: string,
+  goalP: Promise<string[]>,
+  eventName: string
+): Promise<void> {
   const armed = sessionId ? readArmed(sessionId) : new Set<string>()
   // Block priority is aspect order, not registry order — a beads gate
   // (registry-first) must not shadow a dirty-worktree block: abandoning
@@ -1575,7 +1612,7 @@ async function emitStopGateBody(sessionId: string, goalP: Promise<string[]>): Pr
   // a nudge, never a `decision: block` (spec: bro-nkn6)
   hints.push(...guards)
   if (hints.length > 0) {
-    context('Stop', hints.join('\n'))
+    context(eventName, hints.join('\n'))
   }
 }
 
@@ -1945,6 +1982,24 @@ function runPostMergeEvent(event: string | undefined): boolean {
   return true
 }
 
+/** Write the host-derived outcome into `tool_response.success` for the
+ *  post-tool event — no-op on other events, on cursor payloads (the
+ *  translator already decided), and when the payload proves nothing. */
+function normalizeToolOutcome(event: string, input: HookInput, raw: unknown): HookInput {
+  if (event !== 'post-tool' || cursorClient) {
+    return input
+  }
+  const success = deriveToolSuccess(raw)
+  if (success === undefined) {
+    return input
+  }
+  const response =
+    typeof input.tool_response === 'object' && input.tool_response !== null
+      ? input.tool_response
+      : {}
+  return { ...input, tool_response: { ...response, success } }
+}
+
 export async function runHooksCommand(argv: string[]): Promise<void> {
   cursorClient = false
   codexClient = false
@@ -2000,7 +2055,11 @@ export async function runHooksCommand(argv: string[]): Promise<void> {
     !Array.isArray(raw) &&
     typeof (raw as { turn_id?: unknown }).turn_id === 'string'
   const root = hookProjectDir(raw)
-  const input = cursorClient ? cursorToHookInput(raw) : asHookInput(raw)
+  let input = cursorClient ? cursorToHookInput(raw) : asHookInput(raw)
+  // the post-tool outcome normalizes at this edge — hosts encode
+  // success differently (a boolean field, split event names, or not at
+  // all), and policy below must not know which host sent the payload
+  input = normalizeToolOutcome(event, input, raw)
   // BRO_HOOKS=0 marks a machine-backend tree — the acp provider pins it
   // on the agent it spawns (spec bro-ddksm): session hooks rehydrate and
   // gate for a human session that isn't there, so every event is pure
