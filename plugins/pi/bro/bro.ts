@@ -766,10 +766,11 @@ function binding(pi) {
         const outcome = event.outcome;
         return outcome === 'aborted' || outcome === 'error';
       },
-      paint(ctx, lines, crumb) {
+      paint(ctx, lines, _crumb) {
         try {
-          ctx.ui.setWidget(BOARD_KEY, lines, { placement: 'aboveEditor' });
-          ctx.ui.setStatus(BOARD_KEY, crumb);
+          const one = lines.length > 0 ? [lines[0]] : void 0;
+          ctx.ui.setWidget(BOARD_KEY, one, { placement: 'aboveEditor' });
+          ctx.ui.setStatus(BOARD_KEY, void 0);
         } catch {}
       },
     }),
