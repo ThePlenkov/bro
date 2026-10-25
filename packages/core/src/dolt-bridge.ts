@@ -430,7 +430,7 @@ export interface DoltHeadHealth {
  *  a `missing` list. */
 export function manifestTables(text: string): string[] {
   const f = text.trim().split(':')
-  if (f[f.length - 1] === '') {
+  if (f.at(-1) === '') {
     f.pop() // tolerate a stray trailing ':' — not the real form
   }
   if (f[0] !== '5' || f[1] !== '__DOLT__' || f.length < 5 || (f.length - 5) % 2 !== 0) {
