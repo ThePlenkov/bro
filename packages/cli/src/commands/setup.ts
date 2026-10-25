@@ -408,15 +408,11 @@ function setupLockedSkills(dir: string, dryRun: boolean, checkOnly: boolean): vo
         // spawnSync, not execFileSync: `npx` is a PATH lookup and the PATH
         // contract is the same one gh/bd/git already have (doctor.ts probes
         // npx the same way).
-        const p = spawnSync(
-          'npx',
-          ['--yes', 'skills', 'add', skill.source, '--skill', skill.name, '-y'],
-          { // NOSONAR — PATH lookup is the contract (same as gh/bd/git)
-            cwd: dir,
-            stdio: 'pipe',
-            timeout: 300_000,
-          }
-        )
+        const p = spawnSync('npx', ['--yes', 'skills', 'add', skill.source, '--skill', skill.name, '-y'], { // NOSONAR — PATH lookup is the contract (same as gh/bd/git)
+          cwd: dir,
+          stdio: 'pipe',
+          timeout: 300_000,
+        })
         if (p.error !== undefined || p.status !== 0) {
           throw new Error(`npx skills add exited ${p.status ?? 'with error'}`)
         }
