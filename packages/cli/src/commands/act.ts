@@ -133,7 +133,10 @@ function resolvePr(rev: ReviewFacade, argv: string[]): PrTarget {
     // resolve too, so state must be checked explicitly.
     const pr = rev.currentPr()
     if (!pr || pr.state !== 'OPEN') {
-      console.error('error: no open PR for current branch — pass a PR number')
+      console.error(
+        'error: no open PR for current branch — pass a PR number' +
+          ' (`bro act status <PR>`), or run `bro watch` for the gated-PR board'
+      )
       process.exit(2)
     }
     return { repo, pr: pr.pr }
