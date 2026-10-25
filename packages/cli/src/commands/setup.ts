@@ -16,7 +16,7 @@ import { basename, dirname, isAbsolute, join } from 'node:path'
 import { createRequire } from 'node:module'
 import { fileURLToPath } from 'node:url'
 import { execFileSync, spawnSync } from 'node:child_process'
-import { checkSkillLock, initBeadsStealth, PERSONALITIES, hasHelpFlag, printUsage, readSkillLock, withFileLock, type BroConfig } from '@broject/core'
+import { checkSkillLock, initBeadsStealth, PERSONALITIES, hasHelpFlag, printUsage, readSkillLock, withFileLock, type BroConfig, type SkillDrift } from '@broject/core'
 import { loadBroConfig } from '../plugins.ts'
 import {
   cliVersion,
@@ -402,24 +402,7 @@ function setupLockedSkills(dir: string, dryRun: boolean, checkOnly: boolean): vo
       return
     }
     for (const skill of locked.values()) {
-      // `npx skills add` owns the fetch, the symlink and the lockfile
-      // update; bro only decides what to ask for.
-      try {
-        // spawnSync, not execFileSync: `npx` is a PATH lookup and the PATH
-        // contract is the same one gh/bd/git already have (doctor.ts probes
-        // npx the same way).
-        const p = spawnSync('npx', ['--yes', 'skills', 'add', skill.source, '--skill', skill.name, '-y'], { // NOSONAR — PATH lookup is the contract (same as gh/bd/git)
-          cwd: dir,
-          stdio: 'pipe',
-          timeout: 300_000,
-        })
-        if (p.error !== undefined || p.status !== 0) {
-          throw new Error(`npx skills add exited ${p.status ?? 'with error'}`)
-        }
-      } catch {
-        // one unreachable upstream does not stop the rest
-        console.error(`  ${skill.name}: could not fetch from ${skill.source}`)
-      }
+      installLockedSkill(dir, skill.source, skill.name)
     }
   }
 
@@ -427,9 +410,37 @@ function setupLockedSkills(dir: string, dryRun: boolean, checkOnly: boolean): vo
   // just wrote are the ones to check against — the copy read before the
   // install is stale by definition. Re-read it.
   const current = checkOnly || dryRun ? locked : readSkillLock(dir)
-  const drift = checkSkillLock(current, skillsDir)
+  reportSkillDrift(checkSkillLock(current, skillsDir), current.size)
+}
+
+/**
+ * Install one locked skill. `npx skills add` owns the fetch, the symlink
+ * and the lockfile update; bro only decides what to ask for. A failure here
+ * is reported and the rest continue — one unreachable upstream must not
+ * stop the others.
+ */
+function installLockedSkill(dir: string, source: string, name: string): void {
+  try {
+    // spawnSync, not execFileSync: `npx` is a PATH lookup and the PATH
+    // contract is the same one gh/bd/git already have (doctor.ts probes
+    // npx the same way).
+    const p = spawnSync('npx', ['--yes', 'skills', 'add', source, '--skill', name, '-y'], { // NOSONAR — PATH lookup is the contract (same as gh/bd/git)
+      cwd: dir,
+      stdio: 'pipe',
+      timeout: 300_000,
+    })
+    if (p.error !== undefined || p.status !== 0) {
+      throw new Error(`npx skills add exited ${p.status ?? 'with error'}`)
+    }
+  } catch {
+    console.error(`  ${name}: could not fetch from ${source}`)
+  }
+}
+
+/** Report the drift between the installed skills and the lock. */
+function reportSkillDrift(drift: SkillDrift[], lockedCount: number): void {
   if (drift.length === 0) {
-    console.error(`  ${current.size} locked skill(s) match the lock`)
+    console.error(`  ${lockedCount} locked skill(s) match the lock`)
     return
   }
   for (const d of drift) {
