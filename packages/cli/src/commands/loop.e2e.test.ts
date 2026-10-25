@@ -530,6 +530,81 @@ describe('bro loop e2e', () => {
     });
   });
 
+  test('worker exits rate_limited with a provider reset → waits the reset, respawns the same order (bro-36bhc)', () => {
+    // the incident shape: a worker dying on a provider rate wall is a
+    // WAIT, never a verdict — the loop holds the claim until the reset
+    // and respawns the same work order (convoy's blockedDecision), it
+    // does not reopen the bead and spawn the NEXT claim into the wall
+    const f = loopFixture([{ ...FAKE_BEAD, id: 'fx-a', title: 'walled' }], {}, 'wall')
+    inside(f.main, f.root, () => {
+      const r = f.run()
+      assert.match(r.stdout, /rate_limited/)
+      assert.match(r.stdout, /loop: fx-a landed/)
+      assert.match(r.stdout, /1 landed, 0 closed, 0 parked, 0 failed/)
+      assertLandedBead(f.db, 'fx-a')
+      const evs = (readHostState(f.hostState).events ?? []) as Array<Record<string, unknown>>
+      // one wall death, one post-reset respawn — a third spawn would
+      // mean the loop churned a session into the wall
+      assert.equal(evs.filter((e) => e.wallSpawn === 'fx-a').length, 1)
+      assert.equal(evs.filter((e) => e.spawn === 'fx-a').length, 1)
+      assert.equal(
+        spawns(f).trim().split('\n').filter(Boolean).length,
+        2
+      )
+    })
+  })
+
+  test('a member waiting on a wall holds pushes — the next claim spawns after the reset (bro-36bhc)', () => {
+    // a wall wait is an ACCOUNT fact: claiming the next bead while a
+    // member waits burns that bead's spawn on the same wall — the six
+    // consecutive deaths of the incident. fx-b's worker must not start
+    // until fx-a's reset passed.
+    const f = loopFixture(
+      [
+        { ...FAKE_BEAD, id: 'fx-a', title: 'walled', priority: 1 },
+        { ...FAKE_BEAD, id: 'fx-b', title: 'queued', priority: 2 },
+      ],
+      {},
+      'wall'
+    )
+    inside(f.main, f.root, () => {
+      const r = f.run()
+      assert.match(r.stdout, /rate wall/)
+      assert.match(r.stdout, /2 landed, 0 closed, 0 parked, 0 failed/)
+      const evs = (readHostState(f.hostState).events ?? []) as Array<Record<string, unknown>>
+      const death = evs.find((e) => e.wallSpawn === 'fx-a')
+      const fxbSpawn = evs.find((e) => e.spawn === 'fx-b')
+      assert.ok(death !== undefined, 'fx-a never hit the wall')
+      assert.ok(fxbSpawn !== undefined, 'fx-b never spawned')
+      // fx-b never died on the wall itself — and the timing proves
+      // why: its worker started only after fx-a's reset passed
+      assert.equal(evs.filter((e) => e.wallSpawn === 'fx-b').length, 0)
+      assert.ok(
+        (fxbSpawn.at as number) >= Date.parse(death.resetAt as string),
+        `fx-b spawned at ${String(fxbSpawn.at)} inside the wall (reset ${String(death.resetAt)})`
+      )
+    })
+  })
+
+  test('worker exits quota with no reset → parked, never churned (bro-36bhc)', () => {
+    // the wall with no advertised end — the claim snoozes with the
+    // cause named; reopening is the respawn-burn the park exists to kill
+    const f = loopFixture([{ ...FAKE_BEAD, id: 'fx-a', title: 'walled' }], {}, 'quota')
+    inside(f.main, f.root, () => {
+      const r = f.run()
+      assert.match(r.stdout, /1 parked/)
+      // one spawn, then the park — no reopen, no respawn into the wall
+      assert.equal(
+        spawns(f).trim().split('\n').filter(Boolean).length,
+        1
+      )
+      const row = bead(f.db, 'fx-a')
+      assert.equal(row?.status, 'deferred')
+      assert.match(String(row?.notes), /quota/)
+      assert.equal(existsSync(f.worktree), true)
+    })
+  })
+
   test('agent verdict: bd close without a PR → closed, never reopened', () => {
     const f = loopFixture([{ ...FAKE_BEAD, id: 'fx-a', title: 'nothing to ship' }], {}, 'verdict');
     inside(f.main, f.root, () => {

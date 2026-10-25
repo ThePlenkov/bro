@@ -18,9 +18,11 @@ import {
   loopWatch,
   resolveBeadsDir,
   resolveLoopLane,
+  wallWaitUntil,
 } from './loop.ts';
 import type { AgentConnectorEnv } from '../agent-connectors.ts';
 import { bdStoreBlocker, git, initRepo, inside } from './testrepo.ts';
+
 
 // --- resolveLoopLane — the provider-registry vs raw-template pick -------------
 
@@ -326,6 +328,41 @@ describe('resolveLoopLane — fleet.routing per-bead class (bro-zmned)', () => {
     assert.equal(lane.model, 'dev-2');
   });
 });
+
+// --- wallWaitUntil — the wall settle's wait clock (spec bro-36bhc) -------------
+
+describe('wallWaitUntil — the provider wall wait (bro-36bhc)', () => {
+  const now = Date.parse('2026-10-20T12:00:00Z')
+
+  test('a rate_limited death with a future reset waits the provider clock', () => {
+    assert.equal(
+      wallWaitUntil('rate_limited', '2026-10-20T12:15:00Z', now),
+      Date.parse('2026-10-20T12:15:00Z')
+    )
+  })
+
+  test('a stale reset still waits — on a floor that escalates per wall death, capped', () => {
+    const stale = '2026-10-20T11:59:00Z'
+    assert.equal(wallWaitUntil('rate_limited', stale, now), now + 30_000)
+    assert.equal(wallWaitUntil('rate_limited', stale, now, 2), now + 60_000)
+    assert.equal(wallWaitUntil('rate_limited', stale, now, 3), now + 120_000)
+    // a provider lying about its reset every time can never spin the
+    // loop back into the respawn-burn — the floor saturates at 15m
+    assert.equal(wallWaitUntil('rate_limited', stale, now, 20), now + 15 * 60_000)
+  })
+
+  test('non-waitable causes and unusable resets are never a wait', () => {
+    // quota/auth park — they are walls with no honest clock; a
+    // rate_limited death whose provider reported no (or garbage)
+    // reset is indefinite — the same park the blocked state gives it
+    assert.equal(wallWaitUntil('quota', '2026-10-20T12:15:00Z', now), undefined)
+    assert.equal(wallWaitUntil('auth', '2026-10-20T12:15:00Z', now), undefined)
+    assert.equal(wallWaitUntil('crash', '2026-10-20T12:15:00Z', now), undefined)
+    assert.equal(wallWaitUntil('rate_limited', undefined, now), undefined)
+    assert.equal(wallWaitUntil('rate_limited', 'not-a-time', now), undefined)
+    assert.equal(wallWaitUntil(undefined, '2026-10-20T12:15:00Z', now), undefined)
+  })
+})
 
 describe('loopRefTails', () => {
   test('a clean repo reports no tails', () => {

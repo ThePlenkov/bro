@@ -1357,6 +1357,52 @@ switch (scenario) {
     sh('bd', ['close', process.env.BRO_BEAD_ID, '--reason', 'nothing to ship'])
     log('closed bead')
     break
+  case 'wall': {
+    // a provider rate wall that kills the FIRST spawn — wallDied marks
+    // the death so the post-reset respawn lands (bro-36bhc). The reset
+    // rides stderr like a real provider's rate-limit line, where the
+    // .stderr tail the classifier reads picks it up
+    const walled = withState((s) => {
+      if (s.wallDied === true) return false
+      s.wallDied = true
+      return true
+    })
+    if (walled) {
+      const resetAt = new Date(Date.now() + 1200).toISOString()
+      withState((s) => {
+        s.events = (s.events ?? []).concat([
+          { wallSpawn: process.env.BRO_BEAD_ID || null, branch, at: Date.now(), resetAt },
+        ])
+      })
+      log('hit the rate wall til ' + resetAt)
+      console.error('Reached free model rate limit — resets at ' + resetAt)
+      process.exit(1)
+    }
+    retry(() => fs.writeFileSync('work.txt', 'did the thing\\n'))
+    sh('git', ['add', '-A'])
+    sh('git', ['commit', '-qm', 'feat: the thing'])
+    withState((s) => {
+      s.events = (s.events ?? []).concat([
+        { spawn: process.env.BRO_BEAD_ID || null, branch, at: Date.now() },
+      ])
+      markPrOpened(s)
+    })
+    log('opened pr')
+    peekLoop('worker-done')
+    break
+  }
+  case 'quota': {
+    // the wall with no advertised end — a quota death must park, never
+    // respawn into the account wall (bro-36bhc)
+    log('hit the quota wall')
+    withState((s) => {
+      s.events = (s.events ?? []).concat([
+        { wallSpawn: process.env.BRO_BEAD_ID || null, branch, at: Date.now() },
+      ])
+    })
+    console.error('account quota exceeded — out of credits for this cycle')
+    process.exit(1)
+  }
   case 'fail':
     log('dying')
     process.exitCode = 3

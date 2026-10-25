@@ -1,131 +1,146 @@
----
-
-scope:
-- packages/cli/src/commands/loop.ts
-- packages/cli/src/commands/loop.e2e.test.ts
-- packages/cli/src/commands/testrepo.ts
-- skills/loop/SKILL.md
-
----
-
-# bro-36bhc — fix(loop): honor exit-cause taxonomy — wait rate_limited resetAt instead of respawning into the wall
+# bro-36bhc — loop: honor the exit-cause taxonomy on worker settle
 
 ## Problem
 
-Observed 2026-10-19: `bro loop` (pid 2441315) produced six consecutive
-`exited cause=rate_limited` workers (bro-fa7wd, bro-e28ik, bro-61xv2,
-bro-aa6re, bro-bhp6h, bro-1on9l) and kept spawning (bro-v2cn5,
-bro-fe6f0). Each spawn burns a provider session + model requests
-against an account-wide quota already at the wall — while the convoy
-supervisor, facing the same wall, waited `resetAt` and resumed the
-SAME worker without burning an attempt (specs/bro-7xgk.4.md
-`blockedDecision`).
+`bro loop` respawns workers into a known provider wall — the exit-cause
+taxonomy (spec bro-7xgk.2) classifies every registry worker's death
+(`rate_limited`, `quota`, `auth`, `crash`, `ok`, with `resetAt` when the
+provider reports one), and `convoy-run` already honors it: a
+`rate_limited` death with a `resetAt` is a WAIT (sleep until the reset,
+respawn the same molecule, no attempt burned); a quota wall with no
+reset is a parked mol. The loop's settle never consults it.
 
-The spawn-admission half has since landed (bro-9h86l,
-`batchWallRefusal`): a batch-marked spawn into a derived provider wall
-refuses `SpawnError 'cap'` before any worker runs, so the registry-path
-loop can no longer spawn six real workers into a known wall. What the
-loop still does wrong is the _settle_ side — it doesn't consult the
-taxonomy the registry already recorded:
+Observed 2026-10-19: `bro loop` produced six consecutive
+`exited cause=rate_limited` workers, each on a different bead, and kept
+spawning — six provider sessions plus model requests spent against an
+account-wide quota already at the wall, while the convoy supervisor
+facing the same wall waited `resetAt` and resumed the SAME worker.
 
-1. `serviceWorker` reads a worker's terminal `blocked` state and parks
-   the clump on the flat `loop.parkedWakeMin` snooze (default 2h). A
-   `rate_limited` death carrying a provider `resetAt` should wake at
-   the reset — the convoy waits the reset out and respawns; the loop's
-   equivalent is a defer that ends when the wall lifts, not a blunt 2h
-   cooldown that outlives a 15-minute wall (and still fires for a
-   6-hour one).
+The mechanism, two holes:
 
-2. `settleSpawnRefusal` reads every `'cap'` SpawnError as transient
-   fleet pressure: reopen the claims, hold pushes one `--interval`,
-   re-claim, re-probe. For a provider wall with a known `until` that is
-   a per-interval claim churn for the wall's whole duration; for a
-   `quota` wall or a `rate_limited` death with no reported reset it is
-   an endless churn against a wall with no advertised end. The convoy
-   contract instead: reset known → sleep until it, then spawn (no
-   attempt burned); no advertised end → `parked`, reported, never
-   waited into.
+- **The exit settle ignores the cause.** `serviceWorker` parks a worker
+  whose state reads `blocked`/`stopped` — but a `rate_limited` death
+  whose `resetAt` already passed at poll time reads `exited` with the
+  cause still on it. That falls into `settleNoPr`: the bead reopens,
+  the run claims the NEXT ready bead, and its spawn walks into the
+  same wall — the churn, one wasted session per bead. (A sub-10s wall
+  death parks as "environment crash" — the mislabel hides the wall
+  behind the crash window.)
+- **Pushes never see the wall.** A member blocked or dead on a provider
+  wall is an ACCOUNT fact — a fresh claim's spawn burns a session on
+  the same wall. `batchWallRefusal` (spec bro-1x7p) already refuses
+  provider-lane spawns while a derived wall holds, but the settle side
+  still pays the re-pick churn every interval, and a template-lane
+  death derives no wall for the next claim at all.
 
 ## Design
 
-Apply the convoy-run `blockedDecision` contract at the loop's two
-wall-facing decision points (registry path — `ctx.agents` set; the
-awaited-template fallback has no registry to consult).
+Same contract as `convoy-run`'s `blockedDecision`, member-shaped —
+the taxonomy already computed on the registry entry, never re-derived.
 
-### Worker exit `blocked` → park on the wall's own clock
+### The wall wait — `rate_limited` + `resetAt` is a hold, not a verdict
 
-`serviceWorker`'s no-PR `blocked`/`stopped` settle keeps parking — the
-claim must leave the queue — but the snooze is the wall's, not the
-cooldown's:
+When a worker goes terminal without a PR, the settle reads
+`info.cause`/`info.resetAt` (the classification `status()` just
+harvested, same record `agentEntryBlocked` reads — AgentInfo-first like
+convoy):
 
-- `rate_limited` with a parseable `resetAt` (the `blocked` read implies
-  it is in the future) → `defer:` the reset itself. The bead wakes to
-  `open` as the wall lifts; the next claim respawns a fresh worker —
-  "sleep until the reset and respawn, no attempt burned". The worktree
-  stays the resume cache as with any park. cause/resetAt come from the
-  `status()` AgentInfo, with the bead's registry entry as fallback
-  (same pair `blockedDecision` resolves).
-- `quota`, `rate_limited` with no reset, `stopped` → the flat
-  `parkedWakeMin` park, unchanged — a wall with no advertised end is
-  reported, not timed.
+- `rate_limited` with a parseable `resetAt` → the member WAITS:
+  `m.wallWaitUntil` arms, `m.worker` stays cleared, the bead's claim
+  stays held (it is ours — the wall is not the bead's fault).
+  - Reset in the future → wake exactly at the reset.
+  - Reset already past at read time (provider clock behind the poll,
+    or an unreliable reporter) → pace it: consecutive wall deaths on
+    the same member floor the wait at 30s doubling to a 15m cap, so a
+    provider that keeps lying about its reset cannot spin the loop
+    back into the burn this fixes.
+- At expiry, the FIRST worker respawns the same work order into the
+  same worktree (the prompt file the push wrote is still there) —
+  one respawn, no attempt burned. A `cap` refusal (fleet full, or a
+  fresh wall a sibling death derived) re-arms the wait one interval;
+  a `conflict` (a foreign owner picked up the step while we waited)
+  releases the clump tail and ends the item; anything else parks loud.
+- A `rate_limited` death with no usable reset, `quota`, or `auth` →
+  PARK, the claim snoozes with the cause named — reopening is the
+  respawn-burn. (`agentEntryBlocked` already reads `blocked` for the
+  no-reset rate wall and quota; this settles the `exited`-shape cause
+  the state read can't carry — `auth` dies `exited` and respawning
+  into a 401 is the same waste class.)
+- The agent's own verdict still outranks the wall: a worker that
+  closed its bead settles `closed` first — no wait, no respawn.
 
-`parkBeads` gains an optional `wakeAtMs`; when finite it overrides
-`parkedWakeMin` (the park's whole point is the reset), still clamped
-under the existing decade cap so a forged stamp can't RangeError the
-defer write.
+### Fix/rebase workers — same wall, deferred gate
 
-### Spawn refused `'cap'` → classify wall vs pressure
+A fix/rebase worker's terminal read is currently `active` — an
+immediate gate re-poll that spawns the next round into the same wall
+(a real session burn on the template lane, a burned `fixRounds` slot
+everywhere). The wall check runs there first: `rate_limited`+`resetAt`
+defers the re-poll to the reset (the round the dead worker paid is
+refunded — a wall death is not a repair attempt, matching convoy's
+"no attempt burned"), and `quota`/`auth`/reset-less `rate_limited`
+parks the member.
 
-`settleSpawnRefusal` re-reads the refusal against
-`providerWallsFor(ctx.root)` for the member's lane provider:
+### The queue hold — a wall is an account fact
 
-- Matching wall with `until` → release the claims (unchanged) and hold
-  pushes until the reset: `PushOutcome 'hold'` gains `untilMs`, and
-  `unseeClump` stamps `pushHoldUntil` from it instead of one interval.
-  No claim churn, no probe storm — the batch lane waits, and the next
-  post-reset pick spawns normally (or re-refuses and re-holds if the
-  wall re-formed).
-- Matching wall with no `until` (`quota`, or `rate_limited` whose
-  provider reported no reset) → park the clump naming the wall —
-  `{kind:'done', result:'parked'}`. Each queued bead parks once and the
-  run reports its parked tally instead of spinning claim→refuse per
-  interval forever; `bro agents down` stays the manual clear.
-- No matching wall → the existing one-interval hold (a genuine fleet
-  cap or session-quota refusal is transient pressure).
-- `lane.provider` unset (raw `--agent` template lane) → no wall can be
-  attributed — generic interval hold; the admission refusal still
-  prevents any burn.
-- `providerWallsFor` throwing → generic interval hold (a refusal is
-  already proven; a broken wall read must not sink the settle).
+While any member sits in a wall wait, `tryClaim` holds pushes (the
+drain check still runs — an empty queue behind the wall owes the done
+verdict, not an infinite hold). Without it, `maxOpen > 1` claims the
+next bead straight into the wall — each new member burns one session
+before it can wait its own wall, the incident's exact shape.
 
-Fix/rebase respawns (`respawnRound`) already un-burn the round on a
-`'cap'` refusal — the refusal lands before any worker exists, so no
-session is spent; the gate's normal interval re-poll retries. Out of
-scope: per-provider holds under `fleet.routing` (a wall on one lane
-holds all pushes — conservative, never a burn).
+### The spawn refusal — the derived wall sets the hold
 
-### `devin -p` session draw — checked
+`settleSpawnRefusal`'s `cap` already reopens + holds one interval
+(fleet pressure is transient). When the refusal IS a derived provider
+wall (`providerWallsFor` + the member's lane), the hold lasts until
+the wall's `until` instead of churning claim→worktree→refuse every
+interval — and a `quota`/indefinite wall parks the clump outright:
+the bead's "park and report", never churn.
 
-The bead's side question: does a `devin -p` worker's internal
-`devin acp` child double-count a provider session? No — per
-`devin acp --help` the REPL/`-p` frontend spawns an in-process
-`devin acp` child, and that child IS the session; one worker = one
-provider session either way (verified on the live rig: loop workers
-are `bro acp-worker` → `devin acp` directly). No code change.
+### Out of scope
+
+- The legacy awaited `spawnAgent` path (`ctx.agents === undefined`,
+  no beads store → no registry) has no taxonomy to consult — it keeps
+  today's settle.
+- Non-native connectors that don't classify exits — `info.cause`
+  absent falls through to today's behavior.
+- Mixed-provider queues: the member-level wait is provider-scoped by
+  the lane it spawned on; the queue hold is deliberately broader (any
+  wall wait holds pushes) — `batchWallRefusal`'s provider-scoped
+  refusal already protects the common multi-provider case, and a
+  conservative full-hold errs toward never burning.
+
+### The devin double-session note
+
+Checked in passing per the bead: the devin session plane counts live
+sessions as pid-deduplicated lock files. A `devin -p` template worker
+IS one devin process (one lock); if that process internally forks a
+`devin acp` child it writes a second lock under its own pid — two
+sessions counted, two account-side draws. The `--provider devin-acp`
+lane runs `bro acp-worker → devin acp`: one devin process, one lock —
+no doubling there. (Empirical check this host: the live loop worker
+shows a single `devin acp` process per spawn.) The plane's
+`startsSessions(command)` hook exists for exactly this — a command
+known to double-spawn can declare 2; whether `devin -p`'s internals
+actually fork `acp` is vendor behavior outside this fix's reach.
 
 ## Plan
 
-- [ ] `parkBeads` gains `wakeAtMs` (finite → `defer:` that stamp,
-  decade-capped; else `parkedWakeMin`)
-- [ ] `serviceWorker` blocked settle: `rate_limited` + reset → park
-  with `wakeAtMs = Date.parse(resetAt)` (info first, registry
-  entry fallback) and name the reset in the note
-- [ ] `PushOutcome 'hold'` gains `untilMs`; `unseeClump` consumes it
-- [ ] `settleSpawnRefusal` 'cap': `providerWallsFor` match on
-  `m.lane.provider` → timed hold / park / interval hold
-- [ ] e2e: fake agent learns a per-bead wall map (one-shot
-  rate_limited/quota death with log-tail text); tests cover
-  wait-until-reset-then-land and quota-wall-parks-no-churn
-- [ ] `skills/loop/SKILL.md` policy line: the park snooze rides the
-  provider's reset when one was reported
-- [ ] `npm test` (exact CI command)
+1. `wallWaitUntil(cause, resetAt, now, waits)` — the pure decision,
+   exported for unit tests: waitable rate wall → `max(reset, now)`;
+   stale reset → `now + floor(waits)`; anything else → `undefined`.
+2. `GateMember` gains `wallWaitUntil`/`wallWaits`; `serviceWorker`'s
+   terminal settle consults cause before `settleNoPr` (after
+   `agentVerdict`); `serviceMember` services the wait (respawn at
+   expiry for first workers, `active` re-poll for PR members, round
+   refund on arm).
+3. `tryClaim` holds pushes while any member wall-waits; `QueueState`
+   gains `wallHeld` for the once-per-episode line; the idle stage
+   names the wait.
+4. `settleSpawnRefusal` reads `providerWallsFor` on `cap` — wall
+   `until` → hold till then; quota/indefinite → park the clump.
+5. Tests: `wallWaitUntil` unit coverage (wait/stale-escalate/park/
+   non-wall), e2e `wall` scenario (rate_limited+reset → wait →
+   respawn → land, spawn count proves no churn; quota → park;
+   two-bead wall → the second claim holds, one spawn total during
+   the wall).
