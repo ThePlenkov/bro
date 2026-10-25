@@ -19,7 +19,7 @@ describe('readSkillLock', () => {
           version: 1,
           skills: {
             evidence: {
-              source: 'theplenkov-ai/skills',
+              source: 'public-org/public-skills',
               sourceType: 'github',
               skillPath: 'skills/verification/evidence/SKILL.md',
               computedHash: 'abc123',
@@ -31,7 +31,7 @@ describe('readSkillLock', () => {
       const lock = readSkillLock(dir)
       assert.equal(lock.size, 1)
       const skill = lock.get('evidence')!
-      assert.equal(skill.source, 'theplenkov-ai/skills')
+      assert.equal(skill.source, 'public-org/public-skills')
       assert.equal(skill.sourceType, 'github')
       assert.equal(skill.computedHash, 'abc123')
     } finally {
@@ -91,7 +91,7 @@ describe('checkSkillLock', () => {
           'evidence',
           {
             name: 'evidence',
-            source: 'theplenkov-ai/skills',
+            source: 'public-org/public-skills',
             sourceType: 'github',
             skillPath: 'x/SKILL.md',
             computedHash: 'abc',

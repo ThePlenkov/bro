@@ -12,14 +12,24 @@ package. Neither path brings an **external** skill — one owned by another repo
 into a consumer's `.agents/skills/`.
 
 But the machine already runs that model: `skills-lock.json` in the bro repo
-records eleven skills owned by three upstream repos (`theplenkov-ai/skills`,
-`codescene-oss/codescene-mcp-server`, `typesafe-ai/skills`), and they are
-materialised with `npx skills add <owner>/<repo> --skill <name>`. The proof it
-works: `codescene` in the skills repo and in bro are byte-identical.
+records skills owned by upstream repos (`codescene-oss/codescene-mcp-server`,
+`typesafe-ai/skills`), materialised with
+`npx skills add <owner>/<repo> --skill <name>`.
 
 So the linking mechanism exists and is proven — but it lives **outside** bro. A
 consumer of bro has no way to ask bro for the skills bro itself uses. The
 lockfile is a dead file in bro: **no code reads it**.
+
+## Only public sources
+
+bro is a public repo. A skill locked from a **private** repo makes the lockfile
+unusable for every contributor: `npx skills add <owner>/<private-repo>` cannot
+resolve without credentials the contributor does not have, so `bro setup --lock`
+fails for them over a skill they were never meant to install.
+
+The lockfile therefore carries **public sources only**. A private skill stays in
+the private repo it belongs to; it is not locked here, and bro does not try to
+fetch it. bro's plugin ships what bro owns.
 
 ## Design
 
