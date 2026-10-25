@@ -202,7 +202,7 @@ export function readBeads(dir: string): StatusBeads {
       if (remote.code !== 0) {
         return null;
       }
-      const m = remote.out.trim().match(/github\.com[:\/]([^\s]+?)(?:\.git)?$/);
+      const m = remote.out.trim().match(/github\.com[:/]([^\s]+?)(?:\.git)?$/);
       if (m === null || m[1] === undefined) {
         return null;
       }
@@ -212,7 +212,6 @@ export function readBeads(dir: string): StatusBeads {
       // no remote — no link; never spawn gh on the fast path
       return null;
     }
-    return null;
   };
   const beadLink = (r: TaskRow, slug: string): string | undefined => {
     const prMatch = /^drive:pr:(\d+)$/.exec(r.external_ref ?? '');
@@ -561,7 +560,8 @@ function buildLine(build: NonNullable<BroStatus['build']>): string {
 
 function render(s: BroStatus): string[] {
   const lines: string[] = [];
-  lines.push(`board: ${basename(s.dir)} · ${s.branch}${s.dirty > 0 ? ` · dirty ${s.dirty}` : ''}`);
+  const dirtyBit = s.dirty > 0 ? ` · dirty ${s.dirty}` : '';
+  lines.push(`board: ${basename(s.dir)} · ${s.branch}${dirtyBit}`);
   if (s.sync !== null) {
     lines.push(
       `sync: ${s.branch} ${s.sync.behind} behind ${s.sync.upstream} — stale; fetch before trusting state`
@@ -591,9 +591,7 @@ function render(s: BroStatus): string[] {
   const cap = s.fleet.maxConcurrent > 0 ? `/${s.fleet.maxConcurrent}` : '';
   const live = s.fleet.agents.filter(a => a.state === 'running');
   lines.push(`fleet: ${live.length}${cap} running`);
-  for (const a of s.fleet.agents) {
-    lines.push(agentLine(a));
-  }
+  lines.push(...s.fleet.agents.map(agentLine));
   for (const r of s.loop.runs) {
     lines.push(loopLine(r, s.loop.stallMin));
   }
