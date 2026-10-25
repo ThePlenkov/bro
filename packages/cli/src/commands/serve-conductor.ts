@@ -3575,34 +3575,7 @@ export function conductorProxy(
   const getLink = (parent?: OtelCtx): Promise<AcpPeer> => pool.link(parent)
   const wire: WireCtx = { cfg, opts: wireOpts, link: getLink, sessions, pendingOpens }
   return Object.assign(
-    async (req: IncomingMessage, res: ServerResponse): Promise<void> => {
-      const path = (req.url ?? '/').split('?')[0]
-      const method = req.method ?? 'GET'
-      const httpSpan = httpTap(req, res, cfg, method, path)
-      // literal dispatch — a Map.get(requestInput)() call reads to CodeQL
-      // as an unvalidated dynamic method call; the fixed case list IS the
-      // allowlist guard it wants to see
-      switch (`${method} ${path}`) {
-        case 'POST /v1/messages':
-          await messages(req, res, wire, httpSpan.ctx)
-          return
-        case 'POST /v1/responses':
-          await responses(req, res, wire, chains, httpSpan.ctx)
-          return
-        case 'POST /v1/chat/completions':
-          await chatCompletions(req, res, wire, httpSpan.ctx)
-          return
-        case 'POST /v1/messages/count_tokens':
-          await countTokens(req, res)
-          return
-        case 'GET /v1/models':
-          await models(res, cfg, wireOpts)
-          return
-        default:
-          apiError(res, 404, 'not_found_error', `bro conductor: no route ${method} ${path}`)
-          return
-      }
-    },
+    conductorDispatch(wire, chains, cfg, wireOpts),
     {
       terminals: () => pool.live()?.terminals,
       dispose: (): void => {
@@ -3614,6 +3587,42 @@ export function conductorProxy(
       },
     }
   )
+}
+
+/** The `/v1/*` literal dispatch — a Map.get(requestInput)() call reads
+ *  to CodeQL as an unvalidated dynamic method call; the fixed case list
+ *  IS the allowlist guard it wants to see. */
+function conductorDispatch(
+  wire: WireCtx,
+  chains: Map<string, { key: string; consumed: number }>,
+  cfg: ConductorConfig,
+  wireOpts: ProviderWireOpts
+): (req: IncomingMessage, res: ServerResponse) => Promise<void> {
+  return async (req: IncomingMessage, res: ServerResponse): Promise<void> => {
+    const path = (req.url ?? '/').split('?')[0]
+    const method = req.method ?? 'GET'
+    const httpSpan = httpTap(req, res, cfg, method, path)
+    switch (`${method} ${path}`) {
+      case 'POST /v1/messages':
+        await messages(req, res, wire, httpSpan.ctx)
+        return
+      case 'POST /v1/responses':
+        await responses(req, res, wire, chains, httpSpan.ctx)
+        return
+      case 'POST /v1/chat/completions':
+        await chatCompletions(req, res, wire, httpSpan.ctx)
+        return
+      case 'POST /v1/messages/count_tokens':
+        await countTokens(req, res)
+        return
+      case 'GET /v1/models':
+        await models(res, cfg, wireOpts)
+        return
+      default:
+        apiError(res, 404, 'not_found_error', `bro conductor: no route ${method} ${path}`)
+        return
+    }
+  }
 }
 
 /** The per-request span + request-finished telemetry tap — one

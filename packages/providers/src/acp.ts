@@ -826,6 +826,62 @@ function pooledClientApp(opts: ProviderWireOpts, terminals: AcpTerminals) {
   return app
 }
 
+/** fs caps advertised with no bridge to serve them — the unbridged app
+ *  has no fs handler, so every agent fs call would answer
+ *  method-not-found. */
+function fsCapsWithoutBridge(opts: ProviderWireOpts): boolean {
+  const caps = opts.acp?.clientCapabilities
+  return (
+    opts.acp?.bridge === undefined &&
+    (caps?.fs?.readTextFile === true || caps?.fs?.writeTextFile === true)
+  )
+}
+
+/** Spawn the acp child and wire its stdio into `app` — the unref'd
+ *  process can't pin the host's event loop (server close drains it;
+ *  'exit' still fires for the close hook to reap). `spawnError` is a
+ *  getter: the 'error' event lands after spawn returns, and the caller
+ *  only needs it if the handshake fails. */
+function spawnAcpChild(
+  app: ReturnType<typeof pooledClientApp>,
+  entry: AcpEntry,
+  by: string,
+  fail: (err: unknown) => never
+): {
+  conn: ReturnType<typeof app.connect>
+  child: ChildProcess
+  tail: () => string
+  spawnError: () => string | undefined
+} {
+  const argv = [
+    ...shellWords(entry.command),
+    ...(entry.profile === undefined ? [] : ['--profile', entry.profile]),
+  ]
+  const bin = argv[0]
+  if (bin === undefined) {
+    fail(new AcpConfigError(`${by}: acp command is empty`))
+  }
+  const proc = spawn(bin, argv.slice(1), { stdio: 'pipe', env: acpChildEnv() })
+  proc.unref()
+  for (const s of proc.stdio) {
+    ;(s as unknown as { unref?: () => void } | null)?.unref?.()
+  }
+  let spawnError: string | undefined
+  proc.once('error', (e) => {
+    spawnError = e.message
+  })
+  const stream = ndJsonStream(
+    Writable.toWeb(proc.stdin) as WritableStream<Uint8Array>,
+    Readable.toWeb(proc.stdout) as ReadableStream<Uint8Array>
+  )
+  return {
+    conn: app.connect(stream),
+    child: proc,
+    tail: stderrTail(proc),
+    spawnError: () => spawnError,
+  }
+}
+
 export async function acpOpen(
   by: string,
   entry: AcpEntry,
@@ -842,11 +898,7 @@ export async function acpOpen(
   // request_permission(deny) + terminal/*(AcpTerminals); advertising it
   // anyway makes every agent fs call answer method-not-found. Terminal
   // is served locally either way, so it never factors here.
-  const caps = opts.acp?.clientCapabilities
-  if (
-    opts.acp?.bridge === undefined &&
-    (caps?.fs?.readTextFile === true || caps?.fs?.writeTextFile === true)
-  ) {
+  if (fsCapsWithoutBridge(opts)) {
     fail(
       new AcpConfigError(
         `${by}: clientCapabilities advertises fs without acp.bridge — the unbridged link cannot serve it`
@@ -858,37 +910,18 @@ export async function acpOpen(
   const peer = opts.acp?.peer
   let child: ChildProcess | undefined
   let tail = (): string => ''
-  let spawnError: string | undefined
+  // spawn's 'error' event is async — the getter reads it whenever the
+  // handshake below fails, not at spawn time
+  let spawnError = (): string | undefined => undefined
   let conn: Awaited<ReturnType<typeof app.connect>>
   if (peer !== undefined) {
     conn = app.connect(peer)
   } else {
-    const argv = [
-      ...shellWords(entry.command),
-      ...(entry.profile === undefined ? [] : ['--profile', entry.profile]),
-    ]
-    const bin = argv[0]
-    if (bin === undefined) {
-      fail(new AcpConfigError(`${by}: acp command is empty`))
-    }
-    const proc = spawn(bin, argv.slice(1), { stdio: 'pipe', env: acpChildEnv() })
-    child = proc
-    // a pooled transport must not pin the host's event loop — the
-    // server closing drains the process, 'exit' still fires, and the
-    // conductor's close() hook reaps the child on the way out
-    proc.unref()
-    for (const s of proc.stdio) {
-      ;(s as unknown as { unref?: () => void } | null)?.unref?.()
-    }
-    proc.once('error', (e) => {
-      spawnError = e.message
-    })
-    tail = stderrTail(proc)
-    const stream = ndJsonStream(
-      Writable.toWeb(proc.stdin) as WritableStream<Uint8Array>,
-      Readable.toWeb(proc.stdout) as ReadableStream<Uint8Array>
-    )
-    conn = app.connect(stream)
+    const spawned = spawnAcpChild(app, entry, by, fail)
+    conn = spawned.conn
+    child = spawned.child
+    tail = spawned.tail
+    spawnError = spawned.spawnError
   }
   const close = (): void => {
     conn.close()
@@ -921,8 +954,8 @@ export async function acpOpen(
     if (err instanceof AcpConfigError) {
       fail(err)
     }
-    if (spawnError !== undefined) {
-      fail(new AcpConfigError(`${by}: cannot exec acp command — ${spawnError}`))
+    if (spawnError() !== undefined) {
+      fail(new AcpConfigError(`${by}: cannot exec acp command — ${spawnError()}`))
     }
     fail(err)
   }

@@ -31,6 +31,7 @@ import { AcpServer } from '@agentclientprotocol/sdk/experimental/server'
 import { createNodeHttpHandler } from '@agentclientprotocol/sdk/experimental/node'
 import type {
   AgentContext,
+  AgentRequestContext,
   ClientCapabilities,
   ContentBlock,
   InitializeRequest,
@@ -141,7 +142,10 @@ export function acpTransport(
   ): BrokeredSession | undefined => {
     const sid = idOf(params)
     const sess = sid === undefined ? undefined : sessions.get(sid)
-    if (sess === undefined || (conn !== undefined && sess.conn !== conn)) {
+    if (sess === undefined) {
+      return undefined
+    }
+    if (conn !== undefined && sess.conn !== conn) {
       return undefined
     }
     // hits re-insert — insertion order IS the sweep's LRU order
@@ -317,8 +321,8 @@ export function acpTransport(
         backend: cfg.backend,
         'acp.client': st.clientName,
       })
-      const { loadSession: _dropped, ...caps } = (peer.init.agentCapabilities ??
-        {}) as Record<string, unknown>
+      const { loadSession: _dropped, ...caps } = peer.init
+        .agentCapabilities as Record<string, unknown>
       return {
         ...peer.init,
         agentCapabilities: caps as InitializeResponse['agentCapabilities'],
@@ -389,6 +393,16 @@ export function acpTransport(
     }
   }
 
+  /** A failed turn's cleanup — retained.prompt already dropped its
+   *  handle, so the brokered entry is dead weight: close upstream
+   *  best-effort and unindex it or the next call on this id talks to a
+   *  session whose context the agent already forgot. */
+  const evictDeadTurn = (sid: string | undefined, sess: BrokeredSession): void => {
+    if (sid !== undefined && sessions.get(sid) === sess) {
+      closeUpstream(sess, sid)
+    }
+  }
+
   /** session/prompt → the turn on the session's own retained handle —
    *  updates fan out as they arrive. A second concurrent prompt is an
    *  error, never a queue: the update stream is single-reader. */
@@ -430,13 +444,7 @@ export function acpTransport(
       )
       return r.response
     } catch (err) {
-      // retained.prompt already dropped its handle — the brokered
-      // entry is dead weight: close upstream best-effort and
-      // unindex it or the next call on this id talks to a session
-      // whose context the agent already forgot
-      if (sid !== undefined && sessions.get(sid) === sess) {
-        closeUpstream(sess, sid)
-      }
+      evictDeadTurn(sid, sess)
       asWireError(err)
     } finally {
       sess.busy = false
@@ -497,67 +505,45 @@ export function acpTransport(
    *  only stable conn-scope). */
   const buildAgent = () => {
     const st: ConnState = { clientName: '', sessions: new Set(), dropped: false }
-    return (
-      agent({ name: 'bro-acp' })
-      // AcpServer runs onConnect after initialize answers — attach the
-      // disconnect cleanup there
-      .onConnect((conn) => {
-        // settle-either-way: a rejected `closed` still means the
-        // connection is gone — the sessions must not leak
-        void conn.closed.then(
-          () => {
-            dropConn(st)
-          },
-          () => {
-            dropConn(st)
-          }
-        )
-      })
-      .onRequest<Record<string, unknown>, unknown>(
-        'initialize',
-        raw,
-        (ctx) => onInitialize(st, ctx.params)
+    const app = agent({ name: 'bro-acp' })
+    // AcpServer runs onConnect after initialize answers — the
+    // disconnect cleanup attaches there. Settle-either-way: a rejected
+    // `closed` still means the connection is gone — no session leaks.
+    app.onConnect((conn) => {
+      void conn.closed.then(
+        () => {
+          dropConn(st)
+        },
+        () => {
+          dropConn(st)
+        }
       )
-      .onRequest<Record<string, unknown>, unknown>(
-        'session/new',
-        raw,
-        (ctx) => onSessionNew(st, ctx.params, ctx.client)
-      )
-      .onRequest<Record<string, unknown>, unknown>(
-        'session/prompt',
-        raw,
-        (ctx) => onPrompt(st, ctx.params, ctx.signal)
-      )
-      .onNotification<Record<string, unknown>>('session/cancel', raw, (ctx) => {
-        const sess = sessionOf(ctx.params, st)
-        sess?.peer.ctx
-          .notify<Record<string, unknown>>('session/cancel', ctx.params)
-          .catch(() => {})
-      })
-      .onRequest<Record<string, unknown>, unknown>(
-        'session/close',
-        raw,
-        (ctx) => onClose(st, ctx.params)
-      )
-      .onRequest<Record<string, unknown>, unknown>(
-        'session/set_config_option',
-        raw,
-        (ctx) => forwardSession('session/set_config_option', ctx.params, st)
-      )
-      .onRequest<Record<string, unknown>, unknown>(
-        'session/set_mode',
-        raw,
-        (ctx) => forwardSession('session/set_mode', ctx.params, st)
-      )
-      .onRequest<Record<string, unknown>, unknown>(
-        'authenticate',
-        raw,
-        (ctx) => onAuthenticate(ctx.params)
-      )
+    })
+    const req = (
+      method: string,
+      handler: (ctx: AgentRequestContext<Record<string, unknown>>) => unknown
+    ): void => {
+      app.onRequest<Record<string, unknown>, unknown>(method, raw, handler)
+    }
+    req('initialize', (ctx) => onInitialize(st, ctx.params))
+    req('session/new', (ctx) => onSessionNew(st, ctx.params, ctx.client))
+    req('session/prompt', (ctx) => onPrompt(st, ctx.params, ctx.signal))
+    req('session/close', (ctx) => onClose(st, ctx.params))
+    req('session/set_config_option', (ctx) =>
+      forwardSession('session/set_config_option', ctx.params, st)
     )
+    req('session/set_mode', (ctx) => forwardSession('session/set_mode', ctx.params, st))
+    req('authenticate', (ctx) => onAuthenticate(ctx.params))
+    app.onNotification<Record<string, unknown>>('session/cancel', raw, (ctx) => {
+      const sess = sessionOf(ctx.params, st)
+      sess?.peer.ctx
+        .notify<Record<string, unknown>>('session/cancel', ctx.params)
+        .catch(() => {})
+    })
     // session/load · resume · fork · list · delete · providers_* ·
     // logout · nes_* · document_* stay unregistered — the SDK answers
     // method-not-found and advertised capabilities never offer them
+    return app
   }
 
   const handle = createNodeHttpHandler(new AcpServer({ createAgent: buildAgent }))

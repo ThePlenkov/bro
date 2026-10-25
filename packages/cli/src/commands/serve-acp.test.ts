@@ -142,13 +142,11 @@ describe('serve /api/v1/acp — the native ACP transport', () => {
       // agent (the fake's schema parse normalizes the shape — assert
       // the values it must not have touched)
       const req = fake.sessionRequests[0]
-      assert.equal(req?.cwd, '/work/bro--bro-ymbq1')
-      assert.equal(req?._meta?.bead, 'bro-ymbq1')
-      assert.equal(req?.mcpServers?.[0]?.name, 'mine')
-      assert.equal(
-        (req?.mcpServers?.[0] as { command?: string } | undefined)?.command,
-        'mcp-server'
-      )
+      assert.ok(req)
+      assert.equal(req.cwd, '/work/bro--bro-ymbq1')
+      assert.equal(req._meta?.bead, 'bro-ymbq1')
+      assert.equal(req.mcpServers?.[0]?.name, 'mine')
+      assert.equal((req.mcpServers?.[0] as { command?: string }).command, 'mcp-server')
     } finally {
       await c.conn.close()
       await close()

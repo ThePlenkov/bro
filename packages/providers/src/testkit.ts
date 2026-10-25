@@ -68,6 +68,49 @@ export interface FakeAcpAgent {
   probeResult?: unknown
 }
 
+/** The mid-prompt client-bound scripts a test can arm — a scripted
+ *  permission ask, a terminal/* round-trip, a free-form probe. Each
+ *  result lands on `seen` for the test to assert against. */
+async function runClientProbes(
+  client: AgentContext,
+  sessionId: string,
+  opts: {
+    askPermission?: PermissionOption[]
+    askTerminal?: string
+    probeClient?: (client: AgentContext, sessionId: string) => Promise<unknown>
+  },
+  seen: FakeAcpAgent
+): Promise<void> {
+  if (opts.askPermission !== undefined) {
+    const res = await client.request('session/request_permission', {
+      sessionId,
+      toolCall: { toolCallId: 'tc-1', title: 'run tests' },
+      options: opts.askPermission,
+    })
+    seen.permissionOutcome = res.outcome
+  }
+  if (opts.askTerminal !== undefined) {
+    const created = await client.request('terminal/create', {
+      sessionId,
+      command: 'sh',
+      args: ['-c', opts.askTerminal],
+    })
+    const status = await client.request('terminal/wait_for_exit', {
+      sessionId,
+      terminalId: created.terminalId,
+    })
+    const out = await client.request('terminal/output', {
+      sessionId,
+      terminalId: created.terminalId,
+    })
+    await client.request('terminal/release', { sessionId, terminalId: created.terminalId })
+    seen.terminalResult = { output: out.output, exitCode: status.exitCode }
+  }
+  if (opts.probeClient !== undefined) {
+    seen.probeResult = await opts.probeClient(client, sessionId)
+  }
+}
+
 /** A scripted in-process ACP agent — the real protocol round-trip
  *  (initialize → session/new → set_config_option → prompt →
  *  session/update chunks) without spawning a process. Wire it through
@@ -211,37 +254,7 @@ export function fakeAcpAgent(
       if (opts.failPrompt === 'rate-limit') {
         throw new RequestError(-32603, 'rate limit exceeded — retry later')
       }
-      if (opts.askPermission !== undefined) {
-        const res = await ctx.client.request('session/request_permission', {
-          sessionId: ctx.params.sessionId,
-          toolCall: { toolCallId: 'tc-1', title: 'run tests' },
-          options: opts.askPermission,
-        })
-        seen.permissionOutcome = res.outcome
-      }
-      if (opts.askTerminal !== undefined) {
-        const created = await ctx.client.request('terminal/create', {
-          sessionId: ctx.params.sessionId,
-          command: 'sh',
-          args: ['-c', opts.askTerminal],
-        })
-        const status = await ctx.client.request('terminal/wait_for_exit', {
-          sessionId: ctx.params.sessionId,
-          terminalId: created.terminalId,
-        })
-        const out = await ctx.client.request('terminal/output', {
-          sessionId: ctx.params.sessionId,
-          terminalId: created.terminalId,
-        })
-        await ctx.client.request('terminal/release', {
-          sessionId: ctx.params.sessionId,
-          terminalId: created.terminalId,
-        })
-        seen.terminalResult = { output: out.output, exitCode: status.exitCode }
-      }
-      if (opts.probeClient !== undefined) {
-        seen.probeResult = await opts.probeClient(ctx.client, ctx.params.sessionId)
-      }
+      await runClientProbes(ctx.client, ctx.params.sessionId, opts, seen)
       const updates: SessionUpdate[] = opts.updates ?? [
         {
           sessionUpdate: 'agent_message_chunk',
