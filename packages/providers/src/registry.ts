@@ -49,6 +49,21 @@ export interface ProviderClient {
   chat?: ProviderChat
 }
 
+/** The delegate an `acp` link hands every agent→client call when it
+ *  runs in passthrough posture (spec bro-ymbq1 — `bro serve`'s ACP
+ *  transport). `request` returns the downstream client's response
+ *  verbatim — throw RequestError and the refusal rides back upstream
+ *  with its code intact. Params are the raw protocol objects; routing
+ *  by `params.sessionId` is the delegate's job. */
+export interface AcpClientBridge {
+  request(
+    method: string,
+    params: Record<string, unknown>,
+    signal: AbortSignal
+  ): Promise<unknown>
+  notify(method: string, params: Record<string, unknown>): void
+}
+
 /** The acp kind's session seam — `peer` replaces the spawned `command`
  *  with an in-process agent (the SDK's AgentApp; tests wire a scripted
  *  one), `cwd` is the session's working directory. `onUpdate` (spec
@@ -64,6 +79,18 @@ export interface AcpSeam {
    *  and releases the ref'd deadline timer that would otherwise pin
    *  the event loop past server shutdown. */
   signal?: AbortSignal
+  /** What upstream `initialize` advertises as clientCapabilities —
+   *  default {fs:{readTextFile:false, writeTextFile:false}, terminal:true}:
+   *  fs is never served locally, terminal runs through the local
+   *  AcpTerminals registry (bro-z7afs). A brokered transport advertises
+   *  the union and relays the calls through `bridge`. */
+  clientCapabilities?: import('@agentclientprotocol/sdk').ClientCapabilities
+  /** Passthrough delegate — set ⇒ EVERY agent→client request
+   *  (session/request_permission, fs/*, terminal/*, elicitation/create,
+   *  mcp/message) forwards to it; unset ⇒ request_permission is denied
+   *  and the rest get the SDK's method-not-found. Only meaningful on
+   *  the pooled path (acpOpen); one-shot calls keep the deny posture. */
+  bridge?: AcpClientBridge
 }
 
 /** Load an entry → its typed client. `name` is the registry key —

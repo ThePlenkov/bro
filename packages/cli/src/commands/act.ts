@@ -28,7 +28,9 @@ import {
   gitBranchLog,
   gitCommonDir,
   gitTry,
+  hasHelpFlag,
   mergeQueueHost,
+  printUsage,
   prOwnership,
   reviewHost,
   taskStore,
@@ -38,6 +40,7 @@ import {
   type ReviewThread,
   type TaskRow,
 } from '@broject/core'
+import type { ExitCode } from '@broject/core'
 import { loadBroConfig } from '../plugins.ts'
 import { flag } from './args.ts'
 import { SELF_ENTRY } from './self-entry.ts'
@@ -65,6 +68,7 @@ import {
   type GateWaitResult,
   type PrActState,
   type RearmPlan,
+  resolveLedger,
 } from '@broject/act'
 import {
   annotateThreads,
@@ -75,8 +79,8 @@ import {
 import { coveredBeadIds } from '@broject/loop'
 import { githubPrWake } from '@broject/github'
 
-function usage(): never {
-  console.error(`Usage: bro act <command> [args…]
+function usage(exitCode: ExitCode = 2): never {
+  printUsage(`Usage: bro act <command> [args…]
 
 Commands:
   status [PR] [--json]              PR state + exit gate JSON
@@ -99,8 +103,7 @@ Commands:
                                     reject/defer reasons
   reply --thread ID --comment T     Reply without resolving
         --file TSV                  Batch reply: <thread_id>\t<body> per line
-        --unresolve                 resolve → unresolve instead`)
-  process.exit(1)
+        --unresolve                 resolve → unresolve instead`, exitCode)
 }
 
 const VALUE_FLAGS = new Set(['--pr', '--thread', '--comment', '--file', '--interval', '--timeout', '--bead'])
@@ -130,7 +133,10 @@ function resolvePr(rev: ReviewFacade, argv: string[]): PrTarget {
     // resolve too, so state must be checked explicitly.
     const pr = rev.currentPr()
     if (!pr || pr.state !== 'OPEN') {
-      console.error('error: no open PR for current branch — pass a PR number')
+      console.error(
+        'error: no open PR for current branch — pass a PR number' +
+          ' (`bro act status <PR>`), or run `bro watch` for the gated-PR board'
+      )
       process.exit(2)
     }
     return { repo, pr: pr.pr }
@@ -156,7 +162,9 @@ async function cmdStatus(argv: string[]): Promise<void> {
     docsPaths: act.docsPaths,
     docsMaxRounds: act.docsMaxRounds,
     requireApproval: act.requireApproval,
+    approvers: act.approvers,
     stateCache: prStateCache(process.cwd()),
+    resolveLedger: resolveLedger(process.cwd()),
   })
   const gate = evaluateExitGate(state, { requireApproval: act.requireApproval })
 
@@ -181,7 +189,8 @@ function printStatus(state: PrActState, gate: ExitGate): void {
       `reviewers_pending=${gate.reviewers_pending} ` +
       `reviewers_failing=${gate.reviewers_failing} ` +
       `sast_pending=${gate.sast_pending} sast_unknown=${gate.sast_unknown} ` +
-      `fix_rounds=${gate.fix_rounds} docs_only=${gate.docs_only}`
+      `fix_rounds=${gate.fix_rounds} docs_only=${gate.docs_only} ` +
+      `reopened_threads=${gate.reopened_threads}`
   )
   console.log(`exit_gate=${gate.ok ? 'OK' : 'BLOCKED'}`)
   const live = listWatches(process.cwd()).filter(
@@ -241,6 +250,7 @@ async function cmdWait(argv: string[]): Promise<void> {
   // share the same entries; the settle→merge dispatch re-gates
   // uncached inside cmdMerge, so a cached green never lands a PR
   const cache = prStateCache(process.cwd())
+  const ledger = resolveLedger(process.cwd())
   const res = await waitForGate(
     async () => {
       const state = await fetchPrActState(rev, t, {
@@ -250,7 +260,9 @@ async function cmdWait(argv: string[]): Promise<void> {
         docsPaths: act.docsPaths,
         docsMaxRounds: act.docsMaxRounds,
         requireApproval: act.requireApproval,
+        approvers: act.approvers,
         stateCache: cache,
+        resolveLedger: ledger,
       })
       return { state, gate: evaluateExitGate(state, { requireApproval: act.requireApproval }) }
     },
@@ -1004,6 +1016,8 @@ async function cmdMerge(argv: string[]): Promise<void> {
       docsPaths: act.docsPaths,
       docsMaxRounds: act.docsMaxRounds,
       requireApproval: act.requireApproval,
+      approvers: act.approvers,
+      resolveLedger: resolveLedger(process.cwd()),
     })
 
     // a closed/merged PR can pass the gate (threads resolved, checks
@@ -1389,6 +1403,23 @@ function commentArg(argv: string[]): string | null {
   return i >= 0 ? (argv[i + 1] ?? null) : null
 }
 
+/** Record a resolve in the ledger — the source of "this thread was
+ *  resolved before" for the reopened-thread cycle-guard. Best-effort: a
+ *  missing git dir or an unwritable ledger means the reopen is not
+ *  detected, never a crash. */
+function recordResolve(rev: ReviewFacade, argv: string[], threadId: string): void {
+  try {
+    const ledger = resolveLedger(process.cwd())
+    if (ledger === null) {
+      return
+    }
+    const target = resolvePr(rev, argv)
+    ledger.record({ repo: target.repo, pr: target.pr, thread: threadId })
+  } catch {
+    // recording is best-effort — the resolve itself already landed
+  }
+}
+
 function cmdResolve(argv: string[]): void {
   ensureAuth('reviews', { dir: process.cwd() }, { prefer: loadBroConfig().connectors })
   const rev = reviewHost(undefined, loadBroConfig().connectors)
@@ -1415,6 +1446,10 @@ function cmdResolve(argv: string[]): void {
   } else {
     rev.resolveThread(id)
     console.error(`act: resolved ${id}`)
+    // Record the resolve — the reopened-thread cycle-guard needs to know
+    // this thread was resolved before. The ledger, not the state cache:
+    // the cache TTL is 30s, so its entry is gone between polls.
+    recordResolve(rev, argv, id)
     // a silent resolve is the fix verdict; a comment is a reject/defer
     // reason (skills/act/SKILL.md) — the documented defer reply names
     // its bead ("deferred to <id>"), which is the one defer signal a
@@ -1599,12 +1634,15 @@ export async function runActCommand(argv: string[]): Promise<void> {
     return
   }
   if (cmd === '--help' || cmd === '-h') {
-    usage()
+    usage(0)
   }
   const handler = COMMANDS[cmd]
   if (!handler) {
     console.error(`unknown command: ${cmd}`)
     usage()
+  }
+  if (hasHelpFlag(rest)) {
+    usage(0)
   }
   await handler(rest)
 }

@@ -281,6 +281,30 @@ export interface PublishResult {
   replaceExternalRef?: boolean
 }
 
+/** What `claim()` actually guarantees on this store — declared, never
+ *  assumed (spec specs/bro-l8c4f.12). Remote connectors all implement
+ *  assign→verify-reread, which detects a held claim and settles most
+ *  races but cannot promise a single winner; only a backend whose
+ *  claim is a single-winner write (bd's `--claim` against one store)
+ *  may declare `exclusive`. */
+export interface ClaimCapability {
+  /** 'exclusive' — a successful claim() return is sole ownership
+   *  within `authority`. 'best-effort' — claim() performs the
+   *  assignment and refuses claims it can see, but a residual
+   *  interleaving window can still seat two winners: a marker, never
+   *  a lease. */
+  strength: 'exclusive' | 'best-effort'
+  /** The identity a claim binds — 'actor' resolves per worker (bd's
+   *  actor chain); 'viewer' is the API account the credential
+   *  presents, so every worker on one token claims as ONE identity. */
+  identity: 'actor' | 'viewer'
+  /** The boundary `strength` holds inside — 'store': the addressed
+   *  store instance alone (independently syncing replicas are
+   *  separate authorities, never one); 'service': the backend's
+   *  shared namespace (workspace, site, repo). */
+  authority: 'store' | 'service'
+}
+
 export interface TaskStore {
   list<T extends TaskRow = TaskRow>(filter?: TaskFilter): T[]
   /** the claimable queue — backend applies its own ordering/filters */
@@ -296,8 +320,20 @@ export interface TaskStore {
   create<T extends TaskRow = TaskRow>(input: TaskInput): T
   /** field patch — keys map to `--<key> <value>` on the backend */
   update(id: string, patch: Record<string, string | number>): void
-  /** atomic assignee + in_progress — throws when already claimed */
+  /** assignee + in_progress transition — throws when already claimed.
+   *  What a successful return MEANS is `claimCapability`'s word:
+   *  'exclusive' makes it sole ownership inside the declared
+   *  authority; 'best-effort' makes it an assignment marker — it
+   *  refuses every race it can see but cannot promise a single
+   *  winner, and two workers behind one 'viewer' credential claim as
+   *  one identity. */
   claim(id: string): void
+  /** The claim guarantee this backend makes — OPTIONAL capability:
+   *  absence means undeclared, and exclusivity-seeking callers treat
+   *  it as non-exclusive (fail closed) while assignment flows keep
+   *  working regardless (fail open). A store never upcodes: a
+   *  best-effort implementation never reports 'exclusive'. */
+  claimCapability?(): ClaimCapability
   /** the identity `claim()` writes to assignee — '' when unresolvable.
    *  Stores without a claim-actor concept omit it; ownership checks then
    *  keep the claim marker's word (fail-open) rather than disprove a
@@ -650,6 +686,12 @@ function makeStore(x: StoreExec): TaskStore {
     claim: (id) => {
       x.run(['update', id, '--claim'])
     },
+    // `bd update --claim` is a single-winner write against the
+    // ADDRESSED store — two workers pinned to one store get a real
+    // lease. 'store' authority keeps it honest: two syncing replicas
+    // are two stores, so exclusivity never crosses the sync edge
+    // (spec specs/bro-l8c4f.12).
+    claimCapability: () => ({ strength: 'exclusive', identity: 'actor', authority: 'store' }),
     actor: () => x.actor(),
     reopen: (id) => {
       // NOT `bd reopen` — that verb is closed→open only and no-ops on

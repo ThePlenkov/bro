@@ -11,7 +11,7 @@
  *   schema                       print the commented plan template
  */
 import { readFileSync } from 'node:fs'
-import { facade, loadConfig } from '@broject/core'
+import { facade, hasHelpFlag, loadConfig, printUsage, type ExitCode } from '@broject/core'
 import {
   captureWtf,
   checkBeads,
@@ -29,8 +29,8 @@ const VALUE_FLAGS: ReadonlySet<string> = new Set(['--wtf'])
 
 const retroPositionals = (argv: string[]): string[] => positionals(argv, VALUE_FLAGS)
 
-function usage(exitCode = 1): never {
-  console.error(`Usage: bro retrospect <command> [args…]
+function usage(exitCode: ExitCode = 2): never {
+  printUsage(`Usage: bro retrospect <command> [args…]
 
 Commands:
   capture <complaint…>   Open a wtf bead — the user's complaint verbatim + context
@@ -39,8 +39,7 @@ Commands:
   list                   Retro beads and open wtf beads
   schema                 Print the commented plan template
 
-  bro wtf <complaint…>   alias for \`bro retrospect capture\``)
-  process.exit(exitCode)
+  bro wtf <complaint…>   alias for \`bro retrospect capture\``, exitCode)
 }
 
 /** A captured complaint or a recorded retro is a human moment —
@@ -191,7 +190,7 @@ function rejectUnknownFlags(sub: string, known: Set<string>, rest: string[]): vo
 function wantsHelp(sub: string, rest: string[]): boolean {
   return sub === 'capture'
     ? rest[0] === '--help' || rest[0] === '-h'
-    : rest.includes('--help') || rest.includes('-h')
+    : hasHelpFlag(rest)
 }
 
 /** These subs take no positional args — a stray one is a typo, not input. */

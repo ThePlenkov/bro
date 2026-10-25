@@ -157,15 +157,28 @@ export function classifyExitCause(
   exitStatus: number,
   now = Date.now()
 ): ExitClassification {
+  return classifyExitCauseParts([logTail], exitStatus, now)
+}
+
+/** The multi-tail form — each tail matches on its own. Concatenating
+ *  them first would let a pattern be fabricated across the join
+ *  boundary ('…4' + '29…' → '429'), and no separator chars fix that:
+ *  `\s`- and `.`-spanning patterns cross every delimiter. Cause
+ *  precedence is unchanged — the first CAUSE_PATTERNS cause with a
+ *  matching tail wins, and resetAt parses from THAT tail. */
+export function classifyExitCauseParts(
+  tails: string[],
+  exitStatus: number,
+  now = Date.now()
+): ExitClassification {
   if (exitStatus === 0) {
     return { cause: 'ok' }
   }
   for (const [cause, patterns] of CAUSE_PATTERNS) {
-    if (patterns.some((re) => re.test(logTail))) {
+    const hit = tails.find((t) => patterns.some((re) => re.test(t)))
+    if (hit !== undefined) {
       const resetAt =
-        cause === 'rate_limited' || cause === 'quota'
-          ? parseResetAt(logTail, now)
-          : undefined
+        cause === 'rate_limited' || cause === 'quota' ? parseResetAt(hit, now) : undefined
       return resetAt === undefined ? { cause } : { cause, resetAt }
     }
   }
@@ -264,6 +277,10 @@ export interface AgentInfo {
   class?: string
   worktree?: string
   log?: string
+  /** The worker's stderr capture beside `log` — local backends split fd
+   *  2 into `<agentId>.stderr` so `log` stays the agent-updates stream
+   *  (spec bro-e2ec0); absent on remote backends and pre-split entries. */
+  stderrLog?: string
 }
 
 export interface AgentCapabilities {

@@ -17,7 +17,7 @@ CLI (`packages/cli/src/commands/stack.ts`).
 npm i @broject/stack
 ```
 
-Requires Node ≥ 22. ESM only.
+Requires Node ≥ 22.18. ESM only.
 
 ## Surface
 

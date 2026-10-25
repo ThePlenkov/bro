@@ -5,7 +5,8 @@ description: Install bro and wire it into a repo in under a minute.
 
 ## Requirements
 
-- **Node ≥ 22** — bro runs TypeScript natively, no build step
+- **Node ≥ 22.18** — bro runs TypeScript natively (unflagged type
+  stripping), no build step
 - **`gh`**, authenticated — review data comes from the GitHub API and
   `bro setup` requires it. On GitLab repos the review facade uses an
   authenticated **`glab`**, but `gh` stays a setup prerequisite
@@ -22,13 +23,17 @@ npm i -g @broject/bro          # or keep bro around
 ## Wire a repo
 
 ```bash
-bro setup              # checks gh + bd, writes bro.config.json
+bro setup              # checks gh + bd, writes bro.config.local.json
 bro setup --beads      # also: bd init --stealth + debt-pipeline formula
 bro setup --skills     # also: thin skill wrappers for your agent
 ```
 
-`bro.config.json` is written per-clone and gitignored — store choices are
-machine-local. Fresh checkouts run on defaults until set up.
+`bro setup` writes `bro.config.local.json` — the gitignored
+machine-local layer, excluded via `.git/info/exclude` — and never
+touches the committed `bro.config.{ts,json}` the repo shares as policy.
+Layers merge **local > project > global** (`~/.config/bro/config.*`) —
+see [Configuration](/docs/configuration). Fresh checkouts run on
+defaults until set up.
 
 ## First sweep
 
@@ -41,8 +46,9 @@ bro review debt next       # the top open finding — claim, fix, set done
 
 ## As an agent plugin
 
-The repo is a plugin marketplace — one `bro` plugin packaged per client,
-same skills and lifecycle hooks everywhere:
+The repo is a plugin marketplace — one `bro` plugin packaged per client.
+The skills tree is identical everywhere; the hook surface differs per
+host — see the [capability matrix](/docs/integrations#capability-matrix):
 
 | Client | Install |
 | ------ | ------- |

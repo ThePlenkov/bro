@@ -63,7 +63,7 @@ Requires: `node >= 22.18`, `gh` authenticated, `bd`
 ([beads](https://github.com/gastownhall/beads)) — it's a default store, so
 it's required unless you opt out. That's it. No tokens to babysit, no
 config files to confess to. (Zero-beads fallback: `"stores": ["jsonl"]`
-in `bro.config.json`.)
+in `bro.config.local.json`.)
 
 ## Install as an agent plugin
 
@@ -79,6 +79,7 @@ per client:
 | OpenCode | add `"plugin": ["@broject/bro"]` to `opencode.json`, or `bro plugins install opencode` |
 | Kilo | `bro plugins install kilo` |
 | pi | `bro plugins install pi` |
+| omp | `omp plugin install ./plugins/omp/bro`, or `bro plugins install omp` |
 
 Every adapter ships the same skills and lifecycle hooks (session
 rehydration, review-gate stop, self-approve for `bro`/`bd`) wired through
@@ -87,6 +88,14 @@ fail-open. Cursor's adapter is `plugins/cursor/bro`; its hooks speak
 Cursor's schema (`additional_context`, one `followup_message` on stop).
 Cloud agents do not run `sessionStart`, so the first prompt rehydrates
 once.
+
+The pi and omp adapters are **generated** from a shared core
+(`packages/cli/src/adapter/`): the core holds the bro mechanics, each
+client holds only its host's own vocabulary, and the build folds them
+into one standalone file. omp's plugin adds the mode bridges — Plan,
+Goal, Vibe, Prewalk and Advisor keep omp's own semantics, and bro
+supplies the durable state they lack (claims, specs, the judge, the
+debt ledger). See [specs/bro-omp-plugin.md](specs/bro-omp-plugin.md).
 
 OpenCode, Kilo, and pi are native plugins the CLI installs itself —
 `bro plugins install <client>` writes the adapter module to the client's
@@ -166,7 +175,7 @@ Full reference: [broject.dev/docs](https://broject.dev/docs).
 | `bro doctor [--json]` | Diagnose Node, git, auth, beads, hooks, providers, and configuration |
 | `bro check [--evaluate] [--json]` | Run the repo's Sverka workflow; `--evaluate` applies its policy gate |
 | `bro plan run <plan.toml>` / `bro plan validate` | Execute or check a validated plan |
-| `bro plugins [list\|install\|uninstall]` | Print the registry, or install client adapters (opencode, kilo, pi) |
+| `bro plugins [list\|install\|uninstall]` | Print the registry, or install client adapters (opencode, kilo, pi, omp) |
 | `bro task\|store …` | Document verbs; `--global` targets the user-level store |
 | `bro review cleanup [--remote] [--dry-run]` | Delete local branches whose PR merged |
 

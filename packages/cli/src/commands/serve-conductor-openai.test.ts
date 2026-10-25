@@ -3,7 +3,11 @@
  *  as /v1/messages (spec bro-zkpju, epic bro-bvipw). */
 import { describe, test } from 'node:test'
 import assert from 'node:assert/strict'
-import type { SessionConfigOption, SessionUpdate } from '@agentclientprotocol/sdk'
+import { mkdtempSync, readFileSync, rmSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
+import type { SessionConfigOption, SessionUpdate, StopReason } from '@agentclientprotocol/sdk'
+import { otelJournal } from '@broject/providers'
 import { fakeAcpAgent } from '@broject/providers/testkit'
 import { conductorProxy } from './serve-conductor.ts'
 import type { ConductorConfig } from './serve-conductor.ts'
@@ -46,6 +50,7 @@ const CFG: ConductorConfig = {
   entry: { type: 'acp', command: 'dv acp' },
   cwd: '/repo',
   timeoutMs: 10_000,
+  agents: {},
 }
 
 /** Boot the conductor over `fake` — caller owns close() and gets a
@@ -104,6 +109,124 @@ describe('serve /v1/responses — the openai dialect', () => {
       assert.equal(body.usage.total_tokens, body.usage.input_tokens + body.usage.output_tokens)
       // the prompt reached the agent as a canonical user turn
       assert.match(fake.prompts[0] ?? '', /<turn role="user">ping/)
+    } finally {
+      await close()
+    }
+  })
+
+  // bro-6fk80 — a cancelled or backend-ended turn reports its own
+  // Response status, never a silent 'completed'.
+  test('a cancelled turn answers status cancelled', async () => {
+    const fake = fakeAcpAgent({
+      replyText: 'partial',
+      configOptions: [MODEL_OPTION],
+      stopReason: 'cancelled',
+    })
+    const { r, close } = await postResponses(fake, { input: 'x', stream: false })
+    try {
+      assert.equal(r.status, 200)
+      const body = await r.json()
+      assert.equal(body.status, 'cancelled')
+    } finally {
+      await close()
+    }
+  })
+
+  test('a streamed cancelled turn ends on response.cancelled, not completed', async () => {
+    const fake = fakeAcpAgent({
+      replyText: 'partial',
+      configOptions: [MODEL_OPTION],
+      stopReason: 'cancelled',
+    })
+    const { r, close } = await postResponses(fake, { input: 'x', stream: true })
+    try {
+      const ev = await evs(r)
+      assert.equal(ev.filter((e) => e.event === 'response.cancelled').length, 1)
+      assert.equal(ev.filter((e) => e.event === 'response.completed').length, 0)
+    } finally {
+      await close()
+    }
+  })
+
+  test('a non-enum acp reason answers status failed naming the reason', async () => {
+    // devin's adapter emits error/auth_required outside the acp enum —
+    // those used to report a clean 'completed'
+    const fake = fakeAcpAgent({
+      replyText: 'partial',
+      configOptions: [MODEL_OPTION],
+      stopReason: 'auth_required' as StopReason,
+    })
+    const { r, close } = await postResponses(fake, { input: 'x', stream: false })
+    try {
+      const body = await r.json()
+      assert.equal(body.status, 'failed')
+      assert.match(body.error?.message ?? '', /auth_required/)
+    } finally {
+      await close()
+    }
+  })
+
+  test('a prototype-member backend reason forwards raw — never an inherited Object value', async () => {
+    // 'constructor'/'toString' tokens must not resolve through the
+    // prototype chain into a fake mapping or status
+    const fake = fakeAcpAgent({
+      replyText: 'partial',
+      configOptions: [MODEL_OPTION],
+      stopReason: 'constructor' as StopReason,
+    })
+    const { r, close } = await postResponses(fake, { input: 'x', stream: false })
+    try {
+      const body = await r.json()
+      assert.equal(body.status, 'failed')
+      assert.equal(body.error?.message, 'bro conductor: turn ended — constructor')
+    } finally {
+      await close()
+    }
+  })
+
+  test('a cancelled stream closes the message item under its own status', async () => {
+    // the item's own status must not read 'incomplete' (a token cap)
+    // when the turn was cancelled
+    const fake = fakeAcpAgent({
+      replyText: 'partial',
+      configOptions: [MODEL_OPTION],
+      stopReason: 'cancelled',
+    })
+    const { r, close } = await postResponses(fake, { input: 'x', stream: true })
+    try {
+      const ev = await evs(r)
+      const done = ev.filter((e) => e.event === 'response.output_item.done')
+      assert.ok(done.length > 0)
+      const last = done.at(-1)?.data.item as { type: string; status: string }
+      assert.equal(last.type, 'message')
+      assert.equal(last.status, 'cancelled')
+    } finally {
+      await close()
+    }
+  })
+
+  test('a tool_call turn cancelled backend-side replays the delivered status', async () => {
+    // tool_use outranks the backend reason on the wire — the record must
+    // store that verdict or the replay answers 'cancelled' for a turn the
+    // client saw complete
+    const fake = fakeAcpAgent({
+      replyText: 'checking <tool_call>{"name":"ls","input":{"d":"/tmp"}}</tool_call>',
+      configOptions: [MODEL_OPTION],
+      stopReason: 'cancelled',
+    })
+    const { post, close } = await boot(fake)
+    try {
+      const call = () =>
+        post('/v1/responses', {
+          input: 'x',
+          tools: [{ type: 'function', name: 'ls', parameters: { type: 'object' } }],
+          stream: false,
+        })
+      const t1 = await call()
+      assert.equal(((await t1.json()) as { status: string }).status, 'completed')
+      const t2 = await call()
+      assert.equal(((await t2.json()) as { status: string }).status, 'completed')
+      assert.equal(fake.prompts.length, 1)
     } finally {
       await close()
     }
@@ -302,6 +425,114 @@ describe('serve /v1/chat/completions — the stateless chat dialect', () => {
       assert.match(fake.prompts[0] ?? '', /<turn role="user">x/)
     } finally {
       await close()
+    }
+  })
+
+  // bro-6fk80 — the finish_reason enum can't carry a cancelled/backend
+  // reason, so it forwards raw: a marker, never a silent 'stop'.
+  test('a cancelled turn reports finish_reason cancelled, not stop', async () => {
+    const fake = fakeAcpAgent({
+      replyText: 'partial',
+      configOptions: [MODEL_OPTION],
+      stopReason: 'cancelled',
+    })
+    const { r, close } = await postChat(fake)
+    try {
+      const body = await r.json()
+      assert.equal(body.choices[0].finish_reason, 'cancelled')
+    } finally {
+      await close()
+    }
+  })
+
+  test('a non-enum acp reason forwards raw as finish_reason', async () => {
+    const fake = fakeAcpAgent({
+      replyText: 'partial',
+      configOptions: [MODEL_OPTION],
+      stopReason: 'error' as StopReason,
+    })
+    const { r, close } = await postChat(fake)
+    try {
+      const body = await r.json()
+      assert.equal(body.choices[0].finish_reason, 'error')
+    } finally {
+      await close()
+    }
+  })
+
+  test('mapped canonical reasons land on real chat finish values', async () => {
+    // pause_turn/refusal are KNOWN canonicals — they must not leak raw
+    // past the enum; only genuinely unmapped reasons forward raw
+    const pause = fakeAcpAgent({
+      replyText: 'x',
+      configOptions: [MODEL_OPTION],
+      stopReason: 'max_turn_requests',
+    })
+    const { r: r1, close: c1 } = await postChat(pause)
+    try {
+      assert.equal(((await r1.json()) as { choices: { finish_reason: string }[] }).choices[0]!.finish_reason, 'stop')
+    } finally {
+      await c1()
+    }
+    const refusal = fakeAcpAgent({
+      replyText: 'x',
+      configOptions: [MODEL_OPTION],
+      stopReason: 'refusal',
+    })
+    const { r: r2, close: c2 } = await postChat(refusal)
+    try {
+      assert.equal(((await r2.json()) as { choices: { finish_reason: string }[] }).choices[0]!.finish_reason, 'content_filter')
+    } finally {
+      await c2()
+    }
+  })
+
+  test('a prototype-member backend reason forwards raw as finish_reason', async () => {
+    // 'constructor' resolves through Object.prototype on a naive map
+    // lookup — it must forward as the raw token, not an inherited value
+    const fake = fakeAcpAgent({
+      replyText: 'x',
+      configOptions: [MODEL_OPTION],
+      stopReason: 'constructor' as StopReason,
+    })
+    const { r, close } = await postChat(fake)
+    try {
+      const body = await r.json()
+      assert.equal(body.choices[0].finish_reason, 'constructor')
+    } finally {
+      await close()
+    }
+  })
+
+  test('an unmapped reason overridden by a tool call still logs its otel breadcrumb', async () => {
+    // tool_use outranks the backend reason on the wire, but the anomaly
+    // stays observable — canonicalize before precedence (bro-6fk80)
+    const dir = mkdtempSync(join(tmpdir(), 'bro-otel-test-'))
+    const journalPath = join(dir, 'turns.jsonl')
+    otelJournal(journalPath)
+    const fake = fakeAcpAgent({
+      replyText: 'checking <tool_call>{"name":"ls","input":{"d":"/tmp"}}</tool_call>',
+      configOptions: [MODEL_OPTION],
+      stopReason: 'auth_required' as StopReason,
+    })
+    const { r, close } = await postChat(fake, {
+      messages: [{ role: 'user', content: 'list it' }],
+      tools: [{ type: 'function', function: { name: 'ls', description: 'list', parameters: {} } }],
+    })
+    try {
+      const body = await r.json()
+      assert.equal(body.choices[0].finish_reason, 'tool_calls')
+      const rows = readFileSync(journalPath, 'utf8')
+        .trim()
+        .split('\n')
+        .map((l) => JSON.parse(l) as { event: string; reason?: string })
+      const unmapped = rows.filter((e) => e.event === 'conductor.stop_reason.unmapped')
+      assert.equal(unmapped.length, 1)
+      assert.equal(unmapped[0]!.reason, 'auth_required')
+    } finally {
+      await close()
+      otelJournal(undefined)
+      rmSync(dir, { recursive: true, force: true })
     }
   })
 

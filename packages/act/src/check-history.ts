@@ -16,9 +16,10 @@
  * the history reads as empty (streak 0) and records as a no-op, so a
  * failing conditional check trends to "unproven", never to a crash.
  */
-import { appendFileSync, readFileSync, renameSync, statSync, writeFileSync } from 'node:fs'
+import { appendFileSync } from 'node:fs'
 import { join, resolve } from 'node:path'
 import { gitTry, withFileLock } from '@broject/core'
+import { compactLedger, parseLedger } from './ledger.ts'
 
 export interface CheckObservation {
   ts: number
@@ -42,55 +43,26 @@ export interface CheckHistory {
 /** Keep the ledger bounded — one transition per push per check grows
  *  slowly, but a wedged tool could still spam it. Compaction keeps the
  *  tail, which is all a trailing-streak read needs anyway. */
-const MAX_LEDGER_BYTES = 256 * 1024
-const KEEP_LEDGER_BYTES = 128 * 1024
-
 function parseEntries(file: string): CheckObservation[] {
-  let raw: string
-  try {
-    raw = readFileSync(file, 'utf8')
-  } catch {
-    return []
+  return parseLedger(file, isCheckObservation)
+}
+
+/** A well-formed ledger row — every field present and of the right
+ *  type. A malformed row is skipped, not fatal. */
+function isCheckObservation(e: unknown): e is CheckObservation {
+  if (typeof e !== 'object' || e === null) {
+    return false
   }
-  const out: CheckObservation[] = []
-  for (const line of raw.split('\n')) {
-    if (line.trim() === '') {
-      continue
-    }
-    try {
-      const e = JSON.parse(line) as Partial<CheckObservation>
-      if (
-        typeof e.name === 'string' &&
-        typeof e.sha === 'string' &&
-        typeof e.bucket === 'string' &&
-        typeof e.ts === 'number' &&
-        Number.isFinite(e.ts)
-      ) {
-        out.push(e as CheckObservation)
-      }
-    } catch {
-      // a torn line (crash mid-append) is skipped, not fatal
-    }
+  const o = e as Partial<CheckObservation>
+  if (typeof o.name !== 'string' || typeof o.sha !== 'string' || typeof o.bucket !== 'string') {
+    return false
   }
-  return out
+  return typeof o.ts === 'number' && Number.isFinite(o.ts)
 }
 
 /** Truncate to the newest whole lines once the file outgrows the cap —
  *  tmp+rename so a reader never sees a half-written ledger. */
-function compactIfNeeded(file: string): void {
-  try {
-    if (statSync(file).size <= MAX_LEDGER_BYTES) {
-      return
-    }
-    const raw = readFileSync(file, 'utf8')
-    const tail = raw.slice(raw.length - KEEP_LEDGER_BYTES)
-    const cut = tail.indexOf('\n')
-    writeFileSync(`${file}.tmp`, cut >= 0 ? tail.slice(cut + 1) : tail)
-    renameSync(`${file}.tmp`, file)
-  } catch {
-    // compaction is housekeeping — a failure never blocks the record
-  }
-}
+
 
 export function fileCheckHistory(file: string): CheckHistory {
   const read = (): CheckObservation[] => parseEntries(file)
@@ -108,7 +80,7 @@ export function fileCheckHistory(file: string): CheckHistory {
             if (last !== undefined && last.sha === obs.sha && last.bucket === obs.bucket) {
               return
             }
-            compactIfNeeded(file)
+            compactLedger(file)
             appendFileSync(file, `${JSON.stringify({ ...obs, ts: Date.now() })}\n`)
           },
           { waitMs: 2000, label: 'act-checks ledger' }

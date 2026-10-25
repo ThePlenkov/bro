@@ -42,6 +42,7 @@ import {
   isBatchSpawn,
   claimStep,
   classifyExitCause,
+  classifyExitCauseParts,
   cliCommandModel,
   commandCliName,
   DEFAULT_CONFIG,
@@ -91,12 +92,13 @@ import {
   type SpawnSpec,
   type SpawnWorker,
 } from '@broject/core'
+import { otelEvent } from '@broject/providers'
 import type { AcpSeam, FetchFn } from '@broject/providers'
 import { expandAgentCmd, loopSection, type LoopConfig } from '@broject/loop'
 // builtin session planes self-register on import — the connector layer
 // is the plugin host for agent backends, and admission planes ride the
 // same surface
-import './session-planes/devin.ts'
+import '@broject/devin'
 import {
   devinLogsDir,
   devinPidBead,
@@ -104,7 +106,7 @@ import {
   devinPidLog,
   devinProcDir,
   devinSessionPlane,
-} from './session-planes/devin.ts'
+} from '@broject/devin'
 import './session-planes/copilot.ts'
 import { writeCopilotCount } from './session-planes/copilot.ts'
 import { enterWorktree } from './commands/work.ts'
@@ -1464,7 +1466,14 @@ function prepareSpawn(
      *  half-state. */
     sessionQuota?: SessionQuotaLane | undefined
   }
-): { agentId: string; promptFile: string; log: string; exitFile: string; reservation?: string } {
+): {
+  agentId: string
+  promptFile: string
+  log: string
+  stderrLog: string
+  exitFile: string
+  reservation?: string
+} {
   const registry = readAgentRegistry(dir)
   const existing = registry[spec.molStep]
   // A batch spawn must not walk into a provider wall the fleet already
@@ -1552,14 +1561,16 @@ function commitSpawn(
   },
   agentId: string,
   guard: { claimed: boolean; actor: string | undefined; phantom: boolean }
-): { promptFile: string; log: string; exitFile: string } {
+): { promptFile: string; log: string; stderrLog: string; exitFile: string } {
   mkdirSync(home, { recursive: true })
   const promptFile = join(home, `${agentId}.prompt.md`)
   const log = join(home, `${agentId}.log`)
+  const stderrLog = join(home, `${agentId}.stderr`)
   const exitFile = join(home, `${agentId}.exit`)
   rmSync(exitFile, { force: true })
   writeFileSync(promptFile, spec.prompt)
   const logFrom = logSizeOrZero(log)
+  const stderrFrom = logSizeOrZero(stderrLog)
   // exitStatus: undefined clears a respawned entry's stale harvest — the
   // new run must not read as already-exited (undefined keys drop out of
   // the serialized registry). pid/pidStart/spawnError likewise — a claim
@@ -1574,6 +1585,11 @@ function commitSpawn(
     worktree: resolve(spec.repoRoot),
     log,
     logFrom,
+    // the worker's stderr lands in a sibling capture, never the .log —
+    // the .log stays the agent-updates stream; the classifier still
+    // reads this tail so provider walls classify (spec bro-e2ec0)
+    stderrLog,
+    stderrFrom,
     stopped: false,
     exitStatus: undefined,
     // a respawned entry's cause/resetAt belonged to the PREVIOUS run —
@@ -1601,7 +1617,7 @@ function commitSpawn(
     ...opts.entry?.(agentId),
   })
   recordSpawnClaim(dir, spec, agentId, backend, guard, opts.claimAs)
-  return { promptFile, log, exitFile }
+  return { promptFile, log, stderrLog, exitFile }
 }
 
 /** The byte offset a fresh run's log starts at — the log is append-mode
@@ -1758,6 +1774,34 @@ function readLogTail(log: unknown, from?: unknown): string {
  *  (pre-taxonomy runs, or a harvested entry whose patch failed). The
  *  registry write is advisory — the entry object is updated either way
  *  so callers decide on THIS read's verdict, not the store's health. */
+/** The provider's wall — an ACCOUNT fact, not this agent's: every lane
+ *  member shares the budget, so the fleet must see it (spec bro-g0izo).
+ *  Only the devin lane — another provider's wall is not this lane's. */
+function emitProviderWall(
+  entry: AgentRegistryEntry,
+  molStep: string,
+  cause: string,
+  resetAt: string | undefined
+): void {
+  if (cause !== 'rate_limited' && cause !== 'quota') {
+    return
+  }
+  if (entry.sessionKind !== 'devin') {
+    return
+  }
+  try {
+    otelEvent('lane.devin.wall', {
+      provider: typeof entry.provider === 'string' ? entry.provider : 'unknown',
+      cause,
+      until: resetAt ?? '',
+      agent: entry.agentId,
+      step: molStep,
+    })
+  } catch {
+    // telemetry must not stall the harvest
+  }
+}
+
 function ensureExitCause(
   dir: string,
   home: string | null,
@@ -1773,9 +1817,30 @@ function ensureExitCause(
   if (typeof entry.exitStatus !== 'number' || isAgentCause(entry.cause)) {
     return
   }
-  const c = classifyExitCause(readLogTail(entry.log, entry.logFrom), entry.exitStatus)
+  // classification input = this run's .log tail + .stderr tail (spec
+  // bro-e2ec0) — provider walls the child prints on stderr classify from
+  // the capture, the event stream no longer carries them. The tails
+  // classify INDEPENDENTLY — a joined read could fabricate a wall token
+  // across the boundary ('…4' + '29…' → '429')
+  const c = classifyExitCauseParts(
+    [readLogTail(entry.log, entry.logFrom), readLogTail(entry.stderrLog, entry.stderrFrom)],
+    entry.exitStatus
+  )
+  // the tails were read off-lock — a respawn stamping the entry between
+  // the two reads feeds the old run new-run bytes; a DIFFERENT
+  // generation owning the step now suppresses classify + emit. A
+  // missing row (reaped, or a caller's synthesized snapshot) can't
+  // inject new bytes — classify anyway
+  const cur = readAgentRegistry(dir)[molStep]
+  if (
+    cur !== undefined &&
+    (cur.agentId !== entry.agentId || cur.spawnedAt !== entry.spawnedAt)
+  ) {
+    return
+  }
   entry.cause = c.cause
   entry.resetAt = c.resetAt
+  emitProviderWall(entry, molStep, c.cause, c.resetAt)
   // lifecycle — the agent-exit transition, emitted once per run at the
   // harvest (the early return above skips re-emit on a carried cause).
   // The .exit file's mtime is the honest wall-clock; the harvest's own
@@ -1903,13 +1968,168 @@ const entryPidStart = (entry: AgentRegistryEntry): string | undefined =>
     ? entry.pidStart
     : undefined
 
+/** The wrapper's death is not its unit's death: a TERM-resistant
+ *  descendant survives the group signal, so the stop may only record
+ *  `stopped` when the WHOLE execution unit is gone, not the sh-wrapper
+ *  alone (bro-l8c4f.3). kill(-pgid, 0) gates — ESRCH is a group that
+ *  no longer exists (ESRCH-or-hard-failure reads dead, the rule
+ *  pidAlive applies; EPERM is a live group we cannot signal) — but it
+ *  also counts the unreaped wrapper's own zombie, so live members are
+ *  read from /proc the way procStat reads one process: state 'Z' is
+ *  nobody. `minStart` (the wrapper's recorded pidStart) bounds a
+ *  member's /proc starttime from below — our descendants forked after
+ *  the wrapper, so a member older than it belongs to a pgid the kernel
+ *  recycled after our group died, not to this unit.
+ *
+ *  Two edges where the probe cannot answer, and the answer differs by
+ *  platform: on Linux a vanished /proc, or a member stat that fails
+ *  for any reason but ENOENT, stays fail-open (pidAlive's rule: never
+ *  a false "the unit is dead"); off Linux /proc never exists at all,
+ *  so the group probe cannot tell the wrapper's zombie from a live
+ *  member — there the caller's pid check is the probe, and a
+ *  descendant that outlives its wrapper is a documented blind spot
+ *  (failing open would spin the whole kill-wait on EVERY stop and the
+ *  `stopped` marker would never land). */
+/** One parsed row of /proc/<pid>/stat — post-comm fields split the way
+ *  procStat does (index 0 = state/field 3). */
+interface ProcEntry {
+  pid: number
+  state: string
+  ppid: number
+  pgrp: number
+  start: string
+}
+
+/** One shared scan of /proc for the group and tree probes — `null`
+ *  when /proc itself is unreadable; `unverified` marks at least one
+ *  non-ENOENT stat failure (a process we could not inspect). */
+function scanProc(): { entries: ProcEntry[]; unverified: boolean } | null {
+  let names: string[]
+  try {
+    names = readdirSync('/proc')
+  } catch {
+    return null
+  }
+  const entries: ProcEntry[] = []
+  let unverified = false
+  for (const name of names) {
+    const pid = Number(name)
+    if (!Number.isInteger(pid) || pid <= 0) {
+      continue
+    }
+    let stat: string
+    try {
+      stat = readFileSync(`/proc/${pid}/stat`, 'utf8')
+    } catch (e) {
+      // ENOENT/ENOTDIR is the process vanishing mid-scan — anything
+      // else (EACCES under hidepid, …) is a process we could not inspect
+      const code = (e as NodeJS.ErrnoException).code
+      if (code !== 'ENOENT' && code !== 'ENOTDIR') {
+        unverified = true
+      }
+      continue
+    }
+    const rest = stat.slice(stat.lastIndexOf(')') + 2).split(' ')
+    // rest: state, ppid, pgrp, … — the same split procStat uses
+    entries.push({
+      pid,
+      state: rest[0] ?? '',
+      ppid: Number(rest[1]),
+      pgrp: Number(rest[2]),
+      start: rest[19] ?? '',
+    })
+  }
+  return { entries, unverified }
+}
+
+function groupMemberAlive(pgid: number, minStart?: string): boolean {
+  if (!Number.isInteger(pgid) || pgid <= 0) {
+    return false
+  }
+  try {
+    process.kill(-pgid, 0)
+  } catch (e) {
+    if ((e as NodeJS.ErrnoException).code !== 'EPERM') {
+      return false
+    }
+  }
+  const scan = scanProc()
+  if (scan === null) {
+    return process.platform === 'linux'
+  }
+  const min = minStart === undefined ? Number.NaN : Number(minStart)
+  for (const e of scan.entries) {
+    if (e.state === 'Z' || e.pgrp !== pgid) {
+      continue
+    }
+    const start = Number(e.start)
+    if (!Number.isFinite(min) || !(start > 0) || start >= min) {
+      return true
+    }
+  }
+  // no confirmed member — but a process we could not inspect might be
+  // one: fail open, never a false "the unit is dead"
+  return scan.unverified
+}
+
+/** The wrapper's process-TREE snapshot — every descendant pid plus its
+ *  /proc starttime, walked over ppid links. A descendant that escaped
+ *  the process GROUP (setsid, its own session) is invisible to
+ *  groupMemberAlive but stays in this list: the tree link breaks when
+ *  the wrapper dies and the survivor reparents to init, so the
+ *  snapshot must be taken while the parentage is still intact, and
+ *  pid+starttime identity is what keeps a recycled pid from faking
+ *  death. Empty where /proc is absent (non-Linux). */
+function descendantsOf(root: number): Array<{ pid: number; start?: string }> {
+  const scan = scanProc()
+  if (scan === null) {
+    return []
+  }
+  const children = new Map<number, number[]>()
+  const starts = new Map<number, string>()
+  for (const e of scan.entries) {
+    const list = children.get(e.ppid)
+    if (list === undefined) {
+      children.set(e.ppid, [e.pid])
+    } else {
+      list.push(e.pid)
+    }
+    if (e.start !== '') {
+      starts.set(e.pid, e.start)
+    }
+  }
+  const out: Array<{ pid: number; start?: string }> = []
+  const seen = new Set<number>([root])
+  const queue = [root]
+  for (let cur = queue.shift(); cur !== undefined; cur = queue.shift()) {
+    for (const c of children.get(cur) ?? []) {
+      if (seen.has(c)) {
+        continue
+      }
+      seen.add(c)
+      out.push({ pid: c, start: starts.get(c) })
+      queue.push(c)
+    }
+  }
+  return out
+}
+
 /** Live state for a registry entry under this backend. */
 function nativeState(dir: string, home: string | null, molStep: string, entry: AgentRegistryEntry): AgentState {
   // liveness first: a 'stopped' marker on a pid that is still alive means
   // SIGTERM hasn't landed yet — the agent IS still running, and dedup
-  // must keep refusing a respawn that would run alongside it
+  // must keep refusing a respawn that would run alongside it. The unit,
+  // not the wrapper: a dead wrapper's group can still hold a
+  // TERM-resistant descendant, and reporting lost/exited over it would
+  // admit a respawn beside a live writer (bro-l8c4f.3). kill(-pgid,0)
+  // short-circuits before any /proc scan, so dead-group entries — the
+  // common stale row — cost one syscall; the wrapper's pidStart bounds
+  // members so a recycled pgid can't fake liveness.
   const pid = typeof entry.pid === 'number' ? entry.pid : undefined
-  if (pid !== undefined && pidAlive(pid, entryPidStart(entry))) {
+  if (
+    pid !== undefined &&
+    (pidAlive(pid, entryPidStart(entry)) || groupMemberAlive(pid, entryPidStart(entry)))
+  ) {
     touchWorkMarker(dir, entry.agentId)
     return 'running'
   }
@@ -1950,6 +2170,7 @@ function toInfo(dir: string, home: string | null, molStep: string, entry: AgentR
     ...infoProvenance(entry),
     worktree: typeof entry.worktree === 'string' ? entry.worktree : undefined,
     log: typeof entry.log === 'string' ? entry.log : undefined,
+    stderrLog: typeof entry.stderrLog === 'string' ? entry.stderrLog : undefined,
   }
 }
 
@@ -2026,7 +2247,7 @@ export function makeNativeConnector(ctx: ConnectorCtx, env: AgentConnectorEnv): 
       // fleet memo exists: a slow beads store must not hold the lock.
       const mol = stepParent(spec.beadsDir, spec.molStep)
       return withAgentRegistryLock(dir, () => {
-        const { agentId, promptFile, log, exitFile, reservation } = prepareSpawn(
+        const { agentId, promptFile, log, stderrLog, exitFile, reservation } = prepareSpawn(
           dir,
           home,
           'native',
@@ -2037,9 +2258,17 @@ export function makeNativeConnector(ctx: ConnectorCtx, env: AgentConnectorEnv): 
             sessionQuota: sessionQuotaOf(env, 'native', spec, command),
           }
         )
-        const fd = openSync(log, 'a')
+        // the worker's stderr gets its own append fd — the .log stays
+        // the agent-updates stream; the child/agent noise (and every
+        // template worker's diagnostics) lands in .stderr (bro-e2ec0).
+        // Both open INSIDE the guard — a throw must hand the session
+        // reservation back like any other spawn failure, not strand it.
+        let fd: number | undefined
+        let errFd: number | undefined
         let spawned: AgentRegistryEntry
         try {
+          fd = openSync(log, 'a')
+          errFd = openSync(stderrLog, 'a')
           // the wrapper captures $? into the .exit file — the only exit
           // record a detached process can leave once the parent is gone.
           // Worker payloads (spec bro-5hx1.1): a 'template' worker's
@@ -2107,7 +2336,7 @@ export function makeNativeConnector(ctx: ConnectorCtx, env: AgentConnectorEnv): 
                   agentEnvPins(spec, agentId, promptFile, cliBadge, mol)
                 ),
               },
-              stdio: ['ignore', fd, fd],
+              stdio: ['ignore', fd, errFd],
               detached: true,
             }
           )
@@ -2152,7 +2381,12 @@ export function makeNativeConnector(ctx: ConnectorCtx, env: AgentConnectorEnv): 
           }
           throw err
         } finally {
-          closeSync(fd)
+          if (fd !== undefined) {
+            closeSync(fd)
+          }
+          if (errFd !== undefined) {
+            closeSync(errFd)
+          }
         }
         return toInfo(dir, home, spec.molStep, spawned)
       })
@@ -2188,7 +2422,25 @@ export function makeNativeConnector(ctx: ConnectorCtx, env: AgentConnectorEnv): 
       }
       const [molStep, entry] = hit
       const pid = typeof entry.pid === 'number' ? entry.pid : undefined
-      if (pid !== undefined && pidAlive(pid, entryPidStart(entry))) {
+      const start = pid === undefined ? undefined : entryPidStart(entry)
+      // The unit check lives outside the signal block: a repeated `down`
+      // can find the wrapper already dead while a descendant still holds
+      // the group — the lock guard below must see it even when no signal
+      // was sent. `unit` stays empty without a live wrapper (the tree
+      // link is already broken by then — the snapshot only works
+      // pre-death).
+      let unit: Array<{ pid: number; start?: string }> = []
+      const unitAlive = () =>
+        pid !== undefined &&
+        (pidAlive(pid, start) ||
+          groupMemberAlive(pid, start) ||
+          unit.some((d) => pidAlive(d.pid, d.start)))
+      if (pid !== undefined && pidAlive(pid, start)) {
+        // the tree snapshot rides BEFORE the signal: a descendant that
+        // escaped the group (setsid) is invisible to groupMemberAlive,
+        // and once the wrapper dies it reparents to init — the
+        // pre-signal pid+starttime pin is the only handle left on it
+        unit = descendantsOf(pid)
         try {
           process.kill(-pid, 'SIGTERM') // detached → own process group
         } catch {
@@ -2199,9 +2451,13 @@ export function makeNativeConnector(ctx: ConnectorCtx, env: AgentConnectorEnv): 
         }
         // let the signal land before recording the stop — `stopped` on a
         // still-living pid would let a respawn run alongside the dying
-        // agent (nativeState reports live pids as running regardless)
+        // agent (nativeState reports live pids as running regardless).
+        // The unit, not the wrapper, is the wait: a TERM-resistant
+        // descendant outlives the sh-wrapper it was spawned under, and
+        // `stopped` over it would free a respawn onto a live writer
+        // (bro-l8c4f.3)
         const deadline = Date.now() + 2_000
-        while (pidAlive(pid, entryPidStart(entry)) && Date.now() < deadline) {
+        while (unitAlive() && Date.now() < deadline) {
           await new Promise((r) => setTimeout(r, 25))
         }
       }
@@ -2214,9 +2470,9 @@ export function makeNativeConnector(ctx: ConnectorCtx, env: AgentConnectorEnv): 
           cur === undefined ||
           cur.agentId !== entry.agentId ||
           cur.spawnedAt !== entry.spawnedAt ||
-          (pid !== undefined && pidAlive(pid, entryPidStart(entry)))
+          unitAlive()
         ) {
-          return // respawned or still alive — the live run owns the entry
+          return // respawned, or the unit (wrapper/descendant) lives — the live run owns the entry
         }
         try {
           patchAgentRegistry(dir, molStep, { stopped: true })
@@ -2369,6 +2625,7 @@ function toTmuxInfo(
     ...infoProvenance(entry),
     worktree: typeof entry.worktree === 'string' ? entry.worktree : undefined,
     log: typeof entry.log === 'string' ? entry.log : undefined,
+    stderrLog: typeof entry.stderrLog === 'string' ? entry.stderrLog : undefined,
   }
 }
 
@@ -2411,7 +2668,7 @@ export function makeTmuxConnector(ctx: ConnectorCtx, env: AgentConnectorEnv): Ag
         // the session name derives from the agentId prepareSpawn
         // resolves — entry callback, not a precomputed name, because a
         // tampered entry's unsafe id is reminted inside
-        const { agentId, promptFile, log, exitFile, reservation } = prepareSpawn(
+        const { agentId, promptFile, log, stderrLog, exitFile, reservation } = prepareSpawn(
           dir,
           home,
           'tmux',
@@ -2481,7 +2738,7 @@ export function makeTmuxConnector(ctx: ConnectorCtx, env: AgentConnectorEnv): Ag
         // re-parses into a different program.
         warnNoPromptFile(worker, command)
         const runLine = workerRunLine(worker, command, promptFile)
-        const paneScript = `. ${shQuote(envFile)}; rm -f ${shQuote(envFile)}; { ${runLine}; s=$?; printf %s "$s" > ${shQuote(exitFile)}; } 2>&1 | tee -a ${shQuote(log)}`
+        const paneScript = `. ${shQuote(envFile)}; rm -f ${shQuote(envFile)}; { ${runLine}; s=$?; printf %s "$s" > ${shQuote(exitFile)}; } 2>> ${shQuote(stderrLog)} | tee -a ${shQuote(log)}`
         const paneCmd = `sh -c ${shQuote(paneScript)}` // NOSONAR — operator-configured agent command (same contract as native/loop)
         const res = tmuxRun(socket, [
           'new-session',
@@ -2983,6 +3240,7 @@ export function makeGascityConnector(ctx: ConnectorCtx, env: AgentConnectorEnv):
       ...infoProvenance(entry),
       worktree: typeof entry.worktree === 'string' ? entry.worktree : undefined,
       log: typeof entry.log === 'string' ? entry.log : undefined,
+      stderrLog: typeof entry.stderrLog === 'string' ? entry.stderrLog : undefined,
     }
   }
 
@@ -3685,6 +3943,7 @@ function toDockerInfo(
     ...infoProvenance(entry),
     worktree: typeof entry.worktree === 'string' ? entry.worktree : undefined,
     log: typeof entry.log === 'string' ? entry.log : undefined,
+    stderrLog: typeof entry.stderrLog === 'string' ? entry.stderrLog : undefined,
   }
 }
 
@@ -3827,7 +4086,7 @@ export function makeDockerConnector(ctx: ConnectorCtx, env: AgentConnectorEnv): 
       const image = dockerImageFor(spec, knobs)
       const mol = stepParent(spec.beadsDir, spec.molStep)
       return withAgentRegistryLock(dir, () => {
-        const { agentId, promptFile, log, exitFile, reservation } = prepareSpawn(
+        const { agentId, promptFile, log, stderrLog, exitFile, reservation } = prepareSpawn(
           dir,
           home,
           'docker',
@@ -3876,7 +4135,7 @@ export function makeDockerConnector(ctx: ConnectorCtx, env: AgentConnectorEnv): 
           // worker a reaper so grandchildren can't zombie inside; --rm
           // removes the corpse on exit so `docker ps -a` doesn't fill
           // with bro litter and the name frees for a respawn.
-          const wrapper = `{ ${runLine}; s=$?; printf %s "$s" > ${shQuote(exitFile)}; } >> ${shQuote(log)} 2>&1`
+          const wrapper = `{ ${runLine}; s=$?; printf %s "$s" > ${shQuote(exitFile)}; } >> ${shQuote(log)} 2>> ${shQuote(stderrLog)}`
           const res = dockerRun(
             dockerRunArgv(name, spec, dockerMounts(spec), envFile, agentId, promptFile, cliBadge, mol, runArgs, image, wrapper)
           )
@@ -4739,6 +4998,10 @@ export function makeCopilotConnector(ctx: ConnectorCtx, env: AgentConnectorEnv):
               prUrl: undefined,
               attach: undefined,
               log: undefined,
+              // no local worker — nothing splits into the capture, so
+              // the entry must not name a .stderr nobody will write
+              stderrLog: undefined,
+              stderrFrom: undefined,
             }),
             cap: { max: fleetCapOf(env), env },
             sessionQuota: copilotSessionQuota(env),

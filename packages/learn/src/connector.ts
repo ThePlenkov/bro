@@ -31,6 +31,8 @@ import {
 } from 'node:fs'
 import { basename, dirname, isAbsolute, join, relative, resolve } from 'node:path'
 import {
+  beadsDir,
+  beadsStoreStamp,
   getTasksAsync,
   gitTry,
   gitUpstreamBehind,
@@ -378,60 +380,10 @@ interface LessonSnapshot {
   lessons: Lesson[]
 }
 
-/** `.beads` for this ctx — BEADS_DIR when an agent spawn pinned it,
- *  else the sibling of the common git dir (the main checkout; linked
- *  worktrees share it). null when neither resolves. */
-function beadsDir(dir: string): string | null {
-  const env = process.env.BEADS_DIR
-  if (env !== undefined && env !== '') {
-    return env
-  }
-  const r = gitTry(['-C', dir, 'rev-parse', '--path-format=absolute', '--git-common-dir'])
-  if (r.code !== 0 || r.out.trim() === '') {
-    return null
-  }
-  return join(dirname(r.out.trim()), '.beads')
-}
-
-/** `<beads>/{embeddeddolt,dolt}/<db>/.dolt/noms/manifest` mtime+size for
- *  every db dir — bumped on any bd write, so a snapshot keyed on it
- *  cannot be stale (issue writes over-invalidate, which is safe).
- *  `embeddeddolt` is the embedded layout, `dolt` the server-mode one —
- *  the server mutates the same manifest on commit. null means "no
- *  recognizable dolt store" → read live every probe. */
-function storeStamp(dir: string): string | null {
-  const beads = beadsDir(dir)
-  if (beads === null) {
-    return null
-  }
-  const parts: string[] = []
-  for (const root of ['embeddeddolt', 'dolt']) {
-    try {
-      for (const db of readdirSync(join(beads, root))) {
-        try {
-          const st = statSync(join(beads, root, db, '.dolt', 'noms', 'manifest'))
-          if (st.isFile()) {
-            parts.push(`${root}/${db}:${st.mtimeMs}:${st.size}`)
-          }
-        } catch {
-          // not a db dir / unreadable entry — try the next
-        }
-      }
-    } catch {
-      // root absent — the other layout may still exist
-    }
-  }
-  if (parts.length === 0) {
-    return null
-  }
-  parts.sort((a, b) => a.localeCompare(b))
-  return `${beads}|${parts.join('|')}`
-}
-
 const snapshotFile = (hooks: string): string => join(hooks, 'cache', 'lessons.json')
 
 function listLessonsCached(dir: string, hooks: string): Lesson[] {
-  const stamp = storeStamp(dir)
+  const stamp = beadsStoreStamp(dir)
   const file = snapshotFile(hooks)
   const hit = readSnapshot(file, stamp)
   if (hit !== null) {
@@ -443,7 +395,7 @@ function listLessonsCached(dir: string, hooks: string): Lesson[] {
 }
 
 async function listLessonsCachedAsync(dir: string, hooks: string): Promise<Lesson[]> {
-  const stamp = storeStamp(dir)
+  const stamp = beadsStoreStamp(dir)
   const file = snapshotFile(hooks)
   const hit = readSnapshot(file, stamp)
   if (hit !== null) {

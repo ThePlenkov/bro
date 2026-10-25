@@ -24,6 +24,8 @@ import {
   janitorLine,
   lockHolderPid,
   pidAlive,
+  hasHelpFlag,
+  printUsage,
   readAgentRegistry,
   runJanitor,
 } from '@broject/core'
@@ -301,16 +303,16 @@ function reportLines(rep: ResumeReport): string[] {
 }
 
 export async function runResumeCommand(argv: string[]): Promise<void> {
-  if (argv.includes('--help') || argv.includes('-h')) {
-    console.error(
+  if (hasHelpFlag(argv)) {
+    printUsage(
       'Usage: bro fleet resume [--dry-run] [--json]\n' +
         '  Post-restart recovery: rearm dead watches, revive a recorded-but-dead\n' +
         '  daemon, and audit survivors — dead loop/lock/run records, dead agent\n' +
         '  registry entries, dirty worktrees. Never restarts `bro flow loop`.\n' +
         '  --dry-run  print the plan without spawning or sweeping\n' +
-        '  --json     machine-readable report'
+        '  --json     machine-readable report',
+      0,
     )
-    process.exit(argv.includes('--help') ? 0 : 2)
   }
   const extra = argv.filter((a) => a !== '--dry-run' && a !== '--json')
   if (extra.length > 0) {

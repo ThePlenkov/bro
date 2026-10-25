@@ -47,6 +47,31 @@ export function testGit(args: string[], opts: ExecFileSyncOptions = {}): string 
   })
 }
 
+/** A fixture repo shaped like a real one on ANY host git. `init` alone
+ *  leaves HEAD unborn, and `worktree add -b` / `merge-base` against an
+ *  unborn head is a host-version dice-roll — the first commit makes the
+ *  repo complete. Identity rides as env vars and signing-off as a -c
+ *  pin, never a config file: a host ~/.gitconfig the env pins nulled
+ *  can't leak identity or gpgsign into the fixture in either direction. */
+export function testRepoInit(dir: string, branch = 'main'): void {
+  testGit(['init', '-q', '-b', branch, dir])
+  // identity as env, not -c: GIT_AUTHOR_*/GIT_COMMITTER_* outrank
+  // -c user.* and the ambient strip keeps them (fixtures set commit
+  // dates through them) — pin all four or a host-exported ident wins
+  testGit(
+    ['-C', dir, '-c', 'commit.gpgsign=false', 'commit', '-qm', 'init', '--allow-empty'],
+    {
+      env: {
+        ...process.env,
+        GIT_AUTHOR_NAME: 't',
+        GIT_AUTHOR_EMAIL: 't@t',
+        GIT_COMMITTER_NAME: 't',
+        GIT_COMMITTER_EMAIL: 't@t',
+      },
+    }
+  )
+}
+
 /** spawnSync('git') under the same contract — for call sites that need
  *  the exit status instead of a throw. */
 export function testGitSpawn(

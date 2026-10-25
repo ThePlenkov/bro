@@ -48,6 +48,19 @@ code nobody edits by hand.
   packages), which registers with the core registry. Low-level shell
   helpers for tools bro itself invokes (`gh.ts`, `git.ts`) are plumbing,
   not facades, and stay in scope as their own modules.
+- **A spec is the yardstick, and the code is judged against it.** Every
+  claim in a spec's *Design* section that names a mechanism — a call
+  site, a failure mode, a package, a knob — must exist in the diff, and
+  every mechanism in the diff that a spec names must behave as the spec
+  says. A missing call site, a fail-open where the spec says fail-closed,
+  a cap enforced in a place the spec did not name: **major**.
+  Divergence is a finding, not a matter of taste — if the code and the
+  spec disagree, one of them is wrong and the PR must say which.
+- A vendor's knowledge lives in the vendor's own package
+  (`packages/<vendor>`), and the vendor's **plugin** (`plugins/<client>`)
+  inherits that facade — it does not re-implement it. The same vendor
+  logic split across the CLI, the core and a plugin is **major**: the
+  duplicate drifts, and the drift is invisible until the vendor moves.
 
 ## Verification expectations
 

@@ -48,6 +48,8 @@ import {
   loadConfig,
   LockTimeout,
   pidAlive,
+  hasHelpFlag,
+  printUsage,
   readAgentRegistry,
   reviewHost,
   stackSection,
@@ -57,6 +59,7 @@ import {
   type TaskRow,
   type TaskStore,
 } from '@broject/core'
+import type { ExitCode } from '@broject/core'
 import { loopSection, loopSlug, type LoopConfig } from '@broject/loop'
 import { listWatches, type ListedWatch } from '@broject/act'
 import { parseStackBranch } from '@broject/stack'
@@ -304,13 +307,12 @@ export function claimWorktree(
 
 const SLUG_RE = /^\w[\w.-]*$/
 
-function usage(): never {
-  console.error(`usage:
+function usage(exitCode: ExitCode = 2): never {
+  printUsage(`usage:
   bro work enter <slug> [--branch <name>] [--base <ref>] [--stack]
   bro work leave [slug] [--force] [--delete-branch]
   bro work list [--sizes]
-  bro work prune [--loop] [--dry-run]`)
-  process.exit(2)
+  bro work prune [--loop] [--dry-run]`, exitCode)
 }
 
 export function mainWorktree(): WorktreeInfo {
@@ -2042,6 +2044,9 @@ function releaseOrphanedRuns(cands: LitterCandidate[], ctx: LitterCtx): void {
 
 export function runWorkCommand(argv: string[]): void {
   const [sub, ...rest] = argv
+  if (sub === '--help' || sub === '-h' || hasHelpFlag(rest)) {
+    usage(0)
+  }
   switch (sub) {
     case 'enter':
       return cmdEnter(rest)

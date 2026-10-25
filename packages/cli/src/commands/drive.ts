@@ -83,12 +83,17 @@ import {
   type TaskRow,
   type TaskStore,
   BATCH_MARKER_ENV,
+  hasHelpFlag,
+  printUsage,
 } from '@broject/core'
+import type { ExitCode } from '@broject/core'
 import {
   checkHistory,
   evaluateExitGate,
+  ACT_STATE_TTL_MS,
   failingCiChecks,
   fetchPrActState,
+  resolveLedger,
   isSast,
   listWatches,
   liveSastChecks,
@@ -109,6 +114,7 @@ import {
 import { loadAgentEnv, type AgentConnectorEnv } from '../agent-connectors.ts'
 import { flag } from './args.ts'
 import { defaultBranch, runActCommand } from './act.ts'
+import { emitDevinUsage } from '@broject/devin'
 import {
   foreignPushEvent,
   readHeadMemory,
@@ -140,13 +146,13 @@ import { rigNext, type RigNext } from './rig-next.ts'
 import { isOrchestratorSession } from './watch-pulse.ts'
 export { LIVE_MARKER_MS, worktreeClaim, worktreeClaimInfo, worktreeIdleMs } from './work.ts'
 
-function usage(): never {
-  console.error(
+function usage(exitCode: ExitCode = 2): never {
+  printUsage(
     'Usage: bro drive [--once] [--every [SEC]] [--no-merge] [--connector <name>] [--json]\n' +
       '       bro drive install [--every N] [--print]\n' +
-      '       bro drive uninstall'
+      '       bro drive uninstall',
+    exitCode,
   )
-  process.exit(2)
 }
 
 // --- args ------------------------------------------------------------------------
@@ -825,6 +831,7 @@ interface Ctx {
     docsPaths: string[]
     docsMaxRounds: number
     requireApproval: boolean
+    approvers: string[]
   }
   merge: boolean
   json: boolean
@@ -1963,6 +1970,8 @@ async function mergeAndRetire(
         docsPaths: ctx.act.docsPaths,
         docsMaxRounds: ctx.act.docsMaxRounds,
         requireApproval: ctx.act.requireApproval,
+        approvers: ctx.act.approvers,
+        resolveLedger: resolveLedger(ctx.mainRoot),
       }
   ).catch(() => undefined)
   // exit-0 + OPEN IS the enqueue contract — act merge exits 0 only on a
@@ -2036,6 +2045,17 @@ async function classSpawn(
  *  cognitive-complexity cap. */
 async function blockedVerdict(ctx: Ctx, b: BlockedWork): Promise<PrVerdict> {
   const { pr, link, state, gate, occ, worktree, fixer, work } = b
+  if (gate.reopened_threads > 0) {
+    // A reopened thread was resolved and then commented on again — the
+    // earlier resolution was wrong. A fixer would re-resolve it and
+    // hide that, so the work parks for the user instead.
+    return {
+      pr,
+      link,
+      verdict: 'blocked',
+      detail: `${gate.reopened_threads} reopened thread(s) — resolved before, commented on again; the user confirms`,
+    }
+  }
   if (gate.open_threads > 0) {
     if (occ !== undefined) {
       return { pr, link, verdict: 'occupied', detail: occ }
@@ -2191,7 +2211,9 @@ async function drivePr(ctx: Ctx, pr: number, work: PassWork): Promise<PrVerdict>
         docsPaths: ctx.act.docsPaths,
         docsMaxRounds: ctx.act.docsMaxRounds,
         requireApproval: ctx.act.requireApproval,
+        approvers: ctx.act.approvers,
         stateCache: ctx.stateCache,
+        resolveLedger: resolveLedger(ctx.mainRoot),
       }
     )
   } catch (err) {
@@ -2310,7 +2332,9 @@ async function sweepSettledFixers(ctx: Ctx, prs: Set<number>): Promise<void> {
         docsPaths: ctx.act.docsPaths,
         docsMaxRounds: ctx.act.docsMaxRounds,
         requireApproval: ctx.act.requireApproval,
+        approvers: ctx.act.approvers,
         stateCache: ctx.stateCache,
+        resolveLedger: resolveLedger(ctx.mainRoot),
       }
       )
       if (st.state !== 'OPEN') {
@@ -2371,8 +2395,23 @@ function emitWatchHeartbeats(
   }
 }
 
+/** The devin lane's telemetry: the account's request rate per model and
+ *  the lane's live counts. The pass is the fleet's heartbeat, so it is
+ *  where the numbers belong (spec bro-g0izo). */
+async function emitLaneUsage(ctx: Ctx): Promise<void> {
+  try {
+    const bag = loadAgentEnv(ctx.mainRoot).agents['devin'] ?? {}
+    // the drive's own env IS the effective worker env: the connector
+    // builds the child's environment from it (plus the pins)
+    await emitDevinUsage(ctx.mainRoot, bag, process.env)
+  } catch {
+    // telemetry must not stall the pass
+  }
+}
+
 /** One pass: enumerate, probe every open PR, act per verdict. */
 async function driveOnce(ctx: Ctx): Promise<void> {
+  await emitLaneUsage(ctx)
   const { byStep, degraded } = await collectAgents(ctx.mainRoot)
   for (const d of degraded) {
     say(ctx, `warning: backend degraded — ${d}`)
@@ -2476,8 +2515,8 @@ function runDriveSched(argv: string[], dir: string, drive: DriveConfig): void {
 }
 
 export async function runDriveCommand(argv: string[]): Promise<void> {
-  if (argv.includes('--help') || argv.includes('-h')) {
-    usage()
+  if (hasHelpFlag(argv)) {
+    usage(0)
   }
   const main = mainWorktree()
   const broCfg = loadBroConfig(main.path)
@@ -2552,7 +2591,12 @@ async function runDrive(
     // which CLI syntax the fixer prompts write
     host: facadeName('reviews', { dir: mainPath }, { prefer: broCfg.connectors }),
     repo: rev.resolveRepo([]),
-    stateCache: prStateCache(mainPath),
+    // same freshness contract as the loop's: the feed dedup caps
+    // staleness at one poll window — a supervised pass's own cadence,
+    // never more than the production 30s
+    stateCache: prStateCache(mainPath, {
+      ttlMs: Math.min(ACT_STATE_TTL_MS, (args.everySec ?? drive.intervalSec) * 1000),
+    }),
     act: broCfg.act,
     merge: args.merge && drive.merge === 'auto',
     json: args.json,

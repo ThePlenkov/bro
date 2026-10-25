@@ -61,6 +61,13 @@ default store, so standard installs already have it).
   Docs-only PRs (every changed file matches `act.docsPaths`) cap tighter —
   `act.docsMaxRounds` (default 2): doc threads churn per push, so the
   tail belongs in debt, not another round.
+- **A reopened thread stops the loop — the user confirms.** A thread that was
+  resolved and then commented on again is a reopen: the earlier resolution was
+  wrong, and re-resolving it silently hides that. The gate names it as a
+  blocker (`reopened thread <id> ...`), `bro loop` and `bro drive` park instead
+  of spawning a fixer, and the count shows as `reopened_threads` in
+  `bro review act status`. Report it and let the user decide — do not re-resolve
+  it on your own.
 - **Contradictory cross-round findings resolve by judgment, not push.**
   Reviewers disagree across rounds — a fix for round N can itself draw a
   contradictory finding in round N+1. Don't push a flip-flop: pick the
@@ -122,6 +129,26 @@ default store, so standard installs already have it).
   decides: fresh findings land on every push, so the loop exits only on
   `exit_gate=OK` or hands off to `bro review act wait --merge`. Never report a
   PR as done from the resolve output alone.
+- **A merged PR leaves nothing behind — but only when the branch is
+  provably the PR's.** Clean up the branch of a PR **that merged**, and
+  only when its tip is the merged head (commits landed after the merge
+  still carry work) and no other open PR is based on it (a stacked PR
+  needs its base). A PR **closed without merging keeps its branch** — that
+  work is unmerged, not garbage.
+  Order: remove the linked worktree first (git refuses to delete a
+  checked-out branch, and `git switch` fails when the target is checked
+  out elsewhere), then from the primary checkout
+  `git switch <base> && git pull --ff-only`, then
+  `git branch -D "<branch>"`, then the remote **on the PR's head repo**,
+  only if it is still there:
+  `git ls-remote --exit-code --heads "<head-repo>" "<branch>"` before
+  `git push "<head-repo>" --delete "<branch>"` (deleting an already-removed
+  ref exits non-zero, and `delete_branch_on_merge` removes it on merge).
+  **Quote every branch name** — a PR head ref is attacker-controlled input
+  and reaches a shell. `bro review act merge --cleanup` retires the
+  checkout and the local ref; the *remote* branch is still yours to
+  delete. Never touch another branch — another PR or session may own it.
+  Report the cleanup in the closing summary.
 - **A pushed PR is merged, watched, or handed off — never unwatched.**
   `bro review act wait <PR> --merge` in the background is the default end-state —
   `--detach` when the watch must outlive the session;
