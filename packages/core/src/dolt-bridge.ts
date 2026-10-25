@@ -150,6 +150,12 @@ const safeName = (name: string): string => name.replace(/[^\w.-]/g, '_')
  *  git/bd stderr embeds the failing URL mid-line, not at offset 0. */
 export const displayUrl = (u: string): string => u.replace(/(:\/\/)[^@/\s]+@/g, '$1***@')
 
+/** A remote source reaching a git argv must not parse as an option —
+ *  `-`-leading input is rejected outright (`--upload-pack=<cmd>` in a
+ *  "url" slot runs arbitrary code). Sources here are URLs or absolute
+ *  paths, so a leading dash is never legitimate input. */
+const argvSafe = (s: string): boolean => s !== '' && !s.startsWith('-')
+
 export function mirrorPathFor(beadsDir: string, remoteName: string): string {
   return join(beadsDir, `dolt-mirror-${safeName(remoteName)}.git`)
 }
@@ -159,6 +165,9 @@ const fileUrl = (p: string): string => `git+${pathToFileURL(p).href}`
 /** Bare-init the mirror and pin its `origin` to the upstream URL —
  *  idempotent; a drifted URL is set-url'd back. */
 function ensureMirror(mirror: string, upstream: string): string | null {
+  if (!argvSafe(upstream)) {
+    return `option-shaped upstream refused: ${displayUrl(upstream)}`
+  }
   if (!existsSync(join(mirror, 'HEAD'))) {
     const init = gitTry(['init', '--bare', '-q', mirror], PROBE_MS)
     if (init.code !== 0) {
@@ -171,8 +180,8 @@ function ensureMirror(mirror: string, upstream: string): string | null {
   }
   const r =
     cur.code === 0
-      ? gitTry(['-C', mirror, 'remote', 'set-url', 'origin', upstream], PROBE_MS)
-      : gitTry(['-C', mirror, 'remote', 'add', 'origin', upstream], PROBE_MS)
+      ? gitTry(['-C', mirror, 'remote', 'set-url', 'origin', '--', upstream], PROBE_MS)
+      : gitTry(['-C', mirror, 'remote', 'add', 'origin', '--', upstream], PROBE_MS)
   return r.code === 0 ? null : r.err || `git remote exited ${r.code}`
 }
 
@@ -524,7 +533,10 @@ export function probeDoltRemote(
   src: string,
   opts?: { deepen?: number }
 ): DoltHeadHealth & { lastGood?: string } {
-  const ls = gitTry(['ls-remote', src, DOLT_DATA_REF], GIT_NET_MS)
+  if (!argvSafe(src)) {
+    return { head: '', tables: 0, missing: [], error: `option-shaped remote source refused: ${displayUrl(src)}` }
+  }
+  const ls = gitTry(['ls-remote', '--', src, DOLT_DATA_REF], GIT_NET_MS)
   if (ls.code !== 0) {
     return { head: '', tables: 0, missing: [], error: displayUrl(firstLine(ls.err)) }
   }
@@ -536,7 +548,7 @@ export function probeDoltRemote(
     const init = gitTry(['init', '--bare', '-q', scratch], PROBE_MS)
     // a NAMED remote — blob:none lazy fetches need promisor wiring,
     // which exists only as remote.<name>.promisor
-    const add = gitTry(['-C', scratch, 'remote', 'add', 'origin', src], PROBE_MS)
+    const add = gitTry(['-C', scratch, 'remote', 'add', 'origin', '--', src], PROBE_MS)
     if (init.code !== 0 || add.code !== 0) {
       return { head: '', tables: 0, missing: [], error: firstLine(init.err || add.err) }
     }

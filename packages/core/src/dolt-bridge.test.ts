@@ -481,4 +481,10 @@ describe('manifest integrity (bro-orcdv)', { skip: WIN32 }, () => {
     assert.ok(h.error !== undefined && h.error !== '')
     assert.deepEqual(h.missing, [])
   })
+
+  test('probeDoltRemote — an option-shaped source is refused before it reaches argv', () => {
+    const h = probeDoltRemote('--upload-pack=touch /tmp/bro-dolt-pwn')
+    assert.ok(h.error !== undefined && h.error !== '')
+    assert.deepEqual(h.missing, [])
+  })
 })
