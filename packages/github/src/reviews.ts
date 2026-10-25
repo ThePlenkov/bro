@@ -1517,14 +1517,21 @@ export function githubReview(dir: string = process.cwd()): ReviewFacade {
     },
     openPrs(repo) {
       // one listing beats N `pr list --head` subprocesses — bulk
-      // discovery callers want the open set, not per-branch round-trips
-      return ghJson<Array<{ number: number; headRefName?: string }>>(
+      // discovery callers want the open set, not per-branch round-trips;
+      // `gh pr list` has no sort flags, so the facade's most-recently-
+      // updated-first order (act's no-target auto-resolve reads row 0)
+      // is applied client-side on updatedAt (ISO 8601 → lexicographic
+      // compare is chronological)
+      return ghJson<Array<{ number: number; headRefName?: string; updatedAt: string }>>(
         [
           'pr', 'list', '--repo', repo, '--state', 'open', '--limit', '500',
-          '--json', 'number,headRefName',
+          '--json', 'number,headRefName,updatedAt',
         ],
         dir
-      ).map((p) => ({ pr: p.number, headRef: p.headRefName ?? '' }))
+      )
+        .map((p) => ({ pr: p.number, headRef: p.headRefName ?? '', updatedAt: p.updatedAt }))
+        .sort((a, b) => b.updatedAt.localeCompare(a.updatedAt) || b.pr - a.pr)
+        .map((p) => ({ pr: p.pr, headRef: p.headRef }))
     },
     parsePrRef(text) {
       const m = /github\.com\/([\w.-]+)\/([\w.-]+)\/pull\/(\d+)/.exec(text)

@@ -108,8 +108,15 @@ Commands:
 
 const VALUE_FLAGS = new Set(['--pr', '--thread', '--comment', '--file', '--interval', '--timeout', '--bead'])
 
-/** PR number: --pr flag, first positional, or the current branch's PR. */
-function resolvePr(rev: ReviewFacade, argv: string[]): PrTarget {
+/** PR number: --pr flag, first positional, the current branch's PR, or
+ *  (mode 'read') the most recently updated open PR announced as the
+ *  fallback. 'strict' callers — anything that merges or resolves on a
+ *  PR — refuse the auto row: a mutation must name its target. */
+export function resolvePr(
+  rev: ReviewFacade,
+  argv: string[],
+  mode: 'read' | 'strict' = 'read'
+): PrTarget {
   const positional: string[] = []
   for (let i = 0; i < argv.length; i += 1) {
     const arg = argv[i]!
@@ -128,15 +135,31 @@ function resolvePr(rev: ReviewFacade, argv: string[]): PrTarget {
   const repo = rev.resolveRepo([])
 
   if (prRaw === null) {
-    // the connector resolves the PR for the CURRENT branch — a bare list
-    // query would grab an arbitrary open PR instead. CLOSED/MERGED PRs
-    // resolve too, so state must be checked explicitly.
+    // the connector resolves the PR for the CURRENT branch — CLOSED/
+    // MERGED PRs resolve too, so state must be checked explicitly. No
+    // branch PR (the operator on main) falls back to the repo's most
+    // recently updated open PR — the "current" one — but only reads
+    // may ride that guess: merge/resolvers need an explicit target.
     const pr = rev.currentPr()
-    if (!pr || pr.state !== 'OPEN') {
-      console.error('error: no open PR for current branch — pass a PR number')
-      process.exit(2)
+    if (pr && pr.state === 'OPEN') {
+      return { repo, pr: pr.pr }
     }
-    return { repo, pr: pr.pr }
+    const auto = rev.openPrs?.(repo)[0]
+    if (auto !== undefined) {
+      if (mode === 'strict') {
+        console.error(
+          `error: refusing to act on auto-resolved PR #${auto.pr} — ` +
+            'pass a PR number explicitly'
+        )
+        process.exit(2)
+      }
+      console.error(
+        `act: resolved current PR #${auto.pr} — most recently updated open PR`
+      )
+      return { repo, pr: auto.pr }
+    }
+    console.error('error: no open PR for current branch — pass a PR number (`bro act status <PR>`), or run `bro watch` for the gated-PR board')
+    process.exit(2)
   }
   const pr = Number(prRaw)
   if (!Number.isInteger(pr) || pr <= 0) {
@@ -235,7 +258,7 @@ async function cmdWait(argv: string[]): Promise<void> {
   }
   ensureAuth('reviews', { dir: process.cwd() }, { prefer: loadBroConfig().connectors })
   const rev = reviewHost(undefined, loadBroConfig().connectors)
-  const t = resolvePr(rev, argv)
+  const t = resolvePr(rev, argv, argv.includes('--merge') ? 'strict' : 'read')
   const act = loadBroConfig().act
   const interval = Number(flag(argv, '--interval') ?? '60')
   const timeout = Number(flag(argv, '--timeout') ?? '45')
@@ -596,7 +619,7 @@ async function cmdWaitDetach(argv: string[]): Promise<void> {
   }
   ensureAuth('reviews', { dir: process.cwd() }, { prefer: loadBroConfig().connectors })
   const rev = reviewHost(undefined, loadBroConfig().connectors)
-  const t = resolvePr(rev, argv)
+  const t = resolvePr(rev, argv, argv.includes('--merge') ? 'strict' : 'read')
   const args = detachWaitArgs(argv, t.pr, interval, timeout)
   const r = await spawnDetachedWait({ dir: process.cwd(), pr: t.pr, args, cwd: process.cwd() })
   const link = rev.prLink(t.repo, t.pr)
@@ -979,7 +1002,7 @@ async function cmdMerge(argv: string[]): Promise<void> {
   if (queue) {
     ensureAuth('mergeQueue', { dir: process.cwd() }, { prefer: cfg.connectors })
   }
-  const t = resolvePr(rev, argv)
+  const t = resolvePr(rev, argv, 'strict')
 
   const method = mergeMethod(argv)
   if (!method) {
