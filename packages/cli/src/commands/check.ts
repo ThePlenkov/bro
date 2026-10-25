@@ -22,6 +22,8 @@ import { accessSync, existsSync, statSync } from 'node:fs'
 import { delimiter, dirname, isAbsolute, join, resolve, sep } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { X_OK } from 'node:constants'
+import { hasHelpFlag, printUsage } from '@broject/core'
+import type { ExitCode } from '@broject/core'
 import { flag } from './args.ts'
 import { CHECK_EXECUTORS, checkSection, type CheckConfig } from './check-config.ts'
 import { loadBroConfig } from '../plugins.ts'
@@ -429,8 +431,8 @@ export function renderText(report: CheckReport): string[] {
 
 // --- command -------------------------------------------------------------------
 
-function usage(): never {
-  console.error(`Usage: bro check [options]
+function usage(exitCode: ExitCode = 2): never {
+  printUsage(`Usage: bro check [options]
 
 Run the repo's sverka workflow and report per-step stats + findings.
 
@@ -447,8 +449,7 @@ Options:
   --help             this text
 
 Config (bro.config.json "check"): bin, config, entry, executor, evaluate.
-Flags win over config. Exit code mirrors sverka's.`)
-  process.exit(2)
+Flags win over config. Exit code mirrors sverka's.`, exitCode)
 }
 
 /** Known argv surface — a typo'd flag (`--evalute`) silently doing
@@ -542,8 +543,8 @@ function parseCheckArgs(argv: string[]): CheckArgs {
 }
 
 export function runCheckCommand(argv: string[]): void {
-  if (argv.includes('--help') || argv.includes('-h')) {
-    usage()
+  if (hasHelpFlag(argv)) {
+    usage(0)
   }
   const { root, format, opts, cfgBin } = parseCheckArgs(argv)
   const bin = resolveSverka(root, cfgBin)

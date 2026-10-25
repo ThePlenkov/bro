@@ -22,6 +22,17 @@ export interface SessionPlane {
    *  start one of this plane's sessions? Called with the worker's
    *  wrapped cliName for argv workers — never the driver argv[0]. */
   detectsCli(cliName: string): boolean
+  /** How many sessions of this kind does this COMMAND start? The plane
+   *  owns its CLI's grammar — one vendor's CLI opens a session with the
+   *  bare binary, another's only with a subcommand, a third never (a
+   *  read-only listing is not a session). Optional: a plane that does
+   *  not implement it never claims a command, so a caller asks the
+   *  registry rather than guessing (spec bro-bww9v).
+   *
+   *  The answer is the START count, not a boolean: one command can open
+   *  several sessions (`devin a & devin b`), and the cap is judged
+   *  against `live + starts`. */
+  startsSessions?(command: string): number
   /** Live sessions of this kind on the host, per the plane's own state
    *  plane (lock dir, socket listing, local API). `bag` is the
    *  `agents.<kind>` config section — plane-local knobs (like a lockDir
@@ -311,6 +322,32 @@ export function reserveSessionSlot(
  *  left to expire behind the child's own session mark. */
 export function releaseSessionSlot(path: string): void {
   rmSync(path, { force: true })
+}
+
+/** Claim a slot ONCE — the same key never claims twice.
+ *
+ *  The guard plane runs on more than one hook (a client that sends
+ *  both a pre-tool and a permission event would otherwise claim the
+ *  slot twice, and the budget would read one session as two). The
+ *  deterministic name makes the second claim a no-op: the file is
+ *  there, the slot is already held. */
+export function reserveSessionSlotOnce(
+  resDir: string,
+  key: string,
+  lane: ReservationLane
+): { path: string; fresh: boolean } {
+  mkdirSync(resDir, { recursive: true })
+  const tag = lane === 'batch' ? '.batch' : ''
+  const path = join(resDir, `${key}${tag}.slot`)
+  try {
+    writeFileSync(path, String(Date.now()), { flag: 'wx' })
+    return { path, fresh: true }
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === 'EEXIST') {
+      return { path, fresh: false }
+    }
+    throw err
+  }
 }
 
 /** The env var that marks a spawn as the FLEET's. The fleet sets it

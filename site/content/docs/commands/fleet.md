@@ -104,6 +104,16 @@ fleet branches and uses the act gate to decide what happens:
 bro review drive [--once] [--every [N]] [--no-merge] [--connector <name>] [--json]
 ```
 
+"Green" here is the [act exit gate](/docs/commands/act) — threads, CI,
+reviewers, SAST, mergeability. A green gate is **not** a human approval
+on its own: under `drive.merge: auto` a bot-reviewed PR can auto-land
+with zero human sign-off. [`act.requireApproval`](/docs/configuration#act)
+makes human sign-off part of green — auto-merge then waits for a
+trusted human's approving review on the current head (bot approvals and
+unanswerable probes block). If you'd rather keep humans in the loop
+explicitly, `drive.merge: "never"` plus host branch protection is the
+equivalent hardening — drive reports green PRs, a human merges them.
+
 `--once` is the default pass. `--every` is for a detached supervisor;
 `--no-merge` supervises without merging. `--json` emits one verdict per
 PR. The config section is `drive.intervalSec` (default `300`),

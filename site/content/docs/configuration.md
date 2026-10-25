@@ -68,6 +68,8 @@ Explicit `"stores": ["jsonl"]` is the beads opt-out.
 | `maxRounds` | `3` | Inline fix-round cap. Past it, remaining threads must defer to debt beads. `0` unbounds non-docs PRs — a docs-only PR is still capped while `docsMaxRounds > 0` |
 | `docsPaths` | `['*.md', '*.mdx', '*.rst', 'docs/']` | Path patterns classifying a file as docs. No slash → basename glob (`*.md`); trailing `/` → dir at any depth, name globs too (`docs*/` hits `docs-v2/`); otherwise full-path glob (`**` crosses `/`) |
 | `docsMaxRounds` | `2` | Tighter round cap for docs-only PRs (every changed file matches `docsPaths`). `0` disables the docs-specific cap — `(maxRounds: 0, docsMaxRounds: 0)` is fully uncapped |
+| `requireApproval` | `false` | Human-signoff gate: when `true`, the exit gate — and every auto-merge driven off it (`bro review drive`, `bro review act merge`, watch/loop merge paths) — additionally requires a trusted human's approving review **on the PR's current head**. Semantics: the latest decision review per reviewer decides; a standing `CHANGES_REQUESTED` vetoes regardless of which head it reviewed; bot approvals never count; a probe that can't answer reads as *not approved*, never a pass. Opt-in hostile-input hardening — a malicious bead or prompt-injected agent cannot satisfy it on its own. Default `false` keeps bot-only auto-merge — in that mode the hardening is `drive.merge: 'never'` plus host branch protection |
+| `approvers` | `[]` | Trusted reviewer logins for `requireApproval` — when non-empty, only approvals from these accounts count (case-insensitive). Empty means any human (`User`) account's current-head approval counts. The knob that keeps a machine user account from signing off on the agent's own output |
 
 ### `plugins`
 

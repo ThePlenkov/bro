@@ -15,7 +15,7 @@ connector: built-in today, but nothing GitHub-specific lives in core.
 npm i @broject/github
 ```
 
-Requires Node ≥ 22 and an authenticated `gh`. ESM only.
+Requires Node ≥ 22.18 and an authenticated `gh`. ESM only.
 
 ## Surface
 

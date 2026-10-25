@@ -14,7 +14,7 @@ import {
   type PrTarget,
   type ReviewFacade,
 } from '@broject/core'
-import { checkHistory, evaluateExitGate, fetchPrActState, prStateCache, type ExitGate, type PrActState, type PrStateCache } from '@broject/act'
+import { checkHistory, evaluateExitGate, fetchPrActState, prStateCache, resolveLedger, type ExitGate, type PrActState, type PrStateCache } from '@broject/act'
 import { argBool, argNumber, dispatchRead, inRepo } from './helpers.ts'
 
 const VERBS = ['resolve', 'reply', 'merge']
@@ -52,8 +52,10 @@ async function stateOf(
     maxRounds: act.maxRounds,
     docsPaths: act.docsPaths,
     docsMaxRounds: act.docsMaxRounds,
-      requireApproval: act.requireApproval,
+    requireApproval: act.requireApproval,
+    approvers: act.approvers,
     stateCache: cache,
+    resolveLedger: resolveLedger(ctx.dir),
   })
   return { state, gate: evaluateExitGate(state, { requireApproval: act.requireApproval }) }
 }

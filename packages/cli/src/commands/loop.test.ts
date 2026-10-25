@@ -11,9 +11,9 @@ import {
   type SpawnWorker,
 } from '@broject/core'
 import { DEFAULT_LOOP_CONFIG, type LoopConfig } from '@broject/loop'
-import { loopRefTails, loopWatch, resolveBeadsDir, resolveLoopLane } from './loop.ts'
+import { claimAuthorityNote, declaredClaimCapability, loopRefTails, loopWatch, resolveBeadsDir, resolveLoopLane } from './loop.ts'
 import type { AgentConnectorEnv } from '../agent-connectors.ts'
-import { git, initRepo, inside } from './testrepo.ts'
+import { bdStoreBlocker, git, initRepo, inside } from './testrepo.ts'
 
 // --- resolveLoopLane — the provider-registry vs raw-template pick -------------
 
@@ -354,8 +354,11 @@ describe('resolveBeadsDir', () => {
   })
 
   test('an initialized repo resolves its .beads dir', (t) => {
-    if (bdTry(['--version']).code !== 0) {
-      t.skip('bd not installed')
+    // needs-bd: the probe is a real init — a CGO-less bd passes
+    // --version and dies here, so capability, not presence, gates
+    const blocked = bdStoreBlocker()
+    if (blocked !== undefined) {
+      t.skip(blocked)
       return
     }
     const { root, main } = initRepo('bro-loop-beads-')
@@ -364,5 +367,51 @@ describe('resolveBeadsDir', () => {
       assert.equal(init.code, 0, init.err)
       assert.equal(resolveBeadsDir(main), join(main, '.beads'))
     })
+  })
+})
+
+// --- claimAuthorityNote — the best-effort claims-plane advisory (spec bro-l8c4f.12)
+
+describe('claimAuthorityNote', () => {
+  test('an exclusive-claiming backend needs no advisory', () => {
+    assert.equal(
+      claimAuthorityNote('beads', {
+        strength: 'exclusive',
+        identity: 'actor',
+        authority: 'store',
+      }),
+      undefined
+    )
+  })
+
+  test('an undeclared capability still warns — absent is not a promise', () => {
+    const note = claimAuthorityNote('custom', undefined)
+    assert.ok(note !== undefined)
+    assert.match(note, /'custom'/)
+    assert.match(note, /unverified/)
+  })
+
+  test('a throwing capability getter reads as undeclared — the advisory never aborts', () => {
+    const store = {
+      claimCapability(): never {
+        throw new Error('broken connector')
+      },
+    }
+    assert.equal(declaredClaimCapability(store), undefined)
+    assert.match(claimAuthorityNote('broken', declaredClaimCapability(store))!, /unverified/)
+  })
+
+  test('a best-effort viewer backend names the shared-identity caveat and the remedy', () => {
+    const note = claimAuthorityNote('linear', {
+      strength: 'best-effort',
+      identity: 'viewer',
+      authority: 'service',
+    })
+    assert.ok(note !== undefined)
+    assert.match(note, /'linear'/)
+    assert.match(note, /not a lease/)
+    assert.match(note, /one credential claims as the same identity/)
+    assert.match(note, /one loop on this backlog/)
+    assert.match(note, /exclusive-claim store/)
   })
 })

@@ -154,3 +154,10 @@ export function ghHost(): string {
 export function prLink(ownerRepo: string, pr: number): string {
   return `[#${pr}](https://${ghHost()}/${ownerRepo}/pull/${pr})`
 }
+
+/** `[#N](https://github.com/owner/repo/issues/N)` — the same clickable
+ *  form for issue references (bead mirrors land as issues, and `Fixes
+ *  #N` output must not be bare either). */
+export function issueLink(ownerRepo: string, issue: number): string {
+  return `[#${issue}](https://${ghHost()}/${ownerRepo}/issues/${issue})`
+}

@@ -1,8 +1,9 @@
 /**
  * Command reference generator — one docs page per registry command,
- * emitted from the live `bro plugins --json` output (the same registry
- * `--help` reads). Curated guides stay in `site/content/docs/commands/`;
- * `reference/` is the complete, never-rotting index.
+ * emitted from the live `bro contract dump --json` output (the frozen
+ * registry — spec bro-k9ces). Curated guides stay in
+ * `site/content/docs/commands/`; `reference/` is the complete,
+ * never-rotting index.
  *
  *   node scripts/gen-command-docs.ts          # write
  *   node scripts/gen-command-docs.ts --check  # diff-only drift gate
@@ -33,14 +34,24 @@ interface Row {
   external: boolean
 }
 
+interface ContractDump {
+  commands: Record<string, Row>
+}
+
 if (!existsSync(distCli)) {
   console.error('packages/cli/dist/index.js missing — run `npm run build` first')
   process.exit(2)
 }
 
-const rows = JSON.parse(
-  execFileSync(process.execPath, [distCli, 'plugins', '--json'], { encoding: 'utf8' })
-) as Row[]
+const rows = Object.values(
+  (
+    JSON.parse(
+      execFileSync(process.execPath, [distCli, 'contract', 'dump', '--json'], {
+        encoding: 'utf8',
+      })
+    ) as ContractDump
+  ).commands
+)
 
 /** command → curated guide page (site/content/docs/commands/<page>.md).
  *  Wrong links are worse than none — only mapped names get a link. */

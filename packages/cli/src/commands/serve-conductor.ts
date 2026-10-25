@@ -27,6 +27,9 @@ import { join } from 'node:path'
 import { gitCommonDir, loadConfig } from '@broject/core'
 import type { ProviderEntry } from '@broject/core'
 import { acpOpen, acpPooledTurn, acpSessionRetain, otelEvent, otelJournal, otelParent, otelSpan, toolPayload } from '@broject/providers'
+import { randomUUID } from 'node:crypto'
+import { reserveSessionStart, sessionCapViews } from '@broject/core'
+import { conductorSessionRefusal } from './session-cap.ts'
 import type { AcpTerminals, Toolish } from '@broject/providers'
 import type { AcpContentBlock, AcpPeer, AcpRetainedSession, OtelCtx, PooledTurnOpts, ProviderWireOpts } from '@broject/providers'
 import { peerAttrs } from './peer.ts'
@@ -48,6 +51,10 @@ export interface ConductorConfig {
   /** SSE ping cadence while a streamed turn is open — claude's read
    *  timeout is the real constraint on slow acp turns. */
   keepaliveMs?: number
+  /** The `agents.<kind>` bags — the session cap's knobs (spec
+   *  bro-bww9v). Read once at startup: the cap is a policy, not a
+   *  per-request config reload. */
+  agents: Record<string, Record<string, unknown>>
 }
 
 /** A positive-int env pin, else the fallback — 0, negative and NaN are
@@ -146,6 +153,7 @@ export function conductorConfig(
     cwd: dir,
     timeoutMs: positiveEnvInt(env, 'BRO_PROVIDER_TIMEOUT_MS', 120_000),
     keepaliveMs: positiveEnvInt(env, 'BRO_CONDUCTOR_KEEPALIVE_MS', 10_000),
+    agents: (cfg.agents ?? {}) as Record<string, Record<string, unknown>>,
   }
 }
 
@@ -496,17 +504,6 @@ function conversationKey(req: IncomingMessage, body: MessagesRequest): string | 
   return `f:${fp}`
 }
 
-/** Drop a session handle without surfacing transport noise — the
- *  dispose is bookkeeping (eviction, teardown, failure cleanup), never
- *  an error path worth reporting. */
-function disposeQuiet(live: { dispose(): void }): void {
-  try {
-    live.dispose()
-  } catch {
-    // dead transport — the drop is the point
-  }
-}
-
 /** Retired sessions must be disposed — a leaked session holds agent
  *  context (and its cost) for nothing. TTL first, then oldest-out to
  *  the cap; the overflow count is captured BEFORE the loop so a live
@@ -535,6 +532,132 @@ function dropSessions(sessions: Map<string, ConvSession>): void {
     disposeQuiet(s.live)
   }
   sessions.clear()
+}
+
+/** Drop a session handle without surfacing transport noise — the
+ *  dispose is bookkeeping (eviction, teardown, failure cleanup), never
+ *  an error path worth reporting. Exported for the acp transport's
+ *  brokered-session map (spec bro-ymbq1). */
+export function disposeQuiet(live: { dispose(): void }): void {
+  try {
+    live.dispose()
+  } catch {
+    // dead transport — the drop is the point
+  }
+}
+
+/** One consumer's lazy pooled link — spawn-once, respawn-on-death,
+ *  close-on-process-exit. The conductor's `/v1/*` plane and the
+ *  `/api/v1/acp` transport each hold one (spec bro-ymbq1 §pool): the
+ *  machinery is shared, the LINK is not — a peer's initialize fixes
+ *  clientCapabilities for the connection's lifetime and the two
+ *  transports advertise opposite postures. */
+export interface AcpLinkPool {
+  /** The warm peer — spawned lazily, shared until its transport dies. */
+  link(parent?: OtelCtx): Promise<AcpPeer>
+  /** The resolved peer behind `link` — undefined before the first
+   *  spawn resolves and after death until the respawn. The
+   *  /api/v1/terminals plane reads the peer's registry through it
+   *  (bro-eua0d). */
+  live(): AcpPeer | undefined
+  /** `cb` runs when the pooled transport dies — the caller drops every
+   *  session the dead link carried before the next link() respawns. */
+  onDeath(cb: () => void): void
+  /** Teardown — a link resolving after dispose is killed on sight
+   *  instead of resurrecting the pool; the live peer leaves pooledPeers
+   *  and is closed. A pending handshake is the caller's signal handle
+   *  (conductorProxy's poolAbort aborts it before calling this). */
+  dispose(): void
+}
+
+/** Every live pooled peer, process-wide. The pooled child outlives any
+ *  request — without a close on process exit serve shutdown orphans it
+ *  on a dead transport (the zombie acp worker of the original
+ *  incident). ONE registry + ONE 'exit' hook serve all pool instances:
+ *  a per-pool `process.once` leaked a listener per instantiation
+ *  (amazon-q #581); dead peers drop out as their abort fires. */
+const pooledPeers = new Set<AcpPeer>()
+let poolExitArmed = false
+
+export function acpLinkPool(
+  by: string,
+  entry: AcpEntry,
+  opts: ProviderWireOpts,
+  timeoutMs: number
+): AcpLinkPool {
+  let link: Promise<AcpPeer> | undefined
+  let live: AcpPeer | undefined
+  // a link resolving after dispose must not resurrect the pool — the
+  // peer is killed on sight instead of being retained unowned
+  let disposed = false
+  const deathHooks: Array<() => void> = []
+  // close() is sync, safe in an 'exit' handler; an in-flight link
+  // resolve is a ms-scale window.
+  if (!poolExitArmed) {
+    poolExitArmed = true
+    process.once('exit', () => {
+      for (const p of pooledPeers) {
+        try {
+          p.close()
+        } catch {
+          // the drop is the point — one stubborn peer can't block the rest
+        }
+      }
+    })
+  }
+  return {
+    onDeath: (cb) => deathHooks.push(cb),
+    live: () => live,
+    link(parent) {
+      if (link === undefined) {
+        otelEvent('acp.spawn', { backend: by })
+        link = acpOpen(by, entry, opts, Date.now() + timeoutMs, parent)
+        link.then(
+          (p) => {
+            if (disposed) {
+              link = undefined
+              p.close()
+              return
+            }
+            live = p
+            pooledPeers.add(p)
+            // a peer aborted BEFORE the listener attaches never fires
+            // it — replay the dead state or the pool keeps serving a
+            // corpse and the session cleanup never runs (amazon-q #581)
+            let dead = false
+            const onDead = (): void => {
+              if (dead) {
+                return
+              }
+              dead = true
+              link = undefined
+              live = undefined
+              pooledPeers.delete(p)
+              for (const cb of deathHooks) {
+                cb()
+              }
+            }
+            p.signal.addEventListener('abort', onDead, { once: true })
+            if (p.signal.aborted) {
+              onDead()
+            }
+          },
+          () => (link = undefined)
+        )
+      }
+      return link
+    },
+    dispose() {
+      disposed = true
+      const p = live
+      live = undefined
+      link = undefined
+      if (p !== undefined) {
+        pooledPeers.delete(p)
+        p.close()
+      }
+    },
+  }
 }
 
 /** The turns a reused session has NOT seen: everything past the
@@ -619,14 +742,35 @@ export function parseReply(text: string, parseTools = true): OutBlock[] {
 
 // --- response emission -------------------------------------------------
 
-/** Anthropic stop_reasons only — acp reasons outside the enum map to the
- *  nearest honest one, never forwarded raw. */
+/** acp stop_reason → the wire's canonical reason. The mapped entries
+ *  land on the anthropic enum; 'cancelled' forwards as the
+ *  non-standard stop_reason 'cancelled' — a cancelled turn is not a
+ *  clean 'end_turn' (bro-6fk80). */
 const STOP_REASON: Record<string, string> = {
   end_turn: 'end_turn',
   max_tokens: 'max_tokens',
   max_turn_requests: 'pause_turn',
   refusal: 'refusal',
-  cancelled: 'end_turn',
+  cancelled: 'cancelled',
+}
+
+/** Own-key map read — a raw backend token matching an inherited Object
+ *  member ('constructor', 'toString') must never resolve through the
+ *  prototype into a fake mapping or status. */
+const ownKey = (map: Record<string, string>, key: string): string | undefined =>
+  Object.hasOwn(map, key) ? map[key] : undefined
+
+/** Canonicalize the acp stop_reason once for every dialect — an
+ *  unmapped backend reason ('error', 'auth_required', a newer acp
+ *  value) forwards raw so the client can branch on it, never a silent
+ *  'end_turn', plus an otel breadcrumb so the anomaly is observable
+ *  server-side (bro-6fk80). */
+function canonicalStopReason(raw: string | undefined): string {
+  if (raw === undefined || raw === '') return 'end_turn'
+  const mapped = ownKey(STOP_REASON, raw)
+  if (mapped !== undefined) return mapped
+  otelEvent('conductor.stop_reason.unmapped', { reason: raw.slice(0, 80) })
+  return raw
 }
 
 /** chars/4 underestimates CJK several-fold — count wide codepoints
@@ -1184,25 +1328,6 @@ function openaiTooLarge(req: IncomingMessage, res: ServerResponse): void {
   res.once('finish', () => req.destroy())
 }
 
-/** Pooled-peer close hooks share ONE process exit listener — a
- *  `process.once('exit', …)` per conductorProxy() call stacks listeners
- *  in any process that builds several proxies (tests hit
- *  MaxListenersExceeded at ten). dispose() untracks its own hook. */
-const pooledPeerCloses = new Set<() => void>()
-let pooledExitArmed = false
-function trackPooledPeerClose(close: () => void): () => void {
-  pooledPeerCloses.add(close)
-  if (!pooledExitArmed) {
-    pooledExitArmed = true
-    process.once('exit', () => {
-      for (const close of pooledPeerCloses) close()
-    })
-  }
-  return () => {
-    pooledPeerCloses.delete(close)
-  }
-}
-
 const AVAIL = /unavailable|timeout|timed out/i
 /** Quota walls are their own wire class — the client retries on a
  *  schedule, never on a 5xx hunch. */
@@ -1392,6 +1517,71 @@ function retireDivergent(env: TurnEnv, cand: ConvSession): Promise<TurnOutcome> 
 
 /** A first (or restarted) turn — a keyed request retains a session;
  *  a keyless, busy, or already-opening key takes the one-shot path. */
+/** The ACP surface's session facade — the cap before a session is
+ *  opened (spec bro-bww9v).
+ *
+ *  Every request opens a session on the shared peer, and a retained
+ *  conversation keeps one alive — so the conductor's own count is part
+ *  of the host's budget. The plane counts live devin PROCESSES; the
+ *  conductor's conversations share one peer, so the plane sees one
+ *  where the conductor holds many: the conductor adds its own count.
+ *
+ *  Fails CLOSED: a cap that cannot be established is not walked past.
+ *  The refusal names the cap, and the conductor's failure mapping
+ *  answers it with 429 (the message carries "quota"). */
+function assertSessionCap(env: TurnEnv, claimKey: string): void {
+  let views
+  try {
+    views = sessionCapViews(env.cfg.entry.command, env.cfg.agents)
+  } catch (err) {
+    // the count could not be established — fail closed, with the reason
+    // the operator needs (a quota that cannot be verified is not walked
+    // past)
+    throw new Error(
+      `bro conductor: the session cap could not be established (count unavailable) — ${(err as Error).message}`
+    )
+  }
+  const view = views[0]
+  const refusal = conductorSessionRefusal(view, env.sessions.size, view?.starts ?? 1)
+  if (refusal !== undefined) {
+    throw new Error(refusal)
+  }
+  // the slot is claimed, not just counted: a burst of parallel requests
+  // would otherwise all see the same headroom (spec bro-bww9v). The ACP
+  // surface fails CLOSED here — a request that cannot record its claim
+  // must not open a session the budget does not know about.
+  if (view !== undefined) {
+    try {
+      reserveSessionStart({
+        kind: view.kind,
+        agents: env.cfg.agents,
+        key: claimKey,
+        count: view.starts,
+      })
+    } catch (err) {
+      throw new Error(
+        `bro conductor: the session slot could not be claimed — ${(err as Error).message}`
+      )
+    }
+  }
+}
+
+/** The one-shot path — a session on the shared peer, nothing retained. */
+async function oneShotTurn(
+  env: TurnEnv,
+  prompt: string | AcpContentBlock[],
+  inputTokens: number
+): Promise<TurnOutcome> {
+  const reply = await acpPooledTurn(env.peer, env.cfg.entry, env.opts, prompt, env.deadline, {
+    signal: env.signal,
+    by: env.by,
+    requestModel: env.requestModel,
+    parent: env.parent,
+    onUpdate: env.openStream?.(inputTokens),
+  })
+  return { reply, reused: false, inputTokens, replay: false }
+}
+
 async function freshTurn(env: TurnEnv, candBusy: boolean): Promise<TurnOutcome> {
   // image blocks ride the wire only when the agent advertised the
   // prompt capability — serialize after link() so the negotiated
@@ -1399,17 +1589,14 @@ async function freshTurn(env: TurnEnv, candBusy: boolean): Promise<TurnOutcome> 
   const prompt = serializeBlocks(env.body, env.imageOk)
   const inputTokens = inputTokensOf(prompt)
   const key = env.key
+  // the cap before a session is opened — both paths open one
+  // each request opens its own session — the claim is per request, not
+  // per backend (one shared claim would let every request reuse it)
+  assertSessionCap(env, `conductor-${env.by}-${randomUUID()}`)
   if (key === undefined || candBusy || env.pendingOpens.has(key)) {
     // a keyless request, or the conversation's own turn is still in
     // flight — one-shot over the same link, nothing stored
-    const reply = await acpPooledTurn(env.peer, env.cfg.entry, env.opts, prompt, env.deadline, {
-      signal: env.signal,
-      by: env.by,
-      requestModel: env.requestModel,
-      parent: env.parent,
-      onUpdate: env.openStream?.(inputTokens),
-    })
-    return { reply, reused: false, inputTokens, replay: false }
+    return oneShotTurn(env, prompt, inputTokens)
   }
   // mark BEFORE the await — a concurrent first request on the same key
   // takes the one-shot path instead of opening a twin session whose
@@ -1662,15 +1849,18 @@ async function parseMessagesBody(
 }
 
 /** stop_reason for the settled record — a parsed tool_use or a stop
- *  hit outrank the transport's raw code. */
+ *  hit outrank the transport's raw code. The backend reason still
+ *  canonicalizes first: an unmapped one overridden by precedence keeps
+ *  its otel breadcrumb (bro-6fk80). */
 function settledStopReason(
   blocks: OutBlock[],
   reply: PooledReply,
   stopHit: string | undefined
 ): string {
+  const canonical = canonicalStopReason(reply.stopReason)
   if (blocks.some((b) => b.type === 'tool_use')) return 'tool_use'
   if (stopHit !== undefined) return 'stop_sequence'
-  return STOP_REASON[reply.stopReason] ?? 'end_turn'
+  return canonical
 }
 
 async function messages(
@@ -1763,7 +1953,7 @@ async function messages(
   // a live stream pushed the wire deltas as they landed — finish()
   // closes the event shape; the recorded reply is whatever the filter
   // let through — byte-identical to the client's own view
-  live?.finish(STOP_REASON[reply.stopReason] ?? 'end_turn')
+  live?.finish(canonicalStopReason(reply.stopReason))
   if (live === undefined) {
     // the buffered leg's cut lands post-hoc through the same filter
     stops.feed(reply.text)
@@ -2074,7 +2264,7 @@ class RespLive extends TagPump {
     })
   }
 
-  private respObj(status: string): Record<string, unknown> {
+  private respObj(status: string, reason?: string): Record<string, unknown> {
     return {
       id: this.respId,
       object: 'response',
@@ -2084,7 +2274,7 @@ class RespLive extends TagPump {
       output: this.items,
       store: this.store,
       usage: { input_tokens: this.inputTokens, output_tokens: 0, total_tokens: this.inputTokens },
-      error: null,
+      error: respError(status, reason),
       ...(status === 'incomplete'
         ? { incomplete_details: { reason: 'max_output_tokens' } }
         : {}),
@@ -2216,14 +2406,17 @@ class RespLive extends TagPump {
 
   /** The settled reply — the terminal event reports the same items
    *  the wire streamed, ids and order intact; a cut-off answer ends
-   *  as response.incomplete, not a silent completed. */
-  finish(status: string, usageOut: number): void {
+   *  as response.incomplete, a cancelled/failed turn under its own
+   *  response.<status> event — never a silent completed (bro-6fk80).
+   *  The message item carries the same status: 'incomplete' on a
+   *  cancelled turn would read as a token cap, not the cancel it was. */
+  finish(status: string, usageOut: number, reason?: string): void {
     this.drainAll()
     const st = this.capped ? 'incomplete' : status
-    this.closeItem(st === 'incomplete' ? 'incomplete' : 'completed')
-    this.ev(st === 'incomplete' ? 'response.incomplete' : 'response.completed', {
+    this.closeItem(st)
+    this.ev(`response.${st}`, {
       response: {
-        ...this.respObj(st),
+        ...this.respObj(st, reason),
         usage: {
           input_tokens: this.inputTokens,
           output_tokens: usageOut,
@@ -2364,7 +2557,8 @@ function respEnvelope(
   output: unknown[],
   store: boolean,
   inputTokens: number,
-  outTokens: number
+  outTokens: number,
+  reason?: string
 ): Record<string, unknown> {
   return {
     id: respId,
@@ -2379,15 +2573,32 @@ function respEnvelope(
       output_tokens: outTokens,
       total_tokens: inputTokens + outTokens,
     },
-    error: null,
+    error: respError(status, reason),
     ...(status === 'incomplete' ? { incomplete_details: { reason: 'max_output_tokens' } } : {}),
   }
 }
 
-/** acp stop_reason → Response.status — a truncated answer is
- *  incomplete, never a silent success. */
+/** canonical stop_reason → Response.status — a truncated answer is
+ *  incomplete, a cancelled turn cancelled, a backend-ended turn
+ *  (unmapped reason) failed; never a silent success (bro-6fk80). */
+const RESP_STATUS: Record<string, string> = {
+  end_turn: 'completed',
+  tool_use: 'completed',
+  stop_sequence: 'completed',
+  pause_turn: 'completed',
+  refusal: 'completed',
+  max_tokens: 'incomplete',
+  cancelled: 'cancelled',
+}
 const respStatus = (canonicalReason: string): string =>
-  canonicalReason === 'max_tokens' ? 'incomplete' : 'completed'
+  ownKey(RESP_STATUS, canonicalReason) ?? 'failed'
+
+/** The envelope's `error` field — a failed response names the raw acp
+ *  reason that ended the turn; anything else reports null. */
+const respError = (status: string, reason?: string): unknown =>
+  status === 'failed'
+    ? { code: 'server_error', message: `bro conductor: turn ended — ${reason ?? 'unknown'}` }
+    : null
 
 /** A caller's output-token budget expressed in chars — the inverse of
  *  estTokens' ~4-chars-per-token estimate. Honored, not authoritative. */
@@ -2482,7 +2693,7 @@ function responsesReplay(res: ServerResponse, wire: WireCtx, ctx: RespReplayCtx)
       capCharsOf(rreq.max_output_tokens)
     )
     rl.replay(blocks)
-    rl.finish(status, blocksTokens(blocks))
+    rl.finish(status, blocksTokens(blocks), lr?.stopReason)
     res.end()
     return
   }
@@ -2496,7 +2707,8 @@ function responsesReplay(res: ServerResponse, wire: WireCtx, ctx: RespReplayCtx)
         blocksToOutput(blocks),
         store,
         lr?.inputTokens ?? 0,
-        blocksTokens(blocks)
+        blocksTokens(blocks),
+        lr?.stopReason
       )
     )
   )
@@ -2659,11 +2871,12 @@ function responsesDeliver(
   // would — replay and status agree the answer was cut
   const capped = capBlocks(parseReply(reply.text, tools), capCharsOf(d.rreq.max_output_tokens))
   const outBlocks = capped.blocks
-  const canonicalReason = capped.capped
-    ? 'max_tokens'
-    : (STOP_REASON[reply.stopReason] ?? 'end_turn')
+  // canonicalize before precedence applies — an unmapped backend reason
+  // overridden by a cap or a tool_use still earns its otel breadcrumb
+  const backendReason = canonicalStopReason(reply.stopReason)
   const outTokens = capped.capped ? blocksTokens(outBlocks) : estTokens(reply.text)
-  const status = respStatus(finalRespReason(capped.capped, outBlocks, canonicalReason))
+  const wireReason = finalRespReason(capped.capped, outBlocks, backendReason)
+  const status = respStatus(wireReason)
   if (d.out.conv !== undefined && d.key !== undefined) {
     settleConv(
       wire,
@@ -2673,7 +2886,10 @@ function responsesDeliver(
       {
         blocks: outBlocks,
         model: reply.model,
-        stopReason: canonicalReason,
+        // the wire verdict, not the raw canonical — a replay derives
+        // its status from this record and must answer what the client
+        // originally saw (tool_use outranks a backend 'cancelled')
+        stopReason: wireReason,
         inputTokens,
       },
       stopKeyOf(stopSeqsOf(d.body) ?? []),
@@ -2691,6 +2907,7 @@ function responsesDeliver(
     backend: wire.cfg.backend,
     dialect: 'responses',
     model: reply.model,
+    stop_reason: wireReason,
     stream: d.rreq.stream === true,
     session_reused: d.out.reused,
     input_tokens: inputTokens,
@@ -2698,7 +2915,7 @@ function responsesDeliver(
     duration_ms: Date.now() - d.t0,
   })
   if (d.live !== undefined) {
-    d.live.finish(status, outTokens)
+    d.live.finish(status, outTokens, wireReason)
     res.end()
     return
   }
@@ -2712,7 +2929,8 @@ function responsesDeliver(
         blocksToOutput(outBlocks),
         d.store,
         inputTokens,
-        outTokens
+        outTokens,
+        wireReason
       )
     )
   )
@@ -2896,6 +3114,11 @@ const CHAT_FINISH = {
   tool_use: 'tool_calls',
   stop_sequence: 'stop',
   max_tokens: 'length',
+  // mapped canonicals still land on a real chat finish — 'pause_turn'
+  // is a clean end on this wire, 'refusal' the safety stop; only a
+  // genuinely unmapped reason forwards raw (bro-6fk80)
+  pause_turn: 'stop',
+  refusal: 'content_filter',
 } as const
 
 /** Live chat-completion SSE — the same pending/drain pump rendered
@@ -2992,7 +3215,9 @@ class ChatLive extends TagPump {
     this.head()
     const finishReason = this.capped
       ? 'length'
-      : (CHAT_FINISH[stopReason as keyof typeof CHAT_FINISH] ?? 'stop')
+      : // the enum can't carry a cancelled/backend reason — forward it
+        // raw rather than a silent 'stop' (bro-6fk80)
+        (ownKey(CHAT_FINISH, stopReason) ?? stopReason)
     this.ev({}, finishReason)
     if (usage !== undefined) {
       this.res.write(
@@ -3023,7 +3248,9 @@ const chatShape = (r: ChatRequest): string | undefined =>
     : undefined
 
 /** The canonical stop reason over a turn outcome — a replay reports
- *  the recorded reason, a live turn reads the reply's own. */
+ *  the recorded reason, a live turn reads the reply's own. The backend
+ *  reason canonicalizes before tool_use precedence: an unmapped one
+ *  keeps its otel breadcrumb (bro-6fk80). */
 function chatStopReason(
   replay: boolean,
   lr: ConvSession['lastReply'] | undefined,
@@ -3031,8 +3258,9 @@ function chatStopReason(
   reply: PooledReply | undefined
 ): string {
   if (replay) return lr?.stopReason ?? 'end_turn'
+  const canonical = canonicalStopReason(reply?.stopReason)
   if (blocks.some((b) => b.type === 'tool_use')) return 'tool_use'
-  return STOP_REASON[reply?.stopReason ?? ''] ?? 'end_turn'
+  return canonical
 }
 
 /** Terminal reasons for a chat turn: the cap reports the same reason the
@@ -3076,8 +3304,8 @@ function chatOutcome(
   const outTokens = replay ? blocksTokens(blocks) : estTokens(reply?.text ?? '')
   const stopReason = chatStopReason(replay, lr, blocks, reply)
   const finish =
-    CHAT_FINISH[stopReason as keyof typeof CHAT_FINISH] ??
-    (blocks.some((b) => b.type === 'tool_use') ? 'tool_calls' : 'stop')
+    ownKey(CHAT_FINISH, stopReason) ??
+    (blocks.some((b) => b.type === 'tool_use') ? 'tool_calls' : stopReason)
   return { replay, lr, reply, inputTokens, blocks, outTokens, stopReason, finish }
 }
 
@@ -3221,6 +3449,7 @@ function chatDeliver(
     backend: wire.cfg.backend,
     dialect: 'chat_completions',
     model: o.reply?.model ?? o.lr?.model ?? '',
+    stop_reason: stopReason,
     stream: d.creq.stream === true,
     session_reused: d.out.reused,
     input_tokens: o.inputTokens,
@@ -3329,15 +3558,12 @@ export function conductorProxy(
   // initialize is paid once per listener; session/new per request is
   // cheap and concurrent sessions multiplex on the same connection.
   // A dead transport drops the link so the next request respawns.
-  let link: Promise<AcpPeer> | undefined
-  let live: AcpPeer | undefined
-  // a link resolving after dispose must not resurrect the pool — the
-  // peer is killed on sight instead of being retained unowned
-  let disposed = false
+  const pool = acpLinkPool(`conductor:${cfg.backend}`, cfg.entry, wireOpts, cfg.timeoutMs)
   // retained conversations — one acp session per client conversation
   // (x-bro-session pin or history fingerprint). Transport death kills
-  // every session it carried, so the abort listener drops the map.
+  // every session it carried, so the death hook drops the map.
   const sessions = new Map<string, ConvSession>()
+  pool.onDeath(() => dropSessions(sessions))
   // keys whose first session/new is in flight — a concurrent same-key
   // request must not open a twin (the loser would leak unmapped)
   const pendingOpens = new Set<string>()
@@ -3346,88 +3572,57 @@ export function conductorProxy(
   // previous_response_id a real predecessor: a session that moved
   // past it means the caller branched — rejected, not resumed.
   const chains = new Map<string, { key: string; consumed: number }>()
-  const getLink = (parent?: OtelCtx): Promise<AcpPeer> => {
-    if (link === undefined) {
-      otelEvent('acp.spawn', { backend: cfg.backend })
-      link = acpOpen(
-        `conductor:${cfg.backend}`,
-        cfg.entry,
-        wireOpts,
-        Date.now() + cfg.timeoutMs,
-        parent
-      )
-      link.then(
-        (p) => {
-          if (disposed) {
-            p.close()
-            return
-          }
-          live = p
-          p.signal.addEventListener(
-            'abort',
-            () => {
-              link = undefined
-              live = undefined
-              dropSessions(sessions)
-            },
-            { once: true }
-          )
-        },
-        () => (link = undefined)
-      )
-    }
-    return link
-  }
-  // the pooled child outlives any request — without a close on process
-  // exit serve shutdown orphans it on a dead transport (the zombie
-  // acp worker of the original incident). close() is sync, safe in an
-  // 'exit' handler; an in-flight link resolve is a ms-scale window.
-  // One shared exit hook for every proxy — see trackPooledPeerClose.
-  const untrackPeerClose = trackPooledPeerClose(() => live?.close())
+  const getLink = (parent?: OtelCtx): Promise<AcpPeer> => pool.link(parent)
   const wire: WireCtx = { cfg, opts: wireOpts, link: getLink, sessions, pendingOpens }
   return Object.assign(
-    async (req: IncomingMessage, res: ServerResponse): Promise<void> => {
-      const path = (req.url ?? '/').split('?')[0]
-      const method = req.method ?? 'GET'
-      const httpSpan = httpTap(req, res, cfg, method, path)
-      // literal dispatch — a Map.get(requestInput)() call reads to CodeQL
-      // as an unvalidated dynamic method call; the fixed case list IS the
-      // allowlist guard it wants to see
-      switch (`${method} ${path}`) {
-        case 'POST /v1/messages':
-          await messages(req, res, wire, httpSpan.ctx)
-          return
-        case 'POST /v1/responses':
-          await responses(req, res, wire, chains, httpSpan.ctx)
-          return
-        case 'POST /v1/chat/completions':
-          await chatCompletions(req, res, wire, httpSpan.ctx)
-          return
-        case 'POST /v1/messages/count_tokens':
-          await countTokens(req, res)
-          return
-        case 'GET /v1/models':
-          await models(res, cfg, wireOpts)
-          return
-        default:
-          apiError(res, 404, 'not_found_error', `bro conductor: no route ${method} ${path}`)
-          return
-      }
-    },
+    conductorDispatch(wire, chains, cfg, wireOpts),
     {
-      terminals: () => live?.terminals,
+      terminals: () => pool.live()?.terminals,
       dispose: (): void => {
-        disposed = true
-        // a getLink still inside acpOpen holds no `live` peer to close
+        // a link still inside acpOpen holds no `live` peer to close
         // — aborting rejects its init and frees the deadline timer
         // that would otherwise pin the loop past server close
         poolAbort.abort()
-        untrackPeerClose()
-        live?.close()
-        live = undefined
+        pool.dispose()
       },
     }
   )
+}
+
+/** The `/v1/*` literal dispatch — a Map.get(requestInput)() call reads
+ *  to CodeQL as an unvalidated dynamic method call; the fixed case list
+ *  IS the allowlist guard it wants to see. */
+function conductorDispatch(
+  wire: WireCtx,
+  chains: Map<string, { key: string; consumed: number }>,
+  cfg: ConductorConfig,
+  wireOpts: ProviderWireOpts
+): (req: IncomingMessage, res: ServerResponse) => Promise<void> {
+  return async (req: IncomingMessage, res: ServerResponse): Promise<void> => {
+    const path = (req.url ?? '/').split('?')[0]
+    const method = req.method ?? 'GET'
+    const httpSpan = httpTap(req, res, cfg, method, path)
+    switch (`${method} ${path}`) {
+      case 'POST /v1/messages':
+        await messages(req, res, wire, httpSpan.ctx)
+        return
+      case 'POST /v1/responses':
+        await responses(req, res, wire, chains, httpSpan.ctx)
+        return
+      case 'POST /v1/chat/completions':
+        await chatCompletions(req, res, wire, httpSpan.ctx)
+        return
+      case 'POST /v1/messages/count_tokens':
+        await countTokens(req, res)
+        return
+      case 'GET /v1/models':
+        await models(res, cfg, wireOpts)
+        return
+      default:
+        apiError(res, 404, 'not_found_error', `bro conductor: no route ${method} ${path}`)
+        return
+    }
+  }
 }
 
 /** The per-request span + request-finished telemetry tap — one

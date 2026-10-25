@@ -20,7 +20,7 @@
  * between-turn point check stays `bro mesh wait`. stdout carries one
  * line or one JSON object; progress goes to stderr.
  */
-import { gitCommonDir } from '@broject/core'
+import { gitCommonDir, hasHelpFlag, printUsage } from '@broject/core'
 import {
   meshThread,
   parseExternalRef,
@@ -492,6 +492,9 @@ async function watchLoop(
 }
 
 export async function runWaitCommand(argv: string[]): Promise<void> {
+  if (hasHelpFlag(argv)) {
+    printUsage(USAGE, 0)
+  }
   const dir = process.cwd()
   const args = parseArgs(argv)
   const common = gitCommonDir(dir)

@@ -17,7 +17,8 @@
  * trace/, perf/).
  *
  * Session resolution: `--session` > env (BRO_SESSION_ID, DEVIN_SESSION_ID,
- * CLAUDE_SESSION_ID, CODEX_SESSION_ID, OPENCODE_SESSION_ID) > the repo
+ * CLAUDE_CODE_SESSION_ID, CLAUDE_SESSION_ID, CODEX_SESSION_ID,
+ * OPENCODE_SESSION_ID) > the repo
  * seed `_default` — what a bare-shell `bro goal` writes, materialized as
  * the NEXT session's goal when its hook first evaluates it.
  *
@@ -27,7 +28,7 @@
 import { execFileSync } from 'node:child_process'
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { isAbsolute, join, resolve } from 'node:path'
-import type { JudgeAnswer } from '@broject/core'
+import { hasHelpFlag, LockTimeout, printUsage, withFileLock, type JudgeAnswer } from '@broject/core'
 import { appendRow, judgeConfig, judgeFacade } from '@broject/judge'
 import { loadBroConfig } from '../plugins.ts'
 import type { GoalConfig } from './goal-config.ts'
@@ -60,6 +61,7 @@ const SEED = '_default'
 const SESSION_ENV = [
   'BRO_SESSION_ID',
   'DEVIN_SESSION_ID',
+  'CLAUDE_CODE_SESSION_ID',
   'CLAUDE_SESSION_ID',
   'CODEX_SESSION_ID',
   'OPENCODE_SESSION_ID',
@@ -88,6 +90,32 @@ const safe = (id: string): string => id.replace(/[^\w.-]/g, '_')
 function goalPath(dir: string, session: string): string | null {
   const d = goalDir(dir)
   return d ? join(d, `${safe(session)}.json`) : null
+}
+
+/** The session's eval/update lock — serializes the stop hook's
+ *  recheck+write against `bro goal pause|clear|set` so a write landing
+ *  mid-eval is seen, never clobbered back to active. */
+function goalLock(dir: string, session: string): string | null {
+  const p = goalPath(dir, session)
+  return p === null ? null : `${p}.lock`
+}
+
+/** A mutating verb serializes against an in-flight stop-hook eval —
+ *  its read-modify-write must never interleave the eval's recheck+write.
+ *  A wedged lock fails open: `bro goal` must keep working. */
+const withGoalLock = <T>(dir: string, target: string, fn: () => T): T => {
+  const lock = goalLock(dir, target)
+  if (lock === null) {
+    return fn()
+  }
+  try {
+    return withFileLock(lock, fn, { waitMs: 5_000, label: 'goal update lock' })
+  } catch (err) {
+    if (err instanceof LockTimeout) {
+      return fn()
+    }
+    throw err
+  }
 }
 
 export function readGoal(dir: string, session: string): GoalRecord | null {
@@ -197,9 +225,8 @@ export async function goalStopLines(
   if (goal === null) {
     return []
   }
-  if (goal.status === 'paused') {
-    return [`paused goal: "${goal.condition}" — \`bro goal resume\` reactivates`]
-  }
+  // A paused goal stays silent: any per-stop context re-wakes the host,
+  // so a reminder here turns an idle wait into an unbounded turn loop.
   if (goal.status !== 'active') {
     return []
   }
@@ -246,61 +273,75 @@ export async function goalStopLines(
     if (answer === undefined || answer.type !== 'choice' || res.lowConfidence.includes('verdict')) {
       throw new Error('no confident verdict')
     }
-    // the decide() round-trip is async — re-read before writing so a
-    // `bro goal clear`/replace landing mid-eval is not clobbered by the
-    // stale snapshot's verdict
+    // the decide() round-trip is async — the recheck+write runs under
+    // the session's goal lock, merging the verdict into the LATEST
+    // record: a `bro goal pause`/`clear`/replace landing mid-eval is
+    // seen (never clobbered back to active), and a concurrent eval
+    // serializes behind this one instead of losing its verdict
+    const finishEval = (): string[] => {
+      const fresh = sessionGoal(dir, sessionId)
+      if (fresh === null || fresh.createdAt !== goal.createdAt || fresh.status !== 'active') {
+        return []
+      }
+      fresh.lastVerdict = answer.choice as GoalRecord['lastVerdict']
+      fresh.evals += 1
+      try {
+        appendRow(dir, {
+          ts: new Date().toISOString(),
+          kind: 'goal-verdict',
+          subject: { threadId: sessionId || undefined },
+          questions: {},
+          answers: res.answers,
+          model: res.model,
+          latencyMs: res.latencyMs,
+          ...(res.lowConfidence.length > 0 ? { lowConfidence: res.lowConfidence } : {}),
+        })
+      } catch {
+        // the journal is a nicety, not the verdict
+      }
+      if (answer.choice === 'met') {
+        fresh.status = 'achieved'
+        fresh.resolvedAt = Date.now()
+        writeGoal(dir, sessionId, fresh)
+        return [`◎ goal met: "${fresh.condition}" (${fresh.evals} turns) — cleared`]
+      }
+      if (answer.choice === 'impossible') {
+        fresh.status = 'impossible'
+        fresh.resolvedAt = Date.now()
+        writeGoal(dir, sessionId, fresh)
+        return [
+          `goal judged impossible: "${fresh.condition}" — cleared; ` +
+            'report the blocker or set a new goal',
+        ]
+      }
+      if (fresh.maxTurns > 0 && fresh.evals >= fresh.maxTurns) {
+        fresh.status = 'budget'
+        fresh.resolvedAt = Date.now()
+        writeGoal(dir, sessionId, fresh)
+        return [
+          `goal turn budget reached (${fresh.evals}/${fresh.maxTurns}): "${fresh.condition}" ` +
+            '— paused; `bro goal resume` continues, `bro goal clear` drops it',
+        ]
+      }
+      writeGoal(dir, sessionId, fresh)
+      return [
+        `goal turn ${fresh.evals}${fresh.maxTurns > 0 ? `/${fresh.maxTurns}` : ''} — not yet met: ` +
+          `"${fresh.condition}" — keep going (\`bro goal clear\` resolves it)`,
+      ]
+    }
+    const lock = goalLock(dir, sessionId)
+    return lock === null
+      ? finishEval()
+      : withFileLock(lock, finishEval, { waitMs: 5_000, label: 'goal eval lock' })
+  } catch {
+    // fail-open — but re-read first: a pause/clear that landed mid-eval
+    // stays silent instead of re-waking the host
     const fresh = sessionGoal(dir, sessionId)
-    if (fresh === null || fresh.createdAt !== goal.createdAt || fresh.status !== 'active') {
+    if (fresh === null || fresh.status !== 'active') {
       return []
     }
-    goal.lastVerdict = answer.choice as GoalRecord['lastVerdict']
-    goal.evals += 1
-    try {
-      appendRow(dir, {
-        ts: new Date().toISOString(),
-        kind: 'goal-verdict',
-        subject: { threadId: sessionId || undefined },
-        questions: {},
-        answers: res.answers,
-        model: res.model,
-        latencyMs: res.latencyMs,
-        ...(res.lowConfidence.length > 0 ? { lowConfidence: res.lowConfidence } : {}),
-      })
-    } catch {
-      // the journal is a nicety, not the verdict
-    }
-    if (answer.choice === 'met') {
-      goal.status = 'achieved'
-      goal.resolvedAt = Date.now()
-      writeGoal(dir, sessionId, goal)
-      return [`◎ goal met: "${goal.condition}" (${goal.evals} turns) — cleared`]
-    }
-    if (answer.choice === 'impossible') {
-      goal.status = 'impossible'
-      goal.resolvedAt = Date.now()
-      writeGoal(dir, sessionId, goal)
-      return [
-        `goal judged impossible: "${goal.condition}" — cleared; ` +
-          'report the blocker or set a new goal',
-      ]
-    }
-    if (goal.maxTurns > 0 && goal.evals >= goal.maxTurns) {
-      goal.status = 'budget'
-      goal.resolvedAt = Date.now()
-      writeGoal(dir, sessionId, goal)
-      return [
-        `goal turn budget reached (${goal.evals}/${goal.maxTurns}): "${goal.condition}" ` +
-          '— paused; `bro goal resume` continues, `bro goal clear` drops it',
-      ]
-    }
-    writeGoal(dir, sessionId, goal)
     return [
-      `goal turn ${goal.evals}${goal.maxTurns > 0 ? `/${goal.maxTurns}` : ''} — not yet met: ` +
-        `"${goal.condition}" — keep going (\`bro goal clear\` resolves it)`,
-    ]
-  } catch {
-    return [
-      `goal: "${goal.condition}" — verify it before reporting done ` +
+      `goal: "${fresh.condition}" — verify it before reporting done ` +
         '(`bro goal` shows status · `bro goal clear` resolves)',
     ]
   }
@@ -385,48 +426,44 @@ function report(target: string, goal: GoalRecord, asJson: boolean, text: string)
   console.log(text)
 }
 
-export function runGoalCommand(argv: string[]): void {
-  const dir = process.cwd()
-  const { session, turns, asJson, positional } = parseGoalArgs(argv)
-  const target = session ?? SEED
-  const verb = positional[0]
-  // a session-scoped verb binds the session's materialized goal — the
-  // seed is consumed, not left behind to re-seed the next session
-  const verbGoal = () => (session === undefined ? readGoal(dir, SEED) : sessionGoal(dir, target))
+function clearGoal(dir: string, target: string, goal: GoalRecord | null, asJson: boolean): void {
+  if (goal === null) {
+    console.log('No goal set')
+    return
+  }
+  goal.status = 'cleared'
+  goal.resolvedAt = Date.now()
+  writeGoal(dir, target, goal)
+  report(target, goal, asJson, `Goal cleared: ${goal.condition}`)
+}
 
-  if (verb !== undefined && CLEAR_ALIASES.has(verb)) {
-    const goal = verbGoal()
-    if (goal === null) {
-      console.log('No goal set')
-      return
-    }
-    goal.status = 'cleared'
-    goal.resolvedAt = Date.now()
-    writeGoal(dir, target, goal)
-    report(target, goal, asJson, `Goal cleared: ${goal.condition}`)
+function pauseResumeGoal(
+  dir: string,
+  target: string,
+  verb: 'pause' | 'resume',
+  goal: GoalRecord | null,
+  asJson: boolean
+): void {
+  if (goal === null) {
+    console.log('No goal set')
     return
   }
-  if (verb === 'pause' || verb === 'resume') {
-    const goal = verbGoal()
-    if (goal === null) {
-      console.log('No goal set')
-      return
-    }
-    goal.status = verb === 'pause' ? 'paused' : 'active'
-    if (verb === 'resume') {
-      goal.evals = 0
-      goal.resolvedAt = undefined
-    }
-    writeGoal(dir, target, goal)
-    report(target, goal, asJson, `goal ${verb}d: "${goal.condition}"`)
-    return
+  goal.status = verb === 'pause' ? 'paused' : 'active'
+  if (verb === 'resume') {
+    goal.evals = 0
+    goal.resolvedAt = undefined
   }
-  if (verb === 'status' || verb === undefined) {
-    printStatus(verbGoal(), target, asJson)
-    return
-  }
+  writeGoal(dir, target, goal)
+  report(target, goal, asJson, `goal ${verb}d: "${goal.condition}"`)
+}
 
-  const condition = positional.join(' ')
+function setGoal(
+  dir: string,
+  target: string,
+  condition: string,
+  turns: number | undefined,
+  asJson: boolean
+): void {
   if (condition.length > 4000) {
     console.error('error: goal condition is capped at 4000 characters')
     process.exit(2)
@@ -438,7 +475,7 @@ export function runGoalCommand(argv: string[]): void {
     evals: 0,
     maxTurns: turns ?? goalConfig(dir).maxTurns,
   }
-  writeGoal(dir, target, goal)
+  withGoalLock(dir, target, () => writeGoal(dir, target, goal))
   report(
     target,
     goal,
@@ -446,4 +483,34 @@ export function runGoalCommand(argv: string[]): void {
     `goal set (${target === SEED ? 'repo — binds to next session' : `session ${target.slice(0, 12)}`}): ` +
       `"${condition}"${goal.maxTurns > 0 ? ` · ${goal.maxTurns} turns` : ''}`
   )
+}
+
+export function runGoalCommand(argv: string[]): void {
+  if (hasHelpFlag(argv)) {
+    printUsage(
+      'usage: bro goal [<condition> | clear|pause|resume|status] [--session <id>] [--turns <n>] [--json]',
+      0
+    )
+  }
+  const dir = process.cwd()
+  const { session, turns, asJson, positional } = parseGoalArgs(argv)
+  const target = session ?? SEED
+  const verb = positional[0]
+  // a session-scoped verb binds the session's materialized goal — the
+  // seed is consumed, not left behind to re-seed the next session
+  const verbGoal = () => (session === undefined ? readGoal(dir, SEED) : sessionGoal(dir, target))
+
+  if (verb !== undefined && CLEAR_ALIASES.has(verb)) {
+    withGoalLock(dir, target, () => clearGoal(dir, target, verbGoal(), asJson))
+    return
+  }
+  if (verb === 'pause' || verb === 'resume') {
+    withGoalLock(dir, target, () => pauseResumeGoal(dir, target, verb, verbGoal(), asJson))
+    return
+  }
+  if (verb === 'status' || verb === undefined) {
+    printStatus(verbGoal(), target, asJson)
+    return
+  }
+  setGoal(dir, target, positional.join(' '), turns, asJson)
 }

@@ -12,19 +12,21 @@
 import { randomBytes } from 'node:crypto'
 import {
   deliverSinks,
+  hasHelpFlag,
   loadConfig,
+  printUsage,
   sinkSecrets,
   type SinkDef,
   type SinkDelivery,
 } from '@broject/core'
+import type { ExitCode } from '@broject/core'
 
-function usage(exitCode = 1): never {
-  console.error(`Usage: bro sinks <command> [args…]
+function usage(exitCode: ExitCode = 2): never {
+  printUsage(`Usage: bro sinks <command> [args…]
 
 Commands:
   list [--json]   Resolved sinks — type, route patterns, secret env state
-  test [--json]   Deliver a probe event to every sink; report per-sink ok/err`)
-  process.exit(exitCode)
+  test [--json]   Deliver a probe event to every sink; report per-sink ok/err`, exitCode)
 }
 
 /** Endpoint provenance for `list` — the env var name or "literal",
@@ -140,8 +142,8 @@ async function cmdTest(json: boolean): Promise<void> {
 
 export async function runSinksCommand(argv: string[]): Promise<void> {
   const [sub, ...rest] = argv
-  if (sub === undefined || sub === '--help' || sub === '-h') {
-    usage(sub === undefined ? 1 : 0)
+  if (sub === undefined || hasHelpFlag(argv)) {
+    usage(sub === undefined ? 2 : 0)
   }
   switch (sub) {
     case 'list':
