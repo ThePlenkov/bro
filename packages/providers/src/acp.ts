@@ -830,11 +830,12 @@ function pooledClientApp(opts: ProviderWireOpts, terminals: AcpTerminals) {
  *  has no fs handler, so every agent fs call would answer
  *  method-not-found. */
 function fsCapsWithoutBridge(opts: ProviderWireOpts): boolean {
-  const caps = opts.acp?.clientCapabilities
-  return (
-    opts.acp?.bridge === undefined &&
-    (caps?.fs?.readTextFile === true || caps?.fs?.writeTextFile === true)
-  )
+  const acp = opts.acp
+  if (acp === undefined || acp.bridge !== undefined) {
+    return false
+  }
+  const fs = acp.clientCapabilities?.fs
+  return fs?.readTextFile === true || fs?.writeTextFile === true
 }
 
 /** Spawn the acp child and wire its stdio into `app` — the unref'd
@@ -1145,11 +1146,7 @@ export async function acpPooledTurn(
   try {
     const sessSpan = otelSpan('acp.session', { 'acp.by': by }, { parent: span.ctx })
     const session = await acpSessionOpen(
-      ctx,
-      opts,
-      peer.asAuthError,
-      req,
-      turn.sessionRequest
+      ctx, opts, peer.asAuthError, req, turn.sessionRequest
     )
     const endSession = (a: Record<string, string | number | boolean> = {}): void =>
       sessSpan.end({ 'acp.session_id': session.sessionId, ...a })
@@ -1187,10 +1184,7 @@ export async function acpPooledTurn(
       return { ...r, model }
     } catch (err) {
       endSession({ error: errMsg(err) })
-      end(
-        { 'acp.session_id': session.sessionId, error: errMsg(err) },
-        'error'
-      )
+      end({ 'acp.session_id': session.sessionId, error: errMsg(err) }, 'error')
       throw err
     } finally {
       session.dispose()
@@ -1198,16 +1192,15 @@ export async function acpPooledTurn(
   } catch (err) {
     // the pooled link skips withAcp's error mapping — same contract here:
     // config problems stay config, everything else is availability
+    end({ error: errMsg(err) }, 'error')
     if (err instanceof JudgeUnavailable || err instanceof AcpConfigError) {
-      end({ error: errMsg(err) }, 'error')
       throw err
     }
     const tail = peer.tail()
-    const detail = tail === '' ? '' : ` (${tail})`
-    end({ error: errMsg(err) }, 'error')
-    throw new JudgeUnavailable(`acp ${by} unavailable — ${errMsg(err)}${detail}`, {
-      cause: err,
-    })
+    throw new JudgeUnavailable(
+      `acp ${by} unavailable — ${errMsg(err)}${tail === '' ? '' : ` (${tail})`}`,
+      { cause: err }
+    )
   }
 }
 
