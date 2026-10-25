@@ -878,10 +878,66 @@ describe('bro doctor', () => {
         let c = byName(runDoctorChecks(dir), 'daemon')
         assert.equal(c.status, 'warn')
         assert.match(c.detail, /predates HEAD/)
-        utimesSync(entry, new Date(), new Date())
+        // covering without "rebuilt after spawn": the ref move is
+        // backdated under the (also stale) dist mtime — both before the
+        // daemon started, so only the dist↔HEAD relation decides
+        const old = new Date(Date.now() - 7_200_000)
+        utimesSync(join(dir, '.git', 'logs', 'HEAD'), old, old)
         c = byName(runDoctorChecks(dir), 'daemon')
         assert.equal(c.status, 'ok')
         assert.match(c.detail, /covers HEAD/)
+        // a rebuild landing while the daemon runs — fresh on disk, but
+        // the process still holds the pre-build code it exec'd
+        const future = new Date(Date.now() + 60_000)
+        utimesSync(entry, future, future)
+        c = byName(runDoctorChecks(dir), 'daemon')
+        assert.equal(c.status, 'warn')
+        assert.match(c.detail, /rebuilt after the daemon started/)
+      } finally {
+        child.kill()
+      }
+    }))
+
+  test('daemon: a source entry inside this checkout is the checkout\'s code, not an install', () =>
+    withEnv({ bins: ['gh'] }, (dir) => {
+      // `node packages/cli/src/index.ts` — the supported source entry —
+      // must not read as "installed, not this repo's build"
+      mkdirSync(join(dir, 'packages', 'cli', 'src'), { recursive: true })
+      writeFileSync(join(dir, 'packages', 'cli', 'package.json'), '{"name":"@broject/bro","version":"0.2.5"}')
+      const entry = join(dir, 'packages', 'cli', 'src', 'index.ts')
+      writeFileSync(entry, 'setTimeout(() => {}, 1e9)\n')
+      commitAt(dir)
+      // the ref move backdated under the spawn — only the classification
+      // decides
+      const old = new Date(Date.now() - 7_200_000)
+      utimesSync(join(dir, '.git', 'logs', 'HEAD'), old, old)
+      const child = fakeDaemon(dir, [process.execPath, entry])
+      try {
+        const c = byName(runDoctorChecks(dir), 'daemon')
+        assert.equal(c.status, 'ok')
+        assert.match(c.detail, /this checkout's source entry/)
+      } finally {
+        child.kill()
+      }
+    }))
+
+  test('daemon: a source entry warns when HEAD moved after the daemon started', () =>
+    withEnv({ bins: ['gh'] }, (dir) => {
+      mkdirSync(join(dir, 'packages', 'cli', 'src'), { recursive: true })
+      writeFileSync(join(dir, 'packages', 'cli', 'package.json'), '{"name":"@broject/bro","version":"0.2.5"}')
+      const entry = join(dir, 'packages', 'cli', 'src', 'index.ts')
+      writeFileSync(entry, 'setTimeout(() => {}, 1e9)\n')
+      commitAt(dir)
+      const child = fakeDaemon(dir, [process.execPath, entry])
+      try {
+        // a commit landing after the spawn — the reflog pushed into the
+        // future so proc-start quantization can't eat the ordering
+        commitAt(dir)
+        const future = new Date(Date.now() + 60_000)
+        utimesSync(join(dir, '.git', 'logs', 'HEAD'), future, future)
+        const c = byName(runDoctorChecks(dir), 'daemon')
+        assert.equal(c.status, 'warn')
+        assert.match(c.detail, /HEAD moved since it started/)
       } finally {
         child.kill()
       }

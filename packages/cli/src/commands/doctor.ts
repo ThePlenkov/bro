@@ -36,6 +36,7 @@ import {
   loadConfigLayers,
   pidAlive,
   printUsage,
+  procStat,
   probeBdCompat,
   probeDoltRemote,
   PROVIDER_REGISTRY,
@@ -618,6 +619,36 @@ function daemonEntry(pid: number): string | null {
   }
 }
 
+/** The daemon process's start epoch in ms — /proc starttime jiffies off
+ *  /proc/uptime's boot estimate, the same conversion readProcRows uses.
+ *  null off-linux or on a raced exit; callers read null as unverifiable,
+ *  never as stale. */
+function procStartMs(pid: number): number | null {
+  try {
+    const uptimeSec = Number(readFileSync('/proc/uptime', 'utf8').split(' ')[0])
+    const st = procStat(pid)
+    if (st === null || st.start === '') {
+      return null
+    }
+    return Date.now() - uptimeSec * 1000 + (Number(st.start) / 100) * 1000
+  } catch {
+    return null
+  }
+}
+
+/** Two dirs inside the same repository — linked worktrees share the
+ *  common dir, so an entry exec'd from any of them is this repo's code,
+ *  not a foreign binary. */
+function sameGitCommon(a: string, b: string): boolean {
+  const ca = gitCommonDir(a)
+  const cb = gitCommonDir(b)
+  try {
+    return ca !== null && cb !== null && realpathSync(ca) === realpathSync(cb)
+  } catch {
+    return false
+  }
+}
+
 /** The bro package version behind an entry — `<pkg>/dist/index.js` sits
  *  two levels under package.json in dev checkouts, npm installs and the
  *  npx cache alike. Versionless entries (a bare script) report none. */
@@ -679,18 +710,26 @@ function daemonBinChecks(dir: string, root: string | null): DoctorCheck[] {
   }
   const dev = devDistEntry(entry)
   if (dev !== null) {
-    const own = gitCommonDir(dev.checkout)
-    const here = gitCommonDir(dir)
-    let same = false
-    try {
-      same = own !== null && here !== null && realpathSync(own) === realpathSync(here)
-    } catch {
-      same = false
-    }
-    if (same) {
+    if (sameGitCommon(dev.checkout, dir)) {
       // the repo's own dist — the staleness verdict IS the binary
       // verdict: a dist that predates HEAD is protections-not-live
       const c = devDistCheck(dev)
+      if (c.status === 'ok') {
+        // ...but devDistCheck only weighs the files on disk: the running
+        // process still holds what it exec'd, so a dist rebuilt after
+        // this daemon started is fresh on disk and stale in memory
+        const start = procStartMs(pid)
+        if (start !== null && distStampMs(dev.distDir) > start) {
+          return [
+            check(
+              'daemon',
+              'warn',
+              `pid ${pid} runs ${entry} — dist rebuilt after the daemon started`,
+              'restart the daemon — the running process still holds the pre-build code'
+            ),
+          ]
+        }
+      }
       return [check('daemon', c.status, `pid ${pid} · ${c.detail}`, c.hint)]
     }
     return [
@@ -700,6 +739,32 @@ function daemonBinChecks(dir: string, root: string | null): DoctorCheck[] {
         `pid ${pid} runs ${entry} — a different bro checkout's dist`,
         'restart it under this repo\'s build or the shared install — protections live only in the binary the daemon runs'
       ),
+    ]
+  }
+  // a non-dist entry inside a bro checkout (`node packages/cli/src/index.ts`,
+  // a tsx worker, a repo script) IS that checkout's code — node_modules
+  // paths are vendored installs, never source. Only the drift question
+  // remains: HEAD moving after the daemon spawned leaves the running
+  // process behind the checkout
+  const entryRoot = entry.includes('/node_modules/') ? null : repoRoot(dirname(entry))
+  if (
+    entryRoot !== null &&
+    sameGitCommon(entryRoot, dir) &&
+    broCheckoutVersion(entryRoot) !== null
+  ) {
+    const start = procStartMs(pid)
+    if (start !== null && refMovedMs(entryRoot, 'HEAD') > start) {
+      return [
+        check(
+          'daemon',
+          'warn',
+          `pid ${pid} runs ${entry} — this checkout's source, but HEAD moved since it started`,
+          'restart the daemon — the running process loaded the pre-move code'
+        ),
+      ]
+    }
+    return [
+      check('daemon', 'ok', `up — pid ${pid} · ${entry} — this checkout's source entry`),
     ]
   }
   const v = broEntryVersion(entry)
