@@ -53,14 +53,16 @@ const credentialShaped = (path: string, v: unknown): boolean =>
 const show = (path: string, v: unknown): string =>
   credentialShaped(path, v) ? '[redacted]' : describe(v)
 
-/** `type` kinds whose check is more than a jsonTypeOf name match. */
-const TYPE_CHECKS: Record<string, (v: unknown) => boolean> = {
-  integer: Number.isInteger,
-  number: (v) => typeof v === 'number' && Number.isFinite(v),
-}
+/** `type` kinds whose check is more than a jsonTypeOf name match.
+ *  A Map, not a record — key-typed dispatch on an object literal is an
+ *  injection sink to SAST. */
+const TYPE_CHECKS = new Map<string, (v: unknown) => boolean>([
+  ['integer', Number.isInteger],
+  ['number', (v) => typeof v === 'number' && Number.isFinite(v)],
+])
 
 function typeMatches(v: unknown, t: string | readonly string[]): boolean {
-  return (Array.isArray(t) ? t : [t]).some((k) => TYPE_CHECKS[k]?.(v) ?? jsonTypeOf(v) === k)
+  return (Array.isArray(t) ? t : [t]).some((k) => TYPE_CHECKS.get(k)?.(v) ?? jsonTypeOf(v) === k)
 }
 
 /** Schema `pattern`/`patternProperties` strings are code, not user
@@ -355,15 +357,16 @@ export function validateSchemaValue(
 /** Value-shape checks — scalar keywords apply to every shape; the rest
  *  dispatch on the value's actual type. jsonTypeOf already discriminates
  *  null/array/object, so the shape handlers key off its tag. `never`
- *  parameters make the heterogeneous handler table typecheck. */
-const SHAPE_CHECKS: Record<string, (ctx: VCtx, v: never) => void> = {
-  number: pushNumberErrors,
-  string: pushStringErrors,
-  array: pushArrayErrors,
-  object: pushObjectErrors,
-}
+ *  parameters make the heterogeneous handler table typecheck; a Map
+ *  keeps the key-typed lookup from reading as object injection. */
+const SHAPE_CHECKS = new Map<string, (ctx: VCtx, v: never) => void>([
+  ['number', pushNumberErrors],
+  ['string', pushStringErrors],
+  ['array', pushArrayErrors],
+  ['object', pushObjectErrors],
+])
 
 function pushShapeErrors(ctx: VCtx, value: unknown): void {
   pushScalarErrors(ctx, value)
-  SHAPE_CHECKS[jsonTypeOf(value)]?.(ctx, value as never)
+  SHAPE_CHECKS.get(jsonTypeOf(value))?.(ctx, value as never)
 }

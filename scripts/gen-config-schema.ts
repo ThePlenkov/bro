@@ -12,7 +12,7 @@
  */
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
-import { fileURLToPath, pathToFileURL } from 'node:url'
+import { fileURLToPath } from 'node:url'
 
 const root = join(dirname(fileURLToPath(import.meta.url)), '..')
 const outFile = join(root, 'packages/cli/schemas/bro.config.schema.json')
@@ -24,9 +24,10 @@ if (!existsSync(entry)) {
   process.exit(2)
 }
 
-// nosemgrep — `entry` is this repo's own built dist file (existsSync-gated
-// above); the dynamic import is the generator's whole job:
-const { emitConfigSchemaJson } = (await import(pathToFileURL(entry).href)) as { // nosemgrep
+// the specifier is a literal — resolves relative to this script and
+// (existsSync-gated above) always exists here; a computed specifier is
+// an "unsafe call to import" finding
+const { emitConfigSchemaJson } = (await import('../packages/cli/dist/config-schema.js')) as {
   emitConfigSchemaJson: () => string
 }
 const content = emitConfigSchemaJson()
