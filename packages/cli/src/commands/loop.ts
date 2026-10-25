@@ -91,6 +91,7 @@ import {
   type TaskStore,
   BATCH_MARKER_ENV,
   hasHelpFlag,
+  issueLink,
   printUsage,
 } from '@broject/core'
 import type { ExitCode } from '@broject/core'
@@ -966,7 +967,12 @@ function stampProjection(ctx: Ctx, beads: ReadyBead[], pr: number): void {
   }
   try {
     ctx.rev.linkCloses({ repo: ctx.repo, pr }, refs)
-    say(ctx, `loop: ${prRef(ctx, pr)} wired Fixes ${refs.map((r) => `#${r}`).join(', ')}`)
+    say(
+      ctx,
+      `loop: ${prRef(ctx, pr)} wired Fixes ${refs
+        .map((r) => (/^\d+$/.test(r) ? issueLink(ctx.repo, Number(r)) : r))
+        .join(', ')}`
+    )
   } catch (err) {
     console.error(`loop: ${prRef(ctx, pr)} Fixes wiring failed — ${String(err)}`)
   }

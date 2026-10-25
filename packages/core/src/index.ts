@@ -6,6 +6,7 @@ export {
   ghJsonAsync,
   ghTry,
   ghTryAsync,
+  issueLink,
   prLink,
   resolveRepo,
   resolveRepoAsync,
