@@ -1,0 +1,264 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://example.invalid/evidence.v1.schema.json",
+  "title": "evidence.claim.v1",
+  "description": "One physical evidence directory per claim. NO claim is reported without this file. Empty commands or empty assertions is structurally invalid; scripts/validate.py cross-checks that every assertions[].evidence_quote appears verbatim in commands[].stdout_excerpt or in a referenced artifact file. (See inline comments on lines 5 and 209 below for context on the SkillSpector false positives this schema has triggered.)",
+  "type": "object",
+  "required": [
+    "version",
+    "claim",
+    "slug",
+    "agent",
+    "session_id",
+    "produced_at",
+    "target_environment",
+    "verification_method",
+    "preconditions",
+    "commands",
+    "assertions",
+    "files_changed",
+    "artifacts",
+    "remaining_gaps",
+    "self_recheck"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "version": { "const": 1 },
+    "claim": {
+      "type": "string",
+      "minLength": 1,
+      "description": "The exact sentence that will appear in the final report. Mirror it verbatim in the four-line proof block."
+    },
+    "slug": {
+      "type": "string",
+      "pattern": "^[a-z0-9][a-z0-9-]{0,63}$",
+      "description": "Kebab-case label matching the directory name."
+    },
+    "task_id": {
+      "type": ["string", "null"],
+      "description": "Parent task/issue/MR/PR id, or null."
+    },
+    "agent": { "type": "string", "minLength": 1 },
+    "session_id": { "type": "string", "minLength": 1 },
+    "produced_at": { "type": "string", "format": "date-time" },
+    "target_environment": {
+      "enum": [
+        "backend",
+        "cli",
+        "frontend",
+        "browser",
+        "integration",
+        "static-analysis",
+        "test-suite",
+        "db-migration",
+        "docs",
+        "other"
+      ]
+    },
+    "verification_method": {
+      "enum": [
+        "command",
+        "test-suite",
+        "browser-automation",
+        "static-analysis",
+        "manual",
+        "e2e-scenario"
+      ]
+    },
+    "preconditions": {
+      "type": "array",
+      "minItems": 1,
+      "items": { "type": "string", "minLength": 1 },
+      "description": "What was true before this claim became testable. Non-empty."
+    },
+    "commands": {
+      "type": "array",
+      "minItems": 1,
+      "description": "REAL executed commands. Empty array fails validation.",
+      "items": {
+        "type": "object",
+        "required": ["cmd", "cwd", "exit_code", "duration_ms", "stdout_excerpt"],
+        "additionalProperties": false,
+        "properties": {
+          "cmd": { "type": "string", "minLength": 1, "description": "Exact command, no abbrev." },
+          "cwd": { "type": "string", "minLength": 1, "description": "Absolute path." },
+          "exit_code": { "type": "integer", "description": "Real exit code of the command THIS turn." },
+          "duration_ms": { "type": "integer", "minimum": 0, "description": "Wall-clock time in ms." },
+          "stdout_excerpt": { "type": "string", "minLength": 1, "description": "Trimmed but lossless around the assertion line." },
+          "stderr_excerpt": { "type": ["string", "null"] }
+        }
+      }
+    },
+    "assertions": {
+      "type": "array",
+      "minItems": 1,
+      "description": "Each assertion name MUST map to a literal line in commands[].stdout_excerpt or in a sibling artifact. The runtime cross-check (scripts/validate.py) verifies the evidence_quote appears verbatim in at least one such source; an empty or fabricated quote is rejected.",
+      "items": {
+        "type": "object",
+        "required": ["name", "passed", "evidence_quote"],
+        "additionalProperties": false,
+        "properties": {
+          "name": { "type": "string", "minLength": 1, "description": "Short, killable assertion name." },
+          "passed": { "type": "boolean" },
+          "evidence_quote": {
+            "type": "string",
+            "minLength": 1,
+            "description": "Exact line from output that made you mark it passed/failed. Cross-checked at runtime against commands[*].stdout_excerpt / stderr_excerpt and referenced artifact files."
+          }
+        }
+      }
+    },
+    "files_changed": {
+      "type": "array",
+      "items": { "type": "string" }
+    },
+    "diffs": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["path"],
+        "additionalProperties": false,
+        "properties": {
+          "path": { "type": "string" },
+          "unified_diff": { "type": ["string", "null"] }
+        }
+      }
+    },
+    "artifacts": {
+      "type": "array",
+      "minItems": 1,
+      "description": "For browser: MUST include ≥ 1 screenshot/trace AND ≥ 1 log. For db-migration: MUST include ≥ 1 log with non-empty content_excerpt. Per-environment constraints live under allOf.",
+      "items": {
+        "type": "object",
+        "required": ["kind", "path"],
+        "additionalProperties": false,
+        "properties": {
+          "kind": {
+            "type": "string",
+            "enum": ["screenshot", "trace", "e2e-evidence", "log", "report", "bundle", "network"]
+          },
+          "path": { "type": "string", "minLength": 1 },
+          "sha256": { "type": ["string", "null"] },
+          "content_excerpt": {
+            "type": ["string", "null"],
+            "description": "For kind=log artifacts, the runtime-relevant excerpt that proves the claim (e.g. the post-migration \\d dump). When present, the runtime cross-check uses this AND the on-disk file."
+          }
+        }
+      }
+    },
+    "remaining_gaps": {
+      "type": "array",
+      "items": { "type": "string" },
+      "description": "Honest, non-decorative list of what is NOT yet proven."
+    },
+    "self_recheck": {
+      "type": "object",
+      "required": ["performed", "performed_at", "method", "result"],
+      "additionalProperties": false,
+      "properties": {
+        "performed": { "const": true },
+        "performed_at": { "type": "string", "format": "date-time" },
+        "method": {
+          "type": "string",
+          "enum": ["re-read-file", "re-ran-command", "sampled-output"]
+        },
+        "result": {
+          "enum": ["still-holds", "drifted", "invalid"]
+        }
+      }
+    }
+  },
+  "allOf": [
+    {
+      "description": "Browser claims MUST include (1) a screenshot/trace/e2e-evidence artifact AND (2) a log artifact for the captured console. The log artifact is required even if it is empty — its presence means the agent captured it; the runtime cross-check verifies it is empty (zero console errors).",
+      "if": {
+        "properties": { "target_environment": { "const": "browser" } },
+        "required": ["target_environment"]
+      },
+      "then": {
+        "properties": {
+          "artifacts": {
+            "minItems": 2,
+            "contains": {
+              "type": "object",
+              "required": ["kind"],
+              "properties": {
+                "kind": { "enum": ["screenshot", "trace", "e2e-evidence"] }
+              }
+            },
+            "allOf": [
+              {
+                "description": "Browser claims require a log artifact (console capture).",
+                "contains": {
+                  "type": "object",
+                  "required": ["kind"],
+                  "properties": { "kind": { "const": "log" } }
+                }
+              },
+              {
+                "description": "Browser claims with WebSocket / SSE / long-poll should also reference a network artifact. The schema does not require it (cannot infer protocol from target_environment alone); the runtime cross-check warns if a browser claim has no `network` kind AND uses verification_method=browser-automation.",
+                "if": { "properties": { "verification_method": { "const": "browser-automation" } } },
+                "then": {
+                  "contains": {
+                    "type": "object",
+                    "required": ["kind"],
+                    "properties": { "kind": { "const": "network" } }
+                  }
+                }
+              }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "description": "DB-migration claims MUST include a log artifact with a content_excerpt that contains a post-migration schema dump marker (Column | Table | ---). The runtime cross-check (scripts/validate.py) opens the log file and verifies the excerpt is not just a stub.",
+      "if": {
+        "properties": { "target_environment": { "const": "db-migration" } },
+        "required": ["target_environment"]
+      },
+      "then": {
+        "properties": {
+          "artifacts": {
+            "minItems": 1,
+            "contains": {
+              "type": "object",
+              "required": ["kind", "path", "content_excerpt"],
+              "properties": {
+                "kind": { "const": "log" },
+                "content_excerpt": {
+                  "type": "string",
+                  "minLength": 80,
+                  "pattern": "(Column|Table|---|\\bd\\s+\\w+|CREATE|ALTER|index\\s+\\w+)"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "description": "Static-analysis claims MUST have ≥ 1 assertion whose evidence_quote is a literal line from a real tool run. The strict anti-fabrication regex is enforced at runtime by scripts/validate.py (the schema pattern here is a permissive placeholder to keep the JSON Schema well-formed).",
+      "if": {
+        "properties": { "target_environment": { "const": "static-analysis" } },
+        "required": ["target_environment"]
+      },
+      "then": {
+        "properties": {
+          "assertions": {
+            "contains": {
+              "type": "object",
+              "required": ["evidence_quote"],
+              "properties": {
+                "evidence_quote": {
+                  "type": "string",
+                  "pattern": "."
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  ]
+}

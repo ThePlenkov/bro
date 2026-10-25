@@ -1,0 +1,78 @@
+{
+  "version": 1,
+  "claim": "PRIVATE SECTION in ABAP class body now updates class-level visibility to 'private' (was silently ignored, defaulting to 'public').",
+  "slug": "private-section-handled",
+  "task_id": "abapdoc-1#42",
+  "agent": "patcher",
+  "session_id": "patch-2026-07-09T11-07-24Z",
+  "produced_at": "2026-07-09T11:08:31+02:00",
+  "target_environment": "test-suite",
+  "verification_method": "test-suite",
+  "preconditions": [
+    "Reproduced bug: parser emitted `Class.visibility === 'public'` even when source had `PRIVATE SECTION.` after class header.",
+    "Root cause identified: a catch-all `/ SECTION[.\\s]*$/u` regex ran BEFORE the explicit PUBLIC/PROTECTED/PRIVATE branches and silently matched `PRIVATE SECTION`, dropping the visibility update.",
+    "Fix approved by parent in patcher handoff."
+  ],
+  "commands": [
+    {
+      "cmd": "npx --yes vitest@2.1.5 run packages/parser/test/visibility.test.ts --reporter=verbose",
+      "cwd": "/workspace/abapdoc-1",
+      "exit_code": 0,
+      "duration_ms": 4312,
+      "stdout_excerpt": "\n ✓ packages/parser/test/visibility.test.ts > PRIVATE SECTION marks class visibility as private  (PASSED, 14 ms)\n ✓ packages/parser/test/visibility.test.ts > PUBLIC SECTION keeps visibility public         (PASSED,  9 ms)\n ✓ packages/parser/test/visibility.test.ts > No SECTION keeps default visibility public     (PASSED,  7 ms)\n\n Test Files  1 passed (1)\n      Tests  3 passed (3)\n   Duration  4.31 s\n",
+      "stderr_excerpt": null
+    },
+    {
+      "cmd": "pnpm typecheck && pnpm lint",
+      "cwd": "/workspace/abapdoc-1",
+      "exit_code": 0,
+      "duration_ms": 9120,
+      "stdout_excerpt": "\n typecheck: 0 errors\n lint:      0 warnings, 0 errors\n",
+      "stderr_excerpt": null
+    }
+  ],
+  "assertions": [
+    {
+      "name": "private-section-marks-class-as-private",
+      "passed": true,
+      "evidence_quote": " ✓ packages/parser/test/visibility.test.ts > PRIVATE SECTION marks class visibility as private  (PASSED, 14 ms)"
+    },
+    {
+      "name": "no-section-defaults-to-public",
+      "passed": true,
+      "evidence_quote": " ✓ packages/parser/test/visibility.test.ts > No SECTION keeps default visibility public     (PASSED,  7 ms)"
+    },
+    {
+      "name": "typecheck-and-lint-clean",
+      "passed": true,
+      "evidence_quote": " typecheck: 0 errors\n lint:      0 warnings, 0 errors"
+    }
+  ],
+  "files_changed": [
+    "/workspace/abapdoc-1/packages/parser/src/class/statement.ts",
+    "/workspace/abapdoc-1/packages/parser/test/visibility.test.ts"
+  ],
+  "diffs": [
+    {
+      "path": "/workspace/abapdoc-1/packages/parser/src/class/statement.ts",
+      "unified_diff": "@@\n-    } else if (/\\sSECTION[.\\s]*$/u.test(raw)) {\n-      // decorative SECTION line: skip\n-      continue;\n+    } else if (/^\\s*(PUBLIC|PROTECTED|PRIVATE)\\s+SECTION\\.?\\s*$/iu.test(raw)) {\n+      currentVisibility = raw.trim().split(/\\s+/)[0].toLowerCase();\n+      continue;\n+    } else if (/\\sSECTION[.\\s]*$/u.test(raw)) {\n+      // generic SECTION line: skip\n+      continue;\n     }\n"
+    }
+  ],
+  "artifacts": [
+    {
+      "kind": "log",
+      "path": "vitest-output.log",
+      "sha256": null,
+      "content_excerpt": "\n ✓ packages/parser/test/visibility.test.ts > PRIVATE SECTION marks class visibility as private  (PASSED, 14 ms)\n ✓ packages/parser/test/visibility.test.ts > PUBLIC SECTION keeps visibility public         (PASSED,  9 ms)\n ✓ packages/parser/test/visibility.test.ts > No SECTION keeps default visibility public     (PASSED,  7 ms)\n\n Test Files  1 passed (1)\n      Tests  3 passed (3)\n   Duration  4.31 s\n"
+    }
+  ],
+  "remaining_gaps": [
+    "End-to-end test through the renderer (HTML output) not yet added — deferred to v0.1."
+  ],
+  "self_recheck": {
+    "performed": true,
+    "performed_at": "2026-07-09T11:09:02+02:00",
+    "method": "re-read-file",
+    "result": "still-holds"
+  }
+}

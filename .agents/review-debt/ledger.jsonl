@@ -5,6 +5,8 @@
 {"thread_id":"code-scanning:27","status":"done","fix_pr":null,"fixed_at":"2026-10-12T06:31:01.028Z","notes":"resolved upstream — no longer reported"}
 {"thread_id":"code-scanning:3","status":"done","fix_pr":null,"fixed_at":"2026-09-30T19:29:53.340Z","notes":"resolved upstream — no longer reported"}
 {"thread_id":"code-scanning:4","status":"done","fix_pr":null,"fixed_at":"2026-09-30T19:29:53.340Z","notes":"resolved upstream — no longer reported"}
+{"thread_id":"code-scanning:42","status":"done","fix_pr":null,"fixed_at":"2026-10-25T14:00:36.008Z","notes":"resolved upstream — no longer reported"}
+{"thread_id":"code-scanning:43","status":"done","fix_pr":null,"fixed_at":"2026-10-25T14:00:36.008Z","notes":"resolved upstream — no longer reported"}
 {"thread_id":"code-scanning:5","status":"done","fix_pr":null,"fixed_at":"2026-09-30T19:29:53.340Z","notes":"resolved upstream — no longer reported"}
 {"thread_id":"dependabot:10","status":"done","fix_pr":null,"fixed_at":"2026-09-30T19:29:51.737Z","notes":"resolved upstream — no longer reported"}
 {"thread_id":"dependabot:11","status":"done","fix_pr":null,"fixed_at":"2026-09-30T19:29:51.737Z","notes":"resolved upstream — no longer reported"}
@@ -26,6 +28,15 @@
 {"thread_id":"dependabot:28","status":"done","fix_pr":null,"fixed_at":"2026-10-07T12:40:43.574Z","notes":"resolved upstream — no longer reported"}
 {"thread_id":"dependabot:29","status":"done","fix_pr":null,"fixed_at":"2026-10-19T17:40:33.178Z","notes":"resolved upstream — no longer reported"}
 {"thread_id":"dependabot:30","status":"done","fix_pr":null,"fixed_at":"2026-10-19T17:40:33.178Z","notes":"resolved upstream — no longer reported"}
+{"thread_id":"dependabot:31","status":"done","fix_pr":null,"fixed_at":"2026-10-25T14:00:34.634Z","notes":"resolved upstream — no longer reported"}
+{"thread_id":"dependabot:32","status":"done","fix_pr":null,"fixed_at":"2026-10-25T14:00:34.634Z","notes":"resolved upstream — no longer reported"}
+{"thread_id":"dependabot:33","status":"done","fix_pr":null,"fixed_at":"2026-10-25T14:00:34.634Z","notes":"resolved upstream — no longer reported"}
+{"thread_id":"dependabot:34","status":"done","fix_pr":null,"fixed_at":"2026-10-25T14:00:34.634Z","notes":"resolved upstream — no longer reported"}
+{"thread_id":"dependabot:35","status":"done","fix_pr":null,"fixed_at":"2026-10-25T14:00:34.634Z","notes":"resolved upstream — no longer reported"}
+{"thread_id":"dependabot:36","status":"done","fix_pr":null,"fixed_at":"2026-10-25T14:00:34.634Z","notes":"resolved upstream — no longer reported"}
+{"thread_id":"dependabot:37","status":"done","fix_pr":null,"fixed_at":"2026-10-25T14:00:34.634Z","notes":"resolved upstream — no longer reported"}
+{"thread_id":"dependabot:38","status":"done","fix_pr":null,"fixed_at":"2026-10-25T14:00:34.634Z","notes":"resolved upstream — no longer reported"}
+{"thread_id":"dependabot:39","status":"done","fix_pr":null,"fixed_at":"2026-10-25T14:00:34.634Z","notes":"resolved upstream — no longer reported"}
 {"thread_id":"dependabot:4","status":"done","fix_pr":null,"fixed_at":"2026-09-30T19:29:51.737Z","notes":"resolved upstream — no longer reported"}
 {"thread_id":"dependabot:6","status":"done","fix_pr":null,"fixed_at":"2026-09-30T19:29:51.737Z","notes":"resolved upstream — no longer reported"}
 {"thread_id":"dependabot:7","status":"done","fix_pr":null,"fixed_at":"2026-09-30T19:29:51.737Z","notes":"resolved upstream — no longer reported"}
@@ -121,6 +132,7 @@
 {"thread_id":"stale-pr:458","status":"done","fix_pr":null,"fixed_at":"2026-10-12T07:25:53.585Z","notes":"resolved upstream — no longer reported"}
 {"thread_id":"stale-pr:462","status":"done","fix_pr":null,"fixed_at":"2026-10-12T09:00:47.927Z","notes":"resolved upstream — no longer reported"}
 {"thread_id":"stale-pr:467","status":"done","fix_pr":null,"fixed_at":"2026-10-19T14:08:29.932Z","notes":"resolved upstream — no longer reported"}
+{"thread_id":"stale-pr:581","status":"done","fix_pr":null,"fixed_at":"2026-10-25T14:00:40.902Z","notes":"resolved upstream — no longer reported"}
 {"thread_id":"stale-pr:589","status":"done","fix_pr":null,"fixed_at":"2026-10-19T17:40:39.604Z","notes":"resolved upstream — no longer reported"}
 {"thread_id":"stale-pr:605","status":"done","fix_pr":null,"fixed_at":"2026-10-20T17:49:43.069Z","notes":"resolved upstream — no longer reported"}
 {"thread_id":"stale-pr:613","status":"done","fix_pr":null,"fixed_at":"2026-10-20T23:34:03.862Z","notes":"resolved upstream — no longer reported"}

@@ -1,12 +1,12 @@
 {
-  "generated_at": "2026-10-21T10:09:04.468Z",
-  "open_count": 86,
+  "generated_at": "2026-10-25T14:00:43.699Z",
+  "open_count": 96,
   "by_area": {
     "specs/sessions": 4,
     "nx.json": 1,
-    "packages/providers": 4,
+    "packages/providers": 2,
     "specs/bro-ribc.1.md": 6,
-    "packages/cli": 20,
+    "packages/cli": 21,
     "packages/judge": 1,
     "packages/core": 6,
     "packages/guard": 1,
@@ -19,27 +19,19 @@
     "specs/backends": 1,
     "site/content": 5,
     "site/src": 1,
-    "package-lock.json": 3,
-    "site/package.json": 3,
-    "site/package-lock.json": 3,
-    "(root)": 4
+    "specs/bro-rs8sp.md": 1,
+    "site/package-lock.json": 1,
+    "package-lock.json": 9,
+    "(root)": 13
   },
   "by_author": {
-    "kilo-code-bot": 14,
+    "kilo-code-bot": 15,
     "codeant-ai": 55,
-    "coderabbitai": 1,
-    "dependabot[bot]": 9,
-    "github-code-scanning": 3,
-    "ThePlenkov": 4
+    "coderabbitai": 2,
+    "dependabot[bot]": 10,
+    "github-code-scanning": 1,
+    "ThePlenkov": 13
   },
-  "duplicate_fingerprints": [
-    {
-      "fingerprint": "75cf907b533f359c",
-      "count": 2,
-      "prs": [
-        0
-      ]
-    }
-  ],
+  "duplicate_fingerprints": [],
   "oldest_open": "2026-10-04T10:54:12.041Z"
 }

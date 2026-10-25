@@ -1,0 +1,7 @@
+interface:
+  display_name: "Evidence"
+  short_description: "Full proof discipline for non-trivial changes"
+  brand_color: "#3B82F6"
+  policy:
+    allow_implicit_invocation: false
+  default_prompt: "Use $evidence to get started."
