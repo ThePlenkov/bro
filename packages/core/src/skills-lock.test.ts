@@ -23,6 +23,7 @@ describe('readSkillLock', () => {
               sourceType: 'github',
               skillPath: 'skills/verification/evidence/SKILL.md',
               computedHash: 'abc123',
+              ref: '',
             },
           },
         }),
@@ -68,7 +69,7 @@ describe('readSkillLock', () => {
           skills: {
             broken: { sourceType: 'github' },
             alsoBroken: { source: 'o/r' },
-            good: { source: 'o/r', computedHash: 'h' },
+            good: { source: 'o/r', computedHash: 'h', ref: '' },
           },
         }),
         'utf8'
@@ -95,6 +96,7 @@ describe('checkSkillLock', () => {
             sourceType: 'github',
             skillPath: 'x/SKILL.md',
             computedHash: 'abc',
+              ref: '',
           },
         ],
       ])
@@ -125,6 +127,7 @@ describe('checkSkillLock', () => {
             sourceType: 'github',
             skillPath: 'x/SKILL.md',
             computedHash: 'not-the-installed-hash',
+              ref: '',
           },
         ],
       ])
@@ -192,6 +195,7 @@ describe('checkSkillLock', () => {
             sourceType: 'github',
             skillPath: 'x/SKILL.md',
             computedHash: hash,
+            ref: '',
           },
         ],
       ])
