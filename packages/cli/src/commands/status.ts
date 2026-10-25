@@ -592,7 +592,11 @@ function render(s: BroStatus): string[] {
   }
   if (s.watch !== null) {
     const tail = s.watch.attention === 0 ? 'quiet' : `${s.watch.attention} attention`;
-    lines.push(`watch: heartbeat ${heartbeatAge(s.watch.ageMs)} ago — ${tail}`);
+    lines.push(
+      s.watch.futureMs !== undefined
+        ? `watch: heartbeat stamped ${heartbeatAge(s.watch.futureMs)} in the future — writer clock skew — ${tail}`
+        : `watch: heartbeat ${heartbeatAge(s.watch.ageMs)} ago — ${tail}`
+    );
   }
   if (s.drill.frame) {
     lines.push(

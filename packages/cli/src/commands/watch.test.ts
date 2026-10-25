@@ -1,12 +1,12 @@
-import { describe, test } from 'node:test'
-import assert from 'node:assert/strict'
-import { mkdtempSync, readdirSync, readFileSync, rmSync } from 'node:fs'
-import { tmpdir } from 'node:os'
-import { join } from 'node:path'
-import type { ReviewFacade } from '@broject/core'
-import type { FleetRow } from './fleet.ts'
-import type { LoopRunView } from './loop-state.ts'
-import { initRepo, inside } from './testrepo.ts'
+import { describe, test } from 'node:test';
+import assert from 'node:assert/strict';
+import { mkdtempSync, readdirSync, readFileSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import type { ReviewFacade } from '@broject/core';
+import type { FleetRow } from './fleet.ts';
+import type { LoopRunView } from './loop-state.ts';
+import { initRepo, inside } from './testrepo.ts';
 import {
   attentionOf,
   emitMailbox,
@@ -17,7 +17,7 @@ import {
   type WatchMol,
   type WatchPrGate,
   type WatchSnapshot,
-} from './watch.ts'
+} from './watch.ts';
 
 const mol = (over: Partial<WatchMol> = {}): WatchMol => ({
   mol: 'm-1',
@@ -27,7 +27,7 @@ const mol = (over: Partial<WatchMol> = {}): WatchMol => ({
   inProgress: [],
   blocked: [],
   ...over,
-})
+});
 
 const row = (over: Partial<FleetRow> = {}): FleetRow => ({
   mol: 'm-1',
@@ -37,7 +37,7 @@ const row = (over: Partial<FleetRow> = {}): FleetRow => ({
   state: 'in_progress',
   agent: 'running (pid 1)',
   ...over,
-})
+});
 
 const prGate = (over: Partial<WatchPrGate> = {}): WatchPrGate => ({
   pr: 12,
@@ -45,33 +45,33 @@ const prGate = (over: Partial<WatchPrGate> = {}): WatchPrGate => ({
   ok: true,
   blockers: [],
   ...over,
-})
+});
 
 describe('watchArgs', () => {
   test('defaults: one snapshot, no notify', () => {
-    assert.deepEqual(watchArgs([]), { json: false, notify: false })
-    assert.deepEqual(watchArgs(['--once']), { json: false, notify: false })
-  })
+    assert.deepEqual(watchArgs([]), { json: false, notify: false });
+    assert.deepEqual(watchArgs(['--once']), { json: false, notify: false });
+  });
 
   test('flags parse', () => {
     assert.deepEqual(watchArgs(['--json', '--notify', '--every', '30']), {
       json: true,
       notify: true,
       everySec: 30,
-    })
-    assert.equal(watchArgs(['--every=15']).everySec, 15)
-  })
+    });
+    assert.equal(watchArgs(['--every=15']).everySec, 15);
+  });
 
   test('a bad --every fails closed', () => {
     for (const v of ['abc', '0', '-5', 'NaN']) {
-      assert.throws(() => watchArgs(['--every', v]), /--every/)
+      assert.throws(() => watchArgs(['--every', v]), /--every/);
     }
-  })
+  });
 
   test('a sub-floor --every fails closed — a busy loop is not a poll', () => {
-    assert.throws(() => watchArgs(['--every', '0.01']), /--every/)
-    assert.equal(watchArgs(['--every', '0.1']).everySec, 0.1)
-  })
+    assert.throws(() => watchArgs(['--every', '0.01']), /--every/);
+    assert.equal(watchArgs(['--every', '0.1']).everySec, 0.1);
+  });
 
   test('--for bounds the loop; alone or below --every it fails closed', () => {
     assert.deepEqual(watchArgs(['--every', '30', '--for', '300']), {
@@ -79,102 +79,96 @@ describe('watchArgs', () => {
       notify: false,
       everySec: 30,
       forSec: 300,
-    })
-    assert.throws(() => watchArgs(['--for', '60']), /--for/)
-    assert.throws(() => watchArgs(['--every', '30', '--for', '10']), /--for/)
-    assert.throws(() => watchArgs(['--every', '30', '--for', 'abc']), /--for/)
-  })
+    });
+    assert.throws(() => watchArgs(['--for', '60']), /--for/);
+    assert.throws(() => watchArgs(['--every', '30', '--for', '10']), /--for/);
+    assert.throws(() => watchArgs(['--every', '30', '--for', 'abc']), /--for/);
+  });
 
   test('an --every beyond the timer range fails closed', () => {
     // over 2^31-1 ms setTimeout clamps to ~1ms — a busy tick, not a cadence
-    assert.throws(() => watchArgs(['--every', '3000000000']), /--every/)
-    assert.equal(watchArgs(['--every', '2147483']).everySec, 2147483)
-  })
-})
+    assert.throws(() => watchArgs(['--every', '3000000000']), /--every/);
+    assert.equal(watchArgs(['--every', '2147483']).everySec, 2147483);
+  });
+});
 
 describe('attentionOf', () => {
   test('empty inputs are a quiet fleet', () => {
-    assert.deepEqual(attentionOf([], [], []), [])
-  })
+    assert.deepEqual(attentionOf([], [], []), []);
+  });
 
   test('a ready human gate is attention, titled', () => {
     const m = mol({
       state: 'gate',
       gates: ['s-9'],
       ready: [{ id: 's-9', title: 'Approve the merge', kind: 'human' }],
-    })
-    assert.deepEqual(attentionOf([m], [], []), [
-      'gate ready — m-1: s-9 (Approve the merge)',
-    ])
-  })
+    });
+    assert.deepEqual(attentionOf([m], [], []), ['gate ready — m-1: s-9 (Approve the merge)']);
+  });
 
   test('a lost agent on a claimed step is the respawn surface', () => {
-    const r = row({ agent: 'lost — respawn?' })
-    assert.deepEqual(attentionOf([], [r], []), [
-      'agent lost — s-1 (do the thing) — respawn?',
-    ])
-  })
+    const r = row({ agent: 'lost — respawn?' });
+    assert.deepEqual(attentionOf([], [r], []), ['agent lost — s-1 (do the thing) — respawn?']);
+  });
 
   test('a blocked exit gate surfaces its blockers', () => {
-    const g = prGate({ ok: false, blockers: ['2 unresolved review thread(s)'] })
+    const g = prGate({ ok: false, blockers: ['2 unresolved review thread(s)'] });
     assert.deepEqual(attentionOf([], [], [g]), [
       'PR [#12](https://github.com/o/r/pull/12) blocked — 2 unresolved review thread(s)',
-    ])
-  })
+    ]);
+  });
 
   test('a mol whose load threw is attention, not a silent drop', () => {
-    const m = mol({ state: 'error — bd gone' })
-    assert.deepEqual(attentionOf([m], [], []), [
-      'mol m-1 unreadable — error — bd gone',
-    ])
-  })
+    const m = mol({ state: 'error — bd gone' });
+    assert.deepEqual(attentionOf([m], [], []), ['mol m-1 unreadable — error — bd gone']);
+  });
 
   test('a failed probe is reported, not read as blocked', () => {
-    const g = prGate({ ok: undefined, blockers: undefined, error: 'gh timed out' })
+    const g = prGate({ ok: undefined, blockers: undefined, error: 'gh timed out' });
     assert.deepEqual(attentionOf([], [], [g]), [
       'PR [#12](https://github.com/o/r/pull/12) gate probe failed — gh timed out',
-    ])
-  })
+    ]);
+  });
 
   test('provider walls are attention — the spec `walled — <cause>` line', () => {
     const walls = [
       { provider: 'kilo-free', cause: 'rate_limited' as const, until: '2026-10-08T00:00:00Z' },
       { provider: 'devin', cause: 'quota' as const },
-    ]
+    ];
     assert.deepEqual(attentionOf([], [], [], walls), [
       'provider kilo-free walled — rate_limited til 2026-10-08T00:00:00Z',
       'provider devin walled — quota',
-    ])
-  })
+    ]);
+  });
 
   test('ok gates and live agents are not attention', () => {
-    assert.deepEqual(attentionOf([mol()], [row()], [prGate()]), [])
-  })
+    assert.deepEqual(attentionOf([mol()], [row()], [prGate()]), []);
+  });
 
   test('a loop agent silent past stallMin is an inspect advisory', () => {
-    const loop = { stallMin: 45, runs: [loopRun({ silentMs: 50 * 60_000 })] }
+    const loop = { stallMin: 45, runs: [loopRun({ silentMs: 50 * 60_000 })] };
     assert.deepEqual(attentionOf([], [], [], [], loop), [
       'loop agent bro-x1 — output silent 50m — inspect?',
-    ])
-  })
+    ]);
+  });
 
   test('silence under stallMin is not attention — quiet is not a stall', () => {
-    const loop = { stallMin: 45, runs: [loopRun({ silentMs: 10 * 60_000 })] }
-    assert.deepEqual(attentionOf([], [], [], [], loop), [])
+    const loop = { stallMin: 45, runs: [loopRun({ silentMs: 10 * 60_000 })] };
+    assert.deepEqual(attentionOf([], [], [], [], loop), []);
     // an unverifiable record (no log, no startedAt) is reported, never judged
     assert.deepEqual(
       attentionOf([], [], [], [], { stallMin: 45, runs: [loopRun({ silentMs: null })] }),
       []
-    )
-  })
+    );
+  });
 
   test('a dead-pid record is attention — a crashed loop leaves residue', () => {
-    const loop = { stallMin: 45, runs: [loopRun({ state: 'dead', silentMs: null })] }
+    const loop = { stallMin: 45, runs: [loopRun({ state: 'dead', silentMs: null })] };
     assert.deepEqual(attentionOf([], [], [], [], loop), [
       "loop agent bro-x1 — pid 123 gone — crashed run's record",
-    ])
-  })
-})
+    ]);
+  });
+});
 
 const loopRun = (over: Partial<LoopRunView> = {}): LoopRunView => ({
   beadId: 'bro-x1',
@@ -183,7 +177,7 @@ const loopRun = (over: Partial<LoopRunView> = {}): LoopRunView => ({
   state: 'running',
   silentMs: 60_000,
   ...over,
-})
+});
 
 const snap = (over: Partial<WatchSnapshot> = {}): WatchSnapshot => ({
   ts: '2026-10-02T00:00:00.000Z',
@@ -194,21 +188,42 @@ const snap = (over: Partial<WatchSnapshot> = {}): WatchSnapshot => ({
   loop: { stallMin: 45, runs: [] },
   daemon: { live: false, recorded: false, installed: false },
   ...over,
-})
+});
 
 describe('snapshotKey', () => {
   test('the timestamp is not part of the dedup key', () => {
-    const a = snap({ ts: '2026-10-02T00:00:00.000Z' })
-    const b = snap({ ts: '2026-10-02T01:00:00.000Z' })
-    assert.equal(snapshotKey(a), snapshotKey(b))
-  })
+    const a = snap({ ts: '2026-10-02T00:00:00.000Z' });
+    const b = snap({ ts: '2026-10-02T01:00:00.000Z' });
+    assert.equal(snapshotKey(a), snapshotKey(b));
+  });
 
   test('a transition changes the key', () => {
-    const a = snap()
-    const b = snap({ attention: ['gate ready — m-1: s-9'] })
-    assert.notEqual(snapshotKey(a), snapshotKey(b))
-  })
-})
+    const a = snap();
+    const b = snap({ attention: ['gate ready — m-1: s-9'] });
+    assert.notEqual(snapshotKey(a), snapshotKey(b));
+  });
+
+  test('clock readings move every tick but are not a transition — the key keeps verdicts only', () => {
+    const a = snap({
+      clock: { local: 't1', remote: 'r1', skewMs: 100, skewed: false },
+    });
+    const b = snap({
+      clock: { local: 't2', remote: 'r2', skewMs: 500, skewed: false },
+    });
+    assert.equal(snapshotKey(a), snapshotKey(b));
+    // a skew or probe-error transition IS a transition — it mails
+    const skewed = snap({
+      clock: { local: 't3', remote: 'r3', skewMs: 300_000, skewed: true },
+    });
+    assert.notEqual(snapshotKey(a), snapshotKey(skewed));
+    const unverified = snap({
+      clock: { local: 't4', skewed: false, error: 'gh down' },
+    });
+    assert.notEqual(snapshotKey(a), snapshotKey(unverified));
+    // absent vs verified is also a transition — the clock plane coming up is news
+    assert.notEqual(snapshotKey(snap()), snapshotKey(a));
+  });
+});
 
 describe('openPrTargets', () => {
   /** A facade stub — openPrTargets only reads prsForBranch + prLink
@@ -220,69 +235,69 @@ describe('openPrTargets', () => {
   ): ReviewFacade =>
     ({
       prsForBranch: (branch: string) => {
-        seen.push(branch)
-        const prs = byBranch[branch]
+        seen.push(branch);
+        const prs = byBranch[branch];
         if (prs === undefined) {
-          throw new Error(`${branch}: lookup failed`)
+          throw new Error(`${branch}: lookup failed`);
         }
-        return prs
+        return prs;
       },
       openPrs:
         open === undefined
           ? undefined
           : () => {
               if (open instanceof Error) {
-                throw open
+                throw open;
               }
-              return open
+              return open;
             },
       prLink: (repo: string, pr: number) => `[#${pr}](https://example.test/${repo}/pull/${pr})`,
-    }) as unknown as ReviewFacade
+    }) as unknown as ReviewFacade;
 
-  test('no fleet rows still finds the branches\' open PRs (bro-hn7kx)', () => {
-    const seen: string[] = []
-    const rev = stubRev({ 'loop/bro-a': [11], 'work/bro-b': [12, 13] }, seen)
-    const errors: string[] = []
-    const targets = openPrTargets(rev, 'o/r', [], ['loop/bro-a', 'work/bro-b'], errors)
+  test("no fleet rows still finds the branches' open PRs (bro-hn7kx)", () => {
+    const seen: string[] = [];
+    const rev = stubRev({ 'loop/bro-a': [11], 'work/bro-b': [12, 13] }, seen);
+    const errors: string[] = [];
+    const targets = openPrTargets(rev, 'o/r', [], ['loop/bro-a', 'work/bro-b'], errors);
     assert.deepEqual(
-      targets.map((t) => t.pr),
+      targets.map(t => t.pr),
       [11, 12, 13]
-    )
-    assert.deepEqual(errors, [])
-    assert.deepEqual(seen, ['loop/bro-a', 'work/bro-b'])
-  })
+    );
+    assert.deepEqual(errors, []);
+    assert.deepEqual(seen, ['loop/bro-a', 'work/bro-b']);
+  });
 
   test('row PRs union with branch PRs — deduped, row link kept', () => {
-    const seen: string[] = []
-    const rev = stubRev({ 'loop/bro-a': [11, 12] }, seen)
-    const errors: string[] = []
+    const seen: string[] = [];
+    const rev = stubRev({ 'loop/bro-a': [11, 12] }, seen);
+    const errors: string[] = [];
     const rows = [
       row({ prNum: 11, pr: '[#11](https://row.link/11)' }),
       row({ prNum: 12, prNums: [12, 14] }),
-    ]
-    const targets = openPrTargets(rev, 'o/r', rows, ['loop/bro-a'], errors)
+    ];
+    const targets = openPrTargets(rev, 'o/r', rows, ['loop/bro-a'], errors);
     assert.deepEqual(
-      targets.map((t) => t.pr),
+      targets.map(t => t.pr),
       [11, 12, 14]
-    )
-    assert.equal(targets[0]!.link, '[#11](https://row.link/11)')
-  })
+    );
+    assert.equal(targets[0]!.link, '[#11](https://row.link/11)');
+  });
 
   test('a failed branch lookup is a lookupError, not a dead plane', () => {
-    const seen: string[] = []
-    const rev = stubRev({ 'loop/bro-a': [11] }, seen)
-    const errors: string[] = []
-    const targets = openPrTargets(rev, 'o/r', [], ['loop/bro-a', 'loop/gone'], errors)
+    const seen: string[] = [];
+    const rev = stubRev({ 'loop/bro-a': [11] }, seen);
+    const errors: string[] = [];
+    const targets = openPrTargets(rev, 'o/r', [], ['loop/bro-a', 'loop/gone'], errors);
     assert.deepEqual(
-      targets.map((t) => t.pr),
+      targets.map(t => t.pr),
       [11]
-    )
-    assert.equal(errors.length, 1)
-    assert.match(errors[0]!, /loop\/gone: lookup failed/)
-  })
+    );
+    assert.equal(errors.length, 1);
+    assert.match(errors[0]!, /loop\/gone: lookup failed/);
+  });
 
-  test('the bulk listing is one call — fleet-prefixed heads match, foreign ones don\'t', () => {
-    const seen: string[] = []
+  test("the bulk listing is one call — fleet-prefixed heads match, foreign ones don't", () => {
+    const seen: string[] = [];
     const rev = stubRev({}, seen, [
       { pr: 11, headRef: 'loop/bro-a' },
       { pr: 12, headRef: 'work/bro-b' },
@@ -290,65 +305,81 @@ describe('openPrTargets', () => {
       { pr: 13, headRef: 'stack/s/1-bro-c' },
       { pr: 99, headRef: 'feature/not-fleet' },
       { pr: 98, headRef: 'main' },
-    ])
-    const errors: string[] = []
-    const targets = openPrTargets(rev, 'o/r', [], ['loop/bro-a', 'main'], errors)
+    ]);
+    const errors: string[] = [];
+    const targets = openPrTargets(rev, 'o/r', [], ['loop/bro-a', 'main'], errors);
     assert.deepEqual(
-      targets.map((t) => t.pr).sort((a, b) => a - b),
+      targets.map(t => t.pr).sort((a, b) => a - b),
       [11, 12, 13, 98]
-    )
-    assert.deepEqual(errors, [])
+    );
+    assert.deepEqual(errors, []);
     // bulk path never fans out to per-branch lookups
-    assert.deepEqual(seen, [])
-  })
+    assert.deepEqual(seen, []);
+  });
 
   test('a failed bulk listing is a lookupError — row PRs still gate', () => {
-    const seen: string[] = []
-    const rev = stubRev({}, seen, new Error('gh down'))
-    const errors: string[] = []
-    const rows = [row({ prNum: 11, pr: '[#11](https://row.link/11)' })]
-    const targets = openPrTargets(rev, 'o/r', rows, ['loop/bro-a'], errors)
+    const seen: string[] = [];
+    const rev = stubRev({}, seen, new Error('gh down'));
+    const errors: string[] = [];
+    const rows = [row({ prNum: 11, pr: '[#11](https://row.link/11)' })];
+    const targets = openPrTargets(rev, 'o/r', rows, ['loop/bro-a'], errors);
     assert.deepEqual(
-      targets.map((t) => t.pr),
+      targets.map(t => t.pr),
       [11]
-    )
-    assert.equal(errors.length, 1)
-    assert.match(errors[0]!, /open-PR listing: gh down/)
-    assert.deepEqual(seen, [])
-  })
-})
+    );
+    assert.equal(errors.length, 1);
+    assert.match(errors[0]!, /open-PR listing: gh down/);
+    assert.deepEqual(seen, []);
+  });
+});
 
 describe('renderSnapshot', () => {
   test('a quiet snapshot reads quiet, with every section present', () => {
-    const text = renderSnapshot(snap())
-    assert.match(text, /bro watch — 2026-10-02T00:00:00\.000Z/)
-    assert.match(text, /attention\n  \(quiet\)/)
-    assert.match(text, /mols\n  no open molecules/)
-    assert.match(text, /gates\n  no open PRs on fleet branches/)
-    assert.match(text, /fleet\n  no open molecules — nothing in the fleet/)
-    assert.match(text, /loop\n  no loop agents on record/)
-    assert.match(text, /daemon\n  down/)
-  })
+    const text = renderSnapshot(snap());
+    assert.match(text, /bro watch — 2026-10-02T00:00:00\.000Z\n/);
+    assert.match(text, /attention\n  \(quiet\)/);
+    assert.match(text, /mols\n  no open molecules/);
+    assert.match(text, /gates\n  no open PRs on fleet branches/);
+    assert.match(text, /fleet\n  no open molecules — nothing in the fleet/);
+    assert.match(text, /loop\n  no loop agents on record/);
+    assert.match(text, /daemon\n  down/);
+  });
+
+  test('the headline carries the clock caveat — skewed or unverified, never silently trusted', () => {
+    const skewed = renderSnapshot(
+      snap({ clock: { local: 't', remote: 'r', skewMs: 135_000, skewed: true } })
+    );
+    assert.match(skewed, /bro watch — 2026-10-02T00:00:00\.000Z · clock skew \+135s/);
+    const unverified = renderSnapshot(
+      snap({ clock: { local: 't', skewed: false, error: 'gh down' } })
+    );
+    assert.match(unverified, /bro watch — 2026-10-02T00:00:00\.000Z · clock unverified/);
+    // a verified clock adds nothing to the headline
+    const verified = renderSnapshot(
+      snap({ clock: { local: 't', remote: 'r', skewMs: 500, skewed: false } })
+    );
+    assert.match(verified, /bro watch — 2026-10-02T00:00:00\.000Z\n/);
+  });
 
   test('a live supervisor renders its pid; a dead recorded one is attention', () => {
     const up = renderSnapshot(
       snap({ daemon: { live: true, pid: 4242, recorded: true, installed: false } })
-    )
-    assert.match(up, /daemon\n  up — pid 4242/)
-    const dead = renderSnapshot(snap({ daemon: { live: false, recorded: true, installed: false } }))
-    assert.match(dead, /daemon\n  dead — recorded supervisor is gone/)
-  })
+    );
+    assert.match(up, /daemon\n  up — pid 4242/);
+    const dead = renderSnapshot(
+      snap({ daemon: { live: false, recorded: true, installed: false } })
+    );
+    assert.match(dead, /daemon\n  dead — recorded supervisor is gone/);
+  });
 
   test('an installed-but-dead supervisor is a rearm gap, not a hand-restart ask', () => {
-    const dead = renderSnapshot(
-      snap({ daemon: { live: false, recorded: true, installed: true } })
-    )
-    assert.match(dead, /daemon\n  installed but dead — the next session checkpoint rearms it/)
+    const dead = renderSnapshot(snap({ daemon: { live: false, recorded: true, installed: true } }));
+    assert.match(dead, /daemon\n  installed but dead — the next session checkpoint rearms it/);
     const up = renderSnapshot(
       snap({ daemon: { live: true, pid: 4242, recorded: true, installed: true } })
-    )
-    assert.match(up, /daemon\n  up — pid 4242 · installed/)
-  })
+    );
+    assert.match(up, /daemon\n  up — pid 4242 · installed/);
+  });
 
   test('the loop section renders run records — silence readable per row', () => {
     const text = renderSnapshot(
@@ -361,39 +392,41 @@ describe('renderSnapshot', () => {
           ],
         },
       })
-    )
-    assert.match(text, /loop\n  run\s+state\s+pid\s+silent\s+log/)
-    assert.match(text, /bro-x1\s+running\s+123\s+50m\s+\/x\/.git\/bro\/loop\/bro-x1\.log/)
-    assert.match(text, /bro-y2\s+dead\s+123/)
-  })
+    );
+    assert.match(text, /loop\n  run\s+state\s+pid\s+silent\s+log/);
+    assert.match(text, /bro-x1\s+running\s+123\s+50m\s+\/x\/.git\/bro\/loop\/bro-x1\.log/);
+    assert.match(text, /bro-y2\s+dead\s+123/);
+  });
 
   test('an unavailable gates section says so with the reason', () => {
     const text = renderSnapshot(
       snap({ gates: { available: false, reason: 'no review host', prs: [] } })
-    )
-    assert.match(text, /gates\n  unavailable — no review host/)
-  })
+    );
+    assert.match(text, /gates\n  unavailable — no review host/);
+  });
 
   test('a failed mols plane renders unavailable, never a false quiet', () => {
-    const text = renderSnapshot(snap({ molsError: 'bd timed out' }))
-    assert.match(text, /mols\n  unavailable — bd timed out/)
-  })
+    const text = renderSnapshot(snap({ molsError: 'bd timed out' }));
+    assert.match(text, /mols\n  unavailable — bd timed out/);
+  });
 
   test('failed PR lookups warn in the fleet section', () => {
     const text = renderSnapshot(
       snap({ fleet: { rows: [], degraded: [], conflicts: [], prErrors: ['work/x: boom'] } })
-    )
-    assert.match(text, /warning: PR lookup failed — work\/x: boom/)
-  })
+    );
+    assert.match(text, /warning: PR lookup failed — work\/x: boom/);
+  });
 
   test('a failed wall derivation warns — rows survive, the section does not report unavailable', () => {
     const text = renderSnapshot(
-      snap({ fleet: { rows: [row()], degraded: [], conflicts: [], wallsError: 'registry JSON corrupt' } })
-    )
-    assert.match(text, /warning: provider walls unreadable — registry JSON corrupt/)
-    assert.match(text, /s-1\s+in_progress\s+running \(pid 1\)/)
-    assert.doesNotMatch(text, /fleet\n  unavailable/)
-  })
+      snap({
+        fleet: { rows: [row()], degraded: [], conflicts: [], wallsError: 'registry JSON corrupt' },
+      })
+    );
+    assert.match(text, /warning: provider walls unreadable — registry JSON corrupt/);
+    assert.match(text, /s-1\s+in_progress\s+running \(pid 1\)/);
+    assert.doesNotMatch(text, /fleet\n  unavailable/);
+  });
 
   test('gate rows carry the ownership marker — label names, human when unmarked (bro-c650l)', () => {
     const text = renderSnapshot(
@@ -408,17 +441,17 @@ describe('renderSnapshot', () => {
           ],
         },
       })
-    )
-    assert.match(text, /\[#12\]\(https:\/\/github\.com\/o\/r\/pull\/12\)\s+ok\s+· bro-managed/)
-    assert.match(text, /\[#13\]\(x\)\s+ok\s+· bro-review/)
-    assert.match(text, /\[#14\]\(x\)\s+ok\s+· human/)
+    );
+    assert.match(text, /\[#12\]\(https:\/\/github\.com\/o\/r\/pull\/12\)\s+ok\s+· bro-managed/);
+    assert.match(text, /\[#13\]\(x\)\s+ok\s+· bro-review/);
+    assert.match(text, /\[#14\]\(x\)\s+ok\s+· human/);
     // an unprobed marker renders nothing — never a false 'human'
-    assert.match(text, /\[#15\]\(x\)\s+ok\n/)
-  })
+    assert.match(text, /\[#15\]\(x\)\s+ok\n/);
+  });
 
   test('the activity section renders "agent last did X"; absent means no section at all', () => {
-    const quiet = renderSnapshot(snap())
-    assert.doesNotMatch(quiet, /activity\n/)
+    const quiet = renderSnapshot(snap());
+    assert.doesNotMatch(quiet, /activity\n/);
 
     const live = renderSnapshot(
       snap({
@@ -429,15 +462,21 @@ describe('renderSnapshot', () => {
           },
         },
       })
-    )
-    assert.match(live, /activity\n  native-aa11: Edit x\.ts started \[edit\]\n  acp:sess-9: turn stopped \(end_turn\)/)
-    assert.doesNotMatch(live, /ring tail truncated/)
+    );
+    assert.match(
+      live,
+      /activity\n  native-aa11: Edit x\.ts started \[edit\]\n  acp:sess-9: turn stopped \(end_turn\)/
+    );
+    assert.doesNotMatch(live, /ring tail truncated/);
 
     const gapped = renderSnapshot(
       snap({ activity: { latest: { w1: 'w1: turn started' }, gapped: true } })
-    )
-    assert.match(gapped, /activity\n  w1: turn started\n  \(ring tail truncated — newest events only\)/)
-  })
+    );
+    assert.match(
+      gapped,
+      /activity\n  w1: turn started\n  \(ring tail truncated — newest events only\)/
+    );
+  });
 
   test('attention and sections render their contents', () => {
     const text = renderSnapshot(
@@ -453,36 +492,36 @@ describe('renderSnapshot', () => {
         gates: { available: true, prs: [prGate({ ok: false, blockers: ['x'] })] },
         fleet: { rows: [row()], degraded: ['native: down'], conflicts: [] },
       })
-    )
-    assert.match(text, /gate ready — m-1: s-9 \(Approve\)/)
-    assert.match(text, /m-1\s+step\s+s-9\s+s-9/)
-    assert.match(text, /\[#12\]\(https:\/\/github\.com\/o\/r\/pull\/12\)\s+blocked — x/)
-    assert.match(text, /s-1\s+in_progress\s+running \(pid 1\)/)
-    assert.match(text, /warning: backend degraded — native: down/)
-  })
-})
+    );
+    assert.match(text, /gate ready — m-1: s-9 \(Approve\)/);
+    assert.match(text, /m-1\s+step\s+s-9\s+s-9/);
+    assert.match(text, /\[#12\]\(https:\/\/github\.com\/o\/r\/pull\/12\)\s+blocked — x/);
+    assert.match(text, /s-1\s+in_progress\s+running \(pid 1\)/);
+    assert.match(text, /warning: backend degraded — native: down/);
+  });
+});
 
 describe('emitMailbox', () => {
   test('drops one atomic watch-* file into <common>/bro/notify', () => {
-    const { root, main } = initRepo('bro-watch-')
+    const { root, main } = initRepo('bro-watch-');
     inside(main, root, () => {
-      assert.equal(emitMailbox(main, 'snapshot text'), true)
-      const notify = join(main, '.git', 'bro', 'notify')
-      const files = readdirSync(notify)
-      assert.equal(files.length, 1)
-      assert.match(files[0]!, /^watch-\d+-[a-z0-9]+\.txt$/)
-      assert.equal(readFileSync(join(notify, files[0]!), 'utf8'), 'snapshot text')
+      assert.equal(emitMailbox(main, 'snapshot text'), true);
+      const notify = join(main, '.git', 'bro', 'notify');
+      const files = readdirSync(notify);
+      assert.equal(files.length, 1);
+      assert.match(files[0]!, /^watch-\d+-[a-z0-9]+\.txt$/);
+      assert.equal(readFileSync(join(notify, files[0]!), 'utf8'), 'snapshot text');
       // tmp+rename leaves no half-written residue
-      assert.ok(!files.some((f) => f.includes('.tmp')))
-    })
-  })
+      assert.ok(!files.some(f => f.includes('.tmp')));
+    });
+  });
 
   test('outside a repo it reports no mailbox instead of throwing', () => {
-    const dir = mkdtempSync(join(tmpdir(), 'bro-watch-nowt-'))
+    const dir = mkdtempSync(join(tmpdir(), 'bro-watch-nowt-'));
     try {
-      assert.equal(emitMailbox(dir, 'x'), false)
+      assert.equal(emitMailbox(dir, 'x'), false);
     } finally {
-      rmSync(dir, { recursive: true, force: true })
+      rmSync(dir, { recursive: true, force: true });
     }
-  })
-})
+  });
+});
