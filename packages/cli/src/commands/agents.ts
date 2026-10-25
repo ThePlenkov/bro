@@ -353,6 +353,20 @@ export function occupancyLine(o: FleetOccupancy): string {
   return `fleet: ${o.occupied}${cap} agent slots occupied${o.maxConcurrent > 0 ? '' : ' (uncapped)'}`;
 }
 
+/** The lane's wall/gate state (spec bro-y3jvd) — wall, paused
+ *  workers, and the rate-gate budget, before the per-agent table.
+ *  Silent when no lane has anything to say. */
+function printLaneSection(lanes: LaneStatusRow[]): void {
+  const lines = laneStatusLines(lanes)
+  if (lines.length === 0) {
+    return
+  }
+  console.log('lanes:')
+  for (const l of lines) {
+    console.log(l)
+  }
+}
+
 function printStatusTable(
   backends: AgentBackendPlane[],
   occupancy: FleetOccupancy,
@@ -370,20 +384,8 @@ function printStatusTable(
       console.log(`${s.kind} ${label}: ${s.live >= 0 ? `${s.live}/${s.max}` : `?/${s.max}`} live`);
     }
   }
-<<<<<<< HEAD
+  printLaneSection(lanes);
   const cols = ['backend', 'supervisor', 'agent', 'step', 'state', 'cause', 'pid', 'worktree'];
-=======
-  // the lane's wall/gate state (spec bro-y3jvd) — wall, paused
-  // workers, and the rate-gate budget, before the per-agent table
-  const laneLines = laneStatusLines(lanes)
-  if (laneLines.length > 0) {
-    console.log('lanes:')
-    for (const l of laneLines) {
-      console.log(l)
-    }
-  }
-  const cols = ['backend', 'supervisor', 'agent', 'step', 'state', 'cause', 'pid', 'worktree']
->>>>>>> 8d9b081a (feat(lane): pace the devin lane — a shared rate gate, and the wall pauses every worker (bro-y3jvd))
   const rows = backends.flatMap(({ conn, agents }) => {
     const sup = conn.capabilities().supervisor;
     if (agents.length === 0) {

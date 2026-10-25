@@ -30,11 +30,11 @@ const ledgerPath = (dir: string, lane: string, model: string): string =>
 describe('lane gate — the token bucket', () => {
   test('a take debits the bucket; the level reports the rest', () => {
     withDir((dir) => {
-      const r = laneGateTake('devin', '(default)', cfg(), 1000, dir)
+      const r = laneGateTake('devin', '(default)', cfg(), { now: 1000, dir })
       assert.ok(r.ok)
       // 240 - 60 = 180 left
       assert.equal(r.tokens, 180)
-      const level = laneGateLevel('devin', '(default)', cfg(), 1000, dir)
+      const level = laneGateLevel('devin', '(default)', cfg(), { now: 1000, dir })
       assert.deepEqual(level, { tokens: 180, capacity: 240 })
     })
   })
@@ -43,8 +43,8 @@ describe('lane gate — the token bucket', () => {
     withDir((dir) => {
       // burst=spawnCost ⇒ one take drains
       const c = cfg({ burst: 60 })
-      assert.ok(laneGateTake('devin', '(default)', c, 1000, dir).ok)
-      const r = laneGateTake('devin', '(default)', c, 1000, dir)
+      assert.ok(laneGateTake('devin', '(default)', c, { now: 1000, dir }).ok)
+      const r = laneGateTake('devin', '(default)', c, { now: 1000, dir })
       assert.ok(!r.ok)
       // 60 tokens needed, refill 240/h ⇒ 15 minutes
       assert.equal(r.retryAfterSec, 900)
@@ -54,9 +54,9 @@ describe('lane gate — the token bucket', () => {
   test('refill is lazy — elapsed time puts tokens back', () => {
     withDir((dir) => {
       const c = cfg({ burst: 60 })
-      assert.ok(laneGateTake('devin', '(default)', c, 0, dir).ok)
+      assert.ok(laneGateTake('devin', '(default)', c, { now: 0, dir }).ok)
       // 15 minutes later: 60 tokens refilled — a take lands again
-      const r = laneGateTake('devin', '(default)', c, 15 * 60 * 1000, dir)
+      const r = laneGateTake('devin', '(default)', c, { now: 15 * 60 * 1000, dir })
       assert.ok(r.ok)
     })
   })
@@ -64,25 +64,25 @@ describe('lane gate — the token bucket', () => {
   test('buckets are per model — one model draining leaves the other full', () => {
     withDir((dir) => {
       const c = cfg({ burst: 60 })
-      laneGateTake('devin', 'free', c, 0, dir)
-      assert.ok(!laneGateTake('devin', 'free', c, 0, dir).ok)
-      assert.ok(laneGateTake('devin', 'typesafe/jev-1', c, 0, dir).ok)
+      laneGateTake('devin', 'free', c, { now: 0, dir })
+      assert.ok(!laneGateTake('devin', 'free', c, { now: 0, dir }).ok)
+      assert.ok(laneGateTake('devin', 'typesafe/jev-1', c, { now: 0, dir }).ok)
     })
   })
 
   test('a shared lane name draws one budget across provider names', () => {
     withDir((dir) => {
       const c = cfg({ burst: 60 })
-      laneGateTake('devin', '(default)', c, 0, dir)
+      laneGateTake('devin', '(default)', c, { now: 0, dir })
       // devin-acp gates on the same lane → the same (default) bucket
-      assert.ok(!laneGateTake('devin', '(default)', c, 0, dir).ok)
+      assert.ok(!laneGateTake('devin', '(default)', c, { now: 0, dir }).ok)
     })
   })
 
   test('a corrupt ledger recovers as a fresh full bucket', () => {
     withDir((dir) => {
       writeFileSync(ledgerPath(dir, 'devin', '(default)'), '{nope')
-      const r = laneGateTake('devin', '(default)', cfg(), 1000, dir)
+      const r = laneGateTake('devin', '(default)', cfg(), { now: 1000, dir })
       assert.ok(r.ok)
       assert.equal(r.tokens, 180)
     })
@@ -92,7 +92,7 @@ describe('lane gate — the token bucket', () => {
     withDir((dir) => {
       const c = cfg({ burst: 120 })
       // an hour of quiet still caps at burst, not requestsPerHour
-      const r = laneGateTake('devin', '(default)', c, 3_600_000, dir)
+      const r = laneGateTake('devin', '(default)', c, { now: 3_600_000, dir })
       assert.ok(r.ok)
       assert.equal(r.tokens, 60)
     })

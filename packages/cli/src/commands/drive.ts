@@ -2413,19 +2413,24 @@ async function emitLaneUsage(ctx: Ctx): Promise<void> {
   }
 }
 
-/** One pass: enumerate, probe every open PR, act per verdict. */
-async function driveOnce(ctx: Ctx): Promise<void> {
-  await emitLaneUsage(ctx)
+/** The wall pause (spec bro-y3jvd) — the pass's periodic reconcile:
+ *  freeze live workers on a walled provider, thaw lanes whose wall
+ *  lifted. A miss must not stall the pass — the next tick re-asserts. */
+function lanePauseTick(ctx: Ctx): void {
   try {
-    // the wall pause (spec bro-y3jvd) — the periodic reconcile: freeze
-    // live workers on a walled provider, thaw lanes whose wall lifted
     const r = reconcileLanePause(ctx.mainRoot, loadAgentEnv(ctx.mainRoot))
     if (r.paused > 0 || r.thawed > 0) {
       say(ctx, `lane: ${r.paused} worker(s) paused, ${r.thawed} thawed`)
     }
   } catch {
-    // a pause miss must not stall the pass — the next tick re-asserts
+    // next pass re-asserts
   }
+}
+
+/** One pass: enumerate, probe every open PR, act per verdict. */
+async function driveOnce(ctx: Ctx): Promise<void> {
+  await emitLaneUsage(ctx)
+  lanePauseTick(ctx)
   const { byStep, degraded } = await collectAgents(ctx.mainRoot)
   for (const d of degraded) {
     say(ctx, `warning: backend degraded — ${d}`)

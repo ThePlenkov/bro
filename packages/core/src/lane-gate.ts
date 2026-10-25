@@ -91,6 +91,12 @@ function writeLedger(path: string, ledger: LaneGateLedger): void {
 const refill = (l: LaneGateLedger, cfg: LaneRateGate, now: number): number =>
   Math.min(capacityOf(cfg), l.tokens + ((now - l.updatedAt) / 3_600_000) * cfg.requestsPerHour)
 
+/** Clock/ledger overrides — tests pin `now` and isolate `dir`. */
+export interface LaneGateOpts {
+  now?: number
+  dir?: string
+}
+
 /** Charge `cost` request-tokens to the `<lane>/<model>` bucket.
  *  Atomic across processes under the ledger's filelock. Returns the
  *  post-take level on success, or `retryAfterSec` — the wait until
@@ -99,9 +105,10 @@ export function laneGateTake(
   lane: string,
   model: string,
   cfg: LaneRateGate,
-  now = Date.now(),
-  dir = laneGateDir()
+  opts: LaneGateOpts = {}
 ): { ok: true; tokens: number } | { ok: false; retryAfterSec: number } {
+  const now = opts.now ?? Date.now()
+  const dir = opts.dir ?? laneGateDir()
   const path = ledgerPath(dir, lane, model)
   return withFileLock(`${path}.lock`, () => {
     const cur = readLedger(path, cfg, now)
@@ -124,9 +131,10 @@ export function laneGateLevel(
   lane: string,
   model: string,
   cfg: LaneRateGate,
-  now = Date.now(),
-  dir = laneGateDir()
+  opts: LaneGateOpts = {}
 ): { tokens: number; capacity: number } | null {
+  const now = opts.now ?? Date.now()
+  const dir = opts.dir ?? laneGateDir()
   const path = ledgerPath(dir, lane, model)
   if (!existsSync(path)) {
     return null
