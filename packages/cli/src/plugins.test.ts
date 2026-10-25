@@ -157,7 +157,7 @@ describe('assertMutableConfig', () => {
   test('a clean config passes', () => {
     const dir = tmpDir('bro-mut-')
     writeFileSync(join(dir, 'bro.config.json'), JSON.stringify({ sdd: { mode: 'gate' } }))
-    withForce(undefined, () => assertMutableConfig(dir))
+    withForce(undefined, () => assert.doesNotThrow(() => assertMutableConfig(dir)))
   })
 
   function thrown(fn: () => void): ConfigPolicyError {
@@ -187,7 +187,7 @@ describe('assertMutableConfig', () => {
       join(dir, 'bro.config.json'),
       JSON.stringify({ providers: { x: { type: 'bogus' } }, fleet: { maxConcurrent: '1' } })
     )
-    withForce(undefined, () => assertMutableConfig(dir))
+    withForce(undefined, () => assert.doesNotThrow(() => assertMutableConfig(dir)))
   })
 
   test('plugin policy sections gate too — a malformed guard.def throws', () => {
@@ -206,7 +206,7 @@ describe('assertMutableConfig', () => {
   test('BRO_CONFIG_FORCE=1 is the deliberate escape hatch', () => {
     const dir = tmpDir('bro-mut-')
     writeFileSync(join(dir, 'bro.config.json'), JSON.stringify({ sdd: { mode: 'gtae' } }))
-    withForce('1', () => assertMutableConfig(dir))
+    withForce('1', () => assert.doesNotThrow(() => assertMutableConfig(dir)))
   })
 })
 

@@ -1764,7 +1764,7 @@ function printDoctor(checks: DoctorCheck[], budget: ReturnType<typeof readBudget
 
 export function runDoctorCommand(argv: string[]): void {
   if (hasHelpFlag(argv)) {
-    printUsage('usage: bro doctor [--json]', 0)
+    printUsage('usage: bro doctor [--json] [--strict]', 0)
   }
   const json = argv.includes('--json')
   // --strict: schema violations are failures, not warnings — the CI gate

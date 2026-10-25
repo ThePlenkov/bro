@@ -110,7 +110,7 @@ import {
 import './session-planes/copilot.ts'
 import { writeCopilotCount } from './session-planes/copilot.ts'
 import { enterWorktree } from './commands/work.ts'
-import { assertMutableConfig } from './plugins.ts'
+import { assertMutableConfig } from './config-policy.ts'
 import { VERSION } from './version.ts'
 
 /** Everything a factory needs: the repo ctx + the resolved config
@@ -2242,6 +2242,10 @@ export function makeNativeConnector(ctx: ConnectorCtx, env: AgentConnectorEnv): 
     name: 'native',
 
     async spawn(spec: SpawnSpec): Promise<AgentInfo> {
+      // policy before preflight — a refused spawn must not run even the
+      // harmless probes (prepareSpawn re-checks inside the lock for the
+      // claim/registry writes)
+      assertMutableConfig(dir)
       const home = spawnHome(dir, 'native', command, spec)
       // dedup → claim → spawn → pid-patch runs as ONE critical section:
       // without the lock a second bro process can pass the liveness
@@ -2660,6 +2664,7 @@ export function makeTmuxConnector(ctx: ConnectorCtx, env: AgentConnectorEnv): Ag
     name: 'tmux',
 
     async spawn(spec: SpawnSpec): Promise<AgentInfo> { // NOSONAR — connector contract is async; the critical section is sync
+      assertMutableConfig(dir)
       const home = spawnHome(dir, 'tmux', command, spec)
       const ver = tmuxRun(socket, ['-V'])
       if (ver.missing || ver.code !== 0) {
@@ -3344,6 +3349,9 @@ export function makeGascityConnector(ctx: ConnectorCtx, env: AgentConnectorEnv):
     matchDir: () => gcMatchDir(dir, env),
 
     async spawn(spec: SpawnSpec): Promise<AgentInfo> {
+      // policy before preflight — refuse invalid committed config ahead
+      // of the worker/prompt checks, let alone the gc side effects
+      assertMutableConfig(dir)
       // a provider-resolved worker can't ride gc — the city's provider
       // command is written once in city.toml at init, so recording
       // provenance while gc runs its own configured provider would be
@@ -4080,6 +4088,9 @@ export function makeDockerConnector(ctx: ConnectorCtx, env: AgentConnectorEnv): 
     name: 'docker',
 
     async spawn(spec: SpawnSpec): Promise<AgentInfo> { // NOSONAR — connector contract is async; the work is one sync critical section
+      // policy BEFORE the daemon probe and image pull/build — a refused
+      // spawn must not pay (or log) a docker fetch it will never use
+      assertMutableConfig(dir)
       const home = spawnHome(dir, 'docker', command, spec)
       const daemon = dockerDaemonUp()
       if (!daemon.up) {
@@ -4282,6 +4293,20 @@ export function makeDockerConnector(ctx: ConnectorCtx, env: AgentConnectorEnv): 
 registerAgentConnector('docker', makeDockerConnector)
 
 // --- copilot -------------------------------------------------------------------
+
+/** No local command runs on a copilot spawn — a provider-resolved
+ *  worker/template has no remote surface to ride, and agents.copilot.
+ *  command is meaningless by the same logic; refuse before anything
+ *  lands. */
+function refuseCopilotWorker(spec: SpawnSpec): void {
+  if (spec.worker !== undefined) {
+    throw new SpawnError(
+      `copilot spawns run GitHub-hosted sessions — a provider-resolved ${spec.worker.kind} ` +
+        `worker cannot dispatch remotely; drop --provider/--profile or pick a local backend`,
+      'config'
+    )
+  }
+}
 
 /** The copilot backend — GitHub's hosted coding agent ("agent tasks")
  *  as code. Spike verdict: specs/sessions/bro-huy5o.9.md — the first
@@ -4943,16 +4968,10 @@ export function makeCopilotConnector(ctx: ConnectorCtx, env: AgentConnectorEnv):
     name: 'copilot',
 
     async spawn(spec: SpawnSpec): Promise<AgentInfo> { // NOSONAR — connector contract is async; the critical section is sync
-      // no local command runs — a provider-resolved worker/template has
-      // no remote surface to ride, and agents.copilot.command is
-      // meaningless by the same logic; refuse before anything lands
-      if (spec.worker !== undefined) {
-        throw new SpawnError(
-          `copilot spawns run GitHub-hosted sessions — a provider-resolved ${spec.worker.kind} ` +
-            `worker cannot dispatch remotely; drop --provider/--profile or pick a local backend`,
-          'config'
-        )
-      }
+      // policy before preflight — an invalid committed config must
+      // refuse ahead of the remote-count refresh, not just the claim
+      assertMutableConfig(dir)
+      refuseCopilotWorker(spec)
       if (!existsSync(spec.repoRoot)) {
         throw new SpawnError(`worktree ${spec.repoRoot} does not exist`, 'input')
       }

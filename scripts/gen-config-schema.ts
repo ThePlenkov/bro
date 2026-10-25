@@ -24,6 +24,9 @@ if (!existsSync(entry)) {
   process.exit(2)
 }
 
+// `entry` is this repo's own built dist file (existsSync-gated
+// above) — the dynamic import is the generator's whole job:
+// nosemgrep
 const { emitConfigSchemaJson } = (await import(pathToFileURL(entry).href)) as {
   emitConfigSchemaJson: () => string
 }

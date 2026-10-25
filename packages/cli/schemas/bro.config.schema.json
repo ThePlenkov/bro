@@ -63,6 +63,14 @@
         "requireApproval": {
           "type": "boolean"
         },
+        "approvers": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "pattern": "\\S"
+          }
+        },
         "mergeQueue": {
           "type": "object",
           "properties": {
@@ -905,24 +913,24 @@
                   },
                   "type": {
                     "const": "telegram"
-                  },
-                  "anyOf": [
-                    {
-                      "required": [
-                        "chatId"
-                      ]
-                    },
-                    {
-                      "required": [
-                        "chatIdEnv"
-                      ]
-                    }
-                  ]
+                  }
                 },
                 "additionalProperties": false,
                 "required": [
                   "type",
                   "tokenEnv"
+                ],
+                "anyOf": [
+                  {
+                    "required": [
+                      "chatId"
+                    ]
+                  },
+                  {
+                    "required": [
+                      "chatIdEnv"
+                    ]
+                  }
                 ]
               },
               {
@@ -981,23 +989,23 @@
                   },
                   "type": {
                     "const": "slack"
-                  },
-                  "anyOf": [
-                    {
-                      "required": [
-                        "url"
-                      ]
-                    },
-                    {
-                      "required": [
-                        "urlEnv"
-                      ]
-                    }
-                  ]
+                  }
                 },
                 "additionalProperties": false,
                 "required": [
                   "type"
+                ],
+                "anyOf": [
+                  {
+                    "required": [
+                      "url"
+                    ]
+                  },
+                  {
+                    "required": [
+                      "urlEnv"
+                    ]
+                  }
                 ]
               },
               {
@@ -1056,23 +1064,23 @@
                   },
                   "type": {
                     "const": "webhook"
-                  },
-                  "anyOf": [
-                    {
-                      "required": [
-                        "url"
-                      ]
-                    },
-                    {
-                      "required": [
-                        "urlEnv"
-                      ]
-                    }
-                  ]
+                  }
                 },
                 "additionalProperties": false,
                 "required": [
                   "type"
+                ],
+                "anyOf": [
+                  {
+                    "required": [
+                      "url"
+                    ]
+                  },
+                  {
+                    "required": [
+                      "urlEnv"
+                    ]
+                  }
                 ]
               }
             ]

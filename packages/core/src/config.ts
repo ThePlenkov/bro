@@ -106,11 +106,11 @@ export const js: {
   oneOf: (...variants: JsonSchema[]) => JsonSchema
   anyOf: (...variants: JsonSchema[]) => JsonSchema
 } = {
-  // \\S: parsers trim and drop whitespace-only input — a "present"
+  // \S: parsers trim and drop whitespace-only input — a "present"
   // value that normalizes to nothing must validate as the defect it is
-  str: { type: 'string', minLength: 1, pattern: '\\S' },
+  str: { type: 'string', minLength: 1, pattern: String.raw`\S` },
   bool: { type: 'boolean' },
-  strList: { type: 'array', items: { type: 'string', minLength: 1, pattern: '\\S' } },
+  strList: { type: 'array', items: { type: 'string', minLength: 1, pattern: String.raw`\S` } },
   int: (minimum = 0) => ({ type: 'integer', minimum }),
   num: (minimum) => (minimum === undefined ? { type: 'number' } : { type: 'number', minimum }),
   obj: (properties, opts) => ({
@@ -385,6 +385,7 @@ actSection.jsonSchema = js.obj({
   docsPaths: js.strList,
   docsMaxRounds: js.int(),
   requireApproval: js.bool,
+  approvers: js.strList,
   mergeQueue: js.obj({ label: js.str, comment: js.str }),
 })
 
@@ -1635,50 +1636,85 @@ export function loadConfigLayers(
   )]
   const layers: ConfigLayerHit[] = []
   const broken: string[] = []
-  const scan = (layer: ConfigLayerName, dirs: string[]): void => {
-    for (const dir of dirs) {
-      for (const name of CONFIG_LAYER_FILES[layer]) {
-        const path = join(dir, name)
-        if (!existsSync(path)) {
-          continue
-        }
-        const raw = readConfigFile(name, path)
-        // a broken file stops the dir's remaining names (.ts precedence
-        // never promotes the sibling .json) but not the layer — the next
-        // dir still gets its shot, matching pre-layering fallback
-        if (raw === undefined) {
-          broken.push(path) // warned inside readConfigFile
-          break
-        }
-        // a valid non-object root ("str", […], 42) is not a config —
-        // spreading it would silently produce garbage keys
-        if (!isPlainObject(raw)) {
-          console.error(`${name}: root must be an object — skipping`)
-          broken.push(path)
-          break
-        }
-        // anchor relative plugin specs at this layer's dir — post-merge
-        // they must not re-root at the winning layer's location. Only
-        // touch the key when present: provenance reads own-keys.
-        const anchored = 'plugins' in raw
-          ? { ...raw, plugins: normalizePluginSpecs(dir, raw.plugins) }
-          : raw
-        layers.push({
-          layer,
-          dir,
-          file: path,
-          raw: anchored,
-          ...('plugins' in raw ? { pluginsRaw: raw.plugins } : {}),
-        })
-        return
-      }
+  const want = (layer: ConfigLayerName): boolean => only === undefined || only.includes(layer)
+  if (want('global')) scanConfigLayer('global', [globalConfigDir()], layers, broken)
+  if (want('project')) scanConfigLayer('project', projectDirs, layers, broken)
+  if (want('local')) scanConfigLayer('local', projectDirs, layers, broken)
+  return { layers, broken }
+}
+
+/** One candidate config file — 'missing' lets the next name try,
+ *  'broken' retires the dir (a parse failure already warned inside
+ *  readConfigFile; a non-object root warns here), 'loaded' settles the
+ *  layer. */
+function probeLayerCandidate(
+  layer: ConfigLayerName,
+  dir: string,
+  name: string,
+  layers: ConfigLayerHit[],
+  broken: string[]
+): 'missing' | 'broken' | 'loaded' {
+  const path = join(dir, name)
+  if (!existsSync(path)) {
+    return 'missing'
+  }
+  const raw = readConfigFile(name, path)
+  // a valid non-object root ("str", […], 42) is not a config —
+  // spreading it would silently produce garbage keys
+  if (raw === undefined || !isPlainObject(raw)) {
+    if (raw !== undefined) {
+      console.error(`${name}: root must be an object — skipping`)
+    }
+    broken.push(path)
+    return 'broken'
+  }
+  // anchor relative plugin specs at this layer's dir — post-merge
+  // they must not re-root at the winning layer's location. Only
+  // touch the key when present: provenance reads own-keys.
+  const anchored = 'plugins' in raw
+    ? { ...raw, plugins: normalizePluginSpecs(dir, raw.plugins) }
+    : raw
+  layers.push({
+    layer,
+    dir,
+    file: path,
+    raw: anchored,
+    ...('plugins' in raw ? { pluginsRaw: raw.plugins } : {}),
+  })
+  return 'loaded'
+}
+
+/** Probe one dir's candidate names for a layer — the first existing
+ *  file wins the dir. A broken file stops the dir's remaining names
+ *  (.ts precedence never promotes the sibling .json) but not the layer:
+ *  the next dir still gets its shot, matching pre-layering fallback.
+ *  Returns true once a file was consumed — the layer is settled. */
+function scanConfigLayerDir(
+  layer: ConfigLayerName,
+  dir: string,
+  layers: ConfigLayerHit[],
+  broken: string[]
+): boolean {
+  for (const name of CONFIG_LAYER_FILES[layer]) {
+    const verdict = probeLayerCandidate(layer, dir, name, layers, broken)
+    if (verdict !== 'missing') {
+      return verdict === 'loaded'
     }
   }
-  const want = (layer: ConfigLayerName): boolean => only === undefined || only.includes(layer)
-  if (want('global')) scan('global', [globalConfigDir()])
-  if (want('project')) scan('project', projectDirs)
-  if (want('local')) scan('local', projectDirs)
-  return { layers, broken }
+  return false
+}
+
+function scanConfigLayer(
+  layer: ConfigLayerName,
+  dirs: string[],
+  layers: ConfigLayerHit[],
+  broken: string[]
+): void {
+  for (const dir of dirs) {
+    if (scanConfigLayerDir(layer, dir, layers, broken)) {
+      return
+    }
+  }
 }
 
 export function loadConfig(

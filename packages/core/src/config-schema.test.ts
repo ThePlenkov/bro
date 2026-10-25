@@ -199,6 +199,13 @@ describe('configPolicyErrors', () => {
     const dir = dirWith('bro.config.local.json', { act: { maxRounds: 'many' } })
     assert.deepEqual(configPolicyErrors(dir).map((d) => d.path), ['act.maxRounds'])
   })
+
+  test("act.approvers validates — the parser's allowlist is schema-legal", () => {
+    const dir = dirWith('bro.config.json', {
+      act: { requireApproval: true, approvers: ['alice', 'bob'] },
+    })
+    assert.deepEqual(configPolicyErrors(dir), [])
+  })
 })
 
 describe('configSchemaDocument', () => {
