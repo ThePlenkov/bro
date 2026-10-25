@@ -23,7 +23,7 @@
     "typecheck": "nx run-many -t typecheck --exclude=skills-*,plugins-*-skills-*",
     "prepare": "husky",
     "format": "biome format --write",
-    "format:check": "biome format --check"
+    "format:check": "biome format"
   },
   "devDependencies": {
     "@biomejs/biome": "^2.6.3",
