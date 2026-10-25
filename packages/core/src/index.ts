@@ -252,6 +252,78 @@ export type {
   StackMergeReport,
 } from './stacks.ts'
 export {
+  acquireFileLock,
+  awaitFileLock,
+  holdFileLock,
+  lockHolderPid,
+  LockTimeout,
+  staleLock,
+  withFileLock,
+  type FileLockOptions,
+  type HeldLockOptions,
+} from './filelock.ts'
+export {
+  fileBackedJanitorDeps,
+  janitorBroDir,
+  janitorDidWork,
+  janitorLine,
+  runJanitor,
+} from './janitor.ts'
+export type { JanitorDeps, JanitorOpts, JanitorReaped, JanitorReport } from './janitor.ts'
+export type { SpecNode, SpecStore } from './specs.ts'
+export { warnDeprecated } from './deprecation.ts'
+export { EXIT, EXIT_CODES, hasHelpFlag, printUsage, usageWriter } from './exits.ts'
+export type { ExitCode, ExitCodeRow } from './exits.ts'
+export { markerLive, markerOwner, pidAlive, procStat } from './proc.ts'
+export { checkPlanVersion, planKind, readPlanDoc } from './plan.ts'
+export type { PlanSchema } from './plan.ts'
+export { makePrinter } from './output.ts'
+export type { Printer } from './output.ts'
+export {
+  BUS_RING_LIMIT,
+  BUS_TIMEOUT_MS,
+  BusRing,
+  BUS_PROBE_LIMIT,
+  busMatches,
+  busProbe,
+  busPublish,
+  busSocketPath,
+  busStatePath,
+  busStatus,
+  busSubscribe,
+  busTopicMatches,
+  busWake,
+  isBusEventInput,
+  startBusBroker,
+  startBusBrokerAt,
+} from './bus.ts'
+export type {
+  BusBroker,
+  BusBrokerOptions,
+  BusCursor,
+  BusEnvelope,
+  BusEventInput,
+  BusFilter,
+  BusProbeResult,
+  BusPublishResult,
+  BusRecord,
+  BusStatus,
+  BusSubscription,
+  BusSubscriptionHandlers,
+  BusWake,
+} from './bus.ts'
+export {
+  pickOrphanProcs,
+  readProcRows,
+  sweepOrphanProcs,
+  trackChild,
+  unrefPendingChildren,
+} from './live-procs.ts'
+export type { OrphanSweepReport, ProcRow } from './live-procs.ts'
+// test seam — scrubbed fixture git spawns + the ambient-env guard,
+// shared by every package's suites (same role as providers' testkit)
+export { AMBIENT_GIT, doltManifest, doltStoreCommit, scrubEnv, testGit, testGitEnv, testGitSpawn, testRepoInit } from './testkit.ts'
+export {
   collectGuards,
   connectorHooks,
   connectors,
@@ -461,74 +533,10 @@ export type {
   WorkItem,
 } from './planes.ts'
 export {
-  acquireFileLock,
-  awaitFileLock,
-  holdFileLock,
-  lockHolderPid,
-  LockTimeout,
-  staleLock,
-  withFileLock,
-  type FileLockOptions,
-  type HeldLockOptions,
-} from './filelock.ts'
-export {
-  fileBackedJanitorDeps,
-  janitorBroDir,
-  janitorDidWork,
-  janitorLine,
-  runJanitor,
-} from './janitor.ts'
-export type { JanitorDeps, JanitorOpts, JanitorReaped, JanitorReport } from './janitor.ts'
-export type { SpecNode, SpecStore } from './specs.ts'
-export { warnDeprecated } from './deprecation.ts'
-export { EXIT, EXIT_CODES, hasHelpFlag, printUsage, usageWriter } from './exits.ts'
-export type { ExitCode, ExitCodeRow } from './exits.ts'
-export { markerLive, markerOwner, pidAlive, procStat } from './proc.ts'
-export { checkPlanVersion, planKind, readPlanDoc } from './plan.ts'
-export type { PlanSchema } from './plan.ts'
-export { makePrinter } from './output.ts'
-export type { Printer } from './output.ts'
-export {
-  BUS_RING_LIMIT,
-  BUS_TIMEOUT_MS,
-  BusRing,
-  BUS_PROBE_LIMIT,
-  busMatches,
-  busProbe,
-  busPublish,
-  busSocketPath,
-  busStatePath,
-  busStatus,
-  busSubscribe,
-  busTopicMatches,
-  busWake,
-  isBusEventInput,
-  startBusBroker,
-  startBusBrokerAt,
-} from './bus.ts'
-export type {
-  BusBroker,
-  BusBrokerOptions,
-  BusCursor,
-  BusEnvelope,
-  BusEventInput,
-  BusFilter,
-  BusProbeResult,
-  BusPublishResult,
-  BusRecord,
-  BusStatus,
-  BusSubscription,
-  BusSubscriptionHandlers,
-  BusWake,
-} from './bus.ts'
-export {
-  pickOrphanProcs,
-  readProcRows,
-  sweepOrphanProcs,
-  trackChild,
-  unrefPendingChildren,
-} from './live-procs.ts'
-export type { OrphanSweepReport, ProcRow } from './live-procs.ts'
-// test seam — scrubbed fixture git spawns + the ambient-env guard,
-// shared by every package's suites (same role as providers' testkit)
-export { AMBIENT_GIT, doltManifest, doltStoreCommit, scrubEnv, testGit, testGitEnv, testGitSpawn, testRepoInit } from './testkit.ts'
+  checkSkillLock,
+  fileHash,
+  readSkillLock,
+  skillFolderHash,
+  type LockedSkill,
+  type SkillDrift,
+} from './skills-lock.ts'

@@ -15,8 +15,8 @@ import { existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, renameSync
 import { basename, dirname, isAbsolute, join } from 'node:path'
 import { createRequire } from 'node:module'
 import { fileURLToPath } from 'node:url'
-import { execFileSync } from 'node:child_process'
-import { initBeadsStealth, PERSONALITIES, hasHelpFlag, printUsage, withFileLock, type BroConfig } from '@broject/core'
+import { execFileSync, spawnSync } from 'node:child_process'
+import { checkSkillLock, initBeadsStealth, PERSONALITIES, hasHelpFlag, printUsage, readSkillLock, withFileLock, type BroConfig } from '@broject/core'
 import { loadBroConfig } from '../plugins.ts'
 import {
   cliVersion,
@@ -309,6 +309,12 @@ interface SetupArgs {
   /** --pack without a value means "the configured/default pack". */
   pack: false | string
   personality?: string
+  /** Materialise the locked external skills (skills-lock.json). */
+  lock: boolean
+  /** Report what --lock would do, without installing. */
+  dryRun: boolean
+  /** Verify the installed skills against the lock, without installing. */
+  checkOnly: boolean
 }
 
 function parseSetupArgs(argv: string[]): SetupArgs {
@@ -334,6 +340,9 @@ function parseSetupArgs(argv: string[]): SetupArgs {
     skills: argv.includes('--skills'),
     pack,
     personality: pVal,
+    lock: argv.includes('--lock'),
+    dryRun: argv.includes('--dry-run'),
+    checkOnly: argv.includes('--check'),
   }
 }
 
@@ -366,14 +375,103 @@ function checkPrereqs(needBeads: boolean): void {
   }
 }
 
+/**
+ * Materialise the locked external skills — the ones bro does not own.
+ *
+ * The lockfile says which skill came from where and what its content hash
+ * was. bro does not re-implement the fetching: `npx skills` already produces
+ * this lockfile, so bro drives the same CLI and then checks the installed
+ * copies against the lock. A copy whose hash drifted is reported, not
+ * silently updated.
+ *
+ * Fail-open: no lockfile means nothing to do, no `npx` means the install is
+ * skipped with a line saying so, and one unreachable upstream does not stop
+ * the rest.
+ */
+function setupLockedSkills(dir: string, dryRun: boolean, checkOnly: boolean): void {
+  const locked = readSkillLock(dir)
+  if (locked.size === 0) {
+    console.error('  no skills-lock.json — nothing locked')
+    return
+  }
+  const skillsDir = join(dir, '.agents', 'skills')
+
+  // Drift check BEFORE any install — the installer replaces the skill
+  // directory it owns, so installing over a copy with local edits would
+  // erase them. Check first; a drifted skill is reported and left alone.
+  const before = checkSkillLock(locked, skillsDir)
+  if (before.length > 0) {
+    for (const d of before) {
+      console.error(
+        `  ${d.name}: ${d.kind === 'missing' ? 'not installed' : 'local edits differ from the lock'} (${d.source})`
+      )
+    }
+    if (dryRun || checkOnly) {
+      return
+    }
+  }
+
+  if (!checkOnly && !dryRun) {
+    if (!hasBin('npx')) {
+      console.error('  npx not on PATH — skipping the locked skills')
+      return
+    }
+    for (const skill of locked.values()) {
+      // Skip skills that already have local drift — they were reported above
+      const drifted = before.find((d) => d.name === skill.name && d.kind === 'drifted')
+      if (drifted !== undefined) {
+        continue
+      }
+      // `npx skills add` owns the fetch, the symlink and the lockfile
+      // update; bro only decides what to ask for.
+      try {
+        // spawnSync, not execFileSync: `npx` is a PATH lookup and the PATH
+        // contract is the same one gh/bd/git already have (doctor.ts probes
+        // npx the same way).
+        const p = spawnSync('npx', ['--yes', 'skills', 'add', skill.source, '--skill', skill.name], { // NOSONAR — PATH lookup is the contract (same as gh/bd/git)
+          cwd: dir,
+          stdio: 'pipe',
+          timeout: 300_000,
+        })
+        if (p.error !== undefined || p.status !== 0) {
+          const stderr = p.stderr?.toString().trim() || ''
+          const stdout = p.stdout?.toString().trim() || ''
+          throw new Error(
+            `npx skills add exited ${p.status ?? 'with error'}${stderr ? `: ${stderr}` : ''}${stdout ? ` (stdout: ${stdout})` : ''}`
+          )
+        }
+      } catch (err) {
+        // one unreachable upstream does not stop the rest
+        const msg = err instanceof Error ? err.message : String(err)
+        console.error(`  ${skill.name}: could not fetch from ${skill.source} — ${msg}`)
+      }
+    }
+  }
+
+  // `npx skills` rewrites the lockfile as it installs, so the hashes it
+  // just wrote are the ones to check against — the copy read before the
+  // install is stale by definition. Re-read it.
+  const current = checkOnly || dryRun ? locked : readSkillLock(dir)
+  const drift = checkSkillLock(current, skillsDir)
+  if (drift.length === 0) {
+    console.error(`  ${current.size} locked skill(s) match the lock`)
+    return
+  }
+  for (const d of drift) {
+    console.error(
+      `  ${d.name}: ${d.kind === 'missing' ? 'not installed' : 'content drifted from the lock'} (${d.source})`
+    )
+  }
+}
+
 export async function runSetupCommand(argv: string[]): Promise<void> {
   if (hasHelpFlag(argv)) {
     printUsage(
-      'usage: bro setup [--beads] [--skills] [--pack <name|off>] [--personality <name>]',
+      'usage: bro setup [--beads] [--skills] [--pack <name|off>] [--personality <name>] [--lock] [--dry-run] [--check]',
       0
     )
   }
-  const { beads, skills, pack, personality } = parseSetupArgs(argv)
+  const { beads, skills, pack, personality, lock, dryRun, checkOnly } = parseSetupArgs(argv)
   // A malformed config file must fail BEFORE any mutation (bd init,
   // file installs) — readExistingConfig exits on a parse error; loadConfig
   // alone would silently fall back to defaults and setup would init beads
@@ -406,6 +504,10 @@ export async function runSetupCommand(argv: string[]): Promise<void> {
     if (installFiles(join('.agents', 'skills'), SKILL_FILES, 'skill') === 0) {
       console.error('  skills already installed and current')
     }
+  }
+
+  if (lock) {
+    setupLockedSkills(process.cwd(), dryRun, checkOnly)
   }
 
   if (packDir !== null) {

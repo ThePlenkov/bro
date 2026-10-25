@@ -1,12 +1,6 @@
 {
   "version": 1,
   "skills": {
-    "codescene": {
-      "source": "theplenkov-ai/skills",
-      "sourceType": "github",
-      "skillPath": "skills/integrations/codescene/SKILL.md",
-      "computedHash": "2d9a9d26c5d9e47f8d9f4e7af4d42ce316ab3675d63a9df0e2fa20f495c6d06f"
-    },
     "configuring-codescene-mcp": {
       "source": "codescene-oss/codescene-mcp-server",
       "sourceType": "github",
@@ -65,7 +59,7 @@
       "source": "typesafe-ai/skills",
       "sourceType": "github",
       "skillPath": "skills/typesafe-ai/SKILL.md",
-      "computedHash": "9cd84c5e535dec8dec59917c110f9c00b4a61faadb86b432ec7e41051170af12"
+      "computedHash": "15e077333436b1e63e526c7c7559202816f4848dabefd3aa3d4c91988fd181b5"
     }
   }
 }
