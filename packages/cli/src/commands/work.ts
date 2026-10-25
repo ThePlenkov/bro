@@ -1720,7 +1720,7 @@ function watchOwner(ctx: LitterCtx, c: LitterCandidate, bead: TaskRow): string |
       typeof l.watch.workdir === 'string' &&
       resolve(l.watch.workdir) === resolve(c.w.path)
     if (hitsBead || hitsTree) {
-      return `watch on PR #${l.watch.pr} live`
+      return `watch on ${l.watch.link} live`
     }
   }
   return undefined
