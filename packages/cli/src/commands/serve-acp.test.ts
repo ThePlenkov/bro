@@ -92,10 +92,14 @@ const listenAcp = (fake: FakeAcpAgent) =>
   listen(deps({ acp: acpTransport(CFG, { acp: { peer: fake.app } }) }))
 
 describe('serve /api/v1/acp — the native ACP transport', () => {
-  test('initialize answers the upstream handshake minus loadSession', async () => {
+  test('initialize answers the upstream handshake with brokered capabilities masked', async () => {
     const fake = fakeAcpAgent({
       authMethods: [{ id: 'devin', name: 'Devin login' }],
-      agentCapabilities: { loadSession: true },
+      agentCapabilities: {
+        loadSession: true,
+        providers: {},
+        sessionCapabilities: { list: {}, resume: {}, close: {} },
+      },
     })
     const { url, close } = await listenAcp(fake)
     const c = openClient(url)
@@ -104,19 +108,29 @@ describe('serve /api/v1/acp — the native ACP transport', () => {
       assert.equal(res.protocolVersion, PROTOCOL_VERSION)
       assert.equal(res.agentInfo?.name, 'fake-acp')
       assert.deepEqual(res.authMethods, [{ id: 'devin', name: 'Devin login' }])
-      // loadSession is stripped — the broker never joins a session it
-      // did not open
-      assert.equal(res.agentCapabilities?.loadSession !== true, true)
+      // unimplemented methods' flags are stripped — the broker never
+      // advertises a call that answers method-not-found
+      const caps = res.agentCapabilities as {
+        loadSession?: boolean
+        providers?: unknown
+        sessionCapabilities?: Record<string, unknown>
+      }
+      assert.equal(caps.loadSession !== true, true)
+      assert.equal(caps.providers === undefined, true)
+      assert.deepEqual(caps.sessionCapabilities, { close: {} })
       // and upstream saw the broker's capability union, not the
       // client's literal advertisement (the fake's schema parse adds
       // normalized fields like auth:{terminal:false} — assert the
       // advertised surface)
-      const caps = fake.clientCapabilities as {
+      const seen = fake.clientCapabilities as {
         fs?: { readTextFile?: boolean; writeTextFile?: boolean }
         terminal?: boolean
+        elicitation?: { form?: unknown; url?: unknown }
       }
-      assert.deepEqual(caps.fs, { readTextFile: true, writeTextFile: true })
-      assert.equal(caps.terminal, true)
+      assert.deepEqual(seen.fs, { readTextFile: true, writeTextFile: true })
+      assert.equal(seen.terminal, true)
+      // elicitation/create is bridged — the union advertises both modes
+      assert.deepEqual(seen.elicitation, { form: {}, url: {} })
     } finally {
       await c.conn.close()
       await close()

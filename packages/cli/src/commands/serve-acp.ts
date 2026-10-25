@@ -18,11 +18,12 @@
  *                       close upstream best-effort
  *
  *  One logical link serves the whole transport (`initialize` opens it
- *  eagerly so the downstream answer is the upstream handshake minus
- *  loadSession); every brokered session multiplexes on it. Client-bound
- *  calls — session/request_permission, fs/*, terminal/*,
- *  elicitation/create, mcp/message — arrive on the link's bridge and
- *  are routed to the session's owning connection by params.sessionId.
+ *  eagerly so the downstream answer is the upstream handshake with the
+ *  unbrokered capability flags masked); every brokered session
+ *  multiplexes on it. Client-bound calls — session/request_permission,
+ *  fs/*, terminal/*, elicitation/create, mcp/message — arrive on the
+ *  link's bridge and are routed to the session's owning connection by
+ *  params.sessionId.
  */
 
 import type { IncomingMessage, ServerResponse } from 'node:http'
@@ -86,6 +87,35 @@ interface ConnState {
 const BROKER_CLIENT_CAPS: ClientCapabilities = {
   fs: { readTextFile: true, writeTextFile: true },
   terminal: true,
+  // the bridge serves elicitation/create — advertise both modes or a
+  // conforming agent will never send one and the route goes unused
+  elicitation: { form: {}, url: {} },
+}
+
+/** Session-capability flags the brokered surface cannot back —
+ *  session/list · delete · resume · fork stay unregistered here, so
+ *  forwarding their flags would promise calls that answer
+ *  method-not-found. `close` and `additionalDirectories` DO pass: the
+ *  former is registered, the latter rides verbatim in session/new. */
+function maskAgentCapabilities(
+  agentCapabilities: InitializeResponse['agentCapabilities']
+): InitializeResponse['agentCapabilities'] {
+  const {
+    loadSession: _l,
+    providers: _p,
+    nes: _n,
+    sessionCapabilities: sc,
+    ...rest
+  } = agentCapabilities as Record<string, unknown>
+  if (typeof sc !== 'object' || sc === null) {
+    return rest as InitializeResponse['agentCapabilities']
+  }
+  const { list: _a, delete: _b, resume: _c, fork: _d, ...kept } = sc as Record<
+    string,
+    unknown
+  >
+  const hasAny = Object.values(kept).some((v) => v !== undefined && v !== null)
+  return (hasAny ? { ...rest, sessionCapabilities: kept } : rest) as InitializeResponse['agentCapabilities']
 }
 
 /** Server-defined (-32000..-32099 is implementation's): the session
@@ -123,6 +153,15 @@ function asWireError(err: unknown): never {
 
 const idOf = (params: Record<string, unknown>): string | undefined =>
   typeof params.sessionId === 'string' ? params.sessionId : undefined
+
+/** Error codes a session/close rejection may carry that still mean
+ *  "closed" — method-not-found (the agent never implemented close) and
+ *  resource-not-found (the session is already gone). Everything else
+ *  may be transient; the caller keeps the mapping for a retry. */
+const GONE_CLOSE_CODES: ReadonlySet<number> = new Set([-32601, -32002])
+
+const closeMeansGone = (err: unknown): boolean =>
+  err instanceof RequestError && GONE_CLOSE_CODES.has(err.code)
 
 export function acpTransport(
   cfg: ConductorConfig,
@@ -233,14 +272,19 @@ export function acpTransport(
    *  path evicts it. */
   const sweep = (): void => {
     const now = Date.now()
-    let overflow = Math.max(0, sessions.size - SESS_CAP)
+    // expired always goes, and its freed slot counts toward the cap —
+    // then oldest-out until one slot is free for the session/new in
+    // flight (the +1 reservation a bare cap check misses)
+    let overflow = sessions.size - SESS_CAP + 1
     for (const [sid, s] of sessions) {
       if (s.busy) {
         continue
       }
-      if (now - s.lastSeen > SESS_TTL_MS || overflow-- > 0) {
-        closeUpstream(s, sid)
+      if (now - s.lastSeen <= SESS_TTL_MS && overflow <= 0) {
+        continue
       }
+      closeUpstream(s, sid)
+      overflow--
     }
   }
 
@@ -307,8 +351,9 @@ export function acpTransport(
    *  could strip fields newer than this binding knows). */
   const raw = (p: unknown): Record<string, unknown> => p as Record<string, unknown>
 
-  /** initialize → the upstream handshake verbatim, minus loadSession —
-   *  the brokered surface never joins a session it didn't open. */
+  /** initialize → the upstream handshake verbatim, with the capability
+   *  flags masked to what the broker actually registers — a flag a
+   *  client sees is a call it may make. */
   const onInitialize = async (
     st: ConnState,
     params: Record<string, unknown>
@@ -321,11 +366,9 @@ export function acpTransport(
         backend: cfg.backend,
         'acp.client': st.clientName,
       })
-      const { loadSession: _dropped, ...caps } = peer.init
-        .agentCapabilities as Record<string, unknown>
       return {
         ...peer.init,
-        agentCapabilities: caps as InitializeResponse['agentCapabilities'],
+        agentCapabilities: maskAgentCapabilities(peer.init.agentCapabilities),
       }
     } catch (err) {
       asWireError(err)
@@ -463,22 +506,30 @@ export function acpTransport(
     if (sess === undefined) {
       throw RequestError.resourceNotFound(sid)
     }
-    try {
-      return (
-        (await sess.peer.ctx.request(
-          'session/close',
-          params,
-          sess.peer.req(Date.now() + cfg.timeoutMs)
-        )) ?? {}
-      )
-    } catch (err) {
-      asWireError(err)
-    } finally {
-      // whether upstream answered or not, the brokered handle is
-      // done — the close IS the release
+    const releaseKnown = (): void => {
       if (sid !== undefined) {
         release(sid)
       }
+    }
+    try {
+      const r = await sess.peer.ctx.request(
+        'session/close',
+        params,
+        sess.peer.req(Date.now() + cfg.timeoutMs)
+      )
+      // the close IS the release — but only once upstream confirms it:
+      // on failure the mapping stays so the client's retry can land
+      releaseKnown()
+      return r ?? {}
+    } catch (err) {
+      // a session already gone upstream IS closed — not-found and
+      // not-implemented answer as success and drop the handle; any
+      // other error may be transient, so keep the mapping mapped
+      if (closeMeansGone(err)) {
+        releaseKnown()
+        return {}
+      }
+      asWireError(err)
     }
   }
 

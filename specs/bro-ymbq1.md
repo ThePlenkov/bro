@@ -4,7 +4,9 @@ Epic `bro-9rls` row: the missing ACP-out transport. `bro serve` already
 brokers Messages-API clients through a pooled `devin acp` peer (the
 conductor, specs/bro-xeozo.md); this spec adds a second transport that
 passes the **native ACP protocol** through untranslated, so an
-ACP-capable client (Zed, a `devin acp` client, any JSON-RPC ACP client)
+ACP-capable client over **Streamable HTTP** (a `devin acp` client, any
+ACP client that speaks the HTTP transport — Zed's command-launched
+custom agents need a transport adapter, JSON-RPC alone is not enough)
 gets the full wire: `session/update` streaming, the `tool_call`
 lifecycle, `terminal/*`, `fs/*`, `session/request_permission`,
 elicitation.
@@ -82,7 +84,7 @@ used; sessions still multiplex on their transport's link.
 
 | downstream → bro | bro → upstream |
 | --- | --- |
-| `initialize` | opens (or joins) the pooled ACP link eagerly; response = upstream `protocolVersion`, `agentCapabilities` minus `loadSession`, `authMethods`, `agentInfo` verbatim |
+| `initialize` | opens (or joins) the pooled ACP link eagerly; response = upstream `protocolVersion`, `agentCapabilities` masked to the brokered method set, `authMethods`, `agentInfo` verbatim |
 | `session/new` | `session/new` with the client's params verbatim (`cwd`, `mcpServers`, `_meta`) + the configured model pin applied via `session/set_config_option`; response verbatim (upstream `sessionId` is the downstream id — untranslated) |
 | `session/prompt` | verbatim `ContentBlock[]`; every `session/update` fanned out **as it arrives** (the `onUpdate` seam, never buffered to `end_turn`); upstream `PromptResponse` verbatim back |
 | `session/cancel` (notif) | `session/cancel` notification verbatim |
@@ -92,13 +94,13 @@ used; sessions still multiplex on their transport's link.
 | upstream → downstream | routing |
 | --- | --- |
 | `session/update` | owning connection's client context |
-| `session/request_permission`, `fs/read_text_file`, `fs/write_text_file`, `terminal/*`, `elicitation/create`, `mcp/message` | looked up by `params.sessionId` → the session's owning connection, verbatim both ways; an unknown session answers method-not-found |
+| `session/request_permission`, `fs/read_text_file`, `fs/write_text_file`, `terminal/*`, `elicitation/create`, `mcp/message` | looked up by `params.sessionId` → the session's owning connection, verbatim both ways; an unknown session answers resource-not-found (−32002) — the method exists, the session doesn't |
 | `elicitation/complete` (notif) | same routing, forwarded as notification |
 
 | NOT brokered in v1 | behavior |
 | --- | --- |
-| `session/load`/`resume`/`fork`/`list`/`delete` | unregistered → method-not-found; `loadSession` is stripped from advertised `agentCapabilities` so well-behaved clients never call it |
-| `providers_*`, `logout`, `nes_*`, `document_*` | method-not-found |
+| `session/load`/`resume`/`fork`/`list`/`delete` | unregistered → method-not-found; `loadSession` and the matching `sessionCapabilities` flags are stripped from advertised `agentCapabilities` so well-behaved clients never call them |
+| `providers_*`, `logout`, `nes_*`, `document_*` | method-not-found; `providers`/`nes` capability flags are likewise masked |
 | concurrent `session/prompt` on one session | JSON-RPC error — a second pump would steal the first turn's updates (the update queue is per-session, single-reader) |
 | agent updates outside a prompt turn | queued by the SDK's session routing and flushed at the next turn's pump — the pump is the only queue reader |
 
@@ -169,7 +171,7 @@ sent.
 listener, `fakeAcpAgent` as the upstream peer (`acp.peer` seam):
 
 - `initialize` → downstream sees the agent's advertised capabilities
-  (minus `loadSession`).
+  masked to the methods the broker registers.
 - `session/new` + `session/prompt` → upstream records the verbatim
   params; `session/update` updates arrive at the client during the
   turn, before the prompt resolves.
