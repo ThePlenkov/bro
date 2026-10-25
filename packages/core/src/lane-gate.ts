@@ -89,7 +89,12 @@ function writeLedger(path: string, ledger: LaneGateLedger): void {
 }
 
 const refill = (l: LaneGateLedger, cfg: LaneRateGate, now: number): number =>
-  Math.min(capacityOf(cfg), l.tokens + ((now - l.updatedAt) / 3_600_000) * cfg.requestsPerHour)
+  Math.min(
+    capacityOf(cfg),
+    // a host clock stepping backward must not drain the saved balance —
+    // negative elapsed clamps to zero refill, never a debit
+    l.tokens + (Math.max(0, now - l.updatedAt) / 3_600_000) * cfg.requestsPerHour
+  )
 
 /** Clock/ledger overrides — tests pin `now` and isolate `dir`. */
 export interface LaneGateOpts {

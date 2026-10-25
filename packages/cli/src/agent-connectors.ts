@@ -1537,15 +1537,6 @@ function prepareSpawn(
     throw wallRefusal
 >>>>>>> 8d9b081a (feat(lane): pace the devin lane — a shared rate gate, and the wall pauses every worker (bro-y3jvd))
   }
-  // the rate gate: a batch spawn pays its request budget up front —
-  // the lane paces to the account's ceiling instead of discovering it
-  // by dying (spec bro-y3jvd)
-  if (opts.env !== undefined) {
-    const gateRefusal = laneGateRefusal(opts.env, spec)
-    if (gateRefusal !== undefined) {
-      throw gateRefusal
-    }
-  }
   // fleet admission — before the registry write + claim land, so a
   // refusal leaves no half-spawned state
   enforceFleetCap(dir, home, registry, spec, opts.cap);
@@ -1568,6 +1559,18 @@ function prepareSpawn(
           workerEnv: spec.env,
         });
   try {
+    // the rate gate charges LAST — after every admission that can
+    // still refuse (spec bro-y3jvd): a batch spawn pays its request
+    // budget up front so the lane paces to the account's ceiling
+    // instead of discovering it by dying. Inside the try so a gate
+    // refusal hands the session reservation back like any spawn
+    // failure — budget is never spent on a spawn that didn't run
+    if (opts.env !== undefined) {
+      const gateRefusal = laneGateRefusal(opts.env, spec)
+      if (gateRefusal !== undefined) {
+        throw gateRefusal
+      }
+    }
     // enter half of the rig transition — inside the try so an enter
     // failure also hands the session-quota reservation back via the
     // catch below

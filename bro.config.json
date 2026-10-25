@@ -142,25 +142,13 @@
     "devin": {
       "type": "cli",
       "command": "devin -p --permission-mode dangerous --prompt-file {promptFile}",
-      "models": "devin models list --format json | jq -r '.families[].variants[].model_uid'",
-      "rateGate": {
-        "lane": "devin",
-        "requestsPerHour": 600,
-        "spawnCost": 150,
-        "burst": 300
-      }
+      "models": "devin models list --format json | jq -r '.families[].variants[].model_uid'"
     },
     "devin-acp": {
       "type": "acp",
       "command": "devin acp",
       "autoApprove": true,
-      "sessionRm": "devin rm {sessionId} --force",
-      "rateGate": {
-        "lane": "devin",
-        "requestsPerHour": 600,
-        "spawnCost": 150,
-        "burst": 300
-      }
+      "sessionRm": "devin rm {sessionId} --force"
     },
     "opencode-free": {
       "type": "cli",

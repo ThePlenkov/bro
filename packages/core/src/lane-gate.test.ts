@@ -88,6 +88,17 @@ describe('lane gate — the token bucket', () => {
     })
   })
 
+  test('a backward clock step does not drain the balance', () => {
+    withDir((dir) => {
+      laneGateTake('devin', '(default)', cfg(), { now: 10_000, dir })
+      // clock jumps back an hour — elapsed must clamp to zero, and the
+      // saved 180 stays 180 (not 180 - 240)
+      const r = laneGateTake('devin', '(default)', cfg({ burst: 240 }), { now: 0, dir })
+      assert.ok(r.ok)
+      assert.equal(r.tokens, 120)
+    })
+  })
+
   test('capacity honors burst, never the refill', () => {
     withDir((dir) => {
       const c = cfg({ burst: 120 })
@@ -128,6 +139,16 @@ describe('providers.<name>.rateGate config', () => {
       null
     )
     assert.equal(parseProviderEntry('devin', cli({ rateGate: 'fast' })), null)
+  })
+
+  test('burst under spawnCost never admits — config error', () => {
+    assert.equal(
+      parseProviderEntry(
+        'devin',
+        cli({ rateGate: { requestsPerHour: 240, spawnCost: 120, burst: 60 } })
+      ),
+      null
+    )
   })
 
   test('wallPause parses on cli and acp kinds', () => {

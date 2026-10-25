@@ -31,6 +31,7 @@ import {
   readAgentRegistry,
   SpawnError,
   wallText,
+  withFileLock,
   type AgentRegistryEntry,
   type LaneRateGate,
   type ProviderEntry,
@@ -173,13 +174,18 @@ function entryStillOurs(rec: PauseRecord, registry: Record<string, AgentRegistry
 
 /** The one decision per freeze candidate — the wall covers this
  *  entry's provider, the entry is ours to stop, and the group is
- *  live. Returns the group pid to signal. */
+ *  live. Returns the group pid to signal. `native` only: its `sh -c`
+ *  wrapper is a detached process-group leader bro itself spawned —
+ *  pid+pidStart identity pins it. Any other backend's `pid` may name
+ *  a container shim or a REMOTE process — SIGSTOP on the host would
+ *  hit a stranger. */
 function freezablePid(
   entry: AgentRegistryEntry,
   walled: ReadonlyMap<string, ProviderWall>,
   env: AgentConnectorEnv
 ): number | undefined {
   if (
+    entry.backend !== 'native' ||
     entry.provider === undefined ||
     !walled.has(entry.provider) ||
     entry.stopped === true ||
@@ -222,9 +228,17 @@ function freezeLane(
   }
 }
 
+/** Is the recorded group still out there — the wrapper OR a group
+ *  member. The signal targets the whole pgid, so the unit the pause
+ *  holds is the GROUP: a dead wrapper with live descendants must still
+ *  thaw — dropping the record would orphan a stopped group forever.
+ *  pidStart bounds member starttimes, so a recycled pgid can't pass. */
+const groupStillLive = (pid: number, pidStart: string | undefined): boolean =>
+  Number.isInteger(pid) && (pidAlive(pid, pidStart) || groupMemberAlive(pid, pidStart))
+
 /** Thaw pass — a record survives while its provider still walls AND
- *  its pid still resolves to the same process. Dead or recycled pids
- *  drop WITHOUT a signal — never SIGCONT a stranger. */
+ *  its group is still live. Gone or recycled groups drop WITHOUT a
+ *  signal — never SIGCONT a stranger. */
 function thawLane(
   paused: Record<string, PauseRecord>,
   walled: ReadonlyMap<string, ProviderWall>,
@@ -235,8 +249,7 @@ function thawLane(
   let thawed = 0
   for (const [pidStr, rec] of Object.entries(paused)) {
     const pid = Number(pidStr)
-    const alive = Number.isInteger(pid) && pidAlive(pid, rec.pidStart)
-    if (!alive) {
+    if (!groupStillLive(pid, rec.pidStart)) {
       continue
     }
     if (walled.has(rec.provider) && pauseWanted(env, rec.provider) && entryStillOurs(rec, registry)) {
@@ -262,13 +275,18 @@ function reconcile(
   now: number
 ): { paused: number; thawed: number } {
   const walled = new Map(walls.map((w) => [w.provider, w]))
-  const file = readPauseFile(path)
-  freezeLane(registry, walled, env, file, now)
-  const { next, thawed } = thawLane(file.paused, walled, env, registry)
-  if (Object.keys(next).length > 0 || Object.keys(file.paused).length > 0 || existsSync(path)) {
-    writePauseFile(path, { paused: next })
-  }
-  return { paused: Object.keys(next).length, thawed }
+  // the pause file is a shared read-modify-write — the drive pass and
+  // a spawn-path refusal can reconcile at once, and a stale write
+  // would drop records whose groups then stay frozen forever
+  return withFileLock(`${path}.lock`, () => {
+    const file = readPauseFile(path)
+    freezeLane(registry, walled, env, file, now)
+    const { next, thawed } = thawLane(file.paused, walled, env, registry)
+    if (Object.keys(next).length > 0 || Object.keys(file.paused).length > 0 || existsSync(path)) {
+      writePauseFile(path, { paused: next })
+    }
+    return { paused: Object.keys(next).length, thawed }
+  })
 }
 
 const NO_PAUSE = { walled: [] as ProviderWall[], paused: 0, thawed: 0 }

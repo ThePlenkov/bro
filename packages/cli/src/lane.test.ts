@@ -1,6 +1,6 @@
 import { after, describe, test } from 'node:test'
 import assert from 'node:assert/strict'
-import { spawn } from 'node:child_process'
+import { execFileSync, spawn } from 'node:child_process'
 import { mkdirSync, readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import {
@@ -124,6 +124,24 @@ const procState = (pid: number): string | undefined => {
   }
 }
 
+/** SIGSTOP/SIGCONT mark the task's state on delivery — the kernel
+ *  schedules the stop asynchronously, so a proc read right after
+ *  kill() can still show the old state. Poll briefly instead. */
+const waitState = (pid: number, want: string | ((s: string | undefined) => boolean)): void => {
+  const pred = typeof want === 'function' ? want : (s: string | undefined) => s === want
+  const deadline = Date.now() + 2_000
+  while (Date.now() < deadline) {
+    if (pred(procState(pid))) {
+      return
+    }
+    const t = Date.now() + 20
+    while (Date.now() < t) {
+      // settle — Atomics-free spin is fine at this granularity
+    }
+  }
+  assert.fail(`pid ${pid} never reached expected state (now ${procState(pid)})`)
+}
+
 const deadWallEntry = (resetAt: string): AgentRegistryEntry => ({
   agentId: 'native-dead',
   backend: 'native',
@@ -200,6 +218,27 @@ describe('the wall pause', () => {
     })
   })
 
+  test('non-native backends are never frozen — remote pids are not ours to signal', () => {
+    const { root, main } = initRepo('bro-lane-')
+    inside(main, root, () => {
+      const s = sleeper()
+      try {
+        const future = new Date(Date.now() + 3600_000).toISOString()
+        // a copilot entry's pid is a REMOTE session's handle, not a host
+        // process group — the pause must leave it alone
+        writeRegistry(main, {
+          'fx-dead': deadWallEntry(future),
+          'fx-remote': { ...liveEntry(s.pid, s.pidStart), backend: 'copilot' },
+        })
+        const r = reconcileLanePause(main, env())
+        assert.equal(r.paused, 0)
+        assert.notEqual(procState(s.pid), 'T')
+      } finally {
+        s.kill()
+      }
+    })
+  })
+
   test('dead pids drop from the pause file without a signal', () => {
     const { root, main } = initRepo('bro-lane-')
     inside(main, root, () => {
@@ -216,6 +255,56 @@ describe('the wall pause', () => {
         readFileSync(join(agentRegistryPath(main)!, '..', 'lane-pause.json'), 'utf8')
       )
       assert.deepEqual(pause.paused, {})
+    })
+  })
+
+  test('a dead wrapper with a live group member still thaws on lift', () => {
+    const { root, main } = initRepo('bro-lane-')
+    inside(main, root, () => {
+      // `sleep` in the BACKGROUND under the sh wrapper: the member
+      // outlives its group leader when we kill the wrapper mid-pause
+      const child = spawn('sh', ['-c', 'sleep 60 & wait'], { detached: true, stdio: 'ignore' })
+      child.unref()
+      const pid = child.pid as number
+      // the member may not be forked yet — give pgrep a couple of tries
+      let member = ''
+      for (let i = 0; i < 50 && member === ''; i++) {
+        try {
+          member = execFileSync('pgrep', ['-P', String(pid)], { encoding: 'utf8' }).trim()
+        } catch {}
+        const t = Date.now() + 20
+        while (Date.now() < t) {}
+      }
+      assert.notEqual(member, '', 'sleeper member never forked')
+      const cleanup = () => {
+        try {
+          process.kill(-pid, 'SIGCONT')
+        } catch {}
+        try {
+          process.kill(-pid, 'SIGKILL')
+        } catch {}
+      }
+      try {
+        const future = new Date(Date.now() + 3600_000).toISOString()
+        writeRegistry(main, { 'fx-dead': deadWallEntry(future), 'fx-live': liveEntry(pid, procStat(pid)?.start) })
+        reconcileLanePause(main, env())
+        waitState(pid, 'T')
+        // wrapper dies mid-pause — the member stays stopped; a record
+        // that keyed on the wrapper alone would orphan it forever
+        process.kill(pid, 'SIGKILL')
+        const still = reconcileLanePause(main, env())
+        assert.equal(still.paused, 1)
+        // lift the wall — the group gets SIGCONT even without a wrapper
+        writeRegistry(main, {
+          'fx-dead': { ...deadWallEntry(future), stopped: true },
+          'fx-live': liveEntry(pid, undefined),
+        })
+        const r = reconcileLanePause(main, env())
+        assert.equal(r.thawed, 1)
+        waitState(Number(member), (s) => s !== 'T')
+      } finally {
+        cleanup()
+      }
     })
   })
 })

@@ -420,6 +420,11 @@ function parseRateGate(
   if (raw.lane !== undefined && lane === undefined) {
     return { err: 'rateGate.lane must be a non-empty string' }
   }
+  // burst < spawnCost never admits — a config that can only refuse is
+  // a config error, not a pace
+  if (burst !== undefined && burst < spawnCost) {
+    return { err: 'rateGate.burst must be >= spawnCost — the bucket could never admit one spawn' }
+  }
   return {
     rateGate: {
       requestsPerHour,
