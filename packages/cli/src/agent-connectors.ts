@@ -119,6 +119,7 @@ import './session-planes/copilot.ts';
 import { writeCopilotCount } from './session-planes/copilot.ts';
 import { enterWorktree } from './commands/work.ts';
 import { assertMutableConfig } from './config-policy.ts';
+import { laneGateRefusal, reconcileLanePauseForRegistry } from './lane.ts';
 import { VERSION } from './version.ts';
 
 /** Everything a factory needs: the repo ctx + the resolved config
@@ -1468,7 +1469,15 @@ function prepareSpawn(
      *  claim guards, before any write: a spawn that would overshoot
      *  the cap refuses while OTHER live entries fill it (a respawn's
      *  own dead entry holds no slot). */
+<<<<<<< HEAD
     cap?: { max: number; env: AgentConnectorEnv };
+=======
+    cap?: { max: number; env: AgentConnectorEnv }
+    /** The resolved agent env — provider entries carry the lane's
+     *  pacing config (`rateGate`/`wallPause`, spec bro-y3jvd); without
+     *  it the gate and the wall pause can't see their config. */
+    env?: AgentConnectorEnv
+>>>>>>> 8d9b081a (feat(lane): pace the devin lane — a shared rate gate, and the wall pauses every worker (bro-y3jvd))
     /** Session-kind admission — the spawn consumes one of the lane
      *  plane's sessions and refuses when live ones already hit
      *  `agents.<kind>.maxSessions`. The count+claim runs under ONE
@@ -1515,7 +1524,27 @@ function prepareSpawn(
   const { claimed, actor, phantom } = guardClaim(spec, existing !== undefined, opts.claimAs);
   const wallRefusal = batchWallRefusal(registry, spec);
   if (wallRefusal !== undefined) {
+<<<<<<< HEAD
     throw wallRefusal;
+=======
+    // The wall stops the whole lane, not just this admission (spec
+    // bro-y3jvd): while a provider wall holds, the live workers that
+    // keep feeding it freeze — every rejected attempt pushes the
+    // account's reset further out.
+    if (opts.env !== undefined) {
+      reconcileLanePauseForRegistry(dir, opts.env, registry)
+    }
+    throw wallRefusal
+>>>>>>> 8d9b081a (feat(lane): pace the devin lane — a shared rate gate, and the wall pauses every worker (bro-y3jvd))
+  }
+  // the rate gate: a batch spawn pays its request budget up front —
+  // the lane paces to the account's ceiling instead of discovering it
+  // by dying (spec bro-y3jvd)
+  if (opts.env !== undefined) {
+    const gateRefusal = laneGateRefusal(opts.env, spec)
+    if (gateRefusal !== undefined) {
+      throw gateRefusal
+    }
   }
   // fleet admission — before the registry write + claim land, so a
   // refusal leaves no half-spawned state
@@ -2083,7 +2112,7 @@ function scanProc(): { entries: ProcEntry[]; unverified: boolean } | null {
   return { entries, unverified };
 }
 
-function groupMemberAlive(pgid: number, minStart?: string): boolean {
+export function groupMemberAlive(pgid: number, minStart?: string): boolean {
   if (!Number.isInteger(pgid) || pgid <= 0) {
     return false;
   }
@@ -2486,6 +2515,7 @@ export function makeNativeConnector(ctx: ConnectorCtx, env: AgentConnectorEnv): 
             liveDetail: e =>
               typeof e.pid === 'number' ? `pid ${e.pid}` : 'spawn handoff in flight',
             cap: { max: fleetCapOf(env), env },
+            env,
             sessionQuota: sessionQuotaOf(env, 'native', spec, command),
           }
         );
@@ -2707,7 +2737,18 @@ export function makeNativeConnector(ctx: ConnectorCtx, env: AgentConnectorEnv): 
         // pre-signal pid+starttime pin is the only handle left on it
         unit = descendantsOf(pid);
         try {
+<<<<<<< HEAD
           process.kill(-pid, 'SIGTERM'); // detached → own process group
+=======
+          // a lane-paused group (spec bro-y3jvd) pends every signal —
+          // SIGCONT first or the TERM waits on a stopped process
+          process.kill(-pid, 'SIGCONT')
+        } catch {
+          // not stopped, or already gone — the TERM below decides
+        }
+        try {
+          process.kill(-pid, 'SIGTERM') // detached → own process group
+>>>>>>> 8d9b081a (feat(lane): pace the devin lane — a shared rate gate, and the wall pauses every worker (bro-y3jvd))
         } catch {
           // No fallback to kill(pid): a native child is always its own
           // group leader, so a failed group signal means the pid was
@@ -2968,6 +3009,7 @@ export function makeTmuxConnector(ctx: ConnectorCtx, env: AgentConnectorEnv): Ag
             liveDetail: e => `session ${tmuxSessionName(e) ?? '?'}`,
             entry: id => ({ session: `bro-${id}` }),
             cap: { max: fleetCapOf(env), env },
+            env,
             sessionQuota: sessionQuotaOf(env, 'tmux', spec, command),
           }
         );
@@ -3713,6 +3755,7 @@ export function makeGascityConnector(ctx: ConnectorCtx, env: AgentConnectorEnv):
           entry: () => ({ sessionId: undefined }),
           claimAs: spec.molStep,
           cap: { max: fleetCapOf(env), env },
+          env,
           // the quota admits against what gc will actually RUN — the
           // command pinned in city.toml at init, not today's config
           sessionQuota: sessionQuotaOf(env, 'gascity', spec, gcEffectiveCommand(city, command)),
@@ -4448,6 +4491,7 @@ export function makeDockerConnector(ctx: ConnectorCtx, env: AgentConnectorEnv): 
             liveDetail: e => `container ${dockerContainerName(e) ?? '?'}`,
             entry: id => ({ container: `bro-${id}`, containerId: undefined }),
             cap: { max: fleetCapOf(env), env },
+            env,
             sessionQuota: sessionQuotaOf(env, 'docker', spec, command),
           }
         );
@@ -5345,6 +5389,7 @@ export function makeCopilotConnector(ctx: ConnectorCtx, env: AgentConnectorEnv):
         // claim-on-behalf is prepareSpawn's claimStep inside this lock —
         // the remote runner can never reach the shared store, so the
         // orchestrator pins the claim BEFORE the task exists
+<<<<<<< HEAD
         const {
           agentId,
           promptFile: _promptFile,
@@ -5385,6 +5430,51 @@ export function makeCopilotConnector(ctx: ConnectorCtx, env: AgentConnectorEnv):
           cap: { max: fleetCapOf(env), env },
           sessionQuota: copilotSessionQuota(env),
         });
+=======
+        const { agentId, promptFile: _promptFile, reservation } = prepareSpawn(
+          dir,
+          home,
+          'copilot',
+          spec,
+          {
+            isLive: (existing) => {
+              const p = copilotTaskProbe(dir, spec.molStep, existing)
+              if (p.live === 'unknown') {
+                // an unverifiable probe must not let a duplicate spawn
+                // burn beside a remote task that may still be alive
+                throw new SpawnError(
+                  `cannot verify ${spec.molStep}'s copilot task — ${p.err ?? 'gh api failed'}`,
+                  'unavailable'
+                )
+              }
+              return p.live === 'running'
+            },
+            liveDetail: (e) => `task ${copilotTaskIdOf(e) ?? '?'}`,
+            entry: () => ({
+              // respawn clears the previous run's remote handles — a new
+              // task mints fresh ones; stale pins must not alias it
+              taskId: undefined,
+              taskRepo: undefined,
+              taskState: undefined,
+              branch: undefined,
+              sessionId: undefined,
+              sessionUrl: undefined,
+              workflowRun: undefined,
+              pr: undefined,
+              prUrl: undefined,
+              attach: undefined,
+              log: undefined,
+              // no local worker — nothing splits into the capture, so
+              // the entry must not name a .stderr nobody will write
+              stderrLog: undefined,
+              stderrFrom: undefined,
+            }),
+            cap: { max: fleetCapOf(env), env },
+            env,
+            sessionQuota: copilotSessionQuota(env),
+          }
+        )
+>>>>>>> 8d9b081a (feat(lane): pace the devin lane — a shared rate gate, and the wall pauses every worker (bro-y3jvd))
         try {
           const { task, taskId } = dispatchTask(home, agentId, spec, target);
           const state = copilotTaskState(task);

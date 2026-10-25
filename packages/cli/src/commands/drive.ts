@@ -112,6 +112,7 @@ import {
   judgeFacade,
 } from '@broject/judge'
 import { loadAgentEnv, type AgentConnectorEnv } from '../agent-connectors.ts'
+import { reconcileLanePause } from '../lane.ts'
 import { flag } from './args.ts'
 import { defaultBranch, runActCommand } from './act.ts'
 import { emitDevinUsage } from '@broject/devin'
@@ -2415,6 +2416,16 @@ async function emitLaneUsage(ctx: Ctx): Promise<void> {
 /** One pass: enumerate, probe every open PR, act per verdict. */
 async function driveOnce(ctx: Ctx): Promise<void> {
   await emitLaneUsage(ctx)
+  try {
+    // the wall pause (spec bro-y3jvd) — the periodic reconcile: freeze
+    // live workers on a walled provider, thaw lanes whose wall lifted
+    const r = reconcileLanePause(ctx.mainRoot, loadAgentEnv(ctx.mainRoot))
+    if (r.paused > 0 || r.thawed > 0) {
+      say(ctx, `lane: ${r.paused} worker(s) paused, ${r.thawed} thawed`)
+    }
+  } catch {
+    // a pause miss must not stall the pass — the next tick re-asserts
+  }
   const { byStep, degraded } = await collectAgents(ctx.mainRoot)
   for (const d of degraded) {
     say(ctx, `warning: backend degraded — ${d}`)

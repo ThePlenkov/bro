@@ -4,6 +4,7 @@
  * Core holds types + registry config only — SDK bindings live in
  * @broject/providers so a repo without providers never pays the import.
  */
+import type { LaneRateGate } from './lane-gate.ts'
 
 /** Env var NAME sanity — `apiKeyEnv` names a variable, never holds the
  *  key value. Names must be SCREAMING_SNAKE: a pasted key value
@@ -91,6 +92,13 @@ export type ProviderEntry =
        *  of the operator's personal history. Advisory: a failed
        *  cleanup is logged, never fails the worker. */
       sessionRm?: string
+      /** Lane rate gate (spec bro-y3jvd) — a shared token bucket each
+       *  batch spawn charges `spawnCost` request-tokens against. */
+      rateGate?: LaneRateGate
+      /** `false` opts this provider's workers out of the wall pause —
+       *  by default a derived provider wall SIGSTOPs the lane's live
+       *  workers until the reported reset. */
+      wallPause?: boolean
     }
   | {
       type: 'cli'
@@ -101,6 +109,11 @@ export type ProviderEntry =
        *  Absent = the entry has no enumerable catalog (a pinned
        *  `model` still renders). */
       models?: string
+      /** Lane rate gate (spec bro-y3jvd) — a shared token bucket each
+       *  batch spawn charges `spawnCost` request-tokens against. */
+      rateGate?: LaneRateGate
+      /** `false` opts this provider's workers out of the wall pause. */
+      wallPause?: boolean
     }
 
 /** A `fleet.profiles.<name>` spawn preset (spec bro-5hx1.1) — the
@@ -153,9 +166,15 @@ export const PROVIDER_REGISTRY: Record<ProviderKind, ProviderKindSpec> = {
     spawn: true,
     required: ['command'],
     optional: ['profile', 'model', 'apiKeyEnv', 'sessionRm'],
-    optionalBool: ['autoApprove'],
+    optionalBool: ['autoApprove', 'wallPause'],
   },
-  cli: { call: 'prose', spawn: true, required: ['command'], optional: ['model', 'models'] },
+  cli: {
+    call: 'prose',
+    spawn: true,
+    required: ['command'],
+    optional: ['model', 'models'],
+    optionalBool: ['wallPause'],
+  },
 }
 
 /** A consumer named a provider no entry resolves to — startup error,
@@ -366,6 +385,51 @@ function pickSpecFields(
   return { picked }
 }
 
+/** `rateGate` — the lane's token bucket (spec bro-y3jvd). Required
+ *  `requestsPerHour` + `spawnCost`: the unit is requests, and a spawn's
+ *  cost is the operator's estimate of a worker's lifetime spend — bro
+ *  cannot meter a worker mid-flight, so the honest knob is config.
+ *  `burst`/`lane` optional. A present-but-wrong shape is a config
+ *  error (a half-armed gate reads as "no pacing"), matching the
+ *  kind/keys discipline — drop the FIELD silently and the operator
+ *  believes a limit exists that doesn't. */
+function parseRateGate(
+  name: string,
+  raw: unknown
+): { rateGate?: LaneRateGate } | { err: string } {
+  if (raw === undefined) {
+    return {}
+  }
+  if (!isPlainObject(raw)) {
+    return { err: 'rateGate must be an object' }
+  }
+  const num = (f: string): number | undefined => {
+    const v = raw[f]
+    return typeof v === 'number' && Number.isFinite(v) && v > 0 ? v : undefined
+  }
+  const requestsPerHour = num('requestsPerHour')
+  const spawnCost = num('spawnCost')
+  if (requestsPerHour === undefined || spawnCost === undefined) {
+    return { err: 'rateGate requires positive requestsPerHour and spawnCost' }
+  }
+  const burst = num('burst')
+  if (raw.burst !== undefined && burst === undefined) {
+    return { err: 'rateGate.burst must be a positive number' }
+  }
+  const lane = str(raw.lane)
+  if (raw.lane !== undefined && lane === undefined) {
+    return { err: 'rateGate.lane must be a non-empty string' }
+  }
+  return {
+    rateGate: {
+      requestsPerHour,
+      spawnCost,
+      ...(burst === undefined ? {} : { burst }),
+      ...(lane === undefined ? {} : { lane }),
+    },
+  }
+}
+
 export function parseProviderEntry(name: string, raw: unknown): ProviderEntry | null {
   const fail = (why: string): null => {
     console.error(`bro.config: providers.${name} ${why} — entry dropped`)
@@ -397,7 +461,21 @@ export function parseProviderEntry(name: string, raw: unknown): ProviderEntry | 
   if (keyErr !== null) {
     return fail(keyErr)
   }
-  return { type: kind, ...picked, ...(models === undefined ? {} : { models }) } as ProviderEntry
+  // spawn-surface extras — objects/bools the string picker can't carry
+  let rateGate: LaneRateGate | undefined
+  if (kind === 'acp' || kind === 'cli') {
+    const gate = parseRateGate(name, raw.rateGate)
+    if ('err' in gate) {
+      return fail(gate.err)
+    }
+    rateGate = gate.rateGate
+  }
+  return {
+    type: kind,
+    ...picked,
+    ...(models === undefined ? {} : { models }),
+    ...(rateGate === undefined ? {} : { rateGate }),
+  } as ProviderEntry
 }
 
 /** Key-source guards shared by every kind: apiKeyEnv names an env var

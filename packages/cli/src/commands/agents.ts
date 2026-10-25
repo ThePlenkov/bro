@@ -93,7 +93,12 @@ import {
   resolveSpawnProvider,
   type AgentConnectorEnv,
 } from '../agent-connectors.ts';
-import { devinSessionTranscript, devinTranscriptsDir, renderDevinTranscript } from '@broject/devin';
+import { laneStatus, laneStatusLines, type LaneStatusRow } from '../lane.ts';
+import {
+  devinSessionTranscript,
+  devinTranscriptsDir,
+  renderDevinTranscript,
+} from '@broject/devin';
 import { flag, positionals } from './args.ts';
 import { mainWorktree, worktreePathFor } from './work.ts';
 
@@ -351,7 +356,8 @@ export function occupancyLine(o: FleetOccupancy): string {
 function printStatusTable(
   backends: AgentBackendPlane[],
   occupancy: FleetOccupancy,
-  sessions: SessionQuotaView[]
+  sessions: SessionQuotaView[],
+  lanes: LaneStatusRow[] = []
 ): void {
   console.log(occupancyLine(occupancy));
   for (const s of sessions) {
@@ -364,7 +370,20 @@ function printStatusTable(
       console.log(`${s.kind} ${label}: ${s.live >= 0 ? `${s.live}/${s.max}` : `?/${s.max}`} live`);
     }
   }
+<<<<<<< HEAD
   const cols = ['backend', 'supervisor', 'agent', 'step', 'state', 'cause', 'pid', 'worktree'];
+=======
+  // the lane's wall/gate state (spec bro-y3jvd) — wall, paused
+  // workers, and the rate-gate budget, before the per-agent table
+  const laneLines = laneStatusLines(lanes)
+  if (laneLines.length > 0) {
+    console.log('lanes:')
+    for (const l of laneLines) {
+      console.log(l)
+    }
+  }
+  const cols = ['backend', 'supervisor', 'agent', 'step', 'state', 'cause', 'pid', 'worktree']
+>>>>>>> 8d9b081a (feat(lane): pace the devin lane — a shared rate gate, and the wall pauses every worker (bro-y3jvd))
   const rows = backends.flatMap(({ conn, agents }) => {
     const sup = conn.capabilities().supervisor;
     if (agents.length === 0) {
@@ -458,6 +477,7 @@ async function cmdStatus(dir: string, env: AgentConnectorEnv, argv: string[]): P
         {
           occupancy: occupancyOf(dir, env),
           sessions: sessionQuotaViewsOf(env),
+          lanes: laneStatus(dir, env),
           backends: backends.map(({ conn, agents, degraded }) => ({
             name: conn.name,
             capabilities: conn.capabilities(),
@@ -471,7 +491,11 @@ async function cmdStatus(dir: string, env: AgentConnectorEnv, argv: string[]): P
     );
     return;
   }
+<<<<<<< HEAD
   printStatusTable(backends, occupancyOf(dir, env), sessionQuotaViewsOf(env));
+=======
+  printStatusTable(backends, occupancyOf(dir, env), sessionQuotaViewsOf(env), laneStatus(dir, env))
+>>>>>>> 8d9b081a (feat(lane): pace the devin lane — a shared rate gate, and the wall pauses every worker (bro-y3jvd))
 }
 
 // --- up / down ------------------------------------------------------------------
