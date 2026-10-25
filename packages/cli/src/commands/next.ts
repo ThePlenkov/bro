@@ -275,9 +275,10 @@ function claimOne(b: ReadyBead, dir: string | undefined, opts: FacadeOpts | unde
 /** The claim-path policy gate — refuses invalid committed config
  *  before any `bd update --claim` writes (spec: bro-d9dmx). `dir` is
  *  the store anchor; absent → resolve like claimBead. The global store
- *  carries no project policy to refuse on. */
-function gateClaimQueue(queue: ReadyBead[], dir: string | undefined): void {
-  if (queue.length === 0) {
+ *  carries no project policy to refuse on — callers pass skipPolicy
+ *  when the queue came from it (`bro next --global`). */
+function gateClaimQueue(queue: ReadyBead[], dir: string | undefined, skipPolicy = false): void {
+  if (skipPolicy || queue.length === 0) {
     return
   }
   const root = dir ?? (gitTry(['rev-parse', '--show-toplevel']).out.trim() || process.cwd())
@@ -298,13 +299,14 @@ export function claimUpTo(
   queue: ReadyBead[],
   limit: number,
   dir?: string,
-  opts?: FacadeOpts
+  opts?: FacadeOpts,
+  skipPolicy = false
 ): ReadyBead[] {
   // the gate lives INSIDE the claim path — loop/convoy callers reach
   // claimUpTo without next.ts's gate above, and a claim landing before
   // a refused spawn is exactly the half-state the gate exists to stop
   // (spec: bro-d9dmx)
-  gateClaimQueue(queue, dir)
+  gateClaimQueue(queue, dir, skipPolicy)
   const picked: ReadyBead[] = []
   for (const b of queue) {
     if (picked.length >= limit) {
@@ -470,7 +472,11 @@ export function applyNextPlan(plan: NextPlan): void {
     process.exit(1)
   }
   gateClaim(c, plan, projectRoot)
-  const beads = plan.claim ? claimUpTo(c.queue, plan.limit, dir, storeOpts) : c.queue.slice(0, plan.limit)
+  // global scope carries no project policy — skip the gate there the
+  // same way gateClaim does (projectRoot === undefined ⇔ --global)
+  const beads = plan.claim
+    ? claimUpTo(c.queue, plan.limit, dir, storeOpts, projectRoot === undefined)
+    : c.queue.slice(0, plan.limit)
   const result = nextResult(c, beads)
   if (plan.json) {
     console.log(JSON.stringify(result, null, 2))

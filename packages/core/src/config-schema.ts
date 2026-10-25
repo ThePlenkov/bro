@@ -91,7 +91,7 @@ const TOP_LEVEL_JSON_SCHEMAS: Record<string, JsonSchema> = {
 /** `ConfigDiagnostic.key` value for a file that failed to load at all —
  *  no section key exists to name, and the unreadable file is what the
  *  diagnostic (and the policy gate) must see. */
-export const BROKEN_FILE_KEY = '(unreadable)'
+export const BROKEN_FILE_KEY = '(unreadable)' // skipcq: SCT-A000 — sentinel label, not a credential
 
 /** The layer a broken file belonged to — the basename names it since
  *  each layer's candidate names are distinct. */

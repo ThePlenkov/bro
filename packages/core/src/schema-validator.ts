@@ -47,21 +47,20 @@ const SECRET_VALUE = /\b(bearer\s+\S+|xox[baprs]-\S+|ghp_[a-zA-Z0-9]{20,}|sk-[a-
  *  path or content looks credential-shaped; a literal token in a
  *  mistyped field is exactly the case that must not reach retained
  *  logs. */
-const show = (path: string, v: unknown): string =>
+const credentialShaped = (path: string, v: unknown): boolean =>
   SECRET_PATH.test(path) || (typeof v === 'string' && SECRET_VALUE.test(v))
-    ? '[redacted]'
-    : describe(v)
+
+const show = (path: string, v: unknown): string =>
+  credentialShaped(path, v) ? '[redacted]' : describe(v)
+
+/** `type` kinds whose check is more than a jsonTypeOf name match. */
+const TYPE_CHECKS: Record<string, (v: unknown) => boolean> = {
+  integer: Number.isInteger,
+  number: (v) => typeof v === 'number' && Number.isFinite(v),
+}
 
 function typeMatches(v: unknown, t: string | readonly string[]): boolean {
-  return (Array.isArray(t) ? t : [t]).some((k) => {
-    if (k === 'integer') {
-      return Number.isInteger(v)
-    }
-    if (k === 'number') {
-      return typeof v === 'number' && Number.isFinite(v)
-    }
-    return jsonTypeOf(v) === k
-  })
+  return (Array.isArray(t) ? t : [t]).some((k) => TYPE_CHECKS[k]?.(v) ?? jsonTypeOf(v) === k)
 }
 
 /** Schema `pattern`/`patternProperties` strings are code, not user
@@ -96,11 +95,8 @@ const jsonEqual = (a: unknown, b: unknown): boolean => describe(a) === describe(
 /** The `type` discriminant a variant branch wants — draft-07 boolean
  *  subschemas and absent `type` constraints carry none. */
 function variantDiscriminant(v: JsonSchema | boolean): readonly unknown[] | undefined {
-  if (typeof v !== 'object' || v === null) {
-    return undefined
-  }
-  const d = v.properties?.type as JsonSchema | boolean | undefined
-  if (d === undefined || typeof d === 'boolean') {
+  const d = isPlainObject(v) ? v.properties?.type : undefined
+  if (!isPlainObject(d)) {
     return undefined
   }
   if (d.const !== undefined) {
@@ -114,15 +110,11 @@ function variantDiscriminant(v: JsonSchema | boolean): readonly unknown[] | unde
  *  discriminates it. */
 function discriminantIndex(value: unknown, variants: readonly JsonSchema[]): number | undefined {
   const t = isPlainObject(value) ? value.type : undefined
-  if (typeof t !== 'string') {
-    return undefined
-  }
-  for (const [i, v] of variants.entries()) {
-    if (variantDiscriminant(v)?.includes(t) === true) {
-      return i
-    }
-  }
-  return undefined
+  const i =
+    typeof t === 'string'
+      ? variants.findIndex((v) => variantDiscriminant(v)?.includes(t) === true)
+      : -1
+  return i < 0 ? undefined : i
 }
 
 /** Pick the branch whose `type` discriminant names the value's `type`
@@ -139,12 +131,8 @@ function bestAltErrors(
   if (i !== undefined) {
     return all[i]
   }
-  let best: SchemaError[] | undefined
-  for (const e of all) {
-    if (best === undefined || e.length < best.length) {
-      best = e
-    }
-  }
+  // shortest error list = the branch the value came closest to matching
+  const best = [...all].sort((a, b) => a.length - b.length)[0]
   return best !== undefined && best.length > 0
     ? best
     : [{ path, message: `does not match any allowed variant — got ${show(path, value)}` }]
@@ -159,6 +147,20 @@ interface VCtx {
   path: string
   errors: SchemaError[]
   fail: (message: string) => void
+}
+
+/** The VCtx instance for one validation call — `fail` closes over the
+ *  shared `errors` list and stamps the current path. */
+function valueCtx(schema: JsonSchema, path: string): VCtx {
+  const errors: SchemaError[] = []
+  return {
+    schema,
+    path,
+    errors,
+    fail: (message: string): void => {
+      errors.push({ path, message })
+    },
+  }
 }
 
 /** anyOf needs ≥1 clean variant; oneOf needs exactly one. */
@@ -191,35 +193,49 @@ function pushScalarErrors(ctx: VCtx, value: unknown): void {
   }
 }
 
-/** bound key → violated-when + the operator its message shows. */
-const NUMBER_BOUNDS: readonly [
+/** `[bound-key, violates, message-phrase, unit]` — the shared shape of
+ *  minimum/maximum-style checks across number, string, and array. The
+ *  phrase carries verb+operator so each shape keeps its message. */
+type BoundRow = readonly [
   keyof JsonSchema,
-  (value: number, bound: number) => boolean,
+  (measured: number, bound: number) => boolean,
   string,
-][] = [
-  ['minimum', (v, b) => v < b, '≥'],
-  ['maximum', (v, b) => v > b, '≤'],
-  ['exclusiveMinimum', (v, b) => v <= b, '>'],
-  ['exclusiveMaximum', (v, b) => v >= b, '<'],
+  string,
 ]
 
-function pushNumberErrors(ctx: VCtx, value: number): void {
-  for (const [key, violates, symbol] of NUMBER_BOUNDS) {
+const NUMBER_BOUNDS: readonly BoundRow[] = [
+  ['minimum', (v, b) => v < b, 'be ≥', ''],
+  ['maximum', (v, b) => v > b, 'be ≤', ''],
+  ['exclusiveMinimum', (v, b) => v <= b, 'be >', ''],
+  ['exclusiveMaximum', (v, b) => v >= b, 'be <', ''],
+]
+
+const LENGTH_BOUNDS: readonly BoundRow[] = [
+  ['minLength', (l, b) => l < b, 'be ≥', ' char(s)'],
+  ['maxLength', (l, b) => l > b, 'be ≤', ' char(s)'],
+]
+
+const ITEM_BOUNDS: readonly BoundRow[] = [
+  ['minItems', (l, b) => l < b, 'have ≥', ' item(s)'],
+  ['maxItems', (l, b) => l > b, 'have ≤', ' item(s)'],
+]
+
+function pushBoundErrors(ctx: VCtx, rows: readonly BoundRow[], value: unknown, measured: number): void {
+  for (const [key, violates, phrase, unit] of rows) {
     const bound = ctx.schema[key]
-    if (typeof bound === 'number' && violates(value, bound)) {
-      ctx.fail(`must be ${symbol}${bound} — got ${show(ctx.path, value)}`)
+    if (typeof bound === 'number' && violates(measured, bound)) {
+      ctx.fail(`must ${phrase}${bound}${unit} — got ${show(ctx.path, value)}`)
     }
   }
 }
 
+function pushNumberErrors(ctx: VCtx, value: number): void {
+  pushBoundErrors(ctx, NUMBER_BOUNDS, value, value)
+}
+
 function pushStringErrors(ctx: VCtx, value: string): void {
   const { schema, path } = ctx
-  if (schema.minLength !== undefined && value.length < schema.minLength) {
-    ctx.fail(`must be ≥${schema.minLength} char(s) — got ${show(path, value)}`)
-  }
-  if (schema.maxLength !== undefined && value.length > schema.maxLength) {
-    ctx.fail(`must be ≤${schema.maxLength} char(s) — got ${show(path, value)}`)
-  }
+  pushBoundErrors(ctx, LENGTH_BOUNDS, value, value.length)
   if (schema.pattern === undefined) {
     return
   }
@@ -231,21 +247,19 @@ function pushStringErrors(ctx: VCtx, value: string): void {
   }
 }
 
+/** Tuple-form `items` is unhandled — single-schema only (the section
+ *  schemas never declare tuples). */
+function pushItemErrors(ctx: VCtx, items: JsonSchema, value: unknown[]): void {
+  for (const [i, v] of value.entries()) {
+    ctx.errors.push(...validateSchemaValue(v, items, `${ctx.path}[${i}]`))
+  }
+}
+
 function pushArrayErrors(ctx: VCtx, value: unknown[]): void {
-  const { schema, path } = ctx
-  if (schema.minItems !== undefined && value.length < schema.minItems) {
-    ctx.fail(`must have ≥${schema.minItems} item(s) — got ${show(path, value)}`)
-  }
-  if (schema.maxItems !== undefined && value.length > schema.maxItems) {
-    ctx.fail(`must have ≤${schema.maxItems} item(s) — got ${show(path, value)}`)
-  }
-  // tuple-form items are unhandled — single-schema only (the section
-  // schemas never declare tuples)
-  const items = schema.items
+  pushBoundErrors(ctx, ITEM_BOUNDS, value, value.length)
+  const items = ctx.schema.items
   if (items !== undefined && !Array.isArray(items)) {
-    for (const [i, v] of value.entries()) {
-      ctx.errors.push(...validateSchemaValue(v, items as JsonSchema, `${path}[${i}]`))
-    }
+    pushItemErrors(ctx, items as JsonSchema, value)
   }
 }
 
@@ -293,16 +307,20 @@ function pushKeyErrors(ctx: VCtx, k: string, v: unknown): void {
   }
 }
 
+function pushMissingRequired(ctx: VCtx, value: Record<string, unknown>): void {
+  for (const k of ctx.schema.required ?? []) {
+    if (!(k in value)) {
+      ctx.fail(`requires "${k}"`)
+    }
+  }
+}
+
 function pushObjectErrors(ctx: VCtx, value: Record<string, unknown>): void {
   const { schema } = ctx
   if (schema.minProperties !== undefined && Object.keys(value).length < schema.minProperties) {
     ctx.fail(`must have ≥${schema.minProperties} key(s)`)
   }
-  for (const k of schema.required ?? []) {
-    if (!(k in value)) {
-      ctx.fail(`requires "${k}"`)
-    }
-  }
+  pushMissingRequired(ctx, value)
   for (const [k, v] of Object.entries(value)) {
     pushKeyErrors(ctx, k, v)
   }
@@ -324,38 +342,28 @@ export function validateSchemaValue(
   if (typeof schema !== 'object' || schema === null) {
     return [{ path, message: 'is not allowed' }]
   }
-  const errors: SchemaError[] = []
-  const ctx: VCtx = {
-    schema,
-    path,
-    errors,
-    fail: (message: string): void => {
-      errors.push({ path, message })
-    },
-  }
+  const ctx = valueCtx(schema, path)
   pushVariantErrors(ctx, value)
   if (typeRejected(value, schema)) {
     ctx.fail(`must be ${typeLabel(schema.type ?? '')} — got ${show(path, value)}`)
-    return errors
+    return ctx.errors
   }
   pushShapeErrors(ctx, value)
-  return errors
+  return ctx.errors
 }
 
 /** Value-shape checks — scalar keywords apply to every shape; the rest
- *  dispatch on the value's actual type. */
+ *  dispatch on the value's actual type. jsonTypeOf already discriminates
+ *  null/array/object, so the shape handlers key off its tag. `never`
+ *  parameters make the heterogeneous handler table typecheck. */
+const SHAPE_CHECKS: Record<string, (ctx: VCtx, v: never) => void> = {
+  number: pushNumberErrors,
+  string: pushStringErrors,
+  array: pushArrayErrors,
+  object: pushObjectErrors,
+}
+
 function pushShapeErrors(ctx: VCtx, value: unknown): void {
   pushScalarErrors(ctx, value)
-  if (typeof value === 'number') {
-    pushNumberErrors(ctx, value)
-  }
-  if (typeof value === 'string') {
-    pushStringErrors(ctx, value)
-  }
-  if (Array.isArray(value)) {
-    pushArrayErrors(ctx, value)
-  }
-  if (isPlainObject(value)) {
-    pushObjectErrors(ctx, value)
-  }
+  SHAPE_CHECKS[jsonTypeOf(value)]?.(ctx, value as never)
 }
