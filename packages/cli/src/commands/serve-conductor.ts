@@ -28,7 +28,15 @@ import { gitCommonDir, loadConfig } from '@broject/core'
 import type { ProviderEntry } from '@broject/core'
 import { acpOpen, acpPooledTurn, acpSessionRetain, otelEvent, otelJournal, otelParent, otelSpan, toolPayload } from '@broject/providers'
 import { randomUUID } from 'node:crypto'
-import { reserveSessionStart, sessionCapViews } from '@broject/core'
+import {
+  admitSessionStart,
+  LockTimeout,
+  planesStartingSessions,
+  reserveSessionStart,
+  sessionCapViews,
+  SpawnError,
+  type SessionStartAdmission,
+} from '@broject/core'
 import { conductorSessionRefusal } from './session-cap.ts'
 import type { AcpTerminals, Toolish } from '@broject/providers'
 import type { AcpContentBlock, AcpPeer, AcpRetainedSession, OtelCtx, PooledTurnOpts, ProviderWireOpts } from '@broject/providers'
@@ -1530,6 +1538,62 @@ function retireDivergent(env: TurnEnv, cand: ConvSession): Promise<TurnOutcome> 
  *  The refusal names the cap, and the conductor's failure mapping
  *  answers it with 429 (the message carries "quota"). */
 function assertSessionCap(env: TurnEnv, claimKey: string): void {
+  const command = env.cfg.entry.command
+  // the serialized check+claim — under the kind's OWN admission mutex,
+  // the same lock the spawn's admission takes, so a request burst and
+  // a fleet spawn share ONE budget. The first capped plane claiming the
+  // command decides (the views[0] of the un-locked path).
+  let admission: SessionStartAdmission | undefined
+  try {
+    for (const plane of planesStartingSessions(command)) {
+      admission = admitSessionStart({
+        plane,
+        command,
+        agents: env.cfg.agents,
+        key: claimKey,
+        // the retained conversations the plane cannot see — they ride
+        // one shared peer — count with the host's inside the lock
+        extraLive: env.sessions.size,
+        waitMs: CAP_LOCK_WAIT_MS,
+      })
+      if (admission !== undefined) {
+        break
+      }
+    }
+  } catch (err) {
+    if (err instanceof LockTimeout) {
+      // the mutex outlived the wait — contention is not a reason to
+      // refuse a request; the un-locked check+claim still enforces
+      return assertSessionCapUnlocked(env, claimKey)
+    }
+    if (err instanceof SpawnError) {
+      // the count could not be established — fail closed, with the
+      // reason the operator needs (a quota that cannot be verified is
+      // not walked past)
+      throw new Error(
+        `bro conductor: the session cap could not be established (count unavailable) — ${(err as Error).message}`
+      )
+    }
+    // a slot the ACP surface cannot claim refuses the request too — a
+    // session whose claim the budget never saw is exactly the
+    // unbudgeted session this change exists to stop
+    throw new Error(
+      `bro conductor: the session slot could not be claimed — ${(err as Error).message}`
+    )
+  }
+  if (admission?.refusal !== undefined) {
+    throw new Error(admission.refusal)
+  }
+}
+
+/** The conductor's lock wait on the admission mutex — a request stalled
+ *  past this degrades to the un-locked check+claim rather than hang on
+ *  a wedged holder. */
+const CAP_LOCK_WAIT_MS = 5_000
+
+/** The un-locked check+claim — the path the conductor ran before the
+ *  admission mutex serialized it, kept as the contention fallback. */
+function assertSessionCapUnlocked(env: TurnEnv, claimKey: string): void {
   let views
   try {
     views = sessionCapViews(env.cfg.entry.command, env.cfg.agents)
@@ -1546,10 +1610,6 @@ function assertSessionCap(env: TurnEnv, claimKey: string): void {
   if (refusal !== undefined) {
     throw new Error(refusal)
   }
-  // the slot is claimed, not just counted: a burst of parallel requests
-  // would otherwise all see the same headroom (spec bro-bww9v). The ACP
-  // surface fails CLOSED here — a request that cannot record its claim
-  // must not open a session the budget does not know about.
   if (view !== undefined) {
     try {
       reserveSessionStart({

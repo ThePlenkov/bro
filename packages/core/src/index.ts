@@ -404,6 +404,7 @@ export {
   reserveSessionSlot,
   reserveSessionSlotOnce,
   SESSION_SLOT_TTL_MS,
+  sessionAdmissionLock,
   sessionPlane,
   sessionPlaneForCli,
   sessionPlanes,
@@ -417,7 +418,9 @@ export type {
   SessionQuota,
 } from './session-planes.ts'
 export {
+  admitSessionStart,
   planeStartingSessions,
+  planesStartingSessions,
   releaseSessionStart,
   reserveSessionStart,
   sessionCapRefusal,
@@ -425,7 +428,7 @@ export {
   sessionCapViews,
   sessionReservationsDir,
 } from './session-cap.ts'
-export type { SessionCapView } from './session-cap.ts'
+export type { SessionCapView, SessionStartAdmission } from './session-cap.ts'
 export {
   clearPlanes,
   planeNames,

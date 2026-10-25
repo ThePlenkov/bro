@@ -18,13 +18,19 @@
  * slot in the kind's reservation dir before it opens a session, so a
  * burst cannot slip through the window between "the count says there is
  * headroom" and "the session wrote its own mark" (the same mechanism the
- * admission uses — spec bro-9vmx's reservation lifecycle).
+ * admission uses — spec bro-9vmx's reservation lifecycle). And the
+ * check+claim runs under the kind's admission mutex
+ * (`admitSessionStart`) — the same lock the spawn's admission takes —
+ * so two callers racing a burst see each other's claims, not the same
+ * headroom.
  */
 import { SpawnError } from './agents.ts'
+import { withFileLock } from './filelock.ts'
 import {
   countSessionReservations,
   releaseSessionSlot,
   reserveSessionSlotOnce,
+  sessionAdmissionLock,
   sessionPlanes,
   sessionQuotaConfig,
   sessionSlotsDir,
@@ -156,6 +162,15 @@ export function planeStartingSessions(command: string): SessionPlane | undefined
   return undefined
 }
 
+/** Every plane claiming sessions of `command` — a compound command can
+ *  start more than one kind's session, so callers running the locked
+ *  admission judge them all. */
+export function planesStartingSessions(command: string): SessionPlane[] {
+  return sessionPlanes().filter(
+    (plane) => plane.startsSessions !== undefined && plane.startsSessions(command) > 0
+  )
+}
+
 /** Drop the claims a refused start took — the budget must not keep
  *  a slot for a call that never ran. */
 export function releaseSessionStart(paths: string[]): void {
@@ -207,4 +222,93 @@ export function reserveSessionStart(claim: {
     fresh = fresh || claimed.fresh
   }
   return { paths, fresh }
+}
+
+/** One start's admission — the claim taken under the kind's mutex plus
+ *  the cap's verdict computed on the pre-claim count. */
+export interface SessionStartAdmission {
+  /** the slots this call holds — release with `releaseSessionStart`
+   *  when the start never ran. Empty when `refusal` is set: fresh
+   *  claims are dropped inside the section, held ones belong to the
+   *  earlier event that claimed them. */
+  paths: string[]
+  /** false when every slot was already held — a repeat event of the
+   *  same call (its start is already inside the count). */
+  fresh: boolean
+  /** the refusal line when the cap is full. */
+  refusal?: string
+}
+
+/** The cap's check+claim under the kind's OWN admission mutex — the
+ *  same file `admitSessionSlot` locks, so a start through the guard,
+ *  the conductor, or a bro spawn serializes on ONE budget: the count
+ *  inside the mutex already holds every earlier claim. A check taken
+ *  before the lock is exactly the stale read the race runs on, so the
+ *  view is re-counted inside the section.
+ *
+ *  Returns undefined when the plane does not claim the command or no
+ *  cap is armed for the kind. Throws: `SpawnError('config')` on a
+ *  malformed knob and `SpawnError('unavailable')` on a count that
+ *  cannot be established — both from `capViewFor` inside the lock —
+ *  plus the claim's own fs error. `LockTimeout` propagates
+ *  UNtranslated: the caller owns the degradation — a hook falls back
+ *  to the un-locked path and never stalls the client, a quota surface
+ *  keeps its own posture. */
+export function admitSessionStart(args: {
+  /** the plane claiming the command — the caller resolves it (every
+   *  plane for a multi-kind command via `planesStartingSessions`). */
+  plane: SessionPlane
+  command: string
+  agents: Record<string, Record<string, unknown>> | undefined
+  /** the claim key — idempotent per call: the two hook events of one
+   *  call share it, a conductor request gets its own. */
+  key: string
+  lane?: ReservationLane
+  workerEnv?: Record<string, string>
+  /** sessions the caller itself holds that the plane cannot see — the
+   *  conductor's retained conversations riding one shared peer —
+   *  counted with the host's inside the lock. */
+  extraLive?: number
+  /** lock wait bound — a hook passes a small one (never stalls). */
+  waitMs?: number
+}): SessionStartAdmission | undefined {
+  const plane = args.plane
+  if (plane.startsSessions === undefined || plane.startsSessions(args.command) <= 0) {
+    return undefined
+  }
+  const quota = sessionQuotaConfig(args.agents, plane.kind)
+  if (quota === undefined) {
+    return undefined
+  }
+  return withFileLock(
+    sessionAdmissionLock(plane.kind, quota.reservationsDir),
+    () => {
+      const view = capViewFor(plane, args.command, args.agents, args.workerEnv)
+      if (view === undefined) {
+        return undefined
+      }
+      // claim first — a repeat event's slot is already inside the
+      // count, so its start is judged once (starts: 0), never twice
+      const claim = reserveSessionStart({
+        kind: view.kind,
+        agents: args.agents,
+        key: args.key,
+        count: view.starts,
+        lane: args.lane,
+      })
+      const refusal = sessionCapRefusal({
+        ...view,
+        live: view.live + (args.extraLive ?? 0),
+        starts: claim.fresh ? view.starts : 0,
+      })
+      if (refusal !== undefined) {
+        if (claim.fresh) {
+          releaseSessionStart(claim.paths)
+        }
+        return { paths: [], fresh: claim.fresh, refusal }
+      }
+      return { paths: claim.paths, fresh: claim.fresh }
+    },
+    { label: `${plane.kind} session cap admission`, waitMs: args.waitMs }
+  )
 }

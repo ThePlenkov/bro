@@ -22,17 +22,26 @@
  */
 import { createHash } from 'node:crypto'
 import {
+  admitSessionStart,
+  planesStartingSessions,
   releaseSessionStart,
   reserveSessionStart,
   sessionCapRefusal,
   sessionCapRefusalFor,
   sessionCapViews,
+  SpawnError,
   type Connector,
   type ConnectorCtx,
   type PreToolVerdict,
   type SessionCapView,
 } from '@broject/core'
 import { loadAgentEnv } from '../agent-connectors.ts'
+
+/** How long the guard waits on the admission mutex before degrading to
+ *  the un-locked path — a hook must never stall the client. The locked
+ *  section is a dir scan plus a file write, so a live holder yields in
+ *  milliseconds; 2s only bites on a wedged one. */
+export const GUARD_LOCK_WAIT_MS = 2_000
 
 /** The refusal for a command about to start sessions, or undefined when
  *  it fits. Throws when the count cannot be established — the CALLER
@@ -56,7 +65,9 @@ export function sessionCapVerdict(
   input: { tool: string; input: Record<string, unknown> },
   /** The `agents.<kind>` bags — the cap's knobs. Defaults to the
    *  repo's config; injectable for tests. */
-  agents?: Record<string, Record<string, unknown>>
+  agents?: Record<string, Record<string, unknown>>,
+  /** The admission mutex's wait bound — injectable for tests. */
+  lockWaitMs = GUARD_LOCK_WAIT_MS
 ): PreToolVerdict[] {
   const command = typeof input.input['command'] === 'string' ? input.input['command'] : ''
   if (command.trim() === '') {
@@ -69,6 +80,38 @@ export function sessionCapVerdict(
     // the config could not be read — a hook fails OPEN
     return []
   }
+  // The claim's key carries the CALL (its tool-use id when the client
+  // sends one, the command otherwise), so the two hook events of one
+  // call claim ONE slot, and two separate calls with the same command
+  // claim their own.
+  const key = `guard-${ctx.sessionId ?? 'nosession'}-${callKey(command, ctx)}`
+  try {
+    // the locked check+claim first — the cap serializes on the kind's
+    // OWN admission mutex, so a burst of parallel starts shares one
+    // budget exactly instead of each seeing the same headroom
+    for (const plane of planesStartingSessions(command)) {
+      const admitted = admitSessionStart({
+        plane,
+        command,
+        agents: bags,
+        key,
+        waitMs: lockWaitMs,
+      })
+      if (admitted !== undefined && admitted.refusal !== undefined) {
+        return [{ block: admitted.refusal }]
+      }
+    }
+    return []
+  } catch (err) {
+    if (err instanceof SpawnError) {
+      // the count could not be established (or a malformed cap) — a
+      // hook fails OPEN
+      return []
+    }
+    // the mutex outlived the hook's wait, or a claim could not be
+    // written — never stall the client: the un-locked path still
+    // applies the budget best-effort
+  }
   let views: SessionCapView[]
   try {
     views = sessionCapViews(command, bags)
@@ -76,11 +119,6 @@ export function sessionCapVerdict(
     // the count could not be established — a hook fails OPEN
     return []
   }
-  // The claim's key carries the CALL (its tool-use id when the client
-  // sends one, the command otherwise), so the two hook events of one
-  // call claim ONE slot, and two separate calls with the same command
-  // claim their own.
-  const key = `guard-${ctx.sessionId ?? 'nosession'}-${callKey(command, ctx)}`
   return judgeViews(views, bags, key)
 }
 

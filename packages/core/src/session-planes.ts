@@ -251,6 +251,14 @@ export function sessionSlotsDir(kind: string, resDir?: string): string {
   return join(base, 'bro', 'session-slots', kind)
 }
 
+/** The per-kind admission mutex — the file every serialized
+ *  check+claim on this kind locks: the spawn's admission AND the
+ *  session cap's guard/conductor claims. A non-`.slot` name under the
+ *  slots dir, so the reservation tally never reads it as a claim. */
+export function sessionAdmissionLock(kind: string, resDir?: string): string {
+  return join(sessionSlotsDir(kind, resDir), 'admission.mutex')
+}
+
 /** Does this reservation file belong to the asked lane? The fleet's
  *  carry a `.batch` tag, the operator's do not; no lane asks for all of
  *  them. */
@@ -537,7 +545,7 @@ export function admitSessionSlot(
   const resDir = sessionSlotsDir(plane.kind, quota.reservationsDir)
   try {
     return withFileLock(
-      join(resDir, 'admission.mutex'),
+      sessionAdmissionLock(plane.kind, quota.reservationsDir),
       () => {
         if (quota.invalid === true) {
           // a present-but-unparsable cap is a config bug — refuse

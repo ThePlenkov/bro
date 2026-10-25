@@ -2,7 +2,7 @@
  *  bro-bww9v): the guard plane's veto and the ACP surface's refusal. */
 import { describe, test } from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdtempSync, rmSync } from 'node:fs'
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import {
@@ -141,6 +141,28 @@ describe('sessionCapVerdict', () => {
         // ...and the permission event for the SAME call must not count
         // its start twice (the claim is already in the live count)
         assert.deepEqual(verdictFor('twice-run --now', bags), [])
+      })
+    })
+  })
+
+  test('a contended admission mutex degrades to the un-locked path — the hook never stalls', () => {
+    withReservations((dir) => {
+      withPlane(testPlane('fake', { live: 3 }), () => {
+        // a live holder (this pid) parks on the kind's admission mutex —
+        // the verdict must still arrive, and the cap still applies
+        writeFileSync(join(dir, 'admission.mutex'), String(process.pid), { flag: 'wx' })
+        try {
+          const verdicts = sessionCapVerdict(
+            ctx,
+            { tool: 'bash', input: { command: 'fake-run --now' } },
+            { fake: { maxSessions: 3, reservationsDir: dir } },
+            150
+          )
+          assert.equal(verdicts.length, 1)
+          assert.match(verdicts[0]!.block ?? '', /fake session quota reached/)
+        } finally {
+          rmSync(join(dir, 'admission.mutex'), { force: true })
+        }
       })
     })
   })

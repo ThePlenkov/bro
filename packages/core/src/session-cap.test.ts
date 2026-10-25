@@ -6,17 +6,21 @@
  */
 import { describe, test } from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdtempSync, rmSync } from 'node:fs'
+import { spawn } from 'node:child_process'
+import { existsSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { SpawnError } from './agents.ts'
+import { LockTimeout } from './filelock.ts'
 import {
   clearSessionPlanes,
+  countSessionReservations,
   registerSessionPlane,
   reserveSessionSlot,
   type SessionPlane,
 } from './session-planes.ts'
 import {
+  admitSessionStart,
   planeStartingSessions,
   sessionCapRefusal,
   sessionCapRefusalFor,
@@ -198,5 +202,213 @@ describe('planeStartingSessions', () => {
       assert.equal(planeStartingSessions('alpha-run')?.kind, 'alpha')
       assert.equal(planeStartingSessions('nope'), undefined)
     })
+  })
+})
+
+describe('admitSessionStart', () => {
+  test('a start below the cap is admitted and its slot claimed', () => {
+    withSlots((dir) => {
+      const plane = testPlane('alpha', { live: 1 })
+      withPlane(plane, () => {
+        const admitted = admitSessionStart({
+          plane,
+          command: 'alpha-run',
+          agents: { alpha: { maxSessions: 3, reservationsDir: dir } },
+          key: 'call-1',
+        })
+        assert.ok(admitted !== undefined)
+        assert.equal(admitted.refusal, undefined)
+        assert.equal(admitted.fresh, true)
+        // the claim landed — the next start sees it in the count
+        assert.equal(countSessionReservations(dir), 1)
+        assert.equal(admitted.paths.length, 1)
+      })
+    })
+  })
+
+  test('a burst shares one budget — the second start sees the first claim', () => {
+    withSlots((dir) => {
+      const plane = testPlane('alpha', { live: 0 })
+      withPlane(plane, () => {
+        const bags = { alpha: { maxSessions: 1, reservationsDir: dir } }
+        const first = admitSessionStart({ plane, command: 'alpha-run', agents: bags, key: 'call-1' })
+        assert.equal(first?.refusal, undefined)
+        const second = admitSessionStart({ plane, command: 'alpha-run', agents: bags, key: 'call-2' })
+        assert.ok(second !== undefined)
+        assert.match(second.refusal ?? '', /alpha session quota reached — 1 live \+ 1 starting > 1/)
+        // the refused claim was dropped — the budget holds only the admitted one
+        assert.equal(countSessionReservations(dir), 1)
+      })
+    })
+  })
+
+  test('a repeat event of the same call claims no second slot and is judged once', () => {
+    withSlots((dir) => {
+      const plane = testPlane('alpha', { live: 0 })
+      withPlane(plane, () => {
+        const bags = { alpha: { maxSessions: 1, reservationsDir: dir } }
+        assert.equal(
+          admitSessionStart({ plane, command: 'alpha-run', agents: bags, key: 'call-1' })?.refusal,
+          undefined
+        )
+        // the second hook event of the same call: its earlier claim is
+        // inside the count — judging starts again would double-count
+        const repeat = admitSessionStart({ plane, command: 'alpha-run', agents: bags, key: 'call-1' })
+        assert.ok(repeat !== undefined)
+        assert.equal(repeat.fresh, false)
+        assert.equal(repeat.refusal, undefined)
+        assert.equal(countSessionReservations(dir), 1)
+      })
+    })
+  })
+
+  test('extraLive counts sessions the caller holds that the plane cannot see', () => {
+    withSlots((dir) => {
+      const plane = testPlane('alpha', { live: 0 })
+      withPlane(plane, () => {
+        const admitted = admitSessionStart({
+          plane,
+          command: 'alpha-run',
+          agents: { alpha: { maxSessions: 2, reservationsDir: dir } },
+          key: 'call-1',
+          extraLive: 2,
+        })
+        assert.match(admitted?.refusal ?? '', /2 live \+ 1 starting > 2/)
+      })
+    })
+  })
+
+  test('a command the plane does not claim, or an unarmed cap, admits nothing', () => {
+    const plane = testPlane('alpha', { live: 9 })
+    withPlane(plane, () => {
+      assert.equal(
+        admitSessionStart({
+          plane,
+          command: 'other-thing',
+          agents: { alpha: { maxSessions: 1 } },
+          key: 'call-1',
+        }),
+        undefined
+      )
+      assert.equal(
+        admitSessionStart({
+          plane,
+          command: 'alpha-run',
+          agents: { alpha: {} },
+          key: 'call-1',
+        }),
+        undefined
+      )
+    })
+  })
+
+  test('a malformed cap refuses config under the lock too', () => {
+    const plane = testPlane('alpha', { live: 0 })
+    withPlane(plane, () => {
+      assert.throws(
+        () =>
+          admitSessionStart({
+            plane,
+            command: 'alpha-run',
+            agents: { alpha: { maxSessions: 'six' } },
+            key: 'call-1',
+          }),
+        (err: unknown) => err instanceof SpawnError && err.kind === 'config'
+      )
+    })
+  })
+
+  test('an unverifiable count throws — the caller decides', () => {
+    const plane = testPlane('alpha', { fail: true })
+    withPlane(plane, () => {
+      assert.throws(
+        () =>
+          admitSessionStart({
+            plane,
+            command: 'alpha-run',
+            agents: { alpha: { maxSessions: 1 } },
+            key: 'call-1',
+          }),
+        (err: unknown) => err instanceof SpawnError && err.kind === 'unavailable'
+      )
+    })
+  })
+
+  test('a live mutex holder outlasting the wait throws LockTimeout — the caller owns the fallback', () => {
+    withSlots((dir) => {
+      const plane = testPlane('alpha', { live: 0 })
+      withPlane(plane, () => {
+        // a live holder (this pid) parks on the kind's admission mutex
+        const mutex = join(dir, 'admission.mutex')
+        writeFileSync(mutex, String(process.pid), { flag: 'wx' })
+        try {
+          assert.throws(
+            () =>
+              admitSessionStart({
+                plane,
+                command: 'alpha-run',
+                agents: { alpha: { maxSessions: 1, reservationsDir: dir } },
+                key: 'call-1',
+                waitMs: 150,
+              }),
+            (err: unknown) => err instanceof LockTimeout
+          )
+        } finally {
+          rmSync(mutex, { force: true })
+        }
+      })
+    })
+  })
+
+  test('the cap waits on the same mutex a spawn admission takes', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'bro-cap-mutex-'))
+    try {
+      const plane = testPlane('alpha', { live: 0 })
+      // a child plants the admission mutex with its own live pid and
+      // holds it ~600ms — the cap's admit must wait, then succeed
+      const mutex = join(dir, 'admission.mutex')
+      const child = spawn(
+        process.execPath,
+        [
+          '-e',
+          `const fs=require('fs');fs.writeFileSync(${JSON.stringify(mutex)},String(process.pid),{flag:'wx'});setTimeout(()=>process.exit(0),600)`,
+        ],
+        { stdio: 'ignore' }
+      )
+      await new Promise<void>((res) => {
+        const t0 = Date.now()
+        const tick = (): void => {
+          if (existsSync(mutex) || Date.now() - t0 > 3000) {
+            res()
+          } else {
+            setTimeout(tick, 20)
+          }
+        }
+        tick()
+      })
+      const started = Date.now()
+      clearSessionPlanes()
+      try {
+        registerSessionPlane(plane)
+        const admitted = admitSessionStart({
+          plane,
+          command: 'alpha-run',
+          agents: { alpha: { maxSessions: 4, reservationsDir: dir } },
+          key: 'call-1',
+        })
+        assert.equal(admitted?.refusal, undefined)
+      } finally {
+        clearSessionPlanes()
+      }
+      // admitted only after the child's hold ended — serialization
+      // visible in wall time (same proof the spawn admission's test runs)
+      assert.ok(
+        Date.now() - started >= 400,
+        `admit returned in ${Date.now() - started}ms — the mutex was not honored`
+      )
+      await new Promise<void>((res) => child.on('exit', res))
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
   })
 })
