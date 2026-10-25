@@ -1328,13 +1328,14 @@ describe('native spawn handshake (bro-l8c4f.5)', () => {
         (e) => e instanceof SpawnAbandoned && e.at === 'publication'
       )
       const entry = entryOf(f)
-      assert.equal(typeof entry.pid, 'number', 'the handle was published')
+      const pubPid = entry.pid as number
+      assert.equal(typeof pubPid, 'number', 'the handle was published')
       const exitFile = join(agentsDir(f), agentExitFileName(entry.agentId, entry.runId))
       assert.ok(!existsSync(runFile(f, entry.agentId, entry.runId!, 'go')), 'admission never landed')
       // the go timeout self-terminates the worker — a recorded death,
       // never a payload run, never 'lost'
       await until(() => existsSync(exitFile), 8000)
-      await until(() => !pidAlive(entry.pid!))
+      await until(() => !pidAlive(pubPid))
       assert.equal(readFileSync(exitFile, 'utf8').trim(), '75')
       assert.ok(!existsSync(sentinel), 'unadmitted worker must not run the payload')
       const st = await c.status(entry.agentId)
