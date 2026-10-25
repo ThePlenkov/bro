@@ -536,6 +536,7 @@ export {
   checkSkillLock,
   fileHash,
   readSkillLock,
+  skillFolderHash,
   type LockedSkill,
   type SkillDrift,
 } from './skills-lock.ts'
