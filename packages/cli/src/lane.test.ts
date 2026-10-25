@@ -36,6 +36,7 @@ const batchSpec = (provider?: string): SpawnSpec => ({
   molStep: 'fx-step',
   prompt: 'p',
   repoRoot: process.cwd(),
+  beadsDir: process.cwd(),
   env: { BRO_BATCH: '1' },
   provider,
 })
