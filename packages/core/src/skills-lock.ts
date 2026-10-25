@@ -185,41 +185,59 @@ export function checkSkillLock(
 ): SkillDrift[] {
   const drift: SkillDrift[] = []
   for (const skill of locked.values()) {
-    const installedDir = join(skillsDir, skill.name)
-    const installedSkillMd = join(installedDir, 'SKILL.md')
-    if (!existsSync(installedSkillMd)) {
-      drift.push({
-        name: skill.name,
-        source: skill.source,
-        expected: skill.computedHash,
-        actual: '',
-        kind: 'missing',
-      })
-      continue
-    }
-    const actual = skillFolderHash(installedDir)
-    // A folder that cannot be fully read (an unreadable file, an unlistable
-    // subdirectory) hashes to null. Treating that as "no drift" would
-    // vouch for content the hash never covered, so it is drift.
-    if (actual === null) {
-      drift.push({
-        name: skill.name,
-        source: skill.source,
-        expected: skill.computedHash,
-        actual: '',
-        kind: 'drifted',
-      })
-      continue
-    }
-    if (actual !== skill.computedHash) {
-      drift.push({
-        name: skill.name,
-        source: skill.source,
-        expected: skill.computedHash,
-        actual,
-        kind: 'drifted',
-      })
+    const skillDrift = checkSingleSkill(skill, skillsDir)
+    if (skillDrift !== null) {
+      drift.push(skillDrift)
     }
   }
   return drift
+}
+
+function checkSingleSkill(skill: LockedSkill, skillsDir: string): SkillDrift | null {
+  const installedDir = join(skillsDir, skill.name)
+  const installedSkillMd = join(installedDir, 'SKILL.md')
+  if (!existsSync(installedSkillMd)) {
+    return missingDrift(skill)
+  }
+  const actual = skillFolderHash(installedDir)
+  // A folder that cannot be fully read (an unreadable file, an unlistable
+  // subdirectory) hashes to null. Treating that as "no drift" would
+  // vouch for content the hash never covered, so it is drift.
+  if (actual === null) {
+    return unreadableDrift(skill)
+  }
+  if (actual !== skill.computedHash) {
+    return driftedDrift(skill, actual)
+  }
+  return null
+}
+
+function missingDrift(skill: LockedSkill): SkillDrift {
+  return {
+    name: skill.name,
+    source: skill.source,
+    expected: skill.computedHash,
+    actual: '',
+    kind: 'missing',
+  }
+}
+
+function unreadableDrift(skill: LockedSkill): SkillDrift {
+  return {
+    name: skill.name,
+    source: skill.source,
+    expected: skill.computedHash,
+    actual: '',
+    kind: 'drifted',
+  }
+}
+
+function driftedDrift(skill: LockedSkill, actual: string): SkillDrift {
+  return {
+    name: skill.name,
+    source: skill.source,
+    expected: skill.computedHash,
+    actual,
+    kind: 'drifted',
+  }
 }
