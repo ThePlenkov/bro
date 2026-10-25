@@ -115,13 +115,8 @@ const VALUE_FLAGS = new Set(['--pr', '--thread', '--comment', '--file', '--inter
 export type ResolveMode = 'read' | 'strict' | 'record'
 export type ResolvedTarget = PrTarget & { source: 'explicit' | 'branch' | 'auto' }
 
-/** PR number: --pr flag, first positional, the current branch's PR, or
- *  the repo's most recently updated open PR per mode. */
-export function resolvePr(
-  rev: ReviewFacade,
-  argv: string[],
-  mode: ResolveMode = 'read'
-): ResolvedTarget {
+/** PR number from argv — `--pr N` first, then the first positional. */
+function prArgFrom(argv: string[]): string | null {
   const positional: string[] = []
   for (let i = 0; i < argv.length; i += 1) {
     const arg = argv[i]!
@@ -134,38 +129,47 @@ export function resolvePr(
     positional.push(arg)
   }
   const prFlag = argv.indexOf('--pr')
-  const prRaw =
-    (prFlag >= 0 ? argv[prFlag + 1] : undefined) ?? positional[0] ?? null
+  return (prFlag >= 0 ? argv[prFlag + 1] : undefined) ?? positional[0] ?? null
+}
 
-  const repo = rev.resolveRepo([])
-
-  if (prRaw === null) {
-    // the connector resolves the PR for the CURRENT branch — CLOSED/
-    // MERGED PRs resolve too, so state must be checked explicitly. No
-    // branch PR (the operator on main) falls back to the repo's most
-    // recently updated open PR — the "current" one — announced for
-    // readers, refused for anything that can push.
-    const pr = rev.currentPr()
-    if (pr && pr.state === 'OPEN') {
-      return { repo, pr: pr.pr, source: 'branch' }
-    }
-    const auto = rev.openPrs?.(repo)[0]
-    if (auto !== undefined) {
-      const link = rev.prLink(repo, auto.pr)
-      if (mode === 'strict') {
-        console.error(
-          `error: refusing to act on auto-resolved PR ${link} — ` +
-            'pass a PR number explicitly'
-        )
-        process.exit(2)
-      }
-      if (mode === 'read') {
-        console.error(`act: resolved current PR ${link} — most recently updated open PR`)
-      }
-      return { repo, pr: auto.pr, source: 'auto' }
-    }
+/** No explicit number — the current branch's OPEN PR, else the repo's
+ *  most recently updated open PR (announced for readers, refused for
+ *  anything that can push). Exits 2 when neither source exists. */
+function resolveImplicit(rev: ReviewFacade, repo: string, mode: ResolveMode): ResolvedTarget {
+  const pr = rev.currentPr()
+  if (pr?.state === 'OPEN') {
+    return { repo, pr: pr.pr, source: 'branch' }
+  }
+  const auto = rev.openPrs?.(repo)[0]
+  if (auto === undefined) {
     console.error('error: no open PR for current branch — pass a PR number (`bro act status <PR>`), or run `bro watch` for the gated-PR board')
     process.exit(2)
+  }
+  const link = rev.prLink(repo, auto.pr)
+  if (mode === 'strict') {
+    console.error(
+      `error: refusing to act on auto-resolved PR ${link} — ` +
+        'pass a PR number explicitly'
+    )
+    process.exit(2)
+  }
+  if (mode === 'read') {
+    console.error(`act: resolved current PR ${link} — most recently updated open PR`)
+  }
+  return { repo, pr: auto.pr, source: 'auto' }
+}
+
+/** PR number: --pr flag, first positional, the current branch's PR, or
+ *  the repo's most recently updated open PR per mode. */
+export function resolvePr(
+  rev: ReviewFacade,
+  argv: string[],
+  mode: ResolveMode = 'read'
+): ResolvedTarget {
+  const repo = rev.resolveRepo([])
+  const prRaw = prArgFrom(argv)
+  if (prRaw === null) {
+    return resolveImplicit(rev, repo, mode)
   }
   const pr = Number(prRaw)
   if (!Number.isInteger(pr) || pr <= 0) {
