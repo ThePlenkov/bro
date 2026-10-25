@@ -253,6 +253,24 @@ export function claimUpTo(
   dir?: string,
   opts?: FacadeOpts
 ): ReadyBead[] {
+  // the gate lives INSIDE the claim path — loop/convoy callers reach
+  // claimUpTo without next.ts's gate above, and a claim landing before
+  // a refused spawn is exactly the half-state the gate exists to stop
+  // (spec: bro-d9dmx). `dir` is the store anchor (project root for repo
+  // scopes); absent → resolve like claimBead. The global store carries
+  // no project policy to refuse on.
+  if (queue.length > 0) {
+    const root = dir ?? (gitTry(['rev-parse', '--show-toplevel']).out.trim() || process.cwd())
+    try {
+      assertMutableConfig(root)
+    } catch (err) {
+      if (dir !== undefined) {
+        throw err // a pinned store dir's policy errors are the caller's to judge
+      }
+      console.error(`error: ${err instanceof Error ? err.message : String(err)}`)
+      process.exit(1)
+    }
+  }
   const picked: ReadyBead[] = []
   for (const b of queue) {
     if (picked.length >= limit) {
@@ -374,7 +392,12 @@ export function applyNextPlan(plan: NextPlan): void {
   // committed config refuses BEFORE `bd update --claim` writes
   // (spec: bro-d9dmx). The global store carries no project policy.
   if (plan.claim && projectRoot !== undefined) {
-    assertMutableConfig(projectRoot)
+    try {
+      assertMutableConfig(projectRoot)
+    } catch (err) {
+      console.error(`error: ${err instanceof Error ? err.message : String(err)}`)
+      process.exit(1)
+    }
   }
   const beads = plan.claim ? claimUpTo(c.queue, plan.limit, dir, storeOpts) : c.queue.slice(0, plan.limit)
   const picked = new Set(beads.map((b) => b.id))

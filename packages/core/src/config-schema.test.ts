@@ -74,18 +74,33 @@ describe('validateSchemaValue', () => {
     assert.equal(nested[0].path, 'k.outer.inner')
   })
 
-  test('anyOf passes on one clean branch, reports the discriminant branch on failure', () => {
+  test('oneOf passes on one clean branch, reports the discriminant branch on failure', () => {
+    // closed variants: a stray key fails BOTH branches, so "the errors
+    // came from the discriminant branch" is proven, not coincidental
     const schema: JsonSchema = {
       oneOf: [
-        { type: 'object', properties: { type: { const: 'api' }, n: { type: 'integer' } }, required: ['type'] },
-        { type: 'object', properties: { type: { const: 'cli' }, s: { type: 'string' } }, required: ['type'] },
+        {
+          type: 'object',
+          properties: { type: { const: 'api' }, n: { type: 'integer' } },
+          required: ['type'],
+          additionalProperties: false,
+        },
+        {
+          type: 'object',
+          properties: { type: { const: 'cli' }, s: { type: 'string' } },
+          required: ['type'],
+          additionalProperties: false,
+        },
       ],
     }
     assert.deepEqual(check({ type: 'cli', s: 'x' }, schema), [])
-    const e = check({ type: 'cli', n: 5, s: 3 }, schema)
-    // the cli branch's violations surface, not the api branch's
-    assert.ok(e.some((x) => x.path === 'k.s'))
-    assert.ok(!e.some((x) => x.path === 'k.n'))
+    const e = check({ type: 'cli', s: 3 }, schema)
+    // exactly the cli branch's violation — a leak through to the api
+    // branch would add k.type ("must be api") or k.s (unknown key)
+    assert.deepEqual(
+      e.map((x) => x.path),
+      ['k.s']
+    )
   })
 
   test('bounds, patterns, list plumbing', () => {

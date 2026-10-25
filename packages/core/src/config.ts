@@ -70,6 +70,7 @@ export interface JsonSchema {
   maxLength?: number
   minItems?: number
   maxItems?: number
+  minProperties?: number
   pattern?: string
   title?: string
   description?: string
@@ -105,9 +106,11 @@ export const js: {
   oneOf: (...variants: JsonSchema[]) => JsonSchema
   anyOf: (...variants: JsonSchema[]) => JsonSchema
 } = {
-  str: { type: 'string', minLength: 1 },
+  // \\S: parsers trim and drop whitespace-only input — a "present"
+  // value that normalizes to nothing must validate as the defect it is
+  str: { type: 'string', minLength: 1, pattern: '\\S' },
   bool: { type: 'boolean' },
-  strList: { type: 'array', items: { type: 'string', minLength: 1 } },
+  strList: { type: 'array', items: { type: 'string', minLength: 1, pattern: '\\S' } },
   int: (minimum = 0) => ({ type: 'integer', minimum }),
   num: (minimum) => (minimum === undefined ? { type: 'number' } : { type: 'number', minimum }),
   obj: (properties, opts) => ({
@@ -416,14 +419,20 @@ const providerApiSchema = js.obj(
     model: js.str,
     apiKeyEnv: { type: 'string', pattern: '^[A-Z_][A-Z0-9_]*$' },
     apiKeyCommand: js.str,
-    // model → wire: a wire name, {wire}, or null (wire inferred)
-    models: js.map({
-      anyOf: [
-        { enum: API_WIRES },
-        { type: 'null' },
-        js.obj({ wire: { enum: API_WIRES } }),
-      ],
-    }),
+    // model → wire: a wire name, {wire}, or null (wire inferred).
+    // minProperties: an empty map parses to a dropped provider —
+    // "models": {} must not read as valid config
+    models: {
+      type: 'object',
+      minProperties: 1,
+      additionalProperties: {
+        anyOf: [
+          { enum: API_WIRES },
+          { type: 'null' },
+          js.obj({ wire: { enum: API_WIRES } }),
+        ],
+      },
+    },
   },
   { required: ['type', 'baseUrl', 'models'] }
 )
@@ -644,25 +653,48 @@ export const notifySection: ConfigSection<{ sinks: SinkDef[] }> = (raw) => {
   return { sinks }
 }
 
+// per-type endpoint requirements mirror sinkEndpointMissing — a sink
+// the parser drops must not validate: telegram needs tokenEnv plus a
+// chat id source; url-typed sinks need a url source
+const sinkFields = {
+  name: js.str,
+  url: js.str,
+  urlEnv: js.str,
+  tokenEnv: js.str,
+  chatId: js.str,
+  chatIdEnv: js.str,
+  apiBase: js.str,
+  // an explicitly empty list is the no-narrowing rule — no minItems
+  events: { type: 'array', items: js.str },
+  timeoutMs: js.num(0),
+  minIntervalMs: js.num(0),
+} satisfies Record<string, JsonSchema>
+
 notifySection.jsonSchema = js.obj({
   sinks: {
     type: 'array',
-    items: js.obj(
+    items: js.oneOf(
       {
-        name: js.str,
-        type: { enum: SINK_TYPES },
-        url: js.str,
-        urlEnv: js.str,
-        tokenEnv: js.str,
-        chatId: js.str,
-        chatIdEnv: js.str,
-        apiBase: js.str,
-        // an explicitly empty list is the no-narrowing rule — no minItems
-        events: { type: 'array', items: js.str },
-        timeoutMs: js.num(0),
-        minIntervalMs: js.num(0),
+        ...js.obj(
+          { ...sinkFields, type: { const: 'telegram' } },
+          { required: ['type', 'tokenEnv'] }
+        ),
+        anyOf: [{ required: ['chatId'] }, { required: ['chatIdEnv'] }],
       },
-      { required: ['type'] }
+      {
+        ...js.obj(
+          { ...sinkFields, type: { const: 'slack' } },
+          { required: ['type'] }
+        ),
+        anyOf: [{ required: ['url'] }, { required: ['urlEnv'] }],
+      },
+      {
+        ...js.obj(
+          { ...sinkFields, type: { const: 'webhook' } },
+          { required: ['type'] }
+        ),
+        anyOf: [{ required: ['url'] }, { required: ['urlEnv'] }],
+      }
     ),
   },
 })
@@ -938,7 +970,9 @@ export const querySection: ConfigSection<{
   }
 }
 
-querySection.jsonSchema = js.obj({ concurrency: js.int(1), env: js.map(js.str) })
+// env values are a literal overlay — the parser keeps empty strings
+// (explicit unset), so the schema must too
+querySection.jsonSchema = js.obj({ concurrency: js.int(1), env: js.map({ type: 'string' }) })
 
 /** One `mesh.peers.<alias>` entry — rig must be a mesh:// URI, remote a
  *  non-empty string; transport survives verbatim (parsePeer judges it —
@@ -1536,8 +1570,9 @@ function isPlainObject(v: unknown): v is Record<string, unknown> {
 
 /** Deep-merge overlay onto base — plain objects merge per key, arrays
  *  and scalars replace (never concat). `__proto__` is skipped: it is a
- *  setter on Object.prototype, not a mergeable key. */
-function deepMerge(
+ *  setter on Object.prototype, not a mergeable key. Exported so
+ *  configDiagnostics can judge the same merged view loadConfig reads. */
+export function deepMerge(
   base: Record<string, unknown>,
   overlay: Record<string, unknown>
 ): Record<string, unknown> {
@@ -1560,6 +1595,10 @@ export interface ConfigLayerHit {
   dir: string
   file: string
   raw: Record<string, unknown>
+  /** The file's `plugins` value before normalizePluginSpecs filtered
+   *  it — diagnostics validate what the user wrote, not the cleaned
+   *  list (a non-string or blank entry must not vanish). */
+  pluginsRaw?: unknown
 }
 
 export interface ConfigLayersResult {
@@ -1624,7 +1663,13 @@ export function loadConfigLayers(
         const anchored = 'plugins' in raw
           ? { ...raw, plugins: normalizePluginSpecs(dir, raw.plugins) }
           : raw
-        layers.push({ layer, dir, file: path, raw: anchored })
+        layers.push({
+          layer,
+          dir,
+          file: path,
+          raw: anchored,
+          ...('plugins' in raw ? { pluginsRaw: raw.plugins } : {}),
+        })
         return
       }
     }
