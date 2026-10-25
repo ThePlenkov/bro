@@ -396,29 +396,54 @@ function setupLockedSkills(dir: string, dryRun: boolean, checkOnly: boolean): vo
   }
   const skillsDir = join(dir, '.agents', 'skills')
 
+  // Drift check BEFORE any install — the installer replaces the skill
+  // directory it owns, so installing over a copy with local edits would
+  // erase them. Check first; a drifted skill is reported and left alone.
+  const before = checkSkillLock(locked, skillsDir)
+  if (before.length > 0) {
+    for (const d of before) {
+      console.error(
+        `  ${d.name}: ${d.kind === 'missing' ? 'not installed' : 'local edits differ from the lock'} (${d.source})`
+      )
+    }
+    if (dryRun || checkOnly) {
+      return
+    }
+  }
+
   if (!checkOnly && !dryRun) {
     if (!hasBin('npx')) {
       console.error('  npx not on PATH — skipping the locked skills')
       return
     }
     for (const skill of locked.values()) {
+      // Skip skills that already have local drift — they were reported above
+      const drifted = before.find((d) => d.name === skill.name && d.kind === 'drifted')
+      if (drifted !== undefined) {
+        continue
+      }
       // `npx skills add` owns the fetch, the symlink and the lockfile
       // update; bro only decides what to ask for.
       try {
         // spawnSync, not execFileSync: `npx` is a PATH lookup and the PATH
         // contract is the same one gh/bd/git already have (doctor.ts probes
         // npx the same way).
-        const p = spawnSync('npx', ['--yes', 'skills', 'add', skill.source, '--skill', skill.name, '-y'], { // NOSONAR — PATH lookup is the contract (same as gh/bd/git)
+        const p = spawnSync('npx', ['--yes', 'skills', 'add', skill.source, '--skill', skill.name], { // NOSONAR — PATH lookup is the contract (same as gh/bd/git)
           cwd: dir,
           stdio: 'pipe',
           timeout: 300_000,
         })
         if (p.error !== undefined || p.status !== 0) {
-          throw new Error(`npx skills add exited ${p.status ?? 'with error'}`)
+          const stderr = p.stderr?.toString().trim() || ''
+          const stdout = p.stdout?.toString().trim() || ''
+          throw new Error(
+            `npx skills add exited ${p.status ?? 'with error'}${stderr ? `: ${stderr}` : ''}${stdout ? ` (stdout: ${stdout})` : ''}`
+          )
         }
-      } catch {
+      } catch (err) {
         // one unreachable upstream does not stop the rest
-        console.error(`  ${skill.name}: could not fetch from ${skill.source}`)
+        const msg = err instanceof Error ? err.message : String(err)
+        console.error(`  ${skill.name}: could not fetch from ${skill.source} — ${msg}`)
       }
     }
   }

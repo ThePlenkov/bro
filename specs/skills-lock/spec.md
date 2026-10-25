@@ -45,7 +45,7 @@ fetch it. bro's plugin ships what bro owns.
       "source": "<owner>/<repo>",
       "sourceType": "github",
       "skillPath": "<path inside the source repo>",
-      "computedHash": "<sha256 of the source file>"
+      "computedHash": "<sha256 of the skill folder>"
     }
   }
 }
@@ -53,12 +53,11 @@ fetch it. bro's plugin ships what bro owns.
 
 **Installation delegates to `npx skills`** — the same CLI that already produces
 this lockfile. bro does not re-implement git fetching, hashing or symlinking:
-`npx skills add <owner>/<repo> --skill <name> -y` per entry, then
-`npx skills update` to refresh the whole set. bro's contribution is the
+`npx skills add <owner>/<repo> --skill <name> -y` per entry. bro's contribution is the
 *contract* and the *verification*, not the mechanism.
 
 **Verification is bro's own value-add.** After install, each locked skill is
-checked against `computedHash` — the hash of the source file. A skill whose
+checked against `computedHash` — the hash of the whole skill folder. A skill whose
 content drifted from the locked hash is a **drift finding**, not a silent
 update: the lock says "this is what I expected", and the installed copy says
 something else. That is the failure a hash buys and a plain install does not.

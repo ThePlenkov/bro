@@ -21,14 +21,22 @@ import { join, relative } from 'node:path'
 export interface LockedSkill {
   /** The skill's name — the directory under `.agents/skills/`. */
   name: string
-  /** `<owner>/<repo>` — the source repo. */
+  /** `<owner>/<repo>` — the source repo. It must be a **public** repo: bro
+   *  is public, and a lock entry a contributor cannot resolve makes
+   *  `bro setup --lock` fail for them over a skill they never meant to
+   *  install. */
   source: string
   /** How the source is fetched. `github` today; `local` for in-repo skills. */
   sourceType: string
   /** The skill's path inside the source repo. */
   skillPath: string
-  /** sha256 of the source SKILL.md at lock time. */
+  /** sha256 of the skill FOLDER at lock time — every file in the skill
+   *  folder, sorted by relative path, path and content fed into the digest. */
   computedHash: string
+  /** The revision the source was pinned at (a commit sha or a tag). Empty
+   *  when the lock pins none — an unpinned entry is fetched from the source's
+   *  default branch, which is not reproducible. */
+  ref: string
 }
 
 export interface SkillDrift {
@@ -159,6 +167,7 @@ function lockedSkill(name: string, value: unknown): LockedSkill | null {
     sourceType: typeof v.sourceType === 'string' ? v.sourceType : 'github',
     skillPath: typeof v.skillPath === 'string' ? v.skillPath : '',
     computedHash: v.computedHash,
+    ref: typeof v.ref === 'string' ? v.ref : '',
   }
 }
 
@@ -176,8 +185,9 @@ export function checkSkillLock(
 ): SkillDrift[] {
   const drift: SkillDrift[] = []
   for (const skill of locked.values()) {
-    const installed = join(skillsDir, skill.name, 'SKILL.md')
-    if (!existsSync(installed)) {
+    const installedDir = join(skillsDir, skill.name)
+    const installedSkillMd = join(installedDir, 'SKILL.md')
+    if (!existsSync(installedSkillMd)) {
       drift.push({
         name: skill.name,
         source: skill.source,
@@ -187,8 +197,21 @@ export function checkSkillLock(
       })
       continue
     }
-    const actual = skillFolderHash(join(skillsDir, skill.name))
-    if (actual !== null && actual !== skill.computedHash) {
+    const actual = skillFolderHash(installedDir)
+    // A folder that cannot be fully read (an unreadable file, an unlistable
+    // subdirectory) hashes to null. Treating that as "no drift" would
+    // vouch for content the hash never covered, so it is drift.
+    if (actual === null) {
+      drift.push({
+        name: skill.name,
+        source: skill.source,
+        expected: skill.computedHash,
+        actual: '',
+        kind: 'drifted',
+      })
+      continue
+    }
+    if (actual !== skill.computedHash) {
       drift.push({
         name: skill.name,
         source: skill.source,
