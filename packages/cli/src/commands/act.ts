@@ -340,7 +340,7 @@ function waitOpts(
   const updateBranch =
     t.source === 'auto'
       ? undefined
-      : (s: Parameters<NonNullable<Parameters<typeof waitForGate>[1]['updateBranch']>>[0]) => {
+      : (s: PrActState) => {
           const ok = rev.updateBranch(t, s.headSha)
           console.error(
             `act wait ${rev.prLink(t.repo, t.pr)}: update-branch ${ok ? 'pushed a new head' : 'refused'}`
