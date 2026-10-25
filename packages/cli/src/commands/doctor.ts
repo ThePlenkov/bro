@@ -126,7 +126,14 @@ function repoRoot(dir: string): string | null {
 }
 
 function isDir(path: string): boolean {
-  return statSync(path, { throwIfNoEntry: false })?.isDirectory() ?? false
+  try {
+    // throwIfNoEntry only swallows ENOENT — EACCES/ENOTDIR on a path
+    // part still throws; an unreadable target is not a dir, never a
+    // doctor abort
+    return statSync(path, { throwIfNoEntry: false })?.isDirectory() ?? false
+  } catch {
+    return false
+  }
 }
 
 // --- individual probes ------------------------------------------------------

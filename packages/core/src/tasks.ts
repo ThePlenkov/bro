@@ -774,7 +774,13 @@ function makeStore(x: StoreExec): TaskStore {
         if (health.error !== undefined && health.head !== '') {
           notes.push(`warning: ${b.mirror} head unverifiable — ${health.error}; publishing as-is`)
         }
-        const err = bridgePublish(b)
+        // publish the head just validated — a concurrent sync can move
+        // the ref between check and publish; unpinned it would ship
+        // the unchecked replacement (spec: specs/bro-orcdv.md)
+        const err = bridgePublish(
+          b,
+          health.head === '' ? undefined : { pin: new Map([[DOLT_DATA_REF, health.head]]) }
+        )
         if (err !== null) {
           notes.push(`warning: bridge publish ${b.mirror} failed — ${err}`)
         }

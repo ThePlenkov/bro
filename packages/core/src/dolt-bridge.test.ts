@@ -6,6 +6,7 @@ import { join } from 'node:path'
 import {
   bridgeFetch,
   bridgePublish,
+  displayUrl,
   doltDirHealth,
   doltHeadHealth,
   doltRemoteSrc,
@@ -321,6 +322,25 @@ describe('bridge legs', { skip: WIN32 }, () => {
     assert.equal(git('-C', upstream, 'rev-parse', 'refs/dolt/data'), moved)
   })
 
+  test('publish pins the validated head over a moved local ref', () => {
+    const { mirror, head, upstream } = rig()
+    bridgeFetch({ remote: 'origin', mirror, upstream })
+    // a concurrent sync moves the local ref after validation — the
+    // pinned publish must still ship the validated head, not `moved`
+    const tree = git('-C', mirror, 'rev-parse', 'refs/dolt/data^{tree}')
+    const moved = git(
+      '-C', mirror, '-c', 'user.email=t@t', '-c', 'user.name=t',
+      'commit-tree', tree, '-p', head, '-m', 'local'
+    )
+    git('-C', mirror, 'update-ref', 'refs/dolt/data', moved)
+    const err = bridgePublish(
+      { remote: 'origin', mirror, upstream },
+      { pin: new Map([['refs/dolt/data', head]]) }
+    )
+    assert.equal(err, null)
+    assert.equal(git('-C', upstream, 'rev-parse', 'refs/dolt/data'), head)
+  })
+
   test('publish with no dolt refs is a no-op, not an error', () => {
     const dir = tmp()
     const mirror = join(dir, 'empty.git')
@@ -350,6 +370,11 @@ describe('manifest integrity (bro-orcdv)', { skip: WIN32 }, () => {
     assert.deepEqual(manifestTables(doltManifest({ [T1]: 2, [T2]: 5 })), [T1, T2])
   })
 
+  test('manifestTables accepts a zero-table (empty store) manifest', () => {
+    assert.deepEqual(manifestTables(doltManifest({})), [])
+    assert.deepEqual(manifestTables(`5:__DOLT__:lock:root:${'0'.repeat(32)}:`), []) // stray trailing colon
+  })
+
   test('manifestTables throws on anything but the v5 layout', () => {
     for (const bad of [
       '',
@@ -358,7 +383,7 @@ describe('manifest integrity (bro-orcdv)', { skip: WIN32 }, () => {
       '5:__OTHER__:a:b:c:d:e',
       '5:__DOLT__:a:b:c:d', // odd tail — a name with no count
       '5:__DOLT__:a:b',
-      `5:__DOLT__:lock:root:${'0'.repeat(32)}:`, // trailing colon, no pairs
+      `5:__DOLT__:l:r:e:bad\x1b[31mname:2`, // control bytes in a name
     ]) {
       assert.throws(() => manifestTables(bad), /unrecognized/, bad)
     }
@@ -373,6 +398,26 @@ describe('manifest integrity (bro-orcdv)', { skip: WIN32 }, () => {
       [`${T2}.darc`]: 'y',
     })
     assert.deepEqual(doltHeadHealth(dir, 'refs/dolt/data'), { head, tables: 2, missing: [] })
+  })
+
+  test('doltHeadHealth — a directory named for a table does not satisfy it', () => {
+    const dir = tmp()
+    git('init', '--bare', '-q', dir)
+    const leaf = testGit(['-C', dir, 'hash-object', '-w', '--stdin'], { input: 'x' }).trim()
+    const sub = testGit(['-C', dir, 'mktree', '-z'], {
+      input: `100644 blob ${leaf}\tinner\0`,
+    }).trim()
+    const mani = testGit(['-C', dir, 'hash-object', '-w', '--stdin'], {
+      input: doltManifest({ [T1]: 1 }),
+    }).trim()
+    const tree = testGit(['-C', dir, 'mktree', '-z'], {
+      input: `040000 tree ${sub}\t${T1}\0` + `100644 blob ${mani}\tmanifest\0`,
+    }).trim()
+    const head = testGit(
+      ['-C', dir, '-c', 'user.email=t@t', '-c', 'user.name=t', 'commit-tree', tree, '-m', 'store']
+    ).trim()
+    testGit(['-C', dir, 'update-ref', 'refs/dolt/data', head])
+    assert.deepEqual(doltHeadHealth(dir, 'refs/dolt/data').missing, [T1])
   })
 
   test('doltHeadHealth — a manifest naming an absent table reports exactly it', () => {
@@ -406,6 +451,13 @@ describe('manifest integrity (bro-orcdv)', { skip: WIN32 }, () => {
     assert.deepEqual(h.missing, [GONE])
     writeFileSync(join(dir, `${GONE}.darc`), 'y') // archive form satisfies it
     assert.deepEqual(doltDirHealth(dir).missing, [])
+  })
+
+  test('doltDirHealth — a directory named for a table does not satisfy it', () => {
+    const dir = tmp()
+    writeFileSync(join(dir, 'manifest'), doltManifest({ [T1]: 1 }))
+    mkdirSync(join(dir, T1))
+    assert.deepEqual(doltDirHealth(dir).missing, [T1])
   })
 
   test('doltDirHealth — no manifest file is unverifiable', () => {
@@ -486,5 +538,11 @@ describe('manifest integrity (bro-orcdv)', { skip: WIN32 }, () => {
     const h = probeDoltRemote('--upload-pack=touch /tmp/bro-dolt-pwn')
     assert.ok(h.error !== undefined && h.error !== '')
     assert.deepEqual(h.missing, [])
+  })
+
+  test('displayUrl redacts userinfo and query/fragment secrets', () => {
+    assert.equal(displayUrl('https://tok@h/p?q=secret#f'), 'https://***@h/p…')
+    assert.equal(displayUrl('https://h/p?token=x&y=1'), 'https://h/p…')
+    assert.equal(displayUrl('git@h:o/r.git'), 'git@h:o/r.git')
   })
 })

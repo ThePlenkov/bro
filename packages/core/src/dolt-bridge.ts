@@ -145,10 +145,15 @@ function mirrorUpstream(mirror: string): string | null {
 
 const safeName = (name: string): string => name.replace(/[^\w.-]/g, '_')
 
-/** Redact embedded userinfo before a URL lands in sync output — the
- *  remote needs the raw URL, notes and warnings do not. Global because
- *  git/bd stderr embeds the failing URL mid-line, not at offset 0. */
-export const displayUrl = (u: string): string => u.replace(/(:\/\/)[^@/\s]+@/g, '$1***@')
+/** Redact embedded userinfo and query/fragment before a URL lands in
+ *  sync output — the remote needs the raw URL, notes and warnings do
+ *  not, and credentials also hide in `?token=`/`#…` tails. Global
+ *  because git/bd stderr embeds the failing URL mid-line, not at
+ *  offset 0. */
+export const displayUrl = (u: string): string =>
+  u
+    .replace(/(:\/\/)[^@/\s]+@/g, '$1***@')
+    .replace(/(:\/\/[^\s?#]*)[?#][^\s]*/g, '$1…')
 
 /** A remote source reaching a git argv must not parse as an option —
  *  `-`-leading input is rejected outright (`--upload-pack=<cmd>` in a
@@ -363,8 +368,14 @@ export function bridgeFetch(bridge: DoltBridge): string | null {
 /** Publish the mirror's dolt refs upstream — never forced (a non-ff
  *  rejection means another replica won; the state stays in the dolt
  *  store and re-merges next cycle). Only refs that exist are pushed.
+ *  `pin` binds a ref's push source to an already-validated sha — a
+ *  concurrent sync can move the ref between the health check and this
+ *  publish, and the unpinned form would ship the unchecked replacement.
  *  Returns the error line, or null on success / nothing to send. */
-export function bridgePublish(bridge: DoltBridge): string | null {
+export function bridgePublish(
+  bridge: DoltBridge,
+  opts?: { pin?: ReadonlyMap<string, string> }
+): string | null {
   const refs = gitTry(
     ['-C', bridge.mirror, 'for-each-ref', '--format=%(refname)', ...LOCAL_REF_PATTERNS],
     PROBE_MS
@@ -376,7 +387,10 @@ export function bridgePublish(bridge: DoltBridge): string | null {
   if (names.length === 0) {
     return null
   }
-  const r = gitTry(['-C', bridge.mirror, 'push', 'origin', ...names.map((n) => `${n}:${n}`)], GIT_NET_MS)
+  const r = gitTry(
+    ['-C', bridge.mirror, 'push', 'origin', ...names.map((n) => `${opts?.pin?.get(n) ?? n}:${n}`)],
+    GIT_NET_MS
+  )
   return r.code === 0 ? null : displayUrl(firstLine(r.err || `exit ${r.code}`))
 }
 
@@ -408,14 +422,25 @@ export interface DoltHeadHealth {
 }
 
 /** The v5 manifest's table names — `5:__DOLT__:<lock>:<root>:<extra>:`
- *  then name:count pairs. Any other layout throws: an unverifiable
- *  format is reported as `error`, never as corruption. */
+ *  then name:count pairs (zero pairs is a healthy empty store). Any
+ *  other layout throws: an unverifiable format is reported as `error`,
+ *  never as corruption. Table names are rendered verbatim by doctor
+ *  and sync warnings, so anything outside printable ASCII rejects the
+ *  manifest — a hostile remote cannot inject terminal controls through
+ *  a `missing` list. */
 export function manifestTables(text: string): string[] {
   const f = text.trim().split(':')
-  if (f[0] !== '5' || f[1] !== '__DOLT__' || f.length < 7 || (f.length - 5) % 2 !== 0) {
+  if (f[f.length - 1] === '') {
+    f.pop() // tolerate a stray trailing ':' — not the real form
+  }
+  if (f[0] !== '5' || f[1] !== '__DOLT__' || f.length < 5 || (f.length - 5) % 2 !== 0) {
     throw new Error('unrecognized manifest layout')
   }
-  return f.slice(5).filter((_, i) => i % 2 === 0)
+  const names = f.slice(5).filter((_, i) => i % 2 === 0)
+  if (!names.every((n) => /^[\x21-\x7e]+$/.test(n))) {
+    throw new Error('unrecognized manifest layout')
+  }
+  return names
 }
 
 /** Manifest-vs-file-set diff — `<id>` is satisfied by `<id>` or its
@@ -433,7 +458,10 @@ export function doltHeadHealth(gitDir: string, ref: string): DoltHeadHealth {
     return { head: '', tables: 0, missing: [], error: `no ${ref}` }
   }
   const sha = head.out.trim()
-  const tree = gitTry(['-C', gitDir, 'ls-tree', '--name-only', sha], PROBE_MS)
+  // default ls-tree form `mode type sha\tname`, NUL-framed — a table
+  // name must resolve to a regular file (blob), never a tree/gitlink:
+  // a directory carrying the manifest's name is NOT the table file
+  const tree = gitTry(['-C', gitDir, 'ls-tree', '-z', sha], PROBE_MS)
   if (tree.code !== 0) {
     return { head: sha, tables: 0, missing: [], error: firstLine(tree.err) || 'ls-tree failed' }
   }
@@ -452,7 +480,13 @@ export function doltHeadHealth(gitDir: string, ref: string): DoltHeadHealth {
       error: err instanceof Error ? err.message : String(err),
     }
   }
-  const files = new Set(tree.out.split('\n').map((l) => l.trim()).filter((l) => l !== ''))
+  const files = new Set(
+    tree.out
+      .split('\0')
+      .filter((l) => /^100(?:644|755) blob /.test(l))
+      .map((l) => l.slice(l.indexOf('\t') + 1))
+      .filter((l) => l !== '')
+  )
   return { head: sha, tables: tables.length, missing: missingTables(tables, files) }
 }
 
@@ -478,7 +512,11 @@ export function doltDirHealth(dir: string): DoltHeadHealth {
   }
   let files: Set<string>
   try {
-    files = new Set(readdirSync(dir))
+    files = new Set(
+      readdirSync(dir, { withFileTypes: true })
+        .filter((e) => e.isFile())
+        .map((e) => e.name)
+    )
   } catch {
     return { head: '', tables: tables.length, missing: [], error: `unreadable ${dir}` }
   }
@@ -538,26 +576,54 @@ export function probeDoltRemote(
   }
   const ls = gitTry(['ls-remote', '--', src, DOLT_DATA_REF], GIT_NET_MS)
   if (ls.code !== 0) {
-    return { head: '', tables: 0, missing: [], error: displayUrl(firstLine(ls.err)) }
+    return {
+      head: '',
+      tables: 0,
+      missing: [],
+      error: displayUrl(firstLine(ls.err)) || `git ls-remote exited ${ls.code}`,
+    }
   }
   if (!ls.out.split(/\s+/)[0]?.trim()) {
     return { head: '', tables: 0, missing: [] } // no data ref — nothing published yet
   }
-  const scratch = mkdtempSync(join(tmpdir(), 'bro-dolt-probe-'))
+  let scratch: string
+  try {
+    scratch = mkdtempSync(join(tmpdir(), 'bro-dolt-probe-'))
+  } catch (e) {
+    // tmpdir gone/unwritable is an unverifiable probe, not a doctor crash
+    return {
+      head: '',
+      tables: 0,
+      missing: [],
+      error: `mkdtemp: ${e instanceof Error ? e.message : String(e)}`,
+    }
+  }
   try {
     const init = gitTry(['init', '--bare', '-q', scratch], PROBE_MS)
     // a NAMED remote — blob:none lazy fetches need promisor wiring,
     // which exists only as remote.<name>.promisor
     const add = gitTry(['-C', scratch, 'remote', 'add', 'origin', '--', src], PROBE_MS)
     if (init.code !== 0 || add.code !== 0) {
-      return { head: '', tables: 0, missing: [], error: firstLine(init.err || add.err) }
+      return {
+        head: '',
+        tables: 0,
+        missing: [],
+        error: firstLine(init.err || add.err) || 'scratch repo setup failed',
+      }
     }
+    gitTry(['-C', scratch, 'config', 'remote.origin.promisor', 'true'], PROBE_MS)
+    gitTry(['-C', scratch, 'config', 'remote.origin.partialclonefilter', 'blob:none'], PROBE_MS)
     const f = gitTry(
       ['-C', scratch, 'fetch', '--depth=1', '--filter=blob:none', '--no-tags', 'origin', DOLT_DATA_REF],
       GIT_NET_MS
     )
     if (f.code !== 0) {
-      return { head: '', tables: 0, missing: [], error: displayUrl(firstLine(f.err)) }
+      return {
+        head: '',
+        tables: 0,
+        missing: [],
+        error: displayUrl(firstLine(f.err)) || `git fetch exited ${f.code}`,
+      }
     }
     const health = doltHeadHealth(scratch, 'FETCH_HEAD')
     if (health.missing.length === 0) {
