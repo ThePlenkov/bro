@@ -223,14 +223,13 @@ function kiloArtifact(cwd: string): string | null {
   ])
 }
 
-/** The pi adapter artifact — the generated plugin bundle, the bundled
- *  dist, or the source entry. Every rung is self-contained (the shared
- *  adapter core is folded in), so jiti loads it with no node_modules to
- *  resolve against. */
+/** The pi adapter artifact — prefer the project TS source for local dev,
+ *  falling back to the generated bundle/dist. */
 function piArtifact(cwd: string): string | null {
   const pkg = packageRoot()
   const root = gitRoot(cwd)
   return firstExisting([
+    root === null ? null : join(root, 'packages', 'cli', 'src', 'adapter', 'pi.ts'),
     root === null ? null : join(root, 'plugins', 'pi', 'bro', 'bro.ts'),
     pkg === null ? null : join(pkg, 'dist', 'pi.js'),
     pkg === null ? null : join(pkg, 'src', 'pi.ts'),

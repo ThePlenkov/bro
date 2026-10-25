@@ -15,7 +15,7 @@ import { existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, renameSync
 import { basename, dirname, isAbsolute, join } from 'node:path'
 import { createRequire } from 'node:module'
 import { fileURLToPath } from 'node:url'
-import { execFileSync } from 'node:child_process'
+import { execFileSync, spawnSync } from 'node:child_process'
 import { checkSkillLock, initBeadsStealth, PERSONALITIES, hasHelpFlag, printUsage, readSkillLock, withFileLock, type BroConfig } from '@broject/core'
 import { loadBroConfig } from '../plugins.ts'
 import {
@@ -405,11 +405,21 @@ function setupLockedSkills(dir: string, dryRun: boolean, checkOnly: boolean): vo
       // `npx skills add` owns the fetch, the symlink and the lockfile
       // update; bro only decides what to ask for.
       try {
-        execFileSync(
+        // spawnSync, not execFileSync: `npx` is a PATH lookup and the PATH
+        // contract is the same one gh/bd/git already have (doctor.ts probes
+        // npx the same way).
+        const p = spawnSync(
           'npx',
           ['--yes', 'skills', 'add', skill.source, '--skill', skill.name, '-y'],
-          { cwd: dir, stdio: 'pipe' }
+          { // NOSONAR — PATH lookup is the contract (same as gh/bd/git)
+            cwd: dir,
+            stdio: 'pipe',
+            timeout: 300_000,
+          }
         )
+        if (p.error !== undefined || p.status !== 0) {
+          throw new Error(`npx skills add exited ${p.status ?? 'with error'}`)
+        }
       } catch {
         // one unreachable upstream does not stop the rest
         console.error(`  ${skill.name}: could not fetch from ${skill.source}`)

@@ -705,6 +705,9 @@ async function runBro(command, args, cwd, timeoutMs = RUN_TIMEOUT_MS) {
 
 //#endregion
 //#region packages/cli/src/adapter/pi.ts
+const ROLLOVER_STATE_ENTRY = "bro-context-rollover-state";
+const ROLLOVER_EVENT_ENTRY = "bro-context-rollover-event";
+const ROLLOVER_SENTINEL_TYPE = "bro-context-rollover-sentinel";
 /** The published version of this adapter — the npx fallback pin. The
 *  pin is rewritten by gen-plugins on every gen/release run. */
 const NPX_PIN = "@broject/bro@0.2.5";
@@ -758,6 +761,230 @@ function broExtension(pi) {
 	const driver = createBroDriver(binding(pi), pi);
 	pi.on("agent_settled", (_e, ctx) => {
 		driver.refresh(ctx).catch(() => {});
+	});
+	const state = {
+		generation: 0,
+		instructions: "",
+		checkpoint: "",
+		lastAppliedGeneration: -1
+	};
+	const saveState = () => {
+		try {
+			pi.appendEntry?.(ROLLOVER_STATE_ENTRY, {
+				generation: state.generation,
+				instructions: state.instructions,
+				checkpoint: state.checkpoint,
+				rolloverBoundaryEntryId: state.rolloverBoundaryEntryId
+			});
+		} catch {}
+	};
+	const loadState = (ctx) => {
+		try {
+			const sm = ctx.sessionManager;
+			if (typeof sm?.getBranch !== "function") return;
+			const branch = sm.getBranch();
+			if (!Array.isArray(branch)) return;
+			for (let i = branch.length - 1; i >= 0; i--) {
+				const entry = branch[i];
+				if (entry?.type === "custom" && entry.customType === ROLLOVER_STATE_ENTRY && entry.data) {
+					const d = entry.data;
+					state.generation = typeof d.generation === "number" ? d.generation : 0;
+					state.instructions = typeof d.instructions === "string" ? d.instructions : "";
+					state.checkpoint = typeof d.checkpoint === "string" ? d.checkpoint : "";
+					state.rolloverBoundaryEntryId = d.rolloverBoundaryEntryId;
+					state.lastAppliedGeneration = state.generation;
+					state.pending = void 0;
+					break;
+				}
+			}
+		} catch {}
+	};
+	pi.on("session_start", (_e, ctx) => {
+		loadState(ctx);
+	});
+	pi.registerTool({
+		name: "context_rollover",
+		label: "context rollover",
+		description: "Save evolved working instructions and task checkpoint for context rollover. Excludes old iteration messages on next LLM request and continues in the same session.",
+		parameters: {
+			type: "object",
+			properties: {
+				instructions: {
+					type: "string",
+					description: "Evolved working instructions to carry forward (replaces previous working instructions wholly)"
+				},
+				checkpoint: {
+					type: "string",
+					description: "Task checkpoint/state to carry forward"
+				}
+			},
+			required: ["instructions", "checkpoint"],
+			additionalProperties: false
+		},
+		execute: async (toolCallId, params, _signal, _onUpdate, _ctx) => {
+			try {
+				const p = params;
+				const instructions = typeof p.instructions === "string" ? p.instructions : "";
+				const checkpoint = typeof p.checkpoint === "string" ? p.checkpoint : "";
+				const nextGen = state.generation + 1;
+				state.pending = {
+					generation: nextGen,
+					instructions,
+					checkpoint
+				};
+				try {
+					pi.appendEntry?.(ROLLOVER_EVENT_ENTRY, {
+						type: "rollover-requested",
+						generation: nextGen,
+						instructionsLength: instructions.length,
+						checkpointLength: checkpoint.length,
+						timestamp: Date.now()
+					});
+					pi.sendMessage?.({
+						customType: ROLLOVER_SENTINEL_TYPE,
+						content: `[[BRO_CONTEXT_ROLLOVER_SENTINEL:generation=${nextGen}]]`,
+						display: false
+					}, { deliverAs: "followUp" });
+				} catch {}
+				saveState();
+				return {
+					content: [{
+						type: "text",
+						text: JSON.stringify({
+							ok: true,
+							generation: nextGen,
+							pending: true,
+							message: "Context rollover scheduled for application at next safe boundary"
+						})
+					}],
+					details: {
+						generation: nextGen,
+						pending: true
+					}
+				};
+			} catch (err) {
+				return {
+					content: [{
+						type: "text",
+						text: JSON.stringify({
+							ok: false,
+							error: String(err)
+						})
+					}],
+					details: { ok: false }
+				};
+			}
+		}
+	});
+	pi.registerTool({
+		name: "context_status",
+		label: "context status",
+		description: "Show current context rollover status (generation, pending rollover, instructions/checkpoint previews)",
+		parameters: {
+			type: "object",
+			properties: {},
+			additionalProperties: false
+		},
+		execute: async (_toolCallId, _params, _signal, _onUpdate, _ctx) => {
+			try {
+				const instr = state.instructions;
+				const chk = state.checkpoint;
+				const status = {
+					generation: state.generation,
+					hasPending: !!state.pending,
+					pendingGeneration: state.pending?.generation ?? null,
+					instructionsPreview: instr.length > 120 ? instr.slice(0, 120) + "…" : instr,
+					checkpointPreview: chk.length > 120 ? chk.slice(0, 120) + "…" : chk,
+					lastAppliedGeneration: state.lastAppliedGeneration
+				};
+				return {
+					content: [{
+						type: "text",
+						text: JSON.stringify(status, null, 2)
+					}],
+					details: status
+				};
+			} catch (err) {
+				return {
+					content: [{
+						type: "text",
+						text: JSON.stringify({
+							ok: false,
+							error: String(err)
+						})
+					}],
+					details: { ok: false }
+				};
+			}
+		}
+	});
+	const applyPending = (ctx) => {
+		if (!state.pending) return false;
+		const p = state.pending;
+		state.generation = p.generation;
+		state.instructions = p.instructions;
+		state.checkpoint = p.checkpoint;
+		state.pending = void 0;
+		state.lastAppliedGeneration = state.generation;
+		try {
+			pi.appendEntry?.(ROLLOVER_EVENT_ENTRY, {
+				type: "rollover-applied",
+				generation: state.generation,
+				timestamp: Date.now()
+			});
+		} catch {}
+		saveState();
+		try {
+			pi.sendMessage?.({
+				customType: "bro-context-rollover-continuation",
+				content: "Context rolled over. Continue from checkpoint with new working instructions.",
+				display: false
+			}, {
+				deliverAs: "followUp",
+				triggerTurn: false
+			});
+		} catch {}
+		return true;
+	};
+	pi.on("agent_before_settle", async (_event, ctx) => {
+		if (state.pending) applyPending(ctx);
+	});
+	pi.on("turn_end", async (_event, ctx) => {
+		if (state.pending) applyPending(ctx);
+	});
+	pi.on("context_with_system", async (event) => {
+		try {
+			if (!Array.isArray(event?.messages)) return;
+			const messages = event.messages.slice();
+			if (messages.length === 0) return;
+			const out = [];
+			if (messages[0]?.role === "system") out.push(messages[0]);
+			else {
+				const sysIdx = messages.findIndex((m) => m.role === "system");
+				if (sysIdx >= 0) out.push(messages[sysIdx]);
+			}
+			if (state.instructions || state.checkpoint) {
+				const parts = [];
+				if (state.instructions) parts.push("## Working Instructions (rolled over)\n" + state.instructions);
+				if (state.checkpoint) parts.push("## Task Checkpoint\n" + state.checkpoint);
+				const rolloverMsg = {
+					role: "user",
+					content: [{
+						type: "text",
+						text: parts.join("\n\n")
+					}]
+				};
+				out.push(rolloverMsg);
+			}
+			for (let i = 1; i < messages.length; i++) {
+				const m = messages[i];
+				if (m?.customType === ROLLOVER_SENTINEL_TYPE) continue;
+				if (m?.customType === "bro-context-rollover-continuation") continue;
+				out.push(m);
+			}
+			event.messages = out;
+			return { messages: out };
+		} catch {}
 	});
 }
 /**
