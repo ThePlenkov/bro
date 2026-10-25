@@ -199,17 +199,39 @@ export function readBeads(dir: string): StatusBeads {
     repoResolved = true;
     try {
       const remote = gitTry(['-C', dir, 'config', '--get', 'remote.origin.url']);
-      if (remote.code === 0) {
-        const m = remote.out.trim().match(/github\.com[:\/]([^\s]+?)(?:\.git)?$/);
-        if (m !== null && m[1] !== undefined) {
-          repo = m[1];
-          return repo;
-        }
+      if (remote.code !== 0) {
+        return null;
       }
+      const m = remote.out.trim().match(/github\.com[:\/]([^\s]+?)(?:\.git)?$/);
+      if (m === null || m[1] === undefined) {
+        return null;
+      }
+      repo = m[1];
+      return repo;
     } catch {
       // no remote — no link; never spawn gh on the fast path
+      return null;
     }
     return null;
+  };
+  const beadLink = (r: TaskRow, slug: string): string | undefined => {
+    const prMatch = /^drive:pr:(\d+)$/.exec(r.external_ref ?? '');
+    if (prMatch !== null) {
+      return prLink(slug, Number(prMatch[1]));
+    }
+    if (r.metadata === null || r.metadata === undefined) {
+      return undefined;
+    }
+    const meta = r.metadata as Record<string, unknown>;
+    const pr = meta.pr ?? meta.pull_request ?? meta.github_pr;
+    if (typeof pr === 'number') {
+      return prLink(slug, pr);
+    }
+    const issue = meta.issue ?? meta.github_issue;
+    if (typeof issue === 'number') {
+      return issueLink(slug, issue);
+    }
+    return undefined;
   };
   const pick = (r: TaskRow): BeadRow => {
     const row: BeadRow = { id: r.id, title: r.title ?? '' };
@@ -228,18 +250,9 @@ export function readBeads(dir: string): StatusBeads {
     // adapters (pi/omp) can render them without importing @broject/core.
     const slug = repoSlug();
     if (slug !== null) {
-      const prMatch = /^drive:pr:(\d+)$/.exec(r.external_ref ?? '');
-      if (prMatch !== null) {
-        row.link = prLink(slug, Number(prMatch[1]));
-      } else if (r.metadata !== null && r.metadata !== undefined) {
-        const meta = r.metadata as Record<string, unknown>;
-        const pr = meta.pr ?? meta.pull_request ?? meta.github_pr;
-        const issue = meta.issue ?? meta.github_issue;
-        if (typeof pr === 'number') {
-          row.link = prLink(slug, pr);
-        } else if (typeof issue === 'number') {
-          row.link = issueLink(slug, issue);
-        }
+      const link = beadLink(r, slug);
+      if (link !== undefined) {
+        row.link = link;
       }
     }
     return row;
