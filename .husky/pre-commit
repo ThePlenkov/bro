@@ -1,0 +1,8 @@
+#!/usr/bin/env sh
+. "$(dirname -- "$0")/_/husky.sh"
+
+# Only format added/modified files, skip deleted files
+files=$(git diff --name-only --cached --diff-filter=d | grep -E '\.(ts|js|json|md)$' || true)
+if [ -n "$files" ]; then
+  echo "$files" | xargs npx biome format --write
+fi
