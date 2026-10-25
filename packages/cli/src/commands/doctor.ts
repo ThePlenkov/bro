@@ -11,7 +11,7 @@
  * a failing check, never as a crash.
  */
 import { spawnSync } from 'node:child_process';
-import { existsSync, readdirSync, readFileSync, realpathSync, statSync } from 'node:fs';
+import { existsSync, readdirSync, readFileSync, readlinkSync, realpathSync, statSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { basename, delimiter, dirname, join, resolve } from 'node:path';
 import {
@@ -63,6 +63,7 @@ import { judgeConfig, synthesizedProviders } from '@broject/judge';
 import type { JudgeConfig } from '@broject/judge';
 import { broConfigDiagnostics, loadBroConfig, pluginConfigSections } from '../plugins.ts';
 import { pluginRows } from './plugins.ts';
+import { daemonProbe, readDriveMarker } from './daemon.ts';
 import { readStamp, stampAgo, stampSession } from './buildstamp.ts';
 import {
   budgetLines,
@@ -574,6 +575,158 @@ function selfDistChecks(): DoctorCheck[] {
     out.push(check('bro-dist', 'ok', 'no dev-checkout bro — nothing to rebuild'));
   }
   return out;
+}
+
+// --- daemon binary drift (bro-kn6bq) ------------------------------------
+// The supervisor is only as live as the binary it exec'd: a daemon armed
+// under the published install kept respawning the fleet for a full day
+// without the protections merged into the repo (the provider wall —
+// published 0.2.5 equalled the repo's 0.2.5, so VERSION alone proved
+// nothing; the binary path is the discriminating signal). Compare the
+// running daemon's resolved entry — /proc cmdline — against this repo's
+// dist and, outside a bro checkout, the entry `bro` resolves to.
+
+/** The daemon process's resolved entry script — argv[1] under a
+ *  node-ish runtime, argv[0] when the process IS the program. Relative
+ *  spellings resolve against the process's own cwd, never doctor's.
+ *  null when /proc can't name a file (non-/proc platform, raced exit,
+ *  `node -e`). */
+function daemonEntry(pid: number): string | null {
+  let argv: string[]
+  try {
+    argv = readFileSync(`/proc/${pid}/cmdline`, 'utf8')
+      .split('\0')
+      .filter((t) => t !== '')
+  } catch {
+    return null
+  }
+  if (argv.length === 0) {
+    return null
+  }
+  const runtime = basename(argv[0]!)
+  const candidate = /^(node|bun|deno|tsx)[\w.-]*$/.test(runtime) ? argv[1] : argv[0]
+  if (candidate === undefined || candidate.startsWith('-')) {
+    return null
+  }
+  try {
+    const abs = candidate.startsWith('/')
+      ? candidate
+      : join(readlinkSync(`/proc/${pid}/cwd`), candidate)
+    return realpathSync(abs)
+  } catch {
+    return null
+  }
+}
+
+/** The bro package version behind an entry — `<pkg>/dist/index.js` sits
+ *  two levels under package.json in dev checkouts, npm installs and the
+ *  npx cache alike. Versionless entries (a bare script) report none. */
+function broEntryVersion(entry: string): string | undefined {
+  try {
+    const pkg = JSON.parse(readFileSync(join(dirname(dirname(entry)), 'package.json'), 'utf8')) as {
+      name?: string
+      version?: string
+    }
+    return pkg.name === '@broject/bro' ? pkg.version : undefined
+  } catch {
+    return undefined
+  }
+}
+
+/** This repo's own bro version when the checkout builds bro —
+ *  `<root>/packages/cli/package.json` naming @broject/bro. A daemon
+ *  serving the bro repo must run this tree's dist (or an install
+ *  rebuilt from it) for merged protections to be live. */
+function broCheckoutVersion(root: string | null): string | null {
+  if (root === null) {
+    return null
+  }
+  try {
+    const pkg = JSON.parse(readFileSync(join(root, 'packages', 'cli', 'package.json'), 'utf8')) as {
+      name?: string
+      version?: string
+    }
+    return pkg.name === '@broject/bro' && typeof pkg.version === 'string' ? pkg.version : null
+  } catch {
+    return null
+  }
+}
+
+/** One row: supervisor liveness plus the binary-drift verdict. Down is
+ *  ordinary (installed = the checkpoint rearms); up compares the
+ *  running entry — this repo's dist borrows the bro-dist staleness
+ *  verdict, a foreign dist or an install in a bro checkout warns that
+ *  merged protections aren't live, and elsewhere the daemon's entry
+ *  must be the one `bro` resolves or a restart keeps the drift. */
+function daemonBinChecks(dir: string, root: string | null): DoctorCheck[] {
+  const probe = daemonProbe(dir)
+  if (!probe.live) {
+    const installed = readDriveMarker(dir) !== null ? ' · installed — the next session checkpoint rearms' : ''
+    return [
+      check(
+        'daemon',
+        'ok',
+        probe.recorded === null
+          ? `down — no supervisor${installed}`
+          : `down — recorded pid ${probe.recorded.pid} is dead${installed}`
+      ),
+    ]
+  }
+  const pid = probe.pid!
+  const entry = daemonEntry(pid)
+  if (entry === null) {
+    return [check('daemon', 'skip', `up — pid ${pid} · binary unverifiable (no readable argv)`)]
+  }
+  const dev = devDistEntry(entry)
+  if (dev !== null) {
+    const own = gitCommonDir(dev.checkout)
+    const here = gitCommonDir(dir)
+    let same = false
+    try {
+      same = own !== null && here !== null && realpathSync(own) === realpathSync(here)
+    } catch {
+      same = false
+    }
+    if (same) {
+      // the repo's own dist — the staleness verdict IS the binary
+      // verdict: a dist that predates HEAD is protections-not-live
+      const c = devDistCheck(dev)
+      return [check('daemon', c.status, `pid ${pid} · ${c.detail}`, c.hint)]
+    }
+    return [
+      check(
+        'daemon',
+        'warn',
+        `pid ${pid} runs ${entry} — a different bro checkout's dist`,
+        'restart it under this repo\'s build or the shared install — protections live only in the binary the daemon runs'
+      ),
+    ]
+  }
+  const v = broEntryVersion(entry)
+  const vs = v === undefined ? '' : ` (v${v})`
+  const repoV = broCheckoutVersion(root)
+  if (repoV !== null) {
+    return [
+      check(
+        'daemon',
+        'warn',
+        `pid ${pid} runs ${entry}${vs} — installed, not this repo's build (v${repoV})`,
+        'merged protections aren\'t live until the daemon\'s binary is rebuilt — npm run build + reinstall, or restart it on the repo\'s dist'
+      ),
+    ]
+  }
+  const eps = broEntrypoints()
+  if (eps.includes(entry)) {
+    return [check('daemon', 'ok', `up — pid ${pid} · ${entry}${vs}`)]
+  }
+  return [
+    check(
+      'daemon',
+      'warn',
+      `pid ${pid} runs ${entry}${vs} — \`bro\` resolves ${eps[0] ?? 'nothing'}`,
+      'the daemon\'s binary and the rearm path differ — restart it under the current bro'
+    ),
+  ]
 }
 
 /** Top-level keys bro knows — anything else in bro.config.json is almost
@@ -1937,6 +2090,7 @@ export function runDoctorChecks(
     checkHooks(dir),
     devinWiringCheck(root),
     ...selfDistChecks(),
+    ...daemonBinChecks(dir, root),
     ...checkConfig(dir),
     ...configSchemaChecks(dir, opts.strict === true),
     ...providerChecks(dir),

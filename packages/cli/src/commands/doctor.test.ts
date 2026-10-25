@@ -1,6 +1,6 @@
 import { after, describe, test } from 'node:test';
 import assert from 'node:assert/strict';
-import { execFileSync } from 'node:child_process';
+import { execFileSync, spawn } from 'node:child_process';
 import {
   chmodSync,
   mkdirSync,
@@ -13,7 +13,7 @@ import {
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { doctorExitCode, runDoctorChecks, type DoctorCheck } from './doctor.ts';
-import { doltManifest, doltStoreCommit, scrubEnv, testGit } from '@broject/core';
+import { doltManifest, doltStoreCommit, procStat, scrubEnv, testGit } from '@broject/core';
 
 // ambient repo/agent/store pins must not reach fixture git children
 // or the code-under-test spawns — scrub once, restore after the file
@@ -266,6 +266,26 @@ function resolvedBroPlugin(dir: string): void {
 function writeDevinChain(dir: string, chain: object): void {
   mkdirSync(join(dir, '.devin'));
   writeFileSync(join(dir, '.devin', 'hooks.v1.json'), JSON.stringify(chain));
+}
+
+/** A live recorded supervisor — daemon.json pins a real child's pid
+ *  against its /proc start, so daemonProbe reports live while the test
+ *  controls which entry the "daemon" exec'd. Kill the returned child
+ *  when done. */
+function fakeDaemon(dir: string, argv: string[]): ReturnType<typeof spawn> {
+  const child = spawn(argv[0]!, argv.slice(1), { stdio: 'ignore' })
+  mkdirSync(join(dir, '.git', 'bro'), { recursive: true })
+  writeFileSync(
+    join(dir, '.git', 'bro', 'daemon.json'),
+    JSON.stringify({
+      pid: child.pid,
+      everySec: 60,
+      spawnedAt: new Date().toISOString(),
+      cmd: 'bro daemon run --every 60',
+      pidStart: procStat(child.pid!)?.start,
+    })
+  )
+  return child
 }
 
 describe('bro doctor', () => {
@@ -823,6 +843,126 @@ describe('bro doctor', () => {
       assert.match(c.detail, /predates @\{u\}/);
       assert.match(c.hint ?? '', /npm run build/);
     }));
+
+  test('daemon: down is ordinary — no supervisor, recorded dead', () =>
+    withEnv({ bins: ['gh'] }, (dir) => {
+      const c = byName(runDoctorChecks(dir), 'daemon')
+      assert.equal(c.status, 'ok')
+      assert.match(c.detail, /down — no supervisor/)
+    }).then(() =>
+      withEnv({ bins: ['gh'] }, (dir) => {
+        mkdirSync(join(dir, '.git', 'bro'), { recursive: true })
+        writeFileSync(
+          join(dir, '.git', 'bro', 'daemon.json'),
+          JSON.stringify({ pid: 999999, everySec: 60, spawnedAt: new Date().toISOString() })
+        )
+        const c = byName(runDoctorChecks(dir), 'daemon')
+        assert.equal(c.status, 'ok')
+        assert.match(c.detail, /recorded pid 999999 is dead/)
+      })
+    ))
+
+  test('daemon: this repo\'s dist borrows the bro-dist verdict — fresh covers, stale warns', () =>
+    withEnv({ bins: ['gh'] }, (dir) => {
+      // dir itself is the bro checkout — the daemon exec'd its own dist
+      const distDir = join(dir, 'packages', 'cli', 'dist')
+      mkdirSync(distDir, { recursive: true })
+      writeFileSync(join(dir, 'packages', 'cli', 'package.json'), '{"name":"@broject/bro","version":"0.2.5"}')
+      const entry = join(distDir, 'index.js')
+      writeFileSync(entry, 'setTimeout(() => {}, 1e9)\n')
+      commitAt(dir)
+      const child = fakeDaemon(dir, [process.execPath, entry])
+      try {
+        const stale = new Date(Date.now() - 3_600_000)
+        utimesSync(entry, stale, stale)
+        let c = byName(runDoctorChecks(dir), 'daemon')
+        assert.equal(c.status, 'warn')
+        assert.match(c.detail, /predates HEAD/)
+        utimesSync(entry, new Date(), new Date())
+        c = byName(runDoctorChecks(dir), 'daemon')
+        assert.equal(c.status, 'ok')
+        assert.match(c.detail, /covers HEAD/)
+      } finally {
+        child.kill()
+      }
+    }))
+
+  test('daemon: an installed binary in a bro checkout warns — protections not live', () =>
+    withEnv({ bins: ['gh'] }, (dir) => {
+      // this repo builds bro v0.2.5; the daemon runs a published v0.2.4
+      mkdirSync(join(dir, 'packages', 'cli'), { recursive: true })
+      writeFileSync(join(dir, 'packages', 'cli', 'package.json'), '{"name":"@broject/bro","version":"0.2.5"}')
+      const pkg = join(dir, 'lib', 'node_modules', '@broject', 'bro')
+      mkdirSync(join(pkg, 'dist'), { recursive: true })
+      writeFileSync(join(pkg, 'package.json'), '{"name":"@broject/bro","version":"0.2.4"}')
+      const entry = join(pkg, 'dist', 'index.js')
+      writeFileSync(entry, 'setTimeout(() => {}, 1e9)\n')
+      const child = fakeDaemon(dir, [process.execPath, entry])
+      try {
+        const c = byName(runDoctorChecks(dir), 'daemon')
+        assert.equal(c.status, 'warn')
+        assert.match(c.detail, /installed, not this repo's build \(v0\.2\.5\)/)
+        assert.match(c.detail, /v0\.2\.4/)
+        assert.match(c.hint ?? '', /rebuilt/)
+      } finally {
+        child.kill()
+      }
+    }))
+
+  test('daemon: a different bro checkout\'s dist warns', () =>
+    withEnv({ bins: ['gh'] }, (dir) => {
+      const { entry } = fakeCheckout(dir)
+      writeFileSync(entry, 'setTimeout(() => {}, 1e9)\n')
+      const child = fakeDaemon(dir, [process.execPath, entry])
+      try {
+        const c = byName(runDoctorChecks(dir), 'daemon')
+        assert.equal(c.status, 'warn')
+        assert.match(c.detail, /different bro checkout/)
+      } finally {
+        child.kill()
+      }
+    }))
+
+  test('daemon: outside a bro repo, entry = resolved bro → ok; foreign → warn', () =>
+    withEnv({ bins: ['gh'] }, (dir) => {
+      const entry = join(dir, 'installed-bro.js')
+      writeFileSync(entry, 'setTimeout(() => {}, 1e9)\n')
+      symlinkSync(entry, join(dir, 'bin', 'bro'))
+      const child = fakeDaemon(dir, [process.execPath, entry])
+      try {
+        const c = byName(runDoctorChecks(dir), 'daemon')
+        assert.equal(c.status, 'ok')
+        assert.match(c.detail, /up — pid/)
+      } finally {
+        child.kill()
+      }
+    }).then(() =>
+      withEnv({ bins: ['gh', 'bro'] }, (dir) => {
+        // PATH-bro is the shim; the daemon runs a different file
+        const entry = join(dir, 'other-bro.js')
+        writeFileSync(entry, 'setTimeout(() => {}, 1e9)\n')
+        const child = fakeDaemon(dir, [process.execPath, entry])
+        try {
+          const c = byName(runDoctorChecks(dir), 'daemon')
+          assert.equal(c.status, 'warn')
+          assert.match(c.detail, /`bro` resolves/)
+        } finally {
+          child.kill()
+        }
+      })
+    ))
+
+  test('daemon: an argv that names no entry skips honestly', () =>
+    withEnv({ bins: ['gh'] }, (dir) => {
+      const child = fakeDaemon(dir, [process.execPath, '-e', 'setTimeout(() => {}, 1e9)'])
+      try {
+        const c = byName(runDoctorChecks(dir), 'daemon')
+        assert.equal(c.status, 'skip')
+        assert.match(c.detail, /unverifiable/)
+      } finally {
+        child.kill()
+      }
+    }))
 
   test('providers: configured entries are listed as name (kind, model)', () =>
     withEnv(

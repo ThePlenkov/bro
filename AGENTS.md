@@ -119,6 +119,12 @@ Developing bro itself: see CONTRIBUTING.md.
   requester's own store — never wire `external:` deps on these
   planes (bd can't resolve a github issue or board row), and never
   patch the foreign repo's code in place.
+- **Merged ≠ live for the daemon** — a merged change only protects the
+  fleet once the binary the supervisor exec'd is rebuilt AND the daemon
+  restarted (a running process never reloads dist): `npm run build` for
+  a dist-backed daemon, rebuild + reinstall for a published install,
+  then `bro fleet daemon down && bro fleet daemon up`. `bro doctor`'s
+  `daemon` row compares the running binary against the repo.
 
 ## Convoy fan-out — detach + pins
 
