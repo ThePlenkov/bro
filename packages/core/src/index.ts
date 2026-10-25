@@ -94,7 +94,7 @@ export {
   modelBase,
   parseProviderEntry,
   providerCallGrade,
-  PROVIDER_KINDs,
+  PROVIDER_KINDS,
   PROVIDER_REGISTRY,
   ProviderSurfaceError,
   requireProviderSurface,
