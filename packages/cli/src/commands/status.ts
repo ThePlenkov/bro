@@ -29,7 +29,6 @@ import {
   prOwnershipMark,
   prLink,
   issueLink,
-  resolveRepo,
   readAgentRegistry,
   reviewHost,
 } from '@broject/core';
@@ -208,14 +207,9 @@ export function readBeads(dir: string): StatusBeads {
         }
       }
     } catch {
-      // fall through to gh
+      // no remote — no link; never spawn gh on the fast path
     }
-    try {
-      repo = resolveRepo([], dir);
-    } catch {
-      repo = null;
-    }
-    return repo;
+    return null;
   };
   const pick = (r: TaskRow): BeadRow => {
     const row: BeadRow = { id: r.id, title: r.title ?? '' };
