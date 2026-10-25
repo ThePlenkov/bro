@@ -1,8 +1,13 @@
 #!/usr/bin/env sh
 . "$(dirname -- "$0")/_/husky.sh"
 
-# Only format added/modified files, skip deleted files
-files=$(git diff --name-only --cached --diff-filter=d | grep -E '\.(ts|js|json|md)$' || true)
-if [ -n "$files" ]; then
-  echo "$files" | xargs npx biome format --write
-fi
+# Only format added/modified files, skip deleted files.
+# Use NUL-delimited paths, pinned local binary, end-of-options marker,
+# and re-stage formatted files. Fail-open: hook errors never block commit.
+git diff -z --name-only --cached --diff-filter=d \
+  | grep -z -E '\.(ts|tsx|js|json|md)$' \
+  | xargs -0 -r ./node_modules/.bin/biome format --write -- \
+  && git diff -z --name-only --cached --diff-filter=d \
+     | grep -z -E '\.(ts|tsx|js|json|md)$' \
+     | xargs -0 -r git add \
+  || true
