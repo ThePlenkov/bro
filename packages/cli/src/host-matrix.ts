@@ -346,7 +346,7 @@ export const HOOK_MATRIX: {
         // tool_call is deliberately unwired: it can only block, and bro's
         // pre-tool lane is input-override — a block-only slot would lie
       },
-      nativeOnly: ['turn_end', 'session_shutdown', 'agent_settled', 'context_with_system'],
+      nativeOnly: ['turn_end', 'session_shutdown', 'agent_settled'],
       stopRefusal: 'reprompt',
       background: 'async',
       upstream: {
