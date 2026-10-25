@@ -25,7 +25,7 @@
  */
 import { join } from 'node:path'
 import { bd, BdCompatError, bdAt, BD_NO_STORE, bdJson, bdJsonAsync, bdTry, bdTryAsync, isBdNotFound } from './bd.ts'
-import { bridgeFetch, bridgePublish, doltSyncPlan } from './dolt-bridge.ts'
+import { bridgeFetch, bridgePublish, doltHeadHealth, DOLT_DATA_REF, doltSyncPlan, type DoltBridge } from './dolt-bridge.ts'
 import { gitTry } from './git.ts'
 
 /** Resolved probe results per dir — hook surfaces ask for the actor
@@ -627,6 +627,39 @@ function wakeSnoozed(x: StoreExec): void {
   }
 }
 
+/** Post-`bd sync` publish of one bridge — dolt can write a manifest
+ *  naming tables it never uploaded; publishing that head corrupts the
+ *  store for every replica's next bootstrap (spec: specs/bro-orcdv.md).
+ *  Withhold the publish on corruption — upstream keeps its last
+ *  bootstrappable head. An unverifiable/absent manifest warns but
+ *  publishes — an unknown format must not wedge replication. The
+ *  publish pins the head just validated: a concurrent sync can move
+ *  the ref between check and publish, and the unpinned refspec would
+ *  ship the unchecked replacement. Returns the warning lines. */
+function publishDoltBridge(b: DoltBridge): string[] {
+  const notes: string[] = []
+  const health = doltHeadHealth(b.mirror, DOLT_DATA_REF)
+  if (health.missing.length > 0) {
+    notes.push(
+      `warning: ${b.mirror} manifest names ${health.missing.length} missing table(s) ` +
+        `(${health.missing.slice(0, 3).join(', ')}) — publish withheld; re-push from a ` +
+        `healthy store or restore per docs/restore.md`
+    )
+    return notes
+  }
+  if (health.error !== undefined && health.head !== '') {
+    notes.push(`warning: ${b.mirror} head unverifiable — ${health.error}; publishing as-is`)
+  }
+  const err = bridgePublish(
+    b,
+    health.head === '' ? undefined : { pin: new Map([[DOLT_DATA_REF, health.head]]) }
+  )
+  if (err !== null) {
+    notes.push(`warning: bridge publish ${b.mirror} failed — ${err}`)
+  }
+  return notes
+}
+
 function makeStore(x: StoreExec): TaskStore {
   return {
     list: (f = {}) => taskRows(x.json(['list', '--json', ...filterArgs(f)]), 'list'),
@@ -756,10 +789,7 @@ function makeStore(x: StoreExec): TaskStore {
         throw new Error(`task store sync failed — ${r.err || `bd exited ${r.code}`}`)
       }
       for (const b of plan.bridges) {
-        const err = bridgePublish(b)
-        if (err !== null) {
-          notes.push(`warning: bridge publish ${b.mirror} failed — ${err}`)
-        }
+        notes.push(...publishDoltBridge(b))
       }
       return [r.out, ...notes].filter((s) => s.trim() !== '').join('\n')
     },
