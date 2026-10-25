@@ -480,6 +480,20 @@ export function registerConnector(c: Connector): void {
   registry.push(c)
 }
 
+/** Remove a registered connector — the test/fixture seam. Registration
+ *  is process-global, so a fake registered for one case leaks into
+ *  every later facade resolution in the process unless it's removed on
+ *  restore. The pick memo is keyed on registry length, which an
+ *  unregister+re-register cycle leaves unchanged — clearing it keeps a
+ *  stale pick from resolving to a connector that's gone. */
+export function unregisterConnector(name: string): void {
+  const i = registry.findIndex((c) => c.name === name)
+  if (i >= 0) {
+    registry.splice(i, 1)
+    pickMemo.clear()
+  }
+}
+
 export function connectors(): readonly Connector[] {
   return registry
 }

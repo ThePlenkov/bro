@@ -261,6 +261,7 @@ export {
   preToolVerdicts,
   promptContextLines,
   registerConnector,
+  unregisterConnector,
   reviewHost,
   specStore,
   sessionPinnedClaims,

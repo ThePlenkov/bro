@@ -7,8 +7,10 @@
  * block the frame's `drill up`.
  */
 import { taskStore } from '@broject/core'
+import type { TaskStore } from '@broject/core'
 import { currentFrame, drillDown } from './frames.ts'
 import type { DrillRow } from './types.ts'
+import type { DrillScope } from './frames.ts'
 
 const QUEUE_LABEL_PREFIX = 'queue:'
 const RANK_LABEL_PREFIX = 'qrank:'
@@ -38,15 +40,17 @@ function rankOf(row: DrillRow): number {
 
 const isOpen = (r: DrillRow): boolean => r.status !== 'closed' && r.status !== 'done'
 
-/** The queue a writer lands on: explicit --under, else the current
- *  drill leaf, else the session queue (frame #0). */
-export function queueScope(under?: string): string {
-  return under ?? currentFrame()?.id ?? ROOT_QUEUE
+/** The queue a writer lands on: explicit `under`, else the current
+ *  drill leaf, else the session queue (frame #0). `dir`/`store` pin the
+ *  reads to a checkout — an engine probing another rig's queue must
+ *  not read the ambient session's. */
+export function queueScope(opts: { under?: string; dir?: string; store?: TaskStore } = {}): string {
+  return opts.under ?? currentFrame(opts)?.id ?? ROOT_QUEUE
 }
 
 /** The frame's open queue items in rank order (id breaks ties). */
-export function queueItems(frame: string): QueueItem[] {
-  return taskStore()
+export function queueItems(frame: string, scope?: DrillScope): QueueItem[] {
+  return (scope?.store ?? taskStore(scope?.dir))
     .list<DrillRow>({ labels: [queueLabel(frame)], limit: 0 })
     .filter(isOpen)
     .map((r) => ({ id: r.id, title: r.title, rank: rankOf(r) }))
@@ -63,7 +67,7 @@ export function queueAdd(
   if (!trimmed) {
     throw new Error('queue add requires a subject')
   }
-  const frame = queueScope(opts.under)
+  const frame = queueScope({ under: opts.under })
   const items = queueItems(frame)
   // an unranked member sorts at MAX_SAFE_INTEGER — stepping off it
   // overflows; +1 keeps it representable instead
@@ -83,7 +87,7 @@ export function queueAdd(
  *  item to the top (rank = min − STEP). The item must sit on the
  *  named frame's queue — a miss is an error, not a no-op. */
 export function queueBump(id: string, opts: { under?: string; to?: number } = {}): number {
-  const frame = queueScope(opts.under)
+  const frame = queueScope({ under: opts.under })
   const row = taskStore().get<DrillRow>(id)
   if (!row || !isOpen(row) || !(row.labels ?? []).includes(queueLabel(frame))) {
     throw new Error(`${id} is not on ${frame}'s queue`)
@@ -104,7 +108,7 @@ export function queueBump(id: string, opts: { under?: string; to?: number } = {}
 /** Dequeue without working it — strips the queue labels; the bead
  *  stays open (a queue drop is not a close). */
 export function queueDrop(id: string, opts: { under?: string } = {}): void {
-  const frame = queueScope(opts.under)
+  const frame = queueScope({ under: opts.under })
   const row = taskStore().get<DrillRow>(id)
   if (!row || !(row.labels ?? []).includes(queueLabel(frame))) {
     throw new Error(`${id} is not on ${frame}'s queue`)

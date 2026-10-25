@@ -15,7 +15,7 @@ import {
   taskStore,
   taskStoreAsync,
 } from '@broject/core'
-import type { TaskDepEdge } from '@broject/core'
+import type { TaskDepEdge, TaskStore } from '@broject/core'
 import { writeReport } from './report.ts'
 import type { DrillReportInput } from './report.ts'
 import type { DownOptions, DrillFrame, DrillRow, UpOptions, UpResult } from './types.ts'
@@ -39,23 +39,36 @@ function isOpen(row: DrillRow): boolean {
   return row.status !== 'closed' && row.status !== 'done'
 }
 
-export function listDrills(): DrillRow[] {
-  const persistent = taskStore().list<DrillRow>({
+/** Read scope for the drill planes — an engine probing another
+ *  checkout (or a caller pinning a facade-resolved store) reads the
+ *  same rows the verdict will act on; ambient callers pass nothing and
+ *  get the session's cwd store, same as before. */
+export interface DrillScope {
+  dir?: string
+  store?: TaskStore
+}
+
+export function listDrills(scope: DrillScope = {}): DrillRow[] {
+  const persistent = (scope.store ?? taskStore(scope.dir)).list<DrillRow>({
     labels: [DRILL_LABEL],
     all: true,
     limit: 0,
   })
-  // ephemeral frames live in the wisp namespace, outside `bd list`
+  // ephemeral frames live in the wisp namespace, outside `bd list` — a
+  // beads-only plane, skipped when the serving store isn't beads-backed;
+  // `dir` anchors the read at the same checkout the store planes use
   let wisps: DrillRow[] = []
-  try {
-    const out = bdJson<{ wisps?: DrillRow[] }>(['mol', 'wisp', 'list', '--all'])
-    wisps = (out.wisps ?? []).filter(isDrill)
-  } catch (err) {
-    // tolerate only an explicitly unsupported command (older bd) — a
-    // failed or malformed listing must not silently hide live wisps
-    const msg = err instanceof Error ? err.message : String(err)
-    if (!/unknown command|unrecognized command/i.test(msg)) {
-      throw err
+  if (scope.store === undefined || scope.store.dataDir !== undefined) {
+    try {
+      const out = bdJson<{ wisps?: DrillRow[] }>(['mol', 'wisp', 'list', '--all'], scope.dir)
+      wisps = (out.wisps ?? []).filter(isDrill)
+    } catch (err) {
+      // tolerate only an explicitly unsupported command (older bd) — a
+      // failed or malformed listing must not silently hide live wisps
+      const msg = err instanceof Error ? err.message : String(err)
+      if (!/unknown command|unrecognized command/i.test(msg)) {
+        throw err
+      }
     }
   }
   return [...persistent, ...wisps]
@@ -117,7 +130,10 @@ type DepEdge = TaskDepEdge
  * (was N+1 `bd children`). kids holds DRILL children only — every
  * consumer filters on isDrill anyway; drillUp's any-child close check
  * still uses childrenOf directly. */
-function drillRelations(rows: DrillRow[]): {
+function drillRelations(
+  rows: DrillRow[],
+  store: TaskStore = taskStore()
+): {
   kids: Map<string, DrillRow[]>
   parents: Map<string, string>
 } {
@@ -127,7 +143,7 @@ function drillRelations(rows: DrillRow[]): {
     return { kids, parents }
   }
   const byId = new Map(rows.map((r) => [r.id, r]))
-  const edges = taskStore().deps<DepEdge>(
+  const edges = store.deps<DepEdge>(
     rows.map((r) => r.id),
     { rel: 'parent' }
   )
@@ -173,12 +189,12 @@ async function drillRelationsAsync(
  * deepest path. Ties break on most-recently-updated — the frame the agent
  * touched last is almost always the live one.
  */
-export function currentFrame(): DrillFrame | undefined {
-  const rows = listDrills().filter(isOpen)
+export function currentFrame(scope?: DrillScope): DrillFrame | undefined {
+  const rows = listDrills(scope).filter(isOpen)
   if (rows.length === 0) {
     return undefined
   }
-  const { kids, parents } = drillRelations(rows)
+  const { kids, parents } = drillRelations(rows, scope?.store ?? taskStore(scope?.dir))
   return pickLeaf(rows, kids, parents)
 }
 
