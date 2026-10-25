@@ -65,8 +65,8 @@ code nobody edits by hand.
   a CLI spawn. An import of `plugins.ts` or `commands/*`, or a
   `process.exit`/`console.log` call in `packages/rig` is a **major**
   finding — argv, stdout, and exit codes are the adapter's job and live
-  in `packages/cli`. Connector resolution goes through core's `facade`
-  + `loadConfig` only.
+  in `packages/cli`. Connector resolution goes through core's
+  `facade` + `loadConfig` only.
 
 ## Verification expectations
 
