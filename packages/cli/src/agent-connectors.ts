@@ -1968,13 +1968,168 @@ const entryPidStart = (entry: AgentRegistryEntry): string | undefined =>
     ? entry.pidStart
     : undefined
 
+/** The wrapper's death is not its unit's death: a TERM-resistant
+ *  descendant survives the group signal, so the stop may only record
+ *  `stopped` when the WHOLE execution unit is gone, not the sh-wrapper
+ *  alone (bro-l8c4f.3). kill(-pgid, 0) gates — ESRCH is a group that
+ *  no longer exists (ESRCH-or-hard-failure reads dead, the rule
+ *  pidAlive applies; EPERM is a live group we cannot signal) — but it
+ *  also counts the unreaped wrapper's own zombie, so live members are
+ *  read from /proc the way procStat reads one process: state 'Z' is
+ *  nobody. `minStart` (the wrapper's recorded pidStart) bounds a
+ *  member's /proc starttime from below — our descendants forked after
+ *  the wrapper, so a member older than it belongs to a pgid the kernel
+ *  recycled after our group died, not to this unit.
+ *
+ *  Two edges where the probe cannot answer, and the answer differs by
+ *  platform: on Linux a vanished /proc, or a member stat that fails
+ *  for any reason but ENOENT, stays fail-open (pidAlive's rule: never
+ *  a false "the unit is dead"); off Linux /proc never exists at all,
+ *  so the group probe cannot tell the wrapper's zombie from a live
+ *  member — there the caller's pid check is the probe, and a
+ *  descendant that outlives its wrapper is a documented blind spot
+ *  (failing open would spin the whole kill-wait on EVERY stop and the
+ *  `stopped` marker would never land). */
+/** One parsed row of /proc/<pid>/stat — post-comm fields split the way
+ *  procStat does (index 0 = state/field 3). */
+interface ProcEntry {
+  pid: number
+  state: string
+  ppid: number
+  pgrp: number
+  start: string
+}
+
+/** One shared scan of /proc for the group and tree probes — `null`
+ *  when /proc itself is unreadable; `unverified` marks at least one
+ *  non-ENOENT stat failure (a process we could not inspect). */
+function scanProc(): { entries: ProcEntry[]; unverified: boolean } | null {
+  let names: string[]
+  try {
+    names = readdirSync('/proc')
+  } catch {
+    return null
+  }
+  const entries: ProcEntry[] = []
+  let unverified = false
+  for (const name of names) {
+    const pid = Number(name)
+    if (!Number.isInteger(pid) || pid <= 0) {
+      continue
+    }
+    let stat: string
+    try {
+      stat = readFileSync(`/proc/${pid}/stat`, 'utf8')
+    } catch (e) {
+      // ENOENT/ENOTDIR is the process vanishing mid-scan — anything
+      // else (EACCES under hidepid, …) is a process we could not inspect
+      const code = (e as NodeJS.ErrnoException).code
+      if (code !== 'ENOENT' && code !== 'ENOTDIR') {
+        unverified = true
+      }
+      continue
+    }
+    const rest = stat.slice(stat.lastIndexOf(')') + 2).split(' ')
+    // rest: state, ppid, pgrp, … — the same split procStat uses
+    entries.push({
+      pid,
+      state: rest[0] ?? '',
+      ppid: Number(rest[1]),
+      pgrp: Number(rest[2]),
+      start: rest[19] ?? '',
+    })
+  }
+  return { entries, unverified }
+}
+
+function groupMemberAlive(pgid: number, minStart?: string): boolean {
+  if (!Number.isInteger(pgid) || pgid <= 0) {
+    return false
+  }
+  try {
+    process.kill(-pgid, 0)
+  } catch (e) {
+    if ((e as NodeJS.ErrnoException).code !== 'EPERM') {
+      return false
+    }
+  }
+  const scan = scanProc()
+  if (scan === null) {
+    return process.platform === 'linux'
+  }
+  const min = minStart === undefined ? Number.NaN : Number(minStart)
+  for (const e of scan.entries) {
+    if (e.state === 'Z' || e.pgrp !== pgid) {
+      continue
+    }
+    const start = Number(e.start)
+    if (!Number.isFinite(min) || !(start > 0) || start >= min) {
+      return true
+    }
+  }
+  // no confirmed member — but a process we could not inspect might be
+  // one: fail open, never a false "the unit is dead"
+  return scan.unverified
+}
+
+/** The wrapper's process-TREE snapshot — every descendant pid plus its
+ *  /proc starttime, walked over ppid links. A descendant that escaped
+ *  the process GROUP (setsid, its own session) is invisible to
+ *  groupMemberAlive but stays in this list: the tree link breaks when
+ *  the wrapper dies and the survivor reparents to init, so the
+ *  snapshot must be taken while the parentage is still intact, and
+ *  pid+starttime identity is what keeps a recycled pid from faking
+ *  death. Empty where /proc is absent (non-Linux). */
+function descendantsOf(root: number): Array<{ pid: number; start?: string }> {
+  const scan = scanProc()
+  if (scan === null) {
+    return []
+  }
+  const children = new Map<number, number[]>()
+  const starts = new Map<number, string>()
+  for (const e of scan.entries) {
+    const list = children.get(e.ppid)
+    if (list === undefined) {
+      children.set(e.ppid, [e.pid])
+    } else {
+      list.push(e.pid)
+    }
+    if (e.start !== '') {
+      starts.set(e.pid, e.start)
+    }
+  }
+  const out: Array<{ pid: number; start?: string }> = []
+  const seen = new Set<number>([root])
+  const queue = [root]
+  for (let cur = queue.shift(); cur !== undefined; cur = queue.shift()) {
+    for (const c of children.get(cur) ?? []) {
+      if (seen.has(c)) {
+        continue
+      }
+      seen.add(c)
+      out.push({ pid: c, start: starts.get(c) })
+      queue.push(c)
+    }
+  }
+  return out
+}
+
 /** Live state for a registry entry under this backend. */
 function nativeState(dir: string, home: string | null, molStep: string, entry: AgentRegistryEntry): AgentState {
   // liveness first: a 'stopped' marker on a pid that is still alive means
   // SIGTERM hasn't landed yet — the agent IS still running, and dedup
-  // must keep refusing a respawn that would run alongside it
+  // must keep refusing a respawn that would run alongside it. The unit,
+  // not the wrapper: a dead wrapper's group can still hold a
+  // TERM-resistant descendant, and reporting lost/exited over it would
+  // admit a respawn beside a live writer (bro-l8c4f.3). kill(-pgid,0)
+  // short-circuits before any /proc scan, so dead-group entries — the
+  // common stale row — cost one syscall; the wrapper's pidStart bounds
+  // members so a recycled pgid can't fake liveness.
   const pid = typeof entry.pid === 'number' ? entry.pid : undefined
-  if (pid !== undefined && pidAlive(pid, entryPidStart(entry))) {
+  if (
+    pid !== undefined &&
+    (pidAlive(pid, entryPidStart(entry)) || groupMemberAlive(pid, entryPidStart(entry)))
+  ) {
     touchWorkMarker(dir, entry.agentId)
     return 'running'
   }
@@ -2267,7 +2422,25 @@ export function makeNativeConnector(ctx: ConnectorCtx, env: AgentConnectorEnv): 
       }
       const [molStep, entry] = hit
       const pid = typeof entry.pid === 'number' ? entry.pid : undefined
-      if (pid !== undefined && pidAlive(pid, entryPidStart(entry))) {
+      const start = pid === undefined ? undefined : entryPidStart(entry)
+      // The unit check lives outside the signal block: a repeated `down`
+      // can find the wrapper already dead while a descendant still holds
+      // the group — the lock guard below must see it even when no signal
+      // was sent. `unit` stays empty without a live wrapper (the tree
+      // link is already broken by then — the snapshot only works
+      // pre-death).
+      let unit: Array<{ pid: number; start?: string }> = []
+      const unitAlive = () =>
+        pid !== undefined &&
+        (pidAlive(pid, start) ||
+          groupMemberAlive(pid, start) ||
+          unit.some((d) => pidAlive(d.pid, d.start)))
+      if (pid !== undefined && pidAlive(pid, start)) {
+        // the tree snapshot rides BEFORE the signal: a descendant that
+        // escaped the group (setsid) is invisible to groupMemberAlive,
+        // and once the wrapper dies it reparents to init — the
+        // pre-signal pid+starttime pin is the only handle left on it
+        unit = descendantsOf(pid)
         try {
           process.kill(-pid, 'SIGTERM') // detached → own process group
         } catch {
@@ -2278,9 +2451,13 @@ export function makeNativeConnector(ctx: ConnectorCtx, env: AgentConnectorEnv): 
         }
         // let the signal land before recording the stop — `stopped` on a
         // still-living pid would let a respawn run alongside the dying
-        // agent (nativeState reports live pids as running regardless)
+        // agent (nativeState reports live pids as running regardless).
+        // The unit, not the wrapper, is the wait: a TERM-resistant
+        // descendant outlives the sh-wrapper it was spawned under, and
+        // `stopped` over it would free a respawn onto a live writer
+        // (bro-l8c4f.3)
         const deadline = Date.now() + 2_000
-        while (pidAlive(pid, entryPidStart(entry)) && Date.now() < deadline) {
+        while (unitAlive() && Date.now() < deadline) {
           await new Promise((r) => setTimeout(r, 25))
         }
       }
@@ -2293,9 +2470,9 @@ export function makeNativeConnector(ctx: ConnectorCtx, env: AgentConnectorEnv): 
           cur === undefined ||
           cur.agentId !== entry.agentId ||
           cur.spawnedAt !== entry.spawnedAt ||
-          (pid !== undefined && pidAlive(pid, entryPidStart(entry)))
+          unitAlive()
         ) {
-          return // respawned or still alive — the live run owns the entry
+          return // respawned, or the unit (wrapper/descendant) lives — the live run owns the entry
         }
         try {
           patchAgentRegistry(dir, molStep, { stopped: true })

@@ -728,13 +728,28 @@ export function spawnStepAgent(
 export interface StopOutcome {
   found: boolean
   degraded: string[]
-  /** live state at stop time — can differ from the list() snapshot */
+  /** the state the verdict was probed on — the post-stop status() read
+   *  when one ran, else the pre-stop snapshot (either can differ from
+   *  the list() snapshot) */
   agent?: AgentInfo
   backend?: string
-  /** true when stop() ran — always true on a found agent; the connector
-   *  binds to the CURRENT registry entry, so the call also stops a
-   *  respawn that landed between our status read and here */
+  /** true when the backend CONFIRMED the worker is gone after stop() —
+   *  probe verdict (bro-l8c4f.3): true on a recorded-terminal agent
+   *  that still probes terminal, and on a live stop only when the
+   *  post-stop status() read says so.
+   *  stop() itself is the request landing, not proof of death: a
+   *  TERM-resistant worker survives the bounded kill-wait */
   stopped: boolean
+  /** post-stop truth from one status() re-probe (absent only on a
+   *  `blocked` read — the clear IS the result, and on a recorded-
+   *  terminal read that still probes terminal):
+   *  'stopped' the backend confirms the worker is gone/terminal;
+   *  'still-running' the worker survived stop() (TERM-resistant, the
+   *  connector's bounded wait expired) — including a terminal
+   *  snapshot that went stale;
+   *  'unverified' the probe cannot confirm death either way (no death
+   *  record, a missing entry, or the backend failed to answer) */
+  verdict?: 'stopped' | 'still-running' | 'unverified'
   /** the agent already read terminal when we looked — stop() still ran
    *  (idempotent), the flag just says there was nothing live to kill */
   terminal?: boolean
@@ -744,6 +759,32 @@ export interface StopOutcome {
   cleared?: boolean
   /** pid changed between list() and status() — a respawn raced us */
   respawned?: { from?: number; to?: number }
+}
+
+/** One post-stop status() re-probe — the verdict ladder (bro-l8c4f.3):
+ *  a terminal read confirms death, a live read proves survival, anything
+ *  else (lost, blocked, or a probe failure — AgentNotFound included: a
+ *  missing row is the registry's silence, not a death record) stays
+ *  unverified. */
+async function probeStopVerdict(
+  conn: AgentConnector,
+  id: string
+): Promise<{ verdict: NonNullable<StopOutcome['verdict']>; after?: AgentInfo }> {
+  let after: AgentInfo
+  try {
+    after = await conn.status(id)
+  } catch {
+    // a backend that cannot answer must not be read as a kill
+    // confirmation — and a worker can outlive a pruned entry
+    return { verdict: 'unverified' }
+  }
+  if (after.state === 'exited' || after.state === 'stopped') {
+    return { verdict: 'stopped', after }
+  }
+  if (after.state === 'running' || after.state === 'spawned') {
+    return { verdict: 'still-running', after }
+  }
+  return { verdict: 'unverified', after }
 }
 
 /** Stop one agent by agentId or molStep. Idempotent by contract — a
@@ -771,20 +812,54 @@ export async function stopAgent(
   } catch {
     // the read failed — stop() still binds to the observed id
   }
+  // 'lost' is NOT terminal: it is the absence of a death record, not a
+  // record of death — a live process-group descendant can sit under it,
+  // and the post-stop probe is what separates a real corpse from that
+  // survivor. 'blocked' carries no running unit at all (stop() IS the
+  // clear), and recorded deaths (exited/stopped) still probe — a
+  // terminal snapshot can go stale between the read and stop() (a
+  // respawn, or a descendant the pre-read hadn't surfaced yet).
   const terminal =
     current.state === 'exited' ||
     current.state === 'stopped' ||
-    current.state === 'lost' ||
     current.state === 'blocked'
   const respawned =
     current.pid !== hit.agent.pid ? { from: hit.agent.pid, to: current.pid } : undefined
-  await hit.conn.stop(hit.agent.id)
+  try {
+    await hit.conn.stop(hit.agent.id)
+  } catch {
+    // a connector whose own liveness probe fails must not crash the
+    // verdict path — the post-stop status read below carries the
+    // outcome, and serve's 409 contract needs a verdict, not an
+    // exception escaping
+  }
+  // stop() returning proves the REQUEST landed, not the death — a
+  // TERM-resistant worker survives the connector's bounded kill-wait,
+  // so `stopped` is re-probed from the backend before anyone reports
+  // it (bro-l8c4f.3). `blocked` alone skips the probe — the clear IS
+  // the result.
+  let verdict: StopOutcome['verdict']
+  let after: typeof current | undefined
+  if (current.state !== 'blocked') {
+    const probe = await probeStopVerdict(hit.conn, hit.agent.id)
+    after = probe.after
+    verdict = probe.verdict
+    // an already-terminal snapshot that still probes terminal keeps its
+    // "nothing was live" contract — the probe exists to catch the
+    // snapshot going stale (running/spawned above → still-running)
+    if (terminal && verdict === 'stopped') {
+      verdict = undefined
+    }
+  }
   return {
     found: true,
     degraded,
-    agent: current,
+    // the post-stop read when we have it — error text reports the state
+    // the probe verified, never the stale pre-stop snapshot
+    agent: after ?? current,
     backend: hit.conn.name,
-    stopped: true,
+    stopped: verdict === undefined || verdict === 'stopped',
+    verdict,
     terminal,
     cleared: current.state === 'blocked' ? true : undefined,
     respawned,
@@ -1217,6 +1292,19 @@ async function cmdDown(dir: string, env: AgentConnectorEnv, argv: string[]): Pro
     const fmt = (p: number | undefined) => (p === undefined ? 'unknown' : String(p))
     console.error(
       `note: ${agent.id} respawned since lookup (pid ${fmt(outcome.respawned.from)} → ${fmt(outcome.respawned.to)}) — stopping current instance`
+    )
+  }
+  // truthfulness (bro-l8c4f.3): only a confirmed-dead worker may read
+  // as `stopped` — a survivor or an unverifiable death is an error the
+  // operator must see before respawning anything
+  if (outcome.verdict === 'still-running') {
+    die(
+      `${agent.id} (${agent.molStep}, ${outcome.backend}) survived the stop signal — still running (pid ${agent.pid ?? 'unknown'}) — not safe to respawn`
+    )
+  }
+  if (outcome.verdict === 'unverified') {
+    die(
+      `${agent.id} (${agent.molStep}, ${outcome.backend}) — stop unconfirmed: the backend reports ${agent.state}, death not verified — not safe to respawn`
     )
   }
   console.log(`stopped ${agent.id} (${agent.molStep}, ${outcome.backend})`)
