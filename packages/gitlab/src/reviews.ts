@@ -643,7 +643,9 @@ export function gitlabReview(dir: string = process.cwd()): ReviewFacade {
     },
     openPrs(repo) {
       return glabPaged<MrRow>(
-        api(repo, 'merge_requests?state=opened&order_by=updated_at'),
+        // `sort=desc` makes the facade's most-recently-updated-first
+        // order explicit instead of riding the API default
+        api(repo, 'merge_requests?state=opened&order_by=updated_at&sort=desc'),
         // bounded like github's `--limit 500` — the facade contract is
         // one listing page, never an unbounded page loop on a big repo
         { ...gopts(), limit: 500 }

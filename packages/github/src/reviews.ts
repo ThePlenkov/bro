@@ -1516,15 +1516,17 @@ export function githubReview(dir: string = process.cwd()): ReviewFacade {
       ).map((p) => p.number)
     },
     openPrs(repo) {
-      // one listing beats N `pr list --head` subprocesses — bulk
-      // discovery callers want the open set, not per-branch round-trips
-      return ghJson<Array<{ number: number; headRefName?: string }>>(
+      // the facade's most-recently-updated-first order comes from the
+      // REST endpoint itself — `gh pr list` has no sort flags and pages
+      // by creation time, so its first 500 could miss a freshly updated
+      // older PR (the cap then only reorders a stale subset)
+      return ghJson<Array<{ number: number; head?: { ref?: string } }>>(
         [
-          'pr', 'list', '--repo', repo, '--state', 'open', '--limit', '500',
-          '--json', 'number,headRefName',
+          'api',
+          `repos/${repo}/pulls?state=open&sort=updated&direction=desc&per_page=100`,
         ],
         dir
-      ).map((p) => ({ pr: p.number, headRef: p.headRefName ?? '' }))
+      ).map((p) => ({ pr: p.number, headRef: p.head?.ref ?? '' }))
     },
     parsePrRef(text) {
       const m = /github\.com\/([\w.-]+)\/([\w.-]+)\/pull\/(\d+)/.exec(text)
