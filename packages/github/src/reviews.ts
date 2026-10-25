@@ -18,6 +18,8 @@ import {
   withMeta,
 } from '@broject/core'
 import type {
+  ApprovalProbeOpts,
+  ApprovalVerdict,
   CheckInfo,
   MergeOpts,
   MergedPr,
@@ -27,6 +29,7 @@ import type {
   PrLabelOp,
   PrMeta,
   PrTarget,
+  ReviewComment,
   ReviewFacade,
   ReviewThread,
   ScanOpts,
@@ -212,7 +215,7 @@ function reviewThreadsQuery(afterClause: string): string {
               id
               isResolved
               isOutdated
-              comments(first: 1) {
+              comments(first: 100) {
                 nodes { author { login __typename } path line body createdAt }
               }
             }
@@ -239,23 +242,27 @@ function parseThreadPage(raw: string, repo: string, pr: number): ThreadPage {
 
 /** GraphQL thread nodes → domain threads — shared by the paginated
  *  per-PR fetch and the bulk scan's inlined first page. */
+/** One GraphQL comment node → the facade's shape. */
+function toComment(x: ThreadPage['nodes'][number]['comments']['nodes'][number]): ReviewComment {
+  return {
+    author: x.author?.login ?? 'unknown',
+    bot: x.author?.__typename === 'Bot',
+    path: x.path ?? null,
+    line: x.line ?? null,
+    body: x.body ?? '',
+    createdAt: x.createdAt ?? '',
+  }
+}
+
 function toReviewThreads(nodes: ThreadPage['nodes']): ReviewThread[] {
   return nodes.map((n) => {
-    const c = n.comments.nodes[0]
+    const comments = n.comments.nodes.map(toComment)
     return {
       id: n.id,
       resolved: n.isResolved,
       outdated: n.isOutdated,
-      comment: c
-        ? {
-            author: c.author?.login ?? 'unknown',
-            bot: c.author?.__typename === 'Bot',
-            path: c.path ?? null,
-            line: c.line ?? null,
-            body: c.body ?? '',
-            createdAt: c.createdAt ?? '',
-          }
-        : null,
+      comment: comments[0] ?? null,
+      comments,
     }
   })
 }
@@ -265,9 +272,7 @@ async function reviewThreads(t: PrTarget): Promise<ReviewThread[]> {
   const nodes: ReviewThread[] = []
   let cursor = ''
   for (;;) {
-    const afterClause = cursor
-      ? `, after: "${cursor.replace(/\\/g, '\\\\').replace(/"/g, '\\"')}"`
-      : ''
+    const afterClause = cursor ? gqlAfter(cursor) : ''
     const raw = await ghAsync([
       'api',
       'graphql',
@@ -497,50 +502,212 @@ function prUpdatedAt(t: PrTarget): string | null {
 // Same bodies, ghJsonAsync/ghTryAsync in place of the spawnSync forms —
 // semantics identical, only the event loop notices.
 
-/** 'approved by a human' — the host's reviewDecision verdict counts
- *  bot/app approvals, so act.requireApproval enumerates the approving
- *  reviews and keeps only User-authored ones (bro-3vy93). */
-function approvedReviewsQuery(): string {
-  return 'query($o:String!,$r:String!,$pr:Int!){repository(owner:$o,name:$r){pullRequest(number:$pr){reviews(first:50,states:[APPROVED]){nodes{author{__typename}}}}}}'
+/** One decision review — the approval probe needs the head sha it was
+ *  submitted against, who authored it (User vs Bot), and when, for the
+ *  latest-per-reviewer fold. Exported for tests — the verdict is pure. */
+export interface PrReviewNode {
+  state?: string
+  submittedAt?: string
+  commit?: { oid?: string } | null
+  author?: { __typename?: string; login?: string } | null
 }
 
-type ApprovedReviewNodes = {
-  data?: {
-    repository?: {
-      pullRequest?: {
-        reviews?: { nodes?: { author?: { __typename?: string } | null }[] }
-      }
+/** 'a trusted human APPROVED the current head' — the verdict behind
+ *  act.requireApproval (bro-3vy93 round 2, principal audit). Each
+ *  reviewer's newest APPROVED | CHANGES_REQUESTED | DISMISSED is their
+ *  standing verdict — a dismissal is a revocation, so when it is a
+ *  reviewer's latest review the reviewer's older approvals are
+ *  suppressed rather than resurfacing (comment reviews never enter the
+ *  set). An approval counts only when it names `headSha` (a pre-push
+ *  approval is stale, not a sign-off), its author is a `User` (bots
+ *  never satisfy the gate), and — when `approvers` is non-empty — the
+ *  login is trusted. A standing CHANGES_REQUESTED vetoes no matter
+ *  which head it reviewed: an unanswered objection survives pushes. */
+export function headApprovalVerdict(
+  reviews: readonly PrReviewNode[],
+  headSha: string,
+  approvers: readonly string[] = []
+): ApprovalVerdict {
+  const latest = new Map<
+    string,
+    { login: string; human: boolean; state: string; sha?: string; at: string; i: number }
+  >()
+  reviews.forEach((r, i) => {
+    const login = r.author?.login
+    const state = r.state
+    // an unattributable author (deleted account) neither approves nor
+    // vetoes — it cannot be proven human either way. DISMISSED enters
+    // the fold: a dismissed review is a revocation action on that
+    // reviewer's standing, so as the latest entry it means "no standing
+    // decision" — not "the previous approval still counts"
+    if (
+      !login ||
+      (state !== 'APPROVED' && state !== 'CHANGES_REQUESTED' && state !== 'DISMISSED')
+    ) {
+      return
     }
+    const key = login.toLowerCase()
+    const at = r.submittedAt ?? ''
+    const prev = latest.get(key)
+    // later submittedAt wins; a same-stamp tie falls to list order —
+    // the host emits reviews oldest-first
+    if (prev === undefined || at > prev.at || (at === prev.at && i > prev.i)) {
+      latest.set(key, {
+        login,
+        human: r.author?.__typename === 'User',
+        state,
+        sha: r.commit?.oid ?? undefined,
+        at,
+        i,
+      })
+    }
+  })
+  const requesters = [...latest.values()]
+    .filter((v) => v.state === 'CHANGES_REQUESTED')
+    .map((v) => v.login)
+  if (requesters.length > 0) {
+    return { approved: false, reason: `changes requested by ${requesters.join(', ')}` }
+  }
+  const headApprovals = [...latest.values()].filter(
+    (v) => v.state === 'APPROVED' && v.sha === headSha
+  )
+  const trusted = new Set(
+    approvers.map((a) => a.trim().toLowerCase()).filter((a) => a !== '')
+  )
+  const counts = (v: { login: string; human: boolean }): boolean =>
+    v.human && (trusted.size === 0 || trusted.has(v.login.toLowerCase()))
+  if (headApprovals.some(counts)) {
+    return { approved: true }
+  }
+  // name the refusal in the order a user would act on it — a stale
+  // TRUSTED human approval is the "but it WAS approved" case, so it
+  // leads; an untrusted one falls through to the allowlist reason
+  // (re-approval from an untrusted login fixes nothing)
+  const stale = [...latest.values()].find(
+    (v) => v.state === 'APPROVED' && v.sha !== headSha && counts(v)
+  )
+  if (stale !== undefined) {
+    return {
+      approved: false,
+      reason: `approval by ${stale.login} predates the current head — re-approve after the latest push`,
+    }
+  }
+  if (
+    trusted.size > 0 &&
+    [...latest.values()].some((v) => v.state === 'APPROVED' && v.human)
+  ) {
+    return {
+      approved: false,
+      reason: 'approvals only from logins outside act.approvers',
+    }
+  }
+  if (headApprovals.length > 0) {
+    return { approved: false, reason: 'only bot approvals on the current head' }
+  }
+  return { approved: false, reason: 'no approving reviews' }
+}
+
+function reviewsQuery(afterClause: string): string {
+  return `query($o:String!,$r:String!,$pr:Int!){repository(owner:$o,name:$r){pullRequest(number:$pr){headRefOid reviews(first:100,states:[APPROVED,CHANGES_REQUESTED,DISMISSED]${afterClause}){pageInfo{hasNextPage endCursor} nodes{state submittedAt commit{oid} author{__typename login}}}}}}`
+}
+
+/** `, after: "…"` — the cursor is host data interpolated into a GraphQL
+ *  string; JSON.stringify does the escaping (quotes, backslashes, and
+ *  the control chars a two-step regex would miss). */
+const gqlAfter = (cursor: string): string => `, after: ${JSON.stringify(cursor)}`
+
+type ReviewsPullRequest = {
+  headRefOid?: string
+  reviews?: {
+    pageInfo?: { hasNextPage?: boolean; endCursor?: string | null }
+    nodes?: PrReviewNode[]
   }
 }
 
-function humanApproved(t: PrTarget): boolean {
+type ReviewsPage = {
+  data?: { repository?: { pullRequest?: ReviewsPullRequest } }
+}
+
+/** One page of the reviews connection folded into the probe — shared by
+ *  the sync and async loops so they cannot diverge. FAIL CLOSED: a page
+ *  missing reviews/nodes/pageInfo, or a next cursor that is empty or
+ *  equal to the one just consumed, throws — a truncated or stuck
+ *  history is "unanswerable" (fetchState maps a thrown probe to
+ *  undefined), never "complete" with an unread CHANGES_REQUESTED. */
+function reviewsPageStep(
+  pr: number,
+  cursor: string,
+  page: ReviewsPullRequest | undefined
+): { headSha?: string; nodes: PrReviewNode[]; next: string | null } {
+  if (page === undefined) {
+    throw new Error(`pull request #${pr} not found`)
+  }
+  const reviews = page.reviews
+  if (reviews?.nodes === undefined || reviews.pageInfo === undefined) {
+    throw new Error(`pull request #${pr}: reviews page incomplete — approval unanswerable`)
+  }
+  if (reviews.pageInfo.hasNextPage !== true) {
+    return { headSha: page.headRefOid, nodes: reviews.nodes, next: null }
+  }
+  const next = reviews.pageInfo.endCursor
+  if (next === undefined || next === null || next === '' || next === cursor) {
+    throw new Error(`pull request #${pr}: reviews pagination did not advance`)
+  }
+  return { headSha: page.headRefOid, nodes: reviews.nodes, next }
+}
+
+function humanApproved(t: PrTarget, opts?: ApprovalProbeOpts): ApprovalVerdict {
   const { owner, name } = parts(t.repo)
-  const nodes =
-    ghJson<ApprovedReviewNodes>([
+  let headSha = ''
+  const nodes: PrReviewNode[] = []
+  let cursor = ''
+  for (;;) {
+    const afterClause = cursor ? gqlAfter(cursor) : ''
+    const page = ghJson<ReviewsPage>([
       'api',
       'graphql',
       '-f',
-      `query=${approvedReviewsQuery()}`,
+      `query=${reviewsQuery(afterClause)}`,
       '-f',
       `o=${owner}`,
       '-f',
       `r=${name}`,
       '-F',
       `pr=${t.pr}`,
-    ]).data?.repository?.pullRequest?.reviews?.nodes ?? []
-  return nodes.some((n) => n?.author?.__typename === 'User')
+    ]).data?.repository?.pullRequest
+    const step = reviewsPageStep(t.pr, cursor, page)
+    // bind to the FRESHEST head seen — a push mid-pagination turns old
+    // approvals stale (fail-closed); binding to page 1's head would
+    // under-bind the verdict to a head that is already gone
+    headSha = step.headSha ?? headSha
+    nodes.push(...step.nodes)
+    if (step.next === null) {
+      break
+    }
+    cursor = step.next
+  }
+  // the bound head rides the verdict so the caller can prove the
+  // approval was evaluated against the head it is about to merge —
+  // a mid-probe push is a refusal, not a pass
+  return { ...headApprovalVerdict(nodes, headSha, opts?.approvers ?? []), headSha }
 }
 
-async function humanApprovedAsync(t: PrTarget): Promise<boolean> {
+async function humanApprovedAsync(
+  t: PrTarget,
+  opts?: ApprovalProbeOpts
+): Promise<ApprovalVerdict> {
   const { owner, name } = parts(t.repo)
-  const nodes =
-    (
-      await ghJsonAsync<ApprovedReviewNodes>([
+  let headSha = ''
+  const nodes: PrReviewNode[] = []
+  let cursor = ''
+  for (;;) {
+    const afterClause = cursor ? gqlAfter(cursor) : ''
+    const page = (
+      await ghJsonAsync<ReviewsPage>([
         'api',
         'graphql',
         '-f',
-        `query=${approvedReviewsQuery()}`,
+        `query=${reviewsQuery(afterClause)}`,
         '-f',
         `o=${owner}`,
         '-f',
@@ -548,8 +715,19 @@ async function humanApprovedAsync(t: PrTarget): Promise<boolean> {
         '-F',
         `pr=${t.pr}`,
       ])
-    ).data?.repository?.pullRequest?.reviews?.nodes ?? []
-  return nodes.some((n) => n?.author?.__typename === 'User')
+    ).data?.repository?.pullRequest
+    const step = reviewsPageStep(t.pr, cursor, page)
+    // bind to the FRESHEST head seen — a push mid-pagination turns old
+    // approvals stale (fail-closed); binding to page 1's head would
+    // under-bind the verdict to a head that is already gone
+    headSha = step.headSha ?? headSha
+    nodes.push(...step.nodes)
+    if (step.next === null) {
+      break
+    }
+    cursor = step.next
+  }
+  return { ...headApprovalVerdict(nodes, headSha, opts?.approvers ?? []), headSha }
 }
 
 async function prMetaAsync(t: PrTarget): Promise<PrMeta> {
@@ -1081,7 +1259,7 @@ const SCAN_PR_FIELDS = `
   labels(first: 50) { nodes { name } }
   reviewThreads(first: 100) {
     pageInfo { hasNextPage }
-    nodes { id isResolved isOutdated comments(first: 1) { nodes { author { login __typename } path line body createdAt } } }
+    nodes { id isResolved isOutdated comments(first: 100) { nodes { author { login __typename } path line body createdAt } } }
   }`
 
 /** Aliased-GraphQL probe: one `gh api graphql` call per ~15 PRs covers
@@ -1338,15 +1516,17 @@ export function githubReview(dir: string = process.cwd()): ReviewFacade {
       ).map((p) => p.number)
     },
     openPrs(repo) {
-      // one listing beats N `pr list --head` subprocesses — bulk
-      // discovery callers want the open set, not per-branch round-trips
-      return ghJson<Array<{ number: number; headRefName?: string }>>(
+      // the facade's most-recently-updated-first order comes from the
+      // REST endpoint itself — `gh pr list` has no sort flags and pages
+      // by creation time, so its first 500 could miss a freshly updated
+      // older PR (the cap then only reorders a stale subset)
+      return ghJson<Array<{ number: number; head?: { ref?: string } }>>(
         [
-          'pr', 'list', '--repo', repo, '--state', 'open', '--limit', '500',
-          '--json', 'number,headRefName',
+          'api',
+          `repos/${repo}/pulls?state=open&sort=updated&direction=desc&per_page=100`,
         ],
         dir
-      ).map((p) => ({ pr: p.number, headRef: p.headRefName ?? '' }))
+      ).map((p) => ({ pr: p.number, headRef: p.head?.ref ?? '' }))
     },
     parsePrRef(text) {
       const m = /github\.com\/([\w.-]+)\/([\w.-]+)\/pull\/(\d+)/.exec(text)

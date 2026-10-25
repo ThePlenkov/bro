@@ -83,11 +83,18 @@ Design notes: [the rig engine](/docs/design/rig-engine).
 ### A human in the merge gate
 
 `drive.merge:auto` could land agent output with zero human sign-off —
-the exit gate guarded threads, CI, reviewers, and SAST, but never the
-host's review verdict. **`act.requireApproval: true`** (in
-`bro.config`) adds it: auto-merge waits for APPROVED. GitLab approvals
-map lazily — probed only while the gate is on — and an unanswerable
-probe reads as *not approved*, never a pass.
+a green exit gate meant threads, CI, reviewers, and SAST settled, never
+that a human approved the code. **`act.requireApproval: true`** (in
+`bro.config`) adds the sign-off: auto-merge waits for a trusted human's
+approving review **on the PR's current head** — the latest decision
+review per reviewer decides, a standing `CHANGES_REQUESTED` vetoes, bot
+approvals never count, and **`act.approvers`** narrows "trusted" to
+named logins so a machine account can't sign off on the agent's own
+output. GitLab approvals map lazily — probed only while the gate is on
+— and an unanswerable probe reads as *not approved*, never a pass. On
+GitLab, current-head binding rides the project's
+reset-approvals-on-push rule; keep `drive.merge: 'never'` plus branch
+protection as the server-side boundary either way.
 
 ### The site you're reading
 

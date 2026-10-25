@@ -1,0 +1,32 @@
+{
+  "name": "bro",
+  "version": "0.2.5",
+  "description": "Agent's sidekick — the rig that owns the PR-to-merge loop: beads claims, fleet workers, review gates, cross-repo mesh — all mechanics in the bro CLI over gh + beads",
+  "author": {
+    "name": "Petr Plenkov"
+  },
+  "homepage": "https://broject.dev",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/ThePlenkov/bro.git",
+    "directory": "plugins/omp/bro"
+  },
+  "license": "MIT",
+  "keywords": [
+    "agent-rig",
+    "orchestration",
+    "fleet",
+    "convoy",
+    "mesh",
+    "pr-review",
+    "merge-gate",
+    "review-debt",
+    "beads",
+    "agent-workflow"
+  ],
+  "omp": {
+    "extensions": [
+      "./bro.ts"
+    ]
+  }
+}

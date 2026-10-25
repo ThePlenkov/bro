@@ -197,12 +197,14 @@ describe('collectGuards', () => {
     assert.deepEqual(before, [])
   })
 
-  test('a non-array guards() return is skipped — fail open', () => {
+  test('a non-array guards() return degrades the collection — fail open with a problem row', () => {
     registerConnector({
       name: 'g-nonarray',
       guards: () => ({ not: 'a list' }) as unknown as Guard[],
     })
     const rows = collectGuards(ctx, [])
-    assert.deepEqual(rows.filter((r) => r.source === 'g-nonarray'), [])
+    const bad = rows.find((r) => r.source === 'g-nonarray')
+    assert.equal(bad?.guard, undefined)
+    assert.ok(bad?.problems?.[0]?.includes('non-array'))
   })
 })

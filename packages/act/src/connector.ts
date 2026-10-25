@@ -51,6 +51,7 @@ async function gateLine(dir: string, target?: PrTarget): Promise<string | null> 
       docsPaths: cfg.act.docsPaths,
       docsMaxRounds: cfg.act.docsMaxRounds,
       requireApproval: cfg.act.requireApproval,
+      approvers: cfg.act.approvers,
       // the feed serves most probes; lockWaitMs 0 keeps a budgeted hook
       // from ever queuing behind a peer's in-flight fetch
       stateCache: prStateCache(dir, { lockWaitMs: 0 }),
@@ -104,6 +105,7 @@ async function prProbe(dir: string): Promise<PrProbe | null> {
         docsPaths: cfg.act.docsPaths,
         docsMaxRounds: cfg.act.docsMaxRounds,
         requireApproval: cfg.act.requireApproval,
+        approvers: cfg.act.approvers,
         stateCache: prStateCache(dir, { lockWaitMs: 0 }),
       }
     )

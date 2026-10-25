@@ -316,6 +316,19 @@ describe('taskStore', { skip: WIN32 }, () => {
     })
   })
 
+  test('claimCapability declares an exclusive, actor-scoped claim — per store', () => {
+    withFakeBd({}, (log) => {
+      const s = taskStore()
+      assert.deepEqual(s.claimCapability?.(), {
+        strength: 'exclusive',
+        identity: 'actor',
+        authority: 'store',
+      })
+      s.claim('t1')
+      assert.ok(logLines(log).some((l) => l === 'update t1 --claim'), logLines(log).join('\n'))
+    })
+  })
+
   test('prefix parses the config value', () => {
     withFakeBd({ FAKE_BD_PREFIX: 'bro' }, () => {
       assert.equal(taskStore().prefix(), 'bro')

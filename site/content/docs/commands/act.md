@@ -28,6 +28,10 @@ checks, SAST annotations, mergeability, and fix rounds.
 - `reviewers_pending` — a running AI reviewer may still post findings
 - `sast_pending` / `sast_unknown` — failure-level SAST annotations
 - `fix_rounds` — pushes after the first review comment
+- `reopened_threads` — a thread that was resolved and then commented on
+  again. The earlier resolution was wrong, so the gate blocks and `bro loop`
+  / `bro drive` park instead of spawning a fixer — re-resolving it would
+  hide exactly what the reopen says. Report it; the user decides.
 
 **The general rule: project-caused failures block; infrastructure
 failures don't.** A failed AI-reviewer *check* (`reviewers_failing`) is
@@ -37,6 +41,46 @@ go on [`act.ignoreChecks`](/docs/configuration#act) — a conditional
 ignore: a failing advisory check stays quiet only while it keeps failing
 *and* producing thread output, otherwise `alerts` carries a
 silent-reviewer line (still non-blocking).
+
+## Requiring human sign-off
+
+A green gate is **not** a human approval — by default it means threads,
+CI, and mergeability settled; a bot-only review thread satisfies the
+review dimension. For hostile-input threat models (a malicious bead, a
+prompt-injected agent) that's a hole: `bro review drive` can auto-merge
+agent output with zero human sign-off.
+
+[`act.requireApproval`](/docs/configuration#act) closes it. When `true`,
+the gate additionally requires a trusted **human's approving review on
+the PR's current head** — available since bro 0.3.0. Semantics:
+
+- **Latest decision review per reviewer.** Each reviewer's newest
+  `APPROVED`/`CHANGES_REQUESTED`/`DISMISSED` review is their standing
+  verdict — a `CHANGES_REQUESTED` that was never re-approved vetoes the
+  gate no matter which head it reviewed (GitHub; on GitLab the veto is
+  an unresolved discussion).
+- **Head-bound.** An approval counts only on the head being merged; a
+  push after approval makes it stale, not a sign-off.
+- **Bots never count.** A bot `APPROVED` review never satisfies the
+  gate; the host's aggregate "approved" flag alone is never enough.
+- **Trusted logins.** `act.approvers` (a login allowlist, empty = any
+  human account) narrows "trusted" so a machine `User` account can't
+  sign off on the agent's own output.
+- **Fail-closed.** A probe that can't answer — host unreachable, API
+  error, connector without the capability — blocks as *unanswerable*,
+  never a pass. The blocker names the probe's reason (`changes
+  requested by …`, `approval predates the current head`, `bot-only`,
+  `outside act.approvers`).
+
+The flag defaults to `false`: with it off, auto-merge semantics are
+unchanged. If you don't opt in, the documented hardening is
+[`drive.merge: "never"`](/docs/configuration#drive) plus host branch
+protection — the merge decision stays with a human.
+
+GitLab note: the approvals endpoint doesn't expose per-approval head
+SHAs, so current-head binding there is the project's
+**reset-approvals-on-push** rule — set it alongside `requireApproval`
+(same class of server-side boundary as branch protection).
 
 ## The severity-aware loop
 

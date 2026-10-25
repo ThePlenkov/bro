@@ -43,6 +43,11 @@ export interface ConnectorCtx {
   /** Working dir — repo root for project-scoped facades, the resolved
    *  global dir for user-level ones (same contract as taskStore(dir)). */
   dir: string
+  /** The host client's id for the tool call being judged — the two
+   *  hook events of ONE call (a pre-tool and a permission request)
+   *  share it. A guard that budgets per call keys its slot on it
+   *  (spec bro-bww9v). */
+  toolUseId?: string
   /** Firing session's id — lets probes distinguish this session's claims
    *  (recorded in `<git-common-dir>/bro/hooks/<session>.<aspect>` markers)
    *  from foreign live work. Absent outside hook events. */
@@ -902,11 +907,17 @@ function collectConnectorGuards(
   try {
     declared = c.guards?.(ctx)
   } catch (err) {
-    console.error(`bro: connector '${c.name}' guards() threw — skipped: ${err instanceof Error ? err.message : err}`)
+    const detail = err instanceof Error ? err.message : String(err)
+    console.error(`bro: connector '${c.name}' guards() threw — skipped: ${detail}`)
+    // a problems row marks the collection degraded — consumers that
+    // record resolved coverage (the hook fast-path's guards/ dir) must
+    // not mistake "skipped" for "contributes nothing"
+    push(c.name, undefined, [`guards() threw: ${detail}`])
     return
   }
   if (declared !== undefined && !Array.isArray(declared)) {
     console.error(`bro: connector '${c.name}' guards() returned a non-array — skipped`)
+    push(c.name, undefined, ['guards() returned a non-array'])
     return
   }
   for (const raw of declared ?? []) {

@@ -58,6 +58,11 @@ export interface AgentTurnPlaneOpts {
   /** The ACP session id — part of the payload, and the fallback event
    *  `key` when no BRO_AGENT_ID badge is pinned. */
   sessionId: string
+  /** Archive scope — 'agents' (default) keys on the BRO_AGENT_ID badge
+   *  and writes `<common>/bro/agents/`; 'proxy' keys on the session id
+   *  and writes `<common>/bro/proxy/` even unbadged — a human-run
+   *  `bro acp proxy` carries no agent badge (specs/bro-bhyo1.md). */
+  plane?: 'agents' | 'proxy'
 }
 
 /** The per-turn observer pumpTurn drives: update() per session/update,
@@ -100,6 +105,34 @@ export function toolPayload(u: Toolish, phase: 'open' | 'finish'): Record<string
   return p
 }
 
+/** The turn-plane archive path — 'proxy' keys on the session id under
+ *  `bro/proxy/` (`-p<pid>` keeps two concurrent proxy runs of the same
+ *  session id — a reconnect, a duplicated client — from mixing rows in
+ *  one archive); 'agents' keys on the agent badge under `bro/agents/`.
+ *  Undefined when the run can't resolve a git common dir or (agents
+ *  scope) carries no badge. */
+const archiveFile = (
+  scope: 'agents' | 'proxy',
+  common: string | null,
+  agentId: string | undefined,
+  sessionId: string
+): string | undefined => {
+  if (common === null) {
+    return undefined
+  }
+  if (scope === 'proxy') {
+    return join(
+      common,
+      'bro',
+      'proxy',
+      `acp-${sessionId.replace(/[^\w.-]/g, '_')}-p${process.pid}.events.jsonl`
+    )
+  }
+  return agentId === undefined
+    ? undefined
+    : join(common, 'bro', 'agents', `${agentId}.events.jsonl`)
+}
+
 /** The plane for one turn — resolved sinks are computed once so the
  *  per-update cost is a Map lookup plus a queued socket write. */
 export function agentTurnPlane(opts: AgentTurnPlaneOpts): AgentTurnPlane {
@@ -112,11 +145,9 @@ export function agentTurnPlane(opts: AgentTurnPlaneOpts): AgentTurnPlane {
   // the 'acp:' prefix keeps the namespace from colliding with real ids
   const key = agentId ?? `acp:${opts.sessionId}`
   const socket = busSocketPath(cwd)
-  const common = agentId === undefined ? null : gitCommonDir(cwd)
-  const file =
-    agentId !== undefined && common !== null
-      ? join(common, 'bro', 'agents', `${agentId}.events.jsonl`)
-      : undefined
+  const scope = opts.plane ?? 'agents'
+  const common = agentId !== undefined || scope === 'proxy' ? gitCommonDir(cwd) : null
+  const file = archiveFile(scope, common, agentId, opts.sessionId)
 
   let queue: Promise<unknown> = Promise.resolve()
   const seenTools = new Set<string>()

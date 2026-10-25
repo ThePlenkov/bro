@@ -37,6 +37,9 @@ jobs:
       - name: Check command reference is fresh
         run: npm run check:command-docs
 
+      - name: Check CLI contract snapshot is fresh
+        run: npm run check:contract
+
       - name: Typecheck
         run: npm run typecheck
 

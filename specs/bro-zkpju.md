@@ -37,7 +37,9 @@ reused unchanged.
   session (evict + fresh, never invent).
 - Egress: buffered `response` object, or item-ordered SSE
   (`response.created` → `output_item`/`content_part`/`output_text.delta`
-  → `function_call` items → `response.completed`).
+  → `function_call` items → `response.<status>` — `completed` on a clean
+  turn, `incomplete` on a cap, `cancelled`/`failed` on a cancelled or
+  backend-ended turn; bro-6fk80).
 
 ### /v1/chat/completions (stateless chat wire)
 

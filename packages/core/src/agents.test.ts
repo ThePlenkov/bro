@@ -19,6 +19,7 @@ import {
   agentsSection,
   claimStep,
   classifyExitCause,
+  classifyExitCauseParts,
   mintAgentId,
   patchAgentRegistry,
   probeStep,
@@ -550,6 +551,46 @@ describe('classifyExitCause', () => {
 
   test('crash carries no reset', () => {
     assert.deepEqual(classifyExitCause('segfault', 139), { cause: 'crash' })
+  })
+})
+
+describe('classifyExitCauseParts', () => {
+  test('a wall token can never be fabricated across the tail boundary', () => {
+    // '…4' + '29…' joined reads '429' — the tails classify on their own
+    assert.equal(
+      classifyExitCauseParts(['worker output ends with phase 4', '29 rows processed'], 1).cause,
+      'crash'
+    )
+    assert.equal(
+      classifyExitCauseParts(['request', ' per second exceeded'], 1).cause,
+      'crash'
+    )
+    // …while a real wall in EITHER tail still classifies
+    assert.equal(
+      classifyExitCauseParts(['clean shutdown', 'HTTP 429 too many requests'], 1).cause,
+      'rate_limited'
+    )
+    assert.equal(
+      classifyExitCauseParts(['rate limit reached', 'clean shutdown'], 1).cause,
+      'rate_limited'
+    )
+  })
+
+  test('cause precedence follows pattern order, resetAt from the winning tail', () => {
+    const now = Date.parse('2026-10-05T20:00:00Z')
+    assert.equal(
+      classifyExitCauseParts(['invalid api key', 'rate limit hit'], 1).cause,
+      'rate_limited'
+    )
+    assert.equal(
+      classifyExitCauseParts(
+        ['rate limit — retry-after: 90', 'rate limit'],
+        1,
+        now
+      ).resetAt,
+      '2026-10-05T20:01:30.000Z'
+    )
+    assert.equal(classifyExitCauseParts(['', ''], 0).cause, 'ok')
   })
 })
 

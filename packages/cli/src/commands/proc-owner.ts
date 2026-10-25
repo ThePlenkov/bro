@@ -38,7 +38,7 @@ export interface ProcHit {
  *  a launcher like npx/node): matching inside arbitrary arguments would
  *  let `grep claude` occupy a worktree. An optional script extension
  *  covers `node devin.js`-style invocations. */
-const AGENT_NAME_RE = /^(devin|claude|codex|gemini|aider|opencode|amp)(\.\w+)?$/
+const AGENT_NAME_RE = /^(devin|claude|codex|gemini|aider|opencode|amp|omp)(\.\w+)?$/
 const AGENT_LAUNCHERS = new Set(['node', 'npx', 'bun', 'bunx', 'tsx', 'uvx', 'deno'])
 
 /** True when the process's own argv names an agent — the executable or

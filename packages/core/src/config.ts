@@ -196,6 +196,7 @@ export const actSection: ConfigSection<{
   docsPaths: string[]
   docsMaxRounds: number
   requireApproval: boolean
+  approvers: string[]
   mergeQueue: { label?: string; comment?: string }
 }> = (raw) => {
   const obj = (typeof raw === 'object' && raw !== null ? raw : {}) as {
@@ -204,6 +205,7 @@ export const actSection: ConfigSection<{
     docsPaths?: unknown
     docsMaxRounds?: unknown
     requireApproval?: unknown
+    approvers?: unknown
     mergeQueue?: unknown
   }
   const queue = (typeof obj.mergeQueue === 'object' && obj.mergeQueue !== null
@@ -245,6 +247,21 @@ export const actSection: ConfigSection<{
     // opt-in human-signoff gate — off by default, auto-merge stays
     // bot-only until a rig asks for the APPROVED verdict (bro-3vy93)
     requireApproval: obj.requireApproval === true,
+    // trusted-reviewer allowlist for the same gate — absent/empty
+    // means any human account's current-head approval counts. A
+    // CONFIGURED list that yields zero usable logins is the opposite
+    // intent — 'trust nobody', not 'trust anybody': one entry no host
+    // login can ever equal keeps the allowlist non-empty and the gate
+    // fails closed (PR #636 review).
+    approvers: (() => {
+      if (!Array.isArray(obj.approvers)) {
+        return []
+      }
+      const valid = obj.approvers
+        .map((v) => (typeof v === 'string' ? v.trim() : ''))
+        .filter((v) => v !== '')
+      return obj.approvers.length > 0 && valid.length === 0 ? ['!'] : valid
+    })(),
     mergeQueue,
   }
 }
@@ -858,10 +875,16 @@ export interface BroConfig {
      *  converges slower for less value. 0 disables the docs-specific cap. */
     docsMaxRounds: number
     /** Human-signoff gate (bro-3vy93): when true the act exit gate —
-     *  and every auto-merge driven off it — also requires the host's
-     *  review verdict to be APPROVED. Opt-in hostile-input hardening;
-     *  default off keeps bot-only auto-merge. */
+     *  and every auto-merge driven off it — also requires a trusted
+     *  human's approving review on the current head (latest review per
+     *  reviewer; a standing CHANGES_REQUESTED vetoes). Opt-in
+     *  hostile-input hardening; default off keeps bot-only auto-merge. */
     requireApproval: boolean
+    /** Trusted reviewer logins for requireApproval — an approval counts
+     *  only from these accounts; empty means any human (`User`) actor.
+     *  The knob that keeps a machine `User` account from satisfying the
+     *  gate on its own output. */
+    approvers: string[]
     /** External-merge-queue knobs (spec specs/bro-huy5o.6.md) — the
      *  connector pick lives in `connectors.mergeQueue`; these are the
      *  enqueue mechanics it reads. `label` adds a queue label on the
@@ -947,6 +970,7 @@ export const DEFAULT_CONFIG: BroConfig = {
     docsPaths: ['*.md', '*.mdx', '*.rst', 'docs/'],
     docsMaxRounds: 2,
     requireApproval: false,
+    approvers: [],
     mergeQueue: {},
   },
   connectors: {},

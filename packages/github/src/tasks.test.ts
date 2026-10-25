@@ -1,6 +1,6 @@
 import { after, describe, test } from 'node:test'
 import assert from 'node:assert/strict'
-import { chmodSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { facade, facadeName, registerConnector, scrubEnv, testGit } from '@broject/core'
@@ -18,6 +18,9 @@ const WIN32 = process.platform === 'win32'
  *    FAKE_GH_ISSUES   — the issues(first:) GraphQL page body
  *    FAKE_GH_ISSUE_1  — the FIRST issue(number:) read body (claim's pre-read)
  *    FAKE_GH_ISSUE_2  — every LATER issue(number:) read (claim's verify)
+ *    FAKE_GH_ISSUE_SEQ — dir of <n>.json bodies: the Nth issue(number)
+ *                       read answers file <n> — deterministic
+ *                       interleavings (claim races)
  *    FAKE_GH_SUBS     — the subIssues query body
  *    FAKE_GH_ACTOR    — `api user` login */
 const FAKE_GH = `#!/bin/sh
@@ -44,7 +47,9 @@ case "$1" in
           *"issue(number:\$n){ subIssues"*) echo "$FAKE_GH_SUBS" ;;
           *"issue(number"*)
             n=$(grep -c 'issue(number' "$FAKE_GH_LOG")
-            if [ "$n" -le 1 ] && [ -n "$FAKE_GH_ISSUE_1" ]; then
+            if [ -n "$FAKE_GH_ISSUE_SEQ" ] && [ -f "$FAKE_GH_ISSUE_SEQ/$n.json" ]; then
+              cat "$FAKE_GH_ISSUE_SEQ/$n.json"
+            elif [ "$n" -le 1 ] && [ -n "$FAKE_GH_ISSUE_1" ]; then
               echo "$FAKE_GH_ISSUE_1"
             else
               echo "$FAKE_GH_ISSUE_2"
@@ -288,6 +293,71 @@ describe('githubTasks', { skip: WIN32 }, () => {
         assert.equal(callsMatching(log, /--remove-assignee/).length, 0)
       }
     )
+  })
+
+  test('claimCapability declares best-effort assignment — never a lease', () => {
+    withFakeGh({ FAKE_GH_ACTOR: 'me' }, (_log, dir) => {
+      assert.deepEqual(githubTasks(dir).claimCapability?.(), {
+        strength: 'best-effort',
+        identity: 'viewer',
+        authority: 'service',
+      })
+    })
+  })
+
+  /** Bodies for the reads of a scripted claim race — each entry is the
+   *  assignee the Nth issue(42) read reports (null = unassigned). A
+   *  contested race reads raceReads(null, 'alice', null, 'bob'): B's
+   *  pre-read is a stale snapshot, its verify shows B's own write. */
+  const raceReads = (...who: (string | null)[]): string[] =>
+    who.map((a) =>
+      issueRead(node({ number: 42, ...(a === null ? {} : { assignees: [a] }) }))
+    )
+
+  /** Run the scripted race: claim A, then `second()` — a viewer flip
+   *  goes inside the closure (spec specs/bro-l8c4f.12). */
+  const claimRace = (dir: string, bodies: string[], second: () => void): void => {
+    const seq = join(dir, 'seq')
+    mkdirSync(seq, { recursive: true })
+    bodies.forEach((b, i) => writeFileSync(join(seq, `${i + 1}.json`), b))
+    process.env.FAKE_GH_ISSUE_SEQ = seq
+    try {
+      githubTasks(dir).claim('42')
+      second()
+    } finally {
+      delete process.env.FAKE_GH_ISSUE_SEQ
+    }
+  }
+
+  test('claim interleaving: two viewers both win the residual window', () => {
+    withFakeGh({ FAKE_GH_ACTOR: 'alice' }, (log, dir) => {
+      const dirB = mkdtempSync(join(tmpdir(), 'bro-gh-tasks-b-'))
+      try {
+        // ghActor caches per dir — the rival racer claims through a
+        // second store dir
+        claimRace(dir, raceReads(null, 'alice', null, 'bob'), () => {
+          process.env.FAKE_GH_ACTOR = 'bob'
+          githubTasks(dirB).claim('42')
+        })
+      } finally {
+        rmSync(dirB, { recursive: true, force: true })
+      }
+      // both claims returned — each wrote its assignee and the commit flag
+      assert.match(callsMatching(log, /--add-assignee alice/).join('\n'), /--add-assignee alice/)
+      assert.match(callsMatching(log, /--add-assignee bob/).join('\n'), /--add-assignee bob/)
+      assert.equal(callsMatching(log, /--add-label bro:claimed/).length, 2)
+    })
+  })
+
+  test('claim interleaving: two workers on one viewer both pass — one identity', () => {
+    // one credential = one identity: worker B is indistinguishable from
+    // worker A on the wire — BOTH verify "assigned to me" and return.
+    withFakeGh({ FAKE_GH_ACTOR: 'me' }, (log, dir) => {
+      claimRace(dir, raceReads(null, 'me', null, 'me'), () => githubTasks(dir).claim('42'))
+      // both workers' writes landed — under ONE identity
+      assert.equal(callsMatching(log, /--add-assignee me/).length, 2)
+      assert.equal(callsMatching(log, /--add-label bro:claimed/).length, 2)
+    })
   })
 
   test('claim refuses an already-claimed issue before assigning', () => {

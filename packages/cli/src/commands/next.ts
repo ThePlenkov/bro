@@ -23,7 +23,7 @@
  * queue is scoped to this checkout's issue_prefix — foreign-prefix
  * beads are reported, never claimed. scope = "all" opts out in plans.
  */
-import { emitLifecycle, ensureTasksBackend, getTasks, gitTry, type FacadeOpts } from '@broject/core'
+import { emitLifecycle, ensureTasksBackend, getTasks, gitTry, hasHelpFlag, printUsage, type FacadeOpts } from '@broject/core'
 // The ready-set read (storeFor/readyBeads/ReadyBead/NEVER_CLAIM_LABELS)
 // lives in @broject/rig — the engine's dep-gate shares the contract
 // (bro-jamp7); re-exported so `bro next`'s surface is unchanged.
@@ -38,7 +38,7 @@ import type { NextFilters, NextOrder, NextPlan } from './next-plan.ts'
 import { requireGlobalStore } from '../doctypes/store.ts'
 import { loadBroConfig } from '../plugins.ts'
 
-export { readyBeads, NEVER_CLAIM_LABELS, type ReadyBead }
+export { readyBeads, storeFor, NEVER_CLAIM_LABELS, type ReadyBead }
 
 interface NextResult {
   state: 'task' | 'gated' | 'idle'
@@ -373,8 +373,8 @@ export function applyNextPlan(plan: NextPlan): void {
 }
 
 export async function runNextCommand(argv: string[]): Promise<void> {
-  if (argv.includes('--help') || argv.includes('-h')) {
-    console.error(`Usage: bro next [--list] [--json] [--global] [--label a,b]
+  if (hasHelpFlag(argv)) {
+    printUsage(`Usage: bro next [--list] [--json] [--global] [--label a,b]
 
   Claims the top ready bead and prints the work order. Human gates,
   epics, and molecule steps are surfaced, never claimed. --label
@@ -390,8 +390,7 @@ export async function runNextCommand(argv: string[]): Promise<void> {
   Scope: only beads under this checkout's issue_prefix are claimable;
   gt:slot coordination primitives are never surfaced. Plans may set
   scope = "all" to opt out. --global reads the user-level store
-  instead (\`bro store init --global\`) — same pipeline, different home.`)
-    process.exit(0)
+  instead (\`bro store init --global\`) — same pipeline, different home.`, 0)
   }
   // flag() owns both spellings (--label v / --label=v) and rejects repeats —
   // gating on argv.includes('--label') would miss the = form entirely

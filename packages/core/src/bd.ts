@@ -5,8 +5,9 @@
  */
 import { execFileSync, spawnSync, type ChildProcess } from 'node:child_process'
 import { spawnCollect } from './live-procs.ts'
-import { statSync } from 'node:fs'
-import { join } from 'node:path'
+import { readdirSync, statSync } from 'node:fs'
+import { dirname, join } from 'node:path'
+import { gitTry } from './git.ts'
 
 /** `timeout` supervises every bd call — the caller's own deadline dies
  *  with the caller, and an orphaned bd waits on the embedded noms LOCK
@@ -503,6 +504,63 @@ export function initBeadsStealth(): boolean {
     }
     throw err
   }
+}
+
+// --- store write barometer ------------------------------------------------------
+// Every bd mutation bumps a dolt noms manifest; reads don't. Snapshots of
+// store-derived answers (learn's lesson list, drill's open frame) key on the
+// manifest mtimes so a cache can only ever skip a subprocess, never invent
+// an answer — a store without either layout yields no stamp and every probe
+// reads live.
+
+/** `.beads` for a working dir — BEADS_DIR when an agent spawn pinned it,
+ *  else the sibling of the common git dir (the main checkout; linked
+ *  worktrees share it). null when neither resolves. */
+export function beadsDir(dir: string): string | null {
+  const env = process.env.BEADS_DIR
+  if (env !== undefined && env !== '') {
+    return env
+  }
+  const r = gitTry(['-C', dir, 'rev-parse', '--path-format=absolute', '--git-common-dir'])
+  if (r.code !== 0 || r.out.trim() === '') {
+    return null
+  }
+  return join(dirname(r.out.trim()), '.beads')
+}
+
+/** `<beads>/{embeddeddolt,dolt}/<db>/.dolt/noms/manifest` mtime+size for
+ *  every db dir — bumped on any bd write, so a snapshot keyed on it
+ *  cannot be stale (issue writes over-invalidate, which is safe).
+ *  `embeddeddolt` is the embedded layout, `dolt` the server-mode one —
+ *  the server mutates the same manifest on commit. null means "no
+ *  recognizable dolt store" → read live every probe. */
+export function beadsStoreStamp(dir: string): string | null {
+  const beads = beadsDir(dir)
+  if (beads === null) {
+    return null
+  }
+  const parts: string[] = []
+  for (const root of ['embeddeddolt', 'dolt']) {
+    try {
+      for (const db of readdirSync(join(beads, root))) {
+        try {
+          const st = statSync(join(beads, root, db, '.dolt', 'noms', 'manifest'))
+          if (st.isFile()) {
+            parts.push(`${root}/${db}:${st.mtimeMs}:${st.size}`)
+          }
+        } catch {
+          // not a db dir / unreadable entry — try the next
+        }
+      }
+    } catch {
+      // root absent — the other layout may still exist
+    }
+  }
+  if (parts.length === 0) {
+    return null
+  }
+  parts.sort((a, b) => a.localeCompare(b))
+  return `${beads}|${parts.join('|')}`
 }
 
 export function checkBeads(dir?: string): void {

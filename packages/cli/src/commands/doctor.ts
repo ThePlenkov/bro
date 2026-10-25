@@ -19,15 +19,18 @@ import {
   CONFIG_SECTION_LAYERS,
   connectors,
   CORE_CONFIG_SECTIONS,
+  facade,
   facadeAuth,
   facadeName,
   gitCommonDir,
   gitTry,
+  hasHelpFlag,
   isEnvName,
   janitorDidWork,
   janitorLine,
   loadConfigLayers,
   pidAlive,
+  printUsage,
   probeBdCompat,
   PROVIDER_REGISTRY,
   runJanitor,
@@ -670,9 +673,22 @@ function tasksBackendCheck(
     return beadsTasksCheck(bd, beadsActive, compat, tag)
   }
   const auth = facadeAuth('tasks', { dir }, { prefer })
-  return auth === null
-    ? check('tasks', 'ok', `${name}${tag}`)
-    : check('tasks', 'warn', `${name}${tag} — ${auth}`, 'fix it or repoint connectors.tasks')
+  if (auth !== null) {
+    return check('tasks', 'warn', `${name}${tag} — ${auth}`, 'fix it or repoint connectors.tasks')
+  }
+  // the claims plane's own word (spec bro-l8c4f.12): a best-effort
+  // claim() is assignment, not a lease, and undeclared is unverified —
+  // a competitive runner on this tracker needs an exclusive-claiming store
+  let capNote = ' — claim exclusivity undeclared'
+  try {
+    const cap = facade('tasks', { dir }, { prefer }).claimCapability?.()
+    if (cap?.strength === 'exclusive') {
+      capNote = ''
+    } else if (cap !== undefined) {
+      capNote = ' — claims best-effort (assignment, not a lease)'
+    }
+  } catch { /* resolution already proved by facadeName above */ }
+  return check('tasks', 'ok', `${name}${tag}${capNote}`)
 }
 
 /** Remote group: the git remote `bro sync` pushes to, and the beads Dolt
@@ -1647,6 +1663,9 @@ function printDoctor(checks: DoctorCheck[], budget: ReturnType<typeof readBudget
 }
 
 export function runDoctorCommand(argv: string[]): void {
+  if (hasHelpFlag(argv)) {
+    printUsage('usage: bro doctor [--json]', 0)
+  }
   const json = argv.includes('--json')
   const dir = process.cwd()
   const checks = runDoctorChecks(dir)

@@ -6,6 +6,7 @@ export {
   ghJsonAsync,
   ghTry,
   ghTryAsync,
+  issueLink,
   prLink,
   resolveRepo,
   resolveRepoAsync,
@@ -37,6 +38,8 @@ export {
   bdJsonAsync,
   bdTry,
   bdTryAsync,
+  beadsDir,
+  beadsStoreStamp,
   checkBeads,
   evidenceKind,
   initBeadsStealth,
@@ -140,7 +143,7 @@ export {
 export type { BroConfig, ConfigLayerHit, ConfigLayerName, ConfigLayersResult, ConfigSection, MirrorPolicy, Personality, SddMode, StoreBackend } from './config.ts'
 export type { QueryFacade, QueryOpts, QueryResult } from './queries.ts'
 export { definePlugin } from './plugin.ts'
-export type { BroPlugin } from './plugin.ts'
+export type { BroPlugin, CliContract, CliSubContract } from './plugin.ts'
 export { docTypeNamed, docVerbs, STANDARD_VERBS, verbMethod } from './docs.ts'
 export type { DocAdapter, DocCtx, DocFlags, DocType, DocVerb, Scope } from './docs.ts'
 export {
@@ -157,6 +160,7 @@ export {
   taskStoreAt,
 } from './tasks.ts'
 export type {
+  ClaimCapability,
   DepOpts,
   PublishResult,
   SlotAcquire,
@@ -208,6 +212,8 @@ export type {
   Verdict,
 } from './judge.ts'
 export type {
+  ApprovalProbeOpts,
+  ApprovalVerdict,
   CheckInfo,
   EnqueueOpts,
   MergeOpts,
@@ -361,6 +367,7 @@ export {
   agentsSection,
   claimStep,
   classifyExitCause,
+  classifyExitCauseParts,
   commandCliName,
   isAgentCause,
   mintAgentId,
@@ -396,6 +403,7 @@ export {
   registerSessionPlane,
   releaseSessionSlot,
   reserveSessionSlot,
+  reserveSessionSlotOnce,
   SESSION_SLOT_TTL_MS,
   sessionPlane,
   sessionPlaneForCli,
@@ -409,6 +417,16 @@ export type {
   SessionPlane,
   SessionQuota,
 } from './session-planes.ts'
+export {
+  planeStartingSessions,
+  releaseSessionStart,
+  reserveSessionStart,
+  sessionCapRefusal,
+  sessionCapRefusalFor,
+  sessionCapViews,
+  sessionReservationsDir,
+} from './session-cap.ts'
+export type { SessionCapView } from './session-cap.ts'
 export {
   clearPlanes,
   planeNames,
@@ -456,6 +474,8 @@ export {
 export type { JanitorDeps, JanitorOpts, JanitorReaped, JanitorReport } from './janitor.ts'
 export type { SpecNode, SpecStore } from './specs.ts'
 export { warnDeprecated } from './deprecation.ts'
+export { EXIT, EXIT_CODES, hasHelpFlag, printUsage, usageWriter } from './exits.ts'
+export type { ExitCode, ExitCodeRow } from './exits.ts'
 export { markerLive, markerOwner, pidAlive, procStat } from './proc.ts'
 export { checkPlanVersion, planKind, readPlanDoc } from './plan.ts'
 export type { PlanSchema } from './plan.ts'
@@ -504,4 +524,4 @@ export {
 export type { OrphanSweepReport, ProcRow } from './live-procs.ts'
 // test seam — scrubbed fixture git spawns + the ambient-env guard,
 // shared by every package's suites (same role as providers' testkit)
-export { AMBIENT_GIT, scrubEnv, testGit, testGitEnv, testGitSpawn } from './testkit.ts'
+export { AMBIENT_GIT, scrubEnv, testGit, testGitEnv, testGitSpawn, testRepoInit } from './testkit.ts'

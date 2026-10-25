@@ -3,9 +3,9 @@ import assert from 'node:assert/strict'
 import { chmodSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { facade, registerConnector } from '@broject/core'
+import { facade, registerConnector, type ApprovalVerdict } from '@broject/core'
 import { githubConnector, githubReview } from './index.ts'
-import { mergeAsync } from './reviews.ts'
+import { headApprovalVerdict, mergeAsync, type PrReviewNode } from './reviews.ts'
 
 const WIN32 = process.platform === 'win32'
 
@@ -50,6 +50,10 @@ case "$1 $2" in
           else echo '{"data":{"repository":{"mergeQueue":null}}}'; fi ;;
       *"s0: pullRequest"*) echo '{"data":{"repository":{"s0":${SCAN_NODE},"s1":${SCAN_NODE}}}}' ;;
       *"u0: pullRequest"*) echo '{"data":{"repository":{"u0":{"updatedAt":"2026-02-02T00:00:00Z"},"u1":{"updatedAt":"2026-02-02T00:00:00Z"}}}}' ;;
+      *"reviews(first:100"*) case "$@" in
+          *'after: "'*) echo "\${FAKE_GH_REVIEWS_P2:-{\\}}";;
+          *) echo "\${FAKE_GH_REVIEWS_P1:-{\\}}";;
+        esac ;;
       *) echo '{"data":{"repository":{"pullRequest":{"reviewThreads":{"pageInfo":{"hasNextPage":false,"endCursor":null},"nodes":[{"id":"THR_1","isResolved":false,"isOutdated":false,"comments":{"nodes":[{"author":{"login":"reviewer-bot","__typename":"Bot"},"path":"a.ts","line":3,"body":"fix this","createdAt":"2026-01-01"}]}}]}}}}}' ;;
     esac ;;
   "api -X") if [ "$3" = "PUT" ]; then case "$4" in
@@ -91,7 +95,10 @@ case "$1 $2" in
 esac
 `
 
-function withFakeGh(env: Record<string, string>, fn: (log: string) => void): void {
+/** Arms the fake gh + env, returns the log path and the teardown. The
+ *  async probes' spawned child must still find the script on PATH when
+ *  it settles, so callers awaiting a promise hold the fixture open. */
+function armFakeGh(env: Record<string, string>): { log: string; restore: () => void } {
   const dir = mkdtempSync(join(tmpdir(), 'bro-fake-gh-'))
   const log = join(dir, 'gh.log')
   writeFileSync(log, '')
@@ -106,16 +113,26 @@ function withFakeGh(env: Record<string, string>, fn: (log: string) => void): voi
   process.env.PATH = `${dir}:${prevPath}`
   const prevEnv = Object.fromEntries(Object.keys(vars).map((k) => [k, process.env[k]]))
   Object.assign(process.env, { FAKE_GH_LOG: log, ...vars })
+  return {
+    log,
+    restore: () => {
+      process.env.PATH = prevPath
+      for (const [k, v] of Object.entries(prevEnv)) {
+        if (v === undefined) delete process.env[k]
+        else process.env[k] = v
+      }
+      delete process.env.FAKE_GH_LOG
+      rmSync(dir, { recursive: true, force: true })
+    },
+  }
+}
+
+function withFakeGh(env: Record<string, string>, fn: (log: string) => void): void {
+  const { log, restore } = armFakeGh(env)
   try {
     fn(log)
   } finally {
-    process.env.PATH = prevPath
-    for (const [k, v] of Object.entries(prevEnv)) {
-      if (v === undefined) delete process.env[k]
-      else process.env[k] = v
-    }
-    delete process.env.FAKE_GH_LOG
-    rmSync(dir, { recursive: true, force: true })
+    restore()
   }
 }
 
@@ -895,3 +912,278 @@ async function withFakeGhAsync(
     rmSync(dir, { recursive: true, force: true })
   }
 }
+
+// --- act.requireApproval: current-head / latest-per-reviewer verdict ------
+// (bro-3vy93 round 2 — principal audit): the approval that counts names the
+// head being merged, bots never count, a standing objection vetoes, and the
+// approvers allowlist narrows "trusted" to named logins.
+
+const HEAD_SHA = 'b'.repeat(40)
+const STALE_SHA = 'a'.repeat(40)
+const T = (d: string): string => `2026-01-${d}T00:00:00Z`
+
+const review = (
+  login: string | null,
+  typename: string,
+  state: string,
+  sha: string,
+  submittedAt: string
+): PrReviewNode => ({
+  state,
+  submittedAt,
+  commit: { oid: sha },
+  author: login === null ? null : { __typename: typename, login },
+})
+
+describe('headApprovalVerdict', () => {
+  test('a human approval on the current head passes', () => {
+    const v = headApprovalVerdict(
+      [review('alice', 'User', 'APPROVED', HEAD_SHA, T('02'))],
+      HEAD_SHA
+    )
+    assert.deepEqual(v, { approved: true })
+  })
+
+  test('a human approval on a superseded head is stale — not a sign-off', () => {
+    const v = headApprovalVerdict(
+      [review('alice', 'User', 'APPROVED', STALE_SHA, T('02'))],
+      HEAD_SHA
+    )
+    assert.equal(v.approved, false)
+    assert.match(v.reason!, /predates the current head/)
+  })
+
+  test('an approval overridden by the same reviewer\'s newer objection blocks', () => {
+    const v = headApprovalVerdict(
+      [
+        review('alice', 'User', 'APPROVED', STALE_SHA, T('01')),
+        review('alice', 'User', 'CHANGES_REQUESTED', HEAD_SHA, T('02')),
+      ],
+      HEAD_SHA
+    )
+    assert.equal(v.approved, false)
+    assert.match(v.reason!, /changes requested by alice/)
+  })
+
+  test('another reviewer\'s standing objection vetoes a current-head approval', () => {
+    const v = headApprovalVerdict(
+      [
+        review('bob', 'User', 'CHANGES_REQUESTED', STALE_SHA, T('01')),
+        review('alice', 'User', 'APPROVED', HEAD_SHA, T('02')),
+      ],
+      HEAD_SHA
+    )
+    assert.equal(v.approved, false)
+    assert.match(v.reason!, /changes requested by bob/)
+  })
+
+  test('re-approval on the current head clears the veto', () => {
+    const v = headApprovalVerdict(
+      [
+        review('bob', 'User', 'CHANGES_REQUESTED', STALE_SHA, T('01')),
+        review('bob', 'User', 'APPROVED', HEAD_SHA, T('02')),
+      ],
+      HEAD_SHA
+    )
+    assert.equal(v.approved, true)
+  })
+
+  test('bot-only approvals never satisfy the gate', () => {
+    const v = headApprovalVerdict(
+      [review('ci-bot', 'Bot', 'APPROVED', HEAD_SHA, T('02'))],
+      HEAD_SHA
+    )
+    assert.equal(v.approved, false)
+    assert.match(v.reason!, /bot approvals/)
+  })
+
+  test('the approvers allowlist narrows which humans count', () => {
+    const reviews = [review('bob', 'User', 'APPROVED', HEAD_SHA, T('02'))]
+    const denied = headApprovalVerdict(reviews, HEAD_SHA, ['alice'])
+    assert.equal(denied.approved, false)
+    assert.match(denied.reason!, /outside act\.approvers/)
+    assert.equal(
+      headApprovalVerdict(reviews, HEAD_SHA, ['bob']).approved,
+      true
+    )
+    // host logins are case-insensitive
+    assert.equal(
+      headApprovalVerdict(reviews, HEAD_SHA, ['BOB']).approved,
+      true
+    )
+  })
+
+  test('a stale approval from an untrusted login names the allowlist, not the head', () => {
+    // telling the operator "re-approve" would be wrong — bob's
+    // re-approval still falls outside act.approvers
+    const v = headApprovalVerdict(
+      [review('bob', 'User', 'APPROVED', STALE_SHA, T('02'))],
+      HEAD_SHA,
+      ['alice']
+    )
+    assert.equal(v.approved, false)
+    assert.match(v.reason!, /outside act\.approvers/)
+    // but a stale approval from a TRUSTED login still names the head
+    const t = headApprovalVerdict(
+      [review('alice', 'User', 'APPROVED', STALE_SHA, T('02'))],
+      HEAD_SHA,
+      ['alice']
+    )
+    assert.match(t.reason!, /predates the current head/)
+  })
+
+  test('unattributable and non-decision reviews are ignored', () => {
+    const v = headApprovalVerdict(
+      [
+        review(null, 'User', 'APPROVED', HEAD_SHA, T('02')),
+        review('alice', 'User', 'COMMENTED', HEAD_SHA, T('03')),
+        review('alice', 'User', 'DISMISSED', HEAD_SHA, T('04')),
+      ],
+      HEAD_SHA
+    )
+    assert.equal(v.approved, false)
+    assert.equal(v.reason, 'no approving reviews')
+  })
+
+  test('a later comment never disturbs a standing approval', () => {
+    const v = headApprovalVerdict(
+      [
+        review('alice', 'User', 'APPROVED', HEAD_SHA, T('01')),
+        review('alice', 'User', 'COMMENTED', HEAD_SHA, T('02')),
+      ],
+      HEAD_SHA
+    )
+    assert.equal(v.approved, true)
+  })
+
+  test('a dismissed latest review suppresses that reviewer — an older approval cannot resurface', () => {
+    const v = headApprovalVerdict(
+      [
+        review('alice', 'User', 'APPROVED', HEAD_SHA, T('01')),
+        review('alice', 'User', 'APPROVED', HEAD_SHA, T('02')),
+        review('alice', 'User', 'DISMISSED', HEAD_SHA, T('03')),
+      ],
+      HEAD_SHA
+    )
+    assert.equal(v.approved, false)
+  })
+
+  test('a re-approval after a dismissal stands again', () => {
+    const v = headApprovalVerdict(
+      [
+        review('alice', 'User', 'APPROVED', HEAD_SHA, T('01')),
+        review('alice', 'User', 'DISMISSED', HEAD_SHA, T('02')),
+        review('alice', 'User', 'APPROVED', HEAD_SHA, T('03')),
+      ],
+      HEAD_SHA
+    )
+    assert.equal(v.approved, true)
+  })
+
+  test('no reviews is not approved', () => {
+    const v = headApprovalVerdict([], HEAD_SHA)
+    assert.equal(v.approved, false)
+    assert.equal(v.reason, 'no approving reviews')
+  })
+})
+
+describe('githubReview humanApproved', { skip: WIN32 }, () => {
+  const page = (headSha: string, nodes: PrReviewNode[], next: string | null) =>
+    JSON.stringify({
+      data: {
+        repository: {
+          pullRequest: {
+            headRefOid: headSha,
+            reviews: {
+              pageInfo: { hasNextPage: next !== null, endCursor: next },
+              nodes,
+            },
+          },
+        },
+      },
+    })
+
+  test('paginates the reviews connection to the verdict', () => {
+    // the qualifying human approval sits on the SECOND page — a
+    // first-page-only read is the regression this guards (audit r2)
+    const p1 = page(HEAD_SHA, [review('ci-bot', 'Bot', 'APPROVED', HEAD_SHA, T('01'))], 'cur2')
+    const p2 = page(HEAD_SHA, [review('alice', 'User', 'APPROVED', HEAD_SHA, T('02'))], null)
+    withFakeGh({ FAKE_GH_REVIEWS_P1: p1, FAKE_GH_REVIEWS_P2: p2 }, (log) => {
+      const v = githubReview().humanApproved!(target) as ApprovalVerdict
+      assert.equal(v.approved, true)
+      const calls = readFileSync(log, 'utf8')
+      assert.match(calls, /after: "cur2"/)
+    })
+  })
+
+  test('binds the approval to the live headSha — a stale approval refuses', () => {
+    const p1 = page(HEAD_SHA, [review('alice', 'User', 'APPROVED', STALE_SHA, T('01'))], null)
+    withFakeGh({ FAKE_GH_REVIEWS_P1: p1 }, () => {
+      const v = githubReview().humanApproved!(target) as ApprovalVerdict
+      assert.equal(v.approved, false)
+      assert.match(v.reason!, /predates the current head/)
+      // and the bound head rides the verdict so the fetch can prove the
+      // approval named the head being merged
+      assert.equal(v.headSha, HEAD_SHA)
+    })
+  })
+
+  test('a page without the reviews connection throws — incomplete, not complete', () => {
+    // a missing `reviews` field used to read as "history complete" —
+    // a CHANGES_REQUESTED sitting on the unread connection would pass
+    const p1 = JSON.stringify({
+      data: { repository: { pullRequest: { headRefOid: HEAD_SHA } } },
+    })
+    withFakeGh({ FAKE_GH_REVIEWS_P1: p1 }, () => {
+      assert.throws(() => githubReview().humanApproved!(target), /reviews page incomplete/)
+    })
+  })
+
+  test('hasNextPage with no endCursor throws — it cannot read the rest', () => {
+    const p1 = JSON.stringify({
+      data: {
+        repository: {
+          pullRequest: {
+            headRefOid: HEAD_SHA,
+            reviews: { pageInfo: { hasNextPage: true, endCursor: null }, nodes: [] },
+          },
+        },
+      },
+    })
+    withFakeGh({ FAKE_GH_REVIEWS_P1: p1 }, () => {
+      assert.throws(
+        () => githubReview().humanApproved!(target),
+        /pagination did not advance/
+      )
+    })
+  })
+
+  test('a cursor that repeats the one just consumed throws instead of spinning', () => {
+    // p2 claims another page but hands back the same cursor — the loop
+    // would otherwise request page 2 forever (the sync probe blocking
+    // the event loop on a hostile/stuck host)
+    const p1 = page(HEAD_SHA, [], 'cur2')
+    const p2 = page(HEAD_SHA, [], 'cur2')
+    withFakeGh({ FAKE_GH_REVIEWS_P1: p1, FAKE_GH_REVIEWS_P2: p2 }, () => {
+      assert.throws(
+        () => githubReview().humanApproved!(target),
+        /pagination did not advance/
+      )
+    })
+  })
+
+  test('the async loop fails closed the same way — one shared page step', async () => {
+    const p1 = JSON.stringify({
+      data: { repository: { pullRequest: { headRefOid: HEAD_SHA } } },
+    })
+    const fake = armFakeGh({ FAKE_GH_REVIEWS_P1: p1 })
+    try {
+      await assert.rejects(
+        githubReview().humanApprovedAsync!(target) as Promise<unknown>,
+        /reviews page incomplete/
+      )
+    } finally {
+      fake.restore()
+    }
+  })
+})
