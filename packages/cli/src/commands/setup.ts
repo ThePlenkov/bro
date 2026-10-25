@@ -417,9 +417,13 @@ function setupLockedSkills(dir: string, dryRun: boolean, checkOnly: boolean): vo
     }
   }
 
-  const drift = checkSkillLock(locked, skillsDir)
+  // `npx skills` rewrites the lockfile as it installs, so the hashes it
+  // just wrote are the ones to check against — the copy read before the
+  // install is stale by definition. Re-read it.
+  const current = checkOnly || dryRun ? locked : readSkillLock(dir)
+  const drift = checkSkillLock(current, skillsDir)
   if (drift.length === 0) {
-    console.error(`  ${locked.size} locked skill(s) match the lock`)
+    console.error(`  ${current.size} locked skill(s) match the lock`)
     return
   }
   for (const d of drift) {
