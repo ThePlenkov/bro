@@ -274,20 +274,26 @@ describe('rigNext — the gate probe', () => {
   const reviews = (open: number[], all: number[]): ReviewFacade =>
     ({ prsForBranch: (_b, state) => (state === 'all' ? all : open) }) as ReviewFacade
 
+  /** The gate probe's shared stage: a bro.config connector pin, the
+   *  registered reviews host, the staged open row, and a linked
+   *  worktree on branch `work/<id>`. Returns the worktree path for the
+   *  caller's remove. */
+  const stageGate = (f: Fixture, name: string, host: () => ReviewFacade, id: string): string => {
+    writeFileSync(
+      join(f.dir, 'bro.config.json'),
+      JSON.stringify({ connectors: { reviews: name } })
+    )
+    registerConnector({ name, reviews: host })
+    f.row(id, bead(id))
+    const wt = join(f.dir, '..', `${f.dir.split('/').pop()}--${id}`)
+    git(f.dir, ['worktree', 'add', '-b', `work/${id}`, wt])
+    return wt
+  }
+
   test('an open PR on the item worktree branch is gate; settled is the cleanup step', () => {
     const f = fixture()
     try {
-      writeFileSync(
-        join(f.dir, 'bro.config.json'),
-        JSON.stringify({ connectors: { reviews: 'fakegate' } })
-      )
-      registerConnector({
-        name: 'fakegate',
-        reviews: () => reviews([7], [7]),
-      })
-      f.row('g-1', bead('g-1'))
-      const wt = join(f.dir, '..', `${f.dir.split('/').pop()}--g-1`)
-      git(f.dir, ['worktree', 'add', '-b', 'work/g-1', wt])
+      const wt = stageGate(f, 'fakegate', () => reviews([7], [7]), 'g-1')
       assert.deepEqual(rigNext(f.dir, 'g-1'), {
         verdict: 'gate',
         id: 'g-1',
@@ -305,17 +311,7 @@ describe('rigNext — the gate probe', () => {
   test('a settled PR + open bead is the finalize step', () => {
     const f = fixture()
     try {
-      writeFileSync(
-        join(f.dir, 'bro.config.json'),
-        JSON.stringify({ connectors: { reviews: 'fakesettled' } })
-      )
-      registerConnector({
-        name: 'fakesettled',
-        reviews: () => reviews([], [7]),
-      })
-      f.row('g-2', bead('g-2'))
-      const wt = join(f.dir, '..', `${f.dir.split('/').pop()}--g-2`)
-      git(f.dir, ['worktree', 'add', '-b', 'work/g-2', wt])
+      const wt = stageGate(f, 'fakesettled', () => reviews([], [7]), 'g-2')
       assert.equal(rigNext(f.dir, 'g-2').verdict, 'step')
       assert.match(rigNext(f.dir, 'g-2').detail ?? '', /pr settled/)
       git(f.dir, ['worktree', 'remove', '--force', wt])
@@ -327,19 +323,14 @@ describe('rigNext — the gate probe', () => {
   test('an unreachable host is the honest wait, never a double-work step', () => {
     const f = fixture()
     try {
-      writeFileSync(
-        join(f.dir, 'bro.config.json'),
-        JSON.stringify({ connectors: { reviews: 'fakedown' } })
-      )
-      registerConnector({
-        name: 'fakedown',
-        reviews: () => {
+      const wt = stageGate(
+        f,
+        'fakedown',
+        () => {
           throw new Error('host down')
         },
-      })
-      f.row('g-3', bead('g-3'))
-      const wt = join(f.dir, '..', `${f.dir.split('/').pop()}--g-3`)
-      git(f.dir, ['worktree', 'add', '-b', 'work/g-3', wt])
+        'g-3'
+      )
       assert.deepEqual(rigNext(f.dir, 'g-3'), {
         verdict: 'wait',
         id: 'g-3',

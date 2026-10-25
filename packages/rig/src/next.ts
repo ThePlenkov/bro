@@ -6,7 +6,6 @@
  *
  *  Lives in @broject/rig (bro-jamp7): the CLI's `bro rig next` is the
  *  thin adapter over this — argv/stdout/exit stay in commands/. */
-import { existsSync } from 'node:fs'
 import {
   bdActor,
   gitTry,
@@ -38,14 +37,8 @@ export interface RigNext {
 /** The WAKE: predicate is the last `WAKE:` line in the frame's notes —
  *  parkFrame's append contract. */
 function wakePredicate(row: TaskRow): string | undefined {
-  const lines = row.notes?.split('\n') ?? []
-  for (let i = lines.length - 1; i >= 0; i -= 1) {
-    const l = lines[i]!
-    if (l.startsWith('WAKE: ')) {
-      return l.slice(6)
-    }
-  }
-  return undefined
+  const wakes = (row.notes?.split('\n') ?? []).filter((l) => l.startsWith('WAKE: '))
+  return wakes.at(-1)?.slice(6)
 }
 
 /** No-arg focus: the current frame's queue top (intake order), else
@@ -94,6 +87,12 @@ function agentWait(entry: AgentRegistryEntry | undefined, id: string): RigNext |
   return undefined
 }
 
+/** One registry entry by bead id — the Map read keeps the lookup off
+ *  the dynamic-index sink while the on-disk shape stays a plain record. */
+function registryEntry(dir: string, id: string): AgentRegistryEntry | undefined {
+  return new Map(Object.entries(readAgentRegistry(dir))).get(id)
+}
+
 /** The item's worktree: the registry pin first, else the conventional
  *  `<main>--<id>` sibling path. Undefined when the repo/worktree plane
  *  can't answer. */
@@ -111,11 +110,12 @@ function itemWorktree(dir: string, id: string, entry: AgentRegistryEntry | undef
  *  settled PR + still-open bead is the cleanup edge: finalization, not
  *  work. */
 function gateVerdict(dir: string, id: string, wt: string | undefined): RigNext | undefined {
-  if (typeof wt !== 'string' || !existsSync(wt)) {
+  if (wt === undefined) {
     return undefined
   }
-  // a detached/failed branch read means the PR association is
-  // unknowable — skip the probe rather than guess a branch name
+  // a missing worktree or a detached/failed branch read means the PR
+  // association is unknowable — skip the probe rather than guess a
+  // branch name
   const branch = gitTry(['-C', wt, 'branch', '--show-current']).out.trim()
   if (branch === '') {
     return undefined
@@ -141,6 +141,58 @@ function gateVerdict(dir: string, id: string, wt: string | undefined): RigNext |
   return undefined
 }
 
+/** The verdict legs ahead of the registry/forge reads: a closed row is
+ *  done, a waiting-labelled row parks on its WAKE predicate. Undefined
+ *  — the row walks on to the settled/work legs. */
+function earlyVerdict(row: TaskRow, id: string): RigNext | undefined {
+  if (row.status === 'closed') {
+    return { verdict: 'done', id }
+  }
+  if (row.labels?.includes(WAITING_LABEL)) {
+    return { verdict: 'wait', id, detail: wakePredicate(row) }
+  }
+  return undefined
+}
+
+/** The settled legs — anything that supersedes the work ladder: a live
+ *  registry agent owns the step (wait), an open PR on the item's
+ *  worktree branch moves the transition to the gate, a settled PR is
+ *  the finalize step. `gate === false` skips the worktree/PR probe —
+ *  callers that own the gate themselves (drive's fixer spawn,
+ *  spec bro-oy3k1.6) ask for the cheap ladder only. */
+function settledLegs(
+  dir: string,
+  id: string,
+  entry: AgentRegistryEntry | undefined,
+  gate: boolean | undefined
+): RigNext | undefined {
+  return (
+    agentWait(entry, id) ??
+    (gate === false ? undefined : gateVerdict(dir, id, itemWorktree(dir, id, entry)))
+  )
+}
+
+/** The work legs — reached only when no settled leg fired: an
+ *  in-progress row steps for its owner alone, an open row steps only
+ *  when the bd-side ready read counts it actionable (dep-gated or
+ *  deferred rows aren't work — the same filtered list the focus read),
+ *  and a queue member reports its rank as the step's detail. */
+function workVerdict(dir: string, id: string, row: TaskRow, store: TaskStore): RigNext {
+  if (row.status === 'in_progress') {
+    const actor = bdActor(dir)
+    return row.assignee === actor
+      ? { verdict: 'step', id, detail: 'own claim — resume' }
+      : { verdict: 'blocked', id, detail: `claimed by ${row.assignee ?? '?'}` }
+  }
+  // open: dep-gated/deferred beads aren't actionable work — the same
+  // bd-side filtered ready list the focus read
+  if (!readyBeads(dir, { store }).some((r) => r.id === id)) {
+    return { verdict: 'blocked', id, detail: 'dep-gated or deferred' }
+  }
+  const rank = queueItems(queueScope()).find((q) => q.id === id)?.rank
+  return { verdict: 'step', id, detail: rank === undefined ? undefined : `queue rank ${rank}` }
+}
+
 /** The verdict for one item — the ladder from spec .5: done → wait →
  *  gate → live-worker wait → foreign-claim blocked → dep-gated
  *  blocked → step. `opts.gate === false` skips the worktree/PR probe —
@@ -162,31 +214,10 @@ export function rigNext(
   if (row === undefined) {
     return { verdict: 'blocked', id, detail: 'unknown id' }
   }
-  if (row.status === 'closed') {
-    return { verdict: 'done', id }
+  const early = earlyVerdict(row, id)
+  if (early !== undefined) {
+    return early
   }
-  if (row.labels?.includes(WAITING_LABEL)) {
-    return { verdict: 'wait', id, detail: wakePredicate(row) }
-  }
-  const entry = readAgentRegistry(dir)[id]
-  const settled =
-    agentWait(entry, id) ??
-    (opts?.gate === false ? undefined : gateVerdict(dir, id, itemWorktree(dir, id, entry)))
-  if (settled !== undefined) {
-    return settled
-  }
-  if (row.status === 'in_progress') {
-    const actor = bdActor(dir)
-    if (row.assignee === actor) {
-      return { verdict: 'step', id, detail: 'own claim — resume' }
-    }
-    return { verdict: 'blocked', id, detail: `claimed by ${row.assignee ?? '?'}` }
-  }
-  // open: dep-gated/deferred beads aren't actionable work — the same
-  // bd-side filtered ready list the focus read
-  if (!readyBeads(dir, { store }).some((r) => r.id === id)) {
-    return { verdict: 'blocked', id, detail: 'dep-gated or deferred' }
-  }
-  const rank = queueItems(queueScope()).find((q) => q.id === id)?.rank
-  return { verdict: 'step', id, detail: rank === undefined ? undefined : `queue rank ${rank}` }
+  const settled = settledLegs(dir, id, registryEntry(dir, id), opts?.gate)
+  return settled ?? workVerdict(dir, id, row, store)
 }
