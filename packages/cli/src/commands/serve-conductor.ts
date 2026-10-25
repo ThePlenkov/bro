@@ -2553,7 +2553,9 @@ function finalRespReason(capped: boolean, blocks: OutBlock[], canonical: string)
 const respShape = (r: ResponsesRequest): string | undefined =>
   r.input === undefined || (typeof r.input !== 'string' && !Array.isArray(r.input))
     ? 'input: a string or an items array is required'
-    : undefined
+    : r.previous_response_id !== undefined && typeof r.previous_response_id !== 'string'
+      ? 'previous_response_id: a string is required'
+      : undefined
 
 /** The model label a recorded reply or the wire config resolves to. */
 function respModel(wire: WireCtx, body: MessagesRequest, recorded?: string): string {

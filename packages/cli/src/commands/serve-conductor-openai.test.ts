@@ -402,6 +402,28 @@ describe('serve /v1/responses — the openai dialect', () => {
     }
   })
 
+  // a non-string previous_response_id must 400 at the shape gate — the
+  // unknown-chain template interpolates it, and an object with a
+  // non-callable toString throws outside the turn's try instead.
+  test('a non-string previous_response_id answers 400 — never a template throw', async () => {
+    const fake = fakeAcpAgent({ replyText: 'ok' })
+    const { post, close } = await boot(fake)
+    try {
+      const r = await post('/v1/responses', {
+        input: 'x',
+        previous_response_id: { toString: 5 },
+        stream: false,
+      })
+      assert.equal(r.status, 400)
+      const err = (await r.json()) as { error: { type: string; message: string } }
+      assert.equal(err.error.type, 'invalid_request_error')
+      assert.match(err.error.message, /previous_response_id: a string is required/)
+      assert.equal(fake.prompts.length, 0)
+    } finally {
+      await close()
+    }
+  })
+
   test('missing input answers 400 in the openai error envelope', async () => {
     const fake = fakeAcpAgent({ replyText: 'x' })
     const { r, close } = await postResponses(fake, { stream: false })
