@@ -2,9 +2,9 @@
   "version": 1,
   "skills": {
     "codescene": {
-      "source": "theplenkov-ai/skills",
-      "sourceType": "github",
-      "skillPath": "skills/integrations/codescene/SKILL.md",
+      "source": ".agents/skills/codescene",
+      "sourceType": "local",
+      "skillPath": "SKILL.md",
       "computedHash": "2d9a9d26c5d9e47f8d9f4e7af4d42ce316ab3675d63a9df0e2fa20f495c6d06f"
     },
     "configuring-codescene-mcp": {
@@ -14,9 +14,9 @@
       "computedHash": "6c89bb232adcaa600cd9a9b7550e7cd007a1c6d45fa020c035aad8a0114b1802"
     },
     "evidence": {
-      "source": "theplenkov-ai/skills",
-      "sourceType": "github",
-      "skillPath": "skills/verification/evidence/SKILL.md",
+      "source": ".agents/skills/evidence",
+      "sourceType": "local",
+      "skillPath": "SKILL.md",
       "computedHash": "3b5f8e79e446f831a84f5376221655f5fb5d11c72d477df3357eb8eb2dc43c31"
     },
     "explaining-code-health": {
