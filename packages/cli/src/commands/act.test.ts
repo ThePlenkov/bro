@@ -102,6 +102,7 @@ function fakeRev(o: {
 }): ReviewFacade {
   return {
     resolveRepo: () => 'o/r',
+    prLink: (_repo: string, pr: number) => `[#${pr}](https://example.test/pull/${pr})`,
     currentPr: () => o.branch ?? null,
     ...(o.open !== undefined ? { openPrs: () => o.open! } : {}),
   } as unknown as ReviewFacade
@@ -151,8 +152,12 @@ describe('resolvePr', () => {
       branch: { pr: 11, state: 'OPEN', url: 'u' },
       open: [{ pr: 99, headRef: 'x' }],
     })
-    assert.deepEqual(resolvePr(rev, ['--pr', '5']), { repo: 'o/r', pr: 5 })
-    assert.deepEqual(resolvePr(rev, ['7']), { repo: 'o/r', pr: 7 })
+    assert.deepEqual(resolvePr(rev, ['--pr', '5']), {
+      repo: 'o/r',
+      pr: 5,
+      source: 'explicit',
+    })
+    assert.deepEqual(resolvePr(rev, ['7']), { repo: 'o/r', pr: 7, source: 'explicit' })
   })
 
   test('the open PR of the current branch beats the auto row', () => {
@@ -160,23 +165,38 @@ describe('resolvePr', () => {
       branch: { pr: 11, state: 'OPEN', url: 'u' },
       open: [{ pr: 99, headRef: 'x' }],
     })
-    assert.deepEqual(resolvePr(rev, []), { repo: 'o/r', pr: 11 })
+    assert.deepEqual(resolvePr(rev, []), { repo: 'o/r', pr: 11, source: 'branch' })
     // no notice when the target came from the branch
     assert.equal(stderrOf(() => resolvePr(rev, [])), '')
   })
 
-  test('read mode falls back to the most recently updated open PR, announced', () => {
+  test('read mode falls back to the most recently updated open PR, announced as a link', () => {
     const rev = fakeRev({ branch: null, open: [{ pr: 42, headRef: 'w' }] })
     const err = stderrOf(() => {
-      assert.deepEqual(resolvePr(rev, []), { repo: 'o/r', pr: 42 })
+      assert.deepEqual(resolvePr(rev, []), { repo: 'o/r', pr: 42, source: 'auto' })
     })
-    assert.match(err, /resolved current PR #42/)
+    assert.match(err, /resolved current PR \[#42\]\(https:\/\/example\.test\/pull\/42\)/)
     // a non-OPEN branch PR is no target either
     const closed = fakeRev({
       branch: { pr: 3, state: 'MERGED', url: 'u' },
       open: [{ pr: 42, headRef: 'w' }],
     })
-    assert.deepEqual(resolvePr(closed, []), { repo: 'o/r', pr: 42 })
+    assert.deepEqual(resolvePr(closed, []), { repo: 'o/r', pr: 42, source: 'auto' })
+  })
+
+  test("record mode tags the auto row without a notice — the caller decides", () => {
+    const rev = fakeRev({ branch: null, open: [{ pr: 42, headRef: 'w' }] })
+    const err = stderrOf(() => {
+      assert.deepEqual(resolvePr(rev, [], 'record'), {
+        repo: 'o/r',
+        pr: 42,
+        source: 'auto',
+      })
+    })
+    assert.equal(err, '')
+    // a branch PR in record mode is silently attributable
+    const br = fakeRev({ branch: { pr: 11, state: 'OPEN', url: 'u' } })
+    assert.equal(stderrOf(() => resolvePr(br, [], 'record')), '')
   })
 
   test('strict mode refuses the auto row with exit 2', () => {
@@ -187,9 +207,13 @@ describe('resolvePr', () => {
       code = exitCodeOf(() => resolvePr(rev, [], 'strict'))
     })
     assert.equal(code, 2)
-    assert.match(err, /refusing to act on auto-resolved PR #42/)
+    assert.match(err, /refusing to act on auto-resolved PR \[#42\]/)
     // strict still takes an explicit number and a branch PR
-    assert.deepEqual(resolvePr(rev, ['42'], 'strict'), { repo: 'o/r', pr: 42 })
+    assert.deepEqual(resolvePr(rev, ['42'], 'strict'), {
+      repo: 'o/r',
+      pr: 42,
+      source: 'explicit',
+    })
   })
 
   test('with no auto source at all the resolution exits 2 with guidance', () => {

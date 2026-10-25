@@ -27,19 +27,24 @@ Resolution order for `resolvePr(rev, argv, mode)`:
 `mode` per subcommand:
 
 | subcommand | mode |
-|---|---|
+| --- | --- |
 | `status`, `threads` | read |
-| `wait`, `wait --detach` | read |
+| `wait` | read; an auto target gets **no update-branch push** — a recency guess is not an authorization (strix CWE-862) |
+| `wait --detach` | strict — the detached child mutates with the parent's target |
 | `wait --merge`, `wait --detach --merge` | strict |
 | `merge` | strict |
-| `resolve`, `reply` | never resolve a PR target for their own work (threads act by id); the post-hoc ledger `recordResolve` runs read-mode so a resolve from `main` records on the auto PR with a notice instead of killing the process after the mutation already landed (the pre-existing behavior) |
+| `resolve`, `reply` | never resolve a PR target for their own work (threads act by id); the post-hoc ledger `recordResolve` runs 'record' mode and **skips the row** when only an auto target exists — attributing a thread to the wrong PR poisons the reopen guard (codeant) |
+
+Messages name the PR through `rev.prLink(repo, pr)` — clickable
+references, per the repo-wide link rule.
 
 ## Ordering contract change
 
 `ReviewFacade.openPrs(repo)` gains a documented order: **most recently
-updated first**. GitHub: `gh pr list --json …,updatedAt` sorted client-side
-(`gh pr list` has no sort flags). GitLab: `order_by=updated_at&sort=desc`
-(was default-desc, now explicit).
+updated first**. GitHub: `gh api repos/<repo>/pulls?state=open&sort=updated
+&direction=desc&per_page=100` — the REST endpoint sorts natively
+(`gh pr list` has no sort flags and pages by creation time). GitLab:
+`order_by=updated_at&sort=desc` (was default-desc, now explicit).
 Callers today treat it as a set (watch gates, discovery) — order-insensitive.
 
 ## Non-goals
