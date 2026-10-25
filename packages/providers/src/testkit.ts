@@ -5,8 +5,11 @@
 import { agent, RequestError } from '@agentclientprotocol/sdk'
 import type {
   AgentApp,
+  AgentCapabilities,
+  AgentContext,
   AuthMethod,
   ContentBlock,
+  NewSessionRequest,
   PermissionOption,
   SessionConfigOption,
   SessionUpdate,
@@ -45,18 +48,24 @@ export interface FakeAcpAgent {
   configSets: Array<{ configId: string; value: unknown }>
   /** session/new requests (cwd recorded). */
   sessions: Array<{ cwd: string }>
+  /** The raw session/new params — brokered-transport passthrough
+   *  assertions (bro-ymbq1). */
+  sessionRequests: NewSessionRequest[]
   /** session/cancel notifications the agent received (session ids). */
   cancels: string[]
   /** session/close requests the agent received (session ids). */
   closes: string[]
   /** session/fork requests the agent received (source session ids). */
   forks: string[]
+  /** What the client advertised at initialize — the brokered link's
+   *  capability union shows up here (bro-ymbq1). */
+  clientCapabilities?: unknown
   /** The client's answer to a scripted session/request_permission. */
   permissionOutcome?: unknown
   /** What the agent got back from a scripted terminal/* round-trip. */
   terminalResult?: { output: string; exitCode: number | null | undefined }
-  /** The client's advertised capabilities from initialize. */
-  clientCapabilities?: unknown
+  /** The client's answer to a scripted probeClient call (bro-ymbq1). */
+  probeResult?: unknown
 }
 
 /** A scripted in-process ACP agent — the real protocol round-trip
@@ -82,6 +91,18 @@ export function fakeAcpAgent(
     /** Ask session/request_permission mid-prompt with these options —
      *  the outcome lands in `permissionOutcome`. */
     askPermission?: PermissionOption[]
+    /** A client-bound call made mid-prompt — e.g.
+     *  `(client, sid) => client.request('fs/read_text_file',
+     *  {sessionId: sid, path: '/x'})`; its result lands in
+     *  `probeResult` (bro-ymbq1's brokered bridge). */
+    probeClient?: (client: AgentContext, sessionId: string) => Promise<unknown>
+    /** The prompt turn holds until this resolves — lets a test observe
+     *  live mid-turn traffic (session/update fan-out, cancel) before
+     *  the stop flows (bro-ymbq1). */
+    holdPromptUntil?: Promise<void>
+    /** Extra agentCapabilities merged over the default — e.g.
+     *  loadSession:true to watch the broker strip it (bro-ymbq1). */
+    agentCapabilities?: AgentCapabilities
     /** session/prompt fails: 'auth' answers the wire's auth_required
      *  error (code −32000), 'generic' a plain handler error that
      *  arrives as "Internal error" like any backend flake would,
@@ -113,6 +134,7 @@ export function fakeAcpAgent(
     blocks: [],
     configSets: [],
     sessions: [],
+    sessionRequests: [],
     cancels: [],
     closes: [],
     forks: [],
@@ -126,6 +148,7 @@ export function fakeAcpAgent(
         agentInfo: { name: 'fake-acp', version: '0' },
         agentCapabilities: {
           promptCapabilities: { image: opts.imageCapable === true },
+          ...opts.agentCapabilities,
         },
       }
     })
@@ -134,6 +157,7 @@ export function fakeAcpAgent(
         throw RequestError.authRequired()
       }
       seen.sessions.push({ cwd: ctx.params.cwd })
+      seen.sessionRequests.push(ctx.params)
       return {
         sessionId: `sess-${opts.uniqueSessions === true ? seen.sessions.length : 1}`,
         configOptions: opts.configOptions ?? [],
@@ -142,6 +166,9 @@ export function fakeAcpAgent(
     .onRequest('session/fork', (ctx) => {
       seen.forks.push(ctx.params.sessionId)
       return { sessionId: `sess-fork-${seen.forks.length}` }
+    })
+    .onNotification('session/cancel', (ctx) => {
+      seen.cancels.push(ctx.params.sessionId)
     })
     .onRequest('session/close', (ctx) => {
       seen.closes.push(ctx.params.sessionId)
@@ -212,6 +239,9 @@ export function fakeAcpAgent(
         })
         seen.terminalResult = { output: out.output, exitCode: status.exitCode }
       }
+      if (opts.probeClient !== undefined) {
+        seen.probeResult = await opts.probeClient(ctx.client, ctx.params.sessionId)
+      }
       const updates: SessionUpdate[] = opts.updates ?? [
         {
           sessionUpdate: 'agent_message_chunk',
@@ -225,6 +255,7 @@ export function fakeAcpAgent(
         })
       }
       await opts.holdEnd?.()
+      await opts.holdPromptUntil
       return { stopReason: opts.stopReason ?? 'end_turn' }
     })
   seen.app = app

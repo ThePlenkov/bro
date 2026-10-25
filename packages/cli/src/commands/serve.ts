@@ -101,6 +101,12 @@
  *                               is set in the server env — the session
  *                               token is still required, it is the
  *                               client-side credential
+ *   ALL    /api/v1/acp          the native ACP transport (bro-ymbq1):
+ *                               ACP Streamable HTTP (POST per message,
+ *                               GET SSE for agent→client traffic,
+ *                               DELETE to drop the connection) brokered
+ *                               onto the conductor's pooled acp peer —
+ *                               the protocol passes through untranslated
  *
  * Discovery + credentials: `<git-common-dir>/bro/serve.json` {pid,
  * url, dir, startedAt, token} written on listen (tmp+rename, mode
@@ -196,6 +202,7 @@ import { providerConfig, providerProxy, type ProviderConfig } from './serve-prov
 import { conductorConfig, conductorProxy, type ConductorConfig } from './serve-conductor.ts'
 import type { ExitCode } from '@broject/core'
 import type { AcpTerminals, TerminalFollow } from '@broject/providers'
+import { acpTransport } from './serve-acp.ts'
 import { readBeads } from './status.ts'
 import { collectSnapshot } from './watch.ts'
 import { readHeartbeat, type HeartbeatSummary } from './watch-heartbeat.ts'
@@ -487,6 +494,14 @@ export interface ServeDeps {
    *  terminal registry (bro-eua0d). Absent → the route 404s like any
    *  unwired plane (no conductor, no agent shells to read). */
   terminals?: () => AcpTerminals | undefined
+  /** `/api/v1/acp` native ACP transport (bro-ymbq1) — Streamable HTTP,
+   *  raw-stream like /v1/*; absent means no acp backend wired. Sync:
+   *  the SDK's node adapter owns its async internally. `dispose` is the
+   *  same teardown channel as `provider`'s — its pooled upstream peer
+   *  must close on shutdown like any retained acp transport. */
+  acp?: ((req: IncomingMessage, res: ServerResponse) => void) & {
+    dispose?: () => void
+  }
 }
 
 export interface ServeResponse {
@@ -522,6 +537,7 @@ const ROUTES = [
   'DELETE /api/v1/agents/<ref>',
   'POST /api/v1/webhooks/github',
   'ALL /v1/*',
+  'ALL /api/v1/acp',
 ]
 
 /** Per-server context — startedAt is captured at LISTEN time, not module
@@ -1122,13 +1138,7 @@ async function handleRequest(
     // self-answering routes chain first — each returns true once it
     // owns the response (guarded refusal, SSE upgrade, or a 404 it
     // alone can phrase); anything else falls through to the envelope
-    const routed =
-      (await routeProvider(req, res, url.pathname, deps, token, statePathHint)) ||
-      (await routeAgentLog(req, res, url, deps, token, statePathHint)) ||
-      (await routeAgentEvents(req, res, url, deps, token, statePathHint)) ||
-      (await routeTerminalOutput(req, res, url, deps, token, statePathHint)) ||
-      (await routeEventsStream(req, res, url.pathname, deps.eventsBus?.()))
-    if (routed) {
+    if (await routeSelfAnswering(req, res, url, deps, token, statePathHint)) {
       return
     }
     const wantsBody =
@@ -1154,6 +1164,27 @@ async function handleRequest(
   } catch (err) {
     sendError(res, err)
   }
+}
+
+/** The self-answering route chain — raw-stream and upgrade planes that
+ *  own their response end to end. True once one answers; the envelope
+ *  dispatcher only sees what falls through. */
+async function routeSelfAnswering(
+  req: IncomingMessage,
+  res: ServerResponse,
+  url: URL,
+  deps: ServeDeps,
+  token: string,
+  statePathHint: string
+): Promise<boolean> {
+  return (
+    (await routeProvider(req, res, url.pathname, deps, token, statePathHint)) ||
+    routeAcp(req, res, url.pathname, deps, token, statePathHint) ||
+    (await routeAgentLog(req, res, url, deps, token, statePathHint)) ||
+    (await routeAgentEvents(req, res, url, deps, token, statePathHint)) ||
+    (await routeTerminalOutput(req, res, url, deps, token, statePathHint)) ||
+    (await routeEventsStream(req, res, url.pathname, deps.eventsBus?.()))
+  )
 }
 
 /** Error → response mapping: HttpError is fail-closed input
@@ -1207,6 +1238,40 @@ async function routeProvider(
     return true
   }
   await deps.provider(req, res)
+  return true
+}
+
+/** `/api/v1/acp` — the native ACP transport (spec bro-ymbq1). Same
+ *  raw-stream seat as /v1/*: POSTs carry JSON-RPC messages, GET
+ *  answers a long-lived SSE stream, DELETE drops the connection —
+ *  none of it fits the ServeResponse envelope. The credential check
+ *  is providerGuard's on EVERY method — a blinded session/prompt
+ *  still spends agent budget. True once the path is answered. */
+function routeAcp(
+  req: IncomingMessage,
+  res: ServerResponse,
+  pathname: string,
+  deps: ServeDeps,
+  token: string,
+  statePathHint: string
+): boolean {
+  if (pathname !== '/api/v1/acp') {
+    return false
+  }
+  const wantsBody =
+    req.method === 'POST' || req.method === 'PUT' || req.method === 'PATCH'
+  const refusal = providerGuard(req, token, wantsBody, statePathHint)
+  if (refusal !== undefined) {
+    send(res, refusal.status, refusal.body, refusal)
+    return true
+  }
+  if (deps.acp === undefined) {
+    send(res, 404, {
+      error: 'acp transport not wired — set BRO_PROVIDER_BACKEND to an acp provider',
+    })
+    return true
+  }
+  deps.acp(req, res)
   return true
 }
 
@@ -1834,6 +1899,9 @@ function realDeps(
   // the conductor's proxy carries the live link's terminal registry —
   // the /api/v1/terminals plane reads through it (bro-eua0d)
   const conductor = conductorCfg !== undefined ? conductorProxy(conductorCfg) : undefined
+  // /api/v1/acp — the native transport rides the same conductor
+  // config: one acp backend, two surfaces (bro-ymbq1)
+  const acp = conductorCfg !== undefined ? acpTransport(conductorCfg) : undefined
   return {
     snapshot: () => collectSnapshot(dir),
     agents: async () => {
@@ -1887,7 +1955,7 @@ function realDeps(
       }),
     },
     ...(conductor !== undefined
-      ? { provider: conductor, terminals: conductor.terminals }
+      ? { provider: conductor, terminals: conductor.terminals, acp }
       : providerCfg !== undefined
         ? { provider: providerProxy(providerCfg) }
         : {}),
@@ -2462,6 +2530,7 @@ export async function runServeCommand(argv: string[]): Promise<void> {
     // kill the pooled acp transport before the broker — its ref'd child
     // handles are what would otherwise pin the loop past server.close()
     deps.provider?.dispose?.()
+    deps.acp?.dispose?.()
     await broker?.close()
     clearServeState(dir)
   } finally {
