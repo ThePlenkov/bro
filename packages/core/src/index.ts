@@ -523,3 +523,10 @@ export type { OrphanSweepReport, ProcRow } from './live-procs.ts'
 // test seam — scrubbed fixture git spawns + the ambient-env guard,
 // shared by every package's suites (same role as providers' testkit)
 export { AMBIENT_GIT, scrubEnv, testGit, testGitEnv, testGitSpawn, testRepoInit } from './testkit.ts'
+export {
+  checkSkillLock,
+  fileHash,
+  readSkillLock,
+  type LockedSkill,
+  type SkillDrift,
+} from './skills-lock.ts'
