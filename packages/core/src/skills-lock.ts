@@ -123,30 +123,43 @@ export function readSkillLock(root: string): Map<string, LockedSkill> {
   } catch {
     return out
   }
+  for (const [name, value] of Object.entries(skillsOf(parsed))) {
+    const skill = lockedSkill(name, value)
+    if (skill !== null) {
+      out.set(name, skill)
+    }
+  }
+  return out
+}
+
+/** The `skills` map of a parsed lockfile — empty when the shape is wrong. */
+function skillsOf(parsed: unknown): Record<string, unknown> {
   if (typeof parsed !== 'object' || parsed === null) {
-    return out
+    return {}
   }
   const skills = (parsed as { skills?: unknown }).skills
   if (typeof skills !== 'object' || skills === null) {
-    return out
+    return {}
   }
-  for (const [name, value] of Object.entries(skills as Record<string, unknown>)) {
-    if (typeof value !== 'object' || value === null) {
-      continue
-    }
-    const v = value as Partial<LockedSkill>
-    if (typeof v.source !== 'string' || typeof v.computedHash !== 'string') {
-      continue
-    }
-    out.set(name, {
-      name,
-      source: v.source,
-      sourceType: typeof v.sourceType === 'string' ? v.sourceType : 'github',
-      skillPath: typeof v.skillPath === 'string' ? v.skillPath : '',
-      computedHash: v.computedHash,
-    })
+  return skills as Record<string, unknown>
+}
+
+/** One lock entry — null when it carries no source or no hash. */
+function lockedSkill(name: string, value: unknown): LockedSkill | null {
+  if (typeof value !== 'object' || value === null) {
+    return null
   }
-  return out
+  const v = value as Partial<LockedSkill>
+  if (typeof v.source !== 'string' || typeof v.computedHash !== 'string') {
+    return null
+  }
+  return {
+    name,
+    source: v.source,
+    sourceType: typeof v.sourceType === 'string' ? v.sourceType : 'github',
+    skillPath: typeof v.skillPath === 'string' ? v.skillPath : '',
+    computedHash: v.computedHash,
+  }
 }
 
 /**
