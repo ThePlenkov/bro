@@ -45,7 +45,7 @@ already do it. The new thing is the combination:
 ## Vocabulary
 
 | Term | Meaning |
-|---|---|
+| --- | --- |
 | **host** | An agent product (claude, codex, devin, …), represented in bro by a host adapter. |
 | **session** | One host conversation: `(host, nativeSessionId)`, plus cwd, pid/start-time, adapter version, mode, and state (live, idle, ended, interrupted). |
 | **project** | Identity = realpath of the git common dir (or of the folder when there is no git), plus a remote hash. Linked worktrees fold into one project. |
@@ -60,7 +60,7 @@ The core (`@broject/core`) knows contracts, never backends. This spec adds two f
 `FacadeMap` and extends one registry. Everything else reuses facades that already exist:
 
 | Concern | Contract | Default backend | Swappable for |
-|---|---|---|---|
+| --- | --- | --- | --- |
 | hook/event/session storage | **`ledger: LedgerFacade`** (new) | spool + `node:sqlite` (WAL) under `$XDG_STATE_HOME/bro/` | jsonl-only, OTLP sink, remote ledger (mesh, later) |
 | resource leases | **`claims: ClaimFacade`** (new) | ledger-sqlite leases | beads (`bd update --claim`) for `task:*`, mesh for cross-host |
 | host specifics | **`SessionPlane`** (extended, optional members) | one plane per host | — (vendor names never reach core) |
