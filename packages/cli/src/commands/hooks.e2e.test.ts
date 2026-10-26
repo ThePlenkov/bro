@@ -882,6 +882,101 @@ describe('hooks e2e — session-start + the run.sh launcher', () => {
     }
   })
 
+  test('run.sh fails open under dash and bash with one launcher-wide budget', () => {
+    const cases = [
+      {
+        name: 'watchdog kill stops fallback',
+        event: 'session-start',
+        input: '{}',
+        script: `const { writeFileSync } = require('node:fs')\nwriteFileSync(process.env.LOCAL_MARKER, 'started')\nsetTimeout(() => {}, 30_000)\n`,
+        watchdogS: '2',
+        fallback: false,
+        local: true,
+        captureFailure: false,
+        timeout: 3_000,
+      },
+      {
+        name: 'quick nonzero exit falls through',
+        event: 'session-start',
+        input: '{}',
+        script: `const { writeFileSync } = require('node:fs')\nwriteFileSync(process.env.LOCAL_MARKER, 'started')\nprocess.exit(7)\n`,
+        watchdogS: '8',
+        fallback: true,
+        local: true,
+        captureFailure: false,
+        timeout: 2_500,
+      },
+      {
+        name: 'partial payload capture runs no candidate',
+        event: 'post-tool',
+        input: '{"cursor_version":"1"}',
+        script: `const { writeFileSync } = require('node:fs')\nwriteFileSync(process.env.LOCAL_MARKER, 'started')\n`,
+        watchdogS: '8',
+        fallback: false,
+        local: false,
+        captureFailure: true,
+        timeout: 2_500,
+      },
+    ] as const
+    for (const scenario of cases) {
+      for (const shell of ['/bin/dash', '/bin/bash']) {
+        const f = hookFixture()
+        inside(f.main, f.root, () => {
+          const bin = join(f.root, 'bin')
+          const pluginRoot = join(f.root, 'plugin')
+          const localMarker = join(f.root, 'local.started')
+          const fallbackMarker = join(f.root, 'fallback.started')
+          mkdirSync(bin)
+          mkdirSync(join(pluginRoot, 'packages', 'cli', 'dist'), { recursive: true })
+          writeFileSync(join(pluginRoot, 'packages', 'cli', 'dist', 'index.js'), scenario.script)
+          if (scenario.captureFailure) {
+            const cat = join(bin, 'cat')
+            writeFileSync(
+              cat,
+              `#!/bin/sh
+if [ "$#" -eq 0 ]; then
+  printf '%s' '{"cursor_version":"1"'
+  exit 1
+fi
+exec /bin/cat "$@"
+`
+            )
+            chmodSync(cat, 0o755)
+          }
+          const bro = join(bin, 'bro')
+          writeFileSync(bro, '#!/bin/sh\nprintf x > "$FALLBACK_MARKER"\n')
+          chmodSync(bro, 0o755)
+
+          const started = Date.now()
+          const proc = spawnSync(shell, [RUN_SH, scenario.event], {
+            cwd: f.main,
+            input: scenario.input,
+            env: e2eEnv({
+              PATH: `${bin}:${process.env.PATH}`,
+              PLUGIN_ROOT: pluginRoot,
+              LOCAL_MARKER: localMarker,
+              FALLBACK_MARKER: fallbackMarker,
+              BRO_HOOK_WATCHDOG_S: scenario.watchdogS,
+              XDG_STATE_HOME: join(f.root, 'xdg-state'),
+            }),
+            encoding: 'utf8',
+            timeout: scenario.timeout,
+          })
+          const elapsed = Date.now() - started
+          assert.equal(proc.error, undefined, `${shell} ${scenario.name} exceeded the bound`)
+          assert.equal(proc.status, 0, proc.stderr)
+          assert.equal(existsSync(localMarker), scenario.local, `${shell} ${scenario.name} local CLI`)
+          assert.equal(
+            existsSync(fallbackMarker),
+            scenario.fallback,
+            `${shell} ${scenario.name} had unexpected fallback behavior`
+          )
+          assert.ok(elapsed < 2_200, `${shell} ${scenario.name} took ${elapsed}ms`)
+        })
+      }
+    }
+  })
+
   test('run.sh forwards captured and uncaptured stdin byte-for-byte under dash and bash', () => {
     const cases = [
       { event: 'permission', input: '{"hook_event_name":"permission"}\n' },

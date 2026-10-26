@@ -3,8 +3,8 @@
 # PATH. There is no network fallback on the hook path.
 #
 # Fail-open contract: nothing here may stall or fail the session —
-# commands run (not exec'd), a failed candidate falls through to the
-# next, and the script always exits 0.
+# normal candidate failures fall through, deadline exhaustion stops the
+# chain, and the script always exits 0.
 #
 # No-op fast path (spec: specs/bro-arm83.md): post-tool fires on every
 # tool call and prompt-submit on every prompt; most emit nothing yet
@@ -26,6 +26,7 @@ set -u
 # must allow), so it still resolves the binary; the CLI's flag check
 # answers before any probe runs.
 [ "${BRO_HOOKS:-}" = "0" ] && [ "${1:-}" != "permission" ] && exit 0
+BRO_HOOK_T0=$(date +%s)
 
 SCRIPT_ROOT=$(CDPATH= cd -P "$(dirname "$0")/.." 2>/dev/null && pwd -P)
 DEVIN_PROJECT_ROOT=
@@ -60,6 +61,7 @@ EVENT=${1:-}
 
 cleanup_payload() {
   [ -z "$PAYLOAD_FILE" ] || rm -f "$PAYLOAD_FILE"
+  return 0
 }
 trap cleanup_payload 0
 
@@ -81,14 +83,39 @@ run_hook() {
 }
 
 run_bounded() {
+  RUN_BOUNDED_EXPIRED=0
+  _now=$(date +%s)
+  _elapsed=$((_now - BRO_HOOK_T0))
+  _remaining=$((BRO_HOOK_WATCHDOG_S - _elapsed))
+  if [ "$_remaining" -le 0 ]; then
+    RUN_BOUNDED_EXPIRED=1
+    return 124
+  fi
+  _marker=$(mktemp "${TMPDIR:-/tmp}/bro-hook-watchdog.XXXXXX" 2>/dev/null) || {
+    RUN_BOUNDED_EXPIRED=1
+    return 124
+  }
   exec 3<&0
   run_hook "$@" <&3 &
   _pid=$!
-  ( sleep "$BRO_HOOK_WATCHDOG_S"; kill -KILL "$_pid" 2>/dev/null ) </dev/null >/dev/null 2>&1 &
+  (
+    sleep "$_remaining"
+    printf 1 > "$_marker" 2>/dev/null
+    kill -KILL "$_pid" 2>/dev/null
+  ) </dev/null >/dev/null 2>&1 &
   _wd=$!
   wait "$_pid" 2>/dev/null
   _rc=$?
   kill "$_wd" 2>/dev/null
+  wait "$_wd" 2>/dev/null || true
+  if [ -s "$_marker" ]; then
+    RUN_BOUNDED_EXPIRED=1
+  else
+    _now=$(date +%s)
+    _elapsed=$((_now - BRO_HOOK_T0))
+    [ "$_elapsed" -ge "$BRO_HOOK_WATCHDOG_S" ] && RUN_BOUNDED_EXPIRED=1
+  fi
+  rm -f "$_marker" 2>/dev/null
   return "$_rc"
 }
 
@@ -202,8 +229,12 @@ post-tool|prompt-submit)
   NEED_NODE=
   PAYLOAD_FILE=$(mktemp "${TMPDIR:-/tmp}/bro-hook.XXXXXX" 2>/dev/null) || PAYLOAD_FILE=
   if [ -n "$PAYLOAD_FILE" ]; then
-    cat > "$PAYLOAD_FILE"
-    PAYLOAD=$(cat "$PAYLOAD_FILE")
+    if ! cat > "$PAYLOAD_FILE"; then
+      exit 0
+    fi
+    if ! PAYLOAD=$(cat "$PAYLOAD_FILE"); then
+      exit 0
+    fi
     CAPTURED=1
   else
     NEED_NODE=1
@@ -561,10 +592,14 @@ while [ ! -f "$DIR/packages/cli/dist/index.js" ]; do
 done
 
 if [ -f "$DIR/packages/cli/dist/index.js" ] && command -v node >/dev/null 2>&1; then
-  run_bounded node "$DIR/packages/cli/dist/index.js" hooks "$@" && exit 0
+  run_bounded node "$DIR/packages/cli/dist/index.js" hooks "$@"
+  _rc=$?
+  [ "$RUN_BOUNDED_EXPIRED" = 1 ] && exit 0
+  [ "$_rc" -eq 0 ] && exit 0
 fi
 if command -v bro >/dev/null 2>&1; then
   run_bounded bro hooks "$@" || true
+  [ "$RUN_BOUNDED_EXPIRED" = 1 ] && exit 0
 elif [ "$EVENT" = permission ] && [ -n "${CURSOR_PLUGIN_ROOT:-}" ]; then
   printf '%s\n' '{"permission":"ask"}'
 fi
