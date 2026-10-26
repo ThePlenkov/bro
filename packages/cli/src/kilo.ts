@@ -19,6 +19,12 @@ import type { Plugin } from '@kilocode/plugin'
 
 const HOOK_TIMEOUT_MS = 15_000
 const RUN_TIMEOUT_MS = 120_000
+const MAX_OUTPUT = 1 << 20
+
+function appendOutput(current: string, chunk: string): string {
+  const remaining = MAX_OUTPUT - current.length
+  return remaining > 0 ? current + chunk.slice(0, remaining) : current
+}
 
 /** Walk up from the plugin dir for a built CLI — adapter dirs live
  *  below the repo root, so a relative/malformed root can't wander off. */
@@ -123,11 +129,11 @@ function spawnCollect(command: string, args: string[], options: SpawnOptions): P
     )
     child.stdout?.setEncoding('utf8')
     child.stdout?.on('data', (chunk: string) => {
-      stdout += chunk
+      stdout = appendOutput(stdout, chunk)
     })
     child.stderr?.setEncoding('utf8')
     child.stderr?.on('data', (chunk: string) => {
-      stderr += chunk
+      stderr = appendOutput(stderr, chunk)
     })
     child.on('error', (error) => {
       clearTimeout(timer)
@@ -210,17 +216,17 @@ const BroPlugin: Plugin = async ({ directory, client }) => {
   // session-start probes are idempotent but not free (they shell out to
   // gh/bd) — run them once per session, then push the cached context on
   // every turn so it survives compaction. The plugin instance is shared
-  // across sessions, so `liveSessions` records which session each event
-  // belongs to: a sessionless transform may only push context whose
-  // owning session is still live — otherwise the prior session's
-  // hydrate leaks into a reused instance.
+  // across sessions, so each session owns its own hydrated context.
   const liveSessions = new Set<string>()
-  let hydratedSession: string | null = null
-  let hydratedContext: string | null = null
-  const hydrate = async (sessionId: string): Promise<void> => {
-    const out = await runBroHook('session-start', { session_id: sessionId })
-    hydratedContext = hookContext(out)
-    hydratedSession = sessionId
+  const hydratedContexts = new Map<string, { token: number; context: string | null }>()
+  let hydrationToken = 0
+  const hydrate = async (sessionKey: string): Promise<void> => {
+    const token = ++hydrationToken
+    hydratedContexts.set(sessionKey, { token, context: null })
+    const out = await runBroHook('session-start', { session_id: sessionKey })
+    if (hydratedContexts.get(sessionKey)?.token === token) {
+      hydratedContexts.set(sessionKey, { token, context: hookContext(out) })
+    }
   }
 
   return {
@@ -249,20 +255,15 @@ const BroPlugin: Plugin = async ({ directory, client }) => {
     // second run just re-reads the same ready queue / drill frame).
 
     'experimental.chat.system.transform': async (input, output) => {
-      const sessionId = input.sessionID ?? ''
+      const sessionKey = input.sessionID ?? ''
       // hydrate once per session — the probes shell out to gh/bd
-      if (sessionId && hydratedSession !== sessionId) {
-        liveSessions.add(sessionId)
-        await hydrate(sessionId)
+      if (sessionKey && !hydratedContexts.has(sessionKey)) {
+        liveSessions.add(sessionKey)
+        await hydrate(sessionKey)
       }
-      // A sessionless transform inherits whichever session hydrated last;
-      // push only when that owner is still live, so a reused instance can
-      // never inject a retired session's context into an early turn.
-      const ownerLive =
-        hydratedSession !== null &&
-        (hydratedSession === sessionId || liveSessions.has(hydratedSession))
-      if (hydratedContext && ownerLive) {
-        output.system.push(`bro state — resume from here:\n${hydratedContext}`)
+      const context = hydratedContexts.get(sessionKey)?.context
+      if (context && liveSessions.has(sessionKey)) {
+        output.system.push(`bro state — resume from here:\n${context}`)
       }
     },
 
@@ -287,14 +288,15 @@ const BroPlugin: Plugin = async ({ directory, client }) => {
             : null
       if (event.type === 'session.created' && sid !== null) {
         liveSessions.add(sid)
-        if (sid !== hydratedSession) {
+        if (!hydratedContexts.has(sid)) {
           await hydrate(sid)
         }
       } else if (event.type === 'session.deleted') {
         liveSessions.delete(sid ?? '')
-        if (sid === null || sid === hydratedSession) {
-          hydratedSession = null
-          hydratedContext = null
+        if (sid === null) {
+          hydratedContexts.clear()
+        } else {
+          hydratedContexts.delete(sid)
         }
       }
       if (event.type !== 'session.idle') {
