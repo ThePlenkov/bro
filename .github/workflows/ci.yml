@@ -50,10 +50,13 @@ jobs:
         run: npm test
 
       - name: Hook latency baseline
+        # earlier steps may fail after the build — run anyway when the
+        # dist exists so the artifact survives the run that needs it
+        if: always() && hashFiles('packages/cli/dist/index.js') != ''
         run: node scripts/bench-hooks.ts --out hooks-latency.json --enforce
 
       - name: Upload hook latency artifact
-        if: always()
+        if: always() && hashFiles('hooks-latency.json') != ''
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
           name: hooks-latency

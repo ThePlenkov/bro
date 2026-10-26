@@ -117,6 +117,7 @@ import { emitPostMerge, runPostMergeRefresh } from './postmerge.ts'
 import { maybeSpawnTraceFlush } from './trace.ts'
 import { emitRefGuard } from './refguard.ts'
 import { goalContextLines, goalStopLines } from './goal.ts'
+import { HOOK_DISPATCH_ERR } from './hook-signal.ts'
 import { heartbeatLine } from './watch-heartbeat.ts'
 import {
   CURSOR_HYDRATED_SKILL,
@@ -2140,11 +2141,13 @@ export async function runHooksCommand(argv: string[]): Promise<void> {
   try {
     await dispatchHook(event, raw, input)
     evSpan.end()
-  } catch {
+  } catch (e) {
     evSpan.end({}, 'error')
     // hooks fail open — a bro bug must never break the session.
     // A permission hook that already answered returned above; this
-    // covers a throw before that answer.
+    // covers a throw before that answer. The marker line is the
+    // watchdog signal (the latency bench counts it) — exit stays 0.
+    console.error(`${HOOK_DISPATCH_ERR} ${event} — ${e instanceof Error ? e.message : String(e)}`)
     answerCursorPermission(event, input)
   } finally {
     clearTimeout(deadlineTimer)
