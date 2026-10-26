@@ -134,11 +134,14 @@ function emit(): void {
   };
   for (const item of items) {
     const s = JSON.stringify(item);
-    if (size + s.length + 1 > EMIT_PAYLOAD_MAX) {
+    // the env-string ceiling is bytes — .length counts UTF-16 code
+    // units and multibyte error text would undercount past E2BIG
+    const n = Buffer.byteLength(s);
+    if (size + n + 1 > EMIT_PAYLOAD_MAX) {
       ship();
     }
     chunk.push(s);
-    size += s.length + 1;
+    size += n + 1;
   }
   ship();
 }

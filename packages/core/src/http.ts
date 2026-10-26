@@ -19,10 +19,14 @@ export function getJson(url: string, timeoutMs: number): Promise<unknown | undef
     };
     const req = request(url, { method: 'GET' }, res => {
       let body = '';
+      // the cap is bytes — .length counts UTF-16 code units and would
+      // undercount a multibyte body past the limit
+      let bodyBytes = 0;
       res.setEncoding('utf8');
       res.on('data', (d: string) => {
         body += d;
-        if (body.length > MAX_JSON_BODY) {
+        bodyBytes += Buffer.byteLength(d);
+        if (bodyBytes > MAX_JSON_BODY) {
           req.destroy();
         }
       });
