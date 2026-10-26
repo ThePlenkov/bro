@@ -19,6 +19,7 @@ import {
   bdActor,
   countSessionReservations,
   DEFAULT_CONFIG,
+  deriveProviderWalls,
   patchAgentRegistry,
   procStat,
   readAgentRegistry,
@@ -31,6 +32,8 @@ import {
   type AgentInfo,
   type AgentRegistryEntry,
   type ConnectorCtx,
+  type ResolvedClass,
+  type SpawnSpec,
 } from '@broject/core'
 import {
   agentConnectorNames,
@@ -54,6 +57,7 @@ import {
   batchWallRefusal,
   resolveAgentConnector,
   resolveSpawnProvider,
+  resolveSpawnRoute,
   sessionKindOf,
   sessionQuotaOf,
   unregisterAgentConnector,
@@ -1922,6 +1926,70 @@ describe('resolveSpawnProvider', () => {
     assert.equal(pick.worker?.kind === 'argv' ? pick.worker.cliName : undefined, 'kilo')
   })
 
+  test('a route candidate resolution failure names the class and provider as config', async () => {
+    await assert.rejects(
+      resolveSpawnRoute(
+        env,
+        'native',
+        {
+          class: 'free',
+          chain: [{ provider: 'local' }, { provider: 'missing' }],
+          onWall: 'fallthrough',
+          provider: 'local',
+        },
+        {}
+      ),
+      (err: unknown) =>
+        err instanceof SpawnError &&
+        err.kind === 'config' &&
+        /fleet\.routing\.free provider "missing"/.test(err.message)
+    )
+  })
+
+  test('a route candidate preserves an input error kind', async () => {
+    await assert.rejects(
+      resolveSpawnRoute(
+        env,
+        'native',
+        {
+          class: 'free',
+          chain: [{ provider: 'missing' }],
+          onWall: 'fallthrough',
+          provider: 'missing',
+        },
+        {},
+        'flag'
+      ),
+      (err: unknown) =>
+        err instanceof SpawnError &&
+        err.kind === 'input' &&
+        /fleet\.routing\.free provider "missing"/.test(err.message)
+    )
+  })
+
+  test('a model selection applies to the chain head, not fallback provider pins', async () => {
+    const routeEnv: AgentConnectorEnv = {
+      ...env,
+      providers: {
+        A: { type: 'cli', command: 'node {promptFile} --model {model}', model: 'a-default' },
+        B: { type: 'cli', command: 'node {promptFile} --model {model}', model: 'b-default' },
+        C: { type: 'cli', command: 'node {promptFile} --model {model}', model: 'c-default' },
+      },
+    }
+    const resolved: ResolvedClass = {
+      class: 'free',
+      chain: [{ provider: 'A', model: 'a1' }, { provider: 'B' }, { provider: 'C', model: 'c1' }],
+      onWall: 'fallthrough',
+      provider: 'A',
+      model: 'a1',
+    }
+    const route = await resolveSpawnRoute(routeEnv, 'native', resolved, { model: 'x' })
+    assert.deepEqual(
+      route.candidates.map((candidate) => candidate.model),
+      ['x', 'b-default', 'c1']
+    )
+  })
+
   test('cli {model} placeholder wires the resolved model into the worker command', async () => {
     const pin = await resolveSpawnProvider(env, 'native', { provider: 'zen' }, 'flag')
     assert.equal(pin.model, 'zen/free')
@@ -2429,5 +2497,225 @@ describe('the provider wall blocks the batch lane only (spec bro-9h86l)', () => 
       batchWallRefusal(walled(past), { provider: 'devin', env: { BRO_BATCH: '1' } }),
       undefined
     )
+  })
+})
+
+describe('fleet chain walk spawn integration', () => {
+  const fx = (rows: Array<Record<string, unknown>>) => fixture(rows)
+  const conn = (f: Fixture) => makeNativeConnector({ dir: f.main }, f.env)
+  const future = '2099-01-01T00:00:00Z'
+  const oldSpawn = '2026-10-20T00:00:00Z'
+  const routeFor = (onWall: 'park' | 'fallthrough'): NonNullable<SpawnSpec['route']> => ({
+    class: 'free',
+    onWall,
+    candidates: ['A', 'B'].map((provider) => ({
+      provider,
+      model: `model-${provider}`,
+      worker: { kind: 'template', command: 'node {promptFile}' },
+    })),
+  })
+  const death = (provider: string): AgentRegistryEntry => ({
+    agentId: `native-${provider.toLowerCase()}-dead`,
+    backend: 'native',
+    spawnedAt: oldSpawn,
+    provider,
+    model: `model-${provider}`,
+    cause: 'rate_limited',
+    resetAt: future,
+    stopped: false,
+    acpSessionId: 'old-acp-session',
+    resumeSessionId: 'old-resume-session',
+  })
+
+  test('falls through A to B and retains A as a walled attempt', async () => {
+    const f = fx([{ id: 'fx-1', status: 'open' }])
+    try {
+      patchAgentRegistry(f.main, 'fx-1', death('A'))
+      const c = conn(f)
+      const info = await c.spawn({
+        ...SPEC(f.main, f.beadsDir, 'fx-1', 'setTimeout(() => {}, 30000)'),
+        route: routeFor('fallthrough'),
+      })
+      const registry = readAgentRegistry(f.main)
+      const entry = registry['fx-1']!
+      assert.equal(entry.provider, 'B')
+      const attempts = entry.attempts as unknown[]
+      assert.deepEqual(attempts[0], {
+        provider: 'A',
+        model: 'model-A',
+        cause: 'rate_limited',
+        resetAt: future,
+        spawnedAt: oldSpawn,
+        stopped: false,
+      })
+      assert.equal(entry.acpSessionId, undefined)
+      assert.equal(entry.resumeSessionId, undefined)
+      assert.equal(
+        deriveProviderWalls(registry, Date.now()).find((wall) => wall.provider === 'A')?.cause,
+        'rate_limited'
+      )
+      await c.stop(info.id)
+    } finally {
+      cleanup(f)
+    }
+  })
+
+  test('a cause-less routed respawn records its outgoing provider when it moves', async () => {
+    const f = fx([
+      { id: 'fx-1', status: 'open' },
+      { id: 'fx-2', status: 'open' },
+    ])
+    try {
+      patchAgentRegistry(f.main, 'fx-1', {
+        agentId: 'native-a-lost',
+        backend: 'native',
+        spawnedAt: oldSpawn,
+        provider: 'A',
+        model: 'model-A',
+        stopped: false,
+      })
+      patchAgentRegistry(f.main, 'fx-2', death('A'))
+      const c = conn(f)
+      const info = await c.spawn({
+        ...SPEC(f.main, f.beadsDir, 'fx-1', 'setTimeout(() => {}, 30000)'),
+        route: routeFor('fallthrough'),
+      })
+      const entry = readAgentRegistry(f.main)['fx-1']!
+      assert.equal(entry.provider, 'B')
+      assert.deepEqual((entry.attempts as unknown[])[0], {
+        provider: 'A',
+        model: 'model-A',
+        spawnedAt: oldSpawn,
+        stopped: false,
+      })
+      await c.stop(info.id)
+    } finally {
+      cleanup(f)
+    }
+  })
+
+  test('fallback provider uses its own model instead of the chain-head selection', async () => {
+    const f = fx([{ id: 'fx-1', status: 'open' }])
+    f.env.providers = {
+      A: { type: 'cli', command: 'node {promptFile} --model {model}', model: 'a-default' },
+      B: { type: 'cli', command: 'node {promptFile} --model {model}', model: 'b-default' },
+      C: { type: 'cli', command: 'node {promptFile} --model {model}', model: 'c-default' },
+    }
+    try {
+      patchAgentRegistry(f.main, 'fx-1', death('A'))
+      const resolved: ResolvedClass = {
+        class: 'free',
+        chain: [
+          { provider: 'A', model: 'a1' },
+          { provider: 'B' },
+          { provider: 'C', model: 'c1' },
+        ],
+        onWall: 'fallthrough',
+        provider: 'A',
+        model: 'a1',
+      }
+      const route = await resolveSpawnRoute(f.env, 'native', resolved, { model: 'x' })
+      assert.deepEqual(
+        route.candidates.map((candidate) => candidate.model),
+        ['x', 'b-default', 'c1']
+      )
+      const c = conn(f)
+      const info = await c.spawn({
+        ...SPEC(f.main, f.beadsDir, 'fx-1', 'setTimeout(() => {}, 30000)'),
+        route,
+      })
+      const entry = readAgentRegistry(f.main)['fx-1']!
+      assert.equal(entry.provider, 'B')
+      assert.equal(entry.model, 'b-default')
+      assert.notEqual(entry.model, 'x')
+      await c.stop(info.id)
+    } finally {
+      cleanup(f)
+    }
+  })
+
+  test('onWall park refuses the step and points to agents down', async () => {
+    const f = fx([{ id: 'fx-1', status: 'open' }])
+    try {
+      patchAgentRegistry(f.main, 'fx-1', death('A'))
+      await assert.rejects(
+        conn(f).spawn({
+          ...SPEC(f.main, f.beadsDir, 'fx-1', 'true'),
+          route: routeFor('park'),
+        }),
+        (err: unknown) =>
+          err instanceof SpawnError &&
+          /fx-1 class "free" parked — onWall park/.test(err.message) &&
+          /A walled — rate_limited til/.test(err.message) &&
+          /bro agents down fx-1/.test(err.message)
+      )
+    } finally {
+      cleanup(f)
+    }
+  })
+
+  test('fallthrough exhaustion names the final walled provider', async () => {
+    const f = fx([
+      { id: 'fx-1', status: 'open' },
+      { id: 'fx-2', status: 'open' },
+    ])
+    try {
+      patchAgentRegistry(f.main, 'fx-1', death('A'))
+      patchAgentRegistry(f.main, 'fx-2', death('B'))
+      await assert.rejects(
+        conn(f).spawn({
+          ...SPEC(f.main, f.beadsDir, 'fx-1', 'true'),
+          route: routeFor('fallthrough'),
+        }),
+        (err: unknown) =>
+          err instanceof SpawnError &&
+          /fx-1 class "free" chain exhausted/.test(err.message) &&
+          /B walled — rate_limited til/.test(err.message) &&
+          /bro agents down fx-1/.test(err.message)
+      )
+    } finally {
+      cleanup(f)
+    }
+  })
+
+  test('a fresh step falls through a wall recorded by another step', async () => {
+    const f = fx([
+      { id: 'fx-1', status: 'open' },
+      { id: 'fx-2', status: 'open' },
+    ])
+    try {
+      patchAgentRegistry(f.main, 'fx-2', death('A'))
+      const c = conn(f)
+      const info = await c.spawn({
+        ...SPEC(f.main, f.beadsDir, 'fx-1', 'setTimeout(() => {}, 30000)'),
+        route: routeFor('fallthrough'),
+      })
+      assert.equal(readAgentRegistry(f.main)['fx-1']!.provider, 'B')
+      await c.stop(info.id)
+    } finally {
+      cleanup(f)
+    }
+  })
+
+  test('a live entry still refuses a routed spawn', async () => {
+    const f = fx([{ id: 'fx-1', status: 'open' }])
+    let info: AgentInfo | undefined
+    try {
+      const c = conn(f)
+      info = await c.spawn(SPEC(f.main, f.beadsDir, 'fx-1', 'setTimeout(() => {}, 30000)'))
+      await assert.rejects(
+        c.spawn({
+          ...SPEC(f.main, f.beadsDir, 'fx-1', 'true'),
+          route: routeFor('fallthrough'),
+        }),
+        (err: unknown) =>
+          err instanceof SpawnError && /fx-1 already has a live agent/.test(err.message)
+      )
+    } finally {
+      if (info !== undefined) {
+        await conn(f).stop(info.id)
+      }
+      cleanup(f)
+    }
   })
 })

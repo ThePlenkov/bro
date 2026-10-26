@@ -91,6 +91,7 @@ import {
   pidAlive,
   resolveAgentConnector,
   resolveSpawnProvider,
+  resolveSpawnRoute,
   type AgentConnectorEnv,
 } from '../agent-connectors.ts'
 import {
@@ -659,8 +660,9 @@ export function spawnStepAgent(
   }
   // class resolution (spec bro-1x7p): runs whenever fleet.routing is
   // declared — the lane pins provenance regardless of who named the
-  // provider. The routed chain head supplies the provider only when no
-  // explicit lane was picked (--provider/--profile outrank the table).
+  // provider. The routed chain head is the initial provider only when
+  // no explicit lane was picked (--provider/--profile outrank the table);
+  // prepareSpawn may walk forward from the registry's current provider.
   // M7 fleet.router: fires only on an UNCLASSED step (no --class, no
   // class: label) with a table declared and the router armed — its one
   // `bd show` carries both the label check and the title/description
@@ -676,6 +678,7 @@ export function spawnStepAgent(
   const routed = routeStepClass(env.fleet, env.providers ?? {}, beads, req.molStep, req.class, info)
   return applyFleetRouter(dir, env, req.molStep, info, routed, opts).then((route) => {
     const provider = req.provider ?? profile?.provider ?? route?.provider
+    const namedBy = req.provider !== undefined ? 'flag' : profile === undefined ? 'backend' : 'profile'
     return resolveSpawnProvider(
       env,
       conn.name,
@@ -687,10 +690,20 @@ export function spawnStepAgent(
           req.model ??
           profile?.model ??
           (provider !== undefined && provider === route?.provider ? route.model : undefined),
-        autoApprove: req.autoApprove ?? profile?.autoApprove,
+          autoApprove: req.autoApprove ?? profile?.autoApprove,
       },
-      req.provider !== undefined ? 'flag' : profile === undefined ? 'backend' : 'profile'
-    ).then((pick) => {
+      namedBy
+    ).then(async (pick) => {
+      const routeSpec =
+        route !== undefined && req.provider === undefined && provider === route.provider
+          ? await resolveSpawnRoute(
+              env,
+              conn.name,
+              route,
+              { model: req.model ?? profile?.model, autoApprove: req.autoApprove ?? profile?.autoApprove },
+              namedBy
+            )
+          : undefined
       // a spawned worker is a child trace: the span ctx crosses the
       // process boundary as TRACEPARENT (and the endpoint itself so the
       // worker emits without sourcing provider.env) — the worker's own
@@ -720,6 +733,7 @@ export function spawnStepAgent(
           class: route?.class,
           delegatedBy: req.delegatedBy,
           worker: pick.worker,
+          ...(routeSpec === undefined ? {} : { route: routeSpec }),
           enter: resolved.enter,
         })
         .then((r) => {
@@ -1719,4 +1733,3 @@ export async function runAgentsCommand(argv: string[]): Promise<void> {
       usage()
   }
 }
-

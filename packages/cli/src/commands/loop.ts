@@ -73,6 +73,7 @@ import {
   procStat,
   reviewHost,
   routeStepClass,
+  type SpawnSpec,
   SpawnError,
   specStore,
   stampPrOwnership,
@@ -133,6 +134,7 @@ import {
   loadAgentEnv,
   resolveAgentConnector,
   resolveSpawnProvider,
+  resolveSpawnRoute,
   type AgentConnectorEnv,
   type SpawnProviderPick,
 } from '../agent-connectors.ts'
@@ -406,6 +408,7 @@ export interface LoopLane {
    *  bro-1x7p). Provenance like provider/model; absent on unrouted
    *  spawns (no fleet.routing declared). */
   class?: string
+  route?: NonNullable<SpawnSpec['route']>
 }
 
 /** Per-run lane picks — undefined means "not given" so config fields
@@ -428,7 +431,7 @@ export interface LoopLaneSel {
  *  is the facade's own — explicit flag pick → flag-named
  *  fleet.profiles preset → the routed chain head (spec bro-1x7p: a
  *  declared `fleet.routing` resolves the bead's class per spawn and its
- *  chain head supplies the provider) → config picks (`loop.profile`,
+ *  chain head supplies the initial provider) → config picks (`loop.profile`,
  *  `loop.provider`) → `agents.native.provider` → legacy template. A bad
  *  name throws SpawnError — the caller exits before a bead is claimed. */
 export async function resolveLoopLane(
@@ -451,7 +454,29 @@ export async function resolveLoopLane(
   const { provider, model, autoApprove, profileSourced } = lanePicks(env, sel, cfg, route, agentIsProvider)
   const pick = await resolveSpawnProvider(env, 'native', { provider, model, autoApprove }, pickTier(sel, agentIsProvider, profileSourced))
   const lane = providerLaneOrEmpty(pick, model, autoApprove)
-  return route === undefined ? lane : { ...lane, class: route.class }
+  const routeSpec =
+    route !== undefined &&
+    sel.provider === undefined &&
+    !agentIsProvider &&
+    provider === route.provider
+      ? await resolveSpawnRoute(
+          env,
+          'native',
+          route,
+          {
+            model:
+              sel.model ??
+              (sel.profile === undefined ? undefined : fleetProfileOf(env, sel.profile)?.model),
+            autoApprove,
+          },
+          pickTier(sel, agentIsProvider, profileSourced)
+        )
+      : undefined
+  return {
+    ...lane,
+    ...(route === undefined ? {} : { class: route.class }),
+    ...(routeSpec === undefined ? {} : { route: routeSpec }),
+  }
 }
 
 /** The pick tiers — flag > flag-named profile > routing table >
@@ -595,8 +620,9 @@ function beadClassInfo(
 
 /** One claimed bead's spawn lane — fleet.routing resolves its class
  *  (`--class` flag → `class:` label → `default`) and the chain head
- *  supplies the provider, exactly like `bro agents up`'s spawn path
- *  (routeStepClass → applyFleetRouter → resolveSpawnProvider). The
+ *  supplies the initial provider, exactly like `bro agents up`; the
+ *  registry-backed spawn may walk forward from the current provider.
+ *  The path is routeStepClass → applyFleetRouter → resolveSpawnProvider. The
  *  flag-tier picks still outrank the table piecewise; `ctx.lane` is the
  *  run's fixed lane when routing is off or bypassed. The judge router
  *  fires only on a genuinely unclassed bead — an explicit `--class` pin
@@ -821,6 +847,7 @@ async function spawnWorker(ctx: Ctx, m: GateMember, prompt: string, lane: LoopLa
     // the routing lane the spawn resolved to — provenance the registry
     // records and the BRO_AGENT_CLASS env pin both read spec.class
     class: lane.class,
+    ...(lane.route === undefined ? {} : { route: lane.route }),
     // an explicit worker keeps the backend's own command fallback from
     // re-reading loop.agent config — a --agent flag override would
     // otherwise be silently ignored

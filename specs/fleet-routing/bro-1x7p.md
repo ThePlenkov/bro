@@ -150,7 +150,9 @@ retry-storm a walled one); a `resetAt` passing is the proof of lift.
 forbids re-running the step on the *same* provider while it holds,
 never the step itself. The respawn seam resolves the class chain and
 walks it from the step's current position (the registry entry's
-recorded `provider`) to the first un-walled entry:
+recorded `provider`) to the first un-walled entry. A fresh step has no
+recorded provider, so it starts at the chain head; under `fallthrough`
+it must also bypass a walled head rather than start the new step there:
 
 - un-walled entry found + policy `fallthrough` → spawn there; the
   registry patch records the NEW `provider`/`model` — provenance says
@@ -340,8 +342,9 @@ packages/cli/src/agent-connectors.ts  provider-scoped respawn block; chain
 packages/cli/src/commands/agents.ts   --class flag; StepSpawnRequest.class
 packages/cli/src/commands/loop.ts     per-bead class resolution — each
                                       claimed bead's class: label /
-                                      --class / default → chain head
-                                      provider (bro-zmned)
+                                      --class / default → chain walk
+                                      from current provider or chain
+                                      head (bro-zmned)
 packages/cli/src/commands/fleet.ts    provider wall rendering
 packages/providers/src/acp-worker.ts  session/load resume path
 packages/convoy/                      step kind 'run' — `command` on the step
