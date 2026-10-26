@@ -1,6 +1,6 @@
-import { describe, test } from 'node:test'
-import assert from 'node:assert/strict'
-import { spawn, type ChildProcess } from 'node:child_process'
+import { describe, test } from 'node:test';
+import assert from 'node:assert/strict';
+import { spawn, type ChildProcess } from 'node:child_process';
 import {
   existsSync,
   mkdirSync,
@@ -8,340 +8,347 @@ import {
   readdirSync,
   utimesSync,
   writeFileSync,
-} from 'node:fs'
-import { dirname, join, resolve } from 'node:path'
-import { armSession, classifyArmCommand, classifyArmCommands, classifyExecCommand, classifySkillMutation, isSelfToolCommand, journalCommand, journalTrace, readArmed, readCodexInstructions, armDetail, otherLiveWork, recordGuardEvents, traceEntry } from './hooks.ts'
-import { procStat } from '@broject/core'
-import { git, initRepo, inside, insideAsync, tmpDir } from './testrepo.ts'
+} from 'node:fs';
+import { dirname, join, resolve } from 'node:path';
+import {
+  armSession,
+  classifyArmCommand,
+  classifyArmCommands,
+  classifyExecCommand,
+  classifySkillMutation,
+  hookDeadlineMs,
+  isSelfToolCommand,
+  journalCommand,
+  journalTrace,
+  readArmed,
+  readCodexInstructions,
+  armDetail,
+  otherLiveWork,
+  recordGuardEvents,
+  traceEntry,
+} from './hooks.ts';
+import { procStat } from '@broject/core';
+import { git, initRepo, inside, insideAsync, tmpDir } from './testrepo.ts';
 
 function foreignLock(lock: string): ChildProcess {
-  mkdirSync(dirname(lock), { recursive: true })
-  const child = spawn('sleep', ['30'], { stdio: 'ignore' })
+  mkdirSync(dirname(lock), { recursive: true });
+  const child = spawn('sleep', ['30'], { stdio: 'ignore' });
   if (child.pid === undefined) {
-    throw new Error('sleep did not start')
+    throw new Error('sleep did not start');
   }
-  writeFileSync(lock, `${child.pid}:foreign`)
-  return child
+  writeFileSync(lock, `${child.pid}:foreign`);
+  return child;
 }
 
 async function stopChild(child: ChildProcess): Promise<void> {
   if (child.exitCode !== null || child.signalCode !== null) {
-    return
+    return;
   }
-  child.kill('SIGKILL')
-  await new Promise<void>((resolve) => child.once('close', () => resolve()))
+  child.kill('SIGKILL');
+  await new Promise<void>(resolve => child.once('close', () => resolve()));
 }
 
 describe('hook journal and occupancy lock bounds', () => {
-  test(
-    'work arming writes through a live foreign occupancy lock',
-    { skip: process.platform === 'win32' },
-    async () => {
-      const { root, main } = initRepo('bro-hooks-lock-')
-      await insideAsync(main, root, async () => {
-        const common = resolve(main, git(['rev-parse', '--git-common-dir'], main).trim())
-        const lock = join(common, 'bro', 'agents.json.lock')
-        const holder = foreignLock(lock)
-        try {
-          const started = Date.now()
-          armSession('held-occupancy', 'work')
-          assert.ok(Date.now() - started < 1_500)
-          assert.ok(existsSync(join(common, 'bro', 'hooks', 'held-occupancy.work')))
-          assert.equal(holder.exitCode, null)
-        } finally {
-          await stopChild(holder)
-        }
-      })
-    }
-  )
+  test('work arming writes through a live foreign occupancy lock', {
+    skip: process.platform === 'win32',
+  }, async () => {
+    const { root, main } = initRepo('bro-hooks-lock-');
+    await insideAsync(main, root, async () => {
+      const common = resolve(main, git(['rev-parse', '--git-common-dir'], main).trim());
+      const lock = join(common, 'bro', 'agents.json.lock');
+      const holder = foreignLock(lock);
+      try {
+        const started = Date.now();
+        armSession('held-occupancy', 'work');
+        assert.ok(Date.now() - started < 1_500);
+        assert.ok(existsSync(join(common, 'bro', 'hooks', 'held-occupancy.work')));
+        assert.equal(holder.exitCode, null);
+      } finally {
+        await stopChild(holder);
+      }
+    });
+  });
 
-  test(
-    'trace append falls back immediately over a live foreign journal lock',
-    { skip: process.platform === 'win32' },
-    async () => {
-      const { root, main } = initRepo('bro-hooks-journal-')
-      await insideAsync(main, root, async () => {
-        const common = resolve(main, git(['rev-parse', '--git-common-dir'], main).trim())
-        const trace = join(common, 'bro', 'hooks', 'trace', 'held-journal.jsonl')
-        const holder = foreignLock(`${trace}.lock`)
-        try {
-          const started = Date.now()
-          journalTrace(
-            { tool_name: 'Edit', tool_input: { file_path: 'src/a.ts' } },
-            'held-journal'
-          )
-          assert.ok(Date.now() - started < 300)
-          assert.match(readFileSync(trace, 'utf8'), /"tool":"Edit"/)
-          assert.equal(holder.exitCode, null)
-        } finally {
-          await stopChild(holder)
-        }
-      })
-    }
-  )
+  test('trace append falls back immediately over a live foreign journal lock', {
+    skip: process.platform === 'win32',
+  }, async () => {
+    const { root, main } = initRepo('bro-hooks-journal-');
+    await insideAsync(main, root, async () => {
+      const common = resolve(main, git(['rev-parse', '--git-common-dir'], main).trim());
+      const trace = join(common, 'bro', 'hooks', 'trace', 'held-journal.jsonl');
+      const holder = foreignLock(`${trace}.lock`);
+      try {
+        const started = Date.now();
+        journalTrace({ tool_name: 'Edit', tool_input: { file_path: 'src/a.ts' } }, 'held-journal');
+        assert.ok(Date.now() - started < 300);
+        assert.match(readFileSync(trace, 'utf8'), /"tool":"Edit"/);
+        assert.equal(holder.exitCode, null);
+      } finally {
+        await stopChild(holder);
+      }
+    });
+  });
 
-  test(
-    'command journal uses the no-wait append default under contention',
-    { skip: process.platform === 'win32' },
-    async () => {
-      const { root, main } = initRepo('bro-hooks-command-journal-')
-      await insideAsync(main, root, async () => {
-        const common = resolve(main, git(['rev-parse', '--git-common-dir'], main).trim())
-        const commands = join(common, 'bro', 'hooks', 'perf', 'commands.jsonl')
-        const holder = foreignLock(`${commands}.lock`)
-        const telemetry = process.env.BRO_TELEMETRY
-        delete process.env.BRO_TELEMETRY
-        try {
-          const started = Date.now()
-          journalCommand('held-journal-test', 1, 0)
-          assert.ok(Date.now() - started < 300)
-          assert.match(readFileSync(commands, 'utf8'), /"connector":"held-journal-test"/)
-          assert.equal(holder.exitCode, null)
-        } finally {
-          if (telemetry === undefined) delete process.env.BRO_TELEMETRY
-          else process.env.BRO_TELEMETRY = telemetry
-          await stopChild(holder)
-        }
-      })
-    }
-  )
-})
+  test('command journal uses the no-wait append default under contention', {
+    skip: process.platform === 'win32',
+  }, async () => {
+    const { root, main } = initRepo('bro-hooks-command-journal-');
+    await insideAsync(main, root, async () => {
+      const common = resolve(main, git(['rev-parse', '--git-common-dir'], main).trim());
+      const commands = join(common, 'bro', 'hooks', 'perf', 'commands.jsonl');
+      const holder = foreignLock(`${commands}.lock`);
+      const telemetry = process.env.BRO_TELEMETRY;
+      delete process.env.BRO_TELEMETRY;
+      try {
+        const started = Date.now();
+        journalCommand('held-journal-test', 1, 0);
+        assert.ok(Date.now() - started < 300);
+        assert.match(readFileSync(commands, 'utf8'), /"connector":"held-journal-test"/);
+        assert.equal(holder.exitCode, null);
+      } finally {
+        if (telemetry === undefined) delete process.env.BRO_TELEMETRY;
+        else process.env.BRO_TELEMETRY = telemetry;
+        await stopChild(holder);
+      }
+    });
+  });
+});
 
 describe('readCodexInstructions', () => {
   test('reads the plugin file and ignores a missing or relative root', () => {
-    const root = tmpDir('bro-codex-instr-')
-    assert.equal(readCodexInstructions(undefined), undefined)
-    assert.equal(readCodexInstructions('relative/root'), undefined)
-    assert.equal(readCodexInstructions(root), undefined)
-    const path = join(root, 'plugins/codex/bro/INSTRUCTIONS.md')
-    mkdirSync(join(root, 'plugins/codex/bro'), { recursive: true })
-    writeFileSync(path, '\n# bro on Codex\n\n| When | Codex |\n')
-    assert.match(readCodexInstructions(root) ?? '', /# bro on Codex/)
-    writeFileSync(path, '   \n')
-    assert.equal(readCodexInstructions(root), undefined)
-  })
-})
+    const root = tmpDir('bro-codex-instr-');
+    assert.equal(readCodexInstructions(undefined), undefined);
+    assert.equal(readCodexInstructions('relative/root'), undefined);
+    assert.equal(readCodexInstructions(root), undefined);
+    const path = join(root, 'plugins/codex/bro/INSTRUCTIONS.md');
+    mkdirSync(join(root, 'plugins/codex/bro'), { recursive: true });
+    writeFileSync(path, '\n# bro on Codex\n\n| When | Codex |\n');
+    assert.match(readCodexInstructions(root) ?? '', /# bro on Codex/);
+    writeFileSync(path, '   \n');
+    assert.equal(readCodexInstructions(root), undefined);
+  });
+});
 
 describe('classifyExecCommand', () => {
   test('detects gh pr merge', () => {
-    assert.equal(classifyExecCommand('gh pr merge 42 --squash'), 'pr-merge')
-    assert.equal(classifyExecCommand('cd x && gh pr merge --auto'), 'pr-merge')
-  })
+    assert.equal(classifyExecCommand('gh pr merge 42 --squash'), 'pr-merge');
+    assert.equal(classifyExecCommand('cd x && gh pr merge --auto'), 'pr-merge');
+  });
 
   test('detects gh pr create', () => {
-    assert.equal(classifyExecCommand('gh pr create --fill'), 'pr-create')
-  })
+    assert.equal(classifyExecCommand('gh pr create --fill'), 'pr-create');
+  });
 
   test('ignores unrelated commands', () => {
-    assert.equal(classifyExecCommand('git status'), null)
-    assert.equal(classifyExecCommand('gh pr view 42'), null)
-    assert.equal(classifyExecCommand('echo "gh pr merge"'), null) // text, not a merge
-  })
-})
+    assert.equal(classifyExecCommand('git status'), null);
+    assert.equal(classifyExecCommand('gh pr view 42'), null);
+    assert.equal(classifyExecCommand('echo "gh pr merge"'), null); // text, not a merge
+  });
+});
 
 describe('isSelfToolCommand', () => {
   test('approves bro and bd invocations', () => {
-    assert.ok(isSelfToolCommand('bro act status'))
-    assert.ok(isSelfToolCommand('bd ready -n 5'))
-    assert.ok(isSelfToolCommand('  bro debt prs'))
-    assert.ok(isSelfToolCommand('npx -y @broject/bro debt status'))
-    assert.ok(isSelfToolCommand('npx @broject/bro hooks stop'))
-    assert.ok(isSelfToolCommand('npx -y @broject/bro@0 act status'))
-    assert.ok(isSelfToolCommand('npx bro status'))
-    assert.ok(isSelfToolCommand('npx --no-install bro serve ensure --port 44928'))
-    assert.ok(!isSelfToolCommand('npx brother status'))
-  })
+    assert.ok(isSelfToolCommand('bro act status'));
+    assert.ok(isSelfToolCommand('bd ready -n 5'));
+    assert.ok(isSelfToolCommand('  bro debt prs'));
+    assert.ok(isSelfToolCommand('npx -y @broject/bro debt status'));
+    assert.ok(isSelfToolCommand('npx @broject/bro hooks stop'));
+    assert.ok(isSelfToolCommand('npx -y @broject/bro@0 act status'));
+    assert.ok(isSelfToolCommand('npx bro status'));
+    assert.ok(isSelfToolCommand('npx --no-install bro serve ensure --port 44928'));
+    assert.ok(!isSelfToolCommand('npx brother status'));
+  });
 
   test('does not approve lookalikes or other tools', () => {
-    assert.ok(!isSelfToolCommand('brotli -d file'))
-    assert.ok(!isSelfToolCommand('bdr foo'))
-    assert.ok(!isSelfToolCommand('gh pr merge 1'))
-    assert.ok(!isSelfToolCommand(''))
-  })
+    assert.ok(!isSelfToolCommand('brotli -d file'));
+    assert.ok(!isSelfToolCommand('bdr foo'));
+    assert.ok(!isSelfToolCommand('gh pr merge 1'));
+    assert.ok(!isSelfToolCommand(''));
+  });
 
   test('rejects chained/piped/redirected commands — the second stage is unvetted', () => {
-    assert.ok(!isSelfToolCommand('bro act status && rm -rf /'))
-    assert.ok(!isSelfToolCommand('bro act status; rm -rf /'))
-    assert.ok(!isSelfToolCommand('bd ready | sh'))
-    assert.ok(!isSelfToolCommand('bro x $(evil)'))
-    assert.ok(!isSelfToolCommand('bro x > /tmp/out'))
-  })
-})
+    assert.ok(!isSelfToolCommand('bro act status && rm -rf /'));
+    assert.ok(!isSelfToolCommand('bro act status; rm -rf /'));
+    assert.ok(!isSelfToolCommand('bd ready | sh'));
+    assert.ok(!isSelfToolCommand('bro x $(evil)'));
+    assert.ok(!isSelfToolCommand('bro x > /tmp/out'));
+  });
+});
 
 describe('classifyArmCommand', () => {
   test('arms act on PR-touching commands', () => {
-    assert.equal(classifyArmCommand('bro act status'), 'act')
-    assert.equal(classifyArmCommand('bro act merge 33 --squash'), 'act')
-    assert.equal(classifyArmCommand('npx -y @broject/bro act threads 33'), 'act')
-    assert.equal(classifyArmCommand('npx bro act status'), 'act')
-    assert.equal(classifyArmCommand('npx --no-install bro act threads 5'), 'act')
-    assert.equal(classifyArmCommand('gh pr create --fill'), 'act')
-    assert.equal(classifyArmCommand('gh pr view 42'), 'act')
-    assert.equal(classifyArmCommand('git push -u origin feat/x'), 'act')
-    assert.equal(classifyArmCommand('cd x && gh pr checks'), 'act')
-  })
+    assert.equal(classifyArmCommand('bro act status'), 'act');
+    assert.equal(classifyArmCommand('bro act merge 33 --squash'), 'act');
+    assert.equal(classifyArmCommand('npx -y @broject/bro act threads 33'), 'act');
+    assert.equal(classifyArmCommand('npx bro act status'), 'act');
+    assert.equal(classifyArmCommand('npx --no-install bro act threads 5'), 'act');
+    assert.equal(classifyArmCommand('gh pr create --fill'), 'act');
+    assert.equal(classifyArmCommand('gh pr view 42'), 'act');
+    assert.equal(classifyArmCommand('git push -u origin feat/x'), 'act');
+    assert.equal(classifyArmCommand('cd x && gh pr checks'), 'act');
+  });
 
   test('arms drill on drill/wtf commands', () => {
-    assert.equal(classifyArmCommand('bro drill down "x"'), 'drill')
-    assert.equal(classifyArmCommand('bro wtf "why"'), 'drill')
-    assert.equal(classifyArmCommand('bro drill up --result "done"'), 'drill')
-  })
+    assert.equal(classifyArmCommand('bro drill down "x"'), 'drill');
+    assert.equal(classifyArmCommand('bro wtf "why"'), 'drill');
+    assert.equal(classifyArmCommand('bro drill up --result "done"'), 'drill');
+  });
 
   test('arms work on worktree-mutating commands', () => {
-    assert.equal(classifyArmCommand('bro work enter fix-x'), 'work')
-    assert.equal(classifyArmCommand('bro work leave'), 'work')
-    assert.equal(classifyArmCommand('npx -y @broject/bro work list'), 'work')
-    assert.equal(classifyArmCommand('npx bro work enter fix-x'), 'work')
-    assert.equal(classifyArmCommand('npx brother work list'), null)
-    assert.equal(classifyArmCommand('npx bro-fu work list'), null)
-    assert.equal(classifyArmCommand('git worktree add ../repo--fix -b work/fix'), 'work')
-    assert.equal(classifyArmCommand('git -C /path worktree remove old'), 'work')
-    assert.equal(classifyArmCommand('bd worktree create feat'), 'work')
-    assert.equal(classifyArmCommand('bd worktree remove feat'), 'work')
-  })
+    assert.equal(classifyArmCommand('bro work enter fix-x'), 'work');
+    assert.equal(classifyArmCommand('bro work leave'), 'work');
+    assert.equal(classifyArmCommand('npx -y @broject/bro work list'), 'work');
+    assert.equal(classifyArmCommand('npx bro work enter fix-x'), 'work');
+    assert.equal(classifyArmCommand('npx brother work list'), null);
+    assert.equal(classifyArmCommand('npx bro-fu work list'), null);
+    assert.equal(classifyArmCommand('git worktree add ../repo--fix -b work/fix'), 'work');
+    assert.equal(classifyArmCommand('git -C /path worktree remove old'), 'work');
+    assert.equal(classifyArmCommand('bd worktree create feat'), 'work');
+    assert.equal(classifyArmCommand('bd worktree remove feat'), 'work');
+  });
 
   test('read-only worktree commands do not arm', () => {
-    assert.equal(classifyArmCommand('git worktree list'), null)
-    assert.equal(classifyArmCommand('git worktree prune'), null)
-    assert.equal(classifyArmCommand('bd worktree list'), null)
-  })
+    assert.equal(classifyArmCommand('git worktree list'), null);
+    assert.equal(classifyArmCommand('git worktree prune'), null);
+    assert.equal(classifyArmCommand('bd worktree list'), null);
+  });
 
   test('bead claims arm task — the session owes the claim a close/release', () => {
-    assert.equal(classifyArmCommand('bd update bro-x1 --claim'), 'task')
-    assert.equal(classifyArmCommand('bd update --claim bro-x1'), 'task')
-    assert.equal(classifyArmCommand('bd ready'), null)
-    assert.equal(classifyArmCommand('bd show bro-x1'), null)
-  })
+    assert.equal(classifyArmCommand('bd update bro-x1 --claim'), 'task');
+    assert.equal(classifyArmCommand('bd update --claim bro-x1'), 'task');
+    assert.equal(classifyArmCommand('bd ready'), null);
+    assert.equal(classifyArmCommand('bd show bro-x1'), null);
+  });
 
   test('work enter arms both work and task — it also claims the bead', () => {
-    assert.deepEqual(classifyArmCommands('bro work enter bro-x1').sort(), ['task', 'work'])
-    assert.deepEqual(classifyArmCommands('git worktree add ../x'), ['work'])
-    assert.deepEqual(classifyArmCommands('git status'), [])
-  })
+    assert.deepEqual(classifyArmCommands('bro work enter bro-x1').sort(), ['task', 'work']);
+    assert.deepEqual(classifyArmCommands('git worktree add ../x'), ['work']);
+    assert.deepEqual(classifyArmCommands('git status'), []);
+  });
 
   test('ignores unrelated or non-command-position text', () => {
-    assert.equal(classifyArmCommand('git status'), null)
-    assert.equal(classifyArmCommand('bd ready'), null)
-    assert.equal(classifyArmCommand('bro debt collect'), null)
-    assert.equal(classifyArmCommand('echo "gh pr merge"'), null)
-    assert.equal(classifyArmCommand('gh auth status'), null)
-  })
-})
+    assert.equal(classifyArmCommand('git status'), null);
+    assert.equal(classifyArmCommand('bd ready'), null);
+    assert.equal(classifyArmCommand('bro debt collect'), null);
+    assert.equal(classifyArmCommand('echo "gh pr merge"'), null);
+    assert.equal(classifyArmCommand('gh auth status'), null);
+  });
+});
 
 describe('classifySkillMutation', () => {
-  const skill = (cmd: string) => classifySkillMutation(cmd)?.skill ?? null
+  const skill = (cmd: string) => classifySkillMutation(cmd)?.skill ?? null;
 
   test('cites the governing skill on mutating verbs', () => {
-    assert.equal(skill('bro act resolve --thread t1'), 'act')
-    assert.equal(skill('bro act merge 33 --squash'), 'act')
-    assert.equal(skill('bro drill up --result "done"'), 'drill')
-    assert.equal(skill('bro drill down "why"'), 'drill')
-    assert.equal(skill('bro debt collect'), 'debt')
-    assert.equal(skill('bro debt set done --thread-id t1'), 'debt')
-    assert.equal(skill('bro work enter fix-x'), 'work')
-    assert.equal(skill('bro convoy done bro-x --result "y"'), 'convoy')
-    assert.equal(skill('bro spec new bro-x'), 'sdd')
-    assert.equal(skill('npx -y @broject/bro act reply --thread t --comment x'), 'act')
-  })
+    assert.equal(skill('bro act resolve --thread t1'), 'act');
+    assert.equal(skill('bro act merge 33 --squash'), 'act');
+    assert.equal(skill('bro drill up --result "done"'), 'drill');
+    assert.equal(skill('bro drill down "why"'), 'drill');
+    assert.equal(skill('bro debt collect'), 'debt');
+    assert.equal(skill('bro debt set done --thread-id t1'), 'debt');
+    assert.equal(skill('bro work enter fix-x'), 'work');
+    assert.equal(skill('bro convoy done bro-x --result "y"'), 'convoy');
+    assert.equal(skill('bro spec new bro-x'), 'sdd');
+    assert.equal(skill('npx -y @broject/bro act reply --thread t --comment x'), 'act');
+  });
 
   test('aliases cite the shared skill, not argv[0]', () => {
-    assert.equal(skill('bro retrospect capture "oops"'), 'wtf')
-    assert.equal(skill('bro retrospect record --file p.toml'), 'wtf')
-    assert.equal(skill('bro unwind --result "done"'), 'drill')
-    assert.equal(skill('bro wtf "how did this happen"'), 'wtf')
-  })
+    assert.equal(skill('bro retrospect capture "oops"'), 'wtf');
+    assert.equal(skill('bro retrospect record --file p.toml'), 'wtf');
+    assert.equal(skill('bro unwind --result "done"'), 'drill');
+    assert.equal(skill('bro wtf "how did this happen"'), 'wtf');
+  });
 
   test('wtf mutates only with an argument — bare is status', () => {
-    assert.equal(skill('bro wtf'), null)
-    assert.equal(skill('bro wtf verbatim complaint'), 'wtf')
-    assert.equal(skill("bro wtf 'quoted vent'"), 'wtf')
-  })
+    assert.equal(skill('bro wtf'), null);
+    assert.equal(skill('bro wtf verbatim complaint'), 'wtf');
+    assert.equal(skill("bro wtf 'quoted vent'"), 'wtf');
+  });
 
   test('bare-mutation plugins cite unless a read flag suppresses', () => {
-    assert.equal(skill('bro next'), 'next')
-    assert.equal(skill('bro next --list'), null)
-    assert.equal(skill('bro loop'), 'loop')
-    assert.equal(skill('bro loop --dry-run'), null)
-    assert.equal(skill('bro sync'), 'sync')
-    assert.equal(skill('bro sync --pull'), 'sync')
-  })
+    assert.equal(skill('bro next'), 'next');
+    assert.equal(skill('bro next --list'), null);
+    assert.equal(skill('bro loop'), 'loop');
+    assert.equal(skill('bro loop --dry-run'), null);
+    assert.equal(skill('bro sync'), 'sync');
+    assert.equal(skill('bro sync --pull'), 'sync');
+  });
 
   test('reads never cite', () => {
-    assert.equal(skill('bro act status'), null)
-    assert.equal(skill('bro act threads 12'), null)
-    assert.equal(skill('bro act wait --interval 30'), null)
-    assert.equal(skill('bro debt status'), null)
-    assert.equal(skill('bro debt prs'), null)
-    assert.equal(skill('bro debt list --status open'), null)
-    assert.equal(skill('bro drill current'), null)
-    assert.equal(skill('bro drill tree'), null)
-    assert.equal(skill('bro work list'), null)
-    assert.equal(skill('bro convoy next'), null)
-    assert.equal(skill('bro retrospect status'), null)
-    assert.equal(skill('bro spec check'), null)
-  })
+    assert.equal(skill('bro act status'), null);
+    assert.equal(skill('bro act threads 12'), null);
+    assert.equal(skill('bro act wait --interval 30'), null);
+    assert.equal(skill('bro debt status'), null);
+    assert.equal(skill('bro debt prs'), null);
+    assert.equal(skill('bro debt list --status open'), null);
+    assert.equal(skill('bro drill current'), null);
+    assert.equal(skill('bro drill tree'), null);
+    assert.equal(skill('bro work list'), null);
+    assert.equal(skill('bro convoy next'), null);
+    assert.equal(skill('bro retrospect status'), null);
+    assert.equal(skill('bro spec check'), null);
+  });
 
   test('act wait cites only when it can merge', () => {
-    assert.equal(skill('bro act wait'), null)
-    assert.equal(skill('bro act wait --merge'), 'act')
-    assert.equal(skill('bro act wait --merge --cleanup'), 'act')
-  })
+    assert.equal(skill('bro act wait'), null);
+    assert.equal(skill('bro act wait --merge'), 'act');
+    assert.equal(skill('bro act wait --merge --cleanup'), 'act');
+  });
 
   test('debt next cites only when it claims', () => {
-    assert.equal(skill('bro debt next'), null)
-    assert.equal(skill('bro debt next --json'), null)
-    assert.equal(skill('bro debt next --claim'), 'debt')
-  })
+    assert.equal(skill('bro debt next'), null);
+    assert.equal(skill('bro debt next --json'), null);
+    assert.equal(skill('bro debt next --claim'), 'debt');
+  });
 
   test('finds mutations later in a chained command', () => {
-    assert.equal(skill('bro act status && bro act resolve --thread t'), 'act')
-    assert.equal(skill('cd x && bro drill down "y"'), 'drill')
-  })
+    assert.equal(skill('bro act status && bro act resolve --thread t'), 'act');
+    assert.equal(skill('cd x && bro drill down "y"'), 'drill');
+  });
 
   test("a later segment's flags cannot mutate an earlier read", () => {
-    assert.equal(skill('bro act wait; git push'), null)
-    assert.equal(skill('bro next --list && echo done'), null)
-  })
+    assert.equal(skill('bro act wait; git push'), null);
+    assert.equal(skill('bro next --list && echo done'), null);
+  });
 
   test('ignores non-command-position text and other tools', () => {
-    assert.equal(skill('echo "bro act resolve --thread t"'), null)
-    assert.equal(skill('git status'), null)
-    assert.equal(skill('bd close bro-x'), null)
-    assert.equal(skill('broact resolve'), null)
-  })
-})
+    assert.equal(skill('echo "bro act resolve --thread t"'), null);
+    assert.equal(skill('git status'), null);
+    assert.equal(skill('bd close bro-x'), null);
+    assert.equal(skill('broact resolve'), null);
+  });
+});
 
 describe('readArmed', () => {
   test('returns an empty set for a session with no marker', () => {
-    assert.equal(readArmed('definitely-no-such-session-id').size, 0)
-  })
-})
+    assert.equal(readArmed('definitely-no-such-session-id').size, 0);
+  });
+});
 
 describe('classifyArmCommand edge cases', () => {
   test('arms through global flags between binary and subcommand', () => {
-    assert.equal(classifyArmCommand('git -C /path push'), 'act')
-    assert.equal(classifyArmCommand('gh -R owner/repo pr view'), 'act')
-    assert.equal(classifyArmCommand('gh --repo owner/repo pr checks'), 'act')
-  })
+    assert.equal(classifyArmCommand('git -C /path push'), 'act');
+    assert.equal(classifyArmCommand('gh -R owner/repo pr view'), 'act');
+    assert.equal(classifyArmCommand('gh --repo owner/repo pr checks'), 'act');
+  });
 
   test('quoted separators do not fake a command position', () => {
-    assert.equal(classifyArmCommand('echo "x; bro act status"'), null)
-    assert.equal(classifyArmCommand("echo 'git push'"), null)
-  })
-})
+    assert.equal(classifyArmCommand('echo "x; bro act status"'), null);
+    assert.equal(classifyArmCommand("echo 'git push'"), null);
+  });
+});
 
 describe('classifyArmCommand positions', () => {
   test('leading whitespace and newlines still count as command position', () => {
-    assert.equal(classifyArmCommand('  gh pr view'), 'act')
-    assert.equal(classifyArmCommand('echo hi\nbro act status'), 'act')
-    assert.equal(classifyArmCommand('true && git push'), 'act')
-  })
+    assert.equal(classifyArmCommand('  gh pr view'), 'act');
+    assert.equal(classifyArmCommand('echo hi\nbro act status'), 'act');
+    assert.equal(classifyArmCommand('true && git push'), 'act');
+  });
 
   test('escaped quotes inside arguments do not open a command position', () => {
-    assert.equal(classifyArmCommand('echo "x\\"; git push"'), null)
-    assert.equal(classifyArmCommand("echo 'a\\'; bro act'"), null)
-  })
-})
+    assert.equal(classifyArmCommand('echo "x\\"; git push"'), null);
+    assert.equal(classifyArmCommand("echo 'a\\'; bro act'"), null);
+  });
+});
 
 describe('armDetail', () => {
   for (const [cmd, aspect, want] of [
@@ -367,68 +374,83 @@ describe('armDetail', () => {
     ['npm test', 'work', ''],
   ] as const) {
     test(`${cmd} → "${want}"`, () => {
-      assert.equal(armDetail(cmd, aspect), want)
-    })
+      assert.equal(armDetail(cmd, aspect), want);
+    });
   }
-})
+});
 
 describe('traceEntry', () => {
   test('maps the fields each tool family carries', () => {
-    assert.deepEqual(traceEntry({
-      tool_name: 'exec',
-      tool_input: { command: 'git push' },
-      tool_response: { success: true },
-    }, 7), { ts: 7, tool: 'exec', command: 'git push', ok: true })
-    assert.deepEqual(traceEntry({
-      tool_name: 'edit',
-      tool_input: { file_path: '/a/b.ts' },
-      tool_response: { success: false },
-    }, 7), { ts: 7, tool: 'edit', paths: ['/a/b.ts'], ok: false })
-    assert.deepEqual(traceEntry({
-      tool_name: 'write',
-      tool_input: { path: '/a/c.ts', files: ['/a/d.ts', 9] },
-    }, 7), { ts: 7, tool: 'write', paths: ['/a/c.ts', '/a/d.ts'] })
-  })
+    assert.deepEqual(
+      traceEntry(
+        {
+          tool_name: 'exec',
+          tool_input: { command: 'git push' },
+          tool_response: { success: true },
+        },
+        7
+      ),
+      { ts: 7, tool: 'exec', command: 'git push', ok: true }
+    );
+    assert.deepEqual(
+      traceEntry(
+        {
+          tool_name: 'edit',
+          tool_input: { file_path: '/a/b.ts' },
+          tool_response: { success: false },
+        },
+        7
+      ),
+      { ts: 7, tool: 'edit', paths: ['/a/b.ts'], ok: false }
+    );
+    assert.deepEqual(
+      traceEntry(
+        {
+          tool_name: 'write',
+          tool_input: { path: '/a/c.ts', files: ['/a/d.ts', 9] },
+        },
+        7
+      ),
+      { ts: 7, tool: 'write', paths: ['/a/c.ts', '/a/d.ts'] }
+    );
+  });
 
   test('fields the payload lacks stay absent', () => {
-    assert.deepEqual(traceEntry({}, 7), { ts: 7 })
-    assert.deepEqual(
-      traceEntry({ tool_input: { command: 42 }, tool_response: {} }, 7),
-      { ts: 7 }
-    )
-  })
-})
+    assert.deepEqual(traceEntry({}, 7), { ts: 7 });
+    assert.deepEqual(traceEntry({ tool_input: { command: 42 }, tool_response: {} }, 7), { ts: 7 });
+  });
+});
 
 describe('otherLiveWork', () => {
   /** Seed marker files; ageHours backdates mtime past the live window. */
   function markerDir(entries: Array<[name: string, content: string, ageHours?: number]>): string {
-    const dir = tmpDir('bro-hooks-')
+    const dir = tmpDir('bro-hooks-');
     for (const [name, content, ageHours] of entries) {
-      const p = join(dir, name)
-      writeFileSync(p, content)
+      const p = join(dir, name);
+      writeFileSync(p, content);
       if (ageHours !== undefined) {
-        const past = new Date(Date.now() - ageHours * 3_600_000)
-        utimesSync(p, past, past)
+        const past = new Date(Date.now() - ageHours * 3_600_000);
+        utimesSync(p, past, past);
       }
     }
-    return dir
+    return dir;
   }
 
   test("a second session's live work marker is detected with its detail", () => {
-    const dir = markerDir([['other-session-1.work', '123\nbro-xyz']])
-    const found = otherLiveWork(dir, 'self-session')
-    assert.equal(found.length, 1)
-    assert.equal(found[0]!.session, 'other-session-1')
-    assert.equal(found[0]!.detail, 'bro-xyz')
-  })
+    const dir = markerDir([['other-session-1.work', '123\nbro-xyz']]);
+    const found = otherLiveWork(dir, 'self-session');
+    assert.equal(found.length, 1);
+    assert.equal(found[0]!.session, 'other-session-1');
+    assert.equal(found[0]!.detail, 'bro-xyz');
+  });
 
   test('a lone session sees nothing', () => {
     const dir = markerDir([
       ['self-session.work', '123\nbro-mine'],
       ['self-session.act', '123\n#1'],
-    ])
-    assert.equal(otherLiveWork(dir, 'self-session').length, 0)
-  })
+    ]);
+    assert.equal(otherLiveWork(dir, 'self-session').length, 0);
+  });
 
   test('stale markers and non-work aspects are ignored', () => {
     const dir = markerDir([
@@ -436,74 +458,98 @@ describe('otherLiveWork', () => {
       ['other.act', '123\n#1'],
       ['other.drill', '123\n'],
       ['unrelated-file', 'x'],
-    ])
-    assert.equal(otherLiveWork(dir, 'self-session').length, 0)
-  })
+    ]);
+    assert.equal(otherLiveWork(dir, 'self-session').length, 0);
+  });
 
   test("a marker owned by this agent's process tree is suppressed", () => {
     // bro-7022c: restart/rehydration rotates the session id but the
     // owner tag still names the same agent root — own work, not foreign
-    const st = procStat(process.pid)
-    assert.ok(st)
-    const self = { pid: process.pid, start: st.start }
-    const dir = markerDir([['rotated.work', `${Date.now()} ${process.pid} ${st.start}\nbro-mine`]])
-    assert.equal(otherLiveWork(dir, 'new-session', Date.now(), self).length, 0)
-  })
+    const st = procStat(process.pid);
+    assert.ok(st);
+    const self = { pid: process.pid, start: st.start };
+    const dir = markerDir([['rotated.work', `${Date.now()} ${process.pid} ${st.start}\nbro-mine`]]);
+    assert.equal(otherLiveWork(dir, 'new-session', Date.now(), self).length, 0);
+  });
 
   test('a marker owned by a foreign live process still reports', () => {
-    const init = procStat(1) // pid 1 is always live and never this agent
-    const st = procStat(process.pid)
-    assert.ok(init && st)
-    const dir = markerDir([['foreign.work', `${Date.now()} 1 ${init.start}\nbro-theirs`]])
-    const found = otherLiveWork(dir, 'self', Date.now(), { pid: process.pid, start: st.start })
-    assert.equal(found.length, 1)
-    assert.equal(found[0]!.detail, 'bro-theirs')
-  })
-})
+    const init = procStat(1); // pid 1 is always live and never this agent
+    const st = procStat(process.pid);
+    assert.ok(init && st);
+    const dir = markerDir([['foreign.work', `${Date.now()} 1 ${init.start}\nbro-theirs`]]);
+    const found = otherLiveWork(dir, 'self', Date.now(), { pid: process.pid, start: st.start });
+    assert.equal(found.length, 1);
+    assert.equal(found[0]!.detail, 'bro-theirs');
+  });
+});
 
 describe('recordGuardEvents (bro-arm83)', () => {
   /** run.sh fast-paths only on complete coverage — the record is the
    *  contract: presence files first, .stamp second, deletes last. */
   const guardsDir = (main: string): string =>
-    join(resolve(main, git(['rev-parse', '--git-common-dir'], main).trim()), 'bro', 'hooks', 'guards')
+    join(
+      resolve(main, git(['rev-parse', '--git-common-dir'], main).trim()),
+      'bro',
+      'hooks',
+      'guards'
+    );
 
   test('complete coverage writes a file per event plus .stamp and prunes stale ones', () => {
-    const { root, main } = initRepo('bro-guards-unit-')
+    const { root, main } = initRepo('bro-guards-unit-');
     inside(main, root, () => {
-      const gdir = guardsDir(main)
-      recordGuardEvents({ events: ['stop', 'post-tool'], complete: true, trace: false })
-      assert.deepEqual(readdirSync(gdir).sort(), ['.stamp', 'post-tool', 'stop'])
+      const gdir = guardsDir(main);
+      recordGuardEvents({ events: ['stop', 'post-tool'], complete: true, trace: false });
+      assert.deepEqual(readdirSync(gdir).sort(), ['.stamp', 'post-tool', 'stop']);
 
-      recordGuardEvents({ events: ['stop'], complete: true, trace: false })
-      assert.equal(existsSync(join(gdir, 'post-tool')), false, 'stale event file not pruned')
-      assert.equal(existsSync(join(gdir, 'stop')), true)
-      assert.equal(existsSync(join(gdir, '.stamp')), true)
-    })
-  })
+      recordGuardEvents({ events: ['stop'], complete: true, trace: false });
+      assert.equal(existsSync(join(gdir, 'post-tool')), false, 'stale event file not pruned');
+      assert.equal(existsSync(join(gdir, 'stop')), true);
+      assert.equal(existsSync(join(gdir, '.stamp')), true);
+    });
+  });
 
   test('incomplete coverage writes nothing and invalidates a stale stamp', () => {
-    const { root, main } = initRepo('bro-guards-unit-')
+    const { root, main } = initRepo('bro-guards-unit-');
     inside(main, root, () => {
-      const gdir = guardsDir(main)
-      recordGuardEvents({ events: ['stop'], complete: true, trace: false })
-      assert.equal(existsSync(join(gdir, '.stamp')), true)
+      const gdir = guardsDir(main);
+      recordGuardEvents({ events: ['stop'], complete: true, trace: false });
+      assert.equal(existsSync(join(gdir, '.stamp')), true);
       // a degraded collection must not leave the old record readable —
       // the shell would trust stale coverage and skip dropped guards
-      recordGuardEvents({ events: ['stop'], complete: false, trace: false })
-      assert.equal(existsSync(join(gdir, '.stamp')), false, 'stale stamp not invalidated')
-      recordGuardEvents(undefined)
-      assert.equal(existsSync(join(gdir, '.stamp')), false)
-    })
-  })
+      recordGuardEvents({ events: ['stop'], complete: false, trace: false });
+      assert.equal(existsSync(join(gdir, '.stamp')), false, 'stale stamp not invalidated');
+      recordGuardEvents(undefined);
+      assert.equal(existsSync(join(gdir, '.stamp')), false);
+    });
+  });
 
   test('trace coverage persists .trace so post-tool keeps journaling', () => {
-    const { root, main } = initRepo('bro-guards-unit-')
+    const { root, main } = initRepo('bro-guards-unit-');
     inside(main, root, () => {
-      const gdir = guardsDir(main)
-      recordGuardEvents({ events: ['prompt-submit'], complete: true, trace: true })
-      assert.equal(existsSync(join(gdir, '.trace')), true)
-      recordGuardEvents({ events: ['prompt-submit'], complete: true, trace: false })
-      assert.equal(existsSync(join(gdir, '.trace')), false, 'stale .trace not pruned')
-    })
-  })
-})
+      const gdir = guardsDir(main);
+      recordGuardEvents({ events: ['prompt-submit'], complete: true, trace: true });
+      assert.equal(existsSync(join(gdir, '.trace')), true);
+      recordGuardEvents({ events: ['prompt-submit'], complete: true, trace: false });
+      assert.equal(existsSync(join(gdir, '.trace')), false, 'stale .trace not pruned');
+    });
+  });
+});
+
+describe('hookDeadlineMs (bro-36sx7.13)', () => {
+  test('defaults to 6s and only a positive override applies', () => {
+    assert.equal(hookDeadlineMs({}), 6000);
+    assert.equal(hookDeadlineMs({ BRO_HOOK_DEADLINE_MS: '2500' }), 2500);
+    assert.equal(hookDeadlineMs({ BRO_HOOK_DEADLINE_MS: '0' }), 6000);
+    assert.equal(hookDeadlineMs({ BRO_HOOK_DEADLINE_MS: '-1' }), 6000);
+    assert.equal(hookDeadlineMs({ BRO_HOOK_DEADLINE_MS: 'soon' }), 6000);
+    assert.equal(hookDeadlineMs({ BRO_HOOK_DEADLINE_MS: '' }), 6000);
+  });
+
+  test('values above the 32-bit timer ceiling fall back — Node would fire them in ~1ms', () => {
+    assert.equal(hookDeadlineMs({ BRO_HOOK_DEADLINE_MS: '2147483647' }), 2_147_483_647);
+    assert.equal(hookDeadlineMs({ BRO_HOOK_DEADLINE_MS: '2147483648' }), 6000);
+    assert.equal(hookDeadlineMs({ BRO_HOOK_DEADLINE_MS: '3000000000' }), 6000);
+    assert.equal(hookDeadlineMs({ BRO_HOOK_DEADLINE_MS: '6e9' }), 6000);
+    assert.equal(hookDeadlineMs({ BRO_HOOK_DEADLINE_MS: '1e10' }), 6000);
+  });
+});

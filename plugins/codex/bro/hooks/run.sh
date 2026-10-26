@@ -82,6 +82,14 @@ run_hook() {
   fi
 }
 
+_kill_tree() {
+  # children before parent — a dead parent's orphans reparent to init
+  # and pkill -P sees nothing once the link is gone
+  command -v pkill >/dev/null 2>&1 && pkill -"$2" -P "$1" 2>/dev/null
+  kill -s "$2" "$1" 2>/dev/null
+  :
+}
+
 run_bounded() {
   RUN_BOUNDED_EXPIRED=0
   _now=$(date +%s)
@@ -95,17 +103,42 @@ run_bounded() {
     RUN_BOUNDED_EXPIRED=1
     return 124
   }
-  exec 3<&0
+  # fd 0 may be closed at launch: `exec` is a POSIX special builtin —
+  # a failed redirect would exit the script before `||` runs, while a
+  # redirect attached to it directly would persist in the shell. The
+  # `command` prefix drops the exit rule; the brace group's 2>/dev/null
+  # swallows the error without lasting (compound redirects don't persist).
+  { command exec 3<&0 || command exec 3</dev/null; } 2>/dev/null
   run_hook "$@" <&3 &
   _pid=$!
+  # kids are pinned at TERM time: once the parent dies they reparent to
+  # init and `pkill -P` sees nothing — the KILL leg still owes the
+  # recorded ones their signal
   (
     sleep "$_remaining"
     printf 1 > "$_marker" 2>/dev/null
-    kill -KILL "$_pid" 2>/dev/null
+    _kids=
+    command -v pgrep >/dev/null 2>&1 && _kids=$(pgrep -P "$_pid" 2>/dev/null)
+    _kill_tree "$_pid" TERM
+    sleep 1
+    for _k in $_kids; do kill -s KILL "$_k" 2>/dev/null; done
+    _kill_tree "$_pid" KILL
   ) </dev/null >/dev/null 2>&1 &
   _wd=$!
   wait "$_pid" 2>/dev/null
   _rc=$?
+  if [ -s "$_marker" ]; then
+    # the dog's TERM already landed — give its KILL leg the ~1s it
+    # needs so a TERM-ignoring straggler can't hold the host's pipe
+    # past the deadline. Fractional polls keep the tail near 0.2s;
+    # a sleep that can't do fractions breaks to the wait below, which
+    # blocks out the leg anyway — marker ⇒ the dog is ≤ ~1s from done
+    _w=15
+    while kill -0 "$_wd" 2>/dev/null && [ "$_w" -gt 0 ]; do
+      _w=$((_w - 1))
+      sleep 0.2 2>/dev/null || break
+    done
+  fi
   kill "$_wd" 2>/dev/null
   wait "$_wd" 2>/dev/null || true
   if [ -s "$_marker" ]; then
@@ -591,16 +624,24 @@ while [ ! -f "$DIR/packages/cli/dist/index.js" ]; do
   DIR="$PARENT"
 done
 
+# silence on Cursor's beforeShellExecution is a deny — when no binary
+# answered (the watchdog expired the run, or nothing could run), the
+# launcher itself emits the no-opinion
+cursor_permission_ask() {
+  [ "$EVENT" = permission ] && [ -n "${CURSOR_PLUGIN_ROOT:-}" ] || return 0
+  printf '%s\n' '{"permission":"ask"}'
+}
+
 if [ -f "$DIR/packages/cli/dist/index.js" ] && command -v node >/dev/null 2>&1; then
   run_bounded node "$DIR/packages/cli/dist/index.js" hooks "$@"
   _rc=$?
-  [ "$RUN_BOUNDED_EXPIRED" = 1 ] && exit 0
+  [ "$RUN_BOUNDED_EXPIRED" = 1 ] && { cursor_permission_ask; exit 0; }
   [ "$_rc" -eq 0 ] && exit 0
 fi
 if command -v bro >/dev/null 2>&1; then
   run_bounded bro hooks "$@" || true
-  [ "$RUN_BOUNDED_EXPIRED" = 1 ] && exit 0
-elif [ "$EVENT" = permission ] && [ -n "${CURSOR_PLUGIN_ROOT:-}" ]; then
-  printf '%s\n' '{"permission":"ask"}'
+  [ "$RUN_BOUNDED_EXPIRED" = 1 ] && cursor_permission_ask
+else
+  cursor_permission_ask
 fi
 exit 0
