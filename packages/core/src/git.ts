@@ -96,6 +96,15 @@ type GitCommonDirCacheEntry = { value: string } | { value: null; expiresAt: numb
 const GIT_COMMON_DIR_TIMEOUT_TTL_MS = 30_000
 const gitCommonDirCache = new Map<string, GitCommonDirCacheEntry>()
 
+function cachedGitCommonDir(key: string): string | null | undefined {
+  const cached = gitCommonDirCache.get(key)
+  if (cached === undefined) return undefined
+  if (cached.value !== null) return cached.value
+  if (cached.expiresAt > Date.now()) return null
+  gitCommonDirCache.delete(key)
+  return undefined
+}
+
 /** The repo's common git dir, absolute — the one place per-repo runtime
  *  state belongs, so linked worktrees resolve to the SAME directory
  *  instead of each getting its own copy. `--path-format=absolute` keeps
@@ -110,16 +119,8 @@ const gitCommonDirCache = new Map<string, GitCommonDirCacheEntry>()
  *  primary probe that burns the whole budget buys no fallback. */
 export function gitCommonDir(dir: string, timeoutMs?: number): string | null {
   const key = resolve(dir)
-  const cached = gitCommonDirCache.get(key)
-  if (cached !== undefined) {
-    if (cached.value !== null) {
-      return cached.value
-    }
-    if (cached.expiresAt > Date.now()) {
-      return null
-    }
-    gitCommonDirCache.delete(key)
-  }
+  const cached = cachedGitCommonDir(key)
+  if (cached !== undefined) return cached
   const deadline = timeoutMs === undefined ? undefined : Date.now() + timeoutMs
   const remaining = (): number | undefined =>
     deadline === undefined ? undefined : deadline - Date.now()
