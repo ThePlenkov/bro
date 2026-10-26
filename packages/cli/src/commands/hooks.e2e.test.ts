@@ -882,70 +882,47 @@ describe('hooks e2e — session-start + the run.sh launcher', () => {
     }
   })
 
-  test('run.sh forwards uncaptured stdin byte-for-byte under dash and bash', () => {
-    for (const shell of ['/bin/dash', '/bin/bash']) {
-      const f = hookFixture()
-      inside(f.main, f.root, () => {
-        const bin = join(f.root, 'bin')
-        const pluginRoot = join(f.root, 'plugin')
-        const stdinFile = join(f.root, 'bro.stdin')
-        mkdirSync(bin)
-        mkdirSync(pluginRoot)
-        const bro = join(bin, 'bro')
-        writeFileSync(bro, '#!/bin/sh\ncat > "$STUB_STDIN_FILE"\n')
-        chmodSync(bro, 0o755)
-        const input = '{"hook_event_name":"permission"}\n'
-        const proc = spawnSync(shell, [RUN_SH, 'permission'], {
-          cwd: f.main,
-          input,
-          env: e2eEnv({
-            PATH: `${bin}:${process.env.PATH}`,
-            PLUGIN_ROOT: pluginRoot,
-            STUB_STDIN_FILE: stdinFile,
-          }),
-          encoding: 'utf8',
-          timeout: 2_500,
-        })
-        assert.equal(proc.error, undefined, `${shell} exceeded the test bound`)
-        assert.equal(proc.status, 0, proc.stderr)
-        assert.equal(readFileSync(stdinFile, 'utf8'), input)
-      })
-    }
-  })
-
-  test('run.sh forwards captured stdin byte-for-byte under dash and bash', () => {
-    for (const shell of ['/bin/dash', '/bin/bash']) {
-      const f = hookFixture()
-      inside(f.main, f.root, () => {
-        const bin = join(f.root, 'bin')
-        const pluginRoot = join(f.root, 'plugin')
-        const stdinFile = join(f.root, 'bro.stdin')
-        mkdirSync(bin)
-        mkdirSync(pluginRoot)
-        const bro = join(bin, 'bro')
-        writeFileSync(bro, '#!/bin/sh\ncat > "$STUB_STDIN_FILE"\n')
-        chmodSync(bro, 0o755)
-        const input = `${JSON.stringify({
+  test('run.sh forwards captured and uncaptured stdin byte-for-byte under dash and bash', () => {
+    const cases = [
+      { event: 'permission', input: '{"hook_event_name":"permission"}\n' },
+      {
+        event: 'post-tool',
+        input: `${JSON.stringify({
           session_id: 's1',
           tool_name: 'Bash',
           tool_input: { command: 'git push origin main' },
-        })}\n\n`
-        const proc = spawnSync(shell, [RUN_SH, 'post-tool'], {
-          cwd: f.main,
-          input,
-          env: e2eEnv({
-            PATH: `${bin}:${process.env.PATH}`,
-            PLUGIN_ROOT: pluginRoot,
-            STUB_STDIN_FILE: stdinFile,
-            XDG_STATE_HOME: join(f.root, 'xdg-state'),
-          }),
-          encoding: 'utf8',
-          timeout: 2_500,
+        })}\n\n`,
+      },
+    ] as const
+    for (const { event, input } of cases) {
+      for (const shell of ['/bin/dash', '/bin/bash']) {
+        const f = hookFixture()
+        inside(f.main, f.root, () => {
+          const bin = join(f.root, 'bin')
+          const pluginRoot = join(f.root, 'plugin')
+          const stdinFile = join(f.root, 'bro.stdin')
+          mkdirSync(bin)
+          mkdirSync(pluginRoot)
+          const bro = join(bin, 'bro')
+          writeFileSync(bro, '#!/bin/sh\ncat > "$STUB_STDIN_FILE"\n')
+          chmodSync(bro, 0o755)
+          const proc = spawnSync(shell, [RUN_SH, event], {
+            cwd: f.main,
+            input,
+            env: e2eEnv({
+              PATH: `${bin}:${process.env.PATH}`,
+              PLUGIN_ROOT: pluginRoot,
+              STUB_STDIN_FILE: stdinFile,
+              ...(event === 'post-tool' ? { XDG_STATE_HOME: join(f.root, 'xdg-state') } : {}),
+            }),
+            encoding: 'utf8',
+            timeout: 2_500,
+          })
+          assert.equal(proc.error, undefined, `${shell} exceeded the test bound`)
+          assert.equal(proc.status, 0, proc.stderr)
+          assert.equal(readFileSync(stdinFile, 'utf8'), input)
         })
-        assert.equal(proc.error, undefined, `${shell} exceeded the test bound`)
-        assert.equal(proc.status, 0, proc.stderr)
-        assert.equal(readFileSync(stdinFile, 'utf8'), input)
-      })
+      }
     }
   })
 
@@ -1537,73 +1514,55 @@ describe('hooks e2e — run.sh fast path (bro-arm83)', () => {
       mkdirSync(join(f.markerDir, 'cache'), { recursive: true })
       writeFileSync(join(f.markerDir, 'cache', 'drills.json'), '{"frame":{"id":"fx-1"}}')
       let c = canaryEnv(join(f.root, 'c1'))
-      let r = launch(f.main, 'prompt-submit', promptSubmit, c.env)
+      launch(f.main, 'prompt-submit', promptSubmit, c.env)
       assert.ok(existsSync(c.canary), 'open drill frame did not reach node')
 
       // frame closed but this session claims a bead under sdd
       writeFileSync(join(f.markerDir, 'cache', 'drills.json'), '{"frame":null}')
       arm(f, 's1', 'task')
       c = canaryEnv(join(f.root, 'c2'))
-      r = launch(f.main, 'prompt-submit', promptSubmit, c.env)
+      launch(f.main, 'prompt-submit', promptSubmit, c.env)
       assert.ok(existsSync(c.canary), 'sdd claim did not reach node')
 
       // env-pinned claim instead of a marker
       spawnSync('rm', ['-f', join(f.markerDir, 's1.task')])
       c = canaryEnv(join(f.root, 'c3'), { BRO_BEAD_ID: 'fx-9' })
-      r = launch(f.main, 'prompt-submit', promptSubmit, c.env)
+      launch(f.main, 'prompt-submit', promptSubmit, c.env)
       assert.ok(existsSync(c.canary), 'env-pinned claim did not reach node')
     })
   })
 
-  test('a drop addressed only to a foreign session stays on the fast path', () => {
-    const f = hookFixture()
-    inside(f.main, f.root, () => {
-      prime(f)
-      const notify = join(f.markerDir, '..', 'notify')
-      mkdirSync(notify, { recursive: true })
-      writeFileSync(
-        join(notify, `${Date.now()}-x.txt`),
-        '{"kind":"nudge","topic":"t","to":"other-session"}'
-      )
-      const { canary, env } = canaryEnv(f.root)
-      const r = launch(f.main, 'post-tool', postTool, env)
-      assert.equal(r.status, 0)
-      assert.equal(existsSync(canary), false, 'foreign drop reached node')
-    })
-  })
-
-  test('an interior-newline drop is verbatim broadcast — it reaches node', () => {
-    const f = hookFixture()
-    inside(f.main, f.root, () => {
-      prime(f)
-      const notify = join(f.markerDir, '..', 'notify')
-      mkdirSync(notify, { recursive: true })
-      writeFileSync(
-        join(notify, `${Date.now()}-x.txt`),
-        '{"kind":"nudge","topic":"t","to":"other-session"}\nSECOND-LINE'
-      )
-      const { canary, env } = canaryEnv(f.root)
-      const r = launch(f.main, 'post-tool', postTool, env)
-      assert.equal(r.status, 0)
-      assert.ok(existsSync(canary), 'interior-newline drop did not reach node')
-    })
-  })
-
-  test('a foreign-addressed envelope with a trailing newline stays fast', () => {
-    const f = hookFixture()
-    inside(f.main, f.root, () => {
-      prime(f)
-      const notify = join(f.markerDir, '..', 'notify')
-      mkdirSync(notify, { recursive: true })
-      writeFileSync(
-        join(notify, `${Date.now()}-x.txt`),
-        '{"kind":"nudge","topic":"t","to":"other-session"}\n'
-      )
-      const { canary, env } = canaryEnv(f.root)
-      const r = launch(f.main, 'post-tool', postTool, env)
-      assert.equal(r.status, 0)
-      assert.equal(existsSync(canary), false, 'trailing-newline foreign drop reached node')
-    })
+  test('mailbox newline classification determines whether post-tool reaches node', () => {
+    const cases = [
+      {
+        payload: '{"kind":"nudge","topic":"t","to":"other-session"}',
+        reachesNode: false,
+        message: 'foreign drop reached node',
+      },
+      {
+        payload: '{"kind":"nudge","topic":"t","to":"other-session"}\nSECOND-LINE',
+        reachesNode: true,
+        message: 'interior-newline drop did not reach node',
+      },
+      {
+        payload: '{"kind":"nudge","topic":"t","to":"other-session"}\n',
+        reachesNode: false,
+        message: 'trailing-newline foreign drop reached node',
+      },
+    ]
+    for (const scenario of cases) {
+      const f = hookFixture()
+      inside(f.main, f.root, () => {
+        prime(f)
+        const notify = join(f.markerDir, '..', 'notify')
+        mkdirSync(notify, { recursive: true })
+        writeFileSync(join(notify, `${Date.now()}-x.txt`), scenario.payload)
+        const { canary, env } = canaryEnv(f.root)
+        const r = launch(f.main, 'post-tool', postTool, env)
+        assert.equal(r.status, 0)
+        assert.equal(existsSync(canary), scenario.reachesNode, scenario.message)
+      })
+    }
   })
 
   test('permission always reaches node; garbage stdin fails open', () => {
