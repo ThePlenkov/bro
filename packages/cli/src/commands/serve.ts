@@ -117,7 +117,6 @@
 import { randomBytes, timingSafeEqual } from 'node:crypto'
 import { spawn } from 'node:child_process'
 import {
-  chmodSync,
   closeSync,
   existsSync,
   fstatSync,
@@ -130,7 +129,6 @@ import {
   renameSync,
   rmSync,
   statSync,
-  writeFileSync,
 } from 'node:fs'
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http'
 import { basename, dirname, join, resolve } from 'node:path'
@@ -152,6 +150,9 @@ import {
   SpawnError,
   staleLock,
   startBusBroker,
+  mkdirPrivateSync,
+  openPrivateAppendSync,
+  writePrivateFileSync,
   type AgentConnector,
   type AgentInfo,
   type BusBroker,
@@ -270,15 +271,11 @@ export function writeStateFile(path: string, state: ServeState): void {
   mkdirSync(dirname(path), { recursive: true })
   const tmp = `${path}.${process.pid}.${randomBytes(4).toString('hex')}.tmp`
   // the file carries the session token — publish at 0600 so "can read
-  // it" equals "same-UID local process". rm first so the create-mode
-  // always applies (a pre-existing tmp would keep its old mode through
-  // the truncate, leaving a permissive file until a later chmod); the
-  // chmod then pins 0600 exactly — create-mode is `mode & ~umask`, and
-  // a pathological umask could strip even owner bits, leaving the token
-  // unreadable to its own clients
+  // it" equals "same-UID local process" (spec bro-l8c4f.4: the writer
+  // repairs a pre-existing permissive tmp mode before the content
+  // lands, and pins 0600 exactly even under a pathological umask)
   rmSync(tmp, { force: true })
-  writeFileSync(tmp, `${JSON.stringify(state, null, 2)}\n`, { mode: 0o600 })
-  chmodSync(tmp, 0o600)
+  writePrivateFileSync(tmp, `${JSON.stringify(state, null, 2)}\n`)
   renameSync(tmp, path)
 }
 
@@ -2156,8 +2153,8 @@ export async function ensureServe(
     deps.spawnServer()
   } else {
     const logDir = dirname(statePath)
-    mkdirSync(logDir, { recursive: true })
-    const logFd = openSync(join(logDir, 'serve.log'), 'a')
+    mkdirPrivateSync(logDir)
+    const logFd = openPrivateAppendSync(join(logDir, 'serve.log'))
     try {
       // ENTRY_FILE, not argv[1] — the child resolves its script under
       // `cwd: repo`, so a relative argv[1] (CLI launched from a linked
@@ -2300,8 +2297,8 @@ async function cmdWatchdog(argv: string[]): Promise<void> {
     if (verdict === 'retire') return
     if (verdict === 'alive') continue
     try {
-      mkdirSync(logDir, { recursive: true })
-      const logFd = openSync(join(logDir, 'serve.log'), 'a')
+      mkdirPrivateSync(logDir)
+      const logFd = openPrivateAppendSync(join(logDir, 'serve.log'))
       try {
         // the new generation writes its own serve.json and arms its own
         // watchdog — we retire on the next tick's superseded pid. The
@@ -2502,7 +2499,7 @@ export async function runServeCommand(argv: string[]): Promise<void> {
       // listening must not exit over a supervisor it can live without;
       // the next generation's own arm is unaffected either way
       try {
-        const logFd = openSync(join(dirname(statePath), 'serve.log'), 'a')
+        const logFd = openPrivateAppendSync(join(dirname(statePath), 'serve.log'))
         try {
           spawn(
             process.execPath,

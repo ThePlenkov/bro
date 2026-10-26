@@ -485,6 +485,14 @@ export {
   type HeldLockOptions,
 } from './filelock.ts'
 export {
+  appendPrivateFileSync,
+  mkdirPrivateSync,
+  openPrivateAppendSync,
+  PRIVATE_DIR_MODE,
+  PRIVATE_FILE_MODE,
+  writePrivateFileSync,
+} from './private-files.ts'
+export {
   fileBackedJanitorDeps,
   janitorBroDir,
   janitorDidWork,

@@ -43,6 +43,7 @@ import {
   claimStep,
   classifyExitCause,
   classifyExitCauseParts,
+  appendPrivateFileSync,
   cliCommandModel,
   commandCliName,
   DEFAULT_CONFIG,
@@ -54,6 +55,8 @@ import {
   JudgeUnavailable,
   loadConfig,
   mintAgentId,
+  mkdirPrivateSync,
+  openPrivateAppendSync,
   patchAgentRegistry,
   pidAlive,
   probeStep,
@@ -74,6 +77,7 @@ import {
   UnknownProviderError,
   withAgentRegistryLock,
   writeAgentRegistry,
+  writePrivateFileSync,
   type AgentCause,
   type AgentConnector,
   type AgentInfo,
@@ -1567,13 +1571,21 @@ function commitSpawn(
   agentId: string,
   guard: { claimed: boolean; actor: string | undefined; phantom: boolean }
 ): { promptFile: string; log: string; stderrLog: string; exitFile: string } {
-  mkdirSync(home, { recursive: true })
+  mkdirPrivateSync(home)
   const promptFile = join(home, `${agentId}.prompt.md`)
   const log = join(home, `${agentId}.log`)
   const stderrLog = join(home, `${agentId}.stderr`)
   const exitFile = join(home, `${agentId}.exit`)
   rmSync(exitFile, { force: true })
-  writeFileSync(promptFile, spec.prompt)
+  // owner-only artifacts (spec bro-l8c4f.4): the prompt carries secrets
+  // and thread context; the streams get pre-created pinned so every
+  // later append — native's inherited fd, tmux's tee/2>>, docker's
+  // >>/2>> — lands on an already-0600 file. The .exit file can't be
+  // pre-created (readExitFile parses empty as exit 0); the wrapper's
+  // `umask 077` subshell pins it at write time instead.
+  writePrivateFileSync(promptFile, spec.prompt)
+  appendPrivateFileSync(log, '')
+  appendPrivateFileSync(stderrLog, '')
   const logFrom = logSizeOrZero(log)
   const stderrFrom = logSizeOrZero(stderrLog)
   // exitStatus: undefined clears a respawned entry's stale harvest — the
@@ -2276,8 +2288,8 @@ export function makeNativeConnector(ctx: ConnectorCtx, env: AgentConnectorEnv): 
         let errFd: number | undefined
         let spawned: AgentRegistryEntry
         try {
-          fd = openSync(log, 'a')
-          errFd = openSync(stderrLog, 'a')
+          fd = openPrivateAppendSync(log)
+          errFd = openPrivateAppendSync(stderrLog)
           // the wrapper captures $? into the .exit file — the only exit
           // record a detached process can leave once the parent is gone.
           // Worker payloads (spec bro-5hx1.1): a 'template' worker's
@@ -2291,7 +2303,7 @@ export function makeNativeConnector(ctx: ConnectorCtx, env: AgentConnectorEnv): 
             worker?.kind === 'argv'
               ? [
                   '-c',
-                  'out=$1; shift; "$@"; s=$?; printf %s "$s" > "$out"',
+                  'out=$1; shift; "$@"; s=$?; ( umask 077; printf %s "$s" > "$out" )',
                   'bro-agent',
                   exitFile,
                   ...worker.argv,
@@ -2299,7 +2311,7 @@ export function makeNativeConnector(ctx: ConnectorCtx, env: AgentConnectorEnv): 
                 ]
               : [
                   '-c',
-                  `${expandAgentCmd(worker?.kind === 'template' ? worker.command : command, promptFile)}; s=$?; printf %s "$s" > "$1"`,
+                  `${expandAgentCmd(worker?.kind === 'template' ? worker.command : command, promptFile)}; s=$?; ( umask 077; printf %s "$s" > "$1" )`,
                   'bro-agent',
                   exitFile,
                 ]
@@ -2729,7 +2741,7 @@ export function makeTmuxConnector(ctx: ConnectorCtx, env: AgentConnectorEnv): Ag
           )
           .map(([k, v]) => `export ${k}=${shQuote(v)}`)
           .join('\n')
-        writeFileSync(envFile, `${ambient}\n`, { mode: 0o600 })
+        writePrivateFileSync(envFile, `${ambient}\n`)
         const worker = spec.worker
         const cliBadge = workerCliBadge(worker, command)
         const envArgs = agentEnvPins(spec, agentId, promptFile, cliBadge, mol).flatMap(
@@ -2748,7 +2760,7 @@ export function makeTmuxConnector(ctx: ConnectorCtx, env: AgentConnectorEnv): Ag
         // re-parses into a different program.
         warnNoPromptFile(worker, command)
         const runLine = workerRunLine(worker, command, promptFile)
-        const paneScript = `. ${shQuote(envFile)}; rm -f ${shQuote(envFile)}; { ${runLine}; s=$?; printf %s "$s" > ${shQuote(exitFile)}; } 2>> ${shQuote(stderrLog)} | tee -a ${shQuote(log)}`
+        const paneScript = `. ${shQuote(envFile)}; rm -f ${shQuote(envFile)}; { ${runLine}; s=$?; ( umask 077; printf %s "$s" > ${shQuote(exitFile)} ); } 2>> ${shQuote(stderrLog)} | tee -a ${shQuote(log)}`
         const paneCmd = `sh -c ${shQuote(paneScript)}` // NOSONAR — operator-configured agent command (same contract as native/loop)
         const res = tmuxRun(socket, [
           'new-session',
@@ -3195,9 +3207,11 @@ export function makeGascityConnector(ctx: ConnectorCtx, env: AgentConnectorEnv):
         .replace(/^work_dir\s*=.*$/gm, '')
         .replace(/^env\s*=.*$/gm, '')
     const agentDir = join(city, 'agents', spec.molStep)
-    mkdirSync(agentDir, { recursive: true })
-    writeFileSync(join(agentDir, 'prompt.template.md'), read('prompt.template.md', GC_PROMPT_TEMPLATE))
-    writeFileSync(join(agentDir, 'agent.toml'), agentToml)
+    // owner-only (spec bro-l8c4f.4) — agent.toml inlines the caller's
+    // env table; a permissive file leaks secrets into every local login
+    mkdirPrivateSync(agentDir)
+    writePrivateFileSync(join(agentDir, 'prompt.template.md'), read('prompt.template.md', GC_PROMPT_TEMPLATE))
+    writePrivateFileSync(join(agentDir, 'agent.toml'), agentToml)
   }
 
   /** Adopt the repo as a rig — the rig's beads DB IS the shared store,
@@ -4016,7 +4030,7 @@ function writeDockerEnvFile(envFile: string, spec: SpawnSpec): void {
       `warning: docker env-file drops ${dropped.length} var(s) with newline values: ${dropped.join(', ')}`
     )
   }
-  writeFileSync(envFile, `${ambient}\n`, { mode: 0o600 })
+  writePrivateFileSync(envFile, `${ambient}\n`)
 }
 
 /** The `docker run` argv — operator `runArgs` sit FIRST so docker's
@@ -4151,7 +4165,7 @@ export function makeDockerConnector(ctx: ConnectorCtx, env: AgentConnectorEnv): 
           // worker a reaper so grandchildren can't zombie inside; --rm
           // removes the corpse on exit so `docker ps -a` doesn't fill
           // with bro litter and the name frees for a respawn.
-          const wrapper = `{ ${runLine}; s=$?; printf %s "$s" > ${shQuote(exitFile)}; } >> ${shQuote(log)} 2>> ${shQuote(stderrLog)}`
+          const wrapper = `{ ${runLine}; s=$?; ( umask 077; printf %s "$s" > ${shQuote(exitFile)} ); } >> ${shQuote(log)} 2>> ${shQuote(stderrLog)}`
           const res = dockerRun(
             dockerRunArgv(name, spec, dockerMounts(spec), envFile, agentId, promptFile, cliBadge, mol, runArgs, image, wrapper)
           )
@@ -4877,7 +4891,7 @@ export function makeCopilotConnector(ctx: ConnectorCtx, env: AgentConnectorEnv):
     target: { owner: string; repo: string; slug: string }
   ): { task: CopilotTask; taskId: string } => {
     const bodyFile = join(home, `${agentId}.task.json`)
-    writeFileSync(bodyFile, JSON.stringify({
+    writePrivateFileSync(bodyFile, JSON.stringify({
       prompt: spec.prompt,
       create_pull_request: true,
       ...(knobString('base') !== undefined ? { base_ref: knobString('base') } : {}),
