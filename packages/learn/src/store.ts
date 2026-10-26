@@ -17,7 +17,6 @@ import {
   bd,
   bdTry,
   bdTryAsync,
-  GIT_SYNC_PROBE_TIMEOUT_MS,
   gitCommonDir,
   withFileLock,
 } from '@broject/core'
@@ -209,7 +208,7 @@ export function deleteLesson(id: string, cwd?: string): void {
  *  evidence. Outside a git repo there is no shared store to race on:
  *  run unlocked. */
 export function withStoreLock<T>(cwd: string | undefined, fn: () => T): T {
-  const commonDir = gitCommonDir(cwd ?? process.cwd(), GIT_SYNC_PROBE_TIMEOUT_MS)
+  const commonDir = gitCommonDir(cwd ?? process.cwd())
   if (commonDir === null) {
     return fn()
   }

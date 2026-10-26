@@ -3,8 +3,7 @@ import { chmodSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'nod
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { describe, it } from 'node:test'
-import { GIT_SYNC_PROBE_TIMEOUT_MS } from '@broject/core'
-import { deleteLesson, getLesson, lessonIds, listLessons, putLesson, withStoreLock } from './store.ts'
+import { deleteLesson, getLesson, lessonIds, listLessons, putLesson } from './store.ts'
 import type { Lesson } from './lesson.ts'
 
 /** Scripted `bd` on PATH — the exec contract is PATH lookup
@@ -85,30 +84,6 @@ describe('store', { skip: WIN32 }, () => {
     withFakeBd(() => {
       assert.equal(getLesson('learn-absent'), null)
     })
-  })
-
-  it('bounds the git lookup before running the store callback', () => {
-    const dir = mkdtempSync(join(tmpdir(), 'bro-learn-hanging-git-'))
-    const prevPath = process.env.PATH
-    writeFileSync(join(dir, 'git'), '#!/bin/sh\nexec /bin/sleep 30\n')
-    chmodSync(join(dir, 'git'), 0o755)
-    process.env.PATH = `${dir}:${prevPath}`
-    try {
-      const started = Date.now()
-      let ran = false
-      assert.equal(
-        withStoreLock(dir, () => {
-          ran = true
-          return 'ran'
-        }),
-        'ran'
-      )
-      assert.equal(ran, true)
-      assert.ok(Date.now() - started < GIT_SYNC_PROBE_TIMEOUT_MS + 1_000)
-    } finally {
-      process.env.PATH = prevPath
-      rmSync(dir, { recursive: true, force: true })
-    }
   })
 
   it('list enumerates learn/ keys', () => {
