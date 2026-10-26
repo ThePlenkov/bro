@@ -835,13 +835,9 @@ describe('hooks e2e — session-start + the run.sh launcher', () => {
     })
   })
 
-  test('plugin run.sh defers to the project-local Devin hook chain', () => {
+  test('plugin run.sh defers only to registered executable Devin hooks', () => {
     const f = hookFixture()
     inside(f.main, f.root, () => {
-      const hooksDir = join(f.main, '.devin')
-      mkdirSync(hooksDir)
-      writeFileSync(join(hooksDir, 'hooks.v1.json'), '{"hooks":"hooks/run.sh"}')
-
       const bin = join(f.root, 'bin')
       mkdirSync(bin)
       const node = join(bin, 'node')
@@ -851,21 +847,68 @@ describe('hooks e2e — session-start + the run.sh launcher', () => {
       chmodSync(node, 0o755)
       chmodSync(bro, 0o755)
 
-      const r = spawnSync('sh', [DEVIN_PLUGIN_RUN_SH, 'session-start'], {
-        cwd: f.main,
-        input: '{}',
-        env: e2eEnv({
-          DEVIN_PROJECT_DIR: f.main,
-          NODE_MARKER: join(f.root, 'node-called'),
-          BRO_MARKER: join(f.root, 'bro-called'),
-          PATH: `${bin}:${process.env.PATH ?? ''}`,
-        }),
-        encoding: 'utf8',
-      })
-      assert.equal(r.status, 0)
-      assert.equal(r.stdout, '')
-      assert.equal(existsSync(join(f.root, 'node-called')), false)
-      assert.equal(existsSync(join(f.root, 'bro-called')), false)
+      const config = (project: string) => {
+        writeFileSync(join(project, 'bro.config.json'), '{}')
+        mkdirSync(join(project, '.devin'), { recursive: true })
+        writeFileSync(
+          join(project, '.devin', 'hooks.v1.json'),
+          JSON.stringify({
+            hooks: [{ event: 'PostToolUse', command: '"$DEVIN_PROJECT_DIR/hooks/run.sh" post-tool' }],
+          })
+        )
+      }
+      const project = (name: string, launcher: 'executable' | 'non-executable' | 'missing') => {
+        const dir = join(f.root, name)
+        mkdirSync(dir)
+        config(dir)
+        if (launcher !== 'missing') {
+          mkdirSync(join(dir, 'hooks'))
+          const path = join(dir, 'hooks', 'run.sh')
+          writeFileSync(path, '#!/bin/sh\nprintf x > "$LOCAL_MARKER"\n')
+          if (launcher === 'executable') chmodSync(path, 0o755)
+        }
+        return dir
+      }
+      const invoke = (dir: string, event: string, label: string) => {
+        const nodeMarker = join(f.root, `${label}-node`)
+        const broMarker = join(f.root, `${label}-bro`)
+        const r = spawnSync('sh', [DEVIN_PLUGIN_RUN_SH, event], {
+          cwd: dir,
+          input: JSON.stringify({
+            session_id: 'devin-test-session',
+            tool_name: 'bash',
+            tool_input: { command: 'git push -u origin feat/test' },
+          }),
+          env: e2eEnv({
+            DEVIN_PROJECT_DIR: dir,
+            NODE_MARKER: nodeMarker,
+            BRO_MARKER: broMarker,
+            LOCAL_MARKER: join(f.root, `${label}-local`),
+            PATH: `${bin}:${process.env.PATH ?? ''}`,
+          }),
+          encoding: 'utf8',
+        })
+        return { r, nodeMarker, broMarker }
+      }
+
+      const registeredProject = project('registered', 'executable')
+      const registered = invoke(registeredProject, 'post-tool', 'registered')
+      assert.equal(registered.r.status, 0)
+      assert.equal(registered.r.stdout, '')
+      assert.equal(existsSync(registered.nodeMarker), false)
+      assert.equal(existsSync(registered.broMarker), false)
+      assert.equal(existsSync(join(f.root, 'registered-local')), false)
+
+      const unregistered = invoke(registeredProject, 'stop', 'unregistered')
+      assert.equal(unregistered.r.status, 0)
+      assert.ok(existsSync(unregistered.nodeMarker) || existsSync(unregistered.broMarker))
+
+      for (const state of ['missing', 'non-executable'] as const) {
+        const dir = project(state, state)
+        const result = invoke(dir, 'post-tool', state)
+        assert.equal(result.r.status, 0)
+        assert.ok(existsSync(result.nodeMarker) || existsSync(result.broMarker), `${state} launcher skipped plugin`)
+      }
     })
   })
 
@@ -875,10 +918,17 @@ describe('hooks e2e — session-start + the run.sh launcher', () => {
       const project = join(f.root, 'project')
       const hooksDir = join(project, 'hooks')
       mkdirSync(hooksDir, { recursive: true })
+      writeFileSync(join(project, 'bro.config.json'), '{}')
       mkdirSync(join(project, '.devin'))
-      writeFileSync(join(project, '.devin', 'hooks.v1.json'), '{"hooks":"hooks/run.sh"}')
+      writeFileSync(
+        join(project, '.devin', 'hooks.v1.json'),
+        JSON.stringify({
+          hooks: [{ event: 'PostToolUse', command: '"$DEVIN_PROJECT_DIR/hooks/run.sh" post-tool' }],
+        })
+      )
       const localRunSh = join(hooksDir, 'run.sh')
       writeFileSync(localRunSh, readFileSync(RUN_SH, 'utf8'))
+      chmodSync(localRunSh, 0o755)
 
       const bin = join(f.root, 'bin')
       mkdirSync(bin)
@@ -886,9 +936,13 @@ describe('hooks e2e — session-start + the run.sh launcher', () => {
       writeFileSync(bro, '#!/bin/sh\nprintf ran > "$BRO_MARKER"\nprintf ran\n')
       chmodSync(bro, 0o755)
 
-      const r = spawnSync('sh', [localRunSh, 'session-start'], {
+      const r = spawnSync('sh', [localRunSh, 'post-tool'], {
         cwd: project,
-        input: '{}',
+        input: JSON.stringify({
+          session_id: 'devin-test-session',
+          tool_name: 'bash',
+          tool_input: { command: 'git push -u origin feat/test' },
+        }),
         env: e2eEnv({
           DEVIN_PROJECT_DIR: project,
           BRO_MARKER: join(f.root, 'bro-called'),

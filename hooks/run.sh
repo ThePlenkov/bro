@@ -28,17 +28,28 @@ set -u
 [ "${BRO_HOOKS:-}" = "0" ] && [ "${1:-}" != "permission" ] && exit 0
 
 SCRIPT_ROOT=$(CDPATH= cd -P "$(dirname "$0")/.." 2>/dev/null && pwd -P)
+DEVIN_PROJECT_ROOT=
 if [ -n "${DEVIN_PROJECT_DIR:-}" ]; then
   DEVIN_PROJECT_ROOT=$(CDPATH= cd -P "$DEVIN_PROJECT_DIR" 2>/dev/null && pwd -P)
-  if [ -n "$SCRIPT_ROOT" ] && [ -n "$DEVIN_PROJECT_ROOT" ]; then
-    if [ "$SCRIPT_ROOT" != "$DEVIN_PROJECT_ROOT" ]; then
-      DEVIN_HOOKS="$DEVIN_PROJECT_ROOT/.devin/hooks.v1.json"
-      if [ -f "$DEVIN_HOOKS" ] && grep -Fq 'hooks/run.sh' "$DEVIN_HOOKS"; then
-        # The project-local Devin hook chain owns this event.
-        exit 0
-      fi
-    fi
-  fi
+fi
+
+project_devin_hook_owns_event() {
+  _event=$1
+  case "$_event" in
+    ''|*[!a-z-]*) return 1 ;;
+  esac
+  [ -n "$SCRIPT_ROOT" ] || return 1
+  [ -n "$DEVIN_PROJECT_ROOT" ] || return 1
+  [ "$SCRIPT_ROOT" != "$DEVIN_PROJECT_ROOT" ] || return 1
+  [ -f "$DEVIN_PROJECT_ROOT/.devin/hooks.v1.json" ] || return 1
+  [ -x "$DEVIN_PROJECT_ROOT/hooks/run.sh" ] || return 1
+  grep -Eq "hooks/run[.]sh[^[:alnum:]_-]+${_event}([^a-z-]|$)" \
+    "$DEVIN_PROJECT_ROOT/.devin/hooks.v1.json"
+}
+
+# Devin's project-local chain owns only its registered event.
+if project_devin_hook_owns_event "${1:-}"; then
+  exit 0
 fi
 
 CAPTURED=0
