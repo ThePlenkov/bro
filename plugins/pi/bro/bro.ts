@@ -750,7 +750,11 @@ function binding(pi) {
 			},
 			paint(ctx, lines, _crumb) {
 				try {
-					const one = lines.length > 0 ? [lines[0]] : void 0;
+					let one;
+					if (lines.length > 0) {
+						const links = lines.slice(1).map((l) => (l.match(/\[#\d+\]\([^)]+\)/) ?? [])[0]).filter((x) => typeof x === "string");
+						one = [links.length > 0 ? `${lines[0]}  ${links.join(" ")}` : lines[0]];
+					}
 					ctx.ui.setWidget(BOARD_KEY, one, { placement: "aboveEditor" });
 					ctx.ui.setStatus(BOARD_KEY, void 0);
 				} catch {}
