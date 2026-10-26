@@ -87,12 +87,14 @@ export function inside<T>(dir: string, root: string, fn: () => T): T {
     return fn()
   } finally {
     process.chdir(prev)
-    rmSync(root, { recursive: true, force: true })
+    rmSync(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 })
   }
 }
 
 /** Async inside() — the cleanup must await the body: deleting the repo
- *  while a returned promise still probes it turns the test into a race. */
+ *  while a returned promise still probes it turns the test into a race.
+ *  maxRetries covers the detached-child tail (trace flush, act wait): a
+ *  straggler write between readdir and rmdir is ENOTEMPTY, not a bug. */
 export async function insideAsync<T>(dir: string, root: string, fn: () => Promise<T>): Promise<T> {
   const prev = process.cwd()
   process.chdir(dir)
@@ -100,7 +102,7 @@ export async function insideAsync<T>(dir: string, root: string, fn: () => Promis
     return await fn()
   } finally {
     process.chdir(prev)
-    rmSync(root, { recursive: true, force: true })
+    rmSync(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 })
   }
 }
 

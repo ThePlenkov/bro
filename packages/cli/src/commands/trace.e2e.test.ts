@@ -112,6 +112,17 @@ const cursor = (f: Fixture): Record<string, unknown> =>
     unknown
   >
 
+/** One journal's committed cursor line — 0 while absent or mid-write
+ *  (a torn read means the detached child hasn't landed yet). */
+const cursorLine = (f: Fixture, file: string): number => {
+  try {
+    const c = cursor(f) as { sessions?: Record<string, { line?: number }> }
+    return c.sessions?.[file]?.line ?? 0
+  } catch {
+    return 0
+  }
+}
+
 interface OtlpBody {
   resourceSpans: Array<{
     scopeSpans: Array<{
@@ -231,6 +242,16 @@ describe('bro trace export', () => {
       // the detached export lands shortly after — poll, never block
       const arrived = await until(() => journalBodies(c).length > 0)
       assert.equal(arrived, true, 'detached flush never reached the collector')
+      // the POST landing is not the child's end — the cursor commit and
+      // lock release still write under f.root, and teardown racing them
+      // is ENOTEMPTY. Wait for the detached writer's tail, not just its
+      // network call.
+      const settled = await until(
+        () =>
+          cursorLine(f, 's1.jsonl') === 1 &&
+          !existsSync(join(f.markerDir, 'trace', '.export.json.lock'))
+      )
+      assert.equal(settled, true, 'detached flush never committed its cursor')
       const span = postedSpans(c)[0]!
       assert.equal(span.name, 'bro.exec')
       const keys = (span.attributes ?? []).map((a) => a.key)
