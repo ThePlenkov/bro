@@ -360,6 +360,7 @@ function sharedBinding(host) {
 			ctx.ui.setStatus(BOARD_KEY, void 0);
 		},
 		notify: host.notify,
+		argumentCompletions: void 0,
 		refuseStop: host.refuseStop,
 		stopAlreadyRefused: host.stopAlreadyRefused,
 		stopAborted: host.stopAborted,
@@ -585,6 +586,7 @@ function createBroDriver(host, api) {
 	*  renders. Both are the same on every host, so both live here. */
 	api.registerCommand("bro", {
 		description: "bro — board refresh, or run `bro <args>` (act|next|fleet|drill|…)",
+		getArgumentCompletions: host.argumentCompletions,
 		async handler(args, ctx) {
 			const trimmed = args.trim();
 			if (trimmed === "") {
@@ -758,6 +760,38 @@ function binding(pi) {
 				} catch {}
 			}
 		}),
+		argumentCompletions(prefix) {
+			const items = [
+				"act",
+				"act status",
+				"debt",
+				"drill",
+				"convoy",
+				"next",
+				"loop",
+				"stack",
+				"fleet",
+				"agents",
+				"work",
+				"spec",
+				"sync",
+				"doctor",
+				"plugins",
+				"setup",
+				"wait",
+				"review",
+				"self",
+				"plan",
+				"mesh",
+				"check",
+				"help"
+			];
+			const p = prefix.trim().toLowerCase();
+			return (p === "" ? items : items.filter((x) => x.startsWith(p))).map((x) => ({
+				label: x,
+				value: x
+			}));
+		},
 		npxPin: NPX_PIN
 	};
 }

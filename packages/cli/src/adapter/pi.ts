@@ -108,6 +108,12 @@ interface PiApi {
     options: {
       description?: string;
       handler: (args: string, ctx: ExtContext) => Promise<void>;
+      getArgumentCompletions?: (
+        argumentPrefix: string
+      ) =>
+        | Array<{ label: string; value: string }>
+        | null
+        | Promise<Array<{ label: string; value: string }> | null>;
     }
   ): void;
   registerTool(tool: {
@@ -214,6 +220,36 @@ function binding(pi: PiApi): BroHostBinding<ExtContext> {
         }
       },
     }),
+    argumentCompletions(prefix: string) {
+      const items = [
+        'act',
+        'act status',
+        'debt',
+        'drill',
+        'convoy',
+        'next',
+        'loop',
+        'stack',
+        'fleet',
+        'agents',
+        'work',
+        'spec',
+        'sync',
+        'doctor',
+        'plugins',
+        'setup',
+        'wait',
+        'review',
+        'self',
+        'plan',
+        'mesh',
+        'check',
+        'help',
+      ];
+      const p = prefix.trim().toLowerCase();
+      const filtered = p === '' ? items : items.filter(x => x.startsWith(p));
+      return filtered.map(x => ({ label: x, value: x }));
+    },
     npxPin: NPX_PIN,
   };
 }
