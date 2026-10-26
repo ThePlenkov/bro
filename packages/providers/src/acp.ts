@@ -906,6 +906,24 @@ export async function acpOpen(
       )
     )
   }
+  /** Map an init failure onto the availability vocabulary — spawn's
+   *  'error' event is async, so a binary that can't exec is only
+   *  knowable once the handshake on the dead transport has failed. */
+  function openErr(err: unknown): Error {
+    if (err instanceof JudgeUnavailable || err instanceof AcpConfigError) {
+      return err
+    }
+    const spawnErr = spawnError()
+    if (spawnErr !== undefined) {
+      return new AcpConfigError(`${by}: cannot exec acp command — ${spawnErr}`)
+    }
+    // a live child that still failed the handshake — dead transport,
+    // protocol violation — is an availability fault, same vocabulary
+    // withAcp/acpPooledTurn use: JudgeUnavailable, never a raw error
+    const stderr = tail()
+    const detail = stderr === '' ? '' : ` (${stderr})`
+    return new JudgeUnavailable(`acp ${by} unavailable — ${errMsg(err)}${detail}`)
+  }
   const terminals = new AcpTerminals()
   const app = pooledClientApp(opts, terminals)
   const peer = opts.acp?.peer
@@ -950,20 +968,7 @@ export async function acpOpen(
     return { ctx: conn.agent, signal: conn.signal, close, tail, req, asAuthError, caps, init, terminals }
   } catch (err) {
     close()
-    // spawn's 'error' event is async — a binary that can't exec is only
-    // knowable here, once the handshake on the dead transport has failed
-    if (err instanceof JudgeUnavailable || err instanceof AcpConfigError) {
-      fail(err)
-    }
-    if (spawnError() !== undefined) {
-      fail(new AcpConfigError(`${by}: cannot exec acp command — ${spawnError()}`))
-    }
-    // a live child that still failed the handshake — dead transport,
-    // protocol violation — is an availability fault, same vocabulary
-    // withAcp/acpPooledTurn use: JudgeUnavailable, never a raw error
-    const stderr = tail()
-    const detail = stderr === '' ? '' : ` (${stderr})`
-    fail(new JudgeUnavailable(`acp ${by} unavailable — ${errMsg(err)}${detail}`))
+    fail(openErr(err))
   }
 }
 

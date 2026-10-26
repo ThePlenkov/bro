@@ -100,23 +100,27 @@ function assertUnambiguousOps(plane: PlaneDescriptor): void {
 /** One live-capability probe per plane — catalog and dispatch share
  *  the verdict: `read` gates the read tools, each `mcpVerbs` entry its
  *  own capability. A throwing probe certifies nothing. */
-async function capabilities(plane: PlaneDescriptor): Promise<Record<string, boolean>> {
+function capabilities(plane: PlaneDescriptor): Promise<Record<string, boolean>> {
   return plane.capabilities().catch(() => ({ read: false }) as Record<string, boolean>)
 }
 
 /** capabilities → tools/list. `read: false` hides the read tools; a
- *  false verb capability hides just that verb's tool. */
+ *  false verb capability hides just that verb's tool. Probes run in
+ *  parallel — output order stays catalog order. */
 export async function catalogTools(catalog: PlaneDescriptor[]): Promise<PlaneTool[]> {
-  const out: PlaneTool[] = []
-  for (const plane of catalog) {
-    assertUnambiguousOps(plane)
-    const caps = await capabilities(plane)
-    if (caps['read'] === true) {
-      out.push(...planeTools(plane))
-    }
-    out.push(...verbTools(plane).filter((t) => caps[t.name.slice(`bro_${plane.name}_`.length)] === true))
-  }
-  return out
+  const groups = await Promise.all(
+    catalog.map(async (plane) => {
+      assertUnambiguousOps(plane)
+      const caps = await capabilities(plane)
+      return [
+        ...(caps['read'] === true ? planeTools(plane) : []),
+        ...verbTools(plane).filter(
+          (t) => caps[t.name.slice(`bro_${plane.name}_`.length)] === true
+        ),
+      ]
+    })
+  )
+  return groups.flat()
 }
 
 /** tools/call dispatch — name is matched against the catalog by
@@ -135,48 +139,61 @@ export async function callTool(
   // the call and misreads the suffix as an op
   for (const plane of [...catalog].sort((a, b) => b.name.length - a.name.length)) {
     const prefix = `bro_${plane.name}_`
-    if (!name.startsWith(prefix)) {
-      continue
+    if (name.startsWith(prefix)) {
+      return dispatchOp(plane, name, name.slice(prefix.length), args)
     }
-    assertUnambiguousOps(plane)
-    const caps = await capabilities(plane)
-    const op = name.slice(prefix.length)
-    // the same gate tools/list applies — a capability-false op's tool
-    // was never advertised, so a call against one is unavailable, not
-    // dispatchable
-    const declared = op === 'list' || op === 'get' || plane.reads.includes(op)
-    const verb = (plane.mcpVerbs ?? []).includes(op) && plane.verbs.includes(op)
-    if (!declared && !verb) {
-      throw new PlaneVerbError(
-        plane.name,
-        op,
-        `unknown tool '${name}' — plane '${plane.name}' declares: list, get, ` +
-          `${[...plane.reads, ...(plane.mcpVerbs ?? [])].join(', ') || '(no named reads or verbs)'}`
-      )
-    }
-    if ((declared && caps['read'] !== true) || (verb && caps[op] !== true)) {
-      throw new PlaneUnavailable(
-        plane.name,
-        `'${op}' capability absent — its tool is not advertised; enumerate tools/list first`
-      )
-    }
-    if (verb) {
-      return plane.exec(op, args ?? {})
-    }
-    if (op === 'list') {
-      return plane.list(args)
-    }
-    if (op === 'get') {
-      const ref = args?.ref
-      if (typeof ref !== 'string' || ref === '') {
-        throw new PlaneVerbError(plane.name, 'get', 'ref is required')
-      }
-      return (await plane.get(ref)) ?? null
-    }
-    return plane.read(op, args)
   }
   throw new PlaneUnavailable(
     'mcp',
     `unknown tool '${name}' — no plane matches; enumerate tools/list first`
   )
+}
+
+/** Dispatch one op against the plane whose prefix matched — the same
+ *  gate tools/list applies: a capability-false op's tool was never
+ *  advertised, so a call against one is unavailable, not dispatchable. */
+async function dispatchOp(
+  plane: PlaneDescriptor,
+  name: string,
+  op: string,
+  args: Record<string, unknown> | undefined
+): Promise<unknown> {
+  assertUnambiguousOps(plane)
+  const caps = await capabilities(plane)
+  const declared = op === 'list' || op === 'get' || plane.reads.includes(op)
+  const verb = (plane.mcpVerbs ?? []).includes(op) && plane.verbs.includes(op)
+  if (!declared && !verb) {
+    throw new PlaneVerbError(
+      plane.name,
+      op,
+      `unknown tool '${name}' — plane '${plane.name}' declares: list, get, ` +
+        `${[...plane.reads, ...(plane.mcpVerbs ?? [])].join(', ') || '(no named reads or verbs)'}`
+    )
+  }
+  if ((declared && caps['read'] !== true) || (verb && caps[op] !== true)) {
+    throw new PlaneUnavailable(
+      plane.name,
+      `'${op}' capability absent — its tool is not advertised; enumerate tools/list first`
+    )
+  }
+  if (verb) {
+    return plane.exec(op, args ?? {})
+  }
+  if (op === 'get') {
+    return getRow(plane, args)
+  }
+  return op === 'list' ? plane.list(args) : plane.read(op, args)
+}
+
+/** `get` is the one op with a required arg — `ref`, the row's stable
+ *  key. A missing/empty ref is a client bug, null an absent row. */
+async function getRow(
+  plane: PlaneDescriptor,
+  args: Record<string, unknown> | undefined
+): Promise<unknown> {
+  const ref = args?.ref
+  if (typeof ref !== 'string' || ref === '') {
+    throw new PlaneVerbError(plane.name, 'get', 'ref is required')
+  }
+  return (await plane.get(ref)) ?? null
 }

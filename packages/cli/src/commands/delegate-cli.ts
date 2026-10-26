@@ -134,7 +134,8 @@ function printDetach(result: DelegateDetachResult): void {
     console.log(`  delegatedBy: ${result.delegatedBy}`)
   }
   if (info.provider !== undefined) {
-    console.log(`  provider: ${info.provider}${info.model === undefined ? '' : ` · model ${info.model}`}`)
+    const model = info.model === undefined ? '' : ` · model ${info.model}`
+    console.log(`  provider: ${info.provider}${model}`)
   }
   if (info.log !== undefined) {
     console.log(`  log: ${info.log}`)

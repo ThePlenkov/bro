@@ -21,9 +21,13 @@ import {
   type DelegateWaitResult,
 } from './delegate.ts'
 
+function validTimeoutSec(sec: number): boolean {
+  return Number.isFinite(sec) && sec > 0 && sec <= MAX_TIMEOUT_SEC
+}
+
 function waitDeadline(timeoutSec: number | undefined): number {
   const sec = timeoutSec ?? DEFAULT_TIMEOUT_SEC
-  if (!Number.isFinite(sec) || sec <= 0 || sec > MAX_TIMEOUT_SEC) {
+  if (!validTimeoutSec(sec)) {
     throw new SpawnInputError(`--timeout must be 1..${MAX_TIMEOUT_SEC} seconds`)
   }
   return Date.now() + sec * 1000
