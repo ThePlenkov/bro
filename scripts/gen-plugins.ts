@@ -236,7 +236,7 @@ function cursorManifest() {
 
 /** ${CURSOR_PLUGIN_ROOT} is a bare token so Cursor expands it before the
  * shell runs. Quoted, so a path with spaces survives. Fallback is bro on
- * PATH, then the version-pinned package. Always exit 0. */
+ * PATH. Always exit 0. */
 function cursorHookCommand(event) {
   // events are code-owned literals today; keep that a checked invariant —
   // the string lands in a shell command, so a future caller passing
@@ -244,11 +244,7 @@ function cursorHookCommand(event) {
   if (!/^[a-z-]+$/.test(event)) {
     throw new Error(`invalid hook event name: ${event}`)
   }
-  const pin = `@broject/bro@${manifest.version}`
-  // the `bro hooks` capability probe runs with stdin closed — a bare
-  // invocation must not consume the payload stdin still holds for the
-  // real `bro hooks ${event}` call that follows
-  return `if [ -f "\${CURSOR_PLUGIN_ROOT}/hooks/run.sh" ]; then "\${CURSOR_PLUGIN_ROOT}/hooks/run.sh" ${event} || true; elif command -v bro >/dev/null 2>&1 && bro hooks </dev/null >/dev/null 2>&1; then bro hooks ${event} || true; elif command -v npx >/dev/null 2>&1; then npx -y --prefer-offline "${pin}" hooks ${event} || true; fi; exit 0`
+  return `if [ -f "\${CURSOR_PLUGIN_ROOT}/hooks/run.sh" ]; then "\${CURSOR_PLUGIN_ROOT}/hooks/run.sh" ${event} || true; elif command -v bro >/dev/null 2>&1; then bro hooks ${event} || true; fi; exit 0`
 }
 
 function cursorHook(event, timeout, extra = {}) {
@@ -309,7 +305,7 @@ adapter — point opencode at it, or let \`bro plugins install --local\`
 copy \`bro.ts\` + \`cli.ts\` (as \`bro-cli.ts\`) into the project's
 \`.opencode/plugins/\`.
 
-The module resolves the CLI as local dist (bundled sibling or the
+The in-process TypeScript module resolves the CLI as local dist (bundled sibling or the
 checkout's \`packages/cli/dist/index.js\` found walking up), then \`bro\`
 on PATH passing the \`bro hooks\` probe, then \`npx -y --prefer-offline
 @broject/bro@${manifest.version}\`. Every hook call is async and
@@ -384,7 +380,7 @@ Pi discovers extensions from \`<cwd>/.pi/extensions/\` and
 \`~/.pi/agent/extensions/\` (jiti loads the raw .ts — no build needed),
 or load it ad hoc: \`pi --extension <path>/bro.ts\`.
 
-The module resolves the CLI as local dist (bundled sibling or the
+The in-process TypeScript module resolves the CLI as local dist (bundled sibling or the
 checkout's \`packages/cli/dist/index.js\` found walking up), then \`bro\`
 on PATH passing the \`bro hooks\` probe, then \`npx -y --prefer-offline
 @broject/bro@${manifest.version}\`. Every call is async and fail-open —
@@ -480,7 +476,7 @@ omp plugin install bro@bro               # from the marketplace
 
 Or load it ad hoc: \`omp --extension ./plugins/omp/bro/bro.ts\`.
 
-The module resolves the CLI as local dist (bundled sibling or the
+The in-process TypeScript module resolves the CLI as local dist (bundled sibling or the
 checkout's \`packages/cli/dist/index.js\` found walking up), then \`bro\`
 on PATH passing the \`bro hooks\` probe, then \`npx -y --prefer-offline
 @broject/bro@${manifest.version}\`. Every call is async and fail-open —

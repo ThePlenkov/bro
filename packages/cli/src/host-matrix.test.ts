@@ -115,6 +115,16 @@ for (const hostName of ['claude', 'codex', 'devin', 'cursor'] as const) {
         )
       }
     })
+
+    test('manifest hook commands do not probe or install the CLI', () => {
+      for (const [native, commands] of events) {
+        for (const entry of commands) {
+          const command = entry.command ?? ''
+          assert.equal(command.includes('bro hooks </dev/null'), false, `${hostName}: ${native} probes bro hooks`)
+          assert.equal(command.includes('npx -y'), false, `${hostName}: ${native} invokes npx`)
+        }
+      }
+    })
   })
 }
 
