@@ -37,3 +37,8 @@ exclude_paths:
   # — the module's function reads to the path rule as uncontrolled data,
   # same as the store/contract files above.
   - 'packages/core/src/private-files.ts'
+  # The hook latency bench is a dev/CI script — every fs path it
+  # touches is computed (the fixture root it builds, the operator's
+  # --out/--budget args). Codacy's non-literal-path rule reads a
+  # computed path as uncontrolled data; nothing here ships.
+  - 'scripts/bench-hooks.ts'
