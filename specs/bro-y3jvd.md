@@ -63,9 +63,11 @@ provider (cli/acp):
   `$XDG_STATE_HOME/bro/lane-gate/` (one JSON file per key + a filelock —
   `withFileLock` semantics, tmp+rename publish). The account is shared
   across every repo's fleet on the host, so the budget is too.
-- **Admission only.** The gate checks at spawn, inside `prepareSpawn`
-  after the wall refusal and before the fleet cap — a refused spawn
-  throws `SpawnError` kind `'cap'` naming the lane, model, and
+- **Admission only.** The gate checks at spawn, inside `prepareSpawn`,
+  charged LAST — after the wall refusal, the fleet cap, and the
+  session-slot admit — so a refused spawn never spends tokens (and
+  hands the session reservation back like any spawn failure). The
+  refusal throws `SpawnError` kind `'cap'` naming the lane, model, and
   retryAfter. Interactive spawns never consult it. Corrupt/unreadable
   ledger ⇒ treat as a fresh full bucket (a hand-edited file must not
   wedge the lane; atomic writes make real corruption a config event,
@@ -92,12 +94,17 @@ wall *stop the spend*, not just refuse new admissions:
   reconcile that sees the wall lift knows exactly which groups to
   thaw, and a reconcile that sees a stale pid (dead, or recycled —
   pidStart mismatch) drops the record WITHOUT signaling a stranger.
+- A pause publish that fails rolls its freeze back — a group stopped
+  without a record could never thaw, so the reconcile resumes the
+  groups it just froze (pid+starttime identity check — never a
+  liveness guess a recycled pgid could pass) and lets the error
+  propagate.
 - Runs where the wall is (re)discovered: (a) in `prepareSpawn` — the
   batch-spawn refusal path freezes the lane the moment the fleet hits
   the wall again, even on a rig with no drive; (b) each drive pass —
   the periodic reconcile covers fleets spawned outside drive
   supervision and thaws lanes whose wall lifted.
-- `bro fleet agents down` sends `SIGCONT` before `SIGTERM` — a signal
+- `bro agents down` sends `SIGCONT` before `SIGTERM` — a signal
   pends forever against a stopped process, so an operator's kill must
   un-freeze the group first.
 
@@ -136,5 +143,6 @@ fleet is actually holding.
   refusal retryAfter, lane aliasing, corrupt ledger recovery.
 - `lane.test.ts` (cli): reconcile freezes live entries on walled
   providers and thaws on lift, skips dead/recycled pids and `wallPause:
-  false`, `prepareSpawn` refuses under an empty bucket, freeze fires on
+  false`, a failed pause publish resumes the groups it froze,
+  `prepareSpawn` refuses under an empty bucket, freeze fires on
   the wall-refusal path, status renders the lane section.

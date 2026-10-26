@@ -1,7 +1,7 @@
 import { after, describe, test } from 'node:test'
 import assert from 'node:assert/strict'
 import { execFileSync, spawn } from 'node:child_process'
-import { mkdirSync, readFileSync } from 'node:fs'
+import { existsSync, mkdirSync, readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import {
   agentRegistryPath,
@@ -248,6 +248,10 @@ describe('the wall pause', () => {
       reconcileLanePause(main, env())
       assert.equal(procState(s.pid), 'T')
       s.kill()
+      // SIGKILL lands asynchronously — the pid still reads live until
+      // the kernel marks it a zombie (or node reaps it); wait for that
+      // before reconciling or the record looks alive
+      waitState(s.pid, (st) => st === undefined || st === 'Z')
       // the group is gone — the record drops, nothing signaled
       const r = reconcileLanePause(main, env())
       assert.equal(r.paused, 0)
@@ -255,6 +259,29 @@ describe('the wall pause', () => {
         readFileSync(join(agentRegistryPath(main)!, '..', 'lane-pause.json'), 'utf8')
       )
       assert.deepEqual(pause.paused, {})
+    })
+  })
+
+  test('a failed pause publish resumes the groups it froze', () => {
+    const { root, main } = initRepo('bro-lane-')
+    inside(main, root, () => {
+      const s = sleeper()
+      try {
+        const future = new Date(Date.now() + 3600_000).toISOString()
+        writeRegistry(main, { 'fx-dead': deadWallEntry(future), 'fx-live': liveEntry(s.pid, s.pidStart) })
+        // the write dies — a group stopped without a record could never
+        // thaw, so the freeze must roll back and the error propagate
+        assert.throws(() =>
+          reconcileLanePause(main, env(), Date.now(), () => {
+            throw new Error('publish failed')
+          })
+        )
+        waitState(s.pid, (st) => st !== 'T')
+        const pausePath = join(agentRegistryPath(main)!, '..', 'lane-pause.json')
+        assert.equal(existsSync(pausePath), false)
+      } finally {
+        s.kill()
+      }
     })
   })
 

@@ -28,6 +28,7 @@ import {
   laneGateLevel,
   laneGateTake,
   pidAlive,
+  procStat,
   readAgentRegistry,
   SpawnError,
   wallText,
@@ -96,8 +97,9 @@ export function laneGateRefusal(
 // --- the wall pause -----------------------------------------------------
 
 /** A frozen process group — pidStart pins identity so a recycled pid
- *  is never signaled (or reported) as ours. */
-interface PauseRecord {
+ *  is never signaled (or reported) as ours. Exported: the pause file's
+ *  schema is the artifact the writer seam below speaks in. */
+export interface PauseRecord {
   provider: string
   molStep: string
   agentId: string
@@ -105,7 +107,7 @@ interface PauseRecord {
   pausedAt: string
 }
 
-interface PauseFile {
+export interface PauseFile {
   paused: Record<string, PauseRecord>
 }
 
@@ -146,21 +148,32 @@ const sig = (pgid: number, signal: 'SIGSTOP' | 'SIGCONT'): boolean => {
   }
 }
 
+/** The pause publish seam — injectable so a test can fail the write
+ *  and prove the freeze rollback. Production callers never pass it. */
+export type PauseWriter = (path: string, file: PauseFile) => void
+
 /** Does this provider pause on walls? Default ON — a walled account
  *  is rejecting work, and a running worker can only push the reset
  *  out. `wallPause: false` opts out. */
 const pauseWanted = (env: AgentConnectorEnv, provider: string): boolean => {
   const entry = env.providers?.[provider]
-  return entry === undefined || !('wallPause' in entry) || entry.wallPause !== false
+  if (entry === undefined || !('wallPause' in entry)) {
+    return true
+  }
+  return entry.wallPause !== false
 }
+
+/** The entry's recorded pid starttime — the reuse pin; absent when the
+ *  entry predates identity recording. */
+const entryStart = (entry: AgentRegistryEntry): string | undefined =>
+  typeof entry.pidStart === 'string' && entry.pidStart !== '' ? entry.pidStart : undefined
 
 const groupLive = (entry: AgentRegistryEntry): boolean => {
   const pid = typeof entry.pid === 'number' ? entry.pid : undefined
   if (pid === undefined) {
     return false
   }
-  const start =
-    typeof entry.pidStart === 'string' && entry.pidStart !== '' ? entry.pidStart : undefined
+  const start = entryStart(entry)
   return pidAlive(pid, start) || groupMemberAlive(pid, start)
 }
 
@@ -169,7 +182,10 @@ const groupLive = (entry: AgentRegistryEntry): boolean => {
  *  problem, not this record's. */
 function entryStillOurs(rec: PauseRecord, registry: Record<string, AgentRegistryEntry>): boolean {
   const cur = registry[rec.molStep]
-  return cur !== undefined && cur.agentId === rec.agentId && cur.stopped !== true
+  if (cur === undefined || cur.agentId !== rec.agentId) {
+    return false
+  }
+  return cur.stopped !== true
 }
 
 /** The one decision per freeze candidate — the wall covers this
@@ -184,18 +200,16 @@ function freezablePid(
   walled: ReadonlyMap<string, ProviderWall>,
   env: AgentConnectorEnv
 ): number | undefined {
-  if (
-    entry.backend !== 'native' ||
-    entry.provider === undefined ||
-    !walled.has(entry.provider) ||
-    entry.stopped === true ||
-    !pauseWanted(env, entry.provider) ||
-    typeof entry.pid !== 'number' ||
-    !groupLive(entry)
-  ) {
+  if (entry.backend !== 'native' || entry.provider === undefined) {
     return undefined
   }
-  return entry.pid
+  if (!walled.has(entry.provider) || entry.stopped === true) {
+    return undefined
+  }
+  if (!pauseWanted(env, entry.provider) || typeof entry.pid !== 'number') {
+    return undefined
+  }
+  return groupLive(entry) ? entry.pid : undefined
 }
 
 /** Freeze pass — every live registry worker on a walled provider. The
@@ -203,29 +217,37 @@ function freezablePid(
  *  registry workers pause too (bro-owned labor stops spending the
  *  shared account); the operator's own terminal sessions are not
  *  registry entries and are never touched. Records land in
- *  `file.paused` in place. */
+ *  `file.paused` in place. Returns the groups this pass actually
+ *  stopped — the caller's rollback list when the publish fails. */
 function freezeLane(
   registry: Record<string, AgentRegistryEntry>,
   walled: ReadonlyMap<string, ProviderWall>,
   env: AgentConnectorEnv,
   file: PauseFile,
   now: number
-): void {
+): Array<{ pid: number; pidStart?: string }> {
+  const stopped: Array<{ pid: number; pidStart?: string }> = []
   for (const [molStep, entry] of Object.entries(registry)) {
     const pid = freezablePid(entry, walled, env)
     if (pid === undefined || file.paused[String(pid)] !== undefined) {
       continue
     }
     if (sig(pid, 'SIGSTOP')) {
+      // pin identity at freeze time: the entry's recorded starttime,
+      // else a live read — the record's pidStart is what keeps a
+      // recycled pgid out of every later signal decision
+      const pidStart = entryStart(entry) ?? procStat(pid)?.start
       file.paused[String(pid)] = {
         provider: entry.provider as string,
         molStep,
         agentId: entry.agentId,
-        pidStart: typeof entry.pidStart === 'string' ? entry.pidStart : undefined,
+        pidStart,
         pausedAt: new Date(now).toISOString(),
       }
+      stopped.push({ pid, pidStart })
     }
   }
+  return stopped
 }
 
 /** Is the recorded group still out there — the wrapper OR a group
@@ -233,8 +255,12 @@ function freezeLane(
  *  holds is the GROUP: a dead wrapper with live descendants must still
  *  thaw — dropping the record would orphan a stopped group forever.
  *  pidStart bounds member starttimes, so a recycled pgid can't pass. */
-const groupStillLive = (pid: number, pidStart: string | undefined): boolean =>
-  Number.isInteger(pid) && (pidAlive(pid, pidStart) || groupMemberAlive(pid, pidStart))
+const groupStillLive = (pid: number, pidStart: string | undefined): boolean => {
+  if (!Number.isInteger(pid)) {
+    return false
+  }
+  return pidAlive(pid, pidStart) || groupMemberAlive(pid, pidStart)
+}
 
 /** Thaw pass — a record survives while its provider still walls AND
  *  its group is still live. Gone or recycled groups drop WITHOUT a
@@ -252,7 +278,8 @@ function thawLane(
     if (!groupStillLive(pid, rec.pidStart)) {
       continue
     }
-    if (walled.has(rec.provider) && pauseWanted(env, rec.provider) && entryStillOurs(rec, registry)) {
+    const covered = walled.has(rec.provider) && pauseWanted(env, rec.provider)
+    if (covered && entryStillOurs(rec, registry)) {
       next[pidStr] = rec
       continue
     }
@@ -272,7 +299,8 @@ function reconcile(
   registry: Record<string, AgentRegistryEntry>,
   walls: ProviderWall[],
   path: string,
-  now: number
+  now: number,
+  write: PauseWriter
 ): { paused: number; thawed: number } {
   const walled = new Map(walls.map((w) => [w.provider, w]))
   // the pause file is a shared read-modify-write — the drive pass and
@@ -280,10 +308,27 @@ function reconcile(
   // would drop records whose groups then stay frozen forever
   return withFileLock(`${path}.lock`, () => {
     const file = readPauseFile(path)
-    freezeLane(registry, walled, env, file, now)
+    const stopped = freezeLane(registry, walled, env, file, now)
     const { next, thawed } = thawLane(file.paused, walled, env, registry)
-    if (Object.keys(next).length > 0 || Object.keys(file.paused).length > 0 || existsSync(path)) {
-      writePauseFile(path, { paused: next })
+    // a present file always syncs — even all-drained; nothing to
+    // write only when no records moved AND no file exists
+    const settled = Object.keys(next).length === 0 && Object.keys(file.paused).length === 0
+    try {
+      if (!settled || existsSync(path)) {
+        write(path, { paused: next })
+      }
+    } catch (error) {
+      // the publish failed — on-disk records still cover previously
+      // paused groups, but the groups THIS pass stopped have none: a
+      // later reconcile could never thaw them. Resume exactly those,
+      // and only while the leader's recorded identity still verifies
+      // (pid+starttime — never a liveness guess a recycled pgid passes)
+      for (const g of stopped) {
+        if (pidAlive(g.pid, g.pidStart)) {
+          sig(g.pid, 'SIGCONT')
+        }
+      }
+      throw error
     }
     return { paused: Object.keys(next).length, thawed }
   })
@@ -298,25 +343,28 @@ function reconcileWith(
   env: AgentConnectorEnv,
   registry: Record<string, AgentRegistryEntry>,
   walls: ProviderWall[],
-  now: number
+  now: number,
+  write: PauseWriter
 ): { walled: ProviderWall[]; paused: number; thawed: number } {
   const path = lanePausePath(dir)
   if (path === null) {
     return NO_PAUSE
   }
-  const { paused, thawed } = reconcile(env, registry, walls, path, now)
+  const { paused, thawed } = reconcile(env, registry, walls, path, now, write)
   return { walled: walls, paused, thawed }
 }
 
 /** The periodic/idle call — reads the registry and derives walls
  *  itself (providerWallsFor harvests pending exit causes first, so a
- *  fresh rate_limited death walls this pass, not the next). */
+ *  fresh rate_limited death walls this pass, not the next). `write`
+ *  is the publish seam — tests fail it to prove the rollback. */
 export function reconcileLanePause(
   dir: string,
   env: AgentConnectorEnv,
-  now = Date.now()
+  now = Date.now(),
+  write: PauseWriter = writePauseFile
 ): { walled: ProviderWall[]; paused: number; thawed: number } {
-  return reconcileWith(dir, env, readAgentRegistry(dir), providerWallsFor(dir), now)
+  return reconcileWith(dir, env, readAgentRegistry(dir), providerWallsFor(dir), now, write)
 }
 
 /** The spawn-path call — the caller's locked registry snapshot is
@@ -329,7 +377,7 @@ export function reconcileLanePauseForRegistry(
   registry: Record<string, AgentRegistryEntry>,
   now = Date.now()
 ): { walled: ProviderWall[]; paused: number; thawed: number } {
-  return reconcileWith(dir, env, registry, deriveProviderWalls(registry, now), now)
+  return reconcileWith(dir, env, registry, deriveProviderWalls(registry, now), now, writePauseFile)
 }
 
 // --- status ---------------------------------------------------------------

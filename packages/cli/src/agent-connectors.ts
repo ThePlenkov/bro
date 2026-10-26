@@ -1532,7 +1532,11 @@ function prepareSpawn(
     // keep feeding it freeze — every rejected attempt pushes the
     // account's reset further out.
     if (opts.env !== undefined) {
-      reconcileLanePauseForRegistry(dir, opts.env, registry)
+      try {
+        reconcileLanePauseForRegistry(dir, opts.env, registry)
+      } catch {
+        // the pause is advisory — the wall refusal below is the verdict
+      }
     }
     throw wallRefusal
 >>>>>>> 8d9b081a (feat(lane): pace the devin lane — a shared rate gate, and the wall pauses every worker (bro-y3jvd))

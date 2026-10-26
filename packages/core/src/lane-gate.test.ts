@@ -151,6 +151,15 @@ describe('providers.<name>.rateGate config', () => {
     )
   })
 
+  test('spawnCost over the default capacity never admits — config error', () => {
+    // no burst ⇒ capacity is requestsPerHour; a cost above it can only
+    // ever refuse, and its finite retryAfter would be a lie
+    assert.equal(
+      parseProviderEntry('devin', cli({ rateGate: { requestsPerHour: 100, spawnCost: 150 } })),
+      null
+    )
+  })
+
   test('wallPause parses on cli and acp kinds', () => {
     const e = parseProviderEntry('devin', cli({ wallPause: false }))
     assert.ok(e !== null && e.type === 'cli')
