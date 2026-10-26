@@ -3,7 +3,7 @@
  * git, their config, their credentials.
  */
 import { spawnSync } from 'node:child_process'
-import { readdirSync, readFileSync, realpathSync, statSync } from 'node:fs'
+import { existsSync, readdirSync, readFileSync, realpathSync, statSync } from 'node:fs'
 import { basename, dirname, join, resolve } from 'node:path'
 import { killGroup, spawnCollect } from './live-procs.ts'
 
@@ -92,6 +92,35 @@ export function gitTryAsync(
   }
 }
 
+type GitCommonDirCacheEntry =
+  | { value: string; expiresAt: number }
+  | { value: null; expiresAt: number; budgetMs: number }
+const GIT_COMMON_DIR_TIMEOUT_TTL_MS = 30_000
+const GIT_COMMON_DIR_POSITIVE_TTL_MS = 60_000
+const gitCommonDirCache = new Map<string, GitCommonDirCacheEntry>()
+
+function cachedGitCommonDir(key: string, timeoutMs?: number): string | null | undefined {
+  const cached = gitCommonDirCache.get(key)
+  if (cached === undefined) return undefined
+  if (cached.expiresAt <= Date.now()) {
+    gitCommonDirCache.delete(key)
+    return undefined
+  }
+  if (cached.value === null) {
+    return timeoutMs !== undefined && timeoutMs <= cached.budgetMs ? null : undefined
+  }
+  if (existsSync(cached.value)) return cached.value
+  gitCommonDirCache.delete(key)
+  return undefined
+}
+
+function cacheGitCommonDir(key: string, value: string): void {
+  gitCommonDirCache.set(key, {
+    value,
+    expiresAt: Date.now() + GIT_COMMON_DIR_POSITIVE_TTL_MS,
+  })
+}
+
 /** The repo's common git dir, absolute — the one place per-repo runtime
  *  state belongs, so linked worktrees resolve to the SAME directory
  *  instead of each getting its own copy. `--path-format=absolute` keeps
@@ -105,16 +134,37 @@ export function gitTryAsync(
  *  as failure → null, same contract). The deadline is shared: a
  *  primary probe that burns the whole budget buys no fallback. */
 export function gitCommonDir(dir: string, timeoutMs?: number): string | null {
+  const key = resolve(dir)
+  const cached = cachedGitCommonDir(key, timeoutMs)
+  if (cached !== undefined) return cached
   const deadline = timeoutMs === undefined ? undefined : Date.now() + timeoutMs
   const remaining = (): number | undefined =>
     deadline === undefined ? undefined : deadline - Date.now()
+  const cacheTimeout = (): boolean => {
+    if (timeoutMs === undefined) return false
+    const rem = remaining()
+    if (rem === undefined || rem > 0) {
+      return false
+    }
+    gitCommonDirCache.set(key, {
+      value: null,
+      expiresAt: Date.now() + GIT_COMMON_DIR_TIMEOUT_TTL_MS,
+      budgetMs: timeoutMs,
+    })
+    return true
+  }
   const r = gitTry(
     ['-C', dir, 'rev-parse', '--path-format=absolute', '--git-common-dir'],
     remaining()
   )
   if (r.code === 0) {
     const common = r.out.trim()
-    return common === '' ? null : common
+    if (common === '') {
+      cacheTimeout()
+      return null
+    }
+    cacheGitCommonDir(key, common)
+    return common
   }
   // --path-format arrived in git 2.31: on older git the option itself
   // fails, which must not read as "not a repository". The plain output
@@ -122,18 +172,22 @@ export function gitCommonDir(dir: string, timeoutMs?: number): string | null {
   // but keeps a symlinked dir's alias, and callers hash the result
   // (busSocketPath) — canonicalize so one repo yields one socket.
   const rem = remaining()
-  if (rem !== undefined && rem <= 0) {
+  if (cacheTimeout()) {
     return null
   }
   const fallback = gitTry(['-C', dir, 'rev-parse', '--git-common-dir'], rem)
   const common = fallback.code === 0 ? fallback.out.trim() : ''
   if (common === '') {
+    cacheTimeout()
     return null
   }
   const abs = resolve(dir, common)
   try {
-    return realpathSync(abs)
+    const canonical = realpathSync(abs)
+    cacheGitCommonDir(key, canonical)
+    return canonical
   } catch {
+    cacheGitCommonDir(key, abs)
     return abs
   }
 }
