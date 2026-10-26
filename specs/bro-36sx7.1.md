@@ -37,18 +37,25 @@ Two rules for the hook path:
    O_APPEND — each row lands atomically; concurrent writers cannot tear
    a line, so the append needs no lock at all. The only critical section
    the lock ever covered was the bound-trim (read → keep-last-N →
-   rewrite). A trim is rewritten via tmp+rename instead: readers always
-   see a whole file, and rows appended between the read and the rename
-   are dropped — telemetry tolerates this (it is exactly what the old
-   timeout fallback already did). Applies to `journalTrace`,
-   `appendJournal`, `flushPerf`, `journalCommand`.
+   rewrite). The trim instead **renames the file aside** so racing
+   appenders create a fresh one, then folds the kept tail back in with
+   an O_APPEND write — rows appended between the rename and the fold
+   land on the live file and are preserved, never overwritten (learn's
+   postTool reads this tail, so drops lose lessons, not just
+   telemetry). Applies to `journalTrace`, `appendJournal`, `flushPerf`,
+   `journalCommand`.
 2. **Real invariants keep the lock but take it with `waitMs: 0`** — one
    acquisition attempt, no `Atomics.wait`, and contention runs the same
    fallback a timeout produced before:
    - `armSession` `.work` arm: the occupancy lock orders the marker
-     against a driver's occupancy-check→spawn section; contended → the
-     marker is written anyway (it is the session record — dropping it
-     loses the arm entirely)
+     against a driver's occupancy-check→spawn section — a claim must
+     land before the probe or after the action, never between
+     (bro-qry9). A bounded wait is allowed (500ms ≪ the host's hook
+     timeout); contention does **not** write inline — that lands the
+     marker inside the section. It defers to a detached
+     `bro hooks arm-claim` worker that waits the section out under the
+     same lock, then writes; the worker's own timeout is the last hop
+     and writes anyway. Non-work aspects never take the lock.
    - learn `inject` / guard `runGuards` fired sets: count-check-append
      is exactly-once under the lock; contended → the unlocked run(),
      the same double-fire degradation a timeout produced
@@ -67,9 +74,11 @@ wait budgets unchanged.
 
 - [x] `core/filelock.ts` — document the hook-path contract on
   `FileLockOptions.waitMs`
-- [x] `cli/hooks.ts` — `armSession` → `waitMs: 0`; `appendJournal` →
-  lock-free O_APPEND + tmp+rename trim; `journalTrace` and
-  `journalCommand` ride it
+- [x] `cli/hooks.ts` — `armSession` → 500ms bound + detached
+  `arm-claim` worker on contention (never-between preserved);
+  `appendJournal` → lock-free O_APPEND + rename-aside fold trim that
+  preserves concurrent rows; `journalTrace`/`journalCommand`/`flushPerf`
+  ride it
 - [x] `learn/connector.ts` — `inject` fired lock → `waitMs: 0`
 - [x] `guard/engine.ts` — fired lock → `waitMs: 0`
 - [x] `act/check-history.ts` — `lockWaitMs` option; `act/connector.ts`
