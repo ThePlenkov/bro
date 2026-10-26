@@ -289,7 +289,10 @@ function boardLines(s) {
 	if (s.drill?.frame) parts.push(`drill ${s.drill.frame.id}`);
 	if ((s.dirty ?? 0) > 0) parts.push(`dirty ${s.dirty}`);
 	const lines = [`bro · ${parts.join(" · ")}`];
-	for (const b of beads.slice(0, 3)) lines.push(`  ◐ ${b.id ?? "?"}  ${clip(b.title ?? "", 64)}`);
+	for (const b of beads.slice(0, 3)) {
+		const link = b.link ? `  ${b.link}` : "";
+		lines.push(`  ◐ ${b.id ?? "?"}  ${clip(b.title ?? "", 64)}${link}`);
+	}
 	for (const a of running.slice(0, 2)) {
 		const step = a.step ? `  ${a.step}` : "";
 		lines.push(`  ▶ ${a.id ?? "?"}  ${a.backend ?? ""}${step}`);

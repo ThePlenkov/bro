@@ -289,7 +289,10 @@ function boardLines(s) {
 	if (s.drill?.frame) parts.push(`drill ${s.drill.frame.id}`);
 	if ((s.dirty ?? 0) > 0) parts.push(`dirty ${s.dirty}`);
 	const lines = [`bro · ${parts.join(" · ")}`];
-	for (const b of beads.slice(0, 3)) lines.push(`  ◐ ${b.id ?? "?"}  ${clip(b.title ?? "", 64)}`);
+	for (const b of beads.slice(0, 3)) {
+		const link = b.link ? `  ${b.link}` : "";
+		lines.push(`  ◐ ${b.id ?? "?"}  ${clip(b.title ?? "", 64)}${link}`);
+	}
 	for (const a of running.slice(0, 2)) {
 		const step = a.step ? `  ${a.step}` : "";
 		lines.push(`  ▶ ${a.id ?? "?"}  ${a.backend ?? ""}${step}`);
@@ -743,10 +746,15 @@ function binding(pi) {
 				const outcome = event.outcome;
 				return outcome === "aborted" || outcome === "error";
 			},
-			paint(ctx, lines, crumb) {
+			paint(ctx, lines, _crumb) {
 				try {
-					ctx.ui.setWidget(BOARD_KEY, lines, { placement: "aboveEditor" });
-					ctx.ui.setStatus(BOARD_KEY, crumb);
+					let one;
+					if (lines.length > 0) {
+						const links = lines.slice(1).map((l) => (l.match(/\[#\d+\]\([^)]+\)/) ?? [])[0]).filter((x) => typeof x === "string");
+						one = [links.length > 0 ? `${lines[0]}  ${links.join(" ")}` : lines[0]];
+					}
+					ctx.ui.setWidget(BOARD_KEY, one, { placement: "aboveEditor" });
+					ctx.ui.setStatus(BOARD_KEY, void 0);
 				} catch {}
 			}
 		}),
