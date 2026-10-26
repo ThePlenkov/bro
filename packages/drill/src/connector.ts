@@ -5,7 +5,7 @@
  */
 import { mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
-import { beadsStoreStamp, gitTry } from '@broject/core'
+import { beadsStoreStamp, GIT_SYNC_PROBE_TIMEOUT_MS, gitCommonDir } from '@broject/core'
 import type { Connector, ConnectorCtx } from '@broject/core'
 import { currentFrameAsync } from './frames.ts'
 import type { DrillFrame } from './types.ts'
@@ -13,11 +13,11 @@ import type { DrillFrame } from './types.ts'
 /** `<git-common>/bro/hooks` — the shared state dir every hook surface
  *  writes into; null off-repo. */
 function hooksDir(dir: string): string | null {
-  const r = gitTry(['-C', dir, 'rev-parse', '--path-format=absolute', '--git-common-dir'])
-  if (r.code !== 0 || r.out.trim() === '') {
+  const commonDir = gitCommonDir(dir, GIT_SYNC_PROBE_TIMEOUT_MS)
+  if (commonDir === null) {
     return null
   }
-  return join(r.out.trim(), 'bro', 'hooks')
+  return join(commonDir, 'bro', 'hooks')
 }
 
 // --- open-frame snapshot ------------------------------------------------------

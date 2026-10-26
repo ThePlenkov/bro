@@ -13,7 +13,14 @@
  * exception: a corrupt entry throws so `show` can say "exists but
  * broken" rather than lying "no such lesson".
  */
-import { bd, bdTry, bdTryAsync, gitTry, withFileLock } from '@broject/core'
+import {
+  bd,
+  bdTry,
+  bdTryAsync,
+  GIT_SYNC_PROBE_TIMEOUT_MS,
+  gitCommonDir,
+  withFileLock,
+} from '@broject/core'
 import { join } from 'node:path'
 import { lessonProblems, type Lesson } from './lesson.ts'
 
@@ -202,13 +209,11 @@ export function deleteLesson(id: string, cwd?: string): void {
  *  evidence. Outside a git repo there is no shared store to race on:
  *  run unlocked. */
 export function withStoreLock<T>(cwd: string | undefined, fn: () => T): T {
-  const r = gitTry(
-    ['-C', cwd ?? process.cwd(), 'rev-parse', '--path-format=absolute', '--git-common-dir'],
-  )
-  if (r.code !== 0 || r.out.trim() === '') {
+  const commonDir = gitCommonDir(cwd ?? process.cwd(), GIT_SYNC_PROBE_TIMEOUT_MS)
+  if (commonDir === null) {
     return fn()
   }
-  return withFileLock(join(r.out.trim(), 'bro', 'learn-store.lock'), fn, {
+  return withFileLock(join(commonDir, 'bro', 'learn-store.lock'), fn, {
     label: 'learn store lock',
   })
 }
