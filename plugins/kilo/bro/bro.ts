@@ -228,6 +228,23 @@ const BroPlugin: Plugin = async ({ directory, client }) => {
       hydratedContexts.set(sessionKey, { token, context: hookContext(out) })
     }
   }
+  const contextForSession = (sessionKey: string): string | null => {
+    if (sessionKey) {
+      return hydratedContexts.get(sessionKey)?.context ?? null
+    }
+    let context: string | null = null
+    for (const liveSession of liveSessions) {
+      const candidate = hydratedContexts.get(liveSession)?.context
+      if (candidate === null || candidate === undefined) {
+        continue
+      }
+      if (context !== null) {
+        return null
+      }
+      context = candidate
+    }
+    return context
+  }
 
   return {
     tool: {
@@ -261,8 +278,8 @@ const BroPlugin: Plugin = async ({ directory, client }) => {
         liveSessions.add(sessionKey)
         await hydrate(sessionKey)
       }
-      const context = hydratedContexts.get(sessionKey)?.context
-      if (context && liveSessions.has(sessionKey)) {
+      const context = contextForSession(sessionKey)
+      if (context && (!sessionKey || liveSessions.has(sessionKey))) {
         output.system.push(`bro state — resume from here:\n${context}`)
       }
     },
