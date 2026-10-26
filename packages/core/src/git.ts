@@ -3,7 +3,7 @@
  * git, their config, their credentials.
  */
 import { spawnSync } from 'node:child_process'
-import { readdirSync, readFileSync, realpathSync, statSync } from 'node:fs'
+import { existsSync, readdirSync, readFileSync, realpathSync, statSync } from 'node:fs'
 import { basename, dirname, join, resolve } from 'node:path'
 import { killGroup, spawnCollect } from './live-procs.ts'
 
@@ -92,17 +92,33 @@ export function gitTryAsync(
   }
 }
 
-type GitCommonDirCacheEntry = { value: string } | { value: null; expiresAt: number }
+type GitCommonDirCacheEntry =
+  | { value: string; expiresAt: number }
+  | { value: null; expiresAt: number; budgetMs: number }
 const GIT_COMMON_DIR_TIMEOUT_TTL_MS = 30_000
+const GIT_COMMON_DIR_POSITIVE_TTL_MS = 60_000
 const gitCommonDirCache = new Map<string, GitCommonDirCacheEntry>()
 
-function cachedGitCommonDir(key: string): string | null | undefined {
+function cachedGitCommonDir(key: string, timeoutMs?: number): string | null | undefined {
   const cached = gitCommonDirCache.get(key)
   if (cached === undefined) return undefined
-  if (cached.value !== null) return cached.value
-  if (cached.expiresAt > Date.now()) return null
+  if (cached.expiresAt <= Date.now()) {
+    gitCommonDirCache.delete(key)
+    return undefined
+  }
+  if (cached.value === null) {
+    return timeoutMs !== undefined && timeoutMs <= cached.budgetMs ? null : undefined
+  }
+  if (existsSync(cached.value)) return cached.value
   gitCommonDirCache.delete(key)
   return undefined
+}
+
+function cacheGitCommonDir(key: string, value: string): void {
+  gitCommonDirCache.set(key, {
+    value,
+    expiresAt: Date.now() + GIT_COMMON_DIR_POSITIVE_TTL_MS,
+  })
 }
 
 /** The repo's common git dir, absolute — the one place per-repo runtime
@@ -119,12 +135,13 @@ function cachedGitCommonDir(key: string): string | null | undefined {
  *  primary probe that burns the whole budget buys no fallback. */
 export function gitCommonDir(dir: string, timeoutMs?: number): string | null {
   const key = resolve(dir)
-  const cached = cachedGitCommonDir(key)
+  const cached = cachedGitCommonDir(key, timeoutMs)
   if (cached !== undefined) return cached
   const deadline = timeoutMs === undefined ? undefined : Date.now() + timeoutMs
   const remaining = (): number | undefined =>
     deadline === undefined ? undefined : deadline - Date.now()
   const cacheTimeout = (): boolean => {
+    if (timeoutMs === undefined) return false
     const rem = remaining()
     if (rem === undefined || rem > 0) {
       return false
@@ -132,6 +149,7 @@ export function gitCommonDir(dir: string, timeoutMs?: number): string | null {
     gitCommonDirCache.set(key, {
       value: null,
       expiresAt: Date.now() + GIT_COMMON_DIR_TIMEOUT_TTL_MS,
+      budgetMs: timeoutMs,
     })
     return true
   }
@@ -145,7 +163,7 @@ export function gitCommonDir(dir: string, timeoutMs?: number): string | null {
       cacheTimeout()
       return null
     }
-    gitCommonDirCache.set(key, { value: common })
+    cacheGitCommonDir(key, common)
     return common
   }
   // --path-format arrived in git 2.31: on older git the option itself
@@ -166,10 +184,10 @@ export function gitCommonDir(dir: string, timeoutMs?: number): string | null {
   const abs = resolve(dir, common)
   try {
     const canonical = realpathSync(abs)
-    gitCommonDirCache.set(key, { value: canonical })
+    cacheGitCommonDir(key, canonical)
     return canonical
   } catch {
-    gitCommonDirCache.set(key, { value: abs })
+    cacheGitCommonDir(key, abs)
     return abs
   }
 }

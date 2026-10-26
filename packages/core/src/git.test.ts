@@ -127,9 +127,87 @@ describe('gitCommonDir cache', () => {
       assert.equal(firstMarker.length, 1)
 
       const retryStartedAt = Date.now()
-      assert.equal(gitCommonDir(dir, 200), null)
+      assert.equal(gitCommonDir(dir, 100), null)
       assert.ok(Date.now() - retryStartedAt < 100)
       assert.equal(readFileSync(marker, 'utf8'), firstMarker)
+
+      const equalBudgetStartedAt = Date.now()
+      assert.equal(gitCommonDir(dir, 200), null)
+      assert.ok(Date.now() - equalBudgetStartedAt < 100)
+      assert.equal(readFileSync(marker, 'utf8'), firstMarker)
+    } finally {
+      if (previousPath === undefined) delete process.env.PATH
+      else process.env.PATH = previousPath
+      if (previousMarker === undefined) delete process.env.BRO_GIT_COMMON_DIR_MARKER
+      else process.env.BRO_GIT_COMMON_DIR_MARKER = previousMarker
+      rmSync(bin, { recursive: true, force: true })
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  test('does not reuse a timeout null for an unbounded call', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'bro-git-common-unbounded-'))
+    const bin = mkdtempSync(join(tmpdir(), 'bro-git-common-unbounded-bin-'))
+    const marker = join(bin, 'spawned')
+    const stub = join(bin, 'git')
+    const previousPath = process.env.PATH
+    const previousMarker = process.env.BRO_GIT_COMMON_DIR_MARKER
+    const previousValue = process.env.BRO_GIT_COMMON_DIR_VALUE
+    try {
+      writeFileSync(
+        stub,
+        '#!/bin/sh\nprintf x >> "$BRO_GIT_COMMON_DIR_MARKER"\nexec /bin/sleep 30\n',
+        { mode: 0o755 }
+      )
+      process.env.BRO_GIT_COMMON_DIR_MARKER = marker
+      process.env.PATH = [bin, previousPath].filter(Boolean).join(':')
+
+      assert.equal(gitCommonDir(dir, 200), null)
+      const firstMarker = readFileSync(marker, 'utf8')
+      assert.equal(firstMarker.length, 1)
+
+      writeFileSync(
+        stub,
+        '#!/bin/sh\nprintf x >> "$BRO_GIT_COMMON_DIR_MARKER"\nprintf "%s\\n" "$BRO_GIT_COMMON_DIR_VALUE"\n',
+        { mode: 0o755 }
+      )
+      process.env.BRO_GIT_COMMON_DIR_VALUE = dir
+
+      assert.equal(gitCommonDir(dir), dir)
+      assert.equal(readFileSync(marker, 'utf8'), `${firstMarker}x`)
+    } finally {
+      if (previousPath === undefined) delete process.env.PATH
+      else process.env.PATH = previousPath
+      if (previousMarker === undefined) delete process.env.BRO_GIT_COMMON_DIR_MARKER
+      else process.env.BRO_GIT_COMMON_DIR_MARKER = previousMarker
+      if (previousValue === undefined) delete process.env.BRO_GIT_COMMON_DIR_VALUE
+      else process.env.BRO_GIT_COMMON_DIR_VALUE = previousValue
+      rmSync(bin, { recursive: true, force: true })
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  test('re-probes when the cached common directory no longer exists', () => {
+    const dir = makeRepo()
+    const bin = mkdtempSync(join(tmpdir(), 'bro-git-common-deleted-bin-'))
+    const marker = join(bin, 'spawned')
+    const previousPath = process.env.PATH
+    const previousMarker = process.env.BRO_GIT_COMMON_DIR_MARKER
+    try {
+      const common = gitCommonDir(dir)
+      assert.ok(common)
+      rmSync(common, { recursive: true, force: true })
+
+      writeFileSync(
+        join(bin, 'git'),
+        '#!/bin/sh\nprintf x >> "$BRO_GIT_COMMON_DIR_MARKER"\nexit 1\n',
+        { mode: 0o755 }
+      )
+      process.env.BRO_GIT_COMMON_DIR_MARKER = marker
+      process.env.PATH = [bin, previousPath].filter(Boolean).join(':')
+
+      assert.equal(gitCommonDir(dir), null)
+      assert.equal(readFileSync(marker, 'utf8').length, 2)
     } finally {
       if (previousPath === undefined) delete process.env.PATH
       else process.env.PATH = previousPath
