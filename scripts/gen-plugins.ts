@@ -244,7 +244,9 @@ function cursorHookCommand(event) {
   if (!/^[a-z-]+$/.test(event)) {
     throw new Error(`invalid hook event name: ${event}`)
   }
-  return `if [ -f "\${CURSOR_PLUGIN_ROOT}/hooks/run.sh" ]; then "\${CURSOR_PLUGIN_ROOT}/hooks/run.sh" ${event} || true; elif command -v bro >/dev/null 2>&1; then bro hooks ${event} || true; fi; exit 0`
+  const noOpinion =
+    event === 'permission' ? `else printf '%s\\n' '{"permission":"ask"}'; ` : ''
+  return `if [ -f "\${CURSOR_PLUGIN_ROOT}/hooks/run.sh" ]; then "\${CURSOR_PLUGIN_ROOT}/hooks/run.sh" ${event} || true; elif command -v bro >/dev/null 2>&1; then bro hooks ${event} || true; ${noOpinion}fi; exit 0`
 }
 
 function cursorHook(event, timeout, extra = {}) {

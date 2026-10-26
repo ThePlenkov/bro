@@ -509,5 +509,7 @@ fi
 # would otherwise eat the payload the real invocation needs)
 if command -v bro >/dev/null 2>&1; then
   run_hook bro hooks "$@" || true
+elif [ "$EVENT" = permission ] && [ -n "${CURSOR_PLUGIN_ROOT:-}" ]; then
+  printf '%s\n' '{"permission":"ask"}'
 fi
 exit 0

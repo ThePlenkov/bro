@@ -6,7 +6,7 @@
  *  the thing is blocked; ambient state is passive context). */
 import { after, describe, test } from 'node:test'
 import assert from 'node:assert/strict'
-import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, readdirSync, readFileSync, symlinkSync, writeFileSync } from 'node:fs'
 import { join, resolve } from 'node:path'
 import {
   CLI_DIST,
@@ -82,6 +82,30 @@ const BLOCK = /"decision":"block"/
 // the launcher is part of the fail-open contract — it's what plugin
 // hosts actually exec; dist must resolve without PATH help
 const RUN_SH = resolve(CLI_DIST, '..', '..', '..', '..', 'hooks', 'run.sh')
+const CURSOR_PLUGIN_RUN_SH = resolve(
+  CLI_DIST,
+  '..',
+  '..',
+  '..',
+  '..',
+  'plugins',
+  'cursor',
+  'bro',
+  'hooks',
+  'run.sh'
+)
+const CURSOR_HOOKS_JSON = resolve(
+  CLI_DIST,
+  '..',
+  '..',
+  '..',
+  '..',
+  'plugins',
+  'cursor',
+  'bro',
+  'hooks',
+  'hooks.json'
+)
 
 describe('hooks e2e — stop gate', () => {
   test('armed work session in a dirty linked worktree is blocked', () => {
@@ -889,6 +913,49 @@ describe('hooks e2e — BRO_HOOKS=0 machine-backend trees (bro-ddksm)', () => {
       })
       assert.equal(ask.status, 0)
       assert.match(ask.stdout, /"permission":"ask"/)
+    })
+  })
+
+  test('Cursor no-CLI permission paths emit the CLI no-opinion response', () => {
+    const f = hookFixture()
+    inside(f.main, f.root, () => {
+      const bin = join(f.root, 'no-cli-bin')
+      const pluginRoot = join(f.root, 'empty-cursor-plugin')
+      mkdirSync(bin)
+      mkdirSync(pluginRoot)
+      const dirnamePath = process.env.PATH
+        ?.split(':')
+        .map((entry) => join(entry, 'dirname'))
+        .find(existsSync)
+      assert.ok(dirnamePath)
+      symlinkSync(dirnamePath, join(bin, 'dirname'))
+
+      const env = e2eEnv({
+        CURSOR_PLUGIN_ROOT: pluginRoot,
+        PATH: bin,
+      })
+      const launcher = spawnSync('/bin/sh', [CURSOR_PLUGIN_RUN_SH, 'permission'], {
+        cwd: f.main,
+        input: JSON.stringify(cursorPayload('beforeShellExecution', { command: 'rm -rf x' })),
+        env,
+        encoding: 'utf8',
+      })
+      assert.equal(launcher.status, 0)
+      assert.equal(launcher.stdout, '{"permission":"ask"}\n')
+
+      const manifest = JSON.parse(readFileSync(CURSOR_HOOKS_JSON, 'utf8')) as {
+        hooks: { beforeShellExecution: { command: string }[] }
+      }
+      const inlineCommand = manifest.hooks.beforeShellExecution[0]?.command
+      assert.ok(inlineCommand)
+      const inline = spawnSync('/bin/sh', ['-c', inlineCommand], {
+        cwd: f.main,
+        input: JSON.stringify(cursorPayload('beforeShellExecution', { command: 'rm -rf x' })),
+        env,
+        encoding: 'utf8',
+      })
+      assert.equal(inline.status, 0)
+      assert.equal(inline.stdout, '{"permission":"ask"}\n')
     })
   })
 })

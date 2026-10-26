@@ -42,7 +42,7 @@
     ],
     "beforeShellExecution": [
       {
-        "command": "if [ -f \"${CURSOR_PLUGIN_ROOT}/hooks/run.sh\" ]; then \"${CURSOR_PLUGIN_ROOT}/hooks/run.sh\" permission || true; elif command -v bro >/dev/null 2>&1; then bro hooks permission || true; fi; exit 0",
+        "command": "if [ -f \"${CURSOR_PLUGIN_ROOT}/hooks/run.sh\" ]; then \"${CURSOR_PLUGIN_ROOT}/hooks/run.sh\" permission || true; elif command -v bro >/dev/null 2>&1; then bro hooks permission || true; else printf '%s\\n' '{\"permission\":\"ask\"}'; fi; exit 0",
         "timeout": 10,
         "matcher": "^\\s*(bro|bd)(\\s|$)|^\\s*npx\\s+(-y\\s+)?@broject/bro(@[\\w.:-]+)?(\\s|$)"
       }

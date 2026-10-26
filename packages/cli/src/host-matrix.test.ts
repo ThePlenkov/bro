@@ -5,7 +5,7 @@
  * or removes a surface fails here before it fails in a live session.
  */
 import { strict as assert } from 'node:assert'
-import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs'
+import { existsSync, mkdtempSync, readFileSync, readdirSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { after, describe, test } from 'node:test'
@@ -65,6 +65,28 @@ function manifestEvents(path: string): Map<string, HookCommand[]> {
     out.set(native, commands)
   }
   return out
+}
+
+function jsonFiles(dir: string): string[] {
+  return readdirSync(dir, { withFileTypes: true }).flatMap((entry) => {
+    const path = join(dir, entry.name)
+    if (entry.isDirectory()) {
+      return jsonFiles(path)
+    }
+    return entry.name.endsWith('.json') ? [path] : []
+  })
+}
+
+function hookCommands(value: unknown): string[] {
+  if (Array.isArray(value)) {
+    return value.flatMap(hookCommands)
+  }
+  if (value === null || typeof value !== 'object') {
+    return []
+  }
+  return Object.entries(value).flatMap(([key, child]) =>
+    key === 'command' && typeof child === 'string' ? [child] : hookCommands(child)
+  )
 }
 
 /** Every native name a host entry declares, minus cells routed through
@@ -127,6 +149,30 @@ for (const hostName of ['claude', 'codex', 'devin', 'cursor'] as const) {
     })
   })
 }
+
+describe('generated hook launch paths', () => {
+  test('launchers and inline commands never probe or install bro', () => {
+    const pluginDirs = readdirSync(join(repoRoot, 'plugins'))
+    const launchers = [
+      join(repoRoot, 'hooks', 'run.sh'),
+      ...pluginDirs.map((plugin) => join(repoRoot, 'plugins', plugin, 'bro', 'hooks', 'run.sh')),
+    ].filter(existsSync)
+    for (const path of launchers) {
+      const launcher = readFileSync(path, 'utf8')
+      assert.doesNotMatch(launcher, /\bnpx\s+(?:-y|@broject\/bro)\b/, `${path} installs bro with npx`)
+      assert.doesNotMatch(launcher, /bro hooks <\/dev\/null/, `${path} probes bro hooks`)
+    }
+
+    const manifests = [join(repoRoot, 'hooks.json'), ...jsonFiles(join(repoRoot, 'plugins'))]
+    for (const path of manifests) {
+      const commands = hookCommands(JSON.parse(readFileSync(path, 'utf8')) as unknown)
+      for (const command of commands) {
+        assert.doesNotMatch(command, /\bnpx\b/, `${path} hook command invokes npx`)
+        assert.doesNotMatch(command, /bro hooks <\/dev\/null/, `${path} hook command probes bro hooks`)
+      }
+    }
+  })
+})
 
 describe('matrix conformance — declared gaps stay gaps', () => {
   test('claude does not wire PostCompact or PermissionRequest', () => {
