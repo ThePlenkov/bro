@@ -5,6 +5,7 @@
 import { spawnSync } from 'node:child_process'
 import { readdirSync, readFileSync, realpathSync, statSync } from 'node:fs'
 import { basename, dirname, join, resolve } from 'node:path'
+import { killGroup, spawnCollect } from './live-procs.ts'
 
 /** `git -C` must select the repo on argv alone — an inherited
  *  GIT_DIR/GIT_WORK_TREE/GIT_COMMON_DIR silently retargets the probe at
@@ -12,6 +13,7 @@ import { basename, dirname, join, resolve } from 'node:path'
  *  envs carry them). GIT_INDEX_FILE stays: data-ref writes use it as a
  *  private index. undefined for non-`-C` calls — inherit as usual. */
 const GIT_REPO_ENV = ['GIT_DIR', 'GIT_WORK_TREE', 'GIT_COMMON_DIR'] as const
+export const GIT_SYNC_PROBE_TIMEOUT_MS = 1_500
 
 function repoEnv(args: string[]): NodeJS.ProcessEnv | undefined {
   if (!args.includes('-C')) {
@@ -49,6 +51,44 @@ export function gitTry(args: string[], timeoutMs?: number): { code: number; out:
     code: proc.status ?? 128,
     out: proc.stdout ?? '',
     err: (proc.stderr ?? proc.error?.message ?? '').trim(),
+  }
+}
+
+/** Async git probe — bounded and fail-open for hook paths. */
+export function gitTryAsync(
+  args: string[],
+  timeoutMs = GIT_SYNC_PROBE_TIMEOUT_MS
+): Promise<{ code: number; out: string; err: string }> {
+  try {
+    const { proc, done } = spawnCollect(
+      'git',
+      args,
+      undefined,
+      repoEnv(args),
+      { detached: true, envMode: 'replace' }
+    )
+    return new Promise((resolve) => {
+      let timedOut = false
+      const timer = setTimeout(() => {
+        timedOut = true
+        killGroup(proc)
+      }, timeoutMs)
+      timer.unref?.()
+      void done.then(({ code, out, err }) => {
+        clearTimeout(timer)
+        resolve(
+          timedOut
+            ? { code: 124, out, err: `timed out after ${timeoutMs}ms` }
+            : { code: code ?? 128, out, err }
+        )
+      })
+    })
+  } catch (err) {
+    return Promise.resolve({
+      code: 128,
+      out: '',
+      err: err instanceof Error ? err.message : String(err),
+    })
   }
 }
 
@@ -564,5 +604,29 @@ export function gitUpstreamBehind(dir: string): { behind: number; upstream: stri
   }
   const n = gitTry(['-C', dir, 'rev-list', '--count', 'HEAD..@{u}'])
   const behind = n.code === 0 ? Number.parseInt(n.out.trim(), 10) : Number.NaN
+  return Number.isFinite(behind) && behind > 0 ? { behind, upstream } : null
+}
+
+/** Async twin of gitUpstreamBehind for hook probes. */
+export async function gitUpstreamBehindAsync(
+  dir: string
+): Promise<{ behind: number; upstream: string } | null> {
+  const up = await gitTryAsync([
+    '-C',
+    dir,
+    'rev-parse',
+    '--abbrev-ref',
+    '--symbolic-full-name',
+    '@{u}',
+  ])
+  const upstream = up.code === 0 ? up.out.trim() : ''
+  if (upstream === '') {
+    return null
+  }
+  const n = await gitTryAsync(['-C', dir, 'rev-list', '--count', `HEAD..${upstream}`])
+  if (n.code !== 0) {
+    return null
+  }
+  const behind = Number(n.out.trim())
   return Number.isFinite(behind) && behind > 0 ? { behind, upstream } : null
 }

@@ -39,16 +39,21 @@ export function spawnCollect(
   cmd: string,
   args: string[],
   cwd?: string,
-  env?: Record<string, string>,
+  env?: NodeJS.ProcessEnv,
   /** `detached` puts the child at the head of its own process group so a
    *  caller can `process.kill(-proc.pid)` the whole supervised tree
    *  (bd's `timeout` supervisor + bd) instead of just the direct child. */
-  opts?: { detached?: boolean }
+  opts?: { detached?: boolean; envMode?: 'replace' }
 ): { proc: ChildProcess; done: Promise<SpawnResult> } {
   const proc = spawn(cmd, args, { // NOSONAR — PATH lookup is the contract (same as gh/git)
     cwd,
     detached: opts?.detached,
-    env: env === undefined ? undefined : { ...process.env, ...env },
+    env:
+      env === undefined
+        ? undefined
+        : opts?.envMode === 'replace'
+          ? env
+          : { ...process.env, ...env },
     stdio: ['ignore', 'pipe', 'pipe'],
   })
   trackChild(proc)
@@ -63,6 +68,21 @@ export function spawnCollect(
     proc.on('close', (code) => resolve({ code, out, err: err.trim() }))
   })
   return { proc, done }
+}
+
+/** Kill the whole supervised process group — async spawns run detached
+ *  so -pid reaches the complete tree. Direct-child kill is the fallback. */
+export function killGroup(proc: ChildProcess): void {
+  const pid = proc.pid
+  if (pid !== undefined) {
+    try {
+      process.kill(-pid, 'SIGKILL')
+      return
+    } catch { /* group already gone */ }
+  }
+  try {
+    proc.kill('SIGKILL')
+  } catch { /* already dead */ }
 }
 
 /** Unref every still-running child and its stdio pipes — the pipes are

@@ -7,7 +7,7 @@
  */
 import { existsSync } from 'node:fs'
 import { isAbsolute, relative, resolve, sep } from 'node:path'
-import { gitTry, type GuardState } from '@broject/core'
+import { GIT_SYNC_PROBE_TIMEOUT_MS, gitTry, type GuardState } from '@broject/core'
 import { matchPath } from '@broject/learn'
 
 /** One clause's verdict — `bro guard test` renders these rows. */
@@ -97,7 +97,10 @@ export function liveState(dir: string, armed?: () => Set<string>): LiveState {
     },
     branch() {
       if (branchCache === undefined) {
-        const r = gitTry(['-C', dir, 'branch', '--show-current'])
+        const r = gitTry(
+          ['-C', dir, 'branch', '--show-current'],
+          GIT_SYNC_PROBE_TIMEOUT_MS
+        )
         branchCache = r.code === 0 && r.out.trim() !== '' ? r.out.trim() : null
       }
       return branchCache
@@ -126,7 +129,10 @@ export function liveState(dir: string, armed?: () => Set<string>): LiveState {
  *  record the source path follows as the next NUL token — both sides
  *  count as touched (the old name going away IS a change). */
 function readDiffPaths(dir: string): string[] | null {
-  const r = gitTry(['-C', dir, 'status', '--porcelain=v1', '-z', '-uall'])
+  const r = gitTry(
+    ['-C', dir, 'status', '--porcelain=v1', '-z', '-uall'],
+    GIT_SYNC_PROBE_TIMEOUT_MS
+  )
   if (r.code !== 0) {
     return null
   }

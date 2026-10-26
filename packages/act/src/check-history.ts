@@ -17,8 +17,8 @@
  * failing conditional check trends to "unproven", never to a crash.
  */
 import { appendFileSync } from 'node:fs'
-import { join, resolve } from 'node:path'
-import { gitTry, withFileLock } from '@broject/core'
+import { join } from 'node:path'
+import { GIT_SYNC_PROBE_TIMEOUT_MS, gitCommonDir, withFileLock } from '@broject/core'
 import { compactLedger, parseLedger } from './ledger.ts'
 
 export interface CheckObservation {
@@ -83,7 +83,7 @@ export function fileCheckHistory(file: string): CheckHistory {
             compactLedger(file)
             appendFileSync(file, `${JSON.stringify({ ...obs, ts: Date.now() })}\n`)
           },
-          { waitMs: 2000, label: 'act-checks ledger' }
+          { waitMs: 0, label: 'act-checks ledger' }
         )
       } catch {
         // an unwritable ledger is an empty ledger — recording never throws
@@ -95,7 +95,10 @@ export function fileCheckHistory(file: string): CheckHistory {
       let streak = 0
       const seen = new Set<string>()
       for (let i = entries.length - 1; i >= 0; i -= 1) {
-        const e = entries[i]!
+        const e = entries[i]
+        if (e === undefined) {
+          continue
+        }
         // a re-observed sha is one check run, not a new failure —
         // collapse repeats so streak counts heads, not polls. Entries
         // for a sha can be non-adjacent when PRs interleave, so every
@@ -117,15 +120,8 @@ export function fileCheckHistory(file: string): CheckHistory {
 /** The repo ledger — `<git-common-dir>/bro/act-checks.jsonl`; null
  *  outside a repo (callers treat absent history as streak 0). */
 export function checkHistoryPath(dir: string): string | null {
-  const r = gitTry(['-C', dir, 'rev-parse', '--path-format=absolute', '--git-common-dir'])
-  let common = r.code === 0 ? r.out.trim() : ''
-  if (common === '') {
-    // git <2.31 has no --path-format — resolve the possibly-relative
-    // common dir against `dir` instead of failing outright
-    const rel = gitTry(['-C', dir, 'rev-parse', '--git-common-dir'])
-    common = rel.code === 0 && rel.out.trim() !== '' ? resolve(dir, rel.out.trim()) : ''
-  }
-  return common === '' ? null : join(common, 'bro', 'act-checks.jsonl')
+  const common = gitCommonDir(dir, GIT_SYNC_PROBE_TIMEOUT_MS)
+  return common === null ? null : join(common, 'bro', 'act-checks.jsonl')
 }
 
 export function checkHistory(dir: string): CheckHistory | null {

@@ -3,8 +3,8 @@
  * package. PATH lookup is the contract (same as gh); a generous maxBuffer
  * keeps large `bd list --json` payloads from hitting Node's 1 MiB default.
  */
-import { execFileSync, spawnSync, type ChildProcess } from 'node:child_process'
-import { spawnCollect } from './live-procs.ts'
+import { execFileSync, spawnSync } from 'node:child_process'
+import { killGroup, spawnCollect } from './live-procs.ts'
 import { readdirSync, statSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { gitTry } from './git.ts'
@@ -60,22 +60,6 @@ function normalizeSpawnErr(err: string): string {
   return /failed to (run command|execute process)[^\n]*no such file or directory/i.test(err)
     ? `ENOENT ${err}`
     : err
-}
-
-/** Kill the whole supervised group — the async spawns run `detached`
- *  so -pid reaches `timeout` and `bd` together; a bare-bd spawn still
- *  leads its own one-member group. Direct-child kill is the fallback. */
-function killGroup(proc: ChildProcess): void {
-  const pid = proc.pid
-  if (pid !== undefined) {
-    try {
-      process.kill(-pid, 'SIGKILL')
-      return
-    } catch { /* group already gone */ }
-  }
-  try {
-    proc.kill('SIGKILL')
-  } catch { /* already dead */ }
 }
 
 export function bd(args: string[], cwd?: string): string {
