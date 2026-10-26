@@ -92,7 +92,9 @@ export function gitTryAsync(
   }
 }
 
-const gitCommonDirCache = new Map<string, string>()
+type GitCommonDirCacheEntry = { value: string } | { value: null; expiresAt: number }
+const GIT_COMMON_DIR_TIMEOUT_TTL_MS = 30_000
+const gitCommonDirCache = new Map<string, GitCommonDirCacheEntry>()
 
 /** The repo's common git dir, absolute — the one place per-repo runtime
  *  state belongs, so linked worktrees resolve to the SAME directory
@@ -110,11 +112,28 @@ export function gitCommonDir(dir: string, timeoutMs?: number): string | null {
   const key = resolve(dir)
   const cached = gitCommonDirCache.get(key)
   if (cached !== undefined) {
-    return cached
+    if (cached.value !== null) {
+      return cached.value
+    }
+    if (cached.expiresAt > Date.now()) {
+      return null
+    }
+    gitCommonDirCache.delete(key)
   }
   const deadline = timeoutMs === undefined ? undefined : Date.now() + timeoutMs
   const remaining = (): number | undefined =>
     deadline === undefined ? undefined : deadline - Date.now()
+  const cacheTimeout = (): boolean => {
+    const rem = remaining()
+    if (rem === undefined || rem > 0) {
+      return false
+    }
+    gitCommonDirCache.set(key, {
+      value: null,
+      expiresAt: Date.now() + GIT_COMMON_DIR_TIMEOUT_TTL_MS,
+    })
+    return true
+  }
   const r = gitTry(
     ['-C', dir, 'rev-parse', '--path-format=absolute', '--git-common-dir'],
     remaining()
@@ -122,9 +141,10 @@ export function gitCommonDir(dir: string, timeoutMs?: number): string | null {
   if (r.code === 0) {
     const common = r.out.trim()
     if (common === '') {
+      cacheTimeout()
       return null
     }
-    gitCommonDirCache.set(key, common)
+    gitCommonDirCache.set(key, { value: common })
     return common
   }
   // --path-format arrived in git 2.31: on older git the option itself
@@ -133,21 +153,22 @@ export function gitCommonDir(dir: string, timeoutMs?: number): string | null {
   // but keeps a symlinked dir's alias, and callers hash the result
   // (busSocketPath) — canonicalize so one repo yields one socket.
   const rem = remaining()
-  if (rem !== undefined && rem <= 0) {
+  if (cacheTimeout()) {
     return null
   }
   const fallback = gitTry(['-C', dir, 'rev-parse', '--git-common-dir'], rem)
   const common = fallback.code === 0 ? fallback.out.trim() : ''
   if (common === '') {
+    cacheTimeout()
     return null
   }
   const abs = resolve(dir, common)
   try {
     const canonical = realpathSync(abs)
-    gitCommonDirCache.set(key, canonical)
+    gitCommonDirCache.set(key, { value: canonical })
     return canonical
   } catch {
-    gitCommonDirCache.set(key, abs)
+    gitCommonDirCache.set(key, { value: abs })
     return abs
   }
 }

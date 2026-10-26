@@ -104,6 +104,41 @@ describe('gitCommonDir cache', () => {
       rmSync(dir, { recursive: true, force: true })
     }
   })
+
+  test('briefly caches timeouts without spawning git again', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'bro-git-common-timeout-'))
+    const bin = mkdtempSync(join(tmpdir(), 'bro-git-common-timeout-bin-'))
+    const marker = join(bin, 'spawned')
+    const previousPath = process.env.PATH
+    const previousMarker = process.env.BRO_GIT_COMMON_DIR_MARKER
+    try {
+      writeFileSync(
+        join(bin, 'git'),
+        '#!/bin/sh\nprintf x >> "$BRO_GIT_COMMON_DIR_MARKER"\nexec /bin/sleep 30\n',
+        { mode: 0o755 }
+      )
+      process.env.BRO_GIT_COMMON_DIR_MARKER = marker
+      process.env.PATH = [bin, previousPath].filter(Boolean).join(':')
+
+      const startedAt = Date.now()
+      assert.equal(gitCommonDir(dir, 200), null)
+      assert.ok(Date.now() - startedAt >= 180)
+      const firstMarker = readFileSync(marker, 'utf8')
+      assert.equal(firstMarker.length, 1)
+
+      const retryStartedAt = Date.now()
+      assert.equal(gitCommonDir(dir, 200), null)
+      assert.ok(Date.now() - retryStartedAt < 100)
+      assert.equal(readFileSync(marker, 'utf8'), firstMarker)
+    } finally {
+      if (previousPath === undefined) delete process.env.PATH
+      else process.env.PATH = previousPath
+      if (previousMarker === undefined) delete process.env.BRO_GIT_COMMON_DIR_MARKER
+      else process.env.BRO_GIT_COMMON_DIR_MARKER = previousMarker
+      rmSync(bin, { recursive: true, force: true })
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
 })
 
 describe('gitDriftRef', () => {
