@@ -55,13 +55,41 @@ fi
 
 CAPTURED=0
 PAYLOAD=
+PAYLOAD_FILE=
 EVENT=${1:-}
+
+cleanup_payload() {
+  [ -z "$PAYLOAD_FILE" ] || rm -f "$PAYLOAD_FILE"
+}
+trap cleanup_payload 0
+
+BRO_HOOK_WATCHDOG_S=${BRO_HOOK_WATCHDOG_S:-8}
+case "$BRO_HOOK_WATCHDOG_S" in
+  ''|*[!0-9]*) BRO_HOOK_WATCHDOG_S=8 ;;
+  *) [ "$BRO_HOOK_WATCHDOG_S" -gt 0 ] 2>/dev/null || BRO_HOOK_WATCHDOG_S=8 ;;
+esac
 
 # feed the (possibly captured) hook payload to whichever binary runs —
 # the fast-path events re-read stdin, so it is replayed instead of the
 # original fd
 run_hook() {
-  if [ "$CAPTURED" = 1 ]; then printf %s "$PAYLOAD" | "$@"; else "$@"; fi
+  if [ "$CAPTURED" = 1 ]; then
+    exec "$@" < "$PAYLOAD_FILE"
+  else
+    exec "$@" <&0
+  fi
+}
+
+run_bounded() {
+  exec 3<&0
+  run_hook "$@" <&3 &
+  _pid=$!
+  ( sleep "$BRO_HOOK_WATCHDOG_S"; kill -KILL "$_pid" 2>/dev/null ) </dev/null >/dev/null 2>&1 &
+  _wd=$!
+  wait "$_pid" 2>/dev/null
+  _rc=$?
+  kill "$_wd" 2>/dev/null
+  return "$_rc"
 }
 
 # 1 when a drop in mailbox dir $1 is deliverable to this session —
@@ -169,11 +197,17 @@ agent_root_pid() {
 
 case "$EVENT" in
 post-tool|prompt-submit)
-  PAYLOAD=$(cat)
-  CAPTURED=1
   # same base the hook resolves for non-cursor hosts
   BASE=${DEVIN_PROJECT_DIR:-$PWD}
   NEED_NODE=
+  PAYLOAD_FILE=$(mktemp "${TMPDIR:-/tmp}/bro-hook.XXXXXX" 2>/dev/null) || PAYLOAD_FILE=
+  if [ -n "$PAYLOAD_FILE" ]; then
+    cat > "$PAYLOAD_FILE"
+    PAYLOAD=$(cat "$PAYLOAD_FILE")
+    CAPTURED=1
+  else
+    NEED_NODE=1
+  fi
 
   # foreign-schema payload — cursor/codex need schema translation, the
   # hydrate leg, and CURSOR_PROJECT_DIR/workspace_roots resolution;
@@ -527,10 +561,10 @@ while [ ! -f "$DIR/packages/cli/dist/index.js" ]; do
 done
 
 if [ -f "$DIR/packages/cli/dist/index.js" ] && command -v node >/dev/null 2>&1; then
-  run_hook node "$DIR/packages/cli/dist/index.js" hooks "$@" && exit 0
+  run_bounded node "$DIR/packages/cli/dist/index.js" hooks "$@" && exit 0
 fi
 if command -v bro >/dev/null 2>&1; then
-  run_hook bro hooks "$@" || true
+  run_bounded bro hooks "$@" || true
 elif [ "$EVENT" = permission ] && [ -n "${CURSOR_PLUGIN_ROOT:-}" ]; then
   printf '%s\n' '{"permission":"ask"}'
 fi

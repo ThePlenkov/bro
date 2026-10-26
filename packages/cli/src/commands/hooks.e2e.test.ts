@@ -835,6 +835,120 @@ describe('hooks e2e — session-start + the run.sh launcher', () => {
     })
   })
 
+  test('run.sh watchdog kills a hung bro process under dash and bash', () => {
+    for (const shell of ['/bin/dash', '/bin/bash']) {
+      const f = hookFixture()
+      inside(f.main, f.root, () => {
+        const bin = join(f.root, 'bin')
+        const pluginRoot = join(f.root, 'plugin')
+        const pidFile = join(f.root, 'bro.pid')
+        mkdirSync(bin)
+        mkdirSync(pluginRoot)
+        const bro = join(bin, 'bro')
+        writeFileSync(
+          bro,
+          '#!/bin/sh\nprintf "%s\\n" "$$" > "$STUB_PID_FILE"\nexec /bin/sleep 30\n'
+        )
+        chmodSync(bro, 0o755)
+        const input = JSON.stringify({
+          session_id: 's1',
+          tool_name: 'Bash',
+          tool_input: { command: 'git push origin main' },
+        })
+        const proc = spawnSync(shell, [RUN_SH, 'post-tool'], {
+          cwd: f.main,
+          input,
+          env: e2eEnv({
+            PATH: `${bin}:${process.env.PATH}`,
+            PLUGIN_ROOT: pluginRoot,
+            BRO_HOOK_WATCHDOG_S: '1',
+            STUB_PID_FILE: pidFile,
+            XDG_STATE_HOME: join(f.root, 'xdg-state'),
+          }),
+          encoding: 'utf8',
+          timeout: 2_500,
+        })
+        assert.equal(proc.error, undefined, `${shell} exceeded the watchdog bound`)
+        assert.equal(proc.status, 0, proc.stderr)
+        const pid = Number(readFileSync(pidFile, 'utf8'))
+        let alive = true
+        try {
+          process.kill(pid, 0)
+        } catch {
+          alive = false
+        }
+        assert.equal(alive, false, `${shell} left the bro process alive`)
+      })
+    }
+  })
+
+  test('run.sh forwards uncaptured stdin byte-for-byte under dash and bash', () => {
+    for (const shell of ['/bin/dash', '/bin/bash']) {
+      const f = hookFixture()
+      inside(f.main, f.root, () => {
+        const bin = join(f.root, 'bin')
+        const pluginRoot = join(f.root, 'plugin')
+        const stdinFile = join(f.root, 'bro.stdin')
+        mkdirSync(bin)
+        mkdirSync(pluginRoot)
+        const bro = join(bin, 'bro')
+        writeFileSync(bro, '#!/bin/sh\ncat > "$STUB_STDIN_FILE"\n')
+        chmodSync(bro, 0o755)
+        const input = '{"hook_event_name":"permission"}\n'
+        const proc = spawnSync(shell, [RUN_SH, 'permission'], {
+          cwd: f.main,
+          input,
+          env: e2eEnv({
+            PATH: `${bin}:${process.env.PATH}`,
+            PLUGIN_ROOT: pluginRoot,
+            STUB_STDIN_FILE: stdinFile,
+          }),
+          encoding: 'utf8',
+          timeout: 2_500,
+        })
+        assert.equal(proc.error, undefined, `${shell} exceeded the test bound`)
+        assert.equal(proc.status, 0, proc.stderr)
+        assert.equal(readFileSync(stdinFile, 'utf8'), input)
+      })
+    }
+  })
+
+  test('run.sh forwards captured stdin byte-for-byte under dash and bash', () => {
+    for (const shell of ['/bin/dash', '/bin/bash']) {
+      const f = hookFixture()
+      inside(f.main, f.root, () => {
+        const bin = join(f.root, 'bin')
+        const pluginRoot = join(f.root, 'plugin')
+        const stdinFile = join(f.root, 'bro.stdin')
+        mkdirSync(bin)
+        mkdirSync(pluginRoot)
+        const bro = join(bin, 'bro')
+        writeFileSync(bro, '#!/bin/sh\ncat > "$STUB_STDIN_FILE"\n')
+        chmodSync(bro, 0o755)
+        const input = `${JSON.stringify({
+          session_id: 's1',
+          tool_name: 'Bash',
+          tool_input: { command: 'git push origin main' },
+        })}\n\n`
+        const proc = spawnSync(shell, [RUN_SH, 'post-tool'], {
+          cwd: f.main,
+          input,
+          env: e2eEnv({
+            PATH: `${bin}:${process.env.PATH}`,
+            PLUGIN_ROOT: pluginRoot,
+            STUB_STDIN_FILE: stdinFile,
+            XDG_STATE_HOME: join(f.root, 'xdg-state'),
+          }),
+          encoding: 'utf8',
+          timeout: 2_500,
+        })
+        assert.equal(proc.error, undefined, `${shell} exceeded the test bound`)
+        assert.equal(proc.status, 0, proc.stderr)
+        assert.equal(readFileSync(stdinFile, 'utf8'), input)
+      })
+    }
+  })
+
   test('plugin run.sh defers only to registered executable Devin hooks', () => {
     const f = hookFixture()
     inside(f.main, f.root, () => {
@@ -1102,6 +1216,30 @@ describe('hooks e2e — BRO_HOOKS=0 machine-backend trees (bro-ddksm)', () => {
 })
 
 describe('hooks e2e — perf journal', () => {
+  test('deadline exits 0 and journals a deadline row', () => {
+    const f = hookFixture()
+    inside(f.main, f.root, () => {
+      const proc = spawnSync(process.execPath, [CLI_DIST, 'hooks', 'session-start'], {
+        cwd: f.main,
+        input: JSON.stringify({ session_id: 's-deadline' }),
+        env: e2eEnv({
+          BRO_HOOK_DEADLINE_MS: '1',
+          XDG_STATE_HOME: join(f.root, 'xdg-state'),
+        }),
+        encoding: 'utf8',
+        timeout: 3_000,
+      })
+      assert.equal(proc.error, undefined, 'hook exceeded the test bound')
+      assert.equal(proc.status, 0, proc.stderr)
+      const journal = join(f.markerDir, 'perf', 's-deadline.jsonl')
+      const rows = readFileSync(journal, 'utf8')
+        .split('\n')
+        .filter((line) => line !== '')
+        .map((line) => JSON.parse(line) as Record<string, unknown>)
+      assert.ok(rows.some((row) => row.deadline === true))
+    })
+  })
+
   test('a hook event journals per-probe timings plus the event total', () => {
     const f = hookFixture()
     inside(f.main, f.root, () => {
