@@ -16,10 +16,13 @@ per declared named read (`bro_work_ready`, `bro_queue_next`,
 `bro_events_tail`, `bro_judge_stats`, `bro_debt_next`,
 `bro_debt_summary`, `bro_learn_probe`).
 
-**Read-only in v1.** Write verbs stay unexposed until the spec's
-session-authz question is designed — a `claim`/`resolve`/`spawn` call
-is not a tool, and cannot become one by accident because generation is
-the only path.
+**Read-only except spec-assigned verbs.** Write verbs stay unexposed
+until a spec assigns one to this transport through the descriptor's
+`mcpVerbs` allowlist — generation is the only path, so a verb cannot
+become a tool by accident. The one wired verb today is
+`bro_agents_delegate` (spec bro-z8tng — the same contract as
+`bro fleet delegate`: `mode:'wait'` is a pooled ACP turn, `'detach'` a
+registry spawn); `spawn`/`stop`/`respawn` remain declared-but-unwired.
 
 ## Registering
 

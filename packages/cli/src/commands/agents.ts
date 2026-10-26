@@ -410,6 +410,7 @@ function statusDetail(
   if (a.provider !== undefined) console.log(`provider  ${a.provider}`)
   if (a.model !== undefined) console.log(`model     ${a.model}`)
   if (a.class !== undefined) console.log(`class     ${a.class}`)
+  if (a.delegatedBy !== undefined) console.log(`delegatedBy ${a.delegatedBy}`)
   if (a.cause !== undefined) console.log(`cause     ${a.cause}`)
   if (a.resetAt !== undefined) console.log(`resetAt   ${a.resetAt}`)
   if (a.pid !== undefined) console.log(`pid       ${a.pid}`)
@@ -608,6 +609,10 @@ export interface StepSpawnRequest {
    *  (spec bro-1x7p). Read only when `fleet.routing` is declared; a
    *  resolved class with no routing entry is a config error. */
   class?: string
+  /** The delegating agent's agentId — `bro fleet delegate --detach`
+   *  provenance (spec bro-z8tng). Stamped into the registry and pinned
+   *  into the worker's env as BRO_DELEGATED_BY. */
+  delegatedBy?: string
 }
 
 /** The spawn behind `up <step>` and POST /api/v1/agents — resolve the
@@ -713,6 +718,7 @@ export function spawnStepAgent(
           provider: pick.provider,
           model: pick.model,
           class: route?.class,
+          delegatedBy: req.delegatedBy,
           worker: pick.worker,
           enter: resolved.enter,
         })

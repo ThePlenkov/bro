@@ -68,8 +68,17 @@ export interface PlaneDescriptor {
    *  not declared here cannot be a tool — generation, not convention. */
   reads: string[]
   /** declared verbs, plane vocabulary only. Declared ≠ exposed: v1
-   *  transports serve reads only while write authz is undesigned. */
+   *  transports serve reads only while write authz is undesigned —
+   *  `mcpVerbs` is the allowlist a spec assigns to the MCP surface. */
   verbs: string[]
+  /** verbs the MCP transport exposes as `bro_<plane>_<verb>` tools —
+   *  every entry must also appear in `verbs` and hold a `true` live
+   *  capability. An absent list keeps the plane read-only over MCP. */
+  mcpVerbs?: string[]
+  /** JSON-schema arg shapes per verb — surfaced verbatim as tool
+   *  inputSchema for `mcpVerbs` entries. Absent → a permissive object
+   *  schema. */
+  verbArgs?: Record<string, PlaneArgSchema>
   /** JSON-schema arg shapes per named read and for 'list' — transports
    *  surface them as-is. Absent → a permissive object schema. */
   readArgs?: Record<string, PlaneArgSchema>
@@ -81,8 +90,10 @@ export interface PlaneDescriptor {
   /** a declared named read — every entry in `reads` resolves here */
   read(name: string, args?: Record<string, unknown>): Promise<unknown>
   /** throws PlaneVerbError — client bug (bad args) vs
-   *  PlaneUnavailable — the backend can't serve it now */
-  exec(verb: string, args: Record<string, unknown>): Promise<PlaneRow | void>
+   *  PlaneUnavailable — the backend can't serve it now. The result is
+   *  the verb's own result doc (a PlaneRow, a report object, or void) —
+   *  transports envelope it verbatim. */
+  exec(verb: string, args: Record<string, unknown>): Promise<unknown>
 }
 
 // ---------------------------------------------------------------------------
@@ -111,6 +122,9 @@ export interface Worker extends PlaneRow {
   worktree?: string
   provider?: string
   model?: string
+  /** agentId of the delegating agent — `bro fleet delegate --detach`
+   *  provenance; absent on direct spawns. */
+  delegatedBy?: string
 }
 
 /** queue — one molecule/run with its DAG posture. */

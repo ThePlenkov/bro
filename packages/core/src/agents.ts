@@ -232,6 +232,11 @@ export interface SpawnSpec {
    *  spec bro-1x7p). Provenance like provider; absent on unrouted
    *  spawns (no fleet.routing declared). */
   class?: string
+  /** The agentId of the agent that delegated this spawn
+   *  (`bro fleet delegate --detach` — spec bro-z8tng). Provenance like
+   *  provider; stamped into the registry and pinned into the worker's
+   *  env as BRO_DELEGATED_BY. Absent on direct (non-delegated) spawns. */
+  delegatedBy?: string
   /** Provider-resolved spawn payload — see SpawnWorker. */
   worker?: SpawnWorker
   /** Spawn owns the enter transition (rig bro-oy3k1.4): when set,
@@ -275,6 +280,9 @@ export interface AgentInfo {
   /** Routing lane the spawn resolved to (fleet.routing class) —
    *  absent on unrouted spawns. */
   class?: string
+  /** agentId of the delegating agent — `bro fleet delegate --detach`
+   *  provenance; absent on direct spawns. */
+  delegatedBy?: string
   worktree?: string
   log?: string
   /** The worker's stderr capture beside `log` — local backends split fd
@@ -376,6 +384,9 @@ export interface AgentRegistryEntry {
   /** Routing lane the run resolved to (fleet.routing class) — same
    *  provenance role as provider/model (spec bro-1x7p). */
   class?: string
+  /** agentId of the delegating agent (spec bro-z8tng) — same
+   *  provenance role as provider/model; absent on direct spawns. */
+  delegatedBy?: string
   [key: string]: unknown
 }
 
