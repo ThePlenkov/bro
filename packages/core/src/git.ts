@@ -92,6 +92,8 @@ export function gitTryAsync(
   }
 }
 
+const gitCommonDirCache = new Map<string, string>()
+
 /** The repo's common git dir, absolute — the one place per-repo runtime
  *  state belongs, so linked worktrees resolve to the SAME directory
  *  instead of each getting its own copy. `--path-format=absolute` keeps
@@ -105,6 +107,11 @@ export function gitTryAsync(
  *  as failure → null, same contract). The deadline is shared: a
  *  primary probe that burns the whole budget buys no fallback. */
 export function gitCommonDir(dir: string, timeoutMs?: number): string | null {
+  const key = resolve(dir)
+  const cached = gitCommonDirCache.get(key)
+  if (cached !== undefined) {
+    return cached
+  }
   const deadline = timeoutMs === undefined ? undefined : Date.now() + timeoutMs
   const remaining = (): number | undefined =>
     deadline === undefined ? undefined : deadline - Date.now()
@@ -114,7 +121,11 @@ export function gitCommonDir(dir: string, timeoutMs?: number): string | null {
   )
   if (r.code === 0) {
     const common = r.out.trim()
-    return common === '' ? null : common
+    if (common === '') {
+      return null
+    }
+    gitCommonDirCache.set(key, common)
+    return common
   }
   // --path-format arrived in git 2.31: on older git the option itself
   // fails, which must not read as "not a repository". The plain output
@@ -132,8 +143,11 @@ export function gitCommonDir(dir: string, timeoutMs?: number): string | null {
   }
   const abs = resolve(dir, common)
   try {
-    return realpathSync(abs)
+    const canonical = realpathSync(abs)
+    gitCommonDirCache.set(key, canonical)
+    return canonical
   } catch {
+    gitCommonDirCache.set(key, abs)
     return abs
   }
 }

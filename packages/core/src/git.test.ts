@@ -12,6 +12,7 @@ import {
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import {
+  gitCommonDir,
   gitDriftRef,
   gitIsAncestor,
   gitIsShallow,
@@ -62,6 +63,48 @@ function withRepo<T>(fn: (dir: string) => T, branch = 'main'): T {
     rmSync(dir, { recursive: true, force: true })
   }
 }
+
+describe('gitCommonDir cache', () => {
+  test('reuses a successful result without spawning git again', () => {
+    const dir = makeRepo()
+    const bin = mkdtempSync(join(tmpdir(), 'bro-git-common-bin-'))
+    const marker = join(bin, 'spawned')
+    const previousPath = process.env.PATH
+    const previousMarker = process.env.BRO_GIT_COMMON_DIR_MARKER
+    try {
+      const expected = gitCommonDir(dir)
+      assert.ok(expected)
+      writeFileSync(
+        join(bin, 'git'),
+        '#!/bin/sh\nprintf spawned > "$BRO_GIT_COMMON_DIR_MARKER"\nexit 1\n',
+        { mode: 0o755 }
+      )
+      process.env.BRO_GIT_COMMON_DIR_MARKER = marker
+      process.env.PATH = [bin, previousPath].filter(Boolean).join(':')
+
+      assert.equal(gitCommonDir(dir), expected)
+      assert.equal(existsSync(marker), false)
+    } finally {
+      if (previousPath === undefined) delete process.env.PATH
+      else process.env.PATH = previousPath
+      if (previousMarker === undefined) delete process.env.BRO_GIT_COMMON_DIR_MARKER
+      else process.env.BRO_GIT_COMMON_DIR_MARKER = previousMarker
+      rmSync(bin, { recursive: true, force: true })
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  test('does not cache null for a directory initialized later', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'bro-git-common-late-init-'))
+    try {
+      assert.equal(gitCommonDir(dir), null)
+      git(dir, ['init', '-q', '-b', 'main'])
+      assert.ok(gitCommonDir(dir))
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+})
 
 describe('gitDriftRef', () => {
   test('origin/HEAD wins when the remote default is set', () => {
