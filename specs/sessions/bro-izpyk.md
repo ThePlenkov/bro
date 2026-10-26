@@ -132,7 +132,7 @@ Hard watchdog in `run.sh`: kill and exit 0 after 2 s (5 s for `stop`). bro never
 host's timeout.
 
 | event | observe | mode active, answer from snapshot | mode active, live decision |
-|---|---|---|---|
+| --- | --- | --- | --- |
 | post-tool, prompt-submit | ≤ 15 ms | ≤ 30 ms | — (never live) |
 | session-start, compaction | ≤ 15 ms | ≤ 50 ms | — |
 | permission, pre-tool | ≤ 15 ms | — | ≤ 300 ms |
