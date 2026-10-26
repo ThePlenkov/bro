@@ -224,7 +224,7 @@ const BroPlugin: Plugin = async ({ directory, client }) => {
     const token = ++hydrationToken
     hydratedContexts.set(sessionKey, { token, context: null })
     const out = await runBroHook('session-start', { session_id: sessionKey })
-    if (hydratedContexts.get(sessionKey)?.token === token) {
+    if (Object.is(hydratedContexts.get(sessionKey)?.token, token)) {
       hydratedContexts.set(sessionKey, { token, context: hookContext(out) })
     }
   }
