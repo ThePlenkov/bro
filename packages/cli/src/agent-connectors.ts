@@ -2502,6 +2502,10 @@ export function makeNativeConnector(ctx: ConnectorCtx, env: AgentConnectorEnv): 
           errFd = openPrivateAppendSync(stderrLog)
           // the wrapper captures $? into the .exit file — the only exit
           // record a detached process can leave once the parent is gone.
+          // The write targets the literal quoted path, never $out: a
+          // 'template' payload runs in this shell's scope and assigning
+          // `out` would retarget the exit write (the shape tmux/docker
+          // already use).
           // Worker payloads (spec bro-5hx1.1): a 'template' worker's
           // command substitutes for the backend's own template; an
           // 'argv' worker execs verbatim through the wrapper's "$@"
@@ -2519,7 +2523,7 @@ export function makeNativeConnector(ctx: ConnectorCtx, env: AgentConnectorEnv): 
             worker?.kind === 'argv'
               ? [
                   '-c',
-                  `${HANDSHAKE_SCRIPT} shift 4; "$@"; s=$?; ( umask 077; printf %s "$s" > "$out" )`,
+                  `${HANDSHAKE_SCRIPT} shift 4; "$@"; s=$?; ( umask 077; printf %s "$s" > ${shQuote(exitFile)} )`,
                   'bro-agent',
                   exitFile,
                   handleFile,
@@ -2530,7 +2534,7 @@ export function makeNativeConnector(ctx: ConnectorCtx, env: AgentConnectorEnv): 
                 ]
               : [
                   '-c',
-                  `${HANDSHAKE_SCRIPT} ${expandAgentCmd(worker?.kind === 'template' ? worker.command : command, promptFile)}; s=$?; ( umask 077; printf %s "$s" > "$out" )`,
+                  `${HANDSHAKE_SCRIPT} ${expandAgentCmd(worker?.kind === 'template' ? worker.command : command, promptFile)}; s=$?; ( umask 077; printf %s "$s" > ${shQuote(exitFile)} )`,
                   'bro-agent',
                   exitFile,
                   handleFile,

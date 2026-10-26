@@ -220,7 +220,13 @@ describe('claimWorktree', () => {
       writeFileSync(
         join(main, '.git', 'bro', 'agents.json'),
         JSON.stringify({
-          'fx-1': { agentId: 'native-x', backend: 'native', spawnedAt: 't', worktree: tree },
+          'fx-1': {
+            agentId: 'native-x',
+            backend: 'native',
+            spawnedAt: new Date().toISOString(),
+            runId: 'r1',
+            worktree: tree,
+          },
         })
       )
       const r = finishWorktreeEnter(finishOpts(main), createdFor(tree))
