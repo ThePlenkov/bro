@@ -197,6 +197,8 @@ interface Attempt {
   ms: number
   ok: boolean
   detail: string
+  /** spawn error or the 30s kill — retrying re-pays the same hang. */
+  fatal: boolean
 }
 
 /** One spawn — wall clock is the metric (process spawn + boot +
@@ -227,7 +229,7 @@ function attempt(
   const ok =
     proc.status === 0 && proc.error === undefined && !stderr.includes(HOOK_DISPATCH_ERR)
   const detail = `status=${proc.status} signal=${proc.signal} err=${proc.error?.message ?? ''} stderr=${stderr.slice(0, 300)}`
-  return { ms, ok, detail }
+  return { ms, ok, detail, fatal: proc.error !== undefined }
 }
 
 /** A row's `errors` counts measured runs only — warmup failures are
@@ -251,6 +253,15 @@ function benchRow(
         ? undefined
         : JSON.stringify(payload(`${lane}-${event}-${i}`))
     const a = attempt(lane, event, input, opts)
+    if (a.fatal) {
+      // spawn failure or the 30s timeout — the remaining attempts
+      // re-pay the same hang (24 rows × 21 × 30s tops ~4h on a dead
+      // hook). Count once — even in warmup, an empty row must not
+      // read as clean — and stop sampling.
+      errors++
+      console.error(`bench-hooks: ${lane}:${event} aborting — ${a.detail}`)
+      break
+    }
     if (i < opts.warmup) {
       if (!a.ok) {
         console.error(`bench-hooks: ${lane}:${event} warmup failed — ${a.detail}`)
