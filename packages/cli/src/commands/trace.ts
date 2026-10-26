@@ -8,21 +8,21 @@
  * command detached, so a dead collector can only lose spans — never
  * stall a session.
  */
-import { spawn } from 'node:child_process'
-import { createHash } from 'node:crypto'
-import { existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from 'node:fs'
-import { basename, dirname, join } from 'node:path'
-import { hooksDir, safeId } from '@broject/learn'
-import { hasHelpFlag, printUsage, withFileLock } from '@broject/core'
-import { VERSION } from '../version.ts'
-import { loadBroConfig } from '../plugins.ts'
+import { spawn } from 'node:child_process';
+import { createHash } from 'node:crypto';
+import { existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from 'node:fs';
+import { basename, dirname, join } from 'node:path';
+import { hooksDir, safeId } from '@broject/learn';
+import { hasHelpFlag, printUsage, withFileLock } from '@broject/core';
+import { VERSION } from '../version.ts';
+import { loadBroConfig } from '../plugins.ts';
 import {
   resolveOtlp,
   telemetrySection,
   tracesUrl,
   type OtlpConfig,
   type TelemetryConfig,
-} from './trace-config.ts'
+} from './trace-config.ts';
 
 // --- OTLP/HTTP JSON shapes -------------------------------------------------------
 
@@ -31,30 +31,30 @@ type OtlpAttrValue =
   | { intValue: number }
   | { doubleValue: number }
   | { boolValue: boolean }
-  | { arrayValue: { values: OtlpAttrValue[] } }
+  | { arrayValue: { values: OtlpAttrValue[] } };
 
 interface OtlpKeyValue {
-  key: string
-  value: OtlpAttrValue
+  key: string;
+  value: OtlpAttrValue;
 }
 
 interface OtlpSpan {
-  traceId: string
-  spanId: string
-  name: string
-  kind: number
-  startTimeUnixNano: string
-  endTimeUnixNano: string
-  attributes: OtlpKeyValue[]
-  status?: { code: number }
+  traceId: string;
+  spanId: string;
+  name: string;
+  kind: number;
+  startTimeUnixNano: string;
+  endTimeUnixNano: string;
+  attributes: OtlpKeyValue[];
+  status?: { code: number };
 }
 
 /** Journal fields with their own mapping — anything else primitive
  *  lands as a `bro.<key>` attribute verbatim (forward-compat for
  *  token/cost fields the journal may gain). */
-const STRUCTURAL = new Set(['ts', 'tool', 'command', 'paths', 'ok'])
+const STRUCTURAL = new Set(['ts', 'tool', 'command', 'paths', 'ok']);
 
-const COMMAND_ATTR_MAX = 4000
+const COMMAND_ATTR_MAX = 4000;
 
 /** One OTLP attribute for a journal field — number/string/bool only;
  *  objects the journal doesn't know are skipped, not serialized. */
@@ -65,52 +65,51 @@ function fieldAttr(key: string, v: unknown): OtlpKeyValue | null {
       : {
           key: `bro.${key}`,
           value: { stringValue: v.length > COMMAND_ATTR_MAX ? v.slice(0, COMMAND_ATTR_MAX) : v },
-        }
+        };
   }
   if (typeof v === 'number' && Number.isFinite(v)) {
     return Number.isInteger(v)
       ? { key: `bro.${key}`, value: { intValue: v } }
-      : { key: `bro.${key}`, value: { doubleValue: v } }
+      : { key: `bro.${key}`, value: { doubleValue: v } };
   }
   if (typeof v === 'boolean') {
-    return { key: `bro.${key}`, value: { boolValue: v } }
+    return { key: `bro.${key}`, value: { boolValue: v } };
   }
-  return null
+  return null;
 }
 
-const sha256hex = (s: string): string => createHash('sha256').update(s).digest('hex')
+const sha256hex = (s: string): string => createHash('sha256').update(s).digest('hex');
 
-const nano = (ms: number): string => `${BigInt(Math.max(0, Math.round(ms))) * 1_000_000n}`
+const nano = (ms: number): string => `${BigInt(Math.max(0, Math.round(ms))) * 1_000_000n}`;
 
 /** `bro.command` attribute — absent for a missing/empty command, the
  *  value truncated to COMMAND_ATTR_MAX like any other string field. */
 function commandAttr(command: unknown): OtlpKeyValue | null {
   if (typeof command !== 'string' || command === '') {
-    return null
+    return null;
   }
   return {
     key: 'bro.command',
     value: {
-      stringValue:
-        command.length > COMMAND_ATTR_MAX ? command.slice(0, COMMAND_ATTR_MAX) : command,
+      stringValue: command.length > COMMAND_ATTR_MAX ? command.slice(0, COMMAND_ATTR_MAX) : command,
     },
-  }
+  };
 }
 
 /** `bro.paths` attribute — absent unless the field is an array holding
  *  at least one string. */
 function pathsAttr(paths: unknown): OtlpKeyValue | null {
   if (!Array.isArray(paths)) {
-    return null
+    return null;
   }
-  const strings = paths.filter((p): p is string => typeof p === 'string')
+  const strings = paths.filter((p): p is string => typeof p === 'string');
   if (strings.length === 0) {
-    return null
+    return null;
   }
   return {
     key: 'bro.paths',
-    value: { arrayValue: { values: strings.map((p) => ({ stringValue: p })) } },
-  }
+    value: { arrayValue: { values: strings.map(p => ({ stringValue: p })) } },
+  };
 }
 
 /** Span attributes: bro.session first, every non-structural journal
@@ -120,30 +119,28 @@ function spanAttributes(
   raw: Record<string, unknown>,
   tool: string
 ): OtlpKeyValue[] {
-  const attributes: OtlpKeyValue[] = [
-    { key: 'bro.session', value: { stringValue: session } },
-  ]
+  const attributes: OtlpKeyValue[] = [{ key: 'bro.session', value: { stringValue: session } }];
   for (const [k, v] of Object.entries(raw)) {
     if (STRUCTURAL.has(k)) {
-      continue
+      continue;
     }
-    const a = fieldAttr(k, v)
+    const a = fieldAttr(k, v);
     if (a !== null) {
-      attributes.push(a)
+      attributes.push(a);
     }
   }
   if (tool !== 'event') {
-    attributes.push({ key: 'bro.tool', value: { stringValue: tool } })
+    attributes.push({ key: 'bro.tool', value: { stringValue: tool } });
   }
-  const command = commandAttr(raw.command)
+  const command = commandAttr(raw.command);
   if (command !== null) {
-    attributes.push(command)
+    attributes.push(command);
   }
-  const paths = pathsAttr(raw.paths)
+  const paths = pathsAttr(raw.paths);
   if (paths !== null) {
-    attributes.push(paths)
+    attributes.push(paths);
   }
-  return attributes
+  return attributes;
 }
 
 /** Journal line → span. `traceId` is deterministic per session file,
@@ -156,12 +153,12 @@ export function lineToSpan(
   nextTs: number | undefined
 ): OtlpSpan | null {
   if (typeof raw.ts !== 'number' || !Number.isFinite(raw.ts)) {
-    return null
+    return null;
   }
-  const traceId = sha256hex(`bro:${session}`).slice(0, 32)
-  const spanId = sha256hex(`${traceId}|${JSON.stringify(raw)}`).slice(0, 16)
-  const tool = typeof raw.tool === 'string' && raw.tool !== '' ? raw.tool : 'event'
-  const end = nextTs !== undefined && nextTs > raw.ts ? nextTs : raw.ts
+  const traceId = sha256hex(`bro:${session}`).slice(0, 32);
+  const spanId = sha256hex(`${traceId}|${JSON.stringify(raw)}`).slice(0, 16);
+  const tool = typeof raw.tool === 'string' && raw.tool !== '' ? raw.tool : 'event';
+  const end = nextTs !== undefined && nextTs > raw.ts ? nextTs : raw.ts;
   return {
     traceId,
     spanId,
@@ -171,42 +168,42 @@ export function lineToSpan(
     endTimeUnixNano: nano(end),
     attributes: spanAttributes(session, raw, tool),
     ...(raw.ok === false ? { status: { code: 2 } } : {}),
-  }
+  };
 }
 
 /** Parse one journal line — a torn trailing write or a non-object line
  *  yields no span but still counts toward the cursor (it IS consumed). */
 export function parseJournalLine(line: string): Record<string, unknown> | null {
   try {
-    const v: unknown = JSON.parse(line)
+    const v: unknown = JSON.parse(line);
     return typeof v === 'object' && v !== null && !Array.isArray(v)
       ? (v as Record<string, unknown>)
-      : null
+      : null;
   } catch {
-    return null
+    return null;
   }
 }
 
 /** One journal's raw lines → spans, pairing each entry with the next
  *  ts for its duration. */
 export function journalSpans(session: string, lines: string[]): OtlpSpan[] {
-  const entries: Array<Record<string, unknown>> = []
-  const spans: OtlpSpan[] = []
+  const entries: Array<Record<string, unknown>> = [];
+  const spans: OtlpSpan[] = [];
   for (const l of lines) {
-    const e = parseJournalLine(l)
+    const e = parseJournalLine(l);
     if (e !== null) {
-      entries.push(e)
+      entries.push(e);
     }
   }
   for (let i = 0; i < entries.length; i++) {
-    const next = entries[i + 1]
-    const nextTs = typeof next?.ts === 'number' ? next.ts : undefined
-    const s = lineToSpan(session, entries[i]!, nextTs)
+    const next = entries[i + 1];
+    const nextTs = typeof next?.ts === 'number' ? next.ts : undefined;
+    const s = lineToSpan(session, entries[i]!, nextTs);
     if (s !== null) {
-      spans.push(s)
+      spans.push(s);
     }
   }
-  return spans
+  return spans;
 }
 
 /** The OTLP/HTTP JSON request body — one resourceSpans carrying every
@@ -235,34 +232,34 @@ export function spansPayload(
         ],
       },
     ],
-  }
+  };
 }
 
 // --- export cursor ---------------------------------------------------------------
 
 interface ExportCursor {
-  v: number
+  v: number;
   /** Last detached-flush respawn — the hook path's throttle stamp. */
-  spawnedAt?: number
+  spawnedAt?: number;
   /** Last POST failure — the only record a dead collector leaves. */
-  lastError?: string
-  lastErrorAt?: number
+  lastError?: string;
+  lastErrorAt?: number;
   /** journal file basename → lines already sent + when. `tail` pins
    *  the last sent line verbatim — a front-trimmed journal (the
    *  janitor's cap keeps the tail) can leave `line` inside the
    *  retained count, and only the pin detects the shift. */
-  sessions: Record<string, { line: number; at: number; tail?: string }>
+  sessions: Record<string, { line: number; at: number; tail?: string }>;
 }
 
-const CURSOR_NAME = '.export.json'
+const CURSOR_NAME = '.export.json';
 
-const cursorPath = (traceDir: string): string => join(traceDir, CURSOR_NAME)
+const cursorPath = (traceDir: string): string => join(traceDir, CURSOR_NAME);
 
 function readCursor(path: string): ExportCursor {
   try {
-    const v: unknown = JSON.parse(readFileSync(path, 'utf8'))
+    const v: unknown = JSON.parse(readFileSync(path, 'utf8'));
     if (typeof v === 'object' && v !== null && !Array.isArray(v)) {
-      const c = v as Partial<ExportCursor>
+      const c = v as Partial<ExportCursor>;
       return {
         v: 1,
         ...(typeof c.spawnedAt === 'number' ? { spawnedAt: c.spawnedAt } : {}),
@@ -272,20 +269,20 @@ function readCursor(path: string): ExportCursor {
           typeof c.sessions === 'object' && c.sessions !== null
             ? (c.sessions as ExportCursor['sessions'])
             : {},
-      }
+      };
     }
   } catch {
     // absent or torn cursor — everything re-exports (spans dedup by id)
   }
-  return { v: 1, sessions: {} }
+  return { v: 1, sessions: {} };
 }
 
 function writeCursor(path: string, cursor: ExportCursor): void {
   try {
-    mkdirSync(dirname(path), { recursive: true })
+    mkdirSync(dirname(path), { recursive: true });
     withFileLock(`${path}.lock`, () => {
-      writeFileSync(path, JSON.stringify(cursor))
-    })
+      writeFileSync(path, JSON.stringify(cursor));
+    });
   } catch {
     // a lost cursor re-sends — spans dedup by id server-side
   }
@@ -295,37 +292,40 @@ function writeCursor(path: string, cursor: ExportCursor): void {
 
 /** `trace/*.jsonl` — one journal per session; the filter matches on
  *  the sanitized id because that's what the file is named. */
-function journalFiles(traceDir: string, sessionFilter?: string): Array<{ session: string; path: string }> {
-  const wanted = sessionFilter === undefined ? undefined : `${safeId(sessionFilter)}.jsonl`
-  const out: Array<{ session: string; path: string }> = []
+function journalFiles(
+  traceDir: string,
+  sessionFilter?: string
+): Array<{ session: string; path: string }> {
+  const wanted = sessionFilter === undefined ? undefined : `${safeId(sessionFilter)}.jsonl`;
+  const out: Array<{ session: string; path: string }> = [];
   try {
     for (const f of readdirSync(traceDir)) {
       if (!f.endsWith('.jsonl') || (wanted !== undefined && f !== wanted)) {
-        continue
+        continue;
       }
-      out.push({ session: f.slice(0, -'.jsonl'.length), path: join(traceDir, f) })
+      out.push({ session: f.slice(0, -'.jsonl'.length), path: join(traceDir, f) });
     }
   } catch {
     // no trace dir yet — nothing to export
   }
-  return out
+  return out;
 }
 
 export interface ExportResult {
-  endpoint: string
-  sessions: number
-  spans: number
+  endpoint: string;
+  sessions: number;
+  spans: number;
   /** --dry-run: payload built, nothing POSTed, cursor untouched. */
-  dryRun: boolean
-  posted: boolean
-  error?: string
-  payload?: Record<string, unknown>
+  dryRun: boolean;
+  posted: boolean;
+  error?: string;
+  payload?: Record<string, unknown>;
 }
 
 interface JournalScan {
-  spans: OtlpSpan[]
+  spans: OtlpSpan[];
   /** journal basename → the offset a successful POST commits. */
-  advance: Map<string, { line: number; tail: string }>
+  advance: Map<string, { line: number; tail: string }>;
 }
 
 /** Journals past their cursor offsets → spans + the cursor advance.
@@ -336,36 +336,33 @@ function scanJournals(
   session: string | undefined,
   cursor: ExportCursor
 ): JournalScan {
-  const spans: OtlpSpan[] = []
-  const advance = new Map<string, { line: number; tail: string }>()
+  const spans: OtlpSpan[] = [];
+  const advance = new Map<string, { line: number; tail: string }>();
   for (const j of journalFiles(traceDir, session)) {
-    let lines: string[]
+    let lines: string[];
     try {
       lines = readFileSync(j.path, 'utf8')
         .split('\n')
-        .filter((l) => l.trim() !== '')
+        .filter(l => l.trim() !== '');
     } catch {
       // a racing reap can unlink mid-scan — that journal just sits out
-      continue
+      continue;
     }
-    const cur = cursor.sessions[basename(j.path)]
-    let off = cur?.line ?? 0
-    if (
-      off > lines.length ||
-      (off > 0 && cur?.tail !== undefined && lines[off - 1] !== cur.tail)
-    ) {
+    const cur = cursor.sessions[basename(j.path)];
+    let off = cur?.line ?? 0;
+    if (off > lines.length || (off > 0 && cur?.tail !== undefined && lines[off - 1] !== cur.tail)) {
       // the journal trimmed or was recreated past the cursor — resync
       // to the live tail (a resend dedups by span id)
-      off = 0
+      off = 0;
     }
-    const fresh = lines.slice(off)
+    const fresh = lines.slice(off);
     if (fresh.length === 0) {
-      continue
+      continue;
     }
-    spans.push(...journalSpans(j.session, fresh))
-    advance.set(basename(j.path), { line: lines.length, tail: lines[lines.length - 1]! })
+    spans.push(...journalSpans(j.session, fresh));
+    advance.set(basename(j.path), { line: lines.length, tail: lines[lines.length - 1]! });
   }
-  return { spans, advance }
+  return { spans, advance };
 }
 
 /** POST the payload — success commits the cursor advance and clears
@@ -384,22 +381,22 @@ async function postSpans(
       headers: { 'content-type': 'application/json', ...cfg.headers },
       body: JSON.stringify(result.payload),
       signal: AbortSignal.timeout(cfg.timeoutMs),
-    })
+    });
     if (!res.ok) {
-      throw new Error(`OTLP endpoint ${result.endpoint} answered ${res.status}`)
+      throw new Error(`OTLP endpoint ${result.endpoint} answered ${res.status}`);
     }
     for (const [file, s] of advance) {
-      cursor.sessions[file] = { line: s.line, tail: s.tail, at: Date.now() }
+      cursor.sessions[file] = { line: s.line, tail: s.tail, at: Date.now() };
     }
-    delete cursor.lastError
-    delete cursor.lastErrorAt
-    writeCursor(cPath, cursor)
-    result.posted = true
+    delete cursor.lastError;
+    delete cursor.lastErrorAt;
+    writeCursor(cPath, cursor);
+    result.posted = true;
   } catch (e) {
-    result.error = e instanceof Error ? e.message : String(e)
-    cursor.lastError = result.error
-    cursor.lastErrorAt = Date.now()
-    writeCursor(cPath, cursor)
+    result.error = e instanceof Error ? e.message : String(e);
+    cursor.lastError = result.error;
+    cursor.lastErrorAt = Date.now();
+    writeCursor(cPath, cursor);
   }
 }
 
@@ -407,48 +404,51 @@ async function postSpans(
  *  success. Never throws: every failure lands in the result (and the
  *  cursor's lastError for the detached path's postmortem). */
 export async function exportTraces(opts: {
-  dir: string
-  session?: string | undefined
-  dryRun?: boolean
-  otlp?: OtlpConfig | undefined
+  dir: string;
+  session?: string | undefined;
+  dryRun?: boolean;
+  otlp?: OtlpConfig | undefined;
 }): Promise<ExportResult | null> {
-  const hooks = hooksDir(opts.dir)
+  const hooks = hooksDir(opts.dir);
   if (hooks === null) {
-    return null
+    return null;
   }
-  const traceDir = join(hooks, 'trace')
+  const traceDir = join(hooks, 'trace');
   const cfg =
-    opts.otlp ?? resolveOtlp((telemetrySection as (r: unknown) => TelemetryConfig)(
-      (loadBroConfig(opts.dir) as Record<string, unknown>).telemetry
-    ).otlp)
+    opts.otlp ??
+    resolveOtlp(
+      (telemetrySection as (r: unknown) => TelemetryConfig)(
+        (loadBroConfig(opts.dir) as Record<string, unknown>).telemetry
+      ).otlp
+    );
   const result: ExportResult = {
     endpoint: cfg.endpoint === '' ? '' : tracesUrl(cfg.endpoint, cfg.signalUrl === true),
     sessions: 0,
     spans: 0,
     dryRun: opts.dryRun === true,
     posted: false,
-  }
+  };
   if (cfg.endpoint === '') {
     result.error =
-      'no OTLP endpoint configured — set telemetry.otlp.endpoint or OTEL_EXPORTER_OTLP_ENDPOINT'
-    return result
+      'no OTLP endpoint configured — set telemetry.otlp.endpoint or OTEL_EXPORTER_OTLP_ENDPOINT';
+    return result;
   }
-  const cPath = cursorPath(traceDir)
-  const cursor = readCursor(cPath)
-  const { spans, advance } = scanJournals(traceDir, opts.session, cursor)
-  result.sessions = advance.size
-  result.spans = spans.length
+  const cPath = cursorPath(traceDir);
+  const cursor = readCursor(cPath);
+  const { spans, advance } = scanJournals(traceDir, opts.session, cursor);
+  result.sessions = advance.size;
+  result.spans = spans.length;
   if (spans.length === 0) {
-    return result
+    return result;
   }
   // hooks = <common>/.git→bro/hooks — the repo name is the main
   // worktree's basename, three levels up (shared across linked trees)
-  result.payload = spansPayload(spans, basename(dirname(dirname(dirname(hooks)))), cfg)
+  result.payload = spansPayload(spans, basename(dirname(dirname(dirname(hooks)))), cfg);
   if (result.dryRun) {
-    return result
+    return result;
   }
-  await postSpans(cPath, cursor, advance, result, cfg)
-  return result
+  await postSpans(cPath, cursor, advance, result, cfg);
+  return result;
 }
 
 // --- hook-side auto-flush ----------------------------------------------------------
@@ -460,9 +460,9 @@ function spawnFlush(entry: string): void {
   const child = spawn(process.execPath, [entry, 'trace', 'export'], {
     detached: true,
     stdio: 'ignore',
-  })
-  child.on('error', () => {})
-  child.unref()
+  });
+  child.on('error', () => {});
+  child.unref();
 }
 
 /** Throttled auto-flush for emitPostTool — at most one respawn per
@@ -477,35 +477,33 @@ export function maybeSpawnTraceFlush(
 ): void {
   try {
     if (env.BRO_TELEMETRY === '0') {
-      return
+      return;
     }
-    const hooks = hooksDir(dir)
+    const hooks = hooksDir(dir);
     if (hooks === null) {
-      return
+      return;
     }
     const cfg = resolveOtlp(
-      telemetrySection(
-        (loadBroConfig(dir) as Record<string, unknown>).telemetry
-      ).otlp,
+      telemetrySection((loadBroConfig(dir) as Record<string, unknown>).telemetry).otlp,
       env
-    )
+    );
     if (cfg.endpoint === '') {
-      return
+      return;
     }
-    const cPath = join(hooks, 'trace', CURSOR_NAME)
-    const cursor = readCursor(cPath)
+    const cPath = join(hooks, 'trace', CURSOR_NAME);
+    const cursor = readCursor(cPath);
     if (now - (cursor.spawnedAt ?? 0) < cfg.flushMs) {
-      return
+      return;
     }
-    const entry = process.argv[1]
+    const entry = process.argv[1];
     if (entry === undefined || !existsSync(entry)) {
-      return
+      return;
     }
     // stamp before the spawn — two racing hooks both past the throttle
     // may still double-flush, but a lost stamp must not respawn-storm
-    cursor.spawnedAt = now
-    writeCursor(cPath, cursor)
-    spawnFn(entry)
+    cursor.spawnedAt = now;
+    writeCursor(cPath, cursor);
+    spawnFn(entry);
   } catch {
     // the exporter never affects the agent — silence is the contract
   }
@@ -514,22 +512,22 @@ export function maybeSpawnTraceFlush(
 // --- command -----------------------------------------------------------------------
 
 interface ExportArgs {
-  session: string | undefined
-  dryRun: boolean
-  json: boolean
+  session: string | undefined;
+  dryRun: boolean;
+  json: boolean;
 }
 
-const EXPORT_USAGE = 'usage: bro trace export [--session <id>] [--dry-run] [--json]'
+const EXPORT_USAGE = 'usage: bro trace export [--session <id>] [--dry-run] [--json]';
 
 /** export flags → a normalized arg set; null on a dangling --session —
  *  it must not widen the filter to every journal. */
 function parseExportArgs(args: string[]): ExportArgs | null {
-  const si = args.indexOf('--session')
-  const session = si >= 0 ? args[si + 1] : undefined
+  const si = args.indexOf('--session');
+  const session = si >= 0 ? args[si + 1] : undefined;
   if (si >= 0 && (session === undefined || session.startsWith('--'))) {
-    return null
+    return null;
   }
-  return { session, dryRun: args.includes('--dry-run'), json: args.includes('--json') }
+  return { session, dryRun: args.includes('--dry-run'), json: args.includes('--json') };
 }
 
 /** Human/JSON result reporting — the JSON line always comes first so a
@@ -543,47 +541,48 @@ function reportExport(r: ExportResult | null, args: ExportArgs): number {
       spans: 0,
       dryRun: args.dryRun,
       posted: false,
-    }
-    console.log(JSON.stringify({ ...(r === null ? { error: 'not a git repo' } : rest) }))
+    };
+    console.log(JSON.stringify({ ...(r === null ? { error: 'not a git repo' } : rest) }));
   }
   if (r === null) {
     if (!args.json) {
-      console.error('bro trace export: not a git repo — no journals to read')
+      console.error('bro trace export: not a git repo — no journals to read');
     }
-    return 1
+    return 1;
   }
   if (r.error !== undefined && !r.posted) {
     if (!args.json) {
-      console.error(`bro trace export: ${r.error}`)
+      console.error(`bro trace export: ${r.error}`);
     }
-    return 1
+    return 1;
   }
   if (r.dryRun) {
     if (!args.json) {
-      console.log(JSON.stringify(r.payload, null, 2))
+      console.log(JSON.stringify(r.payload, null, 2));
     }
-    return 0
+    return 0;
   }
   if (args.json) {
-    return 0
+    return 0;
   }
   console.log(
     r.spans === 0
       ? 'nothing to export — all journals already flushed'
       : `exported ${r.spans} span(s) from ${r.sessions} session(s) → ${r.endpoint}`
-  )
-  return 0
+  );
+  return 0;
 }
 
 export async function runTraceCommand(argv: string[]): Promise<void> {
-  const [verb, ...rest] = argv
-  const args = hasHelpFlag(rest) ? null : verb === 'export' ? parseExportArgs(rest) : null
+  const [verb, ...rest] = argv;
+  const args = hasHelpFlag(rest) ? null : verb === 'export' ? parseExportArgs(rest) : null;
   if (args === null) {
-    printUsage(EXPORT_USAGE, verb === '--help' || verb === '-h' || hasHelpFlag(rest) ? 0 : 2)
+    printUsage(EXPORT_USAGE, verb === '--help' || verb === '-h' || hasHelpFlag(rest) ? 0 : 2);
   }
-  const r = await exportTraces({ dir: process.cwd(), session: args.session, dryRun: args.dryRun })
-  const code = reportExport(r, args)
-  if (code !== 0) {
-    process.exit(code)
-  }
+  const r = await exportTraces({ dir: process.cwd(), session: args.session, dryRun: args.dryRun });
+  const code = reportExport(r, args);
+  // exit unconditionally — the hook respawn path (spawnFlush) relies on
+  // this child dying promptly; a returned promise leaves the process
+  // hanging on undici's pinned connect handles ~10s (bro-uwoss)
+  process.exit(code);
 }
