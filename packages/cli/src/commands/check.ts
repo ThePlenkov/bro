@@ -352,6 +352,39 @@ function toReport(data: SverkaRunData, durationMs: number, code: number): CheckR
   }
 }
 
+/** COLLECTION_FAILED: the run executed once — evaluation is the failure,
+ *  never the verdict. Recover the step stats from the run report sverka
+ *  wrote before failing (absent on sverka 0.2.x). */
+function collectionFailedRun(
+  parsed: ParsedRun,
+  root: string,
+  sinceMs: number,
+  code: number,
+  err: (msg: string) => void
+): ReturnType<typeof runCheck> {
+  const reason = parsed.message ?? 'collection failed'
+  err(
+    `error: sverka COLLECTION_FAILED: ${reason} — evaluation skipped (declare SARIF artifact outputs or drop --evaluate)`
+  )
+  const evaluation: CheckEvaluation = { status: 'failed', reason }
+  const recovered =
+    parsed.data === undefined ? readRunReport(root, sinceMs) : undefined
+  const data = parsed.data ?? recovered?.data
+  const exitCode = code === 0 ? 1 : code
+  if (data === undefined) {
+    return { evaluation, exitCode }
+  }
+  return {
+    report: {
+      ...toReport(data, recovered?.durationMs ?? parsed.durationMs ?? 0, code),
+      evaluation,
+    },
+    data,
+    evaluation,
+    exitCode,
+  }
+}
+
 /** Execute sverka once and normalize to a CheckReport. `data` is
  *  sverka's raw payload — the `--json` output passes it through verbatim
  *  (planId and future fields included); `report` is the normalized
@@ -378,42 +411,21 @@ export function runCheck(
     return { exitCode: 1 }
   }
   const code = proc.status ?? 1
+  const failCode = code === 0 ? 1 : code
   if (parsed === null) {
     const tail = (proc.stderr ?? '').trim().split('\n').slice(-5).join('\n')
     err(
       `error: sverka exited ${code} without a JSON run report` +
         (tail !== '' ? `\n${tail}` : '')
     )
-    return { exitCode: code === 0 ? 1 : code }
+    return { exitCode: failCode }
+  }
+  if (parsed.error === 'COLLECTION_FAILED') {
+    return collectionFailedRun(parsed, root, startedMs, code, err)
   }
   if (parsed.error !== undefined) {
-    if (parsed.error === 'COLLECTION_FAILED') {
-      // the run executed once — evaluation is the failure, never the
-      // verdict. Recover the step stats from the run report sverka
-      // wrote before failing (absent on sverka 0.2.x).
-      const reason = parsed.message ?? 'collection failed'
-      err(
-        `error: sverka COLLECTION_FAILED: ${reason} — evaluation skipped (declare SARIF artifact outputs or drop --evaluate)`
-      )
-      const evaluation: CheckEvaluation = { status: 'failed', reason }
-      const recovered =
-        parsed.data === undefined ? readRunReport(root, startedMs) : undefined
-      const data = parsed.data ?? recovered?.data
-      if (data === undefined) {
-        return { evaluation, exitCode: code === 0 ? 1 : code }
-      }
-      return {
-        report: {
-          ...toReport(data, recovered?.durationMs ?? parsed.durationMs ?? 0, code),
-          evaluation,
-        },
-        data,
-        evaluation,
-        exitCode: code === 0 ? 1 : code,
-      }
-    }
     err(`error: sverka ${parsed.error}: ${parsed.message ?? 'run failed'}`)
-    return { exitCode: code === 0 ? 1 : code }
+    return { exitCode: failCode }
   }
   const data = parsed.data ?? {}
   return {
