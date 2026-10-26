@@ -7,17 +7,18 @@
  * side-effect-free at import: it returns the Hooks object; the CLI entry
  * runs main() on import, so this module must never do that.
  *
- * Resolves the bro binary in priority order:
- *   1. the built dist reachable from this checkout (local/dev installs)
- *   2. `bro` on PATH
- *   3. npx fallback pinned to the plugin's own version
+ * Resolves the bro binary from the built dist reachable from this
+ * checkout, then from `bro` on PATH.
  */
-import { spawnSync } from 'node:child_process'
+import { spawn, type ChildProcess } from 'node:child_process'
 import { existsSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { tool } from '@kilocode/plugin/tool'
 import type { Plugin } from '@kilocode/plugin'
+
+const HOOK_TIMEOUT_MS = 15_000
+const RUN_TIMEOUT_MS = 120_000
 
 /** Walk up from the plugin dir for a built CLI — adapter dirs live
  *  below the repo root, so a relative/malformed root can't wander off. */
@@ -40,7 +41,7 @@ function findBroBin(): string | null {
 
 /** Resolve argv[0] for `bro` — the local build wins over PATH so hook
  *  behavior tracks the checkout; PATH is the fallback for installed
- *  builds; npx is the last resort (warm cache via --prefer-offline). */
+ *  builds. */
 function broArgs(event: string, extra: string[] = []): string[] {
   const local = findBroBin()
   if (local) {
@@ -49,22 +50,114 @@ function broArgs(event: string, extra: string[] = []): string[] {
   return ['bro', 'hooks', event, ...extra]
 }
 
+interface SpawnResult {
+  code: number | null
+  stdout: string
+  stderr: string
+  error: string | null
+}
+
+interface SpawnOptions {
+  cwd?: string
+  env: NodeJS.ProcessEnv
+  input?: string
+  timeoutMs: number
+}
+
+/** SIGKILL a timed-out child and its process group when available. */
+function killAfter(child: ChildProcess, ms: number, onTimeout: () => void): ReturnType<typeof setTimeout> {
+  const timer = setTimeout(() => {
+    try {
+      if (child.pid !== undefined) {
+        process.kill(-child.pid, 'SIGKILL')
+      }
+    } catch {
+      try {
+        child.kill('SIGKILL')
+      } catch {
+        // already gone
+      }
+    }
+    onTimeout()
+  }, ms)
+  timer.unref?.()
+  return timer
+}
+
+function spawnCollect(command: string, args: string[], options: SpawnOptions): Promise<SpawnResult> {
+  return new Promise((resolve) => {
+    let child: ChildProcess
+    try {
+      child = spawn(command, args, {
+        cwd: options.cwd,
+        env: options.env,
+        stdio: ['pipe', 'pipe', 'pipe'],
+        detached: process.platform !== 'win32',
+      })
+    } catch (error) {
+      resolve({
+        code: null,
+        stdout: '',
+        stderr: '',
+        error: error instanceof Error ? error.message : String(error),
+      })
+      return
+    }
+
+    let settled = false
+    const settle = (result: SpawnResult): void => {
+      if (!settled) {
+        settled = true
+        resolve(result)
+      }
+    }
+    let stdout = ''
+    let stderr = ''
+    const timer = killAfter(child, options.timeoutMs, () =>
+      settle({
+        code: null,
+        stdout,
+        stderr,
+        error: `timed out after ${options.timeoutMs}ms`,
+      })
+    )
+    child.stdout?.setEncoding('utf8')
+    child.stdout?.on('data', (chunk: string) => {
+      stdout += chunk
+    })
+    child.stderr?.setEncoding('utf8')
+    child.stderr?.on('data', (chunk: string) => {
+      stderr += chunk
+    })
+    child.on('error', (error) => {
+      clearTimeout(timer)
+      settle({ code: null, stdout, stderr, error: error.message })
+    })
+    child.on('close', (code) => {
+      clearTimeout(timer)
+      settle({ code, stdout, stderr, error: null })
+    })
+    child.stdin?.on('error', () => {})
+    child.stdin?.end(options.input ?? '')
+  })
+}
+
 /** Run a bro hook, passing the event payload on stdin. Returns the parsed
  *  hook control JSON on stdout, or null on any failure (fail-open). */
-function runBroHook(event: string, input: unknown): unknown {
+async function runBroHook(event: string, input: unknown): Promise<unknown> {
   const argv = broArgs(event)
-  let result
+  let payload: string | undefined
   try {
-    result = spawnSync(argv[0], argv.slice(1), {
-      encoding: 'utf8',
-      input: JSON.stringify(input),
-      env: { ...process.env, BRO_HOOK_INPUT: '1' },
-      timeout: 20_000,
-    })
+    payload = JSON.stringify(input)
   } catch {
     return null
   }
-  if (result.status !== 0 || !result.stdout) {
+  const result = await spawnCollect(argv[0], argv.slice(1), {
+    input: payload,
+    env: { ...process.env, BRO_HOOK_INPUT: '1' },
+    timeoutMs: HOOK_TIMEOUT_MS,
+  })
+  if (result.error !== null || result.code !== 0 || !result.stdout) {
     return null
   }
   // bro emits one JSON control object per line; take the last parseable one
@@ -102,16 +195,16 @@ const BroPlugin: Plugin = async ({ directory, client }) => {
   const run = (sub: string, args: string[]) => {
     const local = findBroBin()
     const argv = local ? ['node', local, sub, ...args] : ['bro', sub, ...args]
-    const r = spawnSync(argv[0], argv.slice(1), {
-      encoding: 'utf8',
+    return spawnCollect(argv[0], argv.slice(1), {
       cwd: directory,
       env: { ...process.env },
-      timeout: 120_000,
+      timeoutMs: RUN_TIMEOUT_MS,
+    }).then((result) => {
+      if (result.error !== null) {
+        return `error: ${result.error}`
+      }
+      return result.stdout + result.stderr
     })
-    if (r.error) {
-      return `error: ${r.error.message}`
-    }
-    return (r.stdout || '') + (r.stderr || '')
   }
 
   // session-start probes are idempotent but not free (they shell out to
@@ -124,8 +217,8 @@ const BroPlugin: Plugin = async ({ directory, client }) => {
   const liveSessions = new Set<string>()
   let hydratedSession: string | null = null
   let hydratedContext: string | null = null
-  const hydrate = (sessionId: string): void => {
-    const out = runBroHook('session-start', { session_id: sessionId })
+  const hydrate = async (sessionId: string): Promise<void> => {
+    const out = await runBroHook('session-start', { session_id: sessionId })
     hydratedContext = hookContext(out)
     hydratedSession = sessionId
   }
@@ -160,7 +253,7 @@ const BroPlugin: Plugin = async ({ directory, client }) => {
       // hydrate once per session — the probes shell out to gh/bd
       if (sessionId && hydratedSession !== sessionId) {
         liveSessions.add(sessionId)
-        hydrate(sessionId)
+        await hydrate(sessionId)
       }
       // A sessionless transform inherits whichever session hydrated last;
       // push only when that owner is still live, so a reused instance can
@@ -195,7 +288,7 @@ const BroPlugin: Plugin = async ({ directory, client }) => {
       if (event.type === 'session.created' && sid !== null) {
         liveSessions.add(sid)
         if (sid !== hydratedSession) {
-          hydrate(sid)
+          await hydrate(sid)
         }
       } else if (event.type === 'session.deleted') {
         liveSessions.delete(sid ?? '')
@@ -207,7 +300,7 @@ const BroPlugin: Plugin = async ({ directory, client }) => {
       if (event.type !== 'session.idle') {
         return
       }
-      const out = runBroHook('stop', { session_id: event.properties.sessionID })
+      const out = await runBroHook('stop', { session_id: event.properties.sessionID })
       if (out && typeof out === 'object' && (out as { decision?: string }).decision === 'block') {
         await client.app.log({
           body: {
