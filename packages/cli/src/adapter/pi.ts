@@ -197,7 +197,15 @@ function binding(pi: PiApi): BroHostBinding<ExtContext> {
           // the status crumb doubled up the chrome. Keep the summary
           // line (the informative one) as the single widget and drop the
           // redundant bottom crumb.
-          const one = lines.length > 0 ? [lines[0]] : undefined;
+          let one: string[] | undefined;
+          if (lines.length > 0) {
+            const links = lines
+              .slice(1)
+              .map(l => (l.match(/\[#\d+\]\([^)]+\)/) ?? [])[0])
+              .filter((x): x is string => typeof x === 'string');
+            const head = links.length > 0 ? `${lines[0]}  ${links.join(' ')}` : lines[0];
+            one = [head];
+          }
           ctx.ui.setWidget(BOARD_KEY, one, { placement: 'aboveEditor' });
           ctx.ui.setStatus(BOARD_KEY, undefined);
         } catch {

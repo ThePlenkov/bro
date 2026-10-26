@@ -202,7 +202,15 @@ export function readBeads(dir: string): StatusBeads {
       if (remote.code !== 0) {
         return null;
       }
-      const m = remote.out.trim().match(/github\.com[:/]([^\s]+?)(?:\.git)?$/);
+      const url = remote.out.trim();
+      // Only derive a slug for GitHub remotes — a host like
+      // notgithub.com must not be mistaken for github.com.
+      const hostMatch = url.match(/^(?:https?:\/\/|git@|ssh:\/\/git@)?([^\/:]+)[\/:]/);
+      const host = hostMatch !== null && hostMatch[1] !== undefined ? hostMatch[1] : '';
+      if (host !== 'github.com') {
+        return null;
+      }
+      const m = url.match(/github\.com[:/]([^\s]+?)(?:\.git)?$/);
       if (m === null || m[1] === undefined) {
         return null;
       }
