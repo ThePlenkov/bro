@@ -65,9 +65,13 @@ kernel RST defect itself is Windows/WSL-side — out of repo scope.
     wall — even if undici pins the child's loop past the abort, the
     child self-terminates. No more unbounded emit children → no
     SYN-SENT accumulation.
-  - **Argv transport, chunked:** the batch rides argv like today
-    (`ep` + JSON items); chunks pack ≤96KiB per child (Linux
-    `MAX_ARG_STRLEN` is 128KiB) so a busy burst can't E2BIG the spawn.
+  - **Env transport, chunked:** the batch rides `BRO_OTLP_EMIT`, never
+    argv — cmdline is `ps`-visible to every local user and the payload
+    carries error text and session attributes, while
+    `/proc/<pid>/environ` is same-UID (the same rule the serve
+    watchdog's token hand-off follows). Chunks still pack ≤96KiB per
+    child — env strings share argv's per-string `MAX_ARG_STRLEN`
+    ceiling — so a busy burst can't E2BIG the spawn.
   - Same drop contract: no endpoint (`OTEL_EXPORTER_OTLP_ENDPOINT` env
     or `~/.config/bro/provider.env`) or `BRO_TELEMETRY=0` → nothing
     enqueues. Endpoint resolution now re-reads the env var per call

@@ -100,6 +100,7 @@ describe('otel emit transport', () => {
       () => hits.some(h => h.body.includes('emit.test.detached')),
       'detached span on the wire'
     );
+    assert.ok(hits.some(h => h.body.includes('emit.test.detached')));
   });
 
   test('a queued batch rides out together when postDetached drains', async () => {
@@ -114,6 +115,11 @@ describe('otel emit transport', () => {
         hits.some(h => h.body.includes('emit.test.batch.b')) &&
         hits.some(h => h.body.includes('emit.test.batch.c')),
       'all three batched spans on the wire'
+    );
+    assert.ok(
+      hits.some(h => h.body.includes('emit.test.batch.a')) &&
+        hits.some(h => h.body.includes('emit.test.batch.b')) &&
+        hits.some(h => h.body.includes('emit.test.batch.c'))
     );
   });
 
@@ -136,8 +142,10 @@ describe('otel emit transport', () => {
   test('a dead endpoint never throws and never holds the caller', () => {
     setEp('http://127.0.0.1:1'); // port 1 — nothing listens on any host
     try {
-      otelSpan('emit.test.dead').end();
-      postDetached('/v1/traces', { dead: true }); // drains into a bounded child
+      assert.doesNotThrow(() => {
+        otelSpan('emit.test.dead').end();
+        postDetached('/v1/traces', { dead: true }); // drains into a bounded child
+      });
     } finally {
       setEp(ep);
     }

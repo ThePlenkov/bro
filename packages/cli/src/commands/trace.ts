@@ -581,6 +581,10 @@ export async function runTraceCommand(argv: string[]): Promise<void> {
   }
   const r = await exportTraces({ dir: process.cwd(), session: args.session, dryRun: args.dryRun });
   const code = reportExport(r, args);
+  // a piped/redirected console.log can still hold unflushed bytes —
+  // process.exit would truncate them; an empty write's callback lands
+  // only after every queued chunk has drained
+  await new Promise<void>(resolve => process.stdout.write('', () => resolve()));
   // exit unconditionally — the hook respawn path (spawnFlush) relies on
   // this child dying promptly; a returned promise leaves the process
   // hanging on undici's pinned connect handles ~10s (bro-uwoss)

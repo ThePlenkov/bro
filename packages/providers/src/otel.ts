@@ -89,17 +89,22 @@ const FLUSH_MS = 2_000;
 const PER_REQUEST_MS = 3_000;
 /** Hard self-kill — an undici-pinned child still dies here. */
 const CHILD_WALL_MS = 8_000;
-/** The batch rides one argv slot — stay under Linux MAX_ARG_STRLEN. */
-const ARGV_PAYLOAD_MAX = 96 * 1024;
+/** The batch rides one env slot — cmdline is `ps`-visible to every
+ *  local user while /proc/<pid>/environ is same-UID, and the payload
+ *  carries error text and session attributes (same rule the serve
+ *  watchdog's token hand-off follows). env strings share argv's
+ *  per-string MAX_ARG_STRLEN ceiling on Linux — keep chunks under it. */
+const EMIT_PAYLOAD_MAX = 96 * 1024;
+const EMIT_PAYLOAD_ENV = 'BRO_OTLP_EMIT';
 
-/** The emit child's script: argv[1] endpoint base, argv[2] JSON array
- *  of `[path, body]`; POSTs each concurrently with a per-request abort,
- *  then force-exits — `process.exit` is what drops undici's pinned
- *  handles when an aborted connect refuses to clean up. The wall clock
- *  bounds even a fetch that never settles. */
-const EMIT_SCRIPT = `const ep=process.argv[1];setTimeout(()=>process.exit(0),${CHILD_WALL_MS});Promise.allSettled(JSON.parse(process.argv[2]).map(([p,b])=>fetch(ep+p,{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify(b),signal:AbortSignal.timeout(${PER_REQUEST_MS})}))).then(()=>process.exit(0))`;
+/** The emit child's script: argv[1] endpoint base, `BRO_OTLP_EMIT` a
+ *  JSON array of `[path, body]`; POSTs each concurrently with a
+ *  per-request abort, then force-exits — `process.exit` is what drops
+ *  undici's pinned handles when an aborted connect refuses to clean up.
+ *  The wall clock bounds even a fetch that never settles. */
+const EMIT_SCRIPT = `const ep=process.argv[1];setTimeout(()=>process.exit(0),${CHILD_WALL_MS});Promise.allSettled(JSON.parse(process.env.${EMIT_PAYLOAD_ENV}??'[]').map(([p,b])=>fetch(ep+p,{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify(b),signal:AbortSignal.timeout(${PER_REQUEST_MS})}))).then(()=>process.exit(0))`;
 
-/** Drain the queue into argv-chunked detached children. Never throws —
+/** Drain the queue into env-chunked detached children. Never throws —
  *  a spawn failure loses the chunk it couldn't carry. */
 function emit(): void {
   const ep = ENDPOINT();
@@ -114,9 +119,10 @@ function emit(): void {
       return;
     }
     try {
-      const child = spawn(process.execPath, ['-e', EMIT_SCRIPT, ep, `[${chunk.join(',')}]`], {
+      const child = spawn(process.execPath, ['-e', EMIT_SCRIPT, ep], {
         detached: true,
         stdio: 'ignore',
+        env: { ...process.env, [EMIT_PAYLOAD_ENV]: `[${chunk.join(',')}]` },
       });
       child.on('error', () => {});
       child.unref();
@@ -128,7 +134,7 @@ function emit(): void {
   };
   for (const item of items) {
     const s = JSON.stringify(item);
-    if (size + s.length + 1 > ARGV_PAYLOAD_MAX) {
+    if (size + s.length + 1 > EMIT_PAYLOAD_MAX) {
       ship();
     }
     chunk.push(s);

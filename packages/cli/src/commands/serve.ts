@@ -2249,6 +2249,11 @@ export function watchdogVerdict(
   return alive(pid) ? 'alive' : 'respawn';
 }
 
+/** Integer inside [lo, hi] — the watchdog's --port/--pid share one
+ *  range check, kept out of the `if` so the conditional stays flat. */
+const intInRange = (n: number, lo: number, hi: number): boolean =>
+  Number.isInteger(n) && n >= lo && n <= hi;
+
 /** `bro serve watchdog --port <n> --pid <p>` — internal: `bro serve`
  *  arms exactly one detached watchdog per generation. It polls the
  *  serve.json record and respawns the listener on the bound port while
@@ -2260,7 +2265,7 @@ async function cmdWatchdog(argv: string[]): Promise<void> {
   if (pos.length > 0) usage();
   const port = Number(flag(argv, '--port'));
   const pid = Number(flag(argv, '--pid'));
-  if (!Number.isInteger(port) || port <= 0 || port > 65535 || !Number.isInteger(pid) || pid <= 0) {
+  if (!intInRange(port, 1, 65535) || !intInRange(pid, 1, Number.MAX_SAFE_INTEGER)) {
     console.error('error: watchdog needs --port <n> and --pid <n>');
     process.exit(2);
   }
