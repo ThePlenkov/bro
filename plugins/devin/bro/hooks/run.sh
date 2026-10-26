@@ -27,6 +27,20 @@ set -u
 # answers before any probe runs.
 [ "${BRO_HOOKS:-}" = "0" ] && [ "${1:-}" != "permission" ] && exit 0
 
+SCRIPT_ROOT=$(CDPATH= cd -P "$(dirname "$0")/.." 2>/dev/null && pwd -P)
+if [ -n "${DEVIN_PROJECT_DIR:-}" ]; then
+  DEVIN_PROJECT_ROOT=$(CDPATH= cd -P "$DEVIN_PROJECT_DIR" 2>/dev/null && pwd -P)
+  if [ -n "$SCRIPT_ROOT" ] && [ -n "$DEVIN_PROJECT_ROOT" ]; then
+    if [ "$SCRIPT_ROOT" != "$DEVIN_PROJECT_ROOT" ]; then
+      DEVIN_HOOKS="$DEVIN_PROJECT_ROOT/.devin/hooks.v1.json"
+      if [ -f "$DEVIN_HOOKS" ] && grep -Fq 'hooks/run.sh' "$DEVIN_HOOKS"; then
+        # The project-local Devin hook chain owns this event.
+        exit 0
+      fi
+    fi
+  fi
+fi
+
 CAPTURED=0
 PAYLOAD=
 EVENT=${1:-}
@@ -484,7 +498,6 @@ esac
 # a relative or nonexistent root is untrusted input: canonicalize an
 # absolute root, and fall back to this script's own dir otherwise so the
 # walk-up can't wander off CWD and execute an unrelated dist.
-SCRIPT_ROOT="$(CDPATH='' cd -- "$(dirname -- "$0")/.." 2>/dev/null && pwd)"
 ROOT="${PLUGIN_ROOT:-${CURSOR_PLUGIN_ROOT:-${DEVIN_PLUGIN_ROOT:-${CLAUDE_PLUGIN_ROOT:-}}}}"
 case "$ROOT" in
   /*) ROOT="$(CDPATH='' cd -- "$ROOT" 2>/dev/null && pwd)" ;;
@@ -504,9 +517,6 @@ done
 if [ -f "$DIR/packages/cli/dist/index.js" ] && command -v node >/dev/null 2>&1; then
   run_hook node "$DIR/packages/cli/dist/index.js" hooks "$@" && exit 0
 fi
-# stdin is the host's hook payload — the capability probe must not
-# consume it, so it runs with stdin closed (a pre-0.2.5 `bro hooks`
-# would otherwise eat the payload the real invocation needs)
 if command -v bro >/dev/null 2>&1; then
   run_hook bro hooks "$@" || true
 elif [ "$EVENT" = permission ] && [ -n "${CURSOR_PLUGIN_ROOT:-}" ]; then

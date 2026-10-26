@@ -6,7 +6,15 @@
  *  the thing is blocked; ambient state is passive context). */
 import { after, describe, test } from 'node:test'
 import assert from 'node:assert/strict'
-import { existsSync, mkdirSync, readdirSync, readFileSync, symlinkSync, writeFileSync } from 'node:fs'
+import {
+  chmodSync,
+  existsSync,
+  mkdirSync,
+  readdirSync,
+  readFileSync,
+  symlinkSync,
+  writeFileSync,
+} from 'node:fs'
 import { join, resolve } from 'node:path'
 import {
   CLI_DIST,
@@ -105,6 +113,18 @@ const CURSOR_HOOKS_JSON = resolve(
   'bro',
   'hooks',
   'hooks.json'
+)
+const DEVIN_PLUGIN_RUN_SH = resolve(
+  CLI_DIST,
+  '..',
+  '..',
+  '..',
+  '..',
+  'plugins',
+  'devin',
+  'bro',
+  'hooks',
+  'run.sh'
 )
 
 describe('hooks e2e — stop gate', () => {
@@ -812,6 +832,73 @@ describe('hooks e2e — session-start + the run.sh launcher', () => {
     inside(f.main, f.root, () => {
       const r = runSh(f.main, 'bogus-event', '{}')
       assert.equal(r.status, 0)
+    })
+  })
+
+  test('plugin run.sh defers to the project-local Devin hook chain', () => {
+    const f = hookFixture()
+    inside(f.main, f.root, () => {
+      const hooksDir = join(f.main, '.devin')
+      mkdirSync(hooksDir)
+      writeFileSync(join(hooksDir, 'hooks.v1.json'), '{"hooks":"hooks/run.sh"}')
+
+      const bin = join(f.root, 'bin')
+      mkdirSync(bin)
+      const node = join(bin, 'node')
+      const bro = join(bin, 'bro')
+      writeFileSync(node, '#!/bin/sh\nprintf x > "$NODE_MARKER"\n')
+      writeFileSync(bro, '#!/bin/sh\nprintf x > "$BRO_MARKER"\n')
+      chmodSync(node, 0o755)
+      chmodSync(bro, 0o755)
+
+      const r = spawnSync('sh', [DEVIN_PLUGIN_RUN_SH, 'session-start'], {
+        cwd: f.main,
+        input: '{}',
+        env: e2eEnv({
+          DEVIN_PROJECT_DIR: f.main,
+          NODE_MARKER: join(f.root, 'node-called'),
+          BRO_MARKER: join(f.root, 'bro-called'),
+          PATH: `${bin}:${process.env.PATH ?? ''}`,
+        }),
+        encoding: 'utf8',
+      })
+      assert.equal(r.status, 0)
+      assert.equal(r.stdout, '')
+      assert.equal(existsSync(join(f.root, 'node-called')), false)
+      assert.equal(existsSync(join(f.root, 'bro-called')), false)
+    })
+  })
+
+  test('project-local run.sh still invokes bro when it owns the Devin hook chain', () => {
+    const f = hookFixture()
+    inside(f.main, f.root, () => {
+      const project = join(f.root, 'project')
+      const hooksDir = join(project, 'hooks')
+      mkdirSync(hooksDir, { recursive: true })
+      mkdirSync(join(project, '.devin'))
+      writeFileSync(join(project, '.devin', 'hooks.v1.json'), '{"hooks":"hooks/run.sh"}')
+      const localRunSh = join(hooksDir, 'run.sh')
+      writeFileSync(localRunSh, readFileSync(RUN_SH, 'utf8'))
+
+      const bin = join(f.root, 'bin')
+      mkdirSync(bin)
+      const bro = join(bin, 'bro')
+      writeFileSync(bro, '#!/bin/sh\nprintf ran > "$BRO_MARKER"\nprintf ran\n')
+      chmodSync(bro, 0o755)
+
+      const r = spawnSync('sh', [localRunSh, 'session-start'], {
+        cwd: project,
+        input: '{}',
+        env: e2eEnv({
+          DEVIN_PROJECT_DIR: project,
+          BRO_MARKER: join(f.root, 'bro-called'),
+          PATH: `${bin}:${process.env.PATH ?? ''}`,
+        }),
+        encoding: 'utf8',
+      })
+      assert.equal(r.status, 0)
+      assert.equal(r.stdout, 'ran')
+      assert.equal(existsSync(join(f.root, 'bro-called')), true)
     })
   })
 
