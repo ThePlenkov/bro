@@ -1,4 +1,4 @@
-import type { ConfigSection } from '@broject/core'
+import { js, type ConfigSection } from '@broject/core'
 import { DEFAULT_LOOP_CONFIG, type LoopConfig } from './types.ts'
 
 /** `loop` config section — strings normalized, numbers must be finite
@@ -55,3 +55,24 @@ export const loopSection: ConfigSection<LoopConfig> = (raw) => {
     parkedWakeMin: num('parkedWakeMin'),
   }
 }
+
+loopSection.jsonSchema = js.obj({
+  agent: js.str,
+  provider: js.str,
+  profile: js.str,
+  model: js.str,
+  bootstrap: js.str,
+  stallMin: js.num(1),
+  crashExitMs: js.num(0),
+  mergeTimeoutMin: js.num(1),
+  fixRounds: js.num(0),
+  maxItems: js.num(0),
+  maxOpen: js.num(1),
+  worktreeMb: js.num(1),
+  diskMinSlots: js.num(0),
+  batch: js.num(1),
+  batchMinPriority: js.num(0),
+  parkedKeep: js.num(0),
+  parkedTtlDays: js.num(0),
+  parkedWakeMin: js.num(0),
+})

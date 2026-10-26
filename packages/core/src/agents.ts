@@ -665,3 +665,10 @@ export const agentsSection: ConfigSection<Record<string, Record<string, unknown>
   }
   return out
 }
+
+// per-backend knob bags pass through verbatim — connector-owned keys
+// (command template, configDir, env, maxBatchWorkers, …) are not
+// enumerable here, so entries stay open. Literal, not `js.map` —
+// routing.ts imports this module and config.ts imports routing.ts, so
+// a runtime config.ts import would cycle.
+agentsSection.jsonSchema = { type: 'object', additionalProperties: { type: 'object' } }

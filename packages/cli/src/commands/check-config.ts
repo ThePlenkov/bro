@@ -3,7 +3,7 @@
  * can register the schema at load time without cycling through
  * check.ts (which needs plugins.ts's loadBroConfig at run time).
  */
-import type { ConfigSection } from '@broject/core'
+import { js, type ConfigSection } from '@broject/core'
 
 export interface CheckConfig {
   /** Explicit sverka binary (path or PATH command) — skips resolution. */
@@ -49,3 +49,11 @@ export const checkSection: ConfigSection<CheckConfig> = (raw) => {
     evaluate: obj.evaluate === true,
   }
 }
+
+checkSection.jsonSchema = js.obj({
+  bin: js.str,
+  config: js.str,
+  entry: js.str,
+  executor: { enum: CHECK_EXECUTORS },
+  evaluate: js.bool,
+})

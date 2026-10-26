@@ -3,7 +3,25 @@ import { writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { describe, test } from 'node:test'
 import { tmpDir } from './commands/testrepo.ts'
-import { loadExternalPlugins, PLUGINS, pluginConfigSections, pluginGroups, runPlanFile } from './plugins.ts'
+import {
+  assertMutableConfig,
+  ConfigPolicyError,
+  loadExternalPlugins,
+  PLUGINS,
+  pluginConfigSections,
+  pluginGroups,
+  runPlanFile,
+} from './plugins.ts'
+
+// the global config layer (~/.config/bro) must not leak the dev
+// machine's real user config into the registry/diagnostics tests —
+// pin it at an empty tmp for the whole file
+const prevXdg = process.env.XDG_CONFIG_HOME
+process.env.XDG_CONFIG_HOME = tmpDir('bro-plugins-xdg-')
+process.on('exit', () => {
+  if (prevXdg === undefined) delete process.env.XDG_CONFIG_HOME
+  else process.env.XDG_CONFIG_HOME = prevXdg
+})
 
 describe('plugin registry', () => {
   test('names are unique', () => {
@@ -111,6 +129,84 @@ describe('plugin registry', () => {
     assert.equal(typeof sections.sync, 'function')
     assert.equal(typeof sections.debt, 'function')
     assert.equal(sections.hooks, undefined)
+  })
+
+  test('every registered section declares a jsonSchema (bro-d9dmx)', () => {
+    // the emitted document is only as complete as the registry — a
+    // schema-less section silently drops out of doctor AND the schema
+    const missing = Object.entries(pluginConfigSections())
+      .filter(([, s]) => typeof s === 'function' && s.jsonSchema === undefined)
+      .map(([k]) => k)
+    assert.deepEqual(missing, [])
+  })
+})
+
+describe('assertMutableConfig', () => {
+  function withForce(v: string | undefined, fn: () => void): void {
+    const prev = process.env.BRO_CONFIG_FORCE
+    if (v === undefined) delete process.env.BRO_CONFIG_FORCE
+    else process.env.BRO_CONFIG_FORCE = v
+    try {
+      fn()
+    } finally {
+      if (prev === undefined) delete process.env.BRO_CONFIG_FORCE
+      else process.env.BRO_CONFIG_FORCE = prev
+    }
+  }
+
+  test('a clean config passes', () => {
+    const dir = tmpDir('bro-mut-')
+    writeFileSync(join(dir, 'bro.config.json'), JSON.stringify({ sdd: { mode: 'gate' } }))
+    withForce(undefined, () => assert.doesNotThrow(() => assertMutableConfig(dir)))
+  })
+
+  function thrown(fn: () => void): ConfigPolicyError {
+    try {
+      fn()
+    } catch (err) {
+      return err as ConfigPolicyError
+    }
+    throw new Error('expected ConfigPolicyError, nothing threw')
+  }
+
+  test('invalid policy config throws ConfigPolicyError carrying diagnostics', () => {
+    const dir = tmpDir('bro-mut-')
+    writeFileSync(join(dir, 'bro.config.json'), JSON.stringify({ sdd: { mode: 'gtae' } }))
+    withForce(undefined, () => {
+      const err = thrown(() => assertMutableConfig(dir))
+      assert.ok(err instanceof ConfigPolicyError)
+      assert.ok(err.diagnostics.some((d) => d.path === 'sdd.mode'))
+      assert.match(err.message, /sdd\.mode/)
+      assert.match(err.message, /BRO_CONFIG_FORCE/)
+    })
+  })
+
+  test('invalid operator config does not gate — it is doctor material', () => {
+    const dir = tmpDir('bro-mut-')
+    writeFileSync(
+      join(dir, 'bro.config.json'),
+      JSON.stringify({ providers: { x: { type: 'bogus' } }, fleet: { maxConcurrent: '1' } })
+    )
+    withForce(undefined, () => assert.doesNotThrow(() => assertMutableConfig(dir)))
+  })
+
+  test('plugin policy sections gate too — a malformed guard.def throws', () => {
+    const dir = tmpDir('bro-mut-')
+    writeFileSync(
+      join(dir, 'bro.config.json'),
+      JSON.stringify({ guard: { defs: [{ name: 'x', when: { on: ['not-an-event'] }, say: 'hi' }] } })
+    )
+    withForce(undefined, () => {
+      const err = thrown(() => assertMutableConfig(dir))
+      assert.ok(err instanceof ConfigPolicyError)
+      assert.ok(err.diagnostics.some((d) => d.key === 'guard'))
+    })
+  })
+
+  test('BRO_CONFIG_FORCE=1 is the deliberate escape hatch', () => {
+    const dir = tmpDir('bro-mut-')
+    writeFileSync(join(dir, 'bro.config.json'), JSON.stringify({ sdd: { mode: 'gtae' } }))
+    withForce('1', () => assert.doesNotThrow(() => assertMutableConfig(dir)))
   })
 })
 

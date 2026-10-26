@@ -11,6 +11,8 @@ import {
   agentsSection,
   beadsSection,
   checkBeads,
+  configDiagnostics,
+  configPolicyErrors,
   debtSection,
   definePlugin,
   loadConfig,
@@ -26,6 +28,7 @@ import {
   sweepSection,
   syncSection,
   type BroPlugin,
+  type ConfigDiagnostic,
   type ConfigSection,
   type DocType,
 } from '@broject/core'
@@ -811,6 +814,20 @@ export function pluginConfigSections(): Record<string, ConfigSection<unknown>> {
 export function loadBroConfig(cwd: string = process.cwd()) {
   return loadConfig(cwd, pluginConfigSections())
 }
+
+/** configDiagnostics over the full registry — core sections merged with
+ *  every plugin's declared configKey schema (spec: specs/bro-d9dmx.md). */
+export function broConfigDiagnostics(cwd: string = process.cwd()) {
+  return configDiagnostics(cwd, pluginConfigSections())
+}
+
+// The gate lives in config-policy.ts — a leaf commands/work.ts can
+// import without the TDZ cycle back into this registry. The merged
+// section list is registered here at init so assertMutableConfig sees
+// plugin configKeys, not just core's.
+export { ConfigPolicyError, assertMutableConfig } from './config-policy.ts'
+import { registerPolicySections } from './config-policy.ts'
+registerPolicySections(pluginConfigSections)
 
 function isPlugin(p: unknown): p is BroPlugin {
   const o = p as BroPlugin
