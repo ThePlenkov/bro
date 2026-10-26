@@ -406,7 +406,7 @@ export async function runGuards(opts: GuardEvalOpts): Promise<GuardRun> {
       }
     }
     try {
-      withFileLock(`${fired}.lock`, run, { waitMs: 2_000, label: 'guard fired lock' })
+      withFileLock(`${fired}.lock`, run, { waitMs: 0, label: 'guard fired lock' })
     } catch {
       try {
         run() // lock timeout degrades to the unlocked race, never a stall

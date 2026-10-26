@@ -1,6 +1,14 @@
 import { after, describe, test } from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdirSync, mkdtempSync, renameSync, rmSync, writeFileSync } from 'node:fs'
+import {
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  renameSync,
+  rmSync,
+  writeFileSync,
+} from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import {
@@ -10,6 +18,8 @@ import {
   gitLogPathRecords,
   gitLogStamp,
   gitUpstreamBehind,
+  gitUpstreamBehindAsync,
+  gitTryAsync,
   gitWorktreeRoots,
   mainWorktreeRoot,
   unquoteGitPath,
@@ -353,6 +363,90 @@ describe('gitUpstreamBehind', () => {
       assert.equal(gitUpstreamBehind(dir), null)
     })
   })
+})
+
+describe('gitTryAsync', () => {
+  test('a real git probe succeeds in a temporary repository', async () => {
+    const dir = makeRepo()
+    try {
+      const result = await gitTryAsync(['-C', dir, 'rev-parse', '--show-toplevel'])
+      assert.equal(result.code, 0)
+      assert.equal(result.out.trim(), dir)
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  test(
+    'timeout kills a PATH-stubbed git process group and resolves promptly',
+    { skip: process.platform === 'win32' },
+    async () => {
+      const root = mkdtempSync(join(tmpdir(), 'bro-git-timeout-'))
+      const bin = join(root, 'bin')
+      const stub = join(bin, 'git')
+      const pidFile = join(root, 'pid')
+      mkdirSync(bin)
+      writeFileSync(
+        stub,
+        `#!/bin/sh\nprintf '%s\\n' "$$" > "${pidFile}"\nexec sleep 30\n`,
+        { mode: 0o755 }
+      )
+      const previousPath = process.env.PATH
+      process.env.PATH = [bin, previousPath].filter(Boolean).join(':')
+      try {
+        const started = Date.now()
+        const result = await gitTryAsync(['--version'], 300)
+        assert.ok(Date.now() - started < 1_500)
+        assert.equal(result.code, 124)
+        assert.equal(result.err, 'timed out after 300ms')
+        const pid = Number(readFileSync(pidFile, 'utf8').trim())
+        assert.ok(Number.isInteger(pid))
+        assert.throws(() => process.kill(pid, 0), { code: 'ESRCH' })
+      } finally {
+        if (previousPath === undefined) delete process.env.PATH
+        else process.env.PATH = previousPath
+        if (existsSync(pidFile)) {
+          const pid = Number(readFileSync(pidFile, 'utf8').trim())
+          if (Number.isInteger(pid)) {
+            try {
+              process.kill(-pid, 'SIGKILL')
+            } catch {
+              try {
+                process.kill(pid, 'SIGKILL')
+              } catch {
+                // already gone
+              }
+            }
+          }
+        }
+        rmSync(root, { recursive: true, force: true })
+      }
+    }
+  )
+})
+
+test('gitUpstreamBehindAsync reports a positive upstream drift', async () => {
+  const dir = makeRepo()
+  const remoteDir = mkdtempSync(join(tmpdir(), 'bro-git-up-async-'))
+  const remoteWorktree = mkdtempSync(join(tmpdir(), 'bro-git-up-async-wt-'))
+  try {
+    git(remoteDir, ['init', '-q', '--bare', '-b', 'main'])
+    git(dir, ['remote', 'add', 'origin', remoteDir])
+    git(dir, ['push', '-qu', 'origin', 'main'])
+    assert.equal(await gitUpstreamBehindAsync(dir), null)
+    git(remoteWorktree, ['clone', remoteDir, '.'])
+    git(remoteWorktree, ['config', 'user.email', 't@t'])
+    git(remoteWorktree, ['config', 'user.name', 't'])
+    commit(remoteWorktree, 'one', { 'a.ts': 'a\n' })
+    commit(remoteWorktree, 'two', { 'b.ts': 'b\n' })
+    git(remoteWorktree, ['push', 'origin', 'main'])
+    git(dir, ['fetch', 'origin'])
+    assert.deepEqual(await gitUpstreamBehindAsync(dir), { behind: 2, upstream: 'origin/main' })
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+    rmSync(remoteDir, { recursive: true, force: true })
+    rmSync(remoteWorktree, { recursive: true, force: true })
+  }
 })
 
 describe('mainWorktreeRoot', () => {

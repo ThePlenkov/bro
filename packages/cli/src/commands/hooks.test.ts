@@ -1,10 +1,111 @@
 import { describe, test } from 'node:test'
 import assert from 'node:assert/strict'
-import { existsSync, mkdirSync, readdirSync, utimesSync, writeFileSync } from 'node:fs'
-import { join, resolve } from 'node:path'
-import { classifyArmCommand, classifyArmCommands, classifyExecCommand, classifySkillMutation, isSelfToolCommand, readArmed, readCodexInstructions, armDetail, otherLiveWork, recordGuardEvents, traceEntry } from './hooks.ts'
+import { spawn, type ChildProcess } from 'node:child_process'
+import {
+  existsSync,
+  mkdirSync,
+  readFileSync,
+  readdirSync,
+  utimesSync,
+  writeFileSync,
+} from 'node:fs'
+import { dirname, join, resolve } from 'node:path'
+import { armSession, classifyArmCommand, classifyArmCommands, classifyExecCommand, classifySkillMutation, isSelfToolCommand, journalCommand, journalTrace, readArmed, readCodexInstructions, armDetail, otherLiveWork, recordGuardEvents, traceEntry } from './hooks.ts'
 import { procStat } from '@broject/core'
-import { git, initRepo, inside, tmpDir } from './testrepo.ts'
+import { git, initRepo, inside, insideAsync, tmpDir } from './testrepo.ts'
+
+function foreignLock(lock: string): ChildProcess {
+  mkdirSync(dirname(lock), { recursive: true })
+  const child = spawn('sleep', ['30'], { stdio: 'ignore' })
+  if (child.pid === undefined) {
+    throw new Error('sleep did not start')
+  }
+  writeFileSync(lock, `${child.pid}:foreign`)
+  return child
+}
+
+async function stopChild(child: ChildProcess): Promise<void> {
+  if (child.exitCode !== null || child.signalCode !== null) {
+    return
+  }
+  child.kill('SIGKILL')
+  await new Promise<void>((resolve) => child.once('close', () => resolve()))
+}
+
+describe('hook journal and occupancy lock bounds', () => {
+  test(
+    'work arming writes through a live foreign occupancy lock',
+    { skip: process.platform === 'win32' },
+    async () => {
+      const { root, main } = initRepo('bro-hooks-lock-')
+      await insideAsync(main, root, async () => {
+        const common = resolve(main, git(['rev-parse', '--git-common-dir'], main).trim())
+        const lock = join(common, 'bro', 'agents.json.lock')
+        const holder = foreignLock(lock)
+        try {
+          const started = Date.now()
+          armSession('held-occupancy', 'work')
+          assert.ok(Date.now() - started < 1_500)
+          assert.ok(existsSync(join(common, 'bro', 'hooks', 'held-occupancy.work')))
+          assert.equal(holder.exitCode, null)
+        } finally {
+          await stopChild(holder)
+        }
+      })
+    }
+  )
+
+  test(
+    'trace append falls back immediately over a live foreign journal lock',
+    { skip: process.platform === 'win32' },
+    async () => {
+      const { root, main } = initRepo('bro-hooks-journal-')
+      await insideAsync(main, root, async () => {
+        const common = resolve(main, git(['rev-parse', '--git-common-dir'], main).trim())
+        const trace = join(common, 'bro', 'hooks', 'trace', 'held-journal.jsonl')
+        const holder = foreignLock(`${trace}.lock`)
+        try {
+          const started = Date.now()
+          journalTrace(
+            { tool_name: 'Edit', tool_input: { file_path: 'src/a.ts' } },
+            'held-journal'
+          )
+          assert.ok(Date.now() - started < 300)
+          assert.match(readFileSync(trace, 'utf8'), /"tool":"Edit"/)
+          assert.equal(holder.exitCode, null)
+        } finally {
+          await stopChild(holder)
+        }
+      })
+    }
+  )
+
+  test(
+    'command journal uses the no-wait append default under contention',
+    { skip: process.platform === 'win32' },
+    async () => {
+      const { root, main } = initRepo('bro-hooks-command-journal-')
+      await insideAsync(main, root, async () => {
+        const common = resolve(main, git(['rev-parse', '--git-common-dir'], main).trim())
+        const commands = join(common, 'bro', 'hooks', 'perf', 'commands.jsonl')
+        const holder = foreignLock(`${commands}.lock`)
+        const telemetry = process.env.BRO_TELEMETRY
+        delete process.env.BRO_TELEMETRY
+        try {
+          const started = Date.now()
+          journalCommand('held-journal-test', 1, 0)
+          assert.ok(Date.now() - started < 300)
+          assert.match(readFileSync(commands, 'utf8'), /"connector":"held-journal-test"/)
+          assert.equal(holder.exitCode, null)
+        } finally {
+          if (telemetry === undefined) delete process.env.BRO_TELEMETRY
+          else process.env.BRO_TELEMETRY = telemetry
+          await stopChild(holder)
+        }
+      })
+    }
+  )
+})
 
 describe('readCodexInstructions', () => {
   test('reads the plugin file and ignores a missing or relative root', () => {

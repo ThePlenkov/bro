@@ -67,6 +67,7 @@ import { dirname, isAbsolute, join } from 'node:path'
 import { setTimeout as nodeSetTimeout } from 'node:timers'
 import {
   acquireFileLock,
+  GIT_SYNC_PROBE_TIMEOUT_MS,
   gitCommonDir,
   parallelWorkProbe,
   postToolLines,
@@ -440,6 +441,7 @@ export function isSelfToolCommand(cmd: string): boolean {
 // aspects. No session_id or no git dir → unarmed → passive (fail-open).
 
 const MARKER_TTL_MS = 7 * 24 * 60 * 60 * 1000
+const HOOK_OCCUPANCY_WAIT_MS = 500
 /** "Live" for parallel-session detection is tighter than the stop-gate
  *  TTL — a marker older than a day is residue, not a working session. */
 const LIVE_SESSION_MS = 24 * 60 * 60 * 1000
@@ -454,7 +456,7 @@ function hooksStateDir(dir: string = process.cwd()): string | null {
   // scrubs inherited GIT_DIR/GIT_WORK_TREE/GIT_COMMON_DIR — an inline
   // rev-parse would let git output (or the proxy's ambient env) point
   // marker reads/writes at a different repository's state
-  const gd = gitCommonDir(dir)
+  const gd = gitCommonDir(dir, GIT_SYNC_PROBE_TIMEOUT_MS)
   return gd !== null ? join(gd, 'bro', 'hooks') : null
 }
 
@@ -675,7 +677,7 @@ export function armDetail(cmd: string, aspect: GateAspect): string {
 
 /** Record that this session touched `aspect`. Best-effort; also prunes
  * markers older than a week so stale sessions don't accumulate. */
-function armSession(sessionId: string, aspect: GateAspect, detail: string = ''): void {
+export function armSession(sessionId: string, aspect: GateAspect, detail: string = ''): void {
   try {
     const path = markerPath(sessionId, aspect)
     if (!path) {
@@ -698,19 +700,16 @@ function armSession(sessionId: string, aspect: GateAspect, detail: string = ''):
     if (detail && !body.split('\n').includes(detail)) {
       body = `${body.replace(/\n?$/, '\n')}${detail}\n`
     }
-    // a .work arm writes under the shared occupancy lock — `bro drive`
-    // holds it across its occupancy-check→spawn section, so this marker
-    // lands before the driver's probe or after the action, never
-    // between (bro-qry9). The wait is the standard lock bound — long
-    // enough to cover a real driver's hold, so the write-anyway
-    // fallback only fires on a pathological holder (the marker is the
-    // session record; dropping it loses the arm entirely).
+    // A .work arm shares the drive occupancy lock so the marker normally
+    // lands before its probe or after the action (bro-qry9). The 500ms
+    // wait is far below the host's 10s hook timeout; on contention, write
+    // anyway, and drive's next occupancy refresh sees the marker.
     let release: () => void = () => {}
     if (aspect === 'work') {
       try {
         release = acquireFileLock(
           join(dirname(dirname(path)), 'agents.json.lock'),
-          { label: 'occupancy lock' }
+          { waitMs: HOOK_OCCUPANCY_WAIT_MS, label: 'occupancy lock' }
         )
       } catch {
         // held past the bound — write anyway; the marker is the record
@@ -881,7 +880,7 @@ const TRACE_JOURNAL_KEEP_LINES = 500
  *  lifecycle, but a weekly TTL doesn't need a per-event dir scan: a new
  *  journal is the once-per-session tick that sweeps residue. Best-effort
  *  like arming: a failed append must never stall the hook. */
-function journalTrace(input: HookInput, sessionId: string): void {
+export function journalTrace(input: HookInput, sessionId: string): void {
   try {
     const path = traceFile(process.cwd(), sessionId)
     if (!path) {
@@ -917,7 +916,7 @@ function journalTrace(input: HookInput, sessionId: string): void {
     }
     try {
       withFileLock(`${path}.lock`, append, {
-        waitMs: 2_000,
+        waitMs: 0,
         label: 'trace journal lock',
       })
     } catch {
@@ -990,7 +989,7 @@ function probeReporter(event: string, probe: string): ProbeReporter {
  *  append + cap-check + trim is one critical section (concurrent hooks
  *  are separate processes); a lock timeout degrades to the plain
  *  append, never a stall. */
-function appendJournal(path: string, line: string, waitMs = 2_000): void {
+function appendJournal(path: string, line: string, waitMs = 0): void {
   mkdirSync(dirname(path), { recursive: true })
   const append = (): void => {
     appendFileSync(path, line)
@@ -1031,9 +1030,9 @@ export function journalCommand(cmd: string, ms: number, exitCode: number): void 
       ms,
       ...(exitCode !== 0 ? { failed: true as const } : {}),
     }
-    // waitMs 0: a contended lock must not stall the exit handler —
-    // the fallback plain append lands the line without the cap check.
-    appendJournal(join(dir, 'perf', 'commands.jsonl'), `${JSON.stringify(row)}\n`, 0)
+    // A contended lock must not stall the exit handler — the fallback
+    // plain append lands the line without the cap check.
+    appendJournal(join(dir, 'perf', 'commands.jsonl'), `${JSON.stringify(row)}\n`)
   } catch {
     // telemetry must never stall or fail the caller
   }
@@ -1538,23 +1537,24 @@ async function emitStopGate(input: HookInput): Promise<void> {
   // the goal reminder fires on EVERY stop — it is the keep-going nudge,
   // exempt from the once-per-session block budget (context, never
   // `decision: block`; spec: specs/goal/bro-6vcll.md)
+  const contextP = boundedMs(
+    sessionContextTextCached(process.cwd(), sessionId).catch(() => undefined),
+    4_000
+  )
   const goalP = goalStopLines(process.cwd(), sessionId, {
     trace: sessionTail(process.cwd(), sessionId).raw,
     // the judge's checkable surface — beads/gate/tree state, not just
     // tool metadata (fail-open inside; a slow probe → undefined)
-    context: boundedMs(
-      sessionContextTextCached(process.cwd(), sessionId).catch(() => undefined),
-      4_000
-    ),
+    context: contextP,
   })
   if (input.stop_hook_active === true) {
-    const goal = await goalP
+    const [goal] = await Promise.all([goalP, contextP])
     if (goal.length > 0) {
       context(eventName, goal.join('\n'))
     }
     return
   }
-  await emitStopGateBody(sessionId, goalP, eventName)
+  await Promise.all([emitStopGateBody(sessionId, goalP, eventName), contextP])
 }
 
 /** The armed-gate half of the stop event — split from emitStopGate so

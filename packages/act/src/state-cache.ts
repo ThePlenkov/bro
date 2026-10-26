@@ -28,7 +28,13 @@ import {
   writeFileSync,
 } from 'node:fs'
 import { join } from 'node:path'
-import { acquireFileLock, gitCommonDir, LockTimeout, type PrTarget } from '@broject/core'
+import {
+  acquireFileLock,
+  GIT_SYNC_PROBE_TIMEOUT_MS,
+  gitCommonDir,
+  LockTimeout,
+  type PrTarget,
+} from '@broject/core'
 import type { PrActState } from './types.ts'
 
 /** Under every poll interval (act wait/watch ~60s, drive ~300s): a
@@ -127,7 +133,7 @@ export function prStateCache(
   dir: string,
   opts?: { ttlMs?: number; lockWaitMs?: number }
 ): PrStateCache | null {
-  const common = gitCommonDir(dir)
+  const common = gitCommonDir(dir, GIT_SYNC_PROBE_TIMEOUT_MS)
   if (common === null) {
     return null
   }

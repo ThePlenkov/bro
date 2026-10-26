@@ -35,7 +35,9 @@ import {
   beadsStoreStamp,
   getTasksAsync,
   gitTry,
-  gitUpstreamBehind,
+  gitTryAsync,
+  gitUpstreamBehindAsync,
+  GIT_SYNC_PROBE_TIMEOUT_MS,
   loadConfig,
   markerLive,
   sessionTaskClaims,
@@ -71,7 +73,10 @@ export const safeId = (s: string): string => s.replace(/[^\w.-]/g, '_')
 /** `<git-common>/bro/hooks` — shared across linked worktrees like the
  *  marker dir it sits beside. null outside a repo. */
 export function hooksDir(dir: string): string | null {
-  const r = gitTry(['-C', dir, 'rev-parse', '--git-common-dir'])
+  const r = gitTry(
+    ['-C', dir, 'rev-parse', '--git-common-dir'],
+    GIT_SYNC_PROBE_TIMEOUT_MS
+  )
   if (r.code !== 0 || r.out.trim() === '') {
     return null
   }
@@ -237,15 +242,17 @@ function learnConfig(dir: string): LearnConfig {
  *  degrades the text, it doesn't kill the probe. */
 export async function sessionContextText(ctx: ConnectorCtx): Promise<string> {
   const parts: string[] = []
-  const top = gitTry(['-C', ctx.dir, 'rev-parse', '--show-toplevel'])
+  const [top, br, behind] = await Promise.all([
+    gitTryAsync(['-C', ctx.dir, 'rev-parse', '--show-toplevel']),
+    gitTryAsync(['-C', ctx.dir, 'branch', '--show-current']),
+    gitUpstreamBehindAsync(ctx.dir),
+  ])
   parts.push(`repo:${basename(top.code === 0 && top.out.trim() !== '' ? top.out.trim() : ctx.dir)}`)
-  const br = gitTry(['-C', ctx.dir, 'branch', '--show-current'])
   if (br.code === 0 && br.out.trim() !== '') {
     parts.push(`branch:${br.out.trim()}`)
   }
   // stale-checkout nudge (bro-6k3f4): a head behind its tracking ref
   // fabricates phantom reverts for any agent reasoning over file state
-  const behind = gitUpstreamBehind(ctx.dir)
   if (behind !== null) {
     parts.push(
       `sync:${br.out.trim() || 'HEAD'} ${behind.behind} behind ${behind.upstream} — stale checkout; fetch before trusting file state`
@@ -355,7 +362,7 @@ function inject(
   }
   try {
     return withFileLock(`${fired}.lock`, run, {
-      waitMs: 2_000,
+      waitMs: 0,
       label: 'learn fired lock',
     })
   } catch {

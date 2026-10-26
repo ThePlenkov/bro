@@ -27,7 +27,7 @@ import {
   writeFileSync,
 } from 'node:fs'
 import { basename, dirname, join, resolve } from 'node:path'
-import { pidAlive, procStat } from '@broject/core'
+import { GIT_SYNC_PROBE_TIMEOUT_MS, pidAlive, procStat } from '@broject/core'
 
 export interface PendingWatch {
   pr: number
@@ -94,7 +94,7 @@ function watchesDir(dir: string): string | null {
       {
         encoding: 'utf8',
         stdio: ['ignore', 'pipe', 'ignore'],
-        timeout: 5000,
+        timeout: GIT_SYNC_PROBE_TIMEOUT_MS,
         killSignal: 'SIGKILL',
       }
     ).trim()
@@ -609,4 +609,3 @@ async function rearmOne(
   out.rearmed.push({ pr: plan.pr, pid })
   sweep()
 }
-

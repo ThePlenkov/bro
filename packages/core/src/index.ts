@@ -14,7 +14,9 @@ export {
 export {
   git,
   gitTry,
+  gitTryAsync,
   gitCommonDir,
+  GIT_SYNC_PROBE_TIMEOUT_MS,
   gitLogPathRecords,
   gitDriftRef,
   gitLogStamp,
@@ -22,6 +24,7 @@ export {
   gitIsAncestor,
   gitIsShallow,
   gitUpstreamBehind,
+  gitUpstreamBehindAsync,
   gitWorktreeRoots,
   mainWorktreeRoot,
   unquoteGitPath,
