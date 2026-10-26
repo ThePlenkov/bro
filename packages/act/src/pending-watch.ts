@@ -516,7 +516,7 @@ function deadWatchPlanFrom(listed: ListedWatch[]): RearmPlan[] {
     if (cur === undefined) {
       byPr.set(l.watch.pr, {
         merge: l.watch.merge,
-        cleanup: l.watch.cleanup === true,
+        cleanup: l.watch.merge === true && l.watch.cleanup === true,
         timeoutMin: l.watch.timeoutMin,
         workdir: l.watch.workdir,
         bead: l.watch.bead,
@@ -526,7 +526,9 @@ function deadWatchPlanFrom(listed: ListedWatch[]): RearmPlan[] {
     }
     cur.files.push(l.file);
     // the merge marker's workdir is the cleanup target — adopt it with
-    // the mode it recorded; a watch-only marker's cwd never is one
+    // the mode it recorded; a watch-only marker's cwd and its cleanup
+    // flag never feed the merge plan (a wait without --merge promised
+    // no worktree retirement, so its marker can't conjure one)
     if (l.watch.merge && !cur.merge) {
       cur.workdir = l.watch.workdir ?? cur.workdir;
       cur.bead = l.watch.bead ?? cur.bead;
@@ -535,7 +537,7 @@ function deadWatchPlanFrom(listed: ListedWatch[]): RearmPlan[] {
       cur.bead = cur.bead ?? l.watch.bead;
     }
     cur.merge = cur.merge || l.watch.merge;
-    cur.cleanup = cur.cleanup || l.watch.cleanup === true;
+    cur.cleanup = cur.cleanup || (l.watch.merge === true && l.watch.cleanup === true);
     cur.timeoutMin = Math.max(cur.timeoutMin, l.watch.timeoutMin);
   }
   return [...byPr.entries()].map(([pr, p]) => ({ pr, ...p }));

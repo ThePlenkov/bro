@@ -373,10 +373,17 @@ export function isOwnClaim(
  *  facade-resolved async read surface. The claim/ready probes below
  *  belong to whichever system `connectors.tasks` selects (beads by
  *  default): naming the serving connector keeps the session-start
- *  header and the actor check honest when another backend is pinned. */
-function servingTasks(dir: string): { name: string; store: TaskStoreAsync } {
+ *  header and the actor check honest when another backend is pinned.
+ *  Async — these probes run inside the hook sweep, so the connector
+ *  pick must not spawnSync the remote probe; name and store resolve
+ *  concurrently. */
+async function servingTasks(dir: string): Promise<{ name: string; store: TaskStoreAsync }> {
   const prefer = loadConfig(dir).connectors;
-  return { name: facadeName('tasks', { dir }, { prefer }), store: tasksAsync(dir, prefer) };
+  const [name, store] = await Promise.all([
+    facadeNameAsync('tasks', { dir }, { prefer }),
+    tasksStoreAsync(dir, prefer),
+  ]);
+  return { name, store };
 }
 
 const beadsConnector: Connector = {
@@ -398,7 +405,7 @@ const beadsConnector: Connector = {
   hooks: () => ({
     async sessionStart(ctx) {
       try {
-        const { name, store } = servingTasks(ctx.dir);
+        const { name, store } = await servingTasks(ctx.dir);
         const ready = (await store.ready())
           .slice(0, 8)
           .map(r => `  ${r.id} ${shortTitle(r.title)}`.trimEnd());
@@ -414,7 +421,7 @@ const beadsConnector: Connector = {
         // "Own" is verified: a marker id whose claim was refused is
         // foreign work — the exact collision this nudge exists for.
         const mine = await sessionTaskClaimsAsync(ctx);
-        const { store } = servingTasks(ctx.dir);
+        const { store } = await servingTasks(ctx.dir);
         const [me, rows] = await Promise.all([
           store.actor ? store.actor() : Promise.resolve(''),
           store.list({ status: 'in_progress' }),
@@ -430,7 +437,7 @@ const beadsConnector: Connector = {
     },
     async stopGate(ctx) {
       try {
-        const { name, store } = servingTasks(ctx.dir);
+        const { name, store } = await servingTasks(ctx.dir);
         const [mine, me, claimed] = await Promise.all([
           sessionTaskClaimsAsync(ctx),
           store.actor ? store.actor() : Promise.resolve(''),
@@ -515,6 +522,13 @@ function remoteUrl(dir: string): string | undefined {
   return r.code === 0 && r.out.trim() !== '' ? r.out.trim() : undefined;
 }
 
+/** Async remoteUrl — hook/probe paths can't pay spawnSync (spec
+ *  bro-36sx7.2); bounded like every async git probe. */
+async function remoteUrlAsync(dir: string): Promise<string | undefined> {
+  const r = await gitTryAsync(['-C', dir, 'remote', 'get-url', 'origin']);
+  return r.code === 0 && r.out.trim() !== '' ? r.out.trim() : undefined;
+}
+
 export interface FacadeOpts {
   /** Explicit connector name — wins over config and auto-detect. */
   connector?: string;
@@ -564,23 +578,33 @@ function warnIfAmbiguous(
   );
 }
 
-/** The connector chosen to serve `kind` — shared by facade() and auth
- *  probing so both resolve through the same precedence. */
-function pickConnector<K extends keyof FacadeMap>(
+/** The named-connector short-circuit — an explicit `connector:`/`prefer`
+ *  pin wins outright and never pays the remote probe. */
+function namedConnector<K extends keyof FacadeMap>(
+  kind: K,
+  providers: Connector[],
+  opts: FacadeOpts
+): Connector | undefined {
+  const named = opts.connector ?? opts.prefer?.[kind];
+  if (named === undefined) {
+    return undefined;
+  }
+  const pick = providers.find(c => c.name === named);
+  if (!pick) {
+    throw new Error(`connector "${named}" does not provide "${kind}"`);
+  }
+  return pick;
+}
+
+/** Auto-detect once the remote URL is resolved — memo + remote/dir
+ *  match + ambiguity warning. Shared by the sync and async picks so
+ *  both resolve through identical precedence. */
+function pickConnectorAuto<K extends keyof FacadeMap>(
   kind: K,
   ctx: ConnectorCtx,
-  opts: FacadeOpts
+  providers: Connector[],
+  url: string | undefined
 ): Connector {
-  const providers = registry.filter(c => typeof c[kind as keyof Connector] === 'function');
-  const named = opts.connector ?? opts.prefer?.[kind];
-  if (named !== undefined) {
-    const pick = providers.find(c => c.name === named);
-    if (!pick) {
-      throw new Error(`connector "${named}" does not provide "${kind}"`);
-    }
-    return pick;
-  }
-  const url = remoteUrl(ctx.dir);
   const key = `${kind}\0${ctx.dir}\0${url ?? ''}\0${registry.length}`;
   const memo = pickMemo.get(key);
   if (memo !== undefined) {
@@ -609,6 +633,34 @@ function pickConnector<K extends keyof FacadeMap>(
   return pick;
 }
 
+/** The connector chosen to serve `kind` — shared by facade() and auth
+ *  probing so both resolve through the same precedence. */
+function pickConnector<K extends keyof FacadeMap>(
+  kind: K,
+  ctx: ConnectorCtx,
+  opts: FacadeOpts
+): Connector {
+  const providers = registry.filter(c => typeof c[kind as keyof Connector] === 'function');
+  return (
+    namedConnector(kind, providers, opts) ??
+    pickConnectorAuto(kind, ctx, providers, remoteUrl(ctx.dir))
+  );
+}
+
+/** Async pickConnector — the remote probe rides gitTryAsync so a hook
+ *  sweep's resolution doesn't freeze sibling timers on spawnSync. */
+async function pickConnectorAsync<K extends keyof FacadeMap>(
+  kind: K,
+  ctx: ConnectorCtx,
+  opts: FacadeOpts
+): Promise<Connector> {
+  const providers = registry.filter(c => typeof c[kind as keyof Connector] === 'function');
+  return (
+    namedConnector(kind, providers, opts) ??
+    pickConnectorAuto(kind, ctx, providers, await remoteUrlAsync(ctx.dir))
+  );
+}
+
 /** Resolve the facade a command needs. Throws when nothing provides it —
  *  callers that probe rather than require should catch or pre-check
  *  `connectors()`. */
@@ -632,6 +684,16 @@ export function facadeName<K extends keyof FacadeMap>(
   opts: FacadeOpts = {}
 ): string {
   return pickConnector(kind, ctx, opts).name;
+}
+
+/** Async facadeName — same precedence, but the remote probe is the
+ *  bounded async git twin (hook paths, spec bro-36sx7.2). */
+export async function facadeNameAsync<K extends keyof FacadeMap>(
+  kind: K,
+  ctx: ConnectorCtx,
+  opts: FacadeOpts = {}
+): Promise<string> {
+  return (await pickConnectorAsync(kind, ctx, opts)).name;
 }
 
 /** The serving connector's auth probe — null when ready, else the
@@ -816,7 +878,30 @@ export function tasksAsync(
       // fall through to the selected tasks connector
     }
   }
-  const pick = pickConnector('tasks', { dir }, { prefer });
+  return taskStoreFromPick(pickConnector('tasks', { dir }, { prefer }), dir);
+}
+
+/** Async-resolution tasksAsync — the probe-path twin for hook sweeps:
+ *  identical precedence, but the connector pick's remote probe rides
+ *  gitTryAsync instead of a spawnSync that would freeze the sweep. */
+export async function tasksStoreAsync(
+  dir: string = process.cwd(),
+  prefer?: Record<string, string>
+): Promise<TaskStoreAsync> {
+  if (prefer?.tasksAsync !== undefined) {
+    try {
+      return facade('tasksAsync', { dir }, { prefer });
+    } catch {
+      // fall through to the selected tasks connector
+    }
+  }
+  return taskStoreFromPick(await pickConnectorAsync('tasks', { dir }, { prefer }), dir);
+}
+
+/** The picked connector → TaskStoreAsync — the connector's own
+ *  `tasksAsync` surface when it has one, else its sync store wrapped
+ *  in async signatures (reads stay sequential for it). */
+function taskStoreFromPick(pick: Connector, dir: string): TaskStoreAsync {
   if (pick.tasksAsync !== undefined) {
     return pick.tasksAsync({ dir });
   }

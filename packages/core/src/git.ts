@@ -26,7 +26,27 @@ function repoEnv(args: string[]): NodeJS.ProcessEnv | undefined {
   return env;
 }
 
+/** git's own argv is a command runner — `--upload-pack=cmd`,
+ *  `--receive-pack=cmd`, `--exec=cmd`, a `--template` dir shipping
+ *  hooks, or an `ext::` "URL" turns fetch-family plumbing into an exec
+ *  of argv data. Callers feed data (dirs, refs, remote names) through
+ *  these helpers, so the helper is the boundary: an arg spelling a
+ *  command-runner is rejected, never forwarded to the child. `-c`/`-u`
+ *  stay legal — config overrides (`-c status.showUntrackedFiles=all`)
+ *  and `ls-files -u` are real call sites; `--exec` must still not eat
+ *  the innocent `--exec-path`. */
+const GIT_COMMAND_ARG = /^(--(upload-pack|receive-pack|exec|template)(=|$)|ext::)/;
+
+function assertGitArgs(args: string[]): void {
+  for (const a of args) {
+    if (GIT_COMMAND_ARG.test(a)) {
+      throw new Error(`git arg rejected — command-runner flag: ${a}`);
+    }
+  }
+}
+
 export function git(args: string[]): string {
+  assertGitArgs(args);
   const proc = spawnSync('git', args, {
     // NOSONAR — PATH lookup is the contract (same as gh/bd)
     stdio: ['ignore', 'pipe', 'pipe'],
@@ -43,6 +63,7 @@ export function gitTry(
   args: string[],
   timeoutMs?: number
 ): { code: number; out: string; err: string } {
+  assertGitArgs(args);
   const proc = spawnSync('git', args, {
     // NOSONAR — PATH lookup is the contract
     stdio: ['ignore', 'pipe', 'pipe'],
@@ -65,6 +86,7 @@ export function gitTryAsync(
   timeoutMs = GIT_SYNC_PROBE_TIMEOUT_MS
 ): Promise<{ code: number; out: string; err: string }> {
   try {
+    assertGitArgs(args);
     const { proc, done } = spawnCollect('git', args, undefined, repoEnv(args), {
       detached: true,
       envMode: 'replace',
@@ -141,6 +163,12 @@ function commonDirCall(
     const rem = remaining();
     if (rem === undefined || rem > 0) {
       return false;
+    }
+    // a racing sibling probe that already answered owns the entry — a
+    // timed-out write must not replace its success with 30s of "no repo"
+    const cur = gitCommonDirCache.get(key);
+    if (cur !== undefined && cur.value !== null && cur.expiresAt > Date.now()) {
+      return true;
     }
     gitCommonDirCache.set(key, {
       value: null,

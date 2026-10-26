@@ -294,6 +294,7 @@ export {
   facade,
   facadeAuth,
   facadeName,
+  facadeNameAsync,
   isOwnClaim,
   mergeQueueHost,
   parallelWorkLines,
@@ -312,6 +313,7 @@ export {
   stackHost,
   stopGateContributions,
   tasksAsync,
+  tasksStoreAsync,
 } from './connectors.ts';
 export { PROBE_TIMEOUT_MS } from './connectors.ts';
 export type { CollectedGuard } from './connectors.ts';

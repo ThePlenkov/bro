@@ -165,6 +165,15 @@ export async function evalState(
   probeTimeoutMs = PROBE_TIMEOUT_MS
 ): Promise<ClauseVerdict[]> {
   const out: ClauseVerdict[] = [];
+  // the lazy git probes memoize on first call — kick the declared ones
+  // up front so a diff+branch guard overlaps the two bounded spawns
+  // instead of serializing them behind the first await
+  if (state.diff !== undefined) {
+    void live.diffPaths();
+  }
+  if (state.branch !== undefined) {
+    void live.branch();
+  }
   if (state.diff !== undefined) {
     out.push(...evalDiff(state.diff, await live.diffPaths()));
   }

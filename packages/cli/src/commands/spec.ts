@@ -547,7 +547,7 @@ const DRIFT_VALUE_FLAGS = new Set([...VALUE_FLAGS, '--ref']);
 /** Per-subcommand option allowlist — a misspelled or misplaced option
  *  must fail loudly. Without it `--jso` runs a TSV audit the caller
  *  expected as JSON, and `--ref HEAD` on `new` leaks HEAD into
- *  positionals as the bead id. `=`-spellings of a known flag pass. */
+ *  positionals as the bead id. `=`-spellings pass for value flags. */
 const KNOWN_FLAGS: Record<string, Set<string>> = {
   new: new Set(['--parent']),
   check: new Set(['--all']),
@@ -573,8 +573,19 @@ export function runSpecCommand(argv: string[]): void {
     usage();
   }
   for (const a of rest) {
-    if (a.startsWith('--') && !known.has(a.split('=', 1)[0]!)) {
+    if (!a.startsWith('--')) {
+      continue;
+    }
+    const name = a.split('=', 1)[0]!;
+    if (!known.has(name)) {
       console.error(`error: unknown option "${a}" for spec ${key}`);
+      process.exit(2);
+    }
+    // `=` belongs to value flags only — `--all=true` passing validation
+    // but missing the exact `includes('--all')` check below was a
+    // silently-ignored option, the same class the allowlist exists for
+    if (a.includes('=') && !DRIFT_VALUE_FLAGS.has(name)) {
+      console.error(`error: option "${name}" takes no value for spec ${key}`);
       process.exit(2);
     }
   }
