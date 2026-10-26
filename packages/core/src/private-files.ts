@@ -24,6 +24,7 @@ import {
   existsSync,
   fchmodSync,
   fstatSync,
+  ftruncateSync,
   mkdirSync,
   openSync,
   writeFileSync,
@@ -41,6 +42,7 @@ export const PRIVATE_DIR_MODE = 0o700
 export const privateFs = {
   fchmod: fchmodSync,
   fstat: fstatSync,
+  truncate: ftruncateSync,
   write: writeFileSync,
 }
 
@@ -100,13 +102,14 @@ function openPrivateSync(path: string, flags: number): number {
 }
 
 /** Truncate-write `path` owner-only: 0600 for a new file, and a
- *  pre-existing file's mode is repaired before data lands. */
+ *  pre-existing file's mode is repaired before data lands. The truncate
+ *  rides on the VERIFIED descriptor, not the open — O_TRUNC at open
+ *  would empty a foreign-owned planted file before the owner check
+ *  could refuse it. */
 export function writePrivateFileSync(path: string, data: string | Uint8Array): void {
-  const fd = openPrivateSync(
-    path,
-    constants.O_WRONLY | constants.O_CREAT | constants.O_TRUNC
-  )
+  const fd = openPrivateSync(path, constants.O_WRONLY | constants.O_CREAT)
   try {
+    privateFs.truncate(fd, 0)
     privateFs.write(fd, data)
   } finally {
     closeSync(fd)

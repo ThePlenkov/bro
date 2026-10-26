@@ -201,6 +201,7 @@ describe('private-files', { skip: process.platform === 'win32' }, () => {
     try {
       const f = join(dir, 'agent.log')
       writeFileSync0164(f)
+      writeFileSync(f, 'theirs')
       const origFstat = privateFs.fstat
       privateFs.fstat = ((fd: number) => {
         const st = origFstat(fd)
@@ -212,8 +213,9 @@ describe('private-files', { skip: process.platform === 'win32' }, () => {
       } finally {
         privateFs.fstat = origFstat
       }
-      // the refusal closed the fd and threw before a byte could land
-      assert.equal(readFileSync(f, 'utf8'), '')
+      // the refusal closed the fd and threw before a byte could land —
+      // and no O_TRUNC at open emptied the planted file either
+      assert.equal(readFileSync(f, 'utf8'), 'theirs')
     } finally {
       done()
     }
