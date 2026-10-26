@@ -494,7 +494,13 @@ describe('repo env sanitization', () => {
       const other = makeRepo();
       try {
         const touched = commit(dir, 'code', { 'src/a.ts': 'a\n' });
-        const prev = { ...process.env };
+        // Restore key-by-key — `process.env = {...}` swaps in a plain
+        // object and every later PATH shim spawns the real git.
+        const prev = {
+          GIT_DIR: process.env.GIT_DIR,
+          GIT_WORK_TREE: process.env.GIT_WORK_TREE,
+          GIT_COMMON_DIR: process.env.GIT_COMMON_DIR,
+        };
         process.env.GIT_DIR = join(other, '.git');
         process.env.GIT_WORK_TREE = other;
         process.env.GIT_COMMON_DIR = join(other, '.git');
@@ -507,7 +513,11 @@ describe('repo env sanitization', () => {
           assert.equal(gitIsShallow(dir), false);
           assert.equal(gitDriftRef(dir), 'refs/heads/main');
         } finally {
-          process.env = prev;
+          for (const k of ['GIT_DIR', 'GIT_WORK_TREE', 'GIT_COMMON_DIR'] as const) {
+            const v = prev[k];
+            if (v === undefined) delete process.env[k];
+            else process.env[k] = v;
+          }
         }
       } finally {
         rmSync(other, { recursive: true, force: true });
