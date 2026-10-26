@@ -173,6 +173,8 @@ function asHookInput(raw: unknown): HookInput {
  * Each hook invocation is its own process. */
 let cursorClient = false
 
+let permissionAnswerEmitted = false
+
 /** Codex adds `turn_id` to every hook payload. Devin and Claude do not,
  * so permission and pre-tool answers stay on their legacy shapes unless
  * this is set. */
@@ -951,6 +953,7 @@ interface PerfRow extends ProbeTiming {
   probe?: string
   /** Total-row marker: how many probe rows the event produced. */
   probes?: number
+  deadline?: boolean
 }
 
 /** `<git-common>/bro/hooks/perf/<session>.jsonl` — null without a git
@@ -1041,7 +1044,7 @@ export function journalCommand(cmd: string, ms: number, exitCode: number): void 
 /** Flush the buffered rows plus the event total to the session's perf
  *  journal. Called in a finally — a hook that threw still reports the
  *  time it burned. */
-function flushPerf(sessionId: string, event: string, t0: number): void {
+function flushPerf(sessionId: string, event: string, t0: number, deadline = false): void {
   try {
     const path = perfFile(sessionId)
     if (!path || !perfBuf) {
@@ -1049,7 +1052,14 @@ function flushPerf(sessionId: string, event: string, t0: number): void {
     }
     const rows = perfBuf
     perfBuf = null
-    rows.push({ ts: Date.now(), event, ms: Date.now() - t0, connector: '', probes: rows.length })
+    rows.push({
+      ts: Date.now(),
+      event,
+      ms: Date.now() - t0,
+      connector: '',
+      probes: rows.length,
+      ...(deadline ? { deadline: true } : {}),
+    })
     const fresh = !existsSync(path)
     appendJournal(
       path,
@@ -1691,6 +1701,7 @@ function emitPermission(input: HookInput): boolean {
         decision: { behavior: 'deny', message: capRefusal },
       },
     })
+    permissionAnswerEmitted = true
     return true
   }
   if (isSelfToolCommand(cmd)) {
@@ -1704,6 +1715,7 @@ function emitPermission(input: HookInput): boolean {
     } else {
       emit({ decision: 'approve' })
     }
+    permissionAnswerEmitted = true
     return true
   }
   return false
@@ -1728,6 +1740,7 @@ function answerCursorPermission(event: string | undefined, input: HookInput): vo
   }
   if (!emitPermission(input)) {
     emit({ permission: 'ask' })
+    permissionAnswerEmitted = true
   }
 }
 
@@ -1834,6 +1847,7 @@ async function dispatchHook(event: string, raw: unknown, input: HookInput): Prom
     case 'permission':
       if (!emitPermission(input) && cursorClient) {
         emit({ permission: 'ask' })
+        permissionAnswerEmitted = true
       }
       return
     default:
@@ -1865,7 +1879,8 @@ function parsePerfRow(line: string): PerfRow | undefined {
     return typeof p.event === 'string' &&
       typeof p.connector === 'string' &&
       typeof p.ms === 'number' &&
-      typeof p.ts === 'number'
+      typeof p.ts === 'number' &&
+      (p.deadline === undefined || typeof p.deadline === 'boolean')
       ? (r as PerfRow)
       : undefined
   } catch {
@@ -2003,6 +2018,7 @@ function normalizeToolOutcome(event: string, input: HookInput, raw: unknown): Ho
 export async function runHooksCommand(argv: string[]): Promise<void> {
   cursorClient = false
   codexClient = false
+  permissionAnswerEmitted = false
   const event = argv[0]
   // install/uninstall are operator commands, not hook events — they
   // report a verdict on stderr and never read stdin (a git hook's stdin
@@ -2076,6 +2092,18 @@ export async function runHooksCommand(argv: string[]): Promise<void> {
   }
   perfBuf = []
   const t0 = Date.now()
+  const configuredDeadline = Number(process.env.BRO_HOOK_DEADLINE_MS)
+  const deadlineMs =
+    Number.isSafeInteger(configuredDeadline) && configuredDeadline > 0 ? configuredDeadline : 6_000
+  const deadlineTimer = nodeSetTimeout(() => {
+    const sessionId = typeof input.session_id === 'string' ? input.session_id : ''
+    flushPerf(sessionId, event, t0, true)
+    if (!permissionAnswerEmitted) {
+      answerCursorPermission(event, input)
+    }
+    process.exit(0)
+  }, deadlineMs)
+  deadlineTimer.unref()
   const evSpan = otelSpan('hook.event', {
     'hook.event': event,
     'hook.session': typeof input.session_id === 'string' ? input.session_id : '',
@@ -2090,6 +2118,7 @@ export async function runHooksCommand(argv: string[]): Promise<void> {
     // covers a throw before that answer.
     answerCursorPermission(event, input)
   } finally {
+    clearTimeout(deadlineTimer)
     const sessionId = typeof input.session_id === 'string' ? input.session_id : ''
     flushPerf(sessionId, event, t0)
     // A probe that raced past its budget leaves its bd/gh child running —
