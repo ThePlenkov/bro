@@ -471,29 +471,27 @@ const gitConnector: Connector = {
 const registry: Connector[] = [beadsConnector, gitConnector]
 
 /** Plugin connectors register here (BroPlugin.connectors). Duplicate
- *  names are skipped — a plugin cannot shadow a built-in system.
- *  Pass `replace: true` to overwrite an existing registration (tests). */
-export function registerConnector(c: Connector & { replace?: boolean }): void {
-  const idx = registry.findIndex((x) => x.name === c.name)
-  if (idx >= 0) {
-    if (c.replace) {
-      registry[idx] = c
-      return
-    }
+ *  names are skipped — a plugin cannot shadow a built-in system. */
+export function registerConnector(c: Connector): void {
+  if (registry.some((x) => x.name === c.name)) {
     console.error(`warning: connector "${c.name}" already registered — skipped`)
     return
   }
   registry.push(c)
 }
 
-/** Remove a connector by name (tests). */
-export function unregisterConnector(name: string): boolean {
-  const idx = registry.findIndex((x) => x.name === name)
-  if (idx < 0) {
-    return false
+/** Remove a registered connector — the test/fixture seam. Registration
+ *  is process-global, so a fake registered for one case leaks into
+ *  every later facade resolution in the process unless it's removed on
+ *  restore. The pick memo is keyed on registry length, which an
+ *  unregister+re-register cycle leaves unchanged — clearing it keeps a
+ *  stale pick from resolving to a connector that's gone. */
+export function unregisterConnector(name: string): void {
+  const i = registry.findIndex((c) => c.name === name)
+  if (i >= 0) {
+    registry.splice(i, 1)
+    pickMemo.clear()
   }
-  registry.splice(idx, 1)
-  return true
 }
 
 export function connectors(): readonly Connector[] {
@@ -923,11 +921,17 @@ function collectConnectorGuards(
   try {
     declared = c.guards?.(ctx)
   } catch (err) {
-    console.error(`bro: connector '${c.name}' guards() threw — skipped: ${err instanceof Error ? err.message : err}`)
+    const detail = err instanceof Error ? err.message : String(err)
+    console.error(`bro: connector '${c.name}' guards() threw — skipped: ${detail}`)
+    // a problems row marks the collection degraded — consumers that
+    // record resolved coverage (the hook fast-path's guards/ dir) must
+    // not mistake "skipped" for "contributes nothing"
+    push(c.name, undefined, [`guards() threw: ${detail}`])
     return
   }
   if (declared !== undefined && !Array.isArray(declared)) {
     console.error(`bro: connector '${c.name}' guards() returned a non-array — skipped`)
+    push(c.name, undefined, ['guards() returned a non-array'])
     return
   }
   for (const raw of declared ?? []) {

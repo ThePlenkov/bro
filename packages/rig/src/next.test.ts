@@ -9,7 +9,7 @@ import { spawn, spawnSync } from 'node:child_process'
 import { chmodSync, mkdirSync, mkdtempSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { registerConnector, type ReviewFacade } from '@broject/core'
+import { registerConnector, testGitEnv, unregisterConnector, type ReviewFacade } from '@broject/core'
 import { rigFocus, rigNext } from './next.ts'
 
 /** `show <id>` answers `$FAKE_BD_DIR/show-<id>.json` when the fixture
@@ -50,7 +50,7 @@ interface Fixture {
 }
 
 const git = (dir: string, args: string[]): void => {
-  const r = spawnSync('git', ['-C', dir, ...args], { encoding: 'utf8' })
+  const r = spawnSync('git', ['-C', dir, ...args], { encoding: 'utf8', env: testGitEnv() })
   assert.equal(r.status, 0, `git ${args.join(' ')}: ${r.stderr}`)
 }
 
@@ -159,17 +159,24 @@ describe('rigNext — the verdict ladder', () => {
       f.row('a-1', bead('a-1', { status: 'in_progress', assignee: 'tester' }))
       f.row('r-1', bead('r-1', { status: 'in_progress', assignee: 'tester' }))
       f.row('x-1', bead('x-1'))
-      f.ready([bead('x-1')])
+      f.row('y-1', bead('y-1'))
+      f.ready([bead('x-1'), bead('y-1')])
       f.agents({
         'a-1': { agentId: 'native-zz', backend: 'native', pid: sleeper.pid },
         'r-1': { agentId: 'devin-zz', backend: 'devin', sessionId: 'sess-1' },
         'x-1': { agentId: 'native-yy', backend: 'native', exitStatus: 0 },
+        'y-1': { agentId: 'native-yq', backend: 'native', pid: sleeper.pid },
       })
       assert.equal(rigNext(f.dir, 'a-1').verdict, 'wait')
       assert.match(rigNext(f.dir, 'a-1').detail ?? '', /agent native-zz in flight/)
       assert.equal(rigNext(f.dir, 'r-1').verdict, 'wait')
       // the recorded death drops the wait — the open+ready row steps
       assert.equal(rigNext(f.dir, 'x-1').verdict, 'step')
+      // paired on the SAME row: in-flight waits, the recorded exit is
+      // what clears it — not a different row's luck
+      assert.equal(rigNext(f.dir, 'y-1').verdict, 'wait')
+      f.agents({ 'y-1': { agentId: 'native-yq', backend: 'native', exitStatus: 0 } })
+      assert.equal(rigNext(f.dir, 'y-1').verdict, 'step')
     } finally {
       sleeper.kill('SIGKILL')
       f.restore()
@@ -304,6 +311,7 @@ describe('rigNext — the gate probe', () => {
       assert.equal(rigNext(f.dir, 'g-1', { gate: false }).verdict, 'blocked')
       git(f.dir, ['worktree', 'remove', '--force', wt])
     } finally {
+      unregisterConnector('fakegate')
       f.restore()
     }
   })
@@ -316,6 +324,7 @@ describe('rigNext — the gate probe', () => {
       assert.match(rigNext(f.dir, 'g-2').detail ?? '', /pr settled/)
       git(f.dir, ['worktree', 'remove', '--force', wt])
     } finally {
+      unregisterConnector('fakesettled')
       f.restore()
     }
   })
@@ -337,6 +346,27 @@ describe('rigNext — the gate probe', () => {
         detail: 'review host unreachable',
       })
       git(f.dir, ['worktree', 'remove', '--force', wt])
+    } finally {
+      unregisterConnector('fakedown')
+      f.restore()
+    }
+  })
+
+  test('no reviews provider at all — the probe skips to the work ladder, never waits', () => {
+    const f = fixture()
+    try {
+      f.row('n-1', bead('n-1'))
+      f.ready([bead('n-1')])
+      // a worktree exists (so the probe WOULD have something to check)
+      // but the connector plane has no reviews facade — absent a gate
+      // to consult, the open+ready row steps
+      const wt = join(f.dir, '..', `${f.dir.split('/').pop()}--n-1`)
+      git(f.dir, ['worktree', 'add', '-b', 'work/n-1', wt])
+      try {
+        assert.equal(rigNext(f.dir, 'n-1').verdict, 'step')
+      } finally {
+        git(f.dir, ['worktree', 'remove', '--force', wt])
+      }
     } finally {
       f.restore()
     }

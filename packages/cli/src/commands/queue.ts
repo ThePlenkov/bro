@@ -75,7 +75,7 @@ function run(fn: () => void): void {
 }
 
 function cmdLs(rest: string[]): void {
-  const frame = queueScope(flag(rest, '--under'))
+  const frame = queueScope({ under: flag(rest, '--under') })
   const items = queueItems(frame)
   if (items.length === 0) {
     console.log(`queue ${frame}: empty`)
