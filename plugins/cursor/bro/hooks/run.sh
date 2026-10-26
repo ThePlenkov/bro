@@ -37,6 +37,7 @@ project_devin_hook_owns_event() {
   _event=$1
   case "$_event" in
     ''|*[!a-z-]*) return 1 ;;
+    *) : ;;
   esac
   [ -n "$SCRIPT_ROOT" ] || return 1
   [ -n "$DEVIN_PROJECT_ROOT" ] || return 1
