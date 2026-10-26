@@ -2,56 +2,61 @@
  * Git plumbing helpers — same shell-out contract as `gh`/`bd`: the user's
  * git, their config, their credentials.
  */
-import { spawnSync } from 'node:child_process'
-import { existsSync, readdirSync, readFileSync, realpathSync, statSync } from 'node:fs'
-import { basename, dirname, join, resolve } from 'node:path'
-import { killGroup, spawnCollect } from './live-procs.ts'
+import { spawnSync } from 'node:child_process';
+import { existsSync, readdirSync, readFileSync, realpathSync, statSync } from 'node:fs';
+import { basename, dirname, join, resolve } from 'node:path';
+import { killGroup, spawnCollect } from './live-procs.ts';
 
 /** `git -C` must select the repo on argv alone — an inherited
  *  GIT_DIR/GIT_WORK_TREE/GIT_COMMON_DIR silently retargets the probe at
  *  whatever repository the parent process was spawned inside (agent
  *  envs carry them). GIT_INDEX_FILE stays: data-ref writes use it as a
  *  private index. undefined for non-`-C` calls — inherit as usual. */
-const GIT_REPO_ENV = ['GIT_DIR', 'GIT_WORK_TREE', 'GIT_COMMON_DIR'] as const
-export const GIT_SYNC_PROBE_TIMEOUT_MS = 1_500
+const GIT_REPO_ENV = ['GIT_DIR', 'GIT_WORK_TREE', 'GIT_COMMON_DIR'] as const;
+export const GIT_SYNC_PROBE_TIMEOUT_MS = 1_500;
 
 function repoEnv(args: string[]): NodeJS.ProcessEnv | undefined {
   if (!args.includes('-C')) {
-    return undefined
+    return undefined;
   }
-  const env = { ...process.env }
+  const env = { ...process.env };
   for (const k of GIT_REPO_ENV) {
-    delete env[k]
+    delete env[k];
   }
-  return env
+  return env;
 }
 
 export function git(args: string[]): string {
-  const proc = spawnSync('git', args, { // NOSONAR — PATH lookup is the contract (same as gh/bd)
+  const proc = spawnSync('git', args, {
+    // NOSONAR — PATH lookup is the contract (same as gh/bd)
     stdio: ['ignore', 'pipe', 'pipe'],
     encoding: 'utf8',
     env: repoEnv(args),
-  })
+  });
   if (proc.status !== 0) {
-    throw new Error(`git ${args[0]} failed: ${(proc.stderr ?? '').trim()}`)
+    throw new Error(`git ${args[0]} failed: ${(proc.stderr ?? '').trim()}`);
   }
-  return proc.stdout ?? ''
+  return proc.stdout ?? '';
 }
 
-export function gitTry(args: string[], timeoutMs?: number): { code: number; out: string; err: string } {
-  const proc = spawnSync('git', args, { // NOSONAR — PATH lookup is the contract
+export function gitTry(
+  args: string[],
+  timeoutMs?: number
+): { code: number; out: string; err: string } {
+  const proc = spawnSync('git', args, {
+    // NOSONAR — PATH lookup is the contract
     stdio: ['ignore', 'pipe', 'pipe'],
     encoding: 'utf8',
     env: repoEnv(args),
     timeout: timeoutMs,
-  })
+  });
   // status null = spawn failure or signal, not a real verdict —
   // callers read exit 1 as one, so surface git's own fatal code
   return {
     code: proc.status ?? 128,
     out: proc.stdout ?? '',
     err: (proc.stderr ?? proc.error?.message ?? '').trim(),
-  }
+  };
 }
 
 /** Async git probe — bounded and fail-open for hook paths. */
@@ -60,65 +65,107 @@ export function gitTryAsync(
   timeoutMs = GIT_SYNC_PROBE_TIMEOUT_MS
 ): Promise<{ code: number; out: string; err: string }> {
   try {
-    const { proc, done } = spawnCollect(
-      'git',
-      args,
-      undefined,
-      repoEnv(args),
-      { detached: true, envMode: 'replace' }
-    )
-    return new Promise((resolve) => {
-      let timedOut = false
+    const { proc, done } = spawnCollect('git', args, undefined, repoEnv(args), {
+      detached: true,
+      envMode: 'replace',
+    });
+    return new Promise(resolve => {
+      let timedOut = false;
       const timer = setTimeout(() => {
-        timedOut = true
-        killGroup(proc)
-      }, timeoutMs)
-      timer.unref?.()
+        timedOut = true;
+        killGroup(proc);
+      }, timeoutMs);
+      timer.unref?.();
       void done.then(({ code, out, err }) => {
-        clearTimeout(timer)
+        clearTimeout(timer);
         resolve(
           timedOut
             ? { code: 124, out, err: `timed out after ${timeoutMs}ms` }
             : { code: code ?? 128, out, err }
-        )
-      })
-    })
+        );
+      });
+    });
   } catch (err) {
     return Promise.resolve({
       code: 128,
       out: '',
       err: err instanceof Error ? err.message : String(err),
-    })
+    });
   }
 }
 
 type GitCommonDirCacheEntry =
   | { value: string; expiresAt: number }
-  | { value: null; expiresAt: number; budgetMs: number }
-const GIT_COMMON_DIR_TIMEOUT_TTL_MS = 30_000
-const GIT_COMMON_DIR_POSITIVE_TTL_MS = 60_000
-const gitCommonDirCache = new Map<string, GitCommonDirCacheEntry>()
+  | { value: null; expiresAt: number; budgetMs: number };
+const GIT_COMMON_DIR_TIMEOUT_TTL_MS = 30_000;
+const GIT_COMMON_DIR_POSITIVE_TTL_MS = 60_000;
+const gitCommonDirCache = new Map<string, GitCommonDirCacheEntry>();
 
 function cachedGitCommonDir(key: string, timeoutMs?: number): string | null | undefined {
-  const cached = gitCommonDirCache.get(key)
-  if (cached === undefined) return undefined
+  const cached = gitCommonDirCache.get(key);
+  if (cached === undefined) return undefined;
   if (cached.expiresAt <= Date.now()) {
-    gitCommonDirCache.delete(key)
-    return undefined
+    gitCommonDirCache.delete(key);
+    return undefined;
   }
   if (cached.value === null) {
-    return timeoutMs !== undefined && timeoutMs <= cached.budgetMs ? null : undefined
+    return timeoutMs !== undefined && timeoutMs <= cached.budgetMs ? null : undefined;
   }
-  if (existsSync(cached.value)) return cached.value
-  gitCommonDirCache.delete(key)
-  return undefined
+  if (existsSync(cached.value)) return cached.value;
+  gitCommonDirCache.delete(key);
+  return undefined;
 }
 
 function cacheGitCommonDir(key: string, value: string): void {
   gitCommonDirCache.set(key, {
     value,
     expiresAt: Date.now() + GIT_COMMON_DIR_POSITIVE_TTL_MS,
-  })
+  });
+}
+
+/** Shared call scaffold for the common-dir twins — the resolved cache
+ *  key, the shared deadline reader, and the negative-cache writer for
+ *  a caller budget already spent (a timed-out probe reads as failure →
+ *  null, and a LATER call with a bigger budget still gets a real
+ *  probe). */
+function commonDirCall(
+  dir: string,
+  timeoutMs?: number
+): { key: string; remaining: () => number | undefined; cacheTimeout: () => boolean } {
+  const key = resolve(dir);
+  const deadline = timeoutMs === undefined ? undefined : Date.now() + timeoutMs;
+  const remaining = (): number | undefined =>
+    deadline === undefined ? undefined : deadline - Date.now();
+  const cacheTimeout = (): boolean => {
+    if (timeoutMs === undefined) return false;
+    const rem = remaining();
+    if (rem === undefined || rem > 0) {
+      return false;
+    }
+    gitCommonDirCache.set(key, {
+      value: null,
+      expiresAt: Date.now() + GIT_COMMON_DIR_TIMEOUT_TTL_MS,
+      budgetMs: timeoutMs,
+    });
+    return true;
+  };
+  return { key, remaining, cacheTimeout };
+}
+
+/** A fallback answer is relative to `dir` — resolve() absolutizes it
+ *  the same way `--path-format=absolute` does, but keeps a symlinked
+ *  dir's alias, and callers hash the result (busSocketPath) —
+ *  canonicalize so one repo yields one socket. */
+function cacheResolvedCommon(key: string, dir: string, common: string): string {
+  const abs = resolve(dir, common);
+  try {
+    const canonical = realpathSync(abs);
+    cacheGitCommonDir(key, canonical);
+    return canonical;
+  } catch {
+    cacheGitCommonDir(key, abs);
+    return abs;
+  }
 }
 
 /** The repo's common git dir, absolute — the one place per-repo runtime
@@ -134,62 +181,72 @@ function cacheGitCommonDir(key: string, value: string): void {
  *  as failure → null, same contract). The deadline is shared: a
  *  primary probe that burns the whole budget buys no fallback. */
 export function gitCommonDir(dir: string, timeoutMs?: number): string | null {
-  const key = resolve(dir)
-  const cached = cachedGitCommonDir(key, timeoutMs)
-  if (cached !== undefined) return cached
-  const deadline = timeoutMs === undefined ? undefined : Date.now() + timeoutMs
-  const remaining = (): number | undefined =>
-    deadline === undefined ? undefined : deadline - Date.now()
-  const cacheTimeout = (): boolean => {
-    if (timeoutMs === undefined) return false
-    const rem = remaining()
-    if (rem === undefined || rem > 0) {
-      return false
-    }
-    gitCommonDirCache.set(key, {
-      value: null,
-      expiresAt: Date.now() + GIT_COMMON_DIR_TIMEOUT_TTL_MS,
-      budgetMs: timeoutMs,
-    })
-    return true
-  }
+  const call = commonDirCall(dir, timeoutMs);
+  const cached = cachedGitCommonDir(call.key, timeoutMs);
+  if (cached !== undefined) return cached;
   const r = gitTry(
     ['-C', dir, 'rev-parse', '--path-format=absolute', '--git-common-dir'],
-    remaining()
-  )
+    call.remaining()
+  );
   if (r.code === 0) {
-    const common = r.out.trim()
+    const common = r.out.trim();
     if (common === '') {
-      cacheTimeout()
-      return null
+      call.cacheTimeout();
+      return null;
     }
-    cacheGitCommonDir(key, common)
-    return common
+    cacheGitCommonDir(call.key, common);
+    return common;
   }
   // --path-format arrived in git 2.31: on older git the option itself
-  // fails, which must not read as "not a repository". The plain output
-  // is relative to `dir`, so resolve() absolutizes it the same way —
-  // but keeps a symlinked dir's alias, and callers hash the result
-  // (busSocketPath) — canonicalize so one repo yields one socket.
-  const rem = remaining()
-  if (cacheTimeout()) {
-    return null
+  // fails, which must not read as "not a repository".
+  if (call.cacheTimeout()) {
+    return null;
   }
-  const fallback = gitTry(['-C', dir, 'rev-parse', '--git-common-dir'], rem)
-  const common = fallback.code === 0 ? fallback.out.trim() : ''
+  const fallback = gitTry(['-C', dir, 'rev-parse', '--git-common-dir'], call.remaining());
+  const common = fallback.code === 0 ? fallback.out.trim() : '';
   if (common === '') {
-    cacheTimeout()
-    return null
+    call.cacheTimeout();
+    return null;
   }
-  const abs = resolve(dir, common)
-  try {
-    const canonical = realpathSync(abs)
-    cacheGitCommonDir(key, canonical)
-    return canonical
-  } catch {
-    cacheGitCommonDir(key, abs)
-    return abs
+  return cacheResolvedCommon(call.key, dir, common);
+}
+
+/** Async `gitCommonDir` — the probe-path twin (spec bro-36sx7.2): the
+ *  sync form's spawnSync freezes a parallel hook sweep, so async
+ *  callers (hook probes, the act connector's watch reads) take this
+ *  one. Same cache, same shared-deadline semantics; each probe also
+ *  carries gitTryAsync's own bound, so an unbudgeted call still
+ *  degrades instead of parking the sweep on a stalled mount. */
+export async function gitCommonDirAsync(dir: string, timeoutMs?: number): Promise<string | null> {
+  const call = commonDirCall(dir, timeoutMs);
+  const cached = cachedGitCommonDir(call.key, timeoutMs);
+  if (cached !== undefined) return cached;
+  const r = await gitTryAsync(
+    ['-C', dir, 'rev-parse', '--path-format=absolute', '--git-common-dir'],
+    call.remaining()
+  );
+  if (r.code === 0) {
+    const common = r.out.trim();
+    if (common === '') {
+      call.cacheTimeout();
+      return null;
+    }
+    cacheGitCommonDir(call.key, common);
+    return common;
   }
+  if (call.cacheTimeout()) {
+    return null;
+  }
+  const fallback = await gitTryAsync(
+    ['-C', dir, 'rev-parse', '--git-common-dir'],
+    call.remaining()
+  );
+  const common = fallback.code === 0 ? fallback.out.trim() : '';
+  if (common === '') {
+    call.cacheTimeout();
+    return null;
+  }
+  return cacheResolvedCommon(call.key, dir, common);
 }
 
 /** This worktree's own git dir, absolute — `<repo>/.git` on the main
@@ -198,13 +255,13 @@ export function gitCommonDir(dir: string, timeoutMs?: number): string | null {
  *  sibling of gitCommonDir (`--git-common-dir` is the SHARED dir).
  *  null outside a repository or on git failure. */
 export function worktreeGitDir(dir: string): string | null {
-  const r = gitTry(['-C', dir, 'rev-parse', '--path-format=absolute', '--git-dir'])
+  const r = gitTry(['-C', dir, 'rev-parse', '--path-format=absolute', '--git-dir']);
   if (r.code === 0 && r.out.trim() !== '') {
-    return r.out.trim()
+    return r.out.trim();
   }
-  const f = gitTry(['-C', dir, 'rev-parse', '--git-dir'])
-  const p = f.code === 0 ? f.out.trim() : ''
-  return p === '' ? null : resolve(dir, p)
+  const f = gitTry(['-C', dir, 'rev-parse', '--git-dir']);
+  const p = f.code === 0 ? f.out.trim() : '';
+  return p === '' ? null : resolve(dir, p);
 }
 
 /** C-style unquote for porcelain paths — git wraps a path carrying
@@ -224,28 +281,28 @@ export function unquoteGitPath(raw: string): string {
     r: 0x0d,
     t: 0x09,
     v: 0x0b,
-  }
-  const inner = raw.slice(1, -1)
-  const bytes: number[] = []
+  };
+  const inner = raw.slice(1, -1);
+  const bytes: number[] = [];
   for (let i = 0; i < inner.length; i++) {
-    const c = inner[i]!
+    const c = inner[i]!;
     if (c === '\\' && i + 1 < inner.length) {
-      const n = inner[i + 1]!
+      const n = inner[i + 1]!;
       if (n >= '0' && n <= '7') {
-        const oct = /^[0-7]{1,3}/.exec(inner.slice(i + 1))![0]
-        bytes.push(parseInt(oct, 8) & 0xff)
-        i += oct.length
-        continue
+        const oct = /^[0-7]{1,3}/.exec(inner.slice(i + 1))![0];
+        bytes.push(parseInt(oct, 8) & 0xff);
+        i += oct.length;
+        continue;
       }
-      bytes.push(escapes[n] ?? n.charCodeAt(0))
-      i += 1
-      continue
+      bytes.push(escapes[n] ?? n.charCodeAt(0));
+      i += 1;
+      continue;
     }
     for (const b of Buffer.from(c, 'utf8')) {
-      bytes.push(b)
+      bytes.push(b);
     }
   }
-  return Buffer.from(bytes).toString('utf8')
+  return Buffer.from(bytes).toString('utf8');
 }
 
 /** The MAIN worktree's root, absolute — linked worktrees share the
@@ -266,38 +323,38 @@ export function unquoteGitPath(raw: string): string {
  *  or the common dir itself is not a checkout — null there so callers
  *  keep their own dir. */
 export function mainWorktreeRoot(dir: string): string | null {
-  const common = gitCommonDir(dir)
+  const common = gitCommonDir(dir);
   if (common === null) {
-    return null
+    return null;
   }
   const real = (p: string): string => {
     try {
-      return realpathSync(p)
+      return realpathSync(p);
     } catch {
-      return p
+      return p;
     }
-  }
-  const own = worktreeGitDir(dir)
+  };
+  const own = worktreeGitDir(dir);
   if (own !== null && real(own) === real(common)) {
-    const top = gitTry(['-C', dir, 'rev-parse', '--path-format=absolute', '--show-toplevel'])
+    const top = gitTry(['-C', dir, 'rev-parse', '--path-format=absolute', '--show-toplevel']);
     if (top.code === 0 && top.out.trim() !== '') {
-      return top.out.trim()
+      return top.out.trim();
     }
   }
-  const marked = checkoutByMarker(dirname(common), common, real, 3)
+  const marked = checkoutByMarker(dirname(common), common, real, 3);
   if (marked !== null) {
-    return marked
+    return marked;
   }
   if (basename(common) === '.git') {
-    const candidate = dirname(common)
-    const theirs = worktreeGitDir(candidate)
+    const candidate = dirname(common);
+    const theirs = worktreeGitDir(candidate);
     if (theirs !== null && real(theirs) === real(common)) {
-      return candidate
+      return candidate;
     }
     // an external gitdir literally named `.git` — its parent is not a
     // worktree; the fallback below answers what git itself reports
   }
-  return worktreeListMain(dir, common, real)
+  return worktreeListMain(dir, common, real);
 }
 
 /** `git worktree list`'s first record — the main worktree as git
@@ -307,32 +364,28 @@ export function mainWorktreeRoot(dir: string): string | null {
  *  (`\0\0`); the plain form C-quotes paths carrying specials. null
  *  when the first record is bare or IS the common dir — a moved
  *  gitdir reports itself, and git storage is no anchor either way. */
-function worktreeListMain(
-  dir: string,
-  common: string,
-  real: (p: string) => string
-): string | null {
-  const z = gitTry(['-C', dir, 'worktree', 'list', '--porcelain', '-z'])
+function worktreeListMain(dir: string, common: string, real: (p: string) => string): string | null {
+  const z = gitTry(['-C', dir, 'worktree', 'list', '--porcelain', '-z']);
   if (z.code === 0 && z.out.startsWith('worktree ')) {
-    const recordEnd = z.out.indexOf('\0\0')
-    const fields = z.out.slice(0, recordEnd === -1 ? undefined : recordEnd).split('\0')
+    const recordEnd = z.out.indexOf('\0\0');
+    const fields = z.out.slice(0, recordEnd === -1 ? undefined : recordEnd).split('\0');
     if (fields.includes('bare')) {
-      return null
+      return null;
     }
-    const first = fields[0]!.slice('worktree '.length)
-    return real(first) === real(common) ? null : first
+    const first = fields[0]!.slice('worktree '.length);
+    return real(first) === real(common) ? null : first;
   }
   // no -z support (pre-2.36 git): the same first record, possibly
   // C-quoted when the path carries specials
-  const p = gitTry(['-C', dir, 'worktree', 'list', '--porcelain'])
-  const firstRecord = p.code === 0 ? (p.out.split(/\r?\n\r?\n/, 1)[0] ?? '') : ''
-  const m = /^worktree (.+)$/m.exec(firstRecord)
+  const p = gitTry(['-C', dir, 'worktree', 'list', '--porcelain']);
+  const firstRecord = p.code === 0 ? (p.out.split(/\r?\n\r?\n/, 1)[0] ?? '') : '';
+  const m = /^worktree (.+)$/m.exec(firstRecord);
   if (m === null || firstRecord.split(/\r?\n/).includes('bare')) {
-    return null
+    return null;
   }
-  const raw = m[1]!.trim()
-  const answer = raw.startsWith('"') && raw.endsWith('"') ? unquoteGitPath(raw) : raw
-  return real(answer) === real(common) ? null : answer
+  const raw = m[1]!.trim();
+  const answer = raw.startsWith('"') && raw.endsWith('"') ? unquoteGitPath(raw) : raw;
+  return real(answer) === real(common) ? null : answer;
 }
 
 /** Every worktree checkout's root — `git worktree list` records, main
@@ -343,45 +396,45 @@ function worktreeListMain(
  *  repository or on git failure — callers read "no siblings" and keep
  *  their own dir. */
 export function gitWorktreeRoots(dir: string): string[] {
-  const z = gitTry(['-C', dir, 'worktree', 'list', '--porcelain', '-z'])
+  const z = gitTry(['-C', dir, 'worktree', 'list', '--porcelain', '-z']);
   if (z.code === 0) {
     return z.out
       .split('\0\0')
       .map(worktreeRootZ)
-      .filter((r): r is string => r !== null)
+      .filter((r): r is string => r !== null);
   }
   // no -z support (pre-2.36 git): records split on blank lines, paths
   // C-quoted when they carry specials
-  const p = gitTry(['-C', dir, 'worktree', 'list', '--porcelain'])
+  const p = gitTry(['-C', dir, 'worktree', 'list', '--porcelain']);
   if (p.code !== 0) {
-    return []
+    return [];
   }
   return p.out
     .split(/\r?\n\r?\n/)
     .map(worktreeRootPlain)
-    .filter((r): r is string => r !== null)
+    .filter((r): r is string => r !== null);
 }
 
 /** One `-z` porcelain record (fields NUL-joined) → its checkout root;
  *  null for a bare record or a fragment that isn't a record head. */
 function worktreeRootZ(rec: string): string | null {
-  const fields = rec.split('\0')
-  const head = fields.find((f) => f !== '')
+  const fields = rec.split('\0');
+  const head = fields.find(f => f !== '');
   if (head === undefined || !head.startsWith('worktree ') || fields.includes('bare')) {
-    return null
+    return null;
   }
-  return head.slice('worktree '.length)
+  return head.slice('worktree '.length);
 }
 
 /** One plain porcelain record → its checkout root — the bare record
  *  drops out; the `worktree` line's C-quoting decodes. */
 function worktreeRootPlain(rec: string): string | null {
-  const m = /^worktree (.+)$/m.exec(rec)
+  const m = /^worktree (.+)$/m.exec(rec);
   if (m === null || rec.split(/\r?\n/).includes('bare')) {
-    return null
+    return null;
   }
-  const raw = m[1]!.trim()
-  return raw.startsWith('"') && raw.endsWith('"') ? unquoteGitPath(raw) : raw
+  const raw = m[1]!.trim();
+  return raw.startsWith('"') && raw.endsWith('"') ? unquoteGitPath(raw) : raw;
 }
 
 /** Depth-bounded search under `root` for a directory whose `.git` FILE
@@ -397,38 +450,38 @@ function checkoutByMarker(
   depth: number
 ): string | null {
   if (depth < 0) {
-    return null
+    return null;
   }
-  let names: string[]
+  let names: string[];
   try {
-    names = readdirSync(root)
+    names = readdirSync(root);
   } catch {
-    return null
+    return null;
   }
   // the comparison target is loop-invariant — canonicalize it once
   // per level, not once per directory entry
-  const realCommon = real(common)
-  const descend: string[] = []
+  const realCommon = real(common);
+  const descend: string[] = [];
   for (const name of names) {
     if (name === '.git' || name === 'node_modules') {
-      continue
+      continue;
     }
-    const sub = join(root, name)
-    const verdict = markerVerdict(sub, realCommon, real)
+    const sub = join(root, name);
+    const verdict = markerVerdict(sub, realCommon, real);
     if (verdict === 'hit') {
-      return sub
+      return sub;
     }
     if (verdict === 'descend') {
-      descend.push(sub)
+      descend.push(sub);
     }
   }
   for (const sub of descend) {
-    const hit = checkoutByMarker(sub, common, real, depth - 1)
+    const hit = checkoutByMarker(sub, common, real, depth - 1);
     if (hit !== null) {
-      return hit
+      return hit;
     }
   }
-  return null
+  return null;
 }
 
 /** One entry's verdict under the marker scan: `hit` — its `.git` FILE
@@ -444,20 +497,20 @@ function markerVerdict(
 ): 'hit' | 'descend' | 'prune' {
   try {
     if (!statSync(sub).isDirectory() || real(sub) === realCommon) {
-      return 'prune'
+      return 'prune';
     }
   } catch {
-    return 'prune' // unreadable entry — skip
+    return 'prune'; // unreadable entry — skip
   }
-  const marker = join(sub, '.git')
+  const marker = join(sub, '.git');
   try {
     if (!statSync(marker).isFile()) {
-      return 'prune' // .git dir — sub is a checkout; prune
+      return 'prune'; // .git dir — sub is a checkout; prune
     }
-    const m = /^gitdir:\s*(.+)$/m.exec(readFileSync(marker, 'utf8'))
-    return m !== null && real(resolve(sub, m[1].trim())) === realCommon ? 'hit' : 'prune'
+    const m = /^gitdir:\s*(.+)$/m.exec(readFileSync(marker, 'utf8'));
+    return m !== null && real(resolve(sub, m[1].trim())) === realCommon ? 'hit' : 'prune';
   } catch {
-    return 'descend' // no readable .git — a checkout may nest below
+    return 'descend'; // no readable .git — a checkout may nest below
   }
 }
 
@@ -479,27 +532,27 @@ export function gitDriftRef(dir: string): string | null {
     'refs/remotes/origin/master',
     'HEAD',
   ]) {
-    const r = gitTry(['-C', dir, 'rev-parse', '--verify', '--quiet', `${cand}^{commit}`])
+    const r = gitTry(['-C', dir, 'rev-parse', '--verify', '--quiet', `${cand}^{commit}`]);
     if (r.code === 0) {
-      return cand
+      return cand;
     }
   }
-  return null
+  return null;
 }
 
 /** One commit's identity plus its committer date — `iso` (%cI) is for
  *  display, `ts` (%ct epoch seconds) is for ordering: strict-ISO
  *  strings don't sort across differing timezone offsets. */
 export interface GitStamp {
-  sha: string
-  iso: string
-  ts: number
+  sha: string;
+  iso: string;
+  ts: number;
 }
 
 export type GitLogStamp =
   | { state: 'commit'; stamp: GitStamp }
   | { state: 'none' } // log ran clean — nothing on <ref> touched the paths
-  | { state: 'error'; err: string } // bad ref, unborn history, git failure
+  | { state: 'error'; err: string }; // bad ref, unborn history, git failure
 
 /** `git log -1` over pathspecs — the newest commit on `ref` touching
  *  any of them. `follow` opts into rename-following (spec side: a
@@ -519,27 +572,27 @@ export function gitLogStamp(
   if (pathspecs.length === 0) {
     // `git log ref --` with no pathspecs audits the whole repo —
     // silent widening, so an empty scope is an error, never fresh data
-    return { state: 'error', err: 'empty pathspecs' }
+    return { state: 'error', err: 'empty pathspecs' };
   }
-  const args = ['-C', dir, 'log', '-1', '--format=%H%x09%cI%x09%ct']
+  const args = ['-C', dir, 'log', '-1', '--format=%H%x09%cI%x09%ct'];
   if (opts?.follow === true) {
-    args.push('--follow', '-M100%', '--diff-filter=r')
+    args.push('--follow', '-M100%', '--diff-filter=r');
   }
-  args.push('--end-of-options', ref, '--', ...pathspecs)
-  const r = gitTry(args)
+  args.push('--end-of-options', ref, '--', ...pathspecs);
+  const r = gitTry(args);
   if (r.code !== 0) {
-    return { state: 'error', err: r.err }
+    return { state: 'error', err: r.err };
   }
-  const line = r.out.trim()
+  const line = r.out.trim();
   if (line === '') {
-    return { state: 'none' }
+    return { state: 'none' };
   }
-  const [sha = '', iso = '', ts = ''] = line.split('\t')
-  const epoch = ts === '' ? Number.NaN : Number(ts)
+  const [sha = '', iso = '', ts = ''] = line.split('\t');
+  const epoch = ts === '' ? Number.NaN : Number(ts);
   if (sha === '' || Number.isNaN(epoch)) {
-    return { state: 'error', err: `unparseable git log line: ${line}` }
+    return { state: 'error', err: `unparseable git log line: ${line}` };
   }
-  return { state: 'commit', stamp: { sha, iso, ts: epoch } }
+  return { state: 'commit', stamp: { sha, iso, ts: epoch } };
 }
 
 /** The commit messages `head` carries since it forked from `baseRef` —
@@ -552,20 +605,20 @@ export function gitLogStamp(
  *  undefined runs in cwd. '' when no merge-base or log resolves —
  *  callers read that as "the log is unknown", never as a clean answer. */
 export function gitBranchLog(headSha: string, baseRef: string, dir?: string): string {
-  const scoped = dir === undefined ? [] : ['-C', dir]
+  const scoped = dir === undefined ? [] : ['-C', dir];
   for (const head of headSha === '' ? ['HEAD'] : [headSha, 'HEAD']) {
     for (const ref of [`origin/${baseRef}`, baseRef]) {
-      const mb = gitTry([...scoped, 'merge-base', head, ref])
+      const mb = gitTry([...scoped, 'merge-base', head, ref]);
       if (mb.code !== 0 || !mb.out.trim()) {
-        continue
+        continue;
       }
-      const log = gitTry([...scoped, 'log', '--format=%B', `${mb.out.trim()}..${head}`])
+      const log = gitTry([...scoped, 'log', '--format=%B', `${mb.out.trim()}..${head}`]);
       if (log.code === 0) {
-        return log.out
+        return log.out;
       }
     }
   }
-  return ''
+  return '';
 }
 
 /** `git merge-base --is-ancestor` — the drift tie-break: equal
@@ -573,24 +626,24 @@ export function gitBranchLog(headSha: string, baseRef: string, dir?: string): st
  *  commit predating the spec commit is fresh). null when git can't
  *  answer (unknown object) — the caller treats that as unverifiable. */
 export function gitIsAncestor(dir: string, ancestor: string, descendant: string): boolean | null {
-  const r = gitTry(['-C', dir, 'merge-base', '--is-ancestor', ancestor, descendant])
-  return r.code === 0 ? true : r.code === 1 ? false : null
+  const r = gitTry(['-C', dir, 'merge-base', '--is-ancestor', ancestor, descendant]);
+  return r.code === 0 ? true : r.code === 1 ? false : null;
 }
 
 /** Shallow check — boundary commits masquerade as roots, so a
  *  path-limited log can attribute spec and scope to the same boundary
  *  commit and fake `fresh`. null on git failure. */
 export function gitIsShallow(dir: string): boolean | null {
-  const r = gitTry(['-C', dir, 'rev-parse', '--is-shallow-repository'])
-  return r.code === 0 ? r.out.trim() === 'true' : null
+  const r = gitTry(['-C', dir, 'rev-parse', '--is-shallow-repository']);
+  return r.code === 0 ? r.out.trim() === 'true' : null;
 }
 
 /** One commit of a `git log --name-only` pass — `paths` is every file
  *  the commit touched. */
 export interface GitLogPathRecord {
-  sha: string
-  subject: string
-  paths: string[]
+  sha: string;
+  subject: string;
+  paths: string[];
 }
 
 /** The scan's wall-clock bound — hooks host these probes on a 10–25s
@@ -598,7 +651,7 @@ export interface GitLogPathRecord {
  *  their own bounds"), and a full-history `--name-only` walk on a large
  *  repo is the one read that can blow it. Overrun returns null — the
  *  caller's `unverifiable`, never a stalled hook. */
-const LOG_SCAN_TIMEOUT_MS = 10_000
+const LOG_SCAN_TIMEOUT_MS = 10_000;
 
 /** `git log --format=%x1e%H%x09%s -z --name-only <ref>` parsed into
  *  per-commit records — callers filter subjects in-process (`--grep`
@@ -614,32 +667,42 @@ export function gitLogPathRecords(
   ref: string,
   opts?: { timeoutMs?: number }
 ): GitLogPathRecord[] | null {
-  const args = ['-C', dir, 'log', '--format=%x1e%H%x09%s', '-z', '--name-only', '--end-of-options', ref]
-  const proc = spawnSync('git', args, { // NOSONAR — PATH lookup is the contract
+  const args = [
+    '-C',
+    dir,
+    'log',
+    '--format=%x1e%H%x09%s',
+    '-z',
+    '--name-only',
+    '--end-of-options',
+    ref,
+  ];
+  const proc = spawnSync('git', args, {
+    // NOSONAR — PATH lookup is the contract
     stdio: ['ignore', 'pipe', 'pipe'],
     encoding: 'utf8',
     timeout: opts?.timeoutMs ?? LOG_SCAN_TIMEOUT_MS,
     maxBuffer: 256 * 1024 * 1024,
     env: repoEnv(args),
-  })
+  });
   if (proc.status !== 0) {
-    return null
+    return null;
   }
-  const records: GitLogPathRecord[] = []
-  let cur: GitLogPathRecord | undefined
+  const records: GitLogPathRecord[] = [];
+  let cur: GitLogPathRecord | undefined;
   for (const tok of (proc.stdout ?? '').split('\0')) {
     if (tok === '') {
-      continue
+      continue;
     }
     if (tok.charCodeAt(0) === 0x1e) {
-      const tab = tok.indexOf('\t')
-      cur = { sha: tok.slice(1, tab), subject: tok.slice(tab + 1), paths: [] }
-      records.push(cur)
+      const tab = tok.indexOf('\t');
+      cur = { sha: tok.slice(1, tab), subject: tok.slice(tab + 1), paths: [] };
+      records.push(cur);
     } else if (cur !== undefined) {
-      cur.paths.push(tok.replace(/^\n/, ''))
+      cur.paths.push(tok.replace(/^\n/, ''));
     }
   }
-  return records
+  return records;
 }
 
 /** How far the checkout trails its recorded upstream — `@{u}` resolves
@@ -651,14 +714,14 @@ export function gitLogPathRecords(
  *  is no upstream, the count fails, or the checkout is current —
  *  callers surface positive drift only. */
 export function gitUpstreamBehind(dir: string): { behind: number; upstream: string } | null {
-  const up = gitTry(['-C', dir, 'rev-parse', '--abbrev-ref', '--symbolic-full-name', '@{u}'])
-  const upstream = up.code === 0 ? up.out.trim() : ''
+  const up = gitTry(['-C', dir, 'rev-parse', '--abbrev-ref', '--symbolic-full-name', '@{u}']);
+  const upstream = up.code === 0 ? up.out.trim() : '';
   if (upstream === '') {
-    return null
+    return null;
   }
-  const n = gitTry(['-C', dir, 'rev-list', '--count', 'HEAD..@{u}'])
-  const behind = n.code === 0 ? Number.parseInt(n.out.trim(), 10) : Number.NaN
-  return Number.isFinite(behind) && behind > 0 ? { behind, upstream } : null
+  const n = gitTry(['-C', dir, 'rev-list', '--count', 'HEAD..@{u}']);
+  const behind = n.code === 0 ? Number.parseInt(n.out.trim(), 10) : Number.NaN;
+  return Number.isFinite(behind) && behind > 0 ? { behind, upstream } : null;
 }
 
 /** Async twin of gitUpstreamBehind for hook probes. */
@@ -672,15 +735,15 @@ export async function gitUpstreamBehindAsync(
     '--abbrev-ref',
     '--symbolic-full-name',
     '@{u}',
-  ])
-  const upstream = up.code === 0 ? up.out.trim() : ''
+  ]);
+  const upstream = up.code === 0 ? up.out.trim() : '';
   if (upstream === '') {
-    return null
+    return null;
   }
-  const n = await gitTryAsync(['-C', dir, 'rev-list', '--count', `HEAD..${upstream}`])
+  const n = await gitTryAsync(['-C', dir, 'rev-list', '--count', `HEAD..${upstream}`]);
   if (n.code !== 0) {
-    return null
+    return null;
   }
-  const behind = Number(n.out.trim())
-  return Number.isFinite(behind) && behind > 0 ? { behind, upstream } : null
+  const behind = Number(n.out.trim());
+  return Number.isFinite(behind) && behind > 0 ? { behind, upstream } : null;
 }
