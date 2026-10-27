@@ -28,6 +28,7 @@ function g(root: string, args: string[], input?: string): string {
     encoding: 'utf8',
     input,
     stdio: ['pipe', 'pipe', 'pipe'],
+    windowsHide: true,
   })
   return proc.trim()
 }
@@ -37,6 +38,7 @@ function gRaw(root: string, args: string[]): string {
   return execFileSync('git', ['-C', root, ...args], { // NOSONAR — PATH contract
     encoding: 'utf8',
     stdio: ['pipe', 'pipe', 'pipe'],
+    windowsHide: true,
   })
 }
 
@@ -66,6 +68,7 @@ function withIndex<T>(
       input,
       env: { ...process.env, GIT_INDEX_FILE: indexPath },
       stdio: ['pipe', 'pipe', 'pipe'],
+    windowsHide: true,
     }).trim()
   try {
     return fn(ix)

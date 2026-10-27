@@ -147,6 +147,7 @@ export async function exitsZero(cmd: string, args: string[]): Promise<boolean> {
   try {
     child = spawn(cmd, args, {
       stdio: ['pipe', 'ignore', 'ignore'],
+      windowsHide: true,
       detached: process.platform !== 'win32',
     }); // NOSONAR typescript:S4036
   } catch {
@@ -220,6 +221,7 @@ export async function callHook(
     child = spawn(command.cmd, [...command.args, 'hooks', event], {
       cwd,
       stdio: ['pipe', 'pipe', 'ignore'],
+      windowsHide: true,
       detached: process.platform !== 'win32',
     });
   } catch {
@@ -321,6 +323,7 @@ export async function statusJson(command: Command, cwd: string): Promise<BoardSt
     child = spawn(command.cmd, [...command.args, 'status', '--json'], {
       cwd,
       stdio: ['ignore', 'pipe', 'ignore'],
+      windowsHide: true,
       detached: process.platform !== 'win32',
     });
   } catch {

@@ -26,7 +26,7 @@ function supervised(args: string[], timeoutMs: number): { cmd: string; argv: str
     let bin: string | null = null;
     for (const candidate of ['timeout', 'gtimeout']) {
       try {
-        execFileSync(candidate, ['--version'], { stdio: 'ignore' });
+        execFileSync(candidate, ['--version'], { stdio: 'ignore', windowsHide: true });
         bin = candidate;
         break;
       } catch {
@@ -75,6 +75,7 @@ export function bd(args: string[], cwd?: string): string {
     // ("no beads database found") into hook logs on every probe. Real
     // errors still surface on err.stderr for callers that catch.
     stdio: ['ignore', 'pipe', 'pipe'],
+    windowsHide: true,
     // a wedged bd must degrade, not stall — hooks call this inline in the
     // agent lifecycle
     timeout: 15_000,
@@ -96,6 +97,7 @@ export function bdTry(
     // NOSONAR — PATH lookup is the contract (same as gh/git)
     cwd,
     stdio: ['ignore', 'pipe', 'pipe'],
+    windowsHide: true,
     encoding: 'utf8',
     timeout: timeoutMs,
     // same maxBuffer contract as bd() — a future caller passing a large
@@ -134,6 +136,7 @@ export function bdAt(
     // NOSONAR — PATH lookup is the contract (same as gh/git/bd)
     env: { ...process.env, BEADS_DIR: beadsDir },
     stdio: ['ignore', 'pipe', 'pipe'],
+    windowsHide: true,
     encoding: 'utf8',
     timeout: timeoutMs,
     maxBuffer: 64 * 1024 * 1024,

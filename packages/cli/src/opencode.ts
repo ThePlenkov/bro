@@ -233,7 +233,7 @@ function exitsZero(cmd: string, args: string[]): Promise<boolean> {
     try {
       // PATH lookup is the point of both tiers — the probe verifies the
       // answer before any hook trusts it
-      child = spawn(cmd, args, { stdio: ['pipe', 'ignore', 'ignore'], detached: process.platform !== 'win32' }) // NOSONAR typescript:S4036
+      child = spawn(cmd, args, { stdio: ['pipe', 'ignore', 'ignore'], windowsHide: true, detached: process.platform !== 'win32' }) // NOSONAR typescript:S4036
     } catch {
       resolve(false)
       return
@@ -347,6 +347,7 @@ function callHook(
         cwd: directory,
         stdio: ['pipe', 'pipe', 'ignore'],
         // own process group so killAfter can take spawned children down too
+        windowsHide: true,
         detached: process.platform !== 'win32',
       })
     } catch {
@@ -519,7 +520,8 @@ function makeCore(input: BroCoreInput) {
           child = spawn(resolved.cmd, [...resolved.args, ...args], {
             cwd: directory,
             stdio: ['ignore', 'pipe', 'pipe'],
-            detached: process.platform !== 'win32',
+            windowsHide: true,
+        detached: process.platform !== 'win32',
           })
         } catch {
           resolve({ code: 127, out: '', err: 'spawn failed' })
