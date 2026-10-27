@@ -34,9 +34,9 @@ import {
   rmdirSync,
   statSync,
   writeFileSync,
-} from 'node:fs';
-import { spawnSync } from 'node:child_process';
-import { basename, dirname, isAbsolute, join, resolve, sep } from 'node:path';
+} from 'node:fs'
+import { spawnSync } from 'node:child_process'
+import { basename, dirname, isAbsolute, join, resolve, sep } from 'node:path'
 import {
   acquireAgentRegistryLock,
   acquireFileLock,
@@ -59,13 +59,13 @@ import {
   type ReviewFacade,
   type TaskRow,
   type TaskStore,
-} from '@broject/core';
-import type { ExitCode } from '@broject/core';
-import { assertMutableConfig } from '../config-policy.ts';
-import { loopSection, loopSlug, type LoopConfig } from '@broject/loop';
-import { listWatches, type ListedWatch } from '@broject/act';
-import { parseStackBranch } from '@broject/stack';
-import { flag, positionals } from './args.ts';
+} from '@broject/core'
+import type { ExitCode } from '@broject/core'
+import { assertMutableConfig } from '../config-policy.ts'
+import { loopSection, loopSlug, type LoopConfig } from '@broject/loop'
+import { listWatches, type ListedWatch } from '@broject/act'
+import { parseStackBranch } from '@broject/stack'
+import { flag, positionals } from './args.ts'
 import {
   agentOwner,
   agentProcessesIn,
@@ -78,68 +78,63 @@ import {
   ownerTag,
   processesRootedIn,
   registryEntryHoldsClaim,
-} from './proc-owner.ts';
-import { collectLoopRuns, type LoopRunView } from './loop-state.ts';
-export { LIVE_MARKER_MS };
+} from './proc-owner.ts'
+import { collectLoopRuns, type LoopRunView } from './loop-state.ts'
+export { LIVE_MARKER_MS }
 
 export interface WorktreeInfo {
-  path: string;
-  head: string;
+  path: string
+  head: string
   /** branch shortname; undefined when detached/bare */
-  branch?: string;
-  bare: boolean;
-  detached: boolean;
+  branch?: string
+  bare: boolean
+  detached: boolean
   /** admin entry exists but the directory is gone — `git worktree prune` bait */
-  prunable?: string;
+  prunable?: string
   /** locked against removal — porcelain carries `locked` or `locked <reason>` */
-  locked?: string;
+  locked?: string
 }
 
 /** Git C-quotes unusual paths in porcelain output — unwrap and unescape. */
 export function unquoteGitPath(path: string): string {
   if (!path.startsWith('"') || !path.endsWith('"')) {
-    return path;
+    return path
   }
   return path.slice(1, -1).replace(/\\(.)/g, (_, c: string) => {
-    if (c === 'n') return '\n';
-    if (c === 't') return '\t';
-    return c; // covers \\, \", and any other escape — take literally
-  });
+    if (c === 'n') return '\n'
+    if (c === 't') return '\t'
+    return c // covers \\, \", and any other escape — take literally
+  })
 }
 
 /** `git worktree list --porcelain` → entries. The first entry is always
  *  the main worktree — linked ones follow. */
 export function parseWorktreePorcelain(text: string): WorktreeInfo[] {
-  const out: WorktreeInfo[] = [];
-  let cur: WorktreeInfo | undefined;
+  const out: WorktreeInfo[] = []
+  let cur: WorktreeInfo | undefined
   for (const line of text.split('\n')) {
     if (line.startsWith('worktree ')) {
-      cur = {
-        path: unquoteGitPath(line.slice('worktree '.length)),
-        head: '',
-        bare: false,
-        detached: false,
-      };
-      out.push(cur);
+      cur = { path: unquoteGitPath(line.slice('worktree '.length)), head: '', bare: false, detached: false }
+      out.push(cur)
     } else if (!cur) {
-      continue;
+      continue
     } else if (line.startsWith('HEAD ')) {
-      cur.head = line.slice('HEAD '.length);
+      cur.head = line.slice('HEAD '.length)
     } else if (line.startsWith('branch refs/heads/')) {
-      cur.branch = line.slice('branch refs/heads/'.length);
+      cur.branch = line.slice('branch refs/heads/'.length)
     } else if (line === 'bare') {
-      cur.bare = true;
+      cur.bare = true
     } else if (line === 'detached') {
-      cur.detached = true;
+      cur.detached = true
     } else if (line.startsWith('prunable ')) {
-      cur.prunable = line.slice('prunable '.length);
+      cur.prunable = line.slice('prunable '.length)
     } else if (line === 'locked') {
-      cur.locked = '';
+      cur.locked = ''
     } else if (line.startsWith('locked ')) {
-      cur.locked = line.slice('locked '.length);
+      cur.locked = line.slice('locked '.length)
     }
   }
-  return out;
+  return out
 }
 
 /** A linked worktree's git dir is exactly `<main>/.git/worktrees/<name>` —
@@ -147,14 +142,14 @@ export function parseWorktreePorcelain(text: string): WorktreeInfo[] {
  *  keeps a primary checkout living under a `…/worktrees/…` directory from
  *  being misclassified as linked. */
 export function isLinkedGitDir(gitDir: string): boolean {
-  const norm = gitDir.split(sep).join('/');
-  return /(?:^|\/)\.git\/worktrees\/[^/]+$/.test(norm);
+  const norm = gitDir.split(sep).join('/')
+  return /(?:^|\/)\.git\/worktrees\/[^/]+$/.test(norm)
 }
 
 /** Slug → sibling path next to the main checkout: `bro` + `fix-x` →
  *  `../bro--fix-x`. */
 export function worktreePathFor(mainRoot: string, slug: string): string {
-  return join(dirname(mainRoot), `${basename(mainRoot)}--${slug}`);
+  return join(dirname(mainRoot), `${basename(mainRoot)}--${slug}`)
 }
 
 /** A worktree's real git dir — a linked worktree's `.git` is a FILE
@@ -162,19 +157,19 @@ export function worktreePathFor(mainRoot: string, slug: string): string {
  *  dir itself. Null when neither is readable. Reading the pointer file
  *  beats a `git rev-parse` subprocess on the driver's per-PR hot path. */
 export function worktreeGitDir(path: string): string | null {
-  const dotgit = join(path, '.git');
+  const dotgit = join(path, '.git')
   try {
     if (statSync(dotgit).isDirectory()) {
-      return dotgit;
+      return dotgit
     }
-    const m = /^gitdir:\s*(.+)$/m.exec(readFileSync(dotgit, 'utf8'));
+    const m = /^gitdir:\s*(.+)$/m.exec(readFileSync(dotgit, 'utf8'))
     if (m === null) {
-      return null;
+      return null
     }
-    const d = m[1]!.trim();
-    return isAbsolute(d) ? d : resolve(path, d);
+    const d = m[1]!.trim()
+    return isAbsolute(d) ? d : resolve(path, d)
   } catch {
-    return null;
+    return null
   }
 }
 
@@ -184,21 +179,21 @@ export function worktreeGitDir(path: string): string | null {
  *  so a dir can't gain an owner while a driver is removing it. Null
  *  when the tree's gitdir can't be resolved. */
 export function claimLockPath(path: string): string | null {
-  const gd = worktreeGitDir(path);
-  return gd === null ? null : join(gd, 'bro', 'claim.lock');
+  const gd = worktreeGitDir(path)
+  return gd === null ? null : join(gd, 'bro', 'claim.lock')
 }
 
 /** The worktree's own claim marker with its stamp — detail + mtime is
  *  what the merge-path occupancy TTL reads (bro-ihnlv): the marker's
  *  mtime is the last proven claim activity. */
 export interface WorktreeClaimInfo {
-  detail: string;
-  mtimeMs: number;
+  detail: string
+  mtimeMs: number
   /** The claiming agent's pid + start parsed from the marker's first
    *  line — null on anonymous markers. Lets callers tell "a sibling
    *  worktree claimed by MY agent tree" (own work, suppress from
    *  parallel-work nudges) from a foreign agent's claim (bro-7022c). */
-  owner: { pid: number; start: string } | null;
+  owner: { pid: number; start: string } | null
 }
 
 /** The worktree's own claim marker — `<gitdir>/bro/work`, stamped by
@@ -211,24 +206,24 @@ export function worktreeClaimInfo(
   now: number = Date.now()
 ): WorktreeClaimInfo | undefined {
   try {
-    const gd = worktreeGitDir(worktree);
+    const gd = worktreeGitDir(worktree)
     if (gd === null) {
-      return undefined;
+      return undefined
     }
-    const marker = join(gd, 'bro', 'work');
-    const mtimeMs = statSync(marker).mtimeMs;
-    const lines = readFileSync(marker, 'utf8').split('\n');
+    const marker = join(gd, 'bro', 'work')
+    const mtimeMs = statSync(marker).mtimeMs
+    const lines = readFileSync(marker, 'utf8').split('\n')
     if (!markerLive(lines[0], mtimeMs, LIVE_MARKER_MS, now)) {
-      return undefined;
+      return undefined
     }
-    return { detail: lines[1]?.trim() ?? '', mtimeMs, owner: markerOwner(lines[0]) };
+    return { detail: lines[1]?.trim() ?? '', mtimeMs, owner: markerOwner(lines[0]) }
   } catch {
-    return undefined;
+    return undefined
   }
 }
 
 export function worktreeClaim(worktree: string, now: number = Date.now()): string | undefined {
-  return worktreeClaimInfo(worktree, now)?.detail;
+  return worktreeClaimInfo(worktree, now)?.detail
 }
 
 /** The worktree's own claim marker — `<gitdir>/bro/work`, the in-tree
@@ -249,11 +244,11 @@ export function claimWorktree(
   opts: { waitMs?: number; preLocked?: boolean } = {}
 ): 'stamped' | 'gone' | 'lock-timeout' | 'skipped' {
   try {
-    const lock = claimLockPath(path);
+    const lock = claimLockPath(path)
     if (lock === null) {
       // a missing .git means the tree is gone; a present but
       // unresolvable one is just an unclaimable checkout
-      return existsSync(join(path, '.git')) ? 'skipped' : 'gone';
+      return existsSync(join(path, '.git')) ? 'skipped' : 'gone'
     }
     // The stamp also takes the shared occupancy lock — `bro drive`
     // holds the registry lock across its occupancy-check→spawn/remove
@@ -263,13 +258,13 @@ export function claimWorktree(
     // to claim-lock-only: the stamp is still the occupancy record.
     // preLocked = the caller already holds that lock (the spawn
     // transition) — reacquiring a file lock in-process never lands.
-    let releaseShared: () => void = () => {};
+    let releaseShared: () => void = () => {}
     if (opts.preLocked !== true) {
       try {
-        releaseShared = acquireAgentRegistryLock(path, { waitMs: opts.waitMs });
+        releaseShared = acquireAgentRegistryLock(path, { waitMs: opts.waitMs })
       } catch (err) {
         if (err instanceof LockTimeout) {
-          return 'lock-timeout';
+          return 'lock-timeout'
         }
       }
     }
@@ -277,83 +272,83 @@ export function claimWorktree(
       const release = acquireFileLock(lock, {
         label: `${basename(path)} claim lock`,
         waitMs: opts.waitMs,
-      });
+      })
       try {
         // a driver holding the lock just retired the tree — stamping a
         // claim now would resurrect a dead checkout's marker
         if (!existsSync(join(path, '.git'))) {
-          return 'gone';
+          return 'gone'
         }
-        const gd = worktreeGitDir(path);
+        const gd = worktreeGitDir(path)
         if (gd === null) {
-          return 'skipped';
+          return 'skipped'
         }
-        const dir = join(gd, 'bro');
-        mkdirSync(dir, { recursive: true });
-        writeFileSync(join(dir, 'work'), `${Date.now()}${ownerTag()}\n${detail}\n`);
-        return 'stamped';
+        const dir = join(gd, 'bro')
+        mkdirSync(dir, { recursive: true })
+        writeFileSync(
+          join(dir, 'work'),
+          `${Date.now()}${ownerTag()}\n${detail}\n`
+        )
+        return 'stamped'
       } finally {
-        release();
+        release()
       }
     } finally {
-      releaseShared();
+      releaseShared()
     }
   } catch (err) {
     // contention is not advisory — a driver holding the claim lock may
     // still retire the tree after we report ready
     if (err instanceof LockTimeout) {
-      return 'lock-timeout';
+      return 'lock-timeout'
     }
     // advisory — occupancy falls back to the other planes
-    return 'skipped';
+    return 'skipped'
   }
 }
 
-const SLUG_RE = /^\w[\w.-]*$/;
+const SLUG_RE = /^\w[\w.-]*$/
 
 function usage(exitCode: ExitCode = 2): never {
-  printUsage(
-    `usage:
+  printUsage(`usage:
   bro work enter <slug> [--branch <name>] [--base <ref>] [--stack]
   bro work leave [slug] [--force] [--delete-branch]
   bro work list [--sizes]
-  bro work prune [--loop] [--dry-run]`,
-    exitCode
-  );
+  bro work prune [--loop] [--dry-run]`, exitCode)
 }
 
 export function mainWorktree(): WorktreeInfo {
-  const all = parseWorktreePorcelain(git(['worktree', 'list', '--porcelain']));
-  const main = all[0];
+  const all = parseWorktreePorcelain(git(['worktree', 'list', '--porcelain']))
+  const main = all[0]
   if (!main) {
-    console.error('bro work: not inside a git worktree');
-    process.exit(1);
+    console.error('bro work: not inside a git worktree')
+    process.exit(1)
   }
-  return main;
+  return main
 }
 
 function currentRoot(): string {
-  return git(['rev-parse', '--show-toplevel']).trim();
+  return git(['rev-parse', '--show-toplevel']).trim()
 }
 
 /** Dirty-file count in a worktree, or -1 when the path is gone. */
 export function dirtyCount(path: string): number {
-  const res = gitTry(['-C', path, 'status', '--porcelain']);
+  const res = gitTry(['-C', path, 'status', '--porcelain'])
   if (res.code !== 0) {
-    return -1;
+    return -1
   }
-  return res.out.split('\n').filter(Boolean).length;
+  return res.out.split('\n').filter(Boolean).length
 }
 
 function diskUsage(path: string): string {
-  const du = spawnSync('du', ['-sh', path], { encoding: 'utf8' }); // NOSONAR — fixed args, path is a string arg not a shell fragment
-  return du.status === 0 ? (du.stdout ?? '').split('\t')[0]!.trim() : '?';
+  const du = spawnSync('du', ['-sh', path], { encoding: 'utf8' }) // NOSONAR — fixed args, path is a string arg not a shell fragment
+  return du.status === 0 ? (du.stdout ?? '').split('\t')[0]!.trim() : '?'
 }
 
 /** The repo declares submodules — git worktree add does NOT populate them,
  *  and `worktree remove` refuses a tree that still contains one. */
 export function hasSubmodules(worktreePath: string): boolean {
-  return existsSync(join(worktreePath, '.gitmodules'));
+  return existsSync(join(worktreePath, '.gitmodules'))
 }
 
 /** Best-effort claim: when the slug names a real bead, mark it in_progress
@@ -365,24 +360,24 @@ export function claimBead(slug: string): { claimed?: string; refused?: boolean }
   // resolve through the configured tasks backend — connectors.tasks
   // pins a non-beads store; the anchor is the git root so a linked
   // worktree or subdirectory resolves the same backend
-  const root = gitTry(['rev-parse', '--show-toplevel']).out.trim() || process.cwd();
+  const root = gitTry(['rev-parse', '--show-toplevel']).out.trim() || process.cwd()
   // the same gate prepareSpawn enforces: a bead claim is an
   // authoritative mutation — invalid policy config refuses BEFORE the
   // claim lands, not after a refused spawn strands it (spec: bro-d9dmx)
-  assertMutableConfig(root);
-  let store: TaskStore;
+  assertMutableConfig(root)
+  let store: TaskStore
   try {
-    store = facade('tasks', { dir: root }, { prefer: loadConfig(root).connectors });
+    store = facade('tasks', { dir: root }, { prefer: loadConfig(root).connectors })
     if (!store.get(slug)) {
-      return {};
+      return {}
     }
   } catch {
-    return {}; // task-store-less repo or a dead store — nothing to say
+    return {} // task-store-less repo or a dead store — nothing to say
   }
   try {
-    store.claim(slug);
+    store.claim(slug)
   } catch {
-    return { refused: true };
+    return { refused: true }
   }
   emitLifecycle(root, {
     kind: 'claim',
@@ -390,8 +385,8 @@ export function claimBead(slug: string): { claimed?: string; refused?: boolean }
     from: 'open',
     to: 'in_progress',
     detail: { via: 'work' },
-  });
-  return { claimed: slug };
+  })
+  return { claimed: slug }
 }
 
 /** Base ref for a new worktree's branch. `git worktree add` alone would
@@ -415,24 +410,22 @@ export function resolveEnterBase(
   defaultRef?: string | undefined
 ): { base?: string; err?: string } {
   if (explicit !== undefined) {
-    return { base: explicit };
+    return { base: explicit }
   }
   if (!current || current === mainRef || current === defaultRef) {
     return stack
-      ? {
-          err: '--stack needs a checked-out work branch — detached HEAD and the default branch are not stack heads',
-        }
-      : { base: mainRef };
+      ? { err: '--stack needs a checked-out work branch — detached HEAD and the default branch are not stack heads' }
+      : { base: mainRef }
   }
-  return stack || auto ? { base: current } : { base: mainRef };
+  return stack || auto ? { base: current } : { base: mainRef }
 }
 
 /** `<common-git-dir>/bro/stack` — the stack edge dir, shared across every
  *  linked worktree. Null when git can't name the common dir. */
 export function stackEdgeDir(): string | null {
-  const res = gitTry(['rev-parse', '--path-format=absolute', '--git-common-dir']);
-  const common = res.code === 0 ? res.out.trim() : '';
-  return common ? join(common, 'bro', 'stack') : null;
+  const res = gitTry(['rev-parse', '--path-format=absolute', '--git-common-dir'])
+  const common = res.code === 0 ? res.out.trim() : ''
+  return common ? join(common, 'bro', 'stack') : null
 }
 
 /** `<common-git-dir>/bro/stack-<name>.lock` — the `stack push`
@@ -442,8 +435,8 @@ export function stackEdgeDir(): string | null {
  *  file in bro/stack/ to a branch edge, so a lockfile there would read
  *  as a bogus edge. Null when git can't name the common dir. */
 export function stackPushLockPath(name: string): string | null {
-  const dir = stackEdgeDir();
-  return dir === null ? null : join(dirname(dir), `stack-${encodeURIComponent(name)}.lock`);
+  const dir = stackEdgeDir()
+  return dir === null ? null : join(dirname(dir), `stack-${encodeURIComponent(name)}.lock`)
 }
 
 /** Stacked branches record their base so stack sync / cleanup can derive
@@ -451,13 +444,13 @@ export function stackPushLockPath(name: string): string | null {
  *  visible from every linked worktree. One file per branch,
  *  create-only, advisory. */
 export function recordStackEdge(branch: string, base: string): void {
-  const dir = stackEdgeDir();
+  const dir = stackEdgeDir()
   if (!dir) {
-    return;
+    return
   }
   try {
-    mkdirSync(dir, { recursive: true });
-    writeFileSync(join(dir, encodeURIComponent(branch)), `${base}\n`);
+    mkdirSync(dir, { recursive: true })
+    writeFileSync(join(dir, encodeURIComponent(branch)), `${base}\n`)
   } catch {
     // advisory record — a failed write must not break enter
   }
@@ -467,33 +460,33 @@ export function recordStackEdge(branch: string, base: string): void {
  *  the reader's call — the file is advisory, reconciliation lives in
  *  `bro stack list`/`sync`. */
 export function readStackEdges(): Map<string, string> {
-  const out = new Map<string, string>();
-  const dir = stackEdgeDir();
+  const out = new Map<string, string>()
+  const dir = stackEdgeDir()
   if (!dir) {
-    return out;
+    return out
   }
   try {
     for (const f of readdirSync(dir)) {
-      const base = readFileSync(join(dir, f), 'utf8').trim();
+      const base = readFileSync(join(dir, f), 'utf8').trim()
       if (base !== '') {
-        out.set(decodeURIComponent(f), base);
+        out.set(decodeURIComponent(f), base)
       }
     }
   } catch {
     // no edge dir yet, or unreadable — same answer: no edges
   }
-  return out;
+  return out
 }
 
 /** Stack sync retargets a member onto the default branch — the edge is
  *  absence, so a stale file must go or the member reads as still-stacked. */
 export function removeStackEdge(branch: string): void {
-  const dir = stackEdgeDir();
+  const dir = stackEdgeDir()
   if (!dir) {
-    return;
+    return
   }
   try {
-    rmSync(join(dir, encodeURIComponent(branch)), { force: true });
+    rmSync(join(dir, encodeURIComponent(branch)), { force: true })
   } catch {
     // advisory — a failed remove must not break sync
   }
@@ -502,11 +495,11 @@ export function removeStackEdge(branch: string): void {
 function stackMode(): 'auto' | 'manual' {
   try {
     const cfg = loadConfig(process.cwd(), { stack: stackSection }) as {
-      stack?: { mode?: string };
-    };
-    return cfg.stack?.mode === 'auto' ? 'auto' : 'manual';
+      stack?: { mode?: string }
+    }
+    return cfg.stack?.mode === 'auto' ? 'auto' : 'manual'
   } catch {
-    return 'manual';
+    return 'manual'
   }
 }
 
@@ -514,14 +507,14 @@ function stackMode(): 'auto' | 'manual' {
 // them builds stale or fails; init is best-effort (network may be down)
 export function initSubmodules(path: string): void {
   if (!hasSubmodules(path)) {
-    return;
+    return
   }
-  const sub = gitTry(['-C', path, 'submodule', 'update', '--init', '--recursive']);
+  const sub = gitTry(['-C', path, 'submodule', 'update', '--init', '--recursive'])
   console.log(
     sub.code === 0
       ? 'submodules initialized'
       : `warning: submodule init failed — ${sub.err || 'check .gitmodules'}`
-  );
+  )
 }
 
 /** Everything that decides where the new branch forks from. */
@@ -533,12 +526,12 @@ function enterBase(argv: string[], main: WorktreeInfo): { base?: string } {
     gitTry(['branch', '--show-current']).out.trim() || undefined,
     main.branch ?? main.head,
     defaultBranchName()
-  );
+  )
   if (err) {
-    console.error(`error: ${err}`);
-    process.exit(1);
+    console.error(`error: ${err}`)
+    process.exit(1)
   }
-  return { base };
+  return { base }
 }
 
 /** The default branch name regardless of the main checkout's attachment
@@ -548,73 +541,73 @@ function enterBase(argv: string[], main: WorktreeInfo): { base?: string } {
  *  HEAD — a repo whose primary remote isn't 'origin' gets the same
  *  protection. */
 export function defaultBranchName(): string | undefined {
-  const remotes = ['origin', ...gitTry(['remote']).out.split('\n').filter(Boolean)];
+  const remotes = ['origin', ...gitTry(['remote']).out.split('\n').filter(Boolean)]
   for (const r of new Set(remotes)) {
-    const head = gitTry(['symbolic-ref', '--short', `refs/remotes/${r}/HEAD`]);
+    const head = gitTry(['symbolic-ref', '--short', `refs/remotes/${r}/HEAD`])
     if (head.code === 0) {
-      return head.out.trim().replace(/^[^/]+\//, '');
+      return head.out.trim().replace(/^[^/]+\//, '')
     }
   }
-  return undefined;
+  return undefined
 }
 
 export interface EnterWorktreeResult {
-  path: string;
-  branch: string;
-  base?: string;
+  path: string
+  branch: string
+  base?: string
   /** base is a real local branch other than main — a stack edge was
    *  recorded for bottom-up merge order */
-  stacked: boolean;
-  claim: { claimed?: string; refused?: boolean };
+  stacked: boolean
+  claim: { claimed?: string; refused?: boolean }
   /** the worktree vanished between `worktree add` and the claim stamp —
    *  a `bro drive` retire won the claim lock. Callers must abort rather
    *  than report the dead path as ready */
-  gone?: boolean;
+  gone?: boolean
   /** the claim-lock wait expired on a live holder — a driver may still
    *  be mid-retire, so callers must abort rather than report ready */
-  claimLockTimedOut?: boolean;
+  claimLockTimedOut?: boolean
   /** set with claimLockTimedOut: the just-added tree was retired so a
    *  retry doesn't die on 'path already exists' (bro-0fiq). Absent/false
    *  means the tree is still there — occupied, or removal failed. */
-  partialRemoved?: boolean;
+  partialRemoved?: boolean
 }
 
 export interface EnterWorktreeOpts {
-  slug: string;
-  branch: string;
-  base?: string;
-  main: WorktreeInfo;
-  defaultRef?: string;
-  allowExisting?: boolean;
-  reusePath?: boolean;
+  slug: string
+  branch: string
+  base?: string
+  main: WorktreeInfo
+  defaultRef?: string
+  allowExisting?: boolean
+  reusePath?: boolean
   /** claim-stamp lock wait — tests bound it; production uses the
    *  default (the 20s shared-lock/claim-lock bound). */
-  claimWaitMs?: number;
+  claimWaitMs?: number
   /** throw on create failure instead of console.error + process.exit —
    *  library callers (the spawn transition) render errors themselves
    *  and a `bro serve` host must not die on a git error. */
-  throws?: boolean;
+  throws?: boolean
   /** false = the caller owns the bead claim (spawn's claimStep lands it
    *  under the registry lock as the worker's, never the session's). */
-  beadClaim?: boolean;
+  beadClaim?: boolean
   /** the caller already holds the agents.json registry lock — the
    *  claim stamp skips its inner acquireAgentRegistryLock (nesting a
    *  file lock would deadlock). The in-tree claim lock still runs. */
-  preLocked?: boolean;
+  preLocked?: boolean
 }
 
 export interface WorktreeCreateResult {
-  path: string;
-  branch: string;
-  branchExists: boolean;
+  path: string
+  branch: string
+  branchExists: boolean
   /** The target dir already stood on the target branch — stack push's
    *  idempotent re-enter; no `worktree add` ran. */
-  reused: boolean;
+  reused: boolean
   /** base is a real local branch other than main — a stack edge was
    *  recorded for bottom-up merge order. Recorded HERE, not in
    *  finishWorktreeEnter, so a same-slug re-push entering under the push
    *  lock always observes the edge the first push minted. */
-  stacked: boolean;
+  stacked: boolean
 }
 
 /** The create half of `enterWorktree` — split out so `stack push` holds
@@ -627,45 +620,44 @@ export interface WorktreeCreateResult {
  *  (same common git dir — an unrelated checkout that happens to sit on
  *  the same branch name is not this stack's member). */
 export function createWorktree(opts: EnterWorktreeOpts): WorktreeCreateResult {
-  const { slug, branch, base, main, defaultRef, allowExisting = true, reusePath = false } = opts;
+  const { slug, branch, base, main, defaultRef, allowExisting = true, reusePath = false } = opts
   const fail = (msg: string): never => {
     if (opts.throws === true) {
-      throw new Error(msg);
+      throw new Error(msg)
     }
-    console.error(`error: ${msg}`);
-    process.exit(1);
-  };
-  const path = worktreePathFor(main.path, slug);
+    console.error(`error: ${msg}`)
+    process.exit(1)
+  }
+  const path = worktreePathFor(main.path, slug)
   if (existsSync(path)) {
-    const onBranch = gitTry(['-C', path, 'branch', '--show-current']).out.trim();
+    const onBranch = gitTry(['-C', path, 'branch', '--show-current']).out.trim()
     const commonOf = (dir: string) =>
-      gitTry(['-C', dir, 'rev-parse', '--path-format=absolute', '--git-common-dir']).out.trim();
-    const sameRepo = commonOf(path) !== '' && commonOf(path) === commonOf(main.path);
+      gitTry(['-C', dir, 'rev-parse', '--path-format=absolute', '--git-common-dir']).out.trim()
+    const sameRepo = commonOf(path) !== '' && commonOf(path) === commonOf(main.path)
     if (reusePath && onBranch === branch && sameRepo) {
-      return { path, branch, branchExists: true, reused: true, stacked: false };
+      return { path, branch, branchExists: true, reused: true, stacked: false }
     }
-    fail(`${path} already exists`);
+    fail(`${path} already exists`)
   }
   // an existing branch under the target name means the slug names an
   // in-flight task — check it out rather than failing on -b. The
   // resolved default base is irrelevant here.
-  const branchExists =
-    gitTry(['rev-parse', '--verify', '--quiet', `refs/heads/${branch}`]).code === 0;
+  const branchExists = gitTry(['rev-parse', '--verify', '--quiet', `refs/heads/${branch}`]).code === 0
   if (branchExists && !allowExisting) {
-    fail(`${branch} already exists`);
+    fail(`${branch} already exists`)
   }
-  const args = ['worktree', 'add', path];
+  const args = ['worktree', 'add', path]
   if (branchExists) {
-    args.push(branch);
+    args.push(branch)
   } else {
-    args.push('-b', branch);
+    args.push('-b', branch)
     if (base) {
-      args.push(base);
+      args.push(base)
     }
   }
-  const res = gitTry(args);
+  const res = gitTry(args)
   if (res.code !== 0) {
-    fail(`git worktree add failed — ${res.err}`);
+    fail(`git worktree add failed — ${res.err}`)
   }
   // a stack edge is only a real edge when the base is a local branch —
   // a raw commit-ish (--base abc123 / origin/main) yields no merge order.
@@ -676,11 +668,11 @@ export function createWorktree(opts: EnterWorktreeOpts): WorktreeCreateResult {
     base !== undefined &&
     base !== (main.branch ?? main.head) &&
     base !== defaultRef &&
-    gitTry(['rev-parse', '--verify', '--quiet', `refs/heads/${base}`]).code === 0;
+    gitTry(['rev-parse', '--verify', '--quiet', `refs/heads/${base}`]).code === 0
   if (stacked && !branchExists) {
-    recordStackEdge(branch, base);
+    recordStackEdge(branch, base)
   }
-  return { path, branch, branchExists, reused: false, stacked };
+  return { path, branch, branchExists, reused: false, stacked }
 }
 
 /** The post-add half of `enterWorktree` — claim marker, submodule init,
@@ -691,17 +683,17 @@ export function finishWorktreeEnter(
   opts: EnterWorktreeOpts,
   created: WorktreeCreateResult
 ): EnterWorktreeResult {
-  const { slug, branch, base } = opts;
-  const { path } = created;
-  const claimBeadFor = () => (opts.beadClaim === false ? {} : claimBead(slug));
+  const { slug, branch, base } = opts
+  const { path } = created
+  const claimBeadFor = () => (opts.beadClaim === false ? {} : claimBead(slug))
   const stamp = claimWorktree(path, slug, {
     waitMs: opts.claimWaitMs,
     preLocked: opts.preLocked,
-  });
+  })
   if (stamp === 'gone') {
     // a driver retired the tree between the add and the stamp — claiming
     // the bead and reporting success would strand both on a dead path
-    return { path, branch, stacked: false, claim: {}, gone: true };
+    return { path, branch, stacked: false, claim: {}, gone: true }
   }
   if (stamp === 'lock-timeout') {
     // a fresh tree left behind dies the retry on 'path already exists'
@@ -712,10 +704,10 @@ export function finishWorktreeEnter(
     // shared occupancy lock — without it a claimant could pin this path
     // after the check and lose its live tree to the remove. A holder
     // past the bound is itself a claimant mid-act → keep the tree.
-    let partialRemoved = false;
+    let partialRemoved = false
     if (!created.reused) {
       try {
-        const releaseOcc = acquireAgentRegistryLock(opts.main.path);
+        const releaseOcc = acquireAgentRegistryLock(opts.main.path)
         try {
           // the registry pins agent occupants; the in-tree claim marker
           // pins a session that won a `work enter`/`stack push` stamp
@@ -724,24 +716,26 @@ export function finishWorktreeEnter(
           // is visible only in /proc (bro-1usa8)
           const movedIn =
             Object.values(readAgentRegistry(opts.main.path)).some(
-              e => typeof e.worktree === 'string' && resolve(e.worktree) === resolve(path)
+              (e) =>
+                typeof e.worktree === 'string' && resolve(e.worktree) === resolve(path)
             ) ||
             worktreeClaim(path) !== undefined ||
-            processesRootedIn(path).length > 0;
+            processesRootedIn(path).length > 0
           partialRemoved =
             !movedIn &&
-            gitTry(['-C', opts.main.path, 'worktree', 'remove', '--force', path]).code === 0;
+            gitTry(['-C', opts.main.path, 'worktree', 'remove', '--force', path])
+              .code === 0
         } finally {
-          releaseOcc();
+          releaseOcc()
         }
       } catch {
         // occupancy lock contended past the bound — keep the tree
       }
     }
-    return { path, branch, stacked: false, claim: {}, claimLockTimedOut: true, partialRemoved };
+    return { path, branch, stacked: false, claim: {}, claimLockTimedOut: true, partialRemoved }
   }
   if (created.reused) {
-    const edgeBase = readStackEdges().get(branch);
+    const edgeBase = readStackEdges().get(branch)
     emitLifecycle(opts.main.path, {
       kind: 'worktree',
       bead: slug,
@@ -752,10 +746,10 @@ export function finishWorktreeEnter(
         branch,
         ...(edgeBase !== undefined ? { base: edgeBase, stacked: true } : {}),
       },
-    });
-    return { path, branch, base: edgeBase, stacked: edgeBase !== undefined, claim: claimBeadFor() };
+    })
+    return { path, branch, base: edgeBase, stacked: edgeBase !== undefined, claim: claimBeadFor() }
   }
-  initSubmodules(path);
+  initSubmodules(path)
   emitLifecycle(opts.main.path, {
     kind: 'worktree',
     bead: slug,
@@ -767,8 +761,8 @@ export function finishWorktreeEnter(
       ...(base !== undefined ? { base } : {}),
       ...(created.stacked ? { stacked: true } : {}),
     },
-  });
-  return { path, branch, base, stacked: created.stacked, claim: claimBeadFor() };
+  })
+  return { path, branch, base, stacked: created.stacked, claim: claimBeadFor() }
 }
 
 /** The worktree-add core shared by `work enter` and `stack push` — the
@@ -777,52 +771,49 @@ export function finishWorktreeEnter(
  *  slug, and records the stack edge last so a failure mid-way never
  *  leaves a half-registered member. */
 export function enterWorktree(opts: EnterWorktreeOpts): EnterWorktreeResult {
-  return finishWorktreeEnter(opts, createWorktree(opts));
+  return finishWorktreeEnter(opts, createWorktree(opts))
 }
 
 function cmdEnter(argv: string[]): void {
-  const pos = positionals(argv, new Set(['--branch', '--base']));
-  const slug = pos[0];
+  const pos = positionals(argv, new Set(['--branch', '--base']))
+  const slug = pos[0]
   if (!slug || !SLUG_RE.test(slug)) {
-    console.error('error: enter needs a slug ([a-z0-9_.-], not starting with -)');
-    usage();
+    console.error('error: enter needs a slug ([a-z0-9_.-], not starting with -)')
+    usage()
   }
-  const branch = flag(argv, '--branch') ?? `work/${slug}`;
-  const main = mainWorktree();
-  const defaultRef = defaultBranchName();
-  const { base } = enterBase(argv, main);
-  const branchExists =
-    gitTry(['rev-parse', '--verify', '--quiet', `refs/heads/${branch}`]).code === 0;
+  const branch = flag(argv, '--branch') ?? `work/${slug}`
+  const main = mainWorktree()
+  const defaultRef = defaultBranchName()
+  const { base } = enterBase(argv, main)
+  const branchExists = gitTry(['rev-parse', '--verify', '--quiet', `refs/heads/${branch}`]).code === 0
   if (branchExists && (flag(argv, '--base') !== undefined || argv.includes('--stack'))) {
-    console.error(
-      `error: --base/--stack only apply when creating the branch; ${branch} already exists`
-    );
-    process.exit(1);
+    console.error(`error: --base/--stack only apply when creating the branch; ${branch} already exists`)
+    process.exit(1)
   }
-  const r = enterWorktree({ slug, branch, base, main, defaultRef });
+  const r = enterWorktree({ slug, branch, base, main, defaultRef })
   if (r.claimLockTimedOut) {
     console.error(
       `error: claim lock for ${r.path} timed out — ` +
         (r.partialRemoved === true
           ? 'removed the partial worktree; retry enter'
           : `worktree left at ${r.path} — inspect it before retrying`)
-    );
-    process.exit(1);
+    )
+    process.exit(1)
   }
   if (r.gone) {
-    console.error(`error: ${r.path} was retired before the claim could land — nothing to enter`);
-    process.exit(1);
+    console.error(`error: ${r.path} was retired before the claim could land — nothing to enter`)
+    process.exit(1)
   }
   console.log(`worktree ready: ${r.path}  (branch ${r.branch})
   cd ${r.path}
-note: gitignored dirs (node_modules, dist) are not shared — install deps there`);
+note: gitignored dirs (node_modules, dist) are not shared — install deps there`)
   if (r.stacked) {
-    console.log(`stacked on ${base} — merge order runs bottom-up`);
+    console.log(`stacked on ${base} — merge order runs bottom-up`)
   }
   if (r.claim.claimed) {
-    console.log(`claimed bead ${r.claim.claimed} for this session`);
+    console.log(`claimed bead ${r.claim.claimed} for this session`)
   } else if (r.claim.refused) {
-    console.error(`note: could not claim bead ${slug} — another actor may hold it`);
+    console.error(`note: could not claim bead ${slug} — another actor may hold it`)
   }
 }
 
@@ -834,25 +825,20 @@ function resolveLeaveTarget(
   main: WorktreeInfo,
   selector: string | undefined
 ): { target: WorktreeInfo; wasCurrent: boolean } {
-  const cur = selector ? undefined : currentRoot();
+  const cur = selector ? undefined : currentRoot()
   const target = selector
-    ? all.find(
-        w =>
-          w.path === resolve(selector) ||
-          basename(w.path) === selector ||
-          w.path === worktreePathFor(main.path, selector)
-      )
-    : all.find(w => w.path === cur);
+    ? all.find((w) => w.path === resolve(selector) || basename(w.path) === selector || w.path === worktreePathFor(main.path, selector))
+    : all.find((w) => w.path === cur)
   if (!target) {
-    const what = selector ? `matching "${selector}"` : 'at the current directory';
-    console.error(`error: no worktree ${what}`);
-    process.exit(1);
+    const what = selector ? `matching "${selector}"` : 'at the current directory'
+    console.error(`error: no worktree ${what}`)
+    process.exit(1)
   }
   if (target.path === main.path) {
-    console.error('error: refusing to remove the main worktree');
-    process.exit(1);
+    console.error('error: refusing to remove the main worktree')
+    process.exit(1)
   }
-  return { target, wasCurrent: target.path === cur };
+  return { target, wasCurrent: target.path === cur }
 }
 
 /** Pre-remove guards git can no longer provide once we stack --force for
@@ -860,44 +846,44 @@ function resolveLeaveTarget(
  *  an on-disk tree that can't be verified clean is NOT clean. */
 function assertRemovable(target: WorktreeInfo, force: boolean): void {
   if (target.locked !== undefined) {
-    const why = target.locked ? ` (${target.locked})` : '';
-    console.error(`error: ${target.path} is locked${why} — run \`git worktree unlock\` first`);
-    process.exit(1);
+    const why = target.locked ? ` (${target.locked})` : ''
+    console.error(`error: ${target.path} is locked${why} — run \`git worktree unlock\` first`)
+    process.exit(1)
   }
-  const dirty = dirtyCount(target.path);
+  const dirty = dirtyCount(target.path)
   if (!force && (dirty > 0 || (dirty < 0 && existsSync(target.path)))) {
-    const why = dirty > 0 ? 'has uncommitted changes' : 'could not be verified clean';
-    console.error(`error: ${target.path} ${why} (use --force to override)`);
-    process.exit(1);
+    const why = dirty > 0 ? 'has uncommitted changes' : 'could not be verified clean'
+    console.error(`error: ${target.path} ${why} (use --force to override)`)
+    process.exit(1)
   }
 }
 
 function cmdLeave(argv: string[]): void {
-  const pos = positionals(argv, new Set());
-  const force = argv.includes('--force');
-  const deleteBranch = argv.includes('--delete-branch');
-  const all = parseWorktreePorcelain(git(['worktree', 'list', '--porcelain']));
-  const main = all[0];
+  const pos = positionals(argv, new Set())
+  const force = argv.includes('--force')
+  const deleteBranch = argv.includes('--delete-branch')
+  const all = parseWorktreePorcelain(git(['worktree', 'list', '--porcelain']))
+  const main = all[0]
   if (!main) {
-    console.error('bro work: not inside a git worktree');
-    process.exit(1);
+    console.error('bro work: not inside a git worktree')
+    process.exit(1)
   }
-  const { target, wasCurrent } = resolveLeaveTarget(all, main, pos[0]);
-  assertRemovable(target, force);
-  const args = ['-C', main.path, 'worktree', 'remove', target.path];
+  const { target, wasCurrent } = resolveLeaveTarget(all, main, pos[0])
+  assertRemovable(target, force)
+  const args = ['-C', main.path, 'worktree', 'remove', target.path]
   if (force) {
-    args.push('--force');
+    args.push('--force')
   }
   // submodule config is shared across worktrees — deinit here would
   // unregister them for everyone. git's documented escape is a second
   // --force; safe to stack now that locked trees are refused above.
   if (hasSubmodules(target.path)) {
-    args.push('--force');
+    args.push('--force')
   }
-  const res = gitTry(args);
+  const res = gitTry(args)
   if (res.code !== 0) {
-    console.error(`error: git worktree remove failed — ${res.err} (use --force to override)`);
-    process.exit(1);
+    console.error(`error: git worktree remove failed — ${res.err} (use --force to override)`)
+    process.exit(1)
   }
   emitLifecycle(main.path, {
     kind: 'worktree',
@@ -908,81 +894,81 @@ function cmdLeave(argv: string[]): void {
       ...(target.branch !== undefined ? { branch: target.branch } : {}),
       ...(force ? { force: true } : {}),
     },
-  });
-  const gone = wasCurrent ? ` — this directory is gone; cd ${main.path}` : '';
-  console.log(`removed worktree ${target.path}${gone}`);
+  })
+  const gone = wasCurrent ? ` — this directory is gone; cd ${main.path}` : ''
+  console.log(`removed worktree ${target.path}${gone}`)
   if (deleteBranch && target.branch) {
-    const del = gitTry(['-C', main.path, 'branch', '-d', target.branch]);
+    const del = gitTry(['-C', main.path, 'branch', '-d', target.branch])
     console.log(
       del.code === 0
         ? `deleted branch ${target.branch}`
         : `kept branch ${target.branch} (${del.err || 'not merged'})`
-    );
+    )
   }
 }
 
 export function stateOfWorktree(w: WorktreeInfo): string {
   if (w.locked !== undefined) {
-    return 'LOCKED';
+    return 'LOCKED'
   }
   if (w.prunable) {
-    return 'PRUNABLE';
+    return 'PRUNABLE'
   }
-  const dirty = existsSync(w.path) ? dirtyCount(w.path) : -1;
+  const dirty = existsSync(w.path) ? dirtyCount(w.path) : -1
   if (dirty < 0) {
-    return 'gone';
+    return 'gone'
   }
-  return dirty === 0 ? 'clean' : `dirty(${dirty})`;
+  return dirty === 0 ? 'clean' : `dirty(${dirty})`
 }
 
 function refLabel(w: WorktreeInfo): string {
   if (w.branch) {
-    return w.branch;
+    return w.branch
   }
-  const head = w.head.slice(0, 8);
-  return w.detached ? `detached@${head}` : head;
+  const head = w.head.slice(0, 8)
+  return w.detached ? `detached@${head}` : head
 }
 
 function cmdList(argv: string[]): void {
-  const withSizes = argv.includes('--sizes');
-  const all = parseWorktreePorcelain(git(['worktree', 'list', '--porcelain']));
-  const main = all[0];
+  const withSizes = argv.includes('--sizes')
+  const all = parseWorktreePorcelain(git(['worktree', 'list', '--porcelain']))
+  const main = all[0]
   for (const [i, w] of all.entries()) {
-    const parts = [i === 0 ? 'main' : 'linked', w.path, refLabel(w), stateOfWorktree(w)];
+    const parts = [i === 0 ? 'main' : 'linked', w.path, refLabel(w), stateOfWorktree(w)]
     // the live in-tree claim — the 'claimed live work' read `bro status`
     // surfaces too (bro-0vj14); absent markers and stale ones print nothing
-    const claim = worktreeClaim(w.path);
+    const claim = worktreeClaim(w.path)
     if (claim !== undefined) {
-      parts.push(claim === '' ? 'claimed' : `claim:${claim}`);
+      parts.push(claim === '' ? 'claimed' : `claim:${claim}`)
     }
     if (withSizes && existsSync(w.path)) {
-      parts.push(diskUsage(w.path));
+      parts.push(diskUsage(w.path))
     }
     if (i === 0) {
-      parts.push(`[${basename(main.path)}]`);
+      parts.push(`[${basename(main.path)}]`)
     }
-    console.log(parts.join('  '));
+    console.log(parts.join('  '))
   }
 }
 
 /** git's own stale-admin prune — missing-dir entries whose metadata
  *  alone is litter. A failed prune is fatal: the report would be fiction. */
 function pruneStaleEntries(): void {
-  const before = parseWorktreePorcelain(git(['worktree', 'list', '--porcelain']));
-  const prunable = before.filter(w => w.prunable);
-  const res = gitTry(['worktree', 'prune', '--verbose']);
+  const before = parseWorktreePorcelain(git(['worktree', 'list', '--porcelain']))
+  const prunable = before.filter((w) => w.prunable)
+  const res = gitTry(['worktree', 'prune', '--verbose'])
   for (const line of res.out.split('\n').filter(Boolean)) {
-    console.log(line);
+    console.log(line)
   }
   if (res.code !== 0) {
-    console.error(`error: git worktree prune failed — ${res.err}`);
-    process.exit(1);
+    console.error(`error: git worktree prune failed — ${res.err}`)
+    process.exit(1)
   }
   if (prunable.length > 0) {
-    const plural = prunable.length === 1 ? 'y' : 'ies';
-    console.log(`pruned ${prunable.length} stale entr${plural}`);
+    const plural = prunable.length === 1 ? 'y' : 'ies'
+    console.log(`pruned ${prunable.length} stale entr${plural}`)
   } else {
-    console.log('nothing stale — all worktrees present on disk');
+    console.log('nothing stale — all worktrees present on disk')
   }
 }
 
@@ -992,80 +978,76 @@ function pruneStaleEntries(): void {
  *  missing task store means no verdict record, so nothing is provably
  *  done and the sweep is skipped outright. */
 function litterFacades(root: string): {
-  tasks?: TaskStore;
-  rev?: { repo: string; facade: ReviewFacade };
+  tasks?: TaskStore
+  rev?: { repo: string; facade: ReviewFacade }
 } {
   // core loadConfig, not loadBroConfig: this file is imported by
   // plugins.ts for workConnector — importing back would TDZ-crash any
   // entry that evaluates work.ts first (unit tests do)
-  const prefer = loadConfig(root).connectors;
-  let tasks: TaskStore | undefined;
+  const prefer = loadConfig(root).connectors
+  let tasks: TaskStore | undefined
   try {
-    tasks = facade('tasks', { dir: root }, { prefer });
+    tasks = facade('tasks', { dir: root }, { prefer })
   } catch (err) {
-    console.error(
-      `work prune --loop: no task store (${err instanceof Error ? err.message : err}) — bead state unverifiable`
-    );
+    console.error(`work prune --loop: no task store (${err instanceof Error ? err.message : err}) — bead state unverifiable`)
   }
-  let rev: { repo: string; facade: ReviewFacade } | undefined;
+  let rev: { repo: string; facade: ReviewFacade } | undefined
   try {
-    const f = reviewHost(root, prefer);
-    rev = { repo: f.resolveRepo([]), facade: f };
+    const f = reviewHost(root, prefer)
+    rev = { repo: f.resolveRepo([]), facade: f }
   } catch {
     // no review host — the PR pass is skipped
   }
-  return { tasks, rev };
+  return { tasks, rev }
 }
 
 /** The sweep's human report — released/repaired/reaped/deleted/kept
  *  lines, errors to stderr, and the count summary. */
 function printLitterReport(rep: LitterReap, dry: boolean): void {
   for (const r of rep.released) {
-    console.log(`  ${dry ? 'would release' : 'released'} claim ${r}`);
+    console.log(`  ${dry ? 'would release' : 'released'} claim ${r}`)
   }
   for (const g of rep.repaired) {
-    console.log(`  ${dry ? 'would re-register' : 're-registered'} ${g}`);
+    console.log(`  ${dry ? 'would re-register' : 're-registered'} ${g}`)
   }
   for (const r of rep.reaped) {
-    console.log(`  ${dry ? 'would reap' : 'reaped'} ${r}`);
+    console.log(`  ${dry ? 'would reap' : 'reaped'} ${r}`)
   }
   for (const b of rep.branches) {
-    console.log(`  ${dry ? 'would delete' : 'deleted'} branch ${b}`);
+    console.log(`  ${dry ? 'would delete' : 'deleted'} branch ${b}`)
   }
   for (const k of rep.kept) {
-    console.log(`  kept ${k}`);
+    console.log(`  kept ${k}`)
   }
   for (const e of rep.errors) {
-    console.error(`  error: ${e}`);
+    console.error(`  error: ${e}`)
   }
-  console.log(
-    `  loop litter: ${rep.reaped.length} ${dry ? 'would be ' : ''}reaped, ${rep.kept.length} kept`
-  );
+  console.log(`  loop litter: ${rep.reaped.length} ${dry ? 'would be ' : ''}reaped, ${rep.kept.length} kept`)
 }
 
 function cmdPrune(argv: string[]): void {
   const pos = positionals(argv, new Set(), {
     boolFlags: new Set(['--loop', '--dry-run']),
     strict: true,
-  });
+  })
   if (pos.length > 0) {
-    usage();
+    usage()
   }
-  pruneStaleEntries();
+  pruneStaleEntries()
   if (!argv.includes('--loop')) {
-    return;
+    return
   }
   // the litter sweep — same predicate the loop audit reaps on: bead
   // closed (or a merged PR names the branch) + verifiably clean
-  const dry = argv.includes('--dry-run');
-  const main = mainWorktree();
-  const { tasks, rev } = litterFacades(main.path);
+  const dry = argv.includes('--dry-run')
+  const main = mainWorktree()
+  const { tasks, rev } = litterFacades(main.path)
   if (tasks === undefined) {
-    return;
+    return
   }
   // core loadConfig (see litterFacades) — the parked-cache knobs ride
   // the loop section
-  const loop = loadConfig(main.path, { loop: loopSection }).loop as LoopConfig | undefined;
+  const loop = loadConfig(main.path, { loop: loopSection }).loop as LoopConfig | undefined
   printLitterReport(
     reapLoopLitter({
       root: main.path,
@@ -1077,7 +1059,7 @@ function cmdPrune(argv: string[]): void {
       parkedTtlDays: loop?.parkedTtlDays,
     }),
     dry
-  );
+  )
 }
 
 // --- merged-work retirement ---------------------------------------------------
@@ -1092,9 +1074,9 @@ function cmdPrune(argv: string[]): void {
  *  present locally (merged heads on deleted remote branches may not be). */
 export function isAncestor(tip: string, oid: string): boolean {
   if (gitTry(['cat-file', '-e', oid]).code !== 0) {
-    return false;
+    return false
   }
-  return gitTry(['merge-base', '--is-ancestor', tip, oid]).code === 0;
+  return gitTry(['merge-base', '--is-ancestor', tip, oid]).code === 0
 }
 
 /** Remove the linked worktree the merged branch was checked out in,
@@ -1107,52 +1089,41 @@ export function isAncestor(tip: string, oid: string): boolean {
  *  safe: only ignored debris remains. The check is config-independent
  *  (`-c status.showUntrackedFiles=all` overrides a user config that
  *  would hide untracked files) and fail-closed. */
-export function removeMergedWorktree(
-  root: string,
-  here: WorktreeInfo,
-  main: WorktreeInfo
-): boolean {
+export function removeMergedWorktree(root: string, here: WorktreeInfo, main: WorktreeInfo): boolean {
   if (here.locked !== undefined) {
-    const why = here.locked ? ` (${here.locked})` : '';
-    console.error(
-      `cleanup: ${root} is locked${why} — worktree kept; unlock with \`git worktree unlock\``
-    );
-    return false;
+    const why = here.locked ? ` (${here.locked})` : ''
+    console.error(`cleanup: ${root} is locked${why} — worktree kept; unlock with \`git worktree unlock\``)
+    return false
   }
   // a process rooted in the tree — cwd inside it, or argv executing its
   // files (a `node <wt>/dist serve` runs deleted code after removal;
   // bro-1usa8's zombie serve) — the merge verdict on the PR says
   // nothing about what the worktree is still HOSTING. Kept, not lost.
-  const rooted = processesRootedIn(root);
+  const rooted = processesRootedIn(root)
   if (rooted.length > 0) {
-    const who = rooted.map(h => `${h.pid} (${h.cmd.slice(0, 80)})`).join(', ');
-    console.error(`cleanup: ${root} hosts live process(es): ${who} — worktree kept`);
-    return false;
+    const who = rooted
+      .map((h) => `${h.pid} (${h.cmd.slice(0, 80)})`)
+      .join(', ')
+    console.error(`cleanup: ${root} hosts live process(es): ${who} — worktree kept`)
+    return false
   }
-  const status = gitTry([
-    '-c',
-    'status.showUntrackedFiles=all',
-    '-C',
-    root,
-    'status',
-    '--porcelain',
-  ]);
+  const status = gitTry(['-c', 'status.showUntrackedFiles=all', '-C', root, 'status', '--porcelain'])
   if (status.code !== 0 || status.out.trim() !== '') {
     console.error(
       status.code !== 0
         ? `cleanup: cannot verify ${root} is clean (${status.err}) — worktree kept`
         : `cleanup: ${root} has uncommitted changes — worktree kept`
-    );
-    return false;
+    )
+    return false
   }
   // initialized submodules need a second --force to override
-  const force = hasSubmodules(root) ? ['--force', '--force'] : ['--force'];
-  const res = gitTry(['-C', main.path, 'worktree', 'remove', ...force, root]);
+  const force = hasSubmodules(root) ? ['--force', '--force'] : ['--force']
+  const res = gitTry(['-C', main.path, 'worktree', 'remove', ...force, root])
   if (res.code !== 0) {
-    console.error(`cleanup: worktree ${root} not removed (${res.err})`);
-    return false;
+    console.error(`cleanup: worktree ${root} not removed (${res.err})`)
+    return false
   }
-  process.chdir(main.path); // cwd is gone — git ops below need a live dir
+  process.chdir(main.path) // cwd is gone — git ops below need a live dir
   emitLifecycle(main.path, {
     kind: 'worktree',
     to: 'removed',
@@ -1162,10 +1133,10 @@ export function removeMergedWorktree(
       ...(here.branch !== undefined ? { branch: here.branch } : {}),
       reason: 'merged',
     },
-  });
-  console.log(`cleanup: removed worktree ${root}`);
-  console.log(`cleanup: cd ${main.path}`);
-  return true;
+  })
+  console.log(`cleanup: removed worktree ${root}`)
+  console.log(`cleanup: cd ${main.path}`)
+  return true
 }
 
 /** Best-effort local-side branch retire after a merge — deletes only
@@ -1177,30 +1148,30 @@ export function deleteMergedLocalBranch(headRef: string, headSha: string): void 
   // a prunable entry (directory already gone) still lists its branch —
   // it must not count as checked out or the branch is never deleted
   const checkedOut = parseWorktreePorcelain(gitTry(['worktree', 'list', '--porcelain']).out).some(
-    w => w.branch === headRef && w.prunable === undefined && existsSync(w.path)
-  );
+    (w) => w.branch === headRef && w.prunable === undefined && existsSync(w.path)
+  )
   if (checkedOut) {
-    console.error(`cleanup: ${headRef} is checked out — delete it after switching`);
-    return;
+    console.error(`cleanup: ${headRef} is checked out — delete it after switching`)
+    return
   }
-  const tipRes = gitTry(['rev-parse', '--verify', `refs/heads/${headRef}`]);
+  const tipRes = gitTry(['rev-parse', '--verify', `refs/heads/${headRef}`])
   if (tipRes.code !== 0) {
-    return; // no local branch — nothing to do
+    return // no local branch — nothing to do
   }
-  const tip = tipRes.out.trim();
+  const tip = tipRes.out.trim()
   if (tip !== headSha && !isAncestor(tip, headSha)) {
-    console.error(`cleanup: ${headRef} has commits beyond the merged head — kept`);
-    return;
+    console.error(`cleanup: ${headRef} has commits beyond the merged head — kept`)
+    return
   }
-  const res = gitTry(['update-ref', '-d', `refs/heads/${headRef}`, tip]);
+  const res = gitTry(['update-ref', '-d', `refs/heads/${headRef}`, tip])
   if (res.code === 0) {
-    console.log(`cleanup: deleted local branch ${headRef}`);
+    console.log(`cleanup: deleted local branch ${headRef}`)
   } else if (/checked out/i.test(res.err)) {
-    console.error(`cleanup: ${headRef} is checked out — delete it after switching`);
+    console.error(`cleanup: ${headRef} is checked out — delete it after switching`)
   } else if (/cannot lock ref/i.test(res.err)) {
-    console.error(`cleanup: ${headRef} moved past the verified tip — kept`);
+    console.error(`cleanup: ${headRef} moved past the verified tip — kept`)
   } else {
-    console.error(`cleanup: local branch ${headRef} not deleted (${res.err})`);
+    console.error(`cleanup: local branch ${headRef} not deleted (${res.err})`)
   }
 }
 
@@ -1216,74 +1187,74 @@ export function deleteMergedLocalBranch(headRef: string, headSha: string): void 
 
 export interface LitterReap {
   /** worktrees removed — '<path> [<branch>]' ('would' list under dryRun) */
-  reaped: string[];
+  reaped: string[]
   /** branches deleted ('would' list under dryRun) */
-  branches: string[];
+  branches: string[]
   /** bead claims released — '<id> (<why>)' ('would' list under dryRun) */
-  released: string[];
+  released: string[]
   /** ghost dirs re-registered as worktrees ('would' list under dryRun) */
-  repaired: string[];
+  repaired: string[]
   /** candidates kept — '<path|branch> (<why>)' */
-  kept: string[];
-  errors: string[];
+  kept: string[]
+  errors: string[]
 }
 
 export interface LitterReapOpts {
   /** repo anchor — any worktree of the repo works; every git op pins -C */
-  root: string;
+  root: string
   /** the verdict store — loopSlug(id) maps a litter branch onto a row */
-  tasks: TaskStore;
+  tasks: TaskStore
   /** review-host evidence — an open PR vetoes, a merged head pins the
    *  branch delete (squash merges make git's own --merged blind).
    *  Undefined skips the pass: closed-bead + clean still reaps and
    *  branches fall back to `branch -d`. */
-  rev?: { repo: string; facade: ReviewFacade };
+  rev?: { repo: string; facade: ReviewFacade }
   /** the stack namespace counted as litter — 'stack/' sweeps every
    *  stack's members, 'stack/<name>/' scopes to one run's chain;
    *  undefined = loop/* only */
-  stackPrefix?: string;
+  stackPrefix?: string
   /** parked resume-cache cap — newest N clean open-bead trees survive,
    *  extras reap; 0/undefined = uncapped (spec bro-ho09d) */
-  parkedKeep?: number;
+  parkedKeep?: number
   /** parked trees idle past this many days reap regardless of the cap;
    *  0/undefined = no age bound */
-  parkedTtlDays?: number;
+  parkedTtlDays?: number
   /** bead ids the caller vouches for — `bro loop` passes the claims it
    *  deliberately parked THIS run (a park is intent, not an orphan):
    *  they skip claim release but their trees still pool. A later sweep
    *  judges them fresh — the loop that parked them is gone by then. */
-  keepClaims?: ReadonlySet<string>;
-  dryRun?: boolean;
-  now?: number;
+  keepClaims?: ReadonlySet<string>
+  dryRun?: boolean
+  now?: number
 }
 
 /** Litter branch → bead slug: 'loop/<slug>' verbatim; stack members carry
  *  '<n>-<slug>' — parseStackBranch validates the shape. */
 function litterSlug(branch: string, stackPrefix?: string): string | undefined {
   if (branch.startsWith('loop/')) {
-    return branch.slice('loop/'.length);
+    return branch.slice('loop/'.length)
   }
   if (stackPrefix !== undefined && branch.startsWith(stackPrefix)) {
-    return parseStackBranch(branch)?.slug;
+    return parseStackBranch(branch)?.slug
   }
-  return undefined;
+  return undefined
 }
 
 interface LitterCandidate {
   /** the live linked worktree the litter branch is checked out in —
    *  undefined for a bare branch */
-  w?: WorktreeInfo;
-  branch: string;
-  slug: string;
+  w?: WorktreeInfo
+  branch: string
+  slug: string
 }
 
 /** Everything one candidate's verdict and reap need that is not the
  *  candidate itself — shared state read once for the whole sweep. */
 interface LitterCtx {
-  opts: LitterReapOpts;
-  rep: LitterReap;
-  main: WorktreeInfo;
-  bySlug: Map<string, TaskRow>;
+  opts: LitterReapOpts
+  rep: LitterReap
+  main: WorktreeInfo
+  bySlug: Map<string, TaskRow>
   /** claim-liveness planes — who owns an in_progress bead's claim
    *  (spec bro-ho09d). Snapshotted once; the release re-reads the
    *  registry inside the lock so a respawn landing during the wait
@@ -1291,29 +1262,29 @@ interface LitterCtx {
   claims: {
     /** loop run records — state already liveness-judged by
      *  collectLoopRuns (pid + pidStart) */
-    runs: LoopRunView[];
+    runs: LoopRunView[]
     /** agents.json snapshot — undefined when unreadable, which fails
      *  CLOSED: an unknowable ownership plane answers "live" */
-    registry: Record<string, AgentRegistryEntry> | undefined;
+    registry: Record<string, AgentRegistryEntry> | undefined
     /** `<common>/bro/agents` — .exit death-proof files live here */
-    agentsHome: string | null;
+    agentsHome: string | null
     /** live .work/.task marker details — a session claiming the bead */
-    sessionDetails: string[];
+    sessionDetails: string[]
     /** live act-wait markers — a gate-stack member's claim survives its
      *  worker's exit: the loop (or a rearmed wait) still services it.
      *  `bead`/`workdir` are the match keys (bro-ho09d) */
-    watches: ListedWatch[];
-  };
+    watches: ListedWatch[]
+  }
 }
 
 interface PrEvidence {
   /** false when the host lookup threw — the candidate stays, the PR
    *  state is unknowable */
-  known: boolean;
-  open: boolean;
+  known: boolean
+  open: boolean
   /** a merged PR's head — the land proof AND the pin the branch delete
    *  compares against */
-  mergedSha?: string;
+  mergedSha?: string
 }
 
 /** Admin debris + the worktree scan → worktree'd candidates. A failed
@@ -1325,43 +1296,43 @@ function litterCandidates(
   opts: LitterReapOpts,
   rep: LitterReap
 ): { main: WorktreeInfo; cands: LitterCandidate[] } | undefined {
-  const pr = gitTry(['-C', opts.root, 'worktree', 'prune']);
+  const pr = gitTry(['-C', opts.root, 'worktree', 'prune'])
   if (pr.code !== 0) {
-    rep.errors.push(`worktree prune failed — ${pr.err || 'git error'}`);
+    rep.errors.push(`worktree prune failed — ${pr.err || 'git error'}`)
   }
-  const first = gitTry(['-C', opts.root, 'worktree', 'list', '--porcelain']);
+  const first = gitTry(['-C', opts.root, 'worktree', 'list', '--porcelain'])
   if (first.code !== 0) {
-    rep.errors.push(`worktree list failed — ${first.err || 'git error'}`);
-    return undefined;
+    rep.errors.push(`worktree list failed — ${first.err || 'git error'}`)
+    return undefined
   }
-  const main = parseWorktreePorcelain(first.out)[0];
+  const main = parseWorktreePorcelain(first.out)[0]
   if (main === undefined) {
-    rep.errors.push('worktree list returned no main entry');
-    return undefined;
+    rep.errors.push('worktree list returned no main entry')
+    return undefined
   }
-  recoverGhosts(opts, main, rep);
+  recoverGhosts(opts, main, rep)
   // a recovered ghost is only visible to a fresh listing — re-read
-  const wt = gitTry(['-C', opts.root, 'worktree', 'list', '--porcelain']);
+  const wt = gitTry(['-C', opts.root, 'worktree', 'list', '--porcelain'])
   if (wt.code !== 0) {
-    rep.errors.push(`worktree list failed — ${wt.err || 'git error'}`);
-    return undefined;
+    rep.errors.push(`worktree list failed — ${wt.err || 'git error'}`)
+    return undefined
   }
-  const all = parseWorktreePorcelain(wt.out);
-  const cands: LitterCandidate[] = [];
-  const onTree = new Set<string>();
+  const all = parseWorktreePorcelain(wt.out)
+  const cands: LitterCandidate[] = []
+  const onTree = new Set<string>()
   for (const w of all.slice(1)) {
     if (w.branch === undefined || w.prunable !== undefined || !existsSync(w.path)) {
-      continue;
+      continue
     }
-    const slug = litterSlug(w.branch, opts.stackPrefix);
+    const slug = litterSlug(w.branch, opts.stackPrefix)
     if (slug === undefined) {
-      continue;
+      continue
     }
-    onTree.add(w.branch);
-    cands.push({ w, branch: w.branch, slug });
+    onTree.add(w.branch)
+    cands.push({ w, branch: w.branch, slug })
   }
-  litterBranches(opts, rep, onTree, cands);
-  return { main, cands };
+  litterBranches(opts, rep, onTree, cands)
+  return { main, cands }
 }
 
 /** Ghost sibling dirs — `<main>--*` on disk but absent from `worktree
@@ -1375,41 +1346,41 @@ function litterCandidates(
  *  missing `.git` is only removal-safe when the dir is empty, and a
  *  ghost with no matching branch is human triage. */
 function recoverGhosts(opts: LitterReapOpts, main: WorktreeInfo, rep: LitterReap): void {
-  const reg = agentRegistryPath(opts.root);
-  const common = reg === null ? null : dirname(dirname(reg));
+  const reg = agentRegistryPath(opts.root)
+  const common = reg === null ? null : dirname(dirname(reg))
   if (common === null) {
-    return;
+    return
   }
-  const adminBase = join(common, 'worktrees');
-  const parent = dirname(main.path);
-  const prefix = `${basename(main.path)}--`;
+  const adminBase = join(common, 'worktrees')
+  const parent = dirname(main.path)
+  const prefix = `${basename(main.path)}--`
   const listed = new Set(
-    parseWorktreePorcelain(gitTry(['-C', opts.root, 'worktree', 'list', '--porcelain']).out).map(
-      w => resolve(w.path)
-    )
-  );
-  let sibs: string[];
+    parseWorktreePorcelain(
+      gitTry(['-C', opts.root, 'worktree', 'list', '--porcelain']).out
+    ).map((w) => resolve(w.path))
+  )
+  let sibs: string[]
   try {
-    sibs = readdirSync(parent);
+    sibs = readdirSync(parent)
   } catch {
-    return;
+    return
   }
   for (const name of sibs) {
     if (!name.startsWith(prefix)) {
-      continue;
+      continue
     }
-    const path = join(parent, name);
+    const path = join(parent, name)
     if (listed.has(resolve(path))) {
-      continue;
+      continue
     }
     try {
       if (!statSync(path).isDirectory()) {
-        continue;
+        continue
       }
     } catch {
-      continue;
+      continue
     }
-    recoverGhost(opts, path, name.slice(prefix.length), adminBase, rep);
+    recoverGhost(opts, path, name.slice(prefix.length), adminBase, rep)
   }
 }
 
@@ -1421,36 +1392,36 @@ function recoverGhost(
   rep: LitterReap
 ): void {
   const keep = (why: string): void => {
-    rep.kept.push(`${path} (ghost — ${why})`);
-  };
-  const dotgit = join(path, '.git');
-  let isDir: boolean | undefined;
+    rep.kept.push(`${path} (ghost — ${why})`)
+  }
+  const dotgit = join(path, '.git')
+  let isDir: boolean | undefined
   try {
-    isDir = statSync(dotgit).isDirectory();
+    isDir = statSync(dotgit).isDirectory()
   } catch {
-    reapEmptyGhost(opts, path, rep);
-    return;
+    reapEmptyGhost(opts, path, rep)
+    return
   }
   if (isDir) {
-    keep('separate clone');
-    return;
+    keep('separate clone')
+    return
   }
-  const admin = worktreeGitDir(path);
+  const admin = worktreeGitDir(path)
   if (admin === null || dirname(admin) !== adminBase) {
-    keep('foreign .git pointer');
-    return;
+    keep('foreign .git pointer')
+    return
   }
   if (existsSync(admin)) {
-    return; // registered but unlisted — worktree prune/list's business
+    return // registered but unlisted — worktree prune/list's business
   }
-  const branch = ghostBranch(opts.root, slug);
+  const branch = ghostBranch(opts.root, slug)
   if (branch === undefined) {
-    keep('no branch to bind');
-    return;
+    keep('no branch to bind')
+    return
   }
   if (opts.dryRun === true) {
-    rep.repaired.push(`${path} [${branch}]`);
-    return;
+    rep.repaired.push(`${path} [${branch}]`)
+    return
   }
   // rebuild the admin entry the way `worktree add` would have written
   // it — gitdir ↔ the worktree's own .git pointer, commondir back to
@@ -1458,37 +1429,37 @@ function recoverGhost(
   // repopulates the index so status reads honestly (a ghost whose tip
   // moved off its checkout reads dirty — kept, not silently reaped).
   try {
-    mkdirSync(admin, { recursive: true });
-    writeFileSync(join(admin, 'gitdir'), `${dotgit}\n`);
-    writeFileSync(join(admin, 'commondir'), '../..\n');
-    writeFileSync(join(admin, 'HEAD'), `ref: refs/heads/${branch}\n`);
+    mkdirSync(admin, { recursive: true })
+    writeFileSync(join(admin, 'gitdir'), `${dotgit}\n`)
+    writeFileSync(join(admin, 'commondir'), '../..\n')
+    writeFileSync(join(admin, 'HEAD'), `ref: refs/heads/${branch}\n`)
   } catch (err) {
-    keep(`admin recreate failed — ${err instanceof Error ? err.message : err}`);
-    return;
+    keep(`admin recreate failed — ${err instanceof Error ? err.message : err}`)
+    return
   }
-  gitTry(['-C', path, 'read-tree', 'HEAD']);
-  rep.repaired.push(`${path} [${branch}]`);
+  gitTry(['-C', path, 'read-tree', 'HEAD'])
+  rep.repaired.push(`${path} [${branch}]`)
 }
 
 /** A ghost with no `.git` at all — the only provably-safe removal is an
  *  empty dir; anything else is kept as unverifiable provenance. */
 function reapEmptyGhost(opts: LitterReapOpts, path: string, rep: LitterReap): void {
-  let empty = false;
+  let empty = false
   try {
-    empty = readdirSync(path).length === 0;
+    empty = readdirSync(path).length === 0
   } catch {
     // unreadable — keep below
   }
   if (!empty) {
-    rep.kept.push(`${path} (ghost — no .git — not provably a worktree)`);
-    return;
+    rep.kept.push(`${path} (ghost — no .git — not provably a worktree)`)
+    return
   }
   if (opts.dryRun !== true) {
     // rmdirSync, not rmSync: it refuses anything that filled in
     // between the check and the call — the guard IS the syscall
-    rmdirSync(path);
+    rmdirSync(path)
   }
-  rep.reaped.push(`${path} (empty ghost dir)`);
+  rep.reaped.push(`${path} (empty ghost dir)`)
 }
 
 /** The branch a recovered ghost binds HEAD to — the naming convention's
@@ -1496,21 +1467,21 @@ function reapEmptyGhost(opts: LitterReapOpts, path: string, rep: LitterReap): vo
  *  tail), else the stack member carrying <slug>. */
 function ghostBranch(root: string, slug: string): string | undefined {
   const has = (b: string): boolean =>
-    gitTry(['-C', root, 'rev-parse', '--verify', '--quiet', `refs/heads/${b}`]).code === 0;
+    gitTry(['-C', root, 'rev-parse', '--verify', '--quiet', `refs/heads/${b}`]).code === 0
   for (const b of [`loop/${slug}`, `work/${slug}`]) {
     if (has(b)) {
-      return b;
+      return b
     }
   }
-  const st = gitTry(['-C', root, 'branch', '--list', 'stack/*', '--format=%(refname:short)']);
+  const st = gitTry(['-C', root, 'branch', '--list', 'stack/*', '--format=%(refname:short)'])
   if (st.code === 0) {
-    for (const b of st.out.split('\n').filter(s => s !== '')) {
+    for (const b of st.out.split('\n').filter((s) => s !== '')) {
       if (parseStackBranch(b)?.slug === slug) {
-        return b;
+        return b
       }
     }
   }
-  return undefined;
+  return undefined
 }
 
 /** Bare litter branches — a worktree-less loop/* is the same tail class. */
@@ -1522,24 +1493,17 @@ function litterBranches(
 ): void {
   for (const pat of ['loop/', opts.stackPrefix]) {
     if (pat === undefined) {
-      continue;
+      continue
     }
-    const bl = gitTry([
-      '-C',
-      opts.root,
-      'branch',
-      '--list',
-      `${pat}*`,
-      '--format=%(refname:short)',
-    ]);
+    const bl = gitTry(['-C', opts.root, 'branch', '--list', `${pat}*`, '--format=%(refname:short)'])
     if (bl.code !== 0) {
-      rep.errors.push(`branch list ${pat}* failed — ${bl.err || 'git error'}`);
-      continue;
+      rep.errors.push(`branch list ${pat}* failed — ${bl.err || 'git error'}`)
+      continue
     }
-    for (const b of bl.out.split('\n').filter(s => s !== '' && !onTree.has(s))) {
-      const slug = litterSlug(b, opts.stackPrefix);
+    for (const b of bl.out.split('\n').filter((s) => s !== '' && !onTree.has(s))) {
+      const slug = litterSlug(b, opts.stackPrefix)
       if (slug !== undefined) {
-        cands.push({ branch: b, slug });
+        cands.push({ branch: b, slug })
       }
     }
   }
@@ -1549,10 +1513,10 @@ function litterBranches(
  *  verdict record. An unreachable store leaves nothing provably done. */
 function litterBeads(opts: LitterReapOpts, rep: LitterReap): Map<string, TaskRow> | undefined {
   try {
-    return new Map(opts.tasks.list({ all: true }).map(r => [loopSlug(r.id), r]));
+    return new Map(opts.tasks.list({ all: true }).map((r) => [loopSlug(r.id), r]))
   } catch (err) {
-    rep.errors.push(`bead list failed — ${err instanceof Error ? err.message : String(err)}`);
-    return undefined;
+    rep.errors.push(`bead list failed — ${err instanceof Error ? err.message : String(err)}`)
+    return undefined
   }
 }
 
@@ -1563,43 +1527,43 @@ function litterBeads(opts: LitterReapOpts, rep: LitterReap): Map<string, TaskRow
  *  agents' trees — bro-f6zp), so an unknowable occupancy plane is a
  *  keep verdict, not an empty map. */
 function litterOccupants(root: string): Map<string, string> | undefined {
-  const occupied = new Map<string, string>();
+  const occupied = new Map<string, string>()
   try {
     for (const [molStep, e] of Object.entries(readAgentRegistry(root))) {
-      const path = typeof e.worktree === 'string' ? resolve(e.worktree) : undefined;
+      const path = typeof e.worktree === 'string' ? resolve(e.worktree) : undefined
       const live =
         typeof e.pid === 'number' &&
-        pidAlive(e.pid, typeof e.pidStart === 'string' ? e.pidStart : undefined);
+        pidAlive(e.pid, typeof e.pidStart === 'string' ? e.pidStart : undefined)
       if (path !== undefined && live) {
-        occupied.set(path, e.agentId || molStep);
+        occupied.set(path, e.agentId || molStep)
       }
     }
-    return occupied;
+    return occupied
   } catch {
-    return undefined;
+    return undefined
   }
 }
 
 /** An open PR vetoes outright; a merged one is the land proof AND the
  *  head pin the branch delete compares against. */
 function litterPrEvidence(opts: LitterReapOpts, branch: string): PrEvidence {
-  const ev: PrEvidence = { known: true, open: false };
+  const ev: PrEvidence = { known: true, open: false }
   if (opts.rev === undefined) {
-    return ev;
+    return ev
   }
   try {
     for (const pr of opts.rev.facade.prsForBranch(branch, 'all')) {
-      const meta = opts.rev.facade.prMeta({ repo: opts.rev.repo, pr });
+      const meta = opts.rev.facade.prMeta({ repo: opts.rev.repo, pr })
       if (meta.state === 'OPEN') {
-        ev.open = true;
+        ev.open = true
       } else if (meta.state === 'MERGED' && ev.mergedSha === undefined) {
-        ev.mergedSha = meta.headSha;
+        ev.mergedSha = meta.headSha
       }
     }
   } catch {
-    ev.known = false;
+    ev.known = false
   }
-  return ev;
+  return ev
 }
 
 /** Worktree-side keep reasons, called under the occupancy lock — the
@@ -1608,31 +1572,31 @@ function litterPrEvidence(opts: LitterReapOpts, branch: string): PrEvidence {
  *  read after the candidate proved done and veto-free; undefined means
  *  the tree is safe to reap. */
 function litterTreeVerdict(c: LitterCandidate, ctx: LitterCtx): string | undefined {
-  const w = c.w;
+  const w = c.w
   if (w === undefined) {
-    return undefined;
+    return undefined
   }
   if (w.locked !== undefined) {
-    return w.locked === '' ? 'locked' : `locked (${w.locked})`;
+    return w.locked === '' ? 'locked' : `locked (${w.locked})`
   }
-  const occupied = litterOccupants(ctx.opts.root);
+  const occupied = litterOccupants(ctx.opts.root)
   if (occupied === undefined) {
-    return 'agent registry unreadable';
+    return 'agent registry unreadable'
   }
-  const occupant = occupied.get(resolve(w.path));
+  const occupant = occupied.get(resolve(w.path))
   if (occupant !== undefined) {
-    return `agent ${occupant} live`;
+    return `agent ${occupant} live`
   }
   if (worktreeClaim(w.path, ctx.opts.now) !== undefined) {
-    return 'claimed';
+    return 'claimed'
   }
   // the same cleanliness bar removeMergedWorktree enforces, read ahead
   // so kept candidates report a reason
-  const st = gitTry(['-c', 'status.showUntrackedFiles=all', '-C', w.path, 'status', '--porcelain']);
+  const st = gitTry(['-c', 'status.showUntrackedFiles=all', '-C', w.path, 'status', '--porcelain'])
   if (st.code !== 0) {
-    return 'cleanliness unverifiable';
+    return 'cleanliness unverifiable'
   }
-  return st.out.trim() === '' ? undefined : 'dirty';
+  return st.out.trim() === '' ? undefined : 'dirty'
 }
 
 /** The evidence-plane keep reason — bead verdict + PR state. undefined
@@ -1641,17 +1605,17 @@ function litterTreeVerdict(c: LitterCandidate, ctx: LitterCtx): string | undefin
  *  left) and veto-free; the tree plane is judged separately, under the
  *  occupancy lock. */
 function litterDoneVerdict(c: LitterCandidate, ctx: LitterCtx, pr: PrEvidence): string | undefined {
-  const bead = ctx.bySlug.get(c.slug);
+  const bead = ctx.bySlug.get(c.slug)
   if (bead?.status !== 'closed' && pr.mergedSha === undefined) {
-    return bead === undefined ? 'no bead — unverifiable' : `bead ${bead.status ?? 'open'}`;
+    return bead === undefined ? 'no bead — unverifiable' : `bead ${bead.status ?? 'open'}`
   }
   if (!pr.known) {
-    return 'PR lookup failed';
+    return 'PR lookup failed'
   }
   if (pr.open) {
-    return 'open PR — unmerged';
+    return 'open PR — unmerged'
   }
-  return undefined;
+  return undefined
 }
 
 /** Branch-side retire — a removed/absent worktree frees the branch, so
@@ -1662,30 +1626,27 @@ function litterDoneVerdict(c: LitterCandidate, ctx: LitterCtx, pr: PrEvidence): 
  *  tip holding commits past the checked-out base — unlanded work keeps
  *  its branch, whatever the bead says. */
 function retireLitterBranch(c: LitterCandidate, ctx: LitterCtx, pr: PrEvidence): void {
-  const { opts, rep } = ctx;
+  const { opts, rep } = ctx
   if (opts.dryRun === true) {
-    rep.branches.push(c.branch);
-    return;
+    rep.branches.push(c.branch)
+    return
   }
   if (pr.mergedSha === undefined) {
-    const del = gitTry(['-C', opts.root, 'branch', '-d', c.branch]);
+    const del = gitTry(['-C', opts.root, 'branch', '-d', c.branch])
     if (del.code === 0) {
-      rep.branches.push(c.branch);
+      rep.branches.push(c.branch)
     } else {
       rep.kept.push(
         `${c.branch} (${/not fully merged/i.test(del.err) ? 'unlanded commits' : 'branch delete refused'})`
-      );
+      )
     }
-    return;
+    return
   }
-  deleteMergedLocalBranch(c.branch, pr.mergedSha);
-  if (
-    gitTry(['-C', opts.root, 'rev-parse', '--verify', '--quiet', `refs/heads/${c.branch}`]).code !==
-    0
-  ) {
-    rep.branches.push(c.branch);
+  deleteMergedLocalBranch(c.branch, pr.mergedSha)
+  if (gitTry(['-C', opts.root, 'rev-parse', '--verify', '--quiet', `refs/heads/${c.branch}`]).code !== 0) {
+    rep.branches.push(c.branch)
   } else {
-    rep.kept.push(`${c.branch} (branch delete refused)`);
+    rep.kept.push(`${c.branch} (branch delete refused)`)
   }
 }
 
@@ -1707,7 +1668,7 @@ function claimOwner(ctx: LitterCtx, c: LitterCandidate, bead: TaskRow): string |
     sessionOwner(ctx, c) ??
     watchOwner(ctx, c, bead) ??
     treeProcessOwner(c)
-  );
+  )
 }
 
 /** loop run records — collectLoopRuns already judged pid+pidStart;
@@ -1718,37 +1679,37 @@ function runRecordOwner(ctx: LitterCtx, c: LitterCandidate, bead: TaskRow): stri
       v.state === 'running' &&
       (v.beadId === bead.id || v.beadIds?.includes(bead.id) === true || v.slug === c.slug)
     ) {
-      return `loop worker pid ${v.pid} live`;
+      return `loop worker pid ${v.pid} live`
     }
   }
-  return undefined;
+  return undefined
 }
 
 /** agent registry — an unreadable plane is not a dead worker */
 function registryOwner(ctx: LitterCtx, c: LitterCandidate, bead: TaskRow): string | undefined {
-  const { claims } = ctx;
+  const { claims } = ctx
   if (claims.registry === undefined) {
-    return 'agent registry unreadable';
+    return 'agent registry unreadable'
   }
   for (const [molStep, e] of Object.entries(claims.registry)) {
-    const hitsBead = molStep === bead.id;
+    const hitsBead = molStep === bead.id
     const hitsTree =
       c.w !== undefined &&
       typeof e.worktree === 'string' &&
-      resolve(e.worktree) === resolve(c.w.path);
+      resolve(e.worktree) === resolve(c.w.path)
     if ((hitsBead || hitsTree) && registryEntryHoldsClaim(claims.agentsHome, e)) {
-      return `agent ${e.agentId || molStep} live`;
+      return `agent ${e.agentId || molStep} live`
     }
   }
-  return undefined;
+  return undefined
 }
 
 /** session markers — `bd --claim` arms .task, `bro work enter` arms .work */
 function sessionOwner(ctx: LitterCtx, c: LitterCandidate): string | undefined {
-  const detail = ctx.claims.sessionDetails.find(d =>
+  const detail = ctx.claims.sessionDetails.find((d) =>
     detailMatches(d, { branch: c.branch, slug: c.slug, worktree: c.w?.path })
-  );
-  return detail === undefined ? undefined : `session armed ${detail}`;
+  )
+  return detail === undefined ? undefined : `session armed ${detail}`
 }
 
 /** live watch markers — a landed member's claim rides its act wait
@@ -1756,29 +1717,29 @@ function sessionOwner(ctx: LitterCtx, c: LitterCandidate): string | undefined {
 function watchOwner(ctx: LitterCtx, c: LitterCandidate, bead: TaskRow): string | undefined {
   for (const l of ctx.claims.watches) {
     if (!l.alive) {
-      continue;
+      continue
     }
     // a clump's whole id list rides the marker comma-joined (bro-q6ppv)
-    const hitsBead = l.watch.bead?.split(',').includes(bead.id) === true;
+    const hitsBead = l.watch.bead?.split(',').includes(bead.id) === true
     const hitsTree =
       c.w !== undefined &&
       typeof l.watch.workdir === 'string' &&
-      resolve(l.watch.workdir) === resolve(c.w.path);
+      resolve(l.watch.workdir) === resolve(c.w.path)
     if (hitsBead || hitsTree) {
-      return `watch on ${l.watch.link} live`;
+      return `watch on ${l.watch.link} live`
     }
   }
-  return undefined;
+  return undefined
 }
 
 /** a live agent-shaped process inside the tree — covers a worker that
  *  never registered (spawn crashed after fork, record write lost) */
 function treeProcessOwner(c: LitterCandidate): string | undefined {
   if (c.w === undefined) {
-    return undefined;
+    return undefined
   }
-  const hit = agentProcessesIn(c.w.path)[0];
-  return hit === undefined ? undefined : `process ${hit.pid} live in tree`;
+  const hit = agentProcessesIn(c.w.path)[0]
+  return hit === undefined ? undefined : `process ${hit.pid} live in tree`
 }
 
 /** Release an orphaned claim — every plane dead. Runs the final
@@ -1788,51 +1749,59 @@ function treeProcessOwner(c: LitterCandidate): string | undefined {
  *  claims after we've released (the reopened bead is then its target —
  *  correct). Returns the keep reason when the claim survives,
  *  undefined when it was released (or would be, under dry-run). */
-function releaseDeadClaim(ctx: LitterCtx, c: LitterCandidate, bead: TaskRow): string | undefined {
-  const { opts, rep } = ctx;
-  const pre = claimOwner(ctx, c, bead);
+function releaseDeadClaim(
+  ctx: LitterCtx,
+  c: LitterCandidate,
+  bead: TaskRow
+): string | undefined {
+  const { opts, rep } = ctx
+  const pre = claimOwner(ctx, c, bead)
   if (pre !== undefined) {
-    return pre;
+    return pre
   }
-  let release: () => void;
+  let release: () => void
   try {
-    release = acquireAgentRegistryLock(ctx.main.path);
+    release = acquireAgentRegistryLock(ctx.main.path)
   } catch {
-    return 'occupancy lock contended';
+    return 'occupancy lock contended'
   }
   try {
     // re-read under the lock — the snapshot predates the wait, and a
     // respawn's registry write lands inside this same section
-    let registry: Record<string, AgentRegistryEntry> | undefined;
+    let registry: Record<string, AgentRegistryEntry> | undefined
     try {
-      registry = readAgentRegistry(opts.root);
+      registry = readAgentRegistry(opts.root)
     } catch {
-      registry = undefined;
+      registry = undefined
     }
-    const owner = claimOwner({ ...ctx, claims: { ...ctx.claims, registry } }, c, bead);
+    const owner = claimOwner(
+      { ...ctx, claims: { ...ctx.claims, registry } },
+      c,
+      bead
+    )
     if (owner !== undefined) {
-      return owner;
+      return owner
     }
     if (opts.dryRun !== true) {
       try {
         opts.tasks.note(
           bead.id,
           'bro work prune --loop: released orphaned claim — every worker-liveness plane is dead (bro-ho09d)'
-        );
-        opts.tasks.reopen(bead.id);
+        )
+        opts.tasks.reopen(bead.id)
       } catch (err) {
         rep.errors.push(
           `claim release for ${bead.id} failed — ${err instanceof Error ? err.message : err}`
-        );
-        return 'claim release failed';
+        )
+        return 'claim release failed'
       }
     }
     // the snapshot row drives the rest of the sweep's verdicts
-    bead.status = 'open';
-    rep.released.push(`${bead.id} (no live worker)`);
-    return undefined;
+    bead.status = 'open'
+    rep.released.push(`${bead.id} (no live worker)`)
+    return undefined
   } finally {
-    release();
+    release()
   }
 }
 
@@ -1841,23 +1810,23 @@ function releaseDeadClaim(ctx: LitterCtx, c: LitterCandidate, bead: TaskRow): st
  *  index/HEAD-reflog (commits, checkouts). A dead tree's clock froze
  *  with it; unreadable stat fields just don't move the max. */
 export function worktreeIdleMs(path: string, now: number = Date.now()): number {
-  let t = 0;
+  let t = 0
   try {
-    t = statSync(path).mtimeMs;
+    t = statSync(path).mtimeMs
   } catch {
     // gone mid-sweep — the verdict pass reports it separately
   }
-  const gd = worktreeGitDir(path);
+  const gd = worktreeGitDir(path)
   if (gd !== null) {
     for (const f of ['index', 'logs/HEAD', 'HEAD', '.']) {
       try {
-        t = Math.max(t, statSync(join(gd, f)).mtimeMs);
+        t = Math.max(t, statSync(join(gd, f)).mtimeMs)
       } catch {
         // partial admin — skip
       }
     }
   }
-  return t === 0 ? Number.POSITIVE_INFINITY : now - t;
+  return t === 0 ? Number.POSITIVE_INFINITY : now - t
 }
 
 /** One candidate: claim liveness first (an in_progress bead with a dead
@@ -1871,69 +1840,63 @@ export function worktreeIdleMs(path: string, now: number = Date.now()): number {
  *  contended past the bound is itself a claimant mid-act → keep. A
  *  failed removal keeps the branch too — it is still checked out there. */
 function reapCandidate(c: LitterCandidate, ctx: LitterCtx, parked: ParkedCand[]): void {
-  const { opts, rep, main } = ctx;
-  const pr = litterPrEvidence(opts, c.branch);
-  const label = c.w?.path ?? c.branch;
-  const bead = ctx.bySlug.get(c.slug);
+  const { opts, rep, main } = ctx
+  const pr = litterPrEvidence(opts, c.branch)
+  const label = c.w?.path ?? c.branch
+  const bead = ctx.bySlug.get(c.slug)
   if (bead?.status === 'in_progress' && opts.keepClaims?.has(bead.id) !== true) {
-    const owner = releaseDeadClaim(ctx, c, bead);
+    const owner = releaseDeadClaim(ctx, c, bead)
     if (owner !== undefined) {
-      rep.kept.push(`${label} (bead in_progress — ${owner})`);
-      return;
+      rep.kept.push(`${label} (bead in_progress — ${owner})`)
+      return
     }
     // released — the bead reads open for the verdicts below
   }
-  const done = litterDoneVerdict(c, ctx, pr);
+  const done = litterDoneVerdict(c, ctx, pr)
   if (done !== undefined) {
     // open/non-terminal beads keep their tree only as resume cache —
     // they pool; every other keep reason is unconditional. A PR veto
     // (open or unreadable) never pools — the work is visibly in flight
-    if (
-      c.w !== undefined &&
-      bead !== undefined &&
-      bead.status !== 'closed' &&
-      pr.known &&
-      !pr.open
-    ) {
-      parked.push({ c, pr, done });
-      return;
+    if (c.w !== undefined && bead !== undefined && bead.status !== 'closed' && pr.known && !pr.open) {
+      parked.push({ c, pr, done })
+      return
     }
-    rep.kept.push(`${label} (${done})`);
-    return;
+    rep.kept.push(`${label} (${done})`)
+    return
   }
   if (c.w === undefined) {
-    retireLitterBranch(c, ctx, pr);
-    return;
+    retireLitterBranch(c, ctx, pr)
+    return
   }
-  let release: () => void;
+  let release: () => void
   try {
-    release = acquireAgentRegistryLock(main.path);
+    release = acquireAgentRegistryLock(main.path)
   } catch {
-    rep.kept.push(`${label} (occupancy lock contended)`);
-    return;
+    rep.kept.push(`${label} (occupancy lock contended)`)
+    return
   }
   try {
-    const why = litterTreeVerdict(c, ctx);
+    const why = litterTreeVerdict(c, ctx)
     if (why !== undefined) {
-      rep.kept.push(`${label} (${why})`);
-      return;
+      rep.kept.push(`${label} (${why})`)
+      return
     }
     if (opts.dryRun !== true && !removeMergedWorktree(c.w.path, c.w, main)) {
-      rep.errors.push(`worktree ${c.w.path} not removed`);
-      return;
+      rep.errors.push(`worktree ${c.w.path} not removed`)
+      return
     }
-    rep.reaped.push(`${c.w.path} [${c.branch}]`);
+    rep.reaped.push(`${c.w.path} [${c.branch}]`)
   } finally {
-    release();
+    release()
   }
-  retireLitterBranch(c, ctx, pr);
+  retireLitterBranch(c, ctx, pr)
 }
 
 interface ParkedCand {
-  c: LitterCandidate;
-  pr: PrEvidence;
+  c: LitterCandidate
+  pr: PrEvidence
   /** the keep reason the candidate earned — reported for survivors */
-  done: string;
+  done: string
 }
 
 /** The parked pool pass — open-bead trees kept only as a resume cache,
@@ -1942,19 +1905,19 @@ interface ParkedCand {
  *  consumes a pool slot — it is data, not cache. Evictions keep the
  *  branch (cheap) via the same retire rule done litter uses. */
 function reapParkedPool(parked: ParkedCand[], ctx: LitterCtx): void {
-  const { opts } = ctx;
+  const { opts } = ctx
   if (parked.length === 0) {
-    return;
+    return
   }
-  const now = opts.now ?? Date.now();
-  const keepN = opts.parkedKeep ?? 0;
-  const ttlMs = (opts.parkedTtlDays ?? 0) * 24 * 60 * 60 * 1000;
+  const now = opts.now ?? Date.now()
+  const keepN = opts.parkedKeep ?? 0
+  const ttlMs = (opts.parkedTtlDays ?? 0) * 24 * 60 * 60 * 1000
   const scored = parked
-    .map(p => ({ ...p, idle: worktreeIdleMs(p.c.w!.path, now) }))
-    .sort((a, b) => a.idle - b.idle);
-  let kept = 0;
+    .map((p) => ({ ...p, idle: worktreeIdleMs(p.c.w!.path, now) }))
+    .sort((a, b) => a.idle - b.idle)
+  let kept = 0
   for (const { c, pr, done, idle } of scored) {
-    kept += reapParkedCand({ c, pr, done, idle }, kept, keepN, ttlMs, ctx);
+    kept += reapParkedCand({ c, pr, done, idle }, kept, keepN, ttlMs, ctx)
   }
 }
 
@@ -1968,67 +1931,60 @@ function reapParkedCand(
   ttlMs: number,
   ctx: LitterCtx
 ): number {
-  const { opts, rep, main } = ctx;
-  const { c, pr, done, idle } = p;
-  const label = c.w!.path;
-  let release: () => void;
+  const { opts, rep, main } = ctx
+  const { c, pr, done, idle } = p
+  const label = c.w!.path
+  let release: () => void
   try {
-    release = acquireAgentRegistryLock(main.path);
+    release = acquireAgentRegistryLock(main.path)
   } catch {
-    rep.kept.push(`${label} (occupancy lock contended)`);
-    return 0;
+    rep.kept.push(`${label} (occupancy lock contended)`)
+    return 0
   }
   try {
-    const held = litterTreeVerdict(c, ctx);
+    const held = litterTreeVerdict(c, ctx)
     if (held !== undefined) {
-      rep.kept.push(`${label} (${held})`);
-      return 0;
+      rep.kept.push(`${label} (${held})`)
+      return 0
     }
-    const overCap = keepN > 0 && kept >= keepN;
-    const stale = ttlMs > 0 && idle > ttlMs;
+    const overCap = keepN > 0 && kept >= keepN
+    const stale = ttlMs > 0 && idle > ttlMs
     if (!overCap && !stale) {
-      rep.kept.push(`${label} (${done})`);
-      return 1;
+      rep.kept.push(`${label} (${done})`)
+      return 1
     }
     if (opts.dryRun !== true && !removeMergedWorktree(c.w!.path, c.w!, main)) {
-      rep.errors.push(`worktree ${c.w!.path} not removed`);
-      return 0;
+      rep.errors.push(`worktree ${c.w!.path} not removed`)
+      return 0
     }
-    const verdict = stale ? 'idle past TTL' : `over cap ${keepN}`;
-    rep.reaped.push(`${c.w!.path} [${c.branch}] — parked pool ${verdict}`);
+    const verdict = stale ? 'idle past TTL' : `over cap ${keepN}`
+    rep.reaped.push(`${c.w!.path} [${c.branch}] — parked pool ${verdict}`)
   } finally {
-    release();
+    release()
   }
-  retireLitterBranch(c, ctx, pr);
-  return 0;
+  retireLitterBranch(c, ctx, pr)
+  return 0
 }
 
 export function reapLoopLitter(opts: LitterReapOpts): LitterReap {
-  const rep: LitterReap = {
-    reaped: [],
-    branches: [],
-    released: [],
-    repaired: [],
-    kept: [],
-    errors: [],
-  };
-  const found = litterCandidates(opts, rep);
+  const rep: LitterReap = { reaped: [], branches: [], released: [], repaired: [], kept: [], errors: [] }
+  const found = litterCandidates(opts, rep)
   if (found === undefined) {
-    return rep;
+    return rep
   }
-  const bySlug = litterBeads(opts, rep);
+  const bySlug = litterBeads(opts, rep)
   if (bySlug === undefined) {
-    return rep;
+    return rep
   }
   // claim-liveness planes — snapshotted once for the sweep; the release
   // re-reads the registry inside the lock before writing
-  const regPath = agentRegistryPath(opts.root);
-  const hooks = hooksDirOf(opts.root);
-  let registry: Record<string, AgentRegistryEntry> | undefined;
+  const regPath = agentRegistryPath(opts.root)
+  const hooks = hooksDirOf(opts.root)
+  let registry: Record<string, AgentRegistryEntry> | undefined
   try {
-    registry = readAgentRegistry(opts.root);
+    registry = readAgentRegistry(opts.root)
   } catch {
-    registry = undefined;
+    registry = undefined
   }
   const ctx: LitterCtx = {
     opts,
@@ -2043,35 +1999,35 @@ export function reapLoopLitter(opts: LitterReapOpts): LitterReap {
         hooks === null ? [] : liveWorkDetails(hooks, ['.work', '.task'], opts.now ?? Date.now()),
       watches: listWatches(opts.root),
     },
-  };
-  const parked: ParkedCand[] = [];
-  for (const c of found.cands) {
-    reapCandidate(c, ctx, parked);
   }
-  reapParkedPool(parked, ctx);
-  releaseOrphanedRuns(found.cands, ctx);
-  return rep;
+  const parked: ParkedCand[] = []
+  for (const c of found.cands) {
+    reapCandidate(c, ctx, parked)
+  }
+  reapParkedPool(parked, ctx)
+  releaseOrphanedRuns(found.cands, ctx)
+  return rep
 }
 
 /** Dead run records whose beads still read in_progress — litter may
  *  have been hand-cleaned already; the claim is still orphaned. A
  *  record's beadIds covers every clump member, not only the lead. */
 function releaseOrphanedRuns(cands: LitterCandidate[], ctx: LitterCtx): void {
-  const handled = new Set(cands.map(c => ctx.bySlug.get(c.slug)?.id).filter(Boolean));
+  const handled = new Set(cands.map((c) => ctx.bySlug.get(c.slug)?.id).filter(Boolean))
   for (const v of ctx.claims.runs) {
     if (v.state !== 'dead') {
-      continue;
+      continue
     }
-    const ids = [...new Set([v.beadId, ...(v.beadIds ?? [])])];
+    const ids = [...new Set([v.beadId, ...(v.beadIds ?? [])])]
     for (const id of ids) {
-      const bead = ctx.bySlug.get(loopSlug(id)) ?? ctx.bySlug.get(v.slug);
+      const bead = ctx.bySlug.get(loopSlug(id)) ?? ctx.bySlug.get(v.slug)
       if (
         bead === undefined ||
         bead.status !== 'in_progress' ||
         handled.has(bead.id) ||
         ctx.opts.keepClaims?.has(bead.id) === true
       ) {
-        continue;
+        continue
       }
       // the record's worktree still narrows the owner check — a live
       // process inside it (or a marker naming it) keeps the claim even
@@ -2087,39 +2043,39 @@ function releaseOrphanedRuns(cands: LitterCandidate[], ctx: LitterCtx): void {
               : { path: v.worktree, head: '', bare: false, detached: false },
         },
         bead
-      );
+      )
     }
   }
 }
 
 export function runWorkCommand(argv: string[]): void {
-  const [sub, ...rest] = argv;
+  const [sub, ...rest] = argv
   if (sub === '--help' || sub === '-h' || hasHelpFlag(rest)) {
-    usage(0);
+    usage(0)
   }
   switch (sub) {
     case 'enter':
-      return cmdEnter(rest);
+      return cmdEnter(rest)
     case 'leave':
-      return cmdLeave(rest);
+      return cmdLeave(rest)
     case 'list':
-      return cmdList(rest);
+      return cmdList(rest)
     case 'prune':
-      return cmdPrune(rest);
+      return cmdPrune(rest)
     default:
-      usage();
+      usage()
   }
 }
 
 /** Absolute git dir for cwd — used by hooks to tell linked worktrees from
  *  the primary checkout without re-parsing `worktree list`. */
 export function gitDirOf(cwd: string): string | null {
-  const res = gitTry(['-C', cwd, 'rev-parse', '--absolute-git-dir'], GIT_SYNC_PROBE_TIMEOUT_MS);
+  const res = gitTry(['-C', cwd, 'rev-parse', '--absolute-git-dir'], GIT_SYNC_PROBE_TIMEOUT_MS)
   if (res.code !== 0) {
-    return null;
+    return null
   }
-  const dir = res.out.trim();
-  return dir ? resolve(dir) : null;
+  const dir = res.out.trim()
+  return dir ? resolve(dir) : null
 }
 
 /** The work connector — git worktrees as lifecycle state: a session in
@@ -2131,15 +2087,15 @@ export const workConnector: Connector = {
   hooks: () => ({
     sessionStart(ctx) {
       try {
-        const gd = gitDirOf(ctx.dir);
+        const gd = gitDirOf(ctx.dir)
         if (!gd || isLinkedGitDir(gd)) {
-          return [];
+          return []
         }
         return [
           'parallel-friendly: run work in a linked worktree — `bro work enter <slug>`; finish with `bro work leave`; `bro work list` shows siblings',
-        ];
+        ]
       } catch {
-        return [];
+        return []
       }
     },
     parallelWork(ctx) {
@@ -2147,7 +2103,7 @@ export const workConnector: Connector = {
         const cur = gitTry(
           ['-C', ctx.dir, 'rev-parse', '--show-toplevel'],
           GIT_SYNC_PROBE_TIMEOUT_MS
-        ).out.trim();
+        ).out.trim()
         // ctx.owner is the dispatched owner; undefined means the caller
         // never resolved one — resolve lazily. An explicit null stays
         // ownerless: no suppression, every claim reports as foreign
@@ -2173,14 +2129,14 @@ export const workConnector: Connector = {
             .map(w => `worktree ${basename(w.path)} [${w.branch ?? 'detached'}]`)
         );
       } catch {
-        return [];
+        return []
       }
     },
     stopGate(ctx) {
       try {
-        const gd = gitDirOf(ctx.dir);
+        const gd = gitDirOf(ctx.dir)
         if (!gd || !isLinkedGitDir(gd)) {
-          return [];
+          return []
         }
         const res = gitTry(['-C', ctx.dir, 'status', '--porcelain'], GIT_SYNC_PROBE_TIMEOUT_MS);
         if (res.code !== 0) {
@@ -2205,10 +2161,10 @@ export const workConnector: Connector = {
                 : undefined,
             armedHint: 'bro: still inside a linked worktree — `bro work leave` when done',
           },
-        ];
+        ]
       } catch {
-        return [];
+        return []
       }
     },
   }),
-};
+}

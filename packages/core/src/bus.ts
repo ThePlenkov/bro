@@ -30,70 +30,62 @@
  * bytes (Linux) / 104 (macOS) and a deep worktree path truncates
  * silently into EADDRINUSE.
  */
-import {
-  chmodSync,
-  existsSync,
-  mkdirSync,
-  readFileSync,
-  rmSync,
-  statSync,
-  writeFileSync,
-} from 'node:fs';
-import { connect, createServer, type Server, type Socket } from 'node:net';
-import { tmpdir } from 'node:os';
-import { createHash, randomBytes } from 'node:crypto';
-import { dirname, join } from 'node:path';
+import { chmodSync, existsSync, mkdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs'
+import { connect, createServer, type Server, type Socket } from 'node:net'
+import { tmpdir } from 'node:os'
+import { createHash, randomBytes } from 'node:crypto'
+import { dirname, join } from 'node:path'
 import {
   eventMatches,
   isEventInput,
   type EventEnvelope,
   type EventFilter,
   type EventInput,
-} from './events.ts';
-import { GIT_SYNC_PROBE_TIMEOUT_MS, gitCommonDir } from './git.ts';
+} from './events.ts'
+import { GIT_SYNC_PROBE_TIMEOUT_MS, gitCommonDir } from './git.ts'
 
 /** Hard budget for every client operation. REVIEW.md rates any path
  *  that can hang or exit non-zero on a hook event as critical, so the
  *  client resolves "nothing to report" on expiry instead of throwing.
  *  Generous enough for a busy loopback round trip, short enough that a
  *  wedged broker cannot outlive the session that probed it. */
-export const BUS_TIMEOUT_MS = 2_000;
+export const BUS_TIMEOUT_MS = 2_000
 
 /** How many envelopes a broker keeps for reconnect replay. A consumer
  *  whose cursor fell out of the window gets a `gap` frame and re-derives
  *  from the registry — which stays the source of truth. Deliberately
  *  memory-only: a delivery path with its own compaction is the debris
  *  this design refuses to create. */
-export const BUS_RING_LIMIT = 10_000;
+export const BUS_RING_LIMIT = 10_000
 
 /** How much a cursorless probe catches up: the newest slice of the ring,
  *  not all of it. A hook runs on every event, so an unbounded catch-up
  *  would turn a 10k ring into 10k lines per hook. */
-export const BUS_PROBE_LIMIT = 64;
+export const BUS_PROBE_LIMIT = 64
 
 /** How long a probe listens before it reports what it has. The bead's
  *  constraint is a hard sub-second budget: a hook must never wait on a
  *  wedged broker, so this is a ceiling and not a suggestion. */
-export const BUS_PROBE_WINDOW_MS = 250;
+export const BUS_PROBE_WINDOW_MS = 250
 
 /** Retention, on the age and byte axes. The count bound alone still
  *  lets a slow trickle of events sit in memory indefinitely, and one
  *  fat payload can carry a whole ring's worth of bytes. */
-export const BUS_RING_TTL_MS = 60 * 60_000;
+export const BUS_RING_TTL_MS = 60 * 60_000
 
-export const BUS_RING_MAX_BYTES = 32 * 1024 * 1024;
+export const BUS_RING_MAX_BYTES = 32 * 1024 * 1024
 
 /** Bytes an envelope occupies in the ring — measured, not estimated,
  *  so the byte bound cannot drift from what is actually retained. */
 function busEventBytes(event: EventEnvelope): number {
-  return Buffer.byteLength(JSON.stringify(event), 'utf8');
+  return Buffer.byteLength(JSON.stringify(event), 'utf8')
 }
 
 /** A slow subscriber is dropped rather than buffered without bound —
  *  `writableLength` past this and the event is skipped, with a `gap`
  *  frame before the next delivered one so the consumer knows to
  *  re-derive instead of silently missing events. */
-const SLOW_CONSUMER_BYTES = 1024 * 1024;
+const SLOW_CONSUMER_BYTES = 1024 * 1024
 
 /**
  * The local bus — a CONNECTOR for the `events` facade, not the capability
@@ -107,12 +99,12 @@ export type {
   EventEnvelope as BusEnvelope,
   EventFilter as BusFilter,
   EventInput as BusEventInput,
-} from './events.ts';
+} from './events.ts'
 export {
   eventMatches as busMatches,
   eventTopicMatches as busTopicMatches,
   isEventInput as isBusEventInput,
-} from './events.ts';
+} from './events.ts'
 
 /** A record the broker itself vouches for: inside the broker `gen` and
  *  `seq` always exist — the facade leaves `seq` optional only because
@@ -121,8 +113,8 @@ export {
  *  `{gen, seq}`, never seq alone — a foreign gen reads as a gap, not
  *  as a silent resume into the wrong seq space. */
 export interface BusRecord extends EventEnvelope {
-  gen: string;
-  seq: number;
+  gen: string
+  seq: number
 }
 
 /** A cursor that survives broker restarts — taken from the last
@@ -130,8 +122,8 @@ export interface BusRecord extends EventEnvelope {
  *  (`--since` on the CLI), but only `{gen, seq}` cannot collide with
  *  the seq space a restarted broker hands out. */
 export interface BusCursor {
-  gen: string;
-  seq: number;
+  gen: string
+  seq: number
 }
 
 /** A durable cursor is {gen, seq}: the gen pins it to one broker run, so
@@ -140,26 +132,22 @@ export interface BusCursor {
  *  (--since on the CLI); absent or unparseable means "from now". */
 function parseSince(raw: unknown, gen: string): number | 'now' | 'foreign' {
   if (typeof raw === 'number' && Number.isFinite(raw)) {
-    return Math.floor(raw);
+    return Math.floor(raw)
   }
   if (typeof raw === 'object' && raw !== null) {
-    const cursor = raw as Partial<BusCursor>;
-    if (
-      typeof cursor.gen === 'string' &&
-      typeof cursor.seq === 'number' &&
-      Number.isFinite(cursor.seq)
-    ) {
-      return cursor.gen === gen ? Math.floor(cursor.seq) : 'foreign';
+    const cursor = raw as Partial<BusCursor>
+    if (typeof cursor.gen === 'string' && typeof cursor.seq === 'number' && Number.isFinite(cursor.seq)) {
+      return cursor.gen === gen ? Math.floor(cursor.seq) : 'foreign'
     }
   }
-  return 'now';
+  return 'now'
 }
 
 /** `limit` bounds a catch-up replay inside the broker — a cursorless
  *  probe would otherwise serialize the whole retained ring through the
  *  socket before its own slice runs. */
 function parseReplayLimit(raw: unknown): number | undefined {
-  return typeof raw === 'number' && Number.isInteger(raw) && raw > 0 ? raw : undefined;
+  return typeof raw === 'number' && Number.isInteger(raw) && raw > 0 ? raw : undefined
 }
 /** Bounded replay window. `since` is the caller's last seen seq.
  *
@@ -169,41 +157,41 @@ function parseReplayLimit(raw: unknown): number | undefined {
  *  (`maxBytes`). All three make an event disappear, and every
  *  disappearance is a `gap`, never a silent hole. */
 export class BusRing {
-  private readonly limit: number;
-  private readonly ttlMs: number;
-  private readonly maxBytes: number;
-  private readonly buf: BusRecord[] = [];
-  private bytes = 0;
+  private readonly limit: number
+  private readonly ttlMs: number
+  private readonly maxBytes: number
+  private readonly buf: BusRecord[] = []
+  private bytes = 0
   /** Highest seq ever dropped by a bound. An empty ring cannot tell
    *  "nothing was published" from "everything aged out", and answering
    *  the second with an empty list is the silent hole this contract
    *  forbids — so the drop watermark is what makes a cursor honest. */
-  private evictedThrough = 0;
+  private evictedThrough = 0
   /** Highest seq this run ever issued. Distinct from `evictedThrough`:
    *  this one survives eviction, so a cursor past it can be recognised as
    *  "this broker run never issued it" rather than answered from an
    *  emptied ring. */
-  private lastSeq = 0;
+  private lastSeq = 0
 
   constructor(opts: { limit?: number; ttlMs?: number; maxBytes?: number } = {}) {
-    const limit = opts.limit ?? BUS_RING_LIMIT;
+    const limit = opts.limit ?? BUS_RING_LIMIT
     if (!Number.isInteger(limit) || limit < 1) {
-      throw new RangeError(`bus ring limit must be a positive integer, got ${String(limit)}`);
+      throw new RangeError(`bus ring limit must be a positive integer, got ${String(limit)}`)
     }
-    this.limit = limit;
-    this.ttlMs = opts.ttlMs ?? BUS_RING_TTL_MS;
-    this.maxBytes = opts.maxBytes ?? BUS_RING_MAX_BYTES;
+    this.limit = limit
+    this.ttlMs = opts.ttlMs ?? BUS_RING_TTL_MS
+    this.maxBytes = opts.maxBytes ?? BUS_RING_MAX_BYTES
   }
 
   get size(): number {
-    return this.buf.length;
+    return this.buf.length
   }
 
   push(event: BusRecord, now: number): void {
-    this.buf.push(event);
-    this.bytes += busEventBytes(event);
-    this.lastSeq = Math.max(this.lastSeq, event.seq);
-    this.evict(now);
+    this.buf.push(event)
+    this.bytes += busEventBytes(event)
+    this.lastSeq = Math.max(this.lastSeq, event.seq)
+    this.evict(now)
   }
 
   /** Drop whatever the bounds no longer admit. Always from the head:
@@ -211,19 +199,19 @@ export class BusRing {
    *  the oldest event and the loop terminates on all three axes. */
   private evict(now: number): void {
     while (this.buf.length > 0) {
-      const oldest = this.buf[0];
+      const oldest = this.buf[0]
       if (oldest === undefined) {
-        return;
+        return
       }
-      const overCount = this.buf.length > this.limit;
-      const overBytes = this.bytes > this.maxBytes;
-      const expired = now - Date.parse(oldest.ts) > this.ttlMs;
+      const overCount = this.buf.length > this.limit
+      const overBytes = this.bytes > this.maxBytes
+      const expired = now - Date.parse(oldest.ts) > this.ttlMs
       if (!overCount && !overBytes && !expired) {
-        return;
+        return
       }
-      this.buf.shift();
-      this.bytes -= busEventBytes(oldest);
-      this.evictedThrough = Math.max(this.evictedThrough, oldest.seq);
+      this.buf.shift()
+      this.bytes -= busEventBytes(oldest)
+      this.evictedThrough = Math.max(this.evictedThrough, oldest.seq)
     }
   }
 
@@ -232,12 +220,12 @@ export class BusRing {
    *  broker run never issued (it restarted, so seq counts from 1 again).
    *  Both mean the same thing to a consumer: re-derive from state. */
   since(since: number, now: number = Date.now()): BusRecord[] | null {
-    this.evict(now);
+    this.evict(now)
     // The cursor wants events after `since`, so the first one it needs is
     // `since + 1`. If a bound has already dropped past that, the range is
     // gone and no answer can be honest.
     if (since < this.evictedThrough) {
-      return null;
+      return null
     }
     // A cursor past anything this run ever issued cannot be served. Two
     // ways to get here, one answer: the broker restarted and counts from
@@ -245,9 +233,9 @@ export class BusRing {
     // collision, not "nothing new"; or the cursor is simply bogus. An
     // empty list would read as "you are caught up" and hide both.
     if (since > this.lastSeq) {
-      return null;
+      return null
     }
-    return this.buf.filter(e => e.seq > since);
+    return this.buf.filter((e) => e.seq > since)
   }
 }
 
@@ -256,90 +244,90 @@ export class BusRing {
  *  short enough for `sun_path` no matter how deep the worktree, and
  *  stable per repo across processes. */
 function busSocketBase(): string {
-  const runtime = process.env.XDG_RUNTIME_DIR;
-  return runtime !== undefined && runtime !== '' ? runtime : tmpdir();
+  const runtime = process.env.XDG_RUNTIME_DIR
+  return runtime !== undefined && runtime !== '' ? runtime : tmpdir()
 }
 
 /** The broker socket for a repo, or null outside a repository. */
 export function busSocketPath(dir: string): string | null {
-  const common = gitCommonDir(dir, GIT_SYNC_PROBE_TIMEOUT_MS);
+  const common = gitCommonDir(dir, GIT_SYNC_PROBE_TIMEOUT_MS)
   if (common === null) {
-    return null;
+    return null
   }
-  const hash = createHash('sha256').update(common).digest('hex').slice(0, 16);
-  return join(busSocketBase(), 'bro-bus', `${hash}.sock`);
+  const hash = createHash('sha256').update(common).digest('hex').slice(0, 16)
+  return join(busSocketBase(), 'bro-bus', `${hash}.sock`)
 }
 
 /** Discovery file — same shape as `serve.json`: how a client learns the
  *  socket path and pid without re-deriving the hash. */
 export function busStatePath(dir: string): string | null {
-  const common = gitCommonDir(dir, GIT_SYNC_PROBE_TIMEOUT_MS);
-  return common === null ? null : join(common, 'bro', 'bus.json');
+  const common = gitCommonDir(dir, GIT_SYNC_PROBE_TIMEOUT_MS)
+  return common === null ? null : join(common, 'bro', 'bus.json')
 }
 
 interface Subscriber {
-  filter: EventFilter;
-  sock: Socket;
-  dropped: boolean;
+  filter: EventFilter
+  sock: Socket
+  dropped: boolean
 }
 
 export interface BusBrokerOptions {
   /** Retention bounds for the replay window — see `BusRing`. */
-  ring?: { limit?: number; ttlMs?: number; maxBytes?: number };
+  ring?: { limit?: number; ttlMs?: number; maxBytes?: number }
   /** Injectable clock for deterministic tests. */
-  now?: () => number;
+  now?: () => number
 }
 
 export interface BusBroker {
-  readonly socketPath: string;
+  readonly socketPath: string
   /** Broker pid — a client that suspects a stale socket needs to know
    *  whether anything is actually behind it. */
-  readonly pid: number;
+  readonly pid: number
   /** This run's generation token — what makes a `{gen, seq}` cursor
    *  honest across restarts. */
-  readonly gen: string;
+  readonly gen: string
   /** Highest seq assigned so far — the cursor a fresh subscriber starts from. */
-  readonly seq: number;
-  readonly subscriberCount: number;
-  close(): Promise<void>;
+  readonly seq: number
+  readonly subscriberCount: number
+  close(): Promise<void>
 }
 
 /** What a connect attempt learned about the path. `live` — something
  *  answers; `stale` — a refused inode a SIGKILLed broker left behind,
  *  safe to unlink; `absent` — nothing there; `unknown` — a timeout or
  *  an error that proves nothing, which must never justify an unlink. */
-type SocketProbe = 'live' | 'stale' | 'absent' | 'unknown';
+type SocketProbe = 'live' | 'stale' | 'absent' | 'unknown'
 
 /** Distinguishes a live broker from a stale inode a SIGKILLed one left
  *  behind — without it, bind fails EADDRINUSE forever and the bus can
  *  never restart. The errno is the verdict: ECONNREFUSED means the file
  *  exists and nothing listens; anything less certain stays put. */
 function probeSocket(socketPath: string, timeoutMs: number): Promise<SocketProbe> {
-  return new Promise<SocketProbe>(resolve => {
-    const sock = connect(socketPath);
-    let settled = false;
+  return new Promise<SocketProbe>((resolve) => {
+    const sock = connect(socketPath)
+    let settled = false
     const finish = (result: SocketProbe): void => {
       if (settled) {
-        return;
+        return
       }
-      settled = true;
-      clearTimeout(timer);
-      sock.destroy();
-      resolve(result);
-    };
-    const timer = setTimeout(() => finish('unknown'), timeoutMs);
-    timer.unref?.();
-    sock.once('connect', () => finish('live'));
+      settled = true
+      clearTimeout(timer)
+      sock.destroy()
+      resolve(result)
+    }
+    const timer = setTimeout(() => finish('unknown'), timeoutMs)
+    timer.unref?.()
+    sock.once('connect', () => finish('live'))
     sock.once('error', (err: NodeJS.ErrnoException) => {
       if (err.code === 'ENOENT') {
-        finish('absent');
+        finish('absent')
       } else if (err.code === 'ECONNREFUSED') {
-        finish('stale');
+        finish('stale')
       } else {
-        finish('unknown');
+        finish('unknown')
       }
-    });
-  });
+    })
+  })
 }
 
 /** Fail closed unless `dir` is ours and unreachable by anyone else. The
@@ -348,33 +336,33 @@ function probeSocket(socketPath: string, timeoutMs: number): Promise<SocketProbe
  *  and it is checked after the chmod, because that is the only thing that
  *  can have fixed it. */
 function assertPrivateDir(dir: string): void {
-  const uid = process.getuid?.();
+  const uid = process.getuid?.()
   if (uid !== undefined && statSync(dir).uid !== uid) {
-    throw new Error(`bro bus: ${dir} is not owned by this user`);
+    throw new Error(`bro bus: ${dir} is not owned by this user`)
   }
   try {
-    chmodSync(dir, 0o700);
+    chmodSync(dir, 0o700)
   } catch {
     // reported by the mode check below
   }
   if ((statSync(dir).mode & 0o077) !== 0) {
-    throw new Error(`bro bus: ${dir} is accessible to other users`);
+    throw new Error(`bro bus: ${dir} is accessible to other users`)
   }
 }
 
 function sendFrame(sock: Socket, frame: unknown): void {
-  let line: string;
+  let line: string
   try {
-    line = JSON.stringify(frame);
+    line = JSON.stringify(frame)
   } catch {
     // A BigInt, a cycle, or anything else JSON cannot represent. These
     // are called from socket callbacks, where a throw is not a rejected
     // promise but an uncaught exception — the report says that takes the
     // broker down with it. An unrepresentable frame becomes an error
     // frame on the wire instead, which is the same fact, safely.
-    line = JSON.stringify({ op: 'err', message: 'frame is not JSON-serializable' });
+    line = JSON.stringify({ op: 'err', message: 'frame is not JSON-serializable' })
   }
-  sock.write(`${line}\n`);
+  sock.write(`${line}\n`)
 }
 
 /** Start a broker on an explicit socket path. Path-taking rather than
@@ -384,41 +372,41 @@ export async function startBusBrokerAt(
   socketPath: string,
   opts: BusBrokerOptions = {}
 ): Promise<BusBroker> {
-  const ring = new BusRing(opts.ring ?? {});
-  const now = opts.now ?? Date.now;
-  const subs = new Set<Subscriber>();
+  const ring = new BusRing(opts.ring ?? {})
+  const now = opts.now ?? Date.now
+  const subs = new Set<Subscriber>()
   // net.Server has no closeAllConnections (that is http.Server), so the
   // open peers are tracked explicitly — close() must not wait on a
   // subscriber that is itself waiting for events.
-  const sockets = new Set<Socket>();
-  let seq = 0;
+  const sockets = new Set<Socket>()
+  let seq = 0
   // Per-run token: a restart re-issues seq from 1, so a bare-number
   // cursor could collide with a dead run's seq space and resume
   // silently mid-stream. A {gen, seq} cursor cannot.
-  const gen = randomBytes(8).toString('hex');
-  let open = true;
+  const gen = randomBytes(8).toString('hex')
+  let open = true
 
   const deliver = (sub: Subscriber, frame: unknown): void => {
     // A subscriber that cannot keep up gets dropped events, not a
     // stalled broker: gap first so its next event is honest about the
     // hole, then resume.
     if (sub.sock.writableLength > SLOW_CONSUMER_BYTES) {
-      sub.dropped = true;
-      return;
+      sub.dropped = true
+      return
     }
     if (sub.dropped) {
-      sub.dropped = false;
-      sendFrame(sub.sock, { op: 'gap', seq });
+      sub.dropped = false
+      sendFrame(sub.sock, { op: 'gap', seq })
     }
-    sendFrame(sub.sock, frame);
-  };
+    sendFrame(sub.sock, frame)
+  }
 
   const onPub = (sock: Socket, input: unknown): void => {
     if (!isEventInput(input)) {
-      sendFrame(sock, { op: 'err', message: 'pub needs event {topic, kind}' });
-      return;
+      sendFrame(sock, { op: 'err', message: 'pub needs event {topic, kind}' })
+      return
     }
-    seq += 1;
+    seq += 1
     // The broker assigns order, so inside here a seq always exists —
     // the facade leaves it optional only because other transports have
     // no total order to offer.
@@ -427,49 +415,45 @@ export async function startBusBrokerAt(
       gen,
       seq,
       ts: new Date(now()).toISOString(),
-    };
-    ring.push(envelope, now());
-    const out = { op: 'event', event: envelope };
+    }
+    ring.push(envelope, now())
+    const out = { op: 'event', event: envelope }
     for (const s of subs) {
       if (eventMatches(s.filter, envelope)) {
-        deliver(s, out);
+        deliver(s, out)
       }
     }
-    sendFrame(sock, { op: 'ack', seq });
-  };
+    sendFrame(sock, { op: 'ack', seq })
+  }
 
-  const onSub = (
-    sock: Socket,
-    frame: Record<string, unknown>,
-    sub: Subscriber | undefined
-  ): Subscriber => {
-    const raw = frame['filter'];
-    const filter: EventFilter = typeof raw === 'object' && raw !== null ? (raw as EventFilter) : {};
-    const since = parseSince(frame['since'], gen);
-    const entry: Subscriber = sub ?? { filter, sock, dropped: false };
-    entry.filter = filter;
-    subs.add(entry);
-    let replay: BusRecord[] | null;
+  const onSub = (sock: Socket, frame: Record<string, unknown>, sub: Subscriber | undefined): Subscriber => {
+    const raw = frame['filter']
+    const filter: EventFilter = typeof raw === 'object' && raw !== null ? (raw as EventFilter) : {}
+    const since = parseSince(frame['since'], gen)
+    const entry: Subscriber = sub ?? { filter, sock, dropped: false }
+    entry.filter = filter
+    subs.add(entry)
+    let replay: BusRecord[] | null
     if (since === 'foreign') {
-      replay = null;
+      replay = null
     } else {
-      replay = ring.since(since === 'now' ? seq : since, now());
+      replay = ring.since(since === 'now' ? seq : since, now())
     }
     if (replay === null) {
-      sendFrame(sock, { op: 'gap', seq });
-      return entry;
+      sendFrame(sock, { op: 'gap', seq })
+      return entry
     }
     // The gap check is against the raw ring — a hole in the stream is a
     // hole whatever this subscriber cares about — but the events it is
     // handed still go through its filter, or replay would hand it topics
     // it never asked for.
-    const matched = replay.filter(e => eventMatches(entry.filter, e));
+    const matched = replay.filter((e) => eventMatches(entry.filter, e))
     // The omitted prefix is a hole, so a truncated catch-up reports as a
     // gap like any other loss.
-    const limit = parseReplayLimit(frame['limit']);
-    const kept = limit === undefined ? matched : matched.slice(-limit);
+    const limit = parseReplayLimit(frame['limit'])
+    const kept = limit === undefined ? matched : matched.slice(-limit)
     if (kept.length < matched.length) {
-      sendFrame(sock, { op: 'gap', seq });
+      sendFrame(sock, { op: 'gap', seq })
     }
     // Replay obeys the same bound as live delivery: a client that cannot
     // drain the window is marked dropped, so its next event carries the
@@ -477,92 +461,88 @@ export async function startBusBrokerAt(
     // the broker's event loop for one slow reader.
     for (const e of kept) {
       if (sock.writableLength > SLOW_CONSUMER_BYTES) {
-        entry.dropped = true;
-        break;
+        entry.dropped = true
+        break
       }
-      sendFrame(sock, { op: 'event', event: e });
+      sendFrame(sock, { op: 'event', event: e })
     }
-    return entry;
-  };
+    return entry
+  }
 
-  const handleFrame = (
-    sock: Socket,
-    line: string,
-    sub: Subscriber | undefined
-  ): Subscriber | undefined => {
-    let parsed: unknown;
+  const handleFrame = (sock: Socket, line: string, sub: Subscriber | undefined): Subscriber | undefined => {
+    let parsed: unknown
     try {
-      parsed = JSON.parse(line);
+      parsed = JSON.parse(line)
     } catch {
-      sendFrame(sock, { op: 'err', message: 'malformed frame' });
+      sendFrame(sock, { op: 'err', message: 'malformed frame' })
       // end() only schedules a close — the 'close' handler that drops
       // the subscriber can trail a peer that never FINs back, so the
       // entry leaves the set here, not whenever the socket gets there.
       if (sub !== undefined) {
-        subs.delete(sub);
+        subs.delete(sub)
       }
-      sock.end();
-      return undefined;
+      sock.end()
+      return undefined
     }
     if (typeof parsed !== 'object' || parsed === null) {
-      sendFrame(sock, { op: 'err', message: 'frame must be an object' });
-      return undefined;
+      sendFrame(sock, { op: 'err', message: 'frame must be an object' })
+      return undefined
     }
-    const frame = parsed as Record<string, unknown>;
+    const frame = parsed as Record<string, unknown>
     switch (frame['op']) {
       case 'pub': {
-        onPub(sock, frame['event']);
-        return undefined;
+        onPub(sock, frame['event'])
+        return undefined
       }
       case 'sub': {
-        return onSub(sock, frame, sub);
+        return onSub(sock, frame, sub)
       }
       case 'stats': {
-        sendFrame(sock, { op: 'stats', seq, subscribers: subs.size, ring: ring.size });
-        return undefined;
+        sendFrame(sock, { op: 'stats', seq, subscribers: subs.size, ring: ring.size })
+        return undefined
       }
       default: {
-        sendFrame(sock, { op: 'err', message: `unknown op ${JSON.stringify(frame['op'])}` });
-        return undefined;
+        sendFrame(sock, { op: 'err', message: `unknown op ${JSON.stringify(frame['op'])}` })
+        return undefined
       }
     }
-  };
+  }
 
-  const server: Server = createServer(sock => {
-    let buf = '';
-    let sub: Subscriber | undefined;
-    sockets.add(sock);
+  const server: Server = createServer((sock) => {
+    let buf = ''
+    let sub: Subscriber | undefined
+    sockets.add(sock)
     // A peer that dies mid-write must not take the broker with it
-    sock.on('error', () => {});
+    sock.on('error', () => {})
     sock.on('close', () => {
-      sockets.delete(sock);
+      sockets.delete(sock)
       if (sub !== undefined) {
-        subs.delete(sub);
+        subs.delete(sub)
       }
-    });
+    })
     sock.on('data', (chunk: Buffer | string) => {
       if (!open) {
-        return;
+        return
       }
-      buf += typeof chunk === 'string' ? chunk : chunk.toString('utf8');
-      let nl = buf.indexOf('\n');
+      buf += typeof chunk === 'string' ? chunk : chunk.toString('utf8')
+      let nl = buf.indexOf('\n')
       while (nl !== -1) {
-        const line = buf.slice(0, nl);
-        buf = buf.slice(nl + 1);
+        const line = buf.slice(0, nl)
+        buf = buf.slice(nl + 1)
         if (line.trim() !== '') {
-          const next = handleFrame(sock, line, sub);
+          const next = handleFrame(sock, line, sub)
           if (next !== undefined) {
-            sub = next;
+            sub = next
           }
         }
-        nl = buf.indexOf('\n');
+        nl = buf.indexOf('\n')
       }
-    });
-  });
+    })
+  })
 
-  const probe = await probeSocket(socketPath, 200);
+  const probe = await probeSocket(socketPath, 200)
   if (probe === 'live') {
-    throw new Error(`bus already running on ${socketPath}`);
+    throw new Error(`bus already running on ${socketPath}`)
   }
   // A SIGKILLed broker leaves its socket inode behind: ECONNREFUSED is
   // the proof nothing listens, so unlinking it is the restart path, not
@@ -570,11 +550,9 @@ export async function startBusBrokerAt(
   // deleting a file whose owner cannot be read is worse than refusing
   // to start.
   if (probe === 'stale') {
-    rmSync(socketPath, { force: true });
+    rmSync(socketPath, { force: true })
   } else if (probe === 'unknown' && existsSync(socketPath)) {
-    throw new Error(
-      `bus socket ${socketPath} is present but did not answer a probe — refusing to unlink it`
-    );
+    throw new Error(`bus socket ${socketPath} is present but did not answer a probe — refusing to unlink it`)
   }
   // The socket lives in a shared dir, so it must be owner-only or another
   // local user could plant the name and receive every event. mkdir is
@@ -583,18 +561,18 @@ export async function startBusBrokerAt(
   // chmod on a dir owned by somebody else fails, which is precisely the
   // case that must not be swallowed: an ignored failure here is a socket
   // any local user can replace and read the stream through.
-  const socketDir = dirname(socketPath);
-  mkdirSync(socketDir, { recursive: true, mode: 0o700 });
-  assertPrivateDir(socketDir);
+  const socketDir = dirname(socketPath)
+  mkdirSync(socketDir, { recursive: true, mode: 0o700 })
+  assertPrivateDir(socketDir)
   await new Promise<void>((resolve, reject) => {
-    server.once('error', reject);
+    server.once('error', reject)
     server.listen(socketPath, () => {
-      server.removeListener('error', reject);
-      resolve();
-    });
-  });
+      server.removeListener('error', reject)
+      resolve()
+    })
+  })
   try {
-    chmodSync(socketPath, 0o600);
+    chmodSync(socketPath, 0o600)
   } catch {
     // best effort — a chmod failure must not stop the broker
   }
@@ -604,87 +582,87 @@ export async function startBusBrokerAt(
     pid: process.pid,
     gen,
     get seq(): number {
-      return seq;
+      return seq
     },
     get subscriberCount(): number {
-      return subs.size;
+      return subs.size
     },
     close: async () => {
-      open = false;
-      subs.clear();
+      open = false
+      subs.clear()
       for (const sock of sockets) {
-        sock.destroy();
+        sock.destroy()
       }
-      sockets.clear();
-      await new Promise<void>(resolve => {
-        const force = setTimeout(resolve, BUS_TIMEOUT_MS);
-        force.unref?.();
+      sockets.clear()
+      await new Promise<void>((resolve) => {
+        const force = setTimeout(resolve, BUS_TIMEOUT_MS)
+        force.unref?.()
         server.close(() => {
-          clearTimeout(force);
-          resolve();
-        });
-      });
+          clearTimeout(force)
+          resolve()
+        })
+      })
     },
-  };
+  }
 }
 
 /** Dir-shaped wrapper: resolves the socket path and publishes discovery
  *  state so clients do not re-derive the hash. */
 export async function startBusBroker(dir: string, opts: BusBrokerOptions = {}): Promise<BusBroker> {
-  const socketPath = busSocketPath(dir);
+  const socketPath = busSocketPath(dir)
   if (socketPath === null) {
-    throw new Error('bro bus: not inside a git repository');
+    throw new Error('bro bus: not inside a git repository')
   }
-  const broker = await startBusBrokerAt(socketPath, opts);
-  const statePath = busStatePath(dir);
+  const broker = await startBusBrokerAt(socketPath, opts)
+  const statePath = busStatePath(dir)
   if (statePath === null) {
-    return broker;
+    return broker
   }
   const record = `${JSON.stringify(
     { socketPath, pid: process.pid, startedAt: new Date().toISOString() },
     null,
     2
-  )}\n`;
+  )}\n`
   try {
     // mkdir lives inside the guard too — its failure must not leave a
     // broker listening without discovery, same rule as the write
-    mkdirSync(dirname(statePath), { recursive: true });
-    writeFileSync(statePath, record, { mode: 0o600 });
+    mkdirSync(dirname(statePath), { recursive: true })
+    writeFileSync(statePath, record, { mode: 0o600 })
   } catch (err) {
     // Discovery state is how a client finds the socket without
     // re-deriving the hash, so a broker nobody can find is worse than no
     // broker: it would hold the name, answer nothing, and look alive in
     // `bus status`. Take it back down and report why.
-    await broker.close();
-    throw err;
+    await broker.close()
+    throw err
   }
   return {
     socketPath,
     pid: process.pid,
     get gen(): string {
-      return broker.gen;
+      return broker.gen
     },
     get seq(): number {
-      return broker.seq;
+      return broker.seq
     },
     get subscriberCount(): number {
-      return broker.subscriberCount;
+      return broker.subscriberCount
     },
     close: async () => {
-      await broker.close();
+      await broker.close()
       // Discovery must not outlive the broker it advertises — but a
       // replacement may already have rewritten the file, so unlink
       // only the record this broker wrote.
       try {
         if (readFileSync(statePath, 'utf8') === record) {
-          rmSync(statePath, { force: true });
+          rmSync(statePath, { force: true })
         }
       } catch {
         // a wedged state file is the next broker's stale-socket
         // problem, not a close() failure
       }
     },
-  };
+  }
 }
 
 /** Nothing is listening on that socket. A stale socket file gives ENOENT,
@@ -692,21 +670,21 @@ export async function startBusBroker(dir: string, opts: BusBrokerOptions = {}): 
  *  caller, so callers get one stable reason instead of an errno that
  *  leaks into notes. EACCES is deliberately excluded: a permission
  *  problem is a real fault worth showing verbatim. */
-const BROKER_DOWN_CODES = new Set(['ENOENT', 'ECONNREFUSED']);
+const BROKER_DOWN_CODES = new Set(['ENOENT', 'ECONNREFUSED'])
 
 function brokerDownReason(err: unknown): string {
-  const code = (err as { code?: unknown }).code;
+  const code = (err as { code?: unknown }).code
   if (typeof code === 'string' && BROKER_DOWN_CODES.has(code)) {
-    return 'broker down';
+    return 'broker down'
   }
-  return err instanceof Error ? err.message : String(err);
+  return err instanceof Error ? err.message : String(err)
 }
 
 export interface BusPublishResult {
-  published: boolean;
-  seq?: number;
+  published: boolean
+  seq?: number
   /** Why it did not publish — `broker down` is routine, not a failure. */
-  reason?: string;
+  reason?: string
 }
 
 /** Publish one event. Fail-open by contract: a broker that is down, or
@@ -718,61 +696,61 @@ export function busPublish(
   event: EventInput,
   opts: { timeoutMs?: number } = {}
 ): Promise<BusPublishResult> {
-  const timeoutMs = opts.timeoutMs ?? BUS_TIMEOUT_MS;
-  return new Promise<BusPublishResult>(resolve => {
-    let settled = false;
-    let buf = '';
+  const timeoutMs = opts.timeoutMs ?? BUS_TIMEOUT_MS
+  return new Promise<BusPublishResult>((resolve) => {
+    let settled = false
+    let buf = ''
     const finish = (res: BusPublishResult): void => {
       if (settled) {
-        return;
+        return
       }
-      settled = true;
-      clearTimeout(timer);
-      sock.destroy();
-      resolve(res);
-    };
-    const sock = connect(socketPath);
-    const timer = setTimeout(() => finish({ published: false, reason: 'timeout' }), timeoutMs);
-    timer.unref?.();
+      settled = true
+      clearTimeout(timer)
+      sock.destroy()
+      resolve(res)
+    }
+    const sock = connect(socketPath)
+    const timer = setTimeout(() => finish({ published: false, reason: 'timeout' }), timeoutMs)
+    timer.unref?.()
     sock.on('error', (err: NodeJS.ErrnoException) => {
-      finish({ published: false, reason: brokerDownReason(err) });
-    });
+      finish({ published: false, reason: brokerDownReason(err) })
+    })
     sock.on('connect', () => {
-      sendFrame(sock, { op: 'pub', event });
-    });
+      sendFrame(sock, { op: 'pub', event })
+    })
     sock.on('data', (chunk: Buffer) => {
-      buf += chunk.toString('utf8');
-      const nl = buf.indexOf('\n');
+      buf += chunk.toString('utf8')
+      const nl = buf.indexOf('\n')
       if (nl === -1) {
-        return;
+        return
       }
       try {
-        const frame = JSON.parse(buf.slice(0, nl)) as Record<string, unknown>;
+        const frame = JSON.parse(buf.slice(0, nl)) as Record<string, unknown>
         if (frame['op'] === 'ack' && typeof frame['seq'] === 'number') {
-          finish({ published: true, seq: frame['seq'] });
+          finish({ published: true, seq: frame['seq'] })
         } else if (frame['op'] === 'err') {
-          finish({ published: false, reason: String(frame['message']) });
+          finish({ published: false, reason: String(frame['message']) })
         }
       } catch {
-        finish({ published: false, reason: 'malformed ack' });
+        finish({ published: false, reason: 'malformed ack' })
       }
-    });
-  });
+    })
+  })
 }
 
 export interface BusSubscriptionHandlers {
-  onEvent: (event: EventEnvelope) => void;
+  onEvent: (event: EventEnvelope) => void
   /** Cursor fell out of the replay window (or the broker restarted) —
    *  re-derive from state before trusting the next event. */
-  onGap?: (seq: number) => void;
+  onGap?: (seq: number) => void
   /** The broker went away and the stream ended. Without this a
    *  subscriber waits on a signal for a socket that can never deliver
    *  again, so a shutdown reads as silence rather than as an ending. */
-  onClose?: () => void;
+  onClose?: () => void
 }
 
 export interface BusSubscription {
-  close(): void;
+  close(): void
 }
 
 /** Subscribe. Unlike publish this throws on an unreachable broker: it is
@@ -788,31 +766,31 @@ export function busSubscribe(
   handlers: BusSubscriptionHandlers,
   opts: { since?: number | BusCursor; limit?: number; timeoutMs?: number } = {}
 ): Promise<BusSubscription> {
-  const timeoutMs = opts.timeoutMs ?? BUS_TIMEOUT_MS;
+  const timeoutMs = opts.timeoutMs ?? BUS_TIMEOUT_MS
   return new Promise<BusSubscription>((resolve, reject) => {
-    let settled = false;
+    let settled = false
     // onClose reports the stream ended BY THE BROKER — a rejected
     // connect never had a stream to end, and a local close() was the
     // caller's own choice; neither should read as "the broker went away"
-    let established = false;
-    let closedByUs = false;
-    let buf = '';
-    const sock = connect(socketPath);
+    let established = false
+    let closedByUs = false
+    let buf = ''
+    const sock = connect(socketPath)
     const timer = setTimeout(() => {
       if (!settled) {
-        settled = true;
-        sock.destroy();
-        reject(new Error('bro bus: subscribe timed out'));
+        settled = true
+        sock.destroy()
+        reject(new Error('bro bus: subscribe timed out'))
       }
-    }, timeoutMs);
-    timer.unref?.();
+    }, timeoutMs)
+    timer.unref?.()
     sock.once('error', (err: Error) => {
       if (!settled) {
-        settled = true;
-        clearTimeout(timer);
-        reject(err);
+        settled = true
+        clearTimeout(timer)
+        reject(err)
       }
-    });
+    })
     sock.once('connect', () => {
       // No cursor means "from now", not "from the beginning of the
       // ring" — a plain subscriber wants the stream, and defaulting to 0
@@ -822,127 +800,119 @@ export function busSubscribe(
         filter,
         ...(opts.since !== undefined ? { since: opts.since } : {}),
         ...(opts.limit !== undefined ? { limit: opts.limit } : {}),
-      });
+      })
       if (settled) {
-        return;
+        return
       }
-      settled = true;
-      established = true;
-      clearTimeout(timer);
+      settled = true
+      established = true
+      clearTimeout(timer)
       resolve({
         close: () => {
-          closedByUs = true;
-          sock.destroy();
+          closedByUs = true
+          sock.destroy()
         },
-      });
-    });
+      })
+    })
     sock.on('data', (chunk: Buffer) => {
-      buf += chunk.toString('utf8');
-      let nl = buf.indexOf('\n');
+      buf += chunk.toString('utf8')
+      let nl = buf.indexOf('\n')
       while (nl !== -1) {
-        const line = buf.slice(0, nl);
-        buf = buf.slice(nl + 1);
+        const line = buf.slice(0, nl)
+        buf = buf.slice(nl + 1)
         if (line.trim() !== '') {
-          let frame: Record<string, unknown>;
+          let frame: Record<string, unknown>
           try {
-            frame = JSON.parse(line) as Record<string, unknown>;
+            frame = JSON.parse(line) as Record<string, unknown>
           } catch {
-            continue;
+            continue
           }
           if (frame['op'] === 'event') {
-            handlers.onEvent(frame['event'] as EventEnvelope);
+            handlers.onEvent(frame['event'] as EventEnvelope)
           } else if (frame['op'] === 'gap' && handlers.onGap !== undefined) {
-            handlers.onGap(typeof frame['seq'] === 'number' ? frame['seq'] : 0);
+            handlers.onGap(typeof frame['seq'] === 'number' ? frame['seq'] : 0)
           }
         }
-        nl = buf.indexOf('\n');
+        nl = buf.indexOf('\n')
       }
-    });
+    })
     // The broker closing its end is the end of the stream, not a lull in
     // it. Fired once, and only on a remote close — a rejected connect
     // reports the rejection, a local close() was the caller's choice.
     sock.on('close', () => {
       if (established && !closedByUs) {
-        handlers.onClose?.();
+        handlers.onClose?.()
       }
-    });
-  });
+    })
+  })
 }
 
 export interface BusStatus {
-  running: boolean;
-  seq?: number;
-  subscribers?: number;
-  ring?: number;
-  socketPath: string;
-  reason?: string;
+  running: boolean
+  seq?: number
+  subscribers?: number
+  ring?: number
+  socketPath: string
+  reason?: string
 }
 
 /** Liveness + counters. Resolves `running: false` instead of throwing —
  *  `bro bus status` must be safe to call from a hook or a doctor walk. */
-export function busStatus(
-  socketPath: string,
-  opts: { timeoutMs?: number } = {}
-): Promise<BusStatus> {
-  const timeoutMs = opts.timeoutMs ?? BUS_TIMEOUT_MS;
-  return new Promise<BusStatus>(resolve => {
-    let settled = false;
-    let buf = '';
+export function busStatus(socketPath: string, opts: { timeoutMs?: number } = {}): Promise<BusStatus> {
+  const timeoutMs = opts.timeoutMs ?? BUS_TIMEOUT_MS
+  return new Promise<BusStatus>((resolve) => {
+    let settled = false
+    let buf = ''
     const finish = (status: BusStatus): void => {
       if (settled) {
-        return;
+        return
       }
-      settled = true;
-      clearTimeout(timer);
-      sock.destroy();
-      resolve(status);
-    };
-    const sock = connect(socketPath);
-    const timer = setTimeout(
-      () => finish({ running: false, socketPath, reason: 'timeout' }),
-      timeoutMs
-    );
-    timer.unref?.();
+      settled = true
+      clearTimeout(timer)
+      sock.destroy()
+      resolve(status)
+    }
+    const sock = connect(socketPath)
+    const timer = setTimeout(() => finish({ running: false, socketPath, reason: 'timeout' }), timeoutMs)
+    timer.unref?.()
     sock.on('error', (err: NodeJS.ErrnoException) => {
-      finish({ running: false, socketPath, reason: brokerDownReason(err) });
-    });
+      finish({ running: false, socketPath, reason: brokerDownReason(err) })
+    })
     sock.on('connect', () => {
-      sendFrame(sock, { op: 'stats' });
-    });
+      sendFrame(sock, { op: 'stats' })
+    })
     sock.on('data', (chunk: Buffer) => {
-      buf += chunk.toString('utf8');
-      const nl = buf.indexOf('\n');
+      buf += chunk.toString('utf8')
+      const nl = buf.indexOf('\n')
       if (nl === -1) {
-        return;
+        return
       }
       try {
-        const frame = JSON.parse(buf.slice(0, nl)) as Record<string, unknown>;
+        const frame = JSON.parse(buf.slice(0, nl)) as Record<string, unknown>
         if (frame['op'] === 'stats') {
           finish({
             running: true,
             socketPath,
             ...(typeof frame['seq'] === 'number' ? { seq: frame['seq'] } : {}),
-            ...(typeof frame['subscribers'] === 'number'
-              ? { subscribers: frame['subscribers'] }
-              : {}),
+            ...(typeof frame['subscribers'] === 'number' ? { subscribers: frame['subscribers'] } : {}),
             ...(typeof frame['ring'] === 'number' ? { ring: frame['ring'] } : {}),
-          });
+          })
         }
       } catch {
-        finish({ running: false, socketPath, reason: 'malformed stats' });
+        finish({ running: false, socketPath, reason: 'malformed stats' })
       }
-    });
-  });
+    })
+  })
 }
 
 export interface BusProbeResult {
-  events: EventEnvelope[];
+  events: EventEnvelope[]
   /** True when the cursor could not be honoured — the caller must
    *  re-derive state rather than trust the events it did get. */
-  gapped: boolean;
+  gapped: boolean
   /** Why nothing came back. `broker down` is routine on a repo where
    *  nobody started one, so it is not an error. */
-  reason?: string;
+  reason?: string
 }
 
 /** The hook-path primitive: collect whatever the bus has for this
@@ -953,49 +923,50 @@ export interface BusProbeResult {
 export async function busProbe(
   socketPath: string,
   opts: {
-    since?: number;
-    windowMs?: number;
-    limit?: number;
+    since?: number
+    windowMs?: number
+    limit?: number
     /** Broker-side narrowing (topic glob, kind, `to`, `keys`) — a probe
      *  asking "what did agent X do" must not spend its window on the
      *  fleet's whole ring. Empty/absent means everything. */
-    filter?: EventFilter;
+    filter?: EventFilter
     /** Settle-based early exit: the wire carries no end-of-replay
      *  marker, but the broker writes the replay as one contiguous
      *  prefix, so `settleMs` of socket quiet after the last frame reads
      *  as "caught up". Without it the probe holds the whole `windowMs`
      *  even on an idle broker — dead time every snapshot read pays. */
-    settleMs?: number;
+    settleMs?: number
   } = {}
 ): Promise<BusProbeResult> {
-  const windowMs = opts.windowMs ?? BUS_PROBE_WINDOW_MS;
+  const windowMs = opts.windowMs ?? BUS_PROBE_WINDOW_MS
   // a bound is a positive integer — 0/negative would read as "no bound"
   // at the broker's parseReplayLimit and invert slice(-n) into all rows
-  const limit = opts.limit === undefined ? BUS_PROBE_LIMIT : Math.max(1, Math.floor(opts.limit));
+  const limit =
+    opts.limit === undefined ? BUS_PROBE_LIMIT : Math.max(1, Math.floor(opts.limit))
   // One budget, spent once. The connect and the listen window are two
   // waits, and giving each the full window would let a probe take twice
   // the budget it advertises — on the hook path that ceiling is the
   // contract, so the deadline is taken before the connect and what is
   // left is what the listen gets.
-  const deadline = Date.now() + windowMs;
-  const events: EventEnvelope[] = [];
-  let gapped = false;
-  let sub: BusSubscription | undefined;
+  const deadline = Date.now() + windowMs
+  const events: EventEnvelope[] = []
+  let gapped = false
+  let sub: BusSubscription | undefined
   // frames rearm the settle timer — assigned once the listen phase is
   // armed below (frames can beat the subscribe resolution)
-  let noteFrame: () => void = () => {};
+  let noteFrame: () => void = () => {}
   try {
     sub = await busSubscribe(
       socketPath,
       opts.filter ?? {},
       {
-        onEvent: e => {
-          events.push(e);
-          noteFrame();
+        onEvent: (e) => {
+          events.push(e)
+          noteFrame()
         },
         onGap: () => {
-          gapped = true;
-          noteFrame();
+          gapped = true
+          noteFrame()
         },
       },
       // Probe asks "what happened while I was away", so it defaults to
@@ -1008,44 +979,41 @@ export async function busProbe(
         ...(opts.since === undefined ? { limit } : {}),
         timeoutMs: Math.max(1, deadline - Date.now()),
       }
-    );
+    )
   } catch (err) {
-    return { events, gapped, reason: brokerDownReason(err) };
+    return { events, gapped, reason: brokerDownReason(err) }
   }
-  await new Promise<void>(resolve => {
-    const cap = setTimeout(
-      () => {
-        clearTimeout(idle);
-        resolve();
-      },
-      Math.max(0, deadline - Date.now())
-    );
-    cap.unref?.();
-    const settle = opts.settleMs;
-    let idle: NodeJS.Timeout | undefined;
+  await new Promise<void>((resolve) => {
+    const cap = setTimeout(() => {
+      clearTimeout(idle)
+      resolve()
+    }, Math.max(0, deadline - Date.now()))
+    cap.unref?.()
+    const settle = opts.settleMs
+    let idle: NodeJS.Timeout | undefined
     const arm = (): void => {
       if (settle === undefined) {
-        return;
+        return
       }
-      clearTimeout(idle);
+      clearTimeout(idle)
       idle = setTimeout(() => {
-        clearTimeout(cap);
-        resolve();
-      }, settle);
-      idle.unref?.();
-    };
-    noteFrame = arm;
-    arm();
-  });
-  sub.close();
+        clearTimeout(cap)
+        resolve()
+      }, settle)
+      idle.unref?.()
+    }
+    noteFrame = arm
+    arm()
+  })
+  sub.close()
   // With no cursor the probe catches up from the start of the ring, and
   // an unbounded ring would hand a hook run thousands of lines. Keep the
   // newest slice and say so: `gapped` already means "you are not seeing
   // everything, re-derive", which is exactly what truncation is.
   if (opts.since === undefined && events.length > limit) {
-    return { events: events.slice(-limit), gapped: true };
+    return { events: events.slice(-limit), gapped: true }
   }
-  return { events, gapped };
+  return { events, gapped }
 }
 
 export interface BusWake {
@@ -1054,8 +1022,8 @@ export interface BusWake {
    *  After close() (or a broker-side drop) it never resolves: the
    *  caller's own timer is the fallback, so a dead subscription degrades
    *  to polling instead of hanging the loop. */
-  next(): Promise<void>;
-  close(): void;
+  next(): Promise<void>
+  close(): void
 }
 
 /** A subscription distilled to a wake-up signal for poll loops —
@@ -1072,47 +1040,47 @@ export async function busWake(
   filter: EventFilter,
   match: (event: EventEnvelope) => boolean = () => true
 ): Promise<BusWake | null> {
-  let open = true;
-  let waiter: (() => void) | null = null;
+  let open = true
+  let waiter: (() => void) | null = null
   const poke = (): void => {
-    const w = waiter;
-    waiter = null;
-    w?.();
-  };
-  let sub: BusSubscription;
+    const w = waiter
+    waiter = null
+    w?.()
+  }
+  let sub: BusSubscription
   try {
     sub = await busSubscribe(socketPath, filter, {
-      onEvent: e => {
-        let hit = false;
+      onEvent: (e) => {
+        let hit = false
         try {
-          hit = match(e);
+          hit = match(e)
         } catch {
-          hit = false;
+          hit = false
         }
         if (hit) {
-          poke();
+          poke()
         }
       },
       onGap: poke,
       onClose: () => {
-        open = false;
+        open = false
       },
-    });
+    })
   } catch {
-    return null;
+    return null
   }
   return {
     next: () => {
       if (!open) {
-        return new Promise<void>(() => {});
+        return new Promise<void>(() => {})
       }
-      return new Promise<void>(resolve => {
-        waiter = resolve;
-      });
+      return new Promise<void>((resolve) => {
+        waiter = resolve
+      })
     },
     close: () => {
-      open = false;
-      sub.close();
+      open = false
+      sub.close()
     },
-  };
+  }
 }

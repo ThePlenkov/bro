@@ -1,24 +1,17 @@
-import { after, describe, test } from 'node:test';
-import assert from 'node:assert/strict';
-import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
-import { join } from 'node:path';
-import {
-  bdActor,
-  getTasks,
-  getTasksAsync,
-  taskStore,
-  type TaskStore,
-  type TaskStoreAsync,
-} from './tasks.ts';
-import { GIT_SYNC_PROBE_TIMEOUT_MS } from './git.ts';
-import { doltManifest, doltStoreCommit, scrubEnv, testGit } from './testkit.ts';
+import { after, describe, test } from 'node:test'
+import assert from 'node:assert/strict'
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
+import { bdActor, getTasks, getTasksAsync, taskStore, type TaskStore, type TaskStoreAsync } from './tasks.ts'
+import { GIT_SYNC_PROBE_TIMEOUT_MS } from './git.ts'
+import { doltManifest, doltStoreCommit, scrubEnv, testGit } from './testkit.ts'
 
 // ambient repo/agent/store pins must not reach fixture git children
 // or the code-under-test spawns — scrub once, restore after the file
-after(scrubEnv());
+after(scrubEnv())
 
-const WIN32 = process.platform === 'win32';
+const WIN32 = process.platform === 'win32'
 
 /** Scripted bd on PATH — records argv to $FAKE_BD_LOG, answers by $1. */
 const FAKE_BD = `#!/bin/sh
@@ -42,38 +35,40 @@ case "$1" in
   update|close|reopen|note|link) : ;;
   delete) : ;;
 esac
-`;
+`
 
 function withFakeBd(env: Record<string, string>, fn: (log: string) => void): void {
-  const dir = mkdtempSync(join(tmpdir(), 'bro-fake-bd-'));
-  const log = join(dir, 'bd.log');
-  writeFileSync(log, '');
-  writeFileSync(join(dir, 'bd'), FAKE_BD);
-  chmodSync(join(dir, 'bd'), 0o755);
-  const prevPath = process.env.PATH;
-  const prevEnv = Object.fromEntries(Object.keys(env).map(k => [k, process.env[k]]));
-  process.env.PATH = `${dir}:${prevPath}`;
-  Object.assign(process.env, { FAKE_BD_LOG: log, ...env });
+  const dir = mkdtempSync(join(tmpdir(), 'bro-fake-bd-'))
+  const log = join(dir, 'bd.log')
+  writeFileSync(log, '')
+  writeFileSync(join(dir, 'bd'), FAKE_BD)
+  chmodSync(join(dir, 'bd'), 0o755)
+  const prevPath = process.env.PATH
+  const prevEnv = Object.fromEntries(
+    Object.keys(env).map((k) => [k, process.env[k]])
+  )
+  process.env.PATH = `${dir}:${prevPath}`
+  Object.assign(process.env, { FAKE_BD_LOG: log, ...env })
   try {
-    fn(log);
+    fn(log)
   } finally {
-    process.env.PATH = prevPath;
+    process.env.PATH = prevPath
     for (const [k, v] of Object.entries(prevEnv)) {
-      if (v === undefined) delete process.env[k];
-      else process.env[k] = v;
+      if (v === undefined) delete process.env[k]
+      else process.env[k] = v
     }
-    delete process.env.FAKE_BD_LOG;
-    rmSync(dir, { recursive: true, force: true });
+    delete process.env.FAKE_BD_LOG
+    rmSync(dir, { recursive: true, force: true })
   }
 }
 
 function logLines(log: string): string[] {
-  return readFileSync(log, 'utf8').trim().split('\n');
+  return readFileSync(log, 'utf8').trim().split('\n')
 }
 
 describe('taskStore', { skip: WIN32 }, () => {
   test('list maps the filter onto bd list args', () => {
-    withFakeBd({}, log => {
+    withFakeBd({}, (log) => {
       const rows = taskStore().list({
         status: 'open',
         labels: ['debt'],
@@ -81,9 +76,9 @@ describe('taskStore', { skip: WIN32 }, () => {
         all: true,
         limit: 0,
         type: 'bug',
-      });
-      assert.equal(rows[0]?.id, 't1');
-      const call = logLines(log)[0] ?? '';
+      })
+      assert.equal(rows[0]?.id, 't1')
+      const call = logLines(log)[0] ?? ''
       for (const part of [
         'list',
         '--json',
@@ -94,160 +89,139 @@ describe('taskStore', { skip: WIN32 }, () => {
         '-n 0',
         '--type bug',
       ]) {
-        assert.ok(call.includes(part), `missing "${part}" in: ${call}`);
+        assert.ok(call.includes(part), `missing "${part}" in: ${call}`)
       }
-    });
-  });
+    })
+  })
 
   test('get unwraps the array bd show returns', () => {
     withFakeBd({}, () => {
-      assert.equal(taskStore().get('t1')?.status, 'in_progress');
-    });
-  });
+      assert.equal(taskStore().get('t1')?.status, 'in_progress')
+    })
+  })
 
   test('get returns undefined for a missing id', () => {
     withFakeBd({ FAKE_BD_SHOW: 'missing' }, () => {
-      assert.equal(taskStore().get('t1'), undefined);
-    });
-  });
+      assert.equal(taskStore().get('t1'), undefined)
+    })
+  })
 
   test('get propagates a backend failure — never reports it as absent', () => {
     withFakeBd({ FAKE_BD_SHOW: 'broken' }, () => {
-      assert.throws(() => taskStore().get('t1'), /locked|Command failed/);
-    });
-  });
+      assert.throws(() => taskStore().get('t1'), /locked|Command failed/)
+    })
+  })
 
   test('getMany answers the found rows in ONE bd show', () => {
-    withFakeBd({ FAKE_BD_SHOW: 'partial' }, log => {
-      const rows = taskStore().getMany?.(['t1', 't2']) ?? [];
-      assert.deepEqual(
-        rows.map(r => r.id),
-        ['t2']
-      );
-      const calls = logLines(log).filter(l => l.startsWith('show '));
-      assert.equal(calls.length, 1);
-      assert.ok(calls[0]!.includes('t1') && calls[0]!.includes('t2'), calls[0]);
-    });
-  });
+    withFakeBd({ FAKE_BD_SHOW: 'partial' }, (log) => {
+      const rows = taskStore().getMany?.(['t1', 't2']) ?? []
+      assert.deepEqual(rows.map((r) => r.id), ['t2'])
+      const calls = logLines(log).filter((l) => l.startsWith('show '))
+      assert.equal(calls.length, 1)
+      assert.ok(calls[0]!.includes('t1') && calls[0]!.includes('t2'), calls[0])
+    })
+  })
 
   test('getMany folds a total miss to [] — the error envelope is not drift', () => {
     withFakeBd({ FAKE_BD_SHOW: 'allmiss' }, () => {
-      assert.deepEqual(taskStore().getMany?.(['t9', 't8']), []);
-    });
-  });
+      assert.deepEqual(taskStore().getMany?.(['t9', 't8']), [])
+    })
+  })
 
   test('getMany folds a single-id miss to [] — same contract as get', () => {
     withFakeBd({ FAKE_BD_SHOW: 'missing' }, () => {
-      assert.deepEqual(taskStore().getMany?.(['t1']), []);
-    });
-  });
+      assert.deepEqual(taskStore().getMany?.(['t1']), [])
+    })
+  })
 
   test('getMany propagates a backend failure like get does', () => {
     withFakeBd({ FAKE_BD_SHOW: 'broken' }, () => {
-      assert.throws(() => taskStore().getMany?.(['t1', 't2']), /locked|Command failed/);
-    });
-  });
+      assert.throws(() => taskStore().getMany?.(['t1', 't2']), /locked|Command failed/)
+    })
+  })
 
   test('getMany on empty ids never spawns', () => {
-    withFakeBd({}, log => {
-      assert.deepEqual(taskStore().getMany?.([]), []);
-      assert.equal(logLines(log).filter(l => l.startsWith('show')).length, 0);
-    });
-  });
+    withFakeBd({}, (log) => {
+      assert.deepEqual(taskStore().getMany?.([]), [])
+      assert.equal(logLines(log).filter((l) => l.startsWith('show')).length, 0)
+    })
+  })
 
   test('getTasks degrades to serial get without the capability', () => {
-    const calls: string[] = [];
+    const calls: string[] = []
     const serial = {
       get: (id: string) => {
-        calls.push(id);
-        return id === 'gone' ? undefined : { id };
+        calls.push(id)
+        return id === 'gone' ? undefined : { id }
       },
-    } as unknown as TaskStore;
-    assert.deepEqual(
-      getTasks(serial, ['a', 'gone', 'b']).map(r => r.id),
-      ['a', 'b']
-    );
-    assert.deepEqual(calls, ['a', 'gone', 'b']);
+    } as unknown as TaskStore
+    assert.deepEqual(getTasks(serial, ['a', 'gone', 'b']).map((r) => r.id), ['a', 'b'])
+    assert.deepEqual(calls, ['a', 'gone', 'b'])
     // and a store WITH the verb never falls back to get
     const batched = {
-      getMany: (ids: string[]) => ids.map(id => ({ id })),
+      getMany: (ids: string[]) => ids.map((id) => ({ id })),
       get: () => {
-        throw new Error('get must not run when getMany exists');
+        throw new Error('get must not run when getMany exists')
       },
-    } as unknown as TaskStore;
-    assert.deepEqual(
-      getTasks(batched, ['x', 'y']).map(r => r.id),
-      ['x', 'y']
-    );
-  });
+    } as unknown as TaskStore
+    assert.deepEqual(getTasks(batched, ['x', 'y']).map((r) => r.id), ['x', 'y'])
+  })
 
   test('getTasks bounds the ids per getMany call — argv has an OS cap', () => {
-    const calls: string[][] = [];
+    const calls: string[][] = []
     const batched = {
       getMany: (ids: string[]) => {
-        calls.push(ids);
-        return ids.map(id => ({ id }));
+        calls.push(ids)
+        return ids.map((id) => ({ id }))
       },
       get: () => {
-        throw new Error('get must not run when getMany exists');
+        throw new Error('get must not run when getMany exists')
       },
-    } as unknown as TaskStore;
-    const ids = Array.from({ length: 1201 }, (_, i) => `t${i}`);
-    assert.equal(getTasks(batched, ids).length, 1201);
-    assert.deepEqual(
-      calls.map(c => c.length),
-      [500, 500, 201]
-    );
+    } as unknown as TaskStore
+    const ids = Array.from({ length: 1201 }, (_, i) => `t${i}`)
+    assert.equal(getTasks(batched, ids).length, 1201)
+    assert.deepEqual(calls.map((c) => c.length), [500, 500, 201])
     // every id reached the backend exactly once, in request order
-    assert.deepEqual(calls.flat(), ids);
-  });
+    assert.deepEqual(calls.flat(), ids)
+  })
 
   test('getTasksAsync degrades to overlapping get without the capability', async () => {
-    const calls: string[] = [];
+    const calls: string[] = []
     const serial = {
       get: (id: string) => {
-        calls.push(id);
-        return Promise.resolve(id === 'gone' ? undefined : { id });
+        calls.push(id)
+        return Promise.resolve(id === 'gone' ? undefined : { id })
       },
-    } as unknown as TaskStoreAsync;
-    assert.deepEqual(
-      (await getTasksAsync(serial, ['a', 'gone', 'b'])).map(r => r.id),
-      ['a', 'b']
-    );
-    assert.deepEqual(calls, ['a', 'gone', 'b']);
+    } as unknown as TaskStoreAsync
+    assert.deepEqual((await getTasksAsync(serial, ['a', 'gone', 'b'])).map((r) => r.id), [
+      'a',
+      'b',
+    ])
+    assert.deepEqual(calls, ['a', 'gone', 'b'])
     // and a store WITH the verb never falls back to get
     const batched = {
-      getMany: (ids: string[]) => Promise.resolve(ids.map(id => ({ id }))),
+      getMany: (ids: string[]) => Promise.resolve(ids.map((id) => ({ id }))),
       get: () => Promise.reject(new Error('get must not run when getMany exists')),
-    } as unknown as TaskStoreAsync;
-    assert.deepEqual(
-      (await getTasksAsync(batched, ['x', 'y'])).map(r => r.id),
-      ['x', 'y']
-    );
-  });
+    } as unknown as TaskStoreAsync
+    assert.deepEqual((await getTasksAsync(batched, ['x', 'y'])).map((r) => r.id), ['x', 'y'])
+  })
 
   test('getTasksAsync bounds and overlaps a batched read', async () => {
-    const calls: string[][] = [];
+    const calls: string[][] = []
     const batched = {
       getMany: (ids: string[]) => {
-        calls.push(ids);
-        return Promise.resolve(ids.map(id => ({ id })));
+        calls.push(ids)
+        return Promise.resolve(ids.map((id) => ({ id })))
       },
       get: () => Promise.reject(new Error('get must not run when getMany exists')),
-    } as unknown as TaskStoreAsync;
-    const ids = Array.from({ length: 1201 }, (_, i) => `t${i}`);
-    assert.deepEqual(
-      (await getTasksAsync(batched, ids)).map(r => r.id),
-      ids
-    );
-    assert.deepEqual(
-      calls.map(c => c.length),
-      [500, 500, 201]
-    );
-  });
+    } as unknown as TaskStoreAsync
+    const ids = Array.from({ length: 1201 }, (_, i) => `t${i}`)
+    assert.deepEqual((await getTasksAsync(batched, ids)).map((r) => r.id), ids)
+    assert.deepEqual(calls.map((c) => c.length), [500, 500, 201])
+  })
 
   test('create maps the typed input onto bd create args', () => {
-    withFakeBd({}, log => {
+    withFakeBd({}, (log) => {
       const row = taskStore().create({
         title: 'fix it',
         description: 'd',
@@ -259,9 +233,9 @@ describe('taskStore', { skip: WIN32 }, () => {
         externalRef: 'th_1',
         metadata: { k: 'v' },
         noInheritLabels: true,
-      });
-      assert.equal(row.id, 't9');
-      const call = logLines(log)[0] ?? '';
+      })
+      assert.equal(row.id, 't9')
+      const call = logLines(log)[0] ?? ''
       for (const part of [
         'create',
         '--title fix it',
@@ -275,282 +249,246 @@ describe('taskStore', { skip: WIN32 }, () => {
         '--external-ref th_1',
         '--metadata {"k":"v"}',
       ]) {
-        assert.ok(call.includes(part), `missing "${part}" in: ${call}`);
+        assert.ok(call.includes(part), `missing "${part}" in: ${call}`)
       }
-    });
-  });
+    })
+  })
 
   test("update emits 'true' as a bare flag, strings as --k v", () => {
-    withFakeBd({}, log => {
-      taskStore().update('t1', { status: 'open', claim: 'true', priority: 1 });
-      const call = logLines(log)[0] ?? '';
-      assert.ok(call.includes('--status open'), call);
-      assert.ok(call.includes('--claim'), call);
-      assert.ok(!call.includes('--claim true'), call);
-      assert.ok(call.includes('--priority 1'), call);
-    });
-  });
+    withFakeBd({}, (log) => {
+      taskStore().update('t1', { status: 'open', claim: 'true', priority: 1 })
+      const call = logLines(log)[0] ?? ''
+      assert.ok(call.includes('--status open'), call)
+      assert.ok(call.includes('--claim'), call)
+      assert.ok(!call.includes('--claim true'), call)
+      assert.ok(call.includes('--priority 1'), call)
+    })
+  })
 
   test('reopen releases via update --status open, never `bd reopen` (bro-aqjji)', () => {
-    withFakeBd({}, log => {
-      taskStore().reopen('t1');
-      const call = logLines(log)[0] ?? '';
+    withFakeBd({}, (log) => {
+      taskStore().reopen('t1')
+      const call = logLines(log)[0] ?? ''
       // `bd reopen` no-ops on an in_progress claim — a quota-refused
       // spawn's settle would strand the bead in_progress forever
-      assert.ok(call.includes('update t1 --status open --assignee'), call);
-      assert.ok(!call.includes('reopen'), call);
-    });
-  });
+      assert.ok(call.includes('update t1 --status open --assignee'), call)
+      assert.ok(!call.includes('reopen'), call)
+    })
+  })
 
   test('deps narrows by type and direction', () => {
-    withFakeBd({}, log => {
-      taskStore().deps(['t1', 't2'], { rel: 'parent', direction: 'up' });
-      const call = logLines(log)[0] ?? '';
-      assert.ok(call.includes('dep list t1 t2'), call);
-      assert.ok(call.includes('-t parent-child'), call);
-      assert.ok(call.includes('--direction=up'), call);
-    });
-  });
+    withFakeBd({}, (log) => {
+      taskStore().deps(['t1', 't2'], { rel: 'parent', direction: 'up' })
+      const call = logLines(log)[0] ?? ''
+      assert.ok(call.includes('dep list t1 t2'), call)
+      assert.ok(call.includes('-t parent-child'), call)
+      assert.ok(call.includes('--direction=up'), call)
+    })
+  })
 
   test('create on an empty-array reply throws, not crashes on .id', () => {
     withFakeBd({ FAKE_BD_CREATE_EMPTY: '1' }, () => {
-      assert.throws(() => taskStore().create({ title: 'x' }), /bd create returned no row/);
-    });
-  });
+      assert.throws(
+        () => taskStore().create({ title: 'x' }),
+        /bd create returned no row/
+      )
+    })
+  })
 
   test('drifted list payload throws a compat error, not a TypeError', () => {
     withFakeBd({ FAKE_BD_DRIFT: 'envelope' }, () => {
-      assert.throws(
-        () => taskStore().list(),
-        (err: unknown) => {
-          assert.equal((err as Error).name, 'BdCompatError');
-          assert.match((err as Error).message, /expected an array/);
-          return true;
-        }
-      );
-    });
-  });
+      assert.throws(() => taskStore().list(), (err: unknown) => {
+        assert.equal((err as Error).name, 'BdCompatError')
+        assert.match((err as Error).message, /expected an array/)
+        return true
+      })
+    })
+  })
 
   test('drifted show row (missing id) throws a compat error', () => {
     withFakeBd({ FAKE_BD_DRIFT: 'norow' }, () => {
-      assert.throws(() => taskStore().get('t1'), /non-row shape/);
-    });
-  });
+      assert.throws(() => taskStore().get('t1'), /non-row shape/)
+    })
+  })
 
   test('actor resolves the bd claim identity', () => {
     withFakeBd({ BEADS_ACTOR: 'agent-x' }, () => {
-      assert.equal(taskStore().actor?.(), 'agent-x');
-    });
-  });
+      assert.equal(taskStore().actor?.(), 'agent-x')
+    })
+  })
 
   test('claimCapability declares an exclusive, actor-scoped claim — per store', () => {
-    withFakeBd({}, log => {
-      const s = taskStore();
+    withFakeBd({}, (log) => {
+      const s = taskStore()
       assert.deepEqual(s.claimCapability?.(), {
         strength: 'exclusive',
         identity: 'actor',
         authority: 'store',
-      });
-      s.claim('t1');
-      assert.ok(
-        logLines(log).some(l => l === 'update t1 --claim'),
-        logLines(log).join('\n')
-      );
-    });
-  });
+      })
+      s.claim('t1')
+      assert.ok(logLines(log).some((l) => l === 'update t1 --claim'), logLines(log).join('\n'))
+    })
+  })
 
   test('prefix parses the config value', () => {
     withFakeBd({ FAKE_BD_PREFIX: 'bro' }, () => {
-      assert.equal(taskStore().prefix(), 'bro');
-    });
-  });
+      assert.equal(taskStore().prefix(), 'bro')
+    })
+  })
 
   test('prefix returns undefined when unset', () => {
     withFakeBd({ FAKE_BD_PREFIX: '' }, () => {
-      assert.equal(taskStore().prefix(), undefined);
-    });
-  });
+      assert.equal(taskStore().prefix(), undefined)
+    })
+  })
 
   test('prefix throws on backend failure — fail closed', () => {
     withFakeBd({ FAKE_BD_CONFIG_FAIL: '1' }, () => {
-      assert.throws(() => taskStore().prefix(), /task store unreachable/);
-    });
-  });
+      assert.throws(() => taskStore().prefix(), /task store unreachable/)
+    })
+  })
 
   test('sync runs bare bd sync when remotes cannot be listed', () => {
-    withFakeBd({ FAKE_BD_NO_DOLT: '1', FAKE_BD_SYNC_OUT: 'synced' }, log => {
-      const out = taskStore().sync?.() ?? '';
-      const call = logLines(log).find(l => l.startsWith('sync')) ?? '';
-      assert.equal(call, 'sync');
-      assert.match(out, /synced/);
-    });
-  });
+    withFakeBd({ FAKE_BD_NO_DOLT: '1', FAKE_BD_SYNC_OUT: 'synced' }, (log) => {
+      const out = taskStore().sync?.() ?? ''
+      const call = logLines(log).find((l) => l.startsWith('sync')) ?? ''
+      assert.equal(call, 'sync')
+      assert.match(out, /synced/)
+    })
+  })
 
   test('sync targets a bridged file-mirror remote with --remote', () => {
     // a real bare upstream + mirror on local paths — no network needed
-    const dir = mkdtempSync(join(tmpdir(), 'bro-sync-bridge-'));
+    const dir = mkdtempSync(join(tmpdir(), 'bro-sync-bridge-'))
     try {
-      const upstream = join(dir, 'upstream.git');
-      const mirror = join(dir, 'mirror.git');
-      const git = (...a: string[]) => testGit(a, { encoding: 'utf8' });
-      git('init', '--bare', '-q', upstream);
-      const tree = testGit(['-C', upstream, 'mktree', '--missing', '-z'], {
-        encoding: 'utf8',
-        input: '',
-      }).trim();
-      const head = git(
-        '-C',
-        upstream,
-        '-c',
-        'user.email=t@t',
-        '-c',
-        'user.name=t',
-        'commit-tree',
-        tree,
-        '-m',
-        'x'
-      ).trim();
-      git('-C', upstream, 'update-ref', 'refs/dolt/data', head);
-      git('init', '--bare', '-q', mirror);
-      git('-C', mirror, 'remote', 'add', 'origin', upstream);
-      const remotes = JSON.stringify([{ name: 'origin', url: `git+file://${mirror}` }]);
-      withFakeBd(
-        { FAKE_BD_REMOTES: remotes, FAKE_BD_SYNC_OUT: 'synced', FAKE_BD_BEADS: dir },
-        log => {
-          const out = taskStore().sync?.() ?? '';
-          const call = logLines(log).find(l => l.startsWith('sync')) ?? '';
-          assert.equal(call, 'sync --remote origin');
-          assert.match(out, /synced/);
-          // the bridge's fetch leg landed the upstream dolt ref in the mirror
-          assert.equal(git('-C', mirror, 'rev-parse', 'refs/dolt/data').trim(), head);
-          // and no repoint — an already-file remote is honored in place
-          assert.ok(
-            !logLines(log).some(l => /remote (add|remove)/.test(l)),
-            logLines(log).join('\n')
-          );
-        }
-      );
+      const upstream = join(dir, 'upstream.git')
+      const mirror = join(dir, 'mirror.git')
+      const git = (...a: string[]) => testGit(a, { encoding: 'utf8' })
+      git('init', '--bare', '-q', upstream)
+      const tree = testGit(['-C', upstream, 'mktree', '--missing', '-z'], { encoding: 'utf8', input: '' }).trim()
+      const head = git('-C', upstream, '-c', 'user.email=t@t', '-c', 'user.name=t', 'commit-tree', tree, '-m', 'x').trim()
+      git('-C', upstream, 'update-ref', 'refs/dolt/data', head)
+      git('init', '--bare', '-q', mirror)
+      git('-C', mirror, 'remote', 'add', 'origin', upstream)
+      const remotes = JSON.stringify([{ name: 'origin', url: `git+file://${mirror}` }])
+      withFakeBd({ FAKE_BD_REMOTES: remotes, FAKE_BD_SYNC_OUT: 'synced', FAKE_BD_BEADS: dir }, (log) => {
+        const out = taskStore().sync?.() ?? ''
+        const call = logLines(log).find((l) => l.startsWith('sync')) ?? ''
+        assert.equal(call, 'sync --remote origin')
+        assert.match(out, /synced/)
+        // the bridge's fetch leg landed the upstream dolt ref in the mirror
+        assert.equal(git('-C', mirror, 'rev-parse', 'refs/dolt/data').trim(), head)
+        // and no repoint — an already-file remote is honored in place
+        assert.ok(
+          !logLines(log).some((l) => /remote (add|remove)/.test(l)),
+          logLines(log).join('\n')
+        )
+      })
     } finally {
-      rmSync(dir, { recursive: true, force: true });
+      rmSync(dir, { recursive: true, force: true })
     }
-  });
+  })
 
   test('sync repoints a git+https remote at a managed mirror', () => {
-    const dir = mkdtempSync(join(tmpdir(), 'bro-sync-repoint-'));
+    const dir = mkdtempSync(join(tmpdir(), 'bro-sync-repoint-'))
     try {
       // a guaranteed-unresolvable host — the fetch leg fails on DNS in
       // ms, not on a connect timeout (filtered ports stall for minutes)
-      const remotes = JSON.stringify([
-        { name: 'origin', url: 'git+https://nonexistent.invalid/x.git' },
-      ]);
-      withFakeBd(
-        { FAKE_BD_REMOTES: remotes, FAKE_BD_SYNC_OUT: 'synced', FAKE_BD_BEADS: dir },
-        log => {
-          const out = taskStore().sync?.() ?? '';
-          const lines = logLines(log);
-          assert.ok(
-            lines.some(l => l === 'dolt remote remove origin'),
-            lines.join('\n')
-          );
-          const add = lines.find(l => l.startsWith('dolt remote add origin ')) ?? '';
-          const mirror = join(dir, 'dolt-mirror-origin.git');
-          assert.equal(add, `dolt remote add origin git+file://${mirror}`);
-          assert.ok(
-            readFileSync(join(mirror, 'config'), 'utf8').includes('nonexistent.invalid/x.git')
-          );
-          const call = lines.find(l => l.startsWith('sync')) ?? '';
-          assert.equal(call, 'sync --remote origin');
-          // the dead upstream's fetch leg warns without breaking the sync
-          assert.match(out, /bridge fetch .* failed|repointed origin/);
-        }
-      );
+      const remotes = JSON.stringify([{ name: 'origin', url: 'git+https://nonexistent.invalid/x.git' }])
+      withFakeBd({ FAKE_BD_REMOTES: remotes, FAKE_BD_SYNC_OUT: 'synced', FAKE_BD_BEADS: dir }, (log) => {
+        const out = taskStore().sync?.() ?? ''
+        const lines = logLines(log)
+        assert.ok(lines.some((l) => l === 'dolt remote remove origin'), lines.join('\n'))
+        const add = lines.find((l) => l.startsWith('dolt remote add origin ')) ?? ''
+        const mirror = join(dir, 'dolt-mirror-origin.git')
+        assert.equal(add, `dolt remote add origin git+file://${mirror}`)
+        assert.ok(readFileSync(join(mirror, 'config'), 'utf8').includes('nonexistent.invalid/x.git'))
+        const call = lines.find((l) => l.startsWith('sync')) ?? ''
+        assert.equal(call, 'sync --remote origin')
+        // the dead upstream's fetch leg warns without breaking the sync
+        assert.match(out, /bridge fetch .* failed|repointed origin/)
+      })
     } finally {
-      rmSync(dir, { recursive: true, force: true });
+      rmSync(dir, { recursive: true, force: true })
     }
-  });
+  })
 
   // spec bro-orcdv fixtures — upstream + bridge mirror pair, wired so
   // sync believes the mirror is remote "origin"
   const doltMirrorPair = (dir: string) => {
-    const upstream = join(dir, 'upstream.git');
-    const mirror = join(dir, 'mirror.git');
-    const git = (...a: string[]) => testGit(a, { encoding: 'utf8' });
-    git('init', '--bare', '-q', upstream);
-    git('init', '--bare', '-q', mirror);
-    git('-C', mirror, 'remote', 'add', 'origin', upstream);
-    const remotes = JSON.stringify([{ name: 'origin', url: `git+file://${mirror}` }]);
-    return { upstream, mirror, git, remotes };
-  };
+    const upstream = join(dir, 'upstream.git')
+    const mirror = join(dir, 'mirror.git')
+    const git = (...a: string[]) => testGit(a, { encoding: 'utf8' })
+    git('init', '--bare', '-q', upstream)
+    git('init', '--bare', '-q', mirror)
+    git('-C', mirror, 'remote', 'add', 'origin', upstream)
+    const remotes = JSON.stringify([{ name: 'origin', url: `git+file://${mirror}` }])
+    return { upstream, mirror, git, remotes }
+  }
 
   test('sync withholds a mirror head whose manifest names missing tables', () => {
     // publishing an unbootstrappable head corrupts the store for every
     // replica's next bootstrap
-    const dir = mkdtempSync(join(tmpdir(), 'bro-sync-corrupt-'));
+    const dir = mkdtempSync(join(tmpdir(), 'bro-sync-corrupt-'))
     try {
-      const { upstream, mirror, git, remotes } = doltMirrorPair(dir);
+      const { upstream, mirror, git, remotes } = doltMirrorPair(dir)
       // what a buggy dolt push leaves behind: manifest names a table
       // the tree lacks
-      const t = 'a'.repeat(32);
-      const gone = 'b'.repeat(32);
-      doltStoreCommit(mirror, { manifest: doltManifest({ [t]: 1, [gone]: 1 }), [t]: 'x' });
-      withFakeBd(
-        { FAKE_BD_REMOTES: remotes, FAKE_BD_SYNC_OUT: 'synced', FAKE_BD_BEADS: dir },
-        () => {
-          const out = taskStore().sync?.() ?? '';
-          assert.match(out, /publish withheld/);
-          assert.ok(out.includes(gone), out);
-          // the corrupt head never reached upstream
-          assert.equal(git('ls-remote', upstream, 'refs/dolt/data'), '');
-        }
-      );
+      const t = 'a'.repeat(32)
+      const gone = 'b'.repeat(32)
+      doltStoreCommit(mirror, { manifest: doltManifest({ [t]: 1, [gone]: 1 }), [t]: 'x' })
+      withFakeBd({ FAKE_BD_REMOTES: remotes, FAKE_BD_SYNC_OUT: 'synced', FAKE_BD_BEADS: dir }, () => {
+        const out = taskStore().sync?.() ?? ''
+        assert.match(out, /publish withheld/)
+        assert.ok(out.includes(gone), out)
+        // the corrupt head never reached upstream
+        assert.equal(git('ls-remote', upstream, 'refs/dolt/data'), '')
+      })
     } finally {
-      rmSync(dir, { recursive: true, force: true });
+      rmSync(dir, { recursive: true, force: true })
     }
-  });
+  })
 
   test('sync publishes a mirror head whose manifest verifies', () => {
-    const dir = mkdtempSync(join(tmpdir(), 'bro-sync-healthy-'));
+    const dir = mkdtempSync(join(tmpdir(), 'bro-sync-healthy-'))
     try {
-      const { upstream, mirror, git, remotes } = doltMirrorPair(dir);
-      const t = 'a'.repeat(32);
-      const head = doltStoreCommit(mirror, { manifest: doltManifest({ [t]: 1 }), [t]: 'x' });
-      withFakeBd(
-        { FAKE_BD_REMOTES: remotes, FAKE_BD_SYNC_OUT: 'synced', FAKE_BD_BEADS: dir },
-        () => {
-          const out = taskStore().sync?.() ?? '';
-          assert.doesNotMatch(out, /withheld|unverifiable/);
-          assert.equal(git('ls-remote', upstream, 'refs/dolt/data').split(/\s+/)[0], head);
-        }
-      );
+      const { upstream, mirror, git, remotes } = doltMirrorPair(dir)
+      const t = 'a'.repeat(32)
+      const head = doltStoreCommit(mirror, { manifest: doltManifest({ [t]: 1 }), [t]: 'x' })
+      withFakeBd({ FAKE_BD_REMOTES: remotes, FAKE_BD_SYNC_OUT: 'synced', FAKE_BD_BEADS: dir }, () => {
+        const out = taskStore().sync?.() ?? ''
+        assert.doesNotMatch(out, /withheld|unverifiable/)
+        assert.equal(git('ls-remote', upstream, 'refs/dolt/data').split(/\s+/)[0], head)
+      })
     } finally {
-      rmSync(dir, { recursive: true, force: true });
+      rmSync(dir, { recursive: true, force: true })
     }
-  });
-});
+  })
+})
 
 describe('actor resolution', { skip: WIN32 }, () => {
   test('bdActor bounds the git config fallback — a wedged git drops to $USER', () => {
-    const dir = mkdtempSync(join(tmpdir(), 'bro-actor-hanging-git-'));
-    writeFileSync(join(dir, 'git'), '#!/bin/sh\nexec /bin/sleep 30\n');
-    chmodSync(join(dir, 'git'), 0o755);
+    const dir = mkdtempSync(join(tmpdir(), 'bro-actor-hanging-git-'))
+    writeFileSync(join(dir, 'git'), '#!/bin/sh\nexec /bin/sleep 30\n')
+    chmodSync(join(dir, 'git'), 0o755)
     try {
       withFakeBd({}, () => {
-        const prevPath = process.env.PATH;
-        const prevUser = process.env.USER;
-        process.env.PATH = `${dir}:${prevPath}`;
-        process.env.USER = 'hook-user';
+        const prevPath = process.env.PATH
+        const prevUser = process.env.USER
+        process.env.PATH = `${dir}:${prevPath}`
+        process.env.USER = 'hook-user'
         try {
-          const started = Date.now();
-          assert.equal(bdActor(dir), 'hook-user');
-          assert.ok(Date.now() - started < GIT_SYNC_PROBE_TIMEOUT_MS + 3_500);
+          const started = Date.now()
+          assert.equal(bdActor(dir), 'hook-user')
+          assert.ok(Date.now() - started < GIT_SYNC_PROBE_TIMEOUT_MS + 3_500)
         } finally {
-          process.env.PATH = prevPath;
-          if (prevUser === undefined) delete process.env.USER;
-          else process.env.USER = prevUser;
+          process.env.PATH = prevPath
+          if (prevUser === undefined) delete process.env.USER
+          else process.env.USER = prevUser
         }
-      });
+      })
     } finally {
-      rmSync(dir, { recursive: true, force: true });
+      rmSync(dir, { recursive: true, force: true })
     }
-  });
-});
+  })
+})

@@ -18,18 +18,11 @@
  * "self-caps" rule): past the byte bound the file truncates to its
  * newest whole lines.
  */
-import {
-  appendFileSync,
-  mkdirSync,
-  readFileSync,
-  renameSync,
-  statSync,
-  writeFileSync,
-} from 'node:fs';
-import { dirname, join } from 'node:path';
-import { GIT_SYNC_PROBE_TIMEOUT_MS, gitCommonDir } from './git.ts';
-import { withFileLock } from './filelock.ts';
-import { bdActor } from './tasks.ts';
+import { appendFileSync, mkdirSync, readFileSync, renameSync, statSync, writeFileSync } from 'node:fs'
+import { dirname, join } from 'node:path'
+import { GIT_SYNC_PROBE_TIMEOUT_MS, gitCommonDir } from './git.ts'
+import { withFileLock } from './filelock.ts'
+import { bdActor } from './tasks.ts'
 
 /** The transition verbs the lifecycle covers (specs/telemetry/
  *  bro-ub91h.md). A closed union for writers — readers treat `kind` as
@@ -46,58 +39,58 @@ export const LIFECYCLE_KINDS = [
   'park',
   'release',
   'close',
-] as const;
-export type LifecycleKind = (typeof LIFECYCLE_KINDS)[number];
+] as const
+export type LifecycleKind = (typeof LIFECYCLE_KINDS)[number]
 
 /** One stored journal row. `actor`/`session` are required on disk —
  *  the emitter derives them when the writer doesn't say. */
 export interface LifecycleEvent {
   /** ISO-8601 transition time — the emitter's clock, or the caller's
    *  honest stamp (an .exit file's mtime beats the harvest time). */
-  ts: string;
-  kind: LifecycleKind;
+  ts: string
+  kind: LifecycleKind
   /** The bead the transition binds to — lead of a clump; the full
    *  member list can ride `detail.beads`. */
-  bead?: string;
-  pr?: number;
+  bead?: string
+  pr?: number
   /** The doer — a worker's BRO_AGENT_ID, else the bd claim actor. */
-  actor: string;
+  actor: string
   /** The session env chain (same as `bro goal`), else 'shell'. */
-  session: string;
+  session: string
   /** State edge — `open`→`in_progress`, `running`→`exited`, →`merged`. */
-  from?: string;
-  to?: string;
+  from?: string
+  to?: string
   /** Flat JSON extras — agent, code, cause, round, sha, blockers,
    *  worktree, branch, via (the writing surface). */
-  detail?: Record<string, unknown>;
+  detail?: Record<string, unknown>
 }
 
 /** What a writer passes — the emitter stamps `ts` and derives
  *  `actor`/`session` from env + the store's actor chain. */
 export interface LifecycleInput {
-  kind: LifecycleKind;
-  bead?: string;
-  pr?: number;
-  actor?: string;
-  session?: string;
-  from?: string;
-  to?: string;
-  detail?: Record<string, unknown>;
+  kind: LifecycleKind
+  bead?: string
+  pr?: number
+  actor?: string
+  session?: string
+  from?: string
+  to?: string
+  detail?: Record<string, unknown>
   /** Honest transition time — ISO string or epoch ms. */
-  ts?: string | number;
+  ts?: string | number
 }
 
 /** 4 MiB of lifecycle history ≈ months of a busy rig — the derived
  *  views are windowed anyway; a wedged writer must not grow the file
  *  forever. Truncation keeps the newest whole lines under 2 MiB. */
-const LIFECYCLE_MAX_BYTES = 4 * 1024 * 1024;
-const LIFECYCLE_KEEP_BYTES = 2 * 1024 * 1024;
+const LIFECYCLE_MAX_BYTES = 4 * 1024 * 1024
+const LIFECYCLE_KEEP_BYTES = 2 * 1024 * 1024
 
 /** `<git-common>/bro/events.jsonl` — null outside a repo; shared
  *  across linked worktrees the same way the sibling journals are. */
 export function lifecyclePath(dir: string): string | null {
-  const common = gitCommonDir(dir, GIT_SYNC_PROBE_TIMEOUT_MS);
-  return common === null ? null : join(common, 'bro', 'events.jsonl');
+  const common = gitCommonDir(dir, GIT_SYNC_PROBE_TIMEOUT_MS)
+  return common === null ? null : join(common, 'bro', 'events.jsonl')
 }
 
 /** The session env chain — a spawned worker's BRO_SESSION_ID pins its
@@ -110,16 +103,16 @@ const SESSION_ENV = [
   'CLAUDE_SESSION_ID',
   'CODEX_SESSION_ID',
   'OPENCODE_SESSION_ID',
-] as const;
+] as const
 
 function sessionEnv(): string | undefined {
   for (const k of SESSION_ENV) {
-    const v = process.env[k]?.trim();
+    const v = process.env[k]?.trim()
     if (v !== undefined && v !== '') {
-      return v;
+      return v
     }
   }
-  return undefined;
+  return undefined
 }
 
 /** Truncate to the newest whole lines once the file outgrows the cap —
@@ -128,13 +121,13 @@ function sessionEnv(): string | undefined {
 function compactLifecycle(file: string): void {
   try {
     if (statSync(file).size <= LIFECYCLE_MAX_BYTES) {
-      return;
+      return
     }
-    const raw = readFileSync(file, 'utf8');
-    const tail = raw.slice(raw.length - LIFECYCLE_KEEP_BYTES);
-    const cut = tail.indexOf('\n');
-    writeFileSync(`${file}.tmp`, cut >= 0 ? tail.slice(cut + 1) : tail);
-    renameSync(`${file}.tmp`, file);
+    const raw = readFileSync(file, 'utf8')
+    const tail = raw.slice(raw.length - LIFECYCLE_KEEP_BYTES)
+    const cut = tail.indexOf('\n')
+    writeFileSync(`${file}.tmp`, cut >= 0 ? tail.slice(cut + 1) : tail)
+    renameSync(`${file}.tmp`, file)
   } catch {
     // compaction is housekeeping — a failure never blocks the record
   }
@@ -147,19 +140,19 @@ function compactLifecycle(file: string): void {
  *  is a no-op. */
 export function emitLifecycle(dir: string, input: LifecycleInput): void {
   try {
-    const file = lifecyclePath(dir);
+    const file = lifecyclePath(dir)
     if (file === null) {
-      return;
+      return
     }
-    const badge = process.env.BRO_AGENT_ID?.trim();
-    const actor = input.actor ?? (badge !== undefined && badge !== '' ? badge : bdActor(dir));
-    const session = input.session ?? sessionEnv() ?? 'shell';
+    const badge = process.env.BRO_AGENT_ID?.trim()
+    const actor = input.actor ?? (badge !== undefined && badge !== '' ? badge : bdActor(dir))
+    const session = input.session ?? sessionEnv() ?? 'shell'
     const ts =
       input.ts === undefined
         ? new Date().toISOString()
         : typeof input.ts === 'number'
           ? new Date(input.ts).toISOString()
-          : input.ts;
+          : input.ts
     const row: LifecycleEvent = {
       ts,
       kind: input.kind,
@@ -170,17 +163,17 @@ export function emitLifecycle(dir: string, input: LifecycleInput): void {
       ...(input.from !== undefined ? { from: input.from } : {}),
       ...(input.to !== undefined ? { to: input.to } : {}),
       ...(input.detail !== undefined ? { detail: input.detail } : {}),
-    };
-    const line = `${JSON.stringify(row)}\n`;
+    }
+    const line = `${JSON.stringify(row)}\n`
     const append = (): void => {
-      mkdirSync(dirname(file), { recursive: true });
-      appendFileSync(file, line);
-      compactLifecycle(file);
-    };
+      mkdirSync(dirname(file), { recursive: true })
+      appendFileSync(file, line)
+      compactLifecycle(file)
+    }
     try {
-      withFileLock(`${file}.lock`, append, { waitMs: 2_000, label: 'lifecycle journal' });
+      withFileLock(`${file}.lock`, append, { waitMs: 2_000, label: 'lifecycle journal' })
     } catch {
-      append();
+      append()
     }
   } catch {
     // telemetry never throws into the transition it observes
@@ -190,14 +183,14 @@ export function emitLifecycle(dir: string, input: LifecycleInput): void {
 /** A lifecycle row as read — `kind` stays an open string on the read
  *  side so a journal carrying newer kinds still parses. */
 export interface LifecycleRead extends Omit<LifecycleEvent, 'kind'> {
-  kind: string;
+  kind: string
   /** 1-based line position in the current file — the append-order
    *  sequence; compaction resets it (a plane read reports `gapped`). */
-  seq: number;
+  seq: number
 }
 
 function isLifecycleRow(v: unknown): v is LifecycleEvent {
-  const o = v as Partial<LifecycleEvent>;
+  const o = v as Partial<LifecycleEvent>
   return (
     !!o &&
     typeof o === 'object' &&
@@ -209,7 +202,7 @@ function isLifecycleRow(v: unknown): v is LifecycleEvent {
     (o.pr === undefined || typeof o.pr === 'number') &&
     (o.from === undefined || typeof o.from === 'string') &&
     (o.to === undefined || typeof o.to === 'string')
-  );
+  )
 }
 
 /** One journal line read — the row with its 1-based `seq`, or
@@ -221,27 +214,27 @@ function readLifecycleRow(
   opts: { kind?: string; bead?: string; pr?: number; since?: string }
 ): LifecycleRead | undefined {
   if (line === '') {
-    return undefined;
+    return undefined
   }
-  let row: unknown;
+  let row: unknown
   try {
-    row = JSON.parse(line);
+    row = JSON.parse(line)
   } catch {
-    return undefined;
+    return undefined
   }
   if (!isLifecycleRow(row)) {
-    return undefined;
+    return undefined
   }
-  const ev: LifecycleRead = { ...row, seq };
+  const ev: LifecycleRead = { ...row, seq }
   if (
     (opts.kind !== undefined && ev.kind !== opts.kind) ||
     (opts.bead !== undefined && ev.bead !== opts.bead) ||
     (opts.pr !== undefined && ev.pr !== opts.pr) ||
     (opts.since !== undefined && ev.ts <= opts.since)
   ) {
-    return undefined;
+    return undefined
   }
-  return ev;
+  return ev
 }
 
 /** Ordered read of the journal — file order, torn/malformed lines
@@ -252,23 +245,23 @@ export function readLifecycle(
   dir: string,
   opts: { limit?: number; kind?: string; bead?: string; pr?: number; since?: string } = {}
 ): LifecycleRead[] {
-  const file = lifecyclePath(dir);
+  const file = lifecyclePath(dir)
   if (file === null) {
-    return [];
+    return []
   }
-  let raw: string;
+  let raw: string
   try {
-    raw = readFileSync(file, 'utf8');
+    raw = readFileSync(file, 'utf8')
   } catch {
-    return [];
+    return []
   }
-  const out: LifecycleRead[] = [];
-  const lines = raw.split('\n');
+  const out: LifecycleRead[] = []
+  const lines = raw.split('\n')
   for (let i = 0; i < lines.length; i += 1) {
-    const ev = readLifecycleRow(lines[i]!, i + 1, opts);
+    const ev = readLifecycleRow(lines[i]!, i + 1, opts)
     if (ev !== undefined) {
-      out.push(ev);
+      out.push(ev)
     }
   }
-  return opts.limit !== undefined && out.length > opts.limit ? out.slice(-opts.limit) : out;
+  return opts.limit !== undefined && out.length > opts.limit ? out.slice(-opts.limit) : out
 }
