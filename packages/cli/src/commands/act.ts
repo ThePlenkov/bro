@@ -68,6 +68,7 @@ import {
   type GateWaitResult,
   type PrActState,
   type RearmPlan,
+  resolveLedger,
 } from '@broject/act'
 import {
   annotateThreads,
@@ -107,8 +108,15 @@ Commands:
 
 const VALUE_FLAGS = new Set(['--pr', '--thread', '--comment', '--file', '--interval', '--timeout', '--bead'])
 
-/** PR number: --pr flag, first positional, or the current branch's PR. */
-function resolvePr(rev: ReviewFacade, argv: string[]): PrTarget {
+/** How a resolved target may be used: 'read' — accept the auto row and
+ *  announce it; 'strict' — refuse the auto row (exit 2) because the
+ *  caller pushes to the PR; 'record' — accept silently and tag the
+ *  source so the caller can skip a row it cannot attribute. */
+export type ResolveMode = 'read' | 'strict' | 'record'
+export type ResolvedTarget = PrTarget & { source: 'explicit' | 'branch' | 'auto' }
+
+/** PR number from argv — `--pr N` first, then the first positional. */
+function prArgFrom(argv: string[]): string | null {
   const positional: string[] = []
   for (let i = 0; i < argv.length; i += 1) {
     const arg = argv[i]!
@@ -121,28 +129,54 @@ function resolvePr(rev: ReviewFacade, argv: string[]): PrTarget {
     positional.push(arg)
   }
   const prFlag = argv.indexOf('--pr')
-  const prRaw =
-    (prFlag >= 0 ? argv[prFlag + 1] : undefined) ?? positional[0] ?? null
+  return (prFlag >= 0 ? argv[prFlag + 1] : undefined) ?? positional[0] ?? null
+}
 
+/** No explicit number — the current branch's OPEN PR, else the repo's
+ *  most recently updated open PR (announced for readers, refused for
+ *  anything that can push). Exits 2 when neither source exists. */
+function resolveImplicit(rev: ReviewFacade, repo: string, mode: ResolveMode): ResolvedTarget {
+  const pr = rev.currentPr()
+  if (pr?.state === 'OPEN') {
+    return { repo, pr: pr.pr, source: 'branch' }
+  }
+  const auto = rev.openPrs?.(repo)[0]
+  if (auto === undefined) {
+    console.error('error: no open PR for current branch — pass a PR number (`bro act status <PR>`), or run `bro watch` for the gated-PR board')
+    process.exit(2)
+  }
+  const link = rev.prLink(repo, auto.pr)
+  if (mode === 'strict') {
+    console.error(
+      `error: refusing to act on auto-resolved PR ${link} — ` +
+        'pass a PR number explicitly'
+    )
+    process.exit(2)
+  }
+  if (mode === 'read') {
+    console.error(`act: resolved current PR ${link} — most recently updated open PR`)
+  }
+  return { repo, pr: auto.pr, source: 'auto' }
+}
+
+/** PR number: --pr flag, first positional, the current branch's PR, or
+ *  the repo's most recently updated open PR per mode. */
+export function resolvePr(
+  rev: ReviewFacade,
+  argv: string[],
+  mode: ResolveMode = 'read'
+): ResolvedTarget {
   const repo = rev.resolveRepo([])
-
+  const prRaw = prArgFrom(argv)
   if (prRaw === null) {
-    // the connector resolves the PR for the CURRENT branch — a bare list
-    // query would grab an arbitrary open PR instead. CLOSED/MERGED PRs
-    // resolve too, so state must be checked explicitly.
-    const pr = rev.currentPr()
-    if (!pr || pr.state !== 'OPEN') {
-      console.error('error: no open PR for current branch — pass a PR number')
-      process.exit(2)
-    }
-    return { repo, pr: pr.pr }
+    return resolveImplicit(rev, repo, mode)
   }
   const pr = Number(prRaw)
   if (!Number.isInteger(pr) || pr <= 0) {
     console.error(`error: invalid PR number "${prRaw}"`)
     process.exit(2)
   }
-  return { repo, pr }
+  return { repo, pr, source: 'explicit' }
 }
 
 async function cmdStatus(argv: string[]): Promise<void> {
@@ -160,6 +194,7 @@ async function cmdStatus(argv: string[]): Promise<void> {
     requireApproval: act.requireApproval,
     approvers: act.approvers,
     stateCache: prStateCache(process.cwd()),
+    resolveLedger: resolveLedger(process.cwd()),
   })
   const gate = evaluateExitGate(state, { requireApproval: act.requireApproval })
 
@@ -184,7 +219,8 @@ function printStatus(state: PrActState, gate: ExitGate): void {
       `reviewers_pending=${gate.reviewers_pending} ` +
       `reviewers_failing=${gate.reviewers_failing} ` +
       `sast_pending=${gate.sast_pending} sast_unknown=${gate.sast_unknown} ` +
-      `fix_rounds=${gate.fix_rounds} docs_only=${gate.docs_only}`
+      `fix_rounds=${gate.fix_rounds} docs_only=${gate.docs_only} ` +
+      `reopened_threads=${gate.reopened_threads}`
   )
   console.log(`exit_gate=${gate.ok ? 'OK' : 'BLOCKED'}`)
   const live = listWatches(process.cwd()).filter(
@@ -232,7 +268,7 @@ async function cmdWait(argv: string[]): Promise<void> {
   }
   ensureAuth('reviews', { dir: process.cwd() }, { prefer: loadBroConfig().connectors })
   const rev = reviewHost(undefined, loadBroConfig().connectors)
-  const t = resolvePr(rev, argv)
+  const t = resolvePr(rev, argv, argv.includes('--merge') ? 'strict' : 'read')
   const act = loadBroConfig().act
   const interval = Number(flag(argv, '--interval') ?? '60')
   const timeout = Number(flag(argv, '--timeout') ?? '45')
@@ -244,6 +280,7 @@ async function cmdWait(argv: string[]): Promise<void> {
   // share the same entries; the settle→merge dispatch re-gates
   // uncached inside cmdMerge, so a cached green never lands a PR
   const cache = prStateCache(process.cwd())
+  const ledger = resolveLedger(process.cwd())
   const res = await waitForGate(
     async () => {
       const state = await fetchPrActState(rev, t, {
@@ -255,6 +292,7 @@ async function cmdWait(argv: string[]): Promise<void> {
         requireApproval: act.requireApproval,
         approvers: act.approvers,
         stateCache: cache,
+        resolveLedger: ledger,
       })
       return { state, gate: evaluateExitGate(state, { requireApproval: act.requireApproval }) }
     },
@@ -295,11 +333,35 @@ async function cmdWait(argv: string[]): Promise<void> {
  *  to sit on — conflicts still settle for a human. */
 function waitOpts(
   rev: ReviewFacade,
-  t: PrTarget,
+  t: ResolvedTarget,
   argv: string[],
   timing: { interval: number; timeout: number },
   cache: ReturnType<typeof prStateCache>
 ): Parameters<typeof waitForGate>[1] {
+  // an auto-resolved target never gets the push: the row is a recency
+  // guess, and update-branch writes to the PR (strix CWE-862) — the
+  // callback is simply not supplied, not re-flagged off --merge
+  const updateBranch =
+    t.source === 'auto'
+      ? undefined
+      : (s: PrActState) => {
+          const ok = rev.updateBranch(t, s.headSha)
+          console.error(
+            `act wait ${rev.prLink(t.repo, t.pr)}: update-branch ${ok ? 'pushed a new head' : 'refused'}`
+          )
+          // the pushed head obsoletes this PR's feed entry — the next
+          // poll must fetch it, not re-serve the pre-update state
+          if (ok) {
+            cache?.invalidate(t)
+          }
+          emitLifecycle(process.cwd(), {
+            kind: 'gate',
+            pr: t.pr,
+            to: ok ? 'updated' : 'blocked',
+            detail: { via: 'act', action: 'update', sha: s.headSha },
+          })
+          return ok
+        }
   return {
     intervalMs: timing.interval * 1000,
     timeoutMs: timing.timeout * 60_000,
@@ -326,24 +388,7 @@ function waitOpts(
       console.error(
         `act wait ${rev.prLink(t.repo, t.pr)}: fetch failed (${n}) — ${err instanceof Error ? err.message : String(err)}`
       ),
-    updateBranch: (s) => {
-      const ok = rev.updateBranch(t, s.headSha)
-      console.error(
-        `act wait ${rev.prLink(t.repo, t.pr)}: update-branch ${ok ? 'pushed a new head' : 'refused'}`
-      )
-      // the pushed head obsoletes this PR's feed entry — the next
-      // poll must fetch it, not re-serve the pre-update state
-      if (ok) {
-        cache?.invalidate(t)
-      }
-      emitLifecycle(process.cwd(), {
-        kind: 'gate',
-        pr: t.pr,
-        to: ok ? 'updated' : 'blocked',
-        detail: { via: 'act', action: 'update', sha: s.headSha },
-      })
-      return ok
-    },
+    ...(updateBranch ? { updateBranch } : {}),
   }
 }
 
@@ -591,7 +636,7 @@ async function cmdWaitDetach(argv: string[]): Promise<void> {
   }
   ensureAuth('reviews', { dir: process.cwd() }, { prefer: loadBroConfig().connectors })
   const rev = reviewHost(undefined, loadBroConfig().connectors)
-  const t = resolvePr(rev, argv)
+  const t = resolvePr(rev, argv, 'strict')
   const args = detachWaitArgs(argv, t.pr, interval, timeout)
   const r = await spawnDetachedWait({ dir: process.cwd(), pr: t.pr, args, cwd: process.cwd() })
   const link = rev.prLink(t.repo, t.pr)
@@ -974,7 +1019,7 @@ async function cmdMerge(argv: string[]): Promise<void> {
   if (queue) {
     ensureAuth('mergeQueue', { dir: process.cwd() }, { prefer: cfg.connectors })
   }
-  const t = resolvePr(rev, argv)
+  const t = resolvePr(rev, argv, 'strict')
 
   const method = mergeMethod(argv)
   if (!method) {
@@ -1009,6 +1054,7 @@ async function cmdMerge(argv: string[]): Promise<void> {
       docsMaxRounds: act.docsMaxRounds,
       requireApproval: act.requireApproval,
       approvers: act.approvers,
+      resolveLedger: resolveLedger(process.cwd()),
     })
 
     // a closed/merged PR can pass the gate (threads resolved, checks
@@ -1394,6 +1440,32 @@ function commentArg(argv: string[]): string | null {
   return i >= 0 ? (argv[i + 1] ?? null) : null
 }
 
+/** Record a resolve in the ledger — the source of "this thread was
+ *  resolved before" for the reopened-thread cycle-guard. Best-effort: a
+ *  missing git dir or an unwritable ledger means the reopen is not
+ *  detected, never a crash. */
+function recordResolve(rev: ReviewFacade, argv: string[], threadId: string): void {
+  try {
+    const ledger = resolveLedger(process.cwd())
+    if (ledger === null) {
+      return
+    }
+    const target = resolvePr(rev, argv, 'record')
+    if (target.source === 'auto') {
+      // the auto row is a recency guess — recording a thread under the
+      // wrong PR poisons the reopen guard just as much as losing the
+      // row would, so the row is dropped with a note instead (codeant)
+      console.error(
+        `act: note — no branch PR for this thread; ledger record of ${threadId} skipped`
+      )
+      return
+    }
+    ledger.record({ repo: target.repo, pr: target.pr, thread: threadId })
+  } catch {
+    // recording is best-effort — the resolve itself already landed
+  }
+}
+
 function cmdResolve(argv: string[]): void {
   ensureAuth('reviews', { dir: process.cwd() }, { prefer: loadBroConfig().connectors })
   const rev = reviewHost(undefined, loadBroConfig().connectors)
@@ -1420,6 +1492,10 @@ function cmdResolve(argv: string[]): void {
   } else {
     rev.resolveThread(id)
     console.error(`act: resolved ${id}`)
+    // Record the resolve — the reopened-thread cycle-guard needs to know
+    // this thread was resolved before. The ledger, not the state cache:
+    // the cache TTL is 30s, so its entry is gone between polls.
+    recordResolve(rev, argv, id)
     // a silent resolve is the fix verdict; a comment is a reject/defer
     // reason (skills/act/SKILL.md) — the documented defer reply names
     // its bead ("deferred to <id>"), which is the one defer signal a

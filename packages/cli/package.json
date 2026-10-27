@@ -49,7 +49,8 @@
     }
   },
   "files": [
-    "dist"
+    "dist",
+    "schemas"
   ],
   "engines": {
     "node": ">=22.18"
@@ -81,6 +82,7 @@
     "sverka": "^0.2.10"
   },
   "devDependencies": {
+    "@earendil-works/pi-coding-agent": "1.4.0",
     "@kilocode/plugin": "^7.8.3",
     "tsdown": "^0.15.0",
     "tsx": "^4.20.0",

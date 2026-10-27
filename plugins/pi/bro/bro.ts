@@ -289,7 +289,10 @@ function boardLines(s) {
 	if (s.drill?.frame) parts.push(`drill ${s.drill.frame.id}`);
 	if ((s.dirty ?? 0) > 0) parts.push(`dirty ${s.dirty}`);
 	const lines = [`bro · ${parts.join(" · ")}`];
-	for (const b of beads.slice(0, 3)) lines.push(`  ◐ ${b.id ?? "?"}  ${clip(b.title ?? "", 64)}`);
+	for (const b of beads.slice(0, 3)) {
+		const link = b.link ? `  ${b.link}` : "";
+		lines.push(`  ◐ ${b.id ?? "?"}  ${clip(b.title ?? "", 64)}${link}`);
+	}
 	for (const a of running.slice(0, 2)) {
 		const step = a.step ? `  ${a.step}` : "";
 		lines.push(`  ▶ ${a.id ?? "?"}  ${a.backend ?? ""}${step}`);
@@ -357,6 +360,7 @@ function sharedBinding(host) {
 			ctx.ui.setStatus(BOARD_KEY, void 0);
 		},
 		notify: host.notify,
+		argumentCompletions: void 0,
 		refuseStop: host.refuseStop,
 		stopAlreadyRefused: host.stopAlreadyRefused,
 		stopAborted: host.stopAborted,
@@ -582,6 +586,7 @@ function createBroDriver(host, api) {
 	*  renders. Both are the same on every host, so both live here. */
 	api.registerCommand("bro", {
 		description: "bro — board refresh, or run `bro <args>` (act|next|fleet|drill|…)",
+		getArgumentCompletions: host.argumentCompletions,
 		async handler(args, ctx) {
 			const trimmed = args.trim();
 			if (trimmed === "") {
@@ -613,10 +618,13 @@ function createBroDriver(host, api) {
 		},
 		async execute(_id, _params, _signal, _onUpdate, ctx) {
 			const result = await run(["status", "--json"], host.cwd(ctx));
-			return { content: [{
-				type: "text",
-				text: result.code === 0 ? result.stdout : "bro status unavailable"
-			}] };
+			return {
+				content: [{
+					type: "text",
+					text: result.code === 0 ? result.stdout : "bro status unavailable"
+				}],
+				details: void 0
+			};
 		}
 	});
 	return {
@@ -740,13 +748,50 @@ function binding(pi) {
 				const outcome = event.outcome;
 				return outcome === "aborted" || outcome === "error";
 			},
-			paint(ctx, lines, crumb) {
+			paint(ctx, lines, _crumb) {
 				try {
-					ctx.ui.setWidget(BOARD_KEY, lines, { placement: "aboveEditor" });
-					ctx.ui.setStatus(BOARD_KEY, crumb);
+					let one;
+					if (lines.length > 0) {
+						const links = lines.slice(1).map((l) => (l.match(/\[#\d+\]\([^)]+\)/) ?? [])[0]).filter((x) => typeof x === "string");
+						one = [links.length > 0 ? `${lines[0]}  ${links.join(" ")}` : lines[0]];
+					}
+					ctx.ui.setWidget(BOARD_KEY, one, { placement: "aboveEditor" });
+					ctx.ui.setStatus(BOARD_KEY, void 0);
 				} catch {}
 			}
 		}),
+		argumentCompletions(prefix) {
+			const items = [
+				"act",
+				"act status",
+				"debt",
+				"drill",
+				"convoy",
+				"next",
+				"loop",
+				"stack",
+				"fleet",
+				"agents",
+				"work",
+				"spec",
+				"sync",
+				"doctor",
+				"plugins",
+				"setup",
+				"wait",
+				"review",
+				"self",
+				"plan",
+				"mesh",
+				"check",
+				"help"
+			];
+			const p = prefix.trim().toLowerCase();
+			return (p === "" ? items : items.filter((x) => x.startsWith(p))).map((x) => ({
+				label: x,
+				value: x
+			}));
+		},
 		npxPin: NPX_PIN
 	};
 }

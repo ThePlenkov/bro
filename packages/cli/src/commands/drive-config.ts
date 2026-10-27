@@ -1,7 +1,7 @@
 /** `drive` config section — a separate module so plugins.ts can register
  *  the schema without importing the command's dependency tree (same
  *  pattern as check-config.ts). */
-import type { ConfigSection } from '@broject/core'
+import { js, type ConfigSection } from '@broject/core'
 
 export interface DriveConfig {
   /** Seconds between passes in --every mode and the documented cadence
@@ -61,3 +61,9 @@ export const driveSection: ConfigSection<DriveConfig> = (raw) => {
         : 7200,
   }
 }
+
+driveSection.jsonSchema = js.obj({
+  intervalSec: { type: 'number', minimum: MIN_INTERVAL_SEC, maximum: MAX_INTERVAL_SEC },
+  merge: { enum: ['auto', 'never'] },
+  occupancyTtlSec: { type: 'number', minimum: MIN_OCCUPANCY_TTL_SEC },
+})

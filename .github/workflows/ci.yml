@@ -40,6 +40,9 @@ jobs:
       - name: Check CLI contract snapshot is fresh
         run: npm run check:contract
 
+      - name: Check config schema is fresh
+        run: npm run check:config-schema
+
       - name: Typecheck
         run: npm run typecheck
 

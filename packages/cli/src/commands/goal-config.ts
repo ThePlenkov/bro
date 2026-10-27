@@ -1,7 +1,7 @@
 /** `goal` config section — a separate module so plugins.ts can register
  *  the schema without importing the command's dependency tree (same
  *  pattern as watch-config.ts). Spec: specs/goal/bro-6vcll.md. */
-import type { ConfigSection } from '@broject/core'
+import { js, type ConfigSection } from '@broject/core'
 
 export interface GoalConfig {
   /** Default turn budget for goals set without `--turns` — stop-hook
@@ -26,3 +26,5 @@ export const goalSection: ConfigSection<GoalConfig> = (raw) => {
     judge: obj.judge !== false,
   }
 }
+
+goalSection.jsonSchema = js.obj({ maxTurns: js.int(0), judge: js.bool })

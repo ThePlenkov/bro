@@ -31,10 +31,11 @@ import {
   utimesSync,
   writeFileSync,
 } from 'node:fs'
-import { delimiter, dirname, isAbsolute, join, resolve } from 'node:path'
+import { basename, delimiter, dirname, isAbsolute, join, resolve } from 'node:path'
 import {
   AgentNotFound,
   agentEntryBlocked,
+  agentExitFileName,
   agentsSection,
   bdActor,
   admitSessionSlot,
@@ -43,17 +44,22 @@ import {
   claimStep,
   classifyExitCause,
   classifyExitCauseParts,
+  appendPrivateFileSync,
   cliCommandModel,
   commandCliName,
   DEFAULT_CONFIG,
   deriveProviderWalls,
   emitLifecycle,
+  entryRunId,
   ghHost,
   gitTry,
   isAgentCause,
   JudgeUnavailable,
   loadConfig,
   mintAgentId,
+  mintRunId,
+  mkdirPrivateSync,
+  openPrivateAppendSync,
   patchAgentRegistry,
   pidAlive,
   probeStep,
@@ -63,6 +69,7 @@ import {
   releaseSessionSlot,
   requireProviderSurface,
   resolveStepClass,
+  SESSION_SLOT_TTL_MS,
   sessionPlane,
   sessionPlaneForCli,
   sessionQuotaConfig,
@@ -74,6 +81,7 @@ import {
   UnknownProviderError,
   withAgentRegistryLock,
   writeAgentRegistry,
+  writePrivateFileSync,
   type AgentCause,
   type AgentConnector,
   type AgentInfo,
@@ -110,6 +118,7 @@ import {
 import './session-planes/copilot.ts'
 import { writeCopilotCount } from './session-planes/copilot.ts'
 import { enterWorktree } from './commands/work.ts'
+import { assertMutableConfig } from './config-policy.ts'
 import { VERSION } from './version.ts'
 
 /** Everything a factory needs: the repo ctx + the resolved config
@@ -770,6 +779,9 @@ const AGENT_PIN_KEYS = new Set([
   'BRO_AGENT_PROVIDER',
   'BRO_AGENT_MODEL',
   'BRO_AGENT_CLASS',
+  // delegation provenance is connector-owned too — a caller-supplied
+  // BRO_DELEGATED_BY would let a spawn forge which agent asked for it
+  'BRO_DELEGATED_BY',
 ])
 
 /** Repo-retarget env keys — same triple core's git.ts strips for
@@ -822,6 +834,9 @@ const agentEnvPins = (
   }
   if (spec.class !== undefined) {
     pins.push(['BRO_AGENT_CLASS', spec.class])
+  }
+  if (spec.delegatedBy !== undefined) {
+    pins.push(['BRO_DELEGATED_BY', spec.delegatedBy])
   }
   return pins
 }
@@ -910,10 +925,14 @@ function entryOccupies(
   }
 ): boolean {
   switch (entry.backend) {
-    case 'native':
+    case 'native': {
       // nativeState also harvests recorded death and retires stale
-      // markers — the same side effects list() has on a dead entry
-      return nativeState(dir, home, molStep, entry) === 'running'
+      // markers — the same side effects list() has on a dead entry.
+      // 'spawned' occupies too: an unproven handoff is never a free
+      // step (spec bro-l8c4f.5)
+      const s = nativeState(dir, home, molStep, entry)
+      return s === 'running' || s === 'spawned'
+    }
     case 'tmux':
       return tmuxOccupies(entry, probes.tmuxLive())
     case 'gascity':
@@ -1472,8 +1491,14 @@ function prepareSpawn(
   log: string
   stderrLog: string
   exitFile: string
+  /** The attempt token — scopes this run's handle/go/exit artifacts. */
+  runId: string
   reservation?: string
 } {
+  // spawn is the authoritative mutation the audit gates on — invalid
+  // committed (policy) config refuses before registry/claim writes,
+  // ahead of even the exit-cause harvest (spec: bro-d9dmx)
+  assertMutableConfig(dir)
   const registry = readAgentRegistry(dir)
   const existing = registry[spec.molStep]
   // A batch spawn must not walk into a provider wall the fleet already
@@ -1561,14 +1586,35 @@ function commitSpawn(
   },
   agentId: string,
   guard: { claimed: boolean; actor: string | undefined; phantom: boolean }
-): { promptFile: string; log: string; stderrLog: string; exitFile: string } {
-  mkdirSync(home, { recursive: true })
+): {
+  promptFile: string
+  log: string
+  stderrLog: string
+  exitFile: string
+  runId: string
+} {
+  mkdirPrivateSync(home)
   const promptFile = join(home, `${agentId}.prompt.md`)
   const log = join(home, `${agentId}.log`)
   const stderrLog = join(home, `${agentId}.stderr`)
-  const exitFile = join(home, `${agentId}.exit`)
+  // every attempt mints its own runId — respawns reuse the agentId but
+  // never the attempt artifacts: an old wrapper's late writes land in
+  // its own runId's files, never the live run's (spec bro-l8c4f.5)
+  const runId = mintRunId()
+  const exitFile = join(home, agentExitFileName(agentId, runId))
   rmSync(exitFile, { force: true })
-  writeFileSync(promptFile, spec.prompt)
+  // a pre-handshake run's legacy exit file would alias nothing the new
+  // run reads — still drop it so old readers can't resurrect it
+  rmSync(join(home, `${agentId}.exit`), { force: true })
+  // owner-only artifacts (spec bro-l8c4f.4): the prompt carries secrets
+  // and thread context; the streams get pre-created pinned so every
+  // later append — native's inherited fd, tmux's tee/2>>, docker's
+  // >>/2>> — lands on an already-0600 file. The .exit file can't be
+  // pre-created (readExitFile parses empty as exit 0); the wrapper's
+  // `umask 077` subshell pins it at write time instead.
+  writePrivateFileSync(promptFile, spec.prompt)
+  appendPrivateFileSync(log, '')
+  appendPrivateFileSync(stderrLog, '')
   const logFrom = logSizeOrZero(log)
   const stderrFrom = logSizeOrZero(stderrLog)
   // exitStatus: undefined clears a respawned entry's stale harvest — the
@@ -1608,16 +1654,22 @@ function commitSpawn(
     // the routing lane the spawn resolved to (fleet.routing class) —
     // same provenance write as provider/model; a respawn re-stamps it
     class: spec.class,
+    // which agent asked for this spawn — same provenance write; a
+    // respawn re-stamps (clears when the respawn wasn't delegated)
+    delegatedBy: spec.delegatedBy,
     // the acp driver patches the real session id after session/new —
     // clear the previous run's so it never masquerades as this run's
     acpSessionId: undefined,
     // the session kind this run consumed — the quota lane it was
     // admitted under; absent for non-kind spawns
     sessionKind: opts.sessionQuota?.plane.kind,
+    // the attempt token — scopes handle/go/exit artifacts (spec
+    // bro-l8c4f.5); a respawn stamps a fresh one over the dead run's
+    runId,
     ...opts.entry?.(agentId),
   })
   recordSpawnClaim(dir, spec, agentId, backend, guard, opts.claimAs)
-  return { promptFile, log, stderrLog, exitFile }
+  return { promptFile, log, stderrLog, exitFile, runId }
 }
 
 /** The byte offset a fresh run's log starts at — the log is append-mode
@@ -1723,11 +1775,13 @@ function enterSpawnTree(spec: SpawnSpec): void {
   }
 }
 
-/** Exit status the wrapper dropped at `<agentId>.exit` — absent when the
+/** Exit status the wrapper dropped — at the attempt-scoped
+ *  `<agentId>.<runId>.exit` for runId'd entries, the legacy
+ *  `<agentId>.exit` otherwise (spec bro-l8c4f.5). Absent when the
  *  process is still running or died by SIGKILL (nothing to write with). */
-function readExitFile(home: string, agentId: string): number | undefined {
+function readExitFile(home: string, agentId: string, runId?: string): number | undefined {
   try {
-    const v = readFileSync(join(home, `${agentId}.exit`), 'utf8').trim()
+    const v = readFileSync(join(home, agentExitFileName(agentId, runId)), 'utf8').trim()
     const n = Number(v)
     return Number.isInteger(n) ? n : undefined
   } catch {
@@ -1809,7 +1863,7 @@ function ensureExitCause(
   entry: AgentRegistryEntry
 ): void {
   if (entry.exitStatus === undefined && home !== null) {
-    const code = readExitFile(home, entry.agentId)
+    const code = readExitFile(home, entry.agentId, entryRunId(entry))
     if (code !== undefined) {
       entry.exitStatus = code
     }
@@ -1848,7 +1902,7 @@ function ensureExitCause(
   let exitAt: number | undefined
   if (home !== null) {
     try {
-      exitAt = statSync(join(home, `${entry.agentId}.exit`)).mtimeMs
+      exitAt = statSync(join(home, agentExitFileName(entry.agentId, entryRunId(entry)))).mtimeMs
     } catch {
       // the file rotated between read and stat — fall back to now
     }
@@ -1968,19 +2022,191 @@ const entryPidStart = (entry: AgentRegistryEntry): string | undefined =>
     ? entry.pidStart
     : undefined
 
+/** The wrapper's death is not its unit's death: a TERM-resistant
+ *  descendant survives the group signal, so the stop may only record
+ *  `stopped` when the WHOLE execution unit is gone, not the sh-wrapper
+ *  alone (bro-l8c4f.3). kill(-pgid, 0) gates — ESRCH is a group that
+ *  no longer exists (ESRCH-or-hard-failure reads dead, the rule
+ *  pidAlive applies; EPERM is a live group we cannot signal) — but it
+ *  also counts the unreaped wrapper's own zombie, so live members are
+ *  read from /proc the way procStat reads one process: state 'Z' is
+ *  nobody. `minStart` (the wrapper's recorded pidStart) bounds a
+ *  member's /proc starttime from below — our descendants forked after
+ *  the wrapper, so a member older than it belongs to a pgid the kernel
+ *  recycled after our group died, not to this unit.
+ *
+ *  Two edges where the probe cannot answer, and the answer differs by
+ *  platform: on Linux a vanished /proc, or a member stat that fails
+ *  for any reason but ENOENT, stays fail-open (pidAlive's rule: never
+ *  a false "the unit is dead"); off Linux /proc never exists at all,
+ *  so the group probe cannot tell the wrapper's zombie from a live
+ *  member — there the caller's pid check is the probe, and a
+ *  descendant that outlives its wrapper is a documented blind spot
+ *  (failing open would spin the whole kill-wait on EVERY stop and the
+ *  `stopped` marker would never land). */
+/** One parsed row of /proc/<pid>/stat — post-comm fields split the way
+ *  procStat does (index 0 = state/field 3). */
+interface ProcEntry {
+  pid: number
+  state: string
+  ppid: number
+  pgrp: number
+  start: string
+}
+
+/** One shared scan of /proc for the group and tree probes — `null`
+ *  when /proc itself is unreadable; `unverified` marks at least one
+ *  non-ENOENT stat failure (a process we could not inspect). */
+function scanProc(): { entries: ProcEntry[]; unverified: boolean } | null {
+  let names: string[]
+  try {
+    names = readdirSync('/proc')
+  } catch {
+    return null
+  }
+  const entries: ProcEntry[] = []
+  let unverified = false
+  for (const name of names) {
+    const pid = Number(name)
+    if (!Number.isInteger(pid) || pid <= 0) {
+      continue
+    }
+    let stat: string
+    try {
+      stat = readFileSync(`/proc/${pid}/stat`, 'utf8')
+    } catch (e) {
+      // ENOENT/ENOTDIR is the process vanishing mid-scan — anything
+      // else (EACCES under hidepid, …) is a process we could not inspect
+      const code = (e as NodeJS.ErrnoException).code
+      if (code !== 'ENOENT' && code !== 'ENOTDIR') {
+        unverified = true
+      }
+      continue
+    }
+    const rest = stat.slice(stat.lastIndexOf(')') + 2).split(' ')
+    // rest: state, ppid, pgrp, … — the same split procStat uses
+    entries.push({
+      pid,
+      state: rest[0] ?? '',
+      ppid: Number(rest[1]),
+      pgrp: Number(rest[2]),
+      start: rest[19] ?? '',
+    })
+  }
+  return { entries, unverified }
+}
+
+function groupMemberAlive(pgid: number, minStart?: string): boolean {
+  if (!Number.isInteger(pgid) || pgid <= 0) {
+    return false
+  }
+  try {
+    process.kill(-pgid, 0)
+  } catch (e) {
+    if ((e as NodeJS.ErrnoException).code !== 'EPERM') {
+      return false
+    }
+  }
+  const scan = scanProc()
+  if (scan === null) {
+    return process.platform === 'linux'
+  }
+  const min = minStart === undefined ? Number.NaN : Number(minStart)
+  for (const e of scan.entries) {
+    if (e.state === 'Z' || e.pgrp !== pgid) {
+      continue
+    }
+    const start = Number(e.start)
+    if (!Number.isFinite(min) || !(start > 0) || start >= min) {
+      return true
+    }
+  }
+  // no confirmed member — but a process we could not inspect might be
+  // one: fail open, never a false "the unit is dead"
+  return scan.unverified
+}
+
+/** The wrapper's process-TREE snapshot — every descendant pid plus its
+ *  /proc starttime, walked over ppid links. A descendant that escaped
+ *  the process GROUP (setsid, its own session) is invisible to
+ *  groupMemberAlive but stays in this list: the tree link breaks when
+ *  the wrapper dies and the survivor reparents to init, so the
+ *  snapshot must be taken while the parentage is still intact, and
+ *  pid+starttime identity is what keeps a recycled pid from faking
+ *  death. Empty where /proc is absent (non-Linux). */
+function descendantsOf(root: number): Array<{ pid: number; start?: string }> {
+  const scan = scanProc()
+  if (scan === null) {
+    return []
+  }
+  const children = new Map<number, number[]>()
+  const starts = new Map<number, string>()
+  for (const e of scan.entries) {
+    const list = children.get(e.ppid)
+    if (list === undefined) {
+      children.set(e.ppid, [e.pid])
+    } else {
+      list.push(e.pid)
+    }
+    if (e.start !== '') {
+      starts.set(e.pid, e.start)
+    }
+  }
+  const out: Array<{ pid: number; start?: string }> = []
+  const seen = new Set<number>([root])
+  const queue = [root]
+  for (let cur = queue.shift(); cur !== undefined; cur = queue.shift()) {
+    for (const c of children.get(cur) ?? []) {
+      if (seen.has(c)) {
+        continue
+      }
+      seen.add(c)
+      out.push({ pid: c, start: starts.get(c) })
+      queue.push(c)
+    }
+  }
+  return out
+}
+
 /** Live state for a registry entry under this backend. */
 function nativeState(dir: string, home: string | null, molStep: string, entry: AgentRegistryEntry): AgentState {
   // liveness first: a 'stopped' marker on a pid that is still alive means
   // SIGTERM hasn't landed yet — the agent IS still running, and dedup
-  // must keep refusing a respawn that would run alongside it
+  // must keep refusing a respawn that would run alongside it. The unit,
+  // not the wrapper: a dead wrapper's group can still hold a
+  // TERM-resistant descendant, and reporting lost/exited over it would
+  // admit a respawn beside a live writer (bro-l8c4f.3). kill(-pgid,0)
+  // short-circuits before any /proc scan, so dead-group entries — the
+  // common stale row — cost one syscall; the wrapper's pidStart bounds
+  // members so a recycled pgid can't fake liveness.
   const pid = typeof entry.pid === 'number' ? entry.pid : undefined
-  if (pid !== undefined && pidAlive(pid, entryPidStart(entry))) {
+  if (
+    pid !== undefined &&
+    (pidAlive(pid, entryPidStart(entry)) || groupMemberAlive(pid, entryPidStart(entry)))
+  ) {
     touchWorkMarker(dir, entry.agentId)
     return 'running'
   }
   const dead = recordedDeath(dir, home, molStep, entry)
   if (dead !== undefined) {
     return dead
+  }
+  // no pid ≠ lost: inside the spawn handoff the worker may be
+  // mid-handshake. A live self-published handle adopts the survivor
+  // outright (spec bro-l8c4f.5); a missing one inside the window is
+  // 'spawned' — reserved/starting, and unknown is never a free step.
+  if (adoptNativeHandle(dir, home, molStep, entry) !== undefined) {
+    touchWorkMarker(dir, entry.agentId)
+    return 'running'
+  }
+  if (
+    pid === undefined &&
+    // only handshake-era rows get the handoff grace — a pre-runId
+    // pid-less row could never be mid-handshake and stays 'lost'
+    entryRunId(entry) !== undefined &&
+    Date.now() - Date.parse(entry.spawnedAt) < SESSION_SLOT_TTL_MS
+  ) {
+    return 'spawned'
   }
   dropWorkMarker(dir, molStep, entry)
   return 'lost'
@@ -1997,20 +2223,26 @@ const infoCause = (entry: AgentRegistryEntry): Pick<AgentInfo, 'cause' | 'resetA
  *  (or unrouted) spawn (the row says so by omission, honestly). */
 const infoProvenance = (
   entry: AgentRegistryEntry
-): Pick<AgentInfo, 'provider' | 'model' | 'class'> => ({
+): Pick<AgentInfo, 'provider' | 'model' | 'class' | 'delegatedBy'> => ({
   provider: typeof entry.provider === 'string' ? entry.provider : undefined,
   model: typeof entry.model === 'string' ? entry.model : undefined,
   class: typeof entry.class === 'string' ? entry.class : undefined,
+  delegatedBy: typeof entry.delegatedBy === 'string' ? entry.delegatedBy : undefined,
 })
 
 function toInfo(dir: string, home: string | null, molStep: string, entry: AgentRegistryEntry): AgentInfo {
+  // state first — the handshake adoption stamps entry.pid on the way
+  // through (spec bro-l8c4f.5); reading pid before it would report the
+  // pre-adoption row
+  const state = nativeState(dir, home, molStep, entry)
   return {
     id: entry.agentId,
     spawnedAt: typeof entry.spawnedAt === 'string' ? entry.spawnedAt : undefined,
+    runId: entryRunId(entry),
     pid: typeof entry.pid === 'number' ? entry.pid : undefined,
     molStep,
     backend: entry.backend,
-    state: nativeState(dir, home, molStep, entry),
+    state,
     ...infoCause(entry),
     ...infoProvenance(entry),
     worktree: typeof entry.worktree === 'string' ? entry.worktree : undefined,
@@ -2064,6 +2296,148 @@ function workerRunLine(
     : expandAgentCmd(worker.command, promptFile)
 }
 
+/** The durable spawn handshake (spec bro-l8c4f.5). A launcher killed
+ *  between `spawn()` and the pid patch used to leave a live worker the
+ *  registry could not name — a 'lost' step and a respawn running beside
+ *  it. The worker now self-publishes its handle and the launcher
+ *  answers with an admission stamp:
+ *
+ *  - `<agentId>.<runId>.handle` — the wrapper's first act: `$$` (the
+ *    detached group-leader pid — the same value `child.pid` reports). A
+ *    parent that dies post-spawn leaves a findable survivor.
+ *  - `<agentId>.<runId>.go` — the launcher's stamp, written only after
+ *    pid+marker are durable. The worker polls for it through the
+ *    spawn-handoff window; absent past the window means the launcher
+ *    died mid-publish, so the payload must never run (exit 75). */
+const GO_WAIT_TICK_MS = 50
+const GO_WAIT_TICKS = SESSION_SLOT_TTL_MS / GO_WAIT_TICK_MS
+
+/** The wrapper's half of the handshake — positional args
+ *  `$1` exit · `$2` handle · `$3` go · `$4` go-wait tick budget. Handle
+ *  publish is tmp+rename so a reader never sees a half-written pid. */
+const HANDSHAKE_SCRIPT =
+  'out=$1; h=$2; g=$3; t=$4; ' +
+  '( umask 077; printf %s "$$" > "$h.tmp" ) && mv "$h.tmp" "$h" ' +
+  '|| { ( umask 077; printf %s 74 > "$out" ); exit 74; }; ' +
+  'i=0; until [ -f "$g" ]; do ' +
+  'i=$((i+1)); [ "$i" -gt "$t" ] && { ( umask 077; printf %s 75 > "$out" ); exit 75; }; ' +
+  `sleep ${GO_WAIT_TICK_MS / 1000}; ` +
+  'done;'
+
+/** Where a launcher crash would stop — the seam leaves exactly the
+ *  half-state a dead parent leaves: registry+claim only (`reservation`),
+ *  plus a live self-publishing child (`os-spawn`), plus the pid patch
+ *  and work marker (`publication`). Production never arms this. */
+export type SpawnAbandonAt = 'reservation' | 'os-spawn' | 'publication'
+
+/** Thrown at the armed point — the test's signal that the parent would
+ *  have died there; the spawned child and registry state are what a
+ *  real crash leaves behind. */
+export class SpawnAbandoned extends Error {
+  override name = 'SpawnAbandoned'
+  constructor(readonly at: SpawnAbandonAt) {
+    super(`spawn abandoned at ${at} (test seam)`)
+  }
+}
+
+const spawnTestSeam: { abandonAt?: SpawnAbandonAt; goWaitTicks?: number } = {}
+
+/** Arm the crash-window failpoints (spec bro-l8c4f.5) — tests only:
+ *  `abandonAt` throws SpawnAbandoned mid-section exactly where a
+ *  launcher crash would cut it, `goWaitTicks` shrinks the worker's
+ *  admission wait so the timeout path runs inside a test budget. */
+export function armNativeSpawnTestSeam(seam: {
+  abandonAt?: SpawnAbandonAt
+  goWaitTicks?: number
+}): void {
+  spawnTestSeam.abandonAt = seam.abandonAt
+  spawnTestSeam.goWaitTicks = seam.goWaitTicks
+}
+
+const maybeAbandonSpawn = (at: SpawnAbandonAt): void => {
+  if (spawnTestSeam.abandonAt === at) {
+    throw new SpawnAbandoned(at)
+  }
+}
+
+/** The `<agentId>.<runId>.{handle,go}` paths for one attempt — the
+ *  handle is the worker's durable self-registration, the go stamp the
+ *  launcher's admission answer. */
+function attemptHandles(
+  home: string,
+  agentId: string,
+  runId: string
+): { handleFile: string; goFile: string } {
+  return {
+    handleFile: join(home, `${agentId}.${runId}.handle`),
+    goFile: join(home, `${agentId}.${runId}.go`),
+  }
+}
+
+/** Adopt a survivor: the entry's pid patch never landed, but the
+ *  worker published its own handle before the launcher died. A live
+ *  handle stamps pid+pidStart into the entry — under the same
+ *  generation guard the exit harvest uses, so a respawned entry is
+ *  never adopted into — and returns the pid so status/down reach the
+ *  worker and dedup keeps refusing beside it. */
+function adoptNativeHandle(
+  dir: string,
+  home: string | null,
+  molStep: string,
+  entry: AgentRegistryEntry
+): { pid: number; start: string | null } | undefined {
+  const runId = entryRunId(entry)
+  if (
+    home === null ||
+    runId === undefined ||
+    entry.backend !== 'native' ||
+    basename(entry.agentId) !== entry.agentId // '../' must never escape the agents home
+  ) {
+    return undefined
+  }
+  let pid: number
+  try {
+    pid = Number(
+      readFileSync(attemptHandles(home, entry.agentId, runId).handleFile, 'utf8').trim()
+    )
+  } catch {
+    return undefined
+  }
+  if (!Number.isInteger(pid) || pid <= 0) {
+    return undefined
+  }
+  const start = procStat(pid)?.start ?? null
+  if (!pidAlive(pid, start ?? undefined)) {
+    return undefined
+  }
+  // the handle file is runId-scoped — its pid IS this attempt's, so the
+  // in-memory row adopts it unconditionally (the AgentInfo built from
+  // it carries the pid to status/down)
+  entry.pid = pid
+  entry.pidStart = start
+  try {
+    withAgentRegistryLock(dir, () => {
+      const reg = readAgentRegistry(dir)
+      const cur = reg[molStep]
+      // a respawn owns the entry now — the handle belongs to a dead
+      // generation and must not stamp the new run's fields
+      if (
+        cur === undefined ||
+        cur.agentId !== entry.agentId ||
+        cur.spawnedAt !== entry.spawnedAt ||
+        cur.runId !== entry.runId
+      ) {
+        return
+      }
+      reg[molStep] = { ...cur, pid, pidStart: start }
+      writeAgentRegistry(dir, reg)
+    })
+  } catch {
+    // the registry stamp is advisory — the handle still proves liveness
+  }
+  return { pid, start }
+}
+
 /** The native backend — detached process, self-sufficient
  *  (supervisor:'none'). Agent command template resolves as
  *  agents.native.command → loop.agent; `{promptFile}` expands like the
@@ -2082,6 +2456,10 @@ export function makeNativeConnector(ctx: ConnectorCtx, env: AgentConnectorEnv): 
     name: 'native',
 
     async spawn(spec: SpawnSpec): Promise<AgentInfo> {
+      // policy before preflight — a refused spawn must not run even the
+      // harmless probes (prepareSpawn re-checks inside the lock for the
+      // claim/registry writes)
+      assertMutableConfig(dir)
       const home = spawnHome(dir, 'native', command, spec)
       // dedup → claim → spawn → pid-patch runs as ONE critical section:
       // without the lock a second bro process can pass the liveness
@@ -2092,17 +2470,25 @@ export function makeNativeConnector(ctx: ConnectorCtx, env: AgentConnectorEnv): 
       // fleet memo exists: a slow beads store must not hold the lock.
       const mol = stepParent(spec.beadsDir, spec.molStep)
       return withAgentRegistryLock(dir, () => {
-        const { agentId, promptFile, log, stderrLog, exitFile, reservation } = prepareSpawn(
-          dir,
-          home,
-          'native',
-          spec,
-          {
-            isLive: (e) => nativeState(dir, home, spec.molStep, e) === 'running',
+        const { agentId, promptFile, log, stderrLog, exitFile, runId, reservation } =
+          prepareSpawn(dir, home, 'native', spec, {
+            // 'spawned' counts as live for dedup: inside the handoff
+            // window a pid-less entry may still be a worker about to
+            // publish its handle — a respawn beside it is the
+            // crash-window bug (spec bro-l8c4f.5)
+            isLive: (e) => {
+              const s = nativeState(dir, home, spec.molStep, e)
+              return s === 'running' || s === 'spawned'
+            },
+            liveDetail: (e) =>
+              typeof e.pid === 'number' ? `pid ${e.pid}` : 'spawn handoff in flight',
             cap: { max: fleetCapOf(env), env },
             sessionQuota: sessionQuotaOf(env, 'native', spec, command),
-          }
-        )
+          })
+        // the launcher crashed after the reservation — registry+claim
+        // landed, no OS child ever ran (spec bro-l8c4f.5 failpoint)
+        maybeAbandonSpawn('reservation')
+        const { handleFile, goFile } = attemptHandles(home, agentId, runId)
         // the worker's stderr gets its own append fd — the .log stays
         // the agent-updates stream; the child/agent noise (and every
         // template worker's diagnostics) lands in .stderr (bro-e2ec0).
@@ -2112,10 +2498,14 @@ export function makeNativeConnector(ctx: ConnectorCtx, env: AgentConnectorEnv): 
         let errFd: number | undefined
         let spawned: AgentRegistryEntry
         try {
-          fd = openSync(log, 'a')
-          errFd = openSync(stderrLog, 'a')
+          fd = openPrivateAppendSync(log)
+          errFd = openPrivateAppendSync(stderrLog)
           // the wrapper captures $? into the .exit file — the only exit
           // record a detached process can leave once the parent is gone.
+          // The write targets the literal quoted path, never $out: a
+          // 'template' payload runs in this shell's scope and assigning
+          // `out` would retarget the exit write (the shape tmux/docker
+          // already use).
           // Worker payloads (spec bro-5hx1.1): a 'template' worker's
           // command substitutes for the backend's own template; an
           // 'argv' worker execs verbatim through the wrapper's "$@"
@@ -2123,21 +2513,33 @@ export function makeNativeConnector(ctx: ConnectorCtx, env: AgentConnectorEnv): 
           // could carry shell metachars) is never string-concatenated.
           const worker = spec.worker
           warnNoPromptFile(worker, command)
+          // the handshake runs before the payload: the worker publishes
+          // its own handle, then holds on the launcher's go stamp — a
+          // launcher that died mid-publish never admits it (75), so a
+          // survivor can never silently double a respawn (spec
+          // bro-l8c4f.5)
+          const goTicks = String(spawnTestSeam.goWaitTicks ?? GO_WAIT_TICKS)
           const args =
             worker?.kind === 'argv'
               ? [
                   '-c',
-                  'out=$1; shift; "$@"; s=$?; printf %s "$s" > "$out"',
+                  `${HANDSHAKE_SCRIPT} shift 4; "$@"; s=$?; ( umask 077; printf %s "$s" > ${shQuote(exitFile)} )`,
                   'bro-agent',
                   exitFile,
+                  handleFile,
+                  goFile,
+                  goTicks,
                   ...worker.argv,
                   promptFile,
                 ]
               : [
                   '-c',
-                  `${expandAgentCmd(worker?.kind === 'template' ? worker.command : command, promptFile)}; s=$?; printf %s "$s" > "$1"`,
+                  `${HANDSHAKE_SCRIPT} ${expandAgentCmd(worker?.kind === 'template' ? worker.command : command, promptFile)}; s=$?; ( umask 077; printf %s "$s" > ${shQuote(exitFile)} )`,
                   'bro-agent',
                   exitFile,
+                  handleFile,
+                  goFile,
+                  goTicks,
                 ]
           const cliBadge = workerCliBadge(worker, command)
           const child = spawn(
@@ -2208,6 +2610,10 @@ export function makeNativeConnector(ctx: ConnectorCtx, env: AgentConnectorEnv): 
             }
           })
           child.unref()
+          // the launcher died between OS spawn and pid publication —
+          // a live detached child the registry cannot yet name (spec
+          // bro-l8c4f.5 failpoint)
+          maybeAbandonSpawn('os-spawn')
           spawned = patchAgentRegistry(dir, spec.molStep, {
             pid: child.pid ?? -1,
             // the starttime pins identity against pid reuse — without it
@@ -2219,6 +2625,13 @@ export function makeNativeConnector(ctx: ConnectorCtx, env: AgentConnectorEnv): 
                 : null,
           })
           writeWorkMarker(dir, agentId, spec.molStep, child.pid)
+          // died after publishing the handle — pid+marker are durable,
+          // the worker's admission stamp never lands
+          maybeAbandonSpawn('publication')
+          // the admission stamp — durable only after pid+marker, so a
+          // crash earlier can never admit a worker the registry cannot
+          // reach. Existence is the signal; the pid inside is forensic.
+          writePrivateFileSync(goFile, `${child.pid ?? -1}\n`)
         } catch (err) {
           // sync failure after the reservation — hand the slot back
           if (reservation !== undefined) {
@@ -2266,8 +2679,36 @@ export function makeNativeConnector(ctx: ConnectorCtx, env: AgentConnectorEnv): 
         return // idempotent — gone is the desired end state
       }
       const [molStep, entry] = hit
-      const pid = typeof entry.pid === 'number' ? entry.pid : undefined
-      if (pid !== undefined && pidAlive(pid, entryPidStart(entry))) {
+      // a crashed launcher's survivor self-published its handle — adopt
+      // it here too so `down` reaches the worker the registry never got
+      // a pid for (spec bro-l8c4f.5)
+      const adopted =
+        typeof entry.pid === 'number'
+          ? undefined
+          : adoptNativeHandle(dir, agentsHome(dir), molStep, entry)
+      const pid = typeof entry.pid === 'number' ? entry.pid : adopted?.pid
+      const start =
+        typeof entry.pid === 'number'
+          ? entryPidStart(entry)
+          : (adopted?.start ?? undefined)
+      // The unit check lives outside the signal block: a repeated `down`
+      // can find the wrapper already dead while a descendant still holds
+      // the group — the lock guard below must see it even when no signal
+      // was sent. `unit` stays empty without a live wrapper (the tree
+      // link is already broken by then — the snapshot only works
+      // pre-death).
+      let unit: Array<{ pid: number; start?: string }> = []
+      const unitAlive = () =>
+        pid !== undefined &&
+        (pidAlive(pid, start) ||
+          groupMemberAlive(pid, start) ||
+          unit.some((d) => pidAlive(d.pid, d.start)))
+      if (pid !== undefined && pidAlive(pid, start)) {
+        // the tree snapshot rides BEFORE the signal: a descendant that
+        // escaped the group (setsid) is invisible to groupMemberAlive,
+        // and once the wrapper dies it reparents to init — the
+        // pre-signal pid+starttime pin is the only handle left on it
+        unit = descendantsOf(pid)
         try {
           process.kill(-pid, 'SIGTERM') // detached → own process group
         } catch {
@@ -2278,9 +2719,13 @@ export function makeNativeConnector(ctx: ConnectorCtx, env: AgentConnectorEnv): 
         }
         // let the signal land before recording the stop — `stopped` on a
         // still-living pid would let a respawn run alongside the dying
-        // agent (nativeState reports live pids as running regardless)
+        // agent (nativeState reports live pids as running regardless).
+        // The unit, not the wrapper, is the wait: a TERM-resistant
+        // descendant outlives the sh-wrapper it was spawned under, and
+        // `stopped` over it would free a respawn onto a live writer
+        // (bro-l8c4f.3)
         const deadline = Date.now() + 2_000
-        while (pidAlive(pid, entryPidStart(entry)) && Date.now() < deadline) {
+        while (unitAlive() && Date.now() < deadline) {
           await new Promise((r) => setTimeout(r, 25))
         }
       }
@@ -2293,9 +2738,9 @@ export function makeNativeConnector(ctx: ConnectorCtx, env: AgentConnectorEnv): 
           cur === undefined ||
           cur.agentId !== entry.agentId ||
           cur.spawnedAt !== entry.spawnedAt ||
-          (pid !== undefined && pidAlive(pid, entryPidStart(entry)))
+          unitAlive()
         ) {
-          return // respawned or still alive — the live run owns the entry
+          return // respawned, or the unit (wrapper/descendant) lives — the live run owns the entry
         }
         try {
           patchAgentRegistry(dir, molStep, { stopped: true })
@@ -2440,6 +2885,7 @@ function toTmuxInfo(
   return {
     id: entry.agentId,
     spawnedAt: typeof entry.spawnedAt === 'string' ? entry.spawnedAt : undefined,
+    runId: entryRunId(entry),
     pid: typeof entry.pid === 'number' ? entry.pid : undefined,
     molStep,
     backend: entry.backend,
@@ -2478,6 +2924,7 @@ export function makeTmuxConnector(ctx: ConnectorCtx, env: AgentConnectorEnv): Ag
     name: 'tmux',
 
     async spawn(spec: SpawnSpec): Promise<AgentInfo> { // NOSONAR — connector contract is async; the critical section is sync
+      assertMutableConfig(dir)
       const home = spawnHome(dir, 'tmux', command, spec)
       const ver = tmuxRun(socket, ['-V'])
       if (ver.missing || ver.code !== 0) {
@@ -2542,7 +2989,7 @@ export function makeTmuxConnector(ctx: ConnectorCtx, env: AgentConnectorEnv): Ag
           )
           .map(([k, v]) => `export ${k}=${shQuote(v)}`)
           .join('\n')
-        writeFileSync(envFile, `${ambient}\n`, { mode: 0o600 })
+        writePrivateFileSync(envFile, `${ambient}\n`)
         const worker = spec.worker
         const cliBadge = workerCliBadge(worker, command)
         const envArgs = agentEnvPins(spec, agentId, promptFile, cliBadge, mol).flatMap(
@@ -2561,7 +3008,7 @@ export function makeTmuxConnector(ctx: ConnectorCtx, env: AgentConnectorEnv): Ag
         // re-parses into a different program.
         warnNoPromptFile(worker, command)
         const runLine = workerRunLine(worker, command, promptFile)
-        const paneScript = `. ${shQuote(envFile)}; rm -f ${shQuote(envFile)}; { ${runLine}; s=$?; printf %s "$s" > ${shQuote(exitFile)}; } 2>> ${shQuote(stderrLog)} | tee -a ${shQuote(log)}`
+        const paneScript = `. ${shQuote(envFile)}; rm -f ${shQuote(envFile)}; { ${runLine}; s=$?; ( umask 077; printf %s "$s" > ${shQuote(exitFile)} ); } 2>> ${shQuote(stderrLog)} | tee -a ${shQuote(log)}`
         const paneCmd = `sh -c ${shQuote(paneScript)}` // NOSONAR — operator-configured agent command (same contract as native/loop)
         const res = tmuxRun(socket, [
           'new-session',
@@ -3008,9 +3455,11 @@ export function makeGascityConnector(ctx: ConnectorCtx, env: AgentConnectorEnv):
         .replace(/^work_dir\s*=.*$/gm, '')
         .replace(/^env\s*=.*$/gm, '')
     const agentDir = join(city, 'agents', spec.molStep)
-    mkdirSync(agentDir, { recursive: true })
-    writeFileSync(join(agentDir, 'prompt.template.md'), read('prompt.template.md', GC_PROMPT_TEMPLATE))
-    writeFileSync(join(agentDir, 'agent.toml'), agentToml)
+    // owner-only (spec bro-l8c4f.4) — agent.toml inlines the caller's
+    // env table; a permissive file leaks secrets into every local login
+    mkdirPrivateSync(agentDir)
+    writePrivateFileSync(join(agentDir, 'prompt.template.md'), read('prompt.template.md', GC_PROMPT_TEMPLATE))
+    writePrivateFileSync(join(agentDir, 'agent.toml'), agentToml)
   }
 
   /** Adopt the repo as a rig — the rig's beads DB IS the shared store,
@@ -3056,6 +3505,7 @@ export function makeGascityConnector(ctx: ConnectorCtx, env: AgentConnectorEnv):
     return {
       id: entry.agentId,
       spawnedAt: typeof entry.spawnedAt === 'string' ? entry.spawnedAt : undefined,
+      runId: entryRunId(entry),
       molStep,
       backend: entry.backend,
       state: sessions === undefined || s === undefined ? missing : gcState(s),
@@ -3162,6 +3612,9 @@ export function makeGascityConnector(ctx: ConnectorCtx, env: AgentConnectorEnv):
     matchDir: () => gcMatchDir(dir, env),
 
     async spawn(spec: SpawnSpec): Promise<AgentInfo> {
+      // policy before preflight — refuse invalid committed config ahead
+      // of the worker/prompt checks, let alone the gc side effects
+      assertMutableConfig(dir)
       // a provider-resolved worker can't ride gc — the city's provider
       // command is written once in city.toml at init, so recording
       // provenance while gc runs its own configured provider would be
@@ -3755,6 +4208,7 @@ function toDockerInfo(
   return {
     id: entry.agentId,
     spawnedAt: typeof entry.spawnedAt === 'string' ? entry.spawnedAt : undefined,
+    runId: entryRunId(entry),
     pid: typeof entry.pid === 'number' ? entry.pid : undefined,
     molStep,
     backend: entry.backend,
@@ -3826,7 +4280,7 @@ function writeDockerEnvFile(envFile: string, spec: SpawnSpec): void {
       `warning: docker env-file drops ${dropped.length} var(s) with newline values: ${dropped.join(', ')}`
     )
   }
-  writeFileSync(envFile, `${ambient}\n`, { mode: 0o600 })
+  writePrivateFileSync(envFile, `${ambient}\n`)
 }
 
 /** The `docker run` argv — operator `runArgs` sit FIRST so docker's
@@ -3898,6 +4352,9 @@ export function makeDockerConnector(ctx: ConnectorCtx, env: AgentConnectorEnv): 
     name: 'docker',
 
     async spawn(spec: SpawnSpec): Promise<AgentInfo> { // NOSONAR — connector contract is async; the work is one sync critical section
+      // policy BEFORE the daemon probe and image pull/build — a refused
+      // spawn must not pay (or log) a docker fetch it will never use
+      assertMutableConfig(dir)
       const home = spawnHome(dir, 'docker', command, spec)
       const daemon = dockerDaemonUp()
       if (!daemon.up) {
@@ -3958,7 +4415,7 @@ export function makeDockerConnector(ctx: ConnectorCtx, env: AgentConnectorEnv): 
           // worker a reaper so grandchildren can't zombie inside; --rm
           // removes the corpse on exit so `docker ps -a` doesn't fill
           // with bro litter and the name frees for a respawn.
-          const wrapper = `{ ${runLine}; s=$?; printf %s "$s" > ${shQuote(exitFile)}; } >> ${shQuote(log)} 2>> ${shQuote(stderrLog)}`
+          const wrapper = `{ ${runLine}; s=$?; ( umask 077; printf %s "$s" > ${shQuote(exitFile)} ); } >> ${shQuote(log)} 2>> ${shQuote(stderrLog)}`
           const res = dockerRun(
             dockerRunArgv(name, spec, dockerMounts(spec), envFile, agentId, promptFile, cliBadge, mol, runArgs, image, wrapper)
           )
@@ -4100,6 +4557,20 @@ export function makeDockerConnector(ctx: ConnectorCtx, env: AgentConnectorEnv): 
 registerAgentConnector('docker', makeDockerConnector)
 
 // --- copilot -------------------------------------------------------------------
+
+/** No local command runs on a copilot spawn — a provider-resolved
+ *  worker/template has no remote surface to ride, and agents.copilot.
+ *  command is meaningless by the same logic; refuse before anything
+ *  lands. */
+function refuseCopilotWorker(spec: SpawnSpec): void {
+  if (spec.worker !== undefined) {
+    throw new SpawnError(
+      `copilot spawns run GitHub-hosted sessions — a provider-resolved ${spec.worker.kind} ` +
+        `worker cannot dispatch remotely; drop --provider/--profile or pick a local backend`,
+      'config'
+    )
+  }
+}
 
 /** The copilot backend — GitHub's hosted coding agent ("agent tasks")
  *  as code. Spike verdict: specs/sessions/bro-huy5o.9.md — the first
@@ -4541,6 +5012,7 @@ function copilotInfoFor(
   return {
     id: entry.agentId,
     spawnedAt: typeof entry.spawnedAt === 'string' ? entry.spawnedAt : undefined,
+    runId: entryRunId(entry),
     molStep,
     backend: entry.backend,
     state: st === 'running' && probe.state === 'queued' ? 'spawned' : st,
@@ -4670,7 +5142,7 @@ export function makeCopilotConnector(ctx: ConnectorCtx, env: AgentConnectorEnv):
     target: { owner: string; repo: string; slug: string }
   ): { task: CopilotTask; taskId: string } => {
     const bodyFile = join(home, `${agentId}.task.json`)
-    writeFileSync(bodyFile, JSON.stringify({
+    writePrivateFileSync(bodyFile, JSON.stringify({
       prompt: spec.prompt,
       create_pull_request: true,
       ...(knobString('base') !== undefined ? { base_ref: knobString('base') } : {}),
@@ -4761,16 +5233,10 @@ export function makeCopilotConnector(ctx: ConnectorCtx, env: AgentConnectorEnv):
     name: 'copilot',
 
     async spawn(spec: SpawnSpec): Promise<AgentInfo> { // NOSONAR — connector contract is async; the critical section is sync
-      // no local command runs — a provider-resolved worker/template has
-      // no remote surface to ride, and agents.copilot.command is
-      // meaningless by the same logic; refuse before anything lands
-      if (spec.worker !== undefined) {
-        throw new SpawnError(
-          `copilot spawns run GitHub-hosted sessions — a provider-resolved ${spec.worker.kind} ` +
-            `worker cannot dispatch remotely; drop --provider/--profile or pick a local backend`,
-          'config'
-        )
-      }
+      // policy before preflight — an invalid committed config must
+      // refuse ahead of the remote-count refresh, not just the claim
+      assertMutableConfig(dir)
+      refuseCopilotWorker(spec)
       if (!existsSync(spec.repoRoot)) {
         throw new SpawnError(`worktree ${spec.repoRoot} does not exist`, 'input')
       }

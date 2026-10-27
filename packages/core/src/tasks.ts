@@ -25,7 +25,7 @@
  */
 import { join } from 'node:path'
 import { bd, BdCompatError, bdAt, BD_NO_STORE, bdJson, bdJsonAsync, bdTry, bdTryAsync, isBdNotFound } from './bd.ts'
-import { bridgeFetch, bridgePublish, doltSyncPlan } from './dolt-bridge.ts'
+import { bridgeFetch, bridgePublish, doltHeadHealth, DOLT_DATA_REF, doltSyncPlan, type DoltBridge } from './dolt-bridge.ts'
 import { gitTry } from './git.ts'
 
 /** Resolved probe results per dir — hook surfaces ask for the actor
@@ -281,6 +281,30 @@ export interface PublishResult {
   replaceExternalRef?: boolean
 }
 
+/** What `claim()` actually guarantees on this store — declared, never
+ *  assumed (spec specs/bro-l8c4f.12). Remote connectors all implement
+ *  assign→verify-reread, which detects a held claim and settles most
+ *  races but cannot promise a single winner; only a backend whose
+ *  claim is a single-winner write (bd's `--claim` against one store)
+ *  may declare `exclusive`. */
+export interface ClaimCapability {
+  /** 'exclusive' — a successful claim() return is sole ownership
+   *  within `authority`. 'best-effort' — claim() performs the
+   *  assignment and refuses claims it can see, but a residual
+   *  interleaving window can still seat two winners: a marker, never
+   *  a lease. */
+  strength: 'exclusive' | 'best-effort'
+  /** The identity a claim binds — 'actor' resolves per worker (bd's
+   *  actor chain); 'viewer' is the API account the credential
+   *  presents, so every worker on one token claims as ONE identity. */
+  identity: 'actor' | 'viewer'
+  /** The boundary `strength` holds inside — 'store': the addressed
+   *  store instance alone (independently syncing replicas are
+   *  separate authorities, never one); 'service': the backend's
+   *  shared namespace (workspace, site, repo). */
+  authority: 'store' | 'service'
+}
+
 export interface TaskStore {
   list<T extends TaskRow = TaskRow>(filter?: TaskFilter): T[]
   /** the claimable queue — backend applies its own ordering/filters */
@@ -296,8 +320,20 @@ export interface TaskStore {
   create<T extends TaskRow = TaskRow>(input: TaskInput): T
   /** field patch — keys map to `--<key> <value>` on the backend */
   update(id: string, patch: Record<string, string | number>): void
-  /** atomic assignee + in_progress — throws when already claimed */
+  /** assignee + in_progress transition — throws when already claimed.
+   *  What a successful return MEANS is `claimCapability`'s word:
+   *  'exclusive' makes it sole ownership inside the declared
+   *  authority; 'best-effort' makes it an assignment marker — it
+   *  refuses every race it can see but cannot promise a single
+   *  winner, and two workers behind one 'viewer' credential claim as
+   *  one identity. */
   claim(id: string): void
+  /** The claim guarantee this backend makes — OPTIONAL capability:
+   *  absence means undeclared, and exclusivity-seeking callers treat
+   *  it as non-exclusive (fail closed) while assignment flows keep
+   *  working regardless (fail open). A store never upcodes: a
+   *  best-effort implementation never reports 'exclusive'. */
+  claimCapability?(): ClaimCapability
   /** the identity `claim()` writes to assignee — '' when unresolvable.
    *  Stores without a claim-actor concept omit it; ownership checks then
    *  keep the claim marker's word (fail-open) rather than disprove a
@@ -591,6 +627,39 @@ function wakeSnoozed(x: StoreExec): void {
   }
 }
 
+/** Post-`bd sync` publish of one bridge — dolt can write a manifest
+ *  naming tables it never uploaded; publishing that head corrupts the
+ *  store for every replica's next bootstrap (spec: specs/bro-orcdv.md).
+ *  Withhold the publish on corruption — upstream keeps its last
+ *  bootstrappable head. An unverifiable/absent manifest warns but
+ *  publishes — an unknown format must not wedge replication. The
+ *  publish pins the head just validated: a concurrent sync can move
+ *  the ref between check and publish, and the unpinned refspec would
+ *  ship the unchecked replacement. Returns the warning lines. */
+function publishDoltBridge(b: DoltBridge): string[] {
+  const notes: string[] = []
+  const health = doltHeadHealth(b.mirror, DOLT_DATA_REF)
+  if (health.missing.length > 0) {
+    notes.push(
+      `warning: ${b.mirror} manifest names ${health.missing.length} missing table(s) ` +
+        `(${health.missing.slice(0, 3).join(', ')}) — publish withheld; re-push from a ` +
+        `healthy store or restore per docs/restore.md`
+    )
+    return notes
+  }
+  if (health.error !== undefined && health.head !== '') {
+    notes.push(`warning: ${b.mirror} head unverifiable — ${health.error}; publishing as-is`)
+  }
+  const err = bridgePublish(
+    b,
+    health.head === '' ? undefined : { pin: new Map([[DOLT_DATA_REF, health.head]]) }
+  )
+  if (err !== null) {
+    notes.push(`warning: bridge publish ${b.mirror} failed — ${err}`)
+  }
+  return notes
+}
+
 function makeStore(x: StoreExec): TaskStore {
   return {
     list: (f = {}) => taskRows(x.json(['list', '--json', ...filterArgs(f)]), 'list'),
@@ -650,6 +719,12 @@ function makeStore(x: StoreExec): TaskStore {
     claim: (id) => {
       x.run(['update', id, '--claim'])
     },
+    // `bd update --claim` is a single-winner write against the
+    // ADDRESSED store — two workers pinned to one store get a real
+    // lease. 'store' authority keeps it honest: two syncing replicas
+    // are two stores, so exclusivity never crosses the sync edge
+    // (spec specs/bro-l8c4f.12).
+    claimCapability: () => ({ strength: 'exclusive', identity: 'actor', authority: 'store' }),
     actor: () => x.actor(),
     reopen: (id) => {
       // NOT `bd reopen` — that verb is closed→open only and no-ops on
@@ -714,10 +789,7 @@ function makeStore(x: StoreExec): TaskStore {
         throw new Error(`task store sync failed — ${r.err || `bd exited ${r.code}`}`)
       }
       for (const b of plan.bridges) {
-        const err = bridgePublish(b)
-        if (err !== null) {
-          notes.push(`warning: bridge publish ${b.mirror} failed — ${err}`)
-        }
+        notes.push(...publishDoltBridge(b))
       }
       return [r.out, ...notes].filter((s) => s.trim() !== '').join('\n')
     },

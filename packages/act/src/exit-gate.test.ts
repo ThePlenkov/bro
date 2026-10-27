@@ -1,35 +1,38 @@
 import assert from 'node:assert/strict'
 import { describe, it } from 'node:test'
 import { evaluateExitGate } from './exit-gate.ts'
-import type { PrActState } from './types.ts'
+import { openActState as open } from './act-fixtures.ts'
 
-const open = (over: Partial<PrActState> = {}): PrActState => ({
-  pr: 1,
-  url: '',
-  headSha: 'a'.repeat(40),
-  headRef: 'feat/x',
-  state: 'OPEN',
-  isDraft: false,
-  mergeable: 'MERGEABLE',
-  mergeState: 'CLEAN',
-  openThreads: 0,
-  threads: [],
-  ciPending: 0,
-  ciFailing: 0,
-  reviewersPending: 0,
-  reviewersFailing: 0,
-  sastPending: 0,
-  sastUnknown: 0,
-  fixRounds: 0,
-  maxRounds: 3,
-  docsOnly: false,
-  alerts: [],
-  ...over,
-})
+
 
 describe('evaluateExitGate', () => {
   it('passes a clean open PR', () => {
     assert.equal(evaluateExitGate(open()).ok, true)
+  })
+
+  it('blocks on a reopened thread — resolved before, commented on again', () => {
+    const g = evaluateExitGate(
+      open({
+        reopenedThreads: [
+          {
+            id: 't1',
+            author: 'bob',
+            reopenedAt: '2026-10-02T10:00:00Z',
+            reason: 'thread was resolved before and is open again',
+          },
+        ],
+      })
+    )
+    assert.equal(g.ok, false)
+    assert.equal(g.reopened_threads, 1)
+    assert.match(g.blockers[0]!, /reopened thread t1/)
+    assert.match(g.blockers[0]!, /bob/)
+  })
+
+  it('does not block when no thread was reopened', () => {
+    const g = evaluateExitGate(open({ reopenedThreads: [] }))
+    assert.equal(g.ok, true)
+    assert.equal(g.reopened_threads, 0)
   })
 
   it('blocks on open threads and pending/failing checks', () => {

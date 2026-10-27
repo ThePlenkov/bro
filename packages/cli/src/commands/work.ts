@@ -60,6 +60,7 @@ import {
   type TaskStore,
 } from '@broject/core'
 import type { ExitCode } from '@broject/core'
+import { assertMutableConfig } from '../config-policy.ts'
 import { loopSection, loopSlug, type LoopConfig } from '@broject/loop'
 import { listWatches, type ListedWatch } from '@broject/act'
 import { parseStackBranch } from '@broject/stack'
@@ -359,6 +360,10 @@ export function claimBead(slug: string): { claimed?: string; refused?: boolean }
   // pins a non-beads store; the anchor is the git root so a linked
   // worktree or subdirectory resolves the same backend
   const root = gitTry(['rev-parse', '--show-toplevel']).out.trim() || process.cwd()
+  // the same gate prepareSpawn enforces: a bead claim is an
+  // authoritative mutation — invalid policy config refuses BEFORE the
+  // claim lands, not after a refused spawn strands it (spec: bro-d9dmx)
+  assertMutableConfig(root)
   let store: TaskStore
   try {
     store = facade('tasks', { dir: root }, { prefer: loadConfig(root).connectors })
@@ -1720,7 +1725,7 @@ function watchOwner(ctx: LitterCtx, c: LitterCandidate, bead: TaskRow): string |
       typeof l.watch.workdir === 'string' &&
       resolve(l.watch.workdir) === resolve(c.w.path)
     if (hitsBead || hitsTree) {
-      return `watch on PR #${l.watch.pr} live`
+      return `watch on ${l.watch.link} live`
     }
   }
   return undefined

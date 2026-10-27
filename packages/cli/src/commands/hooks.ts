@@ -62,11 +62,13 @@ import {
   rmSync,
   statSync,
   writeFileSync,
+  writeSync,
 } from 'node:fs'
 import { dirname, isAbsolute, join } from 'node:path'
 import { setTimeout as nodeSetTimeout } from 'node:timers'
 import {
   acquireFileLock,
+  GIT_SYNC_PROBE_TIMEOUT_MS,
   gitCommonDir,
   parallelWorkProbe,
   postToolLines,
@@ -124,6 +126,7 @@ import {
   isCursorHookPayload,
   toCursorHookOutput,
 } from '../cursor-hook.ts'
+import { deriveToolSuccess } from '../host-matrix.ts'
 
 interface HookInput {
   tool_name?: unknown
@@ -138,6 +141,10 @@ interface HookInput {
     files?: unknown
   }
   tool_response?: { success?: unknown }
+  /** The firing event verbatim — Claude requires emitted
+   *  `hookSpecificOutput.hookEventName` to match it (PostToolUse and
+   *  PostToolUseFailure reach the same bro event). */
+  hook_event_name?: unknown
   prompt?: unknown
   stop_hook_active?: unknown
   session_id?: unknown
@@ -167,6 +174,8 @@ function asHookInput(raw: unknown): HookInput {
  * Each hook invocation is its own process. */
 let cursorClient = false
 
+let permissionAnswerEmitted = false
+
 /** Codex adds `turn_id` to every hook payload. Devin and Claude do not,
  * so permission and pre-tool answers stay on their legacy shapes unless
  * this is set. */
@@ -174,7 +183,20 @@ let codexClient = false
 
 function emit(out: unknown): void {
   const payload = cursorClient ? toCursorHookOutput(out) : out
-  process.stdout.write(`${JSON.stringify(payload)}\n`)
+  const line = `${JSON.stringify(payload)}\n`
+  // synchronous — the answer must be on the wire before whatever
+  // blocking I/O follows it (the deadline flush, exit); a buffered
+  // write only queues behind it. The stream fallback covers a closed
+  // or non-fd stdout.
+  try {
+    writeSync(1, line)
+  } catch {
+    try {
+      process.stdout.write(line)
+    } catch {
+      // stdout is gone — nothing left to answer through
+    }
+  }
 }
 
 function isAbsoluteProject(p: string): boolean {
@@ -435,6 +457,7 @@ export function isSelfToolCommand(cmd: string): boolean {
 // aspects. No session_id or no git dir → unarmed → passive (fail-open).
 
 const MARKER_TTL_MS = 7 * 24 * 60 * 60 * 1000
+const HOOK_OCCUPANCY_WAIT_MS = 500
 /** "Live" for parallel-session detection is tighter than the stop-gate
  *  TTL — a marker older than a day is residue, not a working session. */
 const LIVE_SESSION_MS = 24 * 60 * 60 * 1000
@@ -449,7 +472,7 @@ function hooksStateDir(dir: string = process.cwd()): string | null {
   // scrubs inherited GIT_DIR/GIT_WORK_TREE/GIT_COMMON_DIR — an inline
   // rev-parse would let git output (or the proxy's ambient env) point
   // marker reads/writes at a different repository's state
-  const gd = gitCommonDir(dir)
+  const gd = gitCommonDir(dir, GIT_SYNC_PROBE_TIMEOUT_MS)
   return gd !== null ? join(gd, 'bro', 'hooks') : null
 }
 
@@ -670,7 +693,7 @@ export function armDetail(cmd: string, aspect: GateAspect): string {
 
 /** Record that this session touched `aspect`. Best-effort; also prunes
  * markers older than a week so stale sessions don't accumulate. */
-function armSession(sessionId: string, aspect: GateAspect, detail: string = ''): void {
+export function armSession(sessionId: string, aspect: GateAspect, detail: string = ''): void {
   try {
     const path = markerPath(sessionId, aspect)
     if (!path) {
@@ -693,19 +716,16 @@ function armSession(sessionId: string, aspect: GateAspect, detail: string = ''):
     if (detail && !body.split('\n').includes(detail)) {
       body = `${body.replace(/\n?$/, '\n')}${detail}\n`
     }
-    // a .work arm writes under the shared occupancy lock — `bro drive`
-    // holds it across its occupancy-check→spawn section, so this marker
-    // lands before the driver's probe or after the action, never
-    // between (bro-qry9). The wait is the standard lock bound — long
-    // enough to cover a real driver's hold, so the write-anyway
-    // fallback only fires on a pathological holder (the marker is the
-    // session record; dropping it loses the arm entirely).
+    // A .work arm shares the drive occupancy lock so the marker normally
+    // lands before its probe or after the action (bro-qry9). The 500ms
+    // wait is far below the host's 10s hook timeout; on contention, write
+    // anyway, and drive's next occupancy refresh sees the marker.
     let release: () => void = () => {}
     if (aspect === 'work') {
       try {
         release = acquireFileLock(
           join(dirname(dirname(path)), 'agents.json.lock'),
-          { label: 'occupancy lock' }
+          { waitMs: HOOK_OCCUPANCY_WAIT_MS, label: 'occupancy lock' }
         )
       } catch {
         // held past the bound — write anyway; the marker is the record
@@ -876,7 +896,7 @@ const TRACE_JOURNAL_KEEP_LINES = 500
  *  lifecycle, but a weekly TTL doesn't need a per-event dir scan: a new
  *  journal is the once-per-session tick that sweeps residue. Best-effort
  *  like arming: a failed append must never stall the hook. */
-function journalTrace(input: HookInput, sessionId: string): void {
+export function journalTrace(input: HookInput, sessionId: string): void {
   try {
     const path = traceFile(process.cwd(), sessionId)
     if (!path) {
@@ -912,7 +932,7 @@ function journalTrace(input: HookInput, sessionId: string): void {
     }
     try {
       withFileLock(`${path}.lock`, append, {
-        waitMs: 2_000,
+        waitMs: 0,
         label: 'trace journal lock',
       })
     } catch {
@@ -947,6 +967,7 @@ interface PerfRow extends ProbeTiming {
   probe?: string
   /** Total-row marker: how many probe rows the event produced. */
   probes?: number
+  deadline?: boolean
 }
 
 /** `<git-common>/bro/hooks/perf/<session>.jsonl` — null without a git
@@ -985,7 +1006,7 @@ function probeReporter(event: string, probe: string): ProbeReporter {
  *  append + cap-check + trim is one critical section (concurrent hooks
  *  are separate processes); a lock timeout degrades to the plain
  *  append, never a stall. */
-function appendJournal(path: string, line: string, waitMs = 2_000): void {
+function appendJournal(path: string, line: string, waitMs = 0): void {
   mkdirSync(dirname(path), { recursive: true })
   const append = (): void => {
     appendFileSync(path, line)
@@ -1026,9 +1047,9 @@ export function journalCommand(cmd: string, ms: number, exitCode: number): void 
       ms,
       ...(exitCode !== 0 ? { failed: true as const } : {}),
     }
-    // waitMs 0: a contended lock must not stall the exit handler —
-    // the fallback plain append lands the line without the cap check.
-    appendJournal(join(dir, 'perf', 'commands.jsonl'), `${JSON.stringify(row)}\n`, 0)
+    // A contended lock must not stall the exit handler — the fallback
+    // plain append lands the line without the cap check.
+    appendJournal(join(dir, 'perf', 'commands.jsonl'), `${JSON.stringify(row)}\n`)
   } catch {
     // telemetry must never stall or fail the caller
   }
@@ -1037,7 +1058,7 @@ export function journalCommand(cmd: string, ms: number, exitCode: number): void 
 /** Flush the buffered rows plus the event total to the session's perf
  *  journal. Called in a finally — a hook that threw still reports the
  *  time it burned. */
-function flushPerf(sessionId: string, event: string, t0: number): void {
+function flushPerf(sessionId: string, event: string, t0: number, deadline = false): void {
   try {
     const path = perfFile(sessionId)
     if (!path || !perfBuf) {
@@ -1045,7 +1066,14 @@ function flushPerf(sessionId: string, event: string, t0: number): void {
     }
     const rows = perfBuf
     perfBuf = null
-    rows.push({ ts: Date.now(), event, ms: Date.now() - t0, connector: '', probes: rows.length })
+    rows.push({
+      ts: Date.now(),
+      event,
+      ms: Date.now() - t0,
+      connector: '',
+      probes: rows.length,
+      ...(deadline ? { deadline: true } : {}),
+    })
     const fresh = !existsSync(path)
     appendJournal(
       path,
@@ -1066,6 +1094,19 @@ function flushPerf(sessionId: string, event: string, t0: number): void {
   } catch {
     // perf must never stall a session
   }
+}
+
+/** Whole-dispatch hard deadline (spec: specs/bro-36sx7.13.md) — under
+ *  the host's ~10s hook timeout with room for run.sh's watchdog
+ *  (BRO_HOOK_WATCHDOG_S, default 8s) behind it. */
+const HOOK_DEADLINE_MS = 6_000
+
+export function hookDeadlineMs(env: NodeJS.ProcessEnv = process.env): number {
+  const n = Number(env.BRO_HOOK_DEADLINE_MS)
+  // Node schedules a delay past the 32-bit timer ceiling as ~1ms — an
+  // over-ceiling override would expire the deadline immediately and
+  // strip every gate's verdict, so it falls back like any invalid value.
+  return Number.isSafeInteger(n) && n > 0 && n <= 2_147_483_647 ? n : HOOK_DEADLINE_MS
 }
 
 // --- event handlers -----------------------------------------------------------
@@ -1429,6 +1470,41 @@ async function emitPromptContext(input: HookInput): Promise<void> {
   context('UserPromptSubmit', text)
 }
 
+/** Arm the session aspects a command implies, plus the once-per-session
+ *  governing-skill citation for mutating bro subcommands (bro-d8s). */
+function armPostTool(cmd: string, sessionId: string): string[] {
+  const aspects = classifyArmCommands(cmd)
+  if (sessionId) {
+    for (const aspect of aspects) {
+      armSession(sessionId, aspect, armDetail(cmd, aspect))
+    }
+  }
+  const mutation = classifySkillMutation(cmd)
+  if (mutation && sessionId && !skillHinted(sessionId, mutation.skill)) {
+    markSkillHinted(sessionId, mutation.skill)
+    return [
+      `bro ${mutation.plugin} mutations are governed by the ${mutation.skill} skill ` +
+        `— read skills/${mutation.skill}/SKILL.md before continuing`,
+    ]
+  }
+  return []
+}
+
+/** World-state nudges are statements of fact — emitPostTool reads them
+ *  only where the host proved the call succeeded. */
+function execNudges(cmd: string): string[] {
+  switch (classifyExecCommand(cmd)) {
+    case 'pr-merge':
+      return ['PR merged — sweep review debt with `bro debt collect`; queue: `bro debt prs`']
+    case 'pr-create':
+      return [
+        'PR created — `bro act status` is the review gate; `bro act threads` lists open threads',
+      ]
+    default:
+      return []
+  }
+}
+
 async function emitPostTool(input: HookInput): Promise<void> {
   const sessionId = typeof input.session_id === 'string' ? input.session_id : ''
   const lines: string[] = []
@@ -1439,35 +1515,18 @@ async function emitPostTool(input: HookInput): Promise<void> {
   // collector can lose spans, never stall the hook (spec:
   // specs/telemetry/bro-huy5o.11.md)
   maybeSpawnTraceFlush(process.cwd())
-  if (input.tool_response?.success === true) {
-    const cmd = typeof input.tool_input?.command === 'string' ? input.tool_input.command : ''
-    const aspects = classifyArmCommands(cmd)
-    if (sessionId) {
-      for (const aspect of aspects) {
-        armSession(sessionId, aspect, armDetail(cmd, aspect))
-      }
-    }
-    // a mutating bro subcommand cites its governing skill once per session —
-    // the SKILL.md never loads on a bare CLI call (bro-d8s)
-    const mutation = classifySkillMutation(cmd)
-    if (mutation && sessionId && !skillHinted(sessionId, mutation.skill)) {
-      markSkillHinted(sessionId, mutation.skill)
-      lines.push(
-        `bro ${mutation.plugin} mutations are governed by the ${mutation.skill} skill ` +
-          `— read skills/${mutation.skill}/SKILL.md before continuing`
-      )
-    }
-    switch (classifyExecCommand(cmd)) {
-      case 'pr-merge':
-        lines.push('PR merged — sweep review debt with `bro debt collect`; queue: `bro debt prs`')
-        break
-      case 'pr-create':
-        lines.push(
-          'PR created — `bro act status` is the review gate; `bro act threads` lists open threads'
-        )
-        break
-      default:
-    }
+  const outcome = input.tool_response?.success
+  const cmd = typeof input.tool_input?.command === 'string' ? input.tool_input.command : ''
+  // arming is a "probe live state once" hint the stop gate re-verifies,
+  // not a verdict — so it fires on every outcome except a proven
+  // failure. A host that cannot observe outcomes (Codex PostToolUse
+  // fires on non-zero exits) over-approximates: a false arm costs one
+  // probe that finds nothing, a missed arm loses the gate entirely.
+  if (outcome !== false) {
+    lines.push(...armPostTool(cmd, sessionId))
+  }
+  if (outcome === true) {
+    lines.push(...execNudges(cmd))
   }
   // connector postTool probes run on every event — a failed exec is
   // still a delivery tick for a drained mailbox (notify). Guards read
@@ -1484,7 +1543,12 @@ async function emitPostTool(input: HookInput): Promise<void> {
   ])
   lines.push(...postLines, ...guards)
   if (lines.length > 0) {
-    context('PostToolUse', lines.join('\n'))
+    // Claude validates hookEventName against the triggering event — a
+    // PostToolUseFailure trigger needs its own name back, not
+    // 'PostToolUse'. Hosts without the field get the default.
+    const eventName =
+      typeof input.hook_event_name === 'string' ? input.hook_event_name : 'PostToolUse'
+    context(eventName, lines.join('\n'))
   }
 }
 
@@ -1499,35 +1563,45 @@ const GATE_PRIORITY = ['drill', 'work', 'act', 'task']
 
 async function emitStopGate(input: HookInput): Promise<void> {
   const sessionId = typeof input.session_id === 'string' ? input.session_id : ''
+  // as in emitPostTool — the emitted event name must match the firing
+  // one; Stop is the only wired trigger today, but SubagentStop arrives
+  // on the same bro event wherever a host wires it
+  const eventName =
+    typeof input.hook_event_name === 'string' ? input.hook_event_name : 'Stop'
   // session tail — the last post-tool lines only ship if a flush fires
   // here; a stop's spawn is the same detached, throttled respawn
   maybeSpawnTraceFlush(process.cwd())
   // the goal reminder fires on EVERY stop — it is the keep-going nudge,
   // exempt from the once-per-session block budget (context, never
   // `decision: block`; spec: specs/goal/bro-6vcll.md)
+  const contextP = boundedMs(
+    sessionContextTextCached(process.cwd(), sessionId).catch(() => undefined),
+    4_000
+  )
   const goalP = goalStopLines(process.cwd(), sessionId, {
     trace: sessionTail(process.cwd(), sessionId).raw,
     // the judge's checkable surface — beads/gate/tree state, not just
     // tool metadata (fail-open inside; a slow probe → undefined)
-    context: boundedMs(
-      sessionContextTextCached(process.cwd(), sessionId).catch(() => undefined),
-      4_000
-    ),
+    context: contextP,
   })
   if (input.stop_hook_active === true) {
-    const goal = await goalP
+    const [goal] = await Promise.all([goalP, contextP])
     if (goal.length > 0) {
-      context('Stop', goal.join('\n'))
+      context(eventName, goal.join('\n'))
     }
     return
   }
-  await emitStopGateBody(sessionId, goalP)
+  await Promise.all([emitStopGateBody(sessionId, goalP, eventName), contextP])
 }
 
 /** The armed-gate half of the stop event — split from emitStopGate so
  *  the goal preamble's branches don't push the gate over the complexity
  *  budget (SAST counts them together otherwise). */
-async function emitStopGateBody(sessionId: string, goalP: Promise<string[]>): Promise<void> {
+async function emitStopGateBody(
+  sessionId: string,
+  goalP: Promise<string[]>,
+  eventName: string
+): Promise<void> {
   const armed = sessionId ? readArmed(sessionId) : new Set<string>()
   // Block priority is aspect order, not registry order — a beads gate
   // (registry-first) must not shadow a dirty-worktree block: abandoning
@@ -1575,7 +1649,7 @@ async function emitStopGateBody(sessionId: string, goalP: Promise<string[]>): Pr
   // a nudge, never a `decision: block` (spec: bro-nkn6)
   hints.push(...guards)
   if (hints.length > 0) {
-    context('Stop', hints.join('\n'))
+    context(eventName, hints.join('\n'))
   }
 }
 
@@ -1654,6 +1728,7 @@ function emitPermission(input: HookInput): boolean {
         decision: { behavior: 'deny', message: capRefusal },
       },
     })
+    permissionAnswerEmitted = true
     return true
   }
   if (isSelfToolCommand(cmd)) {
@@ -1667,6 +1742,7 @@ function emitPermission(input: HookInput): boolean {
     } else {
       emit({ decision: 'approve' })
     }
+    permissionAnswerEmitted = true
     return true
   }
   return false
@@ -1691,6 +1767,7 @@ function answerCursorPermission(event: string | undefined, input: HookInput): vo
   }
   if (!emitPermission(input)) {
     emit({ permission: 'ask' })
+    permissionAnswerEmitted = true
   }
 }
 
@@ -1797,6 +1874,7 @@ async function dispatchHook(event: string, raw: unknown, input: HookInput): Prom
     case 'permission':
       if (!emitPermission(input) && cursorClient) {
         emit({ permission: 'ask' })
+        permissionAnswerEmitted = true
       }
       return
     default:
@@ -1828,7 +1906,8 @@ function parsePerfRow(line: string): PerfRow | undefined {
     return typeof p.event === 'string' &&
       typeof p.connector === 'string' &&
       typeof p.ms === 'number' &&
-      typeof p.ts === 'number'
+      typeof p.ts === 'number' &&
+      (p.deadline === undefined || typeof p.deadline === 'boolean')
       ? (r as PerfRow)
       : undefined
   } catch {
@@ -1945,9 +2024,28 @@ function runPostMergeEvent(event: string | undefined): boolean {
   return true
 }
 
+/** Write the host-derived outcome into `tool_response.success` for the
+ *  post-tool event — no-op on other events, on cursor payloads (the
+ *  translator already decided), and when the payload proves nothing. */
+function normalizeToolOutcome(event: string, input: HookInput, raw: unknown): HookInput {
+  if (event !== 'post-tool' || cursorClient) {
+    return input
+  }
+  const success = deriveToolSuccess(raw)
+  if (success === undefined) {
+    return input
+  }
+  const response =
+    typeof input.tool_response === 'object' && input.tool_response !== null
+      ? input.tool_response
+      : {}
+  return { ...input, tool_response: { ...response, success } }
+}
+
 export async function runHooksCommand(argv: string[]): Promise<void> {
   cursorClient = false
   codexClient = false
+  permissionAnswerEmitted = false
   const event = argv[0]
   // install/uninstall are operator commands, not hook events — they
   // report a verdict on stderr and never read stdin (a git hook's stdin
@@ -2000,7 +2098,11 @@ export async function runHooksCommand(argv: string[]): Promise<void> {
     !Array.isArray(raw) &&
     typeof (raw as { turn_id?: unknown }).turn_id === 'string'
   const root = hookProjectDir(raw)
-  const input = cursorClient ? cursorToHookInput(raw) : asHookInput(raw)
+  let input = cursorClient ? cursorToHookInput(raw) : asHookInput(raw)
+  // the post-tool outcome normalizes at this edge — hosts encode
+  // success differently (a boolean field, split event names, or not at
+  // all), and policy below must not know which host sent the payload
+  input = normalizeToolOutcome(event, input, raw)
   // BRO_HOOKS=0 marks a machine-backend tree — the acp provider pins it
   // on the agent it spawns (spec bro-ddksm): session hooks rehydrate and
   // gate for a human session that isn't there, so every event is pure
@@ -2017,6 +2119,20 @@ export async function runHooksCommand(argv: string[]): Promise<void> {
   }
   perfBuf = []
   const t0 = Date.now()
+  const deadlineTimer = nodeSetTimeout(() => {
+    const sessionId = typeof input.session_id === 'string' ? input.session_id : ''
+    // the answer goes out before the journal flush — silence on a
+    // permission event is a deny, and a stalled flushPerf must not take
+    // the answer down with it (emit is already synchronous)
+    if (!permissionAnswerEmitted) {
+      answerCursorPermission(event, input)
+    }
+    flushPerf(sessionId, event, t0, true)
+    // drain barrier — a bare exit can cut a still-queued write; the
+    // run.sh watchdog backstops a pipe that never drains
+    process.stdout.write('', () => process.exit(0))
+  }, hookDeadlineMs())
+  deadlineTimer.unref()
   const evSpan = otelSpan('hook.event', {
     'hook.event': event,
     'hook.session': typeof input.session_id === 'string' ? input.session_id : '',
@@ -2031,6 +2147,7 @@ export async function runHooksCommand(argv: string[]): Promise<void> {
     // covers a throw before that answer.
     answerCursorPermission(event, input)
   } finally {
+    clearTimeout(deadlineTimer)
     const sessionId = typeof input.session_id === 'string' ? input.session_id : ''
     flushPerf(sessionId, event, t0)
     // A probe that raced past its budget leaves its bd/gh child running —

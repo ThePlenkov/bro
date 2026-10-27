@@ -29,7 +29,7 @@ adapter — point opencode at it, or let `bro plugins install --local`
 copy `bro.ts` + `cli.ts` (as `bro-cli.ts`) into the project's
 `.opencode/plugins/`.
 
-The module resolves the CLI as local dist (bundled sibling or the
+The in-process TypeScript module resolves the CLI as local dist (bundled sibling or the
 checkout's `packages/cli/dist/index.js` found walking up), then `bro`
 on PATH passing the `bro hooks` probe, then `npx -y --prefer-offline
 @broject/bro@0.2.5`. Every hook call is async and

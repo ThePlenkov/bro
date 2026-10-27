@@ -33,6 +33,10 @@ checks, SAST annotations, mergeability, and fix rounds.
 - `reviewers_pending` — a running AI reviewer may still post findings
 - `sast_pending` / `sast_unknown` — failure-level SAST annotations
 - `fix_rounds` — pushes after the first review comment
+- `reopened_threads` — a thread that was resolved and then commented on
+  again. The earlier resolution was wrong, so the gate blocks and `bro loop`
+  / `bro drive` park instead of spawning a fixer — re-resolving it would
+  hide exactly what the reopen says. Report it; the user decides.
 
 **The general rule: project-caused failures block; infrastructure
 failures don't.** A failed AI-reviewer *check* (`reviewers_failing`) is

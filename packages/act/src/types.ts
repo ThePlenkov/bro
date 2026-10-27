@@ -3,6 +3,7 @@
  * pr-state.ts, same semantics minus the shell plumbing.
  */
 import type { CheckInfo, ReviewThread } from '@broject/core'
+import type { ReopenedThread } from './reopened.ts'
 
 export type { CheckInfo as PrCheck }
 
@@ -17,6 +18,10 @@ export interface PrActState {
   mergeState: string
   openThreads: number
   threads: ReviewThread[]
+  /** Threads that were resolved in the previous observation and are open
+   *  again now — the act loop's reopened-thread cycle-guard. Empty when
+   *  there is no previous observation (fail-open). */
+  reopenedThreads: ReopenedThread[]
   /** Non-reviewer checks still running/queued — all checks, not just required. */
   ciPending: number
   /** Non-reviewer checks settled red (failure/cancelled/timed out). */
@@ -95,4 +100,7 @@ export interface ExitGate {
   /** Advisory-check alerts — see PrActState.alerts. Surfaced for
    *  visibility; never part of `blockers`. */
   alerts: string[]
+  /** Reopened threads — see PrActState.reopenedThreads. These DO block;
+   *  the count is here for the report. */
+  reopened_threads: number
 }

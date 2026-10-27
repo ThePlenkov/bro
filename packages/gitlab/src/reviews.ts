@@ -270,19 +270,21 @@ function toThreads(discussions: GlDiscussion[], t: PrTarget, headSha?: string): 
       continue
     }
     const posHead = first.position?.head_sha
+    const comments = notes.map((n) => ({
+      author: n.author?.username ?? 'unknown',
+      bot: isBotName(n.author?.username ?? ''),
+      path: n.position?.new_path ?? n.position?.old_path ?? null,
+      line: n.position?.new_line ?? n.position?.old_line ?? null,
+      body: n.body ?? '',
+      createdAt: n.created_at ?? '',
+    }))
     out.push({
       id: `${t.repo}/${t.pr}/${d.id}`,
       resolved: notes.every((n) => n.resolvable !== true || n.resolved === true),
       outdated:
         first.active === false || (posHead !== undefined && headSha !== undefined && posHead !== headSha),
-      comment: {
-        author: first.author?.username ?? 'unknown',
-        bot: isBotName(first.author?.username ?? ''),
-        path: first.position?.new_path ?? first.position?.old_path ?? null,
-        line: first.position?.new_line ?? first.position?.old_line ?? null,
-        body: first.body ?? '',
-        createdAt: first.created_at ?? '',
-      },
+      comment: comments[0] ?? null,
+      comments,
     })
   }
   return out
@@ -641,7 +643,9 @@ export function gitlabReview(dir: string = process.cwd()): ReviewFacade {
     },
     openPrs(repo) {
       return glabPaged<MrRow>(
-        api(repo, 'merge_requests?state=opened&order_by=updated_at'),
+        // `sort=desc` makes the facade's most-recently-updated-first
+        // order explicit instead of riding the API default
+        api(repo, 'merge_requests?state=opened&order_by=updated_at&sort=desc'),
         // bounded like github's `--limit 500` — the facade contract is
         // one listing page, never an unbounded page loop on a big repo
         { ...gopts(), limit: 500 }

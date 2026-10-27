@@ -504,17 +504,6 @@ function conversationKey(req: IncomingMessage, body: MessagesRequest): string | 
   return `f:${fp}`
 }
 
-/** Drop a session handle without surfacing transport noise — the
- *  dispose is bookkeeping (eviction, teardown, failure cleanup), never
- *  an error path worth reporting. */
-function disposeQuiet(live: { dispose(): void }): void {
-  try {
-    live.dispose()
-  } catch {
-    // dead transport — the drop is the point
-  }
-}
-
 /** Retired sessions must be disposed — a leaked session holds agent
  *  context (and its cost) for nothing. TTL first, then oldest-out to
  *  the cap; the overflow count is captured BEFORE the loop so a live
@@ -543,6 +532,132 @@ function dropSessions(sessions: Map<string, ConvSession>): void {
     disposeQuiet(s.live)
   }
   sessions.clear()
+}
+
+/** Drop a session handle without surfacing transport noise — the
+ *  dispose is bookkeeping (eviction, teardown, failure cleanup), never
+ *  an error path worth reporting. Exported for the acp transport's
+ *  brokered-session map (spec bro-ymbq1). */
+export function disposeQuiet(live: { dispose(): void }): void {
+  try {
+    live.dispose()
+  } catch {
+    // dead transport — the drop is the point
+  }
+}
+
+/** One consumer's lazy pooled link — spawn-once, respawn-on-death,
+ *  close-on-process-exit. The conductor's `/v1/*` plane and the
+ *  `/api/v1/acp` transport each hold one (spec bro-ymbq1 §pool): the
+ *  machinery is shared, the LINK is not — a peer's initialize fixes
+ *  clientCapabilities for the connection's lifetime and the two
+ *  transports advertise opposite postures. */
+export interface AcpLinkPool {
+  /** The warm peer — spawned lazily, shared until its transport dies. */
+  link(parent?: OtelCtx): Promise<AcpPeer>
+  /** The resolved peer behind `link` — undefined before the first
+   *  spawn resolves and after death until the respawn. The
+   *  /api/v1/terminals plane reads the peer's registry through it
+   *  (bro-eua0d). */
+  live(): AcpPeer | undefined
+  /** `cb` runs when the pooled transport dies — the caller drops every
+   *  session the dead link carried before the next link() respawns. */
+  onDeath(cb: () => void): void
+  /** Teardown — a link resolving after dispose is killed on sight
+   *  instead of resurrecting the pool; the live peer leaves pooledPeers
+   *  and is closed. A pending handshake is the caller's signal handle
+   *  (conductorProxy's poolAbort aborts it before calling this). */
+  dispose(): void
+}
+
+/** Every live pooled peer, process-wide. The pooled child outlives any
+ *  request — without a close on process exit serve shutdown orphans it
+ *  on a dead transport (the zombie acp worker of the original
+ *  incident). ONE registry + ONE 'exit' hook serve all pool instances:
+ *  a per-pool `process.once` leaked a listener per instantiation
+ *  (amazon-q #581); dead peers drop out as their abort fires. */
+const pooledPeers = new Set<AcpPeer>()
+let poolExitArmed = false
+
+export function acpLinkPool(
+  by: string,
+  entry: AcpEntry,
+  opts: ProviderWireOpts,
+  timeoutMs: number
+): AcpLinkPool {
+  let link: Promise<AcpPeer> | undefined
+  let live: AcpPeer | undefined
+  // a link resolving after dispose must not resurrect the pool — the
+  // peer is killed on sight instead of being retained unowned
+  let disposed = false
+  const deathHooks: Array<() => void> = []
+  // close() is sync, safe in an 'exit' handler; an in-flight link
+  // resolve is a ms-scale window.
+  if (!poolExitArmed) {
+    poolExitArmed = true
+    process.once('exit', () => {
+      for (const p of pooledPeers) {
+        try {
+          p.close()
+        } catch {
+          // the drop is the point — one stubborn peer can't block the rest
+        }
+      }
+    })
+  }
+  return {
+    onDeath: (cb) => deathHooks.push(cb),
+    live: () => live,
+    link(parent) {
+      if (link === undefined) {
+        otelEvent('acp.spawn', { backend: by })
+        link = acpOpen(by, entry, opts, Date.now() + timeoutMs, parent)
+        link.then(
+          (p) => {
+            if (disposed) {
+              link = undefined
+              p.close()
+              return
+            }
+            live = p
+            pooledPeers.add(p)
+            // a peer aborted BEFORE the listener attaches never fires
+            // it — replay the dead state or the pool keeps serving a
+            // corpse and the session cleanup never runs (amazon-q #581)
+            let dead = false
+            const onDead = (): void => {
+              if (dead) {
+                return
+              }
+              dead = true
+              link = undefined
+              live = undefined
+              pooledPeers.delete(p)
+              for (const cb of deathHooks) {
+                cb()
+              }
+            }
+            p.signal.addEventListener('abort', onDead, { once: true })
+            if (p.signal.aborted) {
+              onDead()
+            }
+          },
+          () => (link = undefined)
+        )
+      }
+      return link
+    },
+    dispose() {
+      disposed = true
+      const p = live
+      live = undefined
+      link = undefined
+      if (p !== undefined) {
+        pooledPeers.delete(p)
+        p.close()
+      }
+    },
+  }
 }
 
 /** The turns a reused session has NOT seen: everything past the
@@ -1211,25 +1326,6 @@ function openaiTooLarge(req: IncomingMessage, res: ServerResponse): void {
   res.setHeader('connection', 'close')
   openaiError(res, 413, 'invalid_request_error', 'request body exceeds 32MB')
   res.once('finish', () => req.destroy())
-}
-
-/** Pooled-peer close hooks share ONE process exit listener — a
- *  `process.once('exit', …)` per conductorProxy() call stacks listeners
- *  in any process that builds several proxies (tests hit
- *  MaxListenersExceeded at ten). dispose() untracks its own hook. */
-const pooledPeerCloses = new Set<() => void>()
-let pooledExitArmed = false
-function trackPooledPeerClose(close: () => void): () => void {
-  pooledPeerCloses.add(close)
-  if (!pooledExitArmed) {
-    pooledExitArmed = true
-    process.once('exit', () => {
-      for (const close of pooledPeerCloses) close()
-    })
-  }
-  return () => {
-    pooledPeerCloses.delete(close)
-  }
 }
 
 const AVAIL = /unavailable|timeout|timed out/i
@@ -2553,7 +2649,9 @@ function finalRespReason(capped: boolean, blocks: OutBlock[], canonical: string)
 const respShape = (r: ResponsesRequest): string | undefined =>
   r.input === undefined || (typeof r.input !== 'string' && !Array.isArray(r.input))
     ? 'input: a string or an items array is required'
-    : undefined
+    : r.previous_response_id !== undefined && typeof r.previous_response_id !== 'string'
+      ? 'previous_response_id: a string is required'
+      : undefined
 
 /** The model label a recorded reply or the wire config resolves to. */
 function respModel(wire: WireCtx, body: MessagesRequest, recorded?: string): string {
@@ -2620,10 +2718,9 @@ function responsesReplay(res: ServerResponse, wire: WireCtx, ctx: RespReplayCtx)
 
 /** The retained-conversation key a responses turn writes under — a
  *  chained predecessor wins; else store:true (or an explicit session
- *  pin) fingerprints this request. An unknown predecessor just starts
- *  fresh (fingerprint), never an invention; a KNOWN-but-broken one
- *  fails inside acpTurn rather than answering from history-less
- *  state. */
+ *  pin) fingerprints this request. An unknown predecessor already
+ *  400'd in responses() — a KNOWN-but-broken one fails inside acpTurn
+ *  rather than answering from history-less state. */
 function respConvKey(
   req: IncomingMessage,
   rreq: ResponsesRequest,
@@ -2688,6 +2785,15 @@ async function responses(
   const respId = `resp_${randomBytes(12).toString('hex')}`
   const hit =
     rreq.previous_response_id !== undefined ? chains.get(rreq.previous_response_id) : undefined
+  if (rreq.previous_response_id !== undefined && hit === undefined) {
+    openaiError(
+      res,
+      400,
+      'invalid_request_error',
+      `previous_response_id ${rreq.previous_response_id} not found (expired or evicted)`
+    )
+    return
+  }
   const key = respConvKey(req, rreq, body, hit, store)
   const tools = body.tool_choice?.type !== 'none'
   let live: RespLive | undefined
@@ -3462,15 +3568,12 @@ export function conductorProxy(
   // initialize is paid once per listener; session/new per request is
   // cheap and concurrent sessions multiplex on the same connection.
   // A dead transport drops the link so the next request respawns.
-  let link: Promise<AcpPeer> | undefined
-  let live: AcpPeer | undefined
-  // a link resolving after dispose must not resurrect the pool — the
-  // peer is killed on sight instead of being retained unowned
-  let disposed = false
+  const pool = acpLinkPool(`conductor:${cfg.backend}`, cfg.entry, wireOpts, cfg.timeoutMs)
   // retained conversations — one acp session per client conversation
   // (x-bro-session pin or history fingerprint). Transport death kills
-  // every session it carried, so the abort listener drops the map.
+  // every session it carried, so the death hook drops the map.
   const sessions = new Map<string, ConvSession>()
+  pool.onDeath(() => dropSessions(sessions))
   // keys whose first session/new is in flight — a concurrent same-key
   // request must not open a twin (the loser would leak unmapped)
   const pendingOpens = new Set<string>()
@@ -3479,88 +3582,57 @@ export function conductorProxy(
   // previous_response_id a real predecessor: a session that moved
   // past it means the caller branched — rejected, not resumed.
   const chains = new Map<string, { key: string; consumed: number }>()
-  const getLink = (parent?: OtelCtx): Promise<AcpPeer> => {
-    if (link === undefined) {
-      otelEvent('acp.spawn', { backend: cfg.backend })
-      link = acpOpen(
-        `conductor:${cfg.backend}`,
-        cfg.entry,
-        wireOpts,
-        Date.now() + cfg.timeoutMs,
-        parent
-      )
-      link.then(
-        (p) => {
-          if (disposed) {
-            p.close()
-            return
-          }
-          live = p
-          p.signal.addEventListener(
-            'abort',
-            () => {
-              link = undefined
-              live = undefined
-              dropSessions(sessions)
-            },
-            { once: true }
-          )
-        },
-        () => (link = undefined)
-      )
-    }
-    return link
-  }
-  // the pooled child outlives any request — without a close on process
-  // exit serve shutdown orphans it on a dead transport (the zombie
-  // acp worker of the original incident). close() is sync, safe in an
-  // 'exit' handler; an in-flight link resolve is a ms-scale window.
-  // One shared exit hook for every proxy — see trackPooledPeerClose.
-  const untrackPeerClose = trackPooledPeerClose(() => live?.close())
+  const getLink = (parent?: OtelCtx): Promise<AcpPeer> => pool.link(parent)
   const wire: WireCtx = { cfg, opts: wireOpts, link: getLink, sessions, pendingOpens }
   return Object.assign(
-    async (req: IncomingMessage, res: ServerResponse): Promise<void> => {
-      const path = (req.url ?? '/').split('?')[0]
-      const method = req.method ?? 'GET'
-      const httpSpan = httpTap(req, res, cfg, method, path)
-      // literal dispatch — a Map.get(requestInput)() call reads to CodeQL
-      // as an unvalidated dynamic method call; the fixed case list IS the
-      // allowlist guard it wants to see
-      switch (`${method} ${path}`) {
-        case 'POST /v1/messages':
-          await messages(req, res, wire, httpSpan.ctx)
-          return
-        case 'POST /v1/responses':
-          await responses(req, res, wire, chains, httpSpan.ctx)
-          return
-        case 'POST /v1/chat/completions':
-          await chatCompletions(req, res, wire, httpSpan.ctx)
-          return
-        case 'POST /v1/messages/count_tokens':
-          await countTokens(req, res)
-          return
-        case 'GET /v1/models':
-          await models(res, cfg, wireOpts)
-          return
-        default:
-          apiError(res, 404, 'not_found_error', `bro conductor: no route ${method} ${path}`)
-          return
-      }
-    },
+    conductorDispatch(wire, chains, cfg, wireOpts),
     {
-      terminals: () => live?.terminals,
+      terminals: () => pool.live()?.terminals,
       dispose: (): void => {
-        disposed = true
-        // a getLink still inside acpOpen holds no `live` peer to close
+        // a link still inside acpOpen holds no `live` peer to close
         // — aborting rejects its init and frees the deadline timer
         // that would otherwise pin the loop past server close
         poolAbort.abort()
-        untrackPeerClose()
-        live?.close()
-        live = undefined
+        pool.dispose()
       },
     }
   )
+}
+
+/** The `/v1/*` literal dispatch — a Map.get(requestInput)() call reads
+ *  to CodeQL as an unvalidated dynamic method call; the fixed case list
+ *  IS the allowlist guard it wants to see. */
+function conductorDispatch(
+  wire: WireCtx,
+  chains: Map<string, { key: string; consumed: number }>,
+  cfg: ConductorConfig,
+  wireOpts: ProviderWireOpts
+): (req: IncomingMessage, res: ServerResponse) => Promise<void> {
+  return async (req: IncomingMessage, res: ServerResponse): Promise<void> => {
+    const path = (req.url ?? '/').split('?')[0]
+    const method = req.method ?? 'GET'
+    const httpSpan = httpTap(req, res, cfg, method, path)
+    switch (`${method} ${path}`) {
+      case 'POST /v1/messages':
+        await messages(req, res, wire, httpSpan.ctx)
+        return
+      case 'POST /v1/responses':
+        await responses(req, res, wire, chains, httpSpan.ctx)
+        return
+      case 'POST /v1/chat/completions':
+        await chatCompletions(req, res, wire, httpSpan.ctx)
+        return
+      case 'POST /v1/messages/count_tokens':
+        await countTokens(req, res)
+        return
+      case 'GET /v1/models':
+        await models(res, cfg, wireOpts)
+        return
+      default:
+        apiError(res, 404, 'not_found_error', `bro conductor: no route ${method} ${path}`)
+        return
+    }
+  }
 }
 
 /** The per-request span + request-finished telemetry tap — one

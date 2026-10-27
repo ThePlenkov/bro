@@ -93,6 +93,7 @@ import {
   ACT_STATE_TTL_MS,
   failingCiChecks,
   fetchPrActState,
+  resolveLedger,
   isSast,
   listWatches,
   liveSastChecks,
@@ -1970,6 +1971,7 @@ async function mergeAndRetire(
         docsMaxRounds: ctx.act.docsMaxRounds,
         requireApproval: ctx.act.requireApproval,
         approvers: ctx.act.approvers,
+        resolveLedger: resolveLedger(ctx.mainRoot),
       }
   ).catch(() => undefined)
   // exit-0 + OPEN IS the enqueue contract — act merge exits 0 only on a
@@ -2043,6 +2045,17 @@ async function classSpawn(
  *  cognitive-complexity cap. */
 async function blockedVerdict(ctx: Ctx, b: BlockedWork): Promise<PrVerdict> {
   const { pr, link, state, gate, occ, worktree, fixer, work } = b
+  if (gate.reopened_threads > 0) {
+    // A reopened thread was resolved and then commented on again — the
+    // earlier resolution was wrong. A fixer would re-resolve it and
+    // hide that, so the work parks for the user instead.
+    return {
+      pr,
+      link,
+      verdict: 'blocked',
+      detail: `${gate.reopened_threads} reopened thread(s) — resolved before, commented on again; the user confirms`,
+    }
+  }
   if (gate.open_threads > 0) {
     if (occ !== undefined) {
       return { pr, link, verdict: 'occupied', detail: occ }
@@ -2200,6 +2213,7 @@ async function drivePr(ctx: Ctx, pr: number, work: PassWork): Promise<PrVerdict>
         requireApproval: ctx.act.requireApproval,
         approvers: ctx.act.approvers,
         stateCache: ctx.stateCache,
+        resolveLedger: resolveLedger(ctx.mainRoot),
       }
     )
   } catch (err) {
@@ -2320,6 +2334,7 @@ async function sweepSettledFixers(ctx: Ctx, prs: Set<number>): Promise<void> {
         requireApproval: ctx.act.requireApproval,
         approvers: ctx.act.approvers,
         stateCache: ctx.stateCache,
+        resolveLedger: resolveLedger(ctx.mainRoot),
       }
       )
       if (st.state !== 'OPEN') {

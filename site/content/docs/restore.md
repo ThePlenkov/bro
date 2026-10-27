@@ -112,6 +112,47 @@ mirror, publish with `git -C /tmp/<repo>.git push origin refs/dolt/data`.
 Peer rigs keep their beads on their own `refs/dolt/data` (often a
 dedicated `*-beads` repo) — repeat the mirror step per store.
 
+### When the remote store itself is corrupt
+
+Dolt's git push can publish a `refs/dolt/data` head whose **manifest
+names table files it never uploaded** — `bd sync` stays green (the push
+succeeded), but every `bd bootstrap`/`dolt clone` of that head dies
+`Blob not found`. Observed 2026-10-16 on this repo's own origin: head
+`67b62f4` listed table `b9rv3prlplb1q1oqh06aevausvdnccgv` present in no
+revision of the ref; the previous head `808300e` cloned fine.
+
+Detection is covered from this rig forward: `bro doctor` reports a
+`dolt-store` failure naming the missing table ids plus the last good
+head it found, and `bro`'s sync path withholds publishing a manifest
+that references missing tables. By hand the same check is two reads —
+the manifest is `<table>:<count>` pairs after a 5-field header, and
+every table name must exist in the tree as `<name>` or `<name>.darc`:
+
+```bash
+git fetch --depth=1 origin refs/dolt/data
+git show FETCH_HEAD:manifest            # the claimed table list
+git ls-tree --name-only FETCH_HEAD      # the file set actually there
+```
+
+Recovery — re-point the ref at a healthy head, then let a good replica
+re-push forward. Preserve the corrupt head under a backup ref first:
+the missing-table evidence is what the upstream bug report needs.
+
+```bash
+# keep the corrupt head for forensics
+git fetch origin refs/dolt/data
+git push origin <corrupt-sha>:refs/dolt/backup/corrupt-<corrupt-short>
+# roll the data ref back to the last self-consistent head (bro doctor
+# names it) — then bd sync on a healthy replica carries state forward
+git push -f origin <last-good-sha>:refs/dolt/data
+bd sync
+```
+
+No healthy ancestor means the store was born corrupt — re-push the
+whole thing from the good replica: `bd dolt push --remote <name>` on
+that machine, or `git -C <mirror> push -f origin refs/dolt/data` when
+it rides a bridge mirror.
+
 ### Snapshot branches
 
 Evacuations push dirty worktrees as snapshot branches (e.g. `evac/*`),

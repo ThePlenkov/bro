@@ -140,18 +140,20 @@ nohup: an unregistered worker has no claim, no `.exit` record, no
   orphaned green PRs merge. Prompts and logs land in
   `<git-common>/bro/agents/` — never argv (every local user reads `ps`),
   never world-readable `/tmp`.
-- **Pin the handles at spawn.** pid, log path, claimed step. The
+- **Pin the handles at spawn.** pid, run id, log path, claimed step. The
   registry writes them to `<git-common>/bro/agents.json` plus
-  `<git-common>/bro/agents/<agentId>.{prompt.md,log,exit}` and pins the
-  claim into the shared beads store — `bro fleet agents status`, `down`, and
-  respawn all key off that entry.
+  `<git-common>/bro/agents/<agentId>.{prompt.md,log,stderr}` and the
+  attempt-scoped `<agentId>.<runId>.{handle,go,exit}` — the worker
+  publishes `handle` itself and holds on the launcher's `go` stamp, so
+  an unadmitted survivor can never double a respawn — `bro fleet agents
+  status`, `down`, and respawn all key off that entry.
 - **Monitor by point checks, never by waiting.** `bro fleet agents status`,
   `bro fleet`, `bro review watch`, a fresh `bro flow convoy next` — between turns,
   not in a blocking loop. A synchronous `get_output` or `sleep` wait on
   detached work blocks the conversation and buys nothing (retro
   bro-lmdj).
 - **Completion is detected, not awaited.** `bro fleet agents status` →
-  `exited`/`blocked`, then read the exit record — `<agentId>.exit`
+  `exited`/`blocked`, then read the exit record — `<agentId>.<runId>.exit`
   holds the code, the entry's `cause`/`resetAt` the why. `bro flow convoy
   run` already supervises its own spawns to a verdict — hand a mol list
   to it instead of babysitting. Never promise "I'll report when it

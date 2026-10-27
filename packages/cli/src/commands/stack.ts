@@ -47,6 +47,7 @@ import {
   checkHistory,
   evaluateExitGate,
   fetchPrActState,
+  resolveLedger,
   releaseMergeSlot,
 } from '@broject/act'
 import {
@@ -964,6 +965,7 @@ async function cmdMerge(argv: string[]): Promise<void> {
             docsMaxRounds: act.docsMaxRounds,
             requireApproval: act.requireApproval,
             approvers: act.approvers,
+            resolveLedger: resolveLedger(main.path),
           }
         )
         const gate = evaluateExitGate(state, { requireApproval: act.requireApproval })

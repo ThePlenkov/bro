@@ -1,4 +1,5 @@
 {
+  "$schema": "https://unpkg.com/@broject/bro/schemas/bro.config.schema.json",
   "act": {
     "ignoreChecks": [
       "kilo",

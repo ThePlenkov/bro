@@ -88,7 +88,8 @@ export default {
 - Names colliding with built-ins are rejected; so are `configKey`s that
   shadow an owned section
 - Invalid plugins warn and are skipped — they never crash the CLI
-- TypeScript files load natively (Node ≥ 22)
+- TypeScript files load natively (Node ≥ 22.18, erasable syntax only —
+  enums and parameter properties need a build step, not `import()`)
 
 ## Bring your own memory
 

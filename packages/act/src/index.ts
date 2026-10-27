@@ -1,37 +1,44 @@
-export type { ExitGate, PrActState, PrCheck } from './types.ts'
-export { fetchPrActState } from './state.ts'
-export { failingCiChecks, gatedCiChecks, isSast, liveSastChecks } from './state.ts'
-export type { FetchPrActStateOpts } from './state.ts'
+export type { ExitGate, PrActState, PrCheck } from './types.ts';
+export type { ReopenedThread } from './reopened.ts';
+export { detectReopenedThreads } from './reopened.ts';
+export type { ResolveEvent, ResolveLedger } from './resolve-log.ts';
+export { fileResolveLog, resolveLedger, resolveLogPath } from './resolve-log.ts';
+export { fetchPrActState } from './state.ts';
+export { failingCiChecks, gatedCiChecks, isSast, liveSastChecks } from './state.ts';
+export type { FetchPrActStateOpts } from './state.ts';
 export {
   ACT_STATE_LOCK_WAIT_MS,
   ACT_STATE_TTL_MS,
   prStateCache,
-} from './state-cache.ts'
-export type { PrStateCache } from './state-cache.ts'
-export { evaluateExitGate } from './exit-gate.ts'
-export { docsOnly, effectiveMaxRounds, isDocsPath } from './docs.ts'
-export { gatePending, waitForGate } from './wait.ts'
-export type { GateWaitResult, GateWake, WaitOptions } from './wait.ts'
+} from './state-cache.ts';
+export type { PrStateCache } from './state-cache.ts';
+export { evaluateExitGate } from './exit-gate.ts';
+export { docsOnly, effectiveMaxRounds, isDocsPath } from './docs.ts';
+export { gatePending, waitForGate } from './wait.ts';
+export type { GateWaitResult, GateWake, WaitOptions } from './wait.ts';
 export {
   ACT_ACTIONS,
   parseActPlan,
   PLAN_KIND as ACT_PLAN_KIND,
   PLAN_VERSION as ACT_PLAN_VERSION,
-} from './plan.ts'
-export type { ActAction, ActPlan, ActThreadVerdict } from './plan.ts'
+} from './plan.ts';
+export type { ActAction, ActPlan, ActThreadVerdict } from './plan.ts';
 export {
   acquireMergeSlot,
   mergeSlotHolder,
   parseAcquire,
   parseCheck,
   releaseMergeSlot,
-} from './merge-slot.ts'
-export type { MergeSlot } from './merge-slot.ts'
-export { actConnector } from './connector.ts'
+} from './merge-slot.ts';
+export type { MergeSlot } from './merge-slot.ts';
+export { actConnector } from './connector.ts';
 export {
   deadWatchPlan,
+  deadWatchPlanAsync,
   hasLiveWatch,
+  hasLiveWatchAsync,
   listWatches,
+  listWatchesAsync,
   rearmWatches,
   watchBegin,
   watchEnd,
@@ -40,7 +47,7 @@ export {
   watchRefresh,
   watchRetire,
   watchVerdict,
-} from './pending-watch.ts'
-export type { ListedWatch, PendingWatch, RearmPlan } from './pending-watch.ts'
-export { checkHistory, checkHistoryPath, fileCheckHistory } from './check-history.ts'
-export type { CheckHistory, CheckObservation } from './check-history.ts'
+} from './pending-watch.ts';
+export type { ListedWatch, PendingWatch, RearmPlan } from './pending-watch.ts';
+export { checkHistory, checkHistoryPath, fileCheckHistory } from './check-history.ts';
+export type { CheckHistory, CheckObservation } from './check-history.ts';

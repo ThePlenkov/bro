@@ -19,22 +19,29 @@ import {
   CONFIG_SECTION_LAYERS,
   connectors,
   CORE_CONFIG_SECTIONS,
+  displayUrl,
+  doltDirHealth,
+  doltRemoteSrc,
+  facade,
   facadeAuth,
   facadeName,
+  fileTargetPath,
   gitCommonDir,
   gitTry,
   hasHelpFlag,
   isEnvName,
   janitorDidWork,
   janitorLine,
+  listDoltRemotes,
   loadConfigLayers,
   pidAlive,
   printUsage,
   probeBdCompat,
+  probeDoltRemote,
   PROVIDER_REGISTRY,
   runJanitor,
 } from '@broject/core'
-import type { BdCompat, ProviderEntry, ProviderSurface } from '@broject/core'
+import type { BdCompat, BdProbe, ConfigDiagnostic, DoltHeadHealth, DoltRemote, ProviderEntry, ProviderSurface } from '@broject/core'
 import { formatRigUri, parsePeer, rigFromRemoteUrl } from '@broject/mesh'
 import {
   assertSonarHostTrusted,
@@ -46,7 +53,7 @@ import {
 } from '@broject/debt'
 import { judgeConfig, synthesizedProviders } from '@broject/judge'
 import type { JudgeConfig } from '@broject/judge'
-import { loadBroConfig, pluginConfigSections } from '../plugins.ts'
+import { broConfigDiagnostics, loadBroConfig, pluginConfigSections } from '../plugins.ts'
 import { pluginRows } from './plugins.ts'
 import { readStamp, stampAgo, stampSession } from './buildstamp.ts'
 import {
@@ -119,7 +126,14 @@ function repoRoot(dir: string): string | null {
 }
 
 function isDir(path: string): boolean {
-  return statSync(path, { throwIfNoEntry: false })?.isDirectory() ?? false
+  try {
+    // throwIfNoEntry only swallows ENOENT — EACCES/ENOTDIR on a path
+    // part still throws; an unreadable target is not a dir, never a
+    // doctor abort
+    return statSync(path, { throwIfNoEntry: false })?.isDirectory() ?? false
+  } catch {
+    return false
+  }
 }
 
 // --- individual probes ------------------------------------------------------
@@ -408,6 +422,7 @@ function selfDistChecks(): DoctorCheck[] {
  *  certainly a typo'd section that silently no-ops. */
 function knownConfigKeys(): Set<string> {
   return new Set([
+    '$schema',
     'stores',
     'store', // legacy v0.1.0
     'personality',
@@ -533,6 +548,33 @@ function configOwnershipChecks(
     )
   }
   return checks
+}
+
+/** Schema-validation rows (spec: bro-d9dmx) — one row per layer FILE
+ *  carrying violations, naming the layer + path + rule. Values that
+ *  failed schema look absent downstream (defaults substitute), so the
+ *  default verdict is warn; `--strict` promotes to fail. */
+function configSchemaChecks(dir: string, strict: boolean): DoctorCheck[] {
+  const diags = broConfigDiagnostics(dir)
+  if (diags.length === 0) {
+    return [check('config-schema', 'ok', 'all layers validate')]
+  }
+  const byFile = new Map<string, ConfigDiagnostic[]>()
+  for (const d of diags) {
+    const list = byFile.get(d.file) ?? []
+    list.push(d)
+    byFile.set(d.file, list)
+  }
+  return [...byFile.values()].map((ds) => {
+    const first = ds[0] as ConfigDiagnostic
+    return check(
+      'config-schema',
+      strict ? 'fail' : 'warn',
+      `${first.layer} ${basename(first.file)} — ` +
+        ds.map((d) => `${d.path}: ${d.message}`).join('; '),
+      'invalid values silently read as defaults — fix the file'
+    )
+  })
 }
 
 /** Compat probe — verifies the contract bro calls (read-path --json
@@ -672,9 +714,22 @@ function tasksBackendCheck(
     return beadsTasksCheck(bd, beadsActive, compat, tag)
   }
   const auth = facadeAuth('tasks', { dir }, { prefer })
-  return auth === null
-    ? check('tasks', 'ok', `${name}${tag}`)
-    : check('tasks', 'warn', `${name}${tag} — ${auth}`, 'fix it or repoint connectors.tasks')
+  if (auth !== null) {
+    return check('tasks', 'warn', `${name}${tag} — ${auth}`, 'fix it or repoint connectors.tasks')
+  }
+  // the claims plane's own word (spec bro-l8c4f.12): a best-effort
+  // claim() is assignment, not a lease, and undeclared is unverified —
+  // a competitive runner on this tracker needs an exclusive-claiming store
+  let capNote = ' — claim exclusivity undeclared'
+  try {
+    const cap = facade('tasks', { dir }, { prefer }).claimCapability?.()
+    if (cap?.strength === 'exclusive') {
+      capNote = ''
+    } else if (cap !== undefined) {
+      capNote = ' — claims best-effort (assignment, not a lease)'
+    }
+  } catch { /* resolution already proved by facadeName above */ }
+  return check('tasks', 'ok', `${name}${tag}${capNote}`)
 }
 
 /** Remote group: the git remote `bro sync` pushes to, and the beads Dolt
@@ -702,16 +757,13 @@ function remoteChecks(
     out.push(check('dolt-remote', 'skip', 'needs bd'))
     return out
   }
-  const remotes = bdTry(['dolt', 'remote', 'list'], 15_000, dir)
-  if (remotes.code !== 0) {
+  const probe: BdProbe = (a, ms) => bdTry(a, ms, dir)
+  const remotes = listDoltRemotes(probe)
+  if (remotes === null) {
     out.push(check('dolt-remote', 'skip', '`bd dolt remote list` failed'))
     return out
   }
-  const names = remotes.out
-    .split('\n')
-    .map((l) => l.trim())
-    .filter((l) => l !== '')
-  if (names.length === 0) {
+  if (remotes.length === 0) {
     out.push(
       check(
         'dolt-remote',
@@ -722,8 +774,66 @@ function remoteChecks(
     )
     return out
   }
-  out.push(check('dolt-remote', 'ok', names.join(', ')))
+  out.push(
+    check('dolt-remote', 'ok', remotes.map((r) => `${r.name} → ${displayUrl(r.url)}`).join(', '))
+  )
+  for (const r of remotes) {
+    out.push(doltStoreCheck(r))
+  }
   return out
+}
+
+/** One remote's `dolt-store` row — the refs/dolt/data head verified:
+ *  the manifest's table list against the tree real git fetched (spec:
+ *  specs/bro-orcdv.md). A file remote pointing at a plain noms dir
+ *  verifies in place; everything git-shaped probes over `doltRemoteSrc`
+ *  (the bridge mirror's upstream, not its cache). */
+function doltStoreCheck(r: DoltRemote): DoctorCheck {
+  const target = fileTargetPath(r.url)
+  if (
+    target !== null &&
+    isDir(target) &&
+    existsSync(join(target, 'manifest')) &&
+    !existsSync(join(target, 'HEAD')) &&
+    !existsSync(join(target, '.git'))
+  ) {
+    return doltStoreRow(r.name, doltDirHealth(target))
+  }
+  const src = doltRemoteSrc(r)
+  if (src === null) {
+    return check('dolt-store', 'skip', `${r.name} — non-git remote, nothing to verify`)
+  }
+  return doltStoreRow(r.name, probeDoltRemote(src))
+}
+
+/** Health → row. `missing` fails — that head boots no replica (`bd
+ *  bootstrap` → 'Blob not found'). `error` only warns: unreachable /
+ *  unparseable is transport or format, not corruption. A healthy head
+ *  reports the verified table count; a dir probe has no sha. */
+function doltStoreRow(
+  name: string,
+  h: DoltHeadHealth & { lastGood?: string },
+): DoctorCheck {
+  if (h.missing.length > 0) {
+    const shown =
+      h.missing.slice(0, 3).join(', ') + (h.missing.length > 3 ? `, +${h.missing.length - 3} more` : '')
+    return check(
+      'dolt-store',
+      'fail',
+      `${name}: head ${h.head === '' ? '?' : h.head.slice(0, 12)} names ${h.missing.length} missing table(s): ${shown}` +
+        (h.lastGood !== undefined ? ` — last good head ${h.lastGood.slice(0, 12)}` : ''),
+      'unbootstrappable store — re-push refs/dolt/data from a healthy replica' +
+        (h.lastGood !== undefined ? ` or reset it to ${h.lastGood.slice(0, 12)}` : '') +
+        ' (docs/restore.md)'
+    )
+  }
+  if (h.error !== undefined) {
+    return check('dolt-store', 'warn', `${name}: unverifiable — ${h.error}`)
+  }
+  if (h.head === '') {
+    return check('dolt-store', 'ok', `${name}: nothing published yet`)
+  }
+  return check('dolt-store', 'ok', `${name}: ${h.head.slice(0, 12)} — ${h.tables} table(s) verified`)
 }
 
 // --- providers (specs/bro-ribc.1.md milestone 6) ----------------------
@@ -1553,7 +1663,10 @@ function meshChecks(dir: string, mesh: { rig?: string; peers: Record<string, { r
   return out
 }
 
-export function runDoctorChecks(dir: string = process.cwd()): DoctorCheck[] {
+export function runDoctorChecks(
+  dir: string = process.cwd(),
+  opts: { strict?: boolean } = {}
+): DoctorCheck[] {
   const checks: DoctorCheck[] = [checkNode()]
 
   const git = probeBin('git')
@@ -1588,6 +1701,7 @@ export function runDoctorChecks(dir: string = process.cwd()): DoctorCheck[] {
     checkHooks(dir),
     ...selfDistChecks(),
     ...checkConfig(dir),
+    ...configSchemaChecks(dir, opts.strict === true),
     ...providerChecks(dir),
     ...conductorClassifierChecks(dir, root),
     ...queryCliChecks(dir, cfg.connectors),
@@ -1650,11 +1764,13 @@ function printDoctor(checks: DoctorCheck[], budget: ReturnType<typeof readBudget
 
 export function runDoctorCommand(argv: string[]): void {
   if (hasHelpFlag(argv)) {
-    printUsage('usage: bro doctor [--json]', 0)
+    printUsage('usage: bro doctor [--json] [--strict]', 0)
   }
   const json = argv.includes('--json')
+  // --strict: schema violations are failures, not warnings — the CI gate
+  const strict = argv.includes('--strict')
   const dir = process.cwd()
-  const checks = runDoctorChecks(dir)
+  const checks = runDoctorChecks(dir, { strict })
   const budget = readBudget(dir)
   if (json) {
     console.log(

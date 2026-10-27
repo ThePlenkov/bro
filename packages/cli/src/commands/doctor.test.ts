@@ -13,7 +13,7 @@ import {
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { doctorExitCode, runDoctorChecks, type DoctorCheck } from './doctor.ts'
-import { scrubEnv, testGit } from '@broject/core'
+import { doltManifest, doltStoreCommit, scrubEnv, testGit } from '@broject/core'
 
 // ambient repo/agent/store pins must not reach fixture git children
 // or the code-under-test spawns — scrub once, restore after the file
@@ -195,6 +195,21 @@ function liveServeClient(
 const byName = (checks: DoctorCheck[], name: string): DoctorCheck =>
   checks.find((c) => c.name === name)!
 
+/** A fixture dolt store — a git repo holding `refs/dolt/data` whose head
+ *  tree is manifest + table files. `missing` names tables the manifest
+ *  claims but the tree never gets (the bro-orcdv corruption). */
+function doltStore(base: string, missing: string[] = []): { dir: string; head: string } {
+  const dir = join(base, 'doltstore')
+  testGit(['init', '-q', dir])
+  const ok = 'a'.repeat(32)
+  const files: Record<string, string> = {
+    manifest: doltManifest(Object.fromEntries([ok, ...missing].map((t) => [t, 1]))),
+    [ok]: 'x',
+  }
+  const head = doltStoreCommit(dir, files)
+  return { dir, head }
+}
+
 /** A fake bro dev checkout — packages/cli/dist + the @broject/bro
  *  package.json inside its own git repo (nested under the env dir's repo;
  *  --show-toplevel still resolves to the nested root). */
@@ -226,26 +241,35 @@ function commitAt(checkout: string, isoDate?: string): void {
 }
 
 describe('bro doctor', () => {
-  test('healthy env — every probe ok, exit 0', () =>
-    withEnv(
-      {
-        config: { stores: ['jsonl', 'beads'] },
-        beadsDir: true,
-        remote: true,
-        bins: ['bd', 'gh', 'bro'],
-        env: { FAKE_BD_DOLT: 'origin\tgit+https://example.com/x.git\n' },
-      },
-      (dir) => {
-        const checks = runDoctorChecks(dir)
-        for (const name of [
-          'node', 'git', 'repo', 'gh', 'bd', 'bd-compat', 'bd-backend', 'bd-store',
-          'hooks', 'config', 'git-remote', 'dolt-remote',
-        ]) {
-          assert.equal(byName(checks, name)?.status, 'ok', `${name}: ${JSON.stringify(byName(checks, name))}`)
+  test('healthy env — every probe ok, exit 0', () => {
+    // the dolt remote is a local fixture — a git+https URL would make
+    // the dolt-store probe do a real network fetch in the test suite
+    const base = mkdtempSync(join(tmpdir(), 'bro-doctor-store-'))
+    try {
+      const { dir: store } = doltStore(base)
+      return withEnv(
+        {
+          config: { stores: ['jsonl', 'beads'] },
+          beadsDir: true,
+          remote: true,
+          bins: ['bd', 'gh', 'bro'],
+          env: { FAKE_BD_DOLT: `origin\tgit+file://${store}\n` },
+        },
+        (dir) => {
+          const checks = runDoctorChecks(dir)
+          for (const name of [
+            'node', 'git', 'repo', 'gh', 'bd', 'bd-compat', 'bd-backend', 'bd-store',
+            'hooks', 'config', 'git-remote', 'dolt-remote', 'dolt-store',
+          ]) {
+            assert.equal(byName(checks, name)?.status, 'ok', `${name}: ${JSON.stringify(byName(checks, name))}`)
+          }
+          assert.equal(doctorExitCode(checks), 0)
         }
-        assert.equal(doctorExitCode(checks), 0)
-      }
-    ))
+      )
+    } finally {
+      rmSync(base, { recursive: true, force: true })
+    }
+  })
 
   test('missing bd fails when beads is an active store', () =>
     withEnv({ config: {}, beadsDir: true, bins: ['gh'] }, (dir) => {
@@ -443,6 +467,112 @@ describe('bro doctor', () => {
       const checks = runDoctorChecks(dir)
       assert.equal(byName(checks, 'dolt-remote').status, 'warn')
     }))
+
+  test('dolt-store fails on a manifest naming missing tables — and names the last good head', () => {
+    const base = mkdtempSync(join(tmpdir(), 'bro-doctor-corrupt-'))
+    try {
+      const store = join(base, 'doltstore')
+      testGit(['init', '-q', store])
+      const t = 'a'.repeat(32)
+      const gone = 'b'.repeat(32)
+      const good = doltStoreCommit(store, { manifest: doltManifest({ [t]: 1 }), [t]: 'x' })
+      doltStoreCommit(store, { manifest: doltManifest({ [t]: 1, [gone]: 1 }), [t]: 'x' }, good)
+      return withEnv(
+        {
+          beadsDir: true,
+          remote: true,
+          bins: ['bd', 'gh'],
+          env: { FAKE_BD_DOLT: `origin\tgit+file://${store}\n` },
+        },
+        (dir) => {
+          const c = byName(runDoctorChecks(dir), 'dolt-store')
+          assert.equal(c.status, 'fail', JSON.stringify(c))
+          assert.ok(c.detail.includes(gone), c.detail)
+          assert.ok(c.detail.includes(good.slice(0, 12)), `last good head: ${c.detail}`)
+          assert.match(c.hint ?? '', /refs\/dolt\/data/)
+          assert.equal(doctorExitCode(runDoctorChecks(dir)), 1)
+        }
+      )
+    } finally {
+      rmSync(base, { recursive: true, force: true })
+    }
+  })
+
+  test('dolt-store is ok when the remote published no data ref yet', () => {
+    const base = mkdtempSync(join(tmpdir(), 'bro-doctor-empty-'))
+    try {
+      const store = join(base, 'doltstore')
+      testGit(['init', '-q', store]) // repo exists, refs/dolt/data never pushed
+      return withEnv(
+        {
+          beadsDir: true,
+          remote: true,
+          bins: ['bd', 'gh'],
+          env: { FAKE_BD_DOLT: `origin\tgit+file://${store}\n` },
+        },
+        (dir) => {
+          const c = byName(runDoctorChecks(dir), 'dolt-store')
+          assert.equal(c.status, 'ok', JSON.stringify(c))
+          assert.match(c.detail, /nothing published/)
+        }
+      )
+    } finally {
+      rmSync(base, { recursive: true, force: true })
+    }
+  })
+
+  test('dolt-store warns when the remote is unreachable — transport is not corruption', () =>
+    withEnv(
+      {
+        beadsDir: true,
+        remote: true,
+        bins: ['bd', 'gh'],
+        env: { FAKE_BD_DOLT: 'origin\tgit+file:///nonexistent/gone.git\n' },
+      },
+      (dir) => {
+        const c = byName(runDoctorChecks(dir), 'dolt-store')
+        assert.equal(c.status, 'warn', JSON.stringify(c))
+        assert.match(c.detail, /unverifiable/)
+      }
+    ))
+
+  test('dolt-store skips non-git remotes', () =>
+    withEnv(
+      {
+        beadsDir: true,
+        remote: true,
+        bins: ['bd', 'gh'],
+        env: { FAKE_BD_DOLT: 'hub\tdolthub://org/db\n' },
+      },
+      (dir) => {
+        assert.equal(byName(runDoctorChecks(dir), 'dolt-store').status, 'skip')
+      }
+    ))
+
+  test('dolt-store verifies a plain noms dir remote in place', () => {
+    const base = mkdtempSync(join(tmpdir(), 'bro-doctor-noms-'))
+    try {
+      const noms = join(base, 'noms')
+      mkdirSync(noms)
+      const gone = 'b'.repeat(32)
+      writeFileSync(join(noms, 'manifest'), doltManifest({ [gone]: 2 }))
+      return withEnv(
+        {
+          beadsDir: true,
+          remote: true,
+          bins: ['bd', 'gh'],
+          env: { FAKE_BD_DOLT: `local\tfile://${noms}\n` },
+        },
+        (dir) => {
+          const c = byName(runDoctorChecks(dir), 'dolt-store')
+          assert.equal(c.status, 'fail', JSON.stringify(c))
+          assert.ok(c.detail.includes(gone), c.detail)
+        }
+      )
+    } finally {
+      rmSync(base, { recursive: true, force: true })
+    }
+  })
 
   test('.beads present but unreadable fails the store probe', () =>
     withEnv({ beadsDir: true, bins: ['bd', 'gh'], env: { FAKE_BD_LIST_FAIL: '1' } }, (dir) => {
@@ -1063,4 +1193,39 @@ describe('bro doctor', () => {
       assert.equal(c.status, 'ok', JSON.stringify(c))
       assert.match(c.detail, /no acp-backed serve endpoint/)
     }))
+
+  test('config-schema: a clean config reports one ok row', () =>
+    withEnv({ config: { sdd: { mode: 'gate' } }, bins: ['gh'] }, (dir) => {
+      const rows = runDoctorChecks(dir).filter((c) => c.name === 'config-schema')
+      assert.equal(rows.length, 1)
+      assert.equal(rows[0]?.status, 'ok')
+    }))
+
+  test('config-schema: malformed values warn by default, fail under --strict', () =>
+    withEnv(
+      { config: { sdd: { mode: 'gtae' }, fleet: { maxConcurrent: '1' } }, bins: ['gh'] },
+      (dir) => {
+        const rows = runDoctorChecks(dir).filter((c) => c.name === 'config-schema')
+        assert.ok(rows.length > 0)
+        assert.ok(rows.every((r) => r.status === 'warn'), JSON.stringify(rows))
+        // the file+layer is named, the exact path pinpoints the bad value
+        const detail = rows.map((r) => r.detail).join('\n')
+        assert.match(detail, /bro\.config\.json/)
+        assert.match(detail, /sdd\.mode/)
+        assert.match(detail, /fleet\.maxConcurrent/)
+        const strict = runDoctorChecks(dir, { strict: true }).filter((c) => c.name === 'config-schema')
+        assert.ok(strict.every((r) => r.status === 'fail'), JSON.stringify(strict))
+      }
+    ))
+
+  test('config-schema: $schema is a known key, not an unknown-key warn', () =>
+    withEnv(
+      { config: { $schema: 'https://unpkg.com/@broject/bro/schemas/bro.config.schema.json', sdd: { mode: 'gate' } }, bins: ['gh'] },
+      (dir) => {
+        const warns = runDoctorChecks(dir).filter(
+          (c) => c.name === 'config' && c.status === 'warn'
+        )
+        assert.ok(!warns.some((c) => c.detail.includes('$schema')), JSON.stringify(warns))
+      }
+    ))
 })

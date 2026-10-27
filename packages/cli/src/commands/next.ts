@@ -27,6 +27,7 @@ import { emitLifecycle, ensureTasksBackend, facade, getTasks, gitTry, hasHelpFla
 import { flag } from './args.ts'
 import type { NextFilters, NextOrder, NextPlan } from './next-plan.ts'
 import { requireGlobalStore } from '../doctypes/store.ts'
+import { assertMutableConfig } from '../config-policy.ts'
 import { loadBroConfig } from '../plugins.ts'
 
 /** The serving tasks backend for `dir` — `connectors.tasks` in
@@ -245,38 +246,74 @@ function racedAway(b: ReadyBead, dir?: string, opts?: FacadeOpts): boolean {
   }
 }
 
+/** One claim attempt — claim, journal, then let the caller collect.
+ *  Returns false only when the bead provably raced away; any other
+ *  store error propagates (a bd outage must surface). */
+function claimOne(b: ReadyBead, dir: string | undefined, opts: FacadeOpts | undefined): boolean {
+  try {
+    storeFor(dir, opts).claim(b.id)
+    // lifecycle — the claim transition (specs/telemetry/bro-ub91h.md).
+    // The journal anchors at the run's repo (cwd), not the store dir:
+    // --global's repo-less store would drop the row even inside a
+    // project; a run outside any repo still journals nowhere
+    emitLifecycle(process.cwd(), {
+      kind: 'claim',
+      bead: b.id,
+      from: 'open',
+      to: 'in_progress',
+      detail: { via: 'next' },
+    })
+    return true
+  } catch (err) {
+    if (racedAway(b, dir, opts)) {
+      return false // genuinely raced away — try the next candidate
+    }
+    throw err
+  }
+}
+
+/** The claim-path policy gate — refuses invalid committed config
+ *  before any `bd update --claim` writes (spec: bro-d9dmx). `dir` is
+ *  the store anchor; absent → resolve like claimBead. The global store
+ *  carries no project policy to refuse on — callers pass skipPolicy
+ *  when the queue came from it (`bro next --global`). */
+function gateClaimQueue(queue: ReadyBead[], dir: string | undefined, skipPolicy = false): void {
+  if (skipPolicy || queue.length === 0) {
+    return
+  }
+  const root = dir ?? (gitTry(['rev-parse', '--show-toplevel']).out.trim() || process.cwd())
+  try {
+    assertMutableConfig(root)
+  } catch (err) {
+    if (dir !== undefined) {
+      throw err // a pinned store dir's policy errors are the caller's to judge
+    }
+    console.error(`error: ${err instanceof Error ? err.message : String(err)}`)
+    process.exit(1)
+  }
+}
+
 /** Claim up to `limit` beads — concurrent `bro next` runs race on the
  *  same items; a raced-away claim falls through to the next candidate. */
 export function claimUpTo(
   queue: ReadyBead[],
   limit: number,
   dir?: string,
-  opts?: FacadeOpts
+  opts?: FacadeOpts,
+  skipPolicy = false
 ): ReadyBead[] {
+  // the gate lives INSIDE the claim path — loop/convoy callers reach
+  // claimUpTo without next.ts's gate above, and a claim landing before
+  // a refused spawn is exactly the half-state the gate exists to stop
+  // (spec: bro-d9dmx)
+  gateClaimQueue(queue, dir, skipPolicy)
   const picked: ReadyBead[] = []
   for (const b of queue) {
     if (picked.length >= limit) {
       break
     }
-    try {
-      storeFor(dir, opts).claim(b.id)
-      // lifecycle — the claim transition (specs/telemetry/bro-ub91h.md).
-      // The journal anchors at the run's repo (cwd), not the store dir:
-      // --global's repo-less store would drop the row even inside a
-      // project; a run outside any repo still journals nowhere
-      emitLifecycle(process.cwd(), {
-        kind: 'claim',
-        bead: b.id,
-        from: 'open',
-        to: 'in_progress',
-        detail: { via: 'next' },
-      })
+    if (claimOne(b, dir, opts)) {
       picked.push(b)
-    } catch (err) {
-      if (racedAway(b, dir, opts)) {
-        continue // genuinely raced away — try the next candidate
-      }
-      throw err
     }
   }
   return picked
@@ -340,46 +377,75 @@ function readyOrDie(dir?: string, opts?: FacadeOpts): ReadyBead[] {
   }
 }
 
-/** The shared execution path — argv `bro next` and `bro run next.toml`
- *  differ only in how the plan is populated. */
-export function applyNextPlan(plan: NextPlan): void {
-  // scope = "global" retargets every bd call at the user-level store —
-  // the pipeline is identical, only the queue's home dir differs, and
-  // the project store is not required at all (global works repo-less)
-  const dir = plan.scope === 'global' ? requireGlobalStore() : undefined
-  // the global store is beads by construction — gate AND reads/claims
-  // must pin it, or a merged `connectors.tasks` preference could point
-  // the global queue at a project backend the gate never checked
-  const storeOpts: FacadeOpts | undefined = dir === undefined ? undefined : { connector: 'beads' }
-  let backend: string
-  if (dir === undefined) {
-    // gate on the serving backend — beads gets the compat probe, a
-    // pinned connector gets its own auth check
-    const root = gitTry(['rev-parse', '--show-toplevel']).out.trim() || process.cwd()
-    backend = ensureTasksBackend(root, loadBroConfig(root).connectors)
-  } else {
-    // the global store is beads by construction
-    backend = ensureTasksBackend(dir, {})
+/** Resolve where the queue lives and which backend serves it — scope
+ *  "global" retargets every bd call at the user-level store (the
+ *  pipeline is identical, only the queue's home dir differs, and the
+ *  project store is not required at all). The global store is beads by
+ *  construction — gate AND reads/claims must pin it, or a merged
+ *  `connectors.tasks` preference could point the global queue at a
+ *  project backend the gate never checked. */
+function nextContext(plan: NextPlan): {
+  dir: string | undefined
+  storeOpts: FacadeOpts | undefined
+  backend: string
+  projectRoot: string | undefined
+} {
+  if (plan.scope === 'global') {
+    const dir = requireGlobalStore()
+    return {
+      dir,
+      storeOpts: { connector: 'beads' },
+      backend: ensureTasksBackend(dir, {}),
+      projectRoot: undefined,
+    }
   }
-  const ready = readyOrDie(dir, storeOpts)
-  let c: ReturnType<typeof classify>
+  // gate on the serving backend — beads gets the compat probe, a
+  // pinned connector gets its own auth check
+  const projectRoot = gitTry(['rev-parse', '--show-toplevel']).out.trim() || process.cwd()
+  return {
+    dir: undefined,
+    storeOpts: undefined,
+    backend: ensureTasksBackend(projectRoot, loadBroConfig(projectRoot).connectors),
+    projectRoot,
+  }
+}
+
+/** Refuse a project-scope claim under invalid committed config BEFORE
+ *  any `bd update --claim` writes (spec: bro-d9dmx) — but only when a
+ *  claim can actually be attempted: an empty queue is idle/gated, not
+ *  a policy failure (claimUpTo gates its own nonempty path; the global
+ *  store carries no project policy at all). */
+function gateClaim(c: ReturnType<typeof classify>, plan: NextPlan, projectRoot: string | undefined): void {
+  if (!plan.claim || projectRoot === undefined) {
+    return
+  }
+  // an empty queue means no claim can be attempted — idle/gated, not
+  // a policy failure
+  if (c.queue.length === 0) {
+    return
+  }
   try {
-    c = classify(ready, plan, nextScope(plan.scope, dir, storeOpts), epicParentIds(ready, dir, storeOpts))
+    assertMutableConfig(projectRoot)
   } catch (err) {
     console.error(`error: ${err instanceof Error ? err.message : String(err)}`)
     process.exit(1)
   }
-  const beads = plan.claim ? claimUpTo(c.queue, plan.limit, dir, storeOpts) : c.queue.slice(0, plan.limit)
+}
+
+/** Picks → the NextResult: 'task' when beads were emitted, 'gated'
+ *  when ready beads remain but none are claimable under this plan —
+ *  'idle' there would falsely tell the loop the backlog is empty. */
+function nextResult(c: ReturnType<typeof classify>, beads: ReadyBead[]): NextResult {
   const picked = new Set(beads.map((b) => b.id))
+  const gatedLeft =
+    c.filtered + c.foreign + c.gates.length + c.epics.length + c.moleculeSteps > 0
   let state: NextResult['state'] = 'idle'
   if (beads.length > 0) {
     state = 'task'
-  } else if (c.filtered + c.foreign + c.gates.length + c.epics.length + c.moleculeSteps > 0) {
-    // ready beads remain but none are claimable under this plan —
-    // 'idle' would falsely tell the loop the backlog is empty
+  } else if (gatedLeft) {
     state = 'gated'
   }
-  const result: NextResult = {
+  return {
     state,
     bead: beads.length > 0 ? beads[0] : undefined,
     beads,
@@ -391,12 +457,48 @@ export function applyNextPlan(plan: NextPlan): void {
     epics: c.epics.map((b) => ({ id: b.id, title: b.title })),
     moleculeSteps: c.moleculeSteps,
   }
+}
 
+/** The shared execution path — argv `bro next` and `bro run next.toml`
+ *  differ only in how the plan is populated. */
+export function applyNextPlan(plan: NextPlan): void {
+  const { dir, storeOpts, backend, projectRoot } = nextContext(plan)
+  const ready = readyOrDie(dir, storeOpts)
+  let c: ReturnType<typeof classify>
+  try {
+    c = classify(ready, plan, nextScope(plan.scope, dir, storeOpts), epicParentIds(ready, dir, storeOpts))
+  } catch (err) {
+    console.error(`error: ${err instanceof Error ? err.message : String(err)}`)
+    process.exit(1)
+  }
+  gateClaim(c, plan, projectRoot)
+  // global scope carries no project policy — skip the gate there the
+  // same way gateClaim does (projectRoot === undefined ⇔ --global)
+  const beads = plan.claim
+    ? claimUpTo(c.queue, plan.limit, dir, storeOpts, projectRoot === undefined)
+    : c.queue.slice(0, plan.limit)
+  const result = nextResult(c, beads)
   if (plan.json) {
     console.log(JSON.stringify(result, null, 2))
     return
   }
   printResult(result, !plan.claim, backend)
+}
+
+/** `--label a,b` → the trimmed list — flag() owns both spellings
+ *  (--label v / --label=v) and rejects repeats; gating on
+ *  argv.includes('--label') would miss the = form entirely. */
+function parseNextLabels(argv: string[]): string[] | undefined {
+  const labelArg = flag(argv, '--label')
+  if (labelArg === undefined) {
+    return undefined
+  }
+  const labels = labelArg.split(',').map((s) => s.trim()).filter((s) => s !== '')
+  if (labels.length === 0) {
+    console.error('error: --label requires a comma-separated value, e.g. --label debt,ui')
+    process.exit(2)
+  }
+  return labels
 }
 
 export async function runNextCommand(argv: string[]): Promise<void> {
@@ -419,14 +521,7 @@ export async function runNextCommand(argv: string[]): Promise<void> {
   scope = "all" to opt out. --global reads the user-level store
   instead (\`bro store init --global\`) — same pipeline, different home.`, 0)
   }
-  // flag() owns both spellings (--label v / --label=v) and rejects repeats —
-  // gating on argv.includes('--label') would miss the = form entirely
-  const labelArg = flag(argv, '--label')
-  const labels = labelArg?.split(',').map((s) => s.trim()).filter((s) => s !== '')
-  if (labelArg !== undefined && (labels === undefined || labels.length === 0)) {
-    console.error('error: --label requires a comma-separated value, e.g. --label debt,ui')
-    process.exit(2)
-  }
+  const labels = parseNextLabels(argv)
   applyNextPlan({
     limit: 1,
     order: 'priority',

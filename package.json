@@ -13,6 +13,8 @@
     "gen:command-docs": "node scripts/gen-command-docs.ts",
     "check:contract": "node scripts/check-contract.ts",
     "gen:contract": "node scripts/check-contract.ts --write",
+    "check:config-schema": "node scripts/gen-config-schema.ts --check",
+    "gen:config-schema": "node scripts/gen-config-schema.ts",
     "check:embedded": "node scripts/check-embedded.ts",
     "check:onboarding": "node scripts/check-onboarding.ts",
     "gen:published": "node scripts/gen-published.ts",
@@ -21,17 +23,22 @@
     "gen:plugins": "node scripts/gen-plugins.ts",
     "check:plugins": "node scripts/gen-plugins.ts --check",
     "test": "nx run-many -t test --exclude=skills-*,plugins-*-skills-*",
-    "lint": "nx run-many -t lint",
+    "lint": "biome lint",
     "affected": "nx affected -t build test lint --exclude=skills-*,plugins-*-skills-*",
-    "typecheck": "nx run-many -t typecheck --exclude=skills-*,plugins-*-skills-*"
+    "typecheck": "nx run-many -t typecheck --exclude=skills-*,plugins-*-skills-*",
+    "prepare": "husky",
+    "format": "biome format --write",
+    "format:check": "biome format"
   },
   "devDependencies": {
+    "@biomejs/biome": "^2.6.3",
     "@nx-devkit/prepare-for-release": "^0.1.14",
     "@nx-devkit/skill": "^0.1.9",
     "@nx-devkit/skillspector": "^0.1.9",
     "@nx-devkit/tsdown": "^0.1.7",
     "@nx/js": "^23.2.1",
     "@types/node": "^22.0.0",
+    "husky": "^9.1.7",
     "nx": "^23.1.0",
     "rolldown": "1.0.0-beta.45",
     "tsdown": "^0.15.0",
@@ -43,11 +50,14 @@
   },
   "overrides": {
     "smol-toml": "^1.9.0",
+    "toml": "^5.0.1",
     "axios": "^1.20.0",
     "brace-expansion": "^5.0.12",
     "katex": "^0.19.0",
     "@modelcontextprotocol/sdk": "^1.31.0",
-    "follow-redirects": "1.16.1"
+    "follow-redirects": "1.16.1",
+    "undici": "8.12.3",
+    "zod": "^4.6.6"
   },
   "allowScripts": {
     "nx@23.2.1": true,

@@ -48,9 +48,9 @@ defers the dependency to a later, less predictable failure.
 The init is stealth: `.beads` is written to `.git/info/exclude`, nothing
 lands in git, no hooks or `AGENTS.md` edits, and `rm -rf .beads` reverses
 it — the same machine-local contract as `.agents/review-debt/` and the
-gitignored `bro.config.json`. It announces itself on stderr; a tool that
-wants adoption doesn't get to be silent about writing to your repo.
-Opt out once: `"stores": ["jsonl"]` in `bro.config.json`.
+gitignored `bro.config.local.json`. It announces itself on stderr; a tool
+that wants adoption doesn't get to be silent about writing to your repo.
+Opt out once: `"stores": ["jsonl"]` in `bro.config.local.json`.
 
 ## What it doesn't do
 

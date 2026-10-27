@@ -80,13 +80,20 @@ export interface ApprovalProbeOpts {
   approvers?: readonly string[]
 }
 
-/** One review thread — consumers only ever read the first comment, so
- *  the facade exposes it directly rather than a comments array. */
+/** One review thread — `comment` is the thread's first comment (what
+ *  consumers read); `comments` is the full ordered history, which the
+ *  act gate needs to tell a thread that was resolved and then
+ *  re-commented from one that was never touched. Hosts that cannot
+ *  answer the history leave `comments` undefined rather than empty —
+ *  "no history" and "no comments" are different facts. */
 export interface ReviewThread {
   id: string
   resolved: boolean
   outdated: boolean
   comment: ReviewComment | null
+  /** Every comment in the thread, oldest first. Undefined when the host
+   *  does not expose the history. */
+  comments?: ReviewComment[]
 }
 
 export interface MergedPr {
@@ -205,9 +212,10 @@ export interface ReviewFacade {
   prsForBranch(branch: string, state?: 'open' | 'all'): number[]
   /** Every open PR on the repo — {pr, headRef} rows for one-call
    *  discovery (the watch gates tick wants the set, not N per-branch
-   *  lookups). Optional — a host without it leaves callers on the
-   *  prsForBranch scan. Connector-bounded (one listing page); a repo
-   *  past the cap under-counts, never errors. */
+   *  lookups), most recently updated first (act's no-target auto-resolve
+   *  reads row 0 as "the current PR"). Optional — a host without it
+   *  leaves callers on the prsForBranch scan. Connector-bounded (one
+   *  listing page); a repo past the cap under-counts, never errors. */
   openPrs?(repo: string): { pr: number; headRef: string }[]
   /** A PR reference in free text (the host's own URL shape) → target —
    *  the prompt-submit probe's way to spot its PRs. Null when the text

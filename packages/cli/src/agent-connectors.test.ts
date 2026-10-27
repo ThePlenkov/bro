@@ -8,12 +8,14 @@ import {
   mkdtempSync,
   readFileSync,
   rmSync,
+  statSync,
   symlinkSync,
   writeFileSync,
 } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import {
+  agentExitFileName,
   agentRegistryPath,
   bdActor,
   countSessionReservations,
@@ -22,6 +24,7 @@ import {
   procStat,
   readAgentRegistry,
   scrubEnv,
+  SESSION_SLOT_TTL_MS,
   SpawnError,
   AgentNotFound,
   testGitSpawn,
@@ -33,6 +36,7 @@ import {
 } from '@broject/core'
 import {
   agentConnectorNames,
+  armNativeSpawnTestSeam,
   broSpawnArgv,
   budgetLines,
   budgetSnapshot,
@@ -49,6 +53,7 @@ import {
   makeNativeConnector,
   makeTmuxConnector,
   pidAlive,
+  SpawnAbandoned,
   registerAgentConnector,
   batchWallRefusal,
   resolveAgentConnector,
@@ -911,6 +916,53 @@ const devinProc = (): string => {
     }
   })
 
+  // owner-only artifacts (spec bro-l8c4f.4) — prompt/log/stderr land
+  // 0600 even under umask 022, the wrapper's scoped `umask 077` pins
+  // .exit, and a permissive legacy file is repaired on the next spawn.
+  // POSIX mode bits don't exist on win32 — there the profile ACL is the
+  // owner-only boundary and statSync().mode reports nothing meaningful
+  test(
+    'agent artifacts are owner-only — create pins 0600, respawn repairs 0644',
+    { skip: process.platform === 'win32' },
+    async () => {
+    const f = fx([{ id: 'fx-1', status: 'open' }])
+    try {
+      const home = join(f.main, '.git', 'bro', 'agents')
+      const modeOf = (p: string) => statSync(p).mode & 0o777
+      const artifact = (id: string, n: string) => join(home, `${id}.${n}`)
+      // the .exit name is attempt-scoped (spec bro-l8c4f.5) — each
+      // spawn's record lands under its own runId
+      const exitOf = (i: { id: string; runId?: string }) =>
+        join(home, agentExitFileName(i.id, i.runId))
+      const prev = process.umask(0o022)
+      const c = conn(f)
+      const info = await c.spawn(SPEC(f.main, f.beadsDir, 'fx-1', 'process.exit(0)'))
+      process.umask(prev)
+      await until(() => existsSync(exitOf(info)))
+      for (const n of ['prompt.md', 'log', 'stderr']) {
+        assert.equal(modeOf(artifact(info.id, n)), 0o600, `${n}`)
+      }
+      assert.equal(modeOf(exitOf(info)), 0o600, 'exit')
+      assert.equal(modeOf(home), 0o700, 'agents home')
+      // legacy permissive artifacts — repair rides the next write/append
+      for (const n of ['prompt.md', 'log', 'stderr']) {
+        chmodSync(artifact(info.id, n), 0o644)
+      }
+      const again = await c.spawn(SPEC(f.main, f.beadsDir, 'fx-1', 'process.exit(0)'))
+      assert.equal(again.id, info.id)
+      await until(() => existsSync(exitOf(again)))
+      for (const n of ['prompt.md', 'log', 'stderr']) {
+        assert.equal(modeOf(artifact(info.id, n)), 0o600, `${n} repaired`)
+      }
+      // a per-attempt .exit needs no repair — the fresh run's record is
+      // pinned at create
+      assert.equal(modeOf(exitOf(again)), 0o600, 'exit pinned at create')
+    } finally {
+      cleanup(f)
+    }
+    }
+  )
+
   // the taxonomy contract (bro-7xgk.2): the same rc=1 splits on the log
   // tail — a crash is respawnable, a budget wall reads 'blocked' and
   // refuses respawn until the provider's reset (or `down` clears it).
@@ -919,7 +971,9 @@ const devinProc = (): string => {
   const spawnRun = async (f: Fixture, c: AgentConnector, program: string) => {
     const info = await c.spawn(SPEC(f.main, f.beadsDir, 'fx-1', program))
     await until(() =>
-      existsSync(join(f.main, '.git', 'bro', 'agents', `${info.id}.exit`))
+      existsSync(
+        join(f.main, '.git', 'bro', 'agents', agentExitFileName(info.id, info.runId))
+      )
     )
     // the .exit file can beat the wrapper's death — a single read may
     // still report running/spawned, so poll for a terminal state
@@ -1149,6 +1203,193 @@ describe('native connector', () => {
     foreign: 'tmux',
     idRe: /^native-[0-9a-f]{8}$/,
     capabilities: { attach: false, respawn: true, supervisor: 'none' },
+  })
+})
+
+/** The spawn-handshake crash windows (spec bro-l8c4f.5): deterministic
+ *  failpoints leave the exact half-state a dead launcher leaves —
+ *  reservation only, live self-publishing child, or a published pid
+ *  with no admission stamp. Every run mints a runId that scopes
+ *  <agentId>.<runId>.{handle,go,exit}; the worker holds on the go stamp
+ *  so an unadmitted survivor can never silently double a respawn. */
+describe('native spawn handshake (bro-l8c4f.5)', () => {
+  const fx = (rows: Array<Record<string, unknown>>) => fixture(rows)
+  const conn = (f: Fixture) => makeNativeConnector({ dir: f.main }, f.env)
+  const agentsDir = (f: Fixture) => join(f.main, '.git', 'bro', 'agents')
+  const entryOf = (f: Fixture, step = 'fx-1') => readAgentRegistry(f.main)[step]!
+  const runFile = (f: Fixture, id: string, runId: string, suffix: 'handle' | 'go') =>
+    join(agentsDir(f), `${id}.${runId}.${suffix}`)
+
+  test('spawn mints a per-attempt runId; worker self-publishes a handle, launcher admits with go', async () => {
+    const f = fx([{ id: 'fx-1', status: 'open' }])
+    try {
+      const c = conn(f)
+      const info = await c.spawn(SPEC(f.main, f.beadsDir, 'fx-1', 'setTimeout(() => {}, 30000)'))
+      assert.match(info.runId ?? '', /^[0-9a-f]{8}$/)
+      const entry = entryOf(f)
+      assert.equal(entry.runId, info.runId)
+      // the handle the worker published IS the launcher-patched pid
+      assert.equal(
+        readFileSync(runFile(f, info.id, info.runId!, 'handle'), 'utf8').trim(),
+        String(info.pid)
+      )
+      assert.ok(existsSync(runFile(f, info.id, info.runId!, 'go')), 'the launcher admitted the run')
+      await c.stop(info.id)
+    } finally {
+      armNativeSpawnTestSeam({})
+      cleanup(f)
+    }
+  })
+
+  test('crash after reservation: no child ran — spawned in the window, lost past it, dedup holds', async () => {
+    armNativeSpawnTestSeam({ abandonAt: 'reservation' })
+    const f = fx([{ id: 'fx-1', status: 'open' }])
+    try {
+      const c = conn(f)
+      await assert.rejects(
+        c.spawn(SPEC(f.main, f.beadsDir, 'fx-1', 'process.exit(0)')),
+        (e) => e instanceof SpawnAbandoned && e.at === 'reservation'
+      )
+      const entry = entryOf(f)
+      assert.ok(entry.agentId !== undefined && entry.runId !== undefined)
+      assert.equal(entry.pid, undefined)
+      // inside the handoff window the row is 'spawned' — recoverable,
+      // never 'lost', and never a free step
+      assert.equal((await c.status(entry.agentId)).state, 'spawned')
+      await assert.rejects(
+        c.spawn(SPEC(f.main, f.beadsDir, 'fx-1', 'process.exit(0)')),
+        SpawnError
+      )
+      // past the window a still-empty reservation reads 'lost' — and a
+      // respawn recovers the step
+      patchAgentRegistry(f.main, 'fx-1', {
+        spawnedAt: new Date(Date.now() - 3 * SESSION_SLOT_TTL_MS).toISOString(),
+      })
+      assert.equal((await c.status(entry.agentId)).state, 'lost')
+      armNativeSpawnTestSeam({})
+      const second = await c.spawn(SPEC(f.main, f.beadsDir, 'fx-1', 'setTimeout(() => {}, 30000)'))
+      assert.equal(second.id, entry.agentId)
+      assert.notEqual(second.runId, entry.runId)
+      assert.equal(second.state, 'running')
+      await c.stop(second.id)
+    } finally {
+      armNativeSpawnTestSeam({})
+      cleanup(f)
+    }
+  })
+
+  test('crash after OS spawn: survivor self-published a handle — status adopts it, down reaches it', async () => {
+    // a long admission window keeps the survivor waiting through the
+    // assertions — it must never run the payload without the go stamp
+    armNativeSpawnTestSeam({ abandonAt: 'os-spawn', goWaitTicks: 600 })
+    const f = fx([{ id: 'fx-1', status: 'open' }])
+    try {
+      const c = conn(f)
+      const sentinel = join(f.root, 'payload-ran')
+      await assert.rejects(
+        c.spawn(
+          SPEC(f.main, f.beadsDir, 'fx-1', `require('fs').writeFileSync(${JSON.stringify(sentinel)},'x')`)
+        ),
+        (e) => e instanceof SpawnAbandoned && e.at === 'os-spawn'
+      )
+      const entry = entryOf(f)
+      assert.equal(entry.pid, undefined, 'the pid patch never landed')
+      // the worker published its own handle before holding on admission
+      await until(() => existsSync(runFile(f, entry.agentId, entry.runId!, 'handle')))
+      const handlePid = Number(
+        readFileSync(runFile(f, entry.agentId, entry.runId!, 'handle'), 'utf8').trim()
+      )
+      assert.ok(pidAlive(handlePid), 'the survivor is live')
+      // status finds the survivor and adopts its handle into the registry
+      const st = await c.status(entry.agentId)
+      assert.equal(st.state, 'running')
+      assert.equal(st.pid, handlePid)
+      assert.equal(entryOf(f).pid, handlePid)
+      // no go stamp ever landed — the payload cannot have run
+      assert.ok(!existsSync(sentinel), 'unadmitted worker must not run the payload')
+      // dedup still refuses a second worker beside the survivor
+      await assert.rejects(
+        c.spawn(SPEC(f.main, f.beadsDir, 'fx-1', 'process.exit(0)')),
+        SpawnError
+      )
+      // down reaches the survivor through the adopted handle
+      await c.stop(entry.agentId)
+      await until(() => !pidAlive(handlePid))
+      assert.equal((await c.status(entry.agentId)).state, 'stopped')
+    } finally {
+      armNativeSpawnTestSeam({})
+      cleanup(f)
+    }
+  })
+
+  test('crash after pid publication: registered survivor exits 75 unadmitted — recoverable, payload never ran', async () => {
+    // ~1s admission window so the go-timeout exit lands inside the test
+    armNativeSpawnTestSeam({ abandonAt: 'publication', goWaitTicks: 20 })
+    const f = fx([{ id: 'fx-1', status: 'open' }])
+    try {
+      const c = conn(f)
+      const sentinel = join(f.root, 'payload-ran')
+      await assert.rejects(
+        c.spawn(
+          SPEC(f.main, f.beadsDir, 'fx-1', `require('fs').writeFileSync(${JSON.stringify(sentinel)},'x')`)
+        ),
+        (e) => e instanceof SpawnAbandoned && e.at === 'publication'
+      )
+      const entry = entryOf(f)
+      const pubPid = entry.pid as number
+      assert.equal(typeof pubPid, 'number', 'the handle was published')
+      const exitFile = join(agentsDir(f), agentExitFileName(entry.agentId, entry.runId))
+      assert.ok(!existsSync(runFile(f, entry.agentId, entry.runId!, 'go')), 'admission never landed')
+      // the go timeout self-terminates the worker — a recorded death,
+      // never a payload run, never 'lost'
+      await until(() => existsSync(exitFile), 8000)
+      await until(() => !pidAlive(pubPid))
+      assert.equal(readFileSync(exitFile, 'utf8').trim(), '75')
+      assert.ok(!existsSync(sentinel), 'unadmitted worker must not run the payload')
+      const st = await c.status(entry.agentId)
+      assert.equal(st.state, 'exited')
+      assert.equal(entryOf(f).exitStatus, 75)
+      // the dead run releases the step — a fresh attempt respawns with
+      // a fresh runId whose artifacts are its own
+      armNativeSpawnTestSeam({})
+      const second = await c.spawn(SPEC(f.main, f.beadsDir, 'fx-1', 'setTimeout(() => {}, 30000)'))
+      assert.equal(second.id, entry.agentId)
+      assert.notEqual(second.runId, entry.runId)
+      assert.equal(second.state, 'running')
+      await c.stop(second.id)
+    } finally {
+      armNativeSpawnTestSeam({})
+      cleanup(f)
+    }
+  })
+
+  test('a dead attempt’s late .exit write never aliases the live run — even on the legacy shared path', async () => {
+    const f = fx([{ id: 'fx-1', status: 'open' }])
+    try {
+      const c = conn(f)
+      const first = await c.spawn(SPEC(f.main, f.beadsDir, 'fx-1', 'process.exit(0)'))
+      const firstExit = join(agentsDir(f), agentExitFileName(first.id, first.runId))
+      await until(() => existsSync(firstExit))
+      const second = await c.spawn(SPEC(f.main, f.beadsDir, 'fx-1', 'setTimeout(() => {}, 30000)'))
+      assert.equal(second.id, first.id)
+      assert.notEqual(second.runId, first.runId)
+      // the old attempt's record and the pre-handshake shared path both
+      // land — the live run reads only its own scoped file
+      writeFileSync(firstExit, '99')
+      writeFileSync(join(agentsDir(f), `${first.id}.exit`), '99')
+      const st = await c.status(second.id)
+      assert.equal(st.state, 'running')
+      // now kill the live run without a record — the harvest must not
+      // pick up either bogus file; dead-without-a-record reads 'lost'
+      process.kill(-second.pid!, 'SIGKILL')
+      await until(() => !pidAlive(second.pid!))
+      const dead = await c.status(second.id)
+      assert.equal(dead.state, 'lost', 'the harvest reads only this run’s scoped .exit')
+      assert.equal(entryOf(f).exitStatus, undefined)
+    } finally {
+      armNativeSpawnTestSeam({})
+      cleanup(f)
+    }
   })
 })
 

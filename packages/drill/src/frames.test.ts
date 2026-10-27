@@ -12,6 +12,8 @@ import {
   planPreventions,
   refKind,
 } from './frames.ts'
+import { GIT_SYNC_PROBE_TIMEOUT_MS, type ConnectorCtx } from '@broject/core'
+import { drillConnector } from './connector.ts'
 import type { DrillRow } from './types.ts'
 
 const prevention = (id: string, title: string, status = 'open'): DrillRow => ({
@@ -159,6 +161,27 @@ function withFakeBd(deleteFails: boolean, fn: () => void): void {
 }
 
 const WIN32 = process.platform === 'win32'
+
+test('drill hook bounds the git lookup before the live frame probe', { skip: WIN32 }, async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'bro-drill-hanging-git-'))
+  const prevPath = process.env.PATH
+  writeFileSync(join(dir, 'git'), '#!/bin/sh\nexec /bin/sleep 30\n')
+  writeFileSync(join(dir, 'bd'), '#!/bin/sh\ncase "$*" in *wisp*) printf \'{"wisps":[]}\\n\' ;; *) printf \'[]\\n\' ;; esac\n')
+  chmodSync(join(dir, 'git'), 0o755)
+  chmodSync(join(dir, 'bd'), 0o755)
+  process.env.PATH = `${dir}:${prevPath}`
+  try {
+    const started = Date.now()
+    const ctx = { dir } as ConnectorCtx
+    const hooks = drillConnector.hooks?.(ctx)
+    assert.ok(hooks?.sessionStart)
+    assert.deepEqual(await hooks.sessionStart(ctx), [])
+    assert.ok(Date.now() - started < GIT_SYNC_PROBE_TIMEOUT_MS + 1_000)
+  } finally {
+    process.env.PATH = prevPath
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
 
 describe('drillUp compensation', () => {
   test(

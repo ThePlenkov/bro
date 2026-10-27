@@ -46,18 +46,16 @@ import { spawnSync, spawn } from 'node:child_process'
 import {
   closeSync,
   existsSync,
-  mkdirSync,
-  openSync,
   readFileSync,
   statfsSync,
   statSync,
-  writeFileSync,
   writeSync,
 } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { basename, dirname, join } from 'node:path'
 import {
   AgentNotFound,
+  agentExitFileName,
   agentRegistryPath,
   awaitFileLock,
   CLASS_LABEL_PREFIX,
@@ -71,6 +69,8 @@ import {
   gitCommonDir,
   gitTry,
   LockTimeout,
+  mkdirPrivateSync,
+  openPrivateAppendSync,
   procStat,
   reviewHost,
   routeStepClass,
@@ -80,9 +80,11 @@ import {
   stepClassInfo,
   stepParent,
   withFileLock,
+  writePrivateFileSync,
   type AgentConnector,
   type AgentInfo,
   type AgentState,
+  type ClaimCapability,
   type MirrorPolicy,
   type ResolvedClass,
   type ReviewFacade,
@@ -90,6 +92,7 @@ import {
   type TaskStore,
   BATCH_MARKER_ENV,
   hasHelpFlag,
+  issueLink,
   printUsage,
 } from '@broject/core'
 import type { ExitCode } from '@broject/core'
@@ -98,6 +101,7 @@ import {
   checkHistory,
   evaluateExitGate,
   fetchPrActState,
+  resolveLedger,
   gatePending,
   prStateCache,
   watchBegin,
@@ -704,8 +708,8 @@ function spawnAgent(
     let logFd: number | null = null
     if (log !== null) {
       try {
-        mkdirSync(dirname(log), { recursive: true })
-        logFd = openSync(log, 'a')
+        mkdirPrivateSync(dirname(log))
+        logFd = openPrivateAppendSync(log)
       } catch {
         logFd = null
       }
@@ -828,6 +832,7 @@ async function spawnWorker(ctx: Ctx, m: GateMember, prompt: string, lane: LoopLa
     spawnedAt: info.spawnedAt,
     spawnedMs: Date.now(),
     pid: info.pid,
+    runId: info.runId,
   }
   // the run record stays and rides the worker (bro-wg896): custody of
   // the CLAIM transfers to the registry entry at spawn, but retiring
@@ -876,7 +881,7 @@ function workerExit(ctx: Ctx, w: WorkerRef): { code: number | null; at: number }
   if (log !== '') {
     const home = dirname(log)
     try {
-      const f = join(home, `${w.agentId}.exit`)
+      const f = join(home, agentExitFileName(w.agentId, w.runId))
       const n = Number(readFileSync(f, 'utf8').trim())
       return { code: Number.isInteger(n) ? n : null, at: statSync(f).mtimeMs }
     } catch {
@@ -964,7 +969,12 @@ function stampProjection(ctx: Ctx, beads: ReadyBead[], pr: number): void {
   }
   try {
     ctx.rev.linkCloses({ repo: ctx.repo, pr }, refs)
-    say(ctx, `loop: ${prRef(ctx, pr)} wired Fixes ${refs.map((r) => `#${r}`).join(', ')}`)
+    say(
+      ctx,
+      `loop: ${prRef(ctx, pr)} wired Fixes ${refs
+        .map((r) => (/^\d+$/.test(r) ? issueLink(ctx.repo, Number(r)) : r))
+        .join(', ')}`
+    )
   } catch (err) {
     console.error(`loop: ${prRef(ctx, pr)} Fixes wiring failed — ${String(err)}`)
   }
@@ -1356,10 +1366,12 @@ function runBootstrap(ctx: Ctx, beads: ReadyBead[], item: LoopItem): boolean {
 }
 
 /** The work-order file lives outside the worktree (see planItem) —
- *  its parent dir may not exist yet. */
+ *  its parent dir may not exist yet. Owner-only like the agents-home
+ *  prompt (spec bro-l8c4f.4) — the order can embed secrets and thread
+ *  context. */
 function writePrompt(item: LoopItem, text: string): void {
-  mkdirSync(dirname(item.promptFile), { recursive: true })
-  writeFileSync(item.promptFile, text)
+  mkdirPrivateSync(dirname(item.promptFile))
+  writePrivateFileSync(item.promptFile, text)
 }
 
 interface StackSlot {
@@ -1529,6 +1541,10 @@ interface WorkerRef {
   /** ms stamp at our spawn call — the crash window's start. */
   spawnedMs: number
   pid?: number
+  /** the attempt token — its .exit is `<id>.<runId>.exit`, never the
+   *  shared legacy path a respawn's late write could alias (spec
+   *  bro-l8c4f.5) */
+  runId?: string
 }
 
 /** The push half of the alternation: claim → worktree → agent → PR.
@@ -2006,6 +2022,7 @@ async function serviceGate(ctx: Ctx, m: GateMember): Promise<ServiceVerdict> {
         requireApproval: ctx.act.requireApproval,
         approvers: ctx.act.approvers,
         stateCache: ctx.stateCache,
+        resolveLedger: resolveLedger(ctx.root),
       }
     )
     const gate = evaluateExitGate(state, { requireApproval: ctx.act.requireApproval })
@@ -2018,6 +2035,7 @@ async function serviceGate(ctx: Ctx, m: GateMember): Promise<ServiceVerdict> {
       mergeable: state.mergeable,
       mergeState: state.mergeState,
       openThreads: state.openThreads,
+      reopenedThreads: state.reopenedThreads?.length ?? 0,
       fixRounds: state.fixRounds,
       maxRounds: state.maxRounds,
       ok: gate.ok,
@@ -2536,7 +2554,65 @@ function buildCtx(
     }
   }
   sayLaneNotes(ctx, flagPin)
+  // the claim-authority advisory: outside the registry path the loop
+  // claims through the tasks facade, whose claim() may be best-effort
+  // assignment rather than a lease. The registry path claims on the
+  // pinned beads store (exclusive) and needs no note; an
+  // exclusive-claiming facade needs none either.
+  if (ctx.agents === undefined) {
+    const note = claimAuthorityNote(ctx.backend, declaredClaimCapability(ctx.tasks))
+    if (note !== undefined) {
+      say(ctx, note)
+    }
+  }
   return ctx
+}
+
+/** A third-party store whose capability getter throws reads as
+ *  undeclared — the advisory must never abort the loop. */
+export function declaredClaimCapability(
+  store: Pick<TaskStore, 'claimCapability'>
+): ClaimCapability | undefined {
+  try {
+    return store.claimCapability?.()
+  } catch {
+    return undefined
+  }
+}
+
+/** The startup advisory for a claims plane that cannot promise a single
+ *  winner (spec specs/bro-l8c4f.12). Returns undefined when the store
+ *  declares exclusive claims — or when a third-party store declares
+ *  'exclusive' itself (its word is taken at face value; the honesty
+ *  burden is the connector's). An UNDECLARED capability still warns:
+ *  absent is not a promise either way, and a competitive runner fails
+ *  closed on unknowns. The note names the consequence and the remedy —
+ *  it is a diagnostic, not an enforcement gate: assignment flows stay
+ *  legal on best-effort stores. */
+export function claimAuthorityNote(
+  backend: string,
+  cap: ClaimCapability | undefined
+): string | undefined {
+  if (cap?.strength === 'exclusive') {
+    return undefined
+  }
+  const shared =
+    cap?.identity === 'viewer'
+      ? ' — and every worker behind one credential claims as the same identity'
+      : ''
+  // undeclared names what is unknown rather than claiming best-effort —
+  // the store may be exclusive, the loop just cannot verify it
+  const promise =
+    cap === undefined
+      ? `loop: tasks backend '${backend}' declares no claim capability — ` +
+        `exclusivity is unverified, so claim() may be an assignment, not a lease`
+      : `loop: tasks backend '${backend}' offers best-effort claims only — ` +
+        `claim() is an assignment, not a lease`
+  return (
+    `${promise}${shared}. A second issuer ` +
+    `(another loop or rig on the same tracker) can seat the same item; ` +
+    `keep one loop on this backlog or run on an exclusive-claim store (beads).`
+  )
 }
 
 // announce the resolved lane once — agents.native.provider picking up

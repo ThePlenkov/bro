@@ -11,6 +11,8 @@ import {
   agentsSection,
   beadsSection,
   checkBeads,
+  configDiagnostics,
+  configPolicyErrors,
   debtSection,
   definePlugin,
   loadConfig,
@@ -26,6 +28,7 @@ import {
   sweepSection,
   syncSection,
   type BroPlugin,
+  type ConfigDiagnostic,
   type ConfigSection,
   type DocType,
 } from '@broject/core'
@@ -77,6 +80,7 @@ import { runResumeCommand } from './commands/resume.ts'
 import { runDriveCommand } from './commands/drive.ts'
 import { applyDrillPlan, runDrillCommand } from './commands/drill.ts'
 import { runFleetCommand } from './commands/fleet.ts'
+import { runDelegateCommand } from './commands/delegate-cli.ts'
 import { runGoalCommand } from './commands/goal.ts'
 import { runDogfoodCommand } from './commands/dogfood.ts'
 import { goalSection } from './commands/goal-config.ts'
@@ -283,6 +287,35 @@ export const PLUGINS: BroPlugin[] = [
       exits: {
         0: 'fleet printed',
         2: 'usage — --live without TTY, --every out of range, --json + --live',
+      },
+    },
+  }),
+  definePlugin({
+    name: 'delegate',
+    group: 'fleet',
+    summary:
+      'Activate another agent — sync ask (--wait, pooled ACP turn) or detached registry spawn (--detach)',
+    run: runDelegateCommand,
+    skill: 'delegate',
+    contract: {
+      flags: {
+        '--wait': 'sync short ask — one pooled ACP turn; reply text on stdout (default)',
+        '--detach': 'real work — the registry spawn `bro agents run` takes; returns the agentId',
+        '--prompt <text>': 'literal prompt (positional text is the same channel)',
+        '--prompt-file <file>': 'prompt from a file',
+        '--provider <name>': 'providers.<name> pin — --wait needs an acp entry',
+        '--class <name>': 'fleet.routing lane — chain[0] supplies the provider (exclusive with --provider)',
+        '--model <m>': 'model override — --wait pins it on the ACP session',
+        '--timeout <sec>': '--wait deadline (default 120)',
+        '--connector <name>': '--detach backend pin',
+        '--worktree <path>': '--detach worktree (default: minted <repo>--adhoc-*)',
+        '--auto-approve': '--detach ACP permission policy',
+        '--beads-dir <dir>': 'shared store override',
+        '--json': '{mode,provider,model,class?,stopReason,text,delegatedBy?} for wait; {mode,delegatedBy?,agent} for detach',
+      },
+      exits: {
+        0: 'delegation served — reply printed (--wait) or agent spawned (--detach)',
+        1: 'provider walled/unavailable, spawn refused, prompt/pin error, or usage (usage errors also exit 1 today)',
       },
     },
   }),
@@ -811,6 +844,20 @@ export function pluginConfigSections(): Record<string, ConfigSection<unknown>> {
 export function loadBroConfig(cwd: string = process.cwd()) {
   return loadConfig(cwd, pluginConfigSections())
 }
+
+/** configDiagnostics over the full registry — core sections merged with
+ *  every plugin's declared configKey schema (spec: specs/bro-d9dmx.md). */
+export function broConfigDiagnostics(cwd: string = process.cwd()) {
+  return configDiagnostics(cwd, pluginConfigSections())
+}
+
+// The gate lives in config-policy.ts — a leaf commands/work.ts can
+// import without the TDZ cycle back into this registry. The merged
+// section list is registered here at init so assertMutableConfig sees
+// plugin configKeys, not just core's.
+export { ConfigPolicyError, assertMutableConfig } from './config-policy.ts'
+import { registerPolicySections } from './config-policy.ts'
+registerPolicySections(pluginConfigSections)
 
 function isPlugin(p: unknown): p is BroPlugin {
   const o = p as BroPlugin

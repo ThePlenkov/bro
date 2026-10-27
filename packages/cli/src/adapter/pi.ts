@@ -59,7 +59,7 @@ import {
   sharedBinding,
   type BroContext,
   type BroHostBinding,
-} from './host.ts'
+} from './host.ts';
 
 // --- structural pi surface ----------------------------------------------
 // Declared, never imported — pi loads this module at runtime and nobody
@@ -68,78 +68,88 @@ import {
 // guarantees. Field names are verbatim; upstream is the only place they
 // should change. (Same convention as opencode.ts.)
 
-type Level = 'info' | 'warning' | 'error'
+type Level = 'info' | 'warning' | 'error';
 
 interface UIContext {
-  notify(message: string, type?: Level): void
-  setStatus(key: string, text: string | undefined): void
+  notify(message: string, type?: Level): void;
+  setStatus(key: string, text: string | undefined): void;
   setWidget(
     key: string,
     content: string[] | undefined,
     options?: { placement?: 'aboveEditor' | 'belowEditor' }
-  ): void
+  ): void;
 }
 
 interface SessionReader {
-  getSessionId(): string | undefined
+  getSessionId(): string | undefined;
 }
 
 // the lineage's context shape, with pi's one addition: setWidget takes a
 // placement option
 interface ExtContext extends BroContext {
-  ui: UIContext
-  sessionManager: SessionReader
+  ui: UIContext;
+  sessionManager: SessionReader;
 }
 
 interface BoundaryResult {
   entries?: Array<{
-    type: 'custom_message'
-    customType: string
-    content: string
-    display: boolean
-  }>
-  continue?: boolean
+    type: 'custom_message';
+    customType: string;
+    content: string;
+    display: boolean;
+  }>;
+  continue?: boolean;
 }
 
 interface PiApi {
-  on(event: string, handler: (event: never, ctx: ExtContext) => unknown): () => void
+  on(event: string, handler: (event: unknown, ctx: ExtContext) => unknown): () => void;
   registerCommand(
     name: string,
     options: {
-      description?: string
-      handler: (args: string, ctx: ExtContext) => Promise<void> | void
+      description?: string;
+      handler: (args: string, ctx: ExtContext) => Promise<void>;
+      getArgumentCompletions?: (
+        argumentPrefix: string
+      ) =>
+        | Array<{ label: string; value: string }>
+        | null
+        | Promise<Array<{ label: string; value: string }> | null>;
     }
-  ): void
+  ): void;
   registerTool(tool: {
-    name: string
-    label: string
-    description: string
-    parameters: Record<string, unknown>
+    name: string;
+    label: string;
+    description: string;
+    parameters: Record<string, unknown>;
     execute(
       toolCallId: string,
       params: unknown,
       signal: AbortSignal | undefined,
       onUpdate: unknown,
       ctx: ExtContext
-    ): Promise<{ content: Array<{ type: 'text'; text: string }> }>
-  }): void
-  exec(command: string, args: string[], options?: { timeout?: number; cwd?: string }): Promise<ExecResult>
+    ): Promise<{ content: Array<{ type: 'text'; text: string }>; details: unknown }>;
+  }): void;
+  exec(
+    command: string,
+    args: string[],
+    options?: { timeout?: number; cwd?: string }
+  ): Promise<ExecResult>;
   sendMessage(
     message: { customType: string; content: string; display: boolean; details?: unknown },
     options?: { deliverAs?: 'steer' | 'followUp' | 'nextTurn'; triggerTurn?: boolean }
-  ): void
+  ): void;
 }
 
 interface ExecResult {
-  stdout: string
-  stderr: string
-  code: number
-  killed: boolean
+  stdout: string;
+  stderr: string;
+  code: number;
+  killed: boolean;
 }
 
 /** The published version of this adapter — the npx fallback pin. The
  *  pin is rewritten by gen-plugins on every gen/release run. */
-const NPX_PIN = '@broject/bro@0.2.5'
+const NPX_PIN = '@broject/bro@0.2.5';
 
 /**
  * The pi binding: the host's own shape, nothing else. Every behavioral
@@ -151,11 +161,11 @@ function binding(pi: PiApi): BroHostBinding<ExtContext> {
     ...sharedBinding<ExtContext>({
       stop: 'agent_before_settle',
       on(event, handler) {
-        pi.on(event as never, handler as never)
+        pi.on(event as never, handler as never);
       },
       notify(ctx, text, level) {
         try {
-          ctx.ui.notify(text, level)
+          ctx.ui.notify(text, level);
         } catch {
           // stale ctx — a hint is advisory, never worth a throw
         }
@@ -173,45 +183,88 @@ function binding(pi: PiApi): BroHostBinding<ExtContext> {
               display: true,
             },
           ],
-        } satisfies BoundaryResult
+        } satisfies BoundaryResult;
       },
       stopAlreadyRefused() {
         // pi's settle gate has no stop_hook_active of its own — the
         // driver tracks the one-shot rule instead.
-        return false
+        return false;
       },
       stopAborted(event) {
         // an aborted or errored settle must end, not be resumed by
         // the gate's custom-message continuation
-        const settle = event as { outcome?: string }
-        const outcome = settle.outcome
-        return outcome === 'aborted' || outcome === 'error'
+        const settle = event as { outcome?: string };
+        const outcome = settle.outcome;
+        return outcome === 'aborted' || outcome === 'error';
       },
-      paint(ctx, lines, crumb) {
+      paint(ctx, lines, _crumb) {
         try {
-          ctx.ui.setWidget(BOARD_KEY, lines, { placement: 'aboveEditor' })
-          ctx.ui.setStatus(BOARD_KEY, crumb)
+          // One compact line is enough — the 5-line board widget plus
+          // the status crumb doubled up the chrome. Keep the summary
+          // line (the informative one) as the single widget and drop the
+          // redundant bottom crumb.
+          let one: string[] | undefined;
+          if (lines.length > 0) {
+            const links = lines
+              .slice(1)
+              .map(l => (l.match(/\[#\d+\]\([^)]+\)/) ?? [])[0])
+              .filter((x): x is string => typeof x === 'string');
+            const head = links.length > 0 ? `${lines[0]}  ${links.join(' ')}` : lines[0];
+            one = [head];
+          }
+          ctx.ui.setWidget(BOARD_KEY, one, { placement: 'aboveEditor' });
+          ctx.ui.setStatus(BOARD_KEY, undefined);
         } catch {
           // pi invalidates the ctx on session replacement — a stale
           // widget paint is advisory, never worth a throw
         }
       },
     }),
+    argumentCompletions(prefix: string) {
+      const items = [
+        'act',
+        'act status',
+        'debt',
+        'drill',
+        'convoy',
+        'next',
+        'loop',
+        'stack',
+        'fleet',
+        'agents',
+        'work',
+        'spec',
+        'sync',
+        'doctor',
+        'plugins',
+        'setup',
+        'wait',
+        'review',
+        'self',
+        'plan',
+        'mesh',
+        'check',
+        'help',
+      ];
+      const p = prefix.trim().toLowerCase();
+      const filtered = p === '' ? items : items.filter(x => x.startsWith(p));
+      return filtered.map(x => ({ label: x, value: x }));
+    },
     npxPin: NPX_PIN,
-  }
+  };
 }
 
 /** The extension entry point — pi calls this with its API. */
 export default function broExtension(pi: PiApi): void {
-  const driver = createBroDriver(binding(pi), pi)
+  const driver = createBroDriver(binding(pi), pi);
 
   // pi's board also refreshes when the agent settles — a settle can
   // follow a turn without a turn_end, and the board must not go stale.
   // driver.refresh repaints; driver.run alone spawned the CLI and
   // discarded the answer, leaving the widget stale.
-  pi.on('agent_settled', (_e: never, ctx: ExtContext) => {
-    void driver.refresh(ctx).catch(() => {})
-  })
+  pi.on('agent_settled', (_e: unknown, ctx: ExtContext) => {
+    void driver.refresh(ctx).catch(() => {});
+  });
 }
 
 /**
@@ -219,4 +272,4 @@ export default function broExtension(pi: PiApi): void {
  * foreign file holding this slot; the marker survives generation into
  * plugins/pi/bro/bro.ts.
  */
-export const adapter = { id: 'bro', kind: 'pi-extension' } as const // NOSONAR typescript:S7734 — the sentinel is a published marker, not a second entry point
+export const adapter = { id: 'bro', kind: 'pi-extension' } as const; // NOSONAR typescript:S7734 — the sentinel is a published marker, not a second entry point

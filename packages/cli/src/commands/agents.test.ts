@@ -1414,6 +1414,84 @@ describe('bro agents down <target>', () => {
     }
   })
 
+  /** Shared skeleton of the TERM-survival scenarios (bro-l8c4f.3):
+   *  spawn a native agent running `command`, run `down`, and assert the
+   *  common invariants — exit 1, no `stopped` line, no `stopped`
+   *  marker — before the caller checks its scenario-specific output. */
+  const surviveDown = async (fx: Fixture, command: string) => {
+    writeFileSync(
+      join(fx.main, 'bro.config.json'),
+      JSON.stringify({ agents: { native: { command } } })
+    )
+    const up = await agents([
+      'up', 'fx-1', '--worktree', fx.main, '--beads-dir', fx.beads,
+      '--prompt-file', fx.promptFile(LONG_RUN),
+    ])
+    assert.equal(up.code, 0)
+    const down = await agents(['down', 'fx-1'])
+    assert.equal(down.code, 1)
+    assert.doesNotMatch(down.out.join('\n'), /^stopped /m)
+    // no stopped marker — the live unit still owns the entry
+    assert.notEqual(readAgentRegistry(fx.main)['fx-1']?.stopped, true)
+    return { down, status: await agents(['status', 'fx-1']) }
+  }
+
+  test('a TERM-resistant wrapper survives — down exits 1, never `stopped`', async () => {
+    // the wrapper records receipt of SIGTERM and keeps running — the
+    // marker file proves the signal actually landed, so a no-op stop()
+    // can't pass by never signaling (bro-l8c4f.3)
+    const fx = fixture([{ id: 'fx-1', status: 'open' }])
+    try {
+      const hitFile = join(fx.main, 'term-received')
+      const { down, status } = await surviveDown(
+        fx, `trap 'touch "${hitFile}"' TERM; while :; do sleep 1; done # {promptFile}`)
+      assert.match(down.err.join('\n'), /survived the stop signal — still running/)
+      for (let i = 0; i < 40 && !existsSync(hitFile); i++) {
+        await new Promise((r) => setTimeout(r, 50))
+      }
+      assert.ok(existsSync(hitFile), 'the wrapper never received SIGTERM')
+      assert.match(status.out.join('\n'), /state\s+running/)
+    } finally {
+      fx.restore()
+    }
+  })
+
+  test('a dead wrapper with a live descendant is still-running, not stopped', async () => {
+    // the wrapper dies on SIGTERM while its descendant had TERM
+    // ignored before exec — a group probe, not the wrapper pid, is what
+    // stands between this unit and a `stopped` marker (bro-l8c4f.3)
+    const fx = fixture([{ id: 'fx-1', status: 'open' }])
+    try {
+      const { down, status } = await surviveDown(
+        fx, '(trap "" TERM; exec sleep 30) & wait $! # {promptFile}')
+      assert.match(down.err.join('\n'), /survived the stop signal — still running/)
+      // the live group member keeps the whole unit reading `running`
+      assert.match(status.out.join('\n'), /state\s+running/)
+    } finally {
+      fx.restore()
+    }
+  })
+
+  test('a setsid-escaped descendant leaves the stop unverified, not stopped', async () => {
+    // setsid moves the child into its own session AND process group —
+    // the group probe cannot see it; the pre-signal tree snapshot is
+    // what stops the marker landing over a live writer (bro-l8c4f.3).
+    // Once the wrapper dies the survivor reparents to init — the state
+    // read then says `lost`, so the verdict is unverified.
+    const fx = fixture([{ id: 'fx-1', status: 'open' }])
+    try {
+      const { down, status } = await surviveDown(
+        fx, 'setsid sleep 30 & wait $! # {promptFile}')
+      assert.match(down.err.join('\n'), /stop unconfirmed/)
+      // the escapee lives on in its own session — the state read is
+      // lost (no death record), which is exactly why the verdict stays
+      // unverified; it exits on its own ~30 s out
+      assert.match(status.out.join('\n'), /state\s+lost/)
+    } finally {
+      fx.restore()
+    }
+  })
+
   test("a status() that drops the pid renders 'unknown' in the respawn note", async () => {
     // a respawn between list() and status() reuses the agentId with a new
     // handle — but a connector can also just stop reporting a pid; the
@@ -1446,8 +1524,13 @@ describe('bro agents down <target>', () => {
     const fx = fixture()
     try {
       const r = await agents(['down', 'ag-1', '--connector', 'flaky-pid-agents-test'])
-      assert.equal(r.code, 0)
+      // stop() resolved but the backend still reads `running` — the
+      // post-stop probe refuses `stopped` (bro-l8c4f.3); the respawn
+      // note (bro-8ltl) still renders ahead of the refusal
+      assert.equal(r.code, 1)
       assert.match(r.err.join('\n'), /respawned since lookup \(pid 4242 → unknown\)/)
+      assert.match(r.err.join('\n'), /survived the stop signal — still running/)
+      assert.doesNotMatch(r.out.join('\n'), /^stopped /m)
       assert.equal(stopped, 'ag-1')
     } finally {
       dispose?.()

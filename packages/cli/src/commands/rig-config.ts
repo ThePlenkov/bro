@@ -1,7 +1,7 @@
 /** `rig` config section — a separate module so plugins.ts can register
  *  the schema without importing the command's dependency tree (same
  *  pattern as watch-config.ts). */
-import type { ConfigSection } from '@broject/core'
+import { js, type ConfigSection } from '@broject/core'
 import { MAX_INTERVAL_SEC, MIN_INTERVAL_SEC } from './drive-config.ts'
 
 export interface RigConfig {
@@ -42,3 +42,11 @@ export const rigSection: ConfigSection<RigConfig> = (raw) => {
         : 900,
   }
 }
+
+const boundedSec = { type: 'number', minimum: MIN_INTERVAL_SEC, maximum: MAX_INTERVAL_SEC }
+
+rigSection.jsonSchema = js.obj({
+  repo: js.str,
+  intervalSec: boundedSec,
+  pulseSec: boundedSec,
+})

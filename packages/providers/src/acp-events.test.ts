@@ -1,6 +1,6 @@
 import { after, describe, test } from 'node:test'
 import assert from 'node:assert/strict'
-import { existsSync, mkdtempSync, readdirSync, readFileSync } from 'node:fs'
+import { chmodSync, existsSync, mkdtempSync, readdirSync, readFileSync, statSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import {
@@ -126,6 +126,35 @@ describe('agentTurnPlane', () => {
       assert.equal(last.kind, 'turn')
       assert.equal(last.phase, 'stop')
       assert.equal(last.stopReason, 'end_turn')
+    } finally {
+      await broker.close()
+    }
+  })
+
+  // spec bro-l8c4f.4 — the archive carries raw prompts/replies: it must
+  // land 0600 and repair a permissive pre-existing file on first write
+  test('the archive is owner-only — created 0600, a legacy 0644 repaired', async (t) => {
+    if (process.platform === 'win32') {
+      t.skip('POSIX mode bits do not apply on win32')
+      return
+    }
+    const dir = repo()
+    const broker: BusBroker = await startBusBrokerAt(busSocketPath(dir)!)
+    try {
+      process.env.BRO_AGENT_ID = 'native-t1'
+      const common = gitCommonDir(dir)!
+      const file = join(common, 'bro', 'agents', 'native-t1.events.jsonl')
+      const turn = async () => {
+        const plane = agentTurnPlane({ cwd: dir, by: 't', sessionId: 's' })
+        plane.start()
+        plane.stop('end_turn')
+        await plane.drain()
+      }
+      await turn()
+      assert.equal(statSync(file).mode & 0o777, 0o600)
+      chmodSync(file, 0o644)
+      await turn()
+      assert.equal(statSync(file).mode & 0o777, 0o600)
     } finally {
       await broker.close()
     }
