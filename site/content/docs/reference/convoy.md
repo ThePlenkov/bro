@@ -1,4 +1,5 @@
 ---
+
 title: "bro convoy"
 description: "Convoy execution over beads molecules: status|next|done|pour|list|run"
 ---
@@ -7,10 +8,10 @@ description: "Convoy execution over beads molecules: status|next|done|pour|list|
 
 `bro convoy status|next|done|pour|list|run`
 
-| | |
-| --- | --- |
-| group | `flow` |
-| skill | `convoy` |
-| plan | `kind = "convoy"` (v1) |
-| guide | [commands/convoy](/docs/commands/convoy) |
-
+|            |                                          |
+| ---------- | ---------------------------------------- |
+| group      | `flow`                                   |
+| npm latest | `0.2.5`                                  |
+| skill      | `convoy`                                 |
+| plan       | `kind = "convoy"` (v1)                   |
+| guide      | [commands/convoy](/docs/commands/convoy) |

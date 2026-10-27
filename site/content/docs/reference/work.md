@@ -1,4 +1,5 @@
 ---
+
 title: "bro work"
 description: "Parallel-friendly worktrees: enter|leave|list|prune"
 ---
@@ -7,10 +8,10 @@ description: "Parallel-friendly worktrees: enter|leave|list|prune"
 
 `bro work enter|leave|list|prune`
 
-| | |
-| --- | --- |
-| group | `work` |
-| skill | `work` |
-| config | `stack` in bro.config |
-| guide | [commands/stack](/docs/commands/stack) |
-
+|            |                                        |
+| ---------- | -------------------------------------- |
+| group      | `work`                                 |
+| npm latest | `0.2.5`                                |
+| skill      | `work`                                 |
+| config     | `stack` in bro.config                  |
+| guide      | [commands/stack](/docs/commands/stack) |

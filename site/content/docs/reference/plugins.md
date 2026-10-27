@@ -1,4 +1,5 @@
 ---
+
 title: "bro plugins"
 description: "Plugin registry + client adapters: install|uninstall|list <client>"
 ---
@@ -7,8 +8,8 @@ description: "Plugin registry + client adapters: install|uninstall|list <client>
 
 `bro plugins install|uninstall|list`
 
-| | |
-| --- | --- |
-| group | `utility` |
-| guide | [commands/utility](/docs/commands/utility) |
-
+|            |                                            |
+| ---------- | ------------------------------------------ |
+| group      | `utility`                                  |
+| npm latest | `0.2.5`                                    |
+| guide      | [commands/utility](/docs/commands/utility) |

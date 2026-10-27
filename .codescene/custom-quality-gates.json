@@ -954,12 +954,27 @@
     {
       "quality_gates": "bare_minimum",
       "quality_gates_doc": "Rung 2 — advisory findings only (no critical rule fires): the critical-rule safety net.",
+      "matching_content_path": "scripts/check-onboarding.ts"
+    },
+    {
+      "quality_gates": "bare_minimum",
+      "quality_gates_doc": "Rung 2 — advisory findings only (no critical rule fires): the critical-rule safety net.",
       "matching_content_path": "scripts/gen-command-docs.ts"
     },
     {
       "quality_gates": "bare_minimum",
       "quality_gates_doc": "Rung 2 — advisory findings only (no critical rule fires): the critical-rule safety net.",
       "matching_content_path": "scripts/gen-plugins.ts"
+    },
+    {
+      "quality_gates": "bare_minimum",
+      "quality_gates_doc": "Rung 2 — advisory findings only (no critical rule fires): the critical-rule safety net.",
+      "matching_content_path": "scripts/gen-published.ts"
+    },
+    {
+      "quality_gates": "bare_minimum",
+      "quality_gates_doc": "Rung 2 — advisory findings only (no critical rule fires): the critical-rule safety net.",
+      "matching_content_path": "scripts/published-surface.ts"
     },
     {
       "quality_gates": {

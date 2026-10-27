@@ -1,4 +1,5 @@
 ---
+
 title: "bro sweep"
 description: "Gated disposal for closed beads: status|distill|run — gate → archive → prune"
 ---
@@ -7,10 +8,10 @@ description: "Gated disposal for closed beads: status|distill|run — gate → a
 
 `bro sweep status|distill|run`
 
-| | |
-| --- | --- |
-| group | `work` |
-| skill | `sweep` |
-| config | `sweep` in bro.config |
-| guide | [commands/sweep](/docs/commands/sweep) |
-
+|            |                                        |
+| ---------- | -------------------------------------- |
+| group      | `work`                                 |
+| npm latest | `0.2.5`                                |
+| skill      | `sweep`                                |
+| config     | `sweep` in bro.config                  |
+| guide      | [commands/sweep](/docs/commands/sweep) |
