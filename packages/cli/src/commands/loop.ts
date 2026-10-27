@@ -42,20 +42,10 @@
  * to open; the worktree stays as the resume cache the woken claim
  * reuses (bro-hl22w).
  */
-import { spawnSync, spawn } from 'node:child_process'
-import {
-  closeSync,
-  existsSync,
-  mkdirSync,
-  openSync,
-  readFileSync,
-  statfsSync,
-  statSync,
-  writeFileSync,
-  writeSync,
-} from 'node:fs'
-import { tmpdir } from 'node:os'
-import { basename, dirname, join } from 'node:path'
+import { spawnSync, spawn } from 'node:child_process';
+import { closeSync, existsSync, readFileSync, statfsSync, statSync, writeSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { basename, dirname, join } from 'node:path';
 import {
   AgentNotFound,
   agentRegistryPath,
@@ -70,8 +60,12 @@ import {
   gitBranchLog,
   gitCommonDir,
   gitTry,
+  isAgentCause,
   LockTimeout,
+  mkdirPrivateSync,
+  openPrivateAppendSync,
   procStat,
+  readAgentRegistry,
   reviewHost,
   routeStepClass,
   SpawnError,
@@ -81,6 +75,7 @@ import {
   stepParent,
   wallText,
   withFileLock,
+  writePrivateFileSync,
   type AgentConnector,
   type AgentInfo,
   type AgentState,
@@ -93,21 +88,23 @@ import {
   type TaskStore,
   BATCH_MARKER_ENV,
   hasHelpFlag,
+  issueLink,
   printUsage,
-} from '@broject/core'
-import type { ExitCode } from '@broject/core'
+} from '@broject/core';
+import type { ExitCode } from '@broject/core';
 import {
   ACT_STATE_TTL_MS,
   checkHistory,
   evaluateExitGate,
   fetchPrActState,
+  resolveLedger,
   gatePending,
   prStateCache,
   watchBegin,
   watchEnd,
   watchRefresh,
   type PrStateCache,
-} from '@broject/act'
+} from '@broject/act';
 import {
   buildFixPrompt,
   buildRebasePrompt,
@@ -125,8 +122,8 @@ import {
   type GateSnapshot,
   type LoopConfig,
   type LoopItem,
-} from '@broject/loop'
-import { loadBroConfig } from '../plugins.ts'
+} from '@broject/loop';
+import { loadBroConfig } from '../plugins.ts';
 import {
   applyFleetRouter,
   fleetProfileOf,
@@ -137,14 +134,14 @@ import {
   resolveSpawnProvider,
   type AgentConnectorEnv,
   type SpawnProviderPick,
-} from '../agent-connectors.ts'
-import { flag, positionals } from './args.ts'
-import { runActCommand } from './act.ts'
-import { beginLoopRun, endLoopRun, loopRunLog, reapLoopRuns } from './loop-state.ts'
-import { runSyncCommand } from './sync.ts'
-import { mergedBranches, stackMemberFor, stackTip, syncStack } from './stack.ts'
-import { isStackName } from '@broject/stack'
-import { loopSlug } from '@broject/loop'
+} from '../agent-connectors.ts';
+import { flag, positionals } from './args.ts';
+import { runActCommand } from './act.ts';
+import { beginLoopRun, endLoopRun, loopRunLog, reapLoopRuns } from './loop-state.ts';
+import { runSyncCommand } from './sync.ts';
+import { mergedBranches, stackMemberFor, stackTip, syncStack } from './stack.ts';
+import { isStackName } from '@broject/stack';
+import { loopSlug } from '@broject/loop';
 import {
   defaultBranchName,
   parseWorktreePorcelain,
@@ -154,7 +151,7 @@ import {
   stackPushLockPath,
   worktreePathFor,
   type LitterReap,
-} from './work.ts'
+} from './work.ts';
 import {
   claimUpTo,
   classify,
@@ -162,98 +159,99 @@ import {
   nextScope,
   readyBeads,
   type ReadyBead,
-} from './next.ts'
-import type { NextPlan } from './next-plan.ts'
-import { processesRootedIn } from './proc-owner.ts'
-import { rigNext } from './rig-next.ts'
-import { MIN_INTERVAL_SEC } from './drive-config.ts'
+} from './next.ts';
+import type { NextPlan } from './next-plan.ts';
+import { processesRootedIn } from './proc-owner.ts';
+import { rigNext } from './rig-next.ts';
+import { MIN_INTERVAL_SEC } from './drive-config.ts';
 
 interface Ctx {
   /** Review facade bound to the main checkout — host calls follow the
    *  repo, not the caller's cwd. `repo` is its 'owner/name'. */
-  rev: ReviewFacade
+  rev: ReviewFacade;
   /** The serving tasks backend — beads by default, a pinned connector
    *  (`connectors.tasks`) otherwise. All bead mutations go through it. */
-  tasks: TaskStore
+  tasks: TaskStore;
   /** Resolved tasks connector name — beads-only tails (BEADS_DIR,
    *  molecule provenance) engage only on 'beads'. */
-  backend: string
-  repo: string
-  root: string
-  cfg: LoopConfig
+  backend: string;
+  repo: string;
+  root: string;
+  cfg: LoopConfig;
   /** The act gate's own section — service passes share the one read. */
-  act: ReturnType<typeof loadBroConfig>['act']
+  act: ReturnType<typeof loadBroConfig>['act'];
   /** The shared gate-state feed — every member's service tick reads it,
    *  so loop's own polls plus watch/drive/act-wait passes share one
    *  fetch per PR per TTL window (bro-0tcrl). Null outside a repo. */
-  stateCache: PrStateCache | null
+  stateCache: PrStateCache | null;
   /** The template `expandAgentCmd` runs — `loop.agent`/`--agent`, or a
    *  cli provider's `command` when the provider lane resolved one. For an
    *  acp (argv) worker this field is inert — the spawn never expands it. */
-  agent: string
+  agent: string;
   /** The resolved spawn lane when routing is off (or the flag-tier pin
    *  when it's on) — `resolveBeadLane` re-resolves per bead. */
-  lane: LoopLane
+  lane: LoopLane;
   /** The spawn env config — `fleet.routing`/`providers` for per-bead
    *  class resolution (spec bro-1x7p). */
-  env: AgentConnectorEnv
+  env: AgentConnectorEnv;
   /** The invocation's lane picks — per-bead resolution merges them
    *  above the routed chain exactly like `bro agents up`. */
-  sel: LoopLaneSel
+  sel: LoopLaneSel;
   /** `fleet.routing` declared AND not bypassed by a template --agent —
    *  each claimed bead resolves `class:` label → `default` → chain
    *  head provider. Flag picks (`--provider`/`--profile`/`--agent
    *  <name>`) still outrank the table piecewise. */
-  routing: boolean
-  intervalS: number
-  json: boolean
+  routing: boolean;
+  intervalS: number;
+  json: boolean;
   /** Declared label scope — `bro loop --label debt,ui` only claims
    *  beads carrying one of these labels; the rest of the shared queue
    *  stays untouched. */
-  selection: Pick<NextPlan, 'filters' | 'gates' | 'order'>
+  selection: Pick<NextPlan, 'filters' | 'gates' | 'order'>;
   /** The beads dir the loop's task store resolves to — pinned into
    *  agent and bootstrap env as BEADS_DIR so worktree `bd` writes reach
    *  it. Undefined on a non-beads backend: nothing to pin. */
-  beadsDir?: string
+  beadsDir?: string;
   /** The agents facade connector workers spawn through (spec
    *  bro-zpa93) — the `bro agents up` path: detached sh -c, claim under
    *  the registry lock, .exit record in <git-common>/bro/agents/.
    *  Undefined only when beadsDir is — the registry's claim plane needs
    *  a real store to pin against, so the legacy awaited spawn keeps the
    *  serial semantics there. */
-  agents?: AgentConnector
+  agents?: AgentConnector;
   /** `bro loop --stack <name>` — each claimed bead becomes a member of
    *  the named stack: branch stack/<name>/<n>-<slug> based on the tip,
    *  PR targeting the member below. */
-  stack?: string
+  stack?: string;
   /** Cleanup failures collected during the run — the end-of-run audit
    *  prints them again so a tail never dies in a scrollback line. */
-  tails: string[]
+  tails: string[];
   /** Liveness — the stage the run is suspended on. The heartbeat names
    *  it every tick; the mid-run exit audit names it once (spec
    *  bro-snga4). A silent death becomes a named death either way. */
-  stage: string
+  stage: string;
   /** The bead currently in play — undefined between items so a death
    *  outside an item notes nothing stale. */
-  bead?: string
+  bead?: string;
   /** The tracker projection target — the review-host connector's task
    *  surface when it offers `publish` and isn't the serving store
    *  itself (a github-backend rig's tasks already ARE issues).
    *  Undefined = no projection (spec bro-z2z7f). */
-  mirror?: TaskStore
+  mirror?: TaskStore;
   /** The projection policy — bro.config `mirror`, defaults applied. */
-  mirrorPolicy: MirrorPolicy
+  mirrorPolicy: MirrorPolicy;
   /** Spec probe for the policy's specLinked rule — the `specs` facade;
    *  a connector-less rig answers false (description links still
    *  count inside mirrorable). */
-  specHas: (id: string) => boolean
+  specHas: (id: string) => boolean;
 }
 
 /** Clickable PR ref for this repo — user-facing lines never print bare #N. */
-const prRef = (ctx: Ctx, pr: number): string => ctx.rev.prLink(ctx.repo, pr)
+const prRef = (ctx: Ctx, pr: number): string => ctx.rev.prLink(ctx.repo, pr);
 
 function usage(exitCode: ExitCode = 2): never {
-  printUsage(`Usage: bro loop [--max N] [--dry-run] [--json] [--label a,b] [--stack NAME]
+  printUsage(
+    `Usage: bro loop [--max N] [--dry-run] [--json] [--label a,b] [--stack NAME]
   --agent '<cmd {promptFile}>'   agent template (config: loop.agent) —
                                 a value naming a configured providers.<name>
                                 spawns through the provider registry instead
@@ -280,40 +278,42 @@ function usage(exitCode: ExitCode = 2): never {
                                 lead's affinity key (spec/epic/area/path),
                                 one worktree, one worker, one PR
                                 (loop.batch, 1 = solo)
-  --interval SEC                 gate poll interval, ≥0.1s (60)`, exitCode)
+  --interval SEC                 gate poll interval, ≥0.1s (60)`,
+    exitCode
+  );
 }
 
 const num = (v: string | undefined, dflt: number, min = 1, max?: number): number => {
-  if (v === undefined) return dflt
-  const n = Number(v)
+  if (v === undefined) return dflt;
+  const n = Number(v);
   if (!Number.isFinite(n) || n < min || (max !== undefined && n > max)) {
-    const range = max === undefined ? `>= ${min}` : `${min}..${max}`
-    console.error(`bro loop: invalid numeric value "${v}" (must be ${range})`)
-    process.exit(2)
+    const range = max === undefined ? `>= ${min}` : `${min}..${max}`;
+    console.error(`bro loop: invalid numeric value "${v}" (must be ${range})`);
+    process.exit(2);
   }
-  return n
-}
+  return n;
+};
 
 /** Node clamps a timer delay over 2^31-1 ms to 1 ms — a flag that becomes
  *  a raw delay needs a ceiling or an absurd value hot-loops the
  *  heartbeat/gate poll (or fires the agent timeout instantly). */
-const TIMER_MAX_MS = 2 ** 31 - 1
+const TIMER_MAX_MS = 2 ** 31 - 1;
 
 /** Progress lines — stderr under --json so stdout stays a clean
  *  event stream. */
 const say = (ctx: Pick<Ctx, 'json'>, msg: string): void => {
   if (ctx.json) {
-    console.error(msg)
+    console.error(msg);
   } else {
-    console.log(msg)
+    console.log(msg);
   }
-}
+};
 
 /** Agent commands resolve through PATH by design — bro orchestrates the
  *  operator-configured agent; a sanitized PATH would break the very
  *  binary the config names. NOSONAR lives on the spawn helpers. */
 
-type ItemResult = 'landed' | 'closed' | 'parked' | 'failed'
+type ItemResult = 'landed' | 'closed' | 'parked' | 'failed';
 
 /** The store dir the loop's own taskStore calls resolve to — the
  *  backend's `dataDir` (`bd where` for beads). Pinned into spawned envs
@@ -323,15 +323,15 @@ type ItemResult = 'landed' | 'closed' | 'parked' | 'failed'
  *  with the worktree and the bead re-surfaces phantom-open in main. */
 export function resolveBeadsDir(root: string, warn?: (msg: string) => void): string | undefined {
   const fail = (why: string): undefined => {
-    warn?.(`loop: store data-dir ${why} — agents run unpinned, BEADS_DIR not set`)
-    return undefined
-  }
+    warn?.(`loop: store data-dir ${why} — agents run unpinned, BEADS_DIR not set`);
+    return undefined;
+  };
   try {
-    const store = facade('tasks', { dir: root }, { prefer: loadBroConfig(root).connectors })
-    const dir = store.dataDir?.()
-    return dir ?? fail('returned no path')
+    const store = facade('tasks', { dir: root }, { prefer: loadBroConfig(root).connectors });
+    const dir = store.dataDir?.();
+    return dir ?? fail('returned no path');
   } catch (err) {
-    return fail(err instanceof Error ? err.message : String(err))
+    return fail(err instanceof Error ? err.message : String(err));
   }
 }
 
@@ -341,7 +341,7 @@ export function resolveBeadsDir(root: string, warn?: (msg: string) => void): str
  *  and ambient copies are stripped so a parent worker's badge can't
  *  bleed into the child's commits (bro-fzot). */
 function agentEnv(ctx: Ctx, extra: Record<string, string>): NodeJS.ProcessEnv {
-  const env = { ...process.env }
+  const env = { ...process.env };
   for (const k of [
     'BRO_AGENT',
     'BRO_AGENT_PROVIDER',
@@ -351,47 +351,46 @@ function agentEnv(ctx: Ctx, extra: Record<string, string>): NodeJS.ProcessEnv {
     'BRO_MOL_ID',
     BATCH_MARKER_ENV,
   ]) {
-    delete env[k]
+    delete env[k];
   }
   return {
     ...env,
     ...(ctx.beadsDir ? { BEADS_DIR: ctx.beadsDir } : {}),
     ...extra,
-  }
+  };
 }
 
 /** The command the template arm expands for a lane — a cli provider's
  *  `command` substitutes for the configured template; argv workers never
  *  reach it. */
 const laneCommand = (ctx: Ctx, lane: LoopLane): string =>
-  lane.worker?.kind === 'template' ? lane.worker.command : ctx.agent
+  lane.worker?.kind === 'template' ? lane.worker.command : ctx.agent;
 
 /** Commit-provenance pins for the loop's agent (bro-fzot) — the cli the
  *  effective command names (the acp worker's `cliName` on the argv lane),
  *  the provider/model lane labels, and the bead's molecule parent when
  *  the shared store can answer. */
 function provenancePins(ctx: Ctx, beadId: string, lane: LoopLane): Record<string, string> {
-  const w = lane.worker
+  const w = lane.worker;
   const pins: Record<string, string> = {
-    BRO_AGENT:
-      w?.kind === 'argv' ? (w.cliName ?? 'agent') : commandCliName(laneCommand(ctx, lane)),
-  }
+    BRO_AGENT: w?.kind === 'argv' ? (w.cliName ?? 'agent') : commandCliName(laneCommand(ctx, lane)),
+  };
   if (lane.provider !== undefined) {
-    pins.BRO_AGENT_PROVIDER = lane.provider
+    pins.BRO_AGENT_PROVIDER = lane.provider;
   }
   if (lane.model !== undefined) {
-    pins.BRO_AGENT_MODEL = lane.model
+    pins.BRO_AGENT_MODEL = lane.model;
   }
-  const mol = ctx.beadsDir !== undefined ? stepParent(ctx.beadsDir, beadId) : undefined
+  const mol = ctx.beadsDir !== undefined ? stepParent(ctx.beadsDir, beadId) : undefined;
   if (mol !== undefined) {
-    pins.BRO_MOL_ID = mol
+    pins.BRO_MOL_ID = mol;
   }
   // the fleet's marker rides on every spawn the loop owns — the raw
   // template arm included: it runs a fleet worker, and the devin plane
   // counts it as one (the template arm reserves no quota slot of its
   // own — bro-3xwvu tracks that gap)
-  pins[BATCH_MARKER_ENV] = '1'
-  return pins
+  pins[BATCH_MARKER_ENV] = '1';
+  return pins;
 }
 
 // --- the agent lane: provider registry or raw template (spec bro-c3no8) -------
@@ -399,15 +398,15 @@ function provenancePins(ctx: Ctx, beadId: string, lane: LoopLane): Record<string
 /** What a spawn runs — the provider-resolved worker when the provider
  *  lane engaged, undefined for the raw `loop.agent`/`--agent` template. */
 export interface LoopLane {
-  worker?: SpawnWorker
+  worker?: SpawnWorker;
   /** Resolved provider name + model — provenance pins and reporting
    *  (`bro agents up` prints the same pair). */
-  provider?: string
-  model?: string
+  provider?: string;
+  model?: string;
   /** The routing lane the spawn resolved to (fleet.routing class — spec
    *  bro-1x7p). Provenance like provider/model; absent on unrouted
    *  spawns (no fleet.routing declared). */
-  class?: string
+  class?: string;
 }
 
 /** Per-run lane picks — undefined means "not given" so config fields
@@ -415,12 +414,12 @@ export interface LoopLane {
  *  is the `--class` pin — the fleet.routing lane every claimed bead
  *  takes (spec bro-1x7p's explicit-request tier). */
 export interface LoopLaneSel {
-  agent?: string
-  provider?: string
-  profile?: string
-  model?: string
-  autoApprove?: boolean
-  class?: string
+  agent?: string;
+  provider?: string;
+  profile?: string;
+  model?: string;
+  autoApprove?: boolean;
+  class?: string;
 }
 
 /** Resolve which lane `bro loop` spawns through. A `--agent` value that
@@ -439,21 +438,31 @@ export async function resolveLoopLane(
   cfg: LoopConfig,
   route?: ResolvedClass
 ): Promise<LoopLane> {
-  const agentIsProvider =
-    sel.agent !== undefined && Object.hasOwn(env.providers ?? {}, sel.agent)
+  const agentIsProvider = sel.agent !== undefined && Object.hasOwn(env.providers ?? {}, sel.agent);
   if (agentIsProvider && sel.provider !== undefined && sel.provider !== sel.agent) {
     throw new SpawnError(
       `--agent '${sel.agent}' and --provider '${sel.provider}' name different providers`,
       'input'
-    )
+    );
   }
   if (sel.agent !== undefined && !agentIsProvider) {
-    return templateEscape(sel, cfg, env)
+    return templateEscape(sel, cfg, env);
   }
-  const { provider, model, autoApprove, profileSourced } = lanePicks(env, sel, cfg, route, agentIsProvider)
-  const pick = await resolveSpawnProvider(env, 'native', { provider, model, autoApprove }, pickTier(sel, agentIsProvider, profileSourced))
-  const lane = providerLaneOrEmpty(pick, model, autoApprove)
-  return route === undefined ? lane : { ...lane, class: route.class }
+  const { provider, model, autoApprove, profileSourced } = lanePicks(
+    env,
+    sel,
+    cfg,
+    route,
+    agentIsProvider
+  );
+  const pick = await resolveSpawnProvider(
+    env,
+    'native',
+    { provider, model, autoApprove },
+    pickTier(sel, agentIsProvider, profileSourced)
+  );
+  const lane = providerLaneOrEmpty(pick, model, autoApprove);
+  return route === undefined ? lane : { ...lane, class: route.class };
 }
 
 /** The pick tiers — flag > flag-named profile > routing table >
@@ -469,17 +478,24 @@ function lanePicks(
   route: ResolvedClass | undefined,
   agentIsProvider: boolean
 ): { provider?: string; model?: string; autoApprove?: boolean; profileSourced: boolean } {
-  const profileName = sel.profile ?? (cfg.profile !== '' ? cfg.profile : undefined)
-  const profile = profileName !== undefined ? fleetProfileOf(env, profileName) : undefined
-  const flagProfile = sel.profile !== undefined ? profile : undefined
-  const cfgProfile = sel.profile === undefined ? profile : undefined
+  const profileName = sel.profile ?? (cfg.profile !== '' ? cfg.profile : undefined);
+  const profile = profileName !== undefined ? fleetProfileOf(env, profileName) : undefined;
+  const flagProfile = sel.profile !== undefined ? profile : undefined;
+  const cfgProfile = sel.profile === undefined ? profile : undefined;
   const provider =
     sel.provider ??
     (agentIsProvider ? sel.agent : undefined) ??
     flagProfile?.provider ??
     route?.provider ??
     cfgProfile?.provider ??
-    (cfg.provider !== '' ? cfg.provider : undefined)
+    (cfg.provider !== '' ? cfg.provider : undefined);
+  const model =
+    sel.model ??
+    // a profile's model rides only on its own provider's lane
+    profileModelFor(flagProfile, provider) ??
+    // the chain head's model pin pairs with ITS provider only — an
+    // override provider never inherits chain[0]'s model
+    (provider !== undefined && provider === route?.provider ? route.model : undefined) ??
   const model =
     sel.model ??
     // a profile's model rides only on its own provider's lane
@@ -495,7 +511,6 @@ function lanePicks(
     autoApprove: sel.autoApprove ?? profile?.autoApprove,
     profileSourced: profile?.provider !== undefined,
   }
-
 }
 
 /** The provenance tier for the provider pick — a flag's typo is caller
@@ -507,9 +522,9 @@ function pickTier(
   profileSourced: boolean
 ): 'flag' | 'profile' | 'backend' {
   if (sel.provider !== undefined || agentIsProvider) {
-    return 'flag'
+    return 'flag';
   }
-  return profileSourced ? 'profile' : 'backend'
+  return profileSourced ? 'profile' : 'backend';
 }
 
 /** The escape hatch — a template --agent replaces the provider lane for
@@ -522,24 +537,24 @@ function templateEscape(sel: LoopLaneSel, cfg: LoopConfig, env: AgentConnectorEn
     sel.model !== undefined ? '--model' : undefined,
     sel.class !== undefined ? '--class' : undefined,
     sel.autoApprove === true ? '--auto-approve' : undefined,
-  ].filter((f): f is string => f !== undefined)
+  ].filter((f): f is string => f !== undefined);
   if (extras.length > 0) {
     throw new SpawnError(
       `${extras.join(', ')} pick a provider lane, but --agent '${sel.agent}' is a ` +
         'raw template — name the provider instead (--agent <name>)',
       'input'
-    )
+    );
   }
   if (cfg.provider !== '' || cfg.profile !== '' || cfg.model !== '') {
     console.error(
       'loop: --agent template bypasses the configured provider lane ' +
         '(loop.provider/loop.profile/loop.model)'
-    )
+    );
   }
   if (env.fleet?.routing !== undefined && Object.keys(env.fleet.routing).length > 0) {
-    console.error('loop: --agent template bypasses fleet.routing — every bead runs the template')
+    console.error('loop: --agent template bypasses fleet.routing — every bead runs the template');
   }
-  return {}
+  return {};
 }
 
 /** A pick without a worker is the raw template lane — but only when
@@ -552,16 +567,16 @@ function providerLaneOrEmpty(
   autoApprove: boolean | undefined
 ): LoopLane {
   if (pick.worker !== undefined) {
-    return { worker: pick.worker, provider: pick.provider, model: pick.model }
+    return { worker: pick.worker, provider: pick.provider, model: pick.model };
   }
   if (model !== undefined || autoApprove === true) {
     throw new SpawnError(
       '--model/--auto-approve (or loop.model) ride the provider lane — name a ' +
         'provider via --provider, --agent <name>, or loop.provider',
       'config'
-    )
+    );
   }
-  return {}
+  return {};
 }
 
 // --- per-bead class routing (spec bro-1x7p / bead bro-zmned) ---------------------
@@ -570,9 +585,9 @@ function providerLaneOrEmpty(
  *  ReadyBead.labels come from the claim read (`bd ready --json` rows
  *  carry them); the parse matches stepClassInfo's exactly. */
 function classLabelOf(bead: ReadyBead): string | undefined {
-  const hit = bead.labels?.find((l) => l.startsWith(CLASS_LABEL_PREFIX))
-  const name = hit === undefined ? undefined : hit.slice(CLASS_LABEL_PREFIX.length).trim()
-  return name === '' ? undefined : name
+  const hit = bead.labels?.find(l => l.startsWith(CLASS_LABEL_PREFIX));
+  const name = hit === undefined ? undefined : hit.slice(CLASS_LABEL_PREFIX.length).trim();
+  return name === '' ? undefined : name;
 }
 
 /** The routing inputs one bead carries — `class:` label, priority
@@ -590,16 +605,16 @@ function beadClassInfo(
     priority: bead.priority,
     title: bead.title,
     description: bead.description,
-  }
-  const router = ctx.env.fleet?.router
+  };
+  const router = ctx.env.fleet?.router;
   const routerMayFire =
     routerEnabled &&
     router !== undefined &&
     router.mode !== 'off' &&
     ctx.sel.class === undefined &&
     info.label === undefined &&
-    ctx.beadsDir !== undefined
-  return routerMayFire ? { ...info, ...stepClassInfo(ctx.beadsDir!, bead.id) } : info
+    ctx.beadsDir !== undefined;
+  return routerMayFire ? { ...info, ...stepClassInfo(ctx.beadsDir!, bead.id) } : info;
 }
 
 /** One claimed bead's spawn lane — fleet.routing resolves its class
@@ -622,9 +637,9 @@ async function resolveBeadLane(
   opts: { router?: boolean } = {}
 ): Promise<LoopLane> {
   if (!ctx.routing) {
-    return ctx.lane
+    return ctx.lane;
   }
-  const info = beadClassInfo(ctx, bead, opts.router !== false)
+  const info = beadClassInfo(ctx, bead, opts.router !== false);
   const routed = routeStepClass(
     ctx.env.fleet,
     ctx.env.providers ?? {},
@@ -632,38 +647,38 @@ async function resolveBeadLane(
     bead.id,
     ctx.sel.class,
     info
-  )
+  );
   const route =
     opts.router === false || ctx.sel.class !== undefined
       ? routed
-      : await applyFleetRouter(ctx.root, ctx.env, bead.id, info, routed)
-  return resolveLoopLane(ctx.env, ctx.sel, ctx.cfg, route)
+      : await applyFleetRouter(ctx.root, ctx.env, bead.id, info, routed);
+  return resolveLoopLane(ctx.env, ctx.sel, ctx.cfg, route);
 }
 
 /** Dry-run rendering for an argv worker — single-quotes only the args
  *  that need it, so the printed line stays readable. */
 const shRender = (s: string): string =>
-  /[\s'"\\]/.test(s) ? `'${s.replaceAll("'", String.raw`'\''`)}'` : s
+  /[\s'"\\]/.test(s) ? `'${s.replaceAll("'", String.raw`'\''`)}'` : s;
 
 /** Fresh sibling worktree on loop/<id> off origin/main (falls back to
  *  main/HEAD when no origin) — or off `base` when a stack already picked
  *  the fork point. An existing dir is reused as-is. */
 function ensureWorktree(root: string, branch: string, dir: string, base?: string): void {
   if (existsSync(dir)) {
-    return // a previous run's worktree survived — reuse it
+    return; // a previous run's worktree survived — reuse it
   }
   if (base === undefined) {
-    gitTry(['-C', root, 'fetch', 'origin', 'main', '--quiet'])
+    gitTry(['-C', root, 'fetch', 'origin', 'main', '--quiet']);
     base = ['origin/main', 'main', 'HEAD'].find(
-      (r) => gitTry(['-C', root, 'rev-parse', '--verify', '--quiet', r]).code === 0
-    )
+      r => gitTry(['-C', root, 'rev-parse', '--verify', '--quiet', r]).code === 0
+    );
   }
-  const add = gitTry(['-C', root, 'worktree', 'add', '-b', branch, dir, base ?? 'HEAD'])
+  const add = gitTry(['-C', root, 'worktree', 'add', '-b', branch, dir, base ?? 'HEAD']);
   if (add.code !== 0) {
     // branch may already exist from a previous run — attach to it
-    const retry = gitTry(['-C', root, 'worktree', 'add', dir, branch])
+    const retry = gitTry(['-C', root, 'worktree', 'add', dir, branch]);
     if (retry.code !== 0) {
-      throw new Error(`git worktree add failed: ${retry.err || add.err}`)
+      throw new Error(`git worktree add failed: ${retry.err || add.err}`);
     }
   }
 }
@@ -699,8 +714,8 @@ function spawnAgent(
   promptFile: string,
   dir: string
 ): Promise<number | null> {
-  return new Promise((resolve) => {
-    const leadId = beadIds[0]!
+  return new Promise(resolve => {
+    const leadId = beadIds[0]!;
     const env = agentEnv(ctx, {
       // BRO_BEAD_ID stays the lead for compatibility — batch work orders
       // read the whole clump off BRO_BEAD_IDS
@@ -710,16 +725,16 @@ function spawnAgent(
       BRO_PROMPT_FILE: promptFile,
       ...provenancePins(ctx, leadId, lane),
       ...(lane.class === undefined ? {} : { BRO_AGENT_CLASS: lane.class }),
-    })
-    const slug = loopSlug(leadId)
-    const log = loopRunLog(ctx.root, slug)
-    let logFd: number | null = null
+    });
+    const slug = loopSlug(leadId);
+    const log = loopRunLog(ctx.root, slug);
+    let logFd: number | null = null;
     if (log !== null) {
       try {
-        mkdirSync(dirname(log), { recursive: true })
-        logFd = openSync(log, 'a')
+        mkdirPrivateSync(dirname(log));
+        logFd = openPrivateAppendSync(log);
       } catch {
-        logFd = null
+        logFd = null;
       }
     }
     const opts = {
@@ -730,18 +745,18 @@ function spawnAgent(
           ? (['inherit', logFd, logFd] as Array<'inherit' | number>)
           : (['inherit', ctx.json ? 2 : 'inherit', 'inherit'] as Array<'inherit' | number>),
       detached: true,
-    }
-    const w = lane.worker
+    };
+    const w = lane.worker;
     const child =
       w?.kind === 'argv'
         ? // the same `"$@"` positional exec the native backend builds —
           // argv workers are headless by construction (acp); sh resolves
           // argv[0] ('bro'/'npx') on PATH the way the backend does
           spawn('sh', ['-c', 'exec "$@"', 'loop-agent', ...w.argv, promptFile], opts) // NOSONAR — argv[0] resolves on PATH by design, same as the backend's spawn
-        : spawn('sh', ['-c', expandAgentCmd(laneCommand(ctx, lane), promptFile)], opts) // NOSONAR — operator-configured agent command
+        : spawn('sh', ['-c', expandAgentCmd(laneCommand(ctx, lane), promptFile)], opts); // NOSONAR — operator-configured agent command
     if (logFd !== null) {
       // the child holds its own dup — our copy is spent
-      closeSync(logFd)
+      closeSync(logFd);
     }
     if (child.pid !== undefined) {
       beginLoopRun(ctx.root, {
@@ -753,11 +768,11 @@ function spawnAgent(
         startedAt: new Date().toISOString(),
         worktree: dir,
         log: log ?? '',
-      })
-      const logNote = log === null ? '' : ` — log ${log}`
-      say(ctx, `loop: agent ${beadIds.join(', ')} on pid ${child.pid}${logNote}`)
+      });
+      const logNote = log === null ? '' : ` — log ${log}`;
+      say(ctx, `loop: agent ${beadIds.join(', ')} on pid ${child.pid}${logNote}`);
     }
-    ctx.stage = `worker pid=${child.pid ?? '?'}`
+    ctx.stage = `worker pid=${child.pid ?? '?'}`;
     const settle = (code: number | null): void => {
       // custody returns to the loop process — the worker is gone but the
       // claim isn't: findPr and the member's watchBegin still stand
@@ -773,22 +788,22 @@ function spawnAgent(
         startedAt: new Date().toISOString(),
         worktree: dir,
         log: log ?? '',
-      })
-      resolve(code)
-    }
-    child.on('error', (err) => {
-      console.error(`loop: agent spawn failed — ${err.message}`)
-      settle(null)
-    })
+      });
+      resolve(code);
+    };
+    child.on('error', err => {
+      console.error(`loop: agent spawn failed — ${err.message}`);
+      settle(null);
+    });
     child.on('exit', (code, signal) => {
       if (code === null) {
-        console.error(`loop: agent died on signal ${signal ?? '?'}`)
-        settle(null)
-        return
+        console.error(`loop: agent died on signal ${signal ?? '?'}`);
+        settle(null);
+        return;
       }
-      settle(code)
-    })
-  })
+      settle(code);
+    });
+  });
 }
 
 /** spec.env for the registry spawn — the loop's ambient pins minus
@@ -797,10 +812,8 @@ function spawnAgent(
  *  anyway). Only the clump extras are loop-private. */
 function specEnv(ctx: Ctx, extra: Record<string, string>): Record<string, string> {
   return Object.fromEntries(
-    Object.entries(agentEnv(ctx, extra)).filter(
-      (e): e is [string, string] => e[1] !== undefined
-    )
-  )
+    Object.entries(agentEnv(ctx, extra)).filter((e): e is [string, string] => e[1] !== undefined)
+  );
 }
 
 /** The registry spawn (spec bro-zpa93) — `bro agents up` semantics on
@@ -812,14 +825,14 @@ function specEnv(ctx: Ctx, extra: Record<string, string>): Record<string, string
  *  poll — the tick never awaits the run. Sets `m.worker`; a SpawnError
  *  is the caller's settle decision (cap → hold, conflict → park). */
 async function spawnWorker(ctx: Ctx, m: GateMember, prompt: string, lane: LoopLane): Promise<void> {
-  const lead = m.beads[0]!
+  const lead = m.beads[0]!;
   const info = await ctx.agents!.spawn({
     molStep: lead.id,
     repoRoot: m.item.worktreeDir,
     beadsDir: ctx.beadsDir!,
     prompt,
     env: specEnv(ctx, {
-      BRO_BEAD_IDS: m.beads.map((b) => b.id).join(','),
+      BRO_BEAD_IDS: m.beads.map(b => b.id).join(','),
       BRO_BEAD_TITLE: clumpTitle(m.beads),
       // the fleet's own budget must see this worker — the marker rides
       // on every loop spawn, root bead or not (spec bro-9h86l)
@@ -834,13 +847,13 @@ async function spawnWorker(ctx: Ctx, m: GateMember, prompt: string, lane: LoopLa
     // re-reading loop.agent config — a --agent flag override would
     // otherwise be silently ignored
     worker: lane.worker ?? { kind: 'template', command: laneCommand(ctx, lane) },
-  })
+  });
   m.worker = {
     agentId: info.id,
     spawnedAt: info.spawnedAt,
     spawnedMs: Date.now(),
     pid: info.pid,
-  }
+  };
   // the run record stays and rides the worker (bro-wg896): custody of
   // the CLAIM transfers to the registry entry at spawn, but retiring
   // the record here left `bro watch`/`bro status` blind for the
@@ -848,33 +861,50 @@ async function spawnWorker(ctx: Ctx, m: GateMember, prompt: string, lane: LoopLa
   // check-ins read the live run (and silence keeps meaning silence).
   // A pid-less remote worker keeps the loop as the owner on record —
   // the supervisor is the live party polling its .exit.
-  const workerPid = info.pid ?? process.pid
+  const workerPid = info.pid ?? process.pid;
   beginLoopRun(ctx.root, {
     beadId: lead.id,
-    beadIds: m.beads.map((b) => b.id),
+    beadIds: m.beads.map(b => b.id),
     slug: loopSlug(lead.id),
     pid: workerPid,
     pidStart: procStat(workerPid)?.start,
     startedAt: new Date().toISOString(),
     worktree: m.item.worktreeDir,
     log: info.log ?? '',
-  })
-  say(
-    ctx,
-    `loop: agent ${m.beads.map((b) => b.id).join(', ')} → ${info.id} pid ${info.pid ?? '?'}`
-  )
-  ctx.stage = `worker ${info.id} pid=${info.pid ?? '?'}`
+  });
+  say(ctx, `loop: agent ${m.beads.map(b => b.id).join(', ')} → ${info.id} pid ${info.pid ?? '?'}`);
+  ctx.stage = `worker ${info.id} pid=${info.pid ?? '?'}`;
 }
 
 /** `<git-common>/bro/agents/<id>.log` for a registry worker — the run
  *  record's silence signal on the detached path. '' when the registry
  *  home can't be named (the record falls back to its own stamp). */
 function workerLogPath(ctx: Ctx, agentId: string): string {
-  const reg = agentRegistryPath(ctx.root)
+  const reg = agentRegistryPath(ctx.root);
   if (reg === null || basename(agentId) !== agentId) {
-    return ''
+    return '';
   }
-  return join(dirname(reg), 'agents', `${agentId}.log`)
+  return join(dirname(reg), 'agents', `${agentId}.log`);
+}
+
+/** The classified death recorded on a bead's own registry entry — the
+ *  cause/resetAt fallback when the status() AgentInfo projection came
+ *  back thin (or the connector never projected them). One local JSON
+ *  read on a terminal settle; a corrupt registry answers undefined,
+ *  never sinks the verdict. */
+function entryReset(ctx: Ctx, beadId: string): { cause?: string; resetAt?: string } | undefined {
+  try {
+    const e = readAgentRegistry(ctx.root)[beadId];
+    if (e === undefined) {
+      return undefined;
+    }
+    return {
+      cause: isAgentCause(e.cause) ? e.cause : undefined,
+      resetAt: typeof e.resetAt === 'string' && e.resetAt !== '' ? e.resetAt : undefined,
+    };
+  } catch {
+    return undefined;
+  }
 }
 
 /** The pending worker's settled exit — the .exit record a detached
@@ -884,79 +914,101 @@ function workerLogPath(ctx: Ctx, agentId: string): string {
  *  A worker dead without a record (SIGKILL, spawn failure) falls back
  *  to the log's last write, then now. */
 function workerExit(ctx: Ctx, w: WorkerRef): { code: number | null; at: number } {
-  const log = workerLogPath(ctx, w.agentId)
+  const log = workerLogPath(ctx, w.agentId);
   if (log !== '') {
-    const home = dirname(log)
+    const home = dirname(log);
     try {
-      const f = join(home, `${w.agentId}.exit`)
-      const n = Number(readFileSync(f, 'utf8').trim())
-      return { code: Number.isInteger(n) ? n : null, at: statSync(f).mtimeMs }
+      const f = join(home, `${w.agentId}.exit`);
+      const n = Number(readFileSync(f, 'utf8').trim());
+      return { code: Number.isInteger(n) ? n : null, at: statSync(f).mtimeMs };
     } catch {
       // no exit record — the log clock is the next-best death stamp
     }
     try {
-      return { code: null, at: statSync(log).mtimeMs }
+      return { code: null, at: statSync(log).mtimeMs };
     } catch {
       // no log either — detection time is all that remains
     }
   }
-  return { code: null, at: Date.now() }
+  return { code: null, at: Date.now() };
+}
+
+/** The provider wall a 'cap' refusal may name — the derived-registry
+ *  read (spec bro-1x7p) consulted only AFTER a refusal proved something
+ *  blocked the spawn, so the happy path never pays for it. A template
+ *  lane carries no provider identity a wall can be attributed to, and
+ *  a broken wall read must not sink a settle — both answer undefined
+ *  and fall back to generic pressure handling. */
+function laneWall(ctx: Ctx, provider: string | undefined): ProviderWall | undefined {
+  if (provider === undefined) {
+    return undefined;
+  }
+  try {
+    return providerWallsFor(ctx.root).find(w => w.provider === provider);
+  } catch {
+    return undefined;
+  }
 }
 
 /** A refused registry spawn settles the push without a worker. A full
  *  fleet ('cap') holds the claim for the next tick — fleet pressure is
  *  transient, and a hot re-pick would burn the interval against the
- *  same wall. A 'conflict' (live agent, foreign claim, respawn block)
- *  parks WITHOUT a note — the bead's owner is not this run. Anything
- *  else parks with the error named: the claim releases into the snooze
- *  rather than an instant re-queue into the same refusal. Member claims
- *  release either way; on a conflict the LEAD's claim plane is
- *  contested, so only the clump members this run claimed are
- *  reopened. */
+ *  same wall. When the 'cap' IS a provider wall (batchWallRefusal) the
+ *  wall's own clock rules (bro-36bhc, the convoy-run blockedDecision
+ *  contract): `rate_limited` with a provider reset holds pushes UNTIL
+ *  the reset — no claim churn per interval — while a `quota` or
+ *  no-reset wall parks loud instead of churning claims against a wall
+ *  with no advertised end. A 'conflict' (live agent, foreign claim,
+ *  respawn block) parks WITHOUT a note — the bead's owner is not this
+ *  run. Anything else parks with the error named: the claim releases
+ *  into the snooze rather than an instant re-queue into the same
+ *  refusal. Member claims release either way; on a conflict the LEAD's
+ *  claim plane is contested, so only the clump members this run
+ *  claimed are reopened. */
 function settleSpawnRefusal(ctx: Ctx, m: GateMember, err: unknown): PushOutcome {
-  const msg = err instanceof Error ? err.message : String(err)
+  const msg = err instanceof Error ? err.message : String(err);
   // every refusal path releases this run's claims — the claim-time
   // custody record dies with them (bro-ho09d)
-  endLoopRun(ctx.root, loopSlug(m.beads[0]!.id))
+  endLoopRun(ctx.root, loopSlug(m.beads[0]!.id));
   if (err instanceof SpawnError && err.kind === 'cap') {
-    // a cap that IS a derived provider wall is not transient pressure
-    // (spec bro-36bhc): a rate wall with a reset holds pushes until the
-    // wall's own clock — churning claim→worktree→refuse every interval
-    // burns the tick against the same wall; a quota or indefinite wall
-    // is the bead's "park and report", never a churn
-    const wall = wallForLane(ctx, m.lane)
+    const wall = laneWall(ctx, m.lane.provider);
     if (wall !== undefined) {
-      const until = wall.until === undefined ? Number.NaN : Date.parse(wall.until)
-      if (wall.cause === 'rate_limited' && Number.isFinite(until)) {
+      const untilMs = wall.until === undefined ? Number.NaN : Date.parse(wall.until);
+      if (Number.isFinite(untilMs) && untilMs > Date.now()) {
+        // the batch lane waits the reset out — the claims release so
+        // the pick re-takes them when the wall lifts (or re-refuses
+        // into the same hold if a fresh death re-forms it)
         for (const b of openBeads(ctx, m.beads)) {
-          reopenBead(ctx, b.id)
+          reopenBead(ctx, b.id);
         }
-        say(ctx, `loop: ${wallText(wall)} — ${msg}; pushes hold til the reset`)
-        return { kind: 'hold', why: msg, until }
+        say(ctx, `loop: ${wallText(wall)} — pushes hold until the reset`);
+        return { kind: 'hold', why: msg, untilMs };
       }
+      // a wall with no advertised end is reported, not waited into —
+      // park once, never churn (the convoy 'parked' verdict)
       parkBeads(
         ctx,
         m.beads,
-        `loop: spawn refused on ${wallText(wall)} — worktree ${m.item.worktreeDir}`
-      )
-      say(ctx, `loop: ${m.beads[0]!.id} spawn refused — ${msg}`)
-      return { kind: 'done', result: 'parked' }
+        `loop: ${wallText(wall)} — no advertised end; worktree ${m.item.worktreeDir}`
+      );
+      say(ctx, `loop: ${m.beads[0]!.id} parked — ${wallText(wall)}`);
+      return { kind: 'done', result: 'parked' };
     }
     for (const b of openBeads(ctx, m.beads)) {
-      reopenBead(ctx, b.id)
+      reopenBead(ctx, b.id);
     }
-    say(ctx, `loop: fleet full — ${msg}; pushes hold for the next pass`)
-    return { kind: 'hold', why: msg }
+    say(ctx, `loop: fleet full — ${msg}; pushes hold for the next pass`);
+    return { kind: 'hold', why: msg };
   }
   if (err instanceof SpawnError && err.kind === 'conflict') {
     for (const b of openBeads(ctx, m.beads.slice(1))) {
-      reopenBead(ctx, b.id)
+      reopenBead(ctx, b.id);
     }
   } else {
-    parkBeads(ctx, m.beads, `loop: agent spawn refused — ${msg} — worktree ${m.item.worktreeDir}`)
+    parkBeads(ctx, m.beads, `loop: agent spawn refused — ${msg} — worktree ${m.item.worktreeDir}`);
   }
-  say(ctx, `loop: ${m.beads[0]!.id} spawn refused — ${msg}`)
-  return { kind: 'done', result: 'parked' }
+  say(ctx, `loop: ${m.beads[0]!.id} spawn refused — ${msg}`);
+  return { kind: 'done', result: 'parked' };
 }
 
 /** PR number opened from this worktree's branch — null when none,
@@ -964,17 +1016,17 @@ function settleSpawnRefusal(ctx: Ctx, m: GateMember, err: unknown): PushOutcome 
  *  lookup must not reopen a bead whose PR may still exist). */
 function findPr(ctx: Ctx, branch: string): number | null | 'lookup-error' {
   try {
-    return ctx.rev.prsForBranch(branch)[0] ?? null
+    return ctx.rev.prsForBranch(branch)[0] ?? null;
   } catch {
-    return 'lookup-error'
+    return 'lookup-error';
   }
 }
 
 function noteBead(tasks: TaskStore, id: string, note: string): void {
   try {
-    tasks.update(id, { notes: note })
+    tasks.update(id, { notes: note });
   } catch {
-    console.error(`loop: could not note ${id} — ${note}`)
+    console.error(`loop: could not note ${id} — ${note}`);
   }
 }
 
@@ -990,18 +1042,23 @@ function stampProjection(ctx: Ctx, beads: ReadyBead[], pr: number): void {
       mirror: ctx.mirror,
       hasSpec: ctx.specHas,
       policy: ctx.mirrorPolicy,
-      say: (m) => say(ctx, `loop: ${m}`),
+      say: m => say(ctx, `loop: ${m}`),
     },
-    beads.map((b) => b.id)
-  )
+    beads.map(b => b.id)
+  );
   if (refs.length === 0 || ctx.rev.linkCloses === undefined) {
-    return
+    return;
   }
   try {
-    ctx.rev.linkCloses({ repo: ctx.repo, pr }, refs)
-    say(ctx, `loop: ${prRef(ctx, pr)} wired Fixes ${refs.map((r) => `#${r}`).join(', ')}`)
+    ctx.rev.linkCloses({ repo: ctx.repo, pr }, refs);
+    say(
+      ctx,
+      `loop: ${prRef(ctx, pr)} wired Fixes ${refs
+        .map(r => (/^\d+$/.test(r) ? issueLink(ctx.repo, Number(r)) : r))
+        .join(', ')}`
+    );
   } catch (err) {
-    console.error(`loop: ${prRef(ctx, pr)} Fixes wiring failed — ${String(err)}`)
+    console.error(`loop: ${prRef(ctx, pr)} Fixes wiring failed — ${String(err)}`);
   }
 }
 
@@ -1013,9 +1070,9 @@ function stampProjection(ctx: Ctx, beads: ReadyBead[], pr: number): void {
  *  skips the label half, a failed write warns, and the gate stack arms
  *  either way. */
 function stampLoopPr(ctx: Ctx, beads: ReadyBead[], item: LoopItem, pr: number): void {
-  let draft = false
+  let draft = false;
   try {
-    draft = ctx.rev.prMeta({ repo: ctx.repo, pr }).isDraft
+    draft = ctx.rev.prMeta({ repo: ctx.repo, pr }).isDraft;
   } catch {
     // a failed probe stamps managed — the loop's honest claim for the
     // PR it just pushed (the gate still blocks a draft below)
@@ -1027,29 +1084,30 @@ function stampLoopPr(ctx: Ctx, beads: ReadyBead[], item: LoopItem, pr: number): 
       ownership: draft ? 'review' : 'managed',
       meta: {
         managed: !draft,
-        bead: beads.map((b) => b.id).join(','),
+        bead: beads.map(b => b.id).join(','),
         mode: 'loop',
         run: item.branch,
       },
     },
-    (msg) => console.error(`loop: ${msg}`)
-  )
+    msg => console.error(`loop: ${msg}`)
+  );
 }
-
 
 /** Best-effort return of a bead to the open queue — the claim's
  *  release transition lands in the lifecycle journal beside it. */
 function reopenBead(ctx: Ctx, id: string): void {
   try {
-    ctx.tasks.reopen(id)
+    ctx.tasks.reopen(id);
     emitLifecycle(ctx.root, {
       kind: 'release',
       bead: id,
       from: 'in_progress',
       to: 'open',
       detail: { via: 'loop' },
-    })
-  } catch { /* best-effort unclaim */ }
+    });
+  } catch {
+    /* best-effort unclaim */
+  }
 }
 
 /** The park settle (spec bro-hl22w): the site note names the wall, then
@@ -1064,24 +1122,37 @@ function reopenBead(ctx: Ctx, id: string): void {
  *  `parkedWakeMin` 0 = the indefinite icebox. The worktree stays: the
  *  woken claim's planItemAndWorktree reuses it. A store that rejects
  *  the write (down, or a backend with no defer concept) keeps the old
- *  claim-hold — best-effort, never a crash. */
-function parkBeads(ctx: Ctx, beads: ReadyBead[], msg: string): void {
+ *  claim-hold — best-effort, never a crash.
+ *
+ *  `wakeAtMs` overrides the cooldown with an absolute wake stamp — a
+ *  provider-reported rate-limit reset is exactly that: the park exists
+ *  to wait the wall out, so the snooze IS the reset (bro-36bhc — the
+ *  convoy-run wait contract; a 2h cooldown would outlive a 15-minute
+ *  wall and undershoot a 6-hour one). A past/stale stamp collapses to
+ *  an immediate wake. */
+function parkBeads(ctx: Ctx, beads: ReadyBead[], msg: string, wakeAtMs?: number): void {
   // parkedWakeMin has no natural ceiling — an absurd value overflows the
   // clock into a toISOString() RangeError BEFORE the per-bead catch,
   // aborting the park and leaving claims in progress. Past a decade the
   // operator's intent is the icebox anyway, so clamp the snooze there.
-  const PARKED_WAKE_CAP_MIN = 10 * 365 * 24 * 60
-  const min = Math.min(ctx.cfg.parkedWakeMin, PARKED_WAKE_CAP_MIN)
+  const PARKED_WAKE_CAP_MIN = 10 * 365 * 24 * 60;
+  const wakeCapMs = Date.now() + PARKED_WAKE_CAP_MIN * 60_000;
+  const min = Math.min(ctx.cfg.parkedWakeMin, PARKED_WAKE_CAP_MIN);
   const patch: Record<string, string | number> =
-    min > 0
-      ? { defer: new Date(Date.now() + min * 60_000).toISOString(), assignee: '' }
-      : { status: 'deferred', assignee: '' }
+    wakeAtMs !== undefined && Number.isFinite(wakeAtMs)
+      ? {
+          defer: new Date(Math.min(Math.max(wakeAtMs, Date.now()), wakeCapMs)).toISOString(),
+          assignee: '',
+        }
+      : min > 0
+        ? { defer: new Date(Date.now() + min * 60_000).toISOString(), assignee: '' }
+        : { status: 'deferred', assignee: '' };
   for (const b of openBeads(ctx, beads)) {
-    noteBead(ctx.tasks, b.id, msg)
+    noteBead(ctx.tasks, b.id, msg);
     try {
-      ctx.tasks.update(b.id, patch)
+      ctx.tasks.update(b.id, patch);
     } catch (err) {
-      console.error(`loop: could not defer ${b.id} — ${String(err)}`)
+      console.error(`loop: could not defer ${b.id} — ${String(err)}`);
     }
   }
 }
@@ -1090,22 +1161,22 @@ function parkBeads(ctx: Ctx, beads: ReadyBead[], msg: string): void {
  *  blip or a missing row answers 'unknown' for that member, so callers
  *  keep the still-open contract and a blip never masks work. */
 function beadStatuses(ctx: Ctx, beads: ReadyBead[]): Map<string, string> {
-  const out = new Map<string, string>()
-  let found: Map<string, string>
+  const out = new Map<string, string>();
+  let found: Map<string, string>;
   try {
     found = new Map(
       getTasks(
         ctx.tasks,
-        beads.map((b) => b.id)
-      ).map((r) => [r.id, r.status ?? 'unknown'])
-    )
+        beads.map(b => b.id)
+      ).map(r => [r.id, r.status ?? 'unknown'])
+    );
   } catch {
-    found = new Map()
+    found = new Map();
   }
   for (const b of beads) {
-    out.set(b.id, found.get(b.id) ?? 'unknown')
+    out.set(b.id, found.get(b.id) ?? 'unknown');
   }
-  return out
+  return out;
 }
 
 /** The members of a clump still open in the store — verdict closes the
@@ -1117,14 +1188,14 @@ function openBeads(ctx: Ctx, beads: ReadyBead[]): ReadyBead[] {
     const closed = new Set(
       getTasks(
         ctx.tasks,
-        beads.map((b) => b.id)
+        beads.map(b => b.id)
       )
-        .filter((r) => r.status === 'closed')
-        .map((r) => r.id)
-    )
-    return beads.filter((b) => !closed.has(b.id))
+        .filter(r => r.status === 'closed')
+        .map(r => r.id)
+    );
+    return beads.filter(b => !closed.has(b.id));
   } catch {
-    return beads // a store blip must not mask work
+    return beads; // a store blip must not mask work
   }
 }
 
@@ -1137,21 +1208,23 @@ function openBeads(ctx: Ctx, beads: ReadyBead[]): ReadyBead[] {
  *  treat unknown coverage as "nothing covered", the fail-safe direction
  *  (a re-queue, never a false close). */
 function clumpCommitLog(ctx: Ctx, item: LoopItem, pr: number): string {
-  let base = defaultBranchName() ?? 'main'
-  let headSha = ''
+  let base = defaultBranchName() ?? 'main';
+  let headSha = '';
   try {
-    const meta = ctx.rev.prMeta({ repo: ctx.repo, pr })
-    base = meta.baseRef || base
-    headSha = meta.headSha
-  } catch { /* fall back to the default branch guess + local tip */ }
-  return gitBranchLog(headSha, base, item.worktreeDir)
+    const meta = ctx.rev.prMeta({ repo: ctx.repo, pr });
+    base = meta.baseRef || base;
+    headSha = meta.headSha;
+  } catch {
+    /* fall back to the default branch guess + local tip */
+  }
+  return gitBranchLog(headSha, base, item.worktreeDir);
 }
 
 /** The landed close — a `close` row in the lifecycle journal beside
  *  the store transition. */
 function closeLanded(ctx: Ctx, id: string, pr: number, link: string): void {
   try {
-    ctx.tasks.close(id, `landed via PR ${link}`)
+    ctx.tasks.close(id, `landed via PR ${link}`);
     emitLifecycle(ctx.root, {
       kind: 'close',
       bead: id,
@@ -1159,9 +1232,9 @@ function closeLanded(ctx: Ctx, id: string, pr: number, link: string): void {
       from: 'in_progress',
       to: 'closed',
       detail: { via: 'loop' },
-    })
+    });
   } catch (err) {
-    console.error(`loop: ${ctx.backend} close ${id} failed — ${String(err)}`)
+    console.error(`loop: ${ctx.backend} close ${id} failed — ${String(err)}`);
   }
 }
 
@@ -1171,31 +1244,31 @@ function closeLanded(ctx: Ctx, id: string, pr: number, link: string): void {
  *  item keeps the unconditional close — its prompt never owed a naming
  *  contract. */
 function settleClump(ctx: Ctx, beads: ReadyBead[], item: LoopItem, pr: number): void {
-  const link = prRef(ctx, pr)
-  const statuses = beadStatuses(ctx, beads)
+  const link = prRef(ctx, pr);
+  const statuses = beadStatuses(ctx, beads);
   if (beads.length === 1) {
     // the agent may have closed it already — a verdict plus a PR both
     // reaching the store is fine; a second close is a noisy error
     if (statuses.get(beads[0]!.id) !== 'closed') {
-      closeLanded(ctx, beads[0]!.id, pr, link)
+      closeLanded(ctx, beads[0]!.id, pr, link);
     }
-    return
+    return;
   }
   const covered = coveredBeadIds(
     clumpCommitLog(ctx, item, pr),
-    beads.map((b) => b.id)
-  )
+    beads.map(b => b.id)
+  );
   for (const b of beads) {
     if (statuses.get(b.id) === 'closed') {
-      continue // the agent's own verdict stands
+      continue; // the agent's own verdict stands
     }
     if (covered.has(b.id)) {
-      closeLanded(ctx, b.id, pr, link)
+      closeLanded(ctx, b.id, pr, link);
     } else {
       // merged without a commit naming it — unfinished tail re-queues
-      noteBead(ctx.tasks, b.id, `loop: ${link} landed without a commit naming ${b.id} — re-queued`)
-      reopenBead(ctx, b.id)
-      say(ctx, `loop: ${b.id} not covered by ${link} — re-queued`)
+      noteBead(ctx.tasks, b.id, `loop: ${link} landed without a commit naming ${b.id} — re-queued`);
+      reopenBead(ctx, b.id);
+      say(ctx, `loop: ${b.id} not covered by ${link} — re-queued`);
     }
   }
 }
@@ -1211,19 +1284,19 @@ async function finalizeMerge(
   pr: number,
   alreadyMerged = false
 ): Promise<'landed' | 'parked'> {
-  ctx.stage = `merge pr=${pr}`
+  ctx.stage = `merge pr=${pr}`;
   try {
     if (!alreadyMerged) {
-      await runActCommand(['merge', String(pr)])
+      await runActCommand(['merge', String(pr)]);
     }
-    const meta = ctx.rev.prMeta({ repo: ctx.repo, pr })
+    const meta = ctx.rev.prMeta({ repo: ctx.repo, pr });
     if (meta.state !== 'MERGED') {
       parkBeads(
         ctx,
         beads,
         `loop: merge of ${prRef(ctx, pr)} did not land (state=${meta.state}) — worktree ${item.worktreeDir}`
-      )
-      return 'parked'
+      );
+      return 'parked';
     }
     if (alreadyMerged) {
       // a bro-driven merge journals through act's landPr — an external
@@ -1234,7 +1307,7 @@ async function finalizeMerge(
         pr,
         to: 'merged',
         detail: { via: 'loop', external: true, sha: meta.headSha },
-      })
+      });
     }
   } catch (err) {
     // a merge/fetch failure must not abort the loop leaving the bead
@@ -1243,36 +1316,36 @@ async function finalizeMerge(
       ctx,
       beads,
       `loop: finalizing ${prRef(ctx, pr)} failed — ${err instanceof Error ? err.message : String(err)} — worktree ${item.worktreeDir}`
-    )
-    return 'parked'
+    );
+    return 'parked';
   }
-  settleClump(ctx, beads, item, pr)
+  settleClump(ctx, beads, item, pr);
   // a process rooted in the tree (a serve, a watcher, a leftover agent)
   // keeps it — removal would strand a zombie on deleted files (bro-1usa8)
-  const rooted = processesRootedIn(item.worktreeDir)
+  const rooted = processesRootedIn(item.worktreeDir);
   if (rooted.length > 0) {
     ctx.tails.push(
-      `worktree ${item.worktreeDir} kept — hosts live process(es): ${rooted.map((h) => h.pid).join(', ')}; branch ${item.branch} kept with it`
-    )
-    console.error(`loop: ${ctx.tails.at(-1)}`)
+      `worktree ${item.worktreeDir} kept — hosts live process(es): ${rooted.map(h => h.pid).join(', ')}; branch ${item.branch} kept with it`
+    );
+    console.error(`loop: ${ctx.tails.at(-1)}`);
   }
   if (rooted.length === 0) {
     // an agent-initialized submodule inside the worktree blocks removal —
     // deinit first; either way a failed cleanup is loud, never silent
-    gitTry(['-C', item.worktreeDir, 'submodule', 'deinit', '-f', '--all'])
-    const rm = gitTry(['-C', ctx.root, 'worktree', 'remove', '--force', item.worktreeDir])
+    gitTry(['-C', item.worktreeDir, 'submodule', 'deinit', '-f', '--all']);
+    const rm = gitTry(['-C', ctx.root, 'worktree', 'remove', '--force', item.worktreeDir]);
     if (rm.code !== 0) {
-      ctx.tails.push(`worktree ${item.worktreeDir} not removed — ${rm.err.trim()}`)
-      console.error(`loop: ${ctx.tails.at(-1)}`)
+      ctx.tails.push(`worktree ${item.worktreeDir} not removed — ${rm.err.trim()}`);
+      console.error(`loop: ${ctx.tails.at(-1)}`);
     }
-    const br = gitTry(['-C', ctx.root, 'branch', '-D', item.branch])
+    const br = gitTry(['-C', ctx.root, 'branch', '-D', item.branch]);
     if (br.code !== 0) {
-      ctx.tails.push(`branch ${item.branch} not deleted — ${br.err.trim()}`)
-      console.error(`loop: ${ctx.tails.at(-1)}`)
+      ctx.tails.push(`branch ${item.branch} not deleted — ${br.err.trim()}`);
+      console.error(`loop: ${ctx.tails.at(-1)}`);
     }
   }
-  say(ctx, `loop: ${beads.map((b) => b.id).join(', ')} landed via ${prRef(ctx, pr)}`)
-  return 'landed'
+  say(ctx, `loop: ${beads.map(b => b.id).join(', ')} landed via ${prRef(ctx, pr)}`);
+  return 'landed';
 }
 
 /** Collect unresolved thread text, write the fix prompt, respawn the
@@ -1285,39 +1358,50 @@ async function runFixRound(
   round: number,
   lane: LoopLane
 ): Promise<void> {
-  ctx.stage = `fix round ${round} pr=${pr}`
+  ctx.stage = `fix round ${round} pr=${pr}`;
   const threads = (await ctx.rev.reviewThreads({ repo: ctx.repo, pr }))
-    .filter((t) => !t.resolved)
-    .map((t) => {
-      const c = t.comment
-      return `- ${c?.path ?? ''}:${c?.line ?? ''} [${c?.author ?? '?'}] ${c?.body ?? ''}`
+    .filter(t => !t.resolved)
+    .map(t => {
+      const c = t.comment;
+      return `- ${c?.path ?? ''}:${c?.line ?? ''} [${c?.author ?? '?'}] ${c?.body ?? ''}`;
     })
-    .join('\n')
+    .join('\n');
   // Threads may have been resolved between the gate snapshot and this
   // fetch — respawning the agent on an empty fix list wastes a round.
   if (threads === '') {
-    say(ctx, `loop: ${prRef(ctx, pr)} threads resolved since the gate snapshot — skipping fix round`)
-    return
+    say(
+      ctx,
+      `loop: ${prRef(ctx, pr)} threads resolved since the gate snapshot — skipping fix round`
+    );
+    // no spawn ran — refund the round the same way a fleet-cap refusal
+    // does; the budget bills respawns, not stale gate snapshots
+    m.rounds -= 1;
+    return;
   }
-  const prompt = buildFixPrompt(m.beads, pr, threads)
-  writePrompt(m.item, prompt)
-  say(ctx, `loop: ${prRef(ctx, pr)} has open threads — fix round ${round}`)
+  const prompt = buildFixPrompt(m.beads, pr, threads);
+  writePrompt(m.item, prompt);
+  say(ctx, `loop: ${prRef(ctx, pr)} has open threads — fix round ${round}`);
   if (ctx.agents !== undefined) {
-    await spawnWorker(ctx, m, prompt, lane)
-    return
+    await spawnWorker(ctx, m, prompt, lane);
+    return;
   }
-  const code = await spawnAgent(ctx, lane, m.beads.map((b) => b.id), clumpTitle(m.beads), m.item.promptFile, m.item.worktreeDir)
+  const code = await spawnAgent(
+    ctx,
+    lane,
+    m.beads.map(b => b.id),
+    clumpTitle(m.beads),
+    m.item.promptFile,
+    m.item.worktreeDir
+  );
   if (code !== 0) {
-    console.error(`loop: fix agent exited ${code ?? 'abnormal'} — the next gate poll decides`)
+    console.error(`loop: fix agent exited ${code ?? 'abnormal'} — the next gate poll decides`);
   }
 }
 
 /** The spawned worker's env title — a clump names the lead plus its
  *  tail size so provenance still reads as one line. */
 function clumpTitle(beads: ReadyBead[]): string {
-  return beads.length > 1
-    ? `${beads[0]!.title} (+${beads.length - 1} more)`
-    : beads[0]!.title
+  return beads.length > 1 ? `${beads[0]!.title} (+${beads.length - 1} more)` : beads[0]!.title;
 }
 
 /** An agent that exits without a PR may still have left verdicts — each
@@ -1327,41 +1411,40 @@ function clumpTitle(beads: ReadyBead[]): string {
  *  it. ALL members closed → the whole clump is a verdict; a partial
  *  close still counts — the unclosed tail falls through to requeue. */
 function agentVerdict(ctx: Ctx, beads: ReadyBead[], worktreeDir: string): ItemResult | undefined {
-  const statuses = beadStatuses(ctx, beads)
-  const closed = beads.filter((b) => statuses.get(b.id) === 'closed')
+  const statuses = beadStatuses(ctx, beads);
+  const closed = beads.filter(b => statuses.get(b.id) === 'closed');
   if (closed.length === 0) {
-    return undefined
+    return undefined;
   }
   for (const b of closed) {
-    say(ctx, `loop: ${b.id} closed by the agent — verdict, not a failure`)
-    noteBead(ctx.tasks, b.id, `loop: closed by agent verdict — worktree ${worktreeDir} kept for audit`)
+    say(ctx, `loop: ${b.id} closed by the agent — verdict, not a failure`);
+    noteBead(
+      ctx.tasks,
+      b.id,
+      `loop: closed by agent verdict — worktree ${worktreeDir} kept for audit`
+    );
     emitLifecycle(ctx.root, {
       kind: 'close',
       bead: b.id,
       to: 'closed',
       detail: { via: 'loop', verdict: 'agent' },
-    })
+    });
   }
-  return closed.length === beads.length ? 'closed' : undefined
+  return closed.length === beads.length ? 'closed' : undefined;
 }
 
 /** Agent exited without a PR — note + reopen every member still open,
  *  'failed'. A batch member's own `bd close` verdict stands. */
-function failNoPr(
-  ctx: Ctx,
-  beads: ReadyBead[],
-  item: LoopItem,
-  code: number | null
-): ItemResult {
+function failNoPr(ctx: Ctx, beads: ReadyBead[], item: LoopItem, code: number | null): ItemResult {
   for (const b of openBeads(ctx, beads)) {
     noteBead(
       ctx.tasks,
       b.id,
       `loop: agent exited ${code ?? 'abnormal'} without a PR — worktree kept at ${item.worktreeDir}`
-    )
-    reopenBead(ctx, b.id)
+    );
+    reopenBead(ctx, b.id);
   }
-  return 'failed'
+  return 'failed';
 }
 
 /** Optional bootstrap command — false (with the beads noted + reopened)
@@ -1369,7 +1452,7 @@ function failNoPr(
  *  than failing fast. */
 function runBootstrap(ctx: Ctx, beads: ReadyBead[], item: LoopItem): boolean {
   if (!ctx.cfg.bootstrap) {
-    return true
+    return true;
   }
   const b = spawnSync(
     'sh', // NOSONAR — operator-configured bootstrap shell, PATH by design
@@ -1380,46 +1463,49 @@ function runBootstrap(ctx: Ctx, beads: ReadyBead[], item: LoopItem): boolean {
       stdio: ['inherit', ctx.json ? 2 : 'inherit', 'inherit'],
     }
   );
->>>>>>> 6e124527 (fix(loop): honor exit-cause taxonomy — wait rate_limited resetAt instead of respawning into the wall (bro-36bhc))
+>>>>>>> 6e124527 (fix(loop): honor exit-cause taxonomy — wait rate_limited resetAt instead of respawning into the wall (bro-36bhc))>>>>>>> c93c64fc (fix(loop): honor exit-cause taxonomy — wait rate_limited resetAt instead of respawning into the wall (bro-36bhc))
 =======
-  const b = spawnSync('sh', ['-c', ctx.cfg.bootstrap], { // NOSONAR — operator-configured bootstrap
+  const b = spawnSync('sh', ['-c', ctx.cfg.bootstrap], {
+    // NOSONAR — operator-configured bootstrap
     cwd: item.worktreeDir,
     env: agentEnv(ctx, {}),
     stdio: ['inherit', ctx.json ? 2 : 'inherit', 'inherit'],
-  })
->>>>>>> c93c64fc (fix(loop): honor exit-cause taxonomy — wait rate_limited resetAt instead of respawning into the wall (bro-36bhc))
+  });
+>>>>>>> 3a228478 (fix(loop): review round — stale reset on manual stops, no-spawn rounds refunded (bro-36bhc))
   if (b.status === 0) {
-    return true
+    return true;
   }
   for (const bead of openBeads(ctx, beads)) {
     noteBead(
       ctx.tasks,
       bead.id,
       `loop: bootstrap failed (${b.status ?? b.signal ?? 'spawn error'}) — worktree kept at ${item.worktreeDir}`
-    )
-    reopenBead(ctx, bead.id)
+    );
+    reopenBead(ctx, bead.id);
   }
-  return false
+  return false;
 }
 
 /** The work-order file lives outside the worktree (see planItem) —
- *  its parent dir may not exist yet. */
+ *  its parent dir may not exist yet. Owner-only like the agents-home
+ *  prompt (spec bro-l8c4f.4) — the order can embed secrets and thread
+ *  context. */
 function writePrompt(item: LoopItem, text: string): void {
-  mkdirSync(dirname(item.promptFile), { recursive: true })
-  writeFileSync(item.promptFile, text)
+  mkdirPrivateSync(dirname(item.promptFile));
+  writePrivateFileSync(item.promptFile, text);
 }
 
 interface StackSlot {
   /** Position the bead occupies (or joins at). */
-  n: number
+  n: number;
   /** Creation/prompt base — the live tip's branch, the recorded edge,
    *  or the default branch for a bottom member. */
-  base?: string
+  base?: string;
   /** The stack edge to record — set only for a fresh member whose base
    *  is another stack branch. */
-  edge?: string
+  edge?: string;
   /** True when the member sits directly on the default branch. */
-  bottom: boolean
+  bottom: boolean;
 }
 
 /** The stack slot a claimed bead takes. A bead already in the stack
@@ -1430,38 +1516,35 @@ interface StackSlot {
  *  never forks from a dead (already-merged) branch. */
 function resolveStackSlot(ctx: Ctx, bead: ReadyBead): StackSlot | undefined {
   if (ctx.stack === undefined) {
-    return undefined
+    return undefined;
   }
-  const dflt = defaultBranchName() ?? 'main'
-  const existing = stackMemberFor(ctx.root, ctx.stack, loopSlug(bead.id))
+  const dflt = defaultBranchName() ?? 'main';
+  const existing = stackMemberFor(ctx.root, ctx.stack, loopSlug(bead.id));
   if (existing !== undefined) {
-    const edge = readStackEdges().get(existing.branch)
-    return { n: existing.n, base: edge ?? dflt, bottom: edge === undefined }
+    const edge = readStackEdges().get(existing.branch);
+    return { n: existing.n, base: edge ?? dflt, bottom: edge === undefined };
   }
-  const dead = mergedBranches(ctx.root, ctx.stack, { repo: ctx.repo, facade: ctx.rev })
-  const tip = stackTip(ctx.root, ctx.stack, dead)
-  return { n: tip.n, base: tip.base ?? dflt, edge: tip.base, bottom: tip.base === undefined }
+  const dead = mergedBranches(ctx.root, ctx.stack, { repo: ctx.repo, facade: ctx.rev });
+  const tip = stackTip(ctx.root, ctx.stack, dead);
+  return { n: tip.n, base: tip.base ?? dflt, edge: tip.base, bottom: tip.base === undefined };
 }
 
 /** slot + planItem for a bead — the dry-run render and the real
  *  worktree plan share the member-number/shape wiring. */
-function stackPlan(
-  ctx: Ctx,
-  bead: ReadyBead
-): { slot: StackSlot | undefined; item: LoopItem } {
-  const slot = resolveStackSlot(ctx, bead)
+function stackPlan(ctx: Ctx, bead: ReadyBead): { slot: StackSlot | undefined; item: LoopItem } {
+  const slot = resolveStackSlot(ctx, bead);
   const item = planItem(
     bead,
     ctx.root,
     slot === undefined ? undefined : { stack: { name: ctx.stack!, n: slot.n } }
-  )
-  return { slot, item }
+  );
+  return { slot, item };
 }
 
 /** `P · model M` provenance label — the lane announce and the dry-run
  *  render print the same pair. */
 const laneLabel = (lane: LoopLane): string =>
-  `${lane.provider}` + (lane.model !== undefined ? ` · model ${lane.model}` : '')
+  `${lane.provider}` + (lane.model !== undefined ? ` · model ${lane.model}` : '');
 
 /** Resolve the bead's stack slot and create its worktree under the same
  *  push lock `stack push` holds — without it a loop and a push racing
@@ -1473,19 +1556,19 @@ function planItemAndWorktree(
   ctx: Ctx,
   bead: ReadyBead
 ): { slot: StackSlot | undefined; item: LoopItem; reused: boolean } {
-  let slot: StackSlot | undefined
-  let item!: LoopItem
-  let reused = false
+  let slot: StackSlot | undefined;
+  let item!: LoopItem;
+  let reused = false;
   const planAndCreate = (): void => {
-    const plan = stackPlan(ctx, bead)
-    slot = plan.slot
-    item = plan.item
-    say(ctx, `\nloop: ${bead.id} → ${item.branch} @ ${item.worktreeDir}`)
+    const plan = stackPlan(ctx, bead);
+    slot = plan.slot;
+    item = plan.item;
+    say(ctx, `\nloop: ${bead.id} → ${item.branch} @ ${item.worktreeDir}`);
     // a surviving worktree dir is reused as-is — its branch kept its
     // original base, so the stack edge only records on fresh creation
-    const fresh = !existsSync(item.worktreeDir)
-    reused = !fresh
-    ensureWorktree(ctx.root, item.branch, item.worktreeDir, slot?.base)
+    const fresh = !existsSync(item.worktreeDir);
+    reused = !fresh;
+    ensureWorktree(ctx.root, item.branch, item.worktreeDir, slot?.base);
     if (fresh) {
       emitLifecycle(ctx.root, {
         kind: 'worktree',
@@ -1498,32 +1581,32 @@ function planItemAndWorktree(
           ...(slot?.base !== undefined ? { base: slot.base } : {}),
           ...(ctx.stack !== undefined ? { stack: ctx.stack } : {}),
         },
-      })
+      });
     }
     if (fresh && slot?.edge !== undefined) {
       // same edge `work enter --stack` records — merge order travels
-      recordStackEdge(item.branch, slot.edge)
+      recordStackEdge(item.branch, slot.edge);
     }
-  }
-  const lockPath = ctx.stack === undefined ? null : stackPushLockPath(ctx.stack)
+  };
+  const lockPath = ctx.stack === undefined ? null : stackPushLockPath(ctx.stack);
   if (ctx.stack !== undefined && lockPath === null) {
-    say(ctx, 'loop: could not resolve the git common dir — running without the stack lock')
+    say(ctx, 'loop: could not resolve the git common dir — running without the stack lock');
   }
   for (let attempt = 0; ; attempt += 1) {
     try {
       if (lockPath === null) {
-        planAndCreate()
+        planAndCreate();
       } else {
-        withFileLock(lockPath, planAndCreate, { label: `stack ${ctx.stack} push lock` })
+        withFileLock(lockPath, planAndCreate, { label: `stack ${ctx.stack} push lock` });
       }
-      break
+      break;
     } catch (err) {
       if (!(err instanceof LockTimeout) || attempt >= 2) {
-        throw err
+        throw err;
       }
     }
   }
-  return { slot, item, reused }
+  return { slot, item, reused };
 }
 
 // --- the gate stack: task-stack round-robin (spec bro-zsmwq) -----------------
@@ -1533,63 +1616,49 @@ function planItemAndWorktree(
  *  a batch carries the whole clump (spec bro-nspj7). Entry order is
  *  service priority: the oldest member gets serviced first. */
 interface GateMember {
-  beads: ReadyBead[]
-  item: LoopItem
+  beads: ReadyBead[];
+  item: LoopItem;
   /** The PR this member gates on — undefined while its FIRST worker is
    *  still running (spec bro-zpa93): the member is pushed the moment
    *  the spawn registers and joins the gate when the .exit lands. */
-  pr?: number
+  pr?: number;
   /** The in-flight registry worker — set at push and again on every
    *  fix/rebase respawn; cleared when its exit record lands. */
-  worker?: WorkerRef
+  worker?: WorkerRef;
   /** The lane resolved at push — fix/rebase respawns reuse it. The
    *  member's class was settled before its worktree existed (config
    *  and bead labels are read once, never refreshed mid-run), so
    *  re-resolving in a round can only re-hit the same route error —
    *  silently burning a round per poll — or drift the lane mid-tenure. */
-  lane: LoopLane
+  lane: LoopLane;
   /** watchBegin marker path — armed for the member's whole stack
    *  tenure: a dead loop leaves a dead marker `act rearm` resurrects
    *  as `act wait --merge --cleanup` in the member's worktree. */
-  marker: string | null
+  marker: string | null;
   /** Gate (re-)entry ms — a fix/rebase round resets the budget. */
-  since: number
+  since: number;
   /** When this member may be polled again — a 'kept' verdict stamps
    *  its stage's own cadence (worker: WORKER_POLL_MS; gate: intervalS),
    *  so a fast worker wake can't drag a PR gate into hot host polls. */
-  nextPollAt?: number
+  nextPollAt?: number;
   /** Agent respawns consumed — fix and rebase rounds share the
    *  loop.fixRounds bound. */
-  rounds: number
+  rounds: number;
   /** headSha an update-branch push last moved — the landing check. */
-  updatedSha?: string
+  updatedSha?: string;
   /** Consecutive fetch failures — parks at the old wait's 3. */
-  fetchErrors: number
-  /** The provider wall wait (spec bro-36bhc): a rate_limited death with
-   *  a reset is a HOLD, not a verdict — the member waits on the stack
-   *  (worker cleared, claim held) and the first worker respawns the
-   *  same work order at expiry; a fix/rebase member's wait just defers
-   *  the gate re-poll. */
-  wallWaitUntil?: number
-  /** What the wait rides — 'rate_limited' names a real provider reset;
-   *  'cap' a bare fleet-cap re-arm so the hold's say doesn't claim a
-   *  provider wall it can't prove. */
-  wallWaitCause?: 'rate_limited' | 'cap'
-  /** Consecutive wall deaths on this member — the stale-reset floor
-   *  escalates on each so a provider lying about its reset can't spin
-   *  the loop back into the respawn-burn. */
-  wallWaits?: number
+  fetchErrors: number;
 }
 
 /** The registry handle a pending member polls — `spawnedAt` is the
  *  generation stamp: a respawned same-id entry is a NEW worker, not the
  *  one the member is waiting on, and must not inherit this clock. */
 interface WorkerRef {
-  agentId: string
-  spawnedAt?: string
+  agentId: string;
+  spawnedAt?: string;
   /** ms stamp at our spawn call — the crash window's start. */
-  spawnedMs: number
-  pid?: number
+  spawnedMs: number;
+  pid?: number;
 }
 
 /** The push half of the alternation: claim → worktree → agent → PR.
@@ -1599,10 +1668,9 @@ interface WorkerRef {
 type PushOutcome =
   | { kind: 'member'; member: GateMember }
   | { kind: 'done'; result: ItemResult }
-  /** 'hold' — the claim released and pushes pause: one interval on a
-   *  bare fleet cap, or `until` on a derived provider wall (the wall's
-   *  own clock sets the hold, not the tick). */
-  | { kind: 'hold'; why: string; until?: number }
+  /** untilMs — a provider wall's reset: pushes hold until the wall
+   *  lifts instead of re-probing every interval (bro-36bhc). */
+  | { kind: 'hold'; why: string; untilMs?: number };
 
 /** The loop's watch payload for one member PR — `merge` + `cleanup`
  *  record the promise the loop is keeping (its own merge, its own
@@ -1624,76 +1692,82 @@ export function loopWatch(
     cleanup: true,
     workdir,
     timeoutMin: (cfg.stallMin + cfg.mergeTimeoutMin) * (cfg.fixRounds + 1),
-  }
+  };
 }
 
 async function pushItem(ctx: Ctx, beads: ReadyBead[]): Promise<PushOutcome> {
-  const lead = beads[0]!
+  const lead = beads[0]!;
   // the lead's spawn lane resolves before any worktree exists — a
   // fleet.routing config error (an unknown `class:` label, a broken
   // chain) is deterministic: reopening would re-claim into the same
   // wall, so the lead parks claimed+noted like a spawn-environment
   // crash (bro-sovl3) while the clump's members release for re-pick —
   // their lanes were never resolved, the bad class is the lead's alone
-  let lane: LoopLane
+  let lane: LoopLane;
   try {
-    lane = await resolveBeadLane(ctx, lead)
+    lane = await resolveBeadLane(ctx, lead);
   } catch (err) {
-    const msg = err instanceof Error ? err.message : String(err)
+    const msg = err instanceof Error ? err.message : String(err);
     // the registry path only probed the lead (claimStep owns the real
     // claim under the spawn lock) — take the claim here or the park
     // can't hold the bead off the queue and it re-fails every pass.
     // A raced claim means a foreign owner; the note still lands.
     if (ctx.agents !== undefined) {
       try {
-        claimUpTo([lead], 1, ctx.root)
-      } catch { /* best-effort park claim */ }
+        claimUpTo([lead], 1, ctx.root);
+      } catch {
+        /* best-effort park claim */
+      }
     }
-    noteBead(ctx.tasks, lead.id, `loop: route resolution failed — ${msg} — parked`)
-    say(ctx, `loop: ${lead.id} route failed — ${msg} — parked`)
+    noteBead(ctx.tasks, lead.id, `loop: route resolution failed — ${msg} — parked`);
+    say(ctx, `loop: ${lead.id} route failed — ${msg} — parked`);
     for (const b of openBeads(ctx, beads.slice(1))) {
-      reopenBead(ctx, b.id)
+      reopenBead(ctx, b.id);
     }
-    return { kind: 'done', result: 'parked' }
+    return { kind: 'done', result: 'parked' };
   }
   // resolved here, not earlier — a member that landed since the last
   // push correctly yields the default branch as the next base.
-  let slot: StackSlot | undefined
-  let item!: LoopItem
-  let reused = false
+  let slot: StackSlot | undefined;
+  let item!: LoopItem;
+  let reused = false;
   // the claims this run actually holds — claimUpTo owns the lead only
   // outside the registry path; there the lead is a PROBE until
   // claimStep lands it under the spawn lock, so a pre-spawn settle
   // that reopened it could steal a foreign loop's fresh claim
-  const ours = ctx.agents === undefined ? beads : beads.slice(1)
+  const ours = ctx.agents === undefined ? beads : beads.slice(1);
   try {
-    ctx.stage = 'worktree'
-    const planned = planItemAndWorktree(ctx, lead)
-    slot = planned.slot
-    item = planned.item
-    reused = planned.reused
+    ctx.stage = 'worktree';
+    const planned = planItemAndWorktree(ctx, lead);
+    slot = planned.slot;
+    item = planned.item;
+    reused = planned.reused;
   } catch (err) {
     for (const b of openBeads(ctx, ours)) {
-      noteBead(ctx.tasks, b.id, `loop: worktree failed — ${err instanceof Error ? err.message : String(err)}`)
-      reopenBead(ctx, b.id)
+      noteBead(
+        ctx.tasks,
+        b.id,
+        `loop: worktree failed — ${err instanceof Error ? err.message : String(err)}`
+      );
+      reopenBead(ctx, b.id);
     }
     // the claim-time custody record (claimClump) dies with the claim
-    endLoopRun(ctx.root, loopSlug(lead.id))
-    return { kind: 'done', result: 'failed' }
+    endLoopRun(ctx.root, loopSlug(lead.id));
+    return { kind: 'done', result: 'failed' };
   }
   // re-stamp claim custody (bro-ho09d) — the claimClump record already
   // proves a live owner; this refresh names the verified worktree dir
   // and log for the check-in readers
   beginLoopRun(ctx.root, {
     beadId: lead.id,
-    beadIds: beads.map((b) => b.id),
+    beadIds: beads.map(b => b.id),
     slug: loopSlug(lead.id),
     pid: process.pid,
     pidStart: procStat(process.pid)?.start,
     startedAt: new Date().toISOString(),
     worktree: item.worktreeDir,
     log: loopRunLog(ctx.root, loopSlug(lead.id)) ?? '',
-  })
+  });
   // A woken park re-claims into the worktree it kept — and possibly
   // the open PR it kept too. Only a REUSED worktree can carry that PR:
   // when the branch already gates on one, re-arm the watch and rejoin
@@ -1702,44 +1776,48 @@ async function pushItem(ctx: Ctx, beads: ReadyBead[]): Promise<PushOutcome> {
   // can't prove a PR absent, so it falls through to the spawn exactly
   // as before — the post-spawn findPr stays the backstop.
   if (reused) {
-    ctx.stage = 'pr lookup'
-    const parkedPr = findPr(ctx, item.branch)
+    ctx.stage = 'pr lookup';
+    const parkedPr = findPr(ctx, item.branch);
     if (typeof parkedPr === 'number') {
       // registry mode leaves the lead a mere probe until spawnWorker's
       // claimStep — with no spawn to land it, claim it the non-registry
       // way or the bead snaps back to ready and re-parks forever
       if (ctx.agents !== undefined && claimUpTo([lead], 1, ctx.root).length === 0) {
         for (const b of openBeads(ctx, ours)) {
-          reopenBead(ctx, b.id)
+          reopenBead(ctx, b.id);
         }
-        endLoopRun(ctx.root, loopSlug(lead.id))
-        return { kind: 'done', result: 'failed' }
+        endLoopRun(ctx.root, loopSlug(lead.id));
+        return { kind: 'done', result: 'failed' };
       }
-      say(ctx, `loop: ${lead.id} re-attaches to ${prRef(ctx, parkedPr)} — no re-spawn`)
-      endLoopRun(ctx.root, loopSlug(lead.id))
-      return { kind: 'member', member: armMember(ctx, beads, item, parkedPr, lane) }
+      say(ctx, `loop: ${lead.id} re-attaches to ${prRef(ctx, parkedPr)} — no re-spawn`);
+      endLoopRun(ctx.root, loopSlug(lead.id));
+      return { kind: 'member', member: armMember(ctx, beads, item, parkedPr, lane) };
     }
   }
-  ctx.stage = 'bootstrap'
+  ctx.stage = 'bootstrap';
   if (!runBootstrap(ctx, ours, item)) {
-    endLoopRun(ctx.root, loopSlug(lead.id))
-    return { kind: 'done', result: 'failed' }
+    endLoopRun(ctx.root, loopSlug(lead.id));
+    return { kind: 'done', result: 'failed' };
   }
-  const prompt = buildWorkPrompt(beads, item.branch, slot?.base, slot?.bottom, ctx.backend)
-  ctx.stage = 'prompt write'
+  const prompt = buildWorkPrompt(beads, item.branch, slot?.base, slot?.bottom, ctx.backend);
+  ctx.stage = 'prompt write';
   try {
-    writePrompt(item, prompt)
+    writePrompt(item, prompt);
   } catch (err) {
     // a dead fs must not strand this run's claims in_progress — same
     // settle as the worktree failure above
     for (const b of openBeads(ctx, ours)) {
-      noteBead(ctx.tasks, b.id, `loop: prompt write failed — ${err instanceof Error ? err.message : String(err)}`)
-      reopenBead(ctx, b.id)
+      noteBead(
+        ctx.tasks,
+        b.id,
+        `loop: prompt write failed — ${err instanceof Error ? err.message : String(err)}`
+      );
+      reopenBead(ctx, b.id);
     }
-    endLoopRun(ctx.root, loopSlug(lead.id))
-    return { kind: 'done', result: 'failed' }
+    endLoopRun(ctx.root, loopSlug(lead.id));
+    return { kind: 'done', result: 'failed' };
   }
-  ctx.stage = 'agent spawn'
+  ctx.stage = 'agent spawn';
   if (ctx.agents !== undefined) {
     // the registry path — the member comes back worker-pending and its
     // .exit poll rides the SAME service pass as every PR gate
@@ -1752,38 +1830,49 @@ async function pushItem(ctx: Ctx, beads: ReadyBead[]): Promise<PushOutcome> {
       since: Date.now(),
       rounds: 0,
       fetchErrors: 0,
-    }
+    };
     try {
-      await spawnWorker(ctx, member, prompt, lane)
+      await spawnWorker(ctx, member, prompt, lane);
     } catch (err) {
-      return settleSpawnRefusal(ctx, member, err)
+      return settleSpawnRefusal(ctx, member, err);
     }
     // custody transfers to the agent registry entry — claimStep landed
     // the lead's claim under the spawn lock (bro-ho09d). The run
     // record does NOT retire here (bro-wg896): re-stamped to the
     // worker inside spawnWorker, it stays the check-in plane until the
     // armed watch marker takes custody at the settle.
-    return { kind: 'member', member }
+    return { kind: 'member', member };
   }
   // no shared store to pin a claim/exit record against — the awaited
   // spawn keeps the serial semantics (documented fallback)
-  const spawnAt = Date.now()
-  const code = await spawnAgent(ctx, lane, beads.map((b) => b.id), clumpTitle(beads), item.promptFile, item.worktreeDir)
+  const spawnAt = Date.now();
+  const code = await spawnAgent(
+    ctx,
+    lane,
+    beads.map(b => b.id),
+    clumpTitle(beads),
+    item.promptFile,
+    item.worktreeDir
+  );
   // agent wall-time — measured before findPr's gh call; a slow lookup
   // must not inflate an instant crash past the crashExitMs threshold
-  const elapsed = Date.now() - spawnAt
-  ctx.stage = 'pr lookup'
-  const pr = findPr(ctx, item.branch)
+  const elapsed = Date.now() - spawnAt;
+  ctx.stage = 'pr lookup';
+  const pr = findPr(ctx, item.branch);
   if (pr === 'lookup-error') {
-    parkBeads(ctx, beads, `loop: PR lookup failed for ${item.branch} — worktree ${item.worktreeDir}`)
-    return { kind: 'done', result: 'parked' }
+    parkBeads(
+      ctx,
+      beads,
+      `loop: PR lookup failed for ${item.branch} — worktree ${item.worktreeDir}`
+    );
+    return { kind: 'done', result: 'parked' };
   }
   if (pr === null) {
-    return { kind: 'done', result: settleNoPr(ctx, beads, item, code, elapsed) }
+    return { kind: 'done', result: settleNoPr(ctx, beads, item, code, elapsed) };
   }
   // custody transfers to the armed watch — the run record's job is done
-  endLoopRun(ctx.root, loopSlug(lead.id))
-  return { kind: 'member', member: armMember(ctx, beads, item, pr, lane) }
+  endLoopRun(ctx.root, loopSlug(lead.id));
+  return { kind: 'member', member: armMember(ctx, beads, item, pr, lane) };
 }
 
 /** The PR-armed moment, shared by the post-spawn discovery and the
@@ -1797,20 +1886,26 @@ async function pushItem(ctx: Ctx, beads: ReadyBead[]): Promise<PushOutcome> {
  *  comma-joined. The marker lands BEFORE the stamp — a stall or death
  *  inside stampProjection's tracker calls must not strand the open PR
  *  markerless. */
-function armMember(ctx: Ctx, beads: ReadyBead[], item: LoopItem, pr: number, lane: LoopLane): GateMember {
+function armMember(
+  ctx: Ctx,
+  beads: ReadyBead[],
+  item: LoopItem,
+  pr: number,
+  lane: LoopLane
+): GateMember {
   emitLifecycle(ctx.root, {
     kind: 'pr-open',
     bead: beads[0]?.id,
     pr,
     to: 'open',
     detail: { via: 'loop', branch: item.branch },
-  })
+  });
   const marker = watchBegin(ctx.root, {
     ...loopWatch(pr, prRef(ctx, pr), item.worktreeDir, ctx.cfg),
-    bead: beads.map((b) => b.id).join(','),
-  })
-  stampProjection(ctx, beads, pr)
-  stampLoopPr(ctx, beads, item, pr)
+    bead: beads.map(b => b.id).join(','),
+  });
+  stampProjection(ctx, beads, pr);
+  stampLoopPr(ctx, beads, item, pr);
   return {
     beads,
     item,
@@ -1820,7 +1915,7 @@ function armMember(ctx: Ctx, beads: ReadyBead[], item: LoopItem, pr: number, lan
     since: Date.now(),
     rounds: 0,
     fetchErrors: 0,
-  }
+  };
 }
 
 /** The agent exited without a PR — the settle order: a self-reported
@@ -1834,23 +1929,10 @@ function settleNoPr(
   code: number | null,
   elapsed: number
 ): ItemResult {
-  const verdict = agentVerdict(ctx, beads, item.worktreeDir)
+  const verdict = agentVerdict(ctx, beads, item.worktreeDir);
   if (verdict !== undefined) {
-    return verdict
+    return verdict;
   }
-  return settleNoPrOutcome(ctx, beads, item, code, elapsed)
-}
-
-/** The no-PR settle's tail — serviceWorker already consulted the
- *  verdict and the exit-cause wall, so a no-PR worker exit joins the
- *  crash window → failNoPr chain here without re-reading either. */
-function settleNoPrOutcome(
-  ctx: Ctx,
-  beads: ReadyBead[],
-  item: LoopItem,
-  code: number | null,
-  elapsed: number
-): ItemResult {
   if (ctx.cfg.crashExitMs > 0 && elapsed < ctx.cfg.crashExitMs) {
     // gone in seconds, no PR, no verdict — the spawn died on the
     // environment (broken dist, bad argv), never on the bead. Reopen
@@ -1861,14 +1943,14 @@ function settleNoPrOutcome(
       ctx,
       beads,
       `loop: agent gone in ${elapsed}ms (exit ${code ?? 'spawn failure'}) — environment crash, not a verdict; parked — worktree kept at ${item.worktreeDir}`
-    )
+    );
     say(
       ctx,
       `loop: ${beads[0]!.id} agent exited ${code ?? 'spawn failure'} in ${elapsed}ms — parked (crash, not work)`
-    )
-    return 'parked'
+    );
+    return 'parked';
   }
-  return failNoPr(ctx, beads, item, code)
+  return failNoPr(ctx, beads, item, code);
 }
 
 /** A service verdict — 'kept' parks the member until its nextPollAt
@@ -1876,13 +1958,13 @@ function settleNoPrOutcome(
  *  but asks the scheduler for an immediate re-poll — a fix/rebase/
  *  update just moved the gate, or a worker's exit record just landed.
  *  The rest are ItemResult settles that splice it out. */
-type ServiceVerdict = 'kept' | 'active' | ItemResult
+type ServiceVerdict = 'kept' | 'active' | ItemResult;
 
 /** A pending worker's poll cadence — the registry/.exit probe is a
  *  LOCAL read, not a review-host fetch, so it polls far faster than
  *  the gate interval and a long worker still settles within a second
  *  of its exit landing (spec bro-zpa93). */
-const WORKER_POLL_MS = 1_000
+const WORKER_POLL_MS = 1_000;
 
 /** Alive-line floor: the heartbeat surfaces a STUCK run, so a fast
  *  --interval tick must not turn it into per-poll noise — a sub-floor
@@ -1891,95 +1973,7 @@ const WORKER_POLL_MS = 1_000
  *  a stalled run must name its stall promptly, and the e2e's 4s
  *  kill-windows rely on seeing the line. Production is unchanged:
  *  the default 60s interval sits far above the floor. */
-const HEARTBEAT_MIN_MS = 2_000
-
-// --- the provider wall settle (spec bro-36bhc) --------------------------------
-
-/** The stale-reset floor — a provider whose reported reset already
- *  passed at read time (its clock behind the poll, or an unreliable
- *  reporter) still waits: 30s doubling per consecutive wall death on
- *  the same member, capped at 15m, so a provider that keeps lying
- *  about its reset can never spin the loop back into the burn this
- *  settle exists to kill. */
-const WALL_WAIT_FLOOR_MS = 30_000
-const WALL_WAIT_CAP_MS = 15 * 60_000
-
-/** The wall wait's clock — the member-shaped half of convoy's
- *  blockedDecision. A `rate_limited` death with a parseable provider
- *  reset is a WAIT: a future reset is its own wake; a stale one waits
- *  the escalating floor. Every other cause (quota, auth, crash, a
- *  rate_limited with no honest reset) is not waitable — the caller
- *  parks or settles it. */
-export function wallWaitUntil(
-  cause: string | undefined,
-  resetAt: string | undefined,
-  now: number,
-  waits = 0
-): number | undefined {
-  if (cause !== 'rate_limited' || resetAt === undefined) {
-    return undefined
-  }
-  const reset = Date.parse(resetAt)
-  if (Number.isNaN(reset)) {
-    return undefined
-  }
-  if (reset > now) {
-    return reset
-  }
-  return now + Math.min(WALL_WAIT_FLOOR_MS * 2 ** Math.max(0, waits - 1), WALL_WAIT_CAP_MS)
-}
-
-/** The derived provider wall on a member's spawn lane — undefined on
- *  the template lane (no provider → batchWallRefusal never fired, so a
- *  'cap' there is a real fleet cap) and when no wall holds. An
- *  unreadable registry derives no wall — the ordinary cap settle
- *  stands. */
-function wallForLane(ctx: Ctx, lane: LoopLane): ProviderWall | undefined {
-  if (lane.provider === undefined) {
-    return undefined
-  }
-  try {
-    return providerWallsFor(ctx.root).find((w) => w.provider === lane.provider)
-  } catch {
-    return undefined
-  }
-}
-
-/** A terminal worker read's wall verdict — AgentInfo-first like
- *  convoy's blockedDecision (the classification status() just
- *  harvested is the same record agentEntryBlocked reads). 'wait' arms
- *  `m.wallWaitUntil` — the claim stays held, the member waits on the
- *  stack; 'park' names a death the snooze must record (a blocked state
- *  that never waited out, quota, auth, a reset-less rate wall —
- *  reopening is the respawn-burn); undefined falls through to the
- *  ordinary settle. A stopped worker is the operator's verdict, never
- *  a wall. */
-function wallSettle(
-  m: GateMember,
-  info: AgentInfo | undefined,
-  state: AgentState
-): 'wait' | 'park' | undefined {
-  if (state === 'stopped' || state === 'lost') {
-    return undefined
-  }
-  const wait = wallWaitUntil(info?.cause, info?.resetAt, Date.now(), (m.wallWaits ?? 0) + 1)
-  if (wait !== undefined) {
-    m.wallWaitUntil = wait
-    m.wallWaitCause = 'rate_limited'
-    m.wallWaits = (m.wallWaits ?? 0) + 1
-    return 'wait'
-  }
-  m.wallWaits = 0
-  if (
-    state === 'blocked' ||
-    info?.cause === 'quota' ||
-    info?.cause === 'auth' ||
-    info?.cause === 'rate_limited'
-  ) {
-    return 'park'
-  }
-  return undefined
-}
+const HEARTBEAT_MIN_MS = 2_000;
 
 /** The worker stage — a spawned member's FIRST gate, before its PR
  *  gate is even meaningful (spec bro-zpa93). It polls the agents
@@ -1993,83 +1987,55 @@ function wallSettle(
  *  generation's clock. For a fix/rebase worker (`m.pr` already set)
  *  the terminal read is simply 'active': the gate re-polls. */
 async function serviceWorker(ctx: Ctx, m: GateMember): Promise<ServiceVerdict> {
-  const w = m.worker!
-  ctx.stage = `worker ${w.agentId} pid=${w.pid ?? '?'}`
-  ctx.bead = m.beads[0]!.id
-  let info: AgentInfo | undefined
+  const w = m.worker!;
+  ctx.stage = `worker ${w.agentId} pid=${w.pid ?? '?'}`;
+  ctx.bead = m.beads[0]!.id;
+  let info: AgentInfo | undefined;
   try {
-    info = await ctx.agents!.status(w.agentId)
-    m.fetchErrors = 0
+    info = await ctx.agents!.status(w.agentId);
+    m.fetchErrors = 0;
   } catch (err) {
     if (!(err instanceof AgentNotFound)) {
-      m.fetchErrors += 1
-      console.error(`loop: worker ${w.agentId} status failed (${m.fetchErrors}) — ${String(err)}`)
+      m.fetchErrors += 1;
+      console.error(`loop: worker ${w.agentId} status failed (${m.fetchErrors}) — ${String(err)}`);
       if (m.fetchErrors < 3) {
-        return 'kept'
+        return 'kept';
       }
       parkBeads(
         ctx,
         m.beads,
         `loop: worker status kept failing for ${w.agentId} — ${String(err)} — worktree ${m.item.worktreeDir}`
-      )
-      return leave(m, 'parked')
+      );
+      return leave(m, 'parked');
     }
     // a reaped entry can't prove its death — 'lost' settles it below
   }
   const superseded =
-    info?.spawnedAt !== undefined && w.spawnedAt !== undefined && info.spawnedAt !== w.spawnedAt
-  const state: AgentState = superseded || info === undefined ? 'lost' : info.state
+    info?.spawnedAt !== undefined && w.spawnedAt !== undefined && info.spawnedAt !== w.spawnedAt;
+  const state: AgentState = superseded || info === undefined ? 'lost' : info.state;
   if (state === 'running' || state === 'spawned') {
-    return 'kept'
+    return 'kept';
   }
   // a superseded entry's .exit belongs to the NEW generation — its
   // code/mtime would feed a foreign clock into the crash window
-  const exit = superseded ? { code: null, at: Date.now() } : workerExit(ctx, w)
+  const exit = superseded ? { code: null, at: Date.now() } : workerExit(ctx, w);
   say(
     ctx,
     `loop: worker ${w.agentId} ${exit.code === null ? `${state} — no exit record` : `exited ${exit.code}`}`
-  )
-  m.worker = undefined
+  );
+  m.worker = undefined;
   if (m.pr !== undefined) {
-    // a fix/rebase worker's wall death is not a repair attempt
-    // (spec bro-36bhc): a rate wall defers the gate re-poll to the
-    // reset — the 'active' return below would otherwise spawn the next
-    // round into the same wall — and the round the dead worker paid is
-    // refunded; quota/auth/a reset-less wall parks the member outright
-    const wall = wallSettle(m, info, state)
-    if (wall === 'wait') {
-      m.rounds = Math.max(0, m.rounds - 1)
-      say(
-        ctx,
-        `loop: ${prRef(ctx, m.pr)} round worker ${w.agentId} rate_limited til ${info?.resetAt ?? '?'} — gate re-poll waits the reset, the round is refunded`
-      )
-      ctx.stateCache?.invalidate({ repo: ctx.repo, pr: m.pr })
-      endLoopRun(ctx.root, loopSlug(m.beads[0]!.id))
-      return 'kept'
-    }
-    if (wall === 'park') {
-      const why =
-        state === 'blocked'
-          ? `blocked${info?.cause !== undefined ? ` (${info.cause})` : ''}`
-          : `exited${info?.cause !== undefined ? ` (${info.cause})` : ''}`
-      parkBeads(
-        ctx,
-        m.beads,
-        `loop: ${prRef(ctx, m.pr)} fix/rebase worker ${w.agentId} ${why} — worktree ${m.item.worktreeDir}`
-      )
-      return leave(m, 'parked')
-    }
     // a fix/rebase worker's exit IS the gate re-entry — same contract
     // the awaited spawn's return had. The worker may have moved the
     // PR (pushes, resolves, replies), so the feed entry that spawned
     // its round is obsolete — the re-poll must fetch post-worker
     // truth, not re-serve the ≤ttl-old snapshot and burn rounds
-    ctx.stateCache?.invalidate({ repo: ctx.repo, pr: m.pr })
-    m.since = Date.now()
+    ctx.stateCache?.invalidate({ repo: ctx.repo, pr: m.pr });
+    m.since = Date.now();
     // custody stays with the armed watch marker — the worker's run
     // record retires with the round (bro-wg896)
-    endLoopRun(ctx.root, loopSlug(m.beads[0]!.id))
-    return 'active'
+    endLoopRun(ctx.root, loopSlug(m.beads[0]!.id));
+    return 'active';
   }
   // custody returns to the supervisor for the findPr/arm window —
   // re-stamp the run record with this process's pid so the just-dead
@@ -2080,99 +2046,95 @@ async function serviceWorker(ctx: Ctx, m: GateMember): Promise<ServiceVerdict> {
   // already gone
   beginLoopRun(ctx.root, {
     beadId: m.beads[0]!.id,
-    beadIds: m.beads.map((b) => b.id),
+    beadIds: m.beads.map(b => b.id),
     slug: loopSlug(m.beads[0]!.id),
     pid: process.pid,
     pidStart: procStat(process.pid)?.start,
     startedAt: new Date().toISOString(),
     worktree: m.item.worktreeDir,
     log: info?.log ?? workerLogPath(ctx, w.agentId),
-  })
-  ctx.stage = 'pr lookup'
-  const pr = findPr(ctx, m.item.branch)
+  });
+  ctx.stage = 'pr lookup';
+  const pr = findPr(ctx, m.item.branch);
   if (pr === 'lookup-error') {
     parkBeads(
       ctx,
       m.beads,
       `loop: PR lookup failed for ${m.item.branch} — worktree ${m.item.worktreeDir}`
-    )
-    return leave(m, 'parked')
+    );
+    return leave(m, 'parked');
   }
   if (pr === null) {
-    // the agent's own verdict outranks every taxonomy settle — a
-    // worker that closed its bead is done, not walled (spec bro-36bhc)
-    const verdict = agentVerdict(ctx, m.beads, m.item.worktreeDir)
-    if (verdict !== undefined) {
-      return leave(m, verdict)
-    }
-    if (state === 'stopped') {
-      // the stop is the verdict — reopening respawns into it
-      parkBeads(
-        ctx,
-        m.beads,
-        `loop: worker ${w.agentId} stopped without a PR — worktree ${m.item.worktreeDir}`
-      )
-      return leave(m, 'parked')
-    }
-    const wall = wallSettle(m, info, state)
-    if (wall === 'wait') {
-      // a rate wall is a HOLD, not a verdict — the claim stays held
-      // (the wall is not the bead's fault) and the SAME work order
-      // respawns at the reset; reopening re-picks the next bead into
-      // the same account wall — the incident's respawn-burn
-      say(
-        ctx,
-        `loop: ${m.beads[0]!.id} worker ${w.agentId} rate_limited til ${info?.resetAt ?? '?'} — claim held, the respawn waits the reset`
-      )
-      return 'kept'
-    }
-    if (wall === 'park') {
-      // a wall with no honest clock (quota, auth, a reset-less
-      // rate_limited, a blocked state that never waited out) — park
-      // and report, never reopen into it
+    if (state === 'blocked' || state === 'stopped') {
+      // the wall/stop is the verdict — reopening respawns into it. A
+      // rate_limited death carrying the provider's resetAt snoozes
+      // until the reset — the claim wakes exactly as the wall lifts and
+      // re-claims into a fresh worker (bro-36bhc — the convoy-run wait
+      // contract); a wall with no advertised end (quota, no reset) and
+      // an operator stop keep the flat parkedWakeMin cooldown. The
+      // cause/reset pair resolves AgentInfo-first with the bead's own
+      // registry entry as fallback — the same record the entry's
+      // 'blocked' read came from. A stopped entry still CARRIES the
+      // previous death's cause/resetAt (the stop flag only marks it),
+      // so the reset applies to 'blocked' alone — a manual stop is the
+      // operator's horizon, never the wall's stale one.
+      const entry = entryReset(ctx, m.beads[0]!.id);
+      const cause = info?.cause ?? entry?.cause;
+      const resetAt =
+        state === 'blocked' && cause === 'rate_limited'
+          ? (info?.resetAt ?? entry?.resetAt)
+          : undefined;
       const why =
         state === 'blocked'
-          ? `blocked${info?.cause !== undefined ? ` (${info.cause})` : ''}`
-          : `exited${info?.cause !== undefined ? ` (${info.cause})` : ''}`
+          ? `blocked${cause !== undefined ? ` (${cause})` : ''}${resetAt !== undefined ? ` til ${resetAt}` : ''}`
+          : 'stopped';
       parkBeads(
         ctx,
         m.beads,
-        `loop: worker ${w.agentId} ${why} without a PR — worktree ${m.item.worktreeDir}`
-      )
-      return leave(m, 'parked')
+        `loop: worker ${w.agentId} ${why} without a PR — worktree ${m.item.worktreeDir}`,
+        resetAt === undefined ? undefined : Date.parse(resetAt)
+      );
+      return leave(m, 'parked');
     }
-    return leave(m, settleNoPrOutcome(ctx, m.beads, m.item, exit.code, Math.max(0, exit.at - w.spawnedMs)))
+    return leave(
+      m,
+      settleNoPr(ctx, m.beads, m.item, exit.code, Math.max(0, exit.at - w.spawnedMs))
+    );
   }
   // the worker opened a PR — the member joins its own gate: the loop IS
   // the watcher (bro-z0k2u), the marker arms for the member's whole
   // stack tenure so a dead loop leaves a resurface `act rearm` can
   // resurrect (bro-q6ppv), and `bead` rides comma-joined for the
   // finalizeMerge half the dead loop never reached
-  m.pr = pr
+  m.pr = pr;
   emitLifecycle(ctx.root, {
     kind: 'pr-open',
     bead: m.beads[0]?.id,
     pr,
     to: 'open',
-    detail: { via: 'loop', branch: m.item.branch, ...(w.agentId !== undefined ? { agent: w.agentId } : {}) },
-  })
+    detail: {
+      via: 'loop',
+      branch: m.item.branch,
+      ...(w.agentId !== undefined ? { agent: w.agentId } : {}),
+    },
+  });
   // marker before the stamp — stampProjection's tracker calls can
   // stall or die, and a markerless open PR resurrects nothing
   m.marker = watchBegin(ctx.root, {
     ...loopWatch(pr, prRef(ctx, pr), m.item.worktreeDir, ctx.cfg),
-    bead: m.beads.map((b) => b.id).join(','),
-  })
+    bead: m.beads.map(b => b.id).join(','),
+  });
   // custody transfers to the armed watch — the run record's job is
   // done (the same handoff the awaited path runs at pushItem)
-  endLoopRun(ctx.root, loopSlug(m.beads[0]!.id))
-  stampProjection(ctx, m.beads, pr)
+  endLoopRun(ctx.root, loopSlug(m.beads[0]!.id));
+  stampProjection(ctx, m.beads, pr);
   // ownership marking (spec bro-c650l) — the registry-spawn path's
   // discovery is HERE, not pushItem: a detached worker's PR only
   // exists once this settle pass finds it
-  stampLoopPr(ctx, m.beads, m.item, pr)
-  m.since = Date.now()
-  say(ctx, `loop: ${m.beads.map((b) => b.id).join(', ')} → PR ${prRef(ctx, pr)}`)
-  return 'active'
+  stampLoopPr(ctx, m.beads, m.item, pr);
+  m.since = Date.now();
+  say(ctx, `loop: ${m.beads.map(b => b.id).join(', ')} → PR ${prRef(ctx, pr)}`);
+  return 'active';
 }
 
 /** One member's service tick — the per-member cadence gate. A 'kept'
@@ -2181,132 +2143,27 @@ async function serviceWorker(ctx: Ctx, m: GateMember): Promise<ServiceVerdict> {
  *  the shared review host — intervalS), so the stack's wake set stays
  *  honest: worker exits land fast without dragging every gate into
  *  hot host polls, and a long worker never starves the stack. */
-/** The wall wait's service (spec bro-36bhc) — the member sits on the
- *  stack with its claim held, no worker, no PR gate to poll. At the
- *  reset a fix/rebase member simply re-joins its gate ('active'); a
- *  first worker respawns the SAME work order in the SAME worktree —
- *  `guardExistingEntry` admits the respawn only now that the reset
- *  passed, and claimStep re-binds the held claim rather than opening
- *  a fresh pick. */
-async function serviceWallWait(ctx: Ctx, m: GateMember): Promise<ServiceVerdict> {
-  ctx.stage = `wall wait ${m.beads[0]!.id} til ${new Date(m.wallWaitUntil!).toISOString()}`
-  ctx.bead = m.beads[0]!.id
-  if (Date.now() < m.wallWaitUntil!) {
-    return 'kept'
-  }
-  if (m.pr !== undefined) {
-    // a fix/rebase member's wait only deferred the gate re-poll
-    m.wallWaitUntil = undefined
-    m.wallWaitCause = undefined
-    return 'active'
-  }
-  // the held work order respawns verbatim — the prompt file is the
-  // order, rebuilt prompts would invent a different one
-  let prompt: string
-  try {
-    prompt = readFileSync(m.item.promptFile, 'utf8')
-  } catch (err) {
-    parkBeads(
-      ctx,
-      m.beads,
-      `loop: wall wait ended but the work order at ${m.item.promptFile} is unreadable — ${String(err)} — worktree ${m.item.worktreeDir}`
-    )
-    return leave(m, 'parked')
-  }
-  try {
-    await spawnWorker(ctx, m, prompt, m.lane)
-  } catch (err) {
-    return settleWallRespawnRefusal(ctx, m, err)
-  }
-  m.wallWaitUntil = undefined
-  m.wallWaitCause = undefined
-  say(
-    ctx,
-    `loop: ${m.beads[0]!.id} respawned as ${m.worker!.agentId} — the rate-limit reset passed`
-  )
-  return 'kept'
-}
-
-/** A refused respawn at the wall wait's end — the wall can out-live
- *  its own reset (the provider's clock optimistic, a later death
- *  re-arming it). A still-derived rate wall re-arms the wait on the
- *  NEW clock; quota or an indefinite wall is the park the settle
- *  always promised; a bare fleet cap is transient pressure — the held
- *  claim stays and the wait re-arms an interval rather than dropping
- *  the bead back onto the re-pick wheel. Anything else parks loud. */
-function settleWallRespawnRefusal(ctx: Ctx, m: GateMember, err: unknown): ServiceVerdict {
-  const msg = err instanceof Error ? err.message : String(err)
-  if (err instanceof SpawnError && err.kind === 'cap') {
-    const wall = wallForLane(ctx, m.lane)
-    const until = wall?.until === undefined ? Number.NaN : Date.parse(wall.until)
-    if (wall?.cause === 'rate_limited' && Number.isFinite(until)) {
-      m.wallWaitUntil = until
-      m.wallWaitCause = 'rate_limited'
-      say(
-        ctx,
-        `loop: ${m.beads[0]!.id} respawn refused — ${wallText(wall)} still holds; the wait rides the new reset`
-      )
-      return 'kept'
-    }
-    if (wall !== undefined) {
-      parkBeads(
-        ctx,
-        m.beads,
-        `loop: ${wallText(wall)} at the wall wait's end — worktree ${m.item.worktreeDir}`
-      )
-      return leave(m, 'parked')
-    }
-    m.wallWaitUntil = Date.now() + ctx.intervalS * 1000
-    m.wallWaitCause = 'cap'
-    say(ctx, `loop: ${m.beads[0]!.id} respawn refused — fleet full; the wait re-arms`)
-    return 'kept'
-  }
-  if (err instanceof SpawnError && err.kind === 'conflict') {
-    // the held claim's plane is contested — a foreign owner took the
-    // bead while it waited. Members release for re-pick; the lead
-    // parks unnoted, its owner not this run (settleSpawnRefusal's rule)
-    for (const b of openBeads(ctx, m.beads.slice(1))) {
-      reopenBead(ctx, b.id)
-    }
-  } else {
-    parkBeads(
-      ctx,
-      m.beads,
-      `loop: wall-wait respawn refused — ${msg} — worktree ${m.item.worktreeDir}`
-    )
-  }
-  return leave(m, 'parked')
-}
-
 async function serviceMember(ctx: Ctx, m: GateMember): Promise<ServiceVerdict> {
   if (m.nextPollAt !== undefined && Date.now() < m.nextPollAt) {
-    return 'kept'
+    return 'kept';
   }
-  m.nextPollAt = undefined
+  m.nextPollAt = undefined;
   // re-stamp the member's marker on every real service tick — stallMin
   // is advisory, so a running member outlives the marker's priced TTL
   // (the 24h floor included) and a pruned marker reads as an orphaned
   // PR to drive. Same file, same 'wait' kind; watchEnd still owns it.
-  watchRefresh(m.marker)
-  const verdict =
-    m.wallWaitUntil !== undefined
-      ? await serviceWallWait(ctx, m)
-      : m.worker !== undefined
-        ? await serviceWorker(ctx, m)
-        : await serviceGate(ctx, m)
+  watchRefresh(m.marker);
+  const verdict = m.worker !== undefined ? await serviceWorker(ctx, m) : await serviceGate(ctx, m);
   if (verdict === 'kept') {
-    // the wall's own clock beats the cadence stamp — a walled member
-    // wakes at the reset, never sooner, never an interval late
     m.nextPollAt =
-      m.wallWaitUntil ??
       Date.now() +
-        // a run that ticks below the worker poll's real-time second
-        // services .exit reads on its own cadence — never slower than it
-        (m.worker !== undefined
-          ? Math.min(WORKER_POLL_MS, ctx.intervalS * 1000)
-          : ctx.intervalS * 1000)
+      // a run that ticks below the worker poll's real-time second
+      // services .exit reads on its own cadence — never slower than it
+      (m.worker !== undefined
+        ? Math.min(WORKER_POLL_MS, ctx.intervalS * 1000)
+        : ctx.intervalS * 1000);
   }
-  return verdict
+  return verdict;
 }
 
 /** One member's settled snapshot → the mapped action. 'kept' parks the
@@ -2315,10 +2172,10 @@ async function serviceMember(ctx: Ctx, m: GateMember): Promise<ServiceVerdict> {
  *  rebase/update just moved the gate, exactly like the old serial
  *  waitForGate re-entry did. 'landed'/'parked' remove it. */
 async function serviceGate(ctx: Ctx, m: GateMember): Promise<ServiceVerdict> {
-  const pr = m.pr!
-  ctx.stage = `gate pr=${pr}`
-  ctx.bead = m.beads[0]!.id
-  let snap: GateSnapshot
+  const pr = m.pr!;
+  ctx.stage = `gate pr=${pr}`;
+  ctx.bead = m.beads[0]!.id;
+  let snap: GateSnapshot;
   try {
     const state = await fetchPrActState(
       ctx.rev,
@@ -2332,46 +2189,48 @@ async function serviceGate(ctx: Ctx, m: GateMember): Promise<ServiceVerdict> {
         requireApproval: ctx.act.requireApproval,
         approvers: ctx.act.approvers,
         stateCache: ctx.stateCache,
+        resolveLedger: resolveLedger(ctx.root),
       }
-    )
-    const gate = evaluateExitGate(state, { requireApproval: ctx.act.requireApproval })
+    );
+    const gate = evaluateExitGate(state, { requireApproval: ctx.act.requireApproval });
     console.error(
       `loop ${prRef(ctx, pr)}: threads=${gate.open_threads} ci=${gate.ci_pending}+${gate.ci_failing}f rev=${gate.reviewers_pending} sast=${gate.sast_pending}`
-    )
+    );
     snap = {
       state: state.state,
       headSha: state.headSha,
       mergeable: state.mergeable,
       mergeState: state.mergeState,
       openThreads: state.openThreads,
+      reopenedThreads: state.reopenedThreads?.length ?? 0,
       fixRounds: state.fixRounds,
       maxRounds: state.maxRounds,
       ok: gate.ok,
       blockers: gate.blockers,
       pending: gatePending(state),
-    }
-    m.fetchErrors = 0
+    };
+    m.fetchErrors = 0;
   } catch (err) {
-    m.fetchErrors += 1
-    console.error(`loop ${prRef(ctx, pr)}: fetch failed (${m.fetchErrors}) — ${String(err)}`)
+    m.fetchErrors += 1;
+    console.error(`loop ${prRef(ctx, pr)}: fetch failed (${m.fetchErrors}) — ${String(err)}`);
     // the old wait gave up on 3 consecutive failures OR its deadline —
     // a member whose fetch plane is down past mergeTimeoutMin settles
     // the same way rather than keeping a slot forever
     if (m.fetchErrors < 3 && Date.now() - m.since < ctx.cfg.mergeTimeoutMin * 60_000) {
-      return 'kept'
+      return 'kept';
     }
     parkBeads(
       ctx,
       m.beads,
       `loop: gate fetch kept failing for PR ${prRef(ctx, pr)} — ${String(err)} — worktree ${m.item.worktreeDir}`
-    )
-    return leave(m, 'parked')
+    );
+    return leave(m, 'parked');
   }
   const act = memberAction(snap, m, {
     fixRounds: ctx.cfg.fixRounds,
     timeoutMs: ctx.cfg.mergeTimeoutMin * 60_000,
     now: Date.now(),
-  })
+  });
   // lifecycle — one `gate` row per settled gate decision (specs/
   // telemetry/bro-ub91h.md). 'wait' is a poll, not a verdict; every
   // other action is the round's record — fix/rebase carry the round
@@ -2388,66 +2247,82 @@ async function serviceGate(ctx: Ctx, m: GateMember): Promise<ServiceVerdict> {
         threads: snap.openThreads,
         ...detail,
       },
-    })
-  }
+    });
+  };
   switch (act.kind) {
     case 'land':
       // landed externally while the member sat — close out, no merge call
-      gateRow('green', { action: 'land' })
-      return leave(m, await finalizeMerge(ctx, m.beads, m.item, pr, true))
+      gateRow('green', { action: 'land' });
+      return leave(m, await finalizeMerge(ctx, m.beads, m.item, pr, true));
     case 'merge':
-      gateRow('green', { action: 'merge' })
-      return leave(m, await finalizeMerge(ctx, m.beads, m.item, pr))
+      gateRow('green', { action: 'merge' });
+      return leave(m, await finalizeMerge(ctx, m.beads, m.item, pr));
     case 'closed':
-      gateRow('closed', { action: 'closed' })
-      parkBeads(ctx, m.beads, `loop: PR ${prRef(ctx, pr)} was closed unmerged — worktree ${m.item.worktreeDir}`)
-      return leave(m, 'parked')
+      gateRow('closed', { action: 'closed' });
+      parkBeads(
+        ctx,
+        m.beads,
+        `loop: PR ${prRef(ctx, pr)} was closed unmerged — worktree ${m.item.worktreeDir}`
+      );
+      return leave(m, 'parked');
     case 'fix': {
-      gateRow('blocked', { action: 'fix', round: m.rounds + 1, blockers: snap.blockers })
-      const verdict = await respawnRound(ctx, m, () => runFixRound(ctx, m, pr, m.rounds, m.lane))
+      gateRow('blocked', { action: 'fix', round: m.rounds + 1, blockers: snap.blockers });
+      const verdict = await respawnRound(ctx, m, () => runFixRound(ctx, m, pr, m.rounds, m.lane));
       // the snapshot that spawned the round must not be re-served —
       // a synchronous round (or a skipped spawn on already-resolved
       // threads) re-polls immediately and would re-trigger 'fix' on
       // the stale entry until the ttl lapses
-      ctx.stateCache?.invalidate({ repo: ctx.repo, pr })
-      return verdict
+      ctx.stateCache?.invalidate({ repo: ctx.repo, pr });
+      return verdict;
     }
     case 'rebase': {
-      gateRow('blocked', { action: 'rebase', round: m.rounds + 1 })
-      const verdict = await respawnRound(ctx, m, () => runRebaseRound(ctx, m, pr, m.rounds, m.lane))
-      ctx.stateCache?.invalidate({ repo: ctx.repo, pr })
-      return verdict
+      gateRow('blocked', { action: 'rebase', round: m.rounds + 1 });
+      const verdict = await respawnRound(ctx, m, () =>
+        runRebaseRound(ctx, m, pr, m.rounds, m.lane)
+      );
+      ctx.stateCache?.invalidate({ repo: ctx.repo, pr });
+      return verdict;
     }
     case 'update': {
-      let ok: boolean
+      let ok: boolean;
       try {
-        ok = ctx.rev.updateBranch({ repo: ctx.repo, pr }, snap.headSha)
+        ok = ctx.rev.updateBranch({ repo: ctx.repo, pr }, snap.headSha);
       } catch (err) {
         // a throw must not take the stack down — quiet keep; the
         // member's own deadline still bounds the retries
-        console.error(`loop ${prRef(ctx, pr)}: update-branch threw — ${String(err)}`)
-        return 'kept'
+        console.error(`loop ${prRef(ctx, pr)}: update-branch threw — ${String(err)}`);
+        return 'kept';
       }
-      console.error(`loop ${prRef(ctx, pr)}: update-branch ${ok ? 'pushed a new head' : 'refused'}`)
+      console.error(
+        `loop ${prRef(ctx, pr)}: update-branch ${ok ? 'pushed a new head' : 'refused'}`
+      );
       if (!ok) {
         // an update refusal IS the settle — same park the wait produced
-        gateRow('blocked', { action: 'update', updated: false, blockers: snap.blockers })
-        parkBeads(ctx, m.beads, `loop: PR ${prRef(ctx, pr)} blocked: ${snap.blockers.join('; ')} — worktree ${m.item.worktreeDir}`)
-        return leave(m, 'parked')
+        gateRow('blocked', { action: 'update', updated: false, blockers: snap.blockers });
+        parkBeads(
+          ctx,
+          m.beads,
+          `loop: PR ${prRef(ctx, pr)} blocked: ${snap.blockers.join('; ')} — worktree ${m.item.worktreeDir}`
+        );
+        return leave(m, 'parked');
       }
-      gateRow('behind', { action: 'update', updated: true })
+      gateRow('behind', { action: 'update', updated: true });
       // the pushed head obsoletes the feed entry this snap rode on —
       // the next poll fetches the new sha, not the stale BEHIND state
-      ctx.stateCache?.invalidate({ repo: ctx.repo, pr })
-      m.updatedSha = snap.headSha
-      return 'active'
+      ctx.stateCache?.invalidate({ repo: ctx.repo, pr });
+      m.updatedSha = snap.headSha;
+      return 'active';
     }
     case 'wait':
-      return 'kept'
+      return 'kept';
     case 'park':
-      gateRow('parked', { action: 'park', why: act.why })
-      parkBeads(ctx, m.beads, `loop: PR ${prRef(ctx, pr)} ${act.why} — worktree ${m.item.worktreeDir}`)
-      return leave(m, 'parked')
+      gateRow('parked', { action: 'park', why: act.why });
+      parkBeads(
+        ctx,
+        m.beads,
+        `loop: PR ${prRef(ctx, pr)} ${act.why} — worktree ${m.item.worktreeDir}`
+      );
+      return leave(m, 'parked');
   }
 }
 
@@ -2464,12 +2339,12 @@ function leave(m: GateMember, verdict: ItemResult): ItemResult {
       to: 'parked',
       detail: {
         via: 'loop',
-        ...(m.beads.length > 1 ? { beads: m.beads.map((b) => b.id).join(',') } : {}),
+        ...(m.beads.length > 1 ? { beads: m.beads.map(b => b.id).join(',') } : {}),
       },
-    })
+    });
   }
-  watchEnd(m.marker)
-  return verdict
+  watchEnd(m.marker);
+  return verdict;
 }
 
 /** One respawn round (fix or rebase): consumes budget, resets the
@@ -2481,50 +2356,26 @@ async function respawnRound(
   ctx: Ctx,
   m: GateMember,
   run: () => Promise<void>
-): Promise<ServiceVerdict> {
-  m.rounds += 1
+): Promise<'kept' | 'active'> {
+  m.rounds += 1;
   try {
-    await run()
+    await run();
   } catch (err) {
     // a fleet-cap refusal is transient pressure, not a repair attempt —
     // repeated refusals must not burn fixRounds into a park
     if (err instanceof SpawnError && err.kind === 'cap') {
-      m.rounds -= 1
-      // but a cap that IS a derived provider wall rides the wall's own
-      // clock (spec bro-36bhc): a rate wall defers the next gate poll
-      // to the reset, quota or an indefinite wall parks the member —
-      // otherwise every gate tick burns a respawn refusal against the
-      // same account wall
-      const wall = wallForLane(ctx, m.lane)
-      if (wall !== undefined) {
-        const until = wall.until === undefined ? Number.NaN : Date.parse(wall.until)
-        if (wall.cause === 'rate_limited' && Number.isFinite(until)) {
-          m.wallWaitUntil = until
-          m.wallWaitCause = 'rate_limited'
-          say(
-            ctx,
-            `loop: ${prRef(ctx, m.pr!)} respawn round refused — ${wallText(wall)}; the gate re-poll waits the reset`
-          )
-          return 'kept'
-        }
-        parkBeads(
-          ctx,
-          m.beads,
-          `loop: ${prRef(ctx, m.pr!)} respawn round refused on ${wallText(wall)} — worktree ${m.item.worktreeDir}`
-        )
-        return leave(m, 'parked')
-      }
+      m.rounds -= 1;
     }
-    console.error(`loop ${prRef(ctx, m.pr!)}: respawn round ${m.rounds} failed — ${String(err)}`)
-    return 'kept'
+    console.error(`loop ${prRef(ctx, m.pr!)}: respawn round ${m.rounds} failed — ${String(err)}`);
+    return 'kept';
   }
   if (m.worker !== undefined) {
     // the respawn joined the worker lifecycle — its .exit landing IS
     // the gate re-entry now, not this return (spec bro-zpa93)
-    return 'kept'
+    return 'kept';
   }
-  m.since = Date.now()
-  return 'active'
+  m.since = Date.now();
+  return 'active';
 }
 
 /** The conflict round — the member's PR is CONFLICTING; the agent
@@ -2538,23 +2389,32 @@ async function runRebaseRound(
   round: number,
   lane: LoopLane
 ): Promise<void> {
-  let base: string
+  let base: string;
   try {
-    base = ctx.rev.prMeta({ repo: ctx.repo, pr }).baseRef
+    base = ctx.rev.prMeta({ repo: ctx.repo, pr }).baseRef;
   } catch (err) {
-    console.error(`loop ${prRef(ctx, pr)}: base lookup for the rebase round failed — ${String(err)}`)
-    return
+    console.error(
+      `loop ${prRef(ctx, pr)}: base lookup for the rebase round failed — ${String(err)}`
+    );
+    return;
   }
-  const prompt = buildRebasePrompt(m.beads, pr, base)
-  writePrompt(m.item, prompt)
-  say(ctx, `loop: ${prRef(ctx, pr)} conflicts — rebase round ${round} onto ${base}`)
+  const prompt = buildRebasePrompt(m.beads, pr, base);
+  writePrompt(m.item, prompt);
+  say(ctx, `loop: ${prRef(ctx, pr)} conflicts — rebase round ${round} onto ${base}`);
   if (ctx.agents !== undefined) {
-    await spawnWorker(ctx, m, prompt, lane)
-    return
+    await spawnWorker(ctx, m, prompt, lane);
+    return;
   }
-  const code = await spawnAgent(ctx, lane, m.beads.map((b) => b.id), clumpTitle(m.beads), m.item.promptFile, m.item.worktreeDir)
+  const code = await spawnAgent(
+    ctx,
+    lane,
+    m.beads.map(b => b.id),
+    clumpTitle(m.beads),
+    m.item.promptFile,
+    m.item.worktreeDir
+  );
   if (code !== 0) {
-    console.error(`loop: rebase agent exited ${code ?? 'abnormal'} — the next gate poll decides`)
+    console.error(`loop: rebase agent exited ${code ?? 'abnormal'} — the next gate poll decides`);
   }
 }
 
@@ -2562,30 +2422,30 @@ async function runRebaseRound(
  *  declared-but-empty value fails closed (silently widening to the
  *  whole queue is exactly what --label prevents). */
 function labelSelection(argv: string[]): { labels?: string[] } {
-  const raw = flag(argv, '--label')
+  const raw = flag(argv, '--label');
   if (raw === undefined) {
-    return {}
+    return {};
   }
   const labels = raw
     .split(',')
-    .map((s) => s.trim())
-    .filter((s) => s !== '')
+    .map(s => s.trim())
+    .filter(s => s !== '');
   if (labels.length === 0) {
-    console.error('error: --label requires a comma-separated value, e.g. --label debt,ui')
-    process.exit(2)
+    console.error('error: --label requires a comma-separated value, e.g. --label debt,ui');
+    process.exit(2);
   }
-  return { labels }
+  return { labels };
 }
 
 /** `--stack NAME` — must form a git-ref-safe component or the member
  *  branches it plans would fail on creation mid-run. */
 function stackNameFlag(argv: string[]): string | undefined {
-  const name = flag(argv, '--stack')
+  const name = flag(argv, '--stack');
   if (name !== undefined && !isStackName(name)) {
-    console.error(`bro loop: invalid stack name "${name}" ([a-z0-9_.-])`)
-    process.exit(2)
+    console.error(`bro loop: invalid stack name "${name}" ([a-z0-9_.-])`);
+    process.exit(2);
   }
-  return name
+  return name;
 }
 
 const LOOP_VALUE_FLAGS = new Set([
@@ -2603,47 +2463,47 @@ const LOOP_VALUE_FLAGS = new Set([
   '--profile',
   '--class',
   '--model',
-])
-const LOOP_BOOL_FLAGS = new Set(['--json', '--dry-run', '--help', '--auto-approve'])
+]);
+const LOOP_BOOL_FLAGS = new Set(['--json', '--dry-run', '--help', '--auto-approve']);
 
 export async function runLoopCommand(argv: string[]): Promise<void> {
   if (hasHelpFlag(argv)) {
-    usage(0)
+    usage(0);
   }
-  rejectStrayArgs(argv)
-  const root = gitTry(['rev-parse', '--show-toplevel']).out.trim()
+  rejectStrayArgs(argv);
+  const root = gitTry(['rev-parse', '--show-toplevel']).out.trim();
   if (!root) {
-    console.error('bro loop: not inside a git worktree')
-    process.exit(1)
+    console.error('bro loop: not inside a git worktree');
+    process.exit(1);
   }
-  const broCfg = loadBroConfig(root)
-  const backend = ensureTasksBackend(root, broCfg.connectors)
-  const cfg = broCfg.loop as LoopConfig
-  const run = await resolveRunLane(root, argv, cfg)
-  const ctx = buildCtx(root, argv, broCfg, cfg, run, backend)
+  const broCfg = loadBroConfig(root);
+  const backend = ensureTasksBackend(root, broCfg.connectors);
+  const cfg = broCfg.loop as LoopConfig;
+  const run = await resolveRunLane(root, argv, cfg);
+  const ctx = buildCtx(root, argv, broCfg, cfg, run, backend);
   if (argv.includes('--dry-run')) {
-    await dryRunPlan(ctx)
-    return
+    await dryRunPlan(ctx);
+    return;
   }
   // One loop supervisor per repo: a respawn wrapper's duplicate stands
   // by behind the incumbent's hold and resumes once it exits — the
   // same single-instance contract `bro drive` takes (spec bro-2duu9).
-  const loopLock = gitCommonDir(root)
+  const loopLock = gitCommonDir(root);
   const releaseSupervisor =
     loopLock === null
       ? () => {}
       : await awaitFileLock(join(loopLock, 'bro', 'loop.lock'), {
           label: 'loop supervisor lock',
-          onStandby: (pid) =>
+          onStandby: pid =>
             say(
               ctx,
               `loop: already supervised${pid === null ? '' : ` by pid ${pid}`} — standing by`
             ),
-        })
+        });
   try {
-    await guardedRun(ctx)
+    await guardedRun(ctx);
   } finally {
-    releaseSupervisor()
+    releaseSupervisor();
   }
 }
 
@@ -2655,13 +2515,13 @@ function rejectStrayArgs(argv: string[]): void {
   const stray = positionals(argv, LOOP_VALUE_FLAGS, {
     boolFlags: LOOP_BOOL_FLAGS,
     strict: true,
-  })
+  });
   if (stray.length > 0) {
     console.error(
       `bro loop: unexpected argument '${stray[0]}' — quote the agent template ` +
         "as one arg: --agent 'devin -p --prompt-file {promptFile}'"
-    )
-    process.exit(2)
+    );
+    process.exit(2);
   }
 }
 
@@ -2679,16 +2539,16 @@ async function resolveRunLane(
   argv: string[],
   cfg: LoopConfig
 ): Promise<{
-  env: AgentConnectorEnv
-  sel: LoopLaneSel
-  lane: LoopLane
-  agent: string
-  routing: boolean
-  flagPin: boolean
+  env: AgentConnectorEnv;
+  sel: LoopLaneSel;
+  lane: LoopLane;
+  agent: string;
+  routing: boolean;
+  flagPin: boolean;
 }> {
-  const env = loadAgentEnv(root)
-  const sel = loopLaneSel(argv)
-  return { env, sel, ...(await resolveRunLaneInner(env, sel, cfg)) }
+  const env = loadAgentEnv(root);
+  const sel = loopLaneSel(argv);
+  return { env, sel, ...(await resolveRunLaneInner(env, sel, cfg)) };
 }
 
 function loopLaneSel(argv: string[]): LoopLaneSel {
@@ -2699,7 +2559,7 @@ function loopLaneSel(argv: string[]): LoopLaneSel {
     model: flag(argv, '--model'),
     autoApprove: argv.includes('--auto-approve') ? true : undefined,
     class: flag(argv, '--class'),
-  }
+  };
 }
 
 /** The flag TIER's provider pick — with routing armed, lane.provider
@@ -2710,7 +2570,7 @@ function flagTierPin(env: AgentConnectorEnv, sel: LoopLaneSel): boolean {
     sel.provider !== undefined ||
     (sel.agent !== undefined && Object.hasOwn(env.providers ?? {}, sel.agent)) ||
     (sel.profile !== undefined && fleetProfileOf(env, sel.profile).provider !== undefined)
-  )
+  );
 }
 
 /** The template the run expands — a cli provider's `command`
@@ -2724,13 +2584,13 @@ function effectiveAgent(
   cfg: LoopConfig
 ): string {
   if (lane.worker?.kind === 'template') {
-    return lane.worker.command
+    return lane.worker.command;
   }
-  const agentFlag = sel.agent
+  const agentFlag = sel.agent;
   if (agentFlag !== undefined && !Object.hasOwn(env.providers ?? {}, agentFlag)) {
-    return agentFlag
+    return agentFlag;
   }
-  return cfg.agent
+  return cfg.agent;
 }
 
 async function resolveRunLaneInner(
@@ -2741,13 +2601,10 @@ async function resolveRunLaneInner(
   // a template --agent bypasses the registry entirely — routing can
   // only arm when the provider lane is in play (templateEscape already
   // warned about the bypass)
-  const templateAgent =
-    sel.agent !== undefined && !Object.hasOwn(env.providers ?? {}, sel.agent)
+  const templateAgent = sel.agent !== undefined && !Object.hasOwn(env.providers ?? {}, sel.agent);
   const routing =
-    !templateAgent &&
-    env.fleet?.routing !== undefined &&
-    Object.keys(env.fleet.routing).length > 0
-  let lane: LoopLane
+    !templateAgent && env.fleet?.routing !== undefined && Object.keys(env.fleet.routing).length > 0;
+  let lane: LoopLane;
   try {
     // preflight the class every bead falls back to — a table whose
     // `default` (or the --class pin) doesn't resolve is a global
@@ -2759,23 +2616,23 @@ async function resolveRunLaneInner(
     // pushItem.
     const preflight = routing
       ? routeStepClass(env.fleet, env.providers ?? {}, undefined, '', sel.class, {})
-      : undefined
-    lane = await resolveLoopLane(env, sel, cfg, preflight)
+      : undefined;
+    lane = await resolveLoopLane(env, sel, cfg, preflight);
   } catch (err) {
     if (err instanceof SpawnError) {
-      console.error(`bro loop: ${err.message}`)
-      process.exit(2)
+      console.error(`bro loop: ${err.message}`);
+      process.exit(2);
     }
-    throw err
+    throw err;
   }
-  const flagPin = flagTierPin(env, sel)
-  const agent = effectiveAgent(lane, sel, env, cfg)
+  const flagPin = flagTierPin(env, sel);
+  const agent = effectiveAgent(lane, sel, env, cfg);
   if (lane.worker === undefined && agent === '' && !routing) {
     console.error(
       'bro loop: no agent configured — set loop.agent or loop.provider in bro.config ' +
         '(e.g. "devin --prompt-file {promptFile} -p") or pass --agent/--provider'
-    )
-    process.exit(2)
+    );
+    process.exit(2);
   }
   // {promptFile} isn't strictly required — an agent may read
   // BRO_PROMPT_FILE from env instead — but a TUI-capable CLI spawned
@@ -2786,21 +2643,17 @@ async function resolveRunLaneInner(
   // flag-tier pin the base template is inert — each bead's routed lane
   // carries its own command (lane.worker already holds the fallback
   // class's floor, so the pin test is the picks, not the lane).
-  if (
-    !(routing && !flagPin) &&
-    lane.worker?.kind !== 'argv' &&
-    !agent.includes('{promptFile}')
-  ) {
+  if (!(routing && !flagPin) && lane.worker?.kind !== 'argv' && !agent.includes('{promptFile}')) {
     // binary name only — the template may carry inline credentials
-    const agentBin = agent.split(/\s+/, 1)[0]
+    const agentBin = agent.split(/\s+/, 1)[0];
     console.error(
       `bro loop: agent template has no {promptFile} — "${agentBin}". ` +
         'The prompt file appends as a positional arg; interactive CLIs ' +
         '(devin, claude) treat that as a TUI session, not a worker prompt. ' +
         'Intended for env-reading agents (BRO_PROMPT_FILE) only.'
-    )
+    );
   }
-  return { lane, agent, routing, flagPin }
+  return { lane, agent, routing, flagPin };
 }
 
 function buildCtx(
@@ -2809,20 +2662,25 @@ function buildCtx(
   broCfg: ReturnType<typeof loadBroConfig>,
   cfg: LoopConfig,
   run: {
-    env: AgentConnectorEnv
-    sel: LoopLaneSel
-    lane: LoopLane
-    agent: string
-    routing: boolean
-    flagPin: boolean
+    env: AgentConnectorEnv;
+    sel: LoopLaneSel;
+    lane: LoopLane;
+    agent: string;
+    routing: boolean;
+    flagPin: boolean;
   },
   backend: string
 ): Ctx {
-  const { env, sel, lane, agent, routing, flagPin } = run
-  const rev = reviewHost(root, broCfg.connectors)
+  const { env, sel, lane, agent, routing, flagPin } = run;
+  const rev = reviewHost(root, broCfg.connectors);
   // the shared poll floor, not 1: a fractional interval is the e2e's
   // clock — the run polls fast without anyone faking the wall clock
-  const intervalS = num(flag(argv, '--interval'), 60, MIN_INTERVAL_SEC, Math.floor(TIMER_MAX_MS / 1000))
+  const intervalS = num(
+    flag(argv, '--interval'),
+    60,
+    MIN_INTERVAL_SEC,
+    Math.floor(TIMER_MAX_MS / 1000)
+  );
   const ctx: Ctx = {
     rev,
     tasks: facade('tasks', { dir: root }, { prefer: broCfg.connectors }),
@@ -2860,7 +2718,7 @@ function buildCtx(
     },
     // BEADS_DIR pinning is a beads tail — a non-beads store has no bd
     // to pin and no db that could fork inside the worktree
-    beadsDir: backend === 'beads' ? resolveBeadsDir(root, (m) => console.error(m)) : undefined,
+    beadsDir: backend === 'beads' ? resolveBeadsDir(root, m => console.error(m)) : undefined,
     stack: stackNameFlag(argv),
     tails: [],
     stage: 'startup',
@@ -2871,33 +2729,33 @@ function buildCtx(
     mirror: mirrorStore(root, broCfg, backend),
     mirrorPolicy: broCfg.mirror,
     specHas: specProbe(root, broCfg),
-  }
+  };
   // the registry spawn engages when there's a shared store to pin the
   // claim/exit record against — without one the legacy awaited spawn
   // keeps the serial semantics (spec bro-zpa93). A connector that
   // can't even resolve degrades to that same fallback, not a dead loop.
   if (ctx.beadsDir !== undefined) {
     try {
-      ctx.agents = resolveAgentConnector({ dir: root }, {}, loadAgentEnv(root))
+      ctx.agents = resolveAgentConnector({ dir: root }, {}, loadAgentEnv(root));
     } catch (err) {
       console.error(
         `loop: agent connector failed to resolve — ${err instanceof Error ? err.message : String(err)} — falling back to the awaited spawn`
-      )
+      );
     }
   }
-  sayLaneNotes(ctx, flagPin)
+  sayLaneNotes(ctx, flagPin);
   // the claim-authority advisory: outside the registry path the loop
   // claims through the tasks facade, whose claim() may be best-effort
   // assignment rather than a lease. The registry path claims on the
   // pinned beads store (exclusive) and needs no note; an
   // exclusive-claiming facade needs none either.
   if (ctx.agents === undefined) {
-    const note = claimAuthorityNote(ctx.backend, declaredClaimCapability(ctx.tasks))
+    const note = claimAuthorityNote(ctx.backend, declaredClaimCapability(ctx.tasks));
     if (note !== undefined) {
-      say(ctx, note)
+      say(ctx, note);
     }
   }
-  return ctx
+  return ctx;
 }
 
 /** A third-party store whose capability getter throws reads as
@@ -2906,9 +2764,9 @@ export function declaredClaimCapability(
   store: Pick<TaskStore, 'claimCapability'>
 ): ClaimCapability | undefined {
   try {
-    return store.claimCapability?.()
+    return store.claimCapability?.();
   } catch {
-    return undefined
+    return undefined;
   }
 }
 
@@ -2926,12 +2784,12 @@ export function claimAuthorityNote(
   cap: ClaimCapability | undefined
 ): string | undefined {
   if (cap?.strength === 'exclusive') {
-    return undefined
+    return undefined;
   }
   const shared =
     cap?.identity === 'viewer'
       ? ' — and every worker behind one credential claims as the same identity'
-      : ''
+      : '';
   // undeclared names what is unknown rather than claiming best-effort —
   // the store may be exclusive, the loop just cannot verify it
   const promise =
@@ -2939,12 +2797,12 @@ export function claimAuthorityNote(
       ? `loop: tasks backend '${backend}' declares no claim capability — ` +
         `exclusivity is unverified, so claim() may be an assignment, not a lease`
       : `loop: tasks backend '${backend}' offers best-effort claims only — ` +
-        `claim() is an assignment, not a lease`
+        `claim() is an assignment, not a lease`;
   return (
     `${promise}${shared}. A second issuer ` +
     `(another loop or rig on the same tracker) can seat the same item; ` +
     `keep one loop on this backlog or run on an exclusive-claim store (beads).`
-  )
+  );
 }
 
 // announce the resolved lane once — agents.native.provider picking up
@@ -2954,15 +2812,15 @@ export function claimAuthorityNote(
 // head, which advertises the floor, not a pin.
 function sayLaneNotes(ctx: Ctx, flagPin: boolean): void {
   if (ctx.routing && !flagPin) {
-    const pin = ctx.sel.class === undefined ? '' : ` (pinned: ${ctx.sel.class})`
-    say(ctx, `loop: fleet.routing — provider resolves per bead class${pin}`)
+    const pin = ctx.sel.class === undefined ? '' : ` (pinned: ${ctx.sel.class})`;
+    say(ctx, `loop: fleet.routing — provider resolves per bead class${pin}`);
   }
   if (ctx.lane.provider === undefined || (ctx.routing && !flagPin)) {
-    return
+    return;
   }
-  const worker = ctx.lane.worker?.kind === 'argv' ? ' (acp worker)' : ''
-  const routed = ctx.routing ? ' (pinned — fleet.routing supplies classes only)' : ''
-  say(ctx, `loop: provider ${laneLabel(ctx.lane)}${worker}${routed}`)
+  const worker = ctx.lane.worker?.kind === 'argv' ? ' (acp worker)' : '';
+  const routed = ctx.routing ? ' (pinned — fleet.routing supplies classes only)' : '';
+  say(ctx, `loop: provider ${laneLabel(ctx.lane)}${worker}${routed}`);
 }
 
 // the projection target rides the REVIEW host's tasks — a named
@@ -2975,37 +2833,37 @@ function mirrorStore(
   backend: string
 ): Ctx['mirror'] {
   try {
-    const name = facadeName('reviews', { dir: root }, { prefer: broCfg.connectors })
+    const name = facadeName('reviews', { dir: root }, { prefer: broCfg.connectors });
     if (name === backend) {
-      return undefined
+      return undefined;
     }
-    const s = facade('tasks', { dir: root }, { connector: name })
-    return s.publish === undefined ? undefined : s
+    const s = facade('tasks', { dir: root }, { connector: name });
+    return s.publish === undefined ? undefined : s;
   } catch {
-    return undefined
+    return undefined;
   }
 }
 
 function specProbe(root: string, broCfg: ReturnType<typeof loadBroConfig>): Ctx['specHas'] {
   try {
-    const specs = specStore(root, broCfg.connectors)
-    return (id: string) => specs.hasSpec(id)
+    const specs = specStore(root, broCfg.connectors);
+    return (id: string) => specs.hasSpec(id);
   } catch {
-    return () => false
+    return () => false;
   }
 }
 
 async function dryRunPlan(ctx: Ctx): Promise<void> {
-  const scope = loopScope()
+  const scope = loopScope();
   if (!scope) {
-    return
+    return;
   }
-  const ready = readyBeads(ctx.root)
-  const queue = classify(ready, ctx.selection, scope, epicParentIds(ready, ctx.root)).queue
-  const top = queue[0]
+  const ready = readyBeads(ctx.root);
+  const queue = classify(ready, ctx.selection, scope, epicParentIds(ready, ctx.root)).queue;
+  const top = queue[0];
   if (!top) {
-    console.log('loop --dry-run: nothing claimable')
-    return
+    console.log('loop --dry-run: nothing claimable');
+    return;
   }
   // dry-run renders the clump the claim would pick — no claims made;
   // --max bounds it exactly as tryClaim's budget does
@@ -3014,56 +2872,55 @@ async function dryRunPlan(ctx: Ctx): Promise<void> {
       ? [
           top,
           ...clumpMembers(top, queue.slice(1), {
-            size:
-              ctx.cfg.maxItems > 0 ? Math.min(ctx.cfg.batch, ctx.cfg.maxItems) : ctx.cfg.batch,
+            size: ctx.cfg.maxItems > 0 ? Math.min(ctx.cfg.batch, ctx.cfg.maxItems) : ctx.cfg.batch,
             minPriority: ctx.cfg.batchMinPriority,
           }),
         ]
-      : [top]
-  console.log(`would claim ${clump.map((b) => b.id).join(', ')} — ${top.title}`)
+      : [top];
+  console.log(`would claim ${clump.map(b => b.id).join(', ')} — ${top.title}`);
   for (const b of clump.slice(1)) {
-    console.log(`  + ${b.id} — ${b.title}`)
+    console.log(`  + ${b.id} — ${b.title}`);
   }
   if (clump.length > 1) {
-    console.log(`  batch: ${clump.length} beads, one worktree, one PR`)
+    console.log(`  batch: ${clump.length} beads, one worktree, one PR`);
   }
-  const { slot, item } = stackPlan(ctx, top)
-  console.log(`  worktree ${item.worktreeDir} on ${item.branch}`)
-  dryRunDisk(ctx)
+  const { slot, item } = stackPlan(ctx, top);
+  console.log(`  worktree ${item.worktreeDir} on ${item.branch}`);
+  dryRunDisk(ctx);
   if (slot !== undefined) {
-    console.log(`  stack ${ctx.stack} member ${slot.n} — PR base ${slot.base}`)
+    console.log(`  stack ${ctx.stack} member ${slot.n} — PR base ${slot.base}`);
   }
-  const lane = await dryRunLane(ctx, top)
+  const lane = await dryRunLane(ctx, top);
   if (lane === undefined) {
-    return
+    return;
   }
   if (lane.class !== undefined) {
-    console.log(`  class: ${lane.class}`)
+    console.log(`  class: ${lane.class}`);
   }
   if (lane.provider !== undefined) {
-    console.log(`  provider: ${laneLabel(lane)}`)
+    console.log(`  provider: ${laneLabel(lane)}`);
   }
-  const w = lane.worker
+  const w = lane.worker;
   const argvLine =
     w?.kind === 'argv'
       ? [...w.argv, item.promptFile].map(shRender).join(' ')
-      : expandAgentCmd(laneCommand(ctx, lane), item.promptFile)
-  console.log(`  agent: ${argvLine}`)
+      : expandAgentCmd(laneCommand(ctx, lane), item.promptFile);
+  console.log(`  agent: ${argvLine}`);
 }
 
 // the same floor tryClaim enforces — a dry run is exactly where an
 // operator sizes maxOpen against real headroom
 function dryRunDisk(ctx: Ctx): void {
-  const probes = diskProbes(ctx)
-  const breach = diskFloorBreach(probes, ctx.cfg)
+  const probes = diskProbes(ctx);
+  const breach = diskFloorBreach(probes, ctx.cfg);
   for (const p of probes) {
-    console.log(`  disk: ${Math.floor(p.freeBytes / MB)}M free on ${p.path}`)
+    console.log(`  disk: ${Math.floor(p.freeBytes / MB)}M free on ${p.path}`);
   }
   if (breach !== undefined) {
     console.log(
       `  disk: HOLD — below floor ${Math.floor(diskFloorBytes(ctx.cfg) / MB)}M ` +
         `(${ctx.cfg.diskMinSlots}×${ctx.cfg.worktreeMb}M)`
-    )
+    );
   }
 }
 
@@ -3074,16 +2931,16 @@ function dryRunDisk(ctx: Ctx): void {
 // the armed router instead.
 async function dryRunLane(ctx: Ctx, top: ReadyBead): Promise<LoopLane | undefined> {
   if (!ctx.routing) {
-    return ctx.lane
+    return ctx.lane;
   }
-  let lane: LoopLane
+  let lane: LoopLane;
   try {
-    lane = await resolveBeadLane(ctx, top, { router: false })
+    lane = await resolveBeadLane(ctx, top, { router: false });
   } catch (err) {
-    console.log(`  route: ${err instanceof Error ? err.message : String(err)}`)
-    return undefined
+    console.log(`  route: ${err instanceof Error ? err.message : String(err)}`);
+    return undefined;
   }
-  const router = ctx.env.fleet?.router
+  const router = ctx.env.fleet?.router;
   if (
     router !== undefined &&
     router.mode !== 'off' &&
@@ -3091,45 +2948,45 @@ async function dryRunLane(ctx: Ctx, top: ReadyBead): Promise<LoopLane | undefine
     ctx.beadsDir !== undefined &&
     classLabelOf(top) === undefined
   ) {
-    console.log(`  router: ${router.provider} armed (${router.mode}) — a real run may re-class`)
+    console.log(`  router: ${router.provider} armed (${router.mode}) — a real run may re-class`);
   }
-  return lane
+  return lane;
 }
 
 /** Project scope for the queue — a failed prefix lookup is reported
  *  once, not thrown into the claim loop. */
 function loopScope(): ReturnType<typeof nextScope> | null {
   try {
-    return nextScope('project') // prefix is stable for the run
+    return nextScope('project'); // prefix is stable for the run
   } catch (err) {
-    console.error(`loop: ${err instanceof Error ? err.message : String(err)}`)
-    return null
+    console.error(`loop: ${err instanceof Error ? err.message : String(err)}`);
+    return null;
   }
 }
 
 /** Open PRs on local loop/* branches — exact per-branch lookup, so the
  *  audit is bounded by the repo's own tail set, not a global PR cap. */
 function openLoopPrs(ctx: Ctx, branches: string[]): string[] {
-  const out: string[] = []
+  const out: string[] = [];
   for (const b of branches) {
     try {
       for (const pr of ctx.rev.prsForBranch(b)) {
-        out.push(`${prRef(ctx, pr)} (${b})`)
+        out.push(`${prRef(ctx, pr)} (${b})`);
       }
     } catch {
-      out.push(`warning: PR lookup failed for ${b} — host unreachable`)
+      out.push(`warning: PR lookup failed for ${b} — host unreachable`);
     }
   }
-  return out
+  return out;
 }
 
 interface RefTails {
-  worktrees: string[]
+  worktrees: string[];
   /** branch names riding a loop/* worktree — disjoint from `branches`,
    *  needed so the open-PR audit sees PRs on worktree'd branches too */
-  worktreeBranches: string[]
-  branches: string[]
-  errors: string[]
+  worktreeBranches: string[];
+  branches: string[];
+  errors: string[];
 }
 
 /** loop/* worktrees still checked out + loop/* branches with no
@@ -3137,45 +2994,45 @@ interface RefTails {
  *  branches the same way. A failed git probe reports as an error line,
  *  never as a false "clean". */
 export function loopRefTails(root: string, prefixes: string[] = ['loop/']): RefTails {
-  const errors: string[] = []
-  const wt = gitTry(['-C', root, 'worktree', 'list', '--porcelain'])
+  const errors: string[] = [];
+  const wt = gitTry(['-C', root, 'worktree', 'list', '--porcelain']);
   if (wt.code !== 0) {
-    errors.push(`worktree list failed — ${wt.err || 'git error'}`)
+    errors.push(`worktree list failed — ${wt.err || 'git error'}`);
   }
-  const trees = parseWorktreePorcelain(wt.out).filter((w) =>
-    prefixes.some((p) => w.branch?.startsWith(p))
-  )
-  const onTree = new Set(trees.map((w) => w.branch!))
-  const bare: string[] = []
+  const trees = parseWorktreePorcelain(wt.out).filter(w =>
+    prefixes.some(p => w.branch?.startsWith(p))
+  );
+  const onTree = new Set(trees.map(w => w.branch!));
+  const bare: string[] = [];
   for (const prefix of prefixes) {
-    const bl = gitTry(['-C', root, 'branch', '--list', `${prefix}*`, '--format=%(refname:short)'])
+    const bl = gitTry(['-C', root, 'branch', '--list', `${prefix}*`, '--format=%(refname:short)']);
     if (bl.code !== 0) {
-      errors.push(`branch list failed — ${bl.err || 'git error'}`)
-      continue
+      errors.push(`branch list failed — ${bl.err || 'git error'}`);
+      continue;
     }
-    bare.push(...bl.out.split('\n').filter((b) => b && !onTree.has(b)))
+    bare.push(...bl.out.split('\n').filter(b => b && !onTree.has(b)));
   }
   return {
-    worktrees: trees.map((w) => `${w.path} [${w.branch}]`),
-    worktreeBranches: trees.map((w) => w.branch!),
+    worktrees: trees.map(w => `${w.path} [${w.branch}]`),
+    worktreeBranches: trees.map(w => w.branch!),
     branches: bare,
     errors,
-  }
+  };
 }
 
 /** Beads left in_progress, split by this run's claims vs pre-existing —
  *  a shared store holds other sessions' claims too. */
 function claimedTails(tasks: TaskStore, seen: Set<string>): { own: string[]; other: string[] } {
   try {
-    const rows = tasks.list({ status: 'in_progress' })
+    const rows = tasks.list({ status: 'in_progress' });
     const fmt = (r: { id: string; title?: string }) =>
-      `${r.id} ${(r.title ?? '').replace(/\s+/g, ' ').slice(0, 60)}`.trim()
+      `${r.id} ${(r.title ?? '').replace(/\s+/g, ' ').slice(0, 60)}`.trim();
     return {
-      own: rows.filter((r) => seen.has(r.id)).map(fmt),
-      other: rows.filter((r) => !seen.has(r.id)).map(fmt),
-    }
+      own: rows.filter(r => seen.has(r.id)).map(fmt),
+      other: rows.filter(r => !seen.has(r.id)).map(fmt),
+    };
   } catch {
-    return { own: [], other: ['warning: claimed-task audit failed — store unavailable'] }
+    return { own: [], other: ['warning: claimed-task audit failed — store unavailable'] };
   }
 }
 
@@ -3192,39 +3049,46 @@ function sweepLoopLitter(ctx: Ctx, parkedClaims: ReadonlySet<string>): LitterRea
       parkedKeep: ctx.cfg.parkedKeep,
       parkedTtlDays: ctx.cfg.parkedTtlDays,
       keepClaims: parkedClaims,
-    })
+    });
   } catch (err) {
-    say(ctx, `  warning: litter sweep failed — ${err instanceof Error ? err.message : String(err)}`)
-    return undefined
+    say(
+      ctx,
+      `  warning: litter sweep failed — ${err instanceof Error ? err.message : String(err)}`
+    );
+    return undefined;
   }
 }
 
 /** The audit's printed report: what the sweep reaped, then every tail
  *  that survived it — 'clean' only when no section has anything left. */
-function sayLoopAudit(ctx: Ctx, reap: LitterReap | undefined, sections: [string, string[]][]): void {
-  say(ctx, 'loop audit:')
+function sayLoopAudit(
+  ctx: Ctx,
+  reap: LitterReap | undefined,
+  sections: [string, string[]][]
+): void {
+  say(ctx, 'loop audit:');
   for (const r of reap?.released ?? []) {
-    say(ctx, `  released claim: ${r}`)
+    say(ctx, `  released claim: ${r}`);
   }
   for (const g of reap?.repaired ?? []) {
-    say(ctx, `  re-registered: ${g}`)
+    say(ctx, `  re-registered: ${g}`);
   }
   for (const r of reap?.reaped ?? []) {
-    say(ctx, `  reaped: ${r}`)
+    say(ctx, `  reaped: ${r}`);
   }
   for (const b of reap?.branches ?? []) {
-    say(ctx, `  deleted branch: ${b}`)
+    say(ctx, `  deleted branch: ${b}`);
   }
   for (const e of reap?.errors ?? []) {
-    say(ctx, `  reap error: ${e}`)
+    say(ctx, `  reap error: ${e}`);
   }
   if (sections.every(([, items]) => items.length === 0)) {
-    say(ctx, '  clean — no loop tails')
-    return
+    say(ctx, '  clean — no loop tails');
+    return;
   }
   for (const [label, items] of sections) {
     for (const item of items) {
-      say(ctx, `  ${label}: ${item}`)
+      say(ctx, `  ${label}: ${item}`);
     }
   }
 }
@@ -3238,16 +3102,16 @@ export function syncAfterAudit(
   ctx: { json: boolean },
   sync: () => void = () => runSyncCommand([])
 ): void {
-  const realExit = process.exit
+  const realExit = process.exit;
   process.exit = ((code?: number) => {
-    throw new Error(`bro sync called process.exit(${code ?? 0})`)
-  }) as typeof process.exit
+    throw new Error(`bro sync called process.exit(${code ?? 0})`);
+  }) as typeof process.exit;
   try {
-    sync()
+    sync();
   } catch (err) {
-    say(ctx, `  warning: bro sync failed — ${err instanceof Error ? err.message : String(err)}`)
+    say(ctx, `  warning: bro sync failed — ${err instanceof Error ? err.message : String(err)}`);
   } finally {
-    process.exit = realExit
+    process.exit = realExit;
   }
 }
 
@@ -3259,23 +3123,23 @@ export function syncAfterAudit(
  *  during the run. Finished with `bro sync` so artifacts and bead state
  *  travel. Never throws — an audit failure is reported, not raised. */
 function endAudit(ctx: Ctx, seen: Set<string>, parkedClaims: ReadonlySet<string>): void {
-  ctx.stage = 'audit'
+  ctx.stage = 'audit';
   // the sweep's git helpers and runSyncCommand narrate via console.log —
   // under --json that corrupts the event stream, so route the whole
   // audit's helper output to stderr (say() already routes its own lines)
-  const log = console.log
+  const log = console.log;
   if (ctx.json) {
-    console.log = console.error
+    console.log = console.error;
   }
   try {
     // reap before the report — a landed bead's leftover tree is not a
     // tail; the audit describes what survived the sweep
-    const reap = sweepLoopLitter(ctx, parkedClaims)
+    const reap = sweepLoopLitter(ctx, parkedClaims);
     const { worktrees, worktreeBranches, branches, errors } = loopRefTails(
       ctx.root,
       ctx.stack === undefined ? ['loop/'] : ['loop/', `stack/${ctx.stack}/`]
-    )
-    const claimed = claimedTails(ctx.tasks, seen)
+    );
+    const claimed = claimedTails(ctx.tasks, seen);
     sayLoopAudit(ctx, reap, [
       // PRs live on branches — worktree'd ones (a parked bead keeps both)
       // are just as much a tail as the bare branches
@@ -3286,12 +3150,12 @@ function endAudit(ctx: Ctx, seen: Set<string>, parkedClaims: ReadonlySet<string>
       ['in_progress elsewhere', claimed.other],
       ['audit errors', errors],
       ['cleanup errors', ctx.tails],
-    ])
-    syncAfterAudit(ctx)
+    ]);
+    syncAfterAudit(ctx);
   } catch (err) {
-    say(ctx, `  warning: audit failed — ${err instanceof Error ? err.message : String(err)}`)
+    say(ctx, `  warning: audit failed — ${err instanceof Error ? err.message : String(err)}`);
   } finally {
-    console.log = log
+    console.log = log;
   }
 }
 
@@ -3302,9 +3166,9 @@ function clumpCandidates(
   scope: NonNullable<ReturnType<typeof nextScope>>,
   seen: Set<string>
 ): { candidates: ReadyBead[]; foreign: number } {
-  const ready = readyBeads(ctx.root)
-  const c = classify(ready, ctx.selection, scope, epicParentIds(ready, ctx.root))
-  return { candidates: c.queue.filter((b) => !seen.has(b.id)), foreign: c.foreign }
+  const ready = readyBeads(ctx.root);
+  const c = classify(ready, ctx.selection, scope, epicParentIds(ready, ctx.root));
+  return { candidates: c.queue.filter(b => !seen.has(b.id)), foreign: c.foreign };
 }
 
 /** Read-only drain check for the disk hold — clumpCandidates' pipeline
@@ -3318,24 +3182,24 @@ function queueDrained(
   scope: NonNullable<ReturnType<typeof nextScope>>,
   seen: Set<string>
 ): boolean {
-  let c: { candidates: ReadyBead[]; foreign: number }
+  let c: { candidates: ReadyBead[]; foreign: number };
   try {
-    c = clumpCandidates(ctx, scope, seen)
+    c = clumpCandidates(ctx, scope, seen);
   } catch {
-    return false
+    return false;
   }
-  const statuses = beadStatuses(ctx, c.candidates)
-  const claimable = c.candidates.some((b) => {
-    const s = statuses.get(b.id)
-    return s !== 'in_progress' && s !== 'closed'
-  })
+  const statuses = beadStatuses(ctx, c.candidates);
+  const claimable = c.candidates.some(b => {
+    const s = statuses.get(b.id);
+    return s !== 'in_progress' && s !== 'closed';
+  });
   if (claimable) {
-    return false
+    return false;
   }
   if (c.foreign > 0) {
-    say(ctx, `loop: ${c.foreign} foreign-scope bead(s) remain — not claimable in this project`)
+    say(ctx, `loop: ${c.foreign} foreign-scope bead(s) remain — not claimable in this project`);
   }
-  return true
+  return true;
 }
 
 /** The engine's verdict gates the pick (spec bro-oy3k1.6): a parked
@@ -3348,10 +3212,10 @@ function queueDrained(
  *  stays the guard; a blind probe must not mask work. */
 function claimableByLadder(ctx: Ctx, b: ReadyBead, allowGate: boolean): boolean {
   try {
-    const v = rigNext(ctx.root, b.id, { store: ctx.tasks }).verdict
-    return v === 'step' || (allowGate && v === 'gate')
+    const v = rigNext(ctx.root, b.id, { store: ctx.tasks }).verdict;
+    return v === 'step' || (allowGate && v === 'gate');
   } catch {
-    return true
+    return true;
   }
 }
 
@@ -3364,48 +3228,50 @@ function pickLead(ctx: Ctx, candidates: ReadyBead[]): ReadyBead | undefined {
   if (ctx.agents === undefined) {
     for (const b of candidates) {
       if (!claimableByLadder(ctx, b, true)) {
-        continue
+        continue;
       }
-      const got = claimUpTo([b], 1, ctx.root)[0]
+      const got = claimUpTo([b], 1, ctx.root)[0];
       if (got !== undefined) {
-        return got
+        return got;
       }
     }
-    return undefined
+    return undefined;
   }
-  let statuses: Map<string, string> | undefined
-  return candidates.find((b) => {
+  let statuses: Map<string, string> | undefined;
+  return candidates.find(b => {
     // lazily fetched — a cheap status prefetch ahead of the verdict
     // probe, which costs the ready/show reads
-    const s = (statuses ??= beadStatuses(ctx, candidates)).get(b.id)
-    return s !== 'in_progress' && s !== 'closed' && claimableByLadder(ctx, b, true)
-  })
+    const s = (statuses ??= beadStatuses(ctx, candidates)).get(b.id);
+    return s !== 'in_progress' && s !== 'closed' && claimableByLadder(ctx, b, true);
+  });
 }
 
 /** Members claim one at a time — a raced-away member skips, and a
  *  mid-fill store failure must not sink the run with half the clump
  *  claimed: the lead proceeds with whatever members did claim. */
 function claimMembers(ctx: Ctx, want: ReadyBead[]): ReadyBead[] {
-  const members: ReadyBead[] = []
+  const members: ReadyBead[] = [];
   for (const m of want) {
     // members join only on `step` — a `gate` verdict means the
     // member's own PR is already in flight; folding it into this
     // clump would re-work a gated branch (spec bro-oy3k1.6)
     if (!claimableByLadder(ctx, m, false)) {
-      continue
+      continue;
     }
     try {
-      const got = claimUpTo([m], 1, ctx.root)[0]
+      const got = claimUpTo([m], 1, ctx.root)[0];
       if (got === undefined) {
-        continue // raced away
+        continue; // raced away
       }
-      members.push(got)
+      members.push(got);
     } catch (err) {
-      console.error(`loop: clump member claim failed — ${String(err)} — proceeding with a partial clump`)
-      break
+      console.error(
+        `loop: clump member claim failed — ${String(err)} — proceeding with a partial clump`
+      );
+      break;
     }
   }
-  return members
+  return members;
 }
 
 /** Claim the next work item — the top ready bead, plus its compatible
@@ -3420,13 +3286,13 @@ function claimClump(
   seen: Set<string>,
   budget: number
 ): ReadyBead[] | undefined {
-  const { candidates, foreign } = clumpCandidates(ctx, scope, seen)
-  const lead = pickLead(ctx, candidates)
+  const { candidates, foreign } = clumpCandidates(ctx, scope, seen);
+  const lead = pickLead(ctx, candidates);
   if (!lead) {
     if (foreign > 0) {
-      say(ctx, `loop: ${foreign} foreign-scope bead(s) remain — not claimable in this project`)
+      say(ctx, `loop: ${foreign} foreign-scope bead(s) remain — not claimable in this project`);
     }
-    return undefined
+    return undefined;
   }
   // claim custody — the litter sweep treats in_progress with no live
   // owner as an orphan (bro-ho09d). The worker's pid only exists after
@@ -3437,31 +3303,31 @@ function claimClump(
   // verbatim. pushItem re-stamps the record; the spawn re-stamps it
   // under the worker's pid (spawnAgent's beginLoopRun, or spawnWorker's
   // on the registry path — bro-wg896).
-  claimCustody(ctx, lead, [lead.id])
+  claimCustody(ctx, lead, [lead.id]);
   // solo fast path — batch off, no budget for a second member, or a
   // lead that can't clump (urgent, keyless, or `solo`-labelled)
   if (ctx.cfg.batch < 2 || budget < 2) {
-    return [lead]
+    return [lead];
   }
   const want = clumpMembers(
     lead,
-    candidates.filter((b) => b.id !== lead.id),
+    candidates.filter(b => b.id !== lead.id),
     { size: Math.min(ctx.cfg.batch, budget), minPriority: ctx.cfg.batchMinPriority }
-  )
+  );
   if (want.length === 0) {
-    return [lead]
+    return [lead];
   }
-  const members = claimMembers(ctx, want)
+  const members = claimMembers(ctx, want);
   if (members.length > 0) {
     say(
       ctx,
-      `loop: batch of ${members.length + 1} — ${lead.id} + ${members.map((b) => b.id).join(', ')}`
-    )
+      `loop: batch of ${members.length + 1} — ${lead.id} + ${members.map(b => b.id).join(', ')}`
+    );
     // members claimed after the lead — widen custody so their
     // in_progress also traces to this run's owner pid
-    claimCustody(ctx, lead, [lead.id, ...members.map((b) => b.id)])
+    claimCustody(ctx, lead, [lead.id, ...members.map(b => b.id)]);
   }
-  return [lead, ...members]
+  return [lead, ...members];
 }
 
 /** The run record as a claim-custody marker: loop-pid owned until
@@ -3469,7 +3335,7 @@ function claimClump(
  *  in_progress bead between `bd --claim` and the worker fork reads as
  *  an orphan to `bro work prune --loop` and gets released mid-setup. */
 function claimCustody(ctx: Ctx, lead: ReadyBead, beadIds: string[]): void {
-  const slug = loopSlug(lead.id)
+  const slug = loopSlug(lead.id);
   beginLoopRun(ctx.root, {
     beadId: lead.id,
     beadIds,
@@ -3479,60 +3345,56 @@ function claimCustody(ctx: Ctx, lead: ReadyBead, beadIds: string[]): void {
     startedAt: new Date().toISOString(),
     worktree: worktreePathFor(ctx.root, slug),
     log: loopRunLog(ctx.root, slug) ?? '',
-  })
+  });
 }
 
 /** Post-merge cascade after a landed stack member — retarget + rebase
  *  whatever stacked on top of it before the next item runs. */
 function syncAfterLand(ctx: Ctx): void {
   if (ctx.stack === undefined) {
-    return
+    return;
   }
   try {
     for (const line of syncStack(ctx.root, ctx.stack)) {
-      say(ctx, `loop stack sync:${line}`)
+      say(ctx, `loop stack sync:${line}`);
     }
   } catch (err) {
-    say(ctx, `loop: stack sync failed — ${err instanceof Error ? err.message : String(err)}`)
+    say(ctx, `loop: stack sync failed — ${err instanceof Error ? err.message : String(err)}`);
   }
 }
 
-const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms))
+const sleep = (ms: number): Promise<void> => new Promise(r => setTimeout(r, ms));
 
 /** The run's mutable queue state — the gate stack, the outcome tally,
  *  and the claim bookkeeping the tick helpers share. */
 interface QueueState {
   /** Beads already attempted this run — never re-picked. */
-  seen: Set<string>
+  seen: Set<string>;
   /** The ordered gate stack — entry order is service priority. */
-  stack: GateMember[]
-  tally: { landed: number; closed: number; parked: number; failed: number }
+  stack: GateMember[];
+  tally: { landed: number; closed: number; parked: number; failed: number };
   /** Claims spent — --max bounds claims, not outcomes: a claimed bead's
    *  verdict arrives whenever its gate settles. */
-  claimed: number
+  claimed: number;
   /** claimClump returned nothing — no more pushes, only gate service. */
-  drained: boolean
+  drained: boolean;
   /** Beads this run deliberately parked — a park is intent, not an
    *  orphan, so the end-of-run litter sweep must not release their
    *  claims (bro-ho09d). The claim is now a deferred snooze
    *  (bro-hl22w), so the guard's real job is the park whose defer write
    *  failed and still holds in_progress. A later sweep judges them
    *  fresh. */
-  parkedClaims: Set<string>
+  parkedClaims: Set<string>;
   /** A spawn refused on a full fleet holds pushes until now — a
    *  hot-loop through pick+probe+spawn would burn the tick against
    *  the same wall (spec bro-zpa93). */
-  pushHoldUntil: number
-  /** The provider wall's transition edge (spec bro-36bhc) — a member
-   *  waiting a rate-limit reset holds every push behind it, and the
-   *  held/resumed lines say once per episode, not once per tick. */
-  wallHeld: boolean
+  pushHoldUntil: number;
   /** The disk floor's transition edge — the held/resumed lines say
    *  once per episode, not once per tick (spec bro-2spp7). */
-  diskHeld: boolean
+  diskHeld: boolean;
   /** statfs paths that already reported a probe failure — one warning
    *  per path per run, then the watermark goes blind-quiet. */
-  diskProbeWarned: Set<string>
+  diskProbeWarned: Set<string>;
 }
 
 /** One service pass over the stack, oldest-first — a snapshot copy
@@ -3540,33 +3402,33 @@ interface QueueState {
  *  member moved (action, merge, park): the next tick polls immediately
  *  instead of paying the interval. */
 async function servicePass(ctx: Ctx, q: QueueState): Promise<boolean> {
-  let busy = false
+  let busy = false;
   for (const m of [...q.stack]) {
-    const verdict = await serviceMember(ctx, m)
+    const verdict = await serviceMember(ctx, m);
     if (verdict === 'kept') {
-      continue
+      continue;
     }
-    busy = true
+    busy = true;
     if (verdict === 'active') {
-      continue
+      continue;
     }
-    q.stack.splice(q.stack.indexOf(m), 1)
-    q.tally[verdict] += 1
+    q.stack.splice(q.stack.indexOf(m), 1);
+    q.tally[verdict] += 1;
     if (verdict === 'parked') {
       for (const b of m.beads) {
-        q.parkedClaims.add(b.id)
+        q.parkedClaims.add(b.id);
       }
     }
     if (verdict === 'landed') {
-      syncAfterLand(ctx)
+      syncAfterLand(ctx);
     }
     if (ctx.json) {
       console.log(
-        JSON.stringify({ bead: m.beads[0]!.id, beads: m.beads.map((b) => b.id), result: verdict })
-      )
+        JSON.stringify({ bead: m.beads[0]!.id, beads: m.beads.map(b => b.id), result: verdict })
+      );
     }
   }
-  return busy
+  return busy;
 }
 
 /** The filesystems a claim writes to — the worktree parent (sibling
@@ -3579,14 +3441,14 @@ async function servicePass(ctx: Ctx, q: QueueState): Promise<boolean> {
  *  un-probeable path is skipped and named once per run: a watermark
  *  that cannot see reports, never gates (spec bro-2spp7). */
 function diskProbes(ctx: Ctx, warned?: Set<string>): DiskProbe[] {
-  const out: DiskProbe[] = []
+  const out: DiskProbe[] = [];
   for (const p of new Set([dirname(ctx.root), tmpdir()])) {
-    const probe = probeDisk(p, warned)
+    const probe = probeDisk(p, warned);
     if (probe !== undefined) {
-      out.push(probe)
+      out.push(probe);
     }
   }
-  return out
+  return out;
 }
 
 /** statfs one path → DiskProbe. bigint probe — bavail×bsize on a
@@ -3596,21 +3458,21 @@ function diskProbes(ctx: Ctx, warned?: Set<string>): DiskProbe[] {
  *  when `warned` is provided. */
 function probeDisk(p: string, warned?: Set<string>): DiskProbe | undefined {
   try {
-    const s = statfsSync(p, { bigint: true })
-    const free = s.bavail * s.bsize
+    const s = statfsSync(p, { bigint: true });
+    const free = s.bavail * s.bsize;
     return {
       path: p,
       freeBytes: free > BigInt(Number.MAX_SAFE_INTEGER) ? Number.MAX_SAFE_INTEGER : Number(free),
-    }
+    };
   } catch (err) {
-    const msg = err instanceof Error ? err.message : String(err)
+    const msg = err instanceof Error ? err.message : String(err);
     if (warned === undefined) {
-      console.error(`loop: disk probe failed for ${p} — ${msg}`)
+      console.error(`loop: disk probe failed for ${p} — ${msg}`);
     } else if (!warned.has(p)) {
-      warned.add(p)
-      console.error(`loop: disk probe failed for ${p} — ${msg} — watermark blind there`)
+      warned.add(p);
+      console.error(`loop: disk probe failed for ${p} — ${msg} — watermark blind there`);
     }
-    return undefined
+    return undefined;
   }
 }
 
@@ -3623,10 +3485,10 @@ function settleOutcome(
   ids: string[],
   out: Extract<PushOutcome, { kind: 'done' }>
 ): void {
-  q.tally[out.result] += 1
+  q.tally[out.result] += 1;
   if (out.result === 'parked') {
     for (const id of ids) {
-      q.parkedClaims.add(id)
+      q.parkedClaims.add(id);
     }
     emitLifecycle(ctx.root, {
       kind: 'park',
@@ -3636,10 +3498,10 @@ function settleOutcome(
         via: 'loop',
         ...(ids.length > 1 ? { beads: ids.join(',') } : {}),
       },
-    })
+    });
   }
   if (ctx.json) {
-    console.log(JSON.stringify({ bead: ids[0], beads: ids, result: out.result }))
+    console.log(JSON.stringify({ bead: ids[0], beads: ids, result: out.result }));
   }
 }
 
@@ -3652,37 +3514,25 @@ async function tryClaim(
   scope: NonNullable<ReturnType<typeof loopScope>>,
   q: QueueState
 ): Promise<boolean> {
-  const maxed = ctx.cfg.maxItems > 0 && q.claimed >= ctx.cfg.maxItems
+  const maxed = ctx.cfg.maxItems > 0 && q.claimed >= ctx.cfg.maxItems;
   if (q.drained || maxed || q.stack.length >= ctx.cfg.maxOpen || Date.now() < q.pushHoldUntil) {
-    return false
-  }
-  // a member's wall wait IS the provider wall — pushing the next bead
-  // spawns a fresh worker into the same account quota (the incident's
-  // respawn-burn, spec bro-36bhc). The claim stays with the walled
-  // member; pushes hold until its reset
-  const walled = q.stack.find((m) => m.wallWaitUntil !== undefined)
-  if (walled !== undefined) {
-    return holdForWall(ctx, scope, q, walled)
-  }
-  if (q.wallHeld) {
-    q.wallHeld = false
-    say(ctx, 'loop: provider wall cleared — pushes resume')
+    return false;
   }
   // the disk floor — admission, not eviction. A breached floor holds
   // pushes exactly like a full fleet does: nothing claimed, nothing
   // parked, gate service continues while merges free the disk (spec
   // bro-2spp7). The check sits between the cheap counters and
   // claimClump's store reads so a held push costs one statfs per tick.
-  const breach = diskFloorBreach(diskProbes(ctx, q.diskProbeWarned), ctx.cfg)
+  const breach = diskFloorBreach(diskProbes(ctx, q.diskProbeWarned), ctx.cfg);
   if (breach !== undefined) {
-    return holdForDisk(ctx, scope, q, breach)
+    return holdForDisk(ctx, scope, q, breach);
   }
   if (q.diskHeld) {
-    q.diskHeld = false
-    say(ctx, 'loop: disk back above floor — pushes resume')
+    q.diskHeld = false;
+    say(ctx, 'loop: disk back above floor — pushes resume');
   }
-  ctx.stage = 'claim'
-  ctx.bead = undefined
+  ctx.stage = 'claim';
+  ctx.bead = undefined;
   // --max bounds BEADS, not items — a clump may only fill up to the
   // run's remaining claim budget
   const budget = ctx.cfg.maxItems > 0 ? ctx.cfg.maxItems - q.claimed : Number.MAX_SAFE_INTEGER;
@@ -3700,28 +3550,28 @@ async function tryClaim(
     say(ctx, `loop: claim read failed — ${msg} — holding pushes for ${ctx.intervalS}s`);
     q.pushHoldUntil = Date.now() + ctx.intervalS * 1000;
     return false;
-  }>>>>>>> c93c64fc (fix(loop): honor exit-cause taxonomy — wait rate_limited resetAt instead of respawning into the wall (bro-36bhc))
+  }>>>>>>> c93c64fc (fix(loop): honor exit-cause taxonomy — wait rate_limited resetAt instead of respawning into the wall (bro-36bhc))>>>>>>> 3a228478 (fix(loop): review round — stale reset on manual stops, no-spawn rounds refunded (bro-36bhc))
   if (clump === undefined) {
-    q.drained = true
-    return false
+    q.drained = true;
+    return false;
   }
-  const ids = clump.map((b) => b.id)
+  const ids = clump.map(b => b.id);
   for (const b of clump) {
-    q.seen.add(b.id)
+    q.seen.add(b.id);
   }
-  q.claimed += clump.length
-  ctx.bead = clump[0]!.id
-  const out = await pushItem(ctx, clump)
+  q.claimed += clump.length;
+  ctx.bead = clump[0]!.id;
+  const out = await pushItem(ctx, clump);
   if (out.kind === 'hold') {
-    // fleet cap refused the spawn — un-see the clump and hold pushes
-    // for a beat so the next pick doesn't burn the tick re-probing the
-    // same wall; the claims pushItem released are re-pickable. A
-    // provider wall's own `until` bounds the hold instead
-    unseeClump(ctx, q, clump, out.until)
-    return false
+    // fleet cap or a provider wall refused the spawn — un-see the clump
+    // and hold pushes (the wall's reset when one was reported) so the
+    // next pick doesn't burn the tick re-probing the same wall; the
+    // claims pushItem released are re-pickable
+    unseeClump(ctx, q, clump, out.untilMs);
+    return false;
   }
-  recordClaimOutcome(ctx, q, ids, out)
-  return true
+  recordClaimOutcome(ctx, q, ids, out);
+  return true;
 }
 
 /** The post-push bookkeeping half of tryClaim — stack the fresh member
@@ -3733,13 +3583,13 @@ function recordClaimOutcome(
   out: Exclude<PushOutcome, { kind: 'hold' }>
 ): void {
   if (out.kind === 'member') {
-    q.stack.push(out.member)
+    q.stack.push(out.member);
     // a worker-pending member reports its pending phase — its `→ PR`
     // line lands when the worker exits and the gate join happens
-    say(ctx, pushLine(ctx, out.member.pr, ids, q.stack.length))
-    return
+    say(ctx, pushLine(ctx, out.member.pr, ids, q.stack.length));
+    return;
   }
-  settleOutcome(ctx, q, ids, out)
+  settleOutcome(ctx, q, ids, out);
 }
 
 /** The held-push branch of a tick — park the next probe for an
@@ -3757,66 +3607,38 @@ function holdForDisk(
   // to wait for — without this check the return below keeps q.drained
   // unset and the run idles on disk forever
   if (queueDrained(ctx, scope, q.seen)) {
-    q.drained = true
-    return false
+    q.drained = true;
+    return false;
   }
-  q.pushHoldUntil = Date.now() + ctx.intervalS * 1000
+  q.pushHoldUntil = Date.now() + ctx.intervalS * 1000;
   if (!q.diskHeld) {
-    q.diskHeld = true
+    q.diskHeld = true;
     say(
       ctx,
       `loop: disk below floor on ${breach.path} — ` +
         `${Math.floor(breach.freeBytes / MB)}M free < ` +
         `${ctx.cfg.diskMinSlots}×${ctx.cfg.worktreeMb}M — pushes held`
-    )
+    );
   }
-  return false
-}
-
-/** The wall-held branch of a tick (spec bro-36bhc) — a member waiting
- *  a provider reset owns the push slot: claiming behind it would spawn
- *  the next bead's worker into the same account wall. The drain
- *  verdict is still owed — an empty queue behind the wall reports
- *  done, never idles forever (the same contract holdForDisk keeps).
- *  The push hold rides the member's own wait clock. */
-function holdForWall(
-  ctx: Ctx,
-  scope: NonNullable<ReturnType<typeof nextScope>>,
-  q: QueueState,
-  m: GateMember
-): false {
-  if (queueDrained(ctx, scope, q.seen)) {
-    q.drained = true
-    return false
-  }
-  q.pushHoldUntil = Math.max(q.pushHoldUntil, m.wallWaitUntil!)
-  if (!q.wallHeld) {
-    q.wallHeld = true
-    const what = m.wallWaitCause === 'cap' ? 'fleet cap' : 'provider rate wall'
-    say(
-      ctx,
-      `loop: ${m.beads[0]!.id} waits a ${what} til ${new Date(m.wallWaitUntil!).toISOString()} — pushes held; its claim stays held`
-    )
-  }
-  return false
+  return false;
 }
 
 /** Undo a claim attempt the fleet cap refused — the clump goes back to
- *  pickable and pushes hold for a beat, or until `until` when the
- *  refusal rode a derived provider wall (the wall's own clock bounds
- *  the hold — an interval's beat against a quota wall is still churn). */
-function unseeClump(ctx: Ctx, q: QueueState, clump: ReadyBead[], until?: number): void {
+ *  pickable and pushes hold for a beat. A provider wall's `untilMs`
+ *  overrides the beat: the hold IS the wait — re-claiming before the
+ *  reset only churns the claim store against a known wall. */
+function unseeClump(ctx: Ctx, q: QueueState, clump: ReadyBead[], untilMs?: number): void {
   for (const b of clump) {
-    q.seen.delete(b.id)
+    q.seen.delete(b.id);
   }
-  q.claimed -= clump.length
-  q.pushHoldUntil = until ?? Date.now() + ctx.intervalS * 1000
+  q.claimed -= clump.length;
+  q.pushHoldUntil = untilMs ?? Date.now() + ctx.intervalS * 1000;
 }
 
 function pushLine(ctx: Ctx, pr: number | undefined, ids: string[], gate: number): string {
   return pr === undefined
     ? `loop: ${ids.join(', ')} pushed — worker pending (gate ${gate}/${ctx.cfg.maxOpen})`
-    : `loop: ${ids.join(', ')} → PR ${prRef(ctx, pr)} (gate ${gate}/${ctx.cfg.maxOpen})`
+    : `loop: ${ids.join(', ')} → PR ${prRef(ctx, pr)} (gate ${gate}/${ctx.cfg.maxOpen})`;
 }
 
 /** The round-robin: each tick services the gate stack oldest-first,
@@ -3832,73 +3654,62 @@ async function runQueue(ctx: Ctx): Promise<void> {
     drained: false,
     parkedClaims: new Set(),
     pushHoldUntil: 0,
-    wallHeld: false,
     diskHeld: false,
     diskProbeWarned: new Set(),
-  }
+  };
   try {
     // sweep a crashed run's records before the first claim — a dead-pid
     // record is residue, not a live worker; live pids are never touched
-    reapLoopRuns(ctx.root)
+    reapLoopRuns(ctx.root);
     // inside the try: a failed scope lookup still owes the run an audit
-    const scope = loopScope()
+    const scope = loopScope();
     if (!scope) {
-      return
+      return;
     }
     for (;;) {
-      const busy = await servicePass(ctx, q)
+      const busy = await servicePass(ctx, q);
       if (await tryClaim(ctx, scope, q)) {
-        continue
+        continue;
       }
-      const maxed = ctx.cfg.maxItems > 0 && q.claimed >= ctx.cfg.maxItems
+      const maxed = ctx.cfg.maxItems > 0 && q.claimed >= ctx.cfg.maxItems;
       if (q.stack.length === 0 && (q.drained || maxed)) {
-        break
+        break;
       }
       if (!busy) {
-        const pending = q.stack.find((m) => m.worker !== undefined)
-        const walled = q.stack.find((m) => m.wallWaitUntil !== undefined)
-        const idle = q.diskHeld
-          ? 'idle (disk floor)'
-          : walled !== undefined
-            ? `idle (${walled.wallWaitCause === 'cap' ? 'fleet hold' : 'rate wall'} til ${new Date(walled.wallWaitUntil!).toISOString()})`
-            : 'idle'
+        const pending = q.stack.find(m => m.worker !== undefined);
+        const idle = q.diskHeld ? 'idle (disk floor)' : 'idle';
         ctx.stage =
           pending === undefined
             ? idle
-            : `worker ${pending.worker!.agentId} pid=${pending.worker!.pid ?? '?'}`
-        ctx.bead =
-          pending === undefined
-            ? walled?.beads[0]!.id
-            : pending.beads[0]!.id
+            : `worker ${pending.worker!.agentId} pid=${pending.worker!.pid ?? '?'}`;
+        ctx.bead = pending === undefined ? undefined : pending.beads[0]!.id;
         // the wake is the earliest member's own cadence — a worker's
         // WORKER_POLL_MS .exit probe, a gate's interval — still capped
         // by the merge deadline: a member at mergeTimeoutMin must park
         // on the next tick, not an interval late (waitForGate's own
         // sleep was deadline-capped). A worker-pending member has NO
         // merge deadline — its lifetime is unbounded (bro-9lpn3).
-        const gated = q.stack.filter((m) => m.worker === undefined)
+        const gated = q.stack.filter(m => m.worker === undefined);
         const wake = Math.min(
-          ...q.stack.map((m) => m.nextPollAt ?? Number.POSITIVE_INFINITY),
-          ...gated.map((m) => m.since + ctx.cfg.mergeTimeoutMin * 60_000)
-        )
-        await sleep(
-          Math.min(ctx.intervalS * 1000, Math.max(0, wake - Date.now()))
-        )
+          ...q.stack.map(m => m.nextPollAt ?? Number.POSITIVE_INFINITY),
+          ...gated.map(m => m.since + ctx.cfg.mergeTimeoutMin * 60_000)
+        );
+        await sleep(Math.min(ctx.intervalS * 1000, Math.max(0, wake - Date.now())));
       }
     }
     // the queue is idle — no bead names a settled item in the audit
-    ctx.bead = undefined
+    ctx.bead = undefined;
     if (ctx.json) {
-      console.log(JSON.stringify({ done: true, ...q.tally }))
+      console.log(JSON.stringify({ done: true, ...q.tally }));
     } else {
       console.log(
         `loop: done — ${q.tally.landed} landed, ${q.tally.closed} closed, ${q.tally.parked} parked, ${q.tally.failed} failed`
-      )
+      );
     }
   } finally {
     // idle, gated, or error — the audit always runs; a tail the loop
     // left must surface in the summary, not be discovered later
-    endAudit(ctx, q.seen, q.parkedClaims)
+    endAudit(ctx, q.seen, q.parkedClaims);
   }
 }
 
@@ -3919,57 +3730,58 @@ async function runQueue(ctx: Ctx): Promise<void> {
  *  never emit 'exit' and need handlers that audit then re-raise so
  *  the parent still sees the true signal death. */
 async function guardedRun(ctx: Ctx): Promise<void> {
-  let open = true
-  const heartbeat = setInterval(() => {
-    console.error(`loop: alive — ${ctx.stage}${ctx.bead ? ` on ${ctx.bead}` : ''}`)
-  }, Math.max(ctx.intervalS * 1000, HEARTBEAT_MIN_MS))
+  let open = true;
+  const heartbeat = setInterval(
+    () => {
+      console.error(`loop: alive — ${ctx.stage}${ctx.bead ? ` on ${ctx.bead}` : ''}`);
+    },
+    Math.max(ctx.intervalS * 1000, HEARTBEAT_MIN_MS)
+  );
   const auditDeath = (why: string): void => {
     try {
       writeSync(
         2,
         `loop: process exiting mid-run — ${ctx.stage}` +
           `${ctx.bead ? ` on ${ctx.bead}` : ''} (${why})\n`
-      )
-    } catch { /* stderr may be gone — the note below still lands */ }
-    if (ctx.bead !== undefined) {
-      noteBead(
-        ctx.tasks,
-        ctx.bead,
-        `loop: process exited mid-run — ${ctx.stage} (${why})`
-      )
+      );
+    } catch {
+      /* stderr may be gone — the note below still lands */
     }
-  }
+    if (ctx.bead !== undefined) {
+      noteBead(ctx.tasks, ctx.bead, `loop: process exited mid-run — ${ctx.stage} (${why})`);
+    }
+  };
   const onExit = (code: number): void => {
     if (open) {
-      auditDeath(`exit code ${code}`)
+      auditDeath(`exit code ${code}`);
     }
-  }
+  };
   const onSigint = (): void => {
     if (open) {
-      auditDeath('signal SIGINT')
+      auditDeath('signal SIGINT');
     }
     // restore the default disposition, then re-raise — the parent sees
     // a real signal death, not a clean exit code
-    process.removeListener('SIGINT', onSigint)
-    process.kill(process.pid, 'SIGINT')
-  }
+    process.removeListener('SIGINT', onSigint);
+    process.kill(process.pid, 'SIGINT');
+  };
   const onSigterm = (): void => {
     if (open) {
-      auditDeath('signal SIGTERM')
+      auditDeath('signal SIGTERM');
     }
-    process.removeListener('SIGTERM', onSigterm)
-    process.kill(process.pid, 'SIGTERM')
-  }
-  process.on('exit', onExit)
-  process.on('SIGINT', onSigint)
-  process.on('SIGTERM', onSigterm)
+    process.removeListener('SIGTERM', onSigterm);
+    process.kill(process.pid, 'SIGTERM');
+  };
+  process.on('exit', onExit);
+  process.on('SIGINT', onSigint);
+  process.on('SIGTERM', onSigterm);
   try {
-    await runQueue(ctx)
+    await runQueue(ctx);
   } finally {
-    open = false
-    clearInterval(heartbeat)
-    process.removeListener('exit', onExit)
-    process.removeListener('SIGINT', onSigint)
-    process.removeListener('SIGTERM', onSigterm)
+    open = false;
+    clearInterval(heartbeat);
+    process.removeListener('exit', onExit);
+    process.removeListener('SIGINT', onSigint);
+    process.removeListener('SIGTERM', onSigterm);
   }
 }

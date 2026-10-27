@@ -997,7 +997,18 @@ const facade = {
     return new Map(keys.map((k) => [k, Object.hasOwn(all, k) ? all[k]! : 0]))
   }),
   reviewedShas: () => load().reviewedShas ?? ['abc123'],
-  reviewThreads: async () => load().threads ?? [],
+  reviewThreads: async () => withState((s) => {
+    // readQueues.threads — the same mid-flight race scripting as
+    // readQueues.checks: each call shifts one list, so a test can
+    // script 'open at the gate snapshot, resolved at the fixer fetch'
+    // (the skipped fix round's no-spawn refund, bro-36bhc review)
+    const tq = s.readQueues?.threads
+    if (Array.isArray(tq) && tq.length > 0) {
+      s.readQueues.threads = tq.slice(1)
+      return tq[0]
+    }
+    return s.threads ?? []
+  }),
   resolveThread: () => {},
   replyThread: () => {},
   // per-PR labels/body — the prs map's entries carry them; the flat
@@ -1316,6 +1327,31 @@ if (wall !== undefined) {
   console.error(wall.tail)
   log('walled')
   process.exit(wall.exit ?? 1)
+}
+// a per-bead operator stop over a stale recorded death (bro-36bhc
+// review): the worker patches its OWN registry entry stopped:true while
+// a previous run's cause/resetAt stays on it — the settle must park on
+// the flat parkedWakeMin cooldown, never that stale wall deadline
+const stop = (load().stops ?? {})[process.env.BRO_BEAD_ID]
+if (stop !== undefined) {
+  try {
+    const common = execFileSync(
+      'git',
+      ['rev-parse', '--path-format=absolute', '--git-common-dir'],
+      { encoding: 'utf8' }
+    ).trim()
+    const regPath = path.join(common, 'bro', 'agents.json')
+    const reg = retry(() => JSON.parse(fs.readFileSync(regPath, 'utf8')))
+    const e = reg[process.env.BRO_BEAD_ID]
+    if (e !== undefined) {
+      e.stopped = true
+      e.cause = stop.cause
+      e.resetAt = stop.resetAt
+      retry(() => fs.writeFileSync(regPath, JSON.stringify(reg)))
+    }
+  } catch {}
+  log('stop-marked')
+  process.exit(stop.exit ?? 1)
 }
 switch (scenario) {
   case 'land': {

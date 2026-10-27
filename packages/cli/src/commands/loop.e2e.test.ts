@@ -684,6 +684,41 @@ describe('bro loop e2e', () => {
     });
   });
 
+  test('a fix round skipped on already-resolved threads does not burn the respawn budget', () => {
+    // the review catch: threads resolved between the gate snapshot and
+    // the fixer fetch make runFixRound skip the spawn — but the round
+    // had already been billed, so fixRounds=1 parked on the NEXT real
+    // thread instead of spawning. readQueues.threads scripts the race:
+    // open at the snapshot, empty at the fixer fetch, open again on
+    // the re-poll
+    const thread = {
+      id: 't1',
+      resolved: false,
+      outdated: false,
+      comment: {
+        author: 'reviewer',
+        bot: false,
+        path: 'work.txt',
+        line: 1,
+        body: 'fix this first',
+        createdAt: '2026-01-01',
+      },
+    };
+    const f = loopFixture([{ ...FAKE_BEAD, id: 'fx-a', title: 'iterate' }], { fixRounds: 1 });
+    writeHostState(f.hostState, {
+      threads: [thread],
+      readQueues: { threads: [[thread], []] },
+    });
+    inside(f.main, f.root, () => {
+      const r = f.run();
+      assert.match(r.stdout, /skipping fix round/, r.stderr);
+      assert.match(r.stdout, /fix round 1/, r.stderr);
+      assert.match(r.stdout, /loop: fx-a landed/, r.stderr);
+      assert.match(spawns(f), /fix resolved threads/);
+      assert.equal(bead(f.db, 'fx-a')?.status, 'closed');
+    });
+  });
+
   test('merge accepted but not landed (queue hold) → parked, not failed', () => {
     const f = loopFixture([{ ...FAKE_BEAD, id: 'fx-a', title: 'queued' }]);
     writeHostState(f.hostState, { mergeResult: 'OPEN' });
@@ -1348,6 +1383,31 @@ describe('bro loop provider walls (bro-36bhc)', () => {
       assert.match(woke.stdout, /loop: fx-a landed/, woke.stderr);
       assert.equal(bead(f.db, 'fx-a')?.status, 'closed');
       assert.match(spawns(f), /work opened pr/);
+    });
+  });
+
+  test('a manual stop over a stale rate-limit record parks on the flat cooldown', () => {
+    // the review catch: `bro agents down` only marks the entry stopped —
+    // the previous death's cause/resetAt stays on it, and the settle was
+    // handing that stale wall deadline to parkBeads, so the snooze
+    // ignored parkedWakeMin
+    const resetIso = new Date(Date.now() + 10 * 60_000).toISOString();
+    const f = walledLane();
+    writeHostState(f.hostState, {
+      stops: { 'fx-a': { cause: 'rate_limited', resetAt: resetIso } },
+    });
+    inside(f.main, f.root, () => {
+      const r = f.run();
+      assert.match(r.stdout, /1 parked/, r.stderr);
+      const row = bead(f.db, 'fx-a');
+      assert.equal(row?.status, 'deferred');
+      assert.match(String(row?.notes), /stopped/);
+      const wake = Date.parse(String(row?.defer_until));
+      assert.ok(
+        wake > Date.now() + 60 * 60_000,
+        `a manual stop takes the flat parkedWakeMin cooldown, not the stale reset — defer_until ${String(row?.defer_until)}`
+      );
+      assert.equal(spawns(f).trim().split('\n').length, 1);
     });
   });
 
