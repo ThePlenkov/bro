@@ -595,7 +595,9 @@ function render(s: BroStatus): string[] {
     lines.push(
       s.watch.futureMs !== undefined
         ? `watch: heartbeat stamped ${heartbeatAge(s.watch.futureMs)} in the future — writer clock skew — ${tail}`
-        : `watch: heartbeat ${heartbeatAge(s.watch.ageMs)} ago — ${tail}`
+        : s.watch.writerSkewed === true
+          ? `watch: heartbeat ${heartbeatAge(s.watch.ageMs)} ago — writer clock skew — ${tail}`
+          : `watch: heartbeat ${heartbeatAge(s.watch.ageMs)} ago — ${tail}`
     );
   }
   if (s.drill.frame) {

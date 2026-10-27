@@ -495,6 +495,9 @@ function renderTicks(t) {
     if (hb.futureMs !== undefined) {
       parts.push('last tick stamped ' + age(hb.futureMs) + ' in the future — writer clock skew — ' + htail);
       cls += ' warn';
+    } else if (hb.writerSkewed) {
+      parts.push('last tick ' + age(hb.ageMs) + ' ago — writer clock skew — ' + htail);
+      cls += ' warn';
     } else {
       parts.push('last tick ' + age(hb.ageMs) + ' ago — ' + htail);
       if (hb.ageMs > 30 * 60 * 1000) cls += ' warn';

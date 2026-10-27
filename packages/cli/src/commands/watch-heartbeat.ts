@@ -51,6 +51,10 @@ export interface HeartbeatSummary {
    *  clamping a future stamp to age 0 reads "just now", exactly the
    *  masking the incident showed) */
   futureMs?: number;
+  /** the writer's own tick flagged `clock.skewed` — a behind-skewed
+   *  writer stamps old times that no reader-side check can catch, so
+   *  the persisted verdict is the only signal. */
+  writerSkewed?: boolean;
   /** size of the snapshot's attention list — the rig's open decisions */
   attention: number;
 }
@@ -68,6 +72,7 @@ export function readHeartbeat(dir: string, now = Date.now()): HeartbeatSummary |
     const raw = JSON.parse(readFileSync(file, 'utf8')) as {
       ts?: unknown;
       attention?: unknown;
+      clock?: { skewed?: unknown };
     };
     const ms = typeof raw.ts === 'string' ? Date.parse(raw.ts) : Number.NaN;
     if (!Number.isFinite(ms) || !Array.isArray(raw.attention)) {
@@ -78,6 +83,7 @@ export function readHeartbeat(dir: string, now = Date.now()): HeartbeatSummary |
       ts: raw.ts as string,
       ageMs: Math.max(0, now - ms),
       ...(ahead > CLOCK_SKEW_MS ? { futureMs: ahead } : {}),
+      ...(raw.clock?.skewed === true ? { writerSkewed: true } : {}),
       attention: raw.attention.length,
     };
   } catch {
@@ -115,6 +121,9 @@ export function heartbeatLine(dir: string): string | null {
   const tail = h.attention === 0 ? 'quiet' : `${h.attention} attention`;
   if (h.futureMs !== undefined) {
     return `last tick stamped ${heartbeatAge(h.futureMs)} in the future — writer clock skew — ${tail}`;
+  }
+  if (h.writerSkewed === true) {
+    return `last tick ${heartbeatAge(h.ageMs)} ago — writer clock skew — ${tail}`;
   }
   return `last tick ${heartbeatAge(h.ageMs)} ago — ${tail}`;
 }

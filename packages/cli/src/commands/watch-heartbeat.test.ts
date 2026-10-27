@@ -148,4 +148,27 @@ describe('heartbeatLine', () => {
       assert.match(heartbeatLine(main) ?? '', /^last tick \d+s ago — quiet$/);
     });
   });
+
+  test('a persisted clock.skewed carries the writer verdict — behind-skew stamps read old, never masked (bro-i7t3b)', () => {
+    const { root, main } = initRepo('bro-hb-');
+    inside(main, root, () => {
+      // writer clock behind the host stamps a genuinely old ts — no
+      // reader-side bound catches it; the snapshot's own verdict does
+      const behind = {
+        ...snap,
+        ts: new Date(Date.now() - 9 * 3_600_000).toISOString(),
+        clock: { local: 'x', remote: 'y', skewMs: -3_700_000, skewed: true },
+      };
+      writeHeartbeat(main, behind);
+      assert.equal(readHeartbeat(main)?.writerSkewed, true);
+      assert.match(heartbeatLine(main) ?? '', /^last tick 9h ago — writer clock skew — quiet$/);
+      // a verified-aligned clock sets no flag — verified is quiet
+      writeHeartbeat(main, { ...behind, clock: { skewed: false } });
+      assert.equal(readHeartbeat(main)?.writerSkewed, undefined);
+      assert.match(heartbeatLine(main) ?? '', /^last tick 9h ago — quiet$/);
+      // a failed probe (error, no skewed verdict) stays out of the line
+      writeHeartbeat(main, { ...behind, clock: { skewed: false, error: 'gh down' } });
+      assert.equal(readHeartbeat(main)?.writerSkewed, undefined);
+    });
+  });
 });
