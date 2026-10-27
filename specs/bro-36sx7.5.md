@@ -2,6 +2,8 @@
 
 ## parent: bro-36sx7
 
+<!-- markdownlint-disable-file MD041 -->
+
 # bro-36sx7.5 — devin: drop duplicate .devin/hooks.v1.json chain + doctor duplicate-wiring check
 
 ## Problem
