@@ -93,28 +93,20 @@ describe('clockPlane', () => {
     });
   });
 
-  test('a remote past the bound flags the tick skewed', async () => {
-    const now = Date.parse('2026-10-25T23:20:00.000Z');
-    const res = await clockPlane(
-      '/repo',
-      { name: 'github' },
-      probe({ code: 0, out: INCLUDE_OK, err: '' }),
-      now
-    );
-    assert.equal(res?.skewed, true);
-    assert.equal(res?.skewMs, 180_000);
-  });
-
-  test('a local clock ahead of the host is skew too — future-dated stamps', async () => {
-    const now = Date.parse('2026-10-25T23:30:00.000Z');
-    const res = await clockPlane(
-      '/repo',
-      { name: 'github' },
-      probe({ code: 0, out: INCLUDE_OK, err: '' }),
-      now
-    );
-    assert.equal(res?.skewed, true);
-    assert.equal(res?.skewMs, -420_000);
+  test('past the bound either direction flags the tick — remote ahead or future-dated local stamps', async () => {
+    for (const [now, skewMs] of [
+      ['2026-10-25T23:20:00.000Z', 180_000],
+      ['2026-10-25T23:30:00.000Z', -420_000],
+    ] as const) {
+      const res = await clockPlane(
+        '/repo',
+        { name: 'github' },
+        probe({ code: 0, out: INCLUDE_OK, err: '' }),
+        Date.parse(now)
+      );
+      assert.equal(res?.skewed, true);
+      assert.equal(res?.skewMs, skewMs);
+    }
   });
 
   test('a failed gh is unverified — error, never a fabricated remote', async () => {

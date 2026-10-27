@@ -777,36 +777,16 @@ export async function collectSnapshot(dir: string): Promise<WatchSnapshot> {
       attention.push(line);
     }
   }
-  if (gates.error !== undefined) {
-    attention.push(`gates probe failed — ${gates.error}`);
-  }
-  if (fleet.error !== undefined) {
-    attention.push(`fleet plane failed — ${fleet.error}`);
-  }
-  if (molsPlane_.error !== undefined) {
-    attention.push(`mols plane failed — ${molsPlane_.error}`);
-  }
-  if (loop.error !== undefined) {
-    attention.push(`loop plane failed — ${loop.error}`);
-  }
-  if (daemon.error !== undefined) {
-    attention.push(`daemon plane failed — ${daemon.error}`);
-  } else if (!daemon.live && (daemon.recorded || daemon.installed)) {
-    attention.push(
-      daemon.installed
-        ? `drive supervisor installed but dead — the next session checkpoint rearms it`
-        : `daemon recorded but dead — 'bro daemon up' restarts`
-    );
-  }
-  if (clock !== undefined) {
-    if (clock.skewed) {
-      attention.push(
-        `clock skew ${clockSkewText(clock.skewMs ?? 0)} (local ${clock.local} vs host ${clock.remote}) — reported times unverifiable`
-      );
-    } else if (clock.error !== undefined) {
-      attention.push(`clock unverified — ${clock.error}`);
-    }
-  }
+  attention.push(
+    ...planeErrorLines([
+      ['gates probe', gates.error],
+      ['fleet plane', fleet.error],
+      ['mols plane', molsPlane_.error],
+      ['loop plane', loop.error],
+    ]),
+    ...daemonAttention(daemon),
+    ...clockAttention(clock)
+  );
 
   return {
     ts: new Date().toISOString(),
@@ -820,6 +800,52 @@ export async function collectSnapshot(dir: string): Promise<WatchSnapshot> {
     ...(activity !== undefined ? { activity } : {}),
     ...(clock !== undefined ? { clock } : {}),
   };
+}
+
+/** `<label> failed — <err>` per throwing plane. Labels differ per
+ *  plane, so the caller carries them. */
+function planeErrorLines(
+  planes: ReadonlyArray<readonly [label: string, error: string | undefined]>
+): string[] {
+  const lines: string[] = [];
+  for (const [label, error] of planes) {
+    if (error !== undefined) {
+      lines.push(`${label} failed — ${error}`);
+    }
+  }
+  return lines;
+}
+
+/** The daemon's verdict — a throwing probe degrades the plane; a
+ *  recorded/installed-but-dead supervisor is attention on its own (the
+ *  record says someone armed a watchdog that isn't running). */
+function daemonAttention(daemon: WatchDaemon): string[] {
+  if (daemon.error !== undefined) {
+    return [`daemon plane failed — ${daemon.error}`];
+  }
+  if (daemon.live || (!daemon.recorded && !daemon.installed)) {
+    return [];
+  }
+  return [
+    daemon.installed
+      ? `drive supervisor installed but dead — the next session checkpoint rearms it`
+      : `daemon recorded but dead — 'bro daemon up' restarts`,
+  ];
+}
+
+/** The tick's own clock check — skew past the bound or an unverified
+ *  probe both name themselves on the headline; a verified clock and an
+ *  absent plane stay quiet. */
+function clockAttention(clock: WatchClock | undefined): string[] {
+  if (clock === undefined) {
+    return [];
+  }
+  if (clock.skewed) {
+    return [
+      `clock skew ${clockSkewText(clock.skewMs ?? 0)} (local ${clock.local} vs host ${clock.remote}) — reported times unverifiable`,
+    ];
+  }
+  return clock.error !== undefined ? [`clock unverified — ${clock.error}`] : [];
 }
 
 /** The 'agent' bus tail — one probe over the ring narrowed to the

@@ -32,13 +32,13 @@ export interface WatchClock {
  *  header block only: below the first blank line a body field could
  *  carry the same name. */
 export function dateHeader(out: string): string | undefined {
-  for (const line of out.split('\n')) {
+  for (const line of out.split(/\r?\n/)) {
     if (line.trim() === '') {
       return undefined;
     }
-    const m = /^date:\s*(.+?)\s*$/i.exec(line);
-    if (m !== null) {
-      return m[1];
+    const m = /^date:(.*)$/i.exec(line);
+    if (m !== null && m[1].trim() !== '') {
+      return m[1].trim();
     }
   }
   return undefined;
