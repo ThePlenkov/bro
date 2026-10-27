@@ -66,6 +66,18 @@ Two boundaries, one warning shape.
   settle them exactly like `pushItem`'s own worktree/prompt arms
   (note + reopen + end the custody record), un-see the clump so the
   held retry can re-pick, then hold.
+- The registry spawn's own claim can also hit the outage — the
+  connector's `claimStep` runs `bd update --claim` under the spawn
+  lock, and `spawnClass` already names the store-down shapes
+  'unavailable' (`ran:false` timeouts, the `no beads database` exit
+  line). `settleSpawnRefusal` used to fold that kind into the generic
+  park arm — a wedge parked the bead, drained the queue, and ended
+  the run exit-0. It now returns a settled `infra` outcome instead:
+  no claim release (a killed bd may have half-written the claim, and
+  a store that just refused can't be trusted with the release either
+  — the dead custody record and the exit sweep own the residue), and
+  `tryClaim` joins the same infra hold — un-see, hold an interval,
+  re-pick.
 - `runQueue`'s `for(;;)` keeps a last-resort catch around the whole
   tick: count consecutive tick errors on `QueueState`, name the stage
   `infra hold (N)` so the heartbeat and the `loop: process exiting`

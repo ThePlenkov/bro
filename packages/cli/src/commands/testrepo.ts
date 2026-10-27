@@ -236,16 +236,19 @@ const cmd = pos[0]
 const cmdName = cmd === undefined && args[0] === '--version' ? '--version' : cmd
 // FAKE_BD_WEDGE=<file> — a store-outage dial for failure-injection
 // tests (bro-cu3q8): the file lists wedged commands, one per line.
-// 'hang:<cmd>' sleeps past the caller's 15s budget so execFileSync
-// reports the real incident signature 'spawnSync timeout ETIMEDOUT';
-// a bare name (or '*') fails fast. Absent file → healthy store.
+// 'hang:<cmd>' sleeps past the caller's 15s budget so the spawn's own
+// timeout reports the real incident signature 'spawnSync <bin>
+// ETIMEDOUT'; a bare name (or '*') fails fast on the store's own
+// outage line — 'no beads database' is what callers classify as the
+// store-down shape, a generic refusal would read as a claim race.
+// Absent file → healthy store.
 const WEDGE = process.env.FAKE_BD_WEDGE
 if (WEDGE && fs.existsSync(WEDGE)) {
   const spec = fs.readFileSync(WEDGE, 'utf8').split('\\n').map((l) => l.trim()).filter(Boolean)
   const hit = spec.find((l) => l === cmdName || l === 'hang:' + cmdName || l === '*')
   if (hit !== undefined) {
     if (hit.startsWith('hang:')) { pause(20_000); process.exit(0) }
-    console.error('fake bd: store wedged on ' + cmdName)
+    console.error('Error: no beads database found')
     process.exit(1)
   }
 }

@@ -470,7 +470,9 @@ describe('bro loop e2e', () => {
         cwd: f.main,
         env: e2eEnv({ ...f.env, FAKE_BD_WEDGE: wedge }),
         encoding: 'utf8',
-        timeout: 5_000,
+        // each held re-pick still pays the worktree+spawn probe — ~2.5s
+        // a cycle — so the >1-warning assertion wants several cycles
+        timeout: 15_000,
       });
       // killed by the test clock, not the wedge — the run held
       assert.equal(proc.status, null, 'run should have held until the test timeout');
@@ -485,16 +487,20 @@ describe('bro loop e2e', () => {
       );
       assert.match(stderr, /loop: alive — infra hold — claim/);
       assert.doesNotMatch(proc.stdout ?? '', /loop: done/);
-      // nothing claimed, nothing spawned
+      // nothing claimed, nothing spawned — the worktree the refused
+      // spawn already built stays for the retry's reuse, but no agent
+      // ever ran and the bead never left open
       assert.equal(bead(f.db, 'fx-a')?.status, 'open');
-      assert.equal(existsSync(f.worktree), false);
+      assert.equal(spawns(f), '');
     });
   });
 
   test('a bd spawn timeout lands the incident signature as a held tick (bro-cu3q8)', () => {
-    // 'spawnSync timeout ETIMEDOUT' is the literal line the wedged
-    // store printed before the supervisor died — the fake bd sleeps
-    // past the caller's 15s budget so the failure shape is exact.
+    // 'spawnSync <bin> ETIMEDOUT' is the incident's own signature — the
+    // fake bd sleeps past the claim probe's 15s budget so the failure
+    // shape is exact ('bd' on this probe path, the supervised
+    // 'timeout' wrapper in the incident — both classify unavailable,
+    // never a claim race).
     const f = loopFixture([{ ...FAKE_BEAD, id: 'fx-a', title: 'ship it' }]);
     inside(f.main, f.root, () => {
       const wedge = join(f.root, 'bd-wedge.txt');
@@ -508,7 +514,7 @@ describe('bro loop e2e', () => {
       assert.equal(proc.status, null, 'run should have held until the test timeout');
       assert.match(
         proc.stderr ?? '',
-        /loop: claim failed — spawnSync timeout ETIMEDOUT — infra hold; the next interval retries/
+        /loop: claim failed — .*spawnSync.*ETIMEDOUT — infra hold; the next interval retries/
       );
       assert.equal(bead(f.db, 'fx-a')?.status, 'open');
     });

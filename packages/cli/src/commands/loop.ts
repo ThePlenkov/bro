@@ -64,7 +64,9 @@ import {
   LockTimeout,
   mkdirPrivateSync,
   openPrivateAppendSync,
+  patchAgentRegistry,
   procStat,
+  readAgentRegistry,
   reviewHost,
   routeStepClass,
   SpawnError,
@@ -906,7 +908,9 @@ function workerExit(ctx: Ctx, w: WorkerRef): { code: number | null; at: number }
 /** A refused registry spawn settles the push without a worker. A full
  *  fleet ('cap') holds the claim for the next tick — fleet pressure is
  *  transient, and a hot re-pick would burn the interval against the
- *  same wall. A 'conflict' (live agent, foreign claim, respawn block)
+ *  same wall. 'unavailable' is infra — the backend itself is down, so
+ *  the pick holds and retries instead of parking (spec bro-cu3q8).
+ *  A 'conflict' (live agent, foreign claim, respawn block)
  *  parks WITHOUT a note — the bead's owner is not this run. Anything
  *  else parks with the error named: the claim releases into the snooze
  *  rather than an instant re-queue into the same refusal. Member claims
@@ -924,6 +928,23 @@ function settleSpawnRefusal(ctx: Ctx, m: GateMember, err: unknown): PushOutcome 
     }
     say(ctx, `loop: fleet full — ${msg}; pushes hold for the next pass`);
     return { kind: 'hold', why: msg };
+  }
+  if (err instanceof SpawnError && err.kind === 'unavailable') {
+    // a wedged task store under the spawn lock, a dead multiplexer, a
+    // claim bd killed mid-write — the store outage class, never a
+    // refusal. Release nothing: a killed bd may have half-written the
+    // claim, and a store that just refused can't be trusted with the
+    // release either — the dead custody record above plus the exit
+    // sweep own the residue. The pick un-sees and holds an interval
+    // so a recovered store re-picks cleanly (spec bro-cu3q8).
+    // The registry pin can also predate the failure (it lands before
+    // claimStep): a pid-less entry reads as a remote worker in flight
+    // and walls the retry's re-pick — mark this push's own entry dead.
+    // A refusal thrown before the pin leaves none to kill.
+    if (readAgentRegistry(ctx.root)[m.beads[0]!.id] !== undefined) {
+      patchAgentRegistry(ctx.root, m.beads[0]!.id, { stopped: true, spawnError: msg });
+    }
+    return { kind: 'infra', why: msg };
   }
   if (err instanceof SpawnError && err.kind === 'conflict') {
     for (const b of openBeads(ctx, m.beads.slice(1))) {
@@ -1570,7 +1591,8 @@ interface WorkerRef {
 type PushOutcome =
   | { kind: 'member'; member: GateMember }
   | { kind: 'done'; result: ItemResult }
-  | { kind: 'hold'; why: string };
+  | { kind: 'hold'; why: string }
+  | { kind: 'infra'; why: string };
 
 /** The loop's watch payload for one member PR — `merge` + `cleanup`
  *  record the promise the loop is keeping (its own merge, its own
@@ -3504,6 +3526,13 @@ async function tryClaim(
     unseeClump(ctx, q, clump);
     return false;
   }
+  if (out.kind === 'infra') {
+    // the spawn's own backend wedged — claimStep's store refused on an
+    // outage, not a race. The same hold the claim boundary runs:
+    // un-see, hold an interval, retry (spec bro-cu3q8)
+    unseeClump(ctx, q, clump);
+    return holdForInfra(ctx, q, 'claim', out.why);
+  }
   recordClaimOutcome(ctx, q, ids, out);
   return true;
 }
@@ -3514,7 +3543,7 @@ function recordClaimOutcome(
   ctx: Ctx,
   q: QueueState,
   ids: string[],
-  out: Exclude<PushOutcome, { kind: 'hold' }>
+  out: Exclude<PushOutcome, { kind: 'hold' } | { kind: 'infra' }>
 ): void {
   if (out.kind === 'member') {
     q.stack.push(out.member);
