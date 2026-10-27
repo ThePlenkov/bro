@@ -177,7 +177,7 @@ describe('the wall pause', () => {
         writeRegistry(main, { 'fx-dead': deadWallEntry(future), 'fx-live': liveEntry(s.pid, s.pidStart) })
         const r = reconcileLanePause(main, env({ devin: { type: 'cli', command: 'x' } }))
         assert.equal(r.paused, 1)
-        assert.equal(procState(s.pid), 'T')
+        waitState(s.pid, 'T')
         // the record landed — a re-run holds the pause, not re-stops
         const pause = JSON.parse(
           readFileSync(join(agentRegistryPath(main)!, '..', 'lane-pause.json'), 'utf8')
@@ -192,7 +192,7 @@ describe('the wall pause', () => {
         const r2 = reconcileLanePause(main, env())
         assert.equal(r2.paused, 0)
         assert.equal(r2.thawed, 1)
-        assert.notEqual(procState(s.pid), 'T')
+        waitState(s.pid, (st) => st !== 'T')
       } finally {
         s.kill()
       }
@@ -246,7 +246,7 @@ describe('the wall pause', () => {
       const future = new Date(Date.now() + 3600_000).toISOString()
       writeRegistry(main, { 'fx-dead': deadWallEntry(future), 'fx-live': liveEntry(s.pid, s.pidStart) })
       reconcileLanePause(main, env())
-      assert.equal(procState(s.pid), 'T')
+      waitState(s.pid, 'T')
       s.kill()
       // SIGKILL lands asynchronously — the pid still reads live until
       // the kernel marks it a zombie (or node reaps it); wait for that
