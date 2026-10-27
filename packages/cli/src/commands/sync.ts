@@ -22,10 +22,10 @@ import {
   printUsage,
   taskStore,
   type TaskStore,
-} from '@broject/core'
-import { loadBroConfig } from '../plugins.ts'
-import { existsSync } from 'node:fs'
-import { join } from 'node:path'
+} from '@broject/core';
+import { loadBroConfig } from '../plugins.ts';
+import { existsSync } from 'node:fs';
+import { join } from 'node:path';
 
 /** Task-state replication is a connector capability — `store.sync()`
  *  runs whatever cycle that backend owns (beads: the dolt-refs
@@ -37,54 +37,54 @@ import { join } from 'node:path'
  *  Returns the failure count — artifact sync stays best-effort (a warn
  *  never breaks it), but an explicit --pull reports store failure. */
 function syncStores(root: string, prefer: Record<string, string>): number {
-  let failed = 0
-  const stores: TaskStore[] = []
-  let serving: string | undefined
+  let failed = 0;
+  const stores: TaskStore[] = [];
+  let serving: string | undefined;
   try {
-    serving = facadeName('tasks', { dir: root }, { prefer })
-    stores.push(facade('tasks', { dir: root }, { prefer }))
+    serving = facadeName('tasks', { dir: root }, { prefer });
+    stores.push(facade('tasks', { dir: root }, { prefer }));
   } catch (err) {
-    failed++
+    failed++;
     console.error(
       `warning: task store sync skipped — ${err instanceof Error ? err.message : String(err)}`
-    )
+    );
   }
   // the local beads db is a store too — skipped only when it IS the
   // serving store already queued; a remote backend's construction
   // failure must not strand it
   if (serving !== 'beads' || stores.length === 0) {
-    stores.push(taskStore(root))
+    stores.push(taskStore(root));
   }
   for (const store of stores) {
     if (store.sync === undefined) {
-      continue // the backend syncs on write — nothing to replicate
+      continue; // the backend syncs on write — nothing to replicate
     }
     try {
-      const out = store.sync()
+      const out = store.sync();
       if (out.trim() !== '') {
-        console.log(out.trimEnd())
+        console.log(out.trimEnd());
       }
     } catch (err) {
-      failed++
+      failed++;
       console.error(
-        `warning: task store sync failed — ${(err as { stderr?: string }).stderr?.trim() || (err instanceof Error ? err.message : String(err))}`
-      )
+        `warning: task store sync failed — ${(err as { stderr?: string }).stderr?.trim() || (err instanceof Error ? err.message : String(err))}; the next sync retries`
+      );
     }
   }
-  return failed
+  return failed;
 }
 
 function artifactDirs(root: string): string[] {
-  const dirs = new Set<string>()
+  const dirs = new Set<string>();
   if (existsSync(join(root, '.agents'))) {
-    dirs.add('.agents')
+    dirs.add('.agents');
   }
   // mirror the store's own resolution — BRO_DEBT_DIR wins over config
-  const debt = process.env.BRO_DEBT_DIR ?? loadBroConfig(root).debt.dir
+  const debt = process.env.BRO_DEBT_DIR ?? loadBroConfig(root).debt.dir;
   if (existsSync(join(root, debt))) {
-    dirs.add(debt)
+    dirs.add(debt);
   }
-  return [...dirs]
+  return [...dirs];
 }
 
 /** `--pull`: materialize the data ref, then replicate stores. An absent
@@ -95,17 +95,17 @@ function artifactDirs(root: string): string[] {
  *  CLI's main catch prints the message and exits 1, exactly what
  *  process.exit did. */
 function syncPull(root: string, cfg: ReturnType<typeof loadBroConfig>): void {
-  const { ref, remote, beads } = cfg.sync
-  const written = dataRefPull(root, remote, ref)
+  const { ref, remote, beads } = cfg.sync;
+  const written = dataRefPull(root, remote, ref);
   if (written === -1) {
-    console.log(`bro sync: remote ${remote} has no ${ref} — nothing to pull`)
+    console.log(`bro sync: remote ${remote} has no ${ref} — nothing to pull`);
   } else if (written < 0) {
-    throw new Error(`bro sync: could not fetch ${ref} from ${remote}`)
+    throw new Error(`bro sync: could not fetch ${ref} from ${remote}`);
   } else {
-    console.log(`bro sync: materialized ${written} file(s) from ${ref}`)
+    console.log(`bro sync: materialized ${written} file(s) from ${ref}`);
   }
   if (beads && syncStores(root, cfg.connectors) > 0) {
-    throw new Error('bro sync: task store replication failed — local state may be stale')
+    throw new Error('bro sync: task store replication failed — local state may be stale');
   }
 }
 
@@ -117,45 +117,43 @@ function syncPull(root: string, cfg: ReturnType<typeof loadBroConfig>): void {
  *  not block local work), not a throw. */
 export function runSyncCommand(argv: string[]): void {
   if (hasHelpFlag(argv)) {
-    printUsage('usage: bro sync [--pull]', 0)
+    printUsage('usage: bro sync [--pull]', 0);
   }
-  const pull = argv.includes('--pull')
-  const root = dataRefRoot()
+  const pull = argv.includes('--pull');
+  const root = dataRefRoot();
   if (root === null) {
-    throw new Error('bro sync: not inside a git worktree')
+    throw new Error('bro sync: not inside a git worktree');
   }
-  const cfg = loadBroConfig(root)
-  const { ref, remote, beads } = cfg.sync
+  const cfg = loadBroConfig(root);
+  const { ref, remote, beads } = cfg.sync;
 
   if (pull) {
-    syncPull(root, cfg)
-    return
+    syncPull(root, cfg);
+    return;
   }
 
-  const dirs = artifactDirs(root)
+  const dirs = artifactDirs(root);
   if (dirs.length === 0) {
-    console.log('bro sync: no artifact dirs (.agents/, debt dir)')
+    console.log('bro sync: no artifact dirs (.agents/, debt dir)');
   }
   for (const dir of dirs) {
-    const head = dataRefCommit(root, dir, `bro data: sync ${dir}`, ref)
+    const head = dataRefCommit(root, dir, `bro data: sync ${dir}`, ref);
     if (head === null) {
-      console.log(`bro sync: ${dir} — nothing to sync`)
+      console.log(`bro sync: ${dir} — nothing to sync`);
     } else {
-      console.log(`bro sync: ${dir} → ${ref} @ ${head.slice(0, 8)}`)
+      console.log(`bro sync: ${dir} → ${ref} @ ${head.slice(0, 8)}`);
     }
   }
   // push whenever a local data ref exists — an earlier sync may have left
   // one even when this checkout has no artifact dirs to commit
-  const hasRef = gitTry(['-C', root, 'rev-parse', '--verify', '--quiet', ref]).code === 0
+  const hasRef = gitTry(['-C', root, 'rev-parse', '--verify', '--quiet', ref]).code === 0;
   if (hasRef && !dataRefPush(root, remote, ref)) {
-    console.error(
-      `warning: could not push ${ref} to ${remote} — check network and remote access`
-    )
+    console.error(`warning: could not push ${ref} to ${remote} — check network and remote access`);
   } else if (hasRef) {
-    console.log(`bro sync: ${ref} pushed to ${remote}`)
+    console.log(`bro sync: ${ref} pushed to ${remote}`);
   }
   // the store has its own transport — independent of artifact outcome
   if (beads) {
-    syncStores(root, cfg.connectors)
+    syncStores(root, cfg.connectors);
   }
 }
