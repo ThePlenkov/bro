@@ -1,6 +1,11 @@
 ---
 
-## parent: bro-36sx7
+parent: bro-36sx7
+scope:
+- packages/cli/src/commands/hooks.ts
+- hooks/run.sh
+
+---
 
 # bro-36sx7.13 — hooks: hard wall-clock deadline (Node deadline + run.sh watchdog)
 
