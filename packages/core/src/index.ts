@@ -595,4 +595,5 @@ export {
   skillFolderHash,
   type LockedSkill,
   type SkillDrift,
+  type SkillLockLocation,
 } from './skills-lock.ts';

@@ -429,7 +429,7 @@ function setupLockedSkills(dir: string, dryRun: boolean, checkOnly: boolean): vo
   // Drift check BEFORE any install — the installer replaces the skill
   // directory it owns, so installing over a copy with local edits would
   // erase them. Check first; a drifted skill is reported and left alone.
-  const before = checkSkillLock(locked, skillsDir);
+  const before = checkSkillLock(locked, { skillsDir });
   reportBeforeDrift(before, dryRun, checkOnly);
 
   if (!checkOnly && !dryRun) {
@@ -508,7 +508,7 @@ function installOneLockedSkill(dir: string, skill: LockedSkill): void {
 }
 
 function reportAfterDrift(current: Map<string, LockedSkill>, skillsDir: string): void {
-  const drift = checkSkillLock(current, skillsDir);
+  const drift = checkSkillLock(current, { skillsDir });
   if (drift.length === 0) {
     console.error(`  ${current.size} locked skill(s) match the lock`);
     return;

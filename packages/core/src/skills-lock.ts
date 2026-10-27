@@ -196,15 +196,22 @@ function lockedSkill(entry: { name: string; value: unknown }): LockedSkill | nul
 /**
  * Compare the installed skills against the lock.
  *
- * `skillsDir` is the `.agents/skills` directory. A skill that is missing
+ * `where.skillsDir` is the `.agents/skills` directory. A skill that is missing
  * entirely is reported as `missing`; one whose content hash differs from the
  * lock is `drifted`. Skills that match are not reported — the lock's job is to
  * surface the ones that do not.
  */
-export function checkSkillLock(locked: Map<string, LockedSkill>, skillsDir: string): SkillDrift[] {
+export interface SkillLockLocation {
+  skillsDir: string;
+}
+
+export function checkSkillLock(
+  locked: Map<string, LockedSkill>,
+  where: SkillLockLocation
+): SkillDrift[] {
   const drift: SkillDrift[] = [];
   for (const skill of locked.values()) {
-    const skillDrift = checkSingleSkill(skill, skillsDir);
+    const skillDrift = checkSingleSkill(skill, where);
     if (skillDrift !== null) {
       drift.push(skillDrift);
     }
@@ -212,8 +219,8 @@ export function checkSkillLock(locked: Map<string, LockedSkill>, skillsDir: stri
   return drift;
 }
 
-function checkSingleSkill(skill: LockedSkill, skillsDir: string): SkillDrift | null {
-  const installedDir = join(skillsDir, skill.name);
+function checkSingleSkill(skill: LockedSkill, where: SkillLockLocation): SkillDrift | null {
+  const installedDir = join(where.skillsDir, skill.name);
   const installedSkillMd = join(installedDir, 'SKILL.md');
   if (!existsSync(installedSkillMd)) {
     return driftOf(skill, { actual: '', kind: 'missing' });
