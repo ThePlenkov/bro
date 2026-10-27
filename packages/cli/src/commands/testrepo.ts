@@ -615,6 +615,77 @@ export function bead(db: string, id: string): Record<string, unknown> | undefine
   return readBeads(db).find(r => r.id === id);
 }
 
+/** SIGKILL a spawned run's whole unit — the recorded pid's group plus
+ *  the run-scoped handle's group when the worker named a different
+ *  pid (exec-style `systemd-run --scope` keeps them equal; a
+ *  fork-style one would differ, bro-ybo8z). Self/parent pids are
+ *  never signaled: tests pin their own pid into registries to fake
+ *  'running'. */
+export function killRun(
+  main: string,
+  run: { pid?: unknown; runId?: unknown; agentId?: unknown; id?: unknown }
+): void {
+  const pids = new Set<number>();
+  if (typeof run.pid === 'number' && run.pid > 0) {
+    pids.add(run.pid);
+  }
+  const agentId =
+    typeof run.agentId === 'string' ? run.agentId : typeof run.id === 'string' ? run.id : undefined;
+  if (typeof run.runId === 'string' && agentId !== undefined) {
+    try {
+      const h = Number(
+        readFileSync(
+          join(main, '.git', 'bro', 'agents', `${agentId}.${run.runId}.handle`),
+          'utf8'
+        ).trim()
+      );
+      if (Number.isInteger(h) && h > 0) {
+        pids.add(h);
+      }
+    } catch {
+      // no handle — plain-shape run or pre-handshake
+    }
+  }
+  for (const p of pids) {
+    if (p !== process.pid && p !== process.ppid) {
+      try {
+        process.kill(-p, 'SIGKILL'); // detached → own process group
+      } catch {
+        // already gone
+      }
+    }
+  }
+}
+
+/** SIGKILL every live handle in the repo's agents dir — the reaper for
+ *  runs whose registry row is already gone (a worker self-published
+ *  before its launcher died, or the fixture only knows the log pid). */
+export function killRunHandles(main: string): void {
+  let names: string[] = [];
+  try {
+    names = readdirSync(join(main, '.git', 'bro', 'agents'));
+  } catch {
+    return;
+  }
+  for (const n of names) {
+    if (!n.endsWith('.handle')) {
+      continue;
+    }
+    try {
+      const p = Number(readFileSync(join(main, '.git', 'bro', 'agents', n), 'utf8').trim());
+      if (Number.isInteger(p) && p > 0 && p !== process.pid && p !== process.ppid) {
+        try {
+          process.kill(-p, 'SIGKILL');
+        } catch {
+          // already gone
+        }
+      }
+    } catch {
+      // unreadable handle — not a kill target
+    }
+  }
+}
+
 /** The landed-claim verdict every act settle path owes — the bead is
  *  closed with the merge link as its close reason; stderr (when the
  *  caller holds one) carries the `act: <id> closed` line. */

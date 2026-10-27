@@ -2122,24 +2122,41 @@ function groupMemberAlive(pgid: number, minStart?: string): boolean {
  *  pid+starttime identity is what keeps a recycled pid from faking
  *  death. Empty where /proc is absent (non-Linux). */
 function descendantsOf(root: number): Array<{ pid: number; start?: string }> {
+  return unitSnapshot(root).members;
+}
+
+/** The pre-signal unit snapshot — the wrapper's process tree plus
+ *  every process GROUP the tree spans, off one /proc scan. A payload
+ *  that leads its own session or process group escapes
+ *  kill(-wrapperPgid): a fork-style `systemd-run --scope` gives the
+ *  scoped child its own pid (spec bro-ybo8z — exec-style systemd-run
+ *  keeps the wrapper's pid and needs nothing extra), and a setsid'd
+ *  descendant was already unreachable. `down` signals each distinct
+ *  pgid a live member belongs to — `{root group} ∪ {member groups}` —
+ *  which for the common single-group tree is the group it always was.
+ *  Members keep the same {pid,start} shape descendantsOf reports;
+ *  zombies claim no group. */
+function unitSnapshot(root: number): {
+  members: Array<{ pid: number; start?: string }>;
+  groups: Set<number>;
+} {
   const scan = scanProc();
+  const members: Array<{ pid: number; start?: string }> = [];
+  const groups = new Set<number>();
   if (scan === null) {
-    return [];
+    return { members, groups };
   }
   const children = new Map<number, number[]>();
-  const starts = new Map<number, string>();
+  const byPid = new Map<number, ProcEntry>();
   for (const e of scan.entries) {
+    byPid.set(e.pid, e);
     const list = children.get(e.ppid);
     if (list === undefined) {
       children.set(e.ppid, [e.pid]);
     } else {
       list.push(e.pid);
     }
-    if (e.start !== '') {
-      starts.set(e.pid, e.start);
-    }
   }
-  const out: Array<{ pid: number; start?: string }> = [];
   const seen = new Set<number>([root]);
   const queue = [root];
   for (let cur = queue.shift(); cur !== undefined; cur = queue.shift()) {
@@ -2148,11 +2165,15 @@ function descendantsOf(root: number): Array<{ pid: number; start?: string }> {
         continue;
       }
       seen.add(c);
-      out.push({ pid: c, start: starts.get(c) });
       queue.push(c);
+      const e = byPid.get(c);
+      members.push({ pid: c, start: e?.start === '' ? undefined : e?.start });
+      if (e !== undefined && e.state !== 'Z' && e.pgrp > 0) {
+        groups.add(e.pgrp);
+      }
     }
   }
-  return out;
+  return { members, groups };
 }
 
 /** Live state for a registry entry under this backend. */
@@ -2337,18 +2358,25 @@ export class SpawnAbandoned extends Error {
   }
 }
 
-const spawnTestSeam: { abandonAt?: SpawnAbandonAt; goWaitTicks?: number } = {};
+const spawnTestSeam: {
+  abandonAt?: SpawnAbandonAt;
+  goWaitTicks?: number;
+  scope?: boolean;
+} = {};
 
 /** Arm the crash-window failpoints (spec bro-l8c4f.5) — tests only:
  *  `abandonAt` throws SpawnAbandoned mid-section exactly where a
  *  launcher crash would cut it, `goWaitTicks` shrinks the worker's
- *  admission wait so the timeout path runs inside a test budget. */
+ *  admission wait so the timeout path runs inside a test budget,
+ *  `scope` pins the systemd-scope wrap on or off regardless of probe. */
 export function armNativeSpawnTestSeam(seam: {
   abandonAt?: SpawnAbandonAt;
   goWaitTicks?: number;
+  scope?: boolean;
 }): void {
   spawnTestSeam.abandonAt = seam.abandonAt;
   spawnTestSeam.goWaitTicks = seam.goWaitTicks;
+  spawnTestSeam.scope = seam.scope;
 }
 
 const maybeAbandonSpawn = (at: SpawnAbandonAt): void => {
@@ -2356,6 +2384,64 @@ const maybeAbandonSpawn = (at: SpawnAbandonAt): void => {
     throw new SpawnAbandoned(at);
   }
 };
+
+/** systemd scope wrap (spec bro-ybo8z). A native worker spawned as a
+ *  plain `sh -c` child inherits the spawning unit's cgroup — under
+ *  `KillMode=control-group` every loop/daemon crash (and a manual
+ *  `systemctl stop`) wiped the whole lane: dead workers, no `.exit`,
+ *  'lost' rows. `systemd-run --user --scope` moves the payload into a
+ *  sibling `run-*.scope` that no supervisor's cgroup kill can reach.
+ *
+ *  `--scope`, never a transient service: systemd-run moves ITSELF
+ *  into the new scope and then execs the payload, so cwd, the
+ *  assembled env, and the log fds ride the exec unchanged (a service
+ *  reparents to the manager and would need each of those re-plumbed).
+ *  `--expand-environment=no` is mandatory — systemd-run otherwise
+ *  expands `$`-references in argv (ExecStart rules) and the handshake
+ *  script's `$$`, `$1`, `$@` arrive mangled.
+ *
+ *  Process shape: systemd-run registers the scope with its OWN pid
+ *  and then execs the payload in place, so `child.pid` keeps naming
+ *  the real worker — the handle's `$$`, the registry pid and the
+ *  scope's main pid are one. A systemd-run that FORKED instead would
+ *  put the payload in the scope under a different pid — the stop
+ *  path's multi-group signal and dead-pid handle adoption cover that
+ *  topology too.
+ *
+ *  Availability is one cached probe per process: no binary, no user
+ *  manager, or a refused registration all fall back to the plain
+ *  spawn. `agents.native.systemdScope` opts out (`false`) or forces
+ *  the wrap past the probe (`true`); the test seam wins over both. */
+const SCOPE_RUN_PREFIX = ['systemd-run', '--user', '--scope', '--quiet', '--expand-environment=no'];
+
+let scopeProbeCache: boolean | undefined;
+
+/** Host capability only — the cached `systemd-run --user --scope`
+ *  probe. Exported so tests can skip scope assertions on hosts
+ *  without a user manager; the spawn decision itself is
+ *  `systemdScopeFor` (seam/knob/probe). */
+export function systemdScopeProbe(): boolean {
+  if (scopeProbeCache === undefined) {
+    const r = spawnSync('systemd-run', [...SCOPE_RUN_PREFIX.slice(1), '--', 'true'], {
+      stdio: 'ignore',
+      timeout: 5_000,
+    }); // NOSONAR — PATH lookup is the contract (same as sh/git)
+    scopeProbeCache = r.status === 0;
+  }
+  return scopeProbeCache;
+}
+
+/** The spawn's scope decision: test seam → `systemdScope` knob →
+ *  cached probe. */
+function systemdScopeFor(knobs: Record<string, unknown>): boolean {
+  if (spawnTestSeam.scope !== undefined) {
+    return spawnTestSeam.scope;
+  }
+  if (typeof knobs.systemdScope === 'boolean') {
+    return knobs.systemdScope;
+  }
+  return systemdScopeProbe();
+}
 
 /** The `<agentId>.<runId>.{handle,go}` paths for one attempt — the
  *  handle is the worker's durable self-registration, the go stamp the
@@ -2546,9 +2632,22 @@ export function makeNativeConnector(ctx: ConnectorCtx, env: AgentConnectorEnv): 
                   goTicks,
                 ];
           const cliBadge = workerCliBadge(worker, command);
+          // the scope wrap (bro-ybo8z): the payload runs under
+          // systemd-run so a supervisor's cgroup kill cannot reach it.
+          // --description carries the run's identity (never --unit — a
+          // respawned agentId must not collide on a lingering scope)
+          const scoped = systemdScopeFor(knobs);
           const child = spawn(
-            'sh', // NOSONAR — PATH lookup is the contract (same as git/bd everywhere)
-            args,
+            scoped ? 'systemd-run' : 'sh', // NOSONAR — PATH lookup is the contract (same as git/bd everywhere)
+            scoped
+              ? [
+                  ...SCOPE_RUN_PREFIX.slice(1),
+                  `--description=bro agent ${agentId} ${spec.molStep}`,
+                  '--',
+                  'sh',
+                  ...args,
+                ]
+              : args,
             { // NOSONAR — operator-configured agent command (same contract as loop)
               cwd: spec.repoRoot,
               env: {
@@ -2680,14 +2779,22 @@ export function makeNativeConnector(ctx: ConnectorCtx, env: AgentConnectorEnv): 
       const [molStep, entry] = hit;
       // a crashed launcher's survivor self-published its handle — adopt
       // it here too so `down` reaches the worker the registry never got
-      // a pid for (spec bro-l8c4f.5)
+      // a pid for (spec bro-l8c4f.5). The consultation now also fires
+      // when the recorded pid is simply DEAD: a fork-style
+      // `systemd-run --scope` (bro-ybo8z) leaves the payload alive in
+      // another cgroup under a pid the registry never recorded, and
+      // stamping `stopped` over that live orphan would free a respawn
+      // beside a live writer.
+      const home = agentsHome(dir);
+      const entryPid = typeof entry.pid === 'number' ? entry.pid : undefined;
       const adopted =
-        typeof entry.pid === 'number'
+        entryPid !== undefined &&
+        (pidAlive(entryPid, entryPidStart(entry)) ||
+          groupMemberAlive(entryPid, entryPidStart(entry)))
           ? undefined
-          : adoptNativeHandle(dir, agentsHome(dir), molStep, entry);
-      const pid = typeof entry.pid === 'number' ? entry.pid : adopted?.pid;
-      const start =
-        typeof entry.pid === 'number' ? entryPidStart(entry) : (adopted?.start ?? undefined);
+          : adoptNativeHandle(dir, home, molStep, entry);
+      const pid = adopted?.pid ?? entryPid;
+      const start = adopted !== undefined ? (adopted.start ?? undefined) : entryPidStart(entry);
       // The unit check lives outside the signal block: a repeated `down`
       // can find the wrapper already dead while a descendant still holds
       // the group — the lock guard below must see it even when no signal
@@ -2700,19 +2807,26 @@ export function makeNativeConnector(ctx: ConnectorCtx, env: AgentConnectorEnv): 
         (pidAlive(pid, start) ||
           groupMemberAlive(pid, start) ||
           unit.some(d => pidAlive(d.pid, d.start)));
-      if (pid !== undefined && pidAlive(pid, start)) {
+      if (pid !== undefined && (pidAlive(pid, start) || groupMemberAlive(pid, start))) {
         // the tree snapshot rides BEFORE the signal: a descendant that
-        // escaped the group (setsid) is invisible to groupMemberAlive,
-        // and once the wrapper dies it reparents to init — the
-        // pre-signal pid+starttime pin is the only handle left on it
-        unit = descendantsOf(pid);
-        try {
-          process.kill(-pid, 'SIGTERM'); // detached → own process group
-        } catch {
-          // No fallback to kill(pid): a native child is always its own
-          // group leader, so a failed group signal means the pid was
-          // recycled by a non-leader — signaling it would hit an
-          // unrelated process.
+        // escaped the group (setsid — or a scope payload a fork-style
+        // systemd-run gave its own pid to, bro-ybo8z) is invisible to
+        // groupMemberAlive, and once the wrapper dies it reparents to
+        // init — the pre-signal pid+starttime pin is the only handle
+        // left on it. The signal goes to every group the tree spans:
+        // a scoped payload's own pgid gets SIGTERM too.
+        const snap = unitSnapshot(pid);
+        unit = snap.members;
+        const groups = new Set<number>([pid, ...snap.groups]);
+        for (const g of groups) {
+          try {
+            process.kill(-g, 'SIGTERM'); // detached → own process group
+          } catch {
+            // No fallback to kill(pid): a native child is always its own
+            // group leader, so a failed group signal means the group was
+            // emptied or recycled — signaling a bare pid could hit an
+            // unrelated process.
+          }
         }
         // let the signal land before recording the stop — `stopped` on a
         // still-living pid would let a respawn run alongside the dying
