@@ -277,22 +277,24 @@ function flatAttrs(attributes: unknown): Record<string, unknown> {
   )
 }
 
+interface OtlpLogRecord {
+  body?: { stringValue?: string }
+  attributes?: unknown
+}
+
+interface OtlpScopeLogs {
+  scopeLogs?: { logRecords?: OtlpLogRecord[] }[]
+}
+
+const head = <T>(list: T[] | undefined): T | undefined => list?.[0]
+
 /** resourceLogs[0].scopeLogs[0].logRecords[0] → body + flattened attrs. */
 function firstLogRecord(body: string): {
   body: string | undefined
   attrs: Record<string, unknown>
 } {
-  const parsed: {
-    resourceLogs?: {
-      scopeLogs?: {
-        logRecords?: {
-          body?: { stringValue?: string }
-          attributes?: unknown
-        }[]
-      }[]
-    }[]
-  } = JSON.parse(body)
-  const rec = parsed.resourceLogs?.[0]?.scopeLogs?.[0]?.logRecords?.[0]
+  const parsed = JSON.parse(body) as { resourceLogs?: OtlpScopeLogs[] }
+  const rec = head(head(head(parsed.resourceLogs)?.scopeLogs)?.logRecords)
   return {
     body: rec?.body?.stringValue,
     attrs: flatAttrs(rec?.attributes),

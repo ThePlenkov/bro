@@ -48,9 +48,9 @@ const isObj = (v: unknown): v is Record<string, unknown> =>
 
 /** `a.b.c` against the payload — scalar leaf → attribute, anything
  *  else (missing, object, array) reports back as skipped. */
-function dig(payload: unknown, path: string): { hit: boolean; v?: Scalar } {
-  let cur: unknown = payload
-  for (const seg of path.split('.')) {
+function dig(lookup: { payload: unknown; path: string }): { hit: boolean; v?: Scalar } {
+  let cur: unknown = lookup.payload
+  for (const seg of lookup.path.split('.')) {
     if (!isObj(cur)) return { hit: false }
     // own-property descriptor — a `__proto__`/`constructor` segment in a
     // collect path reads the prototype chain on a bracket access; the
@@ -73,7 +73,7 @@ export function collectFields(
   const fields: Record<string, Scalar> = {}
   const skipped: string[] = []
   for (const path of collect) {
-    const r = dig(payload, path)
+    const r = dig({ payload, path })
     if (r.hit) fields[path] = r.v as Scalar
     else skipped.push(path)
   }
@@ -122,7 +122,8 @@ export function otelSinkPath(cfg: OtelConfig, dir: string): string {
     : join(homedir(), '.local', 'state', 'bro', 'otel-hooks.jsonl')
 }
 
-function writeFileSink(path: string, record: OtelHookRecord): void {
+function writeFileSink(write: { path: string; record: OtelHookRecord }): void {
+  const { path, record } = write
   mkdirSync(dirname(path), { recursive: true })
   const line = `${JSON.stringify(record)}\n`
   const append = (): void => {
@@ -156,10 +157,11 @@ function recordAttrs(record: OtelHookRecord): Record<string, Scalar> {
   return a
 }
 
-function writeSink(cfg: OtelConfig, record: OtelHookRecord, dir: string): void {
+function writeSink(job: { cfg: OtelConfig; record: OtelHookRecord; dir: string }): void {
+  const { cfg, record, dir } = job
   switch (cfg.exporter.type) {
     case 'file':
-      writeFileSink(otelSinkPath(cfg, dir), record)
+      writeFileSink({ path: otelSinkPath(cfg, dir), record })
       return
     case 'otlp':
       // detached delivery — a dead collector cannot stall the hook's
@@ -222,8 +224,8 @@ function mergeOtel(
  *  path, a non-repository dir, a missing or stalled git — every other
  *  answer leaves the file unattributable, and unattributable config
  *  never gets to choose where records go or what they carry. */
-function untrackedInRepo(dir: string, file: string): boolean {
-  const r = gitTry(['-C', dir, 'ls-files', '--error-unmatch', '--', basename(file)], 2_000)
+function untrackedInRepo(hit: { dir: string; file: string }): boolean {
+  const r = gitTry(['-C', hit.dir, 'ls-files', '--error-unmatch', '--', basename(hit.file)], 2_000)
   return r.code === 1 && r.out.trim() === ''
 }
 
@@ -267,17 +269,19 @@ function otelLayerViews(dir: string): {
       continue
     }
     everything = mergeOtel(everything, raw)
-    if (hit.layer === 'global' || untrackedInRepo(hit.dir, hit.file)) {
+    if (hit.layer === 'global' || untrackedInRepo(hit)) {
       own = mergeOtel(own, raw)
     }
   }
   return { everything, own }
 }
 
-function resolveOtelConfig(dir: string): ResolvedOtelConfig {
-  const { everything, own } = otelLayerViews(dir)
-  const merged = otelSection(everything)
-  const operator = otelSection(own)
+function resolveOtelConfig(views: {
+  everything: Record<string, unknown>
+  own: Record<string, unknown>
+}): ResolvedOtelConfig {
+  const merged = otelSection(views.everything)
+  const operator = otelSection(views.own)
   return {
     enabled: merged.enabled && operator.enabled,
     exporter: operator.exporter,
@@ -302,7 +306,7 @@ export function otelConfigFor(dir: string): ResolvedOtelConfig {
   const key = resolve(dir)
   let cfg = cfgMemo.get(key)
   if (cfg === undefined) {
-    cfg = resolveOtelConfig(key)
+    cfg = resolveOtelConfig(otelLayerViews(key))
     cfgMemo.set(key, cfg)
   }
   return cfg
@@ -341,7 +345,7 @@ export function emitHook(name: string, payload: unknown, meta: HookMeta = {}): v
     if (!shouldEmit(cfg, policy)) {
       return
     }
-    writeSink(cfg, hookRecord(name, payload, meta, policy).record, dir)
+    writeSink({ cfg, record: hookRecord(name, payload, meta, policy).record, dir })
   } catch {
     // drop-on-error — telemetry must never stall or fail the caller
   }
