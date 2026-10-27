@@ -12,28 +12,18 @@
  * composition decisions (stop-gate questions like 'spec followed?')
  * append the same way under their own kind.
  */
-import { createHash } from 'node:crypto'
-import { appendFileSync, mkdirSync, readFileSync } from 'node:fs'
-import { dirname, join, resolve } from 'node:path'
-import { gitTry } from '@broject/core'
-import type {
-  Disposition,
-  JournalRow,
-  ReviewComment,
-  Verdict,
-} from '@broject/core'
+import { createHash } from 'node:crypto';
+import { appendFileSync, mkdirSync, readFileSync } from 'node:fs';
+import { dirname, join } from 'node:path';
+import { GIT_SYNC_PROBE_TIMEOUT_MS, gitCommonDir } from '@broject/core';
+import type { Disposition, JournalRow, ReviewComment, Verdict } from '@broject/core';
 
 /** The journal file for `dir` — `<git-common>/bro/judge/verdicts.jsonl`;
- *  null outside a repo (the same relative/absolute fallback chain
- *  mailboxDir uses). */
+ *  null outside a repo. Bounded lookup: the stop-gate judge append runs
+ *  inside hook dispatch, where a wedged git probe must fail fast. */
 export function journalPath(dir: string): string | null {
-  const r = gitTry(['-C', dir, 'rev-parse', '--path-format=absolute', '--git-common-dir'])
-  let common = r.code === 0 ? r.out.trim() : ''
-  if (common === '') {
-    const rel = gitTry(['-C', dir, 'rev-parse', '--git-common-dir'])
-    common = rel.code === 0 && rel.out.trim() !== '' ? resolve(dir, rel.out.trim()) : ''
-  }
-  return common === '' ? null : join(common, 'bro', 'judge', 'verdicts.jsonl')
+  const common = gitCommonDir(dir, GIT_SYNC_PROBE_TIMEOUT_MS);
+  return common === null ? null : join(common, 'bro', 'judge', 'verdicts.jsonl');
 }
 
 /** The subject's dedup key — a content hash of the first comment the
@@ -46,7 +36,7 @@ export function commentKey(c: ReviewComment): string {
   return createHash('sha256')
     .update(JSON.stringify([c.author, c.createdAt, c.path, c.line, c.body]))
     .digest('hex')
-    .slice(0, 16)
+    .slice(0, 16);
 }
 
 /** The subject identity for one thread — `pr`/`headSha` give the
@@ -63,41 +53,41 @@ export function threadSubject(
     threadId,
     ...(headSha !== undefined ? { headSha } : {}),
     ...(comment !== null ? { commentSha: commentKey(comment) } : {}),
-  }
+  };
 }
 
 /** Append one journal row — plain append is atomic at this size; a
  *  missing journal dir is created on first write. No-op outside a
  *  repo (a consumer without a git dir simply has no shadow log). */
 export function appendRow(dir: string, row: JournalRow): void {
-  const path = journalPath(dir)
+  const path = journalPath(dir);
   if (path === null) {
-    return
+    return;
   }
-  mkdirSync(dirname(path), { recursive: true })
-  appendFileSync(path, `${JSON.stringify(row)}\n`)
+  mkdirSync(dirname(path), { recursive: true });
+  appendFileSync(path, `${JSON.stringify(row)}\n`);
 }
 
 /** The whole journal, malformed lines dropped — a torn last line from
  *  a killed writer must not poison the read. */
 export function readJournal(dir: string): JournalRow[] {
-  const path = journalPath(dir)
+  const path = journalPath(dir);
   if (path === null) {
-    return []
+    return [];
   }
-  let text: string
+  let text: string;
   try {
-    text = readFileSync(path, 'utf8')
+    text = readFileSync(path, 'utf8');
   } catch {
-    return []
+    return [];
   }
-  const rows: JournalRow[] = []
+  const rows: JournalRow[] = [];
   for (const line of text.split('\n')) {
     if (line.trim() === '') {
-      continue
+      continue;
     }
     try {
-      const row = JSON.parse(line) as JournalRow
+      const row = JSON.parse(line) as JournalRow;
       // subject must be an OBJECT (possibly {}) — a torn-but-valid tail
       // like {"kind":"x"} or "subject":"s" makes findVerdict's
       // r.subject.threadId throw; threadId itself is legitimately
@@ -109,16 +99,16 @@ export function readJournal(dir: string): JournalRow[] {
         typeof row.subject === 'object' &&
         row.subject !== null
       ) {
-        rows.push(row)
+        rows.push(row);
       }
     } catch {
       // torn write — skip
     }
   }
-  return rows
+  return rows;
 }
 
-const isVerdict = (r: JournalRow): r is Verdict => r.kind !== 'act-disposition'
+const isVerdict = (r: JournalRow): r is Verdict => r.kind !== 'act-disposition';
 
 /** Call-site dedup: the latest verdict for this subject, or undefined
  *  when the inputs moved. Every field the caller supplies must equal —
@@ -135,14 +125,14 @@ export function findVerdict(
     r.replay !== true &&
     r.subject.threadId === subject.threadId &&
     (subject.commentSha === undefined || r.subject.commentSha === subject.commentSha) &&
-    (subject.headSha === undefined || r.subject.headSha === subject.headSha)
+    (subject.headSha === undefined || r.subject.headSha === subject.headSha);
   for (let i = rows.length - 1; i >= 0; i -= 1) {
-    const r = rows[i]!
+    const r = rows[i]!;
     if (match(r)) {
-      return r
+      return r;
     }
   }
-  return undefined
+  return undefined;
 }
 
 /** Record what actually happened to a thread — the outcome half of the
@@ -155,11 +145,11 @@ export function recordDisposition(
   subject: { pr?: number; threadId: string; commentSha?: string; headSha?: string },
   outcome: Disposition['outcome']
 ): void {
-  let { commentSha, headSha } = subject
+  let { commentSha, headSha } = subject;
   if (commentSha === undefined) {
-    const seen = findVerdict(readJournal(dir), { threadId: subject.threadId })
-    commentSha = seen?.subject.commentSha
-    headSha = headSha ?? seen?.subject.headSha
+    const seen = findVerdict(readJournal(dir), { threadId: subject.threadId });
+    commentSha = seen?.subject.commentSha;
+    headSha = headSha ?? seen?.subject.headSha;
   }
   appendRow(dir, {
     ts: new Date().toISOString(),
@@ -171,5 +161,5 @@ export function recordDisposition(
       ...(commentSha !== undefined ? { commentSha } : {}),
     },
     outcome,
-  })
+  });
 }

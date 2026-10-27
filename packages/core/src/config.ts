@@ -25,7 +25,8 @@ import { createRequire } from 'node:module';
 import { homedir } from 'node:os';
 import { basename, dirname, join, resolve, sep } from 'node:path';
 import { pathToFileURL } from 'node:url';
-import { gitTry } from './git.ts';
+import { GIT_SYNC_PROBE_TIMEOUT_MS, gitCommonDir } from './git.ts';
+
 import {
   API_WIRES,
   parseProviderEntry,
@@ -1411,14 +1412,12 @@ function applySections(
  *  `--git-common-dir` resolves to `<main>/.git` there (and to
  *  `<cwd>/.git` in the main checkout itself, which dedupes). */
 function mainWorktreeRoot(cwd: string): string | null {
-  const r = gitTry(['-C', cwd, 'rev-parse', '--git-common-dir']);
-  if (r.code !== 0 || r.out.trim() === '') {
+  // bounded + cached — config layers load on hook probes, where a
+  // wedged git probe must fail fast rather than stall dispatch
+  const common = gitCommonDir(cwd, GIT_SYNC_PROBE_TIMEOUT_MS);
+  if (common === null) {
     return null;
   }
-  // linked worktrees print the main checkout's absolute .git path; the
-  // main worktree prints a relative `.git` — resolve covers both, and
-  // unlike --path-format this works on older git too
-  const common = resolve(cwd, r.out.trim());
   if (basename(common) === '.git') {
     return dirname(common);
   }

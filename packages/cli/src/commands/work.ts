@@ -44,6 +44,7 @@ import {
   emitLifecycle,
   facade,
   git,
+  GIT_SYNC_PROBE_TIMEOUT_MS,
   gitTry,
   loadConfig,
   LockTimeout,
@@ -2113,14 +2114,11 @@ export function runWorkCommand(argv: string[]): void {
 /** Absolute git dir for cwd — used by hooks to tell linked worktrees from
  *  the primary checkout without re-parsing `worktree list`. */
 export function gitDirOf(cwd: string): string | null {
-  const res = spawnSync('git', ['-C', cwd, 'rev-parse', '--absolute-git-dir'], { // NOSONAR — git is a required runtime dep; fixed argv
-    encoding: 'utf8',
-    stdio: ['ignore', 'pipe', 'ignore'],
-  });
-  if (res.status !== 0) {
+  const res = gitTry(['-C', cwd, 'rev-parse', '--absolute-git-dir'], GIT_SYNC_PROBE_TIMEOUT_MS);
+  if (res.code !== 0) {
     return null;
   }
-  const dir = (res.stdout ?? '').trim();
+  const dir = res.out.trim();
   return dir ? resolve(dir) : null;
 }
 
@@ -2146,13 +2144,17 @@ export const workConnector: Connector = {
     },
     parallelWork(ctx) {
       try {
-        const cur = gitTry(['-C', ctx.dir, 'rev-parse', '--show-toplevel']).out.trim();
+        const cur = gitTry(
+          ['-C', ctx.dir, 'rev-parse', '--show-toplevel'],
+          GIT_SYNC_PROBE_TIMEOUT_MS
+        ).out.trim();
         // ctx.owner is the dispatched owner; undefined means the caller
         // never resolved one — resolve lazily. An explicit null stays
         // ownerless: no suppression, every claim reports as foreign
         const self = ctx.owner === undefined ? agentOwner() : ctx.owner;
-        return (
-          parseWorktreePorcelain(gitTry(['-C', ctx.dir, 'worktree', 'list', '--porcelain']).out)
+        return parseWorktreePorcelain(
+          gitTry(['-C', ctx.dir, 'worktree', 'list', '--porcelain'], GIT_SYNC_PROBE_TIMEOUT_MS).out
+        )
             .slice(1) // porcelain lists the main worktree first
             .filter(w => !w.prunable && w.path !== cur)
             // a worktree claimed by THIS agent's process tree is own
@@ -2180,8 +2182,19 @@ export const workConnector: Connector = {
         if (!gd || !isLinkedGitDir(gd)) {
           return [];
         }
-        const res = gitTry(['-C', ctx.dir, 'status', '--porcelain']);
-        const dirty = res.code === 0 ? res.out.split('\n').filter(Boolean).length : 0;
+        const res = gitTry(['-C', ctx.dir, 'status', '--porcelain'], GIT_SYNC_PROBE_TIMEOUT_MS);
+        if (res.code !== 0) {
+          return [
+            {
+              aspect: 'work',
+              block:
+                'bro: could not verify clean state in linked worktree (status timed out or failed) — ' +
+                'commit/push the work or discard deliberately, then `bro work leave`',
+              armedHint: 'bro: still inside a linked worktree — `bro work leave` when done',
+            },
+          ];
+        }
+        const dirty = res.out.split('\n').filter(Boolean).length;
         return [
           {
             aspect: 'work',
