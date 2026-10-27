@@ -438,6 +438,19 @@ function handleFileProves(home: string | null, e: AgentRegistryEntry): boolean {
   }
 }
 
+/** A pid-less native row read by the handshake (spec bro-l8c4f.5): a
+ *  live self-published handle IS the worker even with no pid patch;
+ *  inside the handoff window the attempt can still land it ('spawned'),
+ *  past it the attempt is dead ('lost'). */
+function nativePidlessState(home: string | null, e: AgentRegistryEntry): AgentState {
+  if (handleFileProves(home, e)) {
+    return 'running'
+  }
+  return entryRunId(e) !== undefined && Date.now() - Date.parse(e.spawnedAt) < SESSION_SLOT_TTL_MS
+    ? 'spawned'
+    : 'lost'
+}
+
 /** Agent liveness derived from the registry entry alone — no backend
  *  list() probes. A live pid is running; a recorded or on-disk death is
  *  terminal; anything unproven counts as live ('spawned') — occupied is
@@ -472,13 +485,7 @@ export function registryEntryState(
   // SESSION_SLOT_TTL_MS or the attempt is dead, and a live handle IS
   // the worker even with no pid patch (spec bro-l8c4f.5)
   if (pid === undefined && e.backend === 'native') {
-    if (handleFileProves(home, e)) {
-      return 'running'
-    }
-    return entryRunId(e) !== undefined &&
-      Date.now() - Date.parse(e.spawnedAt) < SESSION_SLOT_TTL_MS
-      ? 'spawned'
-      : 'lost'
+    return nativePidlessState(home, e)
   }
   return pid !== undefined ? 'lost' : 'spawned'
 }
