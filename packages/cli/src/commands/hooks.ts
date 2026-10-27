@@ -422,6 +422,12 @@ export function classifySkillMutation(cmd: string): { plugin: string; skill: str
   return null;
 }
 
+/** Self-tool heads — `bd` plus BRO_CMD's alternation, spelled out as a
+ *  literal: a computed RegExp trips the non-literal-constructor SAST
+ *  rule. Keep the npx arm in sync with BRO_CMD. */
+const SELF_TOOL_HEAD_RE =
+  /^\s*(?:bd|bro|npx(?:\s+--?[\w-]+(?:=\S+)?)*\s+(?:@broject\/)?bro(?:@[\w.:-]+)?(?![\w./-]))(?:\s|$)/;
+
 /** bro/bd are the plugin's own tools — permission hooks approve them
  * outright. Chained, piped, or redirected commands are NOT self-tool calls:
  * the second stage could be anything, so it falls through to a prompt. */
@@ -429,7 +435,7 @@ export function isSelfToolCommand(cmd: string): boolean {
   if (/[;&|`$()<>\n\\]/.test(cmd)) {
     return false;
   }
-  return /^\s*(bro|bd)(\s|$)/.test(cmd) || new RegExp(`^\\s*${BRO_CMD}(\\s|$)`).test(cmd);
+  return SELF_TOOL_HEAD_RE.test(cmd);
 }
 
 // --- session arming -----------------------------------------------------------
@@ -1987,19 +1993,19 @@ function runPerf(argv: string[]): void {
 /** post-merge and its detached worker are git-hook events — same
  *  pre-gate, no-stdin placement as the shim events: the dispatcher only
  *  schedules the refresh, the worker does it; both fail open and never
- *  block a merge (the catch covers a throw before the worker's own). */
-const POST_MERGE_EVENTS: Record<string, (cwd: string) => void> = {
-  'post-merge': emitPostMerge,
-  'post-merge-run': runPostMergeRefresh,
-};
-
+ *  block a merge (the catch covers a throw before the worker's own). The
+ *  dispatch stays a static if-chain — a computed function-table lookup
+ *  trips the non-static-access SAST rule. */
 function runPostMergeEvent(event: string | undefined): boolean {
-  const run = POST_MERGE_EVENTS[event ?? ''];
-  if (run === undefined) {
+  if (event !== 'post-merge' && event !== 'post-merge-run') {
     return false;
   }
   try {
-    run(process.cwd());
+    if (event === 'post-merge') {
+      emitPostMerge(process.cwd());
+    } else {
+      runPostMergeRefresh(process.cwd());
+    }
   } catch {
     // fail-open
   }
