@@ -1,17 +1,18 @@
-import { after, describe, test } from 'node:test'
-import assert from 'node:assert/strict'
-import { execFileSync, spawn, spawnSync } from 'node:child_process'
+import { after, describe, test } from 'node:test';
+import assert from 'node:assert/strict';
+import { execFileSync, spawn, spawnSync } from 'node:child_process';
 import {
   existsSync,
   mkdirSync,
   mkdtempSync,
   readFileSync,
   rmSync,
+  statSync,
   utimesSync,
   writeFileSync,
-} from 'node:fs'
-import { tmpdir } from 'node:os'
-import { dirname, join } from 'node:path'
+} from 'node:fs';
+import { tmpdir } from 'node:os';
+import { dirname, join } from 'node:path';
 import {
   acquireAgentRegistryLock,
   agentEntryBlocked,
@@ -29,33 +30,34 @@ import {
   SpawnError,
   withAgentRegistryLock,
   writeAgentRegistry,
-} from './agents.ts'
-import { bdAt } from './bd.ts'
-import { scrubEnv, testGit } from './testkit.ts'
+} from './agents.ts';
+import { bdAt } from './bd.ts';
+import { lockHolderPid } from './filelock.ts';
+import { scrubEnv, testGit } from './testkit.ts';
 
 // ambient repo/agent/store pins must not reach fixture git children
 // or the code-under-test spawns — scrub once, restore after the file
-after(scrubEnv())
+after(scrubEnv());
 
 const withRepo = (fn: (dir: string) => void): void => {
-  const dir = mkdtempSync(join(tmpdir(), 'bro-agents-'))
+  const dir = mkdtempSync(join(tmpdir(), 'bro-agents-'));
   try {
-    testGit(['init', '-q', dir])
-    fn(dir)
+    testGit(['init', '-q', dir]);
+    fn(dir);
   } finally {
-    rmSync(dir, { recursive: true, force: true })
+    rmSync(dir, { recursive: true, force: true });
   }
-}
+};
 
 const withRepoAsync = async (fn: (dir: string) => Promise<void>): Promise<void> => {
-  const dir = mkdtempSync(join(tmpdir(), 'bro-agents-'))
+  const dir = mkdtempSync(join(tmpdir(), 'bro-agents-'));
   try {
-    testGit(['init', '-q', dir])
-    await fn(dir)
+    testGit(['init', '-q', dir]);
+    await fn(dir);
   } finally {
-    rmSync(dir, { recursive: true, force: true })
+    rmSync(dir, { recursive: true, force: true });
   }
-}
+};
 
 /** Minimal bd shim — a JSON-file store. `show`/`update --claim`/
  *  `update --assignee` cover the claim probes the facade makes. */
@@ -88,7 +90,7 @@ if (args[0] === 'show') {
 } else {
   console.error('unhandled: ' + args.join(' ')); process.exit(1)
 }
-`
+`;
 
 /** Child writer for the inter-process lock test — an independent
  *  process contending on one registry. argv: dir, module-url, molStep,
@@ -113,446 +115,490 @@ main().then(
   () => process.exit(0),
   (e) => { console.error(e); process.exit(1) }
 )
-`
+`;
 
 const withFakeBd = (fn: (binDir: string) => void): void => {
-  const dir = mkdtempSync(join(tmpdir(), 'bro-fakebd-'))
+  const dir = mkdtempSync(join(tmpdir(), 'bro-fakebd-'));
   try {
-    writeFileSync(join(dir, 'bd'), FAKE_BD)
-    execFileSync('chmod', ['+x', join(dir, 'bd')])
-    const prev = process.env.PATH
-    process.env.PATH = `${dir}:${prev}`
+    writeFileSync(join(dir, 'bd'), FAKE_BD);
+    execFileSync('chmod', ['+x', join(dir, 'bd')]);
+    const prev = process.env.PATH;
+    process.env.PATH = `${dir}:${prev}`;
     try {
-      fn(dir)
+      fn(dir);
     } finally {
-      process.env.PATH = prev
+      process.env.PATH = prev;
     }
   } finally {
-    rmSync(dir, { recursive: true, force: true })
+    rmSync(dir, { recursive: true, force: true });
   }
-}
+};
 
 /** PATH with no bd on it at all — spawnSync reports ENOENT, which is
  *  the store being down, not a refused operation. */
 const withNoBd = (fn: () => void): void => {
-  const dir = mkdtempSync(join(tmpdir(), 'bro-nobd-'))
+  const dir = mkdtempSync(join(tmpdir(), 'bro-nobd-'));
   try {
-    const prev = process.env.PATH
-    process.env.PATH = dir
+    const prev = process.env.PATH;
+    process.env.PATH = dir;
     try {
-      fn()
+      fn();
     } finally {
-      process.env.PATH = prev
+      process.env.PATH = prev;
     }
   } finally {
-    rmSync(dir, { recursive: true, force: true })
+    rmSync(dir, { recursive: true, force: true });
   }
-}
+};
 
 const seedStore = (dir: string, rows: Record<string, unknown>[]): string => {
-  mkdirSync(dir, { recursive: true })
-  writeFileSync(join(dir, 'store.json'), JSON.stringify({ rows }))
-  return dir
-}
+  mkdirSync(dir, { recursive: true });
+  writeFileSync(join(dir, 'store.json'), JSON.stringify({ rows }));
+  return dir;
+};
 
 const withStore = (rows: Record<string, unknown>[], fn: (store: string) => void): void => {
-  const dir = mkdtempSync(join(tmpdir(), 'bro-beads-'))
+  const dir = mkdtempSync(join(tmpdir(), 'bro-beads-'));
   try {
-    fn(seedStore(dir, rows))
+    fn(seedStore(dir, rows));
   } finally {
-    rmSync(dir, { recursive: true, force: true })
+    rmSync(dir, { recursive: true, force: true });
   }
-}
+};
 
 describe('agentRegistryPath', () => {
   test('resolves to <git-common-dir>/bro/agents.json', () => {
-    withRepo((dir) => {
-      assert.equal(agentRegistryPath(dir), join(dir, '.git', 'bro', 'agents.json'))
-    })
-  })
+    withRepo(dir => {
+      assert.equal(agentRegistryPath(dir), join(dir, '.git', 'bro', 'agents.json'));
+    });
+  });
 
   test('null outside a git repo', () => {
-    const dir = mkdtempSync(join(tmpdir(), 'bro-agents-'))
+    const dir = mkdtempSync(join(tmpdir(), 'bro-agents-'));
     try {
-      assert.equal(agentRegistryPath(dir), null)
+      assert.equal(agentRegistryPath(dir), null);
     } finally {
-      rmSync(dir, { recursive: true, force: true })
+      rmSync(dir, { recursive: true, force: true });
     }
-  })
-})
+  });
+});
 
 describe('agent registry IO', () => {
   test('round-trips entries; absent dir reads empty', () => {
-    withRepo((dir) => {
-      assert.deepEqual(readAgentRegistry(dir), {})
+    withRepo(dir => {
+      assert.deepEqual(readAgentRegistry(dir), {});
       writeAgentRegistry(dir, {
-        'bro-x': { agentId: 'native-ab12', backend: 'native', spawnedAt: '2026-01-01T00:00:00Z', pid: 42 },
-      })
-      const reg = readAgentRegistry(dir)
-      assert.equal(reg['bro-x']!.agentId, 'native-ab12')
-      assert.equal(reg['bro-x']!.pid, 42)
-    })
-  })
+        'bro-x': {
+          agentId: 'native-ab12',
+          backend: 'native',
+          spawnedAt: '2026-01-01T00:00:00Z',
+          pid: 42,
+        },
+      });
+      const reg = readAgentRegistry(dir);
+      assert.equal(reg['bro-x']!.agentId, 'native-ab12');
+      assert.equal(reg['bro-x']!.pid, 42);
+    });
+  });
 
   test('torn entries (no agentId/backend) are dropped on read', () => {
-    withRepo((dir) => {
-      const path = agentRegistryPath(dir)!
-      mkdirSync(join(path, '..'), { recursive: true })
+    withRepo(dir => {
+      const path = agentRegistryPath(dir)!;
+      mkdirSync(join(path, '..'), { recursive: true });
       writeFileSync(
         path,
-        JSON.stringify({ good: { agentId: 'a', backend: 'native', spawnedAt: 't' }, bad: { pid: 1 } })
-      )
-      const reg = readAgentRegistry(dir)
-      assert.equal(Object.keys(reg).length, 1)
-      assert.equal(reg['good']!.agentId, 'a')
-    })
-  })
+        JSON.stringify({
+          good: { agentId: 'a', backend: 'native', spawnedAt: 't' },
+          bad: { pid: 1 },
+        })
+      );
+      const reg = readAgentRegistry(dir);
+      assert.equal(Object.keys(reg).length, 1);
+      assert.equal(reg['good']!.agentId, 'a');
+    });
+  });
 
   test('malformed json throws — corruption is degradation, not emptiness', () => {
-    withRepo((dir) => {
-      const path = agentRegistryPath(dir)!
-      mkdirSync(join(path, '..'), { recursive: true })
-      writeFileSync(path, '{oops')
-      assert.throws(() => readAgentRegistry(dir), SyntaxError)
-    })
-  })
+    withRepo(dir => {
+      const path = agentRegistryPath(dir)!;
+      mkdirSync(join(path, '..'), { recursive: true });
+      writeFileSync(path, '{oops');
+      assert.throws(() => readAgentRegistry(dir), SyntaxError);
+    });
+  });
 
   test('patch merges over the existing entry and preserves extras', () => {
-    withRepo((dir) => {
+    withRepo(dir => {
       patchAgentRegistry(dir, 'bro-x', {
         agentId: 'native-ab12',
         backend: 'native',
         spawnedAt: 't0',
         pid: 42,
-      })
-      patchAgentRegistry(dir, 'bro-x', { exitStatus: 3 })
-      const e = readAgentRegistry(dir)['bro-x']!
-      assert.equal(e.pid, 42)
-      assert.equal(e.exitStatus, 3)
-      assert.equal(e.agentId, 'native-ab12')
-    })
-  })
+      });
+      patchAgentRegistry(dir, 'bro-x', { exitStatus: 3 });
+      const e = readAgentRegistry(dir)['bro-x']!;
+      assert.equal(e.pid, 42);
+      assert.equal(e.exitStatus, 3);
+      assert.equal(e.agentId, 'native-ab12');
+    });
+  });
 
   test('a stopped stamp cascades to retained attempts (spec bro-1x7p)', () => {
-    withRepo((dir) => {
+    withRepo(dir => {
       patchAgentRegistry(dir, 'bro-x', {
         agentId: 'native-ab12',
         backend: 'native',
         spawnedAt: 't0',
         attempts: [{ provider: 'kilo', cause: 'quota', spawnedAt: 't0' }],
-      })
-      patchAgentRegistry(dir, 'bro-x', { stopped: true })
-      const e = readAgentRegistry(dir)['bro-x']!
-      assert.equal(e.stopped, true)
+      });
+      patchAgentRegistry(dir, 'bro-x', { stopped: true });
+      const e = readAgentRegistry(dir)['bro-x']!;
+      assert.equal(e.stopped, true);
       assert.deepEqual(e.attempts, [
         { provider: 'kilo', cause: 'quota', spawnedAt: 't0', stopped: true },
-      ])
+      ]);
       // an ordinary patch leaves the attempts stamps alone
-      patchAgentRegistry(dir, 'bro-x', { exitStatus: 3 })
-      assert.deepEqual(readAgentRegistry(dir)['bro-x']!.attempts, e.attempts)
-    })
-  })
+      patchAgentRegistry(dir, 'bro-x', { exitStatus: 3 });
+      assert.deepEqual(readAgentRegistry(dir)['bro-x']!.attempts, e.attempts);
+    });
+  });
 
   test('remove skips an entry rewritten since the observed snapshot', () => {
-    withRepo((dir) => {
+    withRepo(dir => {
       patchAgentRegistry(dir, 'bro-x', {
         agentId: 'native-ab12',
         backend: 'native',
         spawnedAt: 't0',
         pid: 42,
-      })
+      });
       // the fingerprint of what status saw — exit 0, pid 42
-      const seen = new Map([
-        ['bro-x', { agentId: 'native-ab12', spawnedAt: 't0', pid: 42 }],
-      ])
+      const seen = new Map([['bro-x', { agentId: 'native-ab12', spawnedAt: 't0', pid: 42 }]]);
       // a respawn lands between snapshot and removal
-      patchAgentRegistry(dir, 'bro-x', { agentId: 'native-ab12', spawnedAt: 't1', pid: 99 })
-      assert.deepEqual(removeAgentRegistryEntries(dir, ['bro-x'], seen), [])
-      assert.equal(readAgentRegistry(dir)['bro-x']!.pid, 99)
+      patchAgentRegistry(dir, 'bro-x', { agentId: 'native-ab12', spawnedAt: 't1', pid: 99 });
+      assert.deepEqual(removeAgentRegistryEntries(dir, ['bro-x'], seen), []);
+      assert.equal(readAgentRegistry(dir)['bro-x']!.pid, 99);
       // same entry still observed → removed
-      const now = new Map([
-        ['bro-x', { agentId: 'native-ab12', spawnedAt: 't1', pid: 99 }],
-      ])
-      assert.deepEqual(removeAgentRegistryEntries(dir, ['bro-x'], now), ['bro-x'])
-      assert.equal(readAgentRegistry(dir)['bro-x'], undefined)
-    })
-  })
-})
+      const now = new Map([['bro-x', { agentId: 'native-ab12', spawnedAt: 't1', pid: 99 }]]);
+      assert.deepEqual(removeAgentRegistryEntries(dir, ['bro-x'], now), ['bro-x']);
+      assert.equal(readAgentRegistry(dir)['bro-x'], undefined);
+    });
+  });
+});
 
 describe('registry lock', () => {
   test('withAgentRegistryLock re-enters — a patch inside the section works', () => {
-    withRepo((dir) => {
-      const order: string[] = []
+    withRepo(dir => {
+      const order: string[] = [];
       withAgentRegistryLock(dir, () => {
-        order.push('outer')
+        order.push('outer');
         patchAgentRegistry(dir, 'bro-x', {
           agentId: 'native-ab12',
           backend: 'native',
           spawnedAt: 't0',
-        })
-        order.push('inner')
-      })
-      assert.deepEqual(order, ['outer', 'inner'])
-      assert.equal(readAgentRegistry(dir)['bro-x']!.agentId, 'native-ab12')
+        });
+        order.push('inner');
+      });
+      assert.deepEqual(order, ['outer', 'inner']);
+      assert.equal(readAgentRegistry(dir)['bro-x']!.agentId, 'native-ab12');
       // released — no lock file left behind
-      assert.equal(existsSync(`${agentRegistryPath(dir)!}.lock`), false)
-    })
-  })
+      assert.equal(existsSync(`${agentRegistryPath(dir)!}.lock`), false);
+    });
+  });
 
-  test('a stale lock file (crashed holder) is broken, not waited on', () => {
-    withRepo((dir) => {
-      const lock = `${agentRegistryPath(dir)!}.lock`
-      mkdirSync(dirname(lock), { recursive: true })
-      writeFileSync(lock, 'dead holder')
-      const past = new Date(Date.now() - 120_000)
-      utimesSync(lock, past, past)
-      const release = acquireAgentRegistryLock(dir)
-      release()
-      assert.equal(existsSync(lock), false)
-    })
-  })
+  test('a stale LEGACY lock file (crashed holder) is broken, not waited on', () => {
+    withRepo(dir => {
+      const lock = `${agentRegistryPath(dir)!}.lock`;
+      mkdirSync(dirname(lock), { recursive: true });
+      writeFileSync(lock, 'dead holder');
+      const past = new Date(Date.now() - 120_000);
+      utimesSync(lock, past, past);
+      const release = acquireAgentRegistryLock(dir);
+      release();
+      assert.equal(existsSync(lock), false);
+    });
+  });
 
-  test('a live holder’s lock is never stolen — the contender fails, the lock survives', () => {
-    withRepo((dir) => {
-      const lock = `${agentRegistryPath(dir)!}.lock`
-      mkdirSync(dirname(lock), { recursive: true })
+  test('a stale lock DIR (crashed holder) is broken, not waited on', () => {
+    withRepo(dir => {
+      const lock = `${agentRegistryPath(dir)!}.lock`;
+      mkdirSync(lock, { recursive: true });
+      writeFileSync(join(lock, 'h-99999999'), '99999999:gone');
+      const release = acquireAgentRegistryLock(dir);
+      release();
+      assert.equal(existsSync(lock), false);
+    });
+  });
+
+  test('a live holder’s LEGACY lock file is never stolen — the contender fails, the lock survives', () => {
+    withRepo(dir => {
+      const lock = `${agentRegistryPath(dir)!}.lock`;
+      mkdirSync(dirname(lock), { recursive: true });
       // a real holder token is <pid>:<hex>; our own pid is alive and the
       // file is way past the old age-only break — a slow-but-alive
       // backend start (gascity's multi-minute section) must not be
       // double-entered
-      writeFileSync(lock, `${process.pid}:cafe`)
-      const past = new Date(Date.now() - 10 * 60_000)
-      utimesSync(lock, past, past)
-      assert.throws(() => acquireAgentRegistryLock(dir, { waitMs: 200 }), /lock held/)
-      assert.equal(readFileSync(lock, 'utf8'), `${process.pid}:cafe`)
-    })
-  })
+      writeFileSync(lock, `${process.pid}:cafe`);
+      const past = new Date(Date.now() - 10 * 60_000);
+      utimesSync(lock, past, past);
+      assert.throws(() => acquireAgentRegistryLock(dir, { waitMs: 200 }), /lock held/);
+      assert.equal(readFileSync(lock, 'utf8'), `${process.pid}:cafe`);
+    });
+  });
 
-  test('a dead-pid lock is broken — the contender recovers the section', () => {
-    withRepo((dir) => {
-      const lock = `${agentRegistryPath(dir)!}.lock`
-      mkdirSync(dirname(lock), { recursive: true })
+  test('a live holder’s lock DIR is never stolen — the contender fails, the dir survives', () => {
+    withRepo(dir => {
+      const lock = `${agentRegistryPath(dir)!}.lock`;
+      mkdirSync(lock, { recursive: true });
+      writeFileSync(join(lock, `h-${process.pid}`), `${process.pid}:alien`);
+      const ino = statSync(lock).ino;
+      assert.throws(() => acquireAgentRegistryLock(dir, { waitMs: 200 }), /lock held/);
+      assert.equal(statSync(lock).ino, ino);
+      assert.equal(readFileSync(join(lock, `h-${process.pid}`), 'utf8'), `${process.pid}:alien`);
+    });
+  });
+
+  test('a dead-pid LEGACY lock file is broken — the contender recovers the section', () => {
+    withRepo(dir => {
+      const lock = `${agentRegistryPath(dir)!}.lock`;
+      mkdirSync(dirname(lock), { recursive: true });
       // a pid that has already exited — spawnSync returns after death
-      const dead = spawnSync(process.execPath, ['-e', '']).pid!
-      writeFileSync(lock, `${dead}:cafe`)
-      const past = new Date(Date.now() - 120_000)
-      utimesSync(lock, past, past)
-      const release = acquireAgentRegistryLock(dir, { waitMs: 5_000 })
-      release()
-      assert.equal(existsSync(lock), false)
-    })
-  })
+      const dead = spawnSync(process.execPath, ['-e', '']).pid!;
+      writeFileSync(lock, `${dead}:cafe`);
+      const past = new Date(Date.now() - 120_000);
+      utimesSync(lock, past, past);
+      const release = acquireAgentRegistryLock(dir, { waitMs: 5_000 });
+      assert.equal(lockHolderPid(lock), process.pid);
+      release();
+      assert.equal(existsSync(lock), false);
+    });
+  });
 
-  test('release never removes a lock a contender re-acquired', () => {
-    withRepo((dir) => {
-      const lock = `${agentRegistryPath(dir)!}.lock`
-      mkdirSync(dirname(lock), { recursive: true })
-      const release = acquireAgentRegistryLock(dir)
-      // our section overran the stale window: the file was broken and
-      // re-created by another holder — releasing must not delete THEIRS
-      rmSync(lock)
-      writeFileSync(lock, 'other-holder')
-      release()
-      assert.equal(readFileSync(lock, 'utf8'), 'other-holder')
-    })
-  })
+  test('a dead-pid lock DIR is broken — the contender recovers the section', () => {
+    withRepo(dir => {
+      const lock = `${agentRegistryPath(dir)!}.lock`;
+      mkdirSync(lock, { recursive: true });
+      const dead = spawnSync(process.execPath, ['-e', '']).pid!;
+      writeFileSync(join(lock, `h-${dead}`), `${dead}:cafe`);
+      const release = acquireAgentRegistryLock(dir, { waitMs: 5_000 });
+      // the recovery must actually hold — a steal that skipped
+      // acquisition would pass the absent-after-release check anyway
+      assert.equal(lockHolderPid(lock), process.pid);
+      release();
+      assert.equal(existsSync(lock), false);
+    });
+  });
+
+  test('release never removes a lock a contender re-acquired — legacy file successor', () => {
+    withRepo(dir => {
+      const lock = `${agentRegistryPath(dir)!}.lock`;
+      mkdirSync(dirname(lock), { recursive: true });
+      const release = acquireAgentRegistryLock(dir);
+      // our section overran the stale window: the dir was broken and
+      // the path re-claimed as a legacy file by another holder —
+      // releasing must not delete THEIRS
+      rmSync(lock, { recursive: true });
+      writeFileSync(lock, 'other-holder');
+      release();
+      assert.equal(readFileSync(lock, 'utf8'), 'other-holder');
+    });
+  });
+
+  test('release never removes a lock a contender re-acquired — dir successor', () => {
+    withRepo(dir => {
+      const lock = `${agentRegistryPath(dir)!}.lock`;
+      mkdirSync(dirname(lock), { recursive: true });
+      const release = acquireAgentRegistryLock(dir);
+      // same race, successor is a dir instance: our release's
+      // unlink-by-name misses inside a foreign dir and its conditional
+      // rmdir refuses a non-empty, foreign-inode instance
+      rmSync(lock, { recursive: true });
+      mkdirSync(lock);
+      writeFileSync(join(lock, 'h-99999999'), '99999999:other');
+      release();
+      assert.equal(readFileSync(join(lock, 'h-99999999'), 'utf8'), '99999999:other');
+    });
+  });
 
   test('a lost patch is impossible under the lock — independent processes serialize', async () => {
-    await withRepoAsync(async (dir) => {
-      const workerDir = mkdtempSync(join(tmpdir(), 'bro-lockworker-'))
+    await withRepoAsync(async dir => {
+      const workerDir = mkdtempSync(join(tmpdir(), 'bro-lockworker-'));
       try {
-        const worker = join(workerDir, 'worker.ts')
-        writeFileSync(worker, LOCK_WORKER)
-        const mod = new URL('./agents.ts', import.meta.url).href
-        const writers = 4
-        const iters = 8
+        const worker = join(workerDir, 'worker.ts');
+        writeFileSync(worker, LOCK_WORKER);
+        const mod = new URL('./agents.ts', import.meta.url).href;
+        const writers = 4;
+        const iters = 8;
         const kids = Array.from({ length: writers }, (_, i) =>
           spawn(process.execPath, [worker, dir, mod, `w${i}`, String(iters)], {
             stdio: ['ignore', 'ignore', 'pipe'],
           })
-        )
+        );
         const exits = await Promise.all(
           kids.map(
-            (k) =>
-              new Promise<{ code: number | null; err: string }>((resolve) => {
-                let err = ''
+            k =>
+              new Promise<{ code: number | null; err: string }>(resolve => {
+                let err = '';
                 // utf8 decode per-chunk would split multi-byte sequences
                 // into U+FFFD — setEncoding joins them stream-aware
-                k.stderr!.setEncoding('utf8')
-                k.stderr!.on('data', (d: string) => (err += d))
-                k.on('close', (code) => resolve({ code, err }))
+                k.stderr!.setEncoding('utf8');
+                k.stderr!.on('data', (d: string) => (err += d));
+                k.on('close', code => resolve({ code, err }));
               })
           )
-        )
-        exits.forEach((r, i) => assert.equal(r.code, 0, `writer w${i}: ${r.err}`))
-        const reg = readAgentRegistry(dir)
+        );
+        exits.forEach((r, i) => assert.equal(r.code, 0, `writer w${i}: ${r.err}`));
+        const reg = readAgentRegistry(dir);
         // every locked read-modify-write landed — a lost update drops the count
-        assert.equal(reg['counter']!.n, writers * iters)
+        assert.equal(reg['counter']!.n, writers * iters);
         for (let i = 0; i < writers; i++) {
-          assert.equal(reg[`w${i}`]!.seq, iters - 1)
+          assert.equal(reg[`w${i}`]!.seq, iters - 1);
         }
-        assert.equal(existsSync(`${agentRegistryPath(dir)!}.lock`), false)
+        assert.equal(existsSync(`${agentRegistryPath(dir)!}.lock`), false);
       } finally {
-        rmSync(workerDir, { recursive: true, force: true })
+        rmSync(workerDir, { recursive: true, force: true });
       }
-    })
-  })
-})
+    });
+  });
+});
 
 describe('mintAgentId', () => {
   test('backend-prefixed hex, unique per call', () => {
-    const a = mintAgentId('native')
-    const b = mintAgentId('native')
-    assert.match(a, /^native-[0-9a-f]{8}$/)
-    assert.notEqual(a, b)
-  })
-})
+    const a = mintAgentId('native');
+    const b = mintAgentId('native');
+    assert.match(a, /^native-[0-9a-f]{8}$/);
+    assert.notEqual(a, b);
+  });
+});
 
 describe('shared-store claims', () => {
   test('probeStep reads status/assignee; missing bead → undefined', () => {
     withFakeBd(() => {
-      withStore([{ id: 'fx-1', status: 'in_progress', assignee: 'me' }], (store) => {
-        const p = probeStep(store, 'fx-1')
-        assert.equal(p!.status, 'in_progress')
-        assert.equal(p!.assignee, 'me')
-        assert.equal(probeStep(store, 'fx-nope'), undefined)
-      })
-    })
-  })
+      withStore([{ id: 'fx-1', status: 'in_progress', assignee: 'me' }], store => {
+        const p = probeStep(store, 'fx-1');
+        assert.equal(p!.status, 'in_progress');
+        assert.equal(p!.assignee, 'me');
+        assert.equal(probeStep(store, 'fx-nope'), undefined);
+      });
+    });
+  });
 
   test('claimStep flips to in_progress; a second claim throws SpawnError', () => {
     withFakeBd(() => {
-      withStore([{ id: 'fx-1', status: 'open' }], (store) => {
-        claimStep(store, 'fx-1')
-        assert.equal(probeStep(store, 'fx-1')!.status, 'in_progress')
+      withStore([{ id: 'fx-1', status: 'open' }], store => {
+        claimStep(store, 'fx-1');
+        assert.equal(probeStep(store, 'fx-1')!.status, 'in_progress');
         assert.throws(
           () => claimStep(store, 'fx-1'),
-          (e) => e instanceof SpawnError && e.kind === 'conflict'
-        )
-      })
-    })
-  })
+          e => e instanceof SpawnError && e.kind === 'conflict'
+        );
+      });
+    });
+  });
 
   test('an unspawnable bd maps claim/rebind failures to unavailable, not conflict', () => {
     withNoBd(() => {
-      const r = bdAt('/anywhere', ['show', 'fx-1', '--json'])
-      assert.equal(r.ran, false)
+      const r = bdAt('/anywhere', ['show', 'fx-1', '--json']);
+      assert.equal(r.ran, false);
       assert.throws(
         () => claimStep('/anywhere', 'fx-1'),
-        (e) => e instanceof SpawnError && e.kind === 'unavailable'
-      )
+        e => e instanceof SpawnError && e.kind === 'unavailable'
+      );
       assert.throws(
         () => rebindStep('/anywhere', 'fx-1', 'worker'),
-        (e) => e instanceof SpawnError && e.kind === 'unavailable'
-      )
-    })
-  })
+        e => e instanceof SpawnError && e.kind === 'unavailable'
+      );
+    });
+  });
 
   test('rebindStep moves the assignee without touching status', () => {
     withFakeBd(() => {
-      withStore([{ id: 'fx-1', status: 'in_progress', assignee: 'dead-worker' }], (store) => {
-        rebindStep(store, 'fx-1', 'new-worker')
-        const p = probeStep(store, 'fx-1')
-        assert.equal(p!.status, 'in_progress')
-        assert.equal(p!.assignee, 'new-worker')
-      })
-    })
-  })
+      withStore([{ id: 'fx-1', status: 'in_progress', assignee: 'dead-worker' }], store => {
+        rebindStep(store, 'fx-1', 'new-worker');
+        const p = probeStep(store, 'fx-1');
+        assert.equal(p!.status, 'in_progress');
+        assert.equal(p!.assignee, 'new-worker');
+      });
+    });
+  });
 
   test('bdAt reports bd failure without throwing', () => {
     withFakeBd(() => {
-      withStore([], (store) => {
-        const r = bdAt(store, ['bogus'])
-        assert.equal(r.code, 1)
+      withStore([], store => {
+        const r = bdAt(store, ['bogus']);
+        assert.equal(r.code, 1);
         // bd ran and refused — a real non-zero exit, not degradation
-        assert.equal(r.ran, true)
-        assert.match(r.err, /unhandled/)
-      })
-    })
-  })
-})
+        assert.equal(r.ran, true);
+        assert.match(r.err, /unhandled/);
+      });
+    });
+  });
+});
 
 describe('classifyExitCause', () => {
   test('exit 0 is ok regardless of the log text', () => {
-    assert.equal(classifyExitCause('rate limit warnings everywhere', 0).cause, 'ok')
-    assert.equal(classifyExitCause('', 0).cause, 'ok')
-  })
+    assert.equal(classifyExitCause('rate limit warnings everywhere', 0).cause, 'ok');
+    assert.equal(classifyExitCause('', 0).cause, 'ok');
+  });
 
   test('the same rc=1 splits crash from rate_limited on text, not code', () => {
-    assert.equal(classifyExitCause('TypeError: x is not a function', 1).cause, 'crash')
-    assert.equal(
-      classifyExitCause('Reached free model rate limit', 1).cause,
-      'rate_limited'
-    )
-    assert.equal(classifyExitCause('HTTP 429 too many requests', 1).cause, 'rate_limited')
+    assert.equal(classifyExitCause('TypeError: x is not a function', 1).cause, 'crash');
+    assert.equal(classifyExitCause('Reached free model rate limit', 1).cause, 'rate_limited');
+    assert.equal(classifyExitCause('HTTP 429 too many requests', 1).cause, 'rate_limited');
     // identifier forms — the suffix continues with word chars
-    assert.equal(classifyExitCause('rate_limit_exceeded', 1).cause, 'rate_limited')
-    assert.equal(classifyExitCause('RateLimitError: slow down', 1).cause, 'rate_limited')
+    assert.equal(classifyExitCause('rate_limit_exceeded', 1).cause, 'rate_limited');
+    assert.equal(classifyExitCause('RateLimitError: slow down', 1).cause, 'rate_limited');
     // requests-per-window phrasing
-    assert.equal(
-      classifyExitCause('30 requests per minute exceeded', 1).cause,
-      'rate_limited'
-    )
-  })
+    assert.equal(classifyExitCause('30 requests per minute exceeded', 1).cause, 'rate_limited');
+  });
 
   test('quota and auth classify from their own phrasing', () => {
-    assert.equal(
-      classifyExitCause('insufficient credits — quota exhausted', 1).cause,
-      'quota'
-    )
-    assert.equal(classifyExitCause('billing hard limit exceeded', 1).cause, 'quota')
+    assert.equal(classifyExitCause('insufficient credits — quota exhausted', 1).cause, 'quota');
+    assert.equal(classifyExitCause('billing hard limit exceeded', 1).cause, 'quota');
     // a bare 'billing' mention is not a wall — transient billing-service
     // errors must not pin the quota block that only `bro agents down` lifts
-    assert.equal(
-      classifyExitCause('billing service unavailable — retrying', 1).cause,
-      'crash'
-    )
-    assert.equal(
-      classifyExitCause('account suspended — unpaid billing invoice', 1).cause,
-      'quota'
-    )
-    assert.equal(classifyExitCause('401 Unauthorized: invalid api key', 1).cause, 'auth')
-    assert.equal(classifyExitCause('token expired — not authenticated', 1).cause, 'auth')
-    assert.equal(classifyExitCause('error: expired API key', 1).cause, 'auth')
-  })
+    assert.equal(classifyExitCause('billing service unavailable — retrying', 1).cause, 'crash');
+    assert.equal(classifyExitCause('account suspended — unpaid billing invoice', 1).cause, 'quota');
+    assert.equal(classifyExitCause('401 Unauthorized: invalid api key', 1).cause, 'auth');
+    assert.equal(classifyExitCause('token expired — not authenticated', 1).cause, 'auth');
+    assert.equal(classifyExitCause('error: expired API key', 1).cause, 'auth');
+  });
 
   test('a provider reset rides the classification', () => {
-    const now = Date.parse('2026-10-05T20:00:00Z')
+    const now = Date.parse('2026-10-05T20:00:00Z');
     assert.equal(
       classifyExitCause('rate limit — retry-after: 90', 1, now).resetAt,
       '2026-10-05T20:01:30.000Z'
-    )
+    );
     assert.equal(
       classifyExitCause('rate limit, try again in 2 hours', 1, now).resetAt,
       '2026-10-05T22:00:00.000Z'
-    )
+    );
     assert.equal(
       classifyExitCause('quota resets at 2026-10-06T00:00:00Z', 1, now).resetAt,
       '2026-10-06T00:00:00.000Z'
-    )
+    );
     assert.equal(
       classifyExitCause('x-ratelimit-reset: 1759700000', 1, now).resetAt,
       new Date(1759700000 * 1000).toISOString()
-    )
+    );
     // Retry-After's HTTP-date form parses too
     assert.equal(
-      classifyExitCause('rate limit — retry-after: Wed, 07 Oct 2026 07:28:00 GMT', 1, now)
-        .resetAt,
+      classifyExitCause('rate limit — retry-after: Wed, 07 Oct 2026 07:28:00 GMT', 1, now).resetAt,
       '2026-10-07T07:28:00.000Z'
-    )
+    );
     // an absurd delay is out of Date range — no throw, no reset
     assert.equal(
       classifyExitCause('rate limit — retry-after: 99999999999999999', 1, now).resetAt,
       undefined
-    )
+    );
     // no reset reported → undefined, the caller's block stays held
-    assert.equal(classifyExitCause('rate limit reached', 1, now).resetAt, undefined)
-  })
+    assert.equal(classifyExitCause('rate limit reached', 1, now).resetAt, undefined);
+  });
 
   test('crash carries no reset', () => {
-    assert.deepEqual(classifyExitCause('segfault', 139), { cause: 'crash' })
-  })
-})
+    assert.deepEqual(classifyExitCause('segfault', 139), { cause: 'crash' });
+  });
+});
 
 describe('classifyExitCauseParts', () => {
   test('a wall token can never be fabricated across the tail boundary', () => {
@@ -560,39 +606,32 @@ describe('classifyExitCauseParts', () => {
     assert.equal(
       classifyExitCauseParts(['worker output ends with phase 4', '29 rows processed'], 1).cause,
       'crash'
-    )
-    assert.equal(
-      classifyExitCauseParts(['request', ' per second exceeded'], 1).cause,
-      'crash'
-    )
+    );
+    assert.equal(classifyExitCauseParts(['request', ' per second exceeded'], 1).cause, 'crash');
     // …while a real wall in EITHER tail still classifies
     assert.equal(
       classifyExitCauseParts(['clean shutdown', 'HTTP 429 too many requests'], 1).cause,
       'rate_limited'
-    )
+    );
     assert.equal(
       classifyExitCauseParts(['rate limit reached', 'clean shutdown'], 1).cause,
       'rate_limited'
-    )
-  })
+    );
+  });
 
   test('cause precedence follows pattern order, resetAt from the winning tail', () => {
-    const now = Date.parse('2026-10-05T20:00:00Z')
+    const now = Date.parse('2026-10-05T20:00:00Z');
     assert.equal(
       classifyExitCauseParts(['invalid api key', 'rate limit hit'], 1).cause,
       'rate_limited'
-    )
+    );
     assert.equal(
-      classifyExitCauseParts(
-        ['rate limit — retry-after: 90', 'rate limit'],
-        1,
-        now
-      ).resetAt,
+      classifyExitCauseParts(['rate limit — retry-after: 90', 'rate limit'], 1, now).resetAt,
       '2026-10-05T20:01:30.000Z'
-    )
-    assert.equal(classifyExitCauseParts(['', ''], 0).cause, 'ok')
-  })
-})
+    );
+    assert.equal(classifyExitCauseParts(['', ''], 0).cause, 'ok');
+  });
+});
 
 describe('agentEntryBlocked', () => {
   const entry = (over: Record<string, unknown>) => ({
@@ -601,37 +640,34 @@ describe('agentEntryBlocked', () => {
     spawnedAt: 't',
     exitStatus: 1,
     ...over,
-  })
+  });
 
   test('rate_limited blocks until resetAt passes', () => {
-    const future = entry({ cause: 'rate_limited', resetAt: '2999-01-01T00:00:00Z' })
-    assert.equal(agentEntryBlocked(future), true)
-    const past = entry({ cause: 'rate_limited', resetAt: '2000-01-01T00:00:00Z' })
-    assert.equal(agentEntryBlocked(past), false)
+    const future = entry({ cause: 'rate_limited', resetAt: '2999-01-01T00:00:00Z' });
+    assert.equal(agentEntryBlocked(future), true);
+    const past = entry({ cause: 'rate_limited', resetAt: '2000-01-01T00:00:00Z' });
+    assert.equal(agentEntryBlocked(past), false);
     // no reset reported — blocked until an operator clears it
-    assert.equal(agentEntryBlocked(entry({ cause: 'rate_limited' })), true)
-  })
+    assert.equal(agentEntryBlocked(entry({ cause: 'rate_limited' })), true);
+  });
 
   test('quota blocks until an operator clears it — resetAt does not lift it', () => {
-    assert.equal(agentEntryBlocked(entry({ cause: 'quota' })), true)
-    const past = entry({ cause: 'quota', resetAt: '2000-01-01T00:00:00Z' })
-    assert.equal(agentEntryBlocked(past), true)
-  })
+    assert.equal(agentEntryBlocked(entry({ cause: 'quota' })), true);
+    const past = entry({ cause: 'quota', resetAt: '2000-01-01T00:00:00Z' });
+    assert.equal(agentEntryBlocked(past), true);
+  });
 
   test('stopped lifts the block — down is the manual clear', () => {
-    assert.equal(
-      agentEntryBlocked(entry({ cause: 'rate_limited', stopped: true })),
-      false
-    )
-  })
+    assert.equal(agentEntryBlocked(entry({ cause: 'rate_limited', stopped: true })), false);
+  });
 
   test('crash, auth, ok and unclassified entries never block', () => {
     for (const cause of ['crash', 'auth', 'ok']) {
-      assert.equal(agentEntryBlocked(entry({ cause })), false)
+      assert.equal(agentEntryBlocked(entry({ cause })), false);
     }
-    assert.equal(agentEntryBlocked(entry({})), false)
-  })
-})
+    assert.equal(agentEntryBlocked(entry({})), false);
+  });
+});
 
 describe('agentsSection', () => {
   test('keeps per-backend object bags, drops scalars and arrays', () => {
@@ -640,16 +676,16 @@ describe('agentsSection', () => {
       fleet: { configDir: '~/.fleet' },
       bad: 'string',
       worse: [1, 2],
-    })
+    });
     assert.deepEqual(s, {
       native: { command: 'agent-cli --run' },
       fleet: { configDir: '~/.fleet' },
-    })
-  })
+    });
+  });
 
   test('missing/non-object section → empty', () => {
-    assert.deepEqual(agentsSection(undefined), {})
-    assert.deepEqual(agentsSection('nope'), {})
-    assert.deepEqual(agentsSection([]), {})
-  })
-})
+    assert.deepEqual(agentsSection(undefined), {});
+    assert.deepEqual(agentsSection('nope'), {});
+    assert.deepEqual(agentsSection([]), {});
+  });
+});
