@@ -15,8 +15,7 @@
  * Fail-open throughout: no git dir, unwritable dir, unreadable marker —
  * the wait still runs, the hook just has nothing to report.
  */
-import { execFileSync } from 'node:child_process'
-import { randomBytes } from 'node:crypto'
+import { randomBytes } from 'node:crypto';
 import {
   mkdirSync,
   readFileSync,
@@ -25,83 +24,84 @@ import {
   rmSync,
   statSync,
   writeFileSync,
-} from 'node:fs'
-import { basename, dirname, join, resolve } from 'node:path'
-import { GIT_SYNC_PROBE_TIMEOUT_MS, pidAlive, procStat } from '@broject/core'
+} from 'node:fs';
+import { basename, dirname, join } from 'node:path';
+import {
+  GIT_SYNC_PROBE_TIMEOUT_MS,
+  gitCommonDir,
+  gitCommonDirAsync,
+  pidAlive,
+  procStat,
+} from '@broject/core';
 
 export interface PendingWatch {
-  pr: number
+  pr: number;
   /** Display link, e.g. `[#42](https://github.com/o/r/pull/42)`. */
-  link: string
-  pid: number
+  link: string;
+  pid: number;
   /** Watcher's /proc start identity — a live pid with a different start
    *  is a reused pid, not the watch that recorded this marker. */
-  pidStart?: string
-  merge: boolean
+  pidStart?: string;
+  merge: boolean;
   /** The original wait's --cleanup — rearm replays it so a resurrected
    *  watch keeps the whole promise, not just the poll. */
-  cleanup?: boolean
+  cleanup?: boolean;
   /** The directory the watcher ran in. --cleanup retires the worktree
    *  containing the watcher's cwd — replaying it from another checkout
    *  would tear down the wrong worktree, so rearm needs the original. */
-  workdir?: string
+  workdir?: string;
   /** The loop-claimed bead a landed merge finalizes — a rearmed wait
    *  inherits it so the merge closes the work item, not just the PR
    *  (bro-q6ppv: a dead loop's marker replayed as `act wait --merge
    *  --cleanup` retired everything but never ran finalizeMerge). */
-  bead?: string
+  bead?: string;
   /** A settled wait's verdict — 'blocked' markers are findings, not
    *  promises: they never count as live coverage and never rearm; a
    *  session-start report flags the blockers until a covering watch or
    *  the TTL removes the record. */
-  verdict?: 'blocked'
+  verdict?: 'blocked';
   /** The gate's blocker names at settle — the finding's payload. */
-  blockers?: string[]
-  startedAt: number
-  timeoutMin: number
+  blockers?: string[];
+  startedAt: number;
+  timeoutMin: number;
 }
 
 export interface ListedWatch {
-  watch: PendingWatch
+  watch: PendingWatch;
   /** Marker path — the reporter removes it once flagged. */
-  file: string
+  file: string;
   /** Watching process still lives — parallel work, not a broken promise. */
-  alive: boolean
+  alive: boolean;
   /** Renamed to `.retired` — a session already claimed the report, but
    *  the claim says nothing about delivery; a fresh retired marker is
    *  still listed so a lost warning re-flags at the next session start. */
-  reported?: boolean
+  reported?: boolean;
 }
 
 /** A marker older than a day is residue regardless of pid — unless the
  *  wait recorded a longer timeout; the marker must outlive its poll. */
-const WATCH_TTL_MS = 24 * 60 * 60 * 1000
+const WATCH_TTL_MS = 24 * 60 * 60 * 1000;
 
 function watchTtlMs(w: PendingWatch): number {
-  const configured = Number.isFinite(w.timeoutMin) ? w.timeoutMin * 60_000 : 0
-  return Math.max(WATCH_TTL_MS, configured)
+  const configured = Number.isFinite(w.timeoutMin) ? w.timeoutMin * 60_000 : 0;
+  return Math.max(WATCH_TTL_MS, configured);
 }
 
 /** <git-common-dir>/bro/watches — the common dir so a watch started in
- *  one linked worktree is visible to sessions in every other. */
+ *  one linked worktree is visible to sessions in every other, on the
+ *  canonical bounded probe — a hung git fails open instead of stalling
+ *  a wait start or the session-start hook. */
 function watchesDir(dir: string): string | null {
-  try {
-    const gd = execFileSync(
-      'git', // NOSONAR — git is the runner's own tool; PATH is trusted config
-      ['-C', dir, 'rev-parse', '--git-common-dir'],
-      // a hung git must not stall a wait start or the session-start hook —
-      // bound the lookup so a stalled process fails open
-      {
-        encoding: 'utf8',
-        stdio: ['ignore', 'pipe', 'ignore'],
-        timeout: GIT_SYNC_PROBE_TIMEOUT_MS,
-        killSignal: 'SIGKILL',
-      }
-    ).trim()
-    return gd ? join(resolve(dir, gd), 'bro', 'watches') : null
-  } catch {
-    return null
-  }
+  const common = gitCommonDir(dir, GIT_SYNC_PROBE_TIMEOUT_MS);
+  return common === null ? null : join(common, 'bro', 'watches');
+}
+
+/** Async watchesDir — the probe-path twin (spec bro-36sx7.2): the
+ *  rev-parse under the sync form is a spawnSync that freezes a
+ *  parallel hook sweep. */
+async function watchesDirAsync(dir: string): Promise<string | null> {
+  const common = await gitCommonDirAsync(dir, GIT_SYNC_PROBE_TIMEOUT_MS);
+  return common === null ? null : join(common, 'bro', 'watches');
 }
 
 /** Does watch `a` keep marker `b`'s promise? Same PR, and `a`'s merge
@@ -111,11 +111,11 @@ function watchesDir(dir: string): string | null {
  *  replacement still has to flag, or the merge intent dies silently
  *  with the old process. */
 function covers(a: PendingWatch, b: PendingWatch): boolean {
-  return a.pr === b.pr && (a.merge || !b.merge)
+  return a.pr === b.pr && (a.merge || !b.merge);
 }
 
 function coveredBy(live: ListedWatch[], w: PendingWatch): boolean {
-  return live.some((l) => covers(l.watch, w))
+  return live.some(l => covers(l.watch, w));
 }
 
 /** Drop a marker for the running wait — best-effort. The marker is
@@ -125,23 +125,17 @@ function coveredBy(live: ListedWatch[], w: PendingWatch): boolean {
  *  stay on disk (hidden from reports by listWatches) until the covering
  *  watch ends. A replacement that crashes leaves both records
  *  flaggable; one that completes retires them in watchEnd. */
-export function watchBegin(
-  dir: string,
-  w: Omit<PendingWatch, 'pid' | 'startedAt'>
-): string | null {
-  const wd = watchesDir(dir)
+export function watchBegin(dir: string, w: Omit<PendingWatch, 'pid' | 'startedAt'>): string | null {
+  const wd = watchesDir(dir);
   if (!wd) {
-    return null
+    return null;
   }
   try {
-    mkdirSync(wd, { recursive: true })
+    mkdirSync(wd, { recursive: true });
     // unique per wait — two waits on the same PR in one process each own
     // their marker, so neither publish nor watchEnd clobbers the other's
-    const path = join(
-      wd,
-      `${w.pr}-${process.pid}-${randomBytes(6).toString('hex')}.json`
-    )
-    const tmp = `${path}.tmp`
+    const path = join(wd, `${w.pr}-${process.pid}-${randomBytes(6).toString('hex')}.json`);
+    const tmp = `${path}.tmp`;
     writeFileSync(
       tmp,
       JSON.stringify(
@@ -154,11 +148,11 @@ export function watchBegin(
         null,
         2
       )
-    )
-    renameSync(tmp, path)
-    return path
+    );
+    renameSync(tmp, path);
+    return path;
   } catch {
-    return null
+    return null;
   }
 }
 
@@ -171,23 +165,23 @@ export function watchBegin(
  *  stay. */
 export function watchEnd(path: string | null): void {
   if (!path) {
-    return
+    return;
   }
-  const w = readMarker(path)
+  const w = readMarker(path);
   try {
-    rmSync(path)
+    rmSync(path);
   } catch {
     // the marker is best-effort — a failed remove leaves residue the TTL prunes
   }
   if (w === null) {
-    return
+    return;
   }
-  const listed = listWatchesIn(dirname(path))
-  const live = listed.filter((l) => l.alive)
+  const listed = listWatchesIn(dirname(path));
+  const live = listed.filter(l => l.alive);
   for (const d of listed) {
     if (!d.alive && covers(w, d.watch) && !coveredBy(live, d.watch)) {
       try {
-        rmSync(d.file)
+        rmSync(d.file);
       } catch {
         // retire is best-effort
       }
@@ -206,14 +200,14 @@ export function watchHeartbeat(
   w: Omit<PendingWatch, 'pid' | 'startedAt'>,
   kind = 'supervisor'
 ): string | null {
-  const wd = watchesDir(dir)
+  const wd = watchesDir(dir);
   if (!wd) {
-    return null
+    return null;
   }
   try {
-    mkdirSync(wd, { recursive: true })
-    const path = join(wd, `${w.pr}-${kind}-${process.pid}.json`)
-    const tmp = `${path}.tmp`
+    mkdirSync(wd, { recursive: true });
+    const path = join(wd, `${w.pr}-${kind}-${process.pid}.json`);
+    const tmp = `${path}.tmp`;
     writeFileSync(
       tmp,
       JSON.stringify(
@@ -226,11 +220,11 @@ export function watchHeartbeat(
         null,
         2
       )
-    )
-    renameSync(tmp, path)
-    return path
+    );
+    renameSync(tmp, path);
+    return path;
   } catch {
-    return null
+    return null;
   }
 }
 
@@ -244,16 +238,16 @@ export function watchHeartbeat(
  *  (re)creation; this only services the living. */
 export function watchRefresh(path: string | null): void {
   if (path === null) {
-    return
+    return;
   }
-  const w = readMarker(path)
+  const w = readMarker(path);
   if (w === null) {
-    return
+    return;
   }
-  const tmp = `${path}.tmp`
+  const tmp = `${path}.tmp`;
   try {
-    writeFileSync(tmp, JSON.stringify({ ...w, startedAt: Date.now() }, null, 2))
-    renameSync(tmp, path)
+    writeFileSync(tmp, JSON.stringify({ ...w, startedAt: Date.now() }, null, 2));
+    renameSync(tmp, path);
   } catch {
     // best-effort — a failed re-stamp leaves the old marker to its TTL
   }
@@ -271,17 +265,14 @@ export function watchVerdict(
   w: { pr: number; link: string; timeoutMin: number },
   blockers: string[]
 ): string | null {
-  const wd = watchesDir(dir)
+  const wd = watchesDir(dir);
   if (!wd) {
-    return null
+    return null;
   }
   try {
-    mkdirSync(wd, { recursive: true })
-    const path = join(
-      wd,
-      `${w.pr}-blocked-${process.pid}-${randomBytes(6).toString('hex')}.json`
-    )
-    const tmp = `${path}.tmp`
+    mkdirSync(wd, { recursive: true });
+    const path = join(wd, `${w.pr}-blocked-${process.pid}-${randomBytes(6).toString('hex')}.json`);
+    const tmp = `${path}.tmp`;
     writeFileSync(
       tmp,
       JSON.stringify(
@@ -297,11 +288,11 @@ export function watchVerdict(
         null,
         2
       )
-    )
-    renameSync(tmp, path)
-    return path
+    );
+    renameSync(tmp, path);
+    return path;
   } catch {
-    return null
+    return null;
   }
 }
 
@@ -312,16 +303,23 @@ export function watchVerdict(
  *  distinguish "no markers" from "markers unreadable". A missing dir
  *  (ENOENT) IS a verdict: no markers have ever been written. */
 export function hasLiveWatch(dir: string, pr: number): boolean | null {
-  const wd = watchesDir(dir)
-  if (!wd) {
-    return null
-  }
+  const wd = watchesDir(dir);
+  return wd === null ? null : hasLiveWatchAt(wd, pr);
+}
+
+/** Async hasLiveWatch — the probe-path twin (spec bro-36sx7.2). */
+export async function hasLiveWatchAsync(dir: string, pr: number): Promise<boolean | null> {
+  const wd = await watchesDirAsync(dir);
+  return wd === null ? null : hasLiveWatchAt(wd, pr);
+}
+
+function hasLiveWatchAt(wd: string, pr: number): boolean | null {
   try {
-    readdirSync(wd)
+    readdirSync(wd);
   } catch (err) {
-    return (err as NodeJS.ErrnoException).code === 'ENOENT' ? false : null
+    return (err as NodeJS.ErrnoException).code === 'ENOENT' ? false : null;
   }
-  return listWatchesIn(wd).some((l) => l.alive && l.watch.pr === pr)
+  return listWatchesIn(wd).some(l => l.alive && l.watch.pr === pr);
 }
 
 /** Claim a reported stale marker — the rename is the atomic claim:
@@ -332,16 +330,16 @@ export function hasLiveWatch(dir: string, pr: number): boolean | null {
  *  is what finally removes it. Returns true only for the winner. */
 export function watchRetire(file: string): boolean {
   try {
-    renameSync(file, `${file}.retired`)
+    renameSync(file, `${file}.retired`);
   } catch {
-    return false // gone or claimed by a racing retire — it reports
+    return false; // gone or claimed by a racing retire — it reports
   }
-  return true
+  return true;
 }
 
 function readMarker(file: string): PendingWatch | null {
   try {
-    const w = JSON.parse(readFileSync(file, 'utf8')) as PendingWatch
+    const w = JSON.parse(readFileSync(file, 'utf8')) as PendingWatch;
     return typeof w.pr === 'number' &&
       typeof w.link === 'string' &&
       typeof w.pid === 'number' &&
@@ -352,22 +350,22 @@ function readMarker(file: string): PendingWatch | null {
       (w.bead === undefined || typeof w.bead === 'string') &&
       (w.verdict === undefined || w.verdict === 'blocked') &&
       (w.blockers === undefined ||
-        (Array.isArray(w.blockers) && w.blockers.every((b) => typeof b === 'string'))) &&
+        (Array.isArray(w.blockers) && w.blockers.every(b => typeof b === 'string'))) &&
       // an Infinity/NaN startedAt poisons the TTL check — Date.now() -
       // Infinity is never > ttl, so the marker would never be pruned
       typeof w.startedAt === 'number' &&
       Number.isFinite(w.startedAt) &&
       typeof w.timeoutMin === 'number'
       ? w
-      : null
+      : null;
   } catch {
-    return null
+    return null;
   }
 }
 
 function pruneFile(file: string): void {
   try {
-    rmSync(file)
+    rmSync(file);
   } catch {
     // prune is best-effort
   }
@@ -375,9 +373,9 @@ function pruneFile(file: string): void {
 
 function fileAge(file: string): number {
   try {
-    return statSync(file).mtimeMs
+    return statSync(file).mtimeMs;
   } catch {
-    return 0 // vanished — the prune attempt below fails silently too
+    return 0; // vanished — the prune attempt below fails silently too
   }
 }
 
@@ -386,28 +384,28 @@ function fileAge(file: string): number {
  *  isn't a fresh, well-formed marker (abandoned tmp write, malformed
  *  JSON, TTL-expired, retire residue) is pruned on the way through. */
 function listWatchesIn(wd: string): ListedWatch[] {
-  let files: string[]
+  let files: string[];
   try {
-    files = readdirSync(wd)
+    files = readdirSync(wd);
   } catch {
-    return []
+    return [];
   }
-  const out: ListedWatch[] = []
+  const out: ListedWatch[] = [];
   for (const f of files) {
-    const file = join(wd, f)
-    const retired = f.endsWith('.json.retired')
+    const file = join(wd, f);
+    const retired = f.endsWith('.json.retired');
     if (!f.endsWith('.json') && !retired) {
       // a .tmp between write and rename is a marker mid-publication —
       // prune it only once it is old enough to be crash residue
       if (!f.endsWith('.tmp') || Date.now() - fileAge(file) > WATCH_TTL_MS) {
-        pruneFile(file)
+        pruneFile(file);
       }
-      continue
+      continue;
     }
-    const w = readMarker(file)
+    const w = readMarker(file);
     if (w === null || Date.now() - w.startedAt > watchTtlMs(w)) {
-      pruneFile(file)
-      continue
+      pruneFile(file);
+      continue;
     }
     // a retired marker is stale by definition — pid reuse since the
     // claim must not resurrect it into a live watch. A verdict marker
@@ -418,9 +416,9 @@ function listWatchesIn(wd: string): ListedWatch[] {
       file,
       alive: !retired && w.verdict === undefined && pidAlive(w.pid, w.pidStart),
       reported: retired,
-    })
+    });
   }
-  return out
+  return out;
 }
 
 /** All recorded watches with pid liveness — a dead pid means the session
@@ -431,13 +429,20 @@ function listWatchesIn(wd: string): ListedWatch[] {
  *  is not reported — the replacement already keeps the promise, so
  *  flagging the old one would be a false stale flag. */
 export function listWatches(dir: string): ListedWatch[] {
-  const wd = watchesDir(dir)
-  if (!wd) {
-    return []
-  }
-  const out = listWatchesIn(wd)
-  const live = out.filter((l) => l.alive)
-  return out.filter((l) => l.alive || !coveredBy(live, l.watch))
+  const wd = watchesDir(dir);
+  return wd === null ? [] : listWatchesAt(wd);
+}
+
+/** Async listWatches — the probe-path twin (spec bro-36sx7.2). */
+export async function listWatchesAsync(dir: string): Promise<ListedWatch[]> {
+  const wd = await watchesDirAsync(dir);
+  return wd === null ? [] : listWatchesAt(wd);
+}
+
+function listWatchesAt(wd: string): ListedWatch[] {
+  const out = listWatchesIn(wd);
+  const live = out.filter(l => l.alive);
+  return out.filter(l => l.alive || !coveredBy(live, l.watch));
 }
 
 /** Who a dead marker's resurrection belongs to, read off the filename.
@@ -452,8 +457,8 @@ export function listWatches(dir: string): ListedWatch[] {
 export function watchMarkerKind(file: string, w: PendingWatch): string {
   const second = basename(file)
     .replace(/\.json(\.retired)?$/, '')
-    .split('-')[1]
-  return second === String(w.pid) ? 'wait' : (second ?? 'supervisor')
+    .split('-')[1];
+  return second === String(w.pid) ? 'wait' : (second ?? 'supervisor');
 }
 
 /** The resurrection plan one dead wait-marker set yields — the fields
@@ -461,13 +466,13 @@ export function watchMarkerKind(file: string, w: PendingWatch): string {
  *  finalizes, and `files`, this PR's dead markers to drop once the
  *  replacement watch is up. */
 export interface RearmPlan {
-  pr: number
-  merge: boolean
-  cleanup: boolean
-  timeoutMin: number
-  workdir?: string
-  bead?: string
-  files: string[]
+  pr: number;
+  merge: boolean;
+  cleanup: boolean;
+  timeoutMin: number;
+  workdir?: string;
+  bead?: string;
+  files: string[];
 }
 
 /** Dead watches deduped to one rearm plan per PR — the strongest
@@ -475,55 +480,67 @@ export interface RearmPlan {
  *  when a watch-only marker died alongside). The caller checks the PR
  *  is still open before respawning. */
 export function deadWatchPlan(dir: string): RearmPlan[] {
+  return deadWatchPlanFrom(listWatches(dir));
+}
+
+/** Async deadWatchPlan — the probe-path twin (spec bro-36sx7.2); the
+ *  rearm sweep is reached from hook paths via the connector. */
+export async function deadWatchPlanAsync(dir: string): Promise<RearmPlan[]> {
+  return deadWatchPlanFrom(await listWatchesAsync(dir));
+}
+
+function deadWatchPlanFrom(listed: ListedWatch[]): RearmPlan[] {
   const byPr = new Map<
     number,
     {
-      merge: boolean
-      cleanup: boolean
-      timeoutMin: number
-      workdir?: string
-      bead?: string
-      files: string[]
+      merge: boolean;
+      cleanup: boolean;
+      timeoutMin: number;
+      workdir?: string;
+      bead?: string;
+      files: string[];
     }
-  >()
-  for (const l of listWatches(dir)) {
+  >();
+  for (const l of listed) {
     if (l.alive) {
-      continue
+      continue;
     }
     // only wait-shaped markers resurrect — a dead supervisor heartbeat
     // (<pr>-<kind>-<pid>.json) belongs to the supervisor's own restart
     // story; respawning it as a bare wait would degrade the coverage it
     // recorded
     if (watchMarkerKind(l.file, l.watch) !== 'wait') {
-      continue
+      continue;
     }
-    const cur = byPr.get(l.watch.pr)
+    const cur = byPr.get(l.watch.pr);
     if (cur === undefined) {
       byPr.set(l.watch.pr, {
         merge: l.watch.merge,
-        cleanup: l.watch.cleanup === true,
+        cleanup: l.watch.merge === true && l.watch.cleanup === true,
         timeoutMin: l.watch.timeoutMin,
         workdir: l.watch.workdir,
         bead: l.watch.bead,
         files: [l.file],
-      })
-      continue
+      });
+      continue;
     }
-    cur.files.push(l.file)
+    cur.files.push(l.file);
     // the merge marker's workdir is the cleanup target — adopt it with
-    // the mode it recorded; a watch-only marker's cwd never is one
+    // the mode it recorded; a watch-only marker's cwd and its cleanup
+    // flag never feed the merge plan (a wait without --merge promised
+    // no worktree retirement, so its marker can't conjure one)
     if (l.watch.merge && !cur.merge) {
-      cur.workdir = l.watch.workdir ?? cur.workdir
-      cur.bead = l.watch.bead ?? cur.bead
+      cur.workdir = l.watch.workdir ?? cur.workdir;
+      cur.bead = l.watch.bead ?? cur.bead;
     } else {
-      cur.workdir = cur.workdir ?? l.watch.workdir
-      cur.bead = cur.bead ?? l.watch.bead
+      cur.workdir = cur.workdir ?? l.watch.workdir;
+      cur.bead = cur.bead ?? l.watch.bead;
     }
-    cur.merge = cur.merge || l.watch.merge
-    cur.cleanup = cur.cleanup || l.watch.cleanup === true
-    cur.timeoutMin = Math.max(cur.timeoutMin, l.watch.timeoutMin)
+    cur.merge = cur.merge || l.watch.merge;
+    cur.cleanup = cur.cleanup || (l.watch.merge === true && l.watch.cleanup === true);
+    cur.timeoutMin = Math.max(cur.timeoutMin, l.watch.timeoutMin);
   }
-  return [...byPr.entries()].map(([pr, p]) => ({ pr, ...p }))
+  return [...byPr.entries()].map(([pr, p]) => ({ pr, ...p }));
 }
 
 /** Resurrect dead watchers: host reboot / turn teardown kills the
@@ -536,28 +553,28 @@ export function deadWatchPlan(dir: string): RearmPlan[] {
  *  caller can close the loop-claimed bead whose finalizeMerge never
  *  ran (bro-q6ppv). */
 export async function rearmWatches(opts: {
-  dir: string
-  isOpen: (pr: number) => Promise<boolean>
+  dir: string;
+  isOpen: (pr: number) => Promise<boolean>;
   /** Absent → plan-only dry run: nothing respawns, no marker moves,
    *  open PRs report as `rearmed` with pid 0. A returned pid means the
    *  replacement watcher is CONFIRMED up (its live marker exists) — a
    *  bare spawn that exits early must resolve to undefined, keeping the
    *  dead markers instead of sweeping the only record of the promise. */
-  respawn?: (plan: RearmPlan) => number | undefined | Promise<number | undefined>
+  respawn?: (plan: RearmPlan) => number | undefined | Promise<number | undefined>;
 }): Promise<{
-  rearmed: Array<{ pr: number; pid: number }>
-  settled: Array<{ pr: number; bead?: string }>
-  kept: Array<{ pr: number; reason: string }>
+  rearmed: Array<{ pr: number; pid: number }>;
+  settled: Array<{ pr: number; bead?: string }>;
+  kept: Array<{ pr: number; reason: string }>;
 }> {
   const out = {
     rearmed: [] as Array<{ pr: number; pid: number }>,
     settled: [] as Array<{ pr: number; bead?: string }>,
     kept: [] as Array<{ pr: number; reason: string }>,
+  };
+  for (const plan of await deadWatchPlanAsync(opts.dir)) {
+    await rearmOne(plan, opts, out);
   }
-  for (const plan of deadWatchPlan(opts.dir)) {
-    await rearmOne(plan, opts, out)
-  }
-  return out
+  return out;
 }
 
 /** One dead-marker's verdict: settled sweeps, unverifiable keeps, open
@@ -566,46 +583,44 @@ export async function rearmWatches(opts: {
 async function rearmOne(
   plan: RearmPlan,
   opts: {
-    isOpen: (pr: number) => Promise<boolean>
-    respawn?: (plan: RearmPlan) => number | undefined | Promise<number | undefined>
+    isOpen: (pr: number) => Promise<boolean>;
+    respawn?: (plan: RearmPlan) => number | undefined | Promise<number | undefined>;
   },
   out: {
-    rearmed: Array<{ pr: number; pid: number }>
-    settled: Array<{ pr: number; bead?: string }>
-    kept: Array<{ pr: number; reason: string }>
+    rearmed: Array<{ pr: number; pid: number }>;
+    settled: Array<{ pr: number; bead?: string }>;
+    kept: Array<{ pr: number; reason: string }>;
   }
 ): Promise<void> {
   const sweep = (): void => {
     for (const f of plan.files) {
-      pruneFile(f)
+      pruneFile(f);
     }
-  }
-  let open: boolean
+  };
+  let open: boolean;
   try {
-    open = await opts.isOpen(plan.pr)
+    open = await opts.isOpen(plan.pr);
   } catch (err) {
-    out.kept.push({ pr: plan.pr, reason: err instanceof Error ? err.message : String(err) })
-    return
+    out.kept.push({ pr: plan.pr, reason: err instanceof Error ? err.message : String(err) });
+    return;
   }
   if (!open) {
-    out.settled.push(
-      plan.bead === undefined ? { pr: plan.pr } : { pr: plan.pr, bead: plan.bead }
-    )
+    out.settled.push(plan.bead === undefined ? { pr: plan.pr } : { pr: plan.pr, bead: plan.bead });
     // a dry run reports but never mutates — markers move only on a real sweep
     if (opts.respawn !== undefined) {
-      sweep()
+      sweep();
     }
-    return
+    return;
   }
   if (opts.respawn === undefined) {
-    out.rearmed.push({ pr: plan.pr, pid: 0 })
-    return
+    out.rearmed.push({ pr: plan.pr, pid: 0 });
+    return;
   }
-  const pid = await opts.respawn(plan)
+  const pid = await opts.respawn(plan);
   if (pid === undefined) {
-    out.kept.push({ pr: plan.pr, reason: 'respawn failed' })
-    return
+    out.kept.push({ pr: plan.pr, reason: 'respawn failed' });
+    return;
   }
-  out.rearmed.push({ pr: plan.pr, pid })
-  sweep()
+  out.rearmed.push({ pr: plan.pr, pid });
+  sweep();
 }

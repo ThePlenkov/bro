@@ -5,16 +5,16 @@
  * `git status`. A read that fails marks its clause failed — a guard
  * whose condition can't be verified doesn't assert it.
  */
-import { existsSync } from 'node:fs'
-import { isAbsolute, relative, resolve, sep } from 'node:path'
-import { GIT_SYNC_PROBE_TIMEOUT_MS, gitTry, type GuardState } from '@broject/core'
-import { matchPath } from '@broject/learn'
+import { existsSync } from 'node:fs';
+import { isAbsolute, relative, resolve, sep } from 'node:path';
+import { GIT_SYNC_PROBE_TIMEOUT_MS, gitTryAsync, type GuardState } from '@broject/core';
+import { matchPath } from '@broject/learn';
 
 /** One clause's verdict — `bro guard test` renders these rows. */
 export interface ClauseVerdict {
-  clause: string
-  ok: boolean
-  detail?: string
+  clause: string;
+  ok: boolean;
+  detail?: string;
 }
 
 /** A probe's richer answer — `ok` is the verdict, `detail` the why a
@@ -22,8 +22,8 @@ export interface ClauseVerdict {
  *  very differently from 'fresh'). A bare boolean is fine when the
  *  name already says everything. */
 export interface ProbeResult {
-  ok: boolean
-  detail?: string
+  ok: boolean;
+  detail?: string;
 }
 
 /** Engine-registered named probes — the extensible slot for costlier
@@ -36,17 +36,17 @@ export interface ProbeResult {
 export type NamedProbe = (
   args: Record<string, unknown> | undefined,
   dir: string
-) => boolean | ProbeResult | Promise<boolean | ProbeResult>
+) => boolean | ProbeResult | Promise<boolean | ProbeResult>;
 
 /** Ceiling on one probe call — a probe that never settles must not hang
  *  the sweep: runGuards' caller is a hook inside the agent's turn, so a
  *  wedged spawn fails its clause closed on the clock instead of freezing
  *  the event. */
-export const PROBE_TIMEOUT_MS = 10_000
+export const PROBE_TIMEOUT_MS = 10_000;
 
 /** Concurrent probes inside one guard — each may shell out, so an
  *  authored list must not become an unbounded spawn burst. */
-export const PROBE_FANOUT = 8
+export const PROBE_FANOUT = 8;
 
 /** Bounded parallel map — a shared sync iterator hands each item to
  *  exactly one worker (the query runner's idiom, run.ts); indexed writes
@@ -56,70 +56,68 @@ export async function mapPool<T, R>(
   items: readonly T[],
   fn: (item: T) => Promise<R>
 ): Promise<R[]> {
-  const out: R[] = new Array(items.length)
-  const it = items.entries()
+  const out: R[] = new Array(items.length);
+  const it = items.entries();
   await Promise.all(
     Array.from({ length: Math.min(cap, items.length) }, async () => {
       for (const [i, item] of it) {
-        out[i] = await fn(item)
+        out[i] = await fn(item);
       }
     })
-  )
-  return out
+  );
+  return out;
 }
 
 /** Live-state reads, lazy + memoized per event — an `armed`-only guard
  *  never pays for `git status`, and `changed`/`without` clauses share
- *  one porcelain call. */
+ *  one porcelain call. The git reads are memoized PROMISES (spec
+ *  bro-36sx7.2): a spawnSync inside a probe freezes the whole parallel
+ *  sweep, so the memo itself is async and one spawn still serves every
+ *  clause. `armed`/`exists` stay sync — pure fs. */
 export interface LiveState {
   /** Repo-relative worktree paths from `git status --porcelain` — null
    *  when git can't answer (not a repo, dead binary). */
-  diffPaths(): string[] | null
+  diffPaths(): Promise<string[] | null>;
   /** `git branch --show-current` — null on detached HEAD or failure. */
-  branch(): string | null
+  branch(): Promise<string | null>;
   /** Gate aspects this session armed (the marker scan) — injected by
    *  the caller so probes stay free of hooks-layer imports. */
-  armed(): Set<string>
+  armed(): Set<string>;
   /** Repo-relative path exists — files and dirs. */
-  exists(path: string): boolean
+  exists(path: string): boolean;
 }
 
 export function liveState(dir: string, armed?: () => Set<string>): LiveState {
-  let diffCache: string[] | null | undefined
-  let branchCache: string | null | undefined
-  let armedCache: Set<string> | undefined
+  let diffCache: Promise<string[] | null> | undefined;
+  let branchCache: Promise<string | null> | undefined;
+  let armedCache: Set<string> | undefined;
   return {
     diffPaths() {
-      if (diffCache === undefined) {
-        diffCache = readDiffPaths(dir)
-      }
-      return diffCache
+      diffCache ??= readDiffPaths(dir);
+      return diffCache;
     },
     branch() {
-      if (branchCache === undefined) {
-        const r = gitTry(
-          ['-C', dir, 'branch', '--show-current'],
-          GIT_SYNC_PROBE_TIMEOUT_MS
-        )
-        branchCache = r.code === 0 && r.out.trim() !== '' ? r.out.trim() : null
-      }
-      return branchCache
+      branchCache ??= gitTryAsync(
+        ['-C', dir, 'branch', '--show-current'],
+        GIT_SYNC_PROBE_TIMEOUT_MS
+      ).then(r => (r.code === 0 && r.out.trim() !== '' ? r.out.trim() : null));
+      return branchCache;
     },
     armed() {
-      armedCache ??= armed?.() ?? new Set<string>()
-      return armedCache
+      armedCache ??= armed?.() ?? new Set<string>();
+      return armedCache;
     },
     exists(path) {
       // contract is repo-relative — a '../' or absolute path resolves
       // outside and would leak host filesystem state into a verdict
-      const resolved = resolve(dir, path)
-      const rel = relative(dir, resolved)
+      const resolved = resolve(dir, path);
+      const rel = relative(dir, resolved);
       if (rel === '..' || rel.startsWith(`..${sep}`) || isAbsolute(rel)) {
-        return false
+        return false;
       }
-      return existsSync(resolved)
+      return existsSync(resolved);
     },
-  }
+  };
 }
 
 /** `git status --porcelain=v1 -z -uall` → repo-relative paths. -z
@@ -128,31 +126,31 @@ export function liveState(dir: string, armed?: () => Set<string>): LiveState {
  *  exactly what `without` clauses exist to see. On a rename/copy
  *  record the source path follows as the next NUL token — both sides
  *  count as touched (the old name going away IS a change). */
-function readDiffPaths(dir: string): string[] | null {
-  const r = gitTry(
+async function readDiffPaths(dir: string): Promise<string[] | null> {
+  const r = await gitTryAsync(
     ['-C', dir, 'status', '--porcelain=v1', '-z', '-uall'],
     GIT_SYNC_PROBE_TIMEOUT_MS
-  )
+  );
   if (r.code !== 0) {
-    return null
+    return null;
   }
-  const tokens = r.out.split('\0').filter((t) => t !== '')
-  const paths: string[] = []
+  const tokens = r.out.split('\0').filter(t => t !== '');
+  const paths: string[] = [];
   for (let i = 0; i < tokens.length; i++) {
-    const t = tokens[i]!
+    const t = tokens[i]!;
     if (t.length < 4) {
-      continue
+      continue;
     }
-    paths.push(t.slice(3))
+    paths.push(t.slice(3));
     if (t[0] === 'R' || t[0] === 'C' || t[1] === 'R' || t[1] === 'C') {
       // rename/copy: the next token is the source path
-      const src = tokens[++i]
+      const src = tokens[++i];
       if (src !== undefined) {
-        paths.push(src)
+        paths.push(src);
       }
     }
   }
-  return paths
+  return paths;
 }
 
 /** Evaluate a `when.state` block — conjunctive across keys. Returns one
@@ -166,69 +164,75 @@ export async function evalState(
   probes: Record<string, NamedProbe> = {},
   probeTimeoutMs = PROBE_TIMEOUT_MS
 ): Promise<ClauseVerdict[]> {
-  const out: ClauseVerdict[] = []
+  const out: ClauseVerdict[] = [];
+  // the lazy git probes memoize on first call — kick the declared ones
+  // up front so a diff+branch guard overlaps the two bounded spawns
+  // instead of serializing them behind the first await
   if (state.diff !== undefined) {
-    out.push(...evalDiff(state.diff, live.diffPaths()))
+    void live.diffPaths();
   }
   if (state.branch !== undefined) {
-    const b = live.branch()
-    const ok = b !== null && matchPath(b, state.branch)
-    out.push({ clause: 'branch', ok, detail: b ?? 'no branch (detached?)' })
+    void live.branch();
+  }
+  if (state.diff !== undefined) {
+    out.push(...evalDiff(state.diff, await live.diffPaths()));
+  }
+  if (state.branch !== undefined) {
+    const b = await live.branch();
+    const ok = b !== null && matchPath(b, state.branch);
+    out.push({ clause: 'branch', ok, detail: b ?? 'no branch (detached?)' });
   }
   if (state.armed !== undefined) {
-    const armed = live.armed()
-    const missing = state.armed.filter((a) => !armed.has(a))
+    const armed = live.armed();
+    const missing = state.armed.filter(a => !armed.has(a));
     out.push({
       clause: 'armed',
       ok: missing.length === 0,
       detail: missing.length > 0 ? `not armed: ${missing.join(',')}` : undefined,
-    })
+    });
   }
   if (state.exists !== undefined) {
-    const missing = state.exists.filter((p) => !live.exists(p))
+    const missing = state.exists.filter(p => !live.exists(p));
     out.push({
       clause: 'exists',
       ok: missing.length === 0,
       detail: missing.length > 0 ? `missing: ${missing.join(',')}` : undefined,
-    })
+    });
   }
-  out.push(...(await evalProbes(state.probes ?? [], dir, probes, probeTimeoutMs)))
-  return out
+  out.push(...(await evalProbes(state.probes ?? [], dir, probes, probeTimeoutMs)));
+  return out;
 }
 
 /** `diff` rows — `git status` failing fails every declared diff clause
  *  (a guard whose condition can't be verified doesn't assert it). */
-function evalDiff(
-  diff: NonNullable<GuardState['diff']>,
-  paths: string[] | null
-): ClauseVerdict[] {
-  const out: ClauseVerdict[] = []
+function evalDiff(diff: NonNullable<GuardState['diff']>, paths: string[] | null): ClauseVerdict[] {
+  const out: ClauseVerdict[] = [];
   if (paths === null) {
     if (diff.changed !== undefined) {
-      out.push({ clause: 'diff.changed', ok: false, detail: 'git status unavailable' })
+      out.push({ clause: 'diff.changed', ok: false, detail: 'git status unavailable' });
     }
     if (diff.without !== undefined) {
-      out.push({ clause: 'diff.without', ok: false, detail: 'git status unavailable' })
+      out.push({ clause: 'diff.without', ok: false, detail: 'git status unavailable' });
     }
-    return out
+    return out;
   }
   if (diff.changed !== undefined) {
-    const hit = diff.changed.find((g) => paths.some((p) => matchPath(p, g)))
+    const hit = diff.changed.find(g => paths.some(p => matchPath(p, g)));
     out.push({
       clause: 'diff.changed',
       ok: hit !== undefined,
       detail: hit === undefined ? `no diff path hits ${diff.changed.join(' | ')}` : hit,
-    })
+    });
   }
   if (diff.without !== undefined) {
-    const hit = diff.without.find((g) => paths.some((p) => matchPath(p, g)))
+    const hit = diff.without.find(g => paths.some(p => matchPath(p, g)));
     out.push({
       clause: 'diff.without',
       ok: hit === undefined,
       detail: hit === undefined ? undefined : `diff touches ${hit}`,
-    })
+    });
   }
-  return out
+  return out;
 }
 
 /** `probes` rows — evaluated in parallel but pooled at PROBE_FANOUT:
@@ -246,38 +250,39 @@ async function evalProbes(
   probes: Record<string, NamedProbe>,
   timeoutMs: number
 ): Promise<ClauseVerdict[]> {
+  const probeMap = new Map(Object.entries(probes));
   return mapPool(PROBE_FANOUT, list, async (p): Promise<ClauseVerdict> => {
-    const fn = probes[p.name]
+    const fn = probeMap.get(p.name);
     if (fn === undefined) {
       // the registry is closed — an unknown name fails the clause and
       // shows in `bro guard test` (spec: never silently true)
-      return { clause: `probe:${p.name}`, ok: false, detail: 'unknown probe' }
+      return { clause: `probe:${p.name}`, ok: false, detail: 'unknown probe' };
     }
-    let timer: ReturnType<typeof setTimeout> | undefined
+    let timer: ReturnType<typeof setTimeout> | undefined;
     try {
       const r = await Promise.race([
         Promise.resolve(fn(p.args, dir)),
-        new Promise<ProbeResult>((res) => {
+        new Promise<ProbeResult>(res => {
           timer = setTimeout(
             () => res({ ok: false, detail: `timed out after ${timeoutMs / 1_000}s` }),
             timeoutMs
-          )
-          timer.unref()
+          );
+          timer.unref();
         }),
-      ])
+      ]);
       return typeof r === 'boolean'
         ? { clause: `probe:${p.name}`, ok: r }
-        : { clause: `probe:${p.name}`, ok: r.ok, detail: r.detail }
+        : { clause: `probe:${p.name}`, ok: r.ok, detail: r.detail };
     } catch (err) {
       return {
         clause: `probe:${p.name}`,
         ok: false,
         detail: `threw: ${err instanceof Error ? err.message : err}`,
-      }
+      };
     } finally {
       // an armed timer pinning the process after the race settled is a
       // leak, not patience (same rule as judge's deadline race)
-      clearTimeout(timer)
+      clearTimeout(timer);
     }
-  })
+  });
 }

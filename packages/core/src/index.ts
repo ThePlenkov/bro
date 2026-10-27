@@ -16,6 +16,7 @@ export {
   gitTry,
   gitTryAsync,
   gitCommonDir,
+  gitCommonDirAsync,
   GIT_SYNC_PROBE_TIMEOUT_MS,
   gitLogPathRecords,
   gitDriftRef,
@@ -42,7 +43,9 @@ export {
   bdTry,
   bdTryAsync,
   beadsDir,
+  beadsDirAsync,
   beadsStoreStamp,
+  beadsStoreStampAsync,
   checkBeads,
   evidenceKind,
   initBeadsStealth,
@@ -291,6 +294,7 @@ export {
   facade,
   facadeAuth,
   facadeName,
+  facadeNameAsync,
   isOwnClaim,
   mergeQueueHost,
   parallelWorkLines,
@@ -305,9 +309,11 @@ export {
   sessionStartLines,
   sessionStartProbe,
   sessionTaskClaims,
+  sessionTaskClaimsAsync,
   stackHost,
   stopGateContributions,
   tasksAsync,
+  tasksStoreAsync,
 } from './connectors.ts';
 export { PROBE_TIMEOUT_MS } from './connectors.ts';
 export type { CollectedGuard } from './connectors.ts';

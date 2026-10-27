@@ -3,11 +3,11 @@
  * package. PATH lookup is the contract (same as gh); a generous maxBuffer
  * keeps large `bd list --json` payloads from hitting Node's 1 MiB default.
  */
-import { execFileSync, spawnSync } from 'node:child_process'
-import { killGroup, spawnCollect } from './live-procs.ts'
-import { readdirSync, statSync } from 'node:fs'
-import { dirname, join } from 'node:path'
-import { gitTry } from './git.ts'
+import { execFileSync, spawnSync } from 'node:child_process';
+import { killGroup, spawnCollect } from './live-procs.ts';
+import { readdirSync, statSync } from 'node:fs';
+import { dirname, join } from 'node:path';
+import { gitTry, gitTryAsync } from './git.ts';
 
 /** `timeout` supervises every bd call — the caller's own deadline dies
  *  with the caller, and an orphaned bd waits on the embedded noms LOCK
@@ -19,30 +19,32 @@ import { gitTry } from './git.ts'
  *  risk comes back but nothing else changes. */
 // PATH-keyed: a process that swaps PATH mid-life (tests injecting a
 // fake timeout, env sanitizers) must re-probe, not ride a stale verdict
-let timeoutProbe: { path?: string; bin: string | null } | undefined
+let timeoutProbe: { path?: string; bin: string | null } | undefined;
 function supervised(args: string[], timeoutMs: number): { cmd: string; argv: string[] } {
-  const path = process.env.PATH
+  const path = process.env.PATH;
   if (timeoutProbe === undefined || timeoutProbe.path !== path) {
-    let bin: string | null = null
+    let bin: string | null = null;
     for (const candidate of ['timeout', 'gtimeout']) {
       try {
-        execFileSync(candidate, ['--version'], { stdio: 'ignore' })
-        bin = candidate
-        break
-      } catch { /* absent or non-GNU — fall through to bare bd */ }
+        execFileSync(candidate, ['--version'], { stdio: 'ignore' });
+        bin = candidate;
+        break;
+      } catch {
+        /* absent or non-GNU — fall through to bare bd */
+      }
     }
-    timeoutProbe = { path, bin }
+    timeoutProbe = { path, bin };
   }
   if (timeoutProbe.bin === null) {
-    return { cmd: 'bd', argv: args }
+    return { cmd: 'bd', argv: args };
   }
   // caller budget + margin — the backstop only matters when the caller
   // died before its own timeout could kill the child
-  const backstopSec = Math.ceil((timeoutMs + 30_000) / 1000)
+  const backstopSec = Math.ceil((timeoutMs + 30_000) / 1000);
   return {
     cmd: timeoutProbe.bin,
     argv: ['--foreground', '-k', '5s', `${backstopSec}s`, 'bd', ...args],
-  }
+  };
 }
 
 /** A missing `bd` reads "ENOENT" on a bare spawn but
@@ -59,12 +61,13 @@ function normalizeSpawnErr(err: string): string {
   // denied" and must stay unnormalized (broken, not missing).
   return /failed to (run command|execute process)[^\n]*no such file or directory/i.test(err)
     ? `ENOENT ${err}`
-    : err
+    : err;
 }
 
 export function bd(args: string[], cwd?: string): string {
-  const s = supervised(args, 15_000)
-  return execFileSync(s.cmd, s.argv, { // NOSONAR — user-installed CLI; PATH lookup is the contract (same as gh)
+  const s = supervised(args, 15_000);
+  return execFileSync(s.cmd, s.argv, {
+    // NOSONAR — user-installed CLI; PATH lookup is the contract (same as gh)
     encoding: 'utf8',
     cwd,
     maxBuffer: 64 * 1024 * 1024,
@@ -75,7 +78,7 @@ export function bd(args: string[], cwd?: string): string {
     // a wedged bd must degrade, not stall — hooks call this inline in the
     // agent lifecycle
     timeout: 15_000,
-  })
+  });
 }
 
 /** Non-throwing bd — same contract as gitTry for paths where beads is
@@ -88,8 +91,9 @@ export function bdTry(
    *  the project checkout, so callers pass it explicitly. */
   cwd?: string
 ): { code: number; out: string; err: string } {
-  const s = supervised(args, timeoutMs)
-  const proc = spawnSync(s.cmd, s.argv, { // NOSONAR — PATH lookup is the contract (same as gh/git)
+  const s = supervised(args, timeoutMs);
+  const proc = spawnSync(s.cmd, s.argv, {
+    // NOSONAR — PATH lookup is the contract (same as gh/git)
     cwd,
     stdio: ['ignore', 'pipe', 'pipe'],
     encoding: 'utf8',
@@ -97,22 +101,22 @@ export function bdTry(
     // same maxBuffer contract as bd() — a future caller passing a large
     // payload must not silently get truncated stdout
     maxBuffer: 64 * 1024 * 1024,
-  })
+  });
   return {
     code: proc.status ?? 1,
     out: proc.stdout ?? '',
     err: normalizeSpawnErr((proc.stderr ?? proc.error?.message ?? '').trim()),
-  }
+  };
 }
 
 export function bdJson<T>(args: string[], cwd?: string): T {
-  const out = bd([...args, '--json'], cwd)
+  const out = bd([...args, '--json'], cwd);
   try {
-    return JSON.parse(out) as T
+    return JSON.parse(out) as T;
   } catch (err) {
     throw new Error(
       `bd returned malformed JSON — ${err instanceof Error ? err.message : String(err)}`
-    )
+    );
   }
 }
 
@@ -126,13 +130,14 @@ export function bdAt(
   args: string[],
   timeoutMs = 15_000
 ): { code: number; out: string; err: string; ran: boolean } {
-  const proc = spawnSync('bd', args, { // NOSONAR — PATH lookup is the contract (same as gh/git/bd)
+  const proc = spawnSync('bd', args, {
+    // NOSONAR — PATH lookup is the contract (same as gh/git/bd)
     env: { ...process.env, BEADS_DIR: beadsDir },
     stdio: ['ignore', 'pipe', 'pipe'],
     encoding: 'utf8',
     timeout: timeoutMs,
     maxBuffer: 64 * 1024 * 1024,
-  })
+  });
   return {
     code: proc.status ?? 1,
     out: proc.stdout ?? '',
@@ -142,7 +147,7 @@ export function bdAt(
       (proc.signal !== null ? `killed by ${proc.signal}` : '')
     ).trim(),
     ran: proc.error === undefined && proc.status !== null,
-  }
+  };
 }
 
 // --- async variants ------------------------------------------------------------
@@ -155,17 +160,17 @@ export function bdAt(
  *  execFileSync-style shape (`.code/.stdout/.stderr`) so isBdNotFound
  *  and friends classify async failures exactly like sync ones. */
 export function bdAsync(args: string[], cwd?: string): Promise<string> {
-  const s = supervised(args, 15_000)
-  const { proc, done } = spawnCollect(s.cmd, s.argv, cwd, undefined, { detached: true })
+  const s = supervised(args, 15_000);
+  const { proc, done } = spawnCollect(s.cmd, s.argv, cwd, undefined, { detached: true });
   return new Promise((resolve, reject) => {
-    let timedOut = false
+    let timedOut = false;
     const timer = setTimeout(() => {
-      timedOut = true
-      killGroup(proc)
-    }, 15_000)
-    timer.unref?.()
+      timedOut = true;
+      killGroup(proc);
+    }, 15_000);
+    timer.unref?.();
     void done.then(({ code, out, err, error }) => {
-      clearTimeout(timer)
+      clearTimeout(timer);
       if (timedOut) {
         reject(
           Object.assign(new Error(`bd ${args[0] ?? ''} timed out after 15000ms`), {
@@ -174,27 +179,27 @@ export function bdAsync(args: string[], cwd?: string): Promise<string> {
             stderr: err,
             killed: true,
           })
-        )
-        return
+        );
+        return;
       }
       if (error !== undefined) {
-        reject(Object.assign(error, { stdout: out, stderr: normalizeSpawnErr(err) }))
-        return
+        reject(Object.assign(error, { stdout: out, stderr: normalizeSpawnErr(err) }));
+        return;
       }
       if (code === 0) {
-        resolve(out)
-        return
+        resolve(out);
+        return;
       }
-      const errMsg = normalizeSpawnErr(err)
+      const errMsg = normalizeSpawnErr(err);
       reject(
         Object.assign(new Error(`bd ${args.join(' ')} failed (${code ?? 1}): ${errMsg}`), {
           code: code ?? 1,
           stdout: out,
           stderr: errMsg,
         })
-      )
-    })
-  })
+      );
+    });
+  });
 }
 
 /** Non-throwing async bd — the spawnSync bdTry's twin for probe paths
@@ -204,34 +209,34 @@ export function bdTryAsync(
   timeoutMs = 15_000,
   cwd?: string
 ): Promise<{ code: number; out: string; err: string }> {
-  const s = supervised(args, timeoutMs)
-  const { proc, done } = spawnCollect(s.cmd, s.argv, cwd, undefined, { detached: true })
-  return new Promise((resolve) => {
-    let timedOut = false
+  const s = supervised(args, timeoutMs);
+  const { proc, done } = spawnCollect(s.cmd, s.argv, cwd, undefined, { detached: true });
+  return new Promise(resolve => {
+    let timedOut = false;
     const timer = setTimeout(() => {
-      timedOut = true
-      killGroup(proc)
-    }, timeoutMs)
-    timer.unref?.()
-    void done.then((r) => {
-      clearTimeout(timer)
+      timedOut = true;
+      killGroup(proc);
+    }, timeoutMs);
+    timer.unref?.();
+    void done.then(r => {
+      clearTimeout(timer);
       resolve(
         timedOut
           ? { code: 124, out: r.out, err: `timed out after ${timeoutMs}ms` }
           : { code: r.code ?? 1, out: r.out, err: normalizeSpawnErr(r.err) }
-      )
-    })
-  })
+      );
+    });
+  });
 }
 
 export async function bdJsonAsync<T>(args: string[], cwd?: string): Promise<T> {
-  const out = await bdAsync([...args, '--json'], cwd)
+  const out = await bdAsync([...args, '--json'], cwd);
   try {
-    return JSON.parse(out) as T
+    return JSON.parse(out) as T;
   } catch (err) {
     throw new Error(
       `bd returned malformed JSON — ${err instanceof Error ? err.message : String(err)}`
-    )
+    );
   }
 }
 
@@ -243,7 +248,7 @@ export async function bdJsonAsync<T>(args: string[], cwd?: string): Promise<T> {
  * so callers may degrade — warn and fall back — instead of retrying.
  */
 export class BdCompatError extends Error {
-  override name = 'BdCompatError'
+  override name = 'BdCompatError';
 }
 
 /** stderr/message patterns that mean the bd binary rejected the call —
@@ -251,17 +256,17 @@ export class BdCompatError extends Error {
  *  database`) are deliberately absent: that's an environment problem,
  *  not API drift. */
 const BD_USAGE_DRIFT =
-  /unknown (command|flag|shorthand)|flag provided but not defined|unrecognized command/i
+  /unknown (command|flag|shorthand)|flag provided but not defined|unrecognized command/i;
 /** "the binary ran but there's no store it routes to" — distinguishes a
  *  missing/unrouted store (a 503, never a refused op) from a real
  *  command-level failure. Exported for the sync + claim classifiers. */
-export const BD_NO_STORE = /no beads database|not initialized|no database found/i
+export const BD_NO_STORE = /no beads database|not initialized|no database found/i;
 
 function errText(err: unknown): string {
-  const e = err as { message?: unknown; stderr?: unknown }
+  const e = err as { message?: unknown; stderr?: unknown };
   return `${typeof e?.message === 'string' ? e.message : String(err)}\n${
     typeof e?.stderr === 'string' ? e.stderr : ''
-  }`
+  }`;
 }
 
 /** bd's exact lookup-miss signals — `bd show <id>` on an absent row
@@ -269,14 +274,14 @@ function errText(err: unknown): string {
  *  `no issues found matching the provided IDs` error payload on
  *  stdout. Only these mark a miss — anything else containing "not
  *  found" (a malformed payload, a dead store) must stay thrown. */
-const BD_NOT_FOUND = /Issue \S+ not found|no issues found matching the provided IDs/i
+const BD_NOT_FOUND = /Issue \S+ not found|no issues found matching the provided IDs/i;
 
 /** Classifier for a thrown bd error: true when the backend reported the
  *  requested id absent. Scans stderr *and* stdout — bd writes the
  *  miss's JSON error object to stdout. */
 export function isBdNotFound(err: unknown): boolean {
-  const out = (err as { stdout?: unknown } | null | undefined)?.stdout
-  return BD_NOT_FOUND.test(`${errText(err)}\n${typeof out === 'string' ? out : ''}`)
+  const out = (err as { stdout?: unknown } | null | undefined)?.stdout;
+  return BD_NOT_FOUND.test(`${errText(err)}\n${typeof out === 'string' ? out : ''}`);
 }
 
 /** Classifier for errors thrown out of any bd call: contract drift vs
@@ -284,123 +289,123 @@ export function isBdNotFound(err: unknown): boolean {
  *  until bd changes, so callers may warn + fall back rather than fail. */
 export function isBdCompatError(err: unknown): boolean {
   if (err instanceof BdCompatError) {
-    return true
+    return true;
   }
-  const t = errText(err)
-  return BD_USAGE_DRIFT.test(t) || t.includes('malformed JSON')
+  const t = errText(err);
+  return BD_USAGE_DRIFT.test(t) || t.includes('malformed JSON');
 }
 
 export interface BdCompat {
   /** no drift found — bd speaks the contract bro assumes */
-  ok: boolean
+  ok: boolean;
   /** bd binary absent (ENOENT) — a setup gap, not drift */
-  missing: boolean
+  missing: boolean;
   /** bd present but `bd --version` itself failed — operational
    *  (timeout, permissions), not drift; do not degrade on it */
-  broken: boolean
-  version?: string
+  broken: boolean;
+  version?: string;
   /** drift findings — non-empty ⇒ ok:false */
-  problems: string[]
+  problems: string[];
   /** what the read probes saw. 'absent' = no store to probe, so shape
    *  checks were inconclusive; 'error' = a store failure that isn't
    *  classifiable as drift (corrupt db, permissions) */
-  store: 'reachable' | 'absent' | 'error' | 'unprobed'
-  storeErr?: string
+  store: 'reachable' | 'absent' | 'error' | 'unprobed';
+  storeErr?: string;
 }
 
 /** The newest `.beads` schema_version this bro was built against —
  *  `bd info --json` reports it; a newer value means the store moved
  *  past what this code reads. */
-export const BD_KNOWN_SCHEMA_VERSION = 1
+export const BD_KNOWN_SCHEMA_VERSION = 1;
 
 function rowShape(v: unknown, cmd: string, problems: string[]): void {
   if (!Array.isArray(v)) {
     problems.push(
       `\`bd ${cmd} --json\` returned ${v === null ? 'null' : typeof v}, expected an array`
-    )
-    return
+    );
+    return;
   }
   for (const r of v) {
     if (typeof r !== 'object' || r === null || typeof (r as { id?: unknown }).id !== 'string') {
-      problems.push(`\`bd ${cmd} --json\` rows lack a string \`id\` — output shape drifted`)
-      return
+      problems.push(`\`bd ${cmd} --json\` rows lack a string \`id\` — output shape drifted`);
+      return;
     }
   }
 }
 
 function firstErrLine(err: string, code: number): string {
-  return err.split('\n')[0] || `exit ${code}`
+  return err.split('\n')[0] || `exit ${code}`;
 }
 
 /** Presence probe — false aborts the compat run (nothing else answers
  *  without the binary). */
 function probeVersion(res: BdCompat, dir?: string): boolean {
-  const ver = bdTry(['--version'], 10_000, dir)
+  const ver = bdTry(['--version'], 10_000, dir);
   if (ver.code !== 0) {
     // bare spawn reports ENOENT; under `timeout` the same miss is
     // normalized by bdTry to ENOENT too — one check covers both
-    res.missing = /ENOENT/.test(ver.err)
-    res.broken = !res.missing
+    res.missing = /ENOENT/.test(ver.err);
+    res.broken = !res.missing;
     res.problems.push(
       res.missing ? 'bd not found on PATH' : `\`bd --version\` failed — ${ver.err || 'spawn error'}`
-    )
-    res.ok = false
-    return false
+    );
+    res.ok = false;
+    return false;
   }
-  res.version = /\d+\.\d+[\d.]*/.exec(`${ver.out} ${ver.err}`)?.[0]?.replace(/\.*$/, '')
-  return true
+  res.version = /\d+\.\d+[\d.]*/.exec(`${ver.out} ${ver.err}`)?.[0]?.replace(/\.*$/, '');
+  return true;
 }
 
 /** One read-path probe: `bd <name> --json -n 1` must answer a JSON array
  *  of id-keyed rows while a store is reachable. Records the store state
  *  the first probe observes; usage errors are drift anywhere. */
 function probeRead(res: BdCompat, name: string, dir?: string): boolean {
-  const p = bdTry([name, '--json', '-n', '1'], 15_000, dir)
+  const p = bdTry([name, '--json', '-n', '1'], 15_000, dir);
   if (p.code === 0) {
-    res.store = 'reachable'
+    res.store = 'reachable';
     try {
-      rowShape(JSON.parse(p.out), name, res.problems)
+      rowShape(JSON.parse(p.out), name, res.problems);
     } catch {
-      res.problems.push(`\`bd ${name} --json\` returned non-JSON output`)
+      res.problems.push(`\`bd ${name} --json\` returned non-JSON output`);
     }
-    return true
+    return true;
   }
   if (BD_USAGE_DRIFT.test(p.err)) {
-    res.problems.push(`\`bd ${name}\` rejected the call — ${firstErrLine(p.err, p.code)}`)
-    return true
+    res.problems.push(`\`bd ${name}\` rejected the call — ${firstErrLine(p.err, p.code)}`);
+    return true;
   }
   if (BD_NO_STORE.test(p.err)) {
-    res.store = 'absent'
-    res.storeErr = p.err
-    return false // every remaining probe hits the same wall
+    res.store = 'absent';
+    res.storeErr = p.err;
+    return false; // every remaining probe hits the same wall
   }
   // unclassifiable failure is store state (corrupt db, lock, perms),
   // not proof of drift — degrade is for contract breakage only
-  res.store = 'error'
-  res.storeErr = `\`bd ${name}\` failed — ${firstErrLine(p.err, p.code)}`
-  return false
+  res.store = 'error';
+  res.storeErr = `\`bd ${name}\` failed — ${firstErrLine(p.err, p.code)}`;
+  return false;
 }
 
 /** Schema probe — meaningful only with a live store. */
 function probeSchema(res: BdCompat, dir?: string): void {
-  const info = bdTry(['info', '--json'], 15_000, dir)
+  const info = bdTry(['info', '--json'], 15_000, dir);
   if (info.code !== 0) {
     // usage errors = drift; anything else is operational, not compat
     if (BD_USAGE_DRIFT.test(info.err)) {
-      res.problems.push(`\`bd info\` rejected the call — ${firstErrLine(info.err, info.code)}`)
+      res.problems.push(`\`bd info\` rejected the call — ${firstErrLine(info.err, info.code)}`);
     }
-    return
+    return;
   }
   try {
-    const parsed = JSON.parse(info.out) as { schema_version?: unknown }
-    const v = parsed.schema_version
+    const parsed = JSON.parse(info.out) as { schema_version?: unknown };
+    const v = parsed.schema_version;
     if (typeof v === 'number' && v > BD_KNOWN_SCHEMA_VERSION) {
       res.problems.push(
         `bd store schema_version ${v} is newer than bro knows (${BD_KNOWN_SCHEMA_VERSION})`
-      )
+      );
     }
   } catch {
-    res.problems.push('`bd info --json` returned non-JSON output')
+    res.problems.push('`bd info --json` returned non-JSON output');
   }
 }
 
@@ -412,43 +417,49 @@ function probeSchema(res: BdCompat, dir?: string): void {
  * unproven.
  */
 export function probeBdCompat(dir?: string): BdCompat {
-  const res: BdCompat = { ok: true, missing: false, broken: false, problems: [], store: 'unprobed' }
+  const res: BdCompat = {
+    ok: true,
+    missing: false,
+    broken: false,
+    problems: [],
+    store: 'unprobed',
+  };
   if (!probeVersion(res, dir)) {
-    return res
+    return res;
   }
   // The read path every TaskStore consumer builds on: list + ready.
   for (const name of ['list', 'ready']) {
     if (!probeRead(res, name, dir)) {
-      break
+      break;
     }
   }
   if (res.store === 'reachable') {
-    probeSchema(res, dir)
+    probeSchema(res, dir);
   }
-  res.ok = res.problems.length === 0
-  return res
+  res.ok = res.problems.length === 0;
+  return res;
 }
 
 /** Classify a provenance ref — shared by drill and retro evidence. */
 export function refKind(ref: string): string {
   if (/\/pull\/|\/merge_requests\//.test(ref)) {
-    return 'pr'
+    return 'pr';
   }
   if (/^[0-9a-f]{40}$/.test(ref)) {
-    return 'git-sha'
+    return 'git-sha';
   }
-  return 'work-id'
+  return 'work-id';
 }
 
 /** Provenance event kind for an evidence ref — a work-id is not a commit. */
 export function evidenceKind(ref: string): 'land' | 'commit' | 'used' {
   switch (refKind(ref)) {
     case 'pr':
-      return 'land'
+      return 'land';
     case 'git-sha':
-      return 'commit'
+      return 'commit';
     default:
-      return 'used'
+      return 'used';
   }
 }
 
@@ -456,13 +467,13 @@ export function evidenceKind(ref: string): 'land' | 'commit' | 'used' {
  *  not suppress init (it would fail loudly rather than be repaired). */
 function beadsDirExists(): boolean {
   try {
-    return statSync(join(process.cwd(), '.beads')).isDirectory()
+    return statSync(join(process.cwd(), '.beads')).isDirectory();
   } catch (err) {
-    const code = (err as NodeJS.ErrnoException).code
+    const code = (err as NodeJS.ErrnoException).code;
     if (code === 'ENOENT' || code === 'ENOTDIR') {
-      return false
+      return false;
     }
-    throw err // EACCES/ELOOP etc. are real failures — don't mask as "absent"
+    throw err; // EACCES/ELOOP etc. are real failures — don't mask as "absent"
   }
 }
 
@@ -473,20 +484,20 @@ function beadsDirExists(): boolean {
  */
 export function initBeadsStealth(): boolean {
   if (beadsDirExists()) {
-    return false
+    return false;
   }
   try {
-    bd(['init', '--stealth', '--skip-agents', '--skip-hooks', '--quiet'])
-    return true
+    bd(['init', '--stealth', '--skip-agents', '--skip-hooks', '--quiet']);
+    return true;
   } catch (err) {
     // Two first-time inits can race: both pass the existence check, the
     // loser's `bd init` fails while the winner's workspace lands. Tolerate
     // that race — callers verify completeness (`bd list` in checkBeads) —
     // but never swallow a real init failure.
     if (beadsDirExists()) {
-      return false
+      return false;
     }
-    throw err
+    throw err;
   }
 }
 
@@ -501,15 +512,36 @@ export function initBeadsStealth(): boolean {
  *  else the sibling of the common git dir (the main checkout; linked
  *  worktrees share it). null when neither resolves. */
 export function beadsDir(dir: string): string | null {
-  const env = process.env.BEADS_DIR
+  const env = process.env.BEADS_DIR;
   if (env !== undefined && env !== '') {
-    return env
+    return env;
   }
-  const r = gitTry(['-C', dir, 'rev-parse', '--path-format=absolute', '--git-common-dir'])
+  const r = gitTry(['-C', dir, 'rev-parse', '--path-format=absolute', '--git-common-dir']);
   if (r.code !== 0 || r.out.trim() === '') {
-    return null
+    return null;
   }
-  return join(dirname(r.out.trim()), '.beads')
+  return join(dirname(r.out.trim()), '.beads');
+}
+
+/** Async beadsDir — the probe-path twin (spec bro-36sx7.2): the git
+ *  probe under the sync name is a spawnSync that freezes a parallel
+ *  hook sweep. */
+export async function beadsDirAsync(dir: string): Promise<string | null> {
+  const env = process.env.BEADS_DIR;
+  if (env !== undefined && env !== '') {
+    return env;
+  }
+  const r = await gitTryAsync([
+    '-C',
+    dir,
+    'rev-parse',
+    '--path-format=absolute',
+    '--git-common-dir',
+  ]);
+  if (r.code !== 0 || r.out.trim() === '') {
+    return null;
+  }
+  return join(dirname(r.out.trim()), '.beads');
 }
 
 /** `<beads>/{embeddeddolt,dolt}/<db>/.dolt/noms/manifest` mtime+size for
@@ -519,18 +551,28 @@ export function beadsDir(dir: string): string | null {
  *  the server mutates the same manifest on commit. null means "no
  *  recognizable dolt store" → read live every probe. */
 export function beadsStoreStamp(dir: string): string | null {
-  const beads = beadsDir(dir)
-  if (beads === null) {
-    return null
-  }
-  const parts: string[] = []
+  const beads = beadsDir(dir);
+  return beads === null ? null : beadsStamp(beads);
+}
+
+/** Async beadsStoreStamp — the probe-path twin: under the sync name the
+ *  `.beads` resolution is a spawnSync inside the async cache helpers
+ *  (spec bro-36sx7.2). The manifest reads stay sync fs — the stall is
+ *  the git spawn, not the stats. */
+export async function beadsStoreStampAsync(dir: string): Promise<string | null> {
+  const beads = await beadsDirAsync(dir);
+  return beads === null ? null : beadsStamp(beads);
+}
+
+function beadsStamp(beads: string): string | null {
+  const parts: string[] = [];
   for (const root of ['embeddeddolt', 'dolt']) {
     try {
       for (const db of readdirSync(join(beads, root))) {
         try {
-          const st = statSync(join(beads, root, db, '.dolt', 'noms', 'manifest'))
+          const st = statSync(join(beads, root, db, '.dolt', 'noms', 'manifest'));
           if (st.isFile()) {
-            parts.push(`${root}/${db}:${st.mtimeMs}:${st.size}`)
+            parts.push(`${root}/${db}:${st.mtimeMs}:${st.size}`);
           }
         } catch {
           // not a db dir / unreadable entry — try the next
@@ -541,25 +583,25 @@ export function beadsStoreStamp(dir: string): string | null {
     }
   }
   if (parts.length === 0) {
-    return null
+    return null;
   }
-  parts.sort((a, b) => a.localeCompare(b))
-  return `${beads}|${parts.join('|')}`
+  parts.sort((a, b) => a.localeCompare(b));
+  return `${beads}|${parts.join('|')}`;
 }
 
 export function checkBeads(dir?: string): void {
-  const compat = probeBdCompat(dir)
+  const compat = probeBdCompat(dir);
   if (compat.missing) {
-    throw new Error('bd not found — install beads first (https://github.com/gastownhall/beads)')
+    throw new Error('bd not found — install beads first (https://github.com/gastownhall/beads)');
   }
   if (compat.broken) {
-    throw new Error(`bd unusable — ${compat.problems.join('; ')}`)
+    throw new Error(`bd unusable — ${compat.problems.join('; ')}`);
   }
   if (!compat.ok) {
-    const v = compat.version ? ` ${compat.version}` : ''
+    const v = compat.version ? ` ${compat.version}` : '';
     throw new BdCompatError(
       `bd${v} drifted off the contract bro speaks — ` + compat.problems.join('; ')
-    )
+    );
   }
   if (compat.store !== 'reachable') {
     // preserve the real failure — "not initialized" is only one cause
@@ -568,6 +610,6 @@ export function checkBeads(dir?: string): void {
         ? `bd store probe failed — ${compat.storeErr}`
         : `bd list failed — ${compat.storeErr || 'no beads database found'} ` +
             '(run `bd init` if beads is not initialized here)'
-    )
+    );
   }
 }
