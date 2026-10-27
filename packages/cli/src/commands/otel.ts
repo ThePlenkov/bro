@@ -31,8 +31,8 @@ const isObj = (v: unknown): v is Record<string, unknown> =>
 
 /** The facade's resolved config — operator provenance applied, so
  *  status/test report what hooks will actually do, not the raw merge. */
-function otelConfig(dir: string): ResolvedOtelConfig {
-  return otelConfigFor(dir)
+function otelConfig(req: { dir: string }): ResolvedOtelConfig {
+  return otelConfigFor(req.dir)
 }
 
 function usage(exitCode: ExitCode = EXIT.usage): never {
@@ -60,7 +60,8 @@ Commands:
  *  presence refuses the write (same rule as `bro setup`). An existing
  *  file that does not parse is operator data — refuse rather than
  *  overwrite it with only the toggle. */
-function cmdSetEnabled(dir: string, enabled: boolean): void {
+function cmdSetEnabled(toggle: { dir: string; enabled: boolean }): void {
+  const { dir, enabled } = toggle
   const tsPath = join(dir, 'bro.config.local.ts')
   if (existsSync(tsPath)) {
     console.error(
@@ -106,7 +107,8 @@ interface StatusReport {
 
 /** Where the resolved exporter sends rows — path, endpoint, or the
  *  literal 'stderr' marker the status line already used. */
-function statusTarget(cfg: ResolvedOtelConfig, dir: string): string {
+function statusTarget(view: { cfg: ResolvedOtelConfig; dir: string }): string {
+  const { cfg, dir } = view
   if (cfg.exporter.type === 'file') {
     return otelSinkPath(cfg, dir)
   }
@@ -119,8 +121,9 @@ function statusTarget(cfg: ResolvedOtelConfig, dir: string): string {
   )
 }
 
-function buildStatusReport(cfg: ResolvedOtelConfig, dir: string): StatusReport {
-  const target = statusTarget(cfg, dir)
+function buildStatusReport(view: { cfg: ResolvedOtelConfig; dir: string }): StatusReport {
+  const { cfg } = view
+  const target = statusTarget(view)
   const report: StatusReport = {
     enabled: cfg.enabled,
     exporter: { type: cfg.exporter.type, target },
@@ -164,10 +167,10 @@ function printStatusReport(report: StatusReport, cfg: ResolvedOtelConfig): void 
   console.log(rows.join('\n'))
 }
 
-function cmdStatus(dir: string, json: boolean): void {
-  const cfg = otelConfig(dir)
-  const report = buildStatusReport(cfg, dir)
-  if (json) {
+function cmdStatus(run: { dir: string; json: boolean }): void {
+  const cfg = otelConfig({ dir: run.dir })
+  const report = buildStatusReport({ cfg, dir: run.dir })
+  if (run.json) {
     console.log(JSON.stringify(report, null, 2))
     return
   }
@@ -190,13 +193,14 @@ const SYNTHETIC_PAYLOAD = {
   turn_id: 'codex-turn-synthetic',
 }
 
-function cmdTest(dir: string, rawName: string | undefined, json: boolean): void {
+function cmdTest(run: { dir: string; rawName: string | undefined; json: boolean }): void {
+  const { dir, rawName, json } = run
   if (rawName === undefined) {
     console.error('error: bro otel test needs a hook name — `bro otel test session-start`')
     process.exit(EXIT.usage)
   }
   const name = hookEventName(rawName)
-  const cfg = otelConfig(dir)
+  const cfg = otelConfig({ dir })
   const policy = resolveHookPolicy(cfg, name)
   const { record, skipped } = hookRecord(name, SYNTHETIC_PAYLOAD, {
     sessionId: SYNTHETIC_PAYLOAD.session_id,
@@ -247,17 +251,17 @@ export function runOtelCommand(argv: string[]): void {
   const dir = process.cwd()
   switch (sub) {
     case 'on':
-      cmdSetEnabled(dir, true)
+      cmdSetEnabled({ dir, enabled: true })
       return
     case 'off':
-      cmdSetEnabled(dir, false)
+      cmdSetEnabled({ dir, enabled: false })
       return
     case 'test':
-      cmdTest(dir, rest.find((a) => !a.startsWith('-')), rest.includes('--json'))
+      cmdTest({ dir, rawName: rest.find((a) => !a.startsWith('-')), json: rest.includes('--json') })
       return
     case 'status':
     case undefined:
-      cmdStatus(dir, rest.includes('--json'))
+      cmdStatus({ dir, json: rest.includes('--json') })
       return
     default:
       console.error(`error: unknown otel command "${sub}"`)
