@@ -16,7 +16,7 @@ import {
   writeFileSync,
 } from 'node:fs'
 import { dirname, isAbsolute, join, relative, sep } from 'node:path'
-import { loadConfig } from '@broject/core'
+import { loadConfig, withFileLock as withCoreFileLock } from '@broject/core'
 import type {
   AuthorPolicy,
   DebtRecord,
@@ -517,131 +517,15 @@ export function readProcessedAt(cwd?: string): Map<number, string> {
   }
 }
 
-// Critical sections here are synchronous file writes — an event-loop
-// heartbeat can't fire while the lock is held, so staleness is judged
-// by mtime + owner liveness instead. A live holder (kill(pid,0)) keeps
-// the lock until the abandoned bound, which also caps an orphan whose
-// pid was recycled onto an unrelated live process.
-const LOCK_STALE_MS = 30_000
-const LOCK_ABANDONED_MS = 10 * 60_000
-
-function lockOwnerAlive(lock: string): boolean {
-  try {
-    const pid = Number(readFileSync(join(lock, 'pid'), 'utf8').trim())
-    if (!Number.isInteger(pid) || pid <= 0) {
-      return false
-    }
-    try {
-      process.kill(pid, 0)
-      return true
-    } catch (err) {
-      // ESRCH = dead; EPERM = alive under another user.
-      return (err as NodeJS.ErrnoException).code === 'EPERM'
-    }
-  } catch {
-    return false // no readable pid file
-  }
-}
-
-function lockStealable(lock: string): boolean {
-  let ageMs: number
-  try {
-    ageMs = Date.now() - statSync(lock).mtimeMs
-  } catch {
-    return false // lock vanished — the retry loop's mkdir handles it
-  }
-  if (ageMs <= LOCK_STALE_MS) {
-    return false
-  }
-  return !lockOwnerAlive(lock) || ageMs > LOCK_ABANDONED_MS
-}
-
-// Capture-then-check: rename grabs whatever instance sits at `lock`
-// atomically. Re-check THAT instance — if a fresh lock replaced the
-// stale one mid-race, put it back instead of deleting a live hold.
-function stealLock(lock: string): boolean {
-  if (!lockStealable(lock)) {
-    return false
-  }
-  const dest = `${lock}.stale-${process.pid}-${process.hrtime.bigint()}`
-  try {
-    renameSync(lock, dest)
-  } catch {
-    return false // already stolen or released
-  }
-  if (lockStealable(dest)) {
-    rmSync(dest, { recursive: true, force: true })
-    return true
-  }
-  try {
-    renameSync(dest, lock)
-  } catch {
-    rmSync(dest, { recursive: true, force: true })
-  }
-  return false
-}
-
-// mkdir is atomic on all platforms — a lock dir serializes the
-// read-modify-write so concurrent processes can't lose each other's
-// updates.
-function acquireFileLock(lock: string): void {
-  for (let i = 0; i < 100; i++) {
-    try {
-      mkdirSync(lock)
-    } catch {
-      // Held by someone else — steal if stale, otherwise wait and retry.
-      if (!stealLock(lock)) {
-        Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 10)
-      }
-      continue
-    }
-    try {
-      writeFileSync(join(lock, 'pid'), String(process.pid))
-      return
-    } catch (err) {
-      rmSync(lock, { recursive: true, force: true })
-      throw err
-    }
-  }
-  throw new Error(`could not acquire lock ${lock}`)
-}
-
-// Capture the lock instance before deleting: only ever remove a dir
-// whose pid file is ours — if our lock was stolen, the dir at `lock`
-// belongs to the stealer and is put back untouched.
-function releaseFileLock(lock: string): void {
-  const dest = `${lock}.release-${process.pid}`
-  try {
-    renameSync(lock, dest)
-  } catch {
-    return // lock already gone (stolen or never fully created)
-  }
-  let ours = false
-  try {
-    ours = readFileSync(join(dest, 'pid'), 'utf8').trim() === String(process.pid)
-  } catch {
-    // unreadable owner — treat as not ours
-  }
-  if (ours) {
-    rmSync(dest, { recursive: true, force: true })
-    return
-  }
-  try {
-    renameSync(dest, lock)
-  } catch {
-    rmSync(dest, { recursive: true, force: true })
-  }
-}
-
+// The ledger's read-modify-write serializes on @broject/core's
+// directory lock — the same primitive every bro lock uses: mkdir(2)
+// claims `X.lock`, the `h-<pid>` entry inside is the hold, and
+// release unlinks by name. The capture/restore primitive that used
+// to live here could drop a successor's live lock mid-restore
+// (bro-l8c4f.2); `X.lock.<name>.stale-*`/`.release-*` debris it left
+// behind is still swept by the filelock's staged-sibling sweep.
 export function withFileLock<T>(path: string, fn: () => T): T {
-  mkdirSync(dirname(path), { recursive: true })
-  const lock = `${path}.lock`
-  acquireFileLock(lock)
-  try {
-    return fn()
-  } finally {
-    releaseFileLock(lock)
-  }
+  return withCoreFileLock(`${path}.lock`, fn, { label: 'debt ledger lock' })
 }
 
 export function markProcessedAt(prs: number[], at: string, cwd?: string): void {

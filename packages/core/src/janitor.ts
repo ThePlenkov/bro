@@ -16,8 +16,9 @@
  *    `.work` detail names no existing path loses its
  *    markers/hinted/fired/cursor; markerless cursors reap on
  *    drain-idleness; everything reaps on the TTL floor
- *  - a lock whose token names a dead pid is garbage — the filelock
- *    steals it on acquire, the janitor removes the file
+ *  - a lock whose owner is dead (its `h-<pid>` entry or legacy file
+ *    token) is garbage — the filelock steals it on acquire, the
+ *    janitor reaps the instance
  *  - append-only logs cap by size regardless of liveness, tail kept
  *    in place so a held-fd writer's inode never unlinks under it
  *
@@ -29,13 +30,13 @@ import {
   existsSync,
   fstatSync,
   ftruncateSync,
+  lstatSync,
   openSync,
   readdirSync,
   readFileSync,
   readSync,
   renameSync,
   rmSync,
-  statSync,
   writeFileSync,
   writeSync,
 } from 'node:fs'
@@ -175,10 +176,14 @@ function listDir(dir: string): string[] {
   }
 }
 
-function statOf(path: string): { mtimeMs: number; size: number; isFile: boolean } | null {
+function statOf(
+  path: string
+): { mtimeMs: number; size: number; isFile: boolean; isDirectory: boolean } | null {
   try {
-    const st = statSync(path)
-    return { mtimeMs: st.mtimeMs, size: st.size, isFile: st.isFile() }
+    // lstat — a reaper never follows a link: a symlinked `*.lock` or
+    // debris name is foreign, not an instance to open or descend into
+    const st = lstatSync(path)
+    return { mtimeMs: st.mtimeMs, size: st.size, isFile: st.isFile(), isDirectory: st.isDirectory() }
   } catch {
     return null
   }
@@ -196,11 +201,12 @@ function firstLine(path: string): string | undefined {
 
 /** Unlink with a counter — a vanished file is a raced reaper and counts
  *  nothing. Callers revalidate liveness right before this; a file
- *  recreated between scan and delete is live, not debris. */
-function reap(ctx: Ctx, path: string, kind: keyof JanitorReaped): void {
+ *  recreated between scan and delete is live, not debris. `recursive`
+ *  only for lock debris — a captured/stale lock instance can be a dir. */
+function reap(ctx: Ctx, path: string, kind: keyof JanitorReaped, recursive = false): void {
   if (!ctx.dryRun) {
     try {
-      rmSync(path, { force: true })
+      rmSync(path, { force: true, recursive })
     } catch {
       // raced removal or a permissions wall — a failed unlink is skipped
       // debris, not a janitor failure
@@ -485,16 +491,21 @@ function sweepAgents(ctx: Ctx): void {
 
 /** `*.lock` reaps by the filelock's own steal rule — dead owner or a
  *  hold past the abandoned bound — through `reapStaleLock`'s
- *  capture-then-check: the instance is renamed aside and re-verified,
- *  so a live replacement swapped in mid-race is put back, not
- *  unlinked (a plain check-then-rm can delete the replacement and
- *  leave two writers inside the same section). `*.cap-*` captured
- *  instances and `*.tmp` staged writes reap past the debris floor. */
+ *  conditional removal over both instance shapes: a dead dir's
+ *  entries are unlinked by pinned name and it goes down only if
+ *  empty; a legacy file is pinned by hardlink and re-verified before
+ *  an unlink that can never take a directory. A live instance inside
+ *  the abandoned bound is never moved, renamed, or unlinked — a plain
+ *  check-then-rm would let a live replacement be deleted and put two
+ *  writers inside the same section (bro-l8c4f.2). `*.cap-`/`.pin-`/
+ *  `.tomb-` captures, `.stale-`/`.release-` captures from the retired
+ *  debt-store primitive, and `*.tmp` staged writes reap past the
+ *  debris floor — any of them can be a dir. */
 function sweepLocks(ctx: Ctx): void {
   for (const f of listDir(ctx.bro)) {
     const path = join(ctx.bro, f)
     const st = statOf(path)
-    if (!st?.isFile) {
+    if (!st || !(st.isFile || st.isDirectory)) {
       continue
     }
     if (f.endsWith('.lock')) {
@@ -503,8 +514,15 @@ function sweepLocks(ctx: Ctx): void {
       }
       continue
     }
-    if ((f.includes('.cap-') || f.endsWith('.tmp')) && ctx.now - st.mtimeMs > DEBRIS_FLOOR_MS) {
-      reap(ctx, path, 'debris')
+    const debris =
+      f.endsWith('.tmp') ||
+      f.includes('.cap-') ||
+      f.includes('.pin-') ||
+      f.includes('.tomb-') ||
+      f.includes('.stale-') ||
+      f.includes('.release-')
+    if (debris && ctx.now - st.mtimeMs > DEBRIS_FLOOR_MS) {
+      reap(ctx, path, 'debris', true)
     }
   }
 }
