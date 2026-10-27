@@ -436,7 +436,11 @@ describe("resumeSessionFor — the coder's own session rides again (bro-5qsnr)",
   test('same provider + argv worker + recorded id resumes; every other shape stays cold', () => {
     const { root, main } = initRepo('bro-loop-resume-');
     inside(main, root, () => {
+      // agentId+backend or the registry reader drops the row as torn
       patchAgentRegistry(main, 'bro-x1', {
+        agentId: 'native-deadbeef',
+        backend: 'native',
+        spawnedAt: new Date().toISOString(),
         provider: 'devin',
         acpSessionId: 'sess-1',
         worktree: main,

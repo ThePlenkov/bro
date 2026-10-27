@@ -229,17 +229,17 @@ export function fakeAcpAgent(
       return { sessionId: `sess-fork-${seen.forks.length}` };
     })
     .onRequest('session/load', ctx => {
+      seen.loads.push(ctx.params.sessionId);
       if (opts.failLoad === true) {
         throw new Error(`session ${ctx.params.sessionId} not found`);
       }
-      seen.loads.push(ctx.params.sessionId);
       return { configOptions: opts.configOptions ?? [] };
     })
     .onRequest('session/resume', ctx => {
+      seen.resumes.push(ctx.params.sessionId);
       if (opts.failLoad === true) {
         throw new Error(`session ${ctx.params.sessionId} not found`);
       }
-      seen.resumes.push(ctx.params.sessionId);
       return { configOptions: opts.configOptions ?? [] };
     })
     .onNotification('session/cancel', ctx => {
