@@ -901,12 +901,14 @@ describe('hooks e2e — session-start + the run.sh launcher', () => {
           env: e2eEnv({
             PATH: `${bin}:${process.env.PATH}`,
             PLUGIN_ROOT: pluginRoot,
-            BRO_HOOK_WATCHDOG_S: '1',
+            BRO_HOOK_WATCHDOG_S: '2',
             STUB_PID_FILE: pidFile,
             XDG_STATE_HOME: join(f.root, 'xdg-state'),
           }),
           encoding: 'utf8',
-          // watchdog TERM at 1s + 1s TERM→KILL grace + kill-leg tail ≈ 2.2s
+          // TERM at 2s + 1s grace + sweep ≈ 3.2s; '2' because whole-second
+          // T0 math can expire '1' before run_bounded starts (boundary
+          // crossing → _remaining=0 → bro never runs → no pidFile)
           timeout: 5_000,
         });
         assert.equal(proc.error, undefined, `${shell} exceeded the watchdog bound`);
@@ -1087,7 +1089,10 @@ exec /bin/cat "$@"
         env: e2eEnv({
           PATH: `${bin}:${process.env.PATH}`,
           PLUGIN_ROOT: pluginRoot,
-          BRO_HOOK_WATCHDOG_S: '1',
+          // '2' not '1': whole-second T0 math can expire a 1s window
+          // before run_bounded starts (boundary crossing → _remaining=0
+          // → bro never runs → no straggler.pid)
+          BRO_HOOK_WATCHDOG_S: '2',
           XDG_STATE_HOME: join(f.root, 'xdg-state'),
         }),
         encoding: 'utf8',

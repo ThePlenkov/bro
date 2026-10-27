@@ -67,15 +67,17 @@ watchdog subshell:
 - `wait` reaps the moment the child exits; a marker file written by the
   dog is the expiry verdict (wait-status heuristics can't distinguish
   "killed by our dog" from a self-signalled hook — the marker can).
-- At the deadline the dog records the child's direct kids (`pgrep -P`)
-  **before** signalling: once the parent dies they reparent to init and
-  `pkill -P` sees nothing. Then TERM to kids+parent (`_kill_tree`), a
-  one-second grace, KILL to the pinned kids, then a final `_kill_tree
-  KILL` sweep — a TERM-ignoring straggler cannot hold the host's stdout
-  pipe past the deadline.
-- When `wait` returns on the expired path the launcher gives the dog's
-  KILL leg a bounded 2s to finish before reaping it — cancelling the
-  dog mid-escalation was the pipe-retention hole.
+- At the deadline the dog records the child's direct kids (`pgrep -P`
+  into a sidecar file) **before** signalling: once the parent dies they
+  reparent to init and `pkill -P` sees nothing. Then TERM to kids+parent
+  (`_kill_tree`) — and nothing else: the dog exits there.
+- The **parent** owns the KILL leg: on the expired path (marker set)
+  it holds the 1s post-TERM grace, KILLs each recorded kid, then sweeps
+  `_kill_tree KILL`. The leg cannot be interrupted by the launcher's own
+  dog-cancellation (`kill $_wd`) because it does not live inside the dog
+  — a TERM-ignoring straggler cannot hold the host's stdout pipe past
+  the deadline. The marker is checked after `wait $_wd`, so an expiry
+  that lands mid-race still gets its leg.
 - POSIX hands async commands `/dev/null` on stdin before explicit
   redirects apply — `run_bounded` pins the real stdin on fd 3 in the
   foreground and the child reads `<&3`. fd 0 may also be _closed_ at
@@ -101,9 +103,9 @@ no-opinion the Node deadline sends.
   synchronous cursor `ask` before `flushPerf`, deadline perf row,
   drain-barrier `process.exit(0)`; `emit` via `writeSync`
 - [x] `hooks/run.sh` — `run_bounded` shares `BRO_HOOK_T0` budget across
-  candidates; detached watchdog TERM→pinned-kids-KILL→KILL; bounded
-  KILL-leg wait; closed-fd0-safe fd-3 pin; `cursor_permission_ask` on
-  expired/no-binary `permission`
+  candidates; detached watchdog marks+pins+TERMs; parent-owned
+  KILL leg (grace → recorded kids → tree sweep); closed-fd0-safe fd-3
+  pin; `cursor_permission_ask` on expired/no-binary `permission`
 - [x] `npm run gen:plugins` — fan out run.sh to the plugin copies
 - [x] tests — unit: deadline env parsing incl. over-ceiling; e2e:
   watchdog kills a wedged run inside one budget, straggler KILLed,

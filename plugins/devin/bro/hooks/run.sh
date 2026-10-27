@@ -111,44 +111,43 @@ run_bounded() {
   { command exec 3<&0 || command exec 3</dev/null; } 2>/dev/null
   run_hook "$@" <&3 &
   _pid=$!
-  # kids are pinned at TERM time: once the parent dies they reparent to
-  # init and `pkill -P` sees nothing — the KILL leg still owes the
-  # recorded ones their signal
+  _kidsfile=$_marker.kids
+  # detached dog: after the leftover window it marks expiry, pins the
+  # direct kids (once the parent dies they reparent to init and
+  # `pkill -P` sees nothing — the parent below owes the recorded ones
+  # their signal), and TERMs the tree. Only TERM lives here: the KILL
+  # leg runs in the parent, where cancelling this subshell mid-leg
+  # can't leave a straggler holding the host's pipe
   (
     sleep "$_remaining"
     printf 1 > "$_marker" 2>/dev/null
-    _kids=
-    command -v pgrep >/dev/null 2>&1 && _kids=$(pgrep -P "$_pid" 2>/dev/null)
+    command -v pgrep >/dev/null 2>&1 && pgrep -P "$_pid" > "$_kidsfile" 2>/dev/null
     _kill_tree "$_pid" TERM
-    sleep 1
-    for _k in $_kids; do kill -s KILL "$_k" 2>/dev/null; done
-    _kill_tree "$_pid" KILL
   ) </dev/null >/dev/null 2>&1 &
   _wd=$!
   wait "$_pid" 2>/dev/null
   _rc=$?
-  if [ -s "$_marker" ]; then
-    # the dog's TERM already landed — give its KILL leg the ~1s it
-    # needs so a TERM-ignoring straggler can't hold the host's pipe
-    # past the deadline. Fractional polls keep the tail near 0.2s;
-    # a sleep that can't do fractions breaks to the wait below, which
-    # blocks out the leg anyway — marker ⇒ the dog is ≤ ~1s from done
-    _w=15
-    while kill -0 "$_wd" 2>/dev/null && [ "$_w" -gt 0 ]; do
-      _w=$((_w - 1))
-      sleep 0.2 2>/dev/null || break
-    done
-  fi
   kill "$_wd" 2>/dev/null
   wait "$_wd" 2>/dev/null || true
   if [ -s "$_marker" ]; then
     RUN_BOUNDED_EXPIRED=1
+    # the dog's TERM landed before it exited — give the tree its 1s
+    # grace, then KILL the recorded kids and sweep. Checked after
+    # wait $_wd too: a marker that lands between the wait and the dog's
+    # exit still gets its leg
+    sleep 1
+    if [ -s "$_kidsfile" ]; then
+      while IFS= read -r _k; do
+        [ -n "$_k" ] && kill -s KILL "$_k" 2>/dev/null
+      done < "$_kidsfile"
+    fi
+    _kill_tree "$_pid" KILL
   else
     _now=$(date +%s)
     _elapsed=$((_now - BRO_HOOK_T0))
     [ "$_elapsed" -ge "$BRO_HOOK_WATCHDOG_S" ] && RUN_BOUNDED_EXPIRED=1
   fi
-  rm -f "$_marker" 2>/dev/null
+  rm -f "$_marker" "$_kidsfile" 2>/dev/null
   return "$_rc"
 }
 
