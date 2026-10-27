@@ -7,6 +7,7 @@ import {
   patchAgentRegistry,
   procStat,
   readAgentRegistry,
+  SESSION_SLOT_TTL_MS,
   type AgentInfo,
   type TaskRow,
   type TaskStore,
@@ -868,7 +869,36 @@ describe('registryEntryState', () => {
     try {
       writeFileSync(join(home, 'a1.exit'), '0')
       assert.equal(registryEntryState(home, entry({ agentId: 'a1' })), 'exited')
-      assert.equal(registryEntryState(home, entry({ agentId: 'a2' })), 'spawned')
+      // a2 — a pid-less native row with no runId — could never be
+      // mid-handshake: 'lost' the way nativeState reads it
+      assert.equal(registryEntryState(home, entry({ agentId: 'a2' })), 'lost')
+    } finally {
+      rmSync(home, { recursive: true, force: true })
+    }
+  })
+
+  test("a native runId'd row's pid-less window is the handshake TTL — then 'lost' (codeant)", () => {
+    const fresh = new Date().toISOString()
+    const stale = new Date(Date.now() - 2 * SESSION_SLOT_TTL_MS).toISOString()
+    assert.equal(
+      registryEntryState(null, entry({ runId: 'r1', spawnedAt: fresh })),
+      'spawned'
+    )
+    // a reservation that never published a handle expires with the
+    // window — registry-only readers must not hold it 'spawned' forever
+    assert.equal(registryEntryState(null, entry({ runId: 'r1', spawnedAt: stale })), 'lost')
+    // a pre-runId pid-less row was never mid-handshake — lost outright
+    assert.equal(registryEntryState(null, entry({ spawnedAt: fresh })), 'lost')
+  })
+
+  test('a live attempt handle proves the worker without a pid patch (bro-l8c4f.5)', () => {
+    const home = mkdtempSync(join(tmpdir(), 'bro-reg-handle-'))
+    try {
+      writeFileSync(join(home, 'a1.r1.handle'), String(process.pid))
+      // stale spawnedAt on purpose: a live handle wins past the window,
+      // the way adoptNativeHandle reads it
+      const e = entry({ agentId: 'a1', runId: 'r1', spawnedAt: '2000-01-01T00:00:00Z' })
+      assert.equal(registryEntryState(home, e), 'running')
     } finally {
       rmSync(home, { recursive: true, force: true })
     }
@@ -922,10 +952,11 @@ describe('freshOccupancy', () => {
     const { root, main } = initRepo('bro-fresh-occ-')
     inside(main, root, () => {
       mkdirSync(join(main, '.git', 'bro'), { recursive: true })
+      const t2 = new Date().toISOString()
       writeFileSync(
         join(main, '.git', 'bro', 'agents.json'),
         JSON.stringify({
-          'fx-1': { agentId: 'native-a', backend: 'native', spawnedAt: 't2' },
+          'fx-1': { agentId: 'native-a', backend: 'native', spawnedAt: t2, runId: 'r1' },
         })
       )
       // the pass probed generation t1 as lost — a respawn landed since;
@@ -936,7 +967,7 @@ describe('freshOccupancy', () => {
       assert.equal(stale.agents.find((a) => a.molStep === 'fx-1')!.state, 'spawned')
       // same generation does inherit — a lost fixer stays respawn-able
       const same = freshOccupancy(main, [
-        agent({ molStep: 'fx-1', id: 'native-a', state: 'lost', spawnedAt: 't2' }),
+        agent({ molStep: 'fx-1', id: 'native-a', state: 'lost', spawnedAt: t2 }),
       ])
       assert.equal(same.agents.find((a) => a.molStep === 'fx-1')!.state, 'lost')
     })

@@ -20,10 +20,13 @@ import {
 import { basename, dirname, join, resolve, sep } from 'node:path'
 import {
   agentEntryBlocked,
+  agentExitFileName,
+  entryRunId,
   gitTry,
   markerLive,
   pidAlive,
   procStat,
+  SESSION_SLOT_TTL_MS,
   type AgentRegistryEntry,
   type AgentState,
 } from '@broject/core'
@@ -398,12 +401,54 @@ function exitFileProves(home: string | null, e: AgentRegistryEntry): boolean {
     return false
   }
   try {
-    const v = readFileSync(join(home, `${e.agentId}.exit`), 'utf8').trim()
+    const v = readFileSync(
+      join(home, agentExitFileName(e.agentId, entryRunId(e))),
+      'utf8'
+    ).trim()
     return v !== '' && Number.isInteger(Number(v))
   } catch {
     // no exit file — not proof
     return false
   }
+}
+
+/** The attempt handle is the worker's own liveness proof — a runId'd
+ *  native worker publishes `<agentId>.<runId>.handle` before its payload
+ *  runs, so a live pid in it means a running worker even when the
+ *  launcher's pid patch never landed (spec bro-l8c4f.5). Same
+ *  basename-only guard as the exit file. */
+function handleFileProves(home: string | null, e: AgentRegistryEntry): boolean {
+  const runId = entryRunId(e)
+  if (
+    home === null ||
+    runId === undefined ||
+    typeof e.agentId !== 'string' ||
+    basename(e.agentId) !== e.agentId
+  ) {
+    return false
+  }
+  try {
+    const pid = Number(
+      readFileSync(join(home, `${e.agentId}.${runId}.handle`), 'utf8').trim()
+    )
+    return pidAlive(pid, procStat(pid)?.start)
+  } catch {
+    // no usable handle — not proof
+    return false
+  }
+}
+
+/** A pid-less native row read by the handshake (spec bro-l8c4f.5): a
+ *  live self-published handle IS the worker even with no pid patch;
+ *  inside the handoff window the attempt can still land it ('spawned'),
+ *  past it the attempt is dead ('lost'). */
+function nativePidlessState(home: string | null, e: AgentRegistryEntry): AgentState {
+  if (handleFileProves(home, e)) {
+    return 'running'
+  }
+  return entryRunId(e) !== undefined && Date.now() - Date.parse(e.spawnedAt) < SESSION_SLOT_TTL_MS
+    ? 'spawned'
+    : 'lost'
 }
 
 /** Agent liveness derived from the registry entry alone — no backend
@@ -434,7 +479,14 @@ export function registryEntryState(
     return 'exited'
   }
   // a dead pid is proven — 'lost' keeps the fixer respawn-able; a
-  // pid-less entry (remote backend) is unproven → conservative live
+  // pid-less entry (remote backend) is unproven → conservative live.
+  // Native is the exception: the handshake bounds a runId'd row's
+  // pid-less window — the worker self-publishes its handle inside
+  // SESSION_SLOT_TTL_MS or the attempt is dead, and a live handle IS
+  // the worker even with no pid patch (spec bro-l8c4f.5)
+  if (pid === undefined && e.backend === 'native') {
+    return nativePidlessState(home, e)
+  }
   return pid !== undefined ? 'lost' : 'spawned'
 }
 
