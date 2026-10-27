@@ -102,8 +102,9 @@ interface BinProbe {
 /** `--version` probe — the same PATH-is-the-contract lookup every bro
  *  shell-out uses. */
 function probeBin(name: string): BinProbe {
-  const p = spawnSync(name, ['--version'], {
-    // NOSONAR — PATH lookup is the contract (same as gh/bd/git)
+  // PATH lookup is the contract (same as gh/bd/git) — biome keeps the
+  // marker on the issue line only in the /* */-leading-statement form
+  /* NOSONAR */ const p = spawnSync(name, ['--version'], {
     stdio: ['ignore', 'pipe', 'pipe'],
     encoding: 'utf8',
     timeout: 10_000,
@@ -167,8 +168,7 @@ function checkGh(): DoctorCheck {
   if (!gh.found) {
     return check('gh', 'fail', binProblem(gh), 'install the GitHub CLI — https://cli.github.com');
   }
-  const auth = spawnSync('gh', ['auth', 'status'], {
-    // NOSONAR — PATH lookup is the contract
+  /* NOSONAR — PATH lookup is the contract */ const auth = spawnSync('gh', ['auth', 'status'], {
     stdio: ['ignore', 'pipe', 'pipe'],
     encoding: 'utf8',
     timeout: 15_000,
@@ -205,8 +205,7 @@ function checkHooks(dir: string): DoctorCheck {
   }
   if (probeBin('bro').found) {
     // `bro hooks` with no event is a silent no-op — same probe run.sh runs
-    const probe = spawnSync('bro', ['hooks'], {
-      // NOSONAR — PATH lookup is the contract
+    /* NOSONAR — PATH lookup is the contract */ const probe = spawnSync('bro', ['hooks'], {
       stdio: ['ignore', 'pipe', 'pipe'],
       timeout: 10_000,
     });
