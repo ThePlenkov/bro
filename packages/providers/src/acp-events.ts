@@ -22,87 +22,88 @@
  * queue and drain() is capped, file writes are swallowed whole — an
  * observer that throws is a dead observer, not a dead agent.
  */
-import { appendFileSync, chmodSync, mkdirSync } from 'node:fs'
-import { dirname, join } from 'node:path'
+import { dirname, join } from 'node:path';
 import {
+  appendPrivateFileSync,
   busPublish,
   busSocketPath,
   gitCommonDir,
+  mkdirPrivateSync,
   type EventInput,
-} from '@broject/core'
-import type { SessionUpdate } from '@agentclientprotocol/sdk'
+} from '@broject/core';
+import type { SessionUpdate } from '@agentclientprotocol/sdk';
 
 /** agentIds minted by agent-connectors are filename-safe — a badge
  *  that is not must never become a path segment under bro/agents/.
  *  Same shape the registry itself guards with. */
-const SAFE_AGENT_ID = /^[A-Za-z0-9][A-Za-z0-9._-]*$/
+const SAFE_AGENT_ID = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
 
 /** usage_update ticks per-chunk on some agents — the bus is not a
  *  per-chunk wire, so intermediate counters coalesce at this interval.
  *  The final counters still land at turn stop (stop() flushes the
  *  pending one), so nothing is lost — just decimated in flight. */
-export const AGENT_USAGE_THROTTLE_MS = 2_000
+export const AGENT_USAGE_THROTTLE_MS = 2_000;
 
 /** Upper bound on drain() — publishes self-bound at the bus timeout
  *  each, but a wedged half-open socket could still serialize N events
  *  into N×timeout; the drain cap keeps a worker's exit prompt. */
-const DRAIN_CAP_MS = 3_000
+const DRAIN_CAP_MS = 3_000;
 
 export interface AgentTurnPlaneOpts {
   /** The session's cwd — resolves the repo's bus socket and the agent
    *  archive under its common dir. Defaults to process.cwd(). */
-  cwd?: string
+  cwd?: string;
   /** Provenance label → the envelope's `source` (conductor:<backend>,
    *  "acp provider 'kilo'", …). */
-  by: string
+  by: string;
   /** The ACP session id — part of the payload, and the fallback event
    *  `key` when no BRO_AGENT_ID badge is pinned. */
-  sessionId: string
+  sessionId: string;
   /** Archive scope — 'agents' (default) keys on the BRO_AGENT_ID badge
    *  and writes `<common>/bro/agents/`; 'proxy' keys on the session id
    *  and writes `<common>/bro/proxy/` even unbadged — a human-run
    *  `bro acp proxy` carries no agent badge (specs/bro-bhyo1.md). */
-  plane?: 'agents' | 'proxy'
+  plane?: 'agents' | 'proxy';
 }
 
 /** The per-turn observer pumpTurn drives: update() per session/update,
  *  start()/stop() bookends, drain() to settle queued publishes. */
 export interface AgentTurnPlane {
-  update(u: SessionUpdate): void
-  start(): void
-  stop(stopReason: string | undefined, opts?: { error?: string; replyLen?: number }): void
-  drain(): Promise<void>
+  update(u: SessionUpdate): void;
+  start(): void;
+  stop(stopReason: string | undefined, opts?: { error?: string; replyLen?: number }): void;
+  drain(): Promise<void>;
 }
 
-const TERMINAL_STATUS = new Set(['completed', 'failed'])
+const TERMINAL_STATUS = new Set(['completed', 'failed']);
 
 export type Toolish = {
-  toolCallId: string
-  title?: string | null
-  name?: string | null
-  kind?: string | null
-  status?: string | null
-  content?: Array<{ type: string; terminalId?: string }> | null
-}
+  toolCallId: string;
+  title?: string | null;
+  name?: string | null;
+  kind?: string | null;
+  status?: string | null;
+  content?: Array<{ type: string; terminalId?: string }> | null;
+};
 
 /** The tool fields consumers need — kind/title/status/terminalId per
  *  the bead, plus the ids and name so a pane can dedupe or label.
  *  Shared by the 'agent' bus topic and the conductor's tool_activity
  *  SSE event (bro-btccj) so both surfaces carry ONE payload shape. */
 export function toolPayload(u: Toolish, phase: 'open' | 'finish'): Record<string, unknown> {
-  const p: Record<string, unknown> = { phase, toolCallId: u.toolCallId }
-  if (typeof u.title === 'string' && u.title !== '') p['title'] = u.title
-  if (typeof u.name === 'string' && u.name !== '') p['name'] = u.name
-  if (typeof u.kind === 'string' && u.kind !== '') p['kind'] = u.kind
-  if (typeof u.status === 'string' && u.status !== '') p['status'] = u.status
+  const p: Record<string, unknown> = { phase, toolCallId: u.toolCallId };
+  if (typeof u.title === 'string' && u.title !== '') p['title'] = u.title;
+  if (typeof u.name === 'string' && u.name !== '') p['name'] = u.name;
+  if (typeof u.kind === 'string' && u.kind !== '') p['kind'] = u.kind;
+  if (typeof u.status === 'string' && u.status !== '') p['status'] = u.status;
   // terminalId rides in tool content ({type:'terminal'}) on the ACP
   // wire — surface the first one so consumers can point at the
   // terminal registry (bro-eua0d) without knowing the content shape
   const terminal = (u.content ?? []).find(
-    (c) => c.type === 'terminal' && typeof c.terminalId === 'string'
-  )
-  if (terminal !== undefined) p['terminalId'] = terminal.terminalId
-  return p
+    c => c.type === 'terminal' && typeof c.terminalId === 'string'
+  );
+  if (terminal !== undefined) p['terminalId'] = terminal.terminalId;
+  return p;
 }
 
 /** The turn-plane archive path — 'proxy' keys on the session id under
@@ -118,7 +119,7 @@ const archiveFile = (
   sessionId: string
 ): string | undefined => {
   if (common === null) {
-    return undefined
+    return undefined;
   }
   if (scope === 'proxy') {
     return join(
@@ -126,39 +127,39 @@ const archiveFile = (
       'bro',
       'proxy',
       `acp-${sessionId.replace(/[^\w.-]/g, '_')}-p${process.pid}.events.jsonl`
-    )
+    );
   }
   return agentId === undefined
     ? undefined
-    : join(common, 'bro', 'agents', `${agentId}.events.jsonl`)
-}
+    : join(common, 'bro', 'agents', `${agentId}.events.jsonl`);
+};
 
 /** The plane for one turn — resolved sinks are computed once so the
  *  per-update cost is a Map lookup plus a queued socket write. */
 export function agentTurnPlane(opts: AgentTurnPlaneOpts): AgentTurnPlane {
-  const cwd = opts.cwd ?? process.cwd()
-  const badge = process.env.BRO_AGENT_ID?.trim()
+  const cwd = opts.cwd ?? process.cwd();
+  const badge = process.env.BRO_AGENT_ID?.trim();
   const agentId =
-    badge !== undefined && badge !== '' && SAFE_AGENT_ID.test(badge) ? badge : undefined
-  const cause = process.env.BRO_BEAD_ID?.trim() || undefined
+    badge !== undefined && badge !== '' && SAFE_AGENT_ID.test(badge) ? badge : undefined;
+  const cause = process.env.BRO_BEAD_ID?.trim() || undefined;
   // unbadged turns key by session so consumers can still pin one —
   // the 'acp:' prefix keeps the namespace from colliding with real ids
-  const key = agentId ?? `acp:${opts.sessionId}`
-  const socket = busSocketPath(cwd)
-  const scope = opts.plane ?? 'agents'
-  const common = agentId !== undefined || scope === 'proxy' ? gitCommonDir(cwd) : null
-  const file = archiveFile(scope, common, agentId, opts.sessionId)
+  const key = agentId ?? `acp:${opts.sessionId}`;
+  const socket = busSocketPath(cwd);
+  const scope = opts.plane ?? 'agents';
+  const common = agentId !== undefined || scope === 'proxy' ? gitCommonDir(cwd) : null;
+  const file = archiveFile(scope, common, agentId, opts.sessionId);
 
-  let queue: Promise<unknown> = Promise.resolve()
-  const seenTools = new Set<string>()
-  const doneTools = new Set<string>()
-  const seenSubs = new Set<string>()
-  let lastUsageAt = 0
-  let pendingUsage: Record<string, unknown> | undefined
+  let queue: Promise<unknown> = Promise.resolve();
+  const seenTools = new Set<string>();
+  const doneTools = new Set<string>();
+  const seenSubs = new Set<string>();
+  let lastUsageAt = 0;
+  let pendingUsage: Record<string, unknown> | undefined;
 
   const emit = (kind: string, payload: Record<string, unknown>): void => {
     if (socket === null) {
-      return
+      return;
     }
     const event: EventInput = {
       topic: 'agent',
@@ -167,158 +168,155 @@ export function agentTurnPlane(opts: AgentTurnPlaneOpts): AgentTurnPlane {
       source: opts.by,
       ...(cause !== undefined ? { cause } : {}),
       payload,
-    }
+    };
     // serialized — publish order IS arrival order on the ring, so an
     // 'open' must never overtake its own turn's 'start'
-    queue = queue.then(() => busPublish(socket, event))
-  }
+    queue = queue.then(() => busPublish(socket, event));
+  };
 
-  let dirReady = false
+  let dirReady = false;
   const record = (row: Record<string, unknown>): void => {
     if (file === undefined) {
-      return
+      return;
     }
     try {
-      // mkdir + chmod once — the dir is stable for the plane's life, so
-      // per-row syscalls are dead weight. The archive carries raw ACP
-      // prompts and replies: pinned owner-only (0600) like the bus
-      // socket and state files — a 022 umask would leave it 0644,
-      // readable by every local user without the token-gated route
+      // mkdir once — the dir is stable for the plane's life. The
+      // archive carries raw ACP prompts and replies: pinned owner-only
+      // (spec bro-l8c4f.4) like the bus socket and state files — a 022
+      // umask would leave it 0644, readable by every local user without
+      // the token-gated route. Repair rides EVERY row, not just the
+      // first — in a dir another user can write, a swapped-in
+      // permissive file between rows must never collect the next row
       if (!dirReady) {
-        mkdirSync(dirname(file), { recursive: true })
+        mkdirPrivateSync(dirname(file));
+        dirReady = true;
       }
-      appendFileSync(file, `${JSON.stringify(row)}\n`, { mode: 0o600 })
-      if (!dirReady) {
-        // appendFileSync mode only pins a NEW file — a pre-existing
-        // archive keeps its old mode without this one-time chmod
-        chmodSync(file, 0o600)
-        dirReady = true
-      }
+      appendPrivateFileSync(file, `${JSON.stringify(row)}\n`);
     } catch {
       /* the archive is telemetry — a disk failure never fails a turn */
     }
-  }
+  };
 
   const stamp = (): Record<string, unknown> => ({
     ts: new Date().toISOString(),
     session: opts.sessionId,
     by: opts.by,
     key,
-  })
+  });
 
   const emitUsage = (): void => {
     if (pendingUsage !== undefined) {
-      const p = pendingUsage
-      pendingUsage = undefined
-      emit('usage', p)
-      lastUsageAt = Date.now()
+      const p = pendingUsage;
+      pendingUsage = undefined;
+      emit('usage', p);
+      lastUsageAt = Date.now();
     }
-  }
+  };
 
   /** A pending counter must not pin stale numbers through a long quiet
    *  stretch — it rides the next non-usage update once the throttle
    *  window has elapsed (the stop() flush stays the last resort). */
   const flushUsageIfDue = (): void => {
     if (pendingUsage !== undefined && Date.now() - lastUsageAt >= AGENT_USAGE_THROTTLE_MS) {
-      emitUsage()
+      emitUsage();
     }
-  }
+  };
 
   const onToolCall = (u: Toolish): void => {
-    const terminal = u.status !== undefined && u.status !== null && TERMINAL_STATUS.has(u.status)
+    const terminal = u.status !== undefined && u.status !== null && TERMINAL_STATUS.has(u.status);
     // a duped terminal edge re-announces a landing, never a new edge —
     // the conductor's LiveTurn dedupes identically (one finish per call)
-    if (terminal && doneTools.has(u.toolCallId)) return
-    const fresh = !seenTools.has(u.toolCallId)
-    if (fresh) seenTools.add(u.toolCallId)
+    if (terminal && doneTools.has(u.toolCallId)) return;
+    const fresh = !seenTools.has(u.toolCallId);
+    if (fresh) seenTools.add(u.toolCallId);
     // a mid-flight repeat of an already-open call is churn — only
     // lifecycle edges (open, finish) go on the wire
-    if (!fresh && !terminal) return
+    if (!fresh && !terminal) return;
     if (fresh && terminal) {
       // a call first seen already-terminal still needs its open edge —
       // consumers pair open→finish and a bare finish orphans the row
-      const openEdge = toolPayload(u, 'open')
-      delete openEdge['status']
-      emit('tool_call', openEdge)
+      const openEdge = toolPayload(u, 'open');
+      delete openEdge['status'];
+      emit('tool_call', openEdge);
     }
-    if (terminal) doneTools.add(u.toolCallId)
-    emit('tool_call', toolPayload(u, terminal ? 'finish' : 'open'))
-  }
+    if (terminal) doneTools.add(u.toolCallId);
+    emit('tool_call', toolPayload(u, terminal ? 'finish' : 'open'));
+  };
 
   const onToolCallUpdate = (u: Toolish): void => {
-    const terminal = u.status != null && TERMINAL_STATUS.has(u.status)
-    if (!terminal || doneTools.has(u.toolCallId)) return
-    seenTools.add(u.toolCallId)
-    doneTools.add(u.toolCallId)
-    emit('tool_call', toolPayload(u, 'finish'))
-  }
+    const terminal = u.status != null && TERMINAL_STATUS.has(u.status);
+    if (!terminal || doneTools.has(u.toolCallId)) return;
+    seenTools.add(u.toolCallId);
+    doneTools.add(u.toolCallId);
+    emit('tool_call', toolPayload(u, 'finish'));
+  };
 
   const onSubagent = (u: {
-    sessionId: string
-    title?: string | null
-    description?: string | null
+    sessionId: string;
+    title?: string | null;
+    description?: string | null;
   }): void => {
-    const fresh = !seenSubs.has(u.sessionId)
-    if (fresh) seenSubs.add(u.sessionId)
+    const fresh = !seenSubs.has(u.sessionId);
+    if (fresh) seenSubs.add(u.sessionId);
     const p: Record<string, unknown> = {
       phase: fresh ? 'open' : 'update',
       sessionId: u.sessionId,
-    }
-    if (typeof u.title === 'string' && u.title !== '') p['title'] = u.title
+    };
+    if (typeof u.title === 'string' && u.title !== '') p['title'] = u.title;
     if (typeof u.description === 'string' && u.description !== '') {
-      p['description'] = u.description
+      p['description'] = u.description;
     }
-    emit('subagent', p)
-  }
+    emit('subagent', p);
+  };
 
   const onUsage = (u: {
-    used?: unknown
-    size?: unknown
-    cost?: { amount?: unknown } | null
+    used?: unknown;
+    size?: unknown;
+    cost?: { amount?: unknown } | null;
   }): void => {
-    const p: Record<string, unknown> = { used: u.used, size: u.size }
+    const p: Record<string, unknown> = { used: u.used, size: u.size };
     if (u.cost != null && typeof u.cost.amount === 'number') {
-      p['cost'] = u.cost
+      p['cost'] = u.cost;
     }
     if (Date.now() - lastUsageAt >= AGENT_USAGE_THROTTLE_MS) {
       // a window-passed tick emits directly — any older pending one is
       // stale by definition (this counter is newer)
-      pendingUsage = undefined
-      emit('usage', p)
-      lastUsageAt = Date.now()
+      pendingUsage = undefined;
+      emit('usage', p);
+      lastUsageAt = Date.now();
     } else {
-      pendingUsage = p
+      pendingUsage = p;
     }
-  }
+  };
 
   return {
     start() {
-      record({ ...stamp(), kind: 'turn', phase: 'start' })
-      emit('turn', { phase: 'start', sessionId: opts.sessionId })
+      record({ ...stamp(), kind: 'turn', phase: 'start' });
+      emit('turn', { phase: 'start', sessionId: opts.sessionId });
     },
 
     update(u) {
       // the durable row is the full-fidelity record — every update,
       // chunks included, written BEFORE the bus sees the filtered view
-      record({ ...stamp(), kind: 'update', update: u })
-      if (u.sessionUpdate !== 'usage_update') flushUsageIfDue()
+      record({ ...stamp(), kind: 'update', update: u });
+      if (u.sessionUpdate !== 'usage_update') flushUsageIfDue();
       switch (u.sessionUpdate) {
         case 'tool_call':
-          onToolCall(u)
-          return
+          onToolCall(u);
+          return;
         case 'tool_call_update':
-          onToolCallUpdate(u)
-          return
+          onToolCallUpdate(u);
+          return;
         case 'subagent_update':
-          onSubagent(u)
-          return
+          onSubagent(u);
+          return;
         case 'usage_update':
-          onUsage(u)
-          return
+          onUsage(u);
+          return;
         default:
           // text deltas and the rest stay off the bus — the archive
           // row above already holds them for the durable record
-          return
+          return;
       }
     },
 
@@ -329,25 +327,25 @@ export function agentTurnPlane(opts: AgentTurnPlaneOpts): AgentTurnPlane {
         phase: 'stop',
         ...(stopReason !== undefined ? { stopReason } : {}),
         ...(o.error !== undefined ? { error: o.error } : {}),
-      })
+      });
       // usage precedes stop on the wire — chronology, and consumers
       // reading 'turn stop' can trust the final counters already landed
-      emitUsage()
-      const p: Record<string, unknown> = { phase: 'stop', sessionId: opts.sessionId }
-      if (stopReason !== undefined) p['stopReason'] = stopReason
-      if (o.error !== undefined) p['error'] = o.error
-      if (o.replyLen !== undefined) p['replyLen'] = o.replyLen
-      emit('turn', p)
+      emitUsage();
+      const p: Record<string, unknown> = { phase: 'stop', sessionId: opts.sessionId };
+      if (stopReason !== undefined) p['stopReason'] = stopReason;
+      if (o.error !== undefined) p['error'] = o.error;
+      if (o.replyLen !== undefined) p['replyLen'] = o.replyLen;
+      emit('turn', p);
     },
 
     async drain() {
       await Promise.race([
         queue.then(() => undefined),
-        new Promise<void>((resolve) => {
-          const t = setTimeout(resolve, DRAIN_CAP_MS)
-          t.unref?.()
+        new Promise<void>(resolve => {
+          const t = setTimeout(resolve, DRAIN_CAP_MS);
+          t.unref?.();
         }),
-      ])
+      ]);
     },
-  }
+  };
 }

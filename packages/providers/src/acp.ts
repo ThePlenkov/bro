@@ -19,9 +19,9 @@
  * text the judge prompt-and-parses and flags `:prose` in decidedBy,
  * so an uncalibrated answer never shares the provider's typed bucket.
  */
-import { spawn, type ChildProcess } from 'node:child_process'
-import { Readable, Writable } from 'node:stream'
-import { client, ndJsonStream, PROTOCOL_VERSION, RequestError } from '@agentclientprotocol/sdk'
+import { spawn, type ChildProcess } from 'node:child_process';
+import { Readable, Writable } from 'node:stream';
+import { client, ndJsonStream, PROTOCOL_VERSION, RequestError } from '@agentclientprotocol/sdk';
 import type {
   ActiveSession,
   ClientCapabilities,
@@ -39,54 +39,45 @@ import type {
   SessionUpdate,
   StopReason,
   ActiveSessionMessage,
-} from '@agentclientprotocol/sdk'
-import { isSystemoneFamily, JudgeUnavailable, modelBase } from '@broject/core'
-import { agentTurnPlane } from './acp-events.ts'
-import { otelSpan } from './otel.ts'
-import type { OtelCtx } from './otel.ts'
-import type {
-  DecideResult,
-  JudgeQuestion,
-  ProviderEntry,
-} from '@broject/core'
-import { AcpTerminals } from './acp-terminal.ts'
-import { objOr, remaining, splitShellWords } from './http.ts'
-import type {
-  ProviderCall,
-  ProviderChat,
-  ProviderChatResult,
-  ProviderClient,
-} from './registry.ts'
-import type { ProviderWireOpts } from './systemone.ts'
-import { mapTypedAnswers } from './typed.ts'
+} from '@agentclientprotocol/sdk';
+import { isSystemoneFamily, JudgeUnavailable, modelBase } from '@broject/core';
+import { agentTurnPlane } from './acp-events.ts';
+import { otelSpan } from './otel.ts';
+import type { OtelCtx } from './otel.ts';
+import type { DecideResult, JudgeQuestion, ProviderEntry } from '@broject/core';
+import { AcpTerminals } from './acp-terminal.ts';
+import { objOr, remaining, splitShellWords } from './http.ts';
+import type { ProviderCall, ProviderChat, ProviderChatResult, ProviderClient } from './registry.ts';
+import type { ProviderWireOpts } from './systemone.ts';
+import { mapTypedAnswers } from './typed.ts';
 
-type AcpEntry = Extract<ProviderEntry, { type: 'acp' }>
+type AcpEntry = Extract<ProviderEntry, { type: 'acp' }>;
 
 /** The caller's config bug (interactive auth required, no model
  *  option advertised, a refused model, a non-v1 peer) — thrown as-is,
  *  never wrapped into JudgeUnavailable: a misconfigured provider is a
  *  startup error, not a backend outage. */
 class AcpConfigError extends Error {
-  override name = 'AcpConfigError'
+  override name = 'AcpConfigError';
 }
 
 // the family test lives in core (the api kind's parse-time wire
 // inference consumes it) — re-exported so acp importers keep working
-export { isSystemoneFamily } from '@broject/core'
+export { isSystemoneFamily } from '@broject/core';
 
 /** JSON-RPC request-cancelled — the code both ends use for an aborted
  *  request. A cancel is availability (deadline, transport), never the
  *  peer refusing a value. */
-const REQUEST_CANCELLED = -32800
+const REQUEST_CANCELLED = -32800;
 
 /** ACP categories that say "not the model picker" — 'model_config' is
  *  a model PARAMETER (its options are parameter values, not model
  *  ids), 'mode'/'thought_level' select session behavior. Absent or
  *  unknown categories stay ambiguous — the spec forbids requiring
  *  category for correctness, so they may still serve. */
-const NON_MODEL_CATEGORIES = new Set(['mode', 'thought_level', 'model_config'])
+const NON_MODEL_CATEGORIES = new Set(['mode', 'thought_level', 'model_config']);
 
-type SelectOpt = Extract<SessionConfigOption, { type: 'select' }>
+type SelectOpt = Extract<SessionConfigOption, { type: 'select' }>;
 
 /** The session's model select: category 'model' wins outright; a
  *  select whose category is absent or unknown still serves — a known
@@ -94,22 +85,21 @@ type SelectOpt = Extract<SessionConfigOption, { type: 'select' }>
  *  correctness). acpModels advertises and resolveModelPin resolves
  *  against the same pick — a listed id must always be pinnable. */
 function modelSelect(configOptions: SessionConfigOption[]): SelectOpt | undefined {
-  const selects = configOptions.filter((o): o is SelectOpt => o.type === 'select')
+  const selects = configOptions.filter((o): o is SelectOpt => o.type === 'select');
   return (
-    selects.find((o) => o.category === 'model') ??
-    selects.find((o) => o.category == null || !NON_MODEL_CATEGORIES.has(o.category))
-  )
+    selects.find(o => o.category === 'model') ??
+    selects.find(o => o.category == null || !NON_MODEL_CATEGORIES.has(o.category))
+  );
 }
 
 /** A `<provider>/` alias on an asked id is bro-side routing, never part
  *  of the agent's own model id — the first path segment strips before
  *  comparing against catalog leaves or a reported currentValue. */
 function providerBare(id: string): string {
-  return id.includes('/') ? id.slice(id.indexOf('/') + 1) : id
+  return id.includes('/') ? id.slice(id.indexOf('/') + 1) : id;
 }
 
-const errMsg = (err: unknown): string =>
-  err instanceof Error ? err.message : String(err)
+const errMsg = (err: unknown): string => (err instanceof Error ? err.message : String(err));
 
 /** Minimal shell-words split for an operator-authored command line —
  *  whitespace-separated argv honoring '…', "…" and \x escapes. NOT a
@@ -119,11 +109,11 @@ const errMsg = (err: unknown): string =>
  *  Exported for the suite — the split IS the trust boundary. */
 export function shellWords(command: string): string[] {
   try {
-    return splitShellWords(command)
+    return splitShellWords(command);
   } catch (err) {
     throw new AcpConfigError(
       `acp command has an ${err instanceof Error ? err.message : 'unclosed quote'}`
-    )
+    );
   }
 }
 
@@ -133,17 +123,17 @@ export function shellWords(command: string): string[] {
  *  session-start rehydrate probes written for a human session. A
  *  default, not a lock — an explicit ambient `BRO_HOOKS` wins. */
 export function acpChildEnv(): NodeJS.ProcessEnv {
-  return { BRO_HOOKS: '0', ...process.env }
+  return { BRO_HOOKS: '0', ...process.env };
 }
 
 /** The last bytes of peer stderr — the diagnostic that survives the
  *  process dying mid-turn (rate-limit walls, crash text). */
 function stderrTail(child: ChildProcess): () => string {
-  let tail = ''
+  let tail = '';
   child.stderr?.on('data', (d: Buffer) => {
-    tail = (tail + d.toString()).slice(-2048)
-  })
-  return () => tail.trim()
+    tail = (tail + d.toString()).slice(-2048);
+  });
+  return () => tail.trim();
 }
 
 /** A judge call has no user to ask — default-deny: take a reject
@@ -151,40 +141,37 @@ function stderrTail(child: ChildProcess): () => string {
 const denyPermission: ClientRequestHandler<
   RequestPermissionRequest,
   RequestPermissionResponse
-> = (ctx) => {
+> = ctx => {
   const reject = ctx.params.options.find(
-    (o) => o.kind === 'reject_once' || o.kind === 'reject_always'
-  )
+    o => o.kind === 'reject_once' || o.kind === 'reject_always'
+  );
   return {
     outcome:
       reject === undefined
         ? { outcome: 'cancelled' }
         : { outcome: 'selected', optionId: reject.optionId },
-  }
-}
+  };
+};
 
 /** The whole call under the caller's budget — a peer that outlives it
  *  is fail-open, and the process kill in the caller's finally is the
  *  backstop the cooperative cancellation may not reach. */
 async function withDeadline<T>(deadline: number, run: () => Promise<T>): Promise<T> {
-  const left = remaining(deadline)
+  const left = remaining(deadline);
   if (left <= 0) {
-    throw new JudgeUnavailable('judge backend timed out (budget spent)')
+    throw new JudgeUnavailable('judge backend timed out (budget spent)');
   }
-  let timer: ReturnType<typeof setTimeout> | undefined
+  let timer: ReturnType<typeof setTimeout> | undefined;
   try {
     return await Promise.race([
       run(),
       new Promise<never>((_resolve, reject) => {
-        timer = setTimeout(
-          () => reject(new JudgeUnavailable('acp provider timed out')),
-          left
-        )
+        timer = setTimeout(() => reject(new JudgeUnavailable('acp provider timed out')), left);
       }),
-    ])
+    ]);
   } finally {
     if (timer !== undefined) {
-      clearTimeout(timer)
+      clearTimeout(timer);
     }
   }
 }
@@ -202,30 +189,30 @@ async function applyModel(
   model: string | undefined,
   req: () => SendRequestOptions
 ): Promise<string> {
-  const modelOpt = modelSelect(configOptions)
+  const modelOpt = modelSelect(configOptions);
   if (model === undefined) {
-    const cur = modelOpt?.currentValue
-    return typeof cur === 'string' ? cur : 'unknown'
+    const cur = modelOpt?.currentValue;
+    return typeof cur === 'string' ? cur : 'unknown';
   }
   if (modelOpt === undefined) {
     throw new AcpConfigError(
       `${by}: model '${model}' requested but the acp agent advertises no model config option — refusing to run an unpinned model`
-    )
+    );
   }
-  const bare = providerBare(model)
+  const bare = providerBare(model);
   // a `model[<size>]` opt-in the session already serves verbatim is the
   // provider command's spawn-level pin — re-setting the base id would
   // silently drop it (the catalog only knows base ids). The agent's
   // own id may carry a namespace — compare both spellings.
-  const cur = modelOpt.currentValue
+  const cur = modelOpt.currentValue;
   if (modelBase(bare) !== bare && (cur === model || cur === bare)) {
-    return cur
+    return cur;
   }
   // an agent may advertise the suffixed id as its own leaf — that takes
   // the value verbatim; else the `[<size>]` context opt-in strips, the
   // catalog only knows the base id (bro-0g2l3)
-  const leaf = selectLeaves(modelOpt).find((o) => o.value === model || o.value === bare)
-  return applyOption(ctx, sessionId, modelOpt, leaf?.value ?? modelBase(model), by, req)
+  const leaf = selectLeaves(modelOpt).find(o => o.value === model || o.value === bare);
+  return applyOption(ctx, sessionId, modelOpt, leaf?.value ?? modelBase(model), by, req);
 }
 
 /** `session/set_config_option` on one advertised option + verify the
@@ -242,31 +229,29 @@ async function applyOption(
   req: () => SendRequestOptions
 ): Promise<string> {
   const res = await ctx
-    .request(
-      'session/set_config_option',
-      { sessionId, configId: opt.id, value },
-      req()
-    )
+    .request('session/set_config_option', { sessionId, configId: opt.id, value }, req())
     .catch((err: unknown) => {
       if (err instanceof RequestError && err.code !== REQUEST_CANCELLED) {
-        throw new AcpConfigError(`${by}: agent refused ${opt.category} '${value}' — ${errMsg(err)}`)
+        throw new AcpConfigError(
+          `${by}: agent refused ${opt.category} '${value}' — ${errMsg(err)}`
+        );
       }
-      throw err
-    })
-  const served = res.configOptions.find((o) => o.id === opt.id)?.currentValue
-  const reported = typeof served === 'string' ? served : value
+      throw err;
+    });
+  const served = res.configOptions.find(o => o.id === opt.id)?.currentValue;
+  const reported = typeof served === 'string' ? served : value;
   if (opt.category === 'model') {
     if (isSystemoneFamily(reported) !== isSystemoneFamily(value)) {
       throw new AcpConfigError(
         `${by}: asked for '${value}' but the agent reports '${reported}' — refusing a model-family swap`
-      )
+      );
     }
   } else if (reported !== value) {
     throw new AcpConfigError(
       `${by}: asked for ${opt.category} '${value}' but the agent reports '${reported}'`
-    )
+    );
   }
-  return reported
+  return reported;
 }
 
 /** Model resolution for the CONVERSE surfaces (acpConverse,
@@ -291,17 +276,17 @@ async function converseModel(
 ): Promise<string> {
   if (modelSelect(configOptions) === undefined) {
     // provenance reports the model, never the opt-in modifier
-    return label === undefined ? 'unknown' : modelBase(label)
+    return label === undefined ? 'unknown' : modelBase(label);
   }
-  return applyModel(ctx, sessionId, configOptions, by, model, req)
+  return applyModel(ctx, sessionId, configOptions, by, model, req);
 }
 
 interface AcpReply {
   /** Concatenated agent_message_chunk text. */
-  text: string
+  text: string;
   /** The model the agent reports running — never the wish alone. */
-  model: string
-  usage?: DecideResult['usage']
+  model: string;
+  usage?: DecideResult['usage'];
 }
 
 /** The initialize handshake — once per connection, not per session.
@@ -318,7 +303,7 @@ async function acpInit(
 ) {
   const req = (d = deadline): SendRequestOptions => ({
     cancellationSignal: AbortSignal.timeout(Math.max(1, remaining(d))),
-  })
+  });
   const init = await ctx.request(
     'initialize',
     {
@@ -330,33 +315,33 @@ async function acpInit(
       },
     },
     req()
-  )
+  );
   if (init.protocolVersion !== PROTOCOL_VERSION) {
     throw new AcpConfigError(
       `${by}: agent negotiated protocol ${init.protocolVersion} — the binding speaks v${PROTOCOL_VERSION} only`
-    )
+    );
   }
   // authMethods is an OFFER, not a requirement — an agent with stored
   // credentials (e.g. kilo's saved oauth) still advertises its login
   // methods and serves sessions fine. Only a session/prompt failure
   // that actually names auth is the operator's problem; keep the
   // advertised ids for the remediation line.
-  const authMethods = init.authMethods ?? []
+  const authMethods = init.authMethods ?? [];
   // prompt capabilities gate rich content — image blocks only go on
   // the wire when the agent says it can consume them (bro-7izjx)
-  const caps = { image: init.agentCapabilities?.promptCapabilities?.image === true }
+  const caps = { image: init.agentCapabilities?.promptCapabilities?.image === true };
   const authHint = (): string =>
-    authMethods.length > 0 ? ` (${authMethods.map((m) => m.id).join(', ')})` : ''
+    authMethods.length > 0 ? ` (${authMethods.map(m => m.id).join(', ')})` : '';
   const asAuthError = (err: unknown): never => {
     // availability vocabulary beats auth vocabulary: an 'auth-gateway
     // timeout' is an outage (fallbackable), not a config bug — only a
     // message that reads as auth REQUIRED names an interactive login
     const avail =
       err instanceof Error &&
-      /timeout|timed out|unavailable|network|econn|socket|502|503|504|deadline/i.test(err.message)
+      /timeout|timed out|unavailable|network|econn|socket|502|503|504|deadline/i.test(err.message);
     const isAuth =
       (err instanceof RequestError && err.code === -32000) ||
-      (!avail && err instanceof Error && /auth|login|credential/i.test(err.message))
+      (!avail && err instanceof Error && /auth|login|credential/i.test(err.message));
     throw isAuth
       ? new AcpConfigError(
           `${by}: agent requires interactive auth${authHint()} — a judge call can't log in; authenticate the agent CLI itself`,
@@ -365,9 +350,9 @@ async function acpInit(
           // the upstream auth_required code survives
           { cause: err }
         )
-      : err
-  }
-  return { asAuthError, req, caps, init }
+      : err;
+  };
+  return { asAuthError, req, caps, init };
 }
 
 /** session/new on an ALREADY-initialized connection — the pooled path.
@@ -384,8 +369,8 @@ async function acpSessionOpen(
   const session = await ctx
     .buildSession(sessionRequest ?? { cwd: opts.acp?.cwd ?? process.cwd(), mcpServers: [] })
     .start(req())
-    .catch(asAuthError)
-  return session
+    .catch(asAuthError);
+  return session;
 }
 
 async function acpSession(
@@ -394,9 +379,9 @@ async function acpSession(
   by: string,
   deadline: number
 ) {
-  const { asAuthError, req, caps } = await acpInit(ctx, by, deadline)
-  const session = await acpSessionOpen(ctx, opts, asAuthError, req)
-  return { session, asAuthError, req, caps }
+  const { asAuthError, req, caps } = await acpInit(ctx, by, deadline);
+  const session = await acpSessionOpen(ctx, opts, asAuthError, req);
+  return { session, asAuthError, req, caps };
 }
 
 /** initialize → session/new → model → prompt → collect chunks — the
@@ -410,7 +395,7 @@ async function acpOp(
   promptText: string,
   deadline: number
 ): Promise<AcpReply> {
-  const { session, asAuthError, req } = await acpSession(ctx, opts, by, deadline)
+  const { session, asAuthError, req } = await acpSession(ctx, opts, by, deadline);
   try {
     const model = await applyModel(
       ctx,
@@ -419,7 +404,7 @@ async function acpOp(
       by,
       opts.model ?? entry.model,
       req
-    )
+    );
     // spec bro-d6mcd: drain session/update as it arrives — the
     // caller's onUpdate sink (streaming hosts) sees every chunk,
     // tool_call and plan update; absent sink = the same whole-turn
@@ -434,11 +419,11 @@ async function acpOp(
       by,
       undefined,
       opts.acp?.cwd
-    )
+    );
     if (r.stopReason !== 'end_turn') {
-      throw new JudgeUnavailable(`${by} (acp) turn stopped — ${r.stopReason}`)
+      throw new JudgeUnavailable(`${by} (acp) turn stopped — ${r.stopReason}`);
     }
-    const usage = r.response.usage
+    const usage = r.response.usage;
     return {
       text: r.text,
       model,
@@ -446,9 +431,9 @@ async function acpOp(
         usage != null && Number.isSafeInteger(usage.inputTokens)
           ? { inputTokens: usage.inputTokens }
           : undefined,
-    }
+    };
   } finally {
-    session.dispose()
+    session.dispose();
   }
 }
 
@@ -463,58 +448,58 @@ async function withAcp<T>(
   deadline: number,
   op: (ctx: ClientContext) => Promise<T>
 ): Promise<T> {
-  const terminals = new AcpTerminals()
+  const terminals = new AcpTerminals();
   const app = terminals.register(
     client({ name: 'bro' }).onRequest('session/request_permission', denyPermission)
-  )
-  const peer = opts.acp?.peer
-  let child: ChildProcess | undefined
-  let tail = (): string => ''
-  let spawnError: string | undefined
+  );
+  const peer = opts.acp?.peer;
+  let child: ChildProcess | undefined;
+  let tail = (): string => '';
+  let spawnError: string | undefined;
   const run = (): Promise<T> => {
     if (peer !== undefined) {
-      return app.connectWith(peer, op)
+      return app.connectWith(peer, op);
     }
     const argv = [
       ...shellWords(entry.command),
       ...(entry.profile === undefined ? [] : ['--profile', entry.profile]),
-    ]
-    const bin = argv[0]
+    ];
+    const bin = argv[0];
     if (bin === undefined) {
-      throw new AcpConfigError(`${by}: acp command is empty`)
+      throw new AcpConfigError(`${by}: acp command is empty`);
     }
-    const proc = spawn(bin, argv.slice(1), { stdio: 'pipe', env: acpChildEnv() })
-    child = proc
+    const proc = spawn(bin, argv.slice(1), { stdio: 'pipe', env: acpChildEnv() });
+    child = proc;
     // a binary that can't exec is operator misconfig — name it as such
-    proc.once('error', (e) => {
-      spawnError = e.message
-    })
-    tail = stderrTail(proc)
+    proc.once('error', e => {
+      spawnError = e.message;
+    });
+    tail = stderrTail(proc);
     const stream = ndJsonStream(
       Writable.toWeb(proc.stdin) as WritableStream<Uint8Array>,
       Readable.toWeb(proc.stdout) as ReadableStream<Uint8Array>
-    )
-    return app.connectWith(stream, op)
-  }
+    );
+    return app.connectWith(stream, op);
+  };
   try {
-    return await withDeadline(deadline, run)
+    return await withDeadline(deadline, run);
   } catch (err) {
     // a timed-out peer dies now — not whenever its prompt settles
-    child?.kill('SIGKILL')
+    child?.kill('SIGKILL');
     if (err instanceof JudgeUnavailable || err instanceof AcpConfigError) {
-      throw err
+      throw err;
     }
     if (spawnError !== undefined) {
-      throw new AcpConfigError(`${by}: cannot exec acp command — ${spawnError}`)
+      throw new AcpConfigError(`${by}: cannot exec acp command — ${spawnError}`);
     }
-    const stderr = tail()
-    const detail = stderr === '' ? '' : ` (${stderr})`
+    const stderr = tail();
+    const detail = stderr === '' ? '' : ` (${stderr})`;
     throw new JudgeUnavailable(`acp ${by} unavailable — ${errMsg(err)}${detail}`, {
       cause: err,
-    })
+    });
   } finally {
-    terminals.dispose()
-    child?.kill('SIGKILL')
+    terminals.dispose();
+    child?.kill('SIGKILL');
   }
 }
 
@@ -527,9 +512,9 @@ async function acpRoundTrip(
   promptText: string,
   deadline: number
 ): Promise<AcpReply> {
-  return withAcp(by, entry, opts, deadline, (ctx) =>
+  return withAcp(by, entry, opts, deadline, ctx =>
     acpOp(ctx, entry, opts, by, promptText, deadline)
-  )
+  );
 }
 
 /** The catalog surface — session/new's configOptions carries the
@@ -543,19 +528,19 @@ export async function acpModels(
   opts: ProviderWireOpts = {},
   deadline = Date.now() + 30_000
 ): Promise<{ value: string; name?: string }[]> {
-  return withAcp(by, entry, opts, deadline, async (ctx) => {
-    const { session } = await acpSession(ctx, opts, by, deadline)
+  return withAcp(by, entry, opts, deadline, async ctx => {
+    const { session } = await acpSession(ctx, opts, by, deadline);
     try {
-      const opt = modelSelect(session.newSessionResponse.configOptions ?? [])
-      const options = opt?.options ?? []
+      const opt = modelSelect(session.newSessionResponse.configOptions ?? []);
+      const options = opt?.options ?? [];
       // options may be grouped — a group's leaf options carry the values
       return options
-        .flatMap((o) => ('options' in o ? o.options : [o]))
-        .map((o) => ({ value: String(o.value), name: o.name }))
+        .flatMap(o => ('options' in o ? o.options : [o]))
+        .map(o => ({ value: String(o.value), name: o.name }));
     } finally {
-      session.dispose()
+      session.dispose();
     }
-  })
+  });
 }
 
 /** One conversational turn — the conductor's primitive (bro-xeozo).
@@ -573,10 +558,10 @@ export async function acpConverse(
   deadline = Date.now() + 120_000,
   signal?: AbortSignal
 ): Promise<{ stopReason: StopReason; text: string; model: string }> {
-  const span = otelSpan('acp.turn', { 'acp.by': by, 'acp.requested_model': opts.model ?? '' })
-  return withAcp(by, entry, opts, deadline, async (ctx) => {
-    const sessSpan = otelSpan('acp.session', { 'acp.by': by }, { parent: span.ctx })
-    const { session, asAuthError, req } = await acpSession(ctx, opts, by, deadline)
+  const span = otelSpan('acp.turn', { 'acp.by': by, 'acp.requested_model': opts.model ?? '' });
+  return withAcp(by, entry, opts, deadline, async ctx => {
+    const sessSpan = otelSpan('acp.session', { 'acp.by': by }, { parent: span.ctx });
+    const { session, asAuthError, req } = await acpSession(ctx, opts, by, deadline);
     try {
       const model = await converseModel(
         ctx,
@@ -586,7 +571,7 @@ export async function acpConverse(
         opts.model ?? entry.model,
         undefined,
         req
-      )
+      );
       const r = await pumpTurn(
         session,
         promptText,
@@ -597,22 +582,22 @@ export async function acpConverse(
         by,
         sessSpan.ctx,
         opts.acp?.cwd
-      )
-      sessSpan.end({ 'acp.session_id': session.sessionId })
+      );
+      sessSpan.end({ 'acp.session_id': session.sessionId });
       span.end({
         'acp.model': model,
         'acp.stop_reason': r.stopReason,
         'acp.reply_len': r.text.length,
-      })
-      return { ...r, model }
+      });
+      return { ...r, model };
     } catch (err) {
-      sessSpan.end({ error: errMsg(err) }, 'error')
-      span.end({ error: errMsg(err) }, 'error')
-      throw err
+      sessSpan.end({ error: errMsg(err) }, 'error');
+      span.end({ error: errMsg(err) }, 'error');
+      throw err;
     } finally {
-      session.dispose()
+      session.dispose();
     }
-  })
+  });
 }
 
 /** Wrap an update sink so every tool_call opens an `acp.tool` span and
@@ -624,11 +609,11 @@ function tracedUpdates(
   onUpdate: (u: SessionUpdate) => void,
   parent: OtelCtx | undefined
 ): { sink: (u: SessionUpdate) => void; flush: (status: 'ok' | 'error') => void } {
-  const open = new Map<string, ReturnType<typeof otelSpan>>()
+  const open = new Map<string, ReturnType<typeof otelSpan>>();
   const terminal = (s: unknown): 'ok' | 'error' | undefined =>
-    s === 'completed' ? 'ok' : s === 'failed' ? 'error' : undefined
+    s === 'completed' ? 'ok' : s === 'failed' ? 'error' : undefined;
   return {
-    sink: (u) => {
+    sink: u => {
       if (u.sessionUpdate === 'tool_call') {
         const s = otelSpan(
           'acp.tool',
@@ -639,16 +624,16 @@ function tracedUpdates(
             'tool.kind': u.kind ?? '',
           },
           { parent }
-        )
-        const done = terminal(u.status)
-        if (done === undefined) open.set(u.toolCallId, s)
-        else s.end({ 'tool.status': String(u.status) }, done)
+        );
+        const done = terminal(u.status);
+        if (done === undefined) open.set(u.toolCallId, s);
+        else s.end({ 'tool.status': String(u.status) }, done);
       } else if (u.sessionUpdate === 'tool_call_update') {
-        const done = terminal(u.status)
-        const s = open.get(u.toolCallId)
+        const done = terminal(u.status);
+        const s = open.get(u.toolCallId);
         if (s !== undefined && done !== undefined) {
-          s.end({ 'tool.status': String(u.status) }, done)
-          open.delete(u.toolCallId)
+          s.end({ 'tool.status': String(u.status) }, done);
+          open.delete(u.toolCallId);
         }
       } else if (u.sessionUpdate === 'subagent_update') {
         // a child session — its own span under this turn's ctx; ended
@@ -665,22 +650,22 @@ function tracedUpdates(
               },
               { parent }
             )
-          )
+          );
         }
       }
       // a throwing sink is an observer bug, not a turn failure —
       // swallow it so the pump keeps draining updates to stop
       try {
-        onUpdate(u)
+        onUpdate(u);
       } catch {
         /* observer must not kill the turn pump */
       }
     },
-    flush: (status) => {
-      for (const [, s] of open) s.end({ 'tool.status': 'turn_end' }, status)
-      open.clear()
+    flush: status => {
+      for (const [, s] of open) s.end({ 'tool.status': 'turn_end' }, status);
+      open.clear();
     },
-  }
+  };
 }
 
 /** The prompt→updates loop shared by one-shot and pooled turns — and
@@ -699,24 +684,24 @@ export async function pumpTurn(
   parent?: OtelCtx,
   cwd?: string
 ): Promise<{ stopReason: StopReason; text: string; response: PromptResponse }> {
-  const traced = tracedUpdates(onUpdate, parent)
-  const plane = agentTurnPlane({ cwd, by, sessionId: session.sessionId })
-  plane.start()
+  const traced = tracedUpdates(onUpdate, parent);
+  const plane = agentTurnPlane({ cwd, by, sessionId: session.sessionId });
+  plane.start();
   // prompt() enqueues `stop` into the SAME updates stream in order —
   // updates drain first, `stop` arrives last, so trailing chunks can't
   // be lost by racing the response promise (bro-d6mcd). The turn's
   // own rejection lands on the queue as a reject — swallow it on the
   // direct promise so it can't fire unhandled; the pump reads and
   // classifies the same failure through nextUpdate.
-  void session.prompt(prompt, req()).catch(() => {})
+  void session.prompt(prompt, req()).catch(() => {});
   // a gone caller cancels the turn: the caller's dispose ends the
   // session — no orphan work on the agent
   const aborted = new Promise<never>((_, reject) => {
-    const drop = () => reject(new JudgeUnavailable(`${by}: caller aborted the turn`))
-    if (signal?.aborted === true) drop()
-    signal?.addEventListener('abort', drop, { once: true })
-  })
-  let text = ''
+    const drop = () => reject(new JudgeUnavailable(`${by}: caller aborted the turn`));
+    if (signal?.aborted === true) drop();
+    signal?.addEventListener('abort', drop, { once: true });
+  });
+  let text = '';
   try {
     for (;;) {
       const msg: ActiveSessionMessage = await Promise.race([
@@ -724,27 +709,27 @@ export async function pumpTurn(
         // rejection through asAuthError the same as a direct throw
         session.nextUpdate().catch(asAuthError),
         aborted,
-      ])
+      ]);
       if (msg.kind === 'stop') {
-        traced.flush('ok')
-        plane.stop(msg.stopReason, { replyLen: text.length })
-        return { stopReason: msg.stopReason, text, response: msg.response }
+        traced.flush('ok');
+        plane.stop(msg.stopReason, { replyLen: text.length });
+        return { stopReason: msg.stopReason, text, response: msg.response };
       }
-      plane.update(msg.update)
-      traced.sink(msg.update)
+      plane.update(msg.update);
+      traced.sink(msg.update);
       if (msg.update.sessionUpdate === 'agent_message_chunk') {
-        const c = msg.update.content
-        if (c.type === 'text') text += c.text
+        const c = msg.update.content;
+        if (c.type === 'text') text += c.text;
       }
     }
   } catch (err) {
-    traced.flush('error')
-    plane.stop(undefined, { error: errMsg(err) })
-    throw err
+    traced.flush('error');
+    plane.stop(undefined, { error: errMsg(err) });
+    throw err;
   } finally {
     // the acp-worker driver exits right after the turn — settle the
     // queued publishes first or the turn's last events die with it
-    await plane.drain()
+    await plane.drain();
   }
 }
 
@@ -753,29 +738,29 @@ export async function pumpTurn(
  *  is paid once per listener, `session/new` per request is the cheap part.
  *  `closed`/`signal` report transport death so callers can respawn. */
 export interface AcpPeer {
-  ctx: ClientContext
+  ctx: ClientContext;
   /** Aborts when the transport dies — pooled callers respawn on next use. */
-  signal: AbortSignal
-  close: () => void
-  tail: () => string
+  signal: AbortSignal;
+  close: () => void;
+  tail: () => string;
   /** Per-request cancel options against any deadline (init one is default). */
-  req: (deadline?: number) => SendRequestOptions
-  asAuthError: (err: unknown) => never
+  req: (deadline?: number) => SendRequestOptions;
+  asAuthError: (err: unknown) => never;
   /** The upstream initialize result — protocolVersion is already
    *  v-checked; agentCapabilities/authMethods/agentInfo are what a
    *  brokered transport answers its own downstream initialize with
    *  (spec bro-ymbq1). */
-  init: InitializeResponse
+  init: InitializeResponse;
   /** Prompt capabilities negotiated at initialize — `image` gates
    *  whether image content blocks may go on the wire (bro-7izjx).
    *  Optional: external peers built before the field existed are
    *  treated as image-incapable (codeant #558). */
-  caps?: { image: boolean }
+  caps?: { image: boolean };
   /** The link's terminal registry — the agent's shells run as this
    *  process's children, and the serve surface reads their buffers
    *  through it (bro-eua0d). Optional: peers built outside acpOpen
    *  carry no registry. */
-  terminals?: AcpTerminals
+  terminals?: AcpTerminals;
 }
 
 /** The client-bound methods a brokered link relays (spec bro-ymbq1):
@@ -793,7 +778,7 @@ const BRIDGED_METHODS = [
   'terminal/kill',
   'elicitation/create',
   'mcp/message',
-] as const
+] as const;
 
 /** The client app for a pooled link — deny-permission posture by
  *  default (bro-5hx1.1 §7); `opts.acp.bridge` flips it to passthrough,
@@ -801,41 +786,39 @@ const BRIDGED_METHODS = [
  *  also register the local terminal registry — a bridged link forwards
  *  terminal/* to the real client instead, so it must not shadow it. */
 function pooledClientApp(opts: ProviderWireOpts, terminals: AcpTerminals) {
-  const bridge = opts.acp?.bridge
-  const app = client({ name: 'bro' })
+  const bridge = opts.acp?.bridge;
+  const app = client({ name: 'bro' });
   if (bridge === undefined) {
-    return terminals.register(
-      app.onRequest('session/request_permission', denyPermission)
-    )
+    return terminals.register(app.onRequest('session/request_permission', denyPermission));
   }
   for (const m of BRIDGED_METHODS) {
     app.onRequest<Record<string, unknown>, unknown>(
       m,
-      (p) => p as Record<string, unknown>,
-      async (ctx) =>
+      p => p as Record<string, unknown>,
+      async ctx =>
         // a void-returning client answer still owes the wire a result
         // object — `result` absent is not a legal JSON-RPC response
         (await bridge.request(m, ctx.params, ctx.signal)) ?? {}
-    )
+    );
   }
   app.onNotification<Record<string, unknown>>(
     'elicitation/complete',
-    (p) => p as Record<string, unknown>,
-    (ctx) => bridge.notify('elicitation/complete', ctx.params)
-  )
-  return app
+    p => p as Record<string, unknown>,
+    ctx => bridge.notify('elicitation/complete', ctx.params)
+  );
+  return app;
 }
 
 /** fs caps advertised with no bridge to serve them — the unbridged app
  *  has no fs handler, so every agent fs call would answer
  *  method-not-found. */
 function fsCapsWithoutBridge(opts: ProviderWireOpts): boolean {
-  const acp = opts.acp
+  const acp = opts.acp;
   if (acp === undefined || acp.bridge !== undefined) {
-    return false
+    return false;
   }
-  const fs = acp.clientCapabilities?.fs
-  return fs?.readTextFile === true || fs?.writeTextFile === true
+  const fs = acp.clientCapabilities?.fs;
+  return fs?.readTextFile === true || fs?.writeTextFile === true;
 }
 
 /** Spawn the acp child and wire its stdio into `app` — the unref'd
@@ -849,38 +832,38 @@ function spawnAcpChild(
   by: string,
   fail: (err: unknown) => never
 ): {
-  conn: ReturnType<typeof app.connect>
-  child: ChildProcess
-  tail: () => string
-  spawnError: () => string | undefined
+  conn: ReturnType<typeof app.connect>;
+  child: ChildProcess;
+  tail: () => string;
+  spawnError: () => string | undefined;
 } {
   const argv = [
     ...shellWords(entry.command),
     ...(entry.profile === undefined ? [] : ['--profile', entry.profile]),
-  ]
-  const bin = argv[0]
+  ];
+  const bin = argv[0];
   if (bin === undefined) {
-    fail(new AcpConfigError(`${by}: acp command is empty`))
+    fail(new AcpConfigError(`${by}: acp command is empty`));
   }
-  const proc = spawn(bin, argv.slice(1), { stdio: 'pipe', env: acpChildEnv() })
-  proc.unref()
+  const proc = spawn(bin, argv.slice(1), { stdio: 'pipe', env: acpChildEnv() });
+  proc.unref();
   for (const s of proc.stdio) {
-    ;(s as unknown as { unref?: () => void } | null)?.unref?.()
+    (s as unknown as { unref?: () => void } | null)?.unref?.();
   }
-  let spawnError: string | undefined
-  proc.once('error', (e) => {
-    spawnError = e.message
-  })
+  let spawnError: string | undefined;
+  proc.once('error', e => {
+    spawnError = e.message;
+  });
   const stream = ndJsonStream(
     Writable.toWeb(proc.stdin) as WritableStream<Uint8Array>,
     Readable.toWeb(proc.stdout) as ReadableStream<Uint8Array>
-  )
+  );
   return {
     conn: app.connect(stream),
     child: proc,
     tail: stderrTail(proc),
     spawnError: () => spawnError,
-  }
+  };
 }
 
 export async function acpOpen(
@@ -890,10 +873,10 @@ export async function acpOpen(
   deadline: number,
   parent?: OtelCtx
 ): Promise<AcpPeer> {
-  const span = otelSpan('acp.open', { 'acp.by': by, 'acp.command': entry.command }, { parent })
+  const span = otelSpan('acp.open', { 'acp.by': by, 'acp.command': entry.command }, { parent });
   function fail(err: unknown): never {
-    span.end({ error: errMsg(err) }, 'error')
-    throw err
+    span.end({ error: errMsg(err) }, 'error');
+    throw err;
   }
   // fs has no local handler — the unbridged app serves only
   // request_permission(deny) + terminal/*(AcpTerminals); advertising it
@@ -904,68 +887,88 @@ export async function acpOpen(
       new AcpConfigError(
         `${by}: clientCapabilities advertises fs without acp.bridge — the unbridged link cannot serve it`
       )
-    )
+    );
   }
-  const terminals = new AcpTerminals()
-  const app = pooledClientApp(opts, terminals)
-  const peer = opts.acp?.peer
-  let child: ChildProcess | undefined
-  let tail = (): string => ''
+  /** Map an init failure onto the availability vocabulary — spawn's
+   *  'error' event is async, so a binary that can't exec is only
+   *  knowable once the handshake on the dead transport has failed. */
+  function openErr(err: unknown): Error {
+    if (err instanceof JudgeUnavailable || err instanceof AcpConfigError) {
+      return err;
+    }
+    const spawnErr = spawnError();
+    if (spawnErr !== undefined) {
+      return new AcpConfigError(`${by}: cannot exec acp command — ${spawnErr}`);
+    }
+    // a live child that still failed the handshake — dead transport,
+    // protocol violation — is an availability fault, same vocabulary
+    // withAcp/acpPooledTurn use: JudgeUnavailable, never a raw error
+    const stderr = tail();
+    const detail = stderr === '' ? '' : ` (${stderr})`;
+    return new JudgeUnavailable(`acp ${by} unavailable — ${errMsg(err)}${detail}`);
+  }
+  const terminals = new AcpTerminals();
+  const app = pooledClientApp(opts, terminals);
+  const peer = opts.acp?.peer;
+  let child: ChildProcess | undefined;
+  let tail = (): string => '';
   // spawn's 'error' event is async — the getter reads it whenever the
   // handshake below fails, not at spawn time
-  let spawnError = (): string | undefined => undefined
-  let conn: Awaited<ReturnType<typeof app.connect>>
+  let spawnError = (): string | undefined => undefined;
+  let conn: Awaited<ReturnType<typeof app.connect>>;
   if (peer !== undefined) {
-    conn = app.connect(peer)
+    conn = app.connect(peer);
   } else {
-    const spawned = spawnAcpChild(app, entry, by, fail)
-    conn = spawned.conn
-    child = spawned.child
-    tail = spawned.tail
-    spawnError = spawned.spawnError
+    const spawned = spawnAcpChild(app, entry, by, fail);
+    conn = spawned.conn;
+    child = spawned.child;
+    tail = spawned.tail;
+    spawnError = spawned.spawnError;
   }
   const close = (): void => {
-    conn.close()
-    terminals.dispose()
-    child?.kill('SIGKILL')
-  }
+    conn.close();
+    terminals.dispose();
+    child?.kill('SIGKILL');
+  };
   // a dead transport is itself a close: pooled callers only drop their
   // peer refs on abort — without this, terminals the agent spawned (and
   // the child) outlive the dead connection they were created under
-  conn.signal.addEventListener('abort', close, { once: true })
+  conn.signal.addEventListener('abort', close, { once: true });
   // the pool's teardown signal: a close here rejects the pending init
   // below, which releases the ref'd deadline timer — a half-open link
   // can no longer pin the event loop past serve shutdown
-  const cancel = opts.acp?.signal
+  const cancel = opts.acp?.signal;
   if (cancel?.aborted === true) {
-    close()
-    fail(new JudgeUnavailable(`${by}: acp open cancelled`))
+    close();
+    fail(new JudgeUnavailable(`${by}: acp open cancelled`));
   }
-  cancel?.addEventListener('abort', close, { once: true })
+  cancel?.addEventListener('abort', close, { once: true });
   try {
     const { asAuthError, req, caps, init } = await withDeadline(deadline, () =>
       acpInit(conn.agent, by, deadline, opts.acp?.clientCapabilities)
-    )
-    span.end({ 'acp.pid': child?.pid ?? 0 })
-    return { ctx: conn.agent, signal: conn.signal, close, tail, req, asAuthError, caps, init, terminals }
+    );
+    span.end({ 'acp.pid': child?.pid ?? 0 });
+    return {
+      ctx: conn.agent,
+      signal: conn.signal,
+      close,
+      tail,
+      req,
+      asAuthError,
+      caps,
+      init,
+      terminals,
+    };
   } catch (err) {
-    close()
-    // spawn's 'error' event is async — a binary that can't exec is only
-    // knowable here, once the handshake on the dead transport has failed
-    if (err instanceof AcpConfigError) {
-      fail(err)
-    }
-    if (spawnError() !== undefined) {
-      fail(new AcpConfigError(`${by}: cannot exec acp command — ${spawnError()}`))
-    }
-    fail(err)
+    close();
+    fail(openErr(err));
   }
 }
 
 /** Flatten a select config option's (possibly grouped) leaf entries. */
 function selectLeaves(opt: SessionConfigOption): { name: string; value: string }[] {
-  if (opt.type !== 'select') return []
-  return opt.options.flatMap((o) => ('options' in o ? o.options : [o]))
+  if (opt.type !== 'select') return [];
+  return opt.options.flatMap(o => ('options' in o ? o.options : [o]));
 }
 
 /** Resolve a caller's model name against the agent's advertised select
@@ -977,25 +980,23 @@ function resolveModelPin(
   configOptions: SessionConfigOption[],
   by: string
 ): string | undefined {
-  const opt = modelSelect(configOptions)
+  const opt = modelSelect(configOptions);
   if (opt === undefined) {
-    return undefined // no catalog to resolve against — the session check decides
+    return undefined; // no catalog to resolve against — the session check decides
   }
-  const leaves = selectLeaves(opt)
-  const bare = providerBare(want)
-  const exact = leaves.find(
-    (o) => o.value === bare || o.name.toLowerCase() === bare.toLowerCase()
-  )
-  if (exact !== undefined) return exact.value
-  const prefixed = leaves.filter((o) => o.value.startsWith(`${bare}-`))
-  if (prefixed.length === 1) return prefixed[0]!.value
+  const leaves = selectLeaves(opt);
+  const bare = providerBare(want);
+  const exact = leaves.find(o => o.value === bare || o.name.toLowerCase() === bare.toLowerCase());
+  if (exact !== undefined) return exact.value;
+  const prefixed = leaves.filter(o => o.value.startsWith(`${bare}-`));
+  if (prefixed.length === 1) return prefixed[0]!.value;
   if (prefixed.length > 1) {
     throw new AcpConfigError(
       `${by}: model '${want}' is ambiguous — the agent offers ` +
-        prefixed.map((o) => o.value).join(', ')
-    )
+        prefixed.map(o => o.value).join(', ')
+    );
   }
-  return undefined
+  return undefined;
 }
 
 /** `<base>-<level>` composite pin — <level> names a thought_level leaf,
@@ -1013,21 +1014,21 @@ async function applyCompositeLevel(
   by: string,
   req: () => SendRequestOptions
 ): Promise<string | undefined> {
-  const thought = configOptions.find((o) => o.category === 'thought_level')
-  const dash = bare.lastIndexOf('-')
-  const level = dash > 0 ? bare.slice(dash + 1) : ''
+  const thought = configOptions.find(o => o.category === 'thought_level');
+  const dash = bare.lastIndexOf('-');
+  const level = dash > 0 ? bare.slice(dash + 1) : '';
   const baseResolved =
-    thought !== undefined && dash > 0 && selectLeaves(thought).some((o) => o.value === level)
+    thought !== undefined && dash > 0 && selectLeaves(thought).some(o => o.value === level)
       ? resolveModelPin(bare.slice(0, dash), configOptions, by)
-      : undefined
+      : undefined;
   if (thought === undefined || baseResolved === undefined) {
-    return undefined
+    return undefined;
   }
   if (modelOpt.currentValue !== baseResolved || thought.currentValue !== level) {
-    await applyOption(ctx, sessionId, modelOpt, baseResolved, by, req)
-    await applyOption(ctx, sessionId, thought, level, by, req)
+    await applyOption(ctx, sessionId, modelOpt, baseResolved, by, req);
+    await applyOption(ctx, sessionId, thought, level, by, req);
   }
-  return bare // the asked id names this exact (model, level) pair
+  return bare; // the asked id names this exact (model, level) pair
 }
 
 /** Resolve a wanted pin against a live session — a verbatim currentValue
@@ -1045,31 +1046,31 @@ async function resolveTurnModel(
   by: string,
   req: () => SendRequestOptions
 ): Promise<string> {
-  const modelOpt = modelSelect(configOptions)
-  const asked = want === undefined ? undefined : modelBase(want)
+  const modelOpt = modelSelect(configOptions);
+  const asked = want === undefined ? undefined : modelBase(want);
   // an asked `model[<size>]` the session already reports verbatim is
   // the provider command's spawn-level pin — normalizing to the base
   // and re-pinning would silently drop the opt-in. The agent's own id
   // may carry a namespace the ask aliases away — compare both spellings.
   if (want !== undefined && asked !== want) {
-    const cur = modelOpt?.currentValue
+    const cur = modelOpt?.currentValue;
     if (cur === want || cur === providerBare(want)) {
-      return cur
+      return cur;
     }
   }
   // the raw id tries the catalog first — an agent may advertise
   // `model[1m]` as its own option value — then the base id (a
   // `[<size>]` suffix is a client-side opt-in, bro-0g2l3)
-  let resolved: string | undefined
+  let resolved: string | undefined;
   if (want !== undefined) {
     resolved =
       resolveModelPin(want, configOptions, by) ??
-      (asked === want ? undefined : resolveModelPin(modelBase(want), configOptions, by))
+      (asked === want ? undefined : resolveModelPin(modelBase(want), configOptions, by));
   }
   if (asked === undefined || resolved !== undefined || modelOpt === undefined) {
     // direct path — or a tool-less backend (no model option): the
     // reported label is the configured pin, never the ask
-    return converseModel(ctx, sessionId, configOptions, by, resolved, configuredLabel, req)
+    return converseModel(ctx, sessionId, configOptions, by, resolved, configuredLabel, req);
   }
   // the agent advertises a catalog that doesn't contain the ask.
   // Two honest ways it can still be served:
@@ -1077,7 +1078,7 @@ async function resolveTurnModel(
   //    the agent's thought_level option
   //  - spawn-level pin: the provider command's --model already set
   //    state the session reports back verbatim
-  const bare = providerBare(asked)
+  const bare = providerBare(asked);
   const composite = await applyCompositeLevel(
     ctx,
     sessionId,
@@ -1086,37 +1087,37 @@ async function resolveTurnModel(
     bare,
     by,
     req
-  )
+  );
   if (composite !== undefined) {
-    return composite
+    return composite;
   }
   // the session reports its running pin verbatim — a spawn-level
   // `model[<size>]` opt-in still serves the asked base id
-  const cur = modelOpt?.currentValue
-  const served = typeof cur === 'string' ? modelBase(cur) : cur
+  const cur = modelOpt?.currentValue;
+  const served = typeof cur === 'string' ? modelBase(cur) : cur;
   if (served !== bare) {
     throw new AcpConfigError(
       `${by}: model '${want}' is not in the agent's catalog and the session serves ` +
         `'${typeof cur === 'string' ? cur : 'unknown'}' — pick a catalog id or pin ` +
         `the model in the provider command`
-    )
+    );
   }
-  return bare
+  return bare;
 }
 
 export interface PooledTurnOpts {
   /** Session updates sink — default drops them (the conductor parses). */
-  onUpdate?: (update: SessionUpdate) => void
-  signal?: AbortSignal
-  by?: string
+  onUpdate?: (update: SessionUpdate) => void;
+  signal?: AbortSignal;
+  by?: string;
   /** The API caller's `model` field — outranks the configured pin. */
-  requestModel?: string
+  requestModel?: string;
   /** Parent span context — nests `acp.turn` under the caller's trace. */
-  parent?: OtelCtx
+  parent?: OtelCtx;
   /** A verbatim client `session/new` request — the brokered transport
    *  (spec bro-ymbq1) passes the downstream client's cwd/mcpServers/
    *  _meta through instead of the synthesized {cwd, mcpServers:[]}. */
-  sessionRequest?: NewSessionRequest
+  sessionRequest?: NewSessionRequest;
 }
 
 /** One conversational turn on an already-open acp link — session/new,
@@ -1129,29 +1130,27 @@ export async function acpPooledTurn(
   deadline: number,
   turn: PooledTurnOpts = {}
 ): Promise<{ stopReason: StopReason; text: string; model: string }> {
-  const ctx = peer.ctx
-  const req = () => peer.req(deadline)
-  const by = turn.by ?? 'conductor'
+  const ctx = peer.ctx;
+  const req = () => peer.req(deadline);
+  const by = turn.by ?? 'conductor';
   const span = otelSpan(
     'acp.turn',
     { 'acp.by': by, 'acp.requested_model': turn.requestModel ?? '' },
     { parent: turn.parent }
-  )
-  let ended = false
+  );
+  let ended = false;
   const end = (a: Record<string, string | number | boolean>, status?: 'ok' | 'error'): void => {
-    if (ended) return
-    ended = true
-    span.end(a, status)
-  }
+    if (ended) return;
+    ended = true;
+    span.end(a, status);
+  };
   try {
-    const sessSpan = otelSpan('acp.session', { 'acp.by': by }, { parent: span.ctx })
-    const session = await acpSessionOpen(
-      ctx, opts, peer.asAuthError, req, turn.sessionRequest
-    )
+    const sessSpan = otelSpan('acp.session', { 'acp.by': by }, { parent: span.ctx });
+    const session = await acpSessionOpen(ctx, opts, peer.asAuthError, req, turn.sessionRequest);
     const endSession = (a: Record<string, string | number | boolean> = {}): void =>
-      sessSpan.end({ 'acp.session_id': session.sessionId, ...a })
+      sessSpan.end({ 'acp.session_id': session.sessionId, ...a });
     try {
-      const configOptions = session.newSessionResponse.configOptions ?? []
+      const configOptions = session.newSessionResponse.configOptions ?? [];
       const model = await resolveTurnModel(
         ctx,
         session.sessionId,
@@ -1162,7 +1161,7 @@ export async function acpPooledTurn(
         opts.model ?? entry.model,
         by,
         req
-      )
+      );
       const r = await pumpTurn(
         session,
         prompt,
@@ -1173,34 +1172,34 @@ export async function acpPooledTurn(
         by,
         sessSpan.ctx,
         opts.acp?.cwd
-      )
-      endSession()
+      );
+      endSession();
       end({
         'acp.session_id': session.sessionId,
         'acp.model': model,
         'acp.stop_reason': r.stopReason,
         'acp.reply_len': r.text.length,
-      })
-      return { ...r, model }
+      });
+      return { ...r, model };
     } catch (err) {
-      endSession({ error: errMsg(err) })
-      end({ 'acp.session_id': session.sessionId, error: errMsg(err) }, 'error')
-      throw err
+      endSession({ error: errMsg(err) });
+      end({ 'acp.session_id': session.sessionId, error: errMsg(err) }, 'error');
+      throw err;
     } finally {
-      session.dispose()
+      session.dispose();
     }
   } catch (err) {
     // the pooled link skips withAcp's error mapping — same contract here:
     // config problems stay config, everything else is availability
-    end({ error: errMsg(err) }, 'error')
+    end({ error: errMsg(err) }, 'error');
     if (err instanceof JudgeUnavailable || err instanceof AcpConfigError) {
-      throw err
+      throw err;
     }
-    const tail = peer.tail()
+    const tail = peer.tail();
     throw new JudgeUnavailable(
       `acp ${by} unavailable — ${errMsg(err)}${tail === '' ? '' : ` (${tail})`}`,
       { cause: err }
-    )
+    );
   }
 }
 
@@ -1209,10 +1208,10 @@ export async function acpPooledTurn(
  *  an eviction, or peer death all end the session's cacheability, and
  *  the caller drops it from any reuse map. */
 export interface AcpRetainedSession {
-  sessionId: string
+  sessionId: string;
   /** The verbatim `session/new` response — a brokered transport answers
    *  its downstream session/new with it (modes, configOptions, meta). */
-  newSessionResponse: NewSessionResponse
+  newSessionResponse: NewSessionResponse;
   /** One more user turn on the live session — the pooled pump minus
    *  session/new+dispose. A differing requestModel re-pins on the
    *  live session's config options. `response` is the verbatim
@@ -1222,11 +1221,11 @@ export interface AcpRetainedSession {
     prompt: string | ContentBlock[],
     deadline: number,
     turn?: PooledTurnOpts
-  ): Promise<{ stopReason: StopReason; text: string; model: string; response: PromptResponse }>
+  ): Promise<{ stopReason: StopReason; text: string; model: string; response: PromptResponse }>;
   /** Re-resolve a request model on the live session without a turn —
    *  a resend that pins a different model still owns the session. */
-  repin(requestModel: string, deadline: number): Promise<string>
-  dispose(): void
+  repin(requestModel: string, deadline: number): Promise<string>;
+  dispose(): void;
 }
 
 /** session/new WITHOUT the per-request dispose — the model pin is
@@ -1240,29 +1239,23 @@ export async function acpSessionRetain(
   deadline: number,
   turn: PooledTurnOpts = {}
 ): Promise<AcpRetainedSession> {
-  const ctx = peer.ctx
-  const req = () => peer.req(deadline)
-  const by = turn.by ?? 'conductor'
+  const ctx = peer.ctx;
+  const req = () => peer.req(deadline);
+  const by = turn.by ?? 'conductor';
   const span = otelSpan(
     'acp.session.retain',
     { 'acp.by': by, 'acp.requested_model': turn.requestModel ?? '' },
     { parent: turn.parent }
-  )
+  );
   try {
-    const session = await acpSessionOpen(
-      ctx,
-      opts,
-      peer.asAuthError,
-      req,
-      turn.sessionRequest
-    )
-    const configOptions = session.newSessionResponse.configOptions ?? []
-    const base = opts.model ?? entry.model
+    const session = await acpSessionOpen(ctx, opts, peer.asAuthError, req, turn.sessionRequest);
+    const configOptions = session.newSessionResponse.configOptions ?? [];
+    const base = opts.model ?? entry.model;
     // the RAW requested id (possibly a composite like 'swe-2-max') —
     // prompt() compares raw-to-raw so a resubmitted request id doesn't
     // re-pin a model the open already resolved
-    const requested = turn.requestModel ?? base
-    let model: string
+    const requested = turn.requestModel ?? base;
+    let model: string;
     try {
       model = await resolveTurnModel(
         ctx,
@@ -1272,47 +1265,47 @@ export async function acpSessionRetain(
         base,
         by,
         req
-      )
+      );
     } catch (err) {
       // the session opened but can't run the pin — it is not
       // cacheable, and no caller ever sees the handle to dispose it
       try {
-        session.dispose()
+        session.dispose();
       } catch {
         // already gone — the drop is the point
       }
-      throw err
+      throw err;
     }
     // what the session currently RUNS — a mid-conversation re-pin moves
     // the cursor so the same new pin isn't applied twice
-    let curReq = requested
-    let curModel = model
-    span.end({ 'acp.session_id': session.sessionId, 'acp.model': model })
+    let curReq = requested;
+    let curModel = model;
+    span.end({ 'acp.session_id': session.sessionId, 'acp.model': model });
     // dispose is idempotent — the prompt failure path already drops the
     // handle, and the cache caller drops it again on eviction; a second
     // cancel on a dead session is a no-op, not an error
-    let disposed = false
+    let disposed = false;
     const dispose = () => {
       if (disposed) {
-        return
+        return;
       }
-      disposed = true
-      session.dispose()
-    }
+      disposed = true;
+      session.dispose();
+    };
     /** The shared wire classification: config stays config (a refused
      *  pin names the caller's mistake); everything else is a
      *  JudgeUnavailable naming the backend and the last transport
      *  lines. */
     const classifyWire = (err: unknown): Error => {
       if (err instanceof JudgeUnavailable || err instanceof AcpConfigError) {
-        return err
+        return err;
       }
-      const tail = peer.tail()
-      const detail = tail === '' ? '' : ` (${tail})`
+      const tail = peer.tail();
+      const detail = tail === '' ? '' : ` (${tail})`;
       return new JudgeUnavailable(`acp ${by} unavailable — ${errMsg(err)}${detail}`, {
         cause: err,
-      })
-    }
+      });
+    };
     /** Resolve a request pin on the live session and move the cursor —
      *  shared by prompt() and repin(); a refused pin surfaces config
      *  and keeps the session, a dead wire disposes + goes unavailable. */
@@ -1326,31 +1319,31 @@ export async function acpSessionRetain(
           base,
           by,
           () => peer.req(dl)
-        )
-        curReq = want
-        curModel = m
-        return m
+        );
+        curReq = want;
+        curModel = m;
+        return m;
       } catch (err) {
-        const classified = classifyWire(err)
+        const classified = classifyWire(err);
         if (!(classified instanceof JudgeUnavailable)) {
-          throw classified
+          throw classified;
         }
         try {
-          dispose()
+          dispose();
         } catch {
           // already gone — the drop is the point
         }
-        throw classified
+        throw classified;
       }
-    }
+    };
     return {
       sessionId: session.sessionId,
       newSessionResponse: session.newSessionResponse,
       prompt: async (prompt, dl, t = {}) => {
         try {
-          const r2 = () => peer.req(dl)
-          const want = t.requestModel ?? curReq
-          const effective = want === curReq ? curModel : await applyPin(want, dl)
+          const r2 = () => peer.req(dl);
+          const want = t.requestModel ?? curReq;
+          const effective = want === curReq ? curModel : await applyPin(want, dl);
           const r = await pumpTurn(
             session,
             prompt,
@@ -1360,34 +1353,34 @@ export async function acpSessionRetain(
             t.signal,
             by,
             t.parent
-          )
-          return { ...r, model: effective }
+          );
+          return { ...r, model: effective };
         } catch (err) {
           // a failed turn leaves the session's context in doubt — the
           // session is dead weight; the caller evicts its cache entry
           // but the acp-side handle is dropped here and now
           try {
-            dispose()
+            dispose();
           } catch {
             // already gone — the drop is the point
           }
-          throw classifyWire(err)
+          throw classifyWire(err);
         }
       },
       repin: (requestModel, dl) =>
         requestModel === curReq ? Promise.resolve(curModel) : applyPin(requestModel, dl),
       dispose,
-    }
+    };
   } catch (err) {
-    span.end({ error: errMsg(err) }, 'error')
+    span.end({ error: errMsg(err) }, 'error');
     if (err instanceof JudgeUnavailable || err instanceof AcpConfigError) {
-      throw err
+      throw err;
     }
-    const tail = peer.tail()
-    const detail = tail === '' ? '' : ` (${tail})`
+    const tail = peer.tail();
+    const detail = tail === '' ? '' : ` (${tail})`;
     throw new JudgeUnavailable(`acp ${by} unavailable — ${errMsg(err)}${detail}`, {
       cause: err,
-    })
+    });
   }
 }
 
@@ -1395,20 +1388,20 @@ export async function acpSessionRetain(
  *  `{answers: {…}}` payload (a jev-family model speaks it natively).
  *  Strict JSON: a fenced or prosaic reply is drift, fail-open. */
 function typedReply(text: string, by: string): { answers: unknown; model?: string } {
-  let parsed: unknown
+  let parsed: unknown;
   try {
-    parsed = JSON.parse(text)
+    parsed = JSON.parse(text);
   } catch {
-    throw new JudgeUnavailable(`${by} (acp) returned a non-JSON reply — not a typed answer`)
+    throw new JudgeUnavailable(`${by} (acp) returned a non-JSON reply — not a typed answer`);
   }
-  const body = objOr(parsed)
+  const body = objOr(parsed);
   if (typeof body.answers !== 'object' || body.answers === null) {
-    throw new JudgeUnavailable(`${by} (acp) returned no answers map`)
+    throw new JudgeUnavailable(`${by} (acp) returned no answers map`);
   }
   return {
     answers: body.answers,
     model: typeof body.model === 'string' ? body.model : undefined,
-  }
+  };
 }
 
 /** The typed contract as prompt preamble — an ACP session is a chat
@@ -1426,29 +1419,25 @@ const TYPED_PREAMBLE = [
   '- "score":  {"type":"score","score":<0..N-1 probability-weighted level>,"probabilities":{"<level index>":<p>, ...}}',
   'Add "confidence": <0..1> to every answer. Answer EVERY question id exactly once.',
   'BODY:',
-].join('\n')
+].join('\n');
 
 /** The typed call surface for an `acp` entry on a systemone-family
  *  model — `{state, questions}` in, typed judgments out. */
-export function acpCall(
-  by: string,
-  entry: AcpEntry,
-  opts: ProviderWireOpts = {}
-): ProviderCall {
+export function acpCall(by: string, entry: AcpEntry, opts: ProviderWireOpts = {}): ProviderCall {
   return async (
     state: unknown,
     questions: Record<string, JudgeQuestion>,
     deadline: number
   ): Promise<DecideResult> => {
-    const started = Date.now()
+    const started = Date.now();
     const reply = await acpRoundTrip(
       by,
       entry,
       opts,
       `${TYPED_PREAMBLE}\n${JSON.stringify({ state, questions })}`,
       deadline
-    )
-    const body = typedReply(reply.text, by)
+    );
+    const body = typedReply(reply.text, by);
     return {
       answers: mapTypedAnswers(body.answers, questions, by, `${by} (acp)`),
       model: body.model ?? reply.model,
@@ -1456,29 +1445,25 @@ export function acpCall(
       usage: reply.usage,
       // the chain owns thresholding — a raw backend reports none
       lowConfidence: [],
-    }
-  }
+    };
+  };
 }
 
 /** The raw prose surface for an `acp` entry on a general model — the
  *  rendered prompt in, the agent's message text out; parsing and the
  *  uncalibrated stamp are the consumer's (the judge's proseDecide). */
-export function acpChat(
-  by: string,
-  entry: AcpEntry,
-  opts: ProviderWireOpts = {}
-): ProviderChat {
+export function acpChat(by: string, entry: AcpEntry, opts: ProviderWireOpts = {}): ProviderChat {
   return async (prompt, deadline): Promise<ProviderChatResult> => {
-    const reply = await acpRoundTrip(by, entry, opts, prompt, deadline)
-    return { content: reply.text, model: reply.model, usage: reply.usage }
-  }
+    const reply = await acpRoundTrip(by, entry, opts, prompt, deadline);
+    return { content: reply.text, model: reply.model, usage: reply.usage };
+  };
 }
 
 /** Shell-quote for the profile render — `command` is a trusted config
  *  string (sh -c'd inside the driver), and the profile lands on it as a
  *  separate `--profile <value>` (spec bro-5hx1.1: the field exists so
  *  operators don't hand-edit profile variants into `command`). */
-const shQ = (s: string): string => `'${s.replaceAll("'", String.raw`'\''`)}'`
+const shQ = (s: string): string => `'${s.replaceAll("'", String.raw`'\''`)}'`;
 
 /** The spawn surface — argv for `bro acp-worker` (spec bro-5hx1.1).
  *  Rendered fully at spawn time so the worker never re-reads config;
@@ -1497,20 +1482,22 @@ export function acpWorkerArgv(
   opts: { model?: string; autoApprove?: boolean; sessionRm?: string } = {}
 ): string[] {
   const command =
-    entry.profile === undefined ? entry.command : `${entry.command} --profile ${shQ(entry.profile)}`
-  const argv = [...broBin, 'acp-worker', '--command', command]
-  const model = opts.model ?? entry.model
+    entry.profile === undefined
+      ? entry.command
+      : `${entry.command} --profile ${shQ(entry.profile)}`;
+  const argv = [...broBin, 'acp-worker', '--command', command];
+  const model = opts.model ?? entry.model;
   if (model !== undefined) {
-    argv.push('--model', model)
+    argv.push('--model', model);
   }
   if (opts.autoApprove ?? entry.autoApprove) {
-    argv.push('--auto-approve')
+    argv.push('--auto-approve');
   }
-  const sessionRm = opts.sessionRm ?? entry.sessionRm
+  const sessionRm = opts.sessionRm ?? entry.sessionRm;
   if (sessionRm !== undefined) {
-    argv.push('--session-rm', sessionRm)
+    argv.push('--session-rm', sessionRm);
   }
-  return argv
+  return argv;
 }
 
 /** The 'auto' capability resolves on the served model: systemone-family
@@ -1523,5 +1510,5 @@ export function acpClient(
 ): ProviderClient {
   return isSystemoneFamily(opts.model ?? entry.model)
     ? { call: acpCall(by, entry, opts) }
-    : { chat: acpChat(by, entry, opts) }
+    : { chat: acpChat(by, entry, opts) };
 }

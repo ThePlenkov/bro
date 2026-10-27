@@ -10,11 +10,14 @@ export {
   prLink,
   resolveRepo,
   resolveRepoAsync,
-} from './gh.ts'
+} from './gh.ts';
 export {
   git,
   gitTry,
+  gitTryAsync,
   gitCommonDir,
+  gitCommonDirAsync,
+  GIT_SYNC_PROBE_TIMEOUT_MS,
   gitLogPathRecords,
   gitDriftRef,
   gitLogStamp,
@@ -22,12 +25,14 @@ export {
   gitIsAncestor,
   gitIsShallow,
   gitUpstreamBehind,
+  gitUpstreamBehindAsync,
   gitWorktreeRoots,
   mainWorktreeRoot,
   unquoteGitPath,
   worktreeGitDir,
-} from './git.ts'
-export type { GitLogPathRecord, GitStamp, GitLogStamp } from './git.ts'
+} from './git.ts';
+export type { GitLogPathRecord, GitStamp, GitLogStamp } from './git.ts';
+export { getJson } from './http.ts';
 export {
   bd,
   BdCompatError,
@@ -38,7 +43,9 @@ export {
   bdTry,
   bdTryAsync,
   beadsDir,
+  beadsDirAsync,
   beadsStoreStamp,
+  beadsStoreStampAsync,
   checkBeads,
   evidenceKind,
   initBeadsStealth,
@@ -46,8 +53,8 @@ export {
   isBdNotFound,
   probeBdCompat,
   refKind,
-} from './bd.ts'
-export type { BdCompat } from './bd.ts'
+} from './bd.ts';
+export type { BdCompat } from './bd.ts';
 export {
   actSection,
   beadsSection,
@@ -63,6 +70,7 @@ export {
   defineConfig,
   fleetSection,
   globalConfigDir,
+  js,
   loadConfig,
   loadConfigLayers,
   mcpSection,
@@ -82,8 +90,8 @@ export {
   STORE_BACKENDS,
   sweepSection,
   syncSection,
-} from './config.ts'
-export type { IgnoreCheckEntry, IgnoreCheckRule, SinkDef, SinkType } from './config.ts'
+} from './config.ts';
+export type { IgnoreCheckEntry, IgnoreCheckRule, SinkDef, SinkType } from './config.ts';
 export {
   API_WIRES,
   cliCommandModel,
@@ -100,7 +108,7 @@ export {
   requireProviderSurface,
   resolveApiModel,
   UnknownProviderError,
-} from './providers.ts'
+} from './providers.ts';
 export type {
   ApiEntry,
   ApiWire,
@@ -110,7 +118,7 @@ export type {
   ProviderKind,
   ProviderKindSpec,
   ProviderSurface,
-} from './providers.ts'
+} from './providers.ts';
 export {
   CLASS_LABEL_PREFIX,
   DEFAULT_STEP_CLASS,
@@ -122,7 +130,7 @@ export {
   routeStepClass,
   stepClassInfo,
   wallText,
-} from './routing.ts'
+} from './routing.ts';
 export type {
   ChainEntry,
   FleetRouter,
@@ -131,20 +139,40 @@ export type {
   ResolvedClass,
   RoutingClass,
   RoutingTable,
-} from './routing.ts'
+} from './routing.ts';
 export {
   DATA_REF,
   dataRefCommit,
   dataRefPull,
   dataRefPush,
   dataRefRoot,
-} from './dataref.ts'
-export type { BroConfig, ConfigLayerHit, ConfigLayerName, ConfigLayersResult, ConfigSection, MirrorPolicy, Personality, SddMode, StoreBackend } from './config.ts'
-export type { QueryFacade, QueryOpts, QueryResult } from './queries.ts'
-export { definePlugin } from './plugin.ts'
-export type { BroPlugin, CliContract, CliSubContract } from './plugin.ts'
-export { docTypeNamed, docVerbs, STANDARD_VERBS, verbMethod } from './docs.ts'
-export type { DocAdapter, DocCtx, DocFlags, DocType, DocVerb, Scope } from './docs.ts'
+} from './dataref.ts';
+export type {
+  BroConfig,
+  ConfigLayerHit,
+  ConfigLayerName,
+  ConfigLayersResult,
+  ConfigSection,
+  JsonSchema,
+  MirrorPolicy,
+  Personality,
+  SddMode,
+  StoreBackend,
+} from './config.ts';
+export {
+  configDiagnostics,
+  configPolicyErrors,
+  CONFIG_SCHEMA_URL,
+  configSchemaDocument,
+  jsonSchemasFor,
+  validateSchemaValue,
+} from './config-schema.ts';
+export type { ConfigDiagnostic, SchemaError } from './config-schema.ts';
+export type { QueryFacade, QueryOpts, QueryResult } from './queries.ts';
+export { definePlugin } from './plugin.ts';
+export type { BroPlugin, CliContract, CliSubContract } from './plugin.ts';
+export { docTypeNamed, docVerbs, STANDARD_VERBS, verbMethod } from './docs.ts';
+export type { DocAdapter, DocCtx, DocFlags, DocType, DocVerb, Scope } from './docs.ts';
 export {
   bdActor,
   bdActorAsync,
@@ -157,7 +185,7 @@ export {
   taskStore,
   taskStoreAsync,
   taskStoreAt,
-} from './tasks.ts'
+} from './tasks.ts';
 export type {
   ClaimCapability,
   DepOpts,
@@ -171,7 +199,7 @@ export type {
   TaskSlot,
   TaskStore,
   TaskStoreAsync,
-} from './tasks.ts'
+} from './tasks.ts';
 export {
   bridgeFetch,
   bridgePublish,
@@ -188,25 +216,31 @@ export {
   manifestTables,
   mirrorPathFor,
   probeDoltRemote,
-} from './dolt-bridge.ts'
-export type { BdProbe, DoltBridge, DoltHeadHealth, DoltRemote, DoltSyncPlan } from './dolt-bridge.ts'
-export { emitLifecycle, LIFECYCLE_KINDS, lifecyclePath, readLifecycle } from './lifecycle.ts'
+} from './dolt-bridge.ts';
+export type {
+  BdProbe,
+  DoltBridge,
+  DoltHeadHealth,
+  DoltRemote,
+  DoltSyncPlan,
+} from './dolt-bridge.ts';
+export { emitLifecycle, LIFECYCLE_KINDS, lifecyclePath, readLifecycle } from './lifecycle.ts';
 export type {
   LifecycleEvent,
   LifecycleInput,
   LifecycleKind,
   LifecycleRead,
-} from './lifecycle.ts'
-export { bodyMeta, broTrailer, stripMeta, withMeta } from './taskmeta.ts'
+} from './lifecycle.ts';
+export { bodyMeta, broTrailer, stripMeta, withMeta } from './taskmeta.ts';
 export {
   PR_MANAGED_LABEL,
   PR_REVIEW_LABEL,
   prOwnership,
   prOwnershipMark,
   stampPrOwnership,
-} from './ownership.ts'
-export type { PrOwnership, PrStamp } from './ownership.ts'
-export { JudgeUnavailable } from './judge.ts'
+} from './ownership.ts';
+export type { PrOwnership, PrStamp } from './ownership.ts';
+export { JudgeUnavailable } from './judge.ts';
 export type {
   DecideResult,
   Disposition,
@@ -217,7 +251,7 @@ export type {
   JudgeQuestion,
   JudgeText,
   Verdict,
-} from './judge.ts'
+} from './judge.ts';
 export type {
   ApprovalProbeOpts,
   ApprovalVerdict,
@@ -236,13 +270,13 @@ export type {
   ReviewFacade,
   ReviewThread,
   ScanOpts,
-} from './review.ts'
+} from './review.ts';
 export {
   gitStacks,
   MANUAL_CASCADE,
   mergeChainPerLayer,
   shQuote,
-} from './stacks.ts'
+} from './stacks.ts';
 export type {
   StackCascade,
   StackChainMember,
@@ -250,7 +284,7 @@ export type {
   StackMembership,
   StackMergeOpts,
   StackMergeReport,
-} from './stacks.ts'
+} from './stacks.ts';
 export {
   acquireFileLock,
   awaitFileLock,
@@ -261,24 +295,24 @@ export {
   withFileLock,
   type FileLockOptions,
   type HeldLockOptions,
-} from './filelock.ts'
+} from './filelock.ts';
 export {
   fileBackedJanitorDeps,
   janitorBroDir,
   janitorDidWork,
   janitorLine,
   runJanitor,
-} from './janitor.ts'
-export type { JanitorDeps, JanitorOpts, JanitorReaped, JanitorReport } from './janitor.ts'
-export type { SpecNode, SpecStore } from './specs.ts'
-export { warnDeprecated } from './deprecation.ts'
-export { EXIT, EXIT_CODES, hasHelpFlag, printUsage, usageWriter } from './exits.ts'
-export type { ExitCode, ExitCodeRow } from './exits.ts'
-export { markerLive, markerOwner, pidAlive, procStat } from './proc.ts'
-export { checkPlanVersion, planKind, readPlanDoc } from './plan.ts'
-export type { PlanSchema } from './plan.ts'
-export { makePrinter } from './output.ts'
-export type { Printer } from './output.ts'
+} from './janitor.ts';
+export type { JanitorDeps, JanitorOpts, JanitorReaped, JanitorReport } from './janitor.ts';
+export type { SpecNode, SpecStore } from './specs.ts';
+export { warnDeprecated } from './deprecation.ts';
+export { EXIT, EXIT_CODES, hasHelpFlag, printUsage, usageWriter } from './exits.ts';
+export type { ExitCode, ExitCodeRow } from './exits.ts';
+export { markerLive, markerOwner, pidAlive, procStat } from './proc.ts';
+export { checkPlanVersion, planKind, readPlanDoc } from './plan.ts';
+export type { PlanSchema } from './plan.ts';
+export { makePrinter } from './output.ts';
+export type { Printer } from './output.ts';
 export {
   BUS_RING_LIMIT,
   BUS_TIMEOUT_MS,
@@ -296,7 +330,7 @@ export {
   isBusEventInput,
   startBusBroker,
   startBusBrokerAt,
-} from './bus.ts'
+} from './bus.ts';
 export type {
   BusBroker,
   BusBrokerOptions,
@@ -311,18 +345,27 @@ export type {
   BusSubscription,
   BusSubscriptionHandlers,
   BusWake,
-} from './bus.ts'
+} from './bus.ts';
 export {
   pickOrphanProcs,
   readProcRows,
   sweepOrphanProcs,
   trackChild,
   unrefPendingChildren,
-} from './live-procs.ts'
-export type { OrphanSweepReport, ProcRow } from './live-procs.ts'
+} from './live-procs.ts';
+export type { OrphanSweepReport, ProcRow } from './live-procs.ts';
 // test seam — scrubbed fixture git spawns + the ambient-env guard,
 // shared by every package's suites (same role as providers' testkit)
-export { AMBIENT_GIT, doltManifest, doltStoreCommit, scrubEnv, testGit, testGitEnv, testGitSpawn, testRepoInit } from './testkit.ts'
+export {
+  AMBIENT_GIT,
+  doltManifest,
+  doltStoreCommit,
+  scrubEnv,
+  testGit,
+  testGitEnv,
+  testGitSpawn,
+  testRepoInit,
+} from './testkit.ts';
 export {
   collectGuards,
   connectorHooks,
@@ -332,6 +375,7 @@ export {
   facade,
   facadeAuth,
   facadeName,
+  facadeNameAsync,
   isOwnClaim,
   mergeQueueHost,
   parallelWorkLines,
@@ -346,12 +390,14 @@ export {
   sessionStartLines,
   sessionStartProbe,
   sessionTaskClaims,
+  sessionTaskClaimsAsync,
   stackHost,
   stopGateContributions,
   tasksAsync,
-} from './connectors.ts'
-export { PROBE_TIMEOUT_MS } from './connectors.ts'
-export type { CollectedGuard } from './connectors.ts'
+  tasksStoreAsync,
+} from './connectors.ts';
+export { PROBE_TIMEOUT_MS } from './connectors.ts';
+export type { CollectedGuard } from './connectors.ts';
 export {
   GUARD_DEFAULT_BUDGET,
   GUARD_EVENTS,
@@ -360,7 +406,7 @@ export {
   GUARD_SAY_MAX_LINES,
   guardProblems,
   isGuardEvent,
-} from './guards.ts'
+} from './guards.ts';
 export type {
   Guard,
   GuardEvent,
@@ -368,12 +414,12 @@ export type {
   GuardMatch,
   GuardState,
   GuardWhen,
-} from './guards.ts'
+} from './guards.ts';
 export {
   eventMatches,
   eventTopicMatches,
   isEventInput,
-} from './events.ts'
+} from './events.ts';
 export type {
   EventEnvelope,
   EventFilter,
@@ -383,13 +429,13 @@ export type {
   EventPublishResult,
   EventsFacade,
   EventSubscription,
-} from './events.ts'
+} from './events.ts';
 export {
   busConnector,
   busEvents,
   mailboxConnector,
   mailboxEvents,
-} from './events-connectors.ts'
+} from './events-connectors.ts';
 export {
   deliverSinks,
   registerSinkBuilder,
@@ -405,7 +451,7 @@ export {
   type SinkDelivery,
   type SinkRequest,
   type SinkRequestBuilder,
-} from './sinks.ts'
+} from './sinks.ts';
 export {
   addressedTo,
   coalesceDrops,
@@ -423,7 +469,7 @@ export {
   peekMailbox,
   renderDrop,
   userMailboxDir,
-} from './notify.ts'
+} from './notify.ts';
 export type {
   Connector,
   ConnectorCtx,
@@ -436,20 +482,23 @@ export type {
   ProbeReporter,
   ProbeResult,
   ProbeTiming,
-} from './connectors.ts'
+} from './connectors.ts';
 export {
   AgentNotFound,
   AGENT_CAUSES,
   acquireAgentRegistryLock,
   agentEntryBlocked,
+  agentExitFileName,
   agentRegistryPath,
   agentsSection,
   claimStep,
   classifyExitCause,
   classifyExitCauseParts,
   commandCliName,
+  entryRunId,
   isAgentCause,
   mintAgentId,
+  mintRunId,
   patchAgentRegistry,
   probeStep,
   readAgentRegistry,
@@ -459,7 +508,7 @@ export {
   stepParent,
   withAgentRegistryLock,
   writeAgentRegistry,
-} from './agents.ts'
+} from './agents.ts';
 export type {
   AgentCapabilities,
   AgentCause,
@@ -472,7 +521,7 @@ export type {
   SpawnErrorKind,
   SpawnSpec,
   SpawnWorker,
-} from './agents.ts'
+} from './agents.ts';
 export {
   admitSessionSlot,
   BATCH_MARKER_ENV,
@@ -489,13 +538,13 @@ export {
   sessionPlanes,
   sessionQuotaConfig,
   sessionSlotsDir,
-} from './session-planes.ts'
+} from './session-planes.ts';
 export type {
   DiscoveredSession,
   ReservationLane,
   SessionPlane,
   SessionQuota,
-} from './session-planes.ts'
+} from './session-planes.ts';
 export {
   planeStartingSessions,
   releaseSessionStart,
@@ -504,8 +553,8 @@ export {
   sessionCapRefusalFor,
   sessionCapViews,
   sessionReservationsDir,
-} from './session-cap.ts'
-export type { SessionCapView } from './session-cap.ts'
+} from './session-cap.ts';
+export type { SessionCapView } from './session-cap.ts';
 export {
   clearPlanes,
   planeNames,
@@ -514,7 +563,7 @@ export {
   PlaneVerbError,
   registerPlane,
   verbsNotWired,
-} from './planes.ts'
+} from './planes.ts';
 export type {
   EventRow,
   Finding,
@@ -531,11 +580,100 @@ export type {
   VerdictRow,
   Worker,
   WorkItem,
-} from './planes.ts'
+} from './planes.ts';
 export {
   checkSkillLock,
   readSkillLock,
   skillFolderHash,
   type LockedSkill,
   type SkillDrift,
-} from './skills-lock.ts'
+} from './skills-lock.ts';
+export {
+  acquireFileLock,
+  awaitFileLock,
+  holdFileLock,
+  lockHolderPid,
+  LockTimeout,
+  staleLock,
+  withFileLock,
+  type FileLockOptions,
+  type HeldLockOptions,
+} from './filelock.ts';
+export {
+  appendPrivateFileSync,
+  mkdirPrivateSync,
+  openPrivateAppendSync,
+  PRIVATE_DIR_MODE,
+  PRIVATE_FILE_MODE,
+  writePrivateFileSync,
+} from './private-files.ts';
+export {
+  fileBackedJanitorDeps,
+  janitorBroDir,
+  janitorDidWork,
+  janitorLine,
+  runJanitor,
+} from './janitor.ts';
+export type { JanitorDeps, JanitorOpts, JanitorReaped, JanitorReport } from './janitor.ts';
+export type { SpecNode, SpecStore } from './specs.ts';
+export { warnDeprecated } from './deprecation.ts';
+export { EXIT, EXIT_CODES, hasHelpFlag, printUsage, usageWriter } from './exits.ts';
+export type { ExitCode, ExitCodeRow } from './exits.ts';
+export { markerLive, markerOwner, pidAlive, procStat } from './proc.ts';
+export { checkPlanVersion, planKind, readPlanDoc } from './plan.ts';
+export type { PlanSchema } from './plan.ts';
+export { makePrinter } from './output.ts';
+export type { Printer } from './output.ts';
+export {
+  BUS_RING_LIMIT,
+  BUS_TIMEOUT_MS,
+  BusRing,
+  BUS_PROBE_LIMIT,
+  busMatches,
+  busProbe,
+  busPublish,
+  busSocketPath,
+  busStatePath,
+  busStatus,
+  busSubscribe,
+  busTopicMatches,
+  busWake,
+  isBusEventInput,
+  startBusBroker,
+  startBusBrokerAt,
+} from './bus.ts';
+export type {
+  BusBroker,
+  BusBrokerOptions,
+  BusCursor,
+  BusEnvelope,
+  BusEventInput,
+  BusFilter,
+  BusProbeResult,
+  BusPublishResult,
+  BusRecord,
+  BusStatus,
+  BusSubscription,
+  BusSubscriptionHandlers,
+  BusWake,
+} from './bus.ts';
+export {
+  pickOrphanProcs,
+  readProcRows,
+  sweepOrphanProcs,
+  trackChild,
+  unrefPendingChildren,
+} from './live-procs.ts';
+export type { OrphanSweepReport, ProcRow } from './live-procs.ts';
+// test seam — scrubbed fixture git spawns + the ambient-env guard,
+// shared by every package's suites (same role as providers' testkit)
+export {
+  AMBIENT_GIT,
+  doltManifest,
+  doltStoreCommit,
+  scrubEnv,
+  testGit,
+  testGitEnv,
+  testGitSpawn,
+  testRepoInit,
+} from './testkit.ts';

@@ -1,4 +1,5 @@
 ---
+
 name: mcp
 description: "Use when an MCP-capable client (Windsurf, Zed, Goose, Gemini CLI, Copilot, Claude Desktop) should read bro orchestration state as tools instead of shelling `bro` and parsing text — `bro fleet mcp` is the stdio server over the read planes. Thin wrapper over the bro CLI — mechanics live in the CLI."
 ---
@@ -16,10 +17,13 @@ per declared named read (`bro_work_ready`, `bro_queue_next`,
 `bro_events_tail`, `bro_judge_stats`, `bro_debt_next`,
 `bro_debt_summary`, `bro_learn_probe`).
 
-**Read-only in v1.** Write verbs stay unexposed until the spec's
-session-authz question is designed — a `claim`/`resolve`/`spawn` call
-is not a tool, and cannot become one by accident because generation is
-the only path.
+**Read-only except spec-assigned verbs.** Write verbs stay unexposed
+until a spec assigns one to this transport through the descriptor's
+`mcpVerbs` allowlist — generation is the only path, so a verb cannot
+become a tool by accident. The one wired verb today is
+`bro_agents_delegate` (spec bro-z8tng — the same contract as
+`bro fleet delegate`: `mode:'wait'` is a pooled ACP turn, `'detach'` a
+registry spawn); `spawn`/`stop`/`respawn` remain declared-but-unwired.
 
 ## Registering
 
@@ -33,7 +37,7 @@ Point the client's MCP config at it like any stdio server:
 ## Semantics the client can rely on
 
 - `tools/list` is the discovery document: an absent capability means an
-  absent *tool* — a repo with no review host exposes no `bro_gates_*`
+  absent _tool_ — a repo with no review host exposes no `bro_gates_*`
   tools, a repo without beads no `bro_queue_*`/`bro_learn_*`.
 - Tool results are JSON text. A plane whose backend is down returns
   `{ "error": "<degraded note>" }` (with `isError: true`) — degraded,
@@ -46,6 +50,6 @@ Point the client's MCP config at it like any stdio server:
 
 ## Debug surface
 
-| Command | What it does |
-| ------- | ------------ |
+| Command                 | What it does                                                                                             |
+| ----------------------- | -------------------------------------------------------------------------------------------------------- |
 | `bro fleet mcp --tools` | prints the generated `tools/list` payload for this repo (same capability gating a client sees) and exits |

@@ -31,13 +31,13 @@ omp already has Plan, Goal, Vibe, Prewalk and Advisor. bro does not
 reimplement them — it supplies the state they cannot have. See
 `modes.ts` for the full mapping; the short version:
 
-| omp mode | what bro adds |
-| --- | --- |
-| Plan | the bead and spec the plan must answer, plus the claims in flight |
-| Goal | the bead the objective belongs to, and the judge that says "met" |
-| Vibe | the claims — who owns which bead, so two workers never edit one |
-| Prewalk | the provider routing that says which model is fast *here* |
-| Advisor | `WATCHDOG.md` — bro's review priorities, plus the debt ledger |
+| omp mode | what bro adds                                                     |
+| -------- | ----------------------------------------------------------------- |
+| Plan     | the bead and spec the plan must answer, plus the claims in flight |
+| Goal     | the bead the objective belongs to, and the judge that says "met"  |
+| Vibe     | the claims — who owns which bead, so two workers never edit one   |
+| Prewalk  | the provider routing that says which model is fast _here_         |
+| Advisor  | `WATCHDOG.md` — bro's review priorities, plus the debt ledger     |
 
 ## Install
 
@@ -48,7 +48,7 @@ omp plugin install bro@bro               # from the marketplace
 
 Or load it ad hoc: `omp --extension ./plugins/omp/bro/bro.ts`.
 
-The module resolves the CLI as local dist (bundled sibling or the
+The in-process TypeScript module resolves the CLI as local dist (bundled sibling or the
 checkout's `packages/cli/dist/index.js` found walking up), then `bro`
 on PATH passing the `bro hooks` probe, then `npx -y --prefer-offline
 @broject/bro@0.2.5`. Every call is async and fail-open —
