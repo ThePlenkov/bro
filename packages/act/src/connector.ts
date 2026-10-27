@@ -5,7 +5,7 @@
  * the session armed 'act'. All host access goes through the resolved
  * ReviewFacade; this connector owns no vendor calls.
  */
-import { loadConfig, reviewHost, type Connector, type PrTarget } from '@broject/core';
+import { loadConfig, reviewHost, spawnSelf, type Connector, type PrTarget } from '@broject/core';
 import { checkHistory } from './check-history.ts';
 import { evaluateExitGate } from './exit-gate.ts';
 import { mergeSlotHolderAsync } from './merge-slot.ts';
@@ -16,7 +16,7 @@ import {
   watchRetire,
   type ListedWatch,
 } from './pending-watch.ts';
-import { fetchPrActState } from './state.ts';
+import { cachedPrActState, fetchPrActState } from './state.ts';
 import { prStateCache } from './state-cache.ts';
 
 /** The bound-dir PR — async when the host has the twin, else a resolved
@@ -78,47 +78,13 @@ async function watchCover(dir: string, pr: number): Promise<boolean> {
   }
 }
 
-interface PrProbe {
-  pr: number;
-  url: string;
-  gate: ReturnType<typeof evaluateExitGate>;
-}
-
-/** Current-branch open PR + its gate, or null when absent/closed. */
-async function prProbe(dir: string): Promise<PrProbe | null> {
-  try {
-    const cfg = loadConfig(dir);
-    const rev = reviewHost(dir, cfg.connectors);
-    const cur = await currentPr(rev);
-    if (!cur || cur.state !== 'OPEN') {
-      return null;
-    }
-    const state = await fetchPrActState(
-      rev,
-      { repo: await resolvedRepo(rev), pr: cur.pr },
-      {
-        ignoreChecks: cfg.act.ignoreChecks,
-        checkHistory: checkHistory(dir),
-        maxRounds: cfg.act.maxRounds,
-        docsPaths: cfg.act.docsPaths,
-        docsMaxRounds: cfg.act.docsMaxRounds,
-        requireApproval: cfg.act.requireApproval,
-        approvers: cfg.act.approvers,
-        stateCache: prStateCache(dir, { lockWaitMs: 0 }),
-      }
-    );
-    // The same gate `bro act status` enforces: open threads, pending/failed
-    // CI and AI reviewers, SAST findings, unknown mergeability, BEHIND.
-    return {
-      pr: cur.pr,
-      url: cur.url,
-      gate: evaluateExitGate(state, { requireApproval: cfg.act.requireApproval }),
-    };
-  } catch {
-    // no repo/PR/auth — nothing to gate on
-    return null;
-  }
-}
+/** The detach hint every unwatched-PR block shares — a watcher in a
+ *  turn-bound shell dies with the turn, so the block points at the
+ *  self-detaching form (bro-b16er). */
+const armWatch = (pr: number): string =>
+  `arm one: \`bro act wait ${pr} --merge --cleanup --detach\` ` +
+  '(a watcher in a turn-bound shell dies with the turn); or state ' +
+  'the exact open state and stop again';
 
 /** Merge-slot holder line — a session seeing the slot held knows not to
  *  start a merge right now. Fail-open: no beads → no line. */
@@ -226,46 +192,82 @@ export const actConnector: Connector = {
       }
     },
     async stopGate(ctx) {
-      const p = await prProbe(ctx.dir);
-      if (!p) {
-        return [];
-      }
-      const watched = await watchCover(ctx.dir, p.pr);
-      const head = `bro: PR [#${p.pr}](${p.url})`;
-      if (!p.gate.ok) {
-        const line = `${head}: ${p.gate.blockers.join('; ')}`;
-        const watchNote = watched ? 'live act watch' : 'no live act watch';
+      // the stop path never fetches: resolve the branch PR, read the
+      // feed, and let a detached `bro act status` fill a miss
+      // (bro-36sx7.4 — the 5-7 call fetch has no budget on a hook)
+      try {
+        const cfg = loadConfig(ctx.dir);
+        const rev = reviewHost(ctx.dir, cfg.connectors);
+        const cur = await currentPr(rev);
+        if (!cur || cur.state !== 'OPEN') {
+          return [];
+        }
+        const target = { repo: await resolvedRepo(rev), pr: cur.pr };
+        const head = `bro: PR [#${cur.pr}](${cur.url})`;
+        const cache = prStateCache(ctx.dir, { lockWaitMs: 0 });
+        const state = cachedPrActState(cache, target, {
+          requireApproval: cfg.act.requireApproval,
+          approvers: cfg.act.approvers,
+        });
+        const watched = await watchCover(ctx.dir, cur.pr);
+        if (state === null) {
+          // no usable verdict — a miss never fabricates one: the
+          // gate's invariant degrades to "verdict known or watcher
+          // armed". claimRefresh dedups the spawn and stands down
+          // while a peer's fetch holds the feed lock.
+          if (cache !== null && cache.claimRefresh(target)) {
+            spawnSelf(['act', 'status', '--pr', String(cur.pr)], ctx.dir);
+          }
+          if (watched) {
+            // a poller publishes — nothing for this session
+            return [];
+          }
+          const line = `${head}: gate verdict pending — no live act watch`;
+          return [
+            {
+              aspect: 'act',
+              block: `${line} — ${armWatch(cur.pr)}`,
+              passive: `${line} (current branch — this session did not touch it)`,
+            },
+          ];
+        }
+        // The same gate `bro act status` enforces: open threads,
+        // pending/failed CI and AI reviewers, SAST findings, unknown
+        // mergeability, BEHIND.
+        const gate = evaluateExitGate(state, { requireApproval: cfg.act.requireApproval });
+        if (!gate.ok) {
+          const line = `${head}: ${gate.blockers.join('; ')}`;
+          const watchNote = watched ? 'live act watch' : 'no live act watch';
+          return [
+            {
+              aspect: 'act',
+              block:
+                `${line} (${watchNote}) — ` +
+                'list with `bro act threads` — fix inline or defer to a debt bead ' +
+                '(reply + resolve); when fix_rounds exceeds the round cap ' +
+                '(act.maxRounds — tighter on docs-only PRs) only defer ' +
+                'counts; recheck `bro act status`',
+              passive: `${line} (${watchNote}; current branch — this session did not touch it)`,
+            },
+          ];
+        }
+        if (watched) {
+          return [];
+        }
+        // green gate is not "done" — a pushed PR ends the turn only
+        // while somebody keeps polling it (bro-97lk).
+        const line = `${head}: gate OK but no live act watch`;
         return [
           {
             aspect: 'act',
-            block:
-              `${line} (${watchNote}) — ` +
-              'list with `bro act threads` — fix inline or defer to a debt bead ' +
-              '(reply + resolve); when fix_rounds exceeds the round cap ' +
-              '(act.maxRounds — tighter on docs-only PRs) only defer ' +
-              'counts; recheck `bro act status`',
-            passive: `${line} (${watchNote}; current branch — this session did not touch it)`,
+            block: `${line} — ${armWatch(cur.pr)}`,
+            passive: `${line} (current branch — this session did not touch it)`,
           },
         ];
-      }
-      if (watched) {
+      } catch {
+        // no repo/PR/auth — nothing to gate on
         return [];
       }
-      // green gate is not "done" — a pushed PR ends the turn only while
-      // somebody keeps polling it. A turn-bound `act wait` dies with the
-      // turn (bro-97lk): the block points at the self-detaching form
-      // (bro-b16er).
-      const line = `${head}: gate OK but no live act watch`;
-      return [
-        {
-          aspect: 'act',
-          block:
-            `${line} — arm one: \`bro act wait ${p.pr} --merge --cleanup --detach\` ` +
-            '(a watcher in a turn-bound shell dies with the turn); or state ' +
-            'the exact open state and stop again',
-          passive: `${line} (current branch — this session did not touch it)`,
-        },
-      ];
     },
   }),
 };

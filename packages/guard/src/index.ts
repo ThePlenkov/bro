@@ -6,7 +6,7 @@ export {
   GUARD_SAY_MAX_LINES,
   guardProblems,
   isGuardEvent,
-} from '@broject/core'
+} from '@broject/core';
 export type {
   CollectedGuard,
   Guard,
@@ -15,12 +15,13 @@ export type {
   GuardMatch,
   GuardState,
   GuardWhen,
-} from '@broject/core'
-export { collectGuards } from '@broject/core'
-export type { GuardConfig } from './config.ts'
-export { DEFAULT_GUARD_CONFIG, guardSection } from './config.ts'
-export { evalState, liveState } from './probes.ts'
-export type { ClauseVerdict, LiveState, NamedProbe, ProbeResult } from './probes.ts'
-export { BUILTIN_GUARDS, guardConnector } from './builtins.ts'
-export { renderSay, runGuards } from './engine.ts'
-export type { GuardEvalOpts, GuardJudgeInput, GuardRun, GuardVerdict } from './engine.ts'
+} from '@broject/core';
+export { collectGuards } from '@broject/core';
+export type { GuardConfig } from './config.ts';
+export { DEFAULT_GUARD_CONFIG, guardSection } from './config.ts';
+export { evalState, liveState } from './probes.ts';
+export type { ClauseVerdict, LiveState, NamedProbe, ProbeResult } from './probes.ts';
+export { BUILTIN_GUARDS, guardConnector } from './builtins.ts';
+export { renderSay, runGuards } from './engine.ts';
+export type { GuardEvalOpts, GuardJudgeInput, GuardRun, GuardVerdict } from './engine.ts';
+export { drainJudgeRequests, judgeQueueDir, queuedJudge } from './queue.ts';
