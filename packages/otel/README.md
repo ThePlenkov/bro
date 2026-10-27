@@ -18,7 +18,7 @@ stdout sink. Sync and fail-open — telemetry never stalls a hook, and
 npm i @broject/otel
 ```
 
-Requires Node ≥ 22. ESM only.
+Requires Node ≥ 22.18. ESM only.
 
 ## Surface
 
