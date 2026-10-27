@@ -62,6 +62,7 @@ import {
   rmSync,
   statSync,
   writeFileSync,
+  writeSync,
 } from 'node:fs'
 import { dirname, isAbsolute, join } from 'node:path'
 import { setTimeout as nodeSetTimeout } from 'node:timers'
@@ -182,7 +183,20 @@ let codexClient = false
 
 function emit(out: unknown): void {
   const payload = cursorClient ? toCursorHookOutput(out) : out
-  process.stdout.write(`${JSON.stringify(payload)}\n`)
+  const line = `${JSON.stringify(payload)}\n`
+  // synchronous — the answer must be on the wire before whatever
+  // blocking I/O follows it (the deadline flush, exit); a buffered
+  // write only queues behind it. The stream fallback covers a closed
+  // or non-fd stdout.
+  try {
+    writeSync(1, line)
+  } catch {
+    try {
+      process.stdout.write(line)
+    } catch {
+      // stdout is gone — nothing left to answer through
+    }
+  }
 }
 
 function isAbsoluteProject(p: string): boolean {
@@ -1080,6 +1094,19 @@ function flushPerf(sessionId: string, event: string, t0: number, deadline = fals
   } catch {
     // perf must never stall a session
   }
+}
+
+/** Whole-dispatch hard deadline (spec: specs/bro-36sx7.13.md) — under
+ *  the host's ~10s hook timeout with room for run.sh's watchdog
+ *  (BRO_HOOK_WATCHDOG_S, default 8s) behind it. */
+const HOOK_DEADLINE_MS = 6_000
+
+export function hookDeadlineMs(env: NodeJS.ProcessEnv = process.env): number {
+  const n = Number(env.BRO_HOOK_DEADLINE_MS)
+  // Node schedules a delay past the 32-bit timer ceiling as ~1ms — an
+  // over-ceiling override would expire the deadline immediately and
+  // strip every gate's verdict, so it falls back like any invalid value.
+  return Number.isSafeInteger(n) && n > 0 && n <= 2_147_483_647 ? n : HOOK_DEADLINE_MS
 }
 
 // --- event handlers -----------------------------------------------------------
@@ -2092,17 +2119,19 @@ export async function runHooksCommand(argv: string[]): Promise<void> {
   }
   perfBuf = []
   const t0 = Date.now()
-  const configuredDeadline = Number(process.env.BRO_HOOK_DEADLINE_MS)
-  const deadlineMs =
-    Number.isSafeInteger(configuredDeadline) && configuredDeadline > 0 ? configuredDeadline : 6_000
   const deadlineTimer = nodeSetTimeout(() => {
     const sessionId = typeof input.session_id === 'string' ? input.session_id : ''
-    flushPerf(sessionId, event, t0, true)
+    // the answer goes out before the journal flush — silence on a
+    // permission event is a deny, and a stalled flushPerf must not take
+    // the answer down with it (emit is already synchronous)
     if (!permissionAnswerEmitted) {
       answerCursorPermission(event, input)
     }
-    process.exit(0)
-  }, deadlineMs)
+    flushPerf(sessionId, event, t0, true)
+    // drain barrier — a bare exit can cut a still-queued write; the
+    // run.sh watchdog backstops a pipe that never drains
+    process.stdout.write('', () => process.exit(0))
+  }, hookDeadlineMs())
   deadlineTimer.unref()
   const evSpan = otelSpan('hook.event', {
     'hook.event': event,
