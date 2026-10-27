@@ -581,6 +581,18 @@ function buildLine(build: NonNullable<BroStatus['build']>): string {
   );
 }
 
+/** The heartbeat one-liner — freshness plus the rig's open-decision
+ *  count; a skewed writer (future stamp or its own persisted verdict)
+ *  is flagged, never passed off as "just now". */
+function watchLine(watch: HeartbeatSummary): string {
+  const tail = watch.attention === 0 ? 'quiet' : `${watch.attention} attention`;
+  if (watch.futureMs !== undefined) {
+    return `watch: heartbeat stamped ${heartbeatAge(watch.futureMs)} in the future — writer clock skew — ${tail}`;
+  }
+  const skew = watch.writerSkewed === true ? ' — writer clock skew' : '';
+  return `watch: heartbeat ${heartbeatAge(watch.ageMs)} ago${skew} — ${tail}`;
+}
+
 function render(s: BroStatus): string[] {
   const lines: string[] = [];
   const dirtyBit = s.dirty > 0 ? ` · dirty ${s.dirty}` : '';
@@ -591,14 +603,7 @@ function render(s: BroStatus): string[] {
     );
   }
   if (s.watch !== null) {
-    const tail = s.watch.attention === 0 ? 'quiet' : `${s.watch.attention} attention`;
-    lines.push(
-      s.watch.futureMs !== undefined
-        ? `watch: heartbeat stamped ${heartbeatAge(s.watch.futureMs)} in the future — writer clock skew — ${tail}`
-        : s.watch.writerSkewed === true
-          ? `watch: heartbeat ${heartbeatAge(s.watch.ageMs)} ago — writer clock skew — ${tail}`
-          : `watch: heartbeat ${heartbeatAge(s.watch.ageMs)} ago — ${tail}`
-    );
+    lines.push(watchLine(s.watch));
   }
   if (s.drill.frame) {
     lines.push(
