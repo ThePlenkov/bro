@@ -91,6 +91,7 @@ import {
   pidAlive,
   resolveAgentConnector,
   resolveSpawnProvider,
+  settleAcpSessions,
   type AgentConnectorEnv,
 } from '../agent-connectors.ts';
 import { laneStatus, laneStatusLines, type LaneStatusRow } from '../lane.ts';
@@ -1424,6 +1425,13 @@ async function cmdPrune(dir: string, env: AgentConnectorEnv, argv: string[]): Pr
   }
   const { backends } = await collectAgentBackends(dir, env, connectorName);
   const { reapable, skipped, expected } = selectReapable(backends, cutoff);
+  // a reaped row takes its recorded acp session id with it — run the
+  // provider's sessionRm while the id is still on file, or an adhoc
+  // `agents run` worker's session outlives its only record (the
+  // PR-settle hook in spec bro-5qsnr never fires for phantom steps)
+  if (reapable.length > 0) {
+    settleAcpSessions(dir, env, { molSteps: reapable });
+  }
   const removed = reapable.length === 0 ? [] : removeAgentRegistryEntries(dir, reapable, expected);
   if (json) {
     console.log(JSON.stringify({ pruned: removed, skippedDegraded: skipped }, null, 2));

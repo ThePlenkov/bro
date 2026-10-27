@@ -1,7 +1,9 @@
 import { after, describe, test } from 'node:test';
 import assert from 'node:assert/strict';
-import { join } from 'node:path';
+import { mkdirSync, writeFileSync } from 'node:fs';
+import { dirname, join } from 'node:path';
 import {
+  agentRegistryPath,
   bdTry,
   patchAgentRegistry,
   resolveStepClass,
@@ -462,6 +464,16 @@ describe("resumeSessionFor — the coder's own session rides again (bro-5qsnr)",
       assert.equal(resumeSessionFor({ root: main }, 'bro-x1', {}), undefined);
       // nothing recorded — a bead that never ran acp
       assert.equal(resumeSessionFor({ root: main }, 'bro-x2', argvLane), undefined);
+    });
+  });
+
+  test('a corrupt agents.json is "no session" — never a throw past the claim', () => {
+    const { root, main } = initRepo('bro-loop-resume-');
+    inside(main, root, () => {
+      const reg = agentRegistryPath(main)!;
+      mkdirSync(dirname(reg), { recursive: true });
+      writeFileSync(reg, '{not json');
+      assert.equal(resumeSessionFor({ root: main }, 'bro-x1', argvLane), undefined);
     });
   });
 });

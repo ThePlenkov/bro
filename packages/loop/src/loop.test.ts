@@ -255,8 +255,10 @@ describe('prompts', () => {
 
   test('fix/rebase prompts name the session truth — resumed or cold (bro-5qsnr)', () => {
     const resumed = buildFixPrompt(bead, 42, 't', 'sess-abc');
-    assert.match(resumed, /resuming your own devin session \(sess-abc\)/);
-    assert.doesNotMatch(resumed, /fresh agent/);
+    assert.match(resumed, /resuming on your own recorded devin session \(sess-abc\)/);
+    // the note hedges the fallback — a gone session means a fresh
+    // worker on the same worktree, and the prompt says so
+    assert.match(resumed, /session was gone, you are fresh/);
 
     const cold = buildFixPrompt(bead, 42, 't');
     assert.match(cold, /No live session.*could be resumed/);

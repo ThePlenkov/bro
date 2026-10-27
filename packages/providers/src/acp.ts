@@ -684,6 +684,12 @@ export async function pumpTurn(
   parent?: OtelCtx,
   cwd?: string
 ): Promise<{ stopReason: StopReason; text: string; response: PromptResponse }> {
+  // an already-cancelled caller never gets a turn — the prompt send
+  // below would start billable agent work the later abort race can only
+  // interrupt mid-flight (tools may already have run)
+  if (signal?.aborted === true) {
+    throw new JudgeUnavailable(`${by}: caller aborted the turn`);
+  }
   const traced = tracedUpdates(onUpdate, parent);
   const plane = agentTurnPlane({ cwd, by, sessionId: session.sessionId });
   plane.start();

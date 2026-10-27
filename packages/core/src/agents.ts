@@ -303,6 +303,11 @@ export interface AgentCapabilities {
   attach?: boolean;
   /** spawn() can rebind a dead agent's claim to a new worker. */
   respawn?: boolean;
+  /** spawn() can run a provider-resolved SpawnWorker — backends that own
+   *  their provider session (gascity's city.toml), dispatch remotely
+   *  (copilot), or never spawn (devin) report false; absent means the
+   *  worker contract holds. */
+  workers?: boolean;
   supervisor: 'none' | 'ondemand' | 'required';
 }
 

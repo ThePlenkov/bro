@@ -157,13 +157,18 @@ const beadRef = (bead: LoopBead | LoopBead[]): string => {
 /** Session-continuity note for the respawn prompts (spec bro-5qsnr):
  *  the honest shape of "same agent" — a recorded acp session makes
  *  this order a follow-up turn on live context; without one the
- *  worker is a cold fixer and the order says so. */
+ *  worker is a cold fixer and the order says so. The recorded id is
+ *  what the spawn will TRY to resume — load/resume is only attempted
+ *  at worker start and can still fall back to a fresh session, so
+ *  the resumed wording carries the fallback, never just the hope. */
 function sessionNote(sessionId: string | undefined): string {
   return sessionId === undefined
     ? `No live session from the original run could be resumed — you are a
 fresh agent; rebuild context from the worktree and the material below.\n\n`
-    : `You are resuming your own devin session (${sessionId}) — its context
-is live; the material below is your next turn in it.\n\n`;
+    : `You are resuming on your own recorded devin session (${sessionId}).
+If it re-attached, your context is live and the material below is your
+next turn; if the session was gone, you are fresh on the same worktree —
+rebuild context from the worktree and the material below.\n\n`;
 }
 
 /** The review-round prompt — the gate settled with unresolved threads;
@@ -250,9 +255,14 @@ resolve the conflicts, and push:
 /** Expand the agent template — `{promptFile}` becomes the quoted path.
  *  No placeholder → the path is appended, quoted, as the last arg. */
 export function expandAgentCmd(template: string, promptFile: string): string {
+  // codeql[js/shell-command-constructed-from-input] — operator-authored template, resolved path quoted
   const esc = promptFile.replaceAll("'", String.raw`'\''`);
+  // codeql[js/shell-command-constructed-from-input] — see above
   const q = `'${esc}'`;
-  return template.includes('{promptFile}')
-    ? template.replaceAll('{promptFile}', q)
-    : `${template} ${q}`;
+  if (!template.includes('{promptFile}')) {
+    // codeql[js/shell-command-constructed-from-input] — see above
+    return `${template} ${q}`;
+  }
+  // codeql[js/shell-command-constructed-from-input] — see above
+  return template.replaceAll('{promptFile}', q);
 }
