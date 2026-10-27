@@ -17,7 +17,7 @@
  *  drops the hook entirely. An absent `'*'` reads as `true`: the
  *  master `enabled` switch alone is enough to light every hook at the
  *  count level — `'*': false` is the "enabled but silent" spelling. */
-import type { ConfigSection } from '@broject/core'
+import { js, type ConfigSection } from '@broject/core'
 
 export const OTEL_EXPORTER_TYPES = ['file', 'otlp', 'stdout'] as const
 export type OtelExporterType = (typeof OTEL_EXPORTER_TYPES)[number]
@@ -132,6 +132,26 @@ export const otelSection: ConfigSection<OtelConfig> = (raw) => {
     ),
   }
 }
+
+otelSection.jsonSchema = js.obj({
+  enabled: js.bool,
+  exporter: js.obj({
+    type: { enum: OTEL_EXPORTER_TYPES },
+    path: js.str,
+    endpoint: js.str,
+    headers: js.map(js.str),
+  }),
+  hooks: js.map(
+    js.oneOf(
+      js.bool,
+      js.obj({
+        enabled: js.bool,
+        sample: { type: 'number', minimum: 0, maximum: 1 },
+        collect: js.strList,
+      })
+    )
+  ),
+})
 
 /** The resolved policy for one hook — its own entry when configured,
  *  else `'*'`, else on-at-meta-level (see the module doc: absent `'*'`
