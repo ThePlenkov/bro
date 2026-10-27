@@ -930,25 +930,33 @@ const devinProc = (): string => {
       const home = join(f.main, '.git', 'bro', 'agents')
       const modeOf = (p: string) => statSync(p).mode & 0o777
       const artifact = (id: string, n: string) => join(home, `${id}.${n}`)
+      // the .exit name is attempt-scoped (spec bro-l8c4f.5) — each
+      // spawn's record lands under its own runId
+      const exitOf = (i: { id: string; runId?: string }) =>
+        join(home, agentExitFileName(i.id, i.runId))
       const prev = process.umask(0o022)
       const c = conn(f)
       const info = await c.spawn(SPEC(f.main, f.beadsDir, 'fx-1', 'process.exit(0)'))
       process.umask(prev)
-      await until(() => existsSync(artifact(info.id, 'exit')))
-      for (const n of ['prompt.md', 'log', 'stderr', 'exit']) {
+      await until(() => existsSync(exitOf(info)))
+      for (const n of ['prompt.md', 'log', 'stderr']) {
         assert.equal(modeOf(artifact(info.id, n)), 0o600, `${n}`)
       }
+      assert.equal(modeOf(exitOf(info)), 0o600, 'exit')
       assert.equal(modeOf(home), 0o700, 'agents home')
       // legacy permissive artifacts — repair rides the next write/append
-      for (const n of ['prompt.md', 'log', 'stderr', 'exit']) {
+      for (const n of ['prompt.md', 'log', 'stderr']) {
         chmodSync(artifact(info.id, n), 0o644)
       }
       const again = await c.spawn(SPEC(f.main, f.beadsDir, 'fx-1', 'process.exit(0)'))
       assert.equal(again.id, info.id)
-      await until(() => existsSync(artifact(info.id, 'exit')))
-      for (const n of ['prompt.md', 'log', 'stderr', 'exit']) {
+      await until(() => existsSync(exitOf(again)))
+      for (const n of ['prompt.md', 'log', 'stderr']) {
         assert.equal(modeOf(artifact(info.id, n)), 0o600, `${n} repaired`)
       }
+      // a per-attempt .exit needs no repair — the fresh run's record is
+      // pinned at create
+      assert.equal(modeOf(exitOf(again)), 0o600, 'exit pinned at create')
     } finally {
       cleanup(f)
     }
