@@ -631,16 +631,88 @@ cursor_permission_ask() {
   printf '%s\n' '{"permission":"ask"}'
 }
 
+HOOK_SPOOL_STARTED=0
+
+hook_spool_prepare() {
+  [ "${BRO_HOOK_SPOOL:-}" = 0 ] && return 0
+  HOOK_SPOOL=${BRO_HOOK_SPOOL:-${XDG_STATE_HOME:-${HOME:-}/.local/state}/bro/hooks.spool}
+  case "$HOOK_SPOOL" in
+    */*) HOOK_SPOOL_DIR=${HOOK_SPOOL%/*}; [ -n "$HOOK_SPOOL_DIR" ] || HOOK_SPOOL_DIR=/ ;;
+    *) HOOK_SPOOL_DIR=. ;;
+  esac
+  if [ ! -d "$HOOK_SPOOL_DIR" ]; then
+    mkdir -p "$HOOK_SPOOL_DIR" 2>/dev/null || :
+  fi
+}
+
+hook_spool_identity() {
+  HOOK_SPOOL_HOST=unknown
+  if [ -n "${CURSOR_PLUGIN_ROOT:-}" ]; then
+    HOOK_SPOOL_HOST=cursor
+  elif [ -n "${DEVIN_PLUGIN_ROOT:-}" ]; then
+    HOOK_SPOOL_HOST=devin
+  elif [ -n "${CLAUDE_PLUGIN_ROOT:-}" ]; then
+    HOOK_SPOOL_HOST=claude
+  fi
+  HOOK_SPOOL_ID=$$-$BRO_HOOK_T0
+}
+
+hook_spool_start() {
+  HOOK_SPOOL_STARTED=1
+  [ "${BRO_HOOK_SPOOL:-}" = 0 ] && return 0
+  hook_spool_prepare
+  hook_spool_identity
+  printf 'v1\t%s\tstart\t%s\t%s\t%s\t%s\n' \
+    "$BRO_HOOK_T0" "$HOOK_SPOOL_ID" "$HOOK_SPOOL_HOST" "$EVENT" "${PWD:-}" \
+    >> "$HOOK_SPOOL" 2>/dev/null || :
+  return 0
+}
+
+hook_spool_end() {
+  [ "${BRO_HOOK_SPOOL:-}" = 0 ] && return 0
+  hook_spool_prepare
+  hook_spool_identity
+  _hook_spool_ts=$(date +%s 2>/dev/null) || _hook_spool_ts=$BRO_HOOK_T0
+  printf 'v1\t%s\tend\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+    "$_hook_spool_ts" "$HOOK_SPOOL_ID" "$HOOK_SPOOL_HOST" "$EVENT" "$1" "$2" "${PWD:-}" \
+    >> "$HOOK_SPOOL" 2>/dev/null || :
+  return 0
+}
+
 if [ -f "$DIR/packages/cli/dist/index.js" ] && command -v node >/dev/null 2>&1; then
-  run_bounded node "$DIR/packages/cli/dist/index.js" hooks "$@"
-  _rc=$?
-  [ "$RUN_BOUNDED_EXPIRED" = 1 ] && { cursor_permission_ask; exit 0; }
-  [ "$_rc" -eq 0 ] && exit 0
+  _rc=0
+  hook_spool_start
+  run_bounded node "$DIR/packages/cli/dist/index.js" hooks "$@" || _rc=$?
+  if [ "$RUN_BOUNDED_EXPIRED" = 1 ]; then
+    hook_spool_end "$_rc" watchdog
+    cursor_permission_ask
+    exit 0
+  fi
+  if [ "$_rc" -eq 0 ]; then
+    hook_spool_end "$_rc" ok
+    exit 0
+  fi
 fi
 if command -v bro >/dev/null 2>&1; then
-  run_bounded bro hooks "$@" || true
-  [ "$RUN_BOUNDED_EXPIRED" = 1 ] && cursor_permission_ask
+  _rc=0
+  [ "$HOOK_SPOOL_STARTED" = 1 ] || hook_spool_start
+  run_bounded bro hooks "$@" || _rc=$?
+  if [ "$RUN_BOUNDED_EXPIRED" = 1 ]; then
+    hook_spool_end "$_rc" watchdog
+    cursor_permission_ask
+    exit 0
+  fi
+  if [ "$_rc" -eq 0 ]; then
+    hook_spool_end "$_rc" ok
+  else
+    hook_spool_end "$_rc" nonzero
+  fi
 else
+  if [ "$HOOK_SPOOL_STARTED" = 1 ]; then
+    hook_spool_end "$_rc" nonzero
+  else
+    hook_spool_end 0 no-cli
+  fi
   cursor_permission_ask
 fi
 exit 0

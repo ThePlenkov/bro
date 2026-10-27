@@ -4,8 +4,8 @@
  *  regression here would silently break: fail-open (a wedged/missing
  *  probe never stalls a session) and arming (only a session that touched
  *  the thing is blocked; ambient state is passive context). */
-import { after, describe, test } from 'node:test';
 import assert from 'node:assert/strict';
+import { spawn, spawnSync } from 'node:child_process';
 import {
   chmodSync,
   existsSync,
@@ -16,6 +16,9 @@ import {
   writeFileSync,
 } from 'node:fs';
 import { join, resolve } from 'node:path';
+import { after, describe, test } from 'node:test';
+import { scrubEnv, testGitSpawn } from '@broject/core';
+import { readHookSpool } from './hook-spool.ts';
 import {
   CLI_DIST,
   e2eEnv,
@@ -24,10 +27,9 @@ import {
   initRepo,
   installFakeBd,
   inside,
+  insideAsync,
   runCli,
 } from './testrepo.ts';
-import { spawnSync } from 'node:child_process';
-import { scrubEnv, testGitSpawn } from '@broject/core';
 
 // ambient repo/agent/store pins must not reach fixture git children
 // or the code-under-test spawns — scrub once, restore after the file
@@ -87,6 +89,16 @@ function linked(f: Fixture, dirty: boolean): string {
 
 const BLOCK = /"decision":"block"/;
 
+async function waitForFile(path: string, timeoutMs: number): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  while (!existsSync(path)) {
+    if (Date.now() >= deadline) {
+      throw new Error(`timed out waiting for ${path}`);
+    }
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+}
+
 // the launcher is part of the fail-open contract — it's what plugin
 // hosts actually exec; dist must resolve without PATH help
 const RUN_SH = resolve(CLI_DIST, '..', '..', '..', '..', 'hooks', 'run.sh');
@@ -126,6 +138,103 @@ const DEVIN_PLUGIN_RUN_SH = resolve(
   'hooks',
   'run.sh'
 );
+
+interface SpoolScenario {
+  name: string;
+  script: string;
+  client: 'cursor' | 'devin' | 'claude' | 'none';
+  outcome: 'ok' | 'watchdog' | 'nonzero' | 'no-cli' | null;
+  rc: string | null;
+  stdout: string;
+  noCli: boolean;
+  disabled: boolean;
+  unwritable: boolean;
+  watchdogS: string;
+}
+
+function linkCommand(bin: string, command: string): void {
+  const source = process.env.PATH?.split(':').map((dir) => join(dir, command)).find(existsSync);
+  assert.ok(source, `${command} must be available for the no-cli fixture`);
+  symlinkSync(source, join(bin, command));
+}
+
+function prepareSpoolCase(root: string, scenario: SpoolScenario) {
+  const bin = join(root, 'bin');
+  const pluginRoot = join(root, 'plugin');
+  const spool = scenario.unwritable
+    ? join(root, 'blocked', 'hooks.spool')
+    : join(root, 'state', 'hooks.spool');
+  mkdirSync(bin);
+  mkdirSync(pluginRoot);
+  if (scenario.unwritable) {
+    writeFileSync(join(root, 'blocked'), 'file');
+  }
+  if (scenario.noCli) {
+    for (const command of ['date', 'dirname', 'mkdir', 'rm']) {
+      linkCommand(bin, command);
+    }
+  } else {
+    const bro = join(bin, 'bro');
+    writeFileSync(bro, scenario.script);
+    chmodSync(bro, 0o755);
+  }
+  return { bin, pluginRoot, spool };
+}
+
+function assertSpoolCase(
+  scenario: SpoolScenario,
+  shell: string,
+  spool: string
+): void {
+  if (scenario.outcome === null) {
+    assert.equal(existsSync(spool), false, `${shell} ${scenario.name} wrote a spool`);
+    return;
+  }
+  const records = readFileSync(spool, 'utf8')
+    .trim()
+    .split('\n')
+    .map((line) => line.split('\t'));
+  const startRecord = records.find((record) => record.at(2) === 'start');
+  const endRecord = records.find((record) => record.at(2) === 'end');
+  assert.equal(records.length, scenario.outcome === 'no-cli' ? 1 : 2);
+  const hostRecord = startRecord ?? endRecord;
+  assert.equal(hostRecord?.at(4), scenario.client === 'none' ? 'unknown' : scenario.client);
+  assert.equal(endRecord?.at(7), scenario.outcome);
+  if (scenario.outcome === 'no-cli') {
+    assert.equal(startRecord, undefined);
+  } else {
+    assert.equal(startRecord?.at(3), endRecord?.at(3), `${shell} ${scenario.name} id`);
+  }
+  if (scenario.rc !== null) {
+    assert.equal(endRecord?.at(6), scenario.rc, `${shell} ${scenario.name} rc`);
+  }
+}
+
+function runSpoolCase(scenario: SpoolScenario, shell: string): void {
+  const f = hookFixture();
+  inside(f.main, f.root, () => {
+    const { bin, pluginRoot, spool } = prepareSpoolCase(f.root, scenario);
+    const proc = spawnSync(shell, [RUN_SH, 'spool-test'], {
+      cwd: f.main,
+      input: 'payload\n',
+      env: e2eEnv({
+        PATH: scenario.noCli ? bin : `${bin}:${process.env.PATH}`,
+        PLUGIN_ROOT: pluginRoot,
+        CURSOR_PLUGIN_ROOT: scenario.client === 'cursor' ? pluginRoot : '',
+        DEVIN_PLUGIN_ROOT: scenario.client === 'devin' ? pluginRoot : '',
+        CLAUDE_PLUGIN_ROOT: scenario.client === 'claude' ? pluginRoot : '',
+        BRO_HOOK_SPOOL: scenario.disabled ? '0' : spool,
+        BRO_HOOK_WATCHDOG_S: scenario.watchdogS,
+      }),
+      encoding: 'utf8',
+      timeout: scenario.outcome === 'watchdog' ? 5_000 : 2_500,
+    });
+    assert.equal(proc.error, undefined, `${shell} ${scenario.name} timed out`);
+    assert.equal(proc.status, 0, `${shell} ${scenario.name}: ${proc.stderr}`);
+    assert.equal(proc.stdout, scenario.stdout, `${shell} ${scenario.name} stdout`);
+    assertSpoolCase(scenario, shell, spool);
+  });
+}
 
 describe('hooks e2e — stop gate', () => {
   test('armed work session in a dirty linked worktree is blocked', () => {
@@ -854,7 +963,12 @@ describe('hooks e2e — session-start + the run.sh launcher', () => {
   });
 
   const runSh = (cwd: string, event: string, input: string) =>
-    spawnSync('sh', [RUN_SH, event], { cwd, input, env: e2eEnv(), encoding: 'utf8' });
+    spawnSync('sh', [RUN_SH, event], {
+      cwd,
+      input,
+      env: e2eEnv({ BRO_HOOK_SPOOL: '0' }),
+      encoding: 'utf8',
+    });
 
   test('run.sh emits the armed dirty-worktree block through the real launch path', () => {
     const f = hookFixture();
@@ -873,6 +987,182 @@ describe('hooks e2e — session-start + the run.sh launcher', () => {
       const r = runSh(f.main, 'bogus-event', '{}');
       assert.equal(r.status, 0);
     });
+  });
+
+  test('hooks status is routed before hook-event stdin dispatch', () => {
+    const f = hookFixture();
+    inside(f.main, f.root, () => {
+      const spool = join(f.root, 'hooks.spool');
+      writeFileSync(
+        spool,
+        [
+          `v1\t${Math.floor(Date.now() / 1000)}\tstart\tid\tcursor\tpost-tool\t/repo`,
+          `v1\t${Math.floor(Date.now() / 1000) + 2}\tend\tid\tcursor\tpost-tool\t0\tok\t/repo`,
+          '',
+        ].join('\n')
+      );
+      const result = runCli(['hooks', 'status', '--since', '24h', '--json'], {
+        cwd: f.main,
+        input: 'not JSON',
+        env: { BRO_HOOK_SPOOL: spool },
+      });
+      assert.equal(result.code, 0, result.stderr);
+      assert.equal(JSON.parse(result.stdout).at(0)?.event, 'post-tool');
+      const empty = runCli(['hooks', 'status'], {
+        cwd: f.main,
+        env: { BRO_HOOK_SPOOL: join(f.root, 'missing.spool') },
+      });
+      assert.equal(empty.code, 0, empty.stderr);
+      assert.equal(empty.stdout, 'no hook runs recorded\n');
+    });
+  });
+
+  test('run.sh spools one fail-open outcome under dash and bash', () => {
+    const cases: SpoolScenario[] = [
+      {
+        name: 'ok',
+        script: '#!/bin/sh\nprintf "candidate output\\n"\n',
+        client: 'cursor',
+        outcome: 'ok',
+        rc: '0',
+        stdout: 'candidate output\n',
+        noCli: false,
+        disabled: false,
+        unwritable: false,
+        watchdogS: '8',
+      },
+      {
+        name: 'watchdog',
+        script: '#!/bin/sh\nexec /bin/sleep 30\n',
+        client: 'devin',
+        outcome: 'watchdog',
+        rc: null,
+        stdout: '',
+        noCli: false,
+        disabled: false,
+        unwritable: false,
+        watchdogS: '2',
+      },
+      {
+        name: 'nonzero',
+        script: '#!/bin/sh\nexit 7\n',
+        client: 'claude',
+        outcome: 'nonzero',
+        rc: '7',
+        stdout: '',
+        noCli: false,
+        disabled: false,
+        unwritable: false,
+        watchdogS: '8',
+      },
+      {
+        name: 'no-cli',
+        script: '',
+        client: 'none',
+        outcome: 'no-cli',
+        rc: '0',
+        stdout: '',
+        noCli: true,
+        disabled: false,
+        unwritable: false,
+        watchdogS: '8',
+      },
+      {
+        name: 'disabled',
+        script: '#!/bin/sh\nprintf "candidate output\\n"\n',
+        client: 'none',
+        outcome: null,
+        rc: null,
+        stdout: 'candidate output\n',
+        noCli: false,
+        disabled: true,
+        unwritable: false,
+        watchdogS: '8',
+      },
+      {
+        name: 'unwritable',
+        script: '#!/bin/sh\nprintf "candidate output\\n"\n',
+        client: 'none',
+        outcome: null,
+        rc: null,
+        stdout: 'candidate output\n',
+        noCli: false,
+        disabled: false,
+        unwritable: true,
+        watchdogS: '8',
+      },
+    ];
+    for (const scenario of cases) {
+      for (const shell of ['/bin/dash', '/bin/bash']) runSpoolCase(scenario, shell);
+    }
+  });
+
+  test('SIGKILL of the launcher leaves a start-only record classified as killed', async () => {
+    for (const shell of ['/bin/dash', '/bin/bash']) {
+      const f = hookFixture();
+      await insideAsync(f.main, f.root, async () => {
+        const bin = join(f.root, 'bin');
+        const pluginRoot = join(f.root, 'plugin');
+        const spool = join(f.root, 'state', 'hooks.spool');
+        const pidFile = join(f.root, 'bro.pid');
+        mkdirSync(bin);
+        mkdirSync(pluginRoot);
+        const bro = join(bin, 'bro');
+        writeFileSync(
+          bro,
+          '#!/bin/sh\nprintf "%s\\n" "$$" > "$STUB_PID_FILE"\nexec /bin/sleep 30\n'
+        );
+        chmodSync(bro, 0o755);
+        const launcher = spawn(shell, [RUN_SH, 'spool-test'], {
+          cwd: f.main,
+          env: e2eEnv({
+            PATH: `${bin}:${process.env.PATH}`,
+            PLUGIN_ROOT: pluginRoot,
+            BRO_HOOK_SPOOL: spool,
+            BRO_HOOK_WATCHDOG_S: '2',
+            STUB_PID_FILE: pidFile,
+          }),
+          stdio: 'ignore',
+        });
+        let candidatePid: number | undefined;
+        try {
+          await waitForFile(pidFile, 5_000);
+          candidatePid = Number(readFileSync(pidFile, 'utf8'));
+          const exit = new Promise<NodeJS.Signals | null>((resolve) => {
+            launcher.once('exit', (_code, signal) => resolve(signal));
+          });
+          launcher.kill('SIGKILL');
+          assert.equal(await exit, 'SIGKILL');
+          try {
+            process.kill(candidatePid, 'SIGKILL');
+          } catch {
+            // The launcher watchdog may have killed it already.
+          }
+          const lines = readFileSync(spool, 'utf8').trim().split('\n');
+          assert.equal(lines.length, 1);
+          const fields = lines.at(0)?.split('\t');
+          assert.equal(fields?.at(2), 'start');
+          const ts = Number(fields?.at(1));
+          const rows = readHookSpool(spool, {
+            sinceMs: 0,
+            nowMs: (ts + 14) * 1000,
+            watchdogSeconds: 8,
+          });
+          assert.equal(rows.at(0)?.killed, 1);
+        } finally {
+          if (launcher.exitCode === null && launcher.signalCode === null) {
+            launcher.kill('SIGKILL');
+          }
+          if (candidatePid !== undefined) {
+            try {
+              process.kill(candidatePid, 'SIGKILL');
+            } catch {
+              // Already gone.
+            }
+          }
+        }
+      });
+    }
   });
 
   test('run.sh watchdog kills a hung bro process under dash and bash', () => {

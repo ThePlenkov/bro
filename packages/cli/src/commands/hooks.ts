@@ -117,6 +117,7 @@ import { emitPostMerge, runPostMergeRefresh } from './postmerge.ts'
 import { maybeSpawnTraceFlush } from './trace.ts'
 import { emitRefGuard } from './refguard.ts'
 import { goalContextLines, goalStopLines } from './goal.ts'
+import { renderHookSpoolStatus, rotateHookSpool } from './hook-spool.ts'
 import { heartbeatLine } from './watch-heartbeat.ts'
 import {
   CURSOR_HYDRATED_SKILL,
@@ -2047,6 +2048,10 @@ export async function runHooksCommand(argv: string[]): Promise<void> {
   codexClient = false
   permissionAnswerEmitted = false
   const event = argv[0]
+  if (event === 'status') {
+    console.log(renderHookSpoolStatus(argv))
+    return
+  }
   // install/uninstall are operator commands, not hook events — they
   // report a verdict on stderr and never read stdin (a git hook's stdin
   // can be a terminal, and reading stdin would block on it forever). They
@@ -2154,5 +2159,6 @@ export async function runHooksCommand(argv: string[]): Promise<void> {
     // unref the stragglers so the hook exits with the answer it sent,
     // not when the last subprocess closes.
     unrefPendingChildren()
+    rotateHookSpool()
   }
 }
