@@ -521,7 +521,7 @@ function makeCore(input: BroCoreInput) {
             cwd: directory,
             stdio: ['ignore', 'pipe', 'pipe'],
             windowsHide: true,
-        detached: process.platform !== 'win32',
+            detached: process.platform !== 'win32',
           })
         } catch {
           resolve({ code: 127, out: '', err: 'spawn failed' })

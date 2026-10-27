@@ -106,6 +106,7 @@ function spawnCollect(
         cwd: options.cwd,
         env: options.env,
         stdio: ['pipe', 'pipe', 'pipe'],
+        windowsHide: true,
         detached: process.platform !== 'win32',
       });
     } catch (error) {
