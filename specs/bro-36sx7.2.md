@@ -1,7 +1,8 @@
-<!-- markdownlint-disable MD041 -->
 ---
 
 ## parent: bro-36sx7
+
+<!-- markdownlint-disable-file MD041 -->
 
 # bro-36sx7.2 — core: async git twins; probe paths off spawnSync
 

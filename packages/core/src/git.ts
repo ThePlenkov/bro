@@ -63,7 +63,13 @@ export function gitTry(
   args: string[],
   timeoutMs?: number
 ): { code: number; out: string; err: string } {
-  assertGitArgs(args);
+  try {
+    assertGitArgs(args);
+  } catch (err) {
+    // fail-open contract — a rejected arg is a failure result,
+    // never a throw (gitTryAsync reports the same code 128)
+    return { code: 128, out: '', err: err instanceof Error ? err.message : String(err) };
+  }
   const proc = spawnSync('git', args, {
     // NOSONAR — PATH lookup is the contract
     stdio: ['ignore', 'pipe', 'pipe'],

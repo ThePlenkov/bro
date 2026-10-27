@@ -5,7 +5,7 @@
  */
 import { mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
-import { beadsStoreStampAsync, gitCommonDirAsync } from '@broject/core';
+import { beadsStoreStampAsync, GIT_SYNC_PROBE_TIMEOUT_MS, gitCommonDirAsync } from '@broject/core';
 import type { Connector, ConnectorCtx } from '@broject/core';
 import { currentFrameAsync } from './frames.ts';
 import type { DrillFrame } from './types.ts';
@@ -15,7 +15,7 @@ import type { DrillFrame } from './types.ts';
  *  inline rev-parse copy was a spawnSync inside the sweep). null
  *  off-repo. */
 async function hooksDirAsync(dir: string): Promise<string | null> {
-  const common = await gitCommonDirAsync(dir);
+  const common = await gitCommonDirAsync(dir, GIT_SYNC_PROBE_TIMEOUT_MS);
   return common === null ? null : join(common, 'bro', 'hooks');
 }
 
