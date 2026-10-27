@@ -477,6 +477,13 @@ function installLockedSkills(
   }
 }
 
+function spawnFailureDetail(p: ReturnType<typeof spawnSync>): string {
+  const stderr = p.stderr?.toString().trim() || '';
+  const stdout = p.stdout?.toString().trim() || '';
+  const status = p.status ?? 'with error';
+  return `${status}${stderr ? `: ${stderr}` : ''}${stdout ? ` (stdout: ${stdout})` : ''}`;
+}
+
 function installOneLockedSkill(dir: string, skill: LockedSkill): void {
   // `npx skills add` owns the fetch, the symlink and the lockfile
   // update; bro only decides what to ask for.
@@ -491,11 +498,7 @@ function installOneLockedSkill(dir: string, skill: LockedSkill): void {
       timeout: 300_000,
     });
     if (p.error !== undefined || p.status !== 0) {
-      const stderr = p.stderr?.toString().trim() || '';
-      const stdout = p.stdout?.toString().trim() || '';
-      throw new Error(
-        `npx skills add exited ${p.status ?? 'with error'}${stderr ? `: ${stderr}` : ''}${stdout ? ` (stdout: ${stdout})` : ''}`
-      );
+      throw new Error(`npx skills add exited ${spawnFailureDetail(p)}`);
     }
   } catch (err) {
     // one unreachable upstream does not stop the rest
@@ -515,6 +518,40 @@ function reportAfterDrift(current: Map<string, LockedSkill>, skillsDir: string):
       `  ${d.name}: ${d.kind === 'missing' ? 'not installed' : 'content drifted from the lock'} (${d.source})`
     );
   }
+}
+
+type HookInstallResult = ReturnType<typeof installCommitHook>;
+
+function reportHookInstall(result: HookInstallResult, names: { note: string; hook: string }): void {
+  if (result.state === 'error') {
+    console.error(`  note: ${names.note} not installed — ${result.err}`);
+  } else if (result.state !== 'already') {
+    console.error(`  ${result.state} ${names.hook} (${result.path})`);
+  }
+}
+
+// git hooks ride setup — a repo that opts into bro gets both
+// without a second step; `bro hooks uninstall` is the opt-out:
+//   commit provenance (bro-fzot): Agent/Session/Bead trailers on
+//     machine-made commits
+//   refguard (bro-1c78): non-ff moves of shared branch refs vetoed
+//   post-merge (bro-sovl3): install → build → patch after a merge
+// Best-effort: a non-git dir just skips.
+function installSetupHooks(): void {
+  const cwd = process.cwd();
+  const version = cliVersion();
+  reportHookInstall(installCommitHook(cwd, version), {
+    note: 'commit-provenance hook',
+    hook: 'prepare-commit-msg hook',
+  });
+  reportHookInstall(installRefGuardHook(cwd, version), {
+    note: 'refguard hook',
+    hook: 'reference-transaction hook',
+  });
+  reportHookInstall(installPostMergeHook(cwd, version), {
+    note: 'post-merge hook',
+    hook: 'post-merge hook',
+  });
 }
 
 export async function runSetupCommand(argv: string[]): Promise<void> {
@@ -568,31 +605,7 @@ export async function runSetupCommand(argv: string[]): Promise<void> {
     setupPack(packDir, pack || loadBroConfig().pack || DEFAULT_PACK, wantsBeads);
   }
 
-  // git hooks ride setup — a repo that opts into bro gets both
-  // without a second step; `bro hooks uninstall` is the opt-out:
-  //   commit provenance (bro-fzot): Agent/Session/Bead trailers on
-  //     machine-made commits
-  //   refguard (bro-1c78): non-ff moves of shared branch refs vetoed
-  //   post-merge (bro-sovl3): install → build → patch after a merge
-  // Best-effort: a non-git dir just skips.
-  const hook = installCommitHook(process.cwd(), cliVersion());
-  if (hook.state === 'error') {
-    console.error(`  note: commit-provenance hook not installed — ${hook.err}`);
-  } else if (hook.state !== 'already') {
-    console.error(`  ${hook.state} prepare-commit-msg hook (${hook.path})`);
-  }
-  const guard = installRefGuardHook(process.cwd(), cliVersion());
-  if (guard.state === 'error') {
-    console.error(`  note: refguard hook not installed — ${guard.err}`);
-  } else if (guard.state !== 'already') {
-    console.error(`  ${guard.state} reference-transaction hook (${guard.path})`);
-  }
-  const fresh = installPostMergeHook(process.cwd(), cliVersion());
-  if (fresh.state === 'error') {
-    console.error(`  note: post-merge hook not installed — ${fresh.err}`);
-  } else if (fresh.state !== 'already') {
-    console.error(`  ${fresh.state} post-merge hook (${fresh.path})`);
-  }
+  installSetupHooks();
 
   console.error(
     'bro setup: done. Next: `bro debt prs` to see the queue, `bro debt collect` to sweep.'
