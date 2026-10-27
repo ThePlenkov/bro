@@ -10,6 +10,7 @@ description: "Orchestrator heartbeat — mols × act gates × fleet snapshot [--
 | | |
 | --- | --- |
 | group | `review` |
+| npm latest | `0.2.5` |
 | skill | `watch` |
 | config | `watch` in bro.config |
 | guide | [commands/fleet](/docs/commands/fleet) |

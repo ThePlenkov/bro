@@ -3,6 +3,11 @@ title: Plans
 description: Structured TOML input — one envelope, per-command schemas.
 ---
 
+*Command examples track the upcoming **0.3.0** — grouped
+`bro <group> <member>` spellings and `0.3.0` marks are not yet on npm
+`latest` (**0.2.5**); use the flat names (`bro convoy run`,
+`bro debt status`).*
+
 Commands that take structured input share one envelope: a TOML file with
 a `kind` that routes to the owning plugin. Each kind's schema carries a
 version — `version` pins the contract the file was written against, and

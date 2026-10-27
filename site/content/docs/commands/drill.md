@@ -3,6 +3,11 @@ title: bro work drill
 description: Scoped descent — narrower investigation frames with mandatory results.
 ---
 
+*Command examples track the upcoming **0.3.0** — grouped
+`bro <group> <member>` spellings and `0.3.0` marks are not yet on npm
+`latest` (**0.2.5**); use the flat names (`bro convoy run`,
+`bro debt status`).*
+
 When a task needs focused investigation, `bro work drill` creates a frame: a
 `drill`-labeled bead nested under the current one. A frame can only close
 with a result — and if it found a lesson, a prevention plan. **beads is

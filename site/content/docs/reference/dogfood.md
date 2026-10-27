@@ -8,5 +8,6 @@ description: "Scenario-driven e2e self-test — markdown runbook, fresh-agent ru
 | | |
 | --- | --- |
 | group | `self` |
+| npm latest | unreleased — lands in `0.3.0` |
 | skill | `dogfood` |
 

@@ -3,6 +3,11 @@ title: bro flow next
 description: The flat backlog scheduler — claim the top ready bead, emit the work order.
 ---
 
+*Command examples track the upcoming **0.3.0** — grouped
+`bro <group> <member>` spellings and `0.3.0` marks are not yet on npm
+`latest` (**0.2.5**); use the flat names (`bro convoy run`,
+`bro debt status`).*
+
 `bro flow next` is the scheduler as code. `bd` owns the queue; bro owns
 picking: the top ready bead, claimed atomically, emitted as a work
 order. The agent loop is one line — next → implement → PR → merge →

@@ -3,6 +3,11 @@ title: bro plan query
 description: Cross-provider GraphQL fan-out — one plan, many connectors, one merged JSON answer.
 ---
 
+*Command examples track the upcoming **0.3.0** — grouped
+`bro <group> <member>` spellings and `0.3.0` marks are not yet on npm
+`latest` (**0.2.5**); use the flat names (`bro convoy run`,
+`bro debt status`).*
+
 A `kind = "query"` [plan](/docs/plans) is a TOML list of independent
 GraphQL steps. `bro plan run` fans them out over connectors under a
 concurrency cap and prints one merged JSON document keyed by step `id` —

@@ -3,6 +3,11 @@ title: bro review debt
 description: Review debt — harvest unresolved threads on merged PRs into a ledger.
 ---
 
+*Command examples track the upcoming **0.3.0** — grouped
+`bro <group> <member>` spellings and `0.3.0` marks are not yet on npm
+`latest` (**0.2.5**); use the flat names (`bro convoy run`,
+`bro debt status`).*
+
 Review bots comment, you merge, the threads rot. `bro review debt` is the
 collections agency: it sweeps merged PRs, writes findings to a local
 ledger, and labels each PR so nothing is scanned twice.

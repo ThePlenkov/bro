@@ -8,6 +8,7 @@ description: "Hook + command latency report — perf journal rollup [--session <
 | | |
 | --- | --- |
 | group | `fleet` |
+| npm latest | unreleased — lands in `0.3.0` |
 
 Alias for `bro hooks perf` (internal — no reference page).
 

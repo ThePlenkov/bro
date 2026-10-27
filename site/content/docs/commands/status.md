@@ -3,6 +3,11 @@ title: bro fleet status + bro fleet serve
 description: The compact live board in one read, and the loopback HTTP facade for thin clients.
 ---
 
+*Command examples track the upcoming **0.3.0** — grouped
+`bro <group> <member>` spellings and `0.3.0` marks are not yet on npm
+`latest` (**0.2.5**); use the flat names (`bro convoy run`,
+`bro debt status`).*
+
 ## `bro fleet status`
 
 One read returns everything a thin client (pi extension, TUI, dashboard)

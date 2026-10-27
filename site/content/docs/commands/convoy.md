@@ -3,6 +3,11 @@ title: bro flow convoy
 description: Intentional group planning — a molecule's needs-DAG executed by claiming steps.
 ---
 
+*Command examples track the upcoming **0.3.0** — grouped
+`bro <group> <member>` spellings and `0.3.0` marks are not yet on npm
+`latest` (**0.2.5**); use the flat names (`bro convoy run`,
+`bro debt status`).*
+
 `bro flow next` is grab-anything mode: the top ready bead, whoever gets there
 first. A **convoy** is the opposite — planned group work. A molecule
 pours a formula into beads: steps are child issues, `blocks` edges are

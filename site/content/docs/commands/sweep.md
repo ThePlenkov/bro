@@ -3,6 +3,11 @@ title: bro work sweep
 description: Gated lifecycle disposal for closed beads — the backlog's outflow stage.
 ---
 
+*Command examples track the upcoming **0.3.0** — grouped
+`bro <group> <member>` spellings and `0.3.0` marks are not yet on npm
+`latest` (**0.2.5**); use the flat names (`bro convoy run`,
+`bro debt status`).*
+
 Closed beads accumulate forever, and `bd prune` alone would burn lessons
 nobody harvested. `bro work sweep` gates the burn on a harvest marker: a
 closed bead is **harvested** when it carries the `sweep:distilled` state

@@ -3,6 +3,11 @@ title: Fleet & supervision
 description: Read the fleet, supervise agents, drive orphaned PRs, and expose a local web facade.
 ---
 
+*Command examples track the upcoming **0.3.0** — grouped
+`bro <group> <member>` spellings and `0.3.0` marks are not yet on npm
+`latest` (**0.2.5**); use the flat names (`bro convoy run`,
+`bro debt status`).*
+
 Fleet commands separate the read plane from the write plane. `bro fleet`
 and `bro review watch` report what needs attention; `bro fleet agents` and `bro review drive`
 take the deliberate actions.
@@ -17,7 +22,7 @@ take the deliberate actions.
 | `bro fleet agents status [<id\|step>] [--json] [--connector <name>]` | Read the agent plane or one agent |
 | `bro fleet agents up [<step>] [--connector <name>]` | Bring up a supervisor or spawn/respawn a step |
 | `bro fleet agents down [<id\|step>] [--connector <name>]` | Bring down a supervisor or stop one agent |
-| `bro fleet agents log <id\|step> [--follow] [--lines <N>]` | Tail an agent's recorded `.log` — `--follow` streams it live (truncation and respawn-reopen are reported, never skipped) |
+| `bro fleet agents log <id\|step> [--follow] [--lines <N>]` *(0.3.0)* | Tail an agent's recorded `.log` — `--follow` streams it live (truncation and respawn-reopen are reported, never skipped) |
 | `bro fleet agents prune [--connector <name>] [--older-than Nd] [--json]` | Reap terminal registry entries (exited, stopped, crashed); `blocked` stays — a wall-parked worker is still a worker |
 
 The agents facade resolves native detached processes, tmux, and Gas City
@@ -55,7 +60,7 @@ non-interactive ticker, use `bro review watch --every N`.
 | `bro review watch --notify` | Drop the initial snapshot and transitions into the mailbox |
 | `bro review watch --json` | Emit `{ts, attention, mols, gates, fleet}` |
 | `bro review watch --every N --for S` | Repeat the heartbeat on a cadence — the unattended pulse leg: holds `bro/pulse.lock` (one per repo, a duplicate stands by) and refuses under `BRO_AGENT_ID`; `--for` bounds the window |
-| `bro fleet pulse [S] [--no-notify\|--json] [-- <cmd>…]` | The session-owned metronome — a long-lived child that beats every S seconds (default `watch.intervalSec`): prints each tick and, as the `pulse.lock` holder, drops it into the mailbox — the mail IS the wake. A non-holder keeps ticking on stdout without mailing; refuses under `BRO_AGENT_ID`; `-- <cmd>…` ticks a probe command instead of the snapshot; works outside a repo as a pure timer |
+| `bro fleet pulse [S] [--no-notify\|--json] [-- <cmd>…]` *(0.3.0)* | The session-owned metronome — a long-lived child that beats every S seconds (default `watch.intervalSec`): prints each tick and, as the `pulse.lock` holder, drops it into the mailbox — the mail IS the wake. A non-holder keeps ticking on stdout without mailing; refuses under `BRO_AGENT_ID`; `-- <cmd>…` ticks a probe command instead of the snapshot; works outside a repo as a pure timer |
 | `bro review watch install [--every N] [--print]` | Arm the session pulse — writes `bro/pulse.json` (the want-marker session-start rearms from), strips any legacy systemd/cron entry; cadence `--every N` or `watch.intervalSec` (default 60) |
 | `bro review watch uninstall` | Disarm the marker + strip any legacy timer/cron entry; a live pulse exits on its own |
 | `bro comms notify <text>` | Write one mailbox event for live sessions — addressed drops, kinds, and the bus are in [Events](/docs/commands/events) |
@@ -71,15 +76,15 @@ spawn blindly, especially when a backend is degraded. The notify connector
 drains unseen drops during the next post-tool probe, so a watcher can reach
 the parent session without a wait loop.
 
-Detach the watcher, don't block on it: `bro fleet pulse <S>` in a
+Detach the watcher, don't block on it: `bro fleet pulse <S>` *(0.3.0)* in a
 background shell keeps a heartbeat running while the agent works — every
 tick lands in the mailbox and surfaces in the session mid-turn, on its
 next tool call (the mailbox is pull-based: a drop lands when the session
 next acts, it never wakes a sleeping one — silence between beats is the
-alarm). The session-pulse model is the durable form: `bro pulse` (or
+alarm). The session-pulse model is the durable form: `bro pulse` *(0.3.0)* (or
 `bro review watch install`) arms `bro/pulse.json`, and a session start
 with no live pulse (lock holder dead) gets the rearm nudge — the
-orchestrator re-arms `bro pulse`, and the unattended fallback is the
+orchestrator re-arms `bro pulse` *(0.3.0)*, and the unattended fallback is the
 bounded `bro review watch --every N --for S --notify` the checkpoint
 spawns (`--for` caps the window without tying the watcher to session
 exit; the window's end is the wake event, followed by one
@@ -124,16 +129,18 @@ bound: an occupied green PR whose owner shows no proven activity
 adopted and merged, so a dead or silent owner never parks a green PR
 forever.
 
-The durable form is `bro review drive install [--every N] [--print]`: it
+The durable form is `bro review drive install [--every N] [--print]`
+*(0.3.0)*: it
 arms `<git-common>/bro/drive.json` — the want-marker — and brings the
-supervisor up (`bro fleet daemon` owns the process). Orchestrator-session
+supervisor up (`bro fleet daemon` *(0.3.0)* owns the process). Orchestrator-session
 checkpoints then rearm a dead supervisor on every lifecycle event —
 spawned workers (`BRO_AGENT_ID`) never arm one — so the merge path is
 always-on infrastructure, not an opt-in.
-`bro review drive uninstall` disarms the marker and stops the
-supervisor; `bro fleet daemon down` under an install is only a
+`bro review drive uninstall` *(0.3.0)* disarms the marker and stops the
+supervisor; `bro fleet daemon down` *(0.3.0)* under an install is only a
 transient stop — the next checkpoint brings it back. For a one-off
-detached supervisor without the install, `bro fleet daemon up` spawns
+detached supervisor without the install, `bro fleet daemon up` *(0.3.0)*
+spawns
 the same loop by hand.
 
 ## Local service

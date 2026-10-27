@@ -15,10 +15,16 @@ import { execFileSync } from 'node:child_process'
 import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
+import { hasFlagWord, loadPublishedSurface } from './published-surface.ts'
 
 const root = join(fileURLToPath(import.meta.url), '..', '..')
 const outDir = join(root, 'site/content/docs/reference')
 const distCli = join(root, 'packages/cli/dist/index.js')
+
+// the npm-published surface is the docs' version boundary — commands
+// the tarball does not dispatch get an `npm latest` row marking them
+// unreleased (spec bro-l8c4f.17); absent manifest → no row
+const published = loadPublishedSurface()
 
 interface Row {
   name: string
@@ -127,6 +133,36 @@ function signature(r: Row): string | undefined {
   return m === null ? undefined : `bro ${r.name} ${m[0]}`
 }
 
+/** `a|b` subcommand signature in a registry summary — same extraction
+ *  `signature()` uses; compared against the published manifest's subs.
+ *  Tokens spelled `--x` elsewhere in the summary are flags
+ *  (`--json|install|uninstall` leaks `json`), not subs. */
+function currentSubs(r: Row): string[] {
+  const m = /[a-z][a-z0-9-]*(?:\|[a-z0-9][a-z0-9-]*)+/.exec(r.summary)
+  if (m === null) {
+    return []
+  }
+  return m[0].split('|').filter((s) => !hasFlagWord(r.summary, `--${s}`))
+}
+
+/** The npm version boundary for this command: the published version
+ *  that ships it, a `— new in <next>` tail when main grew subs the
+ *  tarball lacks, or `unreleased` when the tarball has no such command. */
+function npmRow(r: Row): string | undefined {
+  if (published === undefined) {
+    return undefined
+  }
+  const subs = published.commands[r.name]
+  if (subs === undefined) {
+    return `unreleased — lands in \`${published.next}\``
+  }
+  const missing = currentSubs(r).filter((s) => !subs.includes(s))
+  if (missing.length === 0) {
+    return `\`${published.version}\``
+  }
+  return `\`${published.version}\` — new in \`${published.next}\`: ${missing.join(', ')}`
+}
+
 function page(r: Row, visible: Set<string>): string {
   const lines: string[] = [
     '---',
@@ -144,6 +180,8 @@ function page(r: Row, visible: Set<string>): string {
     '| --- | --- |',
     `| group | \`${groupOf(r)}\` |`
   )
+  const npm = npmRow(r)
+  if (npm !== undefined) lines.push(`| npm latest | ${npm} |`)
   if (r.skill !== undefined) lines.push(`| skill | \`${r.skill}\` |`)
   if (r.configKey !== undefined) lines.push(`| config | \`${r.configKey}\` in bro.config |`)
   if (r.plan) lines.push(`| plan | \`kind = "${r.name}"\` (v${r.planVersion ?? 1}) |`)

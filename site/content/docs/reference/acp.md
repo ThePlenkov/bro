@@ -8,5 +8,6 @@ description: "ACP edge — `proxy -- <agent cmd>` puts bro on the wire (spec bro
 | | |
 | --- | --- |
 | group | `fleet` |
+| npm latest | unreleased — lands in `0.3.0` |
 | skill | `acp` |
 

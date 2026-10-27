@@ -8,6 +8,7 @@ description: "Provider registry — models catalog as <provider>/<model> [name�
 | | |
 | --- | --- |
 | group | `self` |
+| npm latest | unreleased — lands in `0.3.0` |
 | skill | `providers` |
 | guide | [commands/providers](/docs/commands/providers) |
 

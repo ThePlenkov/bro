@@ -3,6 +3,11 @@ title: Integrations
 description: facades, connectors, agent clients, and hooks — what bro plugs into.
 ---
 
+*Command examples track the upcoming **0.3.0** — grouped
+`bro <group> <member>` spellings and `0.3.0` marks are not yet on npm
+`latest` (**0.2.5**); use the flat names (`bro convoy run`,
+`bro debt status`).*
+
 bro keeps vendor details behind facades. Commands ask for tasks, reviews,
 agents, or specs; the configured connector supplies the backend.
 
@@ -40,7 +45,7 @@ evidence record even when the beads projection is disabled.
 | pi | `bro plugins install pi` — extension module |
 
 Cursor installs from `.cursor-plugin/marketplace.json`. The adapter's
-`hooks/hooks.json` uses Cursor event names; `bro hooks` translates that
+`hooks/hooks.json` uses Cursor event names; `bro hooks` *(0.3.0)* translates that
 stdin (`conversation_id`, `loop_count`, shell `command`) into the shared
 contract and writes Cursor output (`additional_context`,
 `followup_message`, `permission`). Cloud agents do not run `sessionStart`,

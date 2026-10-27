@@ -8,4 +8,5 @@ description: "Dep-plane watcher — `bro wait external:<rig>:<id>` polls the dep
 | | |
 | --- | --- |
 | group | `utility` |
+| npm latest | unreleased — lands in `0.3.0` |
 

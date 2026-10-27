@@ -3,6 +3,11 @@ title: Events — notify, mailbox, bus, sinks
 description: The events facade — a session mailbox by default, a local event broker behind it, webhook sinks for humans.
 ---
 
+*Command examples track the upcoming **0.3.0** — grouped
+`bro <group> <member>` spellings and `0.3.0` marks are not yet on npm
+`latest` (**0.2.5**); use the flat names (`bro convoy run`,
+`bro debt status`).*
+
 `bro comms notify` writes through one `events` facade — mailbox by default,
 or the local broker when `"connectors": { "events": "bus" }` selects it.
 The notify connector's postTool probe drains drops into session
@@ -92,8 +97,8 @@ background and the caller never sees the per-sink result rows.
 
 | Command | What it does |
 | ------- | ------------ |
-| `bro sinks list [--json]` | Resolved sinks — type, route patterns, and each secret env var's set/unset status (never the value) |
-| `bro sinks test [--json]` | Probe every configured sink's endpoint (routes bypassed), report per-sink delivered/deduped/error — verify a webhook before a real event needs it |
+| `bro sinks list [--json]` *(0.3.0)* | Resolved sinks — type, route patterns, and each secret env var's set/unset status (never the value) |
+| `bro sinks test [--json]` *(0.3.0)* | Probe every configured sink's endpoint (routes bypassed), report per-sink delivered/deduped/error — verify a webhook before a real event needs it |
 
 ```json
 {

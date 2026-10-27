@@ -3,12 +3,18 @@ title: Providers
 description: The named provider registry — model-plane connections that judge and fleet consume by name.
 ---
 
+*Command examples track the upcoming **0.3.0** — grouped
+`bro <group> <member>` spellings and `0.3.0` marks are not yet on npm
+`latest` (**0.2.5**); use the flat names (`bro convoy run`,
+`bro debt status`).*
+
 A provider is a named entry in the `providers` section of
 [`bro.config.json`](/docs/configuration#providers) — `{ type,
 …connection }`. Consumers pick **by name**; the name carries no
 semantics. The `type` fixes the connection shape and which surfaces the
-entry can serve. There is no `bro providers` command — providers are
-configured, and `bro doctor` reports the resolved set (a misnamed
+entry can serve. The `bro providers` command *(0.3.0)* catalogs the
+resolved set — until then providers are configured, and `bro doctor`
+reports them (a misnamed
 `apiKeyEnv`, an unset env var, a bad model).
 
 ```jsonc
