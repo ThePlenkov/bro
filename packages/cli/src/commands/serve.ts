@@ -2425,7 +2425,10 @@ export async function runServeCommand(argv: string[]): Promise<void> {
   const conductorCfg = conductorConfig(process.env, dir);
   const providerCfg = conductorCfg === undefined ? providerConfig(process.env) : undefined;
   if (conductorCfg !== undefined) {
-    console.log(`provider: /v1/* → acp conductor (${conductorCfg.backend})`);
+    // the fast lane shares the byte proxy's upstream pair — armed, it
+    // takes the classifier-shaped calls off the session lane (bro-6asnu)
+    const fast = conductorCfg.fast !== undefined ? ` · fast → ${conductorCfg.fast.upstream}` : '';
+    console.log(`provider: /v1/* → acp conductor (${conductorCfg.backend})${fast}`);
   } else if (providerCfg !== undefined) {
     console.log(`provider: /v1/* → ${providerCfg.upstream}`);
   }

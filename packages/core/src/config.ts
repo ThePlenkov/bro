@@ -25,7 +25,7 @@ import { createRequire } from 'node:module';
 import { homedir } from 'node:os';
 import { basename, dirname, join, resolve, sep } from 'node:path';
 import { pathToFileURL } from 'node:url';
-import { GIT_SYNC_PROBE_TIMEOUT_MS, gitCommonDir } from './git.ts';
+import { GIT_SYNC_PROBE_TIMEOUT_MS, gitCommonDir, gitTry } from './git.ts';
 import { parseBrouter, type BrouterConfig } from './brouter.ts';
 import {
   API_WIRES,
@@ -437,7 +437,6 @@ const providerCliSchema = js.obj(
 providersSection.jsonSchema = js.map(
   js.oneOf(providerApiSchema, providerAcpSchema, providerCliSchema)
 );
-
 /** bro.config.json `brouter` section — the model-centric routing
  *  registry (spec: specs/bro-n1p0s.md): `models` maps a canonical
  *  model id to its route — a provider name, {provider, model?}, or an
@@ -741,18 +740,36 @@ sddSection.jsonSchema = js.obj({ mode: { enum: SDD_MODES }, dir: js.str });
  *  `backend` names the acp provider `BRO_PROVIDER_BACKEND` falls back
  *  to: a repo that always wants its conductor can pin it in config
  *  instead of relying on the env var reaching every spawn path
- *  (apiKeyHelper children do not inherit settings.env). */
-export const serveSection: ConfigSection<{ backend?: string }> = raw => {
+ *  (apiKeyHelper children do not inherit settings.env). `fastModel`
+ *  pins the upstream model the conductor's fast lane rewrites, and
+ *  `fastLane:false` returns every call to the session lane (spec
+ *  bro-6asnu). */
+export const serveSection: ConfigSection<{
+  backend?: string;
+  fastModel?: string;
+  fastLane?: boolean;
+}> = raw => {
   const obj = (typeof raw === 'object' && raw !== null ? raw : {}) as {
     backend?: unknown;
+    fastModel?: unknown;
+    fastLane?: unknown;
   };
   const backend =
     typeof obj.backend === 'string' && obj.backend.trim() !== '' ? obj.backend.trim() : undefined;
-  // an unset backend reads as an empty bag — same shape as providers:{}
-  return backend === undefined ? {} : { backend };
+  const fastModel =
+    typeof obj.fastModel === 'string' && obj.fastModel.trim() !== ''
+      ? obj.fastModel.trim()
+      : undefined;
+  const fastLane = typeof obj.fastLane === 'boolean' ? obj.fastLane : undefined;
+  // unset reads as an empty bag — same shape as providers:{}
+  const out: { backend?: string; fastModel?: string; fastLane?: boolean } = {};
+  if (backend !== undefined) out.backend = backend;
+  if (fastModel !== undefined) out.fastModel = fastModel;
+  if (fastLane !== undefined) out.fastLane = fastLane;
+  return out;
 };
 
-serveSection.jsonSchema = js.obj({ backend: js.str });
+serveSection.jsonSchema = js.obj({ backend: js.str, fastModel: js.str, fastLane: js.bool });
 
 /** bro.config.json `mirror` section — the bead→tracker projection
  *  policy (spec specs/backends/bro-z2z7f): which beads materialize as
@@ -1215,8 +1232,11 @@ export interface BroConfig {
   /** `bro serve` — the facade host's own knobs. `backend` names the acp
    *  provider the conductor wires when `BRO_PROVIDER_BACKEND` is unset —
    *  a repo that always wants its conductor pins it here instead of
-   *  relying on env reaching every spawn path. */
-  serve: { backend?: string };
+   *  relying on env reaching every spawn path. `fastModel` pins the
+   *  upstream model the conductor's fast lane rewrites classifier calls
+   *  to (spec bro-6asnu); `fastLane:false` returns every call to the
+   *  session lane. */
+  serve: { backend?: string; fastModel?: string; fastLane?: boolean };
   /** Bead→tracker projection policy (spec specs/backends/bro-z2z7f) —
    *  which beads materialize as native tracker items at PR time. */
   mirror: MirrorPolicy;
