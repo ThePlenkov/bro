@@ -10,7 +10,6 @@ import assert from 'node:assert/strict';
 import { spawn, spawnSync } from 'node:child_process';
 import { chmodSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { agentExitFileName } from '@broject/core';
 import {
   CLI_DIST,
   FAKE_BEAD,
@@ -228,16 +227,13 @@ describe('bro loop e2e', () => {
       // decidable after the spawner dies (bro-snga4)
       const registry = JSON.parse(
         readFileSync(join(f.main, '.git', 'bro', 'agents.json'), 'utf8')
-      ) as Record<string, { agentId: string; log?: string; exitStatus?: number; runId?: string }>;
+      ) as Record<string, { agentId: string; log?: string; exitStatus?: number }>;
       const entry = registry['fx-a'];
       assert.ok(entry, 'no agents-registry entry for fx-a');
       assert.ok(entry.log !== undefined && existsSync(entry.log), 'worker log missing');
       assert.match(readFileSync(entry.log!, 'utf8'), /agent land on fx-a/);
       assert.equal(
-        readFileSync(
-          join(f.main, '.git', 'bro', 'agents', agentExitFileName(entry.agentId, entry.runId)),
-          'utf8'
-        ).trim(),
+        readFileSync(join(f.main, '.git', 'bro', 'agents', `${entry.agentId}.exit`), 'utf8').trim(),
         '0'
       );
       // the harvest landed the exit classification on the entry too
@@ -1193,6 +1189,183 @@ describe('bro loop fleet.routing', () => {
       assert.match(r.stdout, /would claim fx-a/);
       assert.match(r.stdout, /class: sweep/);
       assert.match(r.stdout, /provider: sweeper/);
+      assert.equal(bead(f.db, 'fx-a')?.status, 'open');
+    });
+  });
+});
+
+/** Provider-wall settle (bro-36bhc) — the loop honors the exit-cause
+ *  taxonomy the registry records instead of respawning into the wall:
+ *  a rate_limited death with a provider reset parks until the reset
+ *  (then wakes and respawns), a death/wall with no advertised end parks
+ *  loud, and spawn admission into a derived wall holds pushes until
+ *  the reset instead of re-claiming every interval. The cli provider
+ *  lane is required — a raw template spawn carries no `provider` the
+ *  derived wall can be attributed to. */
+describe('bro loop provider walls (bro-36bhc)', () => {
+  const walledLane = (loopCfg: Record<string, unknown> = {}): Fixture =>
+    cliLane({ provider: 'fakecli', ...loopCfg });
+
+  /** Seed a classified death straight into the agents registry — the
+   *  same record a real worker's exit harvest writes (cause/resetAt/
+   *  provider all ride the entry; spec bro-1x7p derives walls from
+   *  exactly this). */
+  const seedDeath = (f: Fixture, patch: Record<string, unknown>): void => {
+    const dir = join(f.main, '.git', 'bro');
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(
+      join(dir, 'agents.json'),
+      JSON.stringify({
+        'fx-prev': {
+          agentId: 'native-prevdead',
+          backend: 'native',
+          spawnedAt: new Date(Date.now() - 60_000).toISOString(),
+          exitStatus: 1,
+          provider: 'fakecli',
+          ...patch,
+        },
+      })
+    );
+  };
+
+  test('a rate_limited worker parks until the provider reset — then wakes and lands', () => {
+    // the incident fix: the park's snooze is the wall's own clock, not
+    // the flat 2h cooldown. The epoch reset form is absolute — the
+    // defer stamp equals it exactly, whenever the harvest runs. A
+    // far-future reset keeps run 1 deterministic on a slow CI; the
+    // wake half then simulates the clock passing rather than sleeping
+    // it out.
+    const f = walledLane();
+    inside(f.main, f.root, () => {
+      const reset = Math.floor(Date.now() / 1000) + 5400;
+      const resetIso = new Date(reset * 1000).toISOString();
+      writeHostState(f.hostState, {
+        walls: {
+          'fx-a': { tail: `API rate limit exceeded — x-ratelimit-reset: ${reset}`, exit: 1 },
+        },
+      });
+      const r = f.run();
+      assert.match(r.stdout, /1 parked/, r.stderr);
+      const row = bead(f.db, 'fx-a');
+      assert.equal(row?.status, 'deferred');
+      assert.equal(row?.defer_until, resetIso);
+      assert.match(String(row?.notes), /blocked \(rate_limited\) til /);
+      // one spawn total — the worker that died; nothing churned
+      assert.equal(spawns(f).trim().split('\n').length, 1);
+      // the wall lifts: the snooze's due stamp wakes on the next ready
+      // read, and the recorded death is operator-cleared (`bro agents
+      // down` writes the same stopped flag — spec bro-1x7p)
+      const db = JSON.parse(readFileSync(f.db, 'utf8')) as {
+        rows: Array<Record<string, unknown>>;
+      };
+      db.rows.find(r2 => r2.id === 'fx-a')!.defer_until = new Date(
+        Date.now() - 60_000
+      ).toISOString();
+      writeFileSync(f.db, JSON.stringify(db));
+      const regPath = join(f.main, '.git', 'bro', 'agents.json');
+      const reg = JSON.parse(readFileSync(regPath, 'utf8')) as Record<
+        string,
+        Record<string, unknown>
+      >;
+      reg['fx-a']!.stopped = true;
+      writeFileSync(regPath, JSON.stringify(reg));
+      const woke = f.run();
+      assert.match(woke.stdout, /loop: fx-a landed/, woke.stderr);
+      assert.equal(bead(f.db, 'fx-a')?.status, 'closed');
+      assert.match(spawns(f), /work opened pr/);
+    });
+  });
+
+  test('a rate_limited death with no reported reset takes the flat cooldown', () => {
+    // no reset on the tail = a wall with no advertised end — a timed
+    // wait would invent a horizon the provider never gave
+    const f = walledLane();
+    writeHostState(f.hostState, {
+      walls: { 'fx-a': { tail: 'HTTP 429 too many requests', exit: 1 } },
+    });
+    inside(f.main, f.root, () => {
+      const r = f.run();
+      assert.match(r.stdout, /1 parked/, r.stderr);
+      const row = bead(f.db, 'fx-a');
+      assert.equal(row?.status, 'deferred');
+      assert.match(String(row?.notes), /blocked \(rate_limited\)/);
+      assert.doesNotMatch(String(row?.notes), /til /);
+      const wake = Date.parse(String(row?.defer_until));
+      assert.ok(
+        wake > Date.now() + 60 * 60_000,
+        `no-reset wall should take the parkedWakeMin cooldown — defer_until ${String(row?.defer_until)}`
+      );
+      assert.equal(spawns(f).trim().split('\n').length, 1);
+    });
+  });
+
+  test('a quota death parks the same way — an operator clears it, not a timer', () => {
+    const f = walledLane();
+    writeHostState(f.hostState, {
+      walls: { 'fx-a': { tail: 'insufficient credits — usage limit exceeded', exit: 1 } },
+    });
+    inside(f.main, f.root, () => {
+      const r = f.run();
+      assert.match(r.stdout, /1 parked/, r.stderr);
+      const row = bead(f.db, 'fx-a');
+      assert.equal(row?.status, 'deferred');
+      assert.match(String(row?.notes), /blocked \(quota\)/);
+      assert.equal(spawns(f).trim().split('\n').length, 1);
+    });
+  });
+
+  test('a derived quota wall at spawn admission parks the clump — zero workers burned', () => {
+    // a quota wall has no advertised end: the batch lane's refusal
+    // settles as a park once, not the claim → refuse → re-claim churn
+    // the bead reported
+    const f = walledLane();
+    seedDeath(f, { cause: 'quota' });
+    inside(f.main, f.root, () => {
+      const r = f.run();
+      assert.match(r.stdout, /loop: fx-a parked — fakecli walled — quota/, r.stderr);
+      assert.match(r.stdout, /1 parked/);
+      const row = bead(f.db, 'fx-a');
+      assert.equal(row?.status, 'deferred');
+      assert.match(String(row?.notes), /fakecli walled — quota/);
+      // the refusal landed before any worker existed — empty spawn ledger
+      assert.equal(spawns(f), '');
+    });
+  });
+
+  test('a rate_limited wall with no reset parks at admission too', () => {
+    const f = walledLane();
+    seedDeath(f, { cause: 'rate_limited' });
+    inside(f.main, f.root, () => {
+      const r = f.run();
+      assert.match(r.stdout, /loop: fx-a parked — fakecli walled — rate_limited/, r.stderr);
+      assert.match(r.stdout, /1 parked/);
+      assert.equal(bead(f.db, 'fx-a')?.status, 'deferred');
+      assert.equal(spawns(f), '');
+    });
+  });
+
+  test('a timed wall at spawn admission holds pushes until the reset — no churn', () => {
+    // the convoy wait contract at the admission edge: a reset the
+    // provider reported is a horizon to wait, not a wall to park — the
+    // claims release and pushes hold until it (same shape as the
+    // disk-floor hold: non-terminating under the test's own timeout)
+    const until = new Date(Date.now() + 45 * 60_000).toISOString();
+    const f = walledLane();
+    seedDeath(f, { cause: 'rate_limited', resetAt: until });
+    inside(f.main, f.root, () => {
+      const proc = spawnSync(process.execPath, [CLI_DIST, 'loop', '--interval', '0.1'], {
+        cwd: f.main,
+        env: e2eEnv(f.env),
+        encoding: 'utf8',
+        timeout: 4_000,
+      });
+      assert.equal(proc.status, null, 'run should hold pushes until the wall reset');
+      const stdout = proc.stdout ?? '';
+      assert.match(stdout, /fakecli walled — rate_limited til \S+ — pushes hold until the reset/);
+      // exactly one hold — the wall's reset is the next probe, not a tick
+      assert.equal(stdout.match(/pushes hold until the reset/g)?.length, 1);
+      // nothing spawned, nothing claimed — the released claim sits open
+      assert.equal(spawns(f), '');
       assert.equal(bead(f.db, 'fx-a')?.status, 'open');
     });
   });

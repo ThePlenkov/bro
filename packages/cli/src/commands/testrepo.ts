@@ -1304,6 +1304,19 @@ if (prompt.includes('SAST fixer')) {
   log(cleared ? 'cleared annotations' : 'left findings (noop)')
   process.exit(0)
 }
+// a per-bead provider wall (bro-36bhc): the worker dies exactly like a
+// provider-walled real run — the tail text on stderr is what the
+// exit-cause classifier reads (rate-limit words + reset), the exit code
+// only proves death. One-shot: consuming the wall lets the woken
+// re-claim's worker run the normal scenario — the "wait the reset, then
+// respawn" e2e gets its second act from the same fixture.
+const wall = (load().walls ?? {})[process.env.BRO_BEAD_ID]
+if (wall !== undefined) {
+  withState((s) => { delete s.walls[process.env.BRO_BEAD_ID] })
+  console.error(wall.tail)
+  log('walled')
+  process.exit(wall.exit ?? 1)
+}
 switch (scenario) {
   case 'land': {
     retry(() => fs.writeFileSync('work.txt', 'did the thing\\n'))

@@ -1,4 +1,5 @@
 ---
+
 name: loop
 description: "Use when the user wants the backlog worked autonomously end-to-end — 'run the backlog', 'bro flow loop', a hands-off /goal over open beads. Unlike /next (one scheduling step), `bro flow loop` IS the loop: bro claims each ready bead, spawns the configured agent in a fresh worktree, drives the act gate, closes the bead, repeats. Requires `bro` and `bd`; the agent is a providers.<name> entry (loop.provider/--provider, acp = headless) or a raw loop.agent template."
 ---
@@ -90,19 +91,19 @@ knobs below.
 
 ## Commands
 
-| Command | What it does |
-| ------- | ------------ |
-| `bro flow loop` | Run the queue until idle or gated |
-| `bro flow loop --max N` | At most N beads this run |
-| `bro flow loop --max-open N` | Cap the gate stack's open PRs — a full stack only services gates until a merge frees a slot |
-| `bro flow loop --disk-min-slots N` | Disk floor in slot units — pushes hold while free disk < N×`loop.worktreeMb` on any filesystem the run writes to (default 2; 0 disables) |
-| `bro flow loop --dry-run` | Print the top item's plan (claim, worktree, agent cmd) — changes nothing |
-| `bro flow loop --agent '<tpl>'` | One-off agent override — a provider name resolves through the registry |
-| `bro flow loop --provider <name>` | Provider pick (`--profile`, `--model`, `--auto-approve` tune it) |
-| `bro flow loop --class <name>` | Pin every claimed bead to one `fleet.routing` class (default: the bead's `class:` label, else `default`) |
-| `bro flow loop --label a,b` | Declared scope — only beads carrying one of these labels are claimable; the rest of the shared queue stays untouched. "Loop the debt beads" never bleeds into unrelated work |
-| `bro flow loop --batch N` | Batch claims — a claim pulls up to N same-affinity beads into one worktree + worker + PR (default 1 = solo). Affinity binds on the lead's spec/epic/`area:`/path-prefix key; `loop.batchMinPriority` (default 3) keeps urgent work solo; a `solo` label opts a bead out |
-| `--merge-timeout MIN`, `--interval SEC` | Gate budget and poll overrides |
+| Command                                 | What it does                                                                                                                                                                                                                                                            |
+| --------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `bro flow loop`                         | Run the queue until idle or gated                                                                                                                                                                                                                                       |
+| `bro flow loop --max N`                 | At most N beads this run                                                                                                                                                                                                                                                |
+| `bro flow loop --max-open N`            | Cap the gate stack's open PRs — a full stack only services gates until a merge frees a slot                                                                                                                                                                             |
+| `bro flow loop --disk-min-slots N`      | Disk floor in slot units — pushes hold while free disk < N×`loop.worktreeMb` on any filesystem the run writes to (default 2; 0 disables)                                                                                                                                |
+| `bro flow loop --dry-run`               | Print the top item's plan (claim, worktree, agent cmd) — changes nothing                                                                                                                                                                                                |
+| `bro flow loop --agent '<tpl>'`         | One-off agent override — a provider name resolves through the registry                                                                                                                                                                                                  |
+| `bro flow loop --provider <name>`       | Provider pick (`--profile`, `--model`, `--auto-approve` tune it)                                                                                                                                                                                                        |
+| `bro flow loop --class <name>`          | Pin every claimed bead to one `fleet.routing` class (default: the bead's `class:` label, else `default`)                                                                                                                                                                |
+| `bro flow loop --label a,b`             | Declared scope — only beads carrying one of these labels are claimable; the rest of the shared queue stays untouched. "Loop the debt beads" never bleeds into unrelated work                                                                                            |
+| `bro flow loop --batch N`               | Batch claims — a claim pulls up to N same-affinity beads into one worktree + worker + PR (default 1 = solo). Affinity binds on the lead's spec/epic/`area:`/path-prefix key; `loop.batchMinPriority` (default 3) keeps urgent work solo; a `solo` label opts a bead out |
+| `--merge-timeout MIN`, `--interval SEC` | Gate budget and poll overrides                                                                                                                                                                                                                                          |
 
 ## What happens per bead
 
@@ -116,7 +117,7 @@ knobs below.
    judges it instead). stdout/stderr append to
    `<git-common>/bro/loop/<slug>.log` and a `<slug>.json` record pins
    the pid — `bro review watch`/`bro fleet status` report output silence past
-   `loop.stallMin` (45) as an *advisory*; the orchestrator decides, bro
+   `loop.stallMin` (45) as an _advisory_; the orchestrator decides, bro
    never kills. Its env
    pins `BEADS_DIR` to the runner's store (`bd where`), so `bd` writes
    inside the worktree reach the shared db regardless of version or a
@@ -148,6 +149,14 @@ knobs below.
   deferred snooze for `loop.parkedWakeMin` (default 2h — then it wakes
   to `open` on the next ready read; `0` ices it until `bd undefer`),
   and the worktree stays as the resume cache.
+- **A provider wall is waited on the provider's clock, never churned** —
+  a `rate_limited` worker death carrying a `resetAt` snoozes the claim
+  until the reset (then it wakes and a fresh worker respawns — no
+  attempt burned waiting), and a `rate_limited`/`quota` wall derived at
+  spawn admission either holds pushes until the reset or parks the
+  clump when no reset was reported. The shared exit-cause taxonomy —
+  the same contract convoy supervision runs — decides; the flat
+  cooldown only covers walls with no advertised end.
 - **The open-PR set is bounded** — `loop.maxOpen` (default 3) caps how
   many gates sit on the stack; a full stack services gates only until a
   merge frees a slot. Independent branches drift against shared files
