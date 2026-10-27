@@ -50,15 +50,6 @@ export interface SkillDrift {
   kind: 'missing' | 'drifted'
 }
 
-/** sha256 of a file's bytes. */
-export function fileHash(path: string): string | null {
-  try {
-    return createHash('sha256').update(readFileSync(path)).digest('hex')
-  } catch {
-    return null
-  }
-}
-
 /**
  * The hash a skill folder hashes to — the shape `skills-lock.json` stores.
  *
@@ -72,20 +63,23 @@ export function fileHash(path: string): string | null {
  */
 export function skillFolderHash(dir: string): string | null {
   const files: Array<{ relativePath: string; content: Buffer }> = []
-  const collect = (current: string): boolean => {
+  const pending = [dir]
+  while (pending.length > 0) {
+    const current = pending.pop()!
     let entries: Dirent[]
     try {
       entries = readdirSync(current, { withFileTypes: true })
     } catch {
-      return false
+      // any unlistable directory fails the hash — a partial hash would
+      // vouch for content it never covered (the drift contract)
+      return null
     }
     for (const entry of entries) {
       const full = join(current, entry.name)
       if (entry.isDirectory()) {
-        if (entry.name === '.git' || entry.name === 'node_modules') {
-          continue
+        if (entry.name !== '.git' && entry.name !== 'node_modules') {
+          pending.push(full)
         }
-        collect(full)
       } else if (entry.isFile()) {
         try {
           files.push({
@@ -97,10 +91,6 @@ export function skillFolderHash(dir: string): string | null {
         }
       }
     }
-    return true
-  }
-  if (!collect(dir)) {
-    return null
   }
   files.sort((a, b) => a.relativePath.localeCompare(b.relativePath))
   const hash = createHash('sha256')
@@ -132,7 +122,7 @@ export function readSkillLock(root: string): Map<string, LockedSkill> {
     return out
   }
   for (const [name, value] of Object.entries(skillsOf(parsed))) {
-    const skill = lockedSkill(name, value)
+    const skill = lockedSkill({ name, value })
     if (skill !== null) {
       out.set(name, skill)
     }
@@ -153,7 +143,8 @@ function skillsOf(parsed: unknown): Record<string, unknown> {
 }
 
 /** One lock entry — null when it carries no source or no hash. */
-function lockedSkill(name: string, value: unknown): LockedSkill | null {
+function lockedSkill(entry: { name: string; value: unknown }): LockedSkill | null {
+  const { name, value } = entry
   if (typeof value !== 'object' || value === null) {
     return null
   }
@@ -197,47 +188,27 @@ function checkSingleSkill(skill: LockedSkill, skillsDir: string): SkillDrift | n
   const installedDir = join(skillsDir, skill.name)
   const installedSkillMd = join(installedDir, 'SKILL.md')
   if (!existsSync(installedSkillMd)) {
-    return missingDrift(skill)
+    return driftOf(skill, { actual: '', kind: 'missing' })
   }
   const actual = skillFolderHash(installedDir)
   // A folder that cannot be fully read (an unreadable file, an unlistable
   // subdirectory) hashes to null. Treating that as "no drift" would
   // vouch for content the hash never covered, so it is drift.
   if (actual === null) {
-    return unreadableDrift(skill)
+    return driftOf(skill, { actual: '', kind: 'drifted' })
   }
   if (actual !== skill.computedHash) {
-    return driftedDrift(skill, actual)
+    return driftOf(skill, { actual, kind: 'drifted' })
   }
   return null
 }
 
-function missingDrift(skill: LockedSkill): SkillDrift {
+function driftOf(skill: LockedSkill, result: Pick<SkillDrift, 'actual' | 'kind'>): SkillDrift {
   return {
     name: skill.name,
     source: skill.source,
     expected: skill.computedHash,
-    actual: '',
-    kind: 'missing',
-  }
-}
-
-function unreadableDrift(skill: LockedSkill): SkillDrift {
-  return {
-    name: skill.name,
-    source: skill.source,
-    expected: skill.computedHash,
-    actual: '',
-    kind: 'drifted',
-  }
-}
-
-function driftedDrift(skill: LockedSkill, actual: string): SkillDrift {
-  return {
-    name: skill.name,
-    source: skill.source,
-    expected: skill.computedHash,
-    actual,
-    kind: 'drifted',
+    actual: result.actual,
+    kind: result.kind,
   }
 }

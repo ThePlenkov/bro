@@ -534,7 +534,6 @@ export type {
 } from './planes.ts'
 export {
   checkSkillLock,
-  fileHash,
   readSkillLock,
   skillFolderHash,
   type LockedSkill,
