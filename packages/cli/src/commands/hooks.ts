@@ -274,7 +274,7 @@ export type GateAspect = 'act' | 'drill' | 'work' | 'task';
 /** `bro` at a command position — the installed bin (`bro …`) or npx
  *  against the package (`npx [--flags] [@broject/]bro[@ver] …`). The
  *  negative lookahead keeps `npx bro-fu`/`npx brother` out. */
-const BRO_CMD = String.raw`(?:bro|npx(?:\s+--?[\w-]+(?:=\S+)?)*\s+(?:@broject\/)?bro(?:@[\w.:-]+)?(?![\w./-]))`;
+const BRO_CMD = String.raw`(?:bro|npx\s+(?:--?[\w-]+(?:=\S+)?\s+)*(?:@broject\/)?bro(?:@[\w.:-]+)?(?![\w./-]))`;
 
 export function classifyArmCommand(cmd: string): GateAspect | null {
   const c = unquoted(cmd);
@@ -426,7 +426,7 @@ export function classifySkillMutation(cmd: string): { plugin: string; skill: str
  *  literal: a computed RegExp trips the non-literal-constructor SAST
  *  rule. Keep the npx arm in sync with BRO_CMD. */
 const SELF_TOOL_HEAD_RE =
-  /^\s*(?:bd|bro|npx(?:\s+--?[\w-]+(?:=\S+)?)*\s+(?:@broject\/)?bro(?:@[\w.:-]+)?(?![\w./-]))(?:\s|$)/;
+  /^\s*(?:bd|bro|npx\s+(?:--?[\w-]+(?:=\S+)?\s+)*(?:@broject\/)?bro(?:@[\w.:-]+)?(?![\w./-]))(?:\s|$)/;
 
 /** bro/bd are the plugin's own tools — permission hooks approve them
  * outright. Chained, piped, or redirected commands are NOT self-tool calls:
