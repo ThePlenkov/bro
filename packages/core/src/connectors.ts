@@ -670,8 +670,31 @@ export function facade<K extends keyof FacadeMap>(
   opts: FacadeOpts = {}
 ): FacadeMap[K] {
   const pick = pickConnector(kind, ctx, opts);
-  const provides = pick[kind as keyof Connector] as (ctx: ConnectorCtx) => unknown;
-  return provides(ctx) as FacadeMap[K];
+  // static dispatch per facade — pickConnector already proved the
+  // method exists, and a dynamic pick[kind] reads as object-injection
+  // to SAST while adding nothing
+  switch (kind) {
+    case 'tasks':
+      return pick.tasks!(ctx) as FacadeMap[K];
+    case 'tasksAsync':
+      return pick.tasksAsync!(ctx) as FacadeMap[K];
+    case 'reviews':
+      return pick.reviews!(ctx) as FacadeMap[K];
+    case 'mergeQueue':
+      return pick.mergeQueue!(ctx) as FacadeMap[K];
+    case 'specs':
+      return pick.specs!(ctx) as FacadeMap[K];
+    case 'judge':
+      return pick.judge!(ctx) as FacadeMap[K];
+    case 'events':
+      return pick.events!(ctx) as FacadeMap[K];
+    case 'queries':
+      return pick.queries!(ctx) as FacadeMap[K];
+    case 'stacks':
+      return pick.stacks!(ctx) as FacadeMap[K];
+    default:
+      throw new Error(`connector "${pick.name}" does not provide "${String(kind)}"`);
+  }
 }
 
 /** The name of the connector facade() would pick for `kind` — same
@@ -919,7 +942,8 @@ function taskStoreFromPick(pick: Connector, dir: string): TaskStoreAsync {
     deps: (ids, opts) => Promise.resolve(s.deps(ids, opts)),
     neighbors: (id, opts) => Promise.resolve(s.neighbors(id, opts)),
     actor: () => Promise.resolve(s.actor?.() ?? ''),
-    slotHolder: s.slot === undefined ? undefined : async name => s.slot!(name)?.holder() ?? null,
+    slotHolder:
+      s.slot === undefined ? undefined : name => Promise.resolve(s.slot!(name)?.holder() ?? null),
   };
 }
 

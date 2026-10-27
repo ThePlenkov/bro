@@ -556,6 +556,27 @@ const KNOWN_FLAGS: Record<string, Set<string>> = {
   init: new Set(['--tool']),
 };
 
+/** Reject options the subcommand doesn't serve — unknown names, and
+ *  `=` spellings on boolean flags (`--all=true` used to pass the
+ *  allowlist yet miss the exact `includes('--all')` check — a silently
+ *  ignored option, the same class the allowlist exists for). */
+function assertSpecFlags(key: string, known: Set<string>, rest: string[]): void {
+  for (const a of rest) {
+    if (!a.startsWith('--')) {
+      continue;
+    }
+    const name = a.split('=', 1)[0]!;
+    if (!known.has(name)) {
+      console.error(`error: unknown option "${a}" for spec ${key}`);
+      process.exit(2);
+    }
+    if (a.includes('=') && !DRIFT_VALUE_FLAGS.has(name)) {
+      console.error(`error: option "${name}" takes no value for spec ${key}`);
+      process.exit(2);
+    }
+  }
+}
+
 export function runSpecCommand(argv: string[]): void {
   const dir = process.cwd();
   const [sub, ...rest] = argv;
@@ -572,23 +593,7 @@ export function runSpecCommand(argv: string[]): void {
   if (known === undefined) {
     usage();
   }
-  for (const a of rest) {
-    if (!a.startsWith('--')) {
-      continue;
-    }
-    const name = a.split('=', 1)[0]!;
-    if (!known.has(name)) {
-      console.error(`error: unknown option "${a}" for spec ${key}`);
-      process.exit(2);
-    }
-    // `=` belongs to value flags only — `--all=true` passing validation
-    // but missing the exact `includes('--all')` check below was a
-    // silently-ignored option, the same class the allowlist exists for
-    if (a.includes('=') && !DRIFT_VALUE_FLAGS.has(name)) {
-      console.error(`error: option "${name}" takes no value for spec ${key}`);
-      process.exit(2);
-    }
-  }
+  assertSpecFlags(key, known, rest);
   const positional = positionals(rest, VALUE_FLAGS);
   if (sub === 'new') {
     cmdNew(dir, positional[0], flag(rest, '--parent'));

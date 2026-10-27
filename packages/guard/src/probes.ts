@@ -250,8 +250,9 @@ async function evalProbes(
   probes: Record<string, NamedProbe>,
   timeoutMs: number
 ): Promise<ClauseVerdict[]> {
+  const probeMap = new Map(Object.entries(probes));
   return mapPool(PROBE_FANOUT, list, async (p): Promise<ClauseVerdict> => {
-    const fn = probes[p.name];
+    const fn = probeMap.get(p.name);
     if (fn === undefined) {
       // the registry is closed — an unknown name fails the clause and
       // shows in `bro guard test` (spec: never silently true)
