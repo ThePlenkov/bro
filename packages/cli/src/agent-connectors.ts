@@ -12,7 +12,7 @@
  * marker in the hooks state dir so parallel-session detection sees the
  * agent, and molStep claims pinned into the shared beads store.
  */
-import { spawn, spawnSync } from 'node:child_process';
+import { spawn, spawnSync, type SpawnOptions } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import {
   accessSync,
@@ -2146,17 +2146,7 @@ function unitSnapshot(root: number): {
   if (scan === null) {
     return { members, groups };
   }
-  const children = new Map<number, number[]>();
-  const byPid = new Map<number, ProcEntry>();
-  for (const e of scan.entries) {
-    byPid.set(e.pid, e);
-    const list = children.get(e.ppid);
-    if (list === undefined) {
-      children.set(e.ppid, [e.pid]);
-    } else {
-      list.push(e.pid);
-    }
-  }
+  const { byPid, children } = procTreeIndex(scan.entries);
   const seen = new Set<number>([root]);
   const queue = [root];
   for (let cur = queue.shift(); cur !== undefined; cur = queue.shift()) {
@@ -2174,6 +2164,21 @@ function unitSnapshot(root: number): {
     }
   }
   return { members, groups };
+}
+
+/** ppid → children index plus pid → row, built over one /proc scan —
+ *  the tree walk's lookup tables. */
+function procTreeIndex(entries: ProcEntry[]): {
+  byPid: Map<number, ProcEntry>;
+  children: Map<number, number[]>;
+} {
+  const byPid = new Map<number, ProcEntry>();
+  const children = new Map<number, number[]>();
+  for (const e of entries) {
+    byPid.set(e.pid, e);
+    children.set(e.ppid, [...(children.get(e.ppid) ?? []), e.pid]);
+  }
+  return { byPid, children };
 }
 
 /** Live state for a registry entry under this backend. */
@@ -2362,21 +2367,26 @@ const spawnTestSeam: {
   abandonAt?: SpawnAbandonAt;
   goWaitTicks?: number;
   scope?: boolean;
+  scopeRefused?: boolean;
 } = {};
 
 /** Arm the crash-window failpoints (spec bro-l8c4f.5) — tests only:
  *  `abandonAt` throws SpawnAbandoned mid-section exactly where a
  *  launcher crash would cut it, `goWaitTicks` shrinks the worker's
  *  admission wait so the timeout path runs inside a test budget,
- *  `scope` pins the systemd-scope wrap on or off regardless of probe. */
+ *  `scope` pins the systemd-scope wrap on or off regardless of probe,
+ *  `scopeRefused` substitutes a child that dies before the exec — the
+ *  shape a user-manager refusal leaves. */
 export function armNativeSpawnTestSeam(seam: {
   abandonAt?: SpawnAbandonAt;
   goWaitTicks?: number;
   scope?: boolean;
+  scopeRefused?: boolean;
 }): void {
   spawnTestSeam.abandonAt = seam.abandonAt;
   spawnTestSeam.goWaitTicks = seam.goWaitTicks;
   spawnTestSeam.scope = seam.scope;
+  spawnTestSeam.scopeRefused = seam.scopeRefused;
 }
 
 const maybeAbandonSpawn = (at: SpawnAbandonAt): void => {
@@ -2441,6 +2451,35 @@ function systemdScopeFor(knobs: Record<string, unknown>): boolean {
     return knobs.systemdScope;
   }
   return systemdScopeProbe();
+}
+
+/** The scope-admission window (spec bro-ybo8z). The probe's yes is a
+ *  host answer, not this scope's — a user manager that refuses the
+ *  registration reports it only by `systemd-run` dying BEFORE the exec:
+ *  dead pid, no handle, no `.exit`, and the registry row would read
+ *  'lost' with no record. The handle is the payload's first write, so
+ *  the check waits on the positive signal and reads a dead pid without
+ *  it as refusal — a live-but-silent pid past the budget stays
+ *  admitted, because a scope still mid-registration is not a refusal
+ *  and retrying beside it would double the run. */
+const SCOPE_ADMIT_TICK_MS = 25;
+const SCOPE_ADMIT_TICKS = 80; // ~2s ceiling; a refusal lands in <100ms
+const scopeAdmitWait = new Int32Array(new SharedArrayBuffer(4));
+
+function scopeAdmitted(pid: number | undefined, handleFile: string, exitFile: string): boolean {
+  if (pid === undefined) {
+    return false;
+  }
+  for (let i = 0; i < SCOPE_ADMIT_TICKS; i++) {
+    if (existsSync(handleFile) || existsSync(exitFile)) {
+      return true;
+    }
+    if (!pidAlive(pid)) {
+      return false;
+    }
+    Atomics.wait(scopeAdmitWait, 0, 0, SCOPE_ADMIT_TICK_MS);
+  }
+  return true;
 }
 
 /** The `<agentId>.<runId>.{handle,go}` paths for one attempt — the
@@ -2637,57 +2676,80 @@ export function makeNativeConnector(ctx: ConnectorCtx, env: AgentConnectorEnv): 
           // --description carries the run's identity (never --unit — a
           // respawned agentId must not collide on a lingering scope)
           const scoped = systemdScopeFor(knobs);
-          const child = spawn(
-            scoped ? 'systemd-run' : 'sh', // NOSONAR — PATH lookup is the contract (same as git/bd everywhere)
-            scoped
-              ? [
-                  ...SCOPE_RUN_PREFIX.slice(1),
-                  `--description=bro agent ${agentId} ${spec.molStep}`,
-                  '--',
-                  'sh',
-                  ...args,
-                ]
-              : args,
-            { // NOSONAR — operator-configured agent command (same contract as loop)
-              cwd: spec.repoRoot,
-              env: {
-                // ambient env minus the connector-owned pins — every
-                // other backend filters AGENT_PIN_KEYS out of
-                // ambient/spec env already (tmux's 0600 env file,
-                // gascity's args); without it a worker-spawned `bro
-                // agents up`/`bro loop` would bleed the parent's
-                // BRO_AGENT_*/BRO_MOL_ID provenance into the child's
-                // commit trailers (bro-fzot's exact bug shape)
-                // The ambient env and the caller's env are filtered
-                // SEPARATELY: the fleet's marker may only come from the
-                // caller (spec.env). Inherited from the ambient env it
-                // would charge a worker's own children — an interactive
-                // session — to the fleet's budget.
-                ...Object.fromEntries(
-                  Object.entries(process.env).filter(
-                    (e): e is [string, string] =>
-                      e[1] !== undefined &&
-                      !AGENT_PIN_KEYS.has(e[0]) &&
-                      !GIT_REPOSITORY_ENV_KEYS.has(e[0]) &&
-                      e[0] !== BATCH_MARKER_ENV
-                  )
-                ),
-                ...Object.fromEntries(
-                  Object.entries(spec.env ?? {}).filter(
-                    (e): e is [string, string] =>
-                      e[1] !== undefined &&
-                      !AGENT_PIN_KEYS.has(e[0]) &&
-                      !GIT_REPOSITORY_ENV_KEYS.has(e[0])
-                  )
-                ),
-                // identity pins last — spec.env must never redirect the
-                // claim store or re-badge the worker as another bead/agent
-                ...Object.fromEntries(agentEnvPins(spec, agentId, promptFile, cliBadge, mol)),
-              },
-              stdio: ['ignore', fd, errFd],
-              detached: true,
+          const scopeArgv = [
+            ...SCOPE_RUN_PREFIX.slice(1),
+            `--description=bro agent ${agentId} ${spec.molStep}`,
+            '--',
+            'sh',
+            ...args,
+          ];
+          const spawnOpts: SpawnOptions = { // NOSONAR — operator-configured agent command (same contract as loop)
+            cwd: spec.repoRoot,
+            env: {
+              // ambient env minus the connector-owned pins — every
+              // other backend filters AGENT_PIN_KEYS out of
+              // ambient/spec env already (tmux's 0600 env file,
+              // gascity's args); without it a worker-spawned `bro
+              // agents up`/`bro loop` would bleed the parent's
+              // BRO_AGENT_*/BRO_MOL_ID provenance into the child's
+              // commit trailers (bro-fzot's exact bug shape)
+              // The ambient env and the caller's env are filtered
+              // SEPARATELY: the fleet's marker may only come from the
+              // caller (spec.env). Inherited from the ambient env it
+              // would charge a worker's own children — an interactive
+              // session — to the fleet's budget.
+              ...Object.fromEntries(
+                Object.entries(process.env).filter(
+                  (e): e is [string, string] =>
+                    e[1] !== undefined &&
+                    !AGENT_PIN_KEYS.has(e[0]) &&
+                    !GIT_REPOSITORY_ENV_KEYS.has(e[0]) &&
+                    e[0] !== BATCH_MARKER_ENV
+                )
+              ),
+              ...Object.fromEntries(
+                Object.entries(spec.env ?? {}).filter(
+                  (e): e is [string, string] =>
+                    e[1] !== undefined &&
+                    !AGENT_PIN_KEYS.has(e[0]) &&
+                    !GIT_REPOSITORY_ENV_KEYS.has(e[0])
+                )
+              ),
+              // identity pins last — spec.env must never redirect the
+              // claim store or re-badge the worker as another bead/agent
+              ...Object.fromEntries(agentEnvPins(spec, agentId, promptFile, cliBadge, mol)),
+            },
+            stdio: ['ignore', fd, errFd],
+            detached: true,
+          };
+          // the scope refusal path needs a second shot at the same spawn —
+          // the seam's refusal stand-in dies instantly like a real refused
+          // systemd-run, but runs the payload verbatim for everything else
+          const spawnWorker = (wrap: boolean) => {
+            if (wrap && spawnTestSeam.scopeRefused === true) {
+              // NOSONAR — PATH lookup is the contract (same as git/bd everywhere)
+              return spawn('sh', ['-c', 'exit 1'], spawnOpts);
             }
-          );
+            // NOSONAR — PATH lookup is the contract (same as git/bd everywhere)
+            return spawn(wrap ? 'systemd-run' : 'sh', wrap ? scopeArgv : args, spawnOpts);
+          };
+          let child = spawnWorker(scoped);
+          if (scoped && !scopeAdmitted(child.pid, handleFile, exitFile)) {
+            // refused — the payload never ran: dead pid, no handle, no
+            // .exit; left alone the row would read 'lost' with no record
+            // and the reservation would idle out its TTL. Retry the plain
+            // spawn over the same attempt artifacts.
+            appendPrivateFileSync(
+              stderrLog,
+              'bro: systemd-run refused the scope — respawned without the wrap\n'
+            );
+            // the discarded child may still emit 'error' (the ENOENT
+            // path) — an unlistened error event takes the whole CLI down
+            child.on('error', () => {
+              /* the retry owns the verdict now — swallow the loser's */
+            });
+            child = spawnWorker(false);
+          }
           // an unhandled 'error' event would take the whole CLI down —
           // a failed exec records itself on the entry and reads 'lost'
           const spawnStamp = readAgentRegistry(dir)[spec.molStep]?.spawnedAt;

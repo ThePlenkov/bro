@@ -615,51 +615,92 @@ export function bead(db: string, id: string): Record<string, unknown> | undefine
   return readBeads(db).find(r => r.id === id);
 }
 
+/** /proc proof the pid still runs OUR wrapper — the wrapper's argv
+ *  carries the handle path as a positional arg, so the run token
+ *  matches verbatim. This is what makes the group kill safe: a stale
+ *  handle or registry row can name a pid the OS has since recycled,
+ *  and a blind kill(-p) would land on a stranger's whole process
+ *  group. Unreadable /proc (raced exit, non-Linux) is never a target —
+ *  a leaked fixture process beats a killed foreign one. */
+function pidRunsToken(pid: number, token: string): boolean {
+  try {
+    return readFileSync(`/proc/${pid}/cmdline`, 'utf8').includes(token);
+  } catch {
+    return false;
+  }
+}
+
+/** SIGKILL a run pid's whole group — detached workers lead their own
+ *  group. Self/parent pids are never signaled: tests pin their own
+ *  pid into registries to fake 'running'. A needle-verified pid is
+ *  provably ours; without a needle the caller's own registry pid
+ *  keeps the old trust — a FILE-derived pid never gets here without
+ *  one. */
+function killVerifiedGroup(pid: number, needle: string | undefined): void {
+  if (
+    pid === process.pid ||
+    pid === process.ppid ||
+    (needle !== undefined && !pidRunsToken(pid, needle))
+  ) {
+    return;
+  }
+  try {
+    process.kill(-pid, 'SIGKILL');
+  } catch {
+    // already gone
+  }
+}
+
+/** The pid a run-scoped handle names — absent file, absent run, or a
+ *  pre-handshake run all read as none. */
+function handlePid(main: string, token: string | undefined): number | undefined {
+  if (token === undefined) {
+    return undefined;
+  }
+  try {
+    const h = Number(
+      readFileSync(join(main, '.git', 'bro', 'agents', `${token}.handle`), 'utf8').trim()
+    );
+    return Number.isInteger(h) && h > 0 ? h : undefined;
+  } catch {
+    return undefined; // no handle — plain-shape run or pre-handshake
+  }
+}
+
 /** SIGKILL a spawned run's whole unit — the recorded pid's group plus
  *  the run-scoped handle's group when the worker named a different
  *  pid (exec-style `systemd-run --scope` keeps them equal; a
- *  fork-style one would differ, bro-ybo8z). Self/parent pids are
- *  never signaled: tests pin their own pid into registries to fake
- *  'running'. */
+ *  fork-style one would differ, bro-ybo8z). Pids are cmdline-verified
+ *  against the run token before the group signal — the wrapper's argv
+ *  carries the handle path, so `<id>.<runId>.` proves ownership and
+ *  the trailing dot keeps a shared prefix from aliasing another run. */
 export function killRun(
   main: string,
   run: { pid?: unknown; runId?: unknown; agentId?: unknown; id?: unknown }
 ): void {
+  const agentId = [run.agentId, run.id].find((x): x is string => typeof x === 'string');
+  const token =
+    agentId !== undefined && typeof run.runId === 'string' ? `${agentId}.${run.runId}` : undefined;
   const pids = new Set<number>();
   if (typeof run.pid === 'number' && run.pid > 0) {
     pids.add(run.pid);
   }
-  const agentId =
-    typeof run.agentId === 'string' ? run.agentId : typeof run.id === 'string' ? run.id : undefined;
-  if (typeof run.runId === 'string' && agentId !== undefined) {
-    try {
-      const h = Number(
-        readFileSync(
-          join(main, '.git', 'bro', 'agents', `${agentId}.${run.runId}.handle`),
-          'utf8'
-        ).trim()
-      );
-      if (Number.isInteger(h) && h > 0) {
-        pids.add(h);
-      }
-    } catch {
-      // no handle — plain-shape run or pre-handshake
-    }
+  const h = handlePid(main, token);
+  if (h !== undefined) {
+    pids.add(h);
   }
+  const needle = token === undefined ? undefined : `${token}.`;
   for (const p of pids) {
-    if (p !== process.pid && p !== process.ppid) {
-      try {
-        process.kill(-p, 'SIGKILL'); // detached → own process group
-      } catch {
-        // already gone
-      }
-    }
+    killVerifiedGroup(p, needle);
   }
 }
 
 /** SIGKILL every live handle in the repo's agents dir — the reaper for
  *  runs whose registry row is already gone (a worker self-published
- *  before its launcher died, or the fixture only knows the log pid). */
+ *  before its launcher died, or the fixture only knows the log pid).
+ *  Every handle read is verified against its own filename token —
+ *  a leftover file outlives its run, and the pid it names may be a
+ *  recycled stranger's by the time cleanup sweeps. */
 export function killRunHandles(main: string): void {
   let names: string[] = [];
   try {
@@ -673,12 +714,8 @@ export function killRunHandles(main: string): void {
     }
     try {
       const p = Number(readFileSync(join(main, '.git', 'bro', 'agents', n), 'utf8').trim());
-      if (Number.isInteger(p) && p > 0 && p !== process.pid && p !== process.ppid) {
-        try {
-          process.kill(-p, 'SIGKILL');
-        } catch {
-          // already gone
-        }
+      if (Number.isInteger(p) && p > 0) {
+        killVerifiedGroup(p, n);
       }
     } catch {
       // unreadable handle — not a kill target
@@ -691,7 +728,7 @@ export function killRunHandles(main: string): void {
  *  caller holds one) carries the `act: <id> closed` line. */
 export function assertLandedBead(db: string, id: string, stderr?: string): void {
   if (stderr !== undefined) {
-    assert.match(stderr, new RegExp(`${id} closed`));
+    assert.ok(stderr.includes(`${id} closed`));
   }
   const row = bead(db, id);
   assert.equal(row?.status, 'closed');

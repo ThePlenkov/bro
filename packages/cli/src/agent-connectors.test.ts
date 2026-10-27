@@ -1520,6 +1520,32 @@ describe('native systemd scope (bro-ybo8z)', () => {
       cleanup(f);
     }
   });
+
+  test('a refused scope retries unscoped — the row names a live worker, never a silent lost', async () => {
+    // no systemd needed — the seam's stand-in dies before the exec the
+    // way a user-manager refusal does; the fallback is the plain spawn
+    armNativeSpawnTestSeam({ scope: true, scopeRefused: true });
+    const f = fx([{ id: 'fx-1', status: 'open' }]);
+    try {
+      const c = conn(f);
+      const info = await c.spawn(SPEC(f.main, f.beadsDir, 'fx-1', 'setTimeout(() => {}, 30000)'));
+      const entry = entryOf(f);
+      // the retry keeps pid identity — handle, registry pid and the
+      // live worker are one, in the spawner's own cgroup (no wrap)
+      assert.equal(handlePid(f, entry), info.pid);
+      await until(() => pidAlive(info.pid!));
+      assert.equal(cgroupOf(info.pid!), cgroupOf(process.pid));
+      assert.equal((await c.status(entry.agentId)).state, 'running');
+      assert.match(
+        readFileSync(String(entry.stderrLog), 'utf8'),
+        /refused the scope — respawned without the wrap/
+      );
+      await c.stop(entry.agentId);
+    } finally {
+      armNativeSpawnTestSeam({});
+      cleanup(f);
+    }
+  });
 });
 
 describe('tmux connector', () => {
