@@ -232,6 +232,35 @@ function attempt(
   return { ms, ok, detail, fatal: proc.error !== undefined }
 }
 
+/** stdin for one attempt — a fresh session id per run, since the trace
+ *  journal and skill-hinted markers are per-session; reusing one id
+ *  lets later runs measure a different session's accumulated state.
+ *  noop skips stdin: with BRO_HOOKS=0 run.sh exits before reading it
+ *  for every event but permission, so writing the payload would race
+ *  the exit (EPIPE). */
+function rowInput(
+  lane: Lane,
+  event: string,
+  payload: (sid: string) => unknown,
+  i: number
+): string | undefined {
+  return lane === 'noop' && event !== 'permission'
+    ? undefined
+    : JSON.stringify(payload(`${lane}-${event}-${i}`))
+}
+
+/** Measured-error accounting — the first failure's detail is the only
+ *  one logged; N copies of the same break are noise. */
+function countSampleError(row: string, i: number, a: Attempt, prior: number): number {
+  if (a.ok) {
+    return 0
+  }
+  if (prior === 0) {
+    console.error(`bench-hooks: ${row} run ${i} failed — ${a.detail}`)
+  }
+  return 1
+}
+
 /** A row's `errors` counts measured runs only — warmup failures are
  *  logged but never gated: a discarded sample must not decide CI. */
 function benchRow(
@@ -243,16 +272,7 @@ function benchRow(
   const times: number[] = []
   let errors = 0
   for (let i = 0; i < opts.warmup + opts.runs; i++) {
-    // a fresh session id per run — the trace journal and skill-hinted
-    // markers are per-session; reusing one id lets later runs measure
-    // a different session's accumulated state. noop skips stdin: with
-    // BRO_HOOKS=0 run.sh exits before reading it for every event but
-    // permission, so writing the payload would race the exit (EPIPE).
-    const input =
-      lane === 'noop' && event !== 'permission'
-        ? undefined
-        : JSON.stringify(payload(`${lane}-${event}-${i}`))
-    const a = attempt(lane, event, input, opts)
+    const a = attempt(lane, event, rowInput(lane, event, payload, i), opts)
     if (a.fatal) {
       // spawn failure or the 30s timeout — the remaining attempts
       // re-pay the same hang (24 rows × 21 × 30s tops ~4h on a dead
@@ -269,12 +289,7 @@ function benchRow(
       continue
     }
     times.push(a.ms)
-    if (!a.ok) {
-      errors++
-      if (errors === 1) {
-        console.error(`bench-hooks: ${lane}:${event} run ${i} failed — ${a.detail}`)
-      }
-    }
+    errors += countSampleError(`${lane}:${event}`, i, a, errors)
   }
   times.sort((a, b) => a - b)
   return {
