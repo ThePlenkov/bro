@@ -40,6 +40,9 @@ the check that names it.
   an entry named `bro` (any source). File absent → ok; chain present
   with no resolved plugin → ok — a lone project chain is legitimate
   wiring. Advisory like the rest of doctor: warn, never fail.
+  The warn names the bro-wired events and preserves unrelated
+  handlers — drop-file only when the chain is all-bro, otherwise the
+  hint strips just the bro entries.
 
 ## Plan
 

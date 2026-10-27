@@ -689,6 +689,41 @@ describe('bro doctor', () => {
       assert.match(c.hint ?? '', /drop \.devin\/hooks\.v1\.json/);
     }));
 
+  test('hooks-wiring: mixed bro + foreign chain → warn scopes to bro events, hint keeps the file', () =>
+    withEnv({ bins: ['gh'] }, dir => {
+      const data = join(dir, 'data');
+      process.env.XDG_DATA_HOME = data;
+      mkdirSync(join(data, 'devin', 'cli', 'plugins'), { recursive: true });
+      writeFileSync(
+        join(data, 'devin', 'cli', 'plugins', 'lock.json'),
+        JSON.stringify({ resolved: [{ name: 'bro' }] })
+      );
+      mkdirSync(join(dir, '.devin'));
+      writeFileSync(
+        join(dir, '.devin', 'hooks.v1.json'),
+        JSON.stringify({
+          PostToolUse: [
+            {
+              matcher: '^exec$',
+              hooks: [{ type: 'command', command: '"$DEVIN_PROJECT_DIR/hooks/run.sh" post-tool' }],
+            },
+          ],
+          Stop: [
+            {
+              matcher: '',
+              hooks: [{ type: 'command', command: '"$DEVIN_PROJECT_DIR/tools/lint.sh" || true' }],
+            },
+          ],
+        })
+      );
+      const c = byName(runDoctorChecks(dir), 'hooks-wiring');
+      assert.equal(c.status, 'warn');
+      assert.match(c.detail, /PostToolUse/);
+      assert.doesNotMatch(c.detail, /Stop/);
+      assert.doesNotMatch(c.hint ?? '', /drop/);
+      assert.match(c.hint ?? '', /remove the bro hook entries/);
+    }));
+
   test('hooks-wiring: bro chain with no resolved plugin → ok sole wiring', () =>
     withEnv({ bins: ['gh'] }, dir => {
       mkdirSync(join(dir, '.devin'));
