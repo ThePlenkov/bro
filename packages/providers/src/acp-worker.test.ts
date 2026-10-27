@@ -1,20 +1,14 @@
-import { describe, test } from 'node:test'
-import assert from 'node:assert/strict'
-import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
-import { tmpdir } from 'node:os'
-import { join } from 'node:path'
-import type { SessionConfigOption } from '@agentclientprotocol/sdk'
-import {
-  busProbe,
-  busSocketPath,
-  gitCommonDir,
-  startBusBrokerAt,
-  testGit,
-} from '@broject/core'
-import { acpWorkerArgv } from './acp.ts'
-import { renderAcpUpdate, runAcpWorker } from './acp-worker.ts'
-import type { AcpWorkerSpec } from './acp-worker.ts'
-import { fakeAcpAgent } from './testkit.ts'
+import { describe, test } from 'node:test';
+import assert from 'node:assert/strict';
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import type { SessionConfigOption } from '@agentclientprotocol/sdk';
+import { busProbe, busSocketPath, gitCommonDir, startBusBrokerAt, testGit } from '@broject/core';
+import { acpWorkerArgv } from './acp.ts';
+import { renderAcpUpdate, runAcpWorker } from './acp-worker.ts';
+import type { AcpWorkerSpec } from './acp-worker.ts';
+import { fakeAcpAgent } from './testkit.ts';
 
 const MODEL_OPTION: SessionConfigOption = {
   type: 'select',
@@ -23,17 +17,19 @@ const MODEL_OPTION: SessionConfigOption = {
   category: 'model',
   currentValue: 'typesafe/jev-1.13',
   options: [{ value: 'typesafe/jev-1.13', name: 'jev' }],
-}
+};
 
 /** A worker spec over the in-process peer — prompt on disk, cwd a real
  *  dir, log lines captured. */
-function workerSpec(
-  over: Partial<AcpWorkerSpec> = {}
-): { spec: AcpWorkerSpec; lines: string[]; dir: string } {
-  const dir = mkdtempSync(join(tmpdir(), 'bro-acpw-'))
-  const promptFile = join(dir, 'prompt.md')
-  writeFileSync(promptFile, 'PROMPT-TEXT')
-  const lines: string[] = []
+function workerSpec(over: Partial<AcpWorkerSpec> = {}): {
+  spec: AcpWorkerSpec;
+  lines: string[];
+  dir: string;
+} {
+  const dir = mkdtempSync(join(tmpdir(), 'bro-acpw-'));
+  const promptFile = join(dir, 'prompt.md');
+  writeFileSync(promptFile, 'PROMPT-TEXT');
+  const lines: string[] = [];
   return {
     dir,
     lines,
@@ -43,10 +39,10 @@ function workerSpec(
       cwd: dir,
       provider: 'kilo',
       signals: false,
-      log: (l) => lines.push(l),
+      log: l => lines.push(l),
       ...over,
     },
-  }
+  };
 }
 
 describe('acpWorkerArgv', () => {
@@ -55,92 +51,92 @@ describe('acpWorkerArgv', () => {
       ['bro'],
       { type: 'acp', command: 'kilo --acp' },
       { model: 'm; rm -rf /' }
-    )
+    );
     assert.deepEqual(argv, [
-      'bro', 'acp-worker', '--command', 'kilo --acp',
-      '--model', 'm; rm -rf /',
-    ])
-  })
+      'bro',
+      'acp-worker',
+      '--command',
+      'kilo --acp',
+      '--model',
+      'm; rm -rf /',
+    ]);
+  });
 
   test('entry pins apply: profile shell-quotes into command, model + autoApprove render flags', () => {
-    const argv = acpWorkerArgv(
-      ['npx', '-y', '@broject/bro@0'],
-      {
-        type: 'acp',
-        command: 'kilo --acp',
-        profile: "it's work",
-        model: 'jev',
-        autoApprove: true,
-      }
-    )
+    const argv = acpWorkerArgv(['npx', '-y', '@broject/bro@0'], {
+      type: 'acp',
+      command: 'kilo --acp',
+      profile: "it's work",
+      model: 'jev',
+      autoApprove: true,
+    });
     assert.deepEqual(argv, [
-      'npx', '-y', '@broject/bro@0', 'acp-worker',
-      '--command', `kilo --acp --profile 'it'\\''s work'`,
-      '--model', 'jev',
+      'npx',
+      '-y',
+      '@broject/bro@0',
+      'acp-worker',
+      '--command',
+      `kilo --acp --profile 'it'\\''s work'`,
+      '--model',
+      'jev',
       '--auto-approve',
-    ])
-  })
+    ]);
+  });
 
   test('opts beat the entry pin piecewise — model override, autoApprove off stays off', () => {
     const argv = acpWorkerArgv(
       ['bro'],
       { type: 'acp', command: 'kilo --acp', model: 'entry-m', autoApprove: false },
       { model: 'flag-m' }
-    )
-    assert.ok(argv.includes('flag-m'))
-    assert.ok(!argv.includes('entry-m'))
-    assert.ok(!argv.includes('--auto-approve'))
-  })
+    );
+    assert.ok(argv.includes('flag-m'));
+    assert.ok(!argv.includes('entry-m'));
+    assert.ok(!argv.includes('--auto-approve'));
+  });
 
-  test('sessionRm rides --session-rm verbatim; the flag value overrides the entry pin', () => {
+  test('sessionRm never rides the worker argv — it renders at PR settlement (bro-5qsnr)', () => {
     const entry = {
       type: 'acp' as const,
       command: 'devin acp',
       sessionRm: 'devin rm {sessionId} --force',
-    }
-    const argv = acpWorkerArgv(['bro'], entry)
-    const i = argv.indexOf('--session-rm')
-    assert.equal(argv[i + 1], 'devin rm {sessionId} --force')
-
-    const over = acpWorkerArgv(['bro'], entry, { sessionRm: 'rm -f {sessionId}.lock' })
-    assert.equal(over[over.indexOf('--session-rm') + 1], 'rm -f {sessionId}.lock')
-
-    const none = acpWorkerArgv(['bro'], { type: 'acp', command: 'devin acp' })
-    assert.ok(!none.includes('--session-rm'))
-  })
-})
+    };
+    const argv = acpWorkerArgv(['bro'], entry);
+    assert.ok(!argv.includes('--session-rm'));
+    assert.ok(!argv.some(a => a.includes('sessionId')));
+  });
+});
 
 describe('runAcpWorker', () => {
   test('end_turn exits 0; prompt text and session id land where they should', async () => {
-    const fake = fakeAcpAgent({ replyText: 'done', configOptions: [MODEL_OPTION] })
-    const recorded: { acpSessionId?: string; model?: string }[] = []
+    const fake = fakeAcpAgent({ replyText: 'done', configOptions: [MODEL_OPTION] });
+    const recorded: { acpSessionId?: string; model?: string }[] = [];
     const { spec, lines, dir } = workerSpec({
       peer: fake.app,
-      record: (p) => recorded.push(p),
-    })
+      record: p => recorded.push(p),
+    });
     try {
-      const code = await runAcpWorker(spec)
-      assert.equal(code, 0)
-      assert.deepEqual(fake.prompts, ['PROMPT-TEXT'])
-      assert.deepEqual(fake.sessions, [{ cwd: dir }])
-      assert.deepEqual(recorded, [{ acpSessionId: 'sess-1' }, { model: 'typesafe/jev-1.13' }])
-      assert.match(lines.join('\n'), /session sess-1/)
-      assert.match(lines.join('\n'), /done/)
-      assert.match(lines.join('\n'), /turn stopped — end_turn/)
+      const code = await runAcpWorker(spec);
+      assert.equal(code, 0);
+      assert.deepEqual(fake.prompts, ['PROMPT-TEXT']);
+      assert.deepEqual(fake.sessions, [{ cwd: dir }]);
+      assert.deepEqual(recorded, [{ acpSessionId: 'sess-1' }, { model: 'typesafe/jev-1.13' }]);
+      assert.match(lines.join('\n'), /session sess-1/);
+      assert.match(lines.join('\n'), /done/);
+      assert.match(lines.join('\n'), /turn stopped — end_turn/);
     } finally {
-      rmSync(dir, { recursive: true, force: true })
+      rmSync(dir, { recursive: true, force: true });
     }
-  })
+  });
 
   test('a repo-anchored worker publishes its turn on the bus and archives every update', async () => {
-    const { spec, lines, dir } = workerSpec()
-    testGit(['init', '-q', dir])
-    const broker = await startBusBrokerAt(busSocketPath(dir)!)
-    const agentId = 'native-test1'
-    const savedId = process.env.BRO_AGENT_ID
-    const savedBead = process.env.BRO_BEAD_ID
-    process.env.BRO_AGENT_ID = agentId
-    process.env.BRO_BEAD_ID = 'bro-w1'
+    const { spec, lines, dir } = workerSpec();
+    testGit(['init', '-q', dir]);
+    const broker = await startBusBrokerAt(busSocketPath(dir)!);
+    const agentId = 'native-test1';
+    const savedId = process.env.BRO_AGENT_ID;
+    const savedBead = process.env.BRO_BEAD_ID;
+    process.env.BRO_AGENT_ID = agentId;
+    process.env.BRO_BEAD_ID = 'bro-w1';
     try {
       const fake = fakeAcpAgent({
         updates: [
@@ -156,47 +152,47 @@ describe('runAcpWorker', () => {
             content: { type: 'text', text: 'done' },
           } as never,
         ],
-      })
-      const code = await runAcpWorker({ ...spec, peer: fake.app })
-      assert.equal(code, 0)
-      assert.match(lines.join('\n'), /turn stopped — end_turn/)
+      });
+      const code = await runAcpWorker({ ...spec, peer: fake.app });
+      assert.equal(code, 0);
+      assert.match(lines.join('\n'), /turn stopped — end_turn/);
 
       // the live tail — turn/tool lifecycle on the 'agent' topic
       const probed = await busProbe(busSocketPath(dir)!, {
         filter: { topics: ['agent'] },
         windowMs: 50,
-      })
+      });
       assert.deepEqual(
-        probed.events.map((e) => `${e.kind}:${(e.payload as { phase?: string }).phase}`),
+        probed.events.map(e => `${e.kind}:${(e.payload as { phase?: string }).phase}`),
         ['turn:start', 'tool_call:open', 'turn:stop']
-      )
+      );
       for (const e of probed.events) {
-        assert.equal(e.key, agentId)
-        assert.equal(e.cause, 'bro-w1')
+        assert.equal(e.key, agentId);
+        assert.equal(e.cause, 'bro-w1');
       }
 
       // the durable archive — every update including the chunk,
       // bookended by turn start/stop, next to the rendered .log
-      const archive = join(gitCommonDir(dir)!, 'bro', 'agents', `${agentId}.events.jsonl`)
-      assert.ok(existsSync(archive), 'events.jsonl written beside the .log')
+      const archive = join(gitCommonDir(dir)!, 'bro', 'agents', `${agentId}.events.jsonl`);
+      assert.ok(existsSync(archive), 'events.jsonl written beside the .log');
       const rows = readFileSync(archive, 'utf8')
         .split('\n')
-        .filter((l) => l !== '')
-        .map((l) => JSON.parse(l) as { kind: string; phase?: string })
-      assert.equal(rows[0]!.kind, 'turn')
-      assert.equal(rows[0]!.phase, 'start')
-      assert.equal(rows.filter((r) => r.kind === 'update').length, 2)
-      assert.equal(rows.at(-1)!.kind, 'turn')
-      assert.equal(rows.at(-1)!.phase, 'stop')
+        .filter(l => l !== '')
+        .map(l => JSON.parse(l) as { kind: string; phase?: string });
+      assert.equal(rows[0]!.kind, 'turn');
+      assert.equal(rows[0]!.phase, 'start');
+      assert.equal(rows.filter(r => r.kind === 'update').length, 2);
+      assert.equal(rows.at(-1)!.kind, 'turn');
+      assert.equal(rows.at(-1)!.phase, 'stop');
     } finally {
-      if (savedId === undefined) delete process.env.BRO_AGENT_ID
-      else process.env.BRO_AGENT_ID = savedId
-      if (savedBead === undefined) delete process.env.BRO_BEAD_ID
-      else process.env.BRO_BEAD_ID = savedBead
-      await broker.close()
-      rmSync(dir, { recursive: true, force: true })
+      if (savedId === undefined) delete process.env.BRO_AGENT_ID;
+      else process.env.BRO_AGENT_ID = savedId;
+      if (savedBead === undefined) delete process.env.BRO_BEAD_ID;
+      else process.env.BRO_BEAD_ID = savedBead;
+      await broker.close();
+      rmSync(dir, { recursive: true, force: true });
     }
-  })
+  });
 
   test('chunk deltas coalesce into one log line per run — the .log stays readable', async () => {
     const fake = fakeAcpAgent({
@@ -228,184 +224,271 @@ describe('runAcpWorker', () => {
           content: { type: 'text', text: 'done' },
         },
       ],
-    })
-    const { spec, lines, dir } = workerSpec({ peer: fake.app })
+    });
+    const { spec, lines, dir } = workerSpec({ peer: fake.app });
     try {
-      assert.equal(await runAcpWorker(spec), 0)
-      const i = lines.indexOf("I'm a bro")
-      assert.ok(i >= 0, `deltas coalesced into one line — got ${JSON.stringify(lines)}`)
-      assert.equal(lines[i + 1], 'tool_call bash ls (in_progress)')
-      assert.equal(lines[i + 2], 'hmm')
-      assert.equal(lines[i + 3], 'done')
+      assert.equal(await runAcpWorker(spec), 0);
+      const i = lines.indexOf("I'm a bro");
+      assert.ok(i >= 0, `deltas coalesced into one line — got ${JSON.stringify(lines)}`);
+      assert.equal(lines[i + 1], 'tool_call bash ls (in_progress)');
+      assert.equal(lines[i + 2], 'hmm');
+      assert.equal(lines[i + 3], 'done');
     } finally {
-      rmSync(dir, { recursive: true, force: true })
+      rmSync(dir, { recursive: true, force: true });
     }
-  })
+  });
 
   test('a non-end_turn stop exits non-zero and says why', async () => {
-    const fake = fakeAcpAgent({ stopReason: 'refusal' })
-    const { spec, lines, dir } = workerSpec({ peer: fake.app })
+    const fake = fakeAcpAgent({ stopReason: 'refusal' });
+    const { spec, lines, dir } = workerSpec({ peer: fake.app });
     try {
-      assert.equal(await runAcpWorker(spec), 1)
-      assert.match(lines.join('\n'), /turn stopped — refusal/)
+      assert.equal(await runAcpWorker(spec), 1);
+      assert.match(lines.join('\n'), /turn stopped — refusal/);
     } finally {
-      rmSync(dir, { recursive: true, force: true })
+      rmSync(dir, { recursive: true, force: true });
     }
-  })
+  });
 
   test('a requested model rides set_config_option on the category:model option', async () => {
-    const fake = fakeAcpAgent({ configOptions: [MODEL_OPTION] })
-    const { spec, dir } = workerSpec({ peer: fake.app, model: 'qwen3-coder' })
+    const fake = fakeAcpAgent({ configOptions: [MODEL_OPTION] });
+    const { spec, dir } = workerSpec({ peer: fake.app, model: 'qwen3-coder' });
     try {
-      assert.equal(await runAcpWorker(spec), 0)
-      assert.deepEqual(fake.configSets, [{ configId: 'model-pick', value: 'qwen3-coder' }])
+      assert.equal(await runAcpWorker(spec), 0);
+      assert.deepEqual(fake.configSets, [{ configId: 'model-pick', value: 'qwen3-coder' }]);
     } finally {
-      rmSync(dir, { recursive: true, force: true })
+      rmSync(dir, { recursive: true, force: true });
     }
-  })
+  });
 
   test('a requested model with no advertised option fails — never runs unpinned', async () => {
-    const fake = fakeAcpAgent()
-    const { spec, lines, dir } = workerSpec({ peer: fake.app, model: 'qwen3-coder' })
+    const fake = fakeAcpAgent();
+    const { spec, lines, dir } = workerSpec({ peer: fake.app, model: 'qwen3-coder' });
     try {
-      assert.equal(await runAcpWorker(spec), 1)
-      assert.match(lines.join('\n'), /no model config option/)
-      assert.equal(fake.prompts.length, 0)
+      assert.equal(await runAcpWorker(spec), 1);
+      assert.match(lines.join('\n'), /no model config option/);
+      assert.equal(fake.prompts.length, 0);
     } finally {
-      rmSync(dir, { recursive: true, force: true })
+      rmSync(dir, { recursive: true, force: true });
     }
-  })
+  });
 
   test('advertised authMethods are an offer — stored credentials still open a session', async () => {
     const fake = fakeAcpAgent({
       authMethods: [{ id: 'oauth', name: 'OAuth' }],
       replyText: 'done',
-    })
-    const { spec, lines, dir } = workerSpec({ peer: fake.app })
+    });
+    const { spec, lines, dir } = workerSpec({ peer: fake.app });
     try {
-      assert.equal(await runAcpWorker(spec), 0)
-      assert.match(lines.join('\n'), /session sess-1/)
-      assert.equal(fake.sessions.length, 1)
+      assert.equal(await runAcpWorker(spec), 0);
+      assert.match(lines.join('\n'), /session sess-1/);
+      assert.equal(fake.sessions.length, 1);
     } finally {
-      rmSync(dir, { recursive: true, force: true })
+      rmSync(dir, { recursive: true, force: true });
     }
-  })
+  });
 
   test('a refused session/new names the advertised auth methods', async () => {
     const fake = fakeAcpAgent({
       authMethods: [{ id: 'oauth', name: 'OAuth' }],
       failNew: 'auth',
-    })
-    const { spec, lines, dir } = workerSpec({ peer: fake.app })
+    });
+    const { spec, lines, dir } = workerSpec({ peer: fake.app });
     try {
-      assert.equal(await runAcpWorker(spec), 1)
-      assert.match(lines.join('\n'), /refused session.*oauth/)
+      assert.equal(await runAcpWorker(spec), 1);
+      assert.match(lines.join('\n'), /refused session.*oauth/);
     } finally {
-      rmSync(dir, { recursive: true, force: true })
+      rmSync(dir, { recursive: true, force: true });
     }
-  })
+  });
 
-  test('sessionRm arms a deferred cleanup substituting {sessionId}', async () => {
-    const fake = fakeAcpAgent({ replyText: 'done' })
-    const { spec, lines, dir } = workerSpec({ peer: fake.app })
-    spec.sessionRm = `touch ${join(dir, 'removed-{sessionId}')}`
+  test('a resumeSessionId rides session/load — the SAME session id records back (bro-5qsnr)', async () => {
+    const fake = fakeAcpAgent({
+      replyText: 'done',
+      loadCapable: true,
+      configOptions: [MODEL_OPTION],
+    });
+    const recorded: { acpSessionId?: string; model?: string }[] = [];
+    const { spec, lines, dir } = workerSpec({
+      peer: fake.app,
+      resumeSessionId: 'sess-old',
+      record: p => recorded.push(p),
+    });
     try {
-      assert.equal(await runAcpWorker(spec), 0)
-      assert.match(lines.join('\n'), /cleanup armed — deferred/)
-      // the detached retrier sleeps before its first attempt — poll
-      // for the marker file instead of sleeping a fixed beat
-      const marker = join(dir, 'removed-sess-1')
-      const deadline = Date.now() + 15_000
-      while (!existsSync(marker) && Date.now() < deadline) {
-        await new Promise((res) => setTimeout(res, 500))
-      }
-      assert.ok(existsSync(marker), 'deferred cleanup ran the template')
+      assert.equal(await runAcpWorker(spec), 0);
+      // load, never new — the coder's own session got the follow-up turn
+      assert.deepEqual(fake.loads, ['sess-old']);
+      assert.equal(fake.sessions.length, 0);
+      assert.deepEqual(fake.prompts, ['PROMPT-TEXT']);
+      // the registry records the RESUMED id — before/after identity is
+      // the acceptance check
+      assert.deepEqual(recorded[0], { acpSessionId: 'sess-old' });
+      assert.match(lines.join('\n'), /resumes session sess-old/);
+      assert.match(lines.join('\n'), /turn stopped — end_turn/);
     } finally {
-      rmSync(dir, { recursive: true, force: true })
+      rmSync(dir, { recursive: true, force: true });
     }
-  })
+  });
+
+  test("sessionCapabilities.resume agents take session/resume — the ladder's second rung", async () => {
+    const fake = fakeAcpAgent({ replyText: 'done', resumeCapable: true });
+    const { spec, lines, dir } = workerSpec({
+      peer: fake.app,
+      resumeSessionId: 'sess-old',
+    });
+    try {
+      assert.equal(await runAcpWorker(spec), 0);
+      assert.deepEqual(fake.resumes, ['sess-old']);
+      assert.equal(fake.sessions.length, 0);
+      assert.match(lines.join('\n'), /resumes session sess-old/);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  test('loadSession beats resume when both are advertised', async () => {
+    const fake = fakeAcpAgent({
+      replyText: 'done',
+      loadCapable: true,
+      resumeCapable: true,
+    });
+    const { spec, dir } = workerSpec({ peer: fake.app, resumeSessionId: 'sess-old' });
+    try {
+      assert.equal(await runAcpWorker(spec), 0);
+      assert.deepEqual(fake.loads, ['sess-old']);
+      assert.equal(fake.resumes.length, 0);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  test('no advertised capability falls back to session/new — a cold fixer is the floor', async () => {
+    const fake = fakeAcpAgent({ replyText: 'done' });
+    const recorded: { acpSessionId?: string; model?: string }[] = [];
+    const { spec, lines, dir } = workerSpec({
+      peer: fake.app,
+      resumeSessionId: 'sess-old',
+      record: p => recorded.push(p),
+    });
+    try {
+      assert.equal(await runAcpWorker(spec), 0);
+      assert.equal(fake.loads.length, 0);
+      assert.equal(fake.sessions.length, 1);
+      assert.deepEqual(recorded[0], { acpSessionId: 'sess-1' });
+      assert.match(lines.join('\n'), /not resumable/);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  test('a gone session falls back to session/new — the resume failure is a log line, never a spawn failure', async () => {
+    const fake = fakeAcpAgent({ replyText: 'done', loadCapable: true, failLoad: true });
+    const { spec, lines, dir } = workerSpec({
+      peer: fake.app,
+      resumeSessionId: 'sess-old',
+    });
+    try {
+      assert.equal(await runAcpWorker(spec), 0);
+      assert.deepEqual(fake.loads, ['sess-old']);
+      assert.equal(fake.sessions.length, 1);
+      assert.match(lines.join('\n'), /resume failed.*fresh session/);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  test('worker exit runs no session cleanup — the session outlives the worker by design (bro-5qsnr)', async () => {
+    const fake = fakeAcpAgent({ replyText: 'done' });
+    const { spec, lines, dir } = workerSpec({ peer: fake.app });
+    try {
+      assert.equal(await runAcpWorker(spec), 0);
+      assert.ok(!lines.some(l => l.includes('cleanup')));
+      // nothing armed means nothing runs — the settle helper owns
+      // session death now; give a would-be retrier no surface at all
+      assert.equal(existsSync(join(dir, 'removed-sess-1')), false);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
 
   test('permission requests default-deny and log; autoApprove selects the allow option', async () => {
     const options = [
       { optionId: 'allow-1', name: 'Allow once', kind: 'allow_once' as const },
       { optionId: 'deny-1', name: 'Deny', kind: 'reject_once' as const },
-    ]
-    const denying = fakeAcpAgent({ askPermission: options })
-    const d = workerSpec({ peer: denying.app })
+    ];
+    const denying = fakeAcpAgent({ askPermission: options });
+    const d = workerSpec({ peer: denying.app });
     try {
-      assert.equal(await runAcpWorker(d.spec), 0)
+      assert.equal(await runAcpWorker(d.spec), 0);
       assert.deepEqual(denying.permissionOutcome, {
         outcome: 'selected',
         optionId: 'deny-1',
-      })
-      assert.match(d.lines.join('\n'), /permission run tests — denied/)
+      });
+      assert.match(d.lines.join('\n'), /permission run tests — denied/);
     } finally {
-      rmSync(d.dir, { recursive: true, force: true })
+      rmSync(d.dir, { recursive: true, force: true });
     }
 
-    const approving = fakeAcpAgent({ askPermission: options })
-    const a = workerSpec({ peer: approving.app, autoApprove: true })
+    const approving = fakeAcpAgent({ askPermission: options });
+    const a = workerSpec({ peer: approving.app, autoApprove: true });
     try {
-      assert.equal(await runAcpWorker(a.spec), 0)
+      assert.equal(await runAcpWorker(a.spec), 0);
       assert.deepEqual(approving.permissionOutcome, {
         outcome: 'selected',
         optionId: 'allow-1',
-      })
-      assert.match(a.lines.join('\n'), /permission run tests — approved \(autoApprove\)/)
+      });
+      assert.match(a.lines.join('\n'), /permission run tests — approved \(autoApprove\)/);
     } finally {
-      rmSync(a.dir, { recursive: true, force: true })
+      rmSync(a.dir, { recursive: true, force: true });
     }
-  })
+  });
 
   test('an allow-less option set still denies under autoApprove — approval is never invented', async () => {
     const fake = fakeAcpAgent({
-      askPermission: [
-        { optionId: 'deny-1', name: 'Deny', kind: 'reject_once' },
-      ],
-    })
-    const { spec, lines, dir } = workerSpec({ peer: fake.app, autoApprove: true })
+      askPermission: [{ optionId: 'deny-1', name: 'Deny', kind: 'reject_once' }],
+    });
+    const { spec, lines, dir } = workerSpec({ peer: fake.app, autoApprove: true });
     try {
-      assert.equal(await runAcpWorker(spec), 0)
-      assert.deepEqual(fake.permissionOutcome, { outcome: 'selected', optionId: 'deny-1' })
-      assert.match(lines.join('\n'), /no allow option offered; denying/)
+      assert.equal(await runAcpWorker(spec), 0);
+      assert.deepEqual(fake.permissionOutcome, { outcome: 'selected', optionId: 'deny-1' });
+      assert.match(lines.join('\n'), /no allow option offered; denying/);
     } finally {
-      rmSync(dir, { recursive: true, force: true })
+      rmSync(dir, { recursive: true, force: true });
     }
-  })
+  });
 
   test('an unadvertised agent→client call gets method-not-found and a log line', async () => {
     // a custom peer asking fs/read_text_file mid-prompt — v1 does not
     // advertise filesystem and the worker must say so, not emulate it
-    const { agent } = await import('@agentclientprotocol/sdk')
+    const { agent } = await import('@agentclientprotocol/sdk');
     const app = agent({ name: 'fs-asker' })
-      .onRequest('initialize', (ctx) => ({
+      .onRequest('initialize', ctx => ({
         protocolVersion: ctx.params.protocolVersion,
         authMethods: [],
       }))
       .onRequest('session/new', () => ({ sessionId: 's1', configOptions: [] }))
-      .onRequest('session/prompt', async (ctx) => {
+      .onRequest('session/prompt', async ctx => {
         try {
           await ctx.client.request('fs/read_text_file', {
             sessionId: ctx.params.sessionId,
             path: '/etc/passwd',
-          })
+          });
         } catch {
           // method-not-found — expected; the turn still completes
         }
-        return { stopReason: 'end_turn' }
-      })
-    const { spec, lines, dir } = workerSpec({ peer: app })
+        return { stopReason: 'end_turn' };
+      });
+    const { spec, lines, dir } = workerSpec({ peer: app });
     try {
-      assert.equal(await runAcpWorker(spec), 0)
-      assert.match(lines.join('\n'), /fs\/read_text_file.*method-not-found/)
+      assert.equal(await runAcpWorker(spec), 0);
+      assert.match(lines.join('\n'), /fs\/read_text_file.*method-not-found/);
     } finally {
-      rmSync(dir, { recursive: true, force: true })
+      rmSync(dir, { recursive: true, force: true });
     }
-  })
+  });
 
   test('a missing prompt file fails before any session work', async () => {
-    const fake = fakeAcpAgent()
-    const dir = mkdtempSync(join(tmpdir(), 'bro-acpw-'))
+    const fake = fakeAcpAgent();
+    const dir = mkdtempSync(join(tmpdir(), 'bro-acpw-'));
     try {
       const code = await runAcpWorker({
         command: 'x',
@@ -414,15 +497,15 @@ describe('runAcpWorker', () => {
         signals: false,
         peer: fake.app,
         log: () => {},
-      })
-      assert.equal(code, 1)
+      });
+      assert.equal(code, 1);
       // session/new ran (handshake precedes the prompt read) but no prompt went out
-      assert.equal(fake.prompts.length, 0)
+      assert.equal(fake.prompts.length, 0);
     } finally {
-      rmSync(dir, { recursive: true, force: true })
+      rmSync(dir, { recursive: true, force: true });
     }
-  })
-})
+  });
+});
 
 describe('renderAcpUpdate', () => {
   test('text chunks render raw; other kinds render discriminator + detail', () => {
@@ -432,7 +515,7 @@ describe('renderAcpUpdate', () => {
         content: { type: 'text', text: 'hello' },
       } as never),
       'hello'
-    )
+    );
     assert.match(
       renderAcpUpdate({
         sessionUpdate: 'tool_call',
@@ -440,10 +523,7 @@ describe('renderAcpUpdate', () => {
         status: 'running',
       } as never),
       /tool_call bash ls \(running\)/
-    )
-    assert.match(
-      renderAcpUpdate({ sessionUpdate: 'plan', entries: [] } as never),
-      /^plan/
-    )
-  })
-})
+    );
+    assert.match(renderAcpUpdate({ sessionUpdate: 'plan', entries: [] } as never), /^plan/);
+  });
+});
