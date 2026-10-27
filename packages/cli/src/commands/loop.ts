@@ -496,21 +496,14 @@ function lanePicks(
     // the chain head's model pin pairs with ITS provider only — an
     // override provider never inherits chain[0]'s model
     (provider !== undefined && provider === route?.provider ? route.model : undefined) ??
-  const model =
-    sel.model ??
-    // a profile's model rides only on its own provider's lane
-    profileModelFor(flagProfile, provider) ??
-    // the chain head's model pin pairs with ITS provider only — an
-    // override provider never inherits chain[0]'s model
-    (provider !== undefined && provider === route?.provider ? route.model : undefined) ??
     profileModelFor(cfgProfile, provider) ??
-    (cfg.model !== '' ? cfg.model : undefined)
+    (cfg.model !== '' ? cfg.model : undefined);
   return {
     provider,
     model,
     autoApprove: sel.autoApprove ?? profile?.autoApprove,
     profileSourced: profile?.provider !== undefined,
-  }
+  };
 }
 
 /** The provenance tier for the provider pick — a flag's typo is caller
@@ -1454,24 +1447,12 @@ function runBootstrap(ctx: Ctx, beads: ReadyBead[], item: LoopItem): boolean {
   if (!ctx.cfg.bootstrap) {
     return true;
   }
-  const b = spawnSync(
-    'sh', // NOSONAR — operator-configured bootstrap shell, PATH by design
-    ['-c', ctx.cfg.bootstrap],
-    {
-      cwd: item.worktreeDir,
-      env: agentEnv(ctx, {}),
-      stdio: ['inherit', ctx.json ? 2 : 'inherit', 'inherit'],
-    }
-  );
->>>>>>> 6e124527 (fix(loop): honor exit-cause taxonomy — wait rate_limited resetAt instead of respawning into the wall (bro-36bhc))>>>>>>> c93c64fc (fix(loop): honor exit-cause taxonomy — wait rate_limited resetAt instead of respawning into the wall (bro-36bhc))
-=======
   const b = spawnSync('sh', ['-c', ctx.cfg.bootstrap], {
-    // NOSONAR — operator-configured bootstrap
+    // NOSONAR — operator-configured bootstrap shell, PATH by design
     cwd: item.worktreeDir,
     env: agentEnv(ctx, {}),
     stdio: ['inherit', ctx.json ? 2 : 'inherit', 'inherit'],
   });
->>>>>>> 3a228478 (fix(loop): review round — stale reset on manual stops, no-spawn rounds refunded (bro-36bhc))
   if (b.status === 0) {
     return true;
   }
@@ -3550,7 +3531,7 @@ async function tryClaim(
     say(ctx, `loop: claim read failed — ${msg} — holding pushes for ${ctx.intervalS}s`);
     q.pushHoldUntil = Date.now() + ctx.intervalS * 1000;
     return false;
-  }>>>>>>> c93c64fc (fix(loop): honor exit-cause taxonomy — wait rate_limited resetAt instead of respawning into the wall (bro-36bhc))>>>>>>> 3a228478 (fix(loop): review round — stale reset on manual stops, no-spawn rounds refunded (bro-36bhc))
+  }
   if (clump === undefined) {
     q.drained = true;
     return false;

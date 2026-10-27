@@ -126,6 +126,19 @@ export const CLI_DIST = join(
   'index.js'
 );
 
+/** The built core bundle — the fake agent requires it so fixture writes
+ *  to agents.json go through the registry's own lock+atomic-write path
+ *  (require-of-ESM is unflagged on the >=22.18 floor). */
+const CORE_DIST = join(
+  dirname(fileURLToPath(import.meta.url)),
+  '..',
+  '..',
+  '..',
+  'core',
+  'dist',
+  'index.js'
+);
+
 /** Sanitized env for spawned e2e processes — ambient GIT_/BEADS_/DEVIN_/
  *  CLAUDE_/CURSOR_/BRO_ vars from the outer agent session must not redirect a
  *  fixture's git dir, hook root, or beads store. Whitelist, not
@@ -1331,25 +1344,24 @@ if (wall !== undefined) {
 // a per-bead operator stop over a stale recorded death (bro-36bhc
 // review): the worker patches its OWN registry entry stopped:true while
 // a previous run's cause/resetAt stays on it — the settle must park on
-// the flat parkedWakeMin cooldown, never that stale wall deadline
+// the flat parkedWakeMin cooldown, never that stale wall deadline. The
+// patch goes through the registry's locked, atomic writer (same
+// read-modify-write the parent's spawns/down take): a hand-rolled
+// read+writeFileSync races that writer and loses updates, and a
+// swallowed error logged 'stop-marked' for a stop that never landed
 const stop = (load().stops ?? {})[process.env.BRO_BEAD_ID]
 if (stop !== undefined) {
-  try {
-    const common = execFileSync(
-      'git',
-      ['rev-parse', '--path-format=absolute', '--git-common-dir'],
-      { encoding: 'utf8' }
-    ).trim()
-    const regPath = path.join(common, 'bro', 'agents.json')
-    const reg = retry(() => JSON.parse(fs.readFileSync(regPath, 'utf8')))
-    const e = reg[process.env.BRO_BEAD_ID]
-    if (e !== undefined) {
-      e.stopped = true
-      e.cause = stop.cause
-      e.resetAt = stop.resetAt
-      retry(() => fs.writeFileSync(regPath, JSON.stringify(reg)))
+  const { patchAgentRegistry, readAgentRegistry, withAgentRegistryLock } =
+    require(${JSON.stringify(CORE_DIST)})
+  withAgentRegistryLock('.', () => {
+    if (readAgentRegistry('.')[process.env.BRO_BEAD_ID] !== undefined) {
+      patchAgentRegistry('.', process.env.BRO_BEAD_ID, {
+        stopped: true,
+        cause: stop.cause,
+        resetAt: stop.resetAt,
+      })
     }
-  } catch {}
+  })
   log('stop-marked')
   process.exit(stop.exit ?? 1)
 }
