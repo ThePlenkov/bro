@@ -16,7 +16,7 @@ import { basename, dirname, isAbsolute, join } from 'node:path'
 import { createRequire } from 'node:module'
 import { fileURLToPath } from 'node:url'
 import { execFileSync, spawnSync } from 'node:child_process'
-import { checkSkillLock, initBeadsStealth, PERSONALITIES, hasHelpFlag, printUsage, readSkillLock, withFileLock, type BroConfig, type SkillDrift } from '@broject/core'
+import { checkSkillLock, initBeadsStealth, PERSONALITIES, hasHelpFlag, printUsage, readSkillLock, withFileLock, type BroConfig, type LockedSkill, type SkillDrift } from '@broject/core'
 import { loadBroConfig } from '../plugins.ts'
 import {
   cliVersion,
@@ -410,13 +410,6 @@ function setupLockedSkills(dir: string, dryRun: boolean, checkOnly: boolean): vo
   // just wrote are the ones to check against — the copy read before the
   // install is stale by definition. Re-read it.
   const current = checkOnly || dryRun ? locked : readSkillLock(dir)
-<<<<<<< HEAD
-  reportSkillDrift(checkSkillLock(current, skillsDir), current.size)
-}
-
-/** Report the drift between the installed skills and the lock. */
-function reportSkillDrift(drift: SkillDrift[], lockedCount: number): void {
-=======
   reportAfterDrift(current, skillsDir)
 }
 
@@ -477,9 +470,8 @@ function installOneLockedSkill(dir: string, skill: LockedSkill): void {
 
 function reportAfterDrift(current: Map<string, LockedSkill>, skillsDir: string): void {
   const drift = checkSkillLock(current, skillsDir)
->>>>>>> 1602d173 (fix: refactor to satisfy CodeScene — reduce nesting in setupLockedSkills, split checkSkillLock)
   if (drift.length === 0) {
-    console.error(`  ${lockedCount} locked skill(s) match the lock`)
+    console.error(`  ${current.size} locked skill(s) match the lock`)
     return
   }
   for (const d of drift) {
