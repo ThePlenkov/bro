@@ -14,6 +14,7 @@ import {
   listWatchesAsync,
   watchMarkerKind,
   watchRetire,
+  type ListedWatch,
 } from './pending-watch.ts';
 import { fetchPrActState } from './state.ts';
 import { prStateCache } from './state-cache.ts';
@@ -130,6 +131,46 @@ async function mergeSlotLine(): Promise<string | null> {
   }
 }
 
+/** The line a settled watch marker earns at session start — null when
+ *  the marker is skipped because the retire claim lost to a racing
+ *  session start. */
+function staleWatchLine({ watch, file, reported }: ListedWatch): string | null {
+  // the retire is an atomic claim — a racing session start already
+  // reporting this stale promise loses the rename and skips it. An
+  // already-retired marker still re-flags: the claim proves nothing
+  // about delivery, so a warning dropped with its session (hook
+  // budget, crash) resurfaces until the marker ages out.
+  if (reported !== true && !watchRetire(file)) {
+    return null;
+  }
+  if (watch.verdict === 'blocked') {
+    // a settled blocked wait is a finding, not a broken promise —
+    // name the blockers; a fresh `bro act wait` supersedes it
+    const list = (watch.blockers ?? []).join('; ');
+    return (
+      `act wait on ${watch.link} settled BLOCKED${list === '' ? '' : ` — ${list}`} — ` +
+      `\`bro act threads ${watch.pr}\` lists them`
+    );
+  }
+  const mode = watch.merge ? ' (was set to merge on green)' : '';
+  const kind = watchMarkerKind(file, watch);
+  // a bare `act wait` resurrects through `act rearm`; a supervisor
+  // heartbeat belongs to the supervisor's own restart story —
+  // pointing a dead drive's marker at rearm would report a recovery
+  // that never happens. The recorded merge mode is part of the
+  // promise: a supervisor that ran --no-merge (or drive.merge:
+  // 'never') restarted bare would merge PRs it only ever watched
+  const noMerge = watch.merge ? '' : ' --no-merge';
+  const restart = kind === 'loop' ? 'bro loop' : `bro ${kind} --every${noMerge}`;
+  return (
+    `stale act watch on ${watch.link}${mode} — ` +
+    (kind === 'wait'
+      ? 'the watching session died; `bro act rearm` resurrects it, '
+      : `the '${kind}' supervisor died — restart it (\`${restart}\`); `) +
+    `\`bro act status --pr ${watch.pr}\` inspects`
+  );
+}
+
 /** Pending-watch markers left by `bro act wait`: a dead pid means the
  *  session that promised to watch died mid-poll — flag the stale promise
  *  and retire the marker to claim the report. The claim says nothing
@@ -139,48 +180,17 @@ async function mergeSlotLine(): Promise<string | null> {
 async function watchLines(dir: string): Promise<string[]> {
   try {
     const out: string[] = [];
-    for (const { watch, file, alive, reported } of await listWatchesAsync(dir)) {
-      if (alive) {
+    for (const listed of await listWatchesAsync(dir)) {
+      if (listed.alive) {
         out.push(
-          `act watch active on ${watch.link} (pid ${watch.pid}) — another process is polling`
+          `act watch active on ${listed.watch.link} (pid ${listed.watch.pid}) — another process is polling`
         );
         continue;
       }
-      // the retire is an atomic claim — a racing session start already
-      // reporting this stale promise loses the rename and skips it. An
-      // already-retired marker still re-flags: the claim proves nothing
-      // about delivery, so a warning dropped with its session (hook
-      // budget, crash) resurfaces until the marker ages out.
-      if (reported !== true && !watchRetire(file)) {
-        continue;
+      const line = staleWatchLine(listed);
+      if (line !== null) {
+        out.push(line);
       }
-      if (watch.verdict === 'blocked') {
-        // a settled blocked wait is a finding, not a broken promise —
-        // name the blockers; a fresh `bro act wait` supersedes it
-        const list = (watch.blockers ?? []).join('; ');
-        out.push(
-          `act wait on ${watch.link} settled BLOCKED${list === '' ? '' : ` — ${list}`} — ` +
-            `\`bro act threads ${watch.pr}\` lists them`
-        );
-        continue;
-      }
-      const mode = watch.merge ? ' (was set to merge on green)' : '';
-      const kind = watchMarkerKind(file, watch);
-      // a bare `act wait` resurrects through `act rearm`; a supervisor
-      // heartbeat belongs to the supervisor's own restart story —
-      // pointing a dead drive's marker at rearm would report a recovery
-      // that never happens. The recorded merge mode is part of the
-      // promise: a supervisor that ran --no-merge (or drive.merge:
-      // 'never') restarted bare would merge PRs it only ever watched
-      const noMerge = watch.merge ? '' : ' --no-merge';
-      const restart = kind === 'loop' ? 'bro loop' : `bro ${kind} --every${noMerge}`;
-      out.push(
-        `stale act watch on ${watch.link}${mode} — ` +
-          (kind === 'wait'
-            ? 'the watching session died; `bro act rearm` resurrects it, '
-            : `the '${kind}' supervisor died — restart it (\`${restart}\`); `) +
-          `\`bro act status --pr ${watch.pr}\` inspects`
-      );
     }
     return out;
   } catch {
