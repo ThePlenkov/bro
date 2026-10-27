@@ -365,11 +365,8 @@ function printTable(rows: Map<string, Row>): void {
  *  resolved on PATH by contract (same rule as codescene-check.ts). */
 function headSha(): string {
   try {
-    return spawnSync('git', ['rev-parse', '--short', 'HEAD'], {
-      // NOSONAR — PATH lookup is the contract
-      cwd: ROOT,
-      encoding: 'utf8',
-    }).stdout.trim();
+    const opts = { cwd: ROOT, encoding: 'utf8' as const };
+    return spawnSync('git', ['rev-parse', '--short', 'HEAD'], opts).stdout.trim(); // NOSONAR — PATH lookup is the contract
   } catch {
     // reporting metadata only
     return '';
