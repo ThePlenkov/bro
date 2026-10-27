@@ -139,6 +139,7 @@ export function e2eEnv(extra: Record<string, string> = {}): NodeJS.ProcessEnv {
   // ~/.gitconfig (core.hooksPath, commit.gpgsign) on fixture commits
   env.GIT_CONFIG_NOSYSTEM = '1'
   env.GIT_CONFIG_GLOBAL = devNull
+  env.BRO_HOOK_SPOOL = '0'
   return { ...env, ...extra }
 }
 
