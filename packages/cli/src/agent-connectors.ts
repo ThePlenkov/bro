@@ -65,9 +65,12 @@ import {
   probeStep,
   procStat,
   providerCallGrade,
+  brouterStaticCatalog,
+  BrouterConfigError,
   rebindStep,
   releaseSessionSlot,
   requireProviderSurface,
+  resolveModelRoute,
   resolveStepClass,
   SESSION_SLOT_TTL_MS,
   sessionPlane,
@@ -87,6 +90,7 @@ import {
   type AgentInfo,
   type AgentRegistryEntry,
   type AgentState,
+  type BrouterConfig,
   type ConnectorCtx,
   type DiscoveredSession,
   type FleetProfile,
@@ -142,6 +146,11 @@ export interface AgentConnectorEnv {
    *  name (`agents.<backend>.provider`, `--provider`, profiles). Absent
    *  means provider behavior is off, never defaulted to a vendor. */
   providers?: Record<string, ProviderEntry>;
+  /** The model-centric routing registry (spec: specs/bro-n1p0s.md) —
+   *  consulted only when no provider is named anywhere: a `--model`
+   *  that resolves through the static index takes its primary route.
+   *  Absent/empty models = label behavior, unchanged. */
+  brouter?: BrouterConfig;
 }
 
 export type AgentConnectorFactory = (ctx: ConnectorCtx, env: AgentConnectorEnv) => AgentConnector;
@@ -231,6 +240,7 @@ export function loadAgentEnv(dir: string): AgentConnectorEnv {
       router?: FleetRouter;
     };
     providers?: Record<string, ProviderEntry>;
+    brouter?: BrouterConfig;
   };
   return {
     agents: cfg.agents ?? {},
@@ -238,6 +248,7 @@ export function loadAgentEnv(dir: string): AgentConnectorEnv {
     loop: cfg.loop,
     fleet: cfg.fleet,
     providers: cfg.providers,
+    brouter: cfg.brouter,
   };
 }
 
@@ -333,8 +344,36 @@ export async function resolveSpawnProvider(
    *  'config'. Used only for the SpawnError kind. */
   namedBy: 'flag' | 'profile' | 'backend' = 'backend'
 ): Promise<SpawnProviderPick> {
-  const providerName = sel.provider ?? backendProvider(env, backend);
+  let providerName = sel.provider ?? backendProvider(env, backend);
   const source = sel.provider === undefined ? 'backend' : namedBy;
+  let routedModel: string | undefined;
+  if (providerName === undefined && sel.model !== undefined && env.brouter !== undefined) {
+    // brouter — the model-centric registry (spec: specs/bro-n1p0s.md):
+    // a declared route resolves a bare --model to its provider, static
+    // catalog only (a spawn never pays a live catalog probe). Empty
+    // models = the registry is off; unresolved stays the label path.
+    const brouter = env.brouter;
+    if (Object.keys(brouter.models).length > 0) {
+      let hit;
+      try {
+        hit = resolveModelRoute(
+          env.providers ?? {},
+          brouter,
+          brouterStaticCatalog(env.providers ?? {}),
+          sel.model
+        )[0];
+      } catch (err) {
+        if (err instanceof BrouterConfigError) {
+          throw new SpawnError(err.message, 'config');
+        }
+        throw err;
+      }
+      if (hit !== undefined) {
+        providerName = hit.provider;
+        routedModel = hit.model;
+      }
+    }
+  }
   if (providerName === undefined) {
     // legacy template path — an explicit model still pins provenance
     // env/registry labels without changing what runs
@@ -352,7 +391,7 @@ export async function resolveSpawnProvider(
     }
     throw err;
   }
-  const model = sel.model ?? entry.model;
+  const model = routedModel ?? sel.model ?? entry.model;
   switch (entry.type) {
     case 'cli': {
       // the entry's command substitutes for the backend's template —
@@ -363,7 +402,7 @@ export async function resolveSpawnProvider(
       const { command } = cliCommandModel(
         entry.command,
         entry.model,
-        sel.model,
+        model,
         m =>
           new SpawnError(
             `providers.${providerName} (type 'cli') cannot honor model '${m}' — ` +
@@ -2549,7 +2588,8 @@ export function makeNativeConnector(ctx: ConnectorCtx, env: AgentConnectorEnv): 
           const child = spawn(
             'sh', // NOSONAR — PATH lookup is the contract (same as git/bd everywhere)
             args,
-            { // NOSONAR — operator-configured agent command (same contract as loop)
+            {
+              // NOSONAR — operator-configured agent command (same contract as loop)
               cwd: spec.repoRoot,
               env: {
                 // ambient env minus the connector-owned pins — every
@@ -2784,7 +2824,8 @@ function tmuxRun(socket: string, args: string[]): TmuxResult {
   for (const k of GIT_REPOSITORY_ENV_KEYS) {
     delete env[k];
   }
-  const proc = spawnSync('tmux', socket === '' ? args : ['-L', socket, ...args], { // NOSONAR — PATH lookup is the contract (same as git/bd)
+  const proc = spawnSync('tmux', socket === '' ? args : ['-L', socket, ...args], {
+    // NOSONAR — PATH lookup is the contract (same as git/bd)
     stdio: ['ignore', 'pipe', 'pipe'],
     encoding: 'utf8',
     timeout: 10_000,
@@ -3056,7 +3097,8 @@ export function makeTmuxConnector(ctx: ConnectorCtx, env: AgentConnectorEnv): Ag
       });
     },
 
-    async list() { // NOSONAR — connector contract is async; the body is sync
+    async list() {
+      // NOSONAR — connector contract is async; the body is sync
       try {
         const ver = tmuxRun(socket, ['-V']);
         if (ver.missing || ver.code !== 0) {
@@ -3189,7 +3231,8 @@ export function makeTmuxConnector(ctx: ConnectorCtx, env: AgentConnectorEnv): Ag
 
 /** One gc call — PATH lookup is the same contract as git/gh/bd. */
 function gcRun(args: string[], timeoutMs = 30_000): { code: number; out: string; err: string } {
-  const proc = spawnSync('gc', args, { // NOSONAR — PATH lookup is the contract (same as gh/git/bd)
+  const proc = spawnSync('gc', args, {
+    // NOSONAR — PATH lookup is the contract (same as gh/git/bd)
     stdio: ['ignore', 'pipe', 'pipe'],
     encoding: 'utf8',
     timeout: timeoutMs,
@@ -3892,7 +3935,8 @@ function dockerRun(
   args: string[],
   timeoutMs = 30_000
 ): { code: number; out: string; err: string; missing: boolean } {
-  const proc = spawnSync('docker', args, { // NOSONAR — PATH lookup is the contract (same as gh/git/bd)
+  const proc = spawnSync('docker', args, {
+    // NOSONAR — PATH lookup is the contract (same as gh/git/bd)
     stdio: ['ignore', 'pipe', 'pipe'],
     encoding: 'utf8',
     timeout: timeoutMs,
@@ -4405,7 +4449,8 @@ export function makeDockerConnector(ctx: ConnectorCtx, env: AgentConnectorEnv): 
   return {
     name: 'docker',
 
-    async spawn(spec: SpawnSpec): Promise<AgentInfo> { // NOSONAR — connector contract is async; the work is one sync critical section
+    async spawn(spec: SpawnSpec): Promise<AgentInfo> {
+      // NOSONAR — connector contract is async; the work is one sync critical section
       // policy BEFORE the daemon probe and image pull/build — a refused
       // spawn must not pay (or log) a docker fetch it will never use
       assertMutableConfig(dir);
@@ -4525,7 +4570,8 @@ export function makeDockerConnector(ctx: ConnectorCtx, env: AgentConnectorEnv): 
       });
     },
 
-    async list(): Promise<ListResult> { // NOSONAR — connector contract is async; the work is sync
+    async list(): Promise<ListResult> {
+      // NOSONAR — connector contract is async; the work is sync
       try {
         const daemon = dockerDaemonUp();
         if (!daemon.up) {
@@ -4688,7 +4734,8 @@ interface GhResult {
  *  spawnSync (the connector's other shell-outs are all synchronous,
  *  and admission runs inside the registry lock). */
 function ghRun(args: string[], timeoutMs = 30_000): GhResult {
-  const proc = spawnSync('gh', args, { // NOSONAR — PATH lookup is the contract (same as docker/git/bd)
+  const proc = spawnSync('gh', args, {
+    // NOSONAR — PATH lookup is the contract (same as docker/git/bd)
     stdio: ['ignore', 'pipe', 'pipe'],
     encoding: 'utf8',
     timeout: timeoutMs,
@@ -5323,7 +5370,8 @@ export function makeCopilotConnector(ctx: ConnectorCtx, env: AgentConnectorEnv):
   return {
     name: 'copilot',
 
-    async spawn(spec: SpawnSpec): Promise<AgentInfo> { // NOSONAR — connector contract is async; the critical section is sync
+    async spawn(spec: SpawnSpec): Promise<AgentInfo> {
+      // NOSONAR — connector contract is async; the critical section is sync
       // policy before preflight — an invalid committed config must
       // refuse ahead of the remote-count refresh, not just the claim
       assertMutableConfig(dir);
@@ -5432,7 +5480,8 @@ export function makeCopilotConnector(ctx: ConnectorCtx, env: AgentConnectorEnv):
       });
     },
 
-    async list(): Promise<ListResult> { // NOSONAR — connector contract is async; the work is sync
+    async list(): Promise<ListResult> {
+      // NOSONAR — connector contract is async; the work is sync
       try {
         const home = agentsHome(dir);
         const entries = Object.entries(readAgentRegistry(dir)).filter(
@@ -5582,7 +5631,8 @@ export function makeDevinConnector(ctx: ConnectorCtx, env: AgentConnectorEnv): A
   return {
     name: 'devin',
 
-    spawn(): Promise<AgentInfo> { // NOSONAR — connector contract is async; the refusal is sync
+    spawn(): Promise<AgentInfo> {
+      // NOSONAR — connector contract is async; the refusal is sync
       return Promise.reject(
         new SpawnError(
           'the devin connector lists host sessions — it does not spawn; ' +
@@ -5592,7 +5642,8 @@ export function makeDevinConnector(ctx: ConnectorCtx, env: AgentConnectorEnv): A
       );
     },
 
-    list(): Promise<ListResult> { // NOSONAR — connector contract is async; the scan is sync
+    list(): Promise<ListResult> {
+      // NOSONAR — connector contract is async; the scan is sync
       try {
         return Promise.resolve({ agents: rows() });
       } catch (err) {

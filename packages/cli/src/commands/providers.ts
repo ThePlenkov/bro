@@ -1,6 +1,7 @@
 /** `bro providers` — the provider registry's read surface.
  *
  *   bro providers models [name…]
+ *   bro providers route [--all] <model>
  *
  * The catalog surface: every provider's model list rendered as
  * `<provider>/<model>` — the uniform `provider/model` vocabulary the
@@ -14,32 +15,41 @@
  * A pinned default `model` always renders, even when no catalog
  * surface exists — `bro providers models` never prints an empty
  * provider silently.
+ *
+ * `route` is the inverse query (spec: specs/bro-n1p0s.md) — the
+ * brouter registry: a MODEL id in, the serving `provider/model` route
+ * out. Qualified `p/m` ids and `brouter.models` declarations resolve
+ * statically; anything else resolves against the same live catalog
+ * `models` enumerates.
  */
-import { execFile as execFileCb } from 'node:child_process'
-import { promisify } from 'node:util'
-import { hasHelpFlag, loadConfig, printUsage } from '@broject/core'
-import type { ProviderEntry } from '@broject/core'
-import type { AcpSeam } from '@broject/providers'
+import { execFile as execFileCb } from 'node:child_process';
+import { promisify } from 'node:util';
+import { hasHelpFlag, loadConfig, printUsage, resolveModelRoute } from '@broject/core';
+import type { BrouterConfig, ModelRoute, ProviderEntry } from '@broject/core';
+import type { AcpSeam } from '@broject/providers';
 
 const USAGE = `usage:
-  bro providers models [name…]  list every provider's models as <provider>/<model>
-`
+  bro providers models [name…]      list every provider's models as <provider>/<model>
+  bro providers route [--all] <id>  resolve a model id to its <provider>/<model> route
+`;
 const die = (msg: string): never => {
-  console.error(`bro providers: ${msg}`)
-  process.exit(1)
-}
+  console.error(`bro providers: ${msg}`);
+  process.exit(1);
+};
 
-const execFile = promisify(execFileCb)
+const execFile = promisify(execFileCb);
 
 interface Opts {
   /** Test seam — injected in-process acp peer (AcpSeam.peer). */
-  acp?: AcpSeam
+  acp?: AcpSeam;
   /** Test seam — replaces the models-template exec. */
-  exec?: (command: string) => string | Promise<string>
+  exec?: (command: string) => string | Promise<string>;
   /** Test seam — the registry; default loads cwd config. */
-  providers?: Record<string, ProviderEntry>
+  providers?: Record<string, ProviderEntry>;
+  /** Test seam — the brouter registry; default loads cwd config. */
+  brouter?: BrouterConfig;
   /** Test seam — stdout capture; default console.log. */
-  out?: (line: string) => void
+  out?: (line: string) => void;
 }
 
 /** A catalog row — `id` is `<name>/<model-id>`; `name` is the
@@ -47,8 +57,8 @@ interface Opts {
  *  carry a human name; api/cli catalogs are id-only). The conductor's
  *  `/v1/models` maps `name` onto display_name. */
 export interface CatalogModel {
-  id: string
-  name?: string
+  id: string;
+  name?: string;
 }
 
 /** The catalog as `<name>/<model-id>` rows — the same list
@@ -60,7 +70,7 @@ export async function catalogModels(
   entry: ProviderEntry,
   opts: { acp?: AcpSeam; exec?: (command: string) => string | Promise<string> } = {}
 ): Promise<CatalogModel[]> {
-  return providerModels(name, entry, opts)
+  return providerModels(name, entry, opts);
 }
 
 /** One provider's catalog rows — `id` is `<name>/<model-id>` each. */
@@ -72,13 +82,13 @@ async function providerModels(
   const render = (id: string, modelName?: string): CatalogModel => ({
     id: `${name}/${id}`,
     name: modelName,
-  })
+  });
   switch (entry.type) {
     case 'api':
       // the allowlist IS the catalog — a model not declared can't run
-      return Object.keys(entry.models).map((id) => render(id))
+      return Object.keys(entry.models).map(id => render(id));
     case 'cli': {
-      const ids: string[] = []
+      const ids: string[] = [];
       if (entry.models !== undefined) {
         // async exec — the conductor serves this path on /v1/models and a
         // sync spawn would stall the event loop; the timeout matches the
@@ -86,63 +96,110 @@ async function providerModels(
         const exec =
           opts.exec ??
           (async (cmd: string) =>
-            (await execFile('sh', ['-c', cmd], { encoding: 'utf8', timeout: 30_000 })).stdout) // NOSONAR — operator-configured models template, same contract as command
+            (await execFile('sh', ['-c', cmd], { encoding: 'utf8', timeout: 30_000 })).stdout); // NOSONAR — operator-configured models template, same contract as command
         ids.push(
           ...(await exec(entry.models))
             .split('\n')
-            .map((l) => l.trim())
-            .filter((l) => l !== '')
-        )
+            .map(l => l.trim())
+            .filter(l => l !== '')
+        );
       }
       if (entry.model !== undefined && !ids.includes(entry.model)) {
-        ids.push(entry.model)
+        ids.push(entry.model);
       }
-      return ids.map((id) => render(id))
+      return ids.map(id => render(id));
     }
     case 'acp': {
-      const { acpModels } = await import('@broject/providers')
-      const listed = await acpModels(name, entry, { acp: opts.acp })
-      if (entry.model !== undefined && !listed.some((m) => m.value === entry.model)) {
-        listed.push({ value: entry.model })
+      const { acpModels } = await import('@broject/providers');
+      const listed = await acpModels(name, entry, { acp: opts.acp });
+      if (entry.model !== undefined && !listed.some(m => m.value === entry.model)) {
+        listed.push({ value: entry.model });
       }
-      return listed.map((m) => render(m.value, m.name))
+      return listed.map(m => render(m.value, m.name));
     }
   }
 }
 
-export async function runProvidersCommand(argv: string[], opts: Opts = {}): Promise<void> {
-  const [verb, ...names] = argv
-  if (verb !== 'models' || hasHelpFlag(names)) {
-    printUsage(USAGE, verb === undefined || hasHelpFlag(argv) ? 0 : 2)
+/** The live catalog as a provider → served-ids index — the same rows
+ *  `models` renders, prefix stripped back to raw model ids. A failed
+ *  provider warns and indexes nothing — a catalog that can't enumerate
+ *  is a smaller index, never the route's error. */
+async function liveCatalog(
+  providers: Record<string, ProviderEntry>,
+  opts: Opts
+): Promise<Record<string, string[]>> {
+  const catalog: Record<string, string[]> = {};
+  for (const [name, entry] of Object.entries(providers)) {
+    try {
+      catalog[name] = (await providerModels(name, entry, opts)).map(r =>
+        r.id.slice(name.length + 1)
+      );
+    } catch (err) {
+      catalog[name] = [];
+      console.error(
+        `bro providers: ${name} — catalog failed: ${err instanceof Error ? err.message : String(err)}`
+      );
+    }
   }
-  const providers = opts.providers ?? loadConfig(process.cwd()).providers ?? {}
+  return catalog;
+}
+
+export async function runProvidersCommand(argv: string[], opts: Opts = {}): Promise<void> {
+  const [verb, ...names] = argv;
+  if ((verb !== 'models' && verb !== 'route') || hasHelpFlag(names)) {
+    printUsage(USAGE, verb === undefined || hasHelpFlag(argv) ? 0 : 2);
+  }
+  const providers = opts.providers ?? loadConfig(process.cwd()).providers ?? {};
+  const out = opts.out ?? ((line: string) => console.log(line));
+  if (verb === 'route') {
+    const rest = names.filter(n => n !== '--all');
+    if (rest.length !== 1) {
+      printUsage(USAGE, 2);
+    }
+    const asked = rest[0]!;
+    const brouter = opts.brouter ?? loadConfig(process.cwd()).brouter ?? { models: {} };
+    const catalog = await liveCatalog(providers, opts);
+    let routes: ModelRoute[] = [];
+    try {
+      routes = resolveModelRoute(providers, brouter, catalog, asked);
+    } catch (err) {
+      die(err instanceof Error ? err.message : String(err));
+    }
+    if (routes.length === 0) {
+      die(
+        `no route for '${asked}' — qualify it <provider>/<model> or declare brouter.models.${asked}`
+      );
+    }
+    for (const r of names.includes('--all') ? routes : routes.slice(0, 1)) {
+      out(`${r.provider}/${r.model}`);
+    }
+    return;
+  }
+
   const wanted =
     names.length > 0
-      ? names.map((n) => {
-          const entry = providers[n]
+      ? names.map(n => {
+          const entry = providers[n];
           if (entry === undefined) {
             die(
               `providers.${n} is not configured — configured: ${Object.keys(providers).join(', ') || 'none'}`
-            )
+            );
           }
-          return [n, entry] as const
+          return [n, entry] as const;
         })
-      : (Object.entries(providers) as [string, ProviderEntry][])
-  const out = opts.out ?? ((line: string) => console.log(line))
-  let failed = 0
+      : (Object.entries(providers) as [string, ProviderEntry][]);
+  let failed = 0;
   for (const [name, entry] of wanted) {
     try {
       for (const row of await providerModels(name, entry, opts)) {
-        out(row.id)
+        out(row.id);
       }
     } catch (err) {
-      failed += 1
-      console.error(
-        `bro providers: ${name} — ${err instanceof Error ? err.message : String(err)}`
-      )
+      failed += 1;
+      console.error(`bro providers: ${name} — ${err instanceof Error ? err.message : String(err)}`);
     }
   }
   if (failed > 0) {
-    process.exit(1)
+    process.exit(1);
   }
 }

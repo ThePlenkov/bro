@@ -2152,6 +2152,98 @@ describe('resolveSpawnProvider', () => {
     });
   });
 
+  test('brouter: a bare --model resolves its declared provider when none is named', async () => {
+    const env2: AgentConnectorEnv = {
+      agents: { native: { command: 'node {promptFile}' } },
+      connectors: {},
+      providers,
+      brouter: { models: { 'swe-2-medium': [{ provider: 'zen' }] } },
+    };
+    const pick = await resolveSpawnProvider(env2, 'native', { model: 'swe-2-medium' }, 'flag');
+    assert.equal(pick.provider, 'zen');
+    assert.equal(pick.model, 'swe-2-medium');
+    assert.deepEqual(pick.worker, {
+      kind: 'template',
+      command: "opencode run --model 'swe-2-medium' -f {promptFile}",
+    });
+  });
+
+  test('brouter: an alias carries its upstream model into the worker and provenance', async () => {
+    const env2: AgentConnectorEnv = {
+      agents: {},
+      connectors: {},
+      providers,
+      brouter: { models: { cheap: [{ provider: 'zen', model: 'zen/pro' }] } },
+    };
+    const pick = await resolveSpawnProvider(env2, 'native', { model: 'cheap' }, 'flag');
+    assert.equal(pick.provider, 'zen');
+    assert.equal(pick.model, 'zen/pro');
+    assert.deepEqual(pick.worker, {
+      kind: 'template',
+      command: "opencode run --model 'zen/pro' -f {promptFile}",
+    });
+  });
+
+  test('brouter: explicit providers and empty/unresolved registries keep the label path', async () => {
+    // explicit provider wins — the registry is never consulted: the
+    // override lands on 'local' (which can't honor it) rather than
+    // routing to the declared 'kilo'
+    const env2: AgentConnectorEnv = {
+      agents: {},
+      connectors: {},
+      providers,
+      brouter: { models: { 'zen/pro': [{ provider: 'kilo' }] } },
+    };
+    await assert.rejects(
+      resolveSpawnProvider(env2, 'native', { provider: 'local', model: 'zen/pro' }, 'flag'),
+      (e: unknown) => e instanceof SpawnError && /cannot honor model 'zen\/pro'/.test(e.message)
+    );
+    // unresolved models stay a provenance label
+    assert.deepEqual(await resolveSpawnProvider(env2, 'native', { model: 'ghost' }, 'flag'), {
+      model: 'ghost',
+    });
+    // empty models map = registry off
+    const off: AgentConnectorEnv = {
+      agents: {},
+      connectors: {},
+      providers,
+      brouter: { models: {} },
+    };
+    assert.deepEqual(await resolveSpawnProvider(off, 'native', { model: 'zen/pro' }, 'flag'), {
+      model: 'zen/pro',
+    });
+    // no brouter at all = off
+    const none: AgentConnectorEnv = { agents: {}, connectors: {}, providers };
+    assert.deepEqual(await resolveSpawnProvider(none, 'native', { model: 'zen/pro' }, 'flag'), {
+      model: 'zen/pro',
+    });
+  });
+
+  test('brouter: a declared route to an unknown or non-spawnable provider is a config error', async () => {
+    const env2: AgentConnectorEnv = {
+      agents: {},
+      connectors: {},
+      providers,
+      brouter: { models: { x: [{ provider: 'nope' }] } },
+    };
+    await assert.rejects(
+      resolveSpawnProvider(env2, 'native', { model: 'x' }, 'flag'),
+      (e: unknown) =>
+        e instanceof SpawnError && e.kind === 'config' && /brouter\.models\.x/.test(e.message)
+    );
+    const env3: AgentConnectorEnv = {
+      agents: {},
+      connectors: {},
+      providers,
+      brouter: { models: { x: [{ provider: 'typesafe' }] } },
+    };
+    await assert.rejects(
+      resolveSpawnProvider(env3, 'native', { model: 'x' }, 'flag'),
+      (e: unknown) =>
+        e instanceof SpawnError && e.kind === 'config' && /no spawn surface/.test(e.message)
+    );
+  });
+
   test('cli override a verbatim command cannot consume is a loud error — never a relabel', async () => {
     // 'local' pins devin-1 in a command with no {model}: reporting 'm2'
     // while devin-1 runs would be provenance the worker never ran

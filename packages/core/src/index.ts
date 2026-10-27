@@ -67,6 +67,7 @@ export {
   DEFAULT_GLOBAL_BEADS_DIR,
   DEFAULT_IGNORE_CONSECUTIVE_FAILURES,
   DEFAULT_IGNORE_THREAD_WINDOW_DAYS,
+  brouterSection,
   defineConfig,
   fleetSection,
   globalConfigDir,
@@ -140,6 +141,18 @@ export type {
   RoutingClass,
   RoutingTable,
 } from './routing.ts';
+export {
+  BrouterConfigError,
+  brouterStaticCatalog,
+  parseBrouter,
+  resolveModelRoute,
+} from './brouter.ts';
+export type {
+  BrouterConfig,
+  BrouterModels,
+  BrouterRoute,
+  ModelRoute,
+} from './brouter.ts';
 export {
   DATA_REF,
   dataRefCommit,
