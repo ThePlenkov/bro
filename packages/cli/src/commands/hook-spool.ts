@@ -35,6 +35,11 @@ interface EndRecord {
 
 type HookRecord = StartRecord | EndRecord;
 
+interface HookIdentity {
+  host: string;
+  event: string;
+}
+
 interface HookSpoolAggregate {
   host: string;
   event: string;
@@ -58,6 +63,32 @@ export interface HookSpoolReadOptions {
   sinceMs?: number;
   nowMs?: number;
   watchdogSeconds?: number;
+}
+
+interface HookSpoolReadContext {
+  aggregates: Map<string, HookSpoolAggregate>;
+  sinceMs: number;
+  nowSeconds: number;
+  watchdogSeconds: number;
+}
+
+interface KilledStartContext extends HookSpoolReadContext {
+  endedIds: Set<string>;
+}
+
+interface TimedFields {
+  ts: number;
+  fields: string[];
+}
+
+interface PercentileInput {
+  values: number[];
+  fraction: number;
+}
+
+interface StatusArgsInput {
+  argv: string[];
+  nowMs: number;
 }
 
 export function resolveHookSpoolPath(env: NodeJS.ProcessEnv = process.env): string | null {
@@ -97,10 +128,8 @@ function isOutcome(value: string | undefined): value is HookOutcome {
   }
 }
 
-interface RecordIdentity {
+interface RecordIdentity extends HookIdentity {
   id: string;
-  host: string;
-  event: string;
 }
 
 function parseIdentity(fields: string[]): RecordIdentity | undefined {
@@ -116,7 +145,7 @@ function parseIdentity(fields: string[]): RecordIdentity | undefined {
   return { id, host, event };
 }
 
-function parseStart(ts: number, fields: string[]): StartRecord | undefined {
+function parseStart({ ts, fields }: TimedFields): StartRecord | undefined {
   const identity = parseIdentity(fields);
   if (identity === undefined) {
     return undefined;
@@ -124,7 +153,7 @@ function parseStart(ts: number, fields: string[]): StartRecord | undefined {
   return { kind: 'start', ts, ...identity };
 }
 
-function parseEnd(ts: number, fields: string[]): EndRecord | undefined {
+function parseEnd({ ts, fields }: TimedFields): EndRecord | undefined {
   const identity = parseIdentity(fields);
   if (identity === undefined) {
     return undefined;
@@ -155,10 +184,10 @@ function parseRecord(line: string): HookRecord | undefined {
   }
   const kind = fields.at(2);
   if (kind === 'start') {
-    return parseStart(ts, fields);
+    return parseStart({ ts, fields });
   }
   if (kind === 'end') {
-    return parseEnd(ts, fields);
+    return parseEnd({ ts, fields });
   }
   return undefined;
 }
@@ -182,17 +211,16 @@ function readRecords(path: string): HookRecord[] {
 
 function aggregateFor(
   aggregates: Map<string, HookSpoolAggregate>,
-  host: string,
-  event: string
+  identity: HookIdentity
 ): HookSpoolAggregate {
-  const key = JSON.stringify([host, event]);
+  const key = JSON.stringify([identity.host, identity.event]);
   const existing = aggregates.get(key);
   if (existing !== undefined) {
     return existing;
   }
   const aggregate: HookSpoolAggregate = {
-    host,
-    event,
+    host: identity.host,
+    event: identity.event,
     count: 0,
     durations: [],
     outcomes: new Map(),
@@ -202,7 +230,7 @@ function aggregateFor(
   return aggregate;
 }
 
-function percentile(values: number[], fraction: number): number | null {
+function percentile({ values, fraction }: PercentileInput): number | null {
   if (values.length === 0) {
     return null;
   }
@@ -221,8 +249,8 @@ function toRow(aggregate: HookSpoolAggregate): HookSpoolRow {
     host: aggregate.host,
     event: aggregate.event,
     count: aggregate.count,
-    p50: percentile(aggregate.durations, 0.5),
-    p95: percentile(aggregate.durations, 0.95),
+    p50: percentile({ values: aggregate.durations, fraction: 0.5 }),
+    p95: percentile({ values: aggregate.durations, fraction: 0.95 }),
     outcomes: {
       ok: aggregate.outcomes.get('ok') ?? 0,
       nonzero: aggregate.outcomes.get('nonzero') ?? 0,
@@ -254,7 +282,7 @@ function addEnd(
   starts: Map<string, StartRecord>,
   aggregates: Map<string, HookSpoolAggregate>
 ): void {
-  const aggregate = aggregateFor(aggregates, end.host, end.event);
+  const aggregate = aggregateFor(aggregates, end);
   aggregate.count += 1;
   aggregate.outcomes.set(end.outcome, (aggregate.outcomes.get(end.outcome) ?? 0) + 1);
   const start = starts.get(end.id);
@@ -276,36 +304,32 @@ function addEnd(
 function addEndRecords(
   ends: EndRecord[],
   starts: Map<string, StartRecord>,
-  aggregates: Map<string, HookSpoolAggregate>,
-  sinceMs: number
+  context: HookSpoolReadContext
 ): void {
   for (const end of ends) {
-    if (end.ts * 1000 < sinceMs) {
+    if (end.ts * 1000 < context.sinceMs) {
       continue;
     }
-    addEnd(end, starts, aggregates);
+    addEnd(end, starts, context.aggregates);
   }
 }
 
-function addKilledStarts(
-  starts: Map<string, StartRecord>,
-  endedIds: Set<string>,
-  aggregates: Map<string, HookSpoolAggregate>,
-  sinceMs: number,
-  nowSeconds: number,
-  watchdogSeconds: number
-): void {
+function isKilledStart(start: StartRecord, context: KilledStartContext): boolean {
+  if (context.endedIds.has(start.id)) {
+    return false;
+  }
+  if (start.ts * 1000 < context.sinceMs) {
+    return false;
+  }
+  return context.nowSeconds - start.ts > context.watchdogSeconds + 5;
+}
+
+function addKilledStarts(starts: Map<string, StartRecord>, context: KilledStartContext): void {
   for (const start of starts.values()) {
-    if (endedIds.has(start.id)) {
+    if (!isKilledStart(start, context)) {
       continue;
     }
-    if (start.ts * 1000 < sinceMs) {
-      continue;
-    }
-    if (nowSeconds - start.ts <= watchdogSeconds + 5) {
-      continue;
-    }
-    const aggregate = aggregateFor(aggregates, start.host, start.event);
+    const aggregate = aggregateFor(context.aggregates, start);
     aggregate.count += 1;
     aggregate.killed += 1;
   }
@@ -322,17 +346,18 @@ export function readHookSpool(
   const sinceMs = options.sinceMs ?? 0;
   const nowSeconds = (options.nowMs ?? Date.now()) / 1000;
   const watchdogSeconds = options.watchdogSeconds ?? DEFAULT_WATCHDOG_SECONDS;
-  const aggregates = new Map<string, HookSpoolAggregate>();
-  addEndRecords(records.ends, records.starts, aggregates, sinceMs);
-  addKilledStarts(
-    records.starts,
-    new Set(records.ends.map(end => end.id)),
-    aggregates,
+  const context: HookSpoolReadContext = {
+    aggregates: new Map(),
     sinceMs,
     nowSeconds,
-    watchdogSeconds
-  );
-  return [...aggregates.values()]
+    watchdogSeconds,
+  };
+  addEndRecords(records.ends, records.starts, context);
+  addKilledStarts(records.starts, {
+    ...context,
+    endedIds: new Set(records.ends.map(end => end.id)),
+  });
+  return [...context.aggregates.values()]
     .map(toRow)
     .sort((a, b) => a.host.localeCompare(b.host) || a.event.localeCompare(b.event));
 }
@@ -363,7 +388,18 @@ function watchdogSeconds(env: NodeJS.ProcessEnv): number {
   return DEFAULT_WATCHDOG_SECONDS;
 }
 
-function statusArgs(argv: string[], nowMs: number): { json: boolean; sinceMs: number } {
+function parseSinceDuration(value: string | undefined): number {
+  if (value === undefined) {
+    throw new Error('usage: bro hooks status [--since <dur>] [--json]');
+  }
+  const parsed = parseDurationMs(value);
+  if (parsed === undefined) {
+    throw new Error(`invalid --since duration: ${value}`);
+  }
+  return parsed;
+}
+
+function statusArgs({ argv, nowMs }: StatusArgsInput): { json: boolean; sinceMs: number } {
   let json = false;
   let duration = DEFAULT_SINCE_MS;
   for (let i = 1; i < argv.length; i += 1) {
@@ -372,19 +408,13 @@ function statusArgs(argv: string[], nowMs: number): { json: boolean; sinceMs: nu
       json = true;
       continue;
     }
-    let value: string | undefined;
     if (arg === '--since') {
+      duration = parseSinceDuration(argv.at(i + 1));
       i += 1;
-      value = argv.at(i);
-    } else if (arg?.startsWith('--since=')) {
-      value = arg.slice('--since='.length);
+      continue;
     }
-    if (value !== undefined) {
-      const parsed = parseDurationMs(value);
-      if (parsed === undefined) {
-        throw new Error(`invalid --since duration: ${value}`);
-      }
-      duration = parsed;
+    if (arg?.startsWith('--since=')) {
+      duration = parseSinceDuration(arg.slice('--since='.length));
       continue;
     }
     throw new Error('usage: bro hooks status [--since <dur>] [--json]');
@@ -397,7 +427,7 @@ export function renderHookSpoolStatus(
   env: NodeJS.ProcessEnv = process.env,
   nowMs: number = Date.now()
 ): string {
-  const args = statusArgs(argv, nowMs);
+  const args = statusArgs({ argv, nowMs });
   const rows = readHookSpool(resolveHookSpoolPath(env), {
     sinceMs: args.sinceMs,
     nowMs,

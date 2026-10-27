@@ -18,25 +18,38 @@ function spoolPath(): string {
   return join(dir, 'hooks.spool');
 }
 
-function start(ts: number, id: string, host = 'cursor', event = 'post-tool', cwd = '/repo') {
+interface StartFixture {
+  ts: number;
+  id: string;
+  host?: string;
+  event?: string;
+  cwd?: string;
+}
+
+interface EndFixture extends StartFixture {
+  outcome?: string;
+  rc?: number;
+}
+
+function start({ ts, id, host = 'cursor', event = 'post-tool', cwd = '/repo' }: StartFixture) {
   return `v1\t${ts}\tstart\t${id}\t${host}\t${event}\t${cwd}`;
 }
 
-function end(
-  ts: number,
-  id: string,
+function end({
+  ts,
+  id,
   outcome = 'ok',
   rc = 0,
   host = 'cursor',
   event = 'post-tool',
-  cwd = '/repo'
-) {
+  cwd = '/repo',
+}: EndFixture) {
   return `v1\t${ts}\tend\t${id}\t${host}\t${event}\t${rc}\t${outcome}\t${cwd}`;
 }
 
 test('rotation replaces .1 after the spool grows past 1 MiB', () => {
   const path = spoolPath();
-  const body = `${start(100, 'id')}\n${'x'.repeat(1024 * 1024 + 1)}`;
+  const body = `${start({ ts: 100, id: 'id' })}\n${'x'.repeat(1024 * 1024 + 1)}`;
   writeFileSync(path, body);
   writeFileSync(`${path}.1`, 'previous spool');
 
@@ -48,8 +61,8 @@ test('rotation replaces .1 after the spool grows past 1 MiB', () => {
 
 test('the reader merges a start in .1 with its end in the current spool', () => {
   const path = spoolPath();
-  writeFileSync(`${path}.1`, `${start(100, 'shared')}\n`);
-  writeFileSync(path, `${end(103, 'shared')}\n`);
+  writeFileSync(`${path}.1`, `${start({ ts: 100, id: 'shared' })}\n`);
+  writeFileSync(path, `${end({ ts: 103, id: 'shared' })}\n`);
 
   assert.deepEqual(readHookSpool(path, { sinceMs: 0, nowMs: 200_000 }), [
     {
@@ -71,8 +84,8 @@ test('tabs in cwd and malformed lines do not break valid records', () => {
     [
       'garbage',
       'v2\tbad\tstart\tbad\tcursor\tpost-tool\t/repo',
-      start(100, 'tabbed', 'cursor', 'post-tool', '/repo\twith\ttabs'),
-      end(102, 'tabbed', 'ok', 0, 'cursor', 'post-tool', '/repo\twith\ttabs'),
+      start({ ts: 100, id: 'tabbed', cwd: '/repo\twith\ttabs' }),
+      end({ ts: 102, id: 'tabbed', cwd: '/repo\twith\ttabs' }),
       '',
     ].join('\n')
   );
@@ -86,8 +99,8 @@ test('tabs in cwd and malformed lines do not break valid records', () => {
 test('fixed durations use linear p50 and p95 percentiles', () => {
   const path = spoolPath();
   const records = [1, 2, 3, 4].flatMap((duration, index) => [
-    start(100, `id-${index}`),
-    end(100 + duration, `id-${index}`),
+    start({ ts: 100, id: `id-${index}` }),
+    end({ ts: 100 + duration, id: `id-${index}` }),
   ]);
   writeFileSync(path, `${records.join('\n')}\n`);
 
@@ -98,7 +111,7 @@ test('fixed durations use linear p50 and p95 percentiles', () => {
 
 test('a start-only record becomes killed only after the watchdog threshold', () => {
   const path = spoolPath();
-  writeFileSync(path, `${start(100, 'left-open')}\n`);
+  writeFileSync(path, `${start({ ts: 100, id: 'left-open' })}\n`);
 
   const before = readHookSpool(path, {
     sinceMs: 0,
@@ -119,9 +132,15 @@ test('status JSON is an array of host/event rows and no-cli is counted', () => {
   writeFileSync(
     path,
     [
-      start(100, 'ok'),
-      end(102, 'ok'),
-      end(103, 'no-cli-id', 'no-cli', 0, 'unknown', 'permission'),
+      start({ ts: 100, id: 'ok' }),
+      end({ ts: 102, id: 'ok' }),
+      end({
+        ts: 103,
+        id: 'no-cli-id',
+        outcome: 'no-cli',
+        host: 'unknown',
+        event: 'permission',
+      }),
       '',
     ].join('\n')
   );
