@@ -5,6 +5,13 @@ import { join, resolve } from 'node:path';
 const MAX_SPOOL_BYTES = 1024 * 1024;
 const DEFAULT_WATCHDOG_SECONDS = 8;
 const DEFAULT_SINCE_MS = 24 * 60 * 60 * 1000;
+const DURATION_UNIT_MS = new Map<string, number>([
+  ['ms', 1],
+  ['s', 1000],
+  ['m', 60_000],
+  ['h', 3_600_000],
+  ['d', 86_400_000],
+]);
 
 type HookOutcome = 'ok' | 'nonzero' | 'watchdog' | 'no-cli';
 
@@ -337,16 +344,10 @@ function parseDurationMs(value: string): number | undefined {
   if (amountText === undefined || unit === undefined) {
     return undefined;
   }
-  const factor =
-    unit === 'ms'
-      ? 1
-      : unit === 's'
-        ? 1000
-        : unit === 'm'
-          ? 60_000
-          : unit === 'h'
-            ? 3_600_000
-            : 86_400_000;
+  const factor = DURATION_UNIT_MS.get(unit);
+  if (factor === undefined) {
+    return undefined;
+  }
   const duration = Number(amountText) * factor;
   return Number.isFinite(duration) ? duration : undefined;
 }
@@ -403,7 +404,7 @@ export function renderHookSpoolStatus(
     watchdogSeconds: watchdogSeconds(env),
   });
   if (rows.length === 0) {
-    return 'no hook runs recorded';
+    return args.json ? '[]' : 'no hook runs recorded';
   }
   if (args.json) {
     return JSON.stringify(rows, null, 2);

@@ -166,3 +166,11 @@ test('missing or disabled spool reports no recorded runs', () => {
     'no hook runs recorded'
   );
 });
+
+test('empty JSON status reports an empty array', () => {
+  const missing = spoolPath();
+  assert.equal(
+    renderHookSpoolStatus(['status', '--json'], { BRO_HOOK_SPOOL: missing }, 100_000),
+    '[]'
+  );
+});
