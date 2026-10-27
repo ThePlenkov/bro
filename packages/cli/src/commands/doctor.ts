@@ -266,6 +266,27 @@ function broPluginResolved(lockfile: string): boolean {
  *  wholesale. */
 const DEVIN_BRO_HOOK = /hooks\/run\.sh|bro(?:\.exe|\.cmd)?\s+hooks[\s"']/;
 
+/** Every command a chain event's groups run — null when the shape is
+ *  off-schema (non-array event value, group without a hooks list),
+ *  which the caller counts as foreign rather than guess at what it
+ *  holds. */
+function devinChainCommands(groups: unknown): string[] | null {
+  if (!Array.isArray(groups)) {
+    return null;
+  }
+  const commands: string[] = [];
+  for (const group of groups) {
+    if (!isRecord(group) || !Array.isArray(group['hooks'])) {
+      return null;
+    }
+    for (const h of group['hooks']) {
+      const cmd = isRecord(h) ? h['command'] : undefined;
+      commands.push(typeof cmd === 'string' ? cmd : '');
+    }
+  }
+  return commands;
+}
+
 /** Which events carry a bro handler and whether the chain wires
  *  anything else — the two facts that pick the remediation (drop the
  *  file vs strip only the bro entries). Anything we cannot prove is a
@@ -289,22 +310,9 @@ function devinChainShape(text: string): { broEvents: string[]; foreign: boolean 
     if (DEVIN_BRO_HOOK.test(JSON.stringify(groups))) {
       broEvents.push(event);
     }
-    if (!Array.isArray(groups)) {
+    const commands = devinChainCommands(groups);
+    if (commands === null || commands.some(c => !DEVIN_BRO_HOOK.test(c))) {
       foreign = true;
-      continue;
-    }
-    for (const group of groups) {
-      const hooks = isRecord(group) && Array.isArray(group['hooks']) ? group['hooks'] : null;
-      if (hooks === null) {
-        foreign = true;
-        continue;
-      }
-      for (const h of hooks) {
-        const cmd = isRecord(h) && typeof h['command'] === 'string' ? h['command'] : '';
-        if (!DEVIN_BRO_HOOK.test(cmd)) {
-          foreign = true;
-        }
-      }
     }
   }
   return { broEvents, foreign };
