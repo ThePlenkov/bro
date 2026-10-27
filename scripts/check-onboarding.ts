@@ -22,14 +22,12 @@ import { join } from 'node:path'
 import {
   extractDocLines,
   loadPublishedSurface,
-  probePublished,
-  resolveSpec,
+  NpmSpec,
   root,
-  runBin,
 } from './published-surface.ts'
 
 const argv = process.argv.slice(2)
-const spec = resolveSpec(argv)
+const spec = NpmSpec.resolve(argv)
 const files = argv
   .filter((a) => a.endsWith('.md') || a.endsWith('.mdx'))
   .map((f) => (f.startsWith('/') ? f : join(root, f)))
@@ -38,11 +36,11 @@ const pages =
     ? files
     : [join(root, 'site/content/docs/index.mdx'), join(root, 'README.md')]
 
-const { bin, scratch, top, version } = probePublished(spec)
+const { install, top, version } = spec.probe()
 
 // the literal install steps — --version and --help are the two
 // invocations every onboarding page leads with
-const vout = runBin(bin, ['--version'], scratch)
+const vout = install.run(['--version'])
 if (!vout.includes(version)) {
   console.error(`${spec}: \`bro --version\` printed ${vout.trim() || '(nothing)'}, expected ${version}`)
   process.exit(1)

@@ -17,21 +17,18 @@ import { writeFileSync } from 'node:fs'
 import {
   argFlag,
   loadPublishedSurface,
-  probePublished,
+  NpmSpec,
   PUBLISHED_PATH,
-  resolveSpec,
-  runBin,
-  subsOf,
   type PublishedSurface,
 } from './published-surface.ts'
 
 const argv = process.argv.slice(2)
 const check = argv.includes('--check')
-const spec = resolveSpec(argv)
+const spec = NpmSpec.resolve(argv)
 const existing = loadPublishedSurface()
 const next = argFlag(argv, '--next') ?? existing?.next ?? '0.3.0'
 
-const { bin, scratch, top, version } = probePublished(spec)
+const { install, top, version } = spec.probe()
 if (top.commands.size === 0) {
   console.error(`no Commands: block parsed from ${spec} --help`)
   process.exit(1)
@@ -39,13 +36,12 @@ if (top.commands.size === 0) {
 
 const commands: Record<string, string[]> = {}
 for (const [name, summary] of top.commands) {
-  commands[name] = subsOf(name, runBin(bin, [name, '--help'], scratch), summary)
+  commands[name] = install.helpFor({ name, summary }).subs()
 }
 
-const at = spec.lastIndexOf('@')
 const surface: PublishedSurface = {
-  package: at > 0 ? spec.slice(0, at) : spec,
-  spec: at > 0 ? spec.slice(at + 1) : 'latest',
+  package: spec.package,
+  spec: spec.tag,
   version,
   next,
   generatedAt: new Date().toISOString(),
