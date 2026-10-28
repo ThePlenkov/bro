@@ -98,8 +98,7 @@ function readExistingConfig(path: string): Partial<BroConfig> | null {
  *  worktree there is nothing to exclude from — quiet skip. */
 function ensureLocalConfigExcluded(): void {
   const git = (args: string[], cwd = process.cwd()): string =>
-    execFileSync('git', ['-C', cwd, ...args], {
-      // NOSONAR — PATH lookup is the contract
+    /* NOSONAR — PATH lookup is the contract */ execFileSync('git', ['-C', cwd, ...args], {
       encoding: 'utf8',
       stdio: ['ignore', 'pipe', 'pipe'],
     }).trim();
@@ -126,10 +125,13 @@ function ensureLocalConfigExcluded(): void {
   // before the exclusion step is skipped.
   const isIgnored = (name: string): boolean => {
     try {
-      execFileSync('git', ['-C', process.cwd(), 'check-ignore', '-q', '--', name], {
-        // NOSONAR — git PATH lookup is the contract
-        stdio: 'ignore',
-      });
+      /* NOSONAR — git PATH lookup is the contract */ execFileSync(
+        'git',
+        ['-C', process.cwd(), 'check-ignore', '-q', '--', name],
+        {
+          stdio: 'ignore',
+        }
+      );
       return true;
     } catch {
       return false;
@@ -174,11 +176,14 @@ function ensureLocalConfigExcluded(): void {
     // whether or not a rule covers the name: ignored-but-tracked is the
     // silent case this warning exists for. Untracking is a staged change
     // only the repo owner should make.
-    const tracked = execFileSync('git', ['-C', root, 'ls-files', '--', 'bro.config.local.*'], {
-      // NOSONAR — git PATH lookup is the contract
-      encoding: 'utf8',
-      stdio: ['ignore', 'pipe', 'ignore'],
-    }).trim();
+    /* NOSONAR — git PATH lookup is the contract */ const tracked = execFileSync(
+      'git',
+      ['-C', root, 'ls-files', '--', 'bro.config.local.*'],
+      {
+        encoding: 'utf8',
+        stdio: ['ignore', 'pipe', 'ignore'],
+      }
+    ).trim();
     if (tracked !== '') {
       console.error(
         'warning: bro.config.local.* has tracked files — .git/info/exclude ' +
@@ -491,12 +496,15 @@ function installOneLockedSkill(dir: string, skill: LockedSkill): void {
     // spawnSync, not execFileSync: `npx` is a PATH lookup and the PATH
     // contract is the same one gh/bd/git already have (doctor.ts probes
     // npx the same way).
-    const p = spawnSync('npx', ['--yes', 'skills', 'add', skill.source, '--skill', skill.name], {
-      // NOSONAR — PATH lookup is the contract (same as gh/bd/git)
-      cwd: dir,
-      stdio: 'pipe',
-      timeout: 300_000,
-    });
+    /* NOSONAR — PATH lookup is the contract (same as gh/bd/git) */ const p = spawnSync(
+      'npx',
+      ['--yes', 'skills', 'add', skill.source, '--skill', skill.name, '-y'],
+      {
+        cwd: dir,
+        stdio: 'pipe',
+        timeout: 300_000,
+      }
+    );
     if (p.error !== undefined || p.status !== 0) {
       throw new Error(`npx skills add exited ${spawnFailureDetail(p)}`);
     }
