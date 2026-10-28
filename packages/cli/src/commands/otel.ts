@@ -13,7 +13,7 @@
  */
 import { existsSync, readFileSync, renameSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
-import { EXIT, hasHelpFlag, printUsage, type ExitCode } from '@broject/core'
+import { CommandError, EXIT, hasHelpFlag, printUsage, type ExitCode } from '@broject/core'
 import { otelEndpoint } from '@broject/providers'
 import {
   hookEventName,
@@ -64,10 +64,10 @@ function cmdSetEnabled(toggle: { dir: string; enabled: boolean }): void {
   const { dir, enabled } = toggle
   const tsPath = join(dir, 'bro.config.local.ts')
   if (existsSync(tsPath)) {
-    console.error(
-      `error: bro.config.local.ts shadows the .json — set "otel": { "enabled": ${enabled} } there directly`
+    throw new CommandError(
+      `error: bro.config.local.ts shadows the .json — set "otel": { "enabled": ${enabled} } there directly`,
+      EXIT.usage
     )
-    process.exit(EXIT.usage)
   }
   const path = join(dir, 'bro.config.local.json')
   let cfg: Record<string, unknown> = {}
@@ -77,10 +77,10 @@ function cmdSetEnabled(toggle: { dir: string; enabled: boolean }): void {
       if (!isObj(raw)) throw new Error('top-level value is not an object')
       cfg = raw
     } catch (e) {
-      console.error(
-        `error: ${path} exists but does not parse — fix or remove it first (${e instanceof Error ? e.message : e})`
+      throw new CommandError(
+        `error: ${path} exists but does not parse — fix or remove it first (${e instanceof Error ? e.message : e})`,
+        EXIT.usage
       )
-      process.exit(EXIT.usage)
     }
   }
   const section = isObj(cfg.otel) ? cfg.otel : {}
@@ -196,8 +196,7 @@ const SYNTHETIC_PAYLOAD = {
 function cmdTest(run: { dir: string; rawName: string | undefined; json: boolean }): void {
   const { dir, rawName, json } = run
   if (rawName === undefined) {
-    console.error('error: bro otel test needs a hook name — `bro otel test session-start`')
-    process.exit(EXIT.usage)
+    throw new CommandError('error: bro otel test needs a hook name — `bro otel test session-start`', EXIT.usage)
   }
   const name = hookEventName(rawName)
   const cfg = otelConfig({ dir })
@@ -264,7 +263,6 @@ export function runOtelCommand(argv: string[]): void {
       cmdStatus({ dir, json: rest.includes('--json') })
       return
     default:
-      console.error(`error: unknown otel command "${sub}"`)
-      usage()
+      throw new CommandError(`error: unknown otel command "${sub}"`, EXIT.usage)
   }
 }

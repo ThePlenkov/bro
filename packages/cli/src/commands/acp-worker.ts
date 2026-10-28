@@ -6,6 +6,7 @@
  * apply to it directly. The ACP session id is diagnostic only; the
  * fleet's own registry identity stands.
  */
+import { CommandError, EXIT } from '@broject/core'
 import { flag, positionals } from './args.ts'
 import { patchAgentRegistry } from '@broject/core'
 
@@ -16,10 +17,11 @@ export async function runAcpWorkerCommand(argv: string[]): Promise<void> {
   const sessionRm = flag(argv, '--session-rm')
   const pos = positionals(argv, new Set(['--command', '--model', '--session-rm']))
   if (command === undefined || pos.length !== 1) {
-    console.error(
+    throw new CommandError(
+      'usage: bro acp-worker --command <cmd> [--model <m>] [--auto-approve] [--session-rm <tmpl>] <promptFile>',
+      EXIT.usage,
       'usage: bro acp-worker --command <cmd> [--model <m>] [--auto-approve] [--session-rm <tmpl>] <promptFile>'
     )
-    process.exit(2)
   }
   const promptFile = pos[0]!
   const { runAcpWorker } = await import('@broject/providers')
@@ -46,5 +48,7 @@ export async function runAcpWorkerCommand(argv: string[]): Promise<void> {
             }
           },
   })
-  process.exit(code)
+  if (code !== 0) {
+    throw new CommandError('', code as any)
+  }
 }

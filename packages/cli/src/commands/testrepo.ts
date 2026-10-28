@@ -1543,9 +1543,18 @@ export async function capture(
   try {
     await fn();
     return { code: 0, out, err };
-  } catch (e) {
+  } catch (e: any) {
     if (e instanceof Exit) {
       return { code: e.code, out, err };
+    }
+    if (e && (e.name === 'CommandError' || e.constructor?.name === 'CommandError')) {
+      const code = typeof e.code === 'number' ? e.code : 1
+      if (e.message && !err.length && !out.length) {
+        // best effort capture
+        if (e.usage) err.push(e.usage.replace(/\n$/, ''))
+        else err.push(e.message.replace(/\n$/, ''))
+      }
+      return { code, out, err }
     }
     throw e;
   } finally {

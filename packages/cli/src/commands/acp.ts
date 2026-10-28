@@ -11,14 +11,13 @@
  * collectPromptContext as library calls keyed on `session/new`'s cwd,
  * never a subprocess and never the proxy's own cwd.
  */
+import { CommandError, EXIT } from '@broject/core'
 import { collectPromptContext, collectSessionContext } from './hooks.ts'
 
 const USAGE = 'usage: bro acp proxy -- <agent cmd…>'
 
 function usage(line: string): never {
-  console.error(line)
-  console.error(USAGE)
-  process.exit(2)
+  throw new CommandError(`${line}\n${USAGE}`, EXIT.usage)
 }
 
 export async function runAcpCommand(argv: string[]): Promise<void> {
@@ -56,5 +55,7 @@ export async function runAcpCommand(argv: string[]): Promise<void> {
       },
     },
   })
-  process.exit(code)
+  if (code !== 0) {
+    throw new CommandError('', code as any)
+  }
 }
