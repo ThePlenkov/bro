@@ -64,6 +64,7 @@ import {
   writeFileSync,
   writeSync,
 } from 'node:fs';
+import { createRequire } from 'node:module';
 import { dirname, isAbsolute, join } from 'node:path';
 import { setTimeout as nodeSetTimeout } from 'node:timers';
 import {
@@ -1102,18 +1103,14 @@ export function hookDeadlineMs(env: NodeJS.ProcessEnv = process.env): number {
 
 // --- event handlers -----------------------------------------------------------
 
+const require = createRequire(import.meta.url);
+
 /** Trace tail for this session — the MatchContext's structured half.
  *  No hooks dir or session id means an empty tail, never a throw. */
 function sessionTail(dir: string, sessionId: string): { entries: any[]; raw: string } {
   const path = traceFile(dir, sessionId);
   if (path === null) {
     return { entries: [], raw: '' };
-  }
-  try {
-    // Try to use already imported module if present; otherwise fallback to sync require in CJS
-    // but in ESM we can't require easily - use dynamic import result cache
-  } catch {
-    // ignore
   }
   try {
     // @ts-ignore
@@ -1128,11 +1125,9 @@ function sessionTail(dir: string, sessionId: string): { entries: any[]; raw: str
   } catch {
     // ignore
   }
-  // Fallback: try to require via createRequire if available
+  // Try to load via require (works in CJS and with createRequire in ESM)
   try {
-    const { createRequire } = require('node:module');
-    const req = createRequire(import.meta.url);
-    const learn = req('@broject/learn');
+    const learn = require('@broject/learn');
     (globalThis as any).__bro_learn_cache = learn;
     return learn.readTraceTail(path);
   } catch {
@@ -2339,12 +2334,23 @@ export async function runHooksCommand(argv: string[]): Promise<void> {
   let evSpan:
     | { end: (attrs?: Record<string, unknown>, status?: 'error' | 'ok') => void }
     | undefined;
+  let evSpanEnded = false;
+  let evSpanError: { attrs?: Record<string, unknown>; status?: 'error' | 'ok' } | undefined;
   void lazyOtelSpan().then(otelSpan => {
     try {
-      evSpan = otelSpan('hook.event', {
+      const span = otelSpan('hook.event', {
         'hook.event': event,
         'hook.session': typeof input.session_id === 'string' ? input.session_id : '',
       });
+      if (evSpanEnded) {
+        try {
+          span.end(evSpanError?.attrs, evSpanError?.status);
+        } catch {
+          // ignore
+        }
+        return;
+      }
+      evSpan = span;
     } catch {
       evSpan = undefined;
     }
@@ -2352,13 +2358,24 @@ export async function runHooksCommand(argv: string[]): Promise<void> {
   try {
     await dispatchHook(event, raw, input);
     try {
-      evSpan?.end();
+      if (evSpan) {
+        evSpan.end();
+        evSpanEnded = true;
+      } else {
+        evSpanEnded = true;
+      }
     } catch {
       // ignore
     }
   } catch (e) {
     try {
-      evSpan?.end({}, 'error');
+      if (evSpan) {
+        evSpan.end({}, 'error');
+        evSpanEnded = true;
+      } else {
+        evSpanEnded = true;
+        evSpanError = { attrs: {}, status: 'error' };
+      }
     } catch {
       // ignore
     }
