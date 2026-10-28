@@ -98,9 +98,10 @@ export function parseArgs(argv: string[], env: NodeJS.ProcessEnv = process.env):
     '--fixture': 'fixture',
     '--permit': 'permit',
   };
+  const TOGGLES = new Set(['--no-color', '--plain']);
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i] as string;
-    if (a === '--no-color' || a === '--plain') {
+    if (TOGGLES.has(a)) {
       cli.color = false;
       continue;
     }

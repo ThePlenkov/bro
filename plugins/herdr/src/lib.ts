@@ -477,6 +477,11 @@ const WORD_ESCAPES: Record<string, string> = { n: '\n', t: '\t' };
 const unescapeWord = (s: string): string =>
   s.replace(/\\(.)/g, (_, c: string) => WORD_ESCAPES[c] ?? c);
 
+const quotedBody = (s: string, q: string): string => {
+  if (s.length < 2 || !s.endsWith(q)) throw new Error(`unclosed ${q} quote`);
+  return s.slice(1, -1);
+};
+
 /** One lexer segment → its literal text; malformed input is a loud
  *  usage error. Single-quoted bodies stay literal, double-quoted and
  *  bare segments get \x escapes. */
@@ -484,8 +489,8 @@ const segmentText = (s: string): string => {
   if (s === '\\') throw new Error('trailing backslash');
   const q = s[0] as string;
   if (q !== '"' && q !== "'") return unescapeWord(s);
-  if (s.length < 2 || !s.endsWith(q)) throw new Error(`unclosed ${q} quote`);
-  return q === '"' ? unescapeWord(s.slice(1, -1)) : s.slice(1, -1);
+  const body = quotedBody(s, q);
+  return q === '"' ? unescapeWord(body) : body;
 };
 
 /** Minimal shell-words split for operator-selected text — whitespace-
