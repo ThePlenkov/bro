@@ -8,8 +8,9 @@
  * process exactly like before.
  */
 import { spawn, type ChildProcess } from 'node:child_process';
-import { readFileSync, readdirSync, readlinkSync } from 'node:fs';
+import { existsSync, readFileSync, readdirSync, readlinkSync } from 'node:fs';
 import type { Socket } from 'node:net';
+import { basename, resolve } from 'node:path';
 
 const live = new Set<ChildProcess>();
 
@@ -91,6 +92,40 @@ export function killGroup(proc: ChildProcess): void {
     proc.kill('SIGKILL');
   } catch {
     /* already dead */
+  }
+}
+
+/** Detached `bro <args>` child — the hook path's off-loop worker spawn
+ *  (bro-36sx7.4): own process group, ignore stdio, unref'd, silent on
+ *  every failure. The child re-runs the CLI entry this process was
+ *  launched as — but only when argv[1] is bro-shaped (`index.*` or a
+ *  `bro` bin). A test runner's argv is the suite file or the runner
+ *  itself, and respawning that would fork the suite, so the shape
+ *  check is the refusal, not a courtesy. */
+export function spawnSelf(args: string[], cwd: string): boolean {
+  const entry = process.argv[1];
+  if (entry === undefined) {
+    return false;
+  }
+  const base = basename(entry);
+  if (base !== 'bro' && !/^index\.[cm]?[jt]s$/.test(base)) {
+    return false;
+  }
+  const abs = resolve(entry);
+  if (!existsSync(abs)) {
+    return false;
+  }
+  try {
+    const child = spawn(process.execPath, [abs, ...args], {
+      cwd,
+      detached: true,
+      stdio: 'ignore',
+    });
+    child.on('error', () => {});
+    child.unref();
+    return true;
+  } catch {
+    return false;
   }
 }
 

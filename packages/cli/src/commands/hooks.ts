@@ -82,9 +82,15 @@ import {
 } from '@broject/core';
 import type { ConnectorCtx, ProbeReporter, ProbeResult, ProbeTiming } from '@broject/core';
 import { agentOwner, markerLive, markerOwner, ownerTag } from './proc-owner.ts';
-import { runGuards, type GuardConfig, type GuardJudgeInput, type GuardRun } from '@broject/guard';
+import {
+  queuedJudge,
+  runGuards,
+  type GuardConfig,
+  type GuardJudgeInput,
+  type GuardRun,
+} from '@broject/guard';
 import { GUARD_PROBES } from '../guard-probes.ts';
-import { appendRow, judgeConfig, judgeFacade } from '@broject/judge';
+import { appendRow, judgeConfig } from '@broject/judge';
 import { otelSpan } from '@broject/providers';
 import { emitHook } from '@broject/otel';
 import {
@@ -1290,7 +1296,12 @@ async function guardLines(
           return undefined;
         }
         const input: GuardJudgeInput = {
-          facade: judgeFacade(dir),
+          // the queued facade — decide() consumes a verdict the
+          // detached `bro guard eval` published, else files the
+          // request and abstains; the model never runs on a hook
+          // (bro-36sx7.4). `bro guard test` keeps the live facade —
+          // it's the honest read of what the clause would answer.
+          facade: queuedJudge(dir),
           confidence: jcfg.confidence,
           maxDecisions: jcfg.maxDecisionsPerRun,
           journal: v => appendRow(dir, v),
