@@ -4,7 +4,7 @@
  * domain mapping: MR discussions are threads, head-pipeline jobs+bridges
  * are checks, diff versions are reviewed SHAs.
  */
-import { gitTry } from '@broject/core';
+import { gitTry, gitTryAsync } from '@broject/core';
 import type {
   ApprovalVerdict,
   CheckInfo,
@@ -103,6 +103,12 @@ function remoteUrl(dir: string): string | undefined {
   return r.code === 0 && r.out.trim() !== '' ? r.out.trim() : undefined;
 }
 
+/** Async twin — hook/probe paths can't pay spawnSync (spec bro-36sx7). */
+async function remoteUrlAsync(dir: string): Promise<string | undefined> {
+  const r = await gitTryAsync(['-C', dir, 'remote', 'get-url', 'origin']);
+  return r.code === 0 && r.out.trim() !== '' ? r.out.trim() : undefined;
+}
+
 /** host + path split for GitLab remotes — https, ssh:// and scp-style
  *  `git@host:path.git`. Nested groups keep their slashes; the port, when
  *  present, stays on the host so self-hosted URLs still build. */
@@ -120,6 +126,14 @@ function remoteParts(url: string): { host: string; path: string } | null {
  *  gitlab.com. */
 export function hostFor(dir: string): string {
   const url = remoteUrl(dir);
+  const parts = url === undefined ? null : remoteParts(url);
+  const envHost = process.env.GITLAB_HOST?.replace(/^https?:\/\//i, '').replace(/\/.*$/, '');
+  return parts?.host ?? envHost ?? 'gitlab.com';
+}
+
+/** Async twin of hostFor. */
+export async function hostForAsync(dir: string): Promise<string> {
+  const url = await remoteUrlAsync(dir);
   const parts = url === undefined ? null : remoteParts(url);
   const envHost = process.env.GITLAB_HOST?.replace(/^https?:\/\//i, '').replace(/\/.*$/, '');
   return parts?.host ?? envHost ?? 'gitlab.com';
@@ -338,6 +352,10 @@ export function gitlabReview(dir: string = process.cwd()): ReviewFacade {
   let host: string | undefined;
   const hostOnce = (): string => (host ??= hostFor(dir));
   const gopts = (): GlabOpts => ({ cwd: dir, env: { GITLAB_HOST: hostOnce() } });
+  const goptsAsync = async (): Promise<GlabOpts> => ({
+    cwd: dir,
+    env: { GITLAB_HOST: (host ??= await hostForAsync(dir)) },
+  });
   const link = (repo: string, pr: number): string =>
     `[#${pr}](https://${hostOnce()}/${repo}/-/merge_requests/${pr})`;
 
@@ -358,6 +376,18 @@ export function gitlabReview(dir: string = process.cwd()): ReviewFacade {
       return positional.join('/');
     }
     const url = remoteUrl(dir);
+    const path = url === undefined ? null : remoteParts(url)?.path;
+    if (!path) {
+      throw new Error('no GitLab remote — pass GROUP/PROJECT or add an origin remote');
+    }
+    return path;
+  }
+
+  async function resolveRepoAsync(positional: string[] = []): Promise<string> {
+    if (positional.length > 0) {
+      return positional.join('/');
+    }
+    const url = await remoteUrlAsync(dir);
     const path = url === undefined ? null : remoteParts(url)?.path;
     if (!path) {
       throw new Error('no GitLab remote — pass GROUP/PROJECT or add an origin remote');
@@ -592,6 +622,7 @@ export function gitlabReview(dir: string = process.cwd()): ReviewFacade {
 
   return {
     resolveRepo,
+    resolveRepoAsync,
     prLink: link,
     currentPr() {
       // GitLab allows at most one open MR per source→target pair; the
@@ -623,6 +654,45 @@ export function gitlabReview(dir: string = process.cwd()): ReviewFacade {
               api(repo, `merge_requests?source_branch=${enc}&order_by=updated_at&per_page=1`),
             ],
             gopts()
+          )[0];
+        if (!mr) {
+          return null;
+        }
+        return { pr: mr.iid, state: toState(mr.state), url: mr.web_url ?? '' };
+      } catch {
+        return null;
+      }
+    },
+    /** Async twin — hook paths must not serialize behind sync `glab`. */
+    async currentPrAsync() {
+      try {
+        const b = await gitTryAsync(['-C', dir, 'branch', '--show-current']);
+        const branch = b.code === 0 ? b.out.trim() : '';
+        if (branch === '') {
+          return null;
+        }
+        const repo = await resolveRepoAsync([]);
+        const enc = encodeURIComponent(branch);
+        const open = await glabJsonAsync<MrRow[]>(
+          [
+            'api',
+            api(
+              repo,
+              `merge_requests?source_branch=${enc}&state=opened&order_by=updated_at&per_page=1`
+            ),
+          ],
+          await goptsAsync()
+        );
+        const mr =
+          open[0] ??
+          (
+            await glabJsonAsync<MrRow[]>(
+              [
+                'api',
+                api(repo, `merge_requests?source_branch=${enc}&order_by=updated_at&per_page=1`),
+              ],
+              await goptsAsync()
+            )
           )[0];
         if (!mr) {
           return null;

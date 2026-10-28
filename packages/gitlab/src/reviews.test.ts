@@ -462,6 +462,27 @@ describe('gitlabReview', { skip: WIN32 }, () => {
     }
   });
 
+  test('currentPrAsync answers the same MR through non-blocking calls', async () => {
+    const dir = makeRepo('git@gitlab.com:acme/widgets.git');
+    try {
+      await withFakeGlabAsync(
+        { FAKE_GLAB_OPEN_MRS: '[{"iid":5,"state":"opened","web_url":"u5"}]' },
+        async () => {
+          assert.deepEqual(await gitlabReview(dir).currentPrAsync!(), {
+            pr: 5,
+            state: 'OPEN',
+            url: 'u5',
+          });
+        }
+      );
+      await withFakeGlabAsync({}, async () => {
+        assert.equal(await gitlabReview(dir).currentPrAsync!(), null);
+      });
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   test("prsForBranch 'all' asks for every MR state — merged members stay visible to stack sync", () => {
     const dir = makeRepo('git@gitlab.com:acme/widgets.git');
     try {
