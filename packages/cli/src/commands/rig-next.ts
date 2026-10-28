@@ -156,7 +156,7 @@ export function rigNext(
   opts?: { gate?: boolean; store?: TaskStore }
 ): RigNext {
   const store = opts?.store ?? taskStore(dir)
-  const id = item ?? rigFocus(dir)
+  const id = item ?? rigFocus(dir, opts)
   if (id === undefined) {
     return { verdict: 'done' }
   }
