@@ -31,7 +31,7 @@ exported alongside the other fs helpers:
 
 - `writePrivateFileSync` / `appendPrivateFileSync` — `openSync` with
   create-mode `0600`, then `fchmodSync(fd, 0o600)` **before** the first
-  byte lands: a legacy `0644` file is repaired *before* the write/append,
+  byte lands: a legacy `0644` file is repaired _before_ the write/append,
   never left readable with new content inside.
 - `openPrivateAppendSync` — same fd contract for callers that keep the
   descriptor (native's spawn stdio).
@@ -106,23 +106,23 @@ Call sites:
 ## Plan
 
 - [x] `packages/core/src/private-files.ts` + `private-files.test.ts`
-      (create-mode, repair-before-write on a `0644` file, append fd)
+  (create-mode, repair-before-write on a `0644` file, append fd)
 - [x] `agent-connectors.ts`: commitSpawn pre-create, native
-      `openPrivateAppendSync`, `( umask 077; printf … )` wrappers, tmux /
-      docker env files, copilot body, gascity step dir + `agent.toml`
+  `openPrivateAppendSync`, `( umask 077; printf … )` wrappers, tmux /
+  docker env files, copilot body, gascity step dir + `agent.toml`
 - [x] `loop.ts` `writePrompt`, `serve.ts` `writeStateFile`,
-      `acp-events.ts` constant
+  `acp-events.ts` constant
 - [x] `agent-connectors.test.ts` contract test: per-backend `0600` on
-      prompt/log/stderr/exit + `0644` repair across a respawn (skipped
-      on win32 — POSIX mode bits don't exist there)
+  prompt/log/stderr/exit + `0644` repair across a respawn (skipped
+  on win32 — POSIX mode bits don't exist there)
 - [x] review-round hardening (PR #659): `O_NOFOLLOW`, foreign-owner
-      refusal, per-level mkdir pin under masking umask, per-row ACP
-      repair, pin-before-write ordering test via the `privateFs` seam
+  refusal, per-level mkdir pin under masking umask, per-row ACP
+  repair, pin-before-write ordering test via the `privateFs` seam
 - [x] SAST placement: `private-files.ts` lands at `bare_minimum` in
-      `.codescene/custom-quality-gates.json` (advisory ratio findings
-      inherent to a path-helper module — contorting the public API for
-      a metric is worse engineering) and `.codacy.yml` `exclude_paths`
-      (the module's job IS computed paths — same class as the store /
-      contract / plane exclusions already there)
+  `.codescene/custom-quality-gates.json` (advisory ratio findings
+  inherent to a path-helper module — contorting the public API for
+  a metric is worse engineering) and `.codacy.yml` `exclude_paths`
+  (the module's job IS computed paths — same class as the store /
+  contract / plane exclusions already there)
 - [x] `npm run build`, `npm run typecheck`, `npm test` (exact CI
-      commands)
+  commands)

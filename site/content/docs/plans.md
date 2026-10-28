@@ -1,12 +1,13 @@
 ---
+
 title: Plans
 description: Structured TOML input — one envelope, per-command schemas.
 ---
 
-*Command examples track the upcoming **0.3.0** — grouped
+_Command examples track the upcoming **0.3.0** — grouped
 `bro <group> <member>` spellings and `0.3.0` marks are not yet on npm
 `latest` (**0.2.5**); use the flat names (`bro convoy run`,
-`bro debt status`).*
+`bro debt status`)._
 
 Commands that take structured input share one envelope: a TOML file with
 a `kind` that routes to the owning plugin. Each kind's schema carries a
@@ -58,7 +59,7 @@ retrospect   v1
 ```
 
 Absent means "whatever the installed schema is" — every unversioned plan
-keeps working. A pin *newer* than this bro understands is rejected with
+keeps working. A pin _newer_ than this bro understands is rejected with
 the supported version named, never silently misparsed. The gate only
 looks upward: a pin at or below the installed version passes and the
 kind's `planSchema` decides what it accepts — whether an older pin

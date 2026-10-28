@@ -1,12 +1,13 @@
 ---
+
 title: bro self judge
 description: A calibrated decision judge for agent loops — typed questions in, typed answers with confidence out.
 ---
 
-*Command examples track the upcoming **0.3.0** — grouped
+_Command examples track the upcoming **0.3.0** — grouped
 `bro <group> <member>` spellings and `0.3.0` marks are not yet on npm
 `latest` (**0.2.5**); use the flat names (`bro convoy run`,
-`bro debt status`).*
+`bro debt status`)._
 
 The judge answers typed questions (`choice` / `score` / `noul`) over a
 compact state and returns typed answers with confidence — sub-second,
@@ -18,10 +19,10 @@ with the legacy `judge.{baseUrl,apiKeyEnv}` + `judge.llm` shape still
 accepted (synthesized into anonymous `api` entries, with a deprecation
 warning).
 
-| Command | What it does |
-| ------- | ------------ |
-| `bro self judge decide --state <file\|-> --questions <file> [--connector N] [--json]` | One `decide()` over the resolved chain — answers, `decidedBy`, model, latency, usage. The smoke path: exercises the connector regardless of `judge.mode` |
-| `bro self judge stats [--since ISO] [--json] [--replay]` | The verdict-journal report: agreement matrix (judge action vs recorded outcome), calibration buckets, p50/p95 latency, cost per provider+model |
+| Command                                                                                     | What it does                                                                                                                                                                                          |
+| ------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `bro self judge decide --state <file\|-> --questions <file> [--connector N] [--json]`       | One `decide()` over the resolved chain — answers, `decidedBy`, model, latency, usage. The smoke path: exercises the connector regardless of `judge.mode`                                              |
+| `bro self judge stats [--since ISO] [--json] [--replay]`                                    | The verdict-journal report: agreement matrix (judge action vs recorded outcome), calibration buckets, p50/p95 latency, cost per provider+model                                                        |
 | `bro self judge replay [--pr N…] [--merged-since ISO] [--limit N] [--connector N] [--json]` | Re-judge archived review threads from merged PRs on the live chain, journal replay verdicts with inferred outcomes, print the replay-scoped stats. Idempotent — a replayed subject is never re-judged |
 
 `judge.mode` governs consumers, not explicit invocation: `shadow`

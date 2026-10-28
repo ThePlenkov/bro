@@ -1,12 +1,14 @@
 ---
+
 parent: bro-l8c4f
 scope:
-  - site/content/docs/
-  - README.md
-  - scripts/
-  - contract/
-  - package.json
-  - .github/workflows/ci.yml
+- site/content/docs/
+- README.md
+- scripts/
+- contract/
+- package.json
+- .github/workflows/ci.yml
+
 ---
 
 # bro-l8c4f.17 — npm onboarding names commands the published CLI does not have
@@ -73,7 +75,7 @@ the commands `daemon`, `resume`, `provider`, `mcp`, `pulse`, `rig`,
   are permanent compat aliases — docs may teach either surface, but
   pages carrying the npm-install path show only what dispatches on
   `latest`.
-- The check never *executes* documented commands — several published
+- The check never _executes_ documented commands — several published
   commands (`bro watch`, `bro sync`, `bro doctor`, `bro fleet`) treat
   `--help` as "run it" and have real side effects. Verification is
   dispatch-level parsing of help output, never invocation of the doc'd

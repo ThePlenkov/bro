@@ -1,12 +1,13 @@
 ---
+
 title: Restoring a rig on a fresh machine
 description: A rig's durable state lives on git refs and branches — clone, bro sync --pull, bd sync through a dolt remote, bro drive install re-supervises open PRs.
 ---
 
-*Everything below runs on npm `latest` (**0.2.5**) as written — the
+_Everything below runs on npm `latest` (**0.2.5**) as written — the
 `0.3.0` mark is the one piece not yet published. These are the flat
 spellings; the grouped `bro <group> <member>` surface (`bro work sync`)
-arrives with the next release.*
+arrives with the next release._
 
 A bro rig is designed so the machine is disposable. What dies with it is
 **processes** — the daemon, act watchers, exec shells, dolt servers —
@@ -19,13 +20,13 @@ state ride `refs/bro/data`.
 
 ## Where each piece lives
 
-| State | Location | Restored by |
-| ----- | -------- | ----------- |
-| Code, `loop/*` and `fix/*` branches, dirty-tree snapshot branches | `refs/heads/*` | `git clone` / `git fetch` |
-| bro artifacts — review-debt ledger, drill evidence, `.agents/` state | `refs/bro/data` | `bro sync --pull` |
-| Beads store — issues, claims, drill frames, molecules | `refs/dolt/data` via a dolt remote (`bd dolt remote list`) | `bd sync` |
-| Operator config — providers, agent templates, global skills | outside the repo (`~/.config/bro`, `~/.agents`) | the operator's own backup — restore this first |
-| Running processes + machine-local state — daemon, watchers, shells, the `bro/drive.json` install marker, act watch markers (`<git-common>/bro/watches/`), agent logs, the agent registry (`<git-common>/bro/agents.json`), git worktree registrations, loop run records (`<git-common>/bro/loop/`), stack edges (`<git-common>/bro/stack/`) | nowhere | restarted below |
+| State                                                                                                                                                                                                                                                                                                                                       | Location                                                   | Restored by                                    |
+| ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------- | ---------------------------------------------- |
+| Code, `loop/*` and `fix/*` branches, dirty-tree snapshot branches                                                                                                                                                                                                                                                                           | `refs/heads/*`                                             | `git clone` / `git fetch`                      |
+| bro artifacts — review-debt ledger, drill evidence, `.agents/` state                                                                                                                                                                                                                                                                        | `refs/bro/data`                                            | `bro sync --pull`                              |
+| Beads store — issues, claims, drill frames, molecules                                                                                                                                                                                                                                                                                       | `refs/dolt/data` via a dolt remote (`bd dolt remote list`) | `bd sync`                                      |
+| Operator config — providers, agent templates, global skills                                                                                                                                                                                                                                                                                 | outside the repo (`~/.config/bro`, `~/.agents`)            | the operator's own backup — restore this first |
+| Running processes + machine-local state — daemon, watchers, shells, the `bro/drive.json` install marker, act watch markers (`<git-common>/bro/watches/`), agent logs, the agent registry (`<git-common>/bro/agents.json`), git worktree registrations, loop run records (`<git-common>/bro/loop/`), stack edges (`<git-common>/bro/stack/`) | nowhere                                                    | restarted below                                |
 
 ## Sequence
 

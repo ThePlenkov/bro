@@ -1,24 +1,25 @@
 ---
+
 title: bro flow next
 description: The flat backlog scheduler — claim the top ready bead, emit the work order.
 ---
 
-*Command examples track the upcoming **0.3.0** — grouped
+_Command examples track the upcoming **0.3.0** — grouped
 `bro <group> <member>` spellings and `0.3.0` marks are not yet on npm
 `latest` (**0.2.5**); use the flat names (`bro convoy run`,
-`bro debt status`).*
+`bro debt status`)._
 
 `bro flow next` is the scheduler as code. `bd` owns the queue; bro owns
 picking: the top ready bead, claimed atomically, emitted as a work
 order. The agent loop is one line — next → implement → PR → merge →
 repeat.
 
-| Command | What it does |
-| ------- | ------------ |
-| `bro flow next` | Claim and print the next ready work order |
-| `bro flow next --list` | Preview the queue without claiming |
-| `bro flow next --json` | Emit the scheduler result as JSON |
-| `bro flow next --global` | Schedule from the user-level store (`bro store init --global`) |
+| Command                  | What it does                                                                                   |
+| ------------------------ | ---------------------------------------------------------------------------------------------- |
+| `bro flow next`          | Claim and print the next ready work order                                                      |
+| `bro flow next --list`   | Preview the queue without claiming                                                             |
+| `bro flow next --json`   | Emit the scheduler result as JSON                                                              |
+| `bro flow next --global` | Schedule from the user-level store (`bro store init --global`)                                 |
 | `bro plan run next.toml` | The same selection driven by a validated [plan](/docs/plans) — filters, limit, ordering, gates |
 
 The scheduler ends in `task`, `gated`, or `idle`.

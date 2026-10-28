@@ -1,12 +1,13 @@
 ---
+
 title: Events — notify, mailbox, bus, sinks
 description: The events facade — a session mailbox by default, a local event broker behind it, webhook sinks for humans.
 ---
 
-*Command examples track the upcoming **0.3.0** — grouped
+_Command examples track the upcoming **0.3.0** — grouped
 `bro <group> <member>` spellings and `0.3.0` marks are not yet on npm
 `latest` (**0.2.5**); use the flat names (`bro convoy run`,
-`bro debt status`).*
+`bro debt status`)._
 
 `bro comms notify` writes through one `events` facade — mailbox by default,
 or the local broker when `"connectors": { "events": "bus" }` selects it.
@@ -26,14 +27,14 @@ One atomic drop (tmp+rename) per event into
 worktrees via the common git dir — or the XDG state dir
 (`$XDG_STATE_HOME`, default `~/.local/state`) outside one.
 
-| Command | What it does |
-| ------- | ------------ |
-| `bro comms notify <text>` | Drop one event — delivered to every session's next postTool probe |
-| `bro comms notify -- <text>` | Verbatim text — needed when it contains option-looking words like `--help` |
+| Command                                                           | What it does                                                                                                     |
+| ----------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------- |
+| `bro comms notify <text>`                                         | Drop one event — delivered to every session's next postTool probe                                                |
+| `bro comms notify -- <text>`                                      | Verbatim text — needed when it contains option-looking words like `--help`                                       |
 | `bro comms notify --to <agentId\|sessionId\|orchestrator> <text>` | Addressed drop for exactly one consumer — `orchestrator` names the session owning agents; absent means broadcast |
-| `--kind note\|info\|ask\|result\|block` | A label, never a grant — a `block` or `ask` carries no approval or scope with it |
-| `--in-reply-to <ref>` | The drop, bead, or step this answers |
-| `--key <k>` | Coalesce — a pending same-key drop from this source is superseded by the newer one |
+| `--kind note\|info\|ask\|result\|block`                           | A label, never a grant — a `block` or `ask` carries no approval or scope with it                                 |
+| `--in-reply-to <ref>`                                             | The drop, bead, or step this answers                                                                             |
+| `--key <k>`                                                       | Coalesce — a pending same-key drop from this source is superseded by the newer one                               |
 
 Delivery is pull-based: a drop never wakes a sleeping session — it lands
 in context on the next tool call. Broadcast drops stay for every session
@@ -47,12 +48,12 @@ A local event broker in `@broject/core` — topics, filters, seq cursors.
 `status` deliberately exits 0 when the broker is down: nobody started
 one is a normal state, not a fault.
 
-| Command | What it does |
-| ------- | ------------ |
-| `bro comms bus serve [--json]` | Run the broker (SIGINT/SIGTERM to stop) |
+| Command                                                                                                                       | What it does                                                                                                                               |
+| ----------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------ |
+| `bro comms bus serve [--json]`                                                                                                | Run the broker (SIGINT/SIGTERM to stop)                                                                                                    |
 | `bro comms bus publish --topic T --kind K [--key K] [--source S] [--to ADDR] [--cause C] [--ref R] [--payload JSON] [--json]` | Publish one event and exit — connect, write, close. `--to` addresses one recipient (`orchestrator` works here too); absent means broadcast |
-| `bro comms bus subscribe [--topic T]… [--kind K]… [--to ADDR] [--since N] [--json]` | Stream matching events until interrupted; `--since N` replays from a seq cursor — a cursor outside the window reports a gap |
-| `bro comms bus status [--json]` | Liveness and counters |
+| `bro comms bus subscribe [--topic T]… [--kind K]… [--to ADDR] [--since N] [--json]`                                           | Stream matching events until interrupted; `--since N` replays from a seq cursor — a cursor outside the window reports a gap                |
+| `bro comms bus status [--json]`                                                                                               | Liveness and counters                                                                                                                      |
 
 ## GitHub webhooks — `github:*`
 
@@ -95,10 +96,10 @@ hits `timeoutMs`. `bro bus publish` and the GitHub webhook ingest call
 `deliverSinks` without awaiting — delivery completes in the
 background and the caller never sees the per-sink result rows.
 
-| Command | What it does |
-| ------- | ------------ |
-| `bro sinks list [--json]` *(0.3.0)* | Resolved sinks — type, route patterns, and each secret env var's set/unset status (never the value) |
-| `bro sinks test [--json]` *(0.3.0)* | Probe every configured sink's endpoint (routes bypassed), report per-sink delivered/deduped/error — verify a webhook before a real event needs it |
+| Command                             | What it does                                                                                                                                      |
+| ----------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `bro sinks list [--json]` _(0.3.0)_ | Resolved sinks — type, route patterns, and each secret env var's set/unset status (never the value)                                               |
+| `bro sinks test [--json]` _(0.3.0)_ | Probe every configured sink's endpoint (routes bypassed), report per-sink delivered/deduped/error — verify a webhook before a real event needs it |
 
 ```json
 {

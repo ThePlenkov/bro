@@ -2,8 +2,8 @@
  * JSONL ledger store — `.agents/review-debt/` in the current working repo.
  * Append-only harvest snapshots + ledger.jsonl status overlays.
  */
-import { createHash } from 'node:crypto'
-import { execFileSync } from 'node:child_process'
+import { createHash } from 'node:crypto';
+import { execFileSync } from 'node:child_process';
 import {
   chmodSync,
   existsSync,
@@ -14,22 +14,16 @@ import {
   rmSync,
   statSync,
   writeFileSync,
-} from 'node:fs'
-import { dirname, isAbsolute, join, relative, sep } from 'node:path'
-import { loadConfig, withFileLock as withCoreFileLock } from '@broject/core'
-import type {
-  AuthorPolicy,
-  DebtRecord,
-  DebtStatus,
-  DebtSummary,
-  LedgerOverlay,
-} from './types.ts'
+} from 'node:fs';
+import { dirname, isAbsolute, join, relative, sep } from 'node:path';
+import { loadConfig, withFileLock as withCoreFileLock } from '@broject/core';
+import type { AuthorPolicy, DebtRecord, DebtStatus, DebtSummary, LedgerOverlay } from './types.ts';
 
 function debtDir(cwd: string = process.cwd()): string {
-  return process.env.BRO_DEBT_DIR ?? join(cwd, loadConfig(cwd).debt.dir)
+  return process.env.BRO_DEBT_DIR ?? join(cwd, loadConfig(cwd).debt.dir);
 }
 
-const excludedDebtDirs = new Set<string>()
+const excludedDebtDirs = new Set<string>();
 
 /**
  * The ledger is machine-local state — same contract as the gitignored
@@ -44,57 +38,57 @@ const excludedDebtDirs = new Set<string>()
  * (negation / character class), silently leaving the ledger trackable.
  */
 function gitignoreLiteral(p: string): string {
-  const escaped = p.replace(/[\\*?[\]]/g, '\\$&')
-  return /^[!#]/.test(escaped) ? `\\${escaped}` : escaped
+  const escaped = p.replace(/[\\*?[\]]/g, '\\$&');
+  return /^[!#]/.test(escaped) ? `\\${escaped}` : escaped;
 }
 
 function ensureDebtDirExcluded(dir: string): void {
   if (excludedDebtDirs.has(dir)) {
-    return
+    return;
   }
   const git = (args: string[]): string =>
     execFileSync('git', ['-C', dir, ...args], { // NOSONAR — git is already a hard dependency of the whole flow
       encoding: 'utf8',
       stdio: ['ignore', 'pipe', 'pipe'],
-    }).trim()
-  let root: string
+    }).trim();
+  let root: string;
   try {
-    mkdirSync(dir, { recursive: true }) // git -C fails on a missing dir
-    root = git(['rev-parse', '--show-toplevel'])
+    mkdirSync(dir, { recursive: true }); // git -C fails on a missing dir
+    root = git(['rev-parse', '--show-toplevel']);
   } catch (err) {
     // Memoize only a proven "not a worktree" (or missing git) — a transient
     // git/perm failure must retry exclusion on the next write, not silence
     // the guard for the rest of the process.
-    const e = err as NodeJS.ErrnoException & { stderr?: string }
+    const e = err as NodeJS.ErrnoException & { stderr?: string };
     if (e.code === 'ENOENT' || (e.stderr ?? '').includes('not a git repository')) {
-      excludedDebtDirs.add(dir)
-      return
+      excludedDebtDirs.add(dir);
+      return;
     }
     console.error(
       `warning: could not resolve git root for ${dir} — ` +
         `${(e.stderr ?? '').trim() || e.message}; exclusion will retry on next write`
-    )
-    return
+    );
+    return;
   }
-  const nativeRel = relative(root, dir)
+  const nativeRel = relative(root, dir);
   // `..` alone or `..<sep>` = outside the worktree; a dir literally named
   // `..debt` is a valid in-worktree segment, not an escape.
   if (nativeRel === '' || nativeRel === '..' || nativeRel.startsWith(`..${sep}`)) {
-    excludedDebtDirs.add(dir)
-    return // debt dir is the repo root or outside the worktree
+    excludedDebtDirs.add(dir);
+    return; // debt dir is the repo root or outside the worktree
   }
   if (/[\r\n]/.test(nativeRel)) {
-    excludedDebtDirs.add(dir)
-    return // a newline in the dir name would inject extra exclude patterns
+    excludedDebtDirs.add(dir);
+    return; // a newline in the dir name would inject extra exclude patterns
   }
   // Git pathspecs and ignore patterns are slash-separated — on Windows the
   // native backslashes would be escaped by gitignoreLiteral and never match.
-  const rel = nativeRel.split(sep).join('/')
+  const rel = nativeRel.split(sep).join('/');
   // Inside a worktree from here — exclusion failures are surfaced, since a
   // silently trackable ledger is exactly what this guard prevents.
   try {
-    const excludePath = git(['rev-parse', '--git-path', 'info/exclude'])
-    const path = isAbsolute(excludePath) ? excludePath : join(dir, excludePath)
+    const excludePath = git(['rev-parse', '--git-path', 'info/exclude']);
+    const path = isAbsolute(excludePath) ? excludePath : join(dir, excludePath);
     // Concurrent writers can race the read-modify-write — everything that
     // decides whether to append runs under the same lock the ledger uses.
     // The lock lives on a sibling path: `path` is the exclude DATA file —
@@ -104,105 +98,105 @@ function ensureDebtDirExcluded(dir: string): void {
       try {
         // Query from the repo root — pathspecs resolve against cwd, and
         // `dir` is the ledger dir itself, not the root.
-        execFileSync('git', ['-C', root, 'check-ignore', '-q', rel], { stdio: 'ignore' }) // NOSONAR
-        return // already covered by .gitignore / info/exclude / global excludes
+        execFileSync('git', ['-C', root, 'check-ignore', '-q', rel], { stdio: 'ignore' }); // NOSONAR
+        return; // already covered by .gitignore / info/exclude / global excludes
       } catch {
         /* not ignored — exclude it locally */
       }
-      const existing = existsSync(path) ? readFileSync(path, 'utf8') : ''
-      const entry = `${gitignoreLiteral(rel)}/`
+      const existing = existsSync(path) ? readFileSync(path, 'utf8') : '';
+      const entry = `${gitignoreLiteral(rel)}/`;
       if (!existing.split('\n').includes(entry)) {
-        const nl = existing === '' || existing.endsWith('\n') ? '' : '\n'
+        const nl = existing === '' || existing.endsWith('\n') ? '' : '\n';
         // atomic write inside the lock — a truncated exclude would drop
         // unrelated local rules, not just ours
-        atomicWrite(path, `${existing}${nl}${entry}\n`)
+        atomicWrite(path, `${existing}${nl}${entry}\n`);
       }
-    })
+    });
     // Ignores never override the index — files already committed under the
     // dir stay tracked and the exclusion is a no-op for them. Surface it;
     // untracking is a staged change only the repo owner should make.
     const tracked = execFileSync('git', ['-C', root, 'ls-files', '--', `${rel}/`], { // NOSONAR — git PATH lookup is the contract
       encoding: 'utf8',
       stdio: ['ignore', 'pipe', 'ignore'],
-    }).trim()
+    }).trim();
     if (tracked !== '') {
       console.error(
         `warning: ${rel}/ has tracked files — .git/info/exclude can't hide ` +
           `index entries; run \`git rm -r --cached ${rel}/\` to untrack`
-      )
+      );
     }
     // Memo only on success — a failed attempt must retry (and re-warn) on
     // the next write instead of going silent for the rest of the process.
-    excludedDebtDirs.add(dir)
+    excludedDebtDirs.add(dir);
   } catch (err) {
     console.error(
       `warning: could not git-exclude ${rel} — ` +
         `${err instanceof Error ? err.message : err}; the ledger may be trackable`
-    )
+    );
   }
 }
 
 function harvestDir(cwd?: string): string {
-  return join(debtDir(cwd), 'harvests')
+  return join(debtDir(cwd), 'harvests');
 }
 
 function debtFile(cwd?: string): string {
-  return join(debtDir(cwd), 'debt.jsonl')
+  return join(debtDir(cwd), 'debt.jsonl');
 }
 
 function ledgerFile(cwd?: string): string {
-  return join(debtDir(cwd), 'ledger.jsonl')
+  return join(debtDir(cwd), 'ledger.jsonl');
 }
 
 function summaryFile(cwd?: string): string {
-  return join(debtDir(cwd), 'debt-summary.json')
+  return join(debtDir(cwd), 'debt-summary.json');
 }
 
 function processedFile(cwd?: string): string {
-  return join(debtDir(cwd), 'processed.json')
+  return join(debtDir(cwd), 'processed.json');
 }
 
 function configFile(cwd?: string): string {
-  return join(debtDir(cwd), 'config.json')
+  return join(debtDir(cwd), 'config.json');
 }
 
 export function loadAuthorPolicy(cwd?: string): AuthorPolicy {
-  const fallback: AuthorPolicy = { excluded_authors: [], non_actionable_authors: [] }
-  const path = configFile(cwd)
+  const fallback: AuthorPolicy = { excluded_authors: [], non_actionable_authors: [] };
+  const path = configFile(cwd);
   if (!existsSync(path)) {
-    return fallback
+    return fallback;
   }
   try {
-    const parsed = JSON.parse(readFileSync(path, 'utf8')) as Partial<AuthorPolicy>
+    const parsed = JSON.parse(readFileSync(path, 'utf8')) as Partial<AuthorPolicy>;
     return {
       excluded_authors: parsed.excluded_authors ?? [],
       non_actionable_authors: parsed.non_actionable_authors ?? [],
-    }
+    };
   } catch {
-    return fallback
+    return fallback;
   }
 }
 
 function readJsonlLines<T>(path: string): T[] {
   if (!existsSync(path)) {
-    return []
+    return [];
   }
   return readFileSync(path, 'utf8')
     .split('\n')
-    .map((line) => line.trim())
-    .filter((line) => line.length > 0)
-    .map((line) => JSON.parse(line) as T)
+    .map(line => line.trim())
+    .filter(line => line.length > 0)
+    .map(line => JSON.parse(line) as T);
 }
 
 function listHarvestFiles(cwd?: string): string[] {
-  const dir = harvestDir(cwd)
+  const dir = harvestDir(cwd);
   if (!existsSync(dir)) {
-    return []
+    return [];
   }
   return readdirSync(dir)
-    .filter((name) => name.endsWith('.jsonl'))
+    .filter(name => name.endsWith('.jsonl'))
     .sort()
-    .map((name) => join(dir, name))
+    .map(name => join(dir, name));
 }
 
 /**
@@ -211,44 +205,44 @@ function listHarvestFiles(cwd?: string): string[] {
  * "a/b" and "a-b" can't collapse into the same file within one second.
  */
 function sanitizeRunId(runId: string): string {
-  const clean = runId.replace(/[^a-zA-Z0-9_-]/g, '-')
+  const clean = runId.replace(/[^a-zA-Z0-9_-]/g, '-');
   if (clean === runId && runId !== '') {
-    return runId
+    return runId;
   }
-  const hash = createHash('sha256').update(runId).digest('hex').slice(0, 8)
-  return `${clean || 'run'}-${hash}`
+  const hash = createHash('sha256').update(runId).digest('hex').slice(0, 8);
+  return `${clean || 'run'}-${hash}`;
 }
 
 export function harvestFilename(opts: {
-  harvestedAt: string
-  pr: number
-  runId: string
-  source?: string
+  harvestedAt: string;
+  pr: number;
+  runId: string;
+  source?: string;
 }): string {
-  const d = new Date(opts.harvestedAt)
-  const pad = (n: number): string => String(n).padStart(2, '0')
+  const d = new Date(opts.harvestedAt);
+  const pad = (n: number): string => String(n).padStart(2, '0');
   const ts =
     `${d.getUTCFullYear()}-${pad(d.getUTCMonth() + 1)}-${pad(d.getUTCDate())}` +
-    `T${pad(d.getUTCHours())}${pad(d.getUTCMinutes())}${pad(d.getUTCSeconds())}Z`
+    `T${pad(d.getUTCHours())}${pad(d.getUTCMinutes())}${pad(d.getUTCSeconds())}Z`;
   // Non-PR collector feeds key off the source name — several sources can
   // land within the same second, so pr-0 alone would collide.
-  const key = opts.source ? `src-${sanitizeRunId(opts.source)}` : `pr-${opts.pr}`
-  return `${ts}-${key}-run-${sanitizeRunId(opts.runId)}.jsonl`
+  const key = opts.source ? `src-${sanitizeRunId(opts.source)}` : `pr-${opts.pr}`;
+  return `${ts}-${key}-run-${sanitizeRunId(opts.runId)}.jsonl`;
 }
 
 /** Append-only harvest snapshot (one new file per PR per run — no merge conflicts). */
 export function writeHarvestFile(opts: {
-  pr: number
-  runId: string
-  harvestedAt: string
-  records: DebtRecord[]
-  source?: string
-  cwd?: string
+  pr: number;
+  runId: string;
+  harvestedAt: string;
+  records: DebtRecord[];
+  source?: string;
+  cwd?: string;
 }): string {
   if (opts.records.length === 0) {
-    throw new Error('writeHarvestFile: no records to write')
+    throw new Error('writeHarvestFile: no records to write');
   }
-  const dir = harvestDir(opts.cwd)
+  const dir = harvestDir(opts.cwd);
   const path = join(
     dir,
     harvestFilename({
@@ -257,83 +251,83 @@ export function writeHarvestFile(opts: {
       runId: opts.runId,
       source: opts.source,
     })
-  )
-  mkdirSync(dir, { recursive: true })
-  ensureDebtDirExcluded(debtDir(opts.cwd))
-  const lines = opts.records.map((r) => JSON.stringify(r)).join('\n')
+  );
+  mkdirSync(dir, { recursive: true });
+  ensureDebtDirExcluded(debtDir(opts.cwd));
+  const lines = opts.records.map(r => JSON.stringify(r)).join('\n');
   // Atomic like every other ledger write — a concurrent trend/list read
   // must never see a half-written snapshot.
-  atomicWrite(path, `${lines}\n`)
-  return path
+  atomicWrite(path, `${lines}\n`);
+  return path;
 }
 
 /** tmp+rename so a crashed/concurrent writer can't leave a torn ledger. */
 function atomicWrite(path: string, content: string): void {
-  mkdirSync(dirname(path), { recursive: true })
-  const tmp = `${path}.${process.pid}.tmp`
+  mkdirSync(dirname(path), { recursive: true });
+  const tmp = `${path}.${process.pid}.tmp`;
   // Read the destination mode first and create the temp file with it —
   // chmod-after-write leaves a window where the temp file holds content
   // under default (broader) permissions. (CWE-377)
-  let mode: number | undefined
+  let mode: number | undefined;
   try {
-    mode = statSync(path).mode
+    mode = statSync(path).mode;
   } catch {
     /* first write — default mode */
   }
   // A temp file left by a crash may carry permissive mode — drop it before
   // recreating. Creation honors `mode & ~umask` (never broader), then chmod
   // restores the exact mode. Single open: reopening a 0o444 temp would EACCES.
-  rmSync(tmp, { force: true })
-  writeFileSync(tmp, content, mode === undefined ? 'utf8' : { encoding: 'utf8', mode })
+  rmSync(tmp, { force: true });
+  writeFileSync(tmp, content, mode === undefined ? 'utf8' : { encoding: 'utf8', mode });
   if (mode !== undefined) {
-    chmodSync(tmp, mode)
+    chmodSync(tmp, mode);
   }
-  renameSync(tmp, path)
+  renameSync(tmp, path);
 }
 
 export function readLedgerOverlays(cwd?: string): Map<string, LedgerOverlay> {
-  const map = new Map<string, LedgerOverlay>()
+  const map = new Map<string, LedgerOverlay>();
   for (const row of readJsonlLines<LedgerOverlay>(ledgerFile(cwd))) {
-    map.set(row.thread_id, row)
+    map.set(row.thread_id, row);
   }
-  return map
+  return map;
 }
 
 function upsertLedgerOverlaysUnlocked(
   updates: LedgerOverlay[],
   cwd?: string
 ): Map<string, LedgerOverlay> {
-  const map = readLedgerOverlays(cwd)
+  const map = readLedgerOverlays(cwd);
   for (const row of updates) {
-    map.set(row.thread_id, row)
+    map.set(row.thread_id, row);
   }
-  const path = ledgerFile(cwd)
-  mkdirSync(dirname(path), { recursive: true })
-  ensureDebtDirExcluded(debtDir(cwd))
+  const path = ledgerFile(cwd);
+  mkdirSync(dirname(path), { recursive: true });
+  ensureDebtDirExcluded(debtDir(cwd));
   const lines = [...map.values()]
     .sort((a, b) => a.thread_id.localeCompare(b.thread_id))
-    .map((r) => JSON.stringify(r))
-    .join('\n')
-  atomicWrite(path, lines.length > 0 ? `${lines}\n` : '')
-  return map
+    .map(r => JSON.stringify(r))
+    .join('\n');
+  atomicWrite(path, lines.length > 0 ? `${lines}\n` : '');
+  return map;
 }
 
 export function upsertLedgerOverlays(
   updates: LedgerOverlay[],
   cwd?: string
 ): Map<string, LedgerOverlay> {
-  return withFileLock(ledgerFile(cwd), () => upsertLedgerOverlaysUnlocked(updates, cwd))
+  return withFileLock(ledgerFile(cwd), () => upsertLedgerOverlaysUnlocked(updates, cwd));
 }
 
 function applyLedgerOverlays(records: DebtRecord[], cwd?: string): DebtRecord[] {
-  const overlays = readLedgerOverlays(cwd)
+  const overlays = readLedgerOverlays(cwd);
   if (overlays.size === 0) {
-    return records
+    return records;
   }
-  return records.map((row) => {
-    const overlay = overlays.get(row.thread_id)
+  return records.map(row => {
+    const overlay = overlays.get(row.thread_id);
     if (!overlay) {
-      return row
+      return row;
     }
     return {
       ...row,
@@ -341,8 +335,8 @@ function applyLedgerOverlays(records: DebtRecord[], cwd?: string): DebtRecord[] 
       fix_pr: overlay.fix_pr,
       fixed_at: overlay.fixed_at,
       notes: overlay.notes,
-    }
-  })
+    };
+  });
 }
 
 /** Fold one raw row into first/last sighting bounds — a row missing a
@@ -351,22 +345,18 @@ function observeSighting(
   bounds: Map<string, { first: string; last: string }>,
   row: Partial<DebtRecord>
 ): void {
-  const at = row.harvested_at
-  if (
-    typeof row.thread_id !== 'string' ||
-    typeof at !== 'string' ||
-    Number.isNaN(Date.parse(at))
-  ) {
-    return
+  const at = row.harvested_at;
+  if (typeof row.thread_id !== 'string' || typeof at !== 'string' || Number.isNaN(Date.parse(at))) {
+    return;
   }
-  const b = bounds.get(row.thread_id) ?? { first: at, last: at }
+  const b = bounds.get(row.thread_id) ?? { first: at, last: at };
   if (at < b.first) {
-    b.first = at
+    b.first = at;
   }
   if (at > b.last) {
-    b.last = at
+    b.last = at;
   }
-  bounds.set(row.thread_id, b)
+  bounds.set(row.thread_id, b);
 }
 
 /**
@@ -374,44 +364,42 @@ function observeSighting(
  * snapshots (+ the legacy flat file). The merged record's `harvested_at`
  * is the *latest* sighting — trend reconstruction needs the earliest.
  */
-export function readThreadBounds(
-  cwd?: string
-): Map<string, { first: string; last: string }> {
-  const bounds = new Map<string, { first: string; last: string }>()
-  const sources = [...listHarvestFiles(cwd)]
-  const legacy = debtFile(cwd)
+export function readThreadBounds(cwd?: string): Map<string, { first: string; last: string }> {
+  const bounds = new Map<string, { first: string; last: string }>();
+  const sources = [...listHarvestFiles(cwd)];
+  const legacy = debtFile(cwd);
   if (existsSync(legacy)) {
-    sources.push(legacy)
+    sources.push(legacy);
   }
   for (const file of sources) {
     for (const row of readJsonlLines<Partial<DebtRecord>>(file)) {
-      observeSighting(bounds, row)
+      observeSighting(bounds, row);
     }
   }
-  return bounds
+  return bounds;
 }
 
 export function readDebtRecords(cwd?: string): DebtRecord[] {
-  const sources = [...listHarvestFiles(cwd)]
-  const legacy = debtFile(cwd)
+  const sources = [...listHarvestFiles(cwd)];
+  const legacy = debtFile(cwd);
   if (existsSync(legacy)) {
-    sources.push(legacy)
+    sources.push(legacy);
   }
 
-  let merged: DebtRecord[] = []
+  let merged: DebtRecord[] = [];
   for (const file of sources) {
-    merged = upsertRecords(merged, readJsonlLines<DebtRecord>(file))
+    merged = upsertRecords(merged, readJsonlLines<DebtRecord>(file));
   }
-  return applyLedgerOverlays(merged, cwd)
+  return applyLedgerOverlays(merged, cwd);
 }
 
 export function upsertRecords(existing: DebtRecord[], incoming: DebtRecord[]): DebtRecord[] {
-  const byId = new Map(existing.map((r) => [r.thread_id, r]))
+  const byId = new Map(existing.map(r => [r.thread_id, r]));
   for (const row of incoming) {
-    const prev = byId.get(row.thread_id)
+    const prev = byId.get(row.thread_id);
     if (!prev) {
-      byId.set(row.thread_id, row)
-      continue
+      byId.set(row.thread_id, row);
+      continue;
     }
     if (prev.status === 'done' || prev.status === 'wontfix') {
       // Re-harvest means the thread is still unresolved on GitHub — reopen.
@@ -422,11 +410,11 @@ export function upsertRecords(existing: DebtRecord[], incoming: DebtRecord[]): D
         fix_pr: null,
         fixed_at: null,
         notes: null,
-      })
-      continue
+      });
+      continue;
     }
-    const status = prev.status === 'claimed' ? 'claimed' : row.status
-    const closed = status === 'done' || status === 'wontfix' || status === 'duplicate'
+    const status = prev.status === 'claimed' ? 'claimed' : row.status;
+    const closed = status === 'done' || status === 'wontfix' || status === 'duplicate';
     byId.set(row.thread_id, {
       ...row,
       times_seen: prev.times_seen + 1,
@@ -436,26 +424,26 @@ export function upsertRecords(existing: DebtRecord[], incoming: DebtRecord[]): D
       fix_pr: closed ? (row.fix_pr ?? prev.fix_pr) : null,
       fixed_at: closed ? (row.fixed_at ?? prev.fixed_at) : null,
       notes: prev.notes,
-    })
+    });
   }
-  return [...byId.values()].sort((a, b) => a.harvested_at.localeCompare(b.harvested_at))
+  return [...byId.values()].sort((a, b) => a.harvested_at.localeCompare(b.harvested_at));
 }
 
 export function buildSummary(records: DebtRecord[]): DebtSummary {
-  const open = records.filter((r) => r.status === 'open')
-  const byArea: Record<string, number> = {}
-  const byAuthor: Record<string, number> = {}
+  const open = records.filter(r => r.status === 'open');
+  const byArea: Record<string, number> = {};
+  const byAuthor: Record<string, number> = {};
   for (const row of open) {
-    byArea[row.area] = (byArea[row.area] ?? 0) + 1
-    byAuthor[row.author] = (byAuthor[row.author] ?? 0) + 1
+    byArea[row.area] = (byArea[row.area] ?? 0) + 1;
+    byAuthor[row.author] = (byAuthor[row.author] ?? 0) + 1;
   }
 
-  const fpMap = new Map<string, { count: number; prs: Set<number> }>()
+  const fpMap = new Map<string, { count: number; prs: Set<number> }>();
   for (const row of open) {
-    const entry = fpMap.get(row.fingerprint) ?? { count: 0, prs: new Set<number>() }
-    entry.count += 1
-    entry.prs.add(row.source_pr)
-    fpMap.set(row.fingerprint, entry)
+    const entry = fpMap.get(row.fingerprint) ?? { count: 0, prs: new Set<number>() };
+    entry.count += 1;
+    entry.prs.add(row.source_pr);
+    fpMap.set(row.fingerprint, entry);
   }
 
   const duplicate_fingerprints = [...fpMap.entries()]
@@ -465,7 +453,7 @@ export function buildSummary(records: DebtRecord[]): DebtSummary {
       count: v.count,
       prs: [...v.prs].sort((a, b) => a - b),
     }))
-    .sort((a, b) => b.count - a.count)
+    .sort((a, b) => b.count - a.count);
 
   return {
     generated_at: new Date().toISOString(),
@@ -480,14 +468,14 @@ export function buildSummary(records: DebtRecord[]): DebtSummary {
             (min, row) => (row.harvested_at < min ? row.harvested_at : min),
             open[0]!.harvested_at
           ),
-  }
+  };
 }
 
 export function writeSummary(summary: DebtSummary, cwd?: string): void {
-  const path = summaryFile(cwd)
-  mkdirSync(dirname(path), { recursive: true })
-  ensureDebtDirExcluded(debtDir(cwd))
-  atomicWrite(path, `${JSON.stringify(summary, null, 2)}\n`)
+  const path = summaryFile(cwd);
+  mkdirSync(dirname(path), { recursive: true });
+  ensureDebtDirExcluded(debtDir(cwd));
+  atomicWrite(path, `${JSON.stringify(summary, null, 2)}\n`);
 }
 
 /**
@@ -496,24 +484,22 @@ export function writeSummary(summary: DebtSummary, cwd?: string): void {
  * PR `updatedAt` against this map to rescan stale labels.
  */
 export function readProcessedAt(cwd?: string): Map<number, string> {
-  const path = processedFile(cwd)
+  const path = processedFile(cwd);
   if (!existsSync(path)) {
-    return new Map()
+    return new Map();
   }
   try {
-    const raw = JSON.parse(readFileSync(path, 'utf8')) as Record<string, string>
+    const raw = JSON.parse(readFileSync(path, 'utf8')) as Record<string, string>;
     return new Map(
       Object.entries(raw)
         .filter(
           ([k, v]) =>
-            Number.isInteger(Number(k)) &&
-            typeof v === 'string' &&
-            !Number.isNaN(Date.parse(v))
+            Number.isInteger(Number(k)) && typeof v === 'string' && !Number.isNaN(Date.parse(v))
         )
         .map(([k, v]) => [Number(k), v])
-    )
+    );
   } catch {
-    return new Map()
+    return new Map();
   }
 }
 
@@ -525,22 +511,22 @@ export function readProcessedAt(cwd?: string): Map<number, string> {
 // (bro-l8c4f.2); `X.lock.<name>.stale-*`/`.release-*` debris it left
 // behind is still swept by the filelock's staged-sibling sweep.
 export function withFileLock<T>(path: string, fn: () => T): T {
-  return withCoreFileLock(`${path}.lock`, fn, { label: 'debt ledger lock' })
+  return withCoreFileLock(`${path}.lock`, fn, { label: 'debt ledger lock' });
 }
 
 export function markProcessedAt(prs: number[], at: string, cwd?: string): void {
-  const path = processedFile(cwd)
-  ensureDebtDirExcluded(debtDir(cwd))
+  const path = processedFile(cwd);
+  ensureDebtDirExcluded(debtDir(cwd));
   withFileLock(path, () => {
-    const map = readProcessedAt(cwd)
+    const map = readProcessedAt(cwd);
     for (const pr of prs) {
-      map.set(pr, at)
+      map.set(pr, at);
     }
     const obj = Object.fromEntries(
       [...map.entries()].sort((a, b) => a[0] - b[0]).map(([k, v]) => [String(k), v])
-    )
-    atomicWrite(path, `${JSON.stringify(obj, null, 2)}\n`)
-  })
+    );
+    atomicWrite(path, `${JSON.stringify(obj, null, 2)}\n`);
+  });
 }
 
 export function claimDebtRecord(threadId: string, cwd?: string): DebtRecord | null {
@@ -548,9 +534,9 @@ export function claimDebtRecord(threadId: string, cwd?: string): DebtRecord | nu
   // --claim` callers can't both win — the second sees the claimed status
   // and gets null.
   return withFileLock(ledgerFile(cwd), () => {
-    const row = readDebtRecords(cwd).find((r) => r.thread_id === threadId)
+    const row = readDebtRecords(cwd).find(r => r.thread_id === threadId);
     if (!row || row.status !== 'open') {
-      return null
+      return null;
     }
     upsertLedgerOverlaysUnlocked(
       [
@@ -563,16 +549,16 @@ export function claimDebtRecord(threadId: string, cwd?: string): DebtRecord | nu
         },
       ],
       cwd
-    )
-    return { ...row, status: 'claimed' }
-  })
+    );
+    return { ...row, status: 'claimed' };
+  });
 }
 
 export interface DebtVerdictInput {
-  thread_id: string
-  status: DebtStatus
-  notes?: string
-  fix_pr?: number
+  thread_id: string;
+  status: DebtStatus;
+  notes?: string;
+  fix_pr?: number;
 }
 
 /** Apply verdict rows to the ledger under one lock — defaults (notes,
@@ -583,29 +569,29 @@ export function applyDebtVerdicts(
   cwd?: string
 ): { applied: number; missing: string[] } {
   return withFileLock(ledgerFile(cwd), () => {
-    const byId = new Map(readDebtRecords(cwd).map((r) => [r.thread_id, r]))
-    const ids = [...new Set(verdicts.map((v) => v.thread_id))]
-    const missing = ids.filter((id) => !byId.has(id))
-    const now = new Date().toISOString()
+    const byId = new Map(readDebtRecords(cwd).map(r => [r.thread_id, r]));
+    const ids = [...new Set(verdicts.map(v => v.thread_id))];
+    const missing = ids.filter(id => !byId.has(id));
+    const now = new Date().toISOString();
     upsertLedgerOverlaysUnlocked(
       verdicts
-        .filter((v) => byId.has(v.thread_id))
-        .map((v) => {
+        .filter(v => byId.has(v.thread_id))
+        .map(v => {
           // duplicate is terminal for the open pool too — unstamped it
           // would ride the trend's open line forever.
           const terminal =
-            v.status === 'done' || v.status === 'wontfix' || v.status === 'duplicate'
-          const row = byId.get(v.thread_id)!
+            v.status === 'done' || v.status === 'wontfix' || v.status === 'duplicate';
+          const row = byId.get(v.thread_id)!;
           return {
             thread_id: v.thread_id,
             status: v.status,
             fix_pr: terminal ? (v.fix_pr ?? row.fix_pr) : null,
             fixed_at: terminal ? now : null,
             notes: v.notes ?? row.notes,
-          }
+          };
         }),
       cwd
-    )
-    return { applied: ids.length - missing.length, missing }
-  })
+    );
+    return { applied: ids.length - missing.length, missing };
+  });
 }

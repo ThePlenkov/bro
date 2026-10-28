@@ -1,34 +1,35 @@
 ---
+
 title: bro review act
 description: The open-PR review loop — exit gate as code, merge only when green.
 ---
 
-*Command examples track the upcoming **0.3.0** — grouped
+_Command examples track the upcoming **0.3.0** — grouped
 `bro <group> <member>` spellings and `0.3.0` marks are not yet on npm
 `latest` (**0.2.5**); use the flat names (`bro convoy run`,
-`bro debt status`).*
+`bro debt status`)._
 
-`bro review act` answers the question an agent can't: *"can I stop now?"* The
+`bro review act` answers the question an agent can't: _"can I stop now?"_ The
 gate is code, not a prompt instruction — it counts open threads, pending
 checks, SAST annotations, mergeability, and fix rounds.
 
 ## Commands
 
-| Command | What it does |
-| ------- | ------------ |
-| `bro review act status [PR] [--json]` | PR state + exit gate. Non-zero while blocked |
-| `bro review act threads [PR]` | Unresolved review threads, TSV |
+| Command                                                                                              | What it does                                                                                                                                                                                                                                                                                                                                                  |
+| ---------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `bro review act status [PR] [--json]`                                                                | PR state + exit gate. Non-zero while blocked                                                                                                                                                                                                                                                                                                                  |
+| `bro review act threads [PR]`                                                                        | Unresolved review threads, TSV                                                                                                                                                                                                                                                                                                                                |
 | `bro review act wait [PR] [--interval S] [--timeout M] [--merge] [--cleanup] [--bead ID] [--detach]` | Poll the gate until it settles — green, blockers, or timeout. `--merge` lands the PR on green; `--cleanup` requires `--merge` and retires the merged worktree and local branch; `--bead` closes the loop-claimed bead once the merge lands; `--detach` re-spawns the wait detached so it outlives the session, output on `<git-common>/bro/act-wait-<pr>.log` |
-| `bro review act merge [PR] [--squash\|--merge\|--rebase] [--admin] [--cleanup] [--bead ID]` | Merge **only if the gate is green** — refuses and names blockers; `--cleanup` retires the checkout the command runs in when safe, and keeps the local branch if another worktree still checks it out; `--bead` closes the loop-claimed bead on land |
-| `bro review act resolve --thread ID [--comment T]` | Resolve (reply first if comment given); `--unresolve` reopens |
-| `bro review act reply --thread ID --comment T` | Reply without resolving; `--file TSV` for batch |
-| `bro review act rearm [--dry-run] [--json]` | Resurrect dead PR watchers — respawn `act wait` for open PRs whose watch marker outlived its process (bead identity included); settled markers are swept — a merged one closes the bead it carried — live ones kept |
+| `bro review act merge [PR] [--squash\|--merge\|--rebase] [--admin] [--cleanup] [--bead ID]`          | Merge **only if the gate is green** — refuses and names blockers; `--cleanup` retires the checkout the command runs in when safe, and keeps the local branch if another worktree still checks it out; `--bead` closes the loop-claimed bead on land                                                                                                           |
+| `bro review act resolve --thread ID [--comment T]`                                                   | Resolve (reply first if comment given); `--unresolve` reopens                                                                                                                                                                                                                                                                                                 |
+| `bro review act reply --thread ID --comment T`                                                       | Reply without resolving; `--file TSV` for batch                                                                                                                                                                                                                                                                                                               |
+| `bro review act rearm [--dry-run] [--json]`                                                          | Resurrect dead PR watchers — respawn `act wait` for open PRs whose watch marker outlived its process (bead identity included); settled markers are swept — a merged one closes the bead it carried — live ones kept                                                                                                                                           |
 ## The gate
 
 `bro review act status` exits non-zero with named blockers:
 
 - `open_threads` — unresolved review threads
-- `ci_pending` — every non-AI check must be green; a failing *optional*
+- `ci_pending` — every non-AI check must be green; a failing _optional_
   job is still red
 - `reviewers_pending` — a running AI reviewer may still post findings
 - `sast_pending` / `sast_unknown` — failure-level SAST annotations
@@ -39,12 +40,12 @@ checks, SAST annotations, mergeability, and fix rounds.
   hide exactly what the reopen says. Report it; the user decides.
 
 **The general rule: project-caused failures block; infrastructure
-failures don't.** A failed AI-reviewer *check* (`reviewers_failing`) is
+failures don't.** A failed AI-reviewer _check_ (`reviewers_failing`) is
 infra noise — crash, quota, outage — reported but never blocking. Its
 real findings arrive as threads, which do block. Chronically flaky checks
 go on [`act.ignoreChecks`](/docs/configuration#act) — a conditional
 ignore: a failing advisory check stays quiet only while it keeps failing
-*and* producing thread output, otherwise `alerts` carries a
+_and_ producing thread output, otherwise `alerts` carries a
 silent-reviewer line (still non-blocking).
 
 ## Requiring human sign-off
@@ -72,7 +73,7 @@ the PR's current head** — available since bro 0.3.0. Semantics:
   human account) narrows "trusted" so a machine `User` account can't
   sign off on the agent's own output.
 - **Fail-closed.** A probe that can't answer — host unreachable, API
-  error, connector without the capability — blocks as *unanswerable*,
+  error, connector without the capability — blocks as _unanswerable_,
   never a pass. The blocker names the probe's reason (`changes
   requested by …`, `approval predates the current head`, `bot-only`,
   `outside act.approvers`).
@@ -99,8 +100,8 @@ So the loop is bounded and severity-aware:
 - **Wrong findings** → reply with the reason, resolve
 
 `act.maxRounds` (default **3**, `0` disables) caps inline fix rounds.
-Past it, the gate's blocker changes its verdict: *defer remaining threads
-to debt beads, do not fix inline.* Docs-only PRs — every changed file
+Past it, the gate's blocker changes its verdict: _defer remaining threads
+to debt beads, do not fix inline._ Docs-only PRs — every changed file
 matching `act.docsPaths` — cap tighter at `act.docsMaxRounds` (default
 **2**): doc threads churn per push, so the tail belongs in debt sooner.
 `docs_only=true` in `act status` marks a docs-only PR.
@@ -139,8 +140,8 @@ supervisor-wide forms.
 ## Stacked PRs and merge queues
 
 GitHub refuses to merge a PR that belongs to a **stack** through either
-`gh pr merge` (GraphQL) or the synchronous merge endpoint — *"must be
-merged using the asynchronous merge REST API"*. `bro review act merge` detects
+`gh pr merge` (GraphQL) or the synchronous merge endpoint — _"must be
+merged using the asynchronous merge REST API"_. `bro review act merge` detects
 the stack (the `.stack` field on the PR, or the refusal itself) and merges
 through the async endpoint instead, polling the request's uuid until it
 settles. `bro review act wait --merge` is the same merge step, so a watcher on a
@@ -197,9 +198,9 @@ stop gate enforces it — an armed session ending with an open, unwatched
 current-branch PR is blocked once and pointed at the detached `act wait`
 form (a running `bro review drive --every` counts as coverage via its per-PR
 heartbeat markers). A `timed_out` watcher retires its marker on the way
-out — start a fresh `act wait`; a watcher that *died* leaves a dead
+out — start a fresh `act wait`; a watcher that _died_ leaves a dead
 marker, the session-start nudge names it, and `bro review act rearm` puts the
-watch back up. A watcher that *settled BLOCKED* leaves a verdict marker
+watch back up. A watcher that _settled BLOCKED_ leaves a verdict marker
 too — session-start flags the named blockers — and drops a keyed
 mailbox event, so the finding reaches a session that never saw the
 exit. `bro review act status` prints `watch=` so coverage is visible

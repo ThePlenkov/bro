@@ -1,12 +1,13 @@
 ---
+
 title: Glossary
 description: One line per concept — the vocabulary bro uses everywhere, defined once.
 ---
 
-*Command examples track the upcoming **0.3.0** — grouped
+_Command examples track the upcoming **0.3.0** — grouped
 `bro <group> <member>` spellings and `0.3.0` marks are not yet on npm
 `latest` (**0.2.5**); use the flat names (`bro convoy run`,
-`bro debt status`).*
+`bro debt status`)._
 
 ## Work items
 
@@ -28,7 +29,7 @@ description: One line per concept — the vocabulary bro uses everywhere, define
 - **drive** — post-PR supervision: orphaned threads get a fixer agent, orphaned green PRs merge (see [act](/docs/commands/act)).
 - **watch** — the monitor loop over molecules and PRs; point checks, never blocking waits (see [act](/docs/commands/act)).
 - **pulse** — a session-owned beat that ticks on a cadence so long-running work stays observable (see [fleet](/docs/commands/fleet)).
-- **daemon** — the project-scoped supervisor: `bro daemon run` *(0.3.0)* *is* the drive loop — post-PR supervision that outlives your session; watch rearm rides the session-start nudge, not the daemon.
+- **daemon** — the project-scoped supervisor: `bro daemon run` _(0.3.0)_ _is_ the drive loop — post-PR supervision that outlives your session; watch rearm rides the session-start nudge, not the daemon.
 - **[stack](/docs/commands/stack)** — a bead→worktree→PR chain where each PR builds on the previous one.
 - **mesh** — federation between rigs: `mesh://` identities, peer bindings, cross-repo work requests.
 - **mailbox** — the per-session notification spool; `bro notify` drops land there and drain at turn boundaries (see [events](/docs/commands/events)).

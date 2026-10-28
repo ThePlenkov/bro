@@ -1,12 +1,13 @@
 ---
+
 title: bro wtf + retrospect
 description: Capture frustration verbatim; turn it into retros and prevention beads.
 ---
 
-*Command examples track the upcoming **0.3.0** — grouped
+_Command examples track the upcoming **0.3.0** — grouped
 `bro <group> <member>` spellings and `0.3.0` marks are not yet on npm
 `latest` (**0.2.5**); use the flat names (`bro convoy run`,
-`bro debt status`).*
+`bro debt status`)._
 
 ## `bro wtf <complaint>`
 
@@ -19,12 +20,12 @@ Turns wtf beads into structured outcomes — a retro record plus one
 prevention bead per action, linked `discovered-from`, with the wtf
 answered.
 
-| Command | What it does |
-| ------- | ------------ |
+| Command                                  | What it does                                                                                    |
+| ---------------------------------------- | ----------------------------------------------------------------------------------------------- |
 | `bro self retrospect record <plan.toml>` | Validate a TOML [plan](/docs/plans) and fan it out: retro bead + prevention beads, wtf answered |
-| `bro self retrospect status` | Exit gate — non-zero while a `wtf` is unanswered |
-| `bro self retrospect schema` | Print the commented TOML template |
-| `bro self retrospect list` | Retros and open wtfs |
+| `bro self retrospect status`             | Exit gate — non-zero while a `wtf` is unanswered                                                |
+| `bro self retrospect schema`             | Print the commented TOML template                                                               |
+| `bro self retrospect list`               | Retros and open wtfs                                                                            |
 
 The agent can't self-declare "sorry, fixed" — `retrospect status` holds
 the gate until every wtf has a recorded answer.
@@ -40,11 +41,13 @@ self learn capture`, `bro review debt collect`, state assertions — and a
 ```jsonc
 {
   "guard": {
-    "defs": [{
-      "name": "retro-on-stop",
-      "when": { "on": ["stop"] },
-      "say": "session ending — run the retro checklist"
-    }]
+    "defs": [
+      {
+        "name": "retro-on-stop",
+        "when": { "on": ["stop"] },
+        "say": "session ending — run the retro checklist"
+      }
+    ]
   }
 }
 ```

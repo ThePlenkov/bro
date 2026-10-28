@@ -1,12 +1,13 @@
 ---
+
 title: Integrations
 description: facades, connectors, agent clients, and hooks — what bro plugs into.
 ---
 
-*Command examples track the upcoming **0.3.0** — grouped
+_Command examples track the upcoming **0.3.0** — grouped
 `bro <group> <member>` spellings and `0.3.0` marks are not yet on npm
 `latest` (**0.2.5**); use the flat names (`bro convoy run`,
-`bro debt status`).*
+`bro debt status`)._
 
 bro keeps vendor details behind facades. Commands ask for tasks, reviews,
 agents, or specs; the configured connector supplies the backend.
@@ -34,18 +35,18 @@ evidence record even when the beads projection is disabled.
 
 ## Agent clients
 
-| Client | Adapter |
-| ------ | ------- |
-| Devin | `plugins/devin/bro` |
+| Client      | Adapter                                                                                    |
+| ----------- | ------------------------------------------------------------------------------------------ |
+| Devin       | `plugins/devin/bro`                                                                        |
 | Claude Code | repo root (`.claude-plugin/plugin.json` + `skills/`); hooks in `plugins/claude/bro/hooks/` |
-| Codex | repo root (`plugin.json` + `skills/`); hooks in `plugins/codex/bro/hooks/` |
-| Cursor | `plugins/cursor/bro` |
-| OpenCode | `bro plugins install opencode` — native plugin + TUI module |
-| Kilo | `bro plugins install kilo` — module + `kilo.json` registration |
-| pi | `bro plugins install pi` — extension module |
+| Codex       | repo root (`plugin.json` + `skills/`); hooks in `plugins/codex/bro/hooks/`                 |
+| Cursor      | `plugins/cursor/bro`                                                                       |
+| OpenCode    | `bro plugins install opencode` — native plugin + TUI module                                |
+| Kilo        | `bro plugins install kilo` — module + `kilo.json` registration                             |
+| pi          | `bro plugins install pi` — extension module                                                |
 
 Cursor installs from `.cursor-plugin/marketplace.json`. The adapter's
-`hooks/hooks.json` uses Cursor event names; `bro hooks` *(0.3.0)* translates that
+`hooks/hooks.json` uses Cursor event names; `bro hooks` _(0.3.0)_ translates that
 stdin (`conversation_id`, `loop_count`, shell `command`) into the shared
 contract and writes Cursor output (`additional_context`,
 `followup_message`, `permission`). Cloud agents do not run `sessionStart`,
@@ -104,16 +105,16 @@ adapters by `host-matrix.test.ts`. Bump `HOOK_MATRIX_VERSION` in
 `packages/cli/src/host-matrix.ts` when any cell changes; the table here
 is its rendering.
 
-| bro event | Claude | Codex | Devin | Cursor | OpenCode | Kilo | pi | OMP |
-| --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| session-start | `SessionStart` | `SessionStart` | `SessionStart` | `sessionStart` | `chat.system.transform` | `chat.system.transform` | `session_start` | `session_start` |
-| post-compaction | — | `PostCompact` | `PostCompaction` | — | — | — | `session_compact` | `session_compact` |
-| pre-compact | `PreCompact` | `PreCompact` | — | `preCompact` | `session.compacting` | — | `session_before_compact` | `session_before_compact` |
-| prompt-submit | `UserPromptSubmit` | `UserPromptSubmit` | `UserPromptSubmit` | `beforeSubmitPrompt` | `chat.message` | `chat.system.transform` | `before_agent_start` | `before_agent_start` |
-| post-tool | `PostToolUse` + `PostToolUseFailure` (`Bash`) | `PostToolUse` (`Bash`) | `PostToolUse` (`exec`) | `postToolUse` + `postToolUseFailure` (`Shell`) | `tool.execute.after` | — | `tool_result` | `tool_result` |
-| pre-tool | `PreToolUse` (`Bash`) | `PreToolUse` (`Bash`) | — | — | `tool.execute.before` (V2) | — | — | `tool_call` |
-| permission | — | `PermissionRequest` | `PermissionRequest` | `beforeShellExecution` | `permission.ask` | `permission.ask` | — | — |
-| stop | `Stop` → **block** | `Stop` → **block** | `Stop` → **block** | `stop` → one follow-up | `session.idle` → re-prompt | `session.idle` → warn log | `agent_before_settle` → re-prompt | `session_stop` → **block** |
+| bro event       | Claude                                        | Codex                  | Devin                  | Cursor                                         | OpenCode                   | Kilo                      | pi                                | OMP                        |
+| --------------- | --------------------------------------------- | ---------------------- | ---------------------- | ---------------------------------------------- | -------------------------- | ------------------------- | --------------------------------- | -------------------------- |
+| session-start   | `SessionStart`                                | `SessionStart`         | `SessionStart`         | `sessionStart`                                 | `chat.system.transform`    | `chat.system.transform`   | `session_start`                   | `session_start`            |
+| post-compaction | —                                             | `PostCompact`          | `PostCompaction`       | —                                              | —                          | —                         | `session_compact`                 | `session_compact`          |
+| pre-compact     | `PreCompact`                                  | `PreCompact`           | —                      | `preCompact`                                   | `session.compacting`       | —                         | `session_before_compact`          | `session_before_compact`   |
+| prompt-submit   | `UserPromptSubmit`                            | `UserPromptSubmit`     | `UserPromptSubmit`     | `beforeSubmitPrompt`                           | `chat.message`             | `chat.system.transform`   | `before_agent_start`              | `before_agent_start`       |
+| post-tool       | `PostToolUse` + `PostToolUseFailure` (`Bash`) | `PostToolUse` (`Bash`) | `PostToolUse` (`exec`) | `postToolUse` + `postToolUseFailure` (`Shell`) | `tool.execute.after`       | —                         | `tool_result`                     | `tool_result`              |
+| pre-tool        | `PreToolUse` (`Bash`)                         | `PreToolUse` (`Bash`)  | —                      | —                                              | `tool.execute.before` (V2) | —                         | —                                 | `tool_call`                |
+| permission      | —                                             | `PermissionRequest`    | `PermissionRequest`    | `beforeShellExecution`                         | `permission.ask`           | `permission.ask`          | —                                 | —                          |
+| stop            | `Stop` → **block**                            | `Stop` → **block**     | `Stop` → **block**     | `stop` → one follow-up                         | `session.idle` → re-prompt | `session.idle` → warn log | `agent_before_settle` → re-prompt | `session_stop` → **block** |
 
 `—` is a declared gap: the host lacks the surface or bro deliberately
 does not wire it (Claude's `PostCompact`/`PermissionRequest`, OMP's
@@ -140,7 +141,7 @@ Three boundaries, stated once:
   enforced decisions are the ones a host's own `block`/`rewrite`/
   `approve` slots apply.
 - **bro policy ≠ host permissions.** The stop gate and merge policy own
-  *repo state* (markers, beads, PR gates). The host's permission plane
+  _repo state_ (markers, beads, PR gates). The host's permission plane
   stays the user's security surface; bro answers permission events, it
   does not widen them.
 - **Opt-in approval is scoped.** The `approve` column approves only

@@ -75,16 +75,16 @@ in `bro.config.local.json`.)
 This repo is a plugin marketplace + registry — one `bro` plugin packaged
 per client:
 
-| Client | Install |
-| ------ | ------- |
-| Devin | `devin plugins install ThePlenkov/bro` (or `ThePlenkov/bro#plugins/devin/bro`) |
-| Claude Code | `/plugin marketplace add ThePlenkov/bro` → `/plugin install bro@bro` |
-| Codex | `codex plugin marketplace add ThePlenkov/bro` → install `bro` |
-| Cursor | `/add-plugin https://github.com/ThePlenkov/bro`, then install `bro` |
-| OpenCode | add `"plugin": ["@broject/bro"]` to `opencode.json`, or `bro plugins install opencode` |
-| Kilo | `bro plugins install kilo` |
-| pi | `bro plugins install pi` |
-| omp | `omp plugin install ./plugins/omp/bro`, or `bro plugins install omp` |
+| Client      | Install                                                                                |
+| ----------- | -------------------------------------------------------------------------------------- |
+| Devin       | `devin plugins install ThePlenkov/bro` (or `ThePlenkov/bro#plugins/devin/bro`)         |
+| Claude Code | `/plugin marketplace add ThePlenkov/bro` → `/plugin install bro@bro`                   |
+| Codex       | `codex plugin marketplace add ThePlenkov/bro` → install `bro`                          |
+| Cursor      | `/add-plugin https://github.com/ThePlenkov/bro`, then install `bro`                    |
+| OpenCode    | add `"plugin": ["@broject/bro"]` to `opencode.json`, or `bro plugins install opencode` |
+| Kilo        | `bro plugins install kilo`                                                             |
+| pi          | `bro plugins install pi`                                                               |
+| omp         | `omp plugin install ./plugins/omp/bro`, or `bro plugins install omp`                   |
 
 Every adapter ships the same skills and lifecycle hooks (session
 rehydration, review-gate stop, self-approve for `bro`/`bd`) wired through
@@ -126,63 +126,63 @@ Full reference: [broject.dev/docs](https://broject.dev/docs).
 
 ### Planning
 
-| Command | What bro does |
-| ------- | ------------- |
-| `bro next [--list] [--json] [--global]` | Claim the top ready bead and print the work order |
-| `bro spec check\|drift\|new\|tree\|init` | Check spec coverage and drift, scaffold specs, and inspect their tree |
-| `bro stack push\|list\|sync` (+ `publish`, `merge` in 0.3.0) | Build, register, retarget, and land stacked bead→worktree→PR chains |
-| `bro query <plan.toml>` | Run a cross-provider GraphQL fan-out plan — one merged JSON answer |
-| `bro work enter\|leave\|list\|prune` | Manage sibling worktrees and their recorded stack membership |
+| Command                                                      | What bro does                                                         |
+| ------------------------------------------------------------ | --------------------------------------------------------------------- |
+| `bro next [--list] [--json] [--global]`                      | Claim the top ready bead and print the work order                     |
+| `bro spec check\|drift\|new\|tree\|init`                     | Check spec coverage and drift, scaffold specs, and inspect their tree |
+| `bro stack push\|list\|sync` (+ `publish`, `merge` in 0.3.0) | Build, register, retarget, and land stacked bead→worktree→PR chains   |
+| `bro query <plan.toml>`                                      | Run a cross-provider GraphQL fan-out plan — one merged JSON answer    |
+| `bro work enter\|leave\|list\|prune`                         | Manage sibling worktrees and their recorded stack membership          |
 
 ### Orchestration
 
-| Command | What bro does |
-| ------- | ------------- |
-| `bro loop [--max N] [--dry-run] [--stack NAME] [--label a,b]` | Claim, work, pass the gate, close, and repeat |
-| `bro convoy pour\|status\|next\|claim\|done\|list\|run` | Run a beads formula as a claimable molecule — `run` is the molecule queue |
-| `bro fleet [--json\|--live]` | View molecules, steps, agents, worktrees, and PRs |
-| `bro agents status\|up\|down\|prune` | Inspect, spawn, respawn, stop, or reap detached agents |
-| `bro watch [--once\|--every N\|--notify]`, `bro watch install\|uninstall` | Read-only heartbeat; `--every` is the session pulse (`bro/pulse.lock`, one per repo); `install` arms the want-marker (`bro/pulse.json`) — OS timers retired |
-| `bro notify <text>` | Drop an event into the session mailbox — addressed, typed, coalesced |
-| `bro bus serve\|publish\|subscribe\|status` | The local event broker behind the events facade |
-| `bro drive [--once\|--every N\|--no-merge]` (+ `install\|uninstall` in 0.3.0) | Apply the act gate to fleet PRs; merge only on green. `install` arms the merge path (`bro/drive.json`) — session checkpoints rearm a dead supervisor |
+| Command                                                                       | What bro does                                                                                                                                               |
+| ----------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `bro loop [--max N] [--dry-run] [--stack NAME] [--label a,b]`                 | Claim, work, pass the gate, close, and repeat                                                                                                               |
+| `bro convoy pour\|status\|next\|claim\|done\|list\|run`                       | Run a beads formula as a claimable molecule — `run` is the molecule queue                                                                                   |
+| `bro fleet [--json\|--live]`                                                  | View molecules, steps, agents, worktrees, and PRs                                                                                                           |
+| `bro agents status\|up\|down\|prune`                                          | Inspect, spawn, respawn, stop, or reap detached agents                                                                                                      |
+| `bro watch [--once\|--every N\|--notify]`, `bro watch install\|uninstall`     | Read-only heartbeat; `--every` is the session pulse (`bro/pulse.lock`, one per repo); `install` arms the want-marker (`bro/pulse.json`) — OS timers retired |
+| `bro notify <text>`                                                           | Drop an event into the session mailbox — addressed, typed, coalesced                                                                                        |
+| `bro bus serve\|publish\|subscribe\|status`                                   | The local event broker behind the events facade                                                                                                             |
+| `bro drive [--once\|--every N\|--no-merge]` (+ `install\|uninstall` in 0.3.0) | Apply the act gate to fleet PRs; merge only on green. `install` arms the merge path (`bro/drive.json`) — session checkpoints rearm a dead supervisor        |
 
 ### Review
 
-| Command | What bro does |
-| ------- | ------------- |
-| `bro act status [PR]` | **Exit gate as code** — open threads, pending CI, SAST findings, mergeability; non-zero while blocked |
-| `bro act threads\|resolve\|reply\|wait\|merge` | Work the threads; merge only when the gate is green |
-| `bro act rearm [--dry-run]` | Resurrect dead PR watchers — a pushed PR is never unwatched |
-| `bro debt collect\|prs\|status\|next\|set\|sync\|stats\|trend` | Harvest unresolved threads on merged PRs into the ledger, then work them off |
-| `bro judge decide\|stats\|replay` | Calibrated decisions for agent loops — typed questions, typed answers with confidence |
-| `bro guard list\|test` | Inspect and dry-run declarative prompt guards — nudges, never gates |
+| Command                                                        | What bro does                                                                                         |
+| -------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------- |
+| `bro act status [PR]`                                          | **Exit gate as code** — open threads, pending CI, SAST findings, mergeability; non-zero while blocked |
+| `bro act threads\|resolve\|reply\|wait\|merge`                 | Work the threads; merge only when the gate is green                                                   |
+| `bro act rearm [--dry-run]`                                    | Resurrect dead PR watchers — a pushed PR is never unwatched                                           |
+| `bro debt collect\|prs\|status\|next\|set\|sync\|stats\|trend` | Harvest unresolved threads on merged PRs into the ledger, then work them off                          |
+| `bro judge decide\|stats\|replay`                              | Calibrated decisions for agent loops — typed questions, typed answers with confidence                 |
+| `bro guard list\|test`                                         | Inspect and dry-run declarative prompt guards — nudges, never gates                                   |
 
 ### Self-reflection
 
-| Command | What bro does |
-| ------- | ------------- |
-| `bro drill down\|up\|current\|tree\|list\|distill` | Scoped descent frames — result and prevention required on the way up |
-| `bro wtf <complaint>` | Capture the complaint verbatim as a bead |
-| `bro retrospect record\|status\|schema\|list` | Turn `wtf`s into retro records and prevention beads |
-| `bro learn add\|list\|show\|forget\|capture\|probe` | Store lessons and surface them when their triggers match |
+| Command                                             | What bro does                                                        |
+| --------------------------------------------------- | -------------------------------------------------------------------- |
+| `bro drill down\|up\|current\|tree\|list\|distill`  | Scoped descent frames — result and prevention required on the way up |
+| `bro wtf <complaint>`                               | Capture the complaint verbatim as a bead                             |
+| `bro retrospect record\|status\|schema\|list`       | Turn `wtf`s into retro records and prevention beads                  |
+| `bro learn add\|list\|show\|forget\|capture\|probe` | Store lessons and surface them when their triggers match             |
 
 ### Plumbing
 
-| Command | What bro does |
-| ------- | ------------- |
-| `providers` config | Named model-plane registry (`api`/`acp`/`cli` kinds) consumed by judge and fleet — `bro doctor` reports it |
-| `bro status [--json\|--deep]` | The compact live board — beads + fleet + drill + git in one read |
-| `bro serve [--port N]` | The fleet facade over loopback HTTP/JSON for thin clients |
-| `bro sweep status\|distill\|run` | Gated disposal for closed beads — gate → archive → prune → flatten |
-| `bro sync [--pull]` | Push or restore bro artifacts on `refs/bro/data` |
-| `bro setup [--beads] [--skills] [--pack [NAME]]` | Configure the repo and optionally install beads, skills, or a capability pack |
-| `bro doctor [--json]` | Diagnose Node, git, auth, beads, hooks, providers, and configuration |
-| `bro check [--evaluate] [--json]` | Run the repo's Sverka workflow; `--evaluate` applies its policy gate |
-| `bro run <plan.toml>` / `bro plan validate` | Execute or check a validated plan |
-| `bro plugins [list\|install\|uninstall]` | Print the registry, or install client adapters (opencode, kilo, pi, omp) |
-| `bro task\|store …` | Document verbs; `--global` targets the user-level store |
-| `bro cleanup [--remote] [--dry-run]` | Delete local branches whose PR merged |
+| Command                                          | What bro does                                                                                              |
+| ------------------------------------------------ | ---------------------------------------------------------------------------------------------------------- |
+| `providers` config                               | Named model-plane registry (`api`/`acp`/`cli` kinds) consumed by judge and fleet — `bro doctor` reports it |
+| `bro status [--json\|--deep]`                    | The compact live board — beads + fleet + drill + git in one read                                           |
+| `bro serve [--port N]`                           | The fleet facade over loopback HTTP/JSON for thin clients                                                  |
+| `bro sweep status\|distill\|run`                 | Gated disposal for closed beads — gate → archive → prune → flatten                                         |
+| `bro sync [--pull]`                              | Push or restore bro artifacts on `refs/bro/data`                                                           |
+| `bro setup [--beads] [--skills] [--pack [NAME]]` | Configure the repo and optionally install beads, skills, or a capability pack                              |
+| `bro doctor [--json]`                            | Diagnose Node, git, auth, beads, hooks, providers, and configuration                                       |
+| `bro check [--evaluate] [--json]`                | Run the repo's Sverka workflow; `--evaluate` applies its policy gate                                       |
+| `bro run <plan.toml>` / `bro plan validate`      | Execute or check a validated plan                                                                          |
+| `bro plugins [list\|install\|uninstall]`         | Print the registry, or install client adapters (opencode, kilo, pi, omp)                                   |
+| `bro task\|store …`                              | Document verbs; `--global` targets the user-level store                                                    |
+| `bro cleanup [--remote] [--dry-run]`             | Delete local branches whose PR merged                                                                      |
 
 ## The pipeline (beads)
 
@@ -252,28 +252,28 @@ default is `["review-threads"]` — the original merged-PR sweep. Opt-in
 sources feed the same ledger and beads projection (`debt:<source>`
 labels, `thread_id` is the source's stable key):
 
-| Source | Feeds on |
-| ------ | -------- |
-| `review-threads` | Unresolved review threads on merged PRs (default) |
-| `dependabot` | Open Dependabot alerts — skipped when an open `dependabot/*` PR already covers the dependency |
-| `code-scanning` | Open code-scanning alerts (rule + file ref) |
-| `secret-scanning` | Open secret-scanning alerts — always blocking priority |
-| `stale-prs` | Open PRs idle > `debt.stale_days` days or failing checks (WIP drafts don't count) |
-| `failed-ci` | Latest default-branch workflow run, if it failed |
-| `sonarcloud` | Open SonarCloud issues + TO_REVIEW hotspots on new code (`SONAR_TOKEN`; project key from `debt.sourceConfig.sonarcloud.project_key` or `sonar-project.properties`). Skips findings a Sonar PR comment already covered |
-| `codacy` | Current repo issues from Codacy API v3 (`CODACY_API_TOKEN` or repo-scoped `CODACY_PROJECT_TOKEN`; `debt.sourceConfig.codacy.{host,provider}` for self-hosted/non-GitHub). Skips findings a Codacy PR comment already covered |
-| `codescene` | Failed quality gates + per-file code-health declines from stored delta analyses (`CODESCENE_TOKEN`; project id from `debt.sourceConfig.codescene.project_id` or `CODESCENE_PROJECT_ID`). Skips findings a CodeScene PR comment already covered |
+| Source            | Feeds on                                                                                                                                                                                                                                       |
+| ----------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `review-threads`  | Unresolved review threads on merged PRs (default)                                                                                                                                                                                              |
+| `dependabot`      | Open Dependabot alerts — skipped when an open `dependabot/*` PR already covers the dependency                                                                                                                                                  |
+| `code-scanning`   | Open code-scanning alerts (rule + file ref)                                                                                                                                                                                                    |
+| `secret-scanning` | Open secret-scanning alerts — always blocking priority                                                                                                                                                                                         |
+| `stale-prs`       | Open PRs idle > `debt.stale_days` days or failing checks (WIP drafts don't count)                                                                                                                                                              |
+| `failed-ci`       | Latest default-branch workflow run, if it failed                                                                                                                                                                                               |
+| `sonarcloud`      | Open SonarCloud issues + TO_REVIEW hotspots on new code (`SONAR_TOKEN`; project key from `debt.sourceConfig.sonarcloud.project_key` or `sonar-project.properties`). Skips findings a Sonar PR comment already covered                          |
+| `codacy`          | Current repo issues from Codacy API v3 (`CODACY_API_TOKEN` or repo-scoped `CODACY_PROJECT_TOKEN`; `debt.sourceConfig.codacy.{host,provider}` for self-hosted/non-GitHub). Skips findings a Codacy PR comment already covered                   |
+| `codescene`       | Failed quality gates + per-file code-health declines from stored delta analyses (`CODESCENE_TOKEN`; project id from `debt.sourceConfig.codescene.project_id` or `CODESCENE_PROJECT_ID`). Skips findings a CodeScene PR comment already covered |
 
 Alert sources reconcile both ways: a finding that disappears upstream is
 marked `done` in the ledger on the next collect.
 
 ## Labels bro manages
 
-| Label | Meaning |
-| ----- | ------- |
-| `debt:collected` | Swept, findings in the ledger |
-| `debt:clean` | Swept, nothing found — bro won't look twice |
-| `debt:skipped` | You told bro to chill. bro chills. |
+| Label            | Meaning                                     |
+| ---------------- | ------------------------------------------- |
+| `debt:collected` | Swept, findings in the ledger               |
+| `debt:clean`     | Swept, nothing found — bro won't look twice |
+| `debt:skipped`   | You told bro to chill. bro chills.          |
 
 ## Philosophy
 

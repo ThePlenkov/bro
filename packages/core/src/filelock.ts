@@ -21,7 +21,7 @@
  *      where its own process wrote it, so release/steal unlink by
  *      name can never hit a successor's entry: no capture, no
  *      compare-and-delete, no restore. */
-import { randomBytes } from 'node:crypto'
+import { randomBytes } from 'node:crypto';
 import {
   linkSync,
   lstatSync,
@@ -33,10 +33,10 @@ import {
   unlinkSync,
   utimesSync,
   writeFileSync,
-} from 'node:fs'
-import { basename, dirname, join } from 'node:path'
-import type { Stats } from 'node:fs'
-import { pidAlive } from './proc.ts'
+} from 'node:fs';
+import { basename, dirname, join } from 'node:path';
+import type { Stats } from 'node:fs';
+import { pidAlive } from './proc.ts';
 
 /** Lock paths → the holds this process owns — makes acquireFileLock
  *  re-entrant (a locked section can call a helper that locks the same
@@ -44,15 +44,15 @@ import { pidAlive } from './proc.ts'
  *  the exit hook the ownership proof they need. */
 interface Hold {
   /** `h-<pid>` — the entry name inside the lock dir. */
-  entry: string
+  entry: string;
   /** `dirId()` of the dir we created — proves `lock` still names OUR
    *  instance: a dir at the same path with a different id is a
    *  foreign instance, never to be touched. */
-  dirId: string
+  dirId: string;
   /** `pid:hex` — the entry's content, for heartbeat re-publish. */
-  token: string
+  token: string;
 }
-const heldLocks = new Map<string, Hold>()
+const heldLocks = new Map<string, Hold>();
 
 /** A holder that outlives this is robbed even while alive — caps the
  *  pid-recycled-onto-an-unrelated-process case. Inside the bound a LIVE
@@ -60,53 +60,53 @@ const heldLocks = new Map<string, Hold>()
  *  backend's multi-minute spawn is the longest legit hold) fails its waiters
  *  instead of being raced. A dead holder's lock is stolen
  *  immediately — liveness is the staleness signal, not age. */
-const LOCK_ABANDONED_MS = 15 * 60_000
-const LOCK_WAIT_MS = 20_000
+const LOCK_ABANDONED_MS = 15 * 60_000;
+const LOCK_WAIT_MS = 20_000;
 /** Sweep floor for crashed staged/debris siblings — a fresh one could
  *  belong to an in-flight actor; an old one can't. */
-const LOCK_STALE_MS = 60_000
+const LOCK_STALE_MS = 60_000;
 
 /** Filesystems where link(2) is not implemented (some fuse/9p/drvfs
  *  mounts). Dir instances never need hardlinks at all; the legacy-file
  *  steal uses one to pin the inode it verifies, and degrades to
  *  verify-then-unlink where link(2) is missing. */
-const NO_HARDLINK_CODES = new Set(['EPERM', 'ENOSYS', 'ENOTSUP', 'EOPNOTSUPP'])
+const NO_HARDLINK_CODES = new Set(['EPERM', 'ENOSYS', 'ENOTSUP', 'EOPNOTSUPP']);
 
 /** An EMPTY lock dir this fresh is a publisher mid-flight (mkdir →
  *  entry write is one synchronous hop — seconds old and empty means a
  *  crashed acquirer). The same grace covers an empty legacy file — a
  *  wx writer mid-publish on a no-link filesystem. */
-const EMPTY_LOCK_GRACE_MS = 5_000
+const EMPTY_LOCK_GRACE_MS = 5_000;
 
 /** Entry name → owner pid. The name IS the ownership proof: a hold
  *  entry only ever exists where its own process wrote it, so judging
  *  staleness is a readdir + kill(0), never a file read. Anything else
  *  inside a lock dir can't represent a live hold — junk. */
-const ENTRY_RE = /^h-(\d+)$/
+const ENTRY_RE = /^h-(\d+)$/;
 
 /** The retired debt-store dir-hold shape: `X.lock/pid`, a file whose
  *  CONTENT is the owner pid. A pre-change binary can still hold one —
  *  mixed-version contention must read it as a real hold, not junk,
  *  or a live old process's lock would be stolen under it. */
 const entryOwnerPid = (lock: string, name: string): number | null => {
-  const m = ENTRY_RE.exec(name)
+  const m = ENTRY_RE.exec(name);
   if (m !== null) {
-    return Number(m[1])
+    return Number(m[1]);
   }
   if (name === 'pid') {
     try {
-      const owner = Number(readFileSync(join(lock, name), 'utf8').trim())
-      return Number.isInteger(owner) && owner > 0 ? owner : null
+      const owner = Number(readFileSync(join(lock, name), 'utf8').trim());
+      return Number.isInteger(owner) && owner > 0 ? owner : null;
     } catch {
-      return null
+      return null;
     }
   }
-  return null
-}
+  return null;
+};
 
 const syncSleep = (ms: number): void => {
-  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms)
-}
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+};
 
 /** Shape classification is ALWAYS lstat — never stat: a `X.lock`
  *  symlink to a directory must fail isDirectory, not resolve to its
@@ -116,11 +116,11 @@ const syncSleep = (ms: number): void => {
  *  left strictly alone. */
 const lstatOrNull = (p: string): Stats | null => {
   try {
-    return lstatSync(p)
+    return lstatSync(p);
   } catch {
-    return null
+    return null;
   }
-}
+};
 
 /** A dir-instance identity — `ino` alone is forgeable by the
  *  allocator: ext4-class filesystems hand a just-freed inode number
@@ -131,73 +131,73 @@ const lstatOrNull = (p: string): Stats | null => {
  *  when the number is recycled. A filesystem without btime reports a
  *  constant 0 and the pair degrades to ino-only, the pin's earlier
  *  strength. */
-const dirId = (st: Stats): string => `${st.ino}:${st.birthtimeMs}`
+const dirId = (st: Stats): string => `${st.ino}:${st.birthtimeMs}`;
 
 /** The instance identity of the dir AT `p`, or null when `p` doesn't
  *  name a directory — the value every "is this still the instance I
  *  verified" check compares against. */
 const lockDirId = (p: string): string | null => {
-  const st = lstatOrNull(p)
-  return st !== null && st.isDirectory() ? dirId(st) : null
-}
+  const st = lstatOrNull(p);
+  return st !== null && st.isDirectory() ? dirId(st) : null;
+};
 
 /** fs errors that mean "the instance moved under us" — contention
  *  races to retry. Everything else (EACCES, ENOSPC, EROFS…) is a real
  *  filesystem fault: surface it instead of burning the wait bound and
  *  mislabeling it as a competing hold — `awaitFileLock` would retry a
  *  broken filesystem forever. */
-const RACED_LOCK_CODES = new Set(['ENOENT', 'ENOTDIR'])
+const RACED_LOCK_CODES = new Set(['ENOENT', 'ENOTDIR']);
 
 const raced = (err: unknown): boolean =>
-  RACED_LOCK_CODES.has((err as NodeJS.ErrnoException).code ?? '')
+  RACED_LOCK_CODES.has((err as NodeJS.ErrnoException).code ?? '');
 
 // --- dir instances ---------------------------------------------------------
 
 interface Entries {
   /** `h-<pid>` entries whose pid is alive. */
-  live: string[]
+  live: string[];
   /** `h-<pid>` entries whose pid is gone. */
-  dead: string[]
+  dead: string[];
   /** Anything not matching h-<pid> — can't represent a live hold. */
-  junk: string[]
+  junk: string[];
 }
 
 const lockEntries = (lock: string): Entries | null => {
-  const out: Entries = { live: [], dead: [], junk: [] }
-  let names: string[]
+  const out: Entries = { live: [], dead: [], junk: [] };
+  let names: string[];
   try {
-    names = readdirSync(lock)
+    names = readdirSync(lock);
   } catch {
-    return null // vanished or unreadable — can't judge, don't steal
+    return null; // vanished or unreadable — can't judge, don't steal
   }
   for (const e of names) {
-    const owner = entryOwnerPid(lock, e)
+    const owner = entryOwnerPid(lock, e);
     if (owner === null) {
-      out.junk.push(e)
+      out.junk.push(e);
     } else {
-      ;(pidAlive(owner) ? out.live : out.dead).push(e)
+      (pidAlive(owner) ? out.live : out.dead).push(e);
     }
   }
-  return out
-}
+  return out;
+};
 
 /** Is the dir instance AT `lock` stealable? A fresh empty dir is a
  *  publisher mid-flight — never touched; aged past the grace it's a
  *  crashed acquirer. Dead-entry and junk-only dirs go at once; a dir
  *  holding live entries only past the abandoned bound. */
 const dirStealable = (lock: string, st: { mtimeMs: number }): boolean => {
-  const e = lockEntries(lock)
+  const e = lockEntries(lock);
   if (e === null) {
-    return false
+    return false;
   }
   if (e.live.length === 0 && e.dead.length === 0 && e.junk.length === 0) {
-    return Date.now() - st.mtimeMs > EMPTY_LOCK_GRACE_MS
+    return Date.now() - st.mtimeMs > EMPTY_LOCK_GRACE_MS;
   }
   if (e.live.length === 0) {
-    return true
+    return true;
   }
-  return Date.now() - st.mtimeMs > LOCK_ABANDONED_MS
-}
+  return Date.now() - st.mtimeMs > LOCK_ABANDONED_MS;
+};
 
 /** name → inode pins for every entry inside `lock`: removal compares
  *  the live inode, so an entry unlinked-and-republished between scan
@@ -206,20 +206,20 @@ const dirStealable = (lock: string, st: { mtimeMs: number }): boolean => {
  *  itself can't be read. */
 const pinDirEntries = (lock: string): Array<{ name: string; ino: number }> | null => {
   try {
-    const pinned: Array<{ name: string; ino: number }> = []
+    const pinned: Array<{ name: string; ino: number }> = [];
     for (const name of readdirSync(lock)) {
       try {
-        pinned.push({ name, ino: lstatSync(join(lock, name)).ino })
+        pinned.push({ name, ino: lstatSync(join(lock, name)).ino });
       } catch {
         // raced away mid-pin — skipped; the conditional rmdir still
         // arbitrates whatever lands in its place
       }
     }
-    return pinned
+    return pinned;
   } catch {
-    return null
+    return null;
   }
-}
+};
 
 /** Drop pinned entries while `lock` still names the judged instance —
  *  each goes only while its live inode matches the pin, and the sweep
@@ -231,17 +231,17 @@ const dropPinnedEntries = (
 ): void => {
   for (const { name, ino } of pinned) {
     if (!ours()) {
-      return // swapped mid-steal — stop touching the path entirely
+      return; // swapped mid-steal — stop touching the path entirely
     }
     try {
       if (lstatSync(join(lock, name)).ino === ino) {
-        rmSync(join(lock, name), { force: true, recursive: true })
+        rmSync(join(lock, name), { force: true, recursive: true });
       }
     } catch {
       // raced removal — fine
     }
   }
-}
+};
 
 /** Drop a stealable dir instance — the instance judged stale is PINNED
  *  by its dir id for the whole operation: every removal is gated on
@@ -259,27 +259,27 @@ const dropPinnedEntries = (
  *  owners. True only when the judged instance is gone — "something
  *  was unlinked" is not a reap. */
 const stealDir = (lock: string): boolean => {
-  const st = lstatOrNull(lock)
+  const st = lstatOrNull(lock);
   if (st === null || !st.isDirectory() || !dirStealable(lock, st)) {
-    return false
+    return false;
   }
-  const id = dirId(st)
-  const ours = (): boolean => lockDirId(lock) === id
-  const pinned = pinDirEntries(lock)
+  const id = dirId(st);
+  const ours = (): boolean => lockDirId(lock) === id;
+  const pinned = pinDirEntries(lock);
   if (pinned === null || !ours()) {
-    return false // swapped between judge and act — a foreign instance stands
+    return false; // swapped between judge and act — a foreign instance stands
   }
-  dropPinnedEntries(lock, pinned, ours)
+  dropPinnedEntries(lock, pinned, ours);
   try {
     if (ours()) {
-      rmdirSync(lock)
-      return true
+      rmdirSync(lock);
+      return true;
     }
   } catch {
     // ENOTEMPTY — the entry that landed keeps its instance
   }
-  return false
-}
+  return false;
+};
 
 // --- legacy file instances ---------------------------------------------------
 
@@ -290,27 +290,25 @@ const stealDir = (lock: string): boolean => {
  *  the stale file's inode — the identity every removal compares
  *  against — or null when `path` isn't a provably stale legacy hold. */
 const legacyStaleIno = (path: string): number | null => {
-  let token: string
-  let st: Stats
+  let token: string;
+  let st: Stats;
   try {
-    token = readFileSync(path, 'utf8')
-    st = lstatSync(path)
+    token = readFileSync(path, 'utf8');
+    st = lstatSync(path);
   } catch {
-    return null // vanished or unreadable — can't prove dead, don't steal
+    return null; // vanished or unreadable — can't prove dead, don't steal
   }
   if (!st.isFile()) {
-    return null
+    return null;
   }
-  const age = Date.now() - st.mtimeMs
+  const age = Date.now() - st.mtimeMs;
   if (token.trim() === '' && age < EMPTY_LOCK_GRACE_MS) {
-    return null // in-flight wx writer — retry, never break it
+    return null; // in-flight wx writer — retry, never break it
   }
-  return !pidAlive(Number(token.split(':')[0])) || age > LOCK_ABANDONED_MS
-    ? st.ino
-    : null
-}
+  return !pidAlive(Number(token.split(':')[0])) || age > LOCK_ABANDONED_MS ? st.ino : null;
+};
 
-const legacyFileStealable = (path: string): boolean => legacyStaleIno(path) !== null
+const legacyFileStealable = (path: string): boolean => legacyStaleIno(path) !== null;
 
 /** Steal a stale legacy file where link(2) is unsupported — the same
  *  compare-then-unlink without the pin: re-verify the stale instance
@@ -318,18 +316,18 @@ const legacyFileStealable = (path: string): boolean => legacyStaleIno(path) !== 
  *  residual stat→unlink gap can hit a file successor; a dir
  *  successor still can't (unlinkSync refuses dirs outright). */
 const stealLegacyFileUnpinned = (lock: string): boolean => {
-  const ino = legacyStaleIno(lock)
-  const cur = ino === null ? null : lstatOrNull(lock)
+  const ino = legacyStaleIno(lock);
+  const cur = ino === null ? null : lstatOrNull(lock);
   if (cur === null || !cur.isFile() || cur.ino !== ino) {
-    return false // successor or foreign shape — not ours to drop
+    return false; // successor or foreign shape — not ours to drop
   }
   try {
-    unlinkSync(lock)
-    return true
+    unlinkSync(lock);
+    return true;
   } catch {
-    return false
+    return false;
   }
-}
+};
 
 /** Steal a provably dead legacy FILE — compare-then-unlink, never
  *  capture: link(2) pins the verified stale inode under a private
@@ -344,56 +342,56 @@ const stealLegacyFileUnpinned = (lock: string): boolean => {
  *  be hit, a dir successor still cannot. */
 const stealLegacyFile = (lock: string): boolean => {
   if (legacyStaleIno(lock) === null) {
-    return false
+    return false;
   }
-  const probe = `${lock}.pin-${process.pid}-${randomBytes(4).toString('hex')}`
+  const probe = `${lock}.pin-${process.pid}-${randomBytes(4).toString('hex')}`;
   try {
-    linkSync(lock, probe)
+    linkSync(lock, probe);
   } catch (err) {
     return NO_HARDLINK_CODES.has((err as NodeJS.ErrnoException).code ?? '')
       ? stealLegacyFileUnpinned(lock) // degraded: no pin — see the helper
-      : false // gone, or a stat flake — the retry decides
+      : false; // gone, or a stat flake — the retry decides
   }
   if (!legacyFileStealable(probe)) {
-    rmSync(probe, { force: true })
-    return false // the pinned instance reads live — `lock` never touched
+    rmSync(probe, { force: true });
+    return false; // the pinned instance reads live — `lock` never touched
   }
-  let probeIno: number
+  let probeIno: number;
   try {
-    probeIno = lstatSync(probe).ino
+    probeIno = lstatSync(probe).ino;
   } catch {
-    rmSync(probe, { force: true })
-    return false
+    rmSync(probe, { force: true });
+    return false;
   }
-  let dropped = false
-  const cur = lstatOrNull(lock)
+  let dropped = false;
+  const cur = lstatOrNull(lock);
   if (cur !== null && cur.isFile() && cur.ino === probeIno) {
     try {
-      unlinkSync(lock)
-      dropped = true
+      unlinkSync(lock);
+      dropped = true;
     } catch {
       // gone or rebound — the retry decides
     }
   }
-  rmSync(probe, { force: true })
-  return dropped
-}
+  rmSync(probe, { force: true });
+  return dropped;
+};
 
 /** `lock` is occupied — steal whichever instance shape proves stale;
  *  a live one is left strictly alone (the acquire loop just retries
  *  until waitMs). A symlink/fifo/socket can't be a lock instance —
  *  lstat refuses to classify it and the path is left untouched. */
 const contend = (lock: string): void => {
-  const st = lstatOrNull(lock)
+  const st = lstatOrNull(lock);
   if (st === null) {
-    return
+    return;
   }
   if (st.isDirectory()) {
-    stealDir(lock)
+    stealDir(lock);
   } else if (st.isFile()) {
-    stealLegacyFile(lock)
+    stealLegacyFile(lock);
   }
-}
+};
 
 /** Pull our entry name back out of whatever `lock` names, then drop
  *  the dir when it is still OUR instance and empty. The name is
@@ -401,18 +399,18 @@ const contend = (lock: string): void => {
  *  unlink is always ours to take even when the dir itself is foreign. */
 const dropOwnInstance = (lock: string, entry: string, id: string): void => {
   try {
-    rmSync(join(lock, entry), { force: true })
+    rmSync(join(lock, entry), { force: true });
   } catch {
     // already gone — or the path doesn't take entries at all
   }
   try {
     if (lockDirId(lock) === id) {
-      rmdirSync(lock)
+      rmdirSync(lock);
     }
   } catch {
     // foreign instance or still occupied — the sweeps own leftovers
   }
-}
+};
 
 /** One acquisition attempt — our instance's dir id when the lock is
  *  ours, null when a contender holds it. mkdir(2) is the atomic
@@ -427,50 +425,50 @@ const dropOwnInstance = (lock: string, entry: string, id: string): void => {
  *  broken filesystem as a competing hold. */
 const tryAcquireLockDir = (lock: string, entry: string, token: string): string | null => {
   try {
-    mkdirSync(lock)
+    mkdirSync(lock);
   } catch (err) {
     // EEXIST is contention — contend and let the loop retry. Anything
     // else (EACCES, EROFS, ENOTDIR through a file component) is a real
     // error, not a competing hold — surface it, don't burn the wait.
     if ((err as NodeJS.ErrnoException).code === 'EEXIST') {
-      contend(lock)
-      return null
+      contend(lock);
+      return null;
     }
-    throw err
+    throw err;
   }
-  let id: string
+  let id: string;
   try {
-    id = dirId(lstatSync(lock))
+    id = dirId(lstatSync(lock));
   } catch (err) {
     if (raced(err)) {
-      return null // gone between mkdir and stat — the retry rebuilds
+      return null; // gone between mkdir and stat — the retry rebuilds
     }
-    throw err
+    throw err;
   }
   try {
-    writeFileSync(join(lock, entry), token)
+    writeFileSync(join(lock, entry), token);
   } catch (err) {
     if (!raced(err)) {
       // a real fault — a partial entry may still stand under our name
-      dropOwnInstance(lock, entry, id)
-      throw err
+      dropOwnInstance(lock, entry, id);
+      throw err;
     }
-    return null // our dir vanished mid-publish — the retry rebuilds
+    return null; // our dir vanished mid-publish — the retry rebuilds
   }
   try {
     if (dirId(lstatSync(lock)) !== id) {
-      rmSync(join(lock, entry), { force: true }) // our stray in a foreign dir
-      return null
+      rmSync(join(lock, entry), { force: true }); // our stray in a foreign dir
+      return null;
     }
   } catch (err) {
     if (!raced(err)) {
-      dropOwnInstance(lock, entry, id)
-      throw err
+      dropOwnInstance(lock, entry, id);
+      throw err;
     }
-    return null // vanished between publish and verify
+    return null; // vanished between publish and verify
   }
-  return id
-}
+  return id;
+};
 
 /** Sweep crashed staged/debris siblings — `<lock>.<pid>.<rand>.tmp`
  *  from the file primitive, `.cap-`/`.pin-`/`.tomb-` capture names,
@@ -479,11 +477,11 @@ const tryAcquireLockDir = (lock: string, entry: string, token: string): string |
  *  (possibly in-flight) safe. */
 const sweepStaged = (lock: string): void => {
   try {
-    const dir = dirname(lock)
-    const prefix = `${basename(lock)}.`
+    const dir = dirname(lock);
+    const prefix = `${basename(lock)}.`;
     for (const f of readdirSync(dir)) {
       if (!f.startsWith(prefix)) {
-        continue
+        continue;
       }
       const debris =
         f.endsWith('.tmp') ||
@@ -491,14 +489,14 @@ const sweepStaged = (lock: string): void => {
         f.includes('.pin-') ||
         f.includes('.tomb-') ||
         f.includes('.stale-') ||
-        f.includes('.release-')
+        f.includes('.release-');
       if (!debris) {
-        continue
+        continue;
       }
-      const p = join(dir, f)
+      const p = join(dir, f);
       try {
         if (Date.now() - lstatSync(p).mtimeMs > LOCK_STALE_MS) {
-          rmSync(p, { force: true, recursive: true })
+          rmSync(p, { force: true, recursive: true });
         }
       } catch {
         // raced removal — fine
@@ -507,7 +505,7 @@ const sweepStaged = (lock: string): void => {
   } catch {
     // unreadable dir — the acquire attempts decide
   }
-}
+};
 
 /** Drop our hold. The instance check comes FIRST: `h-<pid>` is
  *  per-process, so a successor instance can legitimately carry the
@@ -520,71 +518,71 @@ const releaseLock = (lock: string, hold: Hold): void => {
   // step: between any two syscalls the path can swap to a successor's
   // fresh (empty) instance, and rmdir must only ever drop OUR dir
   const ours = (): boolean => {
-    const st = lstatOrNull(lock)
-    return st !== null && st.isDirectory() && dirId(st) === hold.dirId
-  }
+    const st = lstatOrNull(lock);
+    return st !== null && st.isDirectory() && dirId(st) === hold.dirId;
+  };
   if (!ours()) {
-    return // vanished, rebound, or a foreign instance — not ours
+    return; // vanished, rebound, or a foreign instance — not ours
   }
-  let removed = false
+  let removed = false;
   try {
-    unlinkSync(join(lock, hold.entry))
-    removed = true
+    unlinkSync(join(lock, hold.entry));
+    removed = true;
   } catch {
     // ENOENT — our entry was already stolen or never republished
   }
   if (removed) {
     try {
       if (ours()) {
-        rmdirSync(lock)
+        rmdirSync(lock);
       }
     } catch {
       // ENOTEMPTY — a republished or stray entry stands; its instance decides
     }
-    return
+    return;
   }
   // our instance, but our entry is already gone — drop the dir only
   // when nothing stands inside; a republished entry keeps it pinned
   try {
     if (ours() && readdirSync(lock).length === 0 && ours()) {
-      rmdirSync(lock)
+      rmdirSync(lock);
     }
   } catch {
     // raced publish or removal — the surviving instance decides
   }
-}
+};
 
 /** Release every lock this process still holds — called by the exit
  *  hook because process.exit() bypasses callers' finally blocks, and a
  *  stranded lock blocks every contender until a dead-owner steal. */
 const releaseAll = (): void => {
   for (const [lock, hold] of heldLocks) {
-    releaseLock(lock, hold)
+    releaseLock(lock, hold);
   }
-}
+};
 
-let exitHookArmed = false
+let exitHookArmed = false;
 const armExitHook = (): void => {
   if (exitHookArmed) {
-    return
+    return;
   }
-  exitHookArmed = true
-  process.on('exit', releaseAll)
-}
+  exitHookArmed = true;
+  process.on('exit', releaseAll);
+};
 
 /** A live holder outlasted the wait bound — distinct from acquisition
  *  failures (EACCES, EIO) so callers can name contention without
  *  mislabeling filesystem errors as a competing hold. */
 export class LockTimeout extends Error {
-  override name = 'LockTimeout'
+  override name = 'LockTimeout';
 }
 
 export interface FileLockOptions {
   /** Give up waiting after this — the holder is alive but slow.
    *  Default 20s. */
-  waitMs?: number
+  waitMs?: number;
   /** Names the lock in the timeout error — 'agents.json lock' style. */
-  label?: string
+  label?: string;
 }
 
 /** Advisory inter-process lock on `lock` — a directory claimed by
@@ -594,52 +592,52 @@ export interface FileLockOptions {
  *  are also dropped by an 'exit' hook, so a process.exit() inside the
  *  section can't strand the hold. */
 export function acquireFileLock(lock: string, opts: FileLockOptions = {}): () => void {
-  const { waitMs = LOCK_WAIT_MS, label = 'file lock' } = opts
+  const { waitMs = LOCK_WAIT_MS, label = 'file lock' } = opts;
   // a NaN/Infinity deadline compares false forever — the wait would
   // never time out; a negative one is nonsense degrading to an immediate
   // timeout. Reject both instead of misbehaving.
   if (!Number.isFinite(waitMs) || waitMs < 0) {
-    throw new RangeError(`${label}: waitMs must be a finite non-negative number — got ${waitMs}`)
+    throw new RangeError(`${label}: waitMs must be a finite non-negative number — got ${waitMs}`);
   }
-  mkdirSync(dirname(lock), { recursive: true })
+  mkdirSync(dirname(lock), { recursive: true });
   if (heldLocks.has(lock)) {
-    return () => {} // re-entrant — the outer section owns it
+    return () => {}; // re-entrant — the outer section owns it
   }
-  const token = `${process.pid}:${randomBytes(8).toString('hex')}`
-  const entry = `h-${process.pid}`
-  const deadline = Date.now() + waitMs
-  sweepStaged(lock)
-  let id: string | null = null
+  const token = `${process.pid}:${randomBytes(8).toString('hex')}`;
+  const entry = `h-${process.pid}`;
+  const deadline = Date.now() + waitMs;
+  sweepStaged(lock);
+  let id: string | null = null;
   while ((id = tryAcquireLockDir(lock, entry, token)) === null) {
     if (Date.now() >= deadline) {
-      throw new LockTimeout(`${label} held over ${waitMs / 1000}s`)
+      throw new LockTimeout(`${label} held over ${waitMs / 1000}s`);
     }
-    syncSleep(25)
+    syncSleep(25);
   }
-  const hold: Hold = { entry, dirId: id, token }
-  heldLocks.set(lock, hold)
-  armExitHook()
+  const hold: Hold = { entry, dirId: id, token };
+  heldLocks.set(lock, hold);
+  armExitHook();
   return () => {
     // a stale closure is a no-op: once this hold left the registry a
     // newer hold may own the path, and `h-<pid>` is per-process —
     // releasing through the old handle would strip the successor's
     // entry under a matching name
     if (heldLocks.get(lock) !== hold) {
-      return
+      return;
     }
-    heldLocks.delete(lock)
-    releaseLock(lock, hold)
-  }
+    heldLocks.delete(lock);
+    releaseLock(lock, hold);
+  };
 }
 
 /** Run `fn` under the lock. Sync-only on purpose — an async fn would
  *  release-and-reattach semantics nobody needs here. */
 export function withFileLock<T>(lock: string, fn: () => T, opts: FileLockOptions = {}): T {
-  const release = acquireFileLock(lock, opts)
+  const release = acquireFileLock(lock, opts);
   try {
-    return fn()
+    return fn();
   } finally {
-    release()
+    release();
   }
 }
 
@@ -647,52 +645,52 @@ export function withFileLock<T>(lock: string, fn: () => T, opts: FileLockOptions
  *  a live hold's mtime never reads as stale to contenders or the
  *  janitor's `*.lock` sweep; cheap enough to run for a whole process
  *  lifetime. */
-const LOCK_HEARTBEAT_MS = Math.floor(LOCK_ABANDONED_MS / 5)
+const LOCK_HEARTBEAT_MS = Math.floor(LOCK_ABANDONED_MS / 5);
 
 /** The holder pid inside a lock DIR — first hold entry in sorted
  *  order, or null when it's empty or raced away. */
 const dirHolderPid = (lock: string): number | null => {
   try {
     for (const e of readdirSync(lock).sort()) {
-      const owner = entryOwnerPid(lock, e)
+      const owner = entryOwnerPid(lock, e);
       if (owner !== null) {
-        return owner
+        return owner;
       }
     }
   } catch {
     // raced removal — report none
   }
-  return null
-}
+  return null;
+};
 
 /** The holder pid in a legacy FILE's `pid:token` content, or null. */
 const fileHolderPid = (lock: string): number | null => {
   try {
-    const pid = Number(readFileSync(lock, 'utf8').split(':')[0]?.trim())
-    return Number.isInteger(pid) && pid > 0 ? pid : null
+    const pid = Number(readFileSync(lock, 'utf8').split(':')[0]?.trim());
+    return Number.isInteger(pid) && pid > 0 ? pid : null;
   } catch {
-    return null
+    return null;
   }
-}
+};
 
 /** The holder pid in a lock — a dir's `h-<pid>` entry name or a
  *  legacy file's `pid:token` content. Null when `lock` is absent or
  *  carries no parseable pid. */
 export function lockHolderPid(lock: string): number | null {
-  const st = lstatOrNull(lock)
+  const st = lstatOrNull(lock);
   if (st !== null && st.isDirectory()) {
-    return dirHolderPid(lock)
+    return dirHolderPid(lock);
   }
   if (st !== null && st.isFile()) {
-    return fileHolderPid(lock)
+    return fileHolderPid(lock);
   }
-  return null
+  return null;
 }
 
 export interface HeldLockOptions extends FileLockOptions {
   /** Heartbeat period — tests inject a small value; the default sits
    *  far under the abandoned bound. */
-  heartbeatMs?: number
+  heartbeatMs?: number;
 }
 
 /** Acquire `lock` and keep it heartbeated for the hold's whole
@@ -706,37 +704,37 @@ export interface HeldLockOptions extends FileLockOptions {
  *  instance (live dir or file) is stolen only when it proves stale;
  *  a live foreign hold is left alone. */
 export function holdFileLock(lock: string, opts: HeldLockOptions = {}): () => void {
-  const { heartbeatMs = LOCK_HEARTBEAT_MS, ...lockOpts } = opts
-  const release = acquireFileLock(lock, lockOpts)
+  const { heartbeatMs = LOCK_HEARTBEAT_MS, ...lockOpts } = opts;
+  const release = acquireFileLock(lock, lockOpts);
   // acquireFileLock guarantees our hold is registered — re-entrant
   // holds share the outer hold's entry and dir, which is the same claim
-  const hold = heldLocks.get(lock)!
+  const hold = heldLocks.get(lock)!;
   const beat = (): void => {
-    const cur = lstatOrNull(lock)
+    const cur = lstatOrNull(lock);
     if (cur !== null && cur.isDirectory() && dirId(cur) === hold.dirId) {
       // our instance still stands — re-assert the entry (an abandoned-
       // bound steal may have unlinked it) and freshen the dir mtime
       try {
-        writeFileSync(join(lock, hold.entry), hold.token)
+        writeFileSync(join(lock, hold.entry), hold.token);
         // the check above and this write straddle a syscall pair — a
         // stealer that rmdir'd our dir mid-beat leaves `lock` naming a
         // successor instance, and our entry inside it is OUR stray:
         // pull it back so the successor is never blocked by a name it
         // doesn't own
         if (lockDirId(lock) !== hold.dirId) {
-          rmSync(join(lock, hold.entry), { force: true })
-          return
+          rmSync(join(lock, hold.entry), { force: true });
+          return;
         }
       } catch {
         // an I/O flake — the next beat retries
       }
       try {
-        const now = new Date()
-        utimesSync(lock, now, now)
+        const now = new Date();
+        utimesSync(lock, now, now);
       } catch {
         // a stat/write flake — the next beat retries
       }
-      return
+      return;
     }
     if (cur !== null) {
       // a foreign instance holds the path — steal it only when it
@@ -745,42 +743,42 @@ export function holdFileLock(lock: string, opts: HeldLockOptions = {}): () => vo
       // "foreign" means here — on an inode-recycling filesystem a
       // successor dir can carry our old ino, so only the ino+btime
       // pair keeps a foreign hold safe from our own refresh
-      contend(lock)
-      return
+      contend(lock);
+      return;
     }
     // path empty — take the hold back: same mkdir+publish+verify as a
     // fresh acquire; a contender who lands first wins quietly
-    let id: string
+    let id: string;
     try {
-      mkdirSync(lock)
-      id = dirId(lstatSync(lock))
-      writeFileSync(join(lock, hold.entry), hold.token)
+      mkdirSync(lock);
+      id = dirId(lstatSync(lock));
+      writeFileSync(join(lock, hold.entry), hold.token);
       if (dirId(lstatSync(lock)) !== id) {
-        rmSync(join(lock, hold.entry), { force: true }) // stranded in a foreign dir
-        return
+        rmSync(join(lock, hold.entry), { force: true }); // stranded in a foreign dir
+        return;
       }
     } catch {
-      return // raced or I/O — the next beat retries
+      return; // raced or I/O — the next beat retries
     }
-    hold.dirId = id
-  }
-  const timer = setInterval(beat, heartbeatMs)
-  timer.unref()
+    hold.dirId = id;
+  };
+  const timer = setInterval(beat, heartbeatMs);
+  timer.unref();
   return () => {
-    clearInterval(timer)
-    release()
-  }
+    clearInterval(timer);
+    release();
+  };
 }
 
 /** Standby report cadence — one `onStandby` per live-holder wait. */
-const STANDBY_WAIT_MS = 60_000
+const STANDBY_WAIT_MS = 60_000;
 
 /** One acquire attempt's sync budget while standing by —
  *  acquireFileLock's contention wait is `Atomics.wait` on the calling
  *  thread, so a long slice would freeze the event loop (signal
  *  handlers, timers) for a standing-by supervisor. Slice short and
  *  retry: signal latency stays under a quarter second. */
-const ACQUIRE_SLICE_MS = 250
+const ACQUIRE_SLICE_MS = 250;
 
 /** Acquire-and-hold `lock`, waiting through a live hold instead of
  *  timing out — a duplicate supervisor's standby (spec bro-2duu9): it
@@ -794,30 +792,30 @@ export async function awaitFileLock(
   lock: string,
   opts: HeldLockOptions & { onStandby?: (holderPid: number | null) => void } = {}
 ): Promise<() => void> {
-  const { onStandby, ...lockOpts } = opts
+  const { onStandby, ...lockOpts } = opts;
   // waitMs is the standby-report cadence, not the acquire slice —
   // each attempt is bounded by ACQUIRE_SLICE_MS so a standby never
   // stalls the event loop for the whole report window
-  const reportMs = lockOpts.waitMs ?? STANDBY_WAIT_MS
-  const incumbent = lockHolderPid(lock)
+  const reportMs = lockOpts.waitMs ?? STANDBY_WAIT_MS;
+  const incumbent = lockHolderPid(lock);
   if (incumbent !== null && pidAlive(incumbent)) {
-    onStandby?.(incumbent)
+    onStandby?.(incumbent);
   }
-  let lastReport = Date.now()
+  let lastReport = Date.now();
   for (;;) {
     try {
-      return holdFileLock(lock, { ...lockOpts, waitMs: ACQUIRE_SLICE_MS })
+      return holdFileLock(lock, { ...lockOpts, waitMs: ACQUIRE_SLICE_MS });
     } catch (err) {
       if (!(err instanceof LockTimeout)) {
-        throw err
+        throw err;
       }
       if (Date.now() - lastReport >= reportMs) {
-        lastReport = Date.now()
-        onStandby?.(lockHolderPid(lock))
+        lastReport = Date.now();
+        onStandby?.(lockHolderPid(lock));
       }
       // the slice already burned inside acquireFileLock — a macrotask
       // here only keeps signal/'exit' handlers live between attempts
-      await new Promise((r) => setTimeout(r, 0))
+      await new Promise(r => setTimeout(r, 0));
     }
   }
 }
@@ -828,17 +826,17 @@ export async function awaitFileLock(
  *  reapers judge a lock by the rule its contenders already apply
  *  (bro-f6zp). */
 export function staleLock(lock: string): boolean {
-  const st = lstatOrNull(lock)
+  const st = lstatOrNull(lock);
   if (st === null) {
-    return false
+    return false;
   }
   if (st.isDirectory()) {
-    return dirStealable(lock, st)
+    return dirStealable(lock, st);
   }
   if (st.isFile()) {
-    return legacyFileStealable(lock)
+    return legacyFileStealable(lock);
   }
-  return false
+  return false;
 }
 
 /** Remove `lock` when its instance proves stealable — the same
@@ -851,15 +849,15 @@ export function staleLock(lock: string): boolean {
  *  bound may be stolen, by design. True only when the judged stale
  *  instance is actually gone. */
 export function reapStaleLock(lock: string): boolean {
-  const st = lstatOrNull(lock)
+  const st = lstatOrNull(lock);
   if (st === null) {
-    return false
+    return false;
   }
   if (st.isDirectory()) {
-    return stealDir(lock)
+    return stealDir(lock);
   }
   if (st.isFile()) {
-    return stealLegacyFile(lock)
+    return stealLegacyFile(lock);
   }
-  return false
+  return false;
 }

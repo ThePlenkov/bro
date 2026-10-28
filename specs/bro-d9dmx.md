@@ -1,25 +1,27 @@
 ---
+
 parent: bro-6ptci
 scope:
-  - packages/core/src/config.ts
-  - packages/core/src/config-schema.ts
-  - packages/core/src/agents.ts
-  - packages/cli/src/plugins.ts
-  - packages/cli/src/agent-connectors.ts
-  - packages/cli/src/commands/doctor.ts
-  - packages/cli/src/commands/setup.ts
-  - packages/cli/src/commands/next.ts
-  - packages/cli/schemas/
-  - scripts/gen-config-schema.ts
-  - .github/workflows/ci.yml
-  - bro.config.json
+- packages/core/src/config.ts
+- packages/core/src/config-schema.ts
+- packages/core/src/agents.ts
+- packages/cli/src/plugins.ts
+- packages/cli/src/agent-connectors.ts
+- packages/cli/src/commands/doctor.ts
+- packages/cli/src/commands/setup.ts
+- packages/cli/src/commands/next.ts
+- packages/cli/schemas/
+- scripts/gen-config-schema.ts
+- .github/workflows/ci.yml
+- bro.config.json
+
 ---
 
 # bro-d9dmx — contract: bro.config JSON Schema generated from the config section registry
 
 Parent: `bro-6ptci` (epic — CLI is the agent contract). Sibling:
 `bro-k9ces` (`bro contract dump --json` over the command surface) — this
-bead covers the *config* half of the same machine-readable contract.
+bead covers the _config_ half of the same machine-readable contract.
 
 ## Problem
 
@@ -40,7 +42,7 @@ falls back to `schema(undefined)` on a throw
 The audit criterion (bro-l8c4f, config-policy finding) adds the
 behavioral half: diagnostics must name the **layer** a bad value came
 from, an **authoritative command** (spawn / claim) must refuse invalid
-*policy* config before its side effect, and hooks must keep working
+_policy_ config before its side effect, and hooks must keep working
 fail-open with diagnostic + fallback.
 
 ## Design
@@ -50,17 +52,17 @@ fail-open with diagnostic + fallback.
 `ConfigSection<T>` gains an optional `jsonSchema` slot:
 
 ```ts
-export type ConfigSection<T> = ((raw: unknown) => T) & { jsonSchema?: JsonSchema }
+export type ConfigSection<T> = ((raw: unknown) => T) & { jsonSchema?: JsonSchema };
 ```
 
 Each registered section attaches a hand-written JSON Schema (draft-07
 subset) **next to its parser** — `sddSection.jsonSchema = {…}` in the
 same file. Hand-written, not zod-derived: the normalizers accept
 shapes zod can't express cheaply (sync's string passthrough, provider
-`models` as map *or* catalog-command string, `string | false` knobs),
+`models` as map _or_ catalog-command string, `string | false` knobs),
 and core stays dependency-free (only `smol-toml` today).
 
-The schema describes the *accepted input*, not the normalized output —
+The schema describes the _accepted input_, not the normalized output —
 it must admit every value the parser accepts and flag what the parser
 drops. Semantics beyond shape (secrets-in-command guards, model
 allowlists, `mesh://` enforcement) stay in code.
@@ -88,12 +90,12 @@ expose it without a second registry:
   "type": "object",
   "properties": {
     "$schema": { "type": "string" },
-    "stores": { "type": "array", "items": { "enum": ["jsonl","beads","gitref"] } },
-    "personality": { "enum": ["terse","mentor","sarcastic"] },
+    "stores": { "type": "array", "items": { "enum": ["jsonl", "beads", "gitref"] } },
+    "personality": { "enum": ["terse", "mentor", "sarcastic"] }
     // … one entry per registered section
   },
-  "additionalProperties": true  // external plugins own their configKeys;
-                                // doctor owns the unknown-key typo check
+  "additionalProperties": true // external plugins own their configKeys;
+  // doctor owns the unknown-key typo check
 }
 ```
 
@@ -157,7 +159,7 @@ audit names:
   policy).
 
 Escape hatch: `BRO_CONFIG_FORCE=1` — the "осознанный override" the
-audit allows. The gate runs only on *policy* sections (act, sdd,
+audit allows. The gate runs only on _policy_ sections (act, sdd,
 connectors, guard, …); a malformed `providers`/`fleet` entry is
 operator config — it diagnoses and warns, never blocks a spawn that
 doesn't consume the broken section.
@@ -181,19 +183,19 @@ committed file.
 
 - [ ] `specs/bro-d9dmx.md` (this file)
 - [ ] core `config-schema.ts`: `JsonSchema` type, `ConfigSection`
-      gains `.jsonSchema`, mini validator, `configDiagnostics`,
-      `configPolicyErrors`, `configSchemaDocument`, `CONFIG_SCHEMA_URL`
+  gains `.jsonSchema`, mini validator, `configDiagnostics`,
+  `configPolicyErrors`, `configSchemaDocument`, `CONFIG_SCHEMA_URL`
 - [ ] `.jsonSchema` on every registered section (core: debt, sync,
-      sweep, act, connectors, providers, sdd, fleet, query, mesh, mcp,
-      mirror, notify, serve, beads, stack, agents; plugins: loop,
-      watch, drive, check, drill, learn, goal, judge, guard, freshness,
-      telemetry, rig)
+  sweep, act, connectors, providers, sdd, fleet, query, mesh, mcp,
+  mirror, notify, serve, beads, stack, agents; plugins: loop,
+  watch, drive, check, drill, learn, goal, judge, guard, freshness,
+  telemetry, rig)
 - [ ] `pluginConfigJsonSchemas()` + `assertMutableConfig` in
-      cli/plugins.ts; gate wired into `prepareSpawn` + `next` claim
+  cli/plugins.ts; gate wired into `prepareSpawn` + `next` claim
 - [ ] doctor `config-schema` rows + `--strict`
 - [ ] `bro setup` writes `$schema`; `bro.config.json` gets it
 - [ ] `scripts/gen-config-schema.ts`, root `gen:`/`check:` scripts,
-      `packages/cli` `files`, CI step
+  `packages/cli` `files`, CI step
 
 ## Verify
 

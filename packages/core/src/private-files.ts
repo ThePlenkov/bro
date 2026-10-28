@@ -28,11 +28,11 @@ import {
   mkdirSync,
   openSync,
   writeFileSync,
-} from 'node:fs'
-import { dirname } from 'node:path'
+} from 'node:fs';
+import { dirname } from 'node:path';
 
-export const PRIVATE_FILE_MODE = 0o600
-export const PRIVATE_DIR_MODE = 0o700
+export const PRIVATE_FILE_MODE = 0o600;
+export const PRIVATE_DIR_MODE = 0o700;
 
 /** The instrumented seam — the pin-before-write ordering and the
  *  foreign-owner refusal are asserted by patching these slots, and a
@@ -44,18 +44,18 @@ export const privateFs = {
   fstat: fstatSync,
   truncate: ftruncateSync,
   write: writeFileSync,
-}
+};
 
 /** O_NOFOLLOW where the platform has it — an artifact path swapped for
  *  a symlink must fail the open, never be followed to a target another
  *  local user reads. Absent on win32, where the profile ACL is the
  *  guard and the constant is undefined. */
-const NOFOLLOW = constants.O_NOFOLLOW ?? 0
+const NOFOLLOW = constants.O_NOFOLLOW ?? 0;
 
 function warn(path: string, err: unknown): void {
   console.error(
     `warning: could not pin owner-only mode on ${path} — ${err instanceof Error ? err.message : String(err)}`
-  )
+  );
 }
 
 /** Repair-before-write — open(2) create-mode covers a NEW file only;
@@ -63,9 +63,9 @@ function warn(path: string, err: unknown): void {
  *  lands. Best-effort: warn, never fail (non-POSIX filesystems). */
 function pinPrivateFile(fd: number, path: string): void {
   try {
-    privateFs.fchmod(fd, PRIVATE_FILE_MODE)
+    privateFs.fchmod(fd, PRIVATE_FILE_MODE);
   } catch (err) {
-    warn(path, err)
+    warn(path, err);
   }
 }
 
@@ -75,14 +75,13 @@ function pinPrivateFile(fd: number, path: string): void {
  *  POSIX-only: win32 has no uid in stat; the ACL owns the guarantee. */
 function refuseForeignFile(fd: number, path: string): void {
   if (typeof process.getuid !== 'function') {
-    return
+    return;
   }
-  const { uid } = privateFs.fstat(fd)
+  const { uid } = privateFs.fstat(fd);
   if (uid !== process.getuid()) {
-    throw Object.assign(
-      new Error(`refusing foreign-owned artifact ${path} (uid ${uid})`),
-      { code: 'EACCES' }
-    )
+    throw Object.assign(new Error(`refusing foreign-owned artifact ${path} (uid ${uid})`), {
+      code: 'EACCES',
+    });
   }
 }
 
@@ -90,15 +89,15 @@ function refuseForeignFile(fd: number, path: string): void {
  *  descriptor before the caller's first byte. A refusal closes the fd
  *  and throws — a planted artifact fails the spawn loudly. */
 function openPrivateSync(path: string, flags: number): number {
-  const fd = openSync(path, flags | NOFOLLOW, PRIVATE_FILE_MODE)
+  const fd = openSync(path, flags | NOFOLLOW, PRIVATE_FILE_MODE);
   try {
-    refuseForeignFile(fd, path)
-    pinPrivateFile(fd, path)
+    refuseForeignFile(fd, path);
+    pinPrivateFile(fd, path);
   } catch (err) {
-    closeSync(fd)
-    throw err
+    closeSync(fd);
+    throw err;
   }
-  return fd
+  return fd;
 }
 
 /** Truncate-write `path` owner-only: 0600 for a new file, and a
@@ -107,12 +106,12 @@ function openPrivateSync(path: string, flags: number): number {
  *  would empty a foreign-owned planted file before the owner check
  *  could refuse it. */
 export function writePrivateFileSync(path: string, data: string | Uint8Array): void {
-  const fd = openPrivateSync(path, constants.O_WRONLY | constants.O_CREAT)
+  const fd = openPrivateSync(path, constants.O_WRONLY | constants.O_CREAT);
   try {
-    privateFs.truncate(fd, 0)
-    privateFs.write(fd, data)
+    privateFs.truncate(fd, 0);
+    privateFs.write(fd, data);
   } finally {
-    closeSync(fd)
+    closeSync(fd);
   }
 }
 
@@ -121,11 +120,11 @@ export function writePrivateFileSync(path: string, data: string | Uint8Array): v
  *  pinned empty file for later appends (shell `>>`, `tee -a`, a
  *  detached fd) to inherit. */
 export function appendPrivateFileSync(path: string, data: string | Uint8Array): void {
-  const fd = openPrivateAppendSync(path)
+  const fd = openPrivateAppendSync(path);
   try {
-    privateFs.write(fd, data)
+    privateFs.write(fd, data);
   } finally {
-    closeSync(fd)
+    closeSync(fd);
   }
 }
 
@@ -133,10 +132,7 @@ export function appendPrivateFileSync(path: string, data: string | Uint8Array): 
  *  that keep the descriptor (spawn stdio redirection). The mode is
  *  pinned before the caller's first write. */
 export function openPrivateAppendSync(path: string): number {
-  return openPrivateSync(
-    path,
-    constants.O_WRONLY | constants.O_CREAT | constants.O_APPEND
-  )
+  return openPrivateSync(path, constants.O_WRONLY | constants.O_CREAT | constants.O_APPEND);
 }
 
 /** `mkdir -p` pinned owner-only on creation. An existing dir keeps its
@@ -148,25 +144,25 @@ export function openPrivateAppendSync(path: string): number {
  *  not after the whole call. */
 export function mkdirPrivateSync(path: string): void {
   if (existsSync(path)) {
-    return
+    return;
   }
-  const missing: string[] = []
+  const missing: string[] = [];
   for (let d = path; !existsSync(d); d = dirname(d)) {
-    missing.push(d)
+    missing.push(d);
   }
   for (const d of missing.reverse()) {
     try {
-      mkdirSync(d, PRIVATE_DIR_MODE)
+      mkdirSync(d, PRIVATE_DIR_MODE);
     } catch (err) {
       if ((err as NodeJS.ErrnoException).code === 'EEXIST') {
-        continue // creation race — the winner's mode stands
+        continue; // creation race — the winner's mode stands
       }
-      throw err
+      throw err;
     }
     try {
-      chmodSync(d, PRIVATE_DIR_MODE)
+      chmodSync(d, PRIVATE_DIR_MODE);
     } catch (err) {
-      warn(d, err)
+      warn(d, err);
     }
   }
 }

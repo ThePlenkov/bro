@@ -1,12 +1,13 @@
 ---
+
 title: bro self learn
 description: Triggered lessons with evidence, confidence, and a memory that knows when to speak.
 ---
 
-*Command examples track the upcoming **0.3.0** — grouped
+_Command examples track the upcoming **0.3.0** — grouped
 `bro <group> <member>` spellings and `0.3.0` marks are not yet on npm
 `latest` (**0.2.5**); use the flat names (`bro convoy run`,
-`bro debt status`).*
+`bro debt status`)._
 
 `bro self learn` stores durable lessons for the moments they matter. A lesson
 is a rule plus a trigger: hook events and optional terms, commands, paths,
@@ -14,14 +15,14 @@ tools, or failed-tool evidence decide when it surfaces.
 
 ## Commands
 
-| Command | What it does |
-| ------- | ------------ |
-| `bro self learn add --lesson "…" --on E… --evidence K:R…` | Store a manual lesson. `--on` and at least one `--evidence` are required; both are repeatable |
-| `bro self learn list [--json] [--source X] [--confidence X]` | List lessons, optionally filtered |
-| `bro self learn show <id>` | Print one lesson as JSON |
-| `bro self learn forget <id>` | Remove a lesson |
-| `bro self learn capture [--source drill\|retro\|act\|mol\|all] [--mol ID] [--dry-run] [--json]` | Distill finished artifacts into lessons |
-| `bro self learn probe <question>` | Ask the store first; a hit prints ranked lessons and a miss records the gap |
+| Command                                                                                         | What it does                                                                                  |
+| ----------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------- |
+| `bro self learn add --lesson "…" --on E… --evidence K:R…`                                       | Store a manual lesson. `--on` and at least one `--evidence` are required; both are repeatable |
+| `bro self learn list [--json] [--source X] [--confidence X]`                                    | List lessons, optionally filtered                                                             |
+| `bro self learn show <id>`                                                                      | Print one lesson as JSON                                                                      |
+| `bro self learn forget <id>`                                                                    | Remove a lesson                                                                               |
+| `bro self learn capture [--source drill\|retro\|act\|mol\|all] [--mol ID] [--dry-run] [--json]` | Distill finished artifacts into lessons                                                       |
+| `bro self learn probe <question>`                                                               | Ask the store first; a hit prints ranked lessons and a miss records the gap                   |
 
 `bro self learn probe` can also store an answer in its second phase with
 `--lesson`, `--on`, `--match-terms`, `--match-commands`,

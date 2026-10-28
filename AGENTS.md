@@ -66,15 +66,15 @@ Developing bro itself: see CONTRIBUTING.md.
   `bro review act threads` are the only verdict.
 - **Infra failures don't block** — the gate rule: project-caused
   failures (code, config, real findings) block; infrastructure failures
-  (quota, outage, runner flakes) never do. A *failed* AI-reviewer check
+  (quota, outage, runner flakes) never do. A _failed_ AI-reviewer check
   is pure infra — its findings arrive as threads, which block on their
-  own. Reviewers that are *reliably* flaky go on `act.ignoreChecks` in
+  own. Reviewers that are _reliably_ flaky go on `act.ignoreChecks` in
   bro.config.json so a stuck pending state doesn't block either —
   currently `"github-advanced-security"`, `"kilo"` (rate limits;
   advisory, may still be read — `check:docs` fails if this quote rots).
   The
   ignore is conditional: a failing ignored check is dropped quietly
-  only after `consecutiveFailures` failing heads in a row *with*
+  only after `consecutiveFailures` failing heads in a row _with_
   thread activity inside `threadWindowDays` — a failing check with no
   recent thread output surfaces as an alert (advisory, never a
   blocker), because a reviewer producing nothing is down, not flaky.
@@ -88,7 +88,7 @@ Developing bro itself: see CONTRIBUTING.md.
   the convoy default (`merge=auto`) opens a ready PR — the act gate is
   the merge mechanism. A dirty tree at session end is lost work.
 - **One executor per unit of work** — an interactive session (opencode,
-  claude, a terminal) owns what it plans and executes it *there*; bro is
+  claude, a terminal) owns what it plans and executes it _there_; bro is
   the bus — the claim, the ledger, the mailbox, the supervision — plus a
   batch lane that takes only work nobody owns. The occupancy plane skips
   a worktree a live session armed (`green-occupied — session armed work

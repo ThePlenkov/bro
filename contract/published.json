@@ -18,118 +18,34 @@
       "trend",
       "watch"
     ],
-    "act": [
-      "merge",
-      "rearm",
-      "reply",
-      "resolve",
-      "status",
-      "threads",
-      "wait"
-    ],
-    "convoy": [
-      "claim",
-      "done",
-      "list",
-      "next",
-      "pour",
-      "run",
-      "status"
-    ],
+    "act": ["merge", "rearm", "reply", "resolve", "status", "threads", "wait"],
+    "convoy": ["claim", "done", "list", "next", "pour", "run", "status"],
     "next": [],
     "loop": [],
     "fleet": [],
-    "agents": [
-      "down",
-      "prune",
-      "status",
-      "up"
-    ],
+    "agents": ["down", "prune", "status", "up"],
     "status": [],
     "notify": [],
-    "watch": [
-      "install",
-      "uninstall"
-    ],
+    "watch": ["install", "uninstall"],
     "drive": [],
     "serve": [],
-    "bus": [
-      "publish",
-      "serve",
-      "status",
-      "subscribe"
-    ],
+    "bus": ["publish", "serve", "status", "subscribe"],
     "check": [],
     "cleanup": [],
-    "drill": [
-      "current",
-      "distill",
-      "down",
-      "list",
-      "report",
-      "tree",
-      "up"
-    ],
+    "drill": ["current", "distill", "down", "list", "report", "tree", "up"],
     "unwind": [],
-    "retrospect": [
-      "capture",
-      "list",
-      "record",
-      "schema",
-      "status"
-    ],
-    "wtf": [
-      "capture",
-      "list",
-      "record",
-      "schema",
-      "status"
-    ],
-    "learn": [
-      "add",
-      "capture",
-      "forget",
-      "list",
-      "probe",
-      "show"
-    ],
-    "judge": [
-      "decide",
-      "replay",
-      "stats"
-    ],
-    "guard": [
-      "list",
-      "test"
-    ],
-    "work": [
-      "enter",
-      "leave",
-      "list",
-      "prune"
-    ],
-    "stack": [
-      "list",
-      "push",
-      "sync"
-    ],
-    "spec": [
-      "check",
-      "drift",
-      "init",
-      "new",
-      "tree"
-    ],
-    "setup": [
-      "bd"
-    ],
+    "retrospect": ["capture", "list", "record", "schema", "status"],
+    "wtf": ["capture", "list", "record", "schema", "status"],
+    "learn": ["add", "capture", "forget", "list", "probe", "show"],
+    "judge": ["decide", "replay", "stats"],
+    "guard": ["list", "test"],
+    "work": ["enter", "leave", "list", "prune"],
+    "stack": ["list", "push", "sync"],
+    "spec": ["check", "drift", "init", "new", "tree"],
+    "setup": ["bd"],
     "doctor": [],
     "sync": [],
-    "sweep": [
-      "distill",
-      "run",
-      "status"
-    ],
+    "sweep": ["distill", "run", "status"],
     "query": [],
     "mesh": [
       "accept",
@@ -144,20 +60,10 @@
       "wait"
     ],
     "run": [],
-    "plan": [
-      "list",
-      "validate"
-    ],
-    "plugins": [
-      "install",
-      "list",
-      "uninstall"
-    ]
+    "plan": ["list", "validate"],
+    "plugins": ["install", "list", "uninstall"]
   },
-  "docNouns": [
-    "task",
-    "store"
-  ],
+  "docNouns": ["task", "store"],
   "docVerbs": [
     "close",
     "create",
