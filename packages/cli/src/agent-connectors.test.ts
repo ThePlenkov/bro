@@ -10,6 +10,7 @@ import {
   rmSync,
   statSync,
   symlinkSync,
+  utimesSync,
   writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -2196,6 +2197,45 @@ describe('budgetSnapshot', () => {
       assert.equal(snap.resets[0]!.holding, true);
       // the harvest landed on the entry object, not just the report
       assert.equal(registry['step-x']!.cause, 'rate_limited');
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  test('an instant rate death escalates the recorded hold — streak rides the registry (bro-9eeld)', () => {
+    const { root, main } = initRepo('bro-ratedeath-');
+    try {
+      const home = agentsHomeOf(main);
+      mkdirSync(home, { recursive: true });
+      const spawnedAt = '2026-10-27T18:05:33Z';
+      // the .exit mtime is the honest death stamp — 11s after spawn,
+      // inside the instant-death window
+      const died = new Date(Date.parse(spawnedAt) + 11_000);
+      const dead = (id: string): AgentRegistryEntry => {
+        const f = join(home, `${id}.exit`);
+        writeFileSync(f, '1');
+        utimesSync(f, died, died);
+        const log = join(home, `${id}.log`);
+        writeFileSync(
+          log,
+          'boom\nReached free model rate limit — resets at 2999-01-01T00:00:00Z\n'
+        );
+        return { agentId: id, backend: 'native', spawnedAt, log };
+      };
+      // a fresh step and one already on its second instant death
+      patchAgentRegistry(main, 'step-first', dead('native-a1'));
+      patchAgentRegistry(main, 'step-second', { ...dead('native-a2'), rateStreak: 1 });
+      const snap = budgetSnapshot(main, home, readAgentRegistry(main), ENV, NOW);
+      assert.equal(snap.blocked, 2);
+      const first = readAgentRegistry(main)['step-first']!;
+      const second = readAgentRegistry(main)['step-second']!;
+      // the recorded hold is the reported mark PLUS the streak-scaled
+      // wait — 30s on the first instant death, 60s on the second
+      assert.equal(first.cause, 'rate_limited');
+      assert.equal(first.resetAt, '2999-01-01T00:00:30.000Z');
+      assert.equal(first.rateStreak, 1);
+      assert.equal(second.resetAt, '2999-01-01T00:01:00.000Z');
+      assert.equal(second.rateStreak, 2);
     } finally {
       rmSync(root, { recursive: true, force: true });
     }
