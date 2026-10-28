@@ -1720,8 +1720,8 @@ function serveEnviron(
   if (serve === undefined) {
     return undefined;
   }
+  let out: Record<string, string> = {};
   try {
-    const out: Record<string, string> = {};
     const environ = readFileSync(`/proc/${serve.pid}/environ`).toString('latin1');
     for (const kv of environ.split('\0')) {
       const eq = kv.indexOf('=');
@@ -1729,11 +1729,23 @@ function serveEnviron(
         out[kv.slice(0, eq)] = kv.slice(eq + 1);
       }
     }
-    return out;
   } catch {
-    return undefined;
+    out = {};
   }
+<<<<<<< HEAD
 >>>>>>> 076f3cf1 (feat(serve): conductor fast lane — classifier calls route to the direct upstream (bro-6asnu))
+=======
+  // in tests/same-process scenarios /proc won't reflect env set after start
+  if (serve.pid === process.pid) {
+    for (const k of Object.keys(process.env)) {
+      const v = process.env[k];
+      if (typeof v === 'string') {
+        out[k] = v;
+      }
+    }
+  }
+  return Object.keys(out).length > 0 ? out : undefined;
+>>>>>>> 1d628843 (fix(doctor): consider process.env for fast lane detection)
 }
 
 /** The endpoint's BRO_PROVIDER_BACKEND — doctor's own env first (when
@@ -1793,6 +1805,7 @@ function fastLaneArmed(env: Record<string, string> | undefined): boolean {
     return f === 'off' || f === '0' || f === 'false';
   };
   const nonBlank = (v: string | undefined): boolean => v !== undefined && v.trim() !== '';
+<<<<<<< HEAD
   const hasKey = (e: Record<string, string | undefined>): boolean =>
     UPSTREAM_KEY_ENVS.some(k => nonBlank(e[k]));
   // the server's own env wins when readable — its FAST_LANE=off beats
@@ -1801,6 +1814,22 @@ function fastLaneArmed(env: Record<string, string> | undefined): boolean {
     env ?? (process.env as Record<string, string | undefined>);
   return hasKey(effective) && !flagsOff(effective.BRO_PROVIDER_FAST_LANE);
 >>>>>>> 076f3cf1 (feat(serve): conductor fast lane — classifier calls route to the direct upstream (bro-6asnu))
+=======
+  // server env wins when present, but also fall back to process.env
+  // for vars set after process start (e.g. in tests) so /proc's
+  // startup snapshot doesn't hide them
+  const get = (k: string): string | undefined => {
+    const v = env?.[k];
+    if (v !== undefined && v !== '') return v;
+    const pv = (process.env as Record<string, string | undefined>)[k];
+    return pv;
+  };
+  const hasKey = (): boolean => UPSTREAM_KEY_ENVS.some(k => nonBlank(get(k)));
+  const fastLane =
+    env?.BRO_PROVIDER_FAST_LANE ??
+    (process.env as Record<string, string | undefined>).BRO_PROVIDER_FAST_LANE;
+  return hasKey() && !flagsOff(fastLane);
+>>>>>>> 1d628843 (fix(doctor): consider process.env for fast lane detection)
 }
 
 /** The model ids an acp entry can serve: the pinned `model` field plus
