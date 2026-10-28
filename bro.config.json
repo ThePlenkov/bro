@@ -96,7 +96,9 @@
     },
     "devin": {
       "maxSessions": 6,
-      "maxWorkers": 4
+      "maxWorkers": 4,
+      "type": "cli",
+      "command": "devin -p --permission-mode dangerous --prompt-file {promptFile}"
     }
   },
   "fleet": {

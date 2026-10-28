@@ -6,7 +6,7 @@
  * (subcommand + skill + config section); see plugins.ts for the list
  * and `bro plugins` for the live registry.
  */
-import { EXIT, printUsage, warnDeprecated, type BroPlugin, type ExitCode } from '@broject/core'
+import { CommandError, EXIT, printUsage, warnDeprecated, type BroPlugin, type ExitCode } from '@broject/core'
 import { journalCommand } from './commands/hooks.ts'
 import { registerTelegramSink } from './commands/sinks-telegram.ts'
 import { otelSpan, setAmbient } from '@broject/providers'
@@ -217,6 +217,17 @@ async function main(): Promise<void> {
 }
 
 main().catch((err: unknown) => {
+  if (err instanceof CommandError) {
+    if (err.usage) {
+      printUsage(err.usage, err.code)
+    }
+    if (err.code === EXIT.ok) {
+      if (err.message) console.log(err.message)
+      process.exit(0)
+    }
+    if (err.message) console.error(err.message)
+    process.exit(err.code)
+  }
   console.error(err instanceof Error ? err.message : err)
   process.exit(1)
 })

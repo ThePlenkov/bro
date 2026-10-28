@@ -16,7 +16,7 @@
  * flag resolved at adapter construction, never a verb concern.
  */
 import { spawnSync } from 'node:child_process'
-import { facade } from '@broject/core'
+import { CommandError, EXIT, facade } from '@broject/core'
 import type { DocAdapter, DocCtx, DocFlags, DocType, TaskFilter, TaskInput, TaskRow, TaskStore } from '@broject/core'
 import { requireGlobalStore } from './store.ts'
 import { loadBroConfig } from '../plugins.ts'
@@ -83,8 +83,7 @@ function toInput(input: Record<string, unknown>, flags: DocFlags): TaskInput {
 function taskAdapter(ctx: DocCtx): DocAdapter<TaskRow> {
   const store = storeFor(ctx)
   const die = (msg: string): never => {
-    console.error(`error: ${msg}`)
-    process.exit(2)
+    throw new CommandError(`error: ${msg}`, EXIT.usage)
   }
   return {
     list: (flags) => store().list(toFilter(flags)),
@@ -130,13 +129,16 @@ function taskAdapter(ctx: DocCtx): DocAdapter<TaskRow> {
       // the real diagnostic (ENOENT + install hint) must come from here
       if (res.error) {
         const enoent = (res.error as NodeJS.ErrnoException).code === 'ENOENT'
-        console.error(
+        throw new CommandError(
           enoent
             ? 'error: bd not found — install beads first (https://github.com/gastownhall/beads)'
-            : `error: bd failed — ${res.error.message}`
+            : `error: bd failed — ${res.error.message}`,
+          (res.status as ExitCode) ?? EXIT.error
         )
       }
-      process.exit(res.status ?? 1)
+      if (res.status !== 0 && res.status !== null) {
+        throw new CommandError('', res.status as ExitCode)
+      }
     },
   }
 }

@@ -14,7 +14,7 @@
  */
 import { existsSync, mkdirSync, rmSync } from 'node:fs'
 import { isAbsolute, join, resolve } from 'node:path'
-import { DEFAULT_GLOBAL_BEADS_DIR, gitTry, taskStore } from '@broject/core'
+import { CommandError, DEFAULT_GLOBAL_BEADS_DIR, EXIT, gitTry, taskStore } from '@broject/core'
 import type { DocAdapter, DocCtx, DocFlags, DocType, Scope } from '@broject/core'
 import { loadBroConfig } from '../plugins.ts'
 
@@ -44,8 +44,10 @@ export function resolveGlobalDir(cwd: string = process.cwd()): string {
 export function requireGlobalStore(cwd: string = process.cwd()): string {
   const dir = resolveGlobalDir(cwd)
   if (!existsSync(join(dir, '.beads'))) {
-    console.error(`error: no global beads store at ${dir} — run \`bro store init --global\` first`)
-    process.exit(2)
+    throw new CommandError(
+      `error: no global beads store at ${dir} — run \`bro store init --global\` first`,
+      EXIT.usage
+    )
   }
   return dir
 }
@@ -92,13 +94,11 @@ function storeName(ref: string | undefined, scope: Scope): Scope | undefined {
  *  what this run created so a failed init doesn't strand a store. */
 function initFailed(err: unknown, dir: string, drop: () => void): never {
   const enoent = (err as NodeJS.ErrnoException | undefined)?.code === 'ENOENT'
-  console.error(
-    enoent
-      ? 'error: bd not found — install beads first (https://github.com/gastownhall/beads)'
-      : `error: store init failed in ${dir}${err instanceof Error ? ` (${err.message})` : ''}`
-  )
+  const msg = enoent
+    ? 'error: bd not found — install beads first (https://github.com/gastownhall/beads)'
+    : `error: store init failed in ${dir}${err instanceof Error ? ` (${err.message})` : ''}`
   drop()
-  process.exit(1)
+  throw new CommandError(msg, EXIT.error)
 }
 
 /** Exported for tests — the ENOENT/prefix paths are the contract a

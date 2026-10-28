@@ -57,7 +57,9 @@ import {
 import { basename } from 'node:path';
 import { randomBytes } from 'node:crypto';
 import {
+  CommandError,
   countSessionReservations,
+  EXIT,
   gitCommonDir,
   hasHelpFlag,
   printUsage,
@@ -127,8 +129,7 @@ function usage(exitCode: ExitCode = 2): never {
 // never-returning function declarations as terminating the control flow,
 // so the die() call sites below narrow correctly
 function die(msg: string): never {
-  console.error(`error: ${msg}`);
-  process.exit(1);
+  throw new CommandError(`error: ${msg}`, EXIT.error)
 }
 
 /** One backend's plane — the connector plus what its list() saw. */

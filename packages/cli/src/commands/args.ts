@@ -1,7 +1,7 @@
 /**
  * Shared hand-rolled arg parsing for bro commands — no parser library.
  */
-import { warnDeprecated } from '@broject/core'
+import { CommandError, EXIT, warnDeprecated } from '@broject/core'
 
 /** Warn (once per invocation) that a flag is deprecated — it still
  *  applies; removal lands in a later release. Matches both `--flag`
@@ -16,8 +16,7 @@ export function deprecatedFlag(argv: string[], name: string, advice?: string): v
 export function flagValue(argv: string[], i: number, name: string): string {
   const v = argv[i + 1]
   if (v === undefined || v.trim() === '' || v.startsWith('--')) {
-    console.error(`error: ${name} requires a value`)
-    process.exit(2)
+    throw new CommandError(`error: ${name} requires a value`, EXIT.usage)
   }
   return v
 }
@@ -40,15 +39,13 @@ export function flag(argv: string[], name: string): string | undefined {
     return undefined
   }
   if (occurrences.length > 1) {
-    console.error(`error: ${name} may be given only once`)
-    process.exit(2)
+    throw new CommandError(`error: ${name} may be given only once`, EXIT.usage)
   }
   const eq = occurrences[0]!
   if (eq.startsWith(`${name}=`)) {
     const v = eq.slice(name.length + 1)
     if (v === '') {
-      console.error(`error: ${name} requires a value`)
-      process.exit(2)
+      throw new CommandError(`error: ${name} requires a value`, EXIT.usage)
     }
     return v
   }
@@ -69,8 +66,7 @@ export function flagAll(argv: string[], name: string): string[] {
     } else if (arg.startsWith(`${name}=`)) {
       const v = arg.slice(name.length + 1)
       if (v === '') {
-        console.error(`error: ${name} requires a value`)
-        process.exit(2)
+        throw new CommandError(`error: ${name} requires a value`, EXIT.usage)
       }
       out.push(v)
     }
@@ -100,14 +96,12 @@ function flagTokenKind(
     // `argv.includes('--dry-run')` checks miss it — a silent live run.
     // strict mode refuses the inline value outright
     if (opts?.strict === true && arg !== name) {
-      console.error(`error: option ${name} takes no value`)
-      process.exit(2)
+      throw new CommandError(`error: option ${name} takes no value`, EXIT.usage)
     }
     return 'bool'
   }
   if (opts?.strict === true) {
-    console.error(`error: unknown option ${name}`)
-    process.exit(2)
+    throw new CommandError(`error: unknown option ${name}`, EXIT.usage)
   }
   return 'drop'
 }
@@ -149,8 +143,7 @@ export function positionals(
       // value — a missing or flag-looking value is a usage error,
       // never a silent misconfig
       if (opts?.strict === true && (next === undefined || next.startsWith('--'))) {
-        console.error(`error: option ${arg} requires a value`)
-        process.exit(2)
+        throw new CommandError(`error: option ${arg} requires a value`, EXIT.usage)
       }
       i += 1
     }

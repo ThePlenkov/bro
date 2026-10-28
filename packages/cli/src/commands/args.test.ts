@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict'
 import { describe, test } from 'node:test'
+import { CommandError, EXIT } from '@broject/core'
 import { deprecatedFlag, flag, flagAll, positionals } from './args.ts'
 
 class Exit extends Error {
@@ -8,7 +9,7 @@ class Exit extends Error {
   }
 }
 
-/** Intercept process.exit — the arg helpers exit(2) on bad input. */
+/** Intercept CommandError/process.exit — the arg helpers exit(2) on bad input. */
 function exits(fn: () => unknown): { code: number; err: string[] } {
   const origExit = process.exit
   const origErr = console.error
@@ -21,6 +22,10 @@ function exits(fn: () => unknown): { code: number; err: string[] } {
     fn()
     return { code: -1, err }
   } catch (e) {
+    if (e instanceof CommandError) {
+      if (e.message) err.push(e.message)
+      return { code: e.code, err }
+    }
     return { code: e instanceof Exit ? e.code : -1, err }
   } finally {
     process.exit = origExit

@@ -1,7 +1,7 @@
 /** `bro fleet delegate` — the CLI surface over the delegate core
  *  (delegate.ts). Parses argv into a DelegateRequest, prints the
  *  result contract; the core owns mode semantics. */
-import { hasHelpFlag, printUsage, type ExitCode } from '@broject/core';
+import { CommandError, EXIT, hasHelpFlag, printUsage, type ExitCode } from '@broject/core';
 import { flag, positionals } from './args.ts';
 import { loadAgentEnv } from '../agent-connectors.ts';
 import {
@@ -38,8 +38,7 @@ function usage(exitCode: ExitCode = 2): never {
 // declarations as terminating the control flow (same convention as
 // agents.ts's die)
 function die(msg: string): never {
-  console.error(`error: ${msg}`);
-  process.exit(1);
+  throw new CommandError(`error: ${msg}`, EXIT.error)
 }
 
 const VALUE_FLAGS = new Set([

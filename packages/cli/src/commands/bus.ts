@@ -13,6 +13,8 @@
  * `status` is meant to be safe to call from a hook or a doctor walk.
  */
 import {
+  CommandError,
+  EXIT,
   busPublish,
   busSocketPath,
   busStatus,
@@ -77,8 +79,7 @@ function usage(exitCode: ExitCode = 2): never {
 
 // Same reason as agents.ts's die(): declared so tsc narrows.
 function die(msg: string): never {
-  console.error(`error: ${msg}`)
-  process.exit(1)
+  throw new CommandError(`error: ${msg}`, EXIT.error)
 }
 
 /** A misspelled option is a typo, not input — writes fail closed. */
