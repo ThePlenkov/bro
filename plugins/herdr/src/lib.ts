@@ -487,21 +487,18 @@ export function shellWords(text: string): string[] {
   for (const m of text.matchAll(SEGMENT)) {
     const s = m[0];
     if (/^\s+$/.test(s)) {
-      if (cur !== '') {
-        out.push(cur);
-        cur = '';
-      }
-    } else if (s === '\\') {
-      throw new Error('trailing backslash');
-    } else if (s.startsWith('"')) {
-      if (s.length < 2 || !s.endsWith('"')) throw new Error('unclosed " quote');
-      cur += unescape(s.slice(1, -1));
-    } else if (s.startsWith("'")) {
-      if (s.length < 2 || !s.endsWith("'")) throw new Error("unclosed ' quote");
-      cur += s.slice(1, -1);
-    } else {
-      cur += s.startsWith('\\') ? (ESCAPES[s[1] as string] ?? s[1]) : s;
+      if (cur !== '') out.push(cur);
+      cur = '';
+      continue;
     }
+    if (s === '\\') throw new Error('trailing backslash');
+    if (s.startsWith('"') || s.startsWith("'")) {
+      const q = s[0] as string;
+      if (s.length < 2 || !s.endsWith(q)) throw new Error(`unclosed ${q} quote`);
+      cur += q === '"' ? unescape(s.slice(1, -1)) : s.slice(1, -1);
+      continue;
+    }
+    cur += s.startsWith('\\') ? unescape(s) : s;
   }
   if (cur !== '') out.push(cur);
   return out;
