@@ -1,6 +1,6 @@
 ---
-
-## parent: project
+parent: project
+---
 
 # skills-lock — materialising external skills through bro
 
@@ -54,7 +54,7 @@ fetch it. bro's plugin ships what bro owns.
 **Installation delegates to `npx skills`** — the same CLI that already produces
 this lockfile. bro does not re-implement git fetching, hashing or symlinking:
 `npx skills add <owner>/<repo> --skill <name> -y` per entry. bro's contribution is the
-_contract_ and the _verification_, not the mechanism.
+*contract* and the *verification*, not the mechanism.
 
 **Verification is bro's own value-add.** After install, each locked skill is
 checked against `computedHash` — the hash of the whole skill folder. A skill whose
@@ -74,7 +74,7 @@ rest proceed. A hash mismatch → reported as drift, the skill stays installed
   their repos, and bro's plugin stays bro's own capability surface.
 - It does not **publish** a bundle. The `compile → agents target → pack` path
   exists for a different job (shipping bro's own skills to consumers); this is
-  the path for _consuming_ skills bro does not own.
+  the path for *consuming* skills bro does not own.
 - It does not **decide** who owns a skill. When two repos ship the same skill
   name, the lockfile is the arbiter: one entry, one owner. That is a decision
   for the repo owner, and the lockfile records it.
