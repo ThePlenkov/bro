@@ -452,74 +452,9 @@ describe('bro loop e2e', () => {
       assert.match(r.stdout, /done — 0 landed, 0 closed, 0 parked, 0 failed/);
     });
   });
-<<<<<<< HEAD
-=======
-
-  test('a wedged task store holds the pick as infra — never a dead supervisor (bro-cu3q8)', () => {
-    // the 2026-10-25 incident: the dolt store wedged mid-run and a
-    // thrown `bd()` inside the claim pass killed the supervisor while
-    // fleet workers were alive. Now the throw is a held tick — warn
-    // with the retry hint, keep the cadence, never claim, never exit.
-    const f = loopFixture([{ ...FAKE_BEAD, id: 'fx-a', title: 'ship it' }]);
-    inside(f.main, f.root, () => {
-      const wedge = join(f.root, 'bd-wedge.txt');
-      // `update` — the startup probe only runs list/ready/info, so the
-      // store answers healthy until the tick's `bd update --claim` fails
-      writeFileSync(wedge, 'update\n');
-      const proc = spawnSync(process.execPath, [CLI_DIST, 'loop', '--interval', '0.1'], {
-        cwd: f.main,
-        env: e2eEnv({ ...f.env, FAKE_BD_WEDGE: wedge }),
-        encoding: 'utf8',
-        // each held re-pick still pays the worktree+spawn probe — ~2.5s
-        // a cycle — so the >1-warning assertion wants several cycles
-        timeout: 15_000,
-      });
-      // killed by the test clock, not the wedge — the run held
-      assert.equal(proc.status, null, 'run should have held until the test timeout');
-      const stderr = proc.stderr ?? '';
-      assert.match(stderr, /loop: claim failed — /);
-      assert.match(stderr, /infra hold; the next interval retries/);
-      // the cadence — a held run keeps retrying, and the heartbeat
-      // names the wait as infra rather than a silent stall
-      assert.ok(
-        (stderr.match(/loop: claim failed/g) ?? []).length > 1,
-        'expected repeated held-pick warnings'
-      );
-      assert.match(stderr, /loop: alive — infra hold — claim/);
-      assert.doesNotMatch(proc.stdout ?? '', /loop: done/);
-      // nothing claimed, nothing spawned — the worktree the refused
-      // spawn already built stays for the retry's reuse, but no agent
-      // ever ran and the bead never left open
-      assert.equal(bead(f.db, 'fx-a')?.status, 'open');
-      assert.equal(spawns(f), '');
-    });
   });
 
-  test('a bd spawn timeout lands the incident signature as a held tick (bro-cu3q8)', () => {
-    // 'spawnSync <bin> ETIMEDOUT' is the incident's own signature — the
-    // fake bd sleeps past the claim probe's 15s budget so the failure
-    // shape is exact ('bd' on this probe path, the supervised
-    // 'timeout' wrapper in the incident — both classify unavailable,
-    // never a claim race).
-    const f = loopFixture([{ ...FAKE_BEAD, id: 'fx-a', title: 'ship it' }]);
-    inside(f.main, f.root, () => {
-      const wedge = join(f.root, 'bd-wedge.txt');
-      writeFileSync(wedge, 'hang:update\n');
-      const proc = spawnSync(process.execPath, [CLI_DIST, 'loop', '--interval', '0.1'], {
-        cwd: f.main,
-        env: e2eEnv({ ...f.env, FAKE_BD_WEDGE: wedge }),
-        encoding: 'utf8',
-        timeout: 19_000,
-      });
-      assert.equal(proc.status, null, 'run should have held until the test timeout');
-      assert.match(
-        proc.stderr ?? '',
-        /loop: claim failed — .*spawnSync.*ETIMEDOUT — infra hold; the next interval retries/
-      );
-      assert.equal(bead(f.db, 'fx-a')?.status, 'open');
-    });
-  });
->>>>>>> 88f03270 (fix(loop): infra failures hold the tick — never kill the supervisor (bro-cu3q8))
+ (fix(loop): infra failures hold the tick — never kill the supervisor (bro-cu3q8))
 
   test('a throwing claim read degrades to a held push — never a supervisor death (bro-etimout)', () => {
     // a store wedged past bd's 15s budget throws out of claimClump's

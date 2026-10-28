@@ -23,10 +23,27 @@
  * mol/wisp (molecules), provenance (evidence), kv/docs, config.
  * Those keep calling bd() until they get doc types.
  */
-import { join } from 'node:path'
-import { bd, BdCompatError, bdAt, BD_NO_STORE, bdJson, bdJsonAsync, bdTry, bdTryAsync, isBdNotFound } from './bd.ts'
-import { bridgeFetch, bridgePublish, doltHeadHealth, DOLT_DATA_REF, doltSyncPlan, type DoltBridge } from './dolt-bridge.ts'
-import { GIT_SYNC_PROBE_TIMEOUT_MS, gitTry, gitTryAsync } from './git.ts'
+import { join } from 'node:path';
+import {
+  bd,
+  BdCompatError,
+  bdAt,
+  BD_NO_STORE,
+  bdJson,
+  bdJsonAsync,
+  bdTry,
+  bdTryAsync,
+  isBdNotFound,
+} from './bd.ts';
+import {
+  bridgeFetch,
+  bridgePublish,
+  doltHeadHealth,
+  DOLT_DATA_REF,
+  doltSyncPlan,
+  type DoltBridge,
+} from './dolt-bridge.ts';
+import { GIT_SYNC_PROBE_TIMEOUT_MS, gitTry, gitTryAsync } from './git.ts';
 
 /** Resolved probe results per dir — hook surfaces ask for the actor
  *  several times per event in one process, and each probe is a sync
@@ -70,11 +87,7 @@ function probeActor(dir: string): string {
   if (v !== '') {
     return v;
   }
-<<<<<<< HEAD
-  const git = gitTry(['-C', dir, 'config', 'user.name'], GIT_SYNC_PROBE_TIMEOUT_MS)
-=======
-  const git = gitTry(['-C', dir, 'config', 'user.name']);
->>>>>>> 1c4713f7 (fix(loop): infra failures hold the tick — never kill the supervisor (bro-cu3q8))
+  const git = gitTry(['-C', dir, 'config', 'user.name'], GIT_SYNC_PROBE_TIMEOUT_MS);
   if (git.code === 0 && git.out.trim() !== '') {
     return git.out.trim();
   }
@@ -104,11 +117,7 @@ function bdActorAt(beadsDir: string): string {
     actorCache.set(key, configActor);
     return configActor;
   }
-<<<<<<< HEAD
-  const git = gitTry(['config', 'user.name'], GIT_SYNC_PROBE_TIMEOUT_MS)
-=======
-  const git = gitTry(['config', 'user.name']);
->>>>>>> 1c4713f7 (fix(loop): infra failures hold the tick — never kill the supervisor (bro-cu3q8))
+  const git = gitTry(['config', 'user.name'], GIT_SYNC_PROBE_TIMEOUT_MS);
   return git.code === 0 && git.out.trim() !== ''
     ? git.out.trim()
     : (process.env.USER?.trim() ?? '');
@@ -130,11 +139,7 @@ export async function bdActorAsync(dir: string): Promise<string> {
   const line = cfg.code === 0 ? (cfg.out.trim().split('\n').pop()?.trim() ?? '') : '';
   let actor = parseActorLine(line);
   if (actor === '') {
-<<<<<<< HEAD
-    const git = await gitTryAsync(['-C', dir, 'config', 'user.name'], GIT_SYNC_PROBE_TIMEOUT_MS)
-=======
-    const git = gitTry(['-C', dir, 'config', 'user.name']);
->>>>>>> 1c4713f7 (fix(loop): infra failures hold the tick — never kill the supervisor (bro-cu3q8))
+    const git = await gitTryAsync(['-C', dir, 'config', 'user.name'], GIT_SYNC_PROBE_TIMEOUT_MS);
     actor =
       git.code === 0 && git.out.trim() !== '' ? git.out.trim() : (process.env.USER?.trim() ?? '');
   }

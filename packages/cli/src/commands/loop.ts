@@ -1918,7 +1918,6 @@ async function serviceWorker(ctx: Ctx, m: GateMember): Promise<ServiceVerdict> {
   let info: AgentInfo | undefined;
   try {
     info = await ctx.agents!.status(w.agentId);
-    m.fetchErrors = 0;
   } catch (err) {
     if (!(err instanceof AgentNotFound)) {
       m.fetchErrors += 1;
@@ -2116,7 +2115,6 @@ async function serviceGate(ctx: Ctx, m: GateMember): Promise<ServiceVerdict> {
       blockers: gate.blockers,
       pending: gatePending(state),
     };
-    m.fetchErrors = 0;
   } catch (err) {
     m.fetchErrors += 1;
     console.error(`loop ${prRef(ctx, pr)}: fetch failed (${m.fetchErrors}) — ${String(err)}`);
@@ -3514,7 +3512,8 @@ async function tryClaim(
     // release — the same settle its worktree/prompt arms run — then the
     // clump un-sees so the held retry re-picks it (bro-cu3q8)
     const msg = err instanceof Error ? err.message : String(err);
-    for (const b of openBeads(ctx, clump)) {
+    const ours = ctx.agents === undefined ? clump : clump.slice(1);
+    for (const b of openBeads(ctx, ours)) {
       noteBead(ctx.tasks, b.id, `loop: push failed — ${msg}`);
       reopenBead(ctx, b.id);
     }
@@ -3608,7 +3607,8 @@ function holdForInfra(ctx: Ctx, q: QueueState, what: string, err: unknown): fals
   // the stage carries the wait too — the heartbeat and the exit audit
   // classify a wedged backend as infra, never a plain failure. It
   // rides q.holdStage so the idle overwrite can't erase it mid-hold.
-  q.holdStage = `infra hold — ${what}`;
+  q.infraErrors += 1;
+  q.holdStage = `infra hold (${q.infraErrors}) — ${what}`;
   ctx.stage = q.holdStage;
   console.error(
     `loop: ${what} failed — ${err instanceof Error ? err.message : String(err)} — ` +
@@ -3653,18 +3653,21 @@ async function runQueue(ctx: Ctx): Promise<void> {
       let busy = false;
       try {
         busy = await servicePass(ctx, q);
-        if (await tryClaim(ctx, scope, q)) {
+        const claimed = await tryClaim(ctx, scope, q);
+        if (claimed) {
           q.infraErrors = 0;
+          q.holdStage = undefined;
           continue;
         }
-        q.infraErrors = 0;
+        if (q.holdStage?.startsWith('infra hold')) {
+          q.infraErrors += 1;
+          q.holdStage = q.holdStage.includes('(') ? q.holdStage.replace(/\(\d+\)/, `(${q.infraErrors})`) : `infra hold (${q.infraErrors})`;
+          ctx.stage = q.holdStage;
+        } else {
+          q.infraErrors = 0;
+          q.holdStage = undefined;
+        }
       } catch (err) {
-        // last-resort liveness (bro-cu3q8): the member/claim boundaries
-        // hold their own failures, but anything residual — a wedged
-        // store, a dead fs, a spawn timeout — is still infra, never a
-        // dead supervisor. Warn with the retry hint, hold pushes for
-        // the interval, keep the cadence; the count rides the stage so
-        // the heartbeat and the exit audit name the wait as infra.
         q.infraErrors += 1;
         q.holdStage = `infra hold (${q.infraErrors})`;
         ctx.stage = q.holdStage;
