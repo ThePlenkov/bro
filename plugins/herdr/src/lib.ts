@@ -493,6 +493,32 @@ const segmentText = (s: string): string => {
   return q === '"' ? unescapeWord(body) : body;
 };
 
+interface WordAcc {
+  out: string[];
+  cur: string;
+  open: boolean;
+}
+
+/** Position coverage — a regex gap means an unlexable char slipped
+ *  through (only a lone `\` can: every other byte matches some
+ *  alternative). Returns the new offset. */
+const ate = (m: RegExpMatchArray, pos: number): number => {
+  if ((m.index ?? -1) !== pos) throw new Error(`malformed input at offset ${pos}`);
+  return pos + m[0].length;
+};
+
+/** Whitespace closes an open word; anything else accrues into it. */
+const take = (a: WordAcc, s: string): void => {
+  if (!/^\s+$/.test(s)) {
+    a.cur += segmentText(s);
+    a.open = true;
+    return;
+  }
+  if (a.open) a.out.push(a.cur);
+  a.cur = '';
+  a.open = false;
+};
+
 /** Minimal shell-words split for operator-selected text — whitespace-
  *  separated argv honoring '…', "…" and \x escapes. Empty quoted
  *  tokens (""/'') survive as empty argv — `cur` alone can't tell a
@@ -502,26 +528,15 @@ const segmentText = (s: string): string => {
  *  a usage error, named as such. */
 export function shellWords(text: string): string[] {
   const SEGMENT = /"(?:\\.|[^"\\])*"?|'[^']*'?|\\.|[^\s'"\\]+|\s+/g;
-  const out: string[] = [];
-  let cur = '';
-  let open = false;
+  const acc = { out: [] as string[], cur: '', open: false };
   let pos = 0;
   for (const m of text.matchAll(SEGMENT)) {
-    if ((m.index ?? -1) !== pos) throw new Error(`malformed input at offset ${pos}`);
-    const s = m[0];
-    pos += s.length;
-    if (/^\s+$/.test(s)) {
-      if (open) out.push(cur);
-      cur = '';
-      open = false;
-      continue;
-    }
-    cur += segmentText(s);
-    open = true;
+    pos = ate(m, pos);
+    take(acc, m[0]);
   }
   if (pos !== text.length) throw new Error('trailing backslash');
-  if (open) out.push(cur);
-  return out;
+  if (acc.open) acc.out.push(acc.cur);
+  return acc.out;
 }
 
 export { basename, dirname, join, resolve };

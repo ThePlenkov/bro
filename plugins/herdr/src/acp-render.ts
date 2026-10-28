@@ -31,25 +31,41 @@ const RESET = '\u001b[0m';
 
 const isCtrl = (c: number): boolean => c < 9 || (c > 10 && c < 32) || (c > 126 && c < 160);
 
-/** ESC + rest of a sequence — CSI ends at a final byte 0x40–0x7e,
- *  OSC at BEL or ESC\, anything else is ESC + one char. Returns the
- *  index of the sequence's last char (or the ESC itself if
- *  truncated). */
-const skipEscape = (s: string, i: number): number => {
-  const n = s.length;
-  const kind = s[i + 1];
+/** Cursor over the wire string — carries s + position so the escape
+ *  scanners share state instead of threading (string, number) pairs. */
+interface Cur {
+  s: string;
+  i: number;
+}
+
+/** CSI final byte lives in 0x40–0x7e. */
+const isFinal = (c: number): boolean => c > 0x3f && c < 0x7f;
+
+const csiEnd = (c: Cur): void => {
+  while (c.i < c.s.length && !isFinal(c.s.charCodeAt(c.i))) c.i++;
+};
+
+/** OSC ends at BEL or the two-char terminator ESC\. */
+const oscStop = (c: Cur): boolean =>
+  c.s.charCodeAt(c.i) === 0x07 || (c.s.charCodeAt(c.i) === 0x1b && c.s[c.i + 1] === '\\');
+
+const oscEnd = (c: Cur): void => {
+  while (c.i < c.s.length && !oscStop(c)) c.i++;
+  if (c.s.charCodeAt(c.i) === 0x1b) c.i++;
+};
+
+/** Lands on the sequence's last char — the caller's loop steps past
+ *  it. ESC + one char is the degenerate case: stay on that char. */
+const escSkip = (c: Cur): void => {
+  const kind = c.s[c.i + 1];
+  c.i++;
   if (kind === '[') {
-    i += 2;
-    while (i < n && !(s.charCodeAt(i) > 0x3f && s.charCodeAt(i) < 0x7f)) i++;
-    return i;
+    c.i++;
+    csiEnd(c);
+  } else if (kind === ']') {
+    c.i++;
+    oscEnd(c);
   }
-  if (kind === ']') {
-    i += 2;
-    while (i < n && s.charCodeAt(i) !== 0x07 && !(s.charCodeAt(i) === 0x1b && s[i + 1] === '\\'))
-      i++;
-    return s.charCodeAt(i) === 0x1b ? i + 1 : i;
-  }
-  return i + 1;
 };
 
 /** Agent-controlled text may carry control bytes — strip everything
@@ -57,12 +73,13 @@ const skipEscape = (s: string, i: number): number => {
  *  sequences into the pane. Line-mode invariant too: newlines become
  *  a visible `⏎`, never a second line. */
 export const safe = (s: string): string => {
+  const c: Cur = { s, i: 0 };
   let out = '';
-  for (let i = 0; i < s.length; i++) {
-    const c = s.charCodeAt(i);
-    if (c === 0x1b) i = skipEscape(s, i);
-    else if (c === 0x0a) out += ' ⏎ ';
-    else if (!isCtrl(c) && c !== 0x0d) out += s[i];
+  for (; c.i < s.length; c.i++) {
+    const ch = s.charCodeAt(c.i);
+    if (ch === 0x1b) escSkip(c);
+    else if (ch === 0x0a) out += ' ⏎ ';
+    else if (!isCtrl(ch) && ch !== 0x0d) out += s[c.i];
   }
   return out;
 };
