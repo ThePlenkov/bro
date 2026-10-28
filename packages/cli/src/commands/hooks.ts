@@ -112,6 +112,7 @@ import { emitPostMerge, runPostMergeRefresh } from './postmerge.ts';
 import { maybeSpawnTraceFlush } from './trace.ts';
 import { emitRefGuard } from './refguard.ts';
 import { goalContextLines, goalStopLines } from './goal.ts';
+import { HOOK_DISPATCH_ERR } from './hook-signal.ts';
 import { heartbeatLine } from './watch-heartbeat.ts';
 import {
   CURSOR_HYDRATED_SKILL,
@@ -2021,42 +2022,51 @@ function normalizeToolOutcome(event: string, input: HookInput, raw: unknown): Ho
   return { ...input, tool_response: { ...response, success } };
 }
 
-export async function runHooksCommand(argv: string[]): Promise<void> {
-  cursorClient = false;
-  codexClient = false;
-  permissionAnswerEmitted = false;
-  const event = argv[0];
+/** Pre-gate lane — the operator commands and git-hook events that run
+ *  on argv alone and never read stdin (a git hook's stdin can be a
+ *  terminal, and reading it would block forever). They stay ahead of
+ *  the broEnabled gate: wiring a repo is how it opts in, and an
+ *  installed shim IS the opt-in — gating on .beads/bro.config would
+ *  silently deaden a hook the repo installed. */
+function runPreGateCommand(event: string | undefined, argv: string[]): boolean {
   // install/uninstall are operator commands, not hook events — they
-  // report a verdict on stderr and never read stdin (a git hook's stdin
-  // can be a terminal, and reading stdin would block on it forever). They
-  // also run before the broEnabled gate: wiring a repo is how it opts in.
+  // report a verdict on stderr and never read stdin
   if (event === 'install' || event === 'uninstall') {
     runCommitHookCommand(event);
-    return;
+    return true;
   }
   // prepare-commit-msg is a git-hook event (argv, not a JSON payload) —
   // same no-stdin rule as the operator commands, and same pre-gate
-  // placement: the installed shim IS the opt-in, so gating on
-  // .beads/bro.config would silently deaden a hook the repo installed
+  // placement
   if (event === 'prepare-commit-msg') {
     runPrepareCommitMsg(argv);
-    return;
+    return true;
   }
   // reference-transaction is a git-hook event too — argv for the phase
-  // and ppid, stdin for the update list; same pre-gate placement (the
-  // installed shim is the opt-in)
+  // and ppid, stdin for the update list; same pre-gate placement
   if (event === 'reference-transaction') {
     runRefGuard(argv);
-    return;
+    return true;
   }
   if (runPostMergeEvent(event)) {
-    return;
+    return true;
   }
   // `bro hooks perf` is a report over the perf journal — same no-stdin
   // operator placement as install/uninstall: it must not block reading
   // a payload that was never sent.
   if (event === 'perf') {
     runPerf(argv);
+    return true;
+  }
+  return false;
+}
+
+export async function runHooksCommand(argv: string[]): Promise<void> {
+  cursorClient = false;
+  codexClient = false;
+  permissionAnswerEmitted = false;
+  const event = argv[0];
+  if (runPreGateCommand(event, argv)) {
     return;
   }
   // a bare `bro hooks` is a capability probe — launchers test the
@@ -2119,11 +2129,13 @@ export async function runHooksCommand(argv: string[]): Promise<void> {
   try {
     await dispatchHook(event, raw, input);
     evSpan.end();
-  } catch {
+  } catch (e) {
     evSpan.end({}, 'error');
     // hooks fail open — a bro bug must never break the session.
     // A permission hook that already answered returned above; this
-    // covers a throw before that answer.
+    // covers a throw before that answer. The marker line is the
+    // watchdog signal (the latency bench counts it) — exit stays 0.
+    console.error(`${HOOK_DISPATCH_ERR} ${event} — ${e instanceof Error ? e.message : String(e)}`);
     answerCursorPermission(event, input);
   } finally {
     clearTimeout(deadlineTimer);
