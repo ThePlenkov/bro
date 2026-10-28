@@ -119,7 +119,8 @@ function ensureDebtDirExcluded(dir: string): void {
     // Ignores never override the index — files already committed under the
     // dir stay tracked and the exclusion is a no-op for them. Surface it;
     // untracking is a staged change only the repo owner should make.
-    /* NOSONAR — git PATH lookup is the contract */ const tracked = execFileSync(
+    const tracked = execFileSync(
+      // NOSONAR — git PATH lookup is the contract
       'git',
       ['-C', root, 'ls-files', '--', `${rel}/`],
       {

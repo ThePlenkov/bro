@@ -2784,16 +2784,13 @@ function tmuxRun(socket: string, args: string[]): TmuxResult {
   for (const k of GIT_REPOSITORY_ENV_KEYS) {
     delete env[k];
   }
-  /* NOSONAR — PATH lookup is the contract (same as git/bd) */ const proc = spawnSync(
-    'tmux',
-    socket === '' ? args : ['-L', socket, ...args],
-    {
-      stdio: ['ignore', 'pipe', 'pipe'],
-      encoding: 'utf8',
-      timeout: 10_000,
-      env,
-    }
-  );
+  const proc = spawnSync('tmux', socket === '' ? args : ['-L', socket, ...args], {
+    // NOSONAR — PATH lookup is the contract (same as git/bd)
+    stdio: ['ignore', 'pipe', 'pipe'],
+    encoding: 'utf8',
+    timeout: 10_000,
+    env,
+  });
   return {
     code: proc.status ?? 1,
     out: proc.stdout ?? '',
@@ -3197,7 +3194,8 @@ export function makeTmuxConnector(ctx: ConnectorCtx, env: AgentConnectorEnv): Ag
 
 /** One gc call — PATH lookup is the same contract as git/gh/bd. */
 function gcRun(args: string[], timeoutMs = 30_000): { code: number; out: string; err: string } {
-  /* NOSONAR — PATH lookup is the contract (same as gh/git/bd) */ const proc = spawnSync(
+  const proc = spawnSync(
+    // NOSONAR — PATH lookup is the contract (same as gh/git/bd)
     'gc',
     args,
     {
@@ -3904,7 +3902,8 @@ function dockerRun(
   args: string[],
   timeoutMs = 30_000
 ): { code: number; out: string; err: string; missing: boolean } {
-  /* NOSONAR — PATH lookup is the contract (same as gh/git/bd) */ const proc = spawnSync(
+  const proc = spawnSync(
+    // NOSONAR — PATH lookup is the contract (same as gh/git/bd)
     'docker',
     args,
     {
@@ -4708,7 +4707,8 @@ interface GhResult {
  *  spawnSync (the connector's other shell-outs are all synchronous,
  *  and admission runs inside the registry lock). */
 function ghRun(args: string[], timeoutMs = 30_000): GhResult {
-  /* NOSONAR — PATH lookup is the contract (same as docker/git/bd) */ const proc = spawnSync(
+  const proc = spawnSync(
+    // NOSONAR — PATH lookup is the contract (same as docker/git/bd)
     'gh',
     args,
     {
