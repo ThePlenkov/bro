@@ -25,6 +25,7 @@ import {
   ownedEnviron,
   pidAlive,
   registerExternalPlane,
+  SpawnError,
   type ExternalActivity,
   type ExternalActivityPlane,
   type ExternalProbeCtx,
@@ -50,60 +51,92 @@ function ownerIsExternal(pid: number, start: string, procDir: string): boolean {
   }
 }
 
+/** The hooks dir the probe scans — the override wins (tests script a
+ *  hooks dir outside any checkout); hooksDirOf's null (not a repo)
+ *  still means "no markers here". */
+function markersDir(ctx: ExternalProbeCtx): string | null {
+  const override = ctx.agents['session-markers']?.['hooksDir'];
+  return typeof override === 'string' && override.trim() !== '' ? override : hooksDirOf(ctx.dir);
+}
+
+/** The /proc root owner checks read — `agents.session-markers.procDir`
+ *  overrides for tests (a scripted /proc tree). */
+function markersProcDir(ctx: ExternalProbeCtx): string {
+  const override = ctx.agents['session-markers']?.['procDir'];
+  return typeof override === 'string' && override.trim() !== '' ? override : '/proc';
+}
+
+/** Every name in the hooks dir — a missing dir is "no markers here";
+ *  any OTHER listing failure is an unverifiable scan and fails closed
+ *  like the devin lock scan (a dir that cannot be read may hold a live
+ *  foreign arm). */
+function markerNames(dir: string): string[] {
+  try {
+    return readdirSync(dir);
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === 'ENOENT') {
+      return [];
+    }
+    throw new SpawnError(
+      `cannot verify session markers — ${dir}: ${(err as Error).message}`,
+      'unavailable'
+    );
+  }
+}
+
+/** One marker's verdict — session + stamp when it proves a live
+ *  foreign session armed work here, undefined otherwise: not an arm
+ *  file, unreadable (raced away mid-read), ownerless, bro-owned, or
+ *  owned by a dead pid. */
+function externalArm(
+  dir: string,
+  name: string,
+  procDir: string
+): { session: string; pid: number; mtimeMs: number } | undefined {
+  if (!ARM_SUFFIXES.some(s => name.endsWith(s))) {
+    return undefined;
+  }
+  const path = join(dir, name);
+  try {
+    const firstLine = readFileSync(path, 'utf8').split('\n', 1)[0] ?? '';
+    const owner = markerOwner(firstLine);
+    // ownerless: no verifiable agent owner — a shell's arm, not a session
+    if (owner === null || !ownerIsExternal(owner.pid, owner.start, procDir)) {
+      return undefined;
+    }
+    const dot = name.lastIndexOf('.');
+    return {
+      session: dot > 0 ? name.slice(0, dot) : name,
+      pid: owner.pid,
+      mtimeMs: statSync(path).mtimeMs,
+    };
+  } catch {
+    return undefined;
+  }
+}
+
 export function markersExternalActivity(ctx: ExternalProbeCtx): ExternalActivity {
-  const bag = ctx.agents['session-markers'] ?? {};
-  const procOverride = bag['procDir'];
-  const procDir =
-    typeof procOverride === 'string' && procOverride.trim() !== '' ? procOverride : '/proc';
-  const hooksOverride = bag['hooksDir'];
-  // the override wins — tests script a hooks dir outside any checkout;
-  // hooksDirOf's null (not a repo) still means "no markers here"
-  const dir =
-    typeof hooksOverride === 'string' && hooksOverride.trim() !== ''
-      ? hooksOverride
-      : hooksDirOf(ctx.dir);
+  const dir = markersDir(ctx);
   if (dir === null) {
     return { active: false };
   }
-  let names: string[];
-  try {
-    names = readdirSync(dir);
-  } catch {
-    return { active: false };
-  }
+  const procDir = markersProcDir(ctx);
   let freshest: number | undefined;
-  for (const name of names) {
-    if (!ARM_SUFFIXES.some(s => name.endsWith(s))) {
+  for (const name of markerNames(dir)) {
+    const arm = externalArm(dir, name, procDir);
+    if (arm === undefined) {
       continue;
     }
-    const path = join(dir, name);
-    let firstLine: string;
-    let mtimeMs: number;
-    try {
-      firstLine = readFileSync(path, 'utf8').split('\n', 1)[0] ?? '';
-      mtimeMs = statSync(path).mtimeMs;
-    } catch {
-      continue;
+    if (freshest === undefined || arm.mtimeMs > freshest) {
+      freshest = arm.mtimeMs;
     }
-    const owner = markerOwner(firstLine);
-    if (owner === null) {
-      continue; // no verifiable agent owner — a shell's arm, not a session
-    }
-    if (!ownerIsExternal(owner.pid, owner.start, procDir)) {
-      continue;
-    }
-    if (freshest === undefined || mtimeMs > freshest) {
-      freshest = mtimeMs;
-    }
-    if (ctx.now - mtimeMs < ctx.holdMs) {
-      const dot = name.lastIndexOf('.');
-      const session = dot > 0 ? name.slice(0, dot) : name;
+    if (ctx.now - arm.mtimeMs < ctx.holdMs) {
       return {
         active: true,
         detail:
-          `session '${session}' armed work here (owner pid ${owner.pid}, ` +
-          `stamp ${Math.round(Math.max(0, ctx.now - mtimeMs) / 1000)}s ago)`,
-        activityAtMs: mtimeMs,
+          `session '${arm.session}' armed work here (owner pid ${arm.pid}, ` +
+          `stamp ${Math.round(Math.max(0, ctx.now - arm.mtimeMs) / 1000)}s ago)`,
+        activityAtMs: arm.mtimeMs,
       };
     }
   }

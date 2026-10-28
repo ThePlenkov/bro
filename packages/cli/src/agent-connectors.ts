@@ -118,7 +118,12 @@ import {
   devinSessionPlane,
 } from '@broject/devin';
 import './session-planes/copilot.ts';
-import { writeCopilotCount } from './session-planes/copilot.ts';
+import {
+  COPILOT_COUNT_TTL_MS,
+  copilotCountFile,
+  readCopilotCount,
+  writeCopilotCount,
+} from './session-planes/copilot.ts';
 // external-activity planes self-register on import — the spawn guard
 // reads every ecosystem's "an agent bro does not own is working" probe
 import './session-planes/markers.ts';
@@ -547,7 +552,7 @@ export function resolveAgentConnector(
         `agent connector "${prefer}" is not registered (known: ${agentConnectorNames().join(', ') || 'none'})`
       );
     }
-    return makeAgentConnector(hit, ctx, env);
+    return guardPrimed(makeAgentConnector(hit, ctx, env), ctx.dir, env);
   }
   const url = gitTry(['-C', ctx.dir, 'remote', 'get-url', 'origin']);
   const remote = url.code === 0 ? url.out.trim() : '';
@@ -564,7 +569,23 @@ export function resolveAgentConnector(
       console.error(`warning: agent connector "${n}" skipped — failed to initialize: ${why}`);
     }
   }
-  return chosen;
+  return guardPrimed(chosen, ctx.dir, env);
+}
+
+/** Wrap the resolved connector's spawn with the external guard's
+ *  remote preflight (spec bro-eqi2d) — every spawn path funnels
+ *  through resolution (the facade's, the loop's direct connector,
+ *  serve/convoy/delegate alike), so the copilot inventory refresh
+ *  rides here once, BEFORE the connector's registry-lock critical
+ *  section: a gh fetch inside that lock would stall every spawn. */
+function guardPrimed(conn: AgentConnector, dir: string, env: AgentConnectorEnv): AgentConnector {
+  return {
+    ...conn,
+    spawn: spec => {
+      primeCopilotForExternalGuard(dir, env);
+      return conn.spawn(spec);
+    },
+  };
 }
 
 /** Probe-construct each registered backend in registry order and return
@@ -5628,12 +5649,21 @@ function copilotSweepLandedSlots(dir: string, slotsDir: string, live: Set<string
 }
 
 /** Refresh the count cache the copilot plane serves — best-effort and
- *  only while a copilot lane is armed (an unarmed plane has no reader;
- *  the extra gh call is pure waste). A failed refresh just leaves the
+ *  only while the cache has a reader (an unarmed copilot quota AND a
+ *  disarmed external guard means none; the extra gh call is pure
+ *  waste). A failed refresh just leaves the
  *  cache stale, which countLive already fails closed on. The landed
- *  sweep retires this repo's reservations the remote count now sees. */
+ *  sweep retires this repo's reservations the remote count now sees.
+ *  Readers are the quota lanes AND the external guard's copilot probe —
+ *  either one armed keeps the refresh paying. */
 function copilotRefreshCount(dir: string, env: AgentConnectorEnv): void {
-  if (sessionQuotaConfig(env.agents, 'copilot') === undefined) {
+  // an unarmed copilot lane has no reader — unless the external guard
+  // is armed: its copilot probe reads the same cache, so a rig that
+  // never dispatches copilot work still refreshes it (spec bro-eqi2d)
+  if (
+    sessionQuotaConfig(env.agents, 'copilot') === undefined &&
+    externalGuardOf(env) === undefined
+  ) {
     return;
   }
   const resDir = env.agents['copilot']?.['reservationsDir'];
@@ -5644,6 +5674,29 @@ function copilotRefreshCount(dir: string, env: AgentConnectorEnv): void {
     writeCopilotCount(typeof resDir === 'string' ? resDir : undefined, [...ids], observedAt);
     copilotSweepLandedSlots(dir, slots, ids);
   }
+}
+
+/** The external guard's remote preflight — refresh the copilot
+ *  inventory when it is absent or stale so the guard's copilot plane
+ *  sees foreign remote tasks even on a rig that never dispatches
+ *  copilot work (the connector's own refreshes only fire on copilot
+ *  lanes). Runs OUTSIDE the spawn critical section — the gh call must
+ *  not stall the registry lock. Best-effort like every refresh: a
+ *  failed fetch leaves the cache absent/stale and the plane reports
+ *  quiet rather than inventing remote state. */
+export function primeCopilotForExternalGuard(dir: string, env: AgentConnectorEnv): void {
+  if (externalGuardOf(env) === undefined) {
+    return;
+  }
+  const resDir = env.agents['copilot']?.['reservationsDir'];
+  const cache = readCopilotCount(copilotCountFile(typeof resDir === 'string' ? resDir : undefined));
+  if (cache !== undefined) {
+    const age = Date.now() - cache.at;
+    if (age >= 0 && age < COPILOT_COUNT_TTL_MS) {
+      return; // fresh enough — the plane trusts it inside the TTL
+    }
+  }
+  copilotRefreshCount(dir, env);
 }
 
 export function makeCopilotConnector(ctx: ConnectorCtx, env: AgentConnectorEnv): AgentConnector {

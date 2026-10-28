@@ -7,7 +7,7 @@ import type { ExternalProbeCtx } from '@broject/core';
 import { foreignOpencodePids, opencodeExternalActivity } from './opencode.ts';
 import { markersExternalActivity } from './markers.ts';
 import { copilotExternalActivity, writeCopilotCount } from './copilot.ts';
-import { procStat, writeAgentRegistry } from '@broject/core';
+import { procStat, SpawnError, writeAgentRegistry } from '@broject/core';
 import { initRepo } from '../commands/testrepo.ts';
 
 const tmp = (prefix: string): string => mkdtempSync(join(tmpdir(), prefix));
@@ -173,6 +173,24 @@ describe('session-markers external plane (spec bro-eqi2d)', () => {
       writeFileSync(join(hooksDir, 'dead-1.work'), `${Date.now()} 1 0\nbro-x\n`);
       assert.equal(markersExternalActivity(CTX({ agents })).active, false);
     });
+  });
+
+  test('an unlistable hooks dir fails closed — the scan is unverifiable', () => {
+    const root = tmp('bro-ext-hooks-');
+    try {
+      // hooksDir naming a FILE — readdirSync throws ENOTDIR, not ENOENT:
+      // a dir that cannot be read may hold a live foreign arm, so the
+      // probe refuses rather than reporting quiet
+      const file = join(root, 'not-a-dir');
+      writeFileSync(file, 'x');
+      const agents = { 'session-markers': { hooksDir: file } };
+      assert.throws(
+        () => markersExternalActivity(CTX({ agents })),
+        (e: unknown) => e instanceof SpawnError && e.kind === 'unavailable'
+      );
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
   });
 });
 

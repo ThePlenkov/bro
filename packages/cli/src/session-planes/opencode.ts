@@ -75,6 +75,35 @@ function opencodeSessionArgv(cmdline: string): boolean {
   return argv[1] !== 'serve' && argv[1] !== '--service';
 }
 
+/** One /proc entry's verdict — the pid when it is a live foreign
+ *  opencode session, undefined otherwise. An unreadable cmdline is
+ *  skipped; an unreadable environ counts as external (ownership cannot
+ *  be proven). */
+function foreignOpencodePid(procDir: string, name: string): number | undefined {
+  const pid = Number(name);
+  if (!Number.isInteger(pid) || pid <= 0 || !pidAlive(pid)) {
+    return undefined;
+  }
+  const dir = join(procDir, name);
+  let cmdline: string;
+  try {
+    cmdline = readFileSync(join(dir, 'cmdline'), 'utf8');
+  } catch {
+    return undefined;
+  }
+  if (!opencodeSessionArgv(cmdline)) {
+    return undefined;
+  }
+  try {
+    if (ownedEnviron(readFileSync(join(dir, 'environ'), 'utf8'))) {
+      return undefined;
+    }
+  } catch {
+    // unreadable environ — external, fail closed
+  }
+  return pid;
+}
+
 /** Live foreign opencode session pids — opencode argv, alive, and not
  *  bro-owned. An unreadable cmdline is skipped; an unreadable environ
  *  counts as external (ownership cannot be proven). An unreadable
@@ -95,28 +124,10 @@ export function foreignOpencodePids(procDir = '/proc'): number[] {
   }
   const pids: number[] = [];
   for (const name of names) {
-    const pid = Number(name);
-    if (!Number.isInteger(pid) || pid <= 0 || !pidAlive(pid)) {
-      continue;
+    const pid = foreignOpencodePid(procDir, name);
+    if (pid !== undefined) {
+      pids.push(pid);
     }
-    const dir = join(procDir, name);
-    let cmdline: string;
-    try {
-      cmdline = readFileSync(join(dir, 'cmdline'), 'utf8');
-    } catch {
-      continue;
-    }
-    if (!opencodeSessionArgv(cmdline)) {
-      continue;
-    }
-    try {
-      if (ownedEnviron(readFileSync(join(dir, 'environ'), 'utf8'))) {
-        continue;
-      }
-    } catch {
-      // unreadable environ — external, fail closed
-    }
-    pids.push(pid);
   }
   return pids;
 }

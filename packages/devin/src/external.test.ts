@@ -164,6 +164,62 @@ describe('devinExternalActivity (spec bro-eqi2d)', () => {
     });
   });
 
+  test("a resumed session — the second lock's transcript carries the live stamp", () => {
+    withProc((procDir, mk) => {
+      const d = dirs();
+      d.procDir = procDir;
+      mk(process.pid, 'PATH=/bin\0', '/dev/pts/2');
+      writeFileSync(join(d.lockDir, 'aaa.lock'), String(process.pid));
+      writeFileSync(join(d.lockDir, 'zzz.lock'), String(process.pid));
+      // the FIRST (sorted) name's transcript is ancient; the resumed
+      // name's is fresh — reading only one lock name misses it
+      const staleT = join(d.transcriptsDir, 'aaa.json');
+      writeFileSync(staleT, '{}');
+      const old = new Date(Date.now() - 3600_000);
+      utimesSync(staleT, old, old);
+      writeFileSync(join(d.transcriptsDir, 'zzz.json'), '{}');
+      assert.equal(devinExternalActivity(ctx(d)).active, true);
+    });
+  });
+
+  test("a worker-env XDG redirect — stamps searched beside the worker's locks", () => {
+    withProc((procDir, mk) => {
+      const spawnerXdg = tmp('bro-ext-xdg-');
+      const workerXdg = tmp('bro-ext-xdgw-');
+      const wLocks = join(workerXdg, 'devin', 'cli', 'session_locks');
+      const wTrans = join(workerXdg, 'devin', 'cli', 'transcripts');
+      try {
+        for (const d of [join(spawnerXdg, 'devin', 'cli', 'session_locks'), wLocks, wTrans]) {
+          mkdirSync(d, { recursive: true });
+        }
+        mk(process.pid, 'PATH=/bin\0', '/dev/pts/2');
+        writeFileSync(join(wLocks, 'peach.lock'), String(process.pid));
+        // a stale transcript under the WORKER's data dir proves idle —
+        // the spawner's dirs alone read "no stamp" = active forever
+        const tr = join(wTrans, 'peach.json');
+        writeFileSync(tr, '{}');
+        const old = new Date(Date.now() - 3600_000);
+        utimesSync(tr, old, old);
+        const c: ExternalProbeCtx = {
+          dir: tmp('bro-ext-root-'),
+          agents: { devin: { procDir } },
+          env: { XDG_DATA_HOME: spawnerXdg },
+          workerEnv: { XDG_DATA_HOME: workerXdg },
+          holdMs: 480_000,
+          now: Date.now(),
+        };
+        assert.equal(devinExternalActivity(c).active, false);
+        // a fresh stamp there holds the guard
+        const fresh = new Date();
+        utimesSync(tr, fresh, fresh);
+        assert.equal(devinExternalActivity(c).active, true);
+      } finally {
+        rmSync(spawnerXdg, { recursive: true, force: true });
+        rmSync(workerXdg, { recursive: true, force: true });
+      }
+    });
+  });
+
   test('no devin install → quiet', () => {
     const d = dirs();
     d.procDir = tmp('bro-ext-proc-');

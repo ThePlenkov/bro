@@ -75,14 +75,17 @@ function lockPid(dir: string, name: string): number | undefined {
 /** Every dir a count must cover: the spawner's resolved lock dir plus
  *  the worker's own effective one — spec.env can hand the spawned
  *  session a different XDG_DATA_HOME/HOME, and its devin lock lands
- *  THERE, invisible to a scan of only the spawner's dir. */
+ *  THERE, invisible to a scan of only the spawner's dir. `env` is the
+ *  spawner's environment the derivation reads (the quota lanes pass
+ *  process.env; the external probe passes its ctx's). */
 function devinSessionDirs(
   bag: Record<string, unknown>,
-  workerEnv?: Record<string, string>
+  workerEnv?: Record<string, string>,
+  env: Record<string, string | undefined> = process.env
 ): string[] {
-  const dirs = [devinLocksDir(bag)];
+  const dirs = [devinLocksDir(bag, env)];
   if (workerEnv !== undefined) {
-    const eff = devinLocksDir(bag, { ...process.env, ...workerEnv });
+    const eff = devinLocksDir(bag, { ...env, ...workerEnv });
     if (eff !== dirs[0]) {
       dirs.push(eff);
     }
@@ -144,38 +147,38 @@ function lockIsLiveSession(pid: number | undefined, procDir: string): pid is num
   return pidAlive(pid) && isDevinProcess(pid, procDir);
 }
 
-/** Live devin session pids across the dirs — lock files whose pid is
- *  alive AND still a devin process, deduplicated (a resumed session
- *  leaves a second lock for the same process). A missing dir means no
- *  devin install → empty; any OTHER read failure throws
+/** Live devin locks across the dirs — pid → every lock naming it,
+ *  sorted (a resumed session leaves a second lock for the same
+ *  process, and each lock name is a transcript key the idleness
+ *  stamps must all reach). A missing dir means no devin install →
+ *  that dir contributes nothing; any OTHER read failure throws
  *  SpawnError('unavailable') — an unverifiable count fails closed,
  *  never silently admits. */
-function liveDevinLockPids(dirs: string[], procDir = '/proc'): Set<number> {
-  const live = new Set<number>();
+function liveDevinLocks(dirs: string[], procDir = '/proc'): Map<number, string[]> {
+  const live = new Map<number, string[]>();
   for (const dir of dirs) {
-    let names: string[];
-    try {
-      names = readdirSync(dir);
-    } catch (err) {
-      if ((err as NodeJS.ErrnoException).code === 'ENOENT') {
-        continue;
-      }
-      throw new SpawnError(
-        `cannot verify devin session count — ${dir}: ${(err as Error).message}`,
-        'unavailable'
-      );
-    }
-    for (const name of names) {
-      if (!name.endsWith('.lock')) {
-        continue;
-      }
+    for (const name of lockNames(dir)) {
       const pid = lockPid(dir, name);
-      if (lockIsLiveSession(pid, procDir)) {
-        live.add(pid);
+      if (!lockIsLiveSession(pid, procDir)) {
+        continue;
+      }
+      const session = name.slice(0, -'.lock'.length);
+      const names = live.get(pid);
+      if (names === undefined) {
+        live.set(pid, [session]);
+      } else {
+        names.push(session);
+        names.sort();
       }
     }
   }
   return live;
+}
+
+/** Live devin session pids across the dirs — deduplicated (a resumed
+ *  session leaves a second lock for the same process). */
+function liveDevinLockPids(dirs: string[], procDir = '/proc'): Set<number> {
+  return new Set(liveDevinLocks(dirs, procDir).keys());
 }
 
 /** A reservation file is `<key>-<8hex>.slot`; for bro spawns the key
@@ -626,29 +629,16 @@ export function devinPidLog(pid: number, logsDir: string): string | undefined {
   return newest?.path;
 }
 
-/** Live devin sessions as rows — the same lock scan liveDevinLockPids
- *  runs, kept per-lock so each row carries the session's lock-name. A
- *  resumed session's second lock for one pid dedupes like the count
- *  does (first name wins); worker/agentId ride the /proc classifier —
- *  unreadable state means "not verifiably a worker", same undercount
- *  contract as devinPidIsWorker. `procDir` injectable for tests. */
+/** Live devin sessions as rows — the same lock scan liveDevinLocks
+ *  runs, one row per live pid. A resumed session's second lock for one
+ *  pid dedupes like the count does (the first sorted name wins);
+ *  worker/agentId ride the /proc classifier — unreadable state means
+ *  "not verifiably a worker", same undercount contract as
+ *  devinPidIsWorker. `procDir` injectable for tests. */
 export function listDevinSessions(dirs: string[], procDir = '/proc'): DiscoveredSession[] {
-  const seen = new Set<number>();
   const out: DiscoveredSession[] = [];
-  for (const dir of dirs) {
-    for (const name of lockNames(dir)) {
-      const pid = lockPid(dir, name);
-      if (pid === undefined || seen.has(pid)) {
-        continue;
-      }
-      // the same identity the count applies — a board that lists a
-      // recycled pid's session contradicts the count beside it
-      if (!lockIsLiveSession(pid, procDir)) {
-        continue;
-      }
-      seen.add(pid);
-      out.push(sessionRow(pid, name, procDir));
-    }
+  for (const [pid, names] of liveDevinLocks(dirs, procDir)) {
+    out.push(sessionRow(pid, names[0] ?? '', procDir));
   }
   return out;
 }
@@ -673,10 +663,10 @@ function lockNames(dir: string): string[] {
 
 /** One session's row — the lock's name, the pid's working directory and
  *  the /proc classifier's verdicts. */
-function sessionRow(pid: number, lockName: string, procDir: string): DiscoveredSession {
+function sessionRow(pid: number, name: string, procDir: string): DiscoveredSession {
   return {
     pid,
-    name: lockName.slice(0, -'.lock'.length),
+    name,
     cwd: devinPidCwd(pid, procDir),
     worker: devinPidIsWorker(pid, procDir),
     agentId: devinPidAgentId(pid, procDir),
@@ -697,14 +687,17 @@ export function devinPidIsOwned(pid: number, procDir = '/proc'): boolean {
   }
 }
 
-/** One session's activity stamp — the freshest of its transcript and
- *  its own output log, both mtime-based. Undefined means no stamp could
- *  be read at all: the session is live but cannot prove idle. */
+/** One session's activity stamp — the freshest of every lock name's
+ *  transcript (a resumed session writes under its SECOND lock's name,
+ *  so reading only the first misses the live one) and its own output
+ *  log across every candidate dir, all mtime-based. Undefined means
+ *  no stamp could be read at all: the session is live but cannot
+ *  prove idle. */
 function devinSessionActivityMs(
-  name: string | undefined,
+  names: string[],
   pid: number,
-  transcriptsDir: string,
-  logsDir: string
+  transcriptsDirs: string[],
+  logsDirs: string[]
 ): number | undefined {
   let at: number | undefined;
   const stamp = (path: string | undefined): void => {
@@ -717,12 +710,42 @@ function devinSessionActivityMs(
         at = m;
       }
     } catch {
-      // the file raced away — the other stamp still applies
+      // the file raced away — the other stamps still apply
     }
   };
-  stamp(name === undefined ? undefined : devinSessionTranscript(name, transcriptsDir));
-  stamp(devinPidLog(pid, logsDir));
+  for (const name of names) {
+    for (const dir of transcriptsDirs) {
+      stamp(devinSessionTranscript(name, dir));
+    }
+  }
+  for (const dir of logsDirs) {
+    stamp(devinPidLog(pid, dir));
+  }
   return at;
+}
+
+/** Every transcript/log dir a session's stamps could live under — the
+ *  spawner's env's plus the worker's effective one: a spawn handed a
+ *  different XDG base writes its transcripts/logs THERE beside the
+ *  locks the scan already covers, and a stamp searched only in the
+ *  spawner's dirs reads as "no provable activity" — a live session
+ *  that can never prove idle and holds the guard forever. Deduped:
+ *  an un-redirected env derives the same pair. */
+function devinStampDirs(
+  bag: Record<string, unknown>,
+  ctx: ExternalProbeCtx
+): { transcripts: string[]; logs: string[] } {
+  const envs = [ctx.env];
+  if (ctx.workerEnv !== undefined) {
+    envs.push({ ...ctx.env, ...ctx.workerEnv });
+  }
+  const transcripts = new Set<string>();
+  const logs = new Set<string>();
+  for (const env of envs) {
+    transcripts.add(devinTranscriptsDir(bag, env));
+    logs.add(devinLogsDir(bag, env));
+  }
+  return { transcripts: [...transcripts], logs: [...logs] };
 }
 
 /** The external-activity probe (spec bro-eqi2d) — live sessions from
@@ -733,27 +756,26 @@ function devinSessionActivityMs(
 export function devinExternalActivity(ctx: ExternalProbeCtx): ExternalActivity {
   const bag = ctx.agents['devin'] ?? {};
   const procDir = devinProcDir(bag);
-  const rows = listDevinSessions(devinSessionDirs(bag, ctx.workerEnv), procDir);
-  const transcriptsDir = devinTranscriptsDir(bag, ctx.env);
-  const logsDir = devinLogsDir(bag, ctx.env);
+  const locks = liveDevinLocks(devinSessionDirs(bag, ctx.workerEnv, ctx.env), procDir);
+  const stamps = devinStampDirs(bag, ctx);
   let freshest: number | undefined;
-  for (const row of rows) {
-    if (devinPidIsOwned(row.pid, procDir)) {
+  for (const [pid, names] of locks) {
+    if (devinPidIsOwned(pid, procDir)) {
       continue;
     }
-    const at = devinSessionActivityMs(row.name, row.pid, transcriptsDir, logsDir);
+    const at = devinSessionActivityMs(names, pid, stamps.transcripts, stamps.logs);
     if (at !== undefined && (freshest === undefined || at > freshest)) {
       freshest = at;
     }
     if (at === undefined || ctx.now - at < ctx.holdMs) {
-      const who = row.worker === true ? 'devin session' : 'interactive devin session';
+      const who = devinPidIsWorker(pid, procDir) ? 'devin session' : 'interactive devin session';
       const age =
         at === undefined
           ? 'no provable activity stamp'
           : `last activity ${Math.round(Math.max(0, ctx.now - at) / 1000)}s ago`;
       return {
         active: true,
-        detail: `${who} '${row.name ?? '?'}' (pid ${row.pid}) — ${age}`,
+        detail: `${who} '${names[0] ?? '?'}' (pid ${pid}) — ${age}`,
         activityAtMs: at,
       };
     }

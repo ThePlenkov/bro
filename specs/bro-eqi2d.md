@@ -58,8 +58,10 @@ readable stamp cannot prove idle — it counts as active.
 - **devin** (`@broject/devin`): the lock-dir scan the quota plane already
   runs, kept per-session. A live session is external when its environ
   carries neither badge. Activity = the freshest of the session's
-  transcript (`transcripts/<name>.json`) and its own log
-  (`logs/devin_*_<pid>.log`) mtimes.
+  transcripts (`transcripts/<name>.json` — every lock name for the pid,
+  a resumed session writes under its second lock's name) and its own
+  log (`logs/devin_*_<pid>.log`) mtimes, searched under the worker's
+  effective XDG base as well as the spawner's.
 - **opencode** (`packages/cli/src/session-planes/opencode.ts`): a /proc
   scan for live `opencode` processes — the plane has no lock dir. External
   by the same environ predicate. Activity = the freshest mtime of the
@@ -70,12 +72,22 @@ readable stamp cannot prove idle — it counts as active.
   the taskIds this repo's registry spawned (a bro-dispatched task is
   bro's however long it runs) are external. Absent/stale/corrupt cache =
   cannot see → the plane reports quiet rather than inventing remote state.
+  The probe itself is synchronous and cannot fetch, so the resolved
+  connector's spawn is wrapped with a preflight refresh
+  (`primeCopilotForExternalGuard`) — outside the registry lock,
+  independent of any copilot quota, skipped while the cache is fresh —
+  so a copilot-unarmed rig still refuses beside a foreign remote task.
 - **session-markers** (`session-planes/markers.ts`): `<git-common>/
   bro/hooks/*.work`/`*.task` markers — an interactive session's arm is
-  proof an agent works in this repo. Live markers (owner-pid first, mtime
-  fallback) whose owner pid lacks the bro badges are external; the
-  marker's mtime is its activity stamp. Ownerless-but-live markers count
-  external — ownership cannot be proven.
+  proof an agent works in this repo. A marker counts when its owner pid
+  is alive, the owner's environ lacks the bro badges, and the marker's
+  mtime sits inside the idle window; the mtime is its activity stamp.
+  Two populations never count: ownerless markers (no verifiable agent
+  owner — a human shell's `bro work enter` arm is not an agent session,
+  and bro's own writers drop the owner when starttime is unreadable, so
+  counting them would refuse our own spawns; the devin/opencode planes
+  carry the fail-closed ownership cases) and markers whose owner is
+  dead — residue, not a session.
 
 ### The gate
 

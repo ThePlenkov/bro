@@ -30,6 +30,7 @@ import {
   registerSessionPlane,
   sessionSlotsDir,
   SpawnError,
+  withFileLock,
   type ExternalActivity,
   type ExternalActivityPlane,
   type ExternalProbeCtx,
@@ -88,18 +89,32 @@ export function writeCopilotCount(
 ): CopilotCountCache {
   const file = copilotCountFile(resDir);
   const cache = { at, count: ids.length, ids };
-  const existing = readCopilotCount(file);
-  if (existing !== undefined && existing.at > cache.at) {
-    return existing;
-  }
+  const persist = (): CopilotCountCache => {
+    const existing = readCopilotCount(file);
+    if (existing !== undefined && existing.at > cache.at) {
+      return existing;
+    }
+    try {
+      mkdirSync(dirname(file), { recursive: true });
+      writeFileSync(file, `${JSON.stringify(cache)}\n`);
+    } catch {
+      // a cache that can't persist just stays absent — the next count
+      // fails closed like a stale one
+    }
+    return cache;
+  };
+  // the read-compare-write must be serialized — two processes passing
+  // the `at` check before either writes lets the older observation
+  // clobber the newer one (the lock is `<file>.lock/`, invisible to
+  // the `.slot` tally like the cache itself)
   try {
-    mkdirSync(dirname(file), { recursive: true });
-    writeFileSync(file, `${JSON.stringify(cache)}\n`);
+    return withFileLock(`${file}.lock`, persist, { waitMs: 1_000, label: 'copilot live-count' });
   } catch {
-    // a cache that can't persist just stays absent — the next count
-    // fails closed like a stale one
+    // lock contention means another refresh is mid-write — re-read
+    // once; persisting ours anyway would reopen the overwrite race
+    // this lock exists to close
+    return readCopilotCount(file) ?? cache;
   }
-  return cache;
 }
 
 /** The fail-closed read both lanes share — a fresh cache yields its
