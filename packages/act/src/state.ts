@@ -338,6 +338,19 @@ const entryUsable = (s: PrActState, probeKey: string): boolean => {
   return theirs === probeKey.slice(1);
 };
 
+/** The read-only half of the feed — the hook path's whole probe
+ *  (bro-36sx7.4): a fresh cached entry that answers the caller's
+ *  approval-probe semantics, or null. Never fetches; on a miss the
+ *  caller claims the refresh stamp and spawns the publisher off-loop. */
+export function cachedPrActState(
+  cache: PrStateCache | null | undefined,
+  target: PrTarget,
+  opts?: FetchPrActStateOpts
+): PrActState | null {
+  const hit = cache?.read(target);
+  return hit != null && entryUsable(hit, approvalProbeKey(opts)) ? hit : null;
+}
+
 /** Full open-PR state for the act loop — threads + checks + mergeability. */
 export async function fetchPrActState(
   rev: ReviewFacade,
