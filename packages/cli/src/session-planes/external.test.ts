@@ -87,7 +87,10 @@ describe('opencode external plane (spec bro-eqi2d)', () => {
     try {
       // no environ file → cannot prove bro's → external
       mkOpencodeProc(procDir, process.pid, ['opencode'], null);
-      assert.deepEqual(foreignOpencodePids(procDir), [process.pid]);
+      const res = foreignOpencodePids(procDir);
+      assert.deepEqual(res.length, 1);
+      assert.deepEqual(res[0].pid, process.pid);
+      assert.deepEqual(res[0].unknown, true);
     } finally {
       rmSync(procDir, { recursive: true, force: true });
     }
@@ -96,6 +99,32 @@ describe('opencode external plane (spec bro-eqi2d)', () => {
   test('no /proc tree → quiet', () => {
     const agents = { opencode: { procDir: join(tmpdir(), 'bro-oc-absent-') } };
     assert.equal(opencodeExternalActivity(CTX({ agents })).active, false);
+  });
+
+  test('symlink launch counted by resolved exe', () => {
+    const procDir = tmp('bro-oc-proc-');
+    const dataDir = tmp('bro-oc-data-');
+    try {
+      const dir = join(procDir, String(process.pid));
+      mkdirSync(dir, { recursive: true });
+      writeFileSync(
+        join(dir, 'cmdline'),
+        ['/usr/local/bin/oc', '--session', 'ses_x'].join('\0') + '\0'
+      );
+      writeFileSync(join(dir, 'environ'), 'PATH=/bin\0');
+      try {
+        const exeLink = join(dir, 'exe');
+        // create symlink pointing to opencode
+        try {
+          require('fs').symlinkSync('/usr/bin/opencode', exeLink);
+        } catch {}
+      } catch {}
+      const agents = { opencode: { procDir, dataDir } };
+      assert.equal(opencodeExternalActivity(CTX({ agents })).active, true);
+    } finally {
+      rmSync(procDir, { recursive: true, force: true });
+      rmSync(dataDir, { recursive: true, force: true });
+    }
   });
 });
 
