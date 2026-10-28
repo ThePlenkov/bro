@@ -81,6 +81,15 @@ export interface PluginContext {
   focused_pane?: { pane_id?: string; cwd?: string };
   tab?: { tab_id?: string };
   worktree?: { checkout_path?: string; repo_root?: string; repo_key?: string };
+  // flat API-shape keys — the socket invocation context delivers these
+  // alongside (or instead of) the nested objects above
+  workspace_id?: string;
+  workspace_label?: string;
+  workspace_cwd?: string;
+  focused_pane_id?: string;
+  focused_pane_cwd?: string;
+  tab_id?: string;
+  tab_label?: string;
   selected_text?: string;
   clicked_url?: string;
   invocation_source?: string;
@@ -462,6 +471,45 @@ export function configValue(key: string, fallback: string): string {
 
 export function shq(s: string): string {
   return `'${s.replace(/'/g, `'\\''`)}'`;
+}
+
+/** Minimal shell-words split for operator-selected text — whitespace-
+ *  separated argv honoring '…', "…" and \x escapes. NOT a shell: no
+ *  $expansion, globs, `;` or `|` — selected text can never re-parse
+ *  into a different program. An unclosed quote is a usage error,
+ *  named as such. */
+export function shellWords(text: string): string[] {
+  const out: string[] = [];
+  let cur = '';
+  let quote: string | undefined;
+  for (let i = 0; i < text.length; i++) {
+    const c = text[i] as string;
+    if (quote === undefined && /\s/.test(c)) {
+      if (cur !== '') {
+        out.push(cur);
+        cur = '';
+      }
+      continue;
+    }
+    if (quote === undefined && (c === "'" || c === '"')) {
+      quote = c;
+      continue;
+    }
+    if (c === quote) {
+      quote = undefined;
+      continue;
+    }
+    if (c === '\\' && quote !== "'") {
+      const n = text[++i];
+      if (n === undefined) throw new Error('trailing backslash');
+      cur += n === 'n' ? '\n' : n === 't' ? '\t' : n;
+      continue;
+    }
+    cur += c;
+  }
+  if (quote !== undefined) throw new Error(`unclosed ${quote} quote`);
+  if (cur !== '') out.push(cur);
+  return out;
 }
 
 export { basename, dirname, join, resolve };

@@ -61,6 +61,16 @@ title = "PR gate status"
 contexts = ["workspace"]
 command = ["node", "src/action-pr-gate.ts"]
 
+# readonly ACP session renderer (spec bro-5vjpg) — splits a pane that
+# spawns and owns an ACP server child; selected text carries
+# --cmd/--prompt. Local ids forbid dots, so the qualified handle is
+# `bro.fleet.acp:watch`, not `bro.fleet.acp.watch`
+[[actions]]
+id = "acp:watch"
+title = "Watch ACP session"
+contexts = ["workspace"]
+command = ["node", "src/action-acp-watch.ts"]
+
 [[events]]
 on = "worktree.created"
 command = ["node", "src/event-worktree-created.ts"]
