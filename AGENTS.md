@@ -100,6 +100,18 @@ Developing bro itself: see CONTRIBUTING.md.
   budget is shared too — the batch lane spends the account's allowance,
   so it takes only what the operator's own sessions do not need
   (`agents.<kind>.maxBatchWorkers`; spec bro-9h86l).
+- **No spawning beside a foreign agent** — `prepareSpawn` refuses
+  `external agent active` on every spawn path (loop, drive fixers,
+  `bro fleet agents up`, convoy, all backends) while an agent this rig
+  does not own is actively working on the host. External-activity
+  planes (`external-planes.ts` in core) answer per ecosystem: devin
+  session locks minus `BRO_AGENT_ID`/`BRO_HOOKS=0`-badged sessions,
+  opencode `/proc` procs, copilot remote tasks minus this registry's
+  taskIds, live foreign-owned `.work`/`.task` markers. A session is
+  active while its proven stamps sit inside `spawn.externalIdleSec`
+  (default 480s); `spawn.externalBlock: false` is the explicit opt-out.
+  The session-quota lanes and provider walls refuse independently —
+  the exclusion is a second guard, not a replacement (spec bro-eqi2d).
 - **Foreign findings become requests, never patches** — work that
   belongs to another repo is posted to that rig's inbox, never
   edited in place: `bro request <repo> <title> --for <bead>` drops

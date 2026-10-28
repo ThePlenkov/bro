@@ -69,6 +69,11 @@ import {
   type BudgetSnapshot,
 } from './agent-connectors.ts';
 import { initRepo, installFakeBd, killRun, readBeads, writeBeads } from './commands/testrepo.ts';
+
+// the guard reads REAL host state — clear the registered external planes
+// so spawn-mechanics tests stay deterministic on any machine; the
+// exclusion block registers its own stubs
+clearExternalPlanes();
 import { devinSessionPlane } from '@broject/devin';
 import { VERSION } from './version.ts';
 
@@ -335,7 +340,7 @@ function fixture(
     beadsDir,
     binDir,
     db,
-    env: { agents, connectors: {} },
+    env: { agents, connectors: {}, spawn: { externalBlock: false, externalIdleSec: 480 } },
     prevPath,
     prevTmuxFakeHome,
     prevDockerFakeHome,
@@ -2976,7 +2981,9 @@ describe('external-agent exclusion (spec bro-eqi2d)', () => {
     registerExternalPlane(ACTIVE);
     try {
       await assert.rejects(
-        nativeConn(f).spawn(SPEC(f.main, f.beadsDir, 'fx-1', 'true')),
+        nativeConn(f, { spawn: { externalBlock: true, externalIdleSec: 480 } }).spawn(
+          SPEC(f.main, f.beadsDir, 'fx-1', 'true')
+        ),
         (e: unknown) =>
           e instanceof SpawnError &&
           e.kind === 'cap' &&
@@ -3001,6 +3008,7 @@ describe('external-agent exclusion (spec bro-eqi2d)', () => {
       // independent refusal that must not mask the external one
       const env: AgentConnectorEnv = {
         ...f.env,
+        spawn: { externalBlock: true, externalIdleSec: 480 },
         agents: { ...f.env.agents, devin: { ...devinDirs(f.root), maxSessions: 1 } },
       };
       env.agents['native'] = { ...env.agents['native'], sessionKind: 'devin' };
@@ -3020,6 +3028,7 @@ describe('external-agent exclusion (spec bro-eqi2d)', () => {
     try {
       const env: AgentConnectorEnv = {
         ...f.env,
+        spawn: { externalBlock: true, externalIdleSec: 480 },
         agents: {
           ...f.env.agents,
           devin: { ...devinDirs(f.root), maxSessions: 1 },

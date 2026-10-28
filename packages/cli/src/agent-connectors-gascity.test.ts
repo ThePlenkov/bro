@@ -1,23 +1,20 @@
-import { describe, test } from 'node:test'
-import assert from 'node:assert/strict'
-import {
-  chmodSync,
-  existsSync,
-  mkdirSync,
-  readFileSync,
-  rmSync,
-  writeFileSync,
-} from 'node:fs'
-import { dirname, join } from 'node:path'
-import { readAgentRegistry, SpawnError, AgentNotFound } from '@broject/core'
+import { describe, test } from 'node:test';
+import assert from 'node:assert/strict';
+import { chmodSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { dirname, join } from 'node:path';
+import { readAgentRegistry, SpawnError, AgentNotFound, clearExternalPlanes } from '@broject/core';
 import {
   agentConnectorNames,
   loadAgentEnv,
   makeGascityConnector,
   resolveAgentConnector,
   type AgentConnectorEnv,
-} from './agent-connectors.ts'
-import { initRepo } from './commands/testrepo.ts'
+} from './agent-connectors.ts';
+import { initRepo } from './commands/testrepo.ts';
+
+// real host planes would flake spawn tests — fixtures opt out via
+// spawn.externalBlock; the registry clear is the belt
+clearExternalPlanes();
 
 /** bd shim — JSON store at $BEADS_DIR/store.json; same coverage as the
  *  native connector tests (show, update --claim/--assignee, actor). */
@@ -53,7 +50,7 @@ if (args[0] === 'show') {
 } else {
   console.error('unhandled: ' + args.join(' ')); process.exit(1)
 }
-`
+`;
 
 /** gc shim — JSON city store at <city>/.fake-gc.json keyed by --city;
  *  covers init, start, supervisor status, rig list/add, session
@@ -142,35 +139,43 @@ if (args[0] === 'sling') {
   const db = load(); db.slung.push({ target: args[1], bead: args[2] }); save(db); process.exit(0)
 }
 console.error('unhandled: ' + argv.join(' ')); process.exit(1)
-`
+`;
 
 interface Fixture {
-  root: string
-  main: string
-  beadsDir: string
-  city: string
-  env: AgentConnectorEnv
-  prevPath: string
-  dbRows(): Array<Record<string, unknown>>
-  gcDb(): { sessions: { id: string; alias?: string; state: string; closed?: boolean }[]; rigs: string[]; supervisor: boolean; slung: { target: string; bead: string }[] }
+  root: string;
+  main: string;
+  beadsDir: string;
+  city: string;
+  env: AgentConnectorEnv;
+  prevPath: string;
+  dbRows(): Array<Record<string, unknown>>;
+  gcDb(): {
+    sessions: { id: string; alias?: string; state: string; closed?: boolean }[];
+    rigs: string[];
+    supervisor: boolean;
+    slung: { target: string; bead: string }[];
+  };
 }
 
-function fixture(rows: Array<Record<string, unknown>>, knobs: Record<string, unknown> = {}): Fixture {
-  const { root, main } = initRepo('bro-gcconn-')
-  const beadsDir = join(root, 'beads')
-  mkdirSync(beadsDir, { recursive: true })
-  const db = join(beadsDir, 'store.json')
-  writeFileSync(db, JSON.stringify({ rows }))
-  const city = join(root, 'city')
-  const binDir = join(root, 'bin')
-  mkdirSync(binDir)
-  writeFileSync(join(binDir, 'bd'), FAKE_BD)
-  writeFileSync(join(binDir, 'gc'), FAKE_GC)
-  chmodSync(join(binDir, 'bd'), 0o755)
-  chmodSync(join(binDir, 'gc'), 0o755)
-  const prevPath = process.env.PATH ?? ''
-  process.env.PATH = `${binDir}:${prevPath}`
-  process.env.FAKE_GC_SUPERVISOR = join(root, 'gc-supervisor')
+function fixture(
+  rows: Array<Record<string, unknown>>,
+  knobs: Record<string, unknown> = {}
+): Fixture {
+  const { root, main } = initRepo('bro-gcconn-');
+  const beadsDir = join(root, 'beads');
+  mkdirSync(beadsDir, { recursive: true });
+  const db = join(beadsDir, 'store.json');
+  writeFileSync(db, JSON.stringify({ rows }));
+  const city = join(root, 'city');
+  const binDir = join(root, 'bin');
+  mkdirSync(binDir);
+  writeFileSync(join(binDir, 'bd'), FAKE_BD);
+  writeFileSync(join(binDir, 'gc'), FAKE_GC);
+  chmodSync(join(binDir, 'bd'), 0o755);
+  chmodSync(join(binDir, 'gc'), 0o755);
+  const prevPath = process.env.PATH ?? '';
+  process.env.PATH = `${binDir}:${prevPath}`;
+  process.env.FAKE_GC_SUPERVISOR = join(root, 'gc-supervisor');
   return {
     root,
     main,
@@ -178,20 +183,21 @@ function fixture(rows: Array<Record<string, unknown>>, knobs: Record<string, unk
     city,
     env: {
       agents: { gascity: { command: 'fake-agent', configDir: city, ...knobs } },
+      spawn: { externalBlock: false, externalIdleSec: 480 },
       connectors: {},
     },
     prevPath,
     dbRows: () => JSON.parse(readFileSync(db, 'utf8')).rows,
     gcDb: () => JSON.parse(readFileSync(join(city, '.fake-gc.json'), 'utf8')),
-  }
+  };
 }
 
 function cleanup(fx: Fixture): void {
-  process.env.PATH = fx.prevPath
-  delete process.env.FAKE_GC_FAIL
-  delete process.env.FAKE_GC_GARBLE_NEW
-  delete process.env.FAKE_GC_SUPERVISOR
-  rmSync(fx.root, { recursive: true, force: true })
+  process.env.PATH = fx.prevPath;
+  delete process.env.FAKE_GC_FAIL;
+  delete process.env.FAKE_GC_GARBLE_NEW;
+  delete process.env.FAKE_GC_SUPERVISOR;
+  rmSync(fx.root, { recursive: true, force: true });
 }
 
 const SPEC = (main: string, beadsDir: string, molStep: string) => ({
@@ -199,70 +205,77 @@ const SPEC = (main: string, beadsDir: string, molStep: string) => ({
   repoRoot: main,
   beadsDir,
   prompt: 'do the work',
-})
+});
 
 describe('gascity connector', () => {
   test('registry order: native first, gascity before docker', () => {
-    assert.deepEqual(agentConnectorNames(), ['native', 'tmux', 'gascity', 'docker', 'copilot', 'devin'])
-  })
+    assert.deepEqual(agentConnectorNames(), [
+      'native',
+      'tmux',
+      'gascity',
+      'docker',
+      'copilot',
+      'devin',
+    ]);
+  });
 
   test('spawn inits the city, adopts the rig, claims, sessions+slings', async () => {
-    const fx = fixture([{ id: 'fx-1', status: 'open' }])
+    const fx = fixture([{ id: 'fx-1', status: 'open' }]);
     try {
-      const conn = makeGascityConnector({ dir: fx.main }, fx.env)
-      const info = await conn.spawn(SPEC(fx.main, fx.beadsDir, 'fx-1'))
-      assert.equal(info.backend, 'gascity')
-      assert.equal(info.state, 'running')
+      const conn = makeGascityConnector({ dir: fx.main }, fx.env);
+      const info = await conn.spawn(SPEC(fx.main, fx.beadsDir, 'fx-1'));
+      assert.equal(info.backend, 'gascity');
+      assert.equal(info.state, 'running');
       // the claim landed in the pinned shared store, rehomed to the
       // session alias — gc's default work_query picks up in_progress
       // work assigned to the session
-      assert.equal(fx.dbRows()[0]!.status, 'in_progress')
-      assert.equal(fx.dbRows()[0]!.assignee, 'fx-1')
+      assert.equal(fx.dbRows()[0]!.status, 'in_progress');
+      assert.equal(fx.dbRows()[0]!.assignee, 'fx-1');
       // registry keeps the session handle alongside the stable agentId
-      const entry = readAgentRegistry(fx.main)['fx-1']!
-      assert.equal(entry.agentId, info.id)
-      assert.equal(entry.sessionId, 'gc-1')
+      const entry = readAgentRegistry(fx.main)['fx-1']!;
+      assert.equal(entry.agentId, info.id);
+      assert.equal(entry.sessionId, 'gc-1');
       // the city was authored: init files + adopted rig + supervisor up
-      assert.ok(existsSync(join(fx.city, 'city.toml')))
+      assert.ok(existsSync(join(fx.city, 'city.toml')));
       // the per-step agent pins the session's work_dir to the spec's
       // repoRoot — gc sling's target operand resolves it as a configured
       // agent, not a session alias
-      const agentToml = readFileSync(join(fx.city, 'agents', 'fx-1', 'agent.toml'), 'utf8')
-      assert.ok(agentToml.includes(`work_dir = "${fx.main}"`))
-      const gdb = fx.gcDb()
-      assert.deepEqual(gdb.rigs, [dirname(fx.beadsDir)])
-      assert.equal(gdb.supervisor, true)
-      assert.deepEqual(gdb.slung, [{ target: 'fx-1', bead: 'fx-1' }])
-      assert.equal(gdb.sessions[0]!.alias, 'fx-1')
+      const agentToml = readFileSync(join(fx.city, 'agents', 'fx-1', 'agent.toml'), 'utf8');
+      assert.ok(agentToml.includes(`work_dir = "${fx.main}"`));
+      const gdb = fx.gcDb();
+      assert.deepEqual(gdb.rigs, [dirname(fx.beadsDir)]);
+      assert.equal(gdb.supervisor, true);
+      assert.deepEqual(gdb.slung, [{ target: 'fx-1', bead: 'fx-1' }]);
+      assert.equal(gdb.sessions[0]!.alias, 'fx-1');
     } finally {
-      cleanup(fx)
+      cleanup(fx);
     }
-  })
+  });
 
   test('spec.env lands in the per-step agent env table', async () => {
-    const fx = fixture([{ id: 'fx-1', status: 'open' }])
+    const fx = fixture([{ id: 'fx-1', status: 'open' }]);
     try {
-      const conn = makeGascityConnector({ dir: fx.main }, fx.env)
+      const conn = makeGascityConnector({ dir: fx.main }, fx.env);
       await conn.spawn({
         ...SPEC(fx.main, fx.beadsDir, 'fx-1'),
         env: { BRO_PR: '7', BRO_PR_URL: 'https://x/pr/7', 'BAD-KEY': 'x' },
-      })
-      const agentToml = readFileSync(join(fx.city, 'agents', 'fx-1', 'agent.toml'), 'utf8')
-      assert.match(agentToml, /BRO_PR = "7"/)
-      assert.match(agentToml, /BRO_PR_URL = "https:\/\/x\/pr\/7"/)
-      assert.ok(!agentToml.includes('BAD-KEY'))
+      });
+      const agentToml = readFileSync(join(fx.city, 'agents', 'fx-1', 'agent.toml'), 'utf8');
+      assert.match(agentToml, /BRO_PR = "7"/);
+      assert.match(agentToml, /BRO_PR_URL = "https:\/\/x\/pr\/7"/);
+      assert.ok(!agentToml.includes('BAD-KEY'));
       // the connector injects its own identity pins into the table
-      assert.ok(agentToml.includes(`BEADS_DIR = "${fx.beadsDir}"`))
-      assert.match(agentToml, /BRO_BEAD_ID = "fx-1"/)
+      assert.ok(agentToml.includes(`BEADS_DIR = "${fx.beadsDir}"`));
+      assert.match(agentToml, /BRO_BEAD_ID = "fx-1"/);
     } finally {
-      cleanup(fx)
+      cleanup(fx);
     }
-  })
+  });
 
   test('identity pins in spec.env cannot override the connector-owned values', async () => {
-    const fx = fixture([{ id: 'fx-1', status: 'open' }])
+    const fx = fixture([{ id: 'fx-1', status: 'open' }]);
     try {
-      const conn = makeGascityConnector({ dir: fx.main }, fx.env)
+      const conn = makeGascityConnector({ dir: fx.main }, fx.env);
       const info = await conn.spawn({
         ...SPEC(fx.main, fx.beadsDir, 'fx-1'),
         env: {
@@ -272,282 +285,284 @@ describe('gascity connector', () => {
           BRO_PROMPT_FILE: '/evil/prompt.md',
           SAFE: '1',
         },
-      })
-      const agentToml = readFileSync(join(fx.city, 'agents', 'fx-1', 'agent.toml'), 'utf8')
-      assert.ok(!agentToml.includes('/evil/store'))
-      assert.ok(!agentToml.includes('other-bead'))
+      });
+      const agentToml = readFileSync(join(fx.city, 'agents', 'fx-1', 'agent.toml'), 'utf8');
+      assert.ok(!agentToml.includes('/evil/store'));
+      assert.ok(!agentToml.includes('other-bead'));
       // BRO_AGENT_ID still renders — with the connector's real id, never
       // the caller's; the proc-owner environ badge depends on it
-      assert.match(agentToml, new RegExp(`BRO_AGENT_ID = "${info.id}"`))
-      assert.ok(!agentToml.includes('BRO_AGENT_ID = "x"'))
+      assert.match(agentToml, new RegExp(`BRO_AGENT_ID = "${info.id}"`));
+      assert.ok(!agentToml.includes('BRO_AGENT_ID = "x"'));
       // BRO_PROMPT_FILE points at the real prompt artifact, never the
       // caller's path
-      assert.ok(!agentToml.includes('/evil/prompt.md'))
-      assert.ok(agentToml.includes('BRO_PROMPT_FILE = "'), agentToml)
-      assert.ok(agentToml.includes(`${info.id}.prompt.md`), agentToml)
-      assert.match(agentToml, /BRO_BEAD_ID = "fx-1"/)
-      assert.match(agentToml, /SAFE = "1"/)
+      assert.ok(!agentToml.includes('/evil/prompt.md'));
+      assert.ok(agentToml.includes('BRO_PROMPT_FILE = "'), agentToml);
+      assert.ok(agentToml.includes(`${info.id}.prompt.md`), agentToml);
+      assert.match(agentToml, /BRO_BEAD_ID = "fx-1"/);
+      assert.match(agentToml, /SAFE = "1"/);
     } finally {
-      cleanup(fx)
+      cleanup(fx);
     }
-  })
+  });
 
   test('TOML escapes every control char in env values', async () => {
-    const fx = fixture([{ id: 'fx-1', status: 'open' }])
+    const fx = fixture([{ id: 'fx-1', status: 'open' }]);
     try {
-      const conn = makeGascityConnector({ dir: fx.main }, fx.env)
+      const conn = makeGascityConnector({ dir: fx.main }, fx.env);
       await conn.spawn({
         ...SPEC(fx.main, fx.beadsDir, 'fx-1'),
         env: { MSG: 'line1\r\nline2\x07bell', PATHY: 'a\\b"c\td' },
-      })
-      const agentToml = readFileSync(join(fx.city, 'agents', 'fx-1', 'agent.toml'), 'utf8')
-      assert.ok(agentToml.includes('MSG = "line1\\r\\nline2\\u0007bell"'), agentToml)
-      assert.ok(agentToml.includes('PATHY = "a\\\\b\\"c\\td"'), agentToml)
+      });
+      const agentToml = readFileSync(join(fx.city, 'agents', 'fx-1', 'agent.toml'), 'utf8');
+      assert.ok(agentToml.includes('MSG = "line1\\r\\nline2\\u0007bell"'), agentToml);
+      assert.ok(agentToml.includes('PATHY = "a\\\\b\\"c\\td"'), agentToml);
       // no raw control bytes survive into the generated config
-      assert.ok(!/[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]/.test(agentToml))
+      assert.ok(!/[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]/.test(agentToml));
     } finally {
-      cleanup(fx)
+      cleanup(fx);
     }
-  })
+  });
 
   test('a prompt past the argv cap refuses spawn as bad input', async () => {
-    const fx = fixture([{ id: 'fx-1', status: 'open' }])
+    const fx = fixture([{ id: 'fx-1', status: 'open' }]);
     try {
-      const conn = makeGascityConnector({ dir: fx.main }, fx.env)
+      const conn = makeGascityConnector({ dir: fx.main }, fx.env);
       const err = await conn
         .spawn({ ...SPEC(fx.main, fx.beadsDir, 'fx-1'), prompt: 'x'.repeat(200_000) })
         .then(() => null)
-        .catch((e) => e)
-      assert.ok(err instanceof SpawnError, `expected SpawnError, got ${err}`)
-      assert.equal(err.kind, 'input')
-      assert.match(String(err), /argv/)
+        .catch(e => e);
+      assert.ok(err instanceof SpawnError, `expected SpawnError, got ${err}`);
+      assert.equal(err.kind, 'input');
+      assert.match(String(err), /argv/);
       // refused before claiming or touching gc — bead still open, city
       // never even initialized
-      assert.equal(fx.dbRows()[0]!.status, 'open')
-      assert.ok(!existsSync(join(fx.city, '.fake-gc.json')))
+      assert.equal(fx.dbRows()[0]!.status, 'open');
+      assert.ok(!existsSync(join(fx.city, '.fake-gc.json')));
     } finally {
-      cleanup(fx)
+      cleanup(fx);
     }
-  })
+  });
 
   test('a live session on the step refuses a second spawn', async () => {
-    const fx = fixture([{ id: 'fx-1', status: 'open' }])
+    const fx = fixture([{ id: 'fx-1', status: 'open' }]);
     try {
-      const conn = makeGascityConnector({ dir: fx.main }, fx.env)
-      await conn.spawn(SPEC(fx.main, fx.beadsDir, 'fx-1'))
-      await assert.rejects(conn.spawn(SPEC(fx.main, fx.beadsDir, 'fx-1')), SpawnError)
+      const conn = makeGascityConnector({ dir: fx.main }, fx.env);
+      await conn.spawn(SPEC(fx.main, fx.beadsDir, 'fx-1'));
+      await assert.rejects(conn.spawn(SPEC(fx.main, fx.beadsDir, 'fx-1')), SpawnError);
     } finally {
-      cleanup(fx)
+      cleanup(fx);
     }
-  })
+  });
 
   test('a foreign claim (no registry entry) refuses spawn', async () => {
-    const fx = fixture([{ id: 'fx-1', status: 'in_progress', assignee: 'human' }])
+    const fx = fixture([{ id: 'fx-1', status: 'in_progress', assignee: 'human' }]);
     try {
-      const conn = makeGascityConnector({ dir: fx.main }, fx.env)
-      await assert.rejects(conn.spawn(SPEC(fx.main, fx.beadsDir, 'fx-1')), SpawnError)
+      const conn = makeGascityConnector({ dir: fx.main }, fx.env);
+      await assert.rejects(conn.spawn(SPEC(fx.main, fx.beadsDir, 'fx-1')), SpawnError);
     } finally {
-      cleanup(fx)
+      cleanup(fx);
     }
-  })
+  });
 
   test('respawn after session close reuses agentId via session reset', async () => {
-    const fx = fixture([{ id: 'fx-1', status: 'open' }])
+    const fx = fixture([{ id: 'fx-1', status: 'open' }]);
     try {
-      const conn = makeGascityConnector({ dir: fx.main }, fx.env)
-      const first = await conn.spawn(SPEC(fx.main, fx.beadsDir, 'fx-1'))
-      await conn.stop(first.id)
-      const second = await conn.spawn(SPEC(fx.main, fx.beadsDir, 'fx-1'))
-      assert.equal(second.id, first.id)
-      assert.equal(second.state, 'running')
+      const conn = makeGascityConnector({ dir: fx.main }, fx.env);
+      const first = await conn.spawn(SPEC(fx.main, fx.beadsDir, 'fx-1'));
+      await conn.stop(first.id);
+      const second = await conn.spawn(SPEC(fx.main, fx.beadsDir, 'fx-1'));
+      assert.equal(second.id, first.id);
+      assert.equal(second.state, 'running');
       // reset, not new — still one session
-      assert.equal(fx.gcDb().sessions.length, 1)
-      assert.equal(fx.gcDb().sessions[0]!.state, 'active')
+      assert.equal(fx.gcDb().sessions.length, 1);
+      assert.equal(fx.gcDb().sessions[0]!.state, 'active');
     } finally {
-      cleanup(fx)
+      cleanup(fx);
     }
-  })
+  });
 
   test('list maps session states; closed → exited', async () => {
-    const fx = fixture([{ id: 'fx-1', status: 'open' }])
+    const fx = fixture([{ id: 'fx-1', status: 'open' }]);
     try {
-      const conn = makeGascityConnector({ dir: fx.main }, fx.env)
-      const info = await conn.spawn(SPEC(fx.main, fx.beadsDir, 'fx-1'))
-      assert.equal((await conn.list()).agents[0]!.state, 'running')
-      await conn.stop(info.id)
-      assert.equal((await conn.list()).agents[0]!.state, 'exited')
+      const conn = makeGascityConnector({ dir: fx.main }, fx.env);
+      const info = await conn.spawn(SPEC(fx.main, fx.beadsDir, 'fx-1'));
+      assert.equal((await conn.list()).agents[0]!.state, 'running');
+      await conn.stop(info.id);
+      assert.equal((await conn.list()).agents[0]!.state, 'exited');
     } finally {
-      cleanup(fx)
+      cleanup(fx);
     }
-  })
+  });
 
   test('missing session + reachable supervisor → lost; unreachable → degraded, not lost', async () => {
-    const fx = fixture([{ id: 'fx-1', status: 'open' }])
+    const fx = fixture([{ id: 'fx-1', status: 'open' }]);
     try {
-      const conn = makeGascityConnector({ dir: fx.main }, fx.env)
-      const info = await conn.spawn(SPEC(fx.main, fx.beadsDir, 'fx-1'))
+      const conn = makeGascityConnector({ dir: fx.main }, fx.env);
+      const info = await conn.spawn(SPEC(fx.main, fx.beadsDir, 'fx-1'));
       // purge the session record — the worker vanished from gc's ledger
-      const db = fx.gcDb()
-      db.sessions = []
-      writeFileSync(join(fx.city, '.fake-gc.json'), JSON.stringify(db))
-      assert.equal((await conn.list()).agents[0]!.state, 'lost')
+      const db = fx.gcDb();
+      db.sessions = [];
+      writeFileSync(join(fx.city, '.fake-gc.json'), JSON.stringify(db));
+      assert.equal((await conn.list()).agents[0]!.state, 'lost');
       // supervisor unreadable → degraded read, agent omitted (fleet's 'unknown')
-      process.env.FAKE_GC_FAIL = 'supervisor status'
-      const l = await conn.list()
-      assert.equal(l.degraded !== undefined, true)
-      assert.equal(l.agents.length, 0)
+      process.env.FAKE_GC_FAIL = 'supervisor status';
+      const l = await conn.list();
+      assert.equal(l.degraded !== undefined, true);
+      assert.equal(l.agents.length, 0);
       await conn.status(info.id).then(
         () => assert.fail('status should throw on degraded read'),
-        (e) => assert.match(String(e), /supervisor not running/)
-      )
+        e => assert.match(String(e), /supervisor not running/)
+      );
     } finally {
-      cleanup(fx)
+      cleanup(fx);
     }
-  })
+  });
 
   test('stop is idempotent; unknown ids are a no-op', async () => {
-    const fx = fixture([{ id: 'fx-1', status: 'open' }])
+    const fx = fixture([{ id: 'fx-1', status: 'open' }]);
     try {
-      const conn = makeGascityConnector({ dir: fx.main }, fx.env)
-      const info = await conn.spawn(SPEC(fx.main, fx.beadsDir, 'fx-1'))
-      await conn.stop(info.id)
-      await conn.stop(info.id)
-      await conn.stop('gascity-deadbeef')
-      const entry = readAgentRegistry(fx.main)['fx-1']!
-      assert.equal(entry.stopped, true)
+      const conn = makeGascityConnector({ dir: fx.main }, fx.env);
+      const info = await conn.spawn(SPEC(fx.main, fx.beadsDir, 'fx-1'));
+      await conn.stop(info.id);
+      await conn.stop(info.id);
+      await conn.stop('gascity-deadbeef');
+      const entry = readAgentRegistry(fx.main)['fx-1']!;
+      assert.equal(entry.stopped, true);
     } finally {
-      cleanup(fx)
+      cleanup(fx);
     }
-  })
+  });
 
   test('status on an unknown id throws AgentNotFound', async () => {
-    const fx = fixture([])
+    const fx = fixture([]);
     try {
-      const conn = makeGascityConnector({ dir: fx.main }, fx.env)
-      await assert.rejects(conn.status('gascity-nope'), AgentNotFound)
+      const conn = makeGascityConnector({ dir: fx.main }, fx.env);
+      await assert.rejects(conn.status('gascity-nope'), AgentNotFound);
     } finally {
-      cleanup(fx)
+      cleanup(fx);
     }
-  })
+  });
 
   test('no command configured → SpawnError before claiming or init', async () => {
-    const fx = fixture([{ id: 'fx-1', status: 'open' }])
+    const fx = fixture([{ id: 'fx-1', status: 'open' }]);
     try {
-      const conn = makeGascityConnector({ dir: fx.main }, { agents: {}, connectors: {} })
-      await assert.rejects(conn.spawn(SPEC(fx.main, fx.beadsDir, 'fx-1')), SpawnError)
-      assert.equal(fx.dbRows()[0]!.status, 'open')
-      assert.equal(existsSync(join(fx.city, 'city.toml')), false)
+      const conn = makeGascityConnector({ dir: fx.main }, { agents: {}, connectors: {} });
+      await assert.rejects(conn.spawn(SPEC(fx.main, fx.beadsDir, 'fx-1')), SpawnError);
+      assert.equal(fx.dbRows()[0]!.status, 'open');
+      assert.equal(existsSync(join(fx.city, 'city.toml')), false);
     } finally {
-      cleanup(fx)
+      cleanup(fx);
     }
-  })
+  });
 
   test('sling failure leaves a respawn-able lost entry with spawnError', async () => {
-    const fx = fixture([{ id: 'fx-1', status: 'open' }])
+    const fx = fixture([{ id: 'fx-1', status: 'open' }]);
     try {
-      process.env.FAKE_GC_FAIL = 'sling'
-      const conn = makeGascityConnector({ dir: fx.main }, fx.env)
-      await assert.rejects(conn.spawn(SPEC(fx.main, fx.beadsDir, 'fx-1')), SpawnError)
-      const entry = readAgentRegistry(fx.main)['fx-1']!
-      assert.equal(entry.backend, 'gascity')
-      assert.match(String(entry.spawnError), /sling/)
+      process.env.FAKE_GC_FAIL = 'sling';
+      const conn = makeGascityConnector({ dir: fx.main }, fx.env);
+      await assert.rejects(conn.spawn(SPEC(fx.main, fx.beadsDir, 'fx-1')), SpawnError);
+      const entry = readAgentRegistry(fx.main)['fx-1']!;
+      assert.equal(entry.backend, 'gascity');
+      assert.match(String(entry.spawnError), /sling/);
       // the orphan session was closed by the failure path
-      assert.equal(fx.gcDb().sessions[0]!.closed, true)
+      assert.equal(fx.gcDb().sessions[0]!.closed, true);
     } finally {
-      cleanup(fx)
+      cleanup(fx);
     }
-  })
+  });
 
   test('unparseable session-new output closes the alias orphan', async () => {
-    const fx = fixture([{ id: 'fx-1', status: 'open' }])
+    const fx = fixture([{ id: 'fx-1', status: 'open' }]);
     try {
-      process.env.FAKE_GC_GARBLE_NEW = '1'
-      const conn = makeGascityConnector({ dir: fx.main }, fx.env)
-      await assert.rejects(conn.spawn(SPEC(fx.main, fx.beadsDir, 'fx-1')), /unparseable/)
+      process.env.FAKE_GC_GARBLE_NEW = '1';
+      const conn = makeGascityConnector({ dir: fx.main }, fx.env);
+      await assert.rejects(conn.spawn(SPEC(fx.main, fx.beadsDir, 'fx-1')), /unparseable/);
       // the session gc created but never reported is closed by alias
-      assert.equal(fx.gcDb().sessions[0]!.closed, true)
+      assert.equal(fx.gcDb().sessions[0]!.closed, true);
     } finally {
-      cleanup(fx)
+      cleanup(fx);
     }
-  })
+  });
 
   test('stop refuses to mark stopped when close fails and the session lives', async () => {
-    const fx = fixture([{ id: 'fx-1', status: 'open' }])
+    const fx = fixture([{ id: 'fx-1', status: 'open' }]);
     try {
-      const conn = makeGascityConnector({ dir: fx.main }, fx.env)
-      const info = await conn.spawn(SPEC(fx.main, fx.beadsDir, 'fx-1'))
-      process.env.FAKE_GC_FAIL = 'session close'
-      await assert.rejects(conn.stop(info.id), /session close/)
-      assert.notEqual(readAgentRegistry(fx.main)['fx-1']!.stopped, true)
+      const conn = makeGascityConnector({ dir: fx.main }, fx.env);
+      const info = await conn.spawn(SPEC(fx.main, fx.beadsDir, 'fx-1'));
+      process.env.FAKE_GC_FAIL = 'session close';
+      await assert.rejects(conn.stop(info.id), /session close/);
+      assert.notEqual(readAgentRegistry(fx.main)['fx-1']!.stopped, true);
       // close failing on an already-gone session is still a clean stop
-      const db = fx.gcDb()
-      db.sessions = []
-      writeFileSync(join(fx.city, '.fake-gc.json'), JSON.stringify(db))
-      process.env.FAKE_GC_FAIL = ''
-      await conn.stop(info.id)
-      assert.equal(readAgentRegistry(fx.main)['fx-1']!.stopped, true)
+      const db = fx.gcDb();
+      db.sessions = [];
+      writeFileSync(join(fx.city, '.fake-gc.json'), JSON.stringify(db));
+      process.env.FAKE_GC_FAIL = '';
+      await conn.stop(info.id);
+      assert.equal(readAgentRegistry(fx.main)['fx-1']!.stopped, true);
     } finally {
-      cleanup(fx)
+      cleanup(fx);
     }
-  })
+  });
 
   test('a stopped supervisor degrades a missing session, never reports lost', async () => {
-    const fx = fixture([{ id: 'fx-1', status: 'open' }])
+    const fx = fixture([{ id: 'fx-1', status: 'open' }]);
     try {
-      const conn = makeGascityConnector({ dir: fx.main }, fx.env)
-      await conn.spawn(SPEC(fx.main, fx.beadsDir, 'fx-1'))
-      const db = fx.gcDb()
-      db.sessions = []
-      writeFileSync(join(fx.city, '.fake-gc.json'), JSON.stringify(db))
-      writeFileSync(join(fx.root, 'gc-supervisor'), 'false')
-      const l = await conn.list()
-      assert.equal(l.degraded !== undefined, true)
-      assert.equal(l.agents.length, 0)
+      const conn = makeGascityConnector({ dir: fx.main }, fx.env);
+      await conn.spawn(SPEC(fx.main, fx.beadsDir, 'fx-1'));
+      const db = fx.gcDb();
+      db.sessions = [];
+      writeFileSync(join(fx.city, '.fake-gc.json'), JSON.stringify(db));
+      writeFileSync(join(fx.root, 'gc-supervisor'), 'false');
+      const l = await conn.list();
+      assert.equal(l.degraded !== undefined, true);
+      assert.equal(l.agents.length, 0);
     } finally {
-      cleanup(fx)
+      cleanup(fx);
     }
-  })
+  });
 
   test('matchDir claims the configDir layout only after init', async () => {
-    const fx = fixture([])
+    const fx = fixture([]);
     try {
-      const conn = makeGascityConnector({ dir: fx.main }, fx.env)
-      assert.equal(conn.matchDir!(fx.main), false)
-      mkdirSync(fx.city, { recursive: true })
-      writeFileSync(join(fx.city, 'city.toml'), '# city\n')
-      assert.equal(conn.matchDir!(fx.main), true)
+      const conn = makeGascityConnector({ dir: fx.main }, fx.env);
+      assert.equal(conn.matchDir!(fx.main), false);
+      mkdirSync(fx.city, { recursive: true });
+      writeFileSync(join(fx.city, 'city.toml'), '# city\n');
+      assert.equal(conn.matchDir!(fx.main), true);
       // explicit connector pick resolves by name regardless
       assert.equal(
         resolveAgentConnector({ dir: fx.main }, { connector: 'gascity' }, fx.env).name,
         'gascity'
-      )
+      );
     } finally {
-      cleanup(fx)
+      cleanup(fx);
     }
-  })
+  });
 
   test('capabilities: attachable, respawnable, supervisor required', () => {
-    const conn = makeGascityConnector({ dir: '/x' }, { agents: {}, connectors: {} })
+    const conn = makeGascityConnector({ dir: '/x' }, { agents: {}, connectors: {} });
     assert.deepEqual(conn.capabilities(), {
       attach: true,
       respawn: true,
       supervisor: 'required',
-    })
-  })
+    });
+  });
 
   test('loadAgentEnv reads agents.gascity knobs', () => {
-    const { root, main } = initRepo('bro-gcenv-')
+    const { root, main } = initRepo('bro-gcenv-');
     try {
       writeFileSync(
         join(main, 'bro.config.json'),
-        JSON.stringify({ agents: { gascity: { configDir: '/c', template: 'w', command: 'gc-agent' } } })
-      )
-      const env = loadAgentEnv(main)
-      assert.equal(env.agents['gascity']!.configDir, '/c')
-      assert.equal(env.agents['gascity']!.template, 'w')
-      assert.equal(env.agents['gascity']!.command, 'gc-agent')
+        JSON.stringify({
+          agents: { gascity: { configDir: '/c', template: 'w', command: 'gc-agent' } },
+        })
+      );
+      const env = loadAgentEnv(main);
+      assert.equal(env.agents['gascity']!.configDir, '/c');
+      assert.equal(env.agents['gascity']!.template, 'w');
+      assert.equal(env.agents['gascity']!.command, 'gc-agent');
     } finally {
-      rmSync(root, { recursive: true, force: true })
+      rmSync(root, { recursive: true, force: true });
     }
-  })
-})
+  });
+});
