@@ -2972,7 +2972,8 @@ export function makeTmuxConnector(ctx: ConnectorCtx, env: AgentConnectorEnv): Ag
   return {
     name: 'tmux',
 
-    async spawn(spec: SpawnSpec): Promise<AgentInfo> { // NOSONAR — connector contract is async; the critical section is sync
+    async spawn(spec: SpawnSpec): Promise<AgentInfo> {
+      // NOSONAR — connector contract is async; the critical section is sync
       assertMutableConfig(dir);
       const home = spawnHome(dir, 'tmux', command, spec);
       const ver = tmuxRun(socket, ['-V']);
@@ -3138,7 +3139,8 @@ export function makeTmuxConnector(ctx: ConnectorCtx, env: AgentConnectorEnv): Ag
       }
     },
 
-    async status(id: string): Promise<AgentInfo> { // NOSONAR — connector contract is async; the body is sync
+    async status(id: string): Promise<AgentInfo> {
+      // NOSONAR — connector contract is async; the body is sync
       const hit = findEntry(id);
       if (!hit) {
         throw new AgentNotFound(`no tmux agent ${id}`);
@@ -4608,7 +4610,8 @@ export function makeDockerConnector(ctx: ConnectorCtx, env: AgentConnectorEnv): 
       }
     },
 
-    async status(id: string): Promise<AgentInfo> { // NOSONAR — connector contract is async; the work is sync
+    async status(id: string): Promise<AgentInfo> {
+      // NOSONAR — connector contract is async; the work is sync
       const hit = findEntry(id);
       if (!hit) {
         throw new AgentNotFound(`no docker agent ${id}`);
@@ -5526,7 +5529,8 @@ export function makeCopilotConnector(ctx: ConnectorCtx, env: AgentConnectorEnv):
       }
     },
 
-    async status(id: string): Promise<AgentInfo> { // NOSONAR — connector contract is async; the work is sync
+    async status(id: string): Promise<AgentInfo> {
+      // NOSONAR — connector contract is async; the work is sync
       const hit = findEntry(id);
       if (!hit) {
         throw new AgentNotFound(`no copilot agent ${id}`);
@@ -5663,7 +5667,8 @@ export function makeDevinConnector(ctx: ConnectorCtx, env: AgentConnectorEnv): A
       }
     },
 
-    status(id: string): Promise<AgentInfo> { // NOSONAR — connector contract is async; the scan is sync
+    status(id: string): Promise<AgentInfo> {
+      // NOSONAR — connector contract is async; the scan is sync
       const hit = find(id);
       if (hit === undefined) {
         return Promise.reject(new AgentNotFound(`no devin session ${id}`));
@@ -5671,7 +5676,8 @@ export function makeDevinConnector(ctx: ConnectorCtx, env: AgentConnectorEnv): A
       return Promise.resolve(hit);
     },
 
-    stop(id: string): Promise<void> { // NOSONAR — connector contract is async; the signal is sync
+    stop(id: string): Promise<void> {
+      // NOSONAR — connector contract is async; the signal is sync
       const hit = find(id);
       if (hit === undefined) {
         return Promise.resolve(); // idempotent — gone is the desired end state

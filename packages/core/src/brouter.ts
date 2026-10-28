@@ -51,8 +51,6 @@ const str = (v: unknown): string | undefined =>
 const isPlainObject = (v: unknown): v is Record<string, unknown> =>
   typeof v === 'object' && v !== null && !Array.isArray(v);
 
-const hasOwn = (o: object, k: string): boolean => Object.hasOwn(o, k);
-
 /** The `{provider, model?}` route form — `provider` is required, a
  *  present-but-bad `model` drops the field, not the route. */
 function routeObject(at: string, v: Record<string, unknown>): BrouterRoute | null {
@@ -73,8 +71,7 @@ function routeObject(at: string, v: Record<string, unknown>): BrouterRoute | nul
 /** One route value — `"<provider>"` or `{provider, model?}`. Bad
  *  entries drop with a warning; a key whose routes all dropped falls
  *  out of the registry (providers.ts' field-vs-entry convention). */
-function routeEntry(key: string, i: number | undefined, v: unknown): BrouterRoute | null {
-  const at = i === undefined ? key : `${key}[${i}]`;
+function routeEntry(at: string, v: unknown): BrouterRoute | null {
   if (typeof v === 'string' && v.trim() !== '') {
     return { provider: v.trim() };
   }
@@ -90,9 +87,8 @@ function routeEntry(key: string, i: number | undefined, v: unknown): BrouterRout
 /** One registry key's route list — `v` is a route value or an ordered
  *  array of them; a key whose routes all dropped leaves the registry. */
 function routeList(key: string, v: unknown): BrouterRoute[] | null {
-  const items = Array.isArray(v) ? v : [v];
-  const routes = items
-    .map((e, i) => routeEntry(key, Array.isArray(v) ? i : undefined, e))
+  const routes = (Array.isArray(v) ? v : [v])
+    .map((e, i) => routeEntry(Array.isArray(v) ? `${key}[${i}]` : key, e))
     .filter((r): r is BrouterRoute => r !== null);
   if (routes.length === 0) {
     console.error(`bro.config: brouter.models.${key} has no usable routes — entry dropped`);
@@ -101,23 +97,30 @@ function routeList(key: string, v: unknown): BrouterRoute[] | null {
   return routes;
 }
 
+/** The section's `models` bag after shape checks — a malformed
+ *  `brouter` or `brouter.models` warns and yields undefined (sections
+ *  parse independently; the absent registry is 'off', not an error). */
+function modelsBag(raw: unknown): Record<string, unknown> {
+  if (!isPlainObject(raw)) {
+    if (raw !== undefined) {
+      console.error('bro.config: brouter must be an object — section dropped');
+    }
+    return {};
+  }
+  if (raw.models !== undefined && !isPlainObject(raw.models)) {
+    console.error('bro.config: brouter.models must be an object — field dropped');
+    return {};
+  }
+  return isPlainObject(raw.models) ? raw.models : {};
+}
+
 /** `brouter` section parse — shape only; route providers resolve
  *  against `providers` at use (sections parse independently — an
  *  unknown name is a use-time config error naming the model key, same
  *  rule as `fleet.routing` chain entries). */
 export function parseBrouter(raw: unknown): BrouterConfig {
   const models: BrouterModels = {};
-  if (!isPlainObject(raw)) {
-    if (raw !== undefined) {
-      console.error('bro.config: brouter must be an object — section dropped');
-    }
-    return { models };
-  }
-  const rawModels = isPlainObject(raw.models) ? raw.models : undefined;
-  if (raw.models !== undefined && rawModels === undefined) {
-    console.error('bro.config: brouter.models must be an object — field dropped');
-  }
-  for (const [id, v] of Object.entries(rawModels ?? {})) {
+  for (const [id, v] of Object.entries(modelsBag(raw))) {
     const key = id.trim();
     if (key === '') {
       console.error('bro.config: brouter.models keys must be non-empty model ids — entry dropped');
@@ -176,7 +179,7 @@ export function isQualifiedRouteId(
   asked: string
 ): boolean {
   const slash = asked.indexOf('/');
-  return slash > 0 && slash < asked.length - 1 && hasOwn(providers, asked.slice(0, slash));
+  return slash > 0 && slash < asked.length - 1 && Object.hasOwn(providers, asked.slice(0, slash));
 }
 
 /** Model → ordered route candidates. Sources, first hit wins:
@@ -203,9 +206,9 @@ export function resolveModelRoute(
   if (isQualifiedRouteId(providers, asked)) {
     return [{ provider: asked.slice(0, slash), model: asked.slice(slash + 1) }];
   }
-  if (brouter !== undefined && hasOwn(brouter.models, asked)) {
+  if (brouter !== undefined && Object.hasOwn(brouter.models, asked)) {
     return brouter.models[asked]!.map((r, i) => {
-      if (!hasOwn(providers, r.provider)) {
+      if (!Object.hasOwn(providers, r.provider)) {
         const at = brouter.models[asked]!.length > 1 ? `${asked}[${i}]` : asked;
         throw new BrouterConfigError(at, r.provider);
       }

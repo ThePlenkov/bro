@@ -186,31 +186,40 @@ describe('bro providers route', () => {
     assert.deepEqual(out, ['dv/swe-2-max']);
   });
 
-  test('a static hit never pays the live probe', async () => {
+  /** Run `route` over the shared fixture, returning the printed rows. */
+  const routeLines = async (
+    args: string[],
+    o: Parameters<typeof runProvidersCommand>[1]
+  ): Promise<string[]> => {
     const out: string[] = [];
-    let probes = 0;
-    await runProvidersCommand(['route', 'swe-2-max'], {
+    await runProvidersCommand(args, {
       providers,
+      brouter: { models: {} },
+      ...o,
+      out: l => out.push(l),
+    });
+    return out;
+  };
+
+  test('a static hit never pays the live probe', async () => {
+    let probes = 0;
+    const out = await routeLines(['route', 'swe-2-max'], {
       brouter: { models: { 'swe-2-max': [{ provider: 'dv' }] } },
       exec: () => {
         probes += 1;
         return 'swe-2-max\n';
       },
-      out: l => out.push(l),
     });
     assert.deepEqual(out, ['dv/swe-2-max']);
     assert.equal(probes, 0);
   });
 
   test('a failed probe still routes the pinned model', async () => {
-    const out: string[] = [];
-    await runProvidersCommand(['route', 'swe-2-max'], {
+    const out = await routeLines(['route', 'swe-2-max'], {
       providers: { dv: { type: 'cli', command: 'dv run', model: 'swe-2-max', models: 'boom' } },
-      brouter: { models: {} },
       exec: () => {
         throw new Error('kaboom');
       },
-      out: l => out.push(l),
     });
     assert.deepEqual(out, ['dv/swe-2-max']);
   });

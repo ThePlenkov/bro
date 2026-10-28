@@ -194,18 +194,14 @@ async function runRouteCommand(
   }
 }
 
-export async function runProvidersCommand(argv: string[], opts: Opts = {}): Promise<void> {
-  const [verb, ...names] = argv;
-  if ((verb !== 'models' && verb !== 'route') || hasHelpFlag(names)) {
-    printUsage(USAGE, verb === undefined || hasHelpFlag(argv) ? 0 : 2);
-  }
-  const providers = opts.providers ?? loadConfig(process.cwd()).providers ?? {};
-  const out = opts.out ?? ((line: string) => console.log(line));
-  if (verb === 'route') {
-    await runRouteCommand(names, providers, opts, out);
-    return;
-  }
-
+/** `models` — the catalog surface: named providers or all of them,
+ *  a failing provider warns and the exit code reports it. */
+async function runModelsCommand(
+  names: string[],
+  providers: Record<string, ProviderEntry>,
+  opts: Opts,
+  out: (line: string) => void
+): Promise<void> {
   const wanted =
     names.length > 0
       ? names.map(n => {
@@ -232,4 +228,22 @@ export async function runProvidersCommand(argv: string[], opts: Opts = {}): Prom
   if (failed > 0) {
     process.exit(1);
   }
+}
+
+export async function runProvidersCommand(argv: string[], opts: Opts = {}): Promise<void> {
+  const [verb, ...names] = argv;
+  if (verb === undefined || hasHelpFlag(argv)) {
+    printUsage(USAGE, 0);
+  }
+  const providers = opts.providers ?? loadConfig(process.cwd()).providers ?? {};
+  const out = opts.out ?? ((line: string) => console.log(line));
+  if (verb === 'route') {
+    await runRouteCommand(names, providers, opts, out);
+    return;
+  }
+  if (verb === 'models') {
+    await runModelsCommand(names, providers, opts, out);
+    return;
+  }
+  printUsage(USAGE, 2);
 }
