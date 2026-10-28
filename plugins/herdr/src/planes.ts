@@ -5,18 +5,18 @@
  * bro's planes on the left, herdr's on the right, all reads, no writes.
  */
 import {
+  type AgentEntry,
   agentsJson,
   armedWorkDetails,
+  type BroStatus,
   broStatus,
+  type HerdrWorkspace,
+  type HerdrWorktreeList,
   loadState,
   paneExists,
   stateScope,
-  worktreeList,
   workspaceList,
-  type AgentEntry,
-  type BroStatus,
-  type HerdrWorkspace,
-  type HerdrWorktreeList,
+  worktreeList,
 } from './lib.ts';
 
 export interface Planes {

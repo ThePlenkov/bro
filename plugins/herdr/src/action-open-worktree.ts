@@ -12,6 +12,7 @@
 import { existsSync } from 'node:fs';
 import { basename, dirname, join } from 'node:path';
 import {
+  type BroStatus,
   bro,
   broStatus,
   ctxJson,
@@ -19,7 +20,6 @@ import {
   notify,
   repoDir,
   worktreeList,
-  type BroStatus,
 } from './lib.ts';
 
 const ctx = ctxJson();

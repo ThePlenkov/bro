@@ -7,9 +7,10 @@
  * the `new PollSource(...)` below — nothing else.
  * Interval: BRO_SYNC_EVERY_S env or 30s.
  */
-import { converge } from './reconcile.ts';
+
 import { ctxJson, repoDir } from './lib.ts';
-import { PollSource, type EventSource } from './sources.ts';
+import { converge } from './reconcile.ts';
+import { type EventSource, PollSource } from './sources.ts';
 
 const requested = Number(process.env.BRO_SYNC_EVERY_S ?? 30);
 const EVERY_MS = Math.max(5, Number.isFinite(requested) ? requested : 30) * 1000;

@@ -9,7 +9,7 @@
  * Agent kind comes from $HERDR_PLUGIN_CONFIG_DIR/config.toml
  * (`agent_kind = "devin"`), default `devin`.
  */
-import { broJson, configValue, ctxJson, herdr, herdrTry, notify, repoDir } from './lib.ts';
+import { broJson, configValue, ctxJson, herdrTry, notify, repoDir } from './lib.ts';
 
 interface NextOut {
   state: string;

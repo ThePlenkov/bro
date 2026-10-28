@@ -10,15 +10,7 @@
  */
 import { spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import {
-  existsSync,
-  mkdirSync,
-  readFileSync,
-  readdirSync,
-  renameSync,
-  statSync,
-  writeFileSync,
-} from 'node:fs';
+import { mkdirSync, readdirSync, readFileSync, renameSync, statSync, writeFileSync } from 'node:fs';
 import { basename, dirname, isAbsolute, join, resolve } from 'node:path';
 import process from 'node:process';
 
@@ -121,15 +113,14 @@ function gitCommonDir(dir: string): string | null {
  *  context's worktree repo. */
 export function repoDir(ctx: PluginContext = ctxJson()): string {
   const cw = ctx.worktree?.repo_root ?? ctx.worktree?.checkout_path;
-  if (typeof cw === 'string') {
-    const t = gitTop(cw);
-    if (t !== null) return t;
+  const ctxTop = typeof cw === 'string' ? gitTop(cw) : null;
+  const top = ctxTop ?? gitTop(PLUGIN_ROOT);
+  if (top === null) {
+    throw new Error(
+      'no bro repo resolvable — link the plugin inside the repo or invoke from its worktree'
+    );
   }
-  const t = gitTop(PLUGIN_ROOT);
-  if (t !== null) return t;
-  throw new Error(
-    'no bro repo resolvable — link the plugin inside the repo or invoke from its worktree'
-  );
+  return top;
 }
 
 // --- bro planes ------------------------------------------------------------
@@ -245,14 +236,40 @@ export function pidAlive(pid: number, start?: string): boolean {
   return st === null || st === start;
 }
 
-function markerLive(firstLine: string, mtimeMs: number, now: number): boolean {
-  const parts = firstLine.trim().split(' ');
+/** `owner <pid> <start>` on marker line 1 — both parts or there is no
+ *  owner pin at all. */
+function ownerPin(parts: string[]): { pid: number; start: string } | undefined {
   const pid = Number(parts[1]);
   const start = parts[2] ?? '';
-  if (Number.isInteger(pid) && pid > 0 && start !== '') {
-    return pidAlive(pid, start);
+  if (!Number.isInteger(pid) || pid <= 0) return undefined;
+  if (start === '') return undefined;
+  return { pid, start };
+}
+
+/** Owner-pinned liveness: the marker's recorded pid+start must still
+ *  answer. null = not owner-pinned (caller falls to the time window). */
+function markerOwnerAlive(firstLine: string): boolean | null {
+  const pin = ownerPin(firstLine.trim().split(' '));
+  return pin === undefined ? null : pidAlive(pin.pid, pin.start);
+}
+
+function markerLive(firstLine: string, mtimeMs: number, now: number): boolean {
+  return markerOwnerAlive(firstLine) ?? mtimeMs >= now - LIVE_SESSION_MS;
+}
+
+/** Detail lines of one `.work` marker — empty when dead or unreadable. */
+function markerDetails(path: string, now: number): string[] {
+  try {
+    const st = statSync(path);
+    const lines = readFileSync(path, 'utf8').split('\n');
+    if (!markerLive(lines[0] ?? '', st.mtimeMs, now)) return [];
+    return lines
+      .slice(1)
+      .map(d => d.trim())
+      .filter(t => t !== '');
+  } catch {
+    return [];
   }
-  return mtimeMs >= now - LIVE_SESSION_MS;
 }
 
 /** Detail lines of live `<session>.work` markers under the common hooks
@@ -261,29 +278,13 @@ export function armedWorkDetails(repo: string, now = Date.now()): string[] {
   const gd = gitCommonDir(repo);
   if (gd === null) return [];
   const hooks = join(gd, 'bro', 'hooks');
-  const out: string[] = [];
-  let files: string[] = [];
   try {
-    files = readdirSync(hooks);
+    return readdirSync(hooks)
+      .filter(f => f.endsWith('.work') && !f.startsWith('agent-'))
+      .flatMap(f => markerDetails(join(hooks, f), now));
   } catch {
-    return out;
+    return [];
   }
-  for (const f of files) {
-    if (!f.endsWith('.work') || f.startsWith('agent-')) continue;
-    try {
-      const p = join(hooks, f);
-      const st = statSync(p);
-      const lines = readFileSync(p, 'utf8').split('\n');
-      if (!markerLive(lines[0] ?? '', st.mtimeMs, now)) continue;
-      for (const d of lines.slice(1)) {
-        const t = d.trim();
-        if (t !== '') out.push(t);
-      }
-    } catch {
-      // unreadable marker — skip
-    }
-  }
-  return out;
 }
 
 // --- herdr planes ----------------------------------------------------------
@@ -328,6 +329,17 @@ export function paneList(workspaceId: string): HerdrPane[] {
   return herdr<{ panes: HerdrPane[] }>(['pane', 'list', '--workspace', workspaceId]).panes;
 }
 
+/** A success envelope that still carries no pane — or the explicit
+ *  pane_not_found error code — counts as gone. */
+function envelopeSaysGone(out: string): boolean {
+  try {
+    const d = JSON.parse(out) as { result?: { pane?: unknown }; error?: { code?: string } };
+    return d.result?.pane === undefined || d.error?.code === 'pane_not_found';
+  } catch {
+    return false;
+  }
+}
+
 /** Definitive absence only. `pane get` answers "gone" two ways — a
  *  non-zero exit whose output says pane_not_found, or a success
  *  envelope with no pane in result. Anything else (socket hiccup,
@@ -335,13 +347,9 @@ export function paneList(workspaceId: string): HerdrPane[] {
  *  drop a mirror rec or spawn a duplicate pane. */
 export function paneGone(paneId: string): boolean {
   const r = run(HERDR, ['pane', 'get', paneId]);
-  if (r.code !== 0) return /pane_not_found|not found/i.test(`${r.err} ${r.out}`);
-  try {
-    const d = JSON.parse(r.out) as { result?: { pane?: unknown }; error?: { code?: string } };
-    return d.result?.pane === undefined || d.error?.code === 'pane_not_found';
-  } catch {
-    return false;
-  }
+  return r.code !== 0
+    ? /pane_not_found|not found/i.test(`${r.err} ${r.out}`)
+    : envelopeSaysGone(r.out);
 }
 
 export function paneExists(paneId: string): boolean {
@@ -437,12 +445,16 @@ export function saveState(scope: string, s: PluginState): void {
 }
 
 /** Small config file under HERDR_PLUGIN_CONFIG_DIR — `key = value` TOML
- *  subset; we only need `agent_kind`. */
+ *  subset; we only need `agent_kind`. Line-scanned with a static
+ *  pattern — a key never becomes regex source. */
 export function configValue(key: string, fallback: string): string {
   try {
     const raw = readFileSync(join(CONFIG_DIR, 'config.toml'), 'utf8');
-    const m = new RegExp(`^\\s*${key}\\s*=\\s*"([^"]+)"`, 'm').exec(raw);
-    return m?.[1] ?? fallback;
+    for (const line of raw.split('\n')) {
+      const m = /^\s*([\w.-]+)\s*=\s*"([^"]+)"/.exec(line);
+      if (m?.[1] === key) return m[2] ?? fallback;
+    }
+    return fallback;
   } catch {
     return fallback;
   }

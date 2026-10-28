@@ -4,7 +4,7 @@
  * identically no matter what produced them. Swapping the source changes
  * the trigger, never the convergence (spec bro-762eh).
  */
-import { diffKey, readPlanes, type Planes } from './planes.ts';
+import { diffKey, type Planes, readPlanes } from './planes.ts';
 
 export interface EventSource extends AsyncIterable<Planes> {}
 
