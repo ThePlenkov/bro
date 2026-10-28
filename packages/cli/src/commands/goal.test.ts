@@ -51,12 +51,15 @@ function writeReq(dir: string, session: string, body: unknown): void {
  *  carries the verdict the next decide() answers. */
 const FAKE_JUDGE = 'goal-test-judge';
 let scripted: 'met' | 'not_met' | 'impossible' | 'throw' = 'not_met';
+/** Side effect run inside decide() — lets a test land a write mid-eval. */
+let decideEffect: (() => void) | undefined;
 registerConnector({
   name: FAKE_JUDGE,
   optIn: true,
   judge: () =>
     ({
       decide: async () => {
+        decideEffect?.();
         if (scripted === 'throw') {
           throw new Error('judge down');
         }
@@ -333,6 +336,55 @@ describe('goal eval — the queued judge path (bro-36sx7.4)', () => {
     assert.equal(g?.status, 'active');
     assert.equal(g?.evals, 0);
     assert.equal(existsSync(reqFile(dir, 's1')), false);
+  });
+
+  test('a pause+resume mid-eval is a new generation — the in-flight verdict drops', async () => {
+    const dir = repo();
+    judgeCfg(dir);
+    writeRaw(dir, 's1', { ...ACTIVE, createdAt: 1 });
+    scripted = 'met';
+    writeReq(dir, 's1', { createdAt: 1, evals: 0, condition: 'tests pass', trace: 't' });
+    const prev = process.cwd();
+    process.chdir(dir);
+    try {
+      runGoalCommand(['pause', '--session', 's1']);
+      runGoalCommand(['resume', '--session', 's1']);
+    } finally {
+      process.chdir(prev);
+    }
+    // resume restarted the clock — the snapshot the req pinned is stale
+    assert.notEqual(readGoal(dir, 's1')?.createdAt, 1);
+    await evalGoal(dir);
+    const g = readGoal(dir, 's1');
+    assert.equal(g?.status, 'active');
+    assert.equal(g?.evals, 0);
+  });
+
+  test('a newer req queued mid-decide survives a failed worker restore', async () => {
+    const dir = repo();
+    judgeCfg(dir);
+    writeRaw(dir, 's1', ACTIVE);
+    scripted = 'throw';
+    writeReq(dir, 's1', {
+      createdAt: ACTIVE.createdAt,
+      evals: 0,
+      condition: 'tests pass',
+      trace: 'old',
+    });
+    decideEffect = () =>
+      writeReq(dir, 's1', {
+        createdAt: ACTIVE.createdAt,
+        evals: 0,
+        condition: 'tests pass',
+        trace: 'newer',
+      });
+    try {
+      await evalGoal(dir);
+    } finally {
+      decideEffect = undefined;
+    }
+    // restore must not rename over the newer req — fresher evidence wins
+    assert.match(readFileSync(reqFile(dir, 's1'), 'utf8'), /newer/);
   });
 
   test('no req → quiet no-op; a corrupt req is dropped', async () => {

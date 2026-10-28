@@ -28,6 +28,7 @@
 import { execFileSync } from 'node:child_process';
 import {
   existsSync,
+  linkSync,
   mkdirSync,
   readdirSync,
   readFileSync,
@@ -519,7 +520,16 @@ async function cmdGoalEval(dir: string, session: string): Promise<void> {
   }
   const restore = (): void => {
     try {
-      renameSync(work, req);
+      if (existsSync(req)) {
+        // a later stop queued a newer req while decide() ran — its
+        // fresher evidence wins, the stale claim is debris
+        rmSync(work, { force: true });
+        return;
+      }
+      // linkSync is the no-clobber rename: EEXIST drops this claim
+      // rather than replacing a req that raced in mid-check
+      linkSync(work, req);
+      rmSync(work, { force: true });
     } catch {
       rmSync(work, { force: true });
     }
@@ -697,6 +707,10 @@ function pauseResumeGoal(
   goal.status = verb === 'pause' ? 'paused' : 'active';
   if (verb === 'resume') {
     goal.evals = 0;
+    // a resume restarts the goal's generation — createdAt is the merge
+    // recheck's generation key, so an in-flight eval's verdict drops
+    // instead of merging onto the reactivated goal
+    goal.createdAt = Date.now();
     goal.resolvedAt = undefined;
   }
   writeGoal(dir, target, goal);
