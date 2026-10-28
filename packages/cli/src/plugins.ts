@@ -69,6 +69,8 @@ import { applyConvoyPlan, runConvoyCommand } from './commands/convoy.ts';
 import { runLoopCommand } from './commands/loop.ts';
 import { applyNextPlan, runNextCommand } from './commands/next.ts';
 import { runNotifyCommand } from './commands/notify.ts';
+import { runOtelCommand } from './commands/otel.ts';
+import { otelSection } from '@broject/otel';
 import { rigSection } from './commands/rig-config.ts';
 import { rigConnector } from './commands/rig-pulse.ts';
 import { runRigCommand } from './commands/rig.ts';
@@ -639,6 +641,31 @@ export const PLUGINS: BroPlugin[] = [
     skill: 'trace',
     configKey: 'telemetry',
     configSchema: telemetrySection,
+  }),
+  definePlugin({
+    name: 'otel',
+    group: 'fleet',
+    summary:
+      'Hook-first telemetry — status|test|on|off; every dispatched hook exports through the emitHook facade (spec bro-xgejl)',
+    run: runOtelCommand,
+    skill: 'otel',
+    configKey: 'otel',
+    configSchema: otelSection,
+    contract: {
+      subs: {
+        status: {
+          flags: { '--json': 'machine-readable report' },
+          exits: { 0: 'report printed' },
+        },
+        test: {
+          flags: { '--json': 'machine-readable report' },
+          exits: { 0: 'would-be record printed', 2: 'missing hook name' },
+        },
+        on: { exits: { 0: 'otel.enabled=true written to bro.config.local.json', 2: 'bro.config.local.ts shadows' } },
+        off: { exits: { 0: 'otel.enabled=false written to bro.config.local.json', 2: 'bro.config.local.ts shadows' } },
+      },
+      exits: { 0: 'status (bare `bro otel`)', 2: 'usage — unknown subcommand' },
+    },
   }),
   definePlugin({
     name: 'acp-worker',

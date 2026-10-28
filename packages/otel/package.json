@@ -1,0 +1,49 @@
+{
+  "name": "@broject/otel",
+  "version": "0.2.5",
+  "type": "module",
+  "dependencies": {
+    "@broject/core": "^0.2.0",
+    "@broject/providers": "^0.2.0"
+  },
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
+  },
+  "scripts": {
+    "test": "tsx --test src/**/*.test.ts",
+    "typecheck": "tsc --noEmit"
+  },
+  "devDependencies": {
+    "tsdown": "^0.15.0",
+    "tsx": "^4.20.0",
+    "typescript": "^5.9.0"
+  },
+  "files": [
+    "dist"
+  ],
+  "engines": {
+    "node": ">=22"
+  },
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/ThePlenkov/bro.git",
+    "directory": "packages/otel"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "description": "Hook-first telemetry for bro — emitHook facade: config-gated sampling + field allowlist over every dispatched hook event, exported to file/OTLP/stdout sinks",
+  "keywords": [
+    "otel",
+    "telemetry",
+    "hooks",
+    "observability",
+    "agent",
+    "bro"
+  ],
+  "homepage": "https://broject.dev/docs"
+}
