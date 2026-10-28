@@ -1273,7 +1273,11 @@ export function recordGuardEvents(
   try {
     const gdir = join(dir, 'guards');
     if (coverage?.complete !== true) {
-      rmSync(join(gdir, '.stamp'), { force: true });
+      try {
+        rmSync(join(gdir, '.stamp'), { force: true });
+      } catch {
+        // ignore
+      }
       return;
     }
     mkdirSync(gdir, { recursive: true });
@@ -1289,7 +1293,7 @@ export function recordGuardEvents(
     renameSync(tmp, join(gdir, '.stamp'));
     try {
       const core = require('@broject/core');
-      const GUARD_EVENTS = core.GUARD_EVENTS ?? [
+      const GUARD_EVENTS = core?.GUARD_EVENTS ?? [
         'session-start',
         'prompt-submit',
         'post-tool',
@@ -1297,23 +1301,31 @@ export function recordGuardEvents(
       ];
       for (const ev of GUARD_EVENTS) {
         if (!coverage.events.includes(ev)) {
-          rmSync(join(gdir, ev), { force: true });
+          try {
+            rmSync(join(gdir, ev), { force: true });
+          } catch {
+            // ignore
+          }
         }
       }
     } catch {
-      try {
-        const GUARD_EVENTS = ['session-start', 'prompt-submit', 'post-tool', 'stop'];
-        for (const ev of GUARD_EVENTS) {
-          if (!coverage.events.includes(ev)) {
+      const GUARD_EVENTS = ['session-start', 'prompt-submit', 'post-tool', 'stop'];
+      for (const ev of GUARD_EVENTS) {
+        if (!coverage.events.includes(ev)) {
+          try {
             rmSync(join(gdir, ev), { force: true });
+          } catch {
+            // ignore
           }
         }
-      } catch {
-        // ignore
       }
     }
     if (!coverage.trace) {
-      rmSync(join(gdir, '.trace'), { force: true });
+      try {
+        rmSync(join(gdir, '.trace'), { force: true });
+      } catch {
+        // ignore
+      }
     }
   } catch {
     // a failed record only costs future spawns — never stall a hook
