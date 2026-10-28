@@ -1,0 +1,72 @@
+# bro's herdr channel — a pull-only reconciler over bro's read planes.
+# bro never knows herdr exists: this plugin polls `bro fleet status
+# --json` + `herdr worktree list` and converges workspaces/panes to
+# match. Its only bro writes are the documented command-plane verbs
+# (`bro work enter`, `bro next`, `bro review act status`, `bro notify`)
+# — claims, .work markers, agents.json and .exit records come from the
+# work itself (spec bro-762eh).
+id = "bro.fleet"
+name = "bro fleet"
+version = "0.1.0"
+min_herdr_version = "0.9.5"
+description = "bro fleet channel — reconciles herdr workspaces/panes with bro's read planes (pull-only)"
+platforms = ["linux", "macos"]
+
+# one converge pass at server start (one-shot, not a daemon)
+[[startup]]
+command = ["node", "src/reconcile.ts"]
+
+# the reconcile loop as a managed daemon pane — lives/dies with the
+# server, no detached background processes
+[[panes]]
+id = "sync"
+title = "bro sync"
+placement = "tab"
+command = ["node", "src/sync.ts"]
+
+# joined board: worktree ↔ bead ↔ agent ↔ workspace ↔ PR
+[[panes]]
+id = "board"
+title = "bro board"
+placement = "overlay"
+command = ["node", "src/board.ts"]
+
+[[actions]]
+id = "board"
+title = "Open bro board"
+contexts = ["workspace"]
+command = ["node", "src/action-board.ts"]
+
+[[actions]]
+id = "sync"
+title = "Sync bro fleet"
+contexts = ["workspace"]
+command = ["node", "src/reconcile.ts"]
+
+[[actions]]
+id = "open-worktree"
+title = "Open bro worktree"
+contexts = ["workspace"]
+command = ["node", "src/action-open-worktree.ts"]
+
+[[actions]]
+id = "claim-bead"
+title = "Claim next bead"
+contexts = ["workspace"]
+command = ["node", "src/action-claim-bead.ts"]
+
+[[actions]]
+id = "pr-gate"
+title = "PR gate status"
+contexts = ["workspace"]
+command = ["node", "src/action-pr-gate.ts"]
+
+[[events]]
+on = "worktree.created"
+command = ["node", "src/event-worktree-created.ts"]
+
+[[link_handlers]]
+id = "github-pr"
+title = "bro PR gate"
+pattern = "^https://github\\.com/[^/]+/[^/]+/pull/[0-9]+$"
+action = "pr-gate"
