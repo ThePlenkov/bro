@@ -1,24 +1,30 @@
-import { after, describe, test } from 'node:test';
-import assert from 'node:assert/strict';
-import { chmodSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
-import { join } from 'node:path';
-import { facade, registerConnector, scrubEnv, testGit, type ApprovalVerdict } from '@broject/core';
-import { githubConnector } from '@broject/github';
-import { gitlabConnector, gitlabReview } from './index.ts';
+import { after, describe, test } from 'node:test'
+import assert from 'node:assert/strict'
+import { chmodSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
+import {
+  facade,
+  registerConnector,
+  scrubEnv,
+  testGit,
+  type ApprovalVerdict,
+} from '@broject/core'
+import { githubConnector } from '@broject/github'
+import { gitlabConnector, gitlabReview } from './index.ts'
 
 // ambient repo/agent/store pins must not reach fixture git children
 // or the code-under-test spawns — scrub once, restore after the file
-after(scrubEnv());
+after(scrubEnv())
 
-const WIN32 = process.platform === 'win32';
+const WIN32 = process.platform === 'win32'
 
 const MR_DEFAULT =
-  '{"iid":%IID%,"state":"merged","title":"did the thing","web_url":"https://gitlab.com/acme/widgets/-/merge_requests/%IID%","merged_at":"2026-01-02T00:00:00Z","updated_at":"2026-01-03T00:00:00Z","merge_commit_sha":"abc123","labels":["bug"],"sha":"abc123","source_branch":"feat","diff_refs":{"head_sha":"abc123"},"author":{"username":"dev"}}';
+  '{"iid":%IID%,"state":"merged","title":"did the thing","web_url":"https://gitlab.com/acme/widgets/-/merge_requests/%IID%","merged_at":"2026-01-02T00:00:00Z","updated_at":"2026-01-03T00:00:00Z","merge_commit_sha":"abc123","labels":["bug"],"sha":"abc123","source_branch":"feat","diff_refs":{"head_sha":"abc123"},"author":{"username":"dev"}}'
 
 // d1 sits on the current diff head — d4's note is pinned to oldsha99,
 // so outdated comes from position.head_sha, not the flaky `active` flag
-const DISCUSSIONS = `[{"id":"d1","individual_note":false,"notes":[{"id":1,"resolvable":true,"resolved":false,"body":"fix this","created_at":"2026-01-01","author":{"username":"project_7_bot_x"},"position":{"new_path":"a.ts","new_line":3,"head_sha":"abc123"}}]},{"id":"d2","individual_note":true,"notes":[{"id":2,"resolvable":false,"body":"nope","author":{"username":"dev"}}]},{"id":"d3","individual_note":false,"notes":[{"id":3,"resolvable":false,"body":"chat","author":{"username":"dev"}}]},{"id":"d4","individual_note":false,"notes":[{"id":4,"resolvable":true,"resolved":true,"body":"done","author":{"username":"dev"},"position":{"new_path":"b.ts","new_line":9,"head_sha":"oldsha99"}}]}]`;
+const DISCUSSIONS = `[{"id":"d1","individual_note":false,"notes":[{"id":1,"resolvable":true,"resolved":false,"body":"fix this","created_at":"2026-01-01","author":{"username":"project_7_bot_x"},"position":{"new_path":"a.ts","new_line":3,"head_sha":"abc123"}}]},{"id":"d2","individual_note":true,"notes":[{"id":2,"resolvable":false,"body":"nope","author":{"username":"dev"}}]},{"id":"d3","individual_note":false,"notes":[{"id":3,"resolvable":false,"body":"chat","author":{"username":"dev"}}]},{"id":"d4","individual_note":false,"notes":[{"id":4,"resolvable":true,"resolved":true,"body":"done","author":{"username":"dev"},"position":{"new_path":"b.ts","new_line":9,"head_sha":"oldsha99"}}]}]`
 
 /** Scripted glab on PATH — records argv + GITLAB_HOST to $FAKE_GLAB_LOG,
  *  answers REST reads by endpoint shape and writes by method+endpoint. */
@@ -54,37 +60,37 @@ case "$1 $2" in
       *) echo '[]' ;;
     esac ;;
 esac
-`;
+`
 
 /** A git repo in a tmpdir with `url` as origin — remote detection needs
  *  a real checkout, the host never sees a call. */
 function makeRepo(url: string): string {
-  const dir = mkdtempSync(join(tmpdir(), 'bro-gitlab-'));
-  testGit(['init', '-b', 'main'], { cwd: dir, stdio: 'ignore' });
-  testGit(['remote', 'add', 'origin', url], { cwd: dir, stdio: 'ignore' });
-  return dir;
+  const dir = mkdtempSync(join(tmpdir(), 'bro-gitlab-'))
+  testGit(['init', '-b', 'main'], { cwd: dir, stdio: 'ignore' })
+  testGit(['remote', 'add', 'origin', url], { cwd: dir, stdio: 'ignore' })
+  return dir
 }
 
 function withFakeGlab(env: Record<string, string>, fn: (log: string) => void): void {
-  const dir = mkdtempSync(join(tmpdir(), 'bro-fake-glab-'));
-  const log = join(dir, 'glab.log');
-  writeFileSync(log, '');
-  writeFileSync(join(dir, 'glab'), FAKE_GLAB);
-  chmodSync(join(dir, 'glab'), 0o755);
-  const prevPath = process.env.PATH;
-  process.env.PATH = `${dir}:${prevPath}`;
-  const prevEnv = Object.fromEntries(Object.keys(env).map(k => [k, process.env[k]]));
-  Object.assign(process.env, { FAKE_GLAB_LOG: log, ...env });
+  const dir = mkdtempSync(join(tmpdir(), 'bro-fake-glab-'))
+  const log = join(dir, 'glab.log')
+  writeFileSync(log, '')
+  writeFileSync(join(dir, 'glab'), FAKE_GLAB)
+  chmodSync(join(dir, 'glab'), 0o755)
+  const prevPath = process.env.PATH
+  process.env.PATH = `${dir}:${prevPath}`
+  const prevEnv = Object.fromEntries(Object.keys(env).map((k) => [k, process.env[k]]))
+  Object.assign(process.env, { FAKE_GLAB_LOG: log, ...env })
   try {
-    fn(log);
+    fn(log)
   } finally {
-    process.env.PATH = prevPath;
+    process.env.PATH = prevPath
     for (const [k, v] of Object.entries(prevEnv)) {
-      if (v === undefined) delete process.env[k];
-      else process.env[k] = v;
+      if (v === undefined) delete process.env[k]
+      else process.env[k] = v
     }
-    delete process.env.FAKE_GLAB_LOG;
-    rmSync(dir, { recursive: true, force: true });
+    delete process.env.FAKE_GLAB_LOG
+    rmSync(dir, { recursive: true, force: true })
   }
 }
 
@@ -92,115 +98,112 @@ async function withFakeGlabAsync(
   env: Record<string, string>,
   fn: (log: string) => Promise<void>
 ): Promise<void> {
-  const dir = mkdtempSync(join(tmpdir(), 'bro-fake-glab-'));
-  const log = join(dir, 'glab.log');
-  writeFileSync(log, '');
-  writeFileSync(join(dir, 'glab'), FAKE_GLAB);
-  chmodSync(join(dir, 'glab'), 0o755);
-  const prevPath = process.env.PATH;
-  process.env.PATH = `${dir}:${prevPath}`;
-  const prevLog = process.env.FAKE_GLAB_LOG;
-  const prevEnv = Object.fromEntries(Object.keys(env).map(k => [k, process.env[k]]));
-  Object.assign(process.env, { FAKE_GLAB_LOG: log, ...env });
+  const dir = mkdtempSync(join(tmpdir(), 'bro-fake-glab-'))
+  const log = join(dir, 'glab.log')
+  writeFileSync(log, '')
+  writeFileSync(join(dir, 'glab'), FAKE_GLAB)
+  chmodSync(join(dir, 'glab'), 0o755)
+  const prevPath = process.env.PATH
+  process.env.PATH = `${dir}:${prevPath}`
+  const prevLog = process.env.FAKE_GLAB_LOG
+  const prevEnv = Object.fromEntries(Object.keys(env).map((k) => [k, process.env[k]]))
+  Object.assign(process.env, { FAKE_GLAB_LOG: log, ...env })
   try {
-    await fn(log);
+    await fn(log)
   } finally {
-    process.env.PATH = prevPath;
-    if (prevLog === undefined) delete process.env.FAKE_GLAB_LOG;
-    else process.env.FAKE_GLAB_LOG = prevLog;
+    process.env.PATH = prevPath
+    if (prevLog === undefined) delete process.env.FAKE_GLAB_LOG
+    else process.env.FAKE_GLAB_LOG = prevLog
     for (const [k, v] of Object.entries(prevEnv)) {
-      if (v === undefined) delete process.env[k];
-      else process.env[k] = v;
+      if (v === undefined) delete process.env[k]
+      else process.env[k] = v
     }
-    rmSync(dir, { recursive: true, force: true });
+    rmSync(dir, { recursive: true, force: true })
   }
 }
 
-const target = { repo: 'acme/widgets', pr: 42 };
+const target = { repo: 'acme/widgets', pr: 42 }
 
 describe('gitlab connector', () => {
   test('matchRemote claims gitlab.com hosts only', () => {
-    assert.equal(gitlabConnector.matchRemote?.('git@gitlab.com:acme/widgets.git'), true);
-    assert.equal(gitlabConnector.matchRemote?.('https://gitlab.com/acme/widgets.git'), true);
-    assert.equal(gitlabConnector.matchRemote?.('git@github.com:acme/widgets.git'), false);
-    assert.equal(gitlabConnector.matchRemote?.('git@evilgitlab.com:acme/widgets.git'), false);
-    assert.equal(gitlabConnector.matchRemote?.('git@ops.gitlab.com:acme/w.git'), true);
+    assert.equal(gitlabConnector.matchRemote?.('git@gitlab.com:acme/widgets.git'), true)
+    assert.equal(gitlabConnector.matchRemote?.('https://gitlab.com/acme/widgets.git'), true)
+    assert.equal(gitlabConnector.matchRemote?.('git@github.com:acme/widgets.git'), false)
+    assert.equal(gitlabConnector.matchRemote?.('git@evilgitlab.com:acme/widgets.git'), false)
+    assert.equal(gitlabConnector.matchRemote?.('git@ops.gitlab.com:acme/w.git'), true)
     // right-edge lookalikes — a `gitlab` label off the gitlab.com edge is
     // indistinguishable from phishing, so self-hosted goes through config
-    assert.equal(gitlabConnector.matchRemote?.('git@gitlab.com.evil.com:acme/w.git'), false);
-    assert.equal(gitlabConnector.matchRemote?.('git@gitlab.corp.internal:acme/w.git'), false);
-  });
+    assert.equal(gitlabConnector.matchRemote?.('git@gitlab.com.evil.com:acme/w.git'), false)
+    assert.equal(gitlabConnector.matchRemote?.('git@gitlab.corp.internal:acme/w.git'), false)
+  })
 
   test('parsePrRef extracts repo/mr from the bound host only', () => {
-    const rev = gitlabReview(mkdtempSync(join(tmpdir(), 'bro-gl-ref-')));
+    const rev = gitlabReview(mkdtempSync(join(tmpdir(), 'bro-gl-ref-')))
     assert.deepEqual(rev.parsePrRef('see https://gitlab.com/acme/widgets/-/merge_requests/42'), {
       repo: 'acme/widgets',
       pr: 42,
-    });
+    })
     // nested group paths keep their slashes
     assert.deepEqual(rev.parsePrRef('https://gitlab.com/a/b/c/-/merge_requests/9'), {
       repo: 'a/b/c',
       pr: 9,
-    });
-    assert.equal(rev.parsePrRef('fix the thing'), null);
-    assert.equal(rev.parsePrRef('https://github.com/acme/widgets/pull/42'), null);
-    assert.equal(rev.parsePrRef('https://gitlab.com.evil.com/x/-/merge_requests/9'), null);
-  });
+    })
+    assert.equal(rev.parsePrRef('fix the thing'), null)
+    assert.equal(rev.parsePrRef('https://github.com/acme/widgets/pull/42'), null)
+    assert.equal(rev.parsePrRef('https://gitlab.com.evil.com/x/-/merge_requests/9'), null)
+  })
 
   test('resolveRepo reads the origin remote path, positionals join', () => {
-    const dir = makeRepo('git@gitlab.com:a/b/c.git');
+    const dir = makeRepo('git@gitlab.com:a/b/c.git')
     try {
-      const rev = gitlabReview(dir);
-      assert.equal(rev.resolveRepo([]), 'a/b/c');
-      assert.equal(rev.resolveRepo(['x', 'y', 'z']), 'x/y/z');
-      assert.equal(rev.resolveRepo(['x/y']), 'x/y');
+      const rev = gitlabReview(dir)
+      assert.equal(rev.resolveRepo([]), 'a/b/c')
+      assert.equal(rev.resolveRepo(['x', 'y', 'z']), 'x/y/z')
+      assert.equal(rev.resolveRepo(['x/y']), 'x/y')
     } finally {
-      rmSync(dir, { recursive: true, force: true });
+      rmSync(dir, { recursive: true, force: true })
     }
-  });
+  })
 
   test('auth probes glab, naming the detected host in the remediation', () => {
     withFakeGlab({}, () => {
-      assert.equal(gitlabConnector.auth!({ dir: mkdtempSync(join(tmpdir(), 'x-')) }), null);
-    });
+      assert.equal(gitlabConnector.auth!({ dir: mkdtempSync(join(tmpdir(), 'x-')) }), null)
+    })
     withFakeGlab({ FAKE_GLAB_AUTH_FAIL: '1' }, () => {
-      const msg = gitlabConnector.auth!({ dir: mkdtempSync(join(tmpdir(), 'x-')) });
-      assert.match(msg ?? '', /glab not authenticated for gitlab\.com/);
-    });
+      const msg = gitlabConnector.auth!({ dir: mkdtempSync(join(tmpdir(), 'x-')) })
+      assert.match(msg ?? '', /glab not authenticated for gitlab\.com/)
+    })
     // a self-hosted remote scopes the probe to its own host — both the
     // --hostname flag and the GITLAB_HOST env pin
-    const selfHosted = makeRepo('git@gitlab.corp.com:a/b.git');
+    const selfHosted = makeRepo('git@gitlab.corp.com:a/b.git')
     try {
-      withFakeGlab({}, log => {
-        gitlabConnector.auth!({ dir: selfHosted });
-        const lines = readFileSync(log, 'utf8');
-        assert.match(lines, /auth status --hostname gitlab\.corp\.com/);
-        assert.match(lines, /env:GITLAB_HOST=gitlab\.corp\.com/);
-      });
+      withFakeGlab({}, (log) => {
+        gitlabConnector.auth!({ dir: selfHosted })
+        const lines = readFileSync(log, 'utf8')
+        assert.match(lines, /auth status --hostname gitlab\.corp\.com/)
+        assert.match(lines, /env:GITLAB_HOST=gitlab\.corp\.com/)
+      })
     } finally {
-      rmSync(selfHosted, { recursive: true, force: true });
+      rmSync(selfHosted, { recursive: true, force: true })
     }
-  });
+  })
 
   test('facade resolution picks gitlab on a gitlab remote, github on github', () => {
-    registerConnector(githubConnector);
-    registerConnector(gitlabConnector);
-    const gl = makeRepo('git@gitlab.com:acme/widgets.git');
-    const gh = makeRepo('git@github.com:acme/widgets.git');
+    registerConnector(githubConnector)
+    registerConnector(gitlabConnector)
+    const gl = makeRepo('git@gitlab.com:acme/widgets.git')
+    const gh = makeRepo('git@github.com:acme/widgets.git')
     try {
-      const g = facade('reviews', { dir: gl });
-      assert.equal(
-        g.prLink('acme/widgets', 7),
-        '[#7](https://gitlab.com/acme/widgets/-/merge_requests/7)'
-      );
-      const h = facade('reviews', { dir: gh });
-      assert.equal(h.prLink('acme/widgets', 7), '[#7](https://github.com/acme/widgets/pull/7)');
+      const g = facade('reviews', { dir: gl })
+      assert.equal(g.prLink('acme/widgets', 7), '[#7](https://gitlab.com/acme/widgets/-/merge_requests/7)')
+      const h = facade('reviews', { dir: gh })
+      assert.equal(h.prLink('acme/widgets', 7), '[#7](https://github.com/acme/widgets/pull/7)')
     } finally {
-      rmSync(gl, { recursive: true, force: true });
-      rmSync(gh, { recursive: true, force: true });
+      rmSync(gl, { recursive: true, force: true })
+      rmSync(gh, { recursive: true, force: true })
     }
-  });
-});
+  })
+})
 
 describe('gitlabReview', { skip: WIN32 }, () => {
   test('prMeta normalizes the MR row — opened→OPEN, CI-pending stays MERGEABLE', () => {
@@ -210,17 +213,17 @@ describe('gitlabReview', { skip: WIN32 }, () => {
           '{"iid":42,"state":"opened","draft":true,"web_url":"u","sha":"abc123","source_branch":"feat","target_branch":"main","detailed_merge_status":"ci_still_running"}',
       },
       () => {
-        const meta = gitlabReview().prMeta(target);
-        assert.equal(meta.state, 'OPEN');
-        assert.equal(meta.isDraft, true);
-        assert.equal(meta.headSha, 'abc123');
-        assert.equal(meta.baseRef, 'main');
+        const meta = gitlabReview().prMeta(target)
+        assert.equal(meta.state, 'OPEN')
+        assert.equal(meta.isDraft, true)
+        assert.equal(meta.headSha, 'abc123')
+        assert.equal(meta.baseRef, 'main')
         // pending CI is its own gate signal — mergeable only answers
         // "does it conflict"
-        assert.equal(meta.mergeable, 'MERGEABLE');
+        assert.equal(meta.mergeable, 'MERGEABLE')
       }
-    );
-  });
+    )
+  })
 
   test('prMeta maps conflict→CONFLICTING, checking→UNKNOWN, need_rebase→BEHIND', () => {
     for (const [dms, mergeable, mergeState] of [
@@ -232,123 +235,115 @@ describe('gitlabReview', { skip: WIN32 }, () => {
       withFakeGlab(
         { FAKE_GLAB_MR: `{"iid":42,"state":"opened","detailed_merge_status":"${dms}"}` },
         () => {
-          const meta = gitlabReview().prMeta(target);
-          assert.equal(meta.mergeable, mergeable, dms);
-          assert.equal(meta.mergeState, mergeState, dms);
+          const meta = gitlabReview().prMeta(target)
+          assert.equal(meta.mergeable, mergeable, dms)
+          assert.equal(meta.mergeState, mergeState, dms)
         }
-      );
+      )
     }
-  });
+  })
 
   test('checks folds head-pipeline jobs+bridges into bucketed checks', () => {
-    withFakeGlab({ FAKE_GLAB_MR: '{"iid":42,"state":"opened","sha":"abc123"}' }, log => {
-      const got = gitlabReview().checks(target);
+    withFakeGlab({ FAKE_GLAB_MR: '{"iid":42,"state":"opened","sha":"abc123"}' }, (log) => {
+      const got = gitlabReview().checks(target)
       assert.deepEqual(
-        got.map(c => [c.name, c.bucket]),
+        got.map((c) => [c.name, c.bucket]),
         [
           ['build', 'pass'],
           ['kilo', 'pending'],
           ['lint', 'skipping'],
         ]
-      );
-      const lines = readFileSync(log, 'utf8');
-      assert.match(lines, /merge_requests\/42\/pipelines/);
-      assert.match(lines, /pipelines\/11\/jobs/);
-      assert.match(lines, /pipelines\/11\/bridges/);
-    });
-  });
+      )
+      const lines = readFileSync(log, 'utf8')
+      assert.match(lines, /merge_requests\/42\/pipelines/)
+      assert.match(lines, /pipelines\/11\/jobs/)
+      assert.match(lines, /pipelines\/11\/bridges/)
+    })
+  })
 
   test('checks ignores pipelines pinned to an older commit', () => {
     // the fake's only pipeline is sha abc123 — an MR at a moved head has
     // no current pipeline, so no checks rather than stale ones
     withFakeGlab({ FAKE_GLAB_MR: '{"iid":42,"state":"opened","sha":"zzz999"}' }, () => {
-      assert.deepEqual(gitlabReview().checks(target), []);
-    });
-  });
+      assert.deepEqual(gitlabReview().checks(target), [])
+    })
+  })
 
   test('reviewThreads keeps only resolvable discussions, ids carry repo/iid', async () => {
     await withFakeGlabAsync({}, async () => {
-      const threads = await gitlabReview().reviewThreads(target);
-      assert.equal(threads.length, 2);
-      const [a, b] = threads;
+      const threads = await gitlabReview().reviewThreads(target)
+      assert.equal(threads.length, 2)
+      const [a, b] = threads
       assert.deepEqual(
         { id: a!.id, resolved: a!.resolved, outdated: a!.outdated },
         { id: 'acme/widgets/42/d1', resolved: false, outdated: false }
-      );
+      )
       assert.deepEqual(
-        {
-          author: a!.comment!.author,
-          bot: a!.comment!.bot,
-          path: a!.comment!.path,
-          line: a!.comment!.line,
-        },
+        { author: a!.comment!.author, bot: a!.comment!.bot, path: a!.comment!.path, line: a!.comment!.line },
         { author: 'project_7_bot_x', bot: true, path: 'a.ts', line: 3 }
-      );
+      )
       assert.deepEqual(
         { id: b!.id, resolved: b!.resolved, outdated: b!.outdated },
         { id: 'acme/widgets/42/d4', resolved: true, outdated: true }
-      );
-    });
-  });
+      )
+    })
+  })
 
   test('resolveThread/replyThread route the composite id back to its MR', () => {
-    withFakeGlab({}, log => {
-      const rev = gitlabReview();
-      rev.resolveThread('acme/widgets/42/d1');
-      rev.resolveThread('acme/widgets/42/d2', true);
-      rev.replyThread('acme/widgets/42/d1', 'fixed — reverting the change');
-      const lines = readFileSync(log, 'utf8');
+    withFakeGlab({}, (log) => {
+      const rev = gitlabReview()
+      rev.resolveThread('acme/widgets/42/d1')
+      rev.resolveThread('acme/widgets/42/d2', true)
+      rev.replyThread('acme/widgets/42/d1', 'fixed — reverting the change')
+      const lines = readFileSync(log, 'utf8')
       assert.match(
         lines,
         /api -X PUT projects\/acme%2Fwidgets\/merge_requests\/42\/discussions\/d1 -f resolved=true/
-      );
-      assert.match(lines, /discussions\/d2 -f resolved=false/);
+      )
+      assert.match(lines, /discussions\/d2 -f resolved=false/)
       assert.match(
         lines,
         /api -X POST projects\/acme%2Fwidgets\/merge_requests\/42\/discussions\/d1\/notes -f body=fixed/
-      );
-    });
-  });
+      )
+    })
+  })
 
   test('mergedPrInfo returns mergedAt/mergeSha, throws when not merged', () => {
     withFakeGlab({}, () => {
-      const info = gitlabReview().mergedPrInfo(target);
-      assert.equal(info.mergedAt, '2026-01-02T00:00:00Z');
-      assert.equal(info.mergeSha, 'abc123');
-    });
+      const info = gitlabReview().mergedPrInfo(target)
+      assert.equal(info.mergedAt, '2026-01-02T00:00:00Z')
+      assert.equal(info.mergeSha, 'abc123')
+    })
     withFakeGlab({ FAKE_GLAB_MR: '{"iid":42,"state":"opened"}' }, () => {
-      assert.throws(() => gitlabReview().mergedPrInfo(target), /is not merged/);
-    });
-  });
+      assert.throws(() => gitlabReview().mergedPrInfo(target), /is not merged/)
+    })
+  })
 
   test('mergedPrs explicit ids dedups, skips unmerged, throws on outage', () => {
-    withFakeGlab({}, log => {
-      const prs = gitlabReview().mergedPrs('acme/widgets', { ids: [7, 7, 8, 7] });
-      assert.equal(prs.length, 2);
+    withFakeGlab({}, (log) => {
+      const prs = gitlabReview().mergedPrs('acme/widgets', { ids: [7, 7, 8, 7] })
+      assert.equal(prs.length, 2)
       const fetches = readFileSync(log, 'utf8')
         .split('\n')
-        .filter(l => /merge_requests\/\d+$/.test(l));
-      assert.equal(fetches.length, 2);
-    });
+        .filter((l) => /merge_requests\/\d+$/.test(l))
+      assert.equal(fetches.length, 2)
+    })
     withFakeGlab({ FAKE_GLAB_MR_FAIL: '8' }, () => {
-      const errs: string[] = [];
-      const origError = console.error;
-      console.error = (m: unknown) => errs.push(String(m));
+      const errs: string[] = []
+      const origError = console.error
+      console.error = (m: unknown) => errs.push(String(m))
       try {
-        const prs = gitlabReview().mergedPrs('acme/widgets', { ids: [7, 8] });
-        assert.equal(prs.length, 1);
+        const prs = gitlabReview().mergedPrs('acme/widgets', { ids: [7, 8] })
+        assert.equal(prs.length, 1)
       } finally {
-        console.error = origError;
+        console.error = origError
       }
-      assert.match(errs.join('\n'), /fetch failed/);
-    });
+      assert.match(errs.join('\n'), /fetch failed/)
+    })
     withFakeGlab({ FAKE_GLAB_MR_FAIL: '7,8' }, () => {
-      assert.throws(
-        () => gitlabReview().mergedPrs('acme/widgets', { ids: [7, 8] }),
-        /all 2 MR fetch/
-      );
-    });
-  });
+      assert.throws(() => gitlabReview().mergedPrs('acme/widgets', { ids: [7, 8] }), /all 2 MR fetch/)
+    })
+  })
 
   test('mergedPrs list path hits state=merged with the filter params', () => {
     withFakeGlab(
@@ -356,205 +351,188 @@ describe('gitlabReview', { skip: WIN32 }, () => {
         FAKE_GLAB_MERGED_LIST:
           '[{"iid":9,"state":"merged","merged_at":"2026-01-02T00:00:00Z","author":{"username":"dev"},"labels":[],"source_branch":"x","sha":"s1"}]',
       },
-      log => {
-        const prs = gitlabReview().mergedPrs('acme/widgets', { author: 'dev', limit: 10 });
-        assert.equal(prs.length, 1);
-        assert.equal(prs[0]!.number, 9);
-        assert.match(readFileSync(log, 'utf8'), /state=merged.*author_username=dev/);
+      (log) => {
+        const prs = gitlabReview().mergedPrs('acme/widgets', { author: 'dev', limit: 10 })
+        assert.equal(prs.length, 1)
+        assert.equal(prs[0]!.number, 9)
+        assert.match(readFileSync(log, 'utf8'), /state=merged.*author_username=dev/)
       }
-    );
-    withFakeGlab({ FAKE_GLAB_MERGED_LIST: '[]' }, log => {
-      gitlabReview().mergedPrs('acme/widgets', { mergedSince: '2026-01-01T00:00:00Z' });
-      assert.match(readFileSync(log, 'utf8'), /state=merged.*merged_after=2026-01-01/);
-    });
-  });
+    )
+    withFakeGlab({ FAKE_GLAB_MERGED_LIST: '[]' }, (log) => {
+      gitlabReview().mergedPrs('acme/widgets', { mergedSince: '2026-01-01T00:00:00Z' })
+      assert.match(readFileSync(log, 'utf8'), /state=merged.*merged_after=2026-01-01/)
+    })
+  })
 
   test('scanMergedPrs pools per-MR meta+threads probes', async () => {
-    await withFakeGlabAsync({}, async log => {
+    await withFakeGlabAsync({}, async (log) => {
       const scans = await gitlabReview().scanMergedPrs!([
         { repo: 'acme/widgets', pr: 7 },
         { repo: 'acme/widgets', pr: 8 },
-      ]);
-      assert.equal(scans.size, 2);
-      const s = scans.get(7)!;
-      assert.equal(s.info.mergeSha, 'abc123');
-      assert.equal(s.threads.length, 2);
-      assert.deepEqual(s.labels, ['bug']);
-      const lines = readFileSync(log, 'utf8');
-      assert.equal(lines.split('\n').filter(l => /discussions/.test(l)).length, 2);
-    });
-  });
+      ])
+      assert.equal(scans.size, 2)
+      const s = scans.get(7)!
+      assert.equal(s.info.mergeSha, 'abc123')
+      assert.equal(s.threads.length, 2)
+      assert.deepEqual(s.labels, ['bug'])
+      const lines = readFileSync(log, 'utf8')
+      assert.equal(lines.split('\n').filter((l) => /discussions/.test(l)).length, 2)
+    })
+  })
 
   test('scanMergedPrs skips non-merged targets and reports progress', async () => {
-    await withFakeGlabAsync({ FAKE_GLAB_MR: '{"iid":9,"state":"opened"}' }, async () => {
-      const marks: Array<[number, number]> = [];
-      const scans = await gitlabReview().scanMergedPrs!([{ repo: 'acme/widgets', pr: 9 }], {
-        onProgress: (d, t) => marks.push([d, t]),
-      });
-      assert.equal(scans.size, 0);
-      assert.deepEqual(marks, [[1, 1]]);
-    });
-  });
+    await withFakeGlabAsync(
+      { FAKE_GLAB_MR: '{"iid":9,"state":"opened"}' },
+      async () => {
+        const marks: Array<[number, number]> = []
+        const scans = await gitlabReview().scanMergedPrs!(
+          [{ repo: 'acme/widgets', pr: 9 }],
+          { onProgress: (d, t) => marks.push([d, t]) }
+        )
+        assert.equal(scans.size, 0)
+        assert.deepEqual(marks, [[1, 1]])
+      }
+    )
+  })
 
   test('labelPrs writes add+remove in one PUT; response carries the cursor', async () => {
-    await withFakeGlabAsync({}, async log => {
+    await withFakeGlabAsync({}, async (log) => {
       const out = await gitlabReview().labelPrs!([
         { t: { repo: 'acme/widgets', pr: 7 }, add: ['debt:collected'], remove: ['debt:clean'] },
         { t: { repo: 'acme/widgets', pr: 8 }, add: ['debt:clean'], remove: [] },
-      ]);
-      assert.deepEqual([...out.entries()].sort(), [
-        [7, '2026-02-02T00:00:00Z'],
-        [8, '2026-02-02T00:00:00Z'],
-      ]);
-      const lines = readFileSync(log, 'utf8');
-      assert.match(
-        lines,
-        /PUT projects\/acme%2Fwidgets\/merge_requests\/7 -f add_labels=debt:collected -f remove_labels=debt:clean/
-      );
-      assert.match(lines, /merge_requests\/8 -f add_labels=debt:clean/);
-      assert.doesNotMatch(lines, /merge_requests\/8 -f.*remove_labels/);
+      ])
+      assert.deepEqual(
+        [...out.entries()].sort(),
+        [
+          [7, '2026-02-02T00:00:00Z'],
+          [8, '2026-02-02T00:00:00Z'],
+        ]
+      )
+      const lines = readFileSync(log, 'utf8')
+      assert.match(lines, /PUT projects\/acme%2Fwidgets\/merge_requests\/7 -f add_labels=debt:collected -f remove_labels=debt:clean/)
+      assert.match(lines, /merge_requests\/8 -f add_labels=debt:clean/)
+      assert.doesNotMatch(lines, /merge_requests\/8 -f.*remove_labels/)
       // the PUT response is the MR — no updated_at re-query
-      assert.equal(
-        lines.split('\n').filter(l => /^api projects.*merge_requests\/\d+$/.test(l)).length,
-        0
-      );
-    });
-  });
+      assert.equal(lines.split('\n').filter((l) => /^api projects.*merge_requests\/\d+$/.test(l)).length, 0)
+    })
+  })
 
   test('createLabel retries an existing label through its resource route', () => {
-    withFakeGlab({ FAKE_GLAB_LABEL_EXISTS: '1' }, log => {
-      gitlabReview().createLabel('acme/widgets', 'debt:collected', '#112233');
-      const lines = readFileSync(log, 'utf8');
-      assert.match(lines, /POST projects\/acme%2Fwidgets\/labels -f name=debt:collected/);
+    withFakeGlab({ FAKE_GLAB_LABEL_EXISTS: '1' }, (log) => {
+      gitlabReview().createLabel('acme/widgets', 'debt:collected', '#112233')
+      const lines = readFileSync(log, 'utf8')
+      assert.match(lines, /POST projects\/acme%2Fwidgets\/labels -f name=debt:collected/)
       // GitLab updates a label via PUT /labels/:name — the deprecated
       // collection PUT with name as a param must not be used
-      assert.match(
-        lines,
-        /PUT projects\/acme%2Fwidgets\/labels\/debt%3Acollected -f color=#112233/
-      );
-    });
-  });
+      assert.match(lines, /PUT projects\/acme%2Fwidgets\/labels\/debt%3Acollected -f color=#112233/)
+    })
+  })
 
   test('facade calls pin GITLAB_HOST to the detected remote host', () => {
-    const dir = makeRepo('git@gitlab.corp.com:a/b.git');
+    const dir = makeRepo('git@gitlab.corp.com:a/b.git')
     try {
-      withFakeGlab({}, log => {
-        gitlabReview(dir).prsForBranch('main');
-        assert.match(readFileSync(log, 'utf8'), /env:GITLAB_HOST=gitlab\.corp\.com/);
-      });
+      withFakeGlab({}, (log) => {
+        gitlabReview(dir).prsForBranch('main')
+        assert.match(readFileSync(log, 'utf8'), /env:GITLAB_HOST=gitlab\.corp\.com/)
+      })
     } finally {
-      rmSync(dir, { recursive: true, force: true });
+      rmSync(dir, { recursive: true, force: true })
     }
-  });
+  })
 
   test('currentPr/prsForBranch answer from the checked-out branch', () => {
-    const dir = makeRepo('git@gitlab.com:acme/widgets.git');
+    const dir = makeRepo('git@gitlab.com:acme/widgets.git')
     try {
-      withFakeGlab({ FAKE_GLAB_OPEN_MRS: '[{"iid":5,"state":"opened","web_url":"u5"}]' }, () => {
-        assert.deepEqual(gitlabReview(dir).currentPr(), { pr: 5, state: 'OPEN', url: 'u5' });
-        assert.deepEqual(gitlabReview(dir).prsForBranch('main'), [5]);
-      });
-      withFakeGlab({}, () => {
-        assert.equal(gitlabReview(dir).currentPr(), null);
-      });
-    } finally {
-      rmSync(dir, { recursive: true, force: true });
-    }
-  });
-
-  test('currentPrAsync answers the same MR through non-blocking calls', async () => {
-    const dir = makeRepo('git@gitlab.com:acme/widgets.git');
-    try {
-      await withFakeGlabAsync(
+      withFakeGlab(
         { FAKE_GLAB_OPEN_MRS: '[{"iid":5,"state":"opened","web_url":"u5"}]' },
-        async () => {
-          assert.deepEqual(await gitlabReview(dir).currentPrAsync!(), {
-            pr: 5,
-            state: 'OPEN',
-            url: 'u5',
-          });
+        () => {
+          assert.deepEqual(gitlabReview(dir).currentPr(), { pr: 5, state: 'OPEN', url: 'u5' })
+          assert.deepEqual(gitlabReview(dir).prsForBranch('main'), [5])
         }
-      );
-      await withFakeGlabAsync({}, async () => {
-        assert.equal(await gitlabReview(dir).currentPrAsync!(), null);
-      });
+      )
+      withFakeGlab({}, () => {
+        assert.equal(gitlabReview(dir).currentPr(), null)
+      })
     } finally {
-      rmSync(dir, { recursive: true, force: true });
+      rmSync(dir, { recursive: true, force: true })
     }
-  });
+  })
 
   test("prsForBranch 'all' asks for every MR state — merged members stay visible to stack sync", () => {
-    const dir = makeRepo('git@gitlab.com:acme/widgets.git');
+    const dir = makeRepo('git@gitlab.com:acme/widgets.git')
     try {
-      withFakeGlab({ FAKE_GLAB_OPEN_MRS: '[{"iid":9,"state":"merged","web_url":"u9"}]' }, log => {
-        gitlabReview(dir).prsForBranch('stack/s/1-x', 'all');
-        const lines = readFileSync(log, 'utf8');
-        assert.match(lines, /merge_requests\?source_branch=stack%2Fs%2F1-x&state=all/);
-        assert.doesNotMatch(lines, /state=opened/);
-      });
+      withFakeGlab(
+        { FAKE_GLAB_OPEN_MRS: '[{"iid":9,"state":"merged","web_url":"u9"}]' },
+        (log) => {
+          gitlabReview(dir).prsForBranch('stack/s/1-x', 'all')
+          const lines = readFileSync(log, 'utf8')
+          assert.match(lines, /merge_requests\?source_branch=stack%2Fs%2F1-x&state=all/)
+          assert.doesNotMatch(lines, /state=opened/)
+        }
+      )
     } finally {
-      rmSync(dir, { recursive: true, force: true });
+      rmSync(dir, { recursive: true, force: true })
     }
-  });
+  })
 
   test('updateBranch checks the head sha, then PUTs the rebase', () => {
-    withFakeGlab({}, log => {
-      assert.equal(gitlabReview().updateBranch(target, 'abc123'), true);
-      assert.match(
-        readFileSync(log, 'utf8'),
-        /PUT projects\/acme%2Fwidgets\/merge_requests\/42\/rebase/
-      );
-    });
+    withFakeGlab({}, (log) => {
+      assert.equal(gitlabReview().updateBranch(target, 'abc123'), true)
+      assert.match(readFileSync(log, 'utf8'), /PUT projects\/acme%2Fwidgets\/merge_requests\/42\/rebase/)
+    })
     withFakeGlab({}, () => {
-      assert.equal(gitlabReview().updateBranch(target, 'moved-head'), false);
-    });
+      assert.equal(gitlabReview().updateBranch(target, 'moved-head'), false)
+    })
     withFakeGlab({ FAKE_GLAB_REBASE_FAIL: '1' }, () => {
-      assert.equal(gitlabReview().updateBranch(target, 'abc123'), false);
-    });
-  });
+      assert.equal(gitlabReview().updateBranch(target, 'abc123'), false)
+    })
+  })
 
   test('mergePr pins the head sha and returns the post-merge state', () => {
-    withFakeGlab({}, log => {
+    withFakeGlab({}, (log) => {
       const state = gitlabReview().mergePr(target, {
         method: 'squash',
         expectedHeadSha: 'abc123',
         deleteBranch: true,
-      });
-      assert.equal(state, 'MERGED');
-      const lines = readFileSync(log, 'utf8');
+      })
+      assert.equal(state, 'MERGED')
+      const lines = readFileSync(log, 'utf8')
       assert.match(
         lines,
         /PUT projects\/acme%2Fwidgets\/merge_requests\/42\/merge -f sha=abc123 -f squash=true -f should_remove_source_branch=true/
-      );
+      )
       // merge_method is project config, not a merge-endpoint param
-      assert.doesNotMatch(lines, /merge_method/);
-    });
-  });
-});
+      assert.doesNotMatch(lines, /merge_method/)
+    })
+  })
+})
 
 describe('gitlabReview humanApproved', { skip: WIN32 }, () => {
   const approvals = (approved: boolean, users: { bot?: boolean; username?: string }[]) =>
-    JSON.stringify({ approved, approved_by: users.map(user => ({ user })) });
+    JSON.stringify({ approved, approved_by: users.map((user) => ({ user })) })
 
   const approved = (opts?: { approvers?: string[] }): ApprovalVerdict =>
-    gitlabReview().humanApproved!(target, opts) as ApprovalVerdict;
+    gitlabReview().humanApproved!(target, opts) as ApprovalVerdict
 
   test('a non-bot approver on the aggregate verdict satisfies the gate', () => {
-    withFakeGlab({ FAKE_GLAB_APPROVALS: approvals(true, [{ username: 'alice' }]) }, () => {
-      assert.deepEqual(approved(), { approved: true, hostApproved: true });
-    });
-  });
+    withFakeGlab(
+      { FAKE_GLAB_APPROVALS: approvals(true, [{ username: 'alice' }]) },
+      () => {
+        assert.deepEqual(approved(), { approved: true, hostApproved: true })
+      }
+    )
+  })
 
   test('bot-only approvals never satisfy it', () => {
     withFakeGlab(
       { FAKE_GLAB_APPROVALS: approvals(true, [{ bot: true, username: 'ci-bot' }]) },
       () => {
-        const v = approved();
-        assert.equal(v.approved, false);
-        assert.match(v.reason!, /bot-only/);
+        const v = approved()
+        assert.equal(v.approved, false)
+        assert.match(v.reason!, /bot-only/)
       }
-    );
-  });
+    )
+  })
 
   test('the approvers allowlist narrows who counts', () => {
     const env = {
@@ -562,37 +540,37 @@ describe('gitlabReview humanApproved', { skip: WIN32 }, () => {
         { username: 'bob' },
         { bot: true, username: 'ci-bot' },
       ]),
-    };
+    }
     withFakeGlab(env, () => {
-      const denied = approved({ approvers: ['alice'] });
-      assert.equal(denied.approved, false);
-      assert.match(denied.reason!, /outside act\.approvers/);
-      assert.equal(approved({ approvers: ['BOB'] }).approved, true);
-    });
-  });
+      const denied = approved({ approvers: ['alice'] })
+      assert.equal(denied.approved, false)
+      assert.match(denied.reason!, /outside act\.approvers/)
+      assert.equal(approved({ approvers: ['BOB'] }).approved, true)
+    })
+  })
 
   test('a generated bot username counts as a bot even without the flag', () => {
     withFakeGlab(
       { FAKE_GLAB_APPROVALS: approvals(true, [{ username: 'project_7_bot_ci' }]) },
       () => {
-        const v = approved();
-        assert.equal(v.approved, false);
-        assert.match(v.reason!, /bot-only/);
+        const v = approved()
+        assert.equal(v.approved, false)
+        assert.match(v.reason!, /bot-only/)
       }
-    );
-  });
+    )
+  })
 
   test('an unapproved MR and a failed probe both read as not approved', () => {
     withFakeGlab({ FAKE_GLAB_APPROVALS: approvals(false, [{ username: 'alice' }]) }, () => {
-      const v = approved();
-      assert.equal(v.approved, false);
-      assert.match(v.reason!, /unmet/);
-    });
+      const v = approved()
+      assert.equal(v.approved, false)
+      assert.match(v.reason!, /unmet/)
+    })
     // a FAILING glab read is 'unanswerable' — never a pass
     withFakeGlab({ FAKE_GLAB_APPROVALS_FAIL: '1' }, () => {
-      const v = approved();
-      assert.equal(v.approved, false);
-      assert.match(v.reason!, /unanswerable/);
-    });
-  });
-});
+      const v = approved()
+      assert.equal(v.approved, false)
+      assert.match(v.reason!, /unanswerable/)
+    })
+  })
+})

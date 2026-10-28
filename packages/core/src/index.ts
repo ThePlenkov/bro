@@ -577,7 +577,6 @@ export type {
 export {
   pickOrphanProcs,
   readProcRows,
-  spawnSelf,
   sweepOrphanProcs,
   trackChild,
   unrefPendingChildren,
