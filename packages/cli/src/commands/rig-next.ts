@@ -24,7 +24,7 @@ import {
   WAITING_LABEL,
 } from '@broject/drill'
 import { worktreePathFor, mainWorktree } from './work.ts'
-import { readyBeads } from './next.ts'
+import { readyBeads, type ReadyBead } from './next.ts'
 
 export interface RigNext {
   verdict: 'step' | 'gate' | 'wait' | 'done' | 'blocked'
@@ -49,7 +49,7 @@ function wakePredicate(row: TaskRow): string | undefined {
  *  the drill leaf, else the first ready row — epic rows are containers
  *  and gt:slot coordination primitives are never work items (the
  *  same bd-side exclusion next/loop ride). */
-export function rigFocus(dir: string): string | undefined {
+export function rigFocus(dir: string, opts?: { store?: TaskStore }): string | undefined {
   const top = queueItems(queueScope())[0]
   if (top !== undefined) {
     return top.id
@@ -58,7 +58,8 @@ export function rigFocus(dir: string): string | undefined {
   if (leaf) {
     return leaf.id
   }
-  return readyBeads(dir).find((r) => r.issue_type !== 'epic')?.id
+  const ready = (opts?.store ? opts.store.ready<ReadyBead>({ excludeLabels: ['gt:slot'] }) : readyBeads(dir))
+  return ready.find((r) => r.issue_type !== 'epic')?.id
 }
 
 /** A live registry agent owns the step — a signal re-enters. Checked
@@ -155,7 +156,7 @@ export function rigNext(
   opts?: { gate?: boolean; store?: TaskStore }
 ): RigNext {
   const store = opts?.store ?? taskStore(dir)
-  const id = item ?? rigFocus(dir)
+  const id = item ?? rigFocus(dir, opts)
   if (id === undefined) {
     return { verdict: 'done' }
   }
@@ -185,7 +186,8 @@ export function rigNext(
   }
   // open: dep-gated/deferred beads aren't actionable work — the same
   // bd-side filtered ready list the focus read
-  if (!readyBeads(dir).some((r) => r.id === id)) {
+  const ready = (opts?.store ? opts.store.ready<ReadyBead>({ excludeLabels: ['gt:slot'] }) : readyBeads(dir))
+  if (!ready.some((r) => r.id === id)) {
     return { verdict: 'blocked', id, detail: 'dep-gated or deferred' }
   }
   const rank = queueItems(queueScope()).find((q) => q.id === id)?.rank
