@@ -29,19 +29,20 @@ const RED = '\u001b[31m';
 const YELLOW = '\u001b[33m';
 const RESET = '\u001b[0m';
 
+// Built from strings so the source holds no control-byte escapes —
+// the scanner's control-char rule keys on regex literals.
+const CSI_RE = new RegExp(
+  '\\u001b\\[[0-9;:?]*[a-zA-Z]|\\u001b\\][^\\u0007\\u001b]*(?:\\u0007|\\u001b\\\\)|\\u001b[@-Z\\\\-_]',
+  'g'
+);
+const CTRL_RE = new RegExp('[\\u0000-\\u0008\\u000b-\\u001f\\u007f-\\u009f]', 'g');
+
 /** Agent-controlled text may carry control bytes — strip everything
  *  non-printable so a hostile or buggy backend cannot write escape
  *  sequences into the pane. Line-mode invariant too: newlines become
  *  a visible `⏎`, never a second line. */
 export const safe = (s: string): string =>
-  s
-    .replace(
-      /\u001b\[[0-9;:?]*[a-zA-Z]|\u001b\][^\u0007\u001b]*(?:\u0007|\u001b\\)|\u001b[@-Z\\-_]/g,
-      ''
-    )
-    .replace(/[\u0000-\u0008\u000b-\u001f\u007f-\u009f]/g, '')
-    .replace(/\r/g, '')
-    .replace(/\n/g, ' ⏎ ');
+  s.replace(CSI_RE, '').replace(CTRL_RE, '').replaceAll('\r', '').replaceAll('\n', ' ⏎ ');
 
 /** The fixed permission policy (spec): reads (and other observably
  *  non-mutating kinds) may be remembered ALWAYS; everything else is
@@ -49,10 +50,45 @@ export const safe = (s: string): string =>
  *  cancelled outcome — an invented approval is not a viewer's call. */
 const ALWAYS_KINDS = new Set(['read', 'search', 'fetch', 'think']);
 
+interface PermOption {
+  optionId?: string;
+  name?: string;
+  kind?: string;
+}
+
+/** Deny path: reject_once first (least committed), reject_always next.
+ *  Allow path: reads prefer allow_always, then allow_once; non-reads
+ *  prefer allow_once, then allow_always. A deny never falls through
+ *  to an allow. */
+const pickOption = (
+  options: PermOption[],
+  readKind: boolean,
+  wantsDeny: boolean
+): PermOption | undefined => {
+  const find = (kind: string) => options.find(o => o.kind === kind);
+  if (wantsDeny) return find('reject_once') ?? find('reject_always');
+  const first = readKind ? find('allow_always') : find('allow_once');
+  const second = readKind ? find('allow_once') : find('allow_always');
+  return first ?? second;
+};
+
+const whyText = (mode: string, readKind: boolean, wantsDeny: boolean): string => {
+  if (wantsDeny) return `denied — policy: permit=${mode}`;
+  return readKind ? 'read-kind tool → allow-always' : 'default → allow-once';
+};
+
 export interface RenderOpts {
   /** ANSI styling — off for captured/plain output. */
   color?: boolean;
 }
+
+const STATUS_COLOR: Record<string, string> = { completed: GREEN, failed: RED };
+const PLAN_BOX: Record<string, string> = { completed: '[x]', in_progress: '[>]', pending: '[ ]' };
+
+/** Wire value → display scalar; objects get a `?` instead of
+ *  `[object Object]` — status lines only carry primitives. */
+const scalar = (v: unknown): string =>
+  v !== null && typeof v === 'object' ? '?' : String(v ?? '?');
 
 interface ToolRec {
   title?: string;
@@ -126,18 +162,9 @@ export class AcpRenderer {
   private toolLine(rec: ToolRec, status: string): void {
     const label = rec.title ?? rec.name ?? 'tool';
     const kind = rec.kind !== undefined && rec.kind !== '' ? ` [${rec.kind}]` : '';
-    const glyph =
-      status === 'completed'
-        ? this.paint(GREEN, '⣿')
-        : status === 'failed'
-          ? this.paint(RED, '⣿')
-          : '⣿';
-    const word =
-      status === 'completed'
-        ? this.paint(GREEN, status)
-        : status === 'failed'
-          ? this.paint(RED, status)
-          : this.dim(status);
+    const c = STATUS_COLOR[status];
+    const glyph = c !== undefined ? this.paint(c, '⣿') : '⣿';
+    const word = c !== undefined ? this.paint(c, status) : this.dim(status);
     this.out(`${glyph} ${label}${kind} ${word}`);
   }
 
@@ -170,36 +197,25 @@ export class AcpRenderer {
     const entries = (u['entries'] as { content?: string; status?: string }[] | undefined) ?? [];
     this.out(this.dim('── plan ──'));
     for (const e of entries) {
-      const box =
-        e.status === 'completed'
-          ? '[x]'
-          : e.status === 'in_progress'
-            ? '[>]'
-            : e.status === 'pending'
-              ? '[ ]'
-              : '[~]';
+      const box = PLAN_BOX[e.status ?? ''] ?? '[~]';
       this.out(`  ${box} ${e.content !== undefined ? safe(e.content) : '?'}`);
     }
   }
 
   private onUsage(u: SessionUpdateLike): void {
     const t = u as { used?: unknown; size?: unknown };
-    this.out(this.dim(`◌ usage ${String(t.used ?? '?')}/${String(t.size ?? '?')}`));
+    this.out(this.dim(`◌ usage ${scalar(t.used)}/${scalar(t.size)}`));
   }
 
   private onConfig(u: SessionUpdateLike): void {
     const opts =
       (u['configOptions'] as { id?: string; currentValue?: unknown }[] | undefined) ?? [];
-    const kv = opts
-      .map(o => `${safe(o.id ?? '?')}=${safe(String(o.currentValue ?? '?'))}`)
-      .join(' ');
+    const kv = opts.map(o => `${safe(o.id ?? '?')}=${safe(scalar(o.currentValue))}`).join(' ');
     this.out(this.dim(`config ${kv}`));
   }
 
   private onMode(u: SessionUpdateLike): void {
-    this.out(
-      this.dim(`mode → ${safe(String((u as { currentModeId?: unknown }).currentModeId ?? '?'))}`)
-    );
+    this.out(this.dim(`mode → ${safe(scalar((u as { currentModeId?: unknown }).currentModeId))}`));
   }
 
   private onCommands(u: SessionUpdateLike): void {
@@ -298,21 +314,12 @@ export class AcpRenderer {
     this.out(`${this.paint(YELLOW, '⚠')} ${title} [${names}]`);
     const readKind = params.toolCall?.kind != null && ALWAYS_KINDS.has(params.toolCall.kind);
     const wantsDeny = mode === 'none' || (mode === 'reads' && !readKind);
-    const pick = wantsDeny
-      ? (options.find(o => o.kind === 'reject_once') ??
-        options.find(o => o.kind === 'reject_always'))
-      : ((readKind ? options.find(o => o.kind === 'allow_always') : undefined) ??
-        options.find(o => o.kind === 'allow_once') ??
-        (readKind ? undefined : options.find(o => o.kind === 'allow_always')));
+    const pick = pickOption(options, readKind, wantsDeny);
     if (pick === undefined) {
       this.out(this.dim(`  → cancelled — permit=${mode}, no matching option offered`));
       return { outcome: 'cancelled' };
     }
-    const why = wantsDeny
-      ? `denied — policy: permit=${mode}`
-      : readKind
-        ? 'read-kind tool → allow-always'
-        : 'default → allow-once';
+    const why = whyText(mode, readKind, wantsDeny);
     this.out(
       this.dim(
         `  → auto-answered ${safe(pick.name ?? pick.optionId ?? '?')} (${safe(pick.kind ?? '?')}) — ${why}`

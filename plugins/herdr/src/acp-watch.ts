@@ -355,7 +355,7 @@ async function handshake(
   renderer: AcpRenderer,
   out: (s: string) => void
 ): Promise<string | undefined> {
-  const die = async (why: string): Promise<undefined> => {
+  const die = (why: string): undefined => {
     pump.flushStderr();
     renderer.closed(why);
     pump.child.kill('SIGKILL');

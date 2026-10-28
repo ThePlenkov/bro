@@ -496,7 +496,7 @@ const segmentText = (s: string): string => {
  *  can never re-parse into a different program. An unclosed quote is
  *  a usage error, named as such. */
 export function shellWords(text: string): string[] {
-  const SEGMENT = /"(?:\\.|[^"\\])*"?|'[^']*'?|\\.|[^\s'"\\]+|\s+|\S/g;
+  const SEGMENT = /"(?:\\.|[^"\\])*"?|'[^']*'?|(?:\\.|[^\s'"\\])+|\s+|\S/g;
   const out: string[] = [];
   let cur = '';
   let open = false;
