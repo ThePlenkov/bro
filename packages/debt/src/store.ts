@@ -47,8 +47,7 @@ function ensureDebtDirExcluded(dir: string): void {
     return;
   }
   const git = (args: string[]): string =>
-    execFileSync('git', ['-C', dir, ...args], {
-      // NOSONAR — git is already a hard dependency of the whole flow
+    execFileSync('git', ['-C', dir, ...args], { // NOSONAR — git is already a hard dependency of the whole flow
       encoding: 'utf8',
       stdio: ['ignore', 'pipe', 'pipe'],
     }).trim();
@@ -116,8 +115,7 @@ function ensureDebtDirExcluded(dir: string): void {
     // Ignores never override the index — files already committed under the
     // dir stay tracked and the exclusion is a no-op for them. Surface it;
     // untracking is a staged change only the repo owner should make.
-    const tracked = execFileSync('git', ['-C', root, 'ls-files', '--', `${rel}/`], {
-      // NOSONAR — git PATH lookup is the contract
+    const tracked = execFileSync('git', ['-C', root, 'ls-files', '--', `${rel}/`], { // NOSONAR — git PATH lookup is the contract
       encoding: 'utf8',
       stdio: ['ignore', 'pipe', 'ignore'],
     }).trim();
