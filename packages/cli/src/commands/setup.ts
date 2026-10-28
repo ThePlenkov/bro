@@ -18,7 +18,6 @@ import {
   readdirSync,
   readFileSync,
   renameSync,
-  statSync,
   writeFileSync,
 } from 'node:fs';
 import { basename, dirname, isAbsolute, join } from 'node:path';
@@ -125,8 +124,8 @@ function ensureLocalConfigExcluded(): void {
   // before the exclusion step is skipped.
   const isIgnored = (name: string): boolean => {
     try {
-      /* NOSONAR — git PATH lookup is the contract */ execFileSync(
-        'git',
+      execFileSync(
+        'git', // NOSONAR — git PATH lookup is the contract
         ['-C', process.cwd(), 'check-ignore', '-q', '--', name],
         {
           stdio: 'ignore',
@@ -176,8 +175,8 @@ function ensureLocalConfigExcluded(): void {
     // whether or not a rule covers the name: ignored-but-tracked is the
     // silent case this warning exists for. Untracking is a staged change
     // only the repo owner should make.
-    /* NOSONAR — git PATH lookup is the contract */ const tracked = execFileSync(
-      'git',
+    const tracked = execFileSync(
+      'git', // NOSONAR — git PATH lookup is the contract
       ['-C', root, 'ls-files', '--', 'bro.config.local.*'],
       {
         encoding: 'utf8',
@@ -486,7 +485,9 @@ function spawnFailureDetail(p: ReturnType<typeof spawnSync>): string {
   const stderr = p.stderr?.toString().trim() || '';
   const stdout = p.stdout?.toString().trim() || '';
   const status = p.status ?? 'with error';
-  return `${status}${stderr ? `: ${stderr}` : ''}${stdout ? ` (stdout: ${stdout})` : ''}`;
+  const errPart = stderr === '' ? '' : `: ${stderr}`;
+  const outPart = stdout === '' ? '' : ` (stdout: ${stdout})`;
+  return `${status}${errPart}${outPart}`;
 }
 
 function installOneLockedSkill(dir: string, skill: LockedSkill): void {
@@ -496,8 +497,8 @@ function installOneLockedSkill(dir: string, skill: LockedSkill): void {
     // spawnSync, not execFileSync: `npx` is a PATH lookup and the PATH
     // contract is the same one gh/bd/git already have (doctor.ts probes
     // npx the same way).
-    /* NOSONAR — PATH lookup is the contract (same as gh/bd/git) */ const p = spawnSync(
-      'npx',
+    const p = spawnSync(
+      'npx', // NOSONAR — PATH lookup is the contract (same as gh/bd/git)
       ['--yes', 'skills', 'add', skill.source, '--skill', skill.name, '-y'],
       {
         cwd: dir,
