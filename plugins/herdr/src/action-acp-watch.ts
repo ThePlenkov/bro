@@ -56,6 +56,13 @@ if (target === undefined) {
   process.exit(1);
 }
 
+// one acp pane per workspace — a re-invoke REPLACES the watcher, it
+// never stacks. The label is our own marker (`acp: <cmd basename>`
+// set by pane rename below).
+const LABEL = 'acp: ';
+const stale = wsPanes.filter(p => p.label?.startsWith(LABEL));
+for (const p of stale) herdrTry(['pane', 'close', p.pane_id]);
+
 // selected text → --cmd/--prompt; bare text is the prompt
 let cmd = configValue('acp_cmd', 'devin acp');
 let prompt: string | undefined;
@@ -94,7 +101,7 @@ if (pane === undefined) {
   process.exit(1);
 }
 
-herdrTry(['pane', 'rename', pane, `acp: ${basename(cmd)}`]);
+herdrTry(['pane', 'rename', pane, `${LABEL}${basename(cmd)}`]);
 const args = [
   shq(process.execPath),
   shq(join(PLUGIN_ROOT, 'src', 'acp-watch.ts')),
