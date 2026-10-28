@@ -140,6 +140,25 @@ function opencodeTuiArtifact(cwd: string): string | null {
   ])
 }
 
+/** The V2 TUI half's ladder — opencode v2 discovers TUI plugins only as
+ *  `plugins/<dir>/{tui}.{ts,tsx,js}` entries, so the target is a
+ *  directory and the installed filename tracks the artifact's own
+ *  extension (source .tsx vs bundled .js). */
+function opencodeTuiV2Artifact(cwd: string): string | null {
+  const pkg = packageRoot()
+  const root = gitRoot(cwd)
+  return firstExisting([
+    pkg === null ? null : join(pkg, 'src', 'opencode-tui-v2.tsx'),
+    pkg === null ? null : join(pkg, 'dist', 'opencode-tui-v2.js'),
+    root === null ? null : join(root, 'plugins', 'opencode', 'bro', 'tui.tsx'),
+  ])
+}
+
+/** `plugins/bro/tui.<ext>` — the v2 TUI directory entry. */
+function opencodeTuiV2Target(dir: string, artifact: string): string {
+  return join(dir, 'plugins', 'bro', `tui.${artifact.endsWith('.js') ? 'js' : 'tsx'}`)
+}
+
 function kiloConfigDir(env: NodeJS.ProcessEnv): string {
   return join(env.XDG_CONFIG_HOME || join(homedir(), '.config'), 'kilo')
 }
@@ -277,20 +296,27 @@ const CLIENTS: Record<string, ClientSpec> = {
       ),
       local: join(gitRoot(cwd) ?? cwd, '.opencode', 'plugins', 'bro.ts'),
     }),
-    extras: (cwd, env) => [
-      {
-        artifact: opencodeTuiArtifact(cwd),
-        targets: {
-          global: join(
-            env.XDG_CONFIG_HOME || join(homedir(), '.config'),
-            'opencode',
-            'plugins',
-            'bro-cli.ts'
-          ),
-          local: join(gitRoot(cwd) ?? cwd, '.opencode', 'plugins', 'bro-cli.ts'),
+    extras: (cwd, env) => {
+      const v2 = opencodeTuiV2Artifact(cwd)
+      const configDir = env.XDG_CONFIG_HOME || join(homedir(), '.config')
+      const localDir = join(gitRoot(cwd) ?? cwd, '.opencode')
+      return [
+        {
+          artifact: opencodeTuiArtifact(cwd),
+          targets: {
+            global: join(configDir, 'opencode', 'plugins', 'bro-cli.ts'),
+            local: join(localDir, 'plugins', 'bro-cli.ts'),
+          },
         },
-      },
-    ],
+        {
+          artifact: v2,
+          targets: {
+            global: opencodeTuiV2Target(join(configDir, 'opencode'), v2 ?? 'tui.tsx'),
+            local: opencodeTuiV2Target(localDir, v2 ?? 'tui.tsx'),
+          },
+        },
+      ]
+    },
   },
   kilo: {
     artifact: kiloArtifact,

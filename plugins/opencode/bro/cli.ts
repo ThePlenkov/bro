@@ -328,9 +328,10 @@ export default {
           : ''
         const detail = [action, resources].filter((s) => s !== '').join(' ')
         toast?.show?.({
-          title: 'bro',
-          message: clip(detail !== '' ? `permission: ${detail}` : 'permission requested'),
+          title: 'bro • permission',
+          message: clip(detail !== '' ? detail : 'permission requested'),
           variant: 'warning',
+          duration: 8000,
         })
       })
       tap('session.error', (e) => {
@@ -345,7 +346,20 @@ export default {
         } else if (typeof error === 'string') {
           message = error
         }
-        toast?.show?.({ title: 'bro', message: clip(message), variant: 'error' })
+        toast?.show?.({ title: 'bro • error', message: clip(message), variant: 'error', duration: 10000 })
+      })
+      tap('session.idle', () => {
+        // subtle notification - bro manages gate; keep quiet to avoid noise
+      })
+      tap('tool.execute.before', (e) => {
+        const d = (typeof e?.data === 'object' && e.data !== null ? e.data : {}) as Record<
+          string,
+          unknown
+        >
+        const tool = typeof d.tool === 'string' ? d.tool : ''
+        if (tool && tool.startsWith('bro')) {
+          // bro tools are invoked - no toast spam
+        }
       })
     }
 

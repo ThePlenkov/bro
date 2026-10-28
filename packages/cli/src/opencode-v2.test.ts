@@ -444,7 +444,7 @@ describe('v2 transforms', () => {
   test('the bro namespace registers its read tools', async () => {
     const { toolsAdded } = await makeSetup()
     const names = toolsAdded.map((t) => t.name)
-    assert.deepEqual(names, ['status', 'convoy_status', 'act_status', 'fleet'])
+    assert.deepEqual(names, ['status', 'convoy_status', 'act_status', 'fleet', 'next', 'drill_status', 'review_threads', 'worktree_status'])
     for (const t of toolsAdded) {
       assert.deepEqual(t.options, { namespace: 'bro' })
       assert.equal(typeof t.execute, 'function')

@@ -1,7 +1,7 @@
 {
   "name": "@broject/bro",
   "version": "0.2.5",
-  "description": "bro \u2014 agent's sidekick CLI: the rig that owns the PR-to-merge loop \u2014 fleet, convoy, review gates, mesh, debt sweep",
+  "description": "bro — agent's sidekick CLI: the rig that owns the PR-to-merge loop — fleet, convoy, review gates, mesh, debt sweep",
   "keywords": [
     "agent-rig",
     "orchestration",
@@ -55,7 +55,7 @@
     "node": ">=22.18"
   },
   "scripts": {
-    "test": "tsx --test src/*.test.ts src/**/*.test.ts",
+    "test": "tsx --test src/*.test.ts src/*.test.tsx src/**/*.test.ts src/**/*.test.tsx",
     "prepack": "node ../../scripts/pack-cli.ts pre",
     "postpack": "node ../../scripts/pack-cli.ts post",
     "typecheck": "tsc --noEmit"
@@ -83,6 +83,9 @@
   "devDependencies": {
     "@earendil-works/pi-coding-agent": "1.4.0",
     "@kilocode/plugin": "^7.8.3",
+    "@opencode/plugin": "^2.1.4",
+    "@opentui/solid": "^0.7.0",
+    "solid-js": "^1.9.12",
     "tsdown": "^0.15.0",
     "tsx": "^4.20.0",
     "typescript": "^5.9.0"
