@@ -24,7 +24,14 @@
  */
 import { execFile as execFileCb } from 'node:child_process';
 import { promisify } from 'node:util';
-import { hasHelpFlag, loadConfig, printUsage, resolveModelRoute } from '@broject/core';
+import {
+  brouterStaticCatalog,
+  hasHelpFlag,
+  isQualifiedRouteId,
+  loadConfig,
+  printUsage,
+  resolveModelRoute,
+} from '@broject/core';
 import type { BrouterConfig, ModelRoute, ProviderEntry } from '@broject/core';
 import type { AcpSeam } from '@broject/providers';
 
@@ -129,19 +136,62 @@ async function liveCatalog(
   opts: Opts
 ): Promise<Record<string, string[]>> {
   const catalog: Record<string, string[]> = {};
-  for (const [name, entry] of Object.entries(providers)) {
-    try {
-      catalog[name] = (await providerModels(name, entry, opts)).map(r =>
-        r.id.slice(name.length + 1)
-      );
-    } catch (err) {
-      catalog[name] = [];
-      console.error(
-        `bro providers: ${name} — catalog failed: ${err instanceof Error ? err.message : String(err)}`
-      );
-    }
-  }
+  await Promise.all(
+    Object.entries(providers).map(async ([name, entry]) => {
+      try {
+        catalog[name] = (await providerModels(name, entry, opts)).map(r =>
+          r.id.slice(name.length + 1)
+        );
+      } catch (err) {
+        // statically-known ids still route — a probe failure shrinks the
+        // live index, it never drops an api allowlist or a pinned model
+        catalog[name] = brouterStaticCatalog({ [name]: entry })[name] ?? [];
+        console.error(
+          `bro providers: ${name} — catalog failed: ${err instanceof Error ? err.message : String(err)}`
+        );
+      }
+    })
+  );
   return catalog;
+}
+
+/** `route` — qualified ids and declared routes are authoritative:
+ *  they resolve without paying a live probe. Bare ids resolve against
+ *  the live catalog (which subsumes the static index — pins append on
+ *  every kind, api allowlists ARE the api catalog, and a failed probe
+ *  falls back to the static ids) so `--all` still reports every
+ *  candidate the live catalog would serve (spec: specs/bro-n1p0s.md). */
+async function runRouteCommand(
+  names: string[],
+  providers: Record<string, ProviderEntry>,
+  opts: Opts,
+  out: (line: string) => void
+): Promise<void> {
+  const rest = names.filter(n => n !== '--all');
+  if (rest.length !== 1) {
+    printUsage(USAGE, 2);
+  }
+  const asked = rest[0]!;
+  const brouter = opts.brouter ?? loadConfig(process.cwd()).brouter ?? { models: {} };
+  let routes: ModelRoute[] = [];
+  try {
+    if (isQualifiedRouteId(providers, asked) || Object.hasOwn(brouter.models, asked)) {
+      routes = resolveModelRoute(providers, brouter, {}, asked);
+    }
+    if (routes.length === 0) {
+      routes = resolveModelRoute(providers, brouter, await liveCatalog(providers, opts), asked);
+    }
+  } catch (err) {
+    die(err instanceof Error ? err.message : String(err));
+  }
+  if (routes.length === 0) {
+    die(
+      `no route for '${asked}' — qualify it <provider>/<model> or declare brouter.models.${asked}`
+    );
+  }
+  for (const r of names.includes('--all') ? routes : routes.slice(0, 1)) {
+    out(`${r.provider}/${r.model}`);
+  }
 }
 
 export async function runProvidersCommand(argv: string[], opts: Opts = {}): Promise<void> {
@@ -152,27 +202,7 @@ export async function runProvidersCommand(argv: string[], opts: Opts = {}): Prom
   const providers = opts.providers ?? loadConfig(process.cwd()).providers ?? {};
   const out = opts.out ?? ((line: string) => console.log(line));
   if (verb === 'route') {
-    const rest = names.filter(n => n !== '--all');
-    if (rest.length !== 1) {
-      printUsage(USAGE, 2);
-    }
-    const asked = rest[0]!;
-    const brouter = opts.brouter ?? loadConfig(process.cwd()).brouter ?? { models: {} };
-    const catalog = await liveCatalog(providers, opts);
-    let routes: ModelRoute[] = [];
-    try {
-      routes = resolveModelRoute(providers, brouter, catalog, asked);
-    } catch (err) {
-      die(err instanceof Error ? err.message : String(err));
-    }
-    if (routes.length === 0) {
-      die(
-        `no route for '${asked}' — qualify it <provider>/<model> or declare brouter.models.${asked}`
-      );
-    }
-    for (const r of names.includes('--all') ? routes : routes.slice(0, 1)) {
-      out(`${r.provider}/${r.model}`);
-    }
+    await runRouteCommand(names, providers, opts, out);
     return;
   }
 

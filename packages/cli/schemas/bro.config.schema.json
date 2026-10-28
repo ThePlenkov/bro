@@ -37,7 +37,9 @@
                   }
                 },
                 "additionalProperties": false,
-                "required": ["name"]
+                "required": [
+                  "name"
+                ]
               }
             ]
           }
@@ -134,7 +136,9 @@
                       }
                     },
                     "additionalProperties": false,
-                    "required": ["provider"]
+                    "required": [
+                      "provider"
+                    ]
                   }
                 ]
               },
@@ -162,7 +166,9 @@
                         }
                       },
                       "additionalProperties": false,
-                      "required": ["provider"]
+                      "required": [
+                        "provider"
+                      ]
                     }
                   ]
                 },
@@ -193,7 +199,10 @@
           "pattern": "\\S"
         },
         "executor": {
-          "enum": ["host", "docker"]
+          "enum": [
+            "host",
+            "docker"
+          ]
         },
         "evaluate": {
           "type": "boolean"
@@ -251,7 +260,11 @@
               "pattern": "\\S"
             },
             "mode": {
-              "enum": ["off", "prompt", "always"]
+              "enum": [
+                "off",
+                "prompt",
+                "always"
+              ]
             }
           },
           "additionalProperties": false
@@ -268,7 +281,10 @@
           "maximum": 2147483.647
         },
         "merge": {
-          "enum": ["auto", "never"]
+          "enum": [
+            "auto",
+            "never"
+          ]
         },
         "occupancyTtlSec": {
           "type": "number",
@@ -309,7 +325,9 @@
               }
             },
             "additionalProperties": false,
-            "required": ["provider"]
+            "required": [
+              "provider"
+            ]
           }
         },
         "routing": {
@@ -341,18 +359,25 @@
                         }
                       },
                       "additionalProperties": false,
-                      "required": ["provider"]
+                      "required": [
+                        "provider"
+                      ]
                     }
                   ]
                 },
                 "minItems": 1
               },
               "onWall": {
-                "enum": ["park", "fallthrough"]
+                "enum": [
+                  "park",
+                  "fallthrough"
+                ]
               }
             },
             "additionalProperties": false,
-            "required": ["chain"]
+            "required": [
+              "chain"
+            ]
           }
         },
         "router": {
@@ -364,11 +389,18 @@
               "pattern": "\\S"
             },
             "mode": {
-              "enum": ["shadow", "enforce", "off"]
+              "enum": [
+                "shadow",
+                "enforce",
+                "off"
+              ]
             }
           },
           "additionalProperties": false,
-          "required": ["provider", "mode"]
+          "required": [
+            "provider",
+            "mode"
+          ]
         }
       },
       "additionalProperties": false
@@ -453,7 +485,12 @@
                   "on": {
                     "type": "array",
                     "items": {
-                      "enum": ["session-start", "prompt-submit", "post-tool", "stop"]
+                      "enum": [
+                        "session-start",
+                        "prompt-submit",
+                        "post-tool",
+                        "stop"
+                      ]
                     },
                     "minItems": 1
                   },
@@ -559,7 +596,9 @@
                             }
                           },
                           "additionalProperties": false,
-                          "required": ["name"]
+                          "required": [
+                            "name"
+                          ]
                         }
                       }
                     },
@@ -580,7 +619,9 @@
                       }
                     },
                     "additionalProperties": false,
-                    "required": ["question"]
+                    "required": [
+                      "question"
+                    ]
                   },
                   "budget": {
                     "type": "integer",
@@ -588,7 +629,9 @@
                   }
                 },
                 "additionalProperties": false,
-                "required": ["on"]
+                "required": [
+                  "on"
+                ]
               },
               "say": {
                 "type": "string",
@@ -597,7 +640,11 @@
               }
             },
             "additionalProperties": false,
-            "required": ["name", "when", "say"]
+            "required": [
+              "name",
+              "when",
+              "say"
+            ]
           }
         }
       },
@@ -607,7 +654,10 @@
       "type": "object",
       "properties": {
         "mode": {
-          "enum": ["off", "shadow"]
+          "enum": [
+            "off",
+            "shadow"
+          ]
         },
         "model": {
           "type": "string",
@@ -662,7 +712,10 @@
             }
           },
           "additionalProperties": false,
-          "required": ["baseUrl", "model"]
+          "required": [
+            "baseUrl",
+            "model"
+          ]
         },
         "provider": {
           "type": "string",
@@ -828,7 +881,10 @@
               }
             },
             "additionalProperties": false,
-            "required": ["rig", "remote"]
+            "required": [
+              "rig",
+              "remote"
+            ]
           }
         }
       },
@@ -933,13 +989,20 @@
                   }
                 },
                 "additionalProperties": false,
-                "required": ["type", "tokenEnv"],
+                "required": [
+                  "type",
+                  "tokenEnv"
+                ],
                 "anyOf": [
                   {
-                    "required": ["chatId"]
+                    "required": [
+                      "chatId"
+                    ]
                   },
                   {
-                    "required": ["chatIdEnv"]
+                    "required": [
+                      "chatIdEnv"
+                    ]
                   }
                 ]
               },
@@ -1002,13 +1065,19 @@
                   }
                 },
                 "additionalProperties": false,
-                "required": ["type"],
+                "required": [
+                  "type"
+                ],
                 "anyOf": [
                   {
-                    "required": ["url"]
+                    "required": [
+                      "url"
+                    ]
                   },
                   {
-                    "required": ["urlEnv"]
+                    "required": [
+                      "urlEnv"
+                    ]
                   }
                 ]
               },
@@ -1071,13 +1140,19 @@
                   }
                 },
                 "additionalProperties": false,
-                "required": ["type"],
+                "required": [
+                  "type"
+                ],
                 "anyOf": [
                   {
-                    "required": ["url"]
+                    "required": [
+                      "url"
+                    ]
                   },
                   {
-                    "required": ["urlEnv"]
+                    "required": [
+                      "urlEnv"
+                    ]
                   }
                 ]
               }
@@ -1165,7 +1240,11 @@
       "pattern": "\\S"
     },
     "personality": {
-      "enum": ["terse", "mentor", "sarcastic"]
+      "enum": [
+        "terse",
+        "mentor",
+        "sarcastic"
+      ]
     },
     "plugins": {
       "type": "array",
@@ -1210,7 +1289,10 @@
                 "additionalProperties": {
                   "anyOf": [
                     {
-                      "enum": ["systemone", "openai-compat"]
+                      "enum": [
+                        "systemone",
+                        "openai-compat"
+                      ]
                     },
                     {
                       "type": "null"
@@ -1219,7 +1301,10 @@
                       "type": "object",
                       "properties": {
                         "wire": {
-                          "enum": ["systemone", "openai-compat"]
+                          "enum": [
+                            "systemone",
+                            "openai-compat"
+                          ]
                         }
                       },
                       "additionalProperties": false
@@ -1229,7 +1314,11 @@
               }
             },
             "additionalProperties": false,
-            "required": ["type", "baseUrl", "models"]
+            "required": [
+              "type",
+              "baseUrl",
+              "models"
+            ]
           },
           {
             "type": "object",
@@ -1266,7 +1355,10 @@
               }
             },
             "additionalProperties": false,
-            "required": ["type", "command"]
+            "required": [
+              "type",
+              "command"
+            ]
           },
           {
             "type": "object",
@@ -1291,7 +1383,10 @@
               }
             },
             "additionalProperties": false,
-            "required": ["type", "command"]
+            "required": [
+              "type",
+              "command"
+            ]
           }
         ]
       }
@@ -1337,7 +1432,11 @@
       "type": "object",
       "properties": {
         "mode": {
-          "enum": ["off", "remind", "gate"]
+          "enum": [
+            "off",
+            "remind",
+            "gate"
+          ]
         },
         "dir": {
           "type": "string",
@@ -1362,18 +1461,29 @@
       "type": "object",
       "properties": {
         "mode": {
-          "enum": ["auto", "manual"]
+          "enum": [
+            "auto",
+            "manual"
+          ]
         }
       },
       "additionalProperties": false
     },
     "store": {
-      "enum": ["jsonl", "beads", "gitref"]
+      "enum": [
+        "jsonl",
+        "beads",
+        "gitref"
+      ]
     },
     "stores": {
       "type": "array",
       "items": {
-        "enum": ["jsonl", "beads", "gitref"]
+        "enum": [
+          "jsonl",
+          "beads",
+          "gitref"
+        ]
       }
     },
     "sweep": {

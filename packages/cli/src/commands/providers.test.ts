@@ -186,6 +186,47 @@ describe('bro providers route', () => {
     assert.deepEqual(out, ['dv/swe-2-max']);
   });
 
+  test('a static hit never pays the live probe', async () => {
+    const out: string[] = [];
+    let probes = 0;
+    await runProvidersCommand(['route', 'swe-2-max'], {
+      providers,
+      brouter: { models: { 'swe-2-max': [{ provider: 'dv' }] } },
+      exec: () => {
+        probes += 1;
+        return 'swe-2-max\n';
+      },
+      out: l => out.push(l),
+    });
+    assert.deepEqual(out, ['dv/swe-2-max']);
+    assert.equal(probes, 0);
+  });
+
+  test('a failed probe still routes the pinned model', async () => {
+    const out: string[] = [];
+    await runProvidersCommand(['route', 'swe-2-max'], {
+      providers: { dv: { type: 'cli', command: 'dv run', model: 'swe-2-max', models: 'boom' } },
+      brouter: { models: {} },
+      exec: () => {
+        throw new Error('kaboom');
+      },
+      out: l => out.push(l),
+    });
+    assert.deepEqual(out, ['dv/swe-2-max']);
+  });
+
+  test('an empty qualified suffix is not a route', async () => {
+    const r = await capture(() =>
+      runProvidersCommand(['route', 'zen/'], {
+        providers,
+        brouter: { models: {} },
+        exec: () => '',
+      })
+    );
+    assert.equal(r.code, 1);
+    assert.match(r.err.join('\n'), /no route for 'zen\/'/);
+  });
+
   test('an alias resolves to the upstream model id, not the alias', async () => {
     const out: string[] = [];
     await runProvidersCommand(['route', 'jev'], {

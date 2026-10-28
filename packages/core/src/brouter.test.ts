@@ -122,6 +122,9 @@ describe('resolveModelRoute', () => {
     assert.deepEqual(resolveModelRoute(providers, brouter, catalog, 'dv-acp/a/b/c'), [
       { provider: 'dv-acp', model: 'a/b/c' },
     ]);
+    // an empty qualified suffix is not a route — 'zen/' falls through,
+    // never yields a verbatim '' model
+    assert.deepEqual(resolveModelRoute(providers, brouter, catalog, 'zen/'), []);
   });
 
   test('a non-provider head is not a qualifier — falls through to bare sources', () => {

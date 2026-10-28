@@ -144,6 +144,7 @@ export type {
 export {
   BrouterConfigError,
   brouterStaticCatalog,
+  isQualifiedRouteId,
   parseBrouter,
   resolveModelRoute,
 } from './brouter.ts';

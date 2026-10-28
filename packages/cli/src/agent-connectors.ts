@@ -327,6 +327,35 @@ export interface SpawnProviderPick {
   worker?: SpawnWorker;
 }
 
+/** The brouter's spawn-side pick — a bare `--model` resolving through
+ *  the model-centric registry (spec: specs/bro-n1p0s.md). Static
+ *  catalog only: a spawn never pays a live catalog probe. Absent or
+ *  empty `brouter.models` = the registry is off; unresolved stays the
+ *  label path. A declared route naming an unknown provider is a
+ *  'config' SpawnError — the brouter key's own contract. */
+function brouterSpawnRoute(
+  env: AgentConnectorEnv,
+  model: string
+): { provider: string; model: string } | undefined {
+  const brouter = env.brouter;
+  if (brouter === undefined || Object.keys(brouter.models).length === 0) {
+    return undefined;
+  }
+  try {
+    return resolveModelRoute(
+      env.providers ?? {},
+      brouter,
+      brouterStaticCatalog(env.providers ?? {}),
+      model
+    )[0];
+  } catch (err) {
+    if (err instanceof BrouterConfigError) {
+      throw new SpawnError(err.message, 'config');
+    }
+    throw err;
+  }
+}
+
 /** Resolve the spawn's provider into a worker payload. `sel` carries
  *  the explicit fields already merged over the profile's piecewise;
  *  `backend` is the RESOLVED connector name (a profile's `backend`
@@ -347,31 +376,11 @@ export async function resolveSpawnProvider(
   let providerName = sel.provider ?? backendProvider(env, backend);
   const source = sel.provider === undefined ? 'backend' : namedBy;
   let routedModel: string | undefined;
-  if (providerName === undefined && sel.model !== undefined && env.brouter !== undefined) {
-    // brouter — the model-centric registry (spec: specs/bro-n1p0s.md):
-    // a declared route resolves a bare --model to its provider, static
-    // catalog only (a spawn never pays a live catalog probe). Empty
-    // models = the registry is off; unresolved stays the label path.
-    const brouter = env.brouter;
-    if (Object.keys(brouter.models).length > 0) {
-      let hit;
-      try {
-        hit = resolveModelRoute(
-          env.providers ?? {},
-          brouter,
-          brouterStaticCatalog(env.providers ?? {}),
-          sel.model
-        )[0];
-      } catch (err) {
-        if (err instanceof BrouterConfigError) {
-          throw new SpawnError(err.message, 'config');
-        }
-        throw err;
-      }
-      if (hit !== undefined) {
-        providerName = hit.provider;
-        routedModel = hit.model;
-      }
+  if (providerName === undefined && sel.model !== undefined) {
+    const hit = brouterSpawnRoute(env, sel.model);
+    if (hit !== undefined) {
+      providerName = hit.provider;
+      routedModel = hit.model;
     }
   }
   if (providerName === undefined) {

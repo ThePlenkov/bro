@@ -53,39 +53,52 @@ const isPlainObject = (v: unknown): v is Record<string, unknown> =>
 
 const hasOwn = (o: object, k: string): boolean => Object.hasOwn(o, k);
 
+/** The `{provider, model?}` route form — `provider` is required, a
+ *  present-but-bad `model` drops the field, not the route. */
+function routeObject(at: string, v: Record<string, unknown>): BrouterRoute | null {
+  const provider = str(v.provider);
+  if (provider === undefined) {
+    console.error(`bro.config: brouter.models.${at} requires "provider" — route dropped`);
+    return null;
+  }
+  const model = v.model === undefined ? undefined : str(v.model);
+  if (v.model !== undefined && model === undefined) {
+    console.error(
+      `bro.config: brouter.models.${at}.model must be a non-empty string — field dropped`
+    );
+  }
+  return model === undefined ? { provider } : { provider, model };
+}
+
 /** One route value — `"<provider>"` or `{provider, model?}`. Bad
  *  entries drop with a warning; a key whose routes all dropped falls
  *  out of the registry (providers.ts' field-vs-entry convention). */
 function routeEntry(key: string, i: number | undefined, v: unknown): BrouterRoute | null {
   const at = i === undefined ? key : `${key}[${i}]`;
-  if (typeof v === 'string') {
-    const s = v.trim();
-    if (s !== '') {
-      return { provider: s };
-    }
-  } else if (isPlainObject(v)) {
-    const provider = str(v.provider);
-    if (provider === undefined) {
-      console.error(`bro.config: brouter.models.${at} requires "provider" — route dropped`);
-      return null;
-    }
-    const route: BrouterRoute = { provider };
-    if (v.model !== undefined) {
-      const model = str(v.model);
-      if (model === undefined) {
-        console.error(
-          `bro.config: brouter.models.${at}.model must be a non-empty string — field dropped`
-        );
-      } else {
-        route.model = model;
-      }
-    }
-    return route;
+  if (typeof v === 'string' && v.trim() !== '') {
+    return { provider: v.trim() };
+  }
+  if (isPlainObject(v)) {
+    return routeObject(at, v);
   }
   console.error(
     `bro.config: brouter.models.${at} must be a provider name or {provider, model} — route dropped`
   );
   return null;
+}
+
+/** One registry key's route list — `v` is a route value or an ordered
+ *  array of them; a key whose routes all dropped leaves the registry. */
+function routeList(key: string, v: unknown): BrouterRoute[] | null {
+  const items = Array.isArray(v) ? v : [v];
+  const routes = items
+    .map((e, i) => routeEntry(key, Array.isArray(v) ? i : undefined, e))
+    .filter((r): r is BrouterRoute => r !== null);
+  if (routes.length === 0) {
+    console.error(`bro.config: brouter.models.${key} has no usable routes — entry dropped`);
+    return null;
+  }
+  return routes;
 }
 
 /** `brouter` section parse — shape only; route providers resolve
@@ -110,12 +123,8 @@ export function parseBrouter(raw: unknown): BrouterConfig {
       console.error('bro.config: brouter.models keys must be non-empty model ids — entry dropped');
       continue;
     }
-    const items = Array.isArray(v) ? v : [v];
-    const routes = items
-      .map((e, i) => routeEntry(key, Array.isArray(v) ? i : undefined, e))
-      .filter((r): r is BrouterRoute => r !== null);
-    if (routes.length === 0) {
-      console.error(`bro.config: brouter.models.${key} has no usable routes — entry dropped`);
+    const routes = routeList(key, v);
+    if (routes === null) {
       continue;
     }
     // defineProperty, not assignment — a model id like '__proto__'
@@ -158,6 +167,18 @@ export interface ModelRoute {
   model: string;
 }
 
+/** The source-1 test — `asked` is `<provider>/<model>` with a
+ *  configured provider head and a non-empty model tail. Callers that
+ *  short-circuit static sources use this to know a qualified hit is
+ *  guaranteed without resolving. */
+export function isQualifiedRouteId(
+  providers: Record<string, ProviderEntry>,
+  asked: string
+): boolean {
+  const slash = asked.indexOf('/');
+  return slash > 0 && slash < asked.length - 1 && hasOwn(providers, asked.slice(0, slash));
+}
+
 /** Model → ordered route candidates. Sources, first hit wins:
  *
  *  1. qualified `<provider>/<model>` — head is a configured provider;
@@ -179,16 +200,14 @@ export function resolveModelRoute(
   asked: string
 ): ModelRoute[] {
   const slash = asked.indexOf('/');
-  if (slash > 0 && hasOwn(providers, asked.slice(0, slash))) {
+  if (isQualifiedRouteId(providers, asked)) {
     return [{ provider: asked.slice(0, slash), model: asked.slice(slash + 1) }];
   }
   if (brouter !== undefined && hasOwn(brouter.models, asked)) {
     return brouter.models[asked]!.map((r, i) => {
       if (!hasOwn(providers, r.provider)) {
-        throw new BrouterConfigError(
-          `${asked}${brouter.models[asked]!.length > 1 ? `[${i}]` : ''}`,
-          r.provider
-        );
+        const at = brouter.models[asked]!.length > 1 ? `${asked}[${i}]` : asked;
+        throw new BrouterConfigError(at, r.provider);
       }
       return { provider: r.provider, model: r.model ?? asked };
     });
