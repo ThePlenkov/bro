@@ -1425,7 +1425,9 @@ function fixerVerdictRefusal(root: string, store: Ctx['store'], beadId: string):
   try {
     rig = rigNext(root, beadId, { gate: false, store })
   } catch {
-    return undefined
+    // fail closed — an unreadable task store must not read as
+    // permission to spawn (the refusal IS the verdict we cannot see)
+    return 'rig next → unreadable'
   }
   if (rig.verdict === 'step' || rig.verdict === 'gate') {
     return undefined
@@ -1672,7 +1674,8 @@ function gatedChecks(ctx: Ctx, checks: CheckInfo[]): CheckInfo[] {
     return checks
   }
   return checks.filter(
-    (c) => !rules.some((r) => c.name.toLowerCase().includes(r.name.toLowerCase()))
+    (c) =>
+      isSast(c.name) || !rules.some((r) => c.name.toLowerCase().includes(r.name.toLowerCase()))
   )
 }
 
@@ -2607,16 +2610,16 @@ async function runDrive(
     store: facade('tasks', { dir: mainPath }, { prefer: broCfg.connectors }),
   }
 
-  await driveOnce(ctx)
   if (args.everySec === undefined) {
+    await driveOnce(ctx)
     return
   }
   for (;;) {
-    await new Promise((r) => setTimeout(r, args.everySec! * 1000))
     try {
       await driveOnce(ctx)
     } catch (err) {
       say(ctx, `drive: pass failed — ${errText(err)}`)
     }
+    await new Promise((r) => setTimeout(r, args.everySec! * 1000))
   }
 }
