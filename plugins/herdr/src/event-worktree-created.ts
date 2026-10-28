@@ -1,6 +1,6 @@
 /**
  * Event `worktree.created` — notification only: drop a mailbox line
- * through `bro comms notify` so sessions see herdr-side tree creation
+ * through `bro notify` so sessions see herdr-side tree creation
  * on their next probe drain. Never a claim, never a spawn.
  */
 import { bro, ctxJson, repoDir } from './lib.ts';
@@ -16,14 +16,7 @@ try {
 }
 
 bro(
-  [
-    'comms',
-    'notify',
-    '--kind',
-    'herdr',
-    '--',
-    `herdr worktree.created${detail !== '' ? ` ${detail}` : ''}`,
-  ],
+  ['notify', '--kind', 'herdr', '--', `herdr worktree.created${detail !== '' ? ` ${detail}` : ''}`],
   repo
 );
 console.log(`notified: worktree.created ${detail}`);
