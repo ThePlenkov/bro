@@ -4,12 +4,12 @@
  * and that nothing is wired that isn't declared. A host bump that adds
  * or removes a surface fails here before it fails in a live session.
  */
-import { strict as assert } from 'node:assert'
-import { existsSync, mkdtempSync, readFileSync, readdirSync, rmSync } from 'node:fs'
-import { tmpdir } from 'node:os'
-import { dirname, join } from 'node:path'
-import { after, describe, test } from 'node:test'
-import { fileURLToPath } from 'node:url'
+import { strict as assert } from 'node:assert';
+import { existsSync, mkdtempSync, readFileSync, readdirSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { dirname, join } from 'node:path';
+import { after, describe, test } from 'node:test';
+import { fileURLToPath } from 'node:url';
 import {
   deriveToolSuccess,
   HOOK_MATRIX,
@@ -17,18 +17,18 @@ import {
   shellHostOf,
   type BroHookEvent,
   type HostEntry,
-} from './host-matrix.ts'
+} from './host-matrix.ts';
 
-const repoRoot = join(dirname(fileURLToPath(import.meta.url)), '..', '..', '..')
+const repoRoot = join(dirname(fileURLToPath(import.meta.url)), '..', '..', '..');
 
-const tmp = mkdtempSync(join(tmpdir(), 'bro-matrix-'))
-after(() => rmSync(tmp, { recursive: true, force: true }))
+const tmp = mkdtempSync(join(tmpdir(), 'bro-matrix-'));
+after(() => rmSync(tmp, { recursive: true, force: true }));
 
 // --- shared helpers -----------------------------------------------------------
 
 interface HookCommand {
-  command?: string
-  matcher?: string
+  command?: string;
+  matcher?: string;
 }
 
 /** The manifest entry is a hook command when it shells out to
@@ -36,163 +36,181 @@ interface HookCommand {
  *  substring check, not a RegExp — the event list is closed and a
  *  non-literal pattern is what SAST flags. */
 function wiredTo(entry: HookCommand, broEvent: BroHookEvent): boolean {
-  const after = entry.command?.split('run.sh" ').slice(1) ?? []
-  return after.some((rest) => rest === broEvent || rest.startsWith(`${broEvent} `))
+  const after = entry.command?.split('run.sh" ').slice(1) ?? [];
+  return after.some(rest => rest === broEvent || rest.startsWith(`${broEvent} `));
 }
 
 /** Read a host manifest into { nativeEvent: [{command, matcher}] }.
  *  Claude/Codex wrap the map in `hooks:`; Devin's file is the map. */
 function manifestEvents(path: string): Map<string, HookCommand[]> {
   const json = JSON.parse(readFileSync(join(repoRoot, path), 'utf8')) as {
-    hooks?: Record<string, HookCommand[] | { matcher?: string; hooks?: HookCommand[] }[]>
-  } & Record<string, unknown>
+    hooks?: Record<string, HookCommand[] | { matcher?: string; hooks?: HookCommand[] }[]>;
+  } & Record<string, unknown>;
   const table = (json.hooks ?? json) as Record<
     string,
     Array<HookCommand | { matcher?: string; hooks?: HookCommand[] }>
-  >
-  const out = new Map<string, HookCommand[]>()
+  >;
+  const out = new Map<string, HookCommand[]>();
   for (const [native, groups] of Object.entries(table)) {
     if (typeof groups === 'string' || !Array.isArray(groups)) {
-      continue // description / version fields
+      continue; // description / version fields
     }
     // Claude/Codex group entries are {matcher, hooks: [{command}]};
     // Cursor's generated manifest entries ARE the commands
-    const commands: HookCommand[] = groups.flatMap((g) =>
+    const commands: HookCommand[] = groups.flatMap(g =>
       'hooks' in g && Array.isArray(g.hooks)
-        ? (g.hooks as HookCommand[]).map((h) => ({ ...h, matcher: g.matcher }))
+        ? (g.hooks as HookCommand[]).map(h => ({ ...h, matcher: g.matcher }))
         : [g as HookCommand]
-    )
-    out.set(native, commands)
+    );
+    out.set(native, commands);
   }
-  return out
+  return out;
 }
 
 function jsonFiles(dir: string): string[] {
-  return readdirSync(dir, { withFileTypes: true }).flatMap((entry) => {
-    const path = join(dir, entry.name)
+  return readdirSync(dir, { withFileTypes: true }).flatMap(entry => {
+    const path = join(dir, entry.name);
     if (entry.isDirectory()) {
-      return jsonFiles(path)
+      return jsonFiles(path);
     }
-    return entry.name.endsWith('.json') ? [path] : []
-  })
+    return entry.name.endsWith('.json') ? [path] : [];
+  });
 }
 
 function hookCommands(value: unknown): string[] {
   if (Array.isArray(value)) {
-    return value.flatMap(hookCommands)
+    return value.flatMap(hookCommands);
   }
   if (value === null || typeof value !== 'object') {
-    return []
+    return [];
   }
   return Object.entries(value).flatMap(([key, child]) =>
     key === 'command' && typeof child === 'string' ? [child] : hookCommands(child)
-  )
+  );
 }
 
 /** Every native name a host entry declares, minus cells routed through
  *  a secondary module (`via`). */
 function declaredNatives(host: HostEntry): string[] {
-  const names: string[] = []
+  const names: string[] = [];
   for (const cell of Object.values(host.events)) {
     if (cell.via !== undefined) {
-      continue
+      continue;
     }
-    names.push(...cell.native)
+    names.push(...cell.native);
   }
-  return names
+  return names;
 }
 
 // --- manifest hosts -----------------------------------------------------------
 
 for (const hostName of ['claude', 'codex', 'devin', 'cursor'] as const) {
   describe(`matrix conformance — ${hostName} manifest`, () => {
-    const host = HOOK_MATRIX.hosts[hostName]!
-    const events = manifestEvents(host.manifest!)
+    const host = HOOK_MATRIX.hosts[hostName]!;
+    const events = manifestEvents(host.manifest!);
 
     test('every declared native event is wired to its bro event', () => {
-      for (const [broEvent, cell] of Object.entries(host.events) as [BroHookEvent, NonNullable<HostEntry['events'][BroHookEvent]>][]) {
+      for (const [broEvent, cell] of Object.entries(host.events) as [
+        BroHookEvent,
+        NonNullable<HostEntry['events'][BroHookEvent]>,
+      ][]) {
         for (const native of cell.native) {
-          const commands = events.get(native)
-          assert.ok(commands, `${hostName}: ${native} is declared but absent from ${host.manifest}`)
-          const hits = commands.filter((c) => wiredTo(c, broEvent))
+          const commands = events.get(native);
+          assert.ok(
+            commands,
+            `${hostName}: ${native} is declared but absent from ${host.manifest}`
+          );
+          const hits = commands.filter(c => wiredTo(c, broEvent));
           assert.ok(
             hits.length > 0,
-            `${hostName}: ${native} never reaches run.sh ${broEvent} — got ${commands.map((c) => c.command).join(' | ')}`
-          )
-          const wantMatch = cell.match ?? ''
+            `${hostName}: ${native} never reaches run.sh ${broEvent} — got ${commands.map(c => c.command).join(' | ')}`
+          );
+          const wantMatch = cell.match ?? '';
           assert.ok(
-            hits.some((c) => (c.matcher ?? '') === wantMatch),
+            hits.some(c => (c.matcher ?? '') === wantMatch),
             `${hostName}: ${native} wired to ${broEvent} without matcher "${wantMatch}"`
-          )
+          );
         }
       }
-    })
+    });
 
     test('nothing is wired that the matrix does not declare', () => {
-      const declared = new Set(declaredNatives(host))
+      const declared = new Set(declaredNatives(host));
       for (const native of events.keys()) {
         assert.ok(
           declared.has(native),
           `${hostName}: manifest wires ${native} but the matrix does not declare it — declare it or remove the wiring`
-        )
+        );
       }
-    })
+    });
 
     test('manifest hook commands do not probe or install the CLI', () => {
       for (const [native, commands] of events) {
         for (const entry of commands) {
-          const command = entry.command ?? ''
-          assert.equal(command.includes('bro hooks </dev/null'), false, `${hostName}: ${native} probes bro hooks`)
-          assert.equal(command.includes('npx -y'), false, `${hostName}: ${native} invokes npx`)
+          const command = entry.command ?? '';
+          assert.equal(
+            command.includes('bro hooks </dev/null'),
+            false,
+            `${hostName}: ${native} probes bro hooks`
+          );
+          assert.equal(command.includes('npx -y'), false, `${hostName}: ${native} invokes npx`);
         }
       }
-    })
-  })
+    });
+  });
 }
 
 describe('generated hook launch paths', () => {
   test('launchers and inline commands never probe or install bro', () => {
-    const pluginDirs = readdirSync(join(repoRoot, 'plugins'))
+    const pluginDirs = readdirSync(join(repoRoot, 'plugins'));
     const launchers = [
       join(repoRoot, 'hooks', 'run.sh'),
-      ...pluginDirs.map((plugin) => join(repoRoot, 'plugins', plugin, 'bro', 'hooks', 'run.sh')),
-    ].filter(existsSync)
+      ...pluginDirs.map(plugin => join(repoRoot, 'plugins', plugin, 'bro', 'hooks', 'run.sh')),
+    ].filter(existsSync);
     for (const path of launchers) {
-      const launcher = readFileSync(path, 'utf8')
-      assert.doesNotMatch(launcher, /\bnpx\s+(?:-y|@broject\/bro)\b/, `${path} installs bro with npx`)
-      assert.doesNotMatch(launcher, /bro hooks <\/dev\/null/, `${path} probes bro hooks`)
+      const launcher = readFileSync(path, 'utf8');
+      assert.doesNotMatch(
+        launcher,
+        /\bnpx\s+(?:-y|@broject\/bro)\b/,
+        `${path} installs bro with npx`
+      );
+      assert.doesNotMatch(launcher, /bro hooks <\/dev\/null/, `${path} probes bro hooks`);
     }
 
-    const manifests = [join(repoRoot, 'hooks.json'), ...jsonFiles(join(repoRoot, 'plugins'))]
+    const manifests = [join(repoRoot, 'hooks.json'), ...jsonFiles(join(repoRoot, 'plugins'))];
     for (const path of manifests) {
-      const commands = hookCommands(JSON.parse(readFileSync(path, 'utf8')) as unknown)
+      const commands = hookCommands(JSON.parse(readFileSync(path, 'utf8')) as unknown);
       for (const command of commands) {
-        assert.doesNotMatch(command, /\bnpx\b/, `${path} hook command invokes npx`)
-        assert.doesNotMatch(command, /bro hooks <\/dev\/null/, `${path} hook command probes bro hooks`)
+        assert.doesNotMatch(command, /\bnpx\b/, `${path} hook command invokes npx`);
+        assert.doesNotMatch(
+          command,
+          /bro hooks <\/dev\/null/,
+          `${path} hook command probes bro hooks`
+        );
       }
     }
-  })
-})
+  });
+});
 
 describe('matrix conformance — declared gaps stay gaps', () => {
   test('claude does not wire PostCompact or PermissionRequest', () => {
-    const events = manifestEvents(HOOK_MATRIX.hosts.claude!.manifest!)
-    assert.equal(events.has('PostCompact'), false)
-    assert.equal(events.has('PermissionRequest'), false)
-    assert.equal(events.has('SubagentStop'), false)
-  })
+    const events = manifestEvents(HOOK_MATRIX.hosts.claude!.manifest!);
+    assert.equal(events.has('PostCompact'), false);
+    assert.equal(events.has('PermissionRequest'), false);
+    assert.equal(events.has('SubagentStop'), false);
+  });
 
   test('codex does not wire a failure event it does not have', () => {
-    const events = manifestEvents(HOOK_MATRIX.hosts.codex!.manifest!)
-    assert.equal(events.has('PostToolUseFailure'), false)
-  })
-})
+    const events = manifestEvents(HOOK_MATRIX.hosts.codex!.manifest!);
+    assert.equal(events.has('PostToolUseFailure'), false);
+  });
+});
 
 // --- in-process extension hosts ------------------------------------------------
 
 /** A host stub that records what the adapter registers. */
 function hostStub(): { api: unknown; events: string[] } {
-  const events: string[] = []
+  const events: string[] = [];
   return {
     events,
     api: {
@@ -202,108 +220,113 @@ function hostStub(): { api: unknown; events: string[] } {
       exec: async () => ({ stdout: '', stderr: '', code: 0, killed: false }),
       sendMessage: () => {},
     },
-  }
+  };
 }
 
 async function loadModule(rel: string): Promise<{ default: (api: unknown) => void }> {
-  const path = join(repoRoot, rel)
-  assert.ok(existsSync(path), `${rel} is missing — run npm run gen:plugins`)
-  return (await import(path)) as { default: (api: unknown) => void }
+  const path = join(repoRoot, rel);
+  assert.ok(existsSync(path), `${rel} is missing — run npm run gen:plugins`);
+  return (await import(path)) as { default: (api: unknown) => void };
 }
 
 for (const hostName of ['pi', 'omp'] as const) {
   describe(`matrix conformance — ${hostName} extension`, () => {
-    const host = HOOK_MATRIX.hosts[hostName]!
-    const mod = `plugins/${hostName}/bro/bro.ts`
+    const host = HOOK_MATRIX.hosts[hostName]!;
+    const mod = `plugins/${hostName}/bro/bro.ts`;
 
     test('the adapter registers exactly the declared event set', async () => {
-      const { api, events } = hostStub()
-      const ext = await loadModule(mod)
-      ext.default(api)
-      const declared = [...declaredNatives(host), ...(host.nativeOnly ?? [])].sort()
-      assert.deepEqual([...new Set(events)].sort(), [...new Set(declared)].sort())
-    })
-  })
+      const { api, events } = hostStub();
+      const ext = await loadModule(mod);
+      ext.default(api);
+      const declared = [...declaredNatives(host), ...(host.nativeOnly ?? [])].sort();
+      assert.deepEqual([...new Set(events)].sort(), [...new Set(declared)].sort());
+    });
+  });
 }
 
 test('matrix conformance — omp pre-tool cell ships via its own module', async () => {
-  const via = HOOK_MATRIX.hosts.omp!.events['pre-tool']!.via!
-  const { api, events } = hostStub()
-  const mod = await loadModule(via)
-  mod.default(api)
-  assert.deepEqual(events, ['tool_call'])
-})
+  const via = HOOK_MATRIX.hosts.omp!.events['pre-tool']!.via!;
+  const { api, events } = hostStub();
+  const mod = await loadModule(via);
+  mod.default(api);
+  assert.deepEqual(events, ['tool_call']);
+});
 
 // --- in-process plugin hosts ---------------------------------------------------
 
 test('matrix conformance — opencode plugin exposes its declared V1 hooks', async () => {
   const plugin = (await import(join(repoRoot, 'plugins/opencode/bro/bro.ts'))) as {
-    default: { server: (input: unknown) => Promise<Record<string, unknown>>; setup: unknown }
-  }
-  const host = HOOK_MATRIX.hosts.opencode!
-  const hooks = await plugin.default.server({ directory: tmp })
-  const v1 = new Set(Object.keys(hooks))
-  for (const [broEvent, cell] of Object.entries(host.events) as [BroHookEvent, NonNullable<HostEntry['events'][BroHookEvent]>][]) {
+    default: { server: (input: unknown) => Promise<Record<string, unknown>>; setup: unknown };
+  };
+  const host = HOOK_MATRIX.hosts.opencode!;
+  const hooks = await plugin.default.server({ directory: tmp });
+  const v1 = new Set(Object.keys(hooks));
+  for (const [broEvent, cell] of Object.entries(host.events) as [
+    BroHookEvent,
+    NonNullable<HostEntry['events'][BroHookEvent]>,
+  ][]) {
     // V1 literal keys are the cell's non-domain-shaped native names
-    const expected = cell.native.filter((n) => !n.includes('('))
-    const check = cell.v2 === true ? [] : expected
+    const expected = cell.native.filter(n => !n.includes('('));
+    const check = cell.v2 === true ? [] : expected;
     for (const native of check) {
-      assert.ok(v1.has(native), `opencode V1 does not expose ${native} for ${broEvent}`)
+      assert.ok(v1.has(native), `opencode V1 does not expose ${native} for ${broEvent}`);
     }
   }
   // V2 cells ride setup() — asserted present, exercised by opencode-v2.test.ts
-  assert.equal(typeof plugin.default.setup, 'function')
-})
+  assert.equal(typeof plugin.default.setup, 'function');
+});
 
 test('matrix conformance — kilo plugin exposes its declared hooks', async () => {
   const plugin = (await import(join(repoRoot, 'plugins/kilo/bro/bro.ts'))) as {
-    default: { server: (input: unknown) => Promise<Record<string, unknown>> }
-  }
-  const host = HOOK_MATRIX.hosts.kilo!
+    default: { server: (input: unknown) => Promise<Record<string, unknown>> };
+  };
+  const host = HOOK_MATRIX.hosts.kilo!;
   const hooks = await plugin.default.server({
     directory: tmp,
     client: { app: { log: async () => {} } },
-  })
-  const keys = new Set(Object.keys(hooks))
-  for (const [broEvent, cell] of Object.entries(host.events) as [BroHookEvent, NonNullable<HostEntry['events'][BroHookEvent]>][]) {
+  });
+  const keys = new Set(Object.keys(hooks));
+  for (const [broEvent, cell] of Object.entries(host.events) as [
+    BroHookEvent,
+    NonNullable<HostEntry['events'][BroHookEvent]>,
+  ][]) {
     for (const native of cell.native) {
-      assert.ok(keys.has(native), `kilo does not expose ${native} for ${broEvent}`)
+      assert.ok(keys.has(native), `kilo does not expose ${native} for ${broEvent}`);
     }
   }
   // the bro tool is a declared native-only surface
-  assert.ok(keys.has('tool'), 'kilo lost the bro tool namespace')
-})
+  assert.ok(keys.has('tool'), 'kilo lost the bro tool namespace');
+});
 
 // --- the matrix itself ----------------------------------------------------------
 
 test('matrix shape — versioned, dated, every host documented', () => {
-  assert.equal(HOOK_MATRIX.version, HOOK_MATRIX_VERSION)
+  assert.equal(HOOK_MATRIX.version, HOOK_MATRIX_VERSION);
   for (const [name, host] of Object.entries(HOOK_MATRIX.hosts)) {
-    assert.ok(host.upstream.doc !== '', `${name}: missing upstream doc reference`)
-    assert.match(host.upstream.checked, /^\d{4}-\d{2}-\d{2}$/, `${name}: checked must be a date`)
+    assert.ok(host.upstream.doc !== '', `${name}: missing upstream doc reference`);
+    assert.match(host.upstream.checked, /^\d{4}-\d{2}-\d{2}$/, `${name}: checked must be a date`);
     assert.ok(
-      host.stopRefusal === 'block' || host.stopRefusal === 'reprompt' || host.stopRefusal === 'none',
+      host.stopRefusal === 'block' ||
+        host.stopRefusal === 'reprompt' ||
+        host.stopRefusal === 'none',
       `${name}: unknown stop refusal ${host.stopRefusal}`
-    )
+    );
     assert.ok(
       host.background === 'sync' || host.background === 'async',
       `${name}: unknown background ${host.background}`
-    )
+    );
   }
-})
+});
 
 test('matrix shape — the boundaries object states the three separations', () => {
-  const b = HOOK_MATRIX.boundaries
-  assert.ok(b.advisory.length > 0, 'the advisory ≠ enforcement boundary must be stated')
+  const b = HOOK_MATRIX.boundaries;
+  assert.ok(b.advisory.length > 0, 'the advisory ≠ enforcement boundary must be stated');
   assert.ok(
     b.policyVsPermissions.length > 0,
     'the bro-policy ≠ host-permissions boundary must be stated'
-  )
-  assert.ok(
-    b.optInApproval.length > 0,
-    'the opt-in self-tool approval boundary must be stated'
-  )
-})
+  );
+  assert.ok(b.optInApproval.length > 0, 'the opt-in self-tool approval boundary must be stated');
+});
 
 // --- outcome derivation ----------------------------------------------------------
 
@@ -313,11 +336,8 @@ describe('deriveToolSuccess — native outcome normalization', () => {
     assert.equal(
       deriveToolSuccess({ hook_event_name: 'PostToolUse', tool_response: { success: false } }),
       false
-    )
-    assert.equal(
-      deriveToolSuccess({ tool_response: { success: true } }),
-      true
-    )
+    );
+    assert.equal(deriveToolSuccess({ tool_response: { success: true } }), true);
     // even on Codex — a field beats the event name
     assert.equal(
       deriveToolSuccess({
@@ -326,8 +346,8 @@ describe('deriveToolSuccess — native outcome normalization', () => {
         tool_response: { success: false },
       }),
       false
-    )
-  })
+    );
+  });
 
   test('claude PostToolUse is the success signal — no success field needed', () => {
     assert.equal(
@@ -339,19 +359,16 @@ describe('deriveToolSuccess — native outcome normalization', () => {
         tool_response: { filePath: '/x', type: 'create' },
       }),
       true
-    )
-  })
+    );
+  });
 
   test('a documented failure event is failure on any host', () => {
     assert.equal(
       deriveToolSuccess({ hook_event_name: 'PostToolUseFailure', tool_name: 'Bash' }),
       false
-    )
-    assert.equal(
-      deriveToolSuccess({ turn_id: 't', hook_event_name: 'PostToolUseFailure' }),
-      false
-    )
-  })
+    );
+    assert.equal(deriveToolSuccess({ turn_id: 't', hook_event_name: 'PostToolUseFailure' }), false);
+  });
 
   test('codex PostToolUse is unobservable — it fires on non-zero exits', () => {
     assert.equal(
@@ -364,21 +381,21 @@ describe('deriveToolSuccess — native outcome normalization', () => {
         tool_response: 'Exit code 1',
       }),
       undefined
-    )
-  })
+    );
+  });
 
   test('unrelated and absent event names derive nothing', () => {
-    assert.equal(deriveToolSuccess({ hook_event_name: 'SessionStart' }), undefined)
-    assert.equal(deriveToolSuccess({ tool_name: 'Bash' }), undefined)
-    assert.equal(deriveToolSuccess('not an object'), undefined)
-    assert.equal(deriveToolSuccess(null), undefined)
-  })
-})
+    assert.equal(deriveToolSuccess({ hook_event_name: 'SessionStart' }), undefined);
+    assert.equal(deriveToolSuccess({ tool_name: 'Bash' }), undefined);
+    assert.equal(deriveToolSuccess('not an object'), undefined);
+    assert.equal(deriveToolSuccess(null), undefined);
+  });
+});
 
 describe('shellHostOf — the codex fingerprint', () => {
   test('turn_id marks codex; everything else reads the shared vocabulary', () => {
-    assert.equal(shellHostOf({ turn_id: 't' }), 'codex')
-    assert.equal(shellHostOf({ session_id: 's', hook_event_name: 'PostToolUse' }), 'claude')
-    assert.equal(shellHostOf(null), 'claude')
-  })
-})
+    assert.equal(shellHostOf({ turn_id: 't' }), 'codex');
+    assert.equal(shellHostOf({ session_id: 's', hook_event_name: 'PostToolUse' }), 'claude');
+    assert.equal(shellHostOf(null), 'claude');
+  });
+});

@@ -20,6 +20,12 @@ npx -y @broject/bro --help     # zero install
 npm i -g @broject/bro          # or keep bro around
 ```
 
+npm `latest` is **0.2.5** — these pages use the flat spellings the
+published CLI dispatches (`bro debt status`). The grouped surface
+(`bro review debt status`) lands in **0.3.0**; flat names stay
+permanent aliases, and upcoming commands are marked `0.3.0` where the
+docs cite them.
+
 ## Wire a repo
 
 ```bash
@@ -38,10 +44,10 @@ defaults until set up.
 ## First sweep
 
 ```bash
-bro review debt prs        # merged PRs nobody processed yet
-bro review debt collect    # harvest threads → .agents/review-debt/ + labels
-bro review debt status     # the damage report
-bro review debt next       # the top open finding — claim, fix, set done
+bro debt prs        # merged PRs nobody processed yet
+bro debt collect    # harvest threads → .agents/review-debt/ + labels
+bro debt status     # the damage report
+bro debt next       # the top open finding
 ```
 
 ## As an agent plugin

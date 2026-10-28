@@ -66,15 +66,15 @@ Developing bro itself: see CONTRIBUTING.md.
   `bro review act threads` are the only verdict.
 - **Infra failures don't block** — the gate rule: project-caused
   failures (code, config, real findings) block; infrastructure failures
-  (quota, outage, runner flakes) never do. A *failed* AI-reviewer check
+  (quota, outage, runner flakes) never do. A _failed_ AI-reviewer check
   is pure infra — its findings arrive as threads, which block on their
-  own. Reviewers that are *reliably* flaky go on `act.ignoreChecks` in
+  own. Reviewers that are _reliably_ flaky go on `act.ignoreChecks` in
   bro.config.json so a stuck pending state doesn't block either —
   currently `"github-advanced-security"`, `"kilo"` (rate limits;
   advisory, may still be read — `check:docs` fails if this quote rots).
   The
   ignore is conditional: a failing ignored check is dropped quietly
-  only after `consecutiveFailures` failing heads in a row *with*
+  only after `consecutiveFailures` failing heads in a row _with_
   thread activity inside `threadWindowDays` — a failing check with no
   recent thread output surfaces as an alert (advisory, never a
   blocker), because a reviewer producing nothing is down, not flaky.
@@ -88,7 +88,7 @@ Developing bro itself: see CONTRIBUTING.md.
   the convoy default (`merge=auto`) opens a ready PR — the act gate is
   the merge mechanism. A dirty tree at session end is lost work.
 - **One executor per unit of work** — an interactive session (opencode,
-  claude, a terminal) owns what it plans and executes it *there*; bro is
+  claude, a terminal) owns what it plans and executes it _there_; bro is
   the bus — the claim, the ledger, the mailbox, the supervision — plus a
   batch lane that takes only work nobody owns. The occupancy plane skips
   a worktree a live session armed (`green-occupied — session armed work
@@ -140,18 +140,20 @@ nohup: an unregistered worker has no claim, no `.exit` record, no
   orphaned green PRs merge. Prompts and logs land in
   `<git-common>/bro/agents/` — never argv (every local user reads `ps`),
   never world-readable `/tmp`.
-- **Pin the handles at spawn.** pid, log path, claimed step. The
+- **Pin the handles at spawn.** pid, run id, log path, claimed step. The
   registry writes them to `<git-common>/bro/agents.json` plus
-  `<git-common>/bro/agents/<agentId>.{prompt.md,log,exit}` and pins the
-  claim into the shared beads store — `bro fleet agents status`, `down`, and
-  respawn all key off that entry.
+  `<git-common>/bro/agents/<agentId>.{prompt.md,log,stderr}` and the
+  attempt-scoped `<agentId>.<runId>.{handle,go,exit}` — the worker
+  publishes `handle` itself and holds on the launcher's `go` stamp, so
+  an unadmitted survivor can never double a respawn — `bro fleet agents
+  status`, `down`, and respawn all key off that entry.
 - **Monitor by point checks, never by waiting.** `bro fleet agents status`,
   `bro fleet`, `bro review watch`, a fresh `bro flow convoy next` — between turns,
   not in a blocking loop. A synchronous `get_output` or `sleep` wait on
   detached work blocks the conversation and buys nothing (retro
   bro-lmdj).
 - **Completion is detected, not awaited.** `bro fleet agents status` →
-  `exited`/`blocked`, then read the exit record — `<agentId>.exit`
+  `exited`/`blocked`, then read the exit record — `<agentId>.<runId>.exit`
   holds the code, the entry's `cause`/`resetAt` the why. `bro flow convoy
   run` already supervises its own spawns to a verdict — hand a mol list
   to it instead of babysitting. Never promise "I'll report when it

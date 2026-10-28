@@ -23,12 +23,22 @@
  * queue is scoped to this checkout's issue_prefix — foreign-prefix
  * beads are reported, never claimed. scope = "all" opts out in plans.
  */
-import { emitLifecycle, ensureTasksBackend, facade, getTasks, gitTry, hasHelpFlag, printUsage, type FacadeOpts, type TaskStore } from '@broject/core'
-import { flag } from './args.ts'
-import type { NextFilters, NextOrder, NextPlan } from './next-plan.ts'
-import { requireGlobalStore } from '../doctypes/store.ts'
-import { assertMutableConfig } from '../config-policy.ts'
-import { loadBroConfig } from '../plugins.ts'
+import {
+  emitLifecycle,
+  ensureTasksBackend,
+  facade,
+  getTasks,
+  gitTry,
+  hasHelpFlag,
+  printUsage,
+  type FacadeOpts,
+  type TaskStore,
+} from '@broject/core';
+import { flag } from './args.ts';
+import type { NextFilters, NextOrder, NextPlan } from './next-plan.ts';
+import { requireGlobalStore } from '../doctypes/store.ts';
+import { assertMutableConfig } from '../config-policy.ts';
+import { loadBroConfig } from '../plugins.ts';
 
 /** The serving tasks backend for `dir` — `connectors.tasks` in
  *  bro.config selects it (beads by default, github when pinned). The
@@ -37,55 +47,54 @@ import { loadBroConfig } from '../plugins.ts'
  *  construction — its dir carries no bro.config, so resolution falls
  *  to the registry default anyway. */
 function storeFor(dir?: string, opts?: FacadeOpts): TaskStore {
-  const root =
-    dir ?? (gitTry(['rev-parse', '--show-toplevel']).out.trim() || process.cwd())
-  return facade('tasks', { dir: root }, opts ?? { prefer: loadBroConfig(root).connectors })
+  const root = dir ?? (gitTry(['rev-parse', '--show-toplevel']).out.trim() || process.cwd());
+  return facade('tasks', { dir: root }, opts ?? { prefer: loadBroConfig(root).connectors });
 }
 
 export interface ReadyBead {
-  id: string
-  title: string
-  description?: string
-  status: string
-  priority: number
-  issue_type: string
-  created_at: string
-  parent?: string
+  id: string;
+  title: string;
+  description?: string;
+  status: string;
+  priority: number;
+  issue_type: string;
+  created_at: string;
+  parent?: string;
   /** bd labels — present on `bd ready --json` rows; the labels scope
    *  filter in plans/argv only claims beads carrying a declared label. */
-  labels?: string[]
+  labels?: string[];
 }
 
 interface NextResult {
-  state: 'task' | 'gated' | 'idle'
+  state: 'task' | 'gated' | 'idle';
   /** first pick — the single-bead form argv callers expect */
-  bead?: ReadyBead
+  bead?: ReadyBead;
   /** every pick, in order — plans can claim more than one */
-  beads: ReadyBead[]
-  queue: number
+  beads: ReadyBead[];
+  queue: number;
   /** claimable beads the plan's filters excluded — idle must not
    *  pretend the backlog is empty while these remain */
-  filtered: number
+  filtered: number;
   /** ready beads under another issue_prefix — a shared db serves
    *  several repos; they are reported, never claimed here */
-  foreign: number
-  gates: Array<{ id: string; title: string }>
-  epics: Array<{ id: string; title: string }>
-  moleculeSteps: number
+  foreign: number;
+  gates: Array<{ id: string; title: string }>;
+  epics: Array<{ id: string; title: string }>;
+  moleculeSteps: number;
 }
 
-const HUMAN_GATE = /human.?gate/i
+const HUMAN_GATE = /human.?gate/i;
 
 /** Labels that mark coordination primitives, not work — excluded bd-side
  *  so a shared queue's semaphores can never look claimable. Gas Town's
  *  merge-slot bead (<prefix>-merge-slot) is the known instance. */
-export const NEVER_CLAIM_LABELS = ['gt:slot']
+export const NEVER_CLAIM_LABELS = ['gt:slot'];
 
 /** The single `bd ready` contract for next and loop: coordination
  *  primitives are filtered out by bd itself, before classification.
  *  `dir` retargets the query at another store — `bro next --global`. */
 export function readyBeads(dir?: string, opts?: FacadeOpts): ReadyBead[] {
-  return storeFor(dir, opts).ready<ReadyBead>({ excludeLabels: NEVER_CLAIM_LABELS })
+  return storeFor(dir, opts).ready<ReadyBead>({ excludeLabels: NEVER_CLAIM_LABELS });
 }
 
 /** This checkout's bead id scope — what `bd init` recorded as
@@ -95,12 +104,12 @@ export function readyBeads(dir?: string, opts?: FacadeOpts): ReadyBead[] {
  *  cross-repo claiming, so it throws (fail closed). */
 export function projectPrefix(dir?: string, opts?: FacadeOpts): string | undefined {
   try {
-    return storeFor(dir, opts).prefix()
+    return storeFor(dir, opts).prefix();
   } catch (err) {
     throw new Error(
       `${err instanceof Error ? err.message : String(err)} ` +
         '(refusing to schedule without a verified project scope)'
-    )
+    );
   }
 }
 
@@ -112,7 +121,7 @@ export function nextScope(
   dir?: string,
   opts?: FacadeOpts
 ): { prefix?: string } {
-  return { prefix: scope === 'all' ? undefined : projectPrefix(dir, opts) }
+  return { prefix: scope === 'all' ? undefined : projectPrefix(dir, opts) };
 }
 
 /** A parent's issue_type rarely changes mid-process — `bro loop`
@@ -121,26 +130,24 @@ export function nextScope(
  *  positives are cached: a parent promoted to epic mid-loop must start
  *  un-gating its children on the next iteration, not stay mol-stepped
  *  for the process lifetime. */
-const parentEpicCache = new Map<string, boolean>()
+const parentEpicCache = new Map<string, boolean>();
 
 /** bd reuses `parent` for both molecule steps and epic children — only
  *  a parent that IS an epic makes the child regular work. Looked up
  *  once per unique parent id; an unreadable parent stays a mol step. */
 export function epicParentIds(ready: ReadyBead[], dir?: string, opts?: FacadeOpts): Set<string> {
-  const cwd = process.cwd()
-  const ids = [
-    ...new Set(ready.map((b) => b.parent).filter((p): p is string => !!p)),
-  ]
-  const epic = new Set<string>()
-  const missed: string[] = []
+  const cwd = process.cwd();
+  const ids = [...new Set(ready.map(b => b.parent).filter((p): p is string => !!p))];
+  const epic = new Set<string>();
+  const missed: string[] = [];
   for (const id of ids) {
     // cwd namespaces callers that share the same dir arg — without it a
     // project caller inherits another project's classification
-    const key = `${cwd}:${dir ?? ''}:${id}`
+    const key = `${cwd}:${dir ?? ''}:${id}`;
     if (parentEpicCache.get(key) === true) {
-      epic.add(id)
+      epic.add(id);
     } else {
-      missed.push(id)
+      missed.push(id);
     }
   }
   if (missed.length > 0) {
@@ -151,18 +158,20 @@ export function epicParentIds(ready: ReadyBead[], dir?: string, opts?: FacadeOpt
       // E2BIG its way in here)
       for (const r of getTasks(storeFor(dir, opts), missed)) {
         if (r.issue_type === 'epic') {
-          parentEpicCache.set(`${cwd}:${dir ?? ''}:${r.id}`, true)
-          epic.add(r.id)
+          parentEpicCache.set(`${cwd}:${dir ?? ''}:${r.id}`, true);
+          epic.add(r.id);
         }
       }
     } catch (err) {
       // parents we can't inspect stay molecule steps — never cached;
       // the warn keeps a dead store from silently hiding epic children
-      const why = err instanceof Error ? err.message : String(err)
-      console.error(`warning: parent lookup failed — ${missed.length} parent(s) read as molecule steps (${why})`)
+      const why = err instanceof Error ? err.message : String(err);
+      console.error(
+        `warning: parent lookup failed — ${missed.length} parent(s) read as molecule steps (${why})`
+      );
     }
   }
-  return epic
+  return epic;
 }
 
 const claimable = (
@@ -172,41 +181,41 @@ const claimable = (
 ): boolean =>
   (gates === 'allow' || !HUMAN_GATE.test(b.title)) &&
   b.issue_type !== 'epic' &&
-  (!b.parent || epicParents.has(b.parent))
+  (!b.parent || epicParents.has(b.parent));
 
 /** Plan filters narrow the claimable queue — they can never re-include
  *  what classify excludes (epics, molecule steps, forbidden gates). */
 function applyFilters(queue: ReadyBead[], f: NextFilters): ReadyBead[] {
-  let q = queue
+  let q = queue;
   if (f.types?.length) {
-    q = q.filter((b) => f.types!.includes(b.issue_type))
+    q = q.filter(b => f.types!.includes(b.issue_type));
   }
   if (f.maxPriority !== undefined) {
-    q = q.filter((b) => b.priority <= f.maxPriority!)
+    q = q.filter(b => b.priority <= f.maxPriority!);
   }
   if (f.match) {
-    q = q.filter((b) => f.match!.test(b.title))
+    q = q.filter(b => f.match!.test(b.title));
   }
   if (f.labels?.length) {
     // declared scope: any-of — the bead must carry at least one of the
     // labels the run was pointed at; unlabeled beads are out of scope
-    q = q.filter((b) => b.labels?.some((l) => f.labels!.includes(l)))
+    q = q.filter(b => b.labels?.some(l => f.labels!.includes(l)));
   }
-  return q
+  return q;
 }
 
 const ORDERERS: Record<NextOrder, (a: ReadyBead, b: ReadyBead) => number> = {
   priority: (a, b) => a.priority - b.priority || a.created_at.localeCompare(b.created_at),
   oldest: (a, b) => a.created_at.localeCompare(b.created_at),
   newest: (a, b) => b.created_at.localeCompare(a.created_at),
-}
+};
 
 /** The argv `bro next` selection — plan defaults. */
 const DEFAULT_SELECTION = {
   filters: {},
   gates: 'forbid',
   order: 'priority',
-} as const satisfies Pick<NextPlan, 'filters' | 'gates' | 'order'>
+} as const satisfies Pick<NextPlan, 'filters' | 'gates' | 'order'>;
 
 /** Split the ready queue into claimable work and things we never claim.
  *  scope.prefix restricts claimable AND reporting to this project's
@@ -218,20 +227,18 @@ export function classify(
   epicParents: ReadonlySet<string> = new Set()
 ) {
   const local =
-    scope.prefix === undefined
-      ? ready
-      : ready.filter((b) => b.id.startsWith(`${scope.prefix}-`))
-  const claimableAll = local.filter((b) => claimable(b, plan.gates, epicParents))
-  const queue = applyFilters(claimableAll, plan.filters)
-  queue.sort(ORDERERS[plan.order])
+    scope.prefix === undefined ? ready : ready.filter(b => b.id.startsWith(`${scope.prefix}-`));
+  const claimableAll = local.filter(b => claimable(b, plan.gates, epicParents));
+  const queue = applyFilters(claimableAll, plan.filters);
+  queue.sort(ORDERERS[plan.order]);
   return {
     queue,
     filtered: claimableAll.length - queue.length,
     foreign: ready.length - local.length,
-    gates: local.filter((b) => HUMAN_GATE.test(b.title)),
-    epics: local.filter((b) => b.issue_type === 'epic'),
-    moleculeSteps: local.filter((b) => b.parent && !epicParents.has(b.parent)).length,
-  }
+    gates: local.filter(b => HUMAN_GATE.test(b.title)),
+    epics: local.filter(b => b.issue_type === 'epic'),
+    moleculeSteps: local.filter(b => b.parent && !epicParents.has(b.parent)).length,
+  };
 }
 
 /** A failed claim is a race only when the bead actually moved on
@@ -239,10 +246,10 @@ export function classify(
  *  drain the queue into a fake idle. */
 function racedAway(b: ReadyBead, dir?: string, opts?: FacadeOpts): boolean {
   try {
-    const status = storeFor(dir, opts).get(b.id)?.status
-    return typeof status === 'string' && status !== 'open'
+    const status = storeFor(dir, opts).get(b.id)?.status;
+    return typeof status === 'string' && status !== 'open';
   } catch {
-    return false // show failed too — bd is down; the claim error is the diagnostic
+    return false; // show failed too — bd is down; the claim error is the diagnostic
   }
 }
 
@@ -251,7 +258,7 @@ function racedAway(b: ReadyBead, dir?: string, opts?: FacadeOpts): boolean {
  *  store error propagates (a bd outage must surface). */
 function claimOne(b: ReadyBead, dir: string | undefined, opts: FacadeOpts | undefined): boolean {
   try {
-    storeFor(dir, opts).claim(b.id)
+    storeFor(dir, opts).claim(b.id);
     // lifecycle — the claim transition (specs/telemetry/bro-ub91h.md).
     // The journal anchors at the run's repo (cwd), not the store dir:
     // --global's repo-less store would drop the row even inside a
@@ -262,13 +269,13 @@ function claimOne(b: ReadyBead, dir: string | undefined, opts: FacadeOpts | unde
       from: 'open',
       to: 'in_progress',
       detail: { via: 'next' },
-    })
-    return true
+    });
+    return true;
   } catch (err) {
     if (racedAway(b, dir, opts)) {
-      return false // genuinely raced away — try the next candidate
+      return false; // genuinely raced away — try the next candidate
     }
-    throw err
+    throw err;
   }
 }
 
@@ -279,17 +286,17 @@ function claimOne(b: ReadyBead, dir: string | undefined, opts: FacadeOpts | unde
  *  when the queue came from it (`bro next --global`). */
 function gateClaimQueue(queue: ReadyBead[], dir: string | undefined, skipPolicy = false): void {
   if (skipPolicy || queue.length === 0) {
-    return
+    return;
   }
-  const root = dir ?? (gitTry(['rev-parse', '--show-toplevel']).out.trim() || process.cwd())
+  const root = dir ?? (gitTry(['rev-parse', '--show-toplevel']).out.trim() || process.cwd());
   try {
-    assertMutableConfig(root)
+    assertMutableConfig(root);
   } catch (err) {
     if (dir !== undefined) {
-      throw err // a pinned store dir's policy errors are the caller's to judge
+      throw err; // a pinned store dir's policy errors are the caller's to judge
     }
-    console.error(`error: ${err instanceof Error ? err.message : String(err)}`)
-    process.exit(1)
+    console.error(`error: ${err instanceof Error ? err.message : String(err)}`);
+    process.exit(1);
   }
 }
 
@@ -306,56 +313,56 @@ export function claimUpTo(
   // claimUpTo without next.ts's gate above, and a claim landing before
   // a refused spawn is exactly the half-state the gate exists to stop
   // (spec: bro-d9dmx)
-  gateClaimQueue(queue, dir, skipPolicy)
-  const picked: ReadyBead[] = []
+  gateClaimQueue(queue, dir, skipPolicy);
+  const picked: ReadyBead[] = [];
   for (const b of queue) {
     if (picked.length >= limit) {
-      break
+      break;
     }
     if (claimOne(b, dir, opts)) {
-      picked.push(b)
+      picked.push(b);
     }
   }
-  return picked
+  return picked;
 }
 
 function printPick(b: ReadyBead, list: boolean, backend: string): void {
-  console.log(`→ ${b.id}${list ? '' : ' (claimed)'} P${b.priority} ${b.issue_type}`)
-  console.log(`  ${b.title}`)
+  console.log(`→ ${b.id}${list ? '' : ' (claimed)'} P${b.priority} ${b.issue_type}`);
+  console.log(`  ${b.title}`);
   if (b.description?.trim()) {
-    console.log(`  ${b.description.trim().split('\n')[0]}`)
+    console.log(`  ${b.description.trim().split('\n')[0]}`);
   }
-  const closeVerb = backend === 'beads' ? 'bd close' : 'bro task close'
-  console.log(`  loop: implement → PR → bro act merge → ${closeVerb} → bro next`)
+  const closeVerb = backend === 'beads' ? 'bd close' : 'bro task close';
+  console.log(`  loop: implement → PR → bro act merge → ${closeVerb} → bro next`);
 }
 
 function printResult(result: NextResult, list: boolean, backend: string): void {
   for (const b of result.beads) {
-    printPick(b, list, backend)
+    printPick(b, list, backend);
   }
   if (result.beads.length === 0) {
     console.log(
       result.state === 'gated'
         ? 'next: nothing claimable — filters, gates, epics, or molecule steps remain'
         : 'next: backlog empty — nothing ready'
-    )
+    );
   }
   if (result.filtered > 0) {
-    console.log(`  filtered: ${result.filtered} claimable bead(s) excluded by plan filters`)
+    console.log(`  filtered: ${result.filtered} claimable bead(s) excluded by plan filters`);
   }
   if (result.foreign > 0) {
     console.log(
       `  foreign: ${result.foreign} bead(s) outside this project's issue_prefix — not claimable here`
-    )
+    );
   }
   for (const g of result.gates) {
-    console.log(`  gate: ${g.id} — ${g.title} (human decision needed)`)
+    console.log(`  gate: ${g.id} — ${g.title} (human decision needed)`);
   }
   for (const e of result.epics) {
-    console.log(`  epic: ${e.id} — ${e.title} (decompose, don't claim)`)
+    console.log(`  epic: ${e.id} — ${e.title} (decompose, don't claim)`);
   }
   if (result.moleculeSteps > 0) {
-    console.log(`  convoy: ${result.moleculeSteps} molecule step(s) — owned by bro convoy`)
+    console.log(`  convoy: ${result.moleculeSteps} molecule step(s) — owned by bro convoy`);
   }
 }
 
@@ -364,16 +371,16 @@ function printResult(result: NextResult, list: boolean, backend: string): void {
  *  the same way the backend gate does for the project path. */
 function readyOrDie(dir?: string, opts?: FacadeOpts): ReadyBead[] {
   try {
-    return readyBeads(dir, opts)
+    return readyBeads(dir, opts);
   } catch (err) {
-    const enoent = err != null && (err as NodeJS.ErrnoException).code === 'ENOENT'
-    const detail = err instanceof Error ? err.message : String(err)
+    const enoent = err != null && (err as NodeJS.ErrnoException).code === 'ENOENT';
+    const detail = err instanceof Error ? err.message : String(err);
     console.error(
       enoent
         ? "error: task backend's CLI not found — install it or point connectors.tasks elsewhere"
         : `error: task store ready failed — ${detail}`
-    )
-    process.exit(1)
+    );
+    process.exit(1);
   }
 }
 
@@ -385,29 +392,29 @@ function readyOrDie(dir?: string, opts?: FacadeOpts): ReadyBead[] {
  *  `connectors.tasks` preference could point the global queue at a
  *  project backend the gate never checked. */
 function nextContext(plan: NextPlan): {
-  dir: string | undefined
-  storeOpts: FacadeOpts | undefined
-  backend: string
-  projectRoot: string | undefined
+  dir: string | undefined;
+  storeOpts: FacadeOpts | undefined;
+  backend: string;
+  projectRoot: string | undefined;
 } {
   if (plan.scope === 'global') {
-    const dir = requireGlobalStore()
+    const dir = requireGlobalStore();
     return {
       dir,
       storeOpts: { connector: 'beads' },
       backend: ensureTasksBackend(dir, {}),
       projectRoot: undefined,
-    }
+    };
   }
   // gate on the serving backend — beads gets the compat probe, a
   // pinned connector gets its own auth check
-  const projectRoot = gitTry(['rev-parse', '--show-toplevel']).out.trim() || process.cwd()
+  const projectRoot = gitTry(['rev-parse', '--show-toplevel']).out.trim() || process.cwd();
   return {
     dir: undefined,
     storeOpts: undefined,
     backend: ensureTasksBackend(projectRoot, loadBroConfig(projectRoot).connectors),
     projectRoot,
-  }
+  };
 }
 
 /** Refuse a project-scope claim under invalid committed config BEFORE
@@ -415,20 +422,24 @@ function nextContext(plan: NextPlan): {
  *  claim can actually be attempted: an empty queue is idle/gated, not
  *  a policy failure (claimUpTo gates its own nonempty path; the global
  *  store carries no project policy at all). */
-function gateClaim(c: ReturnType<typeof classify>, plan: NextPlan, projectRoot: string | undefined): void {
+function gateClaim(
+  c: ReturnType<typeof classify>,
+  plan: NextPlan,
+  projectRoot: string | undefined
+): void {
   if (!plan.claim || projectRoot === undefined) {
-    return
+    return;
   }
   // an empty queue means no claim can be attempted — idle/gated, not
   // a policy failure
   if (c.queue.length === 0) {
-    return
+    return;
   }
   try {
-    assertMutableConfig(projectRoot)
+    assertMutableConfig(projectRoot);
   } catch (err) {
-    console.error(`error: ${err instanceof Error ? err.message : String(err)}`)
-    process.exit(1)
+    console.error(`error: ${err instanceof Error ? err.message : String(err)}`);
+    process.exit(1);
   }
 }
 
@@ -436,14 +447,13 @@ function gateClaim(c: ReturnType<typeof classify>, plan: NextPlan, projectRoot: 
  *  when ready beads remain but none are claimable under this plan —
  *  'idle' there would falsely tell the loop the backlog is empty. */
 function nextResult(c: ReturnType<typeof classify>, beads: ReadyBead[]): NextResult {
-  const picked = new Set(beads.map((b) => b.id))
-  const gatedLeft =
-    c.filtered + c.foreign + c.gates.length + c.epics.length + c.moleculeSteps > 0
-  let state: NextResult['state'] = 'idle'
+  const picked = new Set(beads.map(b => b.id));
+  const gatedLeft = c.filtered + c.foreign + c.gates.length + c.epics.length + c.moleculeSteps > 0;
+  let state: NextResult['state'] = 'idle';
   if (beads.length > 0) {
-    state = 'task'
+    state = 'task';
   } else if (gatedLeft) {
-    state = 'gated'
+    state = 'gated';
   }
   return {
     state,
@@ -453,57 +463,66 @@ function nextResult(c: ReturnType<typeof classify>, beads: ReadyBead[]): NextRes
     filtered: c.filtered,
     foreign: c.foreign,
     // a claimed gate is already reported as a pick — don't double-count it
-    gates: c.gates.filter((b) => !picked.has(b.id)).map((b) => ({ id: b.id, title: b.title })),
-    epics: c.epics.map((b) => ({ id: b.id, title: b.title })),
+    gates: c.gates.filter(b => !picked.has(b.id)).map(b => ({ id: b.id, title: b.title })),
+    epics: c.epics.map(b => ({ id: b.id, title: b.title })),
     moleculeSteps: c.moleculeSteps,
-  }
+  };
 }
 
 /** The shared execution path — argv `bro next` and `bro run next.toml`
  *  differ only in how the plan is populated. */
 export function applyNextPlan(plan: NextPlan): void {
-  const { dir, storeOpts, backend, projectRoot } = nextContext(plan)
-  const ready = readyOrDie(dir, storeOpts)
-  let c: ReturnType<typeof classify>
+  const { dir, storeOpts, backend, projectRoot } = nextContext(plan);
+  const ready = readyOrDie(dir, storeOpts);
+  let c: ReturnType<typeof classify>;
   try {
-    c = classify(ready, plan, nextScope(plan.scope, dir, storeOpts), epicParentIds(ready, dir, storeOpts))
+    c = classify(
+      ready,
+      plan,
+      nextScope(plan.scope, dir, storeOpts),
+      epicParentIds(ready, dir, storeOpts)
+    );
   } catch (err) {
-    console.error(`error: ${err instanceof Error ? err.message : String(err)}`)
-    process.exit(1)
+    console.error(`error: ${err instanceof Error ? err.message : String(err)}`);
+    process.exit(1);
   }
-  gateClaim(c, plan, projectRoot)
+  gateClaim(c, plan, projectRoot);
   // global scope carries no project policy — skip the gate there the
   // same way gateClaim does (projectRoot === undefined ⇔ --global)
   const beads = plan.claim
     ? claimUpTo(c.queue, plan.limit, dir, storeOpts, projectRoot === undefined)
-    : c.queue.slice(0, plan.limit)
-  const result = nextResult(c, beads)
+    : c.queue.slice(0, plan.limit);
+  const result = nextResult(c, beads);
   if (plan.json) {
-    console.log(JSON.stringify(result, null, 2))
-    return
+    console.log(JSON.stringify(result, null, 2));
+    return;
   }
-  printResult(result, !plan.claim, backend)
+  printResult(result, !plan.claim, backend);
 }
 
 /** `--label a,b` → the trimmed list — flag() owns both spellings
  *  (--label v / --label=v) and rejects repeats; gating on
  *  argv.includes('--label') would miss the = form entirely. */
 function parseNextLabels(argv: string[]): string[] | undefined {
-  const labelArg = flag(argv, '--label')
+  const labelArg = flag(argv, '--label');
   if (labelArg === undefined) {
-    return undefined
+    return undefined;
   }
-  const labels = labelArg.split(',').map((s) => s.trim()).filter((s) => s !== '')
+  const labels = labelArg
+    .split(',')
+    .map(s => s.trim())
+    .filter(s => s !== '');
   if (labels.length === 0) {
-    console.error('error: --label requires a comma-separated value, e.g. --label debt,ui')
-    process.exit(2)
+    console.error('error: --label requires a comma-separated value, e.g. --label debt,ui');
+    process.exit(2);
   }
-  return labels
+  return labels;
 }
 
 export async function runNextCommand(argv: string[]): Promise<void> {
   if (hasHelpFlag(argv)) {
-    printUsage(`Usage: bro next [--list] [--json] [--global] [--label a,b]
+    printUsage(
+      `Usage: bro next [--list] [--json] [--global] [--label a,b]
 
   Claims the top ready bead and prints the work order. Human gates,
   epics, and molecule steps are surfaced, never claimed. --label
@@ -519,9 +538,11 @@ export async function runNextCommand(argv: string[]): Promise<void> {
   Scope: only beads under this checkout's issue_prefix are claimable;
   gt:slot coordination primitives are never surfaced. Plans may set
   scope = "all" to opt out. --global reads the user-level store
-  instead (\`bro store init --global\`) — same pipeline, different home.`, 0)
+  instead (\`bro store init --global\`) — same pipeline, different home.`,
+      0
+    );
   }
-  const labels = parseNextLabels(argv)
+  const labels = parseNextLabels(argv);
   applyNextPlan({
     limit: 1,
     order: 'priority',
@@ -530,5 +551,5 @@ export async function runNextCommand(argv: string[]): Promise<void> {
     json: argv.includes('--json'),
     scope: argv.includes('--global') ? 'global' : 'project',
     filters: labels !== undefined ? { labels } : {},
-  })
+  });
 }

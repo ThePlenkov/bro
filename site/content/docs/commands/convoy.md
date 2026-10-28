@@ -1,7 +1,13 @@
 ---
+
 title: bro flow convoy
 description: Intentional group planning — a molecule's needs-DAG executed by claiming steps.
 ---
+
+_Command examples track the upcoming **0.3.0** — grouped
+`bro <group> <member>` spellings and `0.3.0` marks are not yet on npm
+`latest` (**0.2.5**); use the flat names (`bro convoy run`,
+`bro debt status`)._
 
 `bro flow next` is grab-anything mode: the top ready bead, whoever gets there
 first. A **convoy** is the opposite — planned group work. A molecule
@@ -28,14 +34,14 @@ write what the next step needs, not a diary.
 
 ## Commands
 
-| Command | What it does |
-| ------- | ------------ |
-| `bro flow convoy pour <formula>` | Instantiate a formula as a molecule |
-| `bro flow convoy status [mol]` | The DAG — ✓ done / ◐ in progress / ▸ ready / · blocked |
-| `bro flow convoy next [mol]` | Scheduler as code — the next executable step as JSON |
-| `bro flow convoy claim <step> [--mol ID]` | Atomic claim before starting — required with parallel agents |
-| `bro flow convoy done <step> --result T [--mol ID]` | Close the step, hand the result downstream |
-| `bro flow convoy list` | Open molecules in this workspace |
+| Command                                             | What it does                                                 |
+| --------------------------------------------------- | ------------------------------------------------------------ |
+| `bro flow convoy pour <formula>`                    | Instantiate a formula as a molecule                          |
+| `bro flow convoy status [mol]`                      | The DAG — ✓ done / ◐ in progress / ▸ ready / · blocked       |
+| `bro flow convoy next [mol]`                        | Scheduler as code — the next executable step as JSON         |
+| `bro flow convoy claim <step> [--mol ID]`           | Atomic claim before starting — required with parallel agents |
+| `bro flow convoy done <step> --result T [--mol ID]` | Close the step, hand the result downstream                   |
+| `bro flow convoy list`                              | Open molecules in this workspace                             |
 
 ## `bro flow convoy run` — the molecule queue
 
@@ -43,14 +49,14 @@ write what the next step needs, not a diary.
 spawning a worker agent per ready step instead of doing the work in this
 session.
 
-| Command | What it does |
-| ------- | ------------ |
+| Command                      | What it does                                 |
+| ---------------------------- | -------------------------------------------- |
 | `bro flow convoy run <mol>…` | Run each molecule to complete, one at a time |
-| `bro flow convoy run --open` | Every open molecule, in pour order |
-| `--attempts N` | Per-molecule attempt cap (default 4) |
-| `--poll SEC` | Agent-state poll interval (default 15) |
-| `--retry-delay SEC` | Spacing between crash retries (default 60) |
-| `--json` | One JSON verdict line per molecule |
+| `bro flow convoy run --open` | Every open molecule, in pour order           |
+| `--attempts N`               | Per-molecule attempt cap (default 4)         |
+| `--poll SEC`                 | Agent-state poll interval (default 15)       |
+| `--retry-delay SEC`          | Spacing between crash retries (default 60)   |
+| `--json`                     | One JSON verdict line per molecule           |
 
 With several open molecules, pass `--mol <id>` — no-arg resolution errors
 on ambiguity rather than guessing.

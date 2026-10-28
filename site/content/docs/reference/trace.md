@@ -1,13 +1,14 @@
 ---
+
 title: "bro trace"
 description: "OTLP export of the session trace journals — export [--session|--dry-run|--json]"
 ---
 
 **`bro trace`** — OTLP export of the session trace journals — export [--session|--dry-run|--json]
 
-| | |
-| --- | --- |
-| group | `fleet` |
-| skill | `trace` |
-| config | `telemetry` in bro.config |
-
+|            |                               |
+| ---------- | ----------------------------- |
+| group      | `fleet`                       |
+| npm latest | unreleased — lands in `0.3.0` |
+| skill      | `trace`                       |
+| config     | `telemetry` in bro.config     |

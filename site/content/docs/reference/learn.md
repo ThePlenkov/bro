@@ -1,4 +1,5 @@
 ---
+
 title: "bro learn"
 description: "Self-improvement loop — lessons: add|list|show|forget|capture|probe"
 ---
@@ -7,10 +8,10 @@ description: "Self-improvement loop — lessons: add|list|show|forget|capture|pr
 
 `bro learn add|list|show|forget|capture|probe`
 
-| | |
-| --- | --- |
-| group | `self` |
-| skill | `learn` |
-| config | `learn` in bro.config |
-| guide | [commands/learn](/docs/commands/learn) |
-
+|            |                                        |
+| ---------- | -------------------------------------- |
+| group      | `self`                                 |
+| npm latest | `0.2.5`                                |
+| skill      | `learn`                                |
+| config     | `learn` in bro.config                  |
+| guide      | [commands/learn](/docs/commands/learn) |

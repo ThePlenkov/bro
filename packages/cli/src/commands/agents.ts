@@ -53,9 +53,9 @@ import {
   readSync,
   realpathSync,
   statSync,
-} from 'node:fs'
-import { basename } from 'node:path'
-import { randomBytes } from 'node:crypto'
+} from 'node:fs';
+import { basename } from 'node:path';
+import { randomBytes } from 'node:crypto';
 import {
   countSessionReservations,
   gitCommonDir,
@@ -75,11 +75,11 @@ import {
   type AgentState,
   type DiscoveredSession,
   type SpawnSpec,
-} from '@broject/core'
-import type { ExitCode } from '@broject/core'
-import type { AcpSeam, FetchFn } from '@broject/providers'
-import { otelHeader, otelSpan } from '@broject/providers'
-import { beadsDir } from '@broject/convoy'
+} from '@broject/core';
+import type { ExitCode } from '@broject/core';
+import type { AcpSeam, FetchFn } from '@broject/providers';
+import { otelHeader, otelSpan } from '@broject/providers';
+import { beadsDir } from '@broject/convoy';
 import {
   agentPromptPath,
   applyFleetRouter,
@@ -92,17 +92,14 @@ import {
   resolveAgentConnector,
   resolveSpawnProvider,
   type AgentConnectorEnv,
-} from '../agent-connectors.ts'
-import {
-  devinSessionTranscript,
-  devinTranscriptsDir,
-  renderDevinTranscript,
-} from '@broject/devin'
-import { flag, positionals } from './args.ts'
-import { mainWorktree, worktreePathFor } from './work.ts'
+} from '../agent-connectors.ts';
+import { devinSessionTranscript, devinTranscriptsDir, renderDevinTranscript } from '@broject/devin';
+import { flag, positionals } from './args.ts';
+import { mainWorktree, worktreePathFor } from './work.ts';
 
 function usage(exitCode: ExitCode = 2): never {
-  printUsage(`usage:
+  printUsage(
+    `usage:
   bro agents status [<id|step>] [--json] [--connector <name>]
   bro agents up [<step>] [--connector <name>] [--worktree <path>] [--prompt-file <file>] [--beads-dir <dir>]
                 [--provider <name>] [--model <m>] [--profile <name>] [--class <name>] [--auto-approve]
@@ -121,22 +118,24 @@ function usage(exitCode: ExitCode = 2): never {
   bro agents log <id|step> [--follow] [--lines <N>] [--connector <name>]
   bro agents prune [--connector <name>] [--older-than <N>d] [--json]
                 reap terminal registry entries (exited/lost/stopped —
-                'blocked' is respawn-able debt, never litter)`, exitCode)
+                'blocked' is respawn-able debt, never litter)`,
+    exitCode
+  );
 }
 
 // a function declaration, not a const arrow — tsc only treats calls to
 // never-returning function declarations as terminating the control flow,
 // so the die() call sites below narrow correctly
 function die(msg: string): never {
-  console.error(`error: ${msg}`)
-  process.exit(1)
+  console.error(`error: ${msg}`);
+  process.exit(1);
 }
 
 /** One backend's plane — the connector plus what its list() saw. */
 export interface AgentBackendPlane {
-  conn: AgentConnector
-  agents: AgentInfo[]
-  degraded?: string
+  conn: AgentConnector;
+  agents: AgentInfo[];
+  degraded?: string;
 }
 
 /** All backends' agent planes — a throwing factory or list() is
@@ -148,7 +147,7 @@ export async function collectAgentBackends(
   env: AgentConnectorEnv,
   connectorName?: string
 ): Promise<{ backends: AgentBackendPlane[] }> {
-  const backends: AgentBackendPlane[] = []
+  const backends: AgentBackendPlane[] = [];
   for (const conn of eachAgentConnector({ dir }, env, (name, err) => {
     // --connector scopes failures too — an unrelated backend's throwing
     // factory must not leak a degraded stub into the selected view
@@ -157,27 +156,27 @@ export async function collectAgentBackends(
         conn: { name, capabilities: () => ({ supervisor: 'none' as const }) } as AgentConnector,
         agents: [],
         degraded: `factory: ${err instanceof Error ? err.message : String(err)}`,
-      })
+      });
     }
   })) {
     if (connectorName !== undefined && conn.name !== connectorName) {
-      continue
+      continue;
     }
     try {
-      const res = await conn.list()
-      backends.push({ conn, agents: res.agents, degraded: res.degraded })
+      const res = await conn.list();
+      backends.push({ conn, agents: res.agents, degraded: res.degraded });
     } catch (err) {
       backends.push({
         conn,
         agents: [],
         degraded: err instanceof Error ? err.message : String(err),
-      })
+      });
     }
   }
-  if (connectorName !== undefined && !backends.some((b) => b.conn.name === connectorName)) {
-    throw new Error(`agent connector "${connectorName}" is not registered`)
+  if (connectorName !== undefined && !backends.some(b => b.conn.name === connectorName)) {
+    throw new Error(`agent connector "${connectorName}" is not registered`);
   }
-  return { backends }
+  return { backends };
 }
 
 /** Target → agent + its backend, matched on agentId OR molStep.
@@ -188,15 +187,15 @@ export function findInBackends(
   target: string
 ): { hit?: { conn: AgentConnector; agent: AgentInfo }; degraded: string[] } {
   const degraded = backends
-    .filter((b) => b.degraded !== undefined)
-    .map((b) => `${b.conn.name}: ${b.degraded}`)
+    .filter(b => b.degraded !== undefined)
+    .map(b => `${b.conn.name}: ${b.degraded}`);
   for (const { conn, agents } of backends) {
-    const hit = agents.find((a) => a.id === target || a.molStep === target)
+    const hit = agents.find(a => a.id === target || a.molStep === target);
     if (hit) {
-      return { hit: { conn, agent: hit }, degraded }
+      return { hit: { conn, agent: hit }, degraded };
     }
   }
-  return { degraded }
+  return { degraded };
 }
 
 export async function findAgent(
@@ -205,8 +204,8 @@ export async function findAgent(
   target: string,
   connectorName?: string
 ): Promise<{ hit?: { conn: AgentConnector; agent: AgentInfo }; degraded: string[] }> {
-  const { backends } = await collectAgentBackends(dir, env, connectorName)
-  return findInBackends(backends, target)
+  const { backends } = await collectAgentBackends(dir, env, connectorName);
+  return findInBackends(backends, target);
 }
 
 // --- status -------------------------------------------------------------------
@@ -218,15 +217,15 @@ export async function findAgent(
  *  unverifiable entry keeps its slot, so a degraded backend can't make
  *  the line under-report what a spawn would count. */
 export interface FleetOccupancy {
-  occupied: number
-  maxConcurrent: number
+  occupied: number;
+  maxConcurrent: number;
 }
 
 export function occupancyOf(dir: string, env: AgentConnectorEnv): FleetOccupancy {
   return {
     occupied: fleetOccupancyFor(dir, env),
     maxConcurrent: fleetCapOf(env),
-  }
+  };
 }
 
 /** Session-kind quotas the status surfaces — each registered plane
@@ -236,14 +235,14 @@ export function occupancyOf(dir: string, env: AgentConnectorEnv): FleetOccupancy
  *  scans don't run. A present-but-broken cap shows `invalid`; an
  *  unverifiable count shows `live: -1` rather than pretending zero. */
 export interface SessionQuotaView {
-  kind: string
+  kind: string;
   /** 'sessions' is the maxSessions lane, 'workers' the maxWorkers one. */
-  lane: 'sessions' | 'workers'
-  live: number
-  max: number
-  invalid?: boolean
+  lane: 'sessions' | 'workers';
+  live: number;
+  max: number;
+  invalid?: boolean;
   /** The malformed knob — the invalid row names it. */
-  invalidKey?: string
+  invalidKey?: string;
 }
 
 /** One armed lane's status row — an unverifiable count reads -1
@@ -254,51 +253,65 @@ function laneView(
   max: number,
   count: () => number
 ): SessionQuotaView {
-  let live = -1
+  let live = -1;
   try {
-    live = count()
+    live = count();
   } catch {
     // unverifiable — a scan failure must not take down the status view
   }
-  return { kind, lane, live, max }
+  return { kind, lane, live, max };
 }
 
 export function sessionQuotaViewsOf(env: AgentConnectorEnv): SessionQuotaView[] {
-  const out: SessionQuotaView[] = []
+  const out: SessionQuotaView[] = [];
   for (const plane of sessionPlanes()) {
-    const q = sessionQuotaConfig(env.agents, plane.kind)
+    const q = sessionQuotaConfig(env.agents, plane.kind);
     if (q === undefined) {
-      continue
+      continue;
     }
     if (q.invalid === true) {
-      out.push({ kind: plane.kind, lane: 'sessions', live: -1, max: 0, invalid: true, invalidKey: q.invalidKey })
-      continue
+      out.push({
+        kind: plane.kind,
+        lane: 'sessions',
+        live: -1,
+        max: 0,
+        invalid: true,
+        invalidKey: q.invalidKey,
+      });
+      continue;
     }
-    const bag = env.agents[plane.kind] ?? {}
+    const bag = env.agents[plane.kind] ?? {};
     const reservations = () =>
-      countSessionReservations(sessionSlotsDir(plane.kind, q.reservationsDir))
+      countSessionReservations(sessionSlotsDir(plane.kind, q.reservationsDir));
     if (q.maxSessions > 0) {
       out.push(
         laneView(plane.kind, 'sessions', q.maxSessions, () => plane.countLive(bag) + reservations())
-      )
+      );
     }
-    const countWorkers = plane.countWorkers
+    const countWorkers = plane.countWorkers;
     if (q.maxWorkers !== undefined && q.maxWorkers > 0) {
       out.push(
         countWorkers === undefined
           ? // an armed worker cap the plane cannot count is a config
             // bug — surface it like a malformed value
-            { kind: plane.kind, lane: 'workers', live: -1, max: 0, invalid: true, invalidKey: 'maxWorkers' }
+            {
+              kind: plane.kind,
+              lane: 'workers',
+              live: -1,
+              max: 0,
+              invalid: true,
+              invalidKey: 'maxWorkers',
+            }
           : laneView(plane.kind, 'workers', q.maxWorkers, () => countWorkers(bag) + reservations())
-      )
+      );
     }
   }
-  return out
+  return out;
 }
 
 /** A session-plane discovery row tagged with the plane that saw it. */
 export interface DiscoveredAgentSession extends DiscoveredSession {
-  kind: string
+  kind: string;
 }
 
 /** Sessions the planes see live that never passed through the agents
@@ -308,31 +321,31 @@ export interface DiscoveredAgentSession extends DiscoveredSession {
  *  scan throws degrades to a note — one broken state dir must not take
  *  the whole board's agent list down with it. */
 export function discoverSessions(env: AgentConnectorEnv): {
-  sessions: DiscoveredAgentSession[]
-  degraded: string[]
+  sessions: DiscoveredAgentSession[];
+  degraded: string[];
 } {
-  const sessions: DiscoveredAgentSession[] = []
-  const degraded: string[] = []
+  const sessions: DiscoveredAgentSession[] = [];
+  const degraded: string[] = [];
   for (const plane of sessionPlanes()) {
     if (plane.listLive === undefined) {
-      continue
+      continue;
     }
     try {
       for (const s of plane.listLive(env.agents[plane.kind] ?? {})) {
-        sessions.push({ kind: plane.kind, ...s })
+        sessions.push({ kind: plane.kind, ...s });
       }
     } catch (err) {
-      degraded.push(`${plane.kind}: ${err instanceof Error ? err.message : String(err)}`)
+      degraded.push(`${plane.kind}: ${err instanceof Error ? err.message : String(err)}`);
     }
   }
-  return { sessions, degraded }
+  return { sessions, degraded };
 }
 
 /** `fleet: 2/3 slots occupied` — `uncapped` instead of the ceiling when
  *  the config disables it. */
 export function occupancyLine(o: FleetOccupancy): string {
-  const cap = o.maxConcurrent > 0 ? `/${o.maxConcurrent}` : ''
-  return `fleet: ${o.occupied}${cap} agent slots occupied${o.maxConcurrent > 0 ? '' : ' (uncapped)'}`
+  const cap = o.maxConcurrent > 0 ? `/${o.maxConcurrent}` : '';
+  return `fleet: ${o.occupied}${cap} agent slots occupied${o.maxConcurrent > 0 ? '' : ' (uncapped)'}`;
 }
 
 function printStatusTable(
@@ -340,22 +353,24 @@ function printStatusTable(
   occupancy: FleetOccupancy,
   sessions: SessionQuotaView[]
 ): void {
-  console.log(occupancyLine(occupancy))
+  console.log(occupancyLine(occupancy));
   for (const s of sessions) {
-    const label = s.lane === 'workers' ? 'workers' : 'sessions'
+    const label = s.lane === 'workers' ? 'workers' : 'sessions';
     if (s.invalid === true) {
-      console.log(`${s.kind} ${label}: invalid agents.${s.kind}.${s.invalidKey ?? 'maxSessions'} — must be a positive integer`)
+      console.log(
+        `${s.kind} ${label}: invalid agents.${s.kind}.${s.invalidKey ?? 'maxSessions'} — must be a positive integer`
+      );
     } else {
-      console.log(`${s.kind} ${label}: ${s.live >= 0 ? `${s.live}/${s.max}` : `?/${s.max}`} live`)
+      console.log(`${s.kind} ${label}: ${s.live >= 0 ? `${s.live}/${s.max}` : `?/${s.max}`} live`);
     }
   }
-  const cols = ['backend', 'supervisor', 'agent', 'step', 'state', 'cause', 'pid', 'worktree']
+  const cols = ['backend', 'supervisor', 'agent', 'step', 'state', 'cause', 'pid', 'worktree'];
   const rows = backends.flatMap(({ conn, agents }) => {
-    const sup = conn.capabilities().supervisor
+    const sup = conn.capabilities().supervisor;
     if (agents.length === 0) {
-      return [[conn.name, sup, '—', '—', '—', '—', '—', '—']]
+      return [[conn.name, sup, '—', '—', '—', '—', '—', '—']];
     }
-    return agents.map((a) => [
+    return agents.map(a => [
       conn.name,
       sup,
       a.id,
@@ -364,17 +379,21 @@ function printStatusTable(
       a.cause === undefined ? '—' : a.cause,
       a.pid === undefined ? '—' : String(a.pid),
       a.worktree === undefined ? '—' : basename(a.worktree),
-    ])
-  })
-  const widths = cols.map((h, i) => Math.max(h.length, ...rows.map((r) => r[i]!.length)))
-  const line = (vals: string[]) => vals.map((v, i) => v.padEnd(widths[i]!)).join('  ').trimEnd()
-  console.log(line(cols))
+    ]);
+  });
+  const widths = cols.map((h, i) => Math.max(h.length, ...rows.map(r => r[i]!.length)));
+  const line = (vals: string[]) =>
+    vals
+      .map((v, i) => v.padEnd(widths[i]!))
+      .join('  ')
+      .trimEnd();
+  console.log(line(cols));
   for (const r of rows) {
-    console.log(line(r))
+    console.log(line(r));
   }
   for (const { conn, degraded } of backends) {
     if (degraded) {
-      console.error(`warning: backend degraded — ${conn.name}: ${degraded}`)
+      console.error(`warning: backend degraded — ${conn.name}: ${degraded}`);
     }
   }
 }
@@ -383,58 +402,54 @@ function printStatusTable(
  *  checked backends. Degraded backends warn on the targeted read too — a
  *  found agent doesn't mean the fleet view is complete (stderr, so
  *  --json stays parseable). */
-function statusDetail(
-  backends: AgentBackendPlane[],
-  target: string,
-  json: boolean
-): void {
-  const { hit, degraded } = findInBackends(backends, target)
+function statusDetail(backends: AgentBackendPlane[], target: string, json: boolean): void {
+  const { hit, degraded } = findInBackends(backends, target);
   if (!hit) {
-    const blind = degraded.length > 0 ? ` (degraded: ${degraded.join('; ')})` : ''
+    const blind = degraded.length > 0 ? ` (degraded: ${degraded.join('; ')})` : '';
     die(
-      `no agent "${target}"${blind} — checked ${backends.map((b) => b.conn.name).join(', ') || 'no backends'}`
-    )
+      `no agent "${target}"${blind} — checked ${backends.map(b => b.conn.name).join(', ') || 'no backends'}`
+    );
   }
   for (const d of degraded) {
-    console.error(`warning: backend degraded — ${d}`)
+    console.error(`warning: backend degraded — ${d}`);
   }
-  const a = hit.agent
+  const a = hit.agent;
   if (json) {
-    console.log(JSON.stringify(a, null, 2))
-    return
+    console.log(JSON.stringify(a, null, 2));
+    return;
   }
-  console.log(`agent     ${a.id}`)
-  console.log(`backend   ${a.backend} (supervisor: ${hit.conn.capabilities().supervisor})`)
-  console.log(`step      ${a.molStep}`)
-  console.log(`state     ${a.state}`)
-  if (a.provider !== undefined) console.log(`provider  ${a.provider}`)
-  if (a.model !== undefined) console.log(`model     ${a.model}`)
-  if (a.class !== undefined) console.log(`class     ${a.class}`)
-  if (a.delegatedBy !== undefined) console.log(`delegatedBy ${a.delegatedBy}`)
-  if (a.cause !== undefined) console.log(`cause     ${a.cause}`)
-  if (a.resetAt !== undefined) console.log(`resetAt   ${a.resetAt}`)
-  if (a.pid !== undefined) console.log(`pid       ${a.pid}`)
-  if (a.worktree !== undefined) console.log(`worktree  ${a.worktree}`)
-  if (a.log !== undefined) console.log(`log       ${a.log}`)
-  if (a.stderrLog !== undefined) console.log(`stderr    ${a.stderrLog}`)
+  console.log(`agent     ${a.id}`);
+  console.log(`backend   ${a.backend} (supervisor: ${hit.conn.capabilities().supervisor})`);
+  console.log(`step      ${a.molStep}`);
+  console.log(`state     ${a.state}`);
+  if (a.provider !== undefined) console.log(`provider  ${a.provider}`);
+  if (a.model !== undefined) console.log(`model     ${a.model}`);
+  if (a.class !== undefined) console.log(`class     ${a.class}`);
+  if (a.delegatedBy !== undefined) console.log(`delegatedBy ${a.delegatedBy}`);
+  if (a.cause !== undefined) console.log(`cause     ${a.cause}`);
+  if (a.resetAt !== undefined) console.log(`resetAt   ${a.resetAt}`);
+  if (a.pid !== undefined) console.log(`pid       ${a.pid}`);
+  if (a.worktree !== undefined) console.log(`worktree  ${a.worktree}`);
+  if (a.log !== undefined) console.log(`log       ${a.log}`);
+  if (a.stderrLog !== undefined) console.log(`stderr    ${a.stderrLog}`);
 }
 
 async function cmdStatus(dir: string, env: AgentConnectorEnv, argv: string[]): Promise<void> {
-  const pos = positionals(argv, new Set(['--connector']))
+  const pos = positionals(argv, new Set(['--connector']));
   if (pos.length > 1) {
-    usage()
+    usage();
   }
-  const target = pos[0]
-  const json = argv.includes('--json')
-  const connectorName = flag(argv, '--connector')
+  const target = pos[0];
+  const json = argv.includes('--json');
+  const connectorName = flag(argv, '--connector');
   const { backends } = await collectAgentBackends(dir, env, connectorName).catch((err: unknown) =>
     die(err instanceof Error ? err.message : String(err))
-  )
+  );
 
   if (target !== undefined) {
     // the fleet read already collected — search it, don't list() twice
-    statusDetail(backends, target, json)
-    return
+    statusDetail(backends, target, json);
+    return;
   }
 
   if (json) {
@@ -453,10 +468,10 @@ async function cmdStatus(dir: string, env: AgentConnectorEnv, argv: string[]): P
         null,
         2
       )
-    )
-    return
+    );
+    return;
   }
-  printStatusTable(backends, occupancyOf(dir, env), sessionQuotaViewsOf(env))
+  printStatusTable(backends, occupancyOf(dir, env), sessionQuotaViewsOf(env));
 }
 
 // --- up / down ------------------------------------------------------------------
@@ -465,17 +480,19 @@ async function cmdStatus(dir: string, env: AgentConnectorEnv, argv: string[]): P
  *  self-sufficient — the verb is a reported no-op, not an error. A
  *  supervised backend without the method is a real gap: name it. */
 async function supervisorVerb(conn: AgentConnector, verb: 'up' | 'down'): Promise<void> {
-  const sup = conn.capabilities().supervisor
+  const sup = conn.capabilities().supervisor;
   if (sup === 'none') {
-    console.log(`${conn.name}: supervisor 'none' — detached agents are self-sufficient, nothing to ${verb}`)
-    return
+    console.log(
+      `${conn.name}: supervisor 'none' — detached agents are self-sufficient, nothing to ${verb}`
+    );
+    return;
   }
-  const fn = verb === 'up' ? conn.up : conn.down
+  const fn = verb === 'up' ? conn.up : conn.down;
   if (fn === undefined) {
-    die(`${conn.name} declares supervisor '${sup}' but implements no ${verb}() — connector gap`)
+    die(`${conn.name} declares supervisor '${sup}' but implements no ${verb}() — connector gap`);
   }
-  await fn!.call(conn)
-  console.log(`${conn.name}: supervisor ${verb}`)
+  await fn!.call(conn);
+  console.log(`${conn.name}: supervisor ${verb}`);
 }
 
 /** The step's worktree: explicit --worktree → the registry's recorded
@@ -490,25 +507,25 @@ function resolveWorktree(
   backend: string
 ): { path: string; enter?: NonNullable<SpawnSpec['enter']> } {
   if (explicit !== undefined) {
-    return { path: explicit }
+    return { path: explicit };
   }
   // recorded state is the resolving backend's — `--connector x` must not
   // inherit backend-y's worktree/prompt for the same step
-  const entry = readAgentRegistry(dir)[molStep]
-  const recorded = entry?.backend === backend ? entry.worktree : undefined
+  const entry = readAgentRegistry(dir)[molStep];
+  const recorded = entry?.backend === backend ? entry.worktree : undefined;
   if (typeof recorded === 'string' && existsSync(recorded)) {
-    return { path: recorded }
+    return { path: recorded };
   }
-  const main = mainWorktree()
-  const conventional = worktreePathFor(main.path, molStep)
+  const main = mainWorktree();
+  const conventional = worktreePathFor(main.path, molStep);
   if (existsSync(conventional)) {
-    return { path: conventional }
+    return { path: conventional };
   }
   // a remote-only backend needs no local checkout — the copilot
   // connector reads repoRoot only for the origin remote it dispatches
   // against, and the caller's repo IS that remote's checkout
   if (backend === 'copilot') {
-    return { path: dir }
+    return { path: dir };
   }
   return {
     path: conventional,
@@ -519,7 +536,7 @@ function resolveWorktree(
       mainBranch: main.branch,
       mainHead: main.head,
     },
-  }
+  };
 }
 
 /** The spawn prompt: --prompt-file → the previous run's stored prompt
@@ -536,38 +553,38 @@ function resolvePrompt(
 ): string {
   if (promptFile !== undefined) {
     if (!existsSync(promptFile)) {
-      throw new SpawnInputError(`prompt file ${promptFile} does not exist`)
+      throw new SpawnInputError(`prompt file ${promptFile} does not exist`);
     }
-    return readFileSync(promptFile, 'utf8')
+    return readFileSync(promptFile, 'utf8');
   }
-  const entry = readAgentRegistry(dir)[molStep]
-  const agentId = entry?.backend === backend ? entry.agentId : undefined
-  const stored = agentId === undefined ? null : agentPromptPath(dir, agentId)
+  const entry = readAgentRegistry(dir)[molStep];
+  const agentId = entry?.backend === backend ? entry.agentId : undefined;
+  const stored = agentId === undefined ? null : agentPromptPath(dir, agentId);
   if (stored !== null && existsSync(stored)) {
-    return readFileSync(stored, 'utf8')
+    return readFileSync(stored, 'utf8');
   }
-  let row: { title?: string; description?: string } | undefined
+  let row: { title?: string; description?: string } | undefined;
   try {
-    row = taskStoreAt(beads).get(molStep)
+    row = taskStoreAt(beads).get(molStep);
   } catch (err) {
     throw new SpawnInputError(
       `cannot render a prompt — bead ${molStep} unreadable ` +
         `(${err instanceof Error ? err.message : String(err)}); pass --prompt-file`
-    )
+    );
   }
-  const prompt = `# ${row?.title ?? molStep}\n\n${row?.description ?? ''}`.trim()
+  const prompt = `# ${row?.title ?? molStep}\n\n${row?.description ?? ''}`.trim();
   if (row === undefined || prompt === `# ${molStep}`) {
     throw new SpawnInputError(
       `bead ${molStep} has no title/description to prompt with — pass --prompt-file`
-    )
+    );
   }
-  return prompt
+  return prompt;
 }
 
 /** Bad spawn input (missing worktree/prompt file, exclusive fields) —
  *  400 territory, distinct from SpawnError's conflict/refusal (409). */
 export class SpawnInputError extends Error {
-  override name = 'SpawnInputError'
+  override name = 'SpawnInputError';
 }
 
 /** A spawn request — `bro agents up <step>` flags and `bro serve`'s
@@ -578,41 +595,41 @@ export class SpawnInputError extends Error {
  *  provider/model beats the preset's) → agents.<backend>.provider →
  *  the legacy command template. */
 export interface StepSpawnRequest {
-  molStep: string
-  connector?: string
-  worktree?: string
-  promptFile?: string
-  prompt?: string
-  beadsDir?: string
+  molStep: string;
+  connector?: string;
+  worktree?: string;
+  promptFile?: string;
+  prompt?: string;
+  beadsDir?: string;
   /** `run --for` — the molStep is promised a real bead: the claim guards
    *  never take the `adhoc-*` phantom shortcut on it, so a missing or
    *  mistyped id fails instead of spawning unclaimed (spec bro-7dila). */
-  claimRequired?: boolean
+  claimRequired?: boolean;
   /** Extra env for the spawned process — identity pins (BEADS_DIR,
    *  BRO_BEAD_ID, BRO_AGENT_ID, BRO_AGENT_PROVIDER/MODEL) still win,
    *  so a caller can't redirect the claim store, re-badge the worker,
    *  or forge which provider ran it. */
-  env?: Record<string, string>
+  env?: Record<string, string>;
   /** A `providers.<name>` entry — the spawn must honor it (spawn-
    *  surface required) or refuse. */
-  provider?: string
+  provider?: string;
   /** Model override — beats the profile's and the entry's pin. */
-  model?: string
+  model?: string;
   /** A `fleet.profiles.<name>` preset — expands provider/model/backend
    *  piecewise; `backend` redirects connector resolution only when no
    *  explicit connector was named. */
-  profile?: string
+  profile?: string;
   /** acp permission policy override — the driver's
    *  session/request_permission allow answer. */
-  autoApprove?: boolean
+  autoApprove?: boolean;
   /** The routing lane — wins over the step bead's `class:<name>` label
    *  (spec bro-1x7p). Read only when `fleet.routing` is declared; a
    *  resolved class with no routing entry is a config error. */
-  class?: string
+  class?: string;
   /** The delegating agent's agentId — `bro fleet delegate --detach`
    *  provenance (spec bro-z8tng). Stamped into the registry and pinned
    *  into the worker's env as BRO_DELEGATED_BY. */
-  delegatedBy?: string
+  delegatedBy?: string;
 }
 
 /** The spawn behind `up <step>` and POST /api/v1/agents — resolve the
@@ -630,32 +647,32 @@ export function spawnStepAgent(
   opts: { fetch?: FetchFn; acp?: AcpSeam } = {}
 ): Promise<AgentInfo> {
   if (req.prompt !== undefined && req.promptFile !== undefined) {
-    throw new SpawnInputError('prompt and promptFile are mutually exclusive')
+    throw new SpawnInputError('prompt and promptFile are mutually exclusive');
   }
   // '' would slip past `??` below and spawn an agent with no instructions
   if (req.prompt?.trim() === '') {
-    throw new SpawnInputError('prompt must not be empty')
+    throw new SpawnInputError('prompt must not be empty');
   }
   // --profile expands piecewise BEFORE connector resolution — the
   // preset's `backend` picks the connector only when --connector was
   // not named, and its provider/model lose to explicit fields
-  const profile = req.profile === undefined ? undefined : fleetProfileOf(env, req.profile)
+  const profile = req.profile === undefined ? undefined : fleetProfileOf(env, req.profile);
   const conn = resolveAgentConnector(
     { dir },
     { connector: req.connector ?? profile?.backend },
     env
-  )
-  const beads = req.beadsDir ?? beadsDir()
-  const resolved = resolveWorktree(dir, req.molStep, req.worktree, conn.name)
-  const repoRoot = resolved.path
+  );
+  const beads = req.beadsDir ?? beadsDir();
+  const resolved = resolveWorktree(dir, req.molStep, req.worktree, conn.name);
+  const repoRoot = resolved.path;
   if (resolved.enter === undefined && !existsSync(repoRoot)) {
-    throw new SpawnInputError(`worktree ${repoRoot} does not exist`)
+    throw new SpawnInputError(`worktree ${repoRoot} does not exist`);
   }
-  const prompt = req.prompt ?? resolvePrompt(dir, beads, req.molStep, req.promptFile, conn.name)
+  const prompt = req.prompt ?? resolvePrompt(dir, beads, req.molStep, req.promptFile, conn.name);
   // a whitespace-only FILE resolves to nothing as surely as a
   // whitespace-only flag — check the resolved text, not just req.prompt
   if (prompt.trim() === '') {
-    throw new SpawnInputError('prompt must not be empty')
+    throw new SpawnInputError('prompt must not be empty');
   }
   // class resolution (spec bro-1x7p): runs whenever fleet.routing is
   // declared — the lane pins provenance regardless of who named the
@@ -672,10 +689,17 @@ export function spawnStepAgent(
     env.fleet.routing !== undefined &&
     Object.keys(env.fleet.routing).length > 0
       ? stepClassInfo(beads, req.molStep)
-      : undefined
-  const routed = routeStepClass(env.fleet, env.providers ?? {}, beads, req.molStep, req.class, info)
-  return applyFleetRouter(dir, env, req.molStep, info, routed, opts).then((route) => {
-    const provider = req.provider ?? profile?.provider ?? route?.provider
+      : undefined;
+  const routed = routeStepClass(
+    env.fleet,
+    env.providers ?? {},
+    beads,
+    req.molStep,
+    req.class,
+    info
+  );
+  return applyFleetRouter(dir, env, req.molStep, info, routed, opts).then(route => {
+    const provider = req.provider ?? profile?.provider ?? route?.provider;
     return resolveSpawnProvider(
       env,
       conn.name,
@@ -690,7 +714,7 @@ export function spawnStepAgent(
         autoApprove: req.autoApprove ?? profile?.autoApprove,
       },
       req.provider !== undefined ? 'flag' : profile === undefined ? 'backend' : 'profile'
-    ).then((pick) => {
+    ).then(pick => {
       // a spawned worker is a child trace: the span ctx crosses the
       // process boundary as TRACEPARENT (and the endpoint itself so the
       // worker emits without sourcing provider.env) — the worker's own
@@ -700,9 +724,9 @@ export function spawnStepAgent(
         'agent.backend': conn.name,
         'agent.provider': pick.provider ?? '',
         'agent.model': pick.model ?? '',
-      })
-      const tp = otelHeader(span.ctx)
-      const ep = process.env.OTEL_EXPORTER_OTLP_ENDPOINT
+      });
+      const tp = otelHeader(span.ctx);
+      const ep = process.env.OTEL_EXPORTER_OTLP_ENDPOINT;
       return conn
         .spawn({
           molStep: req.molStep,
@@ -722,30 +746,30 @@ export function spawnStepAgent(
           worker: pick.worker,
           enter: resolved.enter,
         })
-        .then((r) => {
-          span.end({ 'agent.id': String(r.id ?? ''), 'agent.pid': r.pid ?? 0 })
-          return r
-        })
-    })
-  })
+        .then(r => {
+          span.end({ 'agent.id': String(r.id ?? ''), 'agent.pid': r.pid ?? 0 });
+          return r;
+        });
+    });
+  });
 }
 
 /** The stop behind `down <target>` and DELETE /api/v1/agents/<ref>. */
 export interface StopOutcome {
-  found: boolean
-  degraded: string[]
+  found: boolean;
+  degraded: string[];
   /** the state the verdict was probed on — the post-stop status() read
    *  when one ran, else the pre-stop snapshot (either can differ from
    *  the list() snapshot) */
-  agent?: AgentInfo
-  backend?: string
+  agent?: AgentInfo;
+  backend?: string;
   /** true when the backend CONFIRMED the worker is gone after stop() —
    *  probe verdict (bro-l8c4f.3): true on a recorded-terminal agent
    *  that still probes terminal, and on a live stop only when the
    *  post-stop status() read says so.
    *  stop() itself is the request landing, not proof of death: a
    *  TERM-resistant worker survives the bounded kill-wait */
-  stopped: boolean
+  stopped: boolean;
   /** post-stop truth from one status() re-probe (absent only on a
    *  `blocked` read — the clear IS the result, and on a recorded-
    *  terminal read that still probes terminal):
@@ -755,16 +779,16 @@ export interface StopOutcome {
    *  snapshot that went stale;
    *  'unverified' the probe cannot confirm death either way (no death
    *  record, a missing entry, or the backend failed to answer) */
-  verdict?: 'stopped' | 'still-running' | 'unverified'
+  verdict?: 'stopped' | 'still-running' | 'unverified';
   /** the agent already read terminal when we looked — stop() still ran
    *  (idempotent), the flag just says there was nothing live to kill */
-  terminal?: boolean
+  terminal?: boolean;
   /** the agent read `blocked` — stop() still ran and lifted the block,
    *  so callers confirm the manual clear instead of reporting
    *  "nothing to stop" */
-  cleared?: boolean
+  cleared?: boolean;
   /** pid changed between list() and status() — a respawn raced us */
-  respawned?: { from?: number; to?: number }
+  respawned?: { from?: number; to?: number };
 }
 
 /** One post-stop status() re-probe — the verdict ladder (bro-l8c4f.3):
@@ -776,21 +800,21 @@ async function probeStopVerdict(
   conn: AgentConnector,
   id: string
 ): Promise<{ verdict: NonNullable<StopOutcome['verdict']>; after?: AgentInfo }> {
-  let after: AgentInfo
+  let after: AgentInfo;
   try {
-    after = await conn.status(id)
+    after = await conn.status(id);
   } catch {
     // a backend that cannot answer must not be read as a kill
     // confirmation — and a worker can outlive a pruned entry
-    return { verdict: 'unverified' }
+    return { verdict: 'unverified' };
   }
   if (after.state === 'exited' || after.state === 'stopped') {
-    return { verdict: 'stopped', after }
+    return { verdict: 'stopped', after };
   }
   if (after.state === 'running' || after.state === 'spawned') {
-    return { verdict: 'still-running', after }
+    return { verdict: 'still-running', after };
   }
-  return { verdict: 'unverified', after }
+  return { verdict: 'unverified', after };
 }
 
 /** Stop one agent by agentId or molStep. Idempotent by contract — a
@@ -805,16 +829,16 @@ export async function stopAgent(
   target: string,
   connectorName?: string
 ): Promise<StopOutcome> {
-  const { hit, degraded } = await findAgent(dir, env, target, connectorName)
+  const { hit, degraded } = await findAgent(dir, env, target, connectorName);
   if (!hit) {
-    return { found: false, degraded, stopped: false }
+    return { found: false, degraded, stopped: false };
   }
   // bind the stop to what the backend reports NOW, not the list()
   // snapshot — a respawn between the two reuses the agentId with a new
   // pid, and a dead agent is already the desired end state
-  let current = hit.agent
+  let current = hit.agent;
   try {
-    current = await hit.conn.status(hit.agent.id)
+    current = await hit.conn.status(hit.agent.id);
   } catch {
     // the read failed — stop() still binds to the observed id
   }
@@ -826,13 +850,11 @@ export async function stopAgent(
   // terminal snapshot can go stale between the read and stop() (a
   // respawn, or a descendant the pre-read hadn't surfaced yet).
   const terminal =
-    current.state === 'exited' ||
-    current.state === 'stopped' ||
-    current.state === 'blocked'
+    current.state === 'exited' || current.state === 'stopped' || current.state === 'blocked';
   const respawned =
-    current.pid !== hit.agent.pid ? { from: hit.agent.pid, to: current.pid } : undefined
+    current.pid !== hit.agent.pid ? { from: hit.agent.pid, to: current.pid } : undefined;
   try {
-    await hit.conn.stop(hit.agent.id)
+    await hit.conn.stop(hit.agent.id);
   } catch {
     // a connector whose own liveness probe fails must not crash the
     // verdict path — the post-stop status read below carries the
@@ -844,17 +866,17 @@ export async function stopAgent(
   // so `stopped` is re-probed from the backend before anyone reports
   // it (bro-l8c4f.3). `blocked` alone skips the probe — the clear IS
   // the result.
-  let verdict: StopOutcome['verdict']
-  let after: typeof current | undefined
+  let verdict: StopOutcome['verdict'];
+  let after: typeof current | undefined;
   if (current.state !== 'blocked') {
-    const probe = await probeStopVerdict(hit.conn, hit.agent.id)
-    after = probe.after
-    verdict = probe.verdict
+    const probe = await probeStopVerdict(hit.conn, hit.agent.id);
+    after = probe.after;
+    verdict = probe.verdict;
     // an already-terminal snapshot that still probes terminal keeps its
     // "nothing was live" contract — the probe exists to catch the
     // snapshot going stale (running/spawned above → still-running)
     if (terminal && verdict === 'stopped') {
-      verdict = undefined
+      verdict = undefined;
     }
   }
   return {
@@ -869,7 +891,7 @@ export async function stopAgent(
     terminal,
     cleared: current.state === 'blocked' ? true : undefined,
     respawned,
-  }
+  };
 }
 
 async function cmdUp(dir: string, env: AgentConnectorEnv, argv: string[]): Promise<void> {
@@ -885,25 +907,32 @@ async function cmdUp(dir: string, env: AgentConnectorEnv, argv: string[]): Promi
       '--profile',
       '--class',
     ])
-  )
-  const connectorName = flag(argv, '--connector')
+  );
+  const connectorName = flag(argv, '--connector');
   if (pos.length > 1) {
-    usage()
+    usage();
   }
-  const molStep = pos[0]
+  const molStep = pos[0];
   if (molStep === undefined) {
     // spawn-only flags have no step to land on — 'up --provider x'
     // riding the supervisor branch would read as a spawn that happened
-    const stray = ['--worktree', '--prompt-file', '--beads-dir', '--provider', '--model', '--profile', '--class', '--auto-approve'].find(
-      (f) => argv.includes(f) || argv.some((a) => a.startsWith(`${f}=`))
-    )
+    const stray = [
+      '--worktree',
+      '--prompt-file',
+      '--beads-dir',
+      '--provider',
+      '--model',
+      '--profile',
+      '--class',
+      '--auto-approve',
+    ].find(f => argv.includes(f) || argv.some(a => a.startsWith(`${f}=`)));
     if (stray !== undefined) {
-      die(`${stray} requires a molStep`)
+      die(`${stray} requires a molStep`);
     }
-    await supervisorVerb(resolveAgentConnector({ dir }, { connector: connectorName }, env), 'up')
-    return
+    await supervisorVerb(resolveAgentConnector({ dir }, { connector: connectorName }, env), 'up');
+    return;
   }
-  let info: AgentInfo
+  let info: AgentInfo;
   try {
     info = await spawnStepAgent(dir, env, {
       molStep,
@@ -916,26 +945,28 @@ async function cmdUp(dir: string, env: AgentConnectorEnv, argv: string[]): Promi
       profile: flag(argv, '--profile'),
       class: flag(argv, '--class'),
       autoApprove: argv.includes('--auto-approve') ? true : undefined,
-    })
+    });
   } catch (err) {
-    die(err instanceof Error ? err.message : String(err))
+    die(err instanceof Error ? err.message : String(err));
   }
-  reportSpawn(info, molStep)
+  reportSpawn(info, molStep);
 }
 
 /** The spawn report — `up <step>` and `run` share it: id/state/backend
  *  first, then the provenance and handles the caller needs next. */
 function reportSpawn(info: AgentInfo, molStep: string): void {
-  const pid = info.pid === undefined ? '' : ` pid ${info.pid}`
-  console.log(`agent ${info.id} ${info.state} for ${molStep} (${info.backend}${pid})`)
+  const pid = info.pid === undefined ? '' : ` pid ${info.pid}`;
+  console.log(`agent ${info.id} ${info.state} for ${molStep} (${info.backend}${pid})`);
   if (info.provider !== undefined) {
-    console.log(`  provider: ${info.provider}${info.model === undefined ? '' : ` · model ${info.model}`}`)
+    console.log(
+      `  provider: ${info.provider}${info.model === undefined ? '' : ` · model ${info.model}`}`
+    );
   }
   if (info.log !== undefined) {
-    console.log(`  log: ${info.log}`)
+    console.log(`  log: ${info.log}`);
   }
   if (info.worktree !== undefined) {
-    console.log(`  worktree: ${info.worktree}`)
+    console.log(`  worktree: ${info.worktree}`);
   }
 }
 
@@ -945,26 +976,31 @@ function reportSpawn(info: AgentInfo, molStep: string): void {
  *  not text: a session title slug `foo-bar-baz` and a prompt naming
  *  "foo bar baz" tokenize identically. */
 export function promptTokens(text: string): Set<string> {
-  return new Set(text.toLowerCase().split(/[^a-z0-9]+/).filter((t) => t !== ''))
+  return new Set(
+    text
+      .toLowerCase()
+      .split(/[^a-z0-9]+/)
+      .filter(t => t !== '')
+  );
 }
 
 /** Overlap coefficient `|A∩B| / min(|A|,|B|)` — "near-identical" needs
  *  ≥ 0.6 AND ≥ 3 shared tokens; the shared floor keeps one-word prompts
  *  from warning on everything (spec bro-7dila). */
 export function promptSimilar(a: string, b: string): boolean {
-  const ta = promptTokens(a)
-  const tb = promptTokens(b)
+  const ta = promptTokens(a);
+  const tb = promptTokens(b);
   if (ta.size === 0 || tb.size === 0) {
-    return false
+    return false;
   }
-  const [small, big] = ta.size <= tb.size ? [ta, tb] : [tb, ta]
-  let shared = 0
+  const [small, big] = ta.size <= tb.size ? [ta, tb] : [tb, ta];
+  let shared = 0;
   for (const t of small) {
     if (big.has(t)) {
-      shared++
+      shared++;
     }
   }
-  return shared >= 3 && shared / small.size >= 0.6
+  return shared >= 3 && shared / small.size >= 0.6;
 }
 
 /** Advisory liveness — a row counts as work in flight when its pid is
@@ -972,43 +1008,42 @@ export function promptSimilar(a: string, b: string): boolean {
  *  window (mid-spawn; the pid lands within seconds). Terminal rows and
  *  pid-less crash remnants past the window are not work in flight. */
 function registryEntryLiveish(e: {
-  pid?: number
-  pidStart?: string
-  spawnedAt: string
-  exitStatus?: number
-  stopped?: boolean
+  pid?: number;
+  pidStart?: string;
+  spawnedAt: string;
+  exitStatus?: number;
+  stopped?: boolean;
 }): boolean {
   if (typeof e.exitStatus === 'number' || e.stopped === true) {
-    return false
+    return false;
   }
   if (typeof e.pid === 'number') {
-    const start =
-      typeof e.pidStart === 'string' && e.pidStart !== '' ? e.pidStart : undefined
-    return pidAlive(e.pid, start)
+    const start = typeof e.pidStart === 'string' && e.pidStart !== '' ? e.pidStart : undefined;
+    return pidAlive(e.pid, start);
   }
-  return Date.now() - Date.parse(e.spawnedAt) < SESSION_SLOT_TTL_MS
+  return Date.now() - Date.parse(e.spawnedAt) < SESSION_SLOT_TTL_MS;
 }
 
 /** The agent's stored prompt text — undefined when absent/unreadable. */
 function storedPromptText(dir: string, agentId: string): string | undefined {
-  const file = agentPromptPath(dir, agentId)
+  const file = agentPromptPath(dir, agentId);
   if (file === null) {
-    return undefined
+    return undefined;
   }
   try {
-    const text = readFileSync(file, 'utf8')
-    return text.trim() === '' ? undefined : text
+    const text = readFileSync(file, 'utf8');
+    return text.trim() === '' ? undefined : text;
   } catch {
-    return undefined
+    return undefined;
   }
 }
 
 /** realpath where possible — a dangling path compares literally. */
 function realOrSelf(p: string): string {
   try {
-    return realpathSync(p)
+    return realpathSync(p);
   } catch {
-    return p
+    return p;
   }
 }
 
@@ -1022,36 +1057,36 @@ function sessionSuspects(
   env: AgentConnectorEnv,
   seenAgents: Set<string>
 ): { label: string; text: string }[] {
-  const out: { label: string; text: string }[] = []
-  const ours = gitCommonDir(dir, ADVISORY_PROBE_MS)
+  const out: { label: string; text: string }[] = [];
+  const ours = gitCommonDir(dir, ADVISORY_PROBE_MS);
   if (ours === null) {
-    return out
+    return out;
   }
-  const oursReal = realOrSelf(ours)
-  const probeCache = new Map<string, string | null>()
+  const oursReal = realOrSelf(ours);
+  const probeCache = new Map<string, string | null>();
   const commonOf = (cwd: string): string | null => {
     if (!probeCache.has(cwd)) {
-      probeCache.set(cwd, gitCommonDir(cwd, ADVISORY_PROBE_MS))
+      probeCache.set(cwd, gitCommonDir(cwd, ADVISORY_PROBE_MS));
     }
-    return probeCache.get(cwd) ?? null
-  }
+    return probeCache.get(cwd) ?? null;
+  };
   for (const s of discoverSessions(env).sessions) {
     if (s.name === undefined || s.cwd === undefined) {
-      continue
+      continue;
     }
     if (s.agentId !== undefined && seenAgents.has(s.agentId)) {
-      continue // its stored prompt already compared — richer than the title
+      continue; // its stored prompt already compared — richer than the title
     }
-    const common = commonOf(s.cwd)
+    const common = commonOf(s.cwd);
     if (common === null || realOrSelf(common) !== oursReal) {
-      continue
+      continue;
     }
     out.push({
       label: `session "${s.name}" (${s.kind}, pid ${s.pid})`,
       text: s.name.replaceAll('-', ' '),
-    })
+    });
   }
-  return out
+  return out;
 }
 
 /** Work already live in this repo that a new spawn could duplicate —
@@ -1067,11 +1102,11 @@ export function collectDuplicateSuspects(
   env: AgentConnectorEnv,
   opts: { excludeStep?: string } = {}
 ): { label: string; text: string }[] {
-  const out: { label: string; text: string }[] = []
-  const seenAgents = new Set<string>()
-  let registry: ReturnType<typeof readAgentRegistry> = {}
+  const out: { label: string; text: string }[] = [];
+  const seenAgents = new Set<string>();
+  let registry: ReturnType<typeof readAgentRegistry> = {};
   try {
-    registry = readAgentRegistry(dir)
+    registry = readAgentRegistry(dir);
   } catch {
     // a corrupt registry throws — advisory loses the agent pool, not the spawn
   }
@@ -1080,26 +1115,26 @@ export function collectDuplicateSuspects(
     // the spawn guards carry its real verdict (refuse/respawn). Marked
     // seen so the worker's session row can't echo it as a suspect either
     if (molStep === opts.excludeStep) {
-      seenAgents.add(e.agentId)
-      continue
+      seenAgents.add(e.agentId);
+      continue;
     }
     if (!registryEntryLiveish(e)) {
-      continue
+      continue;
     }
     // only a consumed prompt marks the agent seen — an unreadable one
     // leaves the worker's session title as the fallback suspect
-    const text = storedPromptText(dir, e.agentId)
+    const text = storedPromptText(dir, e.agentId);
     if (text !== undefined) {
-      seenAgents.add(e.agentId)
-      out.push({ label: `agent ${e.agentId} for ${molStep}`, text })
+      seenAgents.add(e.agentId);
+      out.push({ label: `agent ${e.agentId} for ${molStep}`, text });
     }
   }
-  return out.concat(sessionSuspects(dir, env, seenAgents))
+  return out.concat(sessionSuspects(dir, env, seenAgents));
 }
 
 /** Per-probe bound on the advisory's `git rev-parse` — one stalled
  *  mounted checkout must cost the spawn a couple of seconds, not a hang. */
-const ADVISORY_PROBE_MS = 2_000
+const ADVISORY_PROBE_MS = 2_000;
 
 /** The text the similarity floor compares — the effective prompt,
  *  resolved in the same precedence the spawn uses: the literal prompt,
@@ -1121,33 +1156,33 @@ function advisoryPromptText(
   backend: string | undefined
 ): string | undefined {
   if (prompt !== undefined) {
-    return prompt
+    return prompt;
   }
   if (promptFile !== undefined) {
     try {
-      return readFileSync(promptFile, 'utf8')
+      return readFileSync(promptFile, 'utf8');
     } catch {
-      return undefined
+      return undefined;
     }
   }
   try {
-    const entry = readAgentRegistry(dir)[molStep]
+    const entry = readAgentRegistry(dir)[molStep];
     const stored =
       entry !== undefined && backend !== undefined && entry.backend === backend
         ? agentPromptPath(dir, entry.agentId)
-        : null
+        : null;
     if (stored !== null && existsSync(stored)) {
-      return readFileSync(stored, 'utf8')
+      return readFileSync(stored, 'utf8');
     }
   } catch {
     // advisory — fall through to the bead text
   }
   try {
-    const row = taskStoreAt(beads).get(molStep)
-    const text = `# ${row?.title ?? ''}\n\n${row?.description ?? ''}`.trim()
-    return text === '#' ? undefined : text
+    const row = taskStoreAt(beads).get(molStep);
+    const text = `# ${row?.title ?? ''}\n\n${row?.description ?? ''}`.trim();
+    return text === '#' ? undefined : text;
   } catch {
-    return undefined
+    return undefined;
   }
 }
 
@@ -1167,28 +1202,26 @@ function adviseDuplicates(
   // mirror spawnStepAgent's connector resolution — the stored-prompt
   // branch needs resolvePrompt's backend gate; a resolution failure is
   // the spawn's error to raise, the advisory just degrades
-  let connName: string | undefined
+  let connName: string | undefined;
   try {
-    const profileName = flag(argv, '--profile')
-    const profile = profileName === undefined ? undefined : fleetProfileOf(env, profileName)
+    const profileName = flag(argv, '--profile');
+    const profile = profileName === undefined ? undefined : fleetProfileOf(env, profileName);
     connName = resolveAgentConnector(
       { dir },
       { connector: flag(argv, '--connector') ?? profile?.backend },
       env
-    ).name
+    ).name;
   } catch {
-    connName = undefined
+    connName = undefined;
   }
-  const warnText = advisoryPromptText(dir, beads, molStep, prompt, promptFile, connName)
+  const warnText = advisoryPromptText(dir, beads, molStep, prompt, promptFile, connName);
   if (warnText === undefined) {
-    return
+    return;
   }
   // --for's own registry row is excluded — the guards carry that verdict
   for (const s of collectDuplicateSuspects(dir, env, { excludeStep: molStep })) {
     if (promptSimilar(warnText, s.text)) {
-      console.error(
-        `warning: possible duplicate — ${s.label} reads near-identical to this prompt`
-      )
+      console.error(`warning: possible duplicate — ${s.label} reads near-identical to this prompt`);
     }
   }
 }
@@ -1215,25 +1248,27 @@ async function cmdRun(dir: string, env: AgentConnectorEnv, argv: string[]): Prom
       '--class',
       '--for',
     ])
-  )
-  const promptFlag = flag(argv, '--prompt')
+  );
+  const promptFlag = flag(argv, '--prompt');
   if (promptFlag !== undefined && pos.length > 0) {
-    die('positional text and --prompt are the same channel — pick one')
+    die('positional text and --prompt are the same channel — pick one');
   }
-  const prompt = promptFlag ?? (pos.length > 0 ? pos.join(' ') : undefined)
-  const promptFile = flag(argv, '--prompt-file')
-  const forBead = flag(argv, '--for')
+  const prompt = promptFlag ?? (pos.length > 0 ? pos.join(' ') : undefined);
+  const promptFile = flag(argv, '--prompt-file');
+  const forBead = flag(argv, '--for');
   if (prompt === undefined && promptFile === undefined && forBead === undefined) {
-    die('run requires a prompt — positional text, --prompt <text>, or --prompt-file <file> (or --for <bead>)')
+    die(
+      'run requires a prompt — positional text, --prompt <text>, or --prompt-file <file> (or --for <bead>)'
+    );
   }
-  const molStep = forBead ?? `adhoc-${randomBytes(4).toString('hex')}`
-  const beads = flag(argv, '--beads-dir') ?? beadsDir()
+  const molStep = forBead ?? `adhoc-${randomBytes(4).toString('hex')}`;
+  const beads = flag(argv, '--beads-dir') ?? beadsDir();
   // the similarity floor (spec bro-7dila): an ad-hoc spawn has no claim
   // to dedup on, so a live agent/session in this repo whose prompt or
   // title reads near-identical earns a warning — advisory, the spawn
   // still lands
-  adviseDuplicates(dir, env, beads, molStep, prompt, promptFile, argv)
-  let info: AgentInfo
+  adviseDuplicates(dir, env, beads, molStep, prompt, promptFile, argv);
+  let info: AgentInfo;
   try {
     info = await spawnStepAgent(dir, env, {
       molStep,
@@ -1250,40 +1285,38 @@ async function cmdRun(dir: string, env: AgentConnectorEnv, argv: string[]): Prom
       profile: flag(argv, '--profile'),
       class: flag(argv, '--class'),
       autoApprove: argv.includes('--auto-approve') ? true : undefined,
-    })
+    });
   } catch (err) {
-    die(err instanceof Error ? err.message : String(err))
+    die(err instanceof Error ? err.message : String(err));
   }
-  reportSpawn(info, molStep)
+  reportSpawn(info, molStep);
 }
 
 async function cmdDown(dir: string, env: AgentConnectorEnv, argv: string[]): Promise<void> {
-  const pos = positionals(argv, new Set(['--connector']))
-  const connectorName = flag(argv, '--connector')
+  const pos = positionals(argv, new Set(['--connector']));
+  const connectorName = flag(argv, '--connector');
   if (pos.length > 1) {
-    usage()
+    usage();
   }
-  const target = pos[0]
+  const target = pos[0];
   if (target === undefined) {
-    await supervisorVerb(resolveAgentConnector({ dir }, { connector: connectorName }, env), 'down')
-    return
+    await supervisorVerb(resolveAgentConnector({ dir }, { connector: connectorName }, env), 'down');
+    return;
   }
   const outcome = await stopAgent(dir, env, target, connectorName).catch((err: unknown) =>
     die(err instanceof Error ? err.message : String(err))
-  )
+  );
   if (!outcome.found) {
     // a degraded read can't confirm "gone" — report unverified, don't
     // claim the desired end state was reached
     if (outcome.degraded.length > 0) {
-      die(
-        `down: no agent "${target}" found — backend(s) degraded: ${outcome.degraded.join('; ')}`
-      )
+      die(`down: no agent "${target}" found — backend(s) degraded: ${outcome.degraded.join('; ')}`);
     }
     // stop() is idempotent — a gone agent is the desired end state
-    console.log(`down: no agent "${target}" — nothing to stop`)
-    return
+    console.log(`down: no agent "${target}" — nothing to stop`);
+    return;
   }
-  const agent = outcome.agent!
+  const agent = outcome.agent!;
   if (outcome.terminal) {
     // a blocked entry is terminal BUT the stop was the manual clear —
     // confirm that, don't report "nothing to stop"
@@ -1291,14 +1324,14 @@ async function cmdDown(dir: string, env: AgentConnectorEnv, argv: string[]): Pro
       outcome.cleared === true
         ? `down: ${agent.id} was blocked (${agent.cause ?? '?'}) — cleared`
         : `down: ${agent.id} is ${agent.state} — nothing to stop`
-    )
-    return
+    );
+    return;
   }
   if (outcome.respawned) {
-    const fmt = (p: number | undefined) => (p === undefined ? 'unknown' : String(p))
+    const fmt = (p: number | undefined) => (p === undefined ? 'unknown' : String(p));
     console.error(
       `note: ${agent.id} respawned since lookup (pid ${fmt(outcome.respawned.from)} → ${fmt(outcome.respawned.to)}) — stopping current instance`
-    )
+    );
   }
   // truthfulness (bro-l8c4f.3): only a confirmed-dead worker may read
   // as `stopped` — a survivor or an unverifiable death is an error the
@@ -1306,19 +1339,19 @@ async function cmdDown(dir: string, env: AgentConnectorEnv, argv: string[]): Pro
   if (outcome.verdict === 'still-running') {
     die(
       `${agent.id} (${agent.molStep}, ${outcome.backend}) survived the stop signal — still running (pid ${agent.pid ?? 'unknown'}) — not safe to respawn`
-    )
+    );
   }
   if (outcome.verdict === 'unverified') {
     die(
       `${agent.id} (${agent.molStep}, ${outcome.backend}) — stop unconfirmed: the backend reports ${agent.state}, death not verified — not safe to respawn`
-    )
+    );
   }
-  console.log(`stopped ${agent.id} (${agent.molStep}, ${outcome.backend})`)
+  console.log(`stopped ${agent.id} (${agent.molStep}, ${outcome.backend})`);
 }
 
 /** States prune reaps — 'blocked' stays: a wall-parked worker is
  *  respawn-able debt, not litter. */
-const REAP_STATES = new Set<AgentState>(['exited', 'lost', 'stopped'])
+const REAP_STATES = new Set<AgentState>(['exited', 'lost', 'stopped']);
 
 /** Which collected entries prune may reap. `expected` pins the observed
  *  identity per molStep — removeAgentRegistryEntries re-checks it under
@@ -1330,92 +1363,91 @@ function selectReapable(
   backends: Array<{ conn: { name: string }; agents: AgentInfo[]; degraded?: string }>,
   cutoff: number | undefined
 ): {
-  reapable: string[]
-  skipped: string[]
-  expected: Map<string, { agentId?: string; spawnedAt?: string; pid?: number }>
+  reapable: string[];
+  skipped: string[];
+  expected: Map<string, { agentId?: string; spawnedAt?: string; pid?: number }>;
 } {
-  const reapable: string[] = []
-  const skipped: string[] = []
-  const expected = new Map<string, { agentId: string; spawnedAt?: string; pid?: number }>()
+  const reapable: string[] = [];
+  const skipped: string[] = [];
+  const expected = new Map<string, { agentId: string; spawnedAt?: string; pid?: number }>();
   for (const b of backends) {
     // a degraded backend's states are unproven — its entries stay
     if (b.degraded !== undefined) {
-      skipped.push(`${b.conn.name}: ${b.degraded}`)
-      continue
+      skipped.push(`${b.conn.name}: ${b.degraded}`);
+      continue;
     }
     for (const a of b.agents) {
-      const t = a.spawnedAt === undefined ? Number.NaN : Date.parse(a.spawnedAt)
+      const t = a.spawnedAt === undefined ? Number.NaN : Date.parse(a.spawnedAt);
       if (!REAP_STATES.has(a.state) || (cutoff !== undefined && (Number.isNaN(t) || t >= cutoff))) {
-        continue
+        continue;
       }
-      reapable.push(a.molStep)
-      expected.set(a.molStep, { agentId: a.id, spawnedAt: a.spawnedAt, pid: a.pid })
+      reapable.push(a.molStep);
+      expected.set(a.molStep, { agentId: a.id, spawnedAt: a.spawnedAt, pid: a.pid });
     }
   }
-  return { reapable, skipped, expected }
+  return { reapable, skipped, expected };
 }
 
 async function cmdPrune(dir: string, env: AgentConnectorEnv, argv: string[]): Promise<void> {
-  const pos = positionals(argv, new Set(['--connector', '--older-than']))
-  const connectorName = flag(argv, '--connector')
-  const olderThan = flag(argv, '--older-than')
-  const json = argv.includes('--json')
+  const pos = positionals(argv, new Set(['--connector', '--older-than']));
+  const connectorName = flag(argv, '--connector');
+  const olderThan = flag(argv, '--older-than');
+  const json = argv.includes('--json');
   if (pos.length > 0) {
-    usage()
+    usage();
   }
-  let cutoff: number | undefined
+  let cutoff: number | undefined;
   if (olderThan !== undefined) {
-    const m = /^(\d+)d$/.exec(olderThan)
+    const m = /^(\d+)d$/.exec(olderThan);
     if (m === null) {
-      die(`--older-than takes <N>d days, got "${olderThan}"`)
+      die(`--older-than takes <N>d days, got "${olderThan}"`);
     }
-    cutoff = Date.now() - Number(m[1]) * 86_400_000
+    cutoff = Date.now() - Number(m[1]) * 86_400_000;
   }
-  const { backends } = await collectAgentBackends(dir, env, connectorName)
-  const { reapable, skipped, expected } = selectReapable(backends, cutoff)
-  const removed =
-    reapable.length === 0 ? [] : removeAgentRegistryEntries(dir, reapable, expected)
+  const { backends } = await collectAgentBackends(dir, env, connectorName);
+  const { reapable, skipped, expected } = selectReapable(backends, cutoff);
+  const removed = reapable.length === 0 ? [] : removeAgentRegistryEntries(dir, reapable, expected);
   if (json) {
-    console.log(JSON.stringify({ pruned: removed, skippedDegraded: skipped }, null, 2))
-    return
+    console.log(JSON.stringify({ pruned: removed, skippedDegraded: skipped }, null, 2));
+    return;
   }
   console.log(
     removed.length === 0
       ? 'prune: nothing terminal to reap'
       : `prune: reaped ${removed.length} — ${removed.join(', ')}`
-  )
+  );
   for (const s of skipped) {
-    console.error(`note: ${s} — entries not verified, left in place`)
+    console.error(`note: ${s} — entries not verified, left in place`);
   }
 }
 
 // --- log -----------------------------------------------------------------------
 
-const DEFAULT_LOG_LINES = 50
-const LOG_POLL_MS = 250
+const DEFAULT_LOG_LINES = 50;
+const LOG_POLL_MS = 250;
 
 /** The newest `n` whole lines of `text` — a trailing partial line (a
  *  worker that died mid-write) counts as a line and keeps its missing
  *  newline; `n <= 0` or empty input prints nothing. */
 export function tailLines(text: string, n: number): string {
   if (n <= 0 || text === '') {
-    return ''
+    return '';
   }
-  const hadNl = text.endsWith('\n')
-  const body = hadNl ? text.slice(0, -1) : text
-  return `${body.split('\n').slice(-n).join('\n')}${hadNl ? '\n' : ''}`
+  const hadNl = text.endsWith('\n');
+  const body = hadNl ? text.slice(0, -1) : text;
+  return `${body.split('\n').slice(-n).join('\n')}${hadNl ? '\n' : ''}`;
 }
 
 export interface LogFollowHandlers {
   /** Appended log bytes — the only data channel. */
-  data(chunk: string): void
+  data(chunk: string): void;
   /** State markers (truncated/removed/reopened) — a side channel, so
    *  callers can keep stdout pure log bytes. */
-  note(line: string): void
+  note(line: string): void;
 }
 
 export interface LogFollowHandle {
-  stop(): void
+  stop(): void;
 }
 
 /** tail -F over `path`: offset-tracked appends on a poll loop, honest
@@ -1434,104 +1466,104 @@ export function followLog(
   on: LogFollowHandlers,
   opts: { pollMs?: number; signal?: AbortSignal; startOffset?: number } = {}
 ): LogFollowHandle {
-  const pollMs = opts.pollMs ?? LOG_POLL_MS
+  const pollMs = opts.pollMs ?? LOG_POLL_MS;
   // the decoder carries a partial multibyte tail between chunks — it
   // resets when the byte stream restarts (truncation/reopen) and
   // drains into `data` on stop so a torn tail is reported, not dropped
-  let decoder = new TextDecoder()
-  let offset = opts.startOffset ?? 0
-  let fd: number | undefined
-  let missing = false
-  let stopped = false
-  let timer: NodeJS.Timeout | undefined
+  let decoder = new TextDecoder();
+  let offset = opts.startOffset ?? 0;
+  let fd: number | undefined;
+  let missing = false;
+  let stopped = false;
+  let timer: NodeJS.Timeout | undefined;
 
   const close = () => {
     if (fd !== undefined) {
       try {
-        closeSync(fd)
+        closeSync(fd);
       } catch {
         // a path that vanished under the fd — nothing to report
       }
-      fd = undefined
+      fd = undefined;
     }
-  }
+  };
   const stop = () => {
-    stopped = true
+    stopped = true;
     if (timer !== undefined) {
-      clearTimeout(timer)
-      timer = undefined
+      clearTimeout(timer);
+      timer = undefined;
     }
-    const tail = decoder.decode()
+    const tail = decoder.decode();
     if (tail !== '') {
-      on.data(tail)
+      on.data(tail);
     }
-    close()
-  }
-  opts.signal?.addEventListener('abort', stop, { once: true })
+    close();
+  };
+  opts.signal?.addEventListener('abort', stop, { once: true });
 
   const onMissing = () => {
     if (!missing) {
-      on.note('[log removed — watching for a respawn]')
-      missing = true
+      on.note('[log removed — watching for a respawn]');
+      missing = true;
     }
-    close()
-  }
+    close();
+  };
   const readAppended = (size: number) => {
     if (fd === undefined) {
       try {
-        fd = openSync(path, 'r')
+        fd = openSync(path, 'r');
       } catch {
-        return
+        return;
       }
     }
-    const buf = Buffer.allocUnsafe(size - offset)
-    const n = readSync(fd, buf, 0, buf.length, offset)
-    offset += n
+    const buf = Buffer.allocUnsafe(size - offset);
+    const n = readSync(fd, buf, 0, buf.length, offset);
+    offset += n;
     if (n > 0) {
-      on.data(decoder.decode(buf.subarray(0, n), { stream: true }))
+      on.data(decoder.decode(buf.subarray(0, n), { stream: true }));
     }
-  }
+  };
   const onPresent = (size: number) => {
     if (missing) {
-      on.note('[log reopened]')
-      missing = false
-      offset = 0
-      decoder = new TextDecoder()
+      on.note('[log reopened]');
+      missing = false;
+      offset = 0;
+      decoder = new TextDecoder();
     }
     if (size < offset) {
-      on.note('[log truncated — resyncing]')
-      offset = 0
-      decoder = new TextDecoder()
+      on.note('[log truncated — resyncing]');
+      offset = 0;
+      decoder = new TextDecoder();
       // a replaced file is a new inode — the open fd still resolves
       // the OLD one's bytes; drop it so the next read reopens fresh
-      close()
+      close();
     }
     if (size > offset) {
-      readAppended(size)
+      readAppended(size);
     }
-  }
+  };
   const tick = () => {
     if (stopped) {
-      return
+      return;
     }
-    let size: number | undefined
+    let size: number | undefined;
     try {
-      size = statSync(path).size
+      size = statSync(path).size;
     } catch {
-      size = undefined
+      size = undefined;
     }
     if (size === undefined) {
-      onMissing()
+      onMissing();
     } else {
-      onPresent(size)
+      onPresent(size);
     }
     if (!stopped) {
-      timer = setTimeout(tick, pollMs)
+      timer = setTimeout(tick, pollMs);
     }
-  }
+  };
 
-  timer = setTimeout(tick, pollMs)
-  return { stop }
+  timer = setTimeout(tick, pollMs);
+  return { stop };
 }
 
 /** Follow a JSON transcript by step watermark — the file is rewritten
@@ -1544,36 +1576,36 @@ function followTranscript(
   startWatermark: number,
   emit: (s: string) => void
 ): { stop: () => void } {
-  let watermark = startWatermark
-  let stopped = false
-  let timer: NodeJS.Timeout | undefined
+  let watermark = startWatermark;
+  let stopped = false;
+  let timer: NodeJS.Timeout | undefined;
   const stop = () => {
-    stopped = true
+    stopped = true;
     if (timer !== undefined) {
-      clearTimeout(timer)
+      clearTimeout(timer);
     }
-  }
+  };
   const tick = () => {
     if (stopped) {
-      return
+      return;
     }
     try {
-      const r = renderDevinTranscript(readFileSync(path, 'utf8'), watermark)
+      const r = renderDevinTranscript(readFileSync(path, 'utf8'), watermark);
       if (r !== undefined) {
         if (r.lines.length > 0) {
-          emit(r.lines.join('\n') + '\n')
+          emit(r.lines.join('\n') + '\n');
         }
-        watermark = r.watermark
+        watermark = r.watermark;
       }
     } catch {
       // mid-rewrite or reaped — retry next tick
     }
     if (!stopped) {
-      timer = setTimeout(tick, 2000)
+      timer = setTimeout(tick, 2000);
     }
-  }
-  timer = setTimeout(tick, 2000)
-  return { stop }
+  };
+  timer = setTimeout(tick, 2000);
+  return { stop };
 }
 
 /** The devin-transcript branch of `agents log` — a devin session's
@@ -1588,135 +1620,134 @@ async function cmdLogDevinTranscript(
   follow: boolean
 ): Promise<boolean> {
   const devinName =
-    a.backend === 'devin' && a.id.startsWith('devin:') ? a.id.slice('devin:'.length) : undefined
+    a.backend === 'devin' && a.id.startsWith('devin:') ? a.id.slice('devin:'.length) : undefined;
   const transcript =
     devinName === undefined
       ? undefined
-      : devinSessionTranscript(devinName, devinTranscriptsDir(env.agents['devin'] ?? {}))
+      : devinSessionTranscript(devinName, devinTranscriptsDir(env.agents['devin'] ?? {}));
   if (transcript === undefined) {
-    return false
+    return false;
   }
-  console.error(`agent ${a.id} (${a.state}) — ${transcript}`)
-  let rendered = renderDevinTranscript(readFileSync(transcript, 'utf8'))
+  console.error(`agent ${a.id} (${a.state}) — ${transcript}`);
+  let rendered = renderDevinTranscript(readFileSync(transcript, 'utf8'));
   if (rendered === undefined) {
     // the file is mid-rewrite — one beat later usually parses
-    await new Promise((resolve) => setTimeout(resolve, 250))
-    rendered = renderDevinTranscript(readFileSync(transcript, 'utf8'))
+    await new Promise(resolve => setTimeout(resolve, 250));
+    rendered = renderDevinTranscript(readFileSync(transcript, 'utf8'));
   }
   if (rendered === undefined) {
-    die(`transcript unreadable mid-rewrite: ${transcript} — retry`)
+    die(`transcript unreadable mid-rewrite: ${transcript} — retry`);
   }
-  process.stdout.write(tailLines(rendered.lines.join('\n') + '\n', lines))
+  process.stdout.write(tailLines(rendered.lines.join('\n') + '\n', lines));
   if (!follow) {
-    return true
+    return true;
   }
-  const handle = followTranscript(transcript, rendered.watermark, (s) =>
-    process.stdout.write(s)
-  )
-  await new Promise<void>((resolve) => process.once('SIGINT', resolve))
-  handle.stop()
-  return true
+  const handle = followTranscript(transcript, rendered.watermark, s => process.stdout.write(s));
+  await new Promise<void>(resolve => process.once('SIGINT', resolve));
+  handle.stop();
+  return true;
 }
 
 async function cmdLog(dir: string, env: AgentConnectorEnv, argv: string[]): Promise<void> {
   const pos = positionals(argv, new Set(['--connector', '--lines']), {
     boolFlags: new Set(['--follow']),
-  })
+  });
   if (pos.length !== 1) {
-    usage()
+    usage();
   }
-  const target = pos[0]!
-  const connectorName = flag(argv, '--connector')
-  const linesArg = flag(argv, '--lines')
-  let lines = DEFAULT_LOG_LINES
+  const target = pos[0]!;
+  const connectorName = flag(argv, '--connector');
+  const linesArg = flag(argv, '--lines');
+  let lines = DEFAULT_LOG_LINES;
   if (linesArg !== undefined) {
     if (!/^\d+$/.test(linesArg)) {
-      die(`--lines takes a non-negative integer, got "${linesArg}"`)
+      die(`--lines takes a non-negative integer, got "${linesArg}"`);
     }
-    lines = Number(linesArg)
+    lines = Number(linesArg);
   }
-  const follow = argv.includes('--follow')
+  const follow = argv.includes('--follow');
 
   const { backends } = await collectAgentBackends(dir, env, connectorName).catch((err: unknown) =>
     die(err instanceof Error ? err.message : String(err))
-  )
-  const { hit, degraded } = findInBackends(backends, target)
+  );
+  const { hit, degraded } = findInBackends(backends, target);
   if (!hit) {
-    const blind = degraded.length > 0 ? ` (degraded: ${degraded.join('; ')})` : ''
+    const blind = degraded.length > 0 ? ` (degraded: ${degraded.join('; ')})` : '';
     die(
-      `no agent "${target}"${blind} — checked ${backends.map((b) => b.conn.name).join(', ') || 'no backends'}`
-    )
+      `no agent "${target}"${blind} — checked ${backends.map(b => b.conn.name).join(', ') || 'no backends'}`
+    );
   }
   for (const d of degraded) {
-    console.error(`warning: backend degraded — ${d}`)
+    console.error(`warning: backend degraded — ${d}`);
   }
-  const a = hit.agent
+  const a = hit.agent;
   if (await cmdLogDevinTranscript(a, env, lines, follow)) {
-    return
+    return;
   }
   if (a.log === undefined) {
-    die(`agent ${a.id} has no recorded log — backend ${a.backend} may not keep one`)
+    die(`agent ${a.id} has no recorded log — backend ${a.backend} may not keep one`);
   }
   // a remote backend records its attach pointer, not a file — name it
   // instead of misreporting 'reaped' (copilot keeps a sessionUrl here)
   if (/^[a-zA-Z][a-zA-Z0-9+.-]*:\/\//.test(a.log)) {
-    die(`agent ${a.id}'s log is remote — ${a.log} (read it through the ${a.backend} backend's own surface)`)
+    die(
+      `agent ${a.id}'s log is remote — ${a.log} (read it through the ${a.backend} backend's own surface)`
+    );
   }
   if (!existsSync(a.log)) {
-    die(`log missing: ${a.log} — reaped or never written`)
+    die(`log missing: ${a.log} — reaped or never written`);
   }
   // stdout stays pure log bytes — the context header rides stderr
-  console.error(`agent ${a.id} (${a.state}) — ${a.log}`)
+  console.error(`agent ${a.id} (${a.state}) — ${a.log}`);
   // one read pins the replay boundary: a second statSync could land past
   // a janitor truncation and fake a 'truncated' resync over printed text
-  const replay = readFileSync(a.log, 'utf8')
-  process.stdout.write(tailLines(replay, lines))
+  const replay = readFileSync(a.log, 'utf8');
+  process.stdout.write(tailLines(replay, lines));
   if (!follow) {
-    return
+    return;
   }
 
   const handle = followLog(
     a.log,
-    { data: (s) => process.stdout.write(s), note: (s) => console.error(s) },
+    { data: s => process.stdout.write(s), note: s => console.error(s) },
     { startOffset: Buffer.byteLength(replay) }
-  )
+  );
   // a SIGINT listener suppresses the default kill — resolve clean (0)
-  await new Promise<void>((resolve) => process.once('SIGINT', resolve))
-  handle.stop()
+  await new Promise<void>(resolve => process.once('SIGINT', resolve));
+  handle.stop();
 }
 
 export async function runAgentsCommand(argv: string[]): Promise<void> {
   if (hasHelpFlag(argv)) {
-    usage(0)
+    usage(0);
   }
-  const dir = process.cwd()
-  const env = loadAgentEnv(dir)
-  const sub = argv[0]
+  const dir = process.cwd();
+  const env = loadAgentEnv(dir);
+  const sub = argv[0];
   switch (sub) {
     case 'status':
-      await cmdStatus(dir, env, argv.slice(1))
-      return
+      await cmdStatus(dir, env, argv.slice(1));
+      return;
     case 'up':
-      await cmdUp(dir, env, argv.slice(1))
-      return
+      await cmdUp(dir, env, argv.slice(1));
+      return;
     case 'run':
-      await cmdRun(dir, env, argv.slice(1))
-      return
+      await cmdRun(dir, env, argv.slice(1));
+      return;
     case 'down':
-      await cmdDown(dir, env, argv.slice(1))
-      return
+      await cmdDown(dir, env, argv.slice(1));
+      return;
     case 'log':
-      await cmdLog(dir, env, argv.slice(1))
-      return
+      await cmdLog(dir, env, argv.slice(1));
+      return;
     case 'prune':
-      await cmdPrune(dir, env, argv.slice(1))
-      return
+      await cmdPrune(dir, env, argv.slice(1));
+      return;
     case undefined:
-      usage()
-      return
+      usage();
+      return;
     default:
-      console.error(`error: unknown agents subcommand "${sub}"`)
-      usage()
+      console.error(`error: unknown agents subcommand "${sub}"`);
+      usage();
   }
 }
-
