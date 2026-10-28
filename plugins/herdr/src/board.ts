@@ -8,10 +8,11 @@
  * workspace(id,label) · mirror pane · PR.
  */
 import { resolve } from 'node:path';
-import { broFleet, loadState, repoDir, type BroStatus, type FleetRow } from './lib.ts';
+import { broFleet, loadState, repoDir, stateScope, type BroStatus, type FleetRow } from './lib.ts';
 import { readPlanes } from './planes.ts';
 
-const EVERY_MS = Math.max(3, Number(process.env.BRO_BOARD_EVERY_S ?? 15)) * 1000;
+const requested = Number(process.env.BRO_BOARD_EVERY_S ?? 15);
+const EVERY_MS = Math.max(3, Number.isFinite(requested) ? requested : 15) * 1000;
 
 interface Row {
   worktree: string;
@@ -42,7 +43,7 @@ function collect(): Row[] {
   const fleetByStep = new Map(fleetRows.map(r => [r.step, r]));
 
   const titles = new Map(status.beads.inProgress.map(b => [b.id, b.title] as const));
-  const state = loadState();
+  const state = loadState(stateScope(p.main));
   const agentByWt = new Map<string, BroStatus['fleet']['agents'][number]>();
   for (const a of status.fleet.agents) {
     if (a.worktree !== undefined) {
@@ -74,6 +75,9 @@ function collect(): Row[] {
     const slug = w.claim ?? agent?.id;
     const bead = slug !== undefined ? (titles.get(slug) ?? slug) : '';
     const mirror = Object.values(state.mirrors).find(m => m.worktree === w.path);
+    // a record whose pane was closed shows as stale, not live — the
+    // rec prunes on the next pass, the board reports what IS
+    const mirrorLive = mirror !== undefined && p.mirrorPanes[mirror.step] === true;
     const pr = agent !== undefined ? fleetByStep.get(agent.id)?.prNum : undefined;
     rows.push({
       worktree: w.name,
@@ -87,7 +91,10 @@ function collect(): Row[] {
         ws !== undefined
           ? `${ws.workspace_id}${ws.label !== undefined ? ` "${ws.label}"` : ''}`
           : '—',
-      mirror: mirror !== undefined ? `${mirror.pane_id}${mirror.marked === true ? ' ✖' : ''}` : '',
+      mirror:
+        mirror !== undefined
+          ? `${mirror.pane_id}${mirror.marked === true ? ' ✖' : ''}${mirrorLive ? '' : ' (gone)'}`
+          : '',
       pr: pr !== undefined ? `#${pr}` : '',
     });
   }

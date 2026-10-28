@@ -23,8 +23,10 @@ import {
   paneGone,
   paneIdle,
   paneList,
+  pidAlive,
   repoDir,
   saveState,
+  stateScope,
   shq,
   type HerdrWorkspace,
   type PluginState,
@@ -117,10 +119,14 @@ function ensureWorkspace(
 
   if (openId === undefined) {
     const res = herdrTry<{
+      workspace_id?: string;
       workspace?: { workspace_id?: string };
       root_pane?: { workspace_id?: string };
     }>(['worktree', 'open', '--cwd', p.main, '--path', path, '--label', label, '--no-focus']);
-    const ws = res?.workspace?.workspace_id ?? res?.root_pane?.workspace_id;
+    // open answers differently by path — fresh opens can carry a
+    // top-level id, already-open responses nest it under
+    // workspace/root_pane; read all three shapes
+    const ws = res?.workspace_id ?? res?.workspace?.workspace_id ?? res?.root_pane?.workspace_id;
     if (ws !== undefined) {
       state.workspaces[path] = { ws, label, managed: true };
       log(`open ${basename(path)} → ${ws} "${label}" (${tree.why})`);
@@ -131,9 +137,12 @@ function ensureWorkspace(
   }
 
   // workspace exists — only plugin-opened rows get drift-corrected;
-  // workspaces a user opened (and named) themselves keep their label
+  // workspaces a user opened (and named) themselves keep their label.
+  // rec.ws must equal the live id too: when our workspace was closed
+  // and the user opened their own for the same path, the label is
+  // theirs, whatever a stale record claims.
   const live = wsById.get(openId);
-  if (rec?.managed === true && live !== undefined && live.label !== label) {
+  if (rec?.managed === true && rec.ws === openId && live !== undefined && live.label !== label) {
     herdrTry(['workspace', 'rename', openId, label]);
     state.workspaces[path] = { ws: openId, label, managed: true };
     log(`rename ${openId} → "${label}"`);
@@ -148,12 +157,20 @@ function ensureWorkspace(
 /** Read-only shell text for a mirror pane: tail the agent log; when the
  *  recorded worker pid dies, kill the tail and mark the pane in place.
  *  The marker lands inside the pane — no bro write anywhere. */
-function mirrorCommand(step: string, logPath: string, pid?: number): string {
+function mirrorCommand(step: string, logPath: string, pid?: number, pidStart?: string): string {
   const marker = `echo '── bro agent ${step} exited — tail closed ──'`;
   if (typeof pid === 'number') {
+    // pid reuse is real: a recycled pid would keep the tail (and the
+    // busy pane) alive forever — when the registry recorded the
+    // process start token, /proc's starttime must match it too
+    const alive =
+      pidStart !== undefined && pidStart !== ''
+        ? `kill -0 ${pid} 2>/dev/null && { [ ! -e /proc/${pid}/stat ] || ` +
+          `[ "$(awk '{print $22}' /proc/${pid}/stat 2>/dev/null)" = ${shq(pidStart)} ]; }`
+        : `kill -0 ${pid} 2>/dev/null`;
     return (
       `tail -n +1 -F ${shq(logPath)} & T=$!; ` +
-      `while kill -0 ${pid} 2>/dev/null; do sleep 5; done; ` +
+      `while ${alive}; do sleep 5; done; ` +
       `kill $T 2>/dev/null; ${marker}`
     );
   }
@@ -162,6 +179,7 @@ function mirrorCommand(step: string, logPath: string, pid?: number): string {
 
 interface MirrorSource extends StatusAgent {
   log: string;
+  pidStart?: string;
 }
 
 function ensureMirror(a: MirrorSource, ws: string, worktreePath: string, state: PluginState): void {
@@ -185,11 +203,17 @@ function ensureMirror(a: MirrorSource, ws: string, worktreePath: string, state: 
     const moved = rec?.pane_id !== paneId || rec?.agentId !== a.agentId || rec?.pid !== a.pid;
     if (moved && paneIdle(paneId)) {
       herdrTry(['pane', 'rename', paneId, `bro: ${step}`]);
-      herdrTry(['pane', 'run', paneId, mirrorCommand(step, a.log, a.pid)]);
+      const ran = herdrTry(['pane', 'run', paneId, mirrorCommand(step, a.log, a.pid, a.pidStart)]);
+      if (ran === undefined) {
+        // labeled but unarmed — a later pass retries via the orphan path
+        log(`re-arm mirror ${paneId}: pane run failed`);
+        return;
+      }
       state.mirrors[step] = {
         step,
         agentId: a.agentId,
         pid: a.pid,
+        pidStart: a.pidStart,
         log: a.log,
         worktree: worktreePath,
         workspace: ws,
@@ -198,14 +222,26 @@ function ensureMirror(a: MirrorSource, ws: string, worktreePath: string, state: 
       };
       log(`re-arm mirror ${paneId} → ${a.agentId ?? step}`);
     } else {
+      // busy pane under a moved attempt keeps its OLD identity — writing
+      // the new agentId/pid now would mark the stale pane converged and
+      // it would show the dead attempt's log forever. If the recorded
+      // worker is provably dead, the busy pane is a dead man's tail —
+      // close it and let a later pass split a fresh one.
+      if (moved && rec?.pid !== undefined && !pidAlive(rec.pid)) {
+        herdrTry(['pane', 'close', paneId]);
+        delete state.mirrors[step];
+        log(`closed stale mirror ${paneId} — worker pid ${rec.pid} is dead`);
+        return;
+      }
       if (orphan?.label?.startsWith('✖')) {
         herdrTry(['pane', 'rename', paneId, `bro: ${step}`]);
       }
       state.mirrors[step] = {
         step,
-        agentId: a.agentId,
-        pid: a.pid,
-        log: a.log,
+        agentId: moved ? rec?.agentId : a.agentId,
+        pid: moved ? rec?.pid : a.pid,
+        pidStart: moved ? rec?.pidStart : a.pidStart,
+        log: moved ? (rec?.log ?? a.log) : a.log,
         worktree: worktreePath,
         workspace: ws,
         pane_id: paneId,
@@ -237,11 +273,17 @@ function ensureMirror(a: MirrorSource, ws: string, worktreePath: string, state: 
     return;
   }
   herdrTry(['pane', 'rename', newPane, `bro: ${step}`]);
-  herdrTry(['pane', 'run', newPane, mirrorCommand(step, a.log, a.pid)]);
+  const ran = herdrTry(['pane', 'run', newPane, mirrorCommand(step, a.log, a.pid, a.pidStart)]);
+  if (ran === undefined) {
+    // labeled but unarmed — a later pass retries via the orphan path
+    log(`mirror ${step} → ${newPane}: pane run failed`);
+    return;
+  }
   state.mirrors[step] = {
     step,
     agentId: a.agentId,
     pid: a.pid,
+    pidStart: a.pidStart,
     log: a.log,
     worktree: worktreePath,
     workspace: ws,
@@ -286,7 +328,8 @@ export function converge(p: Planes): ConvergeResult {
       .map(w => [w.path, w.open_workspace_id!])
   );
   const titles = new Map(p.status.beads.inProgress.map(b => [b.id, b.title] as const));
-  const state = loadState();
+  const scope = stateScope(p.main);
+  const state = loadState(scope);
 
   const armed = armedSet(p);
   const wsForPath = new Map<string, string>();
@@ -309,7 +352,13 @@ export function converge(p: Planes): ConvergeResult {
     const ws = wsForPath.get(wtPath) ?? openByPath.get(wtPath);
     if (ws === undefined) continue;
     ensureMirror(
-      { ...a, agentId: a.agentId ?? reg?.agentId, pid: a.pid ?? reg?.pid, log: logPath },
+      {
+        ...a,
+        agentId: a.agentId ?? reg?.agentId,
+        pid: a.pid ?? reg?.pid,
+        pidStart: typeof reg?.pidStart === 'string' ? reg.pidStart : undefined,
+        log: logPath,
+      },
       ws,
       wtPath,
       state
@@ -317,7 +366,7 @@ export function converge(p: Planes): ConvergeResult {
   }
 
   markExitedMirrors(p, state);
-  saveState(state);
+  saveState(scope, state);
   return { armed: armed.size, mirrors: Object.keys(state.mirrors).length };
 }
 

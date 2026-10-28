@@ -11,7 +11,8 @@ import { converge } from './reconcile.ts';
 import { ctxJson, repoDir } from './lib.ts';
 import { PollSource, type EventSource } from './sources.ts';
 
-const EVERY_MS = Math.max(5, Number(process.env.BRO_SYNC_EVERY_S ?? 30)) * 1000;
+const requested = Number(process.env.BRO_SYNC_EVERY_S ?? 30);
+const EVERY_MS = Math.max(5, Number.isFinite(requested) ? requested : 30) * 1000;
 
 const repo = repoDir(ctxJson());
 const source: EventSource = new PollSource(repo, EVERY_MS);

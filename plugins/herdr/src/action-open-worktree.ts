@@ -11,17 +11,26 @@
  */
 import { existsSync } from 'node:fs';
 import { basename, dirname, join } from 'node:path';
-import { bro, broStatus, ctxJson, herdr, notify, repoDir, worktreeList } from './lib.ts';
+import {
+  bro,
+  broStatus,
+  ctxJson,
+  herdr,
+  notify,
+  repoDir,
+  worktreeList,
+  type BroStatus,
+} from './lib.ts';
 
 const ctx = ctxJson();
 const repo = repoDir(ctx);
 const wt = worktreeList(repo);
 const main = wt.source?.source_checkout_path ?? repo;
 const sel = (ctx.selected_text ?? '').trim();
-const status = broStatus(repo);
 
 function openExisting(path: string, label?: string): void {
   const res = herdr<{
+    workspace_id?: string;
     workspace?: { workspace_id?: string };
     root_pane?: { workspace_id?: string };
     already_open?: boolean;
@@ -35,7 +44,7 @@ function openExisting(path: string, label?: string): void {
     '--no-focus',
     ...(label !== undefined ? ['--label', label] : []),
   ]);
-  const ws = res.workspace?.workspace_id ?? res.root_pane?.workspace_id ?? '?';
+  const ws = res.workspace_id ?? res.workspace?.workspace_id ?? res.root_pane?.workspace_id ?? '?';
   notify(
     'bro worktree open',
     `${basename(path)} → ${ws}${res.already_open === true ? ' (already open)' : ''}`
@@ -43,7 +52,7 @@ function openExisting(path: string, label?: string): void {
   console.log(`${path} → ${ws}`);
 }
 
-function labelFor(path: string, slug: string): string {
+function labelFor(path: string, slug: string, status: BroStatus): string {
   const claim = status.worktrees.find(w => w.path === path)?.claim ?? slug;
   return status.beads.inProgress.find(b => b.id === claim)?.title ?? claim;
 }
@@ -64,7 +73,9 @@ if (/^[\w-][\w.-]*$/.test(sel)) {
     console.error(`work enter ran but no worktree for ${sel} resolved — check 'bro work list'`);
     process.exit(1);
   }
-  openExisting(path, labelFor(path, sel));
+  // status read AFTER the enter — the claim/title it produced must be
+  // in the snapshot or the label falls back to the bare bead id
+  openExisting(path, labelFor(path, sel, broStatus(repo)));
 } else {
   const p = ctx.worktree?.checkout_path;
   if (p === undefined) {
@@ -73,5 +84,5 @@ if (/^[\w-][\w.-]*$/.test(sel)) {
     );
     process.exit(1);
   }
-  openExisting(p, labelFor(p, basename(p)));
+  openExisting(p, labelFor(p, basename(p), broStatus(repo)));
 }

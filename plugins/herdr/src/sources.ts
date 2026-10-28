@@ -9,20 +9,31 @@ import { diffKey, readPlanes, type Planes } from './planes.ts';
 export interface EventSource extends AsyncIterable<Planes> {}
 
 /** v1: poll. Re-reads the planes every `everyMs` and yields a snapshot
- *  only when the diff-key moved — a quiet rig costs nothing, a moving
- *  rig gets a pass as fast as the tick allows. */
+ *  when the diff-key moved — plus every FORCE_EVERYth tick regardless:
+ *  a pass that half-failed (a refused `worktree open`, a dropped split)
+ *  leaves the key unchanged, so without the heartbeat yield it would
+ *  never be retried. A quiet rig still costs almost nothing. */
+const FORCE_EVERY = 4;
+
 export class PollSource implements EventSource {
-  constructor(
-    private readonly repo: string,
-    private readonly everyMs: number = 30_000
-  ) {}
+  private readonly repo: string;
+  private readonly everyMs: number;
+
+  // no parameter properties — node runs these files with strip-only
+  // type handling, where they are a syntax error
+  constructor(repo: string, everyMs: number = 30_000) {
+    this.repo = repo;
+    this.everyMs = everyMs;
+  }
 
   async *[Symbol.asyncIterator](): AsyncGenerator<Planes, void> {
     let last = '';
+    let tick = 0;
     for (;;) {
       const snap = readPlanes(this.repo);
       const key = diffKey(snap);
-      if (key !== last) {
+      tick += 1;
+      if (key !== last || tick % FORCE_EVERY === 0) {
         last = key;
         yield snap;
       }

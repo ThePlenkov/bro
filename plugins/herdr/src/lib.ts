@@ -9,6 +9,7 @@
  * Runs under `node` ≥22.18 native TS (the floor bro itself requires).
  */
 import { spawnSync } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import {
   existsSync,
   mkdirSync,
@@ -384,6 +385,8 @@ export interface MirrorRec {
   step: string;
   agentId?: string;
   pid?: number;
+  /** process start token — reused pids must not pass as the worker. */
+  pidStart?: string;
   log: string;
   worktree: string;
   workspace: string;
@@ -399,11 +402,23 @@ export interface PluginState {
   mirrors: Record<string, MirrorRec>;
 }
 
-export function loadState(): PluginState {
+/** One state file per repository — two repos sharing the plugin state
+ *  dir must never see each other's pane ids (a repo-B pass marking a
+ *  repo-A pane exited is the failure this prevents). The scope is the
+ *  canonical git common dir, so every linked worktree of one repo
+ *  resolves to the same partition. */
+export function stateScope(repo: string): string {
+  const gd = gitCommonDir(repo) ?? repo;
+  return createHash('sha1').update(gd).digest('hex').slice(0, 12);
+}
+
+function stateFile(scope: string): string {
+  return join(STATE_DIR, `state-${scope}.json`);
+}
+
+export function loadState(scope: string): PluginState {
   try {
-    const v = JSON.parse(
-      readFileSync(join(STATE_DIR, 'state.json'), 'utf8')
-    ) as Partial<PluginState>;
+    const v = JSON.parse(readFileSync(stateFile(scope), 'utf8')) as Partial<PluginState>;
     return {
       workspaces: typeof v.workspaces === 'object' && v.workspaces !== null ? v.workspaces : {},
       mirrors: typeof v.mirrors === 'object' && v.mirrors !== null ? v.mirrors : {},
@@ -413,9 +428,9 @@ export function loadState(): PluginState {
   }
 }
 
-export function saveState(s: PluginState): void {
+export function saveState(scope: string, s: PluginState): void {
   mkdirSync(STATE_DIR, { recursive: true });
-  const p = join(STATE_DIR, 'state.json');
+  const p = stateFile(scope);
   const tmp = `${p}.${process.pid}.tmp`;
   writeFileSync(tmp, `${JSON.stringify(s, null, 2)}\n`);
   renameSync(tmp, p);

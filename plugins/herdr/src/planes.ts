@@ -8,6 +8,9 @@ import {
   agentsJson,
   armedWorkDetails,
   broStatus,
+  loadState,
+  paneExists,
+  stateScope,
   worktreeList,
   workspaceList,
   type AgentEntry,
@@ -32,6 +35,9 @@ export interface Planes {
   registry: Record<string, AgentEntry>;
   /** bro: live session `.work` marker details (armed trees). */
   armedDetails: string[];
+  /** plugin state → pane alive? — a closed mirror is a plane change
+   *  the diff-key must see or a killed pane never gets recreated. */
+  mirrorPanes: Record<string, boolean>;
 }
 
 export function readPlanes(repo: string): Planes {
@@ -49,6 +55,9 @@ export function readPlanes(repo: string): Planes {
     workspaces: workspaceList(),
     registry: agentsJson(main),
     armedDetails: armedWorkDetails(main),
+    mirrorPanes: Object.fromEntries(
+      Object.values(loadState(stateScope(main)).mirrors).map(m => [m.step, paneExists(m.pane_id)])
+    ),
   };
 }
 
@@ -73,5 +82,6 @@ export function diffKey(p: Planes): string {
     ws: p.workspaces.map(w => [w.workspace_id, w.label, w.worktree?.checkout_path]),
     titles: p.status.beads.inProgress.map(b => [b.id, b.title]),
     reg: Object.entries(p.registry).map(([k, e]) => [k, e.agentId, e.log, e.worktree, e.pid]),
+    mirrorPanes: p.mirrorPanes,
   });
 }
