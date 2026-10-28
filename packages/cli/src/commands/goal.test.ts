@@ -1,6 +1,6 @@
 /** `bro goal` + hook-side evaluation (spec: specs/goal/bro-6vcll.md). */
 import assert from 'node:assert/strict';
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, utimesSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { after, describe, test } from 'node:test';
 import { tmpDir } from './testrepo.ts';
@@ -212,6 +212,29 @@ describe('goal eval — the queued judge path (bro-36sx7.4)', () => {
     await goalStopLines(dir, 's1', { trace: 'first' });
     await goalStopLines(dir, 's1', { trace: 'second' });
     assert.equal(JSON.parse(readFileSync(reqFile(dir, 's1'), 'utf8')).trace, 'first');
+  });
+
+  test('a fresh work claim marks the eval pending — no duplicate spawn mid-decide', async () => {
+    const dir = repo();
+    judgeCfg(dir);
+    writeRaw(dir, 's1', ACTIVE);
+    // an eval holding the claim rides as <req>.work-<pid> — the req
+    // file is absent for the whole decide span
+    writeFileSync(`${reqFile(dir, 's1')}.work-99999`, '{}');
+    await goalStopLines(dir, 's1', { trace: 'second' });
+    assert.equal(existsSync(reqFile(dir, 's1')), false);
+  });
+
+  test('a stale work claim is a wedged worker — the stop re-queues', async () => {
+    const dir = repo();
+    judgeCfg(dir);
+    writeRaw(dir, 's1', ACTIVE);
+    const work = `${reqFile(dir, 's1')}.work-99999`;
+    writeFileSync(work, '{}');
+    const stale = new Date(Date.now() - 200_000);
+    utimesSync(work, stale, stale);
+    await goalStopLines(dir, 's1', { trace: 'second' });
+    assert.ok(existsSync(reqFile(dir, 's1')));
   });
 
   test('bro goal eval: met transitions + announces once', async () => {

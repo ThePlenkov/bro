@@ -36,7 +36,7 @@ import {
   statSync,
   writeFileSync,
 } from 'node:fs';
-import { dirname, isAbsolute, join, resolve } from 'node:path';
+import { basename, dirname, isAbsolute, join, resolve } from 'node:path';
 import {
   hasHelpFlag,
   LockTimeout,
@@ -301,11 +301,29 @@ function claimGoalNotice(dir: string, sessionId: string): string | null {
   }
 }
 
-/** Queue the off-hook eval — a fresh req already marks one pending, so
- *  writing is the throttle and only a just-written req earns the
- *  spawn. The detached `bro goal eval` claims it by rename; a spawn
- *  that never ran leaves the req to age out — the re-arm is a later
- *  stop seeing it stale (bro-36sx7.4). */
+/** The in-flight half of "pending" — a claimed req rides as
+ *  `<req>.work-<pid>` while its eval decides, so the req file itself
+ *  is absent for that span and the fresh-req check alone would see an
+ *  empty queue. A fresh claim means an eval is running. */
+function workClaimFresh(req: string): boolean {
+  const d = dirname(req);
+  const prefix = `${basename(req)}.work-`;
+  let names: string[];
+  try {
+    names = readdirSync(d);
+  } catch {
+    return false;
+  }
+  return names.some(f => f.startsWith(prefix) && freshFile(join(d, f), GOAL_REQ_FRESH_MS));
+}
+
+/** Queue the off-hook eval — a fresh req or a fresh work claim marks
+ *  one pending (an eval holding the claim is mid-decide; a second
+ *  spawn would burn a paid decide whose verdict the merge's
+ *  eval-count recheck drops), so writing is the throttle and only a
+ *  just-written req earns the spawn. The detached `bro goal eval`
+ *  claims it by rename; a spawn that never ran leaves the req to age
+ *  out — the re-arm is a later stop seeing it stale (bro-36sx7.4). */
 async function enqueueGoalEval(
   dir: string,
   sessionId: string,
@@ -313,7 +331,10 @@ async function enqueueGoalEval(
   evidence: { trace: string; context?: string | Promise<string | undefined> }
 ): Promise<void> {
   const req = goalReqPath(dir, sessionId);
-  if (req === null || freshFile(req, GOAL_REQ_FRESH_MS)) {
+  if (req === null) {
+    return;
+  }
+  if (freshFile(req, GOAL_REQ_FRESH_MS) || workClaimFresh(req)) {
     return;
   }
   try {
