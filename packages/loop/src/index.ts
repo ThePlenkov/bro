@@ -6,22 +6,33 @@ export {
   leadKey,
   SOLO_LABEL,
   type BatchableBead,
-} from './batch.ts'
-export { diskFloorBreach, diskFloorBytes, MB, type DiskProbe } from './capacity.ts'
-export { loopSection } from './config.ts'
-export { loopSlug, planItem, type LoopItem } from './item.ts'
-export { mirrorable, projectBeads, type MirrorDeps } from './mirror.ts'
+} from './batch.ts';
+export { diskFloorBreach, diskFloorBytes, MB, type DiskProbe } from './capacity.ts';
+export {
+  beadForHead,
+  ceilingHeld,
+  deterministicHeadSlug,
+  FLEET_HEAD_PREFIXES,
+  isFleetHead,
+  orphanVerdict,
+  type FleetPrRow,
+  type OrphanVerdict,
+  type ReconcileBead,
+} from './ceiling.ts';
+export { loopSection } from './config.ts';
+export { loopSlug, planItem, type LoopItem } from './item.ts';
+export { mirrorable, projectBeads, type MirrorDeps } from './mirror.ts';
 export {
   buildFixPrompt,
   buildRebasePrompt,
   buildWorkPrompt,
   expandAgentCmd,
-} from './prompt.ts'
-export { memberAction } from './schedule.ts'
+} from './prompt.ts';
+export { memberAction } from './schedule.ts';
 export type {
   GateSnapshot,
   MemberAction,
   MemberClock,
-} from './schedule.ts'
-export { DEFAULT_LOOP_CONFIG } from './types.ts'
-export type { LoopBead, LoopConfig } from './types.ts'
+} from './schedule.ts';
+export { DEFAULT_LOOP_CONFIG } from './types.ts';
+export type { LoopBead, LoopConfig } from './types.ts';

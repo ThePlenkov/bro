@@ -103,22 +103,30 @@ import {
   type PrStateCache,
 } from '@broject/act';
 import {
+  beadForHead,
   buildFixPrompt,
   buildRebasePrompt,
   buildWorkPrompt,
+  ceilingHeld,
   clumpMembers,
   coveredBeadIds,
+  deterministicHeadSlug,
   diskFloorBreach,
   diskFloorBytes,
   expandAgentCmd,
+  FLEET_HEAD_PREFIXES,
+  isFleetHead,
   MB,
   memberAction,
+  orphanVerdict,
   planItem,
   projectBeads,
   type DiskProbe,
+  type FleetPrRow,
   type GateSnapshot,
   type LoopConfig,
   type LoopItem,
+  type ReconcileBead,
 } from '@broject/loop';
 import { loadBroConfig } from '../plugins.ts';
 import {
@@ -218,6 +226,8 @@ interface Ctx {
    *  the named stack: branch stack/<name>/<n>-<slug> based on the tip,
    *  PR targeting the member below. */
   stack?: string;
+  /** Cease claiming new work — only service gate stack + reconcile. */
+  claimsHeld?: { open: number; max: number };
   /** Cleanup failures collected during the run — the end-of-run audit
    *  prints them again so a tail never dies in a scrollback line. */
   tails: string[];
@@ -265,7 +275,8 @@ function usage(exitCode: ExitCode = 2): never {
                                 of these labels are claimable
   --stack NAME                   chain claimed beads onto stack NAME —
                                 each PR targets the member below
-  --max-open N                   cap the gate stack's open PRs (loop.maxOpen, 3)
+  --max-open N                   cap the gate stack's open PRs (loop.maxOpen, 1)
+  --max-open-total N             hard ceiling on total open fleet PRs (loop.maxOpenTotal, 10; 0 = off)
   --disk-min-slots N             disk floor in slot units — pushes hold while
                                 free disk < N×loop.worktreeMb on any fs the
                                 run writes to (loop.diskMinSlots, 2; 0 = off)
@@ -1253,6 +1264,19 @@ async function finalizeMerge(
       ctx.tails.push(`branch ${item.branch} not deleted — ${br.err.trim()}`);
       console.error(`loop: ${ctx.tails.at(-1)}`);
     }
+    // delete remote branch on merge/close (spec bro-jis0c)
+    try {
+      gitTry(['-C', ctx.root, 'push', 'origin', '--delete', item.branch]);
+    } catch {
+      /* best effort */
+    }
+  } else {
+    // even if worktree kept due to live processes, try to delete remote branch if possible
+    try {
+      gitTry(['-C', ctx.root, 'push', 'origin', '--delete', item.branch]);
+    } catch {
+      /* best effort */
+    }
   }
   say(ctx, `loop: ${beads.map(b => b.id).join(', ')} landed via ${prRef(ctx, pr)}`);
   return 'landed';
@@ -1361,6 +1385,7 @@ function runBootstrap(ctx: Ctx, beads: ReadyBead[], item: LoopItem): boolean {
   if (!ctx.cfg.bootstrap) {
     return true;
   }
+<<<<<<< HEAD
   const b = spawnSync(
     'sh', // NOSONAR — operator-configured bootstrap shell, PATH by design
     ['-c', ctx.cfg.bootstrap],
@@ -1370,6 +1395,14 @@ function runBootstrap(ctx: Ctx, beads: ReadyBead[], item: LoopItem): boolean {
       stdio: ['inherit', ctx.json ? 2 : 'inherit', 'inherit'],
     }
   );
+=======
+  const b = spawnSync('sh', ['-c', ctx.cfg.bootstrap], {
+    // NOSONAR — operator-configured bootstrap
+    cwd: item.worktreeDir,
+    env: agentEnv(ctx, {}),
+    stdio: ['inherit', ctx.json ? 2 : 'inherit', 'inherit'],
+  });
+>>>>>>> da72268a (loop: add fleet PR ceiling and closure-first reconcile (bro-jis0c))
   if (b.status === 0) {
     return true;
   }
@@ -2139,14 +2172,31 @@ async function serviceGate(ctx: Ctx, m: GateMember): Promise<ServiceVerdict> {
     case 'merge':
       gateRow('green', { action: 'merge' });
       return leave(m, await finalizeMerge(ctx, m.beads, m.item, pr));
-    case 'closed':
+    case 'closed': {
       gateRow('closed', { action: 'closed' });
+      // closePr cleanup: delete remote branch + reap worktree/branch
+      try {
+        gitTry(['-C', ctx.root, 'push', 'origin', '--delete', m.item.branch]);
+      } catch {
+        /* best effort */
+      }
+      try {
+        const rooted = processesRootedIn(m.item.worktreeDir);
+        if (rooted.length === 0) {
+          gitTry(['-C', m.item.worktreeDir, 'submodule', 'deinit', '-f', '--all']);
+          gitTry(['-C', ctx.root, 'worktree', 'remove', '--force', m.item.worktreeDir]);
+          gitTry(['-C', ctx.root, 'branch', '-D', m.item.branch]);
+        }
+      } catch {
+        /* best effort */
+      }
       parkBeads(
         ctx,
         m.beads,
         `loop: PR ${prRef(ctx, pr)} was closed unmerged — worktree ${m.item.worktreeDir}`
       );
       return leave(m, 'parked');
+    }
     case 'fix': {
       gateRow('blocked', { action: 'fix', round: m.rounds + 1, blockers: snap.blockers });
       const verdict = await respawnRound(ctx, m, () => runFixRound(ctx, m, pr, m.rounds, m.lane));
@@ -2575,6 +2625,8 @@ function buildCtx(
       parkedWakeMin: num(flag(argv, '--parked-wake'), cfg.parkedWakeMin, 0),
       maxItems: num(flag(argv, '--max'), cfg.maxItems, 0),
       maxOpen: num(flag(argv, '--max-open'), cfg.maxOpen, 1),
+      maxOpenTotal: num(flag(argv, '--max-open-total'), cfg.maxOpenTotal, 0),
+      worktreeWarn: num(flag(argv, '--worktree-warn'), cfg.worktreeWarn, 0),
       diskMinSlots: num(flag(argv, '--disk-min-slots'), cfg.diskMinSlots, 0),
       batch: num(flag(argv, '--batch'), cfg.batch, 1),
     },
@@ -3021,6 +3073,12 @@ function endAudit(ctx: Ctx, seen: Set<string>, parkedClaims: ReadonlySet<string>
       ctx.root,
       ctx.stack === undefined ? ['loop/'] : ['loop/', `stack/${ctx.stack}/`]
     );
+    if (ctx.cfg.worktreeWarn > 0 && worktrees.length > ctx.cfg.worktreeWarn) {
+      say(
+        ctx,
+        `loop: worktrees ${worktrees.length} > ${ctx.cfg.worktreeWarn} (disk/coordination pressure)`
+      );
+    }
     const claimed = claimedTails(ctx.tasks, seen);
     sayLoopAudit(ctx, reap, [
       // PRs live on branches — worktree'd ones (a parked bead keeps both)
@@ -3279,12 +3337,117 @@ interface QueueState {
   diskProbeWarned: Set<string>;
 }
 
-/** One service pass over the stack, oldest-first — a snapshot copy
- *  because leave() splices members out mid-iteration. True when any
- *  member moved (action, merge, park): the next tick polls immediately
- *  instead of paying the interval. */
+/** Build slug -> bead map for reconcile. */
+function buildBeadsBySlug(ctx: Ctx): Map<string, ReconcileBead> {
+  const out = new Map<string, ReconcileBead>();
+  try {
+    const rows = ctx.tasks.list({ all: true } as any);
+    for (const r of rows as any[]) {
+      if (!r?.id) continue;
+      const slug = loopSlug(r.id);
+      if (!out.has(slug)) {
+        out.set(slug, { id: r.id, status: r.status });
+      }
+    }
+  } catch {
+    /* best effort */
+  }
+  return out;
+}
+
+/** Get all open fleet PRs (headRef + pr). */
+function listOpenFleetPrs(ctx: Ctx): FleetPrRow[] {
+  const rows: FleetPrRow[] = [];
+  try {
+    if (typeof (ctx.rev as any).openPrs === 'function') {
+      const list = (ctx.rev as any).openPrs(ctx.repo) as Array<{ pr: number; headRef: string }>;
+      for (const p of list ?? []) {
+        if (p?.headRef && isFleetHead(p.headRef)) {
+          rows.push({ pr: p.pr, headRef: p.headRef });
+        }
+      }
+      return rows;
+    }
+  } catch {
+    /* fall through to per-branch scan */
+  }
+  // fallback: scan known branches
+  try {
+    const prefixes =
+      ctx.stack === undefined
+        ? ['loop/', 'work/', 'fix/', 'stack/']
+        : ['loop/', 'work/', 'fix/', 'stack/'];
+    const tails = loopRefTails(ctx.root, prefixes);
+    const branches = [...new Set([...tails.worktreeBranches, ...tails.branches])];
+    for (const b of branches) {
+      try {
+        for (const pr of ctx.rev.prsForBranch(b)) {
+          if (isFleetHead(b)) {
+            rows.push({ pr, headRef: b });
+          }
+        }
+      } catch {
+        /* skip */
+      }
+    }
+  } catch {
+    /* ignore */
+  }
+  return rows;
+}
+
+/** Reconcile orphaned fleet PRs not on the current stack. */
+async function reconcileFleet(ctx: Ctx, q: QueueState): Promise<void> {
+  try {
+    const fleet = listOpenFleetPrs(ctx);
+    if (fleet.length === 0) return;
+    const stackPrs = new Set<number>();
+    for (const m of q.stack) {
+      if (m.pr !== undefined) stackPrs.add(m.pr);
+    }
+    const beadsBySlug = buildBeadsBySlug(ctx);
+    for (const row of fleet) {
+      if (stackPrs.has(row.pr)) continue;
+      const bead = beadForHead(row.headRef, beadsBySlug);
+      const verdict = orphanVerdict(row.headRef, bead);
+      if (verdict.kind === 'close') {
+        try {
+          if (typeof (ctx.rev as any).closePr === 'function') {
+            (ctx.rev as any).closePr({ repo: ctx.repo, pr: row.pr });
+          } else {
+            // best effort via gh
+            try {
+              gitTry(['-C', ctx.root, 'push', 'origin', '--delete', row.headRef]);
+            } catch {
+              /* ignore */
+            }
+          }
+          say(ctx, `loop: reconcile close ${prRef(ctx, row.pr)} (${row.headRef}) — ${verdict.why}`);
+          try {
+            gitTry(['-C', ctx.root, 'push', 'origin', '--delete', row.headRef]);
+          } catch {
+            /* best effort */
+          }
+          try {
+            // try to remove local branch/worktree if any
+            gitTry(['-C', ctx.root, 'branch', '-D', row.headRef]);
+          } catch {
+            /* best effort */
+          }
+        } catch (err) {
+          console.error(`loop: reconcile failed for ${prRef(ctx, row.pr)} — ${String(err)}`);
+        }
+      }
+    }
+  } catch (err) {
+    console.error(`loop: reconcile error — ${String(err)}`);
+  }
+}
+
+/** One service pass over the stack, oldest-first — closure-first order. */
 async function servicePass(ctx: Ctx, q: QueueState): Promise<boolean> {
   let busy = false;
+  // (a)/(b) service gate stack first
   for (const m of [...q.stack]) {
     const verdict = await serviceMember(ctx, m);
     if (verdict === 'kept') {
@@ -3310,6 +3473,9 @@ async function servicePass(ctx: Ctx, q: QueueState): Promise<boolean> {
       );
     }
   }
+  // (c) reconcile orphaned fleet PRs
+  await reconcileFleet(ctx, q);
+  // (d) ceiling check handled by tryClaim
   return busy;
 }
 
@@ -3399,6 +3565,58 @@ async function tryClaim(
   const maxed = ctx.cfg.maxItems > 0 && q.claimed >= ctx.cfg.maxItems;
   if (q.drained || maxed || q.stack.length >= ctx.cfg.maxOpen || Date.now() < q.pushHoldUntil) {
     return false;
+  }
+  // Hard ceiling on TOTAL open fleet PRs
+  if (ctx.cfg.maxOpenTotal > 0) {
+    try {
+      const fleet = listOpenFleetPrs(ctx);
+      if (ceilingHeld(fleet.length, ctx.cfg.maxOpenTotal)) {
+        if (
+          !ctx.claimsHeld ||
+          ctx.claimsHeld.open !== fleet.length ||
+          ctx.claimsHeld.max !== ctx.cfg.maxOpenTotal
+        ) {
+          ctx.claimsHeld = { open: fleet.length, max: ctx.cfg.maxOpenTotal };
+          say(ctx, `loop: claims held — ceiling ${fleet.length}/${ctx.cfg.maxOpenTotal}`);
+        }
+        return false;
+      }
+      ctx.claimsHeld = undefined;
+    } catch {
+      // a listing that can't be produced holds too
+      if (!ctx.claimsHeld) {
+        ctx.claimsHeld = { open: -1, max: ctx.cfg.maxOpenTotal };
+        say(ctx, `loop: claims held — ceiling unknown/${ctx.cfg.maxOpenTotal}`);
+      }
+      return false;
+    }
+  } else {
+    ctx.claimsHeld = undefined;
+  }
+  // Hard ceiling on TOTAL open fleet PRs
+  if (ctx.cfg.maxOpenTotal && ctx.cfg.maxOpenTotal > 0) {
+    try {
+      const fleet = listOpenFleetPrs(ctx);
+      if (ceilingHeld(fleet.length, ctx.cfg.maxOpenTotal)) {
+        if (!ctx.claimsHeld || ctx.claimsHeld.open !== fleet.length) {
+          ctx.claimsHeld = { open: fleet.length, max: ctx.cfg.maxOpenTotal };
+          say(ctx, `loop: claims held — ceiling ${fleet.length}/${ctx.cfg.maxOpenTotal}`);
+        }
+        return false;
+      } else if (ctx.claimsHeld) {
+        ctx.claimsHeld = undefined;
+      }
+    } catch (err) {
+      // if can't list, hold (fail closed)
+      if (!ctx.claimsHeld) {
+        ctx.claimsHeld = { open: -1, max: ctx.cfg.maxOpenTotal };
+        say(
+          ctx,
+          `loop: claims held — ceiling ${ctx.cfg.maxOpenTotal}/${ctx.cfg.maxOpenTotal} (listing unavailable)`
+        );
+      }
+      return false;
+    }
   }
   // the disk floor — admission, not eviction. A breached floor holds
   // pushes exactly like a full fleet does: nothing claimed, nothing
