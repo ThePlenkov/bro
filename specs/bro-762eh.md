@@ -31,8 +31,13 @@ re-`worktree open` idempotently (`already_open` handles repeats).
 `herdr-plugin.toml` + one reconciler command + declared surfaces:
 
 - **Sync loop** (`[[startup]]` + periodic tick, or a `[[panes]]`-backed
-  daemon pane): poll `bro fleet status --json` and `herdr worktree list`;
-  converge —
+  daemon pane): converge workspaces/panes to what the source reports.
+  The trigger sits behind an `EventSource` interface — `PollSource`
+  (v1: diffs `bro fleet status --json` + `herdr worktree list` on a
+  tick) and `LiveSource` (seam only, no implementation, no transport
+  names in plugin code — a live feed from bro's event plane may arrive
+  later and plugs in here). Swapping the source changes the trigger,
+  never the convergence logic. Converge —
   - claimed/armed worktree without a workspace → `herdr worktree open
     --path` + `--label <bead title>`; label drift → `workspace.rename`;
   - native-spawned worker (registry entry, detached) → mirror pane in
