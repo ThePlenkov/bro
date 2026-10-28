@@ -234,6 +234,7 @@ function spawnDetached(cwd: string, logFd: number): void {
     cwd,
     detached: true,
     stdio: ['ignore', logFd, logFd],
+    env: { ...process.env, BRO_LOG_TIMESTAMP: '1' },
   });
   child.on('error', () => {});
   child.unref();

@@ -63,6 +63,7 @@ cleanup_payload() {
   [ -z "$PAYLOAD_FILE" ] || rm -f "$PAYLOAD_FILE"
   return 0
 }
+
 trap cleanup_payload 0
 
 BRO_HOOK_WATCHDOG_S=${BRO_HOOK_WATCHDOG_S:-8}
@@ -90,6 +91,32 @@ _kill_tree() {
   :
 }
 
+bro_hook_kill_journal() {
+  # best-effort journal of host/watchdog kills to <git-common>/bro/hooks/perf/killed.jsonl
+  # fail-open
+  local _base=${DEVIN_PROJECT_DIR:-$PWD}
+  local _common
+  _common=$(git -C "$_base" rev-parse --git-common-dir 2>/dev/null | sed -n 1p)
+  case "$_common" in
+    /*) ;;
+    ?*) _common=$_base/$_common ;;
+    *) _common= ;;
+  esac
+  [ -n "$_common" ] || return 0
+  local _dir="$_common/bro/hooks/perf"
+  mkdir -p "$_dir" 2>/dev/null || return 0
+  local _ts _ev _budget
+  _ts=$(date -u +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || date +%s)
+  _ev=${1:-timeout}
+  _budget=${2:-${BRO_HOOK_WATCHDOG_S:-8}}
+  # try to use python/node if available for safe JSON; fallback to printf
+  if command -v node >/dev/null 2>&1; then
+    node -e "require('fs').appendFileSync(process.argv[1], JSON.stringify({ts:new Date().toISOString(),event:process.argv[2],budget_ms:Number(process.argv[3])*1000})+'\n');" "$_dir/killed.jsonl" "$_ev" "$_budget" 2>/dev/null && return 0
+  fi
+  printf '{"ts":"%s","event":"%s","budget_ms":%d}\n' "$_ts" "$_ev" $((_budget * 1000)) >> "$_dir/killed.jsonl" 2>/dev/null || true
+  return 0
+}
+
 run_bounded() {
   RUN_BOUNDED_EXPIRED=0
   _now=$(date +%s)
@@ -97,10 +124,12 @@ run_bounded() {
   _remaining=$((BRO_HOOK_WATCHDOG_S - _elapsed))
   if [ "$_remaining" -le 0 ]; then
     RUN_BOUNDED_EXPIRED=1
+    bro_hook_kill_journal timeout
     return 124
   fi
   _marker=$(mktemp "${TMPDIR:-/tmp}/bro-hook-watchdog.XXXXXX" 2>/dev/null) || {
     RUN_BOUNDED_EXPIRED=1
+    bro_hook_kill_journal timeout
     return 124
   }
   # fd 0 may be closed at launch: `exec` is a POSIX special builtin —
@@ -131,6 +160,7 @@ run_bounded() {
   wait "$_wd" 2>/dev/null || true
   if [ -s "$_marker" ]; then
     RUN_BOUNDED_EXPIRED=1
+    bro_hook_kill_journal timeout
     # the dog's TERM landed before it exited — give the tree its 1s
     # grace, then KILL the recorded kids and sweep. Checked after
     # wait $_wd too: a marker that lands between the wait and the dog's
@@ -145,7 +175,7 @@ run_bounded() {
   else
     _now=$(date +%s)
     _elapsed=$((_now - BRO_HOOK_T0))
-    [ "$_elapsed" -ge "$BRO_HOOK_WATCHDOG_S" ] && RUN_BOUNDED_EXPIRED=1
+    [ "$_elapsed" -ge "$BRO_HOOK_WATCHDOG_S" ] && { RUN_BOUNDED_EXPIRED=1; bro_hook_kill_journal timeout; }
   fi
   rm -f "$_marker" "$_kidsfile" 2>/dev/null
   return "$_rc"
@@ -634,12 +664,18 @@ cursor_permission_ask() {
 if [ -f "$DIR/packages/cli/dist/index.js" ] && command -v node >/dev/null 2>&1; then
   run_bounded node "$DIR/packages/cli/dist/index.js" hooks "$@"
   _rc=$?
-  [ "$RUN_BOUNDED_EXPIRED" = 1 ] && { cursor_permission_ask; exit 0; }
+  if [ "$RUN_BOUNDED_EXPIRED" = 1 ]; then
+    bro_hook_kill_journal "${EVENT:-unknown}" "${BRO_HOOK_WATCHDOG_S:-8}"
+    cursor_permission_ask; exit 0
+  fi
   [ "$_rc" -eq 0 ] && exit 0
 fi
 if command -v bro >/dev/null 2>&1; then
   run_bounded bro hooks "$@" || true
-  [ "$RUN_BOUNDED_EXPIRED" = 1 ] && cursor_permission_ask
+  if [ "$RUN_BOUNDED_EXPIRED" = 1 ]; then
+    bro_hook_kill_journal "${EVENT:-unknown}" "${BRO_HOOK_WATCHDOG_S:-8}"
+    cursor_permission_ask
+  fi
 else
   cursor_permission_ask
 fi
