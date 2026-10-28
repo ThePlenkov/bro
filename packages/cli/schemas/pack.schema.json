@@ -1,0 +1,19 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://unpkg.com/@broject/bro/schemas/pack.schema.json",
+  "title": "Bro Pack Manifest",
+  "type": "object",
+  "additionalProperties": true,
+  "required": ["name", "version"],
+  "properties": {
+    "$schema": { "type": "string" },
+    "name": { "type": "string" },
+    "version": { "type": "string" },
+    "requires": { "type": "object" },
+    "skills": { "type": "array", "items": { "type": "string" } },
+    "formulas": { "type": "array", "items": { "type": "string" } },
+    "guards": { "type": "array" },
+    "providers": { "type": "object" },
+    "hooks": { "type": "array" }
+  }
+}

@@ -1,16 +1,18 @@
 ---
+
 scope:
-  - packages/pack/
-  - scripts/gen-pack.ts
-  - scripts/check-pack.ts
-  - packages/core/src/pack.ts
-  - packages/core/src/config.ts
-  - packages/core/src/connectors.ts
-  - packages/cli/src/commands/setup.ts
-  - packages/cli/src/commands/pack.ts
-  - packages/cli/src/commands/doctor.ts
-  - packages/cli/src/skills-data.ts
-  - packages/cli/src/embedded.ts
+- packages/pack/
+- scripts/gen-pack.ts
+- scripts/check-pack.ts
+- packages/core/src/pack.ts
+- packages/core/src/config.ts
+- packages/core/src/connectors.ts
+- packages/cli/src/commands/setup.ts
+- packages/cli/src/commands/pack.ts
+- packages/cli/src/commands/doctor.ts
+- packages/cli/src/skills-data.ts
+- packages/cli/src/embedded.ts
+
 ---
 
 # bro-5phkq — pack format: manifest, sections, composition rules
@@ -50,6 +52,10 @@ symlinks followed (`readPackTree`/`lstat`). At the package root, beside
 `package.json`, sits **`pack.json`** — the manifest. File payloads stay
 trees: `skills/<name>/…`, `formulas/*.formula.toml`. Everything else is
 inline JSON in the manifest — one schema surface, nothing second-class.
+The manifest references `https://unpkg.com/@broject/bro/schemas/pack.schema.json`
+so that schema must be published with the CLI (see below) and any
+pack.schema.json artifact required by the manifest must be included in
+published packages.
 
 Backward compatibility: a package without `pack.json` resolves as the
 legacy manifest `{skills: <every dir under skills/>, formulas: <every
@@ -90,14 +96,24 @@ DSLs:
   `guardProblems()` validates; a malformed def fails install (pack defs
   are authored content like config defs — fail closed, not the
   connector contributions' fail-open).
-- `providers`: name → `ProviderEntry`, the exact `providers` config
-  schema — `parseProviderEntry`/`PROVIDER_REGISTRY` validates. Presets
-  can name `apiKeyEnv`/`apiKeyCommand` (a variable name and a command —
-  the schema has never admitted inline secrets, so a pack *cannot*
-  smuggle a key). A preset is a default, not an activation: it resolves
-  only when a consumer names it (`judge.provider`,
-  `agents.<backend>.provider`, `fleet.profiles.*`), so an unreferenced
-  preset spends nothing and calls nothing.
+- `providers`: name → `ProviderEntry`, the `providers` config schema —
+  `parseProviderEntry`/`PROVIDER_REGISTRY` is the base validator, but
+  manifest validation is **strict** where config is forgiving:
+  `parsePack` uses an error-returning variant (never warn-and-drop)
+  and an invalid entry _fails the pack_ (config's warn-and-drop exists
+  for a hand-edited file; a published manifest is authored content —
+  same fail-closed rule as `guards`). Unknown fields on a provider entry
+  fail too — a typo'd `apikeyEnv` silently dropping the key source is a
+  pack defect, not forward-compat; `parsePack` rejects any keys not in
+  the ProviderEntry allowlist. `apiKeyEnv` names a variable and
+  `apiKeyCommand` runs a lookup; beyond the config validators
+  (`isEnvName`, the inline-key denylist — which admits ALL-CAPS literals
+  and key shapes outside its patterns) a pack screens both fields for
+  credential-shaped values, since a published manifest carrying a literal
+  key is a leaked secret, not a config error. A preset is a default, not
+  an activation: it resolves only when a consumer names it
+  (`judge.provider`, `agents.<backend>.provider`, `fleet.profiles.*`),
+  so an unreferenced preset spends nothing and calls nothing.
 - `hooks`: `{event, command, timeoutMs?, failOpen?}` — the
   `hooks.connectors[]` entry shape bro-u8e8m specifies; event names are
   that spec's set. Commands execute on every matching event — this is
@@ -105,8 +121,10 @@ DSLs:
 - `requires.bro`: checked at install; unsatisfied → refuse before any
   mutation.
 - `name`/`version` must equal `package.json`'s — `gen-pack` stamps both
-  from one source; a mismatch is a pack defect (install warns, the
-  repo-side `check:pack` fails).
+  from one source; a mismatch is a pack defect — install **refuses**
+  before any mutation (never a warning; a warning would still let the
+  lock and provenance records state a false identity), and the repo-side
+  `check:pack` fails.
 - Unknown top-level keys warn and are ignored (forward compat — the
   config-file convention).
 
@@ -115,12 +133,12 @@ DSLs:
 Packs compose as an **ordered set processed left→right**. v1 rule:
 **identical merges, differing errors** — no silent shadow.
 
-| Section | Same key, identical content | Same key, different content |
-| ------- | --------------------------- | --------------------------- |
-| `skills`, `formulas` (file payloads, by relpath) | dedupe | **error** — names both packs and the path |
-| `guards` (by `name`) | dedupe | **error** — names both packs and the def |
-| `providers` (by entry name) | dedupe | **error** |
-| `hooks` (by full entry equality) | dedupe | concatenate — both run, in pack order |
+| Section                                          | Same key, identical content | Same key, different content               |
+| ------------------------------------------------ | --------------------------- | ----------------------------------------- |
+| `skills`, `formulas` (file payloads, by relpath) | dedupe                      | **error** — names both packs and the path |
+| `guards` (by `name`)                             | dedupe                      | **error** — names both packs and the def  |
+| `providers` (by entry name)                      | dedupe                      | **error**                                 |
+| `hooks` (by full entry equality)                 | dedupe                      | concatenate — both run, in pack order     |
 
 First-wins was rejected: a pack that silently loses a skill or guard to
 an earlier pack is a broken install the operator never sees. Erroring
@@ -129,8 +147,8 @@ makes the collision a decision — drop a pack, or rename in the pack.
 Repo and config content **always outranks** pack content:
 
 - An existing `.agents/skills/<name>` with different content is a
-  collision, not an overwrite — today's `installFiles` warns *and
-  overwrites*, which is right for `--skills` (reinstalling canonical
+  collision, not an overwrite — today's `installFiles` warns _and
+  overwrites_, which is right for `--skills` (reinstalling canonical
   content) but wrong for a pack: a locally-modified file is operator
   content, so pack install warns, keeps the local file, and reports the
   skipped member at the end. Reinstalling over a local edit is an
@@ -161,8 +179,8 @@ Two channels, by content kind:
      active (today's `wantsBeads` rule).
 2. **The pack installs as a unit**: `.agents/packs/<slug>/` holds the
    resolved `pack.json` plus `install.json` provenance
-   `{name, version, spec, hooksArmed}` — the audit, upgrade, and
-   uninstall unit (removing the dir removes the pack's def
+   `{name, version, spec, hooksArmed, manifestHash}` — the audit,
+   upgrade, and uninstall unit (removing the dir removes the pack's def
    contributions). Committable like `.agents/skills/`.
 3. **Def contributions resolve at load time, never copied into config**:
    - guards: `collectGuards` reads installed manifests as the `pack`
@@ -171,8 +189,14 @@ Two channels, by content kind:
    - hooks: installed entries join `hooks.connectors[]` resolution
      (runtime is bro-u8e8m's) tagged `source: "pack:<name>"`, gated on
      the install receipt's `hooksArmed` — `bro setup --pack x
-     --with-hooks` (or `bro pack arm <name>`) records consent; unarmed
-     entries are listed by `bro pack list`/`bro doctor` but never
+     --with-hooks` (or `bro pack arm <name>`) records consent.
+     `manifestHash` (sha256 over the resolved `pack.json`) binds that
+     consent to the armed content: an entry resolves as armed only
+     while the installed manifest still hashes to the receipt's value —
+     a post-install manifest edit drifts the hash, disarms the pack's
+     hooks (`bro pack list`/`bro doctor` show the drift; `bro pack arm`
+     re-arms explicitly), so an armed command can never be swapped out
+     under a stale receipt. Unarmed entries are listed but never
      executed.
 
 `pack` stays the config key for the default pack; `packs: string[]`
@@ -230,24 +254,39 @@ packages/cli/src/commands/pack.ts    bro pack list|arm|disarm (facade)
 packages/cli/src/commands/doctor.ts  pack rows — installed, armed hooks,
                                      shadowed presets
 packages/pack/pack.json              emitted manifest (reference pack)
+packages/pack/package.json           `files` gains `pack.json` — the
+                                     manifest must reach the tarball
+packages/cli/schemas/pack.schema.json  the $schema target — editor
+                                     schema published with the CLI
+                                     (mirrors bro.config.schema.json)
 scripts/gen-pack.ts                  trees + manifest emission
-scripts/check-pack.ts                freshness gate (mirrors check:plugins)
+scripts/check-pack.ts                freshness gate (mirrors check:plugins);
+                                     also asserts the npm tarball carries
+                                     pack.json and any required schema
+                                     (npm pack --dry-run)
 ```
 
 ## Plan
 
 - [x] bro-5phkq this spec
 - [ ] `packages/core/src/pack.ts` — manifest schema, `parsePack`
-      (guardProblems/parseProviderEntry reuse), composition planner
-- [ ] `gen-pack.ts` emits `pack.json`; `scripts/check-pack.ts` +
-      `npm run check:pack` in CI
+  (strict provider validation — error-returning variant, unknown
+  fields fail, credential-shape screen; guardProblems reuse),
+  composition planner
+- [ ] `packages/cli/schemas/pack.schema.json` — the published `$schema`
+  target (rides the CLI tarball's existing `schemas/` entry)
+- [ ] `gen-pack.ts` emits `pack.json` (and any required schema artifact);
+  `packages/pack/package.json` `files` gains `pack.json` (and schema
+  if referenced); `scripts/check-pack.ts` + `npm run check:pack` in CI
+  (freshness + `npm pack --dry-run` asserts the tarball carries the
+  manifest and any required schema)
 - [ ] setup: multi-spec `--pack a,b`, validate-then-mutate, conflict
-      errors, `.agents/packs/` unit install, skills-lock `pack` entries
+  errors, `.agents/packs/` unit install, skills-lock `pack` entries
 - [ ] config `packs` key; providers preset layer; `collectGuards` pack
-      source
+  source
 - [ ] `bro pack list|arm|disarm`; doctor rows
 - [ ] tests: pack.ts units; setup.test.ts matrix (subset lists,
-      conflict → clean failure, legacy no-manifest pack, hooks unarmed)
+  conflict → clean failure, legacy no-manifest pack, hooks unarmed)
 
 ## Verify
 
@@ -255,7 +294,9 @@ scripts/check-pack.ts                freshness gate (mirrors check:plugins)
   `npm run build`, `check:plugins`, `check:embedded`, `check:pack` green.
 - e2e scratch repo: `--pack a,b` union install; a differing-skill
   conflict exits non-zero before any file lands; a pack without
-  `pack.json` installs as legacy; `--with-hooks` flips `hooksArmed`.
+  `pack.json` installs as legacy; `--with-hooks` flips `hooksArmed`;
+  editing the installed `pack.json` drifts `manifestHash` and disarms
+  hooks until re-armed.
 - `bro guard list` shows a pack-sourced def; `bro guard test` fires it.
 - A pack provider preset resolves when `judge.provider` names it; an
   operator entry of the same name shadows it wholesale.
