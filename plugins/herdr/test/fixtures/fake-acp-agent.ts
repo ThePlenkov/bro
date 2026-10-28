@@ -16,6 +16,60 @@ const notify = (update: unknown): void => {
 };
 
 let askedPermission = false;
+
+/** One scripted turn — the update stream the e2e test asserts on. */
+function pumpTurn(promptId: number | undefined): void {
+  notify({
+    sessionUpdate: 'agent_thought_chunk',
+    content: { type: 'text', text: 'thinking about the task…' },
+  });
+  notify({
+    sessionUpdate: 'plan',
+    entries: [
+      { content: 'Do the thing', priority: 'medium', status: 'in_progress' },
+      { content: 'Report it', priority: 'low', status: 'pending' },
+    ],
+  });
+  notify({
+    sessionUpdate: 'tool_call',
+    toolCallId: 'exec:0#fake',
+    title: 'Run ls',
+    kind: 'execute',
+    status: 'pending',
+  });
+  notify({ sessionUpdate: 'tool_call_update', toolCallId: 'exec:0#fake', status: 'in_progress' });
+  if (!askedPermission) {
+    askedPermission = true;
+    send({
+      jsonrpc: '2.0',
+      id: 99,
+      method: 'session/request_permission',
+      params: {
+        sessionId: 'fake-1',
+        toolCall: {
+          toolCallId: 'exec:0#fake',
+          title: 'Run ls',
+          kind: 'execute',
+          status: 'in_progress',
+        },
+        options: [
+          { optionId: 'a1', name: 'Allow once', kind: 'allow_once' },
+          { optionId: 'a2', name: 'Always', kind: 'allow_always' },
+          { optionId: 'r1', name: 'Reject', kind: 'reject_once' },
+        ],
+      },
+    });
+  }
+  notify({ sessionUpdate: 'tool_call_update', toolCallId: 'exec:0#fake', status: 'completed' });
+  notify({
+    sessionUpdate: 'agent_message_chunk',
+    content: { type: 'text', text: 'Done — the files ' },
+  });
+  notify({ sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: 'are listed.' } });
+  notify({ sessionUpdate: 'usage_update', used: 1234, size: 262000 });
+  send({ jsonrpc: '2.0', id: promptId, result: { stopReason: 'end_turn' } });
+}
+
 const rl = createInterface({ input: process.stdin });
 rl.on('line', line => {
   const m = JSON.parse(line) as { id?: number; method?: string };
@@ -31,73 +85,9 @@ rl.on('line', line => {
     case 'session/new':
       send({ jsonrpc: '2.0', id: m.id, result: { sessionId: 'fake-1' } });
       return;
-    case 'session/prompt': {
-      const id = m.id;
-      const seq = (): void => {
-        notify({
-          sessionUpdate: 'agent_thought_chunk',
-          content: { type: 'text', text: 'thinking about the task…' },
-        });
-        notify({
-          sessionUpdate: 'plan',
-          entries: [
-            { content: 'Do the thing', priority: 'medium', status: 'in_progress' },
-            { content: 'Report it', priority: 'low', status: 'pending' },
-          ],
-        });
-        notify({
-          sessionUpdate: 'tool_call',
-          toolCallId: 'exec:0#fake',
-          title: 'Run ls',
-          kind: 'execute',
-          status: 'pending',
-        });
-        notify({
-          sessionUpdate: 'tool_call_update',
-          toolCallId: 'exec:0#fake',
-          status: 'in_progress',
-        });
-        if (!askedPermission) {
-          askedPermission = true;
-          send({
-            jsonrpc: '2.0',
-            id: 99,
-            method: 'session/request_permission',
-            params: {
-              sessionId: 'fake-1',
-              toolCall: {
-                toolCallId: 'exec:0#fake',
-                title: 'Run ls',
-                kind: 'execute',
-                status: 'in_progress',
-              },
-              options: [
-                { optionId: 'a1', name: 'Allow once', kind: 'allow_once' },
-                { optionId: 'a2', name: 'Always', kind: 'allow_always' },
-                { optionId: 'r1', name: 'Reject', kind: 'reject_once' },
-              ],
-            },
-          });
-        }
-        notify({
-          sessionUpdate: 'tool_call_update',
-          toolCallId: 'exec:0#fake',
-          status: 'completed',
-        });
-        notify({
-          sessionUpdate: 'agent_message_chunk',
-          content: { type: 'text', text: 'Done — the files ' },
-        });
-        notify({
-          sessionUpdate: 'agent_message_chunk',
-          content: { type: 'text', text: 'are listed.' },
-        });
-        notify({ sessionUpdate: 'usage_update', used: 1234, size: 262000 });
-        send({ jsonrpc: '2.0', id, result: { stopReason: 'end_turn' } });
-      };
-      seq();
+    case 'session/prompt':
+      pumpTurn(m.id);
       return;
-    }
     case 'session/cancel':
       process.exit(0);
     default:

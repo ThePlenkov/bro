@@ -29,6 +29,20 @@ const RED = '\u001b[31m';
 const YELLOW = '\u001b[33m';
 const RESET = '\u001b[0m';
 
+/** Agent-controlled text may carry control bytes — strip everything
+ *  non-printable so a hostile or buggy backend cannot write escape
+ *  sequences into the pane. Line-mode invariant too: newlines become
+ *  a visible `⏎`, never a second line. */
+export const safe = (s: string): string =>
+  s
+    .replace(
+      /\u001b\[[0-9;:?]*[a-zA-Z]|\u001b\][^\u0007\u001b]*(?:\u0007|\u001b\\)|\u001b[@-Z\\-_]/g,
+      ''
+    )
+    .replace(/[\u0000-\u0008\u000b-\u001f\u007f-\u009f]/g, '')
+    .replace(/\r/g, '')
+    .replace(/\n/g, ' ⏎ ');
+
 /** The fixed permission policy (spec): reads (and other observably
  *  non-mutating kinds) may be remembered ALWAYS; everything else is
  *  once-only. A backend that offers no allow-kind option gets a
@@ -105,8 +119,8 @@ export class AcpRenderer {
   private static textOf(u: SessionUpdateLike): string {
     const c = u['content'] as { type?: string; text?: string } | undefined;
     return c?.type === 'text' && typeof c.text === 'string'
-      ? c.text
-      : `[${u.sessionUpdate}: ${c?.type ?? '?'}]`;
+      ? safe(c.text)
+      : `[${safe(u.sessionUpdate)}: ${c?.type ?? '?'}]`;
   }
 
   private toolLine(rec: ToolRec, status: string): void {
@@ -137,10 +151,10 @@ export class AcpRenderer {
     };
     const id = t.toolCallId ?? '?';
     const rec = this.tools.get(id) ?? {};
-    if (typeof t.title === 'string' && t.title !== '') rec.title = t.title;
-    if (typeof t.name === 'string' && t.name !== '') rec.name = t.name;
-    if (typeof t.kind === 'string' && t.kind !== '') rec.kind = t.kind;
-    const status = typeof t.status === 'string' && t.status !== '' ? t.status : 'pending';
+    if (typeof t.title === 'string' && t.title !== '') rec.title = safe(t.title);
+    if (typeof t.name === 'string' && t.name !== '') rec.name = safe(t.name);
+    if (typeof t.kind === 'string' && t.kind !== '') rec.kind = safe(t.kind);
+    const status = typeof t.status === 'string' && t.status !== '' ? safe(t.status) : 'pending';
     // a repeat of the seen status is churn (content mid-streams share
     // it); only lifecycle edges print
     if (rec.status === status) {
@@ -164,9 +178,59 @@ export class AcpRenderer {
             : e.status === 'pending'
               ? '[ ]'
               : '[~]';
-      this.out(`  ${box} ${e.content ?? '?'}`);
+      this.out(`  ${box} ${e.content !== undefined ? safe(e.content) : '?'}`);
     }
   }
+
+  private onUsage(u: SessionUpdateLike): void {
+    const t = u as { used?: unknown; size?: unknown };
+    this.out(this.dim(`◌ usage ${String(t.used ?? '?')}/${String(t.size ?? '?')}`));
+  }
+
+  private onConfig(u: SessionUpdateLike): void {
+    const opts =
+      (u['configOptions'] as { id?: string; currentValue?: unknown }[] | undefined) ?? [];
+    const kv = opts
+      .map(o => `${safe(o.id ?? '?')}=${safe(String(o.currentValue ?? '?'))}`)
+      .join(' ');
+    this.out(this.dim(`config ${kv}`));
+  }
+
+  private onMode(u: SessionUpdateLike): void {
+    this.out(
+      this.dim(`mode → ${safe(String((u as { currentModeId?: unknown }).currentModeId ?? '?'))}`)
+    );
+  }
+
+  private onCommands(u: SessionUpdateLike): void {
+    const cmds = (u['availableCommands'] as unknown[] | undefined) ?? [];
+    this.out(this.dim(`${cmds.length} commands`));
+  }
+
+  private onSessionInfo(u: SessionUpdateLike): void {
+    const title = (u as { title?: unknown }).title;
+    this.out(
+      this.dim(`session ${typeof title === 'string' && title !== '' ? safe(title) : '(info)'}`)
+    );
+  }
+
+  private onSubagent(u: SessionUpdateLike): void {
+    const s = u as { sessionId?: string; title?: string | null; description?: string | null };
+    const desc =
+      s.description != null && s.description !== '' ? this.dim(` — ${safe(s.description)}`) : '';
+    this.out(`⎇ subagent ${safe(s.title ?? s.sessionId ?? '?')}${desc}`);
+  }
+
+  /** The one-line-per-kind renderers — every entry flushes the chunk
+   *  buffer first (a structural line always lands in order). */
+  private readonly structured: Record<string, (u: SessionUpdateLike) => void> = {
+    usage_update: u => this.onUsage(u),
+    config_option_update: u => this.onConfig(u),
+    current_mode_update: u => this.onMode(u),
+    available_commands_update: u => this.onCommands(u),
+    session_info_update: u => this.onSessionInfo(u),
+    subagent_update: u => this.onSubagent(u),
+  };
 
   /** One session/update value (params.update on the wire). */
   update(u: SessionUpdateLike): void {
@@ -187,52 +251,12 @@ export class AcpRenderer {
         this.flush();
         this.onPlan(u);
         return;
-      case 'usage_update': {
-        this.flush();
-        const t = u as { used?: unknown; size?: unknown };
-        this.out(this.dim(`◌ usage ${String(t.used ?? '?')}/${String(t.size ?? '?')}`));
-        return;
-      }
-      case 'config_option_update': {
-        this.flush();
-        const opts =
-          (u['configOptions'] as { id?: string; currentValue?: unknown }[] | undefined) ?? [];
-        const kv = opts.map(o => `${o.id}=${String(o.currentValue ?? '?')}`).join(' ');
-        this.out(this.dim(`config ${kv}`));
-        return;
-      }
-      case 'current_mode_update': {
-        this.flush();
-        this.out(
-          this.dim(`mode → ${String((u as { currentModeId?: unknown }).currentModeId ?? '?')}`)
-        );
-        return;
-      }
-      case 'available_commands_update': {
-        this.flush();
-        const cmds = (u['availableCommands'] as unknown[] | undefined) ?? [];
-        this.out(this.dim(`${cmds.length} commands`));
-        return;
-      }
-      case 'session_info_update': {
-        this.flush();
-        const title = (u as { title?: unknown }).title;
-        this.out(
-          this.dim(`session ${typeof title === 'string' && title !== '' ? title : '(info)'}`)
-        );
-        return;
-      }
-      case 'subagent_update': {
-        this.flush();
-        const s = u as { sessionId?: string; title?: string | null; description?: string | null };
-        this.out(
-          `⎇ subagent ${s.title ?? s.sessionId ?? '?'}${s.description != null && s.description !== '' ? this.dim(` — ${s.description}`) : ''}`
-        );
-        return;
-      }
       default:
         this.flush();
-        this.out(this.dim(`[${u.sessionUpdate}]`));
+        (
+          this.structured[u.sessionUpdate] ??
+          (x => this.out(this.dim(`[${safe(x.sessionUpdate)}]`)))
+        )(u);
         return;
     }
   }
@@ -249,34 +273,49 @@ export class AcpRenderer {
     const p = (params ?? {}) as { channel?: string; message?: string; level?: string };
     const text =
       typeof p.channel === 'string' && typeof p.message === 'string'
-        ? `‹${p.channel}› ${p.message}`
-        : `[${method}]`;
+        ? `‹${safe(p.channel)}› ${safe(p.message)}`
+        : `[${safe(method)}]`;
     this.out(this.dim(text));
   }
 
   /** `session/request_permission` — render the chip and answer per the
-   *  fixed policy; returns the response `outcome` object for the wire. */
+   *  policy; returns the response `outcome` object for the wire.
+   *  `mode`: `auto` is the spec's fixed policy (reads → allow_always,
+   *  else → allow_once); `reads` approves read-kind tools only and
+   *  rejects the rest; `none` rejects everything. A backend offering
+   *  no matching option gets cancelled — an invented answer is not a
+   *  viewer's call. */
   permission(
-    params: PermissionRequestLike
+    params: PermissionRequestLike,
+    mode: 'auto' | 'reads' | 'none' = 'auto'
   ): { outcome: 'selected'; optionId: string } | { outcome: 'cancelled' } {
     this.flush();
-    const title = params.toolCall?.title ?? params.toolCall?.toolCallId ?? 'permission request';
+    const title = safe(
+      params.toolCall?.title ?? params.toolCall?.toolCallId ?? 'permission request'
+    );
     const options = params.options ?? [];
-    const names = options.map(o => o.name ?? o.optionId ?? '?').join(', ');
+    const names = options.map(o => safe(o.name ?? o.optionId ?? '?')).join(', ');
     this.out(`${this.paint(YELLOW, '⚠')} ${title} [${names}]`);
     const readKind = params.toolCall?.kind != null && ALWAYS_KINDS.has(params.toolCall.kind);
-    const pick =
-      (readKind ? options.find(o => o.kind === 'allow_always') : undefined) ??
-      options.find(o => o.kind === 'allow_once') ??
-      (readKind ? undefined : options.find(o => o.kind === 'allow_always'));
+    const wantsDeny = mode === 'none' || (mode === 'reads' && !readKind);
+    const pick = wantsDeny
+      ? (options.find(o => o.kind === 'reject_once') ??
+        options.find(o => o.kind === 'reject_always'))
+      : ((readKind ? options.find(o => o.kind === 'allow_always') : undefined) ??
+        options.find(o => o.kind === 'allow_once') ??
+        (readKind ? undefined : options.find(o => o.kind === 'allow_always')));
     if (pick === undefined) {
-      this.out(this.dim('  → cancelled — no allow option offered'));
+      this.out(this.dim(`  → cancelled — permit=${mode}, no matching option offered`));
       return { outcome: 'cancelled' };
     }
-    const why = readKind ? 'read-kind tool → allow-always' : 'default → allow-once';
+    const why = wantsDeny
+      ? `denied — policy: permit=${mode}`
+      : readKind
+        ? 'read-kind tool → allow-always'
+        : 'default → allow-once';
     this.out(
       this.dim(
-        `  → auto-answered ${pick.name ?? pick.optionId ?? '?'} (${pick.kind ?? '?'}) — policy: ${why}`
+        `  → auto-answered ${safe(pick.name ?? pick.optionId ?? '?')} (${safe(pick.kind ?? '?')}) — ${why}`
       )
     );
     return { outcome: 'selected', optionId: pick.optionId ?? '' };
@@ -286,14 +325,16 @@ export class AcpRenderer {
    *  elicitation — unadvertised caps) — visible, then method-not-found. */
   unhandled(method: string): void {
     this.flush();
-    this.out(this.dim(`[${method}] — unadvertised, method-not-found`));
+    this.out(this.dim(`[${safe(method)}] — unadvertised, method-not-found`));
   }
 
   /** Turn boundary — session/prompt resolved with a stop reason. */
   turnEnd(stopReason: string | undefined): void {
     this.flush();
     this.flushNotices();
-    this.out(this.dim(`── turn complete (${stopReason ?? 'unknown'}) ──`));
+    this.out(
+      this.dim(`── turn complete (${stopReason !== undefined ? safe(stopReason) : 'unknown'}) ──`)
+    );
   }
 
   /** The closing marker — child exit, transport death, or a terminal
@@ -301,7 +342,7 @@ export class AcpRenderer {
   closed(detail: string): void {
     this.flush();
     this.flushNotices();
-    this.out(this.dim(`── session ended (${detail}) — scrollback kept ──`));
+    this.out(this.dim(`── session ended (${safe(detail)}) — scrollback kept ──`));
   }
 
   /** Any trailing buffered chunk lands as its own line. */

@@ -155,6 +155,47 @@ describe('AcpRenderer — permission policy', () => {
     );
     assert.deepEqual(res, { outcome: 'cancelled' });
   });
+
+  test('permit=reads denies non-read kinds via reject_once', () => {
+    const { lines, out } = sink();
+    const r = new AcpRenderer(out, { color: false });
+    const res = r.permission(
+      permReq('edit', [
+        { optionId: 'o1', name: 'Allow once', kind: 'allow_once' },
+        { optionId: 'r1', name: 'Reject', kind: 'reject_once' },
+      ]),
+      'reads'
+    );
+    assert.deepEqual(res, { outcome: 'selected', optionId: 'r1' });
+    assert.ok(lines.some(l => l.includes('auto-answered Reject')));
+  });
+
+  test('permit=none rejects even read kinds', () => {
+    const { out } = sink();
+    const r = new AcpRenderer(out, { color: false });
+    const res = r.permission(
+      permReq('read', [
+        { optionId: 'o1', name: 'Allow', kind: 'allow_once' },
+        { optionId: 'r1', name: 'Reject', kind: 'reject_once' },
+      ]),
+      'none'
+    );
+    assert.deepEqual(res, { outcome: 'selected', optionId: 'r1' });
+  });
+});
+
+describe('AcpRenderer — wire text is sanitized', () => {
+  test('escape sequences and newlines cannot inject into the pane', () => {
+    const { lines, out } = sink();
+    const r = new AcpRenderer(out, { color: false });
+    r.update(
+      upd('agent_message_chunk', { content: { type: 'text', text: 'x\u001b[2J\u001b[H\nEVIL' } })
+    );
+    r.update(upd('tool_call', { toolCallId: 't', title: 'rm\u001b[1m-x', kind: 'e\u0007xec' }));
+    r.end();
+    assert.deepEqual(lines, ['x ⏎ EVIL', '⣿ rm-x [exec] pending']);
+    for (const l of lines) assert.ok(!l.includes('\u001b'));
+  });
 });
 
 describe('AcpRenderer — sidebands and markers', () => {

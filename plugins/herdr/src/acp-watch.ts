@@ -20,7 +20,13 @@
 import { spawn, type ChildProcess } from 'node:child_process';
 import { readFileSync } from 'node:fs';
 import { createInterface } from 'node:readline';
-import { AcpRenderer, type PermissionRequestLike, type SessionUpdateLike } from './acp-render.ts';
+import {
+  AcpRenderer,
+  safe,
+  type PermissionRequestLike,
+  type SessionUpdateLike,
+} from './acp-render.ts';
+import { shellWords } from './lib.ts';
 
 const PROTOCOL_VERSION = 1;
 
@@ -41,29 +47,69 @@ interface RpcMessage {
 
 interface Cli {
   cmd: string;
+  /** parsed argv form of cmd — the spawn vector, no shell */
+  cmdArgv: string[];
   prompt?: string;
   cwd: string;
   fixture?: string;
   color: boolean;
+  permit: PermitMode;
 }
 
+/** Permission auto-answer modes — `auto` is the spec's fixed policy
+ *  (reads → always, else → once); `reads` approves only read-kind
+ *  tools and rejects the rest; `none` rejects everything. The pane
+ *  stays readonly either way — this only bounds what the OWNED child
+ *  may do unattended. */
+export type PermitMode = 'auto' | 'reads' | 'none';
+
+const PERMIT_MODES = new Set<string>(['auto', 'reads', 'none']);
+
 export function parseArgs(argv: string[], env: NodeJS.ProcessEnv = process.env): Cli {
-  const cli: Cli = { cmd: 'devin acp', cwd: process.cwd(), color: env.NO_COLOR === undefined };
+  const cli: Cli = {
+    cmd: 'devin acp',
+    cmdArgv: [],
+    cwd: process.cwd(),
+    color: env.NO_COLOR === undefined,
+    permit: 'auto',
+  };
+  const VALUE_FLAGS: Record<string, 'cmd' | 'prompt' | 'cwd' | 'fixture' | 'permit'> = {
+    '--cmd': 'cmd',
+    '--prompt': 'prompt',
+    '--cwd': 'cwd',
+    '--fixture': 'fixture',
+    '--permit': 'permit',
+  };
   for (let i = 0; i < argv.length; i++) {
-    const a = argv[i];
-    if (a === '--cmd' || a === '--prompt' || a === '--cwd' || a === '--fixture') {
-      const v = argv[++i];
-      if (v === undefined) throw new Error(`${a} needs a value`);
-      if (a === '--cmd') cli.cmd = v;
-      else if (a === '--prompt') cli.prompt = v;
-      else if (a === '--cwd') cli.cwd = v;
-      else cli.fixture = v;
-    } else if (a === '--no-color' || a === '--plain') {
+    const a = argv[i] as string;
+    if (a === '--no-color' || a === '--plain') {
       cli.color = false;
+      continue;
+    }
+    const key = VALUE_FLAGS[a];
+    if (key === undefined) throw new Error(`unknown arg ${a}`);
+    const v = argv[++i];
+    if (v === undefined) throw new Error(`${a} needs a value`);
+    if (key === 'permit') {
+      if (!PERMIT_MODES.has(v)) throw new Error(`--permit must be auto|reads|none, got ${v}`);
+      cli.permit = v as PermitMode;
+    } else if (key === 'cmd') {
+      cli.cmd = v;
     } else {
-      throw new Error(`unknown arg ${a}`);
+      cli[key] = v;
     }
   }
+  // env transports — the pane command line would otherwise leak the
+  // prompt into `ps` argv (any local user reads it); env is owner-only
+  cli.prompt ??= env.ACP_WATCH_PROMPT;
+  if (env.ACP_WATCH_PERMIT !== undefined) {
+    if (!PERMIT_MODES.has(env.ACP_WATCH_PERMIT)) {
+      throw new Error(`ACP_WATCH_PERMIT must be auto|reads|none, got ${env.ACP_WATCH_PERMIT}`);
+    }
+    cli.permit = env.ACP_WATCH_PERMIT as PermitMode;
+  }
+  cli.cmdArgv = shellWords(cli.cmd);
+  if (cli.cmdArgv.length === 0) throw new Error('--cmd must name an executable');
   return cli;
 }
 
@@ -87,6 +133,8 @@ export class Wire {
   promptId: number | string | undefined;
   /** Turn-boundary consumer — the runner assigns renderer.turnEnd. */
   onTurnEnd: ((reason: string | undefined) => void) | undefined;
+  /** Permission auto-answer mode — run() sets it from --permit/env. */
+  permit: PermitMode = 'auto';
   /** prompt settled — resolve(value) with the stopReason. */
   private turnSettled: ((reason: string | undefined) => void) | undefined;
   private turnDone = false;
@@ -137,57 +185,63 @@ export class Wire {
   /** One decoded wire line — shared by the live child and the fixture. */
   onMessage(msg: RpcMessage): void {
     const isResponse = msg.method === undefined;
-    if (isResponse) {
-      const slot = msg.id === null || msg.id === undefined ? undefined : this.pending.get(msg.id);
-      if (slot !== undefined) {
-        this.pending.delete(msg.id as number | string);
-        if (msg.error !== undefined) {
-          slot.rej(
-            new Error(
-              `${slot.method} failed (${msg.error.code ?? '?'}): ${msg.error.message ?? '?'}`
-            )
-          );
-        } else {
-          slot.res(msg.result);
-        }
-      }
-      // a response carrying a prompt result settles the turn whether
-      // or not we minted the id (fixture replays carry recorded ids)
-      const stop = (msg.result as { stopReason?: string } | undefined)?.stopReason;
-      if (stop !== undefined || msg.id === this.promptId) {
-        this.settleTurn(
-          msg.error !== undefined ? `error: ${msg.error.message ?? '?'}` : (stop ?? 'unknown')
+    if (isResponse) return this.onResponse(msg);
+    if (msg.id === null || msg.id === undefined) return this.onNotification(msg);
+    return this.onRequest(msg);
+  }
+
+  private onResponse(msg: RpcMessage): void {
+    const slot = msg.id === null || msg.id === undefined ? undefined : this.pending.get(msg.id);
+    if (slot !== undefined) {
+      this.pending.delete(msg.id as number | string);
+      if (msg.error !== undefined) {
+        slot.rej(
+          new Error(`${slot.method} failed (${msg.error.code ?? '?'}): ${msg.error.message ?? '?'}`)
         );
-      }
-      return;
-    }
-    if (msg.id === null || msg.id === undefined) {
-      // notification — session/update renders; ext methods notice-dim
-      if (msg.method === 'session/update') {
-        const params = (msg.params ?? {}) as { update?: SessionUpdateLike };
-        if (params.update !== undefined) this.renderer.update(params.update);
       } else {
-        this.renderer.notice(msg.method ?? '?', msg.params);
+        slot.res(msg.result);
       }
-      return;
     }
-    // inbound request — serve permission/fs-read, method-not-found the rest
+    // a response carrying a prompt result settles the turn whether
+    // or not we minted the id (fixture replays carry recorded ids)
+    const stop = (msg.result as { stopReason?: string } | undefined)?.stopReason;
+    if (stop !== undefined || msg.id === this.promptId) {
+      this.settleTurn(
+        msg.error !== undefined ? `error: ${msg.error.message ?? '?'}` : (stop ?? 'unknown')
+      );
+    }
+  }
+
+  private onNotification(msg: RpcMessage): void {
+    // session/update renders; ext methods notice-dim
+    if (msg.method === 'session/update') {
+      const params = (msg.params ?? {}) as { update?: SessionUpdateLike };
+      if (params.update !== undefined) this.renderer.update(params.update);
+    } else {
+      this.renderer.notice(msg.method ?? '?', msg.params);
+    }
+  }
+
+  /** inbound request — serve permission/fs-read, method-not-found the rest */
+  private onRequest(msg: RpcMessage): void {
+    const id = msg.id as number | string;
     switch (msg.method) {
       case 'session/request_permission': {
-        const outcome = this.renderer.permission((msg.params ?? {}) as PermissionRequestLike);
-        this.answer(msg.id, { result: { outcome } });
+        const outcome = this.renderer.permission(
+          (msg.params ?? {}) as PermissionRequestLike,
+          this.permit
+        );
+        this.answer(id, { result: { outcome } });
         return;
       }
       case 'fs/read_text_file':
-        this.answer(msg.id, this.fsRead(msg.params));
+        this.answer(id, this.fsRead(msg.params));
         return;
       default:
         // every other inbound request is an unadvertised cap —
         // visible line, honest method-not-found
         this.renderer.unhandled(msg.method ?? '?');
-        this.answer(msg.id, {
-          error: { code: -32601, message: `${msg.method}: method not found` },
-        });
+        this.answer(id, { error: { code: -32601, message: `${msg.method}: method not found` } });
         return;
     }
   }
@@ -231,21 +285,27 @@ export class Wire {
   }
 }
 
-/** spawn → wire → handshake → optional prompt → teardown. Returns the
- *  process exit code — 0 when the turn ended `end_turn` or no prompt
- *  was asked, non-zero on everything else. */
-export async function run(
-  cli: Cli,
-  renderer: AcpRenderer,
-  out: (s: string) => void
-): Promise<number> {
-  const child: ChildProcess = spawn('sh', ['-c', cli.cmd], {
+interface Pump {
+  wire: Wire;
+  child: ChildProcess;
+  /** mutable — the exit handler writes, the teardown reads */
+  exit: { done: boolean; detail: string };
+  flushStderr: () => void;
+}
+
+/** Child + wire + stderr tally — the plumbing half of a run. */
+function spawnPump(cli: Cli, renderer: AcpRenderer, out: (s: string) => void): Pump {
+  // --cmd is argv words, never a shell line: shellWords parses quotes
+  // and escapes but performs no expansion, so the command cannot
+  // re-parse into a different program (CodeQL: no env-derived shell).
+  const child: ChildProcess = spawn(cli.cmdArgv[0] as string, cli.cmdArgv.slice(1), {
     cwd: cli.cwd,
     // BRO_HOOKS=0 — a machine backend: bro hooks no-op in the child
     // tree (same pin the acp provider sets for its spawns)
     env: { BRO_HOOKS: '0', ...process.env },
     stdio: ['pipe', 'pipe', 'pipe'],
   });
+  const exit = { done: false, detail: 'transport closed' };
   const wire = new Wire(msg => {
     try {
       child.stdin?.write(`${JSON.stringify(msg)}\n`);
@@ -253,23 +313,21 @@ export async function run(
       /* transport already gone */
     }
   }, renderer);
-  let exited = false;
-  let exitDetail = 'transport closed';
   // stdin EPIPE arrives as a stream error, not a write() throw —
   // transport death is already handled on 'exit'
   child.stdin?.on('error', () => {});
   child.once('error', err => {
-    if (!exited) {
-      exited = true;
-      exitDetail = `spawn failed: ${err.message}`;
-      wire.kill(exitDetail);
+    if (!exit.done) {
+      exit.done = true;
+      exit.detail = `spawn failed: ${err.message}`;
+      wire.kill(exit.detail);
     }
   });
   child.once('exit', (code, signal) => {
-    if (!exited) {
-      exited = true;
-      exitDetail = `child exited (code ${String(code)}, signal ${String(signal)})`;
-      wire.kill(exitDetail);
+    if (!exit.done) {
+      exit.done = true;
+      exit.detail = `child exited (code ${String(code)}, signal ${String(signal)})`;
+      wire.kill(exit.detail);
     }
   });
   // stderr is the child's diagnostic stream, not the protocol — an
@@ -280,7 +338,7 @@ export async function run(
   child.stderr?.on('data', (d: Buffer) => {
     for (const l of d.toString().split('\n')) {
       if (l === '') continue;
-      if (stderrIsSignal(l)) out(`\u001b[2m‹stderr› ${l}\u001b[0m`);
+      if (stderrIsSignal(l)) out(`\u001b[2m‹stderr› ${safe(l)}\u001b[0m`);
       else stderrSuppressed++;
     }
   });
@@ -289,10 +347,71 @@ export async function run(
       out(`\u001b[2m‹stderr› ${stderrSuppressed} diagnostic lines\u001b[0m`);
     stderrSuppressed = 0;
   };
-  const rl = createInterface({ input: child.stdout as NodeJS.ReadableStream });
-  rl.on('line', l => wire.onLine(l));
+  createInterface({ input: child.stdout as NodeJS.ReadableStream }).on('line', l => wire.onLine(l));
+  return { wire, child, exit, flushStderr };
+}
 
+/** initialize → protocol check → session/new. Returns the session id,
+ *  or undefined after rendering `closed` — the caller exits 1. */
+async function handshake(
+  pump: Pump,
+  cli: Cli,
+  renderer: AcpRenderer,
+  out: (s: string) => void
+): Promise<string | undefined> {
+  const die = async (why: string): Promise<undefined> => {
+    pump.flushStderr();
+    renderer.closed(why);
+    pump.child.kill('SIGKILL');
+    return undefined;
+  };
+  const init = (await pump.wire
+    .request('initialize', {
+      protocolVersion: PROTOCOL_VERSION,
+      clientInfo: { name: 'bro-acp-watch', version: '0.1.0' },
+      clientCapabilities: { fs: { readTextFile: true, writeTextFile: false }, terminal: false },
+    })
+    .catch(err => err)) as { protocolVersion?: number } | Error;
+  if (init instanceof Error) return die(`initialize — ${init.message}; ${pump.exit.detail}`);
+  if (init.protocolVersion !== PROTOCOL_VERSION) {
+    return die(
+      `agent negotiated protocol ${String(init.protocolVersion)} — this watcher speaks v${PROTOCOL_VERSION} only`
+    );
+  }
+  out(`\u001b[2m── acp watch: ${cli.cmd} (cwd ${cli.cwd}) ──\u001b[0m`);
+  const session = (await pump.wire
+    .request('session/new', { cwd: cli.cwd, mcpServers: [] })
+    .catch(err => err)) as { sessionId?: string } | Error;
+  if (session instanceof Error) return die(`session/new — ${session.message}; ${pump.exit.detail}`);
+  const sessionId = session.sessionId ?? '?';
+  out(`\u001b[2m── session ${sessionId} ──\u001b[0m`);
+  return sessionId;
+}
+
+/** TERM first so a graceful backend can flush, KILL is the grace
+ *  timer's backstop; resolves once the child is gone. */
+async function reap(pump: Pump): Promise<void> {
+  const grave = setTimeout(() => pump.child.kill('SIGKILL'), 1500);
+  pump.child.kill('SIGTERM');
+  await new Promise<void>(res => {
+    if (pump.exit.done) res();
+    else pump.child.once('exit', () => res());
+  });
+  clearTimeout(grave);
+}
+
+/** spawn → wire → handshake → optional prompt → teardown. Returns the
+ *  process exit code — 0 when the turn ended `end_turn` or no prompt
+ *  was asked, non-zero on everything else. */
+export async function run(
+  cli: Cli,
+  renderer: AcpRenderer,
+  out: (s: string) => void
+): Promise<number> {
+  const pump = spawnPump(cli, renderer, out);
+  const { wire, child, exit, flushStderr } = pump;
   wire.onTurnEnd = reason => renderer.turnEnd(reason);
+  wire.permit = cli.permit;
   const turnDone = wire.whenTurnDone();
 
   // pane close / ctrl+c — courtesy-cancel the session then die; the
@@ -316,46 +435,14 @@ export async function run(
   process.on('SIGINT', onSignal);
   process.on('SIGTERM', onSignal);
 
-  const init = (await wire
-    .request('initialize', {
-      protocolVersion: PROTOCOL_VERSION,
-      clientInfo: { name: 'bro-acp-watch', version: '0.1.0' },
-      clientCapabilities: { fs: { readTextFile: true, writeTextFile: false }, terminal: false },
-    })
-    .catch(err => err)) as { protocolVersion?: number } | Error;
-  if (init instanceof Error) {
-    flushStderr();
-    renderer.closed(`initialize — ${init.message}; ${exitDetail}`);
-    child.kill('SIGKILL');
-    return 1;
-  }
-  if (init.protocolVersion !== PROTOCOL_VERSION) {
-    flushStderr();
-    renderer.closed(
-      `agent negotiated protocol ${String(init.protocolVersion)} — this watcher speaks v${PROTOCOL_VERSION} only`
-    );
-    child.kill('SIGKILL');
-    return 1;
-  }
-  out(`\u001b[2m── acp watch: ${cli.cmd} (cwd ${cli.cwd}) ──\u001b[0m`);
-
-  const session = (await wire
-    .request('session/new', { cwd: cli.cwd, mcpServers: [] })
-    .catch(err => err)) as { sessionId?: string } | Error;
-  if (session instanceof Error) {
-    flushStderr();
-    renderer.closed(`session/new — ${session.message}; ${exitDetail}`);
-    child.kill('SIGKILL');
-    return 1;
-  }
-  sessionId = session.sessionId ?? '?';
-  out(`\u001b[2m── session ${sessionId} ──\u001b[0m`);
+  sessionId = await handshake(pump, cli, renderer, out);
+  if (sessionId === undefined) return 1;
 
   if (cli.prompt === undefined) {
     out(`\u001b[2m── no prompt — watching; close the pane to exit ──\u001b[0m`);
     await turnDone; // settles only on transport death
     flushStderr();
-    renderer.closed(exitDetail);
+    renderer.closed(exit.detail);
     return 0;
   }
 
@@ -363,23 +450,13 @@ export async function run(
   // The request rejection is read through the settle path, so the
   // direct promise just swallows it (no unhandled rejection).
   void wire
-    .request('session/prompt', {
-      sessionId,
-      prompt: [{ type: 'text', text: cli.prompt }],
-    })
+    .request('session/prompt', { sessionId, prompt: [{ type: 'text', text: cli.prompt }] })
     .catch(() => {});
   const stopReason = await turnDone;
-  // readonly v1: the turn's end is the session's end — TERM first so a
-  // graceful backend can flush, KILL is the grace timer's backstop
-  const grave = setTimeout(() => child.kill('SIGKILL'), 1500);
-  child.kill('SIGTERM');
-  await new Promise<void>(res => {
-    if (exited) res();
-    else child.once('exit', () => res());
-  });
-  clearTimeout(grave);
+  // readonly v1: the turn's end is the session's end
+  await reap(pump);
   flushStderr();
-  renderer.closed(exitDetail);
+  renderer.closed(exit.detail);
   return stopReason === 'end_turn' ? 0 : 1;
 }
 

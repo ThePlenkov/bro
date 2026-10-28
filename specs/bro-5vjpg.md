@@ -18,7 +18,7 @@ gemini or any future acp server.
 
 Scope is deliberately **readonly**: the pane visualizes a session it
 spawns (or a stream it is handed); it has no composer. Multi-turn input
-(`session/prompt` between turns) and permission *decisions* are later
+(`session/prompt` between turns) and permission _decisions_ are later
 increments.
 
 ## Design
@@ -45,7 +45,18 @@ increments.
   - `session/request_permission` → a visible `⚠ <title> [options]`
     line; v1 answers per a fixed policy (`allow` reads, otherwise
     `allow-once` — chosen so the session never stalls on the viewer;
-    interactive decisions are the input increment's job)
+    interactive decisions are the input increment's job). The mode is
+    `--permit auto|reads|none` (`ACP_WATCH_PERMIT` / config `acp_permit`)
+    for operators who want the owned child bounded to reads or nothing
+    — `auto` remains the spec default; every answer still prints its
+    policy line on the pane
+  - wire text is sanitized before it reaches the pane — control bytes,
+    CSI/OSC sequences and embedded newlines from titles/chunks/params
+    cannot write escape sequences into the terminal (one update, one
+    line)
+  - `--cmd` is argv words (`shellWords` parse, direct spawn — no
+    shell), and the seed prompt travels via `ACP_WATCH_PROMPT` env,
+    never argv (`ps` is world-readable)
   - turn boundaries → `── turn complete (stopReason) ──` separator
 - **Exit contract**: child exit or `session/prompt` returning a
   terminal stopReason prints a closing marker; the pane stays readable

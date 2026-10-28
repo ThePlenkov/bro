@@ -11,12 +11,16 @@
  *
  *   select `--prompt "summarize this repo"`            → prompt
  *   select `--cmd 'kilo acp' --prompt '…'`             → cmd + prompt
+ *   select `--permit reads`                            → approve reads only
  *   select `summarize this repo` (bare text)          → prompt
  *   nothing selected                                  → watch only
  *
- * `--cmd`'s fallback is the plugin config's `acp_cmd` key, then the
- * spec default `devin acp`. The pane is a normal shell pane — the
- * renderer exits, the shell stays, scrollback survives.
+ * `--cmd`'s fallback is the plugin config's `acp_cmd` key, `--permit`'s
+ * is `acp_permit`; defaults are `devin acp` / `auto`. One acp pane per
+ * workspace — a re-invoke closes the stale `acp: ` pane first. The
+ * prompt travels to the pane process via `ACP_WATCH_PROMPT` (env, not
+ * argv — `ps` is world-readable). The pane is a normal shell pane —
+ * the renderer exits, the shell stays, scrollback survives.
  */
 import { basename, join } from 'node:path';
 import {
@@ -63,21 +67,23 @@ const LABEL = 'acp: ';
 const stale = wsPanes.filter(p => p.label?.startsWith(LABEL));
 for (const p of stale) herdrTry(['pane', 'close', p.pane_id]);
 
-// selected text → --cmd/--prompt; bare text is the prompt
+// selected text → --cmd/--prompt/--permit; bare text is the prompt
 let cmd = configValue('acp_cmd', 'devin acp');
+let permit = configValue('acp_permit', 'auto');
 let prompt: string | undefined;
 const sel = (ctx.selected_text ?? '').trim();
 if (sel !== '') {
   const words = sel.startsWith('-') ? shellWords(sel) : [sel];
   for (let i = 0; i < words.length; i++) {
     const w = words[i] as string;
-    if (w === '--cmd' || w === '--prompt') {
+    if (w === '--cmd' || w === '--prompt' || w === '--permit') {
       const v = words[++i];
       if (v === undefined) {
         console.error(`acp:watch — ${w} needs a value in the selected text`);
         process.exit(1);
       }
       if (w === '--cmd') cmd = v;
+      else if (w === '--permit') permit = v;
       else prompt = v;
     } else {
       // a bare word in a flagged selection still reads as the prompt
@@ -102,14 +108,18 @@ if (pane === undefined) {
 }
 
 herdrTry(['pane', 'rename', pane, `${LABEL}${basename(cmd)}`]);
+// the prompt rides the pane process's env, not argv — `ps` shows argv
+// to every local user; /proc/*/environ is owner-only. `--cmd`/`--cwd`
+// are non-secret and stay visible in the echoed command line.
 const args = [
+  `ACP_WATCH_PERMIT=${shq(permit)}`,
+  ...(prompt === undefined ? [] : [`ACP_WATCH_PROMPT=${shq(prompt)}`]),
   shq(process.execPath),
   shq(join(PLUGIN_ROOT, 'src', 'acp-watch.ts')),
   '--cmd',
   shq(cmd),
   '--cwd',
   shq(cwd),
-  ...(prompt === undefined ? [] : ['--prompt', shq(prompt)]),
 ];
 if (herdrTry(['pane', 'run', pane, args.join(' ')]) === undefined) {
   console.error(`acp:watch — pane run failed on ${pane}`);

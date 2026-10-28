@@ -135,7 +135,14 @@ describe('run — end-to-end against a fake ACP agent', () => {
   test('handshake → prompt → updates → permission → end_turn → exit 0', async () => {
     const { lines, r } = plain();
     const code = await run(
-      { cmd: `${process.execPath} ${FAKE}`, cwd: process.cwd(), prompt: 'do it', color: false },
+      {
+        cmd: `${process.execPath} ${FAKE}`,
+        cmdArgv: [process.execPath, FAKE],
+        cwd: process.cwd(),
+        prompt: 'do it',
+        color: false,
+        permit: 'auto',
+      },
       r,
       () => {}
     );
@@ -152,7 +159,14 @@ describe('run — end-to-end against a fake ACP agent', () => {
   test('a dead command closes with the exit detail, non-zero code', async () => {
     const { lines, r } = plain();
     const code = await run(
-      { cmd: 'exit 3', cwd: process.cwd(), prompt: 'x', color: false },
+      {
+        cmd: 'false',
+        cmdArgv: ['false'],
+        cwd: process.cwd(),
+        prompt: 'x',
+        color: false,
+        permit: 'auto',
+      },
       r,
       () => {}
     );
