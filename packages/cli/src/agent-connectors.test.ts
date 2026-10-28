@@ -10,6 +10,7 @@ import {
   rmSync,
   statSync,
   symlinkSync,
+  utimesSync,
   writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -1900,6 +1901,63 @@ describe('budgetSnapshot', () => {
       assert.equal(snap.resets[0]!.holding, true);
       // the harvest landed on the entry object, not just the report
       assert.equal(registry['step-x']!.cause, 'rate_limited');
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  test('an instant rate death escalates the recorded hold — streak rides the registry (bro-9eeld)', () => {
+    const { root, main } = initRepo('bro-ratedeath-');
+    try {
+      const home = agentsHomeOf(main);
+      mkdirSync(home, { recursive: true });
+      const spawnedAt = '2026-10-27T18:05:33Z';
+      // the .exit mtime is the honest death stamp — 11s after spawn,
+      // inside the instant-death window
+      const died = new Date(Date.parse(spawnedAt) + 11_000);
+      const dead = (id: string, at: Date, runId?: string): AgentRegistryEntry => {
+        const f = join(home, agentExitFileName(id, runId));
+        writeFileSync(f, '1');
+        utimesSync(f, at, at);
+        const log = join(home, `${id}${runId === undefined ? '' : `.${runId}`}.log`);
+        // a RELATIVE reset — the classified deadline anchors to the
+        // .exit mtime, never to whenever the walk read the tail; an
+        // absolute ISO mark could not tell the two clocks apart
+        writeFileSync(log, 'boom\nReached free model rate limit — try again in 10 minutes\n');
+        return { agentId: id, backend: 'native', spawnedAt, log, runId };
+      };
+      // a fresh step, and a step whose first instant death is already
+      // harvested before its respawn dies the same way
+      patchAgentRegistry(main, 'step-first', dead('native-a1', died));
+      patchAgentRegistry(main, 'step-second', dead('native-a2', died, 'r1'));
+      assert.equal(budgetSnapshot(main, home, readAgentRegistry(main), ENV, NOW).blocked, 2);
+      assert.equal(readAgentRegistry(main)['step-second']!.rateStreak, 1);
+      // the respawn re-stamps spawnedAt + runId and clears the death
+      // fields — the streak survives the registry merge as step history
+      const spawned2 = '2026-10-27T19:05:33Z';
+      const died2 = new Date(Date.parse(spawned2) + 11_000);
+      patchAgentRegistry(main, 'step-second', {
+        ...dead('native-a2', died2, 'r2'),
+        spawnedAt: spawned2,
+        exitStatus: undefined,
+        cause: undefined,
+        resetAt: undefined,
+      });
+      const snap = budgetSnapshot(main, home, readAgentRegistry(main), ENV, NOW);
+      assert.equal(snap.blocked, 2);
+      const first = readAgentRegistry(main)['step-first']!;
+      const second = readAgentRegistry(main)['step-second']!;
+      // the recorded hold is the exit-anchored reported mark PLUS the
+      // streak-scaled wait — 30s on the first instant death, 60s on the
+      // consecutive one; a read-time-anchored classifier lands nowhere
+      // near these values
+      const reported1 = died.getTime() + 10 * 60_000 + 90_000;
+      const reported2 = died2.getTime() + 10 * 60_000 + 90_000;
+      assert.equal(first.cause, 'rate_limited');
+      assert.equal(first.resetAt, new Date(reported1 + 30_000).toISOString());
+      assert.equal(first.rateStreak, 1);
+      assert.equal(second.resetAt, new Date(reported2 + 60_000).toISOString());
+      assert.equal(second.rateStreak, 2);
     } finally {
       rmSync(root, { recursive: true, force: true });
     }

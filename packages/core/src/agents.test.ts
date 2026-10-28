@@ -24,6 +24,7 @@ import {
   mintAgentId,
   patchAgentRegistry,
   probeStep,
+  rateDeathBackoff,
   readAgentRegistry,
   removeAgentRegistryEntries,
   rebindStep,
@@ -571,7 +572,7 @@ describe('classifyExitCause', () => {
     );
     assert.equal(
       classifyExitCause('rate limit, try again in 2 hours', 1, now).resetAt,
-      '2026-10-05T22:00:00.000Z'
+      '2026-10-05T22:01:30.000Z' // fuzzy prose forms carry the safety margin
     );
     assert.equal(
       classifyExitCause('quota resets at 2026-10-06T00:00:00Z', 1, now).resetAt,
@@ -597,6 +598,161 @@ describe('classifyExitCause', () => {
 
   test('crash carries no reset', () => {
     assert.deepEqual(classifyExitCause('segfault', 139), { cause: 'crash' });
+  });
+
+  test('multi-unit duration phrases sum every pair (bro-9eeld)', () => {
+    const now = Date.parse('2026-10-27T17:04:50Z');
+    // the observed truncation: '1 hour 55 minutes' parsed as +1h while
+    // the quote meant 19:01 — every pair counts, plus the margin
+    assert.equal(
+      classifyExitCause('rate limit, try again in 1 hour 55 minutes', 1, now).resetAt,
+      '2026-10-27T19:01:20.000Z'
+    );
+    assert.equal(
+      classifyExitCause('rate limit, retry in 1 hour and 30 minutes', 1, now).resetAt,
+      '2026-10-27T18:36:20.000Z'
+    );
+    assert.equal(
+      classifyExitCause('rate limit, resets in 1h 30m', 1, now).resetAt,
+      '2026-10-27T18:36:20.000Z'
+    );
+  });
+
+  test('the quoted clock mark beats the relative paraphrase (bro-9eeld)', () => {
+    // the churn message verbatim — 'in 54 minutes' read as 18:59:44
+    // while the mark said 19:01; the mark wins, plus margin
+    const now = Date.parse('2026-10-27T18:05:44Z');
+    assert.equal(
+      classifyExitCause('rate limit — try again in 54 minutes (reset at 19:01 UTC)', 1, now)
+        .resetAt,
+      '2026-10-27T19:02:30.000Z'
+    );
+    // bare 'at HH:MM' inside reset context parses too — absent zone is UTC
+    assert.equal(
+      classifyExitCause('rate limit — resets in 54 minutes (at 19:01)', 1, now).resetAt,
+      '2026-10-27T19:02:30.000Z'
+    );
+  });
+
+  test('a day-ambiguous clock mark resolves to the nearest occurrence', () => {
+    // an hour ahead — today's mark wins
+    assert.equal(
+      classifyExitCause('rate limit — reset at 20:00 UTC', 1, Date.parse('2026-10-27T19:00:00Z'))
+        .resetAt,
+      '2026-10-27T20:01:30.000Z'
+    );
+    // past-midnight rollover — 23:50 with a 00:01 mark means tomorrow
+    assert.equal(
+      classifyExitCause('rate limit — reset at 00:01 UTC', 1, Date.parse('2026-10-27T23:50:00Z'))
+        .resetAt,
+      '2026-10-28T00:02:30.000Z'
+    );
+    // a mark already past reads as the lifted wall — lazy classification
+    // lands hours after the death and must not roll a stale quote +24h
+    assert.equal(
+      classifyExitCause('rate limit — reset at 19:01 UTC', 1, Date.parse('2026-10-27T20:00:00Z'))
+        .resetAt,
+      '2026-10-27T19:02:30.000Z'
+    );
+    // a previous-EVENING mark read just after midnight belongs to
+    // yesterday — rolling it to tonight would fabricate a day-long hold
+    assert.equal(
+      classifyExitCause('rate limit — reset at 23:30 UTC', 1, Date.parse('2026-10-28T00:15:00Z'))
+        .resetAt,
+      '2026-10-27T23:31:30.000Z'
+    );
+  });
+
+  test('an exact protocol reset beats a fuzzy clock mark in the same message', () => {
+    const now = Date.parse('2026-10-05T20:00:00Z');
+    // retry-after is the provider's exact word — the paraphrased clock
+    // mark (19:01+margin) must not win over it
+    assert.equal(
+      classifyExitCause('rate limit — retry-after: 90 (reset at 19:01 UTC)', 1, now).resetAt,
+      '2026-10-05T20:01:30.000Z'
+    );
+  });
+
+  test('a clock mark with an unsupported zone is not read as UTC', () => {
+    const now = Date.parse('2026-10-27T18:05:44Z');
+    assert.equal(classifyExitCause('rate limit — reset at 19:01 PST', 1, now).resetAt, undefined);
+    // an offset after the zone is not part of the mark either
+    assert.equal(classifyExitCause('rate limit — reset at 19:01 UTC+2', 1, now).resetAt, undefined);
+  });
+
+  test('a prose timestamp cannot fabricate a wall reset', () => {
+    const now = Date.parse('2026-10-27T18:05:44Z');
+    // 'at' outside reset context — a log timestamp, not a quoted mark
+    assert.equal(
+      classifyExitCause('rate limit hit, worker died at 18:05:44', 1, now).resetAt,
+      undefined
+    );
+    // 'already at' must not anchor on 'ready'
+    assert.equal(
+      classifyExitCause('rate limit — already at 19:01 when it failed', 1, now).resetAt,
+      undefined
+    );
+    // a parenthesized EVENT time is not a reset mark either — parens
+    // alone are not context, the mark needs a reset-ish keyword
+    assert.equal(
+      classifyExitCause('rate limit hit, request failed (at 18:05)', 1, now).resetAt,
+      undefined
+    );
+    // a full ISO date after 'at' stays isoReset's, exact — no margin
+    assert.equal(
+      classifyExitCause('quota resets at 2026-10-06T00:00:00Z', 1, now).resetAt,
+      '2026-10-06T00:00:00.000Z'
+    );
+  });
+});
+
+describe('rateDeathBackoff', () => {
+  const spawnedAt = '2026-10-27T18:05:33Z';
+  const spawned = Date.parse(spawnedAt);
+  const reported = '2026-10-27T19:02:30.000Z';
+
+  test('an instant rate death escalates the recorded hold', () => {
+    const exit = spawned + 11_000; // died 11s in — no real work happened
+    const b = rateDeathBackoff({ spawnedAt }, 'rate_limited', reported, exit);
+    assert.equal(b.streak, 1);
+    assert.equal(b.resetAt, '2026-10-27T19:03:00.000Z'); // reported + 30s
+  });
+
+  test('the second consecutive instant death doubles the added wait', () => {
+    const exit = spawned + 9_000;
+    const b = rateDeathBackoff(
+      { spawnedAt, rateStreak: 1 },
+      'rate_limited',
+      '2026-10-27T20:01:00.000Z',
+      exit
+    );
+    assert.equal(b.streak, 2);
+    assert.equal(b.resetAt, '2026-10-27T20:02:00.000Z'); // reported + 60s
+  });
+
+  test('a stale reported mark escalates from the death, not the past', () => {
+    const exit = spawned + 12_000;
+    const b = rateDeathBackoff({ spawnedAt }, 'rate_limited', '2026-10-27T18:00:00.000Z', exit);
+    assert.equal(b.streak, 1);
+    assert.equal(b.resetAt, new Date(exit + 30_000).toISOString());
+  });
+
+  test('a slower death did real work — reported passes through, streak clears', () => {
+    const exit = spawned + 300_000; // 5 minutes in
+    const b = rateDeathBackoff({ spawnedAt, rateStreak: 3 }, 'rate_limited', reported, exit);
+    assert.deepEqual(b, { streak: 0, resetAt: reported });
+    // any other cause clears too — a crash is not a rate-wall datapoint
+    assert.equal(
+      rateDeathBackoff({ spawnedAt, rateStreak: 3 }, 'crash', undefined, spawned + 5_000).streak,
+      0
+    );
+  });
+
+  test('no reported reset stays indefinite — the manual clear is the contract', () => {
+    const exit = spawned + 10_000;
+    const b = rateDeathBackoff({ spawnedAt }, 'rate_limited', undefined, exit);
+    assert.equal(b.streak, 1);
+    assert.equal(b.resetAt, undefined);
   });
 });
 
