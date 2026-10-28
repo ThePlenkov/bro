@@ -134,6 +134,7 @@ async function cmdServe(rest: string[]): Promise<void> {
   try {
     broker = await startBusBroker(process.cwd())
   } catch (err) {
+    if (err instanceof CommandError) throw err
     die(err instanceof Error ? err.message : String(err))
   }
   const payload = { socketPath: broker.socketPath, pid: process.pid, seq: broker.seq }
@@ -264,6 +265,7 @@ async function cmdSubscribe(rest: string[]): Promise<void> {
       onClose: end,
     }, since !== undefined ? { since } : {})
   } catch (err) {
+    if (err instanceof CommandError) throw err
     die(err instanceof Error ? err.message : String(err))
   }
   await ended

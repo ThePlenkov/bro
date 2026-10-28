@@ -948,6 +948,7 @@ async function cmdUp(dir: string, env: AgentConnectorEnv, argv: string[]): Promi
       autoApprove: argv.includes('--auto-approve') ? true : undefined,
     });
   } catch (err) {
+    if (err instanceof CommandError) throw err
     die(err instanceof Error ? err.message : String(err));
   }
   reportSpawn(info, molStep);
@@ -1288,6 +1289,7 @@ async function cmdRun(dir: string, env: AgentConnectorEnv, argv: string[]): Prom
       autoApprove: argv.includes('--auto-approve') ? true : undefined,
     });
   } catch (err) {
+    if (err instanceof CommandError) throw err
     die(err instanceof Error ? err.message : String(err));
   }
   reportSpawn(info, molStep);
@@ -1304,9 +1306,10 @@ async function cmdDown(dir: string, env: AgentConnectorEnv, argv: string[]): Pro
     await supervisorVerb(resolveAgentConnector({ dir }, { connector: connectorName }, env), 'down');
     return;
   }
-  const outcome = await stopAgent(dir, env, target, connectorName).catch((err: unknown) =>
+  const outcome = await stopAgent(dir, env, target, connectorName).catch((err: unknown) => {
+    if (err instanceof CommandError) throw err
     die(err instanceof Error ? err.message : String(err))
-  );
+  });
   if (!outcome.found) {
     // a degraded read can't confirm "gone" — report unverified, don't
     // claim the desired end state was reached

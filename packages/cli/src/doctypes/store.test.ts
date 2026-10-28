@@ -130,8 +130,13 @@ function captureExit(fn: () => unknown): { code: number | undefined; err: string
   }
   try {
     fn()
-  } catch (err) {
-    if ((err as Error).message !== '__exit__') {
+  } catch (err: any) {
+    if (err?.message === '__exit__') {
+      // ok
+    } else if (err?.name === 'CommandError') {
+      code = err.code
+      if (err.message) lines.push(err.message)
+    } else {
       throw err
     }
   } finally {

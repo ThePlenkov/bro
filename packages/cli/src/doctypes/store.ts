@@ -97,7 +97,9 @@ function initFailed(err: unknown, dir: string, drop: () => void): never {
   const msg = enoent
     ? 'error: bd not found — install beads first (https://github.com/gastownhall/beads)'
     : `error: store init failed in ${dir}${err instanceof Error ? ` (${err.message})` : ''}`
-  drop()
+  try {
+    drop()
+  } catch {}
   throw new CommandError(msg, EXIT.error)
 }
 
@@ -135,20 +137,22 @@ export function initStore(name: Scope, flags: DocFlags, root: string): void {
   try {
     reported = store.prefix()
   } catch (err) {
-    console.error(
-      `error: store created but unusable — ${err instanceof Error ? err.message : String(err)}`
+    try {
+      drop()
+    } catch {}
+    throw new CommandError(
+      `error: store created but unusable — ${err instanceof Error ? err.message : String(err)}`,
+      EXIT.error
     )
-    drop()
-    process.exit(1)
   }
   if (prefix && reported !== prefix) {
-    console.error(
-      `error: store in ${dir} recorded prefix "${reported ?? '(not set)'}" — expected "${prefix}"`
+    try {
+      drop()
+    } catch {}
+    throw new CommandError(
+      `error: store in ${dir} recorded prefix "${reported ?? '(not set)'}" — expected "${prefix}"`,
+      EXIT.error
     )
-    // a just-created store with the wrong prefix stays broken for every
-    // later init attempt — drop it; a pre-existing store is not ours
-    drop()
-    process.exit(1)
   }
   const suffix = prefix ? ` (prefix ${prefix})` : ''
   console.log(`${name} store ready: ${dir}${suffix}`)
@@ -165,16 +169,14 @@ function storeAdapter(ctx: DocCtx): DocAdapter<StoreInfo> {
     init: (ref: string | undefined, flags: DocFlags) => {
       const name = named(ref)
       if (!name) {
-        console.error(`error: unknown store "${ref}" — project|global`)
-        process.exit(2)
+        throw new CommandError(`error: unknown store "${ref}" — project|global`, EXIT.usage)
       }
       initStore(name, flags, ctx.root)
     },
     path: (ref: string | undefined) => {
       const name = named(ref)
       if (!name) {
-        console.error(`error: unknown store "${ref}" — project|global`)
-        process.exit(2)
+        throw new CommandError(`error: unknown store "${ref}" — project|global`, EXIT.usage)
       }
       console.log(storePath(name, ctx.root))
     },

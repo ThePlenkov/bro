@@ -7,6 +7,8 @@ import { createRequire } from 'node:module';
 import { isAbsolute, relative, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import {
+  CommandError,
+  EXIT,
   actSection,
   agentsSection,
   beadsSection,
@@ -582,9 +584,7 @@ export const PLUGINS: BroPlugin[] = [
     // the beads config section and keeps the registry honest
     hidden: true,
     run: () => {
-      // eslint-disable-next-line @typescript-eslint/no-require-imports
-      const core = require('@broject/core')
-      throw new core.CommandError('docs plugin must be dispatched via verb-first dispatch', core.EXIT.usage)
+      throw new CommandError('docs plugin must be dispatched via verb-first dispatch', EXIT.usage)
     },
     skill: 'docs',
     configKey: 'beads',
@@ -863,7 +863,6 @@ export function pluginGroups(): Map<string, BroPlugin[]> {
 /** `bro run <plan.toml>` — parse the file, route on `kind`, gate on the
  *  envelope `version`, validate with the owning plugin's planSchema,
  *  execute via runPlan. Resolution is shared with `bro plan validate`. */
-import { CommandError, EXIT } from '@broject/core'
 
 export async function runPlanFile(argv: string[]): Promise<void> {
   const files = argv.filter(a => !a.startsWith('-'));

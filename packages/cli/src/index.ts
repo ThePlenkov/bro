@@ -119,7 +119,7 @@ function usage(exitCode: ExitCode = 1): never {
   const commands = PLUGINS.filter((p) => !p.hidden && !p.group && !p.aliasOf)
     .map((p) => `  ${p.name.padEnd(12)} ${p.summary}`)
     .join('\n')
-  printUsage(`bro — agent's sidekick CLI
+  const text = `bro — agent's sidekick CLI
 
 Usage: bro <command> [args…]
        bro <group> <member> [args…]
@@ -141,7 +141,11 @@ Examples:
   bro review debt sync                # project the ledger into beads
   bro review act status --json        # exit gate for the current PR
   bro plugins                         # the registry — subcommand+skill+config
-  bro setup`, exitCode)
+  bro setup`
+  if (exitCode === EXIT.ok) {
+    printUsage(text, exitCode)
+  }
+  throw new CommandError(text, exitCode, text)
 }
 
 async function main(): Promise<void> {
@@ -217,6 +221,19 @@ async function main(): Promise<void> {
 }
 
 main().catch((err: unknown) => {
+  // Also accept CommandError from different module instances (bundled deps)
+  if (err && typeof err === 'object' && (err as any).name === 'CommandError') {
+    const e = err as any
+    if (e.usage) {
+      printUsage(e.usage, e.code)
+    }
+    if (e.code === EXIT.ok) {
+      if (e.message) console.log(e.message)
+      process.exit(0)
+    }
+    if (e.message) console.error(e.message)
+    process.exit(e.code)
+  }
   if (err instanceof CommandError) {
     if (err.usage) {
       printUsage(err.usage, err.code)

@@ -17,7 +17,7 @@
  */
 import { spawnSync } from 'node:child_process'
 import { CommandError, EXIT, facade } from '@broject/core'
-import type { DocAdapter, DocCtx, DocFlags, DocType, TaskFilter, TaskInput, TaskRow, TaskStore } from '@broject/core'
+import type { DocAdapter, DocCtx, DocFlags, DocType, ExitCode, TaskFilter, TaskInput, TaskRow, TaskStore } from '@broject/core'
 import { requireGlobalStore } from './store.ts'
 import { loadBroConfig } from '../plugins.ts'
 
@@ -133,11 +133,13 @@ function taskAdapter(ctx: DocCtx): DocAdapter<TaskRow> {
           enoent
             ? 'error: bd not found — install beads first (https://github.com/gastownhall/beads)'
             : `error: bd failed — ${res.error.message}`,
-          (res.status as ExitCode) ?? EXIT.error
+          res.status === null ? EXIT.error : ((res.status as ExitCode) ?? EXIT.error)
         )
       }
-      if (res.status !== 0 && res.status !== null) {
-        throw new CommandError('', res.status as ExitCode)
+      if (res.status !== 0) {
+        const code = res.status === null ? EXIT.error : res.status
+        const exitCode = code === EXIT.usage || code === EXIT.error || code === EXIT.actionable || code === EXIT.timeout ? code : EXIT.error
+        throw new CommandError('', exitCode)
       }
     },
   }
