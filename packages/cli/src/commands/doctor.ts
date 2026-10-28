@@ -746,6 +746,92 @@ function broCheckoutVersion(root: string | null): string | null {
   }
 }
 
+/** The daemon exec'd a bro dev checkout's dist. Same repo + same HEAD →
+ *  the bro-dist staleness verdict IS the binary verdict — a dist that
+ *  predates HEAD is protections-not-live. Anything else is a different
+ *  checkout's build. */
+function devDaemonCheck(pid: number, entry: string, dev: DevDist, dir: string): DoctorCheck[] {
+  if (!sameCheckoutHead(dev.checkout, dir)) {
+    return [
+      check(
+        'daemon',
+        'warn',
+        `pid ${pid} runs ${entry} — a different bro checkout's dist`,
+        "restart it under this repo's build or the shared install — protections live only in the binary the daemon runs"
+      ),
+    ]
+  }
+  const c = devDistCheck(dev)
+  if (c.status === 'ok') {
+    // ...but devDistCheck only weighs the files on disk: the running
+    // process still holds what it exec'd, so a dist rebuilt after
+    // this daemon started is fresh on disk and stale in memory
+    const start = procStartMs(pid)
+    if (start !== null && distStampMs(dev.distDir) > start) {
+      return [
+        check(
+          'daemon',
+          'warn',
+          `pid ${pid} runs ${entry} — dist rebuilt after the daemon started`,
+          'restart the daemon — the running process still holds the pre-build code'
+        ),
+      ]
+    }
+  }
+  return [check('daemon', c.status, `pid ${pid} · ${c.detail}`, c.hint)]
+}
+
+/** A non-dist entry inside a bro checkout (`node packages/cli/src/index.ts`,
+ *  a tsx worker, a repo script) IS that checkout's code — node_modules
+ *  paths are vendored installs, never source. Only the drift question
+ *  remains: HEAD moving after the daemon spawned leaves the running
+ *  process behind the checkout. */
+function srcDaemonCheck(
+  pid: number,
+  entry: string,
+  entryRoot: string,
+  dir: string
+): DoctorCheck[] {
+  if (!sameCheckoutHead(entryRoot, dir)) {
+    return [
+      check(
+        'daemon',
+        'warn',
+        `pid ${pid} runs ${entry} — a different bro checkout's source`,
+        "restart it under this repo's build or the shared install — protections live only in the binary the daemon runs"
+      ),
+    ]
+  }
+  const start = procStartMs(pid)
+  const moved = refMovedMs(entryRoot, 'HEAD')
+  // no start time or no reflog = no evidence the process is current —
+  // unverifiable, never a silent ok (commit %ct is committer-declared,
+  // not a fallback)
+  if (start === null || moved === 0) {
+    return [
+      check(
+        'daemon',
+        'warn',
+        `pid ${pid} runs ${entry} — this checkout's source, HEAD drift unverifiable (${
+          start === null ? 'process start unreadable' : 'no HEAD reflog'
+        })`,
+        'restart the daemon — protections live only in the code the process loaded'
+      ),
+    ]
+  }
+  if (moved > start) {
+    return [
+      check(
+        'daemon',
+        'warn',
+        `pid ${pid} runs ${entry} — this checkout's source, but HEAD moved since it started`,
+        'restart the daemon — the running process loaded the pre-move code'
+      ),
+    ]
+  }
+  return [check('daemon', 'ok', `up — pid ${pid} · ${entry} — this checkout's source entry`)]
+}
+
 /** One row: supervisor liveness plus the binary-drift verdict. Down is
  *  ordinary (installed = the checkpoint rearms); up compares the
  *  running entry — this repo's dist borrows the bro-dist staleness
@@ -773,84 +859,11 @@ function daemonBinChecks(dir: string, root: string | null): DoctorCheck[] {
   }
   const dev = devDistEntry(entry)
   if (dev !== null) {
-    if (sameCheckoutHead(dev.checkout, dir)) {
-      // the repo's own dist — the staleness verdict IS the binary
-      // verdict: a dist that predates HEAD is protections-not-live
-      const c = devDistCheck(dev)
-      if (c.status === 'ok') {
-        // ...but devDistCheck only weighs the files on disk: the running
-        // process still holds what it exec'd, so a dist rebuilt after
-        // this daemon started is fresh on disk and stale in memory
-        const start = procStartMs(pid)
-        if (start !== null && distStampMs(dev.distDir) > start) {
-          return [
-            check(
-              'daemon',
-              'warn',
-              `pid ${pid} runs ${entry} — dist rebuilt after the daemon started`,
-              'restart the daemon — the running process still holds the pre-build code'
-            ),
-          ]
-        }
-      }
-      return [check('daemon', c.status, `pid ${pid} · ${c.detail}`, c.hint)]
-    }
-    return [
-      check(
-        'daemon',
-        'warn',
-        `pid ${pid} runs ${entry} — a different bro checkout's dist`,
-        'restart it under this repo\'s build or the shared install — protections live only in the binary the daemon runs'
-      ),
-    ]
+    return devDaemonCheck(pid, entry, dev, dir)
   }
-  // a non-dist entry inside a bro checkout (`node packages/cli/src/index.ts`,
-  // a tsx worker, a repo script) IS that checkout's code — node_modules
-  // paths are vendored installs, never source. Only the drift question
-  // remains: HEAD moving after the daemon spawned leaves the running
-  // process behind the checkout
   const entryRoot = entry.includes('/node_modules/') ? null : repoRoot(dirname(entry))
   if (entryRoot !== null && broCheckoutVersion(entryRoot) !== null) {
-    if (sameCheckoutHead(entryRoot, dir)) {
-      const start = procStartMs(pid)
-      const moved = refMovedMs(entryRoot, 'HEAD')
-      // no start time or no reflog = no evidence the process is current —
-      // unverifiable, never a silent ok (commit %ct is committer-declared,
-      // not a fallback)
-      if (start === null || moved === 0) {
-        return [
-          check(
-            'daemon',
-            'warn',
-            `pid ${pid} runs ${entry} — this checkout's source, HEAD drift unverifiable (${
-              start === null ? 'process start unreadable' : 'no HEAD reflog'
-            })`,
-            'restart the daemon — protections live only in the code the process loaded'
-          ),
-        ]
-      }
-      if (moved > start) {
-        return [
-          check(
-            'daemon',
-            'warn',
-            `pid ${pid} runs ${entry} — this checkout's source, but HEAD moved since it started`,
-            'restart the daemon — the running process loaded the pre-move code'
-          ),
-        ]
-      }
-      return [
-        check('daemon', 'ok', `up — pid ${pid} · ${entry} — this checkout's source entry`),
-      ]
-    }
-    return [
-      check(
-        'daemon',
-        'warn',
-        `pid ${pid} runs ${entry} — a different bro checkout's source`,
-        "restart it under this repo's build or the shared install — protections live only in the binary the daemon runs"
-      ),
-    ]
+    return srcDaemonCheck(pid, entry, entryRoot, dir)
   }
   const v = broEntryVersion(entry)
   const vs = v === undefined ? '' : ` (v${v})`
