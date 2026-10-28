@@ -44,11 +44,14 @@ import {
 export const COPILOT_COUNT_TTL_MS = 120_000;
 
 /** The cache payload — `ids` is what the refresh observed (occupancy
- *  probes correlate entries against it); `count` is the lane's number. */
+ *  probes correlate entries against it); `count` is the lane's number.
+ *  `incomplete` marks a truncated inventory that cannot be treated as
+ *  complete (pagination hit the limit). */
 export interface CopilotCountCache {
   at: number;
   count: number;
   ids: string[];
+  incomplete?: boolean;
 }
 
 /** `<slots>/live-count.json` — inside the reservations dir, invisible
@@ -66,12 +69,13 @@ export function readCopilotCount(file: string): CopilotCountCache | undefined {
     if (typeof v !== 'object' || v === null || Array.isArray(v)) {
       return undefined;
     }
-    const c = v as { at?: unknown; count?: unknown; ids?: unknown };
+    const c = v as { at?: unknown; count?: unknown; ids?: unknown; incomplete?: unknown };
     if (typeof c.at !== 'number' || typeof c.count !== 'number' || c.count < 0) {
       return undefined;
     }
     const ids = Array.isArray(c.ids) ? c.ids.filter((x): x is string => typeof x === 'string') : [];
-    return { at: c.at, count: c.count, ids };
+    const incomplete = c.incomplete === true;
+    return { at: c.at, count: c.count, ids, incomplete: incomplete || undefined };
   } catch {
     return undefined;
   }
@@ -85,10 +89,16 @@ export function readCopilotCount(file: string): CopilotCountCache | undefined {
 export function writeCopilotCount(
   resDir: string | undefined,
   ids: string[],
-  at = Date.now()
+  at = Date.now(),
+  incomplete = false
 ): CopilotCountCache {
   const file = copilotCountFile(resDir);
-  const cache = { at, count: ids.length, ids };
+  const cache: CopilotCountCache = {
+    at,
+    count: ids.length,
+    ids,
+    incomplete: incomplete || undefined,
+  };
   const persist = (): CopilotCountCache => {
     const existing = readCopilotCount(file);
     if (existing !== undefined && existing.at > cache.at) {
@@ -175,7 +185,9 @@ registerSessionPlane(copilotSessionPlane);
  *  task is bro's however long it runs). Absent/corrupt/stale cache =
  *  cannot see the remote — the plane reports quiet rather than
  *  inventing remote state (the quota lane's own fail-closed read still
- *  governs armed copilot caps). */
+ *  governs armed copilot caps). An incomplete inventory is treated as
+ *  active so the guard blocks spawning until a complete listing is
+ *  available. */
 export function copilotExternalActivity(ctx: ExternalProbeCtx): ExternalActivity {
   const bag = ctx.agents['copilot'] ?? {};
   const override = bag['reservationsDir'];
@@ -188,6 +200,13 @@ export function copilotExternalActivity(ctx: ExternalProbeCtx): ExternalActivity
   const age = ctx.now - cache.at;
   if (age < 0 || age >= COPILOT_COUNT_TTL_MS) {
     return { active: false };
+  }
+  if (cache.incomplete === true) {
+    return {
+      active: true,
+      detail: `copilot inventory incomplete — cannot verify foreign tasks`,
+      activityAtMs: cache.at,
+    };
   }
   const own = new Set<string>();
   for (const e of Object.values(readAgentRegistry(ctx.dir))) {

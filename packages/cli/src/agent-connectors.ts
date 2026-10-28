@@ -1053,7 +1053,10 @@ function occupancyProbes(dir: string, env: AgentConnectorEnv): OccupancyProbes {
     }),
     gcSupervisor: memo(() => gcSupervisorRunning()),
     dockerLive: memo(() => dockerLiveContainers()),
-    copilotLive: memo(() => copilotLiveTaskIds()),
+    copilotLive: memo(() => {
+      const res = copilotLiveTaskIds();
+      return res?.ids;
+    }),
   };
 }
 
@@ -5373,9 +5376,10 @@ function copilotFetchTask(taskId: string): { ok: boolean; task?: CopilotTask; er
 /** The account's live task id set — filtered, paginated listings for
  *  the fleet walk and the session-plane count refresh. `undefined` =
  *  the API couldn't answer (fail closed — an unverifiable count
- *  occupies, never frees). A short page ends the walk; the page bound
- *  keeps a pathological account from stalling the spawn lock. */
-function copilotLiveTaskIds(): Set<string> | undefined {
+ *  occupies, never frees). An incomplete inventory is marked explicitly
+ *  (pagination hit the limit) so callers can fail closed rather than
+ *  caching a truncated set as complete. */
+function copilotLiveTaskIds(): { ids: Set<string>; incomplete: boolean } | undefined {
   const ids = new Set<string>();
   for (let page = 1; page <= 10; page++) {
     const r = ghRun([
@@ -5396,13 +5400,17 @@ function copilotLiveTaskIds(): Set<string> | undefined {
         ids.add(id);
       }
       if (batch.length < 100) {
-        return ids;
+        return { ids, incomplete: false };
+      }
+      if (page === 10) {
+        // full page at the limit — cannot tell complete from truncated
+        return { ids, incomplete: true };
       }
     } catch {
       return undefined;
     }
   }
-  return ids;
+  return { ids, incomplete: false };
 }
 
 /** copilot occupancy — the remote probe is the same honesty rule as
@@ -5655,7 +5663,9 @@ function copilotSweepLandedSlots(dir: string, slotsDir: string, live: Set<string
  *  cache stale, which countLive already fails closed on. The landed
  *  sweep retires this repo's reservations the remote count now sees.
  *  Readers are the quota lanes AND the external guard's copilot probe —
- *  either one armed keeps the refresh paying. */
+ *  either one armed keeps the refresh paying. An incomplete inventory is
+ *  not cached as complete; when pagination hits the limit we do not write
+ *  a complete cache. */
 function copilotRefreshCount(dir: string, env: AgentConnectorEnv): void {
   // an unarmed copilot lane has no reader — unless the external guard
   // is armed: its copilot probe reads the same cache, so a rig that
@@ -5668,11 +5678,17 @@ function copilotRefreshCount(dir: string, env: AgentConnectorEnv): void {
   }
   const resDir = env.agents['copilot']?.['reservationsDir'];
   const observedAt = Date.now();
-  const ids = copilotLiveTaskIds();
-  if (ids !== undefined) {
+  const res = copilotLiveTaskIds();
+  if (res !== undefined) {
+    if (res.incomplete) {
+      // Do not cache a truncated/incomplete inventory as complete.
+      // Leave existing cache as-is (or absent); probe will treat absent/stale as not active,
+      // but better to not write partial complete state - explicitly don't write complete cache.
+      return;
+    }
     const slots = sessionSlotsDir('copilot', typeof resDir === 'string' ? resDir : undefined);
-    writeCopilotCount(typeof resDir === 'string' ? resDir : undefined, [...ids], observedAt);
-    copilotSweepLandedSlots(dir, slots, ids);
+    writeCopilotCount(typeof resDir === 'string' ? resDir : undefined, [...res.ids], observedAt);
+    copilotSweepLandedSlots(dir, slots, res.ids);
   }
 }
 
