@@ -65,7 +65,6 @@ import {
   probeStep,
   procStat,
   providerCallGrade,
-  rateDeathBackoff,
   rebindStep,
   releaseSessionSlot,
   requireProviderSurface,
@@ -107,6 +106,7 @@ import { expandAgentCmd, loopSection, type LoopConfig } from '@broject/loop';
 // builtin session planes self-register on import — the connector layer
 // is the plugin host for agent backends, and admission planes ride the
 // same surface
+import '@broject/devin';
 import {
   devinLogsDir,
   devinPidBead,
@@ -1863,10 +1863,31 @@ function ensureExitCause(
   if (typeof entry.exitStatus !== 'number' || isAgentCause(entry.cause)) {
     return;
   }
-  // the .exit file's mtime is the honest death stamp — the harvest's own
-  // clock can land a poll late (specs/telemetry/bro-ub91h.md), and a lazy
-  // read can land HOURS late: the message's "in 54 minutes" / "at 19:01"
-  // anchors to the death, never to whenever this read happened (bro-9eeld)
+  // classification input = this run's .log tail + .stderr tail (spec
+  // bro-e2ec0) — provider walls the child prints on stderr classify from
+  // the capture, the event stream no longer carries them. The tails
+  // classify INDEPENDENTLY — a joined read could fabricate a wall token
+  // across the boundary ('…4' + '29…' → '429')
+  const c = classifyExitCauseParts(
+    [readLogTail(entry.log, entry.logFrom), readLogTail(entry.stderrLog, entry.stderrFrom)],
+    entry.exitStatus
+  );
+  // the tails were read off-lock — a respawn stamping the entry between
+  // the two reads feeds the old run new-run bytes; a DIFFERENT
+  // generation owning the step now suppresses classify + emit. A
+  // missing row (reaped, or a caller's synthesized snapshot) can't
+  // inject new bytes — classify anyway
+  const cur = readAgentRegistry(dir)[molStep];
+  if (cur !== undefined && (cur.agentId !== entry.agentId || cur.spawnedAt !== entry.spawnedAt)) {
+    return;
+  }
+  entry.cause = c.cause;
+  entry.resetAt = c.resetAt;
+  emitProviderWall(entry, molStep, c.cause, c.resetAt);
+  // lifecycle — the agent-exit transition, emitted once per run at the
+  // harvest (the early return above skips re-emit on a carried cause).
+  // The .exit file's mtime is the honest wall-clock; the harvest's own
+  // clock can land a poll late (specs/telemetry/bro-ub91h.md)
   let exitAt: number | undefined;
   if (home !== null) {
     try {
@@ -1875,42 +1896,6 @@ function ensureExitCause(
       // the file rotated between read and stat — fall back to now
     }
   }
-  // classification input = this run's .log tail + .stderr tail (spec
-  // bro-e2ec0) — provider walls the child prints on stderr classify from
-  // the capture, the event stream no longer carries them. The tails
-  // classify INDEPENDENTLY — a joined read could fabricate a wall token
-  // across the boundary ('…4' + '29…' → '429')
-  const c = classifyExitCauseParts(
-    [readLogTail(entry.log, entry.logFrom), readLogTail(entry.stderrLog, entry.stderrFrom)],
-    entry.exitStatus,
-    exitAt ?? Date.now()
-  );
-  // the tails were read off-lock — a respawn stamping the entry between
-  // the two reads feeds the old run new-run bytes; a DIFFERENT
-  // generation owning the step now suppresses classify + emit. A
-  // missing row (reaped, or a caller's synthesized snapshot) can't
-  // inject new bytes — classify anyway
-  const cur = readAgentRegistry(dir)[molStep];
-  if (
-    cur !== undefined &&
-    (cur.agentId !== entry.agentId ||
-      cur.spawnedAt !== entry.spawnedAt ||
-      cur.runId !== entry.runId)
-  ) {
-    return;
-  }
-  // instant-death backoff (spec bro-9eeld): a rate wall hit inside the
-  // first minute proves the last mark undershot — the recorded hold
-  // escalates per consecutive fast death instead of re-trusting it
-  const back = rateDeathBackoff(entry, c.cause, c.resetAt, exitAt ?? Date.now());
-  entry.cause = c.cause;
-  entry.resetAt = back.resetAt;
-  entry.rateStreak = back.streak > 0 ? back.streak : undefined;
-  emitProviderWall(entry, molStep, c.cause, back.resetAt);
-  // lifecycle — the agent-exit transition, emitted once per run at the
-  // harvest (the early return above skips re-emit on a carried cause).
-  // The .exit file's mtime is the honest wall-clock; the harvest's own
-  // clock can land a poll late (specs/telemetry/bro-ub91h.md)
   emitLifecycle(dir, {
     kind: 'agent-exit',
     bead: molStep,
@@ -1934,20 +1919,14 @@ function ensureExitCause(
     withAgentRegistryLock(dir, () => {
       const reg = readAgentRegistry(dir);
       const cur = reg[molStep];
-      if (
-        cur === undefined ||
-        cur.agentId !== entry.agentId ||
-        cur.spawnedAt !== entry.spawnedAt ||
-        cur.runId !== entry.runId
-      ) {
+      if (cur === undefined || cur.agentId !== entry.agentId || cur.spawnedAt !== entry.spawnedAt) {
         return;
       }
       reg[molStep] = {
         ...cur,
         exitStatus: entry.exitStatus,
         cause: c.cause,
-        resetAt: back.resetAt,
-        rateStreak: back.streak > 0 ? back.streak : undefined,
+        resetAt: c.resetAt,
       };
       writeAgentRegistry(dir, reg);
     });
@@ -2570,7 +2549,6 @@ export function makeNativeConnector(ctx: ConnectorCtx, env: AgentConnectorEnv): 
           const child = spawn(
             'sh', // NOSONAR — PATH lookup is the contract (same as git/bd everywhere)
             args,
-            // biome-ignore format: NOSONAR must sit on the flagged line
             { // NOSONAR — operator-configured agent command (same contract as loop)
               cwd: spec.repoRoot,
               env: {
@@ -2806,7 +2784,6 @@ function tmuxRun(socket: string, args: string[]): TmuxResult {
   for (const k of GIT_REPOSITORY_ENV_KEYS) {
     delete env[k];
   }
-  // biome-ignore format: NOSONAR must sit on the flagged line
   const proc = spawnSync('tmux', socket === '' ? args : ['-L', socket, ...args], { // NOSONAR — PATH lookup is the contract (same as git/bd)
     stdio: ['ignore', 'pipe', 'pipe'],
     encoding: 'utf8',
@@ -2945,7 +2922,6 @@ export function makeTmuxConnector(ctx: ConnectorCtx, env: AgentConnectorEnv): Ag
   return {
     name: 'tmux',
 
-    // biome-ignore format: NOSONAR must sit on the flagged line
     async spawn(spec: SpawnSpec): Promise<AgentInfo> { // NOSONAR — connector contract is async; the critical section is sync
       assertMutableConfig(dir);
       const home = spawnHome(dir, 'tmux', command, spec);
@@ -3080,7 +3056,6 @@ export function makeTmuxConnector(ctx: ConnectorCtx, env: AgentConnectorEnv): Ag
       });
     },
 
-    // biome-ignore format: NOSONAR must sit on the flagged line
     async list() { // NOSONAR — connector contract is async; the body is sync
       try {
         const ver = tmuxRun(socket, ['-V']);
@@ -3112,7 +3087,6 @@ export function makeTmuxConnector(ctx: ConnectorCtx, env: AgentConnectorEnv): Ag
       }
     },
 
-    // biome-ignore format: NOSONAR must sit on the flagged line
     async status(id: string): Promise<AgentInfo> { // NOSONAR — connector contract is async; the body is sync
       const hit = findEntry(id);
       if (!hit) {
@@ -3215,7 +3189,6 @@ export function makeTmuxConnector(ctx: ConnectorCtx, env: AgentConnectorEnv): Ag
 
 /** One gc call — PATH lookup is the same contract as git/gh/bd. */
 function gcRun(args: string[], timeoutMs = 30_000): { code: number; out: string; err: string } {
-  // biome-ignore format: NOSONAR must sit on the flagged line
   const proc = spawnSync('gc', args, { // NOSONAR — PATH lookup is the contract (same as gh/git/bd)
     stdio: ['ignore', 'pipe', 'pipe'],
     encoding: 'utf8',
@@ -3919,7 +3892,6 @@ function dockerRun(
   args: string[],
   timeoutMs = 30_000
 ): { code: number; out: string; err: string; missing: boolean } {
-  // biome-ignore format: NOSONAR must sit on the flagged line
   const proc = spawnSync('docker', args, { // NOSONAR — PATH lookup is the contract (same as gh/git/bd)
     stdio: ['ignore', 'pipe', 'pipe'],
     encoding: 'utf8',
@@ -4433,7 +4405,6 @@ export function makeDockerConnector(ctx: ConnectorCtx, env: AgentConnectorEnv): 
   return {
     name: 'docker',
 
-    // biome-ignore format: NOSONAR must sit on the flagged line
     async spawn(spec: SpawnSpec): Promise<AgentInfo> { // NOSONAR — connector contract is async; the work is one sync critical section
       // policy BEFORE the daemon probe and image pull/build — a refused
       // spawn must not pay (or log) a docker fetch it will never use
@@ -4554,7 +4525,6 @@ export function makeDockerConnector(ctx: ConnectorCtx, env: AgentConnectorEnv): 
       });
     },
 
-    // biome-ignore format: NOSONAR must sit on the flagged line
     async list(): Promise<ListResult> { // NOSONAR — connector contract is async; the work is sync
       try {
         const daemon = dockerDaemonUp();
@@ -4583,7 +4553,6 @@ export function makeDockerConnector(ctx: ConnectorCtx, env: AgentConnectorEnv): 
       }
     },
 
-    // biome-ignore format: NOSONAR must sit on the flagged line
     async status(id: string): Promise<AgentInfo> { // NOSONAR — connector contract is async; the work is sync
       const hit = findEntry(id);
       if (!hit) {
@@ -4719,7 +4688,6 @@ interface GhResult {
  *  spawnSync (the connector's other shell-outs are all synchronous,
  *  and admission runs inside the registry lock). */
 function ghRun(args: string[], timeoutMs = 30_000): GhResult {
-  // biome-ignore format: NOSONAR must sit on the flagged line
   const proc = spawnSync('gh', args, { // NOSONAR — PATH lookup is the contract (same as docker/git/bd)
     stdio: ['ignore', 'pipe', 'pipe'],
     encoding: 'utf8',
@@ -4981,12 +4949,7 @@ function copilotPatch(
     withAgentRegistryLock(dir, () => {
       const reg = readAgentRegistry(dir);
       const cur = reg[molStep];
-      if (
-        cur === undefined ||
-        cur.agentId !== entry.agentId ||
-        cur.spawnedAt !== entry.spawnedAt ||
-        cur.runId !== entry.runId
-      ) {
+      if (cur === undefined || cur.agentId !== entry.agentId || cur.spawnedAt !== entry.spawnedAt) {
         return;
       }
       reg[molStep] = { ...cur, ...patch };
@@ -5004,22 +4967,13 @@ function copilotPatch(
  *  death. The terminal half lives in copilotTerminalPatch. */
 /** The terminal-state half of the absorb patch — cancelled reads
  *  stopped, completed the ok exit record, failed/timed_out the
- *  classified one. The classified death runs the same instant-death
- *  backoff ensureExitCause applies (spec bro-9eeld) — a preclassified
- *  cause bypasses ensureExitCause's escalation, so the streak and the
- *  escalated hold are computed here: the session's updated_at is the
- *  honest remote death stamp, and any outcome that isn't a fast
- *  rate-limit death clears the streak. */
-function copilotTerminalPatch(
-  state: string,
-  task: CopilotTask,
-  entry: AgentRegistryEntry
-): Record<string, unknown> {
+ *  classified one. */
+function copilotTerminalPatch(state: string, task: CopilotTask): Record<string, unknown> {
   if (state === 'cancelled') {
     return { stopped: true };
   }
   if (state === 'completed') {
-    return { exitStatus: 0, cause: 'ok', rateStreak: undefined };
+    return { exitStatus: 0, cause: 'ok' };
   }
   if (state !== 'failed' && state !== 'timed_out') {
     return {};
@@ -5028,19 +4982,7 @@ function copilotTerminalPatch(
     state === 'timed_out'
       ? { cause: 'crash' as AgentCause, resetAt: undefined }
       : classifyExitCause(copilotSessionError(task), 1);
-  const stamp = Date.parse(String(copilotLatestSession(task)?.updated_at ?? ''));
-  const back = rateDeathBackoff(
-    entry,
-    c.cause,
-    c.resetAt,
-    Number.isNaN(stamp) ? Date.now() : stamp
-  );
-  return {
-    exitStatus: 1,
-    cause: c.cause,
-    resetAt: back.resetAt,
-    rateStreak: back.streak > 0 ? back.streak : undefined,
-  };
+  return { exitStatus: 1, cause: c.cause, resetAt: c.resetAt };
 }
 
 function copilotAbsorb(
@@ -5088,7 +5030,7 @@ function copilotAbsorb(
   if (sessionUrl !== undefined && sessionUrl !== entry.sessionUrl) {
     patch.sessionUrl = sessionUrl;
   }
-  Object.assign(patch, copilotTerminalPatch(state, task, entry));
+  Object.assign(patch, copilotTerminalPatch(state, task));
   if (Object.keys(patch).length > 0) {
     copilotPatch(dir, molStep, entry, patch);
   }
@@ -5381,7 +5323,6 @@ export function makeCopilotConnector(ctx: ConnectorCtx, env: AgentConnectorEnv):
   return {
     name: 'copilot',
 
-    // biome-ignore format: NOSONAR must sit on the flagged line
     async spawn(spec: SpawnSpec): Promise<AgentInfo> { // NOSONAR — connector contract is async; the critical section is sync
       // policy before preflight — an invalid committed config must
       // refuse ahead of the remote-count refresh, not just the claim
@@ -5491,7 +5432,6 @@ export function makeCopilotConnector(ctx: ConnectorCtx, env: AgentConnectorEnv):
       });
     },
 
-    // biome-ignore format: NOSONAR must sit on the flagged line
     async list(): Promise<ListResult> { // NOSONAR — connector contract is async; the work is sync
       try {
         const home = agentsHome(dir);
@@ -5528,7 +5468,6 @@ export function makeCopilotConnector(ctx: ConnectorCtx, env: AgentConnectorEnv):
       }
     },
 
-    // biome-ignore format: NOSONAR must sit on the flagged line
     async status(id: string): Promise<AgentInfo> { // NOSONAR — connector contract is async; the work is sync
       const hit = findEntry(id);
       if (!hit) {
@@ -5643,7 +5582,6 @@ export function makeDevinConnector(ctx: ConnectorCtx, env: AgentConnectorEnv): A
   return {
     name: 'devin',
 
-    // biome-ignore format: NOSONAR must sit on the flagged line
     spawn(): Promise<AgentInfo> { // NOSONAR — connector contract is async; the refusal is sync
       return Promise.reject(
         new SpawnError(
@@ -5654,7 +5592,6 @@ export function makeDevinConnector(ctx: ConnectorCtx, env: AgentConnectorEnv): A
       );
     },
 
-    // biome-ignore format: NOSONAR must sit on the flagged line
     list(): Promise<ListResult> { // NOSONAR — connector contract is async; the scan is sync
       try {
         return Promise.resolve({ agents: rows() });
@@ -5666,7 +5603,6 @@ export function makeDevinConnector(ctx: ConnectorCtx, env: AgentConnectorEnv): A
       }
     },
 
-    // biome-ignore format: NOSONAR must sit on the flagged line
     status(id: string): Promise<AgentInfo> { // NOSONAR — connector contract is async; the scan is sync
       const hit = find(id);
       if (hit === undefined) {
@@ -5675,7 +5611,6 @@ export function makeDevinConnector(ctx: ConnectorCtx, env: AgentConnectorEnv): A
       return Promise.resolve(hit);
     },
 
-    // biome-ignore format: NOSONAR must sit on the flagged line
     stop(id: string): Promise<void> { // NOSONAR — connector contract is async; the signal is sync
       const hit = find(id);
       if (hit === undefined) {

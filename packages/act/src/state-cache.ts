@@ -77,12 +77,6 @@ export interface PrStateCache {
    *  retried in ACQUIRE_SLICE_MS slices with an event-loop yield
    *  between them instead of one blocking wait. */
   acquireAsync(target: PrTarget, waitMs?: number): Promise<(() => void) | null>;
-  /** Claim the off-loop refresh of `target` — a per-target stamp
-   *  throttled to the entry TTL (bro-36sx7.4). False when a peer's
-   *  fetch holds the feed lock (its write will serve the next read)
-   *  or another claim is still fresh; true means the caller owns
-   *  the refresh — spawn the publisher. */
-  claimRefresh(target: PrTarget): boolean;
 }
 
 interface CacheRecord {
@@ -118,7 +112,7 @@ function sweep(root: string): void {
     return;
   }
   for (const f of names) {
-    if (!f.endsWith('.json') && !f.endsWith('.tmp') && !f.endsWith('.refresh')) {
+    if (!f.endsWith('.json') && !f.endsWith('.tmp')) {
       continue;
     }
     const p = join(root, f);
@@ -234,39 +228,6 @@ export function prStateCache(
         }
         await new Promise(resolve => setTimeout(resolve, 0));
       }
-    },
-    claimRefresh(t) {
-      // a peer's fetch holds the lock → its publish serves the next
-      // read; an fs failure → uncached is the standing degradation
-      const r = tryAcquire(t, 0);
-      if (r === null || r === 'timeout') {
-        return false;
-      }
-      r();
-      const stamp = `${fileFor(root, t)}.refresh`;
-      try {
-        mkdirSync(root, { recursive: true });
-      } catch {
-        return false;
-      }
-      for (let attempt = 0; attempt < 2; attempt++) {
-        try {
-          // 'wx' makes the claim atomic across processes — first
-          // writer owns the refresh spawn for the window
-          writeFileSync(stamp, `${Date.now()}\n`, { flag: 'wx' });
-          return true;
-        } catch {
-          try {
-            if (Date.now() - statSync(stamp).mtimeMs < ttl) {
-              return false;
-            }
-            rmSync(stamp, { force: true });
-          } catch {
-            return false;
-          }
-        }
-      }
-      return false;
     },
   };
 }
