@@ -654,6 +654,30 @@ describe('classifyExitCause', () => {
         .resetAt,
       '2026-10-27T19:02:30.000Z'
     );
+    // a previous-EVENING mark read just after midnight belongs to
+    // yesterday — rolling it to tonight would fabricate a day-long hold
+    assert.equal(
+      classifyExitCause('rate limit — reset at 23:30 UTC', 1, Date.parse('2026-10-28T00:15:00Z'))
+        .resetAt,
+      '2026-10-27T23:31:30.000Z'
+    );
+  });
+
+  test('an exact protocol reset beats a fuzzy clock mark in the same message', () => {
+    const now = Date.parse('2026-10-05T20:00:00Z');
+    // retry-after is the provider's exact word — the paraphrased clock
+    // mark (19:01+margin) must not win over it
+    assert.equal(
+      classifyExitCause('rate limit — retry-after: 90 (reset at 19:01 UTC)', 1, now).resetAt,
+      '2026-10-05T20:01:30.000Z'
+    );
+  });
+
+  test('a clock mark with an unsupported zone is not read as UTC', () => {
+    const now = Date.parse('2026-10-27T18:05:44Z');
+    assert.equal(classifyExitCause('rate limit — reset at 19:01 PST', 1, now).resetAt, undefined);
+    // an offset after the zone is not part of the mark either
+    assert.equal(classifyExitCause('rate limit — reset at 19:01 UTC+2', 1, now).resetAt, undefined);
   });
 
   test('a prose timestamp cannot fabricate a wall reset', () => {
@@ -666,6 +690,12 @@ describe('classifyExitCause', () => {
     // 'already at' must not anchor on 'ready'
     assert.equal(
       classifyExitCause('rate limit — already at 19:01 when it failed', 1, now).resetAt,
+      undefined
+    );
+    // a parenthesized EVENT time is not a reset mark either — parens
+    // alone are not context, the mark needs a reset-ish keyword
+    assert.equal(
+      classifyExitCause('rate limit hit, request failed (at 18:05)', 1, now).resetAt,
       undefined
     );
     // a full ISO date after 'at' stays isoReset's, exact — no margin
