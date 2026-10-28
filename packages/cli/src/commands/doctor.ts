@@ -102,8 +102,9 @@ interface BinProbe {
 /** `--version` probe — the same PATH-is-the-contract lookup every bro
  *  shell-out uses. */
 function probeBin(name: string): BinProbe {
-  const p = spawnSync(name, ['--version'], {
-    // NOSONAR — PATH lookup is the contract (same as gh/bd/git)
+  // PATH lookup is the contract (same as gh/bd/git) — biome keeps the
+  // marker on the issue line only in the /* */-leading-statement form
+  /* NOSONAR */ const p = spawnSync(name, ['--version'], {
     stdio: ['ignore', 'pipe', 'pipe'],
     encoding: 'utf8',
     timeout: 10_000,
@@ -167,8 +168,7 @@ function checkGh(): DoctorCheck {
   if (!gh.found) {
     return check('gh', 'fail', binProblem(gh), 'install the GitHub CLI — https://cli.github.com');
   }
-  const auth = spawnSync('gh', ['auth', 'status'], {
-    // NOSONAR — PATH lookup is the contract
+  /* NOSONAR — PATH lookup is the contract */ const auth = spawnSync('gh', ['auth', 'status'], {
     stdio: ['ignore', 'pipe', 'pipe'],
     encoding: 'utf8',
     timeout: 15_000,
@@ -205,8 +205,7 @@ function checkHooks(dir: string): DoctorCheck {
   }
   if (probeBin('bro').found) {
     // `bro hooks` with no event is a silent no-op — same probe run.sh runs
-    const probe = spawnSync('bro', ['hooks'], {
-      // NOSONAR — PATH lookup is the contract
+    /* NOSONAR — PATH lookup is the contract */ const probe = spawnSync('bro', ['hooks'], {
       stdio: ['ignore', 'pipe', 'pipe'],
       timeout: 10_000,
     });
@@ -228,6 +227,139 @@ function checkHooks(dir: string): DoctorCheck {
     'no resolution — lifecycle hooks silently no-op',
     'install @broject/bro or the agent plugin to get session-start context and the stop gate'
   );
+}
+
+/** Devin's plugin lockfile — `<data>/devin/cli/plugins/lock.json`, the
+ *  resolved-install list `devin plugins` maintains; the same base
+ *  derivation devinLocksDir uses. An absent or unreadable file answers
+ *  "nothing resolved" — duplicate wiring is then unprovable. */
+function devinPluginLockfile(env: NodeJS.ProcessEnv): string {
+  const xdg = env['XDG_DATA_HOME'];
+  const base =
+    xdg !== undefined && xdg.trim() !== ''
+      ? xdg
+      : join(
+          env['HOME'] !== undefined && env['HOME'] !== '' ? env['HOME'] : homedir(),
+          '.local',
+          'share'
+        );
+  return join(base, 'devin', 'cli', 'plugins', 'lock.json');
+}
+
+/** A `bro` entry in the lockfile's resolved list — any source/scope
+ *  counts: a resolved plugin's hooks register in Devin sessions. */
+function broPluginResolved(lockfile: string): boolean {
+  try {
+    const raw = JSON.parse(readFileSync(lockfile, 'utf8')) as { resolved?: unknown };
+    return (
+      Array.isArray(raw.resolved) && raw.resolved.some(r => isRecord(r) && r['name'] === 'bro')
+    );
+  } catch {
+    return false;
+  }
+}
+
+/** Bro-launcher signature inside a Devin hook command — run.sh or a
+ *  `bro hooks …` invocation. Applied per event/handler so a chain that
+ *  also wires foreign tooling can be scoped instead of dropped
+ *  wholesale. */
+const DEVIN_BRO_HOOK = /hooks\/run\.sh|bro(?:\.exe|\.cmd)?\s+hooks[\s"']/;
+
+/** Every command a chain event's groups run — null when the shape is
+ *  off-schema (non-array event value, group without a hooks list),
+ *  which the caller counts as foreign rather than guess at what it
+ *  holds. */
+function devinChainCommands(groups: unknown): string[] | null {
+  if (!Array.isArray(groups)) {
+    return null;
+  }
+  const commands: string[] = [];
+  for (const group of groups) {
+    if (!isRecord(group) || !Array.isArray(group['hooks'])) {
+      return null;
+    }
+    for (const h of group['hooks']) {
+      const cmd = isRecord(h) ? h['command'] : undefined;
+      commands.push(typeof cmd === 'string' ? cmd : '');
+    }
+  }
+  return commands;
+}
+
+/** Which events carry a bro handler and whether the chain wires
+ *  anything else — the two facts that pick the remediation (drop the
+ *  file vs strip only the bro entries). Anything we cannot prove is a
+ *  bro handler counts as foreign, so the hint never advises deleting
+ *  handlers the check didn't recognize. null when the JSON won't
+ *  parse: the caller falls back to the file-level signature and the
+ *  safe hint. */
+function devinChainShape(text: string): { broEvents: string[]; foreign: boolean } | null {
+  let raw: unknown;
+  try {
+    raw = JSON.parse(text);
+  } catch {
+    return null;
+  }
+  if (!isRecord(raw)) {
+    return null;
+  }
+  const broEvents: string[] = [];
+  let foreign = false;
+  for (const [event, groups] of Object.entries(raw)) {
+    if (DEVIN_BRO_HOOK.test(JSON.stringify(groups))) {
+      broEvents.push(event);
+    }
+    const commands = devinChainCommands(groups);
+    if (commands === null || commands.some(c => !DEVIN_BRO_HOOK.test(c))) {
+      foreign = true;
+    }
+  }
+  return { broEvents, foreign };
+}
+
+/** Duplicate Devin hook wiring (bro-36sx7.5) — a project-local bro
+ *  chain plus a resolved `bro` plugin both register the same events, so
+ *  each wired event spawns two launchers (the plugin copy exits early
+ *  when the project chain owns the event — the spawn itself is the
+ *  overhead the hooks-perf epic kills). Only chains carrying a bro
+ *  signature collide: a .devin/hooks.v1.json wiring foreign tooling
+ *  fires alongside the plugin, not against it. Warn, never fail — a
+ *  lone project chain is legitimate wiring. The remediation preserves
+ *  unrelated handlers: drop-file only when the chain is all-bro,
+ *  strip-the-bro-entries otherwise. */
+function devinWiringCheck(root: string | null): DoctorCheck {
+  let text: string | null = null;
+  if (root !== null) {
+    try {
+      text = readFileSync(join(root, '.devin', 'hooks.v1.json'), 'utf8');
+    } catch {
+      // absent or unreadable — no project chain
+    }
+  }
+  if (text === null) {
+    return check('hooks-wiring', 'ok', 'no project-local Devin hook chain');
+  }
+  const shape = devinChainShape(text);
+  const hasBro = shape === null ? DEVIN_BRO_HOOK.test(text) : shape.broEvents.length > 0;
+  if (!hasBro) {
+    return check('hooks-wiring', 'ok', 'project-local Devin chain wires no bro hooks');
+  }
+  if (!broPluginResolved(devinPluginLockfile(process.env))) {
+    return check(
+      'hooks-wiring',
+      'ok',
+      '.devin/hooks.v1.json — sole bro wiring (no resolved bro plugin)'
+    );
+  }
+  const detail =
+    shape !== null
+      ? `.devin/hooks.v1.json + resolved bro plugin — two hook launchers on every bro-wired event (${shape.broEvents.join(', ')})`
+      : '.devin/hooks.v1.json + resolved bro plugin — two hook launchers on every bro-wired event';
+  const hint =
+    shape !== null && !shape.foreign
+      ? 'drop .devin/hooks.v1.json — the plugin already wires bro (run.sh defers to a project chain while one exists)'
+      : 'remove the bro hook entries from .devin/hooks.v1.json, keep the other handlers — the plugin already wires bro';
+  return check('hooks-wiring', 'warn', detail, hint);
 }
 
 // --- self-build staleness (bro-s7vgd) --------------------------------------
@@ -1803,6 +1935,7 @@ export function runDoctorChecks(
     tasksBackendCheck(dir, cfg.connectors, bd, cfg.stores.includes('beads'), compat),
     ...bdChecks(dir, bd, beadsDir, cfg.stores.includes('beads'), compat),
     checkHooks(dir),
+    devinWiringCheck(root),
     ...selfDistChecks(),
     ...checkConfig(dir),
     ...configSchemaChecks(dir, opts.strict === true),

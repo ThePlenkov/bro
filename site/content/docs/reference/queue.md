@@ -1,4 +1,5 @@
 ---
+
 title: "bro queue"
 description: "Frame-scoped intake queue: ls|drill|bump|rm — rank-ordered items that promote to frames"
 ---
@@ -7,7 +8,7 @@ description: "Frame-scoped intake queue: ls|drill|bump|rm — rank-ordered items
 
 `bro queue ls|drill|bump|rm`
 
-| | |
-| --- | --- |
-| group | `work` |
-
+|            |                               |
+| ---------- | ----------------------------- |
+| group      | `work`                        |
+| npm latest | unreleased — lands in `0.3.0` |

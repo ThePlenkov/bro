@@ -161,6 +161,12 @@ function withEnv(opts: EnvOpts, fn: (dir: string) => void): Promise<void> {
     saved.CLAUDE_CONFIG_DIR ??= process.env.CLAUDE_CONFIG_DIR;
     process.env.CLAUDE_CONFIG_DIR = join(dir, 'xdg', 'claude-home');
   }
+  // absent XDG_DATA_HOME the devin-wiring probe reads the real
+  // ~/.local/share — pin it at an empty fixture dir instead
+  if (opts.env === undefined || !('XDG_DATA_HOME' in opts.env)) {
+    saved.XDG_DATA_HOME ??= process.env.XDG_DATA_HOME;
+    process.env.XDG_DATA_HOME = join(dir, 'xdg', 'data');
+  }
   const run = async (): Promise<void> => {
     process.env.PATH = bin;
     await fn(dir);
@@ -244,6 +250,24 @@ function commitAt(checkout: string, isoDate?: string): void {
   });
 }
 
+/** A resolved `bro` entry in Devin's plugin lockfile under the test's
+ *  XDG_DATA_HOME — the plugin half of the duplicate wiring. */
+function resolvedBroPlugin(dir: string): void {
+  const data = join(dir, 'data');
+  process.env.XDG_DATA_HOME = data;
+  mkdirSync(join(data, 'devin', 'cli', 'plugins'), { recursive: true });
+  writeFileSync(
+    join(data, 'devin', 'cli', 'plugins', 'lock.json'),
+    JSON.stringify({ resolved: [{ name: 'bro' }] })
+  );
+}
+
+/** The project-local `.devin/hooks.v1.json` chain — the file half. */
+function writeDevinChain(dir: string, chain: object): void {
+  mkdirSync(join(dir, '.devin'));
+  writeFileSync(join(dir, '.devin', 'hooks.v1.json'), JSON.stringify(chain));
+}
+
 describe('bro doctor', () => {
   test('healthy env — every probe ok, exit 0', () => {
     // the dolt remote is a local fixture — a git+https URL would make
@@ -271,6 +295,7 @@ describe('bro doctor', () => {
             'bd-backend',
             'bd-store',
             'hooks',
+            'hooks-wiring',
             'config',
             'git-remote',
             'dolt-remote',
@@ -654,6 +679,86 @@ describe('bro doctor', () => {
         assert.match(c.detail, /PATH/);
       })
     ));
+
+  test('hooks-wiring: bro chain + resolved bro plugin → warn', () =>
+    withEnv({ bins: ['gh'] }, dir => {
+      resolvedBroPlugin(dir);
+      writeDevinChain(dir, {
+        PostToolUse: [
+          {
+            matcher: '^exec$',
+            hooks: [{ type: 'command', command: '"$DEVIN_PROJECT_DIR/hooks/run.sh" post-tool' }],
+          },
+        ],
+      });
+      const c = byName(runDoctorChecks(dir), 'hooks-wiring');
+      assert.equal(c.status, 'warn');
+      assert.match(c.detail, /two hook launchers/);
+      assert.match(c.hint ?? '', /drop \.devin\/hooks\.v1\.json/);
+    }));
+
+  test('hooks-wiring: mixed bro + foreign chain → warn scopes to bro events, hint keeps the file', () =>
+    withEnv({ bins: ['gh'] }, dir => {
+      resolvedBroPlugin(dir);
+      writeDevinChain(dir, {
+        PostToolUse: [
+          {
+            matcher: '^exec$',
+            hooks: [{ type: 'command', command: '"$DEVIN_PROJECT_DIR/hooks/run.sh" post-tool' }],
+          },
+        ],
+        Stop: [
+          {
+            matcher: '',
+            hooks: [{ type: 'command', command: '"$DEVIN_PROJECT_DIR/tools/lint.sh" || true' }],
+          },
+        ],
+      });
+      const c = byName(runDoctorChecks(dir), 'hooks-wiring');
+      assert.equal(c.status, 'warn');
+      assert.match(c.detail, /PostToolUse/);
+      assert.doesNotMatch(c.detail, /Stop/);
+      assert.doesNotMatch(c.hint ?? '', /drop/);
+      assert.match(c.hint ?? '', /remove the bro hook entries/);
+    }));
+
+  test('hooks-wiring: bro chain with no resolved plugin → ok sole wiring', () =>
+    withEnv({ bins: ['gh'] }, dir => {
+      writeDevinChain(dir, {
+        Stop: [
+          {
+            matcher: '',
+            hooks: [{ type: 'command', command: 'bro hooks stop || true; exit 0' }],
+          },
+        ],
+      });
+      const c = byName(runDoctorChecks(dir), 'hooks-wiring');
+      assert.equal(c.status, 'ok');
+      assert.match(c.detail, /sole bro wiring/);
+    }));
+
+  test('hooks-wiring: no project chain → ok', () =>
+    withEnv({ bins: ['gh'] }, dir => {
+      const c = byName(runDoctorChecks(dir), 'hooks-wiring');
+      assert.equal(c.status, 'ok');
+      assert.match(c.detail, /no project-local/);
+    }));
+
+  test('hooks-wiring: a foreign-tool chain + resolved plugin → ok, not duplicate', () =>
+    withEnv({ bins: ['gh'] }, dir => {
+      resolvedBroPlugin(dir);
+      writeDevinChain(dir, {
+        Stop: [
+          {
+            matcher: '',
+            hooks: [{ type: 'command', command: '"$DEVIN_PROJECT_DIR/tools/lint.sh" || true' }],
+          },
+        ],
+      });
+      const c = byName(runDoctorChecks(dir), 'hooks-wiring');
+      assert.equal(c.status, 'ok');
+      assert.match(c.detail, /no bro hooks/);
+    }));
 
   test('bro-dist: PATH-bro into a dev checkout warns when dist predates HEAD', () =>
     withEnv({ bins: ['gh'] }, dir => {
