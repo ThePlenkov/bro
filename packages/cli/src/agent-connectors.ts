@@ -1964,7 +1964,12 @@ function ensureExitCause(
   // missing row (reaped, or a caller's synthesized snapshot) can't
   // inject new bytes — classify anyway
   const cur = readAgentRegistry(dir)[molStep];
-  if (cur !== undefined && (cur.agentId !== entry.agentId || cur.spawnedAt !== entry.spawnedAt)) {
+  if (
+    cur !== undefined &&
+    (cur.agentId !== entry.agentId ||
+      cur.spawnedAt !== entry.spawnedAt ||
+      cur.runId !== entry.runId)
+  ) {
     return;
   }
   entry.cause = c.cause;
@@ -2009,7 +2014,12 @@ function ensureExitCause(
     withAgentRegistryLock(dir, () => {
       const reg = readAgentRegistry(dir);
       const cur = reg[molStep];
-      if (cur === undefined || cur.agentId !== entry.agentId || cur.spawnedAt !== entry.spawnedAt) {
+      if (
+        cur === undefined ||
+        cur.agentId !== entry.agentId ||
+        cur.spawnedAt !== entry.spawnedAt ||
+        cur.runId !== entry.runId
+      ) {
         return;
       }
       reg[molStep] = {
@@ -5337,7 +5347,12 @@ function copilotPatch(
     withAgentRegistryLock(dir, () => {
       const reg = readAgentRegistry(dir);
       const cur = reg[molStep];
-      if (cur === undefined || cur.agentId !== entry.agentId || cur.spawnedAt !== entry.spawnedAt) {
+      if (
+        cur === undefined ||
+        cur.agentId !== entry.agentId ||
+        cur.spawnedAt !== entry.spawnedAt ||
+        cur.runId !== entry.runId
+      ) {
         return;
       }
       reg[molStep] = { ...cur, ...patch };
@@ -5355,13 +5370,22 @@ function copilotPatch(
  *  death. The terminal half lives in copilotTerminalPatch. */
 /** The terminal-state half of the absorb patch — cancelled reads
  *  stopped, completed the ok exit record, failed/timed_out the
- *  classified one. */
-function copilotTerminalPatch(state: string, task: CopilotTask): Record<string, unknown> {
+ *  classified one. The classified death runs the same instant-death
+ *  backoff ensureExitCause applies (spec bro-9eeld) — a preclassified
+ *  cause bypasses ensureExitCause's escalation, so the streak and the
+ *  escalated hold are computed here: the session's updated_at is the
+ *  honest remote death stamp, and any outcome that isn't a fast
+ *  rate-limit death clears the streak. */
+function copilotTerminalPatch(
+  state: string,
+  task: CopilotTask,
+  entry: AgentRegistryEntry
+): Record<string, unknown> {
   if (state === 'cancelled') {
     return { stopped: true };
   }
   if (state === 'completed') {
-    return { exitStatus: 0, cause: 'ok' };
+    return { exitStatus: 0, cause: 'ok', rateStreak: undefined };
   }
   if (state !== 'failed' && state !== 'timed_out') {
     return {};
@@ -5370,7 +5394,19 @@ function copilotTerminalPatch(state: string, task: CopilotTask): Record<string, 
     state === 'timed_out'
       ? { cause: 'crash' as AgentCause, resetAt: undefined }
       : classifyExitCause(copilotSessionError(task), 1);
-  return { exitStatus: 1, cause: c.cause, resetAt: c.resetAt };
+  const stamp = Date.parse(String(copilotLatestSession(task)?.updated_at ?? ''));
+  const back = rateDeathBackoff(
+    entry,
+    c.cause,
+    c.resetAt,
+    Number.isNaN(stamp) ? Date.now() : stamp
+  );
+  return {
+    exitStatus: 1,
+    cause: c.cause,
+    resetAt: back.resetAt,
+    rateStreak: back.streak > 0 ? back.streak : undefined,
+  };
 }
 
 function copilotAbsorb(
@@ -5418,7 +5454,7 @@ function copilotAbsorb(
   if (sessionUrl !== undefined && sessionUrl !== entry.sessionUrl) {
     patch.sessionUrl = sessionUrl;
   }
-  Object.assign(patch, copilotTerminalPatch(state, task));
+  Object.assign(patch, copilotTerminalPatch(state, task, entry));
   if (Object.keys(patch).length > 0) {
     copilotPatch(dir, molStep, entry, patch);
   }

@@ -85,7 +85,8 @@ wall the loop polls), `blockedDecision` (convoy waits), and
 
 Out of scope: re-querying the provider before spawn (there is no such
 API — the log message IS the provider's word), and the pacing half —
-#685's lane gate / wall pauses complement but don't overlap.
+[#685](https://github.com/ThePlenkov/bro/pull/685)'s lane gate / wall
+pauses complement but don't overlap.
 
 ## Plan
 

@@ -91,7 +91,6 @@ const CAUSE_PATTERNS: [AgentCause, RegExp[]][] = [
 ];
 
 const UNIT_MS: Record<string, number> = { h: 3_600_000, m: 60_000, s: 1_000 };
-const UNIT_RE = 'hours?|hrs?|h|minutes?|mins?|m|seconds?|secs?|s';
 
 /** Safety margin on FUZZY reset forms (spec bro-9eeld): the quoted clock
  *  mark and the "in N minutes" paraphrase both undershot the real wall
@@ -107,51 +106,62 @@ const toIso = (ms: number): string | undefined => {
   return Number.isNaN(d.getTime()) ? undefined : d.toISOString();
 };
 
-/** `retry-after: 120` (exact protocol seconds), `try again in 5
- *  minutes`, `resets in 1h 55m` — the prose phrase sums EVERY
- *  number+unit pair: "1 hour 55 minutes" is 115m, not 1h (bro-9eeld —
- *  the single-pair read truncated the deadline by the trailing units). */
-function relReset(text: string, now: number): string | undefined {
+/** `retry-after: 120` — the exact protocol-seconds form (a header
+ *  value, no margin). The HTTP-date sibling lives in httpDateReset. */
+function retryAfterReset(text: string, now: number): string | undefined {
   const hdr = /retry[- ]?after\s*[:=]\s*(\d+)\b/i.exec(text);
-  if (hdr !== null) {
-    const n = Number(hdr[1]);
-    if (!Number.isFinite(n) || n < 0) {
-      return undefined;
-    }
-    return toIso(now + n * 1_000);
+  if (hdr === null) {
+    return undefined;
   }
-  const rel = new RegExp(
-    String.raw`(?:try again|retry|resets?|available|ready) in ((?:\d+\s*(?:${UNIT_RE})\b[\s,]*(?:and\s+)?)+)`,
-    'i'
-  ).exec(text);
+  const n = Number(hdr[1]);
+  if (!Number.isFinite(n) || n < 0) {
+    return undefined;
+  }
+  return toIso(now + n * 1_000);
+}
+
+/** `try again in 5 minutes`, `resets in 1h 55m` — the prose phrase sums
+ *  EVERY number+unit pair: "1 hour 55 minutes" is 115m, not 1h
+ *  (bro-9eeld — the single-pair read truncated the deadline by the
+ *  trailing units). */
+function relReset(text: string, now: number): string | undefined {
+  const rel =
+    /(?:try again|retry|resets?|available|ready) in ((?:\d+\s*(?:hours?|hrs?|h|minutes?|mins?|m|seconds?|secs?|s)\b[\s,]*(?:and\s+)?)+)/i.exec(
+      text
+    );
   if (rel === null) {
     return undefined;
   }
   let ms = 0;
-  for (const p of rel[1]!.matchAll(new RegExp(String.raw`(\d+)\s*(${UNIT_RE})\b`, 'gi'))) {
+  for (const p of rel[1]!.matchAll(
+    /(\d+)\s*(hours?|hrs?|h|minutes?|mins?|m|seconds?|secs?|s)\b/gi
+  )) {
     ms += Number(p[1]) * (UNIT_MS[p[2]!.toLowerCase()[0]!] ?? 1_000);
   }
   return toIso(now + ms + RESET_MARK_MARGIN_MS);
 }
 
-/** The provider's quoted clock mark — `reset at 19:01 UTC`, `(at
- *  09:01)`, `until at 18:04:50Z`. The mark must sit in reset context —
- *  a reset-ish keyword within ~24 chars or an opening paren — so a
- *  prose timestamp ("died at 18:05:44") can't fabricate a wall reset.
- *  Day-ambiguous marks resolve to the NEARER of today's/tomorrow's UTC
+/** The provider's quoted clock mark — `reset at 19:01 UTC`, `(reset
+ *  at 09:01)`, `until at 18:04:50Z`. The mark must sit in reset context
+ *  — a reset-ish keyword within ~24 chars (inside the parens counts:
+ *  `(reset at …)`) — so a prose or parenthesized EVENT timestamp
+ *  ("died at 18:05:44", "(at 18:05)") can't fabricate a wall reset.
+ *  An explicit zone must be UTC/GMT/Z — anything else (PST, UTC+2)
+ *  rejects the mark rather than misreading it as UTC. Day-ambiguous
+ *  marks resolve to the NEAREST of yesterday's/today's/tomorrow's UTC
  *  occurrence at `now`: a mark already past is the lifted wall, not a
  *  24h block — lazy classification can read the tail hours after the
  *  death it stamps, and rolling a stale quote forward would fabricate
  *  a day-long hold. A `YYYY-MM-DD` date after `at` is left to
  *  isoReset. */
-const CLOCK_MARK = /at\s+(?!\d{4}-)(\d{1,2}):(\d{2})(?::(\d{2}))?\s*(?:UTC|GMT|Z)?\b/i;
+const CLOCK_MARK = /at\s+(?!\d{4}-)(\d{1,2}):(\d{2})(?::(\d{2}))?(?!\d)(\s*[A-Za-z+-][\w:+-]*)?/i;
 const MARK_CONTEXT =
-  /(?:\(\s*|\b(?:resets?|resetting|try again|retry|until|available|ready|window)\b[^\n]{0,24}?)at\s/i;
+  /\b(?:resets?|resetting|try again|retry|until|available|ready|window)\b[^\n]{0,24}?at\s/i;
 
 function clockReset(text: string, now: number): string | undefined {
   // the mark must sit in reset context — a reset-ish keyword within ~24
-  // chars or an opening paren — so a prose timestamp can't fabricate a
-  // reset; the mark itself then parses on its own simpler pattern
+  // chars — so a prose timestamp can't fabricate a reset; the mark
+  // itself then parses on its own simpler pattern
   const ctx = MARK_CONTEXT.exec(text);
   const m = ctx === null ? null : CLOCK_MARK.exec(text.slice(ctx.index));
   if (m === null) {
@@ -160,13 +170,27 @@ function clockReset(text: string, now: number): string | undefined {
   const hh = Number(m[1]);
   const mm = Number(m[2]);
   const ss = m[3] === undefined ? 0 : Number(m[3]);
-  if (hh > 23 || mm > 59 || ss > 59) {
+  // an explicit zone word must be UTC/GMT/Z — anything else (PST,
+  // UTC+2, -0500) rejects the mark rather than misreading it as UTC
+  const zone = m[4]?.trim();
+  if (
+    hh > 23 ||
+    mm > 59 ||
+    ss > 59 ||
+    (zone !== undefined && zone !== '' && !/^(?:UTC|GMT|Z)$/i.test(zone))
+  ) {
     return undefined;
   }
   const d = new Date(now);
   const today = Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate(), hh, mm, ss);
-  const tomorrow = today + 86_400_000;
-  const best = Math.abs(today - now) <= Math.abs(tomorrow - now) ? today : tomorrow;
+  // nearest occurrence across the day boundary — an evening mark read
+  // just after midnight was YESTERDAY's, not 23h out
+  let best = today;
+  for (const cand of [today - 86_400_000, today + 86_400_000]) {
+    if (Math.abs(cand - now) < Math.abs(best - now)) {
+      best = cand;
+    }
+  }
   return toIso(best + RESET_MARK_MARGIN_MS);
 }
 
@@ -198,17 +222,20 @@ function epochReset(text: string): string | undefined {
   return m === null ? undefined : toIso(Number(m[1]) * 1000);
 }
 
-/** Provider reset extraction across the known header/prose forms — the
- *  quoted clock mark wins over the same message's "in N minutes"
+/** Provider reset extraction across the known header/prose forms —
+ *  protocol-exact forms (retry-after seconds/HTTP-date, anchored ISO,
+ *  epoch header) win over the fuzzy marks, and of the fuzzy forms the
+ *  quoted clock mark still beats the same message's "in N minutes"
  *  paraphrase (bro-9eeld: the relative read unblocked ~66s before the
  *  mark the provider actually quoted). */
 function parseResetAt(text: string, now: number): string | undefined {
   return (
-    clockReset(text, now) ??
-    relReset(text, now) ??
+    retryAfterReset(text, now) ??
     httpDateReset(text) ??
     isoReset(text) ??
-    epochReset(text)
+    epochReset(text) ??
+    clockReset(text, now) ??
+    relReset(text, now)
   );
 }
 
@@ -339,7 +366,11 @@ export interface AgentInfo {
    *  absent on live agents, unclassifiable deaths, and pre-taxonomy
    *  entries not yet re-read. */
   cause?: AgentCause;
-  /** Provider-reported reset (ISO) riding a rate_limited/quota cause. */
+  /** The recorded hold deadline (ISO) riding a rate_limited/quota
+   *  cause — the provider's reported reset PLUS any fuzzy-mark margin
+   *  or instant-death backoff. Not necessarily the verbatim provider
+   *  value; consumers must treat it as the effective hold, not the
+   *  quote. */
   resetAt?: string;
   /** Provider provenance — which `providers.<name>` ran this agent,
    *  and the effective model the worker reported or was pinned to.
