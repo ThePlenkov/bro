@@ -26,14 +26,17 @@ feature.
   release ≥7 days old.
 - **Decorate, don't replace.** The connector wraps the local bus
   facade: `publish` delivers to the local bus *and* to nats; `subscribe`
-  merges the local stream with the nats subscription; `probe` reads the
+  merges the local stream with the nats subscription **deduplicated on
+  envelope `id`** — a local publish arrives once from the bus and again
+  from its own nats fan-in, and must deliver once; `probe` reads the
   local bus only (it is the hook-path primitive — intra-rig by
   contract). A rig with `connectors.events=nats` and a dead nats-server
   keeps full local semantics: the nats leg reports
   `EventPublishResult.reason`, the local leg is untouched. Fail-open
   everywhere — the publish contract forbids a transport throw reaching
   a hook caller, and every nats call is bounded like `BUS_TIMEOUT_MS`.
-- **Wire envelope**: `EventInput` + `{ts, gen, source}` as JSON. No
+- **Wire envelope**: `EventInput` + `{id, ts, gen, source}` as JSON —
+  `id` is a fresh per-event unique id (the dedup key above). No
   `seq` — core NATS has no total order, and the facade leaves `seq`
   undefined for transports without one; inventing one is the dishonesty
   the field's contract forbids. `gen` marks the producing rig's run.
@@ -44,12 +47,17 @@ feature.
   `to` subtree; a consumer subscribing `bro.<rig>.evt.>` provably sees
   only broadcast traffic (the `to` subtree sits under a different
   token — `evt` ≠ `to`). Every token is percent-encoded
-  (`encodeURIComponent`) — composite keys get a canonical form;
-  `a.b` and `a_b` must not collide and `%` is not a legal NATS
-  wildcard char.
+  (`encodeURIComponent`) **with `.` additionally escaped to `%2E`** —
+  NATS splits subjects on dots, so an unescaped period inside a value
+  silently splits one token into two (`a.b`/`c` vs `a`/`b.c` would
+  collide). Composite keys get a canonical form; `a.b` and `a_b` must
+  not collide and `%` is not a legal NATS wildcard char.
 - **Rig id**: `comms.nats.rig` → the mesh rig identity (`mesh://`) →
-  basename of the git common dir, subject-encoded. One rig = one
-  subtree owner; `source` in the envelope names it.
+  basename of the **worktree root** (the directory containing `.git`),
+  subject-encoded — never the common-dir basename, which is the
+  constant `.git` for every ordinary repo and would collapse all rigs
+  onto one subtree. One rig = one subtree owner; `source` in the
+  envelope names it.
 - **Egress-only for v1.** Local publishes fan out to nats; remote
   events do NOT re-enter the local bus — ingress republish is the mesh
   binding's job (bro-o6968), where a remote rig's `mesh/1` envelope is
@@ -67,8 +75,12 @@ feature.
 - **Auth**: a loopback NATS is *looser* than the unix socket (which
   asserts a 0700 dir) — any local process could pub/sub. Managed-child
   mode therefore generates a random token, stores it at
-  `<git-common>/bro/nats.token` mode 0600, passes `--auth` to the
-  child, and local publishers read the same file. Foreign-server mode
+  `<git-common>/bro/nats.token` mode 0600, writes a minimal server
+  config `<git-common>/bro/nats-server.conf` (0600) carrying an
+  `authorization { token: ... }` block, and spawns the child with
+  `--config` — never `--auth`, which would print the token in `ps`
+  for every local user. Local publishers read the token file.
+  Foreign-server mode
   takes `comms.nats.tokenEnv`/`credsFile` — env/file indirection, the
   sinks.ts secret rule: values never enter config, argv, or logs.
 - **Deps**: `nats` npm package added to `packages/core` (or the new
