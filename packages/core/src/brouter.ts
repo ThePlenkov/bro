@@ -182,6 +182,23 @@ export function isQualifiedRouteId(
   return slash > 0 && slash < asked.length - 1 && Object.hasOwn(providers, asked.slice(0, slash));
 }
 
+/** Source-2 expansion — the declared candidate list for `asked`, each
+ *  provider validated at use; an unconfigured name throws naming the
+ *  brouter key (suffixed [i] when the entry declares several). */
+function declaredRoutes(
+  providers: Record<string, ProviderEntry>,
+  routes: BrouterRoute[],
+  asked: string
+): ModelRoute[] {
+  return routes.map((r, i) => {
+    if (!Object.hasOwn(providers, r.provider)) {
+      const at = routes.length > 1 ? `${asked}[${i}]` : asked;
+      throw new BrouterConfigError(at, r.provider);
+    }
+    return { provider: r.provider, model: r.model ?? asked };
+  });
+}
+
 /** Model → ordered route candidates. Sources, first hit wins:
  *
  *  1. qualified `<provider>/<model>` — head is a configured provider;
@@ -207,13 +224,7 @@ export function resolveModelRoute(
     return [{ provider: asked.slice(0, slash), model: asked.slice(slash + 1) }];
   }
   if (brouter !== undefined && Object.hasOwn(brouter.models, asked)) {
-    return brouter.models[asked]!.map((r, i) => {
-      if (!Object.hasOwn(providers, r.provider)) {
-        const at = brouter.models[asked]!.length > 1 ? `${asked}[${i}]` : asked;
-        throw new BrouterConfigError(at, r.provider);
-      }
-      return { provider: r.provider, model: r.model ?? asked };
-    });
+    return declaredRoutes(providers, brouter.models[asked]!, asked);
   }
   return Object.keys(providers)
     .filter(name => (catalog[name] ?? []).includes(asked))
