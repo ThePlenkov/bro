@@ -932,17 +932,20 @@ function settleSpawnRefusal(ctx: Ctx, m: GateMember, err: unknown): PushOutcome 
   if (err instanceof SpawnError && err.kind === 'unavailable') {
     // a wedged task store under the spawn lock, a dead multiplexer, a
     // claim bd killed mid-write — the store outage class, never a
-    // refusal. Release nothing: a killed bd may have half-written the
-    // claim, and a store that just refused can't be trusted with the
-    // release either — the dead custody record above plus the exit
-    // sweep own the residue. The pick un-sees and holds an interval
-    // so a recovered store re-picks cleanly (spec bro-cu3q8).
-    // The registry pin can also predate the failure (it lands before
-    // claimStep): a pid-less entry reads as a remote worker in flight
-    // and walls the retry's re-pick — mark this push's own entry dead.
-    // A refusal thrown before the pin leaves none to kill.
+    // refusal. The registry pin can also predate the failure (it lands
+    // before claimStep): a pid-less entry reads as a remote worker in
+    // flight and walls the retry's re-pick — mark this push's own entry
+    // dead. A refusal thrown before the pin leaves none to kill.
     if (readAgentRegistry(ctx.root)[m.beads[0]!.id] !== undefined) {
       patchAgentRegistry(ctx.root, m.beads[0]!.id, { stopped: true, spawnError: msg });
+    }
+    // batch members claimed by claimMembers remain in_progress even if
+    // the lead spawn never landed; release them now so the retry can
+    // re-pick (the lead's claim is uncertain and the infra hold owns
+    // custody until recovered). The store may be wedged, but a failed
+    // reopen is best-effort — tryClaim still un-sees and holds an interval.
+    for (const b of openBeads(ctx, m.beads.slice(1))) {
+      reopenBead(ctx, b.id);
     }
     return { kind: 'infra', why: msg };
   }
