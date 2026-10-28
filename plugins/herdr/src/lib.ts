@@ -473,34 +473,45 @@ export function shq(s: string): string {
   return `'${s.replace(/'/g, `'\\''`)}'`;
 }
 
+const WORD_ESCAPES: Record<string, string> = { n: '\n', t: '\t' };
+const unescapeWord = (s: string): string =>
+  s.replace(/\\(.)/g, (_, c: string) => WORD_ESCAPES[c] ?? c);
+
+/** One lexer segment → its literal text; malformed input is a loud
+ *  usage error. Single-quoted bodies stay literal, double-quoted and
+ *  bare segments get \x escapes. */
+const segmentText = (s: string): string => {
+  if (s === '\\') throw new Error('trailing backslash');
+  const q = s[0] as string;
+  if (q !== '"' && q !== "'") return unescapeWord(s);
+  if (s.length < 2 || !s.endsWith(q)) throw new Error(`unclosed ${q} quote`);
+  return q === '"' ? unescapeWord(s.slice(1, -1)) : s.slice(1, -1);
+};
+
 /** Minimal shell-words split for operator-selected text — whitespace-
- *  separated argv honoring '…', "…" and \x escapes. NOT a shell: no
- *  $expansion, globs, `;` or `|` — selected text can never re-parse
- *  into a different program. An unclosed quote is a usage error,
- *  named as such. */
+ *  separated argv honoring '…', "…" and \x escapes. Empty quoted
+ *  tokens (""/'') survive as empty argv — `cur` alone can't tell a
+ *  word that produced nothing from no word at all, so `open` tracks
+ *  it. NOT a shell: no $expansion, globs, `;` or `|` — selected text
+ *  can never re-parse into a different program. An unclosed quote is
+ *  a usage error, named as such. */
 export function shellWords(text: string): string[] {
-  const ESCAPES: Record<string, string> = { n: '\n', t: '\t' };
-  const unescape = (s: string): string => s.replace(/\\(.)/g, (_, c: string) => ESCAPES[c] ?? c);
   const SEGMENT = /"(?:\\.|[^"\\])*"?|'[^']*'?|\\.|[^\s'"\\]+|\s+|\S/g;
   const out: string[] = [];
   let cur = '';
+  let open = false;
   for (const m of text.matchAll(SEGMENT)) {
     const s = m[0];
     if (/^\s+$/.test(s)) {
-      if (cur !== '') out.push(cur);
+      if (open) out.push(cur);
       cur = '';
+      open = false;
       continue;
     }
-    if (s === '\\') throw new Error('trailing backslash');
-    if (s.startsWith('"') || s.startsWith("'")) {
-      const q = s[0] as string;
-      if (s.length < 2 || !s.endsWith(q)) throw new Error(`unclosed ${q} quote`);
-      cur += q === '"' ? unescape(s.slice(1, -1)) : s.slice(1, -1);
-      continue;
-    }
-    cur += s.startsWith('\\') ? unescape(s) : s;
+    cur += segmentText(s);
+    open = true;
   }
-  if (cur !== '') out.push(cur);
+  if (open) out.push(cur);
   return out;
 }
 

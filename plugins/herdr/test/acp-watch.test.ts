@@ -60,6 +60,12 @@ describe('shellWords', () => {
     assert.deepEqual(shellWords("'a\\nb'"), ['a\\nb']);
   });
 
+  test('empty quoted tokens survive as empty argv', () => {
+    assert.deepEqual(shellWords('a "" b'), ['a', '', 'b']);
+    assert.deepEqual(shellWords("''"), ['']);
+    assert.deepEqual(shellWords("x ''"), ['x', '']);
+  });
+
   test('unclosed quote and trailing backslash are usage errors', () => {
     assert.throws(() => shellWords("a'b"), /unclosed/);
     assert.throws(() => shellWords('"x'), /unclosed/);
