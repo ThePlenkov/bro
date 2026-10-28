@@ -2785,12 +2785,12 @@ function tmuxRun(socket: string, args: string[]): TmuxResult {
     delete env[k];
   }
   const proc = spawnSync('tmux', socket === '' ? args : ['-L', socket, ...args], {
-    // NOSONAR — PATH lookup is the contract (same as git/bd)
     stdio: ['ignore', 'pipe', 'pipe'],
     encoding: 'utf8',
     timeout: 10_000,
     env,
-  });
+    // NOSONAR — PATH lookup is the contract (same as git/bd)
+  } as any);
   return {
     code: proc.status ?? 1,
     out: proc.stdout ?? '',
