@@ -53,11 +53,20 @@ export interface BeadRow {
 
 interface StatusAgent {
   id: string;
+  /** The attempt's agentId — keys `<agents-home>/<agentId>.{log,stderr}`
+   *  and the `agent-<agentId>.work` occupancy marker. Needed by thin
+   *  clients that mirror or link agent artifacts without parsing the
+   *  registry file themselves (bro-762eh). */
+  agentId?: string;
   backend: string;
   step?: string;
   state: string;
   cause?: string;
   pid?: number;
+  /** Absolute path of the agent's log file, when the backend records
+   *  one — lets a read-plane client tail the worker without knowing
+   *  the artifacts-dir convention. */
+  log?: string;
   worktree?: string;
   provider?: string;
   model?: string;
@@ -351,6 +360,12 @@ function readFleet(dir: string): BroStatus['fleet'] {
       backend: e.backend,
       state: agentState(e),
     };
+    if (typeof e.agentId === 'string') {
+      a.agentId = e.agentId;
+    }
+    if (typeof e.log === 'string') {
+      a.log = e.log;
+    }
     if (typeof e.step === 'string') {
       a.step = e.step;
     }
