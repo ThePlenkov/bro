@@ -473,7 +473,6 @@ function BroBoardOpen(props: { board: () => Board | null; theme: any }) {
   const theme = props.theme
   const live = () => (board()?.fleet.agents ?? []).filter((a) => a.state === 'running')
   const runningLoops = () => (board()?.loop.runs ?? []).filter((r) => r.state === 'running')
-  const now = () => Date.now()
   return (
 <>
   <Show when={(board()?.beads.inProgress.length ?? 0) > 0}>
@@ -530,7 +529,6 @@ function BroBoard(props: { context: Plugin.Context; board: () => Board | null })
     initial: { open: true },
   })
   const board = () => props.board()
-  const now = () => Date.now()
   return (
     <Show when={board() !== null}>
       <box flexDirection="column">
