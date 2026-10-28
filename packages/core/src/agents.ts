@@ -91,6 +91,14 @@ const CAUSE_PATTERNS: [AgentCause, RegExp[]][] = [
 ];
 
 const UNIT_MS: Record<string, number> = { h: 3_600_000, m: 60_000, s: 1_000 };
+const UNIT_RE = 'hours?|hrs?|h|minutes?|mins?|m|seconds?|secs?|s';
+
+/** Safety margin on FUZZY reset forms (spec bro-9eeld): the quoted clock
+ *  mark and the "in N minutes" paraphrase both undershot the real wall
+ *  by ~66-90s in the wild — the loop unblocked early and spawned into a
+ *  still-locked provider. Protocol-exact forms (retry-after, HTTP-date,
+ *  ISO, epoch) carry no margin. */
+export const RESET_MARK_MARGIN_MS = 90_000;
 
 const toIso = (ms: number): string | undefined => {
   // an absurd but finite delay overflows Date — toISOString() throws
@@ -99,21 +107,62 @@ const toIso = (ms: number): string | undefined => {
   return Number.isNaN(d.getTime()) ? undefined : d.toISOString();
 };
 
-/** `retry-after: 120`, `try again in 5 minutes`, `resets in 1h` */
+/** `retry-after: 120` (exact protocol seconds), `try again in 5
+ *  minutes`, `resets in 1h 55m` — the prose phrase sums EVERY
+ *  number+unit pair: "1 hour 55 minutes" is 115m, not 1h (bro-9eeld —
+ *  the single-pair read truncated the deadline by the trailing units). */
 function relReset(text: string, now: number): string | undefined {
-  const rel =
-    /retry[- ]?after\s*[:=]\s*(\d+)\b/i.exec(text) ??
-    /(?:try again|retry|resets?|available|ready) in (\d+)\s*(hours?|hrs?|h|minutes?|mins?|m|seconds?|secs?|s)\b/i.exec(
-      text
-    );
+  const hdr = /retry[- ]?after\s*[:=]\s*(\d+)\b/i.exec(text);
+  if (hdr !== null) {
+    const n = Number(hdr[1]);
+    if (!Number.isFinite(n) || n < 0) {
+      return undefined;
+    }
+    return toIso(now + n * 1_000);
+  }
+  const rel = new RegExp(
+    `(?:try again|retry|resets?|available|ready) in ((?:\\d+\\s*(?:${UNIT_RE})\\b[\\s,]*(?:and\\s+)?)+)`,
+    'i'
+  ).exec(text);
   if (rel === null) {
     return undefined;
   }
-  const n = Number(rel[1]);
-  if (!Number.isFinite(n) || n < 0) {
+  let ms = 0;
+  for (const p of rel[1]!.matchAll(new RegExp(`(\\d+)\\s*(${UNIT_RE})\\b`, 'gi'))) {
+    ms += Number(p[1]) * (UNIT_MS[p[2]!.toLowerCase()[0]!] ?? 1_000);
+  }
+  return toIso(now + ms + RESET_MARK_MARGIN_MS);
+}
+
+/** The provider's quoted clock mark — `reset at 19:01 UTC`, `(at
+ *  09:01)`, `until at 18:04:50Z`. The mark must sit in reset context —
+ *  a reset-ish keyword within ~24 chars or an opening paren — so a
+ *  prose timestamp ("died at 18:05:44") can't fabricate a wall reset.
+ *  Day-ambiguous marks resolve to the NEARER of today's/tomorrow's UTC
+ *  occurrence at `now`: a mark already past is the lifted wall, not a
+ *  24h block — lazy classification can read the tail hours after the
+ *  death it stamps, and rolling a stale quote forward would fabricate
+ *  a day-long hold. A `YYYY-MM-DD` date after `at` is left to
+ *  isoReset. */
+function clockReset(text: string, now: number): string | undefined {
+  const m =
+    /(?:\(\s*|\b(?:resets?|resetting|try again|retry|until|available|ready|window)\b[^\n]{0,24}?)\bat\s+(?!\d{4}-)(\d{1,2}):(\d{2})(?::(\d{2}))?\s*(?:UTC|GMT|Z)?\b/i.exec(
+      text
+    );
+  if (m === null) {
     return undefined;
   }
-  return toIso(now + n * (UNIT_MS[(rel[2]?.toLowerCase() ?? 's')[0]!] ?? 1_000));
+  const hh = Number(m[1]);
+  const mm = Number(m[2]);
+  const ss = m[3] === undefined ? 0 : Number(m[3]);
+  if (hh > 23 || mm > 59 || ss > 59) {
+    return undefined;
+  }
+  const d = new Date(now);
+  const today = Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate(), hh, mm, ss);
+  const tomorrow = today + 86_400_000;
+  const best = Math.abs(today - now) <= Math.abs(tomorrow - now) ? today : tomorrow;
+  return toIso(best + RESET_MARK_MARGIN_MS);
 }
 
 /** Retry-After's HTTP-date form — the numeric matcher above skips it */
@@ -144,9 +193,18 @@ function epochReset(text: string): string | undefined {
   return m === null ? undefined : toIso(Number(m[1]) * 1000);
 }
 
-/** Provider reset extraction across the known header/prose forms. */
+/** Provider reset extraction across the known header/prose forms — the
+ *  quoted clock mark wins over the same message's "in N minutes"
+ *  paraphrase (bro-9eeld: the relative read unblocked ~66s before the
+ *  mark the provider actually quoted). */
 function parseResetAt(text: string, now: number): string | undefined {
-  return relReset(text, now) ?? httpDateReset(text) ?? isoReset(text) ?? epochReset(text);
+  return (
+    clockReset(text, now) ??
+    relReset(text, now) ??
+    httpDateReset(text) ??
+    isoReset(text) ??
+    epochReset(text)
+  );
 }
 
 /** Classify a recorded exit from the log tail — the exit code only
@@ -399,6 +457,48 @@ export interface AgentRegistryEntry {
    *  the handshake contract carry none. */
   runId?: string;
   [key: string]: unknown;
+}
+
+/** A spawn→exit under this line proves nothing but the wall — no real
+ *  work could have happened in the window (spec bro-9eeld). */
+export const INSTANT_DEATH_MS = 60_000;
+/** The instant-death ramp: the wait added over the provider's word
+ *  doubles per consecutive fast rate death — 30s, 60s, 120s… capped. */
+export const RATE_BACKOFF_BASE_MS = 30_000;
+export const RATE_BACKOFF_CAP_MS = 30 * 60_000;
+
+/** The recorded hold after a rate_limited death (spec bro-9eeld). A run
+ *  dead inside INSTANT_DEATH_MS of spawn proves the last-reported mark
+ *  undershot — consecutive instant deaths escalate the added wait
+ *  (`RATE_BACKOFF_BASE_MS · 2^(streak-1)`, capped) over
+ *  `max(reported, exitAt)`, so a stale mark escalates from the death
+ *  itself. Every slower death did real work and clears the streak;
+ *  `rateStreak` survives respawns on the registry entry — it is the
+ *  step's wall history, not one run's. A death with no reported reset
+ *  stays indefinite — the `bro agents down` escape is that wall's
+ *  contract. `exitAt` is the .exit file's mtime — the honest death
+ *  stamp a late lazy read cannot inflate. */
+export function rateDeathBackoff(
+  entry: { spawnedAt?: unknown; rateStreak?: unknown },
+  cause: AgentCause,
+  resetAt: string | undefined,
+  exitAt: number
+): { streak: number; resetAt: string | undefined } {
+  const spawned = typeof entry.spawnedAt === 'string' ? Date.parse(entry.spawnedAt) : Number.NaN;
+  const prev = typeof entry.rateStreak === 'number' ? entry.rateStreak : 0;
+  const fast =
+    cause === 'rate_limited' && Number.isFinite(spawned) && exitAt - spawned < INSTANT_DEATH_MS;
+  if (!fast) {
+    return { streak: 0, resetAt };
+  }
+  const streak = prev + 1;
+  if (resetAt === undefined) {
+    return { streak, resetAt };
+  }
+  const extra = Math.min(RATE_BACKOFF_BASE_MS * 2 ** (streak - 1), RATE_BACKOFF_CAP_MS);
+  const reported = Date.parse(resetAt);
+  const base = Number.isNaN(reported) ? exitAt : Math.max(reported, exitAt);
+  return { streak, resetAt: toIso(base + extra) ?? resetAt };
 }
 
 /** Whether the entry's recorded cause still forbids respawn — a
