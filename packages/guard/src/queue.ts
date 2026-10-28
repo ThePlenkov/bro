@@ -97,6 +97,18 @@ function touch(path: string): void {
 
 const QUEUED: DecideResult = { answers: {}, model: 'queued', latencyMs: 0, lowConfidence: [] };
 
+/** The queue is keyed by the guard's name — a state carrying none has
+ *  no queue identity, so the facade abstains outright. */
+function guardKey(state: unknown): string | null {
+  const name =
+    typeof state === 'object' && state !== null ? (state as { guard?: unknown }).guard : undefined;
+  if (typeof name !== 'string') {
+    return null;
+  }
+  const key = safe(name);
+  return key === '' ? null : key;
+}
+
 /** The hook-path judge facade (bro-36sx7.4): decide() first claims a
  *  verdict a drain already published for this guard — the engine
  *  reads it exactly like a live call, journal included — otherwise it
@@ -107,14 +119,14 @@ export function queuedJudge(dir: string): JudgeFacade {
   const root = judgeQueueDir(dir);
   return {
     async decide(state, questions) {
-      const name =
-        typeof state === 'object' && state !== null
-          ? (state as { guard?: unknown }).guard
-          : undefined;
-      if (root === null || typeof name !== 'string' || safe(name) === '') {
+      if (root === null) {
         return QUEUED;
       }
-      const verdict = claimFile(join(root, `${safe(name)}.verdict.json`));
+      const key = guardKey(state);
+      if (key === null) {
+        return QUEUED;
+      }
+      const verdict = claimFile(join(root, `${key}.verdict.json`));
       if (verdict !== null) {
         try {
           return JSON.parse(verdict) as DecideResult;
@@ -122,7 +134,7 @@ export function queuedJudge(dir: string): JudgeFacade {
           // a corrupt verdict is no answer — re-queue below
         }
       }
-      const req = join(root, `${safe(name)}.req.json`);
+      const req = join(root, `${key}.req.json`);
       try {
         mkdirSync(root, { recursive: true });
         const tmp = `${req}.tmp-${process.pid}`;
@@ -141,12 +153,55 @@ export function queuedJudge(dir: string): JudgeFacade {
   };
 }
 
+/** One queue entry end to end — rename-claim the req (a peer drain
+ *  loses the race), decide it against the facade, publish the
+ *  DecideResult to the guard's verdict file, remove the request. A
+ *  thrown decide restores the req — the original write's mtime
+ *  survives the renames, so its age is the retry backoff — a corrupt
+ *  or incomplete one is dropped. Returns whether a verdict landed. */
+async function drainRequest(root: string, name: string, facade: JudgeFacade): Promise<boolean> {
+  const req = join(root, name);
+  const work = `${req}.work-${process.pid}`;
+  try {
+    renameSync(req, work);
+  } catch {
+    return false; // a peer drain claimed it
+  }
+  let payload: Partial<JudgeReq>;
+  try {
+    payload = JSON.parse(readFileSync(work, 'utf8')) as Partial<JudgeReq>;
+  } catch {
+    rmSync(work, { force: true });
+    return false;
+  }
+  if (payload.state === undefined || payload.questions === undefined) {
+    rmSync(work, { force: true });
+    return false;
+  }
+  try {
+    const res = await facade.decide(payload.state, payload.questions);
+    const verdict = join(root, name.slice(0, -'.req.json'.length) + '.verdict.json');
+    const tmp = `${verdict}.tmp-${process.pid}`;
+    writeFileSync(tmp, JSON.stringify(res));
+    renameSync(tmp, verdict);
+    rmSync(work, { force: true });
+    return true;
+  } catch {
+    // no verdict produced — restore the req; its age throttles the
+    // re-drain on a persistently-down judge
+    try {
+      renameSync(work, req);
+    } catch {
+      rmSync(work, { force: true });
+    }
+    return false;
+  }
+}
+
 /** The `bro guard eval` worker body — claim every pending request,
  *  decide against the real facade, publish the DecideResult to the
- *  guard's verdict file, remove the request. A thrown decide restores
- *  the req (the original write's mtime survives the renames, so its
- *  age is the retry backoff); a corrupt one is dropped. Returns the
- *  count drained — CLI exits 0 regardless; a quiet queue is success. */
+ *  guard's verdict file, remove the request. Returns the count
+ *  drained — CLI exits 0 regardless; a quiet queue is success. */
 export async function drainJudgeRequests(dir: string, facade: JudgeFacade): Promise<number> {
   const root = judgeQueueDir(dir);
   if (root === null) {
@@ -161,43 +216,8 @@ export async function drainJudgeRequests(dir: string, facade: JudgeFacade): Prom
   }
   let drained = 0;
   for (const f of names) {
-    if (!f.endsWith('.req.json')) {
-      continue;
-    }
-    const req = join(root, f);
-    const work = `${req}.work-${process.pid}`;
-    try {
-      renameSync(req, work);
-    } catch {
-      continue; // a peer drain claimed it
-    }
-    let payload: Partial<JudgeReq>;
-    try {
-      payload = JSON.parse(readFileSync(work, 'utf8')) as Partial<JudgeReq>;
-    } catch {
-      rmSync(work, { force: true });
-      continue;
-    }
-    if (payload.state === undefined || payload.questions === undefined) {
-      rmSync(work, { force: true });
-      continue;
-    }
-    try {
-      const res = await facade.decide(payload.state, payload.questions);
-      const verdict = join(root, f.slice(0, -'.req.json'.length) + '.verdict.json');
-      const tmp = `${verdict}.tmp-${process.pid}`;
-      writeFileSync(tmp, JSON.stringify(res));
-      renameSync(tmp, verdict);
-      rmSync(work, { force: true });
+    if (f.endsWith('.req.json') && (await drainRequest(root, f, facade))) {
       drained += 1;
-    } catch {
-      // no verdict produced — restore the req; its age throttles the
-      // re-drain on a persistently-down judge
-      try {
-        renameSync(work, req);
-      } catch {
-        rmSync(work, { force: true });
-      }
     }
   }
   return drained;
