@@ -263,6 +263,92 @@ function broEnabled(startDir: string): boolean {
   }
 }
 
+function parseRows(v: unknown): Array<{ id: string; title: string; assignee?: string }> {
+  if (!Array.isArray(v)) return []
+  return v.flatMap((r) => {
+    const row = r as { id?: unknown; title?: unknown; assignee?: unknown }
+    if (typeof row.id === 'string' && typeof row.title === 'string') {
+      const out: { id: string; title: string; assignee?: string } = { id: row.id, title: row.title }
+      if (typeof row.assignee === 'string') out.assignee = row.assignee
+      return [out]
+    }
+    return []
+  })
+}
+
+function parseAgents(v: unknown): Board['fleet']['agents'] {
+  if (!Array.isArray(v)) return []
+  return v.flatMap((a) => {
+    const row = a as Record<string, unknown>
+    if (typeof row.id === 'string' && typeof row.state === 'string') {
+      return [
+        {
+          id: row.id,
+          state: row.state,
+          provider: typeof row.provider === 'string' ? row.provider : undefined,
+          model: typeof row.model === 'string' ? row.model : undefined,
+          worktree: typeof row.worktree === 'string' ? row.worktree : undefined,
+          pid: typeof row.pid === 'number' ? row.pid : undefined,
+          step: typeof row.step === 'string' ? row.step : undefined,
+        },
+      ]
+    }
+    return []
+  })
+}
+
+function parseRuns(v: unknown): Board['loop']['runs'] {
+  if (!Array.isArray(v)) return []
+  return v.flatMap((r) => {
+    const row = r as Record<string, unknown>
+    if (typeof row.slug === 'string' && typeof row.state === 'string') {
+      return [
+        {
+          slug: row.slug,
+          state: row.state,
+          startedAt: typeof row.startedAt === 'number' ? row.startedAt : undefined,
+        },
+      ]
+    }
+    return []
+  })
+}
+
+function parseWorktrees(v: unknown): Board['worktrees'] {
+  if (!Array.isArray(v)) return undefined
+  return v.flatMap((w) => {
+    const row = w as Record<string, unknown>
+    if (typeof row.name === 'string') {
+      return [
+        {
+          name: row.name,
+          branch: typeof row.branch === 'string' ? row.branch : undefined,
+          path: typeof row.path === 'string' ? row.path : undefined,
+        },
+      ]
+    }
+    return []
+  })
+}
+
+function parseWatch(v: unknown): Board['watch'] {
+  if (v === null || typeof v !== 'object') return null
+  const o = v as { ageMs?: unknown; attention?: unknown }
+  return {
+    ageMs: Number(o.ageMs) || 0,
+    attention: Number(o.attention) || 0,
+  }
+}
+
+function parseAct(v: unknown): Board['act'] {
+  if (v === null || typeof v !== 'object') return null
+  const o = v as { pr?: unknown; url?: unknown }
+  return {
+    pr: Number(o.pr) || 0,
+    url: typeof o.url === 'string' ? o.url : '',
+  }
+}
+
 function parseBoard(out: string): Board | null {
   let parsed: unknown
   try {
@@ -277,81 +363,12 @@ function parseBoard(out: string): Board | null {
   const beads = (o.beads ?? {}) as Record<string, unknown>
   const fleet = (o.fleet ?? {}) as Record<string, unknown>
   const loop = (o.loop ?? {}) as Record<string, unknown>
-  const rows = (v: unknown): Array<{ id: string; title: string; assignee?: string }> =>
-    Array.isArray(v)
-      ? v.flatMap((r) => {
-          const row = r as { id?: unknown; title?: unknown; assignee?: unknown }
-          if (typeof row.id === 'string' && typeof row.title === 'string') {
-            const out: { id: string; title: string; assignee?: string } = { id: row.id, title: row.title }
-            if (typeof row.assignee === 'string') out.assignee = row.assignee
-            return [out]
-          }
-          return []
-        })
-      : []
-  const agents = Array.isArray(fleet.agents)
-    ? fleet.agents.flatMap((a) => {
-        const row = a as Record<string, unknown>
-        if (typeof row.id === 'string' && typeof row.state === 'string') {
-          return [
-            {
-              id: row.id,
-              state: row.state,
-              provider: typeof row.provider === 'string' ? row.provider : undefined,
-              model: typeof row.model === 'string' ? row.model : undefined,
-              worktree: typeof row.worktree === 'string' ? row.worktree : undefined,
-              pid: typeof row.pid === 'number' ? row.pid : undefined,
-              step: typeof row.step === 'string' ? row.step : undefined,
-            },
-          ]
-        }
-        return []
-      })
-    : []
-  const runs = Array.isArray(loop.runs)
-    ? loop.runs.flatMap((r) => {
-        const row = r as Record<string, unknown>
-        if (typeof row.slug === 'string' && typeof row.state === 'string') {
-          return [
-            {
-              slug: row.slug,
-              state: row.state,
-              startedAt: typeof row.startedAt === 'number' ? row.startedAt : undefined,
-            },
-          ]
-        }
-        return []
-      })
-    : []
-  const watch =
-    o.watch !== null && typeof o.watch === 'object'
-      ? {
-          ageMs: Number((o.watch as { ageMs?: unknown }).ageMs) || 0,
-          attention: Number((o.watch as { attention?: unknown }).attention) || 0,
-        }
-      : null
-  const act =
-    o.act !== null && typeof o.act === 'object'
-      ? {
-          pr: Number((o.act as { pr?: unknown }).pr) || 0,
-          url: typeof (o.act as { url?: unknown }).url === 'string' ? (o.act as { url: string }).url : '',
-        }
-      : null
-  const worktrees = Array.isArray(o.worktrees)
-    ? o.worktrees.flatMap((w) => {
-        const row = w as Record<string, unknown>
-        if (typeof row.name === 'string') {
-          return [
-            {
-              name: row.name,
-              branch: typeof row.branch === 'string' ? row.branch : undefined,
-              path: typeof row.path === 'string' ? row.path : undefined,
-            },
-          ]
-        }
-        return []
-      })
-    : undefined
+  const rows = parseRows
+  const agents = parseAgents(fleet.agents)
+  const runs = parseRuns(loop.runs)
+  const watch = parseWatch(o.watch)
+  const act = parseAct(o.act)
+  const worktrees = parseWorktrees(o.worktrees)
   return {
     dirty: typeof o.dirty === 'number' ? o.dirty : 0,
     dir: typeof o.dir === 'string' ? o.dir : undefined,
@@ -418,25 +435,102 @@ function findRunForBead(b: { id: string }, runs: Board['loop']['runs']): Board['
   return null
 }
 
+function InWorkItem(props: { b: { id: string; title: string }; board: () => Board | null; theme: any }) {
+  const board = () => props.board()
+  const theme = props.theme
+  const b = props.b
+  const a = findAgentForBead(b, board()!.fleet.agents, board()!.loop.runs)
+  const r = findRunForBead(b, board()!.loop.runs)
+  const pr = board()!.act?.pr && board()!.act?.url ? board()!.act : null
+  const dur = r?.startedAt ? fmtDuration(Date.now() - r.startedAt) : undefined
+  return (
+    <box flexDirection="column" marginBottom={1}>
+      <text wrapMode="none" truncate>
+        <span style={{ fg: theme.text.feedback.info.base }}>●</span>{' '}
+        <b>{shortId(b.id)}</b> <span style={{ fg: theme.text.muted }}>{b.title.length > 40 ? `${b.title.slice(0, 40)}…` : b.title}</span>
+      </text>
+      <box flexDirection="row" gap={1} paddingLeft={2}>
+        <Show when={pr}>
+          <text fg={theme.text.feedback.info.base}>
+            <u>#{pr!.pr}</u>
+          </text>
+        </Show>
+        <Show when={a}>
+          <text fg={theme.text.muted}>
+            {a!.provider ?? 'agent'}{a!.model ? `/${a!.model}` : ''}
+          </text>
+        </Show>
+        <Show when={dur !== undefined}>
+          <text fg={theme.text.muted}>{dur}</text>
+        </Show>
+      </box>
+    </box>
+  )
+}
+
+function BroBoardOpen(props: { board: () => Board | null; theme: any }) {
+  const board = () => props.board()
+  const theme = props.theme
+  const live = () => (board()?.fleet.agents ?? []).filter((a) => a.state === 'running')
+  const runningLoops = () => (board()?.loop.runs ?? []).filter((r) => r.state === 'running')
+  const now = () => Date.now()
+  return (
+<>
+  <Show when={(board()?.beads.inProgress.length ?? 0) > 0}>
+    <text fg={theme.text.muted}>in work</text>
+    <For each={board()?.beads.inProgress.slice(0, 6) ?? []}>
+      {(b) => <InWorkItem b={b} board={board} theme={theme} />}
+    </For>
+  </Show>
+  <Show when={(board()?.beads.readyTotal ?? 0) > 0}>
+    <text fg={theme.text.muted}>ready ({board()?.beads.readyTotal})</text>
+    <For each={board()?.beads.ready.slice(0, 4) ?? []}>
+      {(b) => (
+        <box flexDirection="row" gap={1} minWidth={0}>
+          <text flexShrink={0} style={{ fg: theme.text.muted }}>○</text>
+          <text fg={theme.text.muted} wrapMode="none" truncate flexGrow={1} flexShrink={1} minWidth={0}>
+            <b>{shortId(b.id)}</b> {b.title.length > 40 ? `${b.title.slice(0, 40)}…` : b.title}
+          </text>
+        </box>
+      )}
+    </For>
+  </Show>
+  <Show when={live().length > 0 || runningLoops().length > 0}>
+    <text fg={theme.text.muted}>
+      fleet {live().length}
+      <Show when={(board()?.fleet.maxConcurrent ?? 0) > 0}>/{board()!.fleet.maxConcurrent}</Show>
+      <Show when={runningLoops().length > 0}> · loop ×{runningLoops().length}</Show>
+    </text>
+    <For each={live().slice(0, 3)}>
+      {(a) => (
+        <text fg={theme.text.muted} wrapMode="none" truncate>
+          {'  '}<span style={{ fg: theme.text.feedback.success.base }}>●</span> {a.id}
+        </text>
+      )}
+    </For>
+  </Show>
+  <Show when={board()?.watch}>
+    {(w) => (
+      <text fg={w().attention > 0 ? theme.text.feedback.warning.base : theme.text.muted}>
+        watch {ageStr(w().ageMs)} ago
+        <Show when={w().attention > 0}> · {w().attention} attention</Show>
+      </text>
+    )}
+  </Show>
+  <Show when={(board()?.dirty ?? 0) > 0}>
+    <text fg={theme.text.feedback.warning.base}>dirty ×{board()!.dirty}</text>
+  </Show>
+</>
+  )
+}
+
 function BroBoard(props: { context: Plugin.Context; board: () => Board | null }) {
   const theme = props.context.theme
   const [view, updateView] = props.context.storage.store('bro.view', {
     initial: { open: true },
   })
   const board = () => props.board()
-  const live = () => (board()?.fleet.agents ?? []).filter((a) => a.state === 'running')
-  const runningLoops = () => (board()?.loop.runs ?? []).filter((r) => r.state === 'running')
   const now = () => Date.now()
-  const row = (b: { id: string; title: string }, mark: string, fg: unknown) => (
-    <box flexDirection="row" gap={1} minWidth={0}>
-      <text flexShrink={0} style={{ fg: fg as never }}>
-        {mark}
-      </text>
-      <text fg={theme.text.muted} wrapMode="none" truncate flexGrow={1} flexShrink={1} minWidth={0}>
-        <b>{shortId(b.id)}</b> {b.title.length > TITLE_MAX ? `${b.title.slice(0, TITLE_MAX)}…` : b.title}
-      </text>
-    </box>
-  )
   return (
     <Show when={board() !== null}>
       <box flexDirection="column">
@@ -462,85 +556,7 @@ function BroBoard(props: { context: Plugin.Context; board: () => Board | null })
           </text>
         </box>
         <Show when={view.open}>
-          <Show when={(board()?.beads.inProgress.length ?? 0) > 0}>
-            <text fg={theme.text.muted}>in work</text>
-            <For each={board()?.beads.inProgress.slice(0, 6) ?? []}>
-              {(b) => {
-                const a = findAgentForBead(b, board()!.fleet.agents, board()!.loop.runs)
-                const r = findRunForBead(b, board()!.loop.runs)
-                const pr = board()!.act?.pr && board()!.act?.url ? board()!.act : null
-                const dur = r?.startedAt ? fmtDuration(now() - r.startedAt) : undefined
-                return (
-                  <box flexDirection="column" marginBottom={1}>
-                    <text wrapMode="none" truncate>
-                      <span style={{ fg: theme.text.feedback.info.base }}>●</span>{' '}
-                      <b>{shortId(b.id)}</b> <span style={{ fg: theme.text.muted }}>{b.title.length > 40 ? `${b.title.slice(0, 40)}…` : b.title}</span>
-                    </text>
-                    <box flexDirection="row" gap={1} paddingLeft={2}>
-                      <Show when={pr}>
-                        <text fg={theme.text.feedback.info.base}>
-                          <u>#{pr!.pr}</u>
-                        </text>
-                      </Show>
-                      <Show when={a}>
-                        <text fg={theme.text.muted}>
-                          {a!.provider ?? 'agent'}{a!.model ? `/${a!.model}` : ''}
-                        </text>
-                      </Show>
-                      <Show when={dur !== undefined}>
-                        <text fg={theme.text.muted}>{dur}</text>
-                      </Show>
-                    </box>
-                  </box>
-                )
-              }}
-            </For>
-          </Show>
-          <Show when={(board()?.beads.readyTotal ?? 0) > 0}>
-            <text fg={theme.text.muted}>ready ({board()?.beads.readyTotal})</text>
-            <For each={board()?.beads.ready.slice(0, 4) ?? []}>
-              {(b) => (
-                <box flexDirection="row" gap={1} minWidth={0}>
-                  <text flexShrink={0} style={{ fg: theme.text.muted }}>○</text>
-                  <text fg={theme.text.muted} wrapMode="none" truncate flexGrow={1} flexShrink={1} minWidth={0}>
-                    <b>{shortId(b.id)}</b> {b.title.length > 40 ? `${b.title.slice(0, 40)}…` : b.title}
-                  </text>
-                </box>
-              )}
-            </For>
-          </Show>
-          <Show when={live().length > 0 || runningLoops().length > 0}>
-            <text fg={theme.text.muted}>
-              fleet {live().length}
-              <Show when={(board()?.fleet.maxConcurrent ?? 0) > 0}>/{board()!.fleet.maxConcurrent}</Show>
-              <Show when={runningLoops().length > 0}> · loop ×{runningLoops().length}</Show>
-            </text>
-            <For each={live().slice(0, 3)}>
-              {(a) => (
-                <text fg={theme.text.muted} wrapMode="none" truncate>
-                  {'  '}<span style={{ fg: theme.text.feedback.success.base }}>●</span> {a.id}
-                </text>
-              )}
-            </For>
-          </Show>
-          <Show when={board()?.watch}>
-            {(w) => (
-              <text fg={w().attention > 0 ? theme.text.feedback.warning.base : theme.text.muted}>
-                watch {(() => {
-                  const ms = w().ageMs
-                  const s = Math.round(ms / 1000)
-                  if (s < 90) return `${s}s`
-                  const m = Math.round(s / 60)
-                  if (m < 90) return `${m}m`
-                  return `${Math.round(m / 60)}h`
-                })()} ago
-                <Show when={w().attention > 0}> · {w().attention} attention</Show>
-              </text>
-            )}
-          </Show>
-          <Show when={(board()?.dirty ?? 0) > 0}>
-            <text fg={theme.text.feedback.warning.base}>dirty ×{board()!.dirty}</text>
-          </Show>
+          <BroBoardOpen board={board} theme={theme} />
         </Show>
       </box>
     </Show>
@@ -549,7 +565,7 @@ function BroBoard(props: { context: Plugin.Context; board: () => Board | null })
 
 export default Plugin.define({
   id: 'bro.cli',
-  async setup(context) {
+  setup(context) {
     const cwd = context.location?.directory ?? process.cwd()
     const resolveCmd = commandResolver(context.options)
     const toast = context.ui.toast

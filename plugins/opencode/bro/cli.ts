@@ -357,7 +357,7 @@ export default {
           unknown
         >
         const tool = typeof d.tool === 'string' ? d.tool : ''
-        if (tool && tool.startsWith('bro')) {
+        if (tool?.startsWith('bro')) {
           // bro tools are invoked - no toast spam
         }
       })

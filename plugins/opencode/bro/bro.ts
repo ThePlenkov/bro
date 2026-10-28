@@ -493,7 +493,7 @@ function makeCore(input: BroCoreInput) {
 
   const notify = (level: Level, message: string): void => {
     try {
-      void log(level, message)
+      log(level, message).catch(() => {})
     } catch {
       // fail-open
     }
