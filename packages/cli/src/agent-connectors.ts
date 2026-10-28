@@ -51,6 +51,7 @@ import {
   deriveProviderWalls,
   emitLifecycle,
   entryRunId,
+  externalPlanes,
   ghHost,
   gitTry,
   handleOwner,
@@ -118,6 +119,10 @@ import {
 } from '@broject/devin';
 import './session-planes/copilot.ts';
 import { writeCopilotCount } from './session-planes/copilot.ts';
+// external-activity planes self-register on import — the spawn guard
+// reads every ecosystem's "an agent bro does not own is working" probe
+import './session-planes/markers.ts';
+import './session-planes/opencode.ts';
 import { enterWorktree } from './commands/work.ts';
 import { assertMutableConfig } from './config-policy.ts';
 import {
@@ -149,6 +154,10 @@ export interface AgentConnectorEnv {
    *  name (`agents.<backend>.provider`, `--provider`, profiles). Absent
    *  means provider behavior is off, never defaulted to a vendor. */
   providers?: Record<string, ProviderEntry>;
+  /** Spawn-guard knobs (spec bro-eqi2d) — the external-agent exclusion
+   *  (`externalBlock`) and its idle window (`externalIdleSec`). Absent
+   *  on hand-built envs: externalGuardOf falls back to DEFAULT_CONFIG. */
+  spawn?: { externalBlock: boolean; externalIdleSec: number };
 }
 
 export type AgentConnectorFactory = (ctx: ConnectorCtx, env: AgentConnectorEnv) => AgentConnector;
@@ -238,6 +247,7 @@ export function loadAgentEnv(dir: string): AgentConnectorEnv {
       router?: FleetRouter;
     };
     providers?: Record<string, ProviderEntry>;
+    spawn?: { externalBlock: boolean; externalIdleSec: number };
   };
   return {
     agents: cfg.agents ?? {},
@@ -245,6 +255,7 @@ export function loadAgentEnv(dir: string): AgentConnectorEnv {
     loop: cfg.loop,
     fleet: cfg.fleet,
     providers: cfg.providers,
+    spawn: cfg.spawn,
   };
 }
 
@@ -1087,7 +1098,7 @@ export interface BudgetCause {
  *  accounting CAN be wrong (double-persisted spawns, rewritten history)
  *  which is why the snapshot says so in-band instead of relying on docs. */
 export const BUDGET_LIMITS: readonly string[] = [
-  'counts bro registry agents only — interactive sessions and foreign tools are invisible',
+  'counts bro registry agents only — interactive sessions and foreign tools are visible to the spawn-guard planes (external-planes) but their request burn is not counted here',
   'spawn history is bounded by janitor retention — reaped entries no longer count',
   "causes classify from log tails — a provider wall that prints nothing reads 'crash'",
   "the registry keeps the latest run per step — earlier failures' causes are gone",
@@ -1496,6 +1507,58 @@ export function batchWallRefusal(
   );
 }
 
+/** The external-agent exclusion (spec bro-eqi2d) — bro never starts a
+ *  session while an agent it does not own is actively working, on ANY
+ *  provider: interactive sessions and foreign workers draw on the same
+ *  account as the fleet, and a spawn that lands beside them burns a
+ *  shared allowance neither gate counts alone. Every registered
+ *  external-activity plane probes; the first active report refuses the
+ *  spawn 'cap' — transient pressure a caller waits out, not a conflict.
+ *  A probe's own SpawnError ('unavailable') surfaces verbatim: an
+ *  unverifiable plane fails closed like the quota lanes. */
+function enforceExternalGuard(
+  dir: string,
+  spec: SpawnSpec,
+  guard: { holdMs: number; agents: Record<string, Record<string, unknown>> } | undefined
+): void {
+  if (guard === undefined) {
+    return;
+  }
+  const ctx = {
+    dir,
+    agents: guard.agents,
+    workerEnv: spec.env,
+    env: process.env,
+    holdMs: guard.holdMs,
+    now: Date.now(),
+  };
+  for (const plane of externalPlanes()) {
+    const hit = plane.externalActivity(ctx);
+    if (hit.active) {
+      throw new SpawnError(
+        `external agent active — ${plane.kind}: ${hit.detail ?? 'a session outside this rig is working'}` +
+          ` — spawn of ${spec.molStep} refused`,
+        'cap'
+      );
+    }
+  }
+}
+
+/** The guard payload a spawn opts into — undefined when the operator
+ *  disabled the exclusion (`spawn.externalBlock: false`): the knob is
+ *  an explicit opt-out, defaults armed. `holdMs` is `externalIdleSec`
+ *  in probe units; `agents` is the bag map each plane reads its
+ *  overrides from. */
+export function externalGuardOf(
+  env: AgentConnectorEnv
+): { holdMs: number; agents: Record<string, Record<string, unknown>> } | undefined {
+  const spawn = env.spawn ?? DEFAULT_CONFIG.spawn;
+  if (spawn.externalBlock === false) {
+    return undefined;
+  }
+  return { holdMs: spawn.externalIdleSec * 1000, agents: env.agents };
+}
+
 function prepareSpawn(
   dir: string,
   home: string,
@@ -1527,6 +1590,11 @@ function prepareSpawn(
      *  cross-repo), still before any write — a refused spawn leaves no
      *  half-state. */
     sessionQuota?: SessionQuotaLane | undefined;
+    /** External-agent exclusion — externalGuardOf's payload. Refuses
+     *  while an agent this rig does not own is actively working, after
+     *  the wall check and before fleet admission — a refusal lands
+     *  before any reservation is claimed. */
+    external?: { holdMs: number; agents: Record<string, Record<string, unknown>> } | undefined;
   }
 ): {
   agentId: string;
@@ -1579,6 +1647,10 @@ function prepareSpawn(
     }
     throw wallRefusal;
   }
+  // the external-agent exclusion — after the wall (registry-derived,
+  // cheap) and before fleet admission: a refusal here leaves no
+  // half-spawned state, and no reservation is claimed on the way out
+  enforceExternalGuard(dir, spec, opts.external);
   // fleet admission — before the registry write + claim land, so a
   // refusal leaves no half-spawned state
   enforceFleetCap(dir, home, registry, spec, opts.cap);
@@ -2740,6 +2812,7 @@ export function makeNativeConnector(ctx: ConnectorCtx, env: AgentConnectorEnv): 
             cap: { max: fleetCapOf(env), env },
             env,
             sessionQuota: sessionQuotaOf(env, 'native', spec, command),
+            external: externalGuardOf(env),
           }
         );
         // the launcher crashed after the reservation — registry+claim
@@ -3281,6 +3354,7 @@ export function makeTmuxConnector(ctx: ConnectorCtx, env: AgentConnectorEnv): Ag
             cap: { max: fleetCapOf(env), env },
             env,
             sessionQuota: sessionQuotaOf(env, 'tmux', spec, command),
+            external: externalGuardOf(env),
           }
         );
         const session = `bro-${agentId}`;
@@ -4046,6 +4120,7 @@ export function makeGascityConnector(ctx: ConnectorCtx, env: AgentConnectorEnv):
           // the quota admits against what gc will actually RUN — the
           // command pinned in city.toml at init, not today's config
           sessionQuota: sessionQuotaOf(env, 'gascity', spec, gcEffectiveCommand(city, command)),
+          external: externalGuardOf(env),
         });
         let sessionId: string | undefined;
         try {
@@ -4834,6 +4909,7 @@ export function makeDockerConnector(ctx: ConnectorCtx, env: AgentConnectorEnv): 
             cap: { max: fleetCapOf(env), env },
             env,
             sessionQuota: sessionQuotaOf(env, 'docker', spec, command),
+            external: externalGuardOf(env),
           }
         );
         const name = `bro-${agentId}`;
@@ -5775,6 +5851,7 @@ export function makeCopilotConnector(ctx: ConnectorCtx, env: AgentConnectorEnv):
           cap: { max: fleetCapOf(env), env },
           env,
           sessionQuota: copilotSessionQuota(env),
+          external: externalGuardOf(env),
         });
         try {
           const { task, taskId } = dispatchTask(home, agentId, spec, target);

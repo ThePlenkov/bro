@@ -1071,6 +1071,36 @@ export const mcpSection: ConfigSection<{ planes?: string[] }> = (raw) => {
 
 mcpSection.jsonSchema = js.obj({ planes: js.strList })
 
+/** bro.config.json `spawn` section — the spawn guard's own knobs (spec
+ *  bro-eqi2d): `externalBlock` arms the external-agent exclusion at
+ *  every `prepareSpawn` path, `externalIdleSec` is the idle window a
+ *  foreign session's proven activity must sit inside to hold the guard.
+ *  Defaults arm the guard — a shared account is the common case; the
+ *  opt-out is explicit. */
+export const spawnSection: ConfigSection<{
+  externalBlock: boolean;
+  externalIdleSec: number;
+}> = raw => {
+  const obj = (typeof raw === 'object' && raw !== null ? raw : {}) as {
+    externalBlock?: unknown;
+    externalIdleSec?: unknown;
+  };
+  return {
+    externalBlock: obj.externalBlock !== false,
+    externalIdleSec:
+      typeof obj.externalIdleSec === 'number' &&
+      Number.isFinite(obj.externalIdleSec) &&
+      obj.externalIdleSec > 0
+        ? obj.externalIdleSec
+        : DEFAULT_CONFIG.spawn.externalIdleSec,
+  };
+};
+
+spawnSection.jsonSchema = js.obj({
+  externalBlock: js.bool,
+  externalIdleSec: { type: 'number', exclusiveMinimum: 0 },
+});
+
 /** Sections core normalizes itself — identical to what the built-in
  *  plugins declare as their configSchema. Exported for the schema
  *  registry in config-schema.ts (spec: bro-d9dmx) — the .jsonSchema
@@ -1085,6 +1115,7 @@ export const CORE_SECTIONS: Record<string, ConfigSection<unknown>> = {
   sdd: sddSection as ConfigSection<unknown>,
   fleet: fleetSection as ConfigSection<unknown>,
   query: querySection as ConfigSection<unknown>,
+  spawn: spawnSection as ConfigSection<unknown>,
   mesh: meshSection as ConfigSection<unknown>,
   mcp: mcpSection as ConfigSection<unknown>,
   mirror: mirrorSection as ConfigSection<unknown>,
@@ -1204,7 +1235,13 @@ export interface BroConfig {
   /** `query` plan defaults — `concurrency` is the fan-out cap a plan's
    *  own field overrides (default 4); `env` is the global literal
    *  overlay applied under each step's `env`. */
-  query: { concurrency: number; env: Record<string, string> }
+  query: { concurrency: number; env: Record<string, string> };
+  /** Spawn-guard knobs (spec bro-eqi2d). `externalBlock` arms the
+   *  external-agent exclusion — bro refuses to start a session while an
+   *  agent it does not own is actively working (default true).
+   *  `externalIdleSec` is the idle window: an external session whose
+   *  proven activity is older releases the guard (default 480s). */
+  spawn: { externalBlock: boolean; externalIdleSec: number };
   /** Inter-rig federation (specs/mesh). `rig` pins this repo's mesh://
    *  identity when origin doesn't derive one; `peers` maps alias →
    *  { rig, remote, transport? } — remote is the git URL the peer's
@@ -1263,6 +1300,7 @@ export const DEFAULT_CONFIG: BroConfig = {
   sdd: { mode: 'off', dir: 'specs' },
   fleet: { maxConcurrent: 3, profiles: {}, routing: {} },
   query: { concurrency: 4, env: {} },
+  spawn: { externalBlock: true, externalIdleSec: 480 },
   mesh: { peers: {} },
   mcp: {},
   serve: {},
