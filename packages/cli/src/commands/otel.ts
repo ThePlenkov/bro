@@ -11,9 +11,9 @@
  *                              (telemetry is operator config — the toggle
  *                              lands local, never the committed file)
  */
-import { existsSync, readFileSync, renameSync, writeFileSync } from 'node:fs'
+import { existsSync, readFileSync, renameSync, writeFileSync, chmodSync } from 'node:fs'
 import { join } from 'node:path'
-import { EXIT, hasHelpFlag, printUsage, type ExitCode } from '@broject/core'
+import { EXIT, gitTry, hasHelpFlag, printUsage, type ExitCode } from '@broject/core'
 import { otelEndpoint } from '@broject/providers'
 import {
   hookEventName,
@@ -70,6 +70,29 @@ function cmdSetEnabled(toggle: { dir: string; enabled: boolean }): void {
     process.exit(EXIT.usage)
   }
   const path = join(dir, 'bro.config.local.json')
+  // refuse to write if bro.config.local.json is tracked by git (local-operator config must be untracked)
+  try {
+    const r = gitTry(['-C', dir, 'ls-files', '--error-unmatch', '--', 'bro.config.local.json'], 2000)
+    if (r.code === 0) {
+      console.error(
+        `error: bro.config.local.json is tracked by git — local operator config must be untracked (move to a gitignored override or set "otel": { "enabled": ${enabled} } in an untracked bro.config.local.json)`
+      )
+      process.exit(EXIT.usage)
+    }
+    // If git repo exists but file not tracked, that's fine. If not in a git repo,
+    // gitTry will fail - but facade won't trust it; refuse to write in non-git repos
+    // to match facade's trust model.
+    const repoCheck = gitTry(['-C', dir, 'rev-parse', '--git-dir'], 1000)
+    if (repoCheck.code !== 0) {
+      console.error(
+        `error: not a git repository — bro.config.local.json must live in a git repo (and be untracked) to be trusted as operator config`
+      )
+      process.exit(EXIT.usage)
+    }
+  } catch {
+    console.error('error: failed to validate git repository state')
+    process.exit(EXIT.usage)
+  }
   let cfg: Record<string, unknown> = {}
   if (existsSync(path)) {
     try {
@@ -83,13 +106,31 @@ function cmdSetEnabled(toggle: { dir: string; enabled: boolean }): void {
       process.exit(EXIT.usage)
     }
   }
-  const section = isObj(cfg.otel) ? cfg.otel : {}
+  if ('otel' in cfg && !isObj((cfg as Record<string, unknown>).otel)) {
+    console.error('error: cfg.otel exists but is not an object')
+    process.exit(EXIT.usage)
+  }
+  const section = isObj(cfg.otel) ? (cfg.otel as Record<string, unknown>) : {}
   cfg.otel = { ...section, enabled }
   // temp + rename — a direct overwrite can leave a truncated file on a
   // mid-write crash; operator config loses every sibling section.
   const tmp = `${path}.tmp-${process.pid}`
-  writeFileSync(tmp, `${JSON.stringify(cfg, null, 2)}\n`)
+  try {
+    writeFileSync(tmp, `${JSON.stringify(cfg, null, 2)}\n`, { mode: 0o600 })
+  } catch {
+    writeFileSync(tmp, `${JSON.stringify(cfg, null, 2)}\n`)
+  }
+  try {
+    chmodSync(tmp, 0o600)
+  } catch {
+    // best-effort
+  }
   renameSync(tmp, path)
+  try {
+    chmodSync(path, 0o600)
+  } catch {
+    // best-effort
+  }
   console.log(`otel.enabled=${enabled} → ${path}`)
 }
 

@@ -2122,7 +2122,9 @@ export async function runHooksCommand(argv: string[]): Promise<void> {
   }
   perfBuf = [];
   const t0 = Date.now();
+  let deadlineFired = false;
   const deadlineTimer = nodeSetTimeout(() => {
+    deadlineFired = true;
     const sessionId = typeof input.session_id === 'string' ? input.session_id : '';
     // the answer goes out before the journal flush — silence on a
     // permission event is a deny, and a stalled flushPerf must not take
@@ -2131,6 +2133,18 @@ export async function runHooksCommand(argv: string[]): Promise<void> {
       answerCursorPermission(event, input);
     }
     flushPerf(sessionId, event, t0, true);
+    try {
+      emitHook('hook-deadline', input, {
+        sessionId,
+        client: cursorClient ? 'cursor' : codexClient ? 'codex' : 'default',
+        durationMs: Date.now() - t0,
+        ok: false,
+        error: 'hook deadline exceeded',
+        dir: root,
+      });
+    } catch {
+      // best-effort
+    }
     // drain barrier — a bare exit can cut a still-queued write; the
     // run.sh watchdog backstops a pipe that never drains
     process.stdout.write('', () => process.exit(0));

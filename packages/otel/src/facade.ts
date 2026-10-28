@@ -339,6 +339,9 @@ function shouldEmit(cfg: OtelConfig, policy: OtelHookPolicy): boolean {
  *  short-circuits before any payload work. */
 export function emitHook(name: string, payload: unknown, meta: HookMeta = {}): void {
   try {
+    if (process.env.BRO_TELEMETRY === '0') {
+      return
+    }
     const dir = anchorDir(meta)
     const cfg = otelConfigFor(dir)
     const policy = resolveHookPolicy(cfg, name)
