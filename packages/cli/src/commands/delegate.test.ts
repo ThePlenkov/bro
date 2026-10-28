@@ -3,11 +3,14 @@ import assert from 'node:assert/strict';
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { loadAgentEnv, type AgentConnectorEnv } from '../agent-connectors.ts';
-import { readAgentRegistry, writeAgentRegistry } from '@broject/core';
+import { clearExternalPlanes, readAgentRegistry, writeAgentRegistry } from '@broject/core';
 import { fakeAcpAgent } from '@broject/providers/testkit';
 import { capture, initRepo, installFakeBd, killRun } from './testrepo.ts';
 import { delegate } from './delegate.ts';
 import { runDelegateCommand } from './delegate-cli.ts';
+
+// real host planes would flake spawn tests — the registry clear is the belt
+clearExternalPlanes();
 
 interface Fixture {
   root: string;

@@ -64,6 +64,9 @@ function loopFixture(
     JSON.stringify({
       plugins: ['./fakehost.ts'],
       connectors: { reviews: 'fakehost' },
+      // the spawned loop's external guard must not see the host's real
+      // agents (a live opencode/devin session refuses every spawn)
+      spawn: { externalBlock: false },
       ...extra(host),
       loop: {
         agent: `node ${host.agent}`,
