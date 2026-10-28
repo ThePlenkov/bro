@@ -4,6 +4,7 @@ import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { AcpRenderer } from '../src/acp-render.ts';
 import { Wire, parseArgs, run, runFixture } from '../src/acp-watch.ts';
+import { shellWords } from '../src/lib.ts';
 
 const HERE = fileURLToPath(new URL('.', import.meta.url));
 const FIXTURE = join(HERE, 'fixtures', 'acp-session.jsonl');
@@ -31,6 +32,38 @@ describe('parseArgs', () => {
   test('unknown arg and missing value fail loud', () => {
     assert.throws(() => parseArgs(['--bogus']));
     assert.throws(() => parseArgs(['--cmd']));
+  });
+
+  test('--permit validates against auto|reads|none, env overrides', () => {
+    assert.equal(parseArgs(['--permit', 'reads']).permit, 'reads');
+    assert.equal(parseArgs([], { ACP_WATCH_PERMIT: 'none' } as NodeJS.ProcessEnv).permit, 'none');
+    assert.throws(() => parseArgs(['--permit', 'yolo']));
+    assert.throws(() => parseArgs([], { ACP_WATCH_PERMIT: 'yolo' } as NodeJS.ProcessEnv));
+  });
+
+  test('--cmd splits into argv words — never one shell string', () => {
+    const cli = parseArgs(['--cmd', "kilo acp --flag 'a b'"]);
+    assert.deepEqual(cli.cmdArgv, ['kilo', 'acp', '--flag', 'a b']);
+  });
+});
+
+describe('shellWords', () => {
+  test('quotes concatenate with bare runs like a shell would', () => {
+    assert.deepEqual(shellWords("a'b c'd"), ['ab cd']);
+    assert.deepEqual(shellWords('  x  y '), ['x', 'y']);
+    assert.deepEqual(shellWords(''), []);
+    assert.deepEqual(shellWords('"a\\"b" c'), ['a"b', 'c']);
+  });
+
+  test('escapes expand outside single quotes only', () => {
+    assert.deepEqual(shellWords('a\\nb'), ['a\nb']);
+    assert.deepEqual(shellWords("'a\\nb'"), ['a\\nb']);
+  });
+
+  test('unclosed quote and trailing backslash are usage errors', () => {
+    assert.throws(() => shellWords("a'b"), /unclosed/);
+    assert.throws(() => shellWords('"x'), /unclosed/);
+    assert.throws(() => shellWords('x\\'), /trailing backslash/);
   });
 });
 

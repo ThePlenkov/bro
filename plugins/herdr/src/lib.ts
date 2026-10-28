@@ -479,35 +479,30 @@ export function shq(s: string): string {
  *  into a different program. An unclosed quote is a usage error,
  *  named as such. */
 export function shellWords(text: string): string[] {
+  const ESCAPES: Record<string, string> = { n: '\n', t: '\t' };
+  const unescape = (s: string): string => s.replace(/\\(.)/g, (_, c: string) => ESCAPES[c] ?? c);
+  const SEGMENT = /"(?:\\.|[^"\\])*"?|'[^']*'?|\\.|[^\s'"\\]+|\s+|\S/g;
   const out: string[] = [];
   let cur = '';
-  let quote: string | undefined;
-  for (let i = 0; i < text.length; i++) {
-    const c = text[i] as string;
-    if (quote === undefined && /\s/.test(c)) {
+  for (const m of text.matchAll(SEGMENT)) {
+    const s = m[0];
+    if (/^\s+$/.test(s)) {
       if (cur !== '') {
         out.push(cur);
         cur = '';
       }
-      continue;
+    } else if (s === '\\') {
+      throw new Error('trailing backslash');
+    } else if (s.startsWith('"')) {
+      if (s.length < 2 || !s.endsWith('"')) throw new Error('unclosed " quote');
+      cur += unescape(s.slice(1, -1));
+    } else if (s.startsWith("'")) {
+      if (s.length < 2 || !s.endsWith("'")) throw new Error("unclosed ' quote");
+      cur += s.slice(1, -1);
+    } else {
+      cur += s.startsWith('\\') ? (ESCAPES[s[1] as string] ?? s[1]) : s;
     }
-    if (quote === undefined && (c === "'" || c === '"')) {
-      quote = c;
-      continue;
-    }
-    if (c === quote) {
-      quote = undefined;
-      continue;
-    }
-    if (c === '\\' && quote !== "'") {
-      const n = text[++i];
-      if (n === undefined) throw new Error('trailing backslash');
-      cur += n === 'n' ? '\n' : n === 't' ? '\t' : n;
-      continue;
-    }
-    cur += c;
   }
-  if (quote !== undefined) throw new Error(`unclosed ${quote} quote`);
   if (cur !== '') out.push(cur);
   return out;
 }

@@ -65,6 +65,11 @@ export type PermitMode = 'auto' | 'reads' | 'none';
 
 const PERMIT_MODES = new Set<string>(['auto', 'reads', 'none']);
 
+const asPermit = (flag: string, v: string): PermitMode => {
+  if (!PERMIT_MODES.has(v)) throw new Error(`${flag} must be auto|reads|none, got ${v}`);
+  return v as PermitMode;
+};
+
 export function parseArgs(argv: string[], env: NodeJS.ProcessEnv = process.env): Cli {
   const cli: Cli = {
     cmd: 'devin acp',
@@ -90,23 +95,14 @@ export function parseArgs(argv: string[], env: NodeJS.ProcessEnv = process.env):
     if (key === undefined) throw new Error(`unknown arg ${a}`);
     const v = argv[++i];
     if (v === undefined) throw new Error(`${a} needs a value`);
-    if (key === 'permit') {
-      if (!PERMIT_MODES.has(v)) throw new Error(`--permit must be auto|reads|none, got ${v}`);
-      cli.permit = v as PermitMode;
-    } else if (key === 'cmd') {
-      cli.cmd = v;
-    } else {
-      cli[key] = v;
-    }
+    if (key === 'permit') cli.permit = asPermit('--permit', v);
+    else cli[key] = v;
   }
   // env transports — the pane command line would otherwise leak the
   // prompt into `ps` argv (any local user reads it); env is owner-only
   cli.prompt ??= env.ACP_WATCH_PROMPT;
   if (env.ACP_WATCH_PERMIT !== undefined) {
-    if (!PERMIT_MODES.has(env.ACP_WATCH_PERMIT)) {
-      throw new Error(`ACP_WATCH_PERMIT must be auto|reads|none, got ${env.ACP_WATCH_PERMIT}`);
-    }
-    cli.permit = env.ACP_WATCH_PERMIT as PermitMode;
+    cli.permit = asPermit('ACP_WATCH_PERMIT', env.ACP_WATCH_PERMIT);
   }
   cli.cmdArgv = shellWords(cli.cmd);
   if (cli.cmdArgv.length === 0) throw new Error('--cmd must name an executable');
