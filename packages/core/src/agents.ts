@@ -121,14 +121,14 @@ function relReset(text: string, now: number): string | undefined {
     return toIso(now + n * 1_000);
   }
   const rel = new RegExp(
-    `(?:try again|retry|resets?|available|ready) in ((?:\\d+\\s*(?:${UNIT_RE})\\b[\\s,]*(?:and\\s+)?)+)`,
+    String.raw`(?:try again|retry|resets?|available|ready) in ((?:\d+\s*(?:${UNIT_RE})\b[\s,]*(?:and\s+)?)+)`,
     'i'
   ).exec(text);
   if (rel === null) {
     return undefined;
   }
   let ms = 0;
-  for (const p of rel[1]!.matchAll(new RegExp(`(\\d+)\\s*(${UNIT_RE})\\b`, 'gi'))) {
+  for (const p of rel[1]!.matchAll(new RegExp(String.raw`(\d+)\s*(${UNIT_RE})\b`, 'gi'))) {
     ms += Number(p[1]) * (UNIT_MS[p[2]!.toLowerCase()[0]!] ?? 1_000);
   }
   return toIso(now + ms + RESET_MARK_MARGIN_MS);
@@ -144,11 +144,16 @@ function relReset(text: string, now: number): string | undefined {
  *  death it stamps, and rolling a stale quote forward would fabricate
  *  a day-long hold. A `YYYY-MM-DD` date after `at` is left to
  *  isoReset. */
+const CLOCK_MARK = /at\s+(?!\d{4}-)(\d{1,2}):(\d{2})(?::(\d{2}))?\s*(?:UTC|GMT|Z)?\b/i;
+const MARK_CONTEXT =
+  /(?:\(\s*|\b(?:resets?|resetting|try again|retry|until|available|ready|window)\b[^\n]{0,24}?)at\s/i;
+
 function clockReset(text: string, now: number): string | undefined {
-  const m =
-    /(?:\(\s*|\b(?:resets?|resetting|try again|retry|until|available|ready|window)\b[^\n]{0,24}?)\bat\s+(?!\d{4}-)(\d{1,2}):(\d{2})(?::(\d{2}))?\s*(?:UTC|GMT|Z)?\b/i.exec(
-      text
-    );
+  // the mark must sit in reset context — a reset-ish keyword within ~24
+  // chars or an opening paren — so a prose timestamp can't fabricate a
+  // reset; the mark itself then parses on its own simpler pattern
+  const ctx = MARK_CONTEXT.exec(text);
+  const m = ctx === null ? null : CLOCK_MARK.exec(text.slice(ctx.index));
   if (m === null) {
     return undefined;
   }

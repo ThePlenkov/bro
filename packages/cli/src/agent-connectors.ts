@@ -107,7 +107,6 @@ import { expandAgentCmd, loopSection, type LoopConfig } from '@broject/loop';
 // builtin session planes self-register on import — the connector layer
 // is the plugin host for agent backends, and admission planes ride the
 // same surface
-import '@broject/devin';
 import {
   devinLogsDir,
   devinPidBead,
