@@ -66,13 +66,24 @@ The alternatives were considered:
 
 ### The marker is derived, never written by callers
 
-The spawn prologue pins `env[BRO_BATCH] = '1'` into the worker's
-environment iff `lane === 'batch'`. The env marker stays the wire
-contract — the planes classify a LIVE worker from
-`/proc/<pid>/environ` (spec bro-9h86l), so the pin must still ride into
-the process env — but its only writer is the prologue. `lane` joins
-the identity pins (`BRO_AGENT_ID`, `BRO_BEAD_ID`, `BRO_AGENT_PROVIDER`)
-in the "the caller describes, the prologue pins" tier.
+The prologue **owns the key in both directions**:
+
+- `lane === 'batch'` → it pins `env[BRO_BATCH] = '1'` into the worker's
+  environment;
+- `lane === 'interactive'` → it actively **deletes** `BRO_BATCH` from
+  the merged worker env.
+
+Deletion matters: the child env is `{ ...process.env, ...spec.env }`,
+so a batch worker (which itself carries `BRO_BATCH=1`) spawning an
+interactive child would otherwise leak its own marker into the child —
+an interactive session silently counted and walled as fleet work.
+Omitting the pin is not enough; the prologue must scrub the inherited
+value out of the env the worker actually receives. The env marker stays
+the wire contract — the planes classify a LIVE worker from
+`/proc/<pid>/environ` (spec bro-9h86l) — but its only writer is the
+prologue. `lane` joins the identity pins (`BRO_AGENT_ID`,
+`BRO_BEAD_ID`, `BRO_AGENT_PROVIDER`) in the "the caller describes, the
+prologue pins" tier.
 
 Conflicts fail loud, they are never silently reclassified:
 
@@ -95,19 +106,40 @@ Every `spawnStepAgent` call site declares:
 - **`lane: 'interactive'`** — `bro agents up` / `agents run`
   (agents.ts), and the serve API handler (serve.ts:1927).
 
-The serve POST body shares the `StepSpawnRequest` shape, so a client
-can send `lane`. The handler defaults an absent `lane` to
-`'interactive'`; an explicit `'batch'` passes through — a client can
-only opt INTO restraint, never out of it.
+The serve POST body shares the `StepSpawnRequest` shape, so `lane` must
+join `SPAWN_FIELDS` — the body's field allowlist — or the handler would
+strip it and every API spawn would land interactive regardless. The
+handler validates: absent → `'interactive'`; `'interactive'` → as sent;
+`'batch'` → honored (a client can only opt INTO restraint, never out of
+it); any other value → `400`, not a silent default. A client bypassing
+the API entirely and connecting to a fleet connector directly is out of
+scope — it holds no `BRO_AGENT_ID`, so it is not a registered worker at
+all (see scope boundary below).
+
+### Scope boundary — the facade, not the socket
+
+`lane` classifies spawns that ride `spawnStepAgent` — the single
+admission facade where registration, connector resolution, the lane
+checks and the wall all live. A path that calls `AgentConnector.spawn`
+(or a tmux/Docker launch) directly never reaches the prologue: it
+produces an **unregistered worker** — no `BRO_AGENT_ID`, no `.exit`
+record, no `fleet agents status` reach. That is already a violation of
+the registry convention (AGENTS.md: spawn through the registry, never a
+hand-rolled nohup), independent of lanes. The lane field cannot and
+should not classify below the facade; the defense there stays the
+existing rule — worker paths go through `spawnStepAgent`, and this spec
+makes that path's lane un-forgettable.
 
 ### Behavior change
 
 Exactly one: **dogfood runner and analyst spawns become batch.** They
 start counting against `maxBatchWorkers` and get refused while their
 provider is walled — a `bro dogfood` run against a rate-limited devin
-account waits like any other fleet work instead of burning a session
-into the wall. Intended: they draw on the same account budget as the
-rest of the fleet (drill bro-gblja).
+account gets the wall refusal at spawn time (`devin walled —
+rate_limited til …`, `SpawnError` kind `cap`) — a fast, legible
+failure the run surfaces per spawn, exactly like a refused delegate or
+fixer. It does NOT hang or retry into the wall. Intended: they draw on
+the same account budget as the rest of the fleet (drill bro-gblja).
 
 No behavior change for the already-marked fleet paths (the pin is
 derived instead of hand-set; the env the worker sees is identical) and
@@ -126,9 +158,12 @@ instead of by convention.
   above is what the compiler enumerates.
 - `agents.test.ts` — `lane: 'batch'` lands `BRO_BATCH` in the worker
   env; `lane: 'interactive'` + caller `env[BRO_BATCH]` throws
-  `SpawnInputError`; `lane: 'batch'` + the same env key is accepted.
+  `SpawnInputError`; `lane: 'batch'` + the same env key is accepted;
+  `lane: 'interactive'` issued from a process that itself carries
+  `BRO_BATCH` produces a worker env WITHOUT the marker.
 - `serve.test.ts` — a POST body without `lane` spawns interactive; a
-  body with `lane: 'batch'` spawns batch.
+  body with `lane: 'batch'` spawns batch; an invalid `lane` value is
+  a `400`.
 - `dogfood.test.ts` — the recorded spawn spec carries the marker for
   runner and analyst.
 - Live: `bro fleet agents status` counts a dogfood worker under the
