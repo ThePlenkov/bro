@@ -168,7 +168,7 @@ function liveDevinLocks(dirs: string[], procDir = '/proc'): Map<number, string[]
         live.set(pid, [session]);
       } else {
         names.push(session);
-        names.sort();
+        names.sort((a, b) => a.localeCompare(b));
       }
     }
   }

@@ -75,33 +75,43 @@ function opencodeSessionArgv(cmdline: string): boolean {
   return argv[1] !== 'serve' && argv[1] !== '--service';
 }
 
-/** One /proc entry's verdict — the pid when it is a live foreign
- *  opencode session, undefined otherwise. An unreadable cmdline is
- *  skipped; an unreadable environ counts as external (ownership cannot
- *  be proven). */
-function foreignOpencodePid(procDir: string, name: string): number | undefined {
+/** The live pid a numeric /proc entry names — undefined for
+ *  non-pid names and dead processes. */
+function liveNumericPid(name: string): number | undefined {
   const pid = Number(name);
-  if (!Number.isInteger(pid) || pid <= 0 || !pidAlive(pid)) {
-    return undefined;
+  return Number.isInteger(pid) && pid > 0 && pidAlive(pid) ? pid : undefined;
+}
+
+/** Does this /proc entry carry a session cmdline? An unreadable one
+ *  cannot prove session-ness — it does not count (an unverifiable
+ *  proc undercounts, never invents a session). */
+function opencodeSessionEntry(dir: string): boolean {
+  try {
+    return opencodeSessionArgv(readFileSync(join(dir, 'cmdline'), 'utf8'));
+  } catch {
+    return false;
   }
+}
+
+/** Does this /proc entry's environ prove bro-ownership? An unreadable
+ *  environ cannot prove it — the entry counts external, fail closed. */
+function broOwnedEntry(dir: string): boolean {
+  try {
+    return ownedEnviron(readFileSync(join(dir, 'environ'), 'utf8'));
+  } catch {
+    return false;
+  }
+}
+
+/** One /proc entry's verdict — the pid when it is a live foreign
+ *  opencode session, undefined otherwise. */
+function foreignOpencodePid(procDir: string, name: string): number | undefined {
+  const pid = liveNumericPid(name);
   const dir = join(procDir, name);
-  let cmdline: string;
-  try {
-    cmdline = readFileSync(join(dir, 'cmdline'), 'utf8');
-  } catch {
+  if (pid === undefined || !opencodeSessionEntry(dir)) {
     return undefined;
   }
-  if (!opencodeSessionArgv(cmdline)) {
-    return undefined;
-  }
-  try {
-    if (ownedEnviron(readFileSync(join(dir, 'environ'), 'utf8'))) {
-      return undefined;
-    }
-  } catch {
-    // unreadable environ — external, fail closed
-  }
-  return pid;
+  return broOwnedEntry(dir) ? undefined : pid;
 }
 
 /** Live foreign opencode session pids — opencode argv, alive, and not
