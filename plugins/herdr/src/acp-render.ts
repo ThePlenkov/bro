@@ -29,20 +29,43 @@ const RED = '\u001b[31m';
 const YELLOW = '\u001b[33m';
 const RESET = '\u001b[0m';
 
-// Built from strings so the source holds no control-byte escapes —
-// the scanner's control-char rule keys on regex literals.
-const CSI_RE = new RegExp(
-  '\\u001b\\[[0-9;:?]*[a-zA-Z]|\\u001b\\][^\\u0007\\u001b]*(?:\\u0007|\\u001b\\\\)|\\u001b[@-Z\\\\-_]',
-  'g'
-);
-const CTRL_RE = new RegExp('[\\u0000-\\u0008\\u000b-\\u001f\\u007f-\\u009f]', 'g');
+const isCtrl = (c: number): boolean => c < 9 || (c > 10 && c < 32) || (c > 126 && c < 160);
+
+/** ESC + rest of a sequence — CSI ends at a final byte 0x40–0x7e,
+ *  OSC at BEL or ESC\, anything else is ESC + one char. Returns the
+ *  index of the sequence's last char (or the ESC itself if
+ *  truncated). */
+const skipEscape = (s: string, i: number): number => {
+  const n = s.length;
+  const kind = s[i + 1];
+  if (kind === '[') {
+    i += 2;
+    while (i < n && !(s.charCodeAt(i) > 0x3f && s.charCodeAt(i) < 0x7f)) i++;
+    return i;
+  }
+  if (kind === ']') {
+    i += 2;
+    while (i < n && s.charCodeAt(i) !== 0x07 && !(s.charCodeAt(i) === 0x1b && s[i + 1] === '\\'))
+      i++;
+    return s.charCodeAt(i) === 0x1b ? i + 1 : i;
+  }
+  return i + 1;
+};
 
 /** Agent-controlled text may carry control bytes — strip everything
  *  non-printable so a hostile or buggy backend cannot write escape
  *  sequences into the pane. Line-mode invariant too: newlines become
  *  a visible `⏎`, never a second line. */
-export const safe = (s: string): string =>
-  s.replace(CSI_RE, '').replace(CTRL_RE, '').replaceAll('\r', '').replaceAll('\n', ' ⏎ ');
+export const safe = (s: string): string => {
+  let out = '';
+  for (let i = 0; i < s.length; i++) {
+    const c = s.charCodeAt(i);
+    if (c === 0x1b) i = skipEscape(s, i);
+    else if (c === 0x0a) out += ' ⏎ ';
+    else if (!isCtrl(c) && c !== 0x0d) out += s[i];
+  }
+  return out;
+};
 
 /** The fixed permission policy (spec): reads (and other observably
  *  non-mutating kinds) may be remembered ALWAYS; everything else is
@@ -91,8 +114,10 @@ const PLAN_BOX: Record<string, string> = { completed: '[x]', in_progress: '[>]',
 
 /** Wire value → display scalar; objects get a `?` instead of
  *  `[object Object]` — status lines only carry primitives. */
-const scalar = (v: unknown): string =>
-  v !== null && typeof v === 'object' ? '?' : String(v ?? '?');
+const scalar = (v: unknown): string => {
+  const t = typeof v;
+  return t === 'string' || t === 'number' || t === 'boolean' ? String(v) : '?';
+};
 
 interface ToolRec {
   title?: string;

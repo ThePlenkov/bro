@@ -501,12 +501,15 @@ const segmentText = (s: string): string => {
  *  can never re-parse into a different program. An unclosed quote is
  *  a usage error, named as such. */
 export function shellWords(text: string): string[] {
-  const SEGMENT = /"(?:\\.|[^"\\])*"?|'[^']*'?|(?:\\.|[^\s'"\\])+|\s+|\S/g;
+  const SEGMENT = /"(?:\\.|[^"\\])*"?|'[^']*'?|\\.|[^\s'"\\]+|\s+/g;
   const out: string[] = [];
   let cur = '';
   let open = false;
+  let pos = 0;
   for (const m of text.matchAll(SEGMENT)) {
+    if ((m.index ?? -1) !== pos) throw new Error(`malformed input at offset ${pos}`);
     const s = m[0];
+    pos += s.length;
     if (/^\s+$/.test(s)) {
       if (open) out.push(cur);
       cur = '';
@@ -516,6 +519,7 @@ export function shellWords(text: string): string[] {
     cur += segmentText(s);
     open = true;
   }
+  if (pos !== text.length) throw new Error('trailing backslash');
   if (open) out.push(cur);
   return out;
 }
