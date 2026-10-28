@@ -862,7 +862,7 @@ describe('bro doctor', () => {
       })
     ))
 
-  test('daemon: this repo\'s dist borrows the bro-dist verdict — fresh covers, stale warns', () =>
+  test('daemon: this repo\'s dist borrows the bro-dist verdict — fresh covers, stale warns', { skip: process.platform !== 'linux' }, () =>
     withEnv({ bins: ['gh'] }, (dir) => {
       // dir itself is the bro checkout — the daemon exec'd its own dist
       const distDir = join(dir, 'packages', 'cli', 'dist')
@@ -898,7 +898,7 @@ describe('bro doctor', () => {
       }
     }))
 
-  test('daemon: a source entry inside this checkout is the checkout\'s code, not an install', () =>
+  test('daemon: a source entry inside this checkout is the checkout\'s code, not an install', { skip: process.platform !== 'linux' }, () =>
     withEnv({ bins: ['gh'] }, (dir) => {
       // `node packages/cli/src/index.ts` — the supported source entry —
       // must not read as "installed, not this repo's build"
@@ -921,7 +921,7 @@ describe('bro doctor', () => {
       }
     }))
 
-  test('daemon: a source entry warns when HEAD moved after the daemon started', () =>
+  test('daemon: a source entry warns when HEAD moved after the daemon started', { skip: process.platform !== 'linux' }, () =>
     withEnv({ bins: ['gh'] }, (dir) => {
       mkdirSync(join(dir, 'packages', 'cli', 'src'), { recursive: true })
       writeFileSync(join(dir, 'packages', 'cli', 'package.json'), '{"name":"@broject/bro","version":"0.2.5"}')
@@ -943,7 +943,7 @@ describe('bro doctor', () => {
       }
     }))
 
-  test('daemon: an installed binary in a bro checkout warns — protections not live', () =>
+  test('daemon: an installed binary in a bro checkout warns — protections not live', { skip: process.platform !== 'linux' }, () =>
     withEnv({ bins: ['gh'] }, (dir) => {
       // this repo builds bro v0.2.5; the daemon runs a published v0.2.4
       mkdirSync(join(dir, 'packages', 'cli'), { recursive: true })
@@ -965,7 +965,7 @@ describe('bro doctor', () => {
       }
     }))
 
-  test('daemon: a different bro checkout\'s dist warns', () =>
+  test('daemon: a different bro checkout\'s dist warns', { skip: process.platform !== 'linux' }, () =>
     withEnv({ bins: ['gh'] }, (dir) => {
       const { entry } = fakeCheckout(dir)
       writeFileSync(entry, 'setTimeout(() => {}, 1e9)\n')
@@ -979,7 +979,7 @@ describe('bro doctor', () => {
       }
     }))
 
-  test('daemon: outside a bro repo, entry = resolved bro → ok; foreign → warn', () =>
+  test('daemon: outside a bro repo, entry = resolved bro → ok; foreign → warn', { skip: process.platform !== 'linux' }, () =>
     withEnv({ bins: ['gh'] }, (dir) => {
       const entry = join(dir, 'installed-bro.js')
       writeFileSync(entry, 'setTimeout(() => {}, 1e9)\n')
@@ -1015,6 +1015,72 @@ describe('bro doctor', () => {
         const c = byName(runDoctorChecks(dir), 'daemon')
         assert.equal(c.status, 'skip')
         assert.match(c.detail, /unverifiable/)
+      } finally {
+        child.kill()
+      }
+    }))
+
+  test('daemon: runtime options before the entry still name the entry', { skip: process.platform !== 'linux' }, () =>
+    withEnv({ bins: ['gh'] }, (dir) => {
+      // `node --require reg.js packages/cli/src/index.ts` — the option
+      // and its value must not read as the entry
+      mkdirSync(join(dir, 'packages', 'cli', 'src'), { recursive: true })
+      writeFileSync(join(dir, 'packages', 'cli', 'package.json'), '{"name":"@broject/bro","version":"0.2.5"}')
+      const entry = join(dir, 'packages', 'cli', 'src', 'index.ts')
+      writeFileSync(entry, 'setTimeout(() => {}, 1e9)\n')
+      const reg = join(dir, 'reg.js')
+      writeFileSync(reg, '// preload\n')
+      commitAt(dir)
+      const old = new Date(Date.now() - 7_200_000)
+      utimesSync(join(dir, '.git', 'logs', 'HEAD'), old, old)
+      const child = fakeDaemon(dir, [process.execPath, '--require', reg, entry])
+      try {
+        const c = byName(runDoctorChecks(dir), 'daemon')
+        assert.equal(c.status, 'ok')
+        assert.match(c.detail, /this checkout's source entry/)
+      } finally {
+        child.kill()
+      }
+    }))
+
+  test('daemon: a source entry warns when HEAD drift is unverifiable — no reflog', { skip: process.platform !== 'linux' }, () =>
+    withEnv({ bins: ['gh'] }, (dir) => {
+      // core.logAllRefUpdates=false repos carry no logs/HEAD — absent
+      // evidence must not read as "HEAD did not move"
+      mkdirSync(join(dir, 'packages', 'cli', 'src'), { recursive: true })
+      writeFileSync(join(dir, 'packages', 'cli', 'package.json'), '{"name":"@broject/bro","version":"0.2.5"}')
+      const entry = join(dir, 'packages', 'cli', 'src', 'index.ts')
+      writeFileSync(entry, 'setTimeout(() => {}, 1e9)\n')
+      commitAt(dir)
+      rmSync(join(dir, '.git', 'logs', 'HEAD'))
+      const child = fakeDaemon(dir, [process.execPath, entry])
+      try {
+        const c = byName(runDoctorChecks(dir), 'daemon')
+        assert.equal(c.status, 'warn')
+        assert.match(c.detail, /HEAD drift unverifiable/)
+      } finally {
+        child.kill()
+      }
+    }))
+
+  test('daemon: a sibling worktree on another HEAD is a different checkout', { skip: process.platform !== 'linux' }, () =>
+    withEnv({ bins: ['gh'] }, (dir) => {
+      // shared common dir but diverged HEADs — the running binary can
+      // lack what this HEAD carries, so it is not this checkout's build
+      commitAt(dir)
+      const wt = join(dir, 'wt')
+      execFileSync('git', ['-C', dir, ...GIT_ID, 'worktree', 'add', '-q', '-b', 'wt1', wt])
+      const distDir = join(wt, 'packages', 'cli', 'dist')
+      mkdirSync(distDir, { recursive: true })
+      writeFileSync(join(wt, 'packages', 'cli', 'package.json'), '{"name":"@broject/bro","version":"0.2.5"}')
+      const entry = join(distDir, 'index.js')
+      writeFileSync(entry, 'setTimeout(() => {}, 1e9)\n')
+      commitAt(wt)
+      const child = fakeDaemon(dir, [process.execPath, entry])
+      try {
+        const c = byName(runDoctorChecks(dir), 'daemon')
+        assert.equal(c.status, 'warn')
+        assert.match(c.detail, /different bro checkout/)
       } finally {
         child.kill()
       }

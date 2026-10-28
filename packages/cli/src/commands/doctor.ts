@@ -469,14 +469,18 @@ function devDistEntry(realPath: string): DevDist | null {
  *  be trusted either. */
 function distStampMs(distDir: string): number {
   let newest = 0;
-  for (const f of readdirSync(distDir, { withFileTypes: true })) {
-    if (!f.isFile()) {
-      continue;
+  try {
+    for (const f of readdirSync(distDir, { withFileTypes: true })) {
+      if (!f.isFile()) {
+        continue;
+      }
+      const m = statSync(join(distDir, f.name), { throwIfNoEntry: false })?.mtimeMs ?? 0;
+      if (m > newest) {
+        newest = m;
+      }
     }
-    const m = statSync(join(distDir, f.name), { throwIfNoEntry: false })?.mtimeMs ?? 0;
-    if (m > newest) {
-      newest = m;
-    }
+  } catch {
+    return 0;
   }
   return newest;
 }
@@ -605,7 +609,9 @@ function daemonEntry(pid: number): string | null {
     return null
   }
   const runtime = basename(argv[0]!)
-  const candidate = /^(node|bun|deno|tsx)[\w.-]*$/.test(runtime) ? argv[1] : argv[0]
+  const candidate = /^(node|bun|deno|tsx)[\w.-]*$/.test(runtime)
+    ? scriptArg(argv)
+    : argv[0]
   if (candidate === undefined || candidate.startsWith('-')) {
     return null
   }
@@ -617,6 +623,47 @@ function daemonEntry(pid: number): string | null {
   } catch {
     return null
   }
+}
+
+/** Runtime options whose value travels as the next argv token —
+ *  `-r`/`--require`, `--import`, loaders, eval strings, env files.
+ *  `=`-joined options need no entry: they never consume a token. An
+ *  option missing from the set degrades to today's behavior (its value
+ *  is probed as the entry and fails realpath), never to a wrong entry. */
+const RUNTIME_VALUE_OPTS = new Set([
+  '-r',
+  '--require',
+  '--import',
+  '--loader',
+  '--experimental-loader',
+  '-C',
+  '--conditions',
+  '-e',
+  '--eval',
+  '-p',
+  '--print',
+  '-c',
+  '--check',
+  '--watch-path',
+  '--env-file',
+  '--env-file-if-exists',
+])
+
+/** The entry script inside a runtime argv — the first operand after
+ *  the runtime's own options. `--` ends option parsing outright. */
+function scriptArg(argv: string[]): string | undefined {
+  let i = 1
+  while (i < argv.length) {
+    const t = argv[i]!
+    if (t === '--') {
+      return argv[i + 1]
+    }
+    if (!t.startsWith('-')) {
+      return t
+    }
+    i += RUNTIME_VALUE_OPTS.has(t) ? 2 : 1
+  }
+  return undefined
 }
 
 /** The daemon process's start epoch in ms — /proc starttime jiffies off
@@ -647,6 +694,22 @@ function sameGitCommon(a: string, b: string): boolean {
   } catch {
     return false
   }
+}
+
+/** The checkout's resolved HEAD commit — null where HEAD won't
+ *  resolve (unborn branch, detached probe failure, not a repo). */
+function headSha(dir: string): string | null {
+  const r = gitTry(['-C', dir, 'rev-parse', '--verify', '--quiet', 'HEAD'])
+  return r.code === 0 && r.out.trim() !== '' ? r.out.trim() : null
+}
+
+/** Same repository AND same HEAD — a linked worktree sitting on another
+ *  commit is a different build of the code, not this checkout's: its
+ *  binary can lack what this HEAD carries. An unresolved HEAD never
+ *  matches. */
+function sameCheckoutHead(a: string, b: string): boolean {
+  const ha = headSha(a)
+  return ha !== null && ha === headSha(b) && sameGitCommon(a, b)
 }
 
 /** The bro package version behind an entry — `<pkg>/dist/index.js` sits
@@ -710,7 +773,7 @@ function daemonBinChecks(dir: string, root: string | null): DoctorCheck[] {
   }
   const dev = devDistEntry(entry)
   if (dev !== null) {
-    if (sameGitCommon(dev.checkout, dir)) {
+    if (sameCheckoutHead(dev.checkout, dir)) {
       // the repo's own dist — the staleness verdict IS the binary
       // verdict: a dist that predates HEAD is protections-not-live
       const c = devDistCheck(dev)
@@ -747,24 +810,46 @@ function daemonBinChecks(dir: string, root: string | null): DoctorCheck[] {
   // remains: HEAD moving after the daemon spawned leaves the running
   // process behind the checkout
   const entryRoot = entry.includes('/node_modules/') ? null : repoRoot(dirname(entry))
-  if (
-    entryRoot !== null &&
-    sameGitCommon(entryRoot, dir) &&
-    broCheckoutVersion(entryRoot) !== null
-  ) {
-    const start = procStartMs(pid)
-    if (start !== null && refMovedMs(entryRoot, 'HEAD') > start) {
+  if (entryRoot !== null && broCheckoutVersion(entryRoot) !== null) {
+    if (sameCheckoutHead(entryRoot, dir)) {
+      const start = procStartMs(pid)
+      const moved = refMovedMs(entryRoot, 'HEAD')
+      // no start time or no reflog = no evidence the process is current —
+      // unverifiable, never a silent ok (commit %ct is committer-declared,
+      // not a fallback)
+      if (start === null || moved === 0) {
+        return [
+          check(
+            'daemon',
+            'warn',
+            `pid ${pid} runs ${entry} — this checkout's source, HEAD drift unverifiable (${
+              start === null ? 'process start unreadable' : 'no HEAD reflog'
+            })`,
+            'restart the daemon — protections live only in the code the process loaded'
+          ),
+        ]
+      }
+      if (moved > start) {
+        return [
+          check(
+            'daemon',
+            'warn',
+            `pid ${pid} runs ${entry} — this checkout's source, but HEAD moved since it started`,
+            'restart the daemon — the running process loaded the pre-move code'
+          ),
+        ]
+      }
       return [
-        check(
-          'daemon',
-          'warn',
-          `pid ${pid} runs ${entry} — this checkout's source, but HEAD moved since it started`,
-          'restart the daemon — the running process loaded the pre-move code'
-        ),
+        check('daemon', 'ok', `up — pid ${pid} · ${entry} — this checkout's source entry`),
       ]
     }
     return [
-      check('daemon', 'ok', `up — pid ${pid} · ${entry} — this checkout's source entry`),
+      check(
+        'daemon',
+        'warn',
+        `pid ${pid} runs ${entry} — a different bro checkout's source`,
+        "restart it under this repo's build or the shared install — protections live only in the binary the daemon runs"
+      ),
     ]
   }
   const v = broEntryVersion(entry)
