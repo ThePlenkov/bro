@@ -10,6 +10,7 @@ description: "Hook-first telemetry — status|test|on|off; every dispatched hook
 | | |
 | --- | --- |
 | group | `fleet` |
+| npm latest | unreleased — lands in `0.3.0` |
 | skill | `otel` |
 | config | `otel` in bro.config |
 
