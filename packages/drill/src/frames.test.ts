@@ -1,8 +1,8 @@
-import { describe, test } from 'node:test'
-import assert from 'node:assert/strict'
-import { chmodSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
-import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { describe, test } from 'node:test';
+import assert from 'node:assert/strict';
+import { chmodSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import {
   assertHydratedRows,
   currentFrame,
@@ -11,116 +11,113 @@ import {
   drillUp,
   planPreventions,
   refKind,
-} from './frames.ts'
-import { GIT_SYNC_PROBE_TIMEOUT_MS, type ConnectorCtx } from '@broject/core'
-import { drillConnector } from './connector.ts'
-import type { DrillRow } from './types.ts'
+} from './frames.ts';
+import { GIT_SYNC_PROBE_TIMEOUT_MS, type ConnectorCtx } from '@broject/core';
+import { drillConnector } from './connector.ts';
+import type { DrillRow } from './types.ts';
 
 const prevention = (id: string, title: string, status = 'open'): DrillRow => ({
   id,
   title,
   status,
   labels: ['prevention'],
-})
+});
 
 describe('refKind', () => {
   test('pull/merge-request URLs → pr', () => {
-    assert.equal(refKind('https://github.com/o/r/pull/17'), 'pr')
-    assert.equal(refKind('https://gitlab.com/o/r/-/merge_requests/3'), 'pr')
-  })
+    assert.equal(refKind('https://github.com/o/r/pull/17'), 'pr');
+    assert.equal(refKind('https://gitlab.com/o/r/-/merge_requests/3'), 'pr');
+  });
 
   test('full 40-char lowercase hex → git-sha', () => {
-    assert.equal(refKind('a'.repeat(40)), 'git-sha')
-    assert.equal(refKind('e59d025f1ab2c3d4e5f6a7b8c9d0e1f2a3b4c5d6'), 'git-sha')
-  })
+    assert.equal(refKind('a'.repeat(40)), 'git-sha');
+    assert.equal(refKind('e59d025f1ab2c3d4e5f6a7b8c9d0e1f2a3b4c5d6'), 'git-sha');
+  });
 
   test('short shas are not git-sha → work-id', () => {
-    assert.equal(refKind('abc1234'), 'work-id')
-  })
+    assert.equal(refKind('abc1234'), 'work-id');
+  });
 
   test('uppercase hex is not git-sha → work-id', () => {
-    assert.equal(refKind('A'.repeat(40)), 'work-id')
-  })
+    assert.equal(refKind('A'.repeat(40)), 'work-id');
+  });
 
   test('arbitrary text → work-id', () => {
-    assert.equal(refKind('transcript-2026-09-16'), 'work-id')
-  })
-})
+    assert.equal(refKind('transcript-2026-09-16'), 'work-id');
+  });
+});
 
 describe('planPreventions', () => {
   test('no priors → everything creates', () => {
-    const plan = planPreventions(['a', 'b'], [])
-    assert.deepEqual(plan.create, ['a', 'b'])
-    assert.equal(plan.reuse.size, 0)
-  })
+    const plan = planPreventions(['a', 'b'], []);
+    assert.deepEqual(plan.create, ['a', 'b']);
+    assert.equal(plan.reuse.size, 0);
+  });
 
   test('open same-title prevention bead is reused, not recreated', () => {
-    const plan = planPreventions(['a', 'b'], [prevention('bd-1', 'a')])
-    assert.deepEqual(plan.create, ['b'])
-    assert.equal(plan.reuse.get('a'), 'bd-1')
-  })
+    const plan = planPreventions(['a', 'b'], [prevention('bd-1', 'a')]);
+    assert.deepEqual(plan.create, ['b']);
+    assert.equal(plan.reuse.get('a'), 'bd-1');
+  });
 
   test('closed priors do not block re-filing', () => {
-    const plan = planPreventions(['a'], [prevention('bd-1', 'a', 'closed')])
-    assert.deepEqual(plan.create, ['a'])
-  })
+    const plan = planPreventions(['a'], [prevention('bd-1', 'a', 'closed')]);
+    assert.deepEqual(plan.create, ['a']);
+  });
 
   test('non-prevention beads with the same title are ignored', () => {
-    const other: DrillRow = { id: 'bd-9', title: 'a', status: 'open', labels: ['task'] }
-    const plan = planPreventions(['a'], [other])
-    assert.deepEqual(plan.create, ['a'])
-  })
+    const other: DrillRow = { id: 'bd-9', title: 'a', status: 'open', labels: ['task'] };
+    const plan = planPreventions(['a'], [other]);
+    assert.deepEqual(plan.create, ['a']);
+  });
 
   test('duplicate items within one call collapse to a single create', () => {
-    const plan = planPreventions(['a', 'a', 'b'], [])
-    assert.deepEqual(plan.create, ['a', 'b'])
-  })
+    const plan = planPreventions(['a', 'a', 'b'], []);
+    assert.deepEqual(plan.create, ['a', 'b']);
+  });
 
   test('a retry after partial failure converges: created bead is reused', () => {
     // first attempt created bd-1 for 'a', then died — retry sees it in priors
-    const plan = planPreventions(['a', 'b'], [prevention('bd-1', 'a')])
-    assert.deepEqual(plan.create, ['b'])
-    assert.equal(plan.reuse.get('a'), 'bd-1')
-  })
+    const plan = planPreventions(['a', 'b'], [prevention('bd-1', 'a')]);
+    assert.deepEqual(plan.create, ['b']);
+    assert.equal(plan.reuse.get('a'), 'bd-1');
+  });
 
   test('whitespace and case variants collapse to a single create', () => {
-    const plan = planPreventions(['handle race', ' handle race ', 'Handle Race'], [])
-    assert.deepEqual(plan.create, ['handle race'])
-  })
+    const plan = planPreventions(['handle race', ' handle race ', 'Handle Race'], []);
+    assert.deepEqual(plan.create, ['handle race']);
+  });
 
   test('a prior matches after normalization — retry still converges', () => {
-    const plan = planPreventions(['handle race'], [prevention('bd-1', '  Handle Race ')])
-    assert.deepEqual(plan.create, [])
-    assert.equal(plan.reuse.get('handle race'), 'bd-1')
-  })
+    const plan = planPreventions(['handle race'], [prevention('bd-1', '  Handle Race ')]);
+    assert.deepEqual(plan.create, []);
+    assert.equal(plan.reuse.get('handle race'), 'bd-1');
+  });
 
   test('created titles are trimmed; whitespace-only items are skipped', () => {
-    const plan = planPreventions(['  keep me  ', '   '], [])
-    assert.deepEqual(plan.create, ['keep me'])
-  })
-})
+    const plan = planPreventions(['  keep me  ', '   '], []);
+    assert.deepEqual(plan.create, ['keep me']);
+  });
+});
 
 describe('assertHydratedRows', () => {
   test('passes hydrated rows through', () => {
-    assert.doesNotThrow(() => assertHydratedRows([prevention('d1', 'a')], 'f1'))
-    assert.doesNotThrow(() => assertHydratedRows([], 'f1'))
-  })
+    assert.doesNotThrow(() => assertHydratedRows([prevention('d1', 'a')], 'f1'));
+    assert.doesNotThrow(() => assertHydratedRows([], 'f1'));
+  });
 
   test('throws on dependency-edge shaped rows instead of degrading', () => {
-    const edge = { issue_id: 'f1', depends_on_id: 'p1', type: 'discovered-from' }
-    assert.throws(
-      () => assertHydratedRows([edge] as never, 'f1'),
-      /unexpected row shape/,
-    )
-  })
+    const edge = { issue_id: 'f1', depends_on_id: 'p1', type: 'discovered-from' };
+    assert.throws(() => assertHydratedRows([edge] as never, 'f1'), /unexpected row shape/);
+  });
 
   test('throws on rows missing title', () => {
     assert.throws(
       () => assertHydratedRows([{ id: 'd1', status: 'open' }] as never, 'f1'),
-      /unexpected row shape/,
-    )
-  })
-})
+      /unexpected row shape/
+    );
+  });
+});
 
 /** A scripted `bd` on PATH — PATH lookup is the exec contract
  * (packages/core bd.ts), so no production seam is needed. `close` always
@@ -137,85 +134,80 @@ case "$1" in
   close) echo 'close blew up' >&2; exit 1 ;;
   delete) if [ "$FAKE_BD_DELETE_FAIL" = "1" ]; then echo 'cannot delete' >&2; exit 1; fi ;;
 esac
-`
+`;
 
 function withFakeBd(deleteFails: boolean, fn: () => void): void {
-  const dir = mkdtempSync(join(tmpdir(), 'bro-fake-bd-'))
-  writeFileSync(join(dir, 'bd'), FAKE_BD)
-  chmodSync(join(dir, 'bd'), 0o755)
-  const prevPath = process.env.PATH
-  const prevFlag = process.env.FAKE_BD_DELETE_FAIL
-  process.env.PATH = `${dir}:${prevPath}`
-  process.env.FAKE_BD_DELETE_FAIL = deleteFails ? '1' : '0'
+  const dir = mkdtempSync(join(tmpdir(), 'bro-fake-bd-'));
+  writeFileSync(join(dir, 'bd'), FAKE_BD);
+  chmodSync(join(dir, 'bd'), 0o755);
+  const prevPath = process.env.PATH;
+  const prevFlag = process.env.FAKE_BD_DELETE_FAIL;
+  process.env.PATH = `${dir}:${prevPath}`;
+  process.env.FAKE_BD_DELETE_FAIL = deleteFails ? '1' : '0';
   try {
-    fn()
+    fn();
   } finally {
-    process.env.PATH = prevPath
+    process.env.PATH = prevPath;
     if (prevFlag === undefined) {
-      delete process.env.FAKE_BD_DELETE_FAIL
+      delete process.env.FAKE_BD_DELETE_FAIL;
     } else {
-      process.env.FAKE_BD_DELETE_FAIL = prevFlag
+      process.env.FAKE_BD_DELETE_FAIL = prevFlag;
     }
-    rmSync(dir, { recursive: true, force: true })
+    rmSync(dir, { recursive: true, force: true });
   }
 }
 
-const WIN32 = process.platform === 'win32'
+const WIN32 = process.platform === 'win32';
 
 test('drill hook bounds the git lookup before the live frame probe', { skip: WIN32 }, async () => {
-  const dir = mkdtempSync(join(tmpdir(), 'bro-drill-hanging-git-'))
-  const prevPath = process.env.PATH
-  writeFileSync(join(dir, 'git'), '#!/bin/sh\nexec /bin/sleep 30\n')
-  writeFileSync(join(dir, 'bd'), '#!/bin/sh\ncase "$*" in *wisp*) printf \'{"wisps":[]}\\n\' ;; *) printf \'[]\\n\' ;; esac\n')
-  chmodSync(join(dir, 'git'), 0o755)
-  chmodSync(join(dir, 'bd'), 0o755)
-  process.env.PATH = `${dir}:${prevPath}`
+  const dir = mkdtempSync(join(tmpdir(), 'bro-drill-hanging-git-'));
+  const prevPath = process.env.PATH;
+  writeFileSync(join(dir, 'git'), '#!/bin/sh\nexec /bin/sleep 30\n');
+  writeFileSync(
+    join(dir, 'bd'),
+    '#!/bin/sh\ncase "$*" in *wisp*) printf \'{"wisps":[]}\\n\' ;; *) printf \'[]\\n\' ;; esac\n'
+  );
+  chmodSync(join(dir, 'git'), 0o755);
+  chmodSync(join(dir, 'bd'), 0o755);
+  process.env.PATH = `${dir}:${prevPath}`;
   try {
-    const started = Date.now()
-    const ctx = { dir } as ConnectorCtx
-    const hooks = drillConnector.hooks?.(ctx)
-    assert.ok(hooks?.sessionStart)
-    assert.deepEqual(await hooks.sessionStart(ctx), [])
-    assert.ok(Date.now() - started < GIT_SYNC_PROBE_TIMEOUT_MS + 1_000)
+    const started = Date.now();
+    const ctx = { dir } as ConnectorCtx;
+    const hooks = drillConnector.hooks?.(ctx);
+    assert.ok(hooks?.sessionStart);
+    assert.deepEqual(await hooks.sessionStart(ctx), []);
+    assert.ok(Date.now() - started < GIT_SYNC_PROBE_TIMEOUT_MS + 1_000);
   } finally {
-    process.env.PATH = prevPath
-    rmSync(dir, { recursive: true, force: true })
+    process.env.PATH = prevPath;
+    rmSync(dir, { recursive: true, force: true });
   }
-})
+});
 
 describe('drillUp compensation', () => {
-  test(
-    'failed close + failed cleanup reports the orphan ids',
-    { skip: WIN32 },
-    () => {
-      withFakeBd(true, () => {
-        assert.throws(
-          () => drillUp({ id: 'f1', result: 'r', prevent: ['p1'] }),
-          (err: Error & { cause?: { stderr?: string } }) =>
-            /cleanup incomplete: prevention bead\(s\) left behind: bd-new-1/.test(err.message) &&
-            (err.cause?.stderr ?? '').includes('close blew up'),
-        )
-      })
-    },
-  )
+  test('failed close + failed cleanup reports the orphan ids', { skip: WIN32 }, () => {
+    withFakeBd(true, () => {
+      assert.throws(
+        () => drillUp({ id: 'f1', result: 'r', prevent: ['p1'] }),
+        (err: Error & { cause?: { stderr?: string } }) =>
+          /cleanup incomplete: prevention bead\(s\) left behind: bd-new-1/.test(err.message) &&
+          (err.cause?.stderr ?? '').includes('close blew up')
+      );
+    });
+  });
 
-  test(
-    'failed close + successful cleanup rethrows the original error',
-    { skip: WIN32 },
-    () => {
-      withFakeBd(false, () => {
-        assert.throws(
-          () => drillUp({ id: 'f1', result: 'r', prevent: ['p1'] }),
-          (err: Error & { stderr?: string }) =>
-            err.message.includes('bd close') &&
-            !err.message.includes('cleanup incomplete') &&
-            // stderr present → the raw exec error came through, not a rewrap
-            (err.stderr ?? '').includes('close blew up'),
-        )
-      })
-    },
-  )
-})
+  test('failed close + successful cleanup rethrows the original error', { skip: WIN32 }, () => {
+    withFakeBd(false, () => {
+      assert.throws(
+        () => drillUp({ id: 'f1', result: 'r', prevent: ['p1'] }),
+        (err: Error & { stderr?: string }) =>
+          err.message.includes('bd close') &&
+          !err.message.includes('cleanup incomplete') &&
+          // stderr present → the raw exec error came through, not a rewrap
+          (err.stderr ?? '').includes('close blew up')
+      );
+    });
+  });
+});
 
 /** Nested drills served by a scripted bd — `dep list` answers every id in
  *  one call (the N+1 fix): f2 is f1's child, so f1 is root and f2 is the
@@ -226,31 +218,27 @@ case "$1" in
   dep) echo '[{"issue_id":"f2","depends_on_id":"f1","type":"parent-child"}]' ;;
   mol) echo '{"wisps":[]}' ;;
 esac
-`
+`;
 
 describe('drillRelations via bd dep list', () => {
-  test(
-    'one batch call yields the parent→child tree',
-    { skip: WIN32 },
-    () => {
-      const dir = mkdtempSync(join(tmpdir(), 'bro-fake-bd-'))
-      writeFileSync(join(dir, 'bd'), FAKE_BD_NESTED)
-      chmodSync(join(dir, 'bd'), 0o755)
-      const prevPath = process.env.PATH
-      process.env.PATH = `${dir}:${prevPath}`
-      try {
-        assert.equal(drillTree(), '● f1 root [open]\n  ● f2 leaf [open]')
-        const frame = currentFrame()
-        assert.equal(frame?.id, 'f2')
-        assert.equal(frame?.parentId, 'f1')
-        assert.equal(frame?.depth, 1)
-      } finally {
-        process.env.PATH = prevPath
-        rmSync(dir, { recursive: true, force: true })
-      }
-    },
-  )
-})
+  test('one batch call yields the parent→child tree', { skip: WIN32 }, () => {
+    const dir = mkdtempSync(join(tmpdir(), 'bro-fake-bd-'));
+    writeFileSync(join(dir, 'bd'), FAKE_BD_NESTED);
+    chmodSync(join(dir, 'bd'), 0o755);
+    const prevPath = process.env.PATH;
+    process.env.PATH = `${dir}:${prevPath}`;
+    try {
+      assert.equal(drillTree(), '● f1 root [open]\n  ● f2 leaf [open]');
+      const frame = currentFrame();
+      assert.equal(frame?.id, 'f2');
+      assert.equal(frame?.parentId, 'f1');
+      assert.equal(frame?.depth, 1);
+    } finally {
+      process.env.PATH = prevPath;
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});
 
 /** A scripted bd where `close` succeeds — for the report-write path. */
 const FAKE_BD_OK = `#!/bin/sh
@@ -265,115 +253,105 @@ case "$1" in
   provenance) echo '[]' ;;
   close) : ;;
 esac
-`
+`;
 
 describe('drillUp --report', () => {
-  test(
-    'writes <reportDir>/<frame>.md with the memo data',
-    { skip: WIN32 },
-    () => {
-      const bin = mkdtempSync(join(tmpdir(), 'bro-fake-bd-'))
-      writeFileSync(join(bin, 'bd'), FAKE_BD_OK)
-      chmodSync(join(bin, 'bd'), 0o755)
-      const dir = mkdtempSync(join(tmpdir(), 'bro-report-'))
-      const prevPath = process.env.PATH
-      process.env.PATH = `${bin}:${prevPath}`
-      try {
-        const res = drillUp({
-          id: 'f1',
-          result: 'found it: a\nb',
-          prevent: ['p1'],
-          reportDir: dir,
-        })
-        assert.equal(res.closed, 'f1')
-        assert.deepEqual(res.preventionIds, ['bd-new-1'])
-        assert.equal(res.reportPath, join(dir, 'f1.md'))
-        const text = readFileSync(res.reportPath!, 'utf8')
-        assert.match(text, /^drill: "f1"$/m)
-        assert.match(text, /^result: "found it: a\\nb"$/m)
-        assert.match(text, /^- p1 \(bd-new-1\)$/m)
-      } finally {
-        process.env.PATH = prevPath
-        rmSync(bin, { recursive: true, force: true })
-        rmSync(dir, { recursive: true, force: true })
-      }
-    },
-  )
+  test('writes <reportDir>/<frame>.md with the memo data', { skip: WIN32 }, () => {
+    const bin = mkdtempSync(join(tmpdir(), 'bro-fake-bd-'));
+    writeFileSync(join(bin, 'bd'), FAKE_BD_OK);
+    chmodSync(join(bin, 'bd'), 0o755);
+    const dir = mkdtempSync(join(tmpdir(), 'bro-report-'));
+    const prevPath = process.env.PATH;
+    process.env.PATH = `${bin}:${prevPath}`;
+    try {
+      const res = drillUp({
+        id: 'f1',
+        result: 'found it: a\nb',
+        prevent: ['p1'],
+        reportDir: dir,
+      });
+      assert.equal(res.closed, 'f1');
+      assert.deepEqual(res.preventionIds, ['bd-new-1']);
+      assert.equal(res.reportPath, join(dir, 'f1.md'));
+      const text = readFileSync(res.reportPath!, 'utf8');
+      assert.match(text, /^drill: "f1"$/m);
+      assert.match(text, /^result: "found it: a\\nb"$/m);
+      assert.match(text, /^- p1 \(bd-new-1\)$/m);
+    } finally {
+      process.env.PATH = prevPath;
+      rmSync(bin, { recursive: true, force: true });
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
 
-  test(
-    'report write failure surfaces as reportError — the close still succeeded',
-    { skip: WIN32 },
-    () => {
-      const bin = mkdtempSync(join(tmpdir(), 'bro-fake-bd-'))
-      writeFileSync(join(bin, 'bd'), FAKE_BD_OK)
-      chmodSync(join(bin, 'bd'), 0o755)
-      const dir = mkdtempSync(join(tmpdir(), 'bro-report-'))
-      // a reportDir rooted inside a regular file → mkdir fails
-      const file = join(dir, 'afile')
-      writeFileSync(file, 'x')
-      const prevPath = process.env.PATH
-      process.env.PATH = `${bin}:${prevPath}`
-      try {
-        const res = drillUp({ id: 'f1', result: 'r', reportDir: join(file, 'sub') })
-        assert.equal(res.closed, 'f1')
-        assert.equal(res.reportPath, undefined)
-        assert.match(res.reportError ?? '', /ENOTDIR|not a directory/i)
-      } finally {
-        process.env.PATH = prevPath
-        rmSync(bin, { recursive: true, force: true })
-        rmSync(dir, { recursive: true, force: true })
-      }
-    },
-  )
+  test('report write failure surfaces as reportError — the close still succeeded', {
+    skip: WIN32,
+  }, () => {
+    const bin = mkdtempSync(join(tmpdir(), 'bro-fake-bd-'));
+    writeFileSync(join(bin, 'bd'), FAKE_BD_OK);
+    chmodSync(join(bin, 'bd'), 0o755);
+    const dir = mkdtempSync(join(tmpdir(), 'bro-report-'));
+    // a reportDir rooted inside a regular file → mkdir fails
+    const file = join(dir, 'afile');
+    writeFileSync(file, 'x');
+    const prevPath = process.env.PATH;
+    process.env.PATH = `${bin}:${prevPath}`;
+    try {
+      const res = drillUp({ id: 'f1', result: 'r', reportDir: join(file, 'sub') });
+      assert.equal(res.closed, 'f1');
+      assert.equal(res.reportPath, undefined);
+      assert.match(res.reportError ?? '', /ENOTDIR|not a directory/i);
+    } finally {
+      process.env.PATH = prevPath;
+      rmSync(bin, { recursive: true, force: true });
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
 
   test('no reportDir → no reportPath', { skip: WIN32 }, () => {
-    const bin = mkdtempSync(join(tmpdir(), 'bro-fake-bd-'))
-    writeFileSync(join(bin, 'bd'), FAKE_BD_OK)
-    chmodSync(join(bin, 'bd'), 0o755)
-    const prevPath = process.env.PATH
-    process.env.PATH = `${bin}:${prevPath}`
+    const bin = mkdtempSync(join(tmpdir(), 'bro-fake-bd-'));
+    writeFileSync(join(bin, 'bd'), FAKE_BD_OK);
+    chmodSync(join(bin, 'bd'), 0o755);
+    const prevPath = process.env.PATH;
+    process.env.PATH = `${bin}:${prevPath}`;
     try {
-      const res = drillUp({ id: 'f1', result: 'r' })
-      assert.equal(res.reportPath, undefined)
+      const res = drillUp({ id: 'f1', result: 'r' });
+      assert.equal(res.reportPath, undefined);
     } finally {
-      process.env.PATH = prevPath
-      rmSync(bin, { recursive: true, force: true })
+      process.env.PATH = prevPath;
+      rmSync(bin, { recursive: true, force: true });
     }
-  })
-})
+  });
+});
 
 describe('drillChain', () => {
-  test(
-    'walks parent edges root → frame',
-    { skip: WIN32 },
-    () => {
-      const dir = mkdtempSync(join(tmpdir(), 'bro-fake-bd-'))
-      writeFileSync(join(dir, 'bd'), FAKE_BD_NESTED)
-      chmodSync(join(dir, 'bd'), 0o755)
-      const prevPath = process.env.PATH
-      process.env.PATH = `${dir}:${prevPath}`
-      try {
-        assert.deepEqual(drillChain('f2'), ['f1', 'f2'])
-        assert.deepEqual(drillChain('f1'), ['f1'])
-        // unknown id → chain of itself, no hang
-        assert.deepEqual(drillChain('nope'), ['nope'])
-      } finally {
-        process.env.PATH = prevPath
-        rmSync(dir, { recursive: true, force: true })
-      }
-    },
-  )
-})
+  test('walks parent edges root → frame', { skip: WIN32 }, () => {
+    const dir = mkdtempSync(join(tmpdir(), 'bro-fake-bd-'));
+    writeFileSync(join(dir, 'bd'), FAKE_BD_NESTED);
+    chmodSync(join(dir, 'bd'), 0o755);
+    const prevPath = process.env.PATH;
+    process.env.PATH = `${dir}:${prevPath}`;
+    try {
+      assert.deepEqual(drillChain('f2'), ['f1', 'f2']);
+      assert.deepEqual(drillChain('f1'), ['f1']);
+      // unknown id → chain of itself, no hang
+      assert.deepEqual(drillChain('nope'), ['nope']);
+    } finally {
+      process.env.PATH = prevPath;
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});
 
 describe('assertHydratedRows status check', () => {
   test('throws on rows with missing or non-string status', () => {
     assert.throws(
       () => assertHydratedRows([{ id: 'd1', title: 'a' }] as never, 'q1'),
-      /unexpected row shape/,
-    )
+      /unexpected row shape/
+    );
     assert.throws(
       () => assertHydratedRows([{ id: 'd1', title: 'a', status: 1 }] as never, 'q1'),
-      /unexpected row shape/,
-    )
-  })
-})
+      /unexpected row shape/
+    );
+  });
+});

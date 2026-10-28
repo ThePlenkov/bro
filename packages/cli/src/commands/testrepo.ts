@@ -3,9 +3,9 @@
  *  spawner, and the fake bd/review-host the e2e matrix needs. Test files
  *  must not re-declare these — SonarCloud counts fixture clones as
  *  duplication on new code. */
-import assert from 'node:assert/strict'
-import { execFileSync, spawnSync } from 'node:child_process'
-import { bdTry } from '@broject/core'
+import assert from 'node:assert/strict';
+import { execFileSync, spawnSync } from 'node:child_process';
+import { bdTry } from '@broject/core';
 import {
   chmodSync,
   existsSync,
@@ -16,11 +16,11 @@ import {
   renameSync,
   rmSync,
   writeFileSync,
-} from 'node:fs'
-import { devNull, tmpdir } from 'node:os'
-import { dirname, join } from 'node:path'
-import { fileURLToPath } from 'node:url'
-import { usageWriter } from '@broject/core'
+} from 'node:fs';
+import { devNull, tmpdir } from 'node:os';
+import { dirname, join } from 'node:path';
+import { fileURLToPath } from 'node:url';
+import { usageWriter } from '@broject/core';
 
 /** Ambient env that must not reach a fixture's git children. The
  *  repo-location pins retarget the child outright; the GIT_CONFIG*
@@ -28,7 +28,7 @@ import { usageWriter } from '@broject/core'
  *  injects config — a pinned core.hooksPath would run host hooks on
  *  fixture commits — and GIT_TEMPLATE_DIR plants hook files at init. */
 const AMBIENT_GIT =
-  /^(GIT_DIR|GIT_WORK_TREE|GIT_INDEX_FILE|GIT_COMMON_DIR|GIT_CONFIG($|_)|GIT_TEMPLATE_DIR$)/
+  /^(GIT_DIR|GIT_WORK_TREE|GIT_INDEX_FILE|GIT_COMMON_DIR|GIT_CONFIG($|_)|GIT_TEMPLATE_DIR$)/;
 
 export function git(args: string[], cwd: string): string {
   // a test run inside another repo still carries its repo-location env —
@@ -39,25 +39,28 @@ export function git(args: string[], cwd: string): string {
   // leak through a file instead of a var
   const env = Object.fromEntries(
     Object.entries(process.env).filter(([k]) => !AMBIENT_GIT.test(k))
-  ) as NodeJS.ProcessEnv
-  env.GIT_CONFIG_NOSYSTEM = '1'
-  env.GIT_CONFIG_GLOBAL = devNull
-  return execFileSync('git', args, { cwd, env, encoding: 'utf8' }) // NOSONAR — PATH lookup is the contract (same as core/git.ts)
+  ) as NodeJS.ProcessEnv;
+  env.GIT_CONFIG_NOSYSTEM = '1';
+  env.GIT_CONFIG_GLOBAL = devNull;
+  return execFileSync('git', args, { cwd, env, encoding: 'utf8' }); // NOSONAR — PATH lookup is the contract (same as core/git.ts)
 }
 
 /** mkdtemp repo → `main` checkout with git identity and one commit.
  *  `seed` may drop files before the commit; without it the commit is
  *  --allow-empty. */
-export function initRepo(prefix: string, seed?: (main: string) => void): { root: string; main: string } {
-  const root = tmpDir(prefix)
-  const main = join(root, 'main')
-  git(['init', '-q', '-b', 'main', main], root)
-  git(['config', 'user.email', 't@t'], main)
-  git(['config', 'user.name', 't'], main)
-  seed?.(main)
-  git(['add', '-A'], main)
-  git(['commit', '-qm', 'init', '--allow-empty'], main)
-  return { root, main }
+export function initRepo(
+  prefix: string,
+  seed?: (main: string) => void
+): { root: string; main: string } {
+  const root = tmpDir(prefix);
+  const main = join(root, 'main');
+  git(['init', '-q', '-b', 'main', main], root);
+  git(['config', 'user.email', 't@t'], main);
+  git(['config', 'user.name', 't'], main);
+  seed?.(main);
+  git(['add', '-A'], main);
+  git(['commit', '-qm', 'init', '--allow-empty'], main);
+  return { root, main };
 }
 
 /** mkdtemp under a per-process sweep: dirs made here are deleted when
@@ -65,29 +68,29 @@ export function initRepo(prefix: string, seed?: (main: string) => void): { root:
  *  half of the fixture-leak contract (initRepo callers get the same
  *  guarantee through inside()/insideAsync). Use this for fixture dirs
  *  that are NOT wrapped in a try/finally rmSync of their own. */
-const tmpDirs: string[] = []
-let tmpSweepArmed = false
+const tmpDirs: string[] = [];
+let tmpSweepArmed = false;
 export function tmpDir(prefix: string): string {
   if (!tmpSweepArmed) {
-    tmpSweepArmed = true
+    tmpSweepArmed = true;
     process.once('exit', () => {
-      for (const d of tmpDirs) rmSync(d, { recursive: true, force: true })
-    })
+      for (const d of tmpDirs) rmSync(d, { recursive: true, force: true });
+    });
   }
-  const dir = mkdtempSync(join(tmpdir(), prefix))
-  tmpDirs.push(dir)
-  return dir
+  const dir = mkdtempSync(join(tmpdir(), prefix));
+  tmpDirs.push(dir);
+  return dir;
 }
 
 /** Run fn in dir, then always restore cwd and delete the repo. */
 export function inside<T>(dir: string, root: string, fn: () => T): T {
-  const prev = process.cwd()
-  process.chdir(dir)
+  const prev = process.cwd();
+  process.chdir(dir);
   try {
-    return fn()
+    return fn();
   } finally {
-    process.chdir(prev)
-    rmSync(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 })
+    process.chdir(prev);
+    rmSync(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
   }
 }
 
@@ -96,13 +99,13 @@ export function inside<T>(dir: string, root: string, fn: () => T): T {
  *  maxRetries covers the detached-child tail (trace flush, act wait): a
  *  straggler write between readdir and rmdir is ENOTEMPTY, not a bug. */
 export async function insideAsync<T>(dir: string, root: string, fn: () => Promise<T>): Promise<T> {
-  const prev = process.cwd()
-  process.chdir(dir)
+  const prev = process.cwd();
+  process.chdir(dir);
   try {
-    return await fn()
+    return await fn();
   } finally {
-    process.chdir(prev)
-    rmSync(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 })
+    process.chdir(prev);
+    rmSync(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
   }
 }
 
@@ -121,31 +124,31 @@ export const CLI_DIST = join(
   '..',
   'dist',
   'index.js'
-)
+);
 
 /** Sanitized env for spawned e2e processes — ambient GIT_/BEADS_/DEVIN_/
  *  CLAUDE_/CURSOR_/BRO_ vars from the outer agent session must not redirect a
  *  fixture's git dir, hook root, or beads store. Whitelist, not
  *  strip-list: a new leak variable can't sneak in. */
 export function e2eEnv(extra: Record<string, string> = {}): NodeJS.ProcessEnv {
-  const env: Record<string, string> = {}
+  const env: Record<string, string> = {};
   for (const k of ['PATH', 'HOME', 'TMPDIR', 'USER', 'LANG']) {
     if (process.env[k] !== undefined) {
-      env[k] = process.env[k]!
+      env[k] = process.env[k]!;
     }
   }
   // the whitelist drops even a file-scope scrub's null-config pins —
   // HOME rides along, so without these the child's git reads the host
   // ~/.gitconfig (core.hooksPath, commit.gpgsign) on fixture commits
-  env.GIT_CONFIG_NOSYSTEM = '1'
-  env.GIT_CONFIG_GLOBAL = devNull
-  return { ...env, ...extra }
+  env.GIT_CONFIG_NOSYSTEM = '1';
+  env.GIT_CONFIG_GLOBAL = devNull;
+  return { ...env, ...extra };
 }
 
 export interface CliResult {
-  code: number | null
-  stdout: string
-  stderr: string
+  code: number | null;
+  stdout: string;
+  stderr: string;
 }
 
 /** Spawn `node dist/index.js <args>` — the real CLI, pipes captured. */
@@ -154,7 +157,7 @@ export function runCli(
   opts: { cwd: string; input?: string; env?: Record<string, string> }
 ): CliResult {
   if (!existsSync(CLI_DIST)) {
-    throw new Error('packages/cli/dist is missing — run `npm run build` before e2e tests')
+    throw new Error('packages/cli/dist is missing — run `npm run build` before e2e tests');
   }
   const proc = spawnSync(process.execPath, [CLI_DIST, ...args], {
     cwd: opts.cwd,
@@ -162,12 +165,12 @@ export function runCli(
     env: e2eEnv(opts.env),
     encoding: 'utf8',
     timeout: 60_000,
-  })
+  });
   return {
     code: proc.status,
     stdout: proc.stdout ?? '',
     stderr: proc.stderr ?? '',
-  }
+  };
 }
 
 /** Minimal `bd` — a JSON-file store behind a node shim, covering the
@@ -514,7 +517,7 @@ switch (cmd === undefined && args[0] === '--version' ? '--version' : cmd) {
   default:
     fail('unhandled: ' + args.join(' '))
 }
-`
+`;
 
 /** A healthy-empty docker for fixtures on docker-less hosts — `version`
  *  answers, `ps` lists nothing, anything else is a 'No such object'
@@ -526,7 +529,7 @@ const FAKE_DOCKER = `#!/bin/sh
 if [ "$1" = version ]; then echo "25.0.0-fake"; exit 0; fi
 if [ "$1" = ps ]; then exit 0; fi
 echo "Error: No such object" >&2; exit 1
-`
+`;
 
 /** Capability probe for bd-dependent tests — the "needs-bd" gate.
  *  `bd --version` alone can't tell a CGO-less build: it prints fine,
@@ -534,17 +537,17 @@ echo "Error: No such object" >&2; exit 1
  *  real init in a scratch dir instead; the returned string is what
  *  `t.skip` should print. `undefined` means bd fully works. */
 export function bdStoreBlocker(): string | undefined {
-  const dir = tmpDir('bro-bd-probe-')
+  const dir = tmpDir('bro-bd-probe-');
   if (bdTry(['--version'], 10_000, dir).code !== 0) {
-    return 'bd not installed'
+    return 'bd not installed';
   }
   // a checkout-shaped scratch: a bd build that insists on a git
   // worktree for init must probe "store works", never "dir had no git"
-  git(['init', '-q'], dir)
-  const r = bdTry(['init', '--stealth', '--skip-agents', '--skip-hooks', '--quiet'], 30_000, dir)
+  git(['init', '-q'], dir);
+  const r = bdTry(['init', '--stealth', '--skip-agents', '--skip-hooks', '--quiet'], 30_000, dir);
   return r.code === 0
     ? undefined
-    : `bd cannot init a store (CGO-less build?): ${r.err.trim().split('\n')[0] ?? r.code}`
+    : `bd cannot init a store (CGO-less build?): ${r.err.trim().split('\n')[0] ?? r.code}`;
 }
 
 /** Install the fake bd into <dir>/bin and seed its store. Rows take the
@@ -553,15 +556,15 @@ export function installFakeBd(
   dir: string,
   rows: Array<Record<string, unknown>> = []
 ): { binDir: string; db: string } {
-  const binDir = join(dir, 'bin')
-  const db = join(dir, 'beads.json')
-  mkdirSync(binDir, { recursive: true })
-  writeFileSync(join(binDir, 'bd'), FAKE_BD)
-  chmodSync(join(binDir, 'bd'), 0o755)
-  writeFileSync(join(binDir, 'docker'), FAKE_DOCKER)
-  chmodSync(join(binDir, 'docker'), 0o755)
-  writeBeads(db, rows)
-  return { binDir, db }
+  const binDir = join(dir, 'bin');
+  const db = join(dir, 'beads.json');
+  mkdirSync(binDir, { recursive: true });
+  writeFileSync(join(binDir, 'bd'), FAKE_BD);
+  chmodSync(join(binDir, 'bd'), 0o755);
+  writeFileSync(join(binDir, 'docker'), FAKE_DOCKER);
+  chmodSync(join(binDir, 'docker'), 0o755);
+  writeBeads(db, rows);
+  return { binDir, db };
 }
 
 export function writeBeads(
@@ -569,7 +572,7 @@ export function writeBeads(
   rows: Array<Record<string, unknown>>,
   extra: Record<string, unknown> = {}
 ): void {
-  writeFileSync(db, JSON.stringify({ ...extra, rows }))
+  writeFileSync(db, JSON.stringify({ ...extra, rows }));
 }
 
 /** Test-side read with the same CI-jitter shield the embedded fakes
@@ -578,16 +581,16 @@ export function writeBeads(
 function readJsonRetry(path: string): unknown {
   for (let i = 0; ; i++) {
     try {
-      return JSON.parse(readFileSync(path, 'utf8'))
+      return JSON.parse(readFileSync(path, 'utf8'));
     } catch (e) {
-      if (i > 40) throw e
-      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 25)
+      if (i > 40) throw e;
+      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 25);
     }
   }
 }
 
 export function readBeads(db: string): Array<Record<string, unknown>> {
-  return (readJsonRetry(db) as { rows: Array<Record<string, unknown>> }).rows
+  return (readJsonRetry(db) as { rows: Array<Record<string, unknown>> }).rows;
 }
 
 /** A second git checkout beside `main` — git-initialized so
@@ -596,20 +599,20 @@ export function readBeads(db: string): Array<Record<string, unknown>> {
  *  discovery picks it over FAKE_BD_DB). The cross-repo mesh/request
  *  fixtures' target side. */
 export function initTarget(root: string, name: string): { dir: string; db: string } {
-  const dir = join(root, name)
-  git(['init', '-q', '-b', 'main', dir], root)
-  git(['config', 'user.email', 't@t'], dir)
-  git(['config', 'user.name', 't'], dir)
-  git(['remote', 'add', 'origin', `https://github.com/acme/${name}.git`], dir)
-  git(['commit', '-qm', 'init', '--allow-empty'], dir)
-  const db = join(dir, '.beads', 'beads.json')
-  mkdirSync(join(dir, '.beads'), { recursive: true })
-  writeBeads(db, [])
-  return { dir, db }
+  const dir = join(root, name);
+  git(['init', '-q', '-b', 'main', dir], root);
+  git(['config', 'user.email', 't@t'], dir);
+  git(['config', 'user.name', 't'], dir);
+  git(['remote', 'add', 'origin', `https://github.com/acme/${name}.git`], dir);
+  git(['commit', '-qm', 'init', '--allow-empty'], dir);
+  const db = join(dir, '.beads', 'beads.json');
+  mkdirSync(join(dir, '.beads'), { recursive: true });
+  writeBeads(db, []);
+  return { dir, db };
 }
 
 export function bead(db: string, id: string): Record<string, unknown> | undefined {
-  return readBeads(db).find((r) => r.id === id)
+  return readBeads(db).find(r => r.id === id);
 }
 
 /** The landed-claim verdict every act settle path owes — the bead is
@@ -617,11 +620,11 @@ export function bead(db: string, id: string): Record<string, unknown> | undefine
  *  caller holds one) carries the `act: <id> closed` line. */
 export function assertLandedBead(db: string, id: string, stderr?: string): void {
   if (stderr !== undefined) {
-    assert.match(stderr, new RegExp(`${id} closed`))
+    assert.match(stderr, new RegExp(`${id} closed`));
   }
-  const row = bead(db, id)
-  assert.equal(row?.status, 'closed')
-  assert.match(String(row?.close_reason), /landed via/)
+  const row = bead(db, id);
+  assert.equal(row?.status, 'closed');
+  assert.match(String(row?.close_reason), /landed via/);
 }
 
 export const FAKE_BEAD = {
@@ -630,7 +633,7 @@ export const FAKE_BEAD = {
   status: 'open',
   created_at: '2026-01-01T00:00:00Z',
   labels: [] as string[],
-}
+};
 
 /** The review-host connector the fixture repo loads as an external
  *  plugin — every facade probe reads host.json so tests and the fake
@@ -940,7 +943,7 @@ export default {
   run: () => {},
   connectors: [{ name: 'fakehost', matchRemote: () => false, reviews: () => facade, stacks: () => stacksFacade }],
 }
-`
+`;
 
 /** The loop's spawned agent — a node script keyed off E2E_SCENARIO and
  *  the prompt file (a '<review-threads>' marker means it was respawned
@@ -1163,28 +1166,28 @@ switch (scenario) {
   default:
     process.exit(1)
 }
-`
+`;
 
 /** Write the fake review-host plugin, its state file, and the fake agent
  *  into a fixture repo root. Returns the host state path. */
 export function installFakeHost(root: string): { state: string; agent: string } {
-  writeFileSync(join(root, 'fakehost.ts'), FAKE_HOST_PLUGIN)
-  writeFileSync(join(root, 'fake-agent.js'), FAKE_AGENT)
-  const state = join(root, 'host.json')
-  writeHostState(state, { prOpened: false })
-  return { state, agent: join(root, 'fake-agent.js') }
+  writeFileSync(join(root, 'fakehost.ts'), FAKE_HOST_PLUGIN);
+  writeFileSync(join(root, 'fake-agent.js'), FAKE_AGENT);
+  const state = join(root, 'host.json');
+  writeHostState(state, { prOpened: false });
+  return { state, agent: join(root, 'fake-agent.js') };
 }
 
 export function readHostState(state: string): Record<string, unknown> {
-  return readJsonRetry(state) as Record<string, unknown>
+  return readJsonRetry(state) as Record<string, unknown>;
 }
 
 export interface HostFixture {
-  root: string
-  main: string
-  db: string
-  hostState: string
-  run: (args: string[]) => CliResult
+  root: string;
+  main: string;
+  db: string;
+  hostState: string;
+  run: (args: string[]) => CliResult;
 }
 
 /** Repo + fake bd + fake review host + connector wiring in one — the
@@ -1192,9 +1195,9 @@ export interface HostFixture {
  *  `loopAgent` wires `loop.agent` to the fake agent — the fixer spawn's
  *  command fallback (agents.native.command unset). */
 export function hostFixture(prefix: string, opts: { loopAgent?: boolean } = {}): HostFixture {
-  const { root, main } = initRepo(prefix)
-  const { binDir, db } = installFakeBd(root)
-  const host = installFakeHost(main)
+  const { root, main } = initRepo(prefix);
+  const { binDir, db } = installFakeBd(root);
+  const host = installFakeHost(main);
   writeFileSync(
     join(main, 'bro.config.json'),
     JSON.stringify({
@@ -1202,20 +1205,20 @@ export function hostFixture(prefix: string, opts: { loopAgent?: boolean } = {}):
       connectors: { reviews: 'fakehost' },
       ...(opts.loopAgent === true ? { loop: { agent: `node ${host.agent}` } } : {}),
     })
-  )
+  );
   const env = {
     PATH: `${binDir}:${process.env.PATH ?? ''}`,
     HOME: root,
     FAKE_BD_DB: db,
     FAKE_HOST_STATE: host.state,
-  }
+  };
   return {
     root,
     main,
     db,
     hostState: host.state,
-    run: (args) => runCli(args, { cwd: main, env }),
-  }
+    run: args => runCli(args, { cwd: main, env }),
+  };
 }
 
 /** Repo + fake bd + a PATH-pinned spawn env — the minimal scaffold for
@@ -1225,13 +1228,13 @@ export function e2eRepo(
   prefix: string,
   rows: Array<Record<string, unknown>> = []
 ): { main: string; db: string; env: Record<string, string> } {
-  const { root, main } = initRepo(prefix)
-  const { binDir, db } = installFakeBd(root, rows)
+  const { root, main } = initRepo(prefix);
+  const { binDir, db } = installFakeBd(root, rows);
   return {
     main,
     db,
     env: { PATH: `${binDir}:${process.env.PATH ?? ''}`, FAKE_BD_DB: db },
-  }
+  };
 }
 
 /** A `tasks` connector over tasks.json beside the plugin — the
@@ -1285,7 +1288,7 @@ export default {
     },
   ],
 }
-`
+`;
 
 /** Write the fake tasks-connector plugin + its store into the fixture
  *  repo root; `db` is the tasks.json path `bead()` can read. */
@@ -1293,10 +1296,10 @@ export function installFakeTasks(
   root: string,
   rows: Array<Record<string, unknown>> = []
 ): { db: string } {
-  writeFileSync(join(root, 'faketasks.ts'), FAKE_TASKS_PLUGIN)
-  const db = join(root, 'tasks.json')
-  writeBeads(db, rows)
-  return { db }
+  writeFileSync(join(root, 'faketasks.ts'), FAKE_TASKS_PLUGIN);
+  const db = join(root, 'tasks.json');
+  writeBeads(db, rows);
+  return { db };
 }
 
 // --- fake dolt — the beads-remote transport fixture -----------------------------
@@ -1352,7 +1355,7 @@ switch (args[0]) {
   default:
     fail(args[0])
 }
-`
+`;
 
 /** A bare "published dolt store" a peer would expose: `dir/db.json`
  *  holding `issues` rows with inline `labels`. Returns dir + a `publish`
@@ -1361,44 +1364,44 @@ export function installFakeDoltRemote(
   dir: string,
   issues: Array<Record<string, unknown>>
 ): { remoteDir: string; publish: (issues: Array<Record<string, unknown>>) => void } {
-  const remoteDir = join(dir, 'remote-dolt')
-  mkdirSync(remoteDir, { recursive: true })
+  const remoteDir = join(dir, 'remote-dolt');
+  mkdirSync(remoteDir, { recursive: true });
   const publish = (rows: Array<Record<string, unknown>>) =>
-    writeFileSync(join(remoteDir, 'db.json'), JSON.stringify({ issues: rows }))
-  publish(issues)
-  return { remoteDir, publish }
+    writeFileSync(join(remoteDir, 'db.json'), JSON.stringify({ issues: rows }));
+  publish(issues);
+  return { remoteDir, publish };
 }
 
 /** Put the fake `dolt` binary next to a fake `bd` binDir (or alone). */
 export function installFakeDolt(dir: string): string {
-  const binDir = join(dir, 'bin')
-  mkdirSync(binDir, { recursive: true })
-  writeFileSync(join(binDir, 'dolt'), FAKE_DOLT)
-  chmodSync(join(binDir, 'dolt'), 0o755)
-  return binDir
+  const binDir = join(dir, 'bin');
+  mkdirSync(binDir, { recursive: true });
+  writeFileSync(join(binDir, 'dolt'), FAKE_DOLT);
+  chmodSync(join(binDir, 'dolt'), 0o755);
+  return binDir;
 }
 
 export function writeHostState(state: string, patch: Record<string, unknown>): void {
   // the same mkdir lock + tmp+rename the embedded fixtures serialize on
   // — a mid-run scripted write must not lose to a worker's mutation
-  const lock = `${state}.lock`
+  const lock = `${state}.lock`;
   for (let i = 0; ; i++) {
     try {
-      mkdirSync(lock)
-      break
+      mkdirSync(lock);
+      break;
     } catch (e) {
-      if ((e as NodeJS.ErrnoException).code !== 'EEXIST') throw e
-      if (i > 2000) throw new Error('host state lock wedged')
-      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 5)
+      if ((e as NodeJS.ErrnoException).code !== 'EEXIST') throw e;
+      if (i > 2000) throw new Error('host state lock wedged');
+      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 5);
     }
   }
   try {
-    const cur = existsSync(state) ? (readJsonRetry(state) as Record<string, unknown>) : {}
-    const tmp = `${state}.tmp.${process.pid}`
-    writeFileSync(tmp, JSON.stringify({ ...cur, ...patch }))
-    renameSync(tmp, state)
+    const cur = existsSync(state) ? (readJsonRetry(state) as Record<string, unknown>) : {};
+    const tmp = `${state}.tmp.${process.pid}`;
+    writeFileSync(tmp, JSON.stringify({ ...cur, ...patch }));
+    renameSync(tmp, state);
   } finally {
-    rmSync(lock, { recursive: true, force: true })
+    rmSync(lock, { recursive: true, force: true });
   }
 }
 
@@ -1408,19 +1411,19 @@ export function writeHostState(state: string, patch: Record<string, unknown>): v
 // rule at the top of this file.
 
 export interface DriveFixture {
-  root: string
-  main: string
-  db: string
-  hostState: string
-  run: (args: string[]) => CliResult
+  root: string;
+  main: string;
+  db: string;
+  hostState: string;
+  run: (args: string[]) => CliResult;
 }
 
 /** Repo + fake bd + fake host + bro.config wiring — `loop.agent` is the
  *  fixer spawn's command fallback (agents.native.command unset). */
 export function driveFixture(prefix: string): DriveFixture {
-  const { root, main } = initRepo(prefix)
-  const { binDir, db } = installFakeBd(root)
-  const host = installFakeHost(main)
+  const { root, main } = initRepo(prefix);
+  const { binDir, db } = installFakeBd(root);
+  const host = installFakeHost(main);
   writeFileSync(
     join(main, 'bro.config.json'),
     JSON.stringify({
@@ -1428,80 +1431,84 @@ export function driveFixture(prefix: string): DriveFixture {
       connectors: { reviews: 'fakehost' },
       loop: { agent: `node ${host.agent}` },
     })
-  )
+  );
   const env = {
     PATH: `${binDir}:${process.env.PATH ?? ''}`,
     HOME: root,
     FAKE_BD_DB: db,
     FAKE_HOST_STATE: host.state,
-  }
+  };
   return {
     root,
     main,
     db,
     hostState: host.state,
-    run: (args) => runCli(['drive', ...args], { cwd: main, env }),
-  }
+    run: args => runCli(['drive', ...args], { cwd: main, env }),
+  };
 }
 
 /** The one `{"verdict": …}` row on `drive --json` stdout. */
 export function driveVerdict(r: CliResult): { verdict?: string; detail?: string } {
-  return (JSON.parse(r.stdout.trim().split('\n').find((l) => l.includes('"verdict"')) ?? '{}') ??
-    {}) as { verdict?: string; detail?: string }
+  return (JSON.parse(
+    r.stdout
+      .trim()
+      .split('\n')
+      .find(l => l.includes('"verdict"')) ?? '{}'
+  ) ?? {}) as { verdict?: string; detail?: string };
 }
 
 export async function waitFor(cond: () => boolean, ms = 15_000): Promise<boolean> {
-  const deadline = Date.now() + ms
+  const deadline = Date.now() + ms;
   while (Date.now() < deadline) {
     if (cond()) {
-      return true
+      return true;
     }
-    await new Promise((r) => setTimeout(r, 25))
+    await new Promise(r => setTimeout(r, 25));
   }
-  return false
+  return false;
 }
 
 /** Bead rows labelled 'fixer' — the drive sweep's work-order ledger. */
 export function fixerRows(db: string): Array<Record<string, unknown>> {
-  return readBeads(db).filter((r) => ((r.labels as string[] | undefined) ?? []).includes('fixer'))
+  return readBeads(db).filter(r => ((r.labels as string[] | undefined) ?? []).includes('fixer'));
 }
 
 /** A spawned fixer is detached — completion is its .exit record on the
  *  registry, never a process wait. */
 export function exitRecorded(main: string): boolean {
-  const agentsDir = join(main, '.git', 'bro', 'agents')
-  return existsSync(agentsDir) && readdirSync(agentsDir).some((n) => n.endsWith('.exit'))
+  const agentsDir = join(main, '.git', 'bro', 'agents');
+  return existsSync(agentsDir) && readdirSync(agentsDir).some(n => n.endsWith('.exit'));
 }
 
 export function spawnLog(main: string): string {
-  const log = join(main, 'spawns.log')
-  return existsSync(log) ? readFileSync(log, 'utf8') : ''
+  const log = join(main, 'spawns.log');
+  return existsSync(log) ? readFileSync(log, 'utf8') : '';
 }
 
 /** A live session marker naming the branch — the occupancy guard's
  *  signal that a worker already owns it. */
 export function occupyBranch(main: string, branch: string): void {
-  const hooks = join(main, '.git', 'bro', 'hooks')
-  mkdirSync(hooks, { recursive: true })
-  writeFileSync(join(hooks, 's1.work'), `${Date.now()}\n${branch}\n`)
+  const hooks = join(main, '.git', 'bro', 'hooks');
+  mkdirSync(hooks, { recursive: true });
+  writeFileSync(join(hooks, 's1.work'), `${Date.now()}\n${branch}\n`);
 }
 
 /** The verdict line plus the no-spawn ledger every declined/capped
  *  drive pass owes: no fixer bead, no spawn-log entry. */
 export function assertNoSpawn(f: DriveFixture, r: CliResult, want: string): void {
-  const v = driveVerdict(r)
-  assert.equal(v.verdict, want, v.detail)
-  assert.equal(fixerRows(f.db).length, 0)
-  assert.equal(spawnLog(f.main), '')
+  const v = driveVerdict(r);
+  assert.equal(v.verdict, want, v.detail);
+  assert.equal(fixerRows(f.db).length, 0);
+  assert.equal(spawnLog(f.main), '');
 }
 
 /** The post-fixer pass: gate green → the orphan merged and its fixer
  *  bead closed 'merged via …'. */
 export function assertOrphanMerged(f: DriveFixture, r: CliResult, fixerId: unknown): void {
-  const v = driveVerdict(r)
-  assert.equal(v.verdict, 'merged', v.detail)
-  assert.equal(bead(f.db, String(fixerId))?.status, 'closed')
-  assert.match(String(bead(f.db, String(fixerId))?.close_reason), /merged via/)
+  const v = driveVerdict(r);
+  assert.equal(v.verdict, 'merged', v.detail);
+  assert.equal(bead(f.db, String(fixerId))?.status, 'closed');
+  assert.match(String(bead(f.db, String(fixerId))?.close_reason), /merged via/);
 }
 
 // --- shared in-process test helpers --------------------------------------
@@ -1511,10 +1518,8 @@ export function assertOrphanMerged(f: DriveFixture, r: CliResult, fixerId: unkno
 
 /** process.exit interceptor — die()/usage() becomes a value, not a kill. */
 export class Exit extends Error {
-  code: number
-  constructor(code: number) {
-    super(`exit ${code}`)
-    this.code = code
+  constructor(public code: number) {
+    super(`exit ${code}`);
   }
 }
 
@@ -1522,32 +1527,32 @@ export class Exit extends Error {
 export async function capture(
   fn: () => Promise<unknown>
 ): Promise<{ code: number; out: string[]; err: string[] }> {
-  const origExit = process.exit
-  const origLog = console.log
-  const origErr = console.error
-  const origUsageWrite = usageWriter.write
-  const out: string[] = []
-  const err: string[] = []
-  console.log = (...a: unknown[]) => out.push(a.join(' '))
-  console.error = (...a: unknown[]) => err.push(a.join(' '))
+  const origExit = process.exit;
+  const origLog = console.log;
+  const origErr = console.error;
+  const origUsageWrite = usageWriter.write;
+  const out: string[] = [];
+  const err: string[] = [];
+  console.log = (...a: unknown[]) => out.push(a.join(' '));
+  console.error = (...a: unknown[]) => err.push(a.join(' '));
   // printUsage bypasses console.* via writeSync — capture through its seam
-  usageWriter.write = (fd, t) => (fd === 1 ? out : err).push(t.replace(/\n$/, ''))
+  usageWriter.write = (fd, t) => (fd === 1 ? out : err).push(t.replace(/\n$/, ''));
   process.exit = ((code?: number) => {
-    throw new Exit(code ?? 0)
-  }) as typeof process.exit
+    throw new Exit(code ?? 0);
+  }) as typeof process.exit;
   try {
-    await fn()
-    return { code: 0, out, err }
+    await fn();
+    return { code: 0, out, err };
   } catch (e) {
     if (e instanceof Exit) {
-      return { code: e.code, out, err }
+      return { code: e.code, out, err };
     }
-    throw e
+    throw e;
   } finally {
-    process.exit = origExit
-    console.log = origLog
-    console.error = origErr
-    usageWriter.write = origUsageWrite
+    process.exit = origExit;
+    console.log = origLog;
+    console.error = origErr;
+    usageWriter.write = origUsageWrite;
   }
 }
 
@@ -1559,28 +1564,28 @@ export async function capture(
  *  child's env. The same null-config pins are set so git children the
  *  in-process code spawns can't read host hooks/config either. */
 export function scrubEnv(extra: string[] = []): () => void {
-  const ambient = /^(BEADS_DIR|BRO_)/
-  const saved: Record<string, string | undefined> = {}
+  const ambient = /^(BEADS_DIR|BRO_)/;
+  const saved: Record<string, string | undefined> = {};
   for (const k of Object.keys(process.env)) {
     if (AMBIENT_GIT.test(k) || ambient.test(k) || extra.includes(k)) {
-      saved[k] = process.env[k]
-      delete process.env[k]
+      saved[k] = process.env[k];
+      delete process.env[k];
     }
   }
   // a var that matched AMBIENT_GIT is only in saved when it was set —
   // record the pins too or they'd leak past the restore
   for (const k of ['GIT_CONFIG_NOSYSTEM', 'GIT_CONFIG_GLOBAL']) {
-    if (!(k in saved)) saved[k] = process.env[k]
+    if (!(k in saved)) saved[k] = process.env[k];
   }
-  process.env.GIT_CONFIG_NOSYSTEM = '1'
-  process.env.GIT_CONFIG_GLOBAL = devNull
+  process.env.GIT_CONFIG_NOSYSTEM = '1';
+  process.env.GIT_CONFIG_GLOBAL = devNull;
   return () => {
     for (const [k, v] of Object.entries(saved)) {
       if (v === undefined) {
-        delete process.env[k]
+        delete process.env[k];
       } else {
-        process.env[k] = v
+        process.env[k] = v;
       }
     }
-  }
+  };
 }

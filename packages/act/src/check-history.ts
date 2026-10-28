@@ -16,56 +16,55 @@
  * the history reads as empty (streak 0) and records as a no-op, so a
  * failing conditional check trends to "unproven", never to a crash.
  */
-import { appendFileSync } from 'node:fs'
-import { join } from 'node:path'
-import { GIT_SYNC_PROBE_TIMEOUT_MS, gitCommonDir, withFileLock } from '@broject/core'
-import { compactLedger, parseLedger } from './ledger.ts'
+import { appendFileSync } from 'node:fs';
+import { join } from 'node:path';
+import { GIT_SYNC_PROBE_TIMEOUT_MS, gitCommonDir, withFileLock } from '@broject/core';
+import { compactLedger, parseLedger } from './ledger.ts';
 
 export interface CheckObservation {
-  ts: number
-  repo: string
-  pr: number
-  sha: string
-  name: string
-  bucket: string
+  ts: number;
+  repo: string;
+  pr: number;
+  sha: string;
+  name: string;
+  bucket: string;
 }
 
 export interface CheckHistory {
   /** Append an observation — consecutive repeats of the same
    *  name+sha+bucket collapse, so a long `act wait` poll costs one
    *  line per head, not one per tick. */
-  record(obs: Omit<CheckObservation, 'ts'>): void
+  record(obs: Omit<CheckObservation, 'ts'>): void;
   /** Trailing run of consecutive 'fail' buckets over distinct shas for
    *  this check name (case-insensitive) — 0 on empty/absent history. */
-  consecutiveFailures(name: string): number
+  consecutiveFailures(name: string): number;
 }
 
 /** Keep the ledger bounded — one transition per push per check grows
  *  slowly, but a wedged tool could still spam it. Compaction keeps the
  *  tail, which is all a trailing-streak read needs anyway. */
 function parseEntries(file: string): CheckObservation[] {
-  return parseLedger(file, isCheckObservation)
+  return parseLedger(file, isCheckObservation);
 }
 
 /** A well-formed ledger row — every field present and of the right
  *  type. A malformed row is skipped, not fatal. */
 function isCheckObservation(e: unknown): e is CheckObservation {
   if (typeof e !== 'object' || e === null) {
-    return false
+    return false;
   }
-  const o = e as Partial<CheckObservation>
+  const o = e as Partial<CheckObservation>;
   if (typeof o.name !== 'string' || typeof o.sha !== 'string' || typeof o.bucket !== 'string') {
-    return false
+    return false;
   }
-  return typeof o.ts === 'number' && Number.isFinite(o.ts)
+  return typeof o.ts === 'number' && Number.isFinite(o.ts);
 }
 
 /** Truncate to the newest whole lines once the file outgrows the cap —
  *  tmp+rename so a reader never sees a half-written ledger. */
 
-
 export function fileCheckHistory(file: string): CheckHistory {
-  const read = (): CheckObservation[] => parseEntries(file)
+  const read = (): CheckObservation[] => parseEntries(file);
   return {
     record(obs) {
       try {
@@ -75,56 +74,56 @@ export function fileCheckHistory(file: string): CheckHistory {
         withFileLock(
           `${file}.lock`,
           () => {
-            const entries = read()
-            const last = [...entries].reverse().find((e) => e.name === obs.name)
+            const entries = read();
+            const last = [...entries].reverse().find(e => e.name === obs.name);
             if (last !== undefined && last.sha === obs.sha && last.bucket === obs.bucket) {
-              return
+              return;
             }
-            compactLedger(file)
-            appendFileSync(file, `${JSON.stringify({ ...obs, ts: Date.now() })}\n`)
+            compactLedger(file);
+            appendFileSync(file, `${JSON.stringify({ ...obs, ts: Date.now() })}\n`);
           },
           { waitMs: 0, label: 'act-checks ledger' }
-        )
+        );
       } catch {
         // an unwritable ledger is an empty ledger — recording never throws
       }
     },
     consecutiveFailures(name) {
-      const lower = name.toLowerCase()
-      const entries = read().filter((e) => e.name.toLowerCase() === lower)
-      let streak = 0
-      const seen = new Set<string>()
+      const lower = name.toLowerCase();
+      const entries = read().filter(e => e.name.toLowerCase() === lower);
+      let streak = 0;
+      const seen = new Set<string>();
       for (let i = entries.length - 1; i >= 0; i -= 1) {
-        const e = entries[i]
+        const e = entries[i];
         if (e === undefined) {
-          continue
+          continue;
         }
         // a re-observed sha is one check run, not a new failure —
         // collapse repeats so streak counts heads, not polls. Entries
         // for a sha can be non-adjacent when PRs interleave, so every
         // counted sha is tracked, not just the previous one
         if (seen.has(e.sha)) {
-          continue
+          continue;
         }
         if (e.bucket !== 'fail') {
-          break
+          break;
         }
-        streak += 1
-        seen.add(e.sha)
+        streak += 1;
+        seen.add(e.sha);
       }
-      return streak
+      return streak;
     },
-  }
+  };
 }
 
 /** The repo ledger — `<git-common-dir>/bro/act-checks.jsonl`; null
  *  outside a repo (callers treat absent history as streak 0). */
 export function checkHistoryPath(dir: string): string | null {
-  const common = gitCommonDir(dir, GIT_SYNC_PROBE_TIMEOUT_MS)
-  return common === null ? null : join(common, 'bro', 'act-checks.jsonl')
+  const common = gitCommonDir(dir, GIT_SYNC_PROBE_TIMEOUT_MS);
+  return common === null ? null : join(common, 'bro', 'act-checks.jsonl');
 }
 
 export function checkHistory(dir: string): CheckHistory | null {
-  const file = checkHistoryPath(dir)
-  return file === null ? null : fileCheckHistory(file)
+  const file = checkHistoryPath(dir);
+  return file === null ? null : fileCheckHistory(file);
 }

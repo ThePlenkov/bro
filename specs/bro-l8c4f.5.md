@@ -1,12 +1,14 @@
 ---
+
 parent: bro-l8c4f
 scope:
-  - packages/core/src/agents.ts
-  - packages/core/src/janitor.ts
-  - packages/cli/src/agent-connectors.ts
-  - packages/cli/src/commands/proc-owner.ts
-  - packages/cli/src/commands/loop.ts
-  - AGENTS.md
+- packages/core/src/agents.ts
+- packages/core/src/janitor.ts
+- packages/cli/src/agent-connectors.ts
+- packages/cli/src/commands/proc-owner.ts
+- packages/cli/src/commands/loop.ts
+- AGENTS.md
+
 ---
 
 # bro-l8c4f.5 — durable spawn handshake: close the crash window between spawn and handle publication
