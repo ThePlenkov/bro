@@ -412,17 +412,17 @@ function shortId(id: string): string {
 }
 
 function findAgentForBead(b: { id: string }, agents: Board['fleet']['agents'], runs: Board['loop']['runs']): Board['fleet']['agents'][number] | null {
-  for (const a of agents) {
-    if (a.step === b.id) return a
-    if (a.id === b.id) return a
-    if (a.worktree && (a.worktree.includes(b.id) || b.id.includes(a.worktree))) return a
-  }
+  const direct = agents.find(
+    (a) =>
+      a.step === b.id ||
+      a.id === b.id ||
+      (a.worktree !== undefined && (a.worktree.includes(b.id) || b.id.includes(a.worktree)))
+  )
+  if (direct) return direct
   for (const r of runs) {
-    if (r.slug === b.id) {
-      for (const a of agents) {
-        if (a.worktree?.includes(r.slug)) return a
-      }
-    }
+    if (r.slug !== b.id) continue
+    const matched = agents.find((a) => a.worktree?.includes(r.slug))
+    if (matched) return matched
   }
   return null
 }

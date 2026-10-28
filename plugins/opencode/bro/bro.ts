@@ -492,11 +492,7 @@ function makeCore(input: BroCoreInput) {
   let command: Promise<Command | null> | undefined
 
   const notify = (level: Level, message: string): void => {
-    try {
-      log(level, message).catch(() => {})
-    } catch {
-      // fail-open
-    }
+    log(level, message).catch(() => {})
   }
 
   const probe = async (
