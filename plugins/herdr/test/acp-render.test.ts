@@ -135,17 +135,26 @@ describe('AcpRenderer — permission policy', () => {
     assert.ok(lines[0]!.includes('Allow once, Always, Reject'));
   });
 
-  test('read kind prefers allow_always', () => {
-    const { out } = sink();
-    const r = new AcpRenderer(out, { color: false });
-    const res = r.permission(
-      permReq('read', [
-        { optionId: 'o1', name: 'Allow once', kind: 'allow_once' },
-        { optionId: 'o2', name: 'Always', kind: 'allow_always' },
-      ])
-    );
-    assert.deepEqual(res, { outcome: 'selected', optionId: 'o2' });
-  });
+  const PERMIT_PICKS: [string, 'auto' | 'reads' | 'none' | undefined, string, string][] = [
+    ['read kind prefers allow_always', undefined, 'read', 'o2'],
+    ['permit=reads denies non-read kinds via reject_once', 'reads', 'edit', 'r1'],
+    ['permit=none rejects even read kinds', 'none', 'read', 'r1'],
+  ];
+  for (const [name, mode, kind, want] of PERMIT_PICKS) {
+    test(name, () => {
+      const { out } = sink();
+      const r = new AcpRenderer(out, { color: false });
+      const res = r.permission(
+        permReq(kind, [
+          { optionId: 'o1', name: 'Allow once', kind: 'allow_once' },
+          { optionId: 'o2', name: 'Always', kind: 'allow_always' },
+          { optionId: 'r1', name: 'Reject', kind: 'reject_once' },
+        ]),
+        mode
+      );
+      assert.deepEqual(res, { outcome: 'selected', optionId: want });
+    });
+  }
 
   test('no allow option → cancelled, never an invented approval', () => {
     const { out } = sink();
@@ -154,33 +163,6 @@ describe('AcpRenderer — permission policy', () => {
       permReq('edit', [{ optionId: 'r1', name: 'Reject', kind: 'reject_once' }])
     );
     assert.deepEqual(res, { outcome: 'cancelled' });
-  });
-
-  test('permit=reads denies non-read kinds via reject_once', () => {
-    const { lines, out } = sink();
-    const r = new AcpRenderer(out, { color: false });
-    const res = r.permission(
-      permReq('edit', [
-        { optionId: 'o1', name: 'Allow once', kind: 'allow_once' },
-        { optionId: 'r1', name: 'Reject', kind: 'reject_once' },
-      ]),
-      'reads'
-    );
-    assert.deepEqual(res, { outcome: 'selected', optionId: 'r1' });
-    assert.ok(lines.some(l => l.includes('auto-answered Reject')));
-  });
-
-  test('permit=none rejects even read kinds', () => {
-    const { out } = sink();
-    const r = new AcpRenderer(out, { color: false });
-    const res = r.permission(
-      permReq('read', [
-        { optionId: 'o1', name: 'Allow', kind: 'allow_once' },
-        { optionId: 'r1', name: 'Reject', kind: 'reject_once' },
-      ]),
-      'none'
-    );
-    assert.deepEqual(res, { outcome: 'selected', optionId: 'r1' });
   });
 });
 

@@ -70,6 +70,19 @@ const asPermit = (flag: string, v: string): PermitMode => {
   return v as PermitMode;
 };
 
+/** env transports — the pane command line would otherwise leak the
+ *  prompt into `ps` argv (any local user reads it); env is
+ *  owner-only. Env overrides flag state by spec. */
+const finalizeCli = (cli: Cli, env: NodeJS.ProcessEnv): Cli => {
+  cli.prompt ??= env.ACP_WATCH_PROMPT;
+  if (env.ACP_WATCH_PERMIT !== undefined) {
+    cli.permit = asPermit('ACP_WATCH_PERMIT', env.ACP_WATCH_PERMIT);
+  }
+  cli.cmdArgv = shellWords(cli.cmd);
+  if (cli.cmdArgv.length === 0) throw new Error('--cmd must name an executable');
+  return cli;
+};
+
 export function parseArgs(argv: string[], env: NodeJS.ProcessEnv = process.env): Cli {
   const cli: Cli = {
     cmd: 'devin acp',
@@ -98,15 +111,7 @@ export function parseArgs(argv: string[], env: NodeJS.ProcessEnv = process.env):
     if (key === 'permit') cli.permit = asPermit('--permit', v);
     else cli[key] = v;
   }
-  // env transports — the pane command line would otherwise leak the
-  // prompt into `ps` argv (any local user reads it); env is owner-only
-  cli.prompt ??= env.ACP_WATCH_PROMPT;
-  if (env.ACP_WATCH_PERMIT !== undefined) {
-    cli.permit = asPermit('ACP_WATCH_PERMIT', env.ACP_WATCH_PERMIT);
-  }
-  cli.cmdArgv = shellWords(cli.cmd);
-  if (cli.cmdArgv.length === 0) throw new Error('--cmd must name an executable');
-  return cli;
+  return finalizeCli(cli, env);
 }
 
 const errMsg = (err: unknown): string => (err instanceof Error ? err.message : String(err));
@@ -198,14 +203,17 @@ export class Wire {
         slot.res(msg.result);
       }
     }
-    // a response carrying a prompt result settles the turn whether
-    // or not we minted the id (fixture replays carry recorded ids)
+    this.maybeSettle(msg);
+  }
+
+  /** a response carrying a prompt result settles the turn whether
+   *  or not we minted the id (fixture replays carry recorded ids) */
+  private maybeSettle(msg: RpcMessage): void {
     const stop = (msg.result as { stopReason?: string } | undefined)?.stopReason;
-    if (stop !== undefined || msg.id === this.promptId) {
-      this.settleTurn(
-        msg.error !== undefined ? `error: ${msg.error.message ?? '?'}` : (stop ?? 'unknown')
-      );
-    }
+    if (stop === undefined && msg.id !== this.promptId) return;
+    this.settleTurn(
+      msg.error !== undefined ? `error: ${msg.error.message ?? '?'}` : (stop ?? 'unknown')
+    );
   }
 
   private onNotification(msg: RpcMessage): void {

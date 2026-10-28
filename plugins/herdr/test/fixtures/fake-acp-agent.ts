@@ -23,21 +23,14 @@ function pumpTurn(promptId: number | undefined): void {
     sessionUpdate: 'agent_thought_chunk',
     content: { type: 'text', text: 'thinking about the task…' },
   });
-  notify({
-    sessionUpdate: 'plan',
-    entries: [
-      { content: 'Do the thing', priority: 'medium', status: 'in_progress' },
-      { content: 'Report it', priority: 'low', status: 'pending' },
-    ],
-  });
-  notify({
-    sessionUpdate: 'tool_call',
-    toolCallId: 'exec:0#fake',
-    title: 'Run ls',
-    kind: 'execute',
-    status: 'pending',
-  });
-  notify({ sessionUpdate: 'tool_call_update', toolCallId: 'exec:0#fake', status: 'in_progress' });
+  const planEntries = [
+    { content: 'Do the thing', priority: 'medium', status: 'in_progress' },
+    { content: 'Report it', priority: 'low', status: 'pending' },
+  ];
+  notify({ sessionUpdate: 'plan', entries: planEntries });
+  const tool = { toolCallId: 'exec:0#fake', title: 'Run ls', kind: 'execute' };
+  notify({ sessionUpdate: 'tool_call', ...tool, status: 'pending' });
+  notify({ sessionUpdate: 'tool_call_update', toolCallId: tool.toolCallId, status: 'in_progress' });
   if (!askedPermission) {
     askedPermission = true;
     send({
@@ -46,12 +39,7 @@ function pumpTurn(promptId: number | undefined): void {
       method: 'session/request_permission',
       params: {
         sessionId: 'fake-1',
-        toolCall: {
-          toolCallId: 'exec:0#fake',
-          title: 'Run ls',
-          kind: 'execute',
-          status: 'in_progress',
-        },
+        toolCall: { ...tool, status: 'in_progress' },
         options: [
           { optionId: 'a1', name: 'Allow once', kind: 'allow_once' },
           { optionId: 'a2', name: 'Always', kind: 'allow_always' },
@@ -60,7 +48,7 @@ function pumpTurn(promptId: number | undefined): void {
       },
     });
   }
-  notify({ sessionUpdate: 'tool_call_update', toolCallId: 'exec:0#fake', status: 'completed' });
+  notify({ sessionUpdate: 'tool_call_update', toolCallId: tool.toolCallId, status: 'completed' });
   notify({
     sessionUpdate: 'agent_message_chunk',
     content: { type: 'text', text: 'Done — the files ' },

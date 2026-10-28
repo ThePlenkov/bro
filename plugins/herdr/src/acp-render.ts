@@ -56,25 +56,29 @@ interface PermOption {
   kind?: string;
 }
 
+/** The resolved policy for one request — mode, kind verdict, and
+ *  whether this request must be denied. */
+interface PermPolicy {
+  mode: string;
+  readKind: boolean;
+  deny: boolean;
+}
+
 /** Deny path: reject_once first (least committed), reject_always next.
  *  Allow path: reads prefer allow_always, then allow_once; non-reads
  *  prefer allow_once, then allow_always. A deny never falls through
  *  to an allow. */
-const pickOption = (
-  options: PermOption[],
-  readKind: boolean,
-  wantsDeny: boolean
-): PermOption | undefined => {
+const pickOption = (options: PermOption[], pol: PermPolicy): PermOption | undefined => {
   const find = (kind: string) => options.find(o => o.kind === kind);
-  if (wantsDeny) return find('reject_once') ?? find('reject_always');
-  const first = readKind ? find('allow_always') : find('allow_once');
-  const second = readKind ? find('allow_once') : find('allow_always');
+  if (pol.deny) return find('reject_once') ?? find('reject_always');
+  const first = pol.readKind ? find('allow_always') : find('allow_once');
+  const second = pol.readKind ? find('allow_once') : find('allow_always');
   return first ?? second;
 };
 
-const whyText = (mode: string, readKind: boolean, wantsDeny: boolean): string => {
-  if (wantsDeny) return `denied — policy: permit=${mode}`;
-  return readKind ? 'read-kind tool → allow-always' : 'default → allow-once';
+const whyText = (pol: PermPolicy): string => {
+  if (pol.deny) return `denied — policy: permit=${pol.mode}`;
+  return pol.readKind ? 'read-kind tool → allow-always' : 'default → allow-once';
 };
 
 export interface RenderOpts {
@@ -178,9 +182,10 @@ export class AcpRenderer {
     };
     const id = t.toolCallId ?? '?';
     const rec = this.tools.get(id) ?? {};
-    if (typeof t.title === 'string' && t.title !== '') rec.title = safe(t.title);
-    if (typeof t.name === 'string' && t.name !== '') rec.name = safe(t.name);
-    if (typeof t.kind === 'string' && t.kind !== '') rec.kind = safe(t.kind);
+    for (const k of ['title', 'name', 'kind'] as const) {
+      const v = t[k];
+      if (typeof v === 'string' && v !== '') rec[k] = safe(v);
+    }
     const status = typeof t.status === 'string' && t.status !== '' ? safe(t.status) : 'pending';
     // a repeat of the seen status is churn (content mid-streams share
     // it); only lifecycle edges print
@@ -313,13 +318,17 @@ export class AcpRenderer {
     const names = options.map(o => safe(o.name ?? o.optionId ?? '?')).join(', ');
     this.out(`${this.paint(YELLOW, '⚠')} ${title} [${names}]`);
     const readKind = params.toolCall?.kind != null && ALWAYS_KINDS.has(params.toolCall.kind);
-    const wantsDeny = mode === 'none' || (mode === 'reads' && !readKind);
-    const pick = pickOption(options, readKind, wantsDeny);
+    const pol: PermPolicy = {
+      mode,
+      readKind,
+      deny: mode === 'none' || (mode === 'reads' && !readKind),
+    };
+    const pick = pickOption(options, pol);
     if (pick === undefined) {
       this.out(this.dim(`  → cancelled — permit=${mode}, no matching option offered`));
       return { outcome: 'cancelled' };
     }
-    const why = whyText(mode, readKind, wantsDeny);
+    const why = whyText(pol);
     this.out(
       this.dim(
         `  → auto-answered ${safe(pick.name ?? pick.optionId ?? '?')} (${safe(pick.kind ?? '?')}) — ${why}`
