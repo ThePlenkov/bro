@@ -59,6 +59,49 @@ function isPlainObject(v: unknown): v is Record<string, unknown> {
   return typeof v === 'object' && v !== null && !Array.isArray(v);
 }
 
+const PROVIDER_ALLOWED_KEYS = new Set([
+  'type',
+  'baseUrl',
+  'model',
+  'apiKeyEnv',
+  'apiKeyCommand',
+  'models',
+  'command',
+  'profile',
+  'sessionRm',
+  'autoApprove',
+]);
+
+function checkProviderUnknownKeys(name: string, raw: Record<string, unknown>): string | null {
+  for (const k of Object.keys(raw)) {
+    if (!PROVIDER_ALLOWED_KEYS.has(k)) {
+      return `providers.${name}.${k} is not allowed`;
+    }
+  }
+  return null;
+}
+
+function checkProviderApiKeyEnv(name: string, raw: Record<string, unknown>): string | null {
+  if (typeof raw.apiKeyEnv !== 'string') return null;
+  const v = raw.apiKeyEnv;
+  if (!isEnvName(v)) {
+    return `providers.${name}.apiKeyEnv must NAME an env var (SCREAMING_SNAKE)`;
+  }
+  if (looksLikeCredential(v)) {
+    return `providers.${name}.apiKeyEnv must not contain a credential value`;
+  }
+  return null;
+}
+
+function checkProviderApiKeyCommand(name: string, raw: Record<string, unknown>): string | null {
+  if (typeof raw.apiKeyCommand !== 'string') return null;
+  const v = raw.apiKeyCommand;
+  if (looksLikeCredential(v)) {
+    return `providers.${name}.apiKeyCommand must not contain a credential value`;
+  }
+  return null;
+}
+
 function parseProviderEntryStrict(
   name: string,
   raw: unknown
@@ -66,49 +109,13 @@ function parseProviderEntryStrict(
   if (!isPlainObject(raw)) {
     return { ok: false, error: `providers.${name} must be an object` };
   }
-  // Reject unknown fields
-  const allowed = new Set([
-    'type',
-    'baseUrl',
-    'model',
-    'apiKeyEnv',
-    'apiKeyCommand',
-    'models',
-    'command',
-    'profile',
-    'sessionRm',
-    'autoApprove',
-  ]);
-  for (const k of Object.keys(raw)) {
-    if (!allowed.has(k)) {
-      return { ok: false, error: `providers.${name}.${k} is not allowed` };
-    }
-  }
-  // Screen for credentials
-  if (typeof (raw as any).apiKeyEnv === 'string') {
-    const v = (raw as any).apiKeyEnv;
-    if (!isEnvName(v)) {
-      return {
-        ok: false,
-        error: `providers.${name}.apiKeyEnv must NAME an env var (SCREAMING_SNAKE)`,
-      };
-    }
-    if (looksLikeCredential(v)) {
-      return {
-        ok: false,
-        error: `providers.${name}.apiKeyEnv must not contain a credential value`,
-      };
-    }
-  }
-  if (typeof (raw as any).apiKeyCommand === 'string') {
-    const v = (raw as any).apiKeyCommand;
-    if (looksLikeCredential(v)) {
-      return {
-        ok: false,
-        error: `providers.${name}.apiKeyCommand must not contain a credential value`,
-      };
-    }
-  }
+  const r = raw as Record<string, unknown>;
+  const unknownErr = checkProviderUnknownKeys(name, r);
+  if (unknownErr) return { ok: false, error: unknownErr };
+  const envErr = checkProviderApiKeyEnv(name, r);
+  if (envErr) return { ok: false, error: envErr };
+  const cmdErr = checkProviderApiKeyCommand(name, r);
+  if (cmdErr) return { ok: false, error: cmdErr };
   const entry = parseProviderEntry(name, raw);
   if (entry === null) {
     return { ok: false, error: `providers.${name} is invalid` };
@@ -116,12 +123,54 @@ function parseProviderEntryStrict(
   return { ok: true, entry };
 }
 
+function validateGuards(rawGuards: unknown): PackParseResult | null {
+  if (!Array.isArray(rawGuards)) return null;
+  for (let i = 0; i < rawGuards.length; i++) {
+    const probs = guardProblems(rawGuards[i]);
+    if (probs.length > 0) {
+      return { ok: false, error: `guards[${i}]: ${probs[0]}` };
+    }
+  }
+  return null;
+}
+
+function validateProviders(
+  rawProviders: unknown
+): { ok: true; providers: Record<string, ProviderEntry> } | PackParseError {
+  if (!isPlainObject(rawProviders)) {
+    return { ok: true, providers: {} as Record<string, ProviderEntry> };
+  }
+  const providers: Record<string, ProviderEntry> = {};
+  for (const [pname, pval] of Object.entries(rawProviders)) {
+    const res = parseProviderEntryStrict(pname, pval);
+    if (!res.ok) {
+      return res;
+    }
+    providers[pname] = res.entry;
+  }
+  return { ok: true, providers };
+}
+
+function validateHooks(rawHooks: unknown): PackParseResult | null {
+  if (!Array.isArray(rawHooks)) return null;
+  for (let i = 0; i < rawHooks.length; i++) {
+    const h = rawHooks[i];
+    if (!isPlainObject(h)) return { ok: false, error: `hooks[${i}] must have event and command` };
+    const ho = h as Record<string, unknown>;
+    if (typeof ho.event !== 'string' || typeof ho.command !== 'string') {
+      return { ok: false, error: `hooks[${i}] must have event and command` };
+    }
+  }
+  return null;
+}
+
 export function parsePack(raw: unknown): PackParseResult {
   if (!isPlainObject(raw)) {
     return { ok: false, error: 'pack.json must be an object' };
   }
-  const name = (raw as any).name;
-  const version = (raw as any).version;
+  const r = raw as Record<string, unknown>;
+  const name = r.name;
+  const version = r.version;
   if (typeof name !== 'string' || name.trim() === '') {
     return { ok: false, error: 'pack.json name is required' };
   }
@@ -135,38 +184,17 @@ export function parsePack(raw: unknown): PackParseResult {
     version: version.trim(),
   };
 
-  // Validate guards strictly
-  if (Array.isArray((raw as any).guards)) {
-    for (let i = 0; i < (raw as any).guards.length; i++) {
-      const probs = guardProblems((raw as any).guards[i]);
-      if (probs.length > 0) {
-        return { ok: false, error: `guards[${i}]: ${probs[0]}` };
-      }
-    }
+  const guardRes = validateGuards(r.guards);
+  if (guardRes) return guardRes;
+
+  const provRes = validateProviders(r.providers);
+  if (!provRes.ok) return provRes;
+  if (r.providers && isPlainObject(r.providers)) {
+    manifest.providers = provRes.providers;
   }
 
-  // Validate providers strictly
-  if (isPlainObject((raw as any).providers)) {
-    const providers: Record<string, ProviderEntry> = {};
-    for (const [pname, pval] of Object.entries((raw as any).providers)) {
-      const res = parseProviderEntryStrict(pname, pval);
-      if (!res.ok) {
-        return res;
-      }
-      providers[pname] = res.entry;
-    }
-    manifest.providers = providers;
-  }
-
-  // Validate hooks shape
-  if (Array.isArray((raw as any).hooks)) {
-    for (let i = 0; i < (raw as any).hooks.length; i++) {
-      const h = (raw as any).hooks[i];
-      if (!isPlainObject(h) || typeof h.event !== 'string' || typeof h.command !== 'string') {
-        return { ok: false, error: `hooks[${i}] must have event and command` };
-      }
-    }
-  }
+  const hookRes = validateHooks(r.hooks);
+  if (hookRes) return hookRes;
 
   return { ok: true, manifest };
 }
@@ -174,7 +202,6 @@ export function parsePack(raw: unknown): PackParseResult {
 export function readPackManifest(packDir: string): PackParseResult {
   const manifestPath = join(packDir, 'pack.json');
   if (!existsSync(manifestPath)) {
-    // legacy - return ok with minimal manifest?
     return { ok: false, error: 'pack.json not found' };
   }
   try {
