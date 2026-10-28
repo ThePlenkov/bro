@@ -1421,7 +1421,9 @@ function fixerVerdictRefusal(
   try {
     rig = rigNext(root, beadId, { gate: false, store });
   } catch {
-    return undefined;
+    // fail closed — an unreadable task store must not read as
+    // permission to spawn (the refusal IS the verdict we cannot see)
+    return 'rig next → unreadable';
   }
   if (rig.verdict === 'step' || rig.verdict === 'gate') {
     return undefined;
@@ -2599,16 +2601,16 @@ async function runDrive(
     store: facade('tasks', { dir: mainPath }, { prefer: broCfg.connectors }),
   };
 
-  await driveOnce(ctx);
   if (args.everySec === undefined) {
+    await driveOnce(ctx);
     return;
   }
   for (;;) {
-    await new Promise(r => setTimeout(r, args.everySec! * 1000));
     try {
       await driveOnce(ctx);
     } catch (err) {
       say(ctx, `drive: pass failed — ${errText(err)}`);
     }
+    await new Promise(r => setTimeout(r, args.everySec! * 1000));
   }
 }

@@ -56,7 +56,7 @@ const SAST_NAMES = [
 ];
 
 export function isSast(name: string): boolean {
-  const lower = name.toLowerCase();
+  const lower = name.toLowerCase().replace(/[^a-z0-9]/g, '');
   return SAST_NAMES.some(s => lower.includes(s));
 }
 
