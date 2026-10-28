@@ -125,20 +125,25 @@ function retryAfterReset(text: string, now: number): string | undefined {
  *  (bro-9eeld — the single-pair read truncated the deadline by the
  *  trailing units). */
 function relReset(text: string, now: number): string | undefined {
-  const rel =
-    /(?:try again|retry|resets?|available|ready) in ((?:\d+\s*(?:hours?|hrs?|h|minutes?|mins?|m|seconds?|secs?|s)\b[\s,]*(?:and\s+)?)+)/i.exec(
-      text
-    );
+  const rel = /(?:try again|retry|resets?|available|ready) in\b/i.exec(text);
   if (rel === null) {
     return undefined;
   }
+  // sticky scan — each pair is consumed at its exact position, so the
+  // phrase parses linearly (a nested-quantifier (…)+ is a CodeQL
+  // polynomial-regex finding on uncontrolled log text)
+  const pair = /\s*(?:,\s*|\band\s+)?(\d+)\s*(hours?|hrs?|h|minutes?|mins?|m|seconds?|secs?|s)\b/iy;
   let ms = 0;
-  for (const p of rel[1]!.matchAll(
-    /(\d+)\s*(hours?|hrs?|h|minutes?|mins?|m|seconds?|secs?|s)\b/gi
-  )) {
+  for (let i = rel.index + rel[0].length; ; ) {
+    pair.lastIndex = i;
+    const p = pair.exec(text);
+    if (p === null) {
+      break;
+    }
     ms += Number(p[1]) * (UNIT_MS[p[2]!.toLowerCase()[0]!] ?? 1_000);
+    i = pair.lastIndex;
   }
-  return toIso(now + ms + RESET_MARK_MARGIN_MS);
+  return ms === 0 ? undefined : toIso(now + ms + RESET_MARK_MARGIN_MS);
 }
 
 /** The provider's quoted clock mark — `reset at 19:01 UTC`, `(reset
