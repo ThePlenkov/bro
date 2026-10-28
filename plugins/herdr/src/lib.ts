@@ -81,6 +81,15 @@ export interface PluginContext {
   focused_pane?: { pane_id?: string; cwd?: string };
   tab?: { tab_id?: string };
   worktree?: { checkout_path?: string; repo_root?: string; repo_key?: string };
+  // flat API-shape keys — the socket invocation context delivers these
+  // alongside (or instead of) the nested objects above
+  workspace_id?: string;
+  workspace_label?: string;
+  workspace_cwd?: string;
+  focused_pane_id?: string;
+  focused_pane_cwd?: string;
+  tab_id?: string;
+  tab_label?: string;
   selected_text?: string;
   clicked_url?: string;
   invocation_source?: string;
@@ -462,6 +471,72 @@ export function configValue(key: string, fallback: string): string {
 
 export function shq(s: string): string {
   return `'${s.replace(/'/g, `'\\''`)}'`;
+}
+
+const WORD_ESCAPES: Record<string, string> = { n: '\n', t: '\t' };
+const unescapeWord = (s: string): string =>
+  s.replace(/\\(.)/g, (_, c: string) => WORD_ESCAPES[c] ?? c);
+
+const quotedBody = (s: string, q: string): string => {
+  if (s.length < 2 || !s.endsWith(q)) throw new Error(`unclosed ${q} quote`);
+  return s.slice(1, -1);
+};
+
+/** One lexer segment → its literal text; malformed input is a loud
+ *  usage error. Single-quoted bodies stay literal, double-quoted and
+ *  bare segments get \x escapes. */
+const segmentText = (s: string): string => {
+  if (s === '\\') throw new Error('trailing backslash');
+  const q = s[0] as string;
+  if (q !== '"' && q !== "'") return unescapeWord(s);
+  const body = quotedBody(s, q);
+  return q === '"' ? unescapeWord(body) : body;
+};
+
+interface WordAcc {
+  out: string[];
+  cur: string;
+  open: boolean;
+}
+
+/** Position coverage — a regex gap means an unlexable char slipped
+ *  through (only a lone `\` can: every other byte matches some
+ *  alternative). Returns the new offset. */
+const ate = (m: RegExpMatchArray, pos: number): number => {
+  if ((m.index ?? -1) !== pos) throw new Error(`malformed input at offset ${pos}`);
+  return pos + m[0].length;
+};
+
+/** Whitespace closes an open word; anything else accrues into it. */
+const take = (a: WordAcc, s: string): void => {
+  if (!/^\s+$/.test(s)) {
+    a.cur += segmentText(s);
+    a.open = true;
+    return;
+  }
+  if (a.open) a.out.push(a.cur);
+  a.cur = '';
+  a.open = false;
+};
+
+/** Minimal shell-words split for operator-selected text — whitespace-
+ *  separated argv honoring '…', "…" and \x escapes. Empty quoted
+ *  tokens (""/'') survive as empty argv — `cur` alone can't tell a
+ *  word that produced nothing from no word at all, so `open` tracks
+ *  it. NOT a shell: no $expansion, globs, `;` or `|` — selected text
+ *  can never re-parse into a different program. An unclosed quote is
+ *  a usage error, named as such. */
+export function shellWords(text: string): string[] {
+  const SEGMENT = /"(?:\\.|[^"\\])*"?|'[^']*'?|\\.|[^\s'"\\]+|\s+/g;
+  const acc = { out: [] as string[], cur: '', open: false };
+  let pos = 0;
+  for (const m of text.matchAll(SEGMENT)) {
+    pos = ate(m, pos);
+    take(acc, m[0]);
+  }
+  if (pos !== text.length) throw new Error('trailing backslash');
+  if (acc.open) acc.out.push(acc.cur);
+  return acc.out;
 }
 
 export { basename, dirname, join, resolve };
