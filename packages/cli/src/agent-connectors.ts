@@ -2396,18 +2396,15 @@ function workerCliBadge(worker: SpawnWorker | undefined, command: string): strin
 
 /** The shell line a worker runs — a template expansion, an argv worker
  *  single-quoted slot by slot (the provider argv never re-parses into
- *  a different program), or the configured command's expansion. */
-function workerRunLine(
-  worker: SpawnWorker | undefined,
-  command: string,
-  promptFile: string
-): string {
+ *  a different program), or the configured command's expansion. The
+ *  prompt file's path rides BRO_PROMPT_FILE, never the line. */
+function workerRunLine(worker: SpawnWorker | undefined, command: string): string {
   if (worker === undefined) {
-    return expandAgentCmd(command, promptFile);
+    return expandAgentCmd(command);
   }
   return worker.kind === 'argv'
-    ? [...worker.argv, promptFile].map(shQuote).join(' ')
-    : expandAgentCmd(worker.command, promptFile);
+    ? [...worker.argv.map(shQuote), '"$BRO_PROMPT_FILE"'].join(' ')
+    : expandAgentCmd(worker.command);
 }
 
 /** The durable spawn handshake (spec bro-l8c4f.5). A launcher killed
@@ -2791,7 +2788,7 @@ export function makeNativeConnector(ctx: ConnectorCtx, env: AgentConnectorEnv): 
                 ]
               : [
                   '-c',
-                  `${HANDSHAKE_SCRIPT} ${expandAgentCmd(worker?.kind === 'template' ? worker.command : command, promptFile)}; s=$?; ( umask 077; printf %s "$s" > ${shQuote(exitFile)} )`,
+                  `${HANDSHAKE_SCRIPT} ${expandAgentCmd(worker?.kind === 'template' ? worker.command : command)}; s=$?; ( umask 077; printf %s "$s" > ${shQuote(exitFile)} )`,
                   'bro-agent',
                   exitFile,
                   handleFile,
@@ -3065,8 +3062,8 @@ registerAgentConnector('native', makeNativeConnector);
 
 // --- tmux ----------------------------------------------------------------------
 
-/** tmux runs the pane command through sh — single-quote a path the same
- *  way expandAgentCmd quotes {promptFile}. */
+/** tmux runs the pane command through sh — single-quote every path
+ *  spliced into the line. */
 const SH_SQUOTE = String.raw`'\''`; // ' → '\'' : close, escaped quote, reopen
 const shQuote = (s: string): string => `'${s.replaceAll("'", SH_SQUOTE)}'`;
 
@@ -3339,7 +3336,7 @@ export function makeTmuxConnector(ctx: ConnectorCtx, env: AgentConnectorEnv): Ag
         // with every element single-quoted — the provider argv never
         // re-parses into a different program.
         warnNoPromptFile(worker, command);
-        const runLine = workerRunLine(worker, command, promptFile);
+        const runLine = workerRunLine(worker, command);
         const paneScript = `. ${shQuote(envFile)}; rm -f ${shQuote(envFile)}; { ${runLine}; s=$?; ( umask 077; printf %s "$s" > ${shQuote(exitFile)} ); } 2>> ${shQuote(stderrLog)} | tee -a ${shQuote(log)}`;
         const paneCmd = `sh -c ${shQuote(paneScript)}`; // NOSONAR — operator-configured agent command (same contract as native/loop)
         const res = tmuxRun(socket, [
@@ -4848,7 +4845,7 @@ export function makeDockerConnector(ctx: ConnectorCtx, env: AgentConnectorEnv): 
           const worker = spec.worker;
           warnNoPromptFile(worker, command);
           const cliBadge = workerCliBadge(worker, command);
-          const runLine = workerRunLine(worker, command, promptFile);
+          const runLine = workerRunLine(worker, command);
           // the native wrapper, verbatim — the mounted paths make .exit/
           // log land where the host ladder reads them. --init gives the
           // worker a reaper so grandchildren can't zombie inside; --rm

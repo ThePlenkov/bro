@@ -252,17 +252,19 @@ resolve the conflicts, and push:
 `;
 }
 
-/** Expand the agent template — `{promptFile}` becomes the quoted path.
- *  No placeholder → the path is appended, quoted, as the last arg. */
-export function expandAgentCmd(template: string, promptFile: string): string {
-  // codeql[js/shell-command-constructed-from-input] — operator-authored template, resolved path quoted
-  const esc = promptFile.replaceAll("'", String.raw`'\''`);
-  // codeql[js/shell-command-constructed-from-input] — see above
-  const q = `'${esc}'`;
+/** Expand the agent template — `{promptFile}` becomes `"$BRO_PROMPT_FILE"`,
+ *  never the path itself. The file's path rides the child's environment
+ *  (every spawn path pins it — agentEnvPins, the loop spawn env,
+ *  tmux/docker `-e`), so nothing derived from the filename is ever
+ *  concatenated into the command line and no quoting is needed; a
+ *  nested `sh -c` inside the template still resolves it — env inherits,
+ *  positionals don't. No placeholder → the reference appends as the
+ *  last arg. Same contract as providers' expandPromptFile (spec
+ *  bro-ribc.1) — kept local, the providers package cannot dep on this
+ *  one for seven lines of expansion. */
+export function expandAgentCmd(template: string): string {
   if (!template.includes('{promptFile}')) {
-    // codeql[js/shell-command-constructed-from-input] — see above
-    return `${template} ${q}`;
+    return `${template} "$BRO_PROMPT_FILE"`;
   }
-  // codeql[js/shell-command-constructed-from-input] — see above
-  return template.replaceAll('{promptFile}', q);
+  return template.replaceAll('{promptFile}', () => '"$BRO_PROMPT_FILE"');
 }
