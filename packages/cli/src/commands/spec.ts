@@ -168,17 +168,45 @@ async function sddHooksDir(ctx: ConnectorCtx): Promise<string | null> {
  *  proc-owner LIVE_MARKER_MS). */
 const LIVE_CLAIM_MS = 24 * 60 * 60 * 1000;
 
+/** One marker's side of the claim ledger: this agent's when the file
+ *  is this session's own or is stamped by this agent's process tree
+ *  (rotated session ids fold in, bro-7022c); otherwise foreign, and
+ *  only while live — a dead session's claim is residue, not an owner. */
+function claimMarkerSide(
+  file: string,
+  stampLine: string,
+  stamp: number,
+  safe: string,
+  self: { pid: number; start: string } | null | undefined,
+  now: number
+): 'own' | 'foreign' | null {
+  const owner = markerOwner(stampLine);
+  if (
+    file === `${safe}.task` ||
+    (self != null && owner !== null && owner.pid === self.pid && owner.start === self.start)
+  ) {
+    return 'own';
+  }
+  return markerLive(stampLine, stamp, LIVE_CLAIM_MS, now) ? 'foreign' : null;
+}
+
+/** Detail lines of one claim marker (line 0 is the stamp), with the
+ *  file's mtime — null when the marker cannot be read. */
+function claimMarker(path: string): { lines: string[]; stamp: number } | null {
+  try {
+    return { lines: readFileSync(path, 'utf8').split('\n'), stamp: statSync(path).mtimeMs };
+  } catch {
+    return null;
+  }
+}
+
 /** Ids this session's claims share with a NEWER live claim of another
  *  session — delegated work: the executor's fresher marker owns the
  *  bead and its spec, so the delegator's copy is foreign. The scan is
  *  the session-start 'armed work' nudge's mechanism applied to `.task`
- *  markers: a marker counts as this agent's when it is this session's
- *  own file or stamped by this agent's process tree (rotated session
- *  ids fold in, bro-7022c); any other marker speaks only while live
- *  (owner pid alive, else the mtime window — a dead session's claim is
- *  residue, not an owner). Per-bead claim times are not recorded, so
- *  the marker's stamp is the granularity — newer claim marker wins.
- *  Read failures are empty: a lost marker never masks a nudge. */
+ *  markers. Per-bead claim times are not recorded, so the marker's
+ *  stamp is the granularity — newer claim marker wins. Read failures
+ *  are empty: a lost marker never masks a nudge. */
 function delegatedTaskClaims(
   hooks: string,
   mine: Set<string>,
@@ -198,35 +226,19 @@ function delegatedTaskClaims(
     if (!f.endsWith('.task')) {
       continue;
     }
-    let lines: string[];
-    let stamp: number;
-    try {
-      const path = join(hooks, f);
-      stamp = statSync(path).mtimeMs;
-      lines = readFileSync(path, 'utf8').split('\n');
-    } catch {
+    const marker = claimMarker(join(hooks, f));
+    if (marker === null) {
       continue;
     }
-    const stampLine = lines[0] ?? '';
-    const owner = markerOwner(stampLine);
-    const own =
-      f === `${safe}.task` ||
-      (ctx.owner !== undefined &&
-        owner !== null &&
-        owner.pid === ctx.owner.pid &&
-        owner.start === ctx.owner.start);
-    const side = own
-      ? ownStamp
-      : markerLive(stampLine, stamp, LIVE_CLAIM_MS, now)
-        ? foreignStamp
-        : null;
+    const side = claimMarkerSide(f, marker.lines[0] ?? '', marker.stamp, safe, ctx.owner, now);
     if (side === null) {
       continue;
     }
-    for (const d of lines.slice(1)) {
+    const stamps = side === 'own' ? ownStamp : foreignStamp;
+    for (const d of marker.lines.slice(1)) {
       const id = d.trim();
       if (id !== '') {
-        side.set(id, Math.max(side.get(id) ?? 0, stamp));
+        stamps.set(id, Math.max(stamps.get(id) ?? 0, marker.stamp));
       }
     }
   }
@@ -255,7 +267,7 @@ function sddSetChanged(hooks: string | null, ctx: ConnectorCtx, ids: string[]): 
   }
   const path = join(hooks, 'hinted', `${safe}.sdd-missing`);
   const digest = createHash('sha256')
-    .update([...ids].sort().join('\n'))
+    .update([...ids].sort((a, b) => a.localeCompare(b)).join('\n'))
     .digest('hex');
   try {
     if (readFileSync(path, 'utf8').trim() === digest) {
