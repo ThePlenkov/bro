@@ -4,21 +4,21 @@
  * Core holds types + registry config only — SDK bindings live in
  * @broject/providers so a repo without providers never pays the import.
  */
-import type { LaneRateGate } from './lane-gate.ts'
+import type { LaneRateGate } from './lane-gate.ts';
 
 /** Env var NAME sanity — `apiKeyEnv` names a variable, never holds the
  *  key value. Names must be SCREAMING_SNAKE: a pasted key value
  *  (`ts_live_…`, `sk-…`) fails here — but an ALL-CAPS key passes too,
  *  so a validated name is still never echoed back in a missing-key
  *  message (it may be the secret itself). */
-export const isEnvName = (v: string): boolean => /^[A-Z_][A-Z0-9_]*$/.test(v)
+export const isEnvName = (v: string): boolean => /^[A-Z_][A-Z0-9_]*$/.test(v);
 
 /** Closed union — kinds exist for *connection shape* differences, not
  *  vendors or wires (an api host serves many models on many wires; two
  *  OpenAI-compat hosts are two entries, one kind). A fourth kind is a
  *  spec discussion, not a PR. */
-export const PROVIDER_KINDS = ['api', 'acp', 'cli'] as const
-export type ProviderKind = (typeof PROVIDER_KINDS)[number]
+export const PROVIDER_KINDS = ['api', 'acp', 'cli'] as const;
+export type ProviderKind = (typeof PROVIDER_KINDS)[number];
 
 /** The wire protocol one served model speaks — the api kind's per-model
  *  knob: 'systemone' is the native typed-judgment contract
@@ -26,8 +26,8 @@ export type ProviderKind = (typeof PROVIDER_KINDS)[number]
  *  chat-completions prose (POST {baseUrl}/v1/chat/completions —
  *  each wire mounts its versioned prefix on the host root; a base
  *  the author already versioned is kept). */
-export type ApiWire = 'systemone' | 'openai-compat'
-export const API_WIRES = ['systemone', 'openai-compat'] as const
+export type ApiWire = 'systemone' | 'openai-compat';
+export const API_WIRES = ['systemone', 'openai-compat'] as const;
 
 /** Claude pins context-window variants as `model[1m]` — a client-side
  *  opt-in, not a different catalog model; the trailing `[<size>]`
@@ -35,10 +35,10 @@ export const API_WIRES = ['systemone', 'openai-compat'] as const
  *  misses (bro-0g2l3). Other brackets stay — `model[custom]` is a
  *  real id. Lives in core next to the family test it feeds. */
 export function modelBase(model: string): string {
-  const raw = model.trimEnd()
-  const open = raw.lastIndexOf('[')
-  const inner = open >= 0 && raw.endsWith(']') ? raw.slice(open + 1, -1) : undefined
-  return inner !== undefined && /^\d+[km]?$/i.test(inner) ? raw.slice(0, open).trimEnd() : raw
+  const raw = model.trimEnd();
+  const open = raw.lastIndexOf('[');
+  const inner = open >= 0 && raw.endsWith(']') ? raw.slice(open + 1, -1) : undefined;
+  return inner !== undefined && /^\d+[km]?$/i.test(inner) ? raw.slice(0, open).trimEnd() : raw;
 }
 
 /** A systemone-family model id — `typesafe/jev-<version|latest>`,
@@ -55,66 +55,66 @@ export const isSystemoneFamily = (model: string | undefined): boolean =>
   model !== undefined &&
   /(?:^|\/)typesafe\/jev-(?:latest|\d+(?:\.\d+)*)(?=$|\/)|^jev-(?:latest|\d+(?:\.\d+)*)(?=$|\/)/.test(
     modelBase(model)
-  )
+  );
 
 export type ProviderEntry =
   | {
-      type: 'api'
+      type: 'api';
       /** Host root — every model is served under it on its own wire. */
-      baseUrl: string
+      baseUrl: string;
       /** The allowlist: served model id → resolved wire. Values in
        *  config may be a wire string, {wire}, or null (wire inferred —
        *  systemone-family ids land on 'systemone', the rest on
        *  'openai-compat'); parsing always materializes the wire. */
-      models: Record<string, ApiWire>
+      models: Record<string, ApiWire>;
       /** Default model — must be a key of models. */
-      model?: string
-      apiKeyEnv?: string
+      model?: string;
+      apiKeyEnv?: string;
       /** Secret-store command (secret-tool/pass/op …) whose stdout is
        *  the key — the secure alternative to apiKeyEnv. */
-      apiKeyCommand?: string
+      apiKeyCommand?: string;
     }
   | {
-      type: 'acp'
-      command: string
-      profile?: string
-      model?: string
-      apiKeyEnv?: string
+      type: 'acp';
+      command: string;
+      profile?: string;
+      model?: string;
+      apiKeyEnv?: string;
       /** Permission policy for the spawn surface's driver (spec
        *  bro-5hx1.1 §7): answer `session/request_permission` with the
        *  allow option. Default false — a headless worker denies and
        *  logs. */
-      autoApprove?: boolean
+      autoApprove?: boolean;
       /** Session-cleanup template run when the worker exits —
        *  `{sessionId}` substitutes the acp session id. ACP sessions
        *  still land in the agent CLI's session history; e.g.
        *  `devin rm {sessionId} --force` keeps worker sessions out
        *  of the operator's personal history. Advisory: a failed
        *  cleanup is logged, never fails the worker. */
-      sessionRm?: string
+      sessionRm?: string;
       /** Lane rate gate (spec bro-y3jvd) — a shared token bucket each
        *  batch spawn charges `spawnCost` request-tokens against. */
-      rateGate?: LaneRateGate
+      rateGate?: LaneRateGate;
       /** `false` opts this provider's workers out of the wall pause —
        *  by default a derived provider wall SIGSTOPs the lane's live
        *  workers until the reported reset. */
-      wallPause?: boolean
+      wallPause?: boolean;
     }
   | {
-      type: 'cli'
-      command: string
-      model?: string
+      type: 'cli';
+      command: string;
+      model?: string;
       /** Shell template emitting one model id per line — the catalog
        *  surface `bro providers models` renders as `<name>/<id>`.
        *  Absent = the entry has no enumerable catalog (a pinned
        *  `model` still renders). */
-      models?: string
+      models?: string;
       /** Lane rate gate (spec bro-y3jvd) — a shared token bucket each
        *  batch spawn charges `spawnCost` request-tokens against. */
-      rateGate?: LaneRateGate
+      rateGate?: LaneRateGate;
       /** `false` opts this provider's workers out of the wall pause. */
-      wallPause?: boolean
-    }
+      wallPause?: boolean;
+    };
 
 /** A `fleet.profiles.<name>` spawn preset (spec bro-5hx1.1) — the
  *  convoy vocabulary for "sweeps go here, features go there". Lives
@@ -123,10 +123,10 @@ export type ProviderEntry =
  *  redirects connector resolution only when no explicit connector was
  *  named. */
 export interface FleetProfile {
-  provider: string
-  model?: string
-  backend?: string
-  autoApprove?: boolean
+  provider: string;
+  model?: string;
+  backend?: string;
+  autoApprove?: boolean;
 }
 
 /** Judge-surface fidelity: `typed` = native judgments (choice/score/
@@ -134,22 +134,22 @@ export interface FleetProfile {
  *  semantics — never counted as calibrated), `auto` = decided per
  *  session by the served model (acp: typed on a systemone-family
  *  model, prose otherwise). */
-export type CallSurfaceGrade = 'typed' | 'prose' | 'auto'
+export type CallSurfaceGrade = 'typed' | 'prose' | 'auto';
 
 /** Which consumer surface an entry is being asked to serve. */
-export type ProviderSurface = 'call' | 'spawn'
+export type ProviderSurface = 'call' | 'spawn';
 
 /** Kind registry — the capability matrix plus the fields each kind's
  *  entry may carry. `call` null means the kind has no judge surface;
  *  `spawn` true means a fleet worker can live inside it. */
 export interface ProviderKindSpec {
-  call: CallSurfaceGrade | null
-  spawn: boolean
-  required: readonly string[]
-  optional: readonly string[]
+  call: CallSurfaceGrade | null;
+  spawn: boolean;
+  required: readonly string[];
+  optional: readonly string[];
   /** Boolean knobs — a flag's value type is boolean, not the string
    *  contract `optional` enforces. */
-  optionalBool?: readonly string[]
+  optionalBool?: readonly string[];
 }
 
 export const PROVIDER_REGISTRY: Record<ProviderKind, ProviderKindSpec> = {
@@ -175,14 +175,14 @@ export const PROVIDER_REGISTRY: Record<ProviderKind, ProviderKindSpec> = {
     optional: ['model', 'models'],
     optionalBool: ['wallPause'],
   },
-}
+};
 
 /** A consumer named a provider no entry resolves to — startup error,
  *  never a silent fallthrough to a vendor the user didn't pick. */
 export class UnknownProviderError extends Error {
   constructor(name: string) {
-    super(`providers.${name} is not configured — name a configured provider entry`)
-    this.name = 'UnknownProviderError'
+    super(`providers.${name} is not configured — name a configured provider entry`);
+    this.name = 'UnknownProviderError';
   }
 }
 
@@ -194,13 +194,13 @@ export class ProviderSurfaceError extends Error {
     entry: ProviderEntry,
     surface: ProviderSurface
   ) {
-    super(`providers.${providerName} (type '${entry.type}') has no ${surface} surface`)
-    this.name = 'ProviderSurfaceError'
+    super(`providers.${providerName} (type '${entry.type}') has no ${surface} surface`);
+    this.name = 'ProviderSurfaceError';
   }
 }
 
 const str = (v: unknown): string | undefined =>
-  typeof v === 'string' && v.trim() !== '' ? v.trim() : undefined
+  typeof v === 'string' && v.trim() !== '' ? v.trim() : undefined;
 
 /** Optional string field — a present-but-blank value drops the field
  *  with a warning, never the entry (the required fields do that). */
@@ -210,16 +210,16 @@ function pickOptStr(
   f: string,
   picked: Record<string, string | boolean>
 ): void {
-  const v = o[f]
+  const v = o[f];
   if (v === undefined) {
-    return
+    return;
   }
-  const s = str(v)
+  const s = str(v);
   if (s === undefined) {
-    console.error(`bro.config: providers.${name}.${f} must be a non-empty string — field dropped`)
-    return
+    console.error(`bro.config: providers.${name}.${f} must be a non-empty string — field dropped`);
+    return;
   }
-  picked[f] = s
+  picked[f] = s;
 }
 
 function pickOptBool(
@@ -228,15 +228,15 @@ function pickOptBool(
   f: string,
   picked: Record<string, string | boolean>
 ): void {
-  const v = o[f]
+  const v = o[f];
   if (v === undefined) {
-    return
+    return;
   }
   if (typeof v !== 'boolean') {
-    console.error(`bro.config: providers.${name}.${f} must be a boolean — field dropped`)
-    return
+    console.error(`bro.config: providers.${name}.${f} must be a boolean — field dropped`);
+    return;
   }
-  picked[f] = v
+  picked[f] = v;
 }
 
 /** One model entry → its wire. A bare string wins; `{wire}` unwraps;
@@ -245,46 +245,40 @@ function pickOptBool(
  *  not a known wire name — or the VALUE had a shape the map doesn't
  *  speak (false/42/[...] are errors, never inferences). */
 function resolveModelWire(key: string, v: unknown): ApiWire | undefined {
-  const infer = (): ApiWire => (isSystemoneFamily(key) ? 'systemone' : 'openai-compat')
+  const infer = (): ApiWire => (isSystemoneFamily(key) ? 'systemone' : 'openai-compat');
   if (v === undefined || v === null) {
-    return infer()
+    return infer();
   }
-  const wire = typeof v === 'string' ? v : isPlainObject(v) ? v.wire : undefined
+  const wire = typeof v === 'string' ? v : isPlainObject(v) ? v.wire : undefined;
   // false/42/[...] reach here with wire===undefined — an unknown VALUE
   // shape is a config error, not a license to infer. Same for an object
   // carrying foreign keys ({wrie:…} is a typo, not a pin): only {} and
   // {wire:null} read as the object spelling of "infer".
   if (wire === undefined || wire === null) {
-    return isPlainObject(v) && Object.keys(v).every((k) => k === 'wire')
-      ? infer()
-      : undefined
+    return isPlainObject(v) && Object.keys(v).every(k => k === 'wire') ? infer() : undefined;
   }
   return typeof wire === 'string' && (API_WIRES as readonly string[]).includes(wire)
     ? (wire as ApiWire)
-    : undefined
+    : undefined;
 }
 
 const isPlainObject = (v: unknown): v is Record<string, unknown> =>
-  typeof v === 'object' && v !== null && !Array.isArray(v)
+  typeof v === 'object' && v !== null && !Array.isArray(v);
 
 /** Tagged parse result — a discriminator field, not a key-name probe:
  *  a model literally named 'err' is a valid id, so the failure shape
  *  can't live in the same namespace as the map. */
-type ModelsParsed = { ok: true; models: Record<string, ApiWire> } | { ok: false; err: string }
+type ModelsParsed = { ok: true; models: Record<string, ApiWire> } | { ok: false; err: string };
 
 /** One `models` entry → the resolved map key, or the fail string. */
-function parseModelEntry(
-  out: Record<string, ApiWire>,
-  id: string,
-  v: unknown
-): string | undefined {
-  const key = id.trim()
+function parseModelEntry(out: Record<string, ApiWire>, id: string, v: unknown): string | undefined {
+  const key = id.trim();
   if (key === '') {
-    return 'models keys must be non-empty model ids'
+    return 'models keys must be non-empty model ids';
   }
-  const resolved = resolveModelWire(key, v)
+  const resolved = resolveModelWire(key, v);
   if (resolved === undefined) {
-    return `models.${key}.wire must be a wire string (${API_WIRES.join('|')}), {wire}, or null`
+    return `models.${key}.wire must be a wire string (${API_WIRES.join('|')}), {wire}, or null`;
   }
   // defineProperty, not assignment — a model id like '__proto__'
   // must land as an own key, never trigger the prototype setter
@@ -293,42 +287,39 @@ function parseModelEntry(
     enumerable: true,
     writable: true,
     configurable: true,
-  })
-  return undefined
+  });
+  return undefined;
 }
 
 /** The api kind's `models` map → resolved wires, or the fail string. */
 function parseApiModels(raw: unknown): ModelsParsed {
   if (!isPlainObject(raw)) {
-    return { ok: false, err: 'models must be a model→wire map' }
+    return { ok: false, err: 'models must be a model→wire map' };
   }
-  const out: Record<string, ApiWire> = {}
+  const out: Record<string, ApiWire> = {};
   for (const [id, v] of Object.entries(raw)) {
-    const err = parseModelEntry(out, id, v)
+    const err = parseModelEntry(out, id, v);
     if (err !== undefined) {
-      return { ok: false, err }
+      return { ok: false, err };
     }
   }
   if (Object.keys(out).length === 0) {
-    return { ok: false, err: 'models must name at least one served model' }
+    return { ok: false, err: 'models must name at least one served model' };
   }
-  return { ok: true, models: out }
+  return { ok: true, models: out };
 }
 
 /** api-kind extras: the models map is required; the pinned default
  *  must sit in the allowlist; a systemone wire needs a key source —
  *  checked here, while the error still names the config field. */
-function parseApiEntry(
-  picked: Record<string, string | boolean>,
-  rawModels: unknown
-): ModelsParsed {
-  const parsed = parseApiModels(rawModels)
+function parseApiEntry(picked: Record<string, string | boolean>, rawModels: unknown): ModelsParsed {
+  const parsed = parseApiModels(rawModels);
   if (!parsed.ok) {
-    return parsed
+    return parsed;
   }
-  const models = parsed.models
+  const models = parsed.models;
   if (typeof picked.model === 'string' && !Object.hasOwn(models, picked.model)) {
-    return { ok: false, err: `model '${picked.model}' is not in the models allowlist` }
+    return { ok: false, err: `model '${picked.model}' is not in the models allowlist` };
   }
   // the systemone wire always sends Bearer — an entry resolving a
   // model to it with no key source parses but fails every call
@@ -340,25 +331,23 @@ function parseApiEntry(
     return {
       ok: false,
       err: 'serves a systemone-wire model with no key source — set apiKeyEnv or apiKeyCommand',
-    }
+    };
   }
-  return parsed
+  return parsed;
 }
 
 /** The entry's `type` field → a known kind, or the fail string. The
  *  retired per-protocol spellings fold into the api kind — their error
  *  IS the migration note. Tagged, not raw-string: ProviderKind ⊆ string
  *  would collapse the union. */
-function parseProviderKind(
-  o: Record<string, unknown>
-): { kind: ProviderKind } | { err: string } {
-  const t = o.type
+function parseProviderKind(o: Record<string, unknown>): { kind: ProviderKind } | { err: string } {
+  const t = o.type;
   if (t === 'systemone' || t === 'openai-compat') {
-    return { err: `type '${t}' is retired — use type 'api' with models: { "<model>": "${t}" }` }
+    return { err: `type '${t}' is retired — use type 'api' with models: { "<model>": "${t}" }` };
   }
   return typeof t === 'string' && (PROVIDER_KINDS as readonly string[]).includes(t)
     ? { kind: t as ProviderKind }
-    : { err: `type must be one of ${PROVIDER_KINDS.join('|')} — got ${JSON.stringify(t)}` }
+    : { err: `type must be one of ${PROVIDER_KINDS.join('|')} — got ${JSON.stringify(t)}` };
 }
 
 /** required + optional + optionalBool field sweeps → the picked bag,
@@ -368,21 +357,21 @@ function pickSpecFields(
   spec: ProviderKindSpec,
   o: Record<string, unknown>
 ): { picked: Record<string, string | boolean> } | { err: string } {
-  const picked: Record<string, string | boolean> = {}
+  const picked: Record<string, string | boolean> = {};
   for (const f of spec.required) {
-    const v = str(o[f])
+    const v = str(o[f]);
     if (v === undefined) {
-      return { err: `requires "${f}"` }
+      return { err: `requires "${f}"` };
     }
-    picked[f] = v
+    picked[f] = v;
   }
   for (const f of spec.optional) {
-    pickOptStr(name, o, f, picked)
+    pickOptStr(name, o, f, picked);
   }
   for (const f of spec.optionalBool ?? []) {
-    pickOptBool(name, o, f, picked)
+    pickOptBool(name, o, f, picked);
   }
-  return { picked }
+  return { picked };
 }
 
 /** `rateGate` — the lane's token bucket (spec bro-y3jvd). Required
@@ -393,101 +382,156 @@ function pickSpecFields(
  *  error (a half-armed gate reads as "no pacing"), matching the
  *  kind/keys discipline — drop the FIELD silently and the operator
  *  believes a limit exists that doesn't. */
-function parseRateGate(
-  name: string,
-  raw: unknown
-): { rateGate?: LaneRateGate } | { err: string } {
+function parseRateGate(name: string, raw: unknown): { rateGate?: LaneRateGate } | { err: string } {
   if (raw === undefined) {
-    return {}
+    return {};
   }
   if (!isPlainObject(raw)) {
-    return { err: 'rateGate must be an object' }
+    return { err: 'rateGate must be an object' };
   }
-  const num = (f: string): number | undefined => {
-    const v = raw[f]
-    return typeof v === 'number' && Number.isFinite(v) && v > 0 ? v : undefined
+  return rateBucketOf(raw);
+}
+
+/** A positive finite number field — absent/invalid reads as undefined. */
+function positiveNum(raw: Record<string, unknown>, f: string): number | undefined {
+  const v = raw[f];
+  return typeof v === 'number' && Number.isFinite(v) && v > 0 ? v : undefined;
+}
+
+/** capacity < spawnCost never admits — a config that can only refuse
+ *  is a config error, not a pace. Absent burst the bucket tops out at
+ *  requestsPerHour, so the check runs on the EFFECTIVE capacity. */
+function capacityErr(
+  burst: number | undefined,
+  requestsPerHour: number,
+  spawnCost: number
+): string | undefined {
+  const capacity = burst ?? requestsPerHour;
+  if (capacity >= spawnCost) {
+    return undefined;
   }
-  const requestsPerHour = num('requestsPerHour')
-  const spawnCost = num('spawnCost')
+  return burst === undefined
+    ? 'rateGate.spawnCost must be <= requestsPerHour (the default burst) — the bucket could never admit one spawn'
+    : 'rateGate.burst must be >= spawnCost — the bucket could never admit one spawn';
+}
+
+/** The assembled bucket — absent optionals stay absent (never `null`,
+ *  which the gate would read as a configured zero). */
+function rateGateValue(
+  requestsPerHour: number,
+  spawnCost: number,
+  burst?: number,
+  lane?: string
+): LaneRateGate {
+  const gate: LaneRateGate = { requestsPerHour, spawnCost };
+  if (burst !== undefined) {
+    gate.burst = burst;
+  }
+  if (lane !== undefined) {
+    gate.lane = lane;
+  }
+  return gate;
+}
+
+/** Field validation for the bucket — one flat pass: each wrong field
+ *  is one top-level branch (CodeScene: no bumpy road, CC ≤ 9). */
+function rateBucketOf(raw: Record<string, unknown>): { err: string } | { rateGate: LaneRateGate } {
+  const requestsPerHour = positiveNum(raw, 'requestsPerHour');
+  const spawnCost = positiveNum(raw, 'spawnCost');
   if (requestsPerHour === undefined || spawnCost === undefined) {
-    return { err: 'rateGate requires positive requestsPerHour and spawnCost' }
+    return { err: 'rateGate requires positive requestsPerHour and spawnCost' };
   }
-  const burst = num('burst')
+  const burst = positiveNum(raw, 'burst');
   if (raw.burst !== undefined && burst === undefined) {
-    return { err: 'rateGate.burst must be a positive number' }
+    return { err: 'rateGate.burst must be a positive number' };
   }
-  const lane = str(raw.lane)
+  const lane = str(raw.lane);
   if (raw.lane !== undefined && lane === undefined) {
-    return { err: 'rateGate.lane must be a non-empty string' }
+    return { err: 'rateGate.lane must be a non-empty string' };
   }
-  // capacity < spawnCost never admits — a config that can only refuse
-  // is a config error, not a pace. Absent burst the bucket tops out at
-  // requestsPerHour, so the check runs on the EFFECTIVE capacity.
-  const capacity = burst ?? requestsPerHour
-  if (capacity < spawnCost) {
-    return {
-      err:
-        burst === undefined
-          ? 'rateGate.spawnCost must be <= requestsPerHour (the default burst) — the bucket could never admit one spawn'
-          : 'rateGate.burst must be >= spawnCost — the bucket could never admit one spawn',
-    }
+  const capErr = capacityErr(burst, requestsPerHour, spawnCost);
+  if (capErr !== undefined) {
+    return { err: capErr };
   }
-  return {
-    rateGate: {
-      requestsPerHour,
-      spawnCost,
-      ...(burst === undefined ? {} : { burst }),
-      ...(lane === undefined ? {} : { lane }),
-    },
-  }
+  return { rateGate: rateGateValue(requestsPerHour, spawnCost, burst, lane) };
 }
 
 export function parseProviderEntry(name: string, raw: unknown): ProviderEntry | null {
   const fail = (why: string): null => {
-    console.error(`bro.config: providers.${name} ${why} — entry dropped`)
-    return null
-  }
+    console.error(`bro.config: providers.${name} ${why} — entry dropped`);
+    return null;
+  };
   if (!isPlainObject(raw)) {
-    return fail('must be an object')
+    return fail('must be an object');
   }
-  const kindRes = parseProviderKind(raw)
+  const kindRes = parseProviderKind(raw);
   if ('err' in kindRes) {
-    return fail(kindRes.err)
+    return fail(kindRes.err);
   }
-  const kind = kindRes.kind
-  const spec = PROVIDER_REGISTRY[kind]
-  const fields = pickSpecFields(name, spec, raw)
+  const kind = kindRes.kind;
+  const spec = PROVIDER_REGISTRY[kind];
+  const fields = pickSpecFields(name, spec, raw);
   if ('err' in fields) {
-    return fail(fields.err)
+    return fail(fields.err);
   }
-  const picked = fields.picked
-  let models: Record<string, ApiWire> | undefined
-  if (kind === 'api') {
-    const parsed = parseApiEntry(picked, raw.models)
-    if (!parsed.ok) {
-      return fail(parsed.err)
-    }
-    models = parsed.models
+  const picked = fields.picked;
+  const modelsRes = apiModelsFor(kind, name, picked, raw.models);
+  if ('err' in modelsRes) {
+    return fail(modelsRes.err);
   }
-  const keyErr = keySourceErr(picked)
+  const keyErr = keySourceErr(picked);
   if (keyErr !== null) {
-    return fail(keyErr)
+    return fail(keyErr);
   }
   // spawn-surface extras — objects/bools the string picker can't carry
-  let rateGate: LaneRateGate | undefined
-  if (kind === 'acp' || kind === 'cli') {
-    const gate = parseRateGate(name, raw.rateGate)
-    if ('err' in gate) {
-      return fail(gate.err)
-    }
-    rateGate = gate.rateGate
+  const gateRes = laneGateFor(kind, name, raw.rateGate);
+  if ('err' in gateRes) {
+    return fail(gateRes.err);
   }
+  const models = 'models' in modelsRes ? modelsRes.models : undefined;
+  const rateGate = 'rateGate' in gateRes ? gateRes.rateGate : undefined;
   return {
     type: kind,
     ...picked,
     ...(models === undefined ? {} : { models }),
     ...(rateGate === undefined ? {} : { rateGate }),
-  } as ProviderEntry
+  } as ProviderEntry;
+}
+
+/** The api kind's one extra — the wire models the string picker can't
+ *  hold. Kind-scoped inside the helper so the entry parse stays flat
+ *  (CodeScene: a bumpy road needs no nesting to read). */
+function apiModelsFor(
+  kind: ProviderKind,
+  name: string,
+  picked: Record<string, string | boolean>,
+  rawModels: unknown
+): { err: string } | { models?: Record<string, ApiWire> } {
+  if (kind !== 'api') {
+    return {};
+  }
+  const parsed = parseApiEntry(picked, rawModels);
+  if (!parsed.ok) {
+    return { err: parsed.err };
+  }
+  return { models: parsed.models };
+}
+
+/** The spawn-surface kinds' extra — the lane rate gate (spec
+ *  bro-y3jvd). Same flattening contract as `apiModelsFor`. */
+function laneGateFor(
+  kind: ProviderKind,
+  name: string,
+  rawGate: unknown
+): { err: string } | { rateGate?: LaneRateGate } {
+  if (kind !== 'acp' && kind !== 'cli') {
+    return {};
+  }
+  const gate = parseRateGate(name, rawGate);
+  if ('err' in gate) {
+    return { err: gate.err };
+  }
+  return { rateGate: gate.rateGate };
 }
 
 /** Key-source guards shared by every kind: apiKeyEnv names an env var
@@ -496,18 +540,18 @@ export function parseProviderEntry(name: string, raw: unknown): ProviderEntry | 
  *  config, which is the whole point the field exists to prevent. */
 function keySourceErr(picked: Record<string, string | boolean>): string | null {
   if (typeof picked.apiKeyEnv === 'string' && !isEnvName(picked.apiKeyEnv)) {
-    return 'apiKeyEnv must NAME an env var (SCREAMING_SNAKE) — config never holds a key value'
+    return 'apiKeyEnv must NAME an env var (SCREAMING_SNAKE) — config never holds a key value';
   }
   if (
     typeof picked.apiKeyCommand === 'string' &&
     /sk-[A-Za-z0-9]|ts_(?:live|test)_|Bearer\s/i.test(picked.apiKeyCommand)
   ) {
-    return 'apiKeyCommand must RUN a secret lookup — it may not contain a key value'
+    return 'apiKeyCommand must RUN a secret lookup — it may not contain a key value';
   }
-  return null
+  return null;
 }
 
-export type ApiEntry = Extract<ProviderEntry, { type: 'api' }>
+export type ApiEntry = Extract<ProviderEntry, { type: 'api' }>;
 
 /** One served model resolved out of an api entry — baseUrl + auth live
  *  on the host, the wire is the model's. `requested` is the consumer's
@@ -519,23 +563,26 @@ export function resolveApiModel(
   entry: ApiEntry,
   requested: string | undefined
 ): { model: string; wire: ApiWire } {
-  const model = requested ?? entry.model ?? (Object.keys(entry.models).length === 1 ? Object.keys(entry.models)[0] : undefined)
+  const model =
+    requested ??
+    entry.model ??
+    (Object.keys(entry.models).length === 1 ? Object.keys(entry.models)[0] : undefined);
   if (model === undefined) {
     throw new Error(
       `api provider serves ${Object.keys(entry.models).length} models — name one (e.g. judge.model)`
-    )
+    );
   }
   // hasOwn pins the check to a declared key — an inherited member
   // ('constructor' & co) must not satisfy the allowlist either
   const wire = Object.hasOwn(entry.models, model)
     ? (entry.models as Record<string, ApiWire | undefined>)[model]
-    : undefined
+    : undefined;
   if (wire === undefined) {
     throw new Error(
       `model '${model}' is not served by this provider — declared: ${Object.keys(entry.models).join(', ')}`
-    )
+    );
   }
-  return { model, wire }
+  return { model, wire };
 }
 
 /** The entry's RESOLVED call grade — 'auto' kinds settle on the served
@@ -548,11 +595,11 @@ export function resolveApiModel(
 export function providerCallGrade(entry: ProviderEntry): 'typed' | 'prose' {
   switch (entry.type) {
     case 'api':
-      return resolveApiModel(entry, undefined).wire === 'systemone' ? 'typed' : 'prose'
+      return resolveApiModel(entry, undefined).wire === 'systemone' ? 'typed' : 'prose';
     case 'acp':
-      return isSystemoneFamily(entry.model) ? 'typed' : 'prose'
+      return isSystemoneFamily(entry.model) ? 'typed' : 'prose';
     case 'cli':
-      return 'prose'
+      return 'prose';
   }
 }
 
@@ -564,10 +611,10 @@ export function providerCallGrade(entry: ProviderEntry): 'typed' | 'prose' {
  *  is a loud error, never a relabel. */
 export function expandModelArg(command: string, model: string): string {
   // codeql[js/shell-command-constructed-from-input] — operator-authored template, resolved value quoted
-  const esc = model.replaceAll("'", String.raw`'\''`)
+  const esc = model.replaceAll("'", String.raw`'\''`);
   // codeql[js/shell-command-constructed-from-input] — see above
   // fn replacer — a string replacement would expand $&/$' tokens in the model id
-  return command.replaceAll('{model}', () => `'${esc}'`)
+  return command.replaceAll('{model}', () => `'${esc}'`);
 }
 
 /** The cli kind's model resolution — `resolveApiModel`'s analogue for
@@ -587,32 +634,29 @@ export function cliCommandModel(
   unhonorable: (model: string) => Error,
   unpinned: () => Error
 ): { command: string; model: string | undefined } {
-  const model = override ?? pinned
+  const model = override ?? pinned;
   if (command.includes('{model}')) {
     if (model === undefined) {
-      throw unpinned()
+      throw unpinned();
     }
-    return { command: expandModelArg(command, model), model }
+    return { command: expandModelArg(command, model), model };
   }
   if (override !== undefined && override !== pinned) {
-    throw unhonorable(override)
+    throw unhonorable(override);
   }
-  return { command, model }
+  return { command, model };
 }
 
 /** Lookup by consumer reference — `judge.provider`, `agents.*.provider`.
  *  Throws UnknownProviderError naming the missing key. */
-export function getProvider(
-  providers: Record<string, ProviderEntry>,
-  name: string
-): ProviderEntry {
+export function getProvider(providers: Record<string, ProviderEntry>, name: string): ProviderEntry {
   // hasOwn pins the lookup to configured keys — 'constructor' must not
   // resolve to an inherited member instead of UnknownProviderError
-  const entry = Object.hasOwn(providers, name) ? providers[name] : undefined
+  const entry = Object.hasOwn(providers, name) ? providers[name] : undefined;
   if (entry === undefined) {
-    throw new UnknownProviderError(name)
+    throw new UnknownProviderError(name);
   }
-  return entry
+  return entry;
 }
 
 /** Lookup + surface assertion in one — `requireProviderSurface(cfg,
@@ -624,10 +668,10 @@ export function requireProviderSurface(
   name: string,
   surface: ProviderSurface
 ): ProviderEntry {
-  const entry = getProvider(providers, name)
-  const spec = PROVIDER_REGISTRY[entry.type]
+  const entry = getProvider(providers, name);
+  const spec = PROVIDER_REGISTRY[entry.type];
   if (surface === 'call' ? spec.call === null : !spec.spawn) {
-    throw new ProviderSurfaceError(name, entry, surface)
+    throw new ProviderSurfaceError(name, entry, surface);
   }
-  return entry
+  return entry;
 }

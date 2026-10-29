@@ -17,9 +17,16 @@
  *    reconcile knows who to thaw and never signals a recycled pid.
  *    `providers.<name>.wallPause: false` opts out.
  */
-import { existsSync, mkdirSync, readFileSync, readdirSync, renameSync, writeFileSync } from 'node:fs'
-import { dirname, join } from 'node:path'
-import { randomBytes } from 'node:crypto'
+import {
+  existsSync,
+  mkdirSync,
+  readFileSync,
+  readdirSync,
+  renameSync,
+  writeFileSync,
+} from 'node:fs';
+import { dirname, join } from 'node:path';
+import { randomBytes } from 'node:crypto';
 import {
   agentRegistryPath,
   deriveProviderWalls,
@@ -38,29 +45,27 @@ import {
   type ProviderEntry,
   type ProviderWall,
   type SpawnSpec,
-} from '@broject/core'
-import { groupMemberAlive, providerWallsFor, type AgentConnectorEnv } from './agent-connectors.ts'
+} from '@broject/core';
+import { groupMemberAlive, providerWallsFor, type AgentConnectorEnv } from './agent-connectors.ts';
 
 // --- the rate gate ------------------------------------------------------
 
 /** The bucket key's lane half — a shared `lane` name lets two provider
  *  entries that resolve to the same account (`devin` + `devin-acp`)
  *  draw one budget. */
-const laneOf = (name: string, gate: LaneRateGate): string => gate.lane ?? name
+const laneOf = (name: string, gate: LaneRateGate): string => gate.lane ?? name;
 
 /** Spawn-surface entries carry rateGate; api entries never spawn. */
 function gateOf(entry: ProviderEntry | undefined): LaneRateGate | undefined {
   return entry !== undefined && (entry.type === 'cli' || entry.type === 'acp')
     ? entry.rateGate
-    : undefined
+    : undefined;
 }
 
 /** The bucket key's model half — an unmodeled spawn draws the
  *  `(default)` bucket (the free-model lane pins no model). */
 const modelOf = (spec: SpawnSpec, entry: ProviderEntry | undefined): string =>
-  spec.model ??
-  (entry !== undefined && 'model' in entry ? entry.model : undefined) ??
-  '(default)'
+  spec.model ?? (entry !== undefined && 'model' in entry ? entry.model : undefined) ?? '(default)';
 
 /** Charge a batch spawn against its lane's token bucket — returns the
  *  refusal, or undefined when admitted (no gate, interactive lane,
@@ -72,18 +77,18 @@ export function laneGateRefusal(
   now = Date.now()
 ): SpawnError | undefined {
   if (spec.provider === undefined || !isBatchSpawn(spec.env)) {
-    return undefined
+    return undefined;
   }
-  const entry = env.providers?.[spec.provider]
-  const gate = gateOf(entry)
+  const entry = env.providers?.[spec.provider];
+  const gate = gateOf(entry);
   if (gate === undefined) {
-    return undefined
+    return undefined;
   }
-  const lane = laneOf(spec.provider, gate)
-  const model = modelOf(spec, entry)
-  const take = laneGateTake(lane, model, gate, { now })
+  const lane = laneOf(spec.provider, gate);
+  const model = modelOf(spec, entry);
+  const take = laneGateTake(lane, model, gate, { now });
   if (take.ok) {
-    return undefined
+    return undefined;
   }
   return new SpawnError(
     `provider ${spec.provider} lane '${lane}' out of request budget (${model})` +
@@ -91,7 +96,7 @@ export function laneGateRefusal(
       `; retry in ~${take.retryAfterSec}s` +
       (spec.molStep !== undefined ? ` — spawn of ${spec.molStep} refused` : ''),
     'cap'
-  )
+  );
 }
 
 // --- the wall pause -----------------------------------------------------
@@ -100,92 +105,92 @@ export function laneGateRefusal(
  *  is never signaled (or reported) as ours. Exported: the pause file's
  *  schema is the artifact the writer seam below speaks in. */
 export interface PauseRecord {
-  provider: string
-  molStep: string
-  agentId: string
-  pidStart?: string
-  pausedAt: string
+  provider: string;
+  molStep: string;
+  agentId: string;
+  pidStart?: string;
+  pausedAt: string;
 }
 
 export interface PauseFile {
-  paused: Record<string, PauseRecord>
+  paused: Record<string, PauseRecord>;
 }
 
 /** `<git-common>/bro/lane-pause.json` — repo-scoped like the registry
  *  the walls derive from. */
 export function lanePausePath(dir: string): string | null {
-  const regPath = agentRegistryPath(dir)
-  return regPath === null ? null : join(dirname(regPath), 'lane-pause.json')
+  const regPath = agentRegistryPath(dir);
+  return regPath === null ? null : join(dirname(regPath), 'lane-pause.json');
 }
 
 function readPauseFile(path: string): PauseFile {
   try {
-    const raw = JSON.parse(readFileSync(path, 'utf8')) as Partial<PauseFile>
+    const raw = JSON.parse(readFileSync(path, 'utf8')) as Partial<PauseFile>;
     if (raw.paused !== null && typeof raw.paused === 'object') {
-      return { paused: raw.paused as Record<string, PauseRecord> }
+      return { paused: raw.paused as Record<string, PauseRecord> };
     }
   } catch {
     // missing/corrupt — start clean; a torn pause file must not strand
     // records nobody will thaw (the reconcile re-freezes what should
     // be frozen anyway)
   }
-  return { paused: {} }
+  return { paused: {} };
 }
 
 function writePauseFile(path: string, file: PauseFile): void {
-  mkdirSync(dirname(path), { recursive: true })
-  const tmp = `${path}.${process.pid}.${randomBytes(4).toString('hex')}.tmp`
-  writeFileSync(tmp, `${JSON.stringify(file, null, 2)}\n`)
-  renameSync(tmp, path)
+  mkdirSync(dirname(path), { recursive: true });
+  const tmp = `${path}.${process.pid}.${randomBytes(4).toString('hex')}.tmp`;
+  writeFileSync(tmp, `${JSON.stringify(file, null, 2)}\n`);
+  renameSync(tmp, path);
 }
 
 const sig = (pgid: number, signal: 'SIGSTOP' | 'SIGCONT'): boolean => {
   try {
-    process.kill(-pgid, signal)
-    return true
+    process.kill(-pgid, signal);
+    return true;
   } catch {
-    return false
+    return false;
   }
-}
+};
 
 /** The pause publish seam — injectable so a test can fail the write
  *  and prove the freeze rollback. Production callers never pass it. */
-export type PauseWriter = (path: string, file: PauseFile) => void
+export type PauseWriter = (path: string, file: PauseFile) => void;
 
 /** Does this provider pause on walls? Default ON — a walled account
  *  is rejecting work, and a running worker can only push the reset
  *  out. `wallPause: false` opts out. */
 const pauseWanted = (env: AgentConnectorEnv, provider: string): boolean => {
-  const entry = env.providers?.[provider]
+  const entry = env.providers?.[provider];
   if (entry === undefined || !('wallPause' in entry)) {
-    return true
+    return true;
   }
-  return entry.wallPause !== false
-}
+  return entry.wallPause !== false;
+};
 
 /** The entry's recorded pid starttime — the reuse pin; absent when the
  *  entry predates identity recording. */
 const entryStart = (entry: AgentRegistryEntry): string | undefined =>
-  typeof entry.pidStart === 'string' && entry.pidStart !== '' ? entry.pidStart : undefined
+  typeof entry.pidStart === 'string' && entry.pidStart !== '' ? entry.pidStart : undefined;
 
 const groupLive = (entry: AgentRegistryEntry): boolean => {
-  const pid = typeof entry.pid === 'number' ? entry.pid : undefined
+  const pid = typeof entry.pid === 'number' ? entry.pid : undefined;
   if (pid === undefined) {
-    return false
+    return false;
   }
-  const start = entryStart(entry)
-  return pidAlive(pid, start) || groupMemberAlive(pid, start)
-}
+  const start = entryStart(entry);
+  return pidAlive(pid, start) || groupMemberAlive(pid, start);
+};
 
 /** A recorded pause still points at the same registry row — a respawn
  *  or stop replaces the entry, and the new pid is the reconcile's
  *  problem, not this record's. */
 function entryStillOurs(rec: PauseRecord, registry: Record<string, AgentRegistryEntry>): boolean {
-  const cur = registry[rec.molStep]
+  const cur = registry[rec.molStep];
   if (cur === undefined || cur.agentId !== rec.agentId) {
-    return false
+    return false;
   }
-  return cur.stopped !== true
+  return cur.stopped !== true;
 }
 
 /** The one decision per freeze candidate — the wall covers this
@@ -201,15 +206,15 @@ function freezablePid(
   env: AgentConnectorEnv
 ): number | undefined {
   if (entry.backend !== 'native' || entry.provider === undefined) {
-    return undefined
+    return undefined;
   }
   if (!walled.has(entry.provider) || entry.stopped === true) {
-    return undefined
+    return undefined;
   }
   if (!pauseWanted(env, entry.provider) || typeof entry.pid !== 'number') {
-    return undefined
+    return undefined;
   }
-  return groupLive(entry) ? entry.pid : undefined
+  return groupLive(entry) ? entry.pid : undefined;
 }
 
 /** Freeze pass — every live registry worker on a walled provider. The
@@ -221,33 +226,33 @@ function freezablePid(
  *  stopped — the caller's rollback list when the publish fails. */
 function freezeLane(
   registry: Record<string, AgentRegistryEntry>,
-  walled: ReadonlyMap<string, ProviderWall>,
-  env: AgentConnectorEnv,
+  lane: { walled: ReadonlyMap<string, ProviderWall>; env: AgentConnectorEnv },
   file: PauseFile,
   now: number
 ): Array<{ pid: number; pidStart?: string }> {
-  const stopped: Array<{ pid: number; pidStart?: string }> = []
+  const { walled, env } = lane;
+  const stopped: Array<{ pid: number; pidStart?: string }> = [];
   for (const [molStep, entry] of Object.entries(registry)) {
-    const pid = freezablePid(entry, walled, env)
+    const pid = freezablePid(entry, walled, env);
     if (pid === undefined || file.paused[String(pid)] !== undefined) {
-      continue
+      continue;
     }
     if (sig(pid, 'SIGSTOP')) {
       // pin identity at freeze time: the entry's recorded starttime,
       // else a live read — the record's pidStart is what keeps a
       // recycled pgid out of every later signal decision
-      const pidStart = entryStart(entry) ?? procStat(pid)?.start
+      const pidStart = entryStart(entry) ?? procStat(pid)?.start;
       file.paused[String(pid)] = {
         provider: entry.provider as string,
         molStep,
         agentId: entry.agentId,
         pidStart,
         pausedAt: new Date(now).toISOString(),
-      }
-      stopped.push({ pid, pidStart })
+      };
+      stopped.push({ pid, pidStart });
     }
   }
-  return stopped
+  return stopped;
 }
 
 /** Is the recorded group still out there — the wrapper OR a group
@@ -257,10 +262,10 @@ function freezeLane(
  *  pidStart bounds member starttimes, so a recycled pgid can't pass. */
 const groupStillLive = (pid: number, pidStart: string | undefined): boolean => {
   if (!Number.isInteger(pid)) {
-    return false
+    return false;
   }
-  return pidAlive(pid, pidStart) || groupMemberAlive(pid, pidStart)
-}
+  return pidAlive(pid, pidStart) || groupMemberAlive(pid, pidStart);
+};
 
 /** Thaw pass — a record survives while its provider still walls AND
  *  its group is still live. Gone or recycled groups drop WITHOUT a
@@ -271,23 +276,23 @@ function thawLane(
   env: AgentConnectorEnv,
   registry: Record<string, AgentRegistryEntry>
 ): { next: Record<string, PauseRecord>; thawed: number } {
-  const next: Record<string, PauseRecord> = {}
-  let thawed = 0
+  const next: Record<string, PauseRecord> = {};
+  let thawed = 0;
   for (const [pidStr, rec] of Object.entries(paused)) {
-    const pid = Number(pidStr)
+    const pid = Number(pidStr);
     if (!groupStillLive(pid, rec.pidStart)) {
-      continue
+      continue;
     }
-    const covered = walled.has(rec.provider) && pauseWanted(env, rec.provider)
+    const covered = walled.has(rec.provider) && pauseWanted(env, rec.provider);
     if (covered && entryStillOurs(rec, registry)) {
-      next[pidStr] = rec
-      continue
+      next[pidStr] = rec;
+      continue;
     }
     if (sig(pid, 'SIGCONT')) {
-      thawed++
+      thawed++;
     }
   }
-  return { next, thawed }
+  return { next, thawed };
 }
 
 /** Assert the pause state the walls imply — freeze newly-walled live
@@ -298,24 +303,23 @@ function reconcile(
   env: AgentConnectorEnv,
   registry: Record<string, AgentRegistryEntry>,
   walls: ProviderWall[],
-  path: string,
-  now: number,
-  write: PauseWriter
+  pass: { path: string; now: number; write: PauseWriter }
 ): { paused: number; thawed: number } {
-  const walled = new Map(walls.map((w) => [w.provider, w]))
+  const { path, now, write } = pass;
+  const walled = new Map(walls.map(w => [w.provider, w]));
   // the pause file is a shared read-modify-write — the drive pass and
   // a spawn-path refusal can reconcile at once, and a stale write
   // would drop records whose groups then stay frozen forever
   return withFileLock(`${path}.lock`, () => {
-    const file = readPauseFile(path)
-    const stopped = freezeLane(registry, walled, env, file, now)
-    const { next, thawed } = thawLane(file.paused, walled, env, registry)
+    const file = readPauseFile(path);
+    const stopped = freezeLane(registry, { walled, env }, file, now);
+    const { next, thawed } = thawLane(file.paused, walled, env, registry);
     // a present file always syncs — even all-drained; nothing to
     // write only when no records moved AND no file exists
-    const settled = Object.keys(next).length === 0 && Object.keys(file.paused).length === 0
+    const settled = Object.keys(next).length === 0 && Object.keys(file.paused).length === 0;
     try {
       if (!settled || existsSync(path)) {
-        write(path, { paused: next })
+        write(path, { paused: next });
       }
     } catch (error) {
       // the publish failed — on-disk records still cover previously
@@ -325,33 +329,32 @@ function reconcile(
       // (pid+starttime — never a liveness guess a recycled pgid passes)
       for (const g of stopped) {
         if (pidAlive(g.pid, g.pidStart)) {
-          sig(g.pid, 'SIGCONT')
+          sig(g.pid, 'SIGCONT');
         }
       }
-      throw error
+      throw error;
     }
-    return { paused: Object.keys(next).length, thawed }
-  })
+    return { paused: Object.keys(next).length, thawed };
+  });
 }
 
-const NO_PAUSE = { walled: [] as ProviderWall[], paused: 0, thawed: 0 }
+const NO_PAUSE = { walled: [] as ProviderWall[], paused: 0, thawed: 0 };
 
 /** Shared tail of both entry points — null path means no git common
  *  dir, and there is nowhere to remember a pause anyway. */
 function reconcileWith(
-  dir: string,
   env: AgentConnectorEnv,
   registry: Record<string, AgentRegistryEntry>,
   walls: ProviderWall[],
-  now: number,
-  write: PauseWriter
+  opts: { dir: string; now: number; write: PauseWriter }
 ): { walled: ProviderWall[]; paused: number; thawed: number } {
-  const path = lanePausePath(dir)
+  const { dir, now, write } = opts;
+  const path = lanePausePath(dir);
   if (path === null) {
-    return NO_PAUSE
+    return NO_PAUSE;
   }
-  const { paused, thawed } = reconcile(env, registry, walls, path, now, write)
-  return { walled: walls, paused, thawed }
+  const { paused, thawed } = reconcile(env, registry, walls, { path, now, write });
+  return { walled: walls, paused, thawed };
 }
 
 /** The periodic/idle call — reads the registry and derives walls
@@ -364,7 +367,7 @@ export function reconcileLanePause(
   now = Date.now(),
   write: PauseWriter = writePauseFile
 ): { walled: ProviderWall[]; paused: number; thawed: number } {
-  return reconcileWith(dir, env, readAgentRegistry(dir), providerWallsFor(dir), now, write)
+  return reconcileWith(env, readAgentRegistry(dir), providerWallsFor(dir), { dir, now, write });
 }
 
 /** The spawn-path call — the caller's locked registry snapshot is
@@ -377,16 +380,20 @@ export function reconcileLanePauseForRegistry(
   registry: Record<string, AgentRegistryEntry>,
   now = Date.now()
 ): { walled: ProviderWall[]; paused: number; thawed: number } {
-  return reconcileWith(dir, env, registry, deriveProviderWalls(registry, now), now, writePauseFile)
+  return reconcileWith(env, registry, deriveProviderWalls(registry, now), {
+    dir,
+    now,
+    write: writePauseFile,
+  });
 }
 
 // --- status ---------------------------------------------------------------
 
 export interface LaneStatusRow {
-  provider: string
-  wall?: ProviderWall
-  paused: number
-  gate?: Array<{ model: string; tokens: number; capacity: number }>
+  provider: string;
+  wall?: ProviderWall;
+  paused: number;
+  gate?: Array<{ model: string; tokens: number; capacity: number }>;
 }
 
 /** The lane section `bro agents status` renders: walled providers,
@@ -394,62 +401,62 @@ export interface LaneStatusRow {
  *  here — status never harvests causes (a read that writes is the
  *  spawn path's laziness, not a report's). */
 export function laneStatus(dir: string, env: AgentConnectorEnv, now = Date.now()): LaneStatusRow[] {
-  const walls = new Map(deriveProviderWalls(readRegistrySafe(dir), now).map((w) => [w.provider, w]))
-  const pausedBy = pauseCounts(lanePausePath(dir))
-  const rows = new Map<string, LaneStatusRow>()
+  const walls = new Map(deriveProviderWalls(readRegistrySafe(dir), now).map(w => [w.provider, w]));
+  const pausedBy = pauseCounts(lanePausePath(dir));
+  const rows = new Map<string, LaneStatusRow>();
   const row = (p: string): LaneStatusRow => {
-    const cur = rows.get(p)
+    const cur = rows.get(p);
     if (cur !== undefined) {
-      return cur
+      return cur;
     }
-    const r: LaneStatusRow = { provider: p, paused: pausedBy.get(p) ?? 0 }
-    rows.set(p, r)
-    return r
-  }
+    const r: LaneStatusRow = { provider: p, paused: pausedBy.get(p) ?? 0 };
+    rows.set(p, r);
+    return r;
+  };
   for (const [provider, w] of walls) {
-    row(provider).wall = w
+    row(provider).wall = w;
   }
   for (const provider of pausedBy.keys()) {
-    row(provider)
+    row(provider);
   }
   for (const [name, gate] of armedGates(env)) {
-    row(name).gate = gateLevels(laneOf(name, gate), gate, now)
+    row(name).gate = gateLevels(laneOf(name, gate), gate, now);
   }
-  return [...rows.values()].sort((a, b) => a.provider.localeCompare(b.provider))
+  return [...rows.values()].sort((a, b) => a.provider.localeCompare(b.provider));
 }
 
 /** Registry read that never throws — an unreadable/missing registry
  *  renders as no walls, not a broken status. */
 function readRegistrySafe(dir: string): Record<string, AgentRegistryEntry> {
   try {
-    return readAgentRegistry(dir)
+    return readAgentRegistry(dir);
   } catch {
-    return {}
+    return {};
   }
 }
 
 /** provider → frozen-group count from the pause file. */
 function pauseCounts(path: string | null): Map<string, number> {
-  const out = new Map<string, number>()
+  const out = new Map<string, number>();
   if (path === null) {
-    return out
+    return out;
   }
   for (const rec of Object.values(readPauseFile(path).paused)) {
-    out.set(rec.provider, (out.get(rec.provider) ?? 0) + 1)
+    out.set(rec.provider, (out.get(rec.provider) ?? 0) + 1);
   }
-  return out
+  return out;
 }
 
 /** provider name → its armed gate — the configured lanes only. */
 function armedGates(env: AgentConnectorEnv): Array<[string, LaneRateGate]> {
-  const out: Array<[string, LaneRateGate]> = []
+  const out: Array<[string, LaneRateGate]> = [];
   for (const [name, entry] of Object.entries(env.providers ?? {})) {
-    const gate = gateOf(entry)
+    const gate = gateOf(entry);
     if (gate !== undefined) {
-      out.push([name, gate])
+      out.push([name, gate]);
     }
   }
-  return out
+  return out;
 }
 
 /** Every bucket file under `<lane>/` — models the gate has touched. */
@@ -458,51 +465,51 @@ function gateLevels(
   gate: LaneRateGate,
   now: number
 ): Array<{ model: string; tokens: number; capacity: number }> {
-  const dir = laneGateDir()
-  const prefix = encodeURIComponent(`${lane}/`)
-  let names: string[]
+  const dir = laneGateDir();
+  const prefix = encodeURIComponent(`${lane}/`);
+  let names: string[];
   try {
-    names = readdirSync(dir)
+    names = readdirSync(dir);
   } catch {
-    return []
+    return [];
   }
-  const out: Array<{ model: string; tokens: number; capacity: number }> = []
+  const out: Array<{ model: string; tokens: number; capacity: number }> = [];
   for (const name of names) {
     if (!name.startsWith(prefix) || !name.endsWith('.json')) {
-      continue
+      continue;
     }
-    const model = decodeURIComponent(name.slice(prefix.length, -'.json'.length))
-    const level = laneGateLevel(lane, model, gate, { now, dir })
+    const model = decodeURIComponent(name.slice(prefix.length, -'.json'.length));
+    const level = laneGateLevel(lane, model, gate, { now, dir });
     if (level !== null) {
-      out.push({ model, ...level })
+      out.push({ model, ...level });
     }
   }
-  return out
+  return out;
 }
 
-const pausedPhrase = (n: number): string => `${n} worker${n === 1 ? '' : 's'} paused`
+const pausedPhrase = (n: number): string => `${n} worker${n === 1 ? '' : 's'} paused`;
 
 /** One row's wall/pause clause — the wall text when held, else the
  *  bare frozen count (a paused group outliving a lifted wall's row). */
 function wallClause(r: LaneStatusRow): string | undefined {
   if (r.wall !== undefined) {
-    return r.paused > 0 ? `${wallText(r.wall)} · ${pausedPhrase(r.paused)}` : wallText(r.wall)
+    return r.paused > 0 ? `${wallText(r.wall)} · ${pausedPhrase(r.paused)}` : wallText(r.wall);
   }
-  return r.paused > 0 ? pausedPhrase(r.paused) : undefined
+  return r.paused > 0 ? pausedPhrase(r.paused) : undefined;
 }
 
 /** The status table's lane lines — one per walled/paused provider,
  *  one per armed gate bucket. */
 export function laneStatusLines(rows: LaneStatusRow[]): string[] {
-  const lines: string[] = []
+  const lines: string[] = [];
   for (const r of rows) {
-    const clause = wallClause(r)
+    const clause = wallClause(r);
     if (clause !== undefined) {
-      lines.push(`  ${r.provider}: ${clause}`)
+      lines.push(`  ${r.provider}: ${clause}`);
     }
     for (const g of r.gate ?? []) {
-      lines.push(`  ${r.provider}: gate ${g.model} — ${g.tokens}/${g.capacity} req budget`)
+      lines.push(`  ${r.provider}: gate ${g.model} — ${g.tokens}/${g.capacity} req budget`);
     }
   }
-  return lines
+  return lines;
 }
