@@ -36,8 +36,8 @@ hermes, kilo, qodercli, qwen, letta, maki, muse),
    → read `workspace_id` from `.result`. `--base` pins the source —
    without it the branch comes from the checkout's current HEAD.
    Quote every path; never interpolate task text into a double-quoted
-   string — a title containing ` $()` or backticks executes on the
-   orchestrator.
+   string — a title containing command substitutions or backticks
+   executes on the orchestrator.
 3. Get its shell pane: `herdr pane list --workspace <ws>` → pane_id.
 4. `herdr agent start {{TASK_ID}}-worker --kind {{AGENT_KIND}} --pane <pane_id>`
    → the pane must be at an interactive shell prompt; success means the
