@@ -217,31 +217,65 @@ export function writeConfig(opts: { beads: boolean; personality?: string }): str
     return `bro.config.local.ts present and takes precedence — edit it directly, not writing bro.config.local.json${orphan}`;
   }
   const path = join(process.cwd(), 'bro.config.local.json');
-  const existed = existsSync(path);
-  const existing = readExistingConfig(path)!;
-  // Only local-layer keys land in the file: spreading the merged
-  // effective config here would pin project/global values into the
-  // highest-precedence layer and mask later project edits.
-  const effective = loadBroConfig();
-  const merged: Partial<BroConfig> = { ...existing };
-  if (opts.beads && !effective.stores.includes('beads')) {
-    merged.stores = [...(merged.stores ?? effective.stores), 'beads'];
+  let result = '';
+  try {
+    withFileLock(
+      `${path}.lock`,
+      () => {
+        const existed = existsSync(path);
+        const existing = readExistingConfig(path)!;
+        // Only local-layer keys land in the file: spreading the merged
+        // effective config here would pin project/global values into the
+        // highest-precedence layer and mask later project edits.
+        const effective = loadBroConfig();
+        const merged: Partial<BroConfig> = { ...existing };
+        if (opts.beads && !effective.stores.includes('beads')) {
+          merged.stores = [...(merged.stores ?? effective.stores), 'beads'];
+        }
+        if (opts.personality) {
+          merged.personality = opts.personality as BroConfig['personality'];
+        }
+        // $schema first — IDEs/agents get completion+validation for free;
+        // an existing $schema pin wins the spread (never clobbered). Compare
+        // the RAW file keys against the output — a file lacking $schema is a
+        // diff, so the upgrade lands on the next setup run
+        const out = { $schema: CONFIG_SCHEMA_URL, ...merged };
+        if (existed && JSON.stringify(existing) === JSON.stringify(out)) {
+          result = 'bro.config.local.json already up to date';
+          return;
+        }
+        writeFileSync(path, `${JSON.stringify(out, null, 2)}\n`, 'utf8');
+        const stores = merged.stores ?? effective.stores;
+        const hint = existed ? '' : ' — gitignored (machine-local overrides live here)';
+        result = `${existed ? 'updated' : 'wrote'} bro.config.local.json (stores: ${stores.join(', ')})${hint}`;
+      },
+      { label: 'setup writeConfig' }
+    );
+  } catch (e) {
+    // if lock fails, still try to write? but better to proceed without lock as fallback
+    if (!result) {
+      const existed = existsSync(path);
+      const existing = readExistingConfig(path)!;
+      const effective = loadBroConfig();
+      const merged: Partial<BroConfig> = { ...existing };
+      if (opts.beads && !effective.stores.includes('beads')) {
+        merged.stores = [...(merged.stores ?? effective.stores), 'beads'];
+      }
+      if (opts.personality) {
+        merged.personality = opts.personality as BroConfig['personality'];
+      }
+      const out = { $schema: CONFIG_SCHEMA_URL, ...merged };
+      if (existed && JSON.stringify(existing) === JSON.stringify(out)) {
+        result = 'bro.config.local.json already up to date';
+      } else {
+        writeFileSync(path, `${JSON.stringify(out, null, 2)}\n`, 'utf8');
+        const stores = merged.stores ?? effective.stores;
+        const hint = existed ? '' : ' — gitignored (machine-local overrides live here)';
+        result = `${existed ? 'updated' : 'wrote'} bro.config.local.json (stores: ${stores.join(', ')})${hint}`;
+      }
+    }
   }
-  if (opts.personality) {
-    merged.personality = opts.personality as BroConfig['personality'];
-  }
-  // $schema first — IDEs/agents get completion+validation for free;
-  // an existing $schema pin wins the spread (never clobbered). Compare
-  // the RAW file keys against the output — a file lacking $schema is a
-  // diff, so the upgrade lands on the next setup run
-  const out = { $schema: CONFIG_SCHEMA_URL, ...merged };
-  if (existed && JSON.stringify(existing) === JSON.stringify(out)) {
-    return 'bro.config.local.json already up to date';
-  }
-  writeFileSync(path, `${JSON.stringify(out, null, 2)}\n`, 'utf8');
-  const stores = merged.stores ?? effective.stores;
-  const hint = existed ? '' : ' — gitignored (machine-local overrides live here)';
-  return `${existed ? 'updated' : 'wrote'} bro.config.local.json (stores: ${stores.join(', ')})${hint}`;
+  return result;
 }
 
 /** Install files under root; returns installed count. Warns on drift. */

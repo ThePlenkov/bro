@@ -128,12 +128,32 @@ function writeFileSink(write: { path: string; record: OtelHookRecord }): void {
   const line = `${JSON.stringify(record)}\n`
   const append = (): void => {
     appendFileSync(path, line)
-    if (statSync(path).size > SINK_MAX_BYTES) {
-      const kept = readFileSync(path, 'utf8')
-        .split('\n')
-        .filter((l) => l !== '')
-        .slice(-SINK_KEEP_LINES)
-      writeFileSync(path, `${kept.join('\n')}\n`)
+    try {
+      const size = statSync(path).size
+      if (size > SINK_MAX_BYTES) {
+        const raw = readFileSync(path, 'utf8')
+        const lines = raw.split('\n').filter((l) => l !== '')
+        // trim to fit within byte cap, keeping newest lines
+        let kept: string[] = []
+        let total = 0
+        for (let i = lines.length - 1; i >= 0; i--) {
+          const l = lines[i]
+          const bytes = Buffer.byteLength(l + '\n')
+          if (total + bytes > SINK_MAX_BYTES && kept.length > 0) break
+          kept.unshift(l)
+          total += bytes
+        }
+        if (kept.length === 0 && lines.length > 0) {
+          // single oversized record - keep metadata only by truncating if needed
+          const last = lines[lines.length - 1]
+          // try to keep at least the last line even if over cap
+          writeFileSync(path, `${last}\n`)
+        } else {
+          writeFileSync(path, `${kept.join('\n')}\n`)
+        }
+      }
+    } catch {
+      // best-effort trim
     }
   }
   try {
@@ -258,9 +278,15 @@ function combineHookPolicies(
 function otelLayerViews(dir: string): {
   everything: Record<string, unknown>
   own: Record<string, unknown>
+  everythingEnabled: boolean | undefined
+  everythingSampleMin?: number
+  hasAnyEverything: boolean
 } {
   let everything: Record<string, unknown> = {}
   let own: Record<string, unknown> = {}
+  let everythingEnabled: boolean | undefined = undefined
+  let everythingSampleMin: number | undefined = undefined
+  let hasAnyEverything = false
   for (const hit of loadConfigLayers(dir).layers) {
     const raw = hit.raw.otel
     // no otel section → no merge work AND no provenance probe — the
@@ -268,25 +294,52 @@ function otelLayerViews(dir: string): {
     if (raw === undefined) {
       continue
     }
+    hasAnyEverything = true
     everything = mergeOtel(everything, raw)
+    if (isObj(raw)) {
+      if (typeof raw.enabled === 'boolean') {
+        everythingEnabled = everythingEnabled === undefined ? raw.enabled : everythingEnabled && raw.enabled
+      }
+      if (isObj(raw.hooks)) {
+        const star = raw.hooks['*']
+        if (isObj(star) && typeof star.sample === 'number' && Number.isFinite(star.sample)) {
+          const s = Math.min(1, Math.max(0, star.sample))
+          everythingSampleMin = everythingSampleMin === undefined ? s : Math.min(everythingSampleMin, s)
+        } else if (star === false) {
+          everythingSampleMin = 0
+        }
+        // if '*' is true or undefined, no narrowing from this layer
+      }
+    }
     if (hit.layer === 'global' || untrackedInRepo(hit)) {
       own = mergeOtel(own, raw)
     }
   }
-  return { everything, own }
+  return { everything, own, everythingEnabled, everythingSampleMin, hasAnyEverything }
 }
 
 function resolveOtelConfig(views: {
   everything: Record<string, unknown>
   own: Record<string, unknown>
+  everythingEnabled?: boolean
+  everythingSampleMin?: number
+  hasAnyEverything?: boolean
 }): ResolvedOtelConfig {
   const merged = otelSection(views.everything)
   const operator = otelSection(views.own)
+  const enabled =
+    views.everythingEnabled !== undefined
+      ? views.everythingEnabled && operator.enabled
+      : merged.enabled && operator.enabled
+  const hooks = combineHookPolicies(operator, merged)
+  if (views.everythingSampleMin !== undefined && hooks['*']) {
+    hooks['*'] = { ...hooks['*'], sample: Math.min(hooks['*'].sample, views.everythingSampleMin) }
+  }
   return {
-    enabled: merged.enabled && operator.enabled,
+    enabled,
     exporter: operator.exporter,
-    hooks: combineHookPolicies(operator, merged),
-    armedByCommitted: merged.enabled && !operator.enabled,
+    hooks,
+    armedByCommitted: (views.everythingEnabled !== undefined ? views.everythingEnabled : merged.enabled) && !operator.enabled,
   }
 }
 

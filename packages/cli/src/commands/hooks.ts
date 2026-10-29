@@ -2124,6 +2124,7 @@ export async function runHooksCommand(argv: string[]): Promise<void> {
   const t0 = Date.now();
   let deadlineFired = false;
   const deadlineTimer = nodeSetTimeout(() => {
+    if (deadlineFired) return
     deadlineFired = true;
     const sessionId = typeof input.session_id === 'string' ? input.session_id : '';
     // the answer goes out before the journal flush — silence on a
@@ -2167,19 +2168,23 @@ export async function runHooksCommand(argv: string[]): Promise<void> {
     answerCursorPermission(event, input);
   } finally {
     clearTimeout(deadlineTimer);
-    const sessionId = typeof input.session_id === 'string' ? input.session_id : '';
-    flushPerf(sessionId, event, t0);
-    // hook-first telemetry (spec bro-xgejl) — every dispatched event
-    // emits one facade record; enabled=false in config means this is a
-    // memoized config read and a boolean, nothing more.
-    emitHook(event, input, {
-      sessionId,
-      client: cursorClient ? 'cursor' : codexClient ? 'codex' : 'default',
-      durationMs: Date.now() - t0,
-      ok: !hookErr,
-      error: hookErr ? 'dispatch threw' : undefined,
-      dir: root,
-    });
+    if (deadlineFired) {
+      // deadline path already handled emission/exit
+    } else {
+      const sessionId = typeof input.session_id === 'string' ? input.session_id : '';
+      flushPerf(sessionId, event, t0);
+      // hook-first telemetry (spec bro-xgejl) — every dispatched event
+      // emits one facade record; enabled=false in config means this is a
+      // memoized config read and a boolean, nothing more.
+      emitHook(event, input, {
+        sessionId,
+        client: cursorClient ? 'cursor' : codexClient ? 'codex' : 'default',
+        durationMs: Date.now() - t0,
+        ok: !hookErr,
+        error: hookErr ? 'dispatch threw' : undefined,
+        dir: root,
+      });
+    }
     // A probe that raced past its budget leaves its bd/gh child running —
     // unref the stragglers so the hook exits with the answer it sent,
     // not when the last subprocess closes.

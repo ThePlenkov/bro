@@ -44,6 +44,8 @@ describe('otel journal', () => {
 
 describe('BRO_TELEMETRY kill switch', () => {
   it('an explicit endpoint cannot post past BRO_TELEMETRY=0', async () => {
+    const saved = process.env.BRO_TELEMETRY
+    delete process.env.BRO_TELEMETRY
     const hits: string[] = []
     const server: Server = createServer((req, res) => {
       req.resume()
@@ -68,7 +70,8 @@ describe('BRO_TELEMETRY kill switch', () => {
       await new Promise((r) => setTimeout(r, 500))
       assert.equal(hits.length, 1)
     } finally {
-      delete process.env.BRO_TELEMETRY
+      if (saved === undefined) delete process.env.BRO_TELEMETRY
+      else process.env.BRO_TELEMETRY = saved
       server.close()
     }
   })
