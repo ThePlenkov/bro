@@ -84,18 +84,33 @@ export interface WorkerCand {
 export function silentBucketMin(silentMs: number | null | undefined): number | null {
   if (silentMs === null || silentMs === undefined || !Number.isFinite(silentMs)) return null;
   const min = silentMs / 60_000;
-  return min >= 60 ? Math.floor(min / 60) * 60 : Math.max(0, Math.floor(min / 5) * 5);
+  if (min >= 60) return Math.floor(min / 60) * 60;
+  return Math.max(0, Math.floor(min / 5) * 5);
 }
 
-const freshest = (c: WorkerCand[]): WorkerCand | undefined =>
-  c.reduce<WorkerCand | undefined>(
-    (a, b) =>
-      a === undefined ||
-      (b.silentMs ?? Number.POSITIVE_INFINITY) < (a.silentMs ?? Number.POSITIVE_INFINITY)
-        ? b
-        : a,
-    undefined
-  );
+const quietest = (a: WorkerCand | undefined, b: WorkerCand): WorkerCand =>
+  a === undefined ||
+  (b.silentMs ?? Number.POSITIVE_INFINITY) < (a.silentMs ?? Number.POSITIVE_INFINITY)
+    ? b
+    : a;
+
+const freshest = (c: WorkerCand[]): WorkerCand | undefined => c.reduce(quietest, undefined);
+
+/** The winner among live candidates — a live run anywhere outranks a
+ *  co-resident live agent (the run's silence bucket is the truer one). */
+function liveWinner(cands: WorkerCand[]): WorkerCand | undefined {
+  const live = cands.filter(c => c.live);
+  return freshest(live.filter(c => c.run)) ?? freshest(live);
+}
+
+/** The winning live worker's verdict — silent past the stall window,
+ *  working inside it. `stallMin <= 0` disables stall semantics. */
+function liveVerdict(w: WorkerCand, stallMin: number): Pick<TreeProjection, 'state' | 'silentMin'> {
+  const b = silentBucketMin(w.silentMs);
+  const pastStall = stallMin > 0 && Math.floor((w.silentMs ?? 0) / 60_000) >= stallMin;
+  if (b !== null && pastStall) return { state: 'silent', silentMin: b };
+  return { state: 'working' };
+}
 
 /** The worker verdict for one worktree — a live run anywhere wins over
  *  every dead record (the respawn edge), and a live agent outranks a
@@ -104,15 +119,8 @@ export function workerState(
   cands: WorkerCand[],
   stallMin: number
 ): Pick<TreeProjection, 'state' | 'silentMin'> {
-  const live = cands.filter(c => c.live);
-  const w = freshest(live.filter(c => c.run)) ?? freshest(live);
-  if (w !== undefined) {
-    const b = silentBucketMin(w.silentMs);
-    if (b !== null && stallMin > 0 && Math.floor((w.silentMs ?? 0) / 60_000) >= stallMin) {
-      return { state: 'silent', silentMin: b };
-    }
-    return { state: 'working' };
-  }
+  const w = liveWinner(cands);
+  if (w !== undefined) return liveVerdict(w, stallMin);
   const dead = cands.filter(c => !c.live && c.terminal !== undefined);
   if (dead.length === 0) return {};
   return { state: dead.reduce((a, b) => (b.at > a.at ? b : a)).terminal };
@@ -133,20 +141,24 @@ export interface GateState {
   sastPending?: number;
 }
 
+/** The non-zero finding counts, compacted — `4t`, `3f`, `6sast`,
+ *  `conflicts` — in thread/ci/sast/mergeability order. */
+function gateFindings(s: GateState): string[] {
+  const parts: string[] = [];
+  if ((s.openThreads ?? 0) > 0) parts.push(`${s.openThreads}t`);
+  if ((s.ciFailing ?? 0) > 0) parts.push(`${s.ciFailing}f`);
+  if ((s.sastPending ?? 0) > 0) parts.push(`${s.sastPending}sast`);
+  if ((s.mergeable ?? '').toUpperCase() === 'CONFLICTING') parts.push('conflicts');
+  return parts;
+}
+
 /** Compact last-observed gate summary — `1f`, `4t/3f/6sast/conflicts`,
  *  `pending`, `ok` — "is it moving", not "may it merge". */
 export function gateFrag(s: GateState): string {
   const st = (s.state ?? '').toUpperCase();
   if (st === 'MERGED' || st === 'CLOSED') return st.toLowerCase();
   if (s.isDraft === true) return 'draft';
-  const parts: string[] = [];
-  const threads = s.openThreads ?? 0;
-  const failing = s.ciFailing ?? 0;
-  const sast = s.sastPending ?? 0;
-  if (threads > 0) parts.push(`${threads}t`);
-  if (failing > 0) parts.push(`${failing}f`);
-  if (sast > 0) parts.push(`${sast}sast`);
-  if ((s.mergeable ?? '').toUpperCase() === 'CONFLICTING') parts.push('conflicts');
+  const parts = gateFindings(s);
   if (parts.length > 0) return parts.join('/');
   if ((s.ciPending ?? 0) > 0 || (s.reviewersPending ?? 0) > 0) return 'pending';
   return 'ok';
@@ -398,32 +410,36 @@ export interface TreeInput {
   stallMin: number;
 }
 
+/** Runs + agents flattened into classifier candidates — the boundary's
+ *  liveness verdicts become `live`/`terminal` here, never inside
+ *  workerState. */
+function workerCands(i: TreeInput): WorkerCand[] {
+  const runs: WorkerCand[] = i.runs.map(r => ({
+    run: true,
+    live: r.state === 'running',
+    silentMs: r.silentMs,
+    ...(r.state === 'dead' ? { terminal: 'lost' as WorkerState } : {}),
+    at: r.at,
+  }));
+  const agents: WorkerCand[] = i.agents.map(a => ({
+    run: false,
+    live: a.live,
+    silentMs: a.live ? a.silentMs : null,
+    ...(a.live ? {} : { terminal: a.terminal }),
+    at: a.at,
+  }));
+  return [...runs, ...agents];
+}
+
 /** The projection + display title for one worktree — the object a
  *  future herdr badge consumes directly. */
 export function projectTree(i: TreeInput): { projection: TreeProjection; title: string } {
   const slug = i.claim ?? i.runs.find(r => r.beadId !== undefined)?.beadId ?? i.agents[0]?.key;
-  const cands: WorkerCand[] = [
-    ...i.runs.map(r => ({
-      run: true,
-      live: r.state === 'running',
-      silentMs: r.silentMs,
-      ...(r.state === 'dead' ? { terminal: 'lost' as WorkerState } : {}),
-      at: r.at,
-    })),
-    ...i.agents.map(a => ({
-      run: false,
-      live: a.live,
-      silentMs: a.live ? a.silentMs : null,
-      ...(a.live ? {} : { terminal: a.terminal }),
-      at: a.at,
-    })),
-  ];
-  const worker = workerState(cands, i.stallMin);
-  const armed = i.claim !== undefined || i.markerArmed;
+  const worker = workerState(workerCands(i), i.stallMin);
   const projection: TreeProjection = {
     ...worker,
     ...prFor(i.branch, slug, i.beads, i.act, i.now),
-    armed,
+    armed: i.claim !== undefined || i.markerArmed,
   };
   const title =
     (slug !== undefined ? i.beads.find(b => b.id === slug)?.title : undefined) || basename(i.path);
@@ -442,6 +458,107 @@ export interface ProjectResult {
   writes: number;
 }
 
+/** The bro-plane bundle a pass reads once — assembled after the
+ *  managed∩open set proves at least one workspace is ours to label. */
+interface Planes {
+  agentsHome: string | null;
+  registry: ReturnType<typeof readAgentRegistry>;
+  branches: Map<string, string>;
+  runs: ReturnType<typeof collectLoopRuns>;
+  act: ActEntry[];
+  beads: ReturnType<typeof readBeads>['inProgress'];
+  details: ReturnType<typeof liveWorkEntries>;
+  stall: number;
+}
+
+function readPlanes(mainRoot: string, common: string | null, now: number): Planes {
+  const hooks = hooksDirOf(mainRoot);
+  return {
+    agentsHome: common === null ? null : join(common, 'bro', 'agents'),
+    registry: readAgentRegistry(mainRoot),
+    branches: gitBranches(mainRoot),
+    runs: collectLoopRuns(mainRoot, now),
+    act: actStates(common),
+    beads: readBeads(mainRoot).inProgress,
+    details: hooks === null ? [] : liveWorkEntries(hooks, ['.work'], now),
+    stall: stallMin(mainRoot),
+  };
+}
+
+/** One managed∩open pair — the worktree, the workspace id herdr has
+ *  open for it, and the live workspace record (the dedup source). */
+interface WsTarget {
+  tree: HerdrWorktree;
+  wsId: string;
+  live: HerdrWorkspace;
+}
+
+/** The managed∩open set — workspaces the plugin opened AND still owns;
+ *  a user's own workspace is never a target. */
+function managedTargets(
+  trees: HerdrWorktree[],
+  managed: Map<string, { ws?: string; managed?: boolean }>,
+  wsById: Map<string, HerdrWorkspace>
+): WsTarget[] {
+  const out: WsTarget[] = [];
+  for (const tree of trees) {
+    const wsId = tree.open_workspace_id;
+    const live = wsId === undefined ? undefined : wsById.get(wsId);
+    const rec = managed.get(tree.path);
+    if (wsId !== undefined && live !== undefined && rec?.managed === true && rec.ws === wsId) {
+      out.push({ tree, wsId, live });
+    }
+  }
+  return out;
+}
+
+/** Registry entries on one worktree, pre-classified — the pid/handle
+ *  probes (registryEntryState) run here, at the boundary. */
+function agentRows(path: string, p: Planes, now: number): AgentRow[] {
+  return Object.entries(p.registry)
+    .filter(([, e]) => e.worktree === path)
+    .map(([key, e]) => {
+      const st = registryEntryState(p.agentsHome, e);
+      const live = st === 'running' || st === 'spawned';
+      return {
+        key,
+        live,
+        ...(live ? {} : { terminal: TERMINAL[st] }),
+        silentMs: live ? agentSilentMs(e, now) : null,
+        at: parseTs(e.spawnedAt),
+      };
+    });
+}
+
+/** One worktree's projection input — herdr's branch when it carries
+ *  one, the git porcelain join otherwise; the claim and marker arm
+ *  read the same files the plugin's arm scan does. */
+function treeInput(t: HerdrWorktree, p: Planes, now: number): TreeInput {
+  const branch = t.branch ?? p.branches.get(t.path) ?? undefined;
+  const claim = worktreeClaim(t.path, now);
+  return {
+    path: t.path,
+    ...(branch !== undefined ? { branch } : {}),
+    ...(claim !== undefined ? { claim } : {}),
+    markerArmed: p.details.some(e =>
+      detailMatches(e.detail, { branch: branch ?? '', slug: claim ?? '', worktree: t.path })
+    ),
+    runs: p.runs
+      .filter(r => r.worktree === t.path)
+      .map(r => ({
+        state: r.state,
+        ...(r.beadId !== '' ? { beadId: r.beadId } : {}),
+        silentMs: r.silentMs,
+        at: parseTs(r.startedAt),
+      })),
+    agents: agentRows(t.path, p, now),
+    beads: p.beads,
+    act: p.act,
+    now,
+    stallMin: p.stall,
+  };
+}
+
 /** One projection pass over every plugin-managed open workspace of the
  *  repo. All bro inputs are local reads; each herdr write is a diff
  *  (live label/tokens already hold the last written values — no state
@@ -456,90 +573,47 @@ export function projectFleet(mainRoot: string, now = Date.now()): ProjectResult 
   if (trees?.worktrees === undefined) return none;
 
   const common = gitCommonDir(mainRoot);
-  const managed = managedSet(mainRoot, common);
   const wsAll = herdr<{ workspaces?: HerdrWorkspace[] }>(['workspace', 'list'])?.workspaces ?? [];
   const wsById = new Map(wsAll.map(w => [w.workspace_id, w]));
-
-  // the managed∩open set — every later plane read is only worth it
-  // when at least one workspace is ours to label
-  const targets = trees.worktrees.filter(t => {
-    const open = t.open_workspace_id;
-    if (open === undefined) return false;
-    const rec = managed.get(t.path);
-    return rec?.managed === true && rec.ws === open && wsById.has(open);
-  });
+  const targets = managedTargets(trees.worktrees, managedSet(mainRoot, common), wsById);
   if (targets.length === 0) return { reachable: true, workspaces: 0, writes: 0 };
 
-  const agentsHome = common === null ? null : join(common, 'bro', 'agents');
-  const registry = readAgentRegistry(mainRoot);
-  const branches = gitBranches(mainRoot);
-  const runs = collectLoopRuns(mainRoot, now);
-  const act = actStates(common);
-  const beads = readBeads(mainRoot).inProgress;
-  const hooks = hooksDirOf(mainRoot);
-  const details = hooks === null ? [] : liveWorkEntries(hooks, ['.work'], now);
-  const stall = stallMin(mainRoot);
-
+  const planes = readPlanes(mainRoot, common, now);
   let writes = 0;
   for (const t of targets) {
-    const openId = t.open_workspace_id as string;
-    const branch = t.branch ?? branches.get(t.path) ?? undefined;
-    const claim = worktreeClaim(t.path, now);
-    const input: TreeInput = {
-      path: t.path,
-      ...(branch !== undefined ? { branch } : {}),
-      ...(claim !== undefined ? { claim } : {}),
-      markerArmed: details.some(e =>
-        detailMatches(e.detail, { branch: branch ?? '', slug: claim ?? '', worktree: t.path })
-      ),
-      runs: runs
-        .filter(r => r.worktree === t.path)
-        .map(r => ({
-          state: r.state,
-          ...(r.beadId !== '' ? { beadId: r.beadId } : {}),
-          silentMs: r.silentMs,
-          at: parseTs(r.startedAt),
-        })),
-      agents: Object.entries(registry)
-        .filter(([, e]) => e.worktree === t.path)
-        .map(([key, e]) => {
-          const st = registryEntryState(agentsHome, e);
-          const live = st === 'running' || st === 'spawned';
-          return {
-            key,
-            live,
-            ...(live ? {} : { terminal: TERMINAL[st] }),
-            silentMs: live ? agentSilentMs(e, now) : null,
-            at: parseTs(e.spawnedAt),
-          };
-        }),
-      beads,
-      act,
-      now,
-      stallMin: stall,
-    };
-    const { projection, title } = projectTree(input);
-    writes += writeDiffs(openId, wsById.get(openId), projection, title, now);
+    const { projection, title } = projectTree(treeInput(t.tree, planes, now));
+    writes += writeDiffs(t, projection, title, now);
   }
   return { reachable: true, workspaces: targets.length, writes };
 }
 
 /** Push one workspace's diffs — the live label and tokens are the
- *  dedup record. A failing write skips this workspace only. */
-function writeDiffs(
-  wsId: string,
-  live: HerdrWorkspace | undefined,
-  proj: TreeProjection,
-  title: string,
-  now: number
-): number {
-  if (live === undefined) return 0;
-  let n = 0;
-  const label = labelFor(proj, title);
-  if ((live.label ?? '') !== label && herdrOk(['workspace', 'rename', wsId, label])) n += 1;
+ *  dedup record. A failing write skips that surface only. */
+function writeDiffs(ws: WsTarget, proj: TreeProjection, title: string, now: number): number {
+  return renameDiff(ws, proj, title) + metaDiff(ws, proj, now);
+}
 
-  const status = statusString(proj);
-  const tokens = live.tokens ?? {};
+function renameDiff(ws: WsTarget, proj: TreeProjection, title: string): number {
+  const label = labelFor(proj, title);
+  const changed = (ws.live.label ?? '') !== label;
+  return changed && herdrOk(['workspace', 'rename', ws.wsId, label]) ? 1 : 0;
+}
+
+function metaDiff(ws: WsTarget, proj: TreeProjection, now: number): number {
+  const args = metaArgs(ws.wsId, statusString(proj), ws.live.tokens ?? {}, now);
+  return args !== null && herdrOk(args) ? 1 : 0;
+}
+
+/** The report-metadata argv — or null when the live tokens already
+ *  hold the projection AND the plugin-era keys are gone. The `status`
+ *  token mirrors the label's bracket contents; `--clear-token` on
+ *  vacate. */
+function metaArgs(
+  wsId: string,
+  status: string,
+  tokens: Record<string, string>,
+  now: number
+): string[] | null {
   const args = [
     'workspace',
     'report-metadata',
@@ -549,21 +623,20 @@ function writeDiffs(
     '--seq',
     String(now),
   ];
-  let meta = false;
+  let dirty = false;
   if (status !== '' && tokens.status !== status) {
     args.push('--token', `status=${status}`);
-    meta = true;
+    dirty = true;
   } else if (status === '' && tokens.status !== undefined) {
     args.push('--clear-token', 'status');
-    meta = true;
+    dirty = true;
   }
   // retire the plugin-era keys — the daemon's `status` token replaces them
   for (const k of ['bro.worker', 'bro.pr', 'bro.gate']) {
     if (tokens[k] !== undefined) {
       args.push('--clear-token', k);
-      meta = true;
+      dirty = true;
     }
   }
-  if (meta && herdrOk(args)) n += 1;
-  return n;
+  return dirty ? args : null;
 }
