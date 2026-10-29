@@ -11,8 +11,9 @@ _Command examples track the upcoming **0.3.0** — grouped
 
 `bro mesh` coordinates work between bro rigs. Peer bindings can point to
 local checkouts or beads-remote Dolt replicas; requests flow through
-`inbox`/`claim`/`done`/`accept`/`reject`, with `wait` for blocking on
-dependencies.
+`inbox`/`claim`/`done`/`accept`/`reject`. `bro mesh wait` performs a
+point-check (not blocking); for blocking waits on external dependencies use
+`bro wait external:<rig>:<id>`.
 
 | Command                           | What it does                  |
 | --------------------------------- | ----------------------------- |

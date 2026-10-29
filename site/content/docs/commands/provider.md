@@ -13,13 +13,13 @@ _Command examples track the upcoming **0.3.0** — grouped
 so Claude Code can run on bro. Use `provider serve` to start the host,
 and the wiring helpers to point clients at it.
 
-| Command                                          | What it does                                     |
-| ------------------------------------------------ | ------------------------------------------------ |
-| `bro fleet provider serve [--port N] [--host H]` | Start the Messages-API host listener             |
-| `bro fleet provider url`                         | Print the base URL to configure clients          |
-| `bro fleet provider token`                       | Print/configure the auth token                   |
-| `bro fleet provider env`                         | Emit shell env to wire `ANTHROPIC_BASE_URL`/auth |
-| `bro fleet provider ensure`                      | Ensure the host is running                       |
+| Command                               | What it does                                     |
+| ------------------------------------- | ------------------------------------------------ |
+| `bro fleet provider serve [--port N]` | Start the Messages-API host listener             |
+| `bro fleet provider url`              | Print the base URL to configure clients          |
+| `bro fleet provider token`            | Print/configure the auth token                   |
+| `bro fleet provider env`              | Emit shell env to wire `ANTHROPIC_BASE_URL`/auth |
+| `bro fleet provider ensure`           | Ensure the host is running                       |
 
 Wire Claude Code by setting `ANTHROPIC_BASE_URL` to the host URL and the
 appropriate auth env. The conductor mounts an `acp` provider entry behind
