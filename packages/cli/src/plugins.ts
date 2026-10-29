@@ -661,8 +661,18 @@ export const PLUGINS: BroPlugin[] = [
           flags: { '--json': 'machine-readable report' },
           exits: { 0: 'would-be record printed', 2: 'missing hook name' },
         },
-        on: { exits: { 0: 'otel.enabled=true written to bro.config.local.json', 2: 'bro.config.local.ts shadows' } },
-        off: { exits: { 0: 'otel.enabled=false written to bro.config.local.json', 2: 'bro.config.local.ts shadows' } },
+        on: {
+          exits: {
+            0: 'otel.enabled=true written to bro.config.local.json',
+            2: 'bro.config.local.ts shadows',
+          },
+        },
+        off: {
+          exits: {
+            0: 'otel.enabled=false written to bro.config.local.json',
+            2: 'bro.config.local.ts shadows',
+          },
+        },
       },
       exits: { 0: 'status (bare `bro otel`)', 2: 'usage — unknown subcommand' },
     },
@@ -779,6 +789,7 @@ export const PLUGINS: BroPlugin[] = [
     summary:
       'Inter-rig work federation: me|peers|pull|inbox|request|claim|done|accept|reject|wait (specs/mesh)',
     run: runMeshCommand,
+    skill: 'mesh',
     configKey: 'mesh',
     configSchema: meshSection,
   }),
