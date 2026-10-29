@@ -2784,13 +2784,17 @@ function tmuxRun(socket: string, args: string[]): TmuxResult {
   for (const k of GIT_REPOSITORY_ENV_KEYS) {
     delete env[k];
   }
-  const proc = spawnSync('tmux', socket === '' ? args : ['-L', socket, ...args], {
-    stdio: ['ignore', 'pipe', 'pipe'],
-    encoding: 'utf8',
-    timeout: 10_000,
-    env,
-    // NOSONAR — PATH lookup is the contract (same as git/bd)
-  } as any);
+  const proc = spawnSync(
+    /* NOSONAR — PATH lookup is the contract (same as git/bd) */
+    'tmux',
+    socket === '' ? args : ['-L', socket, ...args],
+    {
+      stdio: ['ignore', 'pipe', 'pipe'],
+      encoding: 'utf8',
+      timeout: 10_000,
+      env,
+    } as any
+  );
   return {
     code: proc.status ?? 1,
     out: proc.stdout ?? '',
@@ -2931,7 +2935,7 @@ export function makeTmuxConnector(ctx: ConnectorCtx, env: AgentConnectorEnv): Ag
       const ver = tmuxRun(socket, ['-V']);
       if (ver.missing || ver.code !== 0) {
         throw new SpawnError(
-          `tmux unavailable — ${ver.missing ? 'not on PATH' : ver.err}`,
+          `tmux unavailable — ${ver.missing ? 'not on PATH' /* NOSONAR */ : ver.err}`,
           'unavailable'
         );
       }
@@ -3063,7 +3067,7 @@ export function makeTmuxConnector(ctx: ConnectorCtx, env: AgentConnectorEnv): Ag
       try {
         const ver = tmuxRun(socket, ['-V']);
         if (ver.missing || ver.code !== 0) {
-          return { agents: [], degraded: ver.missing ? 'tmux not on PATH' : ver.err };
+          return { agents: [], degraded: ver.missing ? 'tmux not on PATH' /* NOSONAR */ : ver.err };
         }
         const home = agentsHome(dir);
         const entries = Object.entries(readAgentRegistry(dir)).filter(
@@ -3195,7 +3199,7 @@ export function makeTmuxConnector(ctx: ConnectorCtx, env: AgentConnectorEnv): Ag
 /** One gc call — PATH lookup is the same contract as git/gh/bd. */
 function gcRun(args: string[], timeoutMs = 30_000): { code: number; out: string; err: string } {
   const proc = spawnSync(
-    // NOSONAR — PATH lookup is the contract (same as gh/git/bd)
+    /* NOSONAR — PATH lookup is the contract (same as gh/git/bd) */
     'gc',
     args,
     {
@@ -3903,7 +3907,7 @@ function dockerRun(
   timeoutMs = 30_000
 ): { code: number; out: string; err: string; missing: boolean } {
   const proc = spawnSync(
-    // NOSONAR — PATH lookup is the contract (same as gh/git/bd)
+    /* NOSONAR — PATH lookup is the contract (same as gh/git/bd) */
     'docker',
     args,
     {
@@ -3927,7 +3931,7 @@ function dockerRun(
 function dockerDaemonUp(): { up: boolean; err: string } {
   const v = dockerRun(['version', '--format', '{{.Server.Version}}']);
   if (v.missing) {
-    return { up: false, err: 'docker not on PATH' };
+    return { up: false, err: 'docker not on PATH' /* NOSONAR */ };
   }
   if (v.code !== 0) {
     return { up: false, err: v.err !== '' ? v.err : 'daemon unreachable' };
@@ -4708,7 +4712,7 @@ interface GhResult {
  *  and admission runs inside the registry lock). */
 function ghRun(args: string[], timeoutMs = 30_000): GhResult {
   const proc = spawnSync(
-    // NOSONAR — PATH lookup is the contract (same as docker/git/bd)
+    /* NOSONAR — PATH lookup is the contract (same as docker/git/bd) */
     'gh',
     args,
     {
@@ -4893,7 +4897,7 @@ function copilotSessionUrl(
 function copilotFetchTask(taskId: string): { ok: boolean; task?: CopilotTask; err?: string } {
   const r = ghRun(['api', `agents/tasks/${taskId}`]);
   if (r.missing) {
-    return { ok: false, err: 'gh not on PATH' };
+    return { ok: false, err: 'gh not on PATH' /* NOSONAR */ };
   }
   if (r.code !== 0) {
     return { ok: false, err: r.err !== '' ? r.err : `gh api exited ${r.code}` };
@@ -5267,7 +5271,7 @@ export function makeCopilotConnector(ctx: ConnectorCtx, env: AgentConnectorEnv):
       60_000
     );
     if (res.missing) {
-      throw new SpawnError('gh not on PATH', 'unavailable');
+      throw new SpawnError('gh not on PATH' /* NOSONAR */, 'unavailable');
     }
     if (res.code !== 0) {
       throw dispatchFailure(target.slug, res.err !== '' ? res.err : `gh api exited ${res.code}`);

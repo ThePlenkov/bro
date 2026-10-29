@@ -739,7 +739,11 @@ function spawnAgent(
         ? // the same `"$@"` positional exec the native backend builds —
           // argv workers are headless by construction (acp); sh resolves
           // argv[0] ('bro'/'npx') on PATH the way the backend does
-          spawn('sh', ['-c', 'exec "$@"', 'loop-agent', ...w.argv, promptFile], opts) // NOSONAR — argv[0] resolves on PATH by design, same as the backend's spawn
+          spawn(
+            /* NOSONAR — argv[0] resolves on PATH by design, same as the backend's spawn */ 'sh',
+            ['-c', 'exec "$@"', 'loop-agent', ...w.argv, promptFile],
+            opts
+          )
         : spawn('sh', ['-c', expandAgentCmd(laneCommand(ctx, lane), promptFile)], opts); // NOSONAR — operator-configured agent command
     if (logFd !== null) {
       // the child holds its own dup — our copy is spent
