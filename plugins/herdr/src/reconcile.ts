@@ -19,16 +19,19 @@ import {
   loadState,
   notify,
   type PluginState,
+  type PrActCacheEntry,
   repoDir,
-  type StatusAgent,
   type StatusWorktree,
   saveState,
   stateScope,
   type WorkspaceRec,
+  worktreeGone,
 } from './lib.ts';
 import { convergeMirrors, markExitedMirrors } from './mirrors.ts';
 import type { Planes } from './planes.ts';
 import { readPlanes } from './planes.ts';
+import { dropOrphanRenderers, ensureRenderer } from './renderers.ts';
+import { agentTreePath, statusFor, statusPrefix, type WorkspaceStatus } from './status.ts';
 
 const log = (s: string): void => console.log(`[reconcile] ${s}`);
 
@@ -66,13 +69,6 @@ function* markerArms(p: Planes): Iterable<ArmedTree> {
     const path = resolveDetail(d, p.main, p.status.worktrees);
     if (path !== undefined) yield { path, why: `session ${d}` };
   }
-}
-
-function agentTreePath(a: StatusAgent, p: Planes): string | undefined {
-  const reg = p.registry[a.id];
-  const byAbs =
-    reg?.worktree !== undefined ? p.status.worktrees.find(t => t.path === reg.worktree) : undefined;
-  return (byAbs ?? p.status.worktrees.find(t => t.name === a.worktree))?.path;
 }
 
 function* agentArms(p: Planes): Iterable<ArmedTree> {
@@ -134,6 +130,8 @@ interface WsCtx {
   wsById: Map<string, HerdrWorkspace>;
   state: PluginState;
   main: string;
+  /** act-state cache from the planes snapshot — label/metadata join. */
+  act: PrActCacheEntry[];
 }
 
 /** `worktree open` answers differently by path — fresh opens can carry
@@ -150,7 +148,12 @@ function openWorkspace(tree: ArmedTree, label: string, ctx: WsCtx): string | und
     log(`open ${basename(tree.path)} FAILED — skipped (${tree.why})`);
     return undefined;
   }
-  ctx.state.workspaces[tree.path] = { ws, label, managed: true };
+  ctx.state.workspaces[tree.path] = {
+    ...ctx.state.workspaces[tree.path],
+    ws,
+    label,
+    managed: true,
+  };
   log(`open ${basename(tree.path)} → ${ws} "${label}" (${tree.why})`);
   return ws;
 }
@@ -179,7 +182,7 @@ function ensureWorkspace(tree: ArmedTree, label: string, ctx: WsCtx): string | u
   const live = ctx.wsById.get(openId);
   if (labelDrifted(rec, openId, live, label)) {
     herdrTry(['workspace', 'rename', openId, label]);
-    ctx.state.workspaces[path] = { ws: openId, label, managed: true };
+    ctx.state.workspaces[path] = { ...rec, ws: openId, label, managed: true };
     log(`rename ${openId} → "${label}"`);
   } else if (rec !== undefined && live === undefined) {
     delete ctx.state.workspaces[path];
@@ -193,6 +196,39 @@ function ensureWorkspace(tree: ArmedTree, label: string, ctx: WsCtx): string | u
 export interface ConvergeResult {
   armed: number;
   mirrors: number;
+  renderers: number;
+  reaped: number;
+}
+
+/** report-metadata is the machine-readable mirror of the label prefix
+ *  — display-only tokens namespaced `bro.*`, written once per change
+ *  (the recorded `meta` map dedupes), never a substitute for the label
+ *  itself. Managed workspaces only: a user's own workspace gets none
+ *  of our tokens. */
+function reportMetadata(path: string, ws: string, st: WorkspaceStatus, ctx: WsCtx): void {
+  const rec = ctx.state.workspaces[path];
+  if (rec?.managed !== true || rec.ws !== ws) return;
+  const tokens: Record<string, string> = {};
+  if (st.worker !== undefined) tokens['bro.worker'] = st.worker;
+  if (st.gate !== undefined) tokens['bro.gate'] = st.gate;
+  if (st.pr !== undefined) tokens['bro.pr'] = String(st.pr);
+  const prev = rec.meta ?? {};
+  const cur = JSON.stringify(tokens);
+  if (JSON.stringify(prev) === cur) return;
+  const args = [
+    'workspace',
+    'report-metadata',
+    ws,
+    '--source',
+    'bro.fleet',
+    '--seq',
+    String(Date.now()),
+  ];
+  for (const [k, v] of Object.entries(tokens)) args.push('--token', `${k}=${v}`);
+  for (const k of Object.keys(prev)) {
+    if (!(k in tokens)) args.push('--clear-token', k);
+  }
+  if (herdrTry(args) !== undefined) rec.meta = tokens;
 }
 
 /** Workspaces for every armed tree; path → live workspace id. */
@@ -204,10 +240,74 @@ function convergeWorkspaces(
   const titles = new Map(p.status.beads.inProgress.map(b => [b.id, b.title] as const));
   const wsForPath = new Map<string, string>();
   for (const t of armed.values()) {
-    const ws = ensureWorkspace(t, desiredLabel(t, titles), ctx);
-    if (ws !== undefined) wsForPath.set(t.path, ws);
+    const st = statusFor(t.path, t.slug, p, ctx.act);
+    const label = `${statusPrefix(st)}${desiredLabel(t, titles)}`;
+    const ws = ensureWorkspace(t, label, ctx);
+    if (ws !== undefined) {
+      wsForPath.set(t.path, ws);
+      reportMetadata(t.path, ws, st, ctx);
+    }
   }
   return wsForPath;
+}
+
+/** Exactly one renderer per managed workspace — after mirrors so a
+ *  live mirror retires the fallback tail in the same pass. The
+ *  recorded ws id must match the live one — a stale `managed` record
+ *  left by a user reopen must not put our pane on their workspace. */
+function convergeRenderers(wsForPath: Map<string, string>, ctx: WsCtx): void {
+  for (const [path, ws] of wsForPath) {
+    const rec = ctx.state.workspaces[path];
+    if (rec?.managed === true && rec.ws === ws) {
+      ensureRenderer({ path, ws, state: ctx.state });
+    }
+  }
+  // wsById predates this pass's opens — a just-created workspace is
+  // live even though the snapshot never saw it
+  dropOrphanRenderers(ctx.state, new Set([...ctx.wsById.keys(), ...wsForPath.values()]));
+}
+
+/** The reaper — a worktree herdr still opens a workspace for, gone off
+ *  disk. One sighting stamps `goneSince`; a second pass at least the
+ *  grace window later closes the workspace. Only filesystem proof and
+ *  time decide — a vanished checkout is never "transient" twice. */
+const GONE_GRACE_MS = 60_000;
+
+function reapDead(p: Planes, ctx: WsCtx): number {
+  const now = Date.now();
+  let reaped = 0;
+  for (const w of p.worktrees.worktrees) {
+    const ws = w.open_workspace_id;
+    if (ws === undefined || w.path === p.main) continue;
+    if (!worktreeGone(w.path)) {
+      delete ctx.state.gone[w.path];
+      continue;
+    }
+    if (ctx.wsById.get(ws) === undefined) {
+      // the workspace plane no longer carries this id — somebody closed
+      // it already; whatever we recorded is residue.
+      delete ctx.state.gone[w.path];
+      delete ctx.state.workspaces[w.path];
+      delete ctx.state.renderers[w.path];
+      continue;
+    }
+    let since = ctx.state.gone[w.path];
+    if (since === undefined) {
+      since = now;
+      ctx.state.gone[w.path] = now;
+    }
+    if (now - since < GONE_GRACE_MS) continue;
+    if (herdrTry(['workspace', 'close', ws]) !== undefined) {
+      delete ctx.state.workspaces[w.path];
+      delete ctx.state.renderers[w.path];
+      delete ctx.state.gone[w.path];
+      reaped += 1;
+      log(`reaped ${ws} — worktree gone: ${basename(w.path)}`);
+    } else {
+      log(`reap ${ws} failed — retry next pass`);
+    }
+  }
+  return reaped;
 }
 
 /** One converge pass over a planes snapshot — the function every
@@ -224,14 +324,22 @@ export function converge(p: Planes): ConvergeResult {
     wsById: new Map(p.workspaces.map(w => [w.workspace_id, w])),
     state: loadState(scope),
     main: p.main,
+    act: p.act,
   };
 
   const armed = armedSet(p);
   const wsForPath = convergeWorkspaces(p, armed, ctx);
   convergeMirrors(p, wsForPath, ctx.openByPath, ctx.state);
   markExitedMirrors(p, ctx.state);
+  convergeRenderers(wsForPath, ctx);
+  const reaped = reapDead(p, ctx);
   saveState(scope, ctx.state);
-  return { armed: armed.size, mirrors: Object.keys(ctx.state.mirrors).length };
+  return {
+    armed: armed.size,
+    mirrors: Object.keys(ctx.state.mirrors).length,
+    renderers: Object.keys(ctx.state.renderers).length,
+    reaped,
+  };
 }
 
 /** One-shot entry — the `sync` action and the startup hook both land
@@ -244,8 +352,12 @@ export function reconcile(): ConvergeResult {
 if (process.argv[1] !== undefined && import.meta.url === `file://${process.argv[1]}`) {
   try {
     const r = reconcile();
-    log(`done — ${r.armed} armed worktrees, ${r.mirrors} mirror panes`);
-    if (r.armed > 0) notify('bro sync', `${r.armed} armed worktrees · ${r.mirrors} mirrors`);
+    log(
+      `done — ${r.armed} armed worktrees, ${r.mirrors} mirror panes, ${r.renderers} renderers, ${r.reaped} reaped`
+    );
+    if (r.armed > 0) {
+      notify('bro sync', `${r.armed} armed worktrees · ${r.mirrors} mirrors · ${r.reaped} reaped`);
+    }
   } catch (err) {
     console.error(`[reconcile] ${err instanceof Error ? err.message : String(err)}`);
     process.exitCode = 1;

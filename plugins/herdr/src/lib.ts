@@ -37,7 +37,9 @@ export function run(cmd: string, args: string[], cwd?: string): RunOut {
     env: process.env,
   });
   return {
-    code: r.status ?? (r.error !== undefined ? -1 : 0),
+    // no status is never success — a signal-killed child reports
+    // status=null, so does a spawn error; both are failure
+    code: r.status ?? -1,
     out: r.stdout ?? '',
     err: r.stderr ?? (r.error !== undefined ? String(r.error) : ''),
   };
@@ -59,6 +61,13 @@ export function herdrTry<T>(args: string[], cwd?: string): T | undefined {
   } catch {
     return undefined;
   }
+}
+
+/** `herdr` verbs that answer exit-0-and-nothing on success (`pane run`
+ *  prints no envelope) — for those the exit code IS the answer; the
+ *  envelope parse in `herdr` would call an empty stdout a failure. */
+export function herdrOk(args: string[], cwd?: string): boolean {
+  return run(HERDR, args, cwd).code === 0;
 }
 
 export function bro(args: string[], cwd: string): string {
@@ -110,7 +119,7 @@ export function gitTop(dir: string): string | null {
   return r.code === 0 ? r.out.trim() : null;
 }
 
-function gitCommonDir(dir: string): string | null {
+export function gitCommonDir(dir: string): string | null {
   const r = run('git', ['-C', dir, 'rev-parse', '--git-common-dir'], dir);
   if (r.code !== 0) return null;
   const p = r.out.trim();
@@ -159,7 +168,7 @@ export interface StatusWorktree {
 export interface BroStatus {
   dir: string;
   worktrees: StatusWorktree[];
-  beads: { inProgress: Array<{ id: string; title: string }> };
+  beads: { inProgress: Array<{ id: string; title: string; link?: string }> };
   fleet: { maxConcurrent: number; agents: StatusAgent[] };
   loop: {
     stallMin: number;
@@ -217,6 +226,53 @@ export function agentsJson(repo: string): Record<string, AgentEntry> {
   } catch {
     return {};
   }
+}
+
+/** One `<git-common>/bro/act-state/*.json` record — the shared gate
+ *  feed every bro poller writes (`fetchPrActState`'s file cache,
+ *  @broject/act state-cache.ts). The plugin only reads the fields a
+ *  label needs — this is a summary plane, not the gate itself. */
+export interface PrActCacheEntry {
+  fetchedAt: number;
+  state: {
+    pr: number;
+    headRef?: string;
+    state?: string;
+    isDraft?: boolean;
+    mergeable?: string;
+    openThreads?: number;
+    ciPending?: number;
+    ciFailing?: number;
+    reviewersPending?: number;
+    sastPending?: number;
+  };
+}
+
+/** The last-fetched act gate state per PR, keyed `state.pr` — a file
+ *  read, never a host call: whatever a real poller observed most
+ *  recently is the freshest thing a label can show without paying gh. */
+export function actStates(repo: string): PrActCacheEntry[] {
+  const gd = gitCommonDir(repo);
+  if (gd === null) return [];
+  const dir = join(gd, 'bro', 'act-state');
+  let names: string[];
+  try {
+    names = readdirSync(dir).filter(f => f.endsWith('.json'));
+  } catch {
+    return [];
+  }
+  const out: PrActCacheEntry[] = [];
+  for (const f of names) {
+    try {
+      const v = JSON.parse(readFileSync(join(dir, f), 'utf8')) as Partial<PrActCacheEntry>;
+      if (typeof v.fetchedAt === 'number' && typeof v.state?.pr === 'number') {
+        out.push(v as PrActCacheEntry);
+      }
+    } catch {
+      // a corrupt entry is a miss, never a pass failure
+    }
+  }
+  return out;
 }
 
 /** Live `.work` marker detail lines — the session-armed occupancy plane.
@@ -294,6 +350,28 @@ export function armedWorkDetails(repo: string, now = Date.now()): string[] {
   } catch {
     return [];
   }
+}
+
+/** "Gone" is a definitive absence — ENOENT/ENOTDIR only. Any other
+ *  stat failure (EACCES, transient fs errors) is NOT proof the
+ *  worktree vanished; same discipline `paneGone` encodes. */
+export function worktreeGone(path: string): boolean {
+  try {
+    statSync(path);
+    return false;
+  } catch (e) {
+    const code = (e as NodeJS.ErrnoException).code;
+    return code === 'ENOENT' || code === 'ENOTDIR';
+  }
+}
+
+/** Silence bucketing shared by the diff key and the label token — a
+ *  token only moves when its bucket does, so rename churn is per-5min
+ *  under an hour, hourly above, never per-tick. */
+export function silentBucketMin(silentMs: number | null | undefined): number | null {
+  if (silentMs === null || silentMs === undefined || !Number.isFinite(silentMs)) return null;
+  const min = silentMs / 60_000;
+  return min >= 60 ? Math.floor(min / 60) * 60 : Math.max(0, Math.floor(min / 5) * 5);
 }
 
 // --- herdr planes ----------------------------------------------------------
@@ -396,6 +474,9 @@ export interface WorkspaceRec {
   /** true only for workspaces this plugin opened — drift renames never
    *  touch workspaces a user named themselves. */
   managed?: boolean;
+  /** last-written report-metadata tokens — the dedup record so a pass
+   *  only calls `workspace report-metadata` when a token moved. */
+  meta?: Record<string, string>;
 }
 
 export interface MirrorRec {
@@ -412,11 +493,22 @@ export interface MirrorRec {
   marked?: boolean;
 }
 
+export interface RendererRec {
+  workspace: string;
+  /** the worktree path the workspace serves — the tail's cwd. */
+  worktree: string;
+  pane_id: string;
+}
+
 export interface PluginState {
   /** worktree path → the workspace we opened (label drift is ours to fix). */
   workspaces: Record<string, WorkspaceRec>;
   /** molStep → mirror pane record. */
   mirrors: Record<string, MirrorRec>;
+  /** worktree path → the event-tail pane record (one per managed ws). */
+  renderers: Record<string, RendererRec>;
+  /** worktree path → first-gone mtime — the reaper's two-sighting grace. */
+  gone: Record<string, number>;
 }
 
 /** One state file per repository — two repos sharing the plugin state
@@ -439,9 +531,11 @@ export function loadState(scope: string): PluginState {
     return {
       workspaces: typeof v.workspaces === 'object' && v.workspaces !== null ? v.workspaces : {},
       mirrors: typeof v.mirrors === 'object' && v.mirrors !== null ? v.mirrors : {},
+      renderers: typeof v.renderers === 'object' && v.renderers !== null ? v.renderers : {},
+      gone: typeof v.gone === 'object' && v.gone !== null ? v.gone : {},
     };
   } catch {
-    return { workspaces: {}, mirrors: {} };
+    return { workspaces: {}, mirrors: {}, renderers: {}, gone: {} };
   }
 }
 

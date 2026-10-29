@@ -1,9 +1,9 @@
-import { describe, test } from 'node:test';
 import assert from 'node:assert/strict';
 import { join } from 'node:path';
+import { describe, test } from 'node:test';
 import { fileURLToPath } from 'node:url';
 import { AcpRenderer } from '../src/acp-render.ts';
-import { Wire, parseArgs, run, runFixture } from '../src/acp-watch.ts';
+import { parseArgs, run, runFixture, Wire } from '../src/acp-watch.ts';
 import { shellWords } from '../src/lib.ts';
 
 const HERE = fileURLToPath(new URL('.', import.meta.url));

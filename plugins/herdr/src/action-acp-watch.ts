@@ -24,11 +24,11 @@
  */
 import { basename, join } from 'node:path';
 import {
-  PLUGIN_ROOT,
   configValue,
   ctxJson,
   herdrTry,
   notify,
+  PLUGIN_ROOT,
   paneIdle,
   paneList,
   repoDir,
