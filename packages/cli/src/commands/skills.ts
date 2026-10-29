@@ -82,13 +82,13 @@ function installed(root: string, name: string): boolean {
   return existsSync(join(skillsDirOf(root), name, 'SKILL.md'));
 }
 
-/** Lock entries and on-disk skill dirs not covered by any declared
- *  source — reported, never removed. */
-function extraNames(
+/** Every skill name a declared source covers — lock-matched names plus
+ *  the local link's own name. */
+function coveredNames(
   root: string,
   declared: SkillSource[],
   locked: Map<string, LockedSkill>
-): string[] {
+): Set<string> {
   const covered = new Set<string>();
   for (const src of declared) {
     for (const n of lockNamesFor(src, locked)) {
@@ -98,21 +98,29 @@ function extraNames(
       covered.add(localSkillName(root, src.path));
     }
   }
-  const extras = new Set<string>();
-  for (const name of locked.keys()) {
-    if (!covered.has(name)) {
-      extras.add(name);
-    }
-  }
+  return covered;
+}
+
+/** Skill names materialized on disk — an absent `.agents/skills` dir
+ *  reads as none. */
+function diskSkillNames(root: string): string[] {
   try {
-    for (const entry of readdirSync(skillsDirOf(root), { withFileTypes: true })) {
-      if (!covered.has(entry.name)) {
-        extras.add(entry.name);
-      }
-    }
+    return readdirSync(skillsDirOf(root), { withFileTypes: true }).map(e => e.name);
   } catch {
     // no .agents/skills dir — nothing on disk to report
+    return [];
   }
+}
+
+/** Lock entries and on-disk skill dirs not covered by any declared
+ *  source — reported, never removed. */
+function extraNames(
+  root: string,
+  declared: SkillSource[],
+  locked: Map<string, LockedSkill>
+): string[] {
+  const covered = coveredNames(root, declared, locked);
+  const extras = new Set([...locked.keys(), ...diskSkillNames(root)].filter(n => !covered.has(n)));
   return [...extras].sort((a, b) => a.localeCompare(b));
 }
 
@@ -432,6 +440,18 @@ Config (bro.config.json "skills"):
 
 const BOOL_FLAGS = new Set(['--json', '--help', '-h']);
 
+/** A flag spelled the way the command accepts it — `--root=<dir>` or a
+ *  registered bool; `--root <dir>` consumes its value separately. */
+function knownFlag(a: string): boolean {
+  if (!a.startsWith('-')) {
+    return false;
+  }
+  if (a.startsWith('--root=')) {
+    return true;
+  }
+  return BOOL_FLAGS.has(a);
+}
+
 /** Stray args after the sub — `--root` consumes its value; anything
  *  else that isn't a known bool flag is a usage error. */
 function rejectStrays(rest: string[]): void {
@@ -444,7 +464,7 @@ function rejectStrays(rest: string[]): void {
       i += 1;
       continue;
     }
-    if (a.startsWith('--root=') || (a.startsWith('-') && BOOL_FLAGS.has(a))) {
+    if (knownFlag(a)) {
       continue;
     }
     const kind = a.startsWith('-') ? 'option' : 'argument';

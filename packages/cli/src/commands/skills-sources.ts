@@ -20,17 +20,18 @@ const dotSeg = (repo: string): boolean => repo.split('/').some(s => s === '.' ||
 
 /** A `local:` path must stay inside the checkout — absolute paths and
  *  `..` segments would link outside content into `.agents/skills/`. */
+const RELATIVE = 'local: must be repo-relative — no absolute paths, no ..';
+
 function localPath(raw: string, spec: string, prefix: string): SkillSource {
   const path = spec.slice(prefix.length).trim();
   if (path === '') {
     return { kind: 'invalid', raw, reason: 'local: needs a repo-relative path' };
   }
-  if (isAbsolute(path) || path.split('/').includes('..')) {
-    return {
-      kind: 'invalid',
-      raw,
-      reason: 'local: must be repo-relative — no absolute paths, no ..',
-    };
+  if (isAbsolute(path)) {
+    return { kind: 'invalid', raw, reason: RELATIVE };
+  }
+  if (path.split('/').includes('..')) {
+    return { kind: 'invalid', raw, reason: RELATIVE };
   }
   return { kind: 'local', path, raw };
 }
@@ -51,7 +52,10 @@ function parseGithubSource(raw: string, spec: string): SkillSource | null {
     .split('/')
     .filter(s => s !== '');
   const repo = `${owner ?? ''}/${name ?? ''}`;
-  if (!GH_REPO.test(repo) || dotSeg(repo)) {
+  if (!GH_REPO.test(repo)) {
+    return { kind: 'invalid', raw, reason: 'github: needs <owner>/<repo>[/<path>]' };
+  }
+  if (dotSeg(repo)) {
     return { kind: 'invalid', raw, reason: 'github: needs <owner>/<repo>[/<path>]' };
   }
   if (rest.length === 0) {
@@ -60,6 +64,27 @@ function parseGithubSource(raw: string, spec: string): SkillSource | null {
   const path = rest.join('/');
   return { kind: 'github', repo, path, skill: basename(path), raw };
 }
+
+function parseUrlSource(raw: string, spec: string): SkillSource | null {
+  if (spec.startsWith('http://')) {
+    return { kind: 'invalid', raw, reason: 'plaintext http:// is not a source — use https://' };
+  }
+  return spec.startsWith('https://') ? { kind: 'url', url: spec, raw } : null;
+}
+
+function parseBareRepo(raw: string, spec: string): SkillSource | null {
+  if (!GH_REPO.test(spec)) {
+    return null;
+  }
+  if (dotSeg(spec)) {
+    return null;
+  }
+  return { kind: 'github', repo: spec, raw };
+}
+
+/** The grammar, in precedence order — first parser to claim the spec
+ *  wins. A parser returns `null` only when the spec is not its shape. */
+const SOURCE_PARSERS = [parseLocalSource, parseGithubSource, parseUrlSource, parseBareRepo];
 
 /** One `skills.install` entry → a typed source. Anything outside the
  *  grammar is `invalid` — reported by the command, never skipped. */
@@ -72,22 +97,11 @@ export function parseSkillSource(raw: unknown): SkillSource {
     };
   }
   const spec = raw.trim();
-  const local = parseLocalSource(raw, spec);
-  if (local !== null) {
-    return local;
-  }
-  const github = parseGithubSource(raw, spec);
-  if (github !== null) {
-    return github;
-  }
-  if (spec.startsWith('http://')) {
-    return { kind: 'invalid', raw, reason: 'plaintext http:// is not a source — use https://' };
-  }
-  if (spec.startsWith('https://')) {
-    return { kind: 'url', url: spec, raw };
-  }
-  if (GH_REPO.test(spec) && !dotSeg(spec)) {
-    return { kind: 'github', repo: spec, raw };
+  for (const parse of SOURCE_PARSERS) {
+    const src = parse(raw, spec);
+    if (src !== null) {
+      return src;
+    }
   }
   return {
     kind: 'invalid',
@@ -95,6 +109,20 @@ export function parseSkillSource(raw: unknown): SkillSource {
     reason:
       'expected github:<owner>/<repo>[/<path>], <owner>/<repo>, an https:// URL, or local:<path>',
   };
+}
+
+/** The skill a `/tree/<ref>/<path…>` URL names — the basename of the
+ *  pinned path. A URL without a tree path names no single skill. */
+function urlTreeSkill(url: string): string | undefined {
+  const segs = url.split('/').filter(s => s !== '');
+  const treeAt = segs.indexOf('tree');
+  if (treeAt < 0) {
+    return undefined;
+  }
+  if (segs.length <= treeAt + 2) {
+    return undefined;
+  }
+  return segs.at(-1);
 }
 
 /** `https://github.com/<owner>/<repo>[/tree/<ref>/<path…>]` — the repo a
@@ -105,11 +133,7 @@ function urlRepo(url: string): { repo: string; skill?: string } | null {
   if (m?.[1] === undefined) {
     return null;
   }
-  const repo = m[1].replace(/\.git$/, '');
-  const segs = url.split('/').filter(s => s !== '');
-  const treeAt = segs.indexOf('tree');
-  const skill = treeAt >= 0 && segs.length > treeAt + 2 ? segs.at(-1) : undefined;
-  return skill !== undefined ? { repo, skill } : { repo };
+  return { repo: m[1].replace(/\.git$/, ''), skill: urlTreeSkill(url) };
 }
 
 /** A source string compared for equality — scheme, `git@` form, `.git`
@@ -123,23 +147,41 @@ function normSource(s: string): string {
     .replace(/\/+$/, '');
 }
 
+function lockedNamesMatching(
+  locked: Map<string, LockedSkill>,
+  match: (e: LockedSkill) => boolean
+): string[] {
+  return [...locked.values()].filter(match).map(e => e.name);
+}
+
+function githubLockNames(
+  src: SkillSource & { kind: 'github' },
+  locked: Map<string, LockedSkill>
+): string[] {
+  if (src.skill !== undefined) {
+    return [src.skill];
+  }
+  return lockedNamesMatching(locked, e => e.source === src.repo);
+}
+
+function urlLockNames(url: string, locked: Map<string, LockedSkill>): string[] {
+  const u = urlRepo(url);
+  if (u?.skill !== undefined) {
+    return [u.skill];
+  }
+  const want = u?.repo ?? normSource(url);
+  return lockedNamesMatching(locked, e => normSource(e.source) === want);
+}
+
 /** Which lock entries a github/URL source is expected to cover —
  *  a pinned path names one skill; a bare repo/URL is covered by the
  *  entries it recorded (`source` matches, normalized, on any host). */
 export function lockNamesFor(src: SkillSource, locked: Map<string, LockedSkill>): string[] {
-  if (src.kind === 'github' && src.skill !== undefined) {
-    return [src.skill];
+  if (src.kind === 'github') {
+    return githubLockNames(src, locked);
   }
   if (src.kind === 'url') {
-    const u = urlRepo(src.url);
-    if (u?.skill !== undefined) {
-      return [u.skill];
-    }
-    const want = u?.repo ?? normSource(src.url);
-    return [...locked.values()].filter(e => normSource(e.source) === want).map(e => e.name);
-  }
-  if (src.kind === 'github') {
-    return [...locked.values()].filter(e => e.source === src.repo).map(e => e.name);
+    return urlLockNames(src.url, locked);
   }
   return [];
 }
