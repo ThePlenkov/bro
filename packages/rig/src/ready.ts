@@ -40,7 +40,10 @@ export const NEVER_CLAIM_LABELS = ['gt:slot']
  *  needed (or wanted) on this side of the package boundary. */
 export function storeFor(dir?: string, opts?: FacadeOpts): TaskStore {
   const root =
-    dir ?? (gitTry(['rev-parse', '--show-toplevel']).out.trim() || process.cwd())
+    dir ??
+    (gitTry(['rev-parse', '--show-toplevel']).out.trim() ||
+      gitTry(['-C', process.cwd(), 'rev-parse', '--show-toplevel']).out.trim() ||
+      process.cwd())
   return facade('tasks', { dir: root }, opts ?? { prefer: loadConfig(root).connectors })
 }
 

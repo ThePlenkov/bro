@@ -8,13 +8,12 @@
  *  thin adapter over this — argv/stdout/exit stay in commands/. */
 import { existsSync } from 'node:fs'
 import {
-  bdActor,
+  connectors,
   gitTry,
   mainWorktreeRoot,
   pidAlive,
   readAgentRegistry,
   reviewHost,
-  taskStore,
   loadConfig,
   worktreePathFor,
   type AgentRegistryEntry,
@@ -27,7 +26,7 @@ import {
   queueScope,
   WAITING_LABEL,
 } from '@broject/drill'
-import { readyBeads } from './ready.ts'
+import { readyBeads, storeFor } from './ready.ts'
 
 export interface RigNext {
   verdict: 'step' | 'gate' | 'wait' | 'done' | 'blocked'
@@ -51,13 +50,15 @@ function wakePredicate(row: TaskRow): string | undefined {
 /** No-arg focus: the current frame's queue top (intake order), else
  *  the drill leaf, else the first ready row — epic rows are containers
  *  and gt:slot coordination primitives are never work items (the
- *  same bd-side exclusion next/loop ride). */
+ *  same bd-side exclusion next/loop ride). Queue and frame reads anchor
+ *  at `dir`/`opts.store` — the ambient default would pick work for the
+ *  wrong checkout. */
 export function rigFocus(dir: string, opts?: { store?: TaskStore }): string | undefined {
-  const top = queueItems(queueScope())[0]
+  const top = queueItems(queueScope(undefined, dir, opts), dir, opts)[0]
   if (top !== undefined) {
     return top.id
   }
-  const leaf = currentFrame()
+  const leaf = currentFrame(dir, opts)
   if (leaf) {
     return leaf.id
   }
@@ -80,17 +81,15 @@ function agentWait(entry: AgentRegistryEntry | undefined, id: string): RigNext |
   ) {
     return { verdict: 'wait', id, detail: `agent ${entry.agentId} in flight` }
   }
-  // a recorded death trumps every liveness handle
-  if (entry.stopped === true || entry.exitStatus !== undefined) {
-    return undefined
-  }
-  // no pid handle — a remote/detached backend (devin, copilot): absent
-  // a recorded death the durable picture reads in-flight, and reporting
+  // no recorded death and no pid handle — a remote/detached backend
+  // (devin, copilot): the durable picture reads in-flight, and reporting
   // step here would invite duplicate work. Reaping stays status/
   // respawn's job — this probe never calls the remote API
-  if (pid === undefined) {
+  if (entry.stopped !== true && entry.exitStatus === undefined && pid === undefined) {
     return { verdict: 'wait', id, detail: `agent ${entry.agentId} in flight (remote)` }
   }
+  // a recorded death — or a dead pid's stale marker — trumps every
+  // liveness handle; the item falls through to the forge/work legs
   return undefined
 }
 
@@ -103,6 +102,24 @@ function itemWorktree(dir: string, id: string, entry: AgentRegistryEntry | undef
   }
   const main = mainWorktreeRoot(dir)
   return main === null ? undefined : worktreePathFor(main, id)
+}
+
+/** Can a reviews connector resolve for this checkout — the probe-side
+ *  twin of pickConnector's eligibility rule: a configured pin always
+ *  counts (its failures are real outages), unnamed resolution needs at
+ *  least one non-opt-in provider. When nothing can resolve there is no
+ *  forge to gate on at all — parking the item on 'host unreachable'
+ *  would be a lie about a plane that doesn't exist. */
+function reviewsResolvable(prefer: Record<string, string>): boolean {
+  if (prefer.reviews !== undefined) {
+    return true
+  }
+  return connectors().some(
+    (c) =>
+      typeof c.reviews === 'function' &&
+      c.optIn !== true &&
+      !(c.optInFacades?.includes('reviews') ?? false)
+  )
 }
 
 /** The gate probe: an open PR on the worktree's branch moves the next
@@ -120,11 +137,20 @@ function gateVerdict(dir: string, id: string, wt: string | undefined): RigNext |
   if (branch === '') {
     return undefined
   }
+  const rawConnectors = (loadConfig(dir) as any).connectors
+  const prefer: Record<string, string> = {}
+  if (rawConnectors && typeof rawConnectors === 'object' && !Array.isArray(rawConnectors)) {
+    for (const [k, v] of Object.entries(rawConnectors)) {
+      if (typeof v === 'string' && v.trim() !== '') {
+        prefer[k] = v.trim()
+      }
+    }
+  }
+  if (!reviewsResolvable(prefer)) {
+    return undefined
+  }
   try {
-    const rev = reviewHost(
-      dir,
-      (loadConfig(dir) as { connectors?: Record<string, string> }).connectors
-    )
+    const rev = reviewHost(dir, prefer)
     const open = rev.prsForBranch(branch)
     if (open.length > 0) {
       return { verdict: 'gate', id, detail: `pr=#${open[0]}` }
@@ -141,43 +167,28 @@ function gateVerdict(dir: string, id: string, wt: string | undefined): RigNext |
   return undefined
 }
 
-/** The verdict for one item — the ladder from spec .5: done → wait →
- *  gate → live-worker wait → foreign-claim blocked → dep-gated
- *  blocked → step. `opts.gate === false` skips the worktree/PR probe —
- *  callers that own the gate themselves (drive's fixer spawn,
- *  spec bro-oy3k1.6) ask for the cheap ladder only. `opts.store` pins
- *  the tasks backend — a facade-resolved store (loop/drive contexts)
- *  must answer the same verdicts a beads one does. */
-export function rigNext(
-  dir: string,
-  item?: string,
-  opts?: { gate?: boolean; store?: TaskStore }
-): RigNext {
-  const store = opts?.store ?? taskStore(dir)
-  const id = item ?? rigFocus(dir, { store })
-  if (id === undefined) {
-    return { verdict: 'done' }
-  }
-  const row = store.get<TaskRow>(id)
-  if (row === undefined) {
-    return { verdict: 'blocked', id, detail: 'unknown id' }
-  }
-  if (row.status === 'closed') {
-    return { verdict: 'done', id }
-  }
-  if (row.labels?.includes(WAITING_LABEL)) {
-    return { verdict: 'wait', id, detail: wakePredicate(row) }
-  }
+/** The settled legs — anything that supersedes the work ladder: a live
+ *  registry agent owns the step, an open PR moves the transition to the
+ *  gate, a settled PR is the finalize step. `gate === false` skips the
+ *  worktree/PR probe — callers that own the gate themselves (drive's
+ *  fixer spawn, spec bro-oy3k1.6) ask for the cheap ladder only. */
+function settledVerdict(dir: string, id: string, gate: boolean | undefined): RigNext | undefined {
   const entry = readAgentRegistry(dir)[id]
-  const settled =
+  return (
     agentWait(entry, id) ??
-    (opts?.gate === false ? undefined : gateVerdict(dir, id, itemWorktree(dir, id, entry)))
-  if (settled !== undefined) {
-    return settled
-  }
+    (gate === false ? undefined : gateVerdict(dir, id, itemWorktree(dir, id, entry)))
+  )
+}
+
+/** The work leg: own-claim resume, foreign-claim blocked, dep-gated
+ *  blocked, else step (+ queue rank when the item sits on a queue). */
+function workVerdict(dir: string, store: TaskStore, row: TaskRow, id: string): RigNext {
   if (row.status === 'in_progress') {
-    const actor = bdActor(dir)
-    if (row.assignee === actor) {
+    // the store's own claim identity decides ownership — a backend
+    // without an actor concept keeps the claim marker's word
+    // (fail-open per TaskStore.actor): only an unclaimed row resumes
+    const actor = store.actor?.()
+    if (actor === undefined ? (row.assignee ?? '') === '' : row.assignee === actor) {
       return { verdict: 'step', id, detail: 'own claim — resume' }
     }
     return { verdict: 'blocked', id, detail: `claimed by ${row.assignee ?? '?'}` }
@@ -187,6 +198,40 @@ export function rigNext(
   if (!readyBeads(dir, { store }).some((r) => r.id === id)) {
     return { verdict: 'blocked', id, detail: 'dep-gated or deferred' }
   }
-  const rank = queueItems(queueScope()).find((q) => q.id === id)?.rank
+  const rank = queueItems(queueScope(undefined, dir, { store }), dir, { store }).find(
+    (q) => q.id === id
+  )?.rank
   return { verdict: 'step', id, detail: rank === undefined ? undefined : `queue rank ${rank}` }
+}
+
+/** The verdict for one item — the ladder from spec .5: done → wait →
+ *  gate → live-worker wait → foreign-claim blocked → dep-gated
+ *  blocked → step. `opts.gate === false` skips the worktree/PR probe.
+ *  `opts.store` pins the tasks backend — a facade-resolved store
+ *  (loop/drive contexts) must answer the same verdicts a beads one
+ *  does; the unpinned default resolves the checkout's CONFIGURED tasks
+ *  connector, not beads by fiat. */
+export function rigNext(
+  dir: string,
+  item?: string,
+  opts?: { gate?: boolean; store?: TaskStore }
+): RigNext {
+  const store = opts?.store ?? storeFor(dir)
+  const id = item ?? rigFocus(dir, { store })
+  if (id === undefined) {
+    return { verdict: 'done' }
+  }
+  const row = store.get<TaskRow>(id)
+  if (row === undefined) {
+    return { verdict: 'blocked', id, detail: 'unknown id' }
+  }
+  // status legs first — a closed or parked row never reaches the
+  // registry/forge probes
+  if (row.status === 'closed') {
+    return { verdict: 'done', id }
+  }
+  if (row.labels?.includes(WAITING_LABEL)) {
+    return { verdict: 'wait', id, detail: wakePredicate(row) }
+  }
+  return settledVerdict(dir, id, opts?.gate) ?? workVerdict(dir, store, row, id)
 }

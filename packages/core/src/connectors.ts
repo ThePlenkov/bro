@@ -21,37 +21,37 @@
  * contract). New facades join FacadeMap + Connector together, and only
  * when a real consumer exists.
  */
-import { readdirSync, readFileSync, realpathSync } from 'node:fs';
-import { join, resolve } from 'node:path';
-import { checkBeads } from './bd.ts';
-import { loadConfig } from './config.ts';
-import { gitTry, gitTryAsync, gitWorktreeRoots } from './git.ts';
-import { markerOwner } from './proc.ts';
-import type { EventsFacade } from './events.ts';
-import type { QueryFacade } from './queries.ts';
-import type { JudgeFacade } from './judge.ts';
-import type { MergeQueueFacade, ReviewFacade } from './review.ts';
-import type { Guard } from './guards.ts';
-import { guardProblems } from './guards.ts';
-import type { SpecStore } from './specs.ts';
-import type { StackFacade } from './stacks.ts';
-import { gitStacks } from './stacks.ts';
-import type { TaskRow, TaskStore, TaskStoreAsync } from './tasks.ts';
-import { taskStore, taskStoreAsync } from './tasks.ts';
+import { readdirSync, readFileSync, realpathSync } from 'node:fs'
+import { join, resolve } from 'node:path'
+import { checkBeads } from './bd.ts'
+import { loadConfig } from './config.ts'
+import { gitTry, gitWorktreeRoots } from './git.ts'
+import { markerOwner } from './proc.ts'
+import type { EventsFacade } from './events.ts'
+import type { QueryFacade } from './queries.ts'
+import type { JudgeFacade } from './judge.ts'
+import type { MergeQueueFacade, ReviewFacade } from './review.ts'
+import type { Guard } from './guards.ts'
+import { guardProblems } from './guards.ts'
+import type { SpecStore } from './specs.ts'
+import type { StackFacade } from './stacks.ts'
+import { gitStacks } from './stacks.ts'
+import type { TaskRow, TaskStore, TaskStoreAsync } from './tasks.ts'
+import { taskStore, taskStoreAsync } from './tasks.ts'
 
 export interface ConnectorCtx {
   /** Working dir — repo root for project-scoped facades, the resolved
    *  global dir for user-level ones (same contract as taskStore(dir)). */
-  dir: string;
+  dir: string
   /** The host client's id for the tool call being judged — the two
    *  hook events of ONE call (a pre-tool and a permission request)
    *  share it. A guard that budgets per call keys its slot on it
    *  (spec bro-bww9v). */
-  toolUseId?: string;
+  toolUseId?: string
   /** Firing session's id — lets probes distinguish this session's claims
    *  (recorded in `<git-common-dir>/bro/hooks/<session>.<aspect>` markers)
    *  from foreign live work. Absent outside hook events. */
-  sessionId?: string;
+  sessionId?: string
   /** The firing process's agent-root owner (pid + start) — the marker
    *  owner tag's counterpart. Session ids rotate across restarts and
    *  client rehydrations while the owning agent process stays; a claim
@@ -59,37 +59,37 @@ export interface ConnectorCtx {
    *  foreign session's (bro-7022c). Absent when the caller can't or
    *  doesn't want to resolve it — ownership then falls back to the
    *  sessionId-only match. */
-  owner?: { pid: number; start: string } | null;
+  owner?: { pid: number; start: string } | null
 }
 
 /** Capability → facade type. Optional on Connector; required here once
  *  the facade exists. `findings`, `sast` join when their first real
  *  consumer lands. */
 export interface FacadeMap {
-  tasks: TaskStore;
+  tasks: TaskStore
   /** The probe-path read surface — parallel sweeps await these instead
    *  of blocking on each other's bd spawns. Connectors without it are
    *  wrapped sync→Promise by tasksAsync() — API-compatible, just not
    *  parallel (no worse than before). */
-  tasksAsync: TaskStoreAsync;
-  reviews: ReviewFacade;
+  tasksAsync: TaskStoreAsync
+  reviews: ReviewFacade
   /** External merge queue — mergify/graphite-class connectors. Opt-in
    *  by name only (spec specs/bro-huy5o.6.md): `mergeQueueHost` never
    *  auto-picks. */
-  mergeQueue: MergeQueueFacade;
-  specs: SpecStore;
-  judge: JudgeFacade;
-  events: EventsFacade;
+  mergeQueue: MergeQueueFacade
+  specs: SpecStore
+  judge: JudgeFacade
+  events: EventsFacade
   /** Raw GraphQL data plane — `query` plans fan out over it
    *  (spec bro-14h8.1). Distinct from `providers[]`, which is the
    *  model plane. */
-  queries: QueryFacade;
+  queries: QueryFacade
   /** Stacked-change ops — chain hints, post-merge cascade ownership,
    *  native whole-chain merge (spec bro-r6vge). */
-  stacks: StackFacade;
+  stacks: StackFacade
 }
 
-export type MaybePromise<T> = T | Promise<T>;
+export type MaybePromise<T> = T | Promise<T>
 
 /** One system's answer to "may this session stop?" — the hook applies
  *  the arming policy; the connector only reports state:
@@ -99,10 +99,10 @@ export type MaybePromise<T> = T | Promise<T>;
 export interface GateContribution {
   /** Arming aspect — matches the post-tool marker name ('act', 'drill',
    *  'work', or a connector-owned name). */
-  aspect: string;
-  block?: string;
-  armedHint?: string;
-  passive?: string;
+  aspect: string
+  block?: string
+  armedHint?: string
+  passive?: string
 }
 
 /** A connector's verdict on an about-to-run tool call — the guard plane's
@@ -111,9 +111,9 @@ export interface GateContribution {
  *  abstention. */
 export interface PreToolVerdict {
   /** Reason line — presence means "do not run this". */
-  block?: string;
+  block?: string
   /** Args override — merged onto the call's tool_input. */
-  input?: Record<string, unknown>;
+  input?: Record<string, unknown>
 }
 
 /** Context a connector contributes to the agent lifecycle — the
@@ -124,82 +124,82 @@ export interface PreToolVerdict {
 export interface ConnectorHooks {
   /** Ambient context lines for session-start rehydration — e.g. beads
    *  reports the ready queue. */
-  sessionStart?(ctx: ConnectorCtx): MaybePromise<string[]>;
+  sessionStart?(ctx: ConnectorCtx): MaybePromise<string[]>
   /** Signals that OTHER live work exists here — claimed items, held
    *  slots; grouped under the parallel-work nudge, never a block. */
-  parallelWork?(ctx: ConnectorCtx): MaybePromise<string[]>;
+  parallelWork?(ctx: ConnectorCtx): MaybePromise<string[]>
   /** Prompt-submit context — the raw prompt lets each system spot its
    *  own references (github sees PR URLs, jira would see issue keys). */
-  promptSubmit?(ctx: ConnectorCtx, prompt: string): MaybePromise<string[]>;
+  promptSubmit?(ctx: ConnectorCtx, prompt: string): MaybePromise<string[]>
   /** Post-tool context — cheap per-event probes that run on every tool
    *  landing, success or not; the notify connector drains the session
    *  mailbox here so child events arrive mid-turn. */
-  postTool?(ctx: ConnectorCtx): MaybePromise<string[]>;
+  postTool?(ctx: ConnectorCtx): MaybePromise<string[]>
   /** Stop-gate contributions — non-empty `block` means the session has
    *  unfinished business in this system. */
-  stopGate?(ctx: ConnectorCtx): MaybePromise<GateContribution[]>;
+  stopGate?(ctx: ConnectorCtx): MaybePromise<GateContribution[]>
   /** Pre-execution verdicts — the guard plane: veto a tool call or
    *  rewrite its args before it runs (a plugin's `tool.execute.before`,
    *  a hook host's `PreToolUse`). */
   preTool?(
     ctx: ConnectorCtx,
     input: { tool: string; input: Record<string, unknown> }
-  ): MaybePromise<PreToolVerdict[]>;
+  ): MaybePromise<PreToolVerdict[]>
 }
 
 export interface Connector {
-  readonly name: string;
+  readonly name: string
   /** Remote-URL matcher — the connector claims hosts it can serve
    *  (github.com, gitlab.*, a self-hosted domain). Drives facade
    *  auto-detect ahead of registry order. */
-  matchRemote?(url: string): boolean;
+  matchRemote?(url: string): boolean
   /** Project-layout matcher — the connector claims repos whose
    *  directories it recognizes (`.specify/`, `openspec/`). Tried after
    *  matchRemote for facades where the project picks the tool, not the
    *  host (specs). */
-  matchDir?(dir: string): boolean;
+  matchDir?(dir: string): boolean
   /** Auth/readiness probe — the SYSTEM owns its credential check, so a
    *  facade-backed command on a foreign host never demands `gh auth`.
    *  null = ready; a string is the remediation line a command prints.
    *  Sync: probes shell out like the rest of the facade surface — a
    *  non-string return (an async probe) is reported back as the
    *  plugin's defect, never awaited. */
-  auth?(ctx: ConnectorCtx): string | null;
-  tasks?(ctx: ConnectorCtx): TaskStore;
+  auth?(ctx: ConnectorCtx): string | null
+  tasks?(ctx: ConnectorCtx): TaskStore
   /** Async read surface for probe paths — when absent, tasksAsync()
    *  wraps the sync `tasks` store in Promise.resolve. */
-  tasksAsync?(ctx: ConnectorCtx): TaskStoreAsync;
-  reviews?(ctx: ConnectorCtx): ReviewFacade;
-  mergeQueue?(ctx: ConnectorCtx): MergeQueueFacade;
-  specs?(ctx: ConnectorCtx): SpecStore;
-  judge?(ctx: ConnectorCtx): JudgeFacade;
-  events?(ctx: ConnectorCtx): EventsFacade;
-  queries?(ctx: ConnectorCtx): QueryFacade;
-  stacks?(ctx: ConnectorCtx): StackFacade;
+  tasksAsync?(ctx: ConnectorCtx): TaskStoreAsync
+  reviews?(ctx: ConnectorCtx): ReviewFacade
+  mergeQueue?(ctx: ConnectorCtx): MergeQueueFacade
+  specs?(ctx: ConnectorCtx): SpecStore
+  judge?(ctx: ConnectorCtx): JudgeFacade
+  events?(ctx: ConnectorCtx): EventsFacade
+  queries?(ctx: ConnectorCtx): QueryFacade
+  stacks?(ctx: ConnectorCtx): StackFacade
   /** Only ever picked BY NAME (`"connectors": {"<kind>": "<name>"}`) —
    *  never by detection, and never a reason to warn about ambiguity on
    *  its own. A transport that must be opted into (it needs a daemon, or
    *  it changes where events go) declares this; a designed default that
    *  has only opt-in alternatives is not ambiguous, it is configured. */
-  optIn?: boolean;
+  optIn?: boolean
   /** The per-facade form of optIn — a connector whose OTHER facades are
    *  detectable (github's reviews) but whose `tasks` must never be
    *  silently claimed by remote/dir matching. Named picks bypass the
    *  exclusion, same as `optIn`. */
-  optInFacades?: (keyof FacadeMap)[];
-  hooks?(ctx: ConnectorCtx): ConnectorHooks;
+  optInFacades?: (keyof FacadeMap)[]
+  hooks?(ctx: ConnectorCtx): ConnectorHooks
   /** Declarative prompt contributions (spec specs/sessions/bro-nkn6.md)
    *  — pure declarations the guard engine evaluates centrally; a
    *  connector never evaluates its own `when`. */
-  guards?(ctx: ConnectorCtx): Guard[];
+  guards?(ctx: ConnectorCtx): Guard[]
 }
 
 // --- built-in: beads -----------------------------------------------------------
 
 const shortTitle = (t: string | undefined): string => {
-  const flat = (t ?? '').replace(/\s+/g, ' ').trim();
-  return flat.length > 60 ? `${flat.slice(0, 60)}…` : flat;
-};
+  const flat = (t ?? '').replace(/\s+/g, ' ').trim()
+  return flat.length > 60 ? `${flat.slice(0, 60)}…` : flat
+}
 
 /** Bead ids the spawn pinned into this session's env — BRO_BEAD_ID plus
  *  the comma-joined BRO_BEAD_IDS clump. Unlike marker ids these are
@@ -209,16 +209,16 @@ const shortTitle = (t: string | undefined): string => {
  *  may be a claimAs worker identity (gascity binds the step id), never
  *  this actor's. */
 export function sessionPinnedClaims(): Set<string> {
-  const out = new Set<string>();
+  const out = new Set<string>()
   for (const raw of [process.env.BRO_BEAD_ID, process.env.BRO_BEAD_IDS]) {
     for (const id of raw?.split(',') ?? []) {
-      const t = id.trim();
+      const t = id.trim()
       if (t !== '') {
-        out.add(t);
+        out.add(t)
       }
     }
   }
-  return out;
+  return out
 }
 
 /** Bead ids this session claimed — the `task` aspect marker records one
@@ -233,70 +233,44 @@ export function sessionPinnedClaims(): Set<string> {
  *  bead). Confirm real ownership per row with `isOwnClaim` before
  *  treating one as ours. */
 export function sessionTaskClaims(ctx: ConnectorCtx): Set<string> {
-  const mine = sessionPinnedClaims();
+  const mine = sessionPinnedClaims()
   if (!ctx.sessionId) {
-    return mine;
+    return mine
   }
   try {
-    const gd = gitTry(['-C', ctx.dir, 'rev-parse', '--git-common-dir']);
+    const gd = gitTry(['-C', ctx.dir, 'rev-parse', '--git-common-dir'])
     if (gd.code !== 0) {
-      return mine;
+      return mine
     }
     // --git-common-dir is relative in the main worktree ('.git') and
     // absolute in linked ones — resolve against ctx.dir, never cwd
-    return claimsFromHooksDir(mine, join(resolve(ctx.dir, gd.out.trim()), 'bro', 'hooks'), ctx);
+    const hooks = join(resolve(ctx.dir, gd.out.trim()), 'bro', 'hooks')
+    const safe = ctx.sessionId.replace(/[^\w.-]/g, '_')
+    for (const id of markerDetails(join(hooks, `${safe}.task`))) {
+      mine.add(id)
+    }
+    // A session id is the CLIENT's handle — it rotates on restart and
+    // rehydration while the owning agent process persists. Markers
+    // stamped by this same agent tree (owner pid + start match) are own
+    // claims under a stale id; folding them in keeps the parallel-work
+    // probe from re-nudging the agent about its own beads (bro-7022c).
+    if (ctx.owner) {
+      for (const id of ownerTaskClaims(hooks, `${safe}.task`, ctx.owner)) {
+        mine.add(id)
+      }
+    }
   } catch {
     // no git dir — the session claimed nothing
-    return mine;
   }
-}
-
-/** Async sessionTaskClaims — the probe-path twin (spec bro-36sx7.2):
- *  hook probes that wrapped the sync form in Promise.resolve still
- *  froze the sweep on the rev-parse spawn. Marker reads stay sync fs. */
-export async function sessionTaskClaimsAsync(ctx: ConnectorCtx): Promise<Set<string>> {
-  const mine = sessionPinnedClaims();
-  if (!ctx.sessionId) {
-    return mine;
-  }
-  try {
-    const gd = await gitTryAsync(['-C', ctx.dir, 'rev-parse', '--git-common-dir']);
-    if (gd.code !== 0) {
-      return mine;
-    }
-    return claimsFromHooksDir(mine, join(resolve(ctx.dir, gd.out.trim()), 'bro', 'hooks'), ctx);
-  } catch {
-    // no git dir — the session claimed nothing
-    return mine;
-  }
-}
-
-/** Marker-scan half of the claims probe, once the hooks dir resolves —
- *  the session's own marker plus same-owner folds (bro-7022c). */
-function claimsFromHooksDir(mine: Set<string>, hooks: string, ctx: ConnectorCtx): Set<string> {
-  const safe = (ctx.sessionId ?? '').replace(/[^\w.-]/g, '_');
-  for (const id of markerDetails(join(hooks, `${safe}.task`))) {
-    mine.add(id);
-  }
-  // A session id is the CLIENT's handle — it rotates on restart and
-  // rehydration while the owning agent process persists. Markers
-  // stamped by this same agent tree (owner pid + start match) are own
-  // claims under a stale id; folding them in keeps the parallel-work
-  // probe from re-nudging the agent about its own beads (bro-7022c).
-  if (ctx.owner) {
-    for (const id of ownerTaskClaims(hooks, `${safe}.task`, ctx.owner)) {
-      mine.add(id);
-    }
-  }
-  return mine;
+  return mine
 }
 
 /** Raw lines of one session marker — empty on any read failure. */
 function markerLines(path: string): string[] {
   try {
-    return readFileSync(path, 'utf8').split('\n');
+    return readFileSync(path, 'utf8').split('\n')
   } catch {
-    return [];
+    return []
   }
 }
 
@@ -304,8 +278,8 @@ function markerLines(path: string): string[] {
 function markerDetails(path: string): string[] {
   return markerLines(path)
     .slice(1)
-    .map(d => d.trim())
-    .filter(d => d !== '');
+    .map((d) => d.trim())
+    .filter((d) => d !== '')
 }
 
 /** Detail ids of every `.task` marker owned by `self` — the rotated-id
@@ -315,24 +289,24 @@ function ownerTaskClaims(
   skip: string,
   self: { pid: number; start: string }
 ): string[] {
-  const ids: string[] = [];
+  const ids: string[] = []
   for (const f of readdirSync(hooks)) {
     if (f === skip || !f.endsWith('.task')) {
-      continue;
+      continue
     }
-    const lines = markerLines(join(hooks, f));
-    const owner = markerOwner(lines[0]);
+    const lines = markerLines(join(hooks, f))
+    const owner = markerOwner(lines[0])
     if (owner === null || owner.pid !== self.pid || owner.start !== self.start) {
-      continue;
+      continue
     }
     for (const d of lines.slice(1)) {
-      const id = d.trim();
+      const id = d.trim()
       if (id) {
-        ids.push(id);
+        ids.push(id)
       }
     }
   }
-  return ids;
+  return ids
 }
 
 /** Does `row` belong to this session's claims? The marker alone cannot
@@ -353,37 +327,30 @@ export function isOwnClaim(
   pinned: Set<string> = sessionPinnedClaims()
 ): boolean {
   if (!mine.has(row.id)) {
-    return false;
+    return false
   }
   if (pinned.has(row.id)) {
-    return true;
+    return true
   }
   if (actor === '' || row.assignee === undefined || row.assignee === '') {
-    return true;
+    return true
   }
   // some backends join several assignees (github: 'a, b') — own when
   // this actor is among them; exact-equality would disown a shared claim
   return row.assignee
     .split(',')
-    .map(a => a.trim())
-    .includes(actor);
+    .map((a) => a.trim())
+    .includes(actor)
 }
 
 /** The tasks backend this repo actually serves — connector name +
  *  facade-resolved async read surface. The claim/ready probes below
  *  belong to whichever system `connectors.tasks` selects (beads by
  *  default): naming the serving connector keeps the session-start
- *  header and the actor check honest when another backend is pinned.
- *  Async — these probes run inside the hook sweep, so the connector
- *  pick must not spawnSync the remote probe; name and store resolve
- *  concurrently. */
-async function servingTasks(dir: string): Promise<{ name: string; store: TaskStoreAsync }> {
-  const prefer = loadConfig(dir).connectors;
-  const [name, store] = await Promise.all([
-    facadeNameAsync('tasks', { dir }, { prefer }),
-    tasksStoreAsync(dir, prefer),
-  ]);
-  return { name, store };
+ *  header and the actor check honest when another backend is pinned. */
+function servingTasks(dir: string): { name: string; store: TaskStoreAsync } {
+  const prefer = loadConfig(dir).connectors
+  return { name: facadeName('tasks', { dir }, { prefer }), store: tasksAsync(dir, prefer) }
 }
 
 const beadsConnector: Connector = {
@@ -392,26 +359,26 @@ const beadsConnector: Connector = {
    *  store reachability. Carrying it on the connector keeps the command
    *  gate uniform: every serving backend answers "are you usable" the
    *  same way. */
-  auth: ctx => {
+  auth: (ctx) => {
     try {
-      checkBeads(ctx.dir);
-      return null;
+      checkBeads(ctx.dir)
+      return null
     } catch (err) {
-      return err instanceof Error ? err.message : String(err);
+      return err instanceof Error ? err.message : String(err)
     }
   },
-  tasks: ctx => taskStore(ctx.dir),
-  tasksAsync: ctx => taskStoreAsync(ctx.dir),
+  tasks: (ctx) => taskStore(ctx.dir),
+  tasksAsync: (ctx) => taskStoreAsync(ctx.dir),
   hooks: () => ({
     async sessionStart(ctx) {
       try {
-        const { name, store } = await servingTasks(ctx.dir);
+        const { name, store } = servingTasks(ctx.dir)
         const ready = (await store.ready())
           .slice(0, 8)
-          .map(r => `  ${r.id} ${shortTitle(r.title)}`.trimEnd());
-        return ready.length > 0 ? [`${name} ready:\n${ready.join('\n')}`] : [];
+          .map((r) => `  ${r.id} ${shortTitle(r.title)}`.trimEnd())
+        return ready.length > 0 ? [`${name} ready:\n${ready.join('\n')}`] : []
       } catch {
-        return [];
+        return []
       }
     },
     async parallelWork(ctx) {
@@ -420,31 +387,31 @@ const beadsConnector: Connector = {
         // session's business, naming them again would be a false nudge.
         // "Own" is verified: a marker id whose claim was refused is
         // foreign work — the exact collision this nudge exists for.
-        const mine = await sessionTaskClaimsAsync(ctx);
-        const { store } = await servingTasks(ctx.dir);
+        const mine = sessionTaskClaims(ctx)
+        const { store } = servingTasks(ctx.dir)
         const [me, rows] = await Promise.all([
           store.actor ? store.actor() : Promise.resolve(''),
           store.list({ status: 'in_progress' }),
-        ]);
+        ])
         const claimed = rows
-          .filter(r => !isOwnClaim(r, mine, me))
+          .filter((r) => !isOwnClaim(r, mine, me))
           .slice(0, 5)
-          .map(r => `${r.id} ${shortTitle(r.title)}`.trim());
-        return claimed.length > 0 ? [`claimed beads: ${claimed.join(', ')}`] : [];
+          .map((r) => `${r.id} ${shortTitle(r.title)}`.trim())
+        return claimed.length > 0 ? [`claimed beads: ${claimed.join(', ')}`] : []
       } catch {
-        return [];
+        return []
       }
     },
     async stopGate(ctx) {
       try {
-        const { name, store } = await servingTasks(ctx.dir);
+        const { name, store } = servingTasks(ctx.dir)
         const [mine, me, claimed] = await Promise.all([
-          sessionTaskClaimsAsync(ctx),
+          Promise.resolve(sessionTaskClaims(ctx)),
           store.actor ? store.actor() : Promise.resolve(''),
           store.list({ status: 'in_progress' }),
-        ]);
+        ])
         if (claimed.length === 0) {
-          return [];
+          return []
         }
         // foreign claims are ambient — the session can't close beads it
         // doesn't own, so they must never reach the stop output of a
@@ -453,35 +420,35 @@ const beadsConnector: Connector = {
         // start (bro-hpb35). Ownership is the store's assignee, not the
         // marker: a refused claim still arms the id, and a bead held by
         // another actor is never ours to close
-        const own = claimed.filter(r => isOwnClaim(r, mine, me));
-        const foreign = claimed.filter(r => !isOwnClaim(r, mine, me));
+        const own = claimed.filter((r) => isOwnClaim(r, mine, me))
+        const foreign = claimed.filter((r) => !isOwnClaim(r, mine, me))
         const fmt = (r: { id: string; title?: string }): string =>
-          `${r.id} ${shortTitle(r.title)}`.trim();
+          `${r.id} ${shortTitle(r.title)}`.trim()
         // the close verb belongs to the SERVING backend — a zero-install
         // rig has no bd, so naming it would leave the gate un-clearable
-        const verb = name === 'beads' ? '`bd close <id>`' : '`bro task close <id>`';
-        const out: GateContribution[] = [];
+        const verb = name === 'beads' ? '`bd close <id>`' : '`bro task close <id>`'
+        const out: GateContribution[] = []
         if (own.length > 0) {
           out.push({
             aspect: 'task',
             block:
               `bro: claimed beads open: ${own.slice(0, 5).map(fmt).join(', ')} — ` +
               `close (${verb}) or release the claim before stopping`,
-          });
+          })
         }
         if (foreign.length > 0) {
           out.push({
             aspect: 'task',
             armedHint: `bro: claimed beads open: ${foreign.slice(0, 5).map(fmt).join(', ')}`,
-          });
+          })
         }
-        return out;
+        return out
       } catch {
-        return [];
+        return []
       }
     },
   }),
-};
+}
 
 // --- built-in: git ---------------------------------------------------------------
 
@@ -491,49 +458,60 @@ const beadsConnector: Connector = {
  *  honest too — a repo without a remote's stack verbs ARE local ops. */
 const gitConnector: Connector = {
   name: 'git',
-  matchDir: dir => gitTry(['-C', dir, 'rev-parse', '--git-dir']).code === 0,
-  auth: ctx =>
-    gitTry(['-C', ctx.dir, 'rev-parse', '--git-dir']).code === 0 ? null : 'not a git repository',
-  stacks: ctx => gitStacks(ctx.dir),
-};
+  matchDir: (dir) => gitTry(['-C', dir, 'rev-parse', '--git-dir']).code === 0,
+  auth: (ctx) =>
+    gitTry(['-C', ctx.dir, 'rev-parse', '--git-dir']).code === 0
+      ? null
+      : 'not a git repository',
+  stacks: (ctx) => gitStacks(ctx.dir),
+}
 
 // --- registry ------------------------------------------------------------------
 
-const registry: Connector[] = [beadsConnector, gitConnector];
+const registry: Connector[] = [beadsConnector, gitConnector]
 
 /** Plugin connectors register here (BroPlugin.connectors). Duplicate
- *  names are skipped — a plugin cannot shadow a built-in system. */
-export function registerConnector(c: Connector): void {
-  if (registry.some(x => x.name === c.name)) {
-    console.error(`warning: connector "${c.name}" already registered — skipped`);
-    return;
+ *  names are skipped — a plugin cannot shadow a built-in system.
+ *  Pass `replace: true` to overwrite an existing registration (tests). */
+export function registerConnector(c: Connector & { replace?: boolean }): void {
+  const idx = registry.findIndex((x) => x.name === c.name)
+  if (idx >= 0) {
+    if (c.replace) {
+      registry[idx] = c
+      return
+    }
+    console.error(`warning: connector "${c.name}" already registered — skipped`)
+    return
   }
-  registry.push(c);
+  registry.push(c)
+}
+
+/** Remove a connector by name (tests). */
+export function unregisterConnector(name: string): boolean {
+  const idx = registry.findIndex((x) => x.name === name)
+  if (idx < 0) {
+    return false
+  }
+  registry.splice(idx, 1)
+  return true
 }
 
 export function connectors(): readonly Connector[] {
-  return registry;
+  return registry
 }
 
 // --- resolution ----------------------------------------------------------------
 
 function remoteUrl(dir: string): string | undefined {
-  const r = gitTry(['-C', dir, 'remote', 'get-url', 'origin']);
-  return r.code === 0 && r.out.trim() !== '' ? r.out.trim() : undefined;
-}
-
-/** Async remoteUrl — hook/probe paths can't pay spawnSync (spec
- *  bro-36sx7.2); bounded like every async git probe. */
-async function remoteUrlAsync(dir: string): Promise<string | undefined> {
-  const r = await gitTryAsync(['-C', dir, 'remote', 'get-url', 'origin']);
-  return r.code === 0 && r.out.trim() !== '' ? r.out.trim() : undefined;
+  const r = gitTry(['-C', dir, 'remote', 'get-url', 'origin'])
+  return r.code === 0 && r.out.trim() !== '' ? r.out.trim() : undefined
 }
 
 export interface FacadeOpts {
   /** Explicit connector name — wins over config and auto-detect. */
-  connector?: string;
+  connector?: string
   /** facade → connector precedence from bro.config.json `connectors`. */
-  prefer?: Record<string, string>;
+  prefer?: Record<string, string>
 }
 
 /** Auto-detect picks memoized per (kind, dir, remote URL, registry
@@ -542,7 +520,7 @@ export interface FacadeOpts {
  *  The URL sits in the key so a mid-process `git remote set-url`
  *  re-resolves instead of serving a stale pick; registry length does
  *  the same for a later registerConnector. */
-const pickMemo = new Map<string, Connector>();
+const pickMemo = new Map<string, Connector>()
 
 /** Ambiguity warning policy — a non-default provider silently winning
  *  (dir/remote claim) deserves a pin hint, as does a bare fallback when
@@ -556,81 +534,27 @@ function warnIfAmbiguous(
   remoteMatched: boolean
 ): void {
   if (remoteMatched || providers.length <= 1) {
-    return;
+    return
   }
-  const designedDefault = pick === providers[0] && providers.some(c => c.matchDir !== undefined);
+  const designedDefault =
+    pick === providers[0] && providers.some((c) => c.matchDir !== undefined)
   if (designedDefault) {
-    return;
+    return
   }
   // A default whose every alternative must be named explicitly is a
   // settled default, not a coin flip — warning on it would train people
   // to ignore the warning that matters. Per-facade opt-ins count the
   // same way for this kind — they're name-only alternatives here.
   const nameOnly = (c: Connector): boolean =>
-    c.optIn === true || (c.optInFacades as readonly string[] | undefined)?.includes(kind) === true;
-  const others = providers.filter(c => c !== pick);
+    c.optIn === true || (c.optInFacades as readonly string[] | undefined)?.includes(kind) === true
+  const others = providers.filter((c) => c !== pick)
   if (pick === providers[0] && others.length > 0 && others.every(nameOnly)) {
-    return;
+    return
   }
   console.error(
-    `warning: ${providers.map(c => c.name).join(', ')} all provide "${kind}" ` +
+    `warning: ${providers.map((c) => c.name).join(', ')} all provide "${kind}" ` +
       `— using ${pick.name}; set connectors.${kind} in bro.config.json`
-  );
-}
-
-/** The named-connector short-circuit — an explicit `connector:`/`prefer`
- *  pin wins outright and never pays the remote probe. */
-function namedConnector<K extends keyof FacadeMap>(
-  kind: K,
-  providers: Connector[],
-  opts: FacadeOpts
-): Connector | undefined {
-  const named = opts.connector ?? opts.prefer?.[kind];
-  if (named === undefined) {
-    return undefined;
-  }
-  const pick = providers.find(c => c.name === named);
-  if (!pick) {
-    throw new Error(`connector "${named}" does not provide "${kind}"`);
-  }
-  return pick;
-}
-
-/** Auto-detect once the remote URL is resolved — memo + remote/dir
- *  match + ambiguity warning. Shared by the sync and async picks so
- *  both resolve through identical precedence. */
-function pickConnectorAuto<K extends keyof FacadeMap>(
-  kind: K,
-  ctx: ConnectorCtx,
-  providers: Connector[],
-  url: string | undefined
-): Connector {
-  const key = `${kind}\0${ctx.dir}\0${url ?? ''}\0${registry.length}`;
-  const memo = pickMemo.get(key);
-  if (memo !== undefined) {
-    return memo;
-  }
-  // optIn providers are never auto-picked — the flag's whole contract is
-  // name-only selection, so an unnamed resolution that reached one would
-  // quietly configure a transport the user never asked for. optInFacades
-  // applies the same rule per capability.
-  const eligible = providers.filter(
-    c => c.optIn !== true && !(c.optInFacades as readonly string[] | undefined)?.includes(kind)
-  );
-  const remote = url === undefined ? undefined : eligible.find(c => c.matchRemote?.(url));
-  // no remote claim → project-layout match (specs: .specify/, openspec/)
-  const dir = remote === undefined ? eligible.find(c => c.matchDir?.(ctx.dir)) : undefined;
-  const pick = remote ?? dir ?? eligible[0];
-  if (!pick) {
-    throw new Error(
-      providers.length === 0
-        ? `no connector provides "${kind}"`
-        : `every "${kind}" provider is opt-in — set connectors.${kind} in bro.config.json`
-    );
-  }
-  warnIfAmbiguous(kind, providers, pick, remote !== undefined);
-  pickMemo.set(key, pick);
-  return pick;
+  )
 }
 
 /** The connector chosen to serve `kind` — shared by facade() and auth
@@ -640,25 +564,42 @@ function pickConnector<K extends keyof FacadeMap>(
   ctx: ConnectorCtx,
   opts: FacadeOpts
 ): Connector {
-  const providers = registry.filter(c => typeof c[kind as keyof Connector] === 'function');
-  return (
-    namedConnector(kind, providers, opts) ??
-    pickConnectorAuto(kind, ctx, providers, remoteUrl(ctx.dir))
-  );
-}
-
-/** Async pickConnector — the remote probe rides gitTryAsync so a hook
- *  sweep's resolution doesn't freeze sibling timers on spawnSync. */
-async function pickConnectorAsync<K extends keyof FacadeMap>(
-  kind: K,
-  ctx: ConnectorCtx,
-  opts: FacadeOpts
-): Promise<Connector> {
-  const providers = registry.filter(c => typeof c[kind as keyof Connector] === 'function');
-  return (
-    namedConnector(kind, providers, opts) ??
-    pickConnectorAuto(kind, ctx, providers, await remoteUrlAsync(ctx.dir))
-  );
+  const providers = registry.filter((c) => typeof c[kind as keyof Connector] === 'function')
+  const named = opts.connector ?? opts.prefer?.[kind]
+  if (named !== undefined) {
+    const pick = providers.find((c) => c.name === named)
+    if (!pick) {
+      throw new Error(`connector "${named}" does not provide "${kind}"`)
+    }
+    return pick
+  }
+  const url = remoteUrl(ctx.dir)
+  const key = `${kind}\0${ctx.dir}\0${url ?? ''}\0${registry.length}`
+  const memo = pickMemo.get(key)
+  if (memo !== undefined) {
+    return memo
+  }
+  // optIn providers are never auto-picked — the flag's whole contract is
+  // name-only selection, so an unnamed resolution that reached one would
+  // quietly configure a transport the user never asked for. optInFacades
+  // applies the same rule per capability.
+  const eligible = providers.filter(
+    (c) => c.optIn !== true && !(c.optInFacades as readonly string[] | undefined)?.includes(kind)
+  )
+  const remote = url === undefined ? undefined : eligible.find((c) => c.matchRemote?.(url))
+  // no remote claim → project-layout match (specs: .specify/, openspec/)
+  const dir = remote === undefined ? eligible.find((c) => c.matchDir?.(ctx.dir)) : undefined
+  const pick = remote ?? dir ?? eligible[0]
+  if (!pick) {
+    throw new Error(
+      providers.length === 0
+        ? `no connector provides "${kind}"`
+        : `every "${kind}" provider is opt-in — set connectors.${kind} in bro.config.json`
+    )
+  }
+  warnIfAmbiguous(kind, providers, pick, remote !== undefined)
+  pickMemo.set(key, pick)
+  return pick
 }
 
 /** Resolve the facade a command needs. Throws when nothing provides it —
@@ -669,32 +610,9 @@ export function facade<K extends keyof FacadeMap>(
   ctx: ConnectorCtx,
   opts: FacadeOpts = {}
 ): FacadeMap[K] {
-  const pick = pickConnector(kind, ctx, opts);
-  // static dispatch per facade — pickConnector already proved the
-  // method exists, and a dynamic pick[kind] reads as object-injection
-  // to SAST while adding nothing
-  switch (kind) {
-    case 'tasks':
-      return pick.tasks!(ctx) as FacadeMap[K];
-    case 'tasksAsync':
-      return pick.tasksAsync!(ctx) as FacadeMap[K];
-    case 'reviews':
-      return pick.reviews!(ctx) as FacadeMap[K];
-    case 'mergeQueue':
-      return pick.mergeQueue!(ctx) as FacadeMap[K];
-    case 'specs':
-      return pick.specs!(ctx) as FacadeMap[K];
-    case 'judge':
-      return pick.judge!(ctx) as FacadeMap[K];
-    case 'events':
-      return pick.events!(ctx) as FacadeMap[K];
-    case 'queries':
-      return pick.queries!(ctx) as FacadeMap[K];
-    case 'stacks':
-      return pick.stacks!(ctx) as FacadeMap[K];
-    default:
-      throw new Error(`connector "${pick.name}" does not provide "${String(kind)}"`);
-  }
+  const pick = pickConnector(kind, ctx, opts)
+  const provides = pick[kind as keyof Connector] as (ctx: ConnectorCtx) => unknown
+  return provides(ctx) as FacadeMap[K]
 }
 
 /** The name of the connector facade() would pick for `kind` — same
@@ -706,17 +624,7 @@ export function facadeName<K extends keyof FacadeMap>(
   ctx: ConnectorCtx,
   opts: FacadeOpts = {}
 ): string {
-  return pickConnector(kind, ctx, opts).name;
-}
-
-/** Async facadeName — same precedence, but the remote probe is the
- *  bounded async git twin (hook paths, spec bro-36sx7.2). */
-export async function facadeNameAsync<K extends keyof FacadeMap>(
-  kind: K,
-  ctx: ConnectorCtx,
-  opts: FacadeOpts = {}
-): Promise<string> {
-  return (await pickConnectorAsync(kind, ctx, opts)).name;
+  return pickConnector(kind, ctx, opts).name
 }
 
 /** The serving connector's auth probe — null when ready, else the
@@ -728,25 +636,25 @@ export function facadeAuth<K extends keyof FacadeMap>(
   opts: FacadeOpts = {}
 ): string | null {
   try {
-    const c = pickConnector(kind, ctx, opts);
+    const c = pickConnector(kind, ctx, opts)
     // the sync signature is a convention plugins can violate — a Promise
     // is truthy, sails past ?? null, and prints as "[object Promise]",
     // so check the shape and name the plugin instead
-    const r: unknown = c.auth?.(ctx);
+    const r: unknown = c.auth?.(ctx)
     if (r === null || r === undefined) {
-      return null;
+      return null
     }
     if (typeof r !== 'string') {
       if (r instanceof Promise) {
         // swallow rejections — the diagnostic already carries the bug
-        r.catch(() => {});
+        r.catch(() => {})
       }
-      const got = r instanceof Promise ? 'a Promise' : typeof r;
-      return `connector "${c.name}": auth probe must be sync — got ${got}`;
+      const got = r instanceof Promise ? 'a Promise' : typeof r
+      return `connector "${c.name}": auth probe must be sync — got ${got}`
     }
-    return r;
+    return r
   } catch (err) {
-    return err instanceof Error ? err.message : String(err);
+    return err instanceof Error ? err.message : String(err)
   }
 }
 
@@ -757,10 +665,10 @@ export function ensureAuth<K extends keyof FacadeMap>(
   ctx: ConnectorCtx,
   opts: FacadeOpts = {}
 ): void {
-  const msg = facadeAuth(kind, ctx, opts);
+  const msg = facadeAuth(kind, ctx, opts)
   if (msg) {
-    console.error(`error: ${msg}`);
-    process.exit(1);
+    console.error(`error: ${msg}`)
+    process.exit(1)
   }
 }
 
@@ -772,9 +680,9 @@ export function ensureAuth<K extends keyof FacadeMap>(
  *  still have beads-only tails (BEADS_DIR pinning, bd sync) branch on
  *  it instead of re-resolving. */
 export function ensureTasksBackend(dir: string, prefer?: Record<string, string>): string {
-  const name = facadeName('tasks', { dir }, { prefer });
-  ensureAuth('tasks', { dir }, { prefer });
-  return name;
+  const name = facadeName('tasks', { dir }, { prefer })
+  ensureAuth('tasks', { dir }, { prefer })
+  return name
 }
 
 /** facade('reviews') bound to a dir — the common resolution path for
@@ -783,7 +691,7 @@ export function reviewHost(
   dir: string = process.cwd(),
   prefer?: Record<string, string>
 ): ReviewFacade {
-  return facade('reviews', { dir }, { prefer });
+  return facade('reviews', { dir }, { prefer })
 }
 
 /** facade('mergeQueue') — null when `connectors.mergeQueue` isn't
@@ -797,9 +705,9 @@ export function mergeQueueHost(
   prefer?: Record<string, string>
 ): MergeQueueFacade | null {
   if (prefer?.mergeQueue === undefined) {
-    return null;
+    return null
   }
-  return facade('mergeQueue', { dir }, { prefer });
+  return facade('mergeQueue', { dir }, { prefer })
 }
 
 /** facade('specs') bound to a dir — the SDD tool this project runs.
@@ -810,23 +718,26 @@ export function mergeQueueHost(
  *  each sibling answers with the same resolved tool (prefer rides
  *  along); tree/scope/scaffold stay single-checkout, drift resolves
  *  where the file actually lives. */
-export function specStore(dir: string = process.cwd(), prefer?: Record<string, string>): SpecStore {
-  const store = facade('specs', { dir }, { prefer });
+export function specStore(
+  dir: string = process.cwd(),
+  prefer?: Record<string, string>
+): SpecStore {
+  const store = facade('specs', { dir }, { prefer })
   // delegate, never spread — a class-instance store's prototype methods
   // must survive the wrap (spread copies own enumerable props only)
   const wrapped: SpecStore = {
-    hasSpec: id => store.hasSpec(id) || siblingHasSpec(dir, prefer, id),
-    remedy: id => store.remedy(id),
+    hasSpec: (id) => store.hasSpec(id) || siblingHasSpec(dir, prefer, id),
+    remedy: (id) => store.remedy(id),
     policy: () => store.policy(),
     tree: () => store.tree(),
-  };
+  }
   if (store.scaffold !== undefined) {
-    wrapped.scaffold = (id, opts) => store.scaffold!(id, opts);
+    wrapped.scaffold = (id, opts) => store.scaffold!(id, opts)
   }
   if (store.scope !== undefined) {
-    wrapped.scope = id => store.scope!(id);
+    wrapped.scope = (id) => store.scope!(id)
   }
-  return wrapped;
+  return wrapped
 }
 
 /** The worktree-scan half of coverage — runs only on a local miss, so
@@ -841,32 +752,32 @@ function siblingHasSpec(
   prefer: Record<string, string> | undefined,
   id: string
 ): boolean {
-  const roots = gitWorktreeRoots(dir);
+  const roots = gitWorktreeRoots(dir)
   if (roots.length === 0) {
-    return false;
+    return false
   }
   const real = (p: string): string => {
     try {
-      return realpathSync(p);
+      return realpathSync(p)
     } catch {
-      return p;
+      return p
     }
-  };
-  const top = gitTry(['-C', dir, 'rev-parse', '--show-toplevel']);
-  const own = top.code === 0 ? real(top.out.trim()) : null;
+  }
+  const top = gitTry(['-C', dir, 'rev-parse', '--show-toplevel'])
+  const own = top.code === 0 ? real(top.out.trim()) : null
   for (const wt of roots) {
     if (own !== null && real(wt) === own) {
-      continue;
+      continue
     }
     try {
       if (facade('specs', { dir: wt }, { prefer }).hasSpec(id)) {
-        return true;
+        return true
       }
     } catch {
       // fail-open per worktree
     }
   }
-  return false;
+  return false
 }
 
 /** facade('stacks') bound to a dir — stack ops dispatch (sync cascade
@@ -876,7 +787,7 @@ export function stackHost(
   dir: string = process.cwd(),
   prefer?: Record<string, string>
 ): StackFacade {
-  return facade('stacks', { dir }, { prefer });
+  return facade('stacks', { dir }, { prefer })
 }
 
 /** facade('tasksAsync') bound to a dir — the probe-path task surface.
@@ -896,73 +807,52 @@ export function tasksAsync(
   // it, which is exactly the status quo.
   if (prefer?.tasksAsync !== undefined) {
     try {
-      return facade('tasksAsync', { dir }, { prefer });
+      return facade('tasksAsync', { dir }, { prefer })
     } catch {
       // fall through to the selected tasks connector
     }
   }
-  return taskStoreFromPick(pickConnector('tasks', { dir }, { prefer }), dir);
-}
-
-/** Async-resolution tasksAsync — the probe-path twin for hook sweeps:
- *  identical precedence, but the connector pick's remote probe rides
- *  gitTryAsync instead of a spawnSync that would freeze the sweep. */
-export async function tasksStoreAsync(
-  dir: string = process.cwd(),
-  prefer?: Record<string, string>
-): Promise<TaskStoreAsync> {
-  if (prefer?.tasksAsync !== undefined) {
-    try {
-      return facade('tasksAsync', { dir }, { prefer });
-    } catch {
-      // fall through to the selected tasks connector
-    }
-  }
-  return taskStoreFromPick(await pickConnectorAsync('tasks', { dir }, { prefer }), dir);
-}
-
-/** The picked connector → TaskStoreAsync — the connector's own
- *  `tasksAsync` surface when it has one, else its sync store wrapped
- *  in async signatures (reads stay sequential for it). */
-function taskStoreFromPick(pick: Connector, dir: string): TaskStoreAsync {
+  const pick = pickConnector('tasks', { dir }, { prefer })
   if (pick.tasksAsync !== undefined) {
-    return pick.tasksAsync({ dir });
+    return pick.tasksAsync({ dir })
   }
-  const s = pick.tasks!({ dir });
+  const s = pick.tasks!({ dir })
   return {
-    list: f => Promise.resolve(s.list(f)),
-    ready: f => Promise.resolve(s.ready(f)),
-    get: id => Promise.resolve(s.get(id)),
+    list: (f) => Promise.resolve(s.list(f)),
+    ready: (f) => Promise.resolve(s.ready(f)),
+    get: (id) => Promise.resolve(s.get(id)),
     // exposed only when the sync store really batches — a faked serial
     // getMany would hide the capability from the degrade decision
     ...(s.getMany === undefined
       ? {}
       : { getMany: (ids: string[]) => Promise.resolve(s.getMany!(ids)) }),
-    children: id => Promise.resolve(s.children(id)),
+    children: (id) => Promise.resolve(s.children(id)),
     deps: (ids, opts) => Promise.resolve(s.deps(ids, opts)),
     neighbors: (id, opts) => Promise.resolve(s.neighbors(id, opts)),
     actor: () => Promise.resolve(s.actor?.() ?? ''),
     slotHolder:
-      s.slot === undefined ? undefined : name => Promise.resolve(s.slot!(name)?.holder() ?? null),
-  };
+      s.slot === undefined
+        ? undefined
+        : async (name) => s.slot!(name)?.holder() ?? null,
+  }
 }
 
 /** Every registered connector's hook probes paired with its name —
  *  hooks collect, never pick: each system reports its own ambient
  *  state. The name rides along so perf rows can blame a connector. */
 export function connectorHooks(ctx: ConnectorCtx): { name: string; hooks: ConnectorHooks }[] {
-  const out: { name: string; hooks: ConnectorHooks }[] = [];
+  const out: { name: string; hooks: ConnectorHooks }[] = []
   for (const c of registry) {
     try {
-      const h = c.hooks?.(ctx);
+      const h = c.hooks?.(ctx)
       if (h) {
-        out.push({ name: c.name, hooks: h });
+        out.push({ name: c.name, hooks: h })
       }
     } catch {
       // a wedged connector contributes no probes — fail-open
     }
   }
-  return out;
+  return out
 }
 
 /** One collected guard declaration — `guard` set means it validated;
@@ -970,12 +860,12 @@ export function connectorHooks(ctx: ConnectorCtx): { name: string; hooks: Connec
  *  dropped at config parse (config defs never reach collection). */
 export interface CollectedGuard {
   /** 'config' for repo defs, else the contributing connector's name. */
-  source: string;
-  guard?: Guard;
+  source: string
+  guard?: Guard
   /** The offending declaration's name when it was readable — lets
    *  `bro guard list` identify a skipped entry. */
-  name?: string;
-  problems?: string[];
+  name?: string
+  problems?: string[]
 }
 
 /** All guard declarations in resolution order — config defs first,
@@ -983,18 +873,18 @@ export interface CollectedGuard {
  *  earlier declaration (warn + annotated, never silently). Connector
  *  contributions fail open: throws and malformed entries are skipped. */
 export function collectGuards(ctx: ConnectorCtx, defs: Guard[] = []): CollectedGuard[] {
-  const seen = new Set<string>();
-  const out: CollectedGuard[] = [];
+  const seen = new Set<string>()
+  const out: CollectedGuard[] = []
   const push = (source: string, guard?: Guard, problems?: string[], name?: string): void => {
-    out.push(collectRow(seen, source, guard, problems, name));
-  };
+    out.push(collectRow(seen, source, guard, problems, name))
+  }
   for (const g of defs) {
-    push('config', g);
+    push('config', g)
   }
   for (const c of registry) {
-    collectConnectorGuards(ctx, c, push);
+    collectConnectorGuards(ctx, c, push)
   }
-  return out;
+  return out
 }
 
 /** One declaration → its collected row. A live guard de-dupes by name;
@@ -1004,22 +894,22 @@ function collectRow(
   source: string,
   guard: Guard | undefined,
   problems: string[] | undefined,
-  name: string | undefined
+  name: string | undefined,
 ): CollectedGuard {
   if (guard !== undefined && seen.has(guard.name)) {
     console.error(
       `bro: guard '${guard.name}' from ${source} duplicates an earlier declaration — skipped`
-    );
+    )
     return {
       source,
       name: guard.name,
       problems: [`duplicate name — shadowed by an earlier declaration`],
-    };
+    }
   }
   if (guard !== undefined) {
-    seen.add(guard.name);
+    seen.add(guard.name)
   }
-  return problems === undefined ? { source, guard } : { source, name, problems };
+  return problems === undefined ? { source, guard } : { source, name, problems }
 }
 
 /** One connector's contributions — fail open: a throwing `guards()` or
@@ -1027,62 +917,56 @@ function collectRow(
 function collectConnectorGuards(
   ctx: ConnectorCtx,
   c: Connector,
-  push: (source: string, guard?: Guard, problems?: string[], name?: string) => void
+  push: (source: string, guard?: Guard, problems?: string[], name?: string) => void,
 ): void {
-  let declared: Guard[] | undefined;
+  let declared: Guard[] | undefined
   try {
-    declared = c.guards?.(ctx);
+    declared = c.guards?.(ctx)
   } catch (err) {
-    const detail = err instanceof Error ? err.message : String(err);
-    console.error(`bro: connector '${c.name}' guards() threw — skipped: ${detail}`);
-    // a problems row marks the collection degraded — consumers that
-    // record resolved coverage (the hook fast-path's guards/ dir) must
-    // not mistake "skipped" for "contributes nothing"
-    push(c.name, undefined, [`guards() threw: ${detail}`]);
-    return;
+    console.error(`bro: connector '${c.name}' guards() threw — skipped: ${err instanceof Error ? err.message : err}`)
+    return
   }
   if (declared !== undefined && !Array.isArray(declared)) {
-    console.error(`bro: connector '${c.name}' guards() returned a non-array — skipped`);
-    push(c.name, undefined, ['guards() returned a non-array']);
-    return;
+    console.error(`bro: connector '${c.name}' guards() returned a non-array — skipped`)
+    return
   }
   for (const raw of declared ?? []) {
-    const problems = guardProblems(raw);
+    const problems = guardProblems(raw)
     if (problems.length === 0) {
-      push(c.name, raw);
-      continue;
+      push(c.name, raw)
+      continue
     }
-    const id = (raw as { name?: unknown } | null)?.name;
-    const label = typeof id === 'string' ? `'${id}'` : '<unnamed>';
+    const id = (raw as { name?: unknown } | null)?.name
+    const label = typeof id === 'string' ? `'${id}'` : '<unnamed>'
     console.error(
       `bro: connector '${c.name}' guard ${label} is malformed — skipped: ${problems.join('; ')}`
-    );
-    push(c.name, undefined, problems, typeof id === 'string' ? id : undefined);
+    )
+    push(c.name, undefined, problems, typeof id === 'string' ? id : undefined)
   }
 }
 
 /** Per-probe budget — a hung connector (dead network, wedged CLI) must
  *  not stall the whole hook. Racing the probe means the output goes out
  *  on time even if a spawned child lingers. */
-export const PROBE_TIMEOUT_MS = 4_000;
+export const PROBE_TIMEOUT_MS = 4_000
 
 /** Sentinel fallback — lets a collector tell "probe timed out" apart
  *  from a probe that genuinely answered `undefined`. */
-const PROBE_TIMED_OUT: unique symbol = Symbol('probe-timed-out');
+const PROBE_TIMED_OUT: unique symbol = Symbol('probe-timed-out')
 
 async function probeWithTimeout<T>(p: () => MaybePromise<T>, fallback: T): Promise<T> {
-  let timer: ReturnType<typeof setTimeout> | undefined;
-  const timeout = new Promise<T>(resolve => {
-    timer = setTimeout(() => resolve(fallback), PROBE_TIMEOUT_MS);
-    timer.unref?.();
-  });
+  let timer: ReturnType<typeof setTimeout> | undefined
+  const timeout = new Promise<T>((resolve) => {
+    timer = setTimeout(() => resolve(fallback), PROBE_TIMEOUT_MS)
+    timer.unref?.()
+  })
   try {
     // The thunk runs AFTER the timer is armed — for a sync probe that's
     // still a blocking call no timer can preempt, but the budget is at
     // least honest about what it measured.
-    return await Promise.race([Promise.resolve().then(p), timeout]);
+    return await Promise.race([Promise.resolve().then(p), timeout])
   } finally {
-    clearTimeout(timer);
+    clearTimeout(timer)
   }
 }
 
@@ -1090,24 +974,24 @@ async function probeWithTimeout<T>(p: () => MaybePromise<T>, fallback: T): Promi
  *  its budget — `settled: false` means a timeout or throw hid state, so
  *  empty `lines` reads "unknown", not "nothing to report". */
 export interface ProbeResult {
-  lines: string[];
-  settled: boolean;
+  lines: string[]
+  settled: boolean
 }
 
 /** One probe's timing row — the perf journal's per-connector record.
  *  `timedOut` = the probe raced past its budget; `failed` = it threw
  *  (or a missing probe was skipped — absent probes report nothing). */
 export interface ProbeTiming {
-  connector: string;
-  ms: number;
-  timedOut?: true;
-  failed?: true;
+  connector: string
+  ms: number
+  timedOut?: true
+  failed?: true
 }
 
 /** Report one timing row per probe — wired to the perf journal by the
  *  hooks bus; collectors default to silent so tests and non-hook
  *  callers see no behavior change. */
-export type ProbeReporter = (rows: ProbeTiming[]) => void;
+export type ProbeReporter = (rows: ProbeTiming[]) => void
 
 /** Collect a line-producing probe across all connectors — fail-open
  *  per connector, one wedged system must not starve the rest. A probe
@@ -1122,42 +1006,38 @@ async function collectLines(
 ): Promise<ProbeResult> {
   const rows = await Promise.all(
     connectorHooks(ctx).map(async ({ name, hooks }) => {
-      const t0 = Date.now();
+      const t0 = Date.now()
       try {
         const r = await probeWithTimeout<string[] | undefined | typeof PROBE_TIMED_OUT>(
           () => probe(hooks),
           PROBE_TIMED_OUT
-        );
+        )
         return {
           name,
           lines: r === PROBE_TIMED_OUT ? [] : (r ?? []),
-          timing: {
-            connector: name,
-            ms: Date.now() - t0,
-            ...(r === PROBE_TIMED_OUT ? { timedOut: true as const } : {}),
-          },
+          timing: { connector: name, ms: Date.now() - t0, ...(r === PROBE_TIMED_OUT ? { timedOut: true as const } : {}) },
           settled: r !== PROBE_TIMED_OUT,
-        };
+        }
       } catch {
         return {
           name,
           lines: [] as string[],
           timing: { connector: name, ms: Date.now() - t0, failed: true as const },
           settled: false,
-        };
+        }
       }
     })
-  );
-  onProbe?.(rows.map(r => r.timing));
+  )
+  onProbe?.(rows.map((r) => r.timing))
   return {
-    lines: rows.flatMap(r => r.lines),
-    settled: rows.every(r => r.settled),
-  };
+    lines: rows.flatMap((r) => r.lines),
+    settled: rows.every((r) => r.settled),
+  }
 }
 
 /** Collect session-start context lines from all connectors. */
 export async function sessionStartLines(ctx: ConnectorCtx): Promise<string[]> {
-  return (await sessionStartProbe(ctx)).lines;
+  return (await sessionStartProbe(ctx)).lines
 }
 
 /** Session-start lines plus the settle flag — rehydrate marks are only
@@ -1166,12 +1046,12 @@ export function sessionStartProbe(
   ctx: ConnectorCtx,
   onProbe?: ProbeReporter
 ): Promise<ProbeResult> {
-  return collectLines(ctx, h => h.sessionStart?.(ctx), onProbe);
+  return collectLines(ctx, (h) => h.sessionStart?.(ctx), onProbe)
 }
 
 /** Collect parallel-work signals from all connectors. */
 export async function parallelWorkLines(ctx: ConnectorCtx): Promise<string[]> {
-  return (await parallelWorkProbe(ctx)).lines;
+  return (await parallelWorkProbe(ctx)).lines
 }
 
 /** Parallel-work lines plus the settle flag. */
@@ -1179,7 +1059,7 @@ export function parallelWorkProbe(
   ctx: ConnectorCtx,
   onProbe?: ProbeReporter
 ): Promise<ProbeResult> {
-  return collectLines(ctx, h => h.parallelWork?.(ctx), onProbe);
+  return collectLines(ctx, (h) => h.parallelWork?.(ctx), onProbe)
 }
 
 /** Collect prompt-submit context from all connectors. */
@@ -1188,13 +1068,16 @@ export async function promptContextLines(
   prompt: string,
   onProbe?: ProbeReporter
 ): Promise<string[]> {
-  return (await collectLines(ctx, h => h.promptSubmit?.(ctx, prompt), onProbe)).lines;
+  return (await collectLines(ctx, (h) => h.promptSubmit?.(ctx, prompt), onProbe)).lines
 }
 
 /** Collect post-tool context lines from all connectors — mailbox
  *  drains and other per-event probes. */
-export async function postToolLines(ctx: ConnectorCtx, onProbe?: ProbeReporter): Promise<string[]> {
-  return (await collectLines(ctx, h => h.postTool?.(ctx), onProbe)).lines;
+export async function postToolLines(
+  ctx: ConnectorCtx,
+  onProbe?: ProbeReporter
+): Promise<string[]> {
+  return (await collectLines(ctx, (h) => h.postTool?.(ctx), onProbe)).lines
 }
 
 /** Collect stop-gate contributions from all connectors — the caller
@@ -1206,12 +1089,11 @@ export async function stopGateContributions(
 ): Promise<GateContribution[]> {
   const rows = await Promise.all(
     connectorHooks(ctx).map(async ({ name, hooks }) => {
-      const t0 = Date.now();
+      const t0 = Date.now()
       try {
-        const r = await probeWithTimeout<GateContribution[] | undefined | typeof PROBE_TIMED_OUT>(
-          () => hooks.stopGate?.(ctx),
-          PROBE_TIMED_OUT
-        );
+        const r = await probeWithTimeout<
+          GateContribution[] | undefined | typeof PROBE_TIMED_OUT
+        >(() => hooks.stopGate?.(ctx), PROBE_TIMED_OUT)
         return {
           contributions: r === PROBE_TIMED_OUT ? [] : (r ?? []),
           timing: {
@@ -1219,17 +1101,17 @@ export async function stopGateContributions(
             ms: Date.now() - t0,
             ...(r === PROBE_TIMED_OUT ? { timedOut: true as const } : {}),
           },
-        };
+        }
       } catch {
         return {
           contributions: [] as GateContribution[],
           timing: { connector: name, ms: Date.now() - t0, failed: true as const },
-        };
+        }
       }
     })
-  );
-  onProbe?.(rows.map(r => r.timing));
-  return rows.flatMap(r => r.contributions);
+  )
+  onProbe?.(rows.map((r) => r.timing))
+  return rows.flatMap((r) => r.contributions)
 }
 
 /** Collect pre-tool verdicts from all connectors — the caller decides
@@ -1245,12 +1127,13 @@ export async function preToolVerdicts(
     connectorHooks(ctx).map(async ({ hooks }) => {
       try {
         return (
-          (await probeWithTimeout(() => hooks.preTool?.(ctx, { tool, input }), undefined)) ?? []
-        );
+          (await probeWithTimeout(() => hooks.preTool?.(ctx, { tool, input }), undefined)) ??
+          []
+        )
       } catch {
-        return []; // fail-open
+        return [] // fail-open
       }
     })
-  );
-  return verdicts.flat();
+  )
+  return verdicts.flat()
 }
