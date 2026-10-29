@@ -11,7 +11,14 @@
  * a failing check, never as a crash.
  */
 import { spawnSync } from 'node:child_process';
-import { existsSync, readdirSync, readFileSync, readlinkSync, realpathSync, statSync } from 'node:fs';
+import {
+  existsSync,
+  readdirSync,
+  readFileSync,
+  readlinkSync,
+  realpathSync,
+  statSync,
+} from 'node:fs';
 import { homedir } from 'node:os';
 import { basename, delimiter, dirname, join, resolve } from 'node:path';
 import {
@@ -597,31 +604,29 @@ function selfDistChecks(): DoctorCheck[] {
  *  null when /proc can't name a file (non-/proc platform, raced exit,
  *  `node -e`). */
 function daemonEntry(pid: number): string | null {
-  let argv: string[]
+  let argv: string[];
   try {
     argv = readFileSync(`/proc/${pid}/cmdline`, 'utf8')
       .split('\0')
-      .filter((t) => t !== '')
+      .filter(t => t !== '');
   } catch {
-    return null
+    return null;
   }
   if (argv.length === 0) {
-    return null
+    return null;
   }
-  const runtime = basename(argv[0]!)
-  const candidate = /^(node|bun|deno|tsx)[\w.-]*$/.test(runtime)
-    ? scriptArg(argv)
-    : argv[0]
+  const runtime = basename(argv[0]!);
+  const candidate = /^(node|bun|deno|tsx)[\w.-]*$/.test(runtime) ? scriptArg(argv) : argv[0];
   if (candidate === undefined || candidate.startsWith('-')) {
-    return null
+    return null;
   }
   try {
     const abs = candidate.startsWith('/')
       ? candidate
-      : join(readlinkSync(`/proc/${pid}/cwd`), candidate)
-    return realpathSync(abs)
+      : join(readlinkSync(`/proc/${pid}/cwd`), candidate);
+    return realpathSync(abs);
   } catch {
-    return null
+    return null;
   }
 }
 
@@ -647,23 +652,23 @@ const RUNTIME_VALUE_OPTS = new Set([
   '--watch-path',
   '--env-file',
   '--env-file-if-exists',
-])
+]);
 
 /** The entry script inside a runtime argv — the first operand after
  *  the runtime's own options. `--` ends option parsing outright. */
 function scriptArg(argv: string[]): string | undefined {
-  let i = 1
+  let i = 1;
   while (i < argv.length) {
-    const t = argv[i]!
+    const t = argv[i]!;
     if (t === '--') {
-      return argv[i + 1]
+      return argv[i + 1];
     }
     if (!t.startsWith('-')) {
-      return t
+      return t;
     }
-    i += RUNTIME_VALUE_OPTS.has(t) ? 2 : 1
+    i += RUNTIME_VALUE_OPTS.has(t) ? 2 : 1;
   }
-  return undefined
+  return undefined;
 }
 
 /** The daemon process's start epoch in ms — /proc starttime jiffies off
@@ -672,14 +677,14 @@ function scriptArg(argv: string[]): string | undefined {
  *  never as stale. */
 function procStartMs(pid: number): number | null {
   try {
-    const uptimeSec = Number(readFileSync('/proc/uptime', 'utf8').split(' ')[0])
-    const st = procStat(pid)
+    const uptimeSec = Number(readFileSync('/proc/uptime', 'utf8').split(' ')[0]);
+    const st = procStat(pid);
     if (st === null || st.start === '') {
-      return null
+      return null;
     }
-    return Date.now() - uptimeSec * 1000 + (Number(st.start) / 100) * 1000
+    return Date.now() - uptimeSec * 1000 + (Number(st.start) / 100) * 1000;
   } catch {
-    return null
+    return null;
   }
 }
 
@@ -687,20 +692,20 @@ function procStartMs(pid: number): number | null {
  *  common dir, so an entry exec'd from any of them is this repo's code,
  *  not a foreign binary. */
 function sameGitCommon(a: string, b: string): boolean {
-  const ca = gitCommonDir(a)
-  const cb = gitCommonDir(b)
+  const ca = gitCommonDir(a);
+  const cb = gitCommonDir(b);
   try {
-    return ca !== null && cb !== null && realpathSync(ca) === realpathSync(cb)
+    return ca !== null && cb !== null && realpathSync(ca) === realpathSync(cb);
   } catch {
-    return false
+    return false;
   }
 }
 
 /** The checkout's resolved HEAD commit — null where HEAD won't
  *  resolve (unborn branch, detached probe failure, not a repo). */
 function headSha(dir: string): string | null {
-  const r = gitTry(['-C', dir, 'rev-parse', '--verify', '--quiet', 'HEAD'])
-  return r.code === 0 && r.out.trim() !== '' ? r.out.trim() : null
+  const r = gitTry(['-C', dir, 'rev-parse', '--verify', '--quiet', 'HEAD']);
+  return r.code === 0 && r.out.trim() !== '' ? r.out.trim() : null;
 }
 
 /** Same repository AND same HEAD — a linked worktree sitting on another
@@ -708,8 +713,8 @@ function headSha(dir: string): string | null {
  *  binary can lack what this HEAD carries. An unresolved HEAD never
  *  matches. */
 function sameCheckoutHead(a: string, b: string): boolean {
-  const ha = headSha(a)
-  return ha !== null && ha === headSha(b) && sameGitCommon(a, b)
+  const ha = headSha(a);
+  return ha !== null && ha === headSha(b) && sameGitCommon(a, b);
 }
 
 /** The bro package version behind an entry — `<pkg>/dist/index.js` sits
@@ -718,12 +723,12 @@ function sameCheckoutHead(a: string, b: string): boolean {
 function broEntryVersion(entry: string): string | undefined {
   try {
     const pkg = JSON.parse(readFileSync(join(dirname(dirname(entry)), 'package.json'), 'utf8')) as {
-      name?: string
-      version?: string
-    }
-    return pkg.name === '@broject/bro' ? pkg.version : undefined
+      name?: string;
+      version?: string;
+    };
+    return pkg.name === '@broject/bro' ? pkg.version : undefined;
   } catch {
-    return undefined
+    return undefined;
   }
 }
 
@@ -733,16 +738,16 @@ function broEntryVersion(entry: string): string | undefined {
  *  rebuilt from it) for merged protections to be live. */
 function broCheckoutVersion(root: string | null): string | null {
   if (root === null) {
-    return null
+    return null;
   }
   try {
     const pkg = JSON.parse(readFileSync(join(root, 'packages', 'cli', 'package.json'), 'utf8')) as {
-      name?: string
-      version?: string
-    }
-    return pkg.name === '@broject/bro' && typeof pkg.version === 'string' ? pkg.version : null
+      name?: string;
+      version?: string;
+    };
+    return pkg.name === '@broject/bro' && typeof pkg.version === 'string' ? pkg.version : null;
   } catch {
-    return null
+    return null;
   }
 }
 
@@ -759,14 +764,14 @@ function devDaemonCheck(pid: number, entry: string, dev: DevDist, dir: string): 
         `pid ${pid} runs ${entry} — a different bro checkout's dist`,
         "restart it under this repo's build or the shared install — protections live only in the binary the daemon runs"
       ),
-    ]
+    ];
   }
-  const c = devDistCheck(dev)
+  const c = devDistCheck(dev);
   if (c.status === 'ok') {
     // ...but devDistCheck only weighs the files on disk: the running
     // process still holds what it exec'd, so a dist rebuilt after
     // this daemon started is fresh on disk and stale in memory
-    const start = procStartMs(pid)
+    const start = procStartMs(pid);
     if (start !== null && distStampMs(dev.distDir) > start) {
       return [
         check(
@@ -775,10 +780,10 @@ function devDaemonCheck(pid: number, entry: string, dev: DevDist, dir: string): 
           `pid ${pid} runs ${entry} — dist rebuilt after the daemon started`,
           'restart the daemon — the running process still holds the pre-build code'
         ),
-      ]
+      ];
     }
   }
-  return [check('daemon', c.status, `pid ${pid} · ${c.detail}`, c.hint)]
+  return [check('daemon', c.status, `pid ${pid} · ${c.detail}`, c.hint)];
 }
 
 /** A non-dist entry inside a bro checkout (`node packages/cli/src/index.ts`,
@@ -786,12 +791,7 @@ function devDaemonCheck(pid: number, entry: string, dev: DevDist, dir: string): 
  *  paths are vendored installs, never source. Only the drift question
  *  remains: HEAD moving after the daemon spawned leaves the running
  *  process behind the checkout. */
-function srcDaemonCheck(
-  pid: number,
-  entry: string,
-  entryRoot: string,
-  dir: string
-): DoctorCheck[] {
+function srcDaemonCheck(pid: number, entry: string, entryRoot: string, dir: string): DoctorCheck[] {
   if (!sameCheckoutHead(entryRoot, dir)) {
     return [
       check(
@@ -800,10 +800,10 @@ function srcDaemonCheck(
         `pid ${pid} runs ${entry} — a different bro checkout's source`,
         "restart it under this repo's build or the shared install — protections live only in the binary the daemon runs"
       ),
-    ]
+    ];
   }
-  const start = procStartMs(pid)
-  const moved = refMovedMs(entryRoot, 'HEAD')
+  const start = procStartMs(pid);
+  const moved = refMovedMs(entryRoot, 'HEAD');
   // no start time or no reflog = no evidence the process is current —
   // unverifiable, never a silent ok (commit %ct is committer-declared,
   // not a fallback)
@@ -817,7 +817,7 @@ function srcDaemonCheck(
         })`,
         'restart the daemon — protections live only in the code the process loaded'
       ),
-    ]
+    ];
   }
   if (moved > start) {
     return [
@@ -827,9 +827,9 @@ function srcDaemonCheck(
         `pid ${pid} runs ${entry} — this checkout's source, but HEAD moved since it started`,
         'restart the daemon — the running process loaded the pre-move code'
       ),
-    ]
+    ];
   }
-  return [check('daemon', 'ok', `up — pid ${pid} · ${entry} — this checkout's source entry`)]
+  return [check('daemon', 'ok', `up — pid ${pid} · ${entry} — this checkout's source entry`)];
 }
 
 /** One row: supervisor liveness plus the binary-drift verdict. Down is
@@ -839,9 +839,10 @@ function srcDaemonCheck(
  *  merged protections aren't live, and elsewhere the daemon's entry
  *  must be the one `bro` resolves or a restart keeps the drift. */
 function daemonBinChecks(dir: string, root: string | null): DoctorCheck[] {
-  const probe = daemonProbe(dir)
+  const probe = daemonProbe(dir);
   if (!probe.live) {
-    const installed = readDriveMarker(dir) !== null ? ' · installed — the next session checkpoint rearms' : ''
+    const installed =
+      readDriveMarker(dir) !== null ? ' · installed — the next session checkpoint rearms' : '';
     return [
       check(
         'daemon',
@@ -850,46 +851,46 @@ function daemonBinChecks(dir: string, root: string | null): DoctorCheck[] {
           ? `down — no supervisor${installed}`
           : `down — recorded pid ${probe.recorded.pid} is dead${installed}`
       ),
-    ]
+    ];
   }
-  const pid = probe.pid!
-  const entry = daemonEntry(pid)
+  const pid = probe.pid!;
+  const entry = daemonEntry(pid);
   if (entry === null) {
-    return [check('daemon', 'skip', `up — pid ${pid} · binary unverifiable (no readable argv)`)]
+    return [check('daemon', 'skip', `up — pid ${pid} · binary unverifiable (no readable argv)`)];
   }
-  const dev = devDistEntry(entry)
+  const dev = devDistEntry(entry);
   if (dev !== null) {
-    return devDaemonCheck(pid, entry, dev, dir)
+    return devDaemonCheck(pid, entry, dev, dir);
   }
-  const entryRoot = entry.includes('/node_modules/') ? null : repoRoot(dirname(entry))
+  const entryRoot = entry.includes('/node_modules/') ? null : repoRoot(dirname(entry));
   if (entryRoot !== null && broCheckoutVersion(entryRoot) !== null) {
-    return srcDaemonCheck(pid, entry, entryRoot, dir)
+    return srcDaemonCheck(pid, entry, entryRoot, dir);
   }
-  const v = broEntryVersion(entry)
-  const vs = v === undefined ? '' : ` (v${v})`
-  const repoV = broCheckoutVersion(root)
+  const v = broEntryVersion(entry);
+  const vs = v === undefined ? '' : ` (v${v})`;
+  const repoV = broCheckoutVersion(root);
   if (repoV !== null) {
     return [
       check(
         'daemon',
         'warn',
         `pid ${pid} runs ${entry}${vs} — installed, not this repo's build (v${repoV})`,
-        'merged protections aren\'t live until the daemon\'s binary is rebuilt — npm run build + reinstall, or restart it on the repo\'s dist'
+        "merged protections aren't live until the daemon's binary is rebuilt — npm run build + reinstall, or restart it on the repo's dist"
       ),
-    ]
+    ];
   }
-  const eps = broEntrypoints()
+  const eps = broEntrypoints();
   if (eps.includes(entry)) {
-    return [check('daemon', 'ok', `up — pid ${pid} · ${entry}${vs}`)]
+    return [check('daemon', 'ok', `up — pid ${pid} · ${entry}${vs}`)];
   }
   return [
     check(
       'daemon',
       'warn',
       `pid ${pid} runs ${entry}${vs} — \`bro\` resolves ${eps[0] ?? 'nothing'}`,
-      'the daemon\'s binary and the rearm path differ — restart it under the current bro'
+      "the daemon's binary and the rearm path differ — restart it under the current bro"
     ),
-  ]
+  ];
 }
 
 /** Top-level keys bro knows — anything else in bro.config.json is almost
@@ -1107,7 +1108,9 @@ function bdChecks(
   if (!bd.found) {
     const fix = 'install beads (https://github.com/gastownhall/beads) or set "stores": ["jsonl"]';
     if (githubTasksHealthy) {
-      return [check('bd', 'warn', binProblem(bd), 'beads store is off — GitHub Issues serves tasks')];
+      return [
+        check('bd', 'warn', binProblem(bd), 'beads store is off — GitHub Issues serves tasks'),
+      ];
     }
     return [
       beadsActive
@@ -1115,15 +1118,17 @@ function bdChecks(
         : check('bd', 'warn', binProblem(bd), 'beads store is off — nothing needs it'),
     ];
   }
-  const out: DoctorCheck[] = [
-    check('bd', 'ok', bd.version ?? 'present'),
-  ];
+  const out: DoctorCheck[] = [check('bd', 'ok', bd.version ?? 'present')];
   if (githubTasksHealthy && (compat.broken || compat.missing || !compat.ok)) {
     out.push(
       check(
         'bd-compat',
         'warn',
-        compat.problems.length > 0 ? compat.problems.join('; ') : (compat.broken ? 'bd unusable' : 'bd not usable'),
+        compat.problems.length > 0
+          ? compat.problems.join('; ')
+          : compat.broken
+            ? 'bd unusable'
+            : 'bd not usable',
         'beads broken but GitHub Issues serves tasks (connectors.tasks=github)'
       )
     );
@@ -2234,6 +2239,61 @@ function meshChecks(
   return out;
 }
 
+function credentialScopeChecks(dir: string, cfg: any): DoctorCheck[] {
+  try {
+    const agents = cfg.agents ?? {};
+    // strict scope is OPT-IN (spec bro-l8c4f.6): getCredentialScope only
+    // enforces the allowlist when strictEnv/credentialScope says so —
+    // an envAllowlist alone stays trusted-host (inert), and reporting it
+    // as enabled would show an ok trust boundary that isn't enforced
+    const strictBackends: string[] = [];
+    const inertBackends: string[] = [];
+    for (const [backend, b] of Object.entries(agents)) {
+      const bb = b as any;
+      if (bb && typeof bb === 'object') {
+        if (bb.strictEnv === true || bb.credentialScope != null) {
+          strictBackends.push(backend);
+        } else if (Array.isArray(bb.envAllowlist)) {
+          inertBackends.push(backend);
+        }
+      }
+    }
+    const out: DoctorCheck[] = [];
+    if (strictBackends.length > 0) {
+      out.push(
+        check(
+          'env-scope',
+          'ok',
+          `strict credential scope enabled for: ${strictBackends.join(', ')} (trust boundary explicit)`
+        )
+      );
+    }
+    if (inertBackends.length > 0) {
+      out.push(
+        check(
+          'env-scope-inert',
+          'warn',
+          `envAllowlist without strictEnv stays trusted-host (inert) on: ${inertBackends.join(', ')} — workers inherit ambient env`,
+          'set agents.<backend>.strictEnv: true to enforce the allowlist (bro-l8c4f.6)'
+        )
+      );
+    }
+    if (out.length === 0) {
+      out.push(
+        check(
+          'env-scope',
+          'warn',
+          'trusted-host mode (default) — workers inherit ambient env',
+          'set agents.<backend>.strictEnv: true and agents.<backend>.envAllowlist for explicit credential scope (bro-l8c4f.6)'
+        )
+      );
+    }
+    return out;
+  } catch {
+    return [];
+  }
+}
+
 export function runDoctorChecks(
   dir: string = process.cwd(),
   opts: { strict?: boolean } = {}
@@ -2290,7 +2350,8 @@ export function runDoctorChecks(
     checkClientPlugins(dir),
     ...buildStampChecks(dir, root),
     ...(janitor === null ? [] : [janitor]),
-    ...remoteChecks(dir, root, cfg.sync.remote, beadsDir, bd.found)
+    ...remoteChecks(dir, root, cfg.sync.remote, beadsDir, bd.found),
+    ...credentialScopeChecks(dir, cfg)
   );
 
   return checks;

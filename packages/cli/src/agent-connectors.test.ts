@@ -1205,6 +1205,58 @@ describe('native connector', () => {
   });
 });
 
+/** Credential scope for workers (spec bro-l8c4f.6): strict mode is
+ *  opt-in, the allowlist owns the worker env, and the fleet batch
+ *  marker rides only the caller's spec.env — an ambient one would class
+ *  the worker's own spawns as batch and charge the fleet budget
+ *  (bro-9h86l). Native-only: the contract suite runs per backend, but
+ *  only native can assert the spawned process's actual environ. */
+describe('native credential scope (bro-l8c4f.6)', () => {
+  const fx = (rows: Array<Record<string, unknown>>) => fixture(rows);
+  const conn = (f: Fixture) => makeNativeConnector({ dir: f.main }, f.env);
+
+  test('ambient BRO_BATCH never reaches the worker — only the caller’s spec.env carries the fleet marker', async () => {
+    const f = fx([
+      { id: 'fx-1', status: 'open' },
+      { id: 'fx-2', status: 'open' },
+    ]);
+    process.env.BRO_BATCH = '1';
+    process.env.KEEP_ME = 'kept';
+    process.env.LEAK_ME = 'leaked';
+    const payload =
+      "require('fs').writeFileSync('env.out', [process.env.KEEP_ME ?? '', process.env.BRO_BATCH ?? '', process.env.LEAK_ME ?? ''].join('|'))";
+    try {
+      f.env.agents['native'] = {
+        ...f.env.agents['native'],
+        strictEnv: true,
+        envAllowlist: ['PATH', 'HOME', 'KEEP_ME'],
+      };
+      const c = conn(f);
+      // ambient only — the allowlisted KEEP_ME rides; the ambient
+      // marker and the sentinel credential do not
+      const a = await c.spawn(SPEC(f.main, f.beadsDir, 'fx-1', payload));
+      await until(() => existsSync(join(f.main, 'env.out')));
+      assert.equal(readFileSync(join(f.main, 'env.out'), 'utf8'), 'kept||');
+      await c.stop(a.id);
+      rmSync(join(f.main, 'env.out'));
+      // the caller's own marker rides even under strict scope; a
+      // spec.env sentinel is still refused by the allowlist
+      const b = await c.spawn({
+        ...SPEC(f.main, f.beadsDir, 'fx-2', payload),
+        env: { BRO_BATCH: '1', LEAK_ME: 'from-spec' },
+      });
+      await until(() => existsSync(join(f.main, 'env.out')));
+      assert.equal(readFileSync(join(f.main, 'env.out'), 'utf8'), 'kept|1|');
+      await c.stop(b.id);
+    } finally {
+      delete process.env.BRO_BATCH;
+      delete process.env.KEEP_ME;
+      delete process.env.LEAK_ME;
+      cleanup(f);
+    }
+  });
+});
+
 /** The spawn-handshake crash windows (spec bro-l8c4f.5): deterministic
  *  failpoints leave the exact half-state a dead launcher leaves —
  *  reservation only, live self-publishing child, or a published pid
@@ -1735,6 +1787,47 @@ describe('docker connector', () => {
       // last-wins puts OUR --name/--workdir last — the contract holds
       assert.ok(db[`bro-${info.id}`], 'container must be named by the contract');
       assert.equal(db['evil'], undefined);
+      await c.stop(info.id);
+    } finally {
+      cleanup(f);
+    }
+  });
+
+  test('strict scope rejects env-passing runArgs — the allowlist owns the container env', async () => {
+    const f = fixture([{ id: 'fx-1', status: 'open' }], undefined, { docker: true });
+    try {
+      const env: AgentConnectorEnv = {
+        ...f.env,
+        agents: {
+          docker: {
+            ...f.env.agents['docker'],
+            strictEnv: true,
+            envAllowlist: ['PATH'],
+            runArgs: [
+              '--env',
+              'SENTRY_TOKEN=leak',
+              '--env-file',
+              '/tmp/leak.env',
+              '--memory',
+              '1g',
+            ],
+          },
+        },
+      };
+      const c = makeDockerConnector({ dir: f.main }, env);
+      const info = await c.spawn(SPEC(f.main, f.beadsDir, 'fx-1', 'setTimeout(() => {}, 30000)'));
+      const db = JSON.parse(
+        readFileSync(join(process.env.DOCKER_FAKE_HOME!, 'containers.json'), 'utf8')
+      ) as Record<string, { argv: string[] }>;
+      const argv = db[`bro-${info.id}`]!.argv;
+      // the operator's env flags AND their operands are gone — bro's own
+      // allowlist-filtered --env-file is the only one left on the argv
+      assert.ok(!argv.includes('--env'));
+      assert.ok(!argv.includes('SENTRY_TOKEN=leak'));
+      assert.ok(!argv.includes('/tmp/leak.env'));
+      assert.equal(argv.filter(a => a === '--env-file').length, 1);
+      // non-env runArgs still ride
+      assert.ok(argv.includes('--memory'), 'non-env runArgs must survive');
       await c.stop(info.id);
     } finally {
       cleanup(f);
