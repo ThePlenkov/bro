@@ -248,14 +248,21 @@ function busSocketBase(): string {
   return runtime !== undefined && runtime !== '' ? runtime : tmpdir()
 }
 
+/** The broker socket for an already-resolved git common dir — the
+ *  probe-free half of `busSocketPath` for callers that hold `common`
+ *  from their own derivation and must not pay a second git spawn. */
+export function busSocketPathForCommon(common: string): string {
+  const hash = createHash('sha256').update(common).digest('hex').slice(0, 16)
+  return join(busSocketBase(), 'bro-bus', `${hash}.sock`)
+}
+
 /** The broker socket for a repo, or null outside a repository. */
 export function busSocketPath(dir: string): string | null {
   const common = gitCommonDir(dir, GIT_SYNC_PROBE_TIMEOUT_MS)
   if (common === null) {
     return null
   }
-  const hash = createHash('sha256').update(common).digest('hex').slice(0, 16)
-  return join(busSocketBase(), 'bro-bus', `${hash}.sock`)
+  return busSocketPathForCommon(common)
 }
 
 /** Discovery file — same shape as `serve.json`: how a client learns the
@@ -694,7 +701,7 @@ export interface BusPublishResult {
 export function busPublish(
   socketPath: string,
   event: EventInput,
-  opts: { timeoutMs?: number } = {}
+  opts: { timeoutMs?: number; unref?: boolean } = {}
 ): Promise<BusPublishResult> {
   const timeoutMs = opts.timeoutMs ?? BUS_TIMEOUT_MS
   return new Promise<BusPublishResult>((resolve) => {
@@ -710,6 +717,12 @@ export function busPublish(
       resolve(res)
     }
     const sock = connect(socketPath)
+    // fire-and-forget callers (unref): a wedged broker must not keep the
+    // publishing process alive past its own work — the socket joins the
+    // already-unref'd settle timer in staying off the event loop.
+    if (opts.unref === true) {
+      sock.unref()
+    }
     const timer = setTimeout(() => finish({ published: false, reason: 'timeout' }), timeoutMs)
     timer.unref?.()
     sock.on('error', (err: NodeJS.ErrnoException) => {

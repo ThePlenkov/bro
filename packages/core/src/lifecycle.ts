@@ -22,6 +22,7 @@ import { appendFileSync, mkdirSync, readFileSync, renameSync, statSync, writeFil
 import { dirname, join } from 'node:path'
 import { GIT_SYNC_PROBE_TIMEOUT_MS, gitCommonDir } from './git.ts'
 import { withFileLock } from './filelock.ts'
+import { publishLifecycleBusEvent } from './lifecycle-bus.ts'
 import { bdActor } from './tasks.ts'
 
 /** The transition verbs the lifecycle covers (specs/telemetry/
@@ -137,13 +138,16 @@ function compactLifecycle(file: string): void {
  *  Stamps ts, derives actor (BRO_AGENT_ID → bdActor) and session (env
  *  chain → 'shell'), then appends + caps under the file's lock. A lock
  *  timeout degrades to the plain append, never a stall; anything worse
- *  is a no-op. */
+ *  is a no-op. After the append the row is mirrored to the bus feed
+ *  (spec specs/bro-294hf.md) — fire-and-forget on the same common dir,
+ *  so the mirror costs no second git probe. */
 export function emitLifecycle(dir: string, input: LifecycleInput): void {
   try {
-    const file = lifecyclePath(dir)
-    if (file === null) {
+    const common = gitCommonDir(dir, GIT_SYNC_PROBE_TIMEOUT_MS)
+    if (common === null) {
       return
     }
+    const file = join(common, 'bro', 'events.jsonl')
     const badge = process.env.BRO_AGENT_ID?.trim()
     const actor = input.actor ?? (badge !== undefined && badge !== '' ? badge : bdActor(dir))
     const session = input.session ?? sessionEnv() ?? 'shell'
@@ -175,6 +179,9 @@ export function emitLifecycle(dir: string, input: LifecycleInput): void {
     } catch {
       append()
     }
+    // bus mirror — after the journal append so the feed trails the
+    // record, never gates it. Fire-and-forget inside the outer catch.
+    publishLifecycleBusEvent(common, row)
   } catch {
     // telemetry never throws into the transition it observes
   }
