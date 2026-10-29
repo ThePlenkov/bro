@@ -2111,23 +2111,19 @@ export const workConnector: Connector = {
         return parseWorktreePorcelain(
           gitTry(['-C', ctx.dir, 'worktree', 'list', '--porcelain'], GIT_SYNC_PROBE_TIMEOUT_MS).out
         )
-            .slice(1) // porcelain lists the main worktree first
-            .filter(w => !w.prunable && w.path !== cur)
-            // a worktree claimed by THIS agent's process tree is own
-            // work, not a foreign session — the nudge exists to warn
-            // about OTHER live claimants (bro-7022c)
-            .filter(w => {
-              const claimOwner = worktreeClaimInfo(w.path)?.owner;
-              return (
-                self === null ||
-                claimOwner == null ||
-                claimOwner.pid !== self.pid ||
-                claimOwner.start !== self.start
-              );
-            })
-            .slice(0, 5)
-            .map(w => `worktree ${basename(w.path)} [${w.branch ?? 'detached'}]`)
-        );
+          .slice(1)
+          .filter((w) => !w.prunable && w.path !== cur)
+          .filter((w) => {
+            const claimOwner = worktreeClaimInfo(w.path)?.owner
+            return (
+              self === null ||
+              claimOwner == null ||
+              claimOwner.pid !== self.pid ||
+              claimOwner.start !== self.start
+            )
+          })
+          .slice(0, 5)
+          .map((w) => `worktree ${basename(w.path)} [${w.branch ?? 'detached'}]`)
       } catch {
         return []
       }

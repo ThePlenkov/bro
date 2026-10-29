@@ -26,7 +26,15 @@ import {
  *  feature branch is found from a linked worktree, not the main one. */
 export function repoRoot(dir: string): string {
   const r = gitTry(['-C', dir, 'rev-parse', '--show-toplevel'], GIT_SYNC_PROBE_TIMEOUT_MS)
-  return r.code === 0 && r.out.trim() !== '' ? r.out.trim() : dir
+  if (r.code === 0 && r.out.trim() !== '') {
+    return r.out.trim()
+  }
+  const err = (r.err || '').toLowerCase()
+  if (/timed out|timeout/i.test(err) || r.code === 124) {
+    throw new Error('could not determine repository root (git rev-parse timed out)')
+  }
+  // Confirmed non-repository - preserve existing fallback
+  return dir
 }
 
 /** Bead ids are word-ish (`bro-svk.5`); separators and dot-segments

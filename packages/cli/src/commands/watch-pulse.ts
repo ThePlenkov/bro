@@ -81,17 +81,24 @@ export function armPulse(dir: string, everySec: number): { state: ArmState; mark
   return { state: cur === null ? 'armed' : 'updated', marker }
 }
 
-export type DisarmState = 'disarmed' | 'absent'
+export type DisarmState = 'disarmed' | 'absent' | 'unknown'
 
 /** Remove the want-marker. The running pulse (if any) keeps its lock —
  *  disarming only drops the rearm intent. */
 export function disarmPulse(dir: string): DisarmState {
   const file = pulseMarkerPath(dir)
-  if (file === null || !existsSync(file)) {
+  if (file === null) {
+    return 'unknown'
+  }
+  if (!existsSync(file)) {
     return 'absent'
   }
-  rmSync(file)
-  return 'disarmed'
+  try {
+    rmSync(file)
+    return 'disarmed'
+  } catch {
+    return 'unknown'
+  }
 }
 
 /** Is a `bro watch --every` alive on this repo? The lock's holder pid

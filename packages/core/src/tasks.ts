@@ -26,7 +26,7 @@
 import { join } from 'node:path'
 import { bd, BdCompatError, bdAt, BD_NO_STORE, bdJson, bdJsonAsync, bdTry, bdTryAsync, isBdNotFound } from './bd.ts'
 import { bridgeFetch, bridgePublish, doltHeadHealth, DOLT_DATA_REF, doltSyncPlan, type DoltBridge } from './dolt-bridge.ts'
-import { GIT_SYNC_PROBE_TIMEOUT_MS, gitTry } from './git.ts'
+import { GIT_SYNC_PROBE_TIMEOUT_MS, gitTry, gitTryAsync } from './git.ts'
 
 /** Resolved probe results per dir — hook surfaces ask for the actor
  *  several times per event in one process, and each probe is a sync
@@ -122,7 +122,7 @@ export async function bdActorAsync(dir: string): Promise<string> {
   const line = cfg.code === 0 ? (cfg.out.trim().split('\n').pop()?.trim() ?? '') : ''
   let actor = parseActorLine(line)
   if (actor === '') {
-    const git = gitTry(['-C', dir, 'config', 'user.name'], GIT_SYNC_PROBE_TIMEOUT_MS)
+    const git = await gitTryAsync(['-C', dir, 'config', 'user.name'], GIT_SYNC_PROBE_TIMEOUT_MS)
     actor =
       git.code === 0 && git.out.trim() !== ''
         ? git.out.trim()
