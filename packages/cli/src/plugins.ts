@@ -912,32 +912,60 @@ export { ConfigPolicyError, assertMutableConfig } from './config-policy.ts';
 import { registerPolicySections } from './config-policy.ts';
 registerPolicySections(pluginConfigSections);
 
-function isPlugin(p: unknown): p is BroPlugin {
-  const o = p as BroPlugin;
-  if (
-    !o ||
-    typeof o !== 'object' ||
-    typeof o.name !== 'string' ||
-    o.name === '' ||
-    typeof o.summary !== 'string' ||
-    typeof o.run !== 'function'
-  ) {
+function hasPluginRequiredShape(o: unknown): boolean {
+  const p = o as BroPlugin;
+  if (!p || typeof p !== 'object') {
     return false;
   }
-  // optional fields must be the right type when present — a truthy
-  // non-function configSchema would crash config loading later
-  if (!PLUGIN_FIELD_CHECKS.every(([key, ok]) => (o as any)[key] === undefined || ok((o as any)[key]))) {
+  if (typeof p.name !== 'string' || p.name === '') {
     return false;
   }
-  // paired fields must both be present or both absent
-  const hasConfigKey = (o as any).configKey !== undefined;
-  const hasConfigSchema = (o as any).configSchema !== undefined;
+  if (typeof p.summary !== 'string') {
+    return false;
+  }
+  if (typeof p.run !== 'function') {
+    return false;
+  }
+  return true;
+}
+
+function hasPluginOptionalFields(o: unknown): boolean {
+  const p = o as Record<string, unknown>;
+  for (const [key, ok] of PLUGIN_FIELD_CHECKS) {
+    const v = p[key as string];
+    if (v === undefined) {
+      continue;
+    }
+    if (!ok(v)) {
+      return false;
+    }
+  }
+  return true;
+}
+
+function hasPluginPairedFields(o: unknown): boolean {
+  const p = o as Record<string, unknown>;
+  const hasConfigKey = p.configKey !== undefined;
+  const hasConfigSchema = p.configSchema !== undefined;
   if (hasConfigKey !== hasConfigSchema) {
     return false;
   }
-  const hasPlanSchema = (o as any).planSchema !== undefined;
-  const hasRunPlan = (o as any).runPlan !== undefined;
+  const hasPlanSchema = p.planSchema !== undefined;
+  const hasRunPlan = p.runPlan !== undefined;
   if (hasPlanSchema !== hasRunPlan) {
+    return false;
+  }
+  return true;
+}
+
+function isPlugin(p: unknown): p is BroPlugin {
+  if (!hasPluginRequiredShape(p)) {
+    return false;
+  }
+  if (!hasPluginOptionalFields(p)) {
+    return false;
+  }
+  if (!hasPluginPairedFields(p)) {
     return false;
   }
   return true;
@@ -945,6 +973,21 @@ function isPlugin(p: unknown): p is BroPlugin {
 
 /** Present-but-wrong optional fields — each predicate runs only when
  *  the field is defined. Table form keeps isPlugin flat as fields grow. */
+function isDenseStringArray(v: unknown): boolean {
+  if (!Array.isArray(v)) {
+    return false;
+  }
+  if (Object.keys(v).length !== v.length) {
+    return false;
+  }
+  for (let i = 0; i < v.length; i++) {
+    if (typeof v[i] !== 'string') {
+      return false;
+    }
+  }
+  return true;
+}
+
 const PLUGIN_FIELD_CHECKS: ReadonlyArray<[keyof BroPlugin, (v: unknown) => boolean]> = [
   ['configSchema', v => typeof v === 'function'],
   ['planSchema', v => typeof v === 'function'],
@@ -957,7 +1000,7 @@ const PLUGIN_FIELD_CHECKS: ReadonlyArray<[keyof BroPlugin, (v: unknown) => boole
   ['deprecated', v => typeof v === 'string'],
   ['flatDeprecated', v => typeof v === 'string'],
   ['configKey', v => typeof v === 'string'],
-  ['argvPrefix', v => Array.isArray(v) && v.every(x => typeof x === 'string')],
+  ['argvPrefix', isDenseStringArray],
   ['docs', v => Array.isArray(v) && v.every(isDocType)],
   ['connectors', v => Array.isArray(v) && v.every(isConnector)],
   ['contract', isCliContract],
@@ -1001,55 +1044,49 @@ const FACADE_KEYS: ReadonlySet<string> = new Set([
   'stacks',
 ]);
 
+const CONNECTOR_FUNCTION_KEYS: ReadonlyArray<string> = [
+  'matchRemote',
+  'matchDir',
+  'auth',
+  'tasks',
+  'tasksAsync',
+  'reviews',
+  'mergeQueue',
+  'specs',
+  'judge',
+  'events',
+  'queries',
+  'stacks',
+  'hooks',
+  'guards',
+];
+
 /** A connectors entry must be a Connector — name + at least the shape
  *  registerConnector relies on — else facade resolution would crash. */
-function isConnector(c: unknown): boolean {
+function hasValidConnectorName(c: unknown): boolean {
   const o = c as Record<string, unknown>;
-  if (!o || typeof o !== 'object' || typeof o.name !== 'string' || o.name === '') {
+  if (!o || typeof o !== 'object') {
     return false;
   }
-  if (o.matchRemote !== undefined && typeof o.matchRemote !== 'function') {
+  if (typeof o.name !== 'string' || o.name === '') {
     return false;
   }
-  if (o.matchDir !== undefined && typeof o.matchDir !== 'function') {
-    return false;
+  return true;
+}
+
+function hasValidConnectorFunctions(c: unknown): boolean {
+  const o = c as Record<string, unknown>;
+  for (const key of CONNECTOR_FUNCTION_KEYS) {
+    const v = o[key];
+    if (v !== undefined && typeof v !== 'function') {
+      return false;
+    }
   }
-  if (o.auth !== undefined && typeof o.auth !== 'function') {
-    return false;
-  }
-  if (o.tasks !== undefined && typeof o.tasks !== 'function') {
-    return false;
-  }
-  if (o.tasksAsync !== undefined && typeof o.tasksAsync !== 'function') {
-    return false;
-  }
-  if (o.reviews !== undefined && typeof o.reviews !== 'function') {
-    return false;
-  }
-  if (o.mergeQueue !== undefined && typeof o.mergeQueue !== 'function') {
-    return false;
-  }
-  if (o.specs !== undefined && typeof o.specs !== 'function') {
-    return false;
-  }
-  if (o.judge !== undefined && typeof o.judge !== 'function') {
-    return false;
-  }
-  if (o.events !== undefined && typeof o.events !== 'function') {
-    return false;
-  }
-  if (o.queries !== undefined && typeof o.queries !== 'function') {
-    return false;
-  }
-  if (o.stacks !== undefined && typeof o.stacks !== 'function') {
-    return false;
-  }
-  if (o.hooks !== undefined && typeof o.hooks !== 'function') {
-    return false;
-  }
-  if (o.guards !== undefined && typeof o.guards !== 'function') {
-    return false;
-  }
+  return true;
+}
+
+function hasValidConnectorFlags(c: unknown): boolean {
+  const o = c as Record<string, unknown>;
   if (o.optIn !== undefined && typeof o.optIn !== 'boolean') {
     return false;
   }
@@ -1060,6 +1097,19 @@ function isConnector(c: unknown): boolean {
     if (!o.optInFacades.every(f => typeof f === 'string' && FACADE_KEYS.has(f))) {
       return false;
     }
+  }
+  return true;
+}
+
+function isConnector(c: unknown): boolean {
+  if (!hasValidConnectorName(c)) {
+    return false;
+  }
+  if (!hasValidConnectorFunctions(c)) {
+    return false;
+  }
+  if (!hasValidConnectorFlags(c)) {
+    return false;
   }
   return true;
 }
