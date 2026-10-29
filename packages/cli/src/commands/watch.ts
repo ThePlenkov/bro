@@ -316,14 +316,7 @@ function prAttention(prs: WatchPrGate[]): string[] {
  *  agentId resolves best-effort off the registry; a run the registry
  *  never claimed still emits keyed on its beadId. */
 function publishSilentTransitions(dir: string, snap: WatchSnapshot, seen: Set<string>): void {
-  // a run that ended while silent leaves no row to re-clear its entry —
-  // prune gone beads or a respawn on the same bead can never emit again
-  const live = new Set(snap.loop.runs.map(r => r.beadId))
-  for (const beadId of seen) {
-    if (!live.has(beadId)) {
-      seen.delete(beadId)
-    }
-  }
+  pruneSilentSeen(snap.loop.runs, seen)
   let reg: ReturnType<typeof readAgentRegistry> | undefined
   const registry = (): ReturnType<typeof readAgentRegistry> => {
     if (reg === undefined) {
@@ -336,17 +329,40 @@ function publishSilentTransitions(dir: string, snap: WatchSnapshot, seen: Set<st
     return reg
   }
   for (const r of snap.loop.runs) {
-    const silentMin = silentRunMin(snap.loop, r)
-    if (silentMin === null) {
-      seen.delete(r.beadId)
-      continue
-    }
-    if (seen.has(r.beadId)) {
-      continue
-    }
-    seen.add(r.beadId)
-    emitRunSilent(dir, r, silentMin, registry)
+    trackSilentTransition(dir, snap.loop, r, seen, registry)
   }
+}
+
+/** A run that ended while silent leaves no row to re-clear its entry —
+ *  prune gone beads or a respawn on the same bead can never emit again. */
+function pruneSilentSeen(runs: LoopRunView[], seen: Set<string>): void {
+  const live = new Set(runs.map(r => r.beadId))
+  for (const beadId of seen) {
+    if (!live.has(beadId)) {
+      seen.delete(beadId)
+    }
+  }
+}
+
+/** One run's edge: loud/dead re-arms, the first tick past stallMin
+ *  emits `worker.silent` once per silent stretch. */
+function trackSilentTransition(
+  dir: string,
+  loop: WatchLoop,
+  r: LoopRunView,
+  seen: Set<string>,
+  registry: () => ReturnType<typeof readAgentRegistry>
+): void {
+  const silentMin = silentRunMin(loop, r)
+  if (silentMin === null) {
+    seen.delete(r.beadId)
+    return
+  }
+  if (seen.has(r.beadId)) {
+    return
+  }
+  seen.add(r.beadId)
+  emitRunSilent(dir, r, silentMin, registry)
 }
 
 /** One run past its silence bound → a keyed `worker.silent` envelope.

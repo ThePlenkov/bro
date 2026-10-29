@@ -23,30 +23,40 @@ import { busPublish, busSocketPath, busSocketPathForCommon } from './bus.ts';
 import type { EventInput } from './events.ts';
 import type { LifecycleEvent } from './lifecycle.ts';
 
+type Detail = Record<string, unknown> | undefined;
+
 /** detail[k] as a usable string, else undefined — an empty-string
  *  detail field is malformed, not a value (same rule isEventInput
  *  enforces on the envelope). */
-function str(detail: Record<string, unknown> | undefined, k: string): string | undefined {
+function str(detail: Detail, k: string): string | undefined {
   const v = detail?.[k];
   return typeof v === 'string' && v !== '' ? v : undefined;
 }
 
-function num(detail: Record<string, unknown> | undefined, k: string): number | undefined {
+function num(detail: Detail, k: string): number | undefined {
   const v = detail?.[k];
   return typeof v === 'number' && Number.isFinite(v) ? v : undefined;
 }
 
-/** detail fields lifted verbatim into the payload when present — one
- *  loop instead of a spread chain per key. */
-function copyDetail(
-  payload: Record<string, unknown>,
-  detail: Record<string, unknown> | undefined,
-  keys: readonly string[]
-): void {
+/** payload[k] = v only when v is present — the shared
+ *  set-if-defined every mapper uses instead of inline ifs. */
+function setIf(payload: Record<string, unknown>, k: string, v: unknown): void {
+  if (v !== undefined) payload[k] = v;
+}
+
+/** detail fields lifted verbatim into the payload when present. */
+function copyDetail(payload: Record<string, unknown>, detail: Detail, keys: readonly string[]): void {
   for (const k of keys) {
-    const v = str(detail, k);
-    if (v !== undefined) payload[k] = v;
+    setIf(payload, k, str(detail, k));
   }
+}
+
+/** The payload skeleton every worker/worktree row shares: the subject
+ *  id plus the bead it ran for. */
+function subjectPayload(ev: LifecycleEvent, id: string, idKey: string): Record<string, unknown> {
+  const payload: Record<string, unknown> = { [idKey]: id };
+  setIf(payload, 'bead', ev.bead);
+  return payload;
 }
 
 /** `spawn` → `worker.spawned` — admission is committed; the attempt's
@@ -56,8 +66,7 @@ function workerSpawnEvent(ev: LifecycleEvent, via: string): EventInput | undefin
   if (agent === undefined) {
     return undefined;
   }
-  const payload: Record<string, unknown> = { agentId: agent };
-  if (ev.bead !== undefined) payload['bead'] = ev.bead;
+  const payload = subjectPayload(ev, agent, 'agentId');
   copyDetail(payload, ev.detail, [
     'runId',
     'worktree',
@@ -86,10 +95,8 @@ function workerExitEvent(ev: LifecycleEvent, via: string): EventInput | undefine
   if (agent === undefined) {
     return undefined;
   }
-  const payload: Record<string, unknown> = { agentId: agent };
-  if (ev.bead !== undefined) payload['bead'] = ev.bead;
-  const code = num(ev.detail, 'code');
-  if (code !== undefined) payload['code'] = code;
+  const payload = subjectPayload(ev, agent, 'agentId');
+  setIf(payload, 'code', num(ev.detail, 'code'));
   copyDetail(payload, ev.detail, ['runId', 'cause', 'backend', 'provider', 'model', 'log']);
   const log = str(ev.detail, 'log');
   return {
@@ -110,10 +117,8 @@ function worktreeEvent(ev: LifecycleEvent, via: string): EventInput | undefined 
   if (path === undefined) {
     return undefined;
   }
-  const payload: Record<string, unknown> = { path };
-  const branch = str(ev.detail, 'branch');
-  if (branch !== undefined) payload['branch'] = branch;
-  if (ev.bead !== undefined) payload['bead'] = ev.bead;
+  const payload = subjectPayload(ev, path, 'path');
+  setIf(payload, 'branch', str(ev.detail, 'branch'));
   return {
     topic: 'worktree',
     kind: ev.to === 'removed' ? 'removed' : 'added',
@@ -123,6 +128,12 @@ function worktreeEvent(ev: LifecycleEvent, via: string): EventInput | undefined 
     payload,
   };
 }
+
+const KIND_MAPPER: Record<string, (ev: LifecycleEvent, via: string) => EventInput | undefined> = {
+  spawn: workerSpawnEvent,
+  'agent-exit': workerExitEvent,
+  worktree: worktreeEvent,
+};
 
 /** Map a lifecycle journal row to its bus envelope — `undefined` for
  *  kinds the worker/worktree feed does not cover (claim, gate, verdict,
@@ -136,16 +147,7 @@ function worktreeEvent(ev: LifecycleEvent, via: string): EventInput | undefined 
  *  phantom and hide it from broadcast subscribers. */
 export function lifecycleBusEvent(ev: LifecycleEvent): EventInput | undefined {
   const via = str(ev.detail, 'via') ?? 'lifecycle';
-  switch (ev.kind) {
-    case 'spawn':
-      return workerSpawnEvent(ev, via);
-    case 'agent-exit':
-      return workerExitEvent(ev, via);
-    case 'worktree':
-      return worktreeEvent(ev, via);
-    default:
-      return undefined;
-  }
+  return KIND_MAPPER[ev.kind]?.(ev, via);
 }
 
 /** Mirror one journal row onto the bus — fire-and-forget inside
@@ -156,10 +158,9 @@ export function lifecycleBusEvent(ev: LifecycleEvent): EventInput | undefined {
 export function publishLifecycleBusEvent(common: string, ev: LifecycleEvent): void {
   try {
     const input = lifecycleBusEvent(ev);
-    if (input === undefined) {
-      return;
+    if (input !== undefined) {
+      void busPublish(busSocketPathForCommon(common), input, { unref: true }).catch(() => {});
     }
-    void busPublish(busSocketPathForCommon(common), input, { unref: true }).catch(() => {});
   } catch {
     // the feed never makes the transition it reports a failure
   }
@@ -180,7 +181,9 @@ export function emitWorkerSilent(
     }
     // an empty agentId is absent, not a key — '' would fail isEventInput
     // and the event would drop silently at the broker door
-    const agentId = input.agentId !== undefined && input.agentId !== '' ? input.agentId : undefined;
+    const agentId = input.agentId === '' ? undefined : input.agentId;
+    const payload: Record<string, unknown> = { bead: input.bead, silentMin: input.silentMin };
+    setIf(payload, 'agentId', agentId);
     void busPublish(
       socket,
       {
@@ -189,11 +192,7 @@ export function emitWorkerSilent(
         key: agentId ?? input.bead,
         source: 'watch',
         ...(input.log !== undefined && input.log !== '' ? { ref: input.log } : {}),
-        payload: {
-          ...(agentId !== undefined ? { agentId } : {}),
-          bead: input.bead,
-          silentMin: input.silentMin,
-        },
+        payload,
       },
       { unref: true }
     ).catch(() => {});
