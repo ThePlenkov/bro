@@ -316,7 +316,25 @@ function prAttention(prs: WatchPrGate[]): string[] {
  *  agentId resolves best-effort off the registry; a run the registry
  *  never claimed still emits keyed on its beadId. */
 function publishSilentTransitions(dir: string, snap: WatchSnapshot, seen: Set<string>): void {
+  // a run that ended while silent leaves no row to re-clear its entry —
+  // prune gone beads or a respawn on the same bead can never emit again
+  const live = new Set(snap.loop.runs.map(r => r.beadId))
+  for (const beadId of seen) {
+    if (!live.has(beadId)) {
+      seen.delete(beadId)
+    }
+  }
   let reg: ReturnType<typeof readAgentRegistry> | undefined
+  const registry = (): ReturnType<typeof readAgentRegistry> => {
+    if (reg === undefined) {
+      try {
+        reg = readAgentRegistry(dir)
+      } catch {
+        reg = {} // a wedged registry is no agentId, never a dead tick
+      }
+    }
+    return reg
+  }
   for (const r of snap.loop.runs) {
     const silentMin = silentRunMin(snap.loop, r)
     if (silentMin === null) {
@@ -327,21 +345,26 @@ function publishSilentTransitions(dir: string, snap: WatchSnapshot, seen: Set<st
       continue
     }
     seen.add(r.beadId)
-    if (reg === undefined) {
-      try {
-        reg = readAgentRegistry(dir)
-      } catch {
-        reg = {} // a wedged registry is no agentId, never a dead tick
-      }
-    }
-    const entry = reg[r.beadId]
-    emitWorkerSilent(dir, {
-      bead: r.beadId,
-      silentMin,
-      ...(typeof entry?.agentId === 'string' && entry.agentId !== '' ? { agentId: entry.agentId } : {}),
-      ...(r.log !== undefined ? { log: r.log } : {}),
-    })
+    emitRunSilent(dir, r, silentMin, registry)
   }
+}
+
+/** One run past its silence bound → a keyed `worker.silent` envelope.
+ *  agentId resolves best-effort off the registry; a run the registry
+ *  never claimed still emits keyed on its beadId. */
+function emitRunSilent(
+  dir: string,
+  r: LoopRunView,
+  silentMin: number,
+  registry: () => ReturnType<typeof readAgentRegistry>
+): void {
+  const entry = registry()[r.beadId]
+  emitWorkerSilent(dir, {
+    bead: r.beadId,
+    silentMin,
+    ...(typeof entry?.agentId === 'string' && entry.agentId !== '' ? { agentId: entry.agentId } : {}),
+    ...(r.log !== undefined ? { log: r.log } : {}),
+  })
 }
 
 /** The notify dedup key — the snapshot minus its timestamp. --every

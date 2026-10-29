@@ -121,7 +121,7 @@ describe('lifecycleBusEvent', () => {
     });
   });
 
-  test('worktree created/reused → added, removed → removed', () => {
+  test('worktree created → added with branch/bead in payload', () => {
     const made = lifecycleBusEvent(
       row({
         kind: 'worktree',
@@ -135,12 +135,16 @@ describe('lifecycleBusEvent', () => {
     assert.equal(made?.key, '/w');
     assert.equal(made?.ref, '/w');
     assert.deepEqual(made?.payload, { path: '/w', branch: 'work/bro-x1', bead: 'bro-x1' });
+  });
 
+  test('worktree reused → added', () => {
     const reused = lifecycleBusEvent(
       row({ kind: 'worktree', to: 'reused', detail: { worktree: '/w' } })
     );
     assert.equal(reused?.kind, 'added');
+  });
 
+  test('worktree removed → removed, via surfaces as source', () => {
     const gone = lifecycleBusEvent(
       row({
         kind: 'worktree',
@@ -217,6 +221,15 @@ describe('lifecycle → bus mirror', () => {
         bead: 'bro-x1',
         silentMin: 42,
       });
+    });
+  });
+
+  test('an empty agentId falls back to the bead key — never a dropped event', async () => {
+    await withRepoBroker(async (dir, _broker, events) => {
+      emitWorkerSilent(dir, { bead: 'bro-x1', silentMin: 7, agentId: '' });
+      await waitFor('worker.silent', () => events.length === 1);
+      assert.equal(events[0]!.key, 'bro-x1');
+      assert.deepEqual(events[0]!.payload, { bead: 'bro-x1', silentMin: 7 });
     });
   });
 

@@ -701,7 +701,7 @@ export interface BusPublishResult {
 export function busPublish(
   socketPath: string,
   event: EventInput,
-  opts: { timeoutMs?: number } = {}
+  opts: { timeoutMs?: number; unref?: boolean } = {}
 ): Promise<BusPublishResult> {
   const timeoutMs = opts.timeoutMs ?? BUS_TIMEOUT_MS
   return new Promise<BusPublishResult>((resolve) => {
@@ -717,6 +717,12 @@ export function busPublish(
       resolve(res)
     }
     const sock = connect(socketPath)
+    // fire-and-forget callers (unref): a wedged broker must not keep the
+    // publishing process alive past its own work — the socket joins the
+    // already-unref'd settle timer in staying off the event loop.
+    if (opts.unref === true) {
+      sock.unref()
+    }
     const timer = setTimeout(() => finish({ published: false, reason: 'timeout' }), timeoutMs)
     timer.unref?.()
     sock.on('error', (err: NodeJS.ErrnoException) => {
