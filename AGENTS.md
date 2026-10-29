@@ -125,7 +125,7 @@ Developing bro itself: see CONTRIBUTING.md.
   a dist-backed daemon, rebuild + reinstall for a published install,
   then `bro fleet daemon down && bro fleet daemon up`. `bro doctor`'s
   `daemon` row compares the running binary against the repo, so protections
-  live only after the CLI the daemon runs is rebuilt.
+  live only after the CLI the daemon runs is rebuilt and the daemon restarted.
 
 ## Convoy fan-out — detach + pins
 
