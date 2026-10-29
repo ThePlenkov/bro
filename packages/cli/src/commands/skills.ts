@@ -16,17 +16,20 @@
  */
 import { spawnSync, type SpawnSyncReturns } from 'node:child_process';
 import {
+  closeSync,
   existsSync,
   lstatSync,
   mkdirSync,
+  openSync,
   readdirSync,
   readFileSync,
   readlinkSync,
+  renameSync,
   symlinkSync,
   unlinkSync,
   type Stats,
 } from 'node:fs';
-import { basename, isAbsolute, join, relative, resolve, sep } from 'node:path';
+import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import {
   checkSkillLock,
   hasHelpFlag,
@@ -45,7 +48,7 @@ export { skillsSection, type SkillsConfig } from './skills-config.ts';
 // --- source descriptors --------------------------------------------------------
 
 export type SkillSource =
-  | { kind: 'github'; repo: string; skill?: string; raw: string }
+  | { kind: 'github'; repo: string; path?: string; skill?: string; raw: string }
   | { kind: 'url'; url: string; raw: string }
   | { kind: 'local'; path: string; raw: string }
   | { kind: 'invalid'; raw: string; reason: string };
@@ -54,35 +57,59 @@ export type SkillSource =
  *  (or a bare shorthand) must carry. */
 const GH_REPO = /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/;
 
+/** A `local:` path must stay inside the checkout — absolute paths and
+ *  `..` segments would link outside content into `.agents/skills/`. */
+function localPath(raw: string, spec: string, prefix: string): SkillSource {
+  const path = spec.slice(prefix.length).trim();
+  if (path === '') {
+    return { kind: 'invalid', raw, reason: 'local: needs a repo-relative path' };
+  }
+  if (isAbsolute(path) || path.split('/').includes('..')) {
+    return {
+      kind: 'invalid',
+      raw,
+      reason: 'local: must be repo-relative — no absolute paths, no ..',
+    };
+  }
+  return { kind: 'local', path, raw };
+}
+
 function parseLocalSource(raw: string, spec: string): SkillSource | null {
   if (spec.startsWith('local:')) {
-    const path = spec.slice('local:'.length).trim();
-    return path === ''
-      ? { kind: 'invalid', raw, reason: 'local: needs a repo-relative path' }
-      : { kind: 'local', path, raw };
+    return localPath(raw, spec, 'local:');
   }
-  return spec.startsWith('./') ? { kind: 'local', path: spec, raw } : null;
+  return spec.startsWith('./') ? localPath(raw, spec, '') : null;
 }
 
 function parseGithubSource(raw: string, spec: string): SkillSource | null {
   if (!spec.startsWith('github:')) {
     return null;
   }
-  const segs = spec
+  const [owner, name, ...rest] = spec
     .slice('github:'.length)
     .split('/')
     .filter(s => s !== '');
-  const repo = segs.slice(0, 2).join('/');
-  if (segs.length < 2 || !GH_REPO.test(repo)) {
+  const repo = `${owner ?? ''}/${name ?? ''}`;
+  if (!GH_REPO.test(repo) || [owner, name].some(s => s === undefined || s === '.' || s === '..')) {
     return { kind: 'invalid', raw, reason: 'github: needs <owner>/<repo>[/<path>]' };
   }
-  const base = { kind: 'github' as const, repo, raw };
-  return segs.length > 2 ? { ...base, skill: segs[segs.length - 1]! } : base;
+  if (rest.length === 0) {
+    return { kind: 'github', repo, raw };
+  }
+  const path = rest.join('/');
+  return { kind: 'github', repo, path, skill: basename(path), raw };
 }
 
-/** One `skills.install` string → a typed source. Anything outside the
+/** One `skills.install` entry → a typed source. Anything outside the
  *  grammar is `invalid` — reported by the command, never skipped. */
-export function parseSkillSource(raw: string): SkillSource {
+export function parseSkillSource(raw: unknown): SkillSource {
+  if (typeof raw !== 'string') {
+    return {
+      kind: 'invalid',
+      raw: JSON.stringify(raw) ?? '?',
+      reason: 'skills.install entries must be strings (the section a string array)',
+    };
+  }
   const spec = raw.trim();
   const local = parseLocalSource(raw, spec);
   if (local !== null) {
@@ -92,10 +119,13 @@ export function parseSkillSource(raw: string): SkillSource {
   if (github !== null) {
     return github;
   }
-  if (spec.startsWith('https://') || spec.startsWith('http://')) {
+  if (spec.startsWith('http://')) {
+    return { kind: 'invalid', raw, reason: 'plaintext http:// is not a source — use https://' };
+  }
+  if (spec.startsWith('https://')) {
     return { kind: 'url', url: spec, raw };
   }
-  if (GH_REPO.test(spec)) {
+  if (GH_REPO.test(spec) && !spec.split('/').some(s => s === '.' || s === '..')) {
     return { kind: 'github', repo: spec, raw };
   }
   return {
@@ -122,10 +152,48 @@ export type SpawnRunner = (
   args: string[]
 ) => SpawnSyncReturns<string>;
 
+/** One argv element quoted for `cmd.exe /d /s /c` — every metachar
+ *  caret-escaped so a configured path or source string can never turn
+ *  into a second command. */
+function cmdQuote(arg: string): string {
+  return `"${arg.replace(/[%^&|<>()"]/g, '^$&')}"`;
+}
+
+/** Windows can't exec `.cmd`/`.bat` (npx's own shim!) or a bare PATH
+ *  command without the interpreter — route through ComSpec with every
+ *  argument quoted; POSIX spawns stay direct. */
+function spawnTarget(file: string, args: string[]): { file: string; args: string[] } {
+  const needsCmd =
+    /\.(cmd|bat)$/i.test(file) ||
+    (process.platform === 'win32' && !/\.(exe|com)$/i.test(file) && !file.includes('/'));
+  if (process.platform !== 'win32' || !needsCmd) {
+    return { file, args };
+  }
+  return {
+    file: process.env.ComSpec ?? 'cmd.exe',
+    args: ['/d', '/s', '/c', cmdQuote(file), ...args.map(cmdQuote)],
+  };
+}
+
+function spawnArgv(file: string, args: string[], cwd?: string): SpawnSyncReturns<string> {
+  const t = spawnTarget(file, args);
+  return spawnSync(t.file, t.args, {
+    // NOSONAR — npx/PATH lookup is the contract (gh/bd precedent)
+    cwd,
+    stdio: cwd === undefined ? 'pipe' : undefined,
+    encoding: 'utf8',
+    // the CLI's interactive UI is verbose — headroom; -y skips prompts
+    maxBuffer: 64 * 1024 * 1024,
+    // a restore re-clones every locked repo — bounded, never infinite
+    timeout: 300_000,
+    env: { ...process.env, NO_COLOR: '1' },
+  });
+}
+
 /** A bare command on PATH? The probe is `cmd --version` — present and
  *  runnable wins; spawn errors and non-zero exits read as absent. */
 export function commandOnPath(cmd: string): boolean {
-  const proc = spawnSync(cmd, ['--version'], { stdio: 'pipe' });
+  const proc = spawnArgv(cmd, ['--version']);
   return proc.error === undefined && proc.status === 0;
 }
 
@@ -150,34 +218,16 @@ export function resolveSkillsBin(
   if (probe('skills')) {
     return { file: 'skills', args: [], via: 'path' };
   }
-  return { file: 'npx', args: ['-y', 'skills'], via: 'npx' };
+  return { file: 'npx', args: ['-y', SKILLS_PKG], via: 'npx' };
 }
 
-/** `.cmd`/`.bat` bins can't be spawned directly — route through the
- *  command interpreter (check.ts precedent). */
-function spawnTarget(bin: SkillsBin): { file: string; args: string[] } {
-  if (/\.(cmd|bat)$/i.test(bin.file)) {
-    return {
-      file: process.env.ComSpec ?? 'cmd.exe',
-      args: ['/d', '/s', '/c', bin.file, ...bin.args],
-    };
-  }
-  return bin;
-}
+/** The npx fallback package — pinned (a bare `skills` spec would
+ *  execute whatever the registry serves that day); skills.bin or a
+ *  PATH install overrides it. */
+const SKILLS_PKG = 'skills@1.7.4';
 
-const spawnSkills: SpawnRunner = (bin, root, args) => {
-  const target = spawnTarget(bin);
-  return spawnSync(target.file, [...target.args, ...args], {
-    // NOSONAR — npx/PATH lookup is the contract (gh/bd precedent)
-    cwd: root,
-    encoding: 'utf8',
-    // the CLI's interactive UI is verbose — headroom; -y skips prompts
-    maxBuffer: 64 * 1024 * 1024,
-    // a restore re-clones every locked repo — bounded, never infinite
-    timeout: 300_000,
-    env: { ...process.env, NO_COLOR: '1' },
-  });
-};
+const spawnSkills: SpawnRunner = (bin, root, args) =>
+  spawnArgv(bin.file, [...bin.args, ...args], root);
 
 function addArgs(src: SkillSource & { kind: 'github' | 'url' }, agents: string[]): string[] {
   const pkg = src.kind === 'url' ? src.url : src.repo;
@@ -210,14 +260,18 @@ function spawnDetail(proc: SpawnSyncReturns<string>): string {
 
 // --- local links ---------------------------------------------------------------
 
-/** A local skill's name — SKILL.md frontmatter `name:`, basename
- *  fallback. */
+/** A name safe to be a `.agents/skills/` entry — no separators, no
+ *  `..`, so frontmatter can't aim the link outside the skills dir. */
+const SAFE_NAME = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
+
+/** A local skill's name — SKILL.md frontmatter `name:` when it's a
+ *  safe directory name, basename fallback. */
 export function localSkillName(root: string, rel: string): string {
   const dir = resolve(root, rel);
   try {
     const md = readFileSync(join(dir, 'SKILL.md'), 'utf8');
     const m = md.match(/^name:\s*["']?([^\s"']+)["']?\s*$/m);
-    if (m?.[1] !== undefined) {
+    if (m?.[1] !== undefined && SAFE_NAME.test(m[1])) {
       return m[1];
     }
   } catch {
@@ -232,9 +286,10 @@ export interface LocalLink {
   detail?: string;
 }
 
-/** `.agents/skills/<name> → <relpath>` — create or repoint. A real
- *  directory in the way is left alone and reported (`present`) — bro
- *  owns links, never deletes vendored content. */
+/** `.agents/skills/<name> → <relpath>` — create via a temp-name rename
+ *  (no delete-then-create gap), verify an existing link's target, and
+ *  never overwrite: a real dir or a link pointing elsewhere is an
+ *  error, not a repoint — bro owns links, never deletes content. */
 export function ensureLocalLink(root: string, rel: string): LocalLink {
   const dir = resolve(root, rel);
   const skillsDir = join(root, '.agents', 'skills');
@@ -245,29 +300,41 @@ export function ensureLocalLink(root: string, rel: string): LocalLink {
   mkdirSync(skillsDir, { recursive: true });
   const link = join(skillsDir, name);
   const target = relative(skillsDir, dir);
-  let st: Stats | null;
   try {
-    st = lstatSync(link);
-  } catch {
-    st = null;
-  }
-  if (st === null) {
-    symlinkSync(target, link);
-    return { name, state: 'linked' };
-  }
-  if (!st.isSymbolicLink()) {
+    let st: Stats | null;
+    try {
+      st = lstatSync(link);
+    } catch {
+      st = null;
+    }
+    if (st === null) {
+      const tmp = `${link}.bro-${process.pid}`;
+      symlinkSync(target, tmp);
+      renameSync(tmp, link);
+      return { name, state: 'linked' };
+    }
+    if (!st.isSymbolicLink()) {
+      return {
+        name,
+        state: 'present',
+        detail: `.agents/skills/${name} is not a symlink — left alone`,
+      };
+    }
+    if (resolve(skillsDir, readlinkSync(link)) === dir) {
+      return { name, state: 'linked', detail: 'unchanged' };
+    }
     return {
       name,
-      state: 'present',
-      detail: `.agents/skills/${name} is not a symlink — left alone`,
+      state: 'error',
+      detail: `.agents/skills/${name} already links elsewhere — not repointing`,
+    };
+  } catch (err) {
+    return {
+      name,
+      state: 'error',
+      detail: `link failed — ${err instanceof Error ? err.message : String(err)}`,
     };
   }
-  if (readlinkSync(link) === target) {
-    return { name, state: 'linked', detail: 'unchanged' };
-  }
-  unlinkSync(link);
-  symlinkSync(target, link);
-  return { name, state: 'linked', detail: 'repointed' };
 }
 
 // --- reconcile -----------------------------------------------------------------
@@ -296,22 +363,31 @@ function urlRepo(url: string): { repo: string; skill?: string } | null {
   return skill !== undefined ? { repo, skill } : { repo };
 }
 
+/** A source string compared for equality — scheme, `git@` form, `.git`
+ *  suffix and trailing slash normalized away so `https://host/o/r` and
+ *  `git@host:o/r.git` name the same thing. */
+function normSource(s: string): string {
+  return s
+    .replace(/^https?:\/\//, '')
+    .replace(/^git@([^:/]+)[:/]/, '$1/')
+    .replace(/\.git$/, '')
+    .replace(/\/+$/, '');
+}
+
 /** Which lock entries a github/URL source is expected to cover —
  *  a pinned path names one skill; a bare repo/URL is covered by the
- *  entries it recorded (`source` matches the repo). */
+ *  entries it recorded (`source` matches, normalized, on any host). */
 function lockNamesFor(src: SkillSource, locked: Map<string, LockedSkill>): string[] {
   if (src.kind === 'github' && src.skill !== undefined) {
     return [src.skill];
   }
   if (src.kind === 'url') {
     const u = urlRepo(src.url);
-    if (u === null) {
-      return [];
-    }
-    if (u.skill !== undefined) {
+    if (u?.skill !== undefined) {
       return [u.skill];
     }
-    return [...locked.values()].filter(e => e.source === u.repo).map(e => e.name);
+    const want = u?.repo ?? normSource(src.url);
+    return [...locked.values()].filter(e => normSource(e.source) === want).map(e => e.name);
   }
   if (src.kind === 'github') {
     return [...locked.values()].filter(e => e.source === src.repo).map(e => e.name);
@@ -375,22 +451,33 @@ function lockedState(ctx: ReconcileCtx, name: string): SkillRow['state'] {
 }
 
 /** `.agents/skills/<name>` — missing | linked | present (a real dir in
- *  the symlink's place). */
+ *  the symlink's place) | error (a link that dangles or points at a
+ *  different directory than the config names). */
 function localRow(root: string, src: SkillSource & { kind: 'local' }): SkillRow {
   const name = localSkillName(root, src.path);
+  const link = join(skillsDirOf(root), name);
+  const want = resolve(root, src.path);
   let lst: Stats | null;
   try {
-    lst = lstatSync(join(skillsDirOf(root), name));
+    lst = lstatSync(link);
   } catch {
     lst = null;
   }
-  const state = lst === null ? 'missing' : lst.isSymbolicLink() ? 'linked' : 'present';
-  return {
-    name,
-    source: src.raw,
-    state,
-    ...(state === 'present' ? { detail: 'a real dir, not the expected symlink' } : {}),
-  };
+  if (lst === null) {
+    return { name, source: src.raw, state: 'missing' };
+  }
+  if (!lst.isSymbolicLink()) {
+    return {
+      name,
+      source: src.raw,
+      state: 'present',
+      detail: 'a real dir, not the expected symlink',
+    };
+  }
+  if (resolve(skillsDirOf(root), readlinkSync(link)) !== want) {
+    return { name, source: src.raw, state: 'error', detail: 'link points elsewhere' };
+  }
+  return { name, source: src.raw, state: 'linked' };
 }
 
 /** Rows for one github/URL source — pending while the lock records
@@ -460,24 +547,26 @@ interface SyncCtx {
   spawn: SpawnRunner;
 }
 
-/** A path-pinned github source whose skill the lock already records is
- *  skipped — a clone for zero information is quota burn, not
- *  correctness. */
+/** A path-pinned github source whose skill the lock already records
+ *  from that repo at that path is skipped — a clone for zero
+ *  information is quota burn, not correctness. A same-name skill
+ *  locked from a different source or path is NOT satisfied. */
 function alreadyLocked(src: SkillSource, locked: Map<string, LockedSkill>): boolean {
-  return (
-    src.kind === 'github' && src.skill !== undefined && locked.get(src.skill)?.source === src.repo
-  );
+  if (src.kind !== 'github' || src.skill === undefined) {
+    return false;
+  }
+  const e = locked.get(src.skill);
+  if (e === undefined || e.source !== src.repo) {
+    return false;
+  }
+  return src.path === undefined || dirname(e.skillPath) === src.path;
 }
 
 /** `skills add` for one github/URL source. */
 function syncRemote(src: SkillSource & { kind: 'github' | 'url' }, ctx: SyncCtx): SyncStep {
   const label = src.kind === 'github' ? `github:${src.repo}` : src.url;
-  if (alreadyLocked(src, readSkillLock(ctx.root))) {
-    return {
-      label,
-      state: 'skipped',
-      detail: `${(src as { skill?: string }).skill} already locked`,
-    };
+  if (src.kind === 'github' && alreadyLocked(src, readSkillLock(ctx.root))) {
+    return { label, state: 'skipped', detail: `${src.skill} already locked` };
   }
   const proc = ctx.spawn(ctx.bin, ctx.root, addArgs(src, ctx.cfg.agents));
   return spawnFailed(proc)
@@ -519,6 +608,50 @@ function syncDeclared(src: SkillSource, ctx: SyncCtx): SyncStep {
   return syncRemote(src, ctx);
 }
 
+/** Post-sync rows that mean the declared set did not land — a step can
+ *  report ok yet leave the skill absent, blocked, or unrecorded. */
+function rowsFailed(rows: SkillRow[]): boolean {
+  return rows.some(
+    r =>
+      r.state === 'missing' ||
+      r.state === 'error' ||
+      r.state === 'drifted' ||
+      r.state === 'pending' ||
+      r.state === 'present'
+  );
+}
+
+/** One sync at a time per checkout — concurrent runs race the
+ *  CLI-maintained lockfile and the `.agents/skills` dir. A pid file
+ *  held via O_EXCL; a dead holder's file is stale and retaken. */
+function withSyncLock<T>(root: string, run: () => T): T | { lockError: string } {
+  mkdirSync(skillsDirOf(root), { recursive: true });
+  const lockPath = join(skillsDirOf(root), '.sync.lock');
+  let fd: number;
+  try {
+    fd = openSync(lockPath, 'wx');
+  } catch {
+    try {
+      const pid = Number(readFileSync(lockPath, 'utf8').trim());
+      process.kill(pid, 0);
+      return { lockError: `another bro skills sync holds the lock (pid ${pid})` };
+    } catch {
+      unlinkSync(lockPath); // stale — holder is gone
+      fd = openSync(lockPath, 'wx');
+    }
+  }
+  try {
+    return run();
+  } finally {
+    closeSync(fd);
+    try {
+      unlinkSync(lockPath);
+    } catch {
+      // a retaker already replaced it
+    }
+  }
+}
+
 export function runSync(
   root: string,
   cfg: SkillsConfig,
@@ -526,15 +659,28 @@ export function runSync(
   probe: BinProbe = commandOnPath
 ): { steps: SyncStep[]; rows: SkillRow[]; drift: SkillDrift[]; failed: boolean } {
   const ctx: SyncCtx = { root, cfg, bin: resolveSkillsBin(root, cfg.bin, probe), spawn };
-  const steps = cfg.install.map(parseSkillSource).map(src => syncDeclared(src, ctx));
-  // the lock is CLI-maintained — re-read after the adds (setup --lock's
-  // stale-lock lesson), then fill any .agents/skills gap it carries
-  const restore = syncRestore(ctx);
-  if (restore !== null) {
-    steps.push(restore);
+  const out = withSyncLock(root, () => {
+    const steps = cfg.install.map(parseSkillSource).map(src => syncDeclared(src, ctx));
+    // the lock is CLI-maintained — re-read after the adds (setup --lock's
+    // stale-lock lesson), then fill any .agents/skills gap it carries
+    const restore = syncRestore(ctx);
+    if (restore !== null) {
+      steps.push(restore);
+    }
+    return steps;
+  });
+  if ('lockError' in out) {
+    const { rows, drift } = collectRows(root, cfg);
+    return {
+      steps: [{ label: 'sync', state: 'error', detail: out.lockError }],
+      rows,
+      drift,
+      failed: true,
+    };
   }
+  const steps = out;
   const { rows, drift } = collectRows(root, cfg);
-  const failed = steps.some(s => s.state === 'error') || drift.length > 0;
+  const failed = steps.some(s => s.state === 'error') || drift.length > 0 || rowsFailed(rows);
   return { steps, rows, drift, failed };
 }
 
@@ -607,7 +753,7 @@ function rejectStrays(rest: string[]): void {
       i += 1;
       continue;
     }
-    if (a.startsWith('-') && BOOL_FLAGS.has(a)) {
+    if (a.startsWith('--root=') || (a.startsWith('-') && BOOL_FLAGS.has(a))) {
       continue;
     }
     console.error(

@@ -55,15 +55,23 @@ const cfg = (install: string[], extra: Partial<SkillsConfig> = {}): SkillsConfig
   ...extra,
 });
 
-/** Spawn stub — records argv, returns a scripted status per predicate. */
-function fakeSpawn(opts: { failOn?: (args: string[]) => boolean; calls?: string[][] } = {}): {
+/** Spawn stub — records argv, returns a scripted status per predicate.
+ *  `materialize` fakes an `add -s <name>` by dropping a SKILL.md into
+ *  .agents/skills/<name> so post-sync verification sees it land. */
+function fakeSpawn(opts: { failOn?: (args: string[]) => boolean; materialize?: boolean } = {}): {
   spawn: SpawnRunner;
   calls: string[][];
 } {
-  const calls: string[][] = opts.calls ?? [];
-  const spawn: SpawnRunner = (_bin, _root, args) => {
+  const calls: string[][] = [];
+  const spawn: SpawnRunner = (_bin, root, args) => {
     calls.push([...args]);
     const status = opts.failOn?.(args) === true ? 1 : 0;
+    if (status === 0 && opts.materialize === true && args[0] === 'add') {
+      const s = args.indexOf('-s');
+      if (s !== -1 && args[s + 1] !== undefined) {
+        makeSkill(join(root, '.agents', 'skills', args[s + 1]!), args[s + 1]!);
+      }
+    }
     return {
       status,
       stdout: '',
@@ -77,10 +85,11 @@ function fakeSpawn(opts: { failOn?: (args: string[]) => boolean; calls?: string[
 }
 
 describe('parseSkillSource', () => {
-  test('github: with a skill path names the basename', () => {
+  test('github: with a skill path keeps repo, path, and basename', () => {
     assert.deepEqual(parseSkillSource('github:herdrdev/herdr/skills/herdr'), {
       kind: 'github',
       repo: 'herdrdev/herdr',
+      path: 'skills/herdr',
       skill: 'herdr',
       raw: 'github:herdrdev/herdr/skills/herdr',
     });
@@ -114,6 +123,20 @@ describe('parseSkillSource', () => {
     assert.equal(parseSkillSource('github:o').kind, 'invalid');
     assert.equal(parseSkillSource('local:').kind, 'invalid');
   });
+  test('local: escapes are invalid — no absolute paths, no ..', () => {
+    assert.equal(parseSkillSource('local:/etc/skill').kind, 'invalid');
+    assert.equal(parseSkillSource('local:../outside/x').kind, 'invalid');
+    assert.equal(parseSkillSource('local:skills/../../x').kind, 'invalid');
+    assert.equal(parseSkillSource('../x').kind, 'invalid');
+  });
+  test('plaintext http:// is rejected — https only', () => {
+    assert.equal(parseSkillSource('http://github.com/o/r').kind, 'invalid');
+  });
+  test('a non-string entry is invalid — not silently dropped', () => {
+    const s = parseSkillSource(42);
+    assert.equal(s.kind, 'invalid');
+    assert.equal(parseSkillSource({ repo: 'o/r' }).kind, 'invalid');
+  });
 });
 
 describe('skillsSection', () => {
@@ -130,8 +153,14 @@ describe('skillsSection', () => {
       bin: 'skills',
     });
   });
-  test('a non-array install warns and falls back', () => {
-    assert.equal(skillsSection({ install: 'github:o/r' }).install.length, 0);
+  test('a non-array install stays visible — an invalid entry, not a drop', () => {
+    const cfg = skillsSection({ install: 'github:o/r' });
+    assert.equal(cfg.install.length, 1);
+    assert.equal(parseSkillSource(cfg.install[0]).kind, 'github');
+    // a non-string entry keeps its seat — parseSkillSource reports it
+    const bad = skillsSection({ install: ['o/r', 7] });
+    assert.equal(bad.install.length, 2);
+    assert.equal(parseSkillSource(bad.install[1]).kind, 'invalid');
   });
 });
 
@@ -140,7 +169,9 @@ describe('resolveSkillsBin', () => {
     // no skills bin anywhere → npx
     const bin = resolveSkillsBin('/x', undefined, () => false);
     assert.equal(bin.file, 'npx');
-    assert.deepEqual(bin.args, ['-y', 'skills']);
+    // the fallback pins the package — a bare `skills` spec would run
+    // whatever the registry serves that day
+    assert.deepEqual(bin.args, ['-y', 'skills@1.7.4']);
     // skills on PATH → run it directly
     assert.deepEqual(
       resolveSkillsBin('/x', undefined, () => true),
@@ -184,7 +215,7 @@ describe('local skills', () => {
     assert.equal(realpathSync(p), realpathSync(join(root, 'skills', 'bro-herdr')));
   });
 
-  test('re-links a repointed symlink, leaves a real dir alone', () => {
+  test('a link pointing elsewhere is an error — never silently repointed', () => {
     const root = tmp();
     makeSkill(join(root, 'a'), 'x');
     makeSkill(join(root, 'b'), 'x');
@@ -192,8 +223,8 @@ describe('local skills', () => {
     const again = ensureLocalLink(root, 'a');
     assert.equal(again.state, 'linked');
     const moved = ensureLocalLink(root, 'b');
-    assert.equal(moved.state, 'linked');
-    assert.equal(realpathSync(join(root, '.agents', 'skills', 'x')), realpathSync(join(root, 'b')));
+    assert.equal(moved.state, 'error');
+    assert.equal(realpathSync(join(root, '.agents', 'skills', 'x')), realpathSync(join(root, 'a')));
     // a real directory in the way is reported, never replaced
     const root2 = tmp();
     const dir = join(root2, '.agents', 'skills', 'x');
@@ -289,7 +320,7 @@ describe('runSync', () => {
   test('adds github sources, links locals, skips nothing extra', () => {
     const root = tmp();
     makeSkill(join(root, 'skills', 'lx'), 'lx');
-    const { spawn, calls } = fakeSpawn();
+    const { spawn, calls } = fakeSpawn({ materialize: true });
     const out = runSync(root, cfg(['github:o/r/skills/s1', 'local:skills/lx']), spawn);
     assert.equal(out.failed, false);
     assert.deepEqual(calls, [['add', 'o/r', '-s', 's1', '-a', 'universal', '-y']]);

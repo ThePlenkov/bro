@@ -1,5 +1,4 @@
 ---
-
 title: "bro skills"
 description: "Agent-skill deps — skills.install sources materialise into .agents/skills/ [sync|list]"
 ---
@@ -8,9 +7,10 @@ description: "Agent-skill deps — skills.install sources materialise into .agen
 
 `bro skills sync|list`
 
-|            |                               |
-| ---------- | ----------------------------- |
-| group      | `self`                        |
+| | |
+| --- | --- |
+| group | `self` |
 | npm latest | unreleased — lands in `0.3.0` |
-| skill      | `skills`                      |
-| config     | `skills` in bro.config        |
+| skill | `skills` |
+| config | `skills` in bro.config |
+

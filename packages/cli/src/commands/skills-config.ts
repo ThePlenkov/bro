@@ -8,8 +8,10 @@ import { js, type ConfigSection } from '@broject/core';
 export interface SkillsConfig {
   /** Source descriptors — `github:<owner>/<repo>[/<path>]`, bare
    *  `<owner>/<repo>`, `https://` URLs, `local:<relpath>`/`./<path>`.
-   *  Parsed by parseSkillSource in skills.ts. */
-  install: string[];
+   *  Parsed by parseSkillSource in skills.ts; non-string entries are
+   *  kept (not dropped) so the command surfaces them as error rows —
+   *  a config that silently normalizes to nothing reports success. */
+  install: unknown[];
   /** `skills add -a` link targets. Default ['universal'] — the
    *  `.agents/skills/` plane only, no per-agent link farm. */
   agents: string[];
@@ -44,12 +46,26 @@ function strList(obj: Record<string, unknown>, key: string): string[] | undefine
   return out;
 }
 
+/** `skills.install` keeps every entry — strings trimmed, non-strings
+ *  and a non-array value preserved verbatim so parseSkillSource turns
+ *  them into error rows the operator sees, never a silent skip. */
+function installList(obj: Record<string, unknown>): unknown[] {
+  const raw = obj.install;
+  if (raw === undefined) {
+    return [];
+  }
+  if (!Array.isArray(raw)) {
+    return [raw];
+  }
+  return raw.map(e => (typeof e === 'string' ? e.trim() : e)).filter(e => e !== '');
+}
+
 /** bro.config.json `skills` section — bad values warn and fall back,
  *  never crash the load. */
 export const skillsSection: ConfigSection<SkillsConfig> = raw => {
   const obj = (typeof raw === 'object' && raw !== null ? raw : {}) as Record<string, unknown>;
   return {
-    install: strList(obj, 'install') ?? [],
+    install: installList(obj),
     agents: strList(obj, 'agents') ?? DEFAULT_AGENTS,
     ...(typeof obj.bin === 'string' && obj.bin.trim() !== '' ? { bin: obj.bin.trim() } : {}),
   };
