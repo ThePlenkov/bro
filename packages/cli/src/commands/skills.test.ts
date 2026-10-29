@@ -136,17 +136,30 @@ describe('skillsSection', () => {
 });
 
 describe('resolveSkillsBin', () => {
-  test('default is the npx fallback', () => {
-    const bin = resolveSkillsBin('/x');
+  test('config → skills on PATH → npx fallback', () => {
+    // no skills bin anywhere → npx
+    const bin = resolveSkillsBin('/x', undefined, () => false);
     assert.equal(bin.file, 'npx');
     assert.deepEqual(bin.args, ['-y', 'skills']);
+    // skills on PATH → run it directly
+    assert.deepEqual(
+      resolveSkillsBin('/x', undefined, () => true),
+      {
+        file: 'skills',
+        args: [],
+        via: 'path',
+      }
+    );
   });
-  test('a configured command runs directly', () => {
-    assert.deepEqual(resolveSkillsBin('/x', 'skills'), {
-      file: 'skills',
-      args: [],
-      via: 'config',
-    });
+  test('a configured command runs directly, probe or not', () => {
+    assert.deepEqual(
+      resolveSkillsBin('/x', 'skills', () => false),
+      {
+        file: 'skills',
+        args: [],
+        via: 'config',
+      }
+    );
   });
   test('a configured relative path resolves against root', () => {
     assert.equal(resolveSkillsBin('/x', 'bin/skills').file, join('/x', 'bin/skills'));

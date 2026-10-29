@@ -54,30 +54,43 @@ export type SkillSource =
  *  (or a bare shorthand) must carry. */
 const GH_REPO = /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/;
 
-/** One `skills.install` string → a typed source. Anything outside the
- *  grammar is `invalid` — reported by the command, never skipped. */
-export function parseSkillSource(raw: string): SkillSource {
-  const spec = raw.trim();
+function parseLocalSource(raw: string, spec: string): SkillSource | null {
   if (spec.startsWith('local:')) {
     const path = spec.slice('local:'.length).trim();
     return path === ''
       ? { kind: 'invalid', raw, reason: 'local: needs a repo-relative path' }
       : { kind: 'local', path, raw };
   }
-  if (spec.startsWith('./')) {
-    return { kind: 'local', path: spec, raw };
+  return spec.startsWith('./') ? { kind: 'local', path: spec, raw } : null;
+}
+
+function parseGithubSource(raw: string, spec: string): SkillSource | null {
+  if (!spec.startsWith('github:')) {
+    return null;
   }
-  if (spec.startsWith('github:')) {
-    const segs = spec
-      .slice('github:'.length)
-      .split('/')
-      .filter(s => s !== '');
-    const repo = segs.slice(0, 2).join('/');
-    if (segs.length < 2 || !GH_REPO.test(repo)) {
-      return { kind: 'invalid', raw, reason: 'github: needs <owner>/<repo>[/<path>]' };
-    }
-    const base = { kind: 'github' as const, repo, raw };
-    return segs.length > 2 ? { ...base, skill: segs[segs.length - 1]! } : base;
+  const segs = spec
+    .slice('github:'.length)
+    .split('/')
+    .filter(s => s !== '');
+  const repo = segs.slice(0, 2).join('/');
+  if (segs.length < 2 || !GH_REPO.test(repo)) {
+    return { kind: 'invalid', raw, reason: 'github: needs <owner>/<repo>[/<path>]' };
+  }
+  const base = { kind: 'github' as const, repo, raw };
+  return segs.length > 2 ? { ...base, skill: segs[segs.length - 1]! } : base;
+}
+
+/** One `skills.install` string → a typed source. Anything outside the
+ *  grammar is `invalid` — reported by the command, never skipped. */
+export function parseSkillSource(raw: string): SkillSource {
+  const spec = raw.trim();
+  const local = parseLocalSource(raw, spec);
+  if (local !== null) {
+    return local;
+  }
+  const github = parseGithubSource(raw, spec);
+  if (github !== null) {
+    return github;
   }
   if (spec.startsWith('https://') || spec.startsWith('http://')) {
     return { kind: 'url', url: spec, raw };
@@ -103,10 +116,30 @@ export interface SkillsBin {
   via?: string;
 }
 
+export type SpawnRunner = (
+  bin: SkillsBin,
+  root: string,
+  args: string[]
+) => SpawnSyncReturns<string>;
+
+/** A bare command on PATH? The probe is `cmd --version` — present and
+ *  runnable wins; spawn errors and non-zero exits read as absent. */
+export function commandOnPath(cmd: string): boolean {
+  const proc = spawnSync(cmd, ['--version'], { stdio: 'pipe' });
+  return proc.error === undefined && proc.status === 0;
+}
+
+type BinProbe = (cmd: string) => boolean;
+
 /** Resolution: `skills.bin` (a path with a separator, else a PATH
- *  command) → `npx -y skills`. The npx fallback needs no probe — npx is
- *  the documented invocation and resolves the package on demand. */
-export function resolveSkillsBin(root: string, cfgBin?: string): SkillsBin {
+ *  command) → `skills` on PATH → `npx -y skills`. The npx fallback needs
+ *  no probe — npx is the documented invocation and resolves the package
+ *  on demand. `probe` is injectable so tests never touch the real PATH. */
+export function resolveSkillsBin(
+  root: string,
+  cfgBin?: string,
+  probe: BinProbe = commandOnPath
+): SkillsBin {
   if (cfgBin !== undefined) {
     if (cfgBin.includes('/') || cfgBin.includes(sep)) {
       const p = isAbsolute(cfgBin) ? cfgBin : resolve(root, cfgBin);
@@ -114,14 +147,11 @@ export function resolveSkillsBin(root: string, cfgBin?: string): SkillsBin {
     }
     return { file: cfgBin, args: [], via: 'config' };
   }
+  if (probe('skills')) {
+    return { file: 'skills', args: [], via: 'path' };
+  }
   return { file: 'npx', args: ['-y', 'skills'], via: 'npx' };
 }
-
-export type SpawnRunner = (
-  bin: SkillsBin,
-  root: string,
-  args: string[]
-) => SpawnSyncReturns<string>;
 
 /** `.cmd`/`.bat` bins can't be spawned directly — route through the
  *  command interpreter (check.ts precedent). */
@@ -328,6 +358,69 @@ function extraNames(
   return [...extras].sort();
 }
 
+interface ReconcileCtx {
+  root: string;
+  locked: Map<string, LockedSkill>;
+  driftByName: Map<string, SkillDrift>;
+}
+
+/** A locked skill's verdict: drift wins, else installed-or-locked is
+ *  ok, else missing. */
+function lockedState(ctx: ReconcileCtx, name: string): SkillRow['state'] {
+  const d = ctx.driftByName.get(name);
+  if (d !== undefined) {
+    return d.kind;
+  }
+  return installed(ctx.root, name) || ctx.locked.has(name) ? 'ok' : 'missing';
+}
+
+/** `.agents/skills/<name>` — missing | linked | present (a real dir in
+ *  the symlink's place). */
+function localRow(root: string, src: SkillSource & { kind: 'local' }): SkillRow {
+  const name = localSkillName(root, src.path);
+  let lst: Stats | null;
+  try {
+    lst = lstatSync(join(skillsDirOf(root), name));
+  } catch {
+    lst = null;
+  }
+  const state = lst === null ? 'missing' : lst.isSymbolicLink() ? 'linked' : 'present';
+  return {
+    name,
+    source: src.raw,
+    state,
+    ...(state === 'present' ? { detail: 'a real dir, not the expected symlink' } : {}),
+  };
+}
+
+/** Rows for one github/URL source — pending while the lock records
+ *  nothing it covers. */
+function remoteRows(src: SkillSource, ctx: ReconcileCtx): SkillRow[] {
+  const names = lockNamesFor(src, ctx.locked);
+  if (names.length === 0) {
+    return [
+      {
+        name: src.kind === 'github' ? src.repo : src.kind === 'url' ? src.url : src.raw,
+        source: src.raw,
+        state: 'pending',
+        detail: 'declared — nothing locked yet (bro skills sync installs)',
+      },
+    ];
+  }
+  return names.map(name => ({ name, source: src.raw, state: lockedState(ctx, name) }));
+}
+
+/** One declared source → its rows. */
+function rowsForSource(src: SkillSource, ctx: ReconcileCtx): SkillRow[] {
+  if (src.kind === 'invalid') {
+    return [{ name: src.raw, source: '', state: 'error', detail: src.reason }];
+  }
+  if (src.kind === 'local') {
+    return [localRow(ctx.root, src)];
+  }
+  return remoteRows(src, ctx);
+}
+
 /** The read-only reconcile — one row per declared source plus `extra`
  *  rows for lock/disk entries nothing declared. `drift` is the
  *  checkSkillLock verdict over the whole lock. */
@@ -337,55 +430,11 @@ export function collectRows(
 ): { rows: SkillRow[]; drift: SkillDrift[] } {
   const locked = readSkillLock(root);
   const drift = checkSkillLock(locked, { skillsDir: skillsDirOf(root) });
-  const driftByName = new Map(drift.map(d => [d.name, d]));
+  const ctx: ReconcileCtx = { root, locked, driftByName: new Map(drift.map(d => [d.name, d])) };
   const declared = cfg.install.map(parseSkillSource);
-  const rows: SkillRow[] = [];
-  const lockedState = (name: string): SkillRow['state'] => {
-    const d = driftByName.get(name);
-    if (d !== undefined) {
-      return d.kind;
-    }
-    return installed(root, name) || locked.has(name) ? 'ok' : 'missing';
-  };
-  for (const src of declared) {
-    if (src.kind === 'invalid') {
-      rows.push({ name: src.raw, source: '', state: 'error', detail: src.reason });
-      continue;
-    }
-    if (src.kind === 'local') {
-      const name = localSkillName(root, src.path);
-      const link = join(skillsDirOf(root), name);
-      let lst: Stats | null;
-      try {
-        lst = lstatSync(link);
-      } catch {
-        lst = null;
-      }
-      const state = lst === null ? 'missing' : lst.isSymbolicLink() ? 'linked' : 'present';
-      rows.push({
-        name,
-        source: src.raw,
-        state,
-        ...(state === 'present' ? { detail: 'a real dir, not the expected symlink' } : {}),
-      });
-      continue;
-    }
-    const names = lockNamesFor(src, locked);
-    if (names.length === 0) {
-      rows.push({
-        name: src.kind === 'github' ? src.repo : src.url,
-        source: src.raw,
-        state: 'pending',
-        detail: 'declared — nothing locked yet (bro skills sync installs)',
-      });
-      continue;
-    }
-    for (const name of names) {
-      rows.push({ name, source: src.raw, state: lockedState(name) });
-    }
-  }
+  const rows = declared.flatMap(src => rowsForSource(src, ctx));
   for (const name of extraNames(root, declared, locked)) {
-    const d = driftByName.get(name);
+    const d = ctx.driftByName.get(name);
     rows.push({
       name,
       source: locked.get(name)?.source ?? '',
@@ -404,43 +453,45 @@ export interface SyncStep {
   detail?: string;
 }
 
-/** `skills add` for one github/URL source. A path-pinned github source
- *  whose skill the lock already records is skipped — a clone for zero
- *  information is quota burn, not correctness. */
-function syncRemote(
-  src: SkillSource & { kind: 'github' | 'url' },
-  root: string,
-  cfg: SkillsConfig,
-  bin: SkillsBin,
-  locked: Map<string, LockedSkill>,
-  spawn: SpawnRunner
-): SyncStep {
+interface SyncCtx {
+  root: string;
+  cfg: SkillsConfig;
+  bin: SkillsBin;
+  spawn: SpawnRunner;
+}
+
+/** A path-pinned github source whose skill the lock already records is
+ *  skipped — a clone for zero information is quota burn, not
+ *  correctness. */
+function alreadyLocked(src: SkillSource, locked: Map<string, LockedSkill>): boolean {
+  return (
+    src.kind === 'github' && src.skill !== undefined && locked.get(src.skill)?.source === src.repo
+  );
+}
+
+/** `skills add` for one github/URL source. */
+function syncRemote(src: SkillSource & { kind: 'github' | 'url' }, ctx: SyncCtx): SyncStep {
   const label = src.kind === 'github' ? `github:${src.repo}` : src.url;
-  if (
-    src.kind === 'github' &&
-    src.skill !== undefined &&
-    locked.get(src.skill)?.source === src.repo
-  ) {
-    return { label, state: 'skipped', detail: `${src.skill} already locked` };
+  if (alreadyLocked(src, readSkillLock(ctx.root))) {
+    return {
+      label,
+      state: 'skipped',
+      detail: `${(src as { skill?: string }).skill} already locked`,
+    };
   }
-  const proc = spawn(bin, root, addArgs(src, cfg.agents));
+  const proc = ctx.spawn(ctx.bin, ctx.root, addArgs(src, ctx.cfg.agents));
   return spawnFailed(proc)
     ? { label, state: 'error', detail: `skills add failed — ${spawnDetail(proc)}` }
     : { label, state: 'ok' };
 }
 
 /** `.agents/skills/` gaps vs the lock → one experimental_install. */
-function syncRestore(
-  root: string,
-  bin: SkillsBin,
-  locked: Map<string, LockedSkill>,
-  spawn: SpawnRunner
-): SyncStep | null {
-  const missing = [...locked.keys()].filter(n => !installed(root, n));
+function syncRestore(ctx: SyncCtx): SyncStep | null {
+  const missing = [...readSkillLock(ctx.root).keys()].filter(n => !installed(ctx.root, n));
   if (missing.length === 0) {
     return null;
   }
-  const proc = spawn(bin, root, ['experimental_install', '-y']);
+  const proc = ctx.spawn(ctx.bin, ctx.root, ['experimental_install', '-y']);
   return spawnFailed(proc)
     ? {
         label: 'experimental_install',
@@ -450,52 +501,41 @@ function syncRestore(
     : { label: 'experimental_install', state: 'ok', detail: `restored ${missing.length}` };
 }
 
+/** One declared source → its sync step. */
+function syncDeclared(src: SkillSource, ctx: SyncCtx): SyncStep {
+  if (src.kind === 'invalid') {
+    return { label: src.raw, state: 'error', detail: src.reason };
+  }
+  if (src.kind === 'local') {
+    const link = ensureLocalLink(ctx.root, src.path);
+    return {
+      label: `local:${src.path}`,
+      state: link.state === 'error' ? 'error' : 'ok',
+      ...(link.detail !== undefined
+        ? { detail: `${link.name} — ${link.detail}` }
+        : { detail: link.name }),
+    };
+  }
+  return syncRemote(src, ctx);
+}
+
 export function runSync(
   root: string,
   cfg: SkillsConfig,
-  spawn: SpawnRunner = spawnSkills
+  spawn: SpawnRunner = spawnSkills,
+  probe: BinProbe = commandOnPath
 ): { steps: SyncStep[]; rows: SkillRow[]; drift: SkillDrift[]; failed: boolean } {
-  const bin = resolveSkillsBin(root, cfg.bin);
-  const declared = cfg.install.map(parseSkillSource);
-  const steps: SyncStep[] = [];
-  let failed = false;
-  for (const src of declared) {
-    if (src.kind === 'invalid') {
-      steps.push({ label: src.raw, state: 'error', detail: src.reason });
-      failed = true;
-      continue;
-    }
-    if (src.kind === 'local') {
-      const link = ensureLocalLink(root, src.path);
-      steps.push({
-        label: `local:${src.path}`,
-        state: link.state === 'error' ? 'error' : 'ok',
-        ...(link.detail !== undefined
-          ? { detail: `${link.name} — ${link.detail}` }
-          : { detail: link.name }),
-      });
-      if (link.state === 'error') {
-        failed = true;
-      }
-      continue;
-    }
-    const step = syncRemote(src, root, cfg, bin, readSkillLock(root), spawn);
-    steps.push(step);
-    if (step.state === 'error') {
-      failed = true;
-    }
-  }
+  const ctx: SyncCtx = { root, cfg, bin: resolveSkillsBin(root, cfg.bin, probe), spawn };
+  const steps = cfg.install.map(parseSkillSource).map(src => syncDeclared(src, ctx));
   // the lock is CLI-maintained — re-read after the adds (setup --lock's
   // stale-lock lesson), then fill any .agents/skills gap it carries
-  const restore = syncRestore(root, bin, readSkillLock(root), spawn);
+  const restore = syncRestore(ctx);
   if (restore !== null) {
     steps.push(restore);
-    if (restore.state === 'error') {
-      failed = true;
-    }
   }
   const { rows, drift } = collectRows(root, cfg);
-  return { steps, rows, drift, failed: failed || drift.length > 0 };
+  const failed = steps.some(s => s.state === 'error') || drift.length > 0;
+  return { steps, rows, drift, failed };
 }
 
 // --- render -----------------------------------------------------------------------
@@ -558,25 +598,32 @@ Config (bro.config.json "skills"):
 
 const BOOL_FLAGS = new Set(['--json', '--help', '-h']);
 
-function parseSkillsArgs(argv: string[]): { sub: string; root: string; json: boolean } {
-  const sub = argv[0];
-  if (sub === undefined || (sub !== 'sync' && sub !== 'list')) {
-    usage(2);
-  }
-  const rest = argv.slice(1);
+/** Stray args after the sub — `--root` consumes its value; anything
+ *  else that isn't a known bool flag is a usage error. */
+function rejectStrays(rest: string[]): void {
   for (let i = 0; i < rest.length; i += 1) {
     const a = rest[i]!;
     if (a === '--root') {
       i += 1;
       continue;
     }
-    if (!a.startsWith('-') || !BOOL_FLAGS.has(a)) {
-      console.error(
-        `error: unexpected ${a.startsWith('-') ? 'option' : 'argument'} ${JSON.stringify(a)} — see \`bro skills --help\``
-      );
-      process.exit(2);
+    if (a.startsWith('-') && BOOL_FLAGS.has(a)) {
+      continue;
     }
+    console.error(
+      `error: unexpected ${a.startsWith('-') ? 'option' : 'argument'} ${JSON.stringify(a)} — see \`bro skills --help\``
+    );
+    process.exit(2);
   }
+}
+
+function parseSkillsArgs(argv: string[]): { sub: string; root: string; json: boolean } {
+  const sub = argv[0];
+  if (sub !== 'sync' && sub !== 'list') {
+    usage(2);
+  }
+  const rest = argv.slice(1);
+  rejectStrays(rest);
   return {
     sub,
     root: resolve(flag(rest, '--root') ?? process.cwd()),
@@ -584,34 +631,27 @@ function parseSkillsArgs(argv: string[]): { sub: string; root: string; json: boo
   };
 }
 
-export function runSkillsCommand(argv: string[]): void {
-  if (hasHelpFlag(argv)) {
-    usage(0);
-  }
-  const { sub, root, json } = parseSkillsArgs(argv);
-  const cfg = (loadBroConfig(root).skills ?? skillsSection(undefined)) as SkillsConfig;
-  if (sub === 'sync') {
-    const { steps, rows, drift, failed } = runSync(root, cfg);
-    if (json) {
-      console.log(
-        JSON.stringify({
-          command: 'skills sync',
-          data: { steps, rows, drift: drift.map(d => ({ name: d.name, kind: d.kind })) },
-        })
-      );
-    } else {
-      for (const line of renderSteps(steps)) {
-        console.log(line);
-      }
-      if (drift.length > 0) {
-        for (const d of drift) {
-          console.log(`✗ ${d.name} — ${d.kind}${d.kind === 'drifted' ? ' (content ≠ lock)' : ''}`);
-        }
-      }
+function cmdSync(root: string, cfg: SkillsConfig, json: boolean): void {
+  const { steps, rows, drift, failed } = runSync(root, cfg);
+  if (json) {
+    console.log(
+      JSON.stringify({
+        command: 'skills sync',
+        data: { steps, rows, drift: drift.map(d => ({ name: d.name, kind: d.kind })) },
+      })
+    );
+  } else {
+    for (const line of renderSteps(steps)) {
+      console.log(line);
     }
-    process.exitCode = failed ? 1 : 0;
-    return;
+    for (const d of drift) {
+      console.log(`✗ ${d.name} — ${d.kind}${d.kind === 'drifted' ? ' (content ≠ lock)' : ''}`);
+    }
   }
+  process.exitCode = failed ? 1 : 0;
+}
+
+function cmdList(root: string, cfg: SkillsConfig, json: boolean): void {
   const { rows } = collectRows(root, cfg);
   if (json) {
     console.log(JSON.stringify({ command: 'skills list', data: { rows } }));
@@ -621,4 +661,17 @@ export function runSkillsCommand(argv: string[]): void {
     }
   }
   process.exitCode = 0;
+}
+
+export function runSkillsCommand(argv: string[]): void {
+  if (hasHelpFlag(argv)) {
+    usage(0);
+  }
+  const { sub, root, json } = parseSkillsArgs(argv);
+  const cfg = (loadBroConfig(root).skills ?? skillsSection(undefined)) as SkillsConfig;
+  if (sub === 'sync') {
+    cmdSync(root, cfg, json);
+  } else {
+    cmdList(root, cfg, json);
+  }
 }
