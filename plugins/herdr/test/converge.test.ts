@@ -68,7 +68,6 @@ const planes = (over: Partial<Planes> = {}): Planes => ({
   armedDetails: [],
   mirrorPanes: {},
   rendererPanes: {},
-  act: [],
   ...over,
 });
 
@@ -275,8 +274,8 @@ describe('renderer panes', () => {
   });
 });
 
-describe('status labels + metadata', () => {
-  test('silent loop run + act-state join prefixes the open label', () => {
+describe('workspace labels — lifecycle only (spec bro-u19mq)', () => {
+  test('open carries the plain title — status prefixes are the daemon projector', () => {
     reset();
     const tree = mkdtempSync(join(TMP, 'tree-'));
     const p = armedTree(tree);
@@ -284,26 +283,20 @@ describe('status labels + metadata', () => {
     p.status.loop.runs = [
       { beadId: 'bead-1', slug: 'bead-1', state: 'running', worktree: tree, silentMs: 16.5 * H },
     ];
-    p.act = [
-      {
-        fetchedAt: Date.now(),
-        state: { pr: 765, headRef: 'work/bead-1', state: 'OPEN', openThreads: 2 },
-      },
-    ];
     converge(p);
     const opens = called('worktree', 'open');
     assert.equal(opens.length, 1);
     const label = opens[0]![opens[0]!.indexOf('--label') + 1]!;
-    assert.equal(label, '[silent16h·#765 blocked] Ship it');
+    assert.equal(label, 'Ship it');
   });
 
-  test('label token updates rename an existing managed workspace', () => {
+  test('the plugin never renames or tokens a managed workspace', () => {
     reset();
     const tree = mkdtempSync(join(TMP, 'tree-'));
     const p = armedTree(tree);
     p.worktrees.worktrees = [{ path: tree, open_workspace_id: 'w1' }];
     p.workspaces = [{ workspace_id: 'w1', label: 'Ship it' }];
-    // the recorded workspace is ours, so drift correction may rename it
+    // ours on record, but renames/status tokens belong to the daemon
     const s = loadState(scope);
     s.workspaces[tree] = { ws: 'w1', label: 'Ship it', managed: true };
     saveState(scope, s);
@@ -311,27 +304,23 @@ describe('status labels + metadata', () => {
       { beadId: 'bead-1', slug: 'bead-1', state: 'running', worktree: tree, silentMs: 10 * H },
     ];
     converge(p);
-    const renames = called('workspace', 'rename', 'w1');
-    assert.equal(renames.length, 1);
-    assert.equal(renames[0]![3], '[silent10h] Ship it');
+    assert.equal(called('workspace', 'rename').length, 0);
+    assert.equal(called('workspace', 'report-metadata').length, 0);
+    // the managed record survives — it is how the projector learns ownership
+    assert.equal(loadState(scope).workspaces[tree]?.managed, true);
   });
 
-  test('report-metadata tokens mirror the label once per change', () => {
+  test('a projector-written label drift is mirrored into the record', () => {
     reset();
     const tree = mkdtempSync(join(TMP, 'tree-'));
     const p = armedTree(tree);
-    p.status.loop.runs = [
-      { beadId: 'bead-1', slug: 'bead-1', state: 'running', worktree: tree, silentMs: 10 * H },
-    ];
+    p.worktrees.worktrees = [{ path: tree, open_workspace_id: 'w1' }];
+    p.workspaces = [{ workspace_id: 'w1', label: '[silent10h·#765 2t] Ship it' }];
+    const s = loadState(scope);
+    s.workspaces[tree] = { ws: 'w1', label: 'Ship it', managed: true };
+    saveState(scope, s);
     converge(p);
-    const metas = called('workspace', 'report-metadata');
-    assert.equal(metas.length, 1);
-    assert.ok(metas[0]!.includes('bro.worker=silent10h'));
-    // second pass over the post-open planes — herdr's list now carries
-    // the opened workspace; nothing moved, nothing is written
-    p.worktrees.worktrees = [{ path: tree, open_workspace_id: 'wOpened' }];
-    p.workspaces = [{ workspace_id: 'wOpened', label: '[silent10h] Ship it' }];
-    converge(p);
-    assert.equal(called('workspace', 'report-metadata').length, 1);
+    assert.equal(called('workspace', 'rename').length, 0);
+    assert.equal(loadState(scope).workspaces[tree]?.label, '[silent10h·#765 2t] Ship it');
   });
 });

@@ -1,10 +1,16 @@
 /**
  * converge — the whole sync-plane contract, trigger-free:
  *
- *   planes in → armed worktrees get workspaces (bead-title labels,
- *   drift-corrected only where this plugin named it) → running native
- *   agents get read-only mirror panes tailing their logs (mirrors.ts)
- *   → exited agents get their mirror renamed as an exit marker.
+ *   planes in → armed worktrees get workspaces (plain bead-title
+ *   labels) → running native agents get read-only mirror panes tailing
+ *   their logs (mirrors.ts) → exited agents get their mirror renamed
+ *   as an exit marker.
+ *
+ * Fleet status (`[state·#PR]` prefixes, `status` tokens) is the bro
+ * daemon's fleet projector, not this file (spec bro-u19mq): the plugin
+ * opens workspaces and records `managed`, the daemon owns every later
+ * rename and metadata write. Splitting it this way leaves ONE writer —
+ * a crashed session can no longer strand a stale `[working]` label.
  *
  * An EventSource decides WHEN converge runs; this file only ever sees
  * the snapshot it produced. bro state is never written — the only
@@ -19,19 +25,19 @@ import {
   loadState,
   notify,
   type PluginState,
-  type PrActCacheEntry,
   repoDir,
   type StatusWorktree,
   saveState,
   stateScope,
-  type WorkspaceRec,
+  withStateLock,
   worktreeGone,
+  type WorkspaceRec,
 } from './lib.ts';
 import { convergeMirrors, markExitedMirrors } from './mirrors.ts';
 import type { Planes } from './planes.ts';
 import { readPlanes } from './planes.ts';
 import { dropOrphanRenderers, ensureRenderer } from './renderers.ts';
-import { agentTreePath, statusFor, statusPrefix, type WorkspaceStatus } from './status.ts';
+import { agentTreePath } from './status.ts';
 
 const log = (s: string): void => console.log(`[reconcile] ${s}`);
 
@@ -130,8 +136,6 @@ interface WsCtx {
   wsById: Map<string, HerdrWorkspace>;
   state: PluginState;
   main: string;
-  /** act-state cache from the planes snapshot — label/metadata join. */
-  act: PrActCacheEntry[];
 }
 
 /** `worktree open` answers differently by path — fresh opens can carry
@@ -158,21 +162,22 @@ function openWorkspace(tree: ArmedTree, label: string, ctx: WsCtx): string | und
   return ws;
 }
 
-/** The plugin may correct a label only on a workspace IT opened —
- *  and only while the recorded id is still the live one. When our
- *  workspace was closed and the user opened their own for the same
- *  path, the label is theirs whatever a stale record claims. */
-function labelDrifted(
+/** The daemon projector moved this workspace's label — a managed
+ *  record whose live label no longer matches what it recorded. */
+function projectorRelabeled(
   rec: WorkspaceRec | undefined,
-  openId: string,
-  live: HerdrWorkspace | undefined,
-  label: string
+  live: HerdrWorkspace | undefined
 ): boolean {
-  return rec?.managed === true && rec.ws === openId && live !== undefined && live.label !== label;
+  if (rec?.managed !== true) return false;
+  if (live === undefined) return false;
+  return live.label !== rec.label;
 }
 
 /** Ensure the armed worktree has a workspace; record plugin-opened ones
- *  so label drift stays ours to fix. Returns the workspace id. */
+ *  so the daemon projector knows it owns their labels. Returns the
+ *  workspace id. The plugin never renames an existing workspace — the
+ *  `[state·#PR]` drift belongs to the projector (spec bro-u19mq), and
+ *  a user's own label is never touched. */
 function ensureWorkspace(tree: ArmedTree, label: string, ctx: WsCtx): string | undefined {
   const { path } = tree;
   const openId = ctx.openByPath.get(path);
@@ -180,15 +185,15 @@ function ensureWorkspace(tree: ArmedTree, label: string, ctx: WsCtx): string | u
 
   const rec = ctx.state.workspaces[path];
   const live = ctx.wsById.get(openId);
-  if (labelDrifted(rec, openId, live, label)) {
-    herdrTry(['workspace', 'rename', openId, label]);
-    ctx.state.workspaces[path] = { ...rec, ws: openId, label, managed: true };
-    log(`rename ${openId} → "${label}"`);
-  } else if (rec !== undefined && live === undefined) {
+  if (rec !== undefined && live === undefined) {
     delete ctx.state.workspaces[path];
   } else if (rec === undefined) {
     // a workspace the user opened — observe, never touch its label
     ctx.state.workspaces[path] = { ws: openId, label: live?.label ?? '', managed: false };
+  } else if (projectorRelabeled(rec, live)) {
+    // the projector relabels managed workspaces — keep the record's
+    // view of the live label honest so a restart doesn't misread it
+    ctx.state.workspaces[path] = { ...rec, label: live?.label ?? '' };
   }
   return openId;
 }
@@ -200,38 +205,9 @@ export interface ConvergeResult {
   reaped: number;
 }
 
-/** report-metadata is the machine-readable mirror of the label prefix
- *  — display-only tokens namespaced `bro.*`, written once per change
- *  (the recorded `meta` map dedupes), never a substitute for the label
- *  itself. Managed workspaces only: a user's own workspace gets none
- *  of our tokens. */
-function reportMetadata(path: string, ws: string, st: WorkspaceStatus, ctx: WsCtx): void {
-  const rec = ctx.state.workspaces[path];
-  if (rec?.managed !== true || rec.ws !== ws) return;
-  const tokens: Record<string, string> = {};
-  if (st.worker !== undefined) tokens['bro.worker'] = st.worker;
-  if (st.gate !== undefined) tokens['bro.gate'] = st.gate;
-  if (st.pr !== undefined) tokens['bro.pr'] = String(st.pr);
-  const prev = rec.meta ?? {};
-  const cur = JSON.stringify(tokens);
-  if (JSON.stringify(prev) === cur) return;
-  const args = [
-    'workspace',
-    'report-metadata',
-    ws,
-    '--source',
-    'bro.fleet',
-    '--seq',
-    String(Date.now()),
-  ];
-  for (const [k, v] of Object.entries(tokens)) args.push('--token', `${k}=${v}`);
-  for (const k of Object.keys(prev)) {
-    if (!(k in tokens)) args.push('--clear-token', k);
-  }
-  if (herdrTry(args) !== undefined) rec.meta = tokens;
-}
-
-/** Workspaces for every armed tree; path → live workspace id. */
+/** Workspaces for every armed tree; path → live workspace id. Opens
+ *  carry the plain bead title — status prefixes are projected by the
+ *  daemon, not written here. */
 function convergeWorkspaces(
   p: Planes,
   armed: Map<string, ArmedTree>,
@@ -240,13 +216,8 @@ function convergeWorkspaces(
   const titles = new Map(p.status.beads.inProgress.map(b => [b.id, b.title] as const));
   const wsForPath = new Map<string, string>();
   for (const t of armed.values()) {
-    const st = statusFor(t.path, t.slug, p, ctx.act);
-    const label = `${statusPrefix(st)}${desiredLabel(t, titles)}`;
-    const ws = ensureWorkspace(t, label, ctx);
-    if (ws !== undefined) {
-      wsForPath.set(t.path, ws);
-      reportMetadata(t.path, ws, st, ctx);
-    }
+    const ws = ensureWorkspace(t, desiredLabel(t, titles), ctx);
+    if (ws !== undefined) wsForPath.set(t.path, ws);
   }
   return wsForPath;
 }
@@ -312,9 +283,15 @@ function reapDead(p: Planes, ctx: WsCtx): number {
 
 /** One converge pass over a planes snapshot — the function every
  *  EventSource feeds and the only one that would notice if the feed
- *  shape changed (it won't — that's the seam's point). */
+ *  shape changed (it won't — that's the seam's point). The whole
+ *  load→mutate→save runs under the scope's state lock so two sessions
+ *  can't lost-update each other's workspace records. */
 export function converge(p: Planes): ConvergeResult {
   const scope = stateScope(p.main);
+  return withStateLock(scope, () => convergeLocked(p, scope));
+}
+
+function convergeLocked(p: Planes, scope: string): ConvergeResult {
   const ctx: WsCtx = {
     openByPath: new Map(
       p.worktrees.worktrees
@@ -324,7 +301,6 @@ export function converge(p: Planes): ConvergeResult {
     wsById: new Map(p.workspaces.map(w => [w.workspace_id, w])),
     state: loadState(scope),
     main: p.main,
-    act: p.act,
   };
 
   const armed = armedSet(p);
