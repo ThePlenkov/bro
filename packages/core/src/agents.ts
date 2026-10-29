@@ -69,8 +69,8 @@ const CAUSE_PATTERNS: [AgentCause, RegExp[]][] = [
       // 'billing' only counts beside an account-wall word — a transient
       // billing-service error is a crash, not the quota block that only
       // a manual `bro agents down` lifts
-      /\bbilling\b.{0,40}\b(?:limits?|exceed\w*|declin\w*|disabl\w*|deactivat\w*|suspen\w*|overdue|unpaid|delinquen\w*|requir\w*|missing|invalid|inactiv\w*)/i,
-      /\b(?:overdue|unpaid|delinquen\w*|declin\w*|disabl\w*|deactivat\w*|suspen\w*|requir\w*|missing|invalid|inactiv\w*)\b.{0,40}\bbilling\b/i,
+      /\bbilling\b(?:\s+\S+){0,5}\s+\b(?:limits?|exceed\w*|declin\w*|disabl\w*|deactivat\w*|suspen\w*|overdue|unpaid|delinquen\w*|requir\w*|missing|invalid|inactiv\w*)/i,
+      /\b(?:overdue|unpaid|delinquen\w*|declin\w*|disabl\w*|deactivat\w*|suspen\w*|requir\w*|missing|invalid|inactiv\w*)\b(?:\s+\S+){0,5}\s+\bbilling\b/i,
       /out of (?:credits?|funds?)/i,
       /spend(?:ing)? limit/i,
       /(?:monthly|daily|usage) limit (?:reached|exceeded)/i,
@@ -129,21 +129,91 @@ function relReset(text: string, now: number): string | undefined {
   if (rel === null) {
     return undefined;
   }
-  // sticky scan — each pair is consumed at its exact position, so the
-  // phrase parses linearly (a nested-quantifier (…)+ is a CodeQL
-  // polynomial-regex finding on uncontrolled log text)
-  const pair = /\s*(?:,\s*|\band\s+)?(\d{1,6})\s*(hours?|hrs?|h|minutes?|mins?|m|seconds?|secs?|s)\b/iy;
   let ms = 0;
   let found = false;
-  for (let i = rel.index + rel[0].length; ; ) {
-    pair.lastIndex = i;
-    const p = pair.exec(text);
-    if (p === null) {
+  let i = rel.index + rel[0].length;
+  const len = text.length;
+  while (i < len) {
+    // skip whitespace (bounded scan to avoid polynomial backtracking)
+    while (i < len && (text.charCodeAt(i) === 32 || text.charCodeAt(i) === 9 || text.charCodeAt(i) === 10 || text.charCodeAt(i) === 13 || text.charCodeAt(i) === 12 || text.charCodeAt(i) === 11)) {
+      i++;
+      if (i - (rel.index + rel[0].length) > 4096) break;
+    }
+    if (i >= len) break;
+    // optional comma
+    if (text.charCodeAt(i) === 44) {
+      i++;
+      while (i < len && (text.charCodeAt(i) === 32 || text.charCodeAt(i) === 9 || text.charCodeAt(i) === 10 || text.charCodeAt(i) === 13)) {
+        i++;
+        if (i - (rel.index + rel[0].length) > 4096) break;
+      }
+      if (i >= len) break;
+    }
+    // optional 'and' (avoid regex backtracking/flags on hot paths)
+    if (i + 3 <= len) {
+      const c0 = text.charCodeAt(i);
+      const c1 = text.charCodeAt(i + 1);
+      const c2 = text.charCodeAt(i + 2);
+      if (((c0 === 97 || c0 === 65) && (c1 === 110 || c1 === 78) && (c2 === 100 || c2 === 68))) {
+        // check word boundary after and
+        if (i === 0 || !/[A-Za-z0-9_]/.test(text[i - 1]!)) {
+          const afterAnd = i + 3;
+          if (afterAnd >= len || !/[A-Za-z0-9_]/.test(text[afterAnd]!)) {
+            i = afterAnd;
+            while (i < len && (text.charCodeAt(i) === 32 || text.charCodeAt(i) === 9 || text.charCodeAt(i) === 10 || text.charCodeAt(i) === 13)) {
+              i++;
+              if (i - (rel.index + rel[0].length) > 4096) break;
+            }
+            if (i >= len) break;
+          }
+        }
+      }
+    }
+    // read number
+    if (text.charCodeAt(i) < 48 || text.charCodeAt(i) > 57) {
       break;
     }
+    let num = 0;
+    let digits = 0;
+    while (i < len && text.charCodeAt(i) >= 48 && text.charCodeAt(i) <= 57 && digits < 6) {
+      num = num * 10 + (text.charCodeAt(i) - 48);
+      i++;
+      digits++;
+    }
+    // skip whitespace
+    while (i < len && (text.charCodeAt(i) === 32 || text.charCodeAt(i) === 9 || text.charCodeAt(i) === 10 || text.charCodeAt(i) === 13)) {
+      i++;
+    }
+    if (i >= len) break;
+    // read unit
+    const startUnit = i;
+    while (i < len) {
+      const cc = text.charCodeAt(i);
+      if ((cc >= 65 && cc <= 90) || (cc >= 97 && cc <= 122)) {
+        i++;
+        if (i - startUnit > 10) break;
+        continue;
+      }
+      break;
+    }
+    if (i === startUnit) break;
+    const unit = text.slice(startUnit, i).toLowerCase();
+    let unitKey = unit[0];
+    if (unit.startsWith('hour') || unit.startsWith('hr')) unitKey = 'h';
+    else if (unit.startsWith('min')) unitKey = 'm';
+    else if (unit.startsWith('sec')) unitKey = 's';
+    else if (unitKey === 'h' || unitKey === 'm' || unitKey === 's') {
+      // ok
+    } else {
+      break;
+    }
+    ms += num * (UNIT_MS[unitKey] ?? 1_000);
     found = true;
-    ms += Number(p[1]) * (UNIT_MS[p[2]!.toLowerCase()[0]!] ?? 1_000);
-    i = pair.lastIndex;
+    // check word boundary
+    if (i < len && /[A-Za-z0-9_]/.test(text[i]!)) {
+      break;
+    }
+    // continue loop
   }
   if (!found) {
     return undefined;
