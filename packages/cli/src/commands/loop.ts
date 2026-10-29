@@ -1259,28 +1259,60 @@ async function finalizeMerge(
       ctx.tails.push(`worktree ${item.worktreeDir} not removed — ${rm.err.trim()}`);
       console.error(`loop: ${ctx.tails.at(-1)}`);
     }
-    // Remove worktree if branch is checked out there
+    // Remove any worktree checked out on this branch first (including possibly another one)
     try {
       const wt = gitTry(['-C', ctx.root, 'worktree', 'list', '--porcelain']);
       if (wt.code === 0) {
         const trees = parseWorktreePorcelain(wt.out);
         for (const t of trees) {
-          if (t.branch === item.branch && t.path && t.path !== item.worktreeDir) {
-            gitTry(['-C', ctx.root, 'worktree', 'remove', '--force', t.path]);
-            break;
-          } else if (t.branch === item.branch && t.path === item.worktreeDir) {
-            // already handled above
-            break;
+          if (t.branch === item.branch && t.path) {
+            if (t.path === item.worktreeDir) {
+              continue;
+            }
+            const r = processesRootedIn(t.path);
+            if (r.length === 0) {
+              gitTry(['-C', t.path, 'submodule', 'deinit', '-f', '--all']);
+              gitTry(['-C', ctx.root, 'worktree', 'remove', '--force', t.path]);
+            } else {
+              ctx.tails.push(
+                `worktree ${t.path} kept — hosts live process(es): ${r.map(h => h.pid).join(', ')}; branch ${item.branch} kept with it`
+              );
+            }
           }
         }
       }
     } catch {
       /* best effort */
     }
-    const br = gitTry(['-C', ctx.root, 'branch', '-D', item.branch]);
-    if (br.code !== 0) {
-      ctx.tails.push(`branch ${item.branch} not deleted — ${br.err.trim()}`);
-      console.error(`loop: ${ctx.tails.at(-1)}`);
+    // Only delete branch if no worktree is still using it
+    try {
+      const wt2 = gitTry(['-C', ctx.root, 'worktree', 'list', '--porcelain']);
+      if (wt2.code === 0) {
+        const trees2 = parseWorktreePorcelain(wt2.out);
+        const stillCheckedOut = trees2.some(t => t.branch === item.branch);
+        if (!stillCheckedOut) {
+          const br = gitTry(['-C', ctx.root, 'branch', '-D', item.branch]);
+          if (br.code !== 0) {
+            ctx.tails.push(`branch ${item.branch} not deleted — ${br.err.trim()}`);
+            console.error(`loop: ${ctx.tails.at(-1)}`);
+          }
+        } else {
+          ctx.tails.push(`branch ${item.branch} not deleted — checked out in a worktree`);
+          console.error(`loop: ${ctx.tails.at(-1)}`);
+        }
+      } else {
+        const br = gitTry(['-C', ctx.root, 'branch', '-D', item.branch]);
+        if (br.code !== 0) {
+          ctx.tails.push(`branch ${item.branch} not deleted — ${br.err.trim()}`);
+          console.error(`loop: ${ctx.tails.at(-1)}`);
+        }
+      }
+    } catch {
+      const br = gitTry(['-C', ctx.root, 'branch', '-D', item.branch]);
+      if (br.code !== 0) {
+        ctx.tails.push(`branch ${item.branch} not deleted — ${br.err.trim()}`);
+        console.error(`loop: ${ctx.tails.at(-1)}`);
+      }
     }
     // delete remote branch on merge/close (spec bro-jis0c)
     try {
@@ -3480,6 +3512,10 @@ async function reconcileFleet(ctx: Ctx, q: QueueState): Promise<void> {
                     if (rooted.length === 0) {
                       gitTry(['-C', t.path, 'submodule', 'deinit', '-f', '--all']);
                       gitTry(['-C', ctx.root, 'worktree', 'remove', '--force', t.path]);
+                    } else {
+                      ctx.tails?.push(
+                        `worktree ${t.path} kept (orphan reconcile) — hosts live process(es): ${rooted.map(h => h.pid).join(', ')}; branch ${row.headRef} kept with it`
+                      );
                     }
                     break;
                   }
@@ -3488,7 +3524,23 @@ async function reconcileFleet(ctx: Ctx, q: QueueState): Promise<void> {
             } catch {
               /* best effort */
             }
-            gitTry(['-C', ctx.root, 'branch', '-D', row.headRef]);
+            // Only delete branch if no worktree is still using it
+            try {
+              const wt2 = gitTry(['-C', ctx.root, 'worktree', 'list', '--porcelain']);
+              if (wt2.code === 0) {
+                const trees2 = parseWorktreePorcelain(wt2.out);
+                const stillCheckedOut = trees2.some(t => t.branch === row.headRef);
+                if (!stillCheckedOut) {
+                  gitTry(['-C', ctx.root, 'branch', '-D', row.headRef]);
+                } else {
+                  ctx.tails?.push(`branch ${row.headRef} not deleted — checked out in a worktree`);
+                }
+              } else {
+                gitTry(['-C', ctx.root, 'branch', '-D', row.headRef]);
+              }
+            } catch {
+              gitTry(['-C', ctx.root, 'branch', '-D', row.headRef]);
+            }
           } catch {
             /* best effort */
           }
@@ -3628,6 +3680,7 @@ async function tryClaim(
   if (ctx.cfg.maxOpenTotal > 0) {
     try {
       const fleetLock = gitCommonDir(ctx.root);
+      let held = false;
       const doCeilCheck = (): boolean => {
         const fleet = listOpenFleetPrs(ctx);
         if (fleet === null) {
@@ -3638,6 +3691,9 @@ async function tryClaim(
           }
           return true;
         }
+        // Count in-flight workers/pending members in this process? Also count our gate stack
+        // but to be globally correct, count all open fleet PRs + in-flight spawns across fleet
+        // For now, be conservative: if at or over ceiling, hold
         if (ceilingHeld(fleet.length, ctx.cfg.maxOpenTotal)) {
           if (
             !ctx.claimsHeld ||
@@ -3652,7 +3708,6 @@ async function tryClaim(
         ctx.claimsHeld = undefined;
         return false;
       };
-      let held = false;
       if (fleetLock !== null) {
         try {
           withFileLock(join(fleetLock, 'bro', 'loop.ceiling.lock'), () => {
