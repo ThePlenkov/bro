@@ -56,8 +56,8 @@
     "node": ">=22.18"
   },
   "scripts": {
-    "test": "tsx --test $(find src -name '*.test.ts' ! -name '*.e2e.test.ts')",
-    "test:e2e": "tsx --test $(find src -name '*.e2e.test.ts')",
+    "test": "node scripts/run-tests.ts 'src/**/*.test.ts'",
+    "test:e2e": "node scripts/run-tests.ts 'src/**/*.e2e.test.ts'",
     "prepack": "node ../../scripts/pack-cli.ts pre",
     "postpack": "node ../../scripts/pack-cli.ts post",
     "typecheck": "tsc --noEmit"
