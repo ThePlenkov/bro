@@ -1,5 +1,4 @@
 ---
-
 title: "bro otel"
 description: "Hook-first telemetry — status|test|on|off; every dispatched hook exports through the emitHook facade (spec bro-xgejl)"
 ---
@@ -8,9 +7,10 @@ description: "Hook-first telemetry — status|test|on|off; every dispatched hook
 
 `bro otel status|test|on|off`
 
-|            |                               |
-| ---------- | ----------------------------- |
-| group      | `fleet`                       |
+| | |
+| --- | --- |
+| group | `fleet` |
 | npm latest | unreleased — lands in `0.3.0` |
-| skill      | `otel`                        |
-| config     | `otel` in bro.config          |
+| skill | `otel` |
+| config | `otel` in bro.config |
+
