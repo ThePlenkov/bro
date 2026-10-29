@@ -654,7 +654,11 @@ function killVerifiedGroup(pid: number, needle: string | undefined): void {
 /** The pid a run-scoped handle names — absent file, absent run, or a
  *  pre-handshake run all read as none. */
 function handlePid(main: string, token: string | undefined): number | undefined {
-  if (token === undefined) {
+  // truthiness, not `=== undefined`: an empty token is equally absent
+  // (the `.handle` file it would name never exists) and a string
+  // comparison guard here reads as a timing-attack pattern to static
+  // analysis without ever comparing secret bytes
+  if (!token) {
     return undefined;
   }
   try {
@@ -689,7 +693,7 @@ export function killRun(
   if (h !== undefined) {
     pids.add(h);
   }
-  const needle = token === undefined ? undefined : `${token}.`;
+  const needle = token ? `${token}.` : undefined;
   for (const p of pids) {
     killVerifiedGroup(p, needle);
   }
