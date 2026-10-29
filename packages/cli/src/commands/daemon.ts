@@ -375,9 +375,7 @@ export function supervisorDown(dir: string): SupervisorDown {
   const state = daemonStatePath(dir);
   const victims = new Set<number>([
     ...(probe.live ? [probe.pid!] : []),
-    ...(probe.recorded !== null && pidAlive(probe.recorded.pid, probe.recorded.pidStart)
-      ? [probe.recorded.pid]
-      : []),
+    ...(probe.recorded !== null && recordedPidAlive(probe.recorded) ? [probe.recorded.pid] : []),
     ...supervisionProcs(dir),
   ]);
   victims.delete(process.pid);

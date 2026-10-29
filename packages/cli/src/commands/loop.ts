@@ -726,7 +726,7 @@ function spawnAgent(
     }
     const opts = {
       cwd: dir,
-      env: { ...env, BRO_LOG_TIMESTAMP: '1' },
+      env: { ...env },
       stdio:
         logFd !== null
           ? (['inherit', logFd, logFd] as Array<'inherit' | number>)
@@ -736,9 +736,9 @@ function spawnAgent(
     const w = lane.worker;
     // When a log file is open, prefix every emitted line with an ISO8601
     // timestamp so loop.out/daemon.log-style trails stay attributable
-    // (spec bro-7h976). The child writes straight to the fd otherwise.
+    // (spec bro-7h976). Preserve the wrapped command's exit status.
     const wrap = (cmd: string): string =>
-      `{ ${cmd}; } 2>&1 | while IFS= read -r _bro_line; do printf '[%s] %s\\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$_bro_line"; done`;
+      `{ { ${cmd}; _brc=$?; echo "__BRO_EXIT__:${_brc}"; exit ${_brc}; } 2>&1 | ( _brc=0; while IFS= read -r _l; do case "${_l}" in __BRO_EXIT__:* ) _brc=$(echo "${_l}" | cut -d: -f2); continue ;; esac; printf '[%s] %s\\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "${_l}"; done; exit ${_brc}; ); }`;
     const child =
       w?.kind === 'argv'
         ? // the same `"$@"` positional exec the native backend builds —
