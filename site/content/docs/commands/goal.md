@@ -22,4 +22,4 @@ was met.
 | `bro work goal clear`           | Clear the goal                               |
 
 Goal state lives under the git common dir and is consumed by hook
-connectors (see [hooks](/docs/hooks)).
+connectors (see [hooks](/docs/guide/hooks)).
