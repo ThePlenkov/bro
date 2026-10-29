@@ -5,6 +5,13 @@
 # (`bro work enter`, `bro next`, `bro review act status`, `bro notify`)
 # — claims, .work markers, agents.json and .exit records come from the
 # work itself (spec bro-762eh).
+#
+# Ownership (spec bro-u19mq): the plugin opens workspaces and keeps
+# spawn/attach lifecycle — mirrors, renderers, the reaper. Fleet status
+# (`[state·#PR]` labels, the `status` metadata token) is written ONLY
+# by the bro daemon's fleet projector, so a dead session can't strand
+# a stale label; the plugin's `managed` record is how the projector
+# knows which workspaces it may relabel.
 id = "bro.fleet"
 name = "bro fleet"
 version = "0.1.0"

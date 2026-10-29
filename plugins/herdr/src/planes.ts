@@ -6,7 +6,6 @@
  */
 import {
   type AgentEntry,
-  actStates,
   agentsJson,
   armedWorkDetails,
   type BroStatus,
@@ -14,7 +13,6 @@ import {
   type HerdrWorkspace,
   type HerdrWorktreeList,
   loadState,
-  type PrActCacheEntry,
   paneExists,
   silentBucketMin,
   stateScope,
@@ -45,9 +43,6 @@ export interface Planes {
   /** plugin state → event-tail pane alive? — same reasoning as
    *  mirrorPanes: a killed renderer pane has to move the key. */
   rendererPanes: Record<string, boolean>;
-  /** act-state file cache — the last-observed PR gate summary per PR,
-   *  display-only (spec bro-8dbyb). */
-  act: PrActCacheEntry[];
 }
 
 export function readPlanes(repo: string): Planes {
@@ -72,7 +67,6 @@ export function readPlanes(repo: string): Planes {
     rendererPanes: Object.fromEntries(
       Object.values(state.renderers).map(r => [r.pane_id, paneExists(r.pane_id)])
     ),
-    act: actStates(main),
   };
 }
 
@@ -107,17 +101,5 @@ export function diffKey(p: Planes): string {
     reg: Object.entries(p.registry).map(([k, e]) => [k, e.agentId, e.log, e.worktree, e.pid]),
     mirrorPanes: p.mirrorPanes,
     rendererPanes: p.rendererPanes,
-    act: p.act.map(e => [
-      e.state.pr,
-      e.state.headRef,
-      e.state.state,
-      e.state.isDraft,
-      e.state.mergeable,
-      e.state.openThreads,
-      e.state.ciFailing,
-      e.state.ciPending,
-      e.state.reviewersPending,
-      e.state.sastPending,
-    ]),
   });
 }

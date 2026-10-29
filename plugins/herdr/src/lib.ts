@@ -228,53 +228,6 @@ export function agentsJson(repo: string): Record<string, AgentEntry> {
   }
 }
 
-/** One `<git-common>/bro/act-state/*.json` record — the shared gate
- *  feed every bro poller writes (`fetchPrActState`'s file cache,
- *  @broject/act state-cache.ts). The plugin only reads the fields a
- *  label needs — this is a summary plane, not the gate itself. */
-export interface PrActCacheEntry {
-  fetchedAt: number;
-  state: {
-    pr: number;
-    headRef?: string;
-    state?: string;
-    isDraft?: boolean;
-    mergeable?: string;
-    openThreads?: number;
-    ciPending?: number;
-    ciFailing?: number;
-    reviewersPending?: number;
-    sastPending?: number;
-  };
-}
-
-/** The last-fetched act gate state per PR, keyed `state.pr` — a file
- *  read, never a host call: whatever a real poller observed most
- *  recently is the freshest thing a label can show without paying gh. */
-export function actStates(repo: string): PrActCacheEntry[] {
-  const gd = gitCommonDir(repo);
-  if (gd === null) return [];
-  const dir = join(gd, 'bro', 'act-state');
-  let names: string[];
-  try {
-    names = readdirSync(dir).filter(f => f.endsWith('.json'));
-  } catch {
-    return [];
-  }
-  const out: PrActCacheEntry[] = [];
-  for (const f of names) {
-    try {
-      const v = JSON.parse(readFileSync(join(dir, f), 'utf8')) as Partial<PrActCacheEntry>;
-      if (typeof v.fetchedAt === 'number' && typeof v.state?.pr === 'number') {
-        out.push(v as PrActCacheEntry);
-      }
-    } catch {
-      // a corrupt entry is a miss, never a pass failure
-    }
-  }
-  return out;
-}
-
 /** Live `.work` marker detail lines — the session-armed occupancy plane.
  *  Same rules as bro's own scan: owner pid+start alive, or ownerless
  *  within the 24h live window; detail-less markers are residue. */
@@ -471,12 +424,10 @@ export function notify(title: string, body?: string): void {
 export interface WorkspaceRec {
   ws: string;
   label: string;
-  /** true only for workspaces this plugin opened — drift renames never
-   *  touch workspaces a user named themselves. */
+  /** true only for workspaces this plugin opened — that's how the
+   *  daemon projector learns it owns the label; a workspace a user
+   *  named themselves is never relabeled (spec bro-u19mq). */
   managed?: boolean;
-  /** last-written report-metadata tokens — the dedup record so a pass
-   *  only calls `workspace report-metadata` when a token moved. */
-  meta?: Record<string, string>;
 }
 
 export interface MirrorRec {
@@ -501,7 +452,8 @@ export interface RendererRec {
 }
 
 export interface PluginState {
-  /** worktree path → the workspace we opened (label drift is ours to fix). */
+  /** worktree path → the workspace we opened (the projector's
+   *  ownership ledger — it relabels only `managed` records). */
   workspaces: Record<string, WorkspaceRec>;
   /** molStep → mirror pane record. */
   mirrors: Record<string, MirrorRec>;
