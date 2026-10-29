@@ -132,7 +132,7 @@ function relReset(text: string, now: number): string | undefined {
   // sticky scan — each pair is consumed at its exact position, so the
   // phrase parses linearly (a nested-quantifier (…)+ is a CodeQL
   // polynomial-regex finding on uncontrolled log text)
-  const pair = /\s*(?:,\s*|\band\s+)?(\d+)\s*(hours?|hrs?|h|minutes?|mins?|m|seconds?|secs?|s)\b/iy;
+  const pair = /\s*(?:,\s*|\band\s+)?(\d{1,6})\s*(hours?|hrs?|h|minutes?|mins?|m|seconds?|secs?|s)\b/iy;
   let ms = 0;
   for (let i = rel.index + rel[0].length; ; ) {
     pair.lastIndex = i;
