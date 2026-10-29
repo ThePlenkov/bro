@@ -298,6 +298,19 @@ function fakeDaemon(dir: string, argv: string[]): ReturnType<typeof spawn> {
   return child;
 }
 
+/** Spawn a stand-in daemon, run doctor once inside the try, kill it on
+ *  the way out — the harness every daemon test copy-pasted before it
+ *  earned a name (Sonar: duplicated lines). The body reads the check
+ *  itself, in its own order. */
+const withFakeDaemon = (dir: string, argv: string[], body: () => void): void => {
+  const child = fakeDaemon(dir, argv);
+  try {
+    body();
+  } finally {
+    child.kill();
+  }
+};
+
 describe('bro doctor', () => {
   test('healthy env — every probe ok, exit 0', () => {
     // the dolt remote is a local fixture — a git+https URL would make
@@ -887,8 +900,7 @@ describe('bro doctor', () => {
         const entry = join(distDir, 'index.js');
         writeFileSync(entry, 'setTimeout(() => {}, 1e9)\n');
         commitAt(dir);
-        const child = fakeDaemon(dir, [process.execPath, entry]);
-        try {
+        withFakeDaemon(dir, [process.execPath, entry], () => {
           const stale = new Date(Date.now() - 3_600_000);
           utimesSync(entry, stale, stale);
           let c = byName(runDoctorChecks(dir), 'daemon');
@@ -909,9 +921,7 @@ describe('bro doctor', () => {
           c = byName(runDoctorChecks(dir), 'daemon');
           assert.equal(c.status, 'warn');
           assert.match(c.detail, /rebuilt after the daemon started/);
-        } finally {
-          child.kill();
-        }
+        });
       })
   );
 
@@ -934,14 +944,11 @@ describe('bro doctor', () => {
         // decides
         const old = new Date(Date.now() - 7_200_000);
         utimesSync(join(dir, '.git', 'logs', 'HEAD'), old, old);
-        const child = fakeDaemon(dir, [process.execPath, entry]);
-        try {
+        withFakeDaemon(dir, [process.execPath, entry], () => {
           const c = byName(runDoctorChecks(dir), 'daemon');
           assert.equal(c.status, 'ok');
           assert.match(c.detail, /this checkout's source entry/);
-        } finally {
-          child.kill();
-        }
+        });
       })
   );
 
@@ -958,8 +965,7 @@ describe('bro doctor', () => {
         const entry = join(dir, 'packages', 'cli', 'src', 'index.ts');
         writeFileSync(entry, 'setTimeout(() => {}, 1e9)\n');
         commitAt(dir);
-        const child = fakeDaemon(dir, [process.execPath, entry]);
-        try {
+        withFakeDaemon(dir, [process.execPath, entry], () => {
           // a commit landing after the spawn — the reflog pushed into the
           // future so proc-start quantization can't eat the ordering
           commitAt(dir);
@@ -968,9 +974,7 @@ describe('bro doctor', () => {
           const c = byName(runDoctorChecks(dir), 'daemon');
           assert.equal(c.status, 'warn');
           assert.match(c.detail, /HEAD moved since it started/);
-        } finally {
-          child.kill();
-        }
+        });
       })
   );
 
@@ -990,16 +994,13 @@ describe('bro doctor', () => {
         writeFileSync(join(pkg, 'package.json'), '{"name":"@broject/bro","version":"0.2.4"}');
         const entry = join(pkg, 'dist', 'index.js');
         writeFileSync(entry, 'setTimeout(() => {}, 1e9)\n');
-        const child = fakeDaemon(dir, [process.execPath, entry]);
-        try {
+        withFakeDaemon(dir, [process.execPath, entry], () => {
           const c = byName(runDoctorChecks(dir), 'daemon');
           assert.equal(c.status, 'warn');
           assert.match(c.detail, /installed, not this repo's build \(v0\.2\.5\)/);
           assert.match(c.detail, /v0\.2\.4/);
           assert.match(c.hint ?? '', /rebuilt/);
-        } finally {
-          child.kill();
-        }
+        });
       })
   );
 
@@ -1010,14 +1011,11 @@ describe('bro doctor', () => {
       withEnv({ bins: ['gh'] }, dir => {
         const { entry } = fakeCheckout(dir);
         writeFileSync(entry, 'setTimeout(() => {}, 1e9)\n');
-        const child = fakeDaemon(dir, [process.execPath, entry]);
-        try {
+        withFakeDaemon(dir, [process.execPath, entry], () => {
           const c = byName(runDoctorChecks(dir), 'daemon');
           assert.equal(c.status, 'warn');
           assert.match(c.detail, /different bro checkout/);
-        } finally {
-          child.kill();
-        }
+        });
       })
   );
 
@@ -1029,41 +1027,32 @@ describe('bro doctor', () => {
         const entry = join(dir, 'installed-bro.js');
         writeFileSync(entry, 'setTimeout(() => {}, 1e9)\n');
         symlinkSync(entry, join(dir, 'bin', 'bro'));
-        const child = fakeDaemon(dir, [process.execPath, entry]);
-        try {
+        withFakeDaemon(dir, [process.execPath, entry], () => {
           const c = byName(runDoctorChecks(dir), 'daemon');
           assert.equal(c.status, 'ok');
           assert.match(c.detail, /up — pid/);
-        } finally {
-          child.kill();
-        }
+        });
       }).then(() =>
         withEnv({ bins: ['gh', 'bro'] }, dir => {
           // PATH-bro is the shim; the daemon runs a different file
           const entry = join(dir, 'other-bro.js');
           writeFileSync(entry, 'setTimeout(() => {}, 1e9)\n');
-          const child = fakeDaemon(dir, [process.execPath, entry]);
-          try {
+          withFakeDaemon(dir, [process.execPath, entry], () => {
             const c = byName(runDoctorChecks(dir), 'daemon');
             assert.equal(c.status, 'warn');
             assert.match(c.detail, /`bro` resolves/);
-          } finally {
-            child.kill();
-          }
+          });
         })
       )
   );
 
   test('daemon: an argv that names no entry skips honestly', () =>
     withEnv({ bins: ['gh'] }, dir => {
-      const child = fakeDaemon(dir, [process.execPath, '-e', 'setTimeout(() => {}, 1e9)']);
-      try {
+      withFakeDaemon(dir, [process.execPath, '-e', 'setTimeout(() => {}, 1e9)'], () => {
         const c = byName(runDoctorChecks(dir), 'daemon');
         assert.equal(c.status, 'skip');
         assert.match(c.detail, /unverifiable/);
-      } finally {
-        child.kill();
-      }
+      });
     }));
 
   test(
@@ -1085,14 +1074,11 @@ describe('bro doctor', () => {
         commitAt(dir);
         const old = new Date(Date.now() - 7_200_000);
         utimesSync(join(dir, '.git', 'logs', 'HEAD'), old, old);
-        const child = fakeDaemon(dir, [process.execPath, '--require', reg, entry]);
-        try {
+        withFakeDaemon(dir, [process.execPath, '--require', reg, entry], () => {
           const c = byName(runDoctorChecks(dir), 'daemon');
           assert.equal(c.status, 'ok');
           assert.match(c.detail, /this checkout's source entry/);
-        } finally {
-          child.kill();
-        }
+        });
       })
   );
 
@@ -1112,14 +1098,11 @@ describe('bro doctor', () => {
         writeFileSync(entry, 'setTimeout(() => {}, 1e9)\n');
         commitAt(dir);
         rmSync(join(dir, '.git', 'logs', 'HEAD'));
-        const child = fakeDaemon(dir, [process.execPath, entry]);
-        try {
+        withFakeDaemon(dir, [process.execPath, entry], () => {
           const c = byName(runDoctorChecks(dir), 'daemon');
           assert.equal(c.status, 'warn');
           assert.match(c.detail, /HEAD drift unverifiable/);
-        } finally {
-          child.kill();
-        }
+        });
       })
   );
 
@@ -1142,14 +1125,11 @@ describe('bro doctor', () => {
         const entry = join(distDir, 'index.js');
         writeFileSync(entry, 'setTimeout(() => {}, 1e9)\n');
         commitAt(wt);
-        const child = fakeDaemon(dir, [process.execPath, entry]);
-        try {
+        withFakeDaemon(dir, [process.execPath, entry], () => {
           const c = byName(runDoctorChecks(dir), 'daemon');
           assert.equal(c.status, 'warn');
           assert.match(c.detail, /different bro checkout/);
-        } finally {
-          child.kill();
-        }
+        });
       })
   );
 
