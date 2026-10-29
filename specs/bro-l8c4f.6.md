@@ -31,6 +31,7 @@ The audit requires an explicit credential scope separate from workspace isolatio
 Add opt-in strict per-provider/backend env allowlist + explicit secret references. Configuration lives under `agents.<backend>` and/or provider-scoped settings. Keep backward compatible trusted-host mode (current behavior) when strict mode not enabled.
 
 Schema additions:
+
 - `agents.<backend>.envAllowlist` (array of env var names) — allowlist of env vars permitted to pass through
 - `agents.<backend>.strictEnv` (boolean, default false) — enables strict mode
 - `agents.<backend>.credentialScope` (object) for explicit secret references if needed
