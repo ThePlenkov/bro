@@ -516,10 +516,17 @@ function refMovedMs(checkout: string, ref: string): number {
   if (name === '') {
     return 0;
   }
-  return (
-    statSync(join(resolve(checkout, gd.out.trim()), 'logs', name), { throwIfNoEntry: false })
-      ?.mtimeMs ?? 0
-  );
+  try {
+    return (
+      statSync(join(resolve(checkout, gd.out.trim()), 'logs', name), { throwIfNoEntry: false })
+        ?.mtimeMs ?? 0
+    );
+  } catch {
+    // an unreadable reflog (EACCES) is no evidence the ref moved —
+    // throwIfNoEntry only suppresses ENOENT; the caller reports 0 as
+    // unverifiable rather than aborting the whole doctor run
+    return 0;
+  }
 }
 
 function devDistCheck({ checkout, distDir, entry }: DevDist): DoctorCheck {
@@ -805,15 +812,15 @@ function srcDaemonCheck(pid: number, entry: string, entryRoot: string, dir: stri
   const start = procStartMs(pid);
   // HEAD covers a pulled checkout; @{u} catches "source built/loaded before
   // the merge landed" even when a fetch moved the tracking ref ahead
-  const refs = ['HEAD'];
+  const headMoved = refMovedMs(entryRoot, 'HEAD');
+  let moved = headMoved;
   if (gitTry(['-C', entryRoot, 'rev-parse', '--verify', '--quiet', '@{u}']).code === 0) {
-    refs.push('@{u}');
+    const upstreamMoved = refMovedMs(entryRoot, '@{u}');
+    if (upstreamMoved > moved) moved = upstreamMoved;
   }
-  let moved = 0;
-  for (const ref of refs) {
-    const m = refMovedMs(entryRoot, ref);
-    if (m > moved) moved = m;
-  }
+  // a missing HEAD reflog is unverifiable even when @{u} has one — the
+  // tracking ref's log cannot prove HEAD didn't move
+  if (headMoved === 0) moved = 0;
   // no start time or no reflog = no evidence the process is current —
   // unverifiable, never a silent ok (commit %ct is committer-declared,
   // not a fallback)
@@ -830,12 +837,19 @@ function srcDaemonCheck(pid: number, entry: string, entryRoot: string, dir: stri
     ];
   }
   if (moved > start) {
+    // a moved HEAD means the process holds pre-move code; a still HEAD
+    // with a moved @{u} means the checkout itself is behind — pull first,
+    // a restart alone would reread the same stale code
     return [
       check(
         'daemon',
         'warn',
-        `pid ${pid} runs ${entry} — this checkout's source, but refs moved since it started`,
-        'restart the daemon — the running process loaded the pre-move code'
+        `pid ${pid} runs ${entry} — this checkout's source, ${
+          headMoved > start ? 'HEAD' : '@{u}'
+        } moved since it started`,
+        headMoved > start
+          ? 'restart the daemon — the running process loaded the pre-move code'
+          : 'git pull, then restart the daemon — the checkout lacks what @{u} already carries'
       ),
     ];
   }
