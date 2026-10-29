@@ -94,11 +94,7 @@ import {
   type AgentConnectorEnv,
 } from '../agent-connectors.ts';
 import { laneStatus, laneStatusLines, type LaneStatusRow } from '../lane.ts';
-import {
-  devinSessionTranscript,
-  devinTranscriptsDir,
-  renderDevinTranscript,
-} from '@broject/devin';
+import { devinSessionTranscript, devinTranscriptsDir, renderDevinTranscript } from '@broject/devin';
 import { flag, positionals } from './args.ts';
 import { mainWorktree, worktreePathFor } from './work.ts';
 
@@ -357,13 +353,13 @@ export function occupancyLine(o: FleetOccupancy): string {
  *  workers, and the rate-gate budget, before the per-agent table.
  *  Silent when no lane has anything to say. */
 function printLaneSection(lanes: LaneStatusRow[]): void {
-  const lines = laneStatusLines(lanes)
+  const lines = laneStatusLines(lanes);
   if (lines.length === 0) {
-    return
+    return;
   }
-  console.log('lanes:')
+  console.log('lanes:');
   for (const l of lines) {
-    console.log(l)
+    console.log(l);
   }
 }
 
@@ -493,11 +489,7 @@ async function cmdStatus(dir: string, env: AgentConnectorEnv, argv: string[]): P
     );
     return;
   }
-<<<<<<< HEAD
-  printStatusTable(backends, occupancyOf(dir, env), sessionQuotaViewsOf(env));
-=======
-  printStatusTable(backends, occupancyOf(dir, env), sessionQuotaViewsOf(env), laneStatus(dir, env))
->>>>>>> 8d9b081a (feat(lane): pace the devin lane — a shared rate gate, and the wall pauses every worker (bro-y3jvd))
+  printStatusTable(backends, occupancyOf(dir, env), sessionQuotaViewsOf(env), laneStatus(dir, env));
 }
 
 // --- up / down ------------------------------------------------------------------
