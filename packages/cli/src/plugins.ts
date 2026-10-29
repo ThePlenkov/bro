@@ -1032,7 +1032,7 @@ function isCliContract(v: unknown): boolean {
   );
 }
 
-const FACADE_KEYS: ReadonlySet<string> = new Set([
+const FACADE_KEYS: ReadonlySet<keyof FacadeMap> = new Set([
   'tasks',
   'tasksAsync',
   'reviews',
@@ -1085,16 +1085,23 @@ function hasValidConnectorFunctions(c: unknown): boolean {
   return true;
 }
 
+function isValidFacadeKey(f: unknown): boolean {
+  return typeof f === 'string' && FACADE_KEYS.has(f as keyof FacadeMap);
+}
+
 function hasValidConnectorFlags(c: unknown): boolean {
   const o = c as Record<string, unknown>;
   if (o.optIn !== undefined && typeof o.optIn !== 'boolean') {
     return false;
   }
-  if (o.optInFacades !== undefined) {
-    if (!Array.isArray(o.optInFacades)) {
-      return false;
-    }
-    if (!o.optInFacades.every(f => typeof f === 'string' && FACADE_KEYS.has(f))) {
+  if (o.optInFacades === undefined) {
+    return true;
+  }
+  if (!Array.isArray(o.optInFacades)) {
+    return false;
+  }
+  for (const f of o.optInFacades) {
+    if (!isValidFacadeKey(f)) {
       return false;
     }
   }
