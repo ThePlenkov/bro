@@ -233,6 +233,22 @@ const db = load()
 const row = (id) => db.rows.find((r) => r.id === id)
 const jsonOut = (v) => { process.stdout.write(JSON.stringify(v) + '\\n') }
 const cmd = pos[0]
+// one-shot claim-read failure injection (bro-etimout): a wedged store
+// past bd's 15s budget makes the throwing bd() ready call throw — a
+// non-zero exit throws identically for execFileSync callers. Scoped to
+// the claim read's own argv signature (exclude-label) so the startup
+// compat probe (ready -n 1, bdTry, non-throwing) never consumes the
+// injection. The counter lives beside the db so each fresh bd process
+// shares it.
+if (process.env.FAKE_BD_READY_FAILS && cmd === 'ready' && args.includes('--exclude-label')) {
+  const counter = DB + '.readyfails'
+  let left = Number(process.env.FAKE_BD_READY_FAILS)
+  try { left = Number(fs.readFileSync(counter, 'utf8')) } catch {}
+  if (left > 0) {
+    retry(() => fs.writeFileSync(counter, String(left - 1)))
+    fail('spawnSync timeout ETIMEDOUT')
+  }
+}
 switch (cmd === undefined && args[0] === '--version' ? '--version' : cmd) {
   case '--version':
     console.log('bd 0.0.0-fake')
