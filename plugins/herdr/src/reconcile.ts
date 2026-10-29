@@ -29,6 +29,7 @@ import {
   type StatusWorktree,
   saveState,
   stateScope,
+  withStateLock,
   worktreeGone,
 } from './lib.ts';
 import { convergeMirrors, markExitedMirrors } from './mirrors.ts';
@@ -270,9 +271,15 @@ function reapDead(p: Planes, ctx: WsCtx): number {
 
 /** One converge pass over a planes snapshot — the function every
  *  EventSource feeds and the only one that would notice if the feed
- *  shape changed (it won't — that's the seam's point). */
+ *  shape changed (it won't — that's the seam's point). The whole
+ *  load→mutate→save runs under the scope's state lock so two sessions
+ *  can't lost-update each other's workspace records. */
 export function converge(p: Planes): ConvergeResult {
   const scope = stateScope(p.main);
+  return withStateLock(scope, () => convergeLocked(p, scope));
+}
+
+function convergeLocked(p: Planes, scope: string): ConvergeResult {
   const ctx: WsCtx = {
     openByPath: new Map(
       p.worktrees.worktrees

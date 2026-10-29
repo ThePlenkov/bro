@@ -17,7 +17,7 @@
  */
 import { spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { readdirSync, readFileSync, statSync } from 'node:fs';
+import { readdirSync, readFileSync, realpathSync, statSync } from 'node:fs';
 import { basename, join } from 'node:path';
 import {
   type AgentRegistryEntry,
@@ -279,30 +279,52 @@ function actStates(common: string | null): ActEntry[] {
   return out.sort((a, b) => b.fetchedAt - a.fetchedAt);
 }
 
+function realpathOrNull(p: string): string | null {
+  try {
+    return realpathSync(p);
+  } catch {
+    return null;
+  }
+}
+
 /** The plugin's ownership ledger — `managed: true` marks workspaces a
  *  plugin opened (the only ones we may relabel). Read-only here; the
- *  plugin still owns writes. Same file contract as plugins/herdr:
- *  `$HERDR_PLUGIN_STATE_DIR` or `~/.config/bro-herdr-plugin/
- *  state-<sha1(git-common-dir).slice(0,12)>.json`. */
+ *  plugin still owns writes. Reads EVERY plausible ledger — the scope
+ *  hashes the git common dir as the plugin resolved it (raw and
+ *  realpath: a symlinked checkout must not partition the fleet), in
+ *  `$HERDR_PLUGIN_STATE_DIR` and the default dir (a plugin host and a
+ *  daemon configured differently must still agree on ownership). */
 function managedSet(
   mainRoot: string,
   common: string | null
 ): Map<string, { ws?: string; managed?: boolean }> {
-  const scope = createHash('sha1')
-    .update(common ?? mainRoot)
-    .digest('hex')
-    .slice(0, 12);
-  const dir =
-    process.env.HERDR_PLUGIN_STATE_DIR ??
-    join(process.env.HOME ?? '/tmp', '.config', 'bro-herdr-plugin');
-  try {
-    const v = JSON.parse(readFileSync(join(dir, `state-${scope}.json`), 'utf8')) as {
-      workspaces?: Record<string, { ws?: string; managed?: boolean }>;
-    };
-    return new Map(Object.entries(v.workspaces ?? {}));
-  } catch {
-    return new Map();
+  const base = common ?? mainRoot;
+  const real = realpathOrNull(base);
+  const scopes = new Set(
+    [base, ...(real === null || real === base ? [] : [real])].map(p =>
+      createHash('sha1').update(p).digest('hex').slice(0, 12)
+    )
+  );
+  const dirs = new Set(
+    [
+      process.env.HERDR_PLUGIN_STATE_DIR,
+      join(process.env.HOME ?? '/tmp', '.config', 'bro-herdr-plugin'),
+    ].filter((d): d is string => d !== undefined)
+  );
+  const out = new Map<string, { ws?: string; managed?: boolean }>();
+  for (const dir of dirs) {
+    for (const scope of scopes) {
+      try {
+        const v = JSON.parse(readFileSync(join(dir, `state-${scope}.json`), 'utf8')) as {
+          workspaces?: Record<string, { ws?: string; managed?: boolean }>;
+        };
+        for (const [k, r] of Object.entries(v.workspaces ?? {})) out.set(k, r);
+      } catch {
+        // no ledger at this candidate — the others still apply
+      }
+    }
   }
+  return out;
 }
 
 /** Branch per worktree from `git worktree list --porcelain` — the

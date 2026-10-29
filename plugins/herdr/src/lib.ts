@@ -10,7 +10,15 @@
  */
 import { spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { mkdirSync, readdirSync, readFileSync, renameSync, statSync, writeFileSync } from 'node:fs';
+import {
+  mkdirSync,
+  readdirSync,
+  readFileSync,
+  renameSync,
+  rmSync,
+  statSync,
+  writeFileSync,
+} from 'node:fs';
 import { basename, dirname, isAbsolute, join, resolve } from 'node:path';
 import process from 'node:process';
 
@@ -497,6 +505,65 @@ export function saveState(scope: string, s: PluginState): void {
   const tmp = `${p}.${process.pid}.tmp`;
   writeFileSync(tmp, `${JSON.stringify(s, null, 2)}\n`);
   renameSync(tmp, p);
+}
+
+/** A lock older than this is a dead holder's — a live converge never
+ *  takes minutes, so breaking it is safe. */
+const STALE_LOCK_MS = 180_000;
+/** How long a session waits on a live lock before running unlocked —
+ *  a wedged fs must never freeze the plugin. */
+const LOCK_WAIT_MS = 10_000;
+
+function lockStale(lock: string): boolean {
+  try {
+    return Date.now() - statSync(lock).mtimeMs > STALE_LOCK_MS;
+  } catch {
+    // vanished between our failed mkdir and this stat — breakable
+    return true;
+  }
+}
+
+const sleep = (ms: number): void => {
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+};
+
+/** A mkdir mutex around a scope's load→converge→save span — mkdir is
+ *  the one atomic create-if-absent the fs gives. Without it two
+ *  sessions reconciling the same repo read-modify-write the same file
+ *  and the last save silently drops the other's workspace/mirror
+ *  records (review finding on bro-u19mq). A stale lock is broken and
+ *  retaken; a live one outlasting LOCK_WAIT_MS runs unlocked —
+ *  correctness degrades to the old race, never to a hang. */
+export function withStateLock<T>(scope: string, fn: () => T): T {
+  mkdirSync(STATE_DIR, { recursive: true });
+  const lock = join(STATE_DIR, `state-${scope}.lock`);
+  const until = Date.now() + LOCK_WAIT_MS;
+  for (;;) {
+    try {
+      mkdirSync(lock);
+      break;
+    } catch {
+      if (lockStale(lock)) {
+        try {
+          rmSync(lock, { recursive: true, force: true });
+        } catch {
+          // raced another breaker — keep spinning
+        }
+        continue;
+      }
+      if (Date.now() >= until) return fn();
+      sleep(50);
+    }
+  }
+  try {
+    return fn();
+  } finally {
+    try {
+      rmSync(lock, { recursive: true, force: true });
+    } catch {
+      // a breaker already took it — nothing to release
+    }
+  }
 }
 
 /** Small config file under HERDR_PLUGIN_CONFIG_DIR — `key = value` TOML
