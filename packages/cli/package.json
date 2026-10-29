@@ -71,6 +71,18 @@
           "{workspaceRoot}/formulas/**/*",
           "{workspaceRoot}/packages/*/dist/**/*"
         ]
+      },
+      "test": {
+        "dependsOn": [
+          "^build",
+          "build"
+        ]
+      },
+      "test:e2e": {
+        "dependsOn": [
+          "^build",
+          "build"
+        ]
       }
     }
   },
