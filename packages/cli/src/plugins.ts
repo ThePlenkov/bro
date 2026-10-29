@@ -1061,23 +1061,26 @@ const CONNECTOR_FUNCTION_KEYS: ReadonlyArray<string> = [
   'guards',
 ];
 
+const isObject = (o: unknown): o is Record<string, unknown> => !!o && typeof o === 'object';
+
 /** A connectors entry must be a Connector — name + at least the shape
  *  registerConnector relies on — else facade resolution would crash. */
 function hasValidConnectorName(c: unknown): boolean {
-  const o = c as Record<string, unknown>;
-  if (!o || typeof o !== 'object') {
+  if (!isObject(c)) {
     return false;
   }
-  if (typeof o.name !== 'string' || o.name === '') {
+  if (typeof c.name !== 'string' || c.name === '') {
     return false;
   }
   return true;
 }
 
 function hasValidConnectorFunctions(c: unknown): boolean {
-  const o = c as Record<string, unknown>;
+  if (!isObject(c)) {
+    return false;
+  }
   for (const key of CONNECTOR_FUNCTION_KEYS) {
-    const v = o[key];
+    const v = c[key];
     if (v !== undefined && typeof v !== 'function') {
       return false;
     }
@@ -1090,17 +1093,19 @@ function isValidFacadeKey(f: unknown): boolean {
 }
 
 function hasValidConnectorFlags(c: unknown): boolean {
-  const o = c as Record<string, unknown>;
-  if (o.optIn !== undefined && typeof o.optIn !== 'boolean') {
+  if (!isObject(c)) {
     return false;
   }
-  if (o.optInFacades === undefined) {
+  if (c.optIn !== undefined && typeof c.optIn !== 'boolean') {
+    return false;
+  }
+  if (c.optInFacades === undefined) {
     return true;
   }
-  if (!Array.isArray(o.optInFacades)) {
+  if (!Array.isArray(c.optInFacades)) {
     return false;
   }
-  for (const f of o.optInFacades) {
+  for (const f of c.optInFacades) {
     if (!isValidFacadeKey(f)) {
       return false;
     }
@@ -1109,6 +1114,9 @@ function hasValidConnectorFlags(c: unknown): boolean {
 }
 
 function isConnector(c: unknown): boolean {
+  if (!isObject(c)) {
+    return false;
+  }
   if (!hasValidConnectorName(c)) {
     return false;
   }
