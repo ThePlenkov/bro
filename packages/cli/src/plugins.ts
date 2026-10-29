@@ -31,6 +31,7 @@ import {
   type ConfigDiagnostic,
   type ConfigSection,
   type DocType,
+  type FacadeMap,
 } from '@broject/core';
 import { actConnector, ACT_PLAN_VERSION, parseActPlan, type ActPlan } from '@broject/act';
 import { CONVOY_PLAN_VERSION, parseConvoyPlan, type ConvoyPlan } from '@broject/convoy';
@@ -925,7 +926,21 @@ function isPlugin(p: unknown): p is BroPlugin {
   }
   // optional fields must be the right type when present — a truthy
   // non-function configSchema would crash config loading later
-  return PLUGIN_FIELD_CHECKS.every(([key, ok]) => o[key] === undefined || ok(o[key]));
+  if (!PLUGIN_FIELD_CHECKS.every(([key, ok]) => (o as any)[key] === undefined || ok((o as any)[key]))) {
+    return false;
+  }
+  // paired fields must both be present or both absent
+  const hasConfigKey = (o as any).configKey !== undefined;
+  const hasConfigSchema = (o as any).configSchema !== undefined;
+  if (hasConfigKey !== hasConfigSchema) {
+    return false;
+  }
+  const hasPlanSchema = (o as any).planSchema !== undefined;
+  const hasRunPlan = (o as any).runPlan !== undefined;
+  if (hasPlanSchema !== hasRunPlan) {
+    return false;
+  }
+  return true;
 }
 
 /** Present-but-wrong optional fields — each predicate runs only when
@@ -942,10 +957,13 @@ const PLUGIN_FIELD_CHECKS: ReadonlyArray<[keyof BroPlugin, (v: unknown) => boole
   ['deprecated', v => typeof v === 'string'],
   ['flatDeprecated', v => typeof v === 'string'],
   ['configKey', v => typeof v === 'string'],
-  ['argvPrefix', v => Array.isArray(v)],
+  ['argvPrefix', v => Array.isArray(v) && v.every(x => typeof x === 'string')],
   ['docs', v => Array.isArray(v) && v.every(isDocType)],
   ['connectors', v => Array.isArray(v) && v.every(isConnector)],
   ['contract', isCliContract],
+  ['group', v => typeof v === 'string'],
+  ['aliasOf', v => typeof v === 'string'],
+  ['hidden', v => typeof v === 'boolean'],
 ];
 
 /** `contract` must be the declared shape at every level — a malformed
@@ -971,17 +989,79 @@ function isCliContract(v: unknown): boolean {
   );
 }
 
+const FACADE_KEYS: ReadonlySet<string> = new Set([
+  'tasks',
+  'tasksAsync',
+  'reviews',
+  'mergeQueue',
+  'specs',
+  'judge',
+  'events',
+  'queries',
+  'stacks',
+]);
+
 /** A connectors entry must be a Connector — name + at least the shape
  *  registerConnector relies on — else facade resolution would crash. */
 function isConnector(c: unknown): boolean {
-  const o = c as { name?: unknown; matchRemote?: unknown };
-  return (
-    !!o &&
-    typeof o === 'object' &&
-    typeof o.name === 'string' &&
-    o.name !== '' &&
-    (o.matchRemote === undefined || typeof o.matchRemote === 'function')
-  );
+  const o = c as Record<string, unknown>;
+  if (!o || typeof o !== 'object' || typeof o.name !== 'string' || o.name === '') {
+    return false;
+  }
+  if (o.matchRemote !== undefined && typeof o.matchRemote !== 'function') {
+    return false;
+  }
+  if (o.matchDir !== undefined && typeof o.matchDir !== 'function') {
+    return false;
+  }
+  if (o.auth !== undefined && typeof o.auth !== 'function') {
+    return false;
+  }
+  if (o.tasks !== undefined && typeof o.tasks !== 'function') {
+    return false;
+  }
+  if (o.tasksAsync !== undefined && typeof o.tasksAsync !== 'function') {
+    return false;
+  }
+  if (o.reviews !== undefined && typeof o.reviews !== 'function') {
+    return false;
+  }
+  if (o.mergeQueue !== undefined && typeof o.mergeQueue !== 'function') {
+    return false;
+  }
+  if (o.specs !== undefined && typeof o.specs !== 'function') {
+    return false;
+  }
+  if (o.judge !== undefined && typeof o.judge !== 'function') {
+    return false;
+  }
+  if (o.events !== undefined && typeof o.events !== 'function') {
+    return false;
+  }
+  if (o.queries !== undefined && typeof o.queries !== 'function') {
+    return false;
+  }
+  if (o.stacks !== undefined && typeof o.stacks !== 'function') {
+    return false;
+  }
+  if (o.hooks !== undefined && typeof o.hooks !== 'function') {
+    return false;
+  }
+  if (o.guards !== undefined && typeof o.guards !== 'function') {
+    return false;
+  }
+  if (o.optIn !== undefined && typeof o.optIn !== 'boolean') {
+    return false;
+  }
+  if (o.optInFacades !== undefined) {
+    if (!Array.isArray(o.optInFacades)) {
+      return false;
+    }
+    if (!o.optInFacades.every(f => typeof f === 'string' && FACADE_KEYS.has(f))) {
+      return false;
+    }
+  }
+  return true;
 }
 
 /** A docs entry must be a DocType — name + adapter factory — else it
