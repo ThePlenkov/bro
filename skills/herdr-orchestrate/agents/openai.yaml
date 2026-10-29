@@ -1,0 +1,7 @@
+interface:
+  display_name: "Herdr Orchestrate"
+  short_description: "Provider-agnostic fleet playbook over the herdr socket API"
+  brand_color: "#0E8A16"
+  default_prompt: "Use $herdr-orchestrate to drive worker agents through Herdr."
+policy:
+  allow_implicit_invocation: true
