@@ -345,6 +345,7 @@ function agentEnv(ctx: Ctx, extra: Record<string, string>): NodeJS.ProcessEnv {
     'BRO_SESSION_ID',
     'BRO_MOL_ID',
     BATCH_MARKER_ENV,
+    'BRO_LOG_TIMESTAMP',
   ]) {
     delete env[k];
   }
@@ -726,7 +727,7 @@ function spawnAgent(
     }
     const opts = {
       cwd: dir,
-      env,
+      env: { ...env },
       stdio:
         logFd !== null
           ? (['inherit', logFd, logFd] as Array<'inherit' | number>)
@@ -734,13 +735,22 @@ function spawnAgent(
       detached: true,
     };
     const w = lane.worker;
+    // When a log file is open, prefix every emitted line with an ISO8601
+    // timestamp so loop.out/daemon.log-style trails stay attributable
+    // (spec bro-7h976). Preserve the wrapped command's exit status.
+    const wrap = (cmd: string): string =>
+      `({ _bro_cmd=${JSON.stringify(cmd)}; _bro_rcf=$(mktemp); { (eval "$_bro_cmd"; echo $? > "$_bro_rcf") 2>&1 | while IFS= read -r _l || [ -n "$_l" ]; do printf '[%s] %s\\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$_l"; done; }; _bro_rc=$(cat "$_bro_rcf" 2>/dev/null || echo 1); rm -f "$_bro_rcf"; exit "$_bro_rc"; })`;
     const child =
       w?.kind === 'argv'
         ? // the same `"$@"` positional exec the native backend builds —
           // argv workers are headless by construction (acp); sh resolves
           // argv[0] ('bro'/'npx') on PATH the way the backend does
-          spawn('sh', ['-c', 'exec "$@"', 'loop-agent', ...w.argv, promptFile], opts) // NOSONAR — argv[0] resolves on PATH by design, same as the backend's spawn
-        : spawn('sh', ['-c', expandAgentCmd(laneCommand(ctx, lane), promptFile)], opts); // NOSONAR — operator-configured agent command
+          logFd !== null
+          ? spawn('sh', ['-c', wrap('"$@"'), 'loop-agent', ...w.argv, promptFile], opts) // NOSONAR
+          : spawn('sh', ['-c', 'exec "$@"', 'loop-agent', ...w.argv, promptFile], opts) // NOSONAR
+        : logFd !== null
+          ? spawn('sh', ['-c', wrap(expandAgentCmd(laneCommand(ctx, lane), promptFile))], opts) // NOSONAR
+          : spawn('sh', ['-c', expandAgentCmd(laneCommand(ctx, lane), promptFile)], opts); // NOSONAR
     if (logFd !== null) {
       // the child holds its own dup — our copy is spent
       closeSync(logFd);
@@ -1361,7 +1371,8 @@ function runBootstrap(ctx: Ctx, beads: ReadyBead[], item: LoopItem): boolean {
   if (!ctx.cfg.bootstrap) {
     return true;
   }
-  const b = spawnSync('sh', ['-c', ctx.cfg.bootstrap], { // NOSONAR — operator-configured bootstrap
+  const b = spawnSync('sh', ['-c', ctx.cfg.bootstrap], {
+    // NOSONAR — operator-configured bootstrap
     cwd: item.worktreeDir,
     env: agentEnv(ctx, {}),
     stdio: ['inherit', ctx.json ? 2 : 'inherit', 'inherit'],

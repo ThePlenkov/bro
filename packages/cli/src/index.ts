@@ -6,52 +6,67 @@
  * (subcommand + skill + config section); see plugins.ts for the list
  * and `bro plugins` for the live registry.
  */
-import { EXIT, printUsage, warnDeprecated, type BroPlugin, type ExitCode } from '@broject/core'
-import { journalCommand } from './commands/hooks.ts'
-import { registerTelegramSink } from './commands/sinks-telegram.ts'
-import { otelSpan, setAmbient } from '@broject/providers'
-import { docUsageLines, reservedWords, runDocVerb } from './docs.ts'
-import { GROUP_META, loadExternalPlugins, pluginGroups, PLUGINS } from './plugins.ts'
-import { VERSION } from './version.ts'
+import { EXIT, printUsage, warnDeprecated, type BroPlugin, type ExitCode } from '@broject/core';
+import { journalCommand } from './commands/hooks.ts';
+import { registerTelegramSink } from './commands/sinks-telegram.ts';
+import { otelSpan, setAmbient } from '@broject/providers';
+import { docUsageLines, reservedWords, runDocVerb } from './docs.ts';
+import { GROUP_META, loadExternalPlugins, pluginGroups, PLUGINS } from './plugins.ts';
+import { VERSION } from './version.ts';
 
+if (
+  process.env.BRO_LOG_TIMESTAMP === '1' &&
+  !process.argv.some(
+    a => a === '--json' || a === '--jsonl' || a === '-j' || a.startsWith('--json=')
+  ) &&
+  !process.env.BRO_JSON &&
+  !process.env.BRO_MACHINE_OUTPUT &&
+  process.stdout.isTTY === true
+) {
+  const origLog = console.log;
+  const origErr = console.error;
+  const origWarn = console.warn;
+  const origInfo = console.info;
+  const ts = () => new Date().toISOString();
+  console.log = (...args: any[]) => origLog(`[${ts()}]`, ...args);
+  console.error = (...args: any[]) => origErr(`[${ts()}]`, ...args);
+  console.warn = (...args: any[]) => origWarn(`[${ts()}]`, ...args);
+  console.info = (...args: any[]) => origInfo(`[${ts()}]`, ...args);
+}
 
 function memberList(members: BroPlugin[]): string {
   return members
-    .filter((p) => !p.hidden)
-    .map((p) => (p.aliasOf ? `${p.name}→${p.aliasOf}` : p.name))
-    .join(' ')
+    .filter(p => !p.hidden)
+    .map(p => (p.aliasOf ? `${p.name}→${p.aliasOf}` : p.name))
+    .join(' ');
 }
 
 function memberLabel(p: BroPlugin): string {
-  return p.aliasOf ? `→ ${p.aliasOf}` : p.summary
+  return p.aliasOf ? `→ ${p.aliasOf}` : p.summary;
 }
 
 /** `bro <group>` with no/unknown member — the member table plus the
  *  flat-spelling reminder. */
 function groupTable(cmd: string, group: BroPlugin[]): string {
-  const blurb = GROUP_META.find(([g]) => g === cmd)?.[1] ?? ''
+  const blurb = GROUP_META.find(([g]) => g === cmd)?.[1] ?? '';
   const rows = group
-    .filter((p) => !p.hidden)
-    .map((p) => `  ${p.name.padEnd(12)} ${memberLabel(p)}`)
-    .join('\n')
+    .filter(p => !p.hidden)
+    .map(p => `  ${p.name.padEnd(12)} ${memberLabel(p)}`)
+    .join('\n');
   return (
     `bro ${cmd} — ${blurb}\n\n` +
     `Members:\n${rows}\n\n` +
     `Usage: bro ${cmd} <member> [args…]   (flat spellings stay valid: bro <member> …)`
-  )
+  );
 }
 
 /** Runs a group member reached via `bro <group> <member>` — the same
  *  plugin object the flat spelling hits. */
-async function runMember(
-  via: string,
-  member: BroPlugin,
-  args: string[]
-): Promise<void> {
+async function runMember(via: string, member: BroPlugin, args: string[]): Promise<void> {
   if (member.deprecated) {
-    warnDeprecated(`'bro ${via} ${member.name}'`, member.deprecated)
+    warnDeprecated(`'bro ${via} ${member.name}'`, member.deprecated);
   }
-  await member.run([...(member.argvPrefix ?? []), ...args])
+  await member.run([...(member.argvPrefix ?? []), ...args]);
 }
 
 /** Flat spelling or group host — `bro act …`, `bro mesh peers`. When
@@ -59,18 +74,18 @@ async function runMember(
  *  wins (`bro plan run` reaches `run`); every other argv shape falls
  *  to the plugin exactly as before (`bro plan`, `bro spec check`). */
 async function dispatchPlugin(cmd: string, rest: string[]): Promise<boolean> {
-  const plugin = PLUGINS.find((p) => p.name === cmd)
+  const plugin = PLUGINS.find(p => p.name === cmd);
   if (!plugin) {
-    return false
+    return false;
   }
   if (plugin.deprecated !== undefined) {
-    warnDeprecated(`'bro ${plugin.name}'`, plugin.deprecated)
+    warnDeprecated(`'bro ${plugin.name}'`, plugin.deprecated);
   }
   const member = pluginGroups()
     .get(cmd)
-    ?.find((p) => p.name === rest[0] && p.name !== cmd)
+    ?.find(p => p.name === rest[0] && p.name !== cmd);
   if (member) {
-    await runMember(cmd, member, rest.slice(1))
+    await runMember(cmd, member, rest.slice(1));
   } else {
     // flat-spelling retirement (specs/cli phase 4): only a truly flat
     // invocation warns — `bro <host> <member>` resolves the member
@@ -85,41 +100,45 @@ async function dispatchPlugin(cmd: string, rest: string[]): Promise<boolean> {
       warnDeprecated(
         `'bro ${plugin.name}'`,
         `${plugin.flatDeprecated} — prefer 'bro ${plugin.group} ${plugin.name}'`
-      )
+      );
     }
-    await plugin.run([...(plugin.argvPrefix ?? []), ...rest])
+    await plugin.run([...(plugin.argvPrefix ?? []), ...rest]);
   }
-  return true
+  return true;
 }
 
 /** Group dispatch — `bro review act status`. A group with no host
  *  plugin shows its member table instead of 'unknown command'. */
 async function dispatchGroup(cmd: string, rest: string[]): Promise<boolean> {
-  const group = pluginGroups().get(cmd)
+  const group = pluginGroups().get(cmd);
   if (!group) {
-    return false
+    return false;
   }
-  const member = group.find((p) => p.name === rest[0])
+  const member = group.find(p => p.name === rest[0]);
   if (member) {
-    await runMember(cmd, member, rest.slice(1))
-    return true
+    await runMember(cmd, member, rest.slice(1));
+    return true;
   }
   // bare `bro <group>` and `--help` ask for the member table (stdout,
   // 0); anything else is an unknown member — the canonical usage error
-  return printUsage(groupTable(cmd, group), rest.length === 0 || rest[0] === '-h' || rest[0] === '--help' ? EXIT.ok : EXIT.usage)
+  return printUsage(
+    groupTable(cmd, group),
+    rest.length === 0 || rest[0] === '-h' || rest[0] === '--help' ? EXIT.ok : EXIT.usage
+  );
 }
 
 function usage(exitCode: ExitCode = 1): never {
-  const groups = pluginGroups()
-  const groupRows = GROUP_META.filter(([g]) =>
-    groups.get(g)?.some((p) => !p.hidden)
-  )
-    .map(([g, blurb]) => `  ${g.padEnd(8)} ${blurb}\n             ${memberList(groups.get(g) ?? [])}`)
-    .join('\n')
-  const commands = PLUGINS.filter((p) => !p.hidden && !p.group && !p.aliasOf)
-    .map((p) => `  ${p.name.padEnd(12)} ${p.summary}`)
-    .join('\n')
-  printUsage(`bro — agent's sidekick CLI
+  const groups = pluginGroups();
+  const groupRows = GROUP_META.filter(([g]) => groups.get(g)?.some(p => !p.hidden))
+    .map(
+      ([g, blurb]) => `  ${g.padEnd(8)} ${blurb}\n             ${memberList(groups.get(g) ?? [])}`
+    )
+    .join('\n');
+  const commands = PLUGINS.filter(p => !p.hidden && !p.group && !p.aliasOf)
+    .map(p => `  ${p.name.padEnd(12)} ${p.summary}`)
+    .join('\n');
+  printUsage(
+    `bro — agent's sidekick CLI
 
 Usage: bro <command> [args…]
        bro <group> <member> [args…]
@@ -141,49 +160,51 @@ Examples:
   bro review debt sync                # project the ledger into beads
   bro review act status --json        # exit gate for the current PR
   bro plugins                         # the registry — subcommand+skill+config
-  bro setup`, exitCode)
+  bro setup`,
+    exitCode
+  );
 }
 
 async function main(): Promise<void> {
   // `bro help` is `bro --help`; `bro help <cmd>…` is `bro <cmd>… --help` —
   // one spelling for explicit help whichever side of the command it sits on
-  let argv = process.argv.slice(2)
+  let argv = process.argv.slice(2);
   if (argv[0] === 'help') {
-    const tail = argv.slice(1)
-    const sep = tail.indexOf('--')
-    const head = sep === -1 ? tail : tail.slice(0, sep)
-    argv = head.length === 0 ? ['--help'] : [...head, '--help']
+    const tail = argv.slice(1);
+    const sep = tail.indexOf('--');
+    const head = sep === -1 ? tail : tail.slice(0, sep);
+    argv = head.length === 0 ? ['--help'] : [...head, '--help'];
   }
-  const [cmd, ...rest] = argv
+  const [cmd, ...rest] = argv;
 
   // sink delivery policies — the plugin layer owns each type's wire
   // shape; core dispatches to whoever registered (bro-mq1t2)
-  registerTelegramSink()
+  registerTelegramSink();
 
   // command telemetry: plugins end via process.exit() — the exit event
   // is the only site that sees every path and its code. Meta commands
   // and BRO_TELEMETRY=0 skip; see journalCommand for the cheap contract
-  const t0 = Date.now()
-  const META_CMDS = new Set([undefined, '--version', '-v', '--help', '-h'])
+  const t0 = Date.now();
+  const META_CMDS = new Set([undefined, '--version', '-v', '--help', '-h']);
   if (!META_CMDS.has(cmd)) {
     // bro.cmd span: ambient parent for everything the command opens
     // (hook probes, acp turns, spawned workers); endDetached on exit —
     // plugins terminate via process.exit() where in-flight fetch dies,
     // so the completed span rides out on a detached node child.
-    const cmdSpan = otelSpan(`bro.cmd ${cmd}`, { cmd: cmd as string }, { startMs: t0 })
-    setAmbient(cmdSpan.ctx)
-    process.on('exit', (code) => {
-      journalCommand(cmd as string, Date.now() - t0, code ?? 0)
+    const cmdSpan = otelSpan(`bro.cmd ${cmd}`, { cmd: cmd as string }, { startMs: t0 });
+    setAmbient(cmdSpan.ctx);
+    process.on('exit', code => {
+      journalCommand(cmd as string, Date.now() - t0, code ?? 0);
       cmdSpan.endDetached(
         { 'cmd.exit_code': code ?? 0, 'cmd.duration_ms': Date.now() - t0 },
         (code ?? 0) === 0 ? 'ok' : 'error'
-      )
-    })
+      );
+    });
   }
 
   if (cmd === '--version' || cmd === '-v') {
-    console.log(VERSION)
-    return
+    console.log(VERSION);
+    return;
   }
   // config `plugins` join the registry before help/dispatch — a listed
   // external command must be dispatchable, and it should show in --help.
@@ -193,30 +214,30 @@ async function main(): Promise<void> {
     undefined,
     undefined,
     new Set([...reservedWords(), ...pluginGroups().keys()])
-  )
+  );
 
   if (cmd === '--help' || cmd === '-h') {
-    usage(0)
+    usage(0);
   }
   if (!cmd) {
-    usage()
+    usage();
   }
 
   if (await dispatchPlugin(cmd, rest)) {
-    return
+    return;
   }
   if (await dispatchGroup(cmd, rest)) {
-    return
+    return;
   }
   // verb-first doc dispatch — `bro list`, `bro show <id>`, …
   if (await runDocVerb(cmd, rest)) {
-    return
+    return;
   }
-  console.error(`unknown command: ${cmd}`)
-  usage(EXIT.usage)
+  console.error(`unknown command: ${cmd}`);
+  usage(EXIT.usage);
 }
 
 main().catch((err: unknown) => {
-  console.error(err instanceof Error ? err.message : err)
-  process.exit(1)
-})
+  console.error(err instanceof Error ? err.message : err);
+  process.exit(1);
+});
