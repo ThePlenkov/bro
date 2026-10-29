@@ -237,12 +237,14 @@ describe('lifecycle → bus mirror', () => {
     const dir = mkdtempSync(join(tmpdir(), 'bro-lifecycle-nobus-'));
     gitTry(['-C', dir, 'init']);
     try {
-      emitLifecycle(dir, {
-        kind: 'spawn',
-        to: 'spawned',
-        detail: { agent: 'a1', worktree: '/w' },
+      assert.doesNotThrow(() => {
+        emitLifecycle(dir, {
+          kind: 'spawn',
+          to: 'spawned',
+          detail: { agent: 'a1', worktree: '/w' },
+        });
+        emitWorkerSilent(dir, { bead: 'b1', silentMin: 1 });
       });
-      emitWorkerSilent(dir, { bead: 'b1', silentMin: 1 });
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
