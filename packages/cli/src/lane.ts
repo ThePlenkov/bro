@@ -47,9 +47,10 @@ import {
   type SpawnSpec,
 } from '@broject/core';
 
+import { groupMemberAlive, providerWallsFor, type AgentConnectorEnv } from './agent-connectors.ts';
+
 // charge and its refund share the take — re-exported for the spawn path
 export { laneGateTake };
-import { groupMemberAlive, providerWallsFor, type AgentConnectorEnv } from './agent-connectors.ts';
 
 // --- the rate gate ------------------------------------------------------
 

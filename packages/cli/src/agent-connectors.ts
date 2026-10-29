@@ -123,7 +123,6 @@ import {
   type LaneAdmission,
   laneGateAdmission,
   laneGateTake,
-  laneGateRefusal,
   reconcileLanePauseForRegistry,
 } from './lane.ts';
 import { VERSION } from './version.ts';
