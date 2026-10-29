@@ -86,6 +86,7 @@ import { runGuards, type GuardConfig, type GuardJudgeInput, type GuardRun } from
 import { GUARD_PROBES } from '../guard-probes.ts';
 import { appendRow, judgeConfig, judgeFacade } from '@broject/judge';
 import { otelSpan } from '@broject/providers';
+import { emitHook } from '@broject/otel';
 import {
   hooksDir,
   previousTraceFile,
@@ -273,7 +274,7 @@ export type GateAspect = 'act' | 'drill' | 'work' | 'task';
 /** `bro` at a command position — the installed bin (`bro …`) or npx
  *  against the package (`npx [--flags] [@broject/]bro[@ver] …`). The
  *  negative lookahead keeps `npx bro-fu`/`npx brother` out. */
-const BRO_CMD = String.raw`(?:bro|npx(?:\s+--?[\w-]+(?:=\S+)?)*\s+(?:@broject\/)?bro(?:@[\w.:-]+)?(?![\w./-]))`;
+const BRO_CMD = String.raw`(?:bro|npx\s+(?:--?\w[\w-]*(?:=\S+)?\s+)*(?:@broject\/)?bro(?:@[\w.:-]+)?(?![\w./-]))`;
 
 export function classifyArmCommand(cmd: string): GateAspect | null {
   const c = unquoted(cmd);
@@ -421,6 +422,12 @@ export function classifySkillMutation(cmd: string): { plugin: string; skill: str
   return null;
 }
 
+/** Self-tool heads — `bd` plus BRO_CMD's alternation, spelled out as a
+ *  literal: a computed RegExp trips the non-literal-constructor SAST
+ *  rule. Keep the npx arm in sync with BRO_CMD. */
+const SELF_TOOL_HEAD_RE =
+  /^\s*(?:bd|bro|npx\s+(?:--?\w[\w-]*(?:=\S+)?\s+)*(?:@broject\/)?bro(?:@[\w.:-]+)?(?![\w./-]))(?:\s|$)/;
+
 /** bro/bd are the plugin's own tools — permission hooks approve them
  * outright. Chained, piped, or redirected commands are NOT self-tool calls:
  * the second stage could be anything, so it falls through to a prompt. */
@@ -428,7 +435,7 @@ export function isSelfToolCommand(cmd: string): boolean {
   if (/[;&|`$()<>\n\\]/.test(cmd)) {
     return false;
   }
-  return /^\s*(bro|bd)(\s|$)/.test(cmd) || new RegExp(`^\\s*${BRO_CMD}(\\s|$)`).test(cmd);
+  return SELF_TOOL_HEAD_RE.test(cmd);
 }
 
 // --- session arming -----------------------------------------------------------
@@ -1784,6 +1791,7 @@ function runPrepareCommitMsg(argv: string[]): void {
   } catch {
     // fail-open — provenance must never block a commit
   }
+  emitHook('prepare-commit-msg', {}, { dir: process.cwd() });
 }
 
 /** The ref guard reads its update list from stdin — but only when a
@@ -1796,6 +1804,7 @@ function runRefGuard(argv: string[]): void {
   } catch {
     // fail-open — the guard must never wedge git
   }
+  emitHook('reference-transaction', {}, { dir: process.cwd() });
 }
 
 /** bd/gh probes inherit cwd — run them in the project the hook fired for. */
@@ -1984,21 +1993,27 @@ function runPerf(argv: string[]): void {
 /** post-merge and its detached worker are git-hook events — same
  *  pre-gate, no-stdin placement as the shim events: the dispatcher only
  *  schedules the refresh, the worker does it; both fail open and never
- *  block a merge (the catch covers a throw before the worker's own). */
-const POST_MERGE_EVENTS: Record<string, (cwd: string) => void> = {
-  'post-merge': emitPostMerge,
-  'post-merge-run': runPostMergeRefresh,
-};
-
+ *  block a merge (the catch covers a throw before the worker's own). The
+ *  dispatch stays a static if-chain — a computed function-table lookup
+ *  trips the non-static-access SAST rule. */
 function runPostMergeEvent(event: string | undefined): boolean {
-  const run = POST_MERGE_EVENTS[event ?? ''];
-  if (run === undefined) {
+  if (event !== 'post-merge' && event !== 'post-merge-run') {
     return false;
   }
   try {
-    run(process.cwd());
+    if (event === 'post-merge') {
+      emitPostMerge(process.cwd());
+    } else {
+      runPostMergeRefresh(process.cwd());
+    }
   } catch {
     // fail-open
+  }
+  // telemetry on the dispatch, not the worker — `post-merge-run` is an
+  // internal spawn, not a hook event: its row would duplicate the
+  // `hook.post-merge` one and dodge the `post-merge` policy name.
+  if (event === 'post-merge') {
+    emitHook(event, {}, { dir: process.cwd() });
   }
   return true;
 }
@@ -2021,18 +2036,19 @@ function normalizeToolOutcome(event: string, input: HookInput, raw: unknown): Ho
   return { ...input, tool_response: { ...response, success } };
 }
 
-export async function runHooksCommand(argv: string[]): Promise<void> {
-  cursorClient = false;
-  codexClient = false;
-  permissionAnswerEmitted = false;
+/** Events that settle on argv alone — operator commands and git-hook
+ *  events never read stdin (a git hook's stdin can be a terminal, and
+ *  reading stdin would block on it forever) and run before the
+ *  broEnabled gate: wiring/shimming a repo is how it opts in. Returns
+ *  true when the argv named one of them. */
+function runArgvEvent(argv: string[]): boolean {
   const event = argv[0];
   // install/uninstall are operator commands, not hook events — they
-  // report a verdict on stderr and never read stdin (a git hook's stdin
-  // can be a terminal, and reading stdin would block on it forever). They
-  // also run before the broEnabled gate: wiring a repo is how it opts in.
+  // report a verdict on stderr. They also run before the broEnabled
+  // gate: wiring a repo is how it opts in.
   if (event === 'install' || event === 'uninstall') {
     runCommitHookCommand(event);
-    return;
+    return true;
   }
   // prepare-commit-msg is a git-hook event (argv, not a JSON payload) —
   // same no-stdin rule as the operator commands, and same pre-gate
@@ -2040,32 +2056,40 @@ export async function runHooksCommand(argv: string[]): Promise<void> {
   // .beads/bro.config would silently deaden a hook the repo installed
   if (event === 'prepare-commit-msg') {
     runPrepareCommitMsg(argv);
-    return;
+    return true;
   }
   // reference-transaction is a git-hook event too — argv for the phase
   // and ppid, stdin for the update list; same pre-gate placement (the
   // installed shim is the opt-in)
   if (event === 'reference-transaction') {
     runRefGuard(argv);
-    return;
+    return true;
   }
   if (runPostMergeEvent(event)) {
-    return;
+    return true;
   }
   // `bro hooks perf` is a report over the perf journal — same no-stdin
   // operator placement as install/uninstall: it must not block reading
   // a payload that was never sent.
   if (event === 'perf') {
     runPerf(argv);
-    return;
+    return true;
   }
   // a bare `bro hooks` is a capability probe — launchers test the
   // subcommand exists before calling it with the real event. Return
   // before readRaw: the probe must not consume a payload still waiting
   // on the caller's stdin for that next invocation.
-  if (!event) {
+  return !event;
+}
+
+export async function runHooksCommand(argv: string[]): Promise<void> {
+  cursorClient = false;
+  codexClient = false;
+  permissionAnswerEmitted = false;
+  if (runArgvEvent(argv)) {
     return;
   }
+  const event = argv[0];
   // stdin before the opt-in check: Cursor's project dir is on the
   // payload / CURSOR_PROJECT_DIR, and cwd may be outside the repo.
   const raw = readRaw();
@@ -2116,11 +2140,13 @@ export async function runHooksCommand(argv: string[]): Promise<void> {
     'hook.event': event,
     'hook.session': typeof input.session_id === 'string' ? input.session_id : '',
   });
+  let hookErr = false;
   try {
     await dispatchHook(event, raw, input);
     evSpan.end();
   } catch {
     evSpan.end({}, 'error');
+    hookErr = true;
     // hooks fail open — a bro bug must never break the session.
     // A permission hook that already answered returned above; this
     // covers a throw before that answer.
@@ -2129,6 +2155,17 @@ export async function runHooksCommand(argv: string[]): Promise<void> {
     clearTimeout(deadlineTimer);
     const sessionId = typeof input.session_id === 'string' ? input.session_id : '';
     flushPerf(sessionId, event, t0);
+    // hook-first telemetry (spec bro-xgejl) — every dispatched event
+    // emits one facade record; enabled=false in config means this is a
+    // memoized config read and a boolean, nothing more.
+    emitHook(event, input, {
+      sessionId,
+      client: cursorClient ? 'cursor' : codexClient ? 'codex' : 'default',
+      durationMs: Date.now() - t0,
+      ok: !hookErr,
+      error: hookErr ? 'dispatch threw' : undefined,
+      dir: root,
+    });
     // A probe that raced past its budget leaves its bd/gh child running —
     // unref the stragglers so the hook exits with the answer it sent,
     // not when the last subprocess closes.

@@ -119,6 +119,12 @@ import './session-planes/copilot.ts';
 import { writeCopilotCount } from './session-planes/copilot.ts';
 import { enterWorktree } from './commands/work.ts';
 import { assertMutableConfig } from './config-policy.ts';
+import {
+  type LaneAdmission,
+  laneGateAdmission,
+  laneGateTake,
+  reconcileLanePauseForRegistry,
+} from './lane.ts';
 import { VERSION } from './version.ts';
 
 /** Everything a factory needs: the repo ctx + the resolved config
@@ -1469,6 +1475,10 @@ function prepareSpawn(
      *  the cap refuses while OTHER live entries fill it (a respawn's
      *  own dead entry holds no slot). */
     cap?: { max: number; env: AgentConnectorEnv };
+    /** The resolved agent env — provider entries carry the lane's
+     *  pacing config (`rateGate`/`wallPause`, spec bro-y3jvd); without
+     *  it the gate and the wall pause can't see their config. */
+    env?: AgentConnectorEnv;
     /** Session-kind admission — the spawn consumes one of the lane
      *  plane's sessions and refuses when live ones already hit
      *  `agents.<kind>.maxSessions`. The count+claim runs under ONE
@@ -1515,6 +1525,17 @@ function prepareSpawn(
   const { claimed, actor, phantom } = guardClaim(spec, existing !== undefined, opts.claimAs);
   const wallRefusal = batchWallRefusal(registry, spec);
   if (wallRefusal !== undefined) {
+    // The wall stops the whole lane, not just this admission (spec
+    // bro-y3jvd): while a provider wall holds, the live workers that
+    // keep feeding it freeze — every rejected attempt pushes the
+    // account's reset further out.
+    if (opts.env !== undefined) {
+      try {
+        reconcileLanePauseForRegistry(dir, opts.env, registry);
+      } catch {
+        // the pause is advisory — the wall refusal below is the verdict
+      }
+    }
     throw wallRefusal;
   }
   // fleet admission — before the registry write + claim land, so a
@@ -1538,7 +1559,24 @@ function prepareSpawn(
           molStep: spec.molStep,
           workerEnv: spec.env,
         });
+  let charged: LaneAdmission['admitted'];
   try {
+    // the rate gate charges LAST — after every admission that can
+    // still refuse (spec bro-y3jvd): a batch spawn pays its request
+    // budget up front so the lane paces to the account's ceiling
+    // instead of discovering it by dying. Inside the try so a gate
+    // refusal hands the session reservation back like any spawn
+    // failure; a throw still inside this try (enter/commit — both run
+    // BEFORE launch) refunds the charge, so budget is never spent on
+    // a spawn that didn't run. Failures after `prepareSpawn` returns
+    // keep the charge — launch may already have started work.
+    if (opts.env !== undefined) {
+      const admission = laneGateAdmission(opts.env, spec);
+      if (admission.refusal !== undefined) {
+        throw admission.refusal;
+      }
+      charged = admission.admitted;
+    }
     // enter half of the rig transition — inside the try so an enter
     // failure also hands the session-quota reservation back via the
     // catch below
@@ -1557,6 +1595,11 @@ function prepareSpawn(
     // the key, so this is the only place that can hand the slot back
     if (reservation !== undefined) {
       releaseSessionSlot(reservation);
+    }
+    // the same door for the charge: everything still inside this try
+    // precedes launch, so a spawn that never ran gives its tokens back
+    if (charged !== undefined) {
+      laneGateTake(charged.lane, charged.model, charged.gate, { refund: true });
     }
     throw err;
   }
@@ -1660,7 +1703,7 @@ function commitSpawn(
     runId,
     ...opts.entry?.(agentId),
   });
-  recordSpawnClaim(dir, spec, agentId, backend, guard, opts.claimAs);
+  recordSpawnClaim(dir, spec, agentId, backend, guard, opts.claimAs, { runId, log });
   return { promptFile, log, stderrLog, exitFile, runId };
 }
 
@@ -1687,7 +1730,8 @@ function recordSpawnClaim(
   agentId: string,
   backend: string,
   guard: { claimed: boolean; actor: string | undefined; phantom: boolean },
-  claimAs: string | undefined
+  claimAs: string | undefined,
+  attempt: { runId: string; log: string }
 ): void {
   if (guard.claimed) {
     rebindStep(spec.beadsDir, spec.molStep, guard.actor!);
@@ -1715,6 +1759,8 @@ function recordSpawnClaim(
       agent: agentId,
       backend,
       worktree: resolve(spec.repoRoot),
+      log: attempt.log,
+      runId: attempt.runId,
       ...(spec.provider !== undefined ? { provider: spec.provider } : {}),
       ...(spec.model !== undefined ? { model: spec.model } : {}),
       ...(spec.class !== undefined ? { class: spec.class } : {}),
@@ -1910,6 +1956,10 @@ function ensureExitCause(
       backend: entry.backend,
       code: entry.exitStatus,
       cause: c.cause,
+      // the attempt token + streams the classification read — the bus
+      // mirror lifts them into worker.exited's payload (bro-294hf)
+      ...(entryRunId(entry) !== undefined ? { runId: entryRunId(entry) } : {}),
+      ...(typeof entry.log === 'string' && entry.log !== '' ? { log: entry.log } : {}),
     },
   });
   try {
@@ -2083,7 +2133,7 @@ function scanProc(): { entries: ProcEntry[]; unverified: boolean } | null {
   return { entries, unverified };
 }
 
-function groupMemberAlive(pgid: number, minStart?: string): boolean {
+export function groupMemberAlive(pgid: number, minStart?: string): boolean {
   if (!Number.isInteger(pgid) || pgid <= 0) {
     return false;
   }
@@ -2612,6 +2662,7 @@ export function makeNativeConnector(ctx: ConnectorCtx, env: AgentConnectorEnv): 
             liveDetail: e =>
               typeof e.pid === 'number' ? `pid ${e.pid}` : 'spawn handoff in flight',
             cap: { max: fleetCapOf(env), env },
+            env,
             sessionQuota: sessionQuotaOf(env, 'native', spec, command),
           }
         );
@@ -2888,6 +2939,13 @@ export function makeNativeConnector(ctx: ConnectorCtx, env: AgentConnectorEnv): 
         const groups = new Set<number>([pid, ...snap.groups]);
         for (const g of groups) {
           try {
+            // a lane-paused group (spec bro-y3jvd) pends every signal —
+            // SIGCONT first or the TERM below waits on a stopped process
+            process.kill(-g, 'SIGCONT');
+          } catch {
+            // not stopped, or already gone — the TERM below decides
+          }
+          try {
             process.kill(-g, 'SIGTERM'); // detached → own process group
           } catch {
             // No fallback to kill(pid): a native child is always its own
@@ -3152,6 +3210,7 @@ export function makeTmuxConnector(ctx: ConnectorCtx, env: AgentConnectorEnv): Ag
             liveDetail: e => `session ${tmuxSessionName(e) ?? '?'}`,
             entry: id => ({ session: `bro-${id}` }),
             cap: { max: fleetCapOf(env), env },
+            env,
             sessionQuota: sessionQuotaOf(env, 'tmux', spec, command),
           }
         );
@@ -3900,6 +3959,7 @@ export function makeGascityConnector(ctx: ConnectorCtx, env: AgentConnectorEnv):
           entry: () => ({ sessionId: undefined }),
           claimAs: spec.molStep,
           cap: { max: fleetCapOf(env), env },
+          env,
           // the quota admits against what gc will actually RUN — the
           // command pinned in city.toml at init, not today's config
           sessionQuota: sessionQuotaOf(env, 'gascity', spec, gcEffectiveCommand(city, command)),
@@ -4637,6 +4697,7 @@ export function makeDockerConnector(ctx: ConnectorCtx, env: AgentConnectorEnv): 
             liveDetail: e => `container ${dockerContainerName(e) ?? '?'}`,
             entry: id => ({ container: `bro-${id}`, containerId: undefined }),
             cap: { max: fleetCapOf(env), env },
+            env,
             sessionQuota: sessionQuotaOf(env, 'docker', spec, command),
           }
         );
@@ -5576,6 +5637,7 @@ export function makeCopilotConnector(ctx: ConnectorCtx, env: AgentConnectorEnv):
             stderrFrom: undefined,
           }),
           cap: { max: fleetCapOf(env), env },
+          env,
           sessionQuota: copilotSessionQuota(env),
         });
         try {

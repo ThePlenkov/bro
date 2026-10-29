@@ -24,6 +24,7 @@ import {
   agentEntryBlocked,
   agentRegistryPath,
   AgentNotFound,
+  BATCH_MARKER_ENV,
   facade,
   loadConfig,
   readAgentRegistry,
@@ -32,7 +33,7 @@ import {
   type AgentInfo,
   type AgentRegistryEntry,
   type AgentState,
-} from '@broject/core'
+} from '@broject/core';
 import {
   beadsDir,
   listMolecules,
@@ -40,49 +41,45 @@ import {
   nextStep,
   type ConvoyNext,
   type Molecule,
-} from '@broject/convoy'
+} from '@broject/convoy';
 import {
   fleetCapOf,
   fleetOccupancyFor,
   loadAgentEnv,
   resolveAgentConnector,
   type AgentConnectorEnv,
-} from '../agent-connectors.ts'
-import { flag, positionals } from './args.ts'
-import { spawnStepAgent } from './agents.ts'
-import { registryEntryState } from './drive.ts'
-import { mainWorktree } from './work.ts'
-import { dirname, join } from 'node:path'
+} from '../agent-connectors.ts';
+import { flag, positionals } from './args.ts';
+import { spawnStepAgent, type StepSpawnRequest } from './agents.ts';
+import { registryEntryState } from './drive.ts';
+import { mainWorktree } from './work.ts';
+import { dirname, join } from 'node:path';
 
 // --- args ------------------------------------------------------------------------
 
 export interface RunArgs {
-  mols: string[]
-  open: boolean
-  attempts: number
-  pollSec: number
-  retryDelaySec: number
-  json: boolean
+  mols: string[];
+  open: boolean;
+  attempts: number;
+  pollSec: number;
+  retryDelaySec: number;
+  json: boolean;
 }
 
-const RUN_VALUE_FLAGS: ReadonlySet<string> = new Set([
-  '--attempts',
-  '--poll',
-  '--retry-delay',
-])
+const RUN_VALUE_FLAGS: ReadonlySet<string> = new Set(['--attempts', '--poll', '--retry-delay']);
 
 const numFlag = (argv: string[], name: string, dflt: number): number => {
-  const raw = flag(argv, name)
+  const raw = flag(argv, name);
   if (raw === undefined) {
-    return dflt
+    return dflt;
   }
-  const n = Number(raw)
+  const n = Number(raw);
   if (!Number.isFinite(n) || n < 1) {
-    console.error(`error: ${name} needs a value >= 1, got "${raw}"`)
-    process.exit(2)
+    console.error(`error: ${name} needs a value >= 1, got "${raw}"`);
+    process.exit(2);
   }
-  return n
-}
+  return n;
+};
 
 export function runArgs(argv: string[]): RunArgs {
   return {
@@ -92,7 +89,7 @@ export function runArgs(argv: string[]): RunArgs {
     pollSec: numFlag(argv, '--poll', 15),
     retryDelaySec: numFlag(argv, '--retry-delay', 60),
     json: argv.includes('--json'),
-  }
+  };
 }
 
 /** The flags `run` understands — the dispatcher's unknown-option check
@@ -101,7 +98,7 @@ export const RUN_KNOWN_FLAGS: ReadonlySet<string> = new Set([
   ...RUN_VALUE_FLAGS,
   '--open',
   '--json',
-])
+]);
 
 // --- prompt ------------------------------------------------------------------------
 
@@ -119,7 +116,23 @@ export function runnerPrompt(molId: string, repo: string): string {
     "a spec, read it from specs/ first. Run the molecule to 'state: complete' — do NOT",
     'stop at gates you can settle yourself; a real human gate means exit cleanly and',
     'let the runner report the mol gated.',
-  ].join('\n')
+  ].join('\n');
+}
+
+/** The runner's spawn request — mol-queue work is fleet-owned, so the
+ *  worker rides the batch lane: BRO_BATCH marks it for the provider
+ *  wall (spec bro-1x7p) and the fleet's own caps; an unmarked runner
+ *  would spawn into a rate_limited wall and burn a doomed session
+ *  (drill bro-gblja). Identity pins still win over this env — the
+ *  marker is the only thing a caller owns here. */
+export function runnerSpawnReq(molId: string, dir: string, beads: string): StepSpawnRequest {
+  return {
+    molStep: molId,
+    worktree: dir,
+    prompt: runnerPrompt(molId, dir),
+    beadsDir: beads,
+    env: { [BATCH_MARKER_ENV]: '1' },
+  };
 }
 
 // --- the runner ------------------------------------------------------------------------
@@ -132,57 +145,56 @@ export type MolVerdict =
   | 'parked' // a budget wall with no advertised end (quota / no-reset rate limit)
   | 'blocked' // a closed dependency loop — 'complete' is unreachable, a worker can't fix it
   | 'failed' // attempts exhausted
-  | 'error' // the mol or its probes could not be read
+  | 'error'; // the mol or its probes could not be read
 
 export interface MolResult {
-  mol: string
-  verdict: MolVerdict
-  attempts: number
-  detail?: string
+  mol: string;
+  verdict: MolVerdict;
+  attempts: number;
+  detail?: string;
 }
 
 /** Everything the loop needs, injectable — tests drive the whole
  *  classification matrix without a repo, a backend, or real sleeps. */
 export interface RunDeps {
-  loadMol: (id: string) => Molecule
-  next: (mol: Molecule) => ConvoyNext
-  listOpen: () => { id: string }[]
-  spawn: (molId: string) => Promise<AgentInfo>
-  status: (agentId: string) => Promise<AgentInfo>
+  loadMol: (id: string) => Molecule;
+  next: (mol: Molecule) => ConvoyNext;
+  listOpen: () => { id: string }[];
+  spawn: (molId: string) => Promise<AgentInfo>;
+  status: (agentId: string) => Promise<AgentInfo>;
   /** The molStep's registry entry — the refusal classifier reads it. */
-  entry: (molId: string) => AgentRegistryEntry | undefined
+  entry: (molId: string) => AgentRegistryEntry | undefined;
   /** Registry-only liveness for a refusal-time entry (cheap, no probes). */
-  entryState: (entry: AgentRegistryEntry) => AgentState
+  entryState: (entry: AgentRegistryEntry) => AgentState;
   /** Fleet occupancy at refusal time — a full cap is a wait, not a fail. */
-  fleetFull: () => boolean
-  sleepSec: (sec: number) => Promise<void>
-  now: () => number
-  say: (msg: string) => void
+  fleetFull: () => boolean;
+  sleepSec: (sec: number) => Promise<void>;
+  now: () => number;
+  say: (msg: string) => void;
   /** Fires the moment a mol settles 'gated' — the human alert is the
    *  gate's whole point; it cannot wait for the rest of the sequential
    *  queue to drain. */
-  onGated?: (r: MolResult) => Promise<void>
+  onGated?: (r: MolResult) => Promise<void>;
 }
 
-const TERMINAL: ReadonlySet<AgentState> = new Set(['exited', 'lost', 'stopped', 'blocked'])
+const TERMINAL: ReadonlySet<AgentState> = new Set(['exited', 'lost', 'stopped', 'blocked']);
 /** Status probes failing in a row before the worker is treated as
  *  gone — a flaky backend must not wedge the queue forever. */
-const STATUS_FAIL_LIMIT = 10
+const STATUS_FAIL_LIMIT = 10;
 
-const sleepWall = (sec: number): Promise<void> =>
-  new Promise((r) => setTimeout(r, sec * 1000))
+const sleepWall = (sec: number): Promise<void> => new Promise(r => setTimeout(r, sec * 1000));
 
 const isoEta = (ms: number): string => {
   if (ms >= 3_600_000) {
-    return `${Math.round(ms / 360_000) / 10}h`
+    return `${Math.round(ms / 360_000) / 10}h`;
   }
   if (ms >= 60_000) {
-    return `${Math.ceil(ms / 60_000)}m`
+    return `${Math.ceil(ms / 60_000)}m`;
   }
-  return `${Math.ceil(ms / 1000)}s`
-}
+  return `${Math.ceil(ms / 1000)}s`;
+};
 
-const errText = (err: unknown): string => (err instanceof Error ? err.message : String(err))
+const errText = (err: unknown): string => (err instanceof Error ? err.message : String(err));
 
 /** The blocked-entry decision: a rate limit with a provider reset is a
  *  wait (sleep until it, respawn, no attempt burned); every other block
@@ -196,58 +208,54 @@ function blockedDecision(
   infoResetAt: string | undefined,
   deps: RunDeps
 ): { waitSec: number } | { parked: string } {
-  const cause = infoCause ?? (entry?.cause as string | undefined)
-  const resetAt = infoResetAt ?? (entry?.resetAt as string | undefined)
-  const reset = typeof resetAt === 'string' ? Date.parse(resetAt) : Number.NaN
+  const cause = infoCause ?? (entry?.cause as string | undefined);
+  const resetAt = infoResetAt ?? (entry?.resetAt as string | undefined);
+  const reset = typeof resetAt === 'string' ? Date.parse(resetAt) : Number.NaN;
   if (cause === 'rate_limited' && !Number.isNaN(reset)) {
-    return { waitSec: Math.max(1, Math.ceil((reset - deps.now()) / 1000)) }
+    return { waitSec: Math.max(1, Math.ceil((reset - deps.now()) / 1000)) };
   }
-  let why = cause ?? 'blocked'
+  let why = cause ?? 'blocked';
   if (cause === 'quota') {
-    why = 'quota exhausted'
+    why = 'quota exhausted';
   } else if (cause === 'rate_limited') {
-    why = 'rate_limited — provider reported no reset'
+    why = 'rate_limited — provider reported no reset';
   }
-  return { parked: `${why} — \`bro agents down\` clears the block` }
+  return { parked: `${why} — \`bro agents down\` clears the block` };
 }
 
 /** Poll the spawned agent until it goes terminal. A status() throw is
  *  transient until STATUS_FAIL_LIMIT in a row — then the worker is
  *  unverifiable, which reads as 'lost' (never 'running' on faith). */
-async function pollAgent(
-  deps: RunDeps,
-  cfg: RunArgs,
-  agent: AgentInfo
-): Promise<AgentInfo> {
-  let failures = 0
+async function pollAgent(deps: RunDeps, cfg: RunArgs, agent: AgentInfo): Promise<AgentInfo> {
+  let failures = 0;
   for (;;) {
-    await deps.sleepSec(cfg.pollSec)
-    let s: AgentInfo
+    await deps.sleepSec(cfg.pollSec);
+    let s: AgentInfo;
     try {
-      s = await deps.status(agent.id)
+      s = await deps.status(agent.id);
     } catch (err) {
       if (err instanceof AgentNotFound) {
-        return { ...agent, state: 'lost' }
+        return { ...agent, state: 'lost' };
       }
-      failures += 1
+      failures += 1;
       if (failures >= STATUS_FAIL_LIMIT) {
-        return { ...agent, state: 'lost' }
+        return { ...agent, state: 'lost' };
       }
-      continue
+      continue;
     }
     if (TERMINAL.has(s.state)) {
-      return s
+      return s;
     }
-    failures = 0
+    failures = 0;
   }
 }
 
 /** A loop step's outcome: a settled mol, a timed wait (no attempt
  *  burned), or a burned attempt to retry after. */
-type RunStep = MolResult | { waitSec: number } | { retry: true }
+type RunStep = MolResult | { waitSec: number } | { retry: true };
 
-const isResult = (s: RunStep): s is MolResult => 'verdict' in s
-const isWait = (s: RunStep): s is { waitSec: number } => 'waitSec' in s
+const isResult = (s: RunStep): s is MolResult => 'verdict' in s;
+const isWait = (s: RunStep): s is { waitSec: number } => 'waitSec' in s;
 
 /** A mol with a permanently-blocked step can never reach 'complete' —
  *  every blocker sits in a closed loop, so no amount of worker effort
@@ -256,34 +264,34 @@ const isWait = (s: RunStep): s is { waitSec: number } => 'waitSec' in s
  *  are claims, not proof of liveness, and a worker can release them. */
 function dagVerdict(n: ConvoyNext, molId: string, attempts: number): MolResult | undefined {
   if (n.stuck.length === 0) {
-    return undefined
+    return undefined;
   }
   return {
     mol: molId,
     verdict: 'blocked',
     attempts,
     detail: `dependency cycle: ${n.stuck.join(', ')}`,
-  }
+  };
 }
 
 /** The pre-spawn read: load + next. Returns the ConvoyNext to act on,
  *  or a MolResult when the mol already settles the run (complete, a
  *  pending human gate, unreadable). */
 function precheck(deps: RunDeps, molId: string, attempts: number): ConvoyNext | MolResult {
-  let mol: Molecule
+  let mol: Molecule;
   try {
-    mol = deps.loadMol(molId)
+    mol = deps.loadMol(molId);
   } catch (err) {
-    return { mol: molId, verdict: 'error', attempts, detail: errText(err) }
+    return { mol: molId, verdict: 'error', attempts, detail: errText(err) };
   }
-  const n = deps.next(mol)
+  const n = deps.next(mol);
   if (n.state === 'complete') {
-    return { mol: molId, verdict: 'done', attempts }
+    return { mol: molId, verdict: 'done', attempts };
   }
   if (n.state === 'gate') {
-    return { mol: molId, verdict: 'gated', attempts, detail: n.gates.join(', ') }
+    return { mol: molId, verdict: 'gated', attempts, detail: n.gates.join(', ') };
   }
-  return dagVerdict(n, molId, attempts) ?? n
+  return dagVerdict(n, molId, attempts) ?? n;
 }
 
 /** A spawn refusal is a signal, not a verdict. The error's kind is the
@@ -300,39 +308,44 @@ function refusalOutcome(
   attempts: number
 ): RunStep {
   if (err.kind === 'cap') {
-    deps.say(`run ${molId}: fleet cap full — waiting a poll tick`)
-    return { waitSec: cfg.pollSec }
+    deps.say(`run ${molId}: fleet cap full — waiting a poll tick`);
+    return { waitSec: cfg.pollSec };
   }
-  const e = deps.entry(molId)
+  const e = deps.entry(molId);
   if (e !== undefined && agentEntryBlocked(e, deps.now())) {
-    const d = blockedDecision(e, e.cause as string | undefined, e.resetAt as string | undefined, deps)
+    const d = blockedDecision(
+      e,
+      e.cause as string | undefined,
+      e.resetAt as string | undefined,
+      deps
+    );
     if ('parked' in d) {
-      return { mol: molId, verdict: 'parked', attempts, detail: d.parked }
+      return { mol: molId, verdict: 'parked', attempts, detail: d.parked };
     }
-    deps.say(`run ${molId}: rate_limited until reset — waiting ${isoEta(d.waitSec * 1000)}`)
-    return d
+    deps.say(`run ${molId}: rate_limited until reset — waiting ${isoEta(d.waitSec * 1000)}`);
+    return d;
   }
   if (e !== undefined) {
-    const st = deps.entryState(e)
+    const st = deps.entryState(e);
     if (st === 'running' || st === 'spawned') {
-      return { mol: molId, verdict: 'occupied', attempts, detail: err.message }
+      return { mol: molId, verdict: 'occupied', attempts, detail: err.message };
     }
     if (st === 'stopped') {
-      return { mol: molId, verdict: 'stopped', attempts }
+      return { mol: molId, verdict: 'stopped', attempts };
     }
   }
   // an untyped refusal while the fleet reads full is capacity — same
   // wait, just classified by occupancy instead of the kind
   if (deps.fleetFull()) {
-    deps.say(`run ${molId}: fleet cap full — waiting a poll tick`)
-    return { waitSec: cfg.pollSec }
+    deps.say(`run ${molId}: fleet cap full — waiting a poll tick`);
+    return { waitSec: cfg.pollSec };
   }
-  const spent = attempts + 1
+  const spent = attempts + 1;
   if (spent >= cfg.attempts) {
-    return { mol: molId, verdict: 'failed', attempts: spent, detail: err.message }
+    return { mol: molId, verdict: 'failed', attempts: spent, detail: err.message };
   }
-  deps.say(`run ${molId}: spawn refused (${err.message}) — attempt ${spent}`)
-  return { retry: true }
+  deps.say(`run ${molId}: spawn refused (${err.message}) — attempt ${spent}`);
+  return { retry: true };
 }
 
 /** The terminal-state classification: re-read the mol first — its
@@ -347,64 +360,66 @@ function afterRun(
   last: AgentInfo,
   attempts: number
 ): RunStep {
-  const spent = attempts + 1
-  let after: ConvoyNext
+  const spent = attempts + 1;
+  let after: ConvoyNext;
   try {
-    after = deps.next(deps.loadMol(molId))
+    after = deps.next(deps.loadMol(molId));
   } catch (err) {
-    return { mol: molId, verdict: 'error', attempts: spent, detail: errText(err) }
+    return { mol: molId, verdict: 'error', attempts: spent, detail: errText(err) };
   }
   if (after.state === 'complete') {
-    return { mol: molId, verdict: 'done', attempts: spent }
+    return { mol: molId, verdict: 'done', attempts: spent };
   }
   if (after.state === 'gate') {
-    return { mol: molId, verdict: 'gated', attempts: spent, detail: after.gates.join(', ') }
+    return { mol: molId, verdict: 'gated', attempts: spent, detail: after.gates.join(', ') };
   }
-  const dag = dagVerdict(after, molId, spent)
+  const dag = dagVerdict(after, molId, spent);
   if (dag !== undefined) {
-    return dag
+    return dag;
   }
   if (last.state === 'blocked') {
-    const d = blockedDecision(deps.entry(molId), last.cause, last.resetAt, deps)
+    const d = blockedDecision(deps.entry(molId), last.cause, last.resetAt, deps);
     if ('parked' in d) {
-      return { mol: molId, verdict: 'parked', attempts: spent, detail: d.parked }
+      return { mol: molId, verdict: 'parked', attempts: spent, detail: d.parked };
     }
-    deps.say(`run ${molId}: ${last.cause} until ${last.resetAt} — waiting ${isoEta(d.waitSec * 1000)}`)
-    return d
+    deps.say(
+      `run ${molId}: ${last.cause} until ${last.resetAt} — waiting ${isoEta(d.waitSec * 1000)}`
+    );
+    return d;
   }
   if (last.state === 'stopped') {
-    return { mol: molId, verdict: 'stopped', attempts: spent }
+    return { mol: molId, verdict: 'stopped', attempts: spent };
   }
   if (spent >= cfg.attempts) {
-    const cause = last.cause === undefined ? '' : ` (${last.cause})`
+    const cause = last.cause === undefined ? '' : ` (${last.cause})`;
     return {
       mol: molId,
       verdict: 'failed',
       attempts: spent,
       detail: `agent ${last.state}${cause}, mol incomplete`,
-    }
+    };
   }
-  deps.say(`run ${molId}: agent ${last.state} with mol incomplete — attempt ${spent}`)
-  return { retry: true }
+  deps.say(`run ${molId}: agent ${last.state} with mol incomplete — attempt ${spent}`);
+  return { retry: true };
 }
 
 /** mol-queue2.sh's fast-fail ramp: an agent dead under ~300s never did
  *  real work — a crash loop gets 900/1800/3600s spacing, doubling per
  *  consecutive fast exit, capped at an hour-ish. A slow crash did work
  *  and resets the streak — it pays the flat --retry-delay. */
-const FAST_FAIL_MS = 300_000
-const BACKOFF_BASE_SEC = 900
-const BACKOFF_CAP_SEC = 3600
+const FAST_FAIL_MS = 300_000;
+const BACKOFF_BASE_SEC = 900;
+const BACKOFF_CAP_SEC = 3600;
 
 const backoffSec = (streak: number): number =>
-  Math.min(BACKOFF_BASE_SEC * 2 ** (streak - 1), BACKOFF_CAP_SEC)
+  Math.min(BACKOFF_BASE_SEC * 2 ** (streak - 1), BACKOFF_CAP_SEC);
 
 /** Agent lifetime for the fast-fail check — the registry-stamped
  *  spawnedAt when the backend reports it, else the spawn call's start. */
 const agentLivedMs = (deps: RunDeps, spawnedAtMs: number, last: AgentInfo): number => {
-  const born = Date.parse(last.spawnedAt ?? '')
-  return deps.now() - (Number.isNaN(born) ? spawnedAtMs : born)
-}
+  const born = Date.parse(last.spawnedAt ?? '');
+  return deps.now() - (Number.isNaN(born) ? spawnedAtMs : born);
+};
 
 /** One spawn → poll → classify cycle of the mol loop: the step to act
  *  on, the delay the fast-fail streak earned, and the updated streak.
@@ -418,57 +433,53 @@ async function molAttempt(
   attempts: number,
   fastFails: number
 ): Promise<{ step: RunStep; delaySec: number; fastFails: number }> {
-  let step: RunStep
-  let delaySec = cfg.retryDelaySec
+  let step: RunStep;
+  let delaySec = cfg.retryDelaySec;
   try {
-    const t0 = deps.now()
-    const agent = await deps.spawn(molId)
-    deps.say(`run ${molId}: agent ${agent.id} up — polling`)
-    const last = await pollAgent(deps, cfg, agent)
-    step = afterRun(deps, cfg, molId, last, attempts)
+    const t0 = deps.now();
+    const agent = await deps.spawn(molId);
+    deps.say(`run ${molId}: agent ${agent.id} up — polling`);
+    const last = await pollAgent(deps, cfg, agent);
+    step = afterRun(deps, cfg, molId, last, attempts);
     if ('retry' in step) {
-      fastFails = agentLivedMs(deps, t0, last) < FAST_FAIL_MS ? fastFails + 1 : 0
+      fastFails = agentLivedMs(deps, t0, last) < FAST_FAIL_MS ? fastFails + 1 : 0;
       if (fastFails > 0) {
-        delaySec = backoffSec(fastFails)
-        deps.say(`run ${molId}: fast exit #${fastFails} — respawn in ${isoEta(delaySec * 1000)}`)
+        delaySec = backoffSec(fastFails);
+        deps.say(`run ${molId}: fast exit #${fastFails} — respawn in ${isoEta(delaySec * 1000)}`);
       }
     }
   } catch (err) {
     step =
       err instanceof SpawnError
         ? refusalOutcome(deps, cfg, molId, err, attempts)
-        : { mol: molId, verdict: 'error', attempts, detail: errText(err) }
+        : { mol: molId, verdict: 'error', attempts, detail: errText(err) };
   }
-  return { step, delaySec, fastFails }
+  return { step, delaySec, fastFails };
 }
 
 /** One molecule end-to-end: spawn → await → classify → respawn, until
  *  the mol completes, the attempts cap lands, or a wait/park verdict
  *  decides. */
-export async function runMol(
-  deps: RunDeps,
-  cfg: RunArgs,
-  molId: string
-): Promise<MolResult> {
-  let attempts = 0
-  let fastFails = 0
+export async function runMol(deps: RunDeps, cfg: RunArgs, molId: string): Promise<MolResult> {
+  let attempts = 0;
+  let fastFails = 0;
   for (;;) {
-    const pre = precheck(deps, molId, attempts)
+    const pre = precheck(deps, molId, attempts);
     if ('verdict' in pre) {
-      return pre
+      return pre;
     }
-    const attempt = await molAttempt(deps, cfg, molId, attempts, fastFails)
-    const { step, delaySec } = attempt
-    fastFails = attempt.fastFails
+    const attempt = await molAttempt(deps, cfg, molId, attempts, fastFails);
+    const { step, delaySec } = attempt;
+    fastFails = attempt.fastFails;
     if (isResult(step)) {
-      return step
+      return step;
     }
     if (isWait(step)) {
-      await deps.sleepSec(step.waitSec)
-      continue
+      await deps.sleepSec(step.waitSec);
+      continue;
     }
-    attempts += 1
-    await deps.sleepSec(delaySec)
+    attempts += 1;
+    await deps.sleepSec(delaySec);
   }
 }
 
@@ -488,7 +499,7 @@ export async function publishGate(dir: string, molId: string, detail: string): P
         `convoy ${molId}: HUMAN GATE ready` +
         (detail === '' ? '' : ` — ${detail}`) +
         ' — human input needed',
-    })
+    });
   } catch {
     // fail-open — sinks/mailbox are advisory edges, never a runner failure
   }
@@ -496,27 +507,24 @@ export async function publishGate(dir: string, molId: string, detail: string): P
 
 /** The queue: each mol in order, sequential like the script it
  *  replaces. Returns the per-mol verdicts; the caller renders. */
-export async function runQueue(
-  deps: RunDeps,
-  cfg: RunArgs
-): Promise<MolResult[]> {
-  const ids = [...cfg.mols]
+export async function runQueue(deps: RunDeps, cfg: RunArgs): Promise<MolResult[]> {
+  const ids = [...cfg.mols];
   if (cfg.open) {
     for (const m of deps.listOpen()) {
       if (!ids.includes(m.id)) {
-        ids.push(m.id)
+        ids.push(m.id);
       }
     }
   }
-  const results: MolResult[] = []
+  const results: MolResult[] = [];
   for (const molId of ids) {
-    const r = await runMol(deps, cfg, molId) // NOSONAR — a convoy runs its mols in order, never fanned out
+    const r = await runMol(deps, cfg, molId); // NOSONAR — a convoy runs its mols in order, never fanned out
     if (r.verdict === 'gated') {
-      await deps.onGated?.(r) // NOSONAR — serial by contract
+      await deps.onGated?.(r); // NOSONAR — serial by contract
     }
-    results.push(r)
+    results.push(r);
   }
-  return results
+  return results;
 }
 
 // --- the command ------------------------------------------------------------------------
@@ -525,72 +533,66 @@ export async function runQueue(
  *  agents dir beside agents.json (same derivation drive's
  *  registryAgents uses). */
 function entryOps(dir: string): Pick<RunDeps, 'entry' | 'entryState'> {
-  const regPath = agentRegistryPath(dir)
-  const home = regPath === null ? null : join(dirname(regPath), 'agents')
+  const regPath = agentRegistryPath(dir);
+  const home = regPath === null ? null : join(dirname(regPath), 'agents');
   return {
-    entry: (molId) => (regPath === null ? undefined : readAgentRegistry(dir)[molId]),
-    entryState: (e) => registryEntryState(home, e),
-  }
+    entry: molId => (regPath === null ? undefined : readAgentRegistry(dir)[molId]),
+    entryState: e => registryEntryState(home, e),
+  };
 }
 
 export async function runConvoyRun(argv: string[]): Promise<void> {
-  const cfg = runArgs(argv)
-  const ids = cfg.mols.length + (cfg.open ? 1 : 0)
+  const cfg = runArgs(argv);
+  const ids = cfg.mols.length + (cfg.open ? 1 : 0);
   if (ids === 0) {
-    console.error('error: run needs molecule ids or --open')
-    process.exit(2)
+    console.error('error: run needs molecule ids or --open');
+    process.exit(2);
   }
-  const main = mainWorktree()
-  const dir = main.path
-  const env: AgentConnectorEnv = loadAgentEnv(dir)
-  const conn: AgentConnector = resolveAgentConnector({ dir }, {}, env)
-  const beads = beadsDir()
+  const main = mainWorktree();
+  const dir = main.path;
+  const env: AgentConnectorEnv = loadAgentEnv(dir);
+  const conn: AgentConnector = resolveAgentConnector({ dir }, {}, env);
+  const beads = beadsDir();
 
   const say = (msg: string): void => {
     if (cfg.json) {
-      console.error(msg)
+      console.error(msg);
     } else {
-      console.log(msg)
+      console.log(msg);
     }
-  }
+  };
   const deps: RunDeps = {
     loadMol: loadMolecule,
     next: nextStep,
     listOpen: listMolecules,
-    spawn: (molId) =>
-      spawnStepAgent(dir, env, {
-        molStep: molId,
-        worktree: dir,
-        prompt: runnerPrompt(molId, dir),
-        beadsDir: beads,
-      }),
-    status: (id) => conn.status(id),
+    spawn: molId => spawnStepAgent(dir, env, runnerSpawnReq(molId, dir, beads)),
+    status: id => conn.status(id),
     ...entryOps(dir),
     fleetFull: () => {
-      const cap = fleetCapOf(env)
-      return cap > 0 && fleetOccupancyFor(dir, env) >= cap
+      const cap = fleetCapOf(env);
+      return cap > 0 && fleetOccupancyFor(dir, env) >= cap;
     },
     sleepSec: sleepWall,
     now: () => Date.now(),
     say,
-    onGated: (r) => publishGate(dir, r.mol, r.detail ?? ''),
-  }
+    onGated: r => publishGate(dir, r.mol, r.detail ?? ''),
+  };
 
-  const results = await runQueue(deps, cfg)
-  let failed = 0
+  const results = await runQueue(deps, cfg);
+  let failed = 0;
   for (const r of results) {
     if (cfg.json) {
-      console.log(JSON.stringify(r))
+      console.log(JSON.stringify(r));
     } else {
-      const detail = r.detail === undefined ? '' : ` — ${r.detail}`
-      console.log(`run ${r.mol} ${r.verdict}${detail}`)
+      const detail = r.detail === undefined ? '' : ` — ${r.detail}`;
+      console.log(`run ${r.mol} ${r.verdict}${detail}`);
     }
     if (r.verdict === 'failed' || r.verdict === 'error' || r.verdict === 'blocked') {
-      failed += 1
+      failed += 1;
     }
   }
-  say(`run: queue drained — ${results.length - failed}/${results.length} settled`)
+  say(`run: queue drained — ${results.length - failed}/${results.length} settled`);
   if (failed > 0) {
-    process.exitCode = 1
+    process.exitCode = 1;
   }
 }

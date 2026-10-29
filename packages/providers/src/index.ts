@@ -7,22 +7,44 @@
  * by name and ask for a surface (`call`, `chat`, `spawn`); they never
  * name a vendor.
  */
-export { acpCall, acpChat, acpClient, acpConverse, acpModels, acpOpen, acpPooledTurn, acpSessionRetain, acpWorkerArgv, isSystemoneFamily } from './acp.ts'
-export type { AcpPeer, AcpRetainedSession, PooledTurnOpts } from './acp.ts'
-export { AcpTerminals } from './acp-terminal.ts'
-export type { TerminalFollow, TerminalFollower } from './acp-terminal.ts'
-export { AGENT_USAGE_THROTTLE_MS, agentTurnPlane, toolPayload } from './acp-events.ts'
-export type { AgentTurnPlane, AgentTurnPlaneOpts, Toolish } from './acp-events.ts'
-export type { ContentBlock as AcpContentBlock } from '@agentclientprotocol/sdk'
-export { newSpanId, newTraceId, otelEvent, otelHeader, otelJournal, otelParent, otelSpan, postDetached, setAmbient } from './otel.ts'
-export type { OtelCtx, OtelSpan } from './otel.ts'
-export { AcpWorkerError, renderAcpUpdate, runAcpWorker } from './acp-worker.ts'
-export type { AcpWorkerSpec } from './acp-worker.ts'
-export { acpProxy, runAcpProxy } from './acp-proxy.ts'
-export type { AcpProxyOptions, AcpProxySeam } from './acp-proxy.ts'
-export { cliChat, expandPromptFile } from './cli.ts'
-export { openaiCompatChat } from './openai.ts'
-export { providerClient } from './registry.ts'
+export {
+  acpCall,
+  acpChat,
+  acpClient,
+  acpConverse,
+  acpModels,
+  acpOpen,
+  acpPooledTurn,
+  acpSessionRetain,
+  acpWorkerArgv,
+  isSystemoneFamily,
+} from './acp.ts';
+export type { AcpPeer, AcpRetainedSession, PooledTurnOpts } from './acp.ts';
+export { AcpTerminals } from './acp-terminal.ts';
+export type { TerminalFollow, TerminalFollower } from './acp-terminal.ts';
+export { AGENT_USAGE_THROTTLE_MS, agentTurnPlane, toolPayload } from './acp-events.ts';
+export type { AgentTurnPlane, AgentTurnPlaneOpts, Toolish } from './acp-events.ts';
+export type { ContentBlock as AcpContentBlock } from '@agentclientprotocol/sdk';
+export {
+  newSpanId,
+  newTraceId,
+  otelEndpoint,
+  otelEvent,
+  otelHeader,
+  otelJournal,
+  otelParent,
+  otelSpan,
+  postDetached,
+  setAmbient,
+} from './otel.ts';
+export type { OtelCtx, OtelSpan } from './otel.ts';
+export { AcpWorkerError, renderAcpUpdate, runAcpWorker } from './acp-worker.ts';
+export type { AcpWorkerSpec } from './acp-worker.ts';
+export { acpProxy, runAcpProxy } from './acp-proxy.ts';
+export type { AcpProxyOptions, AcpProxySeam } from './acp-proxy.ts';
+export { cliChat, expandPromptFile } from './cli.ts';
+export { openaiCompatChat } from './openai.ts';
+export { providerClient } from './registry.ts';
 export type {
   AcpClientBridge,
   AcpSeam,
@@ -30,12 +52,12 @@ export type {
   ProviderChat,
   ProviderChatResult,
   ProviderClient,
-} from './registry.ts'
-export { systemoneCall } from './systemone.ts'
-export type { ApiTarget, ProviderWireOpts } from './systemone.ts'
+} from './registry.ts';
+export { systemoneCall } from './systemone.ts';
+export type { ApiTarget, ProviderWireOpts } from './systemone.ts';
 // typed-contract keyspace guards — the prose path validates its
 // probabilities map against the asked criteria with the same rule
-export { isLevelKey, isProbsOn } from './typed.ts'
+export { isLevelKey, isProbsOn } from './typed.ts';
 // the shared transport — the judge package's http helpers moved here
 // with the bindings that use them; consumers re-export, not reimplement
 export {
@@ -47,5 +69,5 @@ export {
   postJson,
   remaining,
   stripTrailingSlashes,
-} from './http.ts'
-export type { FetchFn, HttpResult, RetryWhen } from './http.ts'
+} from './http.ts';
+export type { FetchFn, HttpResult, RetryWhen } from './http.ts';

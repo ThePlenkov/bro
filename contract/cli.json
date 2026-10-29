@@ -24,6 +24,7 @@
         "pulse",
         "telemetry",
         "trace",
+        "otel",
         "acp",
         "rig"
       ]
@@ -80,6 +81,7 @@
               "--area <a>": "only findings in this area",
               "--author <u>": "only findings from this thread author"
             },
+            "json": "schemas/cli/debt-next.schema.json",
             "exits": {
               "0": "top open finding emitted",
               "1": "no open findings, or the claim CAS lost",
@@ -112,7 +114,8 @@
               "0": "exit gate green",
               "1": "gate blocked — threads/failures remain (usage errors also exit 1 today)",
               "2": "no open PR for the current branch"
-            }
+            },
+            "json": "schemas/cli/act-status.schema.json"
           }
         }
       },
@@ -147,6 +150,7 @@
           "--global": "read the user-level store instead of the project",
           "--label <a,b>": "only beads carrying one of these labels are claimable"
         },
+        "json": "schemas/cli/next.schema.json",
         "exits": {
           "0": "verdict emitted — task | gated | idle",
           "1": "task store unreachable or classify failed",
@@ -181,6 +185,7 @@
           "--live": "TTY dashboard repaint loop (needs a TTY)",
           "--every N": "repaint cadence seconds — implies --live"
         },
+        "json": "schemas/cli/fleet.schema.json",
         "exits": {
           "0": "fleet printed",
           "2": "usage — --live without TTY, --every out of range, --json + --live"
@@ -237,6 +242,7 @@
               "--json": "agent rows + occupancy + session quota as JSON",
               "--connector <name>": "pin the agents facade connector"
             },
+            "json": "schemas/cli/agents-status.schema.json",
             "exits": {
               "0": "agent plane printed",
               "1": "backend collection failed",
@@ -261,6 +267,7 @@
           "--json": "the board as one JSON document",
           "--deep": "add the act exit gate for the current branch PR — the fast path stays local-only"
         },
+        "json": "schemas/cli/fleet-status.schema.json",
         "exits": {
           "0": "board printed"
         }
@@ -615,6 +622,55 @@
       "plan": false,
       "external": false
     },
+    "otel": {
+      "name": "otel",
+      "group": "fleet",
+      "summary": "Hook-first telemetry — status|test|on|off; every dispatched hook exports through the emitHook facade (spec bro-xgejl)",
+      "spellings": ["otel", "fleet otel"],
+      "aliases": [],
+      "hidden": false,
+      "skill": "otel",
+      "configKey": "otel",
+      "plan": false,
+      "contract": {
+        "subs": {
+          "status": {
+            "flags": {
+              "--json": "machine-readable report"
+            },
+            "exits": {
+              "0": "report printed"
+            }
+          },
+          "test": {
+            "flags": {
+              "--json": "machine-readable report"
+            },
+            "exits": {
+              "0": "would-be record printed",
+              "2": "missing hook name"
+            }
+          },
+          "on": {
+            "exits": {
+              "0": "otel.enabled=true written to bro.config.local.json",
+              "2": "bro.config.local.ts shadows"
+            }
+          },
+          "off": {
+            "exits": {
+              "0": "otel.enabled=false written to bro.config.local.json",
+              "2": "bro.config.local.ts shadows"
+            }
+          }
+        },
+        "exits": {
+          "0": "status (bare `bro otel`)",
+          "2": "usage — unknown subcommand"
+        }
+      },
+      "external": false
+    },
     "acp-worker": {
       "name": "acp-worker",
       "summary": "ACP provider spawn unit — backends exec this; never typed",
@@ -692,6 +748,7 @@
               "--repo <dir>": "rig checkout to inspect (default: this repo)",
               "--json": "rig status as JSON"
             },
+            "json": "schemas/cli/rig-status.schema.json",
             "exits": {
               "0": "rig fresh — no error surfaced",
               "1": "a status error was found",
@@ -702,6 +759,7 @@
             "flags": {
               "--json": "the re-entry verdict as JSON"
             },
+            "json": "schemas/cli/rig-next.schema.json",
             "exits": {
               "0": "verdict — step | gate | wait | done",
               "1": "verdict blocked",

@@ -29,64 +29,62 @@ import {
   readdirSync,
   readFileSync,
   statSync,
-} from 'node:fs'
-import { join, resolve } from 'node:path'
-import { gitTry, markerLive, taskStore, withFileLock } from '@broject/core'
+} from 'node:fs';
+import { join } from 'node:path';
+import {
+  GIT_SYNC_PROBE_TIMEOUT_MS,
+  gitCommonDir,
+  markerLive,
+  taskStore,
+  withFileLock,
+} from '@broject/core';
 import {
   applyCapture,
   planCapture,
   TERM_RE,
   TERM_STOPWORDS,
   type CaptureCandidate,
-} from './capture.ts'
-import {
-  lessonId,
-  type Evidence,
-  type Lesson,
-  type LessonTrigger,
-} from './lesson.ts'
-import { listLessons, LessonStoreError, withStoreLock, type SkippedEntry } from './store.ts'
+} from './capture.ts';
+import { lessonId, type Evidence, type Lesson, type LessonTrigger } from './lesson.ts';
+import { listLessons, LessonStoreError, withStoreLock, type SkippedEntry } from './store.ts';
 
 /** "Live" for marker sessions — the same day-window the parallel-work
  *  nudge and the connector's previous-trace exclusion use. */
-const LIVE_SESSION_MS = 24 * 60 * 60 * 1000
+const LIVE_SESSION_MS = 24 * 60 * 60 * 1000;
 
 /** Ranked hits/candidates caps — probe output is a shortlist, not a
  *  dump. */
-const HIT_CAP = 5
-const CANDIDATE_CAP = 8
-const TERM_CAP = 8
-const TRACE_TAIL_LINES = 100
+const HIT_CAP = 5;
+const CANDIDATE_CAP = 8;
+const TERM_CAP = 8;
+const TRACE_TAIL_LINES = 100;
 
-const safeId = (s: string): string => s.replace(/[^\w.-]/g, '_')
-const oneLine = (s: string): string => s.trim().replace(/\s+/g, ' ')
+const safeId = (s: string): string => s.replace(/[^\w.-]/g, '_');
+const oneLine = (s: string): string => s.trim().replace(/\s+/g, ' ');
 
 /** `<git-common>/bro/hooks` — the dir the fired set and trace journal
  *  already live under. null outside a repo. Same resolution as the
  *  connector's. */
 function hooksDir(dir: string): string | null {
-  const r = gitTry(['-C', dir, 'rev-parse', '--git-common-dir'])
-  if (r.code !== 0 || r.out.trim() === '') {
-    return null
-  }
-  return join(resolve(dir, r.out.trim()), 'bro', 'hooks')
+  const common = gitCommonDir(dir, GIT_SYNC_PROBE_TIMEOUT_MS);
+  return common === null ? null : join(common, 'bro', 'hooks');
 }
 
 /** Significant terms of a question — the same vocabulary capture uses
  *  for trigger terms, capped a little higher because a query is longer
  *  than a title. */
 export function probeTerms(question: string): string[] {
-  const out: string[] = []
+  const out: string[] = [];
   for (const m of question.toLowerCase().matchAll(TERM_RE)) {
     if (TERM_STOPWORDS.has(m[0]) || out.includes(m[0])) {
-      continue
+      continue;
     }
-    out.push(m[0])
+    out.push(m[0]);
     if (out.length >= TERM_CAP) {
-      break
+      break;
     }
   }
-  return out
+  return out;
 }
 
 /**
@@ -98,32 +96,32 @@ export function probeTerms(question: string): string[] {
  */
 export function resolveSessionId(dir: string, explicit?: string): string {
   if (explicit !== undefined && explicit.trim() !== '') {
-    return explicit.trim()
+    return explicit.trim();
   }
-  const hooks = hooksDir(dir)
+  const hooks = hooksDir(dir);
   if (hooks === null) {
-    return 'cli'
+    return 'cli';
   }
-  const now = Date.now()
-  let best: { sid: string; mtime: number } | null = null
+  const now = Date.now();
+  let best: { sid: string; mtime: number } | null = null;
   try {
     for (const f of readdirSync(hooks)) {
-      const dot = f.lastIndexOf('.')
+      const dot = f.lastIndexOf('.');
       if (dot <= 0) {
-        continue
+        continue;
       }
       try {
-        const p = join(hooks, f)
-        const st = statSync(p)
+        const p = join(hooks, f);
+        const st = statSync(p);
         if (!st.isFile()) {
-          continue
+          continue;
         }
-        const first = readFileSync(p, 'utf8').split('\n', 1)[0]
+        const first = readFileSync(p, 'utf8').split('\n', 1)[0];
         if (!markerLive(first, st.mtimeMs, LIVE_SESSION_MS, now)) {
-          continue
+          continue;
         }
         if (best === null || st.mtimeMs > best.mtime) {
-          best = { sid: f.slice(0, dot), mtime: st.mtimeMs }
+          best = { sid: f.slice(0, dot), mtime: st.mtimeMs };
         }
       } catch {
         // unreadable marker — skip
@@ -132,14 +130,14 @@ export function resolveSessionId(dir: string, explicit?: string): string {
   } catch {
     // no marker dir — no live session provable
   }
-  return best?.sid ?? 'cli'
+  return best?.sid ?? 'cli';
 }
 
 /** The haystack a question term is looked up in — the rule plus every
  *  match value, so "what happens after gh pr merge" hits a lesson whose
  *  trigger carries the command even though a question has no trace. */
 function lessonHaystack(l: Lesson): string {
-  const m = l.trigger.match ?? {}
+  const m = l.trigger.match ?? {};
   return [
     l.lesson,
     ...(m.terms ?? []),
@@ -148,41 +146,41 @@ function lessonHaystack(l: Lesson): string {
     ...(m.tools ?? []),
   ]
     .join(' ')
-    .toLowerCase()
+    .toLowerCase();
 }
 
 export interface ProbeHit {
-  lesson: Lesson
+  lesson: Lesson;
   /** distinct question terms found in the lesson's haystack */
-  score: number
+  score: number;
 }
 
 /** Rank lessons by distinct question-term coverage; ties break on the
  *  confidence ladder, then id — deterministic for the same store. */
 export function rankLessons(question: string, lessons: Lesson[]): ProbeHit[] {
-  const terms = probeTerms(question)
+  const terms = probeTerms(question);
   if (terms.length === 0) {
-    return []
+    return [];
   }
-  const hits: ProbeHit[] = []
+  const hits: ProbeHit[] = [];
   for (const l of lessons) {
-    const hay = lessonHaystack(l)
-    const score = terms.reduce((n, t) => n + (hay.includes(t) ? 1 : 0), 0)
+    const hay = lessonHaystack(l);
+    const score = terms.reduce((n, t) => n + (hay.includes(t) ? 1 : 0), 0);
     if (score > 0) {
-      hits.push({ lesson: l, score })
+      hits.push({ lesson: l, score });
     }
   }
   const conf: Record<Lesson['confidence'], number> = {
     tentative: 0,
     established: 1,
     proven: 2,
-  }
+  };
   return hits.sort(
     (a, b) =>
       b.score - a.score ||
       conf[b.lesson.confidence] - conf[a.lesson.confidence] ||
       a.lesson.id.localeCompare(b.lesson.id)
-  )
+  );
 }
 
 /** A trace line → the rerun-able candidate text: the command plus the
@@ -191,18 +189,18 @@ export function rankLessons(question: string, lessons: Lesson[]): ProbeHit[] {
  *  visible. */
 function traceLineCandidate(line: string, terms: string[]): string {
   try {
-    const e = JSON.parse(line) as { command?: unknown; paths?: unknown }
-    const cmd = typeof e.command === 'string' ? e.command : ''
+    const e = JSON.parse(line) as { command?: unknown; paths?: unknown };
+    const cmd = typeof e.command === 'string' ? e.command : '';
     const paths = (Array.isArray(e.paths) ? e.paths : []).filter(
       (p): p is string => typeof p === 'string'
-    )
+    );
     // a term that matched only a path must stay visible next to the
     // command — keep the matched paths, not the whole entry
-    const hitPaths = paths.filter((p) => terms.some((t) => p.toLowerCase().includes(t)))
-    const joined = cmd !== '' ? [cmd, ...hitPaths].join(' ') : paths.join(' ')
-    return joined !== '' ? joined : line
+    const hitPaths = paths.filter(p => terms.some(t => p.toLowerCase().includes(t)));
+    const joined = cmd !== '' ? [cmd, ...hitPaths].join(' ') : paths.join(' ');
+    return joined !== '' ? joined : line;
   } catch {
-    return line // torn line — keep raw
+    return line; // torn line — keep raw
   }
 }
 
@@ -210,84 +208,79 @@ function traceLineCandidate(line: string, terms: string[]): string {
  *  first; when it hasn't journaled yet (fresh session, or a 'cli'
  *  probe) the newest trace file on disk is the fallback. */
 function traceFile(hooks: string, sid: string): string | null {
-  const dir = join(hooks, 'trace')
-  const own = join(dir, `${safeId(sid)}.jsonl`)
+  const dir = join(hooks, 'trace');
+  const own = join(dir, `${safeId(sid)}.jsonl`);
   try {
     if (existsSync(own)) {
-      return own
+      return own;
     }
-    let best: { path: string; mtime: number } | null = null
+    let best: { path: string; mtime: number } | null = null;
     for (const f of readdirSync(dir)) {
       if (!f.endsWith('.jsonl')) {
-        continue
+        continue;
       }
-      const p = join(dir, f)
-      const mtime = statSync(p).mtimeMs
+      const p = join(dir, f);
+      const mtime = statSync(p).mtimeMs;
       if (best === null || mtime > best.mtime) {
-        best = { path: p, mtime }
+        best = { path: p, mtime };
       }
     }
-    return best?.path ?? null
+    return best?.path ?? null;
   } catch {
-    return null // no trace dir yet
+    return null; // no trace dir yet
   }
 }
 
 /** Trace lines worth investigating — journal entries whose command or
  *  touched paths carry a question term. */
-function traceCandidates(
-  hooks: string,
-  sid: string,
-  terms: string[],
-  cap: number
-): string[] {
-  const file = traceFile(hooks, sid)
+function traceCandidates(hooks: string, sid: string, terms: string[], cap: number): string[] {
+  const file = traceFile(hooks, sid);
   if (file === null) {
-    return []
+    return [];
   }
-  const out: string[] = []
+  const out: string[] = [];
   try {
     for (const line of readFileSync(file, 'utf8')
       .split('\n')
-      .filter((l) => l.trim() !== '')
+      .filter(l => l.trim() !== '')
       .slice(-TRACE_TAIL_LINES)) {
-      const low = line.toLowerCase()
-      if (!terms.some((t) => low.includes(t))) {
-        continue
+      const low = line.toLowerCase();
+      if (!terms.some(t => low.includes(t))) {
+        continue;
       }
       // keep the raw command/paths, not the JSON — a candidate the agent
       // can rerun or open, not a serialization it has to parse
-      const flat = oneLine(traceLineCandidate(line, terms))
+      const flat = oneLine(traceLineCandidate(line, terms));
       if (flat !== '' && !out.includes(flat)) {
-        out.push(flat)
+        out.push(flat);
       }
       if (out.length >= cap) {
-        break
+        break;
       }
     }
   } catch {
     // unreadable journal mid-rotation — return what gathered
   }
-  return out.map((c) => `trace: ${c}`)
+  return out.map(c => `trace: ${c}`);
 }
 
 /** In-progress beads whose title carries a question term — a live bead
  *  may already hold the answer. */
 function beadCandidates(dir: string, terms: string[], cap: number): string[] {
   try {
-    const out: string[] = []
+    const out: string[] = [];
     for (const row of taskStore(dir).list({ status: 'in_progress' })) {
-      const title = `${row.id} ${row.title ?? ''}`.trim()
-      if (terms.some((t) => title.toLowerCase().includes(t))) {
-        out.push(`bead: ${title}`)
+      const title = `${row.id} ${row.title ?? ''}`.trim();
+      if (terms.some(t => title.toLowerCase().includes(t))) {
+        out.push(`bead: ${title}`);
       }
       if (out.length >= cap) {
-        break
+        break;
       }
     }
-    return out
+    return out;
   } catch {
-    return [] // a dead task store degrades candidates, never the probe
+    return []; // a dead task store degrades candidates, never the probe
   }
 }
 
@@ -297,22 +290,22 @@ function beadCandidates(dir: string, terms: string[], cap: number): string[] {
  *  Best-effort like every fired-set write: a lost gap line costs
  *  observability, never correctness. */
 function logGap(hooks: string, sid: string, question: string): boolean {
-  const line = `gap:${question}`
+  const line = `gap:${question}`;
   try {
-    const dir = join(hooks, 'fired')
-    const path = join(dir, safeId(sid) || 'cli')
+    const dir = join(hooks, 'fired');
+    const path = join(dir, safeId(sid) || 'cli');
     const run = (): boolean => {
       try {
         if (readFileSync(path, 'utf8').split('\n').includes(line)) {
-          return false
+          return false;
         }
       } catch {
         // no fired file yet
       }
-      appendFileSync(path, `${line}\n`)
-      return true
-    }
-    mkdirSync(dir, { recursive: true })
+      appendFileSync(path, `${line}\n`);
+      return true;
+    };
+    mkdirSync(dir, { recursive: true });
     // count-check-append is one critical section — two parallel probes
     // must not double-log one question. A failed lock drops the gap
     // line rather than racing it: a lost line costs observability,
@@ -321,32 +314,32 @@ function logGap(hooks: string, sid: string, question: string): boolean {
       return withFileLock(`${path}.lock`, run, {
         waitMs: 2_000,
         label: 'learn gap lock',
-      })
+      });
     } catch {
-      return false
+      return false;
     }
   } catch {
-    return false
+    return false;
   }
 }
 
 export interface ProbeQuery {
-  question: string
-  hits: ProbeHit[]
+  question: string;
+  hits: ProbeHit[];
   /** cheap investigation context — only gathered on a miss */
-  candidates: string[]
-  sessionId: string
+  candidates: string[];
+  sessionId: string;
   /** the question landed in the fired set as an open gap */
-  gapLogged: boolean
+  gapLogged: boolean;
   /** corrupt kv entries encountered while reading the store */
-  skipped: SkippedEntry[]
+  skipped: SkippedEntry[];
 }
 
 export interface ProbeQueryOptions {
-  dir?: string
-  sessionId?: string
+  dir?: string;
+  sessionId?: string;
   /** max ranked hits returned (default HIT_CAP) */
-  limit?: number
+  limit?: number;
 }
 
 /**
@@ -357,45 +350,45 @@ export interface ProbeQueryOptions {
  * (the caller can't probe a store it can't read).
  */
 export function probeQuestion(question: string, opts: ProbeQueryOptions = {}): ProbeQuery {
-  const dir = opts.dir ?? process.cwd()
-  const sid = resolveSessionId(dir, opts.sessionId)
-  const q = oneLine(question)
-  const { lessons, skipped } = listLessons(dir)
+  const dir = opts.dir ?? process.cwd();
+  const sid = resolveSessionId(dir, opts.sessionId);
+  const q = oneLine(question);
+  const { lessons, skipped } = listLessons(dir);
   // hit-vs-miss is decided on the full ranking — a `limit` slice can
   // hide every hit and a false miss would log a phantom gap
-  const ranked = rankLessons(q, lessons)
-  const hits = ranked.slice(0, opts.limit ?? HIT_CAP)
+  const ranked = rankLessons(q, lessons);
+  const hits = ranked.slice(0, opts.limit ?? HIT_CAP);
   if (ranked.length > 0) {
-    return { question: q, hits, candidates: [], sessionId: sid, gapLogged: false, skipped }
+    return { question: q, hits, candidates: [], sessionId: sid, gapLogged: false, skipped };
   }
-  const hooks = hooksDir(dir)
-  const terms = probeTerms(q)
+  const hooks = hooksDir(dir);
+  const terms = probeTerms(q);
   const candidates = [
     ...(hooks !== null ? traceCandidates(hooks, sid, terms, CANDIDATE_CAP) : []),
     ...beadCandidates(dir, terms, CANDIDATE_CAP),
-  ].slice(0, CANDIDATE_CAP)
-  const gapLogged = hooks !== null && q !== '' && logGap(hooks, sid, q)
-  return { question: q, hits, candidates, sessionId: sid, gapLogged, skipped }
+  ].slice(0, CANDIDATE_CAP);
+  const gapLogged = hooks !== null && q !== '' && logGap(hooks, sid, q);
+  return { question: q, hits, candidates, sessionId: sid, gapLogged, skipped };
 }
 
 export interface RecordProbeOptions {
   /** the question that was probed — recorded as {kind:'text'} evidence */
-  question: string
+  question: string;
   /** the distilled answer — the rule, imperative, quotable as one line */
-  lesson: string
+  lesson: string;
   /** explicit trigger from CLI flags; when absent the caller derives
    *  one from the question's terms (the question IS the index) */
-  trigger: LessonTrigger
+  trigger: LessonTrigger;
   /** extra citations beyond the auto-recorded session+question */
-  evidence?: Evidence[]
-  dir?: string
-  sessionId?: string
+  evidence?: Evidence[];
+  dir?: string;
+  sessionId?: string;
 }
 
 export interface RecordProbeResult {
-  lesson: Lesson
+  lesson: Lesson;
   /** true when the answer folded into an existing lesson's evidence */
-  merged: boolean
+  merged: boolean;
 }
 
 /**
@@ -406,18 +399,18 @@ export interface RecordProbeResult {
  * different rule on the same id throws rather than overwrite.
  */
 export function recordProbeAnswer(opts: RecordProbeOptions): RecordProbeResult {
-  const dir = opts.dir ?? process.cwd()
-  const sid = resolveSessionId(dir, opts.sessionId)
-  const question = oneLine(opts.question)
-  const lesson = oneLine(opts.lesson)
+  const dir = opts.dir ?? process.cwd();
+  const sid = resolveSessionId(dir, opts.sessionId);
+  const question = oneLine(opts.question);
+  const lesson = oneLine(opts.lesson);
   if (lesson === '') {
-    throw new LessonStoreError('probe --lesson requires a non-empty answer')
+    throw new LessonStoreError('probe --lesson requires a non-empty answer');
   }
   const evidence: Evidence[] = [
     { kind: 'session', ref: sid },
     ...(question !== '' ? [{ kind: 'text' as const, ref: question }] : []),
     ...(opts.evidence ?? []),
-  ]
+  ];
   const candidate: CaptureCandidate = {
     lesson,
     trigger: opts.trigger,
@@ -432,30 +425,30 @@ export function recordProbeAnswer(opts: RecordProbeOptions): RecordProbeResult {
     // on a merge the existing rule keeps the store, but this question's
     // terms must still index it — a repeat probe should find it
     mergeTrigger: true,
-  }
+  };
   // plan→apply is one critical section — the store lock keeps a
   // concurrent probe/capture from overwriting this write's merged
   // evidence between the plan's read and apply's write
   const plan = withStoreLock(dir, () => {
-    const p = planCapture([candidate], dir)
+    const p = planCapture([candidate], dir);
     if (p.skipped.length > 0) {
-      const s = p.skipped[0]!
-      throw new LessonStoreError(`${s.reason} — the answer was not stored`)
+      const s = p.skipped[0]!;
+      throw new LessonStoreError(`${s.reason} — the answer was not stored`);
     }
-    applyCapture(p, dir)
-    return p
-  })
-  const written = plan.write[0]?.lesson ?? plan.merge[0]?.lesson
+    applyCapture(p, dir);
+    return p;
+  });
+  const written = plan.write[0]?.lesson ?? plan.merge[0]?.lesson;
   if (written === undefined) {
     // nothing written and nothing merged: the same probe evidence was
     // already folded in — report the stored lesson as-is
-    const existing = listLessons(dir).lessons.find((l) => l.id === lessonId(lesson))
+    const existing = listLessons(dir).lessons.find(l => l.id === lessonId(lesson));
     if (existing === undefined) {
-      throw new LessonStoreError('probe answer produced no store write')
+      throw new LessonStoreError('probe answer produced no store write');
     }
-    return { lesson: existing, merged: true }
+    return { lesson: existing, merged: true };
   }
-  return { lesson: written, merged: plan.merge.length > 0 }
+  return { lesson: written, merged: plan.merge.length > 0 };
 }
 
 /** The default trigger for a probe answer — the question's terms index
@@ -463,9 +456,9 @@ export function recordProbeAnswer(opts: RecordProbeOptions): RecordProbeResult {
  *  is exactly what should fire it. Explicit --on/--match-* flags
  *  override at the CLI layer. */
 export function probeTrigger(question: string): LessonTrigger | undefined {
-  const terms = probeTerms(question)
+  const terms = probeTerms(question);
   if (terms.length === 0) {
-    return undefined
+    return undefined;
   }
-  return { on: ['session-start', 'prompt-submit'], match: { terms } }
+  return { on: ['session-start', 'prompt-submit'], match: { terms } };
 }

@@ -4,7 +4,7 @@
  * domain mapping: MR discussions are threads, head-pipeline jobs+bridges
  * are checks, diff versions are reviewed SHAs.
  */
-import { gitTry } from '@broject/core'
+import { gitTry } from '@broject/core';
 import type {
   ApprovalVerdict,
   CheckInfo,
@@ -18,14 +18,13 @@ import type {
   ReviewFacade,
   ReviewThread,
   ScanOpts,
-} from '@broject/core'
-import type { GlabOpts } from './glab.ts'
-import { glab, glabJson, glabJsonAsync, glabPaged, glabPagedAsync, glabTry } from './glab.ts'
+} from '@broject/core';
+import type { GlabOpts } from './glab.ts';
+import { glab, glabJson, glabJsonAsync, glabPaged, glabPagedAsync, glabTry } from './glab.ts';
 
 // `repo` is a project path — GitLab nests (group/sub/project), so it is
 // opaque here and URL-encoded once at the API boundary.
-const api = (repo: string, path: string): string =>
-  `projects/${encodeURIComponent(repo)}/${path}`
+const api = (repo: string, path: string): string => `projects/${encodeURIComponent(repo)}/${path}`;
 
 /** The approvals endpoint's payload — `approved` is the aggregate
  *  verdict, `approved_by[].user` the per-actor identity the human
@@ -38,15 +37,15 @@ const api = (repo: string, path: string): string =>
  *  (a reviewer's objection lands as an unresolved resolvable
  *  discussion), which blocks before this probe is even consulted. */
 type ApprovalsDoc = {
-  approved?: boolean
-  approved_by?: { user?: { bot?: boolean; username?: string } }[]
-  sha?: string
-}
+  approved?: boolean;
+  approved_by?: { user?: { bot?: boolean; username?: string } }[];
+  sha?: string;
+};
 
 const approvalsArgs = (t: PrTarget): string[] => [
   'api',
   api(t.repo, `merge_requests/${t.pr}/approvals`),
-]
+];
 
 /** 'approved by a trusted human' — the aggregate verdict counts
  *  bot/service approvals, so act.requireApproval keeps only non-bot
@@ -57,56 +56,51 @@ const approvalsArgs = (t: PrTarget): string[] => [
  *  still reports the doc's `sha` when the host sends it, so the state
  *  fetch can refuse a verdict read against a moved head. */
 function approvalVerdict(res: ApprovalsDoc, approvers: readonly string[]): ApprovalVerdict {
-  const trusted = new Set(
-    approvers.map((a) => a.trim().toLowerCase()).filter((a) => a !== '')
-  )
-  const records = res.approved_by ?? []
+  const trusted = new Set(approvers.map(a => a.trim().toLowerCase()).filter(a => a !== ''));
+  const records = res.approved_by ?? [];
   // `bot !== true` alone can't prove human — a service account whose
   // record lacks the flag is indistinguishable from a person, so the
   // generated bot usernames fail closed too; the allowlist stays the
   // real boundary for everything else
   const humans = records.filter(
-    (a) =>
-      a.user?.bot !== true &&
-      typeof a.user?.username === 'string' &&
-      !isBotName(a.user.username)
-  )
-  const qualifying = humans.filter((a) => {
-    const login = a.user?.username?.toLowerCase() ?? ''
-    return trusted.size === 0 || trusted.has(login)
-  })
+    a => a.user?.bot !== true && typeof a.user?.username === 'string' && !isBotName(a.user.username)
+  );
+  const qualifying = humans.filter(a => {
+    const login = a.user?.username?.toLowerCase() ?? '';
+    return trusted.size === 0 || trusted.has(login);
+  });
   // one payload answers both probes: the aggregate pre-filter verdict
   // (reviewDecision) plus the bound head — absent fields stay absent
   // rather than deep-equal-breaking undefined keys
   const base: Pick<ApprovalVerdict, 'hostApproved' | 'headSha'> = {
     hostApproved: res.approved === true && records.length > 0,
     ...(res.sha !== undefined ? { headSha: res.sha } : {}),
-  }
+  };
   if (res.approved === true && qualifying.length > 0) {
-    return { approved: true, ...base }
+    return { approved: true, ...base };
   }
   if (humans.length === 0) {
     return {
       approved: false,
       ...base,
       reason: records.length === 0 ? 'no attributable approvals' : 'bot-only approvals',
-    }
+    };
   }
   if (qualifying.length === 0) {
-    return { approved: false, ...base, reason: 'approvals only from logins outside act.approvers' }
+    return { approved: false, ...base, reason: 'approvals only from logins outside act.approvers' };
   }
   return {
     approved: false,
     ...base,
     reason: 'approval rules unmet — the MR is not fully approved',
-  }
+  };
 }
 
 // --- repo / host ------------------------------------------------------------
 
 function remoteUrl(dir: string): string | undefined {
-  const r = gitTry(['-C', dir, 'remote', 'get-url', 'origin'])
-  return r.code === 0 && r.out.trim() !== '' ? r.out.trim() : undefined
+  const r = gitTry(['-C', dir, 'remote', 'get-url', 'origin']);
+  return r.code === 0 && r.out.trim() !== '' ? r.out.trim() : undefined;
 }
 
 /** host + path split for GitLab remotes — https, ssh:// and scp-style
@@ -114,53 +108,52 @@ function remoteUrl(dir: string): string | undefined {
  *  present, stays on the host so self-hosted URLs still build. */
 function remoteParts(url: string): { host: string; path: string } | null {
   const m =
-    /^(?:https?|ssh):\/\/([^/]+)\/(.+?)\/?$/i.exec(url) ??
-    /^[^@\s]+@([^:/]+):(.+?)\/?$/.exec(url)
+    /^(?:https?|ssh):\/\/([^/]+)\/(.+?)\/?$/i.exec(url) ?? /^[^@\s]+@([^:/]+):(.+?)\/?$/.exec(url);
   if (!m) {
-    return null
+    return null;
   }
-  return { host: m[1]!.toLowerCase(), path: m[2]!.replace(/\.git$/, '') }
+  return { host: m[1]!.toLowerCase(), path: m[2]!.replace(/\.git$/, '') };
 }
 
 /** The GitLab host a dir points at — the origin remote's authority, the
  *  user's GITLAB_HOST (a URL or bare host) when there is no remote, else
  *  gitlab.com. */
 export function hostFor(dir: string): string {
-  const url = remoteUrl(dir)
-  const parts = url === undefined ? null : remoteParts(url)
-  const envHost = process.env.GITLAB_HOST?.replace(/^https?:\/\//i, '').replace(/\/.*$/, '')
-  return parts?.host ?? envHost ?? 'gitlab.com'
+  const url = remoteUrl(dir);
+  const parts = url === undefined ? null : remoteParts(url);
+  const envHost = process.env.GITLAB_HOST?.replace(/^https?:\/\//i, '').replace(/\/.*$/, '');
+  return parts?.host ?? envHost ?? 'gitlab.com';
 }
 
 // --- MR rows -----------------------------------------------------------------
 
 interface MrRow {
-  iid: number
-  state?: string // opened | locked | merged | closed
-  draft?: boolean
-  work_in_progress?: boolean
-  title?: string
-  web_url?: string
-  sha?: string // head sha
-  source_branch?: string
-  target_branch?: string
-  merge_status?: string // pre-15.6 compute flag
-  detailed_merge_status?: string // 15.6+ verdict
-  labels?: string[]
+  iid: number;
+  state?: string; // opened | locked | merged | closed
+  draft?: boolean;
+  work_in_progress?: boolean;
+  title?: string;
+  web_url?: string;
+  sha?: string; // head sha
+  source_branch?: string;
+  target_branch?: string;
+  merge_status?: string; // pre-15.6 compute flag
+  detailed_merge_status?: string; // 15.6+ verdict
+  labels?: string[];
   /** MR description — the bro trailer's carrier (spec bro-c650l). */
-  description?: string
-  updated_at?: string | null
-  merged_at?: string | null
-  merge_commit_sha?: string | null
-  squash_commit_sha?: string | null
+  description?: string;
+  updated_at?: string | null;
+  merged_at?: string | null;
+  merge_commit_sha?: string | null;
+  squash_commit_sha?: string | null;
   /** Current diff refs — a note whose position.head_sha differs from
    *  diff_refs.head_sha is on an old diff = outdated. */
-  diff_refs?: { head_sha?: string }
-  author?: { username?: string }
+  diff_refs?: { head_sha?: string };
+  author?: { username?: string };
 }
 
 const toState = (s: string | undefined): string =>
-  s === 'opened' || s === 'locked' ? 'OPEN' : (s ?? 'unknown').toUpperCase()
+  s === 'opened' || s === 'locked' ? 'OPEN' : (s ?? 'unknown').toUpperCase();
 
 /** `detailed_merge_status` conflates conflicts with workflow blocks (CI
  *  pending, missing approvals, unresolved discussions). The facade's
@@ -168,43 +161,43 @@ const toState = (s: string | undefined): string =>
  *  own signals — so anything non-conflict that finished computing maps
  *  to MERGEABLE. */
 function toMergeable(mr: MrRow): string {
-  const d = mr.detailed_merge_status
+  const d = mr.detailed_merge_status;
   if (d) {
     if (d === 'conflict') {
-      return 'CONFLICTING'
+      return 'CONFLICTING';
     }
     if (d === 'checking' || d === 'unchecked' || d === 'broken_status') {
-      return 'UNKNOWN'
+      return 'UNKNOWN';
     }
-    return 'MERGEABLE'
+    return 'MERGEABLE';
   }
   // legacy merge_status — the pre-detailed_compute flag
-  const legacy = mr.merge_status ?? ''
+  const legacy = mr.merge_status ?? '';
   if (legacy === 'can_be_merged') {
-    return 'MERGEABLE'
+    return 'MERGEABLE';
   }
   if (legacy === 'cannot_be_merged') {
-    return 'CONFLICTING'
+    return 'CONFLICTING';
   }
-  return 'UNKNOWN'
+  return 'UNKNOWN';
 }
 
 /** `mergeState`'s only read is BEHIND (act wait's update-branch path) —
  *  `need_rebase` is GitLab's BEHIND; `mergeable` reports as CLEAN like
  *  GitHub, everything else passes through uppercased. */
 function toMergeState(mr: MrRow): string {
-  const d = mr.detailed_merge_status
+  const d = mr.detailed_merge_status;
   if (d === 'need_rebase') {
-    return 'BEHIND'
+    return 'BEHIND';
   }
   if (d === 'mergeable') {
-    return 'CLEAN'
+    return 'CLEAN';
   }
-  return (d || 'unknown').toUpperCase()
+  return (d || 'unknown').toUpperCase();
 }
 
 const isDraft = (mr: MrRow): boolean =>
-  mr.draft === true || mr.work_in_progress === true || /^draft:/i.test(mr.title ?? '')
+  mr.draft === true || mr.work_in_progress === true || /^draft:/i.test(mr.title ?? '');
 
 const toMergedPr = (row: MrRow & { merged_at: string }): MergedPr => ({
   number: row.iid,
@@ -214,44 +207,44 @@ const toMergedPr = (row: MrRow & { merged_at: string }): MergedPr => ({
   labels: row.labels ?? [],
   headRef: row.source_branch ?? '',
   headSha: row.sha ?? '',
-})
+});
 
 // --- threads: discussions -----------------------------------------------------
 
 interface GlNote {
-  id?: number
-  body?: string
-  type?: string | null
-  resolvable?: boolean
-  resolved?: boolean
-  system?: boolean
+  id?: number;
+  body?: string;
+  type?: string | null;
+  resolvable?: boolean;
+  resolved?: boolean;
+  system?: boolean;
   /** false on diff notes whose line left the diff — GitLab's "outdated".
    *  Not reliably serialized on older GitLab versions, so the
    *  position.head_sha vs diff_refs.head_sha comparison below is the
    *  primary signal and this is the fallback. */
-  active?: boolean
-  created_at?: string
-  author?: { username?: string; name?: string }
+  active?: boolean;
+  created_at?: string;
+  author?: { username?: string; name?: string };
   position?: {
-    new_path?: string
-    old_path?: string
-    new_line?: number | null
-    old_line?: number | null
-    head_sha?: string
-  } | null
+    new_path?: string;
+    old_path?: string;
+    new_line?: number | null;
+    old_line?: number | null;
+    head_sha?: string;
+  } | null;
 }
 
 interface GlDiscussion {
-  id: string
-  individual_note?: boolean
-  notes?: GlNote[]
+  id: string;
+  individual_note?: boolean;
+  notes?: GlNote[];
 }
 
 /** Project/group bot usernames are `project_<id>_bot_<suffix>` /
  *  `group_<id>_bot_<suffix>`; GitHub-style `[bot]` names show up on
  *  mirrored apps too. */
 const isBotName = (username: string): boolean =>
-  /^(?:project|group)_\d+_bot(?:_|$)/.test(username) || username.endsWith('[bot]')
+  /^(?:project|group)_\d+_bot(?:_|$)/.test(username) || username.endsWith('[bot]');
 
 /** Thread ids are COMPOSITE — `repo/iid/discussion-id`. GitHub's node ids
  *  are globally addressable; a GitLab discussion needs its project and MR
@@ -260,56 +253,57 @@ const isBotName = (username: string): boolean =>
  *  an older head is outdated; the `active` flag is the fallback when
  *  either sha is absent. */
 function toThreads(discussions: GlDiscussion[], t: PrTarget, headSha?: string): ReviewThread[] {
-  const out: ReviewThread[] = []
+  const out: ReviewThread[] = [];
   for (const d of discussions) {
-    const notes = (d.notes ?? []).filter((n) => n.system !== true)
-    const first = notes[0]
+    const notes = (d.notes ?? []).filter(n => n.system !== true);
+    const first = notes[0];
     // a resolvable discussion is a review thread; individual notes and
     // unresolvable discussions are MR comments — not threads
     if (d.individual_note === true || first?.resolvable !== true) {
-      continue
+      continue;
     }
-    const posHead = first.position?.head_sha
-    const comments = notes.map((n) => ({
+    const posHead = first.position?.head_sha;
+    const comments = notes.map(n => ({
       author: n.author?.username ?? 'unknown',
       bot: isBotName(n.author?.username ?? ''),
       path: n.position?.new_path ?? n.position?.old_path ?? null,
       line: n.position?.new_line ?? n.position?.old_line ?? null,
       body: n.body ?? '',
       createdAt: n.created_at ?? '',
-    }))
+    }));
     out.push({
       id: `${t.repo}/${t.pr}/${d.id}`,
-      resolved: notes.every((n) => n.resolvable !== true || n.resolved === true),
+      resolved: notes.every(n => n.resolvable !== true || n.resolved === true),
       outdated:
-        first.active === false || (posHead !== undefined && headSha !== undefined && posHead !== headSha),
+        first.active === false ||
+        (posHead !== undefined && headSha !== undefined && posHead !== headSha),
       comment: comments[0] ?? null,
       comments,
-    })
+    });
   }
-  return out
+  return out;
 }
 
 function parseThreadId(id: string): { repo: string; iid: number; did: string } {
-  const m = /^(.+)\/(\d+)\/([\w-]+)$/.exec(id)
+  const m = /^(.+)\/(\d+)\/([\w-]+)$/.exec(id);
   if (!m) {
-    throw new Error(`bad thread id "${id}" — expected repo/iid/discussion-id`)
+    throw new Error(`bad thread id "${id}" — expected repo/iid/discussion-id`);
   }
-  return { repo: m[1]!, iid: Number(m[2]), did: m[3]! }
+  return { repo: m[1]!, iid: Number(m[2]), did: m[3]! };
 }
 
 // --- checks: pipelines ---------------------------------------------------------
 
 interface PipelineRow {
-  id?: number
-  sha?: string
-  status?: string
+  id?: number;
+  sha?: string;
+  status?: string;
 }
 
 interface JobRow {
-  id?: number
-  name?: string
-  status?: string
+  id?: number;
+  name?: string;
+  status?: string;
 }
 
 const BUCKET: Record<string, string> = {
@@ -318,7 +312,7 @@ const BUCKET: Record<string, string> = {
   canceled: 'cancel',
   skipped: 'skipping',
   manual: 'skipping',
-}
+};
 // created | waiting_for_resource | preparing | pending | running |
 // scheduled → pending (default)
 
@@ -326,14 +320,14 @@ const BUCKET: Record<string, string> = {
  *  the win is overlapping `glab` processes. A cap <= 0 clamps to one
  *  serial worker — zero workers would silently process nothing. */
 async function pooled<T>(items: T[], cap: number, fn: (item: T) => Promise<void>): Promise<void> {
-  let next = 0
+  let next = 0;
   await Promise.all(
     Array.from({ length: Math.max(1, Math.min(cap, items.length)) }, async () => {
       while (next < items.length) {
-        await fn(items[next++]!) // NOSONAR — serial within a worker; the workers overlap
+        await fn(items[next++]!); // NOSONAR — serial within a worker; the workers overlap
       }
     })
-  )
+  );
 }
 
 /** The ReviewFacade bound to a dir — `glab api` runs there so project
@@ -341,19 +335,19 @@ async function pooled<T>(items: T[], cap: number, fn: (item: T) => Promise<void>
  *  so a configured self-hosted instance is hit deterministically even
  *  when glab's own repo detection can't see it. */
 export function gitlabReview(dir: string = process.cwd()): ReviewFacade {
-  let host: string | undefined
-  const hostOnce = (): string => (host ??= hostFor(dir))
-  const gopts = (): GlabOpts => ({ cwd: dir, env: { GITLAB_HOST: hostOnce() } })
+  let host: string | undefined;
+  const hostOnce = (): string => (host ??= hostFor(dir));
+  const gopts = (): GlabOpts => ({ cwd: dir, env: { GITLAB_HOST: hostOnce() } });
   const link = (repo: string, pr: number): string =>
-    `[#${pr}](https://${hostOnce()}/${repo}/-/merge_requests/${pr})`
+    `[#${pr}](https://${hostOnce()}/${repo}/-/merge_requests/${pr})`;
 
   function getMr(t: PrTarget): MrRow {
     try {
-      return glabJson<MrRow>(['api', api(t.repo, `merge_requests/${t.pr}`)], gopts())
+      return glabJson<MrRow>(['api', api(t.repo, `merge_requests/${t.pr}`)], gopts());
     } catch (err) {
       throw new Error(
         `merge request ${link(t.repo, t.pr)}: ${err instanceof Error ? err.message : err}`
-      )
+      );
     }
   }
 
@@ -361,18 +355,18 @@ export function gitlabReview(dir: string = process.cwd()): ReviewFacade {
     if (positional.length > 0) {
       // positionals join — a nested path arrives as either 'a/b/c' or
       // `a b c`, both mean the same project
-      return positional.join('/')
+      return positional.join('/');
     }
-    const url = remoteUrl(dir)
-    const path = url === undefined ? null : remoteParts(url)?.path
+    const url = remoteUrl(dir);
+    const path = url === undefined ? null : remoteParts(url)?.path;
     if (!path) {
-      throw new Error('no GitLab remote — pass GROUP/PROJECT or add an origin remote')
+      throw new Error('no GitLab remote — pass GROUP/PROJECT or add an origin remote');
     }
-    return path
+    return path;
   }
 
   function prMeta(t: PrTarget): PrMeta {
-    const mr = getMr(t)
+    const mr = getMr(t);
     return {
       state: toState(mr.state),
       isDraft: isDraft(mr),
@@ -382,47 +376,47 @@ export function gitlabReview(dir: string = process.cwd()): ReviewFacade {
       baseRef: mr.target_branch ?? '',
       mergeable: toMergeable(mr),
       mergeState: toMergeState(mr),
-    }
+    };
   }
 
   function checks(t: PrTarget, _requiredOnly = false): CheckInfo[] {
     // requiredOnly can't narrow: GitLab requiredness is project-level
     // ("pipeline must succeed"), not per-job — every job counts.
-    const head = getMr(t).sha ?? ''
-    const pipes = glabPaged<PipelineRow>(api(t.repo, `merge_requests/${t.pr}/pipelines`), gopts())
+    const head = getMr(t).sha ?? '';
+    const pipes = glabPaged<PipelineRow>(api(t.repo, `merge_requests/${t.pr}/pipelines`), gopts());
     // the pipeline must belong to the MR's HEAD — pipes[0] could be an
     // older commit, and stale jobs are not the current check state
-    const pipe = pipes.find((p) => p.sha === head)
+    const pipe = pipes.find(p => p.sha === head);
     if (!pipe?.id) {
-      return []
+      return [];
     }
     const jobs = glabPaged<JobRow>(
       `projects/${encodeURIComponent(t.repo)}/pipelines/${pipe.id}/jobs`,
       gopts()
-    )
+    );
     const bridges = glabPaged<JobRow>(
       `projects/${encodeURIComponent(t.repo)}/pipelines/${pipe.id}/bridges`,
       gopts()
-    )
-    return [...jobs, ...bridges].map((j) => ({
+    );
+    return [...jobs, ...bridges].map(j => ({
       name: j.name ?? `job-${j.id ?? '?'}`,
       state: (j.status ?? 'unknown').toUpperCase(),
       bucket: BUCKET[j.status ?? ''] ?? 'pending',
-    }))
+    }));
   }
 
   function reviewedShas(t: PrTarget): string[] {
     // MR diff versions — one per push that entered review
-    const shas = new Set<string>()
+    const shas = new Set<string>();
     for (const v of glabPaged<{ head_commit_sha?: string }>(
       api(t.repo, `merge_requests/${t.pr}/versions`),
       gopts()
     )) {
       if (v.head_commit_sha) {
-        shas.add(v.head_commit_sha)
+        shas.add(v.head_commit_sha);
       }
     }
-    return [...shas]
+    return [...shas];
   }
 
   async function reviewThreads(t: PrTarget): Promise<ReviewThread[]> {
@@ -431,86 +425,86 @@ export function gitlabReview(dir: string = process.cwd()): ReviewFacade {
     const [mr, discussions] = await Promise.all([
       glabJsonAsync<MrRow>(['api', api(t.repo, `merge_requests/${t.pr}`)], gopts()),
       glabPagedAsync<GlDiscussion>(api(t.repo, `merge_requests/${t.pr}/discussions`), gopts()),
-    ])
-    return toThreads(discussions, t, mr.diff_refs?.head_sha)
+    ]);
+    return toThreads(discussions, t, mr.diff_refs?.head_sha);
   }
 
   // --- merged MRs ---------------------------------------------------------------
 
   function mergedPrInfo(t: PrTarget, mergeSha?: string): MergedPrInfo {
-    const mr = getMr(t)
+    const mr = getMr(t);
     if (mr.state !== 'merged') {
-      throw new Error(`MR ${link(t.repo, t.pr)} is not merged (state=${mr.state})`)
+      throw new Error(`MR ${link(t.repo, t.pr)} is not merged (state=${mr.state})`);
     }
     if (!mr.merged_at) {
-      throw new Error(`MR ${link(t.repo, t.pr)} is merged but reports no merged_at`)
+      throw new Error(`MR ${link(t.repo, t.pr)} is merged but reports no merged_at`);
     }
     return {
       title: mr.title ?? '',
       url: mr.web_url ?? `https://${hostOnce()}/${t.repo}/-/merge_requests/${t.pr}`,
       mergedAt: mr.merged_at,
       mergeSha: mergeSha || mr.merge_commit_sha || mr.squash_commit_sha || '',
-    }
+    };
   }
 
   function listMergedPrs(repo: string, q: MergedPrQuery): MergedPr[] {
-    let endpoint = api(repo, 'merge_requests?state=merged&order_by=updated_at')
+    let endpoint = api(repo, 'merge_requests?state=merged&order_by=updated_at');
     if (q.author) {
-      endpoint += `&author_username=${encodeURIComponent(q.author)}`
+      endpoint += `&author_username=${encodeURIComponent(q.author)}`;
     }
     if (q.label) {
-      endpoint += `&labels=${encodeURIComponent(q.label)}`
+      endpoint += `&labels=${encodeURIComponent(q.label)}`;
     }
     if (q.mergedSince) {
       // server-side cutoff — the list caps by updated_at, so a
       // merged_at filter applied after the cap would lose eligible MRs
-      endpoint += `&merged_after=${encodeURIComponent(q.mergedSince)}`
+      endpoint += `&merged_after=${encodeURIComponent(q.mergedSince)}`;
     }
     return glabPaged<MrRow>(endpoint, { ...gopts(), limit: q.limit ?? 100 })
       .filter((row): row is MrRow & { merged_at: string } => row.merged_at != null)
-      .map(toMergedPr)
+      .map(toMergedPr);
   }
 
   function explicitMergedPrs(repo: string, ids: number[]): MergedPr[] {
-    const out: MergedPr[] = []
-    const failures: unknown[] = []
+    const out: MergedPr[] = [];
+    const failures: unknown[] = [];
     // Dedup at the facade — duplicate ids would produce duplicate rows
     // that double-count in consumer aggregations.
-    const unique = [...new Set(ids)]
+    const unique = [...new Set(ids)];
     for (const number of unique) {
       try {
-        const mr = getMr({ repo, pr: number })
+        const mr = getMr({ repo, pr: number });
         if (mr.state !== 'merged' || !mr.merged_at) {
-          console.error(`warning: MR ${link(repo, number)} is not merged — skipped`)
-          continue
+          console.error(`warning: MR ${link(repo, number)} is not merged — skipped`);
+          continue;
         }
-        out.push(toMergedPr({ ...mr, merged_at: mr.merged_at }))
+        out.push(toMergedPr({ ...mr, merged_at: mr.merged_at }));
       } catch (err) {
-        failures.push(err)
+        failures.push(err);
         console.error(
           `warning: MR ${link(repo, number)} fetch failed — ` +
             `${err instanceof Error ? err.message : err}`
-        )
+        );
       }
     }
     // Every fetch failing is one outage (auth, network, repo gone, no
     // glab on PATH), not N unmerged MRs — an empty return would read as
     // "all ids unmerged" and silently empty the caller's selection.
     if (failures.length > 0 && failures.length === unique.length) {
-      const first = failures[0]
+      const first = failures[0];
       throw new Error(
         `all ${unique.length} MR fetch(es) failed: ` +
           (first instanceof Error ? first.message : String(first))
-      )
+      );
     }
-    return out
+    return out;
   }
 
   function mergedPrs(repo: string, q: MergedPrQuery = {}): MergedPr[] {
     if (q.ids !== undefined) {
-      return explicitMergedPrs(repo, q.ids)
+      return explicitMergedPrs(repo, q.ids);
     }
-    return listMergedPrs(repo, q)
+    return listMergedPrs(repo, q);
   }
 
   // --- bulk probes ----------------------------------------------------------------
@@ -522,14 +516,17 @@ export function gitlabReview(dir: string = process.cwd()): ReviewFacade {
     targets: PrTarget[],
     opts?: ScanOpts
   ): Promise<Map<number, MergedPrScan>> {
-    const out = new Map<number, MergedPrScan>()
-    let done = 0
-    await pooled(targets, opts?.concurrency ?? 4, async (t) => {
+    const out = new Map<number, MergedPrScan>();
+    let done = 0;
+    await pooled(targets, opts?.concurrency ?? 4, async t => {
       try {
-        const mr = await glabJsonAsync<MrRow>(['api', api(t.repo, `merge_requests/${t.pr}`)], gopts())
+        const mr = await glabJsonAsync<MrRow>(
+          ['api', api(t.repo, `merge_requests/${t.pr}`)],
+          gopts()
+        );
         // non-merged/missing MRs stay out — the serial fallback decides
         if (mr.state !== 'merged' || !mr.merged_at) {
-          return
+          return;
         }
         const threads = toThreads(
           await glabPagedAsync<GlDiscussion>(
@@ -538,7 +535,7 @@ export function gitlabReview(dir: string = process.cwd()): ReviewFacade {
           ),
           t,
           mr.diff_refs?.head_sha
-        )
+        );
         out.set(t.pr, {
           info: {
             title: mr.title ?? '',
@@ -549,18 +546,18 @@ export function gitlabReview(dir: string = process.cwd()): ReviewFacade {
           threads,
           labels: mr.labels ?? [],
           updatedAt: mr.updated_at ?? null,
-        })
+        });
       } catch (err) {
         console.error(
           `warning: bulk scan of ${link(t.repo, t.pr)} failed — ` +
             `${err instanceof Error ? err.message : err}`
-        )
+        );
       } finally {
-        done += 1
-        opts?.onProgress?.(done, targets.length)
+        done += 1;
+        opts?.onProgress?.(done, targets.length);
       }
-    })
-    return out
+    });
+    return out;
   }
 
   /** Pooled label writes — one PUT does add+remove and its response IS
@@ -570,27 +567,27 @@ export function gitlabReview(dir: string = process.cwd()): ReviewFacade {
     ops: PrLabelOp[],
     opts?: { concurrency?: number }
   ): Promise<Map<number, string | null>> {
-    const out = new Map<number, string | null>()
-    await pooled(ops, opts?.concurrency ?? 4, async (op) => {
-      const args = ['api', '-X', 'PUT', api(op.t.repo, `merge_requests/${op.t.pr}`)]
+    const out = new Map<number, string | null>();
+    await pooled(ops, opts?.concurrency ?? 4, async op => {
+      const args = ['api', '-X', 'PUT', api(op.t.repo, `merge_requests/${op.t.pr}`)];
       if (op.add.length > 0) {
-        args.push('-f', `add_labels=${op.add.join(',')}`)
+        args.push('-f', `add_labels=${op.add.join(',')}`);
       }
       if (op.remove.length > 0) {
-        args.push('-f', `remove_labels=${op.remove.join(',')}`)
+        args.push('-f', `remove_labels=${op.remove.join(',')}`);
       }
       try {
-        const mr = await glabJsonAsync<MrRow>(args, gopts())
-        out.set(op.t.pr, mr.updated_at ?? null)
+        const mr = await glabJsonAsync<MrRow>(args, gopts());
+        out.set(op.t.pr, mr.updated_at ?? null);
       } catch (err) {
         // a failed write leaves the MR unlabeled — next collect rescans it
         console.error(
           `warning: label write on ${link(op.t.repo, op.t.pr)} failed — ` +
             `${err instanceof Error ? err.message : err}`
-        )
+        );
       }
-    })
-    return out
+    });
+    return out;
   }
 
   return {
@@ -601,13 +598,13 @@ export function gitlabReview(dir: string = process.cwd()): ReviewFacade {
       // most recently updated open MR for the checked-out branch is the
       // answer, else the latest in any state (callers check state).
       try {
-        const b = gitTry(['-C', dir, 'branch', '--show-current'])
-        const branch = b.code === 0 ? b.out.trim() : ''
+        const b = gitTry(['-C', dir, 'branch', '--show-current']);
+        const branch = b.code === 0 ? b.out.trim() : '';
         if (branch === '') {
-          return null
+          return null;
         }
-        const repo = resolveRepo([])
-        const enc = encodeURIComponent(branch)
+        const repo = resolveRepo([]);
+        const enc = encodeURIComponent(branch);
         const open = glabJson<MrRow[]>(
           [
             'api',
@@ -617,19 +614,22 @@ export function gitlabReview(dir: string = process.cwd()): ReviewFacade {
             ),
           ],
           gopts()
-        )
+        );
         const mr =
           open[0] ??
           glabJson<MrRow[]>(
-            ['api', api(repo, `merge_requests?source_branch=${enc}&order_by=updated_at&per_page=1`)],
+            [
+              'api',
+              api(repo, `merge_requests?source_branch=${enc}&order_by=updated_at&per_page=1`),
+            ],
             gopts()
-          )[0]
+          )[0];
         if (!mr) {
-          return null
+          return null;
         }
-        return { pr: mr.iid, state: toState(mr.state), url: mr.web_url ?? '' }
+        return { pr: mr.iid, state: toState(mr.state), url: mr.web_url ?? '' };
       } catch {
-        return null
+        return null;
       }
     },
     prsForBranch(branch, state) {
@@ -639,7 +639,7 @@ export function gitlabReview(dir: string = process.cwd()): ReviewFacade {
           `merge_requests?source_branch=${encodeURIComponent(branch)}&state=${state === 'all' ? 'all' : 'opened'}`
         ),
         gopts()
-      ).map((m) => m.iid)
+      ).map(m => m.iid);
     },
     openPrs(repo) {
       return glabPaged<MrRow>(
@@ -649,12 +649,22 @@ export function gitlabReview(dir: string = process.cwd()): ReviewFacade {
         // bounded like github's `--limit 500` — the facade contract is
         // one listing page, never an unbounded page loop on a big repo
         { ...gopts(), limit: 500 }
-      ).map((m) => ({ pr: m.iid, headRef: m.source_branch ?? '' }))
+      ).map(m => ({ pr: m.iid, headRef: m.source_branch ?? '' }));
     },
     parsePrRef(text) {
-      const host = hostOnce().replace(/[.*+?^${}()|[\]\\]/g, String.raw`\$&`)
-      const m = new RegExp(String.raw`${host}/([\w./-]+?)/-/merge_requests/(\d+)`, 'i').exec(text)
-      return m ? { repo: m[1]!, pr: Number(m[2]) } : null
+      // no `new RegExp(dynamic)` — a non-literal constructor trips the
+      // Codacy gate (and the host needs no escaping when it is matched
+      // with indexOf, not interpolated into a pattern): locate the raw
+      // host case-insensitively, then parse the tail with a literal.
+      const marker = `${hostOnce()}/`;
+      const lower = text.toLowerCase();
+      const needle = marker.toLowerCase();
+      const tail = /^([\w./-]+?)\/-\/merge_requests\/(\d+)/i;
+      for (let at = lower.indexOf(needle); at >= 0; at = lower.indexOf(needle, at + 1)) {
+        const m = tail.exec(text.slice(at + marker.length));
+        if (m) return { repo: m[1]!, pr: Number(m[2]) };
+      }
+      return null;
     },
     prMeta,
     reviewDecision(t) {
@@ -664,22 +674,18 @@ export function gitlabReview(dir: string = process.cwd()): ReviewFacade {
       // approved_by means "no approvals required", not a review — the
       // verdict needs an actual approver (bro-3vy93)
       try {
-        const res = glabJson<ApprovalsDoc>(approvalsArgs(t), gopts())
-        return res.approved === true && (res.approved_by?.length ?? 0) > 0
-          ? 'APPROVED'
-          : undefined
+        const res = glabJson<ApprovalsDoc>(approvalsArgs(t), gopts());
+        return res.approved === true && (res.approved_by?.length ?? 0) > 0 ? 'APPROVED' : undefined;
       } catch {
-        return undefined
+        return undefined;
       }
     },
     async reviewDecisionAsync(t) {
       try {
-        const res = await glabJsonAsync<ApprovalsDoc>(approvalsArgs(t), gopts())
-        return res.approved === true && (res.approved_by?.length ?? 0) > 0
-          ? 'APPROVED'
-          : undefined
+        const res = await glabJsonAsync<ApprovalsDoc>(approvalsArgs(t), gopts());
+        return res.approved === true && (res.approved_by?.length ?? 0) > 0 ? 'APPROVED' : undefined;
       } catch {
-        return undefined
+        return undefined;
       }
     },
     humanApproved(t, opts) {
@@ -688,18 +694,18 @@ export function gitlabReview(dir: string = process.cwd()): ReviewFacade {
       // flagged bot (absent flag reads as a normal account); a failed
       // read is 'unanswerable', which the gate never reads as a pass
       try {
-        const res = glabJson<ApprovalsDoc>(approvalsArgs(t), gopts())
-        return approvalVerdict(res, opts?.approvers ?? [])
+        const res = glabJson<ApprovalsDoc>(approvalsArgs(t), gopts());
+        return approvalVerdict(res, opts?.approvers ?? []);
       } catch {
-        return { approved: false, reason: 'unanswerable — approvals probe failed' }
+        return { approved: false, reason: 'unanswerable — approvals probe failed' };
       }
     },
     async humanApprovedAsync(t, opts) {
       try {
-        const res = await glabJsonAsync<ApprovalsDoc>(approvalsArgs(t), gopts())
-        return approvalVerdict(res, opts?.approvers ?? [])
+        const res = await glabJsonAsync<ApprovalsDoc>(approvalsArgs(t), gopts());
+        return approvalVerdict(res, opts?.approvers ?? []);
       } catch {
-        return { approved: false, reason: 'unanswerable — approvals probe failed' }
+        return { approved: false, reason: 'unanswerable — approvals probe failed' };
       }
     },
     mergedPrInfo,
@@ -710,7 +716,7 @@ export function gitlabReview(dir: string = process.cwd()): ReviewFacade {
     checkAnnotations() {
       // GitLab jobs have no annotations endpoint — an absent key already
       // means exactly that in the contract, so the map stays empty.
-      return new Map<string, number | null>()
+      return new Map<string, number | null>();
     },
     reviewedShas,
 
@@ -720,34 +726,36 @@ export function gitlabReview(dir: string = process.cwd()): ReviewFacade {
       const files = glabPaged<{ new_path?: string; old_path?: string }>(
         api(t.repo, `merge_requests/${t.pr}/diffs`),
         gopts()
-      )
-      return files.flatMap((f) =>
-        [...new Set([f.new_path, f.old_path].filter((p): p is string => typeof p === 'string' && p !== ''))]
-      )
+      );
+      return files.flatMap(f => [
+        ...new Set(
+          [f.new_path, f.old_path].filter((p): p is string => typeof p === 'string' && p !== '')
+        ),
+      ]);
     },
     reviewThreads,
     labels(t) {
-      return getMr(t).labels ?? []
+      return getMr(t).labels ?? [];
     },
     prUpdatedAt(t) {
-      return getMr(t).updated_at ?? null
+      return getMr(t).updated_at ?? null;
     },
     prBody(t) {
-      return getMr(t).description ?? ''
+      return getMr(t).description ?? '';
     },
     updatePrBody(t, body) {
       glab(
         ['api', '-X', 'PUT', api(t.repo, `merge_requests/${t.pr}`), '-f', `description=${body}`],
         gopts()
-      )
+      );
     },
     createLabel(repo, name, color) {
       const res = glabTry(
         ['api', '-X', 'POST', api(repo, 'labels'), '-f', `name=${name}`, '-f', `color=${color}`],
         gopts()
-      )
+      );
       if (res.code === 0) {
-        return
+        return;
       }
       // idempotent — "already exists" updates in place via the label
       // resource (name doubles as label_id); the collection-route PUT
@@ -763,26 +771,26 @@ export function gitlabReview(dir: string = process.cwd()): ReviewFacade {
             `color=${color}`,
           ],
           gopts()
-        )
-        return
+        );
+        return;
       }
-      throw new Error(`glab api failed: ${res.err}`)
+      throw new Error(`glab api failed: ${res.err}`);
     },
     addLabel(t, label) {
       glab(
         ['api', '-X', 'PUT', api(t.repo, `merge_requests/${t.pr}`), '-f', `add_labels=${label}`],
         gopts()
-      )
+      );
     },
     removeLabel(t, label) {
       // ensure-absent — remove_labels on an MR without it is a no-op
       glab(
         ['api', '-X', 'PUT', api(t.repo, `merge_requests/${t.pr}`), '-f', `remove_labels=${label}`],
         gopts()
-      )
+      );
     },
     resolveThread(id, unresolve = false) {
-      const t = parseThreadId(id)
+      const t = parseThreadId(id);
       glab(
         [
           'api',
@@ -793,10 +801,10 @@ export function gitlabReview(dir: string = process.cwd()): ReviewFacade {
           `resolved=${unresolve ? 'false' : 'true'}`,
         ],
         gopts()
-      )
+      );
     },
     replyThread(id, body) {
-      const t = parseThreadId(id)
+      const t = parseThreadId(id);
       glab(
         [
           'api',
@@ -807,15 +815,22 @@ export function gitlabReview(dir: string = process.cwd()): ReviewFacade {
           `body=${body}`,
         ],
         gopts()
-      )
+      );
     },
     retargetPr(t, base) {
       return (
         glabTry(
-          ['api', '-X', 'PUT', api(t.repo, `merge_requests/${t.pr}`), '-f', `target_branch=${base}`],
+          [
+            'api',
+            '-X',
+            'PUT',
+            api(t.repo, `merge_requests/${t.pr}`),
+            '-f',
+            `target_branch=${base}`,
+          ],
           gopts()
         ).code === 0
-      )
+      );
     },
     updateBranch(t, expectedHeadSha) {
       // the rebase endpoint takes no expected-sha param — check the head
@@ -823,13 +838,15 @@ export function gitlabReview(dir: string = process.cwd()): ReviewFacade {
       // async (202): the caller re-polls state either way.
       try {
         if ((getMr(t).sha ?? '') !== expectedHeadSha) {
-          return false
+          return false;
         }
       } catch {
-        return false
+        return false;
       }
-      return glabTry(['api', '-X', 'PUT', api(t.repo, `merge_requests/${t.pr}/rebase`)], gopts())
-        .code === 0
+      return (
+        glabTry(['api', '-X', 'PUT', api(t.repo, `merge_requests/${t.pr}/rebase`)], gopts())
+          .code === 0
+      );
     },
     mergePr(t, opts) {
       const args = [
@@ -839,22 +856,22 @@ export function gitlabReview(dir: string = process.cwd()): ReviewFacade {
         api(t.repo, `merge_requests/${t.pr}/merge`),
         '-f',
         `sha=${opts.expectedHeadSha}`, // moved head → 409, fails closed
-      ]
+      ];
       // the merge endpoint takes `squash` but no merge-method param —
       // merge-vs-rebase is project config (merge_method there), so
       // non-squash methods land the project's way.
       if (opts.method === 'squash') {
-        args.push('-f', 'squash=true')
+        args.push('-f', 'squash=true');
       }
       if (opts.deleteBranch) {
-        args.push('-f', 'should_remove_source_branch=true')
+        args.push('-f', 'should_remove_source_branch=true');
       }
       // no admin analog — GitLab's merge API applies project rules
-      console.log(glab(args, gopts()))
+      console.log(glab(args, gopts()));
       // auto-merge accepts an MR without landing it — only the
       // authoritative state tells the caller what actually happened
-      const after = getMr(t)
-      return toState(after.state)
+      const after = getMr(t);
+      return toState(after.state);
     },
-  }
+  };
 }

@@ -69,6 +69,8 @@ import { applyConvoyPlan, runConvoyCommand } from './commands/convoy.ts';
 import { runLoopCommand } from './commands/loop.ts';
 import { applyNextPlan, runNextCommand } from './commands/next.ts';
 import { runNotifyCommand } from './commands/notify.ts';
+import { runOtelCommand } from './commands/otel.ts';
+import { otelSection } from '@broject/otel';
 import { rigSection } from './commands/rig-config.ts';
 import { rigConnector } from './commands/rig-pulse.ts';
 import { runRigCommand } from './commands/rig.ts';
@@ -200,6 +202,7 @@ export const PLUGINS: BroPlugin[] = [
             '--area <a>': 'only findings in this area',
             '--author <u>': 'only findings from this thread author',
           },
+          json: 'schemas/cli/debt-next.schema.json',
           exits: {
             0: 'top open finding emitted',
             1: 'no open findings, or the claim CAS lost',
@@ -232,6 +235,7 @@ export const PLUGINS: BroPlugin[] = [
             1: 'gate blocked — threads/failures remain (usage errors also exit 1 today)',
             2: 'no open PR for the current branch',
           },
+          json: 'schemas/cli/act-status.schema.json',
         },
       },
     },
@@ -263,6 +267,7 @@ export const PLUGINS: BroPlugin[] = [
         '--global': 'read the user-level store instead of the project',
         '--label <a,b>': 'only beads carrying one of these labels are claimable',
       },
+      json: 'schemas/cli/next.schema.json',
       exits: {
         0: 'verdict emitted — task | gated | idle',
         1: 'task store unreachable or classify failed',
@@ -294,6 +299,7 @@ export const PLUGINS: BroPlugin[] = [
         '--live': 'TTY dashboard repaint loop (needs a TTY)',
         '--every N': 'repaint cadence seconds — implies --live',
       },
+      json: 'schemas/cli/fleet.schema.json',
       exits: {
         0: 'fleet printed',
         2: 'usage — --live without TTY, --every out of range, --json + --live',
@@ -345,6 +351,7 @@ export const PLUGINS: BroPlugin[] = [
             '--json': 'agent rows + occupancy + session quota as JSON',
             '--connector <name>': 'pin the agents facade connector',
           },
+          json: 'schemas/cli/agents-status.schema.json',
           exits: {
             0: 'agent plane printed',
             1: 'backend collection failed',
@@ -367,6 +374,7 @@ export const PLUGINS: BroPlugin[] = [
         '--deep':
           'add the act exit gate for the current branch PR — the fast path stays local-only',
       },
+      json: 'schemas/cli/fleet-status.schema.json',
       exits: { 0: 'board printed' },
     },
   }),
@@ -641,6 +649,41 @@ export const PLUGINS: BroPlugin[] = [
     configSchema: telemetrySection,
   }),
   definePlugin({
+    name: 'otel',
+    group: 'fleet',
+    summary:
+      'Hook-first telemetry — status|test|on|off; every dispatched hook exports through the emitHook facade (spec bro-xgejl)',
+    run: runOtelCommand,
+    skill: 'otel',
+    configKey: 'otel',
+    configSchema: otelSection,
+    contract: {
+      subs: {
+        status: {
+          flags: { '--json': 'machine-readable report' },
+          exits: { 0: 'report printed' },
+        },
+        test: {
+          flags: { '--json': 'machine-readable report' },
+          exits: { 0: 'would-be record printed', 2: 'missing hook name' },
+        },
+        on: {
+          exits: {
+            0: 'otel.enabled=true written to bro.config.local.json',
+            2: 'bro.config.local.ts shadows',
+          },
+        },
+        off: {
+          exits: {
+            0: 'otel.enabled=false written to bro.config.local.json',
+            2: 'bro.config.local.ts shadows',
+          },
+        },
+      },
+      exits: { 0: 'status (bare `bro otel`)', 2: 'usage — unknown subcommand' },
+    },
+  }),
+  definePlugin({
     name: 'acp-worker',
     summary: 'ACP provider spawn unit — backends exec this; never typed',
     run: runAcpWorkerCommand,
@@ -696,10 +739,12 @@ export const PLUGINS: BroPlugin[] = [
             '--repo <dir>': 'rig checkout to inspect (default: this repo)',
             '--json': 'rig status as JSON',
           },
+          json: 'schemas/cli/rig-status.schema.json',
           exits: { 0: 'rig fresh — no error surfaced', 1: 'a status error was found', 2: 'usage' },
         },
         next: {
           flags: { '--json': 'the re-entry verdict as JSON' },
+          json: 'schemas/cli/rig-next.schema.json',
           exits: {
             0: 'verdict — step | gate | wait | done',
             1: 'verdict blocked',

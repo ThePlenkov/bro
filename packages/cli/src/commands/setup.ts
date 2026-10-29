@@ -18,24 +18,21 @@ import {
   readdirSync,
   readFileSync,
   renameSync,
+  statSync,
   writeFileSync,
 } from 'node:fs';
 import { basename, dirname, isAbsolute, join } from 'node:path';
 import { createRequire } from 'node:module';
 import { fileURLToPath } from 'node:url';
-import { execFileSync, spawnSync } from 'node:child_process';
+import { execFileSync } from 'node:child_process';
 import {
-  checkSkillLock,
   CONFIG_SCHEMA_URL,
   hasHelpFlag,
   initBeadsStealth,
   PERSONALITIES,
   printUsage,
-  readSkillLock,
   withFileLock,
   type BroConfig,
-  type LockedSkill,
-  type SkillDrift,
 } from '@broject/core';
 import { loadBroConfig } from '../plugins.ts';
 import {
@@ -97,7 +94,8 @@ function readExistingConfig(path: string): Partial<BroConfig> | null {
  *  worktree there is nothing to exclude from — quiet skip. */
 function ensureLocalConfigExcluded(): void {
   const git = (args: string[], cwd = process.cwd()): string =>
-    /* NOSONAR — PATH lookup is the contract */ execFileSync('git', ['-C', cwd, ...args], {
+    execFileSync('git', ['-C', cwd, ...args], {
+      // NOSONAR — PATH lookup is the contract
       encoding: 'utf8',
       stdio: ['ignore', 'pipe', 'pipe'],
     }).trim();
@@ -124,13 +122,10 @@ function ensureLocalConfigExcluded(): void {
   // before the exclusion step is skipped.
   const isIgnored = (name: string): boolean => {
     try {
-      execFileSync(
-        'git', // NOSONAR — git PATH lookup is the contract
-        ['-C', process.cwd(), 'check-ignore', '-q', '--', name],
-        {
-          stdio: 'ignore',
-        }
-      );
+      execFileSync('git', ['-C', process.cwd(), 'check-ignore', '-q', '--', name], {
+        // NOSONAR — git PATH lookup is the contract
+        stdio: 'ignore',
+      });
       return true;
     } catch {
       return false;
@@ -175,14 +170,11 @@ function ensureLocalConfigExcluded(): void {
     // whether or not a rule covers the name: ignored-but-tracked is the
     // silent case this warning exists for. Untracking is a staged change
     // only the repo owner should make.
-    const tracked = execFileSync(
-      'git', // NOSONAR — git PATH lookup is the contract
-      ['-C', root, 'ls-files', '--', 'bro.config.local.*'],
-      {
-        encoding: 'utf8',
-        stdio: ['ignore', 'pipe', 'ignore'],
-      }
-    ).trim();
+    const tracked = execFileSync('git', ['-C', root, 'ls-files', '--', 'bro.config.local.*'], {
+      // NOSONAR — git PATH lookup is the contract
+      encoding: 'utf8',
+      stdio: ['ignore', 'pipe', 'ignore'],
+    }).trim();
     if (tracked !== '') {
       console.error(
         'warning: bro.config.local.* has tracked files — .git/info/exclude ' +
@@ -343,12 +335,6 @@ interface SetupArgs {
   /** --pack without a value means "the configured/default pack". */
   pack: false | string;
   personality?: string;
-  /** Materialise the locked external skills (skills-lock.json). */
-  lock: boolean;
-  /** Report what --lock would do, without installing. */
-  dryRun: boolean;
-  /** Verify the installed skills against the lock, without installing. */
-  checkOnly: boolean;
 }
 
 function parseSetupArgs(argv: string[]): SetupArgs {
@@ -374,9 +360,6 @@ function parseSetupArgs(argv: string[]): SetupArgs {
     skills: argv.includes('--skills'),
     pack,
     personality: pVal,
-    lock: argv.includes('--lock'),
-    dryRun: argv.includes('--dry-run'),
-    checkOnly: argv.includes('--check'),
   };
 }
 
@@ -409,168 +392,14 @@ function checkPrereqs(needBeads: boolean): void {
   }
 }
 
-/**
- * Materialise the locked external skills — the ones bro does not own.
- *
- * The lockfile says which skill came from where and what its content hash
- * was. bro does not re-implement the fetching: `npx skills` already produces
- * this lockfile, so bro drives the same CLI and then checks the installed
- * copies against the lock. A copy whose hash drifted is reported, not
- * silently updated.
- *
- * Fail-open: no lockfile means nothing to do, no `npx` means the install is
- * skipped with a line saying so, and one unreachable upstream does not stop
- * the rest.
- */
-function setupLockedSkills(dir: string, dryRun: boolean, checkOnly: boolean): void {
-  const locked = readSkillLock(dir);
-  if (locked.size === 0) {
-    console.error('  no skills-lock.json — nothing locked');
-    return;
-  }
-  const skillsDir = join(dir, '.agents', 'skills');
-
-  // Drift check BEFORE any install — the installer replaces the skill
-  // directory it owns, so installing over a copy with local edits would
-  // erase them. Check first; a drifted skill is reported and left alone.
-  const before = checkSkillLock(locked, { skillsDir });
-  reportBeforeDrift(before, dryRun, checkOnly);
-
-  if (!checkOnly && !dryRun) {
-    installLockedSkills(dir, locked, before, skillsDir);
-  }
-
-  // `npx skills` rewrites the lockfile as it installs, so the hashes it
-  // just wrote are the ones to check against — the copy read before the
-  // install is stale by definition. Re-read it.
-  const current = checkOnly || dryRun ? locked : readSkillLock(dir);
-  reportAfterDrift(current, skillsDir);
-}
-
-function reportBeforeDrift(before: SkillDrift[], dryRun: boolean, checkOnly: boolean): void {
-  if (before.length === 0) return;
-  for (const d of before) {
-    console.error(
-      `  ${d.name}: ${d.kind === 'missing' ? 'not installed' : 'local edits differ from the lock'} (${d.source})`
-    );
-  }
-  if (dryRun || checkOnly) {
-    // For dry-run/check, we also need to report the matching skills
-    // but we don't have the full locked map here — just return
-    // The caller will handle the after-install report
-  }
-}
-
-function installLockedSkills(
-  dir: string,
-  locked: Map<string, LockedSkill>,
-  before: SkillDrift[],
-  skillsDir: string
-): void {
-  if (!hasBin('npx')) {
-    console.error('  npx not on PATH — skipping the locked skills');
-    return;
-  }
-  for (const skill of locked.values()) {
-    // Skip skills that already have local drift — they were reported above
-    const drifted = before.find(d => d.name === skill.name && d.kind === 'drifted');
-    if (drifted !== undefined) {
-      continue;
-    }
-    installOneLockedSkill(dir, skill);
-  }
-}
-
-function spawnFailureDetail(p: ReturnType<typeof spawnSync>): string {
-  const stderr = p.stderr?.toString().trim() || '';
-  const stdout = p.stdout?.toString().trim() || '';
-  const status = p.status ?? 'with error';
-  const errPart = stderr === '' ? '' : `: ${stderr}`;
-  const outPart = stdout === '' ? '' : ` (stdout: ${stdout})`;
-  return `${status}${errPart}${outPart}`;
-}
-
-function installOneLockedSkill(dir: string, skill: LockedSkill): void {
-  // `npx skills add` owns the fetch, the symlink and the lockfile
-  // update; bro only decides what to ask for.
-  try {
-    // spawnSync, not execFileSync: `npx` is a PATH lookup and the PATH
-    // contract is the same one gh/bd/git already have (doctor.ts probes
-    // npx the same way).
-    const p = spawnSync(
-      'npx', // NOSONAR — PATH lookup is the contract (same as gh/bd/git)
-      ['--yes', 'skills', 'add', skill.source, '--skill', skill.name, '-y'],
-      {
-        cwd: dir,
-        stdio: 'pipe',
-        timeout: 300_000,
-      }
-    );
-    if (p.error !== undefined || p.status !== 0) {
-      throw new Error(`npx skills add exited ${spawnFailureDetail(p)}`);
-    }
-  } catch (err) {
-    // one unreachable upstream does not stop the rest
-    const msg = err instanceof Error ? err.message : String(err);
-    console.error(`  ${skill.name}: could not fetch from ${skill.source} — ${msg}`);
-  }
-}
-
-function reportAfterDrift(current: Map<string, LockedSkill>, skillsDir: string): void {
-  const drift = checkSkillLock(current, { skillsDir });
-  if (drift.length === 0) {
-    console.error(`  ${current.size} locked skill(s) match the lock`);
-    return;
-  }
-  for (const d of drift) {
-    console.error(
-      `  ${d.name}: ${d.kind === 'missing' ? 'not installed' : 'content drifted from the lock'} (${d.source})`
-    );
-  }
-}
-
-type HookInstallResult = ReturnType<typeof installCommitHook>;
-
-function reportHookInstall(result: HookInstallResult, names: { note: string; hook: string }): void {
-  if (result.state === 'error') {
-    console.error(`  note: ${names.note} not installed — ${result.err}`);
-  } else if (result.state !== 'already') {
-    console.error(`  ${result.state} ${names.hook} (${result.path})`);
-  }
-}
-
-// git hooks ride setup — a repo that opts into bro gets both
-// without a second step; `bro hooks uninstall` is the opt-out:
-//   commit provenance (bro-fzot): Agent/Session/Bead trailers on
-//     machine-made commits
-//   refguard (bro-1c78): non-ff moves of shared branch refs vetoed
-//   post-merge (bro-sovl3): install → build → patch after a merge
-// Best-effort: a non-git dir just skips.
-function installSetupHooks(): void {
-  const cwd = process.cwd();
-  const version = cliVersion();
-  reportHookInstall(installCommitHook(cwd, version), {
-    note: 'commit-provenance hook',
-    hook: 'prepare-commit-msg hook',
-  });
-  reportHookInstall(installRefGuardHook(cwd, version), {
-    note: 'refguard hook',
-    hook: 'reference-transaction hook',
-  });
-  reportHookInstall(installPostMergeHook(cwd, version), {
-    note: 'post-merge hook',
-    hook: 'post-merge hook',
-  });
-}
-
 export async function runSetupCommand(argv: string[]): Promise<void> {
   if (hasHelpFlag(argv)) {
     printUsage(
-      'usage: bro setup [--beads] [--skills] [--pack <name|off>] [--personality <name>] [--lock] [--dry-run] [--check]',
+      'usage: bro setup [--beads] [--skills] [--pack <name|off>] [--personality <name>]',
       0
     );
   }
-  const { beads, skills, pack, personality, lock, dryRun, checkOnly } = parseSetupArgs(argv);
+  const { beads, skills, pack, personality } = parseSetupArgs(argv);
   // A malformed config file must fail BEFORE any mutation (bd init,
   // file installs) — readExistingConfig exits on a parse error; loadConfig
   // alone would silently fall back to defaults and setup would init beads
@@ -606,15 +435,35 @@ export async function runSetupCommand(argv: string[]): Promise<void> {
     }
   }
 
-  if (lock) {
-    setupLockedSkills(process.cwd(), dryRun, checkOnly);
-  }
-
   if (packDir !== null) {
     setupPack(packDir, pack || loadBroConfig().pack || DEFAULT_PACK, wantsBeads);
   }
 
-  installSetupHooks();
+  // git hooks ride setup — a repo that opts into bro gets both
+  // without a second step; `bro hooks uninstall` is the opt-out:
+  //   commit provenance (bro-fzot): Agent/Session/Bead trailers on
+  //     machine-made commits
+  //   refguard (bro-1c78): non-ff moves of shared branch refs vetoed
+  //   post-merge (bro-sovl3): install → build → patch after a merge
+  // Best-effort: a non-git dir just skips.
+  const hook = installCommitHook(process.cwd(), cliVersion());
+  if (hook.state === 'error') {
+    console.error(`  note: commit-provenance hook not installed — ${hook.err}`);
+  } else if (hook.state !== 'already') {
+    console.error(`  ${hook.state} prepare-commit-msg hook (${hook.path})`);
+  }
+  const guard = installRefGuardHook(process.cwd(), cliVersion());
+  if (guard.state === 'error') {
+    console.error(`  note: refguard hook not installed — ${guard.err}`);
+  } else if (guard.state !== 'already') {
+    console.error(`  ${guard.state} reference-transaction hook (${guard.path})`);
+  }
+  const fresh = installPostMergeHook(process.cwd(), cliVersion());
+  if (fresh.state === 'error') {
+    console.error(`  note: post-merge hook not installed — ${fresh.err}`);
+  } else if (fresh.state !== 'already') {
+    console.error(`  ${fresh.state} post-merge hook (${fresh.path})`);
+  }
 
   console.error(
     'bro setup: done. Next: `bro debt prs` to see the queue, `bro debt collect` to sweep.'
