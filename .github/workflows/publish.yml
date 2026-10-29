@@ -114,5 +114,21 @@ jobs:
               echo "npm view $name failed without E404 — aborting to avoid double publish"
               exit 1
             fi
-            npm publish --access public
+            # A prerelease (v0.3.0-preview.0) must not take over the
+            # `latest` dist-tag — plain `npm publish` sets latest even
+            # for prereleases, leaking previews to every `npm i bro`.
+            # Derive the tag from the version's prerelease id
+            # (v0.3.0-preview.0 → preview; stable tags publish to latest).
+            dist=""
+            case "$EXPECTED_TAG" in
+              v*-*)
+                dist="${EXPECTED_TAG#v*-}"
+                dist="${dist%%.*}"
+                ;;
+            esac
+            if [ -n "$dist" ]; then
+              npm publish --access public --tag "$dist"
+            else
+              npm publish --access public
+            fi
           done
