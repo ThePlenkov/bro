@@ -776,10 +776,23 @@ function bdChecks(
   bd: BinProbe,
   beadsDir: boolean,
   beadsActive: boolean,
-  compat: BdCompat
+  compat: BdCompat,
+  pins?: Record<string, string>
 ): DoctorCheck[] {
+  const prefer = pins ?? {};
+  const tasksPinned = prefer.tasks;
+  let tasksName: string | null = null;
+  try {
+    tasksName = facadeName('tasks', { dir }, { prefer });
+  } catch {
+    tasksName = null;
+  }
+  const githubTasksHealthy = tasksName === 'github' && tasksPinned === 'github';
   if (!bd.found) {
     const fix = 'install beads (https://github.com/gastownhall/beads) or set "stores": ["jsonl"]';
+    if (githubTasksHealthy) {
+      return [check('bd', 'warn', binProblem(bd), 'beads store is off — GitHub Issues serves tasks')];
+    }
     return [
       beadsActive
         ? check('bd', 'fail', binProblem(bd), fix)
@@ -788,8 +801,19 @@ function bdChecks(
   }
   const out: DoctorCheck[] = [
     check('bd', 'ok', bd.version ?? 'present'),
-    bdCompatCheck(beadsActive, compat),
   ];
+  if (githubTasksHealthy && (compat.broken || compat.missing || !compat.ok)) {
+    out.push(
+      check(
+        'bd-compat',
+        'warn',
+        compat.problems.length > 0 ? compat.problems.join('; ') : (compat.broken ? 'bd unusable' : 'bd not usable'),
+        'beads broken but GitHub Issues serves tasks (connectors.tasks=github)'
+      )
+    );
+  } else {
+    out.push(bdCompatCheck(beadsActive, compat));
+  }
   const dolt = bdTry(['dolt', 'remote', 'list'], 15_000, dir);
   if (dolt.code !== 0) {
     const err = dolt.err ? ` (${dolt.err})` : '';
@@ -1933,7 +1957,7 @@ export function runDoctorChecks(
   checks.push(
     checkGh(),
     tasksBackendCheck(dir, cfg.connectors, bd, cfg.stores.includes('beads'), compat),
-    ...bdChecks(dir, bd, beadsDir, cfg.stores.includes('beads'), compat),
+    ...bdChecks(dir, bd, beadsDir, cfg.stores.includes('beads'), compat, cfg.connectors),
     checkHooks(dir),
     devinWiringCheck(root),
     ...selfDistChecks(),
