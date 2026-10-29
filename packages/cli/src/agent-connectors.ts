@@ -119,7 +119,13 @@ import './session-planes/copilot.ts';
 import { writeCopilotCount } from './session-planes/copilot.ts';
 import { enterWorktree } from './commands/work.ts';
 import { assertMutableConfig } from './config-policy.ts';
-import { laneGateRefusal, reconcileLanePauseForRegistry } from './lane.ts';
+import {
+  type LaneAdmission,
+  laneGateAdmission,
+  laneGateCredit,
+  laneGateRefusal,
+  reconcileLanePauseForRegistry,
+} from './lane.ts';
 import { VERSION } from './version.ts';
 
 /** Everything a factory needs: the repo ctx + the resolved config
@@ -1554,18 +1560,23 @@ function prepareSpawn(
           molStep: spec.molStep,
           workerEnv: spec.env,
         });
+  let charged: LaneAdmission['admitted'];
   try {
     // the rate gate charges LAST — after every admission that can
     // still refuse (spec bro-y3jvd): a batch spawn pays its request
     // budget up front so the lane paces to the account's ceiling
     // instead of discovering it by dying. Inside the try so a gate
     // refusal hands the session reservation back like any spawn
-    // failure — budget is never spent on a spawn that didn't run
+    // failure; a throw still inside this try (enter/commit — both run
+    // BEFORE launch) refunds the charge, so budget is never spent on
+    // a spawn that didn't run. Failures after `prepareSpawn` returns
+    // keep the charge — launch may already have started work.
     if (opts.env !== undefined) {
-      const gateRefusal = laneGateRefusal(opts.env, spec);
-      if (gateRefusal !== undefined) {
-        throw gateRefusal;
+      const admission = laneGateAdmission(opts.env, spec);
+      if (admission.refusal !== undefined) {
+        throw admission.refusal;
       }
+      charged = admission.admitted;
     }
     // enter half of the rig transition — inside the try so an enter
     // failure also hands the session-quota reservation back via the
@@ -1585,6 +1596,11 @@ function prepareSpawn(
     // the key, so this is the only place that can hand the slot back
     if (reservation !== undefined) {
       releaseSessionSlot(reservation);
+    }
+    // the same door for the charge: everything still inside this try
+    // precedes launch, so a spawn that never ran gives its tokens back
+    if (charged !== undefined) {
+      laneGateCredit(charged.lane, charged.model, charged.gate);
     }
     throw err;
   }

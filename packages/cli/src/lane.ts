@@ -46,6 +46,9 @@ import {
   type ProviderWall,
   type SpawnSpec,
 } from '@broject/core';
+
+// the refund half — re-exported for the spawn path's catch (spec bro-y3jvd)
+export { laneGateCredit } from '@broject/core';
 import { groupMemberAlive, providerWallsFor, type AgentConnectorEnv } from './agent-connectors.ts';
 
 // --- the rate gate ------------------------------------------------------
@@ -71,32 +74,52 @@ const modelOf = (spec: SpawnSpec, entry: ProviderEntry | undefined): string =>
  *  refusal, or undefined when admitted (no gate, interactive lane,
  *  tokens available). Runs inside the caller's registry-lock section:
  *  a refused spawn leaves no half-state either way. */
-export function laneGateRefusal(
+/** What one admission decides: the refusal to throw, and — on an
+ *  admitted take — the charge the caller must be able to hand back if
+ *  the spawn dies before its launch step (spec bro-y3jvd). */
+export interface LaneAdmission {
+  refusal?: SpawnError;
+  admitted?: { lane: string; model: string; gate: LaneRateGate };
+}
+
+export function laneGateAdmission(
   env: AgentConnectorEnv,
   spec: SpawnSpec,
   now = Date.now()
-): SpawnError | undefined {
+): LaneAdmission {
   if (spec.provider === undefined || !isBatchSpawn(spec.env)) {
-    return undefined;
+    return {};
   }
   const entry = env.providers?.[spec.provider];
   const gate = gateOf(entry);
   if (gate === undefined) {
-    return undefined;
+    return {};
   }
   const lane = laneOf(spec.provider, gate);
   const model = modelOf(spec, entry);
   const take = laneGateTake(lane, model, gate, { now });
   if (take.ok) {
-    return undefined;
+    return { admitted: { lane, model, gate } };
   }
-  return new SpawnError(
-    `provider ${spec.provider} lane '${lane}' out of request budget (${model})` +
-      ` — rateGate ${gate.requestsPerHour} req/h · ${gate.spawnCost}/spawn` +
-      `; retry in ~${take.retryAfterSec}s` +
-      (spec.molStep !== undefined ? ` — spawn of ${spec.molStep} refused` : ''),
-    'cap'
-  );
+  return {
+    refusal: new SpawnError(
+      `provider ${spec.provider} lane '${lane}' out of request budget (${model})` +
+        ` — rateGate ${gate.requestsPerHour} req/h · ${gate.spawnCost}/spawn` +
+        `; retry in ~${take.retryAfterSec}s` +
+        (spec.molStep !== undefined ? ` — spawn of ${spec.molStep} refused` : ''),
+      'cap'
+    ),
+  };
+}
+
+/** The refusal-only view — callers/tests that only need the verdict;
+ *  the admitted charge travels on `laneGateAdmission`. */
+export function laneGateRefusal(
+  env: AgentConnectorEnv,
+  spec: SpawnSpec,
+  now = Date.now()
+): SpawnError | undefined {
+  return laneGateAdmission(env, spec, now).refusal;
 }
 
 // --- the wall pause -----------------------------------------------------
@@ -441,7 +464,13 @@ function pauseCounts(path: string | null): Map<string, number> {
   if (path === null) {
     return out;
   }
-  for (const rec of Object.values(readPauseFile(path).paused)) {
+  for (const raw of Object.values(readPauseFile(path).paused)) {
+    // a hand-edited/corrupt record must not crash `agents status` —
+    // count what parses as a pause record, skip the rest (coderabbit)
+    const rec: PauseRecord | null = raw;
+    if (rec === null || typeof rec !== 'object' || typeof rec.provider !== 'string') {
+      continue;
+    }
     out.set(rec.provider, (out.get(rec.provider) ?? 0) + 1);
   }
   return out;

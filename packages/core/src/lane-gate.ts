@@ -11,11 +11,11 @@
  * budget. One JSON file per `<lane>/<model>` key, updated under a
  * filelock so two bro processes can't race a take.
  */
-import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs'
-import { homedir } from 'node:os'
-import { dirname, join } from 'node:path'
-import { randomBytes } from 'node:crypto'
-import { withFileLock } from './filelock.ts'
+import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
+import { homedir } from 'node:os';
+import { dirname, join } from 'node:path';
+import { randomBytes } from 'node:crypto';
+import { withFileLock } from './filelock.ts';
 
 /** A provider entry's `rateGate` config — the pacing knobs for one
  *  account lane. `requestsPerHour` and `spawnCost` are both required:
@@ -27,10 +27,10 @@ import { withFileLock } from './filelock.ts'
  *  `lane` defaults to the provider name and lets two entries that
  *  resolve to the same account share one bucket. */
 export interface LaneRateGate {
-  lane?: string
-  requestsPerHour: number
-  spawnCost: number
-  burst?: number
+  lane?: string;
+  requestsPerHour: number;
+  spawnCost: number;
+  burst?: number;
 }
 
 /** The host-shared ledger dir — `$XDG_STATE_HOME/bro/lane-gate`
@@ -38,27 +38,27 @@ export interface LaneRateGate {
  *  `provider.json`, it lives outside any repo because the account
  *  it meters is outside every repo. */
 export function laneGateDir(): string {
-  const xdg = process.env['XDG_STATE_HOME']
-  const base = xdg !== undefined && xdg.trim() !== '' ? xdg : join(homedir(), '.local', 'state')
-  return join(base, 'bro', 'lane-gate')
+  const xdg = process.env['XDG_STATE_HOME'];
+  const base = xdg !== undefined && xdg.trim() !== '' ? xdg : join(homedir(), '.local', 'state');
+  return join(base, 'bro', 'lane-gate');
 }
 
 /** One bucket's ledger — tokens left and the timestamp the level was
  *  computed at. Refill is lazy: nothing ticks between takes. */
 interface LaneGateLedger {
-  tokens: number
-  updatedAt: number
+  tokens: number;
+  updatedAt: number;
 }
 
 /** `burst` absent ⇒ a full window of burst capacity. */
-const capacityOf = (cfg: LaneRateGate): number => cfg.burst ?? cfg.requestsPerHour
+const capacityOf = (cfg: LaneRateGate): number => cfg.burst ?? cfg.requestsPerHour;
 
 /** Filesystem-safe one-file-per-key name — lane/model ids may carry
  *  `/` (router-prefixed model ids do), so the key is encoded, never
  *  concatenated raw into a path. */
 function ledgerPath(dir: string, lane: string, model: string): string {
-  const key = encodeURIComponent(`${lane}/${model}`)
-  return join(dir, `${key}.json`)
+  const key = encodeURIComponent(`${lane}/${model}`);
+  return join(dir, `${key}.json`);
 }
 
 /** Read the ledger; absent or corrupt ⇒ a fresh FULL bucket. An
@@ -67,25 +67,23 @@ function ledgerPath(dir: string, lane: string, model: string): string {
  *  recovery is to start full, not to stall forever. */
 function readLedger(path: string, cfg: LaneRateGate, now: number): LaneGateLedger {
   try {
-    const raw = JSON.parse(readFileSync(path, 'utf8')) as Partial<LaneGateLedger>
+    const raw = JSON.parse(readFileSync(path, 'utf8')) as Partial<LaneGateLedger>;
     if (typeof raw.tokens === 'number' && Number.isFinite(raw.tokens)) {
       const updatedAt =
-        typeof raw.updatedAt === 'number' && Number.isFinite(raw.updatedAt)
-          ? raw.updatedAt
-          : now
-      return { tokens: Math.max(0, raw.tokens), updatedAt }
+        typeof raw.updatedAt === 'number' && Number.isFinite(raw.updatedAt) ? raw.updatedAt : now;
+      return { tokens: Math.max(0, raw.tokens), updatedAt };
     }
   } catch {
     // missing/corrupt — fresh bucket below
   }
-  return { tokens: capacityOf(cfg), updatedAt: now }
+  return { tokens: capacityOf(cfg), updatedAt: now };
 }
 
 function writeLedger(path: string, ledger: LaneGateLedger): void {
-  mkdirSync(dirname(path), { recursive: true })
-  const tmp = `${path}.${process.pid}.${randomBytes(4).toString('hex')}.tmp`
-  writeFileSync(tmp, `${JSON.stringify(ledger)}\n`)
-  renameSync(tmp, path)
+  mkdirSync(dirname(path), { recursive: true });
+  const tmp = `${path}.${process.pid}.${randomBytes(4).toString('hex')}.tmp`;
+  writeFileSync(tmp, `${JSON.stringify(ledger)}\n`);
+  renameSync(tmp, path);
 }
 
 const refill = (l: LaneGateLedger, cfg: LaneRateGate, now: number): number =>
@@ -94,12 +92,12 @@ const refill = (l: LaneGateLedger, cfg: LaneRateGate, now: number): number =>
     // a host clock stepping backward must not drain the saved balance —
     // negative elapsed clamps to zero refill, never a debit
     l.tokens + (Math.max(0, now - l.updatedAt) / 3_600_000) * cfg.requestsPerHour
-  )
+  );
 
 /** Clock/ledger overrides — tests pin `now` and isolate `dir`. */
 export interface LaneGateOpts {
-  now?: number
-  dir?: string
+  now?: number;
+  dir?: string;
 }
 
 /** Charge `cost` request-tokens to the `<lane>/<model>` bucket.
@@ -112,21 +110,45 @@ export function laneGateTake(
   cfg: LaneRateGate,
   opts: LaneGateOpts = {}
 ): { ok: true; tokens: number } | { ok: false; retryAfterSec: number } {
-  const now = opts.now ?? Date.now()
-  const dir = opts.dir ?? laneGateDir()
-  const path = ledgerPath(dir, lane, model)
+  const now = opts.now ?? Date.now();
+  const dir = opts.dir ?? laneGateDir();
+  const path = ledgerPath(dir, lane, model);
   return withFileLock(`${path}.lock`, () => {
-    const cur = readLedger(path, cfg, now)
-    const tokens = refill(cur, cfg, now)
+    const cur = readLedger(path, cfg, now);
+    const tokens = refill(cur, cfg, now);
     if (tokens < cfg.spawnCost) {
       // cost > capacity can never satisfy — refuse without the wait
-      const retryAfterSec = Math.ceil(((cfg.spawnCost - tokens) / cfg.requestsPerHour) * 3600)
-      return { ok: false as const, retryAfterSec }
+      const retryAfterSec = Math.ceil(((cfg.spawnCost - tokens) / cfg.requestsPerHour) * 3600);
+      return { ok: false as const, retryAfterSec };
     }
-    const left = tokens - cfg.spawnCost
-    writeLedger(path, { tokens: left, updatedAt: now })
-    return { ok: true as const, tokens: left }
-  })
+    const left = tokens - cfg.spawnCost;
+    writeLedger(path, { tokens: left, updatedAt: now });
+    return { ok: true as const, tokens: left };
+  });
+}
+
+/** Credit one `spawnCost` back to the `<lane>/<model>` bucket — the
+ *  refund half of a charge whose spawn never launched (spec bro-y3jvd:
+ *  a refused spawn spends no tokens, and a spawn that dies BEFORE its
+ *  launch step never ran either). Capped at capacity — a refund never
+ *  overfills the bucket, so a lane can't mint budget it never had.
+ *  Atomic under the same filelock as the take. */
+export function laneGateCredit(
+  lane: string,
+  model: string,
+  cfg: LaneRateGate,
+  opts: LaneGateOpts = {}
+): { ok: true; tokens: number } {
+  const now = opts.now ?? Date.now();
+  const dir = opts.dir ?? laneGateDir();
+  const path = ledgerPath(dir, lane, model);
+  return withFileLock(`${path}.lock`, () => {
+    const cur = readLedger(path, cfg, now);
+    const tokens = refill(cur, cfg, now);
+    const left = Math.min(capacityOf(cfg), tokens + cfg.spawnCost);
+    writeLedger(path, { tokens: left, updatedAt: now });
+    return { ok: true as const, tokens: left };
+  });
 }
 
 /** Read-only view for status: the bucket's level at `now` (no take,
@@ -138,12 +160,12 @@ export function laneGateLevel(
   cfg: LaneRateGate,
   opts: LaneGateOpts = {}
 ): { tokens: number; capacity: number } | null {
-  const now = opts.now ?? Date.now()
-  const dir = opts.dir ?? laneGateDir()
-  const path = ledgerPath(dir, lane, model)
+  const now = opts.now ?? Date.now();
+  const dir = opts.dir ?? laneGateDir();
+  const path = ledgerPath(dir, lane, model);
   if (!existsSync(path)) {
-    return null
+    return null;
   }
-  const cur = readLedger(path, cfg, now)
-  return { tokens: Math.floor(refill(cur, cfg, now)), capacity: capacityOf(cfg) }
+  const cur = readLedger(path, cfg, now);
+  return { tokens: Math.floor(refill(cur, cfg, now)), capacity: capacityOf(cfg) };
 }
