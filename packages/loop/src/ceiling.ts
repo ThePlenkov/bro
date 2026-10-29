@@ -55,6 +55,40 @@ export interface ReconcileBead {
   status?: string;
 }
 
+function tryDeterministicBead(
+  headRef: string,
+  beadsBySlug: ReadonlyMap<string, ReconcileBead>
+): { det?: string; bead?: ReconcileBead } {
+  const det = deterministicHeadSlug(headRef);
+  if (det === undefined) {
+    return {};
+  }
+  return { det, bead: beadsBySlug.get(det) };
+}
+
+function findLongestPrefixMatch(
+  headRef: string,
+  beadsBySlug: ReadonlyMap<string, ReconcileBead>
+): ReconcileBead | undefined {
+  const slash = headRef.indexOf('/');
+  const tail = headRef.slice(slash + 1);
+  let best: ReconcileBead | undefined;
+  let bestLen = -1;
+
+  for (const [slug, bead] of beadsBySlug) {
+    if (tail !== slug && !tail.startsWith(`${slug}-`)) {
+      continue;
+    }
+    const len = loopSlug(bead.id).length;
+    if (best === undefined || len > bestLen) {
+      best = bead;
+      bestLen = len;
+    }
+  }
+
+  return best;
+}
+
 /** Find the bead a fleet head names. Exact slug hit first (`loop/`,
  *  `stack/` members, tidy `work/` names); then the longest bead slug
  *  that is a '-'-bounded prefix of the head's tail — `work/<bead>-desc`
@@ -65,35 +99,14 @@ export function beadForHead(
   headRef: string,
   beadsBySlug: ReadonlyMap<string, ReconcileBead>
 ): ReconcileBead | undefined {
-  const det = deterministicHeadSlug(headRef);
-  if (det !== undefined) {
-    const detHit = beadsBySlug.get(det);
-    if (detHit !== undefined) {
-      return detHit;
-    }
+  const { det, bead } = tryDeterministicBead(headRef, beadsBySlug);
+  if (bead !== undefined) {
+    return bead;
   }
-
-  const slash = headRef.indexOf('/');
-  const tail = headRef.slice(slash + 1);
-  let best: ReconcileBead | undefined;
-  let bestLen = -1;
-
-  for (const [slug, bead] of beadsBySlug) {
-    const matches = tail === slug || tail.startsWith(`${slug}-`);
-    if (!matches) {
-      continue;
-    }
-    const len = loopSlug(bead.id).length;
-    if (best === undefined || len > bestLen) {
-      best = bead;
-      bestLen = len;
-    }
-  }
-
   if (det !== undefined) {
     return undefined;
   }
-  return best;
+  return findLongestPrefixMatch(headRef, beadsBySlug);
 }
 
 /** What the reconcile pass does with an open fleet PR not on this
@@ -102,24 +115,30 @@ export function beadForHead(
  *  namespace), so the PR is pure review/merge-budget spend. */
 export type OrphanVerdict = { kind: 'close'; bead?: string; why: string } | { kind: 'keep' };
 
+function isNonLiveStatus(status: string | undefined): boolean {
+  if (typeof status !== 'string') {
+    return false;
+  }
+  return status !== 'open' && status !== 'in_progress';
+}
+
 /** Bead closed → close; deterministic head with no bead row → close
  *  (obsolete); live or unverifiable → keep. A kept live PR is drive's
  *  territory — it owns the fixer and the merge. */
 export function orphanVerdict(headRef: string, bead: ReconcileBead | undefined): OrphanVerdict {
   if (bead === undefined) {
-    if (deterministicHeadSlug(headRef) !== undefined) {
-      return { kind: 'close', why: 'no bead — obsolete' };
+    if (deterministicHeadSlug(headRef) === undefined) {
+      return { kind: 'keep' };
     }
-    return { kind: 'keep' };
+    return { kind: 'close', why: 'no bead — obsolete' };
   }
 
   if (bead.status === 'closed') {
     return { kind: 'close', bead: bead.id, why: `bead ${bead.id} closed` };
   }
 
-  const status = bead.status;
-  if (typeof status === 'string' && status !== 'open' && status !== 'in_progress') {
-    return { kind: 'close', bead: bead.id, why: `bead ${bead.id} ${status}` };
+  if (isNonLiveStatus(bead.status)) {
+    return { kind: 'close', bead: bead.id, why: `bead ${bead.id} ${bead.status}` };
   }
 
   return { kind: 'keep' };
