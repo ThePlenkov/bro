@@ -114,6 +114,11 @@ function liveVerdict(w: WorkerCand, stallMin: number): Pick<TreeProjection, 'sta
   return { state: 'working' };
 }
 
+/** A dead candidate worth replacing the current newest with — live
+ *  candidates were already handled, undated records carry no verdict. */
+const newerDead = (d: WorkerCand, cur: WorkerCand | undefined): boolean =>
+  !d.live && d.terminal !== undefined && (cur === undefined || d.at > cur.at);
+
 /** The worker verdict for one worktree — a live run anywhere wins over
  *  every dead record (the respawn edge), and a live agent outranks a
  *  dead run. Among terminal records the newest wins. */
@@ -125,9 +130,7 @@ export function workerState(
   if (w !== undefined) return liveVerdict(w, stallMin);
   let newest: WorkerCand | undefined;
   for (const d of cands) {
-    if (!d.live && d.terminal !== undefined && (newest === undefined || d.at > newest.at)) {
-      newest = d;
-    }
+    if (newerDead(d, newest)) newest = d;
   }
   return newest === undefined ? {} : { state: newest.terminal };
 }
