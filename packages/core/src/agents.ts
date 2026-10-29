@@ -134,16 +134,24 @@ function relReset(text: string, now: number): string | undefined {
   // polynomial-regex finding on uncontrolled log text)
   const pair = /\s*(?:,\s*|\band\s+)?(\d{1,6})\s*(hours?|hrs?|h|minutes?|mins?|m|seconds?|secs?|s)\b/iy;
   let ms = 0;
+  let found = false;
   for (let i = rel.index + rel[0].length; ; ) {
     pair.lastIndex = i;
     const p = pair.exec(text);
     if (p === null) {
       break;
     }
+    found = true;
     ms += Number(p[1]) * (UNIT_MS[p[2]!.toLowerCase()[0]!] ?? 1_000);
     i = pair.lastIndex;
   }
-  return ms === 0 ? undefined : toIso(now + ms + RESET_MARK_MARGIN_MS);
+  if (!found) {
+    return undefined;
+  }
+  // "try again in 0 seconds" is a valid immediate reset — do not leave
+  // the entry blocked indefinitely (bro-9eeld)
+  const total = ms === 0 ? RESET_MARK_MARGIN_MS : ms + RESET_MARK_MARGIN_MS;
+  return toIso(now + total);
 }
 
 /** The provider's quoted clock mark — `reset at 19:01 UTC`, `(reset
@@ -168,8 +176,13 @@ function clockReset(text: string, now: number): string | undefined {
   // chars — so a prose timestamp can't fabricate a reset; the mark
   // itself then parses on its own simpler pattern
   const ctx = MARK_CONTEXT.exec(text);
-  const m = ctx === null ? null : CLOCK_MARK.exec(text.slice(ctx.index));
-  if (m === null) {
+  if (ctx === null) {
+    return undefined;
+  }
+  // bind to the reset mark identified by context, not any later "at" in the slice
+  const atIdx = ctx.index + ctx[0].lastIndexOf('at');
+  const m = CLOCK_MARK.exec(text.slice(atIdx));
+  if (m === null || m.index !== 0) {
     return undefined;
   }
   const hh = Number(m[1]);
