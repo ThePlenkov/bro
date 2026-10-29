@@ -15,6 +15,7 @@ import { existsSync, readFileSync, renameSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { EXIT, hasHelpFlag, printUsage, type ExitCode } from '@broject/core'
 import { otelEndpoint } from '@broject/providers'
+export { otelEndpoint } from '@broject/providers'
 import {
   hookEventName,
   hookRecord,

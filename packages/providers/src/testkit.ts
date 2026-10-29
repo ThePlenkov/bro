@@ -64,6 +64,8 @@ export interface FakeAcpAgent {
   terminalResult?: { output: string; exitCode: number | null | undefined }
   /** The client's answer to a scripted probeClient call (bro-ymbq1). */
   probeResult?: unknown
+  /** session/fork requests the agent received (source session ids). */
+  forks?: string[]
 }
 
 /** A scripted in-process ACP agent — the real protocol round-trip
@@ -121,6 +123,9 @@ export function fakeAcpAgent(
     /** Exercise the client's terminal plane mid-prompt: create →
      *  wait_for_exit → output → release on `sh -c <value>`. */
     askTerminal?: string
+    /** Mint a distinct `sess-N` per session/new instead of always
+     *  'sess-1' — multi-session tests need real distinct ids. */
+    uniqueSessions?: boolean
   } = {}
 ): FakeAcpAgent {
   const seen: FakeAcpAgent = {
@@ -132,6 +137,7 @@ export function fakeAcpAgent(
     sessionRequests: [],
     cancels: [],
     closes: [],
+    forks: [],
   }
   const app = agent({ name: 'fake-acp' })
     .onRequest('initialize', (ctx) => {
@@ -152,7 +158,16 @@ export function fakeAcpAgent(
       }
       seen.sessions.push({ cwd: ctx.params.cwd })
       seen.sessionRequests.push(ctx.params)
-      return { sessionId: 'sess-1', configOptions: opts.configOptions ?? [] }
+      const sessionId =
+        opts.uniqueSessions === true ? `sess-${seen.sessions.length}` : 'sess-1'
+      return { sessionId, configOptions: opts.configOptions ?? [] }
+    })
+    .onRequest('session/fork', (ctx: any) => {
+      if (seen.forks) {
+        seen.forks.push(ctx.params?.sessionId)
+        return { sessionId: `sess-fork-${seen.forks.length}` }
+      }
+      return { sessionId: 'sess-fork-1' }
     })
     .onNotification('session/cancel', (ctx) => {
       seen.cancels.push(ctx.params.sessionId)

@@ -353,11 +353,14 @@ export function acquireServeLock(
  *  without a second decode of the failure. */
 export class HttpError extends Error {
   override name = 'HttpError'
+  close?: () => void
   constructor(
     public status: number,
-    message: string
+    message: string,
+    close?: () => void
   ) {
     super(message)
+    if (close) this.close = close
   }
 }
 

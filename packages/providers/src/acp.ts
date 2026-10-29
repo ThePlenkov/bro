@@ -838,6 +838,10 @@ export async function acpOpen(
     span.end({ error: errMsg(err) }, 'error')
     throw err
   }
+  const abort = opts.acp?.signal
+  if (abort?.aborted) {
+    fail(new JudgeUnavailable('cancelled'))
+  }
   // fs has no local handler — the unbridged app serves only
   // request_permission(deny) + terminal/*(AcpTerminals); advertising it
   // anyway makes every agent fs call answer method-not-found. Terminal
@@ -892,13 +896,33 @@ export async function acpOpen(
   // peer refs on abort — without this, terminals the agent spawned (and
   // the child) outlive the dead connection they were created under
   conn.signal.addEventListener('abort', close, { once: true })
+  let abortHandler: (() => void) | undefined
+  if (abort) {
+    abortHandler = () => close()
+    abort.addEventListener('abort', abortHandler, { once: true })
+  }
   try {
-    const { asAuthError, req, caps, init } = await withDeadline(deadline, () =>
+    const initP = withDeadline(deadline, () =>
       acpInit(conn.agent, by, deadline, opts.acp?.clientCapabilities)
     )
+    const { asAuthError, req, caps, init } = await (abort
+      ? Promise.race([
+          initP,
+          new Promise<never>((_, reject) => {
+            if (abort.aborted) return reject(new JudgeUnavailable('cancelled'))
+            abort.addEventListener('abort', () => reject(new JudgeUnavailable('cancelled')), { once: true })
+          }),
+        ])
+      : initP)
+    if (abortHandler && abort) {
+      abort.removeEventListener('abort', abortHandler)
+    }
     span.end({ 'acp.pid': child?.pid ?? 0 })
     return { ctx: conn.agent, signal: conn.signal, close, tail, req, asAuthError, caps, init, terminals }
   } catch (err) {
+    if (abortHandler && abort) {
+      abort.removeEventListener('abort', abortHandler)
+    }
     close()
     // spawn's 'error' event is async — a binary that can't exec is only
     // knowable here, once the handshake on the dead transport has failed

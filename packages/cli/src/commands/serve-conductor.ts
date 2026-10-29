@@ -525,6 +525,8 @@ export interface AcpLinkPool {
   /** `cb` runs when the pooled transport dies — the caller drops every
    *  session the dead link carried before the next link() respawns. */
   onDeath(cb: () => void): void
+  /** Tear down the pool and kill the current peer. Idempotent. */
+  dispose(): void
 }
 
 /** Every live pooled peer, process-wide. The pooled child outlives any
@@ -545,6 +547,8 @@ export function acpLinkPool(
   let link: Promise<AcpPeer> | undefined
   let live: AcpPeer | undefined
   const deathHooks: Array<() => void> = []
+  let disposed = false
+  const disposeCtl = new AbortController()
   // close() is sync, safe in an 'exit' handler; an in-flight link
   // resolve is a ms-scale window.
   if (!poolExitArmed) {
@@ -559,15 +563,30 @@ export function acpLinkPool(
       }
     })
   }
-  return {
+  const pool: AcpLinkPool = {
     onDeath: (cb) => deathHooks.push(cb),
     live: () => live,
     link(parent) {
+      if (disposed) {
+        return Promise.reject(new Error('acp pool disposed'))
+      }
       if (link === undefined) {
         otelEvent('acp.spawn', { backend: by })
-        link = acpOpen(by, entry, opts, Date.now() + timeoutMs, parent)
+        const wireOpts: ProviderWireOpts = {
+          ...opts,
+          acp: { ...opts.acp, signal: disposeCtl.signal },
+        }
+        link = acpOpen(by, entry, wireOpts, Date.now() + timeoutMs, parent)
         link.then(
           (p) => {
+            if (disposed || disposeCtl.signal.aborted) {
+              try {
+                p.close()
+              } catch {
+                // drop
+              }
+              return
+            }
             live = p
             pooledPeers.add(p)
             // a peer aborted BEFORE the listener attaches never fires
@@ -591,12 +610,45 @@ export function acpLinkPool(
               onDead()
             }
           },
-          () => (link = undefined)
+          () => {
+            if (disposed) return
+            link = undefined
+          }
         )
       }
       return link
     },
+    dispose: () => {
+      if (disposed) return
+      disposed = true
+      try {
+        disposeCtl.abort()
+      } catch {
+        // ignore
+      }
+      if (live) {
+        try {
+          live.close()
+        } catch {
+          // ignore
+        }
+        live = undefined
+      }
+      if (link) {
+        link
+          .then((p) => {
+            try {
+              p.close()
+            } catch {
+              // ignore
+            }
+          })
+          .catch(() => {})
+        link = undefined
+      }
+    },
   }
+  return pool
 }
 
 /** The turns a reused session has NOT seen: everything past the
@@ -3177,6 +3229,7 @@ async function models(
 export interface ConductorProxy {
   (req: IncomingMessage, res: ServerResponse): Promise<void>
   terminals(): AcpTerminals | undefined
+  dispose?(): void
 }
 
 /** `(req, res)` handler for `/v1/*` — the conductor's answer when
@@ -3226,7 +3279,7 @@ export function conductorProxy(
     ['POST /v1/messages/count_tokens', (r, s) => countTokens(r, s)],
     ['GET /v1/models', (_r, s) => models(s, cfg, wireOpts)],
   ])
-  return Object.assign(
+  const handler = Object.assign(
     async (req: IncomingMessage, res: ServerResponse): Promise<void> => {
       const path = (req.url ?? '/').split('?')[0]
       const method = req.method ?? 'GET'
@@ -3238,8 +3291,12 @@ export function conductorProxy(
       }
       await route(req, res, httpSpan.ctx)
     },
-    { terminals: () => pool.live()?.terminals }
-  )
+    {
+      terminals: () => pool.live()?.terminals,
+      dispose: () => pool.dispose(),
+    }
+  ) as ConductorProxy & { dispose(): void }
+  return handler as ConductorProxy
 }
 
 /** The per-request span + request-finished telemetry tap — one
