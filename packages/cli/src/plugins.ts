@@ -102,6 +102,8 @@ import { freshnessSection } from './commands/postmerge.ts';
 import { runJudgeCommand } from './commands/judge.ts';
 import { runQueueCommand } from './commands/queue.ts';
 import { runLearnCommand } from './commands/learn.ts';
+import { runSkillsCommand } from './commands/skills.ts';
+import { skillsSection } from './commands/skills-config.ts';
 import { runMcpCommand } from './commands/mcp.ts';
 import { runPulseCommand } from './commands/pulse.ts';
 import { runWatchCommand } from './commands/watch.ts';
@@ -554,6 +556,39 @@ export const PLUGINS: BroPlugin[] = [
     configSchema: goalSection,
   }),
   definePlugin({
+    name: 'skills',
+    group: 'self',
+    summary:
+      'Agent-skill deps — skills.install sources materialise into .agents/skills/ [sync|list]',
+    run: runSkillsCommand,
+    skill: 'skills',
+    configKey: 'skills',
+    configSchema: skillsSection,
+    contract: {
+      subs: {
+        sync: {
+          flags: {
+            '--root <dir>': 'run root — its bro.config and .agents/skills apply',
+            '--json': 'per-source steps + reconcile rows + drift as JSON',
+          },
+          exits: {
+            0: 'all declared sources installed — lock verifies',
+            1: 'a source failed, or drift reported after sync',
+            2: 'usage',
+          },
+        },
+        list: {
+          flags: {
+            '--root <dir>': 'run root',
+            '--json': 'the reconcile rows as JSON',
+          },
+          json: 'schemas/cli/skills-list.schema.json',
+          exits: { 0: 'rows printed', 2: 'usage' },
+        },
+      },
+    },
+  }),
+  definePlugin({
     name: 'judge',
     group: 'self',
     summary: 'Calibrated decision judge — decide smoke test over systemone + llm-judge',
@@ -667,8 +702,18 @@ export const PLUGINS: BroPlugin[] = [
           flags: { '--json': 'machine-readable report' },
           exits: { 0: 'would-be record printed', 2: 'missing hook name' },
         },
-        on: { exits: { 0: 'otel.enabled=true written to bro.config.local.json', 2: 'bro.config.local.ts shadows' } },
-        off: { exits: { 0: 'otel.enabled=false written to bro.config.local.json', 2: 'bro.config.local.ts shadows' } },
+        on: {
+          exits: {
+            0: 'otel.enabled=true written to bro.config.local.json',
+            2: 'bro.config.local.ts shadows',
+          },
+        },
+        off: {
+          exits: {
+            0: 'otel.enabled=false written to bro.config.local.json',
+            2: 'bro.config.local.ts shadows',
+          },
+        },
       },
       exits: { 0: 'status (bare `bro otel`)', 2: 'usage — unknown subcommand' },
     },

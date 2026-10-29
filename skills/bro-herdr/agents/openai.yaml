@@ -1,0 +1,7 @@
+interface:
+  display_name: "Bro Herdr"
+  short_description: "Orchestration playbook for driving herdr devin sessions — goals, panes, reports, teardown"
+  brand_color: "#0E8A16"
+  default_prompt: "Use $bro-herdr when driving herdr devin sessions."
+policy:
+  allow_implicit_invocation: true

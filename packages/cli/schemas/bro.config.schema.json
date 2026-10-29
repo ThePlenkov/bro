@@ -1384,6 +1384,33 @@
       },
       "additionalProperties": false
     },
+    "skills": {
+      "type": "object",
+      "properties": {
+        "install": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "pattern": "\\S"
+          }
+        },
+        "agents": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "pattern": "\\S"
+          }
+        },
+        "bin": {
+          "type": "string",
+          "minLength": 1,
+          "pattern": "\\S"
+        }
+      },
+      "additionalProperties": false
+    },
     "stack": {
       "type": "object",
       "properties": {
