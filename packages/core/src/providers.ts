@@ -488,14 +488,28 @@ export function parseProviderEntry(name: string, raw: unknown): ProviderEntry | 
   if ('err' in gateRes) {
     return fail(gateRes.err);
   }
-  const models = 'models' in modelsRes ? modelsRes.models : undefined;
-  const rateGate = 'rateGate' in gateRes ? gateRes.rateGate : undefined;
-  return {
-    type: kind,
-    ...picked,
-    ...(models === undefined ? {} : { models }),
-    ...(rateGate === undefined ? {} : { rateGate }),
-  } as ProviderEntry;
+  return withProviderExtras(
+    { type: kind, ...picked } as ProviderEntry,
+    modelsRes.models,
+    gateRes.rateGate
+  );
+}
+
+/** Attach the kind-scoped extras without ternary spreads — keeps the
+ *  entry parse under the cyclomatic budget (CodeScene threshold 9). */
+function withProviderExtras(
+  entry: ProviderEntry,
+  models?: Record<string, ApiWire>,
+  rateGate?: LaneRateGate
+): ProviderEntry {
+  const bag = entry as Record<string, unknown>;
+  if (models !== undefined) {
+    bag.models = models;
+  }
+  if (rateGate !== undefined) {
+    bag.rateGate = rateGate;
+  }
+  return entry;
 }
 
 /** The api kind's one extra — the wire models the string picker can't
