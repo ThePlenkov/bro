@@ -1259,6 +1259,24 @@ async function finalizeMerge(
       ctx.tails.push(`worktree ${item.worktreeDir} not removed — ${rm.err.trim()}`);
       console.error(`loop: ${ctx.tails.at(-1)}`);
     }
+    // Remove worktree if branch is checked out there
+    try {
+      const wt = gitTry(['-C', ctx.root, 'worktree', 'list', '--porcelain']);
+      if (wt.code === 0) {
+        const trees = parseWorktreePorcelain(wt.out);
+        for (const t of trees) {
+          if (t.branch === item.branch && t.path && t.path !== item.worktreeDir) {
+            gitTry(['-C', ctx.root, 'worktree', 'remove', '--force', t.path]);
+            break;
+          } else if (t.branch === item.branch && t.path === item.worktreeDir) {
+            // already handled above
+            break;
+          }
+        }
+      }
+    } catch {
+      /* best effort */
+    }
     const br = gitTry(['-C', ctx.root, 'branch', '-D', item.branch]);
     if (br.code !== 0) {
       ctx.tails.push(`branch ${item.branch} not deleted — ${br.err.trim()}`);
@@ -2386,8 +2404,11 @@ const LOOP_VALUE_FLAGS = new Set([
   '--parked-wake',
   '--max',
   '--max-open',
+  '--max-open-total',
+  '--worktree-warn',
   '--disk-min-slots',
   '--batch',
+  '--batch-min-priority',
   '--interval',
   '--label',
   '--stack',
@@ -2629,6 +2650,9 @@ function buildCtx(
       worktreeWarn: num(flag(argv, '--worktree-warn'), cfg.worktreeWarn, 0),
       diskMinSlots: num(flag(argv, '--disk-min-slots'), cfg.diskMinSlots, 0),
       batch: num(flag(argv, '--batch'), cfg.batch, 1),
+      batchMinPriority: flag(argv, '--batch-min-priority')
+        ? Number(flag(argv, '--batch-min-priority'))
+        : cfg.batchMinPriority,
     },
     act: broCfg.act,
     // the feed dedup's freshness contract is "at most one poll window
@@ -3337,8 +3361,8 @@ interface QueueState {
   diskProbeWarned: Set<string>;
 }
 
-/** Build slug -> bead map for reconcile. */
-function buildBeadsBySlug(ctx: Ctx): Map<string, ReconcileBead> {
+/** Build slug -> bead map for reconcile. Returns null if the listing is unknown. */
+function buildBeadsBySlug(ctx: Ctx): Map<string, ReconcileBead> | null {
   const out = new Map<string, ReconcileBead>();
   try {
     const rows = ctx.tasks.list({ all: true } as any);
@@ -3349,14 +3373,14 @@ function buildBeadsBySlug(ctx: Ctx): Map<string, ReconcileBead> {
         out.set(slug, { id: r.id, status: r.status });
       }
     }
+    return out;
   } catch {
-    /* best effort */
+    return null;
   }
-  return out;
 }
 
-/** Get all open fleet PRs (headRef + pr). */
-function listOpenFleetPrs(ctx: Ctx): FleetPrRow[] {
+/** Get all open fleet PRs (headRef + pr). Returns null if listing is unknown/incomplete. */
+function listOpenFleetPrs(ctx: Ctx): FleetPrRow[] | null {
   const rows: FleetPrRow[] = [];
   try {
     if (typeof (ctx.rev as any).openPrs === 'function') {
@@ -3369,15 +3393,19 @@ function listOpenFleetPrs(ctx: Ctx): FleetPrRow[] {
       return rows;
     }
   } catch {
-    /* fall through to per-branch scan */
+    // PR listing failed — cannot produce complete listing
+    return null;
   }
-  // fallback: scan known branches
+  // fallback: scan known branches - if branch discovery fails or is incomplete, treat as unknown
   try {
     const prefixes =
       ctx.stack === undefined
         ? ['loop/', 'work/', 'fix/', 'stack/']
         : ['loop/', 'work/', 'fix/', 'stack/'];
     const tails = loopRefTails(ctx.root, prefixes);
+    if (tails.errors && tails.errors.length > 0) {
+      return null;
+    }
     const branches = [...new Set([...tails.worktreeBranches, ...tails.branches])];
     for (const b of branches) {
       try {
@@ -3387,40 +3415,52 @@ function listOpenFleetPrs(ctx: Ctx): FleetPrRow[] {
           }
         }
       } catch {
-        /* skip */
+        // failed to check a branch - listing incomplete
+        return null;
       }
     }
+    return rows;
   } catch {
-    /* ignore */
+    return null;
   }
-  return rows;
 }
 
 /** Reconcile orphaned fleet PRs not on the current stack. */
 async function reconcileFleet(ctx: Ctx, q: QueueState): Promise<void> {
   try {
     const fleet = listOpenFleetPrs(ctx);
-    if (fleet.length === 0) return;
+    if (fleet === null || fleet.length === 0) return;
     const stackPrs = new Set<number>();
     for (const m of q.stack) {
       if (m.pr !== undefined) stackPrs.add(m.pr);
     }
     const beadsBySlug = buildBeadsBySlug(ctx);
+    if (beadsBySlug === null) {
+      // Bead listing unknown — skip reconciliation to avoid false closures
+      return;
+    }
     for (const row of fleet) {
       if (stackPrs.has(row.pr)) continue;
       const bead = beadForHead(row.headRef, beadsBySlug);
       const verdict = orphanVerdict(row.headRef, bead);
       if (verdict.kind === 'close') {
         try {
+          let closed = false;
           if (typeof (ctx.rev as any).closePr === 'function') {
-            (ctx.rev as any).closePr({ repo: ctx.repo, pr: row.pr });
-          } else {
-            // best effort via gh
             try {
-              gitTry(['-C', ctx.root, 'push', 'origin', '--delete', row.headRef]);
+              (ctx.rev as any).closePr({ repo: ctx.repo, pr: row.pr });
+              closed = true;
             } catch {
-              /* ignore */
+              closed = false;
             }
+          }
+          if (!closed && typeof (ctx.rev as any).closePr !== 'function') {
+            // Host does not support closing PRs; leave PR open to avoid retry churn
+            continue;
+          }
+          if (!closed) {
+            // closePr exists but failed; avoid reporting a close and retrying aggressively
+            continue;
           }
           say(ctx, `loop: reconcile close ${prRef(ctx, row.pr)} (${row.headRef}) — ${verdict.why}`);
           try {
@@ -3429,7 +3469,25 @@ async function reconcileFleet(ctx: Ctx, q: QueueState): Promise<void> {
             /* best effort */
           }
           try {
-            // try to remove local branch/worktree if any
+            // try to remove local worktree/branch if any
+            try {
+              const wt = gitTry(['-C', ctx.root, 'worktree', 'list', '--porcelain']);
+              if (wt.code === 0) {
+                const trees = parseWorktreePorcelain(wt.out);
+                for (const t of trees) {
+                  if (t.branch === row.headRef && t.path) {
+                    const rooted = processesRootedIn(t.path);
+                    if (rooted.length === 0) {
+                      gitTry(['-C', t.path, 'submodule', 'deinit', '-f', '--all']);
+                      gitTry(['-C', ctx.root, 'worktree', 'remove', '--force', t.path]);
+                    }
+                    break;
+                  }
+                }
+              }
+            } catch {
+              /* best effort */
+            }
             gitTry(['-C', ctx.root, 'branch', '-D', row.headRef]);
           } catch {
             /* best effort */
@@ -3569,19 +3627,44 @@ async function tryClaim(
   // Hard ceiling on TOTAL open fleet PRs
   if (ctx.cfg.maxOpenTotal > 0) {
     try {
-      const fleet = listOpenFleetPrs(ctx);
-      if (ceilingHeld(fleet.length, ctx.cfg.maxOpenTotal)) {
-        if (
-          !ctx.claimsHeld ||
-          ctx.claimsHeld.open !== fleet.length ||
-          ctx.claimsHeld.max !== ctx.cfg.maxOpenTotal
-        ) {
-          ctx.claimsHeld = { open: fleet.length, max: ctx.cfg.maxOpenTotal };
-          say(ctx, `loop: claims held — ceiling ${fleet.length}/${ctx.cfg.maxOpenTotal}`);
+      const fleetLock = gitCommonDir(ctx.root);
+      const doCeilCheck = (): boolean => {
+        const fleet = listOpenFleetPrs(ctx);
+        if (fleet === null) {
+          // a listing that can't be produced holds too (fail closed)
+          if (!ctx.claimsHeld) {
+            ctx.claimsHeld = { open: -1, max: ctx.cfg.maxOpenTotal };
+            say(ctx, `loop: claims held — ceiling unknown/${ctx.cfg.maxOpenTotal}`);
+          }
+          return true;
         }
+        if (ceilingHeld(fleet.length, ctx.cfg.maxOpenTotal)) {
+          if (
+            !ctx.claimsHeld ||
+            ctx.claimsHeld.open !== fleet.length ||
+            ctx.claimsHeld.max !== ctx.cfg.maxOpenTotal
+          ) {
+            ctx.claimsHeld = { open: fleet.length, max: ctx.cfg.maxOpenTotal };
+            say(ctx, `loop: claims held — ceiling ${fleet.length}/${ctx.cfg.maxOpenTotal}`);
+          }
+          return true;
+        }
+        ctx.claimsHeld = undefined;
         return false;
+      };
+      let held = false;
+      if (fleetLock !== null) {
+        try {
+          withFileLock(join(fleetLock, 'bro', 'loop.ceiling.lock'), () => {
+            held = doCeilCheck();
+          });
+        } catch {
+          held = doCeilCheck();
+        }
+      } else {
+        held = doCeilCheck();
       }
-      ctx.claimsHeld = undefined;
+      if (held) return false;
     } catch {
       // a listing that can't be produced holds too (fail closed)
       if (!ctx.claimsHeld) {

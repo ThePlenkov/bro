@@ -100,10 +100,10 @@ export function beadForHead(
   beadsBySlug: ReadonlyMap<string, ReconcileBead>
 ): ReconcileBead | undefined {
   const { det, bead } = tryDeterministicBead(headRef, beadsBySlug);
-  if (bead !== undefined) {
-    return bead;
-  }
   if (det !== undefined) {
+    if (bead !== undefined) {
+      return bead;
+    }
     return undefined;
   }
   return findLongestPrefixMatch(headRef, beadsBySlug);
