@@ -2821,8 +2821,8 @@ function tmuxRun(socket: string, args: string[]): TmuxResult {
   for (const k of GIT_REPOSITORY_ENV_KEYS) {
     delete env[k];
   }
-  const proc = spawnSync('tmux', socket === '' ? args : ['-L', socket, ...args], {
-    // NOSONAR — PATH lookup is the contract (same as git/bd)
+  const proc = /* NOSONAR */ spawnSync('tmux', socket === '' ? args : ['-L', socket, ...args], {
+    // PATH lookup is the contract (same as git/bd)
     stdio: ['ignore', 'pipe', 'pipe'],
     encoding: 'utf8',
     timeout: 10_000,
@@ -3231,8 +3231,8 @@ export function makeTmuxConnector(ctx: ConnectorCtx, env: AgentConnectorEnv): Ag
 
 /** One gc call — PATH lookup is the same contract as git/gh/bd. */
 function gcRun(args: string[], timeoutMs = 30_000): { code: number; out: string; err: string } {
-  const proc = spawnSync('gc', args, {
-    // NOSONAR — PATH lookup is the contract (same as gh/git/bd)
+  const proc = /* NOSONAR */ spawnSync('gc', args, {
+    // PATH lookup is the contract (see NOSONAR above)
     stdio: ['ignore', 'pipe', 'pipe'],
     encoding: 'utf8',
     timeout: timeoutMs,
@@ -3936,8 +3936,8 @@ function dockerRun(
   args: string[],
   timeoutMs = 30_000
 ): { code: number; out: string; err: string; missing: boolean } {
-  const proc = spawnSync('docker', args, {
-    // NOSONAR — PATH lookup is the contract (same as gh/git/bd)
+  const proc = /* NOSONAR */ spawnSync('docker', args, {
+    // PATH lookup is the contract (see NOSONAR above)
     stdio: ['ignore', 'pipe', 'pipe'],
     encoding: 'utf8',
     timeout: timeoutMs,
@@ -4737,8 +4737,8 @@ interface GhResult {
  *  spawnSync (the connector's other shell-outs are all synchronous,
  *  and admission runs inside the registry lock). */
 function ghRun(args: string[], timeoutMs = 30_000): GhResult {
-  const proc = spawnSync('gh', args, {
-    // NOSONAR — PATH lookup is the contract (same as docker/git/bd)
+  const proc = /* NOSONAR */ spawnSync('gh', args, {
+    // PATH lookup is the contract (see NOSONAR above)
     stdio: ['ignore', 'pipe', 'pipe'],
     encoding: 'utf8',
     timeout: timeoutMs,
