@@ -1,0 +1,7 @@
+interface:
+  display_name: "Bro Skills"
+  short_description: "Agent-skill deps — declared sources materialise into .agents/skills/"
+  brand_color: "#0E8A16"
+  default_prompt: "Use $skills to sync or reconcile declared agent-skill deps."
+policy:
+  allow_implicit_invocation: true
