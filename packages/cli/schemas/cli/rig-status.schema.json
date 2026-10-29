@@ -4,19 +4,24 @@
   "title": "bro rig status --json",
   "type": "object",
   "additionalProperties": true,
-  "required": ["repo", "state"],
+  "required": ["repo", "via"],
   "properties": {
     "repo": { "type": "string" },
-    "state": { "type": "string" },
     "via": { "type": "string" },
+    "error": { "type": "string" },
+    "branch": { "type": "string" },
+    "upstream": { "type": "string" },
     "ahead": { "type": "integer" },
     "behind": { "type": "integer" },
-    "dirty": { "type": "boolean" },
-    "exists": { "type": "boolean" },
-    "onMain": { "type": "boolean" },
-    "hasUpstream": { "type": "boolean" },
-    "packageJson": { "type": "boolean" },
-    "nodeModules": { "type": "boolean" },
-    "error": { "type": "string" }
+    "dirty": { "type": "integer" },
+    "head": { "type": "string" },
+    "bootstrapped": { "type": "boolean" },
+    "doneSha": { "type": "string" },
+    "fresh": { "type": "boolean" },
+    "steps": {
+      "type": "array",
+      "items": { "type": "string" }
+    },
+    "pulse": { "type": "string" }
   }
 }
