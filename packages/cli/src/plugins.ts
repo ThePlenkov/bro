@@ -1099,7 +1099,7 @@ function hasValidConnectorFlags(c: unknown): boolean {
     return false;
   }
   for (const f of c.optInFacades) {
-    if (!isValidFacadeKey(f)) {
+    if (!(typeof f === 'string' && FACADE_KEYS.has(f as keyof FacadeMap))) {
       return false;
     }
   }
