@@ -1,0 +1,18 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://broject.dev/schemas/cli/fleet.schema.json",
+  "title": "bro fleet --json",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["rows", "degraded", "conflicts", "prErrors", "occupancy", "budget", "walls"],
+  "properties": {
+    "rows": { "type": "array" },
+    "degraded": { "type": "array" },
+    "conflicts": { "type": "array" },
+    "prErrors": { "type": "array" },
+    "occupancy": {},
+    "budget": {},
+    "walls": { "type": "array" },
+    "wallsError": { "type": ["string", "null"] }
+  }
+}
