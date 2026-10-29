@@ -975,8 +975,8 @@ function isDenseStringArray(v: unknown): boolean {
   if (Object.keys(v).length !== v.length) {
     return false;
   }
-  for (let i = 0; i < v.length; i++) {
-    if (typeof v[i] !== 'string') {
+  for (const item of v) {
+    if (typeof item !== 'string') {
       return false;
     }
   }
