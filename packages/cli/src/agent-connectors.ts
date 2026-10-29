@@ -1660,7 +1660,7 @@ function commitSpawn(
     runId,
     ...opts.entry?.(agentId),
   });
-  recordSpawnClaim(dir, spec, agentId, backend, guard, opts.claimAs);
+  recordSpawnClaim(dir, spec, agentId, backend, guard, opts.claimAs, { runId, log });
   return { promptFile, log, stderrLog, exitFile, runId };
 }
 
@@ -1687,7 +1687,8 @@ function recordSpawnClaim(
   agentId: string,
   backend: string,
   guard: { claimed: boolean; actor: string | undefined; phantom: boolean },
-  claimAs: string | undefined
+  claimAs: string | undefined,
+  attempt: { runId: string; log: string }
 ): void {
   if (guard.claimed) {
     rebindStep(spec.beadsDir, spec.molStep, guard.actor!);
@@ -1715,6 +1716,8 @@ function recordSpawnClaim(
       agent: agentId,
       backend,
       worktree: resolve(spec.repoRoot),
+      log: attempt.log,
+      runId: attempt.runId,
       ...(spec.provider !== undefined ? { provider: spec.provider } : {}),
       ...(spec.model !== undefined ? { model: spec.model } : {}),
       ...(spec.class !== undefined ? { class: spec.class } : {}),
@@ -1910,6 +1913,10 @@ function ensureExitCause(
       backend: entry.backend,
       code: entry.exitStatus,
       cause: c.cause,
+      // the attempt token + streams the classification read — the bus
+      // mirror lifts them into worker.exited's payload (bro-294hf)
+      ...(entryRunId(entry) !== undefined ? { runId: entryRunId(entry) } : {}),
+      ...(typeof entry.log === 'string' && entry.log !== '' ? { log: entry.log } : {}),
     },
   });
   try {

@@ -231,6 +231,7 @@ export type {
   LifecycleKind,
   LifecycleRead,
 } from './lifecycle.ts';
+export { emitWorkerSilent, lifecycleBusEvent, publishLifecycleBusEvent } from './lifecycle-bus.ts';
 export { bodyMeta, broTrailer, stripMeta, withMeta } from './taskmeta.ts';
 export {
   PR_MANAGED_LABEL,
@@ -545,6 +546,7 @@ export {
   busProbe,
   busPublish,
   busSocketPath,
+  busSocketPathForCommon,
   busStatePath,
   busStatus,
   busSubscribe,
