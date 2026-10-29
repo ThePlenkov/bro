@@ -82,7 +82,8 @@ export interface WorkerCand {
  *  when its bucket does, so rename churn is per-5m under an hour,
  *  hourly above, never per tick. Same formula as the plugin's. */
 export function silentBucketMin(silentMs: number | null | undefined): number | null {
-  if (silentMs === null || silentMs === undefined || !Number.isFinite(silentMs)) return null;
+  if (typeof silentMs !== 'number') return null;
+  if (!Number.isFinite(silentMs)) return null;
   const min = silentMs / 60_000;
   if (min >= 60) return Math.floor(min / 60) * 60;
   return Math.max(0, Math.floor(min / 5) * 5);

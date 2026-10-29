@@ -31,6 +31,7 @@ import {
   stateScope,
   withStateLock,
   worktreeGone,
+  type WorkspaceRec,
 } from './lib.ts';
 import { convergeMirrors, markExitedMirrors } from './mirrors.ts';
 import type { Planes } from './planes.ts';
@@ -161,6 +162,17 @@ function openWorkspace(tree: ArmedTree, label: string, ctx: WsCtx): string | und
   return ws;
 }
 
+/** The daemon projector moved this workspace's label — a managed
+ *  record whose live label no longer matches what it recorded. */
+function projectorRelabeled(
+  rec: WorkspaceRec | undefined,
+  live: HerdrWorkspace | undefined
+): boolean {
+  if (rec?.managed !== true) return false;
+  if (live === undefined) return false;
+  return live.label !== rec.label;
+}
+
 /** Ensure the armed worktree has a workspace; record plugin-opened ones
  *  so the daemon projector knows it owns their labels. Returns the
  *  workspace id. The plugin never renames an existing workspace — the
@@ -178,10 +190,10 @@ function ensureWorkspace(tree: ArmedTree, label: string, ctx: WsCtx): string | u
   } else if (rec === undefined) {
     // a workspace the user opened — observe, never touch its label
     ctx.state.workspaces[path] = { ws: openId, label: live?.label ?? '', managed: false };
-  } else if (rec.managed === true && live !== undefined && live.label !== rec.label) {
+  } else if (projectorRelabeled(rec, live)) {
     // the projector relabels managed workspaces — keep the record's
     // view of the live label honest so a restart doesn't misread it
-    ctx.state.workspaces[path] = { ...rec, label: live.label ?? '' };
+    ctx.state.workspaces[path] = { ...rec, label: live?.label ?? '' };
   }
   return openId;
 }
