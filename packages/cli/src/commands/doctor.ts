@@ -1918,6 +1918,40 @@ function meshChecks(
   return out;
 }
 
+function credentialScopeChecks(dir: string, cfg: any): DoctorCheck[] {
+  try {
+    const agents = cfg.agents ?? {};
+    const strictBackends: string[] = [];
+    for (const [backend, b] of Object.entries(agents)) {
+      const bb = b as any;
+      if (bb && typeof bb === 'object') {
+        if (bb.strictEnv === true || bb.credentialScope != null || Array.isArray(bb.envAllowlist)) {
+          strictBackends.push(backend);
+        }
+      }
+    }
+    if (strictBackends.length === 0) {
+      return [
+        check(
+          'env-scope',
+          'warn',
+          'trusted-host mode (default) — workers inherit ambient env',
+          'set agents.<backend>.strictEnv: true and agents.<backend>.envAllowlist for explicit credential scope (bro-l8c4f.6)'
+        ),
+      ];
+    }
+    return [
+      check(
+        'env-scope',
+        'ok',
+        `strict credential scope enabled for: ${strictBackends.join(', ')} (trust boundary explicit)`
+      ),
+    ];
+  } catch {
+    return [];
+  }
+}
+
 export function runDoctorChecks(
   dir: string = process.cwd(),
   opts: { strict?: boolean } = {}
@@ -1973,7 +2007,8 @@ export function runDoctorChecks(
     checkClientPlugins(dir),
     ...buildStampChecks(dir, root),
     ...(janitor === null ? [] : [janitor]),
-    ...remoteChecks(dir, root, cfg.sync.remote, beadsDir, bd.found)
+    ...remoteChecks(dir, root, cfg.sync.remote, beadsDir, bd.found),
+    ...credentialScopeChecks(dir, cfg)
   );
 
   return checks;

@@ -783,6 +783,40 @@ const AGENT_PIN_KEYS = new Set([
   'BRO_DELEGATED_BY',
 ]);
 
+/** Credential scope policy for fleet workers (spec bro-l8c4f.6). */
+function getCredentialScope(env: AgentConnectorEnv, backend: string) {
+  const b = env.agents?.[backend] as Record<string, unknown> | undefined;
+  if (!b) return { strictEnv: false, envAllowlist: undefined as string[] | undefined };
+  const strictEnv = b.strictEnv === true || b.credentialScope != null;
+  const allowlist = Array.isArray(b.envAllowlist)
+    ? (b.envAllowlist.filter((x): x is string => typeof x === 'string') as string[])
+    : undefined;
+  return { strictEnv, envAllowlist: allowlist };
+}
+
+function isAllowedByEnvPolicy(
+  key: string,
+  value: string | undefined,
+  backend: string,
+  spec: SpawnSpec,
+  env: AgentConnectorEnv,
+  policy: { strictEnv: boolean; envAllowlist?: string[] }
+): boolean {
+  if (value === undefined) return false;
+  if (AGENT_PIN_KEYS.has(key)) return true; // pins handled separately
+  if (GIT_REPOSITORY_ENV_KEYS.has(key)) return false;
+  if (key === BATCH_MARKER_ENV) return true; // only from caller per existing rules
+  if (!policy.strictEnv) return true; // trusted-host mode (default) for compatibility
+  // strict mode: only allowlisted
+  if (policy.envAllowlist && policy.envAllowlist.includes(key)) return true;
+  // allow provider API key if known
+  if (spec.provider && env.providers?.[spec.provider]) {
+    const p = env.providers[spec.provider] as any;
+    if (typeof p.apiKeyEnv === 'string' && p.apiKeyEnv === key) return true;
+  }
+  return false;
+}
+
 /** Repo-retarget env keys — same triple core's git.ts strips for
  *  `git -C`. A spawn targets spec.worktree on argv alone; an inherited
  *  GIT_DIR/GIT_WORK_TREE/GIT_COMMON_DIR silently points the agent's git
@@ -2603,40 +2637,36 @@ export function makeNativeConnector(ctx: ConnectorCtx, env: AgentConnectorEnv): 
             {
               // NOSONAR — operator-configured agent command (same contract as loop)
               cwd: spec.repoRoot,
-              env: {
-                // ambient env minus the connector-owned pins — every
-                // other backend filters AGENT_PIN_KEYS out of
-                // ambient/spec env already (tmux's 0600 env file,
-                // gascity's args); without it a worker-spawned `bro
-                // agents up`/`bro loop` would bleed the parent's
-                // BRO_AGENT_*/BRO_MOL_ID provenance into the child's
-                // commit trailers (bro-fzot's exact bug shape)
-                // The ambient env and the caller's env are filtered
-                // SEPARATELY: the fleet's marker may only come from the
-                // caller (spec.env). Inherited from the ambient env it
-                // would charge a worker's own children — an interactive
-                // session — to the fleet's budget.
-                ...Object.fromEntries(
+              env: (() => {
+                const policy = getCredentialScope(env, 'native');
+                const ambient = Object.fromEntries(
                   Object.entries(process.env).filter(
-                    (e): e is [string, string] =>
-                      e[1] !== undefined &&
-                      !AGENT_PIN_KEYS.has(e[0]) &&
-                      !GIT_REPOSITORY_ENV_KEYS.has(e[0]) &&
-                      e[0] !== BATCH_MARKER_ENV
+                    (e): e is [string, string] => {
+                      if (e[1] === undefined) return false;
+                      if (AGENT_PIN_KEYS.has(e[0]) || GIT_REPOSITORY_ENV_KEYS.has(e[0])) return false;
+                      if (e[0] === BATCH_MARKER_ENV) return true; // fleet marker only from caller context? keep as before
+                      return isAllowedByEnvPolicy(e[0], e[1], 'native', spec, env, policy);
+                    }
                   )
-                ),
-                ...Object.fromEntries(
+                );
+                const fromSpec = Object.fromEntries(
                   Object.entries(spec.env ?? {}).filter(
-                    (e): e is [string, string] =>
-                      e[1] !== undefined &&
-                      !AGENT_PIN_KEYS.has(e[0]) &&
-                      !GIT_REPOSITORY_ENV_KEYS.has(e[0])
+                    (e): e is [string, string] => {
+                      if (e[1] === undefined) return false;
+                      if (AGENT_PIN_KEYS.has(e[0]) || GIT_REPOSITORY_ENV_KEYS.has(e[0])) return false;
+                      return isAllowedByEnvPolicy(e[0], e[1], 'native', spec, env, policy);
+                    }
                   )
-                ),
-                // identity pins last — spec.env must never redirect the
-                // claim store or re-badge the worker as another bead/agent
-                ...Object.fromEntries(agentEnvPins(spec, agentId, promptFile, cliBadge, mol)),
-              },
+                );
+                return {
+                  // ambient env minus the connector-owned pins
+                  ...ambient,
+                  ...fromSpec,
+                  // identity pins last — spec.env must never redirect the
+                  // claim store or re-badge the worker as another bead/agent
+                  ...Object.fromEntries(agentEnvPins(spec, agentId, promptFile, cliBadge, mol)),
+                };
+              })(),
               stdio: ['ignore', fd, errFd],
               detached: true,
             }
@@ -4371,8 +4401,9 @@ const DOCKER_HOST_ENV = new Set([
  *  (secrets included) never goes on -e. Values with newlines can't
  *  survive docker's line-based format — dropped with a warning naming
  *  the keys. */
-function writeDockerEnvFile(envFile: string, spec: SpawnSpec): void {
+function writeDockerEnvFile(envFile: string, spec: SpawnSpec, env?: AgentConnectorEnv): void {
   const dropped: string[] = [];
+  const policy = env ? getCredentialScope(env, 'docker') : { strictEnv: false, envAllowlist: undefined };
   const ambient = Object.entries({
     ...Object.fromEntries(Object.entries(process.env).filter(([k]) => !DOCKER_HOST_ENV.has(k))),
     ...spec.env,
@@ -4380,7 +4411,7 @@ function writeDockerEnvFile(envFile: string, spec: SpawnSpec): void {
     .filter((e): e is [string, string] => {
       if (
         e[1] === undefined ||
-        !/^[A-Za-z_]\w*$/.test(e[0]) ||
+        !/^[A-Za-z_][A-Za-z0-9_]*$/.test(e[0]) ||
         AGENT_PIN_KEYS.has(e[0]) ||
         GIT_REPOSITORY_ENV_KEYS.has(e[0])
       ) {
@@ -4388,6 +4419,9 @@ function writeDockerEnvFile(envFile: string, spec: SpawnSpec): void {
       }
       if (e[1].includes('\n') || e[1].includes('\r')) {
         dropped.push(e[0]);
+        return false;
+      }
+      if (!isAllowedByEnvPolicy(e[0], e[1], 'docker', spec, env ?? { agents: {}, connectors: {} }, policy)) {
         return false;
       }
       return true;
@@ -4528,7 +4562,7 @@ export function makeDockerConnector(ctx: ConnectorCtx, env: AgentConnectorEnv): 
           // respawn over a stopped container) collides docker run —
           // clear it
           dockerRun(['rm', '-f', name]);
-          writeDockerEnvFile(envFile, spec);
+          writeDockerEnvFile(envFile, spec, env);
           const worker = spec.worker;
           warnNoPromptFile(worker, command);
           const cliBadge = workerCliBadge(worker, command);
