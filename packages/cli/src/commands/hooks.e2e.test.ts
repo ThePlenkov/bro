@@ -13,6 +13,7 @@ import {
   readdirSync,
   readFileSync,
   symlinkSync,
+  utimesSync,
   writeFileSync,
 } from 'node:fs';
 import { join, resolve } from 'node:path';
@@ -225,6 +226,96 @@ describe('hooks e2e — stop gate', () => {
       // another session has its own memory of what it was told
       arm(f, 's3', 'work');
       assert.match(hook(f, 'stop', { session_id: 's3' }, wt).stdout, /bro work leave/);
+    });
+  });
+});
+
+describe('hooks e2e — sdd nudge scope + dedup (bro-6a3dq)', () => {
+  const sddFixture = (f: Fixture) => {
+    const { binDir, db } = installFakeBd(f.root, [
+      {
+        ...FAKE_BEAD,
+        id: 'fx-9',
+        title: 'spec me',
+        status: 'in_progress',
+        assignee: 'tester',
+      },
+      {
+        ...FAKE_BEAD,
+        id: 'fx-8',
+        title: 'also mine',
+        status: 'in_progress',
+        assignee: 'tester',
+      },
+    ]);
+    writeFileSync(join(f.main, 'bro.config.json'), '{"sdd":{"mode":"gate"}}');
+    const env = {
+      PATH: `${binDir}:${process.env.PATH}`,
+      FAKE_BD_DB: db,
+      XDG_STATE_HOME: join(f.root, 'xdg-state'),
+    };
+    return {
+      submit: () =>
+        runCli(['hooks', 'prompt-submit'], {
+          cwd: f.main,
+          input: JSON.stringify({ session_id: 's1', prompt: 'go' }),
+          env,
+        }),
+      stop: () =>
+        runCli(['hooks', 'stop'], {
+          cwd: f.main,
+          input: JSON.stringify({ session_id: 's1' }),
+          env,
+        }),
+    };
+  };
+
+  test('prompt-submit reports the missing set once per change — not on every prompt', () => {
+    const f = hookFixture();
+    inside(f.main, f.root, () => {
+      const { submit } = sddFixture(f);
+      arm(f, 's1', 'task', 'fx-9');
+      const first = submit();
+      assert.equal(first.code, 0);
+      assert.match(first.stdout, /fx-9 spec me/);
+      // the same set on the next prompt is already told — the nudge
+      // used to spam every submit for the claim's whole lifetime
+      const repeat = submit();
+      assert.equal(repeat.code, 0);
+      assert.doesNotMatch(repeat.stdout, /fx-9/);
+      // the set changed → report again, once
+      arm(f, 's1', 'task', 'fx-9\nfx-8');
+      const grown = submit();
+      assert.equal(grown.code, 0);
+      assert.match(grown.stdout, /fx-9 spec me/);
+      assert.match(grown.stdout, /fx-8 also mine/);
+      const settled = submit();
+      assert.equal(settled.code, 0);
+      assert.doesNotMatch(settled.stdout, /fx-9/);
+    });
+  });
+
+  test('a bead a newer sibling session claims is delegated — this session hears nothing', () => {
+    const f = hookFixture();
+    inside(f.main, f.root, () => {
+      const { submit, stop } = sddFixture(f);
+      arm(f, 's1', 'task', 'fx-9');
+      // the orchestrator's claim is the OLDER one — age its marker
+      // back so the executor's stamp wins outside ms granularity
+      const claimedAt = new Date(Date.now() - 60_000);
+      utimesSync(join(f.markerDir, 's1.task'), claimedAt, claimedAt);
+      // the executor session's fresher claim wins — fx-9 is its spec
+      // to write, never this session's nudge
+      arm(f, 's2', 'task', 'fx-9');
+      const quiet = submit();
+      assert.equal(quiet.code, 0);
+      assert.doesNotMatch(quiet.stdout, /SDD/);
+      // the task gate still sees the real claim — only the spec nudge
+      // scopes the delegated bead out
+      const r = stop();
+      assert.equal(r.code, 0);
+      assert.match(r.stdout, /fx-9/);
+      assert.doesNotMatch(r.stdout, /SDD/);
     });
   });
 });
