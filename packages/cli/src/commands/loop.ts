@@ -739,7 +739,7 @@ function spawnAgent(
     // timestamp so loop.out/daemon.log-style trails stay attributable
     // (spec bro-7h976). Preserve the wrapped command's exit status.
     const wrap = (cmd: string): string =>
-      `({ _bro_cmd=${JSON.stringify(cmd)}; { (eval "$_bro_cmd"); _bro_rc=$?; } 2>&1 | while IFS= read -r _l || [ -n "$_l" ]; do printf '[%s] %s\\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$_l"; done; exit $_bro_rc; })`;
+      `({ _bro_cmd=${JSON.stringify(cmd)}; _bro_rcf=$(mktemp); { (eval "$_bro_cmd"; echo $? > "$_bro_rcf") 2>&1 | while IFS= read -r _l || [ -n "$_l" ]; do printf '[%s] %s\\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$_l"; done; }; _bro_rc=$(cat "$_bro_rcf" 2>/dev/null || echo 1); rm -f "$_bro_rcf"; exit "$_bro_rc"; })`;
     const child =
       w?.kind === 'argv'
         ? // the same `"$@"` positional exec the native backend builds —

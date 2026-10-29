@@ -14,7 +14,15 @@ import { docUsageLines, reservedWords, runDocVerb } from './docs.ts';
 import { GROUP_META, loadExternalPlugins, pluginGroups, PLUGINS } from './plugins.ts';
 import { VERSION } from './version.ts';
 
-if (process.env.BRO_LOG_TIMESTAMP === '1') {
+if (
+  process.env.BRO_LOG_TIMESTAMP === '1' &&
+  !process.argv.some(
+    a => a === '--json' || a === '--jsonl' || a === '-j' || a.startsWith('--json=')
+  ) &&
+  !process.env.BRO_JSON &&
+  !process.env.BRO_MACHINE_OUTPUT &&
+  process.stdout.isTTY === true
+) {
   const origLog = console.log;
   const origErr = console.error;
   const origWarn = console.warn;

@@ -161,12 +161,6 @@ function recordedPidAlive(rec: DaemonRecord, now: number = Date.now()): boolean 
   if (rec.pidStart !== undefined) {
     return pidAlive(rec.pid, rec.pidStart);
   }
-  if (rec.spawnedAt) {
-    const spawned = Date.parse(rec.spawnedAt);
-    if (Number.isFinite(spawned) && now - spawned <= RECORD_TRUST_MS) {
-      return pidAlive(rec.pid);
-    }
-  }
   return false;
 }
 
