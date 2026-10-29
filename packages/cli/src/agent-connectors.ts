@@ -119,6 +119,12 @@ import './session-planes/copilot.ts';
 import { writeCopilotCount } from './session-planes/copilot.ts';
 import { enterWorktree } from './commands/work.ts';
 import { assertMutableConfig } from './config-policy.ts';
+import {
+  type LaneAdmission,
+  laneGateAdmission,
+  laneGateTake,
+  reconcileLanePauseForRegistry,
+} from './lane.ts';
 import { VERSION } from './version.ts';
 
 /** Everything a factory needs: the repo ctx + the resolved config
@@ -1469,6 +1475,10 @@ function prepareSpawn(
      *  the cap refuses while OTHER live entries fill it (a respawn's
      *  own dead entry holds no slot). */
     cap?: { max: number; env: AgentConnectorEnv };
+    /** The resolved agent env — provider entries carry the lane's
+     *  pacing config (`rateGate`/`wallPause`, spec bro-y3jvd); without
+     *  it the gate and the wall pause can't see their config. */
+    env?: AgentConnectorEnv;
     /** Session-kind admission — the spawn consumes one of the lane
      *  plane's sessions and refuses when live ones already hit
      *  `agents.<kind>.maxSessions`. The count+claim runs under ONE
@@ -1515,6 +1525,17 @@ function prepareSpawn(
   const { claimed, actor, phantom } = guardClaim(spec, existing !== undefined, opts.claimAs);
   const wallRefusal = batchWallRefusal(registry, spec);
   if (wallRefusal !== undefined) {
+    // The wall stops the whole lane, not just this admission (spec
+    // bro-y3jvd): while a provider wall holds, the live workers that
+    // keep feeding it freeze — every rejected attempt pushes the
+    // account's reset further out.
+    if (opts.env !== undefined) {
+      try {
+        reconcileLanePauseForRegistry(dir, opts.env, registry);
+      } catch {
+        // the pause is advisory — the wall refusal below is the verdict
+      }
+    }
     throw wallRefusal;
   }
   // fleet admission — before the registry write + claim land, so a
@@ -1538,7 +1559,24 @@ function prepareSpawn(
           molStep: spec.molStep,
           workerEnv: spec.env,
         });
+  let charged: LaneAdmission['admitted'];
   try {
+    // the rate gate charges LAST — after every admission that can
+    // still refuse (spec bro-y3jvd): a batch spawn pays its request
+    // budget up front so the lane paces to the account's ceiling
+    // instead of discovering it by dying. Inside the try so a gate
+    // refusal hands the session reservation back like any spawn
+    // failure; a throw still inside this try (enter/commit — both run
+    // BEFORE launch) refunds the charge, so budget is never spent on
+    // a spawn that didn't run. Failures after `prepareSpawn` returns
+    // keep the charge — launch may already have started work.
+    if (opts.env !== undefined) {
+      const admission = laneGateAdmission(opts.env, spec);
+      if (admission.refusal !== undefined) {
+        throw admission.refusal;
+      }
+      charged = admission.admitted;
+    }
     // enter half of the rig transition — inside the try so an enter
     // failure also hands the session-quota reservation back via the
     // catch below
@@ -1557,6 +1595,11 @@ function prepareSpawn(
     // the key, so this is the only place that can hand the slot back
     if (reservation !== undefined) {
       releaseSessionSlot(reservation);
+    }
+    // the same door for the charge: everything still inside this try
+    // precedes launch, so a spawn that never ran gives its tokens back
+    if (charged !== undefined) {
+      laneGateTake(charged.lane, charged.model, charged.gate, { refund: true });
     }
     throw err;
   }
@@ -2090,7 +2133,7 @@ function scanProc(): { entries: ProcEntry[]; unverified: boolean } | null {
   return { entries, unverified };
 }
 
-function groupMemberAlive(pgid: number, minStart?: string): boolean {
+export function groupMemberAlive(pgid: number, minStart?: string): boolean {
   if (!Number.isInteger(pgid) || pgid <= 0) {
     return false;
   }
@@ -2493,6 +2536,7 @@ export function makeNativeConnector(ctx: ConnectorCtx, env: AgentConnectorEnv): 
             liveDetail: e =>
               typeof e.pid === 'number' ? `pid ${e.pid}` : 'spawn handoff in flight',
             cap: { max: fleetCapOf(env), env },
+            env,
             sessionQuota: sessionQuotaOf(env, 'native', spec, command),
           }
         );
@@ -2556,7 +2600,8 @@ export function makeNativeConnector(ctx: ConnectorCtx, env: AgentConnectorEnv): 
           const child = spawn(
             'sh', // NOSONAR — PATH lookup is the contract (same as git/bd everywhere)
             args,
-            { // NOSONAR — operator-configured agent command (same contract as loop)
+            {
+              // NOSONAR — operator-configured agent command (same contract as loop)
               cwd: spec.repoRoot,
               env: {
                 // ambient env minus the connector-owned pins — every
@@ -2714,6 +2759,13 @@ export function makeNativeConnector(ctx: ConnectorCtx, env: AgentConnectorEnv): 
         // pre-signal pid+starttime pin is the only handle left on it
         unit = descendantsOf(pid);
         try {
+          // a lane-paused group (spec bro-y3jvd) pends every signal —
+          // SIGCONT first or the TERM waits on a stopped process
+          process.kill(-pid, 'SIGCONT');
+        } catch {
+          // not stopped, or already gone — the TERM below decides
+        }
+        try {
           process.kill(-pid, 'SIGTERM'); // detached → own process group
         } catch {
           // No fallback to kill(pid): a native child is always its own
@@ -2791,7 +2843,8 @@ function tmuxRun(socket: string, args: string[]): TmuxResult {
   for (const k of GIT_REPOSITORY_ENV_KEYS) {
     delete env[k];
   }
-  const proc = spawnSync('tmux', socket === '' ? args : ['-L', socket, ...args], { // NOSONAR — PATH lookup is the contract (same as git/bd)
+  const proc = /* NOSONAR */ spawnSync('tmux', socket === '' ? args : ['-L', socket, ...args], {
+    // PATH lookup is the contract (same as git/bd)
     stdio: ['ignore', 'pipe', 'pipe'],
     encoding: 'utf8',
     timeout: 10_000,
@@ -2929,7 +2982,8 @@ export function makeTmuxConnector(ctx: ConnectorCtx, env: AgentConnectorEnv): Ag
   return {
     name: 'tmux',
 
-    async spawn(spec: SpawnSpec): Promise<AgentInfo> { // NOSONAR — connector contract is async; the critical section is sync
+    async spawn(spec: SpawnSpec): Promise<AgentInfo> {
+      // NOSONAR — connector contract is async; the critical section is sync
       assertMutableConfig(dir);
       const home = spawnHome(dir, 'tmux', command, spec);
       const ver = tmuxRun(socket, ['-V']);
@@ -2975,6 +3029,7 @@ export function makeTmuxConnector(ctx: ConnectorCtx, env: AgentConnectorEnv): Ag
             liveDetail: e => `session ${tmuxSessionName(e) ?? '?'}`,
             entry: id => ({ session: `bro-${id}` }),
             cap: { max: fleetCapOf(env), env },
+            env,
             sessionQuota: sessionQuotaOf(env, 'tmux', spec, command),
           }
         );
@@ -3063,7 +3118,8 @@ export function makeTmuxConnector(ctx: ConnectorCtx, env: AgentConnectorEnv): Ag
       });
     },
 
-    async list() { // NOSONAR — connector contract is async; the body is sync
+    async list() {
+      // NOSONAR — connector contract is async; the body is sync
       try {
         const ver = tmuxRun(socket, ['-V']);
         if (ver.missing || ver.code !== 0) {
@@ -3094,7 +3150,8 @@ export function makeTmuxConnector(ctx: ConnectorCtx, env: AgentConnectorEnv): Ag
       }
     },
 
-    async status(id: string): Promise<AgentInfo> { // NOSONAR — connector contract is async; the body is sync
+    async status(id: string): Promise<AgentInfo> {
+      // NOSONAR — connector contract is async; the body is sync
       const hit = findEntry(id);
       if (!hit) {
         throw new AgentNotFound(`no tmux agent ${id}`);
@@ -3196,7 +3253,8 @@ export function makeTmuxConnector(ctx: ConnectorCtx, env: AgentConnectorEnv): Ag
 
 /** One gc call — PATH lookup is the same contract as git/gh/bd. */
 function gcRun(args: string[], timeoutMs = 30_000): { code: number; out: string; err: string } {
-  const proc = spawnSync('gc', args, { // NOSONAR — PATH lookup is the contract (same as gh/git/bd)
+  const proc = /* NOSONAR */ spawnSync('gc', args, {
+    // PATH lookup is the contract (see NOSONAR above)
     stdio: ['ignore', 'pipe', 'pipe'],
     encoding: 'utf8',
     timeout: timeoutMs,
@@ -3720,6 +3778,7 @@ export function makeGascityConnector(ctx: ConnectorCtx, env: AgentConnectorEnv):
           entry: () => ({ sessionId: undefined }),
           claimAs: spec.molStep,
           cap: { max: fleetCapOf(env), env },
+          env,
           // the quota admits against what gc will actually RUN — the
           // command pinned in city.toml at init, not today's config
           sessionQuota: sessionQuotaOf(env, 'gascity', spec, gcEffectiveCommand(city, command)),
@@ -3899,7 +3958,8 @@ function dockerRun(
   args: string[],
   timeoutMs = 30_000
 ): { code: number; out: string; err: string; missing: boolean } {
-  const proc = spawnSync('docker', args, { // NOSONAR — PATH lookup is the contract (same as gh/git/bd)
+  const proc = /* NOSONAR */ spawnSync('docker', args, {
+    // PATH lookup is the contract (see NOSONAR above)
     stdio: ['ignore', 'pipe', 'pipe'],
     encoding: 'utf8',
     timeout: timeoutMs,
@@ -4412,7 +4472,8 @@ export function makeDockerConnector(ctx: ConnectorCtx, env: AgentConnectorEnv): 
   return {
     name: 'docker',
 
-    async spawn(spec: SpawnSpec): Promise<AgentInfo> { // NOSONAR — connector contract is async; the work is one sync critical section
+    async spawn(spec: SpawnSpec): Promise<AgentInfo> {
+      // NOSONAR — connector contract is async; the work is one sync critical section
       // policy BEFORE the daemon probe and image pull/build — a refused
       // spawn must not pay (or log) a docker fetch it will never use
       assertMutableConfig(dir);
@@ -4455,6 +4516,7 @@ export function makeDockerConnector(ctx: ConnectorCtx, env: AgentConnectorEnv): 
             liveDetail: e => `container ${dockerContainerName(e) ?? '?'}`,
             entry: id => ({ container: `bro-${id}`, containerId: undefined }),
             cap: { max: fleetCapOf(env), env },
+            env,
             sessionQuota: sessionQuotaOf(env, 'docker', spec, command),
           }
         );
@@ -4532,7 +4594,8 @@ export function makeDockerConnector(ctx: ConnectorCtx, env: AgentConnectorEnv): 
       });
     },
 
-    async list(): Promise<ListResult> { // NOSONAR — connector contract is async; the work is sync
+    async list(): Promise<ListResult> {
+      // NOSONAR — connector contract is async; the work is sync
       try {
         const daemon = dockerDaemonUp();
         if (!daemon.up) {
@@ -4560,7 +4623,8 @@ export function makeDockerConnector(ctx: ConnectorCtx, env: AgentConnectorEnv): 
       }
     },
 
-    async status(id: string): Promise<AgentInfo> { // NOSONAR — connector contract is async; the work is sync
+    async status(id: string): Promise<AgentInfo> {
+      // NOSONAR — connector contract is async; the work is sync
       const hit = findEntry(id);
       if (!hit) {
         throw new AgentNotFound(`no docker agent ${id}`);
@@ -4695,7 +4759,8 @@ interface GhResult {
  *  spawnSync (the connector's other shell-outs are all synchronous,
  *  and admission runs inside the registry lock). */
 function ghRun(args: string[], timeoutMs = 30_000): GhResult {
-  const proc = spawnSync('gh', args, { // NOSONAR — PATH lookup is the contract (same as docker/git/bd)
+  const proc = /* NOSONAR */ spawnSync('gh', args, {
+    // PATH lookup is the contract (see NOSONAR above)
     stdio: ['ignore', 'pipe', 'pipe'],
     encoding: 'utf8',
     timeout: timeoutMs,
@@ -5330,7 +5395,8 @@ export function makeCopilotConnector(ctx: ConnectorCtx, env: AgentConnectorEnv):
   return {
     name: 'copilot',
 
-    async spawn(spec: SpawnSpec): Promise<AgentInfo> { // NOSONAR — connector contract is async; the critical section is sync
+    async spawn(spec: SpawnSpec): Promise<AgentInfo> {
+      // NOSONAR — connector contract is async; the critical section is sync
       // policy before preflight — an invalid committed config must
       // refuse ahead of the remote-count refresh, not just the claim
       assertMutableConfig(dir);
@@ -5390,6 +5456,7 @@ export function makeCopilotConnector(ctx: ConnectorCtx, env: AgentConnectorEnv):
             stderrFrom: undefined,
           }),
           cap: { max: fleetCapOf(env), env },
+          env,
           sessionQuota: copilotSessionQuota(env),
         });
         try {
@@ -5439,7 +5506,8 @@ export function makeCopilotConnector(ctx: ConnectorCtx, env: AgentConnectorEnv):
       });
     },
 
-    async list(): Promise<ListResult> { // NOSONAR — connector contract is async; the work is sync
+    async list(): Promise<ListResult> {
+      // NOSONAR — connector contract is async; the work is sync
       try {
         const home = agentsHome(dir);
         const entries = Object.entries(readAgentRegistry(dir)).filter(
@@ -5475,7 +5543,8 @@ export function makeCopilotConnector(ctx: ConnectorCtx, env: AgentConnectorEnv):
       }
     },
 
-    async status(id: string): Promise<AgentInfo> { // NOSONAR — connector contract is async; the work is sync
+    async status(id: string): Promise<AgentInfo> {
+      // NOSONAR — connector contract is async; the work is sync
       const hit = findEntry(id);
       if (!hit) {
         throw new AgentNotFound(`no copilot agent ${id}`);
@@ -5589,7 +5658,8 @@ export function makeDevinConnector(ctx: ConnectorCtx, env: AgentConnectorEnv): A
   return {
     name: 'devin',
 
-    spawn(): Promise<AgentInfo> { // NOSONAR — connector contract is async; the refusal is sync
+    spawn(): Promise<AgentInfo> {
+      // NOSONAR — connector contract is async; the refusal is sync
       return Promise.reject(
         new SpawnError(
           'the devin connector lists host sessions — it does not spawn; ' +
@@ -5599,7 +5669,8 @@ export function makeDevinConnector(ctx: ConnectorCtx, env: AgentConnectorEnv): A
       );
     },
 
-    list(): Promise<ListResult> { // NOSONAR — connector contract is async; the scan is sync
+    list(): Promise<ListResult> {
+      // NOSONAR — connector contract is async; the scan is sync
       try {
         return Promise.resolve({ agents: rows() });
       } catch (err) {
@@ -5610,7 +5681,8 @@ export function makeDevinConnector(ctx: ConnectorCtx, env: AgentConnectorEnv): A
       }
     },
 
-    status(id: string): Promise<AgentInfo> { // NOSONAR — connector contract is async; the scan is sync
+    status(id: string): Promise<AgentInfo> {
+      // NOSONAR — connector contract is async; the scan is sync
       const hit = find(id);
       if (hit === undefined) {
         return Promise.reject(new AgentNotFound(`no devin session ${id}`));
@@ -5618,7 +5690,8 @@ export function makeDevinConnector(ctx: ConnectorCtx, env: AgentConnectorEnv): A
       return Promise.resolve(hit);
     },
 
-    stop(id: string): Promise<void> { // NOSONAR — connector contract is async; the signal is sync
+    stop(id: string): Promise<void> {
+      // NOSONAR — connector contract is async; the signal is sync
       const hit = find(id);
       if (hit === undefined) {
         return Promise.resolve(); // idempotent — gone is the desired end state

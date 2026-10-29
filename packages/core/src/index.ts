@@ -140,6 +140,8 @@ export type {
   RoutingClass,
   RoutingTable,
 } from './routing.ts';
+export { laneGateDir, laneGateLevel, laneGateTake } from './lane-gate.ts';
+export type { LaneGateOpts, LaneRateGate } from './lane-gate.ts';
 export {
   DATA_REF,
   dataRefCommit,
