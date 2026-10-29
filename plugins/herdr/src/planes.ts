@@ -6,6 +6,7 @@
  */
 import {
   type AgentEntry,
+  actStates,
   agentsJson,
   armedWorkDetails,
   type BroStatus,
@@ -13,9 +14,12 @@ import {
   type HerdrWorkspace,
   type HerdrWorktreeList,
   loadState,
+  type PrActCacheEntry,
   paneExists,
+  silentBucketMin,
   stateScope,
   workspaceList,
+  worktreeGone,
   worktreeList,
 } from './lib.ts';
 
@@ -38,6 +42,12 @@ export interface Planes {
   /** plugin state → pane alive? — a closed mirror is a plane change
    *  the diff-key must see or a killed pane never gets recreated. */
   mirrorPanes: Record<string, boolean>;
+  /** plugin state → event-tail pane alive? — same reasoning as
+   *  mirrorPanes: a killed renderer pane has to move the key. */
+  rendererPanes: Record<string, boolean>;
+  /** act-state file cache — the last-observed PR gate summary per PR,
+   *  display-only (spec bro-8dbyb). */
+  act: PrActCacheEntry[];
 }
 
 export function readPlanes(repo: string): Planes {
@@ -47,6 +57,7 @@ export function readPlanes(repo: string): Planes {
     worktrees.source?.source_checkout_path ??
     status.worktrees.find(w => w.main === true)?.path ??
     repo;
+  const state = loadState(stateScope(main));
   return {
     repo,
     main,
@@ -56,8 +67,12 @@ export function readPlanes(repo: string): Planes {
     registry: agentsJson(main),
     armedDetails: armedWorkDetails(main),
     mirrorPanes: Object.fromEntries(
-      Object.values(loadState(stateScope(main)).mirrors).map(m => [m.step, paneExists(m.pane_id)])
+      Object.values(state.mirrors).map(m => [m.step, paneExists(m.pane_id)])
     ),
+    rendererPanes: Object.fromEntries(
+      Object.values(state.renderers).map(r => [r.pane_id, paneExists(r.pane_id)])
+    ),
+    act: actStates(main),
   };
 }
 
@@ -77,11 +92,32 @@ export function diffKey(p: Planes): string {
       a.agentId,
       a.log,
     ]),
-    loop: p.status.loop.runs.map(r => [r.beadId, r.state, r.worktree, r.log]),
-    open: p.worktrees.worktrees.map(w => [w.path, w.open_workspace_id]),
+    loop: p.status.loop.runs.map(r => [
+      r.beadId,
+      r.state,
+      r.worktree,
+      r.log,
+      silentBucketMin(r.silentMs),
+    ]),
+    // worktreeGone is the reaper's sighting — a worktree vanishing off
+    // disk moves the key without herdr's list itself changing a byte
+    open: p.worktrees.worktrees.map(w => [w.path, w.open_workspace_id, worktreeGone(w.path)]),
     ws: p.workspaces.map(w => [w.workspace_id, w.label, w.worktree?.checkout_path]),
-    titles: p.status.beads.inProgress.map(b => [b.id, b.title]),
+    titles: p.status.beads.inProgress.map(b => [b.id, b.title, b.link]),
     reg: Object.entries(p.registry).map(([k, e]) => [k, e.agentId, e.log, e.worktree, e.pid]),
     mirrorPanes: p.mirrorPanes,
+    rendererPanes: p.rendererPanes,
+    act: p.act.map(e => [
+      e.state.pr,
+      e.state.headRef,
+      e.state.state,
+      e.state.isDraft,
+      e.state.mergeable,
+      e.state.openThreads,
+      e.state.ciFailing,
+      e.state.ciPending,
+      e.state.reviewersPending,
+      e.state.sastPending,
+    ]),
   });
 }
