@@ -397,25 +397,19 @@ describe('bro doctor', () => {
     }));
 
   test('env-scope — an allowlist without strictEnv is an inert warn, never an enabled scope', () =>
-    withEnv(
-      { config: { agents: { native: { envAllowlist: ['PATH'] } } }, bins: ['gh', 'bro'] },
-      dir => {
-        const checks = runDoctorChecks(dir);
-        const inert = byName(checks, 'env-scope-inert');
-        assert.equal(inert?.status, 'warn', JSON.stringify(inert));
-        assert.ok(inert?.detail.includes('native'), inert?.detail);
-        assert.equal(byName(checks, 'env-scope'), undefined);
-      }
-    ));
+    withEnv({ config: { agents: { native: { envAllowlist: ['PATH'] } } }, bins: ['gh', 'bro'] }, dir => {
+      const checks = runDoctorChecks(dir);
+      const inert = byName(checks, 'env-scope-inert');
+      assert.equal(inert?.status, 'warn', JSON.stringify(inert));
+      assert.ok(inert?.detail.includes('native'), inert?.detail);
+      assert.equal(byName(checks, 'env-scope'), undefined);
+    }));
 
   test('env-scope — strictEnv (or credentialScope) reports the explicit trust boundary', () =>
     withEnv(
       {
         config: {
-          agents: {
-            native: { envAllowlist: ['PATH'], strictEnv: true },
-            docker: { credentialScope: {} },
-          },
+          agents: { native: { envAllowlist: ['PATH'], strictEnv: true }, docker: { credentialScope: {} } },
         },
         bins: ['gh', 'bro'],
       },

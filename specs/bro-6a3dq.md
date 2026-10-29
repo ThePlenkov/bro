@@ -38,10 +38,10 @@ Scan `<git-common>/bro/hooks/*.task` once per probe:
   armed-work nudge's horizon). A dead session's claim is residue and
   must not mask the nudge.
 - For each bead id, track the newest **claim stamp** per side — the
-  marker's file _birth_ time where the fs reports it (`birthtimeMs`
+  marker's file *birth* time where the fs reports it (`birthtimeMs`
   via statx), mtime otherwise. `armSession` rewrites a marker's stamp
   line + mtime on every arm, so ordering on mtime would let a session
-  claiming fresh _unrelated_ work silently reorder an older shared
+  claiming fresh *unrelated* work silently reorder an older shared
   claim (and let the delegator's own next re-arm take a delegated bead
   back). Birth never moves. Filesystems without btime degrade to the
   mtime order. An id in `mine` that a foreign live marker also claims
@@ -84,13 +84,13 @@ Scan `<git-common>/bro/hooks/*.task` once per probe:
 ## Plan
 
 - [x] spec.ts: `delegatedTaskClaims` marker scan + `sddHooksDir` via
-  `gitCommonDirAsync`, `sddSetChanged` digest file; wire into
-  `ownClaimsMissingSpec` + the three probes
+      `gitCommonDirAsync`, `sddSetChanged` digest file; wire into
+      `ownClaimsMissingSpec` + the three probes
 - [x] spec.test.ts: delegated-claim exclusion (newer foreign marker
-  wins, older stays own, dead sibling ignored), dedup emit-once /
-  re-emit-on-change, fail-open paths
+      wins, older stays own, dead sibling ignored), dedup emit-once /
+      re-emit-on-change, fail-open paths
 - [x] hooks.e2e.test.ts: prompt-submit emits the SDD line once across
-  two submits for the same set, and a newer sibling `.task` marker
-  silences the nudge end-to-end
+      two submits for the same set, and a newer sibling `.task` marker
+      silences the nudge end-to-end
 - [x] `npm run typecheck` + `npm test` green; act loop per
-  skills/act/SKILL.md
+      skills/act/SKILL.md

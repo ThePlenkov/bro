@@ -1,15 +1,13 @@
 ---
-
 parent: bro-l8c4f
 scope:
-- packages/core/src/config-schema.ts
-- packages/core/src/config.ts
-- packages/core/src/agents.ts
-- packages/cli/src/agent-connectors.ts
-- packages/cli/src/agent-connectors.test.ts
-- packages/cli/src/commands/doctor.ts
-- packages/core/src/providers.ts
-
+  - packages/core/src/config-schema.ts
+  - packages/core/src/config.ts
+  - packages/core/src/agents.ts
+  - packages/cli/src/agent-connectors.ts
+  - packages/cli/src/agent-connectors.test.ts
+  - packages/cli/src/commands/doctor.ts
+  - packages/core/src/providers.ts
 ---
 
 # bro-l8c4f.6 — explicit credential scope for fleet workers

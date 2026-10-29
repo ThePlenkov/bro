@@ -43,7 +43,14 @@
  * never on every prompt (spec bro-6a3dq).
  */
 import { createHash } from 'node:crypto';
-import { existsSync, mkdirSync, readFileSync, readdirSync, statSync, writeFileSync } from 'node:fs';
+import {
+  existsSync,
+  mkdirSync,
+  readFileSync,
+  readdirSync,
+  statSync,
+  writeFileSync,
+} from 'node:fs';
 import { basename, dirname, join, sep } from 'node:path';
 import {
   facade,
@@ -348,11 +355,7 @@ export const sddConnector: Connector = {
       // rehydrate re-reminds every start (post-compaction needs the
       // signal back) — and records the set so a prompt does not
       // repeat what the start already told
-      sddSetChanged(
-        await sddHooksDir(ctx),
-        ctx,
-        missing.map(r => r.id)
-      );
+      sddSetChanged(await sddHooksDir(ctx), ctx, missing.map(r => r.id));
       return [`SDD (${mode}): ${spec.policy()}`, ...missing.map(r => `  spec missing: ${fmt(r)}`)];
     },
     async promptSubmit(ctx) {
@@ -363,11 +366,7 @@ export const sddConnector: Connector = {
       const missing = await ownClaimsMissingSpec(ctx);
       // report the missing set once per change, not on every prompt —
       // the stamp lives in the session's marker area
-      const changed = sddSetChanged(
-        await sddHooksDir(ctx),
-        ctx,
-        missing.map(r => r.id)
-      );
+      const changed = sddSetChanged(await sddHooksDir(ctx), ctx, missing.map(r => r.id));
       if (missing.length === 0 || !changed) {
         return [];
       }
@@ -381,7 +380,10 @@ export const sddConnector: Connector = {
       if (mode === 'off') {
         return [];
       }
-      const [missing, hooks] = await Promise.all([ownClaimsMissingSpec(ctx), sddHooksDir(ctx)]);
+      const [missing, hooks] = await Promise.all([
+        ownClaimsMissingSpec(ctx),
+        sddHooksDir(ctx),
+      ]);
       // the gate reports truth every time — a 'gate' block must hold
       // while the violation does — and records what it told so a
       // later prompt does not re-nag the same set. A 'gate' block can
@@ -395,11 +397,7 @@ export const sddConnector: Connector = {
       // context, so it records
       const told = missing.length === 0 || mode === 'remind';
       if (told) {
-        sddSetChanged(
-          hooks,
-          ctx,
-          missing.map(r => r.id)
-        );
+        sddSetChanged(hooks, ctx, missing.map(r => r.id));
       }
       if (missing.length === 0) {
         return [];
