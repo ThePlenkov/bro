@@ -205,7 +205,17 @@ function liveServeClient(
 }
 
 const byName = (checks: DoctorCheck[], name: string): DoctorCheck =>
-  checks.find(c => c.name === name)!;
+  checks.find(c => c.name === name) as DoctorCheck;
+
+/** The conductor fixture these tests boot: an acp-served devin provider
+ *  with PATH gh — repeated verbatim in six tests before it earned a
+ *  name (Sonar: duplicated lines). Tests that layer extra env spread it. */
+const CONDUCTOR_ACP: EnvOpts = {
+  config: {
+    providers: { 'devin-acp': { type: 'acp', command: 'devin acp --model swe-2-max' } },
+  },
+  bins: ['gh'],
+};
 
 /** A fixture dolt store — a git repo holding `refs/dolt/data` whose head
  *  tree is manifest + table files. `missing` names tables the manifest
@@ -273,8 +283,8 @@ function writeDevinChain(dir: string, chain: object): void {
  *  controls which entry the "daemon" exec'd. Kill the returned child
  *  when done. */
 function fakeDaemon(dir: string, argv: string[]): ReturnType<typeof spawn> {
-  const child = spawn(argv[0]!, argv.slice(1), { stdio: 'ignore' })
-  mkdirSync(join(dir, '.git', 'bro'), { recursive: true })
+  const child = spawn(argv[0]!, argv.slice(1), { stdio: 'ignore' });
+  mkdirSync(join(dir, '.git', 'bro'), { recursive: true });
   writeFileSync(
     join(dir, '.git', 'bro', 'daemon.json'),
     JSON.stringify({
@@ -284,8 +294,8 @@ function fakeDaemon(dir: string, argv: string[]): ReturnType<typeof spawn> {
       cmd: 'bro daemon run --every 60',
       pidStart: procStat(child.pid!)?.start,
     })
-  )
-  return child
+  );
+  return child;
 }
 
 describe('bro doctor', () => {
@@ -845,246 +855,303 @@ describe('bro doctor', () => {
     }));
 
   test('daemon: down is ordinary — no supervisor, recorded dead', () =>
-    withEnv({ bins: ['gh'] }, (dir) => {
-      const c = byName(runDoctorChecks(dir), 'daemon')
-      assert.equal(c.status, 'ok')
-      assert.match(c.detail, /down — no supervisor/)
+    withEnv({ bins: ['gh'] }, dir => {
+      const c = byName(runDoctorChecks(dir), 'daemon');
+      assert.equal(c.status, 'ok');
+      assert.match(c.detail, /down — no supervisor/);
     }).then(() =>
-      withEnv({ bins: ['gh'] }, (dir) => {
-        mkdirSync(join(dir, '.git', 'bro'), { recursive: true })
+      withEnv({ bins: ['gh'] }, dir => {
+        mkdirSync(join(dir, '.git', 'bro'), { recursive: true });
         writeFileSync(
           join(dir, '.git', 'bro', 'daemon.json'),
           JSON.stringify({ pid: 999999, everySec: 60, spawnedAt: new Date().toISOString() })
-        )
-        const c = byName(runDoctorChecks(dir), 'daemon')
-        assert.equal(c.status, 'ok')
-        assert.match(c.detail, /recorded pid 999999 is dead/)
+        );
+        const c = byName(runDoctorChecks(dir), 'daemon');
+        assert.equal(c.status, 'ok');
+        assert.match(c.detail, /recorded pid 999999 is dead/);
       })
-    ))
+    ));
 
-  test('daemon: this repo\'s dist borrows the bro-dist verdict — fresh covers, stale warns', { skip: process.platform !== 'linux' }, () =>
-    withEnv({ bins: ['gh'] }, (dir) => {
-      // dir itself is the bro checkout — the daemon exec'd its own dist
-      const distDir = join(dir, 'packages', 'cli', 'dist')
-      mkdirSync(distDir, { recursive: true })
-      writeFileSync(join(dir, 'packages', 'cli', 'package.json'), '{"name":"@broject/bro","version":"0.2.5"}')
-      const entry = join(distDir, 'index.js')
-      writeFileSync(entry, 'setTimeout(() => {}, 1e9)\n')
-      commitAt(dir)
-      const child = fakeDaemon(dir, [process.execPath, entry])
-      try {
-        const stale = new Date(Date.now() - 3_600_000)
-        utimesSync(entry, stale, stale)
-        let c = byName(runDoctorChecks(dir), 'daemon')
-        assert.equal(c.status, 'warn')
-        assert.match(c.detail, /predates HEAD/)
-        // covering without "rebuilt after spawn": the ref move is
-        // backdated under the (also stale) dist mtime — both before the
-        // daemon started, so only the dist↔HEAD relation decides
-        const old = new Date(Date.now() - 7_200_000)
-        utimesSync(join(dir, '.git', 'logs', 'HEAD'), old, old)
-        c = byName(runDoctorChecks(dir), 'daemon')
-        assert.equal(c.status, 'ok')
-        assert.match(c.detail, /covers HEAD/)
-        // a rebuild landing while the daemon runs — fresh on disk, but
-        // the process still holds the pre-build code it exec'd
-        const future = new Date(Date.now() + 60_000)
-        utimesSync(entry, future, future)
-        c = byName(runDoctorChecks(dir), 'daemon')
-        assert.equal(c.status, 'warn')
-        assert.match(c.detail, /rebuilt after the daemon started/)
-      } finally {
-        child.kill()
-      }
-    }))
-
-  test('daemon: a source entry inside this checkout is the checkout\'s code, not an install', { skip: process.platform !== 'linux' }, () =>
-    withEnv({ bins: ['gh'] }, (dir) => {
-      // `node packages/cli/src/index.ts` — the supported source entry —
-      // must not read as "installed, not this repo's build"
-      mkdirSync(join(dir, 'packages', 'cli', 'src'), { recursive: true })
-      writeFileSync(join(dir, 'packages', 'cli', 'package.json'), '{"name":"@broject/bro","version":"0.2.5"}')
-      const entry = join(dir, 'packages', 'cli', 'src', 'index.ts')
-      writeFileSync(entry, 'setTimeout(() => {}, 1e9)\n')
-      commitAt(dir)
-      // the ref move backdated under the spawn — only the classification
-      // decides
-      const old = new Date(Date.now() - 7_200_000)
-      utimesSync(join(dir, '.git', 'logs', 'HEAD'), old, old)
-      const child = fakeDaemon(dir, [process.execPath, entry])
-      try {
-        const c = byName(runDoctorChecks(dir), 'daemon')
-        assert.equal(c.status, 'ok')
-        assert.match(c.detail, /this checkout's source entry/)
-      } finally {
-        child.kill()
-      }
-    }))
-
-  test('daemon: a source entry warns when HEAD moved after the daemon started', { skip: process.platform !== 'linux' }, () =>
-    withEnv({ bins: ['gh'] }, (dir) => {
-      mkdirSync(join(dir, 'packages', 'cli', 'src'), { recursive: true })
-      writeFileSync(join(dir, 'packages', 'cli', 'package.json'), '{"name":"@broject/bro","version":"0.2.5"}')
-      const entry = join(dir, 'packages', 'cli', 'src', 'index.ts')
-      writeFileSync(entry, 'setTimeout(() => {}, 1e9)\n')
-      commitAt(dir)
-      const child = fakeDaemon(dir, [process.execPath, entry])
-      try {
-        // a commit landing after the spawn — the reflog pushed into the
-        // future so proc-start quantization can't eat the ordering
-        commitAt(dir)
-        const future = new Date(Date.now() + 60_000)
-        utimesSync(join(dir, '.git', 'logs', 'HEAD'), future, future)
-        const c = byName(runDoctorChecks(dir), 'daemon')
-        assert.equal(c.status, 'warn')
-        assert.match(c.detail, /HEAD moved since it started/)
-      } finally {
-        child.kill()
-      }
-    }))
-
-  test('daemon: an installed binary in a bro checkout warns — protections not live', { skip: process.platform !== 'linux' }, () =>
-    withEnv({ bins: ['gh'] }, (dir) => {
-      // this repo builds bro v0.2.5; the daemon runs a published v0.2.4
-      mkdirSync(join(dir, 'packages', 'cli'), { recursive: true })
-      writeFileSync(join(dir, 'packages', 'cli', 'package.json'), '{"name":"@broject/bro","version":"0.2.5"}')
-      const pkg = join(dir, 'lib', 'node_modules', '@broject', 'bro')
-      mkdirSync(join(pkg, 'dist'), { recursive: true })
-      writeFileSync(join(pkg, 'package.json'), '{"name":"@broject/bro","version":"0.2.4"}')
-      const entry = join(pkg, 'dist', 'index.js')
-      writeFileSync(entry, 'setTimeout(() => {}, 1e9)\n')
-      const child = fakeDaemon(dir, [process.execPath, entry])
-      try {
-        const c = byName(runDoctorChecks(dir), 'daemon')
-        assert.equal(c.status, 'warn')
-        assert.match(c.detail, /installed, not this repo's build \(v0\.2\.5\)/)
-        assert.match(c.detail, /v0\.2\.4/)
-        assert.match(c.hint ?? '', /rebuilt/)
-      } finally {
-        child.kill()
-      }
-    }))
-
-  test('daemon: a different bro checkout\'s dist warns', { skip: process.platform !== 'linux' }, () =>
-    withEnv({ bins: ['gh'] }, (dir) => {
-      const { entry } = fakeCheckout(dir)
-      writeFileSync(entry, 'setTimeout(() => {}, 1e9)\n')
-      const child = fakeDaemon(dir, [process.execPath, entry])
-      try {
-        const c = byName(runDoctorChecks(dir), 'daemon')
-        assert.equal(c.status, 'warn')
-        assert.match(c.detail, /different bro checkout/)
-      } finally {
-        child.kill()
-      }
-    }))
-
-  test('daemon: outside a bro repo, entry = resolved bro → ok; foreign → warn', { skip: process.platform !== 'linux' }, () =>
-    withEnv({ bins: ['gh'] }, (dir) => {
-      const entry = join(dir, 'installed-bro.js')
-      writeFileSync(entry, 'setTimeout(() => {}, 1e9)\n')
-      symlinkSync(entry, join(dir, 'bin', 'bro'))
-      const child = fakeDaemon(dir, [process.execPath, entry])
-      try {
-        const c = byName(runDoctorChecks(dir), 'daemon')
-        assert.equal(c.status, 'ok')
-        assert.match(c.detail, /up — pid/)
-      } finally {
-        child.kill()
-      }
-    }).then(() =>
-      withEnv({ bins: ['gh', 'bro'] }, (dir) => {
-        // PATH-bro is the shim; the daemon runs a different file
-        const entry = join(dir, 'other-bro.js')
-        writeFileSync(entry, 'setTimeout(() => {}, 1e9)\n')
-        const child = fakeDaemon(dir, [process.execPath, entry])
+  test(
+    "daemon: this repo's dist borrows the bro-dist verdict — fresh covers, stale warns",
+    { skip: process.platform !== 'linux' },
+    () =>
+      withEnv({ bins: ['gh'] }, dir => {
+        // dir itself is the bro checkout — the daemon exec'd its own dist
+        const distDir = join(dir, 'packages', 'cli', 'dist');
+        mkdirSync(distDir, { recursive: true });
+        writeFileSync(
+          join(dir, 'packages', 'cli', 'package.json'),
+          '{"name":"@broject/bro","version":"0.2.5"}'
+        );
+        const entry = join(distDir, 'index.js');
+        writeFileSync(entry, 'setTimeout(() => {}, 1e9)\n');
+        commitAt(dir);
+        const child = fakeDaemon(dir, [process.execPath, entry]);
         try {
-          const c = byName(runDoctorChecks(dir), 'daemon')
-          assert.equal(c.status, 'warn')
-          assert.match(c.detail, /`bro` resolves/)
+          const stale = new Date(Date.now() - 3_600_000);
+          utimesSync(entry, stale, stale);
+          let c = byName(runDoctorChecks(dir), 'daemon');
+          assert.equal(c.status, 'warn');
+          assert.match(c.detail, /predates HEAD/);
+          // covering without "rebuilt after spawn": the ref move is
+          // backdated under the (also stale) dist mtime — both before the
+          // daemon started, so only the dist↔HEAD relation decides
+          const old = new Date(Date.now() - 7_200_000);
+          utimesSync(join(dir, '.git', 'logs', 'HEAD'), old, old);
+          c = byName(runDoctorChecks(dir), 'daemon');
+          assert.equal(c.status, 'ok');
+          assert.match(c.detail, /covers HEAD/);
+          // a rebuild landing while the daemon runs — fresh on disk, but
+          // the process still holds the pre-build code it exec'd
+          const future = new Date(Date.now() + 60_000);
+          utimesSync(entry, future, future);
+          c = byName(runDoctorChecks(dir), 'daemon');
+          assert.equal(c.status, 'warn');
+          assert.match(c.detail, /rebuilt after the daemon started/);
         } finally {
-          child.kill()
+          child.kill();
         }
       })
-    ))
+  );
+
+  test(
+    "daemon: a source entry inside this checkout is the checkout's code, not an install",
+    { skip: process.platform !== 'linux' },
+    () =>
+      withEnv({ bins: ['gh'] }, dir => {
+        // `node packages/cli/src/index.ts` — the supported source entry —
+        // must not read as "installed, not this repo's build"
+        mkdirSync(join(dir, 'packages', 'cli', 'src'), { recursive: true });
+        writeFileSync(
+          join(dir, 'packages', 'cli', 'package.json'),
+          '{"name":"@broject/bro","version":"0.2.5"}'
+        );
+        const entry = join(dir, 'packages', 'cli', 'src', 'index.ts');
+        writeFileSync(entry, 'setTimeout(() => {}, 1e9)\n');
+        commitAt(dir);
+        // the ref move backdated under the spawn — only the classification
+        // decides
+        const old = new Date(Date.now() - 7_200_000);
+        utimesSync(join(dir, '.git', 'logs', 'HEAD'), old, old);
+        const child = fakeDaemon(dir, [process.execPath, entry]);
+        try {
+          const c = byName(runDoctorChecks(dir), 'daemon');
+          assert.equal(c.status, 'ok');
+          assert.match(c.detail, /this checkout's source entry/);
+        } finally {
+          child.kill();
+        }
+      })
+  );
+
+  test(
+    'daemon: a source entry warns when HEAD moved after the daemon started',
+    { skip: process.platform !== 'linux' },
+    () =>
+      withEnv({ bins: ['gh'] }, dir => {
+        mkdirSync(join(dir, 'packages', 'cli', 'src'), { recursive: true });
+        writeFileSync(
+          join(dir, 'packages', 'cli', 'package.json'),
+          '{"name":"@broject/bro","version":"0.2.5"}'
+        );
+        const entry = join(dir, 'packages', 'cli', 'src', 'index.ts');
+        writeFileSync(entry, 'setTimeout(() => {}, 1e9)\n');
+        commitAt(dir);
+        const child = fakeDaemon(dir, [process.execPath, entry]);
+        try {
+          // a commit landing after the spawn — the reflog pushed into the
+          // future so proc-start quantization can't eat the ordering
+          commitAt(dir);
+          const future = new Date(Date.now() + 60_000);
+          utimesSync(join(dir, '.git', 'logs', 'HEAD'), future, future);
+          const c = byName(runDoctorChecks(dir), 'daemon');
+          assert.equal(c.status, 'warn');
+          assert.match(c.detail, /HEAD moved since it started/);
+        } finally {
+          child.kill();
+        }
+      })
+  );
+
+  test(
+    'daemon: an installed binary in a bro checkout warns — protections not live',
+    { skip: process.platform !== 'linux' },
+    () =>
+      withEnv({ bins: ['gh'] }, dir => {
+        // this repo builds bro v0.2.5; the daemon runs a published v0.2.4
+        mkdirSync(join(dir, 'packages', 'cli'), { recursive: true });
+        writeFileSync(
+          join(dir, 'packages', 'cli', 'package.json'),
+          '{"name":"@broject/bro","version":"0.2.5"}'
+        );
+        const pkg = join(dir, 'lib', 'node_modules', '@broject', 'bro');
+        mkdirSync(join(pkg, 'dist'), { recursive: true });
+        writeFileSync(join(pkg, 'package.json'), '{"name":"@broject/bro","version":"0.2.4"}');
+        const entry = join(pkg, 'dist', 'index.js');
+        writeFileSync(entry, 'setTimeout(() => {}, 1e9)\n');
+        const child = fakeDaemon(dir, [process.execPath, entry]);
+        try {
+          const c = byName(runDoctorChecks(dir), 'daemon');
+          assert.equal(c.status, 'warn');
+          assert.match(c.detail, /installed, not this repo's build \(v0\.2\.5\)/);
+          assert.match(c.detail, /v0\.2\.4/);
+          assert.match(c.hint ?? '', /rebuilt/);
+        } finally {
+          child.kill();
+        }
+      })
+  );
+
+  test(
+    "daemon: a different bro checkout's dist warns",
+    { skip: process.platform !== 'linux' },
+    () =>
+      withEnv({ bins: ['gh'] }, dir => {
+        const { entry } = fakeCheckout(dir);
+        writeFileSync(entry, 'setTimeout(() => {}, 1e9)\n');
+        const child = fakeDaemon(dir, [process.execPath, entry]);
+        try {
+          const c = byName(runDoctorChecks(dir), 'daemon');
+          assert.equal(c.status, 'warn');
+          assert.match(c.detail, /different bro checkout/);
+        } finally {
+          child.kill();
+        }
+      })
+  );
+
+  test(
+    'daemon: outside a bro repo, entry = resolved bro → ok; foreign → warn',
+    { skip: process.platform !== 'linux' },
+    () =>
+      withEnv({ bins: ['gh'] }, dir => {
+        const entry = join(dir, 'installed-bro.js');
+        writeFileSync(entry, 'setTimeout(() => {}, 1e9)\n');
+        symlinkSync(entry, join(dir, 'bin', 'bro'));
+        const child = fakeDaemon(dir, [process.execPath, entry]);
+        try {
+          const c = byName(runDoctorChecks(dir), 'daemon');
+          assert.equal(c.status, 'ok');
+          assert.match(c.detail, /up — pid/);
+        } finally {
+          child.kill();
+        }
+      }).then(() =>
+        withEnv({ bins: ['gh', 'bro'] }, dir => {
+          // PATH-bro is the shim; the daemon runs a different file
+          const entry = join(dir, 'other-bro.js');
+          writeFileSync(entry, 'setTimeout(() => {}, 1e9)\n');
+          const child = fakeDaemon(dir, [process.execPath, entry]);
+          try {
+            const c = byName(runDoctorChecks(dir), 'daemon');
+            assert.equal(c.status, 'warn');
+            assert.match(c.detail, /`bro` resolves/);
+          } finally {
+            child.kill();
+          }
+        })
+      )
+  );
 
   test('daemon: an argv that names no entry skips honestly', () =>
-    withEnv({ bins: ['gh'] }, (dir) => {
-      const child = fakeDaemon(dir, [process.execPath, '-e', 'setTimeout(() => {}, 1e9)'])
+    withEnv({ bins: ['gh'] }, dir => {
+      const child = fakeDaemon(dir, [process.execPath, '-e', 'setTimeout(() => {}, 1e9)']);
       try {
-        const c = byName(runDoctorChecks(dir), 'daemon')
-        assert.equal(c.status, 'skip')
-        assert.match(c.detail, /unverifiable/)
+        const c = byName(runDoctorChecks(dir), 'daemon');
+        assert.equal(c.status, 'skip');
+        assert.match(c.detail, /unverifiable/);
       } finally {
-        child.kill()
+        child.kill();
       }
-    }))
+    }));
 
-  test('daemon: runtime options before the entry still name the entry', { skip: process.platform !== 'linux' }, () =>
-    withEnv({ bins: ['gh'] }, (dir) => {
-      // `node --require reg.js packages/cli/src/index.ts` — the option
-      // and its value must not read as the entry
-      mkdirSync(join(dir, 'packages', 'cli', 'src'), { recursive: true })
-      writeFileSync(join(dir, 'packages', 'cli', 'package.json'), '{"name":"@broject/bro","version":"0.2.5"}')
-      const entry = join(dir, 'packages', 'cli', 'src', 'index.ts')
-      writeFileSync(entry, 'setTimeout(() => {}, 1e9)\n')
-      const reg = join(dir, 'reg.js')
-      writeFileSync(reg, '// preload\n')
-      commitAt(dir)
-      const old = new Date(Date.now() - 7_200_000)
-      utimesSync(join(dir, '.git', 'logs', 'HEAD'), old, old)
-      const child = fakeDaemon(dir, [process.execPath, '--require', reg, entry])
-      try {
-        const c = byName(runDoctorChecks(dir), 'daemon')
-        assert.equal(c.status, 'ok')
-        assert.match(c.detail, /this checkout's source entry/)
-      } finally {
-        child.kill()
-      }
-    }))
+  test(
+    'daemon: runtime options before the entry still name the entry',
+    { skip: process.platform !== 'linux' },
+    () =>
+      withEnv({ bins: ['gh'] }, dir => {
+        // `node --require reg.js packages/cli/src/index.ts` — the option
+        // and its value must not read as the entry
+        mkdirSync(join(dir, 'packages', 'cli', 'src'), { recursive: true });
+        writeFileSync(
+          join(dir, 'packages', 'cli', 'package.json'),
+          '{"name":"@broject/bro","version":"0.2.5"}'
+        );
+        const entry = join(dir, 'packages', 'cli', 'src', 'index.ts');
+        writeFileSync(entry, 'setTimeout(() => {}, 1e9)\n');
+        const reg = join(dir, 'reg.js');
+        writeFileSync(reg, '// preload\n');
+        commitAt(dir);
+        const old = new Date(Date.now() - 7_200_000);
+        utimesSync(join(dir, '.git', 'logs', 'HEAD'), old, old);
+        const child = fakeDaemon(dir, [process.execPath, '--require', reg, entry]);
+        try {
+          const c = byName(runDoctorChecks(dir), 'daemon');
+          assert.equal(c.status, 'ok');
+          assert.match(c.detail, /this checkout's source entry/);
+        } finally {
+          child.kill();
+        }
+      })
+  );
 
-  test('daemon: a source entry warns when HEAD drift is unverifiable — no reflog', { skip: process.platform !== 'linux' }, () =>
-    withEnv({ bins: ['gh'] }, (dir) => {
-      // core.logAllRefUpdates=false repos carry no logs/HEAD — absent
-      // evidence must not read as "HEAD did not move"
-      mkdirSync(join(dir, 'packages', 'cli', 'src'), { recursive: true })
-      writeFileSync(join(dir, 'packages', 'cli', 'package.json'), '{"name":"@broject/bro","version":"0.2.5"}')
-      const entry = join(dir, 'packages', 'cli', 'src', 'index.ts')
-      writeFileSync(entry, 'setTimeout(() => {}, 1e9)\n')
-      commitAt(dir)
-      rmSync(join(dir, '.git', 'logs', 'HEAD'))
-      const child = fakeDaemon(dir, [process.execPath, entry])
-      try {
-        const c = byName(runDoctorChecks(dir), 'daemon')
-        assert.equal(c.status, 'warn')
-        assert.match(c.detail, /HEAD drift unverifiable/)
-      } finally {
-        child.kill()
-      }
-    }))
+  test(
+    'daemon: a source entry warns when HEAD drift is unverifiable — no reflog',
+    { skip: process.platform !== 'linux' },
+    () =>
+      withEnv({ bins: ['gh'] }, dir => {
+        // core.logAllRefUpdates=false repos carry no logs/HEAD — absent
+        // evidence must not read as "HEAD did not move"
+        mkdirSync(join(dir, 'packages', 'cli', 'src'), { recursive: true });
+        writeFileSync(
+          join(dir, 'packages', 'cli', 'package.json'),
+          '{"name":"@broject/bro","version":"0.2.5"}'
+        );
+        const entry = join(dir, 'packages', 'cli', 'src', 'index.ts');
+        writeFileSync(entry, 'setTimeout(() => {}, 1e9)\n');
+        commitAt(dir);
+        rmSync(join(dir, '.git', 'logs', 'HEAD'));
+        const child = fakeDaemon(dir, [process.execPath, entry]);
+        try {
+          const c = byName(runDoctorChecks(dir), 'daemon');
+          assert.equal(c.status, 'warn');
+          assert.match(c.detail, /HEAD drift unverifiable/);
+        } finally {
+          child.kill();
+        }
+      })
+  );
 
-  test('daemon: a sibling worktree on another HEAD is a different checkout', { skip: process.platform !== 'linux' }, () =>
-    withEnv({ bins: ['gh'] }, (dir) => {
-      // shared common dir but diverged HEADs — the running binary can
-      // lack what this HEAD carries, so it is not this checkout's build
-      commitAt(dir)
-      const wt = join(dir, 'wt')
-      execFileSync('git', ['-C', dir, ...GIT_ID, 'worktree', 'add', '-q', '-b', 'wt1', wt])
-      const distDir = join(wt, 'packages', 'cli', 'dist')
-      mkdirSync(distDir, { recursive: true })
-      writeFileSync(join(wt, 'packages', 'cli', 'package.json'), '{"name":"@broject/bro","version":"0.2.5"}')
-      const entry = join(distDir, 'index.js')
-      writeFileSync(entry, 'setTimeout(() => {}, 1e9)\n')
-      commitAt(wt)
-      const child = fakeDaemon(dir, [process.execPath, entry])
-      try {
-        const c = byName(runDoctorChecks(dir), 'daemon')
-        assert.equal(c.status, 'warn')
-        assert.match(c.detail, /different bro checkout/)
-      } finally {
-        child.kill()
-      }
-    }))
+  test(
+    'daemon: a sibling worktree on another HEAD is a different checkout',
+    { skip: process.platform !== 'linux' },
+    () =>
+      withEnv({ bins: ['gh'] }, dir => {
+        // shared common dir but diverged HEADs — the running binary can
+        // lack what this HEAD carries, so it is not this checkout's build
+        commitAt(dir);
+        const wt = join(dir, 'wt');
+        execFileSync('git', ['-C', dir, ...GIT_ID, 'worktree', 'add', '-q', '-b', 'wt1', wt]);
+        const distDir = join(wt, 'packages', 'cli', 'dist');
+        mkdirSync(distDir, { recursive: true });
+        writeFileSync(
+          join(wt, 'packages', 'cli', 'package.json'),
+          '{"name":"@broject/bro","version":"0.2.5"}'
+        );
+        const entry = join(distDir, 'index.js');
+        writeFileSync(entry, 'setTimeout(() => {}, 1e9)\n');
+        commitAt(wt);
+        const child = fakeDaemon(dir, [process.execPath, entry]);
+        try {
+          const c = byName(runDoctorChecks(dir), 'daemon');
+          assert.equal(c.status, 'warn');
+          assert.match(c.detail, /different bro checkout/);
+        } finally {
+          child.kill();
+        }
+      })
+  );
 
   test('providers: configured entries are listed as name (kind, model)', () =>
     withEnv(
@@ -1501,87 +1568,54 @@ describe('bro doctor', () => {
     ));
 
   test('conductor: a classifier pin naming an acp-served wire warns (bro-9ww2q)', () =>
-    withEnv(
-      {
-        config: {
-          providers: { 'devin-acp': { type: 'acp', command: 'devin acp --model swe-2-max' } },
-        },
-        bins: ['gh'],
-      },
-      dir => {
-        mkdirSync(join(dir, '.claude'), { recursive: true });
-        writeFileSync(
-          join(dir, '.claude', 'settings.local.json'),
-          JSON.stringify({
-            env: {
-              ANTHROPIC_DEFAULT_HAIKU_MODEL: 'devin/swe-2-max',
-            },
-          })
-        );
-        const c = byName(runDoctorChecks(dir), 'conductor');
-        assert.equal(c.status, 'warn', JSON.stringify(c));
-        assert.match(c.detail, /ANTHROPIC_DEFAULT_HAIKU_MODEL=devin\/swe-2-max/);
-        assert.match(c.detail, /providers\.devin-acp/);
-      }
-    ));
+    withEnv(CONDUCTOR_ACP, dir => {
+      mkdirSync(join(dir, '.claude'), { recursive: true });
+      writeFileSync(
+        join(dir, '.claude', 'settings.local.json'),
+        JSON.stringify({
+          env: {
+            ANTHROPIC_DEFAULT_HAIKU_MODEL: 'devin/swe-2-max',
+          },
+        })
+      );
+      const c = byName(runDoctorChecks(dir), 'conductor');
+      assert.equal(c.status, 'warn', JSON.stringify(c));
+      assert.match(c.detail, /ANTHROPIC_DEFAULT_HAIKU_MODEL=devin\/swe-2-max/);
+      assert.match(c.detail, /providers\.devin-acp/);
+    }));
 
   test('conductor: a live acp-backed endpoint + client base url warns with no pin at all', () =>
-    withEnv(
-      {
-        config: {
-          providers: { 'devin-acp': { type: 'acp', command: 'devin acp --model swe-2-max' } },
-        },
-        bins: ['gh'],
-        env: { BRO_PROVIDER_BACKEND: 'devin-acp' },
-      },
-      dir => {
-        liveServeClient(dir, 'http://127.0.0.1:44927');
-        const c = byName(runDoctorChecks(dir), 'conductor');
-        assert.equal(c.status, 'warn', JSON.stringify(c));
-        assert.match(c.detail, /acp conductor \(providers\.devin-acp\)/);
-        assert.match(c.detail, /classifier rides it too/);
-      }
-    ));
+    withEnv({ ...CONDUCTOR_ACP, env: { BRO_PROVIDER_BACKEND: 'devin-acp' } }, dir => {
+      liveServeClient(dir, 'http://127.0.0.1:44927');
+      const c = byName(runDoctorChecks(dir), 'conductor');
+      assert.equal(c.status, 'warn', JSON.stringify(c));
+      assert.match(c.detail, /acp conductor \(providers\.devin-acp\)/);
+      assert.match(c.detail, /classifier rides it too/);
+    }));
 
   test('conductor: a live serve with no acp backend stays ok — the byte proxy forwards classifiers fine', () =>
-    withEnv(
-      {
-        config: {
-          providers: { 'devin-acp': { type: 'acp', command: 'devin acp --model swe-2-max' } },
-        },
-        bins: ['gh'],
-      },
-      dir => {
-        const url = 'http://127.0.0.1:44927';
-        liveServeClient(dir, url, url, { ANTHROPIC_DEFAULT_HAIKU_MODEL: 'claude-haiku-4-5' });
-        const c = byName(runDoctorChecks(dir), 'conductor');
-        assert.equal(c.status, 'ok', JSON.stringify(c));
-      }
-    ));
+    withEnv(CONDUCTOR_ACP, dir => {
+      const url = 'http://127.0.0.1:44927';
+      liveServeClient(dir, url, url, { ANTHROPIC_DEFAULT_HAIKU_MODEL: 'claude-haiku-4-5' });
+      const c = byName(runDoctorChecks(dir), 'conductor');
+      assert.equal(c.status, 'ok', JSON.stringify(c));
+    }));
 
   test('conductor: a clean dedicated classifier lane wins — the main-model pin is not evaluated', () =>
-    withEnv(
-      {
-        config: {
-          providers: { 'devin-acp': { type: 'acp', command: 'devin acp --model swe-2-max' } },
-        },
-        bins: ['gh'],
-      },
-      dir => {
-        mkdirSync(join(dir, '.claude'), { recursive: true });
-        writeFileSync(
-          join(dir, '.claude', 'settings.local.json'),
-          JSON.stringify({
-            env: {
-              ANTHROPIC_DEFAULT_HAIKU_MODEL: 'claude-haiku-4-5',
-              ANTHROPIC_DEFAULT_SONNET_MODEL: 'devin/swe-2-max',
-            },
-          })
-        );
-        const c = byName(runDoctorChecks(dir), 'conductor');
-        assert.equal(c.status, 'ok', JSON.stringify(c));
-      }
-    ));
+    withEnv(CONDUCTOR_ACP, dir => {
+      mkdirSync(join(dir, '.claude'), { recursive: true });
+      writeFileSync(
+        join(dir, '.claude', 'settings.local.json'),
+        JSON.stringify({
+          env: {
+            ANTHROPIC_DEFAULT_HAIKU_MODEL: 'claude-haiku-4-5',
+            ANTHROPIC_DEFAULT_SONNET_MODEL: 'devin/swe-2-max',
+          },
+        })
+      );
+      const c = byName(runDoctorChecks(dir), 'conductor');
+      assert.equal(c.status, 'ok', JSON.stringify(c));
+    }));
 
   test('conductor: process-env pins count — <acp-name>/<id> is conductor vocabulary', () =>
     withEnv(
@@ -1601,37 +1635,19 @@ describe('bro doctor', () => {
     ));
 
   test('conductor: a localhost-spelled client url still matches the 127.0.0.1 serve', () =>
-    withEnv(
-      {
-        config: {
-          providers: { 'devin-acp': { type: 'acp', command: 'devin acp --model swe-2-max' } },
-        },
-        bins: ['gh'],
-        env: { BRO_PROVIDER_BACKEND: 'devin-acp' },
-      },
-      dir => {
-        liveServeClient(dir, 'http://127.0.0.1:44927', 'http://localhost:44927/');
-        const c = byName(runDoctorChecks(dir), 'conductor');
-        assert.equal(c.status, 'warn', JSON.stringify(c));
-        assert.match(c.detail, /acp conductor \(providers\.devin-acp\)/);
-      }
-    ));
+    withEnv({ ...CONDUCTOR_ACP, env: { BRO_PROVIDER_BACKEND: 'devin-acp' } }, dir => {
+      liveServeClient(dir, 'http://127.0.0.1:44927', 'http://localhost:44927/');
+      const c = byName(runDoctorChecks(dir), 'conductor');
+      assert.equal(c.status, 'warn', JSON.stringify(c));
+      assert.match(c.detail, /acp conductor \(providers\.devin-acp\)/);
+    }));
 
   test('conductor: a serve.json pointing off-loopback is not live-endpoint evidence', () =>
-    withEnv(
-      {
-        config: {
-          providers: { 'devin-acp': { type: 'acp', command: 'devin acp --model swe-2-max' } },
-        },
-        bins: ['gh'],
-        env: { BRO_PROVIDER_BACKEND: 'devin-acp' },
-      },
-      dir => {
-        liveServeClient(dir, 'http://203.0.113.9:44927');
-        const c = byName(runDoctorChecks(dir), 'conductor');
-        assert.equal(c.status, 'ok', JSON.stringify(c));
-      }
-    ));
+    withEnv({ ...CONDUCTOR_ACP, env: { BRO_PROVIDER_BACKEND: 'devin-acp' } }, dir => {
+      liveServeClient(dir, 'http://203.0.113.9:44927');
+      const c = byName(runDoctorChecks(dir), 'conductor');
+      assert.equal(c.status, 'ok', JSON.stringify(c));
+    }));
 
   test('conductor: two acp entries claiming one bare id are both named in the warn', () =>
     withEnv(
