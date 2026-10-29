@@ -51,22 +51,27 @@ function copyDetail(payload: Record<string, unknown>, detail: Detail, keys: read
   }
 }
 
-/** The payload skeleton every worker/worktree row shares: the subject
- *  id plus the bead it ran for. */
-function subjectPayload(ev: LifecycleEvent, id: string, idKey: string): Record<string, unknown> {
-  const payload: Record<string, unknown> = { [idKey]: id };
+/** The row's writing surface for envelope `source` — `detail.via`
+ *  (agents/work/drive/cleanup/loop) or the generic label. */
+function viaOf(ev: LifecycleEvent): string {
+  return str(ev.detail, 'via') ?? 'lifecycle';
+}
+
+/** The payload skeleton every worker/worktree row shares: the bead the
+ *  transition ran for. */
+function beadPayload(payload: Record<string, unknown>, ev: LifecycleEvent): Record<string, unknown> {
   setIf(payload, 'bead', ev.bead);
   return payload;
 }
 
 /** `spawn` → `worker.spawned` — admission is committed; the attempt's
  *  runId/log/worktree ride the payload. */
-function workerSpawnEvent(ev: LifecycleEvent, via: string): EventInput | undefined {
+function workerSpawnEvent(ev: LifecycleEvent): EventInput | undefined {
   const agent = str(ev.detail, 'agent');
   if (agent === undefined) {
     return undefined;
   }
-  const payload = subjectPayload(ev, agent, 'agentId');
+  const payload = beadPayload({ agentId: agent }, ev);
   copyDetail(payload, ev.detail, [
     'runId',
     'worktree',
@@ -81,7 +86,7 @@ function workerSpawnEvent(ev: LifecycleEvent, via: string): EventInput | undefin
     topic: 'worker',
     kind: 'spawned',
     key: agent,
-    source: via,
+    source: viaOf(ev),
     ...(worktree !== undefined ? { ref: worktree } : {}),
     payload,
   };
@@ -90,12 +95,12 @@ function workerSpawnEvent(ev: LifecycleEvent, via: string): EventInput | undefin
 /** `agent-exit` → `worker.exited` — the classified code/cause plus the
  *  attempt token. actor carries the agentId on this kind (the exit is
  *  the agent's own record); detail.agent is the same fact when present. */
-function workerExitEvent(ev: LifecycleEvent, via: string): EventInput | undefined {
+function workerExitEvent(ev: LifecycleEvent): EventInput | undefined {
   const agent = str(ev.detail, 'agent') ?? (ev.actor === '' ? undefined : ev.actor);
   if (agent === undefined) {
     return undefined;
   }
-  const payload = subjectPayload(ev, agent, 'agentId');
+  const payload = beadPayload({ agentId: agent }, ev);
   setIf(payload, 'code', num(ev.detail, 'code'));
   copyDetail(payload, ev.detail, ['runId', 'cause', 'backend', 'provider', 'model', 'log']);
   const log = str(ev.detail, 'log');
@@ -103,7 +108,7 @@ function workerExitEvent(ev: LifecycleEvent, via: string): EventInput | undefine
     topic: 'worker',
     kind: 'exited',
     key: agent,
-    source: via,
+    source: viaOf(ev),
     ...(log !== undefined ? { ref: log } : {}),
     payload,
   };
@@ -112,28 +117,22 @@ function workerExitEvent(ev: LifecycleEvent, via: string): EventInput | undefine
 /** `worktree` → `worktree.added`/`removed` — `to` drives the kind
  *  (removed) or stays `added` (created/reused); the path is the subject
  *  a subscriber's `keys` filter selects. */
-function worktreeEvent(ev: LifecycleEvent, via: string): EventInput | undefined {
+function worktreeEvent(ev: LifecycleEvent): EventInput | undefined {
   const path = str(ev.detail, 'worktree');
   if (path === undefined) {
     return undefined;
   }
-  const payload = subjectPayload(ev, path, 'path');
+  const payload = beadPayload({ path }, ev);
   setIf(payload, 'branch', str(ev.detail, 'branch'));
   return {
     topic: 'worktree',
     kind: ev.to === 'removed' ? 'removed' : 'added',
     key: path,
-    source: via,
+    source: viaOf(ev),
     ref: path,
     payload,
   };
 }
-
-const KIND_MAPPER: Record<string, (ev: LifecycleEvent, via: string) => EventInput | undefined> = {
-  spawn: workerSpawnEvent,
-  'agent-exit': workerExitEvent,
-  worktree: worktreeEvent,
-};
 
 /** Map a lifecycle journal row to its bus envelope — `undefined` for
  *  kinds the worker/worktree feed does not cover (claim, gate, verdict,
@@ -146,8 +145,16 @@ const KIND_MAPPER: Record<string, (ev: LifecycleEvent, via: string) => EventInpu
  *  (recipient *address*) — mapping it would address every event to a
  *  phantom and hide it from broadcast subscribers. */
 export function lifecycleBusEvent(ev: LifecycleEvent): EventInput | undefined {
-  const via = str(ev.detail, 'via') ?? 'lifecycle';
-  return KIND_MAPPER[ev.kind]?.(ev, via);
+  switch (ev.kind) {
+    case 'spawn':
+      return workerSpawnEvent(ev);
+    case 'agent-exit':
+      return workerExitEvent(ev);
+    case 'worktree':
+      return worktreeEvent(ev);
+    default:
+      return undefined;
+  }
 }
 
 /** Mirror one journal row onto the bus — fire-and-forget inside
