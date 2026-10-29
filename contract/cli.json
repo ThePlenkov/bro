@@ -3,11 +3,22 @@
   "groups": {
     "review": {
       "summary": "PR review loop — gates, threads, debt",
-      "members": ["debt", "act", "watch", "drive", "cleanup"]
+      "members": [
+        "debt",
+        "act",
+        "watch",
+        "drive",
+        "cleanup"
+      ]
     },
     "flow": {
       "summary": "scheduling & work chains — claims, loops, stacks",
-      "members": ["convoy", "next", "loop", "stack"]
+      "members": [
+        "convoy",
+        "next",
+        "loop",
+        "stack"
+      ]
     },
     "fleet": {
       "summary": "agent plane — workers, serve, the board",
@@ -31,27 +42,57 @@
     },
     "work": {
       "summary": "worktree & session mechanics",
-      "members": ["drill", "unwind", "queue", "goal", "work", "stamp", "sync", "sweep"]
+      "members": [
+        "drill",
+        "unwind",
+        "queue",
+        "goal",
+        "work",
+        "stamp",
+        "sync",
+        "sweep"
+      ]
     },
     "self": {
       "summary": "self-correction — retro, lessons, judgment, guards",
-      "members": ["retrospect", "wtf", "learn", "judge", "dogfood", "guard", "providers"]
+      "members": [
+        "retrospect",
+        "wtf",
+        "learn",
+        "judge",
+        "dogfood",
+        "guard",
+        "providers"
+      ]
     },
     "comms": {
       "summary": "events & session mailbox",
-      "members": ["notify", "sinks", "bus"]
+      "members": [
+        "notify",
+        "sinks",
+        "bus"
+      ]
     },
     "plan": {
       "summary": "versioned plans",
-      "members": ["query", "run", "plan"]
+      "members": [
+        "query",
+        "run",
+        "plan"
+      ]
     },
     "mesh": {
       "summary": "inter-rig federation",
-      "members": ["mesh", "request"]
+      "members": [
+        "mesh",
+        "request"
+      ]
     },
     "spec": {
       "summary": "spec-driven development",
-      "members": ["spec"]
+      "members": [
+        "spec"
+      ]
     }
   },
   "commands": {
@@ -59,7 +100,10 @@
       "name": "debt",
       "group": "review",
       "summary": "Review-debt pipeline: collect|status|prs|list|mark|sync|set",
-      "spellings": ["debt", "review debt"],
+      "spellings": [
+        "debt",
+        "review debt"
+      ],
       "aliases": [],
       "hidden": false,
       "skill": "debt",
@@ -81,6 +125,7 @@
               "--area <a>": "only findings in this area",
               "--author <u>": "only findings from this thread author"
             },
+            "json": "schemas/cli/debt-next.schema.json",
             "exits": {
               "0": "top open finding emitted",
               "1": "no open findings, or the claim CAS lost",
@@ -95,7 +140,10 @@
       "name": "act",
       "group": "review",
       "summary": "Open-PR loop: status|threads|resolve|reply|merge",
-      "spellings": ["act", "review act"],
+      "spellings": [
+        "act",
+        "review act"
+      ],
       "aliases": [],
       "hidden": false,
       "skill": "act",
@@ -113,7 +161,8 @@
               "0": "exit gate green",
               "1": "gate blocked — threads/failures remain (usage errors also exit 1 today)",
               "2": "no open PR for the current branch"
-            }
+            },
+            "json": "schemas/cli/act-status.schema.json"
           }
         }
       },
@@ -123,7 +172,10 @@
       "name": "convoy",
       "group": "flow",
       "summary": "Convoy execution over beads molecules: status|next|done|pour|list|run",
-      "spellings": ["convoy", "flow convoy"],
+      "spellings": [
+        "convoy",
+        "flow convoy"
+      ],
       "aliases": [],
       "hidden": false,
       "skill": "convoy",
@@ -135,7 +187,10 @@
       "name": "next",
       "group": "flow",
       "summary": "Claim + emit the top ready bead — the autonomous backlog loop",
-      "spellings": ["next", "flow next"],
+      "spellings": [
+        "next",
+        "flow next"
+      ],
       "aliases": [],
       "hidden": false,
       "skill": "next",
@@ -148,6 +203,7 @@
           "--global": "read the user-level store instead of the project",
           "--label <a,b>": "only beads carrying one of these labels are claimable"
         },
+        "json": "schemas/cli/next.schema.json",
         "exits": {
           "0": "verdict emitted — task | gated | idle",
           "1": "task store unreachable or classify failed",
@@ -160,7 +216,10 @@
       "name": "loop",
       "group": "flow",
       "summary": "Autonomous backlog runner — claim → agent → gate → close → repeat",
-      "spellings": ["loop", "flow loop"],
+      "spellings": [
+        "loop",
+        "flow loop"
+      ],
       "aliases": [],
       "hidden": false,
       "skill": "loop",
@@ -172,7 +231,9 @@
       "name": "fleet",
       "group": "fleet",
       "summary": "Fleet view — mols × steps × agents × worktrees × PRs [--json|--live|--every N]",
-      "spellings": ["fleet"],
+      "spellings": [
+        "fleet"
+      ],
       "aliases": [],
       "hidden": false,
       "plan": false,
@@ -182,6 +243,7 @@
           "--live": "TTY dashboard repaint loop (needs a TTY)",
           "--every N": "repaint cadence seconds — implies --live"
         },
+        "json": "schemas/cli/fleet.schema.json",
         "exits": {
           "0": "fleet printed",
           "2": "usage — --live without TTY, --every out of range, --json + --live"
@@ -193,7 +255,10 @@
       "name": "delegate",
       "group": "fleet",
       "summary": "Activate another agent — sync ask (--wait, pooled ACP turn) or detached registry spawn (--detach)",
-      "spellings": ["delegate", "fleet delegate"],
+      "spellings": [
+        "delegate",
+        "fleet delegate"
+      ],
       "aliases": [],
       "hidden": false,
       "skill": "delegate",
@@ -225,7 +290,10 @@
       "name": "agents",
       "group": "fleet",
       "summary": "Agent supervisor — status|up|down over the orchestrator connectors",
-      "spellings": ["agents", "fleet agents"],
+      "spellings": [
+        "agents",
+        "fleet agents"
+      ],
       "aliases": [],
       "hidden": false,
       "skill": "agents",
@@ -238,6 +306,7 @@
               "--json": "agent rows + occupancy + session quota as JSON",
               "--connector <name>": "pin the agents facade connector"
             },
+            "json": "schemas/cli/agents-status.schema.json",
             "exits": {
               "0": "agent plane printed",
               "1": "backend collection failed",
@@ -252,7 +321,10 @@
       "name": "status",
       "group": "fleet",
       "summary": "The compact live board — beads + fleet + drill + git [--json|--deep]",
-      "spellings": ["status", "fleet status"],
+      "spellings": [
+        "status",
+        "fleet status"
+      ],
       "aliases": [],
       "hidden": false,
       "skill": "status",
@@ -262,6 +334,7 @@
           "--json": "the board as one JSON document",
           "--deep": "add the act exit gate for the current branch PR — the fast path stays local-only"
         },
+        "json": "schemas/cli/fleet-status.schema.json",
         "exits": {
           "0": "board printed"
         }
@@ -272,7 +345,10 @@
       "name": "notify",
       "group": "comms",
       "summary": "Drop an event into the session mailbox — drained into context by the next postTool probe",
-      "spellings": ["notify", "comms notify"],
+      "spellings": [
+        "notify",
+        "comms notify"
+      ],
       "aliases": [],
       "hidden": false,
       "skill": "notify",
@@ -283,7 +359,10 @@
       "name": "sinks",
       "group": "comms",
       "summary": "Outbound event sinks — list configured webhooks, send a probe [list|test]",
-      "spellings": ["sinks", "comms sinks"],
+      "spellings": [
+        "sinks",
+        "comms sinks"
+      ],
       "aliases": [],
       "hidden": false,
       "plan": false,
@@ -293,7 +372,10 @@
       "name": "watch",
       "group": "review",
       "summary": "Orchestrator heartbeat — mols × act gates × fleet snapshot [--once|--every N|--notify|--json|install|uninstall]",
-      "spellings": ["watch", "review watch"],
+      "spellings": [
+        "watch",
+        "review watch"
+      ],
       "aliases": [],
       "hidden": false,
       "skill": "watch",
@@ -305,7 +387,10 @@
       "name": "drive",
       "group": "review",
       "summary": "Post-PR review driver — poll act gates, spawn fixer agents, merge on green [--once|--every N|--no-merge]",
-      "spellings": ["drive", "review drive"],
+      "spellings": [
+        "drive",
+        "review drive"
+      ],
       "aliases": [],
       "hidden": false,
       "skill": "drive",
@@ -317,7 +402,10 @@
       "name": "daemon",
       "group": "fleet",
       "summary": "Project-scoped supervisor — owns the drive pass long-term [up|status|down|run --every N]",
-      "spellings": ["daemon", "fleet daemon"],
+      "spellings": [
+        "daemon",
+        "fleet daemon"
+      ],
       "aliases": [],
       "hidden": false,
       "skill": "daemon",
@@ -328,7 +416,10 @@
       "name": "resume",
       "group": "fleet",
       "summary": "Post-restart recovery — rearm dead watches, revive the daemon, audit survivors [--dry-run|--json]",
-      "spellings": ["resume", "fleet resume"],
+      "spellings": [
+        "resume",
+        "fleet resume"
+      ],
       "aliases": [],
       "hidden": false,
       "skill": "resume",
@@ -339,7 +430,10 @@
       "name": "serve",
       "group": "fleet",
       "summary": "Facade host for thin clients — HTTP/JSON on 127.0.0.1 [--port N]",
-      "spellings": ["serve", "fleet serve"],
+      "spellings": [
+        "serve",
+        "fleet serve"
+      ],
       "aliases": [],
       "hidden": false,
       "skill": "serve",
@@ -351,7 +445,10 @@
       "name": "provider",
       "group": "fleet",
       "summary": "Claude-facing Messages-API plane — host listener + url|token|env wiring helpers",
-      "spellings": ["provider", "fleet provider"],
+      "spellings": [
+        "provider",
+        "fleet provider"
+      ],
       "aliases": [],
       "hidden": false,
       "skill": "provider",
@@ -362,7 +459,10 @@
       "name": "mcp",
       "group": "fleet",
       "summary": "Stdio MCP server over the read planes — bro_<plane>_<read> tools",
-      "spellings": ["mcp", "fleet mcp"],
+      "spellings": [
+        "mcp",
+        "fleet mcp"
+      ],
       "aliases": [],
       "hidden": false,
       "skill": "mcp",
@@ -373,7 +473,10 @@
       "name": "pulse",
       "group": "fleet",
       "summary": "Session-owned metronome — tick + mailbox beat every S seconds [S|--no-notify|--json|-- <cmd>…]",
-      "spellings": ["pulse", "fleet pulse"],
+      "spellings": [
+        "pulse",
+        "fleet pulse"
+      ],
       "aliases": [],
       "hidden": false,
       "skill": "pulse",
@@ -384,7 +487,10 @@
       "name": "bus",
       "group": "comms",
       "summary": "Local event bus — serve/publish/subscribe agent events by topic",
-      "spellings": ["bus", "comms bus"],
+      "spellings": [
+        "bus",
+        "comms bus"
+      ],
       "aliases": [],
       "hidden": false,
       "plan": false,
@@ -393,7 +499,9 @@
     "check": {
       "name": "check",
       "summary": "Run the repo sverka workflow — per-step stats + findings [--json]",
-      "spellings": ["check"],
+      "spellings": [
+        "check"
+      ],
       "aliases": [],
       "hidden": false,
       "skill": "check",
@@ -405,7 +513,10 @@
       "name": "cleanup",
       "group": "review",
       "summary": "Delete local branches whose PR merged [--remote] [--dry-run]",
-      "spellings": ["cleanup", "review cleanup"],
+      "spellings": [
+        "cleanup",
+        "review cleanup"
+      ],
       "aliases": [],
       "hidden": false,
       "plan": false,
@@ -415,8 +526,13 @@
       "name": "drill",
       "group": "work",
       "summary": "Scoped descent over beads: down|up|current|tree|list|report|distill",
-      "spellings": ["drill", "work drill"],
-      "aliases": ["unwind"],
+      "spellings": [
+        "drill",
+        "work drill"
+      ],
+      "aliases": [
+        "unwind"
+      ],
       "hidden": false,
       "skill": "drill",
       "configKey": "drill",
@@ -428,19 +544,27 @@
       "name": "unwind",
       "group": "work",
       "summary": "Alias for `drill up`",
-      "spellings": ["unwind", "work unwind"],
+      "spellings": [
+        "unwind",
+        "work unwind"
+      ],
       "aliases": [],
       "aliasOf": "drill up",
       "hidden": false,
       "plan": false,
-      "argvPrefix": ["up"],
+      "argvPrefix": [
+        "up"
+      ],
       "external": false
     },
     "queue": {
       "name": "queue",
       "group": "work",
       "summary": "Frame-scoped intake queue: ls|drill|bump|rm — rank-ordered items that promote to frames",
-      "spellings": ["queue", "work queue"],
+      "spellings": [
+        "queue",
+        "work queue"
+      ],
       "aliases": [],
       "hidden": false,
       "plan": false,
@@ -450,8 +574,13 @@
       "name": "retrospect",
       "group": "self",
       "summary": "Self-correction: capture|record|status|list|schema",
-      "spellings": ["retrospect", "self retrospect"],
-      "aliases": ["wtf"],
+      "spellings": [
+        "retrospect",
+        "self retrospect"
+      ],
+      "aliases": [
+        "wtf"
+      ],
       "hidden": false,
       "skill": "wtf",
       "plan": true,
@@ -462,7 +591,10 @@
       "name": "wtf",
       "group": "self",
       "summary": "Alias for `retrospect capture` — vent, verbatim",
-      "spellings": ["wtf", "self wtf"],
+      "spellings": [
+        "wtf",
+        "self wtf"
+      ],
       "aliases": [],
       "aliasOf": "retrospect capture",
       "hidden": false,
@@ -473,7 +605,10 @@
       "name": "learn",
       "group": "self",
       "summary": "Self-improvement loop — lessons: add|list|show|forget|capture|probe",
-      "spellings": ["learn", "self learn"],
+      "spellings": [
+        "learn",
+        "self learn"
+      ],
       "aliases": [],
       "hidden": false,
       "skill": "learn",
@@ -485,7 +620,10 @@
       "name": "goal",
       "group": "work",
       "summary": "Session-scoped completion goal — set|status|pause|resume|clear; hooks remind + judge-verdict",
-      "spellings": ["goal", "work goal"],
+      "spellings": [
+        "goal",
+        "work goal"
+      ],
       "aliases": [],
       "hidden": false,
       "skill": "goal",
@@ -497,7 +635,10 @@
       "name": "judge",
       "group": "self",
       "summary": "Calibrated decision judge — decide smoke test over systemone + llm-judge",
-      "spellings": ["judge", "self judge"],
+      "spellings": [
+        "judge",
+        "self judge"
+      ],
       "aliases": [],
       "hidden": false,
       "skill": "judge",
@@ -509,7 +650,10 @@
       "name": "dogfood",
       "group": "self",
       "summary": "Scenario-driven e2e self-test — markdown runbook, fresh-agent runner, analyst verdict",
-      "spellings": ["dogfood", "self dogfood"],
+      "spellings": [
+        "dogfood",
+        "self dogfood"
+      ],
       "aliases": [],
       "hidden": false,
       "skill": "dogfood",
@@ -520,7 +664,10 @@
       "name": "guard",
       "group": "self",
       "summary": "Declarative prompt guards — list resolved declarations [--json]",
-      "spellings": ["guard", "self guard"],
+      "spellings": [
+        "guard",
+        "self guard"
+      ],
       "aliases": [],
       "hidden": false,
       "configKey": "guard",
@@ -530,7 +677,9 @@
     "docs": {
       "name": "docs",
       "summary": "Doc-type dispatch — `bro <verb> <noun|ref>` (bro <verb> store|task)",
-      "spellings": ["docs"],
+      "spellings": [
+        "docs"
+      ],
       "aliases": [],
       "hidden": true,
       "skill": "docs",
@@ -542,7 +691,9 @@
       "name": "work",
       "group": "work",
       "summary": "Parallel-friendly worktrees: enter|leave|list|prune",
-      "spellings": ["work"],
+      "spellings": [
+        "work"
+      ],
       "aliases": [],
       "hidden": false,
       "skill": "work",
@@ -554,7 +705,10 @@
       "name": "stack",
       "group": "flow",
       "summary": "Stacked bead→worktree→PR chains: push|list|sync|publish|merge",
-      "spellings": ["stack", "flow stack"],
+      "spellings": [
+        "stack",
+        "flow stack"
+      ],
       "aliases": [],
       "hidden": false,
       "skill": "stack",
@@ -565,7 +719,10 @@
       "name": "stamp",
       "group": "work",
       "summary": "Attribute shared-output writes — record/read the last build stamp",
-      "spellings": ["stamp", "work stamp"],
+      "spellings": [
+        "stamp",
+        "work stamp"
+      ],
       "aliases": [],
       "hidden": false,
       "plan": false,
@@ -575,7 +732,9 @@
       "name": "spec",
       "group": "spec",
       "summary": "Spec-driven development policy: check|new (sdd.mode gates hooks)",
-      "spellings": ["spec"],
+      "spellings": [
+        "spec"
+      ],
       "aliases": [],
       "hidden": false,
       "skill": "sdd",
@@ -586,8 +745,12 @@
     "hooks": {
       "name": "hooks",
       "summary": "Agent lifecycle hooks",
-      "spellings": ["hooks"],
-      "aliases": ["telemetry"],
+      "spellings": [
+        "hooks"
+      ],
+      "aliases": [
+        "telemetry"
+      ],
       "hidden": true,
       "configKey": "freshness",
       "plan": false,
@@ -597,7 +760,10 @@
       "name": "telemetry",
       "group": "fleet",
       "summary": "Hook + command latency report — perf journal rollup [--session <id>] [--json]",
-      "spellings": ["telemetry", "fleet telemetry"],
+      "spellings": [
+        "telemetry",
+        "fleet telemetry"
+      ],
       "aliases": [],
       "aliasOf": "hooks perf",
       "hidden": false,
@@ -608,7 +774,10 @@
       "name": "trace",
       "group": "fleet",
       "summary": "OTLP export of the session trace journals — export [--session|--dry-run|--json]",
-      "spellings": ["trace", "fleet trace"],
+      "spellings": [
+        "trace",
+        "fleet trace"
+      ],
       "aliases": [],
       "hidden": false,
       "skill": "trace",
@@ -671,7 +840,9 @@
     "acp-worker": {
       "name": "acp-worker",
       "summary": "ACP provider spawn unit — backends exec this; never typed",
-      "spellings": ["acp-worker"],
+      "spellings": [
+        "acp-worker"
+      ],
       "aliases": [],
       "hidden": true,
       "plan": false,
@@ -681,7 +852,10 @@
       "name": "acp",
       "group": "fleet",
       "summary": "ACP edge — `proxy -- <agent cmd>` puts bro on the wire (spec bro-bhyo1)",
-      "spellings": ["acp", "fleet acp"],
+      "spellings": [
+        "acp",
+        "fleet acp"
+      ],
       "aliases": [],
       "hidden": false,
       "skill": "acp",
@@ -703,7 +877,10 @@
       "name": "providers",
       "group": "self",
       "summary": "Provider registry — models catalog as <provider>/<model> [name…]",
-      "spellings": ["providers", "self providers"],
+      "spellings": [
+        "providers",
+        "self providers"
+      ],
       "aliases": [],
       "hidden": false,
       "skill": "providers",
@@ -713,7 +890,9 @@
     "setup": {
       "name": "setup",
       "summary": "Wire bro into the current repo",
-      "spellings": ["setup"],
+      "spellings": [
+        "setup"
+      ],
       "aliases": [],
       "hidden": false,
       "plan": false,
@@ -722,7 +901,9 @@
     "doctor": {
       "name": "doctor",
       "summary": "Environment diagnostics: node, git, gh auth, bd, hooks, config, remotes [--json]",
-      "spellings": ["doctor"],
+      "spellings": [
+        "doctor"
+      ],
       "aliases": [],
       "hidden": false,
       "plan": false,
@@ -732,7 +913,10 @@
       "name": "rig",
       "group": "fleet",
       "summary": "Rig freshness — main checkout tracks upstream, rebuilt + hotpatched: sync|status|watch|install",
-      "spellings": ["rig", "fleet rig"],
+      "spellings": [
+        "rig",
+        "fleet rig"
+      ],
       "aliases": [],
       "hidden": false,
       "skill": "rig",
@@ -745,6 +929,7 @@
               "--repo <dir>": "rig checkout to inspect (default: this repo)",
               "--json": "rig status as JSON"
             },
+            "json": "schemas/cli/rig-status.schema.json",
             "exits": {
               "0": "rig fresh — no error surfaced",
               "1": "a status error was found",
@@ -755,6 +940,7 @@
             "flags": {
               "--json": "the re-entry verdict as JSON"
             },
+            "json": "schemas/cli/rig-next.schema.json",
             "exits": {
               "0": "verdict — step | gate | wait | done",
               "1": "verdict blocked",
@@ -769,7 +955,10 @@
       "name": "sync",
       "group": "work",
       "summary": "Push/pull artifact dirs on refs/bro/data [--pull]",
-      "spellings": ["sync", "work sync"],
+      "spellings": [
+        "sync",
+        "work sync"
+      ],
       "aliases": [],
       "hidden": false,
       "skill": "sync",
@@ -781,7 +970,10 @@
       "name": "sweep",
       "group": "work",
       "summary": "Gated disposal for closed beads: status|distill|run — gate → archive → prune",
-      "spellings": ["sweep", "work sweep"],
+      "spellings": [
+        "sweep",
+        "work sweep"
+      ],
       "aliases": [],
       "hidden": false,
       "skill": "sweep",
@@ -793,7 +985,10 @@
       "name": "query",
       "group": "plan",
       "summary": "Cross-provider GraphQL plan — `bro query <plan.toml>` or `kind = \"query\"` via `bro run`",
-      "spellings": ["query", "plan query"],
+      "spellings": [
+        "query",
+        "plan query"
+      ],
       "aliases": [],
       "hidden": false,
       "skill": "query",
@@ -806,7 +1001,9 @@
       "name": "mesh",
       "group": "mesh",
       "summary": "Inter-rig work federation: me|peers|pull|inbox|request|claim|done|accept|reject|wait (specs/mesh)",
-      "spellings": ["mesh"],
+      "spellings": [
+        "mesh"
+      ],
       "aliases": [],
       "hidden": false,
       "configKey": "mesh",
@@ -817,7 +1014,10 @@
       "name": "request",
       "group": "mesh",
       "summary": "Post a request to a repo or peer — delivers into same-machine checkouts (specs/cross-repo)",
-      "spellings": ["request", "mesh request"],
+      "spellings": [
+        "request",
+        "mesh request"
+      ],
       "aliases": [],
       "hidden": false,
       "plan": false,
@@ -826,7 +1026,9 @@
     "wait": {
       "name": "wait",
       "summary": "Dep-plane watcher — `bro wait external:<rig>:<id>` polls the dep stores, verdict = exit code (specs/cross-repo)",
-      "spellings": ["wait"],
+      "spellings": [
+        "wait"
+      ],
       "aliases": [],
       "hidden": false,
       "plan": false,
@@ -836,7 +1038,10 @@
       "name": "run",
       "group": "plan",
       "summary": "Execute a plan file — `kind` routes to the owning plugin",
-      "spellings": ["run", "plan run"],
+      "spellings": [
+        "run",
+        "plan run"
+      ],
       "aliases": [],
       "hidden": false,
       "plan": false,
@@ -846,7 +1051,9 @@
       "name": "plan",
       "group": "plan",
       "summary": "Plan contract: list kinds + schema versions, validate a file",
-      "spellings": ["plan"],
+      "spellings": [
+        "plan"
+      ],
       "aliases": [],
       "hidden": false,
       "plan": false,
@@ -855,7 +1062,9 @@
     "plugins": {
       "name": "plugins",
       "summary": "Plugin registry + client adapters: install|uninstall|list <client>",
-      "spellings": ["plugins"],
+      "spellings": [
+        "plugins"
+      ],
       "aliases": [],
       "hidden": false,
       "plan": false,
@@ -864,7 +1073,9 @@
     "contract": {
       "name": "contract",
       "summary": "The CLI surface as data — dump|check|gen over the registry",
-      "spellings": ["contract"],
+      "spellings": [
+        "contract"
+      ],
       "aliases": [],
       "hidden": true,
       "plan": false,

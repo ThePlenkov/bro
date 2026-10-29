@@ -1,0 +1,27 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://broject.dev/schemas/cli/rig-status.schema.json",
+  "title": "bro rig status --json",
+  "type": "object",
+  "additionalProperties": true,
+  "required": ["repo", "via"],
+  "properties": {
+    "repo": { "type": "string" },
+    "via": { "type": "string" },
+    "error": { "type": "string" },
+    "branch": { "type": "string" },
+    "upstream": { "type": "string" },
+    "ahead": { "type": "integer" },
+    "behind": { "type": "integer" },
+    "dirty": { "type": "integer" },
+    "head": { "type": "string" },
+    "bootstrapped": { "type": "boolean" },
+    "doneSha": { "type": "string" },
+    "fresh": { "type": "boolean" },
+    "steps": {
+      "type": "array",
+      "items": { "type": "string" }
+    },
+    "pulse": { "type": "string" }
+  }
+}
