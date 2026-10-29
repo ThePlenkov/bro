@@ -55,6 +55,7 @@ import {
   gitTry,
   handleOwner,
   isAgentCause,
+  rateDeathBackoff,
   JudgeUnavailable,
   loadConfig,
   mintAgentId,
@@ -1949,6 +1950,18 @@ function ensureExitCause(
   if (typeof entry.exitStatus !== 'number' || isAgentCause(entry.cause)) {
     return;
   }
+  // the .exit file's mtime is the honest death stamp — the harvest's own
+  // clock can land a poll late (specs/telemetry/bro-ub91h.md), and a lazy
+  // read can land HOURS late: the message's "in 54 minutes" / "at 19:01"
+  // anchors to the death, never to whenever this read happened (bro-9eeld)
+  let exitAt: number | undefined;
+  if (home !== null) {
+    try {
+      exitAt = statSync(join(home, agentExitFileName(entry.agentId, entryRunId(entry)))).mtimeMs;
+    } catch {
+      // the file rotated between read and stat — fall back to now
+    }
+  }
   // classification input = this run's .log tail + .stderr tail (spec
   // bro-e2ec0) — provider walls the child prints on stderr classify from
   // the capture, the event stream no longer carries them. The tails
@@ -1956,7 +1969,8 @@ function ensureExitCause(
   // across the boundary ('…4' + '29…' → '429')
   const c = classifyExitCauseParts(
     [readLogTail(entry.log, entry.logFrom), readLogTail(entry.stderrLog, entry.stderrFrom)],
-    entry.exitStatus
+    entry.exitStatus,
+    exitAt ?? Date.now()
   );
   // the tails were read off-lock — a respawn stamping the entry between
   // the two reads feeds the old run new-run bytes; a DIFFERENT
@@ -1973,13 +1987,13 @@ function ensureExitCause(
     return;
   }
   entry.cause = c.cause;
-  entry.resetAt = c.resetAt;
-  emitProviderWall(entry, molStep, c.cause, c.resetAt);
-  // lifecycle — the agent-exit transition, emitted once per run at the
-  // harvest (the early return above skips re-emit on a carried cause).
-  // The .exit file's mtime is the honest wall-clock; the harvest's own
-  // clock can land a poll late (specs/telemetry/bro-ub91h.md)
-  let exitAt: number | undefined;
+  // instant-death backoff (spec bro-9eeld): a rate wall hit inside the
+  // first minute proves the last mark undershot — the recorded hold
+  // escalates per consecutive fast death instead of re-trusting it
+  const back = rateDeathBackoff(entry, c.cause, c.resetAt, exitAt ?? Date.now());
+  entry.resetAt = back.resetAt;
+  entry.rateStreak = back.streak > 0 ? back.streak : undefined;
+  emitProviderWall(entry, molStep, c.cause, back.resetAt);
   if (home !== null) {
     try {
       exitAt = statSync(join(home, agentExitFileName(entry.agentId, entryRunId(entry)))).mtimeMs;
@@ -2025,8 +2039,9 @@ function ensureExitCause(
       reg[molStep] = {
         ...cur,
         exitStatus: entry.exitStatus,
-        cause: c.cause,
-        resetAt: c.resetAt,
+        cause: entry.cause,
+        resetAt: entry.resetAt,
+        rateStreak: entry.rateStreak,
       };
       writeAgentRegistry(dir, reg);
     });
@@ -5382,7 +5397,7 @@ function copilotTerminalPatch(
   entry: AgentRegistryEntry
 ): Record<string, unknown> {
   if (state === 'cancelled') {
-    return { stopped: true };
+    return { stopped: true, rateStreak: undefined };
   }
   if (state === 'completed') {
     return { exitStatus: 0, cause: 'ok', rateStreak: undefined };
