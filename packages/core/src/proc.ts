@@ -4,18 +4,20 @@
  * alone lies twice: it answers for zombies (nobody polling) and can't
  * tell a reused pid from the process that recorded it.
  */
-import { readFileSync } from 'node:fs';
+import { readFileSync } from 'node:fs'
 
 /** The process's /proc identity — state byte (field 3: 'Z' marks an
  *  unreaped zombie) and starttime (field 22). Post-comm fields split
  *  from index 0 = field 3. Null where /proc is absent or unreadable. */
-export function procStat(pid: number): { state: string; start: string } | null {
+export function procStat(
+  pid: number
+): { state: string; start: string } | null {
   try {
-    const stat = readFileSync(`/proc/${pid}/stat`, 'utf8');
-    const rest = stat.slice(stat.lastIndexOf(')') + 2).split(' ');
-    return { state: rest[0] ?? '', start: rest[19] ?? '' };
+    const stat = readFileSync(`/proc/${pid}/stat`, 'utf8')
+    const rest = stat.slice(stat.lastIndexOf(')') + 2).split(' ')
+    return { state: rest[0] ?? '', start: rest[19] ?? '' }
   } catch {
-    return null;
+    return null
   }
 }
 
@@ -33,23 +35,25 @@ export function procStat(pid: number): { state: string; start: string } | null {
  *  for process groups, so the signal cannot attest that pid. */
 export function pidAlive(pid: number, pidStart?: string): boolean {
   if (!Number.isInteger(pid) || pid <= 0) {
-    return false;
+    return false
   }
   try {
-    process.kill(pid, 0);
+    process.kill(pid, 0)
   } catch (e) {
     // EPERM = exists but owned by another uid — still subject to the
     // zombie and reuse checks below; /proc stat is world-readable, so
     // foreign ownership doesn't make identity unverifiable
     if ((e as NodeJS.ErrnoException).code !== 'EPERM') {
-      return false;
+      return false
     }
   }
-  const st = procStat(pid);
+  const st = procStat(pid)
   if (st?.state === 'Z') {
-    return false;
+    return false
   }
-  return pidStart === undefined || st === null || st.start === '' || st.start === pidStart;
+  return (
+    pidStart === undefined || st === null || st.start === '' || st.start === pidStart
+  )
 }
 
 /** An attempt handle's identity — `<pid> [starttime]`: the worker
@@ -60,13 +64,13 @@ export function pidAlive(pid: number, pidStart?: string): boolean {
  *  so callers stay fail-open the way pidAlive documents. Null when no
  *  positive integer pid is there at all. */
 export function handleOwner(text: string): { pid: number; start?: string } | null {
-  const parts = text.trim().split(/\s+/);
-  const pid = Number(parts[0]);
+  const parts = text.trim().split(/\s+/)
+  const pid = Number(parts[0])
   if (!Number.isInteger(pid) || pid <= 0) {
-    return null;
+    return null
   }
-  const start = parts[1];
-  return start === undefined || start === '' ? { pid } : { pid, start };
+  const start = parts[1]
+  return start === undefined || start === '' ? { pid } : { pid, start }
 }
 
 /** Line 1 of a session/work marker: `<millis> [pid start]` — the pid
@@ -74,11 +78,15 @@ export function handleOwner(text: string): { pid: number; start?: string } | nul
  *  A pid without a start can't disambiguate, so it reads as ownerless:
  *  a reuse-blind owner would suppress the mtime fallback while still
  *  trusting a recycled pid — the worst of both planes. */
-export function markerOwner(firstLine: string | undefined): { pid: number; start: string } | null {
-  const parts = (firstLine ?? '').trim().split(' ');
-  const pid = Number(parts[1]);
-  const start = parts[2] ?? '';
-  return Number.isInteger(pid) && pid > 0 && start !== '' ? { pid, start } : null;
+export function markerOwner(
+  firstLine: string | undefined
+): { pid: number; start: string } | null {
+  const parts = (firstLine ?? '').trim().split(' ')
+  const pid = Number(parts[1])
+  const start = parts[2] ?? ''
+  return Number.isInteger(pid) && pid > 0 && start !== ''
+    ? { pid, start }
+    : null
 }
 
 /** Is this marker's owning session alive? A recorded owner decides by
@@ -91,6 +99,8 @@ export function markerLive(
   liveMs: number,
   now: number = Date.now()
 ): boolean {
-  const owner = markerOwner(firstLine);
-  return owner === null ? mtimeMs >= now - liveMs : pidAlive(owner.pid, owner.start || undefined);
+  const owner = markerOwner(firstLine)
+  return owner === null
+    ? mtimeMs >= now - liveMs
+    : pidAlive(owner.pid, owner.start || undefined)
 }
