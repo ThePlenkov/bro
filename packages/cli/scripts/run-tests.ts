@@ -53,9 +53,9 @@ if (pattern.includes('.e2e')) {
   })
   if (build.status !== 0) {
     // Fallback: try building from package dir if nx not available in expected form
-    const build2 = spawnSync(process.execPath, ['../../node_modules/.bin/tsdown', 'src/index.ts'], {
+    const build2 = spawnSync(process.execPath, ['../node_modules/.bin/tsdown', 'src/index.ts'], {
       stdio: 'inherit',
-      cwd: pkgDir,
+      cwd: join(pkgDir, '..'),
       shell: process.platform === 'win32',
     })
     if (build2.status !== 0 && build.status !== null) {
