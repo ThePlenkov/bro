@@ -72,14 +72,14 @@ Scan `<git-common>/bro/hooks/*.task` once per probe:
   gate-mode `block` must hold as long as the violation does (remind's
   passive is already display-deduped by `stopHintsChanged`). Both
   record the set so a prompt after them doesn't re-report the same
-  claims — **except** a `gate`-mode stopGate whose contribution the
-  host drops: `emitStopGateBody` discards a `block` for a session
-  that never armed `task` (claims via `BRO_BEAD_ID(S)` pins or a
-  rotated session's marker carry no `<session>.task` file), so
-  stamping the set there would eat a nudge nobody saw. stopGate
-  records only when its contribution can surface — always for the
-  empty set and under remind; in gate mode only when the session's
-  own `.task` marker is inside `readArmed`'s TTL.
+  claims — **except** a `gate`-mode stopGate, whose `block` the host
+  can drop two ways: an unarmed `task` aspect (claims via
+  `BRO_BEAD_ID(S)` pins or a rotated session's marker carry no
+  `<session>.task` file), or an armed drill/work/act block outranking
+  `task` in `GATE_PRIORITY`. A connector cannot see the sibling
+  contributions to tell, so gate mode stamps only the empty set —
+  which can hide no nudge — and lets the next prompt re-report once;
+  remind's passive always lands as context, so it records.
 
 ## Plan
 

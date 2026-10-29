@@ -210,6 +210,17 @@ function claimMarker(path: string): { lines: string[]; stamp: number; mtime: num
   }
 }
 
+/** Fold one marker's claimed ids into `stamps` — newest claim stamp
+ *  per id. */
+function foldMarkerStamps(stamps: Map<string, number>, lines: string[], stamp: number): void {
+  for (const d of lines) {
+    const id = d.trim();
+    if (id !== '') {
+      stamps.set(id, Math.max(stamps.get(id) ?? 0, stamp));
+    }
+  }
+}
+
 /** Ids this session's claims share with a NEWER live claim of another
  *  session — delegated work: the executor's fresher marker owns the
  *  bead and its spec, so the delegator's copy is foreign. The scan is
@@ -243,15 +254,10 @@ function delegatedTaskClaims(
       continue;
     }
     const side = claimMarkerSide(f, marker.lines[0] ?? '', marker.mtime, safe, ctx.owner, now);
-    if (side === null) {
-      continue;
-    }
-    const stamps = side === 'own' ? ownStamp : foreignStamp;
-    for (const d of marker.lines.slice(1)) {
-      const id = d.trim();
-      if (id !== '') {
-        stamps.set(id, Math.max(stamps.get(id) ?? 0, marker.stamp));
-      }
+    if (side === 'own') {
+      foldMarkerStamps(ownStamp, marker.lines.slice(1), marker.stamp);
+    } else if (side === 'foreign') {
+      foldMarkerStamps(foreignStamp, marker.lines.slice(1), marker.stamp);
     }
   }
   const out = new Set<string>();
@@ -262,28 +268,6 @@ function delegatedTaskClaims(
     }
   }
   return out;
-}
-
-/** A session 'task'-armed marker's freshness window — readArmed's
- *  MARKER_TTL_MS, duplicated (hooks.ts registers connectors at module
- *  init, so importing it here would cycle). */
-const ARMED_TASK_MS = 7 * 24 * 60 * 60 * 1000;
-
-/** Whether this session armed 'task' — emitStopGateBody's readArmed
- *  verdict for the one aspect this connector gates on: a <session>
- *  .task marker inside the TTL. Claims can arrive without it (env
- *  pins, a rotated session's marker folding in), and for them the
- *  host drops a 'gate' contribution entirely. */
-function armedTask(hooks: string | null, ctx: ConnectorCtx): boolean {
-  const safe = (ctx.sessionId ?? '').replace(/[^\w.-]/g, '_');
-  if (hooks === null || safe === '') {
-    return false;
-  }
-  try {
-    return statSync(join(hooks, `${safe}.task`)).mtimeMs >= Date.now() - ARMED_TASK_MS;
-  } catch {
-    return false;
-  }
 }
 
 /** Record the missing set this session was just told; true when it
@@ -402,13 +386,16 @@ export const sddConnector: Connector = {
       ]);
       // the gate reports truth every time — a 'gate' block must hold
       // while the violation does — and records what it told so a
-      // later prompt does not re-nag the same set. Record only what
-      // can surface: emitStopGateBody DROPS a 'gate' block for a
-      // session that never armed 'task' (claims via pins or a
-      // rotated-session marker, not this session's .task file), so
-      // stamping the set there would eat a nudge nobody saw —
-      // remind's passive lands as context regardless
-      const told = missing.length === 0 || mode === 'remind' || armedTask(hooks, ctx);
+      // later prompt does not re-nag the same set. A 'gate' block can
+      // be DROPPED by emitStopGateBody two ways — an unarmed 'task'
+      // aspect (pins, a rotated session's marker), or an armed
+      // drill/work/act block outranking 'task' in GATE_PRIORITY — and
+      // a connector cannot see the sibling contributions to tell.
+      // So gate mode stamps only the empty set (which can hide no
+      // nudge) and lets the next prompt re-report once rather than
+      // risk a tell nobody saw; remind's passive always lands as
+      // context, so it records
+      const told = missing.length === 0 || mode === 'remind';
       if (told) {
         sddSetChanged(hooks, ctx, missing.map(r => r.id));
       }
