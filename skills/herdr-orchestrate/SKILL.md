@@ -19,7 +19,8 @@ and for the herdr plugin's own internals.
 All mechanics below are the verified `herdr` CLI surface. Placeholders:
 `{{REPO_ROOT}}` main checkout, `{{TASK_ID}}` work item id (MUST match
 `[a-z][a-z0-9-]{0,31}` — it lands in branch names, paths, and labels),
-`{{SHORT_TITLE}}` human label, `{{AGENT_KIND}}` one of the kinds
+`{{SHORT_TITLE}}` human label (display surfaces only — never shell
+strings), `{{AGENT_KIND}}` one of the kinds
 `herdr agent start --kind` accepts (pi, claude, codex, gemini, cursor,
 devin, agy, cline, omp, opencode, copilot, kimi, kiro, droid, amp, grok,
 hermes, kilo, qodercli, qwen, letta, maki, muse),
@@ -32,22 +33,31 @@ hermes, kilo, qodercli, qwen, letta, maki, muse),
    `git -C "{{REPO_ROOT}}" fetch origin main`.
    Do NOT `git pull` — the checkout may sit on a feature branch; you
    only need the fetched ref.
-2. `herdr worktree create --cwd "{{REPO_ROOT}}" --branch "work/{{TASK_ID}}" --base origin/main --path "{{REPO_ROOT}}--{{TASK_ID}}" --label "{{TASK_ID}} {{SHORT_TITLE}}"`
+2. `herdr worktree create --cwd "{{REPO_ROOT}}" --branch "work/{{TASK_ID}}" --base origin/main --path "{{REPO_ROOT}}--{{TASK_ID}}" --label "{{TASK_ID}}"`
    → read `workspace_id` from `.result`. `--base` pins the source —
    without it the branch comes from the checkout's current HEAD.
-   Quote every path; never interpolate task text into a double-quoted
-   string — a title containing command substitutions or backticks
-   executes on the orchestrator.
+   Every interpolated value MUST come from the validated set —
+   `{{TASK_ID}}` is charset-constrained, paths are operator-owned.
+   Never put `{{SHORT_TITLE}}` or any other free task text into the
+   command string: it reaches the shell and a title containing
+   command substitutions or backticks executes on the orchestrator.
+   Quote every path expansion.
 3. Get its shell pane: `herdr pane list --workspace <ws>` → pane_id.
 4. `herdr agent start {{TASK_ID}}-worker --kind {{AGENT_KIND}} --pane <pane_id>`
    → the pane must be at an interactive shell prompt; success means the
    agent was detected in that terminal and is ready for input.
-5. Brief it: `herdr agent prompt {{TASK_ID}}-worker "<brief>" --wait --until working`.
-   The brief MUST state the GATE ({{DONE_CRITERIA}}), the worktree path,
-   and "do not spawn sub-agents". `--wait --until working` confirms the
-   turn actually started (`agent_prompt_stalled` if it didn't).
-   Submission is rejected with `agent_blocked` if the agent is already
-   waiting for input — read it first instead of re-prompting.
+5. Write the brief to `{{REPO_ROOT}}--{{TASK_ID}}/{{TASK_ID}}-brief.md`
+   with your own file-writing tool — the brief MUST state the GATE
+   ({{DONE_CRITERIA}}), the worktree path, and "do not spawn
+   sub-agents". Then submit a FIXED prompt string built only from
+   validated placeholders:
+   `herdr agent prompt {{TASK_ID}}-worker "Read {{TASK_ID}}-brief.md at the worktree root and execute it" --wait --until working`.
+   Never interpolate the brief text itself into the prompt string —
+   `herdr agent prompt` takes argv text, so any quote or substitution
+   in free text executes on the orchestrator. `--wait --until working`
+   confirms the turn actually started (`agent_prompt_stalled` if it
+   didn't). Submission is rejected with `agent_blocked` if the agent
+   is already waiting for input — read it first instead of re-prompting.
    If any step fails after the worktree exists, run the teardown below
    before retrying — a half-spawned workspace poisons the retry.
 
