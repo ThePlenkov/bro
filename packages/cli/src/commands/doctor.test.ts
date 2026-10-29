@@ -311,6 +311,29 @@ const withFakeDaemon = (dir: string, argv: string[], body: () => void): void => 
   }
 };
 
+/** A source-entry checkout: packages/cli/src with a 0.2.5 package.json,
+ *  a runnable entry and a committed HEAD — the setup every source-entry
+ *  daemon test copy-pasted (Sonar: duplicated lines). Returns the entry. */
+const fakeSourceFiles = (dir: string): string => {
+  mkdirSync(join(dir, 'packages', 'cli', 'src'), { recursive: true });
+  writeFileSync(
+    join(dir, 'packages', 'cli', 'package.json'),
+    '{"name":"@broject/bro","version":"0.2.5"}'
+  );
+  const entry = join(dir, 'packages', 'cli', 'src', 'index.ts');
+  writeFileSync(entry, 'setTimeout(() => {}, 1e9)\n');
+  return entry;
+};
+
+/** The same checkout with its HEAD committed — tests that touch refs
+ *  (or nothing else) use this; a test with extra files to commit first
+ *  takes `fakeSourceFiles` and calls `commitAt` itself. */
+const fakeSourceCheckout = (dir: string): string => {
+  const entry = fakeSourceFiles(dir);
+  commitAt(dir);
+  return entry;
+};
+
 describe('bro doctor', () => {
   test('healthy env — every probe ok, exit 0', () => {
     // the dolt remote is a local fixture — a git+https URL would make
@@ -932,14 +955,7 @@ describe('bro doctor', () => {
       withEnv({ bins: ['gh'] }, dir => {
         // `node packages/cli/src/index.ts` — the supported source entry —
         // must not read as "installed, not this repo's build"
-        mkdirSync(join(dir, 'packages', 'cli', 'src'), { recursive: true });
-        writeFileSync(
-          join(dir, 'packages', 'cli', 'package.json'),
-          '{"name":"@broject/bro","version":"0.2.5"}'
-        );
-        const entry = join(dir, 'packages', 'cli', 'src', 'index.ts');
-        writeFileSync(entry, 'setTimeout(() => {}, 1e9)\n');
-        commitAt(dir);
+        const entry = fakeSourceCheckout(dir);
         // the ref move backdated under the spawn — only the classification
         // decides
         const old = new Date(Date.now() - 7_200_000);
@@ -957,14 +973,7 @@ describe('bro doctor', () => {
     { skip: process.platform !== 'linux' },
     () =>
       withEnv({ bins: ['gh'] }, dir => {
-        mkdirSync(join(dir, 'packages', 'cli', 'src'), { recursive: true });
-        writeFileSync(
-          join(dir, 'packages', 'cli', 'package.json'),
-          '{"name":"@broject/bro","version":"0.2.5"}'
-        );
-        const entry = join(dir, 'packages', 'cli', 'src', 'index.ts');
-        writeFileSync(entry, 'setTimeout(() => {}, 1e9)\n');
-        commitAt(dir);
+        const entry = fakeSourceCheckout(dir);
         withFakeDaemon(dir, [process.execPath, entry], () => {
           // a commit landing after the spawn — the reflog pushed into the
           // future so proc-start quantization can't eat the ordering
@@ -1062,13 +1071,7 @@ describe('bro doctor', () => {
       withEnv({ bins: ['gh'] }, dir => {
         // `node --require reg.js packages/cli/src/index.ts` — the option
         // and its value must not read as the entry
-        mkdirSync(join(dir, 'packages', 'cli', 'src'), { recursive: true });
-        writeFileSync(
-          join(dir, 'packages', 'cli', 'package.json'),
-          '{"name":"@broject/bro","version":"0.2.5"}'
-        );
-        const entry = join(dir, 'packages', 'cli', 'src', 'index.ts');
-        writeFileSync(entry, 'setTimeout(() => {}, 1e9)\n');
+        const entry = fakeSourceFiles(dir);
         const reg = join(dir, 'reg.js');
         writeFileSync(reg, '// preload\n');
         commitAt(dir);
@@ -1089,14 +1092,7 @@ describe('bro doctor', () => {
       withEnv({ bins: ['gh'] }, dir => {
         // core.logAllRefUpdates=false repos carry no logs/HEAD — absent
         // evidence must not read as "HEAD did not move"
-        mkdirSync(join(dir, 'packages', 'cli', 'src'), { recursive: true });
-        writeFileSync(
-          join(dir, 'packages', 'cli', 'package.json'),
-          '{"name":"@broject/bro","version":"0.2.5"}'
-        );
-        const entry = join(dir, 'packages', 'cli', 'src', 'index.ts');
-        writeFileSync(entry, 'setTimeout(() => {}, 1e9)\n');
-        commitAt(dir);
+        const entry = fakeSourceCheckout(dir);
         rmSync(join(dir, '.git', 'logs', 'HEAD'));
         withFakeDaemon(dir, [process.execPath, entry], () => {
           const c = byName(runDoctorChecks(dir), 'daemon');
