@@ -93,6 +93,7 @@ import {
   resolveSpawnProvider,
   type AgentConnectorEnv,
 } from '../agent-connectors.ts';
+import { laneStatus, laneStatusLines, type LaneStatusRow } from '../lane.ts';
 import { devinSessionTranscript, devinTranscriptsDir, renderDevinTranscript } from '@broject/devin';
 import { flag, positionals } from './args.ts';
 import { mainWorktree, worktreePathFor } from './work.ts';
@@ -348,10 +349,25 @@ export function occupancyLine(o: FleetOccupancy): string {
   return `fleet: ${o.occupied}${cap} agent slots occupied${o.maxConcurrent > 0 ? '' : ' (uncapped)'}`;
 }
 
+/** The lane's wall/gate state (spec bro-y3jvd) — wall, paused
+ *  workers, and the rate-gate budget, before the per-agent table.
+ *  Silent when no lane has anything to say. */
+function printLaneSection(lanes: LaneStatusRow[]): void {
+  const lines = laneStatusLines(lanes);
+  if (lines.length === 0) {
+    return;
+  }
+  console.log('lanes:');
+  for (const l of lines) {
+    console.log(l);
+  }
+}
+
 function printStatusTable(
   backends: AgentBackendPlane[],
   occupancy: FleetOccupancy,
-  sessions: SessionQuotaView[]
+  sessions: SessionQuotaView[],
+  lanes: LaneStatusRow[] = []
 ): void {
   console.log(occupancyLine(occupancy));
   for (const s of sessions) {
@@ -364,6 +380,7 @@ function printStatusTable(
       console.log(`${s.kind} ${label}: ${s.live >= 0 ? `${s.live}/${s.max}` : `?/${s.max}`} live`);
     }
   }
+  printLaneSection(lanes);
   const cols = ['backend', 'supervisor', 'agent', 'step', 'state', 'cause', 'pid', 'worktree'];
   const rows = backends.flatMap(({ conn, agents }) => {
     const sup = conn.capabilities().supervisor;
@@ -458,6 +475,7 @@ async function cmdStatus(dir: string, env: AgentConnectorEnv, argv: string[]): P
         {
           occupancy: occupancyOf(dir, env),
           sessions: sessionQuotaViewsOf(env),
+          lanes: laneStatus(dir, env),
           backends: backends.map(({ conn, agents, degraded }) => ({
             name: conn.name,
             capabilities: conn.capabilities(),
@@ -471,7 +489,7 @@ async function cmdStatus(dir: string, env: AgentConnectorEnv, argv: string[]): P
     );
     return;
   }
-  printStatusTable(backends, occupancyOf(dir, env), sessionQuotaViewsOf(env));
+  printStatusTable(backends, occupancyOf(dir, env), sessionQuotaViewsOf(env), laneStatus(dir, env));
 }
 
 // --- up / down ------------------------------------------------------------------

@@ -18,12 +18,12 @@ import {
   writeFileSync,
 } from 'node:fs'
 import { dirname, join } from 'node:path'
-import { gitCommonDir } from '@broject/core'
+import { GIT_SYNC_PROBE_TIMEOUT_MS, gitCommonDir } from '@broject/core'
 
 /** `<git-common>/bro/heartbeat.json`; null outside a repository — the
  *  same boundary the mailbox has: no shared state dir, no heartbeat. */
 export function heartbeatFile(dir: string): string | null {
-  const common = gitCommonDir(dir)
+  const common = gitCommonDir(dir, GIT_SYNC_PROBE_TIMEOUT_MS)
   return common === null ? null : join(common, 'bro', 'heartbeat.json')
 }
 

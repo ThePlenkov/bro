@@ -140,6 +140,8 @@ export type {
   RoutingClass,
   RoutingTable,
 } from './routing.ts';
+export { laneGateDir, laneGateLevel, laneGateTake } from './lane-gate.ts';
+export type { LaneGateOpts, LaneRateGate } from './lane-gate.ts';
 export {
   DATA_REF,
   dataRefCommit,
@@ -231,6 +233,7 @@ export type {
   LifecycleKind,
   LifecycleRead,
 } from './lifecycle.ts';
+export { emitWorkerSilent, lifecycleBusEvent, publishLifecycleBusEvent } from './lifecycle-bus.ts';
 export { bodyMeta, broTrailer, stripMeta, withMeta } from './taskmeta.ts';
 export {
   PR_MANAGED_LABEL,
@@ -545,6 +548,7 @@ export {
   busProbe,
   busPublish,
   busSocketPath,
+  busSocketPathForCommon,
   busStatePath,
   busStatus,
   busSubscribe,

@@ -1,6 +1,7 @@
 import { after, describe, test } from 'node:test'
 import assert from 'node:assert/strict'
 import {
+  chmodSync,
   existsSync,
   mkdirSync,
   mkdtempSync,
@@ -27,12 +28,15 @@ import {
   userMailboxDir,
 } from './notify.ts'
 import { scrubEnv, testGit, testRepoInit } from './testkit.ts'
+import { GIT_SYNC_PROBE_TIMEOUT_MS } from './git.ts'
 
 // ambient repo/agent/store pins must not reach fixture git children
 // or the code-under-test spawns — scrub once, restore after the file
 after(scrubEnv())
 
 const tmp = (prefix: string): string => mkdtempSync(join(tmpdir(), prefix))
+
+const WIN32 = process.platform === 'win32'
 
 const withRepo = (fn: (dir: string) => void): void => {
   const dir = tmp('bro-notify-')
@@ -89,6 +93,22 @@ describe('mailboxDir', () => {
     try {
       assert.equal(mailboxDir(dir), null)
     } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  test('bounded: a wedged git probe fails fast, never stalls the hook drain', { skip: WIN32 }, () => {
+    const dir = tmp('bro-notify-hanging-git-')
+    const prevPath = process.env.PATH
+    writeFileSync(join(dir, 'git'), '#!/bin/sh\nexec /bin/sleep 30\n')
+    chmodSync(join(dir, 'git'), 0o755)
+    process.env.PATH = `${dir}:${prevPath}`
+    try {
+      const started = Date.now()
+      assert.equal(mailboxDir(dir), null)
+      assert.ok(Date.now() - started < GIT_SYNC_PROBE_TIMEOUT_MS + 1_000)
+    } finally {
+      process.env.PATH = prevPath
       rmSync(dir, { recursive: true, force: true })
     }
   })

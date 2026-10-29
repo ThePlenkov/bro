@@ -31,26 +31,21 @@ import {
   writeFileSync,
 } from 'node:fs'
 import { homedir } from 'node:os'
-import { join, resolve } from 'node:path'
+import { join } from 'node:path'
 import type { Connector, ConnectorCtx } from './connectors.ts'
 import {
   isEventInput,
   type EventEnvelope,
   type EventInput,
 } from './events.ts'
-import { gitTry } from './git.ts'
+import { GIT_SYNC_PROBE_TIMEOUT_MS, gitCommonDir } from './git.ts'
 
-/** The repo mailbox — `<git-common>/bro/notify`; null outside a repo. */
+/** The repo mailbox — `<git-common>/bro/notify`; null outside a repo.
+ *  Bounded lookup + in-process cache — hook drains call this on every
+ *  postTool/sessionStart, so a wedged git must fail fast, not stall. */
 export function mailboxDir(dir: string): string | null {
-  const r = gitTry(['-C', dir, 'rev-parse', '--path-format=absolute', '--git-common-dir'])
-  let common = r.code === 0 ? r.out.trim() : ''
-  if (common === '') {
-    // git <2.31 has no --path-format — resolve the possibly-relative
-    // common dir against `dir` instead of failing detection outright
-    const rel = gitTry(['-C', dir, 'rev-parse', '--git-common-dir'])
-    common = rel.code === 0 && rel.out.trim() !== '' ? resolve(dir, rel.out.trim()) : ''
-  }
-  return common === '' ? null : join(common, 'bro', 'notify')
+  const common = gitCommonDir(dir, GIT_SYNC_PROBE_TIMEOUT_MS)
+  return common === null ? null : join(common, 'bro', 'notify')
 }
 
 /** The user-level mailbox — the "(or XDG state)" fallback for writers
