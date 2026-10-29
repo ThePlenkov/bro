@@ -12,7 +12,7 @@
  * marker in the hooks state dir so parallel-session detection sees the
  * agent, and molStep claims pinned into the shared beads store.
  */
-import { spawn, spawnSync } from 'node:child_process';
+import { spawn, spawnSync, type SpawnOptions } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import {
   accessSync,
@@ -53,6 +53,7 @@ import {
   entryRunId,
   ghHost,
   gitTry,
+  handleOwner,
   isAgentCause,
   JudgeUnavailable,
   loadConfig,
@@ -2212,24 +2213,31 @@ export function groupMemberAlive(pgid: number, minStart?: string): boolean {
  *  pid+starttime identity is what keeps a recycled pid from faking
  *  death. Empty where /proc is absent (non-Linux). */
 function descendantsOf(root: number): Array<{ pid: number; start?: string }> {
+  return unitSnapshot(root).members;
+}
+
+/** The pre-signal unit snapshot — the wrapper's process tree plus
+ *  every process GROUP the tree spans, off one /proc scan. A payload
+ *  that leads its own session or process group escapes
+ *  kill(-wrapperPgid): a fork-style `systemd-run --scope` gives the
+ *  scoped child its own pid (spec bro-ybo8z — exec-style systemd-run
+ *  keeps the wrapper's pid and needs nothing extra), and a setsid'd
+ *  descendant was already unreachable. `down` signals each distinct
+ *  pgid a live member belongs to — `{root group} ∪ {member groups}` —
+ *  which for the common single-group tree is the group it always was.
+ *  Members keep the same {pid,start} shape descendantsOf reports;
+ *  zombies claim no group. */
+function unitSnapshot(root: number): {
+  members: Array<{ pid: number; start?: string }>;
+  groups: Set<number>;
+} {
   const scan = scanProc();
+  const members: Array<{ pid: number; start?: string }> = [];
+  const groups = new Set<number>();
   if (scan === null) {
-    return [];
+    return { members, groups };
   }
-  const children = new Map<number, number[]>();
-  const starts = new Map<number, string>();
-  for (const e of scan.entries) {
-    const list = children.get(e.ppid);
-    if (list === undefined) {
-      children.set(e.ppid, [e.pid]);
-    } else {
-      list.push(e.pid);
-    }
-    if (e.start !== '') {
-      starts.set(e.pid, e.start);
-    }
-  }
-  const out: Array<{ pid: number; start?: string }> = [];
+  const { byPid, children } = procTreeIndex(scan.entries);
   const seen = new Set<number>([root]);
   const queue = [root];
   for (let cur = queue.shift(); cur !== undefined; cur = queue.shift()) {
@@ -2238,11 +2246,30 @@ function descendantsOf(root: number): Array<{ pid: number; start?: string }> {
         continue;
       }
       seen.add(c);
-      out.push({ pid: c, start: starts.get(c) });
       queue.push(c);
+      const e = byPid.get(c);
+      members.push({ pid: c, start: e?.start === '' ? undefined : e?.start });
+      if (e !== undefined && e.state !== 'Z' && e.pgrp > 0) {
+        groups.add(e.pgrp);
+      }
     }
   }
-  return out;
+  return { members, groups };
+}
+
+/** ppid → children index plus pid → row, built over one /proc scan —
+ *  the tree walk's lookup tables. */
+function procTreeIndex(entries: ProcEntry[]): {
+  byPid: Map<number, ProcEntry>;
+  children: Map<number, number[]>;
+} {
+  const byPid = new Map<number, ProcEntry>();
+  const children = new Map<number, number[]>();
+  for (const e of entries) {
+    byPid.set(e.pid, e);
+    children.set(e.ppid, [...(children.get(e.ppid) ?? []), e.pid]);
+  }
+  return { byPid, children };
 }
 
 /** Live state for a registry entry under this backend. */
@@ -2390,8 +2417,11 @@ function workerRunLine(
  *  answers with an admission stamp:
  *
  *  - `<agentId>.<runId>.handle` — the wrapper's first act: `$$` (the
- *    detached group-leader pid — the same value `child.pid` reports). A
- *    parent that dies post-spawn leaves a findable survivor.
+ *    detached group-leader pid — the same value `child.pid` reports)
+ *    and the wrapper's /proc starttime. A parent that dies post-spawn
+ *    leaves a findable survivor, and the starttime is the identity
+ *    adoption pins before trusting that pid — a recycled one can never
+ *    pass as this worker.
  *  - `<agentId>.<runId>.go` — the launcher's stamp, written only after
  *    pid+marker are durable. The worker polls for it through the
  *    spawn-handoff window; absent past the window means the launcher
@@ -2401,10 +2431,17 @@ const GO_WAIT_TICKS = SESSION_SLOT_TTL_MS / GO_WAIT_TICK_MS;
 
 /** The wrapper's half of the handshake — positional args
  *  `$1` exit · `$2` handle · `$3` go · `$4` go-wait tick budget. Handle
- *  publish is tmp+rename so a reader never sees a half-written pid. */
+ *  publish is tmp+rename so a reader never sees a half-written pid, and
+ *  the pid rides with the wrapper's /proc starttime — the identity the
+ *  readers verify against pid reuse (spec bro-l8c4f.5). */
 const HANDSHAKE_SCRIPT =
   'out=$1; h=$2; g=$3; t=$4; ' +
-  '( umask 077; printf %s "$$" > "$h.tmp" ) && mv "$h.tmp" "$h" ' +
+  // field 22 off the last-')' slice — the same parse procStat takes;
+  // empty where /proc is absent, so the publish degrades to the
+  // bare-pid handle readers fail open on (POSIX sh: the subshell keeps
+  // $$ = this wrapper and $1..$4 for the payload's `shift 4`)
+  's=$(set -f; st=$(cat /proc/$$/stat 2>/dev/null); set -- ${st##*)}; printf %s "${20}"); ' +
+  '( umask 077; printf "%s%s" "$$" "${s:+ $s}" > "$h.tmp" ) && mv "$h.tmp" "$h" ' +
   '|| { ( umask 077; printf %s 74 > "$out" ); exit 74; }; ' +
   'i=0; until [ -f "$g" ]; do ' +
   'i=$((i+1)); [ "$i" -gt "$t" ] && { ( umask 077; printf %s 75 > "$out" ); exit 75; }; ' +
@@ -2427,18 +2464,30 @@ export class SpawnAbandoned extends Error {
   }
 }
 
-const spawnTestSeam: { abandonAt?: SpawnAbandonAt; goWaitTicks?: number } = {};
+const spawnTestSeam: {
+  abandonAt?: SpawnAbandonAt;
+  goWaitTicks?: number;
+  scope?: boolean;
+  scopeRefused?: boolean;
+} = {};
 
 /** Arm the crash-window failpoints (spec bro-l8c4f.5) — tests only:
  *  `abandonAt` throws SpawnAbandoned mid-section exactly where a
  *  launcher crash would cut it, `goWaitTicks` shrinks the worker's
- *  admission wait so the timeout path runs inside a test budget. */
+ *  admission wait so the timeout path runs inside a test budget,
+ *  `scope` pins the systemd-scope wrap on or off regardless of probe,
+ *  `scopeRefused` substitutes a child that dies before the exec — the
+ *  shape a user-manager refusal leaves. */
 export function armNativeSpawnTestSeam(seam: {
   abandonAt?: SpawnAbandonAt;
   goWaitTicks?: number;
+  scope?: boolean;
+  scopeRefused?: boolean;
 }): void {
   spawnTestSeam.abandonAt = seam.abandonAt;
   spawnTestSeam.goWaitTicks = seam.goWaitTicks;
+  spawnTestSeam.scope = seam.scope;
+  spawnTestSeam.scopeRefused = seam.scopeRefused;
 }
 
 const maybeAbandonSpawn = (at: SpawnAbandonAt): void => {
@@ -2446,6 +2495,94 @@ const maybeAbandonSpawn = (at: SpawnAbandonAt): void => {
     throw new SpawnAbandoned(at);
   }
 };
+
+/** systemd scope wrap (spec bro-ybo8z). A native worker spawned as a
+ *  plain `sh -c` child inherits the spawning unit's cgroup — under
+ *  `KillMode=control-group` every loop/daemon crash (and a manual
+ *  `systemctl stop`) wiped the whole lane: dead workers, no `.exit`,
+ *  'lost' rows. `systemd-run --user --scope` moves the payload into a
+ *  sibling `run-*.scope` that no supervisor's cgroup kill can reach.
+ *
+ *  `--scope`, never a transient service: systemd-run moves ITSELF
+ *  into the new scope and then execs the payload, so cwd, the
+ *  assembled env, and the log fds ride the exec unchanged (a service
+ *  reparents to the manager and would need each of those re-plumbed).
+ *  `--expand-environment=no` is mandatory — systemd-run otherwise
+ *  expands `$`-references in argv (ExecStart rules) and the handshake
+ *  script's `$$`, `$1`, `$@` arrive mangled.
+ *
+ *  Process shape: systemd-run registers the scope with its OWN pid
+ *  and then execs the payload in place, so `child.pid` keeps naming
+ *  the real worker — the handle's `$$`, the registry pid and the
+ *  scope's main pid are one. A systemd-run that FORKED instead would
+ *  put the payload in the scope under a different pid — the stop
+ *  path's multi-group signal and dead-pid handle adoption cover that
+ *  topology too.
+ *
+ *  Availability is one cached probe per process: no binary, no user
+ *  manager, or a refused registration all fall back to the plain
+ *  spawn. `agents.native.systemdScope` opts out (`false`) or forces
+ *  the wrap past the probe (`true`); the test seam wins over both. */
+const SCOPE_RUN_PREFIX = ['systemd-run', '--user', '--scope', '--quiet', '--expand-environment=no'];
+
+let scopeProbeCache: boolean | undefined;
+
+/** Host capability only — the cached `systemd-run --user --scope`
+ *  probe. Exported so tests can skip scope assertions on hosts
+ *  without a user manager; the spawn decision itself is
+ *  `systemdScopeFor` (seam/knob/probe). */
+export function systemdScopeProbe(): boolean {
+  if (scopeProbeCache === undefined) {
+    // PATH lookup is the contract (same as sh/git)
+    const r = /* NOSONAR */ spawnSync('systemd-run', [...SCOPE_RUN_PREFIX.slice(1), '--', 'true'], {
+      stdio: 'ignore',
+      timeout: 5_000,
+    });
+    scopeProbeCache = r.status === 0;
+  }
+  return scopeProbeCache;
+}
+
+/** The spawn's scope decision: test seam → `systemdScope` knob →
+ *  cached probe. */
+function systemdScopeFor(knobs: Record<string, unknown>): boolean {
+  if (spawnTestSeam.scope !== undefined) {
+    return spawnTestSeam.scope;
+  }
+  if (typeof knobs.systemdScope === 'boolean') {
+    return knobs.systemdScope;
+  }
+  return systemdScopeProbe();
+}
+
+/** The scope-admission window (spec bro-ybo8z). The probe's yes is a
+ *  host answer, not this scope's — a user manager that refuses the
+ *  registration reports it only by `systemd-run` dying BEFORE the exec:
+ *  dead pid, no handle, no `.exit`, and the registry row would read
+ *  'lost' with no record. The handle is the payload's first write, so
+ *  the check waits on the positive signal and reads a dead pid without
+ *  it as refusal — a live-but-silent pid past the budget stays
+ *  admitted, because a scope still mid-registration is not a refusal
+ *  and retrying beside it would double the run. */
+const SCOPE_ADMIT_TICK_MS = 25;
+const SCOPE_ADMIT_TICKS = 80; // ~2s ceiling; a refusal lands in <100ms
+const scopeAdmitWait = new Int32Array(new SharedArrayBuffer(4));
+
+function scopeAdmitted(pid: number | undefined, handleFile: string, exitFile: string): boolean {
+  if (pid === undefined) {
+    return false;
+  }
+  for (let i = 0; i < SCOPE_ADMIT_TICKS; i++) {
+    if (existsSync(handleFile) || existsSync(exitFile)) {
+      return true;
+    }
+    if (!pidAlive(pid)) {
+      return false;
+    }
+    Atomics.wait(scopeAdmitWait, 0, 0, SCOPE_ADMIT_TICK_MS);
+  }
+  return true;
+}
 
 /** The `<agentId>.<runId>.{handle,go}` paths for one attempt — the
  *  handle is the worker's durable self-registration, the go stamp the
@@ -2461,12 +2598,33 @@ function attemptHandles(
   };
 }
 
+/** The handle's published identity against the pid's current one — a
+ *  mismatch is a recycled pid: refuse it (adopting would stamp a
+ *  stranger into the entry and `down` would signal its tree), and say
+ *  so on stderr, since a live handle is otherwise trusted outright.
+ *  Unpublished identity (a pre-identity handle, or a platform with no
+ *  /proc for the worker to read) or an unreadable current stat stays
+ *  unverifiable and fails open the way pidAlive documents — never a
+ *  false "this worker is dead". */
+function handleIdentity(pid: number, published: string | undefined, agentId: string): boolean {
+  const current = procStat(pid)?.start ?? null;
+  if (published !== undefined && current !== null && current !== '' && current !== published) {
+    console.error(
+      `bro: refusing handle for ${agentId} — pid ${pid} now starts at ${current}, ` +
+        `not the published ${published} (recycled pid)`
+    );
+    return false;
+  }
+  return true;
+}
+
 /** Adopt a survivor: the entry's pid patch never landed, but the
  *  worker published its own handle before the launcher died. A live
- *  handle stamps pid+pidStart into the entry — under the same
- *  generation guard the exit harvest uses, so a respawned entry is
- *  never adopted into — and returns the pid so status/down reach the
- *  worker and dedup keeps refusing beside it. */
+ *  handle whose pid still carries the published starttime stamps
+ *  pid+pidStart into the entry — under the same generation guard the
+ *  exit harvest uses, so a respawned entry is never adopted into — and
+ *  returns the pid so status/down reach the worker and dedup keeps
+ *  refusing beside it. A recycled pid never adopts (handleIdentity). */
 function adoptNativeHandle(
   dir: string,
   home: string | null,
@@ -2482,24 +2640,28 @@ function adoptNativeHandle(
   ) {
     return undefined;
   }
-  let pid: number;
+  let owner: { pid: number; start?: string } | null;
   try {
-    pid = Number(
-      readFileSync(attemptHandles(home, entry.agentId, runId).handleFile, 'utf8').trim()
+    owner = handleOwner(
+      readFileSync(attemptHandles(home, entry.agentId, runId).handleFile, 'utf8')
     );
   } catch {
     return undefined;
   }
-  if (!Number.isInteger(pid) || pid <= 0) {
+  if (owner === null) {
     return undefined;
   }
-  const start = procStat(pid)?.start ?? null;
-  if (!pidAlive(pid, start ?? undefined)) {
+  const { pid, start: published } = owner;
+  // identity before liveness: the handle's pid may have been recycled
+  // since the worker published it, and adopting the stranger would
+  // stamp it into the entry and hand `down` its process tree
+  if (!handleIdentity(pid, published, entry.agentId) || !pidAlive(pid, published)) {
     return undefined;
   }
-  // the handle file is runId-scoped — its pid IS this attempt's, so the
-  // in-memory row adopts it unconditionally (the AgentInfo built from
-  // it carries the pid to status/down)
+  const start = published ?? procStat(pid)?.start ?? null;
+  // the handle file is runId-scoped and identity-checked above — its pid
+  // IS this attempt's, so the in-memory row adopts it unconditionally
+  // (the AgentInfo built from it carries the pid to status/down)
   entry.pid = pid;
   entry.pidStart = start;
   try {
@@ -2637,47 +2799,83 @@ export function makeNativeConnector(ctx: ConnectorCtx, env: AgentConnectorEnv): 
                   goTicks,
                 ];
           const cliBadge = workerCliBadge(worker, command);
-          const child = spawn(
-            'sh', // NOSONAR — PATH lookup is the contract (same as git/bd everywhere)
-            args,
-            {
-              // NOSONAR — operator-configured agent command (same contract as loop)
-              cwd: spec.repoRoot,
-              env: (() => {
-                const policy = getCredentialScope(env, 'native');
-                const ambient = Object.fromEntries(
-                  Object.entries(process.env).filter(
-                    (e): e is [string, string] => {
-                      if (e[1] === undefined) return false;
-                      if (AGENT_PIN_KEYS.has(e[0]) || GIT_REPOSITORY_ENV_KEYS.has(e[0])) return false;
-                      // ambient BRO_BATCH is stripped, not passed — the
-                      // marker reaches the worker only via spec.env below
-                      return isAllowedByEnvPolicy(e[0], e[1], 'native', spec, env, policy);
-                    }
-                  )
-                );
-                const fromSpec = Object.fromEntries(
-                  Object.entries(spec.env ?? {}).filter(
-                    (e): e is [string, string] => {
-                      if (e[1] === undefined) return false;
-                      if (AGENT_PIN_KEYS.has(e[0]) || GIT_REPOSITORY_ENV_KEYS.has(e[0])) return false;
-                      return isAllowedByEnvPolicy(e[0], e[1], 'native', spec, env, policy, true);
-                    }
-                  )
-                );
-                return {
-                  // ambient env minus the connector-owned pins
-                  ...ambient,
-                  ...fromSpec,
-                  // identity pins last — spec.env must never redirect the
-                  // claim store or re-badge the worker as another bead/agent
-                  ...Object.fromEntries(agentEnvPins(spec, agentId, promptFile, cliBadge, mol)),
-                };
-              })(),
-              stdio: ['ignore', fd, errFd],
-              detached: true,
+          // the scope wrap (bro-ybo8z): the payload runs under
+          // systemd-run so a supervisor's cgroup kill cannot reach it.
+          // --description carries the run's identity (never --unit — a
+          // respawned agentId must not collide on a lingering scope)
+          const scoped = systemdScopeFor(knobs);
+          const scopeArgv = [
+            ...SCOPE_RUN_PREFIX.slice(1),
+            `--description=bro agent ${agentId} ${spec.molStep}`,
+            '--',
+            'sh',
+            ...args,
+          ];
+          const spawnOpts: SpawnOptions = {
+            // NOSONAR — operator-configured agent command (same contract as loop)
+            cwd: spec.repoRoot,
+            env: (() => {
+              const policy = getCredentialScope(env, 'native');
+              const ambient = Object.fromEntries(
+                Object.entries(process.env).filter((e): e is [string, string] => {
+                  if (e[1] === undefined) return false;
+                  if (AGENT_PIN_KEYS.has(e[0]) || GIT_REPOSITORY_ENV_KEYS.has(e[0])) return false;
+                  // ambient BRO_BATCH is stripped, not passed — the
+                  // marker reaches the worker only via spec.env below
+                  return isAllowedByEnvPolicy(e[0], e[1], 'native', spec, env, policy);
+                })
+              );
+              const fromSpec = Object.fromEntries(
+                Object.entries(spec.env ?? {}).filter((e): e is [string, string] => {
+                  if (e[1] === undefined) return false;
+                  if (AGENT_PIN_KEYS.has(e[0]) || GIT_REPOSITORY_ENV_KEYS.has(e[0])) return false;
+                  return isAllowedByEnvPolicy(e[0], e[1], 'native', spec, env, policy, true);
+                })
+              );
+              return {
+                // ambient env minus the connector-owned pins
+                ...ambient,
+                ...fromSpec,
+                // identity pins last — spec.env must never redirect the
+                // claim store or re-badge the worker as another bead/agent
+                ...Object.fromEntries(agentEnvPins(spec, agentId, promptFile, cliBadge, mol)),
+              };
+            })(),
+            stdio: ['ignore', fd, errFd],
+            detached: true,
+          };
+          // the scope refusal path needs a second shot at the same spawn —
+          // the seam's refusal stand-in dies instantly like a real refused
+          // systemd-run, but runs the payload verbatim for everything else
+          const spawnWorker = (wrap: boolean) => {
+            if (wrap && spawnTestSeam.scopeRefused === true) {
+              // PATH lookup is the contract (same as git/bd everywhere)
+              return /* NOSONAR */ spawn('sh', ['-c', 'exit 1'], spawnOpts);
             }
-          );
+            // PATH lookup is the contract (same as git/bd everywhere)
+            return /* NOSONAR */ spawn(
+              wrap ? 'systemd-run' : 'sh',
+              wrap ? scopeArgv : args,
+              spawnOpts
+            );
+          };
+          let child = spawnWorker(scoped);
+          if (scoped && !scopeAdmitted(child.pid, handleFile, exitFile)) {
+            // refused — the payload never ran: dead pid, no handle, no
+            // .exit; left alone the row would read 'lost' with no record
+            // and the reservation would idle out its TTL. Retry the plain
+            // spawn over the same attempt artifacts.
+            appendPrivateFileSync(
+              stderrLog,
+              'bro: systemd-run refused the scope — respawned without the wrap\n'
+            );
+            // the discarded child may still emit 'error' (the ENOENT
+            // path) — an unlistened error event takes the whole CLI down
+            child.on('error', () => {
+              /* the retry owns the verdict now — swallow the loser's */
+            });
+            child = spawnWorker(false);
+          }
           // an unhandled 'error' event would take the whole CLI down —
           // a failed exec records itself on the entry and reads 'lost'
           const spawnStamp = readAgentRegistry(dir)[spec.molStep]?.spawnedAt;
@@ -2769,14 +2967,22 @@ export function makeNativeConnector(ctx: ConnectorCtx, env: AgentConnectorEnv): 
       const [molStep, entry] = hit;
       // a crashed launcher's survivor self-published its handle — adopt
       // it here too so `down` reaches the worker the registry never got
-      // a pid for (spec bro-l8c4f.5)
+      // a pid for (spec bro-l8c4f.5). The consultation now also fires
+      // when the recorded pid is simply DEAD: a fork-style
+      // `systemd-run --scope` (bro-ybo8z) leaves the payload alive in
+      // another cgroup under a pid the registry never recorded, and
+      // stamping `stopped` over that live orphan would free a respawn
+      // beside a live writer.
+      const home = agentsHome(dir);
+      const entryPid = typeof entry.pid === 'number' ? entry.pid : undefined;
       const adopted =
-        typeof entry.pid === 'number'
+        entryPid !== undefined &&
+        (pidAlive(entryPid, entryPidStart(entry)) ||
+          groupMemberAlive(entryPid, entryPidStart(entry)))
           ? undefined
-          : adoptNativeHandle(dir, agentsHome(dir), molStep, entry);
-      const pid = typeof entry.pid === 'number' ? entry.pid : adopted?.pid;
-      const start =
-        typeof entry.pid === 'number' ? entryPidStart(entry) : (adopted?.start ?? undefined);
+          : adoptNativeHandle(dir, home, molStep, entry);
+      const pid = adopted?.pid ?? entryPid;
+      const start = adopted !== undefined ? (adopted.start ?? undefined) : entryPidStart(entry);
       // The unit check lives outside the signal block: a repeated `down`
       // can find the wrapper already dead while a descendant still holds
       // the group — the lock guard below must see it even when no signal
@@ -2789,26 +2995,33 @@ export function makeNativeConnector(ctx: ConnectorCtx, env: AgentConnectorEnv): 
         (pidAlive(pid, start) ||
           groupMemberAlive(pid, start) ||
           unit.some(d => pidAlive(d.pid, d.start)));
-      if (pid !== undefined && pidAlive(pid, start)) {
+      if (pid !== undefined && (pidAlive(pid, start) || groupMemberAlive(pid, start))) {
         // the tree snapshot rides BEFORE the signal: a descendant that
-        // escaped the group (setsid) is invisible to groupMemberAlive,
-        // and once the wrapper dies it reparents to init — the
-        // pre-signal pid+starttime pin is the only handle left on it
-        unit = descendantsOf(pid);
-        try {
-          // a lane-paused group (spec bro-y3jvd) pends every signal —
-          // SIGCONT first or the TERM waits on a stopped process
-          process.kill(-pid, 'SIGCONT');
-        } catch {
-          // not stopped, or already gone — the TERM below decides
-        }
-        try {
-          process.kill(-pid, 'SIGTERM'); // detached → own process group
-        } catch {
-          // No fallback to kill(pid): a native child is always its own
-          // group leader, so a failed group signal means the pid was
-          // recycled by a non-leader — signaling it would hit an
-          // unrelated process.
+        // escaped the group (setsid — or a scope payload a fork-style
+        // systemd-run gave its own pid to, bro-ybo8z) is invisible to
+        // groupMemberAlive, and once the wrapper dies it reparents to
+        // init — the pre-signal pid+starttime pin is the only handle
+        // left on it. The signal goes to every group the tree spans:
+        // a scoped payload's own pgid gets SIGTERM too.
+        const snap = unitSnapshot(pid);
+        unit = snap.members;
+        const groups = new Set<number>([pid, ...snap.groups]);
+        for (const g of groups) {
+          try {
+            // a lane-paused group (spec bro-y3jvd) pends every signal —
+            // SIGCONT first or the TERM below waits on a stopped process
+            process.kill(-g, 'SIGCONT');
+          } catch {
+            // not stopped, or already gone — the TERM below decides
+          }
+          try {
+            process.kill(-g, 'SIGTERM'); // detached → own process group
+          } catch {
+            // No fallback to kill(pid): a native child is always its own
+            // group leader, so a failed group signal means the group was
+            // emptied or recycled — signaling a bare pid could hit an
+            // unrelated process.
+          }
         }
         // let the signal land before recording the stop — `stopped` on a
         // still-living pid would let a respawn run alongside the dying
@@ -2880,8 +3093,8 @@ function tmuxRun(socket: string, args: string[]): TmuxResult {
   for (const k of GIT_REPOSITORY_ENV_KEYS) {
     delete env[k];
   }
+  // NOSONAR — PATH lookup is the contract (same as git/bd)
   const proc = /* NOSONAR */ spawnSync('tmux', socket === '' ? args : ['-L', socket, ...args], {
-    // PATH lookup is the contract (same as git/bd)
     stdio: ['ignore', 'pipe', 'pipe'],
     encoding: 'utf8',
     timeout: 10_000,
@@ -3304,8 +3517,8 @@ export function makeTmuxConnector(ctx: ConnectorCtx, env: AgentConnectorEnv): Ag
 
 /** One gc call — PATH lookup is the same contract as git/gh/bd. */
 function gcRun(args: string[], timeoutMs = 30_000): { code: number; out: string; err: string } {
+  // NOSONAR — PATH lookup is the contract (same as gh/git/bd)
   const proc = /* NOSONAR */ spawnSync('gc', args, {
-    // PATH lookup is the contract (see NOSONAR above)
     stdio: ['ignore', 'pipe', 'pipe'],
     encoding: 'utf8',
     timeout: timeoutMs,
@@ -4009,8 +4222,8 @@ function dockerRun(
   args: string[],
   timeoutMs = 30_000
 ): { code: number; out: string; err: string; missing: boolean } {
+  // NOSONAR — PATH lookup is the contract (same as gh/git/bd)
   const proc = /* NOSONAR */ spawnSync('docker', args, {
-    // PATH lookup is the contract (see NOSONAR above)
     stdio: ['ignore', 'pipe', 'pipe'],
     encoding: 'utf8',
     timeout: timeoutMs,
@@ -4456,7 +4669,9 @@ function filterStrictRunArgs(runArgs: string[], strictEnv: boolean): string[] {
  *  the keys. */
 function writeDockerEnvFile(envFile: string, spec: SpawnSpec, env?: AgentConnectorEnv): void {
   const dropped: string[] = [];
-  const policy = env ? getCredentialScope(env, 'docker') : { strictEnv: false, envAllowlist: undefined };
+  const policy = env
+    ? getCredentialScope(env, 'docker')
+    : { strictEnv: false, envAllowlist: undefined };
   const ambient = Object.entries({
     ...Object.fromEntries(Object.entries(process.env).filter(([k]) => !DOCKER_HOST_ENV.has(k))),
     ...spec.env,
@@ -4861,8 +5076,8 @@ interface GhResult {
  *  spawnSync (the connector's other shell-outs are all synchronous,
  *  and admission runs inside the registry lock). */
 function ghRun(args: string[], timeoutMs = 30_000): GhResult {
+  // NOSONAR — PATH lookup is the contract (same as docker/git/bd)
   const proc = /* NOSONAR */ spawnSync('gh', args, {
-    // PATH lookup is the contract (see NOSONAR above)
     stdio: ['ignore', 'pipe', 'pipe'],
     encoding: 'utf8',
     timeout: timeoutMs,

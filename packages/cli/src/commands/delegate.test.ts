@@ -5,7 +5,7 @@ import { join } from 'node:path';
 import { loadAgentEnv, type AgentConnectorEnv } from '../agent-connectors.ts';
 import { readAgentRegistry, writeAgentRegistry } from '@broject/core';
 import { fakeAcpAgent } from '@broject/providers/testkit';
-import { capture, initRepo, installFakeBd } from './testrepo.ts';
+import { capture, initRepo, installFakeBd, killRun } from './testrepo.ts';
 import { delegate } from './delegate.ts';
 import { runDelegateCommand } from './delegate-cli.ts';
 
@@ -19,26 +19,15 @@ interface Fixture {
 /** Detached workers outlive a failed assertion — kill whatever the
  *  registry still points at before the tmpdir goes away (tests fake
  *  'running' with their own pid — never kill self or the runner). */
-function registeredPids(main: string): number[] {
-  try {
-    return Object.values(readAgentRegistry(main)).map(e => (typeof e.pid === 'number' ? e.pid : 0));
-  } catch {
-    return []; // no readable registry — nothing spawned
-  }
-}
-
-const killable = (pid: number): boolean => pid > 0 && pid !== process.pid && pid !== process.ppid;
-
 function killRegistered(main: string): void {
-  for (const pid of registeredPids(main)) {
-    if (!killable(pid)) {
-      continue;
+  try {
+    for (const e of Object.values(readAgentRegistry(main))) {
+      // the handle's group dies beside the recorded one — they differ
+      // under a fork-style scope wrap (bro-ybo8z)
+      killRun(main, { pid: e.pid, runId: e.runId, agentId: e.agentId });
     }
-    try {
-      process.kill(-pid, 'SIGKILL'); // detached → own process group
-    } catch {
-      // already gone
-    }
+  } catch {
+    // no readable registry — nothing spawned
   }
 }
 

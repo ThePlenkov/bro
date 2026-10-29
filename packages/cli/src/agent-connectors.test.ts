@@ -20,6 +20,7 @@ import {
   bdActor,
   countSessionReservations,
   DEFAULT_CONFIG,
+  handleOwner,
   patchAgentRegistry,
   procStat,
   readAgentRegistry,
@@ -60,11 +61,12 @@ import {
   resolveSpawnProvider,
   sessionKindOf,
   sessionQuotaOf,
+  systemdScopeProbe,
   unregisterAgentConnector,
   type AgentConnectorEnv,
   type BudgetSnapshot,
 } from './agent-connectors.ts';
-import { initRepo, installFakeBd, readBeads, writeBeads } from './commands/testrepo.ts';
+import { initRepo, installFakeBd, killRun, readBeads, writeBeads } from './commands/testrepo.ts';
 import { devinSessionPlane } from '@broject/devin';
 import { VERSION } from './version.ts';
 
@@ -358,20 +360,7 @@ function cleanup(fx: Fixture): void {
           { stdio: 'ignore' }
         );
       }
-      // never signal our own pid/pgid — a group-leader test process
-      // would take the whole runner down
-      if (
-        typeof e.pid === 'number' &&
-        e.pid > 0 &&
-        e.pid !== process.pid &&
-        e.pid !== process.ppid
-      ) {
-        try {
-          process.kill(-e.pid, 'SIGKILL'); // detached → own process group
-        } catch {
-          // already gone
-        }
-      }
+      killRun(fx.main, { pid: e.pid, runId: e.runId, agentId: e.agentId });
     }
   } catch {
     // no readable registry — nothing spawned
@@ -484,7 +473,7 @@ function connectorContract(b: BackendCase): void {
   const fx = (rows: Array<Record<string, unknown>>) =>
     fixture(rows, undefined, { tmux: b.tmux === true, docker: b.docker === true });
   const conn = (f: Fixture) => b.make({ dir: f.main }, f.env);
-  const kill = (info: AgentInfo) => process.kill(-info.pid!, 'SIGKILL');
+  const kill = (f: Fixture, info: AgentInfo) => killRun(f.main, info);
 
   test('spawn claims the step, registers the agent, leaves a .work marker', async () => {
     const f = fx([{ id: 'fx-1', status: 'open' }]);
@@ -567,7 +556,7 @@ function connectorContract(b: BackendCase): void {
       assert.equal(f.dbRows().find(r => r.id === 'fx-2')!.status, 'open');
       assert.equal(readAgentRegistry(f.main)['fx-2'], undefined);
       // a dead worker frees its slot — the same spawn now lands
-      kill(first);
+      kill(f, first);
       await until(() => !pidAlive(first.pid!));
       const second = await c.spawn(SPEC(f.main, f.beadsDir, 'fx-2', 'setTimeout(() => {}, 30000)'));
       assert.equal(second.state, 'running');
@@ -825,7 +814,7 @@ function connectorContract(b: BackendCase): void {
       const c = conn(f);
       const first = await c.spawn(SPEC(f.main, f.beadsDir, 'fx-1', 'setTimeout(() => {}, 30000)'));
       // kill -9 — no exit file written → 'lost'
-      kill(first);
+      kill(f, first);
       await until(() => !pidAlive(first.pid!));
       const l = await c.list();
       assert.equal(l.agents[0]!.state, 'lost');
@@ -845,7 +834,7 @@ function connectorContract(b: BackendCase): void {
     try {
       const c = conn(f);
       const first = await c.spawn(SPEC(f.main, f.beadsDir, 'fx-1', 'setTimeout(() => {}, 30000)'));
-      kill(first);
+      kill(f, first);
       await until(() => !pidAlive(first.pid!));
       // someone else claimed the step while our worker was dead
       const rows = f.dbRows();
@@ -1291,11 +1280,23 @@ describe('native spawn handshake (bro-l8c4f.5)', () => {
       assert.match(info.runId ?? '', /^[0-9a-f]{8}$/);
       const entry = entryOf(f);
       assert.equal(entry.runId, info.runId);
-      // the handle the worker published IS the launcher-patched pid
-      assert.equal(
-        readFileSync(runFile(f, info.id, info.runId!, 'handle'), 'utf8').trim(),
-        String(info.pid)
+      // the handle the worker published IS the launcher-patched pid —
+      // scoped or not: systemd-run --scope execs the payload in place,
+      // so the recorded pid keeps naming the worker (bro-ybo8z). The
+      // worker's /proc starttime rides beside it — the identity every
+      // reader verifies against pid reuse
+      const published = handleOwner(
+        readFileSync(runFile(f, info.id, info.runId!, 'handle'), 'utf8')
       );
+      assert.ok(published !== null, 'the handle parses');
+      const handlePid = published.pid;
+      assert.equal(handlePid, info.pid);
+      assert.equal(
+        published.start,
+        procStat(handlePid)?.start,
+        'the published starttime is this pid’s /proc starttime'
+      );
+      assert.ok(pidAlive(handlePid));
       assert.ok(
         existsSync(runFile(f, info.id, info.runId!, 'go')),
         'the launcher admitted the run'
@@ -1367,10 +1368,12 @@ describe('native spawn handshake (bro-l8c4f.5)', () => {
       assert.equal(entry.pid, undefined, 'the pid patch never landed');
       // the worker published its own handle before holding on admission
       await until(() => existsSync(runFile(f, entry.agentId, entry.runId!, 'handle')));
-      const handlePid = Number(
-        readFileSync(runFile(f, entry.agentId, entry.runId!, 'handle'), 'utf8').trim()
+      const published = handleOwner(
+        readFileSync(runFile(f, entry.agentId, entry.runId!, 'handle'), 'utf8')
       );
-      assert.ok(pidAlive(handlePid), 'the survivor is live');
+      assert.ok(published !== null, 'the handle parses');
+      const handlePid = published.pid;
+      assert.ok(pidAlive(handlePid, published.start), 'the survivor is live');
       // status finds the survivor and adopts its handle into the registry
       const st = await c.status(entry.agentId);
       assert.equal(st.state, 'running');
@@ -1389,6 +1392,64 @@ describe('native spawn handshake (bro-l8c4f.5)', () => {
       assert.equal((await c.status(entry.agentId)).state, 'stopped');
     } finally {
       armNativeSpawnTestSeam({});
+      cleanup(f);
+    }
+  });
+
+  test('a recycled pid in the handle never adopts — the published starttime must match', async () => {
+    // adoption used to take the handle pid's CURRENT starttime as its
+    // own identity, so a recycled pid passed its own check and `down`
+    // then signaled a stranger's tree — the starttime is the worker's
+    // to publish, and adoption verifies it before trusting the pid
+    armNativeSpawnTestSeam({ abandonAt: 'os-spawn', goWaitTicks: 600 });
+    const f = fx([{ id: 'fx-1', status: 'open' }]);
+    let survivor: number | undefined;
+    let stranger: number | undefined;
+    try {
+      const c = conn(f);
+      await assert.rejects(
+        c.spawn(SPEC(f.main, f.beadsDir, 'fx-1', 'setTimeout(() => {}, 30000)')),
+        e => e instanceof SpawnAbandoned && e.at === 'os-spawn'
+      );
+      const entry = entryOf(f);
+      const handleFile = runFile(f, entry.agentId, entry.runId!, 'handle');
+      await until(() => existsSync(handleFile));
+      const published = handleOwner(readFileSync(handleFile, 'utf8'));
+      assert.ok(published !== null && published.start !== undefined, 'pid + starttime published');
+      survivor = published.pid;
+      // the recycle: the handle's pid now runs a process that never
+      // published it — planted, because a kernel cannot be asked to
+      // hand a pid back on demand
+      const s = spawn('sleep', ['60'], { stdio: 'ignore', detached: true });
+      s.unref();
+      stranger = s.pid;
+      assert.ok(stranger !== undefined, 'the stranger spawned');
+      await until(() => pidAlive(stranger!));
+      assert.notEqual(
+        procStat(stranger)?.start,
+        published.start,
+        'the stranger carries another identity'
+      );
+      writeFileSync(handleFile, `${stranger} ${published.start}`);
+      // status must not adopt the stranger, and must not stamp it in
+      const st = await c.status(entry.agentId);
+      assert.notEqual(st.state, 'running', 'a recycled pid never adopts');
+      assert.equal(st.pid, undefined);
+      assert.equal(entryOf(f).pid, undefined, 'the registry must not stamp the stranger');
+      // down must not signal the stranger's tree either
+      await c.stop(entry.agentId);
+      assert.ok(pidAlive(stranger), 'the stop never touched the recycled pid');
+    } finally {
+      armNativeSpawnTestSeam({});
+      for (const p of [stranger, survivor]) {
+        if (p !== undefined) {
+          try {
+            process.kill(-p, 'SIGKILL');
+          } catch {
+            // already gone
+          }
+        }
+      }
       cleanup(f);
     }
   });
@@ -1460,11 +1521,153 @@ describe('native spawn handshake (bro-l8c4f.5)', () => {
       assert.equal(st.state, 'running');
       // now kill the live run without a record — the harvest must not
       // pick up either bogus file; dead-without-a-record reads 'lost'
-      process.kill(-second.pid!, 'SIGKILL');
+      killRun(f.main, second);
       await until(() => !pidAlive(second.pid!));
       const dead = await c.status(second.id);
       assert.equal(dead.state, 'lost', 'the harvest reads only this run’s scoped .exit');
       assert.equal(entryOf(f).exitStatus, undefined);
+    } finally {
+      armNativeSpawnTestSeam({});
+      cleanup(f);
+    }
+  });
+});
+
+/** Per-worker systemd scopes (spec bro-ybo8z): `systemd-run --user
+ *  --scope` registers the child into its own `run-*.scope` — a sibling
+ *  of the supervisor's unit, so a `bro-loop.service` cgroup kill (crash
+ *  or `systemctl stop`) cannot reach it. systemd-run EXECS the payload
+ *  in place — the recorded pid IS the worker: `handle == pid`, the
+ *  liveness ladder and `down`'s group signal are all unchanged. */
+describe('native systemd scope (bro-ybo8z)', () => {
+  const scoped = systemdScopeProbe();
+  const gate = { skip: scoped ? false : 'no systemd user manager on this host' };
+  const fx = (rows: Array<Record<string, unknown>>) => fixture(rows);
+  const conn = (f: Fixture) => makeNativeConnector({ dir: f.main }, f.env);
+  const agentsDir = (f: Fixture) => join(f.main, '.git', 'bro', 'agents');
+  const entryOf = (f: Fixture, step = 'fx-1') => readAgentRegistry(f.main)[step]!;
+  const runFile = (f: Fixture, id: string, runId: string, suffix: string) =>
+    join(agentsDir(f), `${id}.${runId}.${suffix}`);
+  const handlePid = (f: Fixture, entry: AgentRegistryEntry): number => {
+    const owner = handleOwner(
+      readFileSync(runFile(f, entry.agentId, entry.runId!, 'handle'), 'utf8')
+    );
+    assert.ok(owner !== null, 'the handle file carries a pid');
+    return owner.pid;
+  };
+  const cgroupOf = (pid: number) => readFileSync(`/proc/${pid}/cgroup`, 'utf8').trim();
+
+  test(
+    'the worker lands in its own .scope cgroup — a sibling of the spawner, not its member',
+    gate,
+    async () => {
+      const f = fx([{ id: 'fx-1', status: 'open' }]);
+      try {
+        const c = conn(f);
+        const info = await c.spawn(SPEC(f.main, f.beadsDir, 'fx-1', 'setTimeout(() => {}, 30000)'));
+        const entry = entryOf(f);
+        // pid continuity: systemd-run execs the payload, so the recorded
+        // pid and the self-published handle name the same live worker —
+        // moved into a cgroup the spawner's unit cannot wipe
+        const worker = handlePid(f, entry);
+        assert.equal(worker, info.pid);
+        await until(() => pidAlive(worker));
+        assert.match(cgroupOf(worker), /\.scope$/, 'the payload lives in a transient scope');
+        assert.notEqual(
+          cgroupOf(worker),
+          cgroupOf(process.pid),
+          'outside the spawner cgroup — the loop-crash/systemctl-stop isolation'
+        );
+        // still running: no .exit, registry reads running, `down` reaches it
+        assert.ok(!existsSync(join(agentsDir(f), agentExitFileName(entry.agentId, entry.runId))));
+        assert.equal((await c.status(entry.agentId)).state, 'running');
+        await c.stop(entry.agentId);
+        await until(() => !pidAlive(worker));
+        assert.equal((await c.status(entry.agentId)).state, 'stopped');
+      } finally {
+        armNativeSpawnTestSeam({});
+        cleanup(f);
+      }
+    }
+  );
+
+  test(
+    'an argv worker scopes too — provider-resolved spawns ride the same wrap',
+    gate,
+    async () => {
+      const f = fx([{ id: 'fx-1', status: 'open' }]);
+      try {
+        const c = conn(f);
+        const info = await c.spawn({
+          ...SPEC(f.main, f.beadsDir, 'fx-1', 'unused — the worker owns the program'),
+          worker: { kind: 'argv', argv: [process.execPath, '-e', 'setTimeout(() => {}, 30000)'] },
+        });
+        await until(() => pidAlive(info.pid!));
+        assert.match(cgroupOf(info.pid!), /\.scope$/);
+        assert.notEqual(cgroupOf(info.pid!), cgroupOf(process.pid));
+        await c.stop(entryOf(f).agentId);
+      } finally {
+        armNativeSpawnTestSeam({});
+        cleanup(f);
+      }
+    }
+  );
+
+  test('agents.native.systemdScope=false keeps the plain detached shape', async () => {
+    const f = fx([{ id: 'fx-1', status: 'open' }]);
+    try {
+      f.env.agents['native']!['systemdScope'] = false;
+      const c = conn(f);
+      const info = await c.spawn(SPEC(f.main, f.beadsDir, 'fx-1', 'setTimeout(() => {}, 30000)'));
+      const entry = entryOf(f);
+      // unwrapped the worker stays in the spawner's cgroup — compare
+      // against our own, which is never a run-*.scope either way
+      assert.equal(handlePid(f, entry), info.pid);
+      await until(() => pidAlive(info.pid!));
+      assert.equal(cgroupOf(info.pid!), cgroupOf(process.pid));
+      await c.stop(entry.agentId);
+    } finally {
+      armNativeSpawnTestSeam({});
+      cleanup(f);
+    }
+  });
+
+  test('the seam pins the wrap off even when the host probe passes', gate, async () => {
+    armNativeSpawnTestSeam({ scope: false });
+    const f = fx([{ id: 'fx-1', status: 'open' }]);
+    try {
+      const c = conn(f);
+      const info = await c.spawn(SPEC(f.main, f.beadsDir, 'fx-1', 'setTimeout(() => {}, 30000)'));
+      const entry = entryOf(f);
+      assert.equal(handlePid(f, entry), info.pid);
+      assert.equal(cgroupOf(info.pid!), cgroupOf(process.pid));
+      await c.stop(entry.agentId);
+    } finally {
+      armNativeSpawnTestSeam({});
+      cleanup(f);
+    }
+  });
+
+  test('a refused scope retries unscoped — the row names a live worker, never a silent lost', async () => {
+    // no systemd needed — the seam's stand-in dies before the exec the
+    // way a user-manager refusal does; the fallback is the plain spawn
+    armNativeSpawnTestSeam({ scope: true, scopeRefused: true });
+    const f = fx([{ id: 'fx-1', status: 'open' }]);
+    try {
+      const c = conn(f);
+      const info = await c.spawn(SPEC(f.main, f.beadsDir, 'fx-1', 'setTimeout(() => {}, 30000)'));
+      const entry = entryOf(f);
+      // the retry keeps pid identity — handle, registry pid and the
+      // live worker are one, in the spawner's own cgroup (no wrap)
+      assert.equal(handlePid(f, entry), info.pid);
+      await until(() => pidAlive(info.pid!));
+      assert.equal(cgroupOf(info.pid!), cgroupOf(process.pid));
+      assert.equal((await c.status(entry.agentId)).state, 'running');
+      assert.match(
+        readFileSync(String(entry.stderrLog), 'utf8'),
+        /refused the scope — respawned without the wrap/
+      );
+      await c.stop(entry.agentId);
     } finally {
       armNativeSpawnTestSeam({});
       cleanup(f);
@@ -1675,7 +1878,14 @@ describe('docker connector', () => {
             ...f.env.agents['docker'],
             strictEnv: true,
             envAllowlist: ['PATH'],
-            runArgs: ['--env', 'SENTRY_TOKEN=leak', '--env-file', '/tmp/leak.env', '--memory', '1g'],
+            runArgs: [
+              '--env',
+              'SENTRY_TOKEN=leak',
+              '--env-file',
+              '/tmp/leak.env',
+              '--memory',
+              '1g',
+            ],
           },
         },
       };

@@ -22,6 +22,7 @@ import {
   inside,
   installFakeBd,
   installFakeHost,
+  killRunHandles,
   readHostState,
   runCli,
   writeHostState,
@@ -839,6 +840,9 @@ describe('bro loop liveness', () => {
           /* already gone */
         }
       }
+      // a fork-style scope would name the payload under a pid the log
+      // never saw — the handles cover either topology (bro-ybo8z)
+      killRunHandles(f.main);
       rmSync(f.root, { recursive: true, force: true });
     }
   });
