@@ -67,23 +67,30 @@ export function beadForHead(
 ): ReconcileBead | undefined {
   const det = deterministicHeadSlug(headRef);
   if (det !== undefined) {
-    const hit = beadsBySlug.get(det);
-    if (hit !== undefined) {
-      return hit;
+    const detHit = beadsBySlug.get(det);
+    if (detHit !== undefined) {
+      return detHit;
     }
   }
-  const tail = headRef.slice(headRef.indexOf('/') + 1);
+
+  const slash = headRef.indexOf('/');
+  const tail = headRef.slice(slash + 1);
   let best: ReconcileBead | undefined;
+  let bestLen = -1;
+
   for (const [slug, bead] of beadsBySlug) {
-    if (tail === slug || tail.startsWith(`${slug}-`)) {
-      if (best === undefined || slug.length > loopSlug(best.id).length) {
-        best = bead;
-      }
+    const matches = tail === slug || tail.startsWith(`${slug}-`);
+    if (!matches) {
+      continue;
+    }
+    const len = loopSlug(bead.id).length;
+    if (best === undefined || len > bestLen) {
+      best = bead;
+      bestLen = len;
     }
   }
-  // a deterministic miss already proved the bead absent — the prefix
-  // scan above can only mis-fire on a foreign slug, so suppress it
-  if (det !== undefined && best === undefined) {
+
+  if (det !== undefined) {
     return undefined;
   }
   return best;
@@ -99,22 +106,21 @@ export type OrphanVerdict = { kind: 'close'; bead?: string; why: string } | { ki
  *  (obsolete); live or unverifiable → keep. A kept live PR is drive's
  *  territory — it owns the fixer and the merge. */
 export function orphanVerdict(headRef: string, bead: ReconcileBead | undefined): OrphanVerdict {
-  if (bead !== undefined) {
-    if (bead.status === 'closed') {
-      return { kind: 'close', bead: bead.id, why: `bead ${bead.id} closed` };
-    }
-    // deprecated/obsolete/non-open statuses also count as dead weight
-    if (
-      typeof bead.status === 'string' &&
-      bead.status !== 'open' &&
-      bead.status !== 'in_progress'
-    ) {
-      return { kind: 'close', bead: bead.id, why: `bead ${bead.id} ${bead.status}` };
+  if (bead === undefined) {
+    if (deterministicHeadSlug(headRef) !== undefined) {
+      return { kind: 'close', why: 'no bead — obsolete' };
     }
     return { kind: 'keep' };
   }
-  if (deterministicHeadSlug(headRef) !== undefined) {
-    return { kind: 'close', why: 'no bead — obsolete' };
+
+  if (bead.status === 'closed') {
+    return { kind: 'close', bead: bead.id, why: `bead ${bead.id} closed` };
   }
+
+  const status = bead.status;
+  if (typeof status === 'string' && status !== 'open' && status !== 'in_progress') {
+    return { kind: 'close', bead: bead.id, why: `bead ${bead.id} ${status}` };
+  }
+
   return { kind: 'keep' };
 }
