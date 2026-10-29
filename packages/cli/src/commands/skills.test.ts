@@ -6,7 +6,6 @@ import {
   mkdtempSync,
   readlinkSync,
   realpathSync,
-  symlinkSync,
   writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -55,9 +54,20 @@ const cfg = (install: string[], extra: Partial<SkillsConfig> = {}): SkillsConfig
   ...extra,
 });
 
-/** Spawn stub — records argv, returns a scripted status per predicate.
- *  `materialize` fakes an `add -s <name>` by dropping a SKILL.md into
+/** Fakes an `add -s <name>` by dropping a SKILL.md into
  *  .agents/skills/<name> so post-sync verification sees it land. */
+function materializeAdd(root: string, args: string[]): void {
+  if (args[0] !== 'add') {
+    return;
+  }
+  const s = args.indexOf('-s');
+  const name = s !== -1 ? args[s + 1] : undefined;
+  if (name !== undefined) {
+    makeSkill(join(root, '.agents', 'skills', name), name);
+  }
+}
+
+/** Spawn stub — records argv, returns a scripted status per predicate. */
 function fakeSpawn(opts: { failOn?: (args: string[]) => boolean; materialize?: boolean } = {}): {
   spawn: SpawnRunner;
   calls: string[][];
@@ -66,11 +76,8 @@ function fakeSpawn(opts: { failOn?: (args: string[]) => boolean; materialize?: b
   const spawn: SpawnRunner = (_bin, root, args) => {
     calls.push([...args]);
     const status = opts.failOn?.(args) === true ? 1 : 0;
-    if (status === 0 && opts.materialize === true && args[0] === 'add') {
-      const s = args.indexOf('-s');
-      if (s !== -1 && args[s + 1] !== undefined) {
-        makeSkill(join(root, '.agents', 'skills', args[s + 1]!), args[s + 1]!);
-      }
+    if (status === 0 && opts.materialize === true) {
+      materializeAdd(root, args);
     }
     return {
       status,
