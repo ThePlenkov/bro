@@ -122,7 +122,7 @@ import { assertMutableConfig } from './config-policy.ts';
 import {
   type LaneAdmission,
   laneGateAdmission,
-  laneGateCredit,
+  laneGateTake,
   laneGateRefusal,
   reconcileLanePauseForRegistry,
 } from './lane.ts';
@@ -1600,7 +1600,7 @@ function prepareSpawn(
     // the same door for the charge: everything still inside this try
     // precedes launch, so a spawn that never ran gives its tokens back
     if (charged !== undefined) {
-      laneGateCredit(charged.lane, charged.model, charged.gate);
+      laneGateTake(charged.lane, charged.model, charged.gate, { refund: true });
     }
     throw err;
   }

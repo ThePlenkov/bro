@@ -47,8 +47,8 @@ import {
   type SpawnSpec,
 } from '@broject/core';
 
-// the refund half — re-exported for the spawn path's catch (spec bro-y3jvd)
-export { laneGateCredit } from '@broject/core';
+// charge and its refund share the take — re-exported for the spawn path
+export { laneGateTake };
 import { groupMemberAlive, providerWallsFor, type AgentConnectorEnv } from './agent-connectors.ts';
 
 // --- the rate gate ------------------------------------------------------
@@ -466,9 +466,17 @@ function pauseCounts(path: string | null): Map<string, number> {
   }
   for (const raw of Object.values(readPauseFile(path).paused)) {
     // a hand-edited/corrupt record must not crash `agents status` —
-    // count what parses as a pause record, skip the rest (coderabbit)
-    const rec: PauseRecord | null = raw;
-    if (rec === null || typeof rec !== 'object' || typeof rec.provider !== 'string') {
+    // count what parses as a pause record, skip the rest (coderabbit);
+    // one condition per branch keeps the guard off CodeScene's
+    // complex-conditional radar
+    if (typeof raw !== 'object') {
+      continue;
+    }
+    if (raw === null) {
+      continue;
+    }
+    const rec = raw as PauseRecord;
+    if (typeof rec.provider !== 'string') {
       continue;
     }
     out.set(rec.provider, (out.get(rec.provider) ?? 0) + 1);

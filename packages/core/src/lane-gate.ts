@@ -98,6 +98,11 @@ const refill = (l: LaneGateLedger, cfg: LaneRateGate, now: number): number =>
 export interface LaneGateOpts {
   now?: number;
   dir?: string;
+  /** The refund half — hand `spawnCost` back to the bucket instead of
+   *  charging it (a spawn that died before launch never ran, spec
+   *  bro-y3jvd). Always succeeds, capped at capacity: a refund can
+   *  never mint budget the lane never had. */
+  refund?: boolean;
 }
 
 /** Charge `cost` request-tokens to the `<lane>/<model>` bucket.
@@ -116,36 +121,19 @@ export function laneGateTake(
   return withFileLock(`${path}.lock`, () => {
     const cur = readLedger(path, cfg, now);
     const tokens = refill(cur, cfg, now);
+    if (opts.refund === true) {
+      // the refund never refuses and never overfills — the lane only
+      // gets back what the failed spawn spent
+      const credited = Math.min(capacityOf(cfg), tokens + cfg.spawnCost);
+      writeLedger(path, { tokens: credited, updatedAt: now });
+      return { ok: true as const, tokens: credited };
+    }
     if (tokens < cfg.spawnCost) {
       // cost > capacity can never satisfy — refuse without the wait
       const retryAfterSec = Math.ceil(((cfg.spawnCost - tokens) / cfg.requestsPerHour) * 3600);
       return { ok: false as const, retryAfterSec };
     }
     const left = tokens - cfg.spawnCost;
-    writeLedger(path, { tokens: left, updatedAt: now });
-    return { ok: true as const, tokens: left };
-  });
-}
-
-/** Credit one `spawnCost` back to the `<lane>/<model>` bucket — the
- *  refund half of a charge whose spawn never launched (spec bro-y3jvd:
- *  a refused spawn spends no tokens, and a spawn that dies BEFORE its
- *  launch step never ran either). Capped at capacity — a refund never
- *  overfills the bucket, so a lane can't mint budget it never had.
- *  Atomic under the same filelock as the take. */
-export function laneGateCredit(
-  lane: string,
-  model: string,
-  cfg: LaneRateGate,
-  opts: LaneGateOpts = {}
-): { ok: true; tokens: number } {
-  const now = opts.now ?? Date.now();
-  const dir = opts.dir ?? laneGateDir();
-  const path = ledgerPath(dir, lane, model);
-  return withFileLock(`${path}.lock`, () => {
-    const cur = readLedger(path, cfg, now);
-    const tokens = refill(cur, cfg, now);
-    const left = Math.min(capacityOf(cfg), tokens + cfg.spawnCost);
     writeLedger(path, { tokens: left, updatedAt: now });
     return { ok: true as const, tokens: left };
   });
