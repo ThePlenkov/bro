@@ -2480,8 +2480,13 @@ async function driveOnce(ctx: Ctx): Promise<void> {
   if (prs.size === 0) {
     say(ctx, 'drive: no open PRs on fleet branches');
   }
-  await sweepSettledFixers(ctx, prs);
-  herdrProjectorTick(ctx);
+  // the projector rides even a failed sweep — a skipped projection is
+  // a stale label, exactly the failure this tick exists to kill
+  try {
+    await sweepSettledFixers(ctx, prs);
+  } finally {
+    herdrProjectorTick(ctx);
+  }
 }
 
 /** The fleet-status projector (spec bro-u19mq) — the ONE writer of
@@ -2500,6 +2505,9 @@ function herdrProjectorTick(ctx: Ctx): void {
       } else if (r.writes > 0 || r.workspaces > 0) {
         say(ctx, `herdr: projecting ${r.workspaces} managed workspace(s)`);
       }
+    }
+    if (r.degraded !== undefined) {
+      say(ctx, `herdr: ${r.degraded} read failed — pass degraded`);
     }
     if (r.writes > 0) {
       say(ctx, `herdr: ${r.writes} label write(s)`);

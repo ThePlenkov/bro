@@ -38,7 +38,7 @@ import { parseWorktreePorcelain, worktreeClaim } from './work.ts';
 const HERDR = (): string => process.env.HERDR_BIN_PATH ?? 'herdr';
 /** A wedged herdr socket must never stall the pass — local calls
  *  answer in milliseconds; anything past this is a hang. */
-const HERDR_TIMEOUT_MS = 15_000;
+const HERDR_TIMEOUT_MS = 5_000;
 
 export type WorkerState = 'working' | 'silent' | 'exited' | 'interrupted' | 'lost' | 'stopped';
 
@@ -88,13 +88,15 @@ export function silentBucketMin(silentMs: number | null | undefined): number | n
   return Math.max(0, Math.floor(min / 5) * 5);
 }
 
-const quietest = (a: WorkerCand | undefined, b: WorkerCand): WorkerCand =>
-  a === undefined ||
-  (b.silentMs ?? Number.POSITIVE_INFINITY) < (a.silentMs ?? Number.POSITIVE_INFINITY)
-    ? b
-    : a;
-
-const freshest = (c: WorkerCand[]): WorkerCand | undefined => c.reduce(quietest, undefined);
+const freshest = (c: WorkerCand[]): WorkerCand | undefined =>
+  c.reduce<WorkerCand | undefined>(
+    (a, b) =>
+      a === undefined ||
+      (b.silentMs ?? Number.POSITIVE_INFINITY) < (a.silentMs ?? Number.POSITIVE_INFINITY)
+        ? b
+        : a,
+    undefined
+  );
 
 /** The winner among live candidates — a live run anywhere outranks a
  *  co-resident live agent (the run's silence bucket is the truer one). */
@@ -121,9 +123,13 @@ export function workerState(
 ): Pick<TreeProjection, 'state' | 'silentMin'> {
   const w = liveWinner(cands);
   if (w !== undefined) return liveVerdict(w, stallMin);
-  const dead = cands.filter(c => !c.live && c.terminal !== undefined);
-  if (dead.length === 0) return {};
-  return { state: dead.reduce((a, b) => (b.at > a.at ? b : a)).terminal };
+  let newest: WorkerCand | undefined;
+  for (const d of cands) {
+    if (!d.live && d.terminal !== undefined && (newest === undefined || d.at > newest.at)) {
+      newest = d;
+    }
+  }
+  return newest === undefined ? {} : { state: newest.terminal };
 }
 
 /** The act-state record's summary fields — a file-cache read, never
@@ -179,7 +185,8 @@ export function workerToken(p: TreeProjection): string | undefined {
  *  neither a worker nor an arm. */
 export function prToken(p: TreeProjection): string | undefined {
   if (p.pr !== undefined) {
-    return `#${p.pr}${p.gate !== undefined && p.gate !== '' ? ` ${p.gate}` : ''}`;
+    const gate = p.gate !== undefined && p.gate !== '' ? ` ${p.gate}` : '';
+    return `#${p.pr}${gate}`;
   }
   return p.state !== undefined || p.armed === true ? 'no PR' : undefined;
 }
@@ -266,7 +273,10 @@ function actStates(common: string | null): ActEntry[] {
       // a corrupt entry is a miss
     }
   }
-  return out;
+  // freshest-first — a `find` anywhere downstream picks the latest
+  // observation on a headRef/PR collision, not whichever file readdir
+  // happened to return first
+  return out.sort((a, b) => b.fetchedAt - a.fetchedAt);
 }
 
 /** The plugin's ownership ledger — `managed: true` marks workspaces a
@@ -338,8 +348,11 @@ const TERMINAL: Partial<Record<AgentState, WorkerState>> = {
   stopped: 'stopped',
 };
 
-const parseTs = (s: unknown): number =>
-  typeof s === 'string' ? (Number.isFinite(Date.parse(s)) ? Date.parse(s) : 0) : 0;
+const parseTs = (s: unknown): number => {
+  if (typeof s !== 'string') return 0;
+  const t = Date.parse(s);
+  return Number.isFinite(t) ? t : 0;
+};
 
 /** Entries past this age are treated as absent — a dead poller's last
  *  write must not paint a stale verdict on the label forever. */
@@ -350,9 +363,11 @@ const prFromLink = (link: string | undefined): number | undefined => {
   return m?.[1] !== undefined ? Number(m[1]) : undefined;
 };
 
-/** PR + gate for a worktree: the bead's link first, else the act-state
- *  entry whose `headRef` is the tree's branch (fresh within the label
- *  window). */
+/** PR + gate for a worktree: the fresh act entry wins when its
+ *  headRef is the tree's branch — the branch is what a PR actually
+ *  tracks, so it outranks a bead link that can be stale. Entries are
+ *  sorted freshest-first, so `find` picks the latest observation on a
+ *  headRef collision. */
 export function prFor(
   branch: string | undefined,
   slug: string | undefined,
@@ -362,11 +377,12 @@ export function prFor(
 ): { pr?: number; gate?: string } {
   const link = slug !== undefined ? prFromLink(beads.find(b => b.id === slug)?.link) : undefined;
   const fresh = (e: ActEntry): boolean => now - e.fetchedAt <= ACT_LABEL_STALE_MS;
-  const entry =
-    (branch !== undefined && branch !== ''
+  const byRef =
+    branch !== undefined && branch !== ''
       ? act.find(e => e.state.headRef === branch && fresh(e))
-      : undefined) ?? act.find(e => e.state.pr === link && fresh(e));
-  const pr = link ?? entry?.state.pr;
+      : undefined;
+  const entry = byRef ?? act.find(e => e.state.pr === link && fresh(e));
+  const pr = entry?.state.pr ?? link;
   if (pr === undefined) return {};
   return { pr, ...(entry !== undefined ? { gate: gateFrag(entry.state) } : {}) };
 }
@@ -434,7 +450,10 @@ function workerCands(i: TreeInput): WorkerCand[] {
 /** The projection + display title for one worktree — the object a
  *  future herdr badge consumes directly. */
 export function projectTree(i: TreeInput): { projection: TreeProjection; title: string } {
-  const slug = i.claim ?? i.runs.find(r => r.beadId !== undefined)?.beadId ?? i.agents[0]?.key;
+  const slug =
+    i.claim ??
+    i.runs.find(r => r.beadId !== undefined)?.beadId ??
+    (i.agents.find(a => a.live) ?? i.agents[0])?.key;
   const worker = workerState(workerCands(i), i.stallMin);
   const projection: TreeProjection = {
     ...worker,
@@ -456,6 +475,9 @@ export interface ProjectResult {
   workspaces: number;
   /** rename/report-metadata calls that succeeded. */
   writes: number;
+  /** A plane read that failed while herdr itself answered — named so
+   *  the tick can say it instead of looking like a clean skip. */
+  degraded?: string;
 }
 
 /** The bro-plane bundle a pass reads once — assembled after the
@@ -471,11 +493,21 @@ interface Planes {
   stall: number;
 }
 
+/** A corrupt/unreadable agents.json degrades to an empty registry —
+ *  one bad file must not skip projection for every managed workspace. */
+function tryRegistry(mainRoot: string): ReturnType<typeof readAgentRegistry> {
+  try {
+    return readAgentRegistry(mainRoot);
+  } catch {
+    return {};
+  }
+}
+
 function readPlanes(mainRoot: string, common: string | null, now: number): Planes {
   const hooks = hooksDirOf(mainRoot);
   return {
     agentsHome: common === null ? null : join(common, 'bro', 'agents'),
-    registry: readAgentRegistry(mainRoot),
+    registry: tryRegistry(mainRoot),
     branches: gitBranches(mainRoot),
     runs: collectLoopRuns(mainRoot, now),
     act: actStates(common),
@@ -503,11 +535,12 @@ function managedTargets(
   const out: WsTarget[] = [];
   for (const tree of trees) {
     const wsId = tree.open_workspace_id;
-    const live = wsId === undefined ? undefined : wsById.get(wsId);
+    if (wsId === undefined) continue;
+    const live = wsById.get(wsId);
+    if (live === undefined) continue;
     const rec = managed.get(tree.path);
-    if (wsId !== undefined && live !== undefined && rec?.managed === true && rec.ws === wsId) {
-      out.push({ tree, wsId, live });
-    }
+    if (rec?.managed !== true || rec.ws !== wsId) continue;
+    out.push({ tree, wsId, live });
   }
   return out;
 }
@@ -559,11 +592,21 @@ function treeInput(t: HerdrWorktree, p: Planes, now: number): TreeInput {
   };
 }
 
+/** The title a live `[tokens] title` label already carries — the
+ *  bead-outage fallback so a backend gap can't clobber a good title
+ *  with a bare path basename. */
+function liveTitle(label: string | undefined): string | undefined {
+  if (label === undefined) return undefined;
+  const m = /^\[[^\]]*\] (.+)$/.exec(label);
+  return m?.[1];
+}
+
 /** One projection pass over every plugin-managed open workspace of the
  *  repo. All bro inputs are local reads; each herdr write is a diff
  *  (live label/tokens already hold the last written values — no state
  *  file needed for dedup). Fail-open: any failure degrades to a
- *  skipped pass, never a thrown tick. */
+ *  skipped pass, never a thrown tick — a plane read that fails while
+ *  herdr answered lands on `degraded` so the tick can say it. */
 export function projectFleet(mainRoot: string, now = Date.now()): ProjectResult {
   const none: ProjectResult = { reachable: false, workspaces: 0, writes: 0 };
   const trees = herdr<{ worktrees?: HerdrWorktree[] }>(
@@ -573,8 +616,11 @@ export function projectFleet(mainRoot: string, now = Date.now()): ProjectResult 
   if (trees?.worktrees === undefined) return none;
 
   const common = gitCommonDir(mainRoot);
-  const wsAll = herdr<{ workspaces?: HerdrWorkspace[] }>(['workspace', 'list'])?.workspaces ?? [];
-  const wsById = new Map(wsAll.map(w => [w.workspace_id, w]));
+  const wsList = herdr<{ workspaces?: HerdrWorkspace[] }>(['workspace', 'list']);
+  if (wsList?.workspaces === undefined) {
+    return { reachable: true, workspaces: 0, writes: 0, degraded: 'workspace list' };
+  }
+  const wsById = new Map(wsList.workspaces.map(w => [w.workspace_id, w]));
   const targets = managedTargets(trees.worktrees, managedSet(mainRoot, common), wsById);
   if (targets.length === 0) return { reachable: true, workspaces: 0, writes: 0 };
 
@@ -582,7 +628,10 @@ export function projectFleet(mainRoot: string, now = Date.now()): ProjectResult 
   let writes = 0;
   for (const t of targets) {
     const { projection, title } = projectTree(treeInput(t.tree, planes, now));
-    writes += writeDiffs(t, projection, title, now);
+    // an empty bead plane means the backend read failed or is empty —
+    // a live titled label beats a path-basename downgrade in that gap
+    const safe = planes.beads.length === 0 ? (liveTitle(t.live.label) ?? title) : title;
+    writes += writeDiffs(t, projection, safe, now);
   }
   return { reachable: true, workspaces: targets.length, writes };
 }

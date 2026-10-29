@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
-import { mkdtempSync } from 'node:fs';
+import { createHash } from 'node:crypto';
+import { mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, test } from 'node:test';
@@ -318,5 +319,130 @@ describe('projectFleet — no herdr, no writes, no throw', () => {
       if (prev === undefined) delete process.env.HERDR_BIN_PATH;
       else process.env.HERDR_BIN_PATH = prev;
     }
+  });
+});
+
+/** A fake `herdr` for the projectFleet integration test — every argv
+ *  lands in FAKE_HERDR_LOG (one JSON line each); `worktree list` and
+ *  `workspace list` answer from FAKE_HERDR_SCENARIO; anything else is
+ *  an empty success envelope. */
+const FAKE_HERDR = `#!/usr/bin/env node
+const fs = require('node:fs');
+const args = process.argv.slice(2);
+if (process.env.FAKE_HERDR_LOG) {
+  fs.appendFileSync(process.env.FAKE_HERDR_LOG, JSON.stringify(args) + '\\n');
+}
+const s = JSON.parse(fs.readFileSync(process.env.FAKE_HERDR_SCENARIO, 'utf8'));
+const verb = args.slice(0, 2).join(' ');
+if (verb === 'worktree list') {
+  console.log(JSON.stringify({ result: { worktrees: s.worktrees ?? [] } }));
+} else if (verb === 'workspace list') {
+  console.log(JSON.stringify({ result: { workspaces: s.workspaces ?? [] } }));
+} else {
+  console.log(JSON.stringify({ result: {} }));
+}
+`;
+
+/** Bind env keys for one call — the projector reads them per call, so
+ *  a fixture only needs them inside its window. */
+function withEnv<T>(env: Record<string, string>, fn: () => T): T {
+  const saved: Record<string, string | undefined> = {};
+  for (const k of Object.keys(env)) saved[k] = process.env[k];
+  try {
+    Object.assign(process.env, env);
+    return fn();
+  } finally {
+    for (const [k, v] of Object.entries(saved)) {
+      if (v === undefined) delete process.env[k];
+      else process.env[k] = v;
+    }
+  }
+}
+
+describe('projectFleet — a live pass over a fake herdr', () => {
+  test('a managed workspace gets its rename + metadata writes', () => {
+    const root = mkdtempSync(join(tmpdir(), 'proj-fleet-'));
+    const stateDir = mkdtempSync(join(tmpdir(), 'proj-state-'));
+    const fake = join(root, 'fake-herdr.js');
+    const scenario = join(root, 'scenario.json');
+    const log = join(root, 'calls.jsonl');
+    writeFileSync(fake, FAKE_HERDR, { mode: 0o755 });
+    writeFileSync(
+      scenario,
+      JSON.stringify({
+        worktrees: [{ path: root, open_workspace_id: 'w1' }],
+        workspaces: [
+          {
+            workspace_id: 'w1',
+            label: '[working·#1] Old Title',
+            tokens: { status: 'old', 'bro.worker': 'stale' },
+          },
+        ],
+      })
+    );
+    // non-repo root → the managed-file scope is sha1(root) (no common dir)
+    const scope = createHash('sha1').update(root).digest('hex').slice(0, 12);
+    writeFileSync(
+      join(stateDir, `state-${scope}.json`),
+      JSON.stringify({
+        workspaces: { [root]: { ws: 'w1', label: '[working·#1] Old Title', managed: true } },
+      })
+    );
+    const r = withEnv(
+      {
+        HERDR_BIN_PATH: fake,
+        HERDR_PLUGIN_STATE_DIR: stateDir,
+        FAKE_HERDR_SCENARIO: scenario,
+        FAKE_HERDR_LOG: log,
+      },
+      () => projectFleet(root, NOW)
+    );
+    assert.deepEqual(r, { reachable: true, workspaces: 1, writes: 2 });
+    const calls = readFileSync(log, 'utf8')
+      .trim()
+      .split('\n')
+      .map(l => JSON.parse(l) as string[]);
+    const rename = calls.find(c => c.slice(0, 2).join(' ') === 'workspace rename');
+    // empty bead plane → the live titled label survives, no basename clobber
+    assert.deepEqual(rename?.slice(0, 4), ['workspace', 'rename', 'w1', 'Old Title']);
+    const meta = calls.find(c => c.slice(0, 2).join(' ') === 'workspace report-metadata');
+    assert.ok(meta?.includes('--clear-token'));
+    assert.ok(meta?.includes('status'));
+    assert.ok(meta?.includes('bro.worker'));
+  });
+
+  test('a user-owned workspace is never touched', () => {
+    const root = mkdtempSync(join(tmpdir(), 'proj-fleet-'));
+    const stateDir = mkdtempSync(join(tmpdir(), 'proj-state-'));
+    const fake = join(root, 'fake-herdr.js');
+    const scenario = join(root, 'scenario.json');
+    const log = join(root, 'calls.jsonl');
+    writeFileSync(fake, FAKE_HERDR, { mode: 0o755 });
+    writeFileSync(
+      scenario,
+      JSON.stringify({
+        worktrees: [{ path: root, open_workspace_id: 'wUser' }],
+        workspaces: [{ workspace_id: 'wUser', label: 'mine' }],
+      })
+    );
+    const scope = createHash('sha1').update(root).digest('hex').slice(0, 12);
+    // recorded but NOT managed — a workspace the user opened themselves
+    writeFileSync(
+      join(stateDir, `state-${scope}.json`),
+      JSON.stringify({ workspaces: { [root]: { ws: 'wUser', managed: false } } })
+    );
+    const r = withEnv(
+      {
+        HERDR_BIN_PATH: fake,
+        HERDR_PLUGIN_STATE_DIR: stateDir,
+        FAKE_HERDR_SCENARIO: scenario,
+        FAKE_HERDR_LOG: log,
+      },
+      () => projectFleet(root, NOW)
+    );
+    assert.deepEqual(r, { reachable: true, workspaces: 0, writes: 0 });
+    const calls = readFileSync(log, 'utf8').trim();
+    assert.ok(!calls.includes('rename'));
+    assert.ok(!calls.includes('report-metadata'));
   });
 });
