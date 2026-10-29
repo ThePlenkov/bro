@@ -959,16 +959,11 @@ function hasPluginPairedFields(o: unknown): boolean {
 }
 
 function isPlugin(p: unknown): p is BroPlugin {
-  if (!hasPluginRequiredShape(p)) {
-    return false;
-  }
-  if (!hasPluginOptionalFields(p)) {
-    return false;
-  }
-  if (!hasPluginPairedFields(p)) {
-    return false;
-  }
-  return true;
+  return (
+    hasPluginRequiredShape(p) &&
+    hasPluginOptionalFields(p) &&
+    hasPluginPairedFields(p)
+  );
 }
 
 /** Present-but-wrong optional fields — each predicate runs only when
@@ -1065,14 +1060,12 @@ const isObject = (o: unknown): o is Record<string, unknown> => !!o && typeof o =
 
 /** A connectors entry must be a Connector — name + at least the shape
  *  registerConnector relies on — else facade resolution would crash. */
+function isNonEmptyString(v: unknown): boolean {
+  return typeof v === 'string' && v !== '';
+}
+
 function hasValidConnectorName(c: unknown): boolean {
-  if (!isObject(c)) {
-    return false;
-  }
-  if (typeof c.name !== 'string' || c.name === '') {
-    return false;
-  }
-  return true;
+  return isObject(c) && isNonEmptyString(c.name);
 }
 
 function hasValidConnectorFunctions(c: unknown): boolean {
@@ -1114,19 +1107,12 @@ function hasValidConnectorFlags(c: unknown): boolean {
 }
 
 function isConnector(c: unknown): boolean {
-  if (!isObject(c)) {
-    return false;
-  }
-  if (!hasValidConnectorName(c)) {
-    return false;
-  }
-  if (!hasValidConnectorFunctions(c)) {
-    return false;
-  }
-  if (!hasValidConnectorFlags(c)) {
-    return false;
-  }
-  return true;
+  return (
+    isObject(c) &&
+    hasValidConnectorName(c) &&
+    hasValidConnectorFunctions(c) &&
+    hasValidConnectorFlags(c)
+  );
 }
 
 /** A docs entry must be a DocType — name + adapter factory — else it
