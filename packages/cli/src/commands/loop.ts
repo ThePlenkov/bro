@@ -345,6 +345,7 @@ function agentEnv(ctx: Ctx, extra: Record<string, string>): NodeJS.ProcessEnv {
     'BRO_SESSION_ID',
     'BRO_MOL_ID',
     BATCH_MARKER_ENV,
+    'BRO_LOG_TIMESTAMP',
   ]) {
     delete env[k];
   }
@@ -738,7 +739,7 @@ function spawnAgent(
     // timestamp so loop.out/daemon.log-style trails stay attributable
     // (spec bro-7h976). Preserve the wrapped command's exit status.
     const wrap = (cmd: string): string =>
-      `{ { ${cmd}; _brc=$?; echo "__BRO_EXIT__:${_brc}"; exit ${_brc}; } 2>&1 | ( _brc=0; while IFS= read -r _l; do case "${_l}" in __BRO_EXIT__:* ) _brc=$(echo "${_l}" | cut -d: -f2); continue ;; esac; printf '[%s] %s\\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "${_l}"; done; exit ${_brc}; ); }`;
+      `({ _bro_cmd=${JSON.stringify(cmd)}; { (eval "$_bro_cmd"); _bro_rc=$?; } 2>&1 | while IFS= read -r _l || [ -n "$_l" ]; do printf '[%s] %s\\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$_l"; done; exit $_bro_rc; })`;
     const child =
       w?.kind === 'argv'
         ? // the same `"$@"` positional exec the native backend builds —

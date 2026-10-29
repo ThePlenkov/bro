@@ -154,18 +154,20 @@ export function daemonProbe(dir: string): {
   return { live: false, recorded };
 }
 
-/** A recorded pid is trusted with its stored start time; records that
- *  predate the field get the bounded post-spawn window only — a reused
- *  pid must not impersonate the daemon forever. */
+/** A recorded pid is trusted only with its stored start time; records that
+ *  predate the field cannot be verified against reuse and must not be
+ *  trusted to kill processes. */
 function recordedPidAlive(rec: DaemonRecord, now: number = Date.now()): boolean {
   if (rec.pidStart !== undefined) {
     return pidAlive(rec.pid, rec.pidStart);
   }
-  const spawnedAt = Date.parse(rec.spawnedAt);
-  if (!Number.isFinite(spawnedAt) || now - spawnedAt > RECORD_TRUST_MS) {
-    return false;
+  if (rec.spawnedAt) {
+    const spawned = Date.parse(rec.spawnedAt);
+    if (Number.isFinite(spawned) && now - spawned <= RECORD_TRUST_MS) {
+      return pidAlive(rec.pid);
+    }
   }
-  return pidAlive(rec.pid);
+  return false;
 }
 
 export type DaemonUpDecision =
