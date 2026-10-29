@@ -3,7 +3,7 @@
   "$id": "https://broject.dev/schemas/cli/fleet.schema.json",
   "title": "bro fleet --json",
   "type": "object",
-  "additionalProperties": false,
+  "additionalProperties": true,
   "required": ["rows", "degraded", "conflicts", "prErrors", "occupancy", "budget", "walls"],
   "properties": {
     "rows": { "type": "array" },
