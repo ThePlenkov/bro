@@ -3583,7 +3583,7 @@ async function tryClaim(
       }
       ctx.claimsHeld = undefined;
     } catch {
-      // a listing that can't be produced holds too
+      // a listing that can't be produced holds too (fail closed)
       if (!ctx.claimsHeld) {
         ctx.claimsHeld = { open: -1, max: ctx.cfg.maxOpenTotal };
         say(ctx, `loop: claims held — ceiling unknown/${ctx.cfg.maxOpenTotal}`);
@@ -3592,31 +3592,6 @@ async function tryClaim(
     }
   } else {
     ctx.claimsHeld = undefined;
-  }
-  // Hard ceiling on TOTAL open fleet PRs
-  if (ctx.cfg.maxOpenTotal && ctx.cfg.maxOpenTotal > 0) {
-    try {
-      const fleet = listOpenFleetPrs(ctx);
-      if (ceilingHeld(fleet.length, ctx.cfg.maxOpenTotal)) {
-        if (!ctx.claimsHeld || ctx.claimsHeld.open !== fleet.length) {
-          ctx.claimsHeld = { open: fleet.length, max: ctx.cfg.maxOpenTotal };
-          say(ctx, `loop: claims held — ceiling ${fleet.length}/${ctx.cfg.maxOpenTotal}`);
-        }
-        return false;
-      } else if (ctx.claimsHeld) {
-        ctx.claimsHeld = undefined;
-      }
-    } catch (err) {
-      // if can't list, hold (fail closed)
-      if (!ctx.claimsHeld) {
-        ctx.claimsHeld = { open: -1, max: ctx.cfg.maxOpenTotal };
-        say(
-          ctx,
-          `loop: claims held — ceiling ${ctx.cfg.maxOpenTotal}/${ctx.cfg.maxOpenTotal} (listing unavailable)`
-        );
-      }
-      return false;
-    }
   }
   // the disk floor — admission, not eviction. A breached floor holds
   // pushes exactly like a full fleet does: nothing claimed, nothing
