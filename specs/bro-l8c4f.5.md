@@ -55,7 +55,7 @@ Attempt artifacts are run-scoped:
   `<agentId>.exit`; an old attempt's late write lands in its own file,
   never the live run's)
 - `<agentId>.<runId>.handle` — native only, the worker's self-published
-  pid
+  pid and its /proc starttime
 - `<agentId>.<runId>.go` — native only, the launcher's admission stamp
 
 `agentExitFileName(agentId, runId)` in core resolves the scoped name;
@@ -66,9 +66,13 @@ entries without `runId` (pre-change) keep the legacy path. The
 
 Worker half, first statements of the wrapper `sh -c`:
 
-1. `printf %s "$$" > $handle.tmp && mv $handle.tmp $handle` — publish
-   the group-leader pid (`$$` == `child.pid`) before anything else. A
-   failed publish exits 74 — an unregisterable worker must not run.
+1. `printf "%s%s" "$$" "${s:+ $s}" > $handle.tmp && mv $handle.tmp
+   $handle` — publish the group-leader pid (`$$` == `child.pid`) and
+   the wrapper's `/proc/$$/stat` starttime (`$s`, empty where /proc is
+   absent) before anything else. The starttime is the identity readers
+   verify against pid reuse: a handle whose pid now carries another
+   starttime is a recycled pid and never adopts. A failed publish
+   exits 74 — an unregisterable worker must not run.
 2. Poll `$go` every 50 ms up to the spawn-handoff window
    (`SESSION_SLOT_TTL_MS`, the existing 2 min convention). Absent past
    the window = the launcher died mid-publish → write `.exit` 75 and
@@ -84,8 +88,10 @@ after the execution handle is durable.
 adoption** → grace → `lost`.
 
 - `adoptNativeHandle` — entry carries no pid but a live-pid handle
-  file for its runId: stamp `pid`/`pidStart` into the entry under the
-  same generation check the exit harvest uses, report `running`.
+  file for its runId whose published starttime still matches the pid:
+  stamp `pid`/`pidStart` into the entry under the same generation
+  check the exit harvest uses, report `running`. A recycled pid (or a
+  starttime the worker never published) never adopts.
   `status`/`down`/`fleetOccupancy`/`bro agents` all reach the survivor;
   dedup keeps refusing a second spawn beside it.
 - A pid-less, handle-less, death-less entry inside the handoff window

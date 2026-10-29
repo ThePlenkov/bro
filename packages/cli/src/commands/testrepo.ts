@@ -5,7 +5,7 @@
  *  duplication on new code. */
 import assert from 'node:assert/strict';
 import { execFileSync, spawnSync } from 'node:child_process';
-import { bdTry } from '@broject/core';
+import { bdTry, handleOwner, pidAlive } from '@broject/core';
 import {
   chmodSync,
   existsSync,
@@ -630,12 +630,62 @@ function pidRunsToken(pid: number, token: string): boolean {
   }
 }
 
+/** The run's process tree — pid, group and starttime off one /proc
+ *  scan, taken BEFORE the first signal: a setsid'd descendant leads its
+ *  own session and group, so kill(-wrapperPgid) never reaches it, and
+ *  the moment the wrapper dies it reparents to init — the parentage is
+ *  the only way left to find it (spec bro-ybo8z; the same pre-signal
+ *  snapshot the production `down` takes). pid+starttime keeps a
+ *  recycled pid out of the kill list. Empty where /proc is absent
+ *  (non-Linux). */
+function descendantTree(root: number): Array<{ pid: number; pgrp: number; start: string }> {
+  let names: string[];
+  try {
+    names = readdirSync('/proc');
+  } catch {
+    return [];
+  }
+  const children = new Map<number, Array<{ pid: number; pgrp: number; start: string }>>();
+  for (const name of names) {
+    const pid = Number(name);
+    if (!Number.isInteger(pid) || pid <= 0) {
+      continue;
+    }
+    try {
+      const stat = readFileSync(`/proc/${pid}/stat`, 'utf8');
+      const rest = stat.slice(stat.lastIndexOf(')') + 2).split(' ');
+      const row = { pid, pgrp: Number(rest[2]), start: rest[19] ?? '' };
+      children.set(Number(rest[1]), [...(children.get(Number(rest[1])) ?? []), row]);
+    } catch {
+      // a process vanishing mid-scan belongs to no tree
+    }
+  }
+  const tree: Array<{ pid: number; pgrp: number; start: string }> = [];
+  const seen = new Set<number>([root]);
+  const queue = [root];
+  for (let cur = queue.shift(); cur !== undefined; cur = queue.shift()) {
+    for (const row of children.get(cur) ?? []) {
+      if (seen.has(row.pid)) {
+        continue;
+      }
+      seen.add(row.pid);
+      queue.push(row.pid);
+      tree.push(row);
+    }
+  }
+  return tree;
+}
+
 /** SIGKILL a run pid's whole group — detached workers lead their own
  *  group. Self/parent pids are never signaled: tests pin their own
  *  pid into registries to fake 'running'. A needle-verified pid is
  *  provably ours; without a needle the caller's own registry pid
  *  keeps the old trust — a FILE-derived pid never gets here without
- *  one. */
+ *  one. The tree snapshot rides BEFORE the signal: a setsid-escaped
+ *  descendant (the `setsid sleep` fixture shape) leaves the wrapper's
+ *  group, and after the wrapper dies it is unreachable — each snapshotted
+ *  member still alive with its recorded starttime then gets its OWN
+ *  group signaled, so an early assertion failure can never leak it. */
 function killVerifiedGroup(pid: number, needle: string | undefined): void {
   if (
     pid === process.pid ||
@@ -644,10 +694,23 @@ function killVerifiedGroup(pid: number, needle: string | undefined): void {
   ) {
     return;
   }
+  const tree = descendantTree(pid);
   try {
     process.kill(-pid, 'SIGKILL');
   } catch {
     // already gone
+  }
+  for (const m of tree) {
+    // starttime-verified liveness: a recycled member pid (or the group
+    // it would name) is a stranger's — never signal it
+    if (m.pid === pid || m.start === '' || !pidAlive(m.pid, m.start)) {
+      continue;
+    }
+    try {
+      process.kill(-m.pgrp, 'SIGKILL');
+    } catch {
+      // already gone, or its group emptied with it
+    }
   }
 }
 
@@ -662,10 +725,10 @@ function handlePid(main: string, token: string | undefined): number | undefined 
     return undefined;
   }
   try {
-    const h = Number(
-      readFileSync(join(main, '.git', 'bro', 'agents', `${token}.handle`), 'utf8').trim()
+    const owner = handleOwner(
+      readFileSync(join(main, '.git', 'bro', 'agents', `${token}.handle`), 'utf8')
     );
-    return Number.isInteger(h) && h > 0 ? h : undefined;
+    return owner?.pid;
   } catch {
     return undefined; // no handle — plain-shape run or pre-handshake
   }
@@ -717,9 +780,9 @@ export function killRunHandles(main: string): void {
       continue;
     }
     try {
-      const p = Number(readFileSync(join(main, '.git', 'bro', 'agents', n), 'utf8').trim());
-      if (Number.isInteger(p) && p > 0) {
-        killVerifiedGroup(p, n);
+      const owner = handleOwner(readFileSync(join(main, '.git', 'bro', 'agents', n), 'utf8'));
+      if (owner !== null) {
+        killVerifiedGroup(owner.pid, n);
       }
     } catch {
       // unreadable handle — not a kill target

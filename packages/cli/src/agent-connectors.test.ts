@@ -20,6 +20,7 @@ import {
   bdActor,
   countSessionReservations,
   DEFAULT_CONFIG,
+  handleOwner,
   patchAgentRegistry,
   procStat,
   readAgentRegistry,
@@ -1281,11 +1282,20 @@ describe('native spawn handshake (bro-l8c4f.5)', () => {
       assert.equal(entry.runId, info.runId);
       // the handle the worker published IS the launcher-patched pid —
       // scoped or not: systemd-run --scope execs the payload in place,
-      // so the recorded pid keeps naming the worker (bro-ybo8z)
-      const handlePid = Number(
-        readFileSync(runFile(f, info.id, info.runId!, 'handle'), 'utf8').trim()
+      // so the recorded pid keeps naming the worker (bro-ybo8z). The
+      // worker's /proc starttime rides beside it — the identity every
+      // reader verifies against pid reuse
+      const published = handleOwner(
+        readFileSync(runFile(f, info.id, info.runId!, 'handle'), 'utf8')
       );
+      assert.ok(published !== null, 'the handle parses');
+      const handlePid = published.pid;
       assert.equal(handlePid, info.pid);
+      assert.equal(
+        published.start,
+        procStat(handlePid)?.start,
+        'the published starttime is this pid’s /proc starttime'
+      );
       assert.ok(pidAlive(handlePid));
       assert.ok(
         existsSync(runFile(f, info.id, info.runId!, 'go')),
@@ -1358,10 +1368,12 @@ describe('native spawn handshake (bro-l8c4f.5)', () => {
       assert.equal(entry.pid, undefined, 'the pid patch never landed');
       // the worker published its own handle before holding on admission
       await until(() => existsSync(runFile(f, entry.agentId, entry.runId!, 'handle')));
-      const handlePid = Number(
-        readFileSync(runFile(f, entry.agentId, entry.runId!, 'handle'), 'utf8').trim()
+      const published = handleOwner(
+        readFileSync(runFile(f, entry.agentId, entry.runId!, 'handle'), 'utf8')
       );
-      assert.ok(pidAlive(handlePid), 'the survivor is live');
+      assert.ok(published !== null, 'the handle parses');
+      const handlePid = published.pid;
+      assert.ok(pidAlive(handlePid, published.start), 'the survivor is live');
       // status finds the survivor and adopts its handle into the registry
       const st = await c.status(entry.agentId);
       assert.equal(st.state, 'running');
@@ -1380,6 +1392,64 @@ describe('native spawn handshake (bro-l8c4f.5)', () => {
       assert.equal((await c.status(entry.agentId)).state, 'stopped');
     } finally {
       armNativeSpawnTestSeam({});
+      cleanup(f);
+    }
+  });
+
+  test('a recycled pid in the handle never adopts — the published starttime must match', async () => {
+    // adoption used to take the handle pid's CURRENT starttime as its
+    // own identity, so a recycled pid passed its own check and `down`
+    // then signaled a stranger's tree — the starttime is the worker's
+    // to publish, and adoption verifies it before trusting the pid
+    armNativeSpawnTestSeam({ abandonAt: 'os-spawn', goWaitTicks: 600 });
+    const f = fx([{ id: 'fx-1', status: 'open' }]);
+    let survivor: number | undefined;
+    let stranger: number | undefined;
+    try {
+      const c = conn(f);
+      await assert.rejects(
+        c.spawn(SPEC(f.main, f.beadsDir, 'fx-1', 'setTimeout(() => {}, 30000)')),
+        e => e instanceof SpawnAbandoned && e.at === 'os-spawn'
+      );
+      const entry = entryOf(f);
+      const handleFile = runFile(f, entry.agentId, entry.runId!, 'handle');
+      await until(() => existsSync(handleFile));
+      const published = handleOwner(readFileSync(handleFile, 'utf8'));
+      assert.ok(published !== null && published.start !== undefined, 'pid + starttime published');
+      survivor = published.pid;
+      // the recycle: the handle's pid now runs a process that never
+      // published it — planted, because a kernel cannot be asked to
+      // hand a pid back on demand
+      const s = spawn('sleep', ['60'], { stdio: 'ignore', detached: true });
+      s.unref();
+      stranger = s.pid;
+      assert.ok(stranger !== undefined, 'the stranger spawned');
+      await until(() => pidAlive(stranger!));
+      assert.notEqual(
+        procStat(stranger)?.start,
+        published.start,
+        'the stranger carries another identity'
+      );
+      writeFileSync(handleFile, `${stranger} ${published.start}`);
+      // status must not adopt the stranger, and must not stamp it in
+      const st = await c.status(entry.agentId);
+      assert.notEqual(st.state, 'running', 'a recycled pid never adopts');
+      assert.equal(st.pid, undefined);
+      assert.equal(entryOf(f).pid, undefined, 'the registry must not stamp the stranger');
+      // down must not signal the stranger's tree either
+      await c.stop(entry.agentId);
+      assert.ok(pidAlive(stranger), 'the stop never touched the recycled pid');
+    } finally {
+      armNativeSpawnTestSeam({});
+      for (const p of [stranger, survivor]) {
+        if (p !== undefined) {
+          try {
+            process.kill(-p, 'SIGKILL');
+          } catch {
+            // already gone
+          }
+        }
+      }
       cleanup(f);
     }
   });
@@ -1478,8 +1548,13 @@ describe('native systemd scope (bro-ybo8z)', () => {
   const entryOf = (f: Fixture, step = 'fx-1') => readAgentRegistry(f.main)[step]!;
   const runFile = (f: Fixture, id: string, runId: string, suffix: string) =>
     join(agentsDir(f), `${id}.${runId}.${suffix}`);
-  const handlePid = (f: Fixture, entry: AgentRegistryEntry) =>
-    Number(readFileSync(runFile(f, entry.agentId, entry.runId!, 'handle'), 'utf8').trim());
+  const handlePid = (f: Fixture, entry: AgentRegistryEntry): number => {
+    const owner = handleOwner(
+      readFileSync(runFile(f, entry.agentId, entry.runId!, 'handle'), 'utf8')
+    );
+    assert.ok(owner !== null, 'the handle file carries a pid');
+    return owner.pid;
+  };
   const cgroupOf = (pid: number) => readFileSync(`/proc/${pid}/cgroup`, 'utf8').trim();
 
   test(

@@ -53,6 +53,7 @@ import {
   entryRunId,
   ghHost,
   gitTry,
+  handleOwner,
   isAgentCause,
   JudgeUnavailable,
   loadConfig,
@@ -2416,8 +2417,11 @@ function workerRunLine(
  *  answers with an admission stamp:
  *
  *  - `<agentId>.<runId>.handle` — the wrapper's first act: `$$` (the
- *    detached group-leader pid — the same value `child.pid` reports). A
- *    parent that dies post-spawn leaves a findable survivor.
+ *    detached group-leader pid — the same value `child.pid` reports)
+ *    and the wrapper's /proc starttime. A parent that dies post-spawn
+ *    leaves a findable survivor, and the starttime is the identity
+ *    adoption pins before trusting that pid — a recycled one can never
+ *    pass as this worker.
  *  - `<agentId>.<runId>.go` — the launcher's stamp, written only after
  *    pid+marker are durable. The worker polls for it through the
  *    spawn-handoff window; absent past the window means the launcher
@@ -2427,10 +2431,17 @@ const GO_WAIT_TICKS = SESSION_SLOT_TTL_MS / GO_WAIT_TICK_MS;
 
 /** The wrapper's half of the handshake — positional args
  *  `$1` exit · `$2` handle · `$3` go · `$4` go-wait tick budget. Handle
- *  publish is tmp+rename so a reader never sees a half-written pid. */
+ *  publish is tmp+rename so a reader never sees a half-written pid, and
+ *  the pid rides with the wrapper's /proc starttime — the identity the
+ *  readers verify against pid reuse (spec bro-l8c4f.5). */
 const HANDSHAKE_SCRIPT =
   'out=$1; h=$2; g=$3; t=$4; ' +
-  '( umask 077; printf %s "$$" > "$h.tmp" ) && mv "$h.tmp" "$h" ' +
+  // field 22 off the last-')' slice — the same parse procStat takes;
+  // empty where /proc is absent, so the publish degrades to the
+  // bare-pid handle readers fail open on (POSIX sh: the subshell keeps
+  // $$ = this wrapper and $1..$4 for the payload's `shift 4`)
+  's=$(set -f; st=$(cat /proc/$$/stat 2>/dev/null); set -- ${st##*)}; printf %s "${20}"); ' +
+  '( umask 077; printf "%s%s" "$$" "${s:+ $s}" > "$h.tmp" ) && mv "$h.tmp" "$h" ' +
   '|| { ( umask 077; printf %s 74 > "$out" ); exit 74; }; ' +
   'i=0; until [ -f "$g" ]; do ' +
   'i=$((i+1)); [ "$i" -gt "$t" ] && { ( umask 077; printf %s 75 > "$out" ); exit 75; }; ' +
@@ -2587,12 +2598,33 @@ function attemptHandles(
   };
 }
 
+/** The handle's published identity against the pid's current one — a
+ *  mismatch is a recycled pid: refuse it (adopting would stamp a
+ *  stranger into the entry and `down` would signal its tree), and say
+ *  so on stderr, since a live handle is otherwise trusted outright.
+ *  Unpublished identity (a pre-identity handle, or a platform with no
+ *  /proc for the worker to read) or an unreadable current stat stays
+ *  unverifiable and fails open the way pidAlive documents — never a
+ *  false "this worker is dead". */
+function handleIdentity(pid: number, published: string | undefined, agentId: string): boolean {
+  const current = procStat(pid)?.start ?? null;
+  if (published !== undefined && current !== null && current !== '' && current !== published) {
+    console.error(
+      `bro: refusing handle for ${agentId} — pid ${pid} now starts at ${current}, ` +
+        `not the published ${published} (recycled pid)`
+    );
+    return false;
+  }
+  return true;
+}
+
 /** Adopt a survivor: the entry's pid patch never landed, but the
  *  worker published its own handle before the launcher died. A live
- *  handle stamps pid+pidStart into the entry — under the same
- *  generation guard the exit harvest uses, so a respawned entry is
- *  never adopted into — and returns the pid so status/down reach the
- *  worker and dedup keeps refusing beside it. */
+ *  handle whose pid still carries the published starttime stamps
+ *  pid+pidStart into the entry — under the same generation guard the
+ *  exit harvest uses, so a respawned entry is never adopted into — and
+ *  returns the pid so status/down reach the worker and dedup keeps
+ *  refusing beside it. A recycled pid never adopts (handleIdentity). */
 function adoptNativeHandle(
   dir: string,
   home: string | null,
@@ -2608,24 +2640,28 @@ function adoptNativeHandle(
   ) {
     return undefined;
   }
-  let pid: number;
+  let owner: { pid: number; start?: string } | null;
   try {
-    pid = Number(
-      readFileSync(attemptHandles(home, entry.agentId, runId).handleFile, 'utf8').trim()
+    owner = handleOwner(
+      readFileSync(attemptHandles(home, entry.agentId, runId).handleFile, 'utf8')
     );
   } catch {
     return undefined;
   }
-  if (!Number.isInteger(pid) || pid <= 0) {
+  if (owner === null) {
     return undefined;
   }
-  const start = procStat(pid)?.start ?? null;
-  if (!pidAlive(pid, start ?? undefined)) {
+  const { pid, start: published } = owner;
+  // identity before liveness: the handle's pid may have been recycled
+  // since the worker published it, and adopting the stranger would
+  // stamp it into the entry and hand `down` its process tree
+  if (!handleIdentity(pid, published, entry.agentId) || !pidAlive(pid, published)) {
     return undefined;
   }
-  // the handle file is runId-scoped — its pid IS this attempt's, so the
-  // in-memory row adopts it unconditionally (the AgentInfo built from
-  // it carries the pid to status/down)
+  const start = published ?? procStat(pid)?.start ?? null;
+  // the handle file is runId-scoped and identity-checked above — its pid
+  // IS this attempt's, so the in-memory row adopts it unconditionally
+  // (the AgentInfo built from it carries the pid to status/down)
   entry.pid = pid;
   entry.pidStart = start;
   try {

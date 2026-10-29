@@ -18,6 +18,7 @@ import {
   agentExitFileName,
   entryRunId,
   gitTry,
+  handleOwner,
   markerLive,
   pidAlive,
   procStat,
@@ -405,8 +406,10 @@ function exitFileProves(home: string | null, e: AgentRegistryEntry): boolean {
 /** The attempt handle is the worker's own liveness proof — a runId'd
  *  native worker publishes `<agentId>.<runId>.handle` before its payload
  *  runs, so a live pid in it means a running worker even when the
- *  launcher's pid patch never landed (spec bro-l8c4f.5). Same
- *  basename-only guard as the exit file. */
+ *  launcher's pid patch never landed (spec bro-l8c4f.5). The handle's
+ *  published starttime decides identity, so a recycled pid never proves
+ *  the worker; a bare legacy pid stays unverifiable and fail-opens.
+ *  Same basename-only guard as the exit file. */
 function handleFileProves(home: string | null, e: AgentRegistryEntry): boolean {
   const runId = entryRunId(e);
   if (
@@ -418,8 +421,8 @@ function handleFileProves(home: string | null, e: AgentRegistryEntry): boolean {
     return false;
   }
   try {
-    const pid = Number(readFileSync(join(home, `${e.agentId}.${runId}.handle`), 'utf8').trim());
-    return pidAlive(pid, procStat(pid)?.start);
+    const owner = handleOwner(readFileSync(join(home, `${e.agentId}.${runId}.handle`), 'utf8'));
+    return owner !== null && pidAlive(owner.pid, owner.start);
   } catch {
     // no usable handle — not proof
     return false;

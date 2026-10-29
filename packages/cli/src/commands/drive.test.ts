@@ -911,6 +911,10 @@ describe('registryEntryState', () => {
       // the way adoptNativeHandle reads it
       const e = entry({ agentId: 'a1', runId: 'r1', spawnedAt: '2000-01-01T00:00:00Z' });
       assert.equal(registryEntryState(home, e), 'running');
+      // a published identity that no longer matches the pid is a
+      // recycled pid — the handle must stop proving the worker
+      writeFileSync(join(home, 'a1.r1.handle'), `${process.pid} 1`);
+      assert.equal(registryEntryState(home, e), 'lost');
     } finally {
       rmSync(home, { recursive: true, force: true });
     }
