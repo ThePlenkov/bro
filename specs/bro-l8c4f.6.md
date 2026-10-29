@@ -41,6 +41,8 @@ Schema additions:
 
 - **Opt-in strict mode**: when `strictEnv` is true (or credential scope configured strictly), only explicitly allowed env vars pass through. Unrelated credentials (sentinels) are dropped.
 - **Trusted-host mode (default)**: existing behavior preserved for compatibility. Must be surfaced in doctor/config docs with explicit trust boundary.
+- **An allowlist alone is inert**: `envAllowlist` without `strictEnv: true` (or `credentialScope`) does not enable filtering — the backend stays trusted-host, and doctor reports it as an explicit warn (inert), never as an enabled scope.
+- **The batch marker rides `spec.env` only**: an ambient `BRO_BATCH` is stripped from every worker env (native/tmux/docker env-file) — a marker reaching a worker's own spawns would class them batch and charge the fleet budget (bro-9h86l). Docker `runArgs` env-passing flags (`--env`, `--env-file`, `-e`) are rejected under strict scope the same way.
 - **Identity pins must never be overridden**: `agentEnvPins` (BEADS_DIR, BRO_BEAD_ID, BRO_AGENT_ID, BRO_PROMPT_FILE, BRO_SESSION_ID, BRO_AGENT, BRO_MOL_ID, BRO_AGENT_PROVIDER, BRO_AGENT_MODEL, BRO_AGENT_CLASS, BRO_DELEGATED_BY) are always set last and cannot be overridden by `spec.env` or ambient env. This is already enforced; must remain so.
 - **Native and Docker identical policy**: both backends enforce the same allowlist/credential scope rules.
 - **Diagnostics/telemetry never print secret values**: only log key names, not values.

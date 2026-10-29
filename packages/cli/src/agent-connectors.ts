@@ -800,12 +800,18 @@ function isAllowedByEnvPolicy(
   backend: string,
   spec: SpawnSpec,
   env: AgentConnectorEnv,
-  policy: { strictEnv: boolean; envAllowlist?: string[] }
+  policy: { strictEnv: boolean; envAllowlist?: string[] },
+  fromSpec = false
 ): boolean {
   if (value === undefined) return false;
   if (AGENT_PIN_KEYS.has(key)) return true; // pins handled separately
   if (GIT_REPOSITORY_ENV_KEYS.has(key)) return false;
-  if (key === BATCH_MARKER_ENV) return true; // only from caller per existing rules
+  // the fleet batch marker rides ONLY the caller's spec.env — an ambient
+  // BRO_BATCH inherited by a worker's own spawns would class those
+  // children as batch lane and charge them to the fleet budget
+  // (spec bro-9h86l), so fromSpec decides it, before trusted-host's
+  // blanket pass-through
+  if (key === BATCH_MARKER_ENV) return fromSpec;
   if (!policy.strictEnv) return true; // trusted-host mode (default) for compatibility
   // strict mode: only allowlisted
   if (policy.envAllowlist && policy.envAllowlist.includes(key)) return true;
@@ -2644,7 +2650,8 @@ export function makeNativeConnector(ctx: ConnectorCtx, env: AgentConnectorEnv): 
                     (e): e is [string, string] => {
                       if (e[1] === undefined) return false;
                       if (AGENT_PIN_KEYS.has(e[0]) || GIT_REPOSITORY_ENV_KEYS.has(e[0])) return false;
-                      if (e[0] === BATCH_MARKER_ENV) return true; // fleet marker only from caller context? keep as before
+                      // ambient BRO_BATCH is stripped, not passed — the
+                      // marker reaches the worker only via spec.env below
                       return isAllowedByEnvPolicy(e[0], e[1], 'native', spec, env, policy);
                     }
                   )
@@ -2654,7 +2661,7 @@ export function makeNativeConnector(ctx: ConnectorCtx, env: AgentConnectorEnv): 
                     (e): e is [string, string] => {
                       if (e[1] === undefined) return false;
                       if (AGENT_PIN_KEYS.has(e[0]) || GIT_REPOSITORY_ENV_KEYS.has(e[0])) return false;
-                      return isAllowedByEnvPolicy(e[0], e[1], 'native', spec, env, policy);
+                      return isAllowedByEnvPolicy(e[0], e[1], 'native', spec, env, policy, true);
                     }
                   )
                 );
@@ -3076,13 +3083,27 @@ export function makeTmuxConnector(ctx: ConnectorCtx, env: AgentConnectorEnv): Ag
         // -e; they're also filtered OUT of the file so sourcing can
         // never redirect the claim store or re-badge the worker
         const envFile = join(home, `${agentId}.env`);
+        // the same credential-scope policy native/docker enforce (spec
+        // bro-l8c4f.6) — a strict backend's tmux worker must not inherit
+        // ambient env the allowlist excludes, and the ambient BRO_BATCH
+        // marker is stripped the same way (only spec.env supplies it)
+        const policy = getCredentialScope(env, 'tmux');
         const ambient = Object.entries({ ...process.env, ...spec.env })
           .filter(
             (e): e is [string, string] =>
               e[1] !== undefined &&
               /^[A-Za-z_][A-Za-z0-9_]*$/.test(e[0]) &&
               !AGENT_PIN_KEYS.has(e[0]) &&
-              !GIT_REPOSITORY_ENV_KEYS.has(e[0])
+              !GIT_REPOSITORY_ENV_KEYS.has(e[0]) &&
+              isAllowedByEnvPolicy(
+                e[0],
+                e[1],
+                'tmux',
+                spec,
+                env,
+                policy,
+                Object.prototype.hasOwnProperty.call(spec.env ?? {}, e[0])
+              )
           )
           .map(([k, v]) => `export ${k}=${shQuote(v)}`)
           .join('\n');
@@ -4395,6 +4416,38 @@ const DOCKER_HOST_ENV = new Set([
   '_',
 ]);
 
+/** Env-passing docker run flags bro does not own — under a strict
+ *  credential scope the container's env is the allowlist-filtered
+ *  env-file plus the identity pins, so an operator `--env KEY[=value]`
+ *  or `--env-file` in runArgs would inject variables the allowlist
+ *  excluded (spec bro-l8c4f.6). Dropped with a warning naming only the
+ *  flag kinds — a value could be a secret and never reaches the log. */
+const DOCKER_ENV_FLAGS = new Set(['-e', '--env', '--env-file']);
+
+function filterStrictRunArgs(runArgs: string[], strictEnv: boolean): string[] {
+  if (!strictEnv) return runArgs;
+  const kept: string[] = [];
+  const dropped = new Set<string>();
+  for (let i = 0; i < runArgs.length; i++) {
+    const a = runArgs[i]!;
+    const bare = a.includes('=') ? a.slice(0, a.indexOf('=')) : a;
+    if (DOCKER_ENV_FLAGS.has(bare)) {
+      dropped.add(bare);
+      // the separate-value form's operand is dropped with the flag —
+      // a leaked `KEY=secret` positional would fail docker run anyway
+      if (bare === a && i + 1 < runArgs.length) i++;
+      continue;
+    }
+    kept.push(a);
+  }
+  if (dropped.size > 0) {
+    console.error(
+      `warning: strict credential scope drops env-passing docker runArgs: ${[...dropped].join(', ')} — route secrets through agents.docker.envAllowlist or spec.env`
+    );
+  }
+  return kept;
+}
+
 /** The ambient env file — a 0600 file like tmux's, deleted by the
  *  caller after `docker run` (and on any failure). argv is visible to
  *  every local user (`ps`, `docker inspect`), so the ambient bag
@@ -4421,7 +4474,20 @@ function writeDockerEnvFile(envFile: string, spec: SpawnSpec, env?: AgentConnect
         dropped.push(e[0]);
         return false;
       }
-      if (!isAllowedByEnvPolicy(e[0], e[1], 'docker', spec, env ?? { agents: {}, connectors: {} }, policy)) {
+      // spec.env spread over ambient — a key the caller supplied decides
+      // its own row (the ambient BRO_BATCH marker is stripped; the
+      // caller's own travels, spec bro-l8c4f.6)
+      if (
+        !isAllowedByEnvPolicy(
+          e[0],
+          e[1],
+          'docker',
+          spec,
+          env ?? { agents: {}, connectors: {} },
+          policy,
+          Object.prototype.hasOwnProperty.call(spec.env ?? {}, e[0])
+        )
+      ) {
         return false;
       }
       return true;
@@ -4454,7 +4520,8 @@ function dockerRunArgv(
   mol: string | undefined,
   runArgs: string[],
   image: string,
-  wrapper: string
+  wrapper: string,
+  strictEnv: boolean
 ): string[] {
   const userArgs =
     typeof process.getuid === 'function' &&
@@ -4467,7 +4534,7 @@ function dockerRunArgv(
     '--init',
     '--rm',
     ...userArgs,
-    ...runArgs,
+    ...filterStrictRunArgs(runArgs, strictEnv),
     '--name',
     name,
     '--workdir',
@@ -4585,7 +4652,8 @@ export function makeDockerConnector(ctx: ConnectorCtx, env: AgentConnectorEnv): 
               mol,
               runArgs,
               image,
-              wrapper
+              wrapper,
+              getCredentialScope(env, 'docker').strictEnv
             )
           );
           rmSync(envFile, { force: true }); // the env is baked into container config — the file has done its job

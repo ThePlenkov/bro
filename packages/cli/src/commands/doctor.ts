@@ -1921,32 +1921,53 @@ function meshChecks(
 function credentialScopeChecks(dir: string, cfg: any): DoctorCheck[] {
   try {
     const agents = cfg.agents ?? {};
+    // strict scope is OPT-IN (spec bro-l8c4f.6): getCredentialScope only
+    // enforces the allowlist when strictEnv/credentialScope says so —
+    // an envAllowlist alone stays trusted-host (inert), and reporting it
+    // as enabled would show an ok trust boundary that isn't enforced
     const strictBackends: string[] = [];
+    const inertBackends: string[] = [];
     for (const [backend, b] of Object.entries(agents)) {
       const bb = b as any;
       if (bb && typeof bb === 'object') {
-        if (bb.strictEnv === true || bb.credentialScope != null || Array.isArray(bb.envAllowlist)) {
+        if (bb.strictEnv === true || bb.credentialScope != null) {
           strictBackends.push(backend);
+        } else if (Array.isArray(bb.envAllowlist)) {
+          inertBackends.push(backend);
         }
       }
     }
-    if (strictBackends.length === 0) {
-      return [
+    const out: DoctorCheck[] = [];
+    if (strictBackends.length > 0) {
+      out.push(
+        check(
+          'env-scope',
+          'ok',
+          `strict credential scope enabled for: ${strictBackends.join(', ')} (trust boundary explicit)`
+        )
+      );
+    }
+    if (inertBackends.length > 0) {
+      out.push(
+        check(
+          'env-scope-inert',
+          'warn',
+          `envAllowlist without strictEnv stays trusted-host (inert) on: ${inertBackends.join(', ')} — workers inherit ambient env`,
+          'set agents.<backend>.strictEnv: true to enforce the allowlist (bro-l8c4f.6)'
+        )
+      );
+    }
+    if (out.length === 0) {
+      out.push(
         check(
           'env-scope',
           'warn',
           'trusted-host mode (default) — workers inherit ambient env',
           'set agents.<backend>.strictEnv: true and agents.<backend>.envAllowlist for explicit credential scope (bro-l8c4f.6)'
-        ),
-      ];
+        )
+      );
     }
-    return [
-      check(
-        'env-scope',
-        'ok',
-        `strict credential scope enabled for: ${strictBackends.join(', ')} (trust boundary explicit)`
-      ),
-    ];
+    return out;
   } catch {
     return [];
   }
