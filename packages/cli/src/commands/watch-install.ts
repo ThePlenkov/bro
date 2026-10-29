@@ -265,6 +265,9 @@ export function uninstallWatch(dir: string, deps: WatchSchedDeps = {}): WatchIns
     return { state: 'error', detail: r.error }
   }
   const marker = disarmPulse(dir)
+  if (marker === 'unknown') {
+    return { state: 'error', detail: 'could not determine pulse marker state (lookup timed out or failed) — uninstall not confirmed' }
+  }
   const strip = stripLegacy(r)
   if ('failed' in strip) {
     return {

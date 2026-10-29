@@ -591,6 +591,10 @@ function cmdInstall(
 function cmdUninstall(resolved: RigRepo | { error: string }): never {
   const { repo } = needRepo(resolved)
   const marker = disarmRigPulse(repo)
+  if (marker === 'unknown') {
+    console.error('bro rig: could not determine rig pulse state (lookup timed out or failed) — uninstall not confirmed')
+    process.exit(1)
+  }
   // a running `bro rig watch` keeps its lock until it exits —
   // disarm drops the rearm intent, not the live process
   const live = rigPulseLive(repo)

@@ -20,7 +20,7 @@
  */
 import { appendFileSync, mkdirSync, readFileSync, renameSync, statSync, writeFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
-import { gitCommonDir } from './git.ts'
+import { GIT_SYNC_PROBE_TIMEOUT_MS, gitCommonDir } from './git.ts'
 import { withFileLock } from './filelock.ts'
 import { bdActor } from './tasks.ts'
 
@@ -89,7 +89,7 @@ const LIFECYCLE_KEEP_BYTES = 2 * 1024 * 1024
 /** `<git-common>/bro/events.jsonl` — null outside a repo; shared
  *  across linked worktrees the same way the sibling journals are. */
 export function lifecyclePath(dir: string): string | null {
-  const common = gitCommonDir(dir)
+  const common = gitCommonDir(dir, GIT_SYNC_PROBE_TIMEOUT_MS)
   return common === null ? null : join(common, 'bro', 'events.jsonl')
 }
 

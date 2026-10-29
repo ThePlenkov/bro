@@ -42,7 +42,7 @@ import {
   type EventFilter,
   type EventInput,
 } from './events.ts'
-import { gitCommonDir } from './git.ts'
+import { GIT_SYNC_PROBE_TIMEOUT_MS, gitCommonDir } from './git.ts'
 
 /** Hard budget for every client operation. REVIEW.md rates any path
  *  that can hang or exit non-zero on a hook event as critical, so the
@@ -250,7 +250,7 @@ function busSocketBase(): string {
 
 /** The broker socket for a repo, or null outside a repository. */
 export function busSocketPath(dir: string): string | null {
-  const common = gitCommonDir(dir)
+  const common = gitCommonDir(dir, GIT_SYNC_PROBE_TIMEOUT_MS)
   if (common === null) {
     return null
   }
@@ -261,7 +261,7 @@ export function busSocketPath(dir: string): string | null {
 /** Discovery file — same shape as `serve.json`: how a client learns the
  *  socket path and pid without re-deriving the hash. */
 export function busStatePath(dir: string): string | null {
-  const common = gitCommonDir(dir)
+  const common = gitCommonDir(dir, GIT_SYNC_PROBE_TIMEOUT_MS)
   return common === null ? null : join(common, 'bro', 'bus.json')
 }
 
