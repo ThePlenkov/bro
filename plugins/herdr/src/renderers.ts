@@ -33,17 +33,25 @@ function tailCommand(worktreePath: string): string {
   );
 }
 
+/** The (path, ws, state) triple every renderer step needs — one
+ *  argument, never three strings threaded apart. */
+export interface RenderCtx {
+  path: string;
+  ws: string;
+  state: PluginState;
+}
+
 /** Label the pane, run the tail, record it. False when `pane run`
  *  never landed — a later pass retries through the same path. */
-function armRenderer(path: string, ws: string, paneId: string, state: PluginState): boolean {
+function armRenderer(ctx: RenderCtx, paneId: string): boolean {
   herdrTry(['pane', 'rename', paneId, RENDER_LABEL]);
-  if (!herdrOk(['pane', 'run', paneId, tailCommand(path)])) return false;
-  state.renderers[path] = { workspace: ws, worktree: path, pane_id: paneId };
+  if (!herdrOk(['pane', 'run', paneId, tailCommand(ctx.path)])) return false;
+  ctx.state.renderers[ctx.path] = { workspace: ctx.ws, worktree: ctx.path, pane_id: paneId };
   return true;
 }
 
 /** The new pane a `pane split` produced, or undefined on failure. */
-function splitPane(targetId: string, cwd: string): string | undefined {
+function splitPane(targetId: string, ctx: RenderCtx): string | undefined {
   return herdrTry<{ pane?: { pane_id?: string } }>([
     'pane',
     'split',
@@ -51,7 +59,7 @@ function splitPane(targetId: string, cwd: string): string | undefined {
     '--direction',
     'down',
     '--cwd',
-    cwd,
+    ctx.path,
     '--no-focus',
   ])?.pane?.pane_id;
 }
@@ -64,14 +72,6 @@ function wsHasLiveMirror(ws: string, state: PluginState): boolean {
   return Object.values(state.mirrors).some(
     m => m.workspace === ws && m.marked !== true && paneExists(m.pane_id)
   );
-}
-
-/** The (path, ws, state) triple every renderer step needs — one
- *  argument, never three strings threaded apart. */
-interface RenderCtx {
-  path: string;
-  ws: string;
-  state: PluginState;
 }
 
 /** Close the redundant tail under a live mirror — recorded pane or
@@ -91,7 +91,7 @@ function retireTail(rec: RendererRec | undefined, ctx: RenderCtx): void {
 /** Arm `paneId` and report the outcome — '(adopted)' when the pane
  *  already carried our label. */
 function armAndReport(ctx: RenderCtx, paneId: string, adopted: boolean): void {
-  if (!armRenderer(ctx.path, ctx.ws, paneId, ctx.state)) {
+  if (!armRenderer(ctx, paneId)) {
     log(`events pane ${paneId} → ${ctx.ws}: pane run failed`);
     return;
   }
@@ -101,7 +101,7 @@ function armAndReport(ctx: RenderCtx, paneId: string, adopted: boolean): void {
 /** No live pane to take — split below the first pane, then arm. */
 function armViaSplit(ctx: RenderCtx, panes: HerdrPane[]): void {
   const target = panes[0];
-  const newPane = target === undefined ? undefined : splitPane(target.pane_id, ctx.path);
+  const newPane = target === undefined ? undefined : splitPane(target.pane_id, ctx);
   if (newPane === undefined) {
     log(`renderer for ${ctx.ws}: no pane to arm or split`);
     return;
@@ -113,10 +113,9 @@ function armViaSplit(ctx: RenderCtx, panes: HerdrPane[]): void {
  *  renders the workspace; otherwise record/adopt/arm/split so exactly
  *  one `bro: events` pane lives. Managed workspaces only — a user's
  *  own workspace is never given a pane it did not ask for. */
-export function ensureRenderer(path: string, ws: string, state: PluginState): void {
-  const ctx: RenderCtx = { path, ws, state };
-  const rec = state.renderers[path];
-  if (wsHasLiveMirror(ws, state)) {
+export function ensureRenderer(ctx: RenderCtx): void {
+  const rec = ctx.state.renderers[ctx.path];
+  if (wsHasLiveMirror(ctx.ws, ctx.state)) {
     retireTail(rec, ctx);
     return;
   }
@@ -128,7 +127,7 @@ export function ensureRenderer(path: string, ws: string, state: PluginState): vo
     return;
   }
 
-  const panes = paneList(ws);
+  const panes = paneList(ctx.ws);
   const orphan = panes.find(p => p.label === RENDER_LABEL);
   const paneId = orphan?.pane_id ?? panes.find(p => paneIdle(p.pane_id))?.pane_id;
   if (paneId === undefined) {

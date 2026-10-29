@@ -259,7 +259,7 @@ function convergeRenderers(wsForPath: Map<string, string>, ctx: WsCtx): void {
   for (const [path, ws] of wsForPath) {
     const rec = ctx.state.workspaces[path];
     if (rec?.managed === true && rec.ws === ws) {
-      ensureRenderer(path, ws, ctx.state);
+      ensureRenderer({ path, ws, state: ctx.state });
     }
   }
   // wsById predates this pass's opens — a just-created workspace is
