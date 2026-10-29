@@ -175,7 +175,7 @@ const LIVE_CLAIM_MS = 24 * 60 * 60 * 1000;
 function claimMarkerSide(
   file: string,
   stampLine: string,
-  stamp: number,
+  mtime: number,
   safe: string,
   self: { pid: number; start: string } | null | undefined,
   now: number
@@ -187,14 +187,24 @@ function claimMarkerSide(
   ) {
     return 'own';
   }
-  return markerLive(stampLine, stamp, LIVE_CLAIM_MS, now) ? 'foreign' : null;
+  return markerLive(stampLine, mtime, LIVE_CLAIM_MS, now) ? 'foreign' : null;
 }
 
-/** Detail lines of one claim marker (line 0 is the stamp), with the
- *  file's mtime — null when the marker cannot be read. */
-function claimMarker(path: string): { lines: string[]; stamp: number } | null {
+/** Detail lines of one claim marker (line 0 is the stamp), its claim
+ *  stamp, and its liveness mtime — null when the marker cannot be
+ *  read. The claim stamp is the file's BIRTH time when the fs reports
+ *  one (mtime otherwise): armSession rewrites line 0 and mtime on
+ *  every arm, so under mtime-order a session claiming fresh unrelated
+ *  work would silently reorder an older shared claim — birth never
+ *  moves. Filesystems without statx-btime degrade to the old mtime
+ *  order (Node reports ctime/epoch there; a nonzero stamp is still
+ *  usable only when it predates mtime, i.e. real creation). */
+function claimMarker(path: string): { lines: string[]; stamp: number; mtime: number } | null {
   try {
-    return { lines: readFileSync(path, 'utf8').split('\n'), stamp: statSync(path).mtimeMs };
+    const st = statSync(path);
+    const birth = st.birthtimeMs;
+    const stamp = birth > 0 && birth <= st.mtimeMs ? birth : st.mtimeMs;
+    return { lines: readFileSync(path, 'utf8').split('\n'), stamp, mtime: st.mtimeMs };
   } catch {
     return null;
   }
@@ -205,8 +215,10 @@ function claimMarker(path: string): { lines: string[]; stamp: number } | null {
  *  bead and its spec, so the delegator's copy is foreign. The scan is
  *  the session-start 'armed work' nudge's mechanism applied to `.task`
  *  markers. Per-bead claim times are not recorded, so the marker's
- *  stamp is the granularity — newer claim marker wins. Read failures
- *  are empty: a lost marker never masks a nudge. */
+ *  claim stamp is the granularity — newer claim marker wins, and a
+ *  later re-arm (which rewrites a marker's stamp line and mtime)
+ *  cannot reorder it. Read failures are empty: a lost marker never
+ *  masks a nudge. */
 function delegatedTaskClaims(
   hooks: string,
   mine: Set<string>,
@@ -230,7 +242,7 @@ function delegatedTaskClaims(
     if (marker === null) {
       continue;
     }
-    const side = claimMarkerSide(f, marker.lines[0] ?? '', marker.stamp, safe, ctx.owner, now);
+    const side = claimMarkerSide(f, marker.lines[0] ?? '', marker.mtime, safe, ctx.owner, now);
     if (side === null) {
       continue;
     }
@@ -250,6 +262,28 @@ function delegatedTaskClaims(
     }
   }
   return out;
+}
+
+/** A session 'task'-armed marker's freshness window — readArmed's
+ *  MARKER_TTL_MS, duplicated (hooks.ts registers connectors at module
+ *  init, so importing it here would cycle). */
+const ARMED_TASK_MS = 7 * 24 * 60 * 60 * 1000;
+
+/** Whether this session armed 'task' — emitStopGateBody's readArmed
+ *  verdict for the one aspect this connector gates on: a <session>
+ *  .task marker inside the TTL. Claims can arrive without it (env
+ *  pins, a rotated session's marker folding in), and for them the
+ *  host drops a 'gate' contribution entirely. */
+function armedTask(hooks: string | null, ctx: ConnectorCtx): boolean {
+  const safe = (ctx.sessionId ?? '').replace(/[^\w.-]/g, '_');
+  if (hooks === null || safe === '') {
+    return false;
+  }
+  try {
+    return statSync(join(hooks, `${safe}.task`)).mtimeMs >= Date.now() - ARMED_TASK_MS;
+  } catch {
+    return false;
+  }
 }
 
 /** Record the missing set this session was just told; true when it
@@ -362,11 +396,22 @@ export const sddConnector: Connector = {
       if (mode === 'off') {
         return [];
       }
-      const missing = await ownClaimsMissingSpec(ctx);
+      const [missing, hooks] = await Promise.all([
+        ownClaimsMissingSpec(ctx),
+        sddHooksDir(ctx),
+      ]);
       // the gate reports truth every time — a 'gate' block must hold
       // while the violation does — and records what it told so a
-      // later prompt does not re-nag the same set
-      sddSetChanged(await sddHooksDir(ctx), ctx, missing.map(r => r.id));
+      // later prompt does not re-nag the same set. Record only what
+      // can surface: emitStopGateBody DROPS a 'gate' block for a
+      // session that never armed 'task' (claims via pins or a
+      // rotated-session marker, not this session's .task file), so
+      // stamping the set there would eat a nudge nobody saw —
+      // remind's passive lands as context regardless
+      const told = missing.length === 0 || mode === 'remind' || armedTask(hooks, ctx);
+      if (told) {
+        sddSetChanged(hooks, ctx, missing.map(r => r.id));
+      }
       if (missing.length === 0) {
         return [];
       }

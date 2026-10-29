@@ -275,16 +275,23 @@ describe('hooks e2e — sdd nudge scope + dedup (bro-6a3dq)', () => {
     inside(f.main, f.root, () => {
       const { submit } = sddFixture(f);
       arm(f, 's1', 'task', 'fx-9');
-      assert.match(submit().stdout, /fx-9 spec me/);
+      const first = submit();
+      assert.equal(first.code, 0);
+      assert.match(first.stdout, /fx-9 spec me/);
       // the same set on the next prompt is already told — the nudge
       // used to spam every submit for the claim's whole lifetime
-      assert.doesNotMatch(submit().stdout, /fx-9/);
+      const repeat = submit();
+      assert.equal(repeat.code, 0);
+      assert.doesNotMatch(repeat.stdout, /fx-9/);
       // the set changed → report again, once
       arm(f, 's1', 'task', 'fx-9\nfx-8');
       const grown = submit();
+      assert.equal(grown.code, 0);
       assert.match(grown.stdout, /fx-9 spec me/);
       assert.match(grown.stdout, /fx-8 also mine/);
-      assert.doesNotMatch(submit().stdout, /fx-9/);
+      const settled = submit();
+      assert.equal(settled.code, 0);
+      assert.doesNotMatch(settled.stdout, /fx-9/);
     });
   });
 
@@ -300,10 +307,13 @@ describe('hooks e2e — sdd nudge scope + dedup (bro-6a3dq)', () => {
       // the executor session's fresher claim wins — fx-9 is its spec
       // to write, never this session's nudge
       arm(f, 's2', 'task', 'fx-9');
-      assert.doesNotMatch(submit().stdout, /SDD/);
+      const quiet = submit();
+      assert.equal(quiet.code, 0);
+      assert.doesNotMatch(quiet.stdout, /SDD/);
       // the task gate still sees the real claim — only the spec nudge
       // scopes the delegated bead out
       const r = stop();
+      assert.equal(r.code, 0);
       assert.match(r.stdout, /fx-9/);
       assert.doesNotMatch(r.stdout, /SDD/);
     });

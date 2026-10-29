@@ -7,6 +7,7 @@ import {
   mkdtempSync,
   readFileSync,
   rmSync,
+  statSync,
   utimesSync,
   writeFileSync,
 } from 'node:fs'
@@ -149,6 +150,19 @@ function withRepo(
 }
 
 const ctx = (dir: string): ConnectorCtx => ({ dir, sessionId: 's1' })
+
+/** statx-btime probe — claim ordering rides the marker's birth time
+ *  where the fs reports one (mtime otherwise, where a re-arm
+ *  legitimately re-orders: the ordering tests skip on such a fs). */
+const birthStable = (dir: string): boolean => {
+  const p = join(dir, '.btime-probe')
+  writeFileSync(p, 'x')
+  const birth = statSync(p).birthtimeMs
+  writeFileSync(p, 'y')
+  const stable = birth > 0 && statSync(p).birthtimeMs === birth
+  rmSync(p)
+  return stable
+}
 
 /** Write spec files under specs/, creating intermediate dirs. */
 const writeSpecs = (dir: string, files: Record<string, string>): void => {
@@ -431,6 +445,61 @@ describe('sddConnector', () => {
         owner: { pid: process.pid, start: st.start },
       }
       assert.match((await probe(dir).promptSubmit!(me, 'p'))[0] ?? '', /b1 thing/)
+    })
+  })
+
+  test("a sibling's re-arm does not take an older shared claim — birth order survives rewrites", async () => {
+    await withRepo({ claims: ['b1'] }, async (dir) => {
+      const hooks = join(dir, '.git', 'bro', 'hooks')
+      // fs without statx-btime keeps mtime order, where a re-arm
+      // legitimately re-orders — nothing to prove there
+      if (!birthStable(hooks)) return
+      const s2 = join(hooks, 's2.task')
+      writeFileSync(s2, '2026-01-01T00:00:00Z\nb1\n')
+      // s1's is the NEWER claim — recreate its marker so file creation
+      // order reads claim order on the birth stamp
+      const s1 = join(hooks, 's1.task')
+      const body = readFileSync(s1, 'utf8')
+      rmSync(s1)
+      writeFileSync(s1, body)
+      // s2 now arms fresh unrelated work — armSession rewrites the
+      // whole marker, refreshing stamp + mtime for every detail; under
+      // mtime order b1 would flip delegated and eat the nudge
+      writeFileSync(s2, `${Date.now()}\nb1\nb9\n`)
+      const gate = await probe(dir).stopGate!(ctx(dir))
+      assert.equal(gate.length, 1)
+      assert.match(gate[0]!.block ?? '', /b1 thing/)
+    })
+  })
+
+  test('a re-arm of this session does not take back delegated work', async () => {
+    await withRepo({ claims: ['b1'] }, async (dir) => {
+      const hooks = join(dir, '.git', 'bro', 'hooks')
+      if (!birthStable(hooks)) return
+      // the executor claimed after us → b1 is delegated, nothing to nag
+      writeFileSync(join(hooks, 's2.task'), '2026-01-01T00:00:00Z\nb1\n')
+      const h = probe(dir)
+      assert.deepEqual(await h.promptSubmit!(ctx(dir), 'p'), [])
+      // we arm more work — the rewrite refreshes our marker's stamp +
+      // mtime; under mtime order b1 would flip back to ours and re-nag
+      writeFileSync(join(hooks, 's1.task'), `${Date.now()}\nb1\nb9\n`)
+      assert.deepEqual(await h.promptSubmit!(ctx(dir), 'p'), [])
+      assert.deepEqual(await h.stopGate!(ctx(dir)), [])
+    })
+  })
+
+  test('a gate block the session cannot see must not consume the nudge', async () => {
+    await withRepo({}, async (dir) => {
+      // a spawned worker's claim rides the env pin — no s1.task
+      // marker exists, so emitStopGateBody drops the 'gate'
+      // contribution for this session; recording the set there
+      // would eat a nudge nobody was shown
+      process.env.BRO_BEAD_ID = 'b1'
+      const h = probe(dir)
+      const gate = await h.stopGate!(ctx(dir))
+      assert.equal(gate.length, 1)
+      assert.match(gate[0]!.block ?? '', /b1 thing/)
+      assert.match((await h.promptSubmit!(ctx(dir), 'p'))[0] ?? '', /b1 thing/)
     })
   })
 

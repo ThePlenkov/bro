@@ -37,10 +37,16 @@ Scan `<git-common>/bro/hooks/*.task` once per probe:
   falls back to the 24h mtime window (`LIVE_CLAIM_MS`, the
   armed-work nudge's horizon). A dead session's claim is residue and
   must not mask the nudge.
-- For each bead id, track the newest stamp (marker mtime) per side.
-  An id in `mine` that a foreign live marker also claims with a
-  **strictly newer** stamp is delegated work — the executor's fresher
-  claim owns the bead and its spec. Excluded from
+- For each bead id, track the newest **claim stamp** per side — the
+  marker's file *birth* time where the fs reports it (`birthtimeMs`
+  via statx), mtime otherwise. `armSession` rewrites a marker's stamp
+  line + mtime on every arm, so ordering on mtime would let a session
+  claiming fresh *unrelated* work silently reorder an older shared
+  claim (and let the delegator's own next re-arm take a delegated bead
+  back). Birth never moves. Filesystems without btime degrade to the
+  mtime order. An id in `mine` that a foreign live marker also claims
+  with a **strictly newer** stamp is delegated work — the executor's
+  fresher claim owns the bead and its spec. Excluded from
   `ownClaimsMissingSpec`, so all three probes drop it at once.
   Per-bead claim times are not stored, so the marker's stamp is the
   granularity — "newer claim marker wins" is a session-level verdict.
@@ -66,7 +72,14 @@ Scan `<git-common>/bro/hooks/*.task` once per probe:
   gate-mode `block` must hold as long as the violation does (remind's
   passive is already display-deduped by `stopHintsChanged`). Both
   record the set so a prompt after them doesn't re-report the same
-  claims.
+  claims — **except** a `gate`-mode stopGate whose contribution the
+  host drops: `emitStopGateBody` discards a `block` for a session
+  that never armed `task` (claims via `BRO_BEAD_ID(S)` pins or a
+  rotated session's marker carry no `<session>.task` file), so
+  stamping the set there would eat a nudge nobody saw. stopGate
+  records only when its contribution can surface — always for the
+  empty set and under remind; in gate mode only when the session's
+  own `.task` marker is inside `readArmed`'s TTL.
 
 ## Plan
 
