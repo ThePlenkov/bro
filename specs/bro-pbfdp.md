@@ -25,20 +25,24 @@ Agents parse `--json` from `act status` / `fleet status` / `rig next` / `flow ne
 ## Design
 
 ### Schema files
+
 Put JSON Schemas under `packages/cli/schemas/cli/` (mirroring `bro.config.schema.json` location style). One schema per agent-facing read command's `--json` output. Start with the four called out: `act-status.schema.json`, `fleet-status.schema.json` (or cover `fleet` and `status`), `rig-next.schema.json`, `flow-next.schema.json` (or `next.schema.json`).
 
 Schemas must be strict enough to catch renames: use `additionalProperties: false` where practical, document required fields, use proper types. Match actual output shapes exactly as emitted.
 
 ### Contract wiring
+
 Add `json: "schemas/cli/....schema.json"` (or relative path as the contract expects) to the relevant `contract` blocks in `plugins.ts` and ensure `contract/cli.json` reflects them after regeneration.
 
 ### Shapes to capture
+
 - `act status --json`: currently emits `{ pr: state, exit_gate: gate }` (see act.ts). Schema must match `PrActState` + `ExitGate` shape as serialized.
 - `fleet` / `fleet status` (status command): `fleet` with `--json` emits `{ rows, degraded, conflicts, prErrors, occupancy, budget, walls, wallsError }`. `status` (`fleet status`) with `--json` emits board JSON — need to capture its actual shape.
 - `rig next --json`: emits `RigNext` `{ verdict, id?, detail? }`
 - `flow next --json` (`next`): emits `NextResult` `{ state, bead?, beads, queue, filtered, foreign, gates, epics, moleculeSteps }` with `ReadyBead` shape.
 
 ### Generation/validation
+
 Add schemas to be validated by contract tooling if needed. Ensure `npm run check:contract` still passes.
 
 ## Plan
