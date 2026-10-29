@@ -1,5 +1,4 @@
 ---
-
 name: daemon
 description: "Use when the project needs a supervisor that outlives the session — 'run the review loop forever', 'keep the fleet owned', `bro fleet daemon up`. The daemon is the long-lived process owner; `bro review watch` is the bounded observer that watches it; `bro fleet serve` is the UI surface. Thin wrapper over the bro CLI — mechanics live in `packages/cli/src/commands/daemon.ts` and `drive.ts`. Requires `bro` (npx -y @broject/bro@0) and the configured review-host CLI."
 ---
@@ -10,11 +9,11 @@ description: "Use when the project needs a supervisor that outlives the session 
 
 The three process roles, never conflated:
 
-| Role     | Command                                                                                    | Lifetime                           |
-| -------- | ------------------------------------------------------------------------------------------ | ---------------------------------- |
-| Owner    | `bro fleet daemon up` — spawns `daemon run` (the `bro review drive --every` loop) detached | long-lived, until `down`           |
-| Observer | `bro review watch --every N --for S`                                                       | bounded window, dies on its own    |
-| UI       | `bro fleet serve`                                                                          | a debug surface, not orchestration |
+| Role | Command | Lifetime |
+| ---- | ------- | -------- |
+| Owner | `bro fleet daemon up` — spawns `daemon run` (the `bro review drive --every` loop) detached | long-lived, until `down` |
+| Observer | `bro review watch --every N --for S` | bounded window, dies on its own |
+| UI | `bro fleet serve` | a debug surface, not orchestration |
 
 The daemon holds `drive.lock` (one supervisor per repo) and owns the
 drive pass: act gates → fixer spawns → merges. Task agents are spawned

@@ -17,10 +17,10 @@
  *  drops the hook entirely. An absent `'*'` reads as `true`: the
  *  master `enabled` switch alone is enough to light every hook at the
  *  count level — `'*': false` is the "enabled but silent" spelling. */
-import { js, type ConfigSection } from '@broject/core';
+import { js, type ConfigSection } from '@broject/core'
 
-export const OTEL_EXPORTER_TYPES = ['file', 'otlp', 'stdout'] as const;
-export type OtelExporterType = (typeof OTEL_EXPORTER_TYPES)[number];
+export const OTEL_EXPORTER_TYPES = ['file', 'otlp', 'stdout'] as const
+export type OtelExporterType = (typeof OTEL_EXPORTER_TYPES)[number]
 
 /** Every event the bro dispatch can emit — the catalog `bro otel
  *  status` and the skill document. Kebab names; host spellings map
@@ -38,46 +38,46 @@ export const OTEL_HOOK_EVENTS = [
   'prepare-commit-msg',
   'reference-transaction',
   'post-merge',
-] as const;
+] as const
 
 export interface OtelHookPolicy {
   /** false drops the hook before any record is built. */
-  enabled: boolean;
+  enabled: boolean
   /** Keep probability per event, clamped [0,1]. */
-  sample: number;
+  sample: number
   /** Dotted payload paths allowed into the record — empty = meta only. */
-  collect: string[];
+  collect: string[]
 }
 
 export interface OtelExporterConfig {
-  type: OtelExporterType;
+  type: OtelExporterType
   /** file sink path — '' resolves to <git-common>/bro/otel/hooks.jsonl. */
-  path: string;
+  path: string
   /** otlp collector base URL — '' falls back to the standard
    *  OTEL_EXPORTER_OTLP_* env / provider.env resolution. */
-  endpoint: string;
+  endpoint: string
   /** otlp-only request headers (auth tokens live here, never argv). */
-  headers: Record<string, string>;
+  headers: Record<string, string>
 }
 
 export interface OtelConfig {
-  enabled: boolean;
-  exporter: OtelExporterConfig;
+  enabled: boolean
+  exporter: OtelExporterConfig
   /** Resolved per-hook policies keyed by bro event name; `'*'` is the
    *  fallback entry — always materialized. */
-  hooks: Record<string, OtelHookPolicy>;
+  hooks: Record<string, OtelHookPolicy>
 }
 
 const isObj = (v: unknown): v is Record<string, unknown> =>
-  typeof v === 'object' && v !== null && !Array.isArray(v);
+  typeof v === 'object' && v !== null && !Array.isArray(v)
 
 /** One hooks-table entry → a normalized policy. `false` = off,
  *  `true`/absent fields = on with sample 1 and no payload collection. */
 function hookPolicy(raw: unknown): OtelHookPolicy {
   if (raw === false) {
-    return { enabled: false, sample: 1, collect: [] };
+    return { enabled: false, sample: 1, collect: [] }
   }
-  const obj = isObj(raw) ? raw : {};
+  const obj = isObj(raw) ? raw : {}
   return {
     enabled: obj.enabled !== false,
     sample:
@@ -87,19 +87,22 @@ function hookPolicy(raw: unknown): OtelHookPolicy {
     collect: Array.isArray(obj.collect)
       ? obj.collect.filter((f): f is string => typeof f === 'string' && f !== '')
       : [],
-  };
+  }
 }
 
 /** `exporter` subsection — unknown types fall back to the file sink. */
 function exporterConfig(raw: unknown): OtelExporterConfig {
-  const exporter = isObj(raw) ? raw : {};
-  const type: OtelExporterType = OTEL_EXPORTER_TYPES.includes(exporter.type as OtelExporterType)
+  const exporter = isObj(raw) ? raw : {}
+  const type: OtelExporterType = OTEL_EXPORTER_TYPES.includes(
+    exporter.type as OtelExporterType
+  )
     ? (exporter.type as OtelExporterType)
-    : 'file';
-  const str = (v: unknown): string => (typeof v === 'string' && v.trim() !== '' ? v.trim() : '');
+    : 'file'
+  const str = (v: unknown): string =>
+    typeof v === 'string' && v.trim() !== '' ? v.trim() : ''
   // trailing slashes would double the path join — `${ep}/v1/logs`
-  let endpoint = str(exporter.endpoint);
-  while (endpoint.endsWith('/')) endpoint = endpoint.slice(0, -1);
+  let endpoint = str(exporter.endpoint)
+  while (endpoint.endsWith('/')) endpoint = endpoint.slice(0, -1)
   return {
     type,
     path: str(exporter.path),
@@ -111,13 +114,13 @@ function exporterConfig(raw: unknown): OtelExporterConfig {
           )
         )
       : {},
-  };
+  }
 }
 
 /** bro.config `otel` section. */
-export const otelSection: ConfigSection<OtelConfig> = raw => {
-  const obj = isObj(raw) ? raw : {};
-  const hooks = isObj(obj.hooks) ? obj.hooks : {};
+export const otelSection: ConfigSection<OtelConfig> = (raw) => {
+  const obj = isObj(raw) ? raw : {}
+  const hooks = isObj(obj.hooks) ? obj.hooks : {}
   return {
     enabled: obj.enabled === true,
     exporter: exporterConfig(obj.exporter),
@@ -127,8 +130,8 @@ export const otelSection: ConfigSection<OtelConfig> = raw => {
         hookPolicy(v),
       ])
     ),
-  };
-};
+  }
+}
 
 otelSection.jsonSchema = js.obj({
   enabled: js.bool,
@@ -148,13 +151,13 @@ otelSection.jsonSchema = js.obj({
       })
     )
   ),
-});
+})
 
 /** The resolved policy for one hook — its own entry when configured,
  *  else `'*'`, else on-at-meta-level (see the module doc: absent `'*'`
  *  reads as `true`). */
 export function resolveHookPolicy(cfg: OtelConfig, name: string): OtelHookPolicy {
-  return cfg.hooks[name] ?? cfg.hooks['*'] ?? { enabled: true, sample: 1, collect: [] };
+  return cfg.hooks[name] ?? cfg.hooks['*'] ?? { enabled: true, sample: 1, collect: [] }
 }
 
 /** Host event spellings → bro's kebab event names — `bro otel test`
@@ -174,7 +177,7 @@ export function hookEventName(raw: string): string {
     preparecommitmsg: 'prepare-commit-msg',
     referencetransaction: 'reference-transaction',
     postmerge: 'post-merge',
-  };
-  const key = raw.trim().toLowerCase();
-  return host[key] ?? key;
+  }
+  const key = raw.trim().toLowerCase()
+  return host[key] ?? key
 }

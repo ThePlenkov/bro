@@ -20,9 +20,16 @@
  * pulse (`isOrchestratorSession`); spawned workers never rearm a
  * cadence they don't own.
  */
-import { spawn } from 'node:child_process';
-import { existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs';
-import { dirname, isAbsolute, join } from 'node:path';
+import { spawn } from 'node:child_process'
+import {
+  existsSync,
+  mkdirSync,
+  readFileSync,
+  renameSync,
+  rmSync,
+  writeFileSync,
+} from 'node:fs'
+import { dirname, isAbsolute, join } from 'node:path'
 import {
   GIT_SYNC_PROBE_TIMEOUT_MS,
   gitCommonDir,
@@ -33,49 +40,46 @@ import {
   staleLock,
   worktreeGitDir,
   type Connector,
-} from '@broject/core';
-import { readWantMarker } from './want-marker.ts';
+} from '@broject/core'
+import { readWantMarker } from './want-marker.ts'
 import {
   isOrchestratorSession,
   parsePulseSpawn,
   spawnedAlive,
   type PulseSpawn,
-} from './watch-pulse.ts';
-import { rigSection, type RigConfig } from './rig-config.ts';
-import { SELF_ENTRY } from './self-entry.ts';
+} from './watch-pulse.ts'
+import { rigSection, type RigConfig } from './rig-config.ts'
+import { SELF_ENTRY } from './self-entry.ts'
 
 export interface RigPulseMarker {
   /** the resolved rig checkout — `bro rig watch --repo` on rearm */
-  repo: string;
-  everySec: number;
-  armedAt: string;
+  repo: string
+  everySec: number
+  armedAt: string
 }
 
 export function rigPulseMarkerPath(dir: string): string | null {
-  const common = gitCommonDir(dir, GIT_SYNC_PROBE_TIMEOUT_MS);
-  return common === null ? null : join(common, 'bro', 'rig-pulse.json');
+  const common = gitCommonDir(dir, GIT_SYNC_PROBE_TIMEOUT_MS)
+  return common === null ? null : join(common, 'bro', 'rig-pulse.json')
 }
 
-export function rigPulseMarkerPathUncertain(dir: string): {
-  path: string | null;
-  uncertain: boolean;
-} {
-  const common = gitCommonDir(dir, GIT_SYNC_PROBE_TIMEOUT_MS);
+export function rigPulseMarkerPathUncertain(dir: string): { path: string | null; uncertain: boolean } {
+  const common = gitCommonDir(dir, GIT_SYNC_PROBE_TIMEOUT_MS)
   if (common === null) {
     // If we got null from bounded probe, could be timeout or truly missing
     // Try without timeout to distinguish
-    const common2 = gitCommonDir(dir);
+    const common2 = gitCommonDir(dir)
     if (common2 === null) {
-      return { path: null, uncertain: false };
+      return { path: null, uncertain: false }
     }
-    return { path: join(common2, 'bro', 'rig-pulse.json'), uncertain: false };
+    return { path: join(common2, 'bro', 'rig-pulse.json'), uncertain: false }
   }
-  return { path: join(common, 'bro', 'rig-pulse.json'), uncertain: false };
+  return { path: join(common, 'bro', 'rig-pulse.json'), uncertain: false }
 }
 
 export function rigPulseLockPath(dir: string): string | null {
-  const common = gitCommonDir(dir, GIT_SYNC_PROBE_TIMEOUT_MS);
-  return common === null ? null : join(common, 'bro', 'rig-pulse.lock');
+  const common = gitCommonDir(dir, GIT_SYNC_PROBE_TIMEOUT_MS)
+  return common === null ? null : join(common, 'bro', 'rig-pulse.lock')
 }
 
 /** The want-record — null when absent, malformed, or the repo has no
@@ -83,13 +87,13 @@ export function rigPulseLockPath(dir: string): string | null {
  *  required — a rearm without it would land on whatever checkout cwd
  *  happens to resolve. */
 export function readRigPulseMarker(dir: string): RigPulseMarker | null {
-  const raw = readWantMarker(rigPulseMarkerPath(dir));
+  const raw = readWantMarker(rigPulseMarkerPath(dir))
   return raw !== null && typeof raw.repo === 'string' && raw.repo.trim() !== ''
     ? { repo: raw.repo, everySec: raw.everySec, armedAt: raw.armedAt }
-    : null;
+    : null
 }
 
-export type ArmState = 'armed' | 'updated' | 'already';
+export type ArmState = 'armed' | 'updated' | 'already'
 
 /** Write the want-marker (tmp+rename — the mailbox drop rule). Same
  *  repo+cadence is `already`; a changed one is `updated`. */
@@ -98,40 +102,40 @@ export function armRigPulse(
   repo: string,
   everySec: number
 ): { state: ArmState; marker: RigPulseMarker } {
-  const file = rigPulseMarkerPath(dir);
+  const file = rigPulseMarkerPath(dir)
   if (file === null) {
-    throw new Error('not a git repository — the rig pulse marker has no common dir to live in');
+    throw new Error('not a git repository — the rig pulse marker has no common dir to live in')
   }
-  const cur = readRigPulseMarker(dir);
+  const cur = readRigPulseMarker(dir)
   if (cur !== null && cur.repo === repo && cur.everySec === everySec) {
-    return { state: 'already', marker: cur };
+    return { state: 'already', marker: cur }
   }
-  const marker: RigPulseMarker = { repo, everySec, armedAt: new Date().toISOString() };
-  mkdirSync(dirname(file), { recursive: true });
-  const tmp = `${file}.${process.pid}.tmp`;
-  writeFileSync(tmp, JSON.stringify(marker, null, 2));
-  renameSync(tmp, file);
-  return { state: cur === null ? 'armed' : 'updated', marker };
+  const marker: RigPulseMarker = { repo, everySec, armedAt: new Date().toISOString() }
+  mkdirSync(dirname(file), { recursive: true })
+  const tmp = `${file}.${process.pid}.tmp`
+  writeFileSync(tmp, JSON.stringify(marker, null, 2))
+  renameSync(tmp, file)
+  return { state: cur === null ? 'armed' : 'updated', marker }
 }
 
 /** Remove the want-marker. A running `bro rig watch` keeps its lock —
  *  disarming only drops the rearm intent. */
-export type DisarmRigState = 'disarmed' | 'absent' | 'unknown';
+export type DisarmRigState = 'disarmed' | 'absent' | 'unknown'
 
 export function disarmRigPulse(dir: string): DisarmRigState {
-  const file = rigPulseMarkerPath(dir);
+  const file = rigPulseMarkerPath(dir)
   if (file === null) {
     // Could not determine git common dir (timeout or error) - treat as unknown
-    return 'unknown';
+    return 'unknown'
   }
   if (!existsSync(file)) {
-    return 'absent';
+    return 'absent'
   }
   try {
-    rmSync(file);
-    return 'disarmed';
+    rmSync(file)
+    return 'disarmed'
   } catch {
-    return 'unknown';
+    return 'unknown'
   }
 }
 
@@ -142,59 +146,59 @@ export function disarmRigPulse(dir: string): DisarmRigState {
  *  heartbeat aged past the abandoned bound doesn't count even while
  *  its pid lives. A real holder heartbeats far under the bound. */
 export function rigPulseLive(dir: string): { live: boolean; pid?: number } {
-  const lock = rigPulseLockPath(dir);
+  const lock = rigPulseLockPath(dir)
   if (lock === null || !existsSync(lock) || staleLock(lock)) {
-    return { live: false };
+    return { live: false }
   }
-  const pid = lockHolderPid(lock);
-  return pid !== null && pidAlive(pid) ? { live: true, pid } : { live: false };
+  const pid = lockHolderPid(lock)
+  return pid !== null && pidAlive(pid) ? { live: true, pid } : { live: false }
 }
 
 /** The status read — what `rig status` prints as the cadence state. */
 export function rigPulseState(dir: string): string {
-  const marker = readRigPulseMarker(dir);
+  const marker = readRigPulseMarker(dir)
   if (marker === null) {
-    return 'absent — `bro rig install` arms the session pulse';
+    return 'absent — `bro rig install` arms the session pulse'
   }
-  const live = rigPulseLive(dir);
+  const live = rigPulseLive(dir)
   return live.live
     ? `armed every ${marker.everySec}s — live (pid ${live.pid})`
-    : `armed every ${marker.everySec}s — dead (session checkpoints rearm)`;
+    : `armed every ${marker.everySec}s — dead (session checkpoints rearm)`
 }
 
-export type { PulseSpawn };
+export type { PulseSpawn }
 
 export function rigPulseSpawnPath(dir: string): string | null {
-  const common = gitCommonDir(dir, GIT_SYNC_PROBE_TIMEOUT_MS);
-  return common === null ? null : join(common, 'bro', 'rig-pulse.spawn.json');
+  const common = gitCommonDir(dir, GIT_SYNC_PROBE_TIMEOUT_MS)
+  return common === null ? null : join(common, 'bro', 'rig-pulse.spawn.json')
 }
 
 export function readRigPulseSpawn(dir: string): PulseSpawn | null {
-  const file = rigPulseSpawnPath(dir);
+  const file = rigPulseSpawnPath(dir)
   if (file === null || !existsSync(file)) {
-    return null;
+    return null
   }
   try {
-    return parsePulseSpawn(JSON.parse(readFileSync(file, 'utf8')));
+    return parsePulseSpawn(JSON.parse(readFileSync(file, 'utf8')))
   } catch {
-    return null;
+    return null
   }
 }
 
 export function writeRigPulseSpawn(dir: string, record: PulseSpawn): void {
-  const file = rigPulseSpawnPath(dir);
+  const file = rigPulseSpawnPath(dir)
   if (file === null) {
-    return;
+    return
   }
-  mkdirSync(dirname(file), { recursive: true });
-  const tmp = `${file}.${process.pid}.tmp`;
-  writeFileSync(tmp, JSON.stringify(record));
-  renameSync(tmp, file);
+  mkdirSync(dirname(file), { recursive: true })
+  const tmp = `${file}.${process.pid}.tmp`
+  writeFileSync(tmp, JSON.stringify(record))
+  renameSync(tmp, file)
 }
 
 export type RigPulseRearm =
   | { kind: 'quiet' }
-  | { kind: 'rearm'; repo: string; everySec: number; forSec: number };
+  | { kind: 'rearm'; repo: string; everySec: number; forSec: number }
 
 /** The checkpoint decision — armed marker + dead pulse + orchestrator +
  *  no live spawned child → rearm the bounded window. Pure: the probe
@@ -205,22 +209,22 @@ export function rigPulseRearm(
   env: NodeJS.ProcessEnv = process.env
 ): RigPulseRearm {
   if (!isOrchestratorSession(env)) {
-    return { kind: 'quiet' };
+    return { kind: 'quiet' }
   }
-  const marker = readRigPulseMarker(dir);
+  const marker = readRigPulseMarker(dir)
   if (marker === null || rigPulseLive(dir).live) {
-    return { kind: 'quiet' };
+    return { kind: 'quiet' }
   }
-  const spawned = readRigPulseSpawn(dir);
+  const spawned = readRigPulseSpawn(dir)
   if (spawned !== null && spawnedAlive(spawned)) {
-    return { kind: 'quiet' };
+    return { kind: 'quiet' }
   }
   return {
     kind: 'rearm',
     repo: marker.repo,
     everySec: marker.everySec,
     forSec: Math.max(pulseSec, marker.everySec),
-  };
+  }
 }
 
 /** Fire-and-forget the bounded window — detached, unref'd, stdio
@@ -239,7 +243,7 @@ export function spawnRigPulse(
   // steer the child it must name a worktree of THIS repo: an absolute
   // path whose common dir is the marker's own. A foreign checkout's
   // refresh commands would otherwise run under our cadence (CWE-73).
-  const common = gitCommonDir(dir, GIT_SYNC_PROBE_TIMEOUT_MS);
+  const common = gitCommonDir(dir, GIT_SYNC_PROBE_TIMEOUT_MS)
   if (
     SELF_ENTRY === null ||
     common === null ||
@@ -248,28 +252,18 @@ export function spawnRigPulse(
     worktreeGitDir(repo) === null ||
     gitCommonDir(repo, GIT_SYNC_PROBE_TIMEOUT_MS) !== common
   ) {
-    return null;
+    return null
   }
   try {
     const child = spawn(
       process.execPath,
-      [
-        SELF_ENTRY,
-        'rig',
-        'watch',
-        '--repo',
-        repo,
-        '--every',
-        String(everySec),
-        '--for',
-        String(forSec),
-      ],
+      [SELF_ENTRY, 'rig', 'watch', '--repo', repo, '--every', String(everySec), '--for', String(forSec)],
       { cwd: repo, detached: true, stdio: 'ignore' }
-    );
-    child.unref();
-    return child.pid ?? null;
+    )
+    child.unref()
+    return child.pid ?? null
   } catch {
-    return null;
+    return null
   }
 }
 
@@ -281,43 +275,43 @@ export const rigConnector: Connector = {
   name: 'rig',
   hooks: () => ({
     sessionStart(ctx) {
-      return rigPulseCheckpoint(ctx.dir, 'session start');
+      return rigPulseCheckpoint(ctx.dir, 'session start')
     },
     postTool(ctx) {
-      return rigPulseCheckpoint(ctx.dir, 'tool call');
+      return rigPulseCheckpoint(ctx.dir, 'tool call')
     },
   }),
-};
+}
 
 /** One checkpoint for every lifecycle event: decide, spawn, record,
  *  report. A failure anywhere stays silent — a probe must never break
  *  the hook event it rode in on. */
 function rigPulseCheckpoint(dir: string, where: string): string[] {
   try {
-    const r = rigPulseRearm(dir, rigCfg(dir).pulseSec);
+    const r = rigPulseRearm(dir, rigCfg(dir).pulseSec)
     if (r.kind !== 'rearm') {
-      return [];
+      return []
     }
-    const pid = spawnRigPulse(dir, r.repo, r.everySec, r.forSec);
+    const pid = spawnRigPulse(dir, r.repo, r.everySec, r.forSec)
     if (pid === null) {
-      return [];
+      return []
     }
     writeRigPulseSpawn(dir, {
       pid,
       spawnedAt: new Date().toISOString(),
       pidStart: procStat(pid)?.start,
-    });
+    })
     return [
       `rig pulse rearmed on ${where} — spawned ` +
         `\`bro rig watch --repo ${r.repo} --every ${r.everySec} --for ${r.forSec}\` (pid ${pid})`,
-    ];
+    ]
   } catch {
-    return [];
+    return []
   }
 }
 
 function rigCfg(dir: string): RigConfig {
   return (
     (loadConfig(dir, { rig: rigSection }).rig as RigConfig | undefined) ?? rigSection(undefined)
-  );
+  )
 }

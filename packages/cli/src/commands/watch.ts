@@ -61,7 +61,7 @@ import {
   type PrOwnership,
   type ProviderWall,
   type ReviewFacade,
-} from '@broject/core';
+} from '@broject/core'
 import {
   checkHistory,
   evaluateExitGate,
@@ -70,147 +70,152 @@ import {
   prStateCache,
   type FetchPrActStateOpts,
   type PrStateCache,
-} from '@broject/act';
-import { listMolecules, loadMolecule, nextStep } from '@broject/convoy';
-import { loopSection } from '@broject/loop';
-import { loadBroConfig } from '../plugins.ts';
-import { flag } from './args.ts';
-import { MAX_INTERVAL_SEC, MIN_INTERVAL_SEC } from './drive-config.ts';
-import { collectAgents, fleetRows, fleetTableLines, type FleetRow } from './fleet.ts';
-import { candidateBranches, FLEET_BRANCH_PREFIXES } from './drive.ts';
-import { collectLoopRuns, type LoopRunView } from './loop-state.ts';
-import { providerWallsFor } from '../agent-connectors.ts';
-import { parseWorktreePorcelain, type WorktreeInfo } from './work.ts';
-import { installWatch, uninstallWatch } from './watch-install.ts';
-import { isOrchestratorSession, pulseLockPath } from './watch-pulse.ts';
-import { daemonProbe, readDriveMarker } from './daemon.ts';
-import { writeHeartbeat } from './watch-heartbeat.ts';
-import { watchSection, type WatchConfig } from './watch-config.ts';
-import { agentEventLine } from '../planes/events.ts';
+} from '@broject/act'
+import { listMolecules, loadMolecule, nextStep } from '@broject/convoy'
+import { loopSection } from '@broject/loop'
+import { loadBroConfig } from '../plugins.ts'
+import { flag } from './args.ts'
+import { MAX_INTERVAL_SEC, MIN_INTERVAL_SEC } from './drive-config.ts'
+import {
+  collectAgents,
+  fleetRows,
+  fleetTableLines,
+  type FleetRow,
+} from './fleet.ts'
+import { candidateBranches, FLEET_BRANCH_PREFIXES } from './drive.ts'
+import { collectLoopRuns, type LoopRunView } from './loop-state.ts'
+import { providerWallsFor } from '../agent-connectors.ts'
+import { parseWorktreePorcelain, type WorktreeInfo } from './work.ts'
+import { installWatch, uninstallWatch } from './watch-install.ts'
+import { isOrchestratorSession, pulseLockPath } from './watch-pulse.ts'
+import { daemonProbe, readDriveMarker } from './daemon.ts'
+import { writeHeartbeat } from './watch-heartbeat.ts'
+import { watchSection, type WatchConfig } from './watch-config.ts'
+import { agentEventLine } from '../planes/events.ts'
 
 export interface WatchMol {
-  mol: string;
-  state: string;
+  mol: string
+  state: string
   /** ready steps as {id,title,kind} — a watcher needs to name the step */
-  ready: { id: string; title: string; kind: string }[];
-  gates: string[];
-  inProgress: string[];
-  blocked: string[];
+  ready: { id: string; title: string; kind: string }[]
+  gates: string[]
+  inProgress: string[]
+  blocked: string[]
 }
 
 export interface WatchPrGate {
-  pr: number;
-  link: string;
+  pr: number
+  link: string
   /** absent = the exit gate evaluated; present = the probe itself failed */
-  ok?: boolean;
-  blockers?: string[];
+  ok?: boolean
+  blockers?: string[]
   /** advisory-check alerts (silent reviewers) — never blockers */
-  alerts?: string[];
-  error?: string;
+  alerts?: string[]
+  error?: string
   /** Structured gate detail for board renders (the /fleet PR board
    *  shows mergeable/threads/CI columns); the text heartbeat stays on
    *  the blockers prose. Populated only on a successful probe. */
-  mergeable?: string;
-  mergeState?: string;
-  openThreads?: number;
-  ciPending?: number;
-  ciFailing?: number;
-  reviewersPending?: number;
-  sastPending?: number;
+  mergeable?: string
+  mergeState?: string
+  openThreads?: number
+  ciPending?: number
+  ciFailing?: number
+  reviewersPending?: number
+  sastPending?: number
 
   /** who lands the PR (spec bro-c650l) — absent when the label read
    *  itself failed; 'human' means no bro marker */
-  ownership?: PrOwnership;
+  ownership?: PrOwnership
 }
 
 export interface WatchGates {
   /** false when no review host resolved (or it died) — the section is
    *  `unavailable`, never a phantom dead fleet */
-  available: boolean;
-  reason?: string;
+  available: boolean
+  reason?: string
   /** the probe machinery itself threw — distinct from per-PR `error`:
    *  every gate is unprobed, which is not "no PRs" */
-  error?: string;
+  error?: string
   /** branch→PR lookups that failed — an empty `prs` then means
    *  "couldn't resolve", not "nothing to gate" */
-  lookupErrors?: string[];
-  prs: WatchPrGate[];
+  lookupErrors?: string[]
+  prs: WatchPrGate[]
 }
 
 /** The loop plane — in-flight `bro loop` worker records. `stallMin` is
  *  the advisory threshold attention judged against (loop.stallMin), so
  *  a consumer reads the verdict with the bound that produced it. */
 export interface WatchLoop {
-  stallMin: number;
-  runs: LoopRunView[];
+  stallMin: number
+  runs: LoopRunView[]
   /** set when the loop plane itself threw — renders `unavailable`,
    *  never a false "no loop runs" */
-  error?: string;
+  error?: string
 }
 
 export interface WatchSnapshot {
-  ts: string;
-  attention: string[];
-  mols: WatchMol[];
+  ts: string
+  attention: string[]
+  mols: WatchMol[]
   /** set when the mols plane itself threw — the section renders
    *  `unavailable` rather than a false "no open molecules" */
-  molsError?: string;
-  gates: WatchGates;
+  molsError?: string
+  gates: WatchGates
   fleet: {
-    rows: FleetRow[];
-    degraded: string[];
-    conflicts: string[];
+    rows: FleetRow[]
+    degraded: string[]
+    conflicts: string[]
     /** branch→PR lookups that failed — a quiet PR column must not
      *  read as "no PRs exist" when the lookups errored */
-    prErrors?: string[];
+    prErrors?: string[]
     /** Provider walls derived from the registry (spec bro-1x7p) —
      *  surfaced in attention; absent on older snapshots. */
-    walls?: ProviderWall[];
+    walls?: ProviderWall[]
     /** the wall derivation itself threw (corrupt registry) — additive
      *  data failed, never the rows; renders as a warning, not
      *  `unavailable` */
-    wallsError?: string;
+    wallsError?: string
     /** set when the fleet plane itself threw (agent backends or the
      *  molecule re-read in fleetRows) — the section renders
      *  `unavailable`, never a false empty fleet */
-    error?: string;
-  };
+    error?: string
+  }
   /** This tick's janitor report — set only when it reaped or capped
    *  something; the attention line carries the same news in text. */
-  janitor?: JanitorReport;
+  janitor?: JanitorReport
   /** In-flight `bro loop` workers + their output-silence read. Advisory
    *  data only — a stale log is reported, never killed (bro-9lpn3). */
-  loop: WatchLoop;
+  loop: WatchLoop
   /** The project supervisor (`bro daemon` / raw `bro drive --every`) —
    *  the watchdog's subject: a recorded-but-dead daemon is attention,
    *  absent is just quiet. */
-  daemon: WatchDaemon;
+  daemon: WatchDaemon
   /** 'agent' topic tail — subject key → its "last did X" line
    *  (bro-0ppt0). Absent entirely when the bus recorded nothing — an
    *  idle or broker-less repo reads compact, never a false wall of
    *  silence-reporting. */
-  activity?: WatchActivity;
+  activity?: WatchActivity
 }
 
 export interface WatchActivity {
   /** agent key → the one-line verdict of its newest in-turn event. */
-  latest: Record<string, string>;
+  latest: Record<string, string>
   /** the ring tail was truncated — the map is the newest slice, not
    *  every live agent */
-  gapped?: boolean;
+  gapped?: boolean
 }
 
 export interface WatchDaemon {
-  live: boolean;
-  pid?: number;
+  live: boolean
+  pid?: number
   /** an armer record exists (`daemon.json`) — dead+recorded is the
    *  "restart me" signal; live+unrecorded is a manual `bro drive` */
-  recorded: boolean;
+  recorded: boolean
   /** `bro drive install` armed `bro/drive.json` — a dead daemon under
    *  it is a checkpoint-rearm gap, not a hand-restart ask (bro-y5zon) */
-  installed: boolean;
+  installed: boolean
   /** the probe itself threw — renders `unavailable` */
-  error?: string;
+  error?: string
 }
 
 /** The heartbeat's answer: ready human gates, lost agents, walled
@@ -227,38 +232,38 @@ export function attentionOf(
     ...molAttention(mols),
     ...agentAttention(rows),
     ...loopAttention(loop),
-    ...walls.map(w => `provider ${wallText(w)}`),
+    ...walls.map((w) => `provider ${wallText(w)}`),
     ...prAttention(prs),
-  ];
+  ]
 }
 
 function molAttention(mols: WatchMol[]): string[] {
-  const out: string[] = [];
+  const out: string[] = []
   for (const m of mols) {
     if (m.state.startsWith('error')) {
-      out.push(`mol ${m.mol} unreadable — ${m.state}`);
-      continue;
+      out.push(`mol ${m.mol} unreadable — ${m.state}`)
+      continue
     }
     for (const g of m.gates) {
-      const t = m.ready.find(s => s.id === g)?.title;
-      const suffix = t === undefined ? '' : ` (${t})`;
-      out.push(`gate ready — ${m.mol}: ${g}${suffix}`);
+      const t = m.ready.find((s) => s.id === g)?.title
+      const suffix = t === undefined ? '' : ` (${t})`
+      out.push(`gate ready — ${m.mol}: ${g}${suffix}`)
     }
   }
-  return out;
+  return out
 }
 
 function agentAttention(rows: FleetRow[]): string[] {
-  const out: string[] = [];
+  const out: string[] = []
   for (const r of rows) {
     if (r.agent === 'lost — respawn?') {
-      out.push(`agent lost — ${r.step} (${r.title}) — respawn?`);
+      out.push(`agent lost — ${r.step} (${r.title}) — respawn?`)
     }
     if (r.agent.startsWith('blocked — ')) {
-      out.push(`agent ${r.agent} — ${r.step} (${r.title})`);
+      out.push(`agent ${r.agent} — ${r.step} (${r.title})`)
     }
   }
-  return out;
+  return out
 }
 
 /** A run's silence in whole minutes once it crosses loop.stallMin —
@@ -266,45 +271,42 @@ function agentAttention(rows: FleetRow[]): string[] {
  *  `worker.silent` bus emit (bro-294hf); null when the run is dead,
  *  unverifiable, or still under the bound. */
 export function silentRunMin(loop: WatchLoop, r: LoopRunView): number | null {
-  return loop.stallMin > 0 &&
-    r.state !== 'dead' &&
-    r.silentMs !== null &&
-    r.silentMs >= loop.stallMin * 60_000
+  return loop.stallMin > 0 && r.state !== 'dead' && r.silentMs !== null && r.silentMs >= loop.stallMin * 60_000
     ? Math.floor(r.silentMs / 60_000)
-    : null;
+    : null
 }
 
 /** Loop-worker advisories — a live spawn silent past loop.stallMin, or a
  *  record whose pid is gone (a crashed loop's residue). Reported for the
  *  orchestrator's judgment; watch never stops or respawns anything. */
 function loopAttention(loop: WatchLoop): string[] {
-  const out: string[] = [];
+  const out: string[] = []
   for (const r of loop.runs) {
     if (r.state === 'dead') {
-      out.push(`loop agent ${r.beadId} — pid ${r.pid ?? '?'} gone — crashed run's record`);
-      continue;
+      out.push(`loop agent ${r.beadId} — pid ${r.pid ?? '?'} gone — crashed run's record`)
+      continue
     }
-    const silentMin = silentRunMin(loop, r);
+    const silentMin = silentRunMin(loop, r)
     if (silentMin !== null) {
-      out.push(`loop agent ${r.beadId} — output silent ${silentMin}m — inspect?`);
+      out.push(`loop agent ${r.beadId} — output silent ${silentMin}m — inspect?`)
     }
   }
-  return out;
+  return out
 }
 
 function prAttention(prs: WatchPrGate[]): string[] {
-  const out: string[] = [];
+  const out: string[] = []
   for (const g of prs) {
     if (g.error !== undefined) {
-      out.push(`PR ${g.link} gate probe failed — ${g.error}`);
+      out.push(`PR ${g.link} gate probe failed — ${g.error}`)
     } else if (g.ok === false) {
-      out.push(`PR ${g.link} blocked — ${(g.blockers ?? []).join('; ')}`);
+      out.push(`PR ${g.link} blocked — ${(g.blockers ?? []).join('; ')}`)
     }
     for (const a of g.alerts ?? []) {
-      out.push(`PR ${g.link} — ${a}`);
+      out.push(`PR ${g.link} — ${a}`)
     }
   }
-  return out;
+  return out
 }
 
 /** `worker.silent` on the bus — the silence computation already runs
@@ -314,30 +316,30 @@ function prAttention(prs: WatchPrGate[]): string[] {
  *  agentId resolves best-effort off the registry; a run the registry
  *  never claimed still emits keyed on its beadId. */
 function publishSilentTransitions(dir: string, snap: WatchSnapshot, seen: Set<string>): void {
-  pruneSilentSeen(snap.loop.runs, seen);
-  let reg: ReturnType<typeof readAgentRegistry> | undefined;
+  pruneSilentSeen(snap.loop.runs, seen)
+  let reg: ReturnType<typeof readAgentRegistry> | undefined
   const registry = (): ReturnType<typeof readAgentRegistry> => {
     if (reg === undefined) {
       try {
-        reg = readAgentRegistry(dir);
+        reg = readAgentRegistry(dir)
       } catch {
-        reg = {}; // a wedged registry is no agentId, never a dead tick
+        reg = {} // a wedged registry is no agentId, never a dead tick
       }
     }
-    return reg;
-  };
+    return reg
+  }
   for (const r of snap.loop.runs) {
-    trackSilentTransition(dir, snap.loop, r, seen, registry);
+    trackSilentTransition(dir, snap.loop, r, seen, registry)
   }
 }
 
 /** A run that ended while silent leaves no row to re-clear its entry —
  *  prune gone beads or a respawn on the same bead can never emit again. */
 function pruneSilentSeen(runs: LoopRunView[], seen: Set<string>): void {
-  const live = new Set(runs.map(r => r.beadId));
+  const live = new Set(runs.map(r => r.beadId))
   for (const beadId of seen) {
     if (!live.has(beadId)) {
-      seen.delete(beadId);
+      seen.delete(beadId)
     }
   }
 }
@@ -351,16 +353,16 @@ function trackSilentTransition(
   seen: Set<string>,
   registry: () => ReturnType<typeof readAgentRegistry>
 ): void {
-  const silentMin = silentRunMin(loop, r);
+  const silentMin = silentRunMin(loop, r)
   if (silentMin === null) {
-    seen.delete(r.beadId);
-    return;
+    seen.delete(r.beadId)
+    return
   }
   if (seen.has(r.beadId)) {
-    return;
+    return
   }
-  seen.add(r.beadId);
-  emitRunSilent(dir, r, silentMin, registry);
+  seen.add(r.beadId)
+  emitRunSilent(dir, r, silentMin, registry)
 }
 
 /** One run past its silence bound → a keyed `worker.silent` envelope.
@@ -372,33 +374,31 @@ function emitRunSilent(
   silentMin: number,
   registry: () => ReturnType<typeof readAgentRegistry>
 ): void {
-  const entry = registry()[r.beadId];
+  const entry = registry()[r.beadId]
   emitWorkerSilent(dir, {
     bead: r.beadId,
     silentMin,
-    ...(typeof entry?.agentId === 'string' && entry.agentId !== ''
-      ? { agentId: entry.agentId }
-      : {}),
+    ...(typeof entry?.agentId === 'string' && entry.agentId !== '' ? { agentId: entry.agentId } : {}),
     ...(r.log !== undefined ? { log: r.log } : {}),
-  });
+  })
 }
 
 /** The notify dedup key — the snapshot minus its timestamp. --every
  *  re-emits only on transitions; a heartbeat reports change, not noise. */
 export function snapshotKey(s: WatchSnapshot): string {
-  return JSON.stringify({ ...s, ts: '' });
+  return JSON.stringify({ ...s, ts: '' })
 }
 
 /** One atomic mailbox file — tmp+rename (dropMailbox in core) so a
  *  draining reader never sees a half-written event. Outside a repo
  *  there is no mailbox — report false instead of throwing. */
 export function emitMailbox(dir: string, text: string): boolean {
-  const mb = mailboxDir(dir);
+  const mb = mailboxDir(dir)
   if (mb === null) {
-    return false;
+    return false
   }
-  dropMailbox(mb, text, 'watch');
-  return true;
+  dropMailbox(mb, text, 'watch')
+  return true
 }
 
 /** --notify's transition drop: a changed snapshot mails once. Marked
@@ -410,17 +410,17 @@ function dropTransition(
   text: string,
   lastNotified: string
 ): string {
-  const key = snapshotKey(snap);
+  const key = snapshotKey(snap)
   if (key === lastNotified) {
-    return lastNotified;
+    return lastNotified
   }
   try {
-    return emitMailbox(dir, text) ? key : lastNotified;
+    return emitMailbox(dir, text) ? key : lastNotified
   } catch (err) {
     console.error(
       `warning: mailbox drop failed — ${err instanceof Error ? err.message : String(err)}`
-    );
-    return lastNotified;
+    )
+    return lastNotified
   }
 }
 
@@ -429,17 +429,17 @@ function dropTransition(
  *  throws degrades to an `error` row — one bad mol must not blank
  *  the plane or kill the heartbeat. */
 function collectMols(): WatchMol[] {
-  return listMolecules().map(m => {
+  return listMolecules().map((m) => {
     try {
-      const n = nextStep(loadMolecule(m.id));
+      const n = nextStep(loadMolecule(m.id))
       return {
         mol: m.id,
         state: n.state,
-        ready: n.ready.map(s => ({ id: s.id, title: s.title, kind: s.kind })),
+        ready: n.ready.map((s) => ({ id: s.id, title: s.title, kind: s.kind })),
         gates: n.gates,
         inProgress: n.inProgress,
         blocked: n.blocked,
-      };
+      }
     } catch (err) {
       return {
         mol: m.id,
@@ -448,19 +448,19 @@ function collectMols(): WatchMol[] {
         gates: [],
         inProgress: [],
         blocked: [],
-      };
+      }
     }
-  });
+  })
 }
 
 function worktreeList(errors?: string[]): WorktreeInfo[] {
   try {
-    return parseWorktreePorcelain(git(['worktree', 'list', '--porcelain']));
+    return parseWorktreePorcelain(git(['worktree', 'list', '--porcelain']))
   } catch (err) {
     // a failed worktree read hides every worktree branch's PR — report
     // it instead of letting gates claim "no PRs in the fleet"
-    errors?.push(`worktree list: ${err instanceof Error ? err.message : String(err)}`);
-    return [];
+    errors?.push(`worktree list: ${err instanceof Error ? err.message : String(err)}`)
+    return []
   }
 }
 
@@ -469,7 +469,7 @@ function worktreeList(errors?: string[]): WorktreeInfo[] {
 function addRowPrs(rows: FleetRow[], add: (pr: number, link?: string) => void): void {
   for (const row of rows) {
     for (const pr of row.prNums ?? (row.prNum === undefined ? [] : [row.prNum])) {
-      add(pr, pr === row.prNum ? row.pr : undefined);
+      add(pr, pr === row.prNum ? row.pr : undefined)
     }
   }
 }
@@ -485,14 +485,14 @@ function addListedPrs(
   lookupErrors: string[]
 ): void {
   try {
-    const branchSet = new Set(branches);
+    const branchSet = new Set(branches)
     for (const { pr, headRef } of openPrs(repo)) {
-      if (branchSet.has(headRef) || FLEET_BRANCH_PREFIXES.some(p => headRef.startsWith(p))) {
-        add(pr);
+      if (branchSet.has(headRef) || FLEET_BRANCH_PREFIXES.some((p) => headRef.startsWith(p))) {
+        add(pr)
       }
     }
   } catch (err) {
-    lookupErrors.push(`open-PR listing: ${errText(err)}`);
+    lookupErrors.push(`open-PR listing: ${errText(err)}`)
   }
 }
 
@@ -508,10 +508,10 @@ function addBranchPrs(
   for (const branch of branches) {
     try {
       for (const pr of rev.prsForBranch(branch)) {
-        add(pr);
+        add(pr)
       }
     } catch (err) {
-      lookupErrors.push(`${branch}: ${errText(err)}`);
+      lookupErrors.push(`${branch}: ${errText(err)}`)
     }
   }
 }
@@ -534,19 +534,19 @@ export function openPrTargets(
   branches: string[],
   lookupErrors: string[]
 ): { pr: number; link: string }[] {
-  const seen = new Map<number, string>();
+  const seen = new Map<number, string>()
   const add = (pr: number, link?: string): void => {
     if (!seen.has(pr)) {
-      seen.set(pr, link ?? rev.prLink(repo, pr));
+      seen.set(pr, link ?? rev.prLink(repo, pr))
     }
-  };
-  addRowPrs(rows, add);
-  if (rev.openPrs === undefined) {
-    addBranchPrs(rev, branches, add, lookupErrors);
-  } else {
-    addListedPrs(rev.openPrs, repo, branches, add, lookupErrors);
   }
-  return [...seen.entries()].map(([pr, link]) => ({ pr, link }));
+  addRowPrs(rows, add)
+  if (rev.openPrs === undefined) {
+    addBranchPrs(rev, branches, add, lookupErrors)
+  } else {
+    addListedPrs(rev.openPrs, repo, branches, add, lookupErrors)
+  }
+  return [...seen.entries()].map(([pr, link]) => ({ pr, link }))
 }
 
 /** The act section's fetch options for one heartbeat pass — hoisted so
@@ -567,7 +567,7 @@ function gateStateOpts(
     approvers: act.approvers,
     stateCache: cache,
     resolveLedger: resolveLedger(dir),
-  };
+  }
 }
 
 /** The act exit gate per distinct fleet PR — probed in parallel so a
@@ -581,29 +581,27 @@ async function gateFleetPrs(
   dir: string,
   lookupErrors: string[]
 ): Promise<WatchPrGate[]> {
-  const act = loadBroConfig(dir).act;
+  const act = loadBroConfig(dir).act
   // the shared feed — a heartbeat overlapping loop/drive/act-wait
   // passes serves the one in-flight fetch instead of duplicating it
-  const cache = prStateCache(dir);
-  const stateOpts = gateStateOpts(act, dir, cache);
-  const candidates = candidateBranches(dir);
+  const cache = prStateCache(dir)
+  const stateOpts = gateStateOpts(act, dir, cache)
+  const candidates = candidateBranches(dir)
   if (!candidates.complete) {
-    lookupErrors.push('branch enumeration failed — the open-PR set may under-count');
+    lookupErrors.push('branch enumeration failed — the open-PR set may under-count')
   }
-  const targets = openPrTargets(rev, repo, rows, candidates.branches, lookupErrors);
+  const targets = openPrTargets(rev, repo, rows, candidates.branches, lookupErrors)
   return Promise.all(
     targets.map(async ({ pr, link }) => {
       try {
-        const state = await fetchPrActState(rev, { repo, pr }, stateOpts);
-        const gate = evaluateExitGate(state, { requireApproval: act.requireApproval });
+        const state = await fetchPrActState(rev, { repo, pr }, stateOpts)
+        const gate = evaluateExitGate(state, { requireApproval: act.requireApproval })
         // ownership marker — one extra labels read per PR; a failure
         // degrades the marker, never the gate row it rides on
-        let ownership: PrOwnership | undefined;
+        let ownership: PrOwnership | undefined
         try {
-          ownership = prOwnership(rev.labels({ repo, pr }));
-        } catch {
-          /* unprobed — the row renders without it */
-        }
+          ownership = prOwnership(rev.labels({ repo, pr }))
+        } catch { /* unprobed — the row renders without it */ }
         return {
           pr,
           link,
@@ -619,48 +617,51 @@ async function gateFleetPrs(
           reviewersPending: state.reviewersPending,
           sastPending: state.sastPending,
           ownership,
-        };
+        }
       } catch (err) {
-        return { pr, link, error: err instanceof Error ? err.message : String(err) };
+        return { pr, link, error: err instanceof Error ? err.message : String(err) }
       }
     })
-  );
+  )
 }
 
-const errText = (e: unknown): string => (e instanceof Error ? e.message : String(e));
+const errText = (e: unknown): string => (e instanceof Error ? e.message : String(e))
 
 /** Each plane degrades to its own error state — the snapshot composes
  *  results, it never dies on one plane. */
 function molsPlane(): { mols: WatchMol[]; error?: string } {
   try {
-    return { mols: collectMols() };
+    return { mols: collectMols() }
   } catch (err) {
-    return { mols: [], error: errText(err) };
+    return { mols: [], error: errText(err) }
   }
 }
 
 interface ResolvedHost {
-  rev?: ReviewFacade;
-  repo: string;
-  reason?: string;
+  rev?: ReviewFacade
+  repo: string
+  reason?: string
 }
 
 function hostPlane(dir: string): ResolvedHost {
   try {
-    const rev = reviewHost(dir);
-    return { rev, repo: rev.resolveRepo([]) };
+    const rev = reviewHost(dir)
+    return { rev, repo: rev.resolveRepo([]) }
   } catch (err) {
-    return { repo: '', reason: errText(err) };
+    return { repo: '', reason: errText(err) }
   }
 }
 
 /** fleet — same machinery as `bro fleet`; a throwing read (backends,
  *  worktree list, the molecule re-read in fleetRows) degrades the
  *  section, never the heartbeat. */
-async function fleetPlane(dir: string, host: ResolvedHost): Promise<WatchSnapshot['fleet']> {
+async function fleetPlane(
+  dir: string,
+  host: ResolvedHost
+): Promise<WatchSnapshot['fleet']> {
   try {
-    const { byStep, degraded, conflicts } = await collectAgents(dir);
-    const prErrors: string[] = [];
+    const { byStep, degraded, conflicts } = await collectAgents(dir)
+    const prErrors: string[] = []
     const rows = fleetRows(
       byStep,
       degraded.length > 0,
@@ -668,19 +669,19 @@ async function fleetPlane(dir: string, host: ResolvedHost): Promise<WatchSnapsho
       host.repo,
       worktreeList(prErrors),
       prErrors
-    );
+    )
     // walls are additive data — a failed derivation (corrupt registry)
     // degrades this one datum, never the rows the plane collected
-    let walls: ProviderWall[] | undefined;
-    let wallsError: string | undefined;
+    let walls: ProviderWall[] | undefined
+    let wallsError: string | undefined
     try {
-      walls = providerWallsFor(dir);
+      walls = providerWallsFor(dir)
     } catch (err) {
-      wallsError = errText(err);
+      wallsError = errText(err)
     }
-    return { rows, degraded, conflicts, prErrors, walls, wallsError };
+    return { rows, degraded, conflicts, prErrors, walls, wallsError }
   } catch (err) {
-    return { rows: [], degraded: [], conflicts: [], prErrors: [], error: errText(err) };
+    return { rows: [], degraded: [], conflicts: [], prErrors: [], error: errText(err) }
   }
 }
 
@@ -690,25 +691,29 @@ async function fleetPlane(dir: string, host: ResolvedHost): Promise<WatchSnapsho
  *  the fleet section + attention, so lookupErrors here collects only
  *  the gates plane's own discovery failures — seeding both into the
  *  same list would double-report them. */
-async function gatesPlane(dir: string, host: ResolvedHost, rows: FleetRow[]): Promise<WatchGates> {
+async function gatesPlane(
+  dir: string,
+  host: ResolvedHost,
+  rows: FleetRow[]
+): Promise<WatchGates> {
   if (host.rev === undefined) {
-    return { available: false, reason: host.reason, prs: [] };
+    return { available: false, reason: host.reason, prs: [] }
   }
-  const lookupErrors: string[] = [];
+  const lookupErrors: string[] = []
   try {
-    const prs = await gateFleetPrs(host.rev, host.repo, rows, dir, lookupErrors);
+    const prs = await gateFleetPrs(host.rev, host.repo, rows, dir, lookupErrors)
     return {
       available: true,
       prs,
       lookupErrors: lookupErrors.length > 0 ? lookupErrors : undefined,
-    };
+    }
   } catch (err) {
     return {
       available: true,
       error: errText(err),
       prs: [],
       lookupErrors: lookupErrors.length > 0 ? lookupErrors : undefined,
-    };
+    }
   }
 }
 
@@ -717,15 +722,15 @@ async function gatesPlane(dir: string, host: ResolvedHost, rows: FleetRow[]): Pr
  *  heartbeat. */
 function daemonPlane(dir: string): WatchDaemon {
   try {
-    const probe = daemonProbe(dir);
+    const probe = daemonProbe(dir)
     return {
       live: probe.live,
       pid: probe.pid,
       recorded: probe.recorded !== null,
       installed: readDriveMarker(dir) !== null,
-    };
+    }
   } catch (err) {
-    return { live: false, recorded: false, installed: false, error: errText(err) };
+    return { live: false, recorded: false, installed: false, error: errText(err) }
   }
 }
 
@@ -733,10 +738,10 @@ function daemonPlane(dir: string): WatchDaemon {
  *  reads; a throwing plane degrades its section, never the heartbeat. */
 function loopPlane(dir: string): WatchLoop {
   try {
-    const cfg = loadBroConfig(dir) as Record<string, unknown>;
-    return { runs: collectLoopRuns(dir), stallMin: loopSection(cfg.loop).stallMin };
+    const cfg = loadBroConfig(dir) as Record<string, unknown>
+    return { runs: collectLoopRuns(dir), stallMin: loopSection(cfg.loop).stallMin }
   } catch (err) {
-    return { runs: [], stallMin: 0, error: errText(err) };
+    return { runs: [], stallMin: 0, error: errText(err) }
   }
 }
 
@@ -744,47 +749,53 @@ function loopPlane(dir: string): WatchLoop {
  *  best-effort on its own: a throwing plane degrades its section, never
  *  kills the heartbeat. */
 export async function collectSnapshot(dir: string): Promise<WatchSnapshot> {
-  const molsPlane_ = molsPlane();
-  const host = hostPlane(dir);
-  const fleet = await fleetPlane(dir, host);
-  const gates = await gatesPlane(dir, host, fleet.rows);
-  const loop = loopPlane(dir);
-  const daemon = daemonPlane(dir);
-  const activity = await activityPlane(dir);
+  const molsPlane_ = molsPlane()
+  const host = hostPlane(dir)
+  const fleet = await fleetPlane(dir, host)
+  const gates = await gatesPlane(dir, host, fleet.rows)
+  const loop = loopPlane(dir)
+  const daemon = daemonPlane(dir)
+  const activity = await activityPlane(dir)
 
-  const attention = attentionOf(molsPlane_.mols, fleet.rows, gates.prs, fleet.walls ?? [], loop);
+  const attention = attentionOf(
+    molsPlane_.mols,
+    fleet.rows,
+    gates.prs,
+    fleet.walls ?? [],
+    loop
+  )
   // fleet prErrors and gates lookupErrors can name the same failure
   // (one dead host failing both scans) — the headline reports it once.
   // Promoting gates lookupErrors keeps an under-counted PR set from
   // reading as quiet.
-  const reported = new Set(attention);
+  const reported = new Set(attention)
   for (const e of [...(fleet.prErrors ?? []), ...(gates.lookupErrors ?? [])]) {
-    const line = `PR lookup failed — ${e}`;
+    const line = `PR lookup failed — ${e}`
     if (!reported.has(line)) {
-      reported.add(line);
-      attention.push(line);
+      reported.add(line)
+      attention.push(line)
     }
   }
   if (gates.error !== undefined) {
-    attention.push(`gates probe failed — ${gates.error}`);
+    attention.push(`gates probe failed — ${gates.error}`)
   }
   if (fleet.error !== undefined) {
-    attention.push(`fleet plane failed — ${fleet.error}`);
+    attention.push(`fleet plane failed — ${fleet.error}`)
   }
   if (molsPlane_.error !== undefined) {
-    attention.push(`mols plane failed — ${molsPlane_.error}`);
+    attention.push(`mols plane failed — ${molsPlane_.error}`)
   }
   if (loop.error !== undefined) {
-    attention.push(`loop plane failed — ${loop.error}`);
+    attention.push(`loop plane failed — ${loop.error}`)
   }
   if (daemon.error !== undefined) {
-    attention.push(`daemon plane failed — ${daemon.error}`);
+    attention.push(`daemon plane failed — ${daemon.error}`)
   } else if (!daemon.live && (daemon.recorded || daemon.installed)) {
     attention.push(
       daemon.installed
         ? `drive supervisor installed but dead — the next session checkpoint rearms it`
         : `daemon recorded but dead — 'bro daemon up' restarts`
-    );
+    )
   }
 
   return {
@@ -797,7 +808,7 @@ export async function collectSnapshot(dir: string): Promise<WatchSnapshot> {
     loop,
     daemon,
     ...(activity !== undefined ? { activity } : {}),
-  };
+  }
 }
 
 /** The 'agent' bus tail — one probe over the ring narrowed to the
@@ -806,9 +817,9 @@ export async function collectSnapshot(dir: string): Promise<WatchSnapshot> {
  *  .events.jsonl. Undefined when no agent events ride the ring — the
  *  section renders only when there is something to report. */
 async function activityPlane(dir: string): Promise<WatchActivity | undefined> {
-  const sock = busSocketPath(dir);
+  const sock = busSocketPath(dir)
   if (sock === null) {
-    return undefined;
+    return undefined
   }
   // a snapshot read, not a tail — the replay arrives as one contiguous
   // prefix, so a short quiet beat is enough; holding the whole 250ms
@@ -817,79 +828,75 @@ async function activityPlane(dir: string): Promise<WatchActivity | undefined> {
     filter: { topics: ['agent'] },
     limit: 128,
     settleMs: 50,
-  });
-  const latest: Record<string, string> = {};
+  })
+  const latest: Record<string, string> = {}
   for (const e of res.events) {
     if (typeof e.key === 'string') {
-      latest[e.key] = agentEventLine(e);
+      latest[e.key] = agentEventLine(e)
     }
   }
   if (Object.keys(latest).length === 0) {
-    return undefined;
+    return undefined
   }
-  return { latest, ...(res.gapped ? { gapped: true } : {}) };
+  return { latest, ...(res.gapped ? { gapped: true } : {}) }
 }
 
 function attentionLines(attention: string[]): string[] {
-  return attention.length === 0 ? ['  (quiet)'] : attention.map(a => `  ${a}`);
+  return attention.length === 0 ? ['  (quiet)'] : attention.map((a) => `  ${a}`)
 }
 
 function molLines(mols: WatchMol[]): string[] {
   if (mols.length === 0) {
-    return ['  no open molecules'];
+    return ['  no open molecules']
   }
-  const head = ['mol', 'state', 'ready', 'gates', 'in-progress', 'blocked'];
-  const rows = mols.map(m => [
+  const head = ['mol', 'state', 'ready', 'gates', 'in-progress', 'blocked']
+  const rows = mols.map((m) => [
     m.mol,
     m.state,
-    m.ready.map(r => r.id).join(',') || '—',
+    m.ready.map((r) => r.id).join(',') || '—',
     m.gates.join(',') || '—',
     m.inProgress.join(',') || '—',
     m.blocked.join(',') || '—',
-  ]);
-  const w = head.map((h, i) => Math.max(h.length, ...rows.map(r => r[i]!.length)));
+  ])
+  const w = head.map((h, i) => Math.max(h.length, ...rows.map((r) => r[i]!.length)))
   const line = (vals: string[]) =>
-    '  ' +
-    vals
-      .map((v, i) => v.padEnd(w[i]!))
-      .join('  ')
-      .trimEnd();
-  return [line(head), ...rows.map(line)];
+    '  ' + vals.map((v, i) => v.padEnd(w[i]!)).join('  ').trimEnd()
+  return [line(head), ...rows.map(line)]
 }
 
 function gateVerdict(g: WatchPrGate): string {
   if (g.error !== undefined) {
-    return `probe failed — ${g.error}`;
+    return `probe failed — ${g.error}`
   }
-  const verdict = g.ok ? 'ok' : `blocked — ${(g.blockers ?? []).join('; ')}`;
-  return (g.alerts ?? []).length === 0 ? verdict : `${verdict} +alert: ${g.alerts!.join('; ')}`;
+  const verdict = g.ok ? 'ok' : `blocked — ${(g.blockers ?? []).join('; ')}`
+  return (g.alerts ?? []).length === 0 ? verdict : `${verdict} +alert: ${g.alerts!.join('; ')}`
 }
 
 function gateLines(gates: WatchGates): string[] {
   if (!gates.available) {
-    const reason = gates.reason === undefined ? '' : ` — ${gates.reason}`;
-    return [`  unavailable${reason}`];
+    const reason = gates.reason === undefined ? '' : ` — ${gates.reason}`
+    return [`  unavailable${reason}`]
   }
   if (gates.error !== undefined) {
-    return [`  probe failed — ${gates.error}`];
+    return [`  probe failed — ${gates.error}`]
   }
   const lookupWarn =
     gates.lookupErrors === undefined
       ? []
-      : [`  warning: ${gates.lookupErrors.length} branch→PR lookup(s) failed — see attention`];
+      : [`  warning: ${gates.lookupErrors.length} branch→PR lookup(s) failed — see attention`]
   if (gates.prs.length === 0) {
     return gates.lookupErrors === undefined
       ? ['  no open PRs on fleet branches']
-      : ['  no PRs resolved', ...lookupWarn];
+      : ['  no PRs resolved', ...lookupWarn]
   }
   return [
     ...gates.prs.map(
-      g =>
+      (g) =>
         `  ${g.link}  ${gateVerdict(g)}` +
         (g.ownership === undefined ? '' : `  · ${prOwnershipMark(g.ownership)}`)
     ),
     ...lookupWarn,
-  ];
+  ]
 }
 
 function fleetLines(fleet: WatchSnapshot['fleet']): string[] {
@@ -898,63 +905,59 @@ function fleetLines(fleet: WatchSnapshot['fleet']): string[] {
       ? [`  unavailable — ${fleet.error}`]
       : fleet.rows.length === 0
         ? ['  no open molecules — nothing in the fleet']
-        : fleetTableLines(fleet.rows).map(l => `  ${l}`);
+        : fleetTableLines(fleet.rows).map((l) => `  ${l}`)
   for (const d of fleet.degraded) {
-    out.push(`  warning: backend degraded — ${d}`);
+    out.push(`  warning: backend degraded — ${d}`)
   }
   for (const c of fleet.conflicts) {
-    out.push(`  warning: agent conflict — ${c}`);
+    out.push(`  warning: agent conflict — ${c}`)
   }
   for (const e of fleet.prErrors ?? []) {
-    out.push(`  warning: PR lookup failed — ${e}`);
+    out.push(`  warning: PR lookup failed — ${e}`)
   }
   for (const w of fleet.walls ?? []) {
-    out.push(`  ${wallText(w)}`);
+    out.push(`  ${wallText(w)}`)
   }
   if (fleet.wallsError !== undefined) {
-    out.push(`  warning: provider walls unreadable — ${fleet.wallsError}`);
+    out.push(`  warning: provider walls unreadable — ${fleet.wallsError}`)
   }
-  return out;
+  return out
 }
 
 function loopLines(loop: WatchLoop): string[] {
   if (loop.error !== undefined) {
-    return [`  unavailable — ${loop.error}`];
+    return [`  unavailable — ${loop.error}`]
   }
   if (loop.runs.length === 0) {
-    return ['  no loop agents on record'];
+    return ['  no loop agents on record']
   }
-  const head = ['run', 'state', 'pid', 'silent', 'log'];
-  const rows = loop.runs.map(r => [
+  const head = ['run', 'state', 'pid', 'silent', 'log']
+  const rows = loop.runs.map((r) => [
     r.beadId,
     r.state,
     String(r.pid ?? '—'),
     r.silentMs === null ? '—' : `${Math.floor(r.silentMs / 60_000)}m`,
     r.log ?? '—',
-  ]);
-  const w = head.map((h, i) => Math.max(h.length, ...rows.map(r => r[i]!.length)));
+  ])
+  const w = head.map((h, i) => Math.max(h.length, ...rows.map((r) => r[i]!.length)))
   const line = (vals: string[]) =>
-    '  ' +
-    vals
-      .map((v, i) => v.padEnd(w[i]!))
-      .join('  ')
-      .trimEnd();
-  return [line(head), ...rows.map(line)];
+    '  ' + vals.map((v, i) => v.padEnd(w[i]!)).join('  ').trimEnd()
+  return [line(head), ...rows.map(line)]
 }
 
 function daemonLines(daemon: WatchDaemon): string[] {
   if (daemon.error !== undefined) {
-    return [`  unavailable — ${daemon.error}`];
+    return [`  unavailable — ${daemon.error}`]
   }
   if (daemon.live) {
     return [
       `  up — pid ${daemon.pid}${daemon.recorded ? '' : ' (unrecorded holder)'}${daemon.installed ? ' · installed' : ''}`,
-    ];
+    ]
   }
   if (daemon.installed) {
-    return ['  installed but dead — the next session checkpoint rearms it'];
+    return ['  installed but dead — the next session checkpoint rearms it']
   }
-  return [daemon.recorded ? '  dead — recorded supervisor is gone' : '  down'];
+  return [daemon.recorded ? '  dead — recorded supervisor is gone' : '  down']
 }
 
 /** Text render — attention first; an empty list is the "fleet is quiet"
@@ -979,8 +982,10 @@ export function renderSnapshot(s: WatchSnapshot): string {
       : [
           '',
           'activity',
-          ...Object.values(s.activity.latest).map(l => `  ${l}`),
-          ...(s.activity.gapped === true ? ['  (ring tail truncated — newest events only)'] : []),
+          ...Object.values(s.activity.latest).map((l) => `  ${l}`),
+          ...(s.activity.gapped === true
+            ? ['  (ring tail truncated — newest events only)']
+            : []),
         ]),
     '',
     'loop',
@@ -988,43 +993,43 @@ export function renderSnapshot(s: WatchSnapshot): string {
     '',
     'daemon',
     ...daemonLines(s.daemon),
-  ].join('\n');
+  ].join('\n')
 }
 
 /** Parsed watch flags — `--once` is the default so it needs no field. */
 export function watchArgs(argv: string[]): {
-  json: boolean;
-  notify: boolean;
-  everySec?: number;
-  forSec?: number;
+  json: boolean
+  notify: boolean
+  everySec?: number
+  forSec?: number
 } {
-  const everyRaw = flag(argv, '--every');
-  const forRaw = flag(argv, '--for');
-  const base = { json: argv.includes('--json'), notify: argv.includes('--notify') };
+  const everyRaw = flag(argv, '--every')
+  const forRaw = flag(argv, '--for')
+  const base = { json: argv.includes('--json'), notify: argv.includes('--notify') }
   if (everyRaw === undefined) {
     if (forRaw !== undefined) {
-      throw new Error('--for bounds a --every loop — pass both or neither');
+      throw new Error('--for bounds a --every loop — pass both or neither')
     }
-    return base;
+    return base
   }
-  const everySec = Number(everyRaw);
+  const everySec = Number(everyRaw)
   // setTimeout clamps delays over 2^31-1 ms to ~1ms — a huge --every
   // would busy-tick instead of waiting; a sub-floor --every is a busy
   // loop either way. Both bounds fail closed here.
   if (!Number.isFinite(everySec) || everySec < MIN_INTERVAL_SEC || everySec > MAX_INTERVAL_SEC) {
     throw new Error(
       `--every needs a seconds value ≥${MIN_INTERVAL_SEC} up to ${MAX_INTERVAL_SEC}s, got "${everyRaw}"`
-    );
+    )
   }
   if (forRaw === undefined) {
-    return { ...base, everySec };
+    return { ...base, everySec }
   }
-  const forSec = Number(forRaw);
+  const forSec = Number(forRaw)
   // a --for whose ms conversion overflows to Infinity is no bound at all
   if (!Number.isFinite(forSec) || forSec < everySec || !Number.isFinite(forSec * 1000)) {
-    throw new Error(`--for needs a finite seconds value ≥ --every (${everySec}s), got "${forRaw}"`);
+    throw new Error(`--for needs a finite seconds value ≥ --every (${everySec}s), got "${forRaw}"`)
   }
-  return { ...base, everySec, forSec };
+  return { ...base, everySec, forSec }
 }
 
 /** One reap for one tick — the report when it did work plus the
@@ -1036,27 +1041,23 @@ function tickJanitor(dir: string): { janitor?: JanitorReport; note: string } {
   // leaves them holding the embedded noms LOCK forever (bro-8845g).
   // Scope by repo root — a watch launched from a subdirectory would
   // never see the root's orphans otherwise.
-  const repoRoot = gitTry(['-C', dir, 'rev-parse', '--show-toplevel']).out.trim() || dir;
-  let orphanNote = '';
+  const repoRoot = gitTry(['-C', dir, 'rev-parse', '--show-toplevel']).out.trim() || dir
+  let orphanNote = ''
   try {
-    const o = sweepOrphanProcs('bd', repoRoot);
+    const o = sweepOrphanProcs('bd', repoRoot)
     if (o.signaled.length > 0 || o.failed.length > 0) {
-      const failed = o.failed.length > 0 ? ` (${o.failed.length} resisted SIGTERM)` : '';
-      orphanNote = `bd-orphans: signaled ${o.signaled.length}${failed}`;
+      const failed = o.failed.length > 0 ? ` (${o.failed.length} resisted SIGTERM)` : ''
+      orphanNote = `bd-orphans: signaled ${o.signaled.length}${failed}`
     }
   } catch (err) {
-    orphanNote = `bd-orphan sweep failed — ${err instanceof Error ? err.message : String(err)}`;
+    orphanNote = `bd-orphan sweep failed — ${err instanceof Error ? err.message : String(err)}`
   }
   try {
-    const j = runJanitor(dir);
-    const note = j !== null && janitorDidWork(j) ? janitorLine(j) : '';
-    return { janitor: j ?? undefined, note: [note, orphanNote].filter(s => s !== '').join(' · ') };
+    const j = runJanitor(dir)
+    const note = j !== null && janitorDidWork(j) ? janitorLine(j) : ''
+    return { janitor: j ?? undefined, note: [note, orphanNote].filter((s) => s !== '').join(' · ') }
   } catch (err) {
-    return {
-      note: [orphanNote, `janitor failed — ${err instanceof Error ? err.message : String(err)}`]
-        .filter(s => s !== '')
-        .join(' · '),
-    };
+    return { note: [orphanNote, `janitor failed — ${err instanceof Error ? err.message : String(err)}`].filter((s) => s !== '').join(' · ') }
   }
 }
 
@@ -1064,36 +1065,32 @@ function tickJanitor(dir: string): { janitor?: JanitorReport; note: string } {
  *  install writes the want-marker session-start rearms from and strips
  *  any legacy systemd/crontab entry; uninstall removes both. */
 function runWatchSched(argv: string[]): void {
-  const dir = process.cwd();
+  const dir = process.cwd()
   const cfg =
     ((loadBroConfig(dir) as Record<string, unknown>).watch as WatchConfig | undefined) ??
-    watchSection(undefined);
+    watchSection(undefined)
   if (argv[0] === 'uninstall') {
-    const r = uninstallWatch(dir);
-    console.log(r.detail);
+    const r = uninstallWatch(dir)
+    console.log(r.detail)
     if (r.state === 'error') {
-      process.exit(1);
+      process.exit(1)
     }
-    return;
+    return
   }
-  const everyRaw = flag(argv, '--every');
-  const everySec = everyRaw === undefined ? cfg.intervalSec : Number(everyRaw);
+  const everyRaw = flag(argv, '--every')
+  const everySec = everyRaw === undefined ? cfg.intervalSec : Number(everyRaw)
   // the shared floor still matters: the armed cadence lands verbatim in
   // the marker and the rearm command — a 0.05s pulse is a busy loop
   if (!Number.isFinite(everySec) || everySec < MIN_INTERVAL_SEC || everySec > MAX_INTERVAL_SEC) {
     console.error(
       `error: --every needs a seconds value ≥${MIN_INTERVAL_SEC} up to ${MAX_INTERVAL_SEC}s, got "${everyRaw ?? everySec}"`
-    );
-    process.exit(2);
+    )
+    process.exit(2)
   }
-  const r = installWatch(dir, {
-    everySec,
-    pulseSec: cfg.pulseSec,
-    print: argv.includes('--print'),
-  });
-  console.log(r.detail);
+  const r = installWatch(dir, { everySec, pulseSec: cfg.pulseSec, print: argv.includes('--print') })
+  console.log(r.detail)
   if (r.state === 'error') {
-    process.exit(1);
+    process.exit(1)
   }
 }
 
@@ -1104,13 +1101,13 @@ function runWatchSched(argv: string[]): void {
  *  the caller — `watch --notify` dedups transitions in-process, `bro
  *  pulse` mails every beat (silence must mean dead, not unchanged). */
 export async function tickOnce(dir: string): Promise<{ snap: WatchSnapshot; text: string }> {
-  const { janitor, note } = tickJanitor(dir);
-  const snap = await collectSnapshot(dir);
-  snap.janitor = janitor;
+  const { janitor, note } = tickJanitor(dir)
+  const snap = await collectSnapshot(dir)
+  snap.janitor = janitor
   if (note !== '') {
-    snap.attention.push(note);
+    snap.attention.push(note)
   }
-  return { snap, text: renderSnapshot(snap) };
+  return { snap, text: renderSnapshot(snap) }
 }
 
 /** The help/install prelude — routed before the ticker path so
@@ -1120,69 +1117,69 @@ function dispatchWatchPrelude(argv: string[]): boolean {
     printUsage(
       'usage: bro watch [--every SEC] [--for SEC] [--json] [--notify] | bro watch install|uninstall',
       0
-    );
+    )
   }
   if (argv[0] === 'install' || argv[0] === 'uninstall') {
-    runWatchSched(argv);
-    return true;
+    runWatchSched(argv)
+    return true
   }
-  return false;
+  return false
 }
 
 export async function runWatchCommand(argv: string[]): Promise<void> {
   if (dispatchWatchPrelude(argv)) {
-    return;
+    return
   }
-  let args: ReturnType<typeof watchArgs>;
+  let args: ReturnType<typeof watchArgs>
   try {
-    args = watchArgs(argv);
+    args = watchArgs(argv)
   } catch (err) {
-    console.error(`error: ${err instanceof Error ? err.message : String(err)}`);
-    process.exit(2);
+    console.error(`error: ${err instanceof Error ? err.message : String(err)}`)
+    process.exit(2)
   }
-  const { json, notify, everySec, forSec } = args;
-  const dir = process.cwd();
+  const { json, notify, everySec, forSec } = args
+  const dir = process.cwd()
 
   if (notify && mailboxDir(dir) === null) {
-    console.error('warning: --notify has no mailbox — not inside a git repo; skipping drops');
+    console.error('warning: --notify has no mailbox — not inside a git repo; skipping drops')
   }
 
   // The dedup key is the snapshot minus its timestamp — --notify re-emits
   // only on transitions, a heartbeat reports change not noise.
-  let lastNotified = '';
+  let lastNotified = ''
   // beadIds already reported silent this process — the transition edge
   // for worker.silent (cleared when a run goes loud or settles)
-  const silentSeen = new Set<string>();
+  const silentSeen = new Set<string>()
   const tick = async (): Promise<void> => {
-    const { snap, text } = await tickOnce(dir);
-    publishSilentTransitions(dir, snap, silentSeen);
-    console.log(json ? JSON.stringify(snap, null, 2) : text);
+    const { snap, text } = await tickOnce(dir)
+    publishSilentTransitions(dir, snap, silentSeen)
+    console.log(json ? JSON.stringify(snap, null, 2) : text)
     try {
       // the durable heartbeat file — mailbox drops expire in an hour,
       // this is what overnight state reads from (bro-dxoa5)
-      writeHeartbeat(dir, snap);
+      writeHeartbeat(dir, snap)
     } catch (err) {
       console.error(
         `warning: heartbeat file write failed — ${err instanceof Error ? err.message : String(err)}`
-      );
+      )
     }
     if (notify) {
-      lastNotified = dropTransition(dir, snap, text, lastNotified);
+      lastNotified = dropTransition(dir, snap, text, lastNotified)
     }
-  };
+  }
 
   const expired = () => {
     console.log(
       json
         ? JSON.stringify({ ts: new Date().toISOString(), event: 'expired' })
         : 'watch: --for expired'
-    );
-  };
-  if (everySec === undefined) {
-    await tick();
-    return;
+    )
   }
-  await runWatchPulse(dir, everySec, forSec, tick, expired);
+  if (everySec === undefined) {
+    await tick()
+    return
+  }
+  await runWatchPulse(dir, everySec, forSec, tick, expired)
 }
 
 /** The session pulse (bro-killn): orchestrator-only, one per repo via
@@ -1202,8 +1199,8 @@ async function runWatchPulse(
     console.error(
       'error: BRO_AGENT_ID is set — spawned workers never arm the watch pulse; ' +
         'the orchestrator session owns the cadence'
-    );
-    process.exit(2);
+    )
+    process.exit(2)
   }
   // The bound starts here, before the lock wait: a standby behind the
   // incumbent spends the same --for budget as ticking — a wait that eats
@@ -1211,49 +1208,49 @@ async function runWatchPulse(
   // Monotonic clock: a wall-clock step backward must not stretch the
   // bound past its elapsed budget.
   const deadline =
-    forSec === undefined ? Number.POSITIVE_INFINITY : performance.now() + forSec * 1000;
+    forSec === undefined ? Number.POSITIVE_INFINITY : performance.now() + forSec * 1000
   // One pulse per repo: `bro/pulse.lock` is held heartbeated for the
   // process lifetime — a duplicate stands by behind the incumbent and
   // takes over when it exits, never ticks concurrently (spec bro-2duu9).
   // The lock's holder pid is also the session-start liveness read.
-  const lock = pulseLockPath(dir);
+  const lock = pulseLockPath(dir)
   const releasePulse =
     lock === null
       ? () => {}
       : await awaitFileLock(lock, {
           label: 'watch pulse lock',
-          onStandby: pid =>
+          onStandby: (pid) =>
             console.error(
               `bro watch: pulse already held${pid === null ? '' : ` by pid ${pid}`} — standing by`
             ),
-        });
+        })
   try {
     if (performance.now() >= deadline) {
-      expired();
-      return;
+      expired()
+      return
     }
-    await tick();
+    await tick()
     // --every: tick on a cadence until killed — or until --for expires.
     // An unbounded watch is only legal while a supervisor owns the
     // lifecycle; session-side watchers must pass --for so their exit
     // exists as an event.
     for (;;) {
       if (performance.now() >= deadline) {
-        expired();
-        return;
+        expired()
+        return
       }
       // cap the sleep at the remaining budget so expiry lands on its
       // boundary, not one full --every late
-      await new Promise(r =>
+      await new Promise((r) =>
         setTimeout(r, Math.min(everySec * 1000, deadline - performance.now()))
-      );
+      )
       if (performance.now() >= deadline) {
-        expired();
-        return;
+        expired()
+        return
       }
-      await tick();
+      await tick()
     }
   } finally {
-    releasePulse();
+    releasePulse()
   }
 }

@@ -25,38 +25,38 @@
  * Verdicts are advisory — the stop hook injects context, never
  * `decision: block` (judge shadow contract; gates not loops).
  */
-import { execFileSync } from 'node:child_process';
-import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
-import { isAbsolute, join, resolve } from 'node:path';
-import {
-  hasHelpFlag,
-  LockTimeout,
-  printUsage,
-  withFileLock,
-  type JudgeAnswer,
-} from '@broject/core';
-import { appendRow, judgeConfig, judgeFacade } from '@broject/judge';
-import { loadBroConfig } from '../plugins.ts';
-import type { GoalConfig } from './goal-config.ts';
+import { execFileSync } from 'node:child_process'
+import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { isAbsolute, join, resolve } from 'node:path'
+import { hasHelpFlag, LockTimeout, printUsage, withFileLock, type JudgeAnswer } from '@broject/core'
+import { appendRow, judgeConfig, judgeFacade } from '@broject/judge'
+import { loadBroConfig } from '../plugins.ts'
+import type { GoalConfig } from './goal-config.ts'
 
-export type GoalStatus = 'active' | 'paused' | 'achieved' | 'impossible' | 'budget' | 'cleared';
+export type GoalStatus =
+  | 'active'
+  | 'paused'
+  | 'achieved'
+  | 'impossible'
+  | 'budget'
+  | 'cleared'
 
 export interface GoalRecord {
-  condition: string;
-  status: GoalStatus;
-  createdAt: number;
+  condition: string
+  status: GoalStatus
+  createdAt: number
   /** Stop-hook evaluations run against this goal (judged turns only). */
-  evals: number;
+  evals: number
   /** Turn budget — 0 = no cap. */
-  maxTurns: number;
-  lastVerdict?: 'met' | 'not_met' | 'impossible';
-  lastReason?: string;
-  resolvedAt?: number;
+  maxTurns: number
+  lastVerdict?: 'met' | 'not_met' | 'impossible'
+  lastReason?: string
+  resolvedAt?: number
 }
 
 /** The repo-level seed — `bro goal` on a bare shell writes here; the
  *  next session's hook materializes it as that session's goal. */
-const SEED = '_default';
+const SEED = '_default'
 
 const SESSION_ENV = [
   'BRO_SESSION_ID',
@@ -65,69 +65,68 @@ const SESSION_ENV = [
   'CLAUDE_SESSION_ID',
   'CODEX_SESSION_ID',
   'OPENCODE_SESSION_ID',
-] as const;
+] as const
 
 /** `<git-common-dir>/bro/hooks/goal` — sibling of the arming markers,
  *  shared across linked worktrees so a goal set in one worktree is
  *  visible to the session running in another. Null outside a git dir. */
 function goalDir(dir: string): string | null {
   try {
-    const gd = execFileSync('git', ['rev-parse', '--git-common-dir'], {
-      // NOSONAR
+    const gd = execFileSync('git', ['rev-parse', '--git-common-dir'], { // NOSONAR
       cwd: dir,
       encoding: 'utf8',
       stdio: ['ignore', 'pipe', 'ignore'],
-    }).trim();
+    }).trim()
     // rev-parse answers relative to the CWD it ran in — resolve against
     // `dir` so callers (tests, hooks in worktrees) get an absolute path
-    return gd ? join(isAbsolute(gd) ? gd : resolve(dir, gd), 'bro', 'hooks', 'goal') : null;
+    return gd ? join(isAbsolute(gd) ? gd : resolve(dir, gd), 'bro', 'hooks', 'goal') : null
   } catch {
-    return null;
+    return null
   }
 }
 
-const safe = (id: string): string => id.replace(/[^\w.-]/g, '_');
+const safe = (id: string): string => id.replace(/[^\w.-]/g, '_')
 
 function goalPath(dir: string, session: string): string | null {
-  const d = goalDir(dir);
-  return d ? join(d, `${safe(session)}.json`) : null;
+  const d = goalDir(dir)
+  return d ? join(d, `${safe(session)}.json`) : null
 }
 
 /** The session's eval/update lock — serializes the stop hook's
  *  recheck+write against `bro goal pause|clear|set` so a write landing
  *  mid-eval is seen, never clobbered back to active. */
 function goalLock(dir: string, session: string): string | null {
-  const p = goalPath(dir, session);
-  return p === null ? null : `${p}.lock`;
+  const p = goalPath(dir, session)
+  return p === null ? null : `${p}.lock`
 }
 
 /** A mutating verb serializes against an in-flight stop-hook eval —
  *  its read-modify-write must never interleave the eval's recheck+write.
  *  A wedged lock fails open: `bro goal` must keep working. */
 const withGoalLock = <T>(dir: string, target: string, fn: () => T): T => {
-  const lock = goalLock(dir, target);
+  const lock = goalLock(dir, target)
   if (lock === null) {
-    return fn();
+    return fn()
   }
   try {
-    return withFileLock(lock, fn, { waitMs: 5_000, label: 'goal update lock' });
+    return withFileLock(lock, fn, { waitMs: 5_000, label: 'goal update lock' })
   } catch (err) {
     if (err instanceof LockTimeout) {
-      return fn();
+      return fn()
     }
-    throw err;
+    throw err
   }
-};
+}
 
 export function readGoal(dir: string, session: string): GoalRecord | null {
-  const path = goalPath(dir, session);
+  const path = goalPath(dir, session)
   if (path === null || !existsSync(path)) {
-    return null;
+    return null
   }
   try {
-    const raw = JSON.parse(readFileSync(path, 'utf8')) as Partial<GoalRecord>;
+    const raw = JSON.parse(readFileSync(path, 'utf8')) as Partial<GoalRecord>
     if (typeof raw.condition !== 'string' || raw.condition === '') {
-      return null;
+      return null
     }
     return {
       condition: raw.condition,
@@ -138,30 +137,30 @@ export function readGoal(dir: string, session: string): GoalRecord | null {
       ...(raw.lastVerdict !== undefined ? { lastVerdict: raw.lastVerdict } : {}),
       ...(raw.lastReason !== undefined ? { lastReason: raw.lastReason } : {}),
       ...(raw.resolvedAt !== undefined ? { resolvedAt: raw.resolvedAt } : {}),
-    };
+    }
   } catch {
-    return null;
+    return null
   }
 }
 
 function writeGoal(dir: string, session: string, goal: GoalRecord): void {
-  const path = goalPath(dir, session);
+  const path = goalPath(dir, session)
   if (path === null) {
-    throw new Error('not inside a git worktree — goal state needs the common git dir');
+    throw new Error('not inside a git worktree — goal state needs the common git dir')
   }
-  mkdirSync(goalDir(dir)!, { recursive: true }); // NOSONAR — goalPath proved non-null
-  writeFileSync(path, `${JSON.stringify(goal, null, 2)}\n`, 'utf8');
+  mkdirSync(goalDir(dir)!, { recursive: true }) // NOSONAR — goalPath proved non-null
+  writeFileSync(path, `${JSON.stringify(goal, null, 2)}\n`, 'utf8')
 }
 
 /** This session's goal — materializing the repo seed when no session
  *  record exists yet (the seed is a template, not shared mutable state:
  *  every session gets its own eval counter). */
 export function sessionGoal(dir: string, sessionId: string): GoalRecord | null {
-  const own = readGoal(dir, sessionId);
+  const own = readGoal(dir, sessionId)
   if (own !== null || sessionId === SEED) {
-    return own;
+    return own
   }
-  const seed = readGoal(dir, SEED);
+  const seed = readGoal(dir, SEED)
   if (seed !== null && sessionId !== '') {
     try {
       writeGoal(dir, sessionId, {
@@ -170,46 +169,46 @@ export function sessionGoal(dir: string, sessionId: string): GoalRecord | null {
         lastVerdict: undefined,
         lastReason: undefined,
         resolvedAt: undefined,
-      });
-      rmSync(goalPath(dir, SEED)!, { force: true }); // NOSONAR — writeGoal proved non-null
-      return sessionGoal(dir, sessionId);
+      })
+      rmSync(goalPath(dir, SEED)!, { force: true }) // NOSONAR — writeGoal proved non-null
+      return sessionGoal(dir, sessionId)
     } catch {
       // a failed materialization still serves the seed read-only —
       // the next session retries the copy
-      return seed;
+      return seed
     }
   }
-  return seed;
+  return seed
 }
 
 function goalConfig(dir: string): GoalConfig {
   try {
-    return (loadBroConfig(dir) as Record<string, unknown>).goal as GoalConfig;
+    return (loadBroConfig(dir) as Record<string, unknown>).goal as GoalConfig
   } catch {
-    return { maxTurns: 25, judge: true };
+    return { maxTurns: 25, judge: true }
   }
 }
 
 function fmtAge(ms: number): string {
-  const m = Math.round(ms / 60_000);
+  const m = Math.round(ms / 60_000)
   if (m < 1) {
-    return 'just now';
+    return 'just now'
   }
   if (m < 60) {
-    return `${m}m`;
+    return `${m}m`
   }
-  return `${Math.round(m / 60)}h`;
+  return `${Math.round(m / 60)}h`
 }
 
 /** One-line status — the CLI's `bro goal` readout and the hook's
  *  session-start rehydration share it. */
 export function goalStatusLine(goal: GoalRecord): string {
-  const budget = goal.maxTurns > 0 ? `${goal.evals}/${goal.maxTurns}` : `${goal.evals}`;
+  const budget = goal.maxTurns > 0 ? `${goal.evals}/${goal.maxTurns}` : `${goal.evals}`
   const tail =
     goal.lastVerdict !== undefined && goal.status === 'active'
       ? ` · last: ${goal.lastVerdict}${goal.lastReason ? ` — ${goal.lastReason}` : ''}`
-      : '';
-  return `goal [${goal.status} · ${fmtAge(Date.now() - goal.createdAt)} · turns ${budget}]: "${goal.condition}"${tail}`;
+      : ''
+  return `goal [${goal.status} · ${fmtAge(Date.now() - goal.createdAt)} · turns ${budget}]: "${goal.condition}"${tail}`
 }
 
 /** The stop-hook evaluation — returns context lines, never a block.
@@ -222,26 +221,26 @@ export async function goalStopLines(
   sessionId: string,
   evidence: { trace: string; context?: string | Promise<string | undefined> }
 ): Promise<string[]> {
-  const goal = sessionGoal(dir, sessionId);
+  const goal = sessionGoal(dir, sessionId)
   if (goal === null) {
-    return [];
+    return []
   }
   // A paused goal stays silent: any per-stop context re-wakes the host,
   // so a reminder here turns an idle wait into an unbounded turn loop.
   if (goal.status !== 'active') {
-    return [];
+    return []
   }
-  const cfg = goalConfig(dir);
-  const jcfg = judgeConfig(dir).judge;
+  const cfg = goalConfig(dir)
+  const jcfg = judgeConfig(dir).judge
   // provider-mode AND legacy connector-mode judge configs both resolve
   // through judgeFacade — a facade that cannot actually serve throws in
   // decide() and lands in the fail-open reminder below
-  const judged = cfg.judge && jcfg.mode !== 'off' && sessionId !== '';
+  const judged = cfg.judge && jcfg.mode !== 'off' && sessionId !== ''
   if (!judged) {
     return [
       `goal: "${goal.condition}" — verify it before reporting done ` +
         '(`bro goal` shows status · `bro goal clear` resolves)',
-    ];
+    ]
   }
   try {
     const res = await judgeFacade(dir).decide(
@@ -269,10 +268,10 @@ export async function goalStopLines(
           },
         },
       }
-    );
-    const answer = res.answers.verdict as JudgeAnswer | undefined;
+    )
+    const answer = res.answers.verdict as JudgeAnswer | undefined
     if (answer === undefined || answer.type !== 'choice' || res.lowConfidence.includes('verdict')) {
-      throw new Error('no confident verdict');
+      throw new Error('no confident verdict')
     }
     // the decide() round-trip is async — the recheck+write runs under
     // the session's goal lock, merging the verdict into the LATEST
@@ -280,12 +279,12 @@ export async function goalStopLines(
     // seen (never clobbered back to active), and a concurrent eval
     // serializes behind this one instead of losing its verdict
     const finishEval = (): string[] => {
-      const fresh = sessionGoal(dir, sessionId);
+      const fresh = sessionGoal(dir, sessionId)
       if (fresh === null || fresh.createdAt !== goal.createdAt || fresh.status !== 'active') {
-        return [];
+        return []
       }
-      fresh.lastVerdict = answer.choice as GoalRecord['lastVerdict'];
-      fresh.evals += 1;
+      fresh.lastVerdict = answer.choice as GoalRecord['lastVerdict']
+      fresh.evals += 1
       try {
         appendRow(dir, {
           ts: new Date().toISOString(),
@@ -296,150 +295,148 @@ export async function goalStopLines(
           model: res.model,
           latencyMs: res.latencyMs,
           ...(res.lowConfidence.length > 0 ? { lowConfidence: res.lowConfidence } : {}),
-        });
+        })
       } catch {
         // the journal is a nicety, not the verdict
       }
       if (answer.choice === 'met') {
-        fresh.status = 'achieved';
-        fresh.resolvedAt = Date.now();
-        writeGoal(dir, sessionId, fresh);
-        return [`◎ goal met: "${fresh.condition}" (${fresh.evals} turns) — cleared`];
+        fresh.status = 'achieved'
+        fresh.resolvedAt = Date.now()
+        writeGoal(dir, sessionId, fresh)
+        return [`◎ goal met: "${fresh.condition}" (${fresh.evals} turns) — cleared`]
       }
       if (answer.choice === 'impossible') {
-        fresh.status = 'impossible';
-        fresh.resolvedAt = Date.now();
-        writeGoal(dir, sessionId, fresh);
+        fresh.status = 'impossible'
+        fresh.resolvedAt = Date.now()
+        writeGoal(dir, sessionId, fresh)
         return [
           `goal judged impossible: "${fresh.condition}" — cleared; ` +
             'report the blocker or set a new goal',
-        ];
+        ]
       }
       if (fresh.maxTurns > 0 && fresh.evals >= fresh.maxTurns) {
-        fresh.status = 'budget';
-        fresh.resolvedAt = Date.now();
-        writeGoal(dir, sessionId, fresh);
+        fresh.status = 'budget'
+        fresh.resolvedAt = Date.now()
+        writeGoal(dir, sessionId, fresh)
         return [
           `goal turn budget reached (${fresh.evals}/${fresh.maxTurns}): "${fresh.condition}" ` +
             '— paused; `bro goal resume` continues, `bro goal clear` drops it',
-        ];
+        ]
       }
-      writeGoal(dir, sessionId, fresh);
+      writeGoal(dir, sessionId, fresh)
       return [
         `goal turn ${fresh.evals}${fresh.maxTurns > 0 ? `/${fresh.maxTurns}` : ''} — not yet met: ` +
           `"${fresh.condition}" — keep going (\`bro goal clear\` resolves it)`,
-      ];
-    };
-    const lock = goalLock(dir, sessionId);
+      ]
+    }
+    const lock = goalLock(dir, sessionId)
     // waitMs 0 — the stop hook may not stall its host on a held lock;
     // contention throws and the catch below degrades to the verify line
     return lock === null
       ? finishEval()
-      : withFileLock(lock, finishEval, { waitMs: 0, label: 'goal eval lock' });
+      : withFileLock(lock, finishEval, { waitMs: 0, label: 'goal eval lock' })
   } catch {
     // fail-open — but re-read first: a pause/clear that landed mid-eval
     // stays silent instead of re-waking the host
-    const fresh = sessionGoal(dir, sessionId);
+    const fresh = sessionGoal(dir, sessionId)
     if (fresh === null || fresh.status !== 'active') {
-      return [];
+      return []
     }
     return [
       `goal: "${fresh.condition}" — verify it before reporting done ` +
         '(`bro goal` shows status · `bro goal clear` resolves)',
-    ];
+    ]
   }
 }
 
 /** Session-start/post-compaction line — Claude's resume-restores-goal,
  *  from a file so it survives compaction and session death alike. */
 export function goalContextLines(dir: string, sessionId: string): string[] {
-  const goal = sessionId !== '' ? sessionGoal(dir, sessionId) : readGoal(dir, SEED);
+  const goal = sessionId !== '' ? sessionGoal(dir, sessionId) : readGoal(dir, SEED)
   if (goal === null || (goal.status !== 'active' && goal.status !== 'paused')) {
-    return [];
+    return []
   }
-  return [goalStatusLine(goal)];
+  return [goalStatusLine(goal)]
 }
 
 // --- CLI -----------------------------------------------------------------------
 
 function sessionFromEnv(env: NodeJS.ProcessEnv): string | undefined {
   for (const k of SESSION_ENV) {
-    const v = env[k]?.trim();
+    const v = env[k]?.trim()
     if (v) {
-      return v;
+      return v
     }
   }
-  return undefined;
+  return undefined
 }
 
-const CLEAR_ALIASES = new Set(['clear', 'stop', 'off', 'reset', 'none', 'cancel']);
+const CLEAR_ALIASES = new Set(['clear', 'stop', 'off', 'reset', 'none', 'cancel'])
 
 interface GoalArgs {
   /** --session > env > undefined (repo seed target). */
-  session?: string;
+  session?: string
   /** --turns override — undefined keeps the config default. */
-  turns?: number;
-  asJson: boolean;
+  turns?: number
+  asJson: boolean
   /** Non-flag argv after consuming --session/--turns values. */
-  positional: string[];
+  positional: string[]
 }
 
 function parseGoalArgs(argv: string[]): GoalArgs {
-  const si = argv.indexOf('--session');
-  const ti = argv.indexOf('--turns');
+  const si = argv.indexOf('--session')
+  const ti = argv.indexOf('--turns')
   const valueOf = (i: number, flag: string): string => {
-    const v = argv[i + 1];
+    const v = argv[i + 1]
     if (v === undefined || v.startsWith('--')) {
-      console.error(`error: ${flag} requires a value`);
-      process.exit(2);
+      console.error(`error: ${flag} requires a value`)
+      process.exit(2)
     }
-    return v;
-  };
-  let turns: number | undefined;
-  if (ti >= 0) {
-    const n = Number(valueOf(ti, '--turns'));
-    if (!Number.isInteger(n) || n < 0) {
-      console.error(
-        `error: --turns expects a non-negative integer — got ${JSON.stringify(argv[ti + 1])}`
-      );
-      process.exit(2);
-    }
-    turns = n;
+    return v
   }
-  const valueIdx = new Set([si, ti].filter(i => i >= 0).map(i => i + 1));
+  let turns: number | undefined
+  if (ti >= 0) {
+    const n = Number(valueOf(ti, '--turns'))
+    if (!Number.isInteger(n) || n < 0) {
+      console.error(`error: --turns expects a non-negative integer — got ${JSON.stringify(argv[ti + 1])}`)
+      process.exit(2)
+    }
+    turns = n
+  }
+  const valueIdx = new Set([si, ti].filter((i) => i >= 0).map((i) => i + 1))
   return {
     session: si >= 0 ? valueOf(si, '--session') : sessionFromEnv(process.env),
     turns,
     asJson: argv.includes('--json'),
     positional: argv.filter((a, i) => !a.startsWith('--') && !valueIdx.has(i)),
-  };
+  }
 }
 
 function printStatus(goal: GoalRecord | null, session: string, asJson: boolean): void {
   if (asJson) {
-    console.log(JSON.stringify({ session, goal }, null, 2));
-    return;
+    console.log(JSON.stringify({ session, goal }, null, 2))
+    return
   }
-  console.log(goal === null ? 'no goal set' : goalStatusLine(goal));
+  console.log(goal === null ? 'no goal set' : goalStatusLine(goal))
 }
 
 function report(target: string, goal: GoalRecord, asJson: boolean, text: string): void {
   if (asJson) {
-    console.log(JSON.stringify({ session: target, goal }, null, 2));
-    return;
+    console.log(JSON.stringify({ session: target, goal }, null, 2))
+    return
   }
-  console.log(text);
+  console.log(text)
 }
 
 function clearGoal(dir: string, target: string, goal: GoalRecord | null, asJson: boolean): void {
   if (goal === null) {
-    console.log('No goal set');
-    return;
+    console.log('No goal set')
+    return
   }
-  goal.status = 'cleared';
-  goal.resolvedAt = Date.now();
-  writeGoal(dir, target, goal);
-  report(target, goal, asJson, `Goal cleared: ${goal.condition}`);
+  goal.status = 'cleared'
+  goal.resolvedAt = Date.now()
+  writeGoal(dir, target, goal)
+  report(target, goal, asJson, `Goal cleared: ${goal.condition}`)
 }
 
 function pauseResumeGoal(
@@ -450,16 +447,16 @@ function pauseResumeGoal(
   asJson: boolean
 ): void {
   if (goal === null) {
-    console.log('No goal set');
-    return;
+    console.log('No goal set')
+    return
   }
-  goal.status = verb === 'pause' ? 'paused' : 'active';
+  goal.status = verb === 'pause' ? 'paused' : 'active'
   if (verb === 'resume') {
-    goal.evals = 0;
-    goal.resolvedAt = undefined;
+    goal.evals = 0
+    goal.resolvedAt = undefined
   }
-  writeGoal(dir, target, goal);
-  report(target, goal, asJson, `goal ${verb}d: "${goal.condition}"`);
+  writeGoal(dir, target, goal)
+  report(target, goal, asJson, `goal ${verb}d: "${goal.condition}"`)
 }
 
 function setGoal(
@@ -470,8 +467,8 @@ function setGoal(
   asJson: boolean
 ): void {
   if (condition.length > 4000) {
-    console.error('error: goal condition is capped at 4000 characters');
-    process.exit(2);
+    console.error('error: goal condition is capped at 4000 characters')
+    process.exit(2)
   }
   const goal: GoalRecord = {
     condition,
@@ -479,15 +476,15 @@ function setGoal(
     createdAt: Date.now(),
     evals: 0,
     maxTurns: turns ?? goalConfig(dir).maxTurns,
-  };
-  withGoalLock(dir, target, () => writeGoal(dir, target, goal));
+  }
+  withGoalLock(dir, target, () => writeGoal(dir, target, goal))
   report(
     target,
     goal,
     asJson,
     `goal set (${target === SEED ? 'repo — binds to next session' : `session ${target.slice(0, 12)}`}): ` +
       `"${condition}"${goal.maxTurns > 0 ? ` · ${goal.maxTurns} turns` : ''}`
-  );
+  )
 }
 
 export function runGoalCommand(argv: string[]): void {
@@ -495,27 +492,27 @@ export function runGoalCommand(argv: string[]): void {
     printUsage(
       'usage: bro goal [<condition> | clear|pause|resume|status] [--session <id>] [--turns <n>] [--json]',
       0
-    );
+    )
   }
-  const dir = process.cwd();
-  const { session, turns, asJson, positional } = parseGoalArgs(argv);
-  const target = session ?? SEED;
-  const verb = positional[0];
+  const dir = process.cwd()
+  const { session, turns, asJson, positional } = parseGoalArgs(argv)
+  const target = session ?? SEED
+  const verb = positional[0]
   // a session-scoped verb binds the session's materialized goal — the
   // seed is consumed, not left behind to re-seed the next session
-  const verbGoal = () => (session === undefined ? readGoal(dir, SEED) : sessionGoal(dir, target));
+  const verbGoal = () => (session === undefined ? readGoal(dir, SEED) : sessionGoal(dir, target))
 
   if (verb !== undefined && CLEAR_ALIASES.has(verb)) {
-    withGoalLock(dir, target, () => clearGoal(dir, target, verbGoal(), asJson));
-    return;
+    withGoalLock(dir, target, () => clearGoal(dir, target, verbGoal(), asJson))
+    return
   }
   if (verb === 'pause' || verb === 'resume') {
-    withGoalLock(dir, target, () => pauseResumeGoal(dir, target, verb, verbGoal(), asJson));
-    return;
+    withGoalLock(dir, target, () => pauseResumeGoal(dir, target, verb, verbGoal(), asJson))
+    return
   }
   if (verb === 'status' || verb === undefined) {
-    printStatus(verbGoal(), target, asJson);
-    return;
+    printStatus(verbGoal(), target, asJson)
+    return
   }
-  setGoal(dir, target, positional.join(' '), turns, asJson);
+  setGoal(dir, target, positional.join(' '), turns, asJson)
 }

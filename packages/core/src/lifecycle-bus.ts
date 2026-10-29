@@ -45,11 +45,7 @@ function setIf(payload: Record<string, unknown>, k: string, v: unknown): void {
 }
 
 /** detail fields lifted verbatim into the payload when present. */
-function copyDetail(
-  payload: Record<string, unknown>,
-  detail: Detail,
-  keys: readonly string[]
-): void {
+function copyDetail(payload: Record<string, unknown>, detail: Detail, keys: readonly string[]): void {
   for (const k of keys) {
     setIf(payload, k, str(detail, k));
   }
@@ -63,10 +59,7 @@ function viaOf(ev: LifecycleEvent): string {
 
 /** The payload skeleton every worker/worktree row shares: the bead the
  *  transition ran for. */
-function beadPayload(
-  payload: Record<string, unknown>,
-  ev: LifecycleEvent
-): Record<string, unknown> {
+function beadPayload(payload: Record<string, unknown>, ev: LifecycleEvent): Record<string, unknown> {
   setIf(payload, 'bead', ev.bead);
   return payload;
 }

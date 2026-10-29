@@ -1,17 +1,15 @@
 ---
-
 scope:
-- packages/otel/**
-- packages/providers/src/otel.ts
-- packages/providers/src/index.ts
-- packages/cli/src/commands/otel.ts
-- packages/cli/src/commands/hooks.ts
-- packages/cli/src/plugins.ts
-- packages/cli/package.json
-- skills/otel/SKILL.md
-- contract/cli.json
-- site/content/docs/reference/otel.md
-
+  - packages/otel/**
+  - packages/providers/src/otel.ts
+  - packages/providers/src/index.ts
+  - packages/cli/src/commands/otel.ts
+  - packages/cli/src/commands/hooks.ts
+  - packages/cli/src/plugins.ts
+  - packages/cli/package.json
+  - skills/otel/SKILL.md
+  - contract/cli.json
+  - site/content/docs/reference/otel.md
 ---
 
 # bro-xgejl — otel: hook-first telemetry — one config-enabled facade exporting every hook event
@@ -78,15 +76,8 @@ construction.
 **Record** — one row per emitted event:
 
 ```json
-{
-  "ts": "…",
-  "event": "hook.post-tool",
-  "session": "…",
-  "client": "default",
-  "ms": 12,
-  "ok": true,
-  "payload": { "tool_name": "exec" }
-}
+{"ts":"…","event":"hook.post-tool","session":"…","client":"default",
+ "ms":12,"ok":true,"payload":{"tool_name":"exec"}}
 ```
 
 ### Config — `otel` section
@@ -135,7 +126,7 @@ config as TWO merges over `loadConfigLayers`:
   every `collect` allowlist. `.gitignore` is advisory — a committed
   `bro.config.local.json` is just another tracked file, so the index,
   not the filename, is the verdict.
-- **Every layer (committed included)** — may only _narrow_: AND on
+- **Every layer (committed included)** — may only *narrow*: AND on
   `enabled`/`hooks.<name>.enabled`, MIN on `sample`. A repo can
   silence telemetry or sample harder; it cannot arm it, redirect it,
   or add a payload field. `hooks` policies combine per hook name as

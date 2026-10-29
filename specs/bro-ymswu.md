@@ -12,7 +12,7 @@ transport that can reach outside the rig.
 
 What this is NOT: a `sinks.ts` type. Sinks are the human edge —
 one-way HTTP POSTs to people, dedup'd on `minIntervalMs`, secrets via
-`urlEnv`. The nats connector is a peer transport on the _agent_ event
+`urlEnv`. The nats connector is a peer transport on the *agent* event
 plane: bidirectional-capable, filter-routed, sequence-honest. Nor is it
 a mailbox replacement — notify drops stay files; the spool is a
 feature.
@@ -25,7 +25,7 @@ feature.
   first-party, zero-dep `nats` npm package (nats.js) — pinned to a
   release ≥7 days old.
 - **Decorate, don't replace.** The connector wraps the local bus
-  facade: `publish` delivers to the local bus _and_ to nats; `subscribe`
+  facade: `publish` delivers to the local bus *and* to nats; `subscribe`
   merges the local stream with the nats subscription **deduplicated on
   envelope `id`** — a local publish arrives once from the bus and again
   from its own nats fan-in, and must deliver once; `probe` reads the
@@ -72,7 +72,7 @@ feature.
   `bro doctor` reports it when the backend is nats, like `gh`/`bd`.
   Publish-side processes hold no connection — connect-write-exit, the
   same model the bus uses; only daemon/host subscribers keep one.
-- **Auth**: a loopback NATS is _looser_ than the unix socket (which
+- **Auth**: a loopback NATS is *looser* than the unix socket (which
   asserts a 0700 dir) — any local process could pub/sub. Managed-child
   mode therefore generates a random token, stores it at
   `<git-common>/bro/nats.token` mode 0600, writes a minimal server

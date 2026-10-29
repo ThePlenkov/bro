@@ -9,8 +9,8 @@ The devin account's free-model limit is a request RATE, not a daily quota
 bro already records the wall correctly — a `rate_limited` death lands on
 the registry entry, `deriveProviderWalls` turns it into a provider wall
 (spec bro-1x7p), and `batchWallRefusal` refuses NEW batch spawns while it
-holds (spec bro-9h86l). What nothing does is _stop the spend that is
-already in flight_:
+holds (spec bro-9h86l). What nothing does is *stop the spend that is
+already in flight*:
 
 - **The lane keeps hitting the wall.** A fixer spawned before the wall
   keeps sending turns after it — every attempt is another reset push.
@@ -76,7 +76,7 @@ provider (cli/acp):
 ### 2. The wall pauses the lane
 
 `reconcileLanePause(dir, env)` is the actuator that makes the derived
-wall _stop the spend_, not just refuse new admissions:
+wall *stop the spend*, not just refuse new admissions:
 
 - Desired set: every registry entry whose `provider` is currently
   walled AND is live (pid or process group). `providers.<name>.wallPause
@@ -108,7 +108,7 @@ wall _stop the spend_, not just refuse new admissions:
   pends forever against a stopped process, so an operator's kill must
   un-freeze the group first.
 
-Interactive nuance: a _registry_ worker on the walled provider pauses —
+Interactive nuance: a *registry* worker on the walled provider pauses —
 bro-owned labor stops spending a shared account that is rejecting. The
 operator's own terminal sessions are not registry entries and are never
 touched.

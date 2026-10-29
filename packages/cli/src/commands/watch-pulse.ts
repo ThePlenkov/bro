@@ -13,9 +13,16 @@
  * `orchestrator` address: `BRO_AGENT_ID` unset means the session is an
  * orchestrator — spawned workers pin it and must never arm the cadence.
  */
-import { spawn } from 'node:child_process';
-import { existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs';
-import { dirname, join } from 'node:path';
+import { spawn } from 'node:child_process'
+import {
+  existsSync,
+  mkdirSync,
+  readFileSync,
+  renameSync,
+  rmSync,
+  writeFileSync,
+} from 'node:fs'
+import { dirname, join } from 'node:path'
 import {
   GIT_SYNC_PROBE_TIMEOUT_MS,
   gitCommonDir,
@@ -25,72 +32,72 @@ import {
   procStat,
   staleLock,
   type Connector,
-} from '@broject/core';
-import { SELF_ENTRY } from './self-entry.ts';
-import { readWantMarker } from './want-marker.ts';
-import { watchSection, type WatchConfig } from './watch-config.ts';
+} from '@broject/core'
+import { SELF_ENTRY } from './self-entry.ts'
+import { readWantMarker } from './want-marker.ts'
+import { watchSection, type WatchConfig } from './watch-config.ts'
 
 export interface PulseMarker {
   /** tick cadence the armed pulse runs `--every` at */
-  everySec: number;
-  armedAt: string;
+  everySec: number
+  armedAt: string
 }
 
 export function pulseMarkerPath(dir: string): string | null {
-  const common = gitCommonDir(dir, GIT_SYNC_PROBE_TIMEOUT_MS);
-  return common === null ? null : join(common, 'bro', 'pulse.json');
+  const common = gitCommonDir(dir, GIT_SYNC_PROBE_TIMEOUT_MS)
+  return common === null ? null : join(common, 'bro', 'pulse.json')
 }
 
 export function pulseLockPath(dir: string): string | null {
-  const common = gitCommonDir(dir, GIT_SYNC_PROBE_TIMEOUT_MS);
-  return common === null ? null : join(common, 'bro', 'pulse.lock');
+  const common = gitCommonDir(dir, GIT_SYNC_PROBE_TIMEOUT_MS)
+  return common === null ? null : join(common, 'bro', 'pulse.lock')
 }
 
 /** The want-record — null when absent, malformed, or the repo has no
  *  common dir; readWantMarker owns the torn/cadence verdict. */
 export function readPulseMarker(dir: string): PulseMarker | null {
-  return readWantMarker(pulseMarkerPath(dir));
+  return readWantMarker(pulseMarkerPath(dir))
 }
 
-export type ArmState = 'armed' | 'updated' | 'already';
+export type ArmState = 'armed' | 'updated' | 'already'
 
 /** Write the want-marker (tmp+rename — the mailbox drop rule). Same
  *  cadence is `already` and leaves the file alone; a changed one is
  *  `updated`. */
 export function armPulse(dir: string, everySec: number): { state: ArmState; marker: PulseMarker } {
-  const file = pulseMarkerPath(dir);
+  const file = pulseMarkerPath(dir)
   if (file === null) {
-    throw new Error('not a git repository — the pulse marker has no common dir to live in');
+    throw new Error('not a git repository — the pulse marker has no common dir to live in')
   }
-  const cur = readPulseMarker(dir);
+  const cur = readPulseMarker(dir)
   if (cur !== null && cur.everySec === everySec) {
-    return { state: 'already', marker: cur };
+    return { state: 'already', marker: cur }
   }
-  const marker: PulseMarker = { everySec, armedAt: new Date().toISOString() };
-  mkdirSync(dirname(file), { recursive: true });
-  const tmp = `${file}.${process.pid}.tmp`;
-  writeFileSync(tmp, JSON.stringify(marker, null, 2));
-  renameSync(tmp, file);
-  return { state: cur === null ? 'armed' : 'updated', marker };
+  const marker: PulseMarker = { everySec, armedAt: new Date().toISOString() }
+  mkdirSync(dirname(file), { recursive: true })
+  const tmp = `${file}.${process.pid}.tmp`
+  writeFileSync(tmp, JSON.stringify(marker, null, 2))
+  renameSync(tmp, file)
+  return { state: cur === null ? 'armed' : 'updated', marker }
 }
 
-export type DisarmState = 'disarmed' | 'absent' | 'unknown';
+export type DisarmState = 'disarmed' | 'absent' | 'unknown'
 
 /** Remove the want-marker. The running pulse (if any) keeps its lock —
  *  disarming only drops the rearm intent. */
 export function disarmPulse(dir: string): DisarmState {
-  const file = pulseMarkerPath(dir);
+  const file = pulseMarkerPath(dir)
   if (file === null) {
-    return 'unknown';
+    return 'unknown'
   }
   if (!existsSync(file)) {
-    return 'absent';
+    return 'absent'
   }
   try {
-    rmSync(file);
-    return 'disarmed';
+    rmSync(file)
+    return 'disarmed'
   } catch {
-    return 'unknown';
+    return 'unknown'
   }
 }
 
@@ -101,29 +108,29 @@ export function disarmPulse(dir: string): DisarmState {
  *  heartbeat aged past the abandoned bound doesn't count even while
  *  its pid lives. A real holder heartbeats far under the bound. */
 export function pulseLive(dir: string): { live: boolean; pid?: number } {
-  const lock = pulseLockPath(dir);
+  const lock = pulseLockPath(dir)
   if (lock === null || !existsSync(lock) || staleLock(lock)) {
-    return { live: false };
+    return { live: false }
   }
-  const pid = lockHolderPid(lock);
-  return pid !== null && pidAlive(pid) ? { live: true, pid } : { live: false };
+  const pid = lockHolderPid(lock)
+  return pid !== null && pidAlive(pid) ? { live: true, pid } : { live: false }
 }
 
 /** The orchestrator predicate — `BRO_AGENT_ID` unset/empty, identical
  *  to the `orchestrator` mailbox address rule in core/notify.ts.
  *  Spawned workers pin the var at spawn; they never arm pulses. */
 export function isOrchestratorSession(env: NodeJS.ProcessEnv = process.env): boolean {
-  const id = env.BRO_AGENT_ID;
-  return id === undefined || id === '';
+  const id = env.BRO_AGENT_ID
+  return id === undefined || id === ''
 }
 
 export interface PulseSpawn {
-  pid: number;
-  spawnedAt: string;
+  pid: number
+  spawnedAt: string
   /** the child's /proc start time — pins the pid against reuse; absent
    *  on older records, which the rearm decision trusts only briefly
    *  after `spawnedAt` (the pre-lock window is seconds anyway) */
-  pidStart?: string;
+  pidStart?: string
 }
 
 /** `<git-common>/bro/pulse.spawn.json` — the last rearm's child. A live
@@ -132,47 +139,45 @@ export interface PulseSpawn {
  *  — without it every postTool would pile another standby on a dead
  *  incumbent. */
 export function pulseSpawnPath(dir: string): string | null {
-  const common = gitCommonDir(dir, GIT_SYNC_PROBE_TIMEOUT_MS);
-  return common === null ? null : join(common, 'bro', 'pulse.spawn.json');
+  const common = gitCommonDir(dir, GIT_SYNC_PROBE_TIMEOUT_MS)
+  return common === null ? null : join(common, 'bro', 'pulse.spawn.json')
 }
 
 /** Shared record parse — the rig pulse stores the same spawn contract at
  *  its own path, so the shape lives once here (sonar duplication cap). */
 export function parsePulseSpawn(raw: unknown): PulseSpawn | null {
-  const r = raw as { pid?: unknown; spawnedAt?: unknown; pidStart?: unknown };
-  return typeof r.pid === 'number' &&
-    Number.isInteger(r.pid) &&
-    r.pid > 0 &&
+  const r = raw as { pid?: unknown; spawnedAt?: unknown; pidStart?: unknown }
+  return typeof r.pid === 'number' && Number.isInteger(r.pid) && r.pid > 0 &&
     typeof r.spawnedAt === 'string'
     ? {
         pid: r.pid,
         spawnedAt: r.spawnedAt,
         pidStart: typeof r.pidStart === 'string' ? r.pidStart : undefined,
       }
-    : null;
+    : null
 }
 
 export function readPulseSpawn(dir: string): PulseSpawn | null {
-  const file = pulseSpawnPath(dir);
+  const file = pulseSpawnPath(dir)
   if (file === null || !existsSync(file)) {
-    return null;
+    return null
   }
   try {
-    return parsePulseSpawn(JSON.parse(readFileSync(file, 'utf8')));
+    return parsePulseSpawn(JSON.parse(readFileSync(file, 'utf8')))
   } catch {
-    return null;
+    return null
   }
 }
 
 export function writePulseSpawn(dir: string, record: PulseSpawn): void {
-  const file = pulseSpawnPath(dir);
+  const file = pulseSpawnPath(dir)
   if (file === null) {
-    return;
+    return
   }
-  mkdirSync(dirname(file), { recursive: true });
-  const tmp = `${file}.${process.pid}.tmp`;
-  writeFileSync(tmp, JSON.stringify(record, null, 2));
-  renameSync(tmp, file);
+  mkdirSync(dirname(file), { recursive: true })
+  const tmp = `${file}.${process.pid}.tmp`
+  writeFileSync(tmp, JSON.stringify(record, null, 2))
+  renameSync(tmp, file)
 }
 
 /** Records without a `pidStart` are trusted only within this window of
@@ -180,7 +185,7 @@ export function writePulseSpawn(dir: string, record: PulseSpawn): void {
  *  that a reused pid can't impersonate the child forever. Either side:
  *  a future-dated record (a stepped clock, a foreign write) must not
  *  turn a negative age into unlimited trust. */
-const SPAWN_TRUST_MS = 120_000;
+const SPAWN_TRUST_MS = 120_000
 
 /** A recorded pid is trusted with its stored start time; records that
  *  predate the field get the bounded post-spawn window only — a reused
@@ -188,16 +193,16 @@ const SPAWN_TRUST_MS = 120_000;
  *  (same spawn-record contract) so the pin can't drift. */
 export function spawnedAlive(spawned: PulseSpawn, now: number = Date.now()): boolean {
   if (spawned.pidStart !== undefined) {
-    return pidAlive(spawned.pid, spawned.pidStart);
+    return pidAlive(spawned.pid, spawned.pidStart)
   }
-  const spawnedAt = Date.parse(spawned.spawnedAt);
+  const spawnedAt = Date.parse(spawned.spawnedAt)
   if (!Number.isFinite(spawnedAt) || Math.abs(now - spawnedAt) > SPAWN_TRUST_MS) {
-    return false;
+    return false
   }
-  return pidAlive(spawned.pid);
+  return pidAlive(spawned.pid)
 }
 
-export type PulseRearm = { kind: 'quiet' } | { kind: 'rearm'; everySec: number; forSec: number };
+export type PulseRearm = { kind: 'quiet' } | { kind: 'rearm'; everySec: number; forSec: number }
 
 /** The postTool checkpoint decision — armed marker + dead pulse +
  *  orchestrator + no live spawned child → rearm the bounded window.
@@ -208,17 +213,17 @@ export function pulseRearm(
   env: NodeJS.ProcessEnv = process.env
 ): PulseRearm {
   if (!isOrchestratorSession(env)) {
-    return { kind: 'quiet' };
+    return { kind: 'quiet' }
   }
-  const marker = readPulseMarker(dir);
+  const marker = readPulseMarker(dir)
   if (marker === null || pulseLive(dir).live) {
-    return { kind: 'quiet' };
+    return { kind: 'quiet' }
   }
-  const spawned = readPulseSpawn(dir);
+  const spawned = readPulseSpawn(dir)
   if (spawned !== null && spawnedAlive(spawned)) {
-    return { kind: 'quiet' };
+    return { kind: 'quiet' }
   }
-  return { kind: 'rearm', everySec: marker.everySec, forSec: Math.max(pulseSec, marker.everySec) };
+  return { kind: 'rearm', everySec: marker.everySec, forSec: Math.max(pulseSec, marker.everySec) }
 }
 
 /** Fire-and-forget the bounded window — detached, unref'd, stdio
@@ -228,18 +233,18 @@ export function pulseRearm(
  *  all re-spawn themselves. */
 export function spawnPulse(dir: string, everySec: number, forSec: number): number | null {
   if (SELF_ENTRY === null) {
-    return null;
+    return null
   }
   try {
     const child = spawn(
       process.execPath,
       [SELF_ENTRY, 'watch', '--every', String(everySec), '--for', String(forSec), '--notify'],
       { cwd: dir, detached: true, stdio: 'ignore' }
-    );
-    child.unref();
-    return child.pid ?? null;
+    )
+    child.unref()
+    return child.pid ?? null
   } catch {
-    return null;
+    return null
   }
 }
 
@@ -253,18 +258,18 @@ export function pulseNudge(
   env: NodeJS.ProcessEnv = process.env
 ): string | null {
   if (!isOrchestratorSession(env)) {
-    return null;
+    return null
   }
-  const marker = readPulseMarker(dir);
+  const marker = readPulseMarker(dir)
   if (marker === null || pulseLive(dir).live) {
-    return null;
+    return null
   }
-  const win = Math.max(pulseSec, marker.everySec);
+  const win = Math.max(pulseSec, marker.everySec)
   return (
     `watch pulse armed (every ${marker.everySec}s) but not live — rearm: ` +
     `\`bro watch --every ${marker.everySec} --for ${win} --notify\`; ` +
     'on window end run one `bro drive` pass, digest, re-arm'
-  );
+  )
 }
 
 /** The watch connector — the pulse's contribution to the lifecycle:
@@ -280,7 +285,7 @@ export const watchConnector: Connector = {
     // session start is the first checkpoint — same rearm path as
     // postTool: armed + dead → spawn the bounded window, don't ask
     sessionStart(ctx) {
-      return pulseCheckpoint(ctx.dir, 'session start');
+      return pulseCheckpoint(ctx.dir, 'session start')
     },
     // every tool call is a checkpoint: an armed marker with a dead
     // pulse gets a fresh bounded window spawned right here — the
@@ -288,35 +293,35 @@ export const watchConnector: Connector = {
     // self-perpetuating while the orchestrator works. A standby child
     // or a live pulse is quiet (bro-killn)
     postTool(ctx) {
-      return pulseCheckpoint(ctx.dir, 'tool call');
+      return pulseCheckpoint(ctx.dir, 'tool call')
     },
   }),
-};
+}
 
 /** One checkpoint for every lifecycle event: decide, spawn, record,
  *  report. A failure anywhere stays silent — a probe must never break
  *  the hook event it rode in on. */
 function pulseCheckpoint(dir: string, where: string): string[] {
   try {
-    const r = pulseRearm(dir, pulseCfg(dir).pulseSec);
+    const r = pulseRearm(dir, pulseCfg(dir).pulseSec)
     if (r.kind !== 'rearm') {
-      return [];
+      return []
     }
-    const pid = spawnPulse(dir, r.everySec, r.forSec);
+    const pid = spawnPulse(dir, r.everySec, r.forSec)
     if (pid === null) {
-      return [];
+      return []
     }
     writePulseSpawn(dir, {
       pid,
       spawnedAt: new Date().toISOString(),
       pidStart: procStat(pid)?.start,
-    });
+    })
     return [
       `watch pulse rearmed on ${where} — spawned ` +
         `\`bro watch --every ${r.everySec} --for ${r.forSec} --notify\` (pid ${pid})`,
-    ];
+    ]
   } catch {
-    return [];
+    return []
   }
 }
 
@@ -324,5 +329,5 @@ function pulseCfg(dir: string): WatchConfig {
   return (
     (loadConfig(dir, { watch: watchSection }).watch as WatchConfig | undefined) ??
     watchSection(undefined)
-  );
+  )
 }

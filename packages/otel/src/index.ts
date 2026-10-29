@@ -11,18 +11,18 @@ export {
   otelConfigReset,
   otelSinkPath,
   readSinkRows,
-} from './facade.ts';
-export type { HookMeta, OtelHookRecord, ResolvedOtelConfig } from './facade.ts';
+} from './facade.ts'
+export type { HookMeta, OtelHookRecord, ResolvedOtelConfig } from './facade.ts'
 export {
   hookEventName,
   otelSection,
   OTEL_EXPORTER_TYPES,
   OTEL_HOOK_EVENTS,
   resolveHookPolicy,
-} from './config.ts';
+} from './config.ts'
 export type {
   OtelConfig,
   OtelExporterConfig,
   OtelExporterType,
   OtelHookPolicy,
-} from './config.ts';
+} from './config.ts'

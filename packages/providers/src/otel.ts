@@ -249,7 +249,7 @@ function journal(name: string, a: Record<string, AttrValue>): void {
  *  provider env file (the same ENDPOINT() resolution every emit uses,
  *  exposed so status surfaces can say where telemetry would go). */
 export function otelEndpoint(): string | undefined {
-  return ENDPOINT();
+  return ENDPOINT()
 }
 
 /** Push one OTEL log record. `a` becomes structured metadata —

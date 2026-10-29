@@ -1,14 +1,12 @@
 ---
-
 parent: bro-mf62s
 scope:
-- packages/cli/src/commands/setup.ts
-- packages/cli/src/commands/doctor.ts
-- packages/core/src/config.ts
-- packages/github/src/index.ts
-- packages/core/src/connectors.ts
-- packages/core/src/bd.ts
-
+  - packages/cli/src/commands/setup.ts
+  - packages/cli/src/commands/doctor.ts
+  - packages/core/src/config.ts
+  - packages/github/src/index.ts
+  - packages/core/src/connectors.ts
+  - packages/core/src/bd.ts
 ---
 
 # bro-mf62s — onboarding: zero-bd first run — setup picks github-issues store when bd is missing/broken

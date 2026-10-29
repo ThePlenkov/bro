@@ -1,19 +1,17 @@
 ---
-
 parent: bro-6ptci
 scope:
-- packages/core/src/plugin.ts
-- packages/cli/src/commands/act.ts
-- packages/cli/src/commands/next.ts
-- packages/cli/src/commands/rig-next.ts
-- packages/cli/src/commands/rig.ts
-- packages/cli/src/commands/fleet.ts
-- packages/cli/src/commands/status.ts
-- packages/cli/src/commands/agents.ts
-- packages/cli/src/plugins.ts
-- packages/cli/schemas/cli/**
-- contract/cli.json
-
+  - packages/core/src/plugin.ts
+  - packages/cli/src/commands/act.ts
+  - packages/cli/src/commands/next.ts
+  - packages/cli/src/commands/rig-next.ts
+  - packages/cli/src/commands/rig.ts
+  - packages/cli/src/commands/fleet.ts
+  - packages/cli/src/commands/status.ts
+  - packages/cli/src/commands/agents.ts
+  - packages/cli/src/plugins.ts
+  - packages/cli/schemas/cli/**
+  - contract/cli.json
 ---
 
 # bro-pbfdp — JSON Schemas for --json outputs of agent-facing read commands
