@@ -87,6 +87,18 @@ export function fleetStatusPath(base: string, worktree: string): string {
   return join(fleetStatusDir(base), `${safe(basename(worktree))}.${h}.json`);
 }
 
+/** One string field or the parse fails. */
+const isStr = (v: unknown): v is string => typeof v === 'string';
+
+/** The led subdocument — a reportable state word plus an optional
+ *  message. Anything else is a miss. */
+function ledOk(led: unknown): led is PaneLed {
+  if (typeof led !== 'object' || led === null) return false;
+  const l = led as Partial<PaneLed>;
+  if (!['working', 'blocked', 'idle', 'unknown'].includes(l.state as string)) return false;
+  return l.message === undefined || isStr(l.message);
+}
+
 /** Parse + shape-check one document — anything else is a miss, never
  *  a throw: a torn write or a schema bump must not kill the pane. */
 export function parseFleetState(raw: string): FleetPaneState | undefined {
@@ -99,18 +111,10 @@ export function parseFleetState(raw: string): FleetPaneState | undefined {
   const s = v as Partial<FleetPaneState>;
   if (typeof s !== 'object' || s === null) return undefined;
   if (s.v !== 1) return undefined;
-  if (typeof s.worktree !== 'string' || typeof s.workspace !== 'string') return undefined;
-  if (typeof s.title !== 'string' || typeof s.status !== 'string') return undefined;
-  const led = s.led;
-  if (
-    typeof led !== 'object' ||
-    led === null ||
-    !['working', 'blocked', 'idle', 'unknown'].includes(led.state as string)
-  ) {
+  if (!isStr(s.worktree) || !isStr(s.workspace) || !isStr(s.title) || !isStr(s.status)) {
     return undefined;
   }
-  if (led.message !== undefined && typeof led.message !== 'string') return undefined;
-  if (typeof s.ts !== 'number') return undefined;
+  if (!ledOk(s.led) || typeof s.ts !== 'number') return undefined;
   return s as FleetPaneState;
 }
 

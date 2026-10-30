@@ -303,7 +303,7 @@ describe('status panes (spec bro-idsat)', () => {
     const runs = called('pane', 'run', 'p2');
     assert.equal(runs.length, 1);
     assert.match(runs[0]![3]!, /herdr status-view/);
-    assert.match(runs[0]![3]!, new RegExp(tree.replace(/[/.]/g, '\\$&')));
+    assert.match(runs[0]![3]!, new RegExp(tree.replace(/[\\/.]/g, '\\$&')));
     assert.equal(loadState(scope).statuses[tree]?.pane_id, 'p2');
   });
 

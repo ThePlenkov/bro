@@ -35,23 +35,16 @@ function call(args: string[]): void {
   }
 }
 
-/** The report-agent argv for one semantic state — `bro:fleet` (never
+/** The shared report/release/metadata envelope — `bro:fleet` (never
  *  `herdr:`-reserved), `bro-status` (self-reported, unrecognized by
- *  design), unix-nanos seq. */
+ *  design), unix-micros seq. */
+function paneArgs(verb: string, pane: string, seq: number): string[] {
+  return ['pane', verb, pane, '--source', PANE_SOURCE, '--agent', PANE_AGENT, '--seq', String(seq)];
+}
+
+/** The report-agent argv for one semantic state. */
 export function reportArgs(pane: string, led: PaneLed, seq: number): string[] {
-  const args = [
-    'pane',
-    'report-agent',
-    pane,
-    '--source',
-    PANE_SOURCE,
-    '--agent',
-    PANE_AGENT,
-    '--seq',
-    String(seq),
-    '--state',
-    led.state,
-  ];
+  const args = [...paneArgs('report-agent', pane, seq), '--state', led.state];
   if (led.message !== undefined && led.message !== '') {
     args.push('--message', led.message);
   }
@@ -61,17 +54,7 @@ export function reportArgs(pane: string, led: PaneLed, seq: number): string[] {
 /** The release argv for pane exit — clears name, state, and any
  *  resume binding so the shell-return probe isn't left to clean up. */
 export function releaseArgs(pane: string, seq: number): string[] {
-  return [
-    'pane',
-    'release-agent',
-    pane,
-    '--source',
-    PANE_SOURCE,
-    '--agent',
-    PANE_AGENT,
-    '--seq',
-    String(seq),
-  ];
+  return paneArgs('release-agent', pane, seq);
 }
 
 /** The display-text argv — presentation only: `--display-agent` names
@@ -82,15 +65,7 @@ export function releaseArgs(pane: string, seq: number): string[] {
  *  `bro-status` binding. */
 export function metaArgs(pane: string, s: FleetPaneState | undefined, seq: number): string[] {
   const args = [
-    'pane',
-    'report-metadata',
-    pane,
-    '--source',
-    PANE_SOURCE,
-    '--agent',
-    PANE_AGENT,
-    '--seq',
-    String(seq),
+    ...paneArgs('report-metadata', pane, seq),
     '--display-agent',
     s?.slug ?? 'fleet',
     '--clear-state-labels',
@@ -153,6 +128,22 @@ function readRaw(path: string): string | undefined {
   }
 }
 
+/** Wire the exit-time release — one `release-agent` for every way
+ *  out (signals route through the exit handler). Idempotent: the
+ *  first release wins. */
+function armRelease(pane: string): void {
+  let released = false;
+  const release = (): void => {
+    if (released) return;
+    released = true;
+    call(releaseArgs(pane, nextSeq()));
+  };
+  process.on('exit', release);
+  for (const sig of ['SIGINT', 'SIGTERM', 'SIGHUP'] as const) {
+    process.on(sig, () => process.exit(0));
+  }
+}
+
 /** `bro herdr status-view <worktree> [--once]` — the pane's whole
  *  lifecycle: bind `unknown`, ride file changes, release on exit. */
 export async function runStatusView(argv: string[]): Promise<void> {
@@ -172,19 +163,7 @@ export async function runStatusView(argv: string[]): Promise<void> {
   const base = gitCommonDir(worktree) ?? worktree;
   const statePath = fleetStatusPath(base, worktree);
   mkdirSync(dirname(statePath), { recursive: true });
-
-  let released = false;
-  const release = (): void => {
-    if (released) return;
-    released = true;
-    call(releaseArgs(pane, nextSeq()));
-  };
-  // the exit event covers signals, normal returns, and fatal throws —
-  // one release for every way out
-  process.on('exit', release);
-  for (const sig of ['SIGINT', 'SIGTERM', 'SIGHUP'] as const) {
-    process.on(sig, () => process.exit(0));
-  }
+  armRelease(pane);
 
   const apply = (s: FleetPaneState | undefined): void => {
     const seq = nextSeq();

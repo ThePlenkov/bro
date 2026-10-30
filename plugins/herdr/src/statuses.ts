@@ -83,6 +83,18 @@ function armViaSplit(ctx: RenderCtx, panes: HerdrPane[]): void {
   armAndReport(ctx, newPane, false);
 }
 
+/** The pane the status role may take: an unbound orphan carrying our
+ *  label first, then any idle pane not bound to another bro role and
+ *  not wearing the renderer's label. */
+function pickPane(panes: HerdrPane[], bound: Set<string>): { id?: string; adopted: boolean } {
+  const orphan = panes.find(p => p.label === STATUS_LABEL && !bound.has(p.pane_id));
+  if (orphan !== undefined) return { id: orphan.pane_id, adopted: true };
+  const free = panes.find(
+    p => !bound.has(p.pane_id) && p.label !== RENDER_LABEL && paneIdle(p.pane_id)
+  );
+  return { ...(free !== undefined ? { id: free.pane_id } : {}), adopted: false };
+}
+
 /** One workspace's status-pane convergence: record → re-arm/adopt →
  *  orphan-label → idle pane → split, so exactly one `bro: status`
  *  lives per managed workspace. The status pane is not a mirror
@@ -99,17 +111,12 @@ export function ensureStatus(ctx: RenderCtx): void {
   }
 
   const panes = paneList(ctx.ws);
-  const bound = boundPaneIds(ctx.state);
-  const orphan = panes.find(p => p.label === STATUS_LABEL && !bound.has(p.pane_id));
-  const paneId =
-    orphan?.pane_id ??
-    panes.find(p => !bound.has(p.pane_id) && p.label !== RENDER_LABEL && paneIdle(p.pane_id))
-      ?.pane_id;
-  if (paneId === undefined) {
+  const pick = pickPane(panes, boundPaneIds(ctx.state));
+  if (pick.id === undefined) {
     armViaSplit(ctx, panes);
     return;
   }
-  armAndReport(ctx, paneId, orphan !== undefined);
+  armAndReport(ctx, pick.id, pick.adopted);
 }
 
 /** Workspaces that lost their arm get their status record dropped —
