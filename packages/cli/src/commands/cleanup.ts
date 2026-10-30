@@ -168,6 +168,9 @@ export function runCleanupCommand(argv: string[]): void {
   if (auth !== null) {
     console.error(`cleanup: ${auth} — planning from local state`);
   }
+  // Run temp cleanup independently of network so a stalled fetch can't block it
+  cleanupTmpDirs(dryRun);
+
   // freshen remote state — tolerable to proceed if the fetch fails
   // (offline): deletion decisions still come from the local view.
   const fetch = gitTry(['fetch', '--prune', '--quiet'], 10_000);
@@ -192,28 +195,31 @@ export function runCleanupCommand(argv: string[]): void {
   for (const { branch, reason } of plan.skip) {
     console.log(`  keep ${branch} (${reason})`);
   }
-  let branchDeleted = 0;
   if (plan.delete.length > 0) {
     const remotes = withRemote ? remoteTips() : new Map<string, string>();
     for (const branch of plan.delete) {
       deleteBranch(branch, merged.get(branch) as string, remotes.get(branch), dryRun);
-      // deleteBranch logs; we track by counting what would happen isn't straightforward here,
-      // but easier to just recompute summary separately if needed - keep as is
     }
     console.log(`cleanup: ${dryRun ? 'would delete' : 'deleted'} ${plan.delete.length} branch(es)`);
   } else {
     // Don't claim "nothing to delete" if temp cleanup may delete items; temp cleanup logs its own summary
     console.log('cleanup: nothing to delete (branches)');
   }
-
-  cleanupTmpDirs(dryRun);
 }
 
 function deleteRemote(branch: string, headOid: string, remoteTip: string | undefined): void {
   if (remoteTip === undefined) {
     return;
   }
-  if (!tipIsMerged(remoteTip, headOid, isAncestor)) {
+  // Re-fetch remote tip right before deletion to avoid TOCTOU if origin advanced
+  try {
+    gitTry(['fetch', 'origin', branch, '--quiet'], 10_000);
+  } catch {
+    // best effort
+  }
+  const remotes = remoteTips();
+  const currentRemoteTip = remotes.get(branch) ?? remoteTip;
+  if (!tipIsMerged(currentRemoteTip, headOid, isAncestor)) {
     console.log(`  keep origin/${branch} (remote tip has commits beyond the merged head)`);
     return;
   }
@@ -239,9 +245,25 @@ function deleteBranch(
   }
   // re-verify the tip right before -D — narrows the recreate-between-
   // snapshot-and-delete race to the syscall itself
-  const tip = git(['rev-parse', branch]).trim();
-  if (!tipIsMerged(tip, headOid, isAncestor)) {
-    console.log(`  keep ${branch} (tip changed since plan)`);
+  try {
+    const tip = git(['rev-parse', branch]).trim();
+    if (!tipIsMerged(tip, headOid, isAncestor)) {
+      console.log(`  keep ${branch} (tip changed since plan)`);
+      return;
+    }
+  } catch {
+    console.log(`  keep ${branch} (ref missing)`);
+    return;
+  }
+  // Check again immediately before deletion to reduce TOCTOU window
+  try {
+    const tip = git(['rev-parse', branch]).trim();
+    if (!tipIsMerged(tip, headOid, isAncestor)) {
+      console.log(`  keep ${branch} (tip changed since plan)`);
+      return;
+    }
+  } catch {
+    console.log(`  keep ${branch} (ref missing)`);
     return;
   }
   const res = gitTry(['branch', '-D', branch]);
@@ -284,6 +306,23 @@ function isPathInUse(path: string): boolean {
       try {
         const cwd = readlinkSync(join(procDir, pid, 'cwd'));
         if (cwd === path || cwd.startsWith(path + '/') || path.startsWith(cwd + '/')) {
+          return true;
+        }
+      } catch {
+        // ignore
+      }
+      // Also check root (chroot) and exe as additional usage signals
+      try {
+        const root = readlinkSync(join(procDir, pid, 'root'));
+        if (root === path || root.startsWith(path + '/') || path.startsWith(root + '/')) {
+          return true;
+        }
+      } catch {
+        // ignore
+      }
+      try {
+        const exe = readlinkSync(join(procDir, pid, 'exe'));
+        if (exe === path || exe.startsWith(path + '/')) {
           return true;
         }
       } catch {
@@ -361,6 +400,11 @@ function cleanupTmpDirs(dryRun: boolean): void {
         console.log(`  deleted ${fullPath}`);
         deleted++;
       } catch (err) {
+        // If it failed due to in-use/race, recheck and skip without failing the run
+        if (isPathInUse(fullPath)) {
+          console.log(`  keep ${fullPath} (in use)`);
+          continue;
+        }
         console.error(`  error deleting ${fullPath}: ${err instanceof Error ? err.message : err}`);
         process.exitCode = 1;
       }
