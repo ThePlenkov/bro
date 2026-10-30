@@ -11,7 +11,8 @@ _Command examples track the upcoming **0.3.0** — grouped
 
 `bro work goal` (alias `bro goal`) sets a session-scoped completion goal.
 Hooks remind on stop and can ask the judge to verdict whether the goal
-was met.
+was met. Pass the condition directly (no `set` verb) — unknown positional
+words become part of the condition.
 
 | Command                         | What it does                                 |
 | ------------------------------- | -------------------------------------------- |
@@ -22,4 +23,4 @@ was met.
 | `bro work goal clear`           | Clear the goal                               |
 
 Goal state lives under the git common dir and is consumed by hook
-connectors (see [hooks](/docs/guide/hooks)).
+connectors (see [hooks](/docs/commands/utility)).

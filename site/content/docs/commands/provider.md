@@ -12,7 +12,7 @@ _Command examples track the upcoming **0.3.0** — grouped
 `bro fleet provider` (alias `bro provider`) hosts a Messages-API listener
 so Claude Code can run on bro. Use `provider serve` to start the host,
 and the wiring helpers to point clients at it. The listener binds to
-127.0.0.1 only (no `--host` flag).
+127.0.0.1 only.
 
 | Command                               | What it does                                     |
 | ------------------------------------- | ------------------------------------------------ |

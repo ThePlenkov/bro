@@ -16,19 +16,19 @@ point-check (not blocking); for blocking waits on external dependencies use
 `bro wait external:<rig>:<id>`. Use `bro mesh peers add <alias> <rig> <remote>`
 and `bro mesh peers remove <alias>` to manage peer bindings.
 
-| Command                                                 | What it does                                   |
-| ------------------------------------------------------- | ---------------------------------------------- |
-| `bro mesh me`                                           | Show this rig's identity                       |
-| `bro mesh peers`                                        | List configured peers                          |
-| `bro mesh peers add <alias> <rig> <remote> [--login L]` | Bind a peer rig                                |
-| `bro mesh peers remove <alias>`                         | Drop a peer binding                            |
-| `bro mesh pull`                                         | Sync from peers                                |
-| `bro mesh inbox`                                        | Show incoming requests                         |
-| `bro mesh request <rig> <title>`                        | Post a request to a peer (mesh://<org>/<repo>) |
-| `bro mesh claim <id>`                                   | Claim an inbox item                            |
-| `bro mesh done <id>`                                    | Mark claimed work done                         |
-| `bro mesh accept <id>`                                  | Accept delivered work                          |
-| `bro mesh reject <id>`                                  | Reject delivered work                          |
-| `bro mesh wait <id>`                                    | Point-check a thread (not blocking)            |
+| Command                                                 | What it does                        |
+| ------------------------------------------------------- | ----------------------------------- |
+| `bro mesh me`                                           | Show this rig's identity            |
+| `bro mesh peers`                                        | List configured peers               |
+| `bro mesh peers add <alias> <rig> <remote> [--login L]` | Bind a peer rig                     |
+| `bro mesh peers remove <alias>`                         | Drop a peer binding                 |
+| `bro mesh pull`                                         | Sync from peers                     |
+| `bro mesh inbox`                                        | Show incoming requests              |
+| `bro mesh request <mesh://<org>/<repo>> <title>`        | Post a request to a peer            |
+| `bro mesh claim <id>`                                   | Claim an inbox item                 |
+| `bro mesh done <id>`                                    | Mark claimed work done              |
+| `bro mesh accept <id>`                                  | Accept delivered work               |
+| `bro mesh reject <id>`                                  | Reject delivered work               |
+| `bro mesh wait <id>`                                    | Point-check a thread (not blocking) |
 
 See [mesh spec](https://github.com/ThePlenkov/bro/blob/main/specs/mesh/spec.md) for the protocol.
