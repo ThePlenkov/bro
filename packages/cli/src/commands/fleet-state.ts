@@ -90,6 +90,14 @@ export function fleetStatusPath(base: string, worktree: string): string {
 /** One string field or the parse fails. */
 const isStr = (v: unknown): v is string => typeof v === 'string';
 
+/** The scalar string fields every document must carry. */
+const REQUIRED_STR: readonly (keyof FleetPaneState)[] = [
+  'worktree',
+  'workspace',
+  'title',
+  'status',
+];
+
 /** The led subdocument — a reportable state word plus an optional
  *  message. Anything else is a miss. */
 function ledOk(led: unknown): led is PaneLed {
@@ -99,21 +107,22 @@ function ledOk(led: unknown): led is PaneLed {
   return l.message === undefined || isStr(l.message);
 }
 
-/** Parse + shape-check one document — anything else is a miss, never
- *  a throw: a torn write or a schema bump must not kill the pane. */
-export function parseFleetState(raw: string): FleetPaneState | undefined {
-  let v: unknown;
+/** JSON.parse + object check — the doc shape the guards below ride on. */
+function jsonObj(raw: string): Partial<FleetPaneState> | undefined {
   try {
-    v = JSON.parse(raw);
+    const v: unknown = JSON.parse(raw);
+    return typeof v === 'object' && v !== null ? (v as Partial<FleetPaneState>) : undefined;
   } catch {
     return undefined;
   }
-  const s = v as Partial<FleetPaneState>;
-  if (typeof s !== 'object' || s === null) return undefined;
-  if (s.v !== 1) return undefined;
-  if (!isStr(s.worktree) || !isStr(s.workspace) || !isStr(s.title) || !isStr(s.status)) {
-    return undefined;
-  }
+}
+
+/** Parse + shape-check one document — anything else is a miss, never
+ *  a throw: a torn write or a schema bump must not kill the pane. */
+export function parseFleetState(raw: string): FleetPaneState | undefined {
+  const s = jsonObj(raw);
+  if (s === undefined || s.v !== 1) return undefined;
+  if (!REQUIRED_STR.every(k => isStr(s[k]))) return undefined;
   if (!ledOk(s.led) || typeof s.ts !== 'number') return undefined;
   return s as FleetPaneState;
 }

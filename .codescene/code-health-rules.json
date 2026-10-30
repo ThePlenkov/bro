@@ -754,6 +754,382 @@
       ]
     },
     {
+      "matching_content_path": "packages/cli/src/commands/fleet-state.ts",
+      "matching_content_path_doc": "The state-file wire contract — path, seq and content primitives ARE the domain here, so String Heavy Function Arguments is disabled for this file only; every other rule keeps bro's bar.",
+      "rules": [
+        {
+          "name": "Brain Method",
+          "weight": 1
+        },
+        {
+          "name": "Bumpy Road Ahead",
+          "weight": 1
+        },
+        {
+          "name": "Code Duplication",
+          "weight": 1
+        },
+        {
+          "name": "Complex Conditional",
+          "weight": 1
+        },
+        {
+          "name": "Complex Method",
+          "weight": 1
+        },
+        {
+          "name": "Constructor Over-Injection",
+          "weight": 1
+        },
+        {
+          "name": "Deep, Global Nested Complexity",
+          "weight": 1
+        },
+        {
+          "name": "Deep, Nested Complexity",
+          "weight": 1
+        },
+        {
+          "name": "Duplicated Assertion Blocks",
+          "weight": 1
+        },
+        {
+          "name": "Excess Number of Function Arguments",
+          "weight": 1
+        },
+        {
+          "name": "Global Conditionals",
+          "weight": 1
+        },
+        {
+          "name": "Large Assertion Blocks",
+          "weight": 1
+        },
+        {
+          "name": "Large Embedded Code Block",
+          "weight": 1
+        },
+        {
+          "name": "Large Method",
+          "weight": 1
+        },
+        {
+          "name": "Lines of Code in a Single File",
+          "weight": 1
+        },
+        {
+          "name": "Lines of Declarations in a Single File",
+          "weight": 1
+        },
+        {
+          "name": "Low Cohesion",
+          "weight": 1
+        },
+        {
+          "name": "Missing Arguments Abstractions",
+          "weight": 1
+        },
+        {
+          "name": "Number of Functions in a Single Module",
+          "weight": 1
+        },
+        {
+          "name": "Overall Code Complexity",
+          "weight": 1
+        },
+        {
+          "name": "Overall Function Size",
+          "weight": 1
+        },
+        {
+          "name": "Primitive Obsession",
+          "weight": 1
+        },
+        {
+          "name": "String Heavy Function Arguments",
+          "weight": 0
+        }
+      ],
+      "thresholds": [
+        {
+          "name": "constructor_max_arguments",
+          "value": "5"
+        },
+        {
+          "name": "file_lines_of_code_for_alert",
+          "value": "-"
+        },
+        {
+          "name": "file_lines_of_code_for_critical_alert",
+          "value": "-"
+        },
+        {
+          "name": "file_lines_of_code_for_warning",
+          "value": "-"
+        },
+        {
+          "name": "file_mean_cyclomatic_complexity_warning",
+          "value": "4"
+        },
+        {
+          "name": "file_primitive_obsession_percentage_for_warning",
+          "value": "30"
+        },
+        {
+          "name": "function_bumpy_road_bumps_for_warning",
+          "value": "2"
+        },
+        {
+          "name": "function_bumpy_road_nesting_level_depth",
+          "value": "2"
+        },
+        {
+          "name": "function_complex_conditional_branches_alert",
+          "value": "-"
+        },
+        {
+          "name": "function_complex_conditional_branches_warning",
+          "value": "2"
+        },
+        {
+          "name": "function_cyclomatic_complexity_alert",
+          "value": "-"
+        },
+        {
+          "name": "function_cyclomatic_complexity_warning",
+          "value": "9"
+        },
+        {
+          "name": "function_duplication_min_lines_of_code_for_check",
+          "value": "10"
+        },
+        {
+          "name": "function_duplication_min_similarity_percentage",
+          "value": "75"
+        },
+        {
+          "name": "function_embedded_content_lines_of_code_alert",
+          "value": "-"
+        },
+        {
+          "name": "function_embedded_content_lines_of_code_warning",
+          "value": "-"
+        },
+        {
+          "name": "function_lines_of_code_alert",
+          "value": "-"
+        },
+        {
+          "name": "function_lines_of_code_warning",
+          "value": "50"
+        },
+        {
+          "name": "function_max_arguments",
+          "value": "4"
+        },
+        {
+          "name": "function_nesting_depth_warning",
+          "value": "4"
+        },
+        {
+          "name": "unit_test_consecutive_asserts_for_large_block",
+          "value": "4"
+        },
+        {
+          "name": "unit_test_suite_number_of_large_assertion_blocks",
+          "value": "4"
+        }
+      ]
+    },
+    {
+      "matching_content_path": "packages/cli/src/commands/herdr-status-view.ts",
+      "matching_content_path_doc": "The herdr CLI seam — pane ids, env names and argv strings ARE the domain here, so Primitive Obsession and String Heavy Function Arguments are disabled for this file only; every other rule keeps bro's bar.",
+      "rules": [
+        {
+          "name": "Brain Method",
+          "weight": 1
+        },
+        {
+          "name": "Bumpy Road Ahead",
+          "weight": 1
+        },
+        {
+          "name": "Code Duplication",
+          "weight": 1
+        },
+        {
+          "name": "Complex Conditional",
+          "weight": 1
+        },
+        {
+          "name": "Complex Method",
+          "weight": 1
+        },
+        {
+          "name": "Constructor Over-Injection",
+          "weight": 1
+        },
+        {
+          "name": "Deep, Global Nested Complexity",
+          "weight": 1
+        },
+        {
+          "name": "Deep, Nested Complexity",
+          "weight": 1
+        },
+        {
+          "name": "Duplicated Assertion Blocks",
+          "weight": 1
+        },
+        {
+          "name": "Excess Number of Function Arguments",
+          "weight": 1
+        },
+        {
+          "name": "Global Conditionals",
+          "weight": 1
+        },
+        {
+          "name": "Large Assertion Blocks",
+          "weight": 1
+        },
+        {
+          "name": "Large Embedded Code Block",
+          "weight": 1
+        },
+        {
+          "name": "Large Method",
+          "weight": 1
+        },
+        {
+          "name": "Lines of Code in a Single File",
+          "weight": 1
+        },
+        {
+          "name": "Lines of Declarations in a Single File",
+          "weight": 1
+        },
+        {
+          "name": "Low Cohesion",
+          "weight": 1
+        },
+        {
+          "name": "Missing Arguments Abstractions",
+          "weight": 1
+        },
+        {
+          "name": "Number of Functions in a Single Module",
+          "weight": 1
+        },
+        {
+          "name": "Overall Code Complexity",
+          "weight": 1
+        },
+        {
+          "name": "Overall Function Size",
+          "weight": 1
+        },
+        {
+          "name": "Primitive Obsession",
+          "weight": 0
+        },
+        {
+          "name": "String Heavy Function Arguments",
+          "weight": 0
+        }
+      ],
+      "thresholds": [
+        {
+          "name": "constructor_max_arguments",
+          "value": "5"
+        },
+        {
+          "name": "file_lines_of_code_for_alert",
+          "value": "-"
+        },
+        {
+          "name": "file_lines_of_code_for_critical_alert",
+          "value": "-"
+        },
+        {
+          "name": "file_lines_of_code_for_warning",
+          "value": "-"
+        },
+        {
+          "name": "file_mean_cyclomatic_complexity_warning",
+          "value": "4"
+        },
+        {
+          "name": "file_primitive_obsession_percentage_for_warning",
+          "value": "30"
+        },
+        {
+          "name": "function_bumpy_road_bumps_for_warning",
+          "value": "2"
+        },
+        {
+          "name": "function_bumpy_road_nesting_level_depth",
+          "value": "2"
+        },
+        {
+          "name": "function_complex_conditional_branches_alert",
+          "value": "-"
+        },
+        {
+          "name": "function_complex_conditional_branches_warning",
+          "value": "2"
+        },
+        {
+          "name": "function_cyclomatic_complexity_alert",
+          "value": "-"
+        },
+        {
+          "name": "function_cyclomatic_complexity_warning",
+          "value": "9"
+        },
+        {
+          "name": "function_duplication_min_lines_of_code_for_check",
+          "value": "10"
+        },
+        {
+          "name": "function_duplication_min_similarity_percentage",
+          "value": "75"
+        },
+        {
+          "name": "function_embedded_content_lines_of_code_alert",
+          "value": "-"
+        },
+        {
+          "name": "function_embedded_content_lines_of_code_warning",
+          "value": "-"
+        },
+        {
+          "name": "function_lines_of_code_alert",
+          "value": "-"
+        },
+        {
+          "name": "function_lines_of_code_warning",
+          "value": "50"
+        },
+        {
+          "name": "function_max_arguments",
+          "value": "4"
+        },
+        {
+          "name": "function_nesting_depth_warning",
+          "value": "4"
+        },
+        {
+          "name": "unit_test_consecutive_asserts_for_large_block",
+          "value": "4"
+        },
+        {
+          "name": "unit_test_suite_number_of_large_assertion_blocks",
+          "value": "4"
+        }
+      ]
+    },
+    {
       "matching_content_path": "**/*",
       "matching_content_path_doc": "All bro source — one bar for the whole repo, so a file's rung in .codescene/custom-quality-gates.json measures the file, not its directory.",
       "rules": [

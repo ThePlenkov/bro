@@ -152,51 +152,68 @@ function armRelease(pane: string): void {
   }
 }
 
-/** `bro herdr status-view <worktree> [--once]` — the pane's whole
- *  lifecycle: bind `unknown`, ride file changes, release on exit. */
-export async function runStatusView(argv: string[]): Promise<void> {
-  const args = argv.filter(a => a !== '--once');
-  const once = argv.includes('--once');
-  const worktree = args[0];
-  if (worktree === undefined || worktree.startsWith('-')) {
+/** Everything one live view needs — resolved once at start. */
+interface ViewCtx {
+  worktree: string;
+  pane: string;
+  statePath: string;
+}
+
+/** Arg + environment resolution — `undefined` means "outside herdr,
+ *  do nothing" (the add-herdr-support contract); a missing worktree
+ *  arg is the only usage error. */
+function viewContext(argv: string[]): ViewCtx | undefined {
+  const worktree = argv.find(a => !a.startsWith('-'));
+  if (worktree === undefined) {
     console.error('usage: bro herdr status-view <worktree> [--once]');
     process.exit(2);
   }
+  if (process.env.HERDR_ENV !== '1') return undefined;
   const pane = process.env.HERDR_PANE_ID;
-  if (process.env.HERDR_ENV !== '1' || pane === undefined || pane === '') {
-    // the add-herdr-support contract — outside Herdr do nothing
-    return;
-  }
-
+  if (pane === undefined || pane === '') return undefined;
   const base = gitCommonDir(worktree) ?? worktree;
-  const statePath = fleetStatusPath(base, worktree);
-  mkdirSync(dirname(statePath), { recursive: true });
-  armRelease(pane);
+  return { worktree, pane, statePath: fleetStatusPath(base, worktree) };
+}
 
+/** One deduped re-read — parses, reports, redraws only on real moves. */
+function makeRefresh(ctx: ViewCtx): () => void {
+  let lastRaw: string | undefined | null = null;
   const apply = (s: FleetPaneState | undefined): void => {
     const seq = nextSeq();
-    call(reportArgs(pane, s?.led ?? { state: 'unknown' }, seq));
-    call(metaArgs(pane, s, seq));
-    process.stdout.write(renderView(s, worktree));
+    call(reportArgs(ctx.pane, s?.led ?? { state: 'unknown' }, seq));
+    call(metaArgs(ctx.pane, s, seq));
+    process.stdout.write(renderView(s, ctx.worktree));
   };
-
-  let lastRaw: string | undefined | null = null;
-  const refresh = (): void => {
-    lastRaw = applyRaw(readRaw(statePath), lastRaw, apply);
+  return () => {
+    lastRaw = applyRaw(readRaw(ctx.statePath), lastRaw, apply);
   };
+}
 
-  refresh();
-  if (once) return;
-
-  // dir watch, not file watch — the projector swaps via rename, so the
-  // file's inode changes every write; the parent dir sees every swap.
+/** dir watch, not file watch — the projector swaps via rename, so the
+ *  file's inode changes every write; the parent dir sees every swap. */
+function armWatch(ctx: ViewCtx, refresh: () => void): void {
   try {
-    watch(dirname(statePath), (_e, name) => {
-      if (name === basename(statePath)) refresh();
+    watch(dirname(ctx.statePath), (_e, name) => {
+      if (name === basename(ctx.statePath)) refresh();
     });
   } catch {
     // the dir vanishes only with the whole repo — the poll below still rides
   }
+}
+
+/** `bro herdr status-view <worktree> [--once]` — the pane's whole
+ *  lifecycle: bind `unknown`, ride file changes, release on exit. */
+export async function runStatusView(argv: string[]): Promise<void> {
+  const ctx = viewContext(argv);
+  if (ctx === undefined) return;
+  mkdirSync(dirname(ctx.statePath), { recursive: true });
+  armRelease(ctx.pane);
+
+  const refresh = makeRefresh(ctx);
+  refresh();
+  if (argv.includes('--once')) return;
+
+  armWatch(ctx, refresh);
   // the interval is the stay-alive handle AND the safety net — a ref'd
   // timer keeps the pane occupied even when the watch failed to arm
   setInterval(refresh, 30_000);
