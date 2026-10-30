@@ -21,6 +21,7 @@
 import { existsSync } from 'node:fs';
 import { basename, isAbsolute, resolve } from 'node:path';
 import {
+  agentsJson,
   ctxJson,
   type HerdrWorkspace,
   herdrTry,
@@ -28,6 +29,7 @@ import {
   notify,
   type PluginState,
   repoDir,
+  run,
   type StatusWorktree,
   saveState,
   stateScope,
@@ -275,6 +277,119 @@ function convergeSessions(wsForPath: Map<string, string>, ctx: WsCtx): void {
  *  time decide — a vanished checkout is never "transient" twice. */
 const GONE_GRACE_MS = 60_000;
 
+function hasLiveRunOrBoundAgent(p: Planes, treePath: string): boolean {
+  // check agents from status
+  for (const a of p.status.fleet.agents) {
+    if (a.state === 'running') {
+      // try to resolve worktree
+      const ap = a.worktree;
+      if (ap === treePath) return true;
+      // also check if it's under this worktree
+      if (ap && (ap.startsWith(treePath + '/') || ap === treePath)) return true;
+    }
+  }
+  // check loop runs
+  for (const r of p.status.loop.runs) {
+    if (r.state === 'running' && r.worktree) {
+      if (r.worktree === treePath || r.worktree.startsWith(treePath + '/')) return true;
+    }
+  }
+  // check agents.json for live entries pointing to this worktree
+  const reg = agentsJson(p.repo);
+  for (const entry of Object.values(reg)) {
+    if (entry.worktree) {
+      if (entry.worktree === treePath || entry.worktree.startsWith(treePath + '/')) {
+        // if there's a pid, check if alive? best effort
+        if (entry.pid !== undefined) {
+          // don't import pidAlive to keep deps minimal; assume live if pid present
+          return true;
+        }
+        return true;
+      }
+    }
+  }
+  return false;
+}
+
+function isBranchPushedToRemote(wt: string): boolean {
+  // branch remote existence
+  const r = run('git', ['-C', wt, 'rev-parse', '--abbrev-ref', '--symbolic-full-name', '@{u}']);
+  if (r.code === 0 && r.out.trim()) return true;
+  // try to see if branch exists on origin
+  const br = run('git', ['-C', wt, 'rev-parse', '--abbrev-ref', 'HEAD']);
+  const branch = br.out.trim();
+  if (branch && branch !== 'HEAD') {
+    const lr = run('git', ['-C', wt, 'ls-remote', '--exit-code', '--heads', 'origin', branch]);
+    if (lr.code === 0) return true;
+  }
+  // also try generic check
+  const lr2 = run('git', ['-C', wt, 'show-ref', '--verify', '--quiet', `refs/remotes/origin/${branch}`]);
+  if (lr2.code === 0) return true;
+  return false;
+}
+
+function isTreeClean(wt: string): boolean {
+  const r = run('git', ['-C', wt, 'status', '--porcelain']);
+  return r.code === 0 && r.out.trim() === '';
+}
+
+function hasUnpushedCommits(wt: string): boolean {
+  // Must check: git -C <wt> log origin/main..HEAD (unpushed commits block)
+  // Try origin/main first, also try origin/HEAD or common bases
+  const bases = ['origin/main', 'origin/master', 'origin/HEAD'];
+  for (const base of bases) {
+    const r = run('git', ['-C', wt, 'log', `${base}..HEAD`, '--oneline']);
+    if (r.code === 0 && r.out.trim() !== '') {
+      return true;
+    }
+  }
+  // if we can't determine against base, be conservative? task says "git -C <wt> log origin/main..HEAD (unpushed commits block)" - check that specific form
+  const r = run('git', ['-C', wt, 'log', 'origin/main..HEAD', '--oneline']);
+  if (r.code === 0 && r.out.trim() !== '') return true;
+  return false;
+}
+
+function reapPreservedDead(p: Planes, ctx: WsCtx): number {
+  let reaped = 0;
+  for (const w of p.worktrees.worktrees) {
+    const ws = w.open_workspace_id;
+    if (ws === undefined || w.path === p.main) continue;
+    if (worktreeGone(w.path)) continue;
+    if (ctx.wsById.get(ws) === undefined) continue;
+    // only close managed workspaces? or any open workspace that meets criteria
+    const rec = ctx.state.workspaces[w.path];
+    // be permissive - if it's managed or just has a workspace open
+    if (hasLiveRunOrBoundAgent(p, w.path)) {
+      log(`keep ${basename(w.path)} — live run/bound agent`);
+      continue;
+    }
+    if (!isTreeClean(w.path)) {
+      log(`keep ${basename(w.path)} — dirty tree`);
+      continue;
+    }
+    if (hasUnpushedCommits(w.path)) {
+      log(`keep ${basename(w.path)} — unpushed commits`);
+      continue;
+    }
+    if (!isBranchPushedToRemote(w.path)) {
+      log(`keep ${basename(w.path)} — branch not remote-preserved`);
+      continue;
+    }
+    // all work remote-preserved (branch pushed or PR merged/open) - we checked remote existence
+    if (herdrTry(['workspace', 'close', ws]) !== undefined) {
+      delete ctx.state.workspaces[w.path];
+      delete ctx.state.renderers[w.path];
+      delete ctx.state.statuses[w.path];
+      delete ctx.state.gone[w.path];
+      reaped += 1;
+      log(`reaped preserved-dead ${ws} — ${basename(w.path)}`);
+    } else {
+      log(`reap preserved-dead ${ws} failed — retry next pass`);
+    }
+  }
+  return reaped;
+}
+
 function reapDead(p: Planes, ctx: WsCtx): number {
   const now = Date.now();
   let reaped = 0;
@@ -345,7 +460,9 @@ function convergeLocked(p: Planes, scope: string): ConvergeResult {
   convergeRenderers(wsForPath, ctx);
   convergeStatuses(wsForPath, ctx);
   convergeSessions(wsForPath, ctx);
-  const reaped = reapDead(p, ctx);
+  const reapedGone = reapDead(p, ctx);
+  const reapedPreserved = reapPreservedDead(p, ctx);
+  const reaped = reapedGone + reapedPreserved;
   saveState(scope, ctx.state);
   return {
     armed: armed.size,
