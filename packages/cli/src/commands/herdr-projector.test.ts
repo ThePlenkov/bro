@@ -500,13 +500,52 @@ describe('projectFleet — a live pass over a fake herdr', () => {
 
   const stateDirOf = (): string => mkdtempSync(join(tmpdir(), 'proj-state-'));
   const plainRoot = (): string => mkdtempSync(join(tmpdir(), 'proj-fleet-'));
-  /** managed workspace record + ws row for a one-workspace scenario. */
-  const oneWs = (root: string, ws: string) => ({
-    worktrees: [{ path: root, open_workspace_id: ws }],
-    workspaces: [{ workspace_id: ws, label: 'Old', tokens: {} }],
+
+  /** A pane row in `pane list` — `agent` only when herdr detected one. */
+  const pane = (id: string, ws: string, agent?: string): Record<string, unknown> => ({
+    pane_id: id,
+    workspace_id: ws,
+    ...(agent !== undefined ? { agent } : {}),
   });
-  const oneWsState = (root: string, ws: string) => ({
-    workspaces: { [root]: { ws, label: 'Old', managed: true } },
+  /** A busy pane's process-info — a foreground pid besides the shell. */
+  const busy = (shell: number, fg: number): Record<string, unknown> => ({
+    shell_pid: shell,
+    foreground_processes: [{ pid: shell }, { pid: fg }],
+  });
+  /** The plugin's renderer record for one tree → pane binding. */
+  const rendererOf = (root: string, paneId: string, ws: string): Record<string, unknown> => ({
+    [root]: { pane_id: paneId, workspace: ws },
+  });
+  /** The plugin's single mirror record. */
+  const mirrorOf = (paneId: string, ws: string, marked: boolean): Record<string, unknown> => ({
+    m1: { pane_id: paneId, workspace: ws, marked },
+  });
+
+  /** The one-workspace LED fixture — scenario + plugin state for a
+   *  managed worktree, with pane rows, process shapes, and ledger
+   *  panes overlaid. Every LED test's fixture is one of these; the
+   *  envelope lives here so the tests carry only their unique data. */
+  const ledFixture = (
+    root: string,
+    ws: string,
+    o: {
+      panes?: Record<string, unknown>[];
+      processes?: Record<string, unknown>;
+      mirrors?: Record<string, unknown>;
+      renderers?: Record<string, unknown>;
+    } = {}
+  ): { scenario: Record<string, unknown>; state: Record<string, unknown> } => ({
+    scenario: {
+      worktrees: [{ path: root, open_workspace_id: ws }],
+      workspaces: [{ workspace_id: ws, label: 'Old', tokens: {} }],
+      ...(o.panes !== undefined ? { panes: o.panes } : {}),
+      ...(o.processes !== undefined ? { processes: o.processes } : {}),
+    },
+    state: {
+      workspaces: { [root]: { ws, label: 'Old', managed: true } },
+      ...(o.mirrors !== undefined ? { mirrors: o.mirrors } : {}),
+      ...(o.renderers !== undefined ? { renderers: o.renderers } : {}),
+    },
   });
 
   test('a managed workspace gets its rename + metadata writes', () => {
@@ -554,24 +593,16 @@ describe('projectFleet — a live pass over a fake herdr', () => {
 
   test('LED report lands on the busy agent-free ledger pane — and only it', () => {
     const root = armedRoot();
-    const { r, calls } = fleetPass(root, stateDirOf(), {
-      scenario: {
-        ...oneWs(root, 'wL'),
-        panes: [
-          { pane_id: 'wL:p2', workspace_id: 'wL', agent: 'devin' },
-          { pane_id: 'wL:p1', workspace_id: 'wL' },
-        ],
-        processes: {
-          'wL:p1': { shell_pid: 7, foreground_processes: [{ pid: 7 }, { pid: 99 }] },
-          'wL:p2': { shell_pid: 5, foreground_processes: [{ pid: 5 }, { pid: 44 }] },
-        },
-      },
-      state: {
-        ...oneWsState(root, 'wL'),
-        mirrors: { m1: { pane_id: 'wL:p2', workspace: 'wL', marked: false } },
-        renderers: { [root]: { pane_id: 'wL:p1', workspace: 'wL' } },
-      },
-    });
+    const { r, calls } = fleetPass(
+      root,
+      stateDirOf(),
+      ledFixture(root, 'wL', {
+        panes: [pane('wL:p2', 'wL', 'devin'), pane('wL:p1', 'wL')],
+        processes: { 'wL:p1': busy(7, 99), 'wL:p2': busy(5, 44) },
+        mirrors: mirrorOf('wL:p2', 'wL', false),
+        renderers: rendererOf(root, 'wL:p1', 'wL'),
+      })
+    );
     assert.equal(r.leds, 1);
     // armed tree, no worker verdict → unknown; only p1 is reportable
     const report = calls.find(c => c.slice(0, 2).join(' ') === 'pane report-agent');
@@ -594,19 +625,15 @@ describe('projectFleet — a live pass over a fake herdr', () => {
 
   test('an unarmed projection releases the pane instead of reporting', () => {
     const root = plainRoot();
-    const { r, calls } = fleetPass(root, stateDirOf(), {
-      scenario: {
-        ...oneWs(root, 'wR'),
-        panes: [{ pane_id: 'wR:p1', workspace_id: 'wR' }],
-        processes: {
-          'wR:p1': { shell_pid: 7, foreground_processes: [{ pid: 7 }, { pid: 99 }] },
-        },
-      },
-      state: {
-        ...oneWsState(root, 'wR'),
-        renderers: { [root]: { pane_id: 'wR:p1', workspace: 'wR' } },
-      },
-    });
+    const { r, calls } = fleetPass(
+      root,
+      stateDirOf(),
+      ledFixture(root, 'wR', {
+        panes: [pane('wR:p1', 'wR')],
+        processes: { 'wR:p1': busy(7, 99) },
+        renderers: rendererOf(root, 'wR:p1', 'wR'),
+      })
+    );
     assert.equal(r.leds, 1);
     const release = calls.find(c => c.slice(0, 2).join(' ') === 'pane release-agent');
     assert.deepEqual(release?.slice(0, 7), [
@@ -623,18 +650,16 @@ describe('projectFleet — a live pass over a fake herdr', () => {
 
   test('an idle-shell pane holds no report — the probe would clear it in ~1s', () => {
     const root = armedRoot();
-    const { r, calls } = fleetPass(root, stateDirOf(), {
-      scenario: {
-        ...oneWs(root, 'wI'),
-        panes: [{ pane_id: 'wI:p1', workspace_id: 'wI' }],
+    const { r, calls } = fleetPass(
+      root,
+      stateDirOf(),
+      ledFixture(root, 'wI', {
+        panes: [pane('wI:p1', 'wI')],
         // shell_pid IS the only foreground process → idle
         processes: { 'wI:p1': { shell_pid: 7, foreground_processes: [{ pid: 7 }] } },
-      },
-      state: {
-        ...oneWsState(root, 'wI'),
-        renderers: { [root]: { pane_id: 'wI:p1', workspace: 'wI' } },
-      },
-    });
+        renderers: rendererOf(root, 'wI:p1', 'wI'),
+      })
+    );
     assert.equal(r.leds, 0);
     assert.ok(calls.some(c => c.slice(0, 2).join(' ') === 'pane list'));
     assert.ok(!calls.some(c => c[1] === 'report-agent' || c[1] === 'release-agent'));
@@ -642,33 +667,26 @@ describe('projectFleet — a live pass over a fake herdr', () => {
 
   test('no ledger panes → the LED path does not even read pane list', () => {
     const root = plainRoot();
-    const { r, calls } = fleetPass(root, stateDirOf(), {
-      scenario: oneWs(root, 'wN'),
-      state: oneWsState(root, 'wN'),
-    });
+    const { r, calls } = fleetPass(root, stateDirOf(), ledFixture(root, 'wN'));
     assert.equal(r.leds, 0);
     assert.ok(!calls.some(c => c.slice(0, 2).join(' ').startsWith('pane ')));
   });
 
   test('a pane still bound to us but never selected is released', () => {
     const root = armedRoot();
-    const { r, calls } = fleetPass(root, stateDirOf(), {
-      scenario: {
-        ...oneWs(root, 'wF'),
+    const { r, calls } = fleetPass(
+      root,
+      stateDirOf(),
+      ledFixture(root, 'wF', {
         panes: [
           // a leftover bro-fleet binding the ledger no longer proposes
-          { pane_id: 'wF:p9', workspace_id: 'wF', agent: 'fleet' },
-          { pane_id: 'wF:p1', workspace_id: 'wF' },
+          pane('wF:p9', 'wF', 'fleet'),
+          pane('wF:p1', 'wF'),
         ],
-        processes: {
-          'wF:p1': { shell_pid: 7, foreground_processes: [{ pid: 7 }, { pid: 99 }] },
-        },
-      },
-      state: {
-        ...oneWsState(root, 'wF'),
-        renderers: { [root]: { pane_id: 'wF:p1', workspace: 'wF' } },
-      },
-    });
+        processes: { 'wF:p1': busy(7, 99) },
+        renderers: rendererOf(root, 'wF:p1', 'wF'),
+      })
+    );
     assert.equal(r.leds, 2);
     assert.deepEqual(
       calls.find(c => c.slice(0, 2).join(' ') === 'pane release-agent')?.slice(0, 3),
@@ -680,35 +698,18 @@ describe('projectFleet — a live pass over a fake herdr', () => {
   test('a stale assertion is released when the selection moves', () => {
     const root = armedRoot();
     const dir = stateDirOf();
-    const scenario = {
-      ...oneWs(root, 'wS'),
-      panes: [
-        { pane_id: 'wS:p1', workspace_id: 'wS' },
-        { pane_id: 'wS:p2', workspace_id: 'wS' },
-      ],
-      processes: {
-        'wS:p1': { shell_pid: 7, foreground_processes: [{ pid: 7 }, { pid: 99 }] },
-        'wS:p2': { shell_pid: 5, foreground_processes: [{ pid: 5 }, { pid: 44 }] },
-      },
-    };
-    const p1 = fleetPass(root, dir, {
-      scenario,
-      state: {
-        ...oneWsState(root, 'wS'),
-        mirrors: { m1: { pane_id: 'wS:p1', workspace: 'wS', marked: false } },
-      },
-    });
+    const f = (render: Record<string, unknown> | undefined, marked: boolean) =>
+      ledFixture(root, 'wS', {
+        panes: [pane('wS:p1', 'wS'), pane('wS:p2', 'wS')],
+        processes: { 'wS:p1': busy(7, 99), 'wS:p2': busy(5, 44) },
+        mirrors: mirrorOf('wS:p1', 'wS', marked),
+        ...(render !== undefined ? { renderers: render } : {}),
+      });
+    const p1 = fleetPass(root, dir, f(undefined, false));
     assert.deepEqual(p1.calls.find(c => c[1] === 'report-agent')?.[2], 'wS:p1');
     // next tick: the mirror is marked (dead tail), the selection moves
     // to the renderer pane → the p1 assertion must be released
-    const p2 = fleetPass(root, dir, {
-      scenario,
-      state: {
-        ...oneWsState(root, 'wS'),
-        mirrors: { m1: { pane_id: 'wS:p1', workspace: 'wS', marked: true } },
-        renderers: { [root]: { pane_id: 'wS:p2', workspace: 'wS' } },
-      },
-    });
+    const p2 = fleetPass(root, dir, f(rendererOf(root, 'wS:p2', 'wS'), true));
     assert.equal(p2.r.leds, 2);
     assert.deepEqual(p2.calls.find(c => c[1] === 'release-agent')?.slice(0, 3), [
       'pane',
@@ -721,19 +722,11 @@ describe('projectFleet — a live pass over a fake herdr', () => {
   test('the seq is monotonic per source — a clock regress cannot emit a stale one', () => {
     const root = armedRoot();
     const dir = stateDirOf();
-    const f = {
-      scenario: {
-        ...oneWs(root, 'wQ'),
-        panes: [{ pane_id: 'wQ:p1', workspace_id: 'wQ' }],
-        processes: {
-          'wQ:p1': { shell_pid: 7, foreground_processes: [{ pid: 7 }, { pid: 99 }] },
-        },
-      },
-      state: {
-        ...oneWsState(root, 'wQ'),
-        renderers: { [root]: { pane_id: 'wQ:p1', workspace: 'wQ' } },
-      },
-    };
+    const f = ledFixture(root, 'wQ', {
+      panes: [pane('wQ:p1', 'wQ')],
+      processes: { 'wQ:p1': busy(7, 99) },
+      renderers: rendererOf(root, 'wQ:p1', 'wQ'),
+    });
     const seqOfReport = (calls: string[][]): number => {
       const c = calls.find(x => x[1] === 'report-agent');
       assert.ok(c !== undefined);
