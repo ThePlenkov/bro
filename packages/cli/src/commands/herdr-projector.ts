@@ -77,6 +77,17 @@ export interface TreeProjection {
   /** The freshest registry agent's program name — the real driver
    *  behind the pane (opencode, devin, claude, …). */
   agent?: string;
+  /** The session pane's attach identity — the session-owning agent's
+   *  recorded acpSessionId (spec bro-nwl5g). */
+  acpSessionId?: string;
+  /** The session-owning agent's provider name — the pane resolves its
+   *  `providers.<name>` entry for the acp command. */
+  provider?: string;
+  /** The session-owning agent's recorded model — display text. */
+  model?: string;
+  /** The session-owning agent's native log — the session pane's
+   *  fallback stream. */
+  log?: string;
 }
 
 // --- pure classification -------------------------------------------------------
@@ -570,6 +581,12 @@ export interface AgentRow {
   /** The agent binary driving the pipeline (opencode, devin, …) —
    *  resolved from `providers.<name>.command`, the pane's agent name. */
   agent?: string;
+  /** The session-view fields — raw registry ride-alongs the
+   *  `bro: session` pane resolves against provider config. */
+  provider?: string;
+  model?: string;
+  acpSessionId?: string;
+  log?: string;
   /** Recency key — the entry's spawnedAt. */
   at: number;
 }
@@ -628,11 +645,25 @@ export function projectTree(i: TreeInput): {
   const agent = (
     i.agents.find(a => a.live && a.agent !== undefined) ?? i.agents.find(a => a.agent !== undefined)
   )?.agent;
+  // the session owner — the agent whose session the `bro: session` pane
+  // attaches (or whose log it tails). A carrier is a row holding an
+  // acpSessionId or a log; live wins over dead, the newest carrier
+  // wins inside a liveness class — the freshest worker on the tree is
+  // the session worth watching, even when an older acp session exists
+  const session = i.agents.reduce<AgentRow | undefined>((best, a) => {
+    if (a.acpSessionId === undefined && a.log === undefined) return best;
+    if (best === undefined || (a.live && !best.live)) return a;
+    return a.live === best.live && a.at > best.at ? a : best;
+  }, undefined);
   const projection: TreeProjection = {
     ...worker,
     ...prFor(i.branch, slug, i.beads, i.act, i.now),
     armed: i.claim !== undefined || i.markerArmed,
     ...(agent !== undefined ? { agent } : {}),
+    ...(session?.acpSessionId !== undefined ? { acpSessionId: session.acpSessionId } : {}),
+    ...(session?.provider !== undefined ? { provider: session.provider } : {}),
+    ...(session?.model !== undefined ? { model: session.model } : {}),
+    ...(session?.log !== undefined ? { log: session.log } : {}),
   };
   const title =
     (slug !== undefined ? i.beads.find(b => b.id === slug)?.title : undefined) || basename(i.path);
@@ -772,8 +803,12 @@ function agentRows(t: HerdrWorktree, p: Planes, ctx: PassCtx): AgentRow[] {
         ...(e.provider !== undefined
           ? {
               agent: agentOfCommand(providerCommand(p.providers[e.provider])) ?? e.provider,
+              provider: e.provider,
             }
           : {}),
+        ...(typeof e.model === 'string' ? { model: e.model } : {}),
+        ...(typeof e.acpSessionId === 'string' ? { acpSessionId: e.acpSessionId } : {}),
+        ...(typeof e.log === 'string' ? { log: e.log } : {}),
         at: parseTs(e.spawnedAt),
       };
     });
@@ -995,6 +1030,35 @@ function backstopArgs(paneId: string, led: PaneLed, seq: number): string[] {
   return args;
 }
 
+/** The fleet-state doc one job writes — every optional field rides a
+ *  spread so a half-populated projection never lands as a null column.
+ *  The title keeps the file's previous value when the projection
+ *  degraded to the basename (a bead-read outage must not flicker a
+ *  real title away). */
+function stateOf(j: PaneJob, path: string, led: PaneLed): FleetPaneState {
+  const prev = readFleetState(path);
+  const title =
+    j.title === basename(j.ws.tree.path) && prev?.title !== undefined && prev.title !== ''
+      ? prev.title
+      : j.title;
+  return {
+    v: 1,
+    worktree: j.ws.tree.path,
+    workspace: j.ws.wsId,
+    title,
+    ...(j.slug !== undefined ? { slug: j.slug } : {}),
+    status: statusString(j.proj),
+    ...(j.proj.prUrl !== undefined ? { prUrl: j.proj.prUrl } : {}),
+    ...(j.proj.agent !== undefined ? { agent: j.proj.agent } : {}),
+    ...(j.proj.acpSessionId !== undefined ? { acpSessionId: j.proj.acpSessionId } : {}),
+    ...(j.proj.provider !== undefined ? { provider: j.proj.provider } : {}),
+    ...(j.proj.model !== undefined ? { model: j.proj.model } : {}),
+    ...(j.proj.log !== undefined ? { log: j.proj.log } : {}),
+    led,
+    ts: j.now,
+  };
+}
+
 /** One workspace's pane-side write: the fleet-state file the `bro:
  *  status` pane renders and self-reports (primary), plus a backstop
  *  `report-agent` push to the recorded status pane when it is still
@@ -1005,25 +1069,7 @@ function backstopArgs(paneId: string, led: PaneLed, seq: number): string[] {
 function paneWrites(j: PaneJob): { files: number; leds: number; path?: string } {
   const path = fleetStatusPath(j.base, j.ws.tree.path);
   const led = paneLed(j.proj);
-  // a bead-read outage resolves title to the bare basename — keep the
-  // title the file already carries instead of flickering it away
-  const prev = readFleetState(path);
-  const title =
-    j.title === basename(j.ws.tree.path) && prev?.title !== undefined && prev.title !== ''
-      ? prev.title
-      : j.title;
-  const state: FleetPaneState = {
-    v: 1,
-    worktree: j.ws.tree.path,
-    workspace: j.ws.wsId,
-    title,
-    ...(j.slug !== undefined ? { slug: j.slug } : {}),
-    status: statusString(j.proj),
-    ...(j.proj.prUrl !== undefined ? { prUrl: j.proj.prUrl } : {}),
-    ...(j.proj.agent !== undefined ? { agent: j.proj.agent } : {}),
-    led,
-    ts: j.now,
-  };
+  const state = stateOf(j, path, led);
   let files = 0;
   try {
     files = writeFleetState(path, state) ? 1 : 0;

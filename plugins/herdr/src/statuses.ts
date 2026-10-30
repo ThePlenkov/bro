@@ -11,6 +11,7 @@
 import {
   boundPaneIds,
   BRO,
+  BRO_LABELS,
   type HerdrPane,
   herdrOk,
   herdrTry,
@@ -18,7 +19,6 @@ import {
   paneIdle,
   paneList,
   type PluginState,
-  RENDER_LABEL,
   shq,
   STATUS_LABEL,
 } from './lib.ts';
@@ -85,12 +85,15 @@ function armViaSplit(ctx: RenderCtx, panes: HerdrPane[]): void {
 
 /** The pane the status role may take: an unbound orphan carrying our
  *  label first, then any idle pane not bound to another bro role and
- *  not wearing the renderer's label. */
+ *  not wearing any bro-role label. */
 function pickPane(panes: HerdrPane[], bound: Set<string>): { id?: string; adopted: boolean } {
   const orphan = panes.find(p => p.label === STATUS_LABEL && !bound.has(p.pane_id));
   if (orphan !== undefined) return { id: orphan.pane_id, adopted: true };
   const free = panes.find(
-    p => !bound.has(p.pane_id) && p.label !== RENDER_LABEL && paneIdle(p.pane_id)
+    p =>
+      !bound.has(p.pane_id) &&
+      (p.label === undefined || !BRO_LABELS.has(p.label)) &&
+      paneIdle(p.pane_id)
   );
   return { ...(free !== undefined ? { id: free.pane_id } : {}), adopted: false };
 }

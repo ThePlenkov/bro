@@ -52,12 +52,22 @@ const agent = (
     silentMs: number | null;
     at: number;
     key: string;
+    agent: string;
+    provider: string;
+    model: string;
+    acpSessionId: string;
+    log: string;
   }>
 ) => ({
   key: o.key ?? 'mol-1',
   live: o.live ?? false,
   ...(o.terminal !== undefined ? { terminal: o.terminal } : {}),
   silentMs: o.silentMs ?? null,
+  ...(o.agent !== undefined ? { agent: o.agent } : {}),
+  ...(o.provider !== undefined ? { provider: o.provider } : {}),
+  ...(o.model !== undefined ? { model: o.model } : {}),
+  ...(o.acpSessionId !== undefined ? { acpSessionId: o.acpSessionId } : {}),
+  ...(o.log !== undefined ? { log: o.log } : {}),
   at: o.at ?? NOW,
 });
 
@@ -317,6 +327,103 @@ describe('projectTree — end to end over injected planes', () => {
       })
     );
     assert.equal(projection.state, 'stopped');
+  });
+});
+
+describe('the session owner — who the `bro: session` pane attaches (bro-nwl5g)', () => {
+  test('a lone carrier lends its session fields to the projection', () => {
+    const { projection } = projectTree(
+      tree({
+        agents: [
+          agent({
+            live: true,
+            silentMs: M,
+            provider: 'oc',
+            model: 'm1',
+            acpSessionId: 'ses_live',
+            log: '/native-1.log',
+          }),
+        ],
+      })
+    );
+    assert.deepEqual(
+      {
+        acpSessionId: projection.acpSessionId,
+        provider: projection.provider,
+        model: projection.model,
+        log: projection.log,
+      },
+      { acpSessionId: 'ses_live', provider: 'oc', model: 'm1', log: '/native-1.log' }
+    );
+  });
+
+  test('a live carrier outranks a newer dead one — watch the running agent', () => {
+    const { projection } = projectTree(
+      tree({
+        agents: [
+          agent({
+            key: 'dead-newer',
+            terminal: 'exited',
+            acpSessionId: 'ses_dead',
+            provider: 'oc',
+            log: '/dead.log',
+            at: NOW,
+          }),
+          agent({
+            key: 'live-older',
+            live: true,
+            silentMs: M,
+            acpSessionId: 'ses_live',
+            provider: 'kilo',
+            log: '/live.log',
+            at: NOW - 10 * M,
+          }),
+        ],
+      })
+    );
+    assert.equal(projection.acpSessionId, 'ses_live');
+    assert.equal(projection.provider, 'kilo');
+  });
+
+  test('inside one liveness class the newest carrier wins', () => {
+    const { projection } = projectTree(
+      tree({
+        agents: [
+          agent({
+            key: 'old',
+            terminal: 'exited',
+            acpSessionId: 'ses_old',
+            log: '/old.log',
+            at: NOW - 2 * H,
+          }),
+          agent({
+            key: 'new',
+            terminal: 'lost',
+            log: '/new.log',
+            at: NOW - H,
+          }),
+        ],
+      })
+    );
+    assert.equal(projection.acpSessionId, undefined);
+    assert.equal(projection.log, '/new.log');
+  });
+
+  test('a log-only agent still names the pane its stream', () => {
+    const { projection } = projectTree(
+      tree({
+        agents: [agent({ key: 'cli', live: true, silentMs: M, log: '/cli.log' })],
+      })
+    );
+    assert.equal(projection.acpSessionId, undefined);
+    assert.equal(projection.log, '/cli.log');
+  });
+
+  test('no carrier — no session fields at all', () => {
+    const { projection } = projectTree(tree({ agents: [agent({ live: true, silentMs: M })] }));
+    assert.equal(projection.acpSessionId, undefined);
+    assert.equal(projection.provider, undefined);
+    assert.equal(projection.log, undefined);
   });
 });
 
@@ -747,6 +854,24 @@ describe('fleet-state — the state file contract', () => {
     assert.equal(parseFleetState(JSON.stringify({ v: 2 })), undefined);
     assert.equal(parseFleetState(JSON.stringify(doc({ led: { state: 'spinning' } }))), undefined);
     assert.deepEqual(parseFleetState(JSON.stringify(doc())), doc());
+  });
+
+  test('session fields ride the doc — good values keep, bad values strip', () => {
+    const withSession = doc({
+      acpSessionId: 'ses_1',
+      provider: 'oc',
+      model: 'm1',
+      log: '/l.log',
+    });
+    assert.deepEqual(parseFleetState(JSON.stringify(withSession)), withSession);
+    const torn = doc({ acpSessionId: 42, provider: null, model: [], log: '/l.log' });
+    const parsed = parseFleetState(JSON.stringify(torn));
+    assert.equal(parsed?.acpSessionId, undefined);
+    assert.equal(parsed?.provider, undefined);
+    assert.equal(parsed?.model, undefined);
+    assert.equal(parsed?.log, '/l.log');
+    // a stripped malformed field must not invalidate the whole doc
+    assert.equal(parsed?.workspace, 'w1');
   });
 
   test('prune keeps named files and drops the rest', () => {

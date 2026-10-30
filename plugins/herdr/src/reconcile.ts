@@ -39,6 +39,7 @@ import { convergeMirrors, markExitedMirrors } from './mirrors.ts';
 import type { Planes } from './planes.ts';
 import { readPlanes } from './planes.ts';
 import { dropOrphanRenderers, ensureRenderer } from './renderers.ts';
+import { dropOrphanSessions, ensureSession } from './sessions.ts';
 import { agentTreePath } from './status.ts';
 import { dropOrphanStatuses, ensureStatus } from './statuses.ts';
 
@@ -205,6 +206,7 @@ export interface ConvergeResult {
   mirrors: number;
   renderers: number;
   statuses: number;
+  sessions: number;
   reaped: number;
 }
 
@@ -254,6 +256,19 @@ function convergeStatuses(wsForPath: Map<string, string>, ctx: WsCtx): void {
   dropOrphanStatuses(ctx.state, new Set([...ctx.wsById.keys(), ...wsForPath.values()]));
 }
 
+/** Exactly one session pane per managed workspace — alongside `bro:
+ *  status` so the readonly conversation view rides the same managed
+ *  set (spec bro-nwl5g). Same managed-record guard as the renderer. */
+function convergeSessions(wsForPath: Map<string, string>, ctx: WsCtx): void {
+  for (const [path, ws] of wsForPath) {
+    const rec = ctx.state.workspaces[path];
+    if (rec?.managed === true && rec.ws === ws) {
+      ensureSession({ path, ws, state: ctx.state });
+    }
+  }
+  dropOrphanSessions(ctx.state, new Set([...ctx.wsById.keys(), ...wsForPath.values()]));
+}
+
 /** The reaper — a worktree herdr still opens a workspace for, gone off
  *  disk. One sighting stamps `goneSince`; a second pass at least the
  *  grace window later closes the workspace. Only filesystem proof and
@@ -277,6 +292,7 @@ function reapDead(p: Planes, ctx: WsCtx): number {
       delete ctx.state.workspaces[w.path];
       delete ctx.state.renderers[w.path];
       delete ctx.state.statuses[w.path];
+      delete ctx.state.sessions[w.path];
       continue;
     }
     let since = ctx.state.gone[w.path];
@@ -289,6 +305,7 @@ function reapDead(p: Planes, ctx: WsCtx): number {
       delete ctx.state.workspaces[w.path];
       delete ctx.state.renderers[w.path];
       delete ctx.state.statuses[w.path];
+      delete ctx.state.sessions[w.path];
       delete ctx.state.gone[w.path];
       reaped += 1;
       log(`reaped ${ws} — worktree gone: ${basename(w.path)}`);
@@ -327,6 +344,7 @@ function convergeLocked(p: Planes, scope: string): ConvergeResult {
   markExitedMirrors(p, ctx.state);
   convergeRenderers(wsForPath, ctx);
   convergeStatuses(wsForPath, ctx);
+  convergeSessions(wsForPath, ctx);
   const reaped = reapDead(p, ctx);
   saveState(scope, ctx.state);
   return {
@@ -334,6 +352,7 @@ function convergeLocked(p: Planes, scope: string): ConvergeResult {
     mirrors: Object.keys(ctx.state.mirrors).length,
     renderers: Object.keys(ctx.state.renderers).length,
     statuses: Object.keys(ctx.state.statuses).length,
+    sessions: Object.keys(ctx.state.sessions).length,
     reaped,
   };
 }
