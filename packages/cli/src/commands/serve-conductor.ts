@@ -2633,24 +2633,32 @@ const blocksTokens = (blocks: OutBlock[]): number =>
  *  the sessions map; entries pointing at dead sessions prune away. */
 const CHAIN_CAP = 256;
 
+function pruneDeadChainEntries(
+  chains: Map<string, { key: string; consumed: number }>,
+  sessions: Map<string, ConvSession>
+): void {
+  for (const [id, e] of chains) {
+    if (sessions.has(e.key)) continue;
+    chains.delete(id);
+  }
+}
+
+function pruneChainCapacity(
+  chains: Map<string, { key: string; consumed: number }>
+): void {
+  const keys = Array.from(chains.keys());
+  let i = 0;
+  while (chains.size > CHAIN_CAP && i < keys.length) {
+    chains.delete(keys[i++]);
+  }
+}
+
 function pruneChains(
   chains: Map<string, { key: string; consumed: number }>,
   sessions: Map<string, ConvSession>
 ): void {
-  for (const [id, e] of Array.from(chains)) {
-    if (sessions.has(e.key)) {
-      continue;
-    }
-    chains.delete(id);
-  }
-  let overflow = chains.size - CHAIN_CAP;
-  for (const id of Array.from(chains.keys())) {
-    if (overflow <= 0) {
-      break;
-    }
-    chains.delete(id);
-    overflow--;
-  }
+  pruneDeadChainEntries(chains, sessions);
+  pruneChainCapacity(chains);
 }
 
 /** Response envelope — the same object shape streamed or buffered. */
