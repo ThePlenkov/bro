@@ -429,13 +429,6 @@ export function worktreePathFor(mainRoot: string, slug: string): string {
   return join(dirname(mainRoot), `${basename(mainRoot)}--${slug}`)
 }
 
-/** Slug → sibling path next to the main checkout: `bro` + `fix-x` →
- *  `../bro--fix-x`. The linked-worktree naming convention every surface
- *  shares — pure path math, the git reads live around it. */
-export function worktreePathFor(mainRoot: string, slug: string): string {
-  return join(dirname(mainRoot), `${basename(mainRoot)}--${slug}`)
-}
-
 /** Every worktree checkout's root — `git worktree list` records, main
  *  first, bare records dropped (a bare repo's own entry is git storage,
  *  not a checkout; its LINKED worktrees still count). `-z` terminates
