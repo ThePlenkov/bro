@@ -117,6 +117,7 @@ import {
 } from '@broject/act';
 import { annotateThreads, judgeConfig, judgeFacade } from '@broject/judge';
 import { loadAgentEnv, type AgentConnectorEnv } from '../agent-connectors.ts';
+import { reconcileLanePause } from '../lane.ts';
 import { flag } from './args.ts';
 import { defaultBranch, runActCommand } from './act.ts';
 import { emitDevinUsage } from '@broject/devin';
@@ -128,6 +129,7 @@ import {
 } from './foreign-push.ts';
 import { spawnStepAgent } from './agents.ts';
 import { collectAgents } from './fleet.ts';
+import { projectFleet } from './herdr-projector.ts';
 import {
   driveSection,
   MAX_INTERVAL_SEC,
@@ -2433,6 +2435,7 @@ function lanePauseTick(ctx: Ctx): void {
 /** One pass: enumerate, probe every open PR, act per verdict. */
 async function driveOnce(ctx: Ctx): Promise<void> {
   await emitLaneUsage(ctx);
+  lanePauseTick(ctx);
   const { byStep, degraded } = await collectAgents(ctx.mainRoot);
   for (const d of degraded) {
     say(ctx, `warning: backend degraded — ${d}`);
@@ -2478,7 +2481,6 @@ async function driveOnce(ctx: Ctx): Promise<void> {
   }
   if (prs.size === 0) {
     say(ctx, 'drive: no open PRs on fleet branches');
-<<<<<<< HEAD
   }
   // the projector rides even a failed sweep — a skipped projection is
   // a stale label, exactly the failure this tick exists to kill
@@ -2515,10 +2517,6 @@ function herdrProjectorTick(ctx: Ctx): void {
   } catch {
     // a failed projection retries next pass — never a pass failure
   }
-=======
-  }
-  await sweepSettledFixers(ctx, prs);
->>>>>>> 8a7a2c20 (fix(loop): enforce thread-resolution protocol and cap fix cycles)
 }
 
 /** `<git-common>/bro/drive.lock` — the one-supervisor-per-repo hold
