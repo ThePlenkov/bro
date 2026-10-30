@@ -767,7 +767,7 @@ function installModeBridges(pi, source) {
 //#region packages/cli/src/adapter/omp.ts
 /** The published version of this adapter — the npx fallback pin. The
 *  pin is rewritten by gen-plugins on every gen/release run. */
-const NPX_PIN = "@broject/bro@0.2.5";
+const NPX_PIN = "@broject/bro@0.3.0";
 /**
 * The omp binding: the host's own shape, nothing else. Every
 * behavioral decision lives in the shared driver, so this file is the
