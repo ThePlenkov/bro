@@ -55,7 +55,7 @@ export function buildWorkPrompt(
     prBase === undefined
       ? `\`gh pr create\` with a
   summary and a test-plan checklist.`
-      : `\`gh pr create --base ${prBase}\` — you are ${stackWho}. Add a summary and a test-plan checklist.`;
+      : `\`gh pr create --base ${shQuote(prBase)}\` — you are ${stackWho}. Add a summary and a test-plan checklist.`;
   const closer = CLOSERS[backend] ?? FALLBACK_CLOSER;
   return `You are an autonomous implementation agent. This worktree is already
 checked out on branch \`${branch}\` — work here, nowhere else.
@@ -102,7 +102,7 @@ function buildBatchPrompt(
   const prLine =
     prBase === undefined
       ? '`gh pr create` — a summary and a test-plan checklist covering the batch.'
-      : `\`gh pr create --base ${prBase}\` — you are ${stackWho}. Summarize the batch and add a test-plan checklist.`;
+      : `\`gh pr create --base ${shQuote(prBase)}\` — you are ${stackWho}. Summarize the batch and add a test-plan checklist.`;
   const closer = BATCH_CLOSERS[backend] ?? BATCH_FALLBACK;
   const sections = beads
     .map((b, i) => {
@@ -182,8 +182,9 @@ ${threads.trim().replaceAll(/<\/review-threads\s*>/gi, '<\\/review-threads>')}
 # Rules
 
 ${coverageRule}- For each thread you MUST take an action before you stop: either (1) fix
-  the code, commit, and push, OR (2) reply with a clear reason it's not
-  applicable/wrong, OR (3) explicitly defer it to a follow-up bead with a
+  the code, commit, push, and resolve the thread (e.g. via \`bro review act resolve\` or
+  \`bro review act reply\` as appropriate), OR (2) reply with a clear reason it's not
+  applicable/wrong and resolve the thread, OR (3) explicitly defer it to a follow-up bead with a
   short explanation and resolve it. You cannot exit cleanly with unresolved
   threads still open and no reply/resolution.
 - You MUST resolve or explicitly address EVERY thread listed above. If you
@@ -213,7 +214,7 @@ resolve the conflicts, and push:
   branch's remote tip moved since the checkout was made, fold it in
   first (\`git rebase\` onto it) — a stale tip would drop those commits
   on the lease push.
-- \`git rebase origin/${base}\` —
+- \`git rebase origin/${shQuote(base)}\` —
   if a rebase is already in progress here, resolve it instead
   (\`git rebase --continue\` / \`--abort\` and restart if the state is
   too tangled).
