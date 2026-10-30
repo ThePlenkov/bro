@@ -449,34 +449,36 @@ function withEnv<T>(env: Record<string, string>, fn: () => T): T {
 }
 
 describe('projectFleet — a live pass over a fake herdr', () => {
-  test('a managed workspace gets its rename + metadata writes', () => {
+  /** Root + a live claim marker — the cheap arm path: `.git/bro/work`
+   *  inside the tree, ownerless and fresh (24h window). */
+  const armedRoot = (): string => {
     const root = mkdtempSync(join(tmpdir(), 'proj-fleet-'));
-    const stateDir = mkdtempSync(join(tmpdir(), 'proj-state-'));
+    mkdirSync(join(root, '.git', 'bro'), { recursive: true });
+    writeFileSync(join(root, '.git', 'bro', 'work'), 'session test\nb1\n');
+    return root;
+  };
+
+  const callsOf = (log: string): string[][] =>
+    readFileSync(log, 'utf8')
+      .trim()
+      .split('\n')
+      .map(l => JSON.parse(l) as string[]);
+
+  /** One full pass over the fake herdr — scenario + plugin ledger in,
+   *  result + the recorded call log out. The ledger scope for a
+   *  repo-less root is sha1(root) (no common dir resolves). */
+  const fleetPass = (
+    root: string,
+    stateDir: string,
+    f: { scenario: Record<string, unknown>; state: Record<string, unknown> }
+  ): { r: ReturnType<typeof projectFleet>; calls: string[][] } => {
     const fake = join(root, 'fake-herdr.js');
     const scenario = join(root, 'scenario.json');
     const log = join(root, 'calls.jsonl');
     writeFileSync(fake, FAKE_HERDR, { mode: 0o755 });
-    writeFileSync(
-      scenario,
-      JSON.stringify({
-        worktrees: [{ path: root, open_workspace_id: 'w1' }],
-        workspaces: [
-          {
-            workspace_id: 'w1',
-            label: '[working·#1] Old Title',
-            tokens: { status: 'old', 'bro.worker': 'stale' },
-          },
-        ],
-      })
-    );
-    // non-repo root → the managed-file scope is sha1(root) (no common dir)
+    writeFileSync(scenario, JSON.stringify(f.scenario));
     const scope = createHash('sha1').update(root).digest('hex').slice(0, 12);
-    writeFileSync(
-      join(stateDir, `state-${scope}.json`),
-      JSON.stringify({
-        workspaces: { [root]: { ws: 'w1', label: '[working·#1] Old Title', managed: true } },
-      })
-    );
+    writeFileSync(join(stateDir, `state-${scope}.json`), JSON.stringify(f.state));
     const r = withEnv(
       {
         HERDR_BIN_PATH: fake,
@@ -486,11 +488,30 @@ describe('projectFleet — a live pass over a fake herdr', () => {
       },
       () => projectFleet(root, NOW)
     );
+    return { r, calls: callsOf(log) };
+  };
+
+  const stateDirOf = (): string => mkdtempSync(join(tmpdir(), 'proj-state-'));
+  const plainRoot = (): string => mkdtempSync(join(tmpdir(), 'proj-fleet-'));
+
+  test('a managed workspace gets its rename + metadata writes', () => {
+    const root = plainRoot();
+    const { r, calls } = fleetPass(root, stateDirOf(), {
+      scenario: {
+        worktrees: [{ path: root, open_workspace_id: 'w1' }],
+        workspaces: [
+          {
+            workspace_id: 'w1',
+            label: '[working·#1] Old Title',
+            tokens: { status: 'old', 'bro.worker': 'stale' },
+          },
+        ],
+      },
+      state: {
+        workspaces: { [root]: { ws: 'w1', label: '[working·#1] Old Title', managed: true } },
+      },
+    });
     assert.deepEqual(r, { reachable: true, workspaces: 1, writes: 2, leds: 0 });
-    const calls = readFileSync(log, 'utf8')
-      .trim()
-      .split('\n')
-      .map(l => JSON.parse(l) as string[]);
     const rename = calls.find(c => c.slice(0, 2).join(' ') === 'workspace rename');
     // empty bead plane → the live titled label survives, no basename clobber
     assert.deepEqual(rename?.slice(0, 4), ['workspace', 'rename', 'w1', 'Old Title']);
@@ -501,70 +522,25 @@ describe('projectFleet — a live pass over a fake herdr', () => {
   });
 
   test('a user-owned workspace is never touched', () => {
-    const root = mkdtempSync(join(tmpdir(), 'proj-fleet-'));
-    const stateDir = mkdtempSync(join(tmpdir(), 'proj-state-'));
-    const fake = join(root, 'fake-herdr.js');
-    const scenario = join(root, 'scenario.json');
-    const log = join(root, 'calls.jsonl');
-    writeFileSync(fake, FAKE_HERDR, { mode: 0o755 });
-    writeFileSync(
-      scenario,
-      JSON.stringify({
+    const root = plainRoot();
+    const { r, calls } = fleetPass(root, stateDirOf(), {
+      scenario: {
         worktrees: [{ path: root, open_workspace_id: 'wUser' }],
         workspaces: [{ workspace_id: 'wUser', label: 'mine' }],
-      })
-    );
-    const scope = createHash('sha1').update(root).digest('hex').slice(0, 12);
-    // recorded but NOT managed — a workspace the user opened themselves
-    writeFileSync(
-      join(stateDir, `state-${scope}.json`),
-      JSON.stringify({ workspaces: { [root]: { ws: 'wUser', managed: false } } })
-    );
-    const r = withEnv(
-      {
-        HERDR_BIN_PATH: fake,
-        HERDR_PLUGIN_STATE_DIR: stateDir,
-        FAKE_HERDR_SCENARIO: scenario,
-        FAKE_HERDR_LOG: log,
       },
-      () => projectFleet(root, NOW)
-    );
+      // recorded but NOT managed — a workspace the user opened themselves
+      state: { workspaces: { [root]: { ws: 'wUser', managed: false } } },
+    });
     assert.deepEqual(r, { reachable: true, workspaces: 0, writes: 0, leds: 0 });
-    const calls = readFileSync(log, 'utf8').trim();
-    assert.ok(!calls.includes('rename'));
-    assert.ok(!calls.includes('report-metadata'));
+    const flat = calls.flat().join(' ');
+    assert.ok(!flat.includes('rename'));
+    assert.ok(!flat.includes('report-metadata'));
   });
-
-  /** Root + a live claim marker — the cheap arm path: `.git/bro/work`
-   *  inside the tree, ownerless and fresh (24h window). */
-  function armedRoot(): string {
-    const root = mkdtempSync(join(tmpdir(), 'proj-fleet-'));
-    mkdirSync(join(root, '.git', 'bro'), { recursive: true });
-    writeFileSync(join(root, '.git', 'bro', 'work'), 'session test\nb1\n');
-    return root;
-  }
-
-  const ledFixture = (root: string) => {
-    const fake = join(root, 'fake-herdr.js');
-    const scenario = join(root, 'scenario.json');
-    const log = join(root, 'calls.jsonl');
-    writeFileSync(fake, FAKE_HERDR, { mode: 0o755 });
-    return { fake, scenario, log };
-  };
-
-  const callsOf = (log: string): string[][] =>
-    readFileSync(log, 'utf8')
-      .trim()
-      .split('\n')
-      .map(l => JSON.parse(l) as string[]);
 
   test('LED report lands on the busy agent-free ledger pane — and only it', () => {
     const root = armedRoot();
-    const stateDir = mkdtempSync(join(tmpdir(), 'proj-state-'));
-    const f = ledFixture(root);
-    writeFileSync(
-      f.scenario,
-      JSON.stringify({
+    const { r, calls } = fleetPass(root, stateDirOf(), {
+      scenario: {
         worktrees: [{ path: root, open_workspace_id: 'w1' }],
         workspaces: [{ workspace_id: 'w1', label: 'Old', tokens: {} }],
         panes: [
@@ -575,28 +551,14 @@ describe('projectFleet — a live pass over a fake herdr', () => {
           'w1:p1': { shell_pid: 7, foreground_processes: [{ pid: 7 }, { pid: 99 }] },
           'w1:p2': { shell_pid: 5, foreground_processes: [{ pid: 5 }, { pid: 44 }] },
         },
-      })
-    );
-    const scope = createHash('sha1').update(root).digest('hex').slice(0, 12);
-    writeFileSync(
-      join(stateDir, `state-${scope}.json`),
-      JSON.stringify({
+      },
+      state: {
         workspaces: { [root]: { ws: 'w1', label: 'Old', managed: true } },
         mirrors: { m1: { pane_id: 'w1:p2', workspace: 'w1', marked: false } },
         renderers: { [root]: { pane_id: 'w1:p1', workspace: 'w1' } },
-      })
-    );
-    const r = withEnv(
-      {
-        HERDR_BIN_PATH: f.fake,
-        HERDR_PLUGIN_STATE_DIR: stateDir,
-        FAKE_HERDR_SCENARIO: f.scenario,
-        FAKE_HERDR_LOG: f.log,
       },
-      () => projectFleet(root, NOW)
-    );
+    });
     assert.equal(r.leds, 1);
-    const calls = callsOf(f.log);
     // armed tree, no worker verdict → unknown; only p1 is reportable
     const report = calls.find(c => c.slice(0, 2).join(' ') === 'pane report-agent');
     assert.deepEqual(report, [
@@ -619,39 +581,22 @@ describe('projectFleet — a live pass over a fake herdr', () => {
   });
 
   test('an unarmed projection releases the pane instead of reporting', () => {
-    const root = mkdtempSync(join(tmpdir(), 'proj-fleet-'));
-    const stateDir = mkdtempSync(join(tmpdir(), 'proj-state-'));
-    const f = ledFixture(root);
-    writeFileSync(
-      f.scenario,
-      JSON.stringify({
+    const root = plainRoot();
+    const { r, calls } = fleetPass(root, stateDirOf(), {
+      scenario: {
         worktrees: [{ path: root, open_workspace_id: 'w1' }],
         workspaces: [{ workspace_id: 'w1', label: 'Old', tokens: {} }],
         panes: [{ pane_id: 'w1:p1', workspace_id: 'w1' }],
         processes: {
           'w1:p1': { shell_pid: 7, foreground_processes: [{ pid: 7 }, { pid: 99 }] },
         },
-      })
-    );
-    const scope = createHash('sha1').update(root).digest('hex').slice(0, 12);
-    writeFileSync(
-      join(stateDir, `state-${scope}.json`),
-      JSON.stringify({
+      },
+      state: {
         workspaces: { [root]: { ws: 'w1', label: 'Old', managed: true } },
         renderers: { [root]: { pane_id: 'w1:p1', workspace: 'w1' } },
-      })
-    );
-    const r = withEnv(
-      {
-        HERDR_BIN_PATH: f.fake,
-        HERDR_PLUGIN_STATE_DIR: stateDir,
-        FAKE_HERDR_SCENARIO: f.scenario,
-        FAKE_HERDR_LOG: f.log,
       },
-      () => projectFleet(root, NOW)
-    );
+    });
     assert.equal(r.leds, 1);
-    const calls = callsOf(f.log);
     assert.deepEqual(
       calls.find(c => c.slice(0, 2).join(' ') === 'pane release-agent'),
       [
@@ -670,71 +615,36 @@ describe('projectFleet — a live pass over a fake herdr', () => {
 
   test('an idle-shell pane holds no report — the probe would clear it in ~1s', () => {
     const root = armedRoot();
-    const stateDir = mkdtempSync(join(tmpdir(), 'proj-state-'));
-    const f = ledFixture(root);
-    writeFileSync(
-      f.scenario,
-      JSON.stringify({
+    const { r, calls } = fleetPass(root, stateDirOf(), {
+      scenario: {
         worktrees: [{ path: root, open_workspace_id: 'w1' }],
         workspaces: [{ workspace_id: 'w1', label: 'Old', tokens: {} }],
         panes: [{ pane_id: 'w1:p1', workspace_id: 'w1' }],
         // shell_pid IS the only foreground process → idle
-        processes: {
-          'w1:p1': { shell_pid: 7, foreground_processes: [{ pid: 7 }] },
-        },
-      })
-    );
-    const scope = createHash('sha1').update(root).digest('hex').slice(0, 12);
-    writeFileSync(
-      join(stateDir, `state-${scope}.json`),
-      JSON.stringify({
+        processes: { 'w1:p1': { shell_pid: 7, foreground_processes: [{ pid: 7 }] } },
+      },
+      state: {
         workspaces: { [root]: { ws: 'w1', label: 'Old', managed: true } },
         renderers: { [root]: { pane_id: 'w1:p1', workspace: 'w1' } },
-      })
-    );
-    const r = withEnv(
-      {
-        HERDR_BIN_PATH: f.fake,
-        HERDR_PLUGIN_STATE_DIR: stateDir,
-        FAKE_HERDR_SCENARIO: f.scenario,
-        FAKE_HERDR_LOG: f.log,
       },
-      () => projectFleet(root, NOW)
-    );
+    });
     assert.equal(r.leds, 0);
-    const calls = callsOf(f.log);
     assert.ok(calls.some(c => c.slice(0, 2).join(' ') === 'pane list'));
     assert.ok(!calls.some(c => c[1] === 'report-agent' || c[1] === 'release-agent'));
   });
 
   test('no ledger panes → the LED path does not even read pane list', () => {
-    const root = mkdtempSync(join(tmpdir(), 'proj-fleet-'));
-    const stateDir = mkdtempSync(join(tmpdir(), 'proj-state-'));
-    const f = ledFixture(root);
-    writeFileSync(
-      f.scenario,
-      JSON.stringify({
+    const root = plainRoot();
+    const { r, calls } = fleetPass(root, stateDirOf(), {
+      scenario: {
         worktrees: [{ path: root, open_workspace_id: 'w1' }],
         workspaces: [{ workspace_id: 'w1', label: 'Old', tokens: {} }],
-      })
-    );
-    const scope = createHash('sha1').update(root).digest('hex').slice(0, 12);
-    writeFileSync(
-      join(stateDir, `state-${scope}.json`),
-      JSON.stringify({
-        workspaces: { [root]: { ws: 'w1', label: 'Old', managed: true } },
-      })
-    );
-    const r = withEnv(
-      {
-        HERDR_BIN_PATH: f.fake,
-        HERDR_PLUGIN_STATE_DIR: stateDir,
-        FAKE_HERDR_SCENARIO: f.scenario,
-        FAKE_HERDR_LOG: f.log,
       },
-      () => projectFleet(root, NOW)
-    );
+      state: {
+        workspaces: { [root]: { ws: 'w1', label: 'Old', managed: true } },
+      },
+    });
     assert.equal(r.leds, 0);
-    assert.ok(!callsOf(f.log).some(c => c.slice(0, 2).join(' ').startsWith('pane ')));
+    assert.ok(!calls.some(c => c.slice(0, 2).join(' ').startsWith('pane ')));
   });
 });
