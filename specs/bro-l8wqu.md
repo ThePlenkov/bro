@@ -70,7 +70,9 @@ existing fleet/agent record (no new flags):
   is `type === 'acp'`. The workspace shows exactly ONE pane:
   `bro: session` running `bro herdr session-view`. The status pane,
   event tail, and per-agent mirrors retire (the session pane folds
-  their information in).
+  their information in) — and it arms BEFORE any retire lands: a
+  workspace whose last pane closes mid-pass is auto-reaped, so a
+  lane flip must never empty the workspace.
 - **agent lane** — a live non-ACP agent on the worktree. Today's
   fallback set: the per-agent log mirror + `bro: status` (the
   `bro: events` tail stays suppressed while a mirror lives). The

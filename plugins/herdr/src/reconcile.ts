@@ -3,9 +3,10 @@
  *
  *   planes in → armed worktrees get workspaces (plain bead-title
  *   labels) → running native agents get read-only mirror panes tailing
- *   their logs (mirrors.ts) → exited agents get their mirror renamed
- *   as an exit marker → every managed workspace gets its `bro: status`
- *   pane (statuses.ts, spec bro-idsat).
+ *   their logs (mirrors.ts — the acp lane excepted: the session pane
+ *   is its one pane, spec bro-l8wqu) → exited agents get their mirror
+ *   renamed as an exit marker → every managed workspace gets its
+ *   `bro: status` pane (statuses.ts, spec bro-idsat).
  *
  * Fleet status (`[state·#PR]` prefixes, `status` tokens, fleet-state
  * files) is the bro daemon's fleet projector, not this file (spec
@@ -267,18 +268,32 @@ function convergeStatuses(p: Planes, wsForPath: Map<string, string>, ctx: WsCtx)
   dropOrphanStatuses(ctx.state, new Set([...ctx.wsById.keys(), ...wsForPath.values()]));
 }
 
-/** The session pane lives ONLY on the acp lane (spec bro-l8wqu) —
- *  it is the lane's one human-readable pane. Every other lane
- *  retires it: a non-acp worker's view only duplicated the mirror,
- *  and a worker-less arm has nothing to show. Same managed-record
- *  guard as the renderer. */
+/** The session pane arms BEFORE the retire phases on the acp lane
+ *  (spec bro-l8wqu): it is the lane's one human-readable pane, and a
+ *  workspace whose last pane closes mid-pass is auto-reaped under the
+ *  retiring surfaces — the flip order must leave a live pane behind at
+ *  every step or the whole workspace vanishes (dogfood finding). Same
+ *  managed-record guard as the renderer. */
+function convergeSessionsAcp(p: Planes, wsForPath: Map<string, string>, ctx: WsCtx): void {
+  for (const [path, ws] of wsForPath) {
+    const rec = ctx.state.workspaces[path];
+    if (rec?.managed === true && rec.ws === ws && laneOf(p.lanes, path) === 'acp') {
+      ensureSession({ path, ws, state: ctx.state });
+    }
+  }
+}
+
+/** Every non-acp lane retires the session pane — a non-acp worker's
+ *  view only duplicated the mirror, and a worker-less arm has nothing
+ *  to show. The acp arming already ran (convergeSessionsAcp); retiring
+ *  last is the safe direction: on an acp→fallback flip the fallback
+ *  set armed first, so closing the session pane never empties the
+ *  workspace. */
 function convergeSessions(p: Planes, wsForPath: Map<string, string>, ctx: WsCtx): void {
   for (const [path, ws] of wsForPath) {
     const rec = ctx.state.workspaces[path];
-    if (rec?.managed === true && rec.ws === ws) {
-      const rctx = { path, ws, state: ctx.state };
-      if (laneOf(p.lanes, path) === 'acp') ensureSession(rctx);
-      else retireSession(rctx);
+    if (rec?.managed === true && rec.ws === ws && laneOf(p.lanes, path) !== 'acp') {
+      retireSession({ path, ws, state: ctx.state });
     }
   }
   dropOrphanSessions(ctx.state, new Set([...ctx.wsById.keys(), ...wsForPath.values()]));
@@ -355,6 +370,9 @@ function convergeLocked(p: Planes, scope: string): ConvergeResult {
 
   const armed = armedSet(p);
   const wsForPath = convergeWorkspaces(p, armed, ctx);
+  // the acp lane's one pane arms before any retire — a workspace
+  // emptying mid-flip is auto-reaped under the closing panes
+  convergeSessionsAcp(p, wsForPath, ctx);
   convergeMirrors(p, wsForPath, ctx.openByPath, ctx.state);
   markExitedMirrors(p, ctx.state);
   convergeRenderers(p, wsForPath, ctx);

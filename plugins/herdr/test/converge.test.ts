@@ -484,6 +484,145 @@ describe('session panes — the acp lane’s one pane (spec bro-nwl5g → bro-l8
     assert.match(runs[1]![3]!, /herdr status-view/);
   });
 
+  test('a live native agent gets no mirror — the lane yields exactly one pane', () => {
+    reset({ panes: [{ pane_id: 'p1' }] });
+    const tree = mkdtempSync(join(TMP, 'tree-'));
+    const p = armedAcpTree(tree);
+    p.status.fleet.agents = [
+      {
+        id: 'step-1',
+        backend: 'native',
+        state: 'running',
+        worktree: 't',
+        log: join(TMP, 'x.log'),
+      },
+    ];
+    converge(p);
+    // dogfood finding: convergeMirrors armed `bro: step-1` beside
+    // `bro: session` — the mirror folds like status/events did
+    const runs = called('pane', 'run');
+    assert.equal(runs.length, 1);
+    assert.match(runs[0]![3]!, /herdr session-view/);
+    assert.equal(called('pane', 'split').length, 0);
+    assert.equal(loadState(scope).mirrors['step-1'], undefined);
+  });
+
+  test('a lane flip to acp retires the live worker’s mirror too', () => {
+    reset({
+      panes: [{ pane_id: 'pM', label: 'bro: step-1' }, { pane_id: 'pRoot' }],
+      paneIds: ['pM', 'pRoot'],
+    });
+    const tree = mkdtempSync(join(TMP, 'tree-'));
+    const p = armedAcpTree(tree);
+    p.status.fleet.agents = [
+      {
+        id: 'step-1',
+        backend: 'native',
+        state: 'running',
+        worktree: 't',
+        log: join(TMP, 'x.log'),
+      },
+    ];
+    const s = loadState(scope);
+    s.mirrors['step-1'] = {
+      step: 'step-1',
+      log: join(TMP, 'x.log'),
+      worktree: tree,
+      workspace: 'wOpened',
+      pane_id: 'pM',
+    };
+    saveState(scope, s);
+    converge(p);
+    assert.equal(called('pane', 'close', 'pM').length, 1);
+    const st = loadState(scope);
+    assert.equal(st.mirrors['step-1'], undefined);
+    // the session pane takes the surviving root — one run, one pane
+    const runs = called('pane', 'run');
+    assert.equal(runs.length, 1);
+    assert.equal(runs[0]![2], 'pRoot');
+    assert.match(runs[0]![3]!, /herdr session-view/);
+  });
+
+  test('an exited worker’s mirror retires on the acp lane — no ✖ marker pane', () => {
+    reset({
+      panes: [{ pane_id: 'pM', label: 'bro: step-1' }],
+      paneIds: ['pM'],
+    });
+    const tree = mkdtempSync(join(TMP, 'tree-'));
+    const s = loadState(scope);
+    s.mirrors['step-1'] = {
+      step: 'step-1',
+      log: join(TMP, 'x.log'),
+      worktree: tree,
+      workspace: 'wOpened',
+      pane_id: 'pM',
+    };
+    saveState(scope, s);
+    // no agent in the fleet — step-1 is exited; the acp lane retires
+    // its mirror outright instead of renaming it an exit marker
+    converge(armedAcpTree(tree));
+    assert.equal(called('pane', 'close', 'pM').length, 1);
+    assert.equal(called('pane', 'rename', 'pM').length, 0);
+    assert.equal(loadState(scope).mirrors['step-1'], undefined);
+  });
+
+  test('a fallback workspace flips to acp in one pass — the session pane arms before the last pane retires', () => {
+    reset({
+      panes: [
+        { pane_id: 'pM', label: 'bro: step-1' },
+        { pane_id: 'pE', label: 'bro: events' },
+        { pane_id: 'pS', label: 'bro: status' },
+      ],
+      paneIds: ['pM', 'pE', 'pS'],
+      busyPanes: ['pM', 'pE', 'pS'],
+    });
+    const tree = mkdtempSync(join(TMP, 'tree-'));
+    const p = armedAcpTree(tree);
+    p.status.fleet.agents = [
+      {
+        id: 'step-1',
+        backend: 'native',
+        state: 'running',
+        worktree: 't',
+        log: join(TMP, 'x.log'),
+      },
+    ];
+    const s = loadState(scope);
+    s.mirrors['step-1'] = {
+      step: 'step-1',
+      log: join(TMP, 'x.log'),
+      worktree: tree,
+      workspace: 'wOpened',
+      pane_id: 'pM',
+    };
+    s.renderers[tree] = { workspace: 'wOpened', worktree: tree, pane_id: 'pE' };
+    s.statuses[tree] = { workspace: 'wOpened', worktree: tree, pane_id: 'pS' };
+    saveState(scope, s);
+    converge(p);
+    // the ordering IS the contract: a workspace losing its last pane is
+    // auto-reaped, so the session pane must be armed before ANY retire
+    // lands — the fake cannot model the reap, the call order can
+    const log = calls();
+    const runIdx = log.findIndex(
+      a => a[0] === 'pane' && a[1] === 'run' && /session-view/.test(a[3] ?? '')
+    );
+    const closes = log.filter(a => a[0] === 'pane' && a[1] === 'close');
+    assert.ok(runIdx !== -1, 'session pane armed');
+    assert.equal(closes.length, 3);
+    for (const [i, c] of log.entries()) {
+      if (c[0] === 'pane' && c[1] === 'close') {
+        assert.ok(runIdx < i, `close ${c[2]} landed before the session arm`);
+      }
+    }
+    // one pass → exactly one pane left standing: the session view
+    const st = loadState(scope);
+    assert.equal(st.mirrors['step-1'], undefined);
+    assert.equal(st.renderers[tree], undefined);
+    assert.equal(st.statuses[tree], undefined);
+    assert.ok(st.sessions[tree]?.pane_id !== undefined);
+    assert.equal(called('pane', 'run').length, 1);
+  });
+
   test('a stale session record on a closed workspace is dropped', () => {
     reset({ panes: [{ pane_id: 'pLive' }] });
     const tree = mkdtempSync(join(TMP, 'tree-'));
