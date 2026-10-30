@@ -114,6 +114,12 @@ export async function runAcpSessionView(spec: AcpSessionViewSpec): Promise<AcpSe
   const errOut = spec.err ?? (() => {});
   const by = spec.provider === undefined ? 'acp' : `acp provider '${spec.provider}'`;
 
+  // a pre-aborted signal never replays to addEventListener — bail before
+  // spawn or the detach lands on the floor and the child still starts.
+  if (spec.signal?.aborted === true) {
+    return { attached: false, reason: 'viewer detached' };
+  }
+
   const app = client({ name: 'bro-session-view' }).onRequest(
     'session/request_permission',
     spec.permission ?? denyPermission
@@ -172,6 +178,11 @@ export async function runAcpSessionView(spec: AcpSessionViewSpec): Promise<AcpSe
     child?.kill('SIGKILL');
     doneResolve(r);
   };
+  // a spawn that cannot start the shell emits 'error' — unhandled it
+  // throws the process; routed, it becomes the same failed-attach verdict.
+  child?.once('error', (e: Error) => {
+    settle({ attached: false, reason: `${by} spawn failed — ${e.message}` });
+  });
   conn.signal.addEventListener('abort', () => {
     settle({ attached: attachedOnce, reason: 'transport closed' });
   });

@@ -69,6 +69,8 @@ const planes = (over: Partial<Planes> = {}): Planes => ({
   armedDetails: [],
   mirrorPanes: {},
   rendererPanes: {},
+  statusPanes: {},
+  sessionPanes: {},
   ...over,
 });
 
