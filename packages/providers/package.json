@@ -1,10 +1,10 @@
 {
   "name": "@broject/providers",
-  "version": "0.2.5",
+  "version": "0.3.0",
   "type": "module",
   "dependencies": {
     "@agentclientprotocol/sdk": "^1.7.0",
-    "@broject/core": "^0.2.0",
+    "@broject/core": "^0.3.0",
     "zod": "^4.6.6"
   },
   "exports": {

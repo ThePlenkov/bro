@@ -30,16 +30,16 @@ anything else that matched is left as a prompt.
 
 ## Hooks
 
-| Cursor hook | bro event | Effect |
-| --- | --- | --- |
-| `sessionStart` | `session-start` | Rehydrate beads, drill, debt, and PR state |
-| `beforeSubmitPrompt` | `prompt-submit` | Prompt context. The first one also rehydrates when `sessionStart` did not run (cloud agents) |
-| `preCompact` | `pre-compact` | Drop the rehydration mark so the next prompt reloads state |
-| `postToolUse` / `postToolUseFailure` | `post-tool` | Arm the stop gate, cite the governing skill, drain `bro notify` |
-| `stop` | `stop` | One follow-up when this session armed a gate (`loop_limit: 1`) |
-| `beforeShellExecution` | `permission` | Auto-approve a plain `bro` / `bd` / `npx @broject/bro` command |
+| Cursor hook                          | bro event       | Effect                                                                                       |
+| ------------------------------------ | --------------- | -------------------------------------------------------------------------------------------- |
+| `sessionStart`                       | `session-start` | Rehydrate beads, drill, debt, and PR state                                                   |
+| `beforeSubmitPrompt`                 | `prompt-submit` | Prompt context. The first one also rehydrates when `sessionStart` did not run (cloud agents) |
+| `preCompact`                         | `pre-compact`   | Drop the rehydration mark so the next prompt reloads state                                   |
+| `postToolUse` / `postToolUseFailure` | `post-tool`     | Arm the stop gate, cite the governing skill, drain `bro notify`                              |
+| `stop`                               | `stop`          | One follow-up when this session armed a gate (`loop_limit: 1`)                               |
+| `beforeShellExecution`               | `permission`    | Auto-approve a plain `bro` / `bd` / `npx @broject/bro` command                               |
 
 A chained command (`bro act status && …`) is not auto-approved.
 
 Requires Node ≥ 22.18. The hook resolves a built checkout, then `bro` on
-PATH, then `npx -y @broject/bro@0.2.5`.
+PATH, then `npx -y @broject/bro@0.3.0`.

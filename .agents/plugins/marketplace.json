@@ -8,7 +8,7 @@
       "name": "bro",
       "source": ".",
       "description": "Agent's sidekick — the rig that owns the PR-to-merge loop: beads claims, fleet workers, review gates, cross-repo mesh — all mechanics in the bro CLI over gh + beads",
-      "version": "0.2.5",
+      "version": "0.3.0",
       "license": "MIT",
       "keywords": [
         "agent-rig",
