@@ -68,104 +68,107 @@
  * missing one degrades to "not wired", never a setup throw that would
  * take the whole plugin down with it.
  */
-import { spawn, type ChildProcess } from 'node:child_process'
-import { existsSync } from 'node:fs'
-import { dirname, join } from 'node:path'
-import { fileURLToPath } from 'node:url'
+import { spawn, type ChildProcess } from 'node:child_process';
+import { existsSync } from 'node:fs';
+import { dirname, join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 
-type Level = 'debug' | 'info' | 'warn' | 'error'
+type Level = 'debug' | 'info' | 'warn' | 'error';
 
 interface LogInput {
-  body: { service: string; level: Level; message: string; extra?: unknown }
+  body: { service: string; level: Level; message: string; extra?: unknown };
 }
 
 interface PermissionAsk {
-  id?: string
-  type?: string
-  permission?: string
-  pattern?: string | string[]
-  patterns?: string[]
-  sessionID?: string
-  metadata?: Record<string, unknown>
+  id?: string;
+  type?: string;
+  permission?: string;
+  pattern?: string | string[];
+  patterns?: string[];
+  sessionID?: string;
+  metadata?: Record<string, unknown>;
 }
 
 interface EventEnvelope {
-  type: string
-  properties?: Record<string, unknown>
+  type: string;
+  properties?: Record<string, unknown>;
 }
 
 interface PluginInput {
-  directory: string
+  directory: string;
   client?: {
-    app?: { log(input: LogInput): Promise<unknown> }
+    app?: { log(input: LogInput): Promise<unknown> };
     session?: {
       promptAsync(input: {
-        path: { id: string }
-        body: { parts: { type: 'text'; text: string }[] }
-      }): Promise<unknown>
-    }
-  }
+        path: { id: string };
+        body: { parts: { type: 'text'; text: string }[] };
+      }): Promise<unknown>;
+    };
+  };
 }
 
 /** `["@broject/bro", { command: … }]` — opencode's tuple plugin form. The
  *  override is a real escape hatch (pin a specific bro build) and the seam
  *  the tests drive; unresolvable options degrade to the default ladder. */
 interface PluginOptions {
-  command?: string | { cmd: string; args?: string[] }
+  command?: string | { cmd: string; args?: string[] };
   /** V2 only: mount `bro serve` as a remote MCP server on this loopback
    *  port — opt-in; unset registers nothing (a dead URL must not appear
    *  in every config). */
-  mcpPort?: number
+  mcpPort?: number;
 }
 
 interface Hooks {
-  event?(input: { event: EventEnvelope }): Promise<void>
+  event?(input: { event: EventEnvelope }): Promise<void>;
   'chat.message'?(
     input: { sessionID: string },
     output: { parts: { type: string; text?: string }[] }
-  ): Promise<void>
-  'permission.ask'?(input: PermissionAsk, output: { status: 'ask' | 'deny' | 'allow' }): Promise<void>
+  ): Promise<void>;
+  'permission.ask'?(
+    input: PermissionAsk,
+    output: { status: 'ask' | 'deny' | 'allow' }
+  ): Promise<void>;
   'tool.execute.after'?(
     input: { tool: string; sessionID: string; args?: unknown },
     output: { output: string; metadata?: unknown }
-  ): Promise<void>
+  ): Promise<void>;
   'experimental.chat.system.transform'?(
     input: { sessionID?: string },
     output: { system: string[] }
-  ): Promise<void>
+  ): Promise<void>;
   'experimental.session.compacting'?(
     input: { sessionID: string },
     output: { context: string[] }
-  ): Promise<void>
+  ): Promise<void>;
 }
 
 /** The one control object `bro hooks <event>` prints. `decision`/`reason`
  *  carry the stop gate and permission answers; `additionalContext` carries
  *  everything the probes want the agent to read. */
 interface HookControl {
-  hookSpecificOutput?: { hookEventName?: string; additionalContext?: unknown }
-  decision?: string
-  reason?: unknown
+  hookSpecificOutput?: { hookEventName?: string; additionalContext?: unknown };
+  decision?: string;
+  reason?: unknown;
 }
 
 interface Command {
-  cmd: string
-  args: string[]
+  cmd: string;
+  args: string[];
 }
 
 /** Per-probe budget for the events that ride on a turn. A wedged connector
  *  already costs up to 4s each and bro runs probes sequentially, so this is an
  *  outer bound, not the expected wait — on timeout the event degrades to "no
  *  context", which is the fail-open answer anyway. */
-const HOOK_TIMEOUT_MS = 15_000
+const HOOK_TIMEOUT_MS = 15_000;
 
 /** Rehydration gets a longer budget because it shells out to `bd ready` and
  *  scans the worktree set — measured at 20-40s in a loaded repo. It is primed
  *  on `session.created` (see below) so that cost overlaps the user's first
  *  prompt instead of serializing after it. */
-const REHYDRATION_TIMEOUT_MS = 45_000
+const REHYDRATION_TIMEOUT_MS = 45_000;
 
-const MAX_OUTPUT = 1 << 20
+const MAX_OUTPUT = 1 << 20;
 
 /** The runtime that executes the sibling CLI.
  *
@@ -176,7 +179,7 @@ const MAX_OUTPUT = 1 << 20
  *  bro itself requires (`engines.node >= 22.18`), it is what hooks/run.sh
  *  resolves, and the CLI is plain ESM JS, so any runtime will do. */
 export function jsRuntime(): string {
-  return process.platform === 'win32' ? 'node.exe' : 'node'
+  return process.platform === 'win32' ? 'node.exe' : 'node';
 }
 
 /**
@@ -187,12 +190,12 @@ export function jsRuntime(): string {
  */
 function siblingCli(): string | null {
   for (const rel of ['./index.js', '../dist/index.js']) {
-    const candidate = fileURLToPath(new URL(rel, import.meta.url))
+    const candidate = fileURLToPath(new URL(rel, import.meta.url));
     if (existsSync(candidate)) {
-      return candidate
+      return candidate;
     }
   }
-  return null
+  return null;
 }
 
 /** Walk up from this module for a checkout build — a bro.ts materialized
@@ -201,24 +204,24 @@ function siblingCli(): string | null {
  *  behavior tracks the checkout. Same walk `.kilo/plugin/bro.ts` and
  *  `hooks/run.sh` already do. */
 function checkoutCli(): string | null {
-  let dir = dirname(fileURLToPath(import.meta.url))
+  let dir = dirname(fileURLToPath(import.meta.url));
   for (;;) {
-    const candidate = join(dir, 'packages', 'cli', 'dist', 'index.js')
+    const candidate = join(dir, 'packages', 'cli', 'dist', 'index.js');
     if (existsSync(candidate)) {
-      return candidate
+      return candidate;
     }
-    const parent = dirname(dir)
+    const parent = dirname(dir);
     if (parent === dir) {
-      return null
+      return null;
     }
-    dir = parent
+    dir = parent;
   }
 }
 
 /** Last-resort npx package spec, pinned to this module's own version —
  *  gen-plugins lists this file in VERSIONED_SOURCES, so the pin is
  *  rewritten to plugin.json's version on every gen/release run. */
-const NPX_PIN = '@broject/bro@0.2.5'
+const NPX_PIN = '@broject/bro@0.2.6';
 
 /** Spawn `cmd args`, resolve true iff it exits 0 within the hook budget. One
  *  probe serves both launch tiers: `hooks` with no event answers "is this
@@ -228,28 +231,31 @@ const NPX_PIN = '@broject/bro@0.2.5'
  *  a command that cannot launch is worse than falling through to the next
  *  tier. */
 function exitsZero(cmd: string, args: string[]): Promise<boolean> {
-  return new Promise((resolve) => {
-    let child: ChildProcess
+  return new Promise(resolve => {
+    let child: ChildProcess;
     try {
       // PATH lookup is the point of both tiers — the probe verifies the
       // answer before any hook trusts it
-      child = spawn(cmd, args, { stdio: ['pipe', 'ignore', 'ignore'], detached: process.platform !== 'win32' }) // NOSONAR typescript:S4036
+      child = spawn(cmd, args, {
+        stdio: ['pipe', 'ignore', 'ignore'],
+        detached: process.platform !== 'win32',
+      }); // NOSONAR typescript:S4036
     } catch {
-      resolve(false)
-      return
+      resolve(false);
+      return;
     }
-    const timer = killAfter(child, HOOK_TIMEOUT_MS, () => resolve(false))
+    const timer = killAfter(child, HOOK_TIMEOUT_MS, () => resolve(false));
     child.on('error', () => {
-      clearTimeout(timer)
-      resolve(false)
-    })
-    child.on('close', (code) => {
-      clearTimeout(timer)
-      resolve(code === 0)
-    })
-    child.stdin?.on('error', () => {})
-    child.stdin?.end('')
-  })
+      clearTimeout(timer);
+      resolve(false);
+    });
+    child.on('close', code => {
+      clearTimeout(timer);
+      resolve(code === 0);
+    });
+    child.stdin?.on('error', () => {});
+    child.stdin?.end('');
+  });
 }
 
 /** Does a PATH `bro` actually answer `bro hooks`? Without an event the hook
@@ -257,7 +263,7 @@ function exitsZero(cmd: string, args: string[]): Promise<boolean> {
  *  the subcommand fails it instead of failing every hook. Same discriminator
  *  hooks/run.sh uses. */
 function hasHooksCommand(): Promise<boolean> {
-  return exitsZero('bro', ['hooks'])
+  return exitsZero('bro', ['hooks']);
 }
 
 /** SIGKILL a hung child on a timer. The spawns below are detached, so the
@@ -271,26 +277,26 @@ function killAfter(
   const timer = setTimeout(() => {
     try {
       if (child.pid !== undefined) {
-        process.kill(-child.pid, 'SIGKILL')
+        process.kill(-child.pid, 'SIGKILL');
       }
     } catch {
       // no group to kill (not detached, already gone, or windows)
       try {
-        child.kill('SIGKILL')
+        child.kill('SIGKILL');
       } catch {
         // already gone
       }
     }
-    onTimeout()
-  }, ms)
-  timer.unref?.()
-  return timer
+    onTimeout();
+  }, ms);
+  timer.unref?.();
+  return timer;
 }
 
 async function resolveCommand(options: PluginOptions | undefined): Promise<Command | null> {
-  const override = options?.command
+  const override = options?.command;
   if (typeof override === 'string' && override.trim() !== '') {
-    return { cmd: override, args: [] }
+    return { cmd: override, args: [] };
   }
   if (override && typeof override === 'object' && typeof override.cmd === 'string') {
     return {
@@ -298,7 +304,7 @@ async function resolveCommand(options: PluginOptions | undefined): Promise<Comma
       args: Array.isArray(override.args)
         ? override.args.filter((a): a is string => typeof a === 'string')
         : [],
-    }
+    };
   }
   // local-dist tiers: the bundled sibling (npm `plugin` config-entry form)
   // first, then the checkout walk-up for a materialized module inside a
@@ -309,21 +315,21 @@ async function resolveCommand(options: PluginOptions | undefined): Promise<Comma
   // working checkout build behind it.
   for (const entry of [siblingCli(), checkoutCli()]) {
     if (entry !== null && (await exitsZero(jsRuntime(), [entry, 'hooks']))) {
-      return { cmd: jsRuntime(), args: [entry] }
+      return { cmd: jsRuntime(), args: [entry] };
     }
   }
   // no local dist — fall back to PATH, and only to a bro that passes the
   // hooks probe.
   if (await hasHooksCommand()) {
-    return { cmd: 'bro', args: [] }
+    return { cmd: 'bro', args: [] };
   }
   // last resort mirrors hooks/run.sh: the published package via npx,
   // probed cheaply (the hook call itself carries the hook budget — a cold
   // npx resolve degrades to no-context for that turn, not a hang)
   if (await exitsZero('npx', ['--version'])) {
-    return { cmd: 'npx', args: ['-y', '--prefer-offline', NPX_PIN] }
+    return { cmd: 'npx', args: ['-y', '--prefer-offline', NPX_PIN] };
   }
-  return null
+  return null;
 }
 
 /** Run one bro hook event. Resolves null for every failure mode, including
@@ -340,75 +346,75 @@ function callHook(
   directory: string,
   timeoutMs: number
 ): Promise<HookControl | null> {
-  return new Promise((resolve) => {
-    let child: ChildProcess
+  return new Promise(resolve => {
+    let child: ChildProcess;
     try {
       child = spawn(command.cmd, [...command.args, 'hooks', event], {
         cwd: directory,
         stdio: ['pipe', 'pipe', 'ignore'],
         // own process group so killAfter can take spawned children down too
         detached: process.platform !== 'win32',
-      })
+      });
     } catch {
-      resolve(null)
-      return
+      resolve(null);
+      return;
     }
-    let settled = false
+    let settled = false;
     const settle = (value: HookControl | null): void => {
       if (!settled) {
-        settled = true
-        resolve(value)
+        settled = true;
+        resolve(value);
       }
-    }
-    const timer = killAfter(child, timeoutMs, () => settle(null))
-    let out = ''
-    child.stdout?.setEncoding('utf8')
+    };
+    const timer = killAfter(child, timeoutMs, () => settle(null));
+    let out = '';
+    child.stdout?.setEncoding('utf8');
     child.stdout?.on('data', (chunk: string) => {
-      const remaining = MAX_OUTPUT - out.length
+      const remaining = MAX_OUTPUT - out.length;
       if (remaining > 0) {
-        out += chunk.slice(0, remaining)
+        out += chunk.slice(0, remaining);
       }
-    })
+    });
     child.on('error', () => {
-      clearTimeout(timer)
-      settle(null)
-    })
-    child.on('close', (code) => {
-      clearTimeout(timer)
+      clearTimeout(timer);
+      settle(null);
+    });
+    child.on('close', code => {
+      clearTimeout(timer);
       // `bro hooks` always exits 0; anything else means the run failed, and a
       // failed run's stdout is not a control object even if it parses
-      settle(code === 0 ? parseControl(out) : null)
-    })
+      settle(code === 0 ? parseControl(out) : null);
+    });
     // bro can exit before reading stdin (unrecognized event) — EPIPE here is
     // bro's answer, not a crash
-    child.stdin?.on('error', () => {})
-    child.stdin?.end(JSON.stringify(payload))
-  })
+    child.stdin?.on('error', () => {});
+    child.stdin?.end(JSON.stringify(payload));
+  });
 }
 
 /** bro prints a single control object per event, but scan for the first
  *  parseable line so unrelated chatter on stdout can't swallow the answer. */
 function parseControl(out: string): HookControl | null {
   for (const line of out.split('\n')) {
-    const text = line.trim()
+    const text = line.trim();
     if (!text) {
-      continue
+      continue;
     }
     try {
-      const parsed = JSON.parse(text) as unknown
+      const parsed = JSON.parse(text) as unknown;
       if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
-        return parsed as HookControl
+        return parsed as HookControl;
       }
     } catch {
       // not a control line — keep scanning
     }
   }
-  return null
+  return null;
 }
 
 function contextOf(control: HookControl | null): string {
-  const text = control?.hookSpecificOutput?.additionalContext
-  return typeof text === 'string' ? text.trim() : ''
+  const text = control?.hookSpecificOutput?.additionalContext;
+  return typeof text === 'string' ? text.trim() : '';
 }
 
 /** opencode describes a bash ask by `patterns` — one entry per command
@@ -419,31 +425,31 @@ function contextOf(control: HookControl | null): string {
  *  Claude puts it. */
 function permissionCommand(input: PermissionAsk): string {
   if (Array.isArray(input.patterns) && input.patterns.length > 0) {
-    return input.patterns.join(' && ')
+    return input.patterns.join(' && ');
   }
   if (typeof input.pattern === 'string') {
-    return input.pattern
+    return input.pattern;
   }
   if (Array.isArray(input.pattern) && input.pattern.length === 1) {
-    return input.pattern[0] ?? ''
+    return input.pattern[0] ?? '';
   }
   for (const key of ['command', 'cmd', 'pattern']) {
-    const value = input.metadata?.[key]
+    const value = input.metadata?.[key];
     if (typeof value === 'string') {
-      return value
+      return value;
     }
   }
-  return ''
+  return '';
 }
 
 function asRecord(value: unknown): Record<string, unknown> | null {
   return value && typeof value === 'object' && !Array.isArray(value)
     ? (value as Record<string, unknown>)
-    : null
+    : null;
 }
 
 function errorText(err: unknown): string {
-  return err instanceof Error ? err.message : String(err)
+  return err instanceof Error ? err.message : String(err);
 }
 
 /** Did the tool succeed? bro arms its gates and cites skills only on success,
@@ -455,9 +461,9 @@ function errorText(err: unknown): string {
  *  to the error key for tools that only set that. */
 export function toolSucceeded(metadata: Record<string, unknown> | null): boolean {
   if (metadata?.error !== undefined) {
-    return false
+    return false;
   }
-  return typeof metadata?.exit === 'number' ? metadata.exit === 0 : true
+  return typeof metadata?.exit === 'number' ? metadata.exit === 0 : true;
 }
 
 /** Everything both majors share: lazy command resolution, the probe, the
@@ -466,40 +472,40 @@ export function toolSucceeded(metadata: Record<string, unknown> | null): boolean
  *  injects `client.app.log` + `session.promptAsync`, V2 `ctx.app.log` +
  *  `session.prompt`. */
 interface BroCoreInput {
-  directory: string
-  options?: PluginOptions
-  log(level: Level, message: string): Promise<unknown>
+  directory: string;
+  options?: PluginOptions;
+  log(level: Level, message: string): Promise<unknown>;
   /** Feed the blocker back as a fresh turn. The core catches and logs a
    *  reprompt failure — implementations only supply the call. */
-  reprompt(sessionID: string, text: string): Promise<unknown>
+  reprompt(sessionID: string, text: string): Promise<unknown>;
   /** Optional durable store for the one-shot gate set — V2 hands it
    *  `ctx.storage` so a plugin reload doesn't re-prompt a session that
    *  already blocked once. A load that settles after a `session.deleted`
    *  must not resurrect that id's gate — deletes landing during the
    *  snapshot read are tombstoned out of the merge. */
   persist?: {
-    load(): Promise<unknown>
-    save(ids: readonly string[]): Promise<unknown>
-  }
+    load(): Promise<unknown>;
+    save(ids: readonly string[]): Promise<unknown>;
+  };
 }
 
 function makeCore(input: BroCoreInput) {
-  const directory = input.directory
-  const options = input.options
-  const log = input.log
+  const directory = input.directory;
+  const options = input.options;
+  const log = input.log;
   // resolved on first use, not at load — the PATH tier costs a spawn probe
   // and opencode loads plugins even in repos where bro is inert.
-  let command: Promise<Command | null> | undefined
+  let command: Promise<Command | null> | undefined;
 
   const probe = async (
     event: string,
     payload: unknown,
     timeoutMs = HOOK_TIMEOUT_MS
   ): Promise<HookControl | null> => {
-    command ??= resolveCommand(options)
-    const resolved = await command
-    return resolved ? callHook(resolved, event, payload, directory, timeoutMs) : null
-  }
+    command ??= resolveCommand(options);
+    const resolved = await command;
+    return resolved ? callHook(resolved, event, payload, directory, timeoutMs) : null;
+  };
 
   /** Spawn `<bro> args` and capture stdout — the read-verb path tool
    *  executions and commands share. Never rejects: no resolved CLI,
@@ -507,49 +513,48 @@ function makeCore(input: BroCoreInput) {
    *  travels in the result because a nonzero exit IS the answer for
    *  gate verbs like `act status`. */
   const exec = (args: string[]): Promise<{ code: number; out: string; err: string }> =>
-    new Promise((resolve) => {
-      command ??= resolveCommand(options)
-      void command.then((resolved) => {
+    new Promise(resolve => {
+      command ??= resolveCommand(options);
+      void command.then(resolved => {
         if (resolved === null) {
-          resolve({ code: 127, out: '', err: 'no bro command resolved' })
-          return
+          resolve({ code: 127, out: '', err: 'no bro command resolved' });
+          return;
         }
-        let child: ChildProcess
+        let child: ChildProcess;
         try {
           child = spawn(resolved.cmd, [...resolved.args, ...args], {
             cwd: directory,
             stdio: ['ignore', 'pipe', 'pipe'],
             detached: process.platform !== 'win32',
-          })
+          });
         } catch {
-          resolve({ code: 127, out: '', err: 'spawn failed' })
-          return
+          resolve({ code: 127, out: '', err: 'spawn failed' });
+          return;
         }
-        let out = ''
-        let err = ''
+        let out = '';
+        let err = '';
         const cap = (buf: string, chunk: string): string =>
-          buf.length < MAX_OUTPUT ? buf + chunk.slice(0, MAX_OUTPUT - buf.length) : buf
-        child.stdout?.setEncoding('utf8')
+          buf.length < MAX_OUTPUT ? buf + chunk.slice(0, MAX_OUTPUT - buf.length) : buf;
+        child.stdout?.setEncoding('utf8');
         child.stdout?.on('data', (chunk: string) => {
-          out = cap(out, chunk)
-        })
-        child.stderr?.setEncoding('utf8')
+          out = cap(out, chunk);
+        });
+        child.stderr?.setEncoding('utf8');
         child.stderr?.on('data', (chunk: string) => {
-          err = cap(err, chunk)
-        })
-        const finish = (code: number): void =>
-          resolve({ code, out: out.trim(), err: err.trim() })
-        const timer = killAfter(child, HOOK_TIMEOUT_MS, () => finish(124))
+          err = cap(err, chunk);
+        });
+        const finish = (code: number): void => resolve({ code, out: out.trim(), err: err.trim() });
+        const timer = killAfter(child, HOOK_TIMEOUT_MS, () => finish(124));
         child.on('error', () => {
-          clearTimeout(timer)
-          finish(127)
-        })
-        child.on('close', (code) => {
-          clearTimeout(timer)
-          finish(code ?? 1)
-        })
-      })
-    })
+          clearTimeout(timer);
+          finish(127);
+        });
+        child.on('close', code => {
+          clearTimeout(timer);
+          finish(code ?? 1);
+        });
+      });
+    });
 
   /** Rehydration is per session, not per turn: system.transform runs on every
    *  request, so the probe runs once and the answer is re-pushed each turn —
@@ -559,54 +564,59 @@ function makeCore(input: BroCoreInput) {
    *  probe is evicted rather than cached — timing out once is not the
    *  session's verdict, and the next turn deserves a retry; only a real
    *  answer (including an empty one) is sticky. */
-  const rehydration = new Map<string, Promise<string>>()
-  const hydrate = (sessionID: string, event: 'session-start' | 'post-compaction'): Promise<string> => {
-    const pending = rehydration.get(sessionID)
+  const rehydration = new Map<string, Promise<string>>();
+  const hydrate = (
+    sessionID: string,
+    event: 'session-start' | 'post-compaction'
+  ): Promise<string> => {
+    const pending = rehydration.get(sessionID);
     if (pending) {
-      return pending
+      return pending;
     }
-    const started = probe(event, { session_id: sessionID }, REHYDRATION_TIMEOUT_MS).then((control) => {
-      // evict only our own failed entry — a compaction may have already
-      // replaced it with a newer probe, which must not be deleted out
-      // from under the session that owns it
-      if (control === null && rehydration.get(sessionID) === started) {
-        rehydration.delete(sessionID)
+    const started = probe(event, { session_id: sessionID }, REHYDRATION_TIMEOUT_MS).then(
+      control => {
+        // evict only our own failed entry — a compaction may have already
+        // replaced it with a newer probe, which must not be deleted out
+        // from under the session that owns it
+        if (control === null && rehydration.get(sessionID) === started) {
+          rehydration.delete(sessionID);
+        }
+        return contextOf(control);
       }
-      return contextOf(control)
-    })
-    rehydration.set(sessionID, started)
-    return started
-  }
+    );
+    rehydration.set(sessionID, started);
+    return started;
+  };
   /** Sessions that already got their one re-prompt. */
-  const gated = new Set<string>()
+  const gated = new Set<string>();
   const persistGated = (): void => {
-    void input.persist?.save([...gated]).catch(() => {})
-  }
+    void input.persist?.save([...gated]).catch(() => {});
+  };
   /** Ids deleted while the persisted snapshot is still in flight — the
    *  merge would otherwise resurrect the gate onto a session reusing the
    *  id and its first block would be swallowed as a repeat. */
-  const retiredDuringLoad = new Set<string>()
-  let persistLoaded = input.persist === undefined
+  const retiredDuringLoad = new Set<string>();
+  let persistLoaded = input.persist === undefined;
   if (input.persist) {
     void input.persist
       .load()
-      .then((stored) => {
+      .then(stored => {
         if (Array.isArray(stored)) {
           for (const id of stored) {
             if (typeof id === 'string' && !retiredDuringLoad.has(id)) {
-              gated.add(id)
+              gated.add(id);
             }
           }
         }
       })
       .catch(() => {})
       .finally(() => {
-        persistLoaded = true
-        retiredDuringLoad.clear()
-      })
+        persistLoaded = true;
+        retiredDuringLoad.clear();
+      });
   }
   /** Sessions whose last assistant turn finished cleanly. */
-  const clean = new Set<string>()
+  const clean = new Set<string>();
   /** Sessions observed alive. `session.deleted` is the only retirement, and
    *  the idle gate suspends on real I/O — liveness is re-checked after each
    *  suspending await before the re-prompt goes out, never assumed. The
@@ -614,19 +624,19 @@ function makeCore(input: BroCoreInput) {
    *  a delete followed by an id-reusing create leaves the map occupied by a
    *  *different* session, and a bare `has` would wave a stale gate through
    *  to it. */
-  const live = new Map<string, number>()
-  let liveSeq = 0
+  const live = new Map<string, number>();
+  let liveSeq = 0;
 
   /** `session.created` primes rehydration while opencode is still waiting on a
    *  prompt — the probe costs real seconds, and this is the only window where
    *  paying it doesn't sit on the critical path of a turn. */
   const onSessionCreated = (props: Record<string, unknown>): void => {
-    const sessionID = props.sessionID
+    const sessionID = props.sessionID;
     if (typeof sessionID === 'string') {
-      live.set(sessionID, ++liveSeq)
-      void hydrate(sessionID, 'session-start')
+      live.set(sessionID, ++liveSeq);
+      void hydrate(sessionID, 'session-start');
     }
-  }
+  };
 
   /** `message.updated` arrives before the matching `session.idle` —
    *  `time.completed` with no `error` is what separates a finished turn from
@@ -634,141 +644,139 @@ function makeCore(input: BroCoreInput) {
    *  is the verdict: a clean step followed by one that aborts, errors, or is
    *  still streaming erases the earlier completion. */
   const onMessageUpdated = (props: Record<string, unknown>): void => {
-    const info = asRecord(props.info)
+    const info = asRecord(props.info);
     if (info?.role !== 'assistant' || typeof info.sessionID !== 'string') {
-      return
+      return;
     }
     // a fresh token only when the session wasn't already live — minting
     // one per update would invalidate an idle gate mid-flight for no reason
     if (!live.has(info.sessionID)) {
-      live.set(info.sessionID, ++liveSeq)
+      live.set(info.sessionID, ++liveSeq);
     }
     if (asRecord(info.time)?.completed !== undefined && info.error === undefined) {
-      clean.add(info.sessionID)
+      clean.add(info.sessionID);
     } else {
-      clean.delete(info.sessionID)
+      clean.delete(info.sessionID);
     }
-  }
+  };
 
   /** `session.deleted` retires the per-session structures — they live as
    *  long as the plugin process, not the session, so without this a
    *  long-lived server accumulates dead entries. */
   const onSessionDeleted = (props: Record<string, unknown>): void => {
-    const sessionID = asRecord(props.info)?.id ?? props.sessionID
+    const sessionID = asRecord(props.info)?.id ?? props.sessionID;
     if (typeof sessionID !== 'string') {
-      return
+      return;
     }
-    rehydration.delete(sessionID)
+    rehydration.delete(sessionID);
     // tombstone for the in-flight snapshot merge — a persisted copy of
     // this gate arriving now belongs to the dead session, not the id
     if (!persistLoaded) {
-      retiredDuringLoad.add(sessionID)
+      retiredDuringLoad.add(sessionID);
     }
     if (gated.delete(sessionID)) {
-      persistGated()
+      persistGated();
     }
-    clean.delete(sessionID)
-    live.delete(sessionID)
-  }
+    clean.delete(sessionID);
+    live.delete(sessionID);
+  };
 
   /** `session.compacted` re-primes the cache so the next turn pushes
    *  post-compaction state instead of the pre-compaction snapshot. */
   const onSessionCompacted = (props: Record<string, unknown>): void => {
-    const sessionID = props.sessionID
+    const sessionID = props.sessionID;
     if (typeof sessionID !== 'string') {
-      return
+      return;
     }
-    rehydration.delete(sessionID)
-    void hydrate(sessionID, 'post-compaction')
-  }
+    rehydration.delete(sessionID);
+    void hydrate(sessionID, 'post-compaction');
+  };
 
   /** `session.idle` is the stop gate. Gated sessions pass `stop_hook_active`,
    *  so bro skips its own re-evaluation — the one-shot guard is bro's, not
    *  duplicated here. */
   const onSessionIdle = async (props: Record<string, unknown>): Promise<void> => {
-    const sessionID = props.sessionID
+    const sessionID = props.sessionID;
     if (typeof sessionID !== 'string' || !clean.delete(sessionID)) {
-      return
+      return;
     }
     // the instance token is captured before any suspending await: a
     // `session.deleted` followed by an id-reusing `session.created` leaves
     // `live` occupied by a different session, and only the token tells the
     // stale gate apart from it
-    const instance = live.get(sessionID)
-    const stillAlive = (): boolean =>
-      instance !== undefined && live.get(sessionID) === instance
+    const instance = live.get(sessionID);
+    const stillAlive = (): boolean => instance !== undefined && live.get(sessionID) === instance;
     const control = await probe('stop', {
       session_id: sessionID,
       stop_hook_active: gated.has(sessionID),
-    })
-    const reason =
-      typeof control?.reason === 'string' ? control.reason.trim() : ''
+    });
+    const reason = typeof control?.reason === 'string' ? control.reason.trim() : '';
     if (control?.decision !== 'block') {
-      const hint = contextOf(control)
+      const hint = contextOf(control);
       if (hint) {
-        await log('info', hint)
+        await log('info', hint);
       }
-      return
+      return;
     }
     // the probe awaited real I/O — a session.deleted that interleaved retired
     // this instance, and gating it now would resurrect the entry and suppress
     // a session reusing it. The gate is set before the log/prompt awaits for
     // the same reason: a delete during them must clear it, not race it.
     if (!stillAlive()) {
-      return
+      return;
     }
     if (gated.has(sessionID)) {
       // the repeat block still earns a trace — it's the answer to
       // "why didn't the agent get re-prompted?"
-      await log('info', `stop gate: already gated — not re-prompting (${reason || 'unfinished bro work'})`)
-      return
+      await log(
+        'info',
+        `stop gate: already gated — not re-prompting (${reason || 'unfinished bro work'})`
+      );
+      return;
     }
-    gated.add(sessionID)
-    persistGated()
-    const message = reason || 'unfinished bro work'
-    await log('warn', `stop gate: ${message}`)
+    gated.add(sessionID);
+    persistGated();
+    const message = reason || 'unfinished bro work';
+    await log('warn', `stop gate: ${message}`);
     // the log await is real I/O — a session.deleted landing inside it
     // retires the instance, and prompting now could hit a session that
     // reused the id
     if (!stillAlive()) {
-      return
+      return;
     }
     try {
-      await input.reprompt(sessionID, message)
+      await input.reprompt(sessionID, message);
     } catch (err) {
-      await log('error', `stop gate could not re-prompt: ${errorText(err)}`)
+      await log('error', `stop gate could not re-prompt: ${errorText(err)}`);
     }
-  }
+  };
 
   /** One dispatch for both event sources — the V1 `event` hook and the
    *  V2 `ctx.event.subscribe()` stream feed the same switch. */
   const onEvent = async (type: string, props: Record<string, unknown>): Promise<void> => {
     switch (type) {
       case 'session.created':
-        onSessionCreated(props)
-        break
+        onSessionCreated(props);
+        break;
       case 'message.updated':
-        onMessageUpdated(props)
-        break
+        onMessageUpdated(props);
+        break;
       case 'session.compacted':
-        onSessionCompacted(props)
-        break
+        onSessionCompacted(props);
+        break;
       case 'session.deleted':
-        onSessionDeleted(props)
-        break
+        onSessionDeleted(props);
+        break;
       case 'session.idle':
-        await onSessionIdle(props)
-        break
+        await onSessionIdle(props);
+        break;
     }
-  }
+  };
 
-  return { probe, hydrate, onEvent, exec }
+  return { probe, hydrate, onEvent, exec };
 }
 
-export const BroPlugin = (
-  input: PluginInput,
-  options?: PluginOptions
-): Promise<Hooks> => {
+export const BroPlugin = (input: PluginInput, options?: PluginOptions): Promise<Hooks> => {
   const { probe, hydrate, onEvent } = makeCore({
     directory: input.directory,
     options,
@@ -776,9 +784,9 @@ export const BroPlugin = (
       try {
         return Promise.resolve(
           input.client?.app?.log({ body: { service: 'bro', level, message } })
-        ).catch(() => undefined)
+        ).catch(() => undefined);
       } catch {
-        return Promise.resolve(undefined)
+        return Promise.resolve(undefined);
       }
     },
     reprompt: (sessionID, text) =>
@@ -788,42 +796,44 @@ export const BroPlugin = (
           body: { parts: [{ type: 'text', text }] },
         })
       ),
-  })
+  });
 
   return Promise.resolve({
     async 'experimental.chat.system.transform'(hookInput, output) {
-      const sessionID = hookInput.sessionID
+      const sessionID = hookInput.sessionID;
       if (!sessionID) {
-        return
+        return;
       }
-      const text = await hydrate(sessionID, 'session-start')
+      const text = await hydrate(sessionID, 'session-start');
       if (text) {
-        output.system.push(text)
+        output.system.push(text);
       }
     },
 
     async 'experimental.session.compacting'(hookInput, output) {
       const text = contextOf(
         await probe('pre-compact', { session_id: hookInput.sessionID }, REHYDRATION_TIMEOUT_MS)
-      )
+      );
       if (text) {
-        output.context.push(text)
+        output.context.push(text);
       }
     },
 
     async 'chat.message'(hookInput, output) {
       const prompt = output.parts
-        .filter((part) => part.type === 'text')
-        .map((part) => part.text ?? '')
-        .join('\n')
-      const text = contextOf(await probe('prompt-submit', { session_id: hookInput.sessionID, prompt }))
+        .filter(part => part.type === 'text')
+        .map(part => part.text ?? '')
+        .join('\n');
+      const text = contextOf(
+        await probe('prompt-submit', { session_id: hookInput.sessionID, prompt })
+      );
       if (text) {
-        output.parts.push({ type: 'text', text })
+        output.parts.push({ type: 'text', text });
       }
     },
 
     async 'tool.execute.after'(hookInput, output) {
-      const metadata = asRecord(output.metadata)
+      const metadata = asRecord(output.metadata);
       const text = contextOf(
         await probe('post-tool', {
           session_id: hookInput.sessionID,
@@ -831,38 +841,38 @@ export const BroPlugin = (
           tool_input: asRecord(hookInput.args) ?? {},
           tool_response: { success: toolSucceeded(metadata) },
         })
-      )
+      );
       if (text) {
-        output.output = `${output.output}\n\n${text}`
+        output.output = `${output.output}\n\n${text}`;
       }
     },
 
     async 'permission.ask'(hookInput, output) {
-      const command = permissionCommand(hookInput)
+      const command = permissionCommand(hookInput);
       if (!command) {
-        return
+        return;
       }
       const control = await probe('permission', {
         tool_input: { command },
         session_id: hookInput.sessionID,
-      })
+      });
       if (control?.decision === 'approve') {
-        output.status = 'allow'
+        output.status = 'allow';
       }
     },
 
     async event({ event }) {
-      await onEvent(event.type, event.properties ?? {})
+      await onEvent(event.type, event.properties ?? {});
     },
-  })
-}
+  });
+};
 
 /* ------------------------------------------------------------------ */
 /* V2 — `setup(ctx)` on the domain-based plugin context                */
 /* ------------------------------------------------------------------ */
 
 interface V2Registration {
-  dispose?(): Promise<void>
+  dispose?(): Promise<void>;
 }
 
 /** `ctx.<domain>.hook(name, cb)` — hook() is declared per domain and
@@ -872,7 +882,7 @@ interface V2HookDomain<E> {
   hook?(
     name: string,
     callback: (event: E) => void | Promise<void>
-  ): Promise<V2Registration | undefined>
+  ): Promise<V2Registration | undefined>;
 }
 
 /** Superset of the session-hook event shapes we touch — `prompt`
@@ -880,95 +890,95 @@ interface V2HookDomain<E> {
  *  optional members partition it: a prompt event has no `system`, a
  *  context event has no `prompt`. */
 interface V2SessionEvent {
-  sessionID?: string
-  prompt?: { text?: string }
-  system?: { type: string; text?: string }[]
-  messages?: unknown[]
-  options?: Record<string, unknown>
+  sessionID?: string;
+  prompt?: { text?: string };
+  system?: { type: string; text?: string }[];
+  messages?: unknown[];
+  options?: Record<string, unknown>;
 }
 
 interface V2ToolEvent {
-  tool?: string
-  sessionID?: string
+  tool?: string;
+  sessionID?: string;
   /** 'completed' | 'error' on execute.after */
-  status?: string
-  input?: unknown
-  args?: unknown
-  result?: unknown
-  error?: unknown
+  status?: string;
+  input?: unknown;
+  args?: unknown;
+  result?: unknown;
+  error?: unknown;
 }
 
 interface V2PermissionEvent {
-  sessionID?: string
-  action?: string
-  resources?: unknown[]
-  metadata?: Record<string, unknown>
-  effect?: string
-  message?: string
+  sessionID?: string;
+  action?: string;
+  resources?: unknown[];
+  metadata?: Record<string, unknown>;
+  effect?: string;
+  message?: string;
 }
 
 interface V2ShellEvent {
-  command?: string
-  cwd?: string
-  timeout?: number
-  shell?: string
-  env?: Record<string, string | undefined>
+  command?: string;
+  cwd?: string;
+  timeout?: number;
+  shell?: string;
+  env?: Record<string, string | undefined>;
 }
 
 /** `ctx.<domain>.transform(cb)` — synchronous registry edit returning a
  *  Registration. */
 interface V2TransformDomain<E> {
-  transform?(callback: (editor: E) => void): Promise<V2Registration | undefined>
+  transform?(callback: (editor: E) => void): Promise<V2Registration | undefined>;
 }
 
 interface V2ToolDef {
-  name: string
-  description: string
+  name: string;
+  description: string;
   /** JSON Schema — no zod in a standalone module. */
-  input: Record<string, unknown>
-  options?: { namespace?: string }
-  execute(input: unknown, context: unknown): Promise<unknown>
+  input: Record<string, unknown>;
+  options?: { namespace?: string };
+  execute(input: unknown, context: unknown): Promise<unknown>;
 }
 
 interface V2ToolEditor {
-  namespace?(ns: { name: string; description?: string }): void
-  add?(tool: V2ToolDef): void
+  namespace?(ns: { name: string; description?: string }): void;
+  add?(tool: V2ToolDef): void;
 }
 
 interface V2CommandEditor {
   add?(def: {
-    name: string
-    description?: string
+    name: string;
+    description?: string;
     execute(input: {
-      sessionID?: string
-      prompt?: { text?: string }
-      delivery?: string
-    }): Promise<void>
-  }): void
+      sessionID?: string;
+      prompt?: { text?: string };
+      delivery?: string;
+    }): Promise<void>;
+  }): void;
 }
 
 interface V2McpEditor {
-  set?(name: string, config: Record<string, unknown>): void
+  set?(name: string, config: Record<string, unknown>): void;
 }
 
 interface V2Ctx {
-  location?: { directory?: string }
-  options?: PluginOptions
-  app?: { version?: string; log?(input: LogInput): Promise<unknown> }
+  location?: { directory?: string };
+  options?: PluginOptions;
+  app?: { version?: string; log?(input: LogInput): Promise<unknown> };
   session?: V2HookDomain<V2SessionEvent> & {
-    prompt?(input: { sessionID: string; text: string }): Promise<unknown>
-    synthetic?(input: { sessionID: string; text: string }): Promise<unknown>
-  }
-  tool?: V2HookDomain<V2ToolEvent> & V2TransformDomain<V2ToolEditor>
-  command?: V2TransformDomain<V2CommandEditor>
-  mcp?: V2TransformDomain<V2McpEditor>
-  permission?: V2HookDomain<V2PermissionEvent>
-  shell?: V2HookDomain<V2ShellEvent>
-  event?: { subscribe?(options?: { signal?: AbortSignal }): AsyncIterable<unknown> }
+    prompt?(input: { sessionID: string; text: string }): Promise<unknown>;
+    synthetic?(input: { sessionID: string; text: string }): Promise<unknown>;
+  };
+  tool?: V2HookDomain<V2ToolEvent> & V2TransformDomain<V2ToolEditor>;
+  command?: V2TransformDomain<V2CommandEditor>;
+  mcp?: V2TransformDomain<V2McpEditor>;
+  permission?: V2HookDomain<V2PermissionEvent>;
+  shell?: V2HookDomain<V2ShellEvent>;
+  event?: { subscribe?(options?: { signal?: AbortSignal }): AsyncIterable<unknown> };
   storage?: {
-    get?(key: string): Promise<unknown>
-    set?(key: string, value: unknown): Promise<void>
-  }
+    get?(key: string): Promise<unknown>;
+    set?(key: string, value: unknown): Promise<void>;
+  };
 }
 
 /** V2's permission evaluation carries `resources` — for a bash ask, the
@@ -977,17 +987,17 @@ interface V2Ctx {
 function evalCommand(event: V2PermissionEvent): string {
   const resources = Array.isArray(event.resources)
     ? event.resources.filter((r): r is string => typeof r === 'string')
-    : []
+    : [];
   if (resources.length > 0) {
-    return resources.join(' && ')
+    return resources.join(' && ');
   }
   for (const key of ['command', 'cmd', 'pattern']) {
-    const value = event.metadata?.[key]
+    const value = event.metadata?.[key];
     if (typeof value === 'string') {
-      return value
+      return value;
     }
   }
-  return ''
+  return '';
 }
 
 /** bro read-verbs exposed as `bro_<name>` model tools — args pinned so
@@ -995,7 +1005,8 @@ function evalCommand(event: V2PermissionEvent): string {
 const BRO_TOOLS: ReadonlyArray<{ name: string; description: string; args: string[] }> = [
   {
     name: 'status',
-    description: 'bro live board — beads in-progress/ready, fleet agents, drill frame, branch (--json)',
+    description:
+      'bro live board — beads in-progress/ready, fleet agents, drill frame, branch (--json)',
     args: ['status', '--json'],
   },
   {
@@ -1005,7 +1016,8 @@ const BRO_TOOLS: ReadonlyArray<{ name: string; description: string; args: string
   },
   {
     name: 'act_status',
-    description: 'PR review exit gate — nonzero while blocked; the exit code IS the verdict (--json)',
+    description:
+      'PR review exit gate — nonzero while blocked; the exit code IS the verdict (--json)',
     args: ['act', 'status', '--json'],
   },
   {
@@ -1013,7 +1025,7 @@ const BRO_TOOLS: ReadonlyArray<{ name: string; description: string; args: string
     description: 'fleet snapshot — mols × steps × agents × worktrees × PRs',
     args: ['fleet'],
   },
-]
+];
 
 /** `/bro` arguments — whitespace-split with "…"/'…' holding a multiword
  *  value together (`/bro learn capture "a note"` must not shred the
@@ -1021,26 +1033,26 @@ const BRO_TOOLS: ReadonlyArray<{ name: string; description: string; args: string
  *  token — a mangled command still runs. Twin of opencode-tui.ts's
  *  copy — materialized files share no imports, keep them in sync. */
 function splitArgs(input: string): string[] {
-  const args: string[] = []
+  const args: string[] = [];
   for (const m of input.matchAll(/"([^"]*)"|'([^']*)'|(\S+)/g)) {
-    args.push(m[1] ?? m[2] ?? m[3] ?? m[0])
+    args.push(m[1] ?? m[2] ?? m[3] ?? m[0]);
   }
-  return args
+  return args;
 }
 
 /** Where the nudge lands on a V2 tool result — `output`/`content` take
  *  text directly; anything else rides metadata as `broContext`. */
 function appendToolResult(result: Record<string, unknown> | null, text: string): unknown {
   if (result === null) {
-    return { metadata: { broContext: text } }
+    return { metadata: { broContext: text } };
   }
   if (typeof result.output === 'string') {
-    return { ...result, output: `${result.output}\n\n${text}` }
+    return { ...result, output: `${result.output}\n\n${text}` };
   }
   if (typeof result.content === 'string') {
-    return { ...result, content: `${result.content}\n\n${text}` }
+    return { ...result, content: `${result.content}\n\n${text}` };
   }
-  return { ...result, metadata: { ...asRecord(result.metadata), broContext: text } }
+  return { ...result, metadata: { ...asRecord(result.metadata), broContext: text } };
 }
 
 export async function BroSetup(ctx: V2Ctx): Promise<() => Promise<void>> {
@@ -1051,108 +1063,108 @@ export async function BroSetup(ctx: V2Ctx): Promise<() => Promise<void>> {
     options: ctx.options,
     log: (level, message) => {
       try {
-        return Promise.resolve(
-          ctx.app?.log?.({ body: { service: 'bro', level, message } })
-        ).catch(() => undefined)
+        return Promise.resolve(ctx.app?.log?.({ body: { service: 'bro', level, message } })).catch(
+          () => undefined
+        );
       } catch {
-        return Promise.resolve(undefined)
+        return Promise.resolve(undefined);
       }
     },
     reprompt: (sessionID, text) => {
-      const session = ctx.session
-      const fn = session?.prompt?.bind(session) ?? session?.synthetic?.bind(session)
-      return fn ? fn({ sessionID, text }) : Promise.resolve(undefined)
+      const session = ctx.session;
+      const fn = session?.prompt?.bind(session) ?? session?.synthetic?.bind(session);
+      return fn ? fn({ sessionID, text }) : Promise.resolve(undefined);
     },
     persist:
       ctx.storage?.get !== undefined && ctx.storage?.set !== undefined
         ? {
             load: () => ctx.storage?.get?.('stop-gated') ?? Promise.resolve(undefined),
-            save: (ids) =>
+            save: ids =>
               Promise.resolve(ctx.storage?.set?.('stop-gated', [...ids])).then(() => undefined),
           }
         : undefined,
-  })
+  });
 
-  const registrations: Promise<V2Registration | undefined>[] = []
+  const registrations: Promise<V2Registration | undefined>[] = [];
   const register = (r: Promise<V2Registration | undefined> | undefined): void => {
     // a hook domain that rejects registration (drifted shape, disabled
     // feature) is one unwired surface — never a failed setup
     if (r) {
-      registrations.push(r.catch(() => undefined))
+      registrations.push(r.catch(() => undefined));
     }
-  }
+  };
 
   // hydrated once per session, re-pushed on every model request —
   // "context" covers continuations, so the cache is what keeps it cheap
   register(
-    ctx.session?.hook?.('context', async (event) => {
-      const sessionID = event.sessionID
+    ctx.session?.hook?.('context', async event => {
+      const sessionID = event.sessionID;
       if (!sessionID || event.system === undefined) {
-        return
+        return;
       }
-      const text = await core.hydrate(sessionID, 'session-start')
+      const text = await core.hydrate(sessionID, 'session-start');
       if (text) {
-        event.system.push({ type: 'text', text })
+        event.system.push({ type: 'text', text });
       }
     })
-  )
+  );
 
   register(
-    ctx.session?.hook?.('compaction', async (event) => {
+    ctx.session?.hook?.('compaction', async event => {
       const text = contextOf(
         await core.probe('pre-compact', { session_id: event.sessionID }, REHYDRATION_TIMEOUT_MS)
-      )
+      );
       if (text && event.system !== undefined) {
-        event.system.push({ type: 'text', text })
+        event.system.push({ type: 'text', text });
       }
     })
-  )
+  );
 
   register(
-    ctx.session?.hook?.('prompt', async (event) => {
-      const prompt = event.prompt
+    ctx.session?.hook?.('prompt', async event => {
+      const prompt = event.prompt;
       if (prompt === undefined) {
-        return
+        return;
       }
       const text = contextOf(
         await core.probe('prompt-submit', {
           session_id: event.sessionID,
           prompt: prompt.text ?? '',
         })
-      )
+      );
       if (text) {
-        prompt.text = `${prompt.text ?? ''}\n\n${text}`
+        prompt.text = `${prompt.text ?? ''}\n\n${text}`;
       }
     })
-  )
+  );
 
   register(
-    ctx.tool?.hook?.('execute.before', async (event) => {
+    ctx.tool?.hook?.('execute.before', async event => {
       const control = await core.probe('pre-tool', {
         session_id: event.sessionID,
         tool_name: event.tool,
         tool_input: asRecord(event.input) ?? {},
-      })
+      });
       if (control === null) {
-        return
+        return;
       }
       // bro's guard contract, translated: block becomes the throw that
       // vetoes the call; a tool_input override merges over the original
       // args — a connector rewriting `command` must not wipe `workdir`
-      const override = asRecord(asRecord(control.hookSpecificOutput)?.tool_input)
+      const override = asRecord(asRecord(control.hookSpecificOutput)?.tool_input);
       if (override) {
-        event.input = { ...asRecord(event.input), ...override }
+        event.input = { ...asRecord(event.input), ...override };
       }
       if (control.decision === 'block' || control.decision === 'deny') {
-        const reason = typeof control.reason === 'string' ? control.reason.trim() : ''
-        throw new Error(reason || 'blocked by bro')
+        const reason = typeof control.reason === 'string' ? control.reason.trim() : '';
+        throw new Error(reason || 'blocked by bro');
       }
     })
-  )
+  );
 
   register(
-    ctx.tool?.hook?.('execute.after', async (event) => {
-      const result = asRecord(event.result)
+    ctx.tool?.hook?.('execute.after', async event => {
+      const result = asRecord(event.result);
       const text = contextOf(
         await core.probe('post-tool', {
           session_id: event.sessionID,
@@ -1162,52 +1174,52 @@ export async function BroSetup(ctx: V2Ctx): Promise<() => Promise<void>> {
             success: event.status !== 'error' && toolSucceeded(asRecord(result?.metadata)),
           },
         })
-      )
+      );
       if (text) {
-        event.result = appendToolResult(result, text)
+        event.result = appendToolResult(result, text);
       }
     })
-  )
+  );
 
   register(
-    ctx.permission?.hook?.('evaluate', async (event) => {
-      const command = evalCommand(event)
+    ctx.permission?.hook?.('evaluate', async event => {
+      const command = evalCommand(event);
       if (!command) {
-        return
+        return;
       }
       const control = await core.probe('permission', {
         tool_input: { command },
         session_id: event.sessionID,
-      })
+      });
       if (control?.decision === 'approve') {
-        event.effect = 'allow'
+        event.effect = 'allow';
       } else if (control?.decision === 'deny' || control?.decision === 'block') {
         // the deny V1's ask-shaped slot could never send
-        event.effect = 'deny'
-        const reason = typeof control?.reason === 'string' ? control.reason.trim() : ''
+        event.effect = 'deny';
+        const reason = typeof control?.reason === 'string' ? control.reason.trim() : '';
         if (reason) {
-          event.message = reason
+          event.message = reason;
         }
       }
     })
-  )
+  );
 
   register(
-    ctx.shell?.hook?.('create.before', (event) => {
+    ctx.shell?.hook?.('create.before', event => {
       if (event.env === undefined) {
-        return
+        return;
       }
       // provenance only — never clobber an operator's own values
-      event.env.BRO_AGENT_ID ??= 'opencode'
+      event.env.BRO_AGENT_ID ??= 'opencode';
     })
-  )
+  );
 
   // bro read-verbs as model-callable tools — args pinned so the model
   // gets reads, never arbitrary bro; the exit code prefixes the content
   // because a nonzero gate (`act status` blocked) IS the answer
   register(
-    ctx.tool?.transform?.((editor) => {
-      editor.namespace?.({ name: 'bro', description: 'bro orchestration reads' })
+    ctx.tool?.transform?.(editor => {
+      editor.namespace?.({ name: 'bro', description: 'bro orchestration reads' });
       for (const tool of BRO_TOOLS) {
         editor.add?.({
           name: tool.name,
@@ -1215,84 +1227,84 @@ export async function BroSetup(ctx: V2Ctx): Promise<() => Promise<void>> {
           input: { type: 'object', properties: {}, additionalProperties: false },
           options: { namespace: 'bro' },
           execute: async () => {
-            const { code, out, err } = await core.exec(tool.args)
-            const body = out || err || '(no output)'
-            return { content: code === 0 ? body : `exit ${code}: ${body}` }
+            const { code, out, err } = await core.exec(tool.args);
+            const body = out || err || '(no output)';
+            return { content: code === 0 ? body : `exit ${code}: ${body}` };
           },
-        })
+        });
       }
     })
-  )
+  );
 
   // `/bro <args>` — run the verb, feed the output back as a prompt
   register(
-    ctx.command?.transform?.((editor) => {
+    ctx.command?.transform?.(editor => {
       editor.add?.({
         name: 'bro',
         description: 'bro orchestration — `/bro [args]` runs the CLI and submits the output',
         execute: async ({ sessionID, prompt }) => {
           if (!sessionID || !ctx.session?.prompt) {
-            return
+            return;
           }
-          const args = splitArgs(prompt?.text ?? '')
-          const verb = args.length > 0 ? args : ['status']
-          const { code, out, err } = await core.exec(verb)
-          const body = out || err || '(no output)'
-          const suffix = code === 0 ? '' : ` (exit ${code})`
+          const args = splitArgs(prompt?.text ?? '');
+          const verb = args.length > 0 ? args : ['status'];
+          const { code, out, err } = await core.exec(verb);
+          const body = out || err || '(no output)';
+          const suffix = code === 0 ? '' : ` (exit ${code})`;
           await ctx.session.prompt({
             sessionID,
             text: `bro ${verb.join(' ')}${suffix}:\n${body}`,
-          })
+          });
         },
-      })
+      });
     })
-  )
+  );
 
   // `bro serve` as a remote MCP server — strictly opt-in via plugin
   // options; nothing mounts a URL nobody asked for
   if (typeof ctx.options?.mcpPort === 'number') {
-    const mcpPort = ctx.options.mcpPort
+    const mcpPort = ctx.options.mcpPort;
     register(
-      ctx.mcp?.transform?.((editor) => {
-        editor.set?.('bro', { type: 'remote', url: `http://127.0.0.1:${mcpPort}` })
+      ctx.mcp?.transform?.(editor => {
+        editor.set?.('bro', { type: 'remote', url: `http://127.0.0.1:${mcpPort}` });
       })
-    )
+    );
   }
 
   // the stop gate rides the public event stream — dispatched without
   // awaiting so a session.deleted lands inside an in-flight idle gate,
   // the same interleaving the V1 `event` hook got for free
-  const controller = new AbortController()
-  const stream = ctx.event?.subscribe?.({ signal: controller.signal })
+  const controller = new AbortController();
+  const stream = ctx.event?.subscribe?.({ signal: controller.signal });
   if (stream) {
     void (async () => {
       for await (const raw of stream) {
-        const e = asRecord(raw)
-        const type = typeof e?.type === 'string' ? e.type : ''
+        const e = asRecord(raw);
+        const type = typeof e?.type === 'string' ? e.type : '';
         // fire-and-forget, never awaited: the idle gate suspends on real
         // I/O, and a session.deleted must land INSIDE an in-flight gate —
         // serializing the stream would replay it after the prompt sent
         if (type) {
-          void core.onEvent(type, asRecord(e?.properties) ?? asRecord(e?.data) ?? {}).catch(
-            () => {}
-          )
+          void core
+            .onEvent(type, asRecord(e?.properties) ?? asRecord(e?.data) ?? {})
+            .catch(() => {});
         }
       }
-    })().catch(() => {})
+    })().catch(() => {});
   }
 
   return async () => {
-    controller.abort()
+    controller.abort();
     for (const pending of registrations) {
       try {
-        await (await pending)?.dispose?.()
+        await (await pending)?.dispose?.();
       } catch {
         // teardown must not throw into the host's unload path
       }
     }
-  }
+  };
 }
 
 /** The dual entrypoint: V1's loader (≥1.18.29 object form) calls
  *  `server()`, V2's reads `id` + `setup()`. */
-export default { id: 'bro', server: BroPlugin, setup: BroSetup }
+export default { id: 'bro', server: BroPlugin, setup: BroSetup };
