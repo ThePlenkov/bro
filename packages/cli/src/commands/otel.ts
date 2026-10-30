@@ -35,8 +35,7 @@ function otelConfig(req: { dir: string }): ResolvedOtelConfig {
   return otelConfigFor(req.dir)
 }
 
-function usage(exitCode: ExitCode = EXIT.usage): never {
-  const usageText = `Usage: bro otel <command> [args…]
+const OTEL_USAGE_TEXT = `Usage: bro otel <command> [args…]
 
 Commands:
   status [--json]   otel.enabled, the resolved exporter (file path /
@@ -48,7 +47,9 @@ Commands:
                     (post-tool) and host (PostToolUse) names both work
   on | off          write otel.enabled to bro.config.local.json — the
                     local layer, never the committed config`
-  throw new CommandError(usageText, exitCode, usageText)
+
+function usage(exitCode: ExitCode = EXIT.usage): never {
+  throw new CommandError(OTEL_USAGE_TEXT, exitCode, OTEL_USAGE_TEXT)
 }
 
 // --- on | off --------------------------------------------------------------------
@@ -261,6 +262,10 @@ export function runOtelCommand(argv: string[]): void {
       cmdStatus({ dir, json: rest.includes('--json') })
       return
     default:
-      usage(EXIT.usage)
+      throw new CommandError(
+        sub === undefined ? OTEL_USAGE_TEXT : `error: unknown otel subcommand: ${sub}\n\n${OTEL_USAGE_TEXT}`,
+        EXIT.usage,
+        OTEL_USAGE_TEXT
+      )
   }
 }
