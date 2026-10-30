@@ -483,7 +483,7 @@ export const PLUGINS: BroPlugin[] = [
   definePlugin({
     name: 'cleanup',
     group: 'review',
-    summary: 'Delete local branches whose PR merged [--remote] [--dry-run]',
+    summary: 'Delete local branches whose PR merged and stale temp dirs [--remote] [--dry-run]',
     run: runCleanupCommand,
   }),
   definePlugin({

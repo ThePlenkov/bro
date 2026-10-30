@@ -6,8 +6,8 @@
  * with local branches. The remote side is opt-in — merge --delete-branch
  * already covers PRs merged through the UI/CLI.
  */
-import { readdirSync, rmSync, statSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { readdirSync, readlinkSync, rmSync, statSync } from 'node:fs';
+import { tmpdir, userInfo } from 'node:os';
 import { join } from 'node:path';
 import { facadeAuth, git, gitTry, hasHelpFlag, printUsage, reviewHost } from '@broject/core';
 import { loadBroConfig } from '../plugins.ts';
@@ -199,7 +199,8 @@ export function runCleanupCommand(argv: string[]): void {
     }
     console.log(`cleanup: ${dryRun ? 'would delete' : 'deleted'} ${plan.delete.length} branch(es)`);
   } else {
-    console.log('cleanup: nothing to delete');
+    // Don't claim "nothing to delete" if temp cleanup may delete items; temp cleanup logs its own summary
+    console.log('cleanup: nothing to delete (branches)');
   }
 
   cleanupTmpDirs(dryRun);
@@ -251,18 +252,18 @@ function deleteBranch(
 }
 
 function isPathInUse(path: string): boolean {
-  // On Linux, check /proc for open file descriptors pointing to this path
+  // On Linux, check /proc for open file descriptors and cwd pointing to this path
   if (process.platform !== 'linux') {
-    return false;
+    // If we cannot safely verify occupancy, skip deletion to avoid removing active paths
+    return true;
   }
   try {
-    const { readdirSync: rd, readlinkSync } = require('node:fs');
     const procDir = '/proc';
-    const pids = rd(procDir).filter((p: string) => /^\d+$/.test(p));
+    const pids = readdirSync(procDir).filter((p: string) => /^\d+$/.test(p));
     for (const pid of pids) {
       try {
         const fdDir = join(procDir, pid, 'fd');
-        const fds = rd(fdDir);
+        const fds = readdirSync(fdDir);
         for (const fd of fds) {
           try {
             const target = readlinkSync(join(fdDir, fd));
@@ -272,6 +273,15 @@ function isPathInUse(path: string): boolean {
           } catch {
             // ignore
           }
+        }
+      } catch {
+        // ignore
+      }
+      // Also check cwd
+      try {
+        const cwd = readlinkSync(join(procDir, pid, 'cwd'));
+        if (cwd === path || cwd.startsWith(path + '/') || path.startsWith(cwd + '/')) {
+          return true;
         }
       } catch {
         // ignore
@@ -290,6 +300,7 @@ function cleanupTmpDirs(dryRun: boolean): void {
     entries = readdirSync(tmp);
   } catch (err) {
     console.error(`cleanup: failed to read ${tmp} (${err instanceof Error ? err.message : err})`);
+    process.exitCode = 1;
     return;
   }
 
@@ -300,12 +311,23 @@ function cleanupTmpDirs(dryRun: boolean): void {
     return;
   }
 
+  let currentUid: number | undefined;
+  try {
+    currentUid = userInfo().uid;
+  } catch {
+    // best effort
+  }
+
   let deleted = 0;
   for (const name of targets) {
     const fullPath = join(tmp, name);
     try {
       const st = statSync(fullPath);
-      if (!st.isDirectory() && !st.isFile()) {
+      if (!st.isDirectory()) {
+        continue;
+      }
+      // Skip entries not owned by current user
+      if (currentUid !== undefined && st.uid !== currentUid) {
         continue;
       }
       // Skip if in use by any process
@@ -316,6 +338,11 @@ function cleanupTmpDirs(dryRun: boolean): void {
       if (dryRun) {
         console.log(`  would delete ${fullPath}`);
         deleted++;
+        continue;
+      }
+      // Re-check before deletion to reduce race
+      if (isPathInUse(fullPath)) {
+        console.log(`  keep ${fullPath} (in use)`);
         continue;
       }
       try {
