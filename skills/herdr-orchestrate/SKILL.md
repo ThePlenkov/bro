@@ -23,8 +23,21 @@ All mechanics below are the verified `herdr` CLI surface. Placeholders:
 strings), `{{AGENT_KIND}}` one of the kinds
 `herdr agent start --kind` accepts (run `herdr agent` for the
 installed list — it tracks the binary, not this doc),
-`{{DONE_CRITERIA}}` the gate (e.g. "PR green + merged" — never
-"PR opened"), `{{PARALLEL_LIMIT}}` max concurrent workers.
+`{{DONE_CRITERIA}}` the worker's gate — pushed commits + review
+threads resolved + `bro review act status` reported (never just
+"PR opened", and NOT "merged" — merge is the orchestrator's job,
+see below), `{{PARALLEL_LIMIT}}` max concurrent workers.
+
+**Merge ownership:** the worker never merges. It drives the PR to
+gate-ready and reports the `act status` verdict; the ORCHESTRATOR
+owns the merge — point-check the gate, arm
+`bro review act wait <PR> --merge --cleanup --bead <id> --detach`
+from inside the worktree (`--cleanup` retires the checkout it runs
+in), and bounce new findings back to the worker instead of fixing
+them yourself. The orchestrator outlives worker turns and watcher
+timeouts — a worker-armed wait (45 min default) dies before a
+CodeScene-length check cycle (~2 h) settles the gate, which is
+exactly the split this rule exists to fix.
 
 ## Spawn one worker
 
