@@ -26,7 +26,7 @@ import { homedir } from 'node:os';
 import { basename, dirname, join, resolve, sep } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { GIT_SYNC_PROBE_TIMEOUT_MS, gitCommonDir } from './git.ts';
-
+import { parseBrouter, type BrouterConfig } from './brouter.ts';
 import {
   API_WIRES,
   parseProviderEntry,
@@ -464,6 +464,25 @@ const providerCliSchema = js.obj(
 )
 
 providersSection.jsonSchema = js.map(js.oneOf(providerApiSchema, providerAcpSchema, providerCliSchema))
+
+/** bro.config.json `brouter` section — the model-centric routing
+ *  registry (spec: specs/bro-n1p0s.md): `models` maps a canonical
+ *  model id to its route — a provider name, {provider, model?}, or an
+ *  ordered list of those (preference order; the first route is the
+ *  primary pick). Absent/empty = model routing off; a route naming an
+ *  unconfigured provider is a use-time config error naming the key. */
+export const brouterSection: ConfigSection<BrouterConfig> = raw => parseBrouter(raw);
+
+const brouterRouteSchema = js.oneOf(
+  js.str,
+  js.obj({ provider: js.str, model: js.str }, { required: ['provider'] })
+);
+
+brouterSection.jsonSchema = js.obj({
+  models: js.map(
+    js.oneOf(brouterRouteSchema, { type: 'array', items: brouterRouteSchema, minItems: 1 })
+  ),
+});
 
 /** bro.config.json `connectors` section — facade → connector precedence,
  *  e.g. { "reviews": "gitlab", "tasks": "jira" }. Only string→string
@@ -1082,6 +1101,7 @@ export const CORE_SECTIONS: Record<string, ConfigSection<unknown>> = {
   act: actSection as ConfigSection<unknown>,
   connectors: connectorsSection as ConfigSection<unknown>,
   providers: providersSection as ConfigSection<unknown>,
+  brouter: brouterSection as ConfigSection<unknown>,
   sdd: sddSection as ConfigSection<unknown>,
   fleet: fleetSection as ConfigSection<unknown>,
   query: querySection as ConfigSection<unknown>,
@@ -1183,6 +1203,10 @@ export interface BroConfig {
    *  (`agents.<backend>.provider`) reference entries by name. Empty
    *  means provider behavior is off, not defaulted to a vendor. */
   providers: Record<string, ProviderEntry>
+  /** Model-centric provider routing registry (spec: specs/bro-n1p0s.md)
+   *  — `models` maps a canonical model id to its provider route(s).
+   *  Empty means model routing is off, never a default route. */
+  brouter: BrouterConfig;
   /** Spec-driven development policy — spec before code for claimed
    *  beads. `off` (default) emits nothing; `remind` adds session/prompt
    *  context; `gate` also lets the stop gate block once. `dir` holds
@@ -1260,6 +1284,7 @@ export const DEFAULT_CONFIG: BroConfig = {
   },
   connectors: {},
   providers: {},
+  brouter: { models: {} },
   sdd: { mode: 'off', dir: 'specs' },
   fleet: { maxConcurrent: 3, profiles: {}, routing: {} },
   query: { concurrency: 4, env: {} },

@@ -107,6 +107,79 @@
       },
       "additionalProperties": false
     },
+    "brouter": {
+      "type": "object",
+      "properties": {
+        "models": {
+          "type": "object",
+          "additionalProperties": {
+            "oneOf": [
+              {
+                "oneOf": [
+                  {
+                    "type": "string",
+                    "minLength": 1,
+                    "pattern": "\\S"
+                  },
+                  {
+                    "type": "object",
+                    "properties": {
+                      "provider": {
+                        "type": "string",
+                        "minLength": 1,
+                        "pattern": "\\S"
+                      },
+                      "model": {
+                        "type": "string",
+                        "minLength": 1,
+                        "pattern": "\\S"
+                      }
+                    },
+                    "additionalProperties": false,
+                    "required": [
+                      "provider"
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "array",
+                "items": {
+                  "oneOf": [
+                    {
+                      "type": "string",
+                      "minLength": 1,
+                      "pattern": "\\S"
+                    },
+                    {
+                      "type": "object",
+                      "properties": {
+                        "provider": {
+                          "type": "string",
+                          "minLength": 1,
+                          "pattern": "\\S"
+                        },
+                        "model": {
+                          "type": "string",
+                          "minLength": 1,
+                          "pattern": "\\S"
+                        }
+                      },
+                      "additionalProperties": false,
+                      "required": [
+                        "provider"
+                      ]
+                    }
+                  ]
+                },
+                "minItems": 1
+              }
+            ]
+          }
+        }
+      },
+      "additionalProperties": false
+    },
     "check": {
       "type": "object",
       "properties": {

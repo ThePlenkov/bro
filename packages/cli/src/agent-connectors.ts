@@ -66,9 +66,13 @@ import {
   probeStep,
   procStat,
   providerCallGrade,
+  brouterStaticCatalog,
+  BrouterConfigError,
+  isQualifiedRouteId,
   rebindStep,
   releaseSessionSlot,
   requireProviderSurface,
+  resolveModelRoute,
   resolveStepClass,
   SESSION_SLOT_TTL_MS,
   sessionPlane,
@@ -88,11 +92,13 @@ import {
   type AgentInfo,
   type AgentRegistryEntry,
   type AgentState,
+  type BrouterConfig,
   type ConnectorCtx,
   type DiscoveredSession,
   type FleetProfile,
   type FleetRouter,
   type ListResult,
+  type ModelRoute,
   type ProviderEntry,
   type ProviderWall,
   type ResolvedClass,
@@ -149,6 +155,11 @@ export interface AgentConnectorEnv {
    *  name (`agents.<backend>.provider`, `--provider`, profiles). Absent
    *  means provider behavior is off, never defaulted to a vendor. */
   providers?: Record<string, ProviderEntry>;
+  /** The model-centric routing registry (spec: specs/bro-n1p0s.md) —
+   *  consulted only when no provider is named anywhere: a `--model`
+   *  that resolves through the static index takes its primary route.
+   *  Absent/empty models = label behavior, unchanged. */
+  brouter?: BrouterConfig;
 }
 
 export type AgentConnectorFactory = (ctx: ConnectorCtx, env: AgentConnectorEnv) => AgentConnector;
@@ -238,6 +249,7 @@ export function loadAgentEnv(dir: string): AgentConnectorEnv {
       router?: FleetRouter;
     };
     providers?: Record<string, ProviderEntry>;
+    brouter?: BrouterConfig;
   };
   return {
     agents: cfg.agents ?? {},
@@ -245,6 +257,7 @@ export function loadAgentEnv(dir: string): AgentConnectorEnv {
     loop: cfg.loop,
     fleet: cfg.fleet,
     providers: cfg.providers,
+    brouter: cfg.brouter,
   };
 }
 
@@ -335,6 +348,68 @@ export interface SpawnProviderPick {
   worker?: SpawnWorker;
 }
 
+/** The brouter's spawn-side pick — a bare `--model` resolving through
+ *  the model-centric registry (spec: specs/bro-n1p0s.md). Static
+ *  catalog only: a spawn never pays a live catalog probe. Absent or
+ *  empty `brouter.models` = the registry is off; unresolved stays the
+ *  label path. A declared route naming an unknown provider is a
+ *  'config' SpawnError — the brouter key's own contract. */
+function brouterSpawnRoute(
+  env: AgentConnectorEnv,
+  model: string
+): { provider: string; model: string; modelFromExplicitConfig: boolean } | undefined {
+  const brouter = env.brouter;
+  if (brouter === undefined || Object.keys(brouter.models).length === 0) {
+    return undefined;
+  }
+  let hit: ModelRoute | undefined;
+  try {
+    hit = resolveModelRoute(
+      env.providers ?? {},
+      brouter,
+      brouterStaticCatalog(env.providers ?? {}),
+      model
+    )[0];
+  } catch (err) {
+    if (err instanceof BrouterConfigError) {
+      throw new SpawnError(err.message, 'config');
+    }
+    throw err;
+  }
+  if (hit === undefined) {
+    return undefined;
+  }
+  // provenance must follow resolveModelRoute's source precedence: only a
+  // brouter.models route (source 2) with an explicit `model` counts as
+  // config — a qualified id, a catalog match and a provider-only
+  // declaration all carry a caller-named model, so their refusals stay
+  // 'input'
+  const modelFromExplicitConfig = isConfiguredBrouterModel(env, model);
+  return { provider: hit.provider, model: hit.model, modelFromExplicitConfig };
+}
+
+/** Whether `model` resolves through a `brouter.models` declaration that
+ *  names an explicit upstream `model` — the only case where the model
+ *  under the spawn came from configuration rather than from the
+ *  caller's string. A qualified `provider/model` id wins over the
+ *  declaration (source 1 precedes source 2), so it never counts. */
+function isConfiguredBrouterModel(env: AgentConnectorEnv, model: string): boolean {
+  const brouter = env.brouter;
+  if (brouter === undefined || !Object.hasOwn(brouter.models, model)) {
+    return false;
+  }
+  // a qualified id wins over the declaration (source 1 precedes source 2)
+  if (isQualifiedRouteId(env.providers ?? {}, model)) {
+    return false;
+  }
+  const routes = brouter.models[model];
+  if (routes === undefined) {
+    return false;
+  }
+  const primary = routes[0];
+  return primary !== undefined && primary.model !== undefined;
+}
+
 /** Resolve the spawn's provider into a worker payload. `sel` carries
  *  the explicit fields already merged over the profile's piecewise;
  *  `backend` is the RESOLVED connector name (a profile's `backend`
@@ -352,8 +427,18 @@ export async function resolveSpawnProvider(
    *  'config'. Used only for the SpawnError kind. */
   namedBy: 'flag' | 'profile' | 'backend' = 'backend'
 ): Promise<SpawnProviderPick> {
-  const providerName = sel.provider ?? backendProvider(env, backend);
+  let providerName = sel.provider ?? backendProvider(env, backend);
   const source = sel.provider === undefined ? 'backend' : namedBy;
+  let routedModel: string | undefined;
+  let modelFromExplicitConfig = false;
+  if (providerName === undefined && sel.model !== undefined) {
+    const hit = brouterSpawnRoute(env, sel.model);
+    if (hit !== undefined) {
+      providerName = hit.provider;
+      routedModel = hit.model;
+      modelFromExplicitConfig = hit.modelFromExplicitConfig;
+    }
+  }
   if (providerName === undefined) {
     // legacy template path — an explicit model still pins provenance
     // env/registry labels without changing what runs
@@ -371,7 +456,7 @@ export async function resolveSpawnProvider(
     }
     throw err;
   }
-  const model = sel.model ?? entry.model;
+  const model = routedModel ?? sel.model ?? entry.model;
   switch (entry.type) {
     case 'cli': {
       // the entry's command substitutes for the backend's template —
@@ -382,12 +467,12 @@ export async function resolveSpawnProvider(
       const { command } = cliCommandModel(
         entry.command,
         entry.model,
-        sel.model,
+        model,
         m =>
           new SpawnError(
             `providers.${providerName} (type 'cli') cannot honor model '${m}' — ` +
               'its command has no {model} placeholder',
-            'input'
+            modelFromExplicitConfig ? 'config' : 'input'
           ),
         () =>
           new SpawnError(
