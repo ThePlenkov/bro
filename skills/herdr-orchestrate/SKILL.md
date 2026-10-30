@@ -63,11 +63,17 @@ exactly the split this rule exists to fix.
    ({{DONE_CRITERIA}}), the worktree path, and "do not spawn
    sub-agents". Arm the persistent objective BEFORE the task prompt —
    the worker's first message must carry the goal, or a mid-run
-   compaction drops the thread: worker kinds with a native `/goal` get
-   `herdr agent prompt {{TASK_ID}}-worker "/goal {{DONE_CRITERIA}} — read {{TASK_ID}}-brief.md at the worktree root and execute it"`;
-   for hosts without one, `bro work goal '{{DONE_CRITERIA}}'` run IN
-   the worktree seeds it (materializes for the next session there —
-   set it before `agent start`). Then submit a FIXED prompt string
+   compaction drops the thread. **The criteria text never enters
+   argv** — it is free prose, and a quote or `$()` in it executes on
+   the orchestrator's shell. Write it to
+   `{{REPO_ROOT}}--{{TASK_ID}}/{{TASK_ID}}-goal.txt` with your file
+   tool; then worker kinds with a native `/goal` get
+   `herdr agent prompt {{TASK_ID}}-worker "/goal — execute {{TASK_ID}}-goal.txt and {{TASK_ID}}-brief.md at the worktree root"`,
+   and hosts without one get
+   `bro work goal "$(cat {{TASK_ID}}-goal.txt)"` run IN the worktree
+   (command-substitution output is not re-parsed — the file indirection
+   is what keeps prose out of the parsed command line). Then submit a
+   FIXED prompt string
    built only from validated placeholders:
    `herdr agent prompt {{TASK_ID}}-worker "Read {{TASK_ID}}-brief.md at the worktree root and execute it" --wait --until working`.
    Never interpolate the brief text itself into the prompt string —
