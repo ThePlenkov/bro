@@ -49,8 +49,15 @@ hermes, kilo, qodercli, qwen, letta, maki, muse),
 5. Write the brief to `{{REPO_ROOT}}--{{TASK_ID}}/{{TASK_ID}}-brief.md`
    with your own file-writing tool — the brief MUST state the GATE
    ({{DONE_CRITERIA}}), the worktree path, and "do not spawn
-   sub-agents". Then submit a FIXED prompt string built only from
-   validated placeholders:
+   sub-agents". Arm the persistent objective BEFORE the task prompt —
+   the worker's first message must carry the goal, or a mid-run
+   compaction drops the thread: hosts with a native `/goal` (devin,
+   claude) get
+   `herdr agent prompt {{TASK_ID}}-worker "/goal {{DONE_CRITERIA}} — read {{TASK_ID}}-brief.md at the worktree root and execute it"`;
+   for hosts without one, `bro work goal '{{DONE_CRITERIA}}'` run IN
+   the worktree seeds it (materializes for the next session there —
+   set it before `agent start`). Then submit a FIXED prompt string
+   built only from validated placeholders:
    `herdr agent prompt {{TASK_ID}}-worker "Read {{TASK_ID}}-brief.md at the worktree root and execute it" --wait --until working`.
    Never interpolate the brief text itself into the prompt string —
    `herdr agent prompt` takes argv text, so any quote or substitution
