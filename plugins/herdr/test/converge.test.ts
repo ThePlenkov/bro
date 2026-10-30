@@ -9,7 +9,7 @@ import {
   writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { basename, join } from 'node:path';
 import { describe, test } from 'node:test';
 import { fileURLToPath } from 'node:url';
 
@@ -383,7 +383,7 @@ describe('workspace labels — lifecycle only (spec bro-u19mq)', () => {
     const opens = called('worktree', 'open');
     assert.equal(opens.length, 1);
     const label = opens[0]![opens[0]!.indexOf('--label') + 1]!;
-    assert.equal(label, 'Ship it');
+    assert.equal(label, `🤖 ${basename(tree)}`);
   });
 
   test('the plugin never renames or tokens a managed workspace', () => {
