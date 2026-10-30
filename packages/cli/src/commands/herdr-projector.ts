@@ -77,6 +77,17 @@ export interface TreeProjection {
   /** The freshest registry agent's program name — the real driver
    *  behind the pane (opencode, devin, claude, …). */
   agent?: string;
+  /** The session pane's attach identity — the session-owning agent's
+   *  recorded acpSessionId (spec bro-nwl5g). */
+  acpSessionId?: string;
+  /** The session-owning agent's provider name — the pane resolves its
+   *  `providers.<name>` entry for the acp command. */
+  provider?: string;
+  /** The session-owning agent's recorded model — display text. */
+  model?: string;
+  /** The session-owning agent's native log — the session pane's
+   *  fallback stream. */
+  log?: string;
 }
 
 // --- pure classification -------------------------------------------------------
@@ -570,6 +581,12 @@ export interface AgentRow {
   /** The agent binary driving the pipeline (opencode, devin, …) —
    *  resolved from `providers.<name>.command`, the pane's agent name. */
   agent?: string;
+  /** The session-view fields — raw registry ride-alongs the
+   *  `bro: session` pane resolves against provider config. */
+  provider?: string;
+  model?: string;
+  acpSessionId?: string;
+  log?: string;
   /** Recency key — the entry's spawnedAt. */
   at: number;
 }
@@ -628,11 +645,25 @@ export function projectTree(i: TreeInput): {
   const agent = (
     i.agents.find(a => a.live && a.agent !== undefined) ?? i.agents.find(a => a.agent !== undefined)
   )?.agent;
+  // the session owner — the agent whose session the `bro: session` pane
+  // attaches (or whose log it tails). A carrier is a row holding an
+  // acpSessionId or a log; live wins over dead, the newest carrier
+  // wins inside a liveness class — the freshest worker on the tree is
+  // the session worth watching, even when an older acp session exists
+  const session = i.agents.reduce<AgentRow | undefined>((best, a) => {
+    if (a.acpSessionId === undefined && a.log === undefined) return best;
+    if (best === undefined || (a.live && !best.live)) return a;
+    return a.live === best.live && a.at > best.at ? a : best;
+  }, undefined);
   const projection: TreeProjection = {
     ...worker,
     ...prFor(i.branch, slug, i.beads, i.act, i.now),
     armed: i.claim !== undefined || i.markerArmed,
     ...(agent !== undefined ? { agent } : {}),
+    ...(session?.acpSessionId !== undefined ? { acpSessionId: session.acpSessionId } : {}),
+    ...(session?.provider !== undefined ? { provider: session.provider } : {}),
+    ...(session?.model !== undefined ? { model: session.model } : {}),
+    ...(session?.log !== undefined ? { log: session.log } : {}),
   };
   const title =
     (slug !== undefined ? i.beads.find(b => b.id === slug)?.title : undefined) || basename(i.path);
@@ -772,8 +803,12 @@ function agentRows(t: HerdrWorktree, p: Planes, ctx: PassCtx): AgentRow[] {
         ...(e.provider !== undefined
           ? {
               agent: agentOfCommand(providerCommand(p.providers[e.provider])) ?? e.provider,
+              provider: e.provider,
             }
           : {}),
+        ...(typeof e.model === 'string' ? { model: e.model } : {}),
+        ...(typeof e.acpSessionId === 'string' ? { acpSessionId: e.acpSessionId } : {}),
+        ...(typeof e.log === 'string' ? { log: e.log } : {}),
         at: parseTs(e.spawnedAt),
       };
     });
@@ -1021,6 +1056,10 @@ function paneWrites(j: PaneJob): { files: number; leds: number; path?: string } 
     status: statusString(j.proj),
     ...(j.proj.prUrl !== undefined ? { prUrl: j.proj.prUrl } : {}),
     ...(j.proj.agent !== undefined ? { agent: j.proj.agent } : {}),
+    ...(j.proj.acpSessionId !== undefined ? { acpSessionId: j.proj.acpSessionId } : {}),
+    ...(j.proj.provider !== undefined ? { provider: j.proj.provider } : {}),
+    ...(j.proj.model !== undefined ? { model: j.proj.model } : {}),
+    ...(j.proj.log !== undefined ? { log: j.proj.log } : {}),
     led,
     ts: j.now,
   };
