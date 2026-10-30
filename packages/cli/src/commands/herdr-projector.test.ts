@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
-import { mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, test } from 'node:test';
@@ -8,6 +8,8 @@ import {
   type ActEntry,
   gateFrag,
   labelFor,
+  ledPane,
+  ledReport,
   prFor,
   prToken,
   projectFleet,
@@ -308,13 +310,86 @@ describe('projectTree — end to end over injected planes', () => {
   });
 });
 
+describe('ledReport — the native-state mapping (bro-awqde)', () => {
+  test('working → working, silent → working + bucket message', () => {
+    assert.deepEqual(ledReport({ state: 'working' }), { kind: 'report', state: 'working' });
+    assert.deepEqual(ledReport({ state: 'silent', silentMin: 45 }), {
+      kind: 'report',
+      state: 'working',
+      message: 'silent45m',
+    });
+    assert.deepEqual(ledReport({ state: 'silent', silentMin: 960 }), {
+      kind: 'report',
+      state: 'working',
+      message: 'silent16h',
+    });
+  });
+
+  test('interrupted/lost → blocked carrying the cause word', () => {
+    assert.deepEqual(ledReport({ state: 'interrupted' }), {
+      kind: 'report',
+      state: 'blocked',
+      message: 'interrupted',
+    });
+    assert.deepEqual(ledReport({ state: 'lost' }), {
+      kind: 'report',
+      state: 'blocked',
+      message: 'lost',
+    });
+  });
+
+  test('exited → idle (native done); stopped → release', () => {
+    assert.deepEqual(ledReport({ state: 'exited' }), {
+      kind: 'report',
+      state: 'idle',
+      message: 'exited',
+    });
+    assert.deepEqual(ledReport({ state: 'stopped' }), { kind: 'release' });
+  });
+
+  test('no worker verdict — armed reports unknown, unarmed releases', () => {
+    assert.deepEqual(ledReport({ armed: true }), { kind: 'report', state: 'unknown' });
+    assert.deepEqual(ledReport({}), { kind: 'release' });
+    assert.deepEqual(ledReport({ armed: false }), { kind: 'release' });
+  });
+});
+
+describe('ledPane — the reportable-candidate filter', () => {
+  const rows = [
+    { pane_id: 'w1:p1' },
+    { pane_id: 'w1:p2', agent: 'devin' },
+    { pane_id: 'w1:p3', agent: 'fleet' },
+    { pane_id: 'w1:p4', agent: '' },
+  ];
+
+  test('first ledger candidate that exists and is agent-free wins', () => {
+    assert.deepEqual(ledPane(rows, ['w1:p9', 'w1:p1']), ['w1:p1']);
+  });
+
+  test('a foreign detected agent skips the pane', () => {
+    assert.deepEqual(ledPane(rows, ['w1:p2', 'w1:p1']), ['w1:p1']);
+  });
+
+  test('our own label and an empty agent field still qualify', () => {
+    assert.deepEqual(ledPane(rows, ['w1:p3', 'w1:p4']), ['w1:p3', 'w1:p4']);
+  });
+
+  test('candidate order is preserved (mirrors before the renderer)', () => {
+    assert.deepEqual(ledPane(rows, ['w1:p4', 'w1:p1', 'w1:p2']), ['w1:p4', 'w1:p1']);
+  });
+
+  test('no candidates → nothing to probe', () => {
+    assert.deepEqual(ledPane(rows, []), []);
+  });
+});
+
 describe('projectFleet — no herdr, no writes, no throw', () => {
   test('unreachable herdr degrades to a quiet skip', () => {
     const prev = process.env.HERDR_BIN_PATH;
     process.env.HERDR_BIN_PATH = '/nonexistent/herdr';
     try {
       const r = projectFleet(mkdtempSync(join(tmpdir(), 'proj-')));
-      assert.deepEqual(r, { reachable: false, workspaces: 0, writes: 0 });
+      assert.deepEqual(r, { reachable: false, workspaces: 0, writes: 0, leds: 0 });
     } finally {
       if (prev === undefined) delete process.env.HERDR_BIN_PATH;
       else process.env.HERDR_BIN_PATH = prev;
@@ -338,6 +413,20 @@ if (verb === 'worktree list') {
   console.log(JSON.stringify({ result: { worktrees: s.worktrees ?? [] } }));
 } else if (verb === 'workspace list') {
   console.log(JSON.stringify({ result: { workspaces: s.workspaces ?? [] } }));
+} else if (verb === 'pane list') {
+  const ws = args[args.indexOf('--workspace') + 1];
+  console.log(
+    JSON.stringify({
+      result: { panes: (s.panes ?? []).filter(p => p.workspace_id === ws) },
+    })
+  );
+} else if (verb === 'pane process-info') {
+  const pi = (s.processes ?? {})[args[args.indexOf('--pane') + 1]];
+  if (pi === undefined) {
+    process.exitCode = 1;
+  } else {
+    console.log(JSON.stringify({ result: { process_info: pi } }));
+  }
 } else {
   console.log(JSON.stringify({ result: {} }));
 }
@@ -397,7 +486,7 @@ describe('projectFleet — a live pass over a fake herdr', () => {
       },
       () => projectFleet(root, NOW)
     );
-    assert.deepEqual(r, { reachable: true, workspaces: 1, writes: 2 });
+    assert.deepEqual(r, { reachable: true, workspaces: 1, writes: 2, leds: 0 });
     const calls = readFileSync(log, 'utf8')
       .trim()
       .split('\n')
@@ -440,9 +529,212 @@ describe('projectFleet — a live pass over a fake herdr', () => {
       },
       () => projectFleet(root, NOW)
     );
-    assert.deepEqual(r, { reachable: true, workspaces: 0, writes: 0 });
+    assert.deepEqual(r, { reachable: true, workspaces: 0, writes: 0, leds: 0 });
     const calls = readFileSync(log, 'utf8').trim();
     assert.ok(!calls.includes('rename'));
     assert.ok(!calls.includes('report-metadata'));
+  });
+
+  /** Root + a live claim marker — the cheap arm path: `.git/bro/work`
+   *  inside the tree, ownerless and fresh (24h window). */
+  function armedRoot(): string {
+    const root = mkdtempSync(join(tmpdir(), 'proj-fleet-'));
+    mkdirSync(join(root, '.git', 'bro'), { recursive: true });
+    writeFileSync(join(root, '.git', 'bro', 'work'), 'session test\nb1\n');
+    return root;
+  }
+
+  const ledFixture = (root: string) => {
+    const fake = join(root, 'fake-herdr.js');
+    const scenario = join(root, 'scenario.json');
+    const log = join(root, 'calls.jsonl');
+    writeFileSync(fake, FAKE_HERDR, { mode: 0o755 });
+    return { fake, scenario, log };
+  };
+
+  const callsOf = (log: string): string[][] =>
+    readFileSync(log, 'utf8')
+      .trim()
+      .split('\n')
+      .map(l => JSON.parse(l) as string[]);
+
+  test('LED report lands on the busy agent-free ledger pane — and only it', () => {
+    const root = armedRoot();
+    const stateDir = mkdtempSync(join(tmpdir(), 'proj-state-'));
+    const f = ledFixture(root);
+    writeFileSync(
+      f.scenario,
+      JSON.stringify({
+        worktrees: [{ path: root, open_workspace_id: 'w1' }],
+        workspaces: [{ workspace_id: 'w1', label: 'Old', tokens: {} }],
+        panes: [
+          { pane_id: 'w1:p2', workspace_id: 'w1', agent: 'devin' },
+          { pane_id: 'w1:p1', workspace_id: 'w1' },
+        ],
+        processes: {
+          'w1:p1': { shell_pid: 7, foreground_processes: [{ pid: 7 }, { pid: 99 }] },
+          'w1:p2': { shell_pid: 5, foreground_processes: [{ pid: 5 }, { pid: 44 }] },
+        },
+      })
+    );
+    const scope = createHash('sha1').update(root).digest('hex').slice(0, 12);
+    writeFileSync(
+      join(stateDir, `state-${scope}.json`),
+      JSON.stringify({
+        workspaces: { [root]: { ws: 'w1', label: 'Old', managed: true } },
+        mirrors: { m1: { pane_id: 'w1:p2', workspace: 'w1', marked: false } },
+        renderers: { [root]: { pane_id: 'w1:p1', workspace: 'w1' } },
+      })
+    );
+    const r = withEnv(
+      {
+        HERDR_BIN_PATH: f.fake,
+        HERDR_PLUGIN_STATE_DIR: stateDir,
+        FAKE_HERDR_SCENARIO: f.scenario,
+        FAKE_HERDR_LOG: f.log,
+      },
+      () => projectFleet(root, NOW)
+    );
+    assert.equal(r.leds, 1);
+    const calls = callsOf(f.log);
+    // armed tree, no worker verdict → unknown; only p1 is reportable
+    const report = calls.find(c => c.slice(0, 2).join(' ') === 'pane report-agent');
+    assert.deepEqual(report, [
+      'pane',
+      'report-agent',
+      'w1:p1',
+      '--source',
+      'bro-fleet',
+      '--agent',
+      'fleet',
+      '--seq',
+      String(NOW),
+      '--state',
+      'unknown',
+    ]);
+    // the foreign-agent mirror is filtered before the busy probe —
+    // no process-info, no report on p2 at all
+    assert.ok(!calls.some(c => c[1] === 'process-info' && c.includes('w1:p2')));
+    assert.ok(!calls.some(c => c.includes('w1:p2') && c[1] !== 'list'));
+  });
+
+  test('an unarmed projection releases the pane instead of reporting', () => {
+    const root = mkdtempSync(join(tmpdir(), 'proj-fleet-'));
+    const stateDir = mkdtempSync(join(tmpdir(), 'proj-state-'));
+    const f = ledFixture(root);
+    writeFileSync(
+      f.scenario,
+      JSON.stringify({
+        worktrees: [{ path: root, open_workspace_id: 'w1' }],
+        workspaces: [{ workspace_id: 'w1', label: 'Old', tokens: {} }],
+        panes: [{ pane_id: 'w1:p1', workspace_id: 'w1' }],
+        processes: {
+          'w1:p1': { shell_pid: 7, foreground_processes: [{ pid: 7 }, { pid: 99 }] },
+        },
+      })
+    );
+    const scope = createHash('sha1').update(root).digest('hex').slice(0, 12);
+    writeFileSync(
+      join(stateDir, `state-${scope}.json`),
+      JSON.stringify({
+        workspaces: { [root]: { ws: 'w1', label: 'Old', managed: true } },
+        renderers: { [root]: { pane_id: 'w1:p1', workspace: 'w1' } },
+      })
+    );
+    const r = withEnv(
+      {
+        HERDR_BIN_PATH: f.fake,
+        HERDR_PLUGIN_STATE_DIR: stateDir,
+        FAKE_HERDR_SCENARIO: f.scenario,
+        FAKE_HERDR_LOG: f.log,
+      },
+      () => projectFleet(root, NOW)
+    );
+    assert.equal(r.leds, 1);
+    const calls = callsOf(f.log);
+    assert.deepEqual(
+      calls.find(c => c.slice(0, 2).join(' ') === 'pane release-agent'),
+      [
+        'pane',
+        'release-agent',
+        'w1:p1',
+        '--source',
+        'bro-fleet',
+        '--agent',
+        'fleet',
+        '--seq',
+        String(NOW),
+      ]
+    );
+  });
+
+  test('an idle-shell pane holds no report — the probe would clear it in ~1s', () => {
+    const root = armedRoot();
+    const stateDir = mkdtempSync(join(tmpdir(), 'proj-state-'));
+    const f = ledFixture(root);
+    writeFileSync(
+      f.scenario,
+      JSON.stringify({
+        worktrees: [{ path: root, open_workspace_id: 'w1' }],
+        workspaces: [{ workspace_id: 'w1', label: 'Old', tokens: {} }],
+        panes: [{ pane_id: 'w1:p1', workspace_id: 'w1' }],
+        // shell_pid IS the only foreground process → idle
+        processes: {
+          'w1:p1': { shell_pid: 7, foreground_processes: [{ pid: 7 }] },
+        },
+      })
+    );
+    const scope = createHash('sha1').update(root).digest('hex').slice(0, 12);
+    writeFileSync(
+      join(stateDir, `state-${scope}.json`),
+      JSON.stringify({
+        workspaces: { [root]: { ws: 'w1', label: 'Old', managed: true } },
+        renderers: { [root]: { pane_id: 'w1:p1', workspace: 'w1' } },
+      })
+    );
+    const r = withEnv(
+      {
+        HERDR_BIN_PATH: f.fake,
+        HERDR_PLUGIN_STATE_DIR: stateDir,
+        FAKE_HERDR_SCENARIO: f.scenario,
+        FAKE_HERDR_LOG: f.log,
+      },
+      () => projectFleet(root, NOW)
+    );
+    assert.equal(r.leds, 0);
+    const calls = callsOf(f.log);
+    assert.ok(calls.some(c => c.slice(0, 2).join(' ') === 'pane list'));
+    assert.ok(!calls.some(c => c[1] === 'report-agent' || c[1] === 'release-agent'));
+  });
+
+  test('no ledger panes → the LED path does not even read pane list', () => {
+    const root = mkdtempSync(join(tmpdir(), 'proj-fleet-'));
+    const stateDir = mkdtempSync(join(tmpdir(), 'proj-state-'));
+    const f = ledFixture(root);
+    writeFileSync(
+      f.scenario,
+      JSON.stringify({
+        worktrees: [{ path: root, open_workspace_id: 'w1' }],
+        workspaces: [{ workspace_id: 'w1', label: 'Old', tokens: {} }],
+      })
+    );
+    const scope = createHash('sha1').update(root).digest('hex').slice(0, 12);
+    writeFileSync(
+      join(stateDir, `state-${scope}.json`),
+      JSON.stringify({
+        workspaces: { [root]: { ws: 'w1', label: 'Old', managed: true } },
+      })
+    );
+    const r = withEnv(
+      {
+        HERDR_BIN_PATH: f.fake,
+        HERDR_PLUGIN_STATE_DIR: stateDir,
+        FAKE_HERDR_SCENARIO: f.scenario,
+        FAKE_HERDR_LOG: f.log,
+      },
+      () => projectFleet(root, NOW)
+    );
+    assert.equal(r.leds, 0);
+    assert.ok(!callsOf(f.log).some(c => c.slice(0, 2).join(' ').startsWith('pane ')));
   });
 });
