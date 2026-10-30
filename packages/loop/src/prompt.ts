@@ -1,3 +1,4 @@
+import { shQuote } from '@broject/core';
 import type { LoopBead } from './types.ts';
 
 /** the verdict verb the SERVING task store guarantees — a github rig
@@ -234,9 +235,9 @@ resolve the conflicts, and push:
 /** Expand the agent template — `{promptFile}` becomes the quoted path.
  *  No placeholder → the path is appended, quoted, as the last arg. */
 export function expandAgentCmd(template: string, promptFile: string): string {
-  const esc = promptFile.replaceAll("'", String.raw`'\''`);
-  const q = `'${esc}'`;
-  return template.includes('{promptFile}')
-    ? template.replaceAll('{promptFile}', q)
-    : `${template} ${q}`;
+  const q = shQuote(promptFile);
+  if (template.indexOf('{promptFile}') >= 0) {
+    return template.split('{promptFile}').join(q);
+  }
+  return template + ' ' + q;
 }
