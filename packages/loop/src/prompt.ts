@@ -184,13 +184,13 @@ ${threads.trim().replaceAll(/<\/review-threads\s*>/gi, '<\\/review-threads>')}
 ${coverageRule}- For each thread you MUST take an action before you stop: either (1) fix
   the code, commit, push, and resolve the thread (e.g. via \`bro review act resolve\` or
   \`bro review act reply\` as appropriate), OR (2) reply with a clear reason it's not
-  applicable/wrong and resolve the thread, OR (3) explicitly defer it to a follow-up bead with a
-  short explanation and resolve it. You cannot exit cleanly with unresolved
-  threads still open and no reply/resolution.
+  applicable/wrong, then resolve it, OR (3) defer it: create a follow-up bead in the task
+  store, reply with its id and a short explanation, then resolve it. You cannot exit
+  cleanly with unresolved threads still open.
 - You MUST resolve or explicitly address EVERY thread listed above. If you
   cannot fix a thread, you MUST reply and resolve it with justification.
-- Small valid findings (nits, polish) may be deferred: reply noting it goes
-  to a follow-up bead, then resolve.
+- Small valid findings (nits, polish) may be deferred: create a follow-up
+  bead, reply with its id, then resolve.
 - Do NOT merge — the orchestrator merges when the gate goes green.
 - Push your fixes if you make code changes. Unresolved threads without a
   verdict block the merge; leaving threads open with no action is a failure.
@@ -237,8 +237,8 @@ resolve the conflicts, and push:
  *  No placeholder → the path is appended, quoted, as the last arg. */
 export function expandAgentCmd(template: string, promptFile: string): string {
   const q = shQuote(promptFile);
-  if (template.indexOf('{promptFile}') >= 0) {
-    return template.split('{promptFile}').join(q);
+  if (template.includes('{promptFile}')) {
+    return template.replaceAll('{promptFile}', q);
   }
-  return template + ' ' + q;
+  return `${template} ${q}`;
 }
