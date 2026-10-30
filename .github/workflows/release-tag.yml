@@ -103,5 +103,14 @@ jobs:
           # registry itself. Warns + exits cleanly while
           # HOMEBREW_TAP_TOKEN is unset (or when the file isn't on main
           # yet, on the first run after merge).
-          gh workflow run homebrew.yml --ref main -f "tag=v$v" \
-            || echo "::warning::homebrew.yml dispatch failed — bump the tap formula by hand"
+          # Prereleases skip the tap: `brew install bro` must never
+          # hand out a preview, and the formula has no prerelease lane.
+          case "$v" in
+            *-*)
+              echo "prerelease $v — skipping homebrew tap bump"
+              ;;
+            *)
+              gh workflow run homebrew.yml --ref main -f "tag=v$v" \
+                || echo "::warning::homebrew.yml dispatch failed — bump the tap formula by hand"
+              ;;
+          esac
