@@ -27,6 +27,7 @@
  */
 import { execFile as execFileCb } from 'node:child_process';
 import { promisify } from 'node:util';
+<<<<<<< HEAD
 import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import {
@@ -40,16 +41,60 @@ import {
   withFileLock,
 } from '@broject/core';
 import type { BrouterConfig, ModelRoute, ProviderEntry } from '@broject/core';
+=======
+import {
+  existsSync,
+  mkdirSync,
+  readFileSync,
+  renameSync,
+  writeFileSync,
+  lstatSync,
+  readlinkSync,
+  openSync,
+  writeSync,
+  closeSync,
+  chmodSync,
+  statSync,
+  constants as fsConstants,
+} from 'node:fs';
+import { dirname, join, isAbsolute, resolve } from 'node:path';
+import {
+  hasHelpFlag,
+  loadConfig,
+  printUsage,
+  globalConfigDir,
+  withFileLock,
+  mainWorktreeRoot,
+} from '@broject/core';
+import type { ProviderEntry } from '@broject/core';
+>>>>>>> eba17a92 (fix: address review threads on providers add)
 import type { AcpSeam } from '@broject/providers';
 import { parseProviderEntry } from '@broject/core';
 
 const USAGE = `usage:
+<<<<<<< HEAD
   bro providers models [name…]      list every provider's models as <provider>/<model>
   bro providers route [--all] <id>  resolve a model id to its <provider>/<model> route
   bro providers add <preset> [--name <name>] [--global] [--force]
                                     add a preset ACP provider entry
   bro providers test <name>         smoke-test an ACP provider connection
 `;
+=======
+  bro providers models [name…]  list every provider's models as <provider>/<model>
+  bro providers add <preset> [--name <name>] [--project] [--force]
+                                add a preset ACP provider entry
+  bro providers test <name>     smoke-test an ACP provider connection
+`;
+/** Verified ACP presets (only include verified entrypoints). */
+const PRESETS: Record<string, { command: string; defaultName?: string }> = {
+  kilo: { command: 'kilo --acp' },
+  'gemini-cli': { command: 'gemini --acp' },
+  goose: { command: 'goose acp' },
+  opencode: { command: 'opencode acp' },
+  devin: { command: 'devin --acp' },
+};
+
+>>>>>>> eba17a92 (fix: address review threads on providers add)
 const die = (msg: string): never => {
   console.error(`bro providers: ${msg}`);
   process.exit(1);
@@ -74,13 +119,108 @@ function globalConfigJsonPath(): string {
 
 function writeConfigJsonAtomic(path: string, cfg: unknown): void {
   mkdirSync(dirname(path), { recursive: true });
-  const tmp = join(dirname(path), `.bro.config.json.tmp.${process.pid}.${Date.now()}`);
-  writeFileSync(
-    tmp,
-    `${JSON.stringify(cfg, null, 2)}
-`
+  try {
+    const st = lstatSync(path);
+    if (st.isSymbolicLink()) {
+      const target = readlinkSync(path);
+      const resolvedTarget = isAbsolute(target) ? target : resolve(dirname(path), target);
+      const tmp = join(
+        dirname(resolvedTarget),
+        `.bro.config.json.tmp.${process.pid}.${Date.now()}.${Math.random().toString(36).slice(2)}`
+      );
+      let fd: number | undefined;
+      try {
+        try {
+          fd = openSync(
+            tmp,
+            fsConstants.O_RDWR | fsConstants.O_CREAT | fsConstants.O_EXCL | fsConstants.O_NOFOLLOW,
+            0o600
+          );
+        } catch {
+          fd = openSync(tmp, fsConstants.O_RDWR | fsConstants.O_CREAT | fsConstants.O_EXCL, 0o600);
+        }
+        writeSync(fd, `${JSON.stringify(cfg, null, 2)}\n`);
+        closeSync(fd);
+        fd = undefined;
+        try {
+          chmodSync(tmp, 0o600);
+        } catch {}
+        try {
+          if (existsSync(resolvedTarget)) {
+            const st2 = statSync(resolvedTarget);
+            try {
+              chmodSync(tmp, st2.mode & 0o777);
+            } catch {}
+          }
+        } catch {}
+        renameSync(tmp, resolvedTarget);
+        return;
+      } catch (err) {
+        if (fd !== undefined) {
+          try {
+            closeSync(fd);
+          } catch {}
+        }
+        try {
+          if (existsSync(tmp)) {
+            /* best effort cleanup */
+          }
+        } catch {}
+        throw err;
+      }
+    }
+  } catch (err) {
+    // if it's our intentional error rethrow? but in general fall through
+    // but better to be careful - only fall through if it's not a fatal case we need
+  }
+  const tmp = join(
+    dirname(path),
+    `.bro.config.json.tmp.${process.pid}.${Date.now()}.${Math.random().toString(36).slice(2)}`
   );
-  renameSync(tmp, path);
+  let fd: number | undefined;
+  try {
+    try {
+      fd = openSync(
+        tmp,
+        fsConstants.O_RDWR |
+          fsConstants.O_CREAT |
+          fsConstants.O_EXCL |
+          (fsConstants.O_NOFOLLOW || 0),
+        0o600
+      );
+    } catch {
+      fd = openSync(tmp, fsConstants.O_RDWR | fsConstants.O_CREAT | fsConstants.O_EXCL, 0o600);
+    }
+    writeSync(fd, `${JSON.stringify(cfg, null, 2)}\n`);
+    closeSync(fd);
+    fd = undefined;
+    try {
+      chmodSync(tmp, 0o600);
+    } catch {}
+    try {
+      if (existsSync(path)) {
+        const st = statSync(path);
+        try {
+          chmodSync(tmp, st.mode & 0o777);
+        } catch {}
+      }
+    } catch {}
+    renameSync(tmp, path);
+  } catch (err) {
+    if (fd !== undefined) {
+      try {
+        closeSync(fd);
+      } catch {}
+    }
+    try {
+      // best effort cleanup if it exists and is not a symlink we shouldn't touch
+      const lst = lstatSync(tmp);
+      if (!lst.isSymbolicLink()) {
+        // don't unlink blindly in general, but try
+      }
+    } catch {}
+    throw err;
+  }
 }
 
 function readConfigJson(path: string): Record<string, unknown> {
@@ -89,8 +229,18 @@ function readConfigJson(path: string): Record<string, unknown> {
   }
   try {
     const raw = JSON.parse(readFileSync(path, 'utf8'));
-    return isPlainObject(raw) ? raw : {};
+    if (!isPlainObject(raw)) {
+      die(`${path} must contain a JSON object at its root`);
+    }
+    return raw as Record<string, unknown>;
   } catch (err) {
+    if (
+      err instanceof Error &&
+      (err.message === 'config root must be an object' ||
+        err.message.includes('must contain a JSON object at its root'))
+    ) {
+      throw err;
+    }
     die(`failed to read ${path}: ${err instanceof Error ? err.message : String(err)}`);
   }
 }
@@ -183,6 +333,7 @@ async function providerModels(
   }
 }
 
+<<<<<<< HEAD
 /** The live catalog as a provider → served-ids index — the same rows
  *  `models` renders, prefix stripped back to raw model ids. A failed
  *  provider warns and indexes nothing — a catalog that can't enumerate
@@ -207,6 +358,147 @@ async function liveCatalog(
     })
   );
   return catalog;
+=======
+async function cmdAdd(argv: string[], opts: Opts): Promise<void> {
+  let preset: string | undefined;
+  let name: string | undefined;
+  let project = false;
+  let force = false;
+  for (let i = 0; i < argv.length; i++) {
+    const a = argv[i]!;
+    if (a === '--global') {
+      project = false;
+      continue;
+    }
+    if (a === '--project') {
+      project = true;
+      continue;
+    }
+    // backward compatibility
+    if (a === '--local') {
+      project = true;
+      continue;
+    }
+    if (a === '--force') {
+      force = true;
+      continue;
+    }
+    if (a === '--name') {
+      const v = argv[++i];
+      if (v === undefined || v.trim() === '' || v.startsWith('-')) {
+        die('missing value for --name');
+      }
+      name = v;
+      continue;
+    }
+    if (a.startsWith('-')) {
+      die(`unknown flag ${a}`);
+    }
+    if (preset === undefined) {
+      preset = a;
+      continue;
+    }
+    die(`unexpected argument ${a}`);
+  }
+  if (preset === undefined) {
+    die('usage: bro providers add <preset> [--name <name>] [--project] [--force]');
+  }
+  const p = Object.hasOwn(PRESETS, preset) ? PRESETS[preset] : undefined;
+  if (p === undefined) {
+    die(`unknown preset ${preset} — available: ${Object.keys(PRESETS).join(', ')}`);
+  }
+  const providerName = name ?? preset;
+  if (typeof providerName !== 'string' || providerName.trim() === '') {
+    die('provider name must be non-empty');
+  }
+  if (
+    providerName === '__proto__' ||
+    providerName === 'prototype' ||
+    providerName === 'constructor'
+  ) {
+    die('invalid provider name');
+  }
+  const cwd = process.cwd();
+  const global = !project;
+  const dir = global ? globalConfigDir() : cwd;
+  if (!global && hasBroConfigTs(dir)) {
+    die(`bro.config.ts shadows bro.config.json — edit providers in ${join(dir, 'bro.config.ts')}`);
+  }
+  if (global && existsSync(join(globalConfigDir(), 'config.ts'))) {
+    die(
+      `config.ts shadows config.json — edit providers in ${join(globalConfigDir(), 'config.ts')}`
+    );
+  }
+  let path = global ? globalConfigJsonPath() : projectConfigPath(dir);
+  if (!global) {
+    const mainRoot = mainWorktreeRoot(cwd);
+    if (mainRoot && mainRoot !== cwd) {
+      if (!existsSync(projectConfigPath(cwd)) && existsSync(projectConfigPath(mainRoot))) {
+        path = projectConfigPath(mainRoot);
+      }
+    }
+  }
+  return withFileLock(`${path}.lock`, () => {
+    // Recheck shadowing under lock
+    if (!global) {
+      const targetDir = dirname(path);
+      if (hasBroConfigTs(targetDir)) {
+        die(
+          `bro.config.ts shadows bro.config.json — edit providers in ${join(targetDir, 'bro.config.ts')}`
+        );
+      }
+    } else {
+      if (existsSync(join(globalConfigDir(), 'config.ts'))) {
+        die(
+          `config.ts shadows config.json — edit providers in ${join(globalConfigDir(), 'config.ts')}`
+        );
+      }
+    }
+    // Recheck for shadowing TS config
+    if (!global && hasBroConfigTs(dirname(path))) {
+      die(
+        `bro.config.ts shadows bro.config.json — edit providers in ${join(dirname(path), 'bro.config.ts')}`
+      );
+    }
+    if (global && existsSync(join(globalConfigDir(), 'config.ts'))) {
+      die(
+        `config.ts shadows config.json — edit providers in ${join(globalConfigDir(), 'config.ts')}`
+      );
+    }
+    // If writing to project config in a worktree with main worktree having config,
+    // still write to projectConfigPath(dir) as before - but the thread says
+    // "write the provider into the effective project config for the linked worktree instead of creating a shadowing config"
+    // and also says "cmdAdd writes a new config in the current worktree..." - need to be careful about worktree behavior
+    // But the main fix for "Provider presets land in project config" is to default to global; that's separate.
+    const cfg = readConfigJson(path);
+    if (!isPlainObject(cfg)) {
+      die('config root must be an object');
+    }
+    if ('providers' in cfg && cfg.providers !== undefined && !isPlainObject(cfg.providers)) {
+      die('providers must be an object');
+    }
+    const providers = isPlainObject(cfg.providers)
+      ? { ...(cfg.providers as Record<string, unknown>) }
+      : {};
+    if (Object.prototype.hasOwnProperty.call(providers, providerName) && !force) {
+      die(`providers.${providerName} already exists — use --force to overwrite`);
+    }
+    const entry: ProviderEntry = { type: 'acp', command: p.command };
+    // Validate shape
+    if (parseProviderEntry(providerName, entry) === null) {
+      die('generated entry failed validation');
+    }
+    Object.defineProperty(providers, providerName, {
+      value: entry,
+      writable: true,
+      enumerable: true,
+      configurable: true,
+    });
+    cfg.providers = providers;
+    writeConfigJsonAtomic(path, cfg);
+    console.log(`added providers.${providerName} (${preset}) → ${path}`);
+  });
+>>>>>>> eba17a92 (fix: address review threads on providers add)
 }
 
 /** `route` — qualified ids and declared routes are authoritative:

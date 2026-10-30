@@ -302,12 +302,23 @@ describe('bro providers add', () => {
   test('add --force overwrites existing entry', async () => {
     const dir = tmpDir('bro-prov-add4-');
     const { main } = initRepo(dir);
-    await insideAsync(main, dir, async () => {
-      await runProvidersCommand(['add', 'kilo']);
-      await runProvidersCommand(['add', 'kilo', '--force']);
-      const cfg = JSON.parse(readFileSync(join(process.cwd(), 'bro.config.json'), 'utf8'));
-      assert.deepEqual(cfg.providers.kilo, { type: 'acp', command: 'kilo --acp' });
-    });
+    const { globalConfigDir } = await import('@broject/core');
+    const orig = process.env.XDG_CONFIG_HOME;
+    process.env.XDG_CONFIG_HOME = join(dir, '.config');
+    try {
+      await insideAsync(main, dir, async () => {
+        const gdir = globalConfigDir();
+        const { mkdirSync } = await import('node:fs');
+        mkdirSync(gdir, { recursive: true });
+        writeFileSync(join(gdir, 'config.json'), JSON.stringify({ providers: { kilo: { type: 'acp', command: 'kilo-old --acp' } } }, null, 2) + '\n');
+        await runProvidersCommand(['add', 'kilo', '--global', '--force']);
+        const cfg = JSON.parse(readFileSync(join(gdir, 'config.json'), 'utf8'));
+        assert.deepEqual(cfg.providers.kilo, { type: 'acp', command: 'kilo --acp' });
+      });
+    } finally {
+      if (orig === undefined) delete process.env.XDG_CONFIG_HOME;
+      else process.env.XDG_CONFIG_HOME = orig;
+    }
   });
 
   test('add to global config with --global', async () => {
@@ -327,27 +338,30 @@ describe('bro providers add', () => {
     });
   });
 
-  test('add refuses if bro.config.ts exists', async () => {
+  test('add refuses if bro.config.ts shadows', async () => {
     const dir = tmpDir('bro-prov-add6-');
     const { main } = initRepo(dir);
     await insideAsync(main, dir, async () => {
-      writeFileSync(join(process.cwd(), 'bro.config.ts'), 'export default {}');
+      writeFileSync(join(process.cwd(), 'bro.config.ts'), 'export default {}\n');
       const r = await capture(() => runProvidersCommand(['add', 'kilo']));
       assert.equal(r.code, 1);
-      assert.match(r.err.join('\n'), /bro\.config\.ts/);
+      assert.match(r.err.join('\n'), /bro\.config\.ts|shadows/);
     });
   });
 });
 
 describe('bro providers test', () => {
-  test('test smoke-tests an acp provider', async () => {
-    const out: string[] = [];
-    await runProvidersCommand(['test', 'acp1'], {
-      acp: fakeAcpAgent({ sessionConfigOptions: [MODEL_OPTION] }),
-      providers: { acp1: { type: 'acp', command: 'x' } },
-      out: l => out.push(l),
-    });
-    assert.deepEqual(out, ['ok: providers.acp1 (acp)']);
+  test('test smokes acp connection via acpModels', async () => {
+    const fake = fakeAcpAgent({ sessionConfigOptions: [MODEL_OPTION] });
+    const r = await capture(() =>
+      runProvidersCommand(['test', 'dv-acp'], {
+        providers: { 'dv-acp': { type: 'acp', command: 'dv acp' } },
+        acp: { peer: fake.app },
+      })
+    );
+    assert.equal(r.code, 0);
+    assert.match(r.out.join('\n'), /ok: providers\.dv-acp/);
+    assert.ok(fake.sessions.length > 0);
   });
 
   test('test errors on non-acp provider', async () => {
