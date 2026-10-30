@@ -4,12 +4,14 @@
  *   planes in → armed worktrees get workspaces (plain bead-title
  *   labels) → running native agents get read-only mirror panes tailing
  *   their logs (mirrors.ts) → exited agents get their mirror renamed
- *   as an exit marker.
+ *   as an exit marker → every managed workspace gets its `bro: status`
+ *   pane (statuses.ts, spec bro-idsat).
  *
- * Fleet status (`[state·#PR]` prefixes, `status` tokens) is the bro
- * daemon's fleet projector, not this file (spec bro-u19mq): the plugin
- * opens workspaces and records `managed`, the daemon owns every later
- * rename and metadata write. Splitting it this way leaves ONE writer —
+ * Fleet status (`[state·#PR]` prefixes, `status` tokens, fleet-state
+ * files) is the bro daemon's fleet projector, not this file (spec
+ * bro-u19mq): the plugin opens workspaces and records `managed`, the
+ * daemon owns every later rename and metadata write, and the status
+ * pane self-reports the LED. Splitting it this way leaves ONE writer —
  * a crashed session can no longer strand a stale `[working]` label.
  *
  * An EventSource decides WHEN converge runs; this file only ever sees
@@ -38,6 +40,7 @@ import type { Planes } from './planes.ts';
 import { readPlanes } from './planes.ts';
 import { dropOrphanRenderers, ensureRenderer } from './renderers.ts';
 import { agentTreePath } from './status.ts';
+import { dropOrphanStatuses, ensureStatus } from './statuses.ts';
 
 const log = (s: string): void => console.log(`[reconcile] ${s}`);
 
@@ -202,6 +205,7 @@ export interface ConvergeResult {
   armed: number;
   mirrors: number;
   renderers: number;
+  statuses: number;
   reaped: number;
 }
 
@@ -238,6 +242,20 @@ function convergeRenderers(wsForPath: Map<string, string>, ctx: WsCtx): void {
   dropOrphanRenderers(ctx.state, new Set([...ctx.wsById.keys(), ...wsForPath.values()]));
 }
 
+/** Exactly one status pane per managed workspace — after mirrors and
+ *  renderers so the pane-order decision sees the settled set. Same
+ *  managed-record guard as the renderer: a stale `managed` record
+ *  must not put our pane on a user's workspace. */
+function convergeStatuses(wsForPath: Map<string, string>, ctx: WsCtx): void {
+  for (const [path, ws] of wsForPath) {
+    const rec = ctx.state.workspaces[path];
+    if (rec?.managed === true && rec.ws === ws) {
+      ensureStatus({ path, ws, state: ctx.state });
+    }
+  }
+  dropOrphanStatuses(ctx.state, new Set([...ctx.wsById.keys(), ...wsForPath.values()]));
+}
+
 /** The reaper — a worktree herdr still opens a workspace for, gone off
  *  disk. One sighting stamps `goneSince`; a second pass at least the
  *  grace window later closes the workspace. Only filesystem proof and
@@ -260,6 +278,7 @@ function reapDead(p: Planes, ctx: WsCtx): number {
       delete ctx.state.gone[w.path];
       delete ctx.state.workspaces[w.path];
       delete ctx.state.renderers[w.path];
+      delete ctx.state.statuses[w.path];
       continue;
     }
     let since = ctx.state.gone[w.path];
@@ -271,6 +290,7 @@ function reapDead(p: Planes, ctx: WsCtx): number {
     if (herdrTry(['workspace', 'close', ws]) !== undefined) {
       delete ctx.state.workspaces[w.path];
       delete ctx.state.renderers[w.path];
+      delete ctx.state.statuses[w.path];
       delete ctx.state.gone[w.path];
       reaped += 1;
       log(`reaped ${ws} — worktree gone: ${basename(w.path)}`);
@@ -308,12 +328,14 @@ function convergeLocked(p: Planes, scope: string): ConvergeResult {
   convergeMirrors(p, wsForPath, ctx.openByPath, ctx.state);
   markExitedMirrors(p, ctx.state);
   convergeRenderers(wsForPath, ctx);
+  convergeStatuses(wsForPath, ctx);
   const reaped = reapDead(p, ctx);
   saveState(scope, ctx.state);
   return {
     armed: armed.size,
     mirrors: Object.keys(ctx.state.mirrors).length,
     renderers: Object.keys(ctx.state.renderers).length,
+    statuses: Object.keys(ctx.state.statuses).length,
     reaped,
   };
 }
@@ -329,7 +351,7 @@ if (process.argv[1] !== undefined && import.meta.url === `file://${process.argv[
   try {
     const r = reconcile();
     log(
-      `done — ${r.armed} armed worktrees, ${r.mirrors} mirror panes, ${r.renderers} renderers, ${r.reaped} reaped`
+      `done — ${r.armed} armed worktrees, ${r.mirrors} mirror panes, ${r.renderers} renderers, ${r.statuses} statuses, ${r.reaped} reaped`
     );
     if (r.armed > 0) {
       notify('bro sync', `${r.armed} armed worktrees · ${r.mirrors} mirrors · ${r.reaped} reaped`);

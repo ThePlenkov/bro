@@ -718,6 +718,15 @@
       "plan": false,
       "external": false
     },
+    "herdr": {
+      "name": "herdr",
+      "summary": "Herdr bridge — pane-facing helpers (status-view); spawned, never typed",
+      "spellings": ["herdr"],
+      "aliases": [],
+      "hidden": true,
+      "plan": false,
+      "external": false
+    },
     "acp": {
       "name": "acp",
       "group": "fleet",

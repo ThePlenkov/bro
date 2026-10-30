@@ -97,6 +97,7 @@ import { runGoalCommand } from './commands/goal.ts';
 import { runDogfoodCommand } from './commands/dogfood.ts';
 import { goalSection } from './commands/goal-config.ts';
 import { runGuardCommand } from './commands/guard.ts';
+import { runHerdrCommand } from './commands/herdr.ts';
 import { runHooksCommand } from './commands/hooks.ts';
 import { freshnessSection } from './commands/postmerge.ts';
 import { runJudgeCommand } from './commands/judge.ts';
@@ -722,6 +723,12 @@ export const PLUGINS: BroPlugin[] = [
     name: 'acp-worker',
     summary: 'ACP provider spawn unit — backends exec this; never typed',
     run: runAcpWorkerCommand,
+    hidden: true,
+  }),
+  definePlugin({
+    name: 'herdr',
+    summary: 'Herdr bridge — pane-facing helpers (status-view); spawned, never typed',
+    run: runHerdrCommand,
     hidden: true,
   }),
   definePlugin({

@@ -404,6 +404,24 @@ export function paneExists(paneId: string): boolean {
   return !paneGone(paneId);
 }
 
+/** The pane labels each convergence role claims — a pane carrying one
+ *  role's label is never an idle-grab candidate for the other, even
+ *  unbound: the label is an intent marker, not just a record key. */
+export const RENDER_LABEL = 'bro: events';
+export const STATUS_LABEL = 'bro: status';
+
+/** Pane ids bound to a bro-managed role (renderer, status, mirror) —
+ *  a generic "any idle pane" grab must never steal one out from under
+ *  its recorded owner: a dead status view re-arms through its own
+ *  record, not through the renderer's spare-pane path. */
+export function boundPaneIds(state: PluginState): Set<string> {
+  const ids = new Set<string>();
+  for (const r of Object.values(state.renderers)) ids.add(r.pane_id);
+  for (const r of Object.values(state.statuses)) ids.add(r.pane_id);
+  for (const r of Object.values(state.mirrors)) ids.add(r.pane_id);
+  return ids;
+}
+
 /** Idle = everything in the foreground is the shell itself. Counting
  *  processes is wrong: a wrapper's `sleep`/builtin loop shows exactly
  *  one non-shell entry — one process is not one shell. */
@@ -459,6 +477,16 @@ export interface RendererRec {
   pane_id: string;
 }
 
+/** The `bro: status` pane record (spec bro-idsat) — one per managed
+ *  workspace, running `bro herdr status-view` as the LED's primary
+ *  self-reporter. The daemon projector reads this binding for its
+ *  backstop push. */
+export interface StatusPaneRec {
+  workspace: string;
+  worktree: string;
+  pane_id: string;
+}
+
 export interface PluginState {
   /** worktree path → the workspace we opened (the projector's
    *  ownership ledger — it relabels only `managed` records). */
@@ -467,6 +495,8 @@ export interface PluginState {
   mirrors: Record<string, MirrorRec>;
   /** worktree path → the event-tail pane record (one per managed ws). */
   renderers: Record<string, RendererRec>;
+  /** worktree path → the status-pane record (one per managed ws). */
+  statuses: Record<string, StatusPaneRec>;
   /** worktree path → first-gone mtime — the reaper's two-sighting grace. */
   gone: Record<string, number>;
 }
@@ -492,10 +522,11 @@ export function loadState(scope: string): PluginState {
       workspaces: typeof v.workspaces === 'object' && v.workspaces !== null ? v.workspaces : {},
       mirrors: typeof v.mirrors === 'object' && v.mirrors !== null ? v.mirrors : {},
       renderers: typeof v.renderers === 'object' && v.renderers !== null ? v.renderers : {},
+      statuses: typeof v.statuses === 'object' && v.statuses !== null ? v.statuses : {},
       gone: typeof v.gone === 'object' && v.gone !== null ? v.gone : {},
     };
   } catch {
-    return { workspaces: {}, mirrors: {}, renderers: {}, gone: {} };
+    return { workspaces: {}, mirrors: {}, renderers: {}, statuses: {}, gone: {} };
   }
 }
 
