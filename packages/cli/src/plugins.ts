@@ -3,9 +3,9 @@
  * skill + owned config section (+ plan schema later, bro-cap). The CLI
  * dispatches argv[0] through this list; nothing is hardcoded in main.
  */
-import { createRequire } from 'node:module';
-import { isAbsolute, relative, resolve } from 'node:path';
-import { pathToFileURL } from 'node:url';
+import { createRequire } from 'node:module'
+import { isAbsolute, relative, resolve } from 'node:path'
+import { pathToFileURL } from 'node:url'
 import {
   actSection,
   agentsSection,
@@ -31,24 +31,18 @@ import {
   type ConfigDiagnostic,
   type ConfigSection,
   type DocType,
-} from '@broject/core';
-import { actConnector, ACT_PLAN_VERSION, parseActPlan, type ActPlan } from '@broject/act';
-import { CONVOY_PLAN_VERSION, parseConvoyPlan, type ConvoyPlan } from '@broject/convoy';
-import { DEBT_PLAN_VERSION, debtConnector, parseDebtPlan, type DebtPlan } from '@broject/debt';
-import {
-  DRILL_PLAN_VERSION,
-  drillConnector,
-  drillSection,
-  parseDrillPlan,
-  type DrillPlan,
-} from '@broject/drill';
-import { parsePlanDoc, RETRO_PLAN_VERSION, type RetroPlan } from '@broject/retro';
-import { learnConnector, learnSection } from '@broject/learn';
-import { loopSection } from '@broject/loop';
-import { githubConnector, graphiteConnector, mergifyConnector } from '@broject/github';
-import { gitlabConnector } from '@broject/gitlab';
-import { linearConnector } from '@broject/linear';
-import { jiraConnector, jiraDcConnector } from '@broject/jira';
+} from '@broject/core'
+import { actConnector, ACT_PLAN_VERSION, parseActPlan, type ActPlan } from '@broject/act'
+import { CONVOY_PLAN_VERSION, parseConvoyPlan, type ConvoyPlan } from '@broject/convoy'
+import { DEBT_PLAN_VERSION, debtConnector, parseDebtPlan, type DebtPlan } from '@broject/debt'
+import { DRILL_PLAN_VERSION, drillConnector, drillSection, parseDrillPlan, type DrillPlan } from '@broject/drill'
+import { parsePlanDoc, RETRO_PLAN_VERSION, type RetroPlan } from '@broject/retro'
+import { learnConnector, learnSection } from '@broject/learn'
+import { loopSection } from '@broject/loop'
+import { githubConnector, graphiteConnector, mergifyConnector } from '@broject/github'
+import { gitlabConnector } from '@broject/gitlab'
+import { linearConnector } from '@broject/linear'
+import { jiraConnector, jiraDcConnector } from '@broject/jira'
 import {
   applyQueryPlan,
   atlassianConnector,
@@ -132,57 +126,58 @@ import { telemetrySection } from './commands/trace-config.ts';
 import { runWorkCommand, workConnector } from './commands/work.ts';
 import { runContractCommand } from './commands/contract.ts';
 
+
 // Built-in connectors register at module load, ahead of external
 // plugins — registry order is the fallback precedence, and an external
 // connector must not shadow a built-in system. Registration order also
 // decides stop-gate block priority: drill > work > act.
-registerConnector(githubConnector);
-registerConnector(gitlabConnector);
+registerConnector(githubConnector)
+registerConnector(gitlabConnector)
 // external merge queues — opt-in only (`connectors.mergeQueue`), they
 // provide nothing but the queue facade so nothing detects them
-registerConnector(mergifyConnector);
-registerConnector(graphiteConnector);
+registerConnector(mergifyConnector)
+registerConnector(graphiteConnector)
 // queries-facade provider — opt-in only (a step names it or
 // connectors.queries pins it); nothing about a repo detects Atlassian
-registerConnector(atlassianConnector);
+registerConnector(atlassianConnector)
 // Linear — tasks + tasksAsync + queries, all name-only pins
 // (connectors.tasks=linear); a repo's remote can't name a Linear team
-registerConnector(linearConnector);
+registerConnector(linearConnector)
 // Jira — tasks + tasksAsync over the atlassian CLI's REST surface,
 // name-only pins (connectors.tasks=jira); a remote can't name a project
-registerConnector(jiraConnector);
+registerConnector(jiraConnector)
 // Jira Data Center/Server — the same tasks facade on the v2 REST
 // surface (name-keyed users, string bodies, /search), name-only
-registerConnector(jiraDcConnector);
-registerConnector(drillConnector);
-registerConnector(workConnector);
-registerConnector(actConnector);
+registerConnector(jiraDcConnector)
+registerConnector(drillConnector)
+registerConnector(workConnector)
+registerConnector(actConnector)
 // the pulse's rearm nudge — same family as act's dead-watch flags
-registerConnector(watchConnector);
+registerConnector(watchConnector)
 // the installed merge path's rearm checkpoint — drive.json's owner
-registerConnector(driveConnector);
-registerConnector(rigConnector);
-registerConnector(debtConnector);
-registerConnector(sddConnector);
+registerConnector(driveConnector)
+registerConnector(rigConnector)
+registerConnector(debtConnector)
+registerConnector(sddConnector)
 // the host-wide session cap — refuses a session start at the cap
-registerConnector(sessionCapConnector);
-registerConnector(notifyConnector);
-registerConnector(learnConnector);
-registerConnector(systemoneConnector);
-registerConnector(llmJudgeConnector);
+registerConnector(sessionCapConnector)
+registerConnector(notifyConnector)
+registerConnector(learnConnector)
+registerConnector(systemoneConnector)
+registerConnector(llmJudgeConnector)
 // the builtins' home — guard defs contributed here shadow by name
 // behind config defs, so a project's `guard.defs` always wins a rename
-registerConnector(guardConnector);
+registerConnector(guardConnector)
 // events facade providers — registry order is the fallback precedence,
 // so `mailbox` first: `bro notify` must keep working with no broker and
 // no config. The bus is opt-in via `connectors.events` in bro.config.json.
-registerConnector(mailboxConnector);
-registerConnector(busConnector);
+registerConnector(mailboxConnector)
+registerConnector(busConnector)
 // specs facade providers — registry order is detection precedence:
 // native first (its matchDir claims the configured sdd.dir), then
 // tool-layout matchers, agent last (explicit pick only, never detects)
 for (const c of SPEC_CONNECTORS) {
-  registerConnector(c);
+  registerConnector(c)
 }
 
 export const PLUGINS: BroPlugin[] = [
@@ -217,7 +212,7 @@ export const PLUGINS: BroPlugin[] = [
     configSchema: debtSection,
     planSchema: (doc, source) => parseDebtPlan(doc, source),
     planVersion: DEBT_PLAN_VERSION,
-    runPlan: plan => applyVerdicts((plan as DebtPlan).verdicts),
+    runPlan: (plan) => applyVerdicts((plan as DebtPlan).verdicts),
   }),
   definePlugin({
     name: 'act',
@@ -245,7 +240,7 @@ export const PLUGINS: BroPlugin[] = [
     configSchema: actSection,
     planSchema: (doc, source) => parseActPlan(doc, source),
     planVersion: ACT_PLAN_VERSION,
-    runPlan: plan => applyActPlan(plan as ActPlan),
+    runPlan: (plan) => applyActPlan(plan as ActPlan),
   }),
   definePlugin({
     name: 'convoy',
@@ -255,7 +250,7 @@ export const PLUGINS: BroPlugin[] = [
     skill: 'convoy',
     planSchema: (doc, source) => parseConvoyPlan(doc, source),
     planVersion: CONVOY_PLAN_VERSION,
-    runPlan: plan => applyConvoyPlan(plan as ConvoyPlan),
+    runPlan: (plan) => applyConvoyPlan(plan as ConvoyPlan),
   }),
   definePlugin({
     name: 'next',
@@ -279,7 +274,7 @@ export const PLUGINS: BroPlugin[] = [
     },
     planSchema: (doc, source) => parseNextPlan(doc, source),
     planVersion: NEXT_PLAN_VERSION,
-    runPlan: plan => applyNextPlan(plan as NextPlan),
+    runPlan: (plan) => applyNextPlan(plan as NextPlan),
   }),
   definePlugin({
     name: 'loop',
@@ -293,12 +288,12 @@ export const PLUGINS: BroPlugin[] = [
   definePlugin({
     name: 'fleet',
     group: 'fleet',
-    summary: 'Fleet view — mols × steps × agents × worktrees × PRs [--json|--live|--every N]',
+    summary:
+      'Fleet view — mols × steps × agents × worktrees × PRs [--json|--live|--every N]',
     run: runFleetCommand,
     contract: {
       flags: {
-        '--json':
-          'fleet payload as JSON — rows, degraded, conflicts, prErrors, occupancy, budget, walls',
+        '--json': 'fleet payload as JSON — rows, degraded, conflicts, prErrors, occupancy, budget, walls',
         '--live': 'TTY dashboard repaint loop (needs a TTY)',
         '--every N': 'repaint cadence seconds — implies --live',
       },
@@ -323,16 +318,14 @@ export const PLUGINS: BroPlugin[] = [
         '--prompt <text>': 'literal prompt (positional text is the same channel)',
         '--prompt-file <file>': 'prompt from a file',
         '--provider <name>': 'providers.<name> pin — --wait needs an acp entry',
-        '--class <name>':
-          'fleet.routing lane — chain[0] supplies the provider (exclusive with --provider)',
+        '--class <name>': 'fleet.routing lane — chain[0] supplies the provider (exclusive with --provider)',
         '--model <m>': 'model override — --wait pins it on the ACP session',
         '--timeout <sec>': '--wait deadline (default 120)',
         '--connector <name>': '--detach backend pin',
         '--worktree <path>': '--detach worktree (default: minted <repo>--adhoc-*)',
         '--auto-approve': '--detach ACP permission policy',
         '--beads-dir <dir>': 'shared store override',
-        '--json':
-          '{mode,provider,model,class?,stopReason,text,delegatedBy?} for wait; {mode,delegatedBy?,agent} for detach',
+        '--json': '{mode,provider,model,class?,stopReason,text,delegatedBy?} for wait; {mode,delegatedBy?,agent} for detach',
       },
       exits: {
         0: 'delegation served — reply printed (--wait) or agent spawned (--detach)',
@@ -374,8 +367,7 @@ export const PLUGINS: BroPlugin[] = [
     contract: {
       flags: {
         '--json': 'the board as one JSON document',
-        '--deep':
-          'add the act exit gate for the current branch PR — the fast path stays local-only',
+        '--deep': 'add the act exit gate for the current branch PR — the fast path stays local-only',
       },
       json: 'schemas/cli/fleet-status.schema.json',
       exits: { 0: 'board printed' },
@@ -384,8 +376,7 @@ export const PLUGINS: BroPlugin[] = [
   definePlugin({
     name: 'notify',
     group: 'comms',
-    summary:
-      'Drop an event into the session mailbox — drained into context by the next postTool probe',
+    summary: 'Drop an event into the session mailbox — drained into context by the next postTool probe',
     run: runNotifyCommand,
     skill: 'notify',
   }),
@@ -445,7 +436,8 @@ export const PLUGINS: BroPlugin[] = [
   definePlugin({
     name: 'provider',
     group: 'fleet',
-    summary: 'Claude-facing Messages-API plane — host listener + url|token|env wiring helpers',
+    summary:
+      'Claude-facing Messages-API plane — host listener + url|token|env wiring helpers',
     run: runProviderCommand,
     skill: 'provider',
   }),
@@ -497,7 +489,7 @@ export const PLUGINS: BroPlugin[] = [
     configSchema: drillSection,
     planSchema: (doc, source) => parseDrillPlan(doc, source),
     planVersion: DRILL_PLAN_VERSION,
-    runPlan: plan => applyDrillPlan(plan as DrillPlan),
+    runPlan: (plan) => applyDrillPlan(plan as DrillPlan),
   }),
   definePlugin({
     name: 'unwind',
@@ -510,8 +502,7 @@ export const PLUGINS: BroPlugin[] = [
   definePlugin({
     name: 'queue',
     group: 'work',
-    summary:
-      'Frame-scoped intake queue: ls|drill|bump|rm — rank-ordered items that promote to frames',
+    summary: 'Frame-scoped intake queue: ls|drill|bump|rm — rank-ordered items that promote to frames',
     run: runQueueCommand,
   }),
   definePlugin({
@@ -522,9 +513,9 @@ export const PLUGINS: BroPlugin[] = [
     skill: 'wtf',
     planSchema: (doc, source) => parsePlanDoc(doc, source),
     planVersion: RETRO_PLAN_VERSION,
-    runPlan: plan => {
-      checkBeads();
-      cmdRecord(plan as RetroPlan);
+    runPlan: (plan) => {
+      checkBeads()
+      cmdRecord(plan as RetroPlan)
     },
   }),
   definePlugin({
@@ -533,7 +524,8 @@ export const PLUGINS: BroPlugin[] = [
     aliasOf: 'retrospect capture',
     summary: 'Alias for `retrospect capture` — vent, verbatim',
     // bare `bro wtf` has nothing to capture — report open wtfs instead
-    run: argv => runRetrospectCommand(argv.length === 0 ? ['status'] : ['capture', ...argv]),
+    run: (argv) =>
+      runRetrospectCommand(argv.length === 0 ? ['status'] : ['capture', ...argv]),
   }),
   definePlugin({
     name: 'learn',
@@ -549,8 +541,7 @@ export const PLUGINS: BroPlugin[] = [
   definePlugin({
     name: 'goal',
     group: 'work',
-    summary:
-      'Session-scoped completion goal — set|status|pause|resume|clear; hooks remind + judge-verdict',
+    summary: 'Session-scoped completion goal — set|status|pause|resume|clear; hooks remind + judge-verdict',
     run: runGoalCommand,
     skill: 'goal',
     configKey: 'goal',
@@ -673,7 +664,7 @@ export const PLUGINS: BroPlugin[] = [
     group: 'fleet',
     aliasOf: 'hooks perf',
     summary: 'Hook + command latency report — perf journal rollup [--session <id>] [--json]',
-    run: argv => runHooksCommand(['perf', ...argv]),
+    run: (argv) => runHooksCommand(['perf', ...argv]),
   }),
   definePlugin({
     name: 'trace',
@@ -719,7 +710,6 @@ export const PLUGINS: BroPlugin[] = [
       exits: { 0: 'status (bare `bro otel`)', 2: 'usage — unknown subcommand' },
     },
   }),
-  definePlugin({
     name: 'acp-worker',
     summary: 'ACP provider spawn unit — backends exec this; never typed',
     run: runAcpWorkerCommand,
@@ -818,26 +808,24 @@ export const PLUGINS: BroPlugin[] = [
   definePlugin({
     name: 'query',
     group: 'plan',
-    summary:
-      'Cross-provider GraphQL plan — `bro query <plan.toml>` or `kind = "query"` via `bro run`',
-    run: argv => runQueryCommand(argv, PLUGINS),
+    summary: 'Cross-provider GraphQL plan — `bro query <plan.toml>` or `kind = "query"` via `bro run`',
+    run: (argv) => runQueryCommand(argv, PLUGINS),
     skill: 'query',
     configKey: 'query',
     configSchema: querySection,
     planSchema: (doc, source) => parseQueryPlan(doc, source),
     planVersion: QUERY_PLAN_VERSION,
-    runPlan: async plan => {
-      const code = await applyQueryPlan(plan as QueryPlan);
+    runPlan: async (plan) => {
+      const code = await applyQueryPlan(plan as QueryPlan)
       if (code !== 0) {
-        process.exit(code);
+        process.exit(code)
       }
     },
   }),
   definePlugin({
     name: 'mesh',
     group: 'mesh',
-    summary:
-      'Inter-rig work federation: me|peers|pull|inbox|request|claim|done|accept|reject|wait (specs/mesh)',
+    summary: 'Inter-rig work federation: me|peers|pull|inbox|request|claim|done|accept|reject|wait (specs/mesh)',
     run: runMeshCommand,
     configKey: 'mesh',
     configSchema: meshSection,
@@ -845,8 +833,7 @@ export const PLUGINS: BroPlugin[] = [
   definePlugin({
     name: 'request',
     group: 'mesh',
-    summary:
-      'Post a request to a repo or peer — delivers into same-machine checkouts (specs/cross-repo)',
+    summary: 'Post a request to a repo or peer — delivers into same-machine checkouts (specs/cross-repo)',
     run: runRequestCommand,
   }),
   definePlugin({
@@ -862,28 +849,28 @@ export const PLUGINS: BroPlugin[] = [
     name: 'run',
     group: 'plan',
     summary: 'Execute a plan file — `kind` routes to the owning plugin',
-    run: argv => runPlanFile(argv),
+    run: (argv) => runPlanFile(argv),
   }),
   definePlugin({
     name: 'plan',
     group: 'plan',
     summary: 'Plan contract: list kinds + schema versions, validate a file',
-    run: argv => runPlanCommand(argv, PLUGINS),
+    run: (argv) => runPlanCommand(argv, PLUGINS),
   }),
   definePlugin({
     name: 'plugins',
     summary: 'Plugin registry + client adapters: install|uninstall|list <client>',
-    run: argv => runPluginsCommand(argv, PLUGINS),
+    run: (argv) => runPluginsCommand(argv, PLUGINS),
   }),
   definePlugin({
     // consumer surface (agents/transports), not an operator one —
     // hidden like hooks/acp-worker; spec bro-k9ces
     name: 'contract',
     summary: 'The CLI surface as data — dump|check|gen over the registry',
-    run: argv => runContractCommand(argv, PLUGINS, GROUP_META),
+    run: (argv) => runContractCommand(argv, PLUGINS, GROUP_META),
     hidden: true,
   }),
-];
+]
 
 /** Group one-liners for `bro --help` — order is the render order.
  *  A plugin whose name equals the group name is the group's host:
@@ -898,73 +885,73 @@ export const GROUP_META: ReadonlyArray<readonly [string, string]> = [
   ['plan', 'versioned plans'],
   ['mesh', 'inter-rig federation'],
   ['spec', 'spec-driven development'],
-];
+]
 
 /** name → members, derived over the live registry each call so
  *  external plugins loaded from config can join a group too. Groups
  *  holding a same-named plugin (mesh/spec/plan) are HOSTED — the host
  *  plugin receives argv the group itself does not claim. */
 export function pluginGroups(): Map<string, BroPlugin[]> {
-  const groups = new Map<string, BroPlugin[]>();
+  const groups = new Map<string, BroPlugin[]>()
   for (const p of PLUGINS) {
-    if (!p.group) continue;
-    const list = groups.get(p.group) ?? [];
-    list.push(p);
-    groups.set(p.group, list);
+    if (!p.group) continue
+    const list = groups.get(p.group) ?? []
+    list.push(p)
+    groups.set(p.group, list)
   }
-  return groups;
+  return groups
 }
 
 /** `bro run <plan.toml>` — parse the file, route on `kind`, gate on the
  *  envelope `version`, validate with the owning plugin's planSchema,
  *  execute via runPlan. Resolution is shared with `bro plan validate`. */
 export async function runPlanFile(argv: string[]): Promise<void> {
-  const files = argv.filter(a => !a.startsWith('-'));
-  const kinds = PLUGINS.filter(p => p.planSchema && p.runPlan).map(p => p.name);
+  const files = argv.filter((a) => !a.startsWith('-'))
+  const kinds = PLUGINS.filter((p) => p.planSchema && p.runPlan).map((p) => p.name)
   if (files.length !== 1) {
-    console.error(`usage: bro run <plan.toml> — plan kinds: ${kinds.join(', ') || '(none)'}`);
-    process.exit(2);
+    console.error(`usage: bro run <plan.toml> — plan kinds: ${kinds.join(', ') || '(none)'}`)
+    process.exit(2)
   }
-  const file = files[0] as string;
-  const { plugin, plan } = resolvePlanDoc(file, PLUGINS);
+  const file = files[0] as string
+  const { plugin, plan } = resolvePlanDoc(file, PLUGINS)
   if (!plugin.runPlan) {
-    throw new Error(`${file}: plugin "${plugin.name}" does not accept plans`);
+    throw new Error(`${file}: plugin "${plugin.name}" does not accept plans`)
   }
-  await plugin.runPlan(plan);
+  await plugin.runPlan(plan)
 }
 
 /** configKey → configSchema across the registry — what `loadConfig`
  *  applies on top of core sections. External plugins register here too. */
 export function pluginConfigSections(): Record<string, ConfigSection<unknown>> {
   return Object.fromEntries(
-    PLUGINS.filter(p => p.configKey && p.configSchema).map(p => [
+    PLUGINS.filter((p) => p.configKey && p.configSchema).map((p) => [
       p.configKey as string,
       p.configSchema as ConfigSection<unknown>,
     ])
-  );
+  )
 }
 
 /** loadConfig + registered plugin sections — the CLI's config entrypoint. */
 export function loadBroConfig(cwd: string = process.cwd()) {
-  return loadConfig(cwd, pluginConfigSections());
+  return loadConfig(cwd, pluginConfigSections())
 }
 
 /** configDiagnostics over the full registry — core sections merged with
  *  every plugin's declared configKey schema (spec: specs/bro-d9dmx.md). */
 export function broConfigDiagnostics(cwd: string = process.cwd()) {
-  return configDiagnostics(cwd, pluginConfigSections());
+  return configDiagnostics(cwd, pluginConfigSections())
 }
 
 // The gate lives in config-policy.ts — a leaf commands/work.ts can
 // import without the TDZ cycle back into this registry. The merged
 // section list is registered here at init so assertMutableConfig sees
 // plugin configKeys, not just core's.
-export { ConfigPolicyError, assertMutableConfig } from './config-policy.ts';
-import { registerPolicySections } from './config-policy.ts';
-registerPolicySections(pluginConfigSections);
+export { ConfigPolicyError, assertMutableConfig } from './config-policy.ts'
+import { registerPolicySections } from './config-policy.ts'
+registerPolicySections(pluginConfigSections)
 
 function isPlugin(p: unknown): p is BroPlugin {
-  const o = p as BroPlugin;
+  const o = p as BroPlugin
   if (
     !o ||
     typeof o !== 'object' ||
@@ -973,80 +960,79 @@ function isPlugin(p: unknown): p is BroPlugin {
     typeof o.summary !== 'string' ||
     typeof o.run !== 'function'
   ) {
-    return false;
+    return false
   }
   // optional fields must be the right type when present — a truthy
   // non-function configSchema would crash config loading later
-  return PLUGIN_FIELD_CHECKS.every(([key, ok]) => o[key] === undefined || ok(o[key]));
+  return PLUGIN_FIELD_CHECKS.every(([key, ok]) => o[key] === undefined || ok(o[key]))
 }
 
 /** Present-but-wrong optional fields — each predicate runs only when
  *  the field is defined. Table form keeps isPlugin flat as fields grow. */
-const PLUGIN_FIELD_CHECKS: ReadonlyArray<[keyof BroPlugin, (v: unknown) => boolean]> = [
-  ['configSchema', v => typeof v === 'function'],
-  ['planSchema', v => typeof v === 'function'],
-  [
-    'planVersion',
-    v => typeof v === 'number' && Number.isInteger(v as number) && (v as number) >= 1,
-  ],
-  ['runPlan', v => typeof v === 'function'],
-  ['skill', v => typeof v === 'string'],
-  ['deprecated', v => typeof v === 'string'],
-  ['flatDeprecated', v => typeof v === 'string'],
-  ['configKey', v => typeof v === 'string'],
-  ['argvPrefix', v => Array.isArray(v)],
-  ['docs', v => Array.isArray(v) && v.every(isDocType)],
-  ['connectors', v => Array.isArray(v) && v.every(isConnector)],
+const PLUGIN_FIELD_CHECKS: ReadonlyArray<
+  [keyof BroPlugin, (v: unknown) => boolean]
+> = [
+  ['configSchema', (v) => typeof v === 'function'],
+  ['planSchema', (v) => typeof v === 'function'],
+  ['planVersion', (v) => typeof v === 'number' && Number.isInteger(v as number) && (v as number) >= 1],
+  ['runPlan', (v) => typeof v === 'function'],
+  ['skill', (v) => typeof v === 'string'],
+  ['deprecated', (v) => typeof v === 'string'],
+  ['flatDeprecated', (v) => typeof v === 'string'],
+  ['configKey', (v) => typeof v === 'string'],
+  ['argvPrefix', (v) => Array.isArray(v)],
+  ['docs', (v) => Array.isArray(v) && v.every(isDocType)],
+  ['connectors', (v) => Array.isArray(v) && v.every(isConnector)],
   ['contract', isCliContract],
-];
+]
 
 /** `contract` must be the declared shape at every level — a malformed
  *  nested map (flags: 5, subs: "x") would otherwise reach the
  *  dump/reconcile engine and crash or corrupt the snapshot. */
 const isRecord = (v: unknown): v is Record<string, unknown> =>
-  v !== null && typeof v === 'object' && !Array.isArray(v);
+  v !== null && typeof v === 'object' && !Array.isArray(v)
 
 const isStrMap = (v: unknown): boolean =>
-  isRecord(v) && Object.values(v).every(x => typeof x === 'string');
+  isRecord(v) && Object.values(v).every((x) => typeof x === 'string')
 
 const isSubContract = (v: unknown): boolean =>
   isRecord(v) &&
   (v.flags === undefined || isStrMap(v.flags)) &&
   (v.exits === undefined || isStrMap(v.exits)) &&
-  (v.json === undefined || typeof v.json === 'string');
+  (v.json === undefined || typeof v.json === 'string')
 
 function isCliContract(v: unknown): boolean {
   return (
     isSubContract(v) &&
     isRecord(v) &&
     (v.subs === undefined || (isRecord(v.subs) && Object.values(v.subs).every(isSubContract)))
-  );
+  )
 }
 
 /** A connectors entry must be a Connector — name + at least the shape
  *  registerConnector relies on — else facade resolution would crash. */
 function isConnector(c: unknown): boolean {
-  const o = c as { name?: unknown; matchRemote?: unknown };
+  const o = c as { name?: unknown; matchRemote?: unknown }
   return (
     !!o &&
     typeof o === 'object' &&
     typeof o.name === 'string' &&
     o.name !== '' &&
     (o.matchRemote === undefined || typeof o.matchRemote === 'function')
-  );
+  )
 }
 
 /** A docs entry must be a DocType — name + adapter factory — else it
  *  would crash docVerbs/docTypes deep in dispatch or --help. */
 function isDocType(d: unknown): d is DocType {
-  const o = d as DocType;
+  const o = d as DocType
   return (
     !!o &&
     typeof o === 'object' &&
     typeof o.name === 'string' &&
     o.name !== '' &&
     typeof o.adapter === 'function'
-  );
+  )
 }
 
 /** Imports one specifier → exported candidate entries, or undefined on
@@ -1058,20 +1044,20 @@ async function importPluginModule(
   root: string
 ): Promise<unknown[] | undefined> {
   try {
-    const resolved = req.resolve(spec);
-    const rel = relative(root, resolved);
+    const resolved = req.resolve(spec)
+    const rel = relative(root, resolved)
     if (spec.startsWith('.') && (rel.startsWith('..') || isAbsolute(rel))) {
-      throw new Error('plugin path escapes the repo root');
+      throw new Error('plugin path escapes the repo root')
     }
     const mod = (await import(pathToFileURL(resolved).href)) as {
-      default?: unknown;
-    };
-    const exported = mod.default ?? mod;
-    return Array.isArray(exported) ? exported : [exported];
+      default?: unknown
+    }
+    const exported = mod.default ?? mod
+    return Array.isArray(exported) ? exported : [exported]
   } catch (err) {
-    const msg = err instanceof Error ? err.message : String(err);
-    console.error(`warning: plugin "${spec}" failed to load (${msg}) — skipped`);
-    return undefined;
+    const msg = err instanceof Error ? err.message : String(err)
+    console.error(`warning: plugin "${spec}" failed to load (${msg}) — skipped`)
+    return undefined
   }
 }
 
@@ -1082,36 +1068,36 @@ function registerExternal(
   reserved?: ReadonlySet<string>
 ): BroPlugin | undefined {
   if (!isPlugin(entry)) {
-    console.error(`warning: plugin "${spec}" export is not a BroPlugin — skipped`);
-    return undefined;
+    console.error(`warning: plugin "${spec}" export is not a BroPlugin — skipped`)
+    return undefined
   }
   // plugin lookup wins argv[0] — a plugin named like a doc verb would
   // shadow `bro list`/`bro show`/`bro init` for every doc type
   if (reserved?.has(entry.name)) {
     console.error(
       `warning: plugin "${spec}" name "${entry.name}" is a reserved doc noun/verb — skipped`
-    );
-    return undefined;
+    )
+    return undefined
   }
-  if (PLUGINS.some(p => p.name === entry.name)) {
-    console.error(`warning: plugin "${spec}" name "${entry.name}" is taken — skipped`);
-    return undefined;
+  if (PLUGINS.some((p) => p.name === entry.name)) {
+    console.error(`warning: plugin "${spec}" name "${entry.name}" is taken — skipped`)
+    return undefined
   }
-  const plugin: BroPlugin = { ...entry, external: true };
+  const plugin: BroPlugin = { ...entry, external: true }
   // a registered configKey is owned — an external plugin must not
   // shadow a builtin (or earlier external) section schema
-  if (plugin.configKey && PLUGINS.some(p => p.configKey === plugin.configKey)) {
+  if (plugin.configKey && PLUGINS.some((p) => p.configKey === plugin.configKey)) {
     console.error(
       `warning: plugin "${spec}" configKey "${plugin.configKey}" is already owned — its configSchema is ignored`
-    );
-    delete plugin.configKey;
-    delete plugin.configSchema;
+    )
+    delete plugin.configKey
+    delete plugin.configSchema
   }
   for (const c of plugin.connectors ?? []) {
-    registerConnector(c);
+    registerConnector(c)
   }
-  PLUGINS.push(plugin);
-  return plugin;
+  PLUGINS.push(plugin)
+  return plugin
 }
 
 /** Imports config `plugins` specifiers relative to the repo and registers
@@ -1125,31 +1111,31 @@ export async function loadExternalPlugins(
   /** plugin names that must stay dispatchable to other layers (doc verbs) */
   reserved: ReadonlySet<string> = new Set()
 ): Promise<BroPlugin[]> {
-  const loaded: BroPlugin[] = [];
+  const loaded: BroPlugin[] = []
   // createRequire anchored at the repo keeps both `./x.ts` and bare
   // package specifiers resolving from the user's install, not the CLI's
-  const req = createRequire(resolve(cwd, 'bro.config.json'));
-  const root = resolve(cwd);
+  const req = createRequire(resolve(cwd, 'bro.config.json'))
+  const root = resolve(cwd)
   // reserved is computed before any external plugin registers — a doc
   // noun a freshly accepted plugin just contributed must still block a
   // later plugin's command name (`bro <noun>` would route to it)
-  const live = new Set(reserved);
+  const live = new Set(reserved)
   for (const spec of specs) {
-    const entries = await importPluginModule(spec, req, root);
+    const entries = await importPluginModule(spec, req, root)
     for (const entry of entries ?? []) {
-      const plugin = registerExternal(entry, spec, live);
+      const plugin = registerExternal(entry, spec, live)
       if (plugin) {
-        loaded.push(plugin);
+        loaded.push(plugin)
         // the accepted plugin's own name is reserved too — a later
         // plugin can't shadow `bro <name>` either
-        live.add(plugin.name);
+        live.add(plugin.name)
         for (const d of plugin.docs ?? []) {
           for (const n of [d.name, ...(d.aliases ?? [])]) {
-            live.add(n);
+            live.add(n)
           }
         }
       }
     }
   }
-  return loaded;
+  return loaded
 }
