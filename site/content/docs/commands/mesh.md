@@ -13,7 +13,7 @@ _Command examples track the upcoming **0.3.0** — grouped
 local checkouts or beads-remote Dolt replicas; requests flow through
 `inbox`/`claim`/`done`/`accept`/`reject`. `bro mesh wait` performs a
 point-check (not blocking); for blocking waits on external dependencies use
-`bro wait external:<rig>:<id>`. Use `bro mesh peers add <alias> <rig> <remote>`
+`bro wait external:<rig>:<id>`. Use `bro mesh peers add <alias> <rig> <remote> [--login L]`
 and `bro mesh peers remove <alias>` to manage peer bindings.
 
 | Command                                                 | What it does                        |

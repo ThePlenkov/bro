@@ -10,7 +10,8 @@ _Command examples track the upcoming **0.3.0** — grouped
 `bro debt status`)._
 
 `bro fleet mcp` (alias `bro mcp`) runs a stdio MCP server exposing bro
-read planes as tools (e.g. `bro_work_status`, `bro_agents_fleet`) for
+read planes as tools (e.g. `bro_work_list`/`bro_work_get` and named reads
+like `bro_work_ready`, `bro_agents_fleet`) for
 clients like Windsurf, Zed, Goose, Gemini CLI, and Claude Desktop.
 Tool names are generated from registered planes and reads — run
 `bro fleet mcp --tools` to see what's advertised for your repo.
