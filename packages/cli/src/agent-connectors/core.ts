@@ -95,6 +95,8 @@ import { otelEvent } from '@broject/providers';
 import type { AcpSeam, FetchFn } from '@broject/providers';
 import { expandAgentCmd, loopSection, type LoopConfig } from '@broject/loop';
 import { assertMutableConfig } from '../config-policy.ts';
+import { enterWorktree } from '../commands/work.ts';
+import { writeCopilotCount } from '../session-planes/copilot.ts';
 import {
   devinLogsDir,
   devinPidBead,
