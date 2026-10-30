@@ -44,6 +44,9 @@ export interface FleetPaneState {
   slug?: string;
   /** `statusString` — the bracket text the workspace label carries. */
   status: string;
+  /** The PR's html_url — the status-view wraps `#N` in an OSC8 link
+   *  so a click opens the PR without the URL ever taking space. */
+  prUrl?: string;
   led: PaneLed;
   /** Wall-clock ms the projector classified at — staleness display. */
   ts: number;

@@ -63,6 +63,9 @@ export interface TreeProjection {
    *  when state==='silent'. */
   silentMin?: number;
   pr?: number;
+  /** The act entry's PR html_url — the OSC8 target for `#N` text
+   *  (absent when only a bead link resolved, which carries no URL). */
+  prUrl?: string;
   /** Compact gate summary ('merged'|'4t/3f/6sast/conflicts'|'ok'|…) —
    *  absent when the act cache has no fresh entry for the PR. */
   gate?: string;
@@ -154,6 +157,8 @@ export function workerState(
  *  the gate itself. */
 export interface GateState {
   pr: number;
+  /** The PR's html_url — the OSC8 link target for `#N`. */
+  url?: string;
   headRef?: string;
   state?: string;
   isDraft?: boolean;
@@ -518,7 +523,11 @@ export function prFor(
   const entry = byRef ?? act.find(e => e.state.pr === link && fresh(e));
   const pr = entry?.state.pr ?? link;
   if (pr === undefined) return {};
-  return { pr, ...(entry !== undefined ? { gate: gateFrag(entry.state) } : {}) };
+  return {
+    pr,
+    ...(entry?.state.url !== undefined ? { prUrl: entry.state.url } : {}),
+    ...(entry !== undefined ? { gate: gateFrag(entry.state) } : {}),
+  };
 }
 
 // --- the per-tree projection (pure — tests drive this directly) -------------------
@@ -944,6 +953,7 @@ function paneWrites(j: PaneJob): { files: number; leds: number; path?: string } 
     title: j.title,
     ...(j.slug !== undefined ? { slug: j.slug } : {}),
     status: statusString(j.proj),
+    ...(j.proj.prUrl !== undefined ? { prUrl: j.proj.prUrl } : {}),
     led,
     ts: j.now,
   };

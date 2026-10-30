@@ -84,6 +84,15 @@ export function metaArgs(pane: string, s: FleetPaneState | undefined, seq: numbe
   return args;
 }
 
+/** OSC8 hyperlink — `#N` stays `#N` on screen but a ctrl/cmd-click
+ *  opens the PR. Wraps only the first `#<digits>` (the PR token);
+ *  applied AFTER `plain` since plain strips the escape bytes. */
+export function linkifyPr(text: string, prUrl: string | undefined): string {
+  if (prUrl === undefined) return text;
+  const url = plain(prUrl);
+  return text.replace(/#\d+/, m => `\u001b]8;;${url}\u0007${m}\u001b]8;;\u0007`);
+}
+
 const LED_ICON: Record<PaneLed['state'], string> = {
   working: '●',
   blocked: '×',
@@ -104,7 +113,7 @@ export function renderView(
     lines.push(' · waiting for the daemon projector', ` ${plain(worktree)}`);
   } else {
     lines.push(
-      ` ${LED_ICON[s.led.state]} ${plain(s.status !== '' ? s.status : s.led.state)}`,
+      ` ${LED_ICON[s.led.state]} ${linkifyPr(plain(s.status !== '' ? s.status : s.led.state), s.prUrl)}`,
       ` ${plain(s.title)}`,
       ` ${plain(worktree)} · ${plain(s.workspace)}`,
       ` updated ${new Date(s.ts).toTimeString().slice(0, 8)} (${Math.max(0, Math.round((now - s.ts) / 1000))}s ago)`

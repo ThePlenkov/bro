@@ -112,6 +112,17 @@ describe('renderView — the pane face', () => {
     assert.match(v, /w1/);
   });
 
+  test('a prUrl wraps the #N token in an OSC8 link', () => {
+    const v = renderView(doc({ prUrl: 'https://github.com/o/r/pull/7' }), '/repo/trees/t1');
+    assert.ok(v.includes('\u001b]8;;https://github.com/o/r/pull/7\u0007#7\u001b]8;;\u0007'));
+    // no URL → the token stays plain text
+    assert.ok(renderView(doc(), '/repo/trees/t1').includes('working·#7'));
+    // an injected URL is sanitized before it reaches the escape — the
+    // payload survives as inert text, never as a live escape
+    const evil = renderView(doc({ prUrl: 'http://e\u001b]8;;x\u0007' }), '/repo/trees/t1');
+    assert.ok(evil.includes(']8;;http://e]8;;x\u0007'));
+  });
+
   test('untrusted fields can never inject terminal escapes', () => {
     assert.equal(plain('a\u001b[2Jb'), 'a[2Jb');
     const evil = doc({ title: 'x\u001b]8;;http://e\u0007t', slug: 's\u0007[0m' });
