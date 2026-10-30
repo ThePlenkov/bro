@@ -410,7 +410,7 @@
     "cleanup": {
       "name": "cleanup",
       "group": "review",
-      "summary": "Delete local branches whose PR merged [--remote] [--dry-run]",
+      "summary": "Delete local branches whose PR merged and stale temp dirs [--remote] [--dry-run]",
       "spellings": ["cleanup", "review cleanup"],
       "aliases": [],
       "hidden": false,
