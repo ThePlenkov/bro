@@ -134,6 +134,8 @@ jobs:
                 dist="${EXPECTED_TAG#v*-}"
                 dist="${dist%%.*}"
                 ;;
+              *)
+                ;;
             esac
             case "$dist" in
               "")
