@@ -75,23 +75,34 @@ describe('reportArgs / releaseArgs — the bro:fleet contract', () => {
 
 describe('metaArgs — display text is metadata, never the semantic', () => {
   test('slug becomes --display-agent; status text becomes the state label', () => {
-    const a = metaArgs('w1:p1', doc(), 7);
-    assert.equal(a[a.indexOf('--display-agent') + 1], 'bro-idsat');
-    assert.ok(a.includes('--clear-state-labels'));
-    assert.deepEqual(a.slice(a.indexOf('--state-label')), ['--state-label', 'working=working·#7']);
+    const calls = metaArgs('w1:p1', doc(), 7);
+    assert.equal(calls.length, 2);
+    const [clear, set] = calls;
+    // call 1 clears only — clear wipes display-agent AND labels
+    assert.ok(clear!.includes('--clear-state-labels'));
+    assert.ok(!clear!.includes('--display-agent') && !clear!.includes('--state-label'));
+    // call 2 writes name + label together
+    assert.equal(set![set!.indexOf('--display-agent') + 1], 'bro-idsat');
+    assert.deepEqual(set!.slice(set!.indexOf('--state-label')), [
+      '--state-label',
+      'working=working·#7',
+    ]);
   });
 
-  test('a slug-less state names the pane fleet', () => {
+  test('an agent name wins over slug; slug wins over fleet', () => {
+    const a = metaArgs('w1:p1', doc({ agent: 'opencode' }), 7);
+    assert.equal(a[1]![a[1]!.indexOf('--display-agent') + 1], 'opencode');
     const s = doc();
     delete s.slug;
-    const a = metaArgs('w1:p1', s, 7);
-    assert.equal(a[a.indexOf('--display-agent') + 1], 'fleet');
+    const b = metaArgs('w1:p1', s, 7);
+    assert.equal(b[1]![b[1]!.indexOf('--display-agent') + 1], 'fleet');
   });
 
   test('undefined state clears everything back to the bare binding', () => {
-    const a = metaArgs('w1:p1', undefined, 7);
+    const calls = metaArgs('w1:p1', undefined, 7);
+    assert.equal(calls.length, 2);
+    const a = calls[1]!;
     assert.equal(a[a.indexOf('--display-agent') + 1], 'fleet');
-    assert.ok(a.includes('--clear-state-labels'));
     assert.ok(!a.includes('--state-label'));
   });
 });
@@ -130,7 +141,7 @@ describe('renderView — the pane face', () => {
     // the only ESC bytes left are the view's own clear-and-home prefix
     assert.equal(v.indexOf('\u001b', v.indexOf('[H')), -1);
     const meta = metaArgs('w1:p1', evil, 1);
-    assert.equal(meta[meta.indexOf('--display-agent') + 1], 's[0m');
+    assert.equal(meta[1]![meta[1]!.indexOf('--display-agent') + 1], 's[0m');
   });
 });
 
@@ -223,7 +234,7 @@ describe('runStatusView --once — one bind against a seeded state file', () => 
     assert.equal(report[report.indexOf('--source') + 1], 'bro:fleet');
     assert.equal(report[report.indexOf('--agent') + 1], 'bro-status');
     assert.equal(report[report.indexOf('--state') + 1], 'working');
-    const meta = calls.find(c => c[1] === 'report-metadata');
+    const meta = calls.find(c => c[1] === 'report-metadata' && c.includes('--display-agent'));
     assert.ok(meta !== undefined);
     assert.equal(meta[meta.indexOf('--display-agent') + 1], 'bro-idsat');
   });
