@@ -5,22 +5,32 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, test } from 'node:test';
 import {
+  fleetStatusPath,
+  nextSeq,
+  parseFleetState,
+  pruneFleetStatus,
+  readFleetState,
+  writeFleetState,
+} from './fleet-state.ts';
+import {
   type ActEntry,
   gateFrag,
+  type HerdrPaneRow,
   labelFor,
-  ledPane,
-  ledReport,
+  paneLed,
   prFor,
   prToken,
   projectFleet,
   projectTree,
   silentBucketMin,
+  statusPaneLive,
   statusString,
   type TreeInput,
   type WorkerCand,
   workerState,
   workerToken,
 } from './herdr-projector.ts';
+import { PANE_AGENT, PANE_SOURCE } from './herdr-status-view.ts';
 
 const H = 3_600_000;
 const M = 60_000;
@@ -310,80 +320,68 @@ describe('projectTree — end to end over injected planes', () => {
   });
 });
 
-describe('ledReport — the native-state mapping (bro-awqde)', () => {
+describe('paneLed — the pane semantic-state mapping (bro-idsat)', () => {
   test('silent without a bucket falls back to bare working', () => {
-    assert.deepEqual(ledReport({ state: 'silent' }), { kind: 'report', state: 'working' });
+    assert.deepEqual(paneLed({ state: 'silent' }), { state: 'working' });
   });
 
   test('working → working, silent → working + bucket message', () => {
-    assert.deepEqual(ledReport({ state: 'working' }), { kind: 'report', state: 'working' });
-    assert.deepEqual(ledReport({ state: 'silent', silentMin: 45 }), {
-      kind: 'report',
+    assert.deepEqual(paneLed({ state: 'working' }), { state: 'working' });
+    assert.deepEqual(paneLed({ state: 'silent', silentMin: 45 }), {
       state: 'working',
       message: 'silent45m',
     });
-    assert.deepEqual(ledReport({ state: 'silent', silentMin: 960 }), {
-      kind: 'report',
+    assert.deepEqual(paneLed({ state: 'silent', silentMin: 960 }), {
       state: 'working',
       message: 'silent16h',
     });
   });
 
   test('interrupted/lost → blocked carrying the cause word', () => {
-    assert.deepEqual(ledReport({ state: 'interrupted' }), {
-      kind: 'report',
+    assert.deepEqual(paneLed({ state: 'interrupted' }), {
       state: 'blocked',
       message: 'interrupted',
     });
-    assert.deepEqual(ledReport({ state: 'lost' }), {
-      kind: 'report',
-      state: 'blocked',
-      message: 'lost',
-    });
+    assert.deepEqual(paneLed({ state: 'lost' }), { state: 'blocked', message: 'lost' });
   });
 
-  test('exited → idle (native done); stopped → release', () => {
-    assert.deepEqual(ledReport({ state: 'exited' }), {
-      kind: 'report',
-      state: 'idle',
-      message: 'exited',
-    });
-    assert.deepEqual(ledReport({ state: 'stopped' }), { kind: 'release' });
+  test('exited/stopped → idle — the pane is a dashboard, never released', () => {
+    assert.deepEqual(paneLed({ state: 'exited' }), { state: 'idle', message: 'exited' });
+    assert.deepEqual(paneLed({ state: 'stopped' }), { state: 'idle', message: 'stopped' });
   });
 
-  test('no worker verdict — armed reports unknown, unarmed releases', () => {
-    assert.deepEqual(ledReport({ armed: true }), { kind: 'report', state: 'unknown' });
-    assert.deepEqual(ledReport({}), { kind: 'release' });
-    assert.deepEqual(ledReport({ armed: false }), { kind: 'release' });
+  test('no worker verdict — armed reads unknown, unarmed reads idle', () => {
+    assert.deepEqual(paneLed({ armed: true }), { state: 'unknown' });
+    assert.deepEqual(paneLed({}), { state: 'idle' });
+    assert.deepEqual(paneLed({ armed: false }), { state: 'idle' });
   });
 });
 
-describe('ledPane — the reportable-candidate filter', () => {
-  const rows = [
+describe('statusPaneLive — the backstop push gate', () => {
+  const rows: HerdrPaneRow[] = [
     { pane_id: 'w1:p1' },
     { pane_id: 'w1:p2', agent: 'devin' },
-    { pane_id: 'w1:p3', agent: 'fleet' },
-    { pane_id: 'w1:p4', agent: '' },
+    { pane_id: 'w1:p3', agent: PANE_AGENT },
+    { pane_id: 'w1:p4', agent: PANE_SOURCE },
+    { pane_id: 'w1:p5', agent: '' },
   ];
 
-  test('first ledger candidate that exists and is agent-free wins', () => {
-    assert.deepEqual(ledPane(rows, ['w1:p9', 'w1:p1']), ['w1:p1']);
+  test('an unbound recorded pane is pushable', () => {
+    assert.equal(statusPaneLive(rows, 'w1:p1'), true);
   });
 
-  test('a foreign detected agent skips the pane', () => {
-    assert.deepEqual(ledPane(rows, ['w1:p2', 'w1:p1']), ['w1:p1']);
+  test('a pane bound to bro-status or bro:fleet is pushable', () => {
+    assert.equal(statusPaneLive(rows, 'w1:p3'), true);
+    assert.equal(statusPaneLive(rows, 'w1:p4'), true);
+    assert.equal(statusPaneLive(rows, 'w1:p5'), true);
   });
 
-  test('our own label and an empty agent field still qualify', () => {
-    assert.deepEqual(ledPane(rows, ['w1:p3', 'w1:p4']), ['w1:p3', 'w1:p4']);
+  test('a foreign detected agent protects the pane', () => {
+    assert.equal(statusPaneLive(rows, 'w1:p2'), false);
   });
 
-  test('candidate order is preserved (mirrors before the renderer)', () => {
-    assert.deepEqual(ledPane(rows, ['w1:p4', 'w1:p1', 'w1:p2']), ['w1:p4', 'w1:p1']);
-  });
-
-  test('no candidates → nothing to probe', () => {
-    assert.deepEqual(ledPane(rows, []), []);
+  test('a pane missing from the list is not pushable', () => {
+    assert.equal(statusPaneLive(rows, 'w1:p9'), false);
   });
 });
 
@@ -393,7 +391,7 @@ describe('projectFleet — no herdr, no writes, no throw', () => {
     process.env.HERDR_BIN_PATH = '/nonexistent/herdr';
     try {
       const r = projectFleet(mkdtempSync(join(tmpdir(), 'proj-')));
-      assert.deepEqual(r, { reachable: false, workspaces: 0, writes: 0, leds: 0 });
+      assert.deepEqual(r, { reachable: false, workspaces: 0, writes: 0, files: 0, leds: 0 });
     } finally {
       if (prev === undefined) delete process.env.HERDR_BIN_PATH;
       else process.env.HERDR_BIN_PATH = prev;
@@ -424,13 +422,6 @@ if (verb === 'worktree list') {
       result: { panes: (s.panes ?? []).filter(p => p.workspace_id === ws) },
     })
   );
-} else if (verb === 'pane process-info') {
-  const pi = (s.processes ?? {})[args[args.indexOf('--pane') + 1]];
-  if (pi === undefined) {
-    process.exitCode = 1;
-  } else {
-    console.log(JSON.stringify({ result: { process_info: pi } }));
-  }
 } else {
   console.log(JSON.stringify({ result: {} }));
 }
@@ -511,44 +502,27 @@ describe('projectFleet — a live pass over a fake herdr', () => {
     workspace_id: ws,
     ...(agent !== undefined ? { agent } : {}),
   });
-  /** A busy pane's process-info — a foreground pid besides the shell. */
-  const busy = (shell: number, fg: number): Record<string, unknown> => ({
-    shell_pid: shell,
-    foreground_processes: [{ pid: shell }, { pid: fg }],
-  });
-  /** The plugin's renderer record for one tree → pane binding. */
-  const rendererOf = (root: string, paneId: string, ws: string): Record<string, unknown> => ({
-    [root]: { pane_id: paneId, workspace: ws },
-  });
-  /** The plugin's single mirror record. */
-  const mirrorOf = (paneId: string, ws: string, marked: boolean): Record<string, unknown> => ({
-    m1: { pane_id: paneId, workspace: ws, marked },
+  /** The plugin's status-pane record for one tree → pane binding. */
+  const statusesOf = (root: string, paneId: string, ws: string): Record<string, unknown> => ({
+    [root]: { pane_id: paneId, workspace: ws, worktree: root },
   });
 
-  /** The one-workspace LED fixture — scenario + plugin state for a
-   *  managed worktree, with pane rows, process shapes, and ledger
-   *  panes overlaid. Every LED test's fixture is one of these; the
-   *  envelope lives here so the tests carry only their unique data. */
-  const ledFixture = (
+  /** The one-workspace fixture — scenario + plugin state for a managed
+   *  worktree, with pane rows and the status-pane binding overlaid.
+   *  The envelope lives here so the tests carry only unique data. */
+  const statusFixture = (
     root: string,
     ws: string,
-    o: {
-      panes?: Record<string, unknown>[];
-      processes?: Record<string, unknown>;
-      mirrors?: Record<string, unknown>;
-      renderers?: Record<string, unknown>;
-    } = {}
+    o: { panes?: Record<string, unknown>[]; statuses?: Record<string, unknown> } = {}
   ): { scenario: Record<string, unknown>; state: Record<string, unknown> } => ({
     scenario: {
       worktrees: [{ path: root, open_workspace_id: ws }],
       workspaces: [{ workspace_id: ws, label: 'Old', tokens: {} }],
       ...(o.panes !== undefined ? { panes: o.panes } : {}),
-      ...(o.processes !== undefined ? { processes: o.processes } : {}),
     },
     state: {
       workspaces: { [root]: { ws, label: 'Old', managed: true } },
-      ...(o.mirrors !== undefined ? { mirrors: o.mirrors } : {}),
-      ...(o.renderers !== undefined ? { renderers: o.renderers } : {}),
+      ...(o.statuses !== undefined ? { statuses: o.statuses } : {}),
     },
   });
 
@@ -569,7 +543,7 @@ describe('projectFleet — a live pass over a fake herdr', () => {
         workspaces: { [root]: { ws: 'w1', label: '[working·#1] Old Title', managed: true } },
       },
     });
-    assert.deepEqual(r, { reachable: true, workspaces: 1, writes: 2, leds: 0 });
+    assert.deepEqual(r, { reachable: true, workspaces: 1, writes: 2, files: 1, leds: 0 });
     const rename = calls.find(c => c.slice(0, 2).join(' ') === 'workspace rename');
     // empty bead plane → the live titled label survives, no basename clobber
     assert.deepEqual(rename?.slice(0, 4), ['workspace', 'rename', 'w1', 'Old Title']);
@@ -577,6 +551,10 @@ describe('projectFleet — a live pass over a fake herdr', () => {
     assert.ok(meta?.includes('--clear-token'));
     assert.ok(meta?.includes('status'));
     assert.ok(meta?.includes('bro.worker'));
+    // and the state file the status pane renders landed under root
+    const st = readFleetState(fleetStatusPath(root, root));
+    assert.equal(st?.workspace, 'w1');
+    assert.equal(st?.title, 'Old Title');
   });
 
   test('a user-owned workspace is never touched', () => {
@@ -589,147 +567,126 @@ describe('projectFleet — a live pass over a fake herdr', () => {
       // recorded but NOT managed — a workspace the user opened themselves
       state: { workspaces: { [root]: { ws: 'wUser', managed: false } } },
     });
-    assert.deepEqual(r, { reachable: true, workspaces: 0, writes: 0, leds: 0 });
+    assert.deepEqual(r, { reachable: true, workspaces: 0, writes: 0, files: 0, leds: 0 });
     const flat = calls.flat().join(' ');
     assert.ok(!flat.includes('rename'));
     assert.ok(!flat.includes('report-metadata'));
+    assert.ok(!flat.includes('report-agent'));
+    assert.equal(readFleetState(fleetStatusPath(root, root)), undefined);
   });
 
-  test('LED report lands on the busy agent-free ledger pane — and only it', () => {
+  test('the state file carries the same verdict the label shows', () => {
+    const root = armedRoot();
+    const { r } = fleetPass(root, stateDirOf(), statusFixture(root, 'wF'));
+    assert.equal(r.files, 1);
+    const st = readFleetState(fleetStatusPath(root, root));
+    assert.equal(st?.v, 1);
+    assert.equal(st?.worktree, root);
+    assert.equal(st?.workspace, 'wF');
+    assert.equal(st?.status, 'no PR');
+    assert.deepEqual(st?.led, { state: 'unknown' });
+  });
+
+  test('the backstop pushes to the recorded status pane — and only it', () => {
     const root = armedRoot();
     const { r, calls } = fleetPass(
       root,
       stateDirOf(),
-      ledFixture(root, 'wL', {
-        panes: [pane('wL:p2', 'wL', 'devin'), pane('wL:p1', 'wL')],
-        processes: { 'wL:p1': busy(7, 99), 'wL:p2': busy(5, 44) },
-        mirrors: mirrorOf('wL:p2', 'wL', false),
-        renderers: rendererOf(root, 'wL:p1', 'wL'),
+      statusFixture(root, 'wB', {
+        panes: [pane('wB:p1', 'wB'), pane('wB:p2', 'wB')],
+        statuses: statusesOf(root, 'wB:p1', 'wB'),
       })
     );
     assert.equal(r.leds, 1);
-    // armed tree, no worker verdict → unknown; only p1 is reportable
     const report = calls.find(c => c.slice(0, 2).join(' ') === 'pane report-agent');
     assert.deepEqual(report?.slice(0, 7), [
       'pane',
       'report-agent',
-      'wL:p1',
+      'wB:p1',
       '--source',
-      'bro-fleet',
+      'bro:fleet',
       '--agent',
-      'fleet',
+      'bro-status',
     ]);
+    assert.ok(report !== undefined && report[7] === '--seq' && seqOf(report) >= NOW * 1e3);
     assert.deepEqual(report?.slice(9), ['--state', 'unknown']);
-    assert.ok(report !== undefined && report[7] === '--seq' && seqOf(report) >= NOW);
-    // the foreign-agent mirror is filtered before the busy probe —
-    // no process-info, no report on p2 at all
-    assert.ok(!calls.some(c => c[1] === 'process-info' && c.includes('wL:p2')));
-    assert.ok(!calls.some(c => c.includes('wL:p2') && c[1] !== 'list'));
+    // never a release, never a report on the unrecorded pane
+    assert.ok(!calls.some(c => c[1] === 'release-agent'));
+    assert.ok(!calls.some(c => c.includes('wB:p2') && c[0] === 'pane' && c[1] !== 'list'));
   });
 
-  test('an unarmed projection releases the pane instead of reporting', () => {
-    const root = plainRoot();
-    const { r, calls } = fleetPass(
-      root,
-      stateDirOf(),
-      ledFixture(root, 'wR', {
-        panes: [pane('wR:p1', 'wR')],
-        processes: { 'wR:p1': busy(7, 99) },
-        renderers: rendererOf(root, 'wR:p1', 'wR'),
-      })
-    );
-    assert.equal(r.leds, 1);
-    const release = calls.find(c => c.slice(0, 2).join(' ') === 'pane release-agent');
-    assert.deepEqual(release?.slice(0, 7), [
-      'pane',
-      'release-agent',
-      'wR:p1',
-      '--source',
-      'bro-fleet',
-      '--agent',
-      'fleet',
-    ]);
-    assert.ok(release !== undefined && seqOf(release) >= NOW);
-  });
-
-  test('an idle-shell pane holds no report — the probe would clear it in ~1s', () => {
+  test('a status pane bound to a foreign agent gets no push', () => {
     const root = armedRoot();
     const { r, calls } = fleetPass(
       root,
       stateDirOf(),
-      ledFixture(root, 'wI', {
-        panes: [pane('wI:p1', 'wI')],
-        // shell_pid IS the only foreground process → idle
-        processes: { 'wI:p1': { shell_pid: 7, foreground_processes: [{ pid: 7 }] } },
-        renderers: rendererOf(root, 'wI:p1', 'wI'),
+      statusFixture(root, 'wX', {
+        panes: [pane('wX:p1', 'wX', 'devin')],
+        statuses: statusesOf(root, 'wX:p1', 'wX'),
       })
     );
     assert.equal(r.leds, 0);
+    assert.equal(r.files, 1);
     assert.ok(calls.some(c => c.slice(0, 2).join(' ') === 'pane list'));
-    assert.ok(!calls.some(c => c[1] === 'report-agent' || c[1] === 'release-agent'));
+    assert.ok(!calls.some(c => c[1] === 'report-agent'));
   });
 
-  test('no ledger panes → the LED path does not even read pane list', () => {
-    const root = plainRoot();
-    const { r, calls } = fleetPass(root, stateDirOf(), ledFixture(root, 'wN'));
+  test('a status pane missing from pane list gets no push', () => {
+    const root = armedRoot();
+    const { r, calls } = fleetPass(
+      root,
+      stateDirOf(),
+      statusFixture(root, 'wM', {
+        panes: [pane('wM:p2', 'wM')],
+        statuses: statusesOf(root, 'wM:p1', 'wM'),
+      })
+    );
+    assert.equal(r.leds, 0);
+    assert.ok(!calls.some(c => c[1] === 'report-agent'));
+  });
+
+  test('no status-pane record → the file still lands, pane list is never read', () => {
+    const root = armedRoot();
+    const { r, calls } = fleetPass(root, stateDirOf(), statusFixture(root, 'wN'));
+    assert.equal(r.files, 1);
     assert.equal(r.leds, 0);
     assert.ok(!calls.some(c => c.slice(0, 2).join(' ').startsWith('pane ')));
   });
 
-  test('a pane still bound to us but never selected is released', () => {
-    const root = armedRoot();
-    const { r, calls } = fleetPass(
-      root,
-      stateDirOf(),
-      ledFixture(root, 'wF', {
-        panes: [
-          // a leftover bro-fleet binding the ledger no longer proposes
-          pane('wF:p9', 'wF', 'fleet'),
-          pane('wF:p1', 'wF'),
-        ],
-        processes: { 'wF:p1': busy(7, 99) },
-        renderers: rendererOf(root, 'wF:p1', 'wF'),
-      })
-    );
-    assert.equal(r.leds, 2);
-    assert.deepEqual(
-      calls.find(c => c.slice(0, 2).join(' ') === 'pane release-agent')?.slice(0, 3),
-      ['pane', 'release-agent', 'wF:p9']
-    );
-    assert.deepEqual(calls.find(c => c[1] === 'report-agent')?.[2], 'wF:p1');
-  });
-
-  test('a stale assertion is released when the selection moves', () => {
+  test('an identical projection is a no-op write — the watch only fires on moves', () => {
     const root = armedRoot();
     const dir = stateDirOf();
-    const f = (render: Record<string, unknown> | undefined, marked: boolean) =>
-      ledFixture(root, 'wS', {
-        panes: [pane('wS:p1', 'wS'), pane('wS:p2', 'wS')],
-        processes: { 'wS:p1': busy(7, 99), 'wS:p2': busy(5, 44) },
-        mirrors: mirrorOf('wS:p1', 'wS', marked),
-        ...(render !== undefined ? { renderers: render } : {}),
-      });
-    const p1 = fleetPass(root, dir, f(undefined, false));
-    assert.deepEqual(p1.calls.find(c => c[1] === 'report-agent')?.[2], 'wS:p1');
-    // next tick: the mirror is marked (dead tail), the selection moves
-    // to the renderer pane → the p1 assertion must be released
-    const p2 = fleetPass(root, dir, f(rendererOf(root, 'wS:p2', 'wS'), true));
-    assert.equal(p2.r.leds, 2);
-    assert.deepEqual(p2.calls.find(c => c[1] === 'release-agent')?.slice(0, 3), [
-      'pane',
-      'release-agent',
-      'wS:p1',
-    ]);
-    assert.deepEqual(p2.calls.find(c => c[1] === 'report-agent')?.[2], 'wS:p2');
+    const f = statusFixture(root, 'wD');
+    assert.equal(fleetPass(root, dir, f).r.files, 1);
+    assert.equal(fleetPass(root, dir, f).r.files, 0);
+  });
+
+  test('a stale state file for an unmanaged tree is pruned', () => {
+    const root = armedRoot();
+    const dir = stateDirOf();
+    const path = fleetStatusPath(root, root);
+    // seed as if a previous managed pass wrote it
+    const first = fleetPass(root, dir, statusFixture(root, 'wP'));
+    assert.equal(first.r.files, 1);
+    assert.ok(readFleetState(path) !== undefined);
+    // the plugin drops the managed record → the file must not linger
+    const gone = fleetPass(root, dir, {
+      scenario: {
+        worktrees: [{ path: root, open_workspace_id: 'wP' }],
+        workspaces: [{ workspace_id: 'wP', label: 'x' }],
+      },
+      state: { workspaces: { [root]: { ws: 'wP', managed: false } } },
+    });
+    assert.equal(gone.r.workspaces, 0);
+    assert.equal(readFleetState(path), undefined);
   });
 
   test('the seq is monotonic per source — a clock regress cannot emit a stale one', () => {
     const root = armedRoot();
     const dir = stateDirOf();
-    const f = ledFixture(root, 'wQ', {
+    const f = statusFixture(root, 'wQ', {
       panes: [pane('wQ:p1', 'wQ')],
-      processes: { 'wQ:p1': busy(7, 99) },
-      renderers: rendererOf(root, 'wQ:p1', 'wQ'),
+      statuses: statusesOf(root, 'wQ:p1', 'wQ'),
     });
     const seqOfReport = (calls: string[][]): number => {
       const c = calls.find(x => x[1] === 'report-agent');
@@ -740,5 +697,63 @@ describe('projectFleet — a live pass over a fake herdr', () => {
     // wall clock jumps backward — the second seq must still outrank the first
     const b = seqOfReport(fleetPass(root, dir, f, NOW - 60_000).calls);
     assert.ok(b > a, `${b} should exceed ${a} after a clock regress`);
+  });
+});
+
+describe('fleet-state — the state file contract', () => {
+  const base = (): string => mkdtempSync(join(tmpdir(), 'fstate-'));
+  const doc = (over: Record<string, unknown> = {}) => ({
+    v: 1 as const,
+    worktree: '/repo/trees/t1',
+    workspace: 'w1',
+    title: 't1',
+    status: 'working·#7',
+    led: { state: 'working' as const },
+    ts: NOW,
+    ...over,
+  });
+
+  test('the path is basename + realpath hash — same tree resolves identically', () => {
+    const b = base();
+    const tree = mkdtempSync(join(tmpdir(), 'fstate-tree-'));
+    const a = fleetStatusPath(b, tree);
+    assert.equal(a, fleetStatusPath(b, tree));
+    // same basename, different realpath → different file
+    assert.notEqual(fleetStatusPath(b, '/no/such/a'), fleetStatusPath(b, '/no/such2/a'));
+    assert.ok(a.endsWith('.json'));
+  });
+
+  test('write → read round-trips; identical content is a no-op', () => {
+    const b = base();
+    const p = fleetStatusPath(b, '/repo/trees/t1');
+    assert.equal(writeFleetState(p, doc()), true);
+    assert.deepEqual(readFleetState(p), doc());
+    assert.equal(writeFleetState(p, doc()), false);
+    // a moved verdict rewrites
+    assert.equal(writeFleetState(p, doc({ led: { state: 'idle' } })), true);
+  });
+
+  test('parse rejects torn or wrong-version documents', () => {
+    assert.equal(parseFleetState('not json'), undefined);
+    assert.equal(parseFleetState(JSON.stringify({ v: 2 })), undefined);
+    assert.equal(parseFleetState(JSON.stringify(doc({ led: { state: 'spinning' } }))), undefined);
+    assert.deepEqual(parseFleetState(JSON.stringify(doc())), doc());
+  });
+
+  test('prune keeps named files and drops the rest', () => {
+    const b = base();
+    const keep = fleetStatusPath(b, '/repo/trees/keep');
+    const drop = fleetStatusPath(b, '/repo/trees/drop');
+    writeFleetState(keep, doc());
+    writeFleetState(drop, doc());
+    pruneFleetStatus(b, new Set([keep]));
+    assert.ok(readFleetState(keep) !== undefined);
+    assert.equal(readFleetState(drop), undefined);
+  });
+
+  test('nextSeq is monotonic through a clock regress', () => {
+    const a = nextSeq(NOW);
+    const b = nextSeq(NOW - 60_000);
+    assert.ok(b > a, `${b} should exceed ${a}`);
   });
 });

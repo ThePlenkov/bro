@@ -6,6 +6,7 @@
  * terminal. bro state is never written — pane mechanics only.
  */
 import {
+  boundPaneIds,
   BRO,
   type HerdrPane,
   herdrOk,
@@ -14,13 +15,13 @@ import {
   paneExists,
   paneIdle,
   paneList,
+  RENDER_LABEL,
   type RendererRec,
   shq,
+  STATUS_LABEL,
 } from './lib.ts';
 
 const log = (s: string): void => console.log(`[reconcile] ${s}`);
-
-export const RENDER_LABEL = 'bro: events';
 
 /** The tail's shell text — a subscribe retry loop, never a bare `die`:
  *  broker-down is routine, so each exit prints its banner and waits.
@@ -128,8 +129,12 @@ export function ensureRenderer(ctx: RenderCtx): void {
   }
 
   const panes = paneList(ctx.ws);
-  const orphan = panes.find(p => p.label === RENDER_LABEL);
-  const paneId = orphan?.pane_id ?? panes.find(p => paneIdle(p.pane_id))?.pane_id;
+  const bound = boundPaneIds(ctx.state);
+  const orphan = panes.find(p => p.label === RENDER_LABEL && !bound.has(p.pane_id));
+  const paneId =
+    orphan?.pane_id ??
+    panes.find(p => !bound.has(p.pane_id) && p.label !== STATUS_LABEL && paneIdle(p.pane_id))
+      ?.pane_id;
   if (paneId === undefined) {
     armViaSplit(ctx, panes);
     return;

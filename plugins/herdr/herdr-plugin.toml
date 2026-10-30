@@ -6,14 +6,16 @@
 # — claims, .work markers, agents.json and .exit records come from the
 # work itself (spec bro-762eh).
 #
-# Ownership (spec bro-u19mq): the plugin opens workspaces and keeps
-# spawn/attach lifecycle — mirrors, renderers, the reaper. Fleet status
-# (`[state·#PR]` labels, the `status` metadata token, and the native
-# pane LED via `pane report-agent` — spec bro-awqde) is written ONLY
-# by the bro daemon's fleet projector, so a dead session can't strand
-# a stale label; the plugin's `managed` record is how the projector
-# knows which workspaces it may relabel, and its mirror/renderer pane
-# records are the LED's report targets.
+# Ownership (specs bro-u19mq / bro-idsat): the plugin opens workspaces
+# and keeps spawn/attach lifecycle — mirrors, renderers, the `bro:
+# status` pane, the reaper. Fleet status (`[state·#PR]` labels, the
+# `status` metadata token, and the per-worktree fleet-state file) is
+# written ONLY by the bro daemon's fleet projector, so a dead session
+# can't strand a stale label; the plugin's `managed` record is how the
+# projector knows which workspaces it may relabel. The pane LED is
+# self-reported by the status pane itself (`pane report-agent`,
+# source `bro:fleet`, agent `bro-status`); the daemon only pushes a
+# backstop report to a pane whose binding its ledger records.
 id = "bro.fleet"
 name = "bro fleet"
 version = "0.1.0"
