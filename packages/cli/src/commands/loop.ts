@@ -125,6 +125,7 @@ import {
   applyFleetRouter,
   fleetProfileOf,
   loadAgentEnv,
+  profileModelFor,
   resolveAgentConnector,
   resolveSpawnProvider,
   type AgentConnectorEnv,
@@ -486,11 +487,12 @@ function lanePicks(
     (cfg.provider !== '' ? cfg.provider : undefined);
   const model =
     sel.model ??
-    flagProfile?.model ??
+    // a profile's model rides only on its own provider's lane
+    profileModelFor(flagProfile, provider) ??
     // the chain head's model pin pairs with ITS provider only — an
     // override provider never inherits chain[0]'s model
     (provider !== undefined && provider === route?.provider ? route.model : undefined) ??
-    cfgProfile?.model ??
+    profileModelFor(cfgProfile, provider) ??
     (cfg.model !== '' ? cfg.model : undefined);
   return {
     provider,
