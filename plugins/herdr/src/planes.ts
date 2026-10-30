@@ -10,6 +10,7 @@ import {
   armedWorkDetails,
   type BroStatus,
   broStatus,
+  gitCommonDir,
   type HerdrWorkspace,
   type HerdrWorktreeList,
   loadState,
@@ -20,6 +21,7 @@ import {
   worktreeGone,
   worktreeList,
 } from './lib.ts';
+import { type Lane, lanesRead } from './lanes.ts';
 
 export interface Planes {
   /** The bro repo being reconciled. */
@@ -48,6 +50,10 @@ export interface Planes {
    *  wakes, not wait for the forced pass. */
   statusPanes: Record<string, boolean>;
   sessionPanes: Record<string, boolean>;
+  /** The daemon projector's per-worktree lane verdict — 'acp' when
+   *  the session-owning agent's provider is a headless acp worker:
+   *  the workspace composes exactly one pane (spec bro-l8wqu). */
+  lanes: Record<string, Lane>;
 }
 
 export function readPlanes(repo: string): Planes {
@@ -78,6 +84,7 @@ export function readPlanes(repo: string): Planes {
     sessionPanes: Object.fromEntries(
       Object.values(state.sessions).map(s => [s.pane_id, paneExists(s.pane_id)])
     ),
+    lanes: lanesRead(gitCommonDir(main) ?? main),
   };
 }
 
@@ -114,5 +121,6 @@ export function diffKey(p: Planes): string {
     rendererPanes: p.rendererPanes,
     statusPanes: p.statusPanes,
     sessionPanes: p.sessionPanes,
+    lanes: p.lanes,
   });
 }

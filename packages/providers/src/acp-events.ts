@@ -134,6 +134,39 @@ const archiveFile = (
     : join(common, 'bro', 'agents', `${agentId}.events.jsonl`);
 };
 
+/** An out-of-band archive row — same file, same shape, written outside
+ *  pumpTurn's update funnel (spec bro-l8wqu). The one consumer today is
+ *  the acp-worker's permission handler: `session/request_permission` is
+ *  a client-bound request, never a session/update notification, so a
+ *  cross-process viewer only sees it if the worker records it here.
+ *  Unbadged processes archive nothing — same posture as the plane. */
+export function agentEventRecord(
+  cwd: string,
+  sessionId: string,
+  by: string,
+  row: Record<string, unknown>
+): void {
+  const badge = process.env.BRO_AGENT_ID?.trim();
+  const agentId =
+    badge !== undefined && badge !== '' && SAFE_AGENT_ID.test(badge) ? badge : undefined;
+  const file = archiveFile(
+    'agents',
+    agentId === undefined ? null : gitCommonDir(cwd),
+    agentId,
+    sessionId
+  );
+  if (file === undefined) return;
+  try {
+    mkdirPrivateSync(dirname(file));
+    appendPrivateFileSync(
+      file,
+      `${JSON.stringify({ ts: new Date().toISOString(), session: sessionId, by, key: agentId, ...row })}\n`
+    );
+  } catch {
+    /* the archive is telemetry — a disk failure never fails a turn */
+  }
+}
+
 /** The plane for one turn — resolved sinks are computed once so the
  *  per-update cost is a Map lookup plus a queued socket write. */
 export function agentTurnPlane(opts: AgentTurnPlaneOpts): AgentTurnPlane {

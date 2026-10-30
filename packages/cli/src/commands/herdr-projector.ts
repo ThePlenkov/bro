@@ -88,6 +88,14 @@ export interface TreeProjection {
   /** The session-owning agent's native log — the session pane's
    *  fallback stream. */
   log?: string;
+  /** The workspace's lane kind (spec bro-l8wqu) — true when the
+   *  session-owning agent's provider resolves `type === 'acp'`: the
+   *  workspace's one human pane is the session view (🤖 label);
+   *  absent/false is the interactive-fallback set (⚙️ label). */
+  acp?: boolean;
+  /** The session-owning agent's `.events.jsonl` archive — the pane's
+   *  live cross-process stream (spec bro-l8wqu). */
+  events?: string;
 }
 
 // --- pure classification -------------------------------------------------------
@@ -236,12 +244,14 @@ export function statusString(p: TreeProjection): string {
   return [workerToken(p), prToken(p)].filter(t => t !== undefined).join('·');
 }
 
-/** The managed workspace's label — `🤖 <worktree-name>`: the LED
- *  carries the state, the name is the identity (operator direction —
- *  `[state·#PR] <title>` formats were messy and unread; the detail
- *  stays on the `status` token and in the status pane). */
-export function labelFor(worktreePath: string): string {
-  return `🤖 ${basename(worktreePath)}`;
+/** The managed workspace's label — `<lane-icon> <worktree-name>`.
+ *  🤖 stays on the acp lane (a headless robot owns the session pane);
+ *  ⚙️ marks every other managed lane — interactive claim/marker/loop
+ *  arms and non-acp workers alike (spec bro-l8wqu, operator decision).
+ *  The LED carries the state, the name is the identity — the detail
+ *  stays on the `status` token and in the status pane. */
+export function labelFor(worktreePath: string, proj: TreeProjection): string {
+  return `${proj.acp === true ? '🤖' : '⚙️'} ${basename(worktreePath)}`;
 }
 
 // --- the native LED (spec bro-awqde → bro-idsat) ---------------------------------
@@ -587,6 +597,12 @@ export interface AgentRow {
   model?: string;
   acpSessionId?: string;
   log?: string;
+  /** True when the entry's provider resolves `type === 'acp'` —
+   *  the lane verdict (spec bro-l8wqu). */
+  acp?: boolean;
+  /** The worker's `.events.jsonl` archive path — present only on an
+   *  acp row carrying an agentId (the turn plane's archive file). */
+  events?: string;
   /** Recency key — the entry's spawnedAt. */
   at: number;
 }
@@ -664,6 +680,8 @@ export function projectTree(i: TreeInput): {
     ...(session?.provider !== undefined ? { provider: session.provider } : {}),
     ...(session?.model !== undefined ? { model: session.model } : {}),
     ...(session?.log !== undefined ? { log: session.log } : {}),
+    ...(session?.acp === true ? { acp: true } : {}),
+    ...(session?.events !== undefined ? { events: session.events } : {}),
   };
   const title =
     (slug !== undefined ? i.beads.find(b => b.id === slug)?.title : undefined) || basename(i.path);
@@ -795,6 +813,7 @@ function agentRows(t: HerdrWorktree, p: Planes, ctx: PassCtx): AgentRow[] {
     .map(([key, e]) => {
       const st = registryEntryState(p.agentsHome, e);
       const live = st === 'running' || st === 'spawned';
+      const acp = e.provider !== undefined && p.providers[e.provider]?.type === 'acp';
       return {
         key,
         live,
@@ -809,6 +828,10 @@ function agentRows(t: HerdrWorktree, p: Planes, ctx: PassCtx): AgentRow[] {
         ...(typeof e.model === 'string' ? { model: e.model } : {}),
         ...(typeof e.acpSessionId === 'string' ? { acpSessionId: e.acpSessionId } : {}),
         ...(typeof e.log === 'string' ? { log: e.log } : {}),
+        ...(acp ? { acp: true } : {}),
+        ...(acp && p.agentsHome !== null && typeof e.agentId === 'string' && e.agentId !== ''
+          ? { events: join(p.agentsHome, `${e.agentId}.events.jsonl`) }
+          : {}),
         at: parseTs(e.spawnedAt),
       };
     });
@@ -937,7 +960,7 @@ function writeDiffs(j: WriteJob): number {
 }
 
 function renameDiff(j: WriteJob): number {
-  const label = labelFor(j.ws.tree.path);
+  const label = labelFor(j.ws.tree.path, j.proj);
   const changed = (j.ws.live.label ?? '') !== label;
   return changed && herdrOk(['workspace', 'rename', j.ws.wsId, label]) ? 1 : 0;
 }
@@ -1054,6 +1077,8 @@ function stateOf(j: PaneJob, path: string, led: PaneLed): FleetPaneState {
     ...(j.proj.provider !== undefined ? { provider: j.proj.provider } : {}),
     ...(j.proj.model !== undefined ? { model: j.proj.model } : {}),
     ...(j.proj.log !== undefined ? { log: j.proj.log } : {}),
+    ...(j.proj.acp === true ? { lane: 'acp' as const } : {}),
+    ...(j.proj.events !== undefined ? { events: j.proj.events } : {}),
     led,
     ts: j.now,
   };

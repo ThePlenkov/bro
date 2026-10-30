@@ -71,6 +71,7 @@ const planes = (over: Partial<Planes> = {}): Planes => ({
   rendererPanes: {},
   statusPanes: {},
   sessionPanes: {},
+  lanes: {},
   ...over,
 });
 
@@ -84,6 +85,14 @@ const armedTree = (dir: string, claim = 'bead-1'): Planes =>
       loop: { stallMin: 30, runs: [] },
     },
   });
+
+/** An armed tree whose projector verdict is the acp lane (spec
+ *  bro-l8wqu) — the session pane is its one human pane. */
+const armedAcpTree = (dir: string, claim = 'bead-1'): Planes => {
+  const p = armedTree(dir, claim);
+  p.lanes = { [dir]: 'acp' };
+  return p;
+};
 
 const H = 3_600_000;
 
@@ -146,32 +155,31 @@ describe('renderer panes', () => {
     const tree = mkdtempSync(join(TMP, 'tree-'));
     converge(armedTree(tree));
     const runs = called('pane', 'run');
-    assert.equal(runs.length, 3);
+    assert.equal(runs.length, 2);
     assert.equal(runs[0]![2], 'p1');
     assert.match(runs[0]![3]!, /bus subscribe/);
     assert.match(runs[0]![3]!, /--topic worker/);
     assert.deepEqual(called('pane', 'rename', 'p1', 'bro: events').length, 1);
     assert.equal(loadState(scope).renderers[tree]?.pane_id, 'p1');
-    // status + session panes converge in the same pass — p1 is busy
-    // now, so each takes a fresh split
+    // the status pane converges in the same pass — p1 is busy now,
+    // so it takes a fresh split; a non-acp lane carries no session
+    // pane (spec bro-l8wqu)
     assert.match(runs[1]![3]!, /herdr status-view/);
     assert.equal(loadState(scope).statuses[tree]?.pane_id, runs[1]![2]);
-    assert.match(runs[2]![3]!, /herdr session-view/);
-    assert.equal(loadState(scope).sessions[tree]?.pane_id, runs[2]![2]);
+    assert.equal(loadState(scope).sessions[tree], undefined);
   });
 
   test('busy panes split instead of stealing the foreground', () => {
     reset({ panes: [{ pane_id: 'p1' }], busyPanes: ['p1'] });
     const tree = mkdtempSync(join(TMP, 'tree-'));
     converge(armedTree(tree));
-    // renderer + status + session splits — all hang off the one busy pane
-    assert.equal(called('pane', 'split', 'p1').length, 3);
+    // renderer + status splits — all hang off the one busy pane
+    assert.equal(called('pane', 'split', 'p1').length, 2);
     const runs = called('pane', 'run');
-    assert.equal(runs.length, 3);
+    assert.equal(runs.length, 2);
     assert.match(runs[0]![2]!, /^pSplit/);
     assert.match(runs[0]![3]!, /bus subscribe/);
     assert.match(runs[1]![3]!, /herdr status-view/);
-    assert.match(runs[2]![3]!, /herdr session-view/);
   });
 
   test('an orphan pane carrying our label is adopted, not duplicated', () => {
@@ -185,9 +193,10 @@ describe('renderer panes', () => {
     s.renderers[tree] = { workspace: 'wOpened', worktree: tree, pane_id: 'pGone' };
     saveState(scope, s);
     converge(armedTree(tree));
-    // the renderer adopts the orphan; status + session each need their
-    // own slot — two splits, off the only live pane
-    assert.equal(called('pane', 'split').length, 2);
+    // the renderer adopts the orphan; the status role needs its own
+    // slot — one split, off the only live pane (non-acp lane: no
+    // session pane)
+    assert.equal(called('pane', 'split').length, 1);
     assert.equal(loadState(scope).renderers[tree]?.pane_id, 'pTail');
   });
 
@@ -235,11 +244,12 @@ describe('renderer panes', () => {
     saveState(scope, s);
     converge(armedTree(tree));
     // the dead mirror is an exit marker, not a renderer — the tail
-    // arms, and the status + session panes converge beside it
-    assert.equal(called('pane', 'run').length, 3);
+    // arms, and the status pane converges beside it (non-acp lane:
+    // no session pane)
+    assert.equal(called('pane', 'run').length, 2);
     assert.equal(loadState(scope).renderers[tree]?.pane_id, 'pTail');
     assert.ok(loadState(scope).statuses[tree]?.pane_id !== undefined);
-    assert.ok(loadState(scope).sessions[tree]?.pane_id !== undefined);
+    assert.equal(loadState(scope).sessions[tree], undefined);
   });
 
   test('a dead tail on a live pane re-arms in place', () => {
@@ -250,7 +260,7 @@ describe('renderer panes', () => {
     saveState(scope, s);
     converge(armedTree(tree));
     const runs = called('pane', 'run');
-    assert.equal(runs.length, 3);
+    assert.equal(runs.length, 2);
     assert.equal(runs[0]![2], 'p1');
     assert.equal(loadState(scope).renderers[tree]?.pane_id, 'p1');
   });
@@ -262,11 +272,11 @@ describe('renderer panes', () => {
     s.renderers[tree] = { workspace: 'wOpened', worktree: tree, pane_id: 'p1' };
     saveState(scope, s);
     converge(armedTree(tree));
-    // the tail is untouched; status + session converge (splits)
+    // the tail is untouched; the status pane converges (a split) —
+    // a non-acp lane carries no session pane
     const runs = called('pane', 'run');
-    assert.equal(runs.length, 2);
+    assert.equal(runs.length, 1);
     assert.match(runs[0]![3]!, /herdr status-view/);
-    assert.match(runs[1]![3]!, /herdr session-view/);
   });
 
   test('a stale managed record cannot pane a user-reopened workspace', () => {
@@ -377,18 +387,22 @@ describe('status panes (spec bro-idsat)', () => {
   });
 });
 
-describe('session panes (spec bro-nwl5g)', () => {
-  test('a spare idle pane becomes the session view', () => {
+describe('session panes — the acp lane’s one pane (spec bro-nwl5g → bro-l8wqu)', () => {
+  test('a spare idle pane becomes the session view — and the ONLY pane', () => {
     reset({ panes: [{ pane_id: 'p1' }, { pane_id: 'p2' }, { pane_id: 'p3' }] });
     const tree = mkdtempSync(join(TMP, 'tree-'));
-    converge(armedTree(tree));
-    // renderer takes p1, status p2, session p3
-    assert.deepEqual(called('pane', 'rename', 'p3', 'bro: session').length, 1);
-    const runs = called('pane', 'run', 'p3');
+    converge(armedAcpTree(tree));
+    // one human-readable pane: session takes the first idle pane,
+    // events + status never arm on the acp lane
+    assert.deepEqual(called('pane', 'rename', 'p1', 'bro: session').length, 1);
+    const runs = called('pane', 'run', 'p1');
     assert.equal(runs.length, 1);
     assert.match(runs[0]![3]!, /herdr session-view/);
     assert.match(runs[0]![3]!, new RegExp(tree.replace(/[\\/.]/g, '\\$&')));
-    assert.equal(loadState(scope).sessions[tree]?.pane_id, 'p3');
+    assert.equal(called('pane', 'run').length, 1);
+    assert.equal(loadState(scope).sessions[tree]?.pane_id, 'p1');
+    assert.equal(loadState(scope).statuses[tree], undefined);
+    assert.equal(loadState(scope).renderers[tree], undefined);
   });
 
   test('a recorded live session pane is left alone', () => {
@@ -397,7 +411,7 @@ describe('session panes (spec bro-nwl5g)', () => {
     const s = loadState(scope);
     s.sessions[tree] = { workspace: 'wOpened', worktree: tree, pane_id: 'pV' };
     saveState(scope, s);
-    converge(armedTree(tree));
+    converge(armedAcpTree(tree));
     assert.ok(called('pane', 'run', 'pV').length === 0);
     assert.equal(loadState(scope).sessions[tree]?.pane_id, 'pV');
   });
@@ -408,32 +422,72 @@ describe('session panes (spec bro-nwl5g)', () => {
     const s = loadState(scope);
     s.sessions[tree] = { workspace: 'wOpened', worktree: tree, pane_id: 'pV' };
     saveState(scope, s);
-    converge(armedTree(tree));
+    converge(armedAcpTree(tree));
     const runs = called('pane', 'run', 'pV');
     assert.equal(runs.length, 1);
     assert.match(runs[0]![3]!, /herdr session-view/);
     assert.equal(loadState(scope).sessions[tree]?.pane_id, 'pV');
   });
 
-  test('a session-labeled orphan is adopted by sessions, never stolen by other roles', () => {
+  test('a session-labeled orphan is adopted — events and status never arm', () => {
     reset({ panes: [{ pane_id: 'pOrph', label: 'bro: session' }], paneIds: ['pOrph'] });
     const tree = mkdtempSync(join(TMP, 'tree-'));
-    converge(armedTree(tree));
-    // sessions adopts the orphan; renderer + status each split —
-    // neither may grab a pane wearing another role's label
+    converge(armedAcpTree(tree));
     const runs = called('pane', 'run', 'pOrph');
     assert.equal(runs.length, 1);
     assert.match(runs[0]![3]!, /herdr session-view/);
     assert.equal(loadState(scope).sessions[tree]?.pane_id, 'pOrph');
-    assert.equal(called('pane', 'split').length, 2);
-    assert.equal(loadState(scope).statuses[tree]?.pane_id !== 'pOrph', true);
-    assert.equal(loadState(scope).renderers[tree]?.pane_id !== 'pOrph', true);
+    // the acp lane is session-only — no split for the other roles
+    assert.equal(called('pane', 'split').length, 0);
+    assert.equal(loadState(scope).statuses[tree], undefined);
+    assert.equal(loadState(scope).renderers[tree], undefined);
+  });
+
+  test('a lane flip to acp retires the status + events panes', () => {
+    reset({
+      panes: [{ pane_id: 'pS' }, { pane_id: 'pE' }, { pane_id: 'pRoot' }],
+      paneIds: ['pS', 'pE', 'pRoot'],
+    });
+    const tree = mkdtempSync(join(TMP, 'tree-'));
+    const s = loadState(scope);
+    s.statuses[tree] = { workspace: 'wOpened', worktree: tree, pane_id: 'pS' };
+    s.renderers[tree] = { workspace: 'wOpened', worktree: tree, pane_id: 'pE' };
+    saveState(scope, s);
+    converge(armedAcpTree(tree));
+    assert.equal(called('pane', 'close', 'pS').length, 1);
+    assert.equal(called('pane', 'close', 'pE').length, 1);
+    const st = loadState(scope);
+    assert.equal(st.statuses[tree], undefined);
+    assert.equal(st.renderers[tree], undefined);
+    // and the session pane armed in their place — the workspace's
+    // surviving root pane is the free slot
+    assert.equal(called('pane', 'run').length, 1);
+    const run = called('pane', 'run')[0]!;
+    assert.equal(run[2], 'pRoot');
+    assert.match(run[3]!, /herdr session-view/);
+  });
+
+  test('a lane flip OFF acp retires the session pane and arms the fallback set', () => {
+    reset({ panes: [{ pane_id: 'pV' }, { pane_id: 'pX' }], paneIds: ['pV', 'pX'] });
+    const tree = mkdtempSync(join(TMP, 'tree-'));
+    const s = loadState(scope);
+    s.sessions[tree] = { workspace: 'wOpened', worktree: tree, pane_id: 'pV' };
+    saveState(scope, s);
+    converge(armedTree(tree));
+    assert.equal(called('pane', 'close', 'pV').length, 1);
+    const st = loadState(scope);
+    assert.equal(st.sessions[tree], undefined);
+    // events + status re-arm on the surviving pane
+    const runs = called('pane', 'run');
+    assert.equal(runs.length, 2);
+    assert.match(runs[0]![3]!, /bus subscribe/);
+    assert.match(runs[1]![3]!, /herdr status-view/);
   });
 
   test('a stale session record on a closed workspace is dropped', () => {
     reset({ panes: [{ pane_id: 'pLive' }] });
     const tree = mkdtempSync(join(TMP, 'tree-'));
-    const p = armedTree(tree);
+    const p = armedAcpTree(tree);
     p.worktrees.worktrees = [{ path: tree, open_workspace_id: 'wLive' }];
     p.workspaces = [{ workspace_id: 'wLive', label: 'live' }];
     const s = loadState(scope);
@@ -480,6 +534,16 @@ describe('workspace labels — lifecycle only (spec bro-u19mq)', () => {
       { beadId: 'bead-1', slug: 'bead-1', state: 'running', worktree: tree, silentMs: 16.5 * H },
     ];
     converge(p);
+    const opens = called('worktree', 'open');
+    assert.equal(opens.length, 1);
+    const label = opens[0]![opens[0]!.indexOf('--label') + 1]!;
+    assert.equal(label, `⚙️ ${basename(tree)}`);
+  });
+
+  test('an acp-lane workspace opens with the robot marker (spec bro-l8wqu)', () => {
+    reset();
+    const tree = mkdtempSync(join(TMP, 'tree-'));
+    converge(armedAcpTree(tree));
     const opens = called('worktree', 'open');
     assert.equal(opens.length, 1);
     const label = opens[0]![opens[0]!.indexOf('--label') + 1]!;

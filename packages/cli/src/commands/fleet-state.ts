@@ -63,6 +63,18 @@ export interface FleetPaneState {
   /** The session-owning agent's native log — the pane's fallback
    *  stream when no ACP attach resolves. */
   log?: string;
+  /** The workspace's lane kind (spec bro-l8wqu) — 'acp' when the
+   *  session-owning agent's provider resolves `type === 'acp'`: the
+   *  workspace composes exactly one pane (the session view) and its
+   *  label keeps the 🤖 prefix; absent means the interactive/
+   *  fallback set (⚙️ prefix, mirror + status + events). */
+  lane?: 'acp';
+  /** The session-owning agent's `.events.jsonl` archive —
+   *  `<common>/bro/agents/<agentId>.events.jsonl` — the pane's live
+   *  cross-process stream (spec bro-l8wqu): raw session/update rows
+   *  bookended by turn start/stop, written by the worker's pumpTurn.
+   *  Present only on the acp lane when the owner carries a badge. */
+  events?: string;
   led: PaneLed;
   /** Wall-clock ms the projector classified at — staleness display. */
   ts: number;
@@ -147,6 +159,8 @@ const OPTIONAL_STR: readonly (keyof FleetPaneState)[] = [
   'provider',
   'model',
   'log',
+  'lane',
+  'events',
 ];
 
 /** Parse + shape-check one document — anything else is a miss, never

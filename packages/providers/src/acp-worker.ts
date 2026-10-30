@@ -24,15 +24,10 @@
  * prompt text, and every runtime value ride argv slots / protocol
  * params, never string-concatenation.
  */
-import { spawn, type ChildProcess } from 'node:child_process'
-import { readFileSync } from 'node:fs'
-import { Readable, Writable } from 'node:stream'
-import {
-  client,
-  ndJsonStream,
-  PROTOCOL_VERSION,
-  RequestError,
-} from '@agentclientprotocol/sdk'
+import { spawn, type ChildProcess } from 'node:child_process';
+import { readFileSync } from 'node:fs';
+import { Readable, Writable } from 'node:stream';
+import { client, ndJsonStream, PROTOCOL_VERSION, RequestError } from '@agentclientprotocol/sdk';
 import type {
   AgentApp,
   ClientContext,
@@ -41,70 +36,70 @@ import type {
   RequestPermissionResponse,
   SessionUpdate,
   StopReason,
-} from '@agentclientprotocol/sdk'
-import { pumpTurn } from './acp.ts'
+} from '@agentclientprotocol/sdk';
+import { pumpTurn } from './acp.ts';
+import { agentEventRecord } from './acp-events.ts';
 
 /** What the resolver computed for one spawn — self-contained, so the
  *  worker never re-reads bro.config.json mid-run. */
 export interface AcpWorkerSpec {
   /** The rendered agent command (`entry.command` + `--profile`) —
    *  trusted config, exec'd via `sh -c` as the stdio peer. */
-  command: string
+  command: string;
   /** The effective model — pinned via `session/set_config_option`
    *  looked up by category. Absent = the agent's own currentValue
    *  stands and provenance records it when reported. */
-  model?: string
+  model?: string;
   /** Permission policy: answer `session/request_permission` with the
    *  allow option. Default false — deny, and log the denial. */
-  autoApprove?: boolean
+  autoApprove?: boolean;
   /** The prepared prompt artifact — its text rides session/prompt. */
-  promptFile: string
+  promptFile: string;
   /** The session cwd — spec.repoRoot (the step's worktree). */
-  cwd: string
+  cwd: string;
   /** Child env — default process.env, which already carries the
    *  caller's spec.env plus the connector's identity pins (the backend
    *  injected them on the driver, and the peer inherits them). */
-  env?: Record<string, string | undefined>
+  env?: Record<string, string | undefined>;
   /** The configured provider name — error text and the registry patch
    *  read it (the BRO_AGENT_PROVIDER pin, when spawned managed). */
-  provider?: string
+  provider?: string;
   /** Registry provenance callback — the driver reports the real
    *  sessionId after session/new and the agent-REPORTED model after
    *  set_config_option: provenance says what ran, not what was asked. */
-  record?: (patch: { acpSessionId?: string; model?: string }) => void
+  record?: (patch: { acpSessionId?: string; model?: string }) => void;
   /** Session-cleanup template run after the session ends —
    *  `{sessionId}` substitutes the acp session id. ACP sessions land
    *  in the agent CLI's history like any other; a worker session is
    *  not the operator's personal history, so the provider may carry
    *  e.g. `devin rm {sessionId} --force`. Advisory — a failed cleanup
    *  logs, never changes the exit code. */
-  sessionRm?: string
+  sessionRm?: string;
   /** The in-process test seam — a fakeAcpAgent() app from
    *  `@broject/providers/testkit`, skipping the process spawn
    *  entirely. */
-  peer?: AgentApp
+  peer?: AgentApp;
   /** Log sink — one rendered line per update plus driver's own lines.
    *  Default stdout, which the backend redirects into the .log. */
-  log?: (line: string) => void
+  log?: (line: string) => void;
   /** The agent's stderr — mirrored raw so provider walls (rate-limit/
    *  quota text) reach the .log for classifyExitCause. Default stderr
    *  (same fd as the log in every backend). */
-  err?: (text: string) => void
+  err?: (text: string) => void;
   /** Wire SIGTERM/SIGINT → session/cancel + grace-kill. Default true;
    *  tests running in-process pass false. */
-  signals?: boolean
+  signals?: boolean;
   /** session/cancel → SIGKILL grace. Default 1500ms. */
-  cancelGraceMs?: number
+  cancelGraceMs?: number;
 }
 
-const errMsg = (err: unknown): string =>
-  err instanceof Error ? err.message : String(err)
+const errMsg = (err: unknown): string => (err instanceof Error ? err.message : String(err));
 
 /** Startup/config failures — bad handshake, interactive auth, a model
  *  the agent can't apply. Same honest-error class as acp.ts's
  *  AcpConfigError: name the refusal, never run unpinned. */
 export class AcpWorkerError extends Error {
-  override name = 'AcpWorkerError'
+  override name = 'AcpWorkerError';
 }
 
 /** One rendered log line per session/update (spec step 6 — the .log
@@ -116,36 +111,34 @@ export function renderAcpUpdate(u: SessionUpdate): string {
   switch (u.sessionUpdate) {
     case 'agent_message_chunk':
     case 'agent_thought_chunk': {
-      const c = (u as { content?: { type?: string; text?: string } }).content
-      return c?.type === 'text'
-        ? c.text ?? ''
-        : `[${u.sessionUpdate}: ${c?.type ?? '?'}]`
+      const c = (u as { content?: { type?: string; text?: string } }).content;
+      return c?.type === 'text' ? (c.text ?? '') : `[${u.sessionUpdate}: ${c?.type ?? '?'}]`;
     }
     case 'tool_call': {
-      const t = u as { title?: string; status?: string }
-      return `tool_call ${t.title ?? '?'} (${t.status ?? '?'})`
+      const t = u as { title?: string; status?: string };
+      return `tool_call ${t.title ?? '?'} (${t.status ?? '?'})`;
     }
     case 'tool_call_update': {
-      const t = u as { toolCallId?: string; status?: string | null }
-      return `tool_call_update ${t.toolCallId ?? '?'} (${t.status ?? '?'})`
+      const t = u as { toolCallId?: string; status?: string | null };
+      return `tool_call_update ${t.toolCallId ?? '?'} (${t.status ?? '?'})`;
     }
     case 'config_option_update': {
-      const t = u as { configOptions?: { id: string; currentValue?: unknown }[] }
+      const t = u as { configOptions?: { id: string; currentValue?: unknown }[] };
       const names = (t.configOptions ?? [])
-        .map((o) => `${o.id}=${String(o.currentValue ?? '?')}`)
-        .join(' ')
-      return `config_option_update ${names}`
+        .map(o => `${o.id}=${String(o.currentValue ?? '?')}`)
+        .join(' ');
+      return `config_option_update ${names}`;
     }
     case 'usage_update': {
-      const t = u as { used?: unknown; size?: unknown }
-      return `usage_update used=${String(t.used ?? '?')} size=${String(t.size ?? '?')}`
+      const t = u as { used?: unknown; size?: unknown };
+      return `usage_update used=${String(t.used ?? '?')} size=${String(t.size ?? '?')}`;
     }
     default: {
-      const { sessionUpdate: kind, ...rest } = u as Record<string, unknown>
-      const detail = JSON.stringify(rest)
+      const { sessionUpdate: kind, ...rest } = u as Record<string, unknown>;
+      const detail = JSON.stringify(rest);
       return detail === '{}' || detail === undefined
         ? String(kind)
-        : `${String(kind)} ${detail.length > 300 ? `${detail.slice(0, 300)}…` : detail}`
+        : `${String(kind)} ${detail.length > 300 ? `${detail.slice(0, 300)}…` : detail}`;
     }
   }
 }
@@ -158,34 +151,41 @@ export function renderAcpUpdate(u: SessionUpdate): string {
 function permissionHandler(
   autoApprove: boolean,
   provider: string | undefined,
-  log: (line: string) => void
+  log: (line: string) => void,
+  record?: (row: { sessionId: string; title: string; verdict: string }) => void
 ): ClientRequestHandler<RequestPermissionRequest, RequestPermissionResponse> {
-  return (ctx) => {
-    const opts = ctx.params.options ?? []
+  return ctx => {
+    const opts = ctx.params.options ?? [];
     const what =
-      ctx.params.toolCall?.title ?? ctx.params.toolCall?.toolCallId ?? 'permission request'
+      ctx.params.toolCall?.title ?? ctx.params.toolCall?.toolCallId ?? 'permission request';
+    const note = (verdict: string): void => {
+      record?.({ sessionId: ctx.params.sessionId, title: String(what), verdict });
+    };
     if (autoApprove) {
-      const allow = opts.find((o) => o.kind === 'allow_once' || o.kind === 'allow_always')
+      const allow = opts.find(o => o.kind === 'allow_once' || o.kind === 'allow_always');
       if (allow !== undefined) {
-        log(`permission ${what} — approved (autoApprove)`)
-        return { outcome: { outcome: 'selected', optionId: allow.optionId } }
+        log(`permission ${what} — approved (autoApprove)`);
+        note('approved');
+        return { outcome: { outcome: 'selected', optionId: allow.optionId } };
       }
-      log(`permission ${what} — no allow option offered; denying`)
+      log(`permission ${what} — no allow option offered; denying`);
     } else {
       log(
         `permission ${what} — denied (headless default; opt in via providers.${
           provider ?? '<name>'
         }.autoApprove, --auto-approve, or the agent CLI's own flag)`
-      )
+      );
     }
-    const reject = opts.find((o) => o.kind === 'reject_once' || o.kind === 'reject_always')
+    const reject = opts.find(o => o.kind === 'reject_once' || o.kind === 'reject_always');
+    if (reject === undefined) note('cancelled');
+    else note('denied');
     return {
       outcome:
         reject === undefined
           ? { outcome: 'cancelled' }
           : { outcome: 'selected', optionId: reject.optionId },
-    }
-  }
+    };
+  };
 }
 
 /** Agent→client service methods v1 does not advertise (fs, terminal,
@@ -202,43 +202,51 @@ const UNADVERTISED_METHODS = [
   'terminal/kill',
   'elicitation/create',
   'mcp/message',
-] as const
+] as const;
 
 /** Run one ACP worker to turn end. Returns the driver's exit code —
  *  0 on `end_turn`, non-zero on everything else. Never throws: the
  *  caller maps the code to the `.exit` file, and every failure mode
  *  logs its own line first (the log IS the diagnosis surface). */
 export async function runAcpWorker(spec: AcpWorkerSpec): Promise<number> {
-  const log = spec.log ?? ((line: string) => console.log(line))
-  const errOut = spec.err ?? ((text: string) => void process.stderr.write(text))
-  const by = spec.provider === undefined ? 'acp' : `acp provider '${spec.provider}'`
+  const log = spec.log ?? ((line: string) => console.log(line));
+  const errOut = spec.err ?? ((text: string) => void process.stderr.write(text));
+  const by = spec.provider === undefined ? 'acp' : `acp provider '${spec.provider}'`;
 
   const app = client({ name: 'bro' }).onRequest(
     'session/request_permission',
-    permissionHandler(spec.autoApprove === true, spec.provider, log)
-  )
+    permissionHandler(spec.autoApprove === true, spec.provider, log, r =>
+      // the ask never reaches a session/update consumer — the archive
+      // row is the pane's blocked signal (spec bro-l8wqu)
+      agentEventRecord(spec.cwd, r.sessionId, by, {
+        kind: 'permission',
+        title: r.title,
+        verdict: r.verdict,
+      })
+    )
+  );
   for (const m of UNADVERTISED_METHODS) {
     app.onRequest<unknown, never>(
       m,
-      (p) => p,
+      p => p,
       (): never => {
-        log(`unadvertised agent→client call ${m} — method-not-found`)
-        throw RequestError.methodNotFound(m)
+        log(`unadvertised agent→client call ${m} — method-not-found`);
+        throw RequestError.methodNotFound(m);
       }
-    )
+    );
   }
 
-  let child: ChildProcess | undefined
+  let child: ChildProcess | undefined;
   // signal scope: filled by the op once the session exists — a signal
   // before session/new has nothing to cancel and just kills the child
-  let cx: ClientContext | undefined
-  let sessionId: string | undefined
-  let killTimer: ReturnType<typeof setTimeout> | undefined
-  const grace = spec.cancelGraceMs ?? 1500
+  let cx: ClientContext | undefined;
+  let sessionId: string | undefined;
+  let killTimer: ReturnType<typeof setTimeout> | undefined;
+  const grace = spec.cancelGraceMs ?? 1500;
   const onSignal = (sig: 'SIGTERM' | 'SIGINT'): void => {
-    log(`${sig} — sending session/cancel (${grace}ms grace)`)
+    log(`${sig} — sending session/cancel (${grace}ms grace)`);
     if (cx !== undefined && sessionId !== undefined) {
-      void cx.notify('session/cancel', { sessionId }).catch(() => {})
+      void cx.notify('session/cancel', { sessionId }).catch(() => {});
     }
     if (killTimer === undefined) {
       killTimer = setTimeout(() => {
@@ -247,22 +255,22 @@ export async function runAcpWorker(spec: AcpWorkerSpec): Promise<number> {
         // grace elapses; nothing spawned (the peer seam) means the
         // signal's only remaining stop is the driver itself
         if (child !== undefined) {
-          child.kill('SIGKILL')
+          child.kill('SIGKILL');
         } else {
-          process.exit(1)
+          process.exit(1);
         }
-      }, grace)
-      killTimer.unref()
+      }, grace);
+      killTimer.unref();
     }
-  }
-  const wireSignals = spec.signals !== false
+  };
+  const wireSignals = spec.signals !== false;
   if (wireSignals) {
-    process.on('SIGTERM', onSignal)
-    process.on('SIGINT', onSignal)
+    process.on('SIGTERM', onSignal);
+    process.on('SIGINT', onSignal);
   }
 
   const op = async (ctx: ClientContext): Promise<number> => {
-    cx = ctx
+    cx = ctx;
     const init = await ctx.request('initialize', {
       protocolVersion: PROTOCOL_VERSION,
       clientInfo: { name: 'bro', version: '1' },
@@ -270,42 +278,39 @@ export async function runAcpWorker(spec: AcpWorkerSpec): Promise<number> {
         fs: { readTextFile: false, writeTextFile: false },
         terminal: false,
       },
-    })
+    });
     if (init.protocolVersion !== PROTOCOL_VERSION) {
       throw new AcpWorkerError(
         `${by}: agent negotiated protocol ${init.protocolVersion} — the driver speaks v${PROTOCOL_VERSION} only`
-      )
+      );
     }
     // authMethods is an OFFER, not a requirement (same policy as the
     // acp judge call): an agent with stored credentials still advertises
     // its login methods — only an actual refusal at session/new names
     // auth as required
-    const authMethods = init.authMethods ?? []
+    const authMethods = init.authMethods ?? [];
     const session = await ctx
       .buildSession({ cwd: spec.cwd, mcpServers: [] })
       .start()
       .catch((err: unknown) => {
-        const hint =
-          authMethods.length > 0 ? ` (${authMethods.map((m) => m.id).join(', ')})` : ''
-        throw new AcpWorkerError(
-          `${by}: agent refused session${hint} — ${errMsg(err)}`
-        )
-      })
-    sessionId = session.sessionId
-    spec.record?.({ acpSessionId: session.sessionId })
-    log(`session ${session.sessionId} (cwd ${spec.cwd})`)
+        const hint = authMethods.length > 0 ? ` (${authMethods.map(m => m.id).join(', ')})` : '';
+        throw new AcpWorkerError(`${by}: agent refused session${hint} — ${errMsg(err)}`);
+      });
+    sessionId = session.sessionId;
+    spec.record?.({ acpSessionId: session.sessionId });
+    log(`session ${session.sessionId} (cwd ${spec.cwd})`);
     try {
       // model — by category, never a hardcoded configId; a requested
       // model the agent can't apply fails the spawn, and provenance
       // records the REPORTED value either way
       const modelOpt = (session.newSessionResponse.configOptions ?? []).find(
-        (o) => o.category === 'model'
-      )
+        o => o.category === 'model'
+      );
       if (spec.model !== undefined) {
         if (modelOpt === undefined) {
           throw new AcpWorkerError(
             `${by}: model '${spec.model}' requested but the acp agent advertises no model config option — refusing to run an unpinned model`
-          )
+          );
         }
         const res = await ctx
           .request('session/set_config_option', {
@@ -314,22 +319,20 @@ export async function runAcpWorker(spec: AcpWorkerSpec): Promise<number> {
             value: spec.model,
           })
           .catch((err: unknown) => {
-            throw new AcpWorkerError(
-              `${by}: agent refused model '${spec.model}' — ${errMsg(err)}`
-            )
-          })
-        const served = res.configOptions?.find((o) => o.id === modelOpt.id)?.currentValue
-        const reported = typeof served === 'string' ? served : spec.model
-        spec.record?.({ model: reported })
-        log(`model ${reported}`)
+            throw new AcpWorkerError(`${by}: agent refused model '${spec.model}' — ${errMsg(err)}`);
+          });
+        const served = res.configOptions?.find(o => o.id === modelOpt.id)?.currentValue;
+        const reported = typeof served === 'string' ? served : spec.model;
+        spec.record?.({ model: reported });
+        log(`model ${reported}`);
       } else {
-        const cur = modelOpt?.currentValue
+        const cur = modelOpt?.currentValue;
         if (typeof cur === 'string') {
-          spec.record?.({ model: cur })
-          log(`model ${cur} (agent default)`)
+          spec.record?.({ model: cur });
+          log(`model ${cur} (agent default)`);
         }
       }
-      const promptText = readFileSync(spec.promptFile, 'utf8')
+      const promptText = readFileSync(spec.promptFile, 'utf8');
       // the shared pump IS the turn (bro-0ppt0): draining to `stop`
       // keeps every notification on the .log in arrival order, and
       // the same updates publish onto the 'agent' bus topic + the
@@ -340,51 +343,50 @@ export async function runAcpWorker(spec: AcpWorkerSpec): Promise<number> {
       // same-kind run and flushes it as one line before the next update
       // kind renders, so the .log carries a sentence, not a line per
       // delta (bro-dojl5's buffering, kept on the sink side of pumpTurn)
-      let buf: { kind: string; text: string } | undefined
+      let buf: { kind: string; text: string } | undefined;
       const flush = (): void => {
         if (buf !== undefined && buf.text !== '') {
-          log(buf.text)
+          log(buf.text);
         }
-        buf = undefined
-      }
+        buf = undefined;
+      };
       const onUpdate = (u: SessionUpdate): void => {
-        const kind = u.sessionUpdate
-        const isChunk =
-          kind === 'agent_message_chunk' || kind === 'agent_thought_chunk'
+        const kind = u.sessionUpdate;
+        const isChunk = kind === 'agent_message_chunk' || kind === 'agent_thought_chunk';
         if (isChunk && buf?.kind === kind) {
-          buf.text += renderAcpUpdate(u)
-          return
+          buf.text += renderAcpUpdate(u);
+          return;
         }
-        flush()
+        flush();
         if (isChunk) {
-          buf = { kind, text: renderAcpUpdate(u) }
+          buf = { kind, text: renderAcpUpdate(u) };
         } else {
-          log(renderAcpUpdate(u))
+          log(renderAcpUpdate(u));
         }
-      }
+      };
       const r = await pumpTurn(
         session,
         promptText,
         onUpdate,
         (err: unknown): never => {
-          throw err
+          throw err;
         },
         () => ({}),
         undefined,
         by,
         undefined,
         spec.cwd
-      ).finally(flush)
-      log(`turn stopped — ${r.stopReason}`)
-      return r.stopReason === 'end_turn' ? 0 : 1
+      ).finally(flush);
+      log(`turn stopped — ${r.stopReason}`);
+      return r.stopReason === 'end_turn' ? 0 : 1;
     } finally {
-      session.dispose()
+      session.dispose();
     }
-  }
+  };
 
   try {
     if (spec.peer !== undefined) {
-      return await app.connectWith(spec.peer, op)
+      return await app.connectWith(spec.peer, op);
     }
     const proc = spawn(
       'sh', // NOSONAR — PATH lookup is the contract (same as git/bd everywhere)
@@ -399,17 +401,17 @@ export async function runAcpWorker(spec: AcpWorkerSpec): Promise<number> {
         // proc.stdin null and the driver dead before initialize
         stdio: ['pipe', 'pipe', 'pipe'],
       }
-    )
-    child = proc
+    );
+    child = proc;
     // provider walls print on the agent's stderr — mirror them so the
     // .log tail still classifies rate_limit/quota, not 'crash'
-    let errBuf = ''
+    let errBuf = '';
     proc.stderr?.on('data', (d: Buffer) => {
-      const text = d.toString()
-      errBuf = (errBuf + text).slice(-4096)
-      errOut(text)
-    })
-    const stderr = (): string => errBuf.trim()
+      const text = d.toString();
+      errBuf = (errBuf + text).slice(-4096);
+      errOut(text);
+    });
+    const stderr = (): string => errBuf.trim();
     try {
       return await app.connectWith(
         ndJsonStream(
@@ -417,29 +419,29 @@ export async function runAcpWorker(spec: AcpWorkerSpec): Promise<number> {
           Readable.toWeb(proc.stdout!) as ReadableStream<Uint8Array>
         ),
         op
-      )
+      );
     } catch (err) {
-      const tail = stderr()
+      const tail = stderr();
       throw new AcpWorkerError(
         `${by} unavailable — ${errMsg(err)}${tail === '' ? '' : ` (${tail})`}`
-      )
+      );
     }
   } catch (err) {
-    log(`acp-worker failed — ${errMsg(err)}`)
-    return 1
+    log(`acp-worker failed — ${errMsg(err)}`);
+    return 1;
   } finally {
     if (wireSignals) {
-      process.removeListener('SIGTERM', onSignal)
-      process.removeListener('SIGINT', onSignal)
+      process.removeListener('SIGTERM', onSignal);
+      process.removeListener('SIGINT', onSignal);
     }
     if (killTimer !== undefined) {
-      clearTimeout(killTimer)
+      clearTimeout(killTimer);
     }
-    await retireAgentChild(child)
+    await retireAgentChild(child);
     try {
-      armSessionCleanup(spec, sessionId, log)
+      armSessionCleanup(spec, sessionId, log);
     } catch (err) {
-      log(`session cleanup arming failed — ${err instanceof Error ? err.message : String(err)}`)
+      log(`session cleanup arming failed — ${err instanceof Error ? err.message : String(err)}`);
     }
   }
 }
@@ -448,20 +450,20 @@ export async function runAcpWorker(spec: AcpWorkerSpec): Promise<number> {
  *  leaves its session 'open' in the CLI's session store, so a TERM
  *  grace window precedes the kill. */
 async function retireAgentChild(child: ChildProcess | undefined): Promise<void> {
-  child?.kill('SIGTERM')
+  child?.kill('SIGTERM');
   if (child === undefined) {
-    return
+    return;
   }
-  const exited = await new Promise<boolean>((res) => {
-    child.once('exit', () => res(true))
-    setTimeout(() => res(false), 3000)
-  })
+  const exited = await new Promise<boolean>(res => {
+    child.once('exit', () => res(true));
+    setTimeout(() => res(false), 3000);
+  });
   if (!exited) {
-    child.kill('SIGKILL')
-    await new Promise<void>((res) => {
-      child.once('exit', res)
-      setTimeout(res, 2000)
-    })
+    child.kill('SIGKILL');
+    await new Promise<void>(res => {
+      child.once('exit', res);
+      setTimeout(res, 2000);
+    });
   }
 }
 
@@ -479,26 +481,21 @@ function armSessionCleanup(
   log: (line: string) => void
 ): void {
   if (spec.sessionRm === undefined || sessionId === undefined) {
-    return
+    return;
   }
   if (!/^[\w.-]+$/.test(sessionId)) {
-    log(`session cleanup skipped — session id is not a safe slug`)
-    return
+    log(`session cleanup skipped — session id is not a safe slug`);
+    return;
   }
-  const rm = spec.sessionRm.replaceAll('{sessionId}', sessionId)
+  const rm = spec.sessionRm.replaceAll('{sessionId}', sessionId);
   // absolute interpreter path — S4036: a PATH-resolved 'sh' can be
   // shadowed by a writable dir on the worker's PATH.
   spawn(
     '/bin/sh',
-    [
-      '-c',
-      'for i in 1 2 3 4 5 6 7 8; do sleep 5; eval "$1" && exit 0; done',
-      'bro-session-rm',
-      rm,
-    ],
-    { detached: true, stdio: 'ignore' },
-  ).unref()
-  log(`session ${sessionId} cleanup armed — deferred until worker exit`)
+    ['-c', 'for i in 1 2 3 4 5 6 7 8; do sleep 5; eval "$1" && exit 0; done', 'bro-session-rm', rm],
+    { detached: true, stdio: 'ignore' }
+  ).unref();
+  log(`session ${sessionId} cleanup armed — deferred until worker exit`);
 }
 
-export type { StopReason }
+export type { StopReason };

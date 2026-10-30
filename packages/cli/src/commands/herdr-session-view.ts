@@ -1,15 +1,20 @@
 /**
  * `bro herdr session-view <worktree>` — the `bro: session` pane's
- * foreground process (spec bro-nwl5g). Renders the bro-managed agent's
- * conversation for one worktree: when the fleet-state file names a
- * provider whose `providers.<name>` entry is `type === 'acp'` AND
- * carries a command, the pane spawns that command, attaches the
- * recorded `acpSessionId` via `session/load`, and renders the replayed
- * — then live — `session/update` stream through AcpRenderer. Anything
- * else (non-acp provider, missing session/command, absent loadSession
- * capability, attach or transport failure) falls back to tailing the
- * session-owning agent's native log — the compact event stream the
- * acp-worker writes.
+ * foreground process (spec bro-nwl5g → bro-l8wqu). Renders the
+ * bro-managed agent's conversation for one worktree. Feed order:
+ *
+ *  1. events — the doc names an `.events.jsonl` archive (the acp
+ *     lane): tail it. Every raw `session/update` the worker's
+ *     pumpTurn recorded renders through AcpRenderer — byte-identical
+ *     fidelity, chunks included — bookended by `kind:'turn'` rows and
+ *     `kind:'permission'` asks. Cross-process live by construction:
+ *     `session/load` cannot stream a session another client owns
+ *     (spec bro-l8wqu step 0), so the archive IS the wire.
+ *  2. acp attach — a recorded `acpSessionId` but no archive (a
+ *     session predating the events plane): `session/load` replay,
+ *     readonly; live updates do not follow — the pane says so.
+ *  3. log — the session-owning agent's native log tail.
+ *  4. none — nothing recorded.
  *
  * Readonly by construction: the attach advertises no served client
  * capability, permission asks are auto-denied, and the pane never
@@ -118,6 +123,8 @@ export interface SessionTarget {
   /** The worker verdict — log-mode LED + label input. */
   workerLed: PaneLed;
   session?: SessionSpec;
+  /** The worker's `.events.jsonl` archive — the acp lane's live feed. */
+  events?: string;
   /** The fallback stream — the session-owning agent's native log. */
   log?: string;
 }
@@ -126,6 +133,7 @@ export interface SessionTarget {
  *  never re-spawn (a churned state file can't fork acp children). */
 export function targetKey(t: SessionTarget | undefined): string {
   if (t === undefined) return 'waiting';
+  if (t.events !== undefined) return `events|${t.events}`;
   if (t.session !== undefined) return `acp|${t.session.command}|${t.session.id}`;
   if (t.log !== undefined) return `log|${t.log}`;
   return 'none';
@@ -164,6 +172,7 @@ export function resolveTarget(
     status: s.status,
     workerLed: s.led,
     ...(session !== undefined ? { session } : {}),
+    ...(s.events !== undefined ? { events: s.events } : {}),
     ...(s.log !== undefined ? { log: s.log } : {}),
   };
 }
@@ -180,18 +189,37 @@ export interface ViewVerdict {
 /** The attach's current posture — what the refresh reports and what a
  *  resolution move re-arms. */
 interface AttachState {
-  /** 'acp' once a session target resolved; 'log' when the fallback
-   *  runs (from the start or after a failed attach); 'none' when the
-   *  tree carries nothing to show. */
-  mode: 'acp' | 'log' | 'none';
+  /** 'events' once an archive target resolved (the acp lane's live
+   *  feed); 'acp' once a session target resolved; 'log' when the
+   *  fallback runs; 'none' when the tree carries nothing to show. */
+  mode: 'events' | 'acp' | 'log' | 'none';
   /** acp leg: 'connecting' through the handshake, 'live' after
    *  session/load resolved, 'ended' once the transport died or the
    *  attach fell back to the log. */
   acp: 'none' | 'connecting' | 'live' | 'ended';
+  /** events leg: the archive's own verdict — last row wins: a turn
+   *  start or update is working, a stop is idle, a denied/cancelled
+   *  permission is blocked; absent until the first row lands. */
+  rowLed?: PaneLed;
+  rowMode?: string;
 }
 
 export function viewVerdict(t: SessionTarget | undefined, a: AttachState): ViewVerdict {
   if (t === undefined) return { led: { state: 'unknown' }, mode: 'waiting for projector' };
+  if (a.mode === 'events') {
+    // the worker verdict is the floor — a blocked worker wins over a
+    // stale 'working' archive state (spec bro-l8wqu LED contract)
+    if (t.workerLed.state === 'blocked') {
+      return { led: { state: 'blocked' }, mode: a.rowMode ?? 'worker blocked' };
+    }
+    if (a.rowLed !== undefined) {
+      return { led: a.rowLed, mode: a.rowMode ?? 'session events' };
+    }
+    return {
+      led: { state: t.workerLed.state === 'working' ? 'working' : 'idle' },
+      mode: 'session events',
+    };
+  }
   if (a.mode === 'acp') {
     if (a.acp === 'ended') return { led: { state: 'idle' }, mode: 'session ended' };
     if (a.acp === 'live') return { led: { state: 'working' }, mode: 'session/load' };
@@ -242,6 +270,19 @@ function sizeOf(path: string): number {
   }
 }
 
+/** One archive row — the shapes `agentTurnPlane` and the worker's
+ *  permission seam write (spec bro-l8wqu). Unknown kinds parse
+ *  through harmlessly — forward-compatible tail. */
+interface ArchiveRow {
+  kind?: string;
+  phase?: string;
+  update?: SessionUpdateLike;
+  stopReason?: string;
+  error?: string;
+  title?: string;
+  verdict?: string;
+}
+
 /** A chunk of the native log — from byte `from` to EOF. */
 function readLogSlice(path: string, from: number): { text: string; size: number } | undefined {
   let fd: number;
@@ -273,6 +314,10 @@ interface Attach extends AttachState {
   /** The log tail's path + read offset — appends render from here. */
   logPath?: string;
   logOffset?: number;
+  /** The events tail's path + read offset — archive rows parse from
+   *  here; shares the watcher/log pump plumbing. */
+  eventsPath?: string;
+  eventsOffset?: number;
   /** One-shot: resolves when the acp handshake reports (attached or
    *  failed) — `--once` waits on it instead of the open attach. */
   handshake: Promise<unknown>;
@@ -416,6 +461,114 @@ export async function runSessionView(argv: string[], opts: SessionViewOpts = {})
     }
   };
 
+  /** The archive's own LED — last row wins; the worker verdict is the
+   *  floor only for 'blocked'. A verdict move re-reports, so a stop
+   *  mid-poll doesn't wait on the next refresh. */
+  const setRowLed = (a: Attach, led: PaneLed, mode: string, t: SessionTarget): void => {
+    const before = viewVerdict(t, a);
+    a.rowLed = led;
+    a.rowMode = mode;
+    const after = viewVerdict(t, a);
+    if (`${before.led.state}|${before.mode}` !== `${after.led.state}|${after.mode}`) {
+      lastReport = '';
+      report(t, after);
+    }
+  };
+
+  /** One parsed archive row — update rows feed the renderer verbatim;
+   *  turn rows print the boundary; permission rows print the ask and
+   *  flip the LED. The pane stays readonly — rows render, nothing
+   *  answers back. */
+  const eventRow = (a: Attach, row: ArchiveRow, t: SessionTarget): void => {
+    switch (row.kind) {
+      case 'update':
+        if (row.update !== undefined) {
+          renderer?.update(row.update);
+          setRowLed(a, { state: 'working' }, 'streaming', t);
+        }
+        return;
+      case 'turn':
+        if (row.phase === 'start') {
+          setRowLed(a, { state: 'working' }, 'turn', t);
+          return;
+        }
+        if (row.phase === 'stop') {
+          if (row.error !== undefined && row.error !== '') {
+            dim(`── turn failed — ${row.error} ──`);
+            setRowLed(a, { state: 'blocked' }, 'turn error', t);
+          } else {
+            dim(
+              `── turn complete${row.stopReason !== undefined && row.stopReason !== '' ? ` (${row.stopReason})` : ''} ──`
+            );
+            // prompt-complete is the bead's 'done' — herdr has no done
+            // state; idle renders the ✓ (spec bro-l8wqu LED contract)
+            setRowLed(a, { state: 'idle' }, 'turn complete', t);
+          }
+        }
+        return;
+      case 'permission': {
+        const what = row.title ?? 'permission request';
+        const verdict = row.verdict ?? 'denied';
+        dim(
+          `── ⚠ permission ‹${what}› — ${verdict} (headless driver; open a terminal in this workspace to handle interactively) ──`
+        );
+        setRowLed(a, { state: 'blocked' }, `permission — ${verdict}`, t);
+        return;
+      }
+      default:
+        return;
+    }
+  };
+
+  /** One pump of the events archive — parse whatever appended since
+   *  the last read. Shared by the fs.watch handler and the refresh
+   *  poll; a torn tail line (a row still being written) is dropped —
+   *  the next complete read picks it up. */
+  const pumpEvents = (a: Attach, t: SessionTarget): void => {
+    if (a.eventsPath === undefined) return;
+    const more = readLogSlice(a.eventsPath, a.eventsOffset ?? 0);
+    if (more === undefined) return;
+    a.eventsOffset = more.size;
+    for (const line of more.text.split('\n')) {
+      if (line === '') continue;
+      let row: ArchiveRow;
+      try {
+        row = JSON.parse(line) as ArchiveRow;
+      } catch {
+        continue;
+      }
+      eventRow(a, row, t);
+    }
+  };
+
+  /** The acp lane's leg — replay the archive's tail, then ride
+   *  appends; rows render through AcpRenderer like the live wire. */
+  const tailEvents = (a: Attach, t: SessionTarget, path: string): void => {
+    a.mode = 'events';
+    a.eventsPath = path;
+    const from = Math.max(0, sizeOf(path) - LOG_TAIL_BYTES);
+    const slice = readLogSlice(path, from);
+    if (slice === undefined) {
+      dim(`── session events ${path} — unreadable; waiting for the worker ──`);
+      return;
+    }
+    a.eventsOffset = slice.size;
+    const start = from > 0 ? slice.text.indexOf('\n') + 1 : 0;
+    for (const line of slice.text.slice(start).split('\n')) {
+      if (line === '') continue;
+      try {
+        eventRow(a, JSON.parse(line) as ArchiveRow, t);
+      } catch {
+        // partial head row — the mid-file offset landed inside it
+      }
+    }
+    try {
+      a.watcher = watch(path, () => pumpEvents(a, t));
+    } catch {
+      // a vanished archive just stays put — the refresh poll still rides
+    }
+  };
+
   /** The acp leg's verdict landing — fallback to the log (or a bare
    *  reason line) plus a re-report, since the attach's posture moved
    *  even when the target key didn't. `reason === undefined` means the
@@ -535,6 +688,31 @@ export async function runSessionView(argv: string[], opts: SessionViewOpts = {})
     };
     cur = a;
     banner(t);
+    if (t.events !== undefined) {
+      // the acp lane's leg — the renderer import is lazy like the
+      // attach leg's; rows stay on disk so the async gap loses nothing
+      a.mode = 'events';
+      const events = t.events;
+      void (async (): Promise<void> => {
+        const { AcpRenderer } = await import('@broject/providers');
+        if (cur !== a) return;
+        renderer ??= new AcpRenderer(out);
+        tailEvents(a, t, events);
+        a.markHandshake('events');
+      })().catch((err: unknown) => {
+        a.markHandshake(err);
+        if (cur !== a) return;
+        dim(
+          `── events feed failed (${err instanceof Error ? err.message : String(err)}) — ${
+            t.log !== undefined ? 'tailing the native log' : 'no fallback stream'
+          } ──`
+        );
+        if (t.log !== undefined) tailLog(a, t.log);
+        lastReport = '';
+        report(t, viewVerdict(t, a));
+      });
+      return;
+    }
     if (t.session === undefined) {
       armFallback(a, t);
       return;
@@ -550,6 +728,15 @@ export async function runSessionView(argv: string[], opts: SessionViewOpts = {})
     );
   };
 
+  /** `bro: status` folds in — the projector's status string prints as
+   *  a dim transition line whenever it changes (spec bro-l8wqu). */
+  let lastStatus = '';
+  const foldStatus = (t: SessionTarget | undefined): void => {
+    if (t === undefined || t.status === lastStatus) return;
+    lastStatus = t.status;
+    if (t.status !== '') dim(`── ${t.status} ──`);
+  };
+
   /** One refresh — file parse → target resolve → report + attach
    *  moves only when the resolution actually changed. */
   const refresh = (): void => {
@@ -559,6 +746,7 @@ export async function runSessionView(argv: string[], opts: SessionViewOpts = {})
       ctx.worktree,
       providers()
     );
+    foldStatus(t);
     const key = targetKey(t);
     if (cur === undefined || key !== cur.key) {
       if (t !== undefined) {
@@ -569,17 +757,21 @@ export async function runSessionView(argv: string[], opts: SessionViewOpts = {})
       }
     }
     report(t, viewVerdict(t, cur ?? { mode: 'none', acp: 'none' }));
-    // a tailed log can grow without a state-file move — pump every poll
-    if (cur !== undefined) pumpLog(cur);
+    // tailed streams can grow without a state-file move — pump every poll
+    if (cur !== undefined && t !== undefined) {
+      pumpLog(cur);
+      pumpEvents(cur, t);
+    }
   };
 
   refresh();
   if (ctx.once) {
-    // --once drains one resolution: an acp attach gets a bounded
-    // handshake window (replay lands inside it — a cold provider
-    // spawn alone can burn most of it), then a beat for late
-    // updates, then detaches; a log target renders its tail already
-    if (cur?.acp === 'connecting') {
+    // --once drains one resolution: every leg gets a bounded
+    // handshake window (an acp attach's replay lands inside it — a
+    // cold provider spawn alone can burn most of it; the events
+    // leg's lazy renderer import resolves the same latch), then a
+    // beat for late updates, then detaches
+    if (cur !== undefined) {
       await Promise.race([cur.handshake, sleep(20_000)]);
       await sleep(300);
     }

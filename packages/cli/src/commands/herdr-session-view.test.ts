@@ -154,6 +154,57 @@ describe('viewVerdict — the pane reports its own feed', () => {
       mode: 'log tail',
     });
   });
+
+  test('events mode — the archive verdict, the worker floor (spec bro-l8wqu)', () => {
+    const ev = resolveTarget(
+      doc({ events: '/a.events.jsonl', led: { state: 'idle' } }),
+      '/repo/trees/t1',
+      {}
+    )!;
+    assert.equal(targetKey(ev), 'events|/a.events.jsonl');
+    // a streaming archive reports working even while the worker's
+    // doc verdict lags
+    assert.deepEqual(
+      viewVerdict(ev, {
+        mode: 'events',
+        acp: 'none',
+        rowLed: { state: 'working' },
+        rowMode: 'streaming',
+      }),
+      { led: { state: 'working' }, mode: 'streaming' }
+    );
+    // a stopped turn reads idle
+    assert.deepEqual(
+      viewVerdict(ev, {
+        mode: 'events',
+        acp: 'none',
+        rowLed: { state: 'idle' },
+        rowMode: 'turn complete',
+      }),
+      { led: { state: 'idle' }, mode: 'turn complete' }
+    );
+    // no rows yet — the worker verdict carries (working → working)
+    const live = resolveTarget(doc({ events: '/a.events.jsonl' }), '/repo/trees/t1', {})!;
+    assert.deepEqual(viewVerdict(live, { mode: 'events', acp: 'none' }), {
+      led: { state: 'working' },
+      mode: 'session events',
+    });
+    // a blocked worker verdict wins over a stale working archive
+    const blocked = resolveTarget(
+      doc({ events: '/a.events.jsonl', led: { state: 'blocked' } }),
+      '/repo/trees/t1',
+      {}
+    )!;
+    assert.deepEqual(
+      viewVerdict(blocked, {
+        mode: 'events',
+        acp: 'none',
+        rowLed: { state: 'working' },
+        rowMode: 'streaming',
+      }),
+      { led: { state: 'blocked' }, mode: 'streaming' }
+    );
+  });
 });
 
 describe('sessionMetaArgs — two-call display contract', () => {
@@ -237,13 +288,19 @@ const putEnv = (env: Record<string, string | undefined>): void => {
 
 /** Env bound for one call — the command reads it per invocation.
  *  `undefined` unbinds: the ambient shell may itself run inside
- *  herdr, so absence is a value a test must be able to force. */
-function withEnv<T>(env: Record<string, string | undefined>, fn: () => T): T {
+ *  herdr, so absence is a value a test must be able to force.
+ *  Async-aware: an awaited fn keeps its env for the whole call —
+ *  restoring on the synchronous return would unbind mid-attach,
+ *  and the fire-and-forget `call()` swallow hides the miss. */
+async function withEnv<T>(
+  env: Record<string, string | undefined>,
+  fn: () => T | Promise<T>
+): Promise<T> {
   const saved: Record<string, string | undefined> = {};
   for (const k of Object.keys(env)) saved[k] = process.env[k];
   try {
     putEnv(env);
-    return fn();
+    return await fn();
   } finally {
     putEnv(saved);
   }
@@ -335,6 +392,61 @@ describe('runSessionView --once', () => {
     const calls = callsOf(f.log);
     const report = calls.find(c => c[1] === 'report-agent');
     assert.equal(report?.[report.indexOf('--state') + 1], 'working');
+  });
+
+  test('an events archive renders through the live wire — rows, turn bookends, permission (spec bro-l8wqu)', async () => {
+    const f = fixture();
+    const eventsPath = f.write(
+      'a.events.jsonl',
+      [
+        { ts: '2026-01-01T00:00:00Z', session: 'ses_1', kind: 'turn', phase: 'start' },
+        {
+          ts: '2026-01-01T00:00:01Z',
+          session: 'ses_1',
+          kind: 'update',
+          update: {
+            sessionUpdate: 'agent_message_chunk',
+            content: { type: 'text', text: 'ARCHIVE-CHUNK' },
+          },
+        },
+        {
+          ts: '2026-01-01T00:00:02Z',
+          session: 'ses_1',
+          kind: 'turn',
+          phase: 'stop',
+          stopReason: 'end_turn',
+        },
+        {
+          ts: '2026-01-01T00:00:03Z',
+          session: 'ses_1',
+          kind: 'permission',
+          title: 'rm -rf /',
+          verdict: 'denied',
+        },
+      ]
+        .map(r => JSON.stringify(r))
+        .join('\n') + '\n'
+    );
+    const statePath = fleetStatusPath(f.worktree, f.worktree);
+    mkdirSync(dirname(statePath), { recursive: true });
+    writeFleetState(
+      statePath,
+      doc({ worktree: f.worktree, events: eventsPath, lane: 'acp', status: 'working·#7' })
+    );
+    await withEnv(f.env, () => runSessionView([f.worktree, '--once'], f.opts));
+    const text = f.stdout();
+    assert.match(text, /ARCHIVE-CHUNK/, 'the archived update renders verbatim');
+    assert.match(text, /── turn complete \(end_turn\) ──/, 'the stop row prints the boundary');
+    assert.match(text, /⚠ permission ‹rm -rf \/› — denied/, 'the ask surfaces with its verdict');
+    // `bro: status` folds in — the projector's status string prints once
+    assert.match(text, /── working·#7 ──/);
+    const calls = callsOf(f.log);
+    const reports = calls.filter(c => c[1] === 'report-agent');
+    // the archive verdict moved through the stream: working while the
+    // turn ran, idle at the stop, blocked at the permission row
+    const states = reports.map(c => c[c.indexOf('--state') + 1]);
+    assert.deepEqual(states[states.length - 1], 'blocked');
+    assert.ok(states.includes('working'));
   });
 
   test('a cli provider state never spawns — the log tail renders', async () => {

@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { execFileSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -57,6 +58,8 @@ const agent = (
     model: string;
     acpSessionId: string;
     log: string;
+    acp: boolean;
+    events: string;
   }>
 ) => ({
   key: o.key ?? 'mol-1',
@@ -68,6 +71,8 @@ const agent = (
   ...(o.model !== undefined ? { model: o.model } : {}),
   ...(o.acpSessionId !== undefined ? { acpSessionId: o.acpSessionId } : {}),
   ...(o.log !== undefined ? { log: o.log } : {}),
+  ...(o.acp === true ? { acp: true } : {}),
+  ...(o.events !== undefined ? { events: o.events } : {}),
   at: o.at ?? NOW,
 });
 
@@ -277,9 +282,12 @@ describe('rendering — label + status token', () => {
     assert.equal(statusString(p), 'silent16h·#765 4t/3f/6sast/conflicts');
   });
 
-  test('the label is the robot marker + worktree basename — state lives on the LED', () => {
-    assert.equal(labelFor('/repo/trees/bro--bro-x1y2z'), '🤖 bro--bro-x1y2z');
-    assert.equal(labelFor('/repo/trees/work-1'), '🤖 work-1');
+  test('the label is the lane icon + worktree basename — state lives on the LED', () => {
+    assert.equal(labelFor('/repo/trees/bro--bro-x1y2z', {}), '⚙️ bro--bro-x1y2z');
+    assert.equal(labelFor('/repo/trees/work-1', {}), '⚙️ work-1');
+    // 🤖 stays on the acp lane — a headless robot owns the session
+    // pane (spec bro-l8wqu, operator decision)
+    assert.equal(labelFor('/repo/trees/bot-1', { acp: true }), '🤖 bot-1');
   });
 });
 
@@ -424,6 +432,36 @@ describe('the session owner — who the `bro: session` pane attaches (bro-nwl5g)
     assert.equal(projection.acpSessionId, undefined);
     assert.equal(projection.provider, undefined);
     assert.equal(projection.log, undefined);
+  });
+
+  test('an acp carrier lends the lane verdict + the events archive (spec bro-l8wqu)', () => {
+    const { projection } = projectTree(
+      tree({
+        agents: [
+          agent({
+            live: true,
+            silentMs: M,
+            provider: 'oc',
+            acpSessionId: 'ses_live',
+            log: '/native-1.log',
+            acp: true,
+            events: '/repo/.git/bro/agents/a1.events.jsonl',
+          }),
+        ],
+      })
+    );
+    assert.equal(projection.acp, true);
+    assert.equal(projection.events, '/repo/.git/bro/agents/a1.events.jsonl');
+  });
+
+  test('a non-acp carrier lends neither lane nor events', () => {
+    const { projection } = projectTree(
+      tree({
+        agents: [agent({ live: true, silentMs: M, provider: 'oc', log: '/cli.log' })],
+      })
+    );
+    assert.equal(projection.acp, undefined);
+    assert.equal(projection.events, undefined);
   });
 });
 
@@ -652,9 +690,10 @@ describe('projectFleet — a live pass over a fake herdr', () => {
     });
     assert.deepEqual(r, { reachable: true, workspaces: 1, writes: 2, files: 1, leds: 0 });
     const rename = calls.find(c => c.slice(0, 2).join(' ') === 'workspace rename');
-    // the label is the robot marker + worktree basename — the bead title
-    // survives on the state file, not the sidebar row
-    assert.deepEqual(rename?.slice(0, 4), ['workspace', 'rename', 'w1', `🤖 ${basename(root)}`]);
+    // the label is the lane icon + worktree basename — ⚙️ marks the
+    // interactive lane (spec bro-l8wqu); the bead title survives on
+    // the state file, not the sidebar row
+    assert.deepEqual(rename?.slice(0, 4), ['workspace', 'rename', 'w1', `⚙️ ${basename(root)}`]);
     const meta = calls.find(c => c.slice(0, 2).join(' ') === 'workspace report-metadata');
     assert.ok(meta?.includes('--clear-token'));
     assert.ok(meta?.includes('status'));
@@ -663,6 +702,56 @@ describe('projectFleet — a live pass over a fake herdr', () => {
     const st = readFleetState(fleetStatusPath(root, root));
     assert.equal(st?.workspace, 'w1');
     assert.equal(st?.title, 'Old Title');
+  });
+
+  test('an acp session owner lands lane + events + the 🤖 label (spec bro-l8wqu)', () => {
+    const root = mkdtempSync(join(tmpdir(), 'proj-acp-'));
+    // the registry read needs a real git common dir — agentsHome and
+    // agents.json both resolve through `git rev-parse --git-common-dir`
+    execFileSync('git', ['init', '-q'], { cwd: root });
+    mkdirSync(join(root, '.git', 'bro', 'agents'), { recursive: true });
+    writeFileSync(
+      join(root, 'bro.config.json'),
+      JSON.stringify({ providers: { oc: { type: 'acp', command: 'opencode acp' } } })
+    );
+    writeFileSync(
+      join(root, '.git', 'bro', 'agents.json'),
+      JSON.stringify({
+        'mol-1': {
+          agentId: 'a1',
+          backend: 'acp',
+          worktree: root,
+          provider: 'oc',
+          acpSessionId: 'ses_1',
+          log: '/a1.log',
+          spawnedAt: new Date(NOW).toISOString(),
+        },
+      })
+    );
+    // a git root scopes the plugin ledger on the COMMON dir — the
+    // repo-less fleetPass helper's sha1(root) file is a second scope
+    // this repo never reads
+    const stateDir = stateDirOf();
+    const scope = createHash('sha1').update(join(root, '.git')).digest('hex').slice(0, 12);
+    writeFileSync(
+      join(stateDir, `state-${scope}.json`),
+      JSON.stringify({ workspaces: { [root]: { ws: 'w1', label: 'old', managed: true } } })
+    );
+    const { calls } = fleetPass(root, stateDir, {
+      scenario: {
+        worktrees: [{ path: root, open_workspace_id: 'w1' }],
+        workspaces: [{ workspace_id: 'w1', label: 'old' }],
+      },
+      state: {},
+    });
+    // the doc the session pane + the plugin's lane read consume
+    const st = readFleetState(fleetStatusPath(join(root, '.git'), root));
+    assert.equal(st?.lane, 'acp');
+    assert.equal(st?.events, join(root, '.git', 'bro', 'agents', 'a1.events.jsonl'));
+    assert.equal(st?.acpSessionId, 'ses_1');
+    // and the workspace label keeps the robot marker on the acp lane
+    const rename = calls.find(c => c.slice(0, 2).join(' ') === 'workspace rename');
+    assert.deepEqual(rename?.slice(0, 4), ['workspace', 'rename', 'w1', `🤖 ${basename(root)}`]);
   });
 
   test('a user-owned workspace is never touched', () => {

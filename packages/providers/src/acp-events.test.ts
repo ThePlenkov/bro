@@ -13,7 +13,7 @@ import {
   type BusBroker,
 } from '@broject/core';
 import type { SessionUpdate } from '@agentclientprotocol/sdk';
-import { agentTurnPlane } from './acp-events.ts';
+import { agentEventRecord, agentTurnPlane } from './acp-events.ts';
 
 // in-process git + the BRO_* badge read must never inherit the OUTER
 // session's pins — same scrub rule every fixture suite carries
@@ -171,6 +171,36 @@ describe('agentTurnPlane', () => {
     } finally {
       await broker.close();
     }
+  });
+
+  test('agentEventRecord lands an out-of-band row in the same archive (spec bro-l8wqu)', () => {
+    const dir = repo();
+    process.env.BRO_AGENT_ID = 'native-t1';
+    try {
+      agentEventRecord(dir, 'sess-1', "acp provider 'kilo'", {
+        kind: 'permission',
+        title: 'rm -rf /',
+        verdict: 'denied',
+      });
+      const rows = readArchive(dir, 'native-t1');
+      assert.equal(rows.length, 1);
+      assert.equal(rows[0]!.kind, 'permission');
+      assert.equal(rows[0]!.title, 'rm -rf /');
+      assert.equal(rows[0]!.verdict, 'denied');
+      assert.equal(rows[0]!.session, 'sess-1');
+      assert.equal(rows[0]!.by, "acp provider 'kilo'");
+      assert.equal(rows[0]!.key, 'native-t1');
+    } finally {
+      delete process.env.BRO_AGENT_ID;
+    }
+  });
+
+  test('unbadged agentEventRecord writes nothing — the archive stays absent', () => {
+    const dir = repo();
+    delete process.env.BRO_AGENT_ID;
+    agentEventRecord(dir, 's', 'x', { kind: 'permission', verdict: 'denied' });
+    const common = gitCommonDir(dir)!;
+    assert.equal(existsSync(join(common, 'bro', 'agents')), false);
   });
 
   test('unbadged turns key acp:<sessionId> and never write an archive', async () => {

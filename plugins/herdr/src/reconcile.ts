@@ -35,13 +35,14 @@ import {
   worktreeGone,
   type WorkspaceRec,
 } from './lib.ts';
+import { type Lane, laneOf } from './lanes.ts';
 import { convergeMirrors, markExitedMirrors } from './mirrors.ts';
 import type { Planes } from './planes.ts';
 import { readPlanes } from './planes.ts';
-import { dropOrphanRenderers, ensureRenderer } from './renderers.ts';
-import { dropOrphanSessions, ensureSession } from './sessions.ts';
+import { dropOrphanRenderers, ensureRenderer, retireEvents } from './renderers.ts';
+import { dropOrphanSessions, ensureSession, retireSession } from './sessions.ts';
 import { agentTreePath } from './status.ts';
-import { dropOrphanStatuses, ensureStatus } from './statuses.ts';
+import { dropOrphanStatuses, ensureStatus, retireStatus } from './statuses.ts';
 
 const log = (s: string): void => console.log(`[reconcile] ${s}`);
 
@@ -128,10 +129,12 @@ function armedSet(p: Planes): Map<string, ArmedTree> {
 }
 
 /** The open-time label matches the daemon projector's contract —
- * `🤖 <worktree-name>` — so a fresh workspace never flashes a bead
- * title or raw slug the next pass would overwrite anyway. */
-function desiredLabel(tree: ArmedTree): string {
-  return `🤖 ${basename(tree.path)}`;
+ * `<lane-icon> <worktree-name>`: 🤖 on the acp lane (a headless robot
+ * owns the session pane), ⚙️ on every other managed lane (spec
+ * bro-l8wqu, operator decision) — so a fresh workspace never flashes
+ * a bead title or raw slug the next pass would overwrite anyway. */
+function desiredLabel(tree: ArmedTree, lane: Lane | undefined): string {
+  return `${lane === 'acp' ? '🤖' : '⚙️'} ${basename(tree.path)}`;
 }
 
 interface WsCtx {
@@ -220,7 +223,7 @@ function convergeWorkspaces(
 ): Map<string, string> {
   const wsForPath = new Map<string, string>();
   for (const t of armed.values()) {
-    const ws = ensureWorkspace(t, desiredLabel(t), ctx);
+    const ws = ensureWorkspace(t, desiredLabel(t, laneOf(p.lanes, t.path)), ctx);
     if (ws !== undefined) wsForPath.set(t.path, ws);
   }
   return wsForPath;
@@ -230,11 +233,15 @@ function convergeWorkspaces(
  *  live mirror retires the fallback tail in the same pass. The
  *  recorded ws id must match the live one — a stale `managed` record
  *  left by a user reopen must not put our pane on their workspace. */
-function convergeRenderers(wsForPath: Map<string, string>, ctx: WsCtx): void {
+function convergeRenderers(p: Planes, wsForPath: Map<string, string>, ctx: WsCtx): void {
   for (const [path, ws] of wsForPath) {
     const rec = ctx.state.workspaces[path];
     if (rec?.managed === true && rec.ws === ws) {
-      ensureRenderer({ path, ws, state: ctx.state });
+      // the acp lane shows exactly one pane — the session view folds
+      // the bus tail in (spec bro-l8wqu)
+      const rctx = { path, ws, state: ctx.state };
+      if (laneOf(p.lanes, path) === 'acp') retireEvents(rctx);
+      else ensureRenderer(rctx);
     }
   }
   // wsById predates this pass's opens — a just-created workspace is
@@ -246,24 +253,32 @@ function convergeRenderers(wsForPath: Map<string, string>, ctx: WsCtx): void {
  *  renderers so the pane-order decision sees the settled set. Same
  *  managed-record guard as the renderer: a stale `managed` record
  *  must not put our pane on a user's workspace. */
-function convergeStatuses(wsForPath: Map<string, string>, ctx: WsCtx): void {
+function convergeStatuses(p: Planes, wsForPath: Map<string, string>, ctx: WsCtx): void {
   for (const [path, ws] of wsForPath) {
     const rec = ctx.state.workspaces[path];
     if (rec?.managed === true && rec.ws === ws) {
-      ensureStatus({ path, ws, state: ctx.state });
+      // the acp lane folds the status strip into the session pane
+      // (spec bro-l8wqu)
+      const rctx = { path, ws, state: ctx.state };
+      if (laneOf(p.lanes, path) === 'acp') retireStatus(rctx);
+      else ensureStatus(rctx);
     }
   }
   dropOrphanStatuses(ctx.state, new Set([...ctx.wsById.keys(), ...wsForPath.values()]));
 }
 
-/** Exactly one session pane per managed workspace — alongside `bro:
- *  status` so the readonly conversation view rides the same managed
- *  set (spec bro-nwl5g). Same managed-record guard as the renderer. */
-function convergeSessions(wsForPath: Map<string, string>, ctx: WsCtx): void {
+/** The session pane lives ONLY on the acp lane (spec bro-l8wqu) —
+ *  it is the lane's one human-readable pane. Every other lane
+ *  retires it: a non-acp worker's view only duplicated the mirror,
+ *  and a worker-less arm has nothing to show. Same managed-record
+ *  guard as the renderer. */
+function convergeSessions(p: Planes, wsForPath: Map<string, string>, ctx: WsCtx): void {
   for (const [path, ws] of wsForPath) {
     const rec = ctx.state.workspaces[path];
     if (rec?.managed === true && rec.ws === ws) {
-      ensureSession({ path, ws, state: ctx.state });
+      const rctx = { path, ws, state: ctx.state };
+      if (laneOf(p.lanes, path) === 'acp') ensureSession(rctx);
+      else retireSession(rctx);
     }
   }
   dropOrphanSessions(ctx.state, new Set([...ctx.wsById.keys(), ...wsForPath.values()]));
@@ -342,9 +357,9 @@ function convergeLocked(p: Planes, scope: string): ConvergeResult {
   const wsForPath = convergeWorkspaces(p, armed, ctx);
   convergeMirrors(p, wsForPath, ctx.openByPath, ctx.state);
   markExitedMirrors(p, ctx.state);
-  convergeRenderers(wsForPath, ctx);
-  convergeStatuses(wsForPath, ctx);
-  convergeSessions(wsForPath, ctx);
+  convergeRenderers(p, wsForPath, ctx);
+  convergeStatuses(p, wsForPath, ctx);
+  convergeSessions(p, wsForPath, ctx);
   const reaped = reapDead(p, ctx);
   saveState(scope, ctx.state);
   return {

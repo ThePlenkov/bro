@@ -122,6 +122,23 @@ export function ensureSession(ctx: RenderCtx): void {
   armAndReport(ctx, pick.id, pick.adopted);
 }
 
+/** Non-acp lanes carry no session pane (spec bro-l8wqu): for a
+ *  non-acp worker the view only duplicated the mirror, and a
+ *  worker-less arm has nothing to show. Close the recorded or
+ *  orphan-labeled `bro: session` pane and drop the record. */
+export function retireSession(ctx: RenderCtx): void {
+  const rec = ctx.state.sessions[ctx.path];
+  const stale =
+    rec !== undefined && paneExists(rec.pane_id)
+      ? rec.pane_id
+      : paneList(ctx.ws).find(x => x.label === SESSION_LABEL)?.pane_id;
+  if (stale !== undefined) {
+    herdrTry(['pane', 'close', stale]);
+    log(`retire session pane ${stale} — not an acp lane (${ctx.ws})`);
+  }
+  delete ctx.state.sessions[ctx.path];
+}
+
 /** Workspaces that lost their arm get their session record dropped —
  *  the workspace itself is the caller's (or the reaper's) problem,
  *  the record is ours: a rec pointing at a closed workspace can never
