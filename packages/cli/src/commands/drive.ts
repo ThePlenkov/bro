@@ -2498,6 +2498,7 @@ async function driveOnce(ctx: Ctx): Promise<void> {
  *  Reachability changes are the only lines worth logging — a pass
  *  with no writes is the steady state, not an event. */
 let herdrWasReachable: boolean | undefined;
+let projectionFailedQuiet = false;
 function herdrProjectorTick(ctx: Ctx): void {
   // the event trigger re-arms lazily here — a broker that came up since
   // the last pass restores event mode without a daemon restart
@@ -2518,8 +2519,17 @@ function herdrProjectorTick(ctx: Ctx): void {
     if (r.writes > 0) {
       say(ctx, `herdr: ${r.writes} label write(s)`);
     }
-  } catch {
-    // a failed projection retries next pass — never a pass failure
+    projectionFailedQuiet = false;
+  } catch (err) {
+    // a failed projection retries next pass — never a pass failure;
+    // log once per failure streak so stale LEDs are diagnosable
+    if (!projectionFailedQuiet) {
+      projectionFailedQuiet = true;
+      say(
+        ctx,
+        `herdr: projection failed — ${err instanceof Error ? err.message : String(err)} (retrying each pass)`
+      );
+    }
   }
 }
 
@@ -2601,6 +2611,9 @@ async function armProjectorEvents(ctx: Ctx): Promise<void> {
       say(ctx, 'herdr: event feed back — LEDs ride worker transitions');
       projectorSubQuiet = false;
     }
+    // transitions during the disconnect window have no envelope —
+    // one kick re-derives whatever the feed missed (coalesced, cheap)
+    kickProjector(ctx);
   } catch {
     projectorSub = undefined;
     if (!projectorSubQuiet) {

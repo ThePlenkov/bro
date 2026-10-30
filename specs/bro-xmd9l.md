@@ -48,7 +48,7 @@ Rules:
 
 ## Shape
 
-```
+```text
 drive --every
   ├─ every N s: driveOnce → … → herdrProjectorTick   (backstop)
   └─ busSubscribe {topics:[worker,worktree]}
