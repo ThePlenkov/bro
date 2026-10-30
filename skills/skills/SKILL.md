@@ -34,7 +34,7 @@ CLI-maintained (source + ref + computedHash is the pin);
     "https://github.com/owner/repo",  // URL passthrough
     "local:skills/name"               // in-repo dir → symlink
   ],
-  "agents": ["devin"],   // `skills add -a` link targets; default ["universal"]
+  "agents": ["claude"],   // `skills add -a` link targets; default ["universal"]
   "bin": "skills"        // optional CLI override (path or PATH command)
 }
 ```
@@ -46,12 +46,12 @@ CLI-maintained (source + ref + computedHash is the pin);
   becomes a symlink **to the repo dir**, not a copy — editing
   `skills/name` is live for every `.agents`-reading agent. A real
   directory in the way is left alone and reported, never deleted.
-- `agents` selects per-agent targets (`.devin/skills/`,
-  `.claude/skills/`…). Default `["universal"]` writes only the shared
+- `agents` selects per-agent targets (`.claude/skills/`,
+  `.cursor/skills/`…). Default `["universal"]` writes only the shared
   plane — usually what you want: `-a <agent>` **copies** (not links)
   into the per-agent dir and the CLI reconciles it on every add, so a
-  committed copy drifts silently, while `.agents`-reading agents (incl.
-  devin) see the shared plane anyway. Careful pinning it: an agent
+  committed copy drifts silently, while `.agents`-reading agents
+  see the shared plane anyway. Careful pinning it: an agent
   whose project dir is the bare `skills/` (OpenClaw) links vendored
   names into a plugin repo's own skill tree.
 

@@ -1,4 +1,5 @@
 ---
+
 name: providers
 description: "Use when configuring or debugging bro's provider registry — `providers` in bro.config.json, provider kinds (api/acp/cli), model wire selection, `judge.provider` / `agents.<backend>.provider` references, or `bro doctor` provider rows. Mechanics live in the CLI + @broject/providers; this skill carries the contract and policy only."
 ---
@@ -20,17 +21,18 @@ can serve.
 {
   "providers": {
     // One API host, many models — each model declares its wire.
-    "orcarouter": { "type": "api", "baseUrl": "https://api.orcarouter.ai",
-                    "apiKeyCommand": "secret-tool lookup service typesafe.ai",
-                    "models": {
-                      "typesafe/jev-1.13": "systemone",
-                      "acme/cheap-chat":   "openai-compat",
-                      "acme/auto-x":       null          // inferred
-                    } },
-    "kilo-cli":   { "type": "acp", "command": "kilo --acp",
-                    "model": "typesafe/jev-1.13" },
-    "local":      { "type": "cli", "command": "devin -p --prompt-file {promptFile}",
-                    "model": "devin-1" }
+    "orcarouter": {
+      "type": "api",
+      "baseUrl": "https://api.orcarouter.ai",
+      "apiKeyCommand": "secret-tool lookup service typesafe.ai",
+      "models": {
+        "typesafe/jev-1.13": "systemone",
+        "acme/cheap-chat": "openai-compat",
+        "acme/auto-x": null // inferred
+      }
+    },
+    "kilo-cli": { "type": "acp", "command": "kilo --acp", "model": "typesafe/jev-1.13" },
+    "local": { "type": "cli", "command": "acme -p --prompt-file {promptFile}", "model": "acme-1" }
   }
 }
 ```
@@ -42,7 +44,6 @@ can serve.
 | `api` | by model wire — `systemone` typed, `openai-compat` prose | —                                  |
 | `acp` | typed on a `jev`-family model, else prose                | yes                                |
 | `cli` | prose — stdout parsed                                    | yes — loop.agent template contract |
-
 - An `api` entry is a host + auth + a **`models` allowlist** —
   `{ "<model-id>": "systemone" | "openai-compat" | { "wire": … } | null }`.
   `null`/absent infers the wire: `jev`-family ids → `systemone`,

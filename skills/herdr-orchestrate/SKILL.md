@@ -1,7 +1,7 @@
 ---
 
 name: herdr-orchestrate
-description: "Use when an agent orchestrates worker agents through Herdr — spawn an isolated worktree workspace per task, start any supported agent kind in it, brief it, wait on semantic state, verify the gate, tear down. Provider-agnostic: the mechanics are `herdr` CLI + git worktrees; bro/devin/opencode/claude are interchangeable workers. Covers the spawn sequence, blocking waits, label-vs-state semantics, sequential budget, and teardown order. In a bro-managed repo, spawn through `bro fleet agents`/`bro flow convoy` instead — this recipe is for herdr-only environments and herdr plugin internals."
+description: "Use when an agent orchestrates worker agents through Herdr — spawn an isolated worktree workspace per task, start any supported agent kind in it, brief it, wait on semantic state, verify the gate, tear down. Provider-agnostic: the mechanics are `herdr` CLI + git worktrees; any supported agent kind is an interchangeable worker. Covers the spawn sequence, blocking waits, label-vs-state semantics, sequential budget, and teardown order. In a bro-managed repo, spawn through `bro fleet agents`/`bro flow convoy` instead — this recipe is for herdr-only environments and herdr plugin internals."
 ---
 
 # herdr-orchestrate — driving worker agents through Herdr
@@ -21,9 +21,8 @@ All mechanics below are the verified `herdr` CLI surface. Placeholders:
 `[a-z][a-z0-9-]{0,31}` — it lands in branch names, paths, and labels),
 `{{SHORT_TITLE}}` human label (display surfaces only — never shell
 strings), `{{AGENT_KIND}}` one of the kinds
-`herdr agent start --kind` accepts (pi, claude, codex, gemini, cursor,
-devin, agy, cline, omp, opencode, copilot, kimi, kiro, droid, amp, grok,
-hermes, kilo, qodercli, qwen, letta, maki, muse),
+`herdr agent start --kind` accepts (run `herdr agent` for the
+installed list — it tracks the binary, not this doc),
 `{{DONE_CRITERIA}}` the gate (e.g. "PR green + merged" — never
 "PR opened"), `{{PARALLEL_LIMIT}}` max concurrent workers.
 
@@ -51,8 +50,7 @@ hermes, kilo, qodercli, qwen, letta, maki, muse),
    ({{DONE_CRITERIA}}), the worktree path, and "do not spawn
    sub-agents". Arm the persistent objective BEFORE the task prompt —
    the worker's first message must carry the goal, or a mid-run
-   compaction drops the thread: hosts with a native `/goal` (devin,
-   claude) get
+   compaction drops the thread: worker kinds with a native `/goal` get
    `herdr agent prompt {{TASK_ID}}-worker "/goal {{DONE_CRITERIA}} — read {{TASK_ID}}-brief.md at the worktree root and execute it"`;
    for hosts without one, `bro work goal '{{DONE_CRITERIA}}'` run IN
    the worktree seeds it (materializes for the next session there —

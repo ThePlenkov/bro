@@ -29,8 +29,8 @@ this repo materializes it as its own. That is how
 (Bare `bro work goal` without a condition only shows status — it writes
 nothing.)
 
-Hosts with a **native** `/goal` (Claude Code, devin) — use it; `bro
-work goal` stays the scriptable, cross-host, worker-spawnable surface.
+Hosts with a **native** `/goal` — use it; `bro work goal` stays the
+scriptable, cross-host, worker-spawnable surface.
 
 ## Writing a condition
 
