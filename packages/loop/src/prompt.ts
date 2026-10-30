@@ -237,8 +237,12 @@ resolve the conflicts, and push:
  *  No placeholder → the path is appended, quoted, as the last arg. */
 export function expandAgentCmd(template: string, promptFile: string): string {
   const q = shQuote(promptFile);
-  if (template.includes('{promptFile}')) {
-    return template.replaceAll('{promptFile}', q);
+  if (template.indexOf('{promptFile}') !== -1) {
+    return template.split('{promptFile}').join(q);
   }
-  return `${template} ${q}`;
+  const t = template.trimEnd();
+  if (t.length === 0) {
+    return q;
+  }
+  return `${t} ${q}`;
 }
