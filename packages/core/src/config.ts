@@ -867,8 +867,11 @@ function fleetProfiles(raw: unknown): Record<string, FleetProfile> {
     console.error('bro.config: fleet.profiles must be an object — section dropped');
     return {};
   }
-  const out: Record<string, FleetProfile> = {};
+  const out: Record<string, FleetProfile> = Object.create(null);
   for (const [name, v] of Object.entries(raw)) {
+    if (name === 'constructor' || name === 'prototype') {
+      continue;
+    }
     const prof = fleetProfile(name, v);
     if (prof !== null) {
       out[name] = prof;
@@ -1019,7 +1022,7 @@ export const meshSection: ConfigSection<{
   };
   const peers: Record<string, { rig: string; remote: string; transport?: string; login?: string }> =
     {};
-  if (typeof obj.peers === 'object' && obj.peers !== null) {
+  if (typeof obj.peers === 'object' && obj.peers !== null && !Array.isArray(obj.peers)) {
     for (const [alias, entry] of Object.entries(obj.peers)) {
       // __proto__ is a setter on Object.prototype, not an own-property
       // write — a peer alias with that name would mutate the map
@@ -1028,7 +1031,12 @@ export const meshSection: ConfigSection<{
       }
       const p = meshPeerEntry(entry);
       if (p !== null) {
-        peers[alias] = p;
+        Object.defineProperty(peers, alias, {
+          value: p,
+          writable: true,
+          enumerable: true,
+          configurable: true,
+        });
       }
     }
   }

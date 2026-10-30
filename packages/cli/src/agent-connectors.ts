@@ -287,6 +287,12 @@ export function fleetProfileOf(env: AgentConnectorEnv, name: string): FleetProfi
   const profiles = env.fleet?.profiles;
   // hasOwn pins the lookup to configured keys — 'constructor' must not
   // resolve to an inherited member and skip the missing-profile error
+  if (name === '__proto__') {
+    throw new SpawnError(
+      `fleet.profiles.${name} is not configured — name a configured profile`,
+      'input'
+    )
+  }
   const profile =
     profiles !== undefined && Object.hasOwn(profiles, name) ? profiles[name] : undefined;
   if (profile === undefined) {

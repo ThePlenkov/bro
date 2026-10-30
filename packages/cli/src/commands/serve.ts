@@ -2376,29 +2376,15 @@ async function armBusBroker(dir: string, url: string): Promise<BusBroker | undef
   }
 }
 
-export async function runServeCommand(argv: string[]): Promise<void> {
-  if (argv[0] === 'ensure') {
-    await cmdEnsure(argv.slice(1));
-    return;
-  }
-  if (argv[0] === 'watchdog') {
-    await cmdWatchdog(argv.slice(1));
-    return;
-  }
-  const port = parseServePort(argv);
-
-  // One listener per repo — serve.json lives in the common dir shared
-  // by every linked worktree, so the anchor must be the path that
-  // outlives them all: the MAIN worktree root. A serve spawned inside
-  // a `bro work` checkout that later got `leave`d kept its cwd there —
-  // acp spawns died with the directory and `ensure` refused from main
-  // (bro-ofbw4). chdir first so `dir`, the recorded state, and every
-  // inherited child cwd land on the durable path.
+function ensureChdirToAnchor(): string {
   const anchor = mainWorktreeRoot(process.cwd());
   if (anchor !== null && anchor !== process.cwd()) {
     process.chdir(anchor);
   }
-  const dir = process.cwd();
+  return process.cwd();
+}
+
+function assertServeSingleton(dir: string): () => void {
   const statePath = serveStatePath(dir);
   if (statePath === null) {
     console.error('error: not inside a git repository — bro serve needs the git common dir');
@@ -2409,54 +2395,118 @@ export async function runServeCommand(argv: string[]): Promise<void> {
     console.error(`error: already serving ${live.url} (pid ${live.pid}) — one host per repo`);
     process.exit(1);
   }
-  // the lock makes the singleton atomic — live-state check → write has a
-  // gap two starters could both pass through; O_EXCL create cannot
   const releaseLock = acquireServeLock(dir);
   if (releaseLock === undefined) {
     console.error('error: another bro serve is starting or running (serve.json.lock held)');
     process.exit(1);
   }
+  return releaseLock;
+}
+
+function logProviderInfo(
+  conductorCfg: ReturnType<typeof conductorConfig>,
+  providerCfg: ReturnType<typeof providerConfig>
+): void {
+  if (conductorCfg !== undefined) {
+    const fast = conductorCfg.fast !== undefined ? ` · fast → ${(conductorCfg.fast as any).upstream}` : '';
+    console.log(`provider: /v1/* → acp conductor (${conductorCfg.backend})${fast}`);
+    return;
+  }
+  if (providerCfg !== undefined) {
+    console.log(`provider: /v1/* → ${providerCfg.upstream}`);
+  }
+}
+
+function armWatchdog(boundPort: number, dir: string, statePath: string): void {
+  try {
+    const logFd = openPrivateAppendSync(join(dirname(statePath), 'serve.log'));
+    try {
+      spawn(
+        process.execPath,
+        [ENTRY_FILE, 'serve', 'watchdog', '--port', String(boundPort), '--pid', String(process.pid)],
+        { cwd: dir, detached: true, stdio: ['ignore', logFd, logFd], env: process.env }
+      )
+        .once('error', e => {
+          console.error(`warning: watchdog did not arm — ${e.message}`);
+        })
+        .unref();
+    } finally {
+      closeSync(logFd);
+    }
+  } catch (err) {
+    console.error(`warning: watchdog did not arm — ${err instanceof Error ? err.message : String(err)}`);
+  }
+}
+
+function waitForShutdown(server: ReturnType<typeof createServer>): Promise<void> {
+  return new Promise<void>(resolve => {
+    const shutdown = (): void => {
+      const force = setTimeout(() => {
+        server.closeAllConnections();
+      }, 2_000);
+      server.close(() => {
+        clearTimeout(force);
+        resolve();
+      });
+    };
+    process.once('SIGINT', shutdown);
+    process.once('SIGTERM', shutdown);
+  });
+}
+
+function warnIfPermissiveState(statePath: string): void {
+  try {
+    if ((statSync(statePath).mode & 0o077) !== 0) {
+      console.error(
+        `warning: ${statePath} is readable by group/other — the session token is exposed to other local users on this filesystem`
+      );
+    }
+  } catch {
+    // best effort
+  }
+}
+
+async function listenServer(server: ReturnType<typeof createServer>, port: number): Promise<string> {
+  const url = await new Promise<string>((resolve, reject) => {
+    server.once('error', reject);
+    server.listen(port, '127.0.0.1', () => {
+      const addr = server.address();
+      const boundPort = typeof addr === 'object' && addr !== null ? addr.port : port;
+      resolve(`http://127.0.0.1:${boundPort}`);
+    });
+  });
+  return url;
+}
+
+export async function runServeCommand(argv: string[]): Promise<void> {
+  if (argv[0] === 'ensure') {
+    await cmdEnsure(argv.slice(1));
+    return;
+  }
+  if (argv[0] === 'watchdog') {
+    await cmdWatchdog(argv.slice(1));
+    return;
+  }
+  const port = parseServePort(argv);
+  const dir = ensureChdirToAnchor();
+  const releaseLock = assertServeSingleton(dir);
+  const statePath = serveStatePath(dir)!;
 
   const env = loadAgentEnv(dir);
   const meta: ServeMeta = { dir, startedAt: '' };
-  // the conductor answers /v1 from a configured acp provider
-  // (BRO_PROVIDER_BACKEND) — explicit backend intent beats the byte
-  // proxy's upstream+key pair, which stays the plain-HTTP fallback
   const conductorCfg = conductorConfig(process.env, dir);
   const providerCfg = conductorCfg === undefined ? providerConfig(process.env) : undefined;
-  if (conductorCfg !== undefined) {
-    // the fast lane shares the byte proxy's upstream pair — armed, it
-    // takes the classifier-shaped calls off the session lane (bro-6asnu)
-    const fast = conductorCfg.fast !== undefined ? ` · fast → ${conductorCfg.fast.upstream}` : '';
-    console.log(`provider: /v1/* → acp conductor (${conductorCfg.backend})${fast}`);
-  } else if (providerCfg !== undefined) {
-    console.log(`provider: /v1/* → ${providerCfg.upstream}`);
-  }
-  // the session token — the "local session context" made concrete.
-  // Adopted from SERVE_TOKEN_ENV when a watchdog respawned this serve
-  // (crash recovery keeps the credential clients already hold), else
-  // generated fresh. Never printed: clients read it out of the 0600
-  // serve.json below, so possession implies same-UID file access
+  logProviderInfo(conductorCfg, providerCfg);
   const token = serveSessionToken();
   const deps = realDeps(dir, env, { conductorCfg, providerCfg });
   const server = createServer(createServeHandler(deps, meta, token));
 
   try {
-    let boundPort = port;
-    const url = await new Promise<string>((resolve, reject) => {
-      server.once('error', reject);
-      // 127.0.0.1 only — the loopback bind IS the trust boundary; there is
-      // no --host flag to widen it with.
-      server.listen(port, '127.0.0.1', () => {
-        meta.startedAt = new Date().toISOString();
-        const addr = server.address();
-        boundPort = typeof addr === 'object' && addr !== null ? addr.port : port;
-        resolve(`http://127.0.0.1:${boundPort}`);
-      });
-    }).catch((err: unknown) => {
+    const url = await listenServer(server, port).catch((err: unknown) => {
       console.error(`error: ${err instanceof Error ? err.message : String(err)}`);
       process.exit(1);
     });
+    meta.startedAt = new Date().toISOString();
 
     writeServeState(dir, {
       pid: process.pid,
@@ -2464,80 +2514,16 @@ export async function runServeCommand(argv: string[]): Promise<void> {
       dir,
       startedAt: meta.startedAt,
       token,
-      // the flag `bro provider` resolution reads — a facade-only serve
-      // must not shadow the host listener's endpoint
       ...(providerCfg !== undefined || conductorCfg !== undefined ? { provider: true } : {}),
     });
-    // filesystems that ignore mode bits (some fuse/9p/drvfs mounts) can
-    // leave the token group/other-readable — the auth boundary then
-    // doesn't hold, so say so loudly rather than trusting silently
-    if ((statSync(statePath).mode & 0o077) !== 0) {
-      console.error(
-        `warning: ${statePath} is readable by group/other — the session token is exposed to other local users on this filesystem`
-      );
-    }
-    // the keepalive leg (bro-ofbw4): between apiKeyHelper runs — clients
-    // only re-ensure on auth refresh — a dead listener is minutes of
-    // failed calls. One detached watchdog per generation polls the
-    // recorded pid and respawns `bro serve` on the bound port; it
-    // retires when the record is retracted (clean stop) or superseded
-    // (the next generation arms its own).
-    {
-      // arming failure is a warning, never a crash — a serve already
-      // listening must not exit over a supervisor it can live without;
-      // the next generation's own arm is unaffected either way
-      try {
-        const logFd = openPrivateAppendSync(join(dirname(statePath), 'serve.log'));
-        try {
-          spawn(
-            process.execPath,
-            [
-              ENTRY_FILE,
-              'serve',
-              'watchdog',
-              '--port',
-              String(boundPort),
-              '--pid',
-              String(process.pid),
-            ],
-            { cwd: dir, detached: true, stdio: ['ignore', logFd, logFd], env: process.env }
-          )
-            .once('error', e => {
-              console.error(`warning: watchdog did not arm — ${e.message}`);
-            })
-            .unref();
-        } finally {
-          closeSync(logFd);
-        }
-      } catch (err) {
-        console.error(
-          `warning: watchdog did not arm — ${err instanceof Error ? err.message : String(err)}`
-        );
-      }
-    }
+    warnIfPermissiveState(statePath);
+    const boundPort = Number(new URL(url).port) || port;
+    armWatchdog(boundPort, dir, statePath);
     console.log(`bro serve — ${url}`);
     console.log('discovery: <git-common-dir>/bro/serve.json · ctrl-c to stop');
 
     const broker = await armBusBroker(dir, url);
-
-    await new Promise<void>(resolve => {
-      const shutdown = (): void => {
-        // close() waits on keep-alive sockets — cap the grace so a
-        // parked connection can't hang SIGTERM forever; in-flight
-        // requests get a short window to land first
-        const force = setTimeout(() => {
-          server.closeAllConnections();
-        }, 2_000);
-        server.close(() => {
-          clearTimeout(force);
-          resolve();
-        });
-      };
-      process.once('SIGINT', shutdown);
-      process.once('SIGTERM', shutdown);
-    });
-    // kill the pooled acp transport before the broker — its ref'd child
-    // handles are what would otherwise pin the loop past server.close()
+    await waitForShutdown(server);
     deps.provider?.dispose?.();
     deps.acp?.dispose?.();
     await broker?.close();
