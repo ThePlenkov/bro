@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
-import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, test } from 'node:test';
@@ -464,19 +464,26 @@ describe('projectFleet — a live pass over a fake herdr', () => {
       .split('\n')
       .map(l => JSON.parse(l) as string[]);
 
+  /** The `--seq` a call carried — per-source monotonic, so tests assert
+   *  it numerically rather than against the pass instant. */
+  const seqOf = (call: string[]): number => Number(call[call.indexOf('--seq') + 1]);
+
   /** One full pass over the fake herdr — scenario + plugin ledger in,
    *  result + the recorded call log out. The ledger scope for a
-   *  repo-less root is sha1(root) (no common dir resolves). */
+   *  repo-less root is sha1(root) (no common dir resolves). The log is
+   *  truncated per pass so multi-pass tests see each tick's calls. */
   const fleetPass = (
     root: string,
     stateDir: string,
-    f: { scenario: Record<string, unknown>; state: Record<string, unknown> }
+    f: { scenario: Record<string, unknown>; state: Record<string, unknown> },
+    now = NOW
   ): { r: ReturnType<typeof projectFleet>; calls: string[][] } => {
     const fake = join(root, 'fake-herdr.js');
     const scenario = join(root, 'scenario.json');
     const log = join(root, 'calls.jsonl');
     writeFileSync(fake, FAKE_HERDR, { mode: 0o755 });
     writeFileSync(scenario, JSON.stringify(f.scenario));
+    rmSync(log, { force: true });
     const scope = createHash('sha1').update(root).digest('hex').slice(0, 12);
     writeFileSync(join(stateDir, `state-${scope}.json`), JSON.stringify(f.state));
     const r = withEnv(
@@ -486,13 +493,21 @@ describe('projectFleet — a live pass over a fake herdr', () => {
         FAKE_HERDR_SCENARIO: scenario,
         FAKE_HERDR_LOG: log,
       },
-      () => projectFleet(root, NOW)
+      () => projectFleet(root, now)
     );
     return { r, calls: callsOf(log) };
   };
 
   const stateDirOf = (): string => mkdtempSync(join(tmpdir(), 'proj-state-'));
   const plainRoot = (): string => mkdtempSync(join(tmpdir(), 'proj-fleet-'));
+  /** managed workspace record + ws row for a one-workspace scenario. */
+  const oneWs = (root: string, ws: string) => ({
+    worktrees: [{ path: root, open_workspace_id: ws }],
+    workspaces: [{ workspace_id: ws, label: 'Old', tokens: {} }],
+  });
+  const oneWsState = (root: string, ws: string) => ({
+    workspaces: { [root]: { ws, label: 'Old', managed: true } },
+  });
 
   test('a managed workspace gets its rename + metadata writes', () => {
     const root = plainRoot();
@@ -541,91 +556,83 @@ describe('projectFleet — a live pass over a fake herdr', () => {
     const root = armedRoot();
     const { r, calls } = fleetPass(root, stateDirOf(), {
       scenario: {
-        worktrees: [{ path: root, open_workspace_id: 'w1' }],
-        workspaces: [{ workspace_id: 'w1', label: 'Old', tokens: {} }],
+        ...oneWs(root, 'wL'),
         panes: [
-          { pane_id: 'w1:p2', workspace_id: 'w1', agent: 'devin' },
-          { pane_id: 'w1:p1', workspace_id: 'w1' },
+          { pane_id: 'wL:p2', workspace_id: 'wL', agent: 'devin' },
+          { pane_id: 'wL:p1', workspace_id: 'wL' },
         ],
         processes: {
-          'w1:p1': { shell_pid: 7, foreground_processes: [{ pid: 7 }, { pid: 99 }] },
-          'w1:p2': { shell_pid: 5, foreground_processes: [{ pid: 5 }, { pid: 44 }] },
+          'wL:p1': { shell_pid: 7, foreground_processes: [{ pid: 7 }, { pid: 99 }] },
+          'wL:p2': { shell_pid: 5, foreground_processes: [{ pid: 5 }, { pid: 44 }] },
         },
       },
       state: {
-        workspaces: { [root]: { ws: 'w1', label: 'Old', managed: true } },
-        mirrors: { m1: { pane_id: 'w1:p2', workspace: 'w1', marked: false } },
-        renderers: { [root]: { pane_id: 'w1:p1', workspace: 'w1' } },
+        ...oneWsState(root, 'wL'),
+        mirrors: { m1: { pane_id: 'wL:p2', workspace: 'wL', marked: false } },
+        renderers: { [root]: { pane_id: 'wL:p1', workspace: 'wL' } },
       },
     });
     assert.equal(r.leds, 1);
     // armed tree, no worker verdict → unknown; only p1 is reportable
     const report = calls.find(c => c.slice(0, 2).join(' ') === 'pane report-agent');
-    assert.deepEqual(report, [
+    assert.deepEqual(report?.slice(0, 7), [
       'pane',
       'report-agent',
-      'w1:p1',
+      'wL:p1',
       '--source',
       'bro-fleet',
       '--agent',
       'fleet',
-      '--seq',
-      String(NOW),
-      '--state',
-      'unknown',
     ]);
+    assert.deepEqual(report?.slice(9), ['--state', 'unknown']);
+    assert.ok(report !== undefined && report[7] === '--seq' && seqOf(report) >= NOW);
     // the foreign-agent mirror is filtered before the busy probe —
     // no process-info, no report on p2 at all
-    assert.ok(!calls.some(c => c[1] === 'process-info' && c.includes('w1:p2')));
-    assert.ok(!calls.some(c => c.includes('w1:p2') && c[1] !== 'list'));
+    assert.ok(!calls.some(c => c[1] === 'process-info' && c.includes('wL:p2')));
+    assert.ok(!calls.some(c => c.includes('wL:p2') && c[1] !== 'list'));
   });
 
   test('an unarmed projection releases the pane instead of reporting', () => {
     const root = plainRoot();
     const { r, calls } = fleetPass(root, stateDirOf(), {
       scenario: {
-        worktrees: [{ path: root, open_workspace_id: 'w1' }],
-        workspaces: [{ workspace_id: 'w1', label: 'Old', tokens: {} }],
-        panes: [{ pane_id: 'w1:p1', workspace_id: 'w1' }],
+        ...oneWs(root, 'wR'),
+        panes: [{ pane_id: 'wR:p1', workspace_id: 'wR' }],
         processes: {
-          'w1:p1': { shell_pid: 7, foreground_processes: [{ pid: 7 }, { pid: 99 }] },
+          'wR:p1': { shell_pid: 7, foreground_processes: [{ pid: 7 }, { pid: 99 }] },
         },
       },
       state: {
-        workspaces: { [root]: { ws: 'w1', label: 'Old', managed: true } },
-        renderers: { [root]: { pane_id: 'w1:p1', workspace: 'w1' } },
+        ...oneWsState(root, 'wR'),
+        renderers: { [root]: { pane_id: 'wR:p1', workspace: 'wR' } },
       },
     });
     assert.equal(r.leds, 1);
-    assert.deepEqual(
-      calls.find(c => c.slice(0, 2).join(' ') === 'pane release-agent'),
-      [
-        'pane',
-        'release-agent',
-        'w1:p1',
-        '--source',
-        'bro-fleet',
-        '--agent',
-        'fleet',
-        '--seq',
-        String(NOW),
-      ]
-    );
+    const release = calls.find(c => c.slice(0, 2).join(' ') === 'pane release-agent');
+    assert.deepEqual(release?.slice(0, 7), [
+      'pane',
+      'release-agent',
+      'wR:p1',
+      '--source',
+      'bro-fleet',
+      '--agent',
+      'fleet',
+    ]);
+    assert.ok(release !== undefined && seqOf(release) >= NOW);
   });
 
   test('an idle-shell pane holds no report — the probe would clear it in ~1s', () => {
     const root = armedRoot();
     const { r, calls } = fleetPass(root, stateDirOf(), {
       scenario: {
-        worktrees: [{ path: root, open_workspace_id: 'w1' }],
-        workspaces: [{ workspace_id: 'w1', label: 'Old', tokens: {} }],
-        panes: [{ pane_id: 'w1:p1', workspace_id: 'w1' }],
+        ...oneWs(root, 'wI'),
+        panes: [{ pane_id: 'wI:p1', workspace_id: 'wI' }],
         // shell_pid IS the only foreground process → idle
-        processes: { 'w1:p1': { shell_pid: 7, foreground_processes: [{ pid: 7 }] } },
+        processes: { 'wI:p1': { shell_pid: 7, foreground_processes: [{ pid: 7 }] } },
       },
       state: {
-        workspaces: { [root]: { ws: 'w1', label: 'Old', managed: true } },
-        renderers: { [root]: { pane_id: 'w1:p1', workspace: 'w1' } },
+        ...oneWsState(root, 'wI'),
+        renderers: { [root]: { pane_id: 'wI:p1', workspace: 'wI' } },
       },
     });
     assert.equal(r.leds, 0);
@@ -636,15 +643,105 @@ describe('projectFleet — a live pass over a fake herdr', () => {
   test('no ledger panes → the LED path does not even read pane list', () => {
     const root = plainRoot();
     const { r, calls } = fleetPass(root, stateDirOf(), {
-      scenario: {
-        worktrees: [{ path: root, open_workspace_id: 'w1' }],
-        workspaces: [{ workspace_id: 'w1', label: 'Old', tokens: {} }],
-      },
-      state: {
-        workspaces: { [root]: { ws: 'w1', label: 'Old', managed: true } },
-      },
+      scenario: oneWs(root, 'wN'),
+      state: oneWsState(root, 'wN'),
     });
     assert.equal(r.leds, 0);
     assert.ok(!calls.some(c => c.slice(0, 2).join(' ').startsWith('pane ')));
+  });
+
+  test('a pane still bound to us but never selected is released', () => {
+    const root = armedRoot();
+    const { r, calls } = fleetPass(root, stateDirOf(), {
+      scenario: {
+        ...oneWs(root, 'wF'),
+        panes: [
+          // a leftover bro-fleet binding the ledger no longer proposes
+          { pane_id: 'wF:p9', workspace_id: 'wF', agent: 'fleet' },
+          { pane_id: 'wF:p1', workspace_id: 'wF' },
+        ],
+        processes: {
+          'wF:p1': { shell_pid: 7, foreground_processes: [{ pid: 7 }, { pid: 99 }] },
+        },
+      },
+      state: {
+        ...oneWsState(root, 'wF'),
+        renderers: { [root]: { pane_id: 'wF:p1', workspace: 'wF' } },
+      },
+    });
+    assert.equal(r.leds, 2);
+    assert.deepEqual(
+      calls.find(c => c.slice(0, 2).join(' ') === 'pane release-agent')?.slice(0, 3),
+      ['pane', 'release-agent', 'wF:p9']
+    );
+    assert.deepEqual(calls.find(c => c[1] === 'report-agent')?.[2], 'wF:p1');
+  });
+
+  test('a stale assertion is released when the selection moves', () => {
+    const root = armedRoot();
+    const dir = stateDirOf();
+    const scenario = {
+      ...oneWs(root, 'wS'),
+      panes: [
+        { pane_id: 'wS:p1', workspace_id: 'wS' },
+        { pane_id: 'wS:p2', workspace_id: 'wS' },
+      ],
+      processes: {
+        'wS:p1': { shell_pid: 7, foreground_processes: [{ pid: 7 }, { pid: 99 }] },
+        'wS:p2': { shell_pid: 5, foreground_processes: [{ pid: 5 }, { pid: 44 }] },
+      },
+    };
+    const p1 = fleetPass(root, dir, {
+      scenario,
+      state: {
+        ...oneWsState(root, 'wS'),
+        mirrors: { m1: { pane_id: 'wS:p1', workspace: 'wS', marked: false } },
+      },
+    });
+    assert.deepEqual(p1.calls.find(c => c[1] === 'report-agent')?.[2], 'wS:p1');
+    // next tick: the mirror is marked (dead tail), the selection moves
+    // to the renderer pane → the p1 assertion must be released
+    const p2 = fleetPass(root, dir, {
+      scenario,
+      state: {
+        ...oneWsState(root, 'wS'),
+        mirrors: { m1: { pane_id: 'wS:p1', workspace: 'wS', marked: true } },
+        renderers: { [root]: { pane_id: 'wS:p2', workspace: 'wS' } },
+      },
+    });
+    assert.equal(p2.r.leds, 2);
+    assert.deepEqual(p2.calls.find(c => c[1] === 'release-agent')?.slice(0, 3), [
+      'pane',
+      'release-agent',
+      'wS:p1',
+    ]);
+    assert.deepEqual(p2.calls.find(c => c[1] === 'report-agent')?.[2], 'wS:p2');
+  });
+
+  test('the seq is monotonic per source — a clock regress cannot emit a stale one', () => {
+    const root = armedRoot();
+    const dir = stateDirOf();
+    const f = {
+      scenario: {
+        ...oneWs(root, 'wQ'),
+        panes: [{ pane_id: 'wQ:p1', workspace_id: 'wQ' }],
+        processes: {
+          'wQ:p1': { shell_pid: 7, foreground_processes: [{ pid: 7 }, { pid: 99 }] },
+        },
+      },
+      state: {
+        ...oneWsState(root, 'wQ'),
+        renderers: { [root]: { pane_id: 'wQ:p1', workspace: 'wQ' } },
+      },
+    };
+    const seqOfReport = (calls: string[][]): number => {
+      const c = calls.find(x => x[1] === 'report-agent');
+      assert.ok(c !== undefined);
+      return seqOf(c);
+    };
+    const a = seqOfReport(fleetPass(root, dir, f).calls);
+    // wall clock jumps backward — the second seq must still outrank the first
+    const b = seqOfReport(fleetPass(root, dir, f, NOW - 60_000).calls);
+    assert.ok(b > a, `${b} should exceed ${a} after a clock regress`);
   });
 });

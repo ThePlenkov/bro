@@ -860,10 +860,31 @@ function metaArgs(j: MetaCall): string[] | null {
 
 // --- the LED write ---------------------------------------------------------------
 
-/** The report/release argv for one pane. `--seq` rides the pass
- *  instant — monotonic per source across ticks, so a stale drop can
- *  never overwrite a newer one (hook_report_is_newer). */
-function ledArgs(paneId: string, rep: LedReport, now: number): string[] {
+/** At most this many eligible panes get a process-info probe per tick —
+ *  probe order is ledger order (live mirrors first), and a wedged pane
+ *  costs one HERDR_TIMEOUT_MS, so the cap bounds what one workspace can
+ *  add to the drive tick. */
+const LED_PROBE_MAX = 3;
+
+/** `--seq` is per-source monotonic (hook_report_is_newer drops a stale
+ *  seq) — a wall clock that ticks backward or two passes inside one
+ *  millisecond must never emit a seq herdr then ignores. */
+let ledSeqLast = 0;
+const ledSeq = (now: number): number => {
+  ledSeqLast = Math.max(now, ledSeqLast + 1);
+  return ledSeqLast;
+};
+
+/** The pane this source last asserted on, per workspace — daemon-process
+ *  memory. A changed selection releases the stale row before the new
+ *  report lands; panes herdr still shows bound to us get the same
+ *  release regardless of where the assertion came from. */
+const ledPanes = new Map<string, string>();
+
+/** The report/release argv for one pane. `--seq` is per-source
+ *  monotonic, so a stale drop can never overwrite a newer one
+ *  (hook_report_is_newer). */
+function ledArgs(paneId: string, rep: LedReport, seq: number): string[] {
   const args = [
     'pane',
     rep.kind === 'report' ? 'report-agent' : 'release-agent',
@@ -873,7 +894,7 @@ function ledArgs(paneId: string, rep: LedReport, now: number): string[] {
     '--agent',
     LED_AGENT,
     '--seq',
-    String(now),
+    String(seq),
   ];
   if (rep.kind === 'report') {
     args.push('--state', rep.state);
@@ -887,12 +908,36 @@ function ledArgs(paneId: string, rep: LedReport, now: number): string[] {
  *  agent-free, and busy. This is a heartbeat, not a diff: the
  *  authority isn't persisted across herdr restarts and the
  *  self-reported probe can clear it, so it's re-asserted every tick —
- *  fire-and-forget, every failure a quiet skip. */
+ *  fire-and-forget, every failure a quiet skip. Panes that keep a
+ *  stale `bro-fleet` assertion after the selection moved (a re-ordered
+ *  candidate, a newly-marked mirror, a daemon restart mid-authority)
+ *  are released in the same pass. */
 function ledDiff(t: WsTarget, proj: TreeProjection, now: number): number {
-  if (t.panes.length === 0) return 0;
+  const stale = ledPanes.get(t.wsId);
+  if (t.panes.length === 0 && stale === undefined) return 0;
   const rows = paneRows(t.wsId);
   if (rows === undefined) return 0;
-  const pane = ledPane(rows, t.panes).find(p => paneBusy(p));
-  if (pane === undefined) return 0;
-  return herdrOk(ledArgs(pane, ledReport(proj), now)) ? 1 : 0;
+  const pane = ledPane(rows, t.panes)
+    .slice(0, LED_PROBE_MAX)
+    .find(p => paneBusy(p));
+  const rep = pane === undefined ? undefined : ledReport(proj);
+  const seq = ledSeq(now);
+  let n = 0;
+  // release assertions that outlived their selection — the pane we
+  // last reported is no longer the target, or herdr still shows a
+  // pane bound to us that the ledger no longer proposes
+  const releases = new Set(
+    rows.filter(r => r.agent === LED_AGENT || r.agent === LED_SOURCE).map(r => r.pane_id)
+  );
+  if (stale !== undefined) releases.add(stale);
+  if (pane !== undefined) releases.delete(pane); // its verdict lands via rep below
+  for (const s of releases) {
+    n += herdrOk(ledArgs(s, { kind: 'release' }, seq)) ? 1 : 0;
+    if (s === stale) ledPanes.delete(t.wsId);
+  }
+  if (pane === undefined || rep === undefined) return n;
+  n += herdrOk(ledArgs(pane, rep, seq)) ? 1 : 0;
+  if (rep.kind === 'report') ledPanes.set(t.wsId, pane);
+  else ledPanes.delete(t.wsId);
+  return n;
 }
