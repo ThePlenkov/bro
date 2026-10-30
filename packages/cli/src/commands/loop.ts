@@ -3661,7 +3661,9 @@ async function runQueue(ctx: Ctx): Promise<void> {
         }
         if (q.holdStage?.startsWith('infra hold')) {
           q.infraErrors += 1;
-          q.holdStage = q.holdStage.includes('(') ? q.holdStage.replace(/\(\d+\)/, `(${q.infraErrors})`) : `infra hold (${q.infraErrors})`;
+          q.holdStage = q.holdStage.includes('(')
+            ? q.holdStage.replace(/\(\d+\)/, `(${q.infraErrors})`)
+            : `infra hold (${q.infraErrors})`;
           ctx.stage = q.holdStage;
         } else {
           q.infraErrors = 0;
