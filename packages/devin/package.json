@@ -1,10 +1,10 @@
 {
   "name": "@broject/devin",
-  "version": "0.2.5",
+  "version": "0.3.0",
   "type": "module",
   "dependencies": {
-    "@broject/core": "^0.2.0",
-    "@broject/providers": "^0.2.5"
+    "@broject/core": "^0.3.0",
+    "@broject/providers": "^0.3.0"
   },
   "exports": {
     ".": {

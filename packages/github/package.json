@@ -1,6 +1,6 @@
 {
   "name": "@broject/github",
-  "version": "0.2.5",
+  "version": "0.3.0",
   "type": "module",
   "exports": {
     ".": {
@@ -13,7 +13,7 @@
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
-    "@broject/core": "^0.2.0"
+    "@broject/core": "^0.3.0"
   },
   "devDependencies": {
     "tsdown": "^0.15.0",
