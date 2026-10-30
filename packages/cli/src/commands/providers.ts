@@ -211,10 +211,7 @@ async function liveCatalog(
 
 /** `route` — qualified ids and declared routes are authoritative:
  *  they resolve without paying a live probe. Bare ids resolve against
- *  the live catalog (which subsumes the static index — pins append on
- *  every kind, api allowlists ARE the api catalog, and a failed probe
- *  falls back to the static ids) so `--all` still reports every
- *  candidate the live catalog would serve. */
+ *  the live catalog. */
 async function runRouteCommand(
   names: string[],
   providers: Record<string, ProviderEntry>,
@@ -224,6 +221,7 @@ async function runRouteCommand(
   const rest = names.filter(n => n !== '--all');
   if (rest.length !== 1) {
     printUsage(USAGE, 2);
+    return;
   }
   const asked = rest[0]!;
   const brouter = opts.brouter ?? loadConfig(process.cwd()).brouter ?? { models: {} };
@@ -248,14 +246,13 @@ async function runRouteCommand(
   }
 }
 
-/** `models` — the catalog surface: named providers or all of them,
- *  a failing provider warns and the exit code reports it. */
-async function runModelsCommand(
-  names: string[],
-  providers: Record<string, ProviderEntry>,
-  opts: Opts,
-  out: (line: string) => void
-): Promise<void> {
+async function cmdModels(argv: string[], opts: Opts): Promise<void> {
+  const names = argv;
+  if (hasHelpFlag(names)) {
+    printUsage(USAGE, 2);
+    return;
+  }
+  const providers = opts.providers ?? loadConfig(process.cwd()).providers ?? {};
   const wanted =
     names.length > 0
       ? names.map(n => {
@@ -268,10 +265,12 @@ async function runModelsCommand(
           return [n, entry] as const;
         })
       : (Object.entries(providers) as [string, ProviderEntry][]);
+  const out = opts.out ?? ((line: string) => console.log(line));
   let failed = 0;
   for (const [name, entry] of wanted) {
     try {
-      for (const row of await providerModels(name, entry, opts)) {
+      const models = await providerModels(name, entry, opts);
+      for (const row of models) {
         out(row.id);
       }
     } catch (err) {
@@ -382,11 +381,13 @@ async function cmdTest(argv: string[], opts: Opts): Promise<void> {
 
 export async function runProvidersCommand(argv: string[], opts: Opts = {}): Promise<void> {
   const [verb, ...rest] = argv;
-  if (verb === undefined || hasHelpFlag(argv)) {
+  if (verb === undefined) {
     printUsage(USAGE, 0);
+    return;
   }
-  const providers = opts.providers ?? loadConfig(process.cwd()).providers ?? {};
-  const out = opts.out ?? ((line: string) => console.log(line));
+  if (hasHelpFlag(argv)) {
+    printUsage(USAGE, verb === 'models' || verb === 'route' || verb === 'add' || verb === 'test' ? 0 : 2);
+  }
   if (verb === 'add') {
     await cmdAdd(rest, opts);
     return;
@@ -396,11 +397,11 @@ export async function runProvidersCommand(argv: string[], opts: Opts = {}): Prom
     return;
   }
   if (verb === 'route') {
-    await runRouteCommand(rest, providers, opts, out);
+    await runRouteCommand(rest, opts.providers ?? loadConfig(process.cwd()).providers ?? {}, opts, opts.out ?? ((line: string) => console.log(line)));
     return;
   }
   if (verb === 'models') {
-    await runModelsCommand(rest, providers, opts, out);
+    await cmdModels(rest, opts);
     return;
   }
   die(`unknown subcommand ${verb}`);
