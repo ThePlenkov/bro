@@ -1,7 +1,8 @@
 /**
  * The daemon-owned fleet-status projector (spec bro-u19mq) — the ONE
- * writer of `[state·#PR]` workspace labels and the `status` metadata
- * token on herdr workspaces. The herdr session plugins keep only
+ * writer of `[state·#PR]` workspace labels, the `status` metadata
+ * token, and the native pane LED (`pane report-agent`, spec bro-awqde)
+ * on herdr workspaces. The herdr session plugins keep only
  * spawn/attach lifecycle (`worktree open`, mirrors, renderers, the
  * reaper); they never write fleet labels — this tick does, so a dead
  * session can't leave a stale `[working]` on a crashed run.
@@ -211,6 +212,70 @@ export function labelFor(p: TreeProjection, title: string): string {
   return s === '' ? title : `[${s}] ${title}`;
 }
 
+// --- the native LED (spec bro-awqde) -------------------------------------------
+
+/** Herdr's reportable pane states — `done` is not a reportable state,
+ *  `idle` renders the native `✓` on unviewed panes. */
+export type LedState = 'working' | 'blocked' | 'idle' | 'unknown';
+
+export type LedReport = { kind: 'report'; state: LedState; message?: string } | { kind: 'release' };
+
+/** The projection → `pane report-agent` verdict — the SAME
+ *  classification the label carries, one mapping (bro-awqde):
+ *  working/silent → working (silent carries its bucket as the
+ *  message), interrupted/lost → blocked with the cause word, exited →
+ *  idle (native done), stopped/vacated → release (the row disappears),
+ *  armed-but-no-worker → unknown (the LED is present but dim, the
+ *  `no PR`-layer analogue). */
+export function ledReport(p: TreeProjection): LedReport {
+  switch (p.state) {
+    case 'working':
+      return { kind: 'report', state: 'working' };
+    case 'silent': {
+      const m = workerToken(p);
+      // a silent verdict always carries its bucket — an unbucketed
+      // 'silent' message reads like a bug, so fall back to bare working
+      return m === undefined || m === 'silent'
+        ? { kind: 'report', state: 'working' }
+        : { kind: 'report', state: 'working', message: m };
+    }
+    case 'interrupted':
+    case 'lost':
+      return { kind: 'report', state: 'blocked', message: p.state };
+    case 'exited':
+      return { kind: 'report', state: 'idle', message: 'exited' };
+    case 'stopped':
+      return { kind: 'release' };
+    case undefined:
+      return p.armed === true ? { kind: 'report', state: 'unknown' } : { kind: 'release' };
+  }
+}
+
+/** The `--agent` label we report as — self-reported (unrecognized) by
+ *  design; a `herdr:`-prefixed source would degrade, `bro-fleet` is
+ *  ours. */
+const LED_SOURCE = 'bro-fleet';
+const LED_AGENT = 'fleet';
+
+/** One `pane list` row — only the fields selection reads. */
+export interface HerdrPaneRow {
+  pane_id: string;
+  /** herdr's DETECTED agent — absent means no known agent is bound. */
+  agent?: string;
+}
+
+/** Ledger candidates that are live and reportable — in order. A pane
+ *  bound to a DIFFERENT detected agent rejects our report anyway; a
+ *  pane carrying our own label is a re-report, allowed. */
+export function ledPane(rows: HerdrPaneRow[], candidates: string[]): string[] {
+  const ok = new Set(
+    rows
+      .filter(r => r.agent === undefined || r.agent === '' || r.agent === LED_AGENT)
+      .map(r => r.pane_id)
+  );
+  return candidates.filter(c => ok.has(c));
+}
+
 // --- plane reads (the function boundary — a NATS feed swaps these) --------------
 
 interface HerdrWorktree {
@@ -249,6 +314,27 @@ function herdr<T>(args: string[]): T | undefined {
 
 function herdrOk(args: string[]): boolean {
   return herdrRun(args).code === 0;
+}
+
+/** `pane list --workspace <ws>` — the existence + detected-agent probe
+ *  for LED candidates. Undefined on any failure — a skipped LED, not
+ *  a tick verdict. */
+function paneRows(wsId: string): HerdrPaneRow[] | undefined {
+  return herdr<{ panes?: HerdrPaneRow[] }>(['pane', 'list', '--workspace', wsId])?.panes;
+}
+
+/** A live non-shell foreground process — the ONLY pane a self-reported
+ *  authority survives on. Herdr's ~1s pane probe auto-clears a
+ *  self-reported report the moment the foreground is the bare shell
+ *  (`self_reported_agent_active`/`ReportedAgentShellReturned`), so a
+ *  report onto an idle pane is a guaranteed miss — skip it instead. */
+function paneBusy(paneId: string): boolean {
+  const pi = herdr<{
+    process_info?: { shell_pid?: number; foreground_processes?: { pid?: number }[] };
+  }>(['pane', 'process-info', '--pane', paneId])?.process_info;
+  if (pi === undefined) return false;
+  const fg = pi.foreground_processes ?? [];
+  return fg.some(proc => proc.pid !== pi.shell_pid);
 }
 
 export interface ActEntry {
@@ -302,16 +388,52 @@ function realpathOrNull(p: string): string | null {
   }
 }
 
+/** What the projector reads out of the plugin's state file — the
+ *  ownership records AND the LED's candidate panes, one parse. */
+interface PluginLedger {
+  /** worktree path → the plugin's workspace binding + ownership flag. */
+  workspaces: Map<string, { ws?: string; managed?: boolean }>;
+  /** workspace id → ordered LED candidate pane ids — live mirror panes
+   *  first (the pane tailing the actual worker), the events renderer
+   *  last. Marked mirrors are dead tails on idle shells — a report
+   *  there self-clears, so they never make the list. */
+  panes: Map<string, string[]>;
+}
+
 /** The plugin's ownership ledger — `managed: true` marks workspaces a
- *  plugin opened (the only ones we may relabel). Read-only here; the
- *  plugin still owns writes. Reads EVERY plausible ledger — the scope
- *  hashes the git common dir as the plugin resolved it (raw and
- *  realpath: a symlinked checkout must not partition the fleet), in
- *  `$HERDR_PLUGIN_STATE_DIR` and the default dir (a plugin host and a
- *  daemon configured differently must still agree on ownership). */
-function managedSet(
-  ctx: Pick<PassCtx, 'root' | 'common'>
-): Map<string, { ws?: string; managed?: boolean }> {
+ *  plugin opened (the only ones we may relabel), and the mirror /
+ *  renderer pane records are the LED's foreground-process candidates.
+ *  Read-only here; the plugin still owns writes. Reads EVERY plausible
+ *  ledger — the scope hashes the git common dir as the plugin resolved
+ *  it (raw and realpath: a symlinked checkout must not partition the
+ *  fleet), in `$HERDR_PLUGIN_STATE_DIR` and the default dir (a plugin
+ *  host and a daemon configured differently must still agree on
+ *  ownership). */
+/** One parsed `state-<scope>.json` — the fields the ledger reads. */
+interface PluginLedgerFile {
+  workspaces?: Record<string, { ws?: string; managed?: boolean }>;
+  mirrors?: Record<string, { pane_id?: string; workspace?: string; marked?: boolean }>;
+  renderers?: Record<string, { pane_id?: string; workspace?: string }>;
+}
+
+/** Merge one parsed state file into the ledger — last write wins per
+ *  workspace key, and candidate panes collect in mirror-then-renderer
+ *  order (the live worker's tail before the events renderer). */
+function mergeLedger(out: PluginLedger, v: PluginLedgerFile): void {
+  const pane = (ws: string | undefined, paneId: string | undefined): void => {
+    if (ws === undefined || paneId === undefined) return;
+    const l = out.panes.get(ws) ?? [];
+    if (!l.includes(paneId)) l.push(paneId);
+    out.panes.set(ws, l);
+  };
+  for (const [k, r] of Object.entries(v.workspaces ?? {})) out.workspaces.set(k, r);
+  for (const r of Object.values(v.mirrors ?? {})) {
+    if (r.marked !== true) pane(r.workspace, r.pane_id);
+  }
+  for (const r of Object.values(v.renderers ?? {})) pane(r.workspace, r.pane_id);
+}
+
+function pluginLedger(ctx: Pick<PassCtx, 'root' | 'common'>): PluginLedger {
   const base = ctx.common ?? ctx.root;
   const real = realpathOrNull(base);
   const scopes = new Set(
@@ -325,14 +447,11 @@ function managedSet(
       join(process.env.HOME ?? '/tmp', '.config', 'bro-herdr-plugin'),
     ].filter((d): d is string => d !== undefined)
   );
-  const out = new Map<string, { ws?: string; managed?: boolean }>();
+  const out: PluginLedger = { workspaces: new Map(), panes: new Map() };
   for (const dir of dirs) {
     for (const scope of scopes) {
       try {
-        const v = JSON.parse(readFileSync(join(dir, `state-${scope}.json`), 'utf8')) as {
-          workspaces?: Record<string, { ws?: string; managed?: boolean }>;
-        };
-        for (const [k, r] of Object.entries(v.workspaces ?? {})) out.set(k, r);
+        mergeLedger(out, JSON.parse(readFileSync(join(dir, `state-${scope}.json`), 'utf8')));
       } catch {
         // no ledger at this candidate — the others still apply
       }
@@ -511,6 +630,10 @@ export interface ProjectResult {
   workspaces: number;
   /** rename/report-metadata calls that succeeded. */
   writes: number;
+  /** report-agent/release-agent calls that succeeded — NOT dedup'd
+   *  (re-report every tick is the protocol), so they stay out of
+   *  `writes` to keep the label-churn log line honest. */
+  leds: number;
   /** A plane read that failed while herdr itself answered — named so
    *  the tick can say it instead of looking like a clean skip. */
   degraded?: string;
@@ -554,18 +677,20 @@ function readPlanes(ctx: PassCtx): Planes {
 }
 
 /** One managed∩open pair — the worktree, the workspace id herdr has
- *  open for it, and the live workspace record (the dedup source). */
+ *  open for it, the live workspace record (the dedup source), and the
+ *  LED's candidate pane ids from the ledger. */
 interface WsTarget {
   tree: HerdrWorktree;
   wsId: string;
   live: HerdrWorkspace;
+  panes: string[];
 }
 
 /** The managed∩open set — workspaces the plugin opened AND still owns;
  *  a user's own workspace is never a target. */
 function managedTargets(
   trees: HerdrWorktree[],
-  managed: Map<string, { ws?: string; managed?: boolean }>,
+  ledger: PluginLedger,
   wsById: Map<string, HerdrWorkspace>
 ): WsTarget[] {
   const out: WsTarget[] = [];
@@ -574,9 +699,9 @@ function managedTargets(
     if (wsId === undefined) continue;
     const live = wsById.get(wsId);
     if (live === undefined) continue;
-    const rec = managed.get(tree.path);
+    const rec = ledger.workspaces.get(tree.path);
     if (rec?.managed !== true || rec.ws !== wsId) continue;
-    out.push({ tree, wsId, live });
+    out.push({ tree, wsId, live, panes: ledger.panes.get(wsId) ?? [] });
   }
   return out;
 }
@@ -644,30 +769,32 @@ function liveTitle(label: string | undefined): string | undefined {
  *  skipped pass, never a thrown tick — a plane read that fails while
  *  herdr answered lands on `degraded` so the tick can say it. */
 export function projectFleet(mainRoot: string, now = Date.now()): ProjectResult {
-  const none: ProjectResult = { reachable: false, workspaces: 0, writes: 0 };
+  const none: ProjectResult = { reachable: false, workspaces: 0, writes: 0, leds: 0 };
   const trees = herdr<{ worktrees?: HerdrWorktree[] }>(['worktree', 'list', '--cwd', mainRoot]);
   if (trees?.worktrees === undefined) return none;
 
   const common = gitCommonDir(mainRoot);
   const wsList = herdr<{ workspaces?: HerdrWorkspace[] }>(['workspace', 'list']);
   if (wsList?.workspaces === undefined) {
-    return { reachable: true, workspaces: 0, writes: 0, degraded: 'workspace list' };
+    return { reachable: true, workspaces: 0, writes: 0, leds: 0, degraded: 'workspace list' };
   }
   const wsById = new Map(wsList.workspaces.map(w => [w.workspace_id, w]));
   const ctx: PassCtx = { root: mainRoot, common, now };
-  const targets = managedTargets(trees.worktrees, managedSet(ctx), wsById);
-  if (targets.length === 0) return { reachable: true, workspaces: 0, writes: 0 };
+  const targets = managedTargets(trees.worktrees, pluginLedger(ctx), wsById);
+  if (targets.length === 0) return { reachable: true, workspaces: 0, writes: 0, leds: 0 };
 
   const planes = readPlanes(ctx);
   let writes = 0;
+  let leds = 0;
   for (const t of targets) {
     const { projection, title } = projectTree(treeInput(t.tree, planes, ctx));
     // an empty bead plane means the backend read failed or is empty —
     // a live titled label beats a path-basename downgrade in that gap
     const safe = planes.beads.length === 0 ? (liveTitle(t.live.label) ?? title) : title;
     writes += writeDiffs({ ws: t, proj: projection, title: safe, now: ctx.now });
+    leds += ledDiff(t, projection, ctx.now);
   }
-  return { reachable: true, workspaces: targets.length, writes };
+  return { reachable: true, workspaces: targets.length, writes, leds };
 }
 
 /** Everything one workspace's write pass needs — the projection, the
@@ -740,4 +867,88 @@ function metaArgs(j: MetaCall): string[] | null {
     }
   }
   return dirty ? args : null;
+}
+
+// --- the LED write ---------------------------------------------------------------
+
+/** At most this many eligible panes get a process-info probe per tick —
+ *  probe order is ledger order (live mirrors first), and a wedged pane
+ *  costs one HERDR_TIMEOUT_MS, so the cap bounds what one workspace can
+ *  add to the drive tick. */
+const LED_PROBE_MAX = 3;
+
+/** `--seq` is per-source monotonic (hook_report_is_newer drops a stale
+ *  seq) — a wall clock that ticks backward or two passes inside one
+ *  millisecond must never emit a seq herdr then ignores. */
+let ledSeqLast = 0;
+const ledSeq = (now: number): number => {
+  ledSeqLast = Math.max(now, ledSeqLast + 1);
+  return ledSeqLast;
+};
+
+/** The pane this source last asserted on, per workspace — daemon-process
+ *  memory. A changed selection releases the stale row before the new
+ *  report lands; panes herdr still shows bound to us get the same
+ *  release regardless of where the assertion came from. */
+const ledPanes = new Map<string, string>();
+
+/** The report/release argv for one pane. `--seq` is per-source
+ *  monotonic, so a stale drop can never overwrite a newer one
+ *  (hook_report_is_newer). */
+function ledArgs(paneId: string, rep: LedReport, seq: number): string[] {
+  const args = [
+    'pane',
+    rep.kind === 'report' ? 'report-agent' : 'release-agent',
+    paneId,
+    '--source',
+    LED_SOURCE,
+    '--agent',
+    LED_AGENT,
+    '--seq',
+    String(seq),
+  ];
+  if (rep.kind === 'report') {
+    args.push('--state', rep.state);
+    if (rep.message !== undefined) args.push('--message', rep.message);
+  }
+  return args;
+}
+
+/** The native-LED write for one workspace — the verdict the label
+ *  already computed, asserted on the first ledger pane that is live,
+ *  agent-free, and busy. This is a heartbeat, not a diff: the
+ *  authority isn't persisted across herdr restarts and the
+ *  self-reported probe can clear it, so it's re-asserted every tick —
+ *  fire-and-forget, every failure a quiet skip. Panes that keep a
+ *  stale `bro-fleet` assertion after the selection moved (a re-ordered
+ *  candidate, a newly-marked mirror, a daemon restart mid-authority)
+ *  are released in the same pass. */
+function ledDiff(t: WsTarget, proj: TreeProjection, now: number): number {
+  const stale = ledPanes.get(t.wsId);
+  if (t.panes.length === 0 && stale === undefined) return 0;
+  const rows = paneRows(t.wsId);
+  if (rows === undefined) return 0;
+  const pane = ledPane(rows, t.panes)
+    .slice(0, LED_PROBE_MAX)
+    .find(p => paneBusy(p));
+  const rep = pane === undefined ? undefined : ledReport(proj);
+  const seq = ledSeq(now);
+  let n = 0;
+  // release assertions that outlived their selection — the pane we
+  // last reported is no longer the target, or herdr still shows a
+  // pane bound to us that the ledger no longer proposes
+  const releases = new Set(
+    rows.filter(r => r.agent === LED_AGENT || r.agent === LED_SOURCE).map(r => r.pane_id)
+  );
+  if (stale !== undefined) releases.add(stale);
+  if (pane !== undefined) releases.delete(pane); // its verdict lands via rep below
+  for (const s of releases) {
+    n += herdrOk(ledArgs(s, { kind: 'release' }, seq)) ? 1 : 0;
+    if (s === stale) ledPanes.delete(t.wsId);
+  }
+  if (pane === undefined || rep === undefined) return n;
+  n += herdrOk(ledArgs(pane, rep, seq)) ? 1 : 0;
+  if (rep.kind === 'report') ledPanes.set(t.wsId, pane);
+  else ledPanes.delete(t.wsId);
+  return n;
 }

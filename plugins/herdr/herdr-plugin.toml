@@ -8,10 +8,12 @@
 #
 # Ownership (spec bro-u19mq): the plugin opens workspaces and keeps
 # spawn/attach lifecycle — mirrors, renderers, the reaper. Fleet status
-# (`[state·#PR]` labels, the `status` metadata token) is written ONLY
+# (`[state·#PR]` labels, the `status` metadata token, and the native
+# pane LED via `pane report-agent` — spec bro-awqde) is written ONLY
 # by the bro daemon's fleet projector, so a dead session can't strand
 # a stale label; the plugin's `managed` record is how the projector
-# knows which workspaces it may relabel.
+# knows which workspaces it may relabel, and its mirror/renderer pane
+# records are the LED's report targets.
 id = "bro.fleet"
 name = "bro fleet"
 version = "0.1.0"

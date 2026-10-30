@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
-import { mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, test } from 'node:test';
@@ -8,6 +8,8 @@ import {
   type ActEntry,
   gateFrag,
   labelFor,
+  ledPane,
+  ledReport,
   prFor,
   prToken,
   projectFleet,
@@ -308,13 +310,90 @@ describe('projectTree — end to end over injected planes', () => {
   });
 });
 
+describe('ledReport — the native-state mapping (bro-awqde)', () => {
+  test('silent without a bucket falls back to bare working', () => {
+    assert.deepEqual(ledReport({ state: 'silent' }), { kind: 'report', state: 'working' });
+  });
+
+  test('working → working, silent → working + bucket message', () => {
+    assert.deepEqual(ledReport({ state: 'working' }), { kind: 'report', state: 'working' });
+    assert.deepEqual(ledReport({ state: 'silent', silentMin: 45 }), {
+      kind: 'report',
+      state: 'working',
+      message: 'silent45m',
+    });
+    assert.deepEqual(ledReport({ state: 'silent', silentMin: 960 }), {
+      kind: 'report',
+      state: 'working',
+      message: 'silent16h',
+    });
+  });
+
+  test('interrupted/lost → blocked carrying the cause word', () => {
+    assert.deepEqual(ledReport({ state: 'interrupted' }), {
+      kind: 'report',
+      state: 'blocked',
+      message: 'interrupted',
+    });
+    assert.deepEqual(ledReport({ state: 'lost' }), {
+      kind: 'report',
+      state: 'blocked',
+      message: 'lost',
+    });
+  });
+
+  test('exited → idle (native done); stopped → release', () => {
+    assert.deepEqual(ledReport({ state: 'exited' }), {
+      kind: 'report',
+      state: 'idle',
+      message: 'exited',
+    });
+    assert.deepEqual(ledReport({ state: 'stopped' }), { kind: 'release' });
+  });
+
+  test('no worker verdict — armed reports unknown, unarmed releases', () => {
+    assert.deepEqual(ledReport({ armed: true }), { kind: 'report', state: 'unknown' });
+    assert.deepEqual(ledReport({}), { kind: 'release' });
+    assert.deepEqual(ledReport({ armed: false }), { kind: 'release' });
+  });
+});
+
+describe('ledPane — the reportable-candidate filter', () => {
+  const rows = [
+    { pane_id: 'w1:p1' },
+    { pane_id: 'w1:p2', agent: 'devin' },
+    { pane_id: 'w1:p3', agent: 'fleet' },
+    { pane_id: 'w1:p4', agent: '' },
+  ];
+
+  test('first ledger candidate that exists and is agent-free wins', () => {
+    assert.deepEqual(ledPane(rows, ['w1:p9', 'w1:p1']), ['w1:p1']);
+  });
+
+  test('a foreign detected agent skips the pane', () => {
+    assert.deepEqual(ledPane(rows, ['w1:p2', 'w1:p1']), ['w1:p1']);
+  });
+
+  test('our own label and an empty agent field still qualify', () => {
+    assert.deepEqual(ledPane(rows, ['w1:p3', 'w1:p4']), ['w1:p3', 'w1:p4']);
+  });
+
+  test('candidate order is preserved (mirrors before the renderer)', () => {
+    assert.deepEqual(ledPane(rows, ['w1:p4', 'w1:p1', 'w1:p2']), ['w1:p4', 'w1:p1']);
+  });
+
+  test('no candidates → nothing to probe', () => {
+    assert.deepEqual(ledPane(rows, []), []);
+  });
+});
+
 describe('projectFleet — no herdr, no writes, no throw', () => {
   test('unreachable herdr degrades to a quiet skip', () => {
     const prev = process.env.HERDR_BIN_PATH;
     process.env.HERDR_BIN_PATH = '/nonexistent/herdr';
     try {
       const r = projectFleet(mkdtempSync(join(tmpdir(), 'proj-')));
-      assert.deepEqual(r, { reachable: false, workspaces: 0, writes: 0 });
+      assert.deepEqual(r, { reachable: false, workspaces: 0, writes: 0, leds: 0 });
     } finally {
       if (prev === undefined) delete process.env.HERDR_BIN_PATH;
       else process.env.HERDR_BIN_PATH = prev;
@@ -338,6 +417,20 @@ if (verb === 'worktree list') {
   console.log(JSON.stringify({ result: { worktrees: s.worktrees ?? [] } }));
 } else if (verb === 'workspace list') {
   console.log(JSON.stringify({ result: { workspaces: s.workspaces ?? [] } }));
+} else if (verb === 'pane list') {
+  const ws = args[args.indexOf('--workspace') + 1];
+  console.log(
+    JSON.stringify({
+      result: { panes: (s.panes ?? []).filter(p => p.workspace_id === ws) },
+    })
+  );
+} else if (verb === 'pane process-info') {
+  const pi = (s.processes ?? {})[args[args.indexOf('--pane') + 1]];
+  if (pi === undefined) {
+    process.exitCode = 1;
+  } else {
+    console.log(JSON.stringify({ result: { process_info: pi } }));
+  }
 } else {
   console.log(JSON.stringify({ result: {} }));
 }
@@ -360,16 +453,109 @@ function withEnv<T>(env: Record<string, string>, fn: () => T): T {
 }
 
 describe('projectFleet — a live pass over a fake herdr', () => {
-  test('a managed workspace gets its rename + metadata writes', () => {
+  /** Root + a live claim marker — the cheap arm path: `.git/bro/work`
+   *  inside the tree, ownerless and fresh (24h window). */
+  const armedRoot = (): string => {
     const root = mkdtempSync(join(tmpdir(), 'proj-fleet-'));
-    const stateDir = mkdtempSync(join(tmpdir(), 'proj-state-'));
+    mkdirSync(join(root, '.git', 'bro'), { recursive: true });
+    writeFileSync(join(root, '.git', 'bro', 'work'), 'session test\nb1\n');
+    return root;
+  };
+
+  const callsOf = (log: string): string[][] =>
+    readFileSync(log, 'utf8')
+      .trim()
+      .split('\n')
+      .map(l => JSON.parse(l) as string[]);
+
+  /** The `--seq` a call carried — per-source monotonic, so tests assert
+   *  it numerically rather than against the pass instant. */
+  const seqOf = (call: string[]): number => Number(call[call.indexOf('--seq') + 1]);
+
+  /** One full pass over the fake herdr — scenario + plugin ledger in,
+   *  result + the recorded call log out. The ledger scope for a
+   *  repo-less root is sha1(root) (no common dir resolves). The log is
+   *  truncated per pass so multi-pass tests see each tick's calls. */
+  const fleetPass = (
+    root: string,
+    stateDir: string,
+    f: { scenario: Record<string, unknown>; state: Record<string, unknown> },
+    now = NOW
+  ): { r: ReturnType<typeof projectFleet>; calls: string[][] } => {
     const fake = join(root, 'fake-herdr.js');
     const scenario = join(root, 'scenario.json');
     const log = join(root, 'calls.jsonl');
     writeFileSync(fake, FAKE_HERDR, { mode: 0o755 });
-    writeFileSync(
-      scenario,
-      JSON.stringify({
+    writeFileSync(scenario, JSON.stringify(f.scenario));
+    rmSync(log, { force: true });
+    const scope = createHash('sha1').update(root).digest('hex').slice(0, 12);
+    writeFileSync(join(stateDir, `state-${scope}.json`), JSON.stringify(f.state));
+    const r = withEnv(
+      {
+        HERDR_BIN_PATH: fake,
+        HERDR_PLUGIN_STATE_DIR: stateDir,
+        FAKE_HERDR_SCENARIO: scenario,
+        FAKE_HERDR_LOG: log,
+      },
+      () => projectFleet(root, now)
+    );
+    return { r, calls: callsOf(log) };
+  };
+
+  const stateDirOf = (): string => mkdtempSync(join(tmpdir(), 'proj-state-'));
+  const plainRoot = (): string => mkdtempSync(join(tmpdir(), 'proj-fleet-'));
+
+  /** A pane row in `pane list` — `agent` only when herdr detected one. */
+  const pane = (id: string, ws: string, agent?: string): Record<string, unknown> => ({
+    pane_id: id,
+    workspace_id: ws,
+    ...(agent !== undefined ? { agent } : {}),
+  });
+  /** A busy pane's process-info — a foreground pid besides the shell. */
+  const busy = (shell: number, fg: number): Record<string, unknown> => ({
+    shell_pid: shell,
+    foreground_processes: [{ pid: shell }, { pid: fg }],
+  });
+  /** The plugin's renderer record for one tree → pane binding. */
+  const rendererOf = (root: string, paneId: string, ws: string): Record<string, unknown> => ({
+    [root]: { pane_id: paneId, workspace: ws },
+  });
+  /** The plugin's single mirror record. */
+  const mirrorOf = (paneId: string, ws: string, marked: boolean): Record<string, unknown> => ({
+    m1: { pane_id: paneId, workspace: ws, marked },
+  });
+
+  /** The one-workspace LED fixture — scenario + plugin state for a
+   *  managed worktree, with pane rows, process shapes, and ledger
+   *  panes overlaid. Every LED test's fixture is one of these; the
+   *  envelope lives here so the tests carry only their unique data. */
+  const ledFixture = (
+    root: string,
+    ws: string,
+    o: {
+      panes?: Record<string, unknown>[];
+      processes?: Record<string, unknown>;
+      mirrors?: Record<string, unknown>;
+      renderers?: Record<string, unknown>;
+    } = {}
+  ): { scenario: Record<string, unknown>; state: Record<string, unknown> } => ({
+    scenario: {
+      worktrees: [{ path: root, open_workspace_id: ws }],
+      workspaces: [{ workspace_id: ws, label: 'Old', tokens: {} }],
+      ...(o.panes !== undefined ? { panes: o.panes } : {}),
+      ...(o.processes !== undefined ? { processes: o.processes } : {}),
+    },
+    state: {
+      workspaces: { [root]: { ws, label: 'Old', managed: true } },
+      ...(o.mirrors !== undefined ? { mirrors: o.mirrors } : {}),
+      ...(o.renderers !== undefined ? { renderers: o.renderers } : {}),
+    },
+  });
+
+  test('a managed workspace gets its rename + metadata writes', () => {
+    const root = plainRoot();
+    const { r, calls } = fleetPass(root, stateDirOf(), {
+      scenario: {
         worktrees: [{ path: root, open_workspace_id: 'w1' }],
         workspaces: [
           {
@@ -378,30 +564,12 @@ describe('projectFleet — a live pass over a fake herdr', () => {
             tokens: { status: 'old', 'bro.worker': 'stale' },
           },
         ],
-      })
-    );
-    // non-repo root → the managed-file scope is sha1(root) (no common dir)
-    const scope = createHash('sha1').update(root).digest('hex').slice(0, 12);
-    writeFileSync(
-      join(stateDir, `state-${scope}.json`),
-      JSON.stringify({
-        workspaces: { [root]: { ws: 'w1', label: '[working·#1] Old Title', managed: true } },
-      })
-    );
-    const r = withEnv(
-      {
-        HERDR_BIN_PATH: fake,
-        HERDR_PLUGIN_STATE_DIR: stateDir,
-        FAKE_HERDR_SCENARIO: scenario,
-        FAKE_HERDR_LOG: log,
       },
-      () => projectFleet(root, NOW)
-    );
-    assert.deepEqual(r, { reachable: true, workspaces: 1, writes: 2 });
-    const calls = readFileSync(log, 'utf8')
-      .trim()
-      .split('\n')
-      .map(l => JSON.parse(l) as string[]);
+      state: {
+        workspaces: { [root]: { ws: 'w1', label: '[working·#1] Old Title', managed: true } },
+      },
+    });
+    assert.deepEqual(r, { reachable: true, workspaces: 1, writes: 2, leds: 0 });
     const rename = calls.find(c => c.slice(0, 2).join(' ') === 'workspace rename');
     // empty bead plane → the live titled label survives, no basename clobber
     assert.deepEqual(rename?.slice(0, 4), ['workspace', 'rename', 'w1', 'Old Title']);
@@ -412,37 +580,165 @@ describe('projectFleet — a live pass over a fake herdr', () => {
   });
 
   test('a user-owned workspace is never touched', () => {
-    const root = mkdtempSync(join(tmpdir(), 'proj-fleet-'));
-    const stateDir = mkdtempSync(join(tmpdir(), 'proj-state-'));
-    const fake = join(root, 'fake-herdr.js');
-    const scenario = join(root, 'scenario.json');
-    const log = join(root, 'calls.jsonl');
-    writeFileSync(fake, FAKE_HERDR, { mode: 0o755 });
-    writeFileSync(
-      scenario,
-      JSON.stringify({
+    const root = plainRoot();
+    const { r, calls } = fleetPass(root, stateDirOf(), {
+      scenario: {
         worktrees: [{ path: root, open_workspace_id: 'wUser' }],
         workspaces: [{ workspace_id: 'wUser', label: 'mine' }],
+      },
+      // recorded but NOT managed — a workspace the user opened themselves
+      state: { workspaces: { [root]: { ws: 'wUser', managed: false } } },
+    });
+    assert.deepEqual(r, { reachable: true, workspaces: 0, writes: 0, leds: 0 });
+    const flat = calls.flat().join(' ');
+    assert.ok(!flat.includes('rename'));
+    assert.ok(!flat.includes('report-metadata'));
+  });
+
+  test('LED report lands on the busy agent-free ledger pane — and only it', () => {
+    const root = armedRoot();
+    const { r, calls } = fleetPass(
+      root,
+      stateDirOf(),
+      ledFixture(root, 'wL', {
+        panes: [pane('wL:p2', 'wL', 'devin'), pane('wL:p1', 'wL')],
+        processes: { 'wL:p1': busy(7, 99), 'wL:p2': busy(5, 44) },
+        mirrors: mirrorOf('wL:p2', 'wL', false),
+        renderers: rendererOf(root, 'wL:p1', 'wL'),
       })
     );
-    const scope = createHash('sha1').update(root).digest('hex').slice(0, 12);
-    // recorded but NOT managed — a workspace the user opened themselves
-    writeFileSync(
-      join(stateDir, `state-${scope}.json`),
-      JSON.stringify({ workspaces: { [root]: { ws: 'wUser', managed: false } } })
+    assert.equal(r.leds, 1);
+    // armed tree, no worker verdict → unknown; only p1 is reportable
+    const report = calls.find(c => c.slice(0, 2).join(' ') === 'pane report-agent');
+    assert.deepEqual(report?.slice(0, 7), [
+      'pane',
+      'report-agent',
+      'wL:p1',
+      '--source',
+      'bro-fleet',
+      '--agent',
+      'fleet',
+    ]);
+    assert.deepEqual(report?.slice(9), ['--state', 'unknown']);
+    assert.ok(report !== undefined && report[7] === '--seq' && seqOf(report) >= NOW);
+    // the foreign-agent mirror is filtered before the busy probe —
+    // no process-info, no report on p2 at all
+    assert.ok(!calls.some(c => c[1] === 'process-info' && c.includes('wL:p2')));
+    assert.ok(!calls.some(c => c.includes('wL:p2') && c[1] !== 'list'));
+  });
+
+  test('an unarmed projection releases the pane instead of reporting', () => {
+    const root = plainRoot();
+    const { r, calls } = fleetPass(
+      root,
+      stateDirOf(),
+      ledFixture(root, 'wR', {
+        panes: [pane('wR:p1', 'wR')],
+        processes: { 'wR:p1': busy(7, 99) },
+        renderers: rendererOf(root, 'wR:p1', 'wR'),
+      })
     );
-    const r = withEnv(
-      {
-        HERDR_BIN_PATH: fake,
-        HERDR_PLUGIN_STATE_DIR: stateDir,
-        FAKE_HERDR_SCENARIO: scenario,
-        FAKE_HERDR_LOG: log,
-      },
-      () => projectFleet(root, NOW)
+    assert.equal(r.leds, 1);
+    const release = calls.find(c => c.slice(0, 2).join(' ') === 'pane release-agent');
+    assert.deepEqual(release?.slice(0, 7), [
+      'pane',
+      'release-agent',
+      'wR:p1',
+      '--source',
+      'bro-fleet',
+      '--agent',
+      'fleet',
+    ]);
+    assert.ok(release !== undefined && seqOf(release) >= NOW);
+  });
+
+  test('an idle-shell pane holds no report — the probe would clear it in ~1s', () => {
+    const root = armedRoot();
+    const { r, calls } = fleetPass(
+      root,
+      stateDirOf(),
+      ledFixture(root, 'wI', {
+        panes: [pane('wI:p1', 'wI')],
+        // shell_pid IS the only foreground process → idle
+        processes: { 'wI:p1': { shell_pid: 7, foreground_processes: [{ pid: 7 }] } },
+        renderers: rendererOf(root, 'wI:p1', 'wI'),
+      })
     );
-    assert.deepEqual(r, { reachable: true, workspaces: 0, writes: 0 });
-    const calls = readFileSync(log, 'utf8').trim();
-    assert.ok(!calls.includes('rename'));
-    assert.ok(!calls.includes('report-metadata'));
+    assert.equal(r.leds, 0);
+    assert.ok(calls.some(c => c.slice(0, 2).join(' ') === 'pane list'));
+    assert.ok(!calls.some(c => c[1] === 'report-agent' || c[1] === 'release-agent'));
+  });
+
+  test('no ledger panes → the LED path does not even read pane list', () => {
+    const root = plainRoot();
+    const { r, calls } = fleetPass(root, stateDirOf(), ledFixture(root, 'wN'));
+    assert.equal(r.leds, 0);
+    assert.ok(!calls.some(c => c.slice(0, 2).join(' ').startsWith('pane ')));
+  });
+
+  test('a pane still bound to us but never selected is released', () => {
+    const root = armedRoot();
+    const { r, calls } = fleetPass(
+      root,
+      stateDirOf(),
+      ledFixture(root, 'wF', {
+        panes: [
+          // a leftover bro-fleet binding the ledger no longer proposes
+          pane('wF:p9', 'wF', 'fleet'),
+          pane('wF:p1', 'wF'),
+        ],
+        processes: { 'wF:p1': busy(7, 99) },
+        renderers: rendererOf(root, 'wF:p1', 'wF'),
+      })
+    );
+    assert.equal(r.leds, 2);
+    assert.deepEqual(
+      calls.find(c => c.slice(0, 2).join(' ') === 'pane release-agent')?.slice(0, 3),
+      ['pane', 'release-agent', 'wF:p9']
+    );
+    assert.deepEqual(calls.find(c => c[1] === 'report-agent')?.[2], 'wF:p1');
+  });
+
+  test('a stale assertion is released when the selection moves', () => {
+    const root = armedRoot();
+    const dir = stateDirOf();
+    const f = (render: Record<string, unknown> | undefined, marked: boolean) =>
+      ledFixture(root, 'wS', {
+        panes: [pane('wS:p1', 'wS'), pane('wS:p2', 'wS')],
+        processes: { 'wS:p1': busy(7, 99), 'wS:p2': busy(5, 44) },
+        mirrors: mirrorOf('wS:p1', 'wS', marked),
+        ...(render !== undefined ? { renderers: render } : {}),
+      });
+    const p1 = fleetPass(root, dir, f(undefined, false));
+    assert.deepEqual(p1.calls.find(c => c[1] === 'report-agent')?.[2], 'wS:p1');
+    // next tick: the mirror is marked (dead tail), the selection moves
+    // to the renderer pane → the p1 assertion must be released
+    const p2 = fleetPass(root, dir, f(rendererOf(root, 'wS:p2', 'wS'), true));
+    assert.equal(p2.r.leds, 2);
+    assert.deepEqual(p2.calls.find(c => c[1] === 'release-agent')?.slice(0, 3), [
+      'pane',
+      'release-agent',
+      'wS:p1',
+    ]);
+    assert.deepEqual(p2.calls.find(c => c[1] === 'report-agent')?.[2], 'wS:p2');
+  });
+
+  test('the seq is monotonic per source — a clock regress cannot emit a stale one', () => {
+    const root = armedRoot();
+    const dir = stateDirOf();
+    const f = ledFixture(root, 'wQ', {
+      panes: [pane('wQ:p1', 'wQ')],
+      processes: { 'wQ:p1': busy(7, 99) },
+      renderers: rendererOf(root, 'wQ:p1', 'wQ'),
+    });
+    const seqOfReport = (calls: string[][]): number => {
+      const c = calls.find(x => x[1] === 'report-agent');
+      assert.ok(c !== undefined);
+      return seqOf(c);
+    };
+    const a = seqOfReport(fleetPass(root, dir, f).calls);
+    // wall clock jumps backward — the second seq must still outrank the first
+    const b = seqOfReport(fleetPass(root, dir, f, NOW - 60_000).calls);
+    assert.ok(b > a, `${b} should exceed ${a} after a clock regress`);
   });
 });
