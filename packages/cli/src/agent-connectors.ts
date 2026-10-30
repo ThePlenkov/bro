@@ -68,6 +68,7 @@ import {
   providerCallGrade,
   brouterStaticCatalog,
   BrouterConfigError,
+  isQualifiedRouteId,
   rebindStep,
   releaseSessionSlot,
   requireProviderSurface,
@@ -397,9 +398,8 @@ function isConfiguredBrouterModel(env: AgentConnectorEnv, model: string): boolea
   if (brouter === undefined || !Object.hasOwn(brouter.models, model)) {
     return false;
   }
-  const providers = env.providers ?? {};
-  const slash = model.indexOf('/');
-  if (slash > 0 && slash < model.length - 1 && Object.hasOwn(providers, model.slice(0, slash))) {
+  // a qualified id wins over the declaration (source 1 precedes source 2)
+  if (isQualifiedRouteId(env.providers ?? {}, model)) {
     return false;
   }
   const routes = brouter.models[model];
