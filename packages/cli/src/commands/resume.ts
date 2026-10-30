@@ -28,6 +28,8 @@ import {
   printUsage,
   readAgentRegistry,
   runJanitor,
+  CommandError,
+  EXIT,
 } from '@broject/core'
 import { deadWatchPlan } from '@broject/act'
 import { rearmPass } from './act.ts'
@@ -316,15 +318,14 @@ export async function runResumeCommand(argv: string[]): Promise<void> {
   }
   const extra = argv.filter((a) => a !== '--dry-run' && a !== '--json')
   if (extra.length > 0) {
-    console.error(`error: bro fleet resume takes no arguments — got "${extra[0]}"`)
-    process.exit(2)
+    throw new CommandError(`error: bro fleet resume takes no arguments — got "${extra[0]}"`, EXIT.usage)
   }
   if (!isOrchestratorSession()) {
-    console.error(
+    throw new CommandError(
       'error: BRO_AGENT_ID is set — spawned workers never resume supervisors; ' +
-        'the orchestrator session owns the pass'
+        'the orchestrator session owns the pass',
+      EXIT.usage
     )
-    process.exit(2)
   }
   const dry = argv.includes('--dry-run')
   const rep = await resumePass(mainWorktree().path, dry)

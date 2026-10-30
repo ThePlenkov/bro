@@ -265,7 +265,13 @@ async function cmdSubscribe(rest: string[]): Promise<void> {
       onClose: end,
     }, since !== undefined ? { since } : {})
   } catch (err) {
-    if (err instanceof CommandError) throw err
+    if (err instanceof CommandError) {
+      if (err.code === EXIT.usage) throw err
+      throw err
+    }
+    if (err instanceof Error && err.message.startsWith('error:')) {
+      throw new CommandError(err.message, EXIT.error)
+    }
     die(err instanceof Error ? err.message : String(err))
   }
   await ended

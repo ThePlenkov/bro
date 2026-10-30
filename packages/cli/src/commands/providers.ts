@@ -17,7 +17,7 @@
  */
 import { execFile as execFileCb } from 'node:child_process'
 import { promisify } from 'node:util'
-import { hasHelpFlag, loadConfig, printUsage } from '@broject/core'
+import { hasHelpFlag, loadConfig, printUsage, CommandError, EXIT } from '@broject/core'
 import type { ProviderEntry } from '@broject/core'
 import type { AcpSeam } from '@broject/providers'
 
@@ -25,8 +25,7 @@ const USAGE = `usage:
   bro providers models [name…]  list every provider's models as <provider>/<model>
 `
 const die = (msg: string): never => {
-  console.error(`bro providers: ${msg}`)
-  process.exit(1)
+  throw new CommandError(`bro providers: ${msg}`, EXIT.error)
 }
 
 const execFile = promisify(execFileCb)
@@ -143,6 +142,6 @@ export async function runProvidersCommand(argv: string[], opts: Opts = {}): Prom
     }
   }
   if (failed > 0) {
-    process.exit(1)
+    throw new CommandError('bro providers: failed to list some models', EXIT.error)
   }
 }

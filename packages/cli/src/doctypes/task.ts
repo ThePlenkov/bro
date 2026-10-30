@@ -137,9 +137,7 @@ function taskAdapter(ctx: DocCtx): DocAdapter<TaskRow> {
         )
       }
       if (res.status !== 0) {
-        const code = res.status === null ? EXIT.error : res.status
-        const exitCode = code === EXIT.usage || code === EXIT.error || code === EXIT.actionable || code === EXIT.timeout ? code : EXIT.error
-        throw new CommandError('', exitCode)
+        throw new CommandError('', (res.status ?? EXIT.error) as ExitCode)
       }
     },
   }

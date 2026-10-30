@@ -26,6 +26,8 @@ import {
   hasHelpFlag,
   printUsage,
   taskStore,
+  CommandError,
+  EXIT,
   type TaskRow,
 } from '@broject/core'
 import { beadsDir, inlineFormulaDoc, pourFormula } from '@broject/convoy'
@@ -37,9 +39,8 @@ import { loadBroConfig } from '../plugins.ts'
 const DAY_MS = 86_400_000
 const MARK = 'sweep:distilled'
 
-function fail(msg: string, code = 2): never {
-  console.error(`error: ${msg}`)
-  process.exit(code)
+function fail(msg: string, code: number = EXIT.usage): never {
+  throw new CommandError(`error: ${msg}`, code as any)
 }
 
 interface SweepCfg {

@@ -15,8 +15,7 @@ import {
 } from './delegate.ts';
 
 function usage(exitCode: ExitCode = 2): never {
-  printUsage(
-    `usage:
+  const usageText = `usage:
   bro fleet delegate [prompt…] [--prompt <text>] [--prompt-file <file>]
               [--provider <name> | --class <name>] [--model <m>]
               [--wait [--timeout <sec>] | --detach [--connector <name>]
@@ -29,9 +28,8 @@ function usage(exitCode: ExitCode = 2): never {
               work: the registry spawn 'bro agents run' takes (routing,
               walls, fleet cap, quotas), returning the new agentId. The
               caller's BRO_AGENT_ID rides as delegatedBy provenance on
-              both — 'agent A activates agent B' is auditable.`,
-    exitCode
-  );
+              both — 'agent A activates agent B' is auditable.`
+  throw new CommandError(usageText, exitCode, usageText);
 }
 
 // a function declaration — tsc only treats calls to never-returning

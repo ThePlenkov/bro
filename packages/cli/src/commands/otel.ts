@@ -36,8 +36,7 @@ function otelConfig(req: { dir: string }): ResolvedOtelConfig {
 }
 
 function usage(exitCode: ExitCode = EXIT.usage): never {
-  printUsage(
-    `Usage: bro otel <command> [args…]
+  const usageText = `Usage: bro otel <command> [args…]
 
 Commands:
   status [--json]   otel.enabled, the resolved exporter (file path /
@@ -48,9 +47,8 @@ Commands:
                     and the payload fields the allowlist dropped. Bro
                     (post-tool) and host (PostToolUse) names both work
   on | off          write otel.enabled to bro.config.local.json — the
-                    local layer, never the committed config`,
-    exitCode
-  )
+                    local layer, never the committed config`
+  throw new CommandError(usageText, exitCode, usageText)
 }
 
 // --- on | off --------------------------------------------------------------------
@@ -263,6 +261,6 @@ export function runOtelCommand(argv: string[]): void {
       cmdStatus({ dir, json: rest.includes('--json') })
       return
     default:
-      throw new CommandError(`error: unknown otel command "${sub}"`, EXIT.usage)
+      usage(EXIT.usage)
   }
 }
