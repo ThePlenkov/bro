@@ -20,6 +20,7 @@
  */
 import { existsSync } from 'node:fs';
 import { basename, isAbsolute, resolve } from 'node:path';
+import { spawnSync } from 'node:child_process';
 import {
   agentsJson,
   ctxJson,
@@ -36,7 +37,12 @@ import {
   withStateLock,
   worktreeGone,
   type WorkspaceRec,
+  paneList,
+  pidAlive,
 } from './lib.ts';
+import { readFileSync } from 'node:fs';
+import { join } from 'node:path';
+import { homedir } from 'node:os';
 import { convergeMirrors, markExitedMirrors } from './mirrors.ts';
 import type { Planes } from './planes.ts';
 import { readPlanes } from './planes.ts';
@@ -281,11 +287,9 @@ function hasLiveRunOrBoundAgent(p: Planes, treePath: string): boolean {
   // check agents from status
   for (const a of p.status.fleet.agents) {
     if (a.state === 'running') {
-      // try to resolve worktree
-      const ap = a.worktree;
+      const ap = agentTreePath(a, p) ?? a.worktree;
       if (ap === treePath) return true;
-      // also check if it's under this worktree
-      if (ap && (ap.startsWith(treePath + '/') || ap === treePath)) return true;
+      if (ap && (ap.startsWith(treePath + '/') || treePath.startsWith(ap + '/'))) return true;
     }
   }
   // check loop runs
@@ -299,16 +303,57 @@ function hasLiveRunOrBoundAgent(p: Planes, treePath: string): boolean {
   for (const entry of Object.values(reg)) {
     if (entry.worktree) {
       if (entry.worktree === treePath || entry.worktree.startsWith(treePath + '/')) {
-        // if there's a pid, check if alive? best effort
         if (entry.pid !== undefined) {
-          // don't import pidAlive to keep deps minimal; assume live if pid present
-          return true;
+          if (pidAlive(entry.pid)) return true;
+          continue;
         }
         return true;
       }
     }
   }
+  // check workspace panes for live foreign agents (exclude bro-status)
+  for (const ws of p.workspaces) {
+    const wpath = ws.worktree?.checkout_path;
+    const isRelated =
+      wpath === treePath ||
+      (wpath && (wpath.startsWith(treePath + '/') || treePath.startsWith(wpath + '/'))) ||
+      p.worktrees.worktrees.some(
+        w =>
+          w.open_workspace_id === ws.workspace_id &&
+          (w.path === treePath || w.path.startsWith(treePath + '/') || treePath.startsWith(w.path + '/'))
+      );
+    if (!isRelated) continue;
+    try {
+      const panes = paneList(ws.workspace_id);
+      for (const pane of panes) {
+        if (pane.agent && pane.agent !== '' && pane.agent !== 'bro-status') {
+          return true;
+        }
+      }
+    } catch {
+      // best effort
+    }
+  }
   return false;
+}
+
+function quickRun(cmd: string, args: string[], cwd?: string, timeoutMs = 2000): { code: number; out: string; err: string } {
+  try {
+    const r = spawnSync(cmd, args, {
+      cwd,
+      encoding: 'utf8',
+      timeout: timeoutMs,
+      maxBuffer: 16 * 1024 * 1024,
+      env: process.env,
+    });
+    return {
+      code: r.status ?? -1,
+      out: r.stdout ?? '',
+      err: r.stderr ?? (r.error !== undefined ? String(r.error) : ''),
+    };
+  } catch {
+    return { code: -1, out: '', err: '' };
+  }
 }
 
 function isBranchPushedToRemote(wt: string): boolean {
@@ -319,12 +364,22 @@ function isBranchPushedToRemote(wt: string): boolean {
   const br = run('git', ['-C', wt, 'rev-parse', '--abbrev-ref', 'HEAD']);
   const branch = br.out.trim();
   if (branch && branch !== 'HEAD') {
-    const lr = run('git', ['-C', wt, 'ls-remote', '--exit-code', '--heads', 'origin', branch]);
+    const lr2 = run('git', ['-C', wt, 'show-ref', '--verify', '--quiet', `refs/remotes/origin/${branch}`]);
+    if (lr2.code === 0) return true;
+    // avoid unbounded network probe in reconcile; do a quick local-only check if possible
+    const lr = quickRun('git', ['-C', wt, 'ls-remote', '--exit-code', '--heads', 'origin', branch], undefined, 2000);
     if (lr.code === 0) return true;
   }
-  // also try generic check
-  const lr2 = run('git', ['-C', wt, 'show-ref', '--verify', '--quiet', `refs/remotes/origin/${branch}`]);
-  if (lr2.code === 0) return true;
+  // If commits are merged into a verified remote base, treat as preserved
+  const bases = ['origin/main', 'origin/master', 'origin/HEAD'];
+  for (const base of bases) {
+    const rlog = run('git', ['-C', wt, 'log', `${base}..HEAD`, '--oneline']);
+    if (rlog.code === 0 && rlog.out.trim() === '') {
+      // no commits ahead of base means everything is in base (merged)
+      const rbase = run('git', ['-C', wt, 'rev-parse', '--verify', base]);
+      if (rbase.code === 0) return true;
+    }
+  }
   return false;
 }
 
@@ -334,18 +389,78 @@ function isTreeClean(wt: string): boolean {
 }
 
 function hasUnpushedCommits(wt: string): boolean {
-  // Must check: git -C <wt> log origin/main..HEAD (unpushed commits block)
-  // Try origin/main first, also try origin/HEAD or common bases
-  const bases = ['origin/main', 'origin/master', 'origin/HEAD'];
-  for (const base of bases) {
-    const r = run('git', ['-C', wt, 'log', `${base}..HEAD`, '--oneline']);
-    if (r.code === 0 && r.out.trim() !== '') {
-      return true;
+  const br = run('git', ['-C', wt, 'rev-parse', '--abbrev-ref', 'HEAD']);
+  const branch = br.out.trim();
+  // Check if all commits are pushed to the branch's remote ref
+  if (branch && branch !== 'HEAD') {
+    // try upstream
+    const up = run('git', ['-C', wt, 'rev-parse', '--abbrev-ref', '--symbolic-full-name', '@{u}']);
+    if (up.code === 0 && up.out.trim()) {
+      const ur = run('git', ['-C', wt, 'log', `${up.out.trim()}..HEAD`, '--oneline']);
+      if (ur.code === 0) {
+        if (ur.out.trim() === '') return false;
+        // if there are commits ahead of upstream but branch is pushed? maybe not pushed - but be conservative
+        // also check if upstream exists remotely
+      } else {
+        // can't compare against upstream, be conservative
+        return true;
+      }
+    } else {
+      // no upstream configured - check if branch exists on origin
+      const lr = run('git', ['-C', wt, 'show-ref', '--verify', '--quiet', `refs/remotes/origin/${branch}`]);
+      if (lr.code === 0) {
+        const ur2 = run('git', ['-C', wt, 'log', `origin/${branch}..HEAD`, '--oneline']);
+        if (ur2.code === 0) {
+          if (ur2.out.trim() === '') return false;
+        } else {
+          return true;
+        }
+      }
     }
   }
-  // if we can't determine against base, be conservative? task says "git -C <wt> log origin/main..HEAD (unpushed commits block)" - check that specific form
-  const r = run('git', ['-C', wt, 'log', 'origin/main..HEAD', '--oneline']);
-  if (r.code === 0 && r.out.trim() !== '') return true;
+  // Fall back to base branch comparison
+  const bases = ['origin/main', 'origin/master', 'origin/HEAD'];
+  let anyOk = false;
+  for (const base of bases) {
+    const r = run('git', ['-C', wt, 'log', `${base}..HEAD`, '--oneline']);
+    if (r.code === 0) {
+      anyOk = true;
+      if (r.out.trim() !== '') {
+        return true;
+      }
+      // if no commits ahead of base, that means all work is in base (merged) - good
+    }
+  }
+  if (!anyOk) {
+    const r = run('git', ['-C', wt, 'log', 'origin/main..HEAD', '--oneline']);
+    if (r.code !== 0) {
+      return true;
+    }
+    if (r.out.trim() !== '') return true;
+    return false;
+  }
+  return false;
+}
+
+function isArmedOrClaimed(p: Planes, treePath: string): boolean {
+  const wt = p.status.worktrees.find(t => t.path === treePath);
+  if (wt?.claim) return true;
+  const armed = (p as any).armedDetails as string[] | undefined;
+  if (armed) {
+    for (const d of armed) {
+      const path = resolveDetail(d, p.main, p.status.worktrees);
+      if (path === treePath) return true;
+    }
+  }
+  for (const a of (p.status.fleet.agents || [])) {
+    if (a.state === 'running' && a.worktree) {
+      const ap = agentTreePath(a, p) ?? a.worktree;
+      if (ap === treePath) return true;
+    }
+  }
+  for (const r of (p.status.loop.runs || [])) {
+    if (r.state === 'running' && r.worktree === treePath) return true;
+  }
   return false;
 }
 
@@ -356,9 +471,18 @@ function reapPreservedDead(p: Planes, ctx: WsCtx): number {
     if (ws === undefined || w.path === p.main) continue;
     if (worktreeGone(w.path)) continue;
     if (ctx.wsById.get(ws) === undefined) continue;
-    // only close managed workspaces? or any open workspace that meets criteria
+    // only close managed workspaces with matching workspace id
     const rec = ctx.state.workspaces[w.path];
-    // be permissive - if it's managed or just has a workspace open
+    if (rec?.managed !== true) {
+      continue;
+    }
+    if (rec.ws !== ws) {
+      continue;
+    }
+    if (isArmedOrClaimed(p, w.path)) {
+      log(`keep ${basename(w.path)} — armed/claimed`);
+      continue;
+    }
     if (hasLiveRunOrBoundAgent(p, w.path)) {
       log(`keep ${basename(w.path)} — live run/bound agent`);
       continue;
@@ -371,11 +495,17 @@ function reapPreservedDead(p: Planes, ctx: WsCtx): number {
       log(`keep ${basename(w.path)} — unpushed commits`);
       continue;
     }
+    // must verify work is pushed to origin / remote-preserved
     if (!isBranchPushedToRemote(w.path)) {
       log(`keep ${basename(w.path)} — branch not remote-preserved`);
       continue;
     }
-    // all work remote-preserved (branch pushed or PR merged/open) - we checked remote existence
+    // recheck occupancy immediately before closing to avoid race
+    if (isArmedOrClaimed(p, w.path) || hasLiveRunOrBoundAgent(p, w.path)) {
+      log(`keep ${basename(w.path)} — occupied at close time`);
+      continue;
+    }
+    // all work remote-preserved
     if (herdrTry(['workspace', 'close', ws]) !== undefined) {
       delete ctx.state.workspaces[w.path];
       delete ctx.state.renderers[w.path];
