@@ -2244,6 +2244,52 @@ describe('resolveSpawnProvider', () => {
     );
   });
 
+  test('brouter: a refusal is config only when the model came from an explicit declared model', async () => {
+    // 'local' pins devin-1 in a command with no {model} placeholder —
+    // a route pinning another model can never reach the worker
+    const configured: AgentConnectorEnv = {
+      agents: {},
+      connectors: {},
+      providers,
+      brouter: { models: { cheap: [{ provider: 'local', model: 'devin-2' }] } },
+    };
+    await assert.rejects(
+      resolveSpawnProvider(configured, 'native', { model: 'cheap' }, 'flag'),
+      (e: unknown) =>
+        e instanceof SpawnError &&
+        e.kind === 'config' &&
+        /cannot honor model 'devin-2'.*\{model\} placeholder/.test(e.message)
+    );
+    // a provider-only declaration routes the caller's own id — the model
+    // was named by the caller, so the refusal stays 'input'
+    const declared: AgentConnectorEnv = {
+      agents: {},
+      connectors: {},
+      providers,
+      brouter: { models: { cheap: [{ provider: 'local' }] } },
+    };
+    await assert.rejects(
+      resolveSpawnProvider(declared, 'native', { model: 'cheap' }, 'flag'),
+      (e: unknown) =>
+        e instanceof SpawnError &&
+        e.kind === 'input' &&
+        /cannot honor model 'cheap'/.test(e.message)
+    );
+    // a qualified id is the caller's string too — source 1 wins over the
+    // declaration, and the refusal stays 'input'
+    const qualified: AgentConnectorEnv = {
+      agents: {},
+      connectors: {},
+      providers,
+      brouter: { models: { cheap: [{ provider: 'local', model: 'devin-2' }] } },
+    };
+    await assert.rejects(
+      resolveSpawnProvider(qualified, 'native', { model: 'local/m2' }, 'flag'),
+      (e: unknown) =>
+        e instanceof SpawnError && e.kind === 'input' && /cannot honor model 'm2'/.test(e.message)
+    );
+  });
+
   test('cli override a verbatim command cannot consume is a loud error — never a relabel', async () => {
     // 'local' pins devin-1 in a command with no {model}: reporting 'm2'
     // while devin-1 runs would be provenance the worker never ran

@@ -96,6 +96,7 @@ import {
   type FleetProfile,
   type FleetRouter,
   type ListResult,
+  type ModelRoute,
   type ProviderEntry,
   type ProviderWall,
   type ResolvedClass,
@@ -336,13 +337,14 @@ export interface SpawnProviderPick {
 function brouterSpawnRoute(
   env: AgentConnectorEnv,
   model: string
-): { provider: string; model: string } | undefined {
+): { provider: string; model: string; modelFromExplicitConfig: boolean } | undefined {
   const brouter = env.brouter;
   if (brouter === undefined || Object.keys(brouter.models).length === 0) {
     return undefined;
   }
+  let hit: ModelRoute | undefined;
   try {
-    return resolveModelRoute(
+    hit = resolveModelRoute(
       env.providers ?? {},
       brouter,
       brouterStaticCatalog(env.providers ?? {}),
@@ -354,6 +356,39 @@ function brouterSpawnRoute(
     }
     throw err;
   }
+  if (hit === undefined) {
+    return undefined;
+  }
+  // provenance must follow resolveModelRoute's source precedence: only a
+  // brouter.models route (source 2) with an explicit `model` counts as
+  // config — a qualified id, a catalog match and a provider-only
+  // declaration all carry a caller-named model, so their refusals stay
+  // 'input'
+  const modelFromExplicitConfig = isConfiguredBrouterModel(env, model);
+  return { provider: hit.provider, model: hit.model, modelFromExplicitConfig };
+}
+
+/** Whether `model` resolves through a `brouter.models` declaration that
+ *  names an explicit upstream `model` — the only case where the model
+ *  under the spawn came from configuration rather than from the
+ *  caller's string. A qualified `provider/model` id wins over the
+ *  declaration (source 1 precedes source 2), so it never counts. */
+function isConfiguredBrouterModel(env: AgentConnectorEnv, model: string): boolean {
+  const brouter = env.brouter;
+  if (brouter === undefined || !Object.hasOwn(brouter.models, model)) {
+    return false;
+  }
+  const providers = env.providers ?? {};
+  const slash = model.indexOf('/');
+  if (slash > 0 && slash < model.length - 1 && Object.hasOwn(providers, model.slice(0, slash))) {
+    return false;
+  }
+  const routes = brouter.models[model];
+  if (routes === undefined) {
+    return false;
+  }
+  const primary = routes[0];
+  return primary !== undefined && primary.model !== undefined;
 }
 
 /** Resolve the spawn's provider into a worker payload. `sel` carries
@@ -376,11 +411,13 @@ export async function resolveSpawnProvider(
   let providerName = sel.provider ?? backendProvider(env, backend);
   const source = sel.provider === undefined ? 'backend' : namedBy;
   let routedModel: string | undefined;
+  let modelFromExplicitConfig = false;
   if (providerName === undefined && sel.model !== undefined) {
     const hit = brouterSpawnRoute(env, sel.model);
     if (hit !== undefined) {
       providerName = hit.provider;
       routedModel = hit.model;
+      modelFromExplicitConfig = hit.modelFromExplicitConfig;
     }
   }
   if (providerName === undefined) {
@@ -416,7 +453,7 @@ export async function resolveSpawnProvider(
           new SpawnError(
             `providers.${providerName} (type 'cli') cannot honor model '${m}' — ` +
               'its command has no {model} placeholder',
-            'input'
+            modelFromExplicitConfig ? 'config' : 'input'
           ),
         () =>
           new SpawnError(

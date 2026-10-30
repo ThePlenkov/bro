@@ -130,6 +130,12 @@ export function parseBrouter(raw: unknown): BrouterConfig {
     if (routes === null) {
       continue;
     }
+    if (Object.hasOwn(models, key)) {
+      console.error(
+        `bro.config: brouter.models.${key} duplicates another key after trimming — later entry dropped`
+      );
+      continue;
+    }
     // defineProperty, not assignment — a model id like '__proto__'
     // must land as an own key, never trigger the prototype setter
     // (same guard as providers' model ids)

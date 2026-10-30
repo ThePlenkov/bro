@@ -86,6 +86,23 @@ describe('parseBrouter', () => {
     assert.ok(lines.some(l => /brouter\.models\.bad3 has no usable routes/.test(l)));
   });
 
+  test('a key duplicated after trimming keeps the first route and warns', () => {
+    const lines = err(() => {
+      const cfg = parseBrouter({
+        models: {
+          cheap: 'dv-acp',
+          ' cheap ': 'zen',
+        },
+      });
+      // the first declaration wins — the later one is dropped, not merged
+      assert.deepEqual(cfg.models.cheap, [{ provider: 'dv-acp' }]);
+    });
+    assert.ok(
+      lines.some(l => /brouter\.models\.cheap duplicates another key after trimming/.test(l)),
+      `warnings: ${lines.join(' | ')}`
+    );
+  });
+
   test('a __proto__ model id lands as an own key', () => {
     const cfg = parseBrouter({ models: { ['__proto__']: 'dv-acp' } });
     assert.deepEqual(Object.getOwnPropertyDescriptor(cfg.models, '__proto__')?.value, [
