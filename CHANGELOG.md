@@ -1,3 +1,5 @@
+# Changelog
+
 ## 0.3.0 (2026-10-30)
 
 ### 🚀 Features
@@ -25,7 +27,7 @@
 - **bus:** worker/worktree lifecycle events on bus topics (bro-294hf) ([#781](https://github.com/ThePlenkov/bro/pull/781))
 - **cap:** the host-wide session cap, per kind, through the plane facade ([#627](https://github.com/ThePlenkov/bro/pull/627))
 - **claude:** install the plugin from the repo root ([#395](https://github.com/ThePlenkov/bro/pull/395))
-- **cli:** command groups — bro <group> <member> dispatch (bro-b5v2t) ([#396](https://github.com/ThePlenkov/bro/pull/396))
+- **cli:** command groups — bro `<group>` `<member>` dispatch (bro-b5v2t) ([#396](https://github.com/ThePlenkov/bro/pull/396))
 - **cli:** land cli spec + migrate docs to grouped spelling (bro-vlmrb.1/.2) ([#459](https://github.com/ThePlenkov/bro/pull/459))
 - **cli:** optional OTLP export of the session trace journal (bro-huy5o.11) ([#439](https://github.com/ThePlenkov/bro/pull/439))
 - **cli:** flatDeprecated — per-name flat-spelling retirement knob (bro-vlmrb.3) ([#557](https://github.com/ThePlenkov/bro/pull/557))
@@ -79,7 +81,7 @@
 - **loop:** beads materialize as tracker issues at PR-armed time (bro-z2z7f) ([#411](https://github.com/ThePlenkov/bro/pull/411))
 - **loop:** PR ownership marking — bro-managed label + body trailer (bro-c650l) ([#457](https://github.com/ThePlenkov/bro/pull/457))
 - **mesh:** bro request — same-machine delivery into the target's store (bro-5nnj.1) ([#565](https://github.com/ThePlenkov/bro/pull/565))
-- **mesh:** bro wait external:<ref> — bounded dep-plane watcher (bro-5nnj.2) ([#604](https://github.com/ThePlenkov/bro/pull/604))
+- **mesh:** bro wait external:`<ref>` — bounded dep-plane watcher (bro-5nnj.2) ([#604](https://github.com/ThePlenkov/bro/pull/604))
 - **mesh:** cross-repo REMOTE planes — github-issue + wasteland transports (bro-5nnj.3) ([#608](https://github.com/ThePlenkov/bro/pull/608))
 - **notify:** webhook sinks — slack, telegram, generic (bro-huy5o.8) ([#436](https://github.com/ThePlenkov/bro/pull/436))
 - **omp:** bro as an omp plugin — the adapter framework and the mode bridges ([#651](https://github.com/ThePlenkov/bro/pull/651))
@@ -94,12 +96,12 @@
 - **rig:** bro rig — the rig's own checkout keeps itself current (bro-te73m) ([#403](https://github.com/ThePlenkov/bro/pull/403))
 - **serve:** real /fleet dashboard — agents+queue+PRs+ticks+mailbox (bro-w4a45) ([#421](https://github.com/ThePlenkov/bro/pull/421))
 - **serve:** /v1/* Messages-API provider plane — bro as a Claude Code provider ([#495](https://github.com/ThePlenkov/bro/pull/495))
-- **serve:** GET /api/v1/agents/<ref>/log — token-gated tail + SSE follow (bro-j1kk2.3) ([#541](https://github.com/ThePlenkov/bro/pull/541))
+- **serve:** GET /api/v1/agents/`<ref>`/log — token-gated tail + SSE follow (bro-j1kk2.3) ([#541](https://github.com/ThePlenkov/bro/pull/541))
 - **serve:** REST surface over the plane catalog (bro-9rls.3) ([#562](https://github.com/ThePlenkov/bro/pull/562))
 - **serve:** /ui — index-driven plane-catalog dashboard (bro-9rls.4) ([#563](https://github.com/ThePlenkov/bro/pull/563))
 - **serve:** SSE /api/v1/events/stream + AsyncAPI + notify dual-write (bro-9rls.5) ([#564](https://github.com/ThePlenkov/bro/pull/564))
 - **serve:** openai dialects — /v1/responses + /v1/chat/completions (bro-zkpju) ([#589](https://github.com/ThePlenkov/bro/pull/589))
-- **serve:** conductor acp terminal surface — /api/v1/terminals/<id>/output (bro-eua0d) ([#584](https://github.com/ThePlenkov/bro/pull/584))
+- **serve:** conductor acp terminal surface — /api/v1/terminals/`<id>`/output (bro-eua0d) ([#584](https://github.com/ThePlenkov/bro/pull/584))
 - **serve:** conductor forwards agent tool activity as tool_activity SSE events (bro-btccj) ([#614](https://github.com/ThePlenkov/bro/pull/614))
 - **serve:** native ACP transport — brokered sessions (merge main + check fixes) ([#677](https://github.com/ThePlenkov/bro/pull/677))
 - **sessions:** the batch lane gets its own share of the worker budget (bro-9h86l) ([#607](https://github.com/ThePlenkov/bro/pull/607))
@@ -134,7 +136,7 @@
 - **act:** carry loop-claimed bead through rearmed watch markers (bro-q6ppv) ([#391](https://github.com/ThePlenkov/bro/pull/391))
 - **act:** shared gate-state feed — one fetch per PR per TTL (bro-0tcrl) ([#470](https://github.com/ThePlenkov/bro/pull/470))
 - **act:** the no-target error names what to do instead ([#678](https://github.com/ThePlenkov/bro/pull/678))
-- **agents:** split worker stderr into <agentId>.stderr (bro-e2ec0) ([#620](https://github.com/ThePlenkov/bro/pull/620))
+- **agents:** split worker stderr into `<agentId>`.stderr (bro-e2ec0) ([#620](https://github.com/ThePlenkov/bro/pull/620))
 - **agents:** owner-only prompt/log/exit/env artifacts (bro-l8c4f.4) ([#659](https://github.com/ThePlenkov/bro/pull/659))
 - **agents:** stop chasing the moving rate-limit deadline (bro-9eeld) ([#749](https://github.com/ThePlenkov/bro/pull/749))
 - **bd:** unambiguous BD_NOT_FOUND id token (CodeQL js/polynomial-redos) ([#456](https://github.com/ThePlenkov/bro/pull/456))
