@@ -35,6 +35,7 @@ export const OTEL_HOOK_EVENTS = [
   'post-tool',
   'stop',
   'permission',
+  'hook-deadline',
   'prepare-commit-msg',
   'reference-transaction',
   'post-merge',
@@ -157,7 +158,8 @@ otelSection.jsonSchema = js.obj({
  *  else `'*'`, else on-at-meta-level (see the module doc: absent `'*'`
  *  reads as `true`). */
 export function resolveHookPolicy(cfg: OtelConfig, name: string): OtelHookPolicy {
-  return cfg.hooks[name] ?? cfg.hooks['*'] ?? { enabled: true, sample: 1, collect: [] }
+  const own = Object.hasOwn(cfg.hooks, name) ? cfg.hooks[name] : undefined
+  return own ?? cfg.hooks['*'] ?? { enabled: true, sample: 1, collect: [] }
 }
 
 /** Host event spellings → bro's kebab event names — `bro otel test`

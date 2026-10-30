@@ -112,8 +112,8 @@ The default file sink is one JSONL row per event at
 
 ```bash
 bro otel status                                  # counts per event
-jq -r .event .git/bro/otel/hooks.jsonl | sort | uniq -c
-jq 'select(.event=="hook.post-tool") | .ms' .git/bro/otel/hooks.jsonl
+jq -r .event "$(git rev-parse --git-common-dir)/bro/otel/hooks.jsonl" | sort | uniq -c
+jq 'select(.event=="hook.post-tool") | .ms' "$(git rev-parse --git-common-dir)/bro/otel/hooks.jsonl"
 ```
 
 For a collector: `exporter.type=otlp` posts OTLP/HTTP-JSON log records
