@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { basename, join } from 'node:path';
 import { describe, test } from 'node:test';
 import {
   fleetStatusPath,
@@ -265,11 +265,11 @@ describe('rendering — label + status token', () => {
   test('the full stack — the goal shape', () => {
     const p = { state: 'silent' as const, silentMin: 960, pr: 765, gate: '4t/3f/6sast/conflicts' };
     assert.equal(statusString(p), 'silent16h·#765 4t/3f/6sast/conflicts');
-    assert.equal(labelFor(p, 'Ship it'), '[silent16h·#765 4t/3f/6sast/conflicts] Ship it');
   });
 
-  test('an idle tree carries no bracket', () => {
-    assert.equal(labelFor({}, 'Title'), 'Title');
+  test('the label is the robot marker + worktree basename — state lives on the LED', () => {
+    assert.equal(labelFor('/repo/trees/bro--bro-x1y2z'), '🤖 bro--bro-x1y2z');
+    assert.equal(labelFor('/repo/trees/work-1'), '🤖 work-1');
   });
 });
 
@@ -283,14 +283,14 @@ describe('projectTree — end to end over injected planes', () => {
     );
     assert.equal(title, 'Fix it');
     assert.equal(projection.state, 'lost');
-    assert.equal(labelFor(projection, title), '[lost·no PR] Fix it');
+    assert.equal(statusString(projection), 'lost·no PR');
   });
 
-  test('armed session tree, nothing running → [no PR] when unarmed would carry none', () => {
+  test('armed session tree, nothing running → no PR in the token when unarmed would carry none', () => {
     const armed = projectTree(tree({ claim: 'b1', markerArmed: false }));
-    assert.equal(labelFor(armed.projection, armed.title), '[no PR] work-1');
+    assert.equal(statusString(armed.projection), 'no PR');
     const idle = projectTree(tree());
-    assert.equal(labelFor(idle.projection, idle.title), 'work-1');
+    assert.equal(statusString(idle.projection), '');
   });
 
   test('live run + fresh act entry → silent bucket + PR fragment', () => {
@@ -545,8 +545,9 @@ describe('projectFleet — a live pass over a fake herdr', () => {
     });
     assert.deepEqual(r, { reachable: true, workspaces: 1, writes: 2, files: 1, leds: 0 });
     const rename = calls.find(c => c.slice(0, 2).join(' ') === 'workspace rename');
-    // empty bead plane → the live titled label survives, no basename clobber
-    assert.deepEqual(rename?.slice(0, 4), ['workspace', 'rename', 'w1', 'Old Title']);
+    // the label is the robot marker + worktree basename — the bead title
+    // survives on the state file, not the sidebar row
+    assert.deepEqual(rename?.slice(0, 4), ['workspace', 'rename', 'w1', `🤖 ${basename(root)}`]);
     const meta = calls.find(c => c.slice(0, 2).join(' ') === 'workspace report-metadata');
     assert.ok(meta?.includes('--clear-token'));
     assert.ok(meta?.includes('status'));
