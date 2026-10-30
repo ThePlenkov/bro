@@ -75,7 +75,7 @@ export function metaArgs(pane: string, s: FleetPaneState | undefined, seq: numbe
   const args = [
     ...paneArgs('report-metadata', pane, seq),
     '--display-agent',
-    plain(s?.slug ?? 'fleet'),
+    plain(s?.agent ?? s?.slug ?? 'fleet'),
     '--clear-state-labels',
   ];
   if (s !== undefined && s.status !== '') {
@@ -90,6 +90,9 @@ export function metaArgs(pane: string, s: FleetPaneState | undefined, seq: numbe
 export function linkifyPr(text: string, prUrl: string | undefined): string {
   if (prUrl === undefined) return text;
   const url = plain(prUrl);
+  // http(s) only — a crafted `file:`/`javascript:`/custom-scheme cache
+  // entry would open a local handler on click
+  if (!/^https?:\/\//i.test(url)) return text;
   return text.replace(/#\d+/, m => `\u001b]8;;${url}\u0007${m}\u001b]8;;\u0007`);
 }
 

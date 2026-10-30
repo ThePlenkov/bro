@@ -47,6 +47,9 @@ export interface FleetPaneState {
   /** The PR's html_url — the status-view wraps `#N` in an OSC8 link
    *  so a click opens the PR without the URL ever taking space. */
   prUrl?: string;
+  /** The agent binary driving the pipeline (opencode, devin, …) —
+   *  the pane's `--display-agent` name instead of `fleet`. */
+  agent?: string;
   led: PaneLed;
   /** Wall-clock ms the projector classified at — staleness display. */
   ts: number;
@@ -120,6 +123,11 @@ function jsonObj(raw: string): Partial<FleetPaneState> | undefined {
   }
 }
 
+/** Optional string fields — a non-string (a `null`, a number) is
+ *  stripped, never fatal: the doc's required fields still carry the
+ *  state and a bad optional must not blank the pane. */
+const OPTIONAL_STR: readonly (keyof FleetPaneState)[] = ['slug', 'prUrl', 'agent'];
+
 /** Parse + shape-check one document — anything else is a miss, never
  *  a throw: a torn write or a schema bump must not kill the pane. */
 export function parseFleetState(raw: string): FleetPaneState | undefined {
@@ -127,6 +135,9 @@ export function parseFleetState(raw: string): FleetPaneState | undefined {
   if (s === undefined || s.v !== 1) return undefined;
   if (!REQUIRED_STR.every(k => isStr(s[k]))) return undefined;
   if (!ledOk(s.led) || typeof s.ts !== 'number') return undefined;
+  for (const k of OPTIONAL_STR) {
+    if (s[k] !== undefined && !isStr(s[k])) delete s[k];
+  }
   return s as FleetPaneState;
 }
 

@@ -25,6 +25,7 @@ import {
   type AgentRegistryEntry,
   type AgentState,
   gitCommonDir,
+  type ProviderEntry,
   gitTry,
   readAgentRegistry,
 } from '@broject/core';
@@ -36,6 +37,7 @@ import {
   nextSeq,
   type PaneLed,
   pruneFleetStatus,
+  readFleetState,
   writeFleetState,
 } from './fleet-state.ts';
 import { PANE_AGENT, PANE_SOURCE } from './herdr-status-view.ts';
@@ -72,6 +74,9 @@ export interface TreeProjection {
   /** A live claim/session-marker arm — drives the `no PR` layer when
    *  the tree has no worker and nothing resolves. */
   armed?: boolean;
+  /** The freshest registry agent's program name — the real driver
+   *  behind the pane (opencode, devin, claude, …). */
+  agent?: string;
 }
 
 // --- pure classification -------------------------------------------------------
@@ -526,7 +531,7 @@ export function prFor(
   beads: { id: string; link?: string }[],
   act: ActEntry[],
   now: number
-): { pr?: number; gate?: string } {
+): { pr?: number; prUrl?: string; gate?: string } {
   const link = slug !== undefined ? prFromLink(beads.find(b => b.id === slug)?.link) : undefined;
   const fresh = (e: ActEntry): boolean => now - e.fetchedAt <= ACT_LABEL_STALE_MS;
   const byRef =
@@ -562,6 +567,9 @@ export interface AgentRow {
   live: boolean;
   terminal?: WorkerState;
   silentMs: number | null;
+  /** The agent binary driving the pipeline (opencode, devin, …) —
+   *  resolved from `providers.<name>.command`, the pane's agent name. */
+  agent?: string;
   /** Recency key — the entry's spawnedAt. */
   at: number;
 }
@@ -615,10 +623,16 @@ export function projectTree(i: TreeInput): {
     i.runs.find(r => r.beadId !== undefined)?.beadId ??
     (i.agents.find(a => a.live) ?? i.agents[0])?.key;
   const worker = workerState(workerCands(i), i.stallMin);
+  // the freshest agent names the pipeline driver — a live one wins,
+  // a dead one still identifies who ran the tree
+  const agent = (
+    i.agents.find(a => a.live && a.agent !== undefined) ?? i.agents.find(a => a.agent !== undefined)
+  )?.agent;
   const projection: TreeProjection = {
     ...worker,
     ...prFor(i.branch, slug, i.beads, i.act, i.now),
     armed: i.claim !== undefined || i.markerArmed,
+    ...(agent !== undefined ? { agent } : {}),
   };
   const title =
     (slug !== undefined ? i.beads.find(b => b.id === slug)?.title : undefined) || basename(i.path);
@@ -658,6 +672,32 @@ interface Planes {
   beads: ReturnType<typeof readBeads>['inProgress'];
   details: ReturnType<typeof liveWorkEntries>;
   stall: number;
+  /** `providers` section — resolves a registry entry's `provider` to
+   *  the agent binary name its command spawns. */
+  providers: Record<string, ProviderEntry>;
+}
+
+/** The agent name behind a provider command — the first meaningful
+ *  token of the LAST pipeline segment (`cat f | claude -p` → claude;
+ *  `npx opencode acp` → opencode). Shell wrappers and `{placeholder}`
+ *  tokens are skipped. */
+const CMD_WRAPPERS = new Set(['npx', 'bunx', 'uvx', 'env', 'cat', 'echo', 'sh', 'bash']);
+export function agentOfCommand(command: string | undefined): string | undefined {
+  if (command === undefined) return undefined;
+  const last = (command.split('|').pop() ?? '').trim();
+  for (const tok of last.split(/\s+/)) {
+    if (tok === '' || tok.startsWith('{') || /^[A-Z_]+=/.test(tok)) continue;
+    const name = basename(tok);
+    if (CMD_WRAPPERS.has(name)) continue;
+    return name;
+  }
+  return undefined;
+}
+
+/** `providers.<name>.command` where the entry variant carries one —
+ *  api-typed entries have no spawned binary to name. */
+function providerCommand(entry: ProviderEntry | undefined): string | undefined {
+  return entry !== undefined && 'command' in entry ? entry.command : undefined;
 }
 
 /** A corrupt/unreadable agents.json degrades to an empty registry —
@@ -681,6 +721,7 @@ function readPlanes(ctx: PassCtx): Planes {
     beads: readBeads(ctx.root).inProgress,
     details: hooks === null ? [] : liveWorkEntries(hooks, ['.work'], ctx.now),
     stall: stallMin(ctx),
+    providers: loadBroConfig(ctx.root).providers ?? {},
   };
 }
 
@@ -728,6 +769,11 @@ function agentRows(t: HerdrWorktree, p: Planes, ctx: PassCtx): AgentRow[] {
         live,
         ...(live ? {} : { terminal: TERMINAL[st] }),
         silentMs: live ? agentSilentMs(e, ctx) : null,
+        ...(e.provider !== undefined
+          ? {
+              agent: agentOfCommand(providerCommand(p.providers[e.provider])) ?? e.provider,
+            }
+          : {}),
         at: parseTs(e.spawnedAt),
       };
     });
@@ -959,14 +1005,22 @@ function backstopArgs(paneId: string, led: PaneLed, seq: number): string[] {
 function paneWrites(j: PaneJob): { files: number; leds: number; path?: string } {
   const path = fleetStatusPath(j.base, j.ws.tree.path);
   const led = paneLed(j.proj);
+  // a bead-read outage resolves title to the bare basename — keep the
+  // title the file already carries instead of flickering it away
+  const prev = readFleetState(path);
+  const title =
+    j.title === basename(j.ws.tree.path) && prev?.title !== undefined && prev.title !== ''
+      ? prev.title
+      : j.title;
   const state: FleetPaneState = {
     v: 1,
     worktree: j.ws.tree.path,
     workspace: j.ws.wsId,
-    title: j.title,
+    title,
     ...(j.slug !== undefined ? { slug: j.slug } : {}),
     status: statusString(j.proj),
     ...(j.proj.prUrl !== undefined ? { prUrl: j.proj.prUrl } : {}),
+    ...(j.proj.agent !== undefined ? { agent: j.proj.agent } : {}),
     led,
     ts: j.now,
   };
