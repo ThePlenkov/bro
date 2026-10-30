@@ -1,4 +1,5 @@
 ---
+
 name: watch
 description: "Use when supervising parallel convoys/agents — 'watch the fleet', 'what needs attention', a monitor loop over mols/PRs. Thin wrapper over the bro CLI: `bro review watch` is the deterministic heartbeat — one snapshot of molecules, PR exit gates, and the fleet. Requires `bro` (npx -y @broject/bro@0) and bd."
 ---
@@ -13,14 +14,14 @@ Prereq: `bro` on PATH or `npx -y @broject/bro@0`, `bd` initialized.
 
 ## Commands
 
-| Command | What it does |
-| ------- | ------------ |
-| `bro review watch [--once]` | One snapshot — the heartbeat call: attention list + open molecules + act gates per fleet PR + fleet rows |
-| `bro review watch --every N --for S` | The session pulse — tick the snapshot every N seconds: holds `<git-common>/bro/pulse.lock` (one per repo, a duplicate stands by), refuses under `BRO_AGENT_ID`; `--for` is required for a session-owned pulse — the window's exit is the session's wake event; omitting it leaves an unbounded watcher only an external supervisor may own |
-| `bro review watch --notify` | Drop the initial snapshot plus each transition into the mailbox (`<git-common>/bro/notify/`) — a notify connector drains it into the parent session |
-| `bro review watch --json` | Machine-readable `{ts, attention, mols, gates, fleet, janitor?}` |
-| `bro review watch install [--every N] [--print]` | Arm the session pulse — writes `<git-common>/bro/pulse.json` (the want-marker session-start rearms from) and strips any legacy systemd/cron entry; cadence is `--every N` or `watch.intervalSec` (default 60). No OS timer is installed |
-| `bro review watch uninstall` | Disarm the marker + strip any legacy timer/cron entry; a live pulse exits on its own |
+| Command                                          | What it does                                                                                                                                                                                                                                                                                                                               |
+| ------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `bro review watch [--once]`                      | One snapshot — the heartbeat call: attention list + open molecules + act gates per fleet PR + fleet rows                                                                                                                                                                                                                                   |
+| `bro review watch --every N --for S`             | The session pulse — tick the snapshot every N seconds: holds `<git-common>/bro/pulse.lock` (one per repo, a duplicate stands by), refuses under `BRO_AGENT_ID`; `--for` is required for a session-owned pulse — the window's exit is the session's wake event; omitting it leaves an unbounded watcher only an external supervisor may own |
+| `bro review watch --notify`                      | Drop the initial snapshot plus each transition into the mailbox (`<git-common>/bro/notify/`) — a notify connector drains it into the parent session                                                                                                                                                                                        |
+| `bro review watch --json`                        | Machine-readable `{ts, attention, mols, gates, fleet, janitor?}`                                                                                                                                                                                                                                                                           |
+| `bro review watch install [--every N] [--print]` | Arm the session pulse — writes `<git-common>/bro/pulse.json` (the want-marker session-start rearms from) and strips any legacy systemd/cron entry; cadence is `--every N` or `watch.intervalSec` (default 60). No OS timer is installed                                                                                                    |
+| `bro review watch uninstall`                     | Disarm the marker + strip any legacy timer/cron entry; a live pulse exits on its own                                                                                                                                                                                                                                                       |
 
 Every tick also rewrites `<git-common>/bro/heartbeat.json` — the durable
 last-known-state file. Mailbox drops expire after ~1h; this file does
@@ -75,6 +76,14 @@ context), never an inference from whether a session was polled.
 - **Report progress in words, not IDs.** When relaying snapshot state
   to the user, translate every code: `bro-mol-3n2` → "the notify
   connector molecule", `bro-mol-0io` → "the `bro review watch` molecule".
-  A status line must say what the agent is *doing* and what just
-  *landed* ("PR for X merged, session moved to Y") — bare mol/bead/PR
+  A status line must say what the agent is _doing_ and what just
+  _landed_ ("PR for X merged, session moved to Y") — bare mol/bead/PR
   IDs alone are not a report. IDs may appear in parentheses.
+- **Never report a merge you didn't verify.** A landed claim comes
+  from `gh pr view <N> --json state,mergedAt` in hand — never from
+  memory, a worker's exit line, or another digest. What the probe
+  didn't confirm is reported as "unverified", not "merged".
+- **Report times only against a verified clock.** The snapshot's
+  `clock` field is the tick's own check — `skewed` or `error` means
+  every stamp it carries (ages, merge times) is unverifiable and the
+  digest flags that instead of trusting the numbers.
