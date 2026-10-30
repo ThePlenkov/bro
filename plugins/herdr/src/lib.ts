@@ -11,6 +11,7 @@
 import { spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import {
+  existsSync,
   mkdirSync,
   readdirSync,
   readFileSync,
@@ -23,8 +24,12 @@ import { basename, dirname, isAbsolute, join, resolve } from 'node:path';
 import process from 'node:process';
 
 export const HERDR = process.env.HERDR_BIN_PATH ?? 'herdr';
-export const BRO = process.env.BRO_BIN_PATH ?? 'bro';
 export const PLUGIN_ROOT = process.env.HERDR_PLUGIN_ROOT ?? process.cwd();
+// The plugin and the CLI ship from one repo — prefer the checkout's own
+// build over a possibly stale `bro` on PATH (a linked dev worktree must
+// spawn status panes on its own dist, not the global install).
+const REPO_BRO = join(PLUGIN_ROOT, '..', '..', 'packages', 'cli', 'dist', 'index.js');
+export const BRO = process.env.BRO_BIN_PATH ?? (existsSync(REPO_BRO) ? REPO_BRO : 'bro');
 export const STATE_DIR =
   process.env.HERDR_PLUGIN_STATE_DIR ??
   join(process.env.HOME ?? '/tmp', '.config', 'bro-herdr-plugin');

@@ -117,7 +117,7 @@ export function renderView(
   worktree: string,
   now = Date.now()
 ): string {
-  const lines: string[] = [`── bro fleet · ${plain(s?.slug ?? 'waiting')} ──`];
+  const lines: string[] = [`── ${plain(s?.agent ?? 'fleet')} · ${plain(s?.slug ?? 'waiting')} ──`];
   if (s === undefined) {
     lines.push(' · waiting for the daemon projector', ` ${plain(worktree)}`);
   } else {
