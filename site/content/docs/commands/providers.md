@@ -83,3 +83,12 @@ reports them (a misnamed
 No defaults, no hardcoding: absent `providers` means provider behavior
 is off — a consumer naming a missing entry errors rather than silently
 vendoring a fallback.
+---
+
+## Add presets
+
+`bro providers add <preset> [--name <name>] [--global] [--force]`
+writes an `acp` provider entry for verified presets (kilo, claude-code, codex, gemini-cli, goose, opencode, devin). Defaults to `bro.config.json`; `--global` writes to `$XDG_CONFIG_HOME/bro/config.json`. Refuses if `bro.config.ts` shadows. Use `--force` to overwrite.
+
+`bro providers test <name>`
+smoke-tests the ACP connection for a configured provider.

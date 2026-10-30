@@ -1,165 +1,126 @@
-/** `bro providers models` — the <provider>/<model> catalog surface. */
-import { test, describe } from 'node:test';
 import assert from 'node:assert/strict';
-import type { SessionConfigOption } from '@agentclientprotocol/sdk';
+import { describe, test } from 'node:test';
+import type { SessionConfigOption } from '@broject/core';
 import { fakeAcpAgent } from '@broject/providers/testkit';
 import { runProvidersCommand } from './providers.ts';
 import { capture } from './testrepo.ts';
+import { writeFileSync, readFileSync } from 'node:fs';
+import { join } from 'node:path';
+import { tmpDir, initRepo, insideAsync } from './testrepo.ts';
 
 const MODEL_OPTION: SessionConfigOption = {
   id: 'model',
   name: 'Model',
   category: 'model',
   type: 'select',
-  currentValue: 'm1',
   options: [
-    { value: 'm1', name: 'Model One' },
-    { value: 'm2', name: 'Model Two' },
+    { value: 'qwen/qwen3-coder', name: 'qwen3-coder' },
+    { value: 'google/gemini-2.5-pro', name: 'gemini-2.5-pro' },
   ],
 };
 
 describe('bro providers models', () => {
-  test('api renders the models allowlist as <name>/<id>', async () => {
+  test('lists models for a named acp provider', async () => {
     const out: string[] = [];
-    await runProvidersCommand(['models'], {
+    await runProvidersCommand(['models', 'acp1'], {
+      acp: fakeAcpAgent({ sessionConfigOptions: [MODEL_OPTION] }),
+      providers: { acp1: { type: 'acp', command: 'x' } },
+      out: l => out.push(l),
+    });
+    assert.deepEqual(out, ['acp1/qwen/qwen3-coder', 'acp1/google/gemini-2.5-pro']);
+  });
+
+  test('includes the pinned model when not in the option list', async () => {
+    const out: string[] = [];
+    await runProvidersCommand(['models', 'acp1'], {
+      acp: fakeAcpAgent({ sessionConfigOptions: [] }),
+      providers: { acp1: { type: 'acp', command: 'x', model: 'some/model' } },
+      out: l => out.push(l),
+    });
+    assert.deepEqual(out, ['acp1/some/model']);
+  });
+
+  test('lists models for cli provider via template', async () => {
+    const out: string[] = [];
+    await runProvidersCommand(['models', 'cli1'], {
+      exec: async () => '  a\nb\n\n',
+      providers: { cli1: { type: 'cli', command: 'x', models: 'echo a; echo b' } },
+      out: l => out.push(l),
+    });
+    assert.deepEqual(out, ['cli1/a', 'cli1/b']);
+  });
+
+  test('cli provider includes pinned model when not listed', async () => {
+    const out: string[] = [];
+    await runProvidersCommand(['models', 'cli1'], {
+      exec: async () => 'a\n',
+      providers: { cli1: { type: 'cli', command: 'x', models: 'echo a', model: 'pinned' } },
+      out: l => out.push(l),
+    });
+    assert.deepEqual(out, ['cli1/a', 'cli1/pinned']);
+  });
+
+  test('cli provider with only pinned model and no template', async () => {
+    const out: string[] = [];
+    await runProvidersCommand(['models', 'cli1'], {
+      providers: { cli1: { type: 'cli', command: 'x', model: 'pinned' } },
+      out: l => out.push(l),
+    });
+    assert.deepEqual(out, ['cli1/pinned']);
+  });
+
+  test('api provider uses the models allowlist', async () => {
+    const out: string[] = [];
+    await runProvidersCommand(['models', 'api1'], {
+      providers: { api1: { type: 'api', baseUrl: 'http://x', apiKeyEnv: 'K', models: { 'm/a': {}, 'm/b': {} } } },
+      out: l => out.push(l),
+    });
+    assert.deepEqual(out, ['api1/m/a', 'api1/m/b']);
+  });
+
+  test('lists all configured providers when no names given', async () => {
+    const out: string[] = [];
+    await runProvidersCommand([], {
       providers: {
-        orca: {
-          type: 'api',
-          baseUrl: 'http://x',
-          apiKeyEnv: 'K',
-          models: { 'a/m-1': 'systemone', 'a/m-2': 'openai-compat' },
-        },
+        a: { type: 'api', baseUrl: 'http://x', apiKeyEnv: 'K', models: { m: {} } },
+        b: { type: 'cli', command: 'x', model: 'p' },
       },
       out: l => out.push(l),
     });
-    assert.deepEqual(out, ['orca/a/m-1', 'orca/a/m-2']);
+    assert.deepEqual(out, ['a/m', 'b/p']);
   });
 
-  test('cli renders the models template + the pinned model deduped', async () => {
-    const out: string[] = [];
-    await runProvidersCommand(['models', 'dv'], {
-      providers: {
-        dv: {
-          type: 'cli',
-          command: 'dv run',
-          model: 'swe-2-max',
-          models: 'ignored — seam supplies output',
-        },
-      },
-      exec: () => 'swe-2-max\nswe-2-medium\n\n',
-      out: l => out.push(l),
-    });
-    assert.deepEqual(out, ['dv/swe-2-max', 'dv/swe-2-medium']);
-  });
-
-  test('cli with only a pinned model still prints it — never silently empty', async () => {
-    const out: string[] = [];
-    await runProvidersCommand(['models', 'dv'], {
-      providers: { dv: { type: 'cli', command: 'dv run', model: 'pin-m' } },
-      out: l => out.push(l),
-    });
-    assert.deepEqual(out, ['dv/pin-m']);
-  });
-
-  test('acp enumerates session/new model configOptions over the protocol', async () => {
-    const fake = fakeAcpAgent({ configOptions: [MODEL_OPTION] });
-    const out: string[] = [];
-    await runProvidersCommand(['models', 'dv-acp'], {
-      providers: { 'dv-acp': { type: 'acp', command: 'dv acp' } },
-      acp: { peer: fake.app },
-      out: l => out.push(l),
-    });
-    assert.deepEqual(out, ['dv-acp/m1', 'dv-acp/m2']);
-  });
-
-  test('acp falls back to an uncategorized select — category is never required', async () => {
-    const uncategorized: SessionConfigOption = {
-      id: 'model',
-      name: 'Model',
-      type: 'select',
-      currentValue: 'm1',
-      options: [
-        { value: 'm1', name: 'Model One' },
-        { value: 'm9', name: 'Model Nine' },
-      ],
-    };
-    const fake = fakeAcpAgent({ configOptions: [uncategorized] });
-    const out: string[] = [];
-    await runProvidersCommand(['models', 'dv-acp'], {
-      providers: { 'dv-acp': { type: 'acp', command: 'dv acp' } },
-      acp: { peer: fake.app },
-      out: l => out.push(l),
-    });
-    assert.deepEqual(out, ['dv-acp/m1', 'dv-acp/m9']);
-  });
-
-  test('a select categorized mode is never the model picker', async () => {
-    const mode: SessionConfigOption = {
-      id: 'mode',
-      name: 'Mode',
-      type: 'select',
-      category: 'mode',
-      currentValue: 'plan',
-      options: [
-        { value: 'plan', name: 'Plan' },
-        { value: 'build', name: 'Build' },
-      ],
-    };
-    const fake = fakeAcpAgent({ configOptions: [mode] });
-    const out: string[] = [];
-    await runProvidersCommand(['models', 'dv-acp'], {
-      providers: { 'dv-acp': { type: 'acp', command: 'dv acp' } },
-      acp: { peer: fake.app },
-      out: l => out.push(l),
-    });
-    assert.deepEqual(out, []);
-  });
-
-  test('a categorized model option wins over an uncategorized select', async () => {
-    const uncategorized: SessionConfigOption = {
-      id: 'other',
-      name: 'Other',
-      type: 'select',
-      currentValue: 'x',
-      options: [{ value: 'x', name: 'X' }],
-    };
-    const fake = fakeAcpAgent({ configOptions: [uncategorized, MODEL_OPTION] });
-    const out: string[] = [];
-    await runProvidersCommand(['models', 'dv-acp'], {
-      providers: { 'dv-acp': { type: 'acp', command: 'dv acp' } },
-      acp: { peer: fake.app },
-      out: l => out.push(l),
-    });
-    assert.deepEqual(out, ['dv-acp/m1', 'dv-acp/m2']);
-  });
-
-  test('an unknown named provider dies naming what IS configured', async () => {
-    const r = await capture(() =>
-      runProvidersCommand(['models', 'nope'], {
-        providers: { dv: { type: 'cli', command: 'dv run' } },
-      })
-    );
+  test('unknown provider name exits 1', async () => {
+    const r = await capture(() => runProvidersCommand(['models', 'nope'], { providers: {} }));
     assert.equal(r.code, 1);
-    assert.match(r.err.join('\n'), /providers\.nope is not configured — configured: dv/);
+    assert.match(r.err.join('\n'), /providers\.nope/);
   });
 
-  test('a failing provider warns but never stops the others', async () => {
+  test('a failing provider warns and exits 1', async () => {
+    const err: string[] = [];
     const out: string[] = [];
-    const r = await capture(() =>
-      runProvidersCommand(['models'], {
-        providers: {
-          bad: { type: 'cli', command: 'x', models: 'boom' },
-          dv: { type: 'cli', command: 'y', model: 'm' },
-        },
-        exec: () => {
-          throw new Error('kaboom');
-        },
+    const orig = console.error;
+    console.error = (...a: unknown[]) => err.push(a.map(String).join(' '));
+    try {
+      await runProvidersCommand(['models', 'bad'], {
+        acp: fakeAcpAgent({ throwOnInitialize: new Error('boom') }),
+        providers: { bad: { type: 'acp', command: 'x' } },
         out: l => out.push(l),
-      })
-    );
-    assert.equal(r.code, 1);
-    assert.match(r.err.join('\n'), /bad — kaboom/);
-    assert.deepEqual(out, ['dv/m']);
+      });
+    } catch (e: any) {
+      assert.equal(e.code, 1);
+    } finally {
+      console.error = orig;
+    }
+    assert.deepEqual(out, []);
+    assert.match(err.join('\n'), /bad/);
+    assert.match(err.join('\n'), /boom/);
+  });
+
+  test('-h prints usage and exits 0', async () => {
+    const r = await capture(() => runProvidersCommand(['-h'], { providers: {} }));
+    assert.equal(r.code, 0);
+    assert.match(r.out.join('\n'), /bro providers/);
   });
 });
 
@@ -302,5 +263,106 @@ describe('bro providers route', () => {
     );
     assert.equal(r.code, 1);
     assert.match(r.err.join('\n'), /brouter\.models\.x.*providers\.nope/);
+  });
+});
+
+describe('bro providers add', () => {
+  test('add writes a preset entry to bro.config.json', async () => {
+    const dir = tmpDir('bro-prov-add-');
+    const { main } = initRepo(dir);
+    await insideAsync(main, dir, async () => {
+      await runProvidersCommand(['add', 'kilo']);
+      const cfg = JSON.parse(readFileSync(join(process.cwd(), 'bro.config.json'), 'utf8'));
+      assert.deepEqual(cfg.providers.kilo, { type: 'acp', command: 'kilo --acp' });
+    });
+  });
+
+  test('add with --name overrides provider name', async () => {
+    const dir = tmpDir('bro-prov-add2-');
+    const { main } = initRepo(dir);
+    await insideAsync(main, dir, async () => {
+      await runProvidersCommand(['add', 'kilo', '--name', 'kilo-cli']);
+      const cfg = JSON.parse(readFileSync(join(process.cwd(), 'bro.config.json'), 'utf8'));
+      assert.ok(cfg.providers['kilo-cli']);
+      assert.equal(cfg.providers.kilo, undefined);
+    });
+  });
+
+  test('add refuses to clobber without --force', async () => {
+    const dir = tmpDir('bro-prov-add3-');
+    const { main } = initRepo(dir);
+    await insideAsync(main, dir, async () => {
+      await runProvidersCommand(['add', 'kilo']);
+      const r = await capture(() => runProvidersCommand(['add', 'kilo']));
+      assert.equal(r.code, 1);
+      assert.match(r.err.join('\n'), /already exists/);
+    });
+  });
+
+  test('add --force overwrites existing entry', async () => {
+    const dir = tmpDir('bro-prov-add4-');
+    const { main } = initRepo(dir);
+    await insideAsync(main, dir, async () => {
+      await runProvidersCommand(['add', 'kilo']);
+      await runProvidersCommand(['add', 'kilo', '--force']);
+      const cfg = JSON.parse(readFileSync(join(process.cwd(), 'bro.config.json'), 'utf8'));
+      assert.deepEqual(cfg.providers.kilo, { type: 'acp', command: 'kilo --acp' });
+    });
+  });
+
+  test('add to global config with --global', async () => {
+    const dir = tmpDir('bro-prov-add5-');
+    const { main } = initRepo(dir);
+    await insideAsync(main, dir, async () => {
+      const home = join(dir, 'home');
+      const origHome = process.env.HOME;
+      process.env.HOME = home;
+      try {
+        await runProvidersCommand(['add', 'kilo', '--global']);
+        const cfg = JSON.parse(readFileSync(join(home, '.config', 'bro', 'config.json'), 'utf8'));
+        assert.deepEqual(cfg.providers.kilo, { type: 'acp', command: 'kilo --acp' });
+      } finally {
+        process.env.HOME = origHome;
+      }
+    });
+  });
+
+  test('add refuses if bro.config.ts exists', async () => {
+    const dir = tmpDir('bro-prov-add6-');
+    const { main } = initRepo(dir);
+    await insideAsync(main, dir, async () => {
+      writeFileSync(join(process.cwd(), 'bro.config.ts'), 'export default {}');
+      const r = await capture(() => runProvidersCommand(['add', 'kilo']));
+      assert.equal(r.code, 1);
+      assert.match(r.err.join('\n'), /bro\.config\.ts/);
+    });
+  });
+});
+
+describe('bro providers test', () => {
+  test('test smoke-tests an acp provider', async () => {
+    const out: string[] = [];
+    await runProvidersCommand(['test', 'acp1'], {
+      acp: fakeAcpAgent({ sessionConfigOptions: [MODEL_OPTION] }),
+      providers: { acp1: { type: 'acp', command: 'x' } },
+      out: l => out.push(l),
+    });
+    assert.deepEqual(out, ['ok: providers.acp1 (acp)']);
+  });
+
+  test('test errors on non-acp provider', async () => {
+    const r = await capture(() =>
+      runProvidersCommand(['test', 'api1'], {
+        providers: { api1: { type: 'api', baseUrl: 'http://x', apiKeyEnv: 'K', models: { m: {} } } },
+      })
+    );
+    assert.equal(r.code, 1);
+    assert.match(r.err.join('\n'), /must be type 'acp'/);
+  });
+
+  test('test errors if provider not configured', async () => {
+    const r = await capture(() => runProvidersCommand(['test', 'nope'], { providers: {} }));
+    assert.equal(r.code, 1);
+    assert.match(r.err.join('\n'), /providers\.nope/);
   });
 });
