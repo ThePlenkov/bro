@@ -67,6 +67,7 @@ export {
   DEFAULT_GLOBAL_BEADS_DIR,
   DEFAULT_IGNORE_CONSECUTIVE_FAILURES,
   DEFAULT_IGNORE_THREAD_WINDOW_DAYS,
+  brouterSection,
   defineConfig,
   fleetSection,
   globalConfigDir,
@@ -142,6 +143,19 @@ export type {
 } from './routing.ts';
 export { laneGateDir, laneGateLevel, laneGateTake } from './lane-gate.ts';
 export type { LaneGateOpts, LaneRateGate } from './lane-gate.ts';
+export {
+  BrouterConfigError,
+  brouterStaticCatalog,
+  isQualifiedRouteId,
+  parseBrouter,
+  resolveModelRoute,
+} from './brouter.ts';
+export type {
+  BrouterConfig,
+  BrouterModels,
+  BrouterRoute,
+  ModelRoute,
+} from './brouter.ts';
 export {
   DATA_REF,
   dataRefCommit,
