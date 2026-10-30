@@ -212,11 +212,7 @@ function deleteRemote(branch: string, headOid: string, remoteTip: string | undef
     return;
   }
   // Re-fetch remote tip right before deletion to avoid TOCTOU if origin advanced
-  try {
-    gitTry(['fetch', 'origin', branch, '--quiet'], 10_000);
-  } catch {
-    // best effort
-  }
+  gitTry(['fetch', 'origin', branch, '--quiet'], 10_000);
   const remotes = remoteTips();
   const currentRemoteTip = remotes.get(branch) ?? remoteTip;
   if (!tipIsMerged(currentRemoteTip, headOid, isAncestor)) {
@@ -245,17 +241,6 @@ function deleteBranch(
   }
   // re-verify the tip right before -D — narrows the recreate-between-
   // snapshot-and-delete race to the syscall itself
-  try {
-    const tip = git(['rev-parse', branch]).trim();
-    if (!tipIsMerged(tip, headOid, isAncestor)) {
-      console.log(`  keep ${branch} (tip changed since plan)`);
-      return;
-    }
-  } catch {
-    console.log(`  keep ${branch} (ref missing)`);
-    return;
-  }
-  // Check again immediately before deletion to reduce TOCTOU window
   try {
     const tip = git(['rev-parse', branch]).trim();
     if (!tipIsMerged(tip, headOid, isAncestor)) {
