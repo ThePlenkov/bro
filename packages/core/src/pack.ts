@@ -103,42 +103,33 @@ function checkProviderApiKeyCommand(name: string, raw: Record<string, unknown>):
 }
 
 function validateProviderChecks(name: string, r: Record<string, unknown>): string | null {
-  const unknownErr = checkProviderUnknownKeys(name, r);
-  if (unknownErr) return unknownErr;
-  const envErr = checkProviderApiKeyEnv(name, r);
-  if (envErr) return envErr;
-  const cmdErr = checkProviderApiKeyCommand(name, r);
-  if (cmdErr) return cmdErr;
-  return null;
+  const err =
+    checkProviderUnknownKeys(name, r) ||
+    checkProviderApiKeyEnv(name, r) ||
+    checkProviderApiKeyCommand(name, r);
+  return err;
 }
 
 function parseProviderEntryStrict(
   name: string,
   raw: unknown
 ): { ok: true; entry: ProviderEntry } | { ok: false; error: string } {
-  if (!isPlainObject(raw)) {
-    return { ok: false, error: `providers.${name} must be an object` };
-  }
+  if (!isPlainObject(raw)) return { ok: false, error: `providers.${name} must be an object` };
   const r = raw as Record<string, unknown>;
   const checkErr = validateProviderChecks(name, r);
   if (checkErr) return { ok: false, error: checkErr };
   const entry = parseProviderEntry(name, raw);
-  if (entry === null) {
-    return { ok: false, error: `providers.${name} is invalid` };
-  }
-  return { ok: true, entry };
+  return entry === null
+    ? { ok: false, error: `providers.${name} is invalid` }
+    : { ok: true, entry };
 }
 
 function validateGuards(rawGuards: unknown): PackParseResult | null {
   if (rawGuards === undefined) return null;
-  if (!Array.isArray(rawGuards)) {
-    return { ok: false, error: 'guards must be an array' };
-  }
+  if (!Array.isArray(rawGuards)) return { ok: false, error: 'guards must be an array' };
   for (let i = 0; i < rawGuards.length; i++) {
     const probs = guardProblems(rawGuards[i]);
-    if (probs.length > 0) {
-      return { ok: false, error: `guards[${i}]: ${probs[0]}` };
-    }
+    if (probs.length > 0) return { ok: false, error: `guards[${i}]: ${probs[0]}` };
   }
   return null;
 }
@@ -146,18 +137,13 @@ function validateGuards(rawGuards: unknown): PackParseResult | null {
 function validateProviders(
   rawProviders: unknown
 ): { ok: true; providers: Record<string, ProviderEntry> } | PackParseError {
-  if (rawProviders === undefined) {
+  if (rawProviders === undefined)
     return { ok: true, providers: {} as Record<string, ProviderEntry> };
-  }
-  if (!isPlainObject(rawProviders)) {
-    return { ok: false, error: 'providers must be an object' };
-  }
+  if (!isPlainObject(rawProviders)) return { ok: false, error: 'providers must be an object' };
   const providers: Record<string, ProviderEntry> = {};
   for (const [pname, pval] of Object.entries(rawProviders)) {
     const res = parseProviderEntryStrict(pname, pval);
-    if (!res.ok) {
-      return res;
-    }
+    if (!res.ok) return res;
     providers[pname] = res.entry;
   }
   return { ok: true, providers };
@@ -166,17 +152,14 @@ function validateProviders(
 function validateHookEntry(i: number, h: unknown): PackParseResult | null {
   if (!isPlainObject(h)) return { ok: false, error: `hooks[${i}] must have event and command` };
   const ho = h as Record<string, unknown>;
-  if (typeof ho.event !== 'string' || typeof ho.command !== 'string') {
+  if (typeof ho.event !== 'string' || typeof ho.command !== 'string')
     return { ok: false, error: `hooks[${i}] must have event and command` };
-  }
   return null;
 }
 
 function validateHooks(rawHooks: unknown): PackParseResult | null {
   if (rawHooks === undefined) return null;
-  if (!Array.isArray(rawHooks)) {
-    return { ok: false, error: 'hooks must be an array' };
-  }
+  if (!Array.isArray(rawHooks)) return { ok: false, error: 'hooks must be an array' };
   for (let i = 0; i < rawHooks.length; i++) {
     const err = validateHookEntry(i, rawHooks[i]);
     if (err) return err;
@@ -184,15 +167,22 @@ function validateHooks(rawHooks: unknown): PackParseResult | null {
   return null;
 }
 
+function validateStringArray(name: string, raw: unknown): PackParseResult | null {
+  if (raw === undefined) return null;
+  if (!Array.isArray(raw)) return { ok: false, error: `${name} must be an array` };
+  for (let i = 0; i < raw.length; i++) {
+    if (typeof raw[i] !== 'string') return { ok: false, error: `${name}[${i}] must be a string` };
+  }
+  return null;
+}
+
 function validateNameVersion(r: Record<string, unknown>): { ok: false; error: string } | null {
   const name = r.name;
   const version = r.version;
-  if (typeof name !== 'string' || name.trim() === '') {
+  if (typeof name !== 'string' || name.trim() === '')
     return { ok: false, error: 'pack.json name is required' };
-  }
-  if (typeof version !== 'string' || version.trim() === '') {
+  if (typeof version !== 'string' || version.trim() === '')
     return { ok: false, error: 'pack.json version is required' };
-  }
   return null;
 }
 
@@ -200,38 +190,41 @@ function applyPackValidations(
   r: Record<string, unknown>,
   manifest: PackManifest
 ): PackParseResult | null {
-  const guardRes = validateGuards(r.guards);
-  if (guardRes) return guardRes;
-
+  const checks = [
+    validateGuards(r.guards),
+    validateStringArray('skills', r.skills),
+    validateStringArray('formulas', r.formulas),
+    validateHooks(r.hooks),
+  ];
+  for (const c of checks) if (c) return c;
   const provRes = validateProviders(r.providers);
   if (!provRes.ok) return provRes;
   if (r.providers !== undefined && isPlainObject(r.providers)) {
     manifest.providers = provRes.providers;
   }
-
-  const hookRes = validateHooks(r.hooks);
-  if (hookRes) return hookRes;
   return null;
 }
 
-export function parsePack(raw: unknown): PackParseResult {
-  if (!isPlainObject(raw)) {
-    return { ok: false, error: 'pack.json must be an object' };
-  }
-  const r = raw as Record<string, unknown>;
+function buildManifest(r: Record<string, unknown>): PackManifest {
+  return {
+    ...(r as PackManifest),
+    name: String(r.name).trim(),
+    version: String(r.version).trim(),
+  };
+}
+
+function parsePackObject(r: Record<string, unknown>): PackParseResult {
   const nv = validateNameVersion(r);
   if (nv) return nv;
-
-  const manifest: PackManifest = {
-    ...(raw as any),
-    name: (r.name as string).trim(),
-    version: (r.version as string).trim(),
-  };
-
+  const manifest = buildManifest(r);
   const valRes = applyPackValidations(r, manifest);
   if (valRes) return valRes;
-
   return { ok: true, manifest };
+}
+
+export function parsePack(raw: unknown): PackParseResult {
+  if (!isPlainObject(raw)) return { ok: false, error: 'pack.json must be an object' };
+  return parsePackObject(raw as Record<string, unknown>);
 }
 
 export function readPackManifest(packDir: string): PackParseResult {
