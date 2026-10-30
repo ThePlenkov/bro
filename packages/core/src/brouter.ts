@@ -33,6 +33,23 @@ export interface BrouterConfig {
   models: BrouterModels;
 }
 
+/** Where a declared route sits — the model id it was declared under
+ *  plus the route index when the key declares several. A domain
+ *  object rather than a pre-formatted label: the parse layer owns
+ *  the label format, so the index never leaks into a message built
+ *  at the wrong depth. */
+interface RouteAt {
+  readonly key: string;
+  readonly index?: number;
+}
+
+/** One registry entry's parsed routes — the trimmed key plus the
+ *  route list it declares. */
+interface ModelEntry {
+  readonly key: string;
+  readonly routes: BrouterRoute[];
+}
+
 /** A declared route named a provider no entry resolves to — a config
  *  error naming the brouter key, never a skipped entry. */
 export class BrouterConfigError extends Error {
@@ -51,18 +68,24 @@ const str = (v: unknown): string | undefined =>
 const isPlainObject = (v: unknown): v is Record<string, unknown> =>
   typeof v === 'object' && v !== null && !Array.isArray(v);
 
+/** The label a parse warning names — `x`, or `x[2]` for the third
+ *  route under key `x`. */
+function atLabel(at: RouteAt): string {
+  return at.index === undefined ? at.key : `${at.key}[${at.index}]`;
+}
+
 /** The `{provider, model?}` route form — `provider` is required, a
  *  present-but-bad `model` drops the field, not the route. */
-function routeObject(at: string, v: Record<string, unknown>): BrouterRoute | null {
+function routeObject(at: RouteAt, v: Record<string, unknown>): BrouterRoute | null {
   const provider = str(v.provider);
   if (provider === undefined) {
-    console.error(`bro.config: brouter.models.${at} requires "provider" — route dropped`);
+    console.error(`bro.config: brouter.models.${atLabel(at)} requires "provider" — route dropped`);
     return null;
   }
   const model = v.model === undefined ? undefined : str(v.model);
   if (v.model !== undefined && model === undefined) {
     console.error(
-      `bro.config: brouter.models.${at}.model must be a non-empty string — field dropped`
+      `bro.config: brouter.models.${atLabel(at)}.model must be a non-empty string — field dropped`
     );
   }
   return model === undefined ? { provider } : { provider, model };
@@ -71,7 +94,7 @@ function routeObject(at: string, v: Record<string, unknown>): BrouterRoute | nul
 /** One route value — `"<provider>"` or `{provider, model?}`. Bad
  *  entries drop with a warning; a key whose routes all dropped falls
  *  out of the registry (providers.ts' field-vs-entry convention). */
-function routeEntry(at: string, v: unknown): BrouterRoute | null {
+function routeEntry(at: RouteAt, v: unknown): BrouterRoute | null {
   if (typeof v === 'string' && v.trim() !== '') {
     return { provider: v.trim() };
   }
@@ -79,19 +102,20 @@ function routeEntry(at: string, v: unknown): BrouterRoute | null {
     return routeObject(at, v);
   }
   console.error(
-    `bro.config: brouter.models.${at} must be a provider name or {provider, model} — route dropped`
+    `bro.config: brouter.models.${atLabel(at)} must be a provider name or {provider, model} — route dropped`
   );
   return null;
 }
 
 /** One registry key's route list — `v` is a route value or an ordered
  *  array of them; a key whose routes all dropped leaves the registry. */
-function routeList(key: string, v: unknown): BrouterRoute[] | null {
-  const routes = (Array.isArray(v) ? v : [v])
-    .map((e, i) => routeEntry(Array.isArray(v) ? `${key}[${i}]` : key, e))
+function routeList(at: RouteAt, v: unknown): BrouterRoute[] | null {
+  const entries = Array.isArray(v) ? v : [v];
+  const routes = entries
+    .map((e, i) => routeEntry(Array.isArray(v) ? { key: at.key, index: i } : at, e))
     .filter((r): r is BrouterRoute => r !== null);
   if (routes.length === 0) {
-    console.error(`bro.config: brouter.models.${key} has no usable routes — entry dropped`);
+    console.error(`bro.config: brouter.models.${atLabel(at)} has no usable routes — entry dropped`);
     return null;
   }
   return routes;
@@ -114,6 +138,29 @@ function modelsBag(raw: unknown): Record<string, unknown> {
   return isPlainObject(raw.models) ? raw.models : {};
 }
 
+/** One registry entry's routes — null when the entry drops: an empty
+ *  key, a route list with nothing usable in it, or a key that
+ *  collides with an earlier one after trimming (the first wins, the
+ *  later entry is dropped with a warning). */
+function modelEntry(models: BrouterModels, id: string, v: unknown): ModelEntry | null {
+  const key = id.trim();
+  if (key === '') {
+    console.error('bro.config: brouter.models keys must be non-empty model ids — entry dropped');
+    return null;
+  }
+  const routes = routeList({ key }, v);
+  if (routes === null) {
+    return null;
+  }
+  if (Object.hasOwn(models, key)) {
+    console.error(
+      `bro.config: brouter.models.${key} duplicates another key after trimming — later entry dropped`
+    );
+    return null;
+  }
+  return { key, routes };
+}
+
 /** `brouter` section parse — shape only; route providers resolve
  *  against `providers` at use (sections parse independently — an
  *  unknown name is a use-time config error naming the model key, same
@@ -121,26 +168,15 @@ function modelsBag(raw: unknown): Record<string, unknown> {
 export function parseBrouter(raw: unknown): BrouterConfig {
   const models: BrouterModels = {};
   for (const [id, v] of Object.entries(modelsBag(raw))) {
-    const key = id.trim();
-    if (key === '') {
-      console.error('bro.config: brouter.models keys must be non-empty model ids — entry dropped');
-      continue;
-    }
-    const routes = routeList(key, v);
-    if (routes === null) {
-      continue;
-    }
-    if (Object.hasOwn(models, key)) {
-      console.error(
-        `bro.config: brouter.models.${key} duplicates another key after trimming — later entry dropped`
-      );
+    const entry = modelEntry(models, id, v);
+    if (entry === null) {
       continue;
     }
     // defineProperty, not assignment — a model id like '__proto__'
     // must land as an own key, never trigger the prototype setter
     // (same guard as providers' model ids)
-    Object.defineProperty(models, key, {
-      value: routes,
+    Object.defineProperty(models, entry.key, {
+      value: entry.routes,
       enumerable: true,
       writable: true,
       configurable: true,
@@ -212,7 +248,7 @@ function declaredRoutes(
  *     servability downstream). A head that isn't configured is not a
  *     qualifier — vendor-namespaced ids (`opencode/x`, `kilo/orca/…`)
  *     fall through to the bare-id sources.
- *  2. `brouter.models.<id>` — its declared order; a route naming an
+ *  2. `brouter.models.<id>` — its ordered order; a route naming an
  *     unconfigured provider throws BrouterConfigError naming the key.
  *  3. the catalog — providers serving the id exactly, in `providers`
  *     insertion order.
