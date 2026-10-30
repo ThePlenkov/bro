@@ -425,19 +425,32 @@ function pluginLedger(ctx: Pick<PassCtx, 'root' | 'common'>): PluginLedger {
       createHash('sha1').update(p).digest('hex').slice(0, 12)
     )
   );
+  const home = process.env.HOME ?? '/tmp';
   const dirs = new Set(
     [
       process.env.HERDR_PLUGIN_STATE_DIR,
-      join(process.env.HOME ?? '/tmp', '.config', 'bro-herdr-plugin'),
+      join(home, '.config', 'bro-herdr-plugin'),
+      // herdr's own plugin-state root — host-spawned plugin panes get
+      // HERDR_PLUGIN_STATE_DIR pointing here, the daemon does not
+      join(
+        process.env.XDG_STATE_HOME ?? join(home, '.local', 'state'),
+        'herdr',
+        'plugins',
+        'bro.fleet'
+      ),
     ].filter((d): d is string => d !== undefined)
   );
   const out: PluginLedger = { workspaces: new Map(), statusPanes: new Map() };
   for (const dir of dirs) {
     for (const scope of scopes) {
-      try {
-        mergeLedger(out, JSON.parse(readFileSync(join(dir, `state-${scope}.json`), 'utf8')));
-      } catch {
-        // no ledger at this candidate — the others still apply
+      // unscoped `state.json` is the legacy name — read first so a
+      // same-dir scoped file always wins on a shared worktree key
+      for (const file of ['state.json', `state-${scope}.json`]) {
+        try {
+          mergeLedger(out, JSON.parse(readFileSync(join(dir, file), 'utf8')));
+        } catch {
+          // no ledger at this candidate — the others still apply
+        }
       }
     }
   }
