@@ -225,24 +225,35 @@ main().catch((err: unknown) => {
   if (err && typeof err === 'object' && (err as any).name === 'CommandError') {
     const e = err as any
     if (e.usage) {
-      printUsage(e.usage, e.code)
+      try {
+        printUsage(e.usage, e.code)
+      } catch {
+        // printUsage throws CommandError; handled below
+      }
     }
-    if (e.code === EXIT.ok) {
-      if (e.message) console.log(e.message)
+    const code = typeof e.code === 'number' ? e.code : 1
+    if (code === EXIT.ok) {
+      if (e.message && e.message !== e.usage) console.log(e.message)
       process.exit(0)
     }
-    if (e.message) console.error(e.message)
-    process.exit(e.code)
+    if (e.message && e.message !== e.usage) console.error(e.message)
+    else if (!e.usage && e.message) console.error(e.message)
+    process.exit(code)
   }
   if (err instanceof CommandError) {
     if (err.usage) {
-      printUsage(err.usage, err.code)
+      try {
+        printUsage(err.usage, err.code)
+      } catch {
+        // printUsage throws CommandError
+      }
     }
     if (err.code === EXIT.ok) {
-      if (err.message) console.log(err.message)
+      if (err.message && err.message !== err.usage) console.log(err.message)
       process.exit(0)
     }
-    if (err.message) console.error(err.message)
+    if (err.message && err.message !== err.usage) console.error(err.message)
+    else if (!err.usage && err.message) console.error(err.message)
     process.exit(err.code)
   }
   console.error(err instanceof Error ? err.message : err)

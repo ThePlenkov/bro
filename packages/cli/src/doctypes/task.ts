@@ -137,7 +137,7 @@ function taskAdapter(ctx: DocCtx): DocAdapter<TaskRow> {
         )
       }
       if (res.status !== 0) {
-        throw new CommandError('', (res.status ?? 1) as ExitCode)
+        throw new CommandError('', ((res.status ?? 1) >= 0 && (res.status ?? 1) <= 4) ? ((res.status ?? 1) as ExitCode) : EXIT.error)
       }
     },
   }

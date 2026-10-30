@@ -266,7 +266,6 @@ async function cmdSubscribe(rest: string[]): Promise<void> {
     }, since !== undefined ? { since } : {})
   } catch (err) {
     if (err instanceof CommandError) {
-      if (err.code === EXIT.usage) throw err
       throw err
     }
     if (err instanceof Error && err.message.startsWith('error:')) {
