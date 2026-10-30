@@ -607,11 +607,3 @@ export {
   testGitSpawn,
   testRepoInit,
 } from './testkit.ts';
-export {
-  checkSkillLock,
-  readSkillLock,
-  skillFolderHash,
-  type LockedSkill,
-  type SkillDrift,
-  type SkillLockLocation,
-} from './skills-lock.ts';

@@ -22,6 +22,8 @@ import {
   initBeadsStealth,
   PERSONALITIES,
   printUsage,
+  probeBdCompat,
+  resolveRepo,
   withFileLock,
   type BroConfig,
 } from '@broject/core'
@@ -178,7 +180,7 @@ function ensureLocalConfigExcluded(): void {
 }
 
 /** Exported for tests — writes/merges the gitignored local layer. */
-export function writeConfig(opts: { beads: boolean; personality?: string }): string {
+export function writeConfig(opts: { beads: boolean; personality?: string; connectors?: Record<string, string>; stores?: string[] }): string {
   // The written file is called "gitignored" by every doc that mentions
   // it — make that true here, not only in repos whose .gitignore
   // already carries the pattern.
@@ -204,11 +206,16 @@ export function writeConfig(opts: { beads: boolean; personality?: string }): str
   // highest-precedence layer and mask later project edits.
   const effective = loadBroConfig()
   const merged: Partial<BroConfig> = { ...existing }
-  if (opts.beads && !effective.stores.includes('beads')) {
-    merged.stores = [...(merged.stores ?? effective.stores), 'beads']
+  if (opts.stores) {
+    merged.stores = opts.stores as BroConfig['stores']
+  } else if (opts.beads && !effective.stores.includes('beads')) {
+    merged.stores = [...(merged.stores ?? effective.stores), 'beads'] as BroConfig['stores']
   }
   if (opts.personality) {
     merged.personality = opts.personality as BroConfig['personality']
+  }
+  if (opts.connectors && Object.keys(opts.connectors).length > 0) {
+    merged.connectors = { ...(merged.connectors ?? effective.connectors ?? {}), ...opts.connectors }
   }
   // $schema first — IDEs/agents get completion+validation for free;
   // an existing $schema pin wins the spread (never clobbered). Compare
@@ -269,15 +276,25 @@ export function readPackTree(dir: string): Record<string, string> {
     for (const name of readdirSync(d)) {
       const path = join(d, name)
       const rel = prefix ? `${prefix}/${name}` : name
-      const st = lstatSync(path)
+      let st
+      try {
+        st = lstatSync(path)
+      } catch {
+        continue
+      }
       if (st.isSymbolicLink()) {
         continue
       }
       if (st.isDirectory()) {
         walk(path, rel)
-      } else {
-        out[rel] = readFileSync(path, 'utf8')
+      } else if (st.isFile()) {
+        try {
+          out[rel] = readFileSync(path, 'utf8')
+        } catch {
+          continue
+        }
       }
+      // skip other types (devices, sockets, etc.)
     }
   }
   walk(dir, '')
@@ -292,7 +309,29 @@ export function checkedPackDir(spec: string): string {
     console.error(`error: pack ${spec} not resolvable — install it or check the "pack" config key`)
     process.exit(1)
   }
-  if (!existsSync(join(dir, 'skills'))) {
+  const skillsPath = join(dir, 'skills')
+  // Never trust a symlinked skills root or a non-directory.
+  try {
+    const lst = lstatSync(skillsPath)
+    if (lst.isSymbolicLink()) {
+      console.error(`error: ${spec} resolved to ${dir} but has no skills/ tree — not a bro pack`)
+      process.exit(1)
+    }
+  } catch {
+    console.error(`error: ${spec} resolved to ${dir} but has no skills/ tree — not a bro pack`)
+    process.exit(1)
+  }
+  if (!existsSync(skillsPath)) {
+    console.error(`error: ${spec} resolved to ${dir} but has no skills/ tree — not a bro pack`)
+    process.exit(1)
+  }
+  try {
+    const st = statSync(skillsPath)
+    if (!st.isDirectory()) {
+      console.error(`error: ${spec} resolved to ${dir} but has no skills/ tree — not a bro pack`)
+      process.exit(1)
+    }
+  } catch {
     console.error(`error: ${spec} resolved to ${dir} but has no skills/ tree — not a bro pack`)
     process.exit(1)
   }
@@ -326,6 +365,12 @@ interface SetupArgs {
 }
 
 function parseSetupArgs(argv: string[]): SetupArgs {
+  for (const removed of ['--lock', '--dry-run', '--check']) {
+    if (argv.includes(removed)) {
+      console.error(`error: ${removed} was removed from bro setup`)
+      process.exit(2)
+    }
+  }
   const pIdx = argv.indexOf('--personality')
   const pVal = pIdx >= 0 ? argv[pIdx + 1] : undefined
   if (pIdx >= 0 && (!pVal || pVal.startsWith('--'))) {
@@ -351,7 +396,7 @@ function parseSetupArgs(argv: string[]): SetupArgs {
   }
 }
 
-function checkPrereqs(needBeads: boolean): void {
+function checkPrereqs(needBeads: boolean, allowFallback = false): void {
   const gh = hasBin('gh')
   const ghOk = gh && ghAuthed()
   const bd = hasBin('bd')
@@ -371,7 +416,7 @@ function checkPrereqs(needBeads: boolean): void {
   }
   // Validate prerequisites before writing anything — a config pointing at a
   // store we can't run would strand the repo.
-  if (needBeads && !bd) {
+  if (needBeads && !bd && !allowFallback) {
     console.error(
       'error: bd not found — install beads (https://github.com/gastownhall/beads) ' +
         'or opt out with "stores": ["jsonl"] in bro.config.local.json'
@@ -402,11 +447,45 @@ export async function runSetupCommand(argv: string[]): Promise<void> {
   }
   // beads is a default store — setup needs bd whenever the effective config
   // keeps it on, not only when --beads was passed explicitly.
-  const wantsBeads = beads || loadBroConfig().stores.includes('beads')
+  let wantsBeads = beads || loadBroConfig().stores.includes('beads')
+  let fallbackToGithub = false
+  // Detect bd usability
+  if (wantsBeads) {
+    const bdPresent = hasBin('bd')
+    if (!bdPresent) {
+      // Try to see if we can fallback to github
+      try {
+        resolveRepo([], process.cwd())
+        if (ghAuthed()) {
+          fallbackToGithub = true
+          wantsBeads = false
+        }
+      } catch {
+        // ignore
+      }
+    } else {
+      try {
+        const compat = probeBdCompat(process.cwd())
+        if (compat.missing || compat.broken || !compat.ok) {
+          try {
+            resolveRepo([], process.cwd())
+            if (ghAuthed()) {
+              fallbackToGithub = true
+              wantsBeads = false
+            }
+          } catch {
+            // ignore
+          }
+        }
+      } catch {
+        // if probe fails, be conservative
+      }
+    }
+  }
   // Validate the pack BEFORE beads init/config/skills mutate anything —
   // a bad spec must fail setup on a clean tree, not a half-written one.
   const packDir = pack === false ? null : checkedPackDir(pack || loadBroConfig().pack || DEFAULT_PACK)
-  checkPrereqs(wantsBeads)
+  checkPrereqs(wantsBeads, fallbackToGithub)
 
   // bd init + formulas land BEFORE the config write — if beads setup fails,
   // no config claiming store=both is left behind.
@@ -414,7 +493,12 @@ export async function runSetupCommand(argv: string[]): Promise<void> {
     setupBeads()
   }
 
-  console.error(`  ${writeConfig({ beads, personality })}`)
+  if (fallbackToGithub) {
+    console.error('  bd unavailable — falling back to GitHub Issues (connectors.tasks=github), stores=["jsonl"]')
+    console.error(`  ${writeConfig({ beads: false, personality, connectors: { tasks: 'github' }, stores: ['jsonl'] })}`)
+  } else {
+    console.error(`  ${writeConfig({ beads, personality })}`)
+  }
 
   if (skills) {
     if (installFiles(join('.agents', 'skills'), SKILL_FILES, 'skill') === 0) {
