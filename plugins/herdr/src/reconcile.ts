@@ -126,12 +126,11 @@ function armedSet(p: Planes): Map<string, ArmedTree> {
   return armed;
 }
 
-function desiredLabel(tree: ArmedTree, titles: Map<string, string>): string {
-  if (tree.slug !== undefined) {
-    const t = titles.get(tree.slug);
-    if (t !== undefined && t !== '') return t;
-  }
-  return basename(tree.path);
+/** The open-time label matches the daemon projector's contract —
+ * `🤖 <worktree-name>` — so a fresh workspace never flashes a bead
+ * title or raw slug the next pass would overwrite anyway. */
+function desiredLabel(tree: ArmedTree): string {
+  return `🤖 ${basename(tree.path)}`;
 }
 
 interface WsCtx {
@@ -210,17 +209,16 @@ export interface ConvergeResult {
 }
 
 /** Workspaces for every armed tree; path → live workspace id. Opens
- *  carry the plain bead title — status prefixes are projected by the
- *  daemon, not written here. */
+ *  carry the robot-marked worktree name — the same label the daemon
+ *  projector maintains. */
 function convergeWorkspaces(
   p: Planes,
   armed: Map<string, ArmedTree>,
   ctx: WsCtx
 ): Map<string, string> {
-  const titles = new Map(p.status.beads.inProgress.map(b => [b.id, b.title] as const));
   const wsForPath = new Map<string, string>();
   for (const t of armed.values()) {
-    const ws = ensureWorkspace(t, desiredLabel(t, titles), ctx);
+    const ws = ensureWorkspace(t, desiredLabel(t), ctx);
     if (ws !== undefined) wsForPath.set(t.path, ws);
   }
   return wsForPath;

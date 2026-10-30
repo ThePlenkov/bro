@@ -40,6 +40,15 @@ Developing bro itself: see CONTRIBUTING.md.
   skill + config section. bro is a plugin system on top of beads (and more):
   agents orchestrate by pushing work into shared, schema-validated plans
   and workflows rather than re-deriving mechanics in prompts.
+- **Provider-agnostic core** — bro is a general agent framework; every
+  agent kind is an interchangeable provider plugin. Naming a provider
+  in a comment, doc, or config example is fine; what must never sit in
+  shared paths is provider-specific LOGIC — branching on a kind, a
+  kind's CLI flags/session semantics, its cloud API, its rate-limit
+  shape. Those live in the provider package (`@broject/devin`, …);
+  core calls the generic seam. Env constants (`DEVIN_SESSION_ID`, …)
+  and kind-namespaced config keys (`agents.<kind>.*`) are integration
+  facts, not violations. The cleanup epic is bro-751ah.
 - **One portable package** — the product is an
   [Agent Plugin](https://agent-plugins.org/) whose skills are
   [Agent Skills](https://agentskills.io/): root `plugin.json` plus

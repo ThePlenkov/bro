@@ -32,19 +32,19 @@ import {
   parseProviderEntry,
   type FleetProfile,
   type ProviderEntry,
-} from './providers.ts'
+} from './providers.ts';
 import {
   fleetRouter,
   fleetRouting,
   ON_WALL,
   type FleetRouter,
   type RoutingTable,
-} from './routing.ts'
+} from './routing.ts';
 
-export const STORE_BACKENDS = ['jsonl', 'beads', 'gitref'] as const
-export type StoreBackend = (typeof STORE_BACKENDS)[number]
-export const PERSONALITIES = ['terse', 'mentor', 'sarcastic'] as const
-export type Personality = (typeof PERSONALITIES)[number]
+export const STORE_BACKENDS = ['jsonl', 'beads', 'gitref'] as const;
+export type StoreBackend = (typeof STORE_BACKENDS)[number];
+export const PERSONALITIES = ['terse', 'mentor', 'sarcastic'] as const;
+export type Personality = (typeof PERSONALITIES)[number];
 
 /** A JSON Schema (draft-07 subset — `validateSchemaValue` in
  *  config-schema.ts honors exactly these keywords) describing a config
@@ -53,31 +53,31 @@ export type Personality = (typeof PERSONALITIES)[number]
  *  draft keywords are legal in the emitted document; the validator
  *  ignores them. */
 export interface JsonSchema {
-  type?: string | readonly string[]
-  enum?: readonly unknown[]
-  const?: unknown
-  required?: readonly string[]
-  properties?: Record<string, JsonSchema>
-  patternProperties?: Record<string, JsonSchema>
-  additionalProperties?: boolean | JsonSchema
-  items?: JsonSchema | readonly JsonSchema[]
-  anyOf?: readonly JsonSchema[]
-  oneOf?: readonly JsonSchema[]
-  minimum?: number
-  maximum?: number
-  exclusiveMinimum?: number
-  exclusiveMaximum?: number
-  minLength?: number
-  maxLength?: number
-  minItems?: number
-  maxItems?: number
-  minProperties?: number
-  pattern?: string
-  title?: string
-  description?: string
-  $id?: string
-  $schema?: string
-  [k: string]: unknown
+  type?: string | readonly string[];
+  enum?: readonly unknown[];
+  const?: unknown;
+  required?: readonly string[];
+  properties?: Record<string, JsonSchema>;
+  patternProperties?: Record<string, JsonSchema>;
+  additionalProperties?: boolean | JsonSchema;
+  items?: JsonSchema | readonly JsonSchema[];
+  anyOf?: readonly JsonSchema[];
+  oneOf?: readonly JsonSchema[];
+  minimum?: number;
+  maximum?: number;
+  exclusiveMinimum?: number;
+  exclusiveMaximum?: number;
+  minLength?: number;
+  maxLength?: number;
+  minItems?: number;
+  maxItems?: number;
+  minProperties?: number;
+  pattern?: string;
+  title?: string;
+  description?: string;
+  $id?: string;
+  $schema?: string;
+  [k: string]: unknown;
 }
 
 /** A plugin-owned config section: raw JSON value in, normalized section
@@ -86,7 +86,7 @@ export interface JsonSchema {
  *  `.jsonSchema` (spec: specs/bro-d9dmx.md) is the section's declared
  *  input shape — IDE/agent autocompletion plus the diagnostics doctor,
  *  `bro doctor --strict`, and the mutation gate read. */
-export type ConfigSection<T> = ((raw: unknown) => T) & { jsonSchema?: JsonSchema }
+export type ConfigSection<T> = ((raw: unknown) => T) & { jsonSchema?: JsonSchema };
 
 /** Compact builders for the `.jsonSchema` literals — keep each schema
  *  a few lines next to its parser (spec: specs/bro-d9dmx.md). `obj`
@@ -94,18 +94,18 @@ export type ConfigSection<T> = ((raw: unknown) => T) & { jsonSchema?: JsonSchema
  *  diagnostics should name, so only true maps (connectors, providers,
  *  agents.<backend>) stay open. */
 export const js: {
-  str: JsonSchema
-  bool: JsonSchema
-  strList: JsonSchema
-  int: (minimum?: number) => JsonSchema
-  num: (minimum?: number) => JsonSchema
+  str: JsonSchema;
+  bool: JsonSchema;
+  strList: JsonSchema;
+  int: (minimum?: number) => JsonSchema;
+  num: (minimum?: number) => JsonSchema;
   obj: (
     properties: Record<string, JsonSchema>,
     opts?: { additional?: boolean | JsonSchema; required?: readonly string[] }
-  ) => JsonSchema
-  map: (values: JsonSchema) => JsonSchema
-  oneOf: (...variants: JsonSchema[]) => JsonSchema
-  anyOf: (...variants: JsonSchema[]) => JsonSchema
+  ) => JsonSchema;
+  map: (values: JsonSchema) => JsonSchema;
+  oneOf: (...variants: JsonSchema[]) => JsonSchema;
+  anyOf: (...variants: JsonSchema[]) => JsonSchema;
 } = {
   // \S: parsers trim and drop whitespace-only input — a "present"
   // value that normalizes to nothing must validate as the defect it is
@@ -113,61 +113,56 @@ export const js: {
   bool: { type: 'boolean' },
   strList: { type: 'array', items: { type: 'string', minLength: 1, pattern: String.raw`\S` } },
   int: (minimum = 0) => ({ type: 'integer', minimum }),
-  num: (minimum) => (minimum === undefined ? { type: 'number' } : { type: 'number', minimum }),
+  num: minimum => (minimum === undefined ? { type: 'number' } : { type: 'number', minimum }),
   obj: (properties, opts) => ({
     type: 'object',
     properties,
     additionalProperties: opts?.additional ?? false,
     ...(opts?.required === undefined ? {} : { required: [...opts.required] }),
   }),
-  map: (values) => ({ type: 'object', additionalProperties: values }),
+  map: values => ({ type: 'object', additionalProperties: values }),
   oneOf: (...variants) => ({ oneOf: variants }),
   anyOf: (...variants) => ({ anyOf: variants }),
-}
+};
 
 export const debtSection: ConfigSection<{
-  dir: string
-  sources: string[]
-  stale_days: number
-  sourceConfig: Record<string, Record<string, unknown>>
-}> = (raw) => {
-  const obj = (typeof raw === 'object' && raw !== null ? raw : {}) as Record<string, unknown>
+  dir: string;
+  sources: string[];
+  stale_days: number;
+  sourceConfig: Record<string, Record<string, unknown>>;
+}> = raw => {
+  const obj = (typeof raw === 'object' && raw !== null ? raw : {}) as Record<string, unknown>;
   // Per-source knob bags pass through verbatim — core stays
   // vendor-neutral; each collector validates its own fields (see the
   // sources note below). Only plain-object entries survive.
-  const sourceConfig: Record<string, Record<string, unknown>> = {}
+  const sourceConfig: Record<string, Record<string, unknown>> = {};
   if (isPlainObject(obj.sourceConfig)) {
     for (const [name, bag] of Object.entries(obj.sourceConfig)) {
       if (name !== '__proto__' && isPlainObject(bag)) {
-        sourceConfig[name] = bag
+        sourceConfig[name] = bag;
       }
     }
   }
   return {
     // dir feeds path.join — a non-string or empty value must fall back to
     // the default, not throw mid-command
-    dir:
-      typeof obj.dir === 'string' && obj.dir.trim() !== ''
-        ? obj.dir
-        : DEFAULT_CONFIG.debt.dir,
+    dir: typeof obj.dir === 'string' && obj.dir.trim() !== '' ? obj.dir : DEFAULT_CONFIG.debt.dir,
     // Which collectors `debt collect` runs. Source names are validated by
     // the debt plugin (core stays vendor-neutral) — unknown entries are
     // dropped there with a warning, not silently accepted.
     sources:
       Array.isArray(obj.sources) &&
-      obj.sources.every((s) => typeof s === 'string' && s.trim() !== '') &&
+      obj.sources.every(s => typeof s === 'string' && s.trim() !== '') &&
       obj.sources.length > 0
         ? obj.sources
         : DEFAULT_CONFIG.debt.sources,
     stale_days:
-      typeof obj.stale_days === 'number' &&
-      Number.isFinite(obj.stale_days) &&
-      obj.stale_days > 0
+      typeof obj.stale_days === 'number' && Number.isFinite(obj.stale_days) && obj.stale_days > 0
         ? obj.stale_days
         : DEFAULT_CONFIG.debt.stale_days,
     sourceConfig,
-  }
-}
+  };
+};
 
 debtSection.jsonSchema = js.obj({
   dir: js.str,
@@ -175,29 +170,24 @@ debtSection.jsonSchema = js.obj({
   stale_days: { type: 'number', exclusiveMinimum: 0 },
   // per-source knob bags pass through verbatim — core stays vendor-neutral
   sourceConfig: js.map({ type: 'object' }),
-})
+});
 
 export const syncSection: ConfigSection<{
-  ref: string
-  remote: string
-  beads: boolean
-}> = (raw) => {
-  const obj = (typeof raw === 'object' && raw !== null ? raw : {}) as Record<
-    string,
-    unknown
-  >
+  ref: string;
+  remote: string;
+  beads: boolean;
+}> = raw => {
+  const obj = (typeof raw === 'object' && raw !== null ? raw : {}) as Record<string, unknown>;
   return {
     // only non-blank strings may reach git arg construction — a null,
     // non-string, or empty sync.ref/sync.remote falls back to the default
     ...DEFAULT_CONFIG.sync,
     ...Object.fromEntries(
-      Object.entries(obj).filter(
-        ([, v]) => typeof v === 'string' && v.trim() !== ''
-      )
+      Object.entries(obj).filter(([, v]) => typeof v === 'string' && v.trim() !== '')
     ),
     beads: typeof obj.beads === 'boolean' ? obj.beads : DEFAULT_CONFIG.sync.beads,
-  }
-}
+  };
+};
 
 // every non-empty-string key merges through — the passthrough is the
 // contract, so unknown keys are legal iff string-valued
@@ -205,14 +195,14 @@ syncSection.jsonSchema = {
   type: 'object',
   properties: { ref: js.str, remote: js.str, beads: js.bool },
   additionalProperties: js.str,
-}
+};
 
 export const sweepSection: ConfigSection<{
-  olderThanDays: number
-  dir: string
-  flatten: boolean
-}> = (raw) => {
-  const obj = (typeof raw === 'object' && raw !== null ? raw : {}) as Record<string, unknown>
+  olderThanDays: number;
+  dir: string;
+  flatten: boolean;
+}> = raw => {
+  const obj = (typeof raw === 'object' && raw !== null ? raw : {}) as Record<string, unknown>;
   return {
     // the gate threshold and `bd prune --older-than` read the same knob
     // so the two can never disagree (spec: specs/bro-pj2g.1.md) —
@@ -223,19 +213,16 @@ export const sweepSection: ConfigSection<{
       obj.olderThanDays > 0
         ? Math.ceil(obj.olderThanDays)
         : DEFAULT_CONFIG.sweep.olderThanDays,
-    dir:
-      typeof obj.dir === 'string' && obj.dir.trim() !== ''
-        ? obj.dir
-        : DEFAULT_CONFIG.sweep.dir,
+    dir: typeof obj.dir === 'string' && obj.dir.trim() !== '' ? obj.dir : DEFAULT_CONFIG.sweep.dir,
     flatten: typeof obj.flatten === 'boolean' ? obj.flatten : DEFAULT_CONFIG.sweep.flatten,
-  }
-}
+  };
+};
 
 sweepSection.jsonSchema = js.obj({
   olderThanDays: { type: 'number', exclusiveMinimum: 0 },
   dir: js.str,
   flatten: js.bool,
-})
+});
 
 /** A conditional ignoreChecks entry — `name` keeps the bare-string
  *  substring match; the two knobs say when a *failing* check has earned
@@ -243,19 +230,19 @@ sweepSection.jsonSchema = js.obj({
  *  AND thread activity by the check's bot inside `threadWindowDays`. A
  *  failing check without that evidence is an alert, not a pass. */
 export interface IgnoreCheckRule {
-  name: string
-  consecutiveFailures: number
-  threadWindowDays: number
+  name: string;
+  consecutiveFailures: number;
+  threadWindowDays: number;
 }
 
-export type IgnoreCheckEntry = string | IgnoreCheckRule
+export type IgnoreCheckEntry = string | IgnoreCheckRule;
 
-export const DEFAULT_IGNORE_CONSECUTIVE_FAILURES = 3
-export const DEFAULT_IGNORE_THREAD_WINDOW_DAYS = 7
+export const DEFAULT_IGNORE_CONSECUTIVE_FAILURES = 3;
+export const DEFAULT_IGNORE_THREAD_WINDOW_DAYS = 7;
 
 function normalizeIgnoreEntry(v: unknown): IgnoreCheckRule | null {
   const posInt = (x: unknown, dflt: number, min: number): number =>
-    typeof x === 'number' && Number.isInteger(x) && x >= min ? x : dflt
+    typeof x === 'number' && Number.isInteger(x) && x >= min ? x : dflt;
   if (typeof v === 'string') {
     // a bare substring is a rule with default thresholds — the
     // silent-reviewer detection applies without a config migration
@@ -265,70 +252,58 @@ function normalizeIgnoreEntry(v: unknown): IgnoreCheckRule | null {
           name: v,
           consecutiveFailures: DEFAULT_IGNORE_CONSECUTIVE_FAILURES,
           threadWindowDays: DEFAULT_IGNORE_THREAD_WINDOW_DAYS,
-        }
+        };
   }
   if (typeof v !== 'object' || v === null || Array.isArray(v)) {
-    return null
+    return null;
   }
-  const o = v as { name?: unknown; consecutiveFailures?: unknown; threadWindowDays?: unknown }
+  const o = v as { name?: unknown; consecutiveFailures?: unknown; threadWindowDays?: unknown };
   if (typeof o.name !== 'string' || o.name.trim() === '') {
-    return null
+    return null;
   }
   return {
     name: o.name,
-    consecutiveFailures: posInt(
-      o.consecutiveFailures,
-      DEFAULT_IGNORE_CONSECUTIVE_FAILURES,
-      1
-    ),
-    threadWindowDays: posInt(
-      o.threadWindowDays,
-      DEFAULT_IGNORE_THREAD_WINDOW_DAYS,
-      1
-    ),
-  }
+    consecutiveFailures: posInt(o.consecutiveFailures, DEFAULT_IGNORE_CONSECUTIVE_FAILURES, 1),
+    threadWindowDays: posInt(o.threadWindowDays, DEFAULT_IGNORE_THREAD_WINDOW_DAYS, 1),
+  };
 }
 
 export const actSection: ConfigSection<{
-  ignoreChecks: IgnoreCheckRule[]
-  maxRounds: number
-  docsPaths: string[]
-  docsMaxRounds: number
-  requireApproval: boolean
-  approvers: string[]
-  mergeQueue: { label?: string; comment?: string }
-}> = (raw) => {
+  ignoreChecks: IgnoreCheckRule[];
+  maxRounds: number;
+  docsPaths: string[];
+  docsMaxRounds: number;
+  requireApproval: boolean;
+  approvers: string[];
+  mergeQueue: { label?: string; comment?: string };
+}> = raw => {
   const obj = (typeof raw === 'object' && raw !== null ? raw : {}) as {
-    ignoreChecks?: unknown
-    maxRounds?: unknown
-    docsPaths?: unknown
-    docsMaxRounds?: unknown
-    requireApproval?: unknown
-    approvers?: unknown
-    mergeQueue?: unknown
-  }
-  const queue = (typeof obj.mergeQueue === 'object' && obj.mergeQueue !== null
-    ? obj.mergeQueue
-    : {}) as { label?: unknown; comment?: unknown }
-  const mergeQueue: { label?: string; comment?: string } = {}
+    ignoreChecks?: unknown;
+    maxRounds?: unknown;
+    docsPaths?: unknown;
+    docsMaxRounds?: unknown;
+    requireApproval?: unknown;
+    approvers?: unknown;
+    mergeQueue?: unknown;
+  };
+  const queue = (
+    typeof obj.mergeQueue === 'object' && obj.mergeQueue !== null ? obj.mergeQueue : {}
+  ) as { label?: unknown; comment?: unknown };
+  const mergeQueue: { label?: string; comment?: string } = {};
   if (typeof queue.label === 'string' && queue.label.trim() !== '') {
-    mergeQueue.label = queue.label.trim()
+    mergeQueue.label = queue.label.trim();
   }
   if (typeof queue.comment === 'string' && queue.comment.trim() !== '') {
-    mergeQueue.comment = queue.comment.trim()
+    mergeQueue.comment = queue.comment.trim();
   }
   return {
     // only name substrings (bare or rule objects) may reach the check
     // filter — anything else falls back to the default
     ignoreChecks: Array.isArray(obj.ignoreChecks)
-      ? obj.ignoreChecks
-          .map(normalizeIgnoreEntry)
-          .filter((r): r is IgnoreCheckRule => r !== null)
+      ? obj.ignoreChecks.map(normalizeIgnoreEntry).filter((r): r is IgnoreCheckRule => r !== null)
       : [],
     maxRounds:
-      typeof obj.maxRounds === 'number' &&
-      Number.isInteger(obj.maxRounds) &&
-      obj.maxRounds >= 0
+      typeof obj.maxRounds === 'number' && Number.isInteger(obj.maxRounds) && obj.maxRounds >= 0
         ? obj.maxRounds
         : DEFAULT_CONFIG.act.maxRounds,
     docsPaths: Array.isArray(obj.docsPaths)
@@ -354,16 +329,16 @@ export const actSection: ConfigSection<{
     // fails closed (PR #636 review).
     approvers: (() => {
       if (!Array.isArray(obj.approvers)) {
-        return []
+        return [];
       }
       const valid = obj.approvers
-        .map((v) => (typeof v === 'string' ? v.trim() : ''))
-        .filter((v) => v !== '')
-      return obj.approvers.length > 0 && valid.length === 0 ? ['!'] : valid
+        .map(v => (typeof v === 'string' ? v.trim() : ''))
+        .filter(v => v !== '');
+      return obj.approvers.length > 0 && valid.length === 0 ? ['!'] : valid;
     })(),
     mergeQueue,
-  }
-}
+  };
+};
 
 actSection.jsonSchema = js.obj({
   ignoreChecks: {
@@ -388,7 +363,7 @@ actSection.jsonSchema = js.obj({
   requireApproval: js.bool,
   approvers: js.strList,
   mergeQueue: js.obj({ label: js.str, comment: js.str }),
-})
+});
 
 /** bro.config.json `providers` section — the typed provider registry
  *  (spec: specs/bro-ribc.1.md). A name → entry map, kind-validated via
@@ -396,23 +371,23 @@ actSection.jsonSchema = js.obj({
  *  and entries missing required fields are dropped with a warning. The
  *  absent/empty section is valid — consumers fall back to their
  *  pre-registry behavior, never to a vendor the user didn't name. */
-export const providersSection: ConfigSection<Record<string, ProviderEntry>> = (raw) => {
-  const out: Record<string, ProviderEntry> = {}
+export const providersSection: ConfigSection<Record<string, ProviderEntry>> = raw => {
+  const out: Record<string, ProviderEntry> = {};
   if (typeof raw !== 'object' || raw === null || Array.isArray(raw)) {
-    return out
+    return out;
   }
   for (const [name, v] of Object.entries(raw)) {
-    const trimmed = name.trim()
+    const trimmed = name.trim();
     if (trimmed === '') {
-      continue
+      continue;
     }
-    const entry = parseProviderEntry(trimmed, v)
+    const entry = parseProviderEntry(trimmed, v);
     if (entry !== null) {
-      out[trimmed] = entry
+      out[trimmed] = entry;
     }
   }
-  return out
-}
+  return out;
+};
 
 const providerApiSchema = js.obj(
   {
@@ -428,16 +403,12 @@ const providerApiSchema = js.obj(
       type: 'object',
       minProperties: 1,
       additionalProperties: {
-        anyOf: [
-          { enum: API_WIRES },
-          { type: 'null' },
-          js.obj({ wire: { enum: API_WIRES } }),
-        ],
+        anyOf: [{ enum: API_WIRES }, { type: 'null' }, js.obj({ wire: { enum: API_WIRES } })],
       },
     },
   },
   { required: ['type', 'baseUrl', 'models'] }
-)
+);
 
 const providerAcpSchema = js.obj(
   {
@@ -450,7 +421,7 @@ const providerAcpSchema = js.obj(
     autoApprove: js.bool,
   },
   { required: ['type', 'command'] }
-)
+);
 
 const providerCliSchema = js.obj(
   {
@@ -461,9 +432,11 @@ const providerCliSchema = js.obj(
     models: js.str,
   },
   { required: ['type', 'command'] }
-)
+);
 
-providersSection.jsonSchema = js.map(js.oneOf(providerApiSchema, providerAcpSchema, providerCliSchema))
+providersSection.jsonSchema = js.map(
+  js.oneOf(providerApiSchema, providerAcpSchema, providerCliSchema)
+);
 
 /** bro.config.json `brouter` section — the model-centric routing
  *  registry (spec: specs/bro-n1p0s.md): `models` maps a canonical
@@ -487,50 +460,50 @@ brouterSection.jsonSchema = js.obj({
 /** bro.config.json `connectors` section — facade → connector precedence,
  *  e.g. { "reviews": "gitlab", "tasks": "jira" }. Only string→string
  *  entries survive; anything else is dropped. */
-export const connectorsSection: ConfigSection<Record<string, string>> = (raw) => {
-  const out: Record<string, string> = {}
+export const connectorsSection: ConfigSection<Record<string, string>> = raw => {
+  const out: Record<string, string> = {};
   if (typeof raw === 'object' && raw !== null && !Array.isArray(raw)) {
     for (const [k, v] of Object.entries(raw)) {
       if (k.trim() !== '' && typeof v === 'string' && v.trim() !== '') {
-        out[k.trim()] = v.trim()
+        out[k.trim()] = v.trim();
       }
     }
   }
-  return out
-}
+  return out;
+};
 
-connectorsSection.jsonSchema = js.map(js.str)
+connectorsSection.jsonSchema = js.map(js.str);
 
 /** Default global-beads store — XDG data dir, not a repo path. */
-export const DEFAULT_GLOBAL_BEADS_DIR = join(homedir(), '.local', 'share', 'bro', 'beads')
+export const DEFAULT_GLOBAL_BEADS_DIR = join(homedir(), '.local', 'share', 'bro', 'beads');
 
 /** bro.config.json `beads` section — `beads.global` is the global store
  *  dir. BRO_GLOBAL_BEADS wins over the file: a per-machine path should
  *  not need a committed edit. `~` expands against the home dir. */
-export const beadsSection: ConfigSection<{ global: string }> = (raw) => {
+export const beadsSection: ConfigSection<{ global: string }> = raw => {
   const fromConfig =
-    typeof raw === 'object' && raw !== null ? (raw as { global?: unknown }).global : undefined
-  const env = process.env.BRO_GLOBAL_BEADS
+    typeof raw === 'object' && raw !== null ? (raw as { global?: unknown }).global : undefined;
+  const env = process.env.BRO_GLOBAL_BEADS;
   const v =
     (typeof env === 'string' && env.trim() !== '' ? env : undefined) ??
-    (typeof fromConfig === 'string' && fromConfig.trim() !== '' ? fromConfig : undefined)
+    (typeof fromConfig === 'string' && fromConfig.trim() !== '' ? fromConfig : undefined);
   if (v === undefined) {
-    return { global: DEFAULT_GLOBAL_BEADS_DIR }
+    return { global: DEFAULT_GLOBAL_BEADS_DIR };
   }
-  const p = v.trim()
-  let dir = p
+  const p = v.trim();
+  let dir = p;
   if (p === '~') {
-    dir = homedir()
+    dir = homedir();
   } else if (p.startsWith('~/')) {
-    dir = join(homedir(), p.slice(2))
+    dir = join(homedir(), p.slice(2));
   }
-  return { global: dir }
-}
+  return { global: dir };
+};
 
-beadsSection.jsonSchema = js.obj({ global: js.str })
+beadsSection.jsonSchema = js.obj({ global: js.str });
 
-export const SINK_TYPES = ['slack', 'telegram', 'webhook'] as const
-export type SinkType = (typeof SINK_TYPES)[number]
+export const SINK_TYPES = ['slack', 'telegram', 'webhook'] as const;
+export type SinkType = (typeof SINK_TYPES)[number];
 
 /** One outbound notify sink (spec: specs/bro-huy5o.8.md) — a webhook
  *  endpoint events matching `events` are POSTed to. Secrets are never
@@ -540,32 +513,31 @@ export type SinkType = (typeof SINK_TYPES)[number]
 export interface SinkDef {
   /** Label for `bro sinks` output and dedup identity — defaults to the
    *  type when absent. */
-  name?: string
-  type: SinkType
+  name?: string;
+  type: SinkType;
   /** slack/webhook: literal endpoint for non-secret hooks. `urlEnv` wins. */
-  url?: string
+  url?: string;
   /** slack/webhook: env var holding the endpoint URL. */
-  urlEnv?: string
+  urlEnv?: string;
   /** telegram: env var holding the bot token. */
-  tokenEnv?: string
+  tokenEnv?: string;
   /** telegram: literal chat id. */
-  chatId?: string
+  chatId?: string;
   /** telegram: env var holding the chat id. `chatId` wins. */
-  chatIdEnv?: string
+  chatIdEnv?: string;
   /** telegram: bot-API host override (default https://api.telegram.org). */
-  apiBase?: string
+  apiBase?: string;
   /** Routing patterns — `topic` or `topic:kind`, `*` and trailing-`*`
    *  globs. Omitted/empty = every event (the EventFilter no-narrowing
    *  rule). */
-  events?: string[]
+  events?: string[];
   /** Per-request timeout, default 5000. */
-  timeoutMs?: number
+  timeoutMs?: number;
   /** Identical-event resend floor, default 4h — `0` sends every time. */
-  minIntervalMs?: number
+  minIntervalMs?: number;
 }
 
-const nonEmptyStr = (v: unknown): v is string =>
-  typeof v === 'string' && v.trim() !== ''
+const nonEmptyStr = (v: unknown): v is string => typeof v === 'string' && v.trim() !== '';
 
 const SINK_STR_KEYS = [
   'name',
@@ -575,8 +547,8 @@ const SINK_STR_KEYS = [
   'chatId',
   'chatIdEnv',
   'apiBase',
-] as const
-const SINK_NUM_KEYS = ['timeoutMs', 'minIntervalMs'] as const
+] as const;
+const SINK_NUM_KEYS = ['timeoutMs', 'minIntervalMs'] as const;
 
 /** `events` routes → the trimmed list, 'drop' when a restrictive intent
  *  can't be honored as written, undefined when the field was absent.
@@ -584,13 +556,13 @@ const SINK_NUM_KEYS = ['timeoutMs', 'minIntervalMs'] as const
  *  no-narrowing rule. */
 function parseSinkRoutes(raw: unknown): string[] | 'drop' | undefined {
   if (raw === undefined) {
-    return undefined
+    return undefined;
   }
   if (Array.isArray(raw) && raw.length === 0) {
-    return []
+    return [];
   }
-  const routes = Array.isArray(raw) ? raw.filter(nonEmptyStr).map((e) => e.trim()) : []
-  return routes.length === 0 ? 'drop' : routes
+  const routes = Array.isArray(raw) ? raw.filter(nonEmptyStr).map(e => e.trim()) : [];
+  return routes.length === 0 ? 'drop' : routes;
 }
 
 /** Structurally dead = no endpoint could ever resolve. An unset env
@@ -599,9 +571,9 @@ function sinkEndpointMissing(sink: SinkDef): boolean {
   if (sink.type === 'telegram') {
     return (
       sink.tokenEnv === undefined || (sink.chatId === undefined && sink.chatIdEnv === undefined)
-    )
+    );
   }
-  return sink.url === undefined && sink.urlEnv === undefined
+  return sink.url === undefined && sink.urlEnv === undefined;
 }
 
 /** One raw sinks entry → a SinkDef, or null when the entry is
@@ -610,17 +582,17 @@ function sinkEndpointMissing(sink: SinkDef): boolean {
  *  `bro sinks list` reports it, the entry survives. */
 function parseSinkDef(raw: unknown, i: number): SinkDef | null {
   if (typeof raw !== 'object' || raw === null || Array.isArray(raw)) {
-    console.error(`bro.config: notify.sinks[${i}] must be an object — dropped`)
-    return null
+    console.error(`bro.config: notify.sinks[${i}] must be an object — dropped`);
+    return null;
   }
-  const o = raw as Record<string, unknown>
+  const o = raw as Record<string, unknown>;
   if (!nonEmptyStr(o.type) || !(SINK_TYPES as readonly string[]).includes(o.type)) {
     console.error(
       `bro.config: notify.sinks[${i}].type must be one of ${SINK_TYPES.join('|')} — dropped`
-    )
-    return null
+    );
+    return null;
   }
-  const routes = parseSinkRoutes(o.events)
+  const routes = parseSinkRoutes(o.events);
   // A supplied `events` says "restrict me" — when nothing in it parses
   // (non-array, or every entry unusable) honoring the field as written
   // is impossible, and omitting it would silently widen the sink to
@@ -628,51 +600,51 @@ function parseSinkDef(raw: unknown, i: number): SinkDef | null {
   if (routes === 'drop') {
     console.error(
       `bro.config: notify.sinks[${i}].events has no usable route — dropped (a restrictive intent must not widen to all events)`
-    )
-    return null
+    );
+    return null;
   }
-  const sink: SinkDef = { type: o.type as SinkType }
+  const sink: SinkDef = { type: o.type as SinkType };
   for (const k of SINK_STR_KEYS) {
-    const v = o[k]
+    const v = o[k];
     if (nonEmptyStr(v)) {
-      sink[k] = v.trim()
+      sink[k] = v.trim();
     }
   }
   for (const k of SINK_NUM_KEYS) {
-    const v = o[k]
+    const v = o[k];
     if (typeof v === 'number' && Number.isFinite(v) && v >= 0) {
-      sink[k] = v
+      sink[k] = v;
     }
   }
   if (routes !== undefined && routes.length > 0) {
-    sink.events = routes
+    sink.events = routes;
   }
   if (sinkEndpointMissing(sink)) {
     console.error(
       `bro.config: notify.sinks[${i}] (${sink.type}) has no endpoint it could ever resolve — dropped`
-    )
-    return null
+    );
+    return null;
   }
-  return sink
+  return sink;
 }
 
 /** `notify` config section — outbound event sinks (spec:
  *  specs/bro-huy5o.8.md). Operator-class: endpoints and chat ids are
  *  per-machine, so it belongs in the global or local layer. */
-export const notifySection: ConfigSection<{ sinks: SinkDef[] }> = (raw) => {
-  const obj = (typeof raw === 'object' && raw !== null ? raw : {}) as { sinks?: unknown }
+export const notifySection: ConfigSection<{ sinks: SinkDef[] }> = raw => {
+  const obj = (typeof raw === 'object' && raw !== null ? raw : {}) as { sinks?: unknown };
   if (!Array.isArray(obj.sinks)) {
-    return { sinks: [] }
+    return { sinks: [] };
   }
-  const sinks: SinkDef[] = []
+  const sinks: SinkDef[] = [];
   for (const [i, entry] of obj.sinks.entries()) {
-    const s = parseSinkDef(entry, i)
+    const s = parseSinkDef(entry, i);
     if (s !== null) {
-      sinks.push(s)
+      sinks.push(s);
     }
   }
-  return { sinks }
-}
+  return { sinks };
+};
 
 // per-type endpoint requirements mirror sinkEndpointMissing — a sink
 // the parser drops must not validate: telegram needs tokenEnv plus a
@@ -689,7 +661,7 @@ const sinkFields = {
   events: { type: 'array', items: js.str },
   timeoutMs: js.num(0),
   minIntervalMs: js.num(0),
-} satisfies Record<string, JsonSchema>
+} satisfies Record<string, JsonSchema>;
 
 notifySection.jsonSchema = js.obj({
   sinks: {
@@ -703,22 +675,16 @@ notifySection.jsonSchema = js.obj({
         anyOf: [{ required: ['chatId'] }, { required: ['chatIdEnv'] }],
       },
       {
-        ...js.obj(
-          { ...sinkFields, type: { const: 'slack' } },
-          { required: ['type'] }
-        ),
+        ...js.obj({ ...sinkFields, type: { const: 'slack' } }, { required: ['type'] }),
         anyOf: [{ required: ['url'] }, { required: ['urlEnv'] }],
       },
       {
-        ...js.obj(
-          { ...sinkFields, type: { const: 'webhook' } },
-          { required: ['type'] }
-        ),
+        ...js.obj({ ...sinkFields, type: { const: 'webhook' } }, { required: ['type'] }),
         anyOf: [{ required: ['url'] }, { required: ['urlEnv'] }],
       }
     ),
   },
-})
+});
 
 /** bro.config.json `stack` section — how `bro work enter` picks the base
  *  for a new worktree when a session already produced a PR branch.
@@ -726,72 +692,67 @@ notifySection.jsonSchema = js.obj({
  *  'auto': base on the current worktree's branch whenever it isn't the
  *  main checkout's branch — second+ PR in a session lands on the stack
  *  head; gh-stack then drives submit/sync/merge bottom-up. */
-export const stackSection: ConfigSection<{ mode: 'auto' | 'manual' }> = (raw) => {
-  const m = typeof raw === 'object' && raw !== null ? (raw as { mode?: unknown }).mode : undefined
+export const stackSection: ConfigSection<{ mode: 'auto' | 'manual' }> = raw => {
+  const m = typeof raw === 'object' && raw !== null ? (raw as { mode?: unknown }).mode : undefined;
   if (m !== undefined && m !== 'auto' && m !== 'manual') {
-    console.error(`bro.config: stack.mode must be "auto" or "manual" — got ${JSON.stringify(m)}`)
-    return { mode: 'manual' }
+    console.error(`bro.config: stack.mode must be "auto" or "manual" — got ${JSON.stringify(m)}`);
+    return { mode: 'manual' };
   }
-  return { mode: m ?? 'manual' }
-}
+  return { mode: m ?? 'manual' };
+};
 
-stackSection.jsonSchema = js.obj({ mode: { enum: ['auto', 'manual'] } })
+stackSection.jsonSchema = js.obj({ mode: { enum: ['auto', 'manual'] } });
 
-export const SDD_MODES = ['off', 'remind', 'gate'] as const
-export type SddMode = (typeof SDD_MODES)[number]
+export const SDD_MODES = ['off', 'remind', 'gate'] as const;
+export type SddMode = (typeof SDD_MODES)[number];
 
 /** bro.config.json `sdd` section — spec-driven development policy.
  *  off (default): nothing emitted. remind: session-start/prompt context
  *  names claimed beads without a spec. gate: the stop gate also blocks
  *  once while an own claim lacks a spec. `dir` is where `specs/<id>.md`
  *  lives; a `spec:` link in the bead description counts too. */
-export const sddSection: ConfigSection<{ mode: SddMode; dir: string }> = (raw) => {
+export const sddSection: ConfigSection<{ mode: SddMode; dir: string }> = raw => {
   const obj = (typeof raw === 'object' && raw !== null ? raw : {}) as {
-    mode?: unknown
-    dir?: unknown
-  }
-  if (
-    obj.mode !== undefined &&
-    !(SDD_MODES as readonly unknown[]).includes(obj.mode)
-  ) {
+    mode?: unknown;
+    dir?: unknown;
+  };
+  if (obj.mode !== undefined && !(SDD_MODES as readonly unknown[]).includes(obj.mode)) {
     console.error(
-      `bro.config: sdd.mode must be one of ${SDD_MODES.map((m) => `"${m}"`).join('|')} — got ${JSON.stringify(obj.mode)}`
-    )
+      `bro.config: sdd.mode must be one of ${SDD_MODES.map(m => `"${m}"`).join('|')} — got ${JSON.stringify(obj.mode)}`
+    );
   }
   const mode = (
     obj.mode !== undefined && (SDD_MODES as readonly unknown[]).includes(obj.mode)
       ? obj.mode
       : DEFAULT_CONFIG.sdd.mode
-  ) as SddMode
+  ) as SddMode;
   return {
     mode,
     dir:
       typeof obj.dir === 'string' && obj.dir.trim() !== ''
         ? obj.dir.trim()
         : DEFAULT_CONFIG.sdd.dir,
-  }
-}
+  };
+};
 
-sddSection.jsonSchema = js.obj({ mode: { enum: SDD_MODES }, dir: js.str })
+sddSection.jsonSchema = js.obj({ mode: { enum: SDD_MODES }, dir: js.str });
 
 /** bro.config.json `serve` section — the facade host's own knobs.
  *  `backend` names the acp provider `BRO_PROVIDER_BACKEND` falls back
  *  to: a repo that always wants its conductor can pin it in config
  *  instead of relying on the env var reaching every spawn path
  *  (apiKeyHelper children do not inherit settings.env). */
-export const serveSection: ConfigSection<{ backend?: string }> = (raw) => {
+export const serveSection: ConfigSection<{ backend?: string }> = raw => {
   const obj = (typeof raw === 'object' && raw !== null ? raw : {}) as {
-    backend?: unknown
-  }
+    backend?: unknown;
+  };
   const backend =
-    typeof obj.backend === 'string' && obj.backend.trim() !== ''
-      ? obj.backend.trim()
-      : undefined
+    typeof obj.backend === 'string' && obj.backend.trim() !== '' ? obj.backend.trim() : undefined;
   // an unset backend reads as an empty bag — same shape as providers:{}
-  return backend === undefined ? {} : { backend }
-}
+  return backend === undefined ? {} : { backend };
+};
 
-serveSection.jsonSchema = js.obj({ backend: js.str })
+serveSection.jsonSchema = js.obj({ backend: js.str });
 
 /** bro.config.json `mirror` section — the bead→tracker projection
  *  policy (spec specs/backends/bro-z2z7f): which beads materialize as
@@ -799,45 +760,45 @@ serveSection.jsonSchema = js.obj({ backend: js.str })
  *  this only picks what's board-worthy. */
 export interface MirrorPolicy {
   /** Labels that force projection regardless of type/spec. */
-  labels: string[]
+  labels: string[];
   /** Extra labels vetoing projection — layered over the built-in sink
    *  set (debt/fixer/wtf/retro/drill beads and every mesh:* label). */
-  excludeLabels: string[]
+  excludeLabels: string[];
   /** issue_types that project without a spec link — default
    *  ['feature','bug']; 'task' stays opt-in: unspecced tasks are the
    *  internal churn the projection exists to hide. */
-  types: string[]
+  types: string[];
   /** A spec-linked bead projects whatever its type — the `specs`
    *  facade's hasSpec or a `spec:` link in the description. Default
    *  true; false narrows projection to types/labels only. */
-  specLinked: boolean
+  specLinked: boolean;
 }
 
-export const mirrorSection: ConfigSection<MirrorPolicy> = (raw) => {
-  const obj = (typeof raw === 'object' && raw !== null ? raw : {}) as Record<string, unknown>
+export const mirrorSection: ConfigSection<MirrorPolicy> = raw => {
+  const obj = (typeof raw === 'object' && raw !== null ? raw : {}) as Record<string, unknown>;
   const list = (k: string, dflt: string[] = []): string[] =>
     Array.isArray(obj[k])
       ? (obj[k] as unknown[])
           .filter((v): v is string => typeof v === 'string' && v.trim() !== '')
-          .map((v) => v.trim())
-      : dflt
+          .map(v => v.trim())
+      : dflt;
   return {
     labels: list('labels'),
     excludeLabels: list('excludeLabels'),
     types: list('types', ['feature', 'bug']),
     specLinked: obj.specLinked !== false,
-  }
-}
+  };
+};
 
 mirrorSection.jsonSchema = js.obj({
   labels: js.strList,
   excludeLabels: js.strList,
   types: js.strList,
   specLinked: js.bool,
-})
+});
 
 const strField = (v: unknown): string | undefined =>
-  typeof v === 'string' && v.trim() !== '' ? v.trim() : undefined
+  typeof v === 'string' && v.trim() !== '' ? v.trim() : undefined;
 
 /** One fleet.profiles entry — {provider, model?, backend?,
  *  autoApprove?} (spec bro-5hx1.1). A missing provider drops the whole
@@ -845,58 +806,58 @@ const strField = (v: unknown): string | undefined =>
  *  providers.ts' convention. */
 function fleetProfile(name: string, v: unknown): FleetProfile | null {
   if (typeof v !== 'object' || v === null || Array.isArray(v)) {
-    console.error(`bro.config: fleet.profiles.${name} must be an object — entry dropped`)
-    return null
+    console.error(`bro.config: fleet.profiles.${name} must be an object — entry dropped`);
+    return null;
   }
-  const p = v as Record<string, unknown>
-  const provider = strField(p.provider)
+  const p = v as Record<string, unknown>;
+  const provider = strField(p.provider);
   if (provider === undefined) {
-    console.error(`bro.config: fleet.profiles.${name} requires "provider" — entry dropped`)
-    return null
+    console.error(`bro.config: fleet.profiles.${name} requires "provider" — entry dropped`);
+    return null;
   }
-  const prof: FleetProfile = { provider }
+  const prof: FleetProfile = { provider };
   for (const f of ['model', 'backend'] as const) {
-    const raw2 = p[f]
+    const raw2 = p[f];
     if (raw2 === undefined) {
-      continue
+      continue;
     }
-    const s = strField(raw2)
+    const s = strField(raw2);
     if (s === undefined) {
       console.error(
         `bro.config: fleet.profiles.${name}.${f} must be a non-empty string — field dropped`
-      )
-      continue
+      );
+      continue;
     }
-    prof[f] = s
+    prof[f] = s;
   }
   if (p.autoApprove !== undefined) {
     if (typeof p.autoApprove === 'boolean') {
-      prof.autoApprove = p.autoApprove
+      prof.autoApprove = p.autoApprove;
     } else {
       console.error(
         `bro.config: fleet.profiles.${name}.autoApprove must be a boolean — field dropped`
-      )
+      );
     }
   }
-  return prof
+  return prof;
 }
 
 function fleetProfiles(raw: unknown): Record<string, FleetProfile> {
   if (raw === undefined) {
-    return {}
+    return {};
   }
   if (typeof raw !== 'object' || raw === null || Array.isArray(raw)) {
-    console.error('bro.config: fleet.profiles must be an object — section dropped')
-    return {}
+    console.error('bro.config: fleet.profiles must be an object — section dropped');
+    return {};
   }
-  const out: Record<string, FleetProfile> = {}
+  const out: Record<string, FleetProfile> = {};
   for (const [name, v] of Object.entries(raw)) {
-    const prof = fleetProfile(name, v)
+    const prof = fleetProfile(name, v);
     if (prof !== null) {
-      out[name] = prof
+      out[name] = prof;
     }
   }
-  return out
+  return out;
 }
 
 /** bro.config.json `fleet` section — the live-agent ceiling the spawn
@@ -907,18 +868,18 @@ function fleetProfiles(raw: unknown): Record<string, FleetProfile> {
  *  ALL backends (the budget wall is per-account, not per-runtime); 0
  *  disables the cap, matching act.maxRounds' convention. */
 export const fleetSection: ConfigSection<{
-  maxConcurrent: number
-  profiles: Record<string, FleetProfile>
-  routing: RoutingTable
-  router?: FleetRouter
-}> = (raw) => {
+  maxConcurrent: number;
+  profiles: Record<string, FleetProfile>;
+  routing: RoutingTable;
+  router?: FleetRouter;
+}> = raw => {
   const obj = (typeof raw === 'object' && raw !== null ? raw : {}) as {
-    maxConcurrent?: unknown
-    profiles?: unknown
-    routing?: unknown
-    router?: unknown
-  }
-  const router = fleetRouter(obj.router)
+    maxConcurrent?: unknown;
+    profiles?: unknown;
+    routing?: unknown;
+    router?: unknown;
+  };
+  const router = fleetRouter(obj.router);
   return {
     maxConcurrent:
       typeof obj.maxConcurrent === 'number' &&
@@ -929,12 +890,12 @@ export const fleetSection: ConfigSection<{
     profiles: fleetProfiles(obj.profiles),
     routing: fleetRouting(obj.routing),
     ...(router === undefined ? {} : { router }),
-  }
-}
+  };
+};
 
 const fleetChainEntry: JsonSchema = {
   anyOf: [js.str, js.obj({ provider: js.str, model: js.str }, { required: ['provider'] })],
-}
+};
 
 fleetSection.jsonSchema = js.obj({
   maxConcurrent: js.int(),
@@ -957,7 +918,7 @@ fleetSection.jsonSchema = js.obj({
     { provider: js.str, mode: { enum: ['shadow', 'enforce', 'off'] } },
     { required: ['provider', 'mode'] }
   ),
-})
+});
 
 /** bro.config.json `query` section — `query`-plan defaults (spec
  *  bro-14h8.1). `concurrency` is the plan-level default a plan's own
@@ -965,18 +926,18 @@ fleetSection.jsonSchema = js.obj({
  *  each step's `env` — instance pinning (`GITLAB_HOST`, `GH_HOST`,
  *  `ATLASSIAN_API_URL`), never credentials. */
 export const querySection: ConfigSection<{
-  concurrency: number
-  env: Record<string, string>
-}> = (raw) => {
+  concurrency: number;
+  env: Record<string, string>;
+}> = raw => {
   const obj = (typeof raw === 'object' && raw !== null ? raw : {}) as {
-    concurrency?: unknown
-    env?: unknown
-  }
-  const env: Record<string, string> = {}
+    concurrency?: unknown;
+    env?: unknown;
+  };
+  const env: Record<string, string> = {};
   if (typeof obj.env === 'object' && obj.env !== null) {
     for (const [k, v] of Object.entries(obj.env)) {
       if (typeof v === 'string') {
-        env[k] = v
+        env[k] = v;
       }
     }
   }
@@ -988,37 +949,42 @@ export const querySection: ConfigSection<{
         ? obj.concurrency
         : DEFAULT_CONFIG.query.concurrency,
     env,
-  }
-}
+  };
+};
 
 // env values are a literal overlay — the parser keeps empty strings
 // (explicit unset), so the schema must too
-querySection.jsonSchema = js.obj({ concurrency: js.int(1), env: js.map({ type: 'string' }) })
+querySection.jsonSchema = js.obj({ concurrency: js.int(1), env: js.map({ type: 'string' }) });
 
 /** One `mesh.peers.<alias>` entry — rig must be a mesh:// URI, remote a
  *  non-empty string; transport survives verbatim (parsePeer judges it —
  *  stripping it here would silently downgrade explicit bindings). */
-function meshPeerEntry(entry: unknown): { rig: string; remote: string; transport?: string; login?: string } | null {
+function meshPeerEntry(
+  entry: unknown
+): { rig: string; remote: string; transport?: string; login?: string } | null {
   if (typeof entry !== 'object' || entry === null) {
-    return null
+    return null;
   }
-  const e = entry as { rig?: unknown; remote?: unknown; transport?: unknown; login?: unknown }
+  const e = entry as { rig?: unknown; remote?: unknown; transport?: unknown; login?: unknown };
   if (
     typeof e.rig !== 'string' ||
     !e.rig.startsWith('mesh://') ||
     typeof e.remote !== 'string' ||
     e.remote === ''
   ) {
-    return null
+    return null;
   }
-  const p: { rig: string; remote: string; transport?: string; login?: string } = { rig: e.rig, remote: e.remote }
+  const p: { rig: string; remote: string; transport?: string; login?: string } = {
+    rig: e.rig,
+    remote: e.remote,
+  };
   if (typeof e.transport === 'string' && e.transport !== '') {
-    p.transport = e.transport
+    p.transport = e.transport;
   }
   if (typeof e.login === 'string' && e.login !== '') {
-    p.login = e.login
+    p.login = e.login;
   }
-  return p
+  return p;
 }
 
 /** bro.config.json `mesh` section — the federation seam (specs/mesh).
@@ -1027,35 +993,39 @@ function meshPeerEntry(entry: unknown): { rig: string; remote: string; transport
  *  the remote is a git/dolt remote the peer's beads store federates
  *  over (beads-remote binding). */
 export const meshSection: ConfigSection<{
-  rig?: string
-  peers: Record<string, { rig: string; remote: string; transport?: string; login?: string }>
-}> = (raw) => {
+  rig?: string;
+  peers: Record<string, { rig: string; remote: string; transport?: string; login?: string }>;
+}> = raw => {
   const obj = (typeof raw === 'object' && raw !== null ? raw : {}) as {
-    rig?: unknown
-    peers?: unknown
-  }
-  const peers: Record<string, { rig: string; remote: string; transport?: string; login?: string }> = {}
+    rig?: unknown;
+    peers?: unknown;
+  };
+  const peers: Record<string, { rig: string; remote: string; transport?: string; login?: string }> =
+    {};
   if (typeof obj.peers === 'object' && obj.peers !== null) {
     for (const [alias, entry] of Object.entries(obj.peers)) {
       // __proto__ is a setter on Object.prototype, not an own-property
       // write — a peer alias with that name would mutate the map
       if (alias === '__proto__') {
-        continue
+        continue;
       }
-      const p = meshPeerEntry(entry)
+      const p = meshPeerEntry(entry);
       if (p !== null) {
-        peers[alias] = p
+        peers[alias] = p;
       }
     }
   }
-  const out: { rig?: string; peers: Record<string, { rig: string; remote: string; transport?: string; login?: string }> } = { peers }
+  const out: {
+    rig?: string;
+    peers: Record<string, { rig: string; remote: string; transport?: string; login?: string }>;
+  } = { peers };
   if (typeof obj.rig === 'string' && obj.rig.startsWith('mesh://')) {
-    out.rig = obj.rig
+    out.rig = obj.rig;
   }
-  return out
-}
+  return out;
+};
 
-const meshUri: JsonSchema = { type: 'string', pattern: '^mesh://' }
+const meshUri: JsonSchema = { type: 'string', pattern: '^mesh://' };
 
 meshSection.jsonSchema = js.obj({
   rig: meshUri,
@@ -1065,7 +1035,7 @@ meshSection.jsonSchema = js.obj({
       { required: ['rig', 'remote'] }
     )
   ),
-})
+});
 
 /** bro.config.json `mcp` section — the `bro mcp` stdio server's plane
  *  exposure (specs/bro-9rls.1.md). Absent/empty section = every read
@@ -1075,20 +1045,20 @@ meshSection.jsonSchema = js.obj({
  *  only when unwritten — a present non-array value is a malformed
  *  allowlist and fails closed (`[]`), never silently widens to every
  *  plane. */
-export const mcpSection: ConfigSection<{ planes?: string[] }> = (raw) => {
-  const obj = (typeof raw === 'object' && raw !== null ? raw : {}) as { planes?: unknown }
-  const out: { planes?: string[] } = {}
+export const mcpSection: ConfigSection<{ planes?: string[] }> = raw => {
+  const obj = (typeof raw === 'object' && raw !== null ? raw : {}) as { planes?: unknown };
+  const out: { planes?: string[] } = {};
   if (Array.isArray(obj.planes)) {
     out.planes = obj.planes
       .filter((p): p is string => typeof p === 'string' && p.trim() !== '')
-      .map((p) => p.trim())
+      .map(p => p.trim());
   } else if (obj.planes !== undefined) {
-    out.planes = []
+    out.planes = [];
   }
-  return out
-}
+  return out;
+};
 
-mcpSection.jsonSchema = js.obj({ planes: js.strList })
+mcpSection.jsonSchema = js.obj({ planes: js.strList });
 
 /** Sections core normalizes itself — identical to what the built-in
  *  plugins declare as their configSchema. Exported for the schema
@@ -1110,55 +1080,55 @@ export const CORE_SECTIONS: Record<string, ConfigSection<unknown>> = {
   mirror: mirrorSection as ConfigSection<unknown>,
   notify: notifySection as ConfigSection<unknown>,
   serve: serveSection as ConfigSection<unknown>,
-}
+};
 
 /** Every config key core normalizes itself — the authoritative "known
  *  section" set for surfaces that check bro.config for typos (doctor's
  *  unknown-key warn). Exported so a new core section can't drift the
  *  checker: sections without a plugin configKey (connectors, fleet,
  *  providers) are still real config. */
-export const CORE_CONFIG_SECTIONS: readonly string[] = Object.keys(CORE_SECTIONS)
+export const CORE_CONFIG_SECTIONS: readonly string[] = Object.keys(CORE_SECTIONS);
 
 export interface BroConfig {
   /** Active stores. The JSONL ledger is always on — extra backends are
    *  projections written alongside it. beads is on by default; gitref is
    *  opt-in — it pushes artifact dirs to a standalone data ref. */
-  stores: StoreBackend[]
-  personality: Personality
+  stores: StoreBackend[];
+  personality: Personality;
   debt: {
     /** Directory holding the review-debt ledger, relative to cwd. */
-    dir: string
+    dir: string;
     /** Collectors `bro debt collect` runs. Default: review-threads only —
      *  the pre-multi-source contract. Others opt in: dependabot,
      *  code-scanning, secret-scanning, stale-prs, failed-ci, sonarcloud,
      *  codacy, codescene. */
-    sources: string[]
+    sources: string[];
     /** Idle days before an open PR counts as stale (stale-prs collector). */
-    stale_days: number
+    stale_days: number;
     /** Per-source knob bags, keyed by collector name
      *  (`debt.sourceConfig.sonarcloud.project_key` overrides
      *  `sonar-project.properties`). Core carries the bags verbatim —
      *  field validation is the collector's job, keeping core
      *  vendor-neutral. */
-    sourceConfig: Record<string, Record<string, unknown>>
-  }
+    sourceConfig: Record<string, Record<string, unknown>>;
+  };
   sync: {
     /** Data ref holding synced artifacts — outside refs/heads so it
      *  never shows up as a branch. */
-    ref: string
+    ref: string;
     /** Remote the data ref pushes to / pulls from. */
-    remote: string
+    remote: string;
     /** Also run `bd sync` — beads state (drill frames, wtfs, retros) has
      *  its own transport, not the data ref. Default true; set false to
      *  sync only bro artifacts. */
-    beads: boolean
-  }
+    beads: boolean;
+  };
   /** `bro sweep` — gated lifecycle disposal for closed beads
    *  (spec: specs/bro-pj2g.1.md). `olderThanDays` feeds both the gate
    *  and `bd prune --older-than`; `dir` is the JSONL archive dir under
    *  the synced set (`.agents/`); `flatten` controls the post-prune
    *  `bd flatten` stage. BRO_SWEEP_DIR wins over `dir` at use sites. */
-  sweep: { olderThanDays: number; dir: string; flatten: boolean }
+  sweep: { olderThanDays: number; dir: string; flatten: boolean };
   act: {
     /** Advisory checks excluded from the exit gate — a flaky external
      *  reviewer's infra is not this repo's problem. The ignore is
@@ -1166,43 +1136,43 @@ export interface BroConfig {
      *  `consecutiveFailures` failing heads in a row WITH thread
      *  activity inside `threadWindowDays` — otherwise it surfaces as a
      *  silent-reviewer alert (still non-blocking). */
-    ignoreChecks: IgnoreCheckRule[]
+    ignoreChecks: IgnoreCheckRule[];
     /** Inline fix-round cap — past it, remaining threads must defer to
      *  debt beads instead of another push. 0 disables the cap. */
-    maxRounds: number
+    maxRounds: number;
     /** Path patterns classifying a file as docs — a pattern without a
      *  slash matches the basename glob (`*.md`), one ending in `/`
      *  matches the dir anywhere (`docs/`), anything else is a full-path
      *  glob. A PR whose changed files all match is "docs-only". */
-    docsPaths: string[]
+    docsPaths: string[];
     /** Round cap applied instead of maxRounds (whichever is tighter)
      *  on a docs-only PR — doc threads churn per push, so inline fixing
      *  converges slower for less value. 0 disables the docs-specific cap. */
-    docsMaxRounds: number
+    docsMaxRounds: number;
     /** Human-signoff gate (bro-3vy93): when true the act exit gate —
      *  and every auto-merge driven off it — also requires a trusted
      *  human's approving review on the current head (latest review per
      *  reviewer; a standing CHANGES_REQUESTED vetoes). Opt-in
      *  hostile-input hardening; default off keeps bot-only auto-merge. */
-    requireApproval: boolean
+    requireApproval: boolean;
     /** Trusted reviewer logins for requireApproval — an approval counts
      *  only from these accounts; empty means any human (`User`) actor.
      *  The knob that keeps a machine `User` account from satisfying the
      *  gate on its own output. */
-    approvers: string[]
+    approvers: string[];
     /** External-merge-queue knobs (spec specs/bro-huy5o.6.md) — the
      *  connector pick lives in `connectors.mergeQueue`; these are the
      *  enqueue mechanics it reads. `label` adds a queue label on the
      *  PR (mergify's label-triggered rules), `comment` overrides the
      *  posted queue command (default `@mergifyio queue`). */
-    mergeQueue: { label?: string; comment?: string }
-  }
+    mergeQueue: { label?: string; comment?: string };
+  };
   /** Facade → connector precedence, e.g. { reviews: 'gitlab' }. */
-  connectors: Record<string, string>
+  connectors: Record<string, string>;
   /** Named provider registry — judge (`judge.provider`) and fleet
    *  (`agents.<backend>.provider`) reference entries by name. Empty
    *  means provider behavior is off, not defaulted to a vendor. */
-  providers: Record<string, ProviderEntry>
+  providers: Record<string, ProviderEntry>;
   /** Model-centric provider routing registry (spec: specs/bro-n1p0s.md)
    *  — `models` maps a canonical model id to its provider route(s).
    *  Empty means model routing is off, never a default route. */
@@ -1211,7 +1181,7 @@ export interface BroConfig {
    *  beads. `off` (default) emits nothing; `remind` adds session/prompt
    *  context; `gate` also lets the stop gate block once. `dir` holds
    *  `specs/<id>.md` files; a `spec:` link in the description counts. */
-  sdd: { mode: SddMode; dir: string }
+  sdd: { mode: SddMode; dir: string };
   /** Fleet knobs. `maxConcurrent` is the cap `prepareSpawn` enforces
    *  on every backend's spawn — counts live registry agents across all
    *  backends; 0 means uncapped. Default 3. `profiles` holds the named
@@ -1220,45 +1190,48 @@ export interface BroConfig {
    *  bro-1x7p) — absent/empty = today's static resolution; `router`
    *  names the optional judge classifier (M7). */
   fleet: {
-    maxConcurrent: number
-    profiles: Record<string, FleetProfile>
-    routing: RoutingTable
-    router?: FleetRouter
-  }
+    maxConcurrent: number;
+    profiles: Record<string, FleetProfile>;
+    routing: RoutingTable;
+    router?: FleetRouter;
+  };
   /** `query` plan defaults — `concurrency` is the fan-out cap a plan's
    *  own field overrides (default 4); `env` is the global literal
    *  overlay applied under each step's `env`. */
-  query: { concurrency: number; env: Record<string, string> }
+  query: { concurrency: number; env: Record<string, string> };
   /** Inter-rig federation (specs/mesh). `rig` pins this repo's mesh://
    *  identity when origin doesn't derive one; `peers` maps alias →
    *  { rig, remote, transport? } — remote is the git URL the peer's
    *  beads store federates over (read-only pulls, sovereignty rule),
    *  transport overrides derivation. */
-  mesh: { rig?: string; peers: Record<string, { rig: string; remote: string; transport?: string; login?: string }> }
+  mesh: {
+    rig?: string;
+    peers: Record<string, { rig: string; remote: string; transport?: string; login?: string }>;
+  };
   /** `bro mcp` plane exposure. `planes` undefined = every read plane
    *  (the default — spawning the server IS the consent), `[]` = none,
    *  a list = allowlist. Backend selection stays on connectors.*. */
-  mcp: { planes?: string[] }
+  mcp: { planes?: string[] };
   /** `bro serve` — the facade host's own knobs. `backend` names the acp
    *  provider the conductor wires when `BRO_PROVIDER_BACKEND` is unset —
    *  a repo that always wants its conductor pins it here instead of
    *  relying on env reaching every spawn path. */
-  serve: { backend?: string }
+  serve: { backend?: string };
   /** Bead→tracker projection policy (spec specs/backends/bro-z2z7f) —
    *  which beads materialize as native tracker items at PR time. */
-  mirror: MirrorPolicy
+  mirror: MirrorPolicy;
   /** Outbound event sinks (spec: specs/bro-huy5o.8.md) — matching
    *  events published through the `events` facade are POSTed to
    *  operator-configured webhooks (slack/telegram/generic). */
-  notify: { sinks: SinkDef[] }
+  notify: { sinks: SinkDef[] };
   /** External plugin specifiers — relative paths or package names the CLI
    *  resolves from the repo and imports at startup. Each module's default
    *  export must be a BroPlugin (or an array of them). */
-  plugins: string[]
+  plugins: string[];
   /** Capability pack `bro setup --pack` installs — an npm package name
    *  carrying skills/ + formulas/ trees. Default @broject/bro-pack;
    *  project-local node_modules are resolved before the CLI's own. */
-  pack?: string
+  pack?: string;
 }
 
 export const DEFAULT_CONFIG: BroConfig = {
@@ -1294,64 +1267,60 @@ export const DEFAULT_CONFIG: BroConfig = {
   mirror: { labels: [], excludeLabels: [], types: ['feature', 'bug'], specLinked: true },
   notify: { sinks: [] },
   plugins: [],
-}
+};
 
 interface RawConfig extends Partial<Omit<BroConfig, 'stores' | 'plugins' | 'pack'>> {
   /** New: explicit backend list. */
-  stores?: unknown
+  stores?: unknown;
   /** External plugin specifiers — normalized to a string list. */
-  plugins?: unknown
+  plugins?: unknown;
   /** Capability pack name — must normalize to a string, anything else
    *  (object, array, number) is rejected rather than reaching `pack`. */
-  pack?: unknown
+  pack?: unknown;
   /** Legacy v0.1.0 field — 'beads'/'both' meant jsonl + beads projection. */
-  store?: string
+  store?: string;
 }
 
 function normalizePack(raw: unknown): string | undefined {
   if (raw === undefined) {
-    return undefined
+    return undefined;
   }
   if (typeof raw === 'string' && raw.trim() !== '') {
-    return raw
+    return raw;
   }
-  console.error('warning: bro.config "pack" must be a non-empty string — ignoring')
-  return undefined
+  console.error('warning: bro.config "pack" must be a non-empty string — ignoring');
+  return undefined;
 }
 
 function normalizeStores(raw: RawConfig): StoreBackend[] {
   const isBackend = (s: unknown): s is StoreBackend =>
-    typeof s === 'string' && (STORE_BACKENDS as readonly string[]).includes(s)
+    typeof s === 'string' && (STORE_BACKENDS as readonly string[]).includes(s);
   if (Array.isArray(raw.stores)) {
-    return [...new Set<StoreBackend>(['jsonl', ...raw.stores.filter(isBackend)])]
+    return [...new Set<StoreBackend>(['jsonl', ...raw.stores.filter(isBackend)])];
   }
   if (raw.stores !== undefined) {
     // Present but not an array — a malformed config must not silently
     // widen into the beads projection.
-    console.error(
-      'warning: bro.config.json "stores" must be an array — using jsonl-only'
-    )
-    return ['jsonl']
+    console.error('warning: bro.config.json "stores" must be an array — using jsonl-only');
+    return ['jsonl'];
   }
   if (raw.store === 'beads' || raw.store === 'both') {
-    return ['jsonl', 'beads']
+    return ['jsonl', 'beads'];
   }
   if (raw.store !== undefined) {
     // Legacy explicit opt-out — and any mistyped value ('beed'): an
     // unrecognized legacy field must fall back to jsonl-only, not silently
     // widen into the beads projection.
-    return ['jsonl']
+    return ['jsonl'];
   }
-  return [...DEFAULT_CONFIG.stores]
+  return [...DEFAULT_CONFIG.stores];
 }
 
 /** Identity helper for bro.config.ts: `export default defineConfig({…})`
  *  gives typed sections when @broject/core is a local dep; a plain object
  *  works without it. Extra keys are plugin sections (see bro-akl). */
-export function defineConfig<
-  T extends Partial<BroConfig> & Record<string, unknown>,
->(config: T): T {
-  return config
+export function defineConfig<T extends Partial<BroConfig> & Record<string, unknown>>(config: T): T {
+  return config;
 }
 
 // Unwrap the default export — a real ESM namespace (Module tag) OR tsx's
@@ -1359,13 +1328,13 @@ export function defineConfig<
 // the non-object fallback, not leak a wrapper through `??`
 function unwrapDefault(mod: unknown): unknown {
   if (typeof mod !== 'object' || mod === null) {
-    return mod
+    return mod;
   }
-  const m = mod as Record<string | symbol, unknown>
+  const m = mod as Record<string | symbol, unknown>;
   const wrapper =
     m[Symbol.toStringTag] === 'Module' ||
-    Object.keys(m).every((k) => k === 'default' || k === '__esModule')
-  return wrapper && 'default' in m ? m.default : mod
+    Object.keys(m).every(k => k === 'default' || k === '__esModule');
+  return wrapper && 'default' in m ? m.default : mod;
 }
 
 function loadTsConfig(name: string, path: string): unknown {
@@ -1375,27 +1344,25 @@ function loadTsConfig(name: string, path: string): unknown {
   if (!(process.features as { typescript?: unknown }).typescript) {
     console.error(
       `warning: ${name} needs Node >=22.18 (native type stripping) — using jsonl-only stores`
-    )
-    return undefined
+    );
+    return undefined;
   }
   // resolving from the config itself keeps any relative imports inside it
   // rooted at the repo, not at the CLI install location. createRequire
   // needs an ABSOLUTE referrer — a relative cwd would throw here while
   // the .json path happily loads.
-  const abs = resolve(path)
-  const req = createRequire(abs)
+  const abs = resolve(path);
+  const req = createRequire(abs);
   try {
-    return unwrapDefault(req(abs))
+    return unwrapDefault(req(abs));
   } catch (err) {
-    const msg = err instanceof Error ? err.message : String(err)
+    const msg = err instanceof Error ? err.message : String(err);
     // Node ≤24's require() treats every .ts as CJS-TS — `export default`
     // can't transform there. Fall back to a real ESM import() in a
     // subprocess: same loader semantics, and `import` statements in the
     // config keep working. Config values must be JSON-serializable.
-    if (
-      !/Transform failed|Expected identifier|Cannot use export|ERR_REQUIRE/.test(msg)
-    ) {
-      throw err
+    if (!/Transform failed|Expected identifier|Cannot use export|ERR_REQUIRE/.test(msg)) {
+      throw err;
     }
     const out = execFileSync(
       process.execPath,
@@ -1404,8 +1371,8 @@ function loadTsConfig(name: string, path: string): unknown {
         `import(${JSON.stringify(pathToFileURL(abs).href)}).then(m => process.stdout.write(JSON.stringify(m.default ?? null)))`,
       ],
       { encoding: 'utf8' }
-    )
-    return JSON.parse(out)
+    );
+    return JSON.parse(out);
   }
 }
 
@@ -1414,20 +1381,20 @@ function loadTsConfig(name: string, path: string): unknown {
 function readConfigFile(name: string, path: string): unknown {
   try {
     if (name.endsWith('.ts')) {
-      return loadTsConfig(name, path)
+      return loadTsConfig(name, path);
     }
-    return JSON.parse(readFileSync(path, 'utf8'))
+    return JSON.parse(readFileSync(path, 'utf8'));
   } catch (err) {
-    const msg = err instanceof Error ? err.message : String(err)
-    let hint = ` (${msg})`
+    const msg = err instanceof Error ? err.message : String(err);
+    let hint = ` (${msg})`;
     if (/module is not defined|exports is not defined/.test(msg)) {
-      hint = ' (this repo is ESM — use `export default`, not module.exports)'
+      hint = ' (this repo is ESM — use `export default`, not module.exports)';
     } else if (/Transform failed|Expected identifier/.test(msg)) {
       hint =
-        ' (this dir resolves as CommonJS — use `module.exports` or add `"type": "module"` to package.json)'
+        ' (this dir resolves as CommonJS — use `module.exports` or add `"type": "module"` to package.json)';
     }
-    console.error(`warning: ${name} failed to load — skipping${hint}`)
-    return undefined
+    console.error(`warning: ${name} failed to load — skipping${hint}`);
+    return undefined;
   }
 }
 
@@ -1437,13 +1404,13 @@ function readConfigFile(name: string, path: string): unknown {
  *  'ok' | 'broken' | null (file absent). */
 export function probeConfigFile(path: string): 'ok' | 'broken' | null {
   if (!existsSync(path)) {
-    return null
+    return null;
   }
-  const raw = readConfigFile(basename(path), path)
+  const raw = readConfigFile(basename(path), path);
   if (raw === undefined) {
-    return 'broken' // warned inside readConfigFile
+    return 'broken'; // warned inside readConfigFile
   }
-  return typeof raw === 'object' && raw !== null && !Array.isArray(raw) ? 'ok' : 'broken'
+  return typeof raw === 'object' && raw !== null && !Array.isArray(raw) ? 'ok' : 'broken';
 }
 
 /** Runs every section schema over the raw file — a throwing schema warns
@@ -1457,11 +1424,11 @@ function applySections(
   // shadow a section whose semantics the CLI enforces (fleet cap)
   for (const [key, schema] of Object.entries({ ...sections, ...CORE_SECTIONS })) {
     try {
-      config[key] = schema(raw[key])
+      config[key] = schema(raw[key]);
     } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err)
-      console.error(`warning: bro.config "${key}" invalid (${msg}) — using defaults`)
-      config[key] = schema(undefined)
+      const msg = err instanceof Error ? err.message : String(err);
+      console.error(`warning: bro.config "${key}" invalid (${msg}) — using defaults`);
+      config[key] = schema(undefined);
     }
   }
 }
@@ -1472,12 +1439,12 @@ function applySections(
 function mainWorktreeRoot(cwd: string): string | null {
   // bounded + cached — config layers load on hook probes, where a
   // wedged git probe must fail fast rather than stall dispatch
-  const common = gitCommonDir(cwd, GIT_SYNC_PROBE_TIMEOUT_MS)
+  const common = gitCommonDir(cwd, GIT_SYNC_PROBE_TIMEOUT_MS);
   if (common === null) {
-    return null
+    return null;
   }
   if (basename(common) === '.git') {
-    return dirname(common)
+    return dirname(common);
   }
   // `--separate-git-dir` detaches the git dir from the checkout and git
   // keeps no back-pointer (`worktree list` reports the git dir itself).
@@ -1485,42 +1452,42 @@ function mainWorktreeRoot(cwd: string): string | null {
   // — scan the common dir's siblings for it. A worktree of a BARE repo
   // finds no such checkout (linked worktrees point at
   // `<bare>/worktrees/<name>`, not the common dir) → nothing to inherit.
-  const parent = dirname(common)
-  let names: string[] = []
+  const parent = dirname(common);
+  let names: string[] = [];
   try {
-    names = readdirSync(parent)
+    names = readdirSync(parent);
   } catch {
-    return null
+    return null;
   }
   for (const name of names) {
-    const dir = join(parent, name)
-    const gitfile = join(dir, '.git')
+    const dir = join(parent, name);
+    const gitfile = join(dir, '.git');
     try {
       if (!statSync(gitfile).isFile()) {
-        continue
+        continue;
       }
-      const m = /^gitdir:\s*(.+)$/m.exec(readFileSync(gitfile, 'utf8'))
+      const m = /^gitdir:\s*(.+)$/m.exec(readFileSync(gitfile, 'utf8'));
       if (m && resolve(dir, m[1].trim()) === common) {
-        return dir
+        return dir;
       }
     } catch {
       // unreadable sibling — skip
     }
   }
-  return null
+  return null;
 }
 
 /** The three config layers, ascending precedence — global user, then
  *  committed project, then gitignored local override. */
-export const CONFIG_LAYERS = ['global', 'project', 'local'] as const
-export type ConfigLayerName = (typeof CONFIG_LAYERS)[number]
+export const CONFIG_LAYERS = ['global', 'project', 'local'] as const;
+export type ConfigLayerName = (typeof CONFIG_LAYERS)[number];
 
 /** File names tried per layer, in order — `.ts` shadows `.json`. */
 export const CONFIG_LAYER_FILES: Record<ConfigLayerName, readonly string[]> = {
   global: ['config.ts', 'config.json'],
   project: ['bro.config.ts', 'bro.config.json'],
   local: ['bro.config.local.ts', 'bro.config.local.json'],
-}
+};
 
 /** Sections and their owning layer audience — `doctor` warns (never
  *  blocks) on a mismatch: operator config committed for everyone, or
@@ -1559,7 +1526,7 @@ export const CONFIG_SECTION_LAYERS: Record<string, 'operator' | 'policy'> = {
   mesh: 'policy',
   plugins: 'policy',
   pack: 'policy',
-}
+};
 
 /** Repo opt-in probe — walks up from startDir for any project/local
  *  bro.config.* file or a .beads/ dir. The global layer never counts:
@@ -1567,31 +1534,31 @@ export const CONFIG_SECTION_LAYERS: Record<string, 'operator' | 'policy'> = {
  *  standalone copy of the same list — jiti loads it raw, so it cannot
  *  import this package; keep the name list in sync. */
 export function repoOptedIn(startDir: string): boolean {
-  const markers = [...CONFIG_LAYER_FILES.project, ...CONFIG_LAYER_FILES.local, '.beads']
-  let dir = startDir
+  const markers = [...CONFIG_LAYER_FILES.project, ...CONFIG_LAYER_FILES.local, '.beads'];
+  let dir = startDir;
   for (;;) {
-    if (markers.some((m) => existsSync(join(dir, m)))) {
-      return true
+    if (markers.some(m => existsSync(join(dir, m)))) {
+      return true;
     }
-    const parent = dirname(dir)
+    const parent = dirname(dir);
     if (parent === dir) {
-      return false
+      return false;
     }
-    dir = parent
+    dir = parent;
   }
 }
 
 /** Directory holding the global user layer — XDG config dir + `bro`. */
 export function globalConfigDir(): string {
-  const xdg = process.env.XDG_CONFIG_HOME
+  const xdg = process.env.XDG_CONFIG_HOME;
   return join(
     typeof xdg === 'string' && xdg.trim() !== '' ? xdg : join(homedir(), '.config'),
     'bro'
-  )
+  );
 }
 
 function isPlainObject(v: unknown): v is Record<string, unknown> {
-  return typeof v === 'object' && v !== null && !Array.isArray(v)
+  return typeof v === 'object' && v !== null && !Array.isArray(v);
 }
 
 /** Deep-merge overlay onto base — plain objects merge per key, arrays
@@ -1602,40 +1569,40 @@ export function deepMerge(
   base: Record<string, unknown>,
   overlay: Record<string, unknown>
 ): Record<string, unknown> {
-  const out: Record<string, unknown> = { ...base }
+  const out: Record<string, unknown> = { ...base };
   for (const [k, v] of Object.entries(overlay)) {
     if (k === '__proto__') {
-      continue
+      continue;
     }
-    const cur = out[k]
-    out[k] = isPlainObject(v) && isPlainObject(cur) ? deepMerge(cur, v) : v
+    const cur = out[k];
+    out[k] = isPlainObject(v) && isPlainObject(cur) ? deepMerge(cur, v) : v;
   }
-  return out
+  return out;
 }
 
 /** One loaded layer — `file` is the absolute path of the winning file,
  *  `raw` the parsed object (relative `plugins` specs already anchored
  *  to `dir` so the merge can't re-root them at the wrong layer). */
 export interface ConfigLayerHit {
-  layer: ConfigLayerName
-  dir: string
-  file: string
-  raw: Record<string, unknown>
+  layer: ConfigLayerName;
+  dir: string;
+  file: string;
+  raw: Record<string, unknown>;
   /** The file's `plugins` value before normalizePluginSpecs filtered
    *  it — diagnostics validate what the user wrote, not the cleaned
    *  list (a non-string or blank entry must not vanish). */
-  pluginsRaw?: unknown
+  pluginsRaw?: unknown;
 }
 
 export interface ConfigLayersResult {
   /** Present layers, ascending precedence (global → project → local). */
-  layers: ConfigLayerHit[]
+  layers: ConfigLayerHit[];
   /** Files that exist but failed to parse. The broken file contributes
    *  nothing and the scan falls through to the layer's next dir — but
    *  when NO layer loads at all, loadConfig collapses `stores` to
    *  jsonl-only: a half-read file must never silently enable the beads
    *  projection. */
-  broken: string[]
+  broken: string[];
 }
 
 /** Reads the raw layer objects loadConfig merges — exported so `bro
@@ -1649,23 +1616,25 @@ export function loadConfigLayers(
    *  listener's config. */
   only?: readonly ConfigLayerName[]
 ): ConfigLayersResult {
-  const base = resolve(cwd)
+  const base = resolve(cwd);
   // Linked worktrees share the main checkout's machine-local config —
   // bro.config.local.* is gitignored, so a fresh `git worktree add`
   // otherwise loses act.ignoreChecks and store choices (a bare `act
   // wait` stalls on a flaky reviewer the main checkout knows to ignore).
   // mainWorktreeRoot returns an absolute path, so a relative cwd must be
   // absolute too or the Set dedupe compares 'foo' against '/abs/foo'.
-  const projectDirs = [...new Set(
-    [base, mainWorktreeRoot(base)].filter((d): d is string => d !== null && d.trim() !== '')
-  )]
-  const layers: ConfigLayerHit[] = []
-  const broken: string[] = []
-  const want = (layer: ConfigLayerName): boolean => only === undefined || only.includes(layer)
-  if (want('global')) scanConfigLayer('global', [globalConfigDir()], layers, broken)
-  if (want('project')) scanConfigLayer('project', projectDirs, layers, broken)
-  if (want('local')) scanConfigLayer('local', projectDirs, layers, broken)
-  return { layers, broken }
+  const projectDirs = [
+    ...new Set(
+      [base, mainWorktreeRoot(base)].filter((d): d is string => d !== null && d.trim() !== '')
+    ),
+  ];
+  const layers: ConfigLayerHit[] = [];
+  const broken: string[] = [];
+  const want = (layer: ConfigLayerName): boolean => only === undefined || only.includes(layer);
+  if (want('global')) scanConfigLayer('global', [globalConfigDir()], layers, broken);
+  if (want('project')) scanConfigLayer('project', projectDirs, layers, broken);
+  if (want('local')) scanConfigLayer('local', projectDirs, layers, broken);
+  return { layers, broken };
 }
 
 /** One candidate config file — 'missing' lets the next name try,
@@ -1679,34 +1648,33 @@ function probeLayerCandidate(
   layers: ConfigLayerHit[],
   broken: string[]
 ): 'missing' | 'broken' | 'loaded' {
-  const path = join(dir, name)
+  const path = join(dir, name);
   if (!existsSync(path)) {
-    return 'missing'
+    return 'missing';
   }
-  const raw = readConfigFile(name, path)
+  const raw = readConfigFile(name, path);
   // a valid non-object root ("str", […], 42) is not a config —
   // spreading it would silently produce garbage keys
   if (raw === undefined || !isPlainObject(raw)) {
     if (raw !== undefined) {
-      console.error(`${name}: root must be an object — skipping`)
+      console.error(`${name}: root must be an object — skipping`);
     }
-    broken.push(path)
-    return 'broken'
+    broken.push(path);
+    return 'broken';
   }
   // anchor relative plugin specs at this layer's dir — post-merge
   // they must not re-root at the winning layer's location. Only
   // touch the key when present: provenance reads own-keys.
-  const anchored = 'plugins' in raw
-    ? { ...raw, plugins: normalizePluginSpecs(dir, raw.plugins) }
-    : raw
+  const anchored =
+    'plugins' in raw ? { ...raw, plugins: normalizePluginSpecs(dir, raw.plugins) } : raw;
   layers.push({
     layer,
     dir,
     file: path,
     raw: anchored,
     ...('plugins' in raw ? { pluginsRaw: raw.plugins } : {}),
-  })
-  return 'loaded'
+  });
+  return 'loaded';
 }
 
 /** Probe one dir's candidate names for a layer — the first existing
@@ -1721,12 +1689,12 @@ function scanConfigLayerDir(
   broken: string[]
 ): boolean {
   for (const name of CONFIG_LAYER_FILES[layer]) {
-    const verdict = probeLayerCandidate(layer, dir, name, layers, broken)
+    const verdict = probeLayerCandidate(layer, dir, name, layers, broken);
     if (verdict !== 'missing') {
-      return verdict === 'loaded'
+      return verdict === 'loaded';
     }
   }
-  return false
+  return false;
 }
 
 function scanConfigLayer(
@@ -1737,7 +1705,7 @@ function scanConfigLayer(
 ): void {
   for (const dir of dirs) {
     if (scanConfigLayerDir(layer, dir, layers, broken)) {
-      return
+      return;
     }
   }
 }
@@ -1753,22 +1721,22 @@ export function loadConfig(
   // every exit path applies section schemas — a registered plugin
   // section must resolve to its defaults even with no usable config file
   const fallback = (stores: StoreBackend[]): BroConfig & Record<string, unknown> => {
-    const config = { ...DEFAULT_CONFIG, stores } as BroConfig & Record<string, unknown>
-    applySections(config, {}, sections)
-    return config
-  }
-  const { layers, broken } = loadConfigLayers(cwd, only)
+    const config = { ...DEFAULT_CONFIG, stores } as BroConfig & Record<string, unknown>;
+    applySections(config, {}, sections);
+    return config;
+  };
+  const { layers, broken } = loadConfigLayers(cwd, only);
   if (layers.length === 0) {
     // a config that exists but fails never silently enables beads —
     // jsonl-only in that case, defaults otherwise
-    return fallback(broken.length > 0 ? ['jsonl'] : [...DEFAULT_CONFIG.stores])
+    return fallback(broken.length > 0 ? ['jsonl'] : [...DEFAULT_CONFIG.stores]);
   }
-  let merged: Record<string, unknown> = {}
+  let merged: Record<string, unknown> = {};
   for (const hit of layers) {
-    merged = deepMerge(merged, hit.raw)
+    merged = deepMerge(merged, hit.raw);
   }
-  const { stores: _s, store: _legacy, plugins: _p, pack: _pk, ...rest } = merged as RawConfig
-  const pack = normalizePack(_pk)
+  const { stores: _s, store: _legacy, plugins: _p, pack: _pk, ...rest } = merged as RawConfig;
+  const pack = normalizePack(_pk);
   const config: BroConfig & Record<string, unknown> = {
     ...DEFAULT_CONFIG,
     ...rest,
@@ -1779,9 +1747,9 @@ export function loadConfig(
     plugins: Array.isArray(merged.plugins)
       ? merged.plugins.filter((v): v is string => typeof v === 'string')
       : [],
-  }
-  applySections(config, merged, sections)
-  return config
+  };
+  applySections(config, merged, sections);
+  return config;
 }
 
 /** Relative specs anchor at the config's own dir — an inherited config's
@@ -1791,24 +1759,24 @@ export function loadConfig(
  *  repo-root guard. */
 function normalizePluginSpecs(dir: string, plugins: unknown): string[] {
   if (!Array.isArray(plugins)) {
-    return []
+    return [];
   }
   return plugins
     .filter((v): v is string => typeof v === 'string')
-    .map((v) => v.trim())
-    .filter((v) => v !== '')
-    .flatMap((v) => {
+    .map(v => v.trim())
+    .filter(v => v !== '')
+    .flatMap(v => {
       if (!v.startsWith('.')) {
-        return [v]
+        return [v];
       }
       // anchor must be absolute too — a relative cwd would compare an
       // absolute path against 'foo/' and drop every legit spec
-      const anchor = resolve(dir)
-      const abs = resolve(dir, v)
+      const anchor = resolve(dir);
+      const abs = resolve(dir, v);
       if (abs !== anchor && !abs.startsWith(anchor + sep)) {
-        console.error(`warning: plugin spec "${v}" escapes ${dir} — skipped`)
-        return []
+        console.error(`warning: plugin spec "${v}" escapes ${dir} — skipped`);
+        return [];
       }
-      return [abs]
-    })
+      return [abs];
+    });
 }

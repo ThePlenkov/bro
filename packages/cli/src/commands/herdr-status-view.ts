@@ -65,23 +65,41 @@ export function plain(s: string): string {
   return s.replace(/[\u0000-\u001f\u007f-\u009f]/g, '');
 }
 
-/** The display-text argv — presentation only: `--display-agent` names
- *  the pane (the slug when the projection has one, `fleet` otherwise)
- *  and `--state-label` swaps the semantic word for the label's bracket
- *  text. Old labels clear each pass so a stale `working=` can't outlive
- *  its state. `undefined` state → clear everything back to the bare
- *  `bro-status` binding. */
-export function metaArgs(pane: string, s: FleetPaneState | undefined, seq: number): string[] {
-  const args = [
-    ...paneArgs('report-metadata', pane, seq),
+/** The display-text argvs — presentation only: `--display-agent` names
+ *  the pane (the agent when the projection resolves one, the slug,
+ *  `fleet` last) and `--state-label` swaps the semantic word for the
+ *  label's bracket text. Old labels clear each pass so a stale
+ *  `working=` can't outlive its state — but herdr rejects
+ *  set-and-clear in one call, so clear rides call 1 and the label
+ *  lands in call 2. `undefined` state → clear everything back to the
+ *  bare `bro-status` binding. */
+export function metaArgs(pane: string, s: FleetPaneState | undefined, seq: number): string[][] {
+  // herdr rejects set-and-clear in one call, and --clear-state-labels
+  // wipes display-agent too — so: call 1 clears only, call 2 writes
+  // the display name and the label together.
+  const calls = [[...paneArgs('report-metadata', pane, seq), '--clear-state-labels']];
+  const set = [
+    ...paneArgs('report-metadata', pane, seq + 1),
     '--display-agent',
-    plain(s?.slug ?? 'fleet'),
-    '--clear-state-labels',
+    plain(s?.agent ?? s?.slug ?? 'fleet'),
   ];
   if (s !== undefined && s.status !== '') {
-    args.push('--state-label', `${s.led.state}=${plain(s.status)}`);
+    set.push('--state-label', `${s.led.state}=${plain(s.status)}`);
   }
-  return args;
+  calls.push(set);
+  return calls;
+}
+
+/** OSC8 hyperlink — `#N` stays `#N` on screen but a ctrl/cmd-click
+ *  opens the PR. Wraps only the first `#<digits>` (the PR token);
+ *  applied AFTER `plain` since plain strips the escape bytes. */
+export function linkifyPr(text: string, prUrl: string | undefined): string {
+  if (prUrl === undefined) return text;
+  const url = plain(prUrl);
+  // http(s) only — a crafted `file:`/`javascript:`/custom-scheme cache
+  // entry would open a local handler on click
+  if (!/^https?:\/\//i.test(url)) return text;
+  return text.replace(/#\d+/, m => `\u001b]8;;${url}\u0007${m}\u001b]8;;\u0007`);
 }
 
 const LED_ICON: Record<PaneLed['state'], string> = {
@@ -99,12 +117,12 @@ export function renderView(
   worktree: string,
   now = Date.now()
 ): string {
-  const lines: string[] = [`── bro fleet · ${plain(s?.slug ?? 'waiting')} ──`];
+  const lines: string[] = [`── ${plain(s?.agent ?? 'fleet')} · ${plain(s?.slug ?? 'waiting')} ──`];
   if (s === undefined) {
     lines.push(' · waiting for the daemon projector', ` ${plain(worktree)}`);
   } else {
     lines.push(
-      ` ${LED_ICON[s.led.state]} ${plain(s.status !== '' ? s.status : s.led.state)}`,
+      ` ${LED_ICON[s.led.state]} ${linkifyPr(plain(s.status !== '' ? s.status : s.led.state), s.prUrl)}`,
       ` ${plain(s.title)}`,
       ` ${plain(worktree)} · ${plain(s.workspace)}`,
       ` updated ${new Date(s.ts).toTimeString().slice(0, 8)} (${Math.max(0, Math.round((now - s.ts) / 1000))}s ago)`
@@ -181,7 +199,7 @@ function makeRefresh(ctx: ViewCtx): () => void {
   const apply = (s: FleetPaneState | undefined): void => {
     const seq = nextSeq();
     call(reportArgs(ctx.pane, s?.led ?? { state: 'unknown' }, seq));
-    call(metaArgs(ctx.pane, s, seq));
+    for (const a of metaArgs(ctx.pane, s, seq)) call(a);
     process.stdout.write(renderView(s, ctx.worktree));
   };
   return () => {

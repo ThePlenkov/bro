@@ -1,7 +1,7 @@
 ---
 
 name: herdr-orchestrate
-description: "Use when an agent orchestrates worker agents through Herdr — spawn an isolated worktree workspace per task, start any supported agent kind in it, brief it, wait on semantic state, verify the gate, tear down. Provider-agnostic: the mechanics are `herdr` CLI + git worktrees; bro/devin/opencode/claude are interchangeable workers. Covers the spawn sequence, blocking waits, label-vs-state semantics, sequential budget, and teardown order. In a bro-managed repo, spawn through `bro fleet agents`/`bro flow convoy` instead — this recipe is for herdr-only environments and herdr plugin internals."
+description: "Use when an agent orchestrates worker agents through Herdr — spawn an isolated worktree workspace per task, start any supported agent kind in it, brief it, wait on semantic state, verify the gate, tear down. Provider-agnostic: the mechanics are `herdr` CLI + git worktrees; any supported agent kind is an interchangeable worker. Covers the spawn sequence, blocking waits, label-vs-state semantics, sequential budget, and teardown order. In a bro-managed repo, spawn through `bro fleet agents`/`bro flow convoy` instead — this recipe is for herdr-only environments and herdr plugin internals."
 ---
 
 # herdr-orchestrate — driving worker agents through Herdr
@@ -21,11 +21,23 @@ All mechanics below are the verified `herdr` CLI surface. Placeholders:
 `[a-z][a-z0-9-]{0,31}` — it lands in branch names, paths, and labels),
 `{{SHORT_TITLE}}` human label (display surfaces only — never shell
 strings), `{{AGENT_KIND}}` one of the kinds
-`herdr agent start --kind` accepts (pi, claude, codex, gemini, cursor,
-devin, agy, cline, omp, opencode, copilot, kimi, kiro, droid, amp, grok,
-hermes, kilo, qodercli, qwen, letta, maki, muse),
-`{{DONE_CRITERIA}}` the gate (e.g. "PR green + merged" — never
-"PR opened"), `{{PARALLEL_LIMIT}}` max concurrent workers.
+`herdr agent start --kind` accepts (run `herdr agent` for the
+installed list — it tracks the binary, not this doc),
+`{{DONE_CRITERIA}}` the worker's gate — pushed commits + review
+threads resolved + `bro review act status` reported (never just
+"PR opened", and NOT "merged" — merge is the orchestrator's job,
+see below), `{{PARALLEL_LIMIT}}` max concurrent workers.
+
+**Merge ownership:** the worker never merges. It drives the PR to
+gate-ready and reports the `act status` verdict; the ORCHESTRATOR
+owns the merge — point-check the gate, arm
+`bro review act wait <PR> --merge --cleanup --bead <id> --detach`
+from inside the worktree (`--cleanup` retires the checkout it runs
+in), and bounce new findings back to the worker instead of fixing
+them yourself. The orchestrator outlives worker turns and watcher
+timeouts — a worker-armed wait (45 min default) dies before a
+CodeScene-length check cycle (~2 h) settles the gate, which is
+exactly the split this rule exists to fix.
 
 ## Spawn one worker
 
@@ -49,8 +61,20 @@ hermes, kilo, qodercli, qwen, letta, maki, muse),
 5. Write the brief to `{{REPO_ROOT}}--{{TASK_ID}}/{{TASK_ID}}-brief.md`
    with your own file-writing tool — the brief MUST state the GATE
    ({{DONE_CRITERIA}}), the worktree path, and "do not spawn
-   sub-agents". Then submit a FIXED prompt string built only from
-   validated placeholders:
+   sub-agents". Arm the persistent objective BEFORE the task prompt —
+   the worker's first message must carry the goal, or a mid-run
+   compaction drops the thread. **The criteria text never enters
+   argv** — it is free prose, and a quote or `$()` in it executes on
+   the orchestrator's shell. Write it to
+   `{{REPO_ROOT}}--{{TASK_ID}}/{{TASK_ID}}-goal.txt` with your file
+   tool; then worker kinds with a native `/goal` get
+   `herdr agent prompt {{TASK_ID}}-worker "/goal — execute {{TASK_ID}}-goal.txt and {{TASK_ID}}-brief.md at the worktree root"`,
+   and hosts without one get
+   `bro work goal "$(cat {{TASK_ID}}-goal.txt)"` run IN the worktree
+   (command-substitution output is not re-parsed — the file indirection
+   is what keeps prose out of the parsed command line). Then submit a
+   FIXED prompt string
+   built only from validated placeholders:
    `herdr agent prompt {{TASK_ID}}-worker "Read {{TASK_ID}}-brief.md at the worktree root and execute it" --wait --until working`.
    Never interpolate the brief text itself into the prompt string —
    `herdr agent prompt` takes argv text, so any quote or substitution

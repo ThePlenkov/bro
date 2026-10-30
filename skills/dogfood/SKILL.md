@@ -1,4 +1,5 @@
 ---
+
 name: dogfood
 description: "Use when running bro's scenario-driven e2e self-test — a committed markdown runbook executed by a fresh registry agent in a scratch repo, then judged by a second agent that writes verdict.md. Thin wrapper over the bro CLI: `bro self dogfood run|status|report|scenarios` does the work. Requires `bro` (npx -y @broject/bro@0) and a configured agents.* backend for the runner/analyst spawns."
 ---
@@ -30,12 +31,12 @@ fail lines + findings).
 
 ## Commands
 
-| Command | What it does |
-| ------- | ------------ |
-| `bro self dogfood scenarios` | List committed `dogfood/*.md` scenario names |
-| `bro self dogfood run <name> [--backend <c>] [--analyst <c\|same\|none>] [--provider <p>] [--keep]` | Provision + spawn the runner; prints the run id. `--analyst` defaults to `same` (runner's backend), `none` skips the verdict pass, `<c>` names a different connector. `--provider` pins the worker engine (a `providers.<name>` entry — e.g. `devin-acp`) for BOTH runner and analyst |
-| `bro self dogfood status [run-id] [--json]` | Run ledger; calling it advances runner→analyst for terminal runners |
-| `bro self dogfood report <run-id>` | The verdict once written; run state + transcript pointers otherwise |
+| Command                                                                                             | What it does                                                                                                                                                                                                                                                       |
+| --------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `bro self dogfood scenarios`                                                                        | List committed `dogfood/*.md` scenario names                                                                                                                                                                                                                       |
+| `bro self dogfood run <name> [--backend <c>] [--analyst <c\|same\|none>] [--provider <p>] [--keep]` | Provision + spawn the runner; prints the run id. `--analyst` defaults to `same` (runner's backend), `none` skips the verdict pass, `<c>` names a different connector. `--provider` pins the worker engine (a `providers.<name>` entry) for BOTH runner and analyst |
+| `bro self dogfood status [run-id] [--json]`                                                         | Run ledger; calling it advances runner→analyst for terminal runners                                                                                                                                                                                                |
+| `bro self dogfood report <run-id>`                                                                  | The verdict once written; run state + transcript pointers otherwise                                                                                                                                                                                                |
 
 ## Policy
 

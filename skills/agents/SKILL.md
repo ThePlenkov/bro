@@ -1,4 +1,5 @@
 ---
+
 name: agents
 description: "Use when supervising bro-managed agents — respawn a lost worker, stop one, or check the agent plane across orchestrator connectors. Thin wrapper over `bro fleet agents` — mechanics live in the CLI."
 ---
@@ -25,7 +26,7 @@ a stale 'lost' verdict.
 
 The `copilot` connector dispatches GitHub Copilot coding-agent tasks —
 hosted remote workers that open pull requests. The step is claimed into
-the shared beads store *before* dispatch (the remote runner can't reach
+the shared beads store _before_ dispatch (the remote runner can't reach
 it), the registry pins `{taskId, pr}`, and `down` best-effort cancels
 the backing Actions run — a surviving session is reported, never hidden.
 `agents.copilot.maxSessions`/`maxWorkers` count remote live tasks via a
@@ -33,13 +34,13 @@ cached count that fails closed when stale.
 
 ## Commands
 
-| Command | What it does |
-| ------- | ------------ |
-| `bro fleet agents status [<id\|step>] [--json] [--connector <name>]` | The agent plane across every backend; an arg prints one agent's detail. Degraded backends warn — never a hard failure of the view, but a targeted miss exits non-zero when a backend is degraded ('gone' is only claimed on a healthy read) |
-| `bro fleet agents up [<step>] [--connector <name>]` | No arg: the backend's supervisor up (a `supervisor:'none'` backend like native is a reported no-op). With `<step>`: spawn the step's agent — a `lost`/`exited` agent is respawned on the same agentId (the beads claim rebinds), a live one is a SpawnError |
-| `bro agents run [<prompt>…] [--prompt-file <f>] [--for <bead>]` | Ad-hoc spawn — mints a phantom `adhoc-<hex>` step, sends the prompt through the same registry/worktree/quota path as `up`, and answers `status`/`log`/`down` under the minted id. `--for <bead>` binds the spawn to the bead's claim instead (live agent or foreign claim refuses; no prompt → the bead's own text). Either way a live agent/session in this repo with a near-identical prompt earns a stderr warning — advisory, the spawn still lands |
-| `bro fleet agents down [<id\|step>] [--connector <name>]` | No arg: supervisor down. With a target: stop that one agent — a gone agent exits 0 on a healthy read (`stopped <id>`); a miss beside a degraded backend reports unverified (exit 1), not 'gone'; a worker that survives the stop signal (TERM-resistant) or whose death the backend cannot confirm also exits 1 and never prints `stopped` (spec `specs/bro-l8c4f.3.md`) |
-| `bro fleet agents log <id\|step> [--follow] [--lines <N>]` | Tail the agent's recorded `.log` — the surface for "is it actually working?" `status` prints the path; `log` reads it. `--follow` is `tail -F`: janitor truncation and remove/respawn-reopen are reported, never silently skipped. stdout is log bytes only — the context header rides stderr |
+| Command                                                              | What it does                                                                                                                                                                                                                                                                                                                                                                                                                                            |
+| -------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `bro fleet agents status [<id\|step>] [--json] [--connector <name>]` | The agent plane across every backend; an arg prints one agent's detail. Degraded backends warn — never a hard failure of the view, but a targeted miss exits non-zero when a backend is degraded ('gone' is only claimed on a healthy read)                                                                                                                                                                                                             |
+| `bro fleet agents up [<step>] [--connector <name>]`                  | No arg: the backend's supervisor up (a `supervisor:'none'` backend like native is a reported no-op). With `<step>`: spawn the step's agent — a `lost`/`exited` agent is respawned on the same agentId (the beads claim rebinds), a live one is a SpawnError                                                                                                                                                                                             |
+| `bro agents run [<prompt>…] [--prompt-file <f>] [--for <bead>]`      | Ad-hoc spawn — mints a phantom `adhoc-<hex>` step, sends the prompt through the same registry/worktree/quota path as `up`, and answers `status`/`log`/`down` under the minted id. `--for <bead>` binds the spawn to the bead's claim instead (live agent or foreign claim refuses; no prompt → the bead's own text). Either way a live agent/session in this repo with a near-identical prompt earns a stderr warning — advisory, the spawn still lands |
+| `bro fleet agents down [<id\|step>] [--connector <name>]`            | No arg: supervisor down. With a target: stop that one agent — a gone agent exits 0 on a healthy read (`stopped <id>`); a miss beside a degraded backend reports unverified (exit 1), not 'gone'; a worker that survives the stop signal (TERM-resistant) or whose death the backend cannot confirm also exits 1 and never prints `stopped` (spec `specs/bro-l8c4f.3.md`)                                                                                |
+| `bro fleet agents log <id\|step> [--follow] [--lines <N>]`           | Tail the agent's recorded `.log` — the surface for "is it actually working?" `status` prints the path; `log` reads it. `--follow` is `tail -F`: janitor truncation and remove/respawn-reopen are reported, never silently skipped. stdout is log bytes only — the context header rides stderr                                                                                                                                                           |
 
 `--connector <name>` scopes these subcommands to one backend. Useful
 flags on `up`: `--worktree <path>` (overrides the
@@ -63,14 +64,14 @@ half-entered tree (the remote-only copilot backend skips this).
   all) refuses a rebind — release the stale claim first, don't force it.
 - **Two caps, different axes.** `fleet.maxConcurrent` counts bro's own
   registry agents; `agents.<kind>.maxSessions` caps host-wide sessions
-  through a registered session plane — `agents.devin.maxSessions`
-  counts live devin CLI sessions (its `session_locks`, deduped by pid),
-  interactive sessions included, so a spawn can refuse while the fleet
+  through a registered session plane — the plane counts live sessions
+  of its kind (its own lock/detect files, deduped by pid), interactive
+  sessions included, so a spawn can refuse while the fleet
   looks empty. `agents.<kind>.maxWorkers` splits the count: only spawned
-  workers fill it (devin: a `BRO_AGENT_ID` environ badge or a
+  workers fill it (a `BRO_AGENT_ID` environ badge or a
   non-terminal stdin), so interactive TTYs stop starving rigs. A spawn
   counts into a kind when a registered plane detects the resolved
   command's CLI or the backend sets `agents.<backend>.sessionKind`; a
-  declared kind with no registered plane refuses loudly. Devin's
-  host-local count misses cloud-side `devin_session_create` sessions —
+  declared kind with no registered plane refuses loudly. A host-local
+  count misses sessions the kind's cloud side may hold —
   a plane reports only what the host can verify.
