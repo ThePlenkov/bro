@@ -236,11 +236,11 @@ resolve the conflicts, and push:
 /** Expand the agent template — `{promptFile}` becomes the quoted path.
  *  No placeholder → the path is appended, quoted, as the last arg. */
 export function expandAgentCmd(template: string, promptFile: string): string {
-  const q = shQuote(promptFile);
-  if (template.indexOf('{promptFile}') !== -1) {
+  const q = shQuote(String(promptFile));
+  if (typeof template === 'string' && template.indexOf('{promptFile}') !== -1) {
     return template.split('{promptFile}').join(q);
   }
-  const t = template.trimEnd();
+  const t = typeof template === 'string' ? template.trimEnd() : '';
   if (t.length === 0) {
     return q;
   }
