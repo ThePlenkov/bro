@@ -34,6 +34,7 @@ import {
   occupied,
   occupancyProofs,
   processesRootedIn,
+  projectorKicker,
   recordFixerAttempt,
   registryAgents,
   registryEntryState,
@@ -1385,5 +1386,49 @@ describe('fixerAttemptSpent — same-head dedup (bro-atb2g)', () => {
       att = readAgentRegistry(main)['fx-1']?.fixerAttempt as typeof att;
       assert.deepEqual(att, { head: 'h2', spent: [], current: 'sast' });
     });
+  });
+});
+
+describe('projectorKicker — the event-kick coalescer (bro-xmd9l)', () => {
+  const wait = (ms: number): Promise<void> => new Promise(r => setTimeout(r, ms));
+
+  test('a burst of kicks lands exactly one fire', async () => {
+    let n = 0;
+    const kick = projectorKicker(() => {
+      n += 1;
+    }, 40);
+    kick();
+    kick();
+    kick();
+    await wait(80);
+    assert.equal(n, 1);
+  });
+
+  test('a kick after the cooldown fires again — events are not eaten', async () => {
+    let n = 0;
+    const kick = projectorKicker(() => {
+      n += 1;
+    }, 30);
+    kick();
+    await wait(70);
+    kick();
+    await wait(70);
+    assert.equal(n, 2);
+  });
+
+  test('a kick inside the cooldown trails its end instead of leading', async () => {
+    const firedAt: number[] = [];
+    const kick = projectorKicker(() => {
+      firedAt.push(Date.now());
+    }, 60);
+    const t0 = Date.now();
+    kick();
+    await wait(30);
+    kick(); // pending-cooldown kick — schedules at the cooldown end
+    await wait(120);
+    assert.equal(firedAt.length, 2);
+    // the second fire lands at/after the first fire + kickMs, not at t0+30
+    assert.ok(firedAt[1]! - firedAt[0]! >= 55, `gap ${firedAt[1]! - firedAt[0]!}ms < 55ms`);
+    assert.ok(firedAt[1]! - t0 >= 55);
   });
 });

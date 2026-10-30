@@ -70,6 +70,8 @@ import {
   acquireFileLock,
   agentRegistryPath,
   awaitFileLock,
+  busSocketPath,
+  busSubscribe,
   checkBeads,
   emitLifecycle,
   ensureAuth,
@@ -84,6 +86,7 @@ import {
   stampPrOwnership,
   type AgentInfo,
   type AgentRegistryEntry,
+  type BusSubscription,
   type CheckInfo,
   type IgnoreCheckRule,
   type PrMeta,
@@ -2496,6 +2499,9 @@ async function driveOnce(ctx: Ctx): Promise<void> {
  *  with no writes is the steady state, not an event. */
 let herdrWasReachable: boolean | undefined;
 function herdrProjectorTick(ctx: Ctx): void {
+  // the event trigger re-arms lazily here — a broker that came up since
+  // the last pass restores event mode without a daemon restart
+  void armProjectorEvents(ctx);
   try {
     const r = projectFleet(ctx.mainRoot);
     if (r.reachable !== herdrWasReachable) {
@@ -2514,6 +2520,95 @@ function herdrProjectorTick(ctx: Ctx): void {
     }
   } catch {
     // a failed projection retries next pass — never a pass failure
+  }
+}
+
+// --- event-triggered re-projection (spec bro-xmd9l) ------------------------------
+
+/** The cooldown between event-kicked projections — an exit-harvest
+ *  burst lands ONE pass, not one per envelope; leading-edge when the
+ *  projector has been quiet at least this long, else scheduled at the
+ *  cooldown end. 1.5s is snappy against the 300s tick and cheap
+ *  against a churning fleet. */
+const PROJECTOR_KICK_MS = 1_500;
+
+/** A coalescing scheduler for re-projection kicks: the returned
+ *  function absorbs kicks while one is pending (the scheduled pass
+ *  re-derives all state anyway, so it sees the merged event set).
+ *  Leading-edge when idle ≥`kickMs`, cooldown-trailing under load —
+ *  exported so tests drive it with an injected `fire`. */
+export function projectorKicker(fire: () => void, kickMs = PROJECTOR_KICK_MS): () => void {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  let readyAt = 0;
+  return () => {
+    if (timer !== undefined) {
+      return;
+    }
+    timer = setTimeout(
+      () => {
+        timer = undefined;
+        readyAt = Date.now() + kickMs;
+        fire();
+      },
+      Math.max(0, readyAt - Date.now())
+    );
+    timer.unref?.();
+  };
+}
+
+let projectorKickFn: (() => void) | undefined;
+function kickProjector(ctx: Ctx): void {
+  projectorKickFn ??= projectorKicker(() => herdrProjectorTick(ctx));
+  projectorKickFn();
+}
+
+/** The in-process bus subscription (no new process — spec bro-xmd9l):
+ *  every `worker`/`worktree` envelope the lifecycle mirror already
+ *  publishes (spawn, exit, silence, add/remove) kicks a re-projection,
+ *  and a `gap` (missed events — broker restart, replay overflow) is
+ *  the same kick since the pass re-derives anyway. `onClose` drops the
+ *  handle; the next tick's lazy re-arm restores event mode when the
+ *  broker returns. Only armed in loop mode — a `--once` pass is a
+ *  report, not supervision. */
+let projectorSub: BusSubscription | undefined;
+let projectorSubQuiet = false;
+let projectorArming = false;
+async function armProjectorEvents(ctx: Ctx): Promise<void> {
+  if (projectorSub !== undefined || projectorArming || ctx.everySec === undefined) {
+    return;
+  }
+  const socket = busSocketPath(ctx.mainRoot);
+  if (socket === null) {
+    return;
+  }
+  // the await below can overlap a second caller (kick + tick landing in
+  // the same window) — without the flag both open a socket and one
+  // subscription leaks with its handle overwritten
+  projectorArming = true;
+  try {
+    projectorSub = await busSubscribe(
+      socket,
+      { topics: ['worker', 'worktree'] },
+      {
+        onEvent: () => kickProjector(ctx),
+        onGap: () => kickProjector(ctx),
+        onClose: () => {
+          projectorSub = undefined;
+        },
+      }
+    );
+    if (projectorSubQuiet) {
+      say(ctx, 'herdr: event feed back — LEDs ride worker transitions');
+      projectorSubQuiet = false;
+    }
+  } catch {
+    projectorSub = undefined;
+    if (!projectorSubQuiet) {
+      say(ctx, 'herdr: no event feed — projector rides the tick only');
+      projectorSubQuiet = true;
+    }
+  } finally {
+    projectorArming = false;
   }
 }
 
@@ -2663,6 +2758,10 @@ async function runDrive(
     await driveOnce(ctx);
     return;
   }
+  // event-triggered re-projection (bro-xmd9l) — LED transitions ride
+  // worker/worktree envelopes between passes; the tick stays the
+  // backstop + herdr-restart rehydrator
+  await armProjectorEvents(ctx);
   for (;;) {
     try {
       await driveOnce(ctx);
