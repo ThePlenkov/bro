@@ -16,7 +16,7 @@ import {
   resolveRepoAsync,
   stripMeta,
   withMeta,
-} from '@broject/core'
+} from '@broject/core';
 import type {
   ApprovalProbeOpts,
   ApprovalVerdict,
@@ -34,36 +34,36 @@ import type {
   ReviewThread,
   ScanOpts,
   StackMembership,
-} from '@broject/core'
+} from '@broject/core';
 
 // graphql/REST paths need owner+repo separately — split the facade's
 // 'owner/name' string once at the boundary.
 const parts = (repo: string): { owner: string; name: string } => {
-  const [owner, name] = repo.split('/')
-  return { owner: owner!, name: name! }
-}
+  const [owner, name] = repo.split('/');
+  return { owner: owner!, name: name! };
+};
 
 // --- PR state -----------------------------------------------------------------
 
 function prMeta(t: PrTarget): PrMeta {
-  const { owner, name } = parts(t.repo)
+  const { owner, name } = parts(t.repo);
   const pr = ghJson<{
     data?: {
       repository?: {
         pullRequest?: {
-          headRefOid: string
-          headRefName: string
-          baseRefName: string
-          mergeable: string
-          mergeStateStatus: string
-          state: string
-          url: string
-          isDraft: boolean
-          reviewDecision?: string | null
-        }
-      }
-    }
-    errors?: unknown
+          headRefOid: string;
+          headRefName: string;
+          baseRefName: string;
+          mergeable: string;
+          mergeStateStatus: string;
+          state: string;
+          url: string;
+          isDraft: boolean;
+          reviewDecision?: string | null;
+        };
+      };
+    };
+    errors?: unknown;
   }>([
     'api',
     'graphql',
@@ -75,9 +75,9 @@ function prMeta(t: PrTarget): PrMeta {
     `r=${name}`,
     '-F',
     `pr=${t.pr}`,
-  ]).data?.repository?.pullRequest
+  ]).data?.repository?.pullRequest;
   if (!pr) {
-    throw new Error(`pull request #${t.pr} not found`)
+    throw new Error(`pull request #${t.pr} not found`);
   }
   return {
     state: (pr.state || 'UNKNOWN').toUpperCase(),
@@ -89,35 +89,27 @@ function prMeta(t: PrTarget): PrMeta {
     mergeable: (pr.mergeable || 'UNKNOWN').toUpperCase(),
     mergeState: (pr.mergeStateStatus || 'UNKNOWN').toUpperCase(),
     reviewDecision: pr.reviewDecision ?? undefined,
-  }
+  };
 }
 
 function checks(t: PrTarget, requiredOnly = false): CheckInfo[] {
-  const args = [
-    'pr',
-    'checks',
-    String(t.pr),
-    '--repo',
-    t.repo,
-    '--json',
-    'name,state,bucket',
-  ]
+  const args = ['pr', 'checks', String(t.pr), '--repo', t.repo, '--json', 'name,state,bucket'];
   if (requiredOnly) {
-    args.push('--required')
+    args.push('--required');
   }
   // `gh pr checks` exits 1 when any check is pending/failing — the JSON is
   // still on stdout, so a throwing call would lose exactly the data we need.
-  const res = ghTry(args)
+  const res = ghTry(args);
   if (res.out.trim().startsWith('[')) {
-    return JSON.parse(res.out) as CheckInfo[]
+    return JSON.parse(res.out) as CheckInfo[];
   }
   if (res.code !== 0 && /no (checks|required checks)/i.test(res.err)) {
-    return []
+    return [];
   }
   if (res.code !== 0) {
-    throw new Error(`gh pr checks failed: ${res.err}`)
+    throw new Error(`gh pr checks failed: ${res.err}`);
   }
-  return []
+  return [];
 }
 
 function checkAnnotations(
@@ -125,12 +117,12 @@ function checkAnnotations(
   headSha: string,
   names?: ReadonlySet<string>
 ): Map<string, number | null> {
-  const out = new Map<string, number | null>()
+  const out = new Map<string, number | null>();
   for (let page = 1; ; page += 1) {
     const res = ghJson<{ check_runs: Array<{ id: number; name: string }> }>([
       'api',
       `repos/${repo}/commits/${headSha}/check-runs?per_page=100&page=${page}`,
-    ])
+    ]);
     for (const run of res.check_runs ?? []) {
       // A re-run check reports one run per attempt — every attempt's
       // annotations count, not just the latest id's. A failed fetch
@@ -139,7 +131,7 @@ function checkAnnotations(
       // skip them outright (bro-2l7r9: an unfiltered scan fans a
       // whole check-suite out into per-run gh spawns).
       if (out.get(run.name) === null || (names !== undefined && !names.has(run.name))) {
-        continue
+        continue;
       }
       try {
         // --paginate emits one JSON array per page — --slurp folds them
@@ -149,59 +141,59 @@ function checkAnnotations(
           '--paginate',
           '--slurp',
           `repos/${repo}/check-runs/${run.id}/annotations?per_page=100`,
-        ])
-        const failures = pages.flat().filter((a) => a.annotation_level === 'failure').length
-        out.set(run.name, (out.get(run.name) ?? 0) + failures)
+        ]);
+        const failures = pages.flat().filter(a => a.annotation_level === 'failure').length;
+        out.set(run.name, (out.get(run.name) ?? 0) + failures);
       } catch {
-        out.set(run.name, null)
+        out.set(run.name, null);
       }
     }
     if ((res.check_runs?.length ?? 0) < 100) {
-      break
+      break;
     }
   }
-  return out
+  return out;
 }
 
 /** Submitted reviews — each carries the head SHA it reviewed; distinct
  *  SHAs ≈ pushes that entered the review loop. */
 function reviewedShas(t: PrTarget): string[] {
-  const shas = new Set<string>()
+  const shas = new Set<string>();
   for (let page = 1; ; page += 1) {
     const reviews = ghJson<Array<{ commit_id?: string }>>([
       'api',
       `repos/${t.repo}/pulls/${t.pr}/reviews?per_page=100&page=${page}`,
-    ])
+    ]);
     for (const r of reviews ?? []) {
       if (r.commit_id) {
-        shas.add(r.commit_id)
+        shas.add(r.commit_id);
       }
     }
     if ((reviews?.length ?? 0) < 100) {
-      break
+      break;
     }
   }
-  return [...shas]
+  return [...shas];
 }
 
 // --- review threads -----------------------------------------------------------
 
 interface ThreadPage {
   nodes: Array<{
-    id: string
-    isResolved: boolean
-    isOutdated: boolean
+    id: string;
+    isResolved: boolean;
+    isOutdated: boolean;
     comments: {
       nodes: Array<{
-        author?: { login?: string; __typename?: string }
-        path?: string
-        line?: number | null
-        body?: string
-        createdAt?: string
-      }>
-    }
-  }>
-  pageInfo: { hasNextPage: boolean; endCursor: string | null }
+        author?: { login?: string; __typename?: string };
+        path?: string;
+        line?: number | null;
+        body?: string;
+        createdAt?: string;
+      }>;
+    };
+  }>;
+  pageInfo: { hasNextPage: boolean; endCursor: string | null };
 }
 
 function reviewThreadsQuery(afterClause: string): string {
@@ -222,22 +214,22 @@ function reviewThreadsQuery(afterClause: string): string {
           }
         }
       }
-    }`
+    }`;
 }
 
 function parseThreadPage(raw: string, repo: string, pr: number): ThreadPage {
   const parsed = JSON.parse(raw) as {
-    data?: { repository?: { pullRequest?: { reviewThreads?: ThreadPage } } }
-    errors?: unknown
-  }
+    data?: { repository?: { pullRequest?: { reviewThreads?: ThreadPage } } };
+    errors?: unknown;
+  };
   if (parsed.errors) {
-    throw new Error(`GraphQL errors: ${JSON.stringify(parsed.errors)}`)
+    throw new Error(`GraphQL errors: ${JSON.stringify(parsed.errors)}`);
   }
-  const threads = parsed.data?.repository?.pullRequest?.reviewThreads
+  const threads = parsed.data?.repository?.pullRequest?.reviewThreads;
   if (!threads) {
-    throw new Error(`pull request ${prLink(repo, pr)} not found`)
+    throw new Error(`pull request ${prLink(repo, pr)} not found`);
   }
-  return threads
+  return threads;
 }
 
 /** GraphQL thread nodes → domain threads — shared by the paginated
@@ -251,28 +243,28 @@ function toComment(x: ThreadPage['nodes'][number]['comments']['nodes'][number]):
     line: x.line ?? null,
     body: x.body ?? '',
     createdAt: x.createdAt ?? '',
-  }
+  };
 }
 
 function toReviewThreads(nodes: ThreadPage['nodes']): ReviewThread[] {
-  return nodes.map((n) => {
-    const comments = n.comments.nodes.map(toComment)
+  return nodes.map(n => {
+    const comments = n.comments.nodes.map(toComment);
     return {
       id: n.id,
       resolved: n.isResolved,
       outdated: n.isOutdated,
       comment: comments[0] ?? null,
       comments,
-    }
-  })
+    };
+  });
 }
 
 async function reviewThreads(t: PrTarget): Promise<ReviewThread[]> {
-  const { owner, name } = parts(t.repo)
-  const nodes: ReviewThread[] = []
-  let cursor = ''
+  const { owner, name } = parts(t.repo);
+  const nodes: ReviewThread[] = [];
+  let cursor = '';
   for (;;) {
-    const afterClause = cursor ? gqlAfter(cursor) : ''
+    const afterClause = cursor ? gqlAfter(cursor) : '';
     const raw = await ghAsync([
       'api',
       'graphql',
@@ -286,26 +278,26 @@ async function reviewThreads(t: PrTarget): Promise<ReviewThread[]> {
       `pr=${t.pr}`,
       '-F',
       'n=100',
-    ])
-    const page = parseThreadPage(raw, t.repo, t.pr)
-    nodes.push(...toReviewThreads(page.nodes))
+    ]);
+    const page = parseThreadPage(raw, t.repo, t.pr);
+    nodes.push(...toReviewThreads(page.nodes));
     if (!page.pageInfo.hasNextPage || !page.pageInfo.endCursor) {
-      break
+      break;
     }
-    cursor = page.pageInfo.endCursor
+    cursor = page.pageInfo.endCursor;
   }
-  return nodes
+  return nodes;
 }
 
 // --- merged PRs ---------------------------------------------------------------
 
 function mergedPrInfo(t: PrTarget, mergeSha?: string): MergedPrInfo {
   const viewed = ghJson<{
-    title: string
-    url: string
-    mergedAt: string | null
-    mergeCommit?: { oid: string }
-    state: string
+    title: string;
+    url: string;
+    mergedAt: string | null;
+    mergeCommit?: { oid: string };
+    state: string;
   }>([
     'pr',
     'view',
@@ -314,31 +306,31 @@ function mergedPrInfo(t: PrTarget, mergeSha?: string): MergedPrInfo {
     t.repo,
     '--json',
     'title,url,mergedAt,mergeCommit,state',
-  ])
+  ]);
 
   if (viewed.state !== 'MERGED') {
-    throw new Error(`PR ${prLink(t.repo, t.pr)} is not merged (state=${viewed.state})`)
+    throw new Error(`PR ${prLink(t.repo, t.pr)} is not merged (state=${viewed.state})`);
   }
   if (!viewed.mergedAt) {
-    throw new Error(`PR ${prLink(t.repo, t.pr)} is MERGED but reports no mergedAt`)
+    throw new Error(`PR ${prLink(t.repo, t.pr)} is MERGED but reports no mergedAt`);
   }
   return {
     title: viewed.title,
     url: viewed.url,
     mergedAt: viewed.mergedAt,
     mergeSha: mergeSha || viewed.mergeCommit?.oid || '',
-  }
+  };
 }
 
 interface MergedPrRow {
-  number: number
-  mergedAt: string | null
-  updatedAt: string | null
-  state?: string
-  author?: { login?: string }
-  labels?: Array<{ name: string }>
-  headRefName?: string
-  headRefOid?: string
+  number: number;
+  mergedAt: string | null;
+  updatedAt: string | null;
+  state?: string;
+  author?: { login?: string };
+  labels?: Array<{ name: string }>;
+  headRefName?: string;
+  headRefOid?: string;
 }
 
 const toMergedPr = (row: MergedPrRow & { mergedAt: string }): MergedPr => ({
@@ -346,10 +338,10 @@ const toMergedPr = (row: MergedPrRow & { mergedAt: string }): MergedPr => ({
   mergedAt: row.mergedAt,
   updatedAt: row.updatedAt,
   author: row.author?.login ?? 'unknown',
-  labels: (row.labels ?? []).map((l) => l.name),
+  labels: (row.labels ?? []).map(l => l.name),
   headRef: row.headRefName ?? '',
   headSha: row.headRefOid ?? '',
-})
+});
 
 function listMergedPrs(repo: string, q: MergedPrQuery): MergedPr[] {
   const args = [
@@ -363,34 +355,34 @@ function listMergedPrs(repo: string, q: MergedPrQuery): MergedPr[] {
     String(q.limit ?? 100),
     '--json',
     'number,mergedAt,updatedAt,author,labels,headRefName,headRefOid',
-  ]
+  ];
   if (q.author) {
-    args.push('--author', q.author)
+    args.push('--author', q.author);
   }
   if (q.label) {
-    args.push('--label', q.label)
+    args.push('--label', q.label);
   }
   if (q.mergedSince) {
     // server-side cutoff — the list caps by recency, so a mergedAt
     // filter applied after the cap would lose eligible PRs. The
     // merged: qualifier takes a YYYY-MM-DD date — slice the ISO stamp;
     // the over-inclusive day edge is fine, callers filter exactly.
-    args.push('--search', `merged:>=${q.mergedSince.slice(0, 10)}`)
+    args.push('--search', `merged:>=${q.mergedSince.slice(0, 10)}`);
   }
   return ghJson<MergedPrRow[]>(args)
     .filter((row): row is MergedPrRow & { mergedAt: string } => row.mergedAt !== null)
-    .map(toMergedPr)
+    .map(toMergedPr);
 }
 
 function explicitMergedPrs(repo: string, ids: number[]): MergedPr[] {
-  const out: MergedPr[] = []
-  const failures: unknown[] = []
+  const out: MergedPr[] = [];
+  const failures: unknown[] = [];
   // Dedup at the facade — the old pipeline's `parseCsvInts` deduplicated
   // upstream, and duplicate ids would produce duplicate rows that
   // double-count in consumer aggregations.
-  const unique = [...new Set(ids)]
+  const unique = [...new Set(ids)];
   for (const number of unique) {
-    const link = prLink(repo, number)
+    const link = prLink(repo, number);
     try {
       const viewed = ghJson<MergedPrRow>([
         'pr',
@@ -400,39 +392,39 @@ function explicitMergedPrs(repo: string, ids: number[]): MergedPr[] {
         repo,
         '--json',
         'number,mergedAt,updatedAt,author,labels,state,headRefName,headRefOid',
-      ])
+      ]);
       if (viewed.state !== 'MERGED' || !viewed.mergedAt) {
-        console.error(`warning: PR ${link} is not merged — skipped`)
-        continue
+        console.error(`warning: PR ${link} is not merged — skipped`);
+        continue;
       }
-      out.push(toMergedPr({ ...viewed, mergedAt: viewed.mergedAt }))
+      out.push(toMergedPr({ ...viewed, mergedAt: viewed.mergedAt }));
     } catch (err) {
-      failures.push(err)
+      failures.push(err);
       console.error(
         `warning: PR ${link} fetch failed — ${err instanceof Error ? err.message : err}`
-      )
+      );
     }
   }
   // Every fetch failing is one outage (auth, network, repo gone, no gh on
   // PATH), not N unmerged PRs — an empty return would read as "all ids
   // unmerged" and silently empty the caller's selection.
   if (failures.length > 0 && failures.length === unique.length) {
-    const first = failures[0]
+    const first = failures[0];
     throw new Error(
       `all ${unique.length} PR fetch(es) failed: ` +
         (first instanceof Error ? first.message : String(first))
-    )
+    );
   }
-  return out
+  return out;
 }
 
 function mergedPrs(repo: string, q: MergedPrQuery = {}): MergedPr[] {
   // `ids` present — even empty — is an explicit selection; only its
   // absence means "list merged PRs with the filters".
   if (q.ids !== undefined) {
-    return explicitMergedPrs(repo, q.ids)
+    return explicitMergedPrs(repo, q.ids);
   }
-  return listMergedPrs(repo, q)
+  return listMergedPrs(repo, q);
 }
 
 // --- labels -------------------------------------------------------------------
@@ -446,40 +438,40 @@ function labels(t: PrTarget): string[] {
     t.repo,
     '--json',
     'labels',
-  ])
-  return (viewed.labels ?? []).map((l) => l.name)
+  ]);
+  return (viewed.labels ?? []).map(l => l.name);
 }
 
 /** Paths the PR's diff touches — one entry per file, paginated like the
  *  reviews fetch. */
 function prFiles(t: PrTarget): string[] {
-  const files: string[] = []
+  const files: string[] = [];
   for (let page = 1; ; page += 1) {
     // the endpoint truncates at 3,000 files — a 30th full page means the
     // list is silently incomplete, so throw: callers must treat an
     // unknown file scope as "not docs-only", not guess from a prefix
     if (page > 30) {
-      throw new Error(`prFiles: ${prLink(t.repo, t.pr)} exceeds the 3,000-file API limit`)
+      throw new Error(`prFiles: ${prLink(t.repo, t.pr)} exceeds the 3,000-file API limit`);
     }
     const rows = ghJson<Array<{ filename?: string; previous_filename?: string }>>([
       'api',
       `repos/${t.repo}/pulls/${t.pr}/files?per_page=100&page=${page}`,
-    ])
+    ]);
     for (const f of rows ?? []) {
       // a rename reports BOTH paths — a code→docs rename still counts as
       // touching code
       if (f.filename) {
-        files.push(f.filename)
+        files.push(f.filename);
       }
       if (f.previous_filename) {
-        files.push(f.previous_filename)
+        files.push(f.previous_filename);
       }
     }
     if ((rows?.length ?? 0) < 100) {
-      break
+      break;
     }
   }
-  return files
+  return files;
 }
 
 function prUpdatedAt(t: PrTarget): string | null {
@@ -491,8 +483,8 @@ function prUpdatedAt(t: PrTarget): string | null {
     t.repo,
     '--json',
     'updatedAt',
-  ])
-  return viewed.updatedAt ?? null
+  ]);
+  return viewed.updatedAt ?? null;
 }
 
 // --- async twins — the hook-probe read path -------------------------------------
@@ -506,10 +498,10 @@ function prUpdatedAt(t: PrTarget): string | null {
  *  submitted against, who authored it (User vs Bot), and when, for the
  *  latest-per-reviewer fold. Exported for tests — the verdict is pure. */
 export interface PrReviewNode {
-  state?: string
-  submittedAt?: string
-  commit?: { oid?: string } | null
-  author?: { __typename?: string; login?: string } | null
+  state?: string;
+  submittedAt?: string;
+  commit?: { oid?: string } | null;
+  author?: { __typename?: string; login?: string } | null;
 }
 
 /** 'a trusted human APPROVED the current head' — the verdict behind
@@ -531,10 +523,10 @@ export function headApprovalVerdict(
   const latest = new Map<
     string,
     { login: string; human: boolean; state: string; sha?: string; at: string; i: number }
-  >()
+  >();
   reviews.forEach((r, i) => {
-    const login = r.author?.login
-    const state = r.state
+    const login = r.author?.login;
+    const state = r.state;
     // an unattributable author (deleted account) neither approves nor
     // vetoes — it cannot be proven human either way. DISMISSED enters
     // the fold: a dismissed review is a revocation action on that
@@ -544,11 +536,11 @@ export function headApprovalVerdict(
       !login ||
       (state !== 'APPROVED' && state !== 'CHANGES_REQUESTED' && state !== 'DISMISSED')
     ) {
-      return
+      return;
     }
-    const key = login.toLowerCase()
-    const at = r.submittedAt ?? ''
-    const prev = latest.get(key)
+    const key = login.toLowerCase();
+    const at = r.submittedAt ?? '';
+    const prev = latest.get(key);
     // later submittedAt wins; a same-stamp tie falls to list order —
     // the host emits reviews oldest-first
     if (prev === undefined || at > prev.at || (at === prev.at && i > prev.i)) {
@@ -559,74 +551,69 @@ export function headApprovalVerdict(
         sha: r.commit?.oid ?? undefined,
         at,
         i,
-      })
+      });
     }
-  })
+  });
   const requesters = [...latest.values()]
-    .filter((v) => v.state === 'CHANGES_REQUESTED')
-    .map((v) => v.login)
+    .filter(v => v.state === 'CHANGES_REQUESTED')
+    .map(v => v.login);
   if (requesters.length > 0) {
-    return { approved: false, reason: `changes requested by ${requesters.join(', ')}` }
+    return { approved: false, reason: `changes requested by ${requesters.join(', ')}` };
   }
   const headApprovals = [...latest.values()].filter(
-    (v) => v.state === 'APPROVED' && v.sha === headSha
-  )
-  const trusted = new Set(
-    approvers.map((a) => a.trim().toLowerCase()).filter((a) => a !== '')
-  )
+    v => v.state === 'APPROVED' && v.sha === headSha
+  );
+  const trusted = new Set(approvers.map(a => a.trim().toLowerCase()).filter(a => a !== ''));
   const counts = (v: { login: string; human: boolean }): boolean =>
-    v.human && (trusted.size === 0 || trusted.has(v.login.toLowerCase()))
+    v.human && (trusted.size === 0 || trusted.has(v.login.toLowerCase()));
   if (headApprovals.some(counts)) {
-    return { approved: true }
+    return { approved: true };
   }
   // name the refusal in the order a user would act on it — a stale
   // TRUSTED human approval is the "but it WAS approved" case, so it
   // leads; an untrusted one falls through to the allowlist reason
   // (re-approval from an untrusted login fixes nothing)
   const stale = [...latest.values()].find(
-    (v) => v.state === 'APPROVED' && v.sha !== headSha && counts(v)
-  )
+    v => v.state === 'APPROVED' && v.sha !== headSha && counts(v)
+  );
   if (stale !== undefined) {
     return {
       approved: false,
       reason: `approval by ${stale.login} predates the current head — re-approve after the latest push`,
-    }
+    };
   }
-  if (
-    trusted.size > 0 &&
-    [...latest.values()].some((v) => v.state === 'APPROVED' && v.human)
-  ) {
+  if (trusted.size > 0 && [...latest.values()].some(v => v.state === 'APPROVED' && v.human)) {
     return {
       approved: false,
       reason: 'approvals only from logins outside act.approvers',
-    }
+    };
   }
   if (headApprovals.length > 0) {
-    return { approved: false, reason: 'only bot approvals on the current head' }
+    return { approved: false, reason: 'only bot approvals on the current head' };
   }
-  return { approved: false, reason: 'no approving reviews' }
+  return { approved: false, reason: 'no approving reviews' };
 }
 
 function reviewsQuery(afterClause: string): string {
-  return `query($o:String!,$r:String!,$pr:Int!){repository(owner:$o,name:$r){pullRequest(number:$pr){headRefOid reviews(first:100,states:[APPROVED,CHANGES_REQUESTED,DISMISSED]${afterClause}){pageInfo{hasNextPage endCursor} nodes{state submittedAt commit{oid} author{__typename login}}}}}}`
+  return `query($o:String!,$r:String!,$pr:Int!){repository(owner:$o,name:$r){pullRequest(number:$pr){headRefOid reviews(first:100,states:[APPROVED,CHANGES_REQUESTED,DISMISSED]${afterClause}){pageInfo{hasNextPage endCursor} nodes{state submittedAt commit{oid} author{__typename login}}}}}}`;
 }
 
 /** `, after: "…"` — the cursor is host data interpolated into a GraphQL
  *  string; JSON.stringify does the escaping (quotes, backslashes, and
  *  the control chars a two-step regex would miss). */
-const gqlAfter = (cursor: string): string => `, after: ${JSON.stringify(cursor)}`
+const gqlAfter = (cursor: string): string => `, after: ${JSON.stringify(cursor)}`;
 
 type ReviewsPullRequest = {
-  headRefOid?: string
+  headRefOid?: string;
   reviews?: {
-    pageInfo?: { hasNextPage?: boolean; endCursor?: string | null }
-    nodes?: PrReviewNode[]
-  }
-}
+    pageInfo?: { hasNextPage?: boolean; endCursor?: string | null };
+    nodes?: PrReviewNode[];
+  };
+};
 
 type ReviewsPage = {
-  data?: { repository?: { pullRequest?: ReviewsPullRequest } }
-}
+  data?: { repository?: { pullRequest?: ReviewsPullRequest } };
+};
 
 /** One page of the reviews connection folded into the probe — shared by
  *  the sync and async loops so they cannot diverge. FAIL CLOSED: a page
@@ -640,29 +627,29 @@ function reviewsPageStep(
   page: ReviewsPullRequest | undefined
 ): { headSha?: string; nodes: PrReviewNode[]; next: string | null } {
   if (page === undefined) {
-    throw new Error(`pull request #${pr} not found`)
+    throw new Error(`pull request #${pr} not found`);
   }
-  const reviews = page.reviews
+  const reviews = page.reviews;
   if (reviews?.nodes === undefined || reviews.pageInfo === undefined) {
-    throw new Error(`pull request #${pr}: reviews page incomplete — approval unanswerable`)
+    throw new Error(`pull request #${pr}: reviews page incomplete — approval unanswerable`);
   }
   if (reviews.pageInfo.hasNextPage !== true) {
-    return { headSha: page.headRefOid, nodes: reviews.nodes, next: null }
+    return { headSha: page.headRefOid, nodes: reviews.nodes, next: null };
   }
-  const next = reviews.pageInfo.endCursor
+  const next = reviews.pageInfo.endCursor;
   if (next === undefined || next === null || next === '' || next === cursor) {
-    throw new Error(`pull request #${pr}: reviews pagination did not advance`)
+    throw new Error(`pull request #${pr}: reviews pagination did not advance`);
   }
-  return { headSha: page.headRefOid, nodes: reviews.nodes, next }
+  return { headSha: page.headRefOid, nodes: reviews.nodes, next };
 }
 
 function humanApproved(t: PrTarget, opts?: ApprovalProbeOpts): ApprovalVerdict {
-  const { owner, name } = parts(t.repo)
-  let headSha = ''
-  const nodes: PrReviewNode[] = []
-  let cursor = ''
+  const { owner, name } = parts(t.repo);
+  let headSha = '';
+  const nodes: PrReviewNode[] = [];
+  let cursor = '';
   for (;;) {
-    const afterClause = cursor ? gqlAfter(cursor) : ''
+    const afterClause = cursor ? gqlAfter(cursor) : '';
     const page = ghJson<ReviewsPage>([
       'api',
       'graphql',
@@ -674,34 +661,31 @@ function humanApproved(t: PrTarget, opts?: ApprovalProbeOpts): ApprovalVerdict {
       `r=${name}`,
       '-F',
       `pr=${t.pr}`,
-    ]).data?.repository?.pullRequest
-    const step = reviewsPageStep(t.pr, cursor, page)
+    ]).data?.repository?.pullRequest;
+    const step = reviewsPageStep(t.pr, cursor, page);
     // bind to the FRESHEST head seen — a push mid-pagination turns old
     // approvals stale (fail-closed); binding to page 1's head would
     // under-bind the verdict to a head that is already gone
-    headSha = step.headSha ?? headSha
-    nodes.push(...step.nodes)
+    headSha = step.headSha ?? headSha;
+    nodes.push(...step.nodes);
     if (step.next === null) {
-      break
+      break;
     }
-    cursor = step.next
+    cursor = step.next;
   }
   // the bound head rides the verdict so the caller can prove the
   // approval was evaluated against the head it is about to merge —
   // a mid-probe push is a refusal, not a pass
-  return { ...headApprovalVerdict(nodes, headSha, opts?.approvers ?? []), headSha }
+  return { ...headApprovalVerdict(nodes, headSha, opts?.approvers ?? []), headSha };
 }
 
-async function humanApprovedAsync(
-  t: PrTarget,
-  opts?: ApprovalProbeOpts
-): Promise<ApprovalVerdict> {
-  const { owner, name } = parts(t.repo)
-  let headSha = ''
-  const nodes: PrReviewNode[] = []
-  let cursor = ''
+async function humanApprovedAsync(t: PrTarget, opts?: ApprovalProbeOpts): Promise<ApprovalVerdict> {
+  const { owner, name } = parts(t.repo);
+  let headSha = '';
+  const nodes: PrReviewNode[] = [];
+  let cursor = '';
   for (;;) {
-    const afterClause = cursor ? gqlAfter(cursor) : ''
+    const afterClause = cursor ? gqlAfter(cursor) : '';
     const page = (
       await ghJsonAsync<ReviewsPage>([
         'api',
@@ -715,41 +699,41 @@ async function humanApprovedAsync(
         '-F',
         `pr=${t.pr}`,
       ])
-    ).data?.repository?.pullRequest
-    const step = reviewsPageStep(t.pr, cursor, page)
+    ).data?.repository?.pullRequest;
+    const step = reviewsPageStep(t.pr, cursor, page);
     // bind to the FRESHEST head seen — a push mid-pagination turns old
     // approvals stale (fail-closed); binding to page 1's head would
     // under-bind the verdict to a head that is already gone
-    headSha = step.headSha ?? headSha
-    nodes.push(...step.nodes)
+    headSha = step.headSha ?? headSha;
+    nodes.push(...step.nodes);
     if (step.next === null) {
-      break
+      break;
     }
-    cursor = step.next
+    cursor = step.next;
   }
-  return { ...headApprovalVerdict(nodes, headSha, opts?.approvers ?? []), headSha }
+  return { ...headApprovalVerdict(nodes, headSha, opts?.approvers ?? []), headSha };
 }
 
 async function prMetaAsync(t: PrTarget): Promise<PrMeta> {
-  const { owner, name } = parts(t.repo)
+  const { owner, name } = parts(t.repo);
   const pr = (
     await ghJsonAsync<{
       data?: {
         repository?: {
           pullRequest?: {
-            headRefOid: string
-            headRefName: string
-            baseRefName: string
-            mergeable: string
-            mergeStateStatus: string
-            state: string
-            url: string
-            isDraft: boolean
-            reviewDecision?: string | null
-          }
-        }
-      }
-      errors?: unknown
+            headRefOid: string;
+            headRefName: string;
+            baseRefName: string;
+            mergeable: string;
+            mergeStateStatus: string;
+            state: string;
+            url: string;
+            isDraft: boolean;
+            reviewDecision?: string | null;
+          };
+        };
+      };
+      errors?: unknown;
     }>([
       'api',
       'graphql',
@@ -762,9 +746,9 @@ async function prMetaAsync(t: PrTarget): Promise<PrMeta> {
       '-F',
       `pr=${t.pr}`,
     ])
-  ).data?.repository?.pullRequest
+  ).data?.repository?.pullRequest;
   if (!pr) {
-    throw new Error(`pull request #${t.pr} not found`)
+    throw new Error(`pull request #${t.pr} not found`);
   }
   return {
     state: (pr.state || 'UNKNOWN').toUpperCase(),
@@ -776,33 +760,25 @@ async function prMetaAsync(t: PrTarget): Promise<PrMeta> {
     mergeable: (pr.mergeable || 'UNKNOWN').toUpperCase(),
     mergeState: (pr.mergeStateStatus || 'UNKNOWN').toUpperCase(),
     reviewDecision: pr.reviewDecision ?? undefined,
-  }
+  };
 }
 
 async function checksAsync(t: PrTarget, requiredOnly = false): Promise<CheckInfo[]> {
-  const args = [
-    'pr',
-    'checks',
-    String(t.pr),
-    '--repo',
-    t.repo,
-    '--json',
-    'name,state,bucket',
-  ]
+  const args = ['pr', 'checks', String(t.pr), '--repo', t.repo, '--json', 'name,state,bucket'];
   if (requiredOnly) {
-    args.push('--required')
+    args.push('--required');
   }
-  const res = await ghTryAsync(args)
+  const res = await ghTryAsync(args);
   if (res.out.trim().startsWith('[')) {
-    return JSON.parse(res.out) as CheckInfo[]
+    return JSON.parse(res.out) as CheckInfo[];
   }
   if (res.code !== 0 && /no (checks|required checks)/i.test(res.err)) {
-    return []
+    return [];
   }
   if (res.code !== 0) {
-    throw new Error(`gh pr checks failed: ${res.err}`)
+    throw new Error(`gh pr checks failed: ${res.err}`);
   }
-  return []
+  return [];
 }
 
 async function checkAnnotationsAsync(
@@ -810,12 +786,12 @@ async function checkAnnotationsAsync(
   headSha: string,
   names?: ReadonlySet<string>
 ): Promise<Map<string, number | null>> {
-  const out = new Map<string, number | null>()
+  const out = new Map<string, number | null>();
   for (let page = 1; ; page += 1) {
     const res = await ghJsonAsync<{ check_runs: Array<{ id: number; name: string }> }>([
       'api',
       `repos/${repo}/commits/${headSha}/check-runs?per_page=100&page=${page}`,
-    ])
+    ]);
     // a page's annotation fetches are independent — overlap them, but
     // bounded: each fetch is a ~50MB gh child and a CI suite runs tens
     // of check-runs, so an unbounded Promise.all spikes the whole
@@ -825,82 +801,80 @@ async function checkAnnotationsAsync(
     // read — skip them outright. Each run reports to its own slot
     // first so a name shared by concurrent runs can't let a success
     // overwrite a sibling's failure.
-    const runs = (res.check_runs ?? []).filter(
-      (run) => names === undefined || names.has(run.name)
-    )
-    const results: Array<{ name: string; count: number | null }> = []
-    await pooled(runs, 4, async (run) => {
+    const runs = (res.check_runs ?? []).filter(run => names === undefined || names.has(run.name));
+    const results: Array<{ name: string; count: number | null }> = [];
+    await pooled(runs, 4, async run => {
       try {
         const pages = await ghJsonAsync<Array<Array<{ annotation_level?: string }>>>([
           'api',
           '--paginate',
           '--slurp',
           `repos/${repo}/check-runs/${run.id}/annotations?per_page=100`,
-        ])
+        ]);
         results.push({
           name: run.name,
-          count: pages.flat().filter((a) => a.annotation_level === 'failure').length,
-        })
+          count: pages.flat().filter(a => a.annotation_level === 'failure').length,
+        });
       } catch {
-        results.push({ name: run.name, count: null })
+        results.push({ name: run.name, count: null });
       }
-    })
+    });
     for (const r of results) {
-      const prev = out.get(r.name)
+      const prev = out.get(r.name);
       if (prev === null) {
-        continue
+        continue;
       }
-      out.set(r.name, r.count === null ? null : (prev ?? 0) + r.count)
+      out.set(r.name, r.count === null ? null : (prev ?? 0) + r.count);
     }
     if ((res.check_runs?.length ?? 0) < 100) {
-      break
+      break;
     }
   }
-  return out
+  return out;
 }
 
 async function reviewedShasAsync(t: PrTarget): Promise<string[]> {
-  const shas = new Set<string>()
+  const shas = new Set<string>();
   for (let page = 1; ; page += 1) {
     const reviews = await ghJsonAsync<Array<{ commit_id?: string }>>([
       'api',
       `repos/${t.repo}/pulls/${t.pr}/reviews?per_page=100&page=${page}`,
-    ])
+    ]);
     for (const r of reviews ?? []) {
       if (r.commit_id) {
-        shas.add(r.commit_id)
+        shas.add(r.commit_id);
       }
     }
     if ((reviews?.length ?? 0) < 100) {
-      break
+      break;
     }
   }
-  return [...shas]
+  return [...shas];
 }
 
 async function prFilesAsync(t: PrTarget): Promise<string[]> {
-  const files: string[] = []
+  const files: string[] = [];
   for (let page = 1; ; page += 1) {
     if (page > 30) {
-      throw new Error(`prFiles: ${prLink(t.repo, t.pr)} exceeds the 3,000-file API limit`)
+      throw new Error(`prFiles: ${prLink(t.repo, t.pr)} exceeds the 3,000-file API limit`);
     }
     const rows = await ghJsonAsync<Array<{ filename?: string; previous_filename?: string }>>([
       'api',
       `repos/${t.repo}/pulls/${t.pr}/files?per_page=100&page=${page}`,
-    ])
+    ]);
     for (const f of rows ?? []) {
       if (f.filename) {
-        files.push(f.filename)
+        files.push(f.filename);
       }
       if (f.previous_filename) {
-        files.push(f.previous_filename)
+        files.push(f.previous_filename);
       }
     }
     if ((rows?.length ?? 0) < 100) {
-      break
+      break;
     }
   }
-  return files
+  return files;
 }
 
 // --- bulk probes ---------------------------------------------------------------
@@ -915,22 +889,22 @@ async function prFilesAsync(t: PrTarget): Promise<string[]> {
  *  clamps to one serial worker — zero workers would silently process
  *  nothing. */
 async function pooled<T>(items: T[], cap: number, fn: (item: T) => Promise<void>): Promise<void> {
-  let next = 0
+  let next = 0;
   await Promise.all(
     Array.from({ length: Math.max(1, Math.min(cap, items.length)) }, async () => {
       while (next < items.length) {
-        await fn(items[next++]!) // NOSONAR — serial within a worker; the workers overlap
+        await fn(items[next++]!); // NOSONAR — serial within a worker; the workers overlap
       }
     })
-  )
+  );
 }
 
 function chunks<T>(items: T[], size: number): T[][] {
-  const out: T[][] = []
+  const out: T[][] = [];
   for (let i = 0; i < items.length; i += size) {
-    out.push(items.slice(i, i + size))
+    out.push(items.slice(i, i + size));
   }
-  return out
+  return out;
 }
 
 // --- stacked PRs: the asynchronous merge endpoint -------------------------------
@@ -943,10 +917,10 @@ function chunks<T>(items: T[], size: number): T[][] {
 
 export interface StackProbe {
   /** Stack membership — absent on a PR that isn't in one. */
-  stacked: boolean
+  stacked: boolean;
   /** Base branch — undefined when the read failed; the merge action's
    *  queue decision needs it. */
-  base?: string
+  base?: string;
 }
 
 /** The `stack` object `GET /pulls/{n}` carries for members —
@@ -954,20 +928,21 @@ export interface StackProbe {
  *  Shared by the cascade probe and the publish pre-flight; every read
  *  failure (older API version, auth, network) surfaces as undefined —
  *  a probe never blocks the caller's fallback. */
-function readPrStack(
-  t: PrTarget
-): { stack?: { number?: number; position?: number; size?: number } | null; base?: { ref?: string } } {
-  const res = ghTry(['api', `repos/${t.repo}/pulls/${t.pr}`])
+function readPrStack(t: PrTarget): {
+  stack?: { number?: number; position?: number; size?: number } | null;
+  base?: { ref?: string };
+} {
+  const res = ghTry(['api', `repos/${t.repo}/pulls/${t.pr}`]);
   if (res.code !== 0) {
-    return {}
+    return {};
   }
   try {
     return JSON.parse(res.out) as {
-      stack?: { number?: number; position?: number; size?: number } | null
-      base?: { ref?: string }
-    }
+      stack?: { number?: number; position?: number; size?: number } | null;
+      base?: { ref?: string };
+    };
   } catch {
-    return {}
+    return {};
   }
 }
 
@@ -979,11 +954,11 @@ function readPrStack(
  *  stack the probe missed. Exported for the stacks facade — cascade
  *  ownership is the same probe. */
 export function stackProbe(t: PrTarget): StackProbe {
-  const body = readPrStack(t)
+  const body = readPrStack(t);
   return {
     stacked: body.stack !== undefined && body.stack !== null,
     base: body.base?.ref,
-  }
+  };
 }
 
 /** Which stack this PR sits in — the same `.stack` read as stackProbe,
@@ -991,10 +966,10 @@ export function stackProbe(t: PrTarget): StackProbe {
  *  unstacked or unreadable; `number` is the host's stack id (the
  *  `gh stack link <id>` grow arg). */
 export function stackMembership(t: PrTarget): StackMembership | null {
-  const stack = readPrStack(t).stack
+  const stack = readPrStack(t).stack;
   return stack?.number === undefined
     ? null
-    : { id: stack.number, position: stack.position, size: stack.size }
+    : { id: stack.number, position: stack.position, size: stack.size };
 }
 
 /** Does the base branch require a merge queue? GraphQL is the only
@@ -1005,7 +980,7 @@ export function stackMembership(t: PrTarget): StackMembership | null {
  *  loudly at the endpoint instead of silently picking a strategy. */
 function queueRequired(repo: string, base: string): boolean {
   try {
-    const { owner, name } = parts(repo)
+    const { owner, name } = parts(repo);
     const res = ghJson<{ data?: { repository?: { mergeQueue?: { id?: number } | null } } }>([
       'api',
       'graphql',
@@ -1017,17 +992,17 @@ function queueRequired(repo: string, base: string): boolean {
       `r=${name}`,
       '-f',
       `b=${base}`,
-    ])
-    return res.data?.repository?.mergeQueue != null
+    ]);
+    return res.data?.repository?.mergeQueue != null;
   } catch {
-    return false
+    return false;
   }
 }
 
 interface AsyncMergeResult {
-  status?: 'pending' | 'merged' | 'enqueued' | 'failed'
-  uuid?: string
-  message?: string
+  status?: 'pending' | 'merged' | 'enqueued' | 'failed';
+  uuid?: string;
+  message?: string;
 }
 
 /** The merge-async body, read from whichever stream `gh api` used — it
@@ -1039,46 +1014,46 @@ interface AsyncMergeResult {
  *  unobservable rather than as a verdict. */
 function readAsyncMerge(res: { out: string; err: string }): AsyncMergeResult {
   for (const text of [res.out, res.err]) {
-    const start = text.indexOf('{')
+    const start = text.indexOf('{');
     if (start < 0) {
-      continue
+      continue;
     }
     try {
       const body = JSON.parse(text.slice(start)) as {
-        status?: AsyncMergeResult['status']
-        message?: string
-        details?: { uuid?: string; message?: string }
-      }
+        status?: AsyncMergeResult['status'];
+        message?: string;
+        details?: { uuid?: string; message?: string };
+      };
       return {
         status: body.status,
         uuid: body.details?.uuid,
         message: body.details?.message ?? body.message,
-      }
+      };
     } catch {
       // not the merge body (gh's error prefix, a partial line) — try the
       // other stream before giving up
     }
   }
-  return {}
+  return {};
 }
 
 export interface AsyncMergePoll {
   /** Gap between result reads while the request is pending. */
-  intervalMs?: number
+  intervalMs?: number;
   /** Give up watching after this long — the merge keeps running on
    *  GitHub's side; re-running `bro act merge` resumes polling the same
    *  uuid. */
-  deadlineMs?: number
+  deadlineMs?: number;
   /** Injectable so the poll loop is testable without wall-clock waits. */
-  sleep?: (ms: number) => void
+  sleep?: (ms: number) => void;
 }
 
 /** Sync nap — the merge path is a command, not a hook probe, and
  *  `mergePr` is a sync facade method that cannot await a poll. Same
  *  primitive filelock uses to block on a lock. */
 const sleepSync = (ms: number): void => {
-  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms)
-}
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+};
 
 /** merge-async argv — the same pin --match-head-commit gives the sync
  *  path: a head that moved since the gate evaluated it fails closed
@@ -1092,16 +1067,16 @@ function mergeAsyncArgs(t: PrTarget, opts: MergeOpts, queued: boolean): string[]
     `repos/${t.repo}/pulls/${t.pr}/merge-async`,
     '-f',
     `sha=${opts.expectedHeadSha}`,
-  ]
+  ];
   if (queued) {
-    args.push('-f', 'merge_action=merge_queue')
+    args.push('-f', 'merge_action=merge_queue');
   } else {
-    args.push('-f', 'merge_action=direct_merge', '-f', `merge_method=${opts.method}`)
+    args.push('-f', 'merge_action=direct_merge', '-f', `merge_method=${opts.method}`);
   }
   if (opts.admin) {
-    args.push('-F', 'bypass_rules=true')
+    args.push('-F', 'bypass_rules=true');
   }
-  return args
+  return args;
 }
 
 /** Poll the uuid while `pending`. Throws on a uuid-less pending, and on
@@ -1116,26 +1091,26 @@ function pollAsyncMerge(
   deadlineMs: number,
   sleep: (ms: number) => void
 ): AsyncMergeResult {
-  const started = Date.now()
+  const started = Date.now();
   while (result.status === 'pending') {
-    const uuid = result.uuid
+    const uuid = result.uuid;
     if (uuid === undefined) {
       throw new Error(
         `async merge of ${prLink(t.repo, t.pr)} reports pending with no uuid — nothing to poll`
-      )
+      );
     }
-    const elapsed = Date.now() - started
+    const elapsed = Date.now() - started;
     if (elapsed >= deadlineMs) {
       throw new Error(
         `async merge ${uuid} of ${prLink(t.repo, t.pr)} still pending after ` +
           `${Math.round(elapsed / 1000)}s — the request keeps running on GitHub; ` +
           're-run to resume polling it'
-      )
+      );
     }
-    sleep(Math.min(intervalMs, deadlineMs - elapsed))
-    result = readAsyncMerge(ghTry(['api', `repos/${t.repo}/pulls/${t.pr}/merge-async/${uuid}`]))
+    sleep(Math.min(intervalMs, deadlineMs - elapsed));
+    result = readAsyncMerge(ghTry(['api', `repos/${t.repo}/pulls/${t.pr}/merge-async/${uuid}`]));
   }
-  return result
+  return result;
 }
 
 /** How mergePr routed the call to the async endpoint. `base` feeds the
@@ -1146,13 +1121,13 @@ export interface AsyncMergeRoute {
   /** The PR's base branch — decides the merge action when `queued`
    *  isn't given (the reactive fallback after a failed probe read
    *  passes no base, which means "assume no queue"). */
-  base?: string
+  base?: string;
   /** The PR sits in a stack — log line only; the endpoint call is the
    *  same either way. */
-  stacked?: boolean
+  stacked?: boolean;
   /** Precomputed queue verdict — a caller that already probed doesn't
    *  pay the GraphQL round-trip twice. */
-  queued?: boolean
+  queued?: boolean;
 }
 
 /** `PUT /pulls/{n}/merge-async`, then poll its uuid until the request
@@ -1166,37 +1141,36 @@ export function mergeAsync(
   route: AsyncMergeRoute = {},
   poll: AsyncMergePoll = {}
 ): void {
-  const queued =
-    route.queued ?? (route.base !== undefined && queueRequired(t.repo, route.base))
+  const queued = route.queued ?? (route.base !== undefined && queueRequired(t.repo, route.base));
   const why =
     route.stacked === true
       ? 'stack member'
       : queued
         ? 'base branch requires the merge queue'
-        : 'async path'
+        : 'async path';
   console.log(
     `merge: ${why} — ${prLink(t.repo, t.pr)} via merge-async ` +
       `(${queued ? 'merge queue' : opts.method}, head branch kept: ` +
       `${route.stacked === true ? 'a layer above may be based on it' : 'deleting it mid-queue closes the PR'})`
-  )
+  );
   const result = pollAsyncMerge(
     t,
     readAsyncMerge(ghTry(mergeAsyncArgs(t, opts, queued))),
     poll.intervalMs ?? 2_000,
     poll.deadlineMs ?? 10 * 60_000,
     poll.sleep ?? sleepSync
-  )
+  );
 
   if (result.status === 'failed') {
     throw new Error(
       `async merge of ${prLink(t.repo, t.pr)} failed — ${result.message ?? 'no reason reported'}`
-    )
+    );
   }
   if (result.status === 'enqueued') {
     // final for the request, NOT for the PR: the queue merges later. The
     // caller's post-merge re-read reports the real state.
-    console.log('merge: async merge accepted into the merge queue — not merged yet')
-    return
+    console.log('merge: async merge accepted into the merge queue — not merged yet');
+    return;
   }
   if (result.status !== 'merged') {
     throw new Error(
@@ -1204,34 +1178,30 @@ export function mergeAsync(
         `${result.uuid === undefined ? '' : ` (uuid ${result.uuid})`}` +
         `${result.message === undefined ? '' : ` — ${result.message}`} — ` +
         'check the PR state; GitHub may have discarded the request'
-    )
+    );
   }
 }
 
 /** pullRequest(number:N) under an alias — the building block for bulk
  *  probes and post-write updatedAt re-queries. */
-function aliasedPrQuery(
-  targets: PrTarget[],
-  alias: string,
-  fields: string
-): string {
+function aliasedPrQuery(targets: PrTarget[], alias: string, fields: string): string {
   const body = targets
     .map((t, i) => `${alias}${i}: pullRequest(number: ${t.pr}) { ${fields} }`)
-    .join('\n')
-  return `query($o:String!,$r:String!){ repository(owner:$o,name:$r){ ${body} } }`
+    .join('\n');
+  return `query($o:String!,$r:String!){ repository(owner:$o,name:$r){ ${body} } }`;
 }
 
 interface ScanNode {
-  title?: string
-  url?: string
-  mergedAt?: string | null
-  updatedAt?: string | null
-  mergeCommit?: { oid?: string }
-  labels?: { nodes?: Array<{ name?: string }> }
+  title?: string;
+  url?: string;
+  mergedAt?: string | null;
+  updatedAt?: string | null;
+  mergeCommit?: { oid?: string };
+  labels?: { nodes?: Array<{ name?: string }> };
   reviewThreads?: {
-    pageInfo?: { hasNextPage?: boolean }
-    nodes?: ThreadPage['nodes']
-  }
+    pageInfo?: { hasNextPage?: boolean };
+    nodes?: ThreadPage['nodes'];
+  };
 }
 
 function parseAliasedPrs<T extends object>(
@@ -1240,17 +1210,17 @@ function parseAliasedPrs<T extends object>(
   alias: string
 ): Array<T | null> {
   const parsed = JSON.parse(raw) as {
-    data?: { repository?: Record<string, T | null> }
-    errors?: unknown
-  }
+    data?: { repository?: Record<string, T | null> };
+    errors?: unknown;
+  };
   if (parsed.errors) {
-    throw new Error(`GraphQL errors: ${JSON.stringify(parsed.errors)}`)
+    throw new Error(`GraphQL errors: ${JSON.stringify(parsed.errors)}`);
   }
-  const repo = parsed.data?.repository
+  const repo = parsed.data?.repository;
   if (!repo) {
-    throw new Error('bulk scan: no repository in response')
+    throw new Error('bulk scan: no repository in response');
   }
-  return targets.map((_, i) => repo[`${alias}${i}`] ?? null)
+  return targets.map((_, i) => repo[`${alias}${i}`] ?? null);
 }
 
 const SCAN_PR_FIELDS = `
@@ -1260,7 +1230,7 @@ const SCAN_PR_FIELDS = `
   reviewThreads(first: 100) {
     pageInfo { hasNextPage }
     nodes { id isResolved isOutdated comments(first: 100) { nodes { author { login __typename } path line body createdAt } } }
-  }`
+  }`;
 
 /** Aliased-GraphQL probe: one `gh api graphql` call per ~15 PRs covers
  *  meta + threads + labels + updatedAt; chunks overlap under a small
@@ -1270,14 +1240,14 @@ async function scanMergedPrs(
   targets: PrTarget[],
   opts?: ScanOpts
 ): Promise<Map<number, MergedPrScan>> {
-  const out = new Map<number, MergedPrScan>()
+  const out = new Map<number, MergedPrScan>();
   if (targets.length === 0) {
-    return out
+    return out;
   }
-  const { owner, name } = parts(targets[0]!.repo)
-  let done = 0
-  await pooled(chunks(targets, 15), opts?.concurrency ?? 4, async (chunk) => {
-    let rows: Array<ScanNode | null>
+  const { owner, name } = parts(targets[0]!.repo);
+  let done = 0;
+  await pooled(chunks(targets, 15), opts?.concurrency ?? 4, async chunk => {
+    let rows: Array<ScanNode | null>;
     try {
       rows = parseAliasedPrs<ScanNode>(
         await ghAsync([
@@ -1292,27 +1262,27 @@ async function scanMergedPrs(
         ]),
         chunk,
         's'
-      )
+      );
     } catch (err) {
       console.error(
         `warning: bulk scan chunk (${chunk.length} PR(s)) failed — ` +
           `${err instanceof Error ? err.message : err}`
-      )
-      return
+      );
+      return;
     }
     for (const [i, t] of chunk.entries()) {
-      const node = rows[i]
+      const node = rows[i];
       // Non-merged / missing PRs stay out — the serial fallback decides.
       if (!node?.mergedAt) {
-        continue
+        continue;
       }
-      let threads = toReviewThreads(node.reviewThreads?.nodes ?? [])
+      let threads = toReviewThreads(node.reviewThreads?.nodes ?? []);
       // >100 threads on one PR is rare — full paginated fetch per-PR.
       if (node.reviewThreads?.pageInfo?.hasNextPage) {
         try {
-          threads = await reviewThreads(t) // NOSONAR — rare per-PR fallback inside the chunk loop
+          threads = await reviewThreads(t); // NOSONAR — rare per-PR fallback inside the chunk loop
         } catch {
-          continue
+          continue;
         }
       }
       out.set(t.pr, {
@@ -1323,26 +1293,26 @@ async function scanMergedPrs(
           mergeSha: node.mergeCommit?.oid ?? '',
         },
         threads,
-        labels: (node.labels?.nodes ?? []).map((l) => l.name ?? ''),
+        labels: (node.labels?.nodes ?? []).map(l => l.name ?? ''),
         updatedAt: node.updatedAt ?? null,
-      })
+      });
     }
-    done += chunk.length
-    opts?.onProgress?.(done, targets.length)
-  })
-  return out
+    done += chunk.length;
+    opts?.onProgress?.(done, targets.length);
+  });
+  return out;
 }
 
 /** Post-write `updatedAt` for a set of PRs — one chunked aliased query,
  *  not a serial `pr view` per PR. Missing keys stay absent. */
 async function updatedAtFor(targets: PrTarget[]): Promise<Map<number, string>> {
-  const out = new Map<number, string>()
+  const out = new Map<number, string>();
   if (targets.length === 0) {
-    return out
+    return out;
   }
-  const { owner, name } = parts(targets[0]!.repo)
-  await pooled(chunks(targets, 50), 4, async (chunk) => {
-    let rows: Array<{ updatedAt?: string | null } | null>
+  const { owner, name } = parts(targets[0]!.repo);
+  await pooled(chunks(targets, 50), 4, async chunk => {
+    let rows: Array<{ updatedAt?: string | null } | null>;
     try {
       rows = parseAliasedPrs(
         await ghAsync([
@@ -1357,18 +1327,18 @@ async function updatedAtFor(targets: PrTarget[]): Promise<Map<number, string>> {
         ]),
         chunk,
         'u'
-      )
+      );
     } catch {
-      return
+      return;
     }
     for (const [i, t] of chunk.entries()) {
-      const at = rows[i]?.updatedAt
+      const at = rows[i]?.updatedAt;
       if (at) {
-        out.set(t.pr, at)
+        out.set(t.pr, at);
       }
     }
-  })
-  return out
+  });
+  return out;
 }
 
 /** `gh pr edit` per PR overlapped under the pool — one call does the
@@ -1378,44 +1348,44 @@ async function labelPrs(
   ops: PrLabelOp[],
   opts?: { concurrency?: number }
 ): Promise<Map<number, string | null>> {
-  const applied: PrTarget[] = []
-  await pooled(ops, opts?.concurrency ?? 4, async (op) => {
+  const applied: PrTarget[] = [];
+  await pooled(ops, opts?.concurrency ?? 4, async op => {
     if (op.add.length === 0 && op.remove.length === 0) {
-      applied.push(op.t)
-      return
+      applied.push(op.t);
+      return;
     }
-    const args = ['pr', 'edit', String(op.t.pr), '--repo', op.t.repo]
+    const args = ['pr', 'edit', String(op.t.pr), '--repo', op.t.repo];
     if (op.add.length > 0) {
-      args.push('--add-label', op.add.join(','))
+      args.push('--add-label', op.add.join(','));
     }
     if (op.remove.length > 0) {
-      args.push('--remove-label', op.remove.join(','))
+      args.push('--remove-label', op.remove.join(','));
     }
     try {
-      await ghAsync(args)
-      applied.push(op.t)
+      await ghAsync(args);
+      applied.push(op.t);
     } catch (err) {
       // A failed write leaves the PR unlabeled — next collect rescans it.
       console.error(
         `warning: label write on ${prLink(op.t.repo, op.t.pr)} failed — ` +
           `${err instanceof Error ? err.message : err}`
-      )
+      );
     }
-  })
-  const stamps = await updatedAtFor(applied)
-  return new Map(applied.map((t) => [t.pr, stamps.get(t.pr) ?? null]))
+  });
+  const stamps = await updatedAtFor(applied);
+  return new Map(applied.map(t => [t.pr, stamps.get(t.pr) ?? null]));
 }
 
 // --- mutations ----------------------------------------------------------------
 
 /** Auto-close keywords GitHub recognizes — a body already carrying one
  *  for a ref is wired; re-stamping must not duplicate the line. */
-const CLOSER_RE = /(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)/i
+const CLOSER_RE = /(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)/i;
 
-const refEsc = (s: string): string => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+const refEsc = (s: string): string => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 
 const isWired = (body: string, ref: string): boolean =>
-  new RegExp(String.raw`\b${CLOSER_RE.source}\s+#${refEsc(ref)}\b`, 'i').test(body)
+  new RegExp(String.raw`\b${CLOSER_RE.source}\s+#${refEsc(ref)}\b`, 'i').test(body);
 
 /** The projection's body stamp (spec specs/backends/bro-z2z7f) — one
  *  `Fixes #N` line per newly-linked ref, inserted before the bro
@@ -1434,46 +1404,46 @@ const isWired = (body: string, ref: string): boolean =>
  *  inside the last guard→edit gap is still lost — revisit if a
  *  CAS-capable transport lands. */
 function linkCloses(dir: string, t: PrTarget, refs: string[]): void {
-  const wanted = [...new Set(refs.map((r) => r.trim()).filter((r) => r !== ''))]
+  const wanted = [...new Set(refs.map(r => r.trim()).filter(r => r !== ''))];
   if (wanted.length === 0) {
-    return
+    return;
   }
   const view = () =>
     ghJson<{ body?: string | null }>(
       ['pr', 'view', String(t.pr), '--repo', t.repo, '--json', 'body'],
       dir
-    ).body ?? ''
-  let body = view()
+    ).body ?? '';
+  let body = view();
   for (let attempt = 0; attempt < 3; attempt++) {
-    const missing = wanted.filter((r) => !isWired(body, r))
+    const missing = wanted.filter(r => !isWired(body, r));
     if (missing.length === 0) {
-      return
+      return;
     }
-    const lines = missing.map((r) => `Fixes #${r}`).join('\n')
-    const base = stripMeta(body)
-    const next = withMeta(base === '' ? lines : `${base}\n\n${lines}`, bodyMeta(body))
-    const fresh = view()
+    const lines = missing.map(r => `Fixes #${r}`).join('\n');
+    const base = stripMeta(body);
+    const next = withMeta(base === '' ? lines : `${base}\n\n${lines}`, bodyMeta(body));
+    const fresh = view();
     if (fresh === body) {
-      gh(['pr', 'edit', String(t.pr), '--repo', t.repo, '--body', next], dir)
-      body = view()
+      gh(['pr', 'edit', String(t.pr), '--repo', t.repo, '--body', next], dir);
+      body = view();
     } else {
-      body = fresh
+      body = fresh;
     }
   }
-  if (wanted.every((r) => isWired(body, r))) {
-    return
+  if (wanted.every(r => isWired(body, r))) {
+    return;
   }
-  throw new Error(`linkCloses: ${prLink(t.repo, t.pr)} body kept changing under the stamp`)
+  throw new Error(`linkCloses: ${prLink(t.repo, t.pr)} body kept changing under the stamp`);
 }
 
 function graphql(query: string, vars: Record<string, string>): void {
-  const args = ['api', 'graphql', '-f', `query=${query}`]
+  const args = ['api', 'graphql', '-f', `query=${query}`];
   for (const [k, v] of Object.entries(vars)) {
-    args.push('-f', `${k}=${v}`)
+    args.push('-f', `${k}=${v}`);
   }
-  const res = ghJson<{ errors?: unknown }>(args)
+  const res = ghJson<{ errors?: unknown }>(args);
   if (res.errors) {
-    throw new Error(`GraphQL errors: ${JSON.stringify(res.errors)}`)
+    throw new Error(`GraphQL errors: ${JSON.stringify(res.errors)}`);
   }
 }
 
@@ -1488,20 +1458,20 @@ export function githubReview(dir: string = process.cwd()): ReviewFacade {
       // `gh pr view` resolves the PR for the checked-out branch — `gh pr
       // list --limit 1` would grab an arbitrary open PR instead. It also
       // resolves CLOSED/MERGED PRs, so the caller must check state.
-      const res = ghTry(['pr', 'view', '--json', 'number,state,url'], dir)
+      const res = ghTry(['pr', 'view', '--json', 'number,state,url'], dir);
       if (res.code !== 0 || res.out.trim() === '') {
-        return null
+        return null;
       }
-      const view = JSON.parse(res.out) as { number: number; state: string; url: string }
-      return { pr: view.number, state: view.state, url: view.url }
+      const view = JSON.parse(res.out) as { number: number; state: string; url: string };
+      return { pr: view.number, state: view.state, url: view.url };
     },
     async currentPrAsync() {
-      const res = await ghTryAsync(['pr', 'view', '--json', 'number,state,url'], dir)
+      const res = await ghTryAsync(['pr', 'view', '--json', 'number,state,url'], dir);
       if (res.code !== 0 || res.out.trim() === '') {
-        return null
+        return null;
       }
-      const view = JSON.parse(res.out) as { number: number; state: string; url: string }
-      return { pr: view.number, state: view.state, url: view.url }
+      const view = JSON.parse(res.out) as { number: number; state: string; url: string };
+      return { pr: view.number, state: view.state, url: view.url };
     },
     prsForBranch(branch, state) {
       // Explicit --repo: `gh pr list --head` would otherwise guess the
@@ -1509,11 +1479,19 @@ export function githubReview(dir: string = process.cwd()): ReviewFacade {
       // instead of the configured review host.
       return ghJson<Array<{ number: number }>>(
         [
-          'pr', 'list', '--head', branch, '--state', state === 'all' ? 'all' : 'open',
-          '--repo', resolveRepo([], dir), '--json', 'number',
+          'pr',
+          'list',
+          '--head',
+          branch,
+          '--state',
+          state === 'all' ? 'all' : 'open',
+          '--repo',
+          resolveRepo([], dir),
+          '--json',
+          'number',
         ],
         dir
-      ).map((p) => p.number)
+      ).map(p => p.number);
     },
     openPrs(repo) {
       // the facade's most-recently-updated-first order comes from the
@@ -1521,16 +1499,13 @@ export function githubReview(dir: string = process.cwd()): ReviewFacade {
       // by creation time, so its first 500 could miss a freshly updated
       // older PR (the cap then only reorders a stale subset)
       return ghJson<Array<{ number: number; head?: { ref?: string } }>>(
-        [
-          'api',
-          `repos/${repo}/pulls?state=open&sort=updated&direction=desc&per_page=100`,
-        ],
+        ['api', `repos/${repo}/pulls?state=open&sort=updated&direction=desc&per_page=100`],
         dir
-      ).map((p) => ({ pr: p.number, headRef: p.head?.ref ?? '' }))
+      ).map(p => ({ pr: p.number, headRef: p.head?.ref ?? '' }));
     },
     parsePrRef(text) {
-      const m = /github\.com\/([\w.-]+)\/([\w.-]+)\/pull\/(\d+)/.exec(text)
-      return m ? { repo: `${m[1]}/${m[2]}`, pr: Number(m[3]) } : null
+      const m = /github\.com\/([\w.-]+)\/([\w.-]+)\/pull\/(\d+)/.exec(text);
+      return m ? { repo: `${m[1]}/${m[2]}`, pr: Number(m[3]) } : null;
     },
     prMeta,
     mergedPrInfo,
@@ -1555,54 +1530,50 @@ export function githubReview(dir: string = process.cwd()): ReviewFacade {
     prUpdatedAt,
     prBody(t) {
       return (
-        ghJson<{ body?: string }>([
-          'pr',
-          'view',
-          String(t.pr),
-          '--repo',
-          t.repo,
-          '--json',
-          'body',
-        ]).body ?? ''
-      )
+        ghJson<{ body?: string }>(['pr', 'view', String(t.pr), '--repo', t.repo, '--json', 'body'])
+          .body ?? ''
+      );
     },
     updatePrBody(t, body) {
-      gh(['pr', 'edit', String(t.pr), '--repo', t.repo, '--body', body])
+      gh(['pr', 'edit', String(t.pr), '--repo', t.repo, '--body', body]);
     },
     createLabel(repo, name, color) {
-      gh(['label', 'create', name, '--repo', repo, '--color', color, '--force'])
+      gh(['label', 'create', name, '--repo', repo, '--color', color, '--force']);
     },
     addLabel(t, label) {
-      gh(['pr', 'edit', String(t.pr), '--repo', t.repo, '--add-label', label])
+      gh(['pr', 'edit', String(t.pr), '--repo', t.repo, '--add-label', label]);
     },
     removeLabel(t, label) {
       // Ensure-absent: suppress only confirmed absent-label errors —
       // "repository not found" and other real failures propagate.
       try {
-        gh(['pr', 'edit', String(t.pr), '--repo', t.repo, '--remove-label', label])
+        gh(['pr', 'edit', String(t.pr), '--repo', t.repo, '--remove-label', label]);
       } catch (err) {
-        const msg = err instanceof Error ? err.message : String(err)
+        const msg = err instanceof Error ? err.message : String(err);
         if (msg.includes(label) && /not found|does not exist|no such label/i.test(msg)) {
-          return
+          return;
         }
-        throw err
+        throw err;
       }
     },
     linkCloses(t, refs) {
-      linkCloses(dir, t, refs)
+      linkCloses(dir, t, refs);
     },
     resolveThread(id, unresolve = false) {
-      const m = unresolve ? 'unresolveReviewThread' : 'resolveReviewThread'
-      graphql(`mutation($id:ID!){${m}(input:{threadId:$id}){thread{isResolved}}}`, { id })
+      const m = unresolve ? 'unresolveReviewThread' : 'resolveReviewThread';
+      graphql(`mutation($id:ID!){${m}(input:{threadId:$id}){thread{isResolved}}}`, { id });
     },
     replyThread(id, body) {
       graphql(
         'mutation($t:ID!,$b:String!){addPullRequestReviewThreadReply(input:{pullRequestReviewThreadId:$t,body:$b}){comment{id}}}',
         { t: id, b: body }
-      )
+      );
     },
     retargetPr(t, base) {
-      return ghTry(['pr', 'edit', String(t.pr), '--repo', t.repo, '--base', base]).code === 0
+      return ghTry(['pr', 'edit', String(t.pr), '--repo', t.repo, '--base', base]).code === 0;
+    },
+    closePr(t) {
+      gh(['pr', 'close', String(t.pr), '--repo', t.repo]);
     },
     updateBranch(t, expectedHeadSha) {
       const r = ghTry([
@@ -1612,8 +1583,8 @@ export function githubReview(dir: string = process.cwd()): ReviewFacade {
         `repos/${t.repo}/pulls/${t.pr}/update-branch`,
         '-f',
         `expected_head_sha=${expectedHeadSha}`,
-      ])
-      return r.code === 0
+      ]);
+      return r.code === 0;
     },
     mergePr(t, opts) {
       // The async endpoint is the path whenever `gh pr merge` can't be:
@@ -1623,11 +1594,11 @@ export function githubReview(dir: string = process.cwd()): ReviewFacade {
       // The probe decides first — a clean path, no doomed attempt — and
       // the reactive net covers what the probe could not see (an API
       // version without the field answers no question either way).
-      const probe = stackProbe(t)
-      const queued = probe.base !== undefined && queueRequired(t.repo, probe.base)
+      const probe = stackProbe(t);
+      const queued = probe.base !== undefined && queueRequired(t.repo, probe.base);
       if (probe.stacked || queued) {
-        mergeAsync(t, opts, { base: probe.base, stacked: probe.stacked, queued })
-        return postMergeState(t)
+        mergeAsync(t, opts, { base: probe.base, stacked: probe.stacked, queued });
+        return postMergeState(t);
       }
       const args = [
         'pr',
@@ -1638,33 +1609,33 @@ export function githubReview(dir: string = process.cwd()): ReviewFacade {
         t.repo,
         '--match-head-commit',
         opts.expectedHeadSha,
-      ]
+      ];
       if (opts.deleteBranch) {
-        args.push('--delete-branch')
+        args.push('--delete-branch');
       }
       if (opts.admin) {
-        args.push('--admin')
+        args.push('--admin');
       }
       try {
-        console.log(gh(args))
+        console.log(gh(args));
       } catch (err) {
-        const msg = err instanceof Error ? err.message : String(err)
+        const msg = err instanceof Error ? err.message : String(err);
         if (!/asynchronous merge|merge queue/i.test(msg)) {
-          throw err
+          throw err;
         }
-        console.error(`merge: sync merge refused — ${msg.trim()}`)
+        console.error(`merge: sync merge refused — ${msg.trim()}`);
         // Naming the queue forces `queued` — no second probe on a verdict
         // GitHub just gave. An async-only refusal keeps probing the base.
         mergeAsync(t, opts, {
           base: probe.base,
           queued: /merge queue/i.test(msg) || undefined,
-        })
+        });
       }
       // A merge queue accepts a PR without landing it — only the
       // authoritative state tells the caller what actually happened.
-      return postMergeState(t)
+      return postMergeState(t);
     },
-  }
+  };
 }
 
 /** The PR's post-merge state, authoritative — a queue hold or a stack
@@ -1679,6 +1650,6 @@ function postMergeState(t: PrTarget): string {
     t.repo,
     '--json',
     'state',
-  ])
-  return (after.state || 'UNKNOWN').toUpperCase()
+  ]);
+  return (after.state || 'UNKNOWN').toUpperCase();
 }
