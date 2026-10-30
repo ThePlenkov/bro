@@ -215,11 +215,12 @@ export function statusString(p: TreeProjection): string {
   return [workerToken(p), prToken(p)].filter(t => t !== undefined).join('·');
 }
 
-/** `[silent16h·#765 4t/3f] <title>` — or the bare title when nothing
- *  projects onto this tree. */
-export function labelFor(p: TreeProjection, title: string): string {
-  const s = statusString(p);
-  return s === '' ? title : `[${s}] ${title}`;
+/** The managed workspace's label — `🤖 <worktree-name>`: the LED
+ *  carries the state, the name is the identity (operator direction —
+ *  `[state·#PR] <title>` formats were messy and unread; the detail
+ *  stays on the `status` token and in the status pane). */
+export function labelFor(worktreePath: string): string {
+  return `🤖 ${basename(worktreePath)}`;
 }
 
 // --- the native LED (spec bro-awqde → bro-idsat) ---------------------------------
@@ -833,7 +834,7 @@ function writeDiffs(j: WriteJob): number {
 }
 
 function renameDiff(j: WriteJob): number {
-  const label = labelFor(j.proj, j.title);
+  const label = labelFor(j.ws.tree.path);
   const changed = (j.ws.live.label ?? '') !== label;
   return changed && herdrOk(['workspace', 'rename', j.ws.wsId, label]) ? 1 : 0;
 }
