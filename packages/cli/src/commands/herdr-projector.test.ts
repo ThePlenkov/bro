@@ -661,7 +661,7 @@ describe('projectFleet — a live pass over a fake herdr', () => {
     assert.equal(fleetPass(root, dir, f).r.files, 0);
   });
 
-  test('a stale state file for an unmanaged tree is pruned', () => {
+  test('a state file survives a blind ledger and is pruned once the tree is gone', () => {
     const root = armedRoot();
     const dir = stateDirOf();
     const path = fleetStatusPath(root, root);
@@ -669,13 +669,21 @@ describe('projectFleet — a live pass over a fake herdr', () => {
     const first = fleetPass(root, dir, statusFixture(root, 'wP'));
     assert.equal(first.r.files, 1);
     assert.ok(readFleetState(path) !== undefined);
-    // the plugin drops the managed record → the file must not linger
-    const gone = fleetPass(root, dir, {
+    // the ledger record vanishes but the workspace is still open —
+    // the file stays: a blind read must not blank the pane
+    const blind = fleetPass(root, dir, {
       scenario: {
         worktrees: [{ path: root, open_workspace_id: 'wP' }],
         workspaces: [{ workspace_id: 'wP', label: 'x' }],
       },
       state: { workspaces: { [root]: { ws: 'wP', managed: false } } },
+    });
+    assert.equal(blind.r.workspaces, 0);
+    assert.ok(readFleetState(path) !== undefined);
+    // the tree leaves herdr's list entirely → residue is swept
+    const gone = fleetPass(root, dir, {
+      scenario: { worktrees: [], workspaces: [] },
+      state: { workspaces: {} },
     });
     assert.equal(gone.r.workspaces, 0);
     assert.equal(readFleetState(path), undefined);

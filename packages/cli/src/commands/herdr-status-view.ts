@@ -57,6 +57,14 @@ export function releaseArgs(pane: string, seq: number): string[] {
   return paneArgs('release-agent', pane, seq);
 }
 
+/** Strip C0/C1 control bytes from untrusted text — a bead title is
+ *  operator input, and an embedded ESC written to the pane is terminal
+ *  injection (clear-screen, title-set, worse). */
+export function plain(s: string): string {
+  // eslint-disable-next-line no-control-regex -- sanitizing is the point
+  return s.replace(/[\u0000-\u001f\u007f-\u009f]/g, '');
+}
+
 /** The display-text argv — presentation only: `--display-agent` names
  *  the pane (the slug when the projection has one, `fleet` otherwise)
  *  and `--state-label` swaps the semantic word for the label's bracket
@@ -67,11 +75,11 @@ export function metaArgs(pane: string, s: FleetPaneState | undefined, seq: numbe
   const args = [
     ...paneArgs('report-metadata', pane, seq),
     '--display-agent',
-    s?.slug ?? 'fleet',
+    plain(s?.slug ?? 'fleet'),
     '--clear-state-labels',
   ];
   if (s !== undefined && s.status !== '') {
-    args.push('--state-label', `${s.led.state}=${s.status}`);
+    args.push('--state-label', `${s.led.state}=${plain(s.status)}`);
   }
   return args;
 }
@@ -91,14 +99,14 @@ export function renderView(
   worktree: string,
   now = Date.now()
 ): string {
-  const lines: string[] = [`── bro fleet · ${s?.slug ?? 'waiting'} ──`];
+  const lines: string[] = [`── bro fleet · ${plain(s?.slug ?? 'waiting')} ──`];
   if (s === undefined) {
-    lines.push(' · waiting for the daemon projector', ` ${worktree}`);
+    lines.push(' · waiting for the daemon projector', ` ${plain(worktree)}`);
   } else {
     lines.push(
-      ` ${LED_ICON[s.led.state]} ${s.status !== '' ? s.status : s.led.state}`,
-      ` ${s.title}`,
-      ` ${worktree} · ${s.workspace}`,
+      ` ${LED_ICON[s.led.state]} ${plain(s.status !== '' ? s.status : s.led.state)}`,
+      ` ${plain(s.title)}`,
+      ` ${plain(worktree)} · ${plain(s.workspace)}`,
       ` updated ${new Date(s.ts).toTimeString().slice(0, 8)} (${Math.max(0, Math.round((now - s.ts) / 1000))}s ago)`
     );
   }

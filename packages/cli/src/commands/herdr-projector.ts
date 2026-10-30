@@ -777,8 +777,17 @@ export function projectFleet(mainRoot: string, now = Date.now()): ProjectResult 
   // state files live under the common dir the pane resolves identically
   // (gitCommonDir(worktree) ?? worktree) — prune has the same base
   const statusBase = common ?? mainRoot;
+  // prune keeps every file a live workspace could still be rendering:
+  // a tree herdr lists with an open workspace keeps its file even when
+  // the ledger read was blind — wiping on a transient miss would blank
+  // every status pane until the next good pass
+  const keep = new Set(
+    trees.worktrees
+      .filter(t => t.open_workspace_id !== undefined)
+      .map(t => fleetStatusPath(statusBase, t.path))
+  );
   if (targets.length === 0) {
-    pruneFleetStatus(statusBase, new Set());
+    pruneFleetStatus(statusBase, keep);
     return { reachable: true, workspaces: 0, writes: 0, files: 0, leds: 0 };
   }
 
@@ -786,7 +795,6 @@ export function projectFleet(mainRoot: string, now = Date.now()): ProjectResult 
   let writes = 0;
   let files = 0;
   let leds = 0;
-  const keep = new Set<string>();
   for (const t of targets) {
     const { projection, title, slug } = projectTree(treeInput(t.tree, planes, ctx));
     // an empty bead plane means the backend read failed or is empty —

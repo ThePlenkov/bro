@@ -9,6 +9,7 @@ import {
   metaArgs,
   PANE_AGENT,
   PANE_SOURCE,
+  plain,
   releaseArgs,
   renderView,
   reportArgs,
@@ -109,6 +110,16 @@ describe('renderView — the pane face', () => {
     assert.match(v, /Ship the thing/);
     assert.match(v, /5s ago/);
     assert.match(v, /w1/);
+  });
+
+  test('untrusted fields can never inject terminal escapes', () => {
+    assert.equal(plain('a\u001b[2Jb'), 'a[2Jb');
+    const evil = doc({ title: 'x\u001b]8;;http://e\u0007t', slug: 's\u0007[0m' });
+    const v = renderView(evil, '/repo/trees/t1');
+    // the only ESC bytes left are the view's own clear-and-home prefix
+    assert.equal(v.indexOf('\u001b', v.indexOf('[H')), -1);
+    const meta = metaArgs('w1:p1', evil, 1);
+    assert.equal(meta[meta.indexOf('--display-agent') + 1], 's[0m');
   });
 });
 
