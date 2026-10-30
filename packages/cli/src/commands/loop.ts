@@ -125,6 +125,7 @@ import {
   applyFleetRouter,
   fleetProfileOf,
   loadAgentEnv,
+  profileModelFor,
   resolveAgentConnector,
   resolveSpawnProvider,
   type AgentConnectorEnv,
@@ -486,11 +487,12 @@ function lanePicks(
     (cfg.provider !== '' ? cfg.provider : undefined);
   const model =
     sel.model ??
-    flagProfile?.model ??
+    // a profile's model rides only on its own provider's lane
+    profileModelFor(flagProfile, provider) ??
     // the chain head's model pin pairs with ITS provider only — an
     // override provider never inherits chain[0]'s model
     (provider !== undefined && provider === route?.provider ? route.model : undefined) ??
-    cfgProfile?.model ??
+    profileModelFor(cfgProfile, provider) ??
     (cfg.model !== '' ? cfg.model : undefined);
   return {
     provider,
@@ -1361,11 +1363,15 @@ function runBootstrap(ctx: Ctx, beads: ReadyBead[], item: LoopItem): boolean {
   if (!ctx.cfg.bootstrap) {
     return true;
   }
-  const b = spawnSync('sh', ['-c', ctx.cfg.bootstrap], { // NOSONAR — operator-configured bootstrap
-    cwd: item.worktreeDir,
-    env: agentEnv(ctx, {}),
-    stdio: ['inherit', ctx.json ? 2 : 'inherit', 'inherit'],
-  });
+  const b = spawnSync(
+    'sh', // NOSONAR — operator-configured bootstrap shell, PATH by design
+    ['-c', ctx.cfg.bootstrap],
+    {
+      cwd: item.worktreeDir,
+      env: agentEnv(ctx, {}),
+      stdio: ['inherit', ctx.json ? 2 : 'inherit', 'inherit'],
+    }
+  );
   if (b.status === 0) {
     return true;
   }
@@ -3414,7 +3420,21 @@ async function tryClaim(
   // --max bounds BEADS, not items — a clump may only fill up to the
   // run's remaining claim budget
   const budget = ctx.cfg.maxItems > 0 ? ctx.cfg.maxItems - q.claimed : Number.MAX_SAFE_INTEGER;
-  const clump = claimClump(ctx, scope, q.seen, budget);
+  // the claim read (bd ready via claimClump) is a throwing bd() spawn —
+  // a store busy past the 15s budget (mirror publish, dolt GC/fsck on a
+  // multi-GB store) must degrade to a held push, never kill the
+  // supervisor mid-run (bro-etimout: an uncaught spawnSync ETIMEDOUT
+  // took the loop down three times in one day — the read failing is a
+  // blip; a failed read is NOT an empty queue, so drained stays unset)
+  let clump: ReadyBead[] | undefined;
+  try {
+    clump = claimClump(ctx, scope, q.seen, budget);
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    say(ctx, `loop: claim read failed — ${msg} — holding pushes for ${ctx.intervalS}s`);
+    q.pushHoldUntil = Date.now() + ctx.intervalS * 1000;
+    return false;
+  }
   if (clump === undefined) {
     q.drained = true;
     return false;

@@ -141,6 +141,8 @@ export type {
   RoutingClass,
   RoutingTable,
 } from './routing.ts';
+export { laneGateDir, laneGateLevel, laneGateTake } from './lane-gate.ts';
+export type { LaneGateOpts, LaneRateGate } from './lane-gate.ts';
 export {
   BrouterConfigError,
   brouterStaticCatalog,
@@ -245,6 +247,7 @@ export type {
   LifecycleKind,
   LifecycleRead,
 } from './lifecycle.ts';
+export { emitWorkerSilent, lifecycleBusEvent, publishLifecycleBusEvent } from './lifecycle-bus.ts';
 export { bodyMeta, broTrailer, stripMeta, withMeta } from './taskmeta.ts';
 export {
   PR_MANAGED_LABEL,
@@ -545,7 +548,7 @@ export type { SpecNode, SpecStore } from './specs.ts';
 export { warnDeprecated } from './deprecation.ts';
 export { EXIT, EXIT_CODES, hasHelpFlag, printUsage, usageWriter } from './exits.ts';
 export type { ExitCode, ExitCodeRow } from './exits.ts';
-export { markerLive, markerOwner, pidAlive, procStat } from './proc.ts';
+export { handleOwner, markerLive, markerOwner, pidAlive, procStat } from './proc.ts';
 export { checkPlanVersion, planKind, readPlanDoc } from './plan.ts';
 export type { PlanSchema } from './plan.ts';
 export { makePrinter } from './output.ts';
@@ -559,6 +562,7 @@ export {
   busProbe,
   busPublish,
   busSocketPath,
+  busSocketPathForCommon,
   busStatePath,
   busStatus,
   busSubscribe,

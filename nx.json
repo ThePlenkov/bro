@@ -3,30 +3,42 @@
   "defaultBase": "main",
   "targetDefaults": {
     "typecheck": {
-      "dependsOn": [
-        "^build"
-      ],
+      "dependsOn": ["^build"],
       "cache": false
     },
     "test": {
-      "dependsOn": [
-        "^build",
-        "build"
+      "dependsOn": ["^build", "build"],
+      "cache": true,
+      "inputs": [
+        "default",
+        "envGates",
+        "{workspaceRoot}/plugin.json",
+        "{workspaceRoot}/skills/**/*",
+        "{workspaceRoot}/.claude-plugin/**/*",
+        "{workspaceRoot}/.codex-plugin/**/*"
       ]
     }
   },
+  "namedInputs": {
+    "envGates": [
+      { "env": "BRO_MESH_E2E_REPO" },
+      { "env": "BRO_MESH_WL_E2E" },
+      { "env": "CODACY_API_TOKEN" },
+      { "env": "CODACY_PROJECT_TOKEN" },
+      { "env": "CODESCENE_TOKEN" },
+      { "env": "SONAR_TOKEN" }
+    ]
+  },
   "release": {
-    "projects": [
-      "@broject/*",
-      "!@broject/site"
-    ],
+    "projects": ["@broject/*", "!@broject/site"],
     "changelog": {
       "workspaceChangelog": {
         "createRelease": false
       }
     },
     "version": {
-      "conventionalCommits": true
+      "conventionalCommits": true,
+      "preserveMatchingDependencyRanges": false
     },
     "releaseTag": {
       "pattern": "v{version}"

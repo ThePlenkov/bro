@@ -7,7 +7,7 @@
   },
   "files": {
     "ignoreUnknown": false,
-    "includes": ["**", "!packages/cli/schemas/bro.config.schema.json"]
+    "includes": ["**", "!**/schemas/**", "!site/content/docs/reference/**"]
   },
   "formatter": {
     "enabled": true,

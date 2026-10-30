@@ -56,6 +56,23 @@ export function pidAlive(pid: number, pidStart?: string): boolean {
   )
 }
 
+/** An attempt handle's identity — `<pid> [starttime]`: the worker
+ *  publishes its /proc starttime beside the pid so a reader can pin
+ *  identity against pid reuse (the same pair markerOwner carries). A
+ *  bare pid — a pre-identity handle, or a platform with no /proc for
+ *  the worker to read — parses with `start` undefined: unverifiable,
+ *  so callers stay fail-open the way pidAlive documents. Null when no
+ *  positive integer pid is there at all. */
+export function handleOwner(text: string): { pid: number; start?: string } | null {
+  const parts = text.trim().split(/\s+/)
+  const pid = Number(parts[0])
+  if (!Number.isInteger(pid) || pid <= 0) {
+    return null
+  }
+  const start = parts[1]
+  return start === undefined || start === '' ? { pid } : { pid, start }
+}
+
 /** Line 1 of a session/work marker: `<millis> [pid start]` — the pid
  *  pair is the owning process's identity (start disambiguates reuse).
  *  A pid without a start can't disambiguate, so it reads as ownerless:

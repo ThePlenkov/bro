@@ -17,6 +17,10 @@
   "sdd": {
     "mode": "gate"
   },
+  "skills": {
+    "install": ["github:herdrdev/herdr/skills/herdr", "local:skills/bro-herdr"],
+    "agents": ["universal"]
+  },
   "guard": {
     "defs": [
       {

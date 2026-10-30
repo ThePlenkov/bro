@@ -23,7 +23,7 @@ import {
 import { readAgentRegistry, writeAgentRegistry, type Verdict } from '@broject/core'
 import { readJournal, ROUTE_CLASS_KIND } from '@broject/judge'
 import { fakeFetch } from '@broject/providers/testkit'
-import { capture, initRepo, installFakeBd, readBeads } from './testrepo.ts'
+import { capture, initRepo, installFakeBd, killRun, readBeads } from './testrepo.ts'
 import {
   collectDuplicateSuspects,
   discoverSessions,
@@ -101,15 +101,11 @@ function fixture(rows: Array<Record<string, unknown>> = []): Fixture {
       // registry still points at before the tmpdir (and it) goes away
       try {
         for (const e of Object.values(readAgentRegistry(main))) {
-          // tests register pid: process.pid to fake 'running' — if this
-          // process led its own group, kill(-pid) would kill the runner
-          if (typeof e.pid === 'number' && e.pid > 0 && e.pid !== process.pid && e.pid !== process.ppid) {
-            try {
-              process.kill(-e.pid, 'SIGKILL') // detached → own process group
-            } catch {
-              // already gone
-            }
-          }
+          // tests register pid: process.pid to fake 'running' — killRun
+          // never signals self/parent; the handle's group dies beside
+          // the recorded one (they differ under a fork-style scope,
+          // bro-ybo8z)
+          killRun(main, { pid: e.pid, runId: e.runId, agentId: e.agentId })
         }
       } catch {
         // no readable registry — nothing spawned
@@ -1472,21 +1468,37 @@ describe('bro agents down <target>', () => {
     }
   })
 
-  test('a setsid-escaped descendant leaves the stop unverified, not stopped', async () => {
+  test('a setsid-escaped descendant dies with the unit — the tree spans every group it leads', async () => {
     // setsid moves the child into its own session AND process group —
-    // the group probe cannot see it; the pre-signal tree snapshot is
-    // what stops the marker landing over a live writer (bro-l8c4f.3).
-    // Once the wrapper dies the survivor reparents to init — the state
-    // read then says `lost`, so the verdict is unverified.
+    // kill(-wrapperPgid) cannot reach it, but it is still a tree member,
+    // so the pre-signal snapshot's pgid set signals it directly
+    // (bro-ybo8z's fork-style scope hardening closes the escapee blind
+    // spot bro-l8c4f.3 documented).
     const fx = fixture([{ id: 'fx-1', status: 'open' }])
     try {
-      const { down, status } = await surviveDown(
-        fx, 'setsid sleep 30 & wait $! # {promptFile}')
-      assert.match(down.err.join('\n'), /stop unconfirmed/)
-      // the escapee lives on in its own session — the state read is
-      // lost (no death record), which is exactly why the verdict stays
-      // unverified; it exits on its own ~30 s out
-      assert.match(status.out.join('\n'), /state\s+lost/)
+      writeFileSync(
+        join(fx.main, 'bro.config.json'),
+        JSON.stringify({
+          agents: { native: { command: 'setsid sleep 30 & wait $! # {promptFile}' } },
+        })
+      )
+      const up = await agents([
+        'up',
+        'fx-1',
+        '--worktree',
+        fx.main,
+        '--beads-dir',
+        fx.beads,
+        '--prompt-file',
+        fx.promptFile(LONG_RUN),
+      ])
+      assert.equal(up.code, 0)
+      const agentId = readAgentRegistry(fx.main)['fx-1']!.agentId
+      const down = await agents(['down', 'fx-1'])
+      assert.equal(down.code, 0)
+      assert.match(down.out.join('\n'), new RegExp(`stopped ${String(agentId)}`))
+      const status = await agents(['status', 'fx-1'])
+      assert.match(status.out.join('\n'), /state\s+stopped/)
     } finally {
       fx.restore()
     }

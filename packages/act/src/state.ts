@@ -29,11 +29,18 @@ import type { PrActState } from './types.ts'
 // "kilometer-tests") is not an AI reviewer.
 const AI_REVIEWER_RE = /\b(cubic|code\s*rabbit|amazon\s*q|qodo|chatgpt\s*codex|gemini|kilo|codeant)\b/i
 
+/** Static-scanner check-name stems — the must-fix set. A check matching
+ *  one of these can NEVER be advisory-ignored: a scanner's failed job
+ *  or error annotation is a real project finding, not reviewer flake —
+ *  the proof-of-life model does not apply to it. */
 const SAST_NAMES = [
   'sonarcloud',
   'sonarqube',
   'codacy',
   'codescene',
+  'codeclimate',
+  'codefactor',
+  'deepsource',
   'codeql',
   'semgrep',
   'opengrep',
@@ -48,12 +55,13 @@ const SAST_NAMES = [
 ]
 
 export function isSast(name: string): boolean {
-  const lower = name.toLowerCase()
+  const lower = name.toLowerCase().replace(/[^a-z0-9]/g, '')
   return SAST_NAMES.some((s) => lower.includes(s))
 }
 
-const isLiveSast = (c: CheckInfo): boolean =>
-  isSast(c.name) && c.state !== 'SKIPPED' && c.state !== 'NEUTRAL'
+// SKIPPED means the run never produced output — every other conclusion
+// (SUCCESS, NEUTRAL included) can still carry failure-level annotations
+const isLiveSast = (c: CheckInfo): boolean => isSast(c.name) && c.state !== 'SKIPPED'
 
 /** The gate's ci set — non-reviewer checks that aren't pass/skipped/
  *  neutral. Exported so drive's CI-fail fixer names exactly the checks
@@ -75,8 +83,8 @@ export function failingCiChecks(checks: CheckInfo[]): CheckInfo[] {
 }
 
 /** Non-skipped SAST checks — the annotation-inspection set the gate
- *  reads, green runs included (a SUCCESS conclusion can still carry
- *  failure-level annotations). */
+ *  reads, green and NEUTRAL runs included (a SUCCESS or NEUTRAL
+ *  conclusion can still carry failure-level annotations). */
 export function liveSastChecks(checks: CheckInfo[]): CheckInfo[] {
   return checks.filter(isLiveSast)
 }
@@ -106,22 +114,19 @@ function countFindings(
  *  value means the run's annotations could not be fetched — unknown,
  *  and only counted for required checks (an optional SAST must not hold
  *  the gate; with no required checks configured at all, a flaky
- *  annotations endpoint stays infra noise). An advisory-ignored SAST
- *  check never gates — but one carrying failure annotations earns an
- *  alert: quietly dropping real findings is not what ignore is for. */
+ *  annotations endpoint stays infra noise). Static scanners are never
+ *  advisory-ignored (advisoryFilter returns them gated), so the counts
+ *  below are the whole story — findings here are must-fix. */
 async function sastCounts(
   rev: ReviewFacade,
   target: PrTarget,
   checks: CheckInfo[],
-  ignored: CheckInfo[],
   requiredNames: Set<string>,
-  headSha: string,
-  alerts: string[]
+  headSha: string
 ): Promise<{ pending: number; unknown: number }> {
   const out = { pending: 0, unknown: 0 }
   const sastChecks = liveSastChecks(checks)
-  const ignoredSast = liveSastChecks(ignored)
-  if (sastChecks.length === 0 && ignoredSast.length === 0) {
+  if (sastChecks.length === 0) {
     return out
   }
   let annotations: Map<string, number | null>
@@ -130,7 +135,7 @@ async function sastCounts(
     // annotations for every check-run on the commit, one host call each
     // (a 40-run suite fanned a gh child per run into one cgroup, the
     // bro-2l7r9 OOM)
-    const wanted = new Set([...sastChecks, ...ignoredSast].map((c) => c.name))
+    const wanted = new Set(sastChecks.map((c) => c.name))
     annotations =
       rev.checkAnnotationsAsync === undefined
         ? rev.checkAnnotations(target.repo, headSha, wanted)
@@ -138,19 +143,10 @@ async function sastCounts(
   } catch {
     // a transient check-runs failure must not sink the whole gate
     // state — every gated SAST check reads as "unknown" (required
-    // ones count below); ignored checks stay silent — their alert
-    // would claim findings we never saw
+    // ones count below)
     annotations = new Map(sastChecks.map((c) => [c.name, null]))
   }
   countFindings(sastChecks, annotations, requiredNames, out)
-  for (const check of ignoredSast) {
-    const count = annotations.get(check.name)
-    if (typeof count === 'number' && count > 0) {
-      alerts.push(
-        `ignored SAST check "${check.name}" carries ${count} failure annotation(s) — suppressed by act.ignoreChecks, review manually`
-      )
-    }
-  }
   return out
 }
 
@@ -217,6 +213,12 @@ function advisoryFilter(
   headSha: string,
   alerts: string[]
 ): boolean {
+  // a static scanner is must-fix, never advisory: a failed job or an
+  // error annotation IS the finding — the flaky-reviewer proof-of-life
+  // model (streak + fresh threads) does not apply to it
+  if (isSast(c.name)) {
+    return true
+  }
   const rule = rules.find((r) => c.name.toLowerCase().includes(r.name.toLowerCase()))
   if (rule === undefined) {
     return true
@@ -413,14 +415,9 @@ async function fetchState(
   const rules = ignoreRules(opts?.ignoreChecks ?? [])
   const alerts: string[] = []
   const history = opts?.checkHistory ?? null
-  const ignored: CheckInfo[] = []
-  const checks = checksAll.filter((c) => {
-    const gated = advisoryFilter(c, rules, history, threads, target, meta.headSha, alerts)
-    if (!gated) {
-      ignored.push(c)
-    }
-    return gated
-  })
+  const checks = checksAll.filter((c) =>
+    advisoryFilter(c, rules, history, threads, target, meta.headSha, alerts)
+  )
 
   // "CI green" means every check — an optional check that fails is still
   // a red job on the PR. Required names are only kept to decide whether a
@@ -446,15 +443,7 @@ async function fetchState(
 
   // A SAST scan can report "success" while still carrying failure-level
   // annotations — inspect every non-skipped SAST check, not just pending.
-  const sast = await sastCounts(
-    rev,
-    target,
-    checks,
-    ignored,
-    requiredNames,
-    meta.headSha,
-    alerts
-  )
+  const sast = await sastCounts(rev, target, checks, requiredNames, meta.headSha)
   const sastPending = sast.pending
   const sastUnknown = sast.unknown
 

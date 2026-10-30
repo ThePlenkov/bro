@@ -1,0 +1,34 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://broject.dev/schemas/cli/skills-list.schema.json",
+  "title": "bro skills list --json",
+  "type": "object",
+  "required": ["command", "data"],
+  "properties": {
+    "command": { "const": "skills list" },
+    "data": {
+      "type": "object",
+      "required": ["rows"],
+      "properties": {
+        "rows": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["name", "source", "state"],
+            "properties": {
+              "name": { "type": "string" },
+              "source": { "type": "string" },
+              "state": {
+                "enum": ["ok", "linked", "present", "missing", "drifted", "extra", "pending", "error"]
+              },
+              "detail": { "type": "string" }
+            },
+            "additionalProperties": false
+          }
+        }
+      },
+      "additionalProperties": true
+    }
+  },
+  "additionalProperties": true
+}

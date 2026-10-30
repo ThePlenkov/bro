@@ -330,9 +330,11 @@ export async function goalStopLines(
       ]
     }
     const lock = goalLock(dir, sessionId)
+    // waitMs 0 — the stop hook may not stall its host on a held lock;
+    // contention throws and the catch below degrades to the verify line
     return lock === null
       ? finishEval()
-      : withFileLock(lock, finishEval, { waitMs: 5_000, label: 'goal eval lock' })
+      : withFileLock(lock, finishEval, { waitMs: 0, label: 'goal eval lock' })
   } catch {
     // fail-open — but re-read first: a pause/clear that landed mid-eval
     // stays silent instead of re-waking the host

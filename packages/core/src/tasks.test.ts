@@ -3,7 +3,8 @@ import assert from 'node:assert/strict'
 import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { getTasks, getTasksAsync, taskStore, type TaskStore, type TaskStoreAsync } from './tasks.ts'
+import { bdActor, getTasks, getTasksAsync, taskStore, type TaskStore, type TaskStoreAsync } from './tasks.ts'
+import { GIT_SYNC_PROBE_TIMEOUT_MS } from './git.ts'
 import { doltManifest, doltStoreCommit, scrubEnv, testGit } from './testkit.ts'
 
 // ambient repo/agent/store pins must not reach fixture git children
@@ -458,6 +459,33 @@ describe('taskStore', { skip: WIN32 }, () => {
         const out = taskStore().sync?.() ?? ''
         assert.doesNotMatch(out, /withheld|unverifiable/)
         assert.equal(git('ls-remote', upstream, 'refs/dolt/data').split(/\s+/)[0], head)
+      })
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+})
+
+describe('actor resolution', { skip: WIN32 }, () => {
+  test('bdActor bounds the git config fallback — a wedged git drops to $USER', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'bro-actor-hanging-git-'))
+    writeFileSync(join(dir, 'git'), '#!/bin/sh\nexec /bin/sleep 30\n')
+    chmodSync(join(dir, 'git'), 0o755)
+    try {
+      withFakeBd({}, () => {
+        const prevPath = process.env.PATH
+        const prevUser = process.env.USER
+        process.env.PATH = `${dir}:${prevPath}`
+        process.env.USER = 'hook-user'
+        try {
+          const started = Date.now()
+          assert.equal(bdActor(dir), 'hook-user')
+          assert.ok(Date.now() - started < GIT_SYNC_PROBE_TIMEOUT_MS + 3_500)
+        } finally {
+          process.env.PATH = prevPath
+          if (prevUser === undefined) delete process.env.USER
+          else process.env.USER = prevUser
+        }
       })
     } finally {
       rmSync(dir, { recursive: true, force: true })

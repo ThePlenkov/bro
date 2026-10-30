@@ -97,11 +97,14 @@ import { runGoalCommand } from './commands/goal.ts';
 import { runDogfoodCommand } from './commands/dogfood.ts';
 import { goalSection } from './commands/goal-config.ts';
 import { runGuardCommand } from './commands/guard.ts';
+import { runHerdrCommand } from './commands/herdr.ts';
 import { runHooksCommand } from './commands/hooks.ts';
 import { freshnessSection } from './commands/postmerge.ts';
 import { runJudgeCommand } from './commands/judge.ts';
 import { runQueueCommand } from './commands/queue.ts';
 import { runLearnCommand } from './commands/learn.ts';
+import { runSkillsCommand } from './commands/skills.ts';
+import { skillsSection } from './commands/skills-config.ts';
 import { runMcpCommand } from './commands/mcp.ts';
 import { runPulseCommand } from './commands/pulse.ts';
 import { runWatchCommand } from './commands/watch.ts';
@@ -202,6 +205,7 @@ export const PLUGINS: BroPlugin[] = [
             '--area <a>': 'only findings in this area',
             '--author <u>': 'only findings from this thread author',
           },
+          json: 'schemas/cli/debt-next.schema.json',
           exits: {
             0: 'top open finding emitted',
             1: 'no open findings, or the claim CAS lost',
@@ -234,6 +238,7 @@ export const PLUGINS: BroPlugin[] = [
             1: 'gate blocked — threads/failures remain (usage errors also exit 1 today)',
             2: 'no open PR for the current branch',
           },
+          json: 'schemas/cli/act-status.schema.json',
         },
       },
     },
@@ -265,6 +270,7 @@ export const PLUGINS: BroPlugin[] = [
         '--global': 'read the user-level store instead of the project',
         '--label <a,b>': 'only beads carrying one of these labels are claimable',
       },
+      json: 'schemas/cli/next.schema.json',
       exits: {
         0: 'verdict emitted — task | gated | idle',
         1: 'task store unreachable or classify failed',
@@ -296,6 +302,7 @@ export const PLUGINS: BroPlugin[] = [
         '--live': 'TTY dashboard repaint loop (needs a TTY)',
         '--every N': 'repaint cadence seconds — implies --live',
       },
+      json: 'schemas/cli/fleet.schema.json',
       exits: {
         0: 'fleet printed',
         2: 'usage — --live without TTY, --every out of range, --json + --live',
@@ -347,6 +354,7 @@ export const PLUGINS: BroPlugin[] = [
             '--json': 'agent rows + occupancy + session quota as JSON',
             '--connector <name>': 'pin the agents facade connector',
           },
+          json: 'schemas/cli/agents-status.schema.json',
           exits: {
             0: 'agent plane printed',
             1: 'backend collection failed',
@@ -369,6 +377,7 @@ export const PLUGINS: BroPlugin[] = [
         '--deep':
           'add the act exit gate for the current branch PR — the fast path stays local-only',
       },
+      json: 'schemas/cli/fleet-status.schema.json',
       exits: { 0: 'board printed' },
     },
   }),
@@ -548,6 +557,39 @@ export const PLUGINS: BroPlugin[] = [
     configSchema: goalSection,
   }),
   definePlugin({
+    name: 'skills',
+    group: 'self',
+    summary:
+      'Agent-skill deps — skills.install sources materialise into .agents/skills/ [sync|list]',
+    run: runSkillsCommand,
+    skill: 'skills',
+    configKey: 'skills',
+    configSchema: skillsSection,
+    contract: {
+      subs: {
+        sync: {
+          flags: {
+            '--root <dir>': 'run root — its bro.config and .agents/skills apply',
+            '--json': 'per-source steps + reconcile rows + drift as JSON',
+          },
+          exits: {
+            0: 'all declared sources installed — lock verifies',
+            1: 'a source failed, or drift reported after sync',
+            2: 'usage',
+          },
+        },
+        list: {
+          flags: {
+            '--root <dir>': 'run root',
+            '--json': 'the reconcile rows as JSON',
+          },
+          json: 'schemas/cli/skills-list.schema.json',
+          exits: { 0: 'rows printed', 2: 'usage' },
+        },
+      },
+    },
+  }),
+  definePlugin({
     name: 'judge',
     group: 'self',
     summary: 'Calibrated decision judge — decide smoke test over systemone + llm-judge',
@@ -661,8 +703,18 @@ export const PLUGINS: BroPlugin[] = [
           flags: { '--json': 'machine-readable report' },
           exits: { 0: 'would-be record printed', 2: 'missing hook name' },
         },
-        on: { exits: { 0: 'otel.enabled=true written to bro.config.local.json', 2: 'bro.config.local.ts shadows' } },
-        off: { exits: { 0: 'otel.enabled=false written to bro.config.local.json', 2: 'bro.config.local.ts shadows' } },
+        on: {
+          exits: {
+            0: 'otel.enabled=true written to bro.config.local.json',
+            2: 'bro.config.local.ts shadows',
+          },
+        },
+        off: {
+          exits: {
+            0: 'otel.enabled=false written to bro.config.local.json',
+            2: 'bro.config.local.ts shadows',
+          },
+        },
       },
       exits: { 0: 'status (bare `bro otel`)', 2: 'usage — unknown subcommand' },
     },
@@ -671,6 +723,12 @@ export const PLUGINS: BroPlugin[] = [
     name: 'acp-worker',
     summary: 'ACP provider spawn unit — backends exec this; never typed',
     run: runAcpWorkerCommand,
+    hidden: true,
+  }),
+  definePlugin({
+    name: 'herdr',
+    summary: 'Herdr bridge — pane-facing helpers (status-view); spawned, never typed',
+    run: runHerdrCommand,
     hidden: true,
   }),
   definePlugin({
@@ -723,10 +781,12 @@ export const PLUGINS: BroPlugin[] = [
             '--repo <dir>': 'rig checkout to inspect (default: this repo)',
             '--json': 'rig status as JSON',
           },
+          json: 'schemas/cli/rig-status.schema.json',
           exits: { 0: 'rig fresh — no error surfaced', 1: 'a status error was found', 2: 'usage' },
         },
         next: {
           flags: { '--json': 'the re-entry verdict as JSON' },
+          json: 'schemas/cli/rig-next.schema.json',
           exits: {
             0: 'verdict — step | gate | wait | done',
             1: 'verdict blocked',

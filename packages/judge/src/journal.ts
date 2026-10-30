@@ -14,8 +14,8 @@
  */
 import { createHash } from 'node:crypto'
 import { appendFileSync, mkdirSync, readFileSync } from 'node:fs'
-import { dirname, join, resolve } from 'node:path'
-import { gitTry } from '@broject/core'
+import { dirname, join } from 'node:path'
+import { GIT_SYNC_PROBE_TIMEOUT_MS, gitCommonDir } from '@broject/core'
 import type {
   Disposition,
   JournalRow,
@@ -24,16 +24,11 @@ import type {
 } from '@broject/core'
 
 /** The journal file for `dir` — `<git-common>/bro/judge/verdicts.jsonl`;
- *  null outside a repo (the same relative/absolute fallback chain
- *  mailboxDir uses). */
+ *  null outside a repo. Bounded lookup: the stop-gate judge append runs
+ *  inside hook dispatch, where a wedged git probe must fail fast. */
 export function journalPath(dir: string): string | null {
-  const r = gitTry(['-C', dir, 'rev-parse', '--path-format=absolute', '--git-common-dir'])
-  let common = r.code === 0 ? r.out.trim() : ''
-  if (common === '') {
-    const rel = gitTry(['-C', dir, 'rev-parse', '--git-common-dir'])
-    common = rel.code === 0 && rel.out.trim() !== '' ? resolve(dir, rel.out.trim()) : ''
-  }
-  return common === '' ? null : join(common, 'bro', 'judge', 'verdicts.jsonl')
+  const common = gitCommonDir(dir, GIT_SYNC_PROBE_TIMEOUT_MS)
+  return common === null ? null : join(common, 'bro', 'judge', 'verdicts.jsonl')
 }
 
 /** The subject's dedup key — a content hash of the first comment the

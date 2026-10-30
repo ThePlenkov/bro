@@ -1,6 +1,6 @@
 {
   "name": "@broject/bro",
-  "version": "0.2.5",
+  "version": "0.3.0",
   "description": "bro \u2014 agent's sidekick CLI: the rig that owns the PR-to-merge loop \u2014 fleet, convoy, review gates, mesh, debt sweep",
   "keywords": [
     "agent-rig",
@@ -74,9 +74,9 @@
     }
   },
   "dependencies": {
-    "@broject/bro-pack": "^0.2.0",
-    "@broject/devin": "^0.2.5",
-    "@broject/mcp": "^0.2.5",
+    "@broject/bro-pack": "^0.3.0",
+    "@broject/devin": "^0.3.0",
+    "@broject/mcp": "^0.3.0",
     "@modelcontextprotocol/sdk": "^1.31.0",
     "smol-toml": "^1.9.0",
     "sverka": "^0.2.10"

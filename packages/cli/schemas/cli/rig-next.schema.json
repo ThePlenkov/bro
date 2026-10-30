@@ -1,0 +1,16 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://broject.dev/schemas/cli/rig-next.schema.json",
+  "title": "bro rig next --json",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["verdict"],
+  "properties": {
+    "verdict": {
+      "type": "string",
+      "enum": ["step", "gate", "wait", "done", "blocked"]
+    },
+    "id": { "type": "string" },
+    "detail": { "type": "string" }
+  }
+}

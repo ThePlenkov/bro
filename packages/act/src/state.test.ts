@@ -168,19 +168,16 @@ describe('fetchPrActState — conditional ignoreChecks', () => {
     assert.deepEqual(h.recorded, [`Kilo Code@${SHA.slice(0, 7)}=fail`])
   })
 
-  test('an ignored SAST check carrying failure annotations alerts — ignored ≠ clean', async () => {
+  test('an ignored SAST check carrying failure annotations still gates — findings are must-fix', async () => {
     const rev = fakeRev([check('SonarCloud Code Analysis', 'pass')], [])
     rev.checkAnnotations = () => new Map([['SonarCloud Code Analysis', 3]])
     const s = await fetchPrActState(rev, target, {
       ignoreChecks: ['sonarcloud'],
       checkHistory: memHistory(0),
     })
-    // never gates on an advisory check…
-    assert.equal(s.sastPending, 0)
-    // …but suppressed findings surface
-    assert.equal(s.alerts.length, 1)
-    assert.match(s.alerts[0]!, /ignored SAST check "SonarCloud Code Analysis"/)
-    assert.match(s.alerts[0]!, /3 failure annotation/)
+    // a static scanner is never advisory — its annotations ARE the findings
+    assert.equal(s.sastPending, 3)
+    assert.deepEqual(s.alerts, [])
   })
 
   test('an ignored SAST check with no findings stays quiet', async () => {
@@ -192,6 +189,42 @@ describe('fetchPrActState — conditional ignoreChecks', () => {
     })
     assert.equal(s.sastPending, 0)
     assert.deepEqual(s.alerts, [])
+  })
+
+  test('a failing ignored SAST check counts as failing — the job itself is a finding', async () => {
+    const s = await fetchPrActState(
+      fakeRev([check('Codacy Static Code Analysis', 'fail')], []),
+      target,
+      {
+        ignoreChecks: ['codacy'],
+        checkHistory: memHistory(9),
+      }
+    )
+    // ignore is for flaky REVIEWERS — a failed scanner job is a real
+    // project-caused failure and must hold the gate
+    assert.equal(s.ciFailing, 1)
+    assert.deepEqual(s.alerts, [])
+  })
+
+  test('a NEUTRAL SAST conclusion still gets its annotations inspected', async () => {
+    const rev = fakeRev(
+      [{ name: 'Codacy Static Code Analysis', state: 'NEUTRAL', bucket: 'pass' }],
+      []
+    )
+    rev.checkAnnotations = () => new Map([['Codacy Static Code Analysis', 2]])
+    const s = await fetchPrActState(rev, target, {})
+    assert.equal(s.sastPending, 2)
+  })
+
+  test('scanner names beyond the original set are recognized — deepsource/codeclimate', async () => {
+    const rev = fakeRev([check('DeepSource: Analysis', 'pass'), check('codeclimate', 'pass')], [])
+    rev.checkAnnotations = () =>
+      new Map([
+        ['DeepSource: Analysis', 1],
+        ['codeclimate', 2],
+      ])
+    const s = await fetchPrActState(rev, target, {})
+    assert.equal(s.sastPending, 3)
   })
 })
 

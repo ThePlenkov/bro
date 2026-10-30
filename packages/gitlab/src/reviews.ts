@@ -652,9 +652,19 @@ export function gitlabReview(dir: string = process.cwd()): ReviewFacade {
       ).map((m) => ({ pr: m.iid, headRef: m.source_branch ?? '' }))
     },
     parsePrRef(text) {
-      const host = hostOnce().replace(/[.*+?^${}()|[\]\\]/g, String.raw`\$&`)
-      const m = new RegExp(String.raw`${host}/([\w./-]+?)/-/merge_requests/(\d+)`, 'i').exec(text)
-      return m ? { repo: m[1]!, pr: Number(m[2]) } : null
+      // no `new RegExp(dynamic)` — a non-literal constructor trips the
+      // Codacy gate (and the host needs no escaping when it is matched
+      // with indexOf, not interpolated into a pattern): locate the raw
+      // host case-insensitively, then parse the tail with a literal.
+      const marker = `${hostOnce()}/`
+      const lower = text.toLowerCase()
+      const needle = marker.toLowerCase()
+      const tail = /^([\w./-]+?)\/-\/merge_requests\/(\d+)/i
+      for (let at = lower.indexOf(needle); at >= 0; at = lower.indexOf(needle, at + 1)) {
+        const m = tail.exec(text.slice(at + marker.length))
+        if (m) return { repo: m[1]!, pr: Number(m[2]) }
+      }
+      return null
     },
     prMeta,
     reviewDecision(t) {

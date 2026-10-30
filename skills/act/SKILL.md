@@ -40,7 +40,12 @@ default store, so standard installs already have it).
   service flake, so it can never hold a merge hostage. Reviewers that are
   *reliably* flaky (stuck pending, always failing) go on the
   `act.ignoreChecks` list in bro.config.json so their pending state
-  doesn't block either.
+  doesn't block either. **Static scanners are never advisory** —
+  SAST-named checks (codacy, codescene, sonar, codeql, deepsource, …)
+  gate unconditionally: a failed job or an error-level annotation is a
+  real project finding, not reviewer flake, so `act.ignoreChecks` does
+  not shield them and a `neutral` conclusion still gets its annotations
+  inspected.
   Bot reviewers never resolve their own threads — **you** must give each
   one a verdict and resolve it: fix → resolve silently (the push is the
   verdict); reject → reply with the reason, then resolve; or **defer** —
