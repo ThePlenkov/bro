@@ -226,6 +226,15 @@ rl.on('line', l => {
 });
 `;
 
+/** Apply an env map — `undefined` deletes the key. Shared by the
+ *  bind and the restore so the loop body lives once. */
+const putEnv = (env: Record<string, string | undefined>): void => {
+  for (const [k, v] of Object.entries(env)) {
+    if (v === undefined) delete process.env[k];
+    else process.env[k] = v;
+  }
+};
+
 /** Env bound for one call — the command reads it per invocation.
  *  `undefined` unbinds: the ambient shell may itself run inside
  *  herdr, so absence is a value a test must be able to force. */
@@ -233,16 +242,10 @@ function withEnv<T>(env: Record<string, string | undefined>, fn: () => T): T {
   const saved: Record<string, string | undefined> = {};
   for (const k of Object.keys(env)) saved[k] = process.env[k];
   try {
-    for (const [k, v] of Object.entries(env)) {
-      if (v === undefined) delete process.env[k];
-      else process.env[k] = v;
-    }
+    putEnv(env);
     return fn();
   } finally {
-    for (const [k, v] of Object.entries(saved)) {
-      if (v === undefined) delete process.env[k];
-      else process.env[k] = v;
-    }
+    putEnv(saved);
   }
 }
 

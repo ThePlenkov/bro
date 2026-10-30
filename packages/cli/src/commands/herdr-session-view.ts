@@ -32,6 +32,7 @@ import { basename, dirname } from 'node:path';
 import { gitCommonDir, type ProviderEntry } from '@broject/core';
 import type {
   AcpRenderer as AcpRendererT,
+  AcpSessionViewResult,
   AcpSessionViewSpec,
   SessionUpdateLike,
 } from '@broject/providers';
@@ -98,6 +99,15 @@ export function sessionReleaseArgs(pane: string, seq: number): string[] {
 /** What one refresh resolves — the attach identity plus the display
  *  fields the report carries. `session` present means an ACP attach
  *  is attempted; absent, `log` tails. */
+/** The resolved acp attach — only when provider type==='acp' and a
+ *  session id exists. */
+export interface SessionSpec {
+  id: string;
+  command: string;
+  provider?: string;
+  model?: string;
+}
+
 export interface SessionTarget {
   worktree: string;
   /** Display driver name (`agent` field — binary, not provider). */
@@ -107,9 +117,7 @@ export interface SessionTarget {
   status: string;
   /** The worker verdict — log-mode LED + label input. */
   workerLed: PaneLed;
-  /** The resolved acp attach — only when provider type==='acp' and a
-   *  session id exists. */
-  session?: { id: string; command: string; provider?: string; model?: string };
+  session?: SessionSpec;
   /** The fallback stream — the session-owning agent's native log. */
   log?: string;
 }
@@ -123,17 +131,32 @@ export function targetKey(t: SessionTarget | undefined): string {
   return 'none';
 }
 
-/** Resolve one fleet-state document + the providers section into the
- *  attach target — the ONLY place provider config meets the pane:
- *  `type === 'acp'` gates the command; everything else is a log tail. */
+/** The acp attach spec one state doc resolves to — only when the
+ *  provider entry exists, carries `type === 'acp'`, and the doc names
+ *  a session id. Everything else resolves to no session at all. */
+function sessionSpecOf(
+  s: FleetPaneState,
+  providers: Record<string, ProviderEntry>
+): SessionSpec | undefined {
+  const entry = s.provider !== undefined ? providers[s.provider] : undefined;
+  if (entry === undefined || entry.type !== 'acp' || s.acpSessionId === undefined) {
+    return undefined;
+  }
+  return {
+    id: s.acpSessionId,
+    command: entry.command,
+    ...(s.provider !== undefined ? { provider: s.provider } : {}),
+    ...(s.model !== undefined ? { model: s.model } : {}),
+  };
+}
+
 export function resolveTarget(
   s: FleetPaneState | undefined,
   worktree: string,
   providers: Record<string, ProviderEntry>
 ): SessionTarget | undefined {
   if (s === undefined) return undefined;
-  const entry = s.provider !== undefined ? providers[s.provider] : undefined;
-  const acp = entry !== undefined && entry.type === 'acp' ? entry : undefined;
+  const session = sessionSpecOf(s, providers);
   return {
     worktree,
     ...(s.agent !== undefined ? { agent: s.agent } : {}),
@@ -141,16 +164,7 @@ export function resolveTarget(
     title: s.title,
     status: s.status,
     workerLed: s.led,
-    ...(acp !== undefined && s.acpSessionId !== undefined
-      ? {
-          session: {
-            id: s.acpSessionId,
-            command: acp.command,
-            ...(s.provider !== undefined ? { provider: s.provider } : {}),
-            ...(s.model !== undefined ? { model: s.model } : {}),
-          },
-        }
-      : {}),
+    ...(session !== undefined ? { session } : {}),
     ...(s.log !== undefined ? { log: s.log } : {}),
   };
 }
@@ -403,6 +417,66 @@ export async function runSessionView(argv: string[], opts: SessionViewOpts = {})
     }
   };
 
+  /** The acp leg's verdict landing — fallback to the log (or a bare
+   *  reason line) plus a re-report, since the attach's posture moved
+   *  even when the target key didn't. `reason === undefined` means the
+   *  attach ended cleanly after being live: the renderer prints the
+   *  close marker, no fallback. */
+  const acpDone = (a: Attach, t: SessionTarget, reason: string, attached: boolean): void => {
+    a.acp = 'ended';
+    if (!attached) {
+      if (t.log !== undefined) {
+        dim(`── ${reason} — tailing the native log ──`);
+        tailLog(a, t.log);
+      } else {
+        dim(`── ${reason} ──`);
+      }
+    } else {
+      renderer?.closed(reason);
+    }
+    lastReport = '';
+    report(t, viewVerdict(t, a));
+  };
+
+  /** The spawned leg — import, spec, run. Split from `arm` so the
+   *  dispatch stays a flat read; a stale generation checks `cur`. */
+  const acpAttach = async (
+    a: Attach,
+    session: SessionSpec,
+    t: SessionTarget,
+    signal: AbortSignal
+  ): Promise<AcpSessionViewResult | undefined> => {
+    const { AcpRenderer, runAcpSessionView } = await import('@broject/providers');
+    if (cur !== a) return undefined;
+    renderer ??= new AcpRenderer(out);
+    const r = renderer;
+    const spec: AcpSessionViewSpec = {
+      command: session.command,
+      sessionId: session.id,
+      cwd: ctx.worktree,
+      ...(session.provider !== undefined ? { provider: session.provider } : {}),
+      update: u => r.update(u as SessionUpdateLike),
+      note: dim,
+      err: text => {
+        for (const line of text.split('\n')) {
+          if (line.trim() !== '') dim(`‹stderr› ${line.slice(0, 200)}`);
+        }
+      },
+      permission: pctx => ({ outcome: r.permission(pctx.params, 'none') }),
+      attached: () => {
+        if (cur === a) {
+          a.acp = 'live';
+          a.markHandshake('live');
+          // 'attaching' → 'session/load' without waiting on the poll
+          lastReport = '';
+          report(t, viewVerdict(t, a));
+        }
+      },
+      signal,
+    };
+    return runAcpSessionView(spec);
+  };
+
   /** One attach generation — identity-checked so a stale handshake
    *  or a re-resolve mid-flight can't double-render into the pane. */
   const arm = (t: SessionTarget): void => {
@@ -438,72 +512,20 @@ export async function runSessionView(argv: string[], opts: SessionViewOpts = {})
     const ac = new AbortController();
     a.ac = ac;
     const session = t.session;
-    void (async () => {
-      const { AcpRenderer, runAcpSessionView } = await import('@broject/providers');
-      if (cur !== a) return;
-      renderer ??= new AcpRenderer(out);
-      const r = renderer;
-      const spec: AcpSessionViewSpec = {
-        command: session.command,
-        sessionId: session.id,
-        cwd: ctx.worktree,
-        ...(session.provider !== undefined ? { provider: session.provider } : {}),
-        update: u => r.update(u as SessionUpdateLike),
-        note: dim,
-        err: text => {
-          for (const line of text.split('\n')) {
-            if (line.trim() !== '') dim(`‹stderr› ${line.slice(0, 200)}`);
-          }
-        },
-        permission: pctx => ({ outcome: r.permission(pctx.params, 'none') }),
-        attached: () => {
-          if (cur === a) {
-            a.acp = 'live';
-            a.markHandshake('live');
-            // 'attaching' → 'session/load' without waiting on the poll
-            lastReport = '';
-            report(t, viewVerdict(t, a));
-          }
-        },
-        signal: ac.signal,
-      };
-      return runAcpSessionView(spec);
-    })()
-      .then(result => {
+    acpAttach(a, session, t, ac.signal).then(
+      result => {
         a.markHandshake(result);
         if (cur !== a || result === undefined) return;
-        a.acp = 'ended';
-        if (!result.attached) {
-          if (t.log !== undefined) {
-            dim(`── ${result.reason} — tailing the native log ──`);
-            tailLog(a, t.log);
-          } else {
-            dim(`── ${result.reason} ──`);
-          }
-        } else {
-          renderer?.closed(result.reason);
-        }
-        // the attach moved (connecting → ended/fallback) — the verdict
-        // text moved even when the target key didn't
-        lastReport = '';
-        report(t, viewVerdict(t, a));
-      })
-      .catch((err: unknown) => {
+        acpDone(a, t, result.reason, result.attached);
+      },
+      (err: unknown) => {
         // a failed module import or a thrown spawn lands here — the
         // same fallback as a wire refusal
         a.markHandshake(err);
         if (cur !== a) return;
-        a.acp = 'ended';
-        const why = err instanceof Error ? err.message : String(err);
-        if (t.log !== undefined) {
-          dim(`── ${why} — tailing the native log ──`);
-          tailLog(a, t.log);
-        } else {
-          dim(`── ${why} ──`);
-        }
-        lastReport = '';
-        report(t, viewVerdict(t, a));
-      });
+        acpDone(a, t, err instanceof Error ? err.message : String(err), false);
+      }
+    );
   };
 
   /** One refresh — file parse → target resolve → report + attach
