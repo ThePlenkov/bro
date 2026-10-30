@@ -89,6 +89,7 @@ import {
   fleetProfileOf,
   loadAgentEnv,
   pidAlive,
+  profileModelFor,
   resolveAgentConnector,
   resolveSpawnProvider,
   type AgentConnectorEnv,
@@ -723,11 +724,12 @@ export function spawnStepAgent(
       conn.name,
       {
         provider,
-        // the routed model pin pairs with the routed provider — an
-        // explicit provider override must not inherit chain[0]'s model
         model:
           req.model ??
-          profile?.model ??
+          // a profile's model rides only on its own provider's lane
+          profileModelFor(profile, provider) ??
+          // the routed model pin pairs with the routed provider — an
+          // explicit provider override must not inherit chain[0]'s model
           (provider !== undefined && provider === route?.provider ? route.model : undefined),
         autoApprove: req.autoApprove ?? profile?.autoApprove,
       },
