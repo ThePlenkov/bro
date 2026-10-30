@@ -774,10 +774,12 @@ export function buildFixerPrompt(opts: {
     'Rules:',
     "- Read skills/act/SKILL.md first — it owns this loop's policy.",
     '- Fix valid findings on this branch; commit and push — the push is the verdict.',
+    '- For EVERY thread: fix+push OR reply with reason and resolve, OR explicitly defer to a follow-up bead and resolve. You MUST address all threads before stopping.',
+    '- You cannot exit cleanly with unresolved threads and no action taken on them.',
     '- Resolve fixed threads silently; reply + resolve with the reason on reject/defer.',
     '- Defer non-blocking nits (P2/P3) to debt beads — never chase a perfect PR.',
     '- NEVER merge — `bro drive` owns the merge on green.',
-    '- Exit when threads are zero or all deferred.',
+    '- Exit when threads are zero or all deferred/resolved with explanation.',
     '',
   ].join('\n');
 }
