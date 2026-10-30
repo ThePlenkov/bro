@@ -139,9 +139,8 @@ function sessionSpecOf(
   providers: Record<string, ProviderEntry>
 ): SessionSpec | undefined {
   const entry = s.provider !== undefined ? providers[s.provider] : undefined;
-  if (entry === undefined || entry.type !== 'acp' || s.acpSessionId === undefined) {
-    return undefined;
-  }
+  if (entry?.type !== 'acp') return undefined;
+  if (s.acpSessionId === undefined) return undefined;
   return {
     id: s.acpSessionId,
     command: entry.command,
@@ -477,6 +476,48 @@ export async function runSessionView(argv: string[], opts: SessionViewOpts = {})
     return runAcpSessionView(spec);
   };
 
+  /** The generation's header line — driver name (agent → provider),
+   *  the session id when an attach is coming, and the worktree's
+   *  title or basename. */
+  const banner = (t: SessionTarget): void => {
+    const who = t.agent ?? t.session?.provider ?? 'session';
+    const what = t.session !== undefined ? `${who} · ${t.session.id}` : who;
+    const title = t.title === undefined || t.title === '' ? basename(ctx.worktree) : t.title;
+    out(`── ${plain(what)} · ${plain(title)} ──`);
+  };
+
+  /** The attach resolved — a clean end after live, or a refusal that
+   *  falls back. A superseded generation reports nothing. */
+  const acpSettled = (
+    a: Attach,
+    t: SessionTarget,
+    result: AcpSessionViewResult | undefined
+  ): void => {
+    a.markHandshake(result);
+    if (cur !== a || result === undefined) return;
+    acpDone(a, t, result.reason, result.attached);
+  };
+
+  /** The leg threw — a failed module import or a thrown spawn lands
+   *  here, the same fallback as a wire refusal. */
+  const acpErrored = (a: Attach, t: SessionTarget, err: unknown): void => {
+    a.markHandshake(err);
+    if (cur !== a) return;
+    acpDone(a, t, err instanceof Error ? err.message : String(err), false);
+  };
+
+  /** No acp target resolved — the log carries the conversation when
+   *  the doc records one, a bare note otherwise. */
+  const armFallback = (a: Attach, t: SessionTarget): void => {
+    if (t.log !== undefined) {
+      dim('── no acp session resolved — tailing the native log ──');
+      tailLog(a, t.log);
+    } else {
+      dim('── no session recorded for this worktree ──');
+    }
+    a.markHandshake(null);
+  };
+
   /** One attach generation — identity-checked so a stale handshake
    *  or a re-resolve mid-flight can't double-render into the pane. */
   const arm = (t: SessionTarget): void => {
@@ -493,18 +534,9 @@ export async function runSessionView(argv: string[], opts: SessionViewOpts = {})
       markHandshake,
     };
     cur = a;
-    const who = t.agent ?? t.session?.provider ?? 'session';
-    const what = t.session !== undefined ? `${who} · ${t.session.id}` : who;
-    const title = t.title === undefined || t.title === '' ? basename(ctx.worktree) : t.title;
-    out(`── ${plain(what)} · ${plain(title)} ──`);
+    banner(t);
     if (t.session === undefined) {
-      if (t.log !== undefined) {
-        dim('── no acp session resolved — tailing the native log ──');
-        tailLog(a, t.log);
-      } else {
-        dim('── no session recorded for this worktree ──');
-      }
-      a.markHandshake(null);
+      armFallback(a, t);
       return;
     }
     a.mode = 'acp';
@@ -513,18 +545,8 @@ export async function runSessionView(argv: string[], opts: SessionViewOpts = {})
     a.ac = ac;
     const session = t.session;
     acpAttach(a, session, t, ac.signal).then(
-      result => {
-        a.markHandshake(result);
-        if (cur !== a || result === undefined) return;
-        acpDone(a, t, result.reason, result.attached);
-      },
-      (err: unknown) => {
-        // a failed module import or a thrown spawn lands here — the
-        // same fallback as a wire refusal
-        a.markHandshake(err);
-        if (cur !== a) return;
-        acpDone(a, t, err instanceof Error ? err.message : String(err), false);
-      }
+      result => acpSettled(a, t, result),
+      (err: unknown) => acpErrored(a, t, err)
     );
   };
 
