@@ -409,6 +409,30 @@ interface PluginLedger {
  *  fleet), in `$HERDR_PLUGIN_STATE_DIR` and the default dir (a plugin
  *  host and a daemon configured differently must still agree on
  *  ownership). */
+/** One parsed `state-<scope>.json` — the fields the ledger reads. */
+interface PluginLedgerFile {
+  workspaces?: Record<string, { ws?: string; managed?: boolean }>;
+  mirrors?: Record<string, { pane_id?: string; workspace?: string; marked?: boolean }>;
+  renderers?: Record<string, { pane_id?: string; workspace?: string }>;
+}
+
+/** Merge one parsed state file into the ledger — last write wins per
+ *  workspace key, and candidate panes collect in mirror-then-renderer
+ *  order (the live worker's tail before the events renderer). */
+function mergeLedger(out: PluginLedger, v: PluginLedgerFile): void {
+  const pane = (ws: string | undefined, paneId: string | undefined): void => {
+    if (ws === undefined || paneId === undefined) return;
+    const l = out.panes.get(ws) ?? [];
+    if (!l.includes(paneId)) l.push(paneId);
+    out.panes.set(ws, l);
+  };
+  for (const [k, r] of Object.entries(v.workspaces ?? {})) out.workspaces.set(k, r);
+  for (const r of Object.values(v.mirrors ?? {})) {
+    if (r.marked !== true) pane(r.workspace, r.pane_id);
+  }
+  for (const r of Object.values(v.renderers ?? {})) pane(r.workspace, r.pane_id);
+}
+
 function pluginLedger(ctx: Pick<PassCtx, 'root' | 'common'>): PluginLedger {
   const base = ctx.common ?? ctx.root;
   const real = realpathOrNull(base);
@@ -424,25 +448,10 @@ function pluginLedger(ctx: Pick<PassCtx, 'root' | 'common'>): PluginLedger {
     ].filter((d): d is string => d !== undefined)
   );
   const out: PluginLedger = { workspaces: new Map(), panes: new Map() };
-  const panes = (ws: string | undefined, paneId: string | undefined): void => {
-    if (ws === undefined || paneId === undefined) return;
-    const l = out.panes.get(ws) ?? [];
-    if (!l.includes(paneId)) l.push(paneId);
-    out.panes.set(ws, l);
-  };
   for (const dir of dirs) {
     for (const scope of scopes) {
       try {
-        const v = JSON.parse(readFileSync(join(dir, `state-${scope}.json`), 'utf8')) as {
-          workspaces?: Record<string, { ws?: string; managed?: boolean }>;
-          mirrors?: Record<string, { pane_id?: string; workspace?: string; marked?: boolean }>;
-          renderers?: Record<string, { pane_id?: string; workspace?: string }>;
-        };
-        for (const [k, r] of Object.entries(v.workspaces ?? {})) out.workspaces.set(k, r);
-        for (const r of Object.values(v.mirrors ?? {})) {
-          if (r.marked !== true) panes(r.workspace, r.pane_id);
-        }
-        for (const r of Object.values(v.renderers ?? {})) panes(r.workspace, r.pane_id);
+        mergeLedger(out, JSON.parse(readFileSync(join(dir, `state-${scope}.json`), 'utf8')));
       } catch {
         // no ledger at this candidate — the others still apply
       }
