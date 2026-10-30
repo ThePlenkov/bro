@@ -233,7 +233,9 @@ export function ledReport(p: TreeProjection): LedReport {
       return { kind: 'report', state: 'working' };
     case 'silent': {
       const m = workerToken(p);
-      return m === undefined
+      // a silent verdict always carries its bucket — an unbucketed
+      // 'silent' message reads like a bug, so fall back to bare working
+      return m === undefined || m === 'silent'
         ? { kind: 'report', state: 'working' }
         : { kind: 'report', state: 'working', message: m };
     }

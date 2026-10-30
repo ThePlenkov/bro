@@ -311,6 +311,10 @@ describe('projectTree — end to end over injected planes', () => {
 });
 
 describe('ledReport — the native-state mapping (bro-awqde)', () => {
+  test('silent without a bucket falls back to bare working', () => {
+    assert.deepEqual(ledReport({ state: 'silent' }), { kind: 'report', state: 'working' });
+  });
+
   test('working → working, silent → working + bucket message', () => {
     assert.deepEqual(ledReport({ state: 'working' }), { kind: 'report', state: 'working' });
     assert.deepEqual(ledReport({ state: 'silent', silentMin: 45 }), {
