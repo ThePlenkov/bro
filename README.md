@@ -182,7 +182,7 @@ Full reference: [broject.dev/docs](https://broject.dev/docs).
 | `bro run <plan.toml>` / `bro plan validate`      | Execute or check a validated plan                                                                          |
 | `bro plugins [list\|install\|uninstall]`         | Print the registry, or install client adapters (opencode, kilo, pi, omp)                                   |
 | `bro task\|store …`                              | Document verbs; `--global` targets the user-level store                                                    |
-| `bro cleanup [--remote] [--dry-run]`             | Delete local branches whose PR merged                                                                      |
+| `bro cleanup [--remote] [--dry-run]`             | Delete local branches whose PR merged and stale temp dirs                                                  |
 
 ## The pipeline (beads)
 

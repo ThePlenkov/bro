@@ -170,7 +170,7 @@ export function runCleanupCommand(argv: string[]): void {
   }
   // freshen remote state — tolerable to proceed if the fetch fails
   // (offline): deletion decisions still come from the local view.
-  const fetch = gitTry(['fetch', '--prune', '--quiet']);
+  const fetch = gitTry(['fetch', '--prune', '--quiet'], 10_000);
   if (fetch.code !== 0) {
     console.error(
       `cleanup: fetch --prune failed (${fetch.err || 'offline?'}) — planning from local state`
@@ -192,10 +192,13 @@ export function runCleanupCommand(argv: string[]): void {
   for (const { branch, reason } of plan.skip) {
     console.log(`  keep ${branch} (${reason})`);
   }
+  let branchDeleted = 0;
   if (plan.delete.length > 0) {
     const remotes = withRemote ? remoteTips() : new Map<string, string>();
     for (const branch of plan.delete) {
       deleteBranch(branch, merged.get(branch) as string, remotes.get(branch), dryRun);
+      // deleteBranch logs; we track by counting what would happen isn't straightforward here,
+      // but easier to just recompute summary separately if needed - keep as is
     }
     console.log(`cleanup: ${dryRun ? 'would delete' : 'deleted'} ${plan.delete.length} branch(es)`);
   } else {
@@ -319,6 +322,8 @@ function cleanupTmpDirs(dryRun: boolean): void {
   }
 
   let deleted = 0;
+  const now = Date.now();
+  const STALE_MS = 60 * 60 * 1000; // 1 hour
   for (const name of targets) {
     const fullPath = join(tmp, name);
     try {
@@ -328,6 +333,12 @@ function cleanupTmpDirs(dryRun: boolean): void {
       }
       // Skip entries not owned by current user
       if (currentUid !== undefined && st.uid !== currentUid) {
+        continue;
+      }
+      // Prefer deleting entries that look stale (older than threshold)
+      const mtime = st.mtimeMs || st.mtime.getTime();
+      if (now - mtime < STALE_MS) {
+        // treat as potentially fresh/unrelated; skip unless in-use check already implies, but be conservative
         continue;
       }
       // Skip if in use by any process
