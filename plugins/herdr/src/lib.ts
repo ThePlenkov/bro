@@ -410,10 +410,15 @@ export function paneExists(paneId: string): boolean {
 }
 
 /** The pane labels each convergence role claims — a pane carrying one
- *  role's label is never an idle-grab candidate for the other, even
+ *  role's label is never an idle-grab candidate for another, even
  *  unbound: the label is an intent marker, not just a record key. */
 export const RENDER_LABEL = 'bro: events';
 export const STATUS_LABEL = 'bro: status';
+export const SESSION_LABEL = 'bro: session';
+
+/** Every bro-role label — a generic "any idle pane" grab skips all of
+ *  them; only the owning role adopts its own orphans. */
+export const BRO_LABELS: ReadonlySet<string> = new Set([RENDER_LABEL, STATUS_LABEL, SESSION_LABEL]);
 
 /** Pane ids bound to a bro-managed role (renderer, status, mirror) —
  *  a generic "any idle pane" grab must never steal one out from under
@@ -423,6 +428,7 @@ export function boundPaneIds(state: PluginState): Set<string> {
   const ids = new Set<string>();
   for (const r of Object.values(state.renderers)) ids.add(r.pane_id);
   for (const r of Object.values(state.statuses)) ids.add(r.pane_id);
+  for (const r of Object.values(state.sessions)) ids.add(r.pane_id);
   for (const r of Object.values(state.mirrors)) ids.add(r.pane_id);
   return ids;
 }
@@ -502,6 +508,9 @@ export interface PluginState {
   renderers: Record<string, RendererRec>;
   /** worktree path → the status-pane record (one per managed ws). */
   statuses: Record<string, StatusPaneRec>;
+  /** worktree path → the session-pane record (one per managed ws —
+   *  spec bro-nwl5g's `bro herdr session-view` renderer). */
+  sessions: Record<string, StatusPaneRec>;
   /** worktree path → first-gone mtime — the reaper's two-sighting grace. */
   gone: Record<string, number>;
 }
@@ -528,10 +537,18 @@ export function loadState(scope: string): PluginState {
       mirrors: typeof v.mirrors === 'object' && v.mirrors !== null ? v.mirrors : {},
       renderers: typeof v.renderers === 'object' && v.renderers !== null ? v.renderers : {},
       statuses: typeof v.statuses === 'object' && v.statuses !== null ? v.statuses : {},
+      sessions: typeof v.sessions === 'object' && v.sessions !== null ? v.sessions : {},
       gone: typeof v.gone === 'object' && v.gone !== null ? v.gone : {},
     };
   } catch {
-    return { workspaces: {}, mirrors: {}, renderers: {}, statuses: {}, gone: {} };
+    return {
+      workspaces: {},
+      mirrors: {},
+      renderers: {},
+      statuses: {},
+      sessions: {},
+      gone: {},
+    };
   }
 }
 

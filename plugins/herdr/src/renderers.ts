@@ -8,6 +8,7 @@
 import {
   boundPaneIds,
   BRO,
+  BRO_LABELS,
   type HerdrPane,
   herdrOk,
   herdrTry,
@@ -18,7 +19,6 @@ import {
   RENDER_LABEL,
   type RendererRec,
   shq,
-  STATUS_LABEL,
 } from './lib.ts';
 
 const log = (s: string): void => console.log(`[reconcile] ${s}`);
@@ -133,8 +133,12 @@ export function ensureRenderer(ctx: RenderCtx): void {
   const orphan = panes.find(p => p.label === RENDER_LABEL && !bound.has(p.pane_id));
   const paneId =
     orphan?.pane_id ??
-    panes.find(p => !bound.has(p.pane_id) && p.label !== STATUS_LABEL && paneIdle(p.pane_id))
-      ?.pane_id;
+    panes.find(
+      p =>
+        !bound.has(p.pane_id) &&
+        (p.label === undefined || !BRO_LABELS.has(p.label)) &&
+        paneIdle(p.pane_id)
+    )?.pane_id;
   if (paneId === undefined) {
     armViaSplit(ctx, panes);
     return;

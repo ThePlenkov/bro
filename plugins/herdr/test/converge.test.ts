@@ -69,6 +69,8 @@ const planes = (over: Partial<Planes> = {}): Planes => ({
   armedDetails: [],
   mirrorPanes: {},
   rendererPanes: {},
+  statusPanes: {},
+  sessionPanes: {},
   ...over,
 });
 
@@ -144,29 +146,32 @@ describe('renderer panes', () => {
     const tree = mkdtempSync(join(TMP, 'tree-'));
     converge(armedTree(tree));
     const runs = called('pane', 'run');
-    assert.equal(runs.length, 2);
+    assert.equal(runs.length, 3);
     assert.equal(runs[0]![2], 'p1');
     assert.match(runs[0]![3]!, /bus subscribe/);
     assert.match(runs[0]![3]!, /--topic worker/);
     assert.deepEqual(called('pane', 'rename', 'p1', 'bro: events').length, 1);
     assert.equal(loadState(scope).renderers[tree]?.pane_id, 'p1');
-    // the status pane converges in the same pass — p1 is busy now, so
-    // it takes a fresh split
+    // status + session panes converge in the same pass — p1 is busy
+    // now, so each takes a fresh split
     assert.match(runs[1]![3]!, /herdr status-view/);
     assert.equal(loadState(scope).statuses[tree]?.pane_id, runs[1]![2]);
+    assert.match(runs[2]![3]!, /herdr session-view/);
+    assert.equal(loadState(scope).sessions[tree]?.pane_id, runs[2]![2]);
   });
 
   test('busy panes split instead of stealing the foreground', () => {
     reset({ panes: [{ pane_id: 'p1' }], busyPanes: ['p1'] });
     const tree = mkdtempSync(join(TMP, 'tree-'));
     converge(armedTree(tree));
-    // renderer split + status split — both hang off the one busy pane
-    assert.equal(called('pane', 'split', 'p1').length, 2);
+    // renderer + status + session splits — all hang off the one busy pane
+    assert.equal(called('pane', 'split', 'p1').length, 3);
     const runs = called('pane', 'run');
-    assert.equal(runs.length, 2);
+    assert.equal(runs.length, 3);
     assert.match(runs[0]![2]!, /^pSplit/);
     assert.match(runs[0]![3]!, /bus subscribe/);
     assert.match(runs[1]![3]!, /herdr status-view/);
+    assert.match(runs[2]![3]!, /herdr session-view/);
   });
 
   test('an orphan pane carrying our label is adopted, not duplicated', () => {
@@ -180,9 +185,9 @@ describe('renderer panes', () => {
     s.renderers[tree] = { workspace: 'wOpened', worktree: tree, pane_id: 'pGone' };
     saveState(scope, s);
     converge(armedTree(tree));
-    // the renderer adopts the orphan; the status pane still needs its
-    // own slot — one split, off the only live pane
-    assert.equal(called('pane', 'split').length, 1);
+    // the renderer adopts the orphan; status + session each need their
+    // own slot — two splits, off the only live pane
+    assert.equal(called('pane', 'split').length, 2);
     assert.equal(loadState(scope).renderers[tree]?.pane_id, 'pTail');
   });
 
@@ -230,10 +235,11 @@ describe('renderer panes', () => {
     saveState(scope, s);
     converge(armedTree(tree));
     // the dead mirror is an exit marker, not a renderer — the tail
-    // arms, and the status pane converges beside it
-    assert.equal(called('pane', 'run').length, 2);
+    // arms, and the status + session panes converge beside it
+    assert.equal(called('pane', 'run').length, 3);
     assert.equal(loadState(scope).renderers[tree]?.pane_id, 'pTail');
     assert.ok(loadState(scope).statuses[tree]?.pane_id !== undefined);
+    assert.ok(loadState(scope).sessions[tree]?.pane_id !== undefined);
   });
 
   test('a dead tail on a live pane re-arms in place', () => {
@@ -244,7 +250,7 @@ describe('renderer panes', () => {
     saveState(scope, s);
     converge(armedTree(tree));
     const runs = called('pane', 'run');
-    assert.equal(runs.length, 2);
+    assert.equal(runs.length, 3);
     assert.equal(runs[0]![2], 'p1');
     assert.equal(loadState(scope).renderers[tree]?.pane_id, 'p1');
   });
@@ -256,10 +262,11 @@ describe('renderer panes', () => {
     s.renderers[tree] = { workspace: 'wOpened', worktree: tree, pane_id: 'p1' };
     saveState(scope, s);
     converge(armedTree(tree));
-    // the tail is untouched; only the status pane converges (a split)
+    // the tail is untouched; status + session converge (splits)
     const runs = called('pane', 'run');
-    assert.equal(runs.length, 1);
+    assert.equal(runs.length, 2);
     assert.match(runs[0]![3]!, /herdr status-view/);
+    assert.match(runs[1]![3]!, /herdr session-view/);
   });
 
   test('a stale managed record cannot pane a user-reopened workspace', () => {
@@ -367,6 +374,99 @@ describe('status panes (spec bro-idsat)', () => {
     assert.equal(st.statuses[join(TMP, 'old-tree')], undefined);
     // and the live workspace got its own status pane
     assert.ok(st.statuses[tree]?.pane_id !== undefined);
+  });
+});
+
+describe('session panes (spec bro-nwl5g)', () => {
+  test('a spare idle pane becomes the session view', () => {
+    reset({ panes: [{ pane_id: 'p1' }, { pane_id: 'p2' }, { pane_id: 'p3' }] });
+    const tree = mkdtempSync(join(TMP, 'tree-'));
+    converge(armedTree(tree));
+    // renderer takes p1, status p2, session p3
+    assert.deepEqual(called('pane', 'rename', 'p3', 'bro: session').length, 1);
+    const runs = called('pane', 'run', 'p3');
+    assert.equal(runs.length, 1);
+    assert.match(runs[0]![3]!, /herdr session-view/);
+    assert.match(runs[0]![3]!, new RegExp(tree.replace(/[\\/.]/g, '\\$&')));
+    assert.equal(loadState(scope).sessions[tree]?.pane_id, 'p3');
+  });
+
+  test('a recorded live session pane is left alone', () => {
+    reset({ panes: [{ pane_id: 'pV' }], paneIds: ['pV'], busyPanes: ['pV'] });
+    const tree = mkdtempSync(join(TMP, 'tree-'));
+    const s = loadState(scope);
+    s.sessions[tree] = { workspace: 'wOpened', worktree: tree, pane_id: 'pV' };
+    saveState(scope, s);
+    converge(armedTree(tree));
+    assert.ok(called('pane', 'run', 'pV').length === 0);
+    assert.equal(loadState(scope).sessions[tree]?.pane_id, 'pV');
+  });
+
+  test('a dead session view on a live pane re-arms in place', () => {
+    reset({ panes: [{ pane_id: 'pV' }], paneIds: ['pV'] });
+    const tree = mkdtempSync(join(TMP, 'tree-'));
+    const s = loadState(scope);
+    s.sessions[tree] = { workspace: 'wOpened', worktree: tree, pane_id: 'pV' };
+    saveState(scope, s);
+    converge(armedTree(tree));
+    const runs = called('pane', 'run', 'pV');
+    assert.equal(runs.length, 1);
+    assert.match(runs[0]![3]!, /herdr session-view/);
+    assert.equal(loadState(scope).sessions[tree]?.pane_id, 'pV');
+  });
+
+  test('a session-labeled orphan is adopted by sessions, never stolen by other roles', () => {
+    reset({ panes: [{ pane_id: 'pOrph', label: 'bro: session' }], paneIds: ['pOrph'] });
+    const tree = mkdtempSync(join(TMP, 'tree-'));
+    converge(armedTree(tree));
+    // sessions adopts the orphan; renderer + status each split —
+    // neither may grab a pane wearing another role's label
+    const runs = called('pane', 'run', 'pOrph');
+    assert.equal(runs.length, 1);
+    assert.match(runs[0]![3]!, /herdr session-view/);
+    assert.equal(loadState(scope).sessions[tree]?.pane_id, 'pOrph');
+    assert.equal(called('pane', 'split').length, 2);
+    assert.equal(loadState(scope).statuses[tree]?.pane_id !== 'pOrph', true);
+    assert.equal(loadState(scope).renderers[tree]?.pane_id !== 'pOrph', true);
+  });
+
+  test('a stale session record on a closed workspace is dropped', () => {
+    reset({ panes: [{ pane_id: 'pLive' }] });
+    const tree = mkdtempSync(join(TMP, 'tree-'));
+    const p = armedTree(tree);
+    p.worktrees.worktrees = [{ path: tree, open_workspace_id: 'wLive' }];
+    p.workspaces = [{ workspace_id: 'wLive', label: 'live' }];
+    const s = loadState(scope);
+    s.workspaces[tree] = { ws: 'wLive', label: 'live', managed: true };
+    s.sessions[join(TMP, 'old-tree')] = {
+      workspace: 'wGone',
+      worktree: join(TMP, 'old-tree'),
+      pane_id: 'pOld',
+    };
+    saveState(scope, s);
+    converge(p);
+    const st = loadState(scope);
+    assert.equal(st.sessions[join(TMP, 'old-tree')], undefined);
+    assert.ok(st.sessions[tree]?.pane_id !== undefined);
+  });
+
+  test('the reaper clears session records with the workspace', () => {
+    const DEAD = join(TMP, 'gone-tree');
+    reset();
+    const s = loadState(scope);
+    s.gone[DEAD] = Date.now() - 90_000;
+    s.sessions[DEAD] = { workspace: 'wDead', worktree: DEAD, pane_id: 'pDead' };
+    saveState(scope, s);
+    converge(
+      planes({
+        worktrees: {
+          source: { source_checkout_path: MAIN },
+          worktrees: [{ path: DEAD, open_workspace_id: 'wDead' }],
+        },
+        workspaces: [{ workspace_id: 'wDead', label: 'orphan' }],
+      })
+    );
+    assert.equal(loadState(scope).sessions[DEAD], undefined);
   });
 });
 

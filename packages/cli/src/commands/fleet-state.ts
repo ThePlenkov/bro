@@ -50,6 +50,19 @@ export interface FleetPaneState {
   /** The agent binary driving the pipeline (opencode, devin, …) —
    *  the pane's `--display-agent` name instead of `fleet`. */
   agent?: string;
+  /** The `bro: session` pane's attach identity — the registry's
+   *  recorded acpSessionId on the worktree's session-owning agent.
+   *  Present does not mean loadable: the pane still gates on the
+   *  provider's type and the agent's loadSession capability. */
+  acpSessionId?: string;
+  /** The session-owning agent's provider name — the pane resolves
+   *  `providers.<name>.command` from it (only when type==="acp"). */
+  provider?: string;
+  /** The session-owning agent's recorded model — display text. */
+  model?: string;
+  /** The session-owning agent's native log — the pane's fallback
+   *  stream when no ACP attach resolves. */
+  log?: string;
   led: PaneLed;
   /** Wall-clock ms the projector classified at — staleness display. */
   ts: number;
@@ -126,7 +139,15 @@ function jsonObj(raw: string): Partial<FleetPaneState> | undefined {
 /** Optional string fields — a non-string (a `null`, a number) is
  *  stripped, never fatal: the doc's required fields still carry the
  *  state and a bad optional must not blank the pane. */
-const OPTIONAL_STR: readonly (keyof FleetPaneState)[] = ['slug', 'prUrl', 'agent'];
+const OPTIONAL_STR: readonly (keyof FleetPaneState)[] = [
+  'slug',
+  'prUrl',
+  'agent',
+  'acpSessionId',
+  'provider',
+  'model',
+  'log',
+];
 
 /** Parse + shape-check one document — anything else is a miss, never
  *  a throw: a torn write or a schema bump must not kill the pane. */
