@@ -1030,24 +1030,18 @@ function backstopArgs(paneId: string, led: PaneLed, seq: number): string[] {
   return args;
 }
 
-/** One workspace's pane-side write: the fleet-state file the `bro:
- *  status` pane renders and self-reports (primary), plus a backstop
- *  `report-agent` push to the recorded status pane when it is still
- *  ours-to-write. The file is content-dedup'd (the pane's fs.watch
- *  must only fire on real moves); the push is not — a crashed
- *  status-view leaves an unbound pane whose every tick needs the
- *  daemon's heartbeat until the plugin re-arms it. */
-function paneWrites(j: PaneJob): { files: number; leds: number; path?: string } {
-  const path = fleetStatusPath(j.base, j.ws.tree.path);
-  const led = paneLed(j.proj);
-  // a bead-read outage resolves title to the bare basename — keep the
-  // title the file already carries instead of flickering it away
+/** The fleet-state doc one job writes — every optional field rides a
+ *  spread so a half-populated projection never lands as a null column.
+ *  The title keeps the file's previous value when the projection
+ *  degraded to the basename (a bead-read outage must not flicker a
+ *  real title away). */
+function stateOf(j: PaneJob, path: string, led: PaneLed): FleetPaneState {
   const prev = readFleetState(path);
   const title =
     j.title === basename(j.ws.tree.path) && prev?.title !== undefined && prev.title !== ''
       ? prev.title
       : j.title;
-  const state: FleetPaneState = {
+  return {
     v: 1,
     worktree: j.ws.tree.path,
     workspace: j.ws.wsId,
@@ -1063,6 +1057,19 @@ function paneWrites(j: PaneJob): { files: number; leds: number; path?: string } 
     led,
     ts: j.now,
   };
+}
+
+/** One workspace's pane-side write: the fleet-state file the `bro:
+ *  status` pane renders and self-reports (primary), plus a backstop
+ *  `report-agent` push to the recorded status pane when it is still
+ *  ours-to-write. The file is content-dedup'd (the pane's fs.watch
+ *  must only fire on real moves); the push is not — a crashed
+ *  status-view leaves an unbound pane whose every tick needs the
+ *  daemon's heartbeat until the plugin re-arms it. */
+function paneWrites(j: PaneJob): { files: number; leds: number; path?: string } {
+  const path = fleetStatusPath(j.base, j.ws.tree.path);
+  const led = paneLed(j.proj);
+  const state = stateOf(j, path, led);
   let files = 0;
   try {
     files = writeFleetState(path, state) ? 1 : 0;
