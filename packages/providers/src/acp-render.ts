@@ -316,9 +316,12 @@ export class AcpRenderer {
         return;
       default:
         this.flush();
+        // own-key lookup — a '__proto__'/'constructor' kind must land on
+        // the fallback, never an inherited Object.prototype member
         (
-          this.structured[u.sessionUpdate] ??
-          (x => this.out(this.dim(`[${safe(x.sessionUpdate)}]`)))
+          (Object.hasOwn(this.structured, u.sessionUpdate)
+            ? this.structured[u.sessionUpdate]
+            : undefined) ?? (x => this.out(this.dim(`[${safe(x.sessionUpdate)}]`)))
         )(u);
         return;
     }
