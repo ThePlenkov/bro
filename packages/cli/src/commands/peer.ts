@@ -14,6 +14,7 @@
 
 import { readdirSync, readFileSync, readlinkSync } from 'node:fs'
 import { basename } from 'node:path'
+import { execFileSync } from 'node:child_process'
 import type { Socket } from 'node:net'
 
 const AGENT =
@@ -29,48 +30,96 @@ export interface PeerInfo {
 
 const hex = (n: number): string => n.toString(16).toUpperCase().padStart(4, '0')
 
+function readTcpTableLinux(table: string, remotePort: number, localPort: number): string | undefined {
+  let rows: string
+  try {
+    rows = readFileSync(table, 'utf8')
+  } catch {
+    return undefined
+  }
+  for (const line of rows.split('\n')) {
+    const f = line.trim().split(/\s+/)
+    if (f.length < 10 || f[1] === 'local_address') continue
+    const [, lport] = (f[1] ?? '').split(':')
+    const [, rport] = (f[2] ?? '').split(':')
+    if (lport === hex(remotePort) && rport === hex(localPort) && f[3] === '01') {
+      return f[9]
+    }
+  }
+  return undefined
+}
+
+function peerInodeDarwin(remotePort: number, localPort: number): string | undefined {
+  try {
+    const out = execFileSync('lsof', ['-nP', '-i', 'TCP', '-sTCP:ESTABLISHED'], { encoding: 'utf8', timeout: 1000 })
+    const lp = `:${localPort}`
+    const rp = `:${remotePort}`
+    for (const line of out.split('\n')) {
+      if (!line.includes('TCP') || !line.includes('->')) continue
+      const nameIdx = line.indexOf('TCP')
+      const afterTcp = line.slice(nameIdx)
+      const arrowIdx = afterTcp.indexOf('->')
+      if (arrowIdx === -1) continue
+      const left = afterTcp.slice(0, arrowIdx)
+      const right = afterTcp.slice(arrowIdx + 2)
+      // Match exact endpoints in the expected direction: peer's local = remotePort, peer's remote = localPort
+      // Look for the ports as standalone tokens/ends to avoid substring matches
+      const lpRe = new RegExp(`(^|[^0-9])${localPort}$|:${localPort}\\b`)
+      const rpRe = new RegExp(`(^|[^0-9])${remotePort}$|:${remotePort}\\b`)
+      if (!rpRe.test(left)) continue
+      if (!lpRe.test(right)) continue
+      const parts = line.trim().split(/\s+/)
+      if (parts.length > 1 && /^\d+$/.test(parts[1])) {
+        return `mac:${parts[1]}`
+      }
+    }
+  } catch {
+    // fall through
+  }
+  return undefined
+}
+
 /** (remotePort on our socket, localPort listener) → inode of the peer's
  *  socket. /proc/net/tcp lists every row from the OWNING process's view:
  *  the peer's row has local_address = :remotePort, rem = :localPort. */
 function peerInode(remotePort: number, localPort: number): string | undefined {
-  for (const table of ['/proc/net/tcp', '/proc/net/tcp6']) {
-    let rows: string
-    try {
-      rows = readFileSync(table, 'utf8')
-    } catch {
-      continue
+  if (process.platform === 'linux') {
+    for (const table of ['/proc/net/tcp', '/proc/net/tcp6']) {
+      const found = readTcpTableLinux(table, remotePort, localPort)
+      if (found) return found
     }
-    for (const line of rows.split('\n')) {
-      const f = line.trim().split(/\s+/)
-      if (f.length < 10 || f[1] === 'local_address') continue
-      const [, lport] = (f[1] ?? '').split(':')
-      const [, rport] = (f[2] ?? '').split(':')
-      if (lport === hex(remotePort) && rport === hex(localPort) && f[3] === '01') {
-        return f[9]
-      }
-    }
+    return undefined
+  }
+  if (process.platform === 'darwin') {
+    return peerInodeDarwin(remotePort, localPort)
   }
   return undefined
 }
 
 /** socket inode → owning pid (scan fd symlinks under /proc/<pid>). */
 function inodePid(inode: string): number | undefined {
-  for (const p of readdirSync('/proc')) {
-    if (!/^\d+$/.test(p)) continue
-    const fdDir = `/proc/${p}/fd`
-    let fds: string[]
-    try {
-      fds = readdirSync(fdDir)
-    } catch {
-      continue
-    }
-    for (const fd of fds) {
+  if (process.platform === 'linux') {
+    for (const p of readdirSync('/proc')) {
+      if (!/^\d+$/.test(p)) continue
+      const fdDir = `/proc/${p}/fd`
+      let fds: string[]
       try {
-        if (readlinkSync(`${fdDir}/${fd}`) === `socket:[${inode}]`) return Number(p)
+        fds = readdirSync(fdDir)
       } catch {
-        // fd vanished mid-scan — keep walking
+        continue
+      }
+      for (const fd of fds) {
+        try {
+          if (readlinkSync(`${fdDir}/${fd}`) === `socket:[${inode}]`) return Number(p)
+        } catch {
+          // fd vanished mid-scan — keep walking
+        }
       }
     }
+    return undefined
+  }
+  if (process.platform === 'darwin' && inode.startsWith('mac:')) {
+    return Number(inode.slice(4))
   }
   return undefined
 }
@@ -82,28 +131,53 @@ interface ProcRow {
 }
 
 function procRow(pid: number): ProcRow | undefined {
-  try {
-    const s = readFileSync(`/proc/${pid}/stat`, 'utf8')
-    const open = s.indexOf('(')
-    const close = s.lastIndexOf(')')
-    return {
-      pid,
-      comm: s.slice(open + 1, close),
-      ppid: Number(s.slice(close + 2).split(' ')[1]),
+  if (process.platform === 'linux') {
+    try {
+      const s = readFileSync(`/proc/${pid}/stat`, 'utf8')
+      const open = s.indexOf('(')
+      const close = s.lastIndexOf(')')
+      return {
+        pid,
+        comm: s.slice(open + 1, close),
+        ppid: Number(s.slice(close + 2).split(' ')[1]),
+      }
+    } catch {
+      return undefined
     }
-  } catch {
-    return undefined
   }
+  if (process.platform === 'darwin') {
+    try {
+      const out = execFileSync('ps', ['-o', 'pid=,ppid=,comm=', '-p', String(pid)], { encoding: 'utf8', timeout: 500 })
+      const m = out.trim().match(/^\s*(\d+)\s+(\d+)\s+(.+)$/)
+      if (!m) return undefined
+      return { pid: Number(m[1]), ppid: Number(m[2]), comm: basename(m[3].trim()) }
+    } catch {
+      return undefined
+    }
+  }
+  return undefined
 }
 
 /** argv[0]'s basename only — the full cmdline can carry prompts,
  *  tokens and client secrets; arguments stay out of telemetry. */
 function cmdline(pid: number): string {
-  try {
-    return basename(readFileSync(`/proc/${pid}/cmdline`, 'utf8').split('\0')[0] ?? '')
-  } catch {
-    return ''
+  if (process.platform === 'linux') {
+    try {
+      return basename(readFileSync(`/proc/${pid}/cmdline`, 'utf8').split('\0')[0] ?? '')
+    } catch {
+      return ''
+    }
   }
+  if (process.platform === 'darwin') {
+    try {
+      const out = execFileSync('ps', ['-o', 'command=', '-p', String(pid)], { encoding: 'utf8', timeout: 500 })
+      const first = out.trim().split(/\s+/)[0] ?? ''
+      return basename(first)
+    } catch {
+      return ''
+    }
+  }
+  return ''
 }
 
 /** Per-socket memo — a keep-alive socket serves many requests and the
