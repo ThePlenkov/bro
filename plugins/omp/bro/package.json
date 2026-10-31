@@ -1,7 +1,7 @@
 {
   "name": "bro",
   "version": "0.3.0",
-  "description": "Agent's sidekick — deterministic lifecycle closure (task → agent → PR → gate → debt). Wedge: review gate + debt ledger with existing agents, task store, and PR/CI. Orchestration (fleet/convoy) is optional and progressive — not a replacement runtime."
+  "description": "Agent's sidekick — deterministic lifecycle closure (task → agent → PR → gate → debt). Wedge: review gate + debt ledger with existing agents, task store, and PR/CI. Orchestration (fleet/convoy) is optional and progressive — not a replacement runtime.",
   "author": {
     "name": "Petr Plenkov"
   },
