@@ -7,7 +7,7 @@ description: Install bro and wire it into a repo in under a minute.
 
 **ICP:** maintainers and small teams with existing agents, a task store, and PR/CI.  
 **JTBD:** deterministic lifecycle closure — `task → agent → PR → gate → debt`.  
-**Wedge:** start with `bro act status` (review gate) and `bro debt` (sweep merged threads). No fleet, no model gateway required. Orchestration is optional and progressive.
+**Wedge:** start with `bro act status` (review gate) and `bro debt status` (debt ledger). Sweep merged threads with `bro debt collect`. No fleet, no model gateway required. Orchestration is optional and progressive.
 
 ## Requirements
 
@@ -53,12 +53,17 @@ defaults until set up.
 # 1) Claim work from your task store
 npx @broject/bro next
 
-# 2) Drive the PR through the review gate
+# 2) Implement and open a PR for the claimed work
+#    (commit your changes, push the branch, and open a PR — e.g. with `gh pr create`).
+#    The review gate inspects the PR on the current branch.
+
+# 3) Drive the PR through the review gate
 npx @broject/bro act status        # verdict: threads/ci/reviewers/sast/mergeable
 npx @broject/bro act threads       # work unresolved threads
-npx @broject/bro act merge         # merge only when green
+#    Must resolve all listed threads before merging (the gate blocks until clean).
+npx @broject/bro act merge --bead <bead-id>  # merge only when green; pass the claimed bead to close it
 
-# 3) Sweep merged threads into debt
+# 4) Sweep merged threads into debt
 npx @broject/bro debt prs          # merged PRs nobody processed yet
 npx @broject/bro debt collect      # harvest threads → .agents/review-debt/ + labels
 npx @broject/bro debt status       # what's left
