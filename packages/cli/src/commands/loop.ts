@@ -64,7 +64,9 @@ import {
   LockTimeout,
   mkdirPrivateSync,
   openPrivateAppendSync,
+  patchAgentRegistry,
   procStat,
+  readAgentRegistry,
   reviewHost,
   routeStepClass,
   SpawnError,
@@ -906,7 +908,9 @@ function workerExit(ctx: Ctx, w: WorkerRef): { code: number | null; at: number }
 /** A refused registry spawn settles the push without a worker. A full
  *  fleet ('cap') holds the claim for the next tick — fleet pressure is
  *  transient, and a hot re-pick would burn the interval against the
- *  same wall. A 'conflict' (live agent, foreign claim, respawn block)
+ *  same wall. 'unavailable' is infra — the backend itself is down, so
+ *  the pick holds and retries instead of parking (spec bro-cu3q8).
+ *  A 'conflict' (live agent, foreign claim, respawn block)
  *  parks WITHOUT a note — the bead's owner is not this run. Anything
  *  else parks with the error named: the claim releases into the snooze
  *  rather than an instant re-queue into the same refusal. Member claims
@@ -924,6 +928,26 @@ function settleSpawnRefusal(ctx: Ctx, m: GateMember, err: unknown): PushOutcome 
     }
     say(ctx, `loop: fleet full — ${msg}; pushes hold for the next pass`);
     return { kind: 'hold', why: msg };
+  }
+  if (err instanceof SpawnError && err.kind === 'unavailable') {
+    // a wedged task store under the spawn lock, a dead multiplexer, a
+    // claim bd killed mid-write — the store outage class, never a
+    // refusal. The registry pin can also predate the failure (it lands
+    // before claimStep): a pid-less entry reads as a remote worker in
+    // flight and walls the retry's re-pick — mark this push's own entry
+    // dead. A refusal thrown before the pin leaves none to kill.
+    if (readAgentRegistry(ctx.root)[m.beads[0]!.id] !== undefined) {
+      patchAgentRegistry(ctx.root, m.beads[0]!.id, { stopped: true, spawnError: msg });
+    }
+    // batch members claimed by claimMembers remain in_progress even if
+    // the lead spawn never landed; release them now so the retry can
+    // re-pick (the lead's claim is uncertain and the infra hold owns
+    // custody until recovered). The store may be wedged, but a failed
+    // reopen is best-effort — tryClaim still un-sees and holds an interval.
+    for (const b of openBeads(ctx, m.beads.slice(1))) {
+      reopenBead(ctx, b.id);
+    }
+    return { kind: 'infra', why: msg };
   }
   if (err instanceof SpawnError && err.kind === 'conflict') {
     for (const b of openBeads(ctx, m.beads.slice(1))) {
@@ -1363,15 +1387,12 @@ function runBootstrap(ctx: Ctx, beads: ReadyBead[], item: LoopItem): boolean {
   if (!ctx.cfg.bootstrap) {
     return true;
   }
-  const b = spawnSync(
-    'sh', // NOSONAR — operator-configured bootstrap shell, PATH by design
-    ['-c', ctx.cfg.bootstrap],
-    {
-      cwd: item.worktreeDir,
-      env: agentEnv(ctx, {}),
-      stdio: ['inherit', ctx.json ? 2 : 'inherit', 'inherit'],
-    }
-  );
+  const b = spawnSync('sh', ['-c', ctx.cfg.bootstrap], {
+    // NOSONAR — operator-configured bootstrap
+    cwd: item.worktreeDir,
+    env: agentEnv(ctx, {}),
+    stdio: ['inherit', ctx.json ? 2 : 'inherit', 'inherit'],
+  });
   if (b.status === 0) {
     return true;
   }
@@ -1548,6 +1569,7 @@ interface GateMember {
   updatedSha?: string;
   /** Consecutive fetch failures — parks at the old wait's 3. */
   fetchErrors: number;
+  fetchErrors: number;
 }
 
 /** The registry handle a pending member polls — `spawnedAt` is the
@@ -1572,7 +1594,8 @@ interface WorkerRef {
 type PushOutcome =
   | { kind: 'member'; member: GateMember }
   | { kind: 'done'; result: ItemResult }
-  | { kind: 'hold'; why: string };
+  | { kind: 'hold'; why: string }
+  | { kind: 'infra'; why: string };
 
 /** The loop's watch payload for one member PR — `merge` + `cleanup`
  *  record the promise the loop is keeping (its own merge, its own
@@ -1895,7 +1918,6 @@ async function serviceWorker(ctx: Ctx, m: GateMember): Promise<ServiceVerdict> {
   let info: AgentInfo | undefined;
   try {
     info = await ctx.agents!.status(w.agentId);
-    m.fetchErrors = 0;
   } catch (err) {
     if (!(err instanceof AgentNotFound)) {
       m.fetchErrors += 1;
@@ -2093,7 +2115,6 @@ async function serviceGate(ctx: Ctx, m: GateMember): Promise<ServiceVerdict> {
       blockers: gate.blockers,
       pending: gatePending(state),
     };
-    m.fetchErrors = 0;
   } catch (err) {
     m.fetchErrors += 1;
     console.error(`loop ${prRef(ctx, pr)}: fetch failed (${m.fetchErrors}) — ${String(err)}`);
@@ -2993,7 +3014,11 @@ export function syncAfterAudit(
   try {
     sync();
   } catch (err) {
-    say(ctx, `  warning: bro sync failed — ${err instanceof Error ? err.message : String(err)}`);
+    say(
+      ctx,
+      `  warning: bro sync failed — ${err instanceof Error ? err.message : String(err)} ` +
+        `— infra; the next run's audit retries`
+    );
   } finally {
     process.exit = realExit;
   }
@@ -3276,6 +3301,15 @@ interface QueueState {
   /** The disk floor's transition edge — the held/resumed lines say
    *  once per episode, not once per tick (spec bro-2spp7). */
   diskHeld: boolean;
+  /** Consecutive tick failures past the member/claim boundaries — the
+   *  count rides the stage so a held run names its stall on the
+   *  heartbeat (spec bro-cu3q8). */
+  infraErrors: number;
+  /** The stage an infra-held push carries — set by holdForInfra and the
+   *  last-resort catch, cleared when a tick reaches the claim section
+   *  unheld, so the idle heartbeat names the wedged backend instead of
+   *  a silent 'idle' (spec bro-cu3q8). */
+  holdStage?: string;
   /** statfs paths that already reported a probe failure — one warning
    *  per path per run, then the watermark goes blind-quiet. */
   diskProbeWarned: Set<string>;
@@ -3288,7 +3322,34 @@ interface QueueState {
 async function servicePass(ctx: Ctx, q: QueueState): Promise<boolean> {
   let busy = false;
   for (const m of [...q.stack]) {
-    const verdict = await serviceMember(ctx, m);
+    let verdict: ServiceVerdict;
+    try {
+      verdict = await serviceMember(ctx, m);
+    } catch (err) {
+      // a member's settle can still throw on infra — the task store
+      // wedged mid-write, a dead spawn, a failed projection call. That's
+      // a member failure, never a dead supervisor (bro-cu3q8): it
+      // strikes the same budget the fetch arms use — under 3 strikes
+      // and inside mergeTimeoutMin the member is kept and its re-poll
+      // holds an interval (a wedged store throws instantly, so without
+      // the pause every tick re-strikes); past the budget it parks
+      // exactly like the fetch arm. The pass continues either way —
+      // one poison member must not starve the stack behind it.
+      m.fetchErrors += 1;
+      console.error(
+        `loop: member ${m.beads[0]!.id} service failed (${m.fetchErrors}) — ${String(err)}`
+      );
+      if (m.fetchErrors < 3 && Date.now() - m.since < ctx.cfg.mergeTimeoutMin * 60_000) {
+        m.nextPollAt = Date.now() + ctx.intervalS * 1000;
+        continue;
+      }
+      parkBeads(
+        ctx,
+        m.beads,
+        `loop: member service kept failing — ${String(err)} — worktree ${m.item.worktreeDir}`
+      );
+      verdict = leave(m, 'parked');
+    }
     if (verdict === 'kept') {
       continue;
     }
@@ -3402,6 +3463,10 @@ async function tryClaim(
   if (q.drained || maxed || q.stack.length >= ctx.cfg.maxOpen || Date.now() < q.pushHoldUntil) {
     return false;
   }
+  // past the gate the push is unheld — a stale hold stage must not
+  // shadow this tick's own verdict (idle names from here re-set their
+  // own marker: diskHeld, holdStage, or a fresh claim stage)
+  q.holdStage = undefined;
   // the disk floor — admission, not eviction. A breached floor holds
   // pushes exactly like a full fleet does: nothing claimed, nothing
   // parked, gate service continues while merges free the disk (spec
@@ -3420,20 +3485,14 @@ async function tryClaim(
   // --max bounds BEADS, not items — a clump may only fill up to the
   // run's remaining claim budget
   const budget = ctx.cfg.maxItems > 0 ? ctx.cfg.maxItems - q.claimed : Number.MAX_SAFE_INTEGER;
-  // the claim read (bd ready via claimClump) is a throwing bd() spawn —
-  // a store busy past the 15s budget (mirror publish, dolt GC/fsck on a
-  // multi-GB store) must degrade to a held push, never kill the
-  // supervisor mid-run (bro-etimout: an uncaught spawnSync ETIMEDOUT
-  // took the loop down three times in one day — the read failing is a
-  // blip; a failed read is NOT an empty queue, so drained stays unset)
   let clump: ReadyBead[] | undefined;
   try {
     clump = claimClump(ctx, scope, q.seen, budget);
   } catch (err) {
-    const msg = err instanceof Error ? err.message : String(err);
-    say(ctx, `loop: claim read failed — ${msg} — holding pushes for ${ctx.intervalS}s`);
-    q.pushHoldUntil = Date.now() + ctx.intervalS * 1000;
-    return false;
+    // a wedged task store surfaces HERE — `bd ready`/`bd update --claim`
+    // rethrow by design ("a bd outage must surface", next.ts) — as a
+    // held push, never a dead supervisor (bro-cu3q8)
+    return holdForInfra(ctx, q, 'claim', err);
   }
   if (clump === undefined) {
     q.drained = true;
@@ -3445,13 +3504,36 @@ async function tryClaim(
   }
   q.claimed += clump.length;
   ctx.bead = clump[0]!.id;
-  const out = await pushItem(ctx, clump);
+  let out: PushOutcome;
+  try {
+    out = await pushItem(ctx, clump);
+  } catch (err) {
+    // a throw past pushItem's own settle arms still owes the claims a
+    // release — the same settle its worktree/prompt arms run — then the
+    // clump un-sees so the held retry re-picks it (bro-cu3q8)
+    const msg = err instanceof Error ? err.message : String(err);
+    const ours = ctx.agents === undefined ? clump : clump.slice(1);
+    for (const b of openBeads(ctx, ours)) {
+      noteBead(ctx.tasks, b.id, `loop: push failed — ${msg}`);
+      reopenBead(ctx, b.id);
+    }
+    endLoopRun(ctx.root, loopSlug(clump[0]!.id));
+    unseeClump(ctx, q, clump);
+    return holdForInfra(ctx, q, 'push', err);
+  }
   if (out.kind === 'hold') {
     // fleet cap refused the spawn — un-see the clump and hold pushes
     // for a beat so the next pick doesn't burn the tick re-probing the
     // same wall; the claims pushItem released are re-pickable
     unseeClump(ctx, q, clump);
     return false;
+  }
+  if (out.kind === 'infra') {
+    // the spawn's own backend wedged — claimStep's store refused on an
+    // outage, not a race. The same hold the claim boundary runs:
+    // un-see, hold an interval, retry (spec bro-cu3q8)
+    unseeClump(ctx, q, clump);
+    return holdForInfra(ctx, q, 'claim', out.why);
   }
   recordClaimOutcome(ctx, q, ids, out);
   return true;
@@ -3463,7 +3545,7 @@ function recordClaimOutcome(
   ctx: Ctx,
   q: QueueState,
   ids: string[],
-  out: Exclude<PushOutcome, { kind: 'hold' }>
+  out: Exclude<PushOutcome, { kind: 'hold' } | { kind: 'infra' }>
 ): void {
   if (out.kind === 'member') {
     q.stack.push(out.member);
@@ -3516,6 +3598,25 @@ function unseeClump(ctx: Ctx, q: QueueState, clump: ReadyBead[]): void {
   q.pushHoldUntil = Date.now() + ctx.intervalS * 1000;
 }
 
+/** The infra hold for a claim/push that threw on a backend — a wedged
+ *  task store, a dead fs, a spawn timeout. A held tick, never a death:
+ *  warn once with the retry hint, hold the pick an interval, keep the
+ *  run (spec bro-cu3q8). */
+function holdForInfra(ctx: Ctx, q: QueueState, what: string, err: unknown): false {
+  q.pushHoldUntil = Date.now() + ctx.intervalS * 1000;
+  // the stage carries the wait too — the heartbeat and the exit audit
+  // classify a wedged backend as infra, never a plain failure. It
+  // rides q.holdStage so the idle overwrite can't erase it mid-hold.
+  q.infraErrors += 1;
+  q.holdStage = `infra hold (${q.infraErrors}) — ${what}`;
+  ctx.stage = q.holdStage;
+  console.error(
+    `loop: ${what} failed — ${err instanceof Error ? err.message : String(err)} — ` +
+      `infra hold; the next interval retries`
+  );
+  return false;
+}
+
 function pushLine(ctx: Ctx, pr: number | undefined, ids: string[], gate: number): string {
   return pr === undefined
     ? `loop: ${ids.join(', ')} pushed — worker pending (gate ${gate}/${ctx.cfg.maxOpen})`
@@ -3536,6 +3637,7 @@ async function runQueue(ctx: Ctx): Promise<void> {
     parkedClaims: new Set(),
     pushHoldUntil: 0,
     diskHeld: false,
+    infraErrors: 0,
     diskProbeWarned: new Set(),
   };
   try {
@@ -3548,8 +3650,36 @@ async function runQueue(ctx: Ctx): Promise<void> {
       return;
     }
     for (;;) {
-      const busy = await servicePass(ctx, q);
-      if (await tryClaim(ctx, scope, q)) {
+      let busy = false;
+      try {
+        busy = await servicePass(ctx, q);
+        const claimed = await tryClaim(ctx, scope, q);
+        if (claimed) {
+          q.infraErrors = 0;
+          q.holdStage = undefined;
+          continue;
+        }
+        if (q.holdStage?.startsWith('infra hold')) {
+          q.infraErrors += 1;
+          q.holdStage = q.holdStage.includes('(')
+            ? q.holdStage.replace(/\(\d+\)/, `(${q.infraErrors})`)
+            : `infra hold (${q.infraErrors})`;
+          ctx.stage = q.holdStage;
+        } else {
+          q.infraErrors = 0;
+          q.holdStage = undefined;
+        }
+      } catch (err) {
+        q.infraErrors += 1;
+        q.holdStage = `infra hold (${q.infraErrors})`;
+        ctx.stage = q.holdStage;
+        console.error(
+          `loop: tick failed (${q.infraErrors}) — ` +
+            `${err instanceof Error ? err.message : String(err)} — ` +
+            `infra hold; the next interval retries`
+        );
+        q.pushHoldUntil = Date.now() + ctx.intervalS * 1000;
+        await sleep(ctx.intervalS * 1000);
         continue;
       }
       const maxed = ctx.cfg.maxItems > 0 && q.claimed >= ctx.cfg.maxItems;
@@ -3558,7 +3688,7 @@ async function runQueue(ctx: Ctx): Promise<void> {
       }
       if (!busy) {
         const pending = q.stack.find(m => m.worker !== undefined);
-        const idle = q.diskHeld ? 'idle (disk floor)' : 'idle';
+        const idle = q.holdStage ?? (q.diskHeld ? 'idle (disk floor)' : 'idle');
         ctx.stage =
           pending === undefined
             ? idle

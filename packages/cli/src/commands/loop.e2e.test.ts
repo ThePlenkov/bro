@@ -452,6 +452,9 @@ describe('bro loop e2e', () => {
       assert.match(r.stdout, /done — 0 landed, 0 closed, 0 parked, 0 failed/);
     });
   });
+  });
+
+ (fix(loop): infra failures hold the tick — never kill the supervisor (bro-cu3q8))
 
   test('a throwing claim read degrades to a held push — never a supervisor death (bro-etimout)', () => {
     // a store wedged past bd's 15s budget throws out of claimClump's

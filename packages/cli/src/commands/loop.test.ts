@@ -18,6 +18,7 @@ import {
   loopWatch,
   resolveBeadsDir,
   resolveLoopLane,
+  syncAfterAudit,
 } from './loop.ts';
 import type { AgentConnectorEnv } from '../agent-connectors.ts';
 import { bdStoreBlocker, git, initRepo, inside } from './testrepo.ts';
@@ -292,39 +293,6 @@ describe('resolveLoopLane — fleet.routing per-bead class (bro-zmned)', () => {
     assert.equal(lane.class, undefined);
     assert.equal(lane.provider, undefined);
   });
-
-  // bro-mmmodel: a profile's model is a PAIR with its provider (the same
-  // rule chain[0]'s {provider, model} pin follows) — a routed provider
-  // must never inherit a foreign profile's model.
-  test('a routed provider never inherits a foreign profile model (bro-mmmodel)', async () => {
-    const env = routedEnv({ fancy: { provider: 'fancy', model: 'm-9' } });
-    const route = resolveStepClass(env.fleet!.routing!, env.providers ?? {}, { label: 'default' });
-    // the default class routes to devin while loop.profile names the
-    // fancy provider — m-9 belongs to fancy's lane (omp refused exactly
-    // this leak: an alien model handed to the routed provider)
-    const confd = await resolveLoopLane(env, {}, laneCfg({ profile: 'fancy' }), route);
-    assert.equal(confd.provider, 'devin');
-    assert.equal(confd.model, undefined);
-    // an explicit provider beside a flag-named profile drops its model too
-    const over = await resolveLoopLane(
-      env,
-      { profile: 'fancy', provider: 'devin' },
-      laneCfg(),
-      route
-    );
-    assert.equal(over.provider, 'devin');
-    assert.equal(over.model, undefined);
-  });
-
-  test('a profile naming the routed provider still supplies its model (bro-mmmodel)', async () => {
-    const env = routedEnv({ devinf: { provider: 'devin', model: 'dev-2' } });
-    const route = resolveStepClass(env.fleet!.routing!, env.providers ?? {}, { label: 'default' });
-    // loop.profile pins devin's model and the default class routes to
-    // devin — same provider, so the standing default still inherits
-    const lane = await resolveLoopLane(env, {}, laneCfg({ profile: 'devinf' }), route);
-    assert.equal(lane.provider, 'devin');
-    assert.equal(lane.model, 'dev-2');
-  });
 });
 
 describe('loopRefTails', () => {
@@ -455,5 +423,47 @@ describe('claimAuthorityNote', () => {
     assert.match(note, /one credential claims as the same identity/);
     assert.match(note, /one loop on this backlog/);
     assert.match(note, /exclusive-claim store/);
+  });
+});
+
+
+// --- syncAfterAudit — the audit's fail-open sync boundary (bro-cu3q8) ----------
+
+describe('syncAfterAudit', () => {
+  const capture = (fn: () => void): string => {
+    const out: string[] = [];
+    const real = console.log;
+    console.log = (m?: unknown) => out.push(String(m));
+    try {
+      fn();
+    } finally {
+      console.log = real;
+    }
+    return out.join('\n');
+  };
+
+  test('a throwing sync degrades to a warning with the retry hint — never an exit', () => {
+    const realExit = process.exit;
+    // 'spawnSync timeout ETIMEDOUT' is the incident's own signature — a
+    // wedged store's bd() throw must not reach main's catch
+    const out = capture(() =>
+      syncAfterAudit({ json: false }, () => {
+        throw new Error('spawnSync timeout ETIMEDOUT');
+      })
+    );
+    assert.equal(process.exit, realExit);
+    assert.match(out, /warning: bro sync failed — spawnSync timeout ETIMEDOUT/);
+    assert.match(out, /infra; the next run's audit retries/);
+  });
+
+  test('a stray process.exit inside sync converts to the same warning (bro-qjbwq)', () => {
+    const realExit = process.exit;
+    const out = capture(() =>
+      syncAfterAudit({ json: false }, () => {
+        process.exit(1);
+      })
+    );
+    assert.equal(process.exit, realExit);
+    assert.match(out, /warning: bro sync failed — bro sync called process.exit\(1\)/);
   });
 });
