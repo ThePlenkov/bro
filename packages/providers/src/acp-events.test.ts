@@ -119,10 +119,12 @@ describe('agentTurnPlane', () => {
       const rows = readArchive(dir, 'native-t1')
       // the archive carries raw ACP prompts/replies — owner-only 0600,
       // no umask can widen it (spec bro-l8c4f.4)
-      assert.equal(
-        statSync(join(gitCommonDir(dir)!, 'bro', 'agents', 'native-t1.events.jsonl')).mode & 0o777,
-        0o600
-      )
+      if (process.platform !== 'win32') {
+        assert.equal(
+          statSync(join(gitCommonDir(dir)!, 'bro', 'agents', 'native-t1.events.jsonl')).mode & 0o777,
+          0o600
+        )
+      }
       assert.equal(rows[0]!.kind, 'turn')
       assert.equal(rows[0]!.phase, 'start')
       const updates = rows.filter((r) => r.kind === 'update')
