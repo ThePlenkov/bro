@@ -55,6 +55,7 @@ import {
   gitTry,
   handleOwner,
   isAgentCause,
+  rateDeathBackoff,
   JudgeUnavailable,
   loadConfig,
   mintAgentId,
@@ -113,7 +114,6 @@ import { expandAgentCmd, loopSection, type LoopConfig } from '@broject/loop';
 // builtin session planes self-register on import — the connector layer
 // is the plugin host for agent backends, and admission planes ride the
 // same surface
-import '@broject/devin';
 import {
   devinLogsDir,
   devinPidBead,
@@ -2047,6 +2047,18 @@ function ensureExitCause(
   if (typeof entry.exitStatus !== 'number' || isAgentCause(entry.cause)) {
     return;
   }
+  // the .exit file's mtime is the honest death stamp — the harvest's own
+  // clock can land a poll late (specs/telemetry/bro-ub91h.md), and a lazy
+  // read can land HOURS late: the message's "in 54 minutes" / "at 19:01"
+  // anchors to the death, never to whenever this read happened (bro-9eeld)
+  let exitAt: number | undefined;
+  if (home !== null) {
+    try {
+      exitAt = statSync(join(home, agentExitFileName(entry.agentId, entryRunId(entry)))).mtimeMs;
+    } catch {
+      // the file rotated between read and stat — fall back to now
+    }
+  }
   // classification input = this run's .log tail + .stderr tail (spec
   // bro-e2ec0) — provider walls the child prints on stderr classify from
   // the capture, the event stream no longer carries them. The tails
@@ -2054,7 +2066,8 @@ function ensureExitCause(
   // across the boundary ('…4' + '29…' → '429')
   const c = classifyExitCauseParts(
     [readLogTail(entry.log, entry.logFrom), readLogTail(entry.stderrLog, entry.stderrFrom)],
-    entry.exitStatus
+    entry.exitStatus,
+    exitAt ?? Date.now()
   );
   // the tails were read off-lock — a respawn stamping the entry between
   // the two reads feeds the old run new-run bytes; a DIFFERENT
@@ -2062,17 +2075,22 @@ function ensureExitCause(
   // missing row (reaped, or a caller's synthesized snapshot) can't
   // inject new bytes — classify anyway
   const cur = readAgentRegistry(dir)[molStep];
-  if (cur !== undefined && (cur.agentId !== entry.agentId || cur.spawnedAt !== entry.spawnedAt)) {
+  if (
+    cur !== undefined &&
+    (cur.agentId !== entry.agentId ||
+      cur.spawnedAt !== entry.spawnedAt ||
+      cur.runId !== entry.runId)
+  ) {
     return;
   }
   entry.cause = c.cause;
-  entry.resetAt = c.resetAt;
-  emitProviderWall(entry, molStep, c.cause, c.resetAt);
-  // lifecycle — the agent-exit transition, emitted once per run at the
-  // harvest (the early return above skips re-emit on a carried cause).
-  // The .exit file's mtime is the honest wall-clock; the harvest's own
-  // clock can land a poll late (specs/telemetry/bro-ub91h.md)
-  let exitAt: number | undefined;
+  // instant-death backoff (spec bro-9eeld): a rate wall hit inside the
+  // first minute proves the last mark undershot — the recorded hold
+  // escalates per consecutive fast death instead of re-trusting it
+  const back = rateDeathBackoff(entry, c.cause, c.resetAt, exitAt ?? Date.now());
+  entry.resetAt = back.resetAt;
+  entry.rateStreak = back.streak > 0 ? back.streak : undefined;
+  emitProviderWall(entry, molStep, c.cause, back.resetAt);
   if (home !== null) {
     try {
       exitAt = statSync(join(home, agentExitFileName(entry.agentId, entryRunId(entry)))).mtimeMs;
@@ -2107,14 +2125,20 @@ function ensureExitCause(
     withAgentRegistryLock(dir, () => {
       const reg = readAgentRegistry(dir);
       const cur = reg[molStep];
-      if (cur === undefined || cur.agentId !== entry.agentId || cur.spawnedAt !== entry.spawnedAt) {
+      if (
+        cur === undefined ||
+        cur.agentId !== entry.agentId ||
+        cur.spawnedAt !== entry.spawnedAt ||
+        cur.runId !== entry.runId
+      ) {
         return;
       }
       reg[molStep] = {
         ...cur,
         exitStatus: entry.exitStatus,
-        cause: c.cause,
-        resetAt: c.resetAt,
+        cause: entry.cause,
+        resetAt: entry.resetAt,
+        rateStreak: entry.rateStreak,
       };
       writeAgentRegistry(dir, reg);
     });
@@ -5435,7 +5459,12 @@ function copilotPatch(
     withAgentRegistryLock(dir, () => {
       const reg = readAgentRegistry(dir);
       const cur = reg[molStep];
-      if (cur === undefined || cur.agentId !== entry.agentId || cur.spawnedAt !== entry.spawnedAt) {
+      if (
+        cur === undefined ||
+        cur.agentId !== entry.agentId ||
+        cur.spawnedAt !== entry.spawnedAt ||
+        cur.runId !== entry.runId
+      ) {
         return;
       }
       reg[molStep] = { ...cur, ...patch };
@@ -5453,13 +5482,22 @@ function copilotPatch(
  *  death. The terminal half lives in copilotTerminalPatch. */
 /** The terminal-state half of the absorb patch — cancelled reads
  *  stopped, completed the ok exit record, failed/timed_out the
- *  classified one. */
-function copilotTerminalPatch(state: string, task: CopilotTask): Record<string, unknown> {
+ *  classified one. The classified death runs the same instant-death
+ *  backoff ensureExitCause applies (spec bro-9eeld) — a preclassified
+ *  cause bypasses ensureExitCause's escalation, so the streak and the
+ *  escalated hold are computed here: the session's updated_at is the
+ *  honest remote death stamp, and any outcome that isn't a fast
+ *  rate-limit death clears the streak. */
+function copilotTerminalPatch(
+  state: string,
+  task: CopilotTask,
+  entry: AgentRegistryEntry
+): Record<string, unknown> {
   if (state === 'cancelled') {
-    return { stopped: true };
+    return { stopped: true, rateStreak: undefined };
   }
   if (state === 'completed') {
-    return { exitStatus: 0, cause: 'ok' };
+    return { exitStatus: 0, cause: 'ok', rateStreak: undefined };
   }
   if (state !== 'failed' && state !== 'timed_out') {
     return {};
@@ -5468,7 +5506,19 @@ function copilotTerminalPatch(state: string, task: CopilotTask): Record<string, 
     state === 'timed_out'
       ? { cause: 'crash' as AgentCause, resetAt: undefined }
       : classifyExitCause(copilotSessionError(task), 1);
-  return { exitStatus: 1, cause: c.cause, resetAt: c.resetAt };
+  const stamp = Date.parse(String(copilotLatestSession(task)?.updated_at ?? ''));
+  const back = rateDeathBackoff(
+    entry,
+    c.cause,
+    c.resetAt,
+    Number.isNaN(stamp) ? Date.now() : stamp
+  );
+  return {
+    exitStatus: 1,
+    cause: c.cause,
+    resetAt: back.resetAt,
+    rateStreak: back.streak > 0 ? back.streak : undefined,
+  };
 }
 
 function copilotAbsorb(
@@ -5516,7 +5566,7 @@ function copilotAbsorb(
   if (sessionUrl !== undefined && sessionUrl !== entry.sessionUrl) {
     patch.sessionUrl = sessionUrl;
   }
-  Object.assign(patch, copilotTerminalPatch(state, task));
+  Object.assign(patch, copilotTerminalPatch(state, task, entry));
   if (Object.keys(patch).length > 0) {
     copilotPatch(dir, molStep, entry, patch);
   }

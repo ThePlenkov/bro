@@ -69,8 +69,8 @@ const CAUSE_PATTERNS: [AgentCause, RegExp[]][] = [
       // 'billing' only counts beside an account-wall word — a transient
       // billing-service error is a crash, not the quota block that only
       // a manual `bro agents down` lifts
-      /\bbilling\b.{0,40}\b(?:limits?|exceed\w*|declin\w*|disabl\w*|deactivat\w*|suspen\w*|overdue|unpaid|delinquen\w*|requir\w*|missing|invalid|inactiv\w*)/i,
-      /\b(?:overdue|unpaid|delinquen\w*|declin\w*|disabl\w*|deactivat\w*|suspen\w*|requir\w*|missing|invalid|inactiv\w*)\b.{0,40}\bbilling\b/i,
+      /\bbilling\b(?:\s+\S+){0,5}\s+\b(?:limits?|exceed\w*|declin\w*|disabl\w*|deactivat\w*|suspen\w*|overdue|unpaid|delinquen\w*|requir\w*|missing|invalid|inactiv\w*)/i,
+      /\b(?:overdue|unpaid|delinquen\w*|declin\w*|disabl\w*|deactivat\w*|suspen\w*|requir\w*|missing|invalid|inactiv\w*)\b(?:\s+\S+){0,5}\s+\bbilling\b/i,
       /out of (?:credits?|funds?)/i,
       /spend(?:ing)? limit/i,
       /(?:monthly|daily|usage) limit (?:reached|exceeded)/i,
@@ -92,6 +92,13 @@ const CAUSE_PATTERNS: [AgentCause, RegExp[]][] = [
 
 const UNIT_MS: Record<string, number> = { h: 3_600_000, m: 60_000, s: 1_000 };
 
+/** Safety margin on FUZZY reset forms (spec bro-9eeld): the quoted clock
+ *  mark and the "in N minutes" paraphrase both undershot the real wall
+ *  by ~66-90s in the wild — the loop unblocked early and spawned into a
+ *  still-locked provider. Protocol-exact forms (retry-after, HTTP-date,
+ *  ISO, epoch) carry no margin. */
+export const RESET_MARK_MARGIN_MS = 90_000;
+
 const toIso = (ms: number): string | undefined => {
   // an absurd but finite delay overflows Date — toISOString() throws
   // RangeError, so validate before formatting and fall through
@@ -99,21 +106,180 @@ const toIso = (ms: number): string | undefined => {
   return Number.isNaN(d.getTime()) ? undefined : d.toISOString();
 };
 
-/** `retry-after: 120`, `try again in 5 minutes`, `resets in 1h` */
-function relReset(text: string, now: number): string | undefined {
-  const rel =
-    /retry[- ]?after\s*[:=]\s*(\d+)\b/i.exec(text) ??
-    /(?:try again|retry|resets?|available|ready) in (\d+)\s*(hours?|hrs?|h|minutes?|mins?|m|seconds?|secs?|s)\b/i.exec(
-      text
-    );
-  if (rel === null) {
+/** `retry-after: 120` — the exact protocol-seconds form (a header
+ *  value, no margin). The HTTP-date sibling lives in httpDateReset. */
+function retryAfterReset(text: string, now: number): string | undefined {
+  const hdr = /retry[- ]?after\s*[:=]\s*(\d+)\b/i.exec(text);
+  if (hdr === null) {
     return undefined;
   }
-  const n = Number(rel[1]);
+  const n = Number(hdr[1]);
   if (!Number.isFinite(n) || n < 0) {
     return undefined;
   }
-  return toIso(now + n * (UNIT_MS[(rel[2]?.toLowerCase() ?? 's')[0]!] ?? 1_000));
+  return toIso(now + n * 1_000);
+}
+
+/** `try again in 5 minutes`, `resets in 1h 55m` — the prose phrase sums
+ *  EVERY number+unit pair: "1 hour 55 minutes" is 115m, not 1h
+ *  (bro-9eeld — the single-pair read truncated the deadline by the
+ *  trailing units). */
+function relReset(text: string, now: number): string | undefined {
+  const rel = /(?:try again|retry|resets?|available|ready) in\b/i.exec(text);
+  if (rel === null) {
+    return undefined;
+  }
+  let ms = 0;
+  let found = false;
+  let i = rel.index + rel[0].length;
+  const len = text.length;
+  while (i < len) {
+    // skip whitespace (bounded scan to avoid polynomial backtracking)
+    while (i < len && (text.charCodeAt(i) === 32 || text.charCodeAt(i) === 9 || text.charCodeAt(i) === 10 || text.charCodeAt(i) === 13 || text.charCodeAt(i) === 12 || text.charCodeAt(i) === 11)) {
+      i++;
+      if (i - (rel.index + rel[0].length) > 4096) break;
+    }
+    if (i >= len) break;
+    // optional comma
+    if (text.charCodeAt(i) === 44) {
+      i++;
+      while (i < len && (text.charCodeAt(i) === 32 || text.charCodeAt(i) === 9 || text.charCodeAt(i) === 10 || text.charCodeAt(i) === 13)) {
+        i++;
+        if (i - (rel.index + rel[0].length) > 4096) break;
+      }
+      if (i >= len) break;
+    }
+    // optional 'and' (avoid regex backtracking/flags on hot paths)
+    if (i + 3 <= len) {
+      const c0 = text.charCodeAt(i);
+      const c1 = text.charCodeAt(i + 1);
+      const c2 = text.charCodeAt(i + 2);
+      if (((c0 === 97 || c0 === 65) && (c1 === 110 || c1 === 78) && (c2 === 100 || c2 === 68))) {
+        // check word boundary after and
+        if (i === 0 || !/[A-Za-z0-9_]/.test(text[i - 1]!)) {
+          const afterAnd = i + 3;
+          if (afterAnd >= len || !/[A-Za-z0-9_]/.test(text[afterAnd]!)) {
+            i = afterAnd;
+            while (i < len && (text.charCodeAt(i) === 32 || text.charCodeAt(i) === 9 || text.charCodeAt(i) === 10 || text.charCodeAt(i) === 13)) {
+              i++;
+              if (i - (rel.index + rel[0].length) > 4096) break;
+            }
+            if (i >= len) break;
+          }
+        }
+      }
+    }
+    // read number
+    if (text.charCodeAt(i) < 48 || text.charCodeAt(i) > 57) {
+      break;
+    }
+    let num = 0;
+    let digits = 0;
+    while (i < len && text.charCodeAt(i) >= 48 && text.charCodeAt(i) <= 57 && digits < 6) {
+      num = num * 10 + (text.charCodeAt(i) - 48);
+      i++;
+      digits++;
+    }
+    // skip whitespace
+    while (i < len && (text.charCodeAt(i) === 32 || text.charCodeAt(i) === 9 || text.charCodeAt(i) === 10 || text.charCodeAt(i) === 13)) {
+      i++;
+    }
+    if (i >= len) break;
+    // read unit
+    const startUnit = i;
+    while (i < len) {
+      const cc = text.charCodeAt(i);
+      if ((cc >= 65 && cc <= 90) || (cc >= 97 && cc <= 122)) {
+        i++;
+        if (i - startUnit > 10) break;
+        continue;
+      }
+      break;
+    }
+    if (i === startUnit) break;
+    const unit = text.slice(startUnit, i).toLowerCase();
+    let unitKey = unit[0];
+    if (unit.startsWith('hour') || unit.startsWith('hr')) unitKey = 'h';
+    else if (unit.startsWith('min')) unitKey = 'm';
+    else if (unit.startsWith('sec')) unitKey = 's';
+    else if (unitKey === 'h' || unitKey === 'm' || unitKey === 's') {
+      // ok
+    } else {
+      break;
+    }
+    ms += num * (UNIT_MS[unitKey] ?? 1_000);
+    found = true;
+    // check word boundary
+    if (i < len && /[A-Za-z0-9_]/.test(text[i]!)) {
+      break;
+    }
+    // continue loop
+  }
+  if (!found) {
+    return undefined;
+  }
+  // "try again in 0 seconds" is a valid immediate reset — do not leave
+  // the entry blocked indefinitely (bro-9eeld)
+  const total = ms === 0 ? RESET_MARK_MARGIN_MS : ms + RESET_MARK_MARGIN_MS;
+  return toIso(now + total);
+}
+
+/** The provider's quoted clock mark — `reset at 19:01 UTC`, `(reset
+ *  at 09:01)`, `until at 18:04:50Z`. The mark must sit in reset context
+ *  — a reset-ish keyword within ~24 chars (inside the parens counts:
+ *  `(reset at …)`) — so a prose or parenthesized EVENT timestamp
+ *  ("died at 18:05:44", "(at 18:05)") can't fabricate a wall reset.
+ *  An explicit zone must be UTC/GMT/Z — anything else (PST, UTC+2)
+ *  rejects the mark rather than misreading it as UTC. Day-ambiguous
+ *  marks resolve to the NEAREST of yesterday's/today's/tomorrow's UTC
+ *  occurrence at `now`: a mark already past is the lifted wall, not a
+ *  24h block — lazy classification can read the tail hours after the
+ *  death it stamps, and rolling a stale quote forward would fabricate
+ *  a day-long hold. A `YYYY-MM-DD` date after `at` is left to
+ *  isoReset. */
+const CLOCK_MARK = /at\s+(?!\d{4}-)(\d{1,2}):(\d{2})(?::(\d{2}))?(?!\d)(\s*[A-Za-z+-][\w:+-]*)?/i;
+const MARK_CONTEXT =
+  /\b(?:resets?|resetting|try again|retry|until|available|ready|window)\b[^\n]{0,24}?at\s/i;
+
+function clockReset(text: string, now: number): string | undefined {
+  // the mark must sit in reset context — a reset-ish keyword within ~24
+  // chars — so a prose timestamp can't fabricate a reset; the mark
+  // itself then parses on its own simpler pattern
+  const ctx = MARK_CONTEXT.exec(text);
+  if (ctx === null) {
+    return undefined;
+  }
+  // bind to the reset mark identified by context, not any later "at" in the slice
+  const atIdx = ctx.index + ctx[0].lastIndexOf('at');
+  const m = CLOCK_MARK.exec(text.slice(atIdx));
+  if (m === null || m.index !== 0) {
+    return undefined;
+  }
+  const hh = Number(m[1]);
+  const mm = Number(m[2]);
+  const ss = m[3] === undefined ? 0 : Number(m[3]);
+  // an explicit zone word must be UTC/GMT/Z — anything else (PST,
+  // UTC+2, -0500) rejects the mark rather than misreading it as UTC
+  const zone = m[4]?.trim();
+  if (
+    hh > 23 ||
+    mm > 59 ||
+    ss > 59 ||
+    (zone !== undefined && zone !== '' && !/^(?:UTC|GMT|Z)$/i.test(zone))
+  ) {
+    return undefined;
+  }
+  const d = new Date(now);
+  const today = Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate(), hh, mm, ss);
+  // nearest occurrence across the day boundary — an evening mark read
+  // just after midnight was YESTERDAY's, not 23h out
+  let best = today;
+  for (const cand of [today - 86_400_000, today + 86_400_000]) {
+    if (Math.abs(cand - now) < Math.abs(best - now)) {
+      best = cand;
+    }
+  }
+  return toIso(best + RESET_MARK_MARGIN_MS);
 }
 
 /** Retry-After's HTTP-date form — the numeric matcher above skips it */
@@ -144,9 +310,21 @@ function epochReset(text: string): string | undefined {
   return m === null ? undefined : toIso(Number(m[1]) * 1000);
 }
 
-/** Provider reset extraction across the known header/prose forms. */
+/** Provider reset extraction across the known header/prose forms —
+ *  protocol-exact forms (retry-after seconds/HTTP-date, anchored ISO,
+ *  epoch header) win over the fuzzy marks, and of the fuzzy forms the
+ *  quoted clock mark still beats the same message's "in N minutes"
+ *  paraphrase (bro-9eeld: the relative read unblocked ~66s before the
+ *  mark the provider actually quoted). */
 function parseResetAt(text: string, now: number): string | undefined {
-  return relReset(text, now) ?? httpDateReset(text) ?? isoReset(text) ?? epochReset(text);
+  return (
+    retryAfterReset(text, now) ??
+    httpDateReset(text) ??
+    isoReset(text) ??
+    epochReset(text) ??
+    clockReset(text, now) ??
+    relReset(text, now)
+  );
 }
 
 /** Classify a recorded exit from the log tail — the exit code only
@@ -276,7 +454,11 @@ export interface AgentInfo {
    *  absent on live agents, unclassifiable deaths, and pre-taxonomy
    *  entries not yet re-read. */
   cause?: AgentCause;
-  /** Provider-reported reset (ISO) riding a rate_limited/quota cause. */
+  /** The recorded hold deadline (ISO) riding a rate_limited/quota
+   *  cause — the provider's reported reset PLUS any fuzzy-mark margin
+   *  or instant-death backoff. Not necessarily the verbatim provider
+   *  value; consumers must treat it as the effective hold, not the
+   *  quote. */
   resetAt?: string;
   /** Provider provenance — which `providers.<name>` ran this agent,
    *  and the effective model the worker reported or was pinned to.
@@ -399,6 +581,48 @@ export interface AgentRegistryEntry {
    *  the handshake contract carry none. */
   runId?: string;
   [key: string]: unknown;
+}
+
+/** A spawn→exit under this line proves nothing but the wall — no real
+ *  work could have happened in the window (spec bro-9eeld). */
+export const INSTANT_DEATH_MS = 60_000;
+/** The instant-death ramp: the wait added over the provider's word
+ *  doubles per consecutive fast rate death — 30s, 60s, 120s… capped. */
+export const RATE_BACKOFF_BASE_MS = 30_000;
+export const RATE_BACKOFF_CAP_MS = 30 * 60_000;
+
+/** The recorded hold after a rate_limited death (spec bro-9eeld). A run
+ *  dead inside INSTANT_DEATH_MS of spawn proves the last-reported mark
+ *  undershot — consecutive instant deaths escalate the added wait
+ *  (`RATE_BACKOFF_BASE_MS · 2^(streak-1)`, capped) over
+ *  `max(reported, exitAt)`, so a stale mark escalates from the death
+ *  itself. Every slower death did real work and clears the streak;
+ *  `rateStreak` survives respawns on the registry entry — it is the
+ *  step's wall history, not one run's. A death with no reported reset
+ *  stays indefinite — the `bro agents down` escape is that wall's
+ *  contract. `exitAt` is the .exit file's mtime — the honest death
+ *  stamp a late lazy read cannot inflate. */
+export function rateDeathBackoff(
+  entry: { spawnedAt?: unknown; rateStreak?: unknown },
+  cause: AgentCause,
+  resetAt: string | undefined,
+  exitAt: number
+): { streak: number; resetAt: string | undefined } {
+  const spawned = typeof entry.spawnedAt === 'string' ? Date.parse(entry.spawnedAt) : Number.NaN;
+  const prev = typeof entry.rateStreak === 'number' ? entry.rateStreak : 0;
+  const fast =
+    cause === 'rate_limited' && Number.isFinite(spawned) && exitAt - spawned < INSTANT_DEATH_MS;
+  if (!fast) {
+    return { streak: 0, resetAt };
+  }
+  const streak = prev + 1;
+  if (resetAt === undefined) {
+    return { streak, resetAt };
+  }
+  const extra = Math.min(RATE_BACKOFF_BASE_MS * 2 ** (streak - 1), RATE_BACKOFF_CAP_MS);
+  const reported = Date.parse(resetAt);
+  const base = Number.isNaN(reported) ? exitAt : Math.max(reported, exitAt);
+  return { streak, resetAt: toIso(base + extra) ?? resetAt };
 }
 
 /** Whether the entry's recorded cause still forbids respawn — a
