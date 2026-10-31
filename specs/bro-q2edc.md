@@ -606,6 +606,25 @@ Home/End now actually scroll — `pane.scroll`/`scrollPage`/`scrollEdge`
 drive the captured `ScrollBoxRenderable` (`scrollBy`/`scrollTo`),
 previously the footer claimed bindings that never existed.
 
+**Inline rendering** (addendum 10 — the wheel's actual root cause):
+herdr owns the mouse; in alt-screen its wheel scrolls HERDR's
+scrollback, which is empty while our pane owns the alt buffer.
+`screenMode: 'main-screen'` renders the feed inline — every row lands
+in herdr's native scrollback, so wheel scroll, drag-select, and
+copy-mode all ride the terminal for free; keyboard scroll
+(arrows/PgUp) keeps working as before. `?1007` was removed with it:
+alternate-scroll only exists for alt-screen apps, and on the primary
+screen it would inject phantom arrows while the terminal scrolls
+natively — a double-scroll. `split-footer` (footer-pinned variant)
+stalled the renderer under a dumb pty and was not pursued; the
+hints row scrolls off with the feed like any other line. Verified
+on the wire: `?1049h` absent, OSC52 copy still fires, `▸` tally rows
+flow. What inline mode costs: frame repaints land in scrollback too
+(stale footer/header copies accumulate above — cosmetic only for a
+read-mostly feed) and the live tail keeps appending below the user's
+scroll position — herdr pins or tracks that per its own pane
+semantics.
+
 ## Risks
 
 - **Solid's prop application is post-construction.** The reconciler

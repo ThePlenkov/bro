@@ -19,7 +19,7 @@
  * so `app.tsx` cannot be imported by the Node test runner, while the
  * model and the pane's state (`model.ts`, `state.ts`) can.
  */
-import { type FSWatcher, mkdirSync, readFileSync, watch, writeSync } from 'node:fs';
+import { type FSWatcher, mkdirSync, readFileSync, watch } from 'node:fs';
 import { dirname } from 'node:path';
 import { gitCommonDir, type ProviderEntry } from '@broject/core';
 import { createCliRenderer } from '@opentui/core';
@@ -158,18 +158,13 @@ export async function runTui(argv: string[]): Promise<void> {
     // no mouse features — reporting would steal native/herdr
     // selection; copy must work without Shift (addendum 7)
     useMouse: false,
-  });
-
-  // Alternate scroll (DECSET 1007): with mouse reporting off, the
-  // terminal translates the wheel into arrow keys — scroll returns
-  // without button tracking, so plain drag still selects (addendum 9)
-  process.stdout.write('\x1b[?1007h');
-  process.on('exit', () => {
-    try {
-      writeSync(1, '\x1b[?1007l');
-    } catch {
-      // stdout already gone — the terminal's own teardown resets 1007
-    }
+    // no alternate screen — the feed renders INLINE, so herdr's own
+    // scrollback holds every row: wheel scroll, drag-select, copy-mode
+    // all ride the terminal for free (addendum 10). 'split-footer'
+    // (pinned footer) stalled the renderer under a dumb pty —
+    // 'main-screen' is the addendum's literal ask; the hints row just
+    // scrolls off with the feed like any other line.
+    screenMode: 'main-screen',
   });
 
   const impl = await pickImpl(implArg(argv));
