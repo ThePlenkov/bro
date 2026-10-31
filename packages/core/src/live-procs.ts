@@ -157,48 +157,102 @@ export function pickOrphanProcs(
 /** Read the rows pickOrphanProcs needs out of /proc — linux-only;
  *  anything else returns []. Races are the norm: a pid vanishing
  *  mid-scan just drops out. */
+import { execFileSync } from 'node:child_process';
+
 export function readProcRows(procDir = '/proc'): ProcRow[] {
-  if (process.platform !== 'linux') return [];
-  let uptimeSec = 0;
-  try {
-    uptimeSec = Number(readFileSync(`${procDir}/uptime`, 'utf8').split(' ')[0]);
-  } catch {
-    return [];
-  }
-  const bootMs = Date.now() - uptimeSec * 1000;
-  const rows: ProcRow[] = [];
-  for (const ent of readdirSync(procDir)) {
-    if (!/^\d+$/.test(ent)) continue;
+  if (process.platform === 'linux') {
+    let uptimeSec = 0;
     try {
-      const stat = readFileSync(`${procDir}/${ent}/stat`, 'utf8');
-      // comm sits in parens and may itself hold parens — parse after ')'
-      const close = stat.lastIndexOf(')');
-      const comm = stat.slice(stat.indexOf('(') + 1, close);
-      const f = stat.slice(close + 2).split(' ');
-      const ppid = Number(f[1]);
-      // fields after comm are 1-indexed from state: starttime is
-      // field 22 → index 19; jiffies run at 100 ticks/s on linux
-      const startMs = bootMs + (Number(f[19]) / 100) * 1000;
-      let parentComm: string | null = null;
-      if (ppid > 0) {
-        try {
-          parentComm = readFileSync(`${procDir}/${ppid}/comm`, 'utf8').trim();
-        } catch {
-          /* parent exited mid-scan — orphan race, next tick decides */
-        }
-      }
-      let cwd: string | null = null;
-      try {
-        cwd = readlinkSync(`${procDir}/${ent}/cwd`);
-      } catch {
-        /* kernel threads and raced exits have no cwd */
-      }
-      rows.push({ pid: Number(ent), comm, ppid, parentComm, cwd, startMs });
+      uptimeSec = Number(readFileSync(`${procDir}/uptime`, 'utf8').split(' ')[0]);
     } catch {
-      continue;
+      return [];
+    }
+    const bootMs = Date.now() - uptimeSec * 1000;
+    const rows: ProcRow[] = [];
+    for (const ent of readdirSync(procDir)) {
+      if (!/^\d+$/.test(ent)) continue;
+      try {
+        const stat = readFileSync(`${procDir}/${ent}/stat`, 'utf8');
+        // comm sits in parens and may itself hold parens — parse after ')'
+        const close = stat.lastIndexOf(')');
+        const comm = stat.slice(stat.indexOf('(') + 1, close);
+        const f = stat.slice(close + 2).split(' ');
+        const ppid = Number(f[1]);
+        // fields after comm are 1-indexed from state: starttime is
+        // field 22 → index 19; jiffies run at 100 ticks/s on linux
+        const startMs = bootMs + (Number(f[19]) / 100) * 1000;
+        let parentComm: string | null = null;
+        if (ppid > 0) {
+          try {
+            parentComm = readFileSync(`${procDir}/${ppid}/comm`, 'utf8').trim();
+          } catch {
+            /* parent exited mid-scan — orphan race, next tick decides */
+          }
+        }
+        let cwd: string | null = null;
+        try {
+          cwd = readlinkSync(`${procDir}/${ent}/cwd`);
+        } catch {
+          /* kernel threads and raced exits have no cwd */
+        }
+        rows.push({ pid: Number(ent), comm, ppid, parentComm, cwd, startMs });
+      } catch {
+        continue;
+      }
+    }
+    return rows;
+  }
+  if (process.platform === 'darwin') {
+    try {
+      // Get all processes: pid, ppid, comm, start time
+      const out = execFileSync('ps', ['-axo', 'pid=,ppid=,comm=,lstart='], { encoding: 'utf8', timeout: 2000 })
+      const lines = out.split('\n').filter(Boolean)
+      const rows: ProcRow[] = []
+      for (const line of lines) {
+        // This is a bit fragile parsing lstart, but try best effort
+        const m = line.match(/^\s*(\d+)\s+(\d+)\s+(\S+)\s+(.+)$/)
+        if (!m) continue
+        const pid = Number(m[1])
+        const ppid = Number(m[2])
+        const comm = m[3]
+        const lstart = m[4]
+        let startMs = Date.now()
+        try {
+          startMs = Date.parse(lstart)
+          if (isNaN(startMs)) startMs = Date.now()
+        } catch {
+          startMs = Date.now()
+        }
+        let parentComm: string | null = null
+        if (ppid > 0 && ppid !== 1) {
+          try {
+            const pout = execFileSync('ps', ['-p', String(ppid), '-o', 'comm='], { encoding: 'utf8', timeout: 500 })
+            parentComm = pout.trim() || null
+          } catch {
+            parentComm = null
+          }
+        } else if (ppid === 1) {
+          parentComm = 'launchd'
+        }
+        let cwd: string | null = null
+        try {
+          // Try lsof to get cwd
+          const lout = execFileSync('lsof', ['-a', '-p', String(pid), '-d', 'cwd', '-Fn'], { encoding: 'utf8', timeout: 500 })
+          const cline = lout.split('\n').find(l => l.startsWith('n'))
+          if (cline) {
+            cwd = cline.slice(1)
+          }
+        } catch {
+          cwd = null
+        }
+        rows.push({ pid, comm, ppid, parentComm, cwd, startMs })
+      }
+      return rows
+    } catch {
+      return []
     }
   }
-  return rows;
+  return [];
 }
 
 export interface OrphanSweepReport {

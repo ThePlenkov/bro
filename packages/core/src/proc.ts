@@ -5,6 +5,7 @@
  * tell a reused pid from the process that recorded it.
  */
 import { readFileSync } from 'node:fs'
+import { execFileSync } from 'node:child_process'
 
 /** The process's /proc identity — state byte (field 3: 'Z' marks an
  *  unreaped zombie) and starttime (field 22). Post-comm fields split
@@ -12,13 +13,42 @@ import { readFileSync } from 'node:fs'
 export function procStat(
   pid: number
 ): { state: string; start: string } | null {
-  try {
-    const stat = readFileSync(`/proc/${pid}/stat`, 'utf8')
-    const rest = stat.slice(stat.lastIndexOf(')') + 2).split(' ')
-    return { state: rest[0] ?? '', start: rest[19] ?? '' }
-  } catch {
-    return null
+  if (process.platform === 'linux') {
+    try {
+      const stat = readFileSync(`/proc/${pid}/stat`, 'utf8')
+      const rest = stat.slice(stat.lastIndexOf(')') + 2).split(' ')
+      return { state: rest[0] ?? '', start: rest[19] ?? '' }
+    } catch {
+      return null
+    }
   }
+  if (process.platform === 'darwin' || process.platform === 'freebsd' || process.platform === 'openbsd') {
+    try {
+      // Get state and start time on BSD/macOS
+      const out = execFileSync('ps', ['-p', String(pid), '-o', 'state=,lstart='], { encoding: 'utf8', timeout: 1000 })
+      const lines = out.trim().split('\n').filter(Boolean)
+      if (lines.length === 0) return null
+      const line = lines[0]
+      // state is first char(s), rest is lstart
+      const state = line.trim()[0] ?? ''
+      // Use lstart as start identifier (full date string is reasonably unique per start)
+      const start = line.replace(/^[A-Z?]+\s+/, '').trim()
+      if (start === '') {
+        // Fallback to just state
+        try {
+          const out2 = execFileSync('ps', ['-p', String(pid), '-o', 'state='], { encoding: 'utf8', timeout: 1000 })
+          const st = out2.trim()[0] ?? ''
+          return { state: st, start: '' }
+        } catch {
+          return { state, start: '' }
+        }
+      }
+      return { state, start }
+    } catch {
+      return null
+    }
+  }
+  return null
 }
 
 /** pid alive = kill(pid, 0) doesn't throw, or throws EPERM (a live

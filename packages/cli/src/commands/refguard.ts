@@ -35,6 +35,7 @@
  */
 import { readFileSync } from 'node:fs'
 import { basename } from 'node:path'
+import { execFileSync } from 'node:child_process'
 import { gitTry } from '@broject/core'
 
 export const REFGUARD_HOOK_MARK = '# bro: reference-transaction — shared-branch ref guard'
@@ -219,13 +220,25 @@ export function refGuardVerdict(
 /** /proc/<pid>/cmdline → argv; undefined when unreadable (no /proc,
  *  dead pid). */
 function readProcArgv(pid: number): string[] | undefined {
-  try {
-    const raw = readFileSync(`/proc/${pid}/cmdline`, 'utf8')
-    const argv = raw.split('\0').filter((s) => s !== '')
-    return argv.length > 0 ? argv : undefined
-  } catch {
-    return undefined
+  if (process.platform === 'linux') {
+    try {
+      const raw = readFileSync(`/proc/${pid}/cmdline`, 'utf8')
+      const argv = raw.split('\0').filter((s) => s !== '')
+      return argv.length > 0 ? argv : undefined
+    } catch {
+      return undefined
+    }
   }
+  if (process.platform === 'darwin') {
+    try {
+      const out = execFileSync('ps', ['-o', 'command=', '-p', String(pid)], { encoding: 'utf8', timeout: 500 })
+      const argv = out.trim().split(/\s+/).filter((s) => s !== '')
+      return argv.length > 0 ? argv : undefined
+    } catch {
+      return undefined
+    }
+  }
+  return undefined
 }
 
 /** git-hook entry — `bro hooks reference-transaction prepared <ppid>`

@@ -10,7 +10,7 @@
  * failure; warnings pass. Probes are read-only — a broken tool reports as
  * a failing check, never as a crash.
  */
-import { spawnSync } from 'node:child_process';
+import { spawnSync, execFileSync } from 'node:child_process';
 import {
   existsSync,
   readdirSync,
@@ -1676,12 +1676,25 @@ function serveBackendName(serve: { url: string; pid: number } | undefined): stri
     return undefined;
   }
   try {
-    const environ = readFileSync(`/proc/${serve.pid}/environ`).toString('latin1');
-    for (const kv of environ.split('\0')) {
-      const eq = kv.indexOf('=');
-      if (eq > 0 && kv.slice(0, eq) === 'BRO_PROVIDER_BACKEND') {
-        const v = kv.slice(eq + 1).trim();
-        return v === '' ? undefined : v;
+    if (process.platform === 'linux') {
+      const environ = readFileSync(`/proc/${serve.pid}/environ`).toString('latin1');
+      for (const kv of environ.split('\0')) {
+        const eq = kv.indexOf('=');
+        if (eq > 0 && kv.slice(0, eq) === 'BRO_PROVIDER_BACKEND') {
+          const v = kv.slice(eq + 1).trim();
+          return v === '' ? undefined : v;
+        }
+      }
+    } else if (process.platform === 'darwin') {
+      try {
+        const out = execFileSync('ps', ['eww', '-p', String(serve.pid)], { encoding: 'utf8', timeout: 1000 });
+        const m = out.match(/BRO_PROVIDER_BACKEND=([^\s]+)/);
+        if (m) {
+          const v = m[1].trim();
+          return v === '' ? undefined : v;
+        }
+      } catch {
+        // ignore
       }
     }
   } catch {
