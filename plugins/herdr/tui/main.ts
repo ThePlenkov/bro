@@ -153,6 +153,9 @@ export async function runTui(argv: string[]): Promise<void> {
 
   const renderer = await createCliRenderer({
     exitOnCtrlC: true,
+    // no mouse features — reporting would steal native/herdr
+    // selection; copy must work without Shift (addendum 7)
+    useMouse: false,
   });
 
   const impl = await pickImpl(implArg(argv));

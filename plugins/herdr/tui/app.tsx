@@ -655,6 +655,10 @@ export async function mountPane(opts: {
    *  (the vendored baseline); unset keeps COLLAPSE_AT. */
   foldAll?: boolean;
 }): Promise<Pane> {
+  // mouse capture OFF — the pane uses no mouse features, and holding
+  // reporting steals native selection (addendum 7: copy must work
+  // without Shift; herdr's own selection rides the same release)
+  opts.renderer.useMouse = false;
   const pane = createPane(opts.meta, opts.foldAll);
   const syntax = syntaxStyle(opts.renderer.nativeScene);
   await render(() => <Pane store={pane.store} syntax={syntax} />, opts.renderer);

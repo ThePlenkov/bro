@@ -576,6 +576,14 @@ lifecycle. The process exits on herdr's pane close (signal →
 `process.exit` → `'exit'` releases the session lock); `quit()` was
 deleted with its last caller.
 
+**Mouse off** (addendum 7): the pane uses no mouse features, so
+capture is disabled twice — `useMouse: false` on `createCliRenderer`
+(never enables) and `renderer.useMouse = false` in `mountPane` (the
+chokepoint for every mount). Wire check: no `?1000/2/3/6` sequences
+emitted at all, so native terminal selection and herdr's own
+selection both work without Shift. A future click feature goes
+behind a flag, off by default.
+
 ## Risks
 
 - **Solid's prop application is post-construction.** The reconciler
