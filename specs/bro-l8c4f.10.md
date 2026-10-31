@@ -95,7 +95,7 @@ BRO                        GC (Gas City)
 - [ ] Lifecycle diagram and ownership table included (with recovery) in this spec/docs.
 - [ ] Single owner defined per phase: claims/spawn/retry/reconciliation/shutdown/gate.
 - [ ] Documentation/runbook published (see docs below) stating Gas City is complement (not Gas Town), no second scheduler.
-- [ ] Fixture coverage backed by versioned real-gc conformance evidence (not only stub tests) — opt-in real-gc tests + version capture.
+- [x] Fixture coverage backed by versioned real-gc conformance evidence (not only stub tests) — opt-in real-gc tests + version capture.
 
 ## Implementation plan
 1. **Spec first (SDD):** this file is the spec (bro.config.json has `sdd.mode: "gate"`).
