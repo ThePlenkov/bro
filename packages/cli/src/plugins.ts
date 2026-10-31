@@ -31,6 +31,7 @@ import {
   type ConfigDiagnostic,
   type ConfigSection,
   type DocType,
+  type FacadeMap,
 } from '@broject/core';
 import { actConnector, ACT_PLAN_VERSION, parseActPlan, type ActPlan } from '@broject/act';
 import { CONVOY_PLAN_VERSION, parseConvoyPlan, type ConvoyPlan } from '@broject/convoy';
@@ -963,25 +964,77 @@ export { ConfigPolicyError, assertMutableConfig } from './config-policy.ts';
 import { registerPolicySections } from './config-policy.ts';
 registerPolicySections(pluginConfigSections);
 
-function isPlugin(p: unknown): p is BroPlugin {
-  const o = p as BroPlugin;
-  if (
-    !o ||
-    typeof o !== 'object' ||
-    typeof o.name !== 'string' ||
-    o.name === '' ||
-    typeof o.summary !== 'string' ||
-    typeof o.run !== 'function'
-  ) {
+function hasPluginRequiredShape(o: unknown): boolean {
+  const p = o as BroPlugin;
+  if (!p || typeof p !== 'object') {
     return false;
   }
-  // optional fields must be the right type when present — a truthy
-  // non-function configSchema would crash config loading later
-  return PLUGIN_FIELD_CHECKS.every(([key, ok]) => o[key] === undefined || ok(o[key]));
+  if (typeof p.name !== 'string' || p.name === '') {
+    return false;
+  }
+  if (typeof p.summary !== 'string') {
+    return false;
+  }
+  if (typeof p.run !== 'function') {
+    return false;
+  }
+  return true;
+}
+
+function hasPluginOptionalFields(o: unknown): boolean {
+  const p = o as Record<string, unknown>;
+  for (const [key, ok] of PLUGIN_FIELD_CHECKS) {
+    const v = p[key as string];
+    if (v === undefined) {
+      continue;
+    }
+    if (!ok(v)) {
+      return false;
+    }
+  }
+  return true;
+}
+
+function hasPluginPairedFields(o: unknown): boolean {
+  const p = o as Record<string, unknown>;
+  const hasConfigKey = p.configKey !== undefined;
+  const hasConfigSchema = p.configSchema !== undefined;
+  if (hasConfigKey !== hasConfigSchema) {
+    return false;
+  }
+  const hasPlanSchema = p.planSchema !== undefined;
+  const hasRunPlan = p.runPlan !== undefined;
+  if (hasPlanSchema !== hasRunPlan) {
+    return false;
+  }
+  return true;
+}
+
+function isPlugin(p: unknown): p is BroPlugin {
+  return (
+    hasPluginRequiredShape(p) &&
+    hasPluginOptionalFields(p) &&
+    hasPluginPairedFields(p)
+  );
 }
 
 /** Present-but-wrong optional fields — each predicate runs only when
  *  the field is defined. Table form keeps isPlugin flat as fields grow. */
+function isDenseStringArray(v: unknown): boolean {
+  if (!Array.isArray(v)) {
+    return false;
+  }
+  if (Object.keys(v).length !== v.length) {
+    return false;
+  }
+  for (const item of v) {
+    if (typeof item !== 'string') {
+      return false;
+    }
+  }
+  return true;
+}
+
 const PLUGIN_FIELD_CHECKS: ReadonlyArray<[keyof BroPlugin, (v: unknown) => boolean]> = [
   ['configSchema', v => typeof v === 'function'],
   ['planSchema', v => typeof v === 'function'],
@@ -994,10 +1047,13 @@ const PLUGIN_FIELD_CHECKS: ReadonlyArray<[keyof BroPlugin, (v: unknown) => boole
   ['deprecated', v => typeof v === 'string'],
   ['flatDeprecated', v => typeof v === 'string'],
   ['configKey', v => typeof v === 'string'],
-  ['argvPrefix', v => Array.isArray(v)],
+  ['argvPrefix', isDenseStringArray],
   ['docs', v => Array.isArray(v) && v.every(isDocType)],
   ['connectors', v => Array.isArray(v) && v.every(isConnector)],
   ['contract', isCliContract],
+  ['group', v => typeof v === 'string'],
+  ['aliasOf', v => typeof v === 'string'],
+  ['hidden', v => typeof v === 'boolean'],
 ];
 
 /** `contract` must be the declared shape at every level — a malformed
@@ -1023,16 +1079,91 @@ function isCliContract(v: unknown): boolean {
   );
 }
 
+const FACADE_KEYS: ReadonlySet<keyof FacadeMap> = new Set([
+  'tasks',
+  'tasksAsync',
+  'reviews',
+  'mergeQueue',
+  'specs',
+  'judge',
+  'events',
+  'queries',
+  'stacks',
+]);
+
+const CONNECTOR_FUNCTION_KEYS: ReadonlyArray<string> = [
+  'matchRemote',
+  'matchDir',
+  'auth',
+  'tasks',
+  'tasksAsync',
+  'reviews',
+  'mergeQueue',
+  'specs',
+  'judge',
+  'events',
+  'queries',
+  'stacks',
+  'hooks',
+  'guards',
+];
+
+const isObject = (o: unknown): o is Record<string, unknown> => !!o && typeof o === 'object';
+
 /** A connectors entry must be a Connector — name + at least the shape
  *  registerConnector relies on — else facade resolution would crash. */
+function isNonEmptyString(v: unknown): boolean {
+  return typeof v === 'string' && v !== '';
+}
+
+function hasValidConnectorName(c: unknown): boolean {
+  return isObject(c) && isNonEmptyString(c.name);
+}
+
+function hasValidConnectorFunctions(c: unknown): boolean {
+  if (!isObject(c)) {
+    return false;
+  }
+  for (const key of CONNECTOR_FUNCTION_KEYS) {
+    const v = c[key];
+    if (v !== undefined && typeof v !== 'function') {
+      return false;
+    }
+  }
+  return true;
+}
+
+function isValidFacadeKey(f: unknown): boolean {
+  return typeof f === 'string' && FACADE_KEYS.has(f as keyof FacadeMap);
+}
+
+function hasValidConnectorFlags(c: unknown): boolean {
+  if (!isObject(c)) {
+    return false;
+  }
+  if (c.optIn !== undefined && typeof c.optIn !== 'boolean') {
+    return false;
+  }
+  if (c.optInFacades === undefined) {
+    return true;
+  }
+  if (!Array.isArray(c.optInFacades)) {
+    return false;
+  }
+  for (const f of c.optInFacades) {
+    if (!(typeof f === 'string' && FACADE_KEYS.has(f as keyof FacadeMap))) {
+      return false;
+    }
+  }
+  return true;
+}
+
 function isConnector(c: unknown): boolean {
-  const o = c as { name?: unknown; matchRemote?: unknown };
   return (
-    !!o &&
-    typeof o === 'object' &&
-    typeof o.name === 'string' &&
-    o.name !== '' &&
-    (o.matchRemote === undefined || typeof o.matchRemote === 'function')
+    isObject(c) &&
+    hasValidConnectorName(c) &&
+    hasValidConnectorFunctions(c) &&
+    hasValidConnectorFlags(c)
   );
 }
 
