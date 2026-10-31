@@ -398,30 +398,63 @@ update never stomps the user's toggle.
   `replaying` → working/replaying, `disconnected` → blocked,
   `requires_action` → blocked/permission, `running` → working/turn,
   `idle` → idle (+`turn complete` when a stop reason stands).
+- `lines.ts` — the vendored **row language**: `toolLine` /
+  `thoughtLine` / `planLine` / `permissionLine` / `turnEndLine` from
+  their `conversation/format.ts`, plus `LIVE_GLYPHS` and
+  `DEFAULT_THEME` — imported straight from the submodule (it loads
+  clean). `acpLine(vi, width, frame, findTool)` resolves an item's
+  `Segment[]`; `segStyle` resolves each `TokenName` through their
+  `DEFAULT_THEME` (`ref` hops, `{color, light, bold, italic, dim}`
+  styles) into `<text>` props.
 - `conform.ts` — the shared conformance probe: the same archive
   through every registered impl, coverage compared **on the op
   stream** (the seam's currency), not the eviction-windowed state —
   two impls emitting different item mixes otherwise disagree at the
   500-item frontier for no real reason.
 
+### The row language on the pane
+
+Every acp-projected item carries its source `Item` on `vi` (opaque
+to the seam — `Item.vi?: unknown`, `Op` unchanged since `append` /
+partial `tool` ops carry it for free). `app.tsx` branches per row:
+`item.vi !== undefined` renders `AcpSegRow` — the `format.ts`
+one-liner painted segment-by-segment — while legacy items keep the
+`ToolCard` chrome. An expanded tool keeps its vendored line and
+opens into an `│`-guttered body over the existing `<markdown>` /
+`<code>` / `<diff>` renderables (Option B verbatim: their layout,
+our payload blocks). `permissionLine` links back to its tool via a
+`toolCallId` lookup over pane items; `renderer.width` feeds
+`toolLine`'s right-aligned tail; the running-tool spinner is the
+existing 10 fps `onAnimationTick` frame. `--dump` prints the same
+`lineText` rows so the headless readout matches the pane.
+
+Vendored sources now sit on the tsc graph (through `format.ts` →
+`layout/segments` → `live-glyphs`), so `vendor-env.d.ts` declares
+the two Bun symbols they touch (`Bun`, `bun:ffi`). `bun-types` was
+rejected: its globals redeclare `ReadableStream` and break
+`serve-provider.ts` across the packages this tsconfig reaches.
+
 ### What was taken, adapted, skipped
 
 - **Taken**: `acp-model` whole — session, reducer, item types,
   replay/other origin semantics.
-- **Adapted**: the vendored view-model's _fold semantics_ (collapse
-  default = every body, user toggle survives updates) as a fold
-  policy on `state.ts`, and their item→card language as a
-  projection (`tool_call` → ToolItem incl. `rawOutputText`
-  fallback; `plan`/`permission_record`/`marker` → the side rows our
-  model already used). Tool args keep OUR `toolArg` extraction —
-  their items do not carry `rawInput`.
+- **Adapted**: `conversation/format.ts` + `live-glyphs` +
+  `theme/default-theme` — the collapsed-line engine and its
+  palette, called directly; only our `Segment` → `<text>` paint is
+  new. The vendored view-model's _fold semantics_ (collapse default
+  = every body, user toggle survives updates) as a fold policy on
+  `state.ts`, and their item→card language as a projection
+  (`tool_call` → ToolItem incl. `rawOutputText` fallback;
+  `plan`/`permission_record`/`marker` → the side rows our model
+  already used). Tool args keep OUR `toolArg` extraction — their
+  items do not carry `rawInput`.
 - **Skipped**: `items.tsx`/`WindowedConversation`/session-store/
-  config/keys (their app shell — ours stays), the `card.ts`/`format`/
-  markdown row engine (our Solid card renders the same fold
-  contract; pulling their row layout is the deferred Option), the
+  config/keys (their app shell — ours stays), `card.ts` and the
+  markdown subtree (our renderables paint the expanded body), the
   `outputShown` snippet key (our fold IS the snippet: collapsed =
-  header + count, expanded = full), and their cursor-over-all-items
-  walk (our j/k stays tool-cards-only).
+  the line, expanded = full), their cursor-over-all-items walk (our
+  j/k stays tool-cards-only), and their `theme` switching — the
+  pane paints `DEFAULT_THEME` ("terminal", their out-of-box look).
 
 ### Conformance on the real archive (25,562 rows)
 

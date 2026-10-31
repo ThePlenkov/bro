@@ -10,19 +10,20 @@
  * chunk text, tool arg extraction, content classification, the
  * sanitize posture — is the providers' `acp-render` module verbatim.
  */
+
+import type { PaneLed } from '../../../packages/cli/src/commands/fleet-state.ts';
+import { type ArchiveRow, rowVerdict } from '../../../packages/cli/src/commands/session-feed.ts';
 import {
   chunkText,
   clip,
   DONE_STATUS,
   firstLine,
+  type SessionUpdateLike,
   safe,
+  type ToolContent,
   toolArg,
   toolContent,
-  type SessionUpdateLike,
-  type ToolContent,
 } from '../../../packages/providers/src/acp-render.ts';
-import { rowVerdict, type ArchiveRow } from '../../../packages/cli/src/commands/session-feed.ts';
-import type { PaneLed } from '../../../packages/cli/src/commands/fleet-state.ts';
 
 export type { ToolContent };
 
@@ -39,6 +40,9 @@ export interface TextItem {
   id: number;
   kind: 'message' | 'thought';
   text: string;
+  /** The impl's source item (acp impl: their Item). The view renders
+   *  the impl's row language when present — opaque to this seam. */
+  vi?: unknown;
 }
 
 /** A tool call card — the header (glyph, title, kind, arg) plus the
@@ -56,6 +60,7 @@ export interface ToolItem {
   bodyLanded: boolean;
   collapsed: boolean;
   content: ToolContent[];
+  vi?: unknown;
 }
 
 /** A one-shot line — turn boundary, permission ask, plan block, or a
@@ -66,6 +71,7 @@ export interface SideItem {
   kind: 'turn' | 'permission' | 'note';
   text: string;
   tone?: 'warn' | 'error';
+  vi?: unknown;
 }
 
 export type Item = TextItem | ToolItem | SideItem;
@@ -357,7 +363,7 @@ export function dumpItems(items: readonly Item[]): string[] {
 /** One content item → plain card lines for dump()/tests — text block,
  *  diff `─ path` + `-`/`+`, terminal note, unknown bracket. No caps
  *  here: a dump is a snapshot, not the live pane. */
-function dumpContent(content: ToolContent[]): string[] {
+export function dumpContent(content: ToolContent[]): string[] {
   const lines: string[] = [];
   for (const c of content) {
     switch (c.kind) {

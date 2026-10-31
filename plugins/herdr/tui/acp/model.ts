@@ -19,32 +19,35 @@
  * title), so the feed stashes `rawInput` per toolCallId on the way
  * past — our `toolArg` keeps its exact header/body fidelity.
  */
-import { createSession, reduce, type ModelEvent, type Session } from 'acp-model';
+
+import type { LoadSessionResponse, SessionUpdate, StopReason } from '@agentclientprotocol/sdk';
 import type {
-  Item as TheirItem,
   MarkerItem,
   PermissionRecordItem,
   PlanItem,
+  Item as TheirItem,
   ToolCallItem,
 } from 'acp-model';
-import type { LoadSessionResponse, SessionUpdate, StopReason } from '@agentclientprotocol/sdk';
-import {
-  toolArg,
-  type SessionUpdateLike,
-  type ToolWire,
-} from '../../../../packages/providers/src/acp-render.ts';
+import { createSession, type ModelEvent, reduce, type Session } from 'acp-model';
 import type { PaneLed } from '../../../../packages/cli/src/commands/fleet-state.ts';
 import type { ArchiveRow } from '../../../../packages/cli/src/commands/session-feed.ts';
+import {
+  type SessionUpdateLike,
+  type ToolWire,
+  toolArg,
+} from '../../../../packages/providers/src/acp-render.ts';
 import type { FoldPolicy, PaneImpl } from '../impl.ts';
 import {
+  dumpContent,
+  dumpItems,
   type Item,
+  MAX_ITEMS,
   type Op,
   type SideItem,
   type ToolItem,
   type ToolStatus,
-  dumpItems,
-  MAX_ITEMS,
 } from '../model.ts';
+import { acpLine, lineText } from './lines.ts';
 
 const at = (row: ArchiveRow): number => {
   const ts = (row as { ts?: string }).ts;
@@ -145,6 +148,7 @@ const toolItem = (
     bodyLanded: content.length > 0,
     collapsed: folded && content.length > 0,
     content,
+    vi: item,
   };
 };
 
@@ -155,7 +159,7 @@ const planItem = (item: PlanItem, id: number): SideItem => {
   for (const e of item.entries) {
     lines.push(`  ${PLAN_BOX[e.status] ?? '[~]'} ${e.content}`);
   }
-  return { id, kind: 'note', text: lines.join('\n') };
+  return { id, kind: 'note', text: lines.join('\n'), vi: item };
 };
 
 const OUTCOME_LABELS: Record<string, string> = {
@@ -180,6 +184,7 @@ const permissionItem = (item: PermissionRecordItem, id: number): SideItem => {
     kind: 'permission',
     text: `── ⚠ permission ‹${item.title}› — ${label} (headless driver; open a terminal in this workspace to handle interactively) ──`,
     tone: 'warn',
+    vi: item,
   };
 };
 
@@ -189,11 +194,12 @@ const markerItem = (item: MarkerItem, id: number): SideItem => {
       id,
       kind: 'turn',
       text: `── turn complete (${item.stopReason}) ──`,
+      vi: item,
     };
   }
   return item.markerKind === 'error'
-    ? { id, kind: 'turn', text: `── turn failed — ${item.text} ──`, tone: 'error' }
-    : { id, kind: 'note', text: item.text };
+    ? { id, kind: 'turn', text: `── turn failed — ${item.text} ──`, tone: 'error', vi: item }
+    : { id, kind: 'note', text: item.text, vi: item };
 };
 
 /** Their item → ours (numeric id assigned by the diff). `folded`
@@ -208,9 +214,11 @@ const project = (
     case 'agent_message':
       return { id, kind: 'message', text: item.text };
     case 'user_message':
-    case 'thought':
-      // our model dims user_message chunks like thoughts — parity
+      // our model dims user_message chunks like thoughts — parity;
+      // no `vi` — their line language has no user-bubble row here
       return { id, kind: 'thought', text: item.text };
+    case 'thought':
+      return { id, kind: 'thought', text: item.text, vi: item };
     case 'tool_call':
       return toolItem(item, id, args, folded);
     case 'plan':
@@ -336,9 +344,17 @@ export class AcpImpl implements PaneImpl {
     return ops;
   }
 
-  /** The whole projection, formatted — the `--dump` readout. */
+  /** The whole projection, formatted — the `--dump` readout. Items
+   *  with a vendored line print THAT row (the pane's own language);
+   *  tools keep their body below it (a dump is the full readout). */
   dump(): string[] {
-    const out: Item[] = [];
+    const out: string[] = [];
+    const toolsByCall = new Map<string, TheirItem>();
+    for (const sid of this.session.order) {
+      const item = this.session.items.get(sid);
+      if (item?.kind === 'tool_call') toolsByCall.set(item.toolCallId, item);
+    }
+    const find = (toolCallId: string): unknown => toolsByCall.get(toolCallId);
     for (const sid of this.session.order) {
       const item = this.session.items.get(sid);
       if (item === undefined) continue;
@@ -347,8 +363,18 @@ export class AcpImpl implements PaneImpl {
         id = this.nextId++;
         this.ids.set(sid, id);
       }
-      out.push(project(item, id, this.args, false));
+      const line = lineText(acpLine(item, 120, 0, find));
+      if (line !== '') {
+        out.push(line);
+        if (item.kind === 'tool_call') {
+          for (const l of dumpContent(toolItem(item, id, this.args, false).content)) {
+            out.push(`│  ${l}`);
+          }
+        }
+        continue;
+      }
+      out.push(...dumpItems([project(item, id, this.args, false)]));
     }
-    return dumpItems(out);
+    return out;
   }
 }

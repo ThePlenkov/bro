@@ -14,12 +14,23 @@
  * OpenTUI's native FFI has no Node build. `main.ts` registers the
  * transform before importing this file.
  */
-import { For, Show, createMemo, createSignal } from 'solid-js';
-import { createStore, reconcile } from 'solid-js/store';
-import { render, onAnimationTick } from '@opentui/solid';
-import { SyntaxStyle, TextAttributes } from '@opentui/core';
+
 import type { CliRenderer, NativeResourceOwner } from '@opentui/core';
+import { SyntaxStyle, TextAttributes } from '@opentui/core';
+import { onAnimationTick, render, useRenderer } from '@opentui/solid';
+import { createMemo, createSignal, For, Show } from 'solid-js';
+import { createStore, reconcile } from 'solid-js/store';
+import { acpLine, type Segment, segStyle } from './acp/lines.ts';
 import type { Item, Op, ToolContent, ToolItem } from './model.ts';
+import {
+  applyOps,
+  emptyState,
+  moveSelection,
+  type PaneMeta,
+  type PaneState,
+  withMeta,
+} from './state.ts';
+import { ledColor, theme } from './theme.ts';
 import {
   argBody,
   argHead,
@@ -29,15 +40,6 @@ import {
   diffText,
   sideColor,
 } from './view.ts';
-import {
-  applyOps,
-  emptyState,
-  moveSelection,
-  withMeta,
-  type PaneMeta,
-  type PaneState,
-} from './state.ts';
-import { ledColor, theme } from './theme.ts';
 
 /** The store the tree renders from. */
 export interface PaneStore {
@@ -229,10 +231,76 @@ function ToolCard(props: { item: ToolItem; syntax: SyntaxStyle; selected: boolea
   );
 }
 
+/** A vendored `format.ts` row — the acp impl's own line language.
+ *  Each segment paints through `segStyle` (their DEFAULT_THEME);
+ *  selection reads as a surface wash, no box chrome. */
+function AcpSegRow(props: { segs: readonly Segment[]; selected: boolean }) {
+  return (
+    <box
+      flexDirection="row"
+      width="100%"
+      height={1}
+      flexShrink={0}
+      backgroundColor={props.selected ? theme.surface : undefined}
+    >
+      <For each={props.segs}>
+        {seg => {
+          const st = () => segStyle(seg);
+          return (
+            <box backgroundColor={st().bg} height={1} flexShrink={0}>
+              <text
+                fg={st().fg}
+                attributes={
+                  (st().bold ? TextAttributes.BOLD : 0) |
+                  (st().italic ? TextAttributes.ITALIC : 0) |
+                  (st().dim ? TextAttributes.DIM : 0)
+                }
+                content={seg.text}
+              />
+            </box>
+          );
+        }}
+      </For>
+    </box>
+  );
+}
+
+/** The expanded tool body in their gutter language — a dim `│`
+ *  margin over our content renderables (Option B: their layout,
+ *  our markdown/code/diff blocks). */
+function AcpToolBody(props: { item: ToolItem; syntax: SyntaxStyle }) {
+  return (
+    <box flexDirection="row" flexShrink={0}>
+      <text fg={theme.muted} attributes={TextAttributes.DIM} content={'│ '} />
+      <box flexDirection="column" flexGrow={1} flexShrink={0}>
+        <Show when={argBody(props.item)}>
+          {arg => <code content={arg()} filetype="bash" syntaxStyle={props.syntax} />}
+        </Show>
+        <ToolBody item={props.item} syntax={props.syntax} />
+      </box>
+    </box>
+  );
+}
+
 /** One session item — agent speech, a dim thought, a side line, or
- *  a tool card. */
-function ItemRow(props: { item: Item; syntax: SyntaxStyle; selected: boolean }) {
+ *  a tool card. Items carrying `vi` render the impl's own row
+ *  language (acp impl: the vendored `format.ts` one-liners);
+ *  everything else keeps this pane's card chrome. */
+function ItemRow(props: {
+  item: Item;
+  syntax: SyntaxStyle;
+  selected: boolean;
+  width: () => number;
+  frame: () => number;
+  findTool: (toolCallId: string) => unknown;
+}) {
   const tool = createMemo(() => (props.item.kind === 'tool' ? props.item : undefined));
+  const segs = createMemo(() => {
+    const vi = props.item.vi;
+    if (vi === undefined) return null;
+    const line = acpLine(vi, props.width(), props.frame(), props.findTool);
+    return line.length > 0 ? line : null;
+  });
   const thought = createMemo(() => props.item.kind === 'thought');
   const tone = createMemo(() => {
     const it = props.item;
@@ -242,33 +310,45 @@ function ItemRow(props: { item: Item; syntax: SyntaxStyle; selected: boolean }) 
   });
   return (
     <Show
-      when={tool()}
-      keyed
+      when={segs() === null}
       fallback={
-        <Show
-          when={props.item.kind === 'message'}
-          fallback={
-            <text
-              fg={thought() ? theme.muted : sideColor(tone())}
-              attributes={
-                thought() ? TextAttributes.DIM | TextAttributes.ITALIC : TextAttributes.DIM
-              }
-              flexShrink={0}
-              content={props.item.kind === 'tool' ? '' : props.item.text}
-            />
-          }
-        >
-          <markdown
-            content={props.item.kind === 'tool' ? '' : props.item.text}
-            syntaxStyle={props.syntax}
-            streaming
-            internalBlockMode="top-level"
-            flexShrink={0}
-          />
-        </Show>
+        <box flexDirection="column" flexShrink={0}>
+          <AcpSegRow segs={segs() ?? []} selected={props.selected} />
+          <Show when={tool() !== undefined && !tool()?.collapsed}>
+            <AcpToolBody item={tool() as ToolItem} syntax={props.syntax} />
+          </Show>
+        </box>
       }
     >
-      {item => <ToolCard item={item} syntax={props.syntax} selected={props.selected} />}
+      <Show
+        when={tool()}
+        keyed
+        fallback={
+          <Show
+            when={props.item.kind === 'message'}
+            fallback={
+              <text
+                fg={thought() ? theme.muted : sideColor(tone())}
+                attributes={
+                  thought() ? TextAttributes.DIM | TextAttributes.ITALIC : TextAttributes.DIM
+                }
+                flexShrink={0}
+                content={props.item.kind === 'tool' ? '' : props.item.text}
+              />
+            }
+          >
+            <markdown
+              content={props.item.kind === 'tool' ? '' : props.item.text}
+              syntaxStyle={props.syntax}
+              streaming
+              internalBlockMode="top-level"
+              flexShrink={0}
+            />
+          </Show>
+        }
+      >
+        {item => <ToolCard item={item} syntax={props.syntax} selected={props.selected} />}
+      </Show>
     </Show>
   );
 }
@@ -312,6 +392,17 @@ function FooterBar() {
 /** The whole pane — header bar, the sticky-bottom scrollback of
  *  session items, footer. */
 function Pane(props: { store: PaneStore; syntax: SyntaxStyle }) {
+  const renderer = useRenderer();
+  const [frame, setFrame] = createSignal(0);
+  onAnimationTick(10, () => setFrame(f => f + 1));
+  /** permission rows name their tool — look the call up by id. */
+  const findTool = (toolCallId: string): unknown => {
+    for (const id of props.store.state.order) {
+      const it = props.store.state.byId[id];
+      if (it?.kind === 'tool' && it.toolCallId === toolCallId) return it.vi;
+    }
+    return undefined;
+  };
   return (
     <box flexDirection="column" width="100%" height="100%">
       <HeaderBar meta={props.store.state.meta} />
@@ -324,6 +415,9 @@ function Pane(props: { store: PaneStore; syntax: SyntaxStyle }) {
                   item={item}
                   syntax={props.syntax}
                   selected={props.store.state.selected === id}
+                  width={() => renderer.width}
+                  frame={frame}
+                  findTool={findTool}
                 />
               )}
             </Show>
