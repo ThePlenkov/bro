@@ -167,6 +167,11 @@ export async function runTui(argv: string[]): Promise<void> {
     // scrolls off with the feed like any other line.
     screenMode: 'main-screen',
   });
+  // clean start: inline mode draws below whatever scrollback the
+  // pane already held (the launch command line, prior output) —
+  // clear screen AND scrollback once so the feed begins at the top.
+  // Startup-only; never mid-run (addendum 15).
+  process.stdout.write('\x1b[2J\x1b[3J\x1b[H');
 
   const impl = await pickImpl(implArg(argv));
   impl.setContext?.({ worktree });

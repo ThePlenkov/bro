@@ -690,6 +690,15 @@ never re-subscribe to the tick; run members gate the same way.
 Append path unchanged (p95 0.15ms), spinner still animates live
 rows at 10Hz.
 
+**Clean start** (addendum 15): inline mode was drawing BELOW the
+pane's existing scrollback — the launch command line and prior
+output read as a stale screen above the feed. One
+`\x1b[2J\x1b[3J\x1b[H` lands between renderer init and the first
+frame: screen AND scrollback cleared, cursor home, the feed begins
+at the top of a clean pane. Startup-only — never mid-run; the
+pane's prior scrollback is not content we own. Wire-verified:
+`2J`/`3J`/`H` emit before the first painted glyph.
+
 ## Risks
 
 - **Solid's prop application is post-construction.** The reconciler
