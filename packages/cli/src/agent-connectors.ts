@@ -4146,7 +4146,19 @@ export function makeGascityConnector(ctx: ConnectorCtx, env: AgentConnectorEnv):
               );
             }
             const s = gcSessionFor(e, spec.molStep, sessions);
-            const st = s === undefined ? 'lost' : gcState(s);
+            if (s === undefined) {
+              // session listing omitted the worker but supervisor liveness is
+              // indeterminate — cannot conclude lost/rebindable without
+              // verifiably running supervisor (admission guarantee)
+              if (gcSupervisorRunning() !== true) {
+                throw new SpawnError(
+                  'gc supervisor not running — agent liveness unknown',
+                  'unavailable'
+                );
+              }
+              return false;
+            }
+            const st = gcState(s);
             return st === 'running' || st === 'spawned';
           },
           liveDetail: e =>
