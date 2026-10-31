@@ -57,17 +57,13 @@ describe('AcpRenderer — chunk styling', () => {
 });
 
 describe('AcpRenderer — tool calls', () => {
-  test('tool_call prints `⣿ title [kind] status`; transitions re-print', () => {
+  test('tool_call headers print per status EDGE — pending and in_progress are one live edge', () => {
     const { lines, out } = sink();
     const r = new AcpRenderer(out, { color: false });
     r.update(upd('tool_call', { toolCallId: 't1', title: 'Listed ./', kind: 'execute' }));
     r.update(upd('tool_call_update', { toolCallId: 't1', status: 'in_progress' }));
     r.update(upd('tool_call_update', { toolCallId: 't1', status: 'completed' }));
-    assert.deepEqual(lines, [
-      '⣿ Listed ./ [execute] pending',
-      '⣿ Listed ./ [execute] in_progress',
-      '⣿ Listed ./ [execute] completed',
-    ]);
+    assert.deepEqual(lines, ['⣿ Listed ./ [execute]', '✓ Listed ./ [execute]']);
   });
 
   test('repeated same-status updates are churn — no re-print', () => {
@@ -77,7 +73,7 @@ describe('AcpRenderer — tool calls', () => {
     r.update(upd('tool_call_update', { toolCallId: 't1', status: 'in_progress' }));
     r.update(upd('tool_call_update', { toolCallId: 't1', status: 'in_progress' }));
     r.update(upd('tool_call_update', { toolCallId: 't1', status: 'in_progress' }));
-    assert.equal(lines.length, 2);
+    assert.equal(lines.length, 1);
   });
 
   test('failed renders red when color is on', () => {
@@ -93,7 +89,61 @@ describe('AcpRenderer — tool calls', () => {
     const r = new AcpRenderer(out, { color: false });
     r.update(upd('tool_call', { toolCallId: 't1', title: 'Run tests', kind: 'execute' }));
     r.update(upd('tool_call_update', { toolCallId: 't1', status: 'completed' }));
-    assert.equal(lines[1], '⣿ Run tests [execute] completed');
+    assert.equal(lines[1], '✓ Run tests [execute]');
+  });
+
+  test('the header picks the meaningful arg by tool kind', () => {
+    const { lines, out } = sink();
+    const r = new AcpRenderer(out, { color: false });
+    r.update(
+      upd('tool_call', {
+        toolCallId: 't1',
+        title: 'Bash',
+        kind: 'execute',
+        rawInput: { command: 'ls -la /tmp', timeout: 5000 },
+      })
+    );
+    assert.equal(lines[0], '⣿ Bash [execute] ls -la /tmp');
+  });
+
+  test('kind-blind arg order prefers the path; rawInput-less falls to locations', () => {
+    const { lines, out } = sink();
+    const r = new AcpRenderer(out, { color: false });
+    r.update(
+      upd('tool_call', { toolCallId: 't1', title: 'Read', rawInput: { file_path: '/etc/hosts' } })
+    );
+    r.update(upd('tool_call', { toolCallId: 't2', title: 'Edit', locations: [{ path: '/x.ts' }] }));
+    assert.equal(lines[0], '⣿ Read /etc/hosts');
+    assert.equal(lines[1], '⣿ Edit /x.ts');
+  });
+
+  test('search picks the pattern even when a path rides along', () => {
+    const { lines, out } = sink();
+    const r = new AcpRenderer(out, { color: false });
+    r.update(
+      upd('tool_call', {
+        toolCallId: 't1',
+        title: 'Grep',
+        kind: 'search',
+        rawInput: { pattern: 'TODO', path: '/src' },
+      })
+    );
+    assert.equal(lines[0], '⣿ Grep [search] TODO');
+  });
+
+  test('a long arg is clipped at line width', () => {
+    const { lines, out } = sink();
+    const r = new AcpRenderer(out, { color: false });
+    r.update(
+      upd('tool_call', {
+        toolCallId: 't1',
+        title: 'Bash',
+        kind: 'execute',
+        rawInput: { command: 'y'.repeat(300) },
+      })
+    );
+    assert.ok(lines[0]!.endsWith('…'));
+    assert.ok(lines[0]!.length <= 121);
   });
 });
 
@@ -166,8 +216,207 @@ describe('AcpRenderer — permission policy', () => {
   });
 });
 
+describe('AcpRenderer — paragraphs (spec bro-l8wqu)', () => {
+  test('a message chunk with real newlines renders real lines', () => {
+    const { lines, out } = sink();
+    const r = new AcpRenderer(out, { color: false });
+    r.update(upd('agent_message_chunk', { content: { type: 'text', text: 'one\ntwo\nthree' } }));
+    r.end();
+    assert.deepEqual(lines, ['one', 'two', 'three']);
+  });
+
+  test('newlines split the buffered run across chunk boundaries', () => {
+    const { lines, out } = sink();
+    const r = new AcpRenderer(out, { color: false });
+    r.update(upd('agent_message_chunk', { content: { type: 'text', text: 'a\nb' } }));
+    r.update(upd('agent_message_chunk', { content: { type: 'text', text: 'c' } }));
+    r.end();
+    assert.deepEqual(lines, ['a', 'bc']);
+  });
+
+  test('thought paragraphs stay dim line by line', () => {
+    const { lines, out } = sink();
+    const r = new AcpRenderer(out);
+    r.update(upd('agent_thought_chunk', { content: { type: 'text', text: 'l1\nl2' } }));
+    r.end();
+    assert.equal(lines.length, 2);
+    for (const l of lines) assert.ok(l.startsWith(DIM));
+  });
+
+  test('blank lines inside a paragraph are kept', () => {
+    const { lines, out } = sink();
+    const r = new AcpRenderer(out, { color: false });
+    r.update(upd('agent_message_chunk', { content: { type: 'text', text: 'a\n\nb' } }));
+    r.end();
+    assert.deepEqual(lines, ['a', '', 'b']);
+  });
+});
+
+describe('AcpRenderer — tool output cards (spec bro-l8wqu)', () => {
+  test('a finished call prints its output as an indented card', () => {
+    const { lines, out } = sink();
+    const r = new AcpRenderer(out, { color: false });
+    r.update(upd('tool_call', { toolCallId: 't1', title: 'Bash', kind: 'execute' }));
+    r.update(
+      upd('tool_call_update', {
+        toolCallId: 't1',
+        status: 'completed',
+        content: [{ type: 'content', content: { type: 'text', text: 'o1\no2' } }],
+      })
+    );
+    assert.deepEqual(lines, ['⣿ Bash [execute]', '✓ Bash [execute]', '│  o1', '│  o2']);
+  });
+
+  test('a one-shot completed tool_call carries its card inline', () => {
+    const { lines, out } = sink();
+    const r = new AcpRenderer(out, { color: false });
+    r.update(
+      upd('tool_call', {
+        toolCallId: 't1',
+        title: 'Read',
+        status: 'completed',
+        content: [{ type: 'content', content: { type: 'text', text: 'data' } }],
+      })
+    );
+    assert.deepEqual(lines, ['✓ Read', '│  data']);
+  });
+
+  test('the per-item cap collapses overflow to … (N more)', () => {
+    const { lines, out } = sink();
+    const r = new AcpRenderer(out, { color: false });
+    r.update(
+      upd('tool_call', {
+        toolCallId: 't1',
+        title: 'Bash',
+        status: 'completed',
+        content: [
+          {
+            type: 'content',
+            content: {
+              type: 'text',
+              text: Array.from({ length: 14 }, (_, i) => `l${i}`).join('\n'),
+            },
+          },
+        ],
+      })
+    );
+    assert.equal(lines.length, 12); // header + 10 body lines + tally
+    assert.equal(lines[11], '│  … (4 more)');
+  });
+
+  test('the whole card caps — remaining items fold into a tally', () => {
+    const { lines, out } = sink();
+    const r = new AcpRenderer(out, { color: false });
+    const items = Array.from({ length: 5 }, (_, i) => ({
+      type: 'content',
+      content: { type: 'text', text: `item${i}\n`.repeat(9).trim() },
+    }));
+    r.update(
+      upd('tool_call', { toolCallId: 't1', title: 'Bash', status: 'completed', content: items })
+    );
+    const card = lines.slice(1);
+    assert.ok(card.length <= 31);
+    assert.match(card[card.length - 1]!, /… \(/);
+  });
+
+  test('a diff renders path header + red minus + green plus', () => {
+    const { lines, out } = sink();
+    const r = new AcpRenderer(out);
+    r.update(
+      upd('tool_call', {
+        toolCallId: 't1',
+        title: 'Edit',
+        status: 'completed',
+        content: [{ type: 'diff', path: '/f.ts', oldText: 'old1\nold2', newText: 'new1' }],
+      })
+    );
+    assert.ok(lines[0]!.includes('✓') && lines[0]!.includes('Edit'));
+    assert.ok(lines[1]!.includes('─ /f.ts'));
+    assert.ok(lines[2]!.includes('\u001b[31m') && lines[2]!.includes('- old1'));
+    assert.ok(lines[3]!.includes('- old2'));
+    assert.ok(lines[4]!.includes('\u001b[32m') && lines[4]!.includes('+ new1'));
+  });
+
+  test('a new-file diff prints only + lines', () => {
+    const { lines, out } = sink();
+    const r = new AcpRenderer(out, { color: false });
+    r.update(
+      upd('tool_call', {
+        toolCallId: 't1',
+        title: 'Write',
+        status: 'completed',
+        content: [{ type: 'diff', path: '/n.ts', newText: 'fresh' }],
+      })
+    );
+    assert.deepEqual(lines.slice(2), ['│  + fresh']);
+  });
+
+  test('terminal content notes the archive gap', () => {
+    const { lines, out } = sink();
+    const r = new AcpRenderer(out, { color: false });
+    r.update(
+      upd('tool_call', {
+        toolCallId: 't1',
+        title: 'Bash',
+        status: 'completed',
+        content: [{ type: 'terminal', terminalId: 't9' }],
+      })
+    );
+    assert.match(lines[1]!, /terminal output is not archived.*t9/);
+  });
+
+  test('unknown content types stay visible as dim brackets', () => {
+    const { lines, out } = sink();
+    const r = new AcpRenderer(out, { color: false });
+    r.update(
+      upd('tool_call', {
+        toolCallId: 't1',
+        title: 'x',
+        status: 'completed',
+        content: [{ type: 'content', content: { type: 'image' } }, { type: 'mystery' }],
+      })
+    );
+    assert.deepEqual(lines.slice(1), ['│  [image]', '│  [mystery]']);
+  });
+
+  test('a late content-carrying repeat lands the card exactly once', () => {
+    const { lines, out } = sink();
+    const r = new AcpRenderer(out, { color: false });
+    r.update(upd('tool_call', { toolCallId: 't1', title: 'Bash', status: 'completed' }));
+    r.update(
+      upd('tool_call_update', {
+        toolCallId: 't1',
+        status: 'completed',
+        content: [{ type: 'content', content: { type: 'text', text: 'late' } }],
+      })
+    );
+    r.update(
+      upd('tool_call_update', {
+        toolCallId: 't1',
+        status: 'completed',
+        content: [{ type: 'content', content: { type: 'text', text: 'later' } }],
+      })
+    );
+    assert.deepEqual(lines, ['✓ Bash', '│  late']);
+  });
+
+  test('long single lines inside a card are clipped', () => {
+    const { lines, out } = sink();
+    const r = new AcpRenderer(out, { color: false });
+    r.update(
+      upd('tool_call', {
+        toolCallId: 't1',
+        title: 'x',
+        status: 'completed',
+        content: [{ type: 'content', content: { type: 'text', text: 'z'.repeat(300) } }],
+      })
+    );
+    assert.ok(lines[1]!.endsWith('…'));
+  });
+});
+
 describe('AcpRenderer — wire text is sanitized', () => {
-  test('escape sequences and newlines cannot inject into the pane', () => {
+  test('escape sequences cannot inject into the pane — real newlines still flow', () => {
     const { lines, out } = sink();
     const r = new AcpRenderer(out, { color: false });
     r.update(
@@ -175,8 +424,28 @@ describe('AcpRenderer — wire text is sanitized', () => {
     );
     r.update(upd('tool_call', { toolCallId: 't', title: 'rm\u001b[1m-x', kind: 'e\u0007xec' }));
     r.end();
-    assert.deepEqual(lines, ['x ⏎ EVIL', '⣿ rm-x [exec] pending']);
+    assert.deepEqual(lines, ['x', 'EVIL', '⣿ rm-x [exec]']);
     for (const l of lines) assert.ok(!l.includes('\u001b'));
+  });
+
+  test('an ESC inside a tool output block is stripped, never painted through', () => {
+    const { lines, out } = sink();
+    const r = new AcpRenderer(out); // color ON — our own paint may use ESC; the AGENT's never may
+    r.update(
+      upd('tool_call', {
+        toolCallId: 't1',
+        title: 'x',
+        status: 'completed',
+        content: [
+          { type: 'content', content: { type: 'text', text: 'a\u001b[2J\u001b[31mred\nc' } },
+        ],
+      })
+    );
+    for (const l of lines) {
+      assert.ok(!l.includes('[2J'), `clear-screen survived in ${l}`);
+      assert.ok(!l.includes('[31m'), `agent red survived in ${l}`);
+    }
+    assert.ok(lines.some(l => l.includes('ared')));
   });
 });
 

@@ -135,6 +135,12 @@ describe('agentTurnPlane', () => {
       const updates = rows.filter(r => r.kind === 'update');
       assert.equal(updates.length, 6); // chunk + tool open + tool done + sub + 2 usage
       assert.equal((updates[0]!.update as SessionUpdate).sessionUpdate, 'agent_message_chunk');
+      // the wire shape survives verbatim — the card renderer's
+      // content/rawInput/locations ride the row untouched
+      assert.deepEqual(
+        updates.map(r => r.update),
+        [chunk, toolOpen, toolDone, subagent, usage(100), usage(200)]
+      );
       const last = rows.at(-1)!;
       assert.equal(last.kind, 'turn');
       assert.equal(last.phase, 'stop');

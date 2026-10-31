@@ -406,7 +406,31 @@ describe('runSessionView --once', () => {
           kind: 'update',
           update: {
             sessionUpdate: 'agent_message_chunk',
-            content: { type: 'text', text: 'ARCHIVE-CHUNK' },
+            content: { type: 'text', text: 'ARCHIVE-CHUNK\nARCHIVE-LINE2' },
+          },
+        },
+        {
+          ts: '2026-01-01T00:00:01.500Z',
+          session: 'ses_1',
+          kind: 'update',
+          update: {
+            sessionUpdate: 'tool_call',
+            toolCallId: 't1',
+            title: 'Bash',
+            kind: 'execute',
+            rawInput: { command: 'ls /tmp' },
+            status: 'in_progress',
+          },
+        },
+        {
+          ts: '2026-01-01T00:00:01.750Z',
+          session: 'ses_1',
+          kind: 'update',
+          update: {
+            sessionUpdate: 'tool_call_update',
+            toolCallId: 't1',
+            status: 'completed',
+            content: [{ type: 'content', content: { type: 'text', text: 'OUT-LINE' } }],
           },
         },
         {
@@ -436,6 +460,15 @@ describe('runSessionView --once', () => {
     await withEnv(f.env, () => runSessionView([f.worktree, '--once'], f.opts));
     const text = f.stdout();
     assert.match(text, /ARCHIVE-CHUNK/, 'the archived update renders verbatim');
+    // rich rendering flows through the archive leg — real paragraphs,
+    // the argged tool header, the indented output card
+    assert.match(text, /ARCHIVE-CHUNK\nARCHIVE-LINE2/, 'a chunk newline is a real line break');
+    // kind+arg ride in separate dim spans — match inside each
+    assert.match(text, /⣿ Bash/, 'the live edge prints');
+    assert.match(text, /\[execute\]/, 'the kind tag rides the header');
+    assert.match(text, /ls \/tmp/, 'the header picks the kind-guided arg');
+    assert.match(text, /✓.*Bash/, 'the completion edge re-prints');
+    assert.match(text, /│ {2}OUT-LINE/, 'the output card indents under the call');
     assert.match(text, /── turn complete \(end_turn\) ──/, 'the stop row prints the boundary');
     assert.match(text, /⚠ permission ‹rm -rf \/› — denied/, 'the ask surfaces with its verdict');
     // `bro: status` folds in — the projector's status string prints once

@@ -156,9 +156,10 @@ describe('runFixture — recorded wire replay', () => {
     // thoughts are bare text here; styling is the unit test's job
     assert.ok(joined.includes('I need to list the files'));
     assert.ok(joined.includes('`/tmp`'));
-    // tool lifecycle edges only (pending → in_progress → completed)
-    assert.equal(lines.filter(l => l.includes('⣿')).length, 3);
-    assert.ok(joined.includes('⣿ Listed ./ [execute] completed'));
+    // tool lifecycle EDGES only — pending+in_progress are one live
+    // edge (⣿), completion re-prints with ✓ and the kind-guided arg
+    assert.equal(lines.filter(l => l.includes('⣿')).length, 1);
+    assert.ok(joined.includes('✓ Listed ./ [execute] ls -la /tmp'));
     // plan re-rendered checklist
     assert.ok(joined.includes('[x] Inspect the workspace layout'));
     assert.ok(joined.includes('[>] Report findings'));
@@ -188,7 +189,7 @@ describe('run — end-to-end against a fake ACP agent', () => {
     assert.equal(code, 0);
     const joined = lines.join('\n');
     assert.ok(joined.includes('thinking about the task'));
-    assert.ok(joined.includes('⣿ Run ls [execute] completed'));
+    assert.ok(joined.includes('✓ Run ls [execute]'));
     assert.ok(joined.includes('⚠ Run ls'));
     assert.ok(joined.includes('Done — the files are listed.'));
     assert.ok(joined.includes('── turn complete (end_turn) ──'));

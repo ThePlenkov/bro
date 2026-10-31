@@ -6,9 +6,13 @@
  * backend branches either — the contract is the ACP wire shape only.
  *
  * Rendering rules (scrollback-friendly, no curses):
- *   agent_thought_chunk  → dim text (same-kind runs coalesce to a line)
- *   agent_message_chunk  → plain text (same)
- *   tool_call(_update)   → `⣿ <title> [<kind>] <status>` per transition
+ *   agent_thought_chunk  → dim paragraphs (same-kind runs coalesce;
+ *                          real newlines, never ⏎-flattened)
+ *   agent_message_chunk  → plain paragraphs (same)
+ *   tool_call(_update)   → `⣿/✓/✗ <title> [<kind>] <arg>` per status
+ *                          edge + an indented `│` output card on the
+ *                          finished edge — text block, diff +/-,
+ *                          terminal note — bounded per item & card
  *   plan                 → a re-rendered checklist block
  *   request_permission   → `⚠ <title> [options]` + the auto-answer
  *   everything else      → dim one-liners; unknown kinds stay visible
@@ -84,6 +88,40 @@ export const safe = (s: string): string => {
   return out;
 };
 
+/** The block variant of safe() — same ESC/control strip but REAL
+ *  newlines pass through: a `\n` in agent text is a line break, never
+ *  a ⏎. Output paths split on it; agent-controlled ANSI still cannot
+ *  reach the pane (the pane is a real terminal — pass-through means
+ *  an agent owns the display). */
+const safeBlock = (s: string): string => {
+  const c: Cur = { s, i: 0 };
+  let out = '';
+  for (; c.i < s.length; c.i++) {
+    const ch = s.charCodeAt(c.i);
+    if (ch === 0x1b) escSkip(c);
+    else if (ch === 0x0a) out += '\n';
+    else if (!isCtrl(ch) && ch !== 0x0d) out += s[c.i];
+  }
+  return out;
+};
+
+/** One emitted line's width — past it the tail collapses to '…'. Every
+ *  printed line is clipped BEFORE paint so ANSI never eats the count.
+ *  `n` lets a caller spend a smaller budget (an arg fitting what's
+ *  left of the header); under ~4 chars nothing legible survives. */
+const LINE_MAX = 120;
+const clip = (s: string, n = LINE_MAX): string =>
+  n < 4 ? '' : s.length > n ? `${s.slice(0, n - 1)}…` : s;
+
+/** Tool-card bounds — a chatty tool cannot flood the scrollback: each
+ *  content item shows at most ITEM_MAX lines, each card at most
+ *  CARD_MAX lines; overflow lands as `… (N more)`. */
+const ITEM_MAX = 10;
+const CARD_MAX = 30;
+
+/** Statuses that finish a tool call — the card edge. */
+const DONE_STATUS = new Set(['completed', 'failed']);
+
 /** The fixed permission policy (spec): reads (and other observably
  *  non-mutating kinds) may be remembered ALWAYS; everything else is
  *  once-only. A backend that offers no allow-kind option gets a
@@ -126,7 +164,6 @@ export interface RenderOpts {
   color?: boolean;
 }
 
-const STATUS_COLOR: Record<string, string> = { completed: GREEN, failed: RED };
 const PLAN_BOX: Record<string, string> = { completed: '[x]', in_progress: '[>]', pending: '[ ]' };
 
 /** Wire value → display scalar; objects get a `?` instead of
@@ -141,6 +178,51 @@ interface ToolRec {
   name?: string;
   kind?: string;
   status?: string;
+  /** The header's one meaningful argument — a rawInput key picked by
+   *  tool kind, else locations[0] — sanitized and clipped at learn. */
+  arg?: string;
+  /** Last PRINTED edge bucket — 'live' covers pending+in_progress so a
+   *  status flip that changes no glyph never duplicates the header. */
+  edge?: string;
+  /** The output card rendered once — a content-carrying repeat of a
+   *  terminal status still lands, but the card never prints twice. */
+  body?: boolean;
+}
+
+/** rawInput keys worth printing, by tool kind — `bash <cmd>`,
+ *  `grep <pattern>`, `fetch <url>` each have one arg a human scans
+ *  for; everything else falls to the generic order below. */
+const ARG_KEYS: Record<string, string[]> = {
+  execute: ['command', 'cmd'],
+  search: ['pattern', 'query'],
+  fetch: ['url'],
+  think: ['description', 'thought'],
+};
+
+/** Kind-blind arg order — a path beats a command when both appear
+ *  (an edit's `file_path` is the identity, `command` its payload). */
+const ARG_FALLBACK = ['path', 'file_path', 'filePath', 'command', 'pattern', 'url', 'query'];
+
+interface ToolWire {
+  rawInput?: unknown;
+  locations?: { path?: unknown }[] | null;
+}
+
+/** The one arg on the header — a kind-guided rawInput key first, the
+ *  generic list next, a bare-string rawInput, then locations[0].
+ *  Sanitized + clipped here so the header just interpolates. */
+function toolArg(u: ToolWire, kind: string | undefined): string | undefined {
+  if (typeof u.rawInput === 'string' && u.rawInput !== '') return clip(safe(u.rawInput));
+  if (typeof u.rawInput === 'object' && u.rawInput !== null) {
+    const raw = u.rawInput as Record<string, unknown>;
+    const keys = [...(kind !== undefined ? (ARG_KEYS[kind] ?? []) : []), ...ARG_FALLBACK];
+    for (const k of keys) {
+      const v = raw[k];
+      if (typeof v === 'string' && v !== '') return clip(safe(v));
+    }
+  }
+  const loc = u.locations?.find(l => typeof l.path === 'string' && l.path !== '');
+  return loc !== undefined ? clip(safe(loc.path as string)) : undefined;
 }
 
 export class AcpRenderer {
@@ -170,13 +252,18 @@ export class AcpRenderer {
   }
 
   /** Anything buffered must land before the next structural line —
-   *  every render path that isn't a same-kind chunk flushes first. */
+   *  every render path that isn't a same-kind chunk flushes first.
+   *  Paragraphs, not a ⏎-flattened single: a newline inside the
+   *  buffered text is a real line break (thought stays dim). */
   private flush(): void {
     if (this.buf === undefined) return;
     const { kind, text } = this.buf;
     this.buf = undefined;
     if (text === '') return;
-    this.out(kind === 'agent_message_chunk' ? text : this.dim(text));
+    const dimmed = kind !== 'agent_message_chunk';
+    for (const line of text.split('\n')) {
+      this.out(line === '' ? '' : dimmed ? this.dim(clip(line)) : clip(line));
+    }
   }
 
   /** Suppressed repeat tallies land before closing markers so the
@@ -201,17 +288,102 @@ export class AcpRenderer {
   private static textOf(u: SessionUpdateLike): string {
     const c = u['content'] as { type?: string; text?: string } | undefined;
     return c?.type === 'text' && typeof c.text === 'string'
-      ? safe(c.text)
+      ? safeBlock(c.text)
       : `[${safe(u.sessionUpdate)}: ${c?.type ?? '?'}]`;
   }
 
+  /** The header line — glyph per status edge (⣿ live, ✓ green,
+   *  ✗ red), then `title [kind] arg`; kind+arg dim so the title leads.
+   *  The arg spends what the title+kind leave of LINE_MAX — a header
+   *  is a single line and gets the same bound as every other. */
   private toolLine(rec: ToolRec, status: string): void {
-    const label = rec.title ?? rec.name ?? 'tool';
+    const glyph =
+      status === 'completed'
+        ? this.paint(GREEN, '✓')
+        : status === 'failed'
+          ? this.paint(RED, '✗')
+          : '⣿';
+    const head = `${glyph} ${clip(rec.title ?? rec.name ?? 'tool')}`;
     const kind = rec.kind !== undefined && rec.kind !== '' ? ` [${rec.kind}]` : '';
-    const c = STATUS_COLOR[status];
-    const glyph = c !== undefined ? this.paint(c, '⣿') : '⣿';
-    const word = c !== undefined ? this.paint(c, status) : this.dim(status);
-    this.out(`${glyph} ${label}${kind} ${word}`);
+    const arg =
+      rec.arg !== undefined && rec.arg !== ''
+        ? ` ${clip(rec.arg, LINE_MAX - head.length - kind.length)}`
+        : '';
+    this.out(`${head}${kind === '' ? '' : this.dim(kind)}${arg === '' ? '' : this.dim(arg)}`);
+  }
+
+  /** A per-item line cap — overflow collapses to one `… (N more)`. */
+  private capItem(lines: string[]): string[] {
+    if (lines.length <= ITEM_MAX) return lines;
+    return [...lines.slice(0, ITEM_MAX), `│  ${this.dim(`… (${lines.length - ITEM_MAX} more)`)}`];
+  }
+
+  /** One content item → its `│`-indented card lines (already painted):
+   *  text block, diff +/- lines under a path header, terminal note,
+   *  or a dim bracket for shapes the archive can't display. */
+  private itemLines(item: unknown): string[] {
+    const it = item as {
+      type?: unknown;
+      content?: { type?: unknown; text?: unknown };
+      path?: unknown;
+      oldText?: unknown;
+      newText?: unknown;
+      terminalId?: unknown;
+    };
+    switch (it.type) {
+      case 'content': {
+        const c = it.content;
+        if (c?.type === 'text' && typeof c.text === 'string') {
+          return this.capItem(
+            safeBlock(c.text)
+              .split('\n')
+              .map(l => `│  ${clip(l)}`)
+          );
+        }
+        return [`│  ${this.dim(`[${safe(typeof c?.type === 'string' ? c.type : '?')}]`)}`];
+      }
+      case 'diff': {
+        const head = `│  ${this.dim(`─ ${clip(safe(typeof it.path === 'string' ? it.path : '?'))}`)}`;
+        const body: string[] = [];
+        if (typeof it.oldText === 'string') {
+          for (const l of safeBlock(it.oldText).split('\n')) {
+            body.push(`│  ${this.paint(RED, `- ${clip(l)}`)}`);
+          }
+        }
+        if (typeof it.newText === 'string') {
+          for (const l of safeBlock(it.newText).split('\n')) {
+            body.push(`│  ${this.paint(GREEN, `+ ${clip(l)}`)}`);
+          }
+        }
+        return [head, ...this.capItem(body)];
+      }
+      case 'terminal':
+        return [
+          `│  ${this.dim(`terminal output is not archived (terminal ${safe(String(it.terminalId ?? '?'))})`)}`,
+        ];
+      default:
+        return [`│  ${this.dim(`[${safe(typeof it.type === 'string' ? it.type : '?')}]`)}`];
+    }
+  }
+
+  /** The card body under a finished call — per-item cap inside,
+   *  CARD_MAX lines total; remaining items fold into one tally. */
+  private toolBody(items: unknown[]): void {
+    let used = 0;
+    for (let i = 0; i < items.length; i++) {
+      const room = CARD_MAX - used;
+      if (room <= 0) {
+        this.out(`│  ${this.dim(`… (${items.length - i} more)`)}`);
+        return;
+      }
+      const lines = this.itemLines(items[i]);
+      for (const l of lines.slice(0, room)) this.out(l);
+      used += Math.min(lines.length, room);
+      if (lines.length > room) {
+        this.out(`│  ${this.dim(`… (${lines.length - room} more)`)}`);
+        return;
+      }
+    }
   }
 
   private onTool(u: SessionUpdateLike): void {
@@ -221,6 +393,9 @@ export class AcpRenderer {
       name?: string | null;
       kind?: string | null;
       status?: string | null;
+      content?: unknown;
+      rawInput?: unknown;
+      locations?: { path?: unknown }[] | null;
     };
     const id = t.toolCallId ?? '?';
     const rec = this.tools.get(id) ?? {};
@@ -228,16 +403,33 @@ export class AcpRenderer {
       const v = t[k];
       if (typeof v === 'string' && v !== '') rec[k] = safe(v);
     }
+    const arg = toolArg(t, rec.kind);
+    if (arg !== undefined) rec.arg = arg;
     const status = typeof t.status === 'string' && t.status !== '' ? safe(t.status) : 'pending';
-    // a repeat of the seen status is churn (content mid-streams share
-    // it); only lifecycle edges print
-    if (rec.status === status) {
+    const content = Array.isArray(t.content) ? t.content : [];
+    const done = DONE_STATUS.has(status);
+    // churn: a repeat status never re-prints the header — EXCEPT a
+    // terminal repeat that newly carries content: the output card is
+    // still owed (it lands once, flagged by rec.body)
+    if (rec.status === status || rec.edge === (done ? status : 'live')) {
+      if (done && rec.body !== true && content.length > 0) {
+        rec.body = true;
+        this.tools.set(id, rec);
+        this.toolBody(content);
+        return;
+      }
+      rec.status = status;
       this.tools.set(id, rec);
       return;
     }
     rec.status = status;
+    rec.edge = done ? status : 'live';
     this.tools.set(id, rec);
     this.toolLine(rec, status);
+    if (done && content.length > 0) {
+      rec.body = true;
+      this.toolBody(content);
+    }
   }
 
   private onPlan(u: SessionUpdateLike): void {
@@ -316,9 +508,12 @@ export class AcpRenderer {
         return;
       default:
         this.flush();
+        // own-key lookup — a '__proto__'/'constructor' kind must land on
+        // the fallback, never an inherited Object.prototype member
         (
-          this.structured[u.sessionUpdate] ??
-          (x => this.out(this.dim(`[${safe(x.sessionUpdate)}]`)))
+          (Object.hasOwn(this.structured, u.sessionUpdate)
+            ? this.structured[u.sessionUpdate]
+            : undefined) ?? (x => this.out(this.dim(`[${safe(x.sessionUpdate)}]`)))
         )(u);
         return;
     }

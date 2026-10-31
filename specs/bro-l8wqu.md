@@ -135,6 +135,16 @@ string (`working·#815 1f` etc.) as a dim transition line whenever it
 changes, and carries the title/agent/model in its banner — the status
 pane's information without the strip.
 
+**Rendering is formatted, not a raw log** — `AcpRenderer` produces a
+human view from the same archive: chunks render real paragraphs
+(thought dim), never `⏎`-flattened; tool calls render an edge-glyph
+header `⣿/✓/✗ title [kind] arg` (arg picked from `rawInput` by tool
+kind, else `locations[0]`) and, on a terminal edge, an indented `│`
+output card — text block, diff `+`/`-` lines, a terminal-notice for
+unarchived terminal output. Everything is bounded (per-item ~10
+lines, per-card ~30, per-line ~120) and sanitized — agent ANSI/control
+bytes never reach the pane; blocks strip ESC but keep newlines.
+
 **Interactive TTY only on demand:** nothing spawns a TTY pane. A
 denied permission prints the ask plus a hint that the session needs
 interactive handling; the human opens a terminal in the same
