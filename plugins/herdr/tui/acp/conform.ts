@@ -1,0 +1,166 @@
+/**
+ * The seam's conformance probe (spec bro-q2edc, "Phase 2 — the
+ * seam"): the same `.events.jsonl` archive through EVERY registered
+ * impl — `legacy` and `acp` — with the resulting item coverage
+ * compared. The shell contract is the Op stream, so the probe
+ * counts on each impl's drain (append/update ops), NOT the
+ * eviction-windowed pane state — two impls emitting different item
+ * mixes otherwise disagree at the frontier for no real reason.
+ *
+ *   bun run plugins/herdr/tui/acp/conform.ts <events.jsonl>
+ *
+ * Parity rules (not identity — the impls model differently):
+ *  - tool calls, diffs, turn markers: same count on both
+ *  - agent messages: acp may merge chunks differently — compare
+ *    coverage loosely (>=), never require identity
+ *  - side items: acp absorbs usage/commands/mode into session state,
+ *    so its note count is strictly lower — expected, not a failure
+ *  - permissions: same count
+ */
+import { readFileSync } from 'node:fs';
+import { parseArchiveRows } from '../../../../packages/cli/src/commands/session-feed.ts';
+import { pickImpl } from '../impl.ts';
+import type { Item } from '../model.ts';
+
+const path = process.argv[2];
+if (path === undefined) {
+  console.error('usage: conform.ts <events.jsonl>');
+  process.exit(2);
+}
+const rows = parseArchiveRows(readFileSync(path, 'utf8'));
+
+interface Stats {
+  impl: string;
+  appended: number;
+  tools: number;
+  toolIds: Set<string>;
+  toolsWithContent: Set<number>;
+  diffs: number;
+  messages: number;
+  thoughts: number;
+  turns: number;
+  permissions: number;
+  notes: number;
+  updates: number;
+  diffKeys: Set<string>;
+  messageChars: number;
+  verdict: string;
+}
+
+const run = async (name: string): Promise<Stats> => {
+  const impl = await pickImpl(name, {});
+  for (const row of rows) impl.feed(row);
+  impl.beginLive();
+  const s: Stats = {
+    impl: name,
+    appended: 0,
+    tools: 0,
+    toolIds: new Set(),
+    toolsWithContent: new Set(),
+    diffs: 0,
+    messages: 0,
+    thoughts: 0,
+    turns: 0,
+    permissions: 0,
+    notes: 0,
+    updates: 0,
+    diffKeys: new Set(),
+    messageChars: 0,
+    verdict: impl.verdict?.led.state ?? '?',
+  };
+  const countItem = (item: Item): void => {
+    switch (item.kind) {
+      case 'tool':
+        s.tools++;
+        s.toolIds.add(item.toolCallId);
+        if (item.content.length > 0) s.toolsWithContent.add(item.id);
+        s.diffs += item.content.filter(c => c.kind === 'diff').length;
+        for (const c of item.content) {
+          if (c.kind === 'diff') s.diffKeys.add(`${item.toolCallId}|${c.path}`);
+        }
+        break;
+      case 'message':
+        s.messages++;
+        s.messageChars += item.text.length;
+        break;
+      case 'thought':
+        s.thoughts++;
+        break;
+      case 'turn':
+        s.turns++;
+        break;
+      case 'permission':
+        s.permissions++;
+        break;
+      default:
+        s.notes++;
+    }
+  };
+  for (const op of impl.drain()) {
+    if (op.op === 'append') {
+      s.appended++;
+      countItem(op.item);
+    } else if (op.op === 'tool') {
+      const t = op.item;
+      if (t.content !== undefined && t.content.length > 0) {
+        s.toolsWithContent.add(t.id);
+        s.diffs += t.content.filter(c => c.kind === 'diff').length;
+        for (const c of t.content) {
+          if (c.kind === 'diff') {
+            s.diffKeys.add(`${t.toolCallId ?? `id:${t.id}`}|${c.path}`);
+          }
+        }
+      }
+      s.updates++;
+    } else if (op.op === 'text') {
+      s.updates++;
+    }
+  }
+  return s;
+};
+
+const legacy = await run('legacy');
+const acp = await run('acp');
+
+const fmt = (s: Stats): string =>
+  `${s.impl}: appended=${s.appended} tools=${s.tools} wContent=${s.toolsWithContent.size} ` +
+  `diffs=${s.diffs} msg=${s.messages} thought=${s.thoughts} turn=${s.turns} ` +
+  `perm=${s.permissions} note=${s.notes} updates=${s.updates} verdict=${s.verdict}`;
+console.log(fmt(legacy));
+console.log(fmt(acp));
+
+const problems: string[] = [];
+const eq = (label: string, a: number, b: number): void => {
+  if (a !== b) problems.push(`${label}: legacy=${a} acp=${b}`);
+};
+const ge = (label: string, a: number, b: number): void => {
+  if (b < a) problems.push(`${label}: legacy=${a} acp=${b} (acp dropped coverage)`);
+};
+
+// the wire is the same — every tool call must exist on both
+eq('tools', legacy.tools, acp.tools);
+if (legacy.toolIds.size !== acp.toolIds.size) {
+  const onlyL = [...legacy.toolIds].filter(id => !acp.toolIds.has(id));
+  const onlyA = [...acp.toolIds].filter(id => !legacy.toolIds.has(id));
+  problems.push(`toolCallIds differ: only-legacy=${onlyL.length} only-acp=${onlyA.length}`);
+}
+// content coverage: acp never covers fewer cards than legacy
+ge('toolsWithContent', legacy.toolsWithContent.size, acp.toolsWithContent.size);
+// diffs compare as unique (toolCallId, path) pairs — op streams
+// recount the same diff on every content-carrying update
+ge('unique diffs', legacy.diffKeys.size, acp.diffKeys.size);
+// message items differ at chunk-merge boundaries — coverage is the
+// text, not the item count
+ge('message text', Math.floor(legacy.messageChars * 0.98), acp.messageChars);
+ge('thoughts', legacy.thoughts, acp.thoughts);
+eq('turns', legacy.turns, acp.turns);
+ge('permissions', legacy.permissions, acp.permissions);
+// notes: acp SHOULD carry fewer (usage/commands/mode are session
+// state, not items) — flag only if it carries more
+if (acp.notes > legacy.notes) problems.push(`notes: acp=${acp.notes} > legacy=${legacy.notes}`);
+
+if (problems.length > 0) {
+  console.log(`FAIL: ${problems.join('; ')}`);
+  process.exit(1);
+}
+console.log('OK — coverage agrees');

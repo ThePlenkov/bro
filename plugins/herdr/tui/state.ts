@@ -35,6 +35,10 @@ export interface PaneState {
   /** The selected tool card's id, or -1 when none is selected. */
   selected: number;
   meta: PaneMeta;
+  /** The impl's fold policy (impl.ts `PaneImpl.fold`): set — every
+   *  card body lands collapsed (the vendored baseline); unset — the
+   *  legacy COLLAPSE_AT heuristic. */
+  foldAll?: boolean;
 }
 
 /** A body past this many lines lands collapsed — a card stays a
@@ -42,12 +46,13 @@ export interface PaneState {
 export const COLLAPSE_AT = 12;
 
 /** A fresh, empty pane state. */
-export function emptyState(meta?: Partial<PaneMeta>): PaneState {
+export function emptyState(meta?: Partial<PaneMeta>, foldAll?: boolean): PaneState {
   return {
     byId: {},
     order: [],
     selected: -1,
     meta: { worktree: '', agent: '', led: 'unknown', mode: '', ...meta },
+    foldAll,
   };
 }
 
@@ -77,9 +82,15 @@ export function applyOps(state: PaneState, ops: readonly Op[]): PaneState {
     switch (op.op) {
       case 'append': {
         const item = { ...op.item };
-        // A card born carrying a big body lands folded too — replay
-        // of a finished session should not dump every full output.
-        if (item.kind === 'tool' && item.bodyLanded && contentLineCount(item) > COLLAPSE_AT) {
+        // A card born carrying a body lands folded too — under the
+        // 'folded' policy always, else past COLLAPSE_AT lines — a
+        // replay of a finished session should not dump every full
+        // output.
+        if (
+          item.kind === 'tool' &&
+          item.bodyLanded &&
+          (state.foldAll === true || contentLineCount(item) > COLLAPSE_AT)
+        ) {
           item.collapsed = true;
         }
         byId[op.item.id] = item;
@@ -98,11 +109,15 @@ export function applyOps(state: PaneState, ops: readonly Op[]): PaneState {
         const item = byId[op.item.id];
         if (item === undefined || item.kind !== 'tool') break;
         const next: ToolItem = { ...item, ...op.item };
-        // A body past COLLAPSE_AT lines lands folded — the card
-        // stays scannable and the hint counts what it hides. Only
-        // on the body's first landing: a later op never re-folds a
-        // card the user opened.
-        if (next.bodyLanded && !item.bodyLanded && contentLineCount(next) > COLLAPSE_AT) {
+        // A body lands folded — under 'folded' always, else past
+        // COLLAPSE_AT lines — the card stays scannable and the hint
+        // counts what it hides. Only on the body's first landing: a
+        // later op never re-folds a card the user opened.
+        if (
+          next.bodyLanded === true &&
+          item.bodyLanded !== true &&
+          (state.foldAll === true || contentLineCount(next) > COLLAPSE_AT)
+        ) {
           next.collapsed = true;
         }
         byId[op.item.id] = next;

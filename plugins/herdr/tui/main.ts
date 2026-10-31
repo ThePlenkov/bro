@@ -45,7 +45,7 @@ import {
   type SessionTarget,
 } from '../../../packages/cli/src/commands/herdr-session-view.ts';
 import { loadBroConfig } from '../../../packages/cli/src/plugins.ts';
-import { SessionModel } from './model.ts';
+import { implArg, pickImpl } from './impl.ts';
 
 /** The op-drain cadence — opencode's delta buffer: archive rows feed
  *  the model immediately, the tree commits on a timer so token-wise
@@ -82,20 +82,21 @@ const providers = (worktree: string): Record<string, ProviderEntry> => {
 
 /** `main.ts <worktree> --dump` — the headless readout. Prints the
  *  model's text projection of the archive tail and exits. */
-async function dump(worktree: string): Promise<void> {
+async function dump(worktree: string, argv: string[]): Promise<void> {
   const base = gitCommonDir(worktree) ?? worktree;
   const state = readState(fleetStatusPath(base, worktree));
   const target = resolveTarget(state, worktree, providers(worktree));
-  const model = new SessionModel();
+  const impl = await pickImpl(implArg(argv));
   if (target?.events !== undefined) {
     const from = Math.max(0, sizeOf(target.events) - TAIL_BYTES);
     const slice = readTailSlice(target.events, from);
     if (slice !== undefined) {
       const start = from > 0 ? slice.text.indexOf('\n') + 1 : 0;
-      for (const row of parseArchiveRows(slice.text.slice(start))) model.feed(row);
+      for (const row of parseArchiveRows(slice.text.slice(start))) impl.feed(row);
     }
+    impl.beginLive();
   }
-  for (const line of model.dump()) process.stdout.write(`${line}\n`);
+  for (const line of impl.dump()) process.stdout.write(`${line}\n`);
 }
 
 // --- the TUI ---------------------------------------------------------------
@@ -103,11 +104,11 @@ async function dump(worktree: string): Promise<void> {
 export async function runTui(argv: string[]): Promise<void> {
   const worktree = argv.find(a => !a.startsWith('-'));
   if (worktree === undefined) {
-    console.error('usage: main.ts <worktree> [--dump]');
+    console.error('usage: main.ts <worktree> [--dump] [--impl legacy|acp]');
     process.exit(2);
   }
   if (argv.includes('--dump')) {
-    await dump(worktree);
+    await dump(worktree, argv);
     return;
   }
   if (process.env.HERDR_ENV !== '1') return;
@@ -130,8 +131,12 @@ export async function runTui(argv: string[]): Promise<void> {
     exitOnCtrlC: true,
   });
 
-  const model = new SessionModel();
-  const pane = await mountPane({ renderer, meta: { worktree } });
+  const impl = await pickImpl(implArg(argv));
+  const pane = await mountPane({
+    renderer,
+    meta: { worktree },
+    foldAll: impl.fold === 'folded',
+  });
 
   // --- keys: j/k walk the tool cards, Enter/c folds one, q quits.
   renderer.keyInput.on('keypress', key => {
@@ -161,7 +166,7 @@ export async function runTui(argv: string[]): Promise<void> {
     const more = readTailSlice(cur.eventsPath, cur.offset);
     if (more === undefined) return;
     cur.offset = more.size;
-    for (const row of parseArchiveRows(more.text)) model.feed(row);
+    for (const row of parseArchiveRows(more.text)) impl.feed(row);
   };
 
   /** Arm the archive tail on a resolved target — replay the window,
@@ -175,8 +180,11 @@ export async function runTui(argv: string[]): Promise<void> {
     if (slice !== undefined) {
       cur.offset = slice.size;
       const start = from > 0 ? slice.text.indexOf('\n') + 1 : 0;
-      for (const row of parseArchiveRows(slice.text.slice(start))) model.feed(row);
+      for (const row of parseArchiveRows(slice.text.slice(start))) impl.feed(row);
     }
+    // the tail window is replayed history; appends after this are the
+    // live tail — the impl's replay/live boundary
+    impl.beginLive();
     try {
       cur.watcher = watch(path, () => pumpEvents());
     } catch {
@@ -190,7 +198,7 @@ export async function runTui(argv: string[]): Promise<void> {
   let lastReport = '';
   let target: SessionTarget | undefined;
   const report = (): void => {
-    const rowV = model.verdict;
+    const rowV = impl.verdict;
     const v =
       target === undefined
         ? { led: { state: 'unknown' } as PaneLed, mode: 'waiting for projector' }
@@ -237,7 +245,7 @@ export async function runTui(argv: string[]): Promise<void> {
     refresh();
   }, POLL_MS);
   // the tree commit — opencode's delta-buffer cadence
-  setInterval(() => pane.writer.apply(model.drain()), FLUSH_MS);
+  setInterval(() => pane.writer.apply(impl.drain()), FLUSH_MS);
 
   // the intervals keep the loop alive; this promise just holds the fn
   await new Promise(() => {});

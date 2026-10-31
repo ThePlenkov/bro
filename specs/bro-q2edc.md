@@ -345,6 +345,118 @@ Spike artifacts: `vendor/acp-tui` (submodule @ `70b8a6d`),
 `tui/spike-feed.ts` (the replay probe + adapter), this section.
 `main.ts`/`app.tsx` untouched — adoption is a follow-on decision.
 
+## Phase 2 — the seam and the `acp` impl
+
+The spike's recommendation landed as a **parallel implementation
+behind a seam**, not a refactor — per the brief's amendment, nothing
+was deleted and `legacy` stays the default until the `acp` impl
+proves itself in the live pane.
+
+### The seam contract (`tui/impl.ts`)
+
+The shell (`main.ts`) speaks one interface:
+
+```ts
+interface PaneImpl {
+  readonly name: string; // 'legacy' | 'acp'
+  readonly fold: 'legacy' | 'folded'; // the impl's fold policy
+  feed(row: ArchiveRow): void; // archive rows in
+  beginLive(): void; // replay/live boundary
+  drain(): Op[]; // ops for the state fold
+  readonly verdict: { led; mode } | undefined; // rowVerdict shape
+  dump(): string[]; // headless projection
+}
+```
+
+The seam's currency is the `Op` stream `state.ts` already consumes —
+`app.tsx`, the writer, and the key bindings are impl-agnostic by
+construction; a third impl registers one factory in `IMPLS` and
+nothing else moves. Selection resolves `--impl <name>` >
+`BRO_TUI_IMPL` > `'legacy'` (`pickImpl`/`implArg`), and the `acp`
+factory lazy-imports `acp-model` so Node tests and the `--dump`
+path never touch it. The impl's `fold` reaches the fold as
+`PaneState.foldAll` via `mountPane`/`emptyState` — `legacy` keeps
+the COLLAPSE_AT heuristic, `folded` collapses every card body (the
+vendored view-model's `expanded(item) === false` baseline — the
+"too verbose" answer). A `tool` op may now omit `collapsed` so an
+update never stomps the user's toggle.
+
+### The `acp` impl (`tui/acp/`)
+
+- `model.ts` — `AcpImpl`: the vendored session behind the seam. The
+  feed adapter is the spike's verbatim (`session_opening(load)` →
+  `session_update` per row → `prompt_response` per `turn stop` →
+  `permission_opened` per permission row); `beginLive()` reduces
+  `session_opened` so the live tail lands `origin: "other"`. Their
+  session is immutable and delta-free, so `drain()` diffs the item
+  map against the last snapshot and emits our ops — a changed item
+  re-projects whole. Their `ToolCallItem` drops `rawInput`, so
+  `feed()` stashes `toolArg(u)` per `toolCallId` on the way past —
+  the card header keeps its exact arg fidelity. `rawOutputText`
+  projects as a content fallback when `content` is empty (their
+  view-model's same fallback). Verdict maps session state:
+  `replaying` → working/replaying, `disconnected` → blocked,
+  `requires_action` → blocked/permission, `running` → working/turn,
+  `idle` → idle (+`turn complete` when a stop reason stands).
+- `conform.ts` — the shared conformance probe: the same archive
+  through every registered impl, coverage compared **on the op
+  stream** (the seam's currency), not the eviction-windowed state —
+  two impls emitting different item mixes otherwise disagree at the
+  500-item frontier for no real reason.
+
+### What was taken, adapted, skipped
+
+- **Taken**: `acp-model` whole — session, reducer, item types,
+  replay/other origin semantics.
+- **Adapted**: the vendored view-model's _fold semantics_ (collapse
+  default = every body, user toggle survives updates) as a fold
+  policy on `state.ts`, and their item→card language as a
+  projection (`tool_call` → ToolItem incl. `rawOutputText`
+  fallback; `plan`/`permission_record`/`marker` → the side rows our
+  model already used). Tool args keep OUR `toolArg` extraction —
+  their items do not carry `rawInput`.
+- **Skipped**: `items.tsx`/`WindowedConversation`/session-store/
+  config/keys (their app shell — ours stays), the `card.ts`/`format`/
+  markdown row engine (our Solid card renders the same fold
+  contract; pulling their row layout is the deferred Option), the
+  `outputShown` snippet key (our fold IS the snippet: collapsed =
+  header + count, expanded = full), and their cursor-over-all-items
+  walk (our j/k stays tool-cards-only).
+
+### Conformance on the real archive (25,562 rows)
+
+```
+legacy: tools=4643 wContent=4388 diffs=78 msg=791 thought=199 turn=460 perm=0 note=537
+acp:    tools=4643 wContent=4601 diffs=72 msg=786 thought=199 turn=460 perm=0 note=0
+```
+
+Tool calls and turn markers match exactly. The `acp` impl covers
+**more** of the wire: `wContent` is higher (the `rawOutputText`
+fallback fills cards ours left empty), and on unique
+`(toolCallId, path)` pairs the diff coverage is 72 vs 39 — their
+model keeps diffs our repeat-status dedupe drops. `note` collapses
+537 → 0: `usage_update`, `current_mode_update`,
+`available_commands_update`, `session_info_update` become session
+state in their model instead of scrollback noise — the other half
+of "too verbose". `bun run tui/acp/conform.ts <events.jsonl>`
+re-runs the check on any archive.
+
+### Before/after
+
+- `model.ts`/`state.ts`/`app.tsx` unchanged as the default path —
+  `SessionModel` is now `LegacyImpl` (zero delegation loss).
+- `main.ts` resolves `pickImpl` once and speaks the seam —
+  `--impl acp` flips a pane; `--dump` honors it too.
+- `biome.json` excludes `**/vendor/**` — upstream code is not ours
+  to lint or format.
+- `--dump` on the acp impl projects `collapsed: false` — a dump is
+  the full readout; the fold is pane state, not model state.
+
+Dogfood: `bun run plugins/herdr/tui/main.ts <wt> --impl acp` in a
+pane (or `BRO_TUI_IMPL=acp` for a whole attach). `default stays
+legacy` is load-bearing — flipping the default is a one-line
+`pickImpl` change after live review.
+
 ## Risks
 
 - **Solid's prop application is post-construction.** The reconciler

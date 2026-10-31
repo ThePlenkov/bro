@@ -172,4 +172,42 @@ describe('the auto-fold on a landed body', () => {
     const still = bumped.byId[1];
     assert.ok(still !== undefined && still.kind === 'tool' && !still.collapsed);
   });
+
+  test('the folded policy collapses a small body too', () => {
+    const next = applyOps(emptyState({}, true), [{ op: 'append', item: toolDone(1, 3) }]);
+    const item = next.byId[1];
+    assert.ok(item !== undefined && item.kind === 'tool' && item.collapsed);
+  });
+
+  test('the folded policy folds a body landing via tool op', () => {
+    const live = applyOps(emptyState({}, true), [{ op: 'append', item: tool(1, 'Bash') }]);
+    const next = applyOps(live, [{ op: 'tool', item: toolDone(1, 4) }]);
+    const item = next.byId[1];
+    assert.ok(item !== undefined && item.kind === 'tool' && item.collapsed);
+  });
+
+  test('the folded policy still never re-folds a card the user opened', () => {
+    const born = applyOps(emptyState({}, true), [{ op: 'append', item: toolDone(1, 3) }]);
+    const item = born.byId[1];
+    assert.ok(item !== undefined && item.kind === 'tool' && item.collapsed);
+    const opened = { ...item, collapsed: false };
+    const userOpened = applyOps(born, [{ op: 'tool', item: opened }]);
+    const bumped = applyOps(userOpened, [{ op: 'tool', item: { ...opened, status: 'completed' } }]);
+    const still = bumped.byId[1];
+    assert.ok(still !== undefined && still.kind === 'tool' && !still.collapsed);
+  });
+
+  test('a partial tool op without collapsed keeps the user toggle', () => {
+    // the acp impl's tool ops omit `collapsed` — the fold must not
+    // let an absent key stomp the user's open/closed state
+    const born = applyOps(emptyState({}, true), [{ op: 'append', item: toolDone(1, 3) }]);
+    const item = born.byId[1];
+    assert.ok(item !== undefined && item.kind === 'tool' && item.collapsed);
+    const userOpened = applyOps(born, [{ op: 'tool', item: { ...item, collapsed: false } }]);
+    const bumped = applyOps(userOpened, [
+      { op: 'tool', item: { id: 1, status: 'completed', content: [{ kind: 'text', text: 'x' }] } },
+    ]);
+    const still = bumped.byId[1];
+    assert.ok(still !== undefined && still.kind === 'tool' && !still.collapsed);
+  });
 });

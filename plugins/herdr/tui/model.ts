@@ -70,11 +70,13 @@ export interface SideItem {
 
 export type Item = TextItem | ToolItem | SideItem;
 
-/** The ops a feed() call returns — the shell's apply order. */
+/** The ops a feed() call returns — the shell's apply order. A `tool`
+ *  op may carry a partial card (the acp impl omits `collapsed` so the
+ *  fold keeps the user's toggle across updates). */
 export type Op =
   | { op: 'append'; item: Item }
   | { op: 'text'; id: number; text: string }
-  | { op: 'tool'; item: ToolItem }
+  | { op: 'tool'; item: Partial<ToolItem> & Pick<ToolItem, 'id'> }
   | { op: 'evict'; ids: number[] };
 
 interface ToolRec {
@@ -319,31 +321,37 @@ export class SessionModel {
    *  tests' readout. Mirrors the line renderer's shapes so a dump is
    *  already a readable session. */
   dump(): string[] {
-    const lines: string[] = [];
-    for (const it of this.items) {
-      switch (it.kind) {
-        case 'message':
-        case 'thought':
-          for (const l of it.text.split('\n')) lines.push(clip(l));
-          break;
-        case 'tool': {
-          const glyph = it.status === 'completed' ? '✓' : it.status === 'failed' ? '✗' : '⣿';
-          const head = `${glyph} ${clip(it.title)}`;
-          const kind = it.toolKind !== undefined && it.toolKind !== '' ? ` [${it.toolKind}]` : '';
-          const argText = it.arg !== undefined ? firstLine(it.arg) : '';
-          const arg = argText !== '' ? ` ${clip(argText, 120 - head.length - kind.length)}` : '';
-          lines.push(`${head}${kind}${arg}`);
-          if (it.bodyLanded && !it.collapsed) {
-            for (const l of dumpContent(it.content)) lines.push(`│  ${l}`);
-          }
-          break;
-        }
-        default:
-          for (const l of it.text.split('\n')) lines.push(clip(l));
-      }
-    }
-    return lines;
+    return dumpItems(this.items);
   }
+}
+
+/** The item list → plain dump lines, shared by every impl's dump()
+ *  — a dump is a snapshot, not the live pane, so there are no caps. */
+export function dumpItems(items: readonly Item[]): string[] {
+  const lines: string[] = [];
+  for (const it of items) {
+    switch (it.kind) {
+      case 'message':
+      case 'thought':
+        for (const l of it.text.split('\n')) lines.push(clip(l));
+        break;
+      case 'tool': {
+        const glyph = it.status === 'completed' ? '✓' : it.status === 'failed' ? '✗' : '⣿';
+        const head = `${glyph} ${clip(it.title)}`;
+        const kind = it.toolKind !== undefined && it.toolKind !== '' ? ` [${it.toolKind}]` : '';
+        const argText = it.arg !== undefined ? firstLine(it.arg) : '';
+        const arg = argText !== '' ? ` ${clip(argText, 120 - head.length - kind.length)}` : '';
+        lines.push(`${head}${kind}${arg}`);
+        if (it.bodyLanded && !it.collapsed) {
+          for (const l of dumpContent(it.content)) lines.push(`│  ${l}`);
+        }
+        break;
+      }
+      default:
+        for (const l of it.text.split('\n')) lines.push(clip(l));
+    }
+  }
+  return lines;
 }
 
 /** One content item → plain card lines for dump()/tests — text block,

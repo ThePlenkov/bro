@@ -76,9 +76,9 @@ export interface Pane {
  * keys are the ids; letting reconcile treat the items as a keyed
  * list would reorder them.
  */
-export function createPane(meta?: Partial<PaneMeta>): Pane {
-  const [state, setState] = createStore<PaneState>(emptyState(meta));
-  let plain: PaneState = emptyState(meta);
+export function createPane(meta?: Partial<PaneMeta>, foldAll?: boolean): Pane {
+  const [state, setState] = createStore<PaneState>(emptyState(meta, foldAll));
+  let plain: PaneState = emptyState(meta, foldAll);
 
   const publish = (next: PaneState): void => {
     plain = next;
@@ -345,8 +345,11 @@ function Pane(props: { store: PaneStore; syntax: SyntaxStyle }) {
 export async function mountPane(opts: {
   renderer: CliRenderer;
   meta?: Partial<PaneMeta>;
+  /** The impl's fold policy — 'folded' collapses every card body
+   *  (the vendored baseline); unset keeps COLLAPSE_AT. */
+  foldAll?: boolean;
 }): Promise<Pane> {
-  const pane = createPane(opts.meta);
+  const pane = createPane(opts.meta, opts.foldAll);
   const syntax = syntaxStyle(opts.renderer.nativeScene);
   await render(() => <Pane store={pane.store} syntax={syntax} />, opts.renderer);
   return pane;
