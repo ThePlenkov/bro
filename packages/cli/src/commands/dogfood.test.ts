@@ -632,8 +632,8 @@ describe('benchmark (bro-l8c4f.9)', () => {
       })();
       assert.equal(r.code, 0, r.err.join('\n'));
       // find jsonl
-      const lines = require('node:fs')
-        .readFileSync(join(fx.main, '.evidence', 'benchmark', 'paired-results.jsonl'), 'utf8')
+      const { readFileSync } = await import('node:fs');
+      const lines = readFileSync(join(fx.main, '.evidence', 'benchmark', 'paired-results.jsonl'), 'utf8')
         .trim()
         .split('\n');
       assert.ok(lines.length > 0);
