@@ -2785,8 +2785,7 @@ function tmuxRun(socket: string, args: string[]): TmuxResult {
     delete env[k];
   }
   const proc = spawnSync(
-    /* NOSONAR — PATH lookup is the contract (same as git/bd) */
-    'tmux',
+    'tmux' /* NOSONAR — PATH lookup is the contract (same as git/bd) */,
     socket === '' ? args : ['-L', socket, ...args],
     {
       stdio: ['ignore', 'pipe', 'pipe'],
@@ -3199,8 +3198,7 @@ export function makeTmuxConnector(ctx: ConnectorCtx, env: AgentConnectorEnv): Ag
 /** One gc call — PATH lookup is the same contract as git/gh/bd. */
 function gcRun(args: string[], timeoutMs = 30_000): { code: number; out: string; err: string } {
   const proc = spawnSync(
-    /* NOSONAR — PATH lookup is the contract (same as gh/git/bd) */
-    'gc',
+    'gc' /* NOSONAR — PATH lookup is the contract (same as gh/git/bd) */,
     args,
     {
       stdio: ['ignore', 'pipe', 'pipe'],
@@ -3907,8 +3905,7 @@ function dockerRun(
   timeoutMs = 30_000
 ): { code: number; out: string; err: string; missing: boolean } {
   const proc = spawnSync(
-    /* NOSONAR — PATH lookup is the contract (same as gh/git/bd) */
-    'docker',
+    'docker' /* NOSONAR — PATH lookup is the contract (same as gh/git/bd) */,
     args,
     {
       stdio: ['ignore', 'pipe', 'pipe'],
@@ -4712,8 +4709,7 @@ interface GhResult {
  *  and admission runs inside the registry lock). */
 function ghRun(args: string[], timeoutMs = 30_000): GhResult {
   const proc = spawnSync(
-    /* NOSONAR — PATH lookup is the contract (same as docker/git/bd) */
-    'gh',
+    'gh' /* NOSONAR — PATH lookup is the contract (same as docker/git/bd) */,
     args,
     {
       stdio: ['ignore', 'pipe', 'pipe'],
