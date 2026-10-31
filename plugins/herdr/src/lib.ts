@@ -529,27 +529,71 @@ function stateFile(scope: string): string {
   return join(STATE_DIR, `state-${scope}.json`);
 }
 
-export function loadState(scope: string): PluginState {
+function loadStateFromPath(p: string): PluginState | null {
   try {
-    const v = JSON.parse(readFileSync(stateFile(scope), 'utf8')) as Partial<PluginState>;
+    const v = JSON.parse(readFileSync(p, 'utf8')) as Partial<PluginState>;
     return {
-      workspaces: typeof v.workspaces === 'object' && v.workspaces !== null ? v.workspaces : {},
-      mirrors: typeof v.mirrors === 'object' && v.mirrors !== null ? v.mirrors : {},
-      renderers: typeof v.renderers === 'object' && v.renderers !== null ? v.renderers : {},
-      statuses: typeof v.statuses === 'object' && v.statuses !== null ? v.statuses : {},
-      sessions: typeof v.sessions === 'object' && v.sessions !== null ? v.sessions : {},
-      gone: typeof v.gone === 'object' && v.gone !== null ? v.gone : {},
+      workspaces: typeof v.workspaces === 'object' && v.workspaces !== null ? (v.workspaces as Record<string, WorkspaceRec>) : {},
+      mirrors: typeof v.mirrors === 'object' && v.mirrors !== null ? (v.mirrors as Record<string, MirrorRec>) : {},
+      renderers: typeof v.renderers === 'object' && v.renderers !== null ? (v.renderers as Record<string, RendererRec>) : {},
+      statuses: typeof v.statuses === 'object' && v.statuses !== null ? (v.statuses as Record<string, StatusPaneRec>) : {},
+      sessions: typeof v.sessions === 'object' && v.sessions !== null ? (v.sessions as Record<string, StatusPaneRec>) : {},
+      gone: typeof v.gone === 'object' && v.gone !== null ? (v.gone as Record<string, number>) : {},
     };
   } catch {
-    return {
-      workspaces: {},
-      mirrors: {},
-      renderers: {},
-      statuses: {},
-      sessions: {},
-      gone: {},
-    };
+    return null;
   }
+}
+
+export function loadState(scope: string): PluginState {
+  const cur = loadStateFromPath(stateFile(scope)) ?? { workspaces: {}, mirrors: {}, renderers: {}, statuses: {}, gone: {} };
+
+  // try legacy locations and merge any managed workspaces we don't have
+  const home = process.env.HOME ?? (typeof homedir === 'function' ? homedir() : '/root');
+  const legacyDirs = [
+    join(home, '.local', 'state', 'herdr', 'plugins', 'bro.fleet'),
+    join(home, '.local', 'state', 'herdr', 'plugins'),
+    join(home, '.local', 'state', 'herdr'),
+    join(home, '.config', 'herdr', 'plugins', 'bro.fleet'),
+    join(home, '.config', 'herdr', 'plugins'),
+    join(home, '.config', 'bro-herdr-plugin'),
+    join(home, '.local', 'share', 'herdr', 'plugins', 'bro.fleet'),
+    join(home, '.local', 'share', 'herdr', 'plugins'),
+    join(home, '.local', 'share', 'herdr'),
+  ];
+  for (const dir of legacyDirs) {
+    try {
+      const candidates = [
+        join(dir, `state-${scope}.json`),
+        join(dir, 'state.json'),
+      ];
+      for (const c of candidates) {
+        const st = loadStateFromPath(c);
+        if (!st) continue;
+        for (const [k, v] of Object.entries(st.workspaces || {})) {
+          if (cur.workspaces[k] === undefined) {
+            cur.workspaces[k] = v as any;
+          } else if ((v as any)?.managed && !(cur.workspaces[k] as any)?.managed) {
+            cur.workspaces[k] = { ...(cur.workspaces[k] as any), managed: true };
+          }
+        }
+        // merge mirrors/renderers/statuses/gone if missing
+        for (const k of Object.keys(st.mirrors || {})) {
+          if (cur.mirrors[k] === undefined) cur.mirrors[k] = (st.mirrors as any)[k];
+        }
+        for (const k of Object.keys(st.renderers || {})) {
+          if (cur.renderers[k] === undefined) cur.renderers[k] = (st.renderers as any)[k];
+        }
+        for (const k of Object.keys(st.statuses || {})) {
+          if (cur.statuses[k] === undefined) cur.statuses[k] = (st.statuses as any)[k];
+        }
+        for (const k of Object.keys(st.gone || {})) {
+          if (cur.gone[k] === undefined) cur.gone[k] = (st.gone as any)[k];
+        }
+      }
+    } catch {}
+  }
+  return cur;
 }
 
 export function saveState(scope: string, s: PluginState): void {
