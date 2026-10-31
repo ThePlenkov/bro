@@ -673,4 +673,26 @@ export class AcpImpl implements PaneImpl {
     if (this.hidden > 0) out.push(`▸ ${this.hidden} hidden`);
     return out;
   }
+
+  /** The item's full raw text for Ctrl+C — the impl's line language
+   *  at copy width (no display clip): a run emits every member's
+   *  line, a tool its one-liner + full body, a verdict its control
+   *  text, everything else its raw text. */
+  copyText(item: Item): string {
+    const line = (vi: unknown): string => lineText(acpLine(vi, 400, 0, () => undefined));
+    if ('runs' in item && item.runs !== undefined) {
+      const members = (item.runs as readonly unknown[]).map(m => line(m)).filter(l => l !== '');
+      return [`▸ ${item.runs.length} activity`, ...members].join('\n');
+    }
+    if ('vi' in item && item.vi !== undefined) {
+      const body =
+        'content' in item && Array.isArray(item.content) ? dumpContent(item.content) : [];
+      return [line(item.vi), ...body].join('\n');
+    }
+    const v = 'text' in item ? verdictOf(item.text) : undefined;
+    if (v !== undefined) {
+      return [`⛨ jev · ${v.summary}`, ...v.fields.map(([q, f]) => `${q} ${f}`)].join('\n');
+    }
+    return 'text' in item ? item.text : '';
+  }
 }

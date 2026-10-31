@@ -19,7 +19,7 @@
  * so `app.tsx` cannot be imported by the Node test runner, while the
  * model and the pane's state (`model.ts`, `state.ts`) can.
  */
-import { type FSWatcher, mkdirSync, readFileSync, watch } from 'node:fs';
+import { type FSWatcher, mkdirSync, readFileSync, watch, writeSync } from 'node:fs';
 import { dirname } from 'node:path';
 import { gitCommonDir, type ProviderEntry } from '@broject/core';
 import { createCliRenderer } from '@opentui/core';
@@ -152,10 +152,24 @@ export async function runTui(argv: string[]): Promise<void> {
   const { mountPane } = await import('./app.tsx');
 
   const renderer = await createCliRenderer({
-    exitOnCtrlC: true,
+    // Ctrl+C is a key, not a signal: the pane copies (addendum 8);
+    // herdr owns lifecycle — no exit path lives here (addendum 2)
+    exitOnCtrlC: false,
     // no mouse features — reporting would steal native/herdr
     // selection; copy must work without Shift (addendum 7)
     useMouse: false,
+  });
+
+  // Alternate scroll (DECSET 1007): with mouse reporting off, the
+  // terminal translates the wheel into arrow keys — scroll returns
+  // without button tracking, so plain drag still selects (addendum 9)
+  process.stdout.write('\x1b[?1007h');
+  process.on('exit', () => {
+    try {
+      writeSync(1, '\x1b[?1007l');
+    } catch {
+      // stdout already gone — the terminal's own teardown resets 1007
+    }
   });
 
   const impl = await pickImpl(implArg(argv));
@@ -163,14 +177,32 @@ export async function runTui(argv: string[]): Promise<void> {
     renderer,
     meta: { worktree },
     foldAll: impl.fold === 'folded',
+    copyItem: it => impl.copyText?.(it) ?? ('text' in it ? it.text : ''),
   });
 
-  // --- keys: j/k walk the tool cards, Enter/c folds one. No quit
+  // --- keys: j/k walk the tool cards, Enter/c folds one, arrows and
+  // PgUp/PgDn/Home/End scroll (the wheel rides them via ?1007), and
+  // Ctrl+C copies the current row as OSC 52 — the terminal puts it on
+  // the system clipboard where it speaks OSC 52 at all. No quit
   // binding — herdr owns the pane's lifecycle; the pane exits on
   // its close (signal → process.exit → 'exit' releases the session).
+  let toastTimer: ReturnType<typeof setTimeout> | undefined;
   renderer.keyInput.on('keypress', key => {
-    if (key.name === 'j') pane.writer.select(1);
+    if (key.ctrl && key.name === 'c') {
+      const text = pane.writer.copy();
+      if (text === undefined || text === '') return;
+      process.stdout.write(`\x1b]52;c;${Buffer.from(text).toString('base64')}\x1b\\`);
+      pane.toast?.('copied');
+      if (toastTimer !== undefined) clearTimeout(toastTimer);
+      toastTimer = setTimeout(() => pane.toast?.(''), 1500);
+    } else if (key.name === 'j') pane.writer.select(1);
     else if (key.name === 'k') pane.writer.select(-1);
+    else if (key.name === 'up') pane.scroll?.(-1);
+    else if (key.name === 'down') pane.scroll?.(1);
+    else if (key.name === 'pageup') pane.scrollPage?.(-1);
+    else if (key.name === 'pagedown') pane.scrollPage?.(1);
+    else if (key.name === 'home') pane.scrollEdge?.(0);
+    else if (key.name === 'end') pane.scrollEdge?.(1);
     else if (key.name === 'return' || key.name === 'enter' || key.name === 'c')
       pane.writer.toggle();
   });

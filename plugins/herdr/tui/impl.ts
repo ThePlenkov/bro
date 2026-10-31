@@ -15,7 +15,7 @@
  */
 import type { PaneLed } from '../../../packages/cli/src/commands/fleet-state.ts';
 import type { ArchiveRow } from '../../../packages/cli/src/commands/session-feed.ts';
-import { type Op, SessionModel } from './model.ts';
+import { copyItem, type Item, type Op, SessionModel } from './model.ts';
 
 /** How the fold treats a freshly landed card body: `legacy` folds
  *  past COLLAPSE_AT lines, `folded` folds every body (vendored
@@ -41,6 +41,9 @@ export interface PaneImpl {
   readonly verdict: { led: PaneLed; mode: string } | undefined;
   /** The headless text projection — the `--dump` readout. */
   dump(): string[];
+  /** The item's full raw text for clipboard copy — the impl's own
+   *  line language, unclipped. Unset impls fall back to `item.text`. */
+  copyText?(item: Item): string;
 }
 
 /** `SessionModel` is the seam's reference impl — zero delegation
@@ -64,6 +67,9 @@ class LegacyImpl implements PaneImpl {
   }
   dump(): string[] {
     return this.model.dump();
+  }
+  copyText(item: Item): string {
+    return copyItem(item);
   }
 }
 

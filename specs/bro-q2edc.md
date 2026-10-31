@@ -584,6 +584,28 @@ emitted at all, so native terminal selection and herdr's own
 selection both work without Shift. A future click feature goes
 behind a flag, off by default.
 
+**Ctrl+C copies** (addendum 8): `exitOnCtrlC: false` hands 0x03 to
+the key handler (kitty disambiguation delivers `ctrl+c` as an
+event). `PaneImpl.copyText(item)` is the seam's copy payload — the
+impl's own line language at copy width, unclipped (a run emits every
+member line, a tool its one-liner + full body, a verdict its control
+text). `writer.copy()` resolves the selected card, else the latest
+row. The shell writes `OSC 52;c;<base64>` to stdout — terminals that
+speak OSC 52 put it on the system clipboard — and the footer shows a
+1.5s 'copied' toast. No input fields exist, so the selected-text
+branch of the spec is vacuous. Decision: NO quit chord — addendum 2
+stands; the process exits only on herdr's pane close or a signal.
+Copy verified on the wire: `\x1b]52;c;` emitted, payload decodes to
+the run's tally + member lines.
+
+**Wheel without capture** (addendum 9): alternate scroll `?1007h` on
+start (`?1007l` on exit) — terminals translate the wheel into arrow
+keys when the app holds no mouse mode, so scroll returns while plain
+drag still selects (button tracking stays off). Arrows/PgUp/PgDn/
+Home/End now actually scroll — `pane.scroll`/`scrollPage`/`scrollEdge`
+drive the captured `ScrollBoxRenderable` (`scrollBy`/`scrollTo`),
+previously the footer claimed bindings that never existed.
+
 ## Risks
 
 - **Solid's prop application is post-construction.** The reconciler

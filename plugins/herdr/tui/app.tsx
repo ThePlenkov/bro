@@ -15,7 +15,7 @@
  * transform before importing this file.
  */
 
-import type { CliRenderer, NativeResourceOwner } from '@opentui/core';
+import type { CliRenderer, NativeResourceOwner, ScrollBoxRenderable } from '@opentui/core';
 import { SyntaxStyle, TextAttributes } from '@opentui/core';
 import { onAnimationTick, render, useRenderer } from '@opentui/solid';
 import { createMemo, createSignal, For, Show } from 'solid-js';
@@ -63,6 +63,9 @@ export interface PaneWriter {
   select(delta: number): void;
   /** Fold the selected card open or closed. */
   toggle(): void;
+  /** The selected card's (else the latest row's) full raw text —
+   *  Ctrl+C's payload, via the impl's `copyItem` resolver. */
+  copy(): string | undefined;
   /** Update the header bar's fields (worktree, agent, LED). */
   setMeta(meta: Partial<PaneMeta>): void;
 }
@@ -71,6 +74,15 @@ export interface PaneWriter {
 export interface Pane {
   store: PaneStore;
   writer: PaneWriter;
+  /** A brief footer message ('copied'); '' clears. */
+  toast?: (msg: string) => void;
+  /** Scroll the timeline by `lines` (+down/-up) — arrows and the
+   *  alt-scroll wheel path ride this. */
+  scroll?: (lines: number) => void;
+  /** Scroll by a viewport. */
+  scrollPage?: (dir: -1 | 1) => void;
+  /** Jump to the top (0) or the bottom (1). */
+  scrollEdge?: (edge: 0 | 1) => void;
 }
 
 /**
@@ -87,7 +99,11 @@ export interface Pane {
  * keys are the ids; letting reconcile treat the items as a keyed
  * list would reorder them.
  */
-export function createPane(meta?: Partial<PaneMeta>, foldAll?: boolean): Pane {
+export function createPane(
+  meta?: Partial<PaneMeta>,
+  foldAll?: boolean,
+  copyItem?: (item: Item) => string
+): Pane {
   const [state, setState] = createStore<PaneState>(emptyState(meta, foldAll));
   let plain: PaneState = emptyState(meta, foldAll);
 
@@ -113,6 +129,13 @@ export function createPane(meta?: Partial<PaneMeta>, foldAll?: boolean): Pane {
           ...plain,
           byId: { ...plain.byId, [item.id]: { ...item, collapsed: !item.collapsed } },
         });
+      },
+      copy() {
+        const sel = plain.byId[plain.selected];
+        const last = plain.byId[plain.order[plain.order.length - 1]];
+        const item = sel !== undefined && sel.kind === 'tool' ? sel : (sel ?? last);
+        if (item === undefined) return undefined;
+        return copyItem !== undefined ? copyItem(item) : 'text' in item ? item.text : '';
       },
       setMeta(meta) {
         publish(withMeta(plain, meta));
@@ -574,21 +597,32 @@ function HeaderBar(props: { meta: PaneMeta }) {
   );
 }
 
-/** The footer — the key hints, dim, one line. */
-function FooterBar() {
+/** The footer — the key hints, dim, one line; a toast ('copied')
+ *  replaces them while it's set. */
+function FooterBar(props: { toast: () => string }) {
   return (
     <box width="100%" height={1} flexShrink={0}>
-      <text
-        fg={theme.muted}
-        content="j/k select card · Enter/c fold · arrows/PgUp/Home/End scroll"
-      />
+      <Show
+        when={props.toast() === ''}
+        fallback={<text fg={theme.accent} content={`  ${props.toast()}`} />}
+      >
+        <text
+          fg={theme.muted}
+          content="j/k select card · Enter/c fold · arrows/PgUp/Home/End scroll · Ctrl+C copy row"
+        />
+      </Show>
     </box>
   );
 }
 
 /** The whole pane — header bar, the sticky-bottom scrollback of
  *  session items, footer. */
-function Pane(props: { store: PaneStore; syntax: SyntaxStyle }) {
+function Pane(props: {
+  store: PaneStore;
+  syntax: SyntaxStyle;
+  toast: () => string;
+  onScroller?: (el: ScrollBoxRenderable) => void;
+}) {
   const renderer = useRenderer();
   const [frame, setFrame] = createSignal(0);
   onAnimationTick(10, () => setFrame(f => f + 1));
@@ -603,7 +637,14 @@ function Pane(props: { store: PaneStore; syntax: SyntaxStyle }) {
   return (
     <box flexDirection="column" width="100%" height="100%">
       <HeaderBar meta={props.store.state.meta} />
-      <scrollbox stickyScroll stickyStart="bottom" viewportCulling flexGrow={1} width="100%">
+      <scrollbox
+        ref={el => props.onScroller?.(el as ScrollBoxRenderable)}
+        stickyScroll
+        stickyStart="bottom"
+        viewportCulling
+        flexGrow={1}
+        width="100%"
+      >
         <For each={props.store.state.order}>
           {(id, index) => (
             <Show when={props.store.state.byId[id]} keyed>
@@ -636,7 +677,7 @@ function Pane(props: { store: PaneStore; syntax: SyntaxStyle }) {
           )}
         </For>
       </scrollbox>
-      <FooterBar />
+      <FooterBar toast={props.toast} />
     </box>
   );
 }
@@ -654,13 +695,33 @@ export async function mountPane(opts: {
   /** The impl's fold policy — 'folded' collapses every card body
    *  (the vendored baseline); unset keeps COLLAPSE_AT. */
   foldAll?: boolean;
+  /** The impl's copy text for an item — Ctrl+C's payload. */
+  copyItem?: (item: Item) => string;
 }): Promise<Pane> {
   // mouse capture OFF — the pane uses no mouse features, and holding
   // reporting steals native selection (addendum 7: copy must work
   // without Shift; herdr's own selection rides the same release)
   opts.renderer.useMouse = false;
-  const pane = createPane(opts.meta, opts.foldAll);
+  const pane = createPane(opts.meta, opts.foldAll, opts.copyItem);
   const syntax = syntaxStyle(opts.renderer.nativeScene);
-  await render(() => <Pane store={pane.store} syntax={syntax} />, opts.renderer);
+  const [toast, setToast] = createSignal('');
+  let scroller: ScrollBoxRenderable | undefined;
+  await render(
+    () => (
+      <Pane
+        store={pane.store}
+        syntax={syntax}
+        toast={toast}
+        onScroller={el => {
+          scroller = el;
+        }}
+      />
+    ),
+    opts.renderer
+  );
+  pane.toast = setToast;
+  pane.scroll = lines => scroller?.scrollBy(lines);
+  pane.scrollPage = dir => scroller?.scrollBy(dir * Math.max(1, opts.renderer.height - 2));
+  pane.scrollEdge = edge => scroller?.scrollTo(edge === 0 ? 0 : Infinity);
   return pane;
 }

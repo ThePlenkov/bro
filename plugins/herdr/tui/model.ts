@@ -430,3 +430,14 @@ export function dumpContent(content: ToolContent[]): string[] {
   }
   return lines;
 }
+
+/** One item → its FULL raw text for the clipboard (Ctrl+C): text
+ *  as-is, tools as `title\n<every content line>` — no display clip,
+ *  no fold gate: copy always gets the whole card. */
+export function copyItem(it: Item): string {
+  if (it.kind === 'tool') {
+    const head = `${it.title}${it.toolKind !== undefined && it.toolKind !== '' ? ` [${it.toolKind}]` : ''}${it.arg !== undefined ? ` ${it.arg}` : ''}`;
+    return [head, ...dumpContent(it.content)].join('\n');
+  }
+  return it.text;
+}
