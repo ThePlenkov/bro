@@ -131,16 +131,26 @@ function percentile(sorted: number[], p: number): number {
   return sorted[Math.min(sorted.length - 1, Math.max(0, Math.ceil(p * sorted.length) - 1))]!;
 }
 
+const VALUE_FLAGS = new Set(['--runs', '--warmup', '--out', '--budget', '--lanes']);
+
 function argValue(argv: string[], flag: string): string | undefined {
   const i = argv.indexOf(flag);
-  return i >= 0 ? argv[i + 1] : undefined;
+  if (i < 0) {
+    return undefined;
+  }
+  const val = argv[i + 1];
+  if (val === undefined || val.startsWith('-')) {
+    console.error(`bench-hooks: ${flag} requires an argument`);
+    process.exit(2);
+  }
+  return val;
 }
 
 /** Sample-count sanity in one named predicate — the validation rule,
  *  not a stack of operators on an `if`. */
 function validCounts(lim: RunLimits): boolean {
   return (
-    Number.isFinite(lim.runs) && lim.runs >= 3 && Number.isFinite(lim.warmup) && lim.warmup >= 0
+    Number.isInteger(lim.runs) && lim.runs >= 3 && Number.isInteger(lim.warmup) && lim.warmup >= 0
   );
 }
 
@@ -177,8 +187,14 @@ function loadBudget(opts: Options): Record<string, number> {
     return BUDGET_P50_MS;
   }
   try {
-    const parsed = JSON.parse(readFileSync(opts.budgetFile, 'utf8')) as Record<string, number>;
-    return { ...BUDGET_P50_MS, ...parsed };
+    const parsed = JSON.parse(readFileSync(opts.budgetFile, 'utf8')) as Record<string, unknown>;
+    for (const [key, cap] of Object.entries(parsed)) {
+      if (typeof cap !== 'number' || !Number.isFinite(cap)) {
+        console.error(`bench-hooks: budget ${key} must be a finite number of ms`);
+        process.exit(2);
+      }
+    }
+    return { ...BUDGET_P50_MS, ...(parsed as Record<string, number>) };
   } catch (e) {
     console.error(
       `bench-hooks: cannot read --budget ${opts.budgetFile} — ${e instanceof Error ? e.message : String(e)}`
