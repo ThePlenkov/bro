@@ -330,15 +330,18 @@ function hasLiveRunOrBoundAgent(p: Planes, treePath: string): boolean {
         if (entry.pid === undefined || entry.pid === null) {
           continue;
         }
-        if (!pidAlive(entry.pid)) {
+        const pidStart = (entry as any).pidStart as string | undefined;
+        if (!pidAlive(entry.pid, pidStart)) {
           continue;
         }
         // must correspond to a still-running agent in fleet status
-        const eid = (entry as any).agentId ?? (entry as any).id;
+        const eid = (entry as any).agentId ?? (entry as any).id ?? (entry as any).molStep;
         let running = false;
+        let found = false;
         for (const a of p.status.fleet.agents || []) {
           const aid = (a as any).agentId ?? a.id;
           if (eid && aid && eid === aid) {
+            found = true;
             if (a.state === 'running') {
               running = true;
               break;
@@ -346,10 +349,10 @@ function hasLiveRunOrBoundAgent(p: Planes, treePath: string): boolean {
             break;
           }
         }
+        if (!found) {
+          continue;
+        }
         if (!running) {
-          // if no specific fleet agent match found, be conservative only if
-          // fleet status doesn't show this agent as exited/blocked
-          // but better to not block on orphaned pid entries
           continue;
         }
         return true;
@@ -452,8 +455,24 @@ function isBranchPushedToRemote(wt: string): boolean {
       }
     }
   }
-  // if no bases exist, be conservative and don't assume remote-preserved
+  // if no bases exist, try to see if current branch has upstream on origin or commit is reachable from origin
   if (!anyBaseOk) {
+    const br2 = run('git', ['-C', wt, 'rev-parse', '--abbrev-ref', '--symbolic-full-name', '@{u}']);
+    if (br2.code === 0 && br2.out.trim().startsWith('origin/')) {
+      return true;
+    }
+    const brn = run('git', ['-C', wt, 'rev-parse', '--abbrev-ref', 'HEAD']);
+    const b = brn.out.trim();
+    if (b && b !== 'HEAD') {
+      if (run('git', ['-C', wt, 'show-ref', '--verify', '--quiet', `refs/remotes/origin/${b}`]).code === 0) return true;
+      if (run('git', ['-C', wt, 'config', `branch.${b}.remote`]).code === 0 && run('git', ['-C', wt, 'config', `branch.${b}.remote`]).out.trim() === 'origin') return true;
+    } else {
+      const head = run('git', ['-C', wt, 'rev-parse', 'HEAD']);
+      if (head.code === 0) {
+        const lr = quickRun('git', ['-C', wt, 'branch', '-r', '--contains', head.out.trim()], undefined, 2000);
+        if (lr.code === 0 && lr.out.includes('origin/')) return true;
+      }
+    }
     return false;
   }
   return false;
@@ -498,6 +517,33 @@ function hasUnpushedCommits(wt: string): boolean {
         return true;
       }
     }
+    // branch pushed to origin but not tracked locally? also try ls-remote quickly
+    const lrr = quickRun('git', ['-C', wt, 'ls-remote', '--exit-code', '--heads', 'origin', branch], undefined, 2000);
+    if (lrr.code === 0) {
+      const ur3 = run('git', ['-C', wt, 'log', `origin/${branch}..HEAD`, '--oneline']);
+      if (ur3.code === 0) {
+        if (ur3.out.trim() === '') return false;
+        return true;
+      }
+    }
+    // If pushed to origin branch exists, don't fall through to base-branch check
+    // which would incorrectly think unmerged commits mean "unpreserved"
+    const chkOriginBranch =
+      run('git', ['-C', wt, 'show-ref', '--verify', '--quiet', `refs/remotes/origin/${branch}`]).code === 0 ||
+      quickRun('git', ['-C', wt, 'ls-remote', '--exit-code', '--heads', 'origin', branch], undefined, 1500).code === 0;
+    if (chkOriginBranch) {
+      // All commits pushed to origin branch - preserved even if not merged to main
+      return false;
+    }
+  } else if (branch === 'HEAD') {
+    // detached HEAD - if commit is on origin, treat as preserved
+    const head = run('git', ['-C', wt, 'rev-parse', 'HEAD']);
+    if (head.code === 0) {
+      const lr = quickRun('git', ['-C', wt, 'branch', '-r', '--contains', head.out.trim()], undefined, 2000);
+      if (lr.code === 0 && lr.out.includes('origin/')) {
+        return false;
+      }
+    }
   }
   // Fall back to base branch comparison - if commits are in base (merged), that's fine
   const bases = ['origin/main', 'origin/master', 'origin/HEAD'];
@@ -509,6 +555,15 @@ function hasUnpushedCommits(wt: string): boolean {
     const r = run('git', ['-C', wt, 'log', `${base}..HEAD`, '--oneline']);
     if (r.code === 0) {
       if (r.out.trim() !== '') {
+        // commits ahead of base but maybe pushed to origin branch - check again
+        const br2 = run('git', ['-C', wt, 'rev-parse', '--abbrev-ref', 'HEAD']);
+        const b2 = br2.out.trim();
+        if (b2 && b2 !== 'HEAD') {
+          const pushed =
+            run('git', ['-C', wt, 'show-ref', '--verify', '--quiet', `refs/remotes/origin/${b2}`]).code === 0 ||
+            quickRun('git', ['-C', wt, 'ls-remote', '--exit-code', '--heads', 'origin', b2], undefined, 1500).code === 0;
+          if (pushed) return false;
+        }
         return true;
       }
       // no commits ahead of base means all work is in base (merged) - good
@@ -586,6 +641,16 @@ function reapPreservedDead(p: Planes, ctx: WsCtx): number {
       log(`keep ${basename(w.path)} — armed/claimed`);
       continue;
     }
+    // double check fresh state before deciding
+    const pPre = readPlanes(repoDir(ctxJson()));
+    if (isArmedOrClaimed(pPre, w.path)) {
+      log(`keep ${basename(w.path)} — armed/claimed`);
+      continue;
+    }
+    if (hasLiveRunOrBoundAgent(pPre, w.path)) {
+      log(`keep ${basename(w.path)} — live run/bound agent`);
+      continue;
+    }
     if (hasLiveRunOrBoundAgent(p, w.path)) {
       log(`keep ${basename(w.path)} — live run/bound agent`);
       continue;
@@ -622,10 +687,23 @@ function reapPreservedDead(p: Planes, ctx: WsCtx): number {
       }
     }
     // recheck occupancy immediately before closing to avoid race
-    const pFresh = readPlanes(repoDir(ctxJson()));
+    const pFresh1 = readPlanes(repoDir(ctxJson()));
     if (
-      isArmedOrClaimed(pFresh, w.path) ||
-      hasLiveRunOrBoundAgent(pFresh, w.path) ||
+      isArmedOrClaimed(pFresh1, w.path) ||
+      hasLiveRunOrBoundAgent(pFresh1, w.path) ||
+      isArmedOrClaimed(p, w.path) ||
+      hasLiveRunOrBoundAgent(p, w.path)
+    ) {
+      log(`keep ${basename(w.path)} — occupied at close time`);
+      continue;
+    }
+    // one more recheck immediately before close
+    const pFresh2 = readPlanes(repoDir(ctxJson()));
+    if (
+      isArmedOrClaimed(pFresh2, w.path) ||
+      hasLiveRunOrBoundAgent(pFresh2, w.path) ||
+      isArmedOrClaimed(pFresh1, w.path) ||
+      hasLiveRunOrBoundAgent(pFresh1, w.path) ||
       isArmedOrClaimed(p, w.path) ||
       hasLiveRunOrBoundAgent(p, w.path)
     ) {
