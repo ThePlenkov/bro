@@ -86,7 +86,27 @@ session-start hooks. A conversation turn can afford seconds; a
 client's _internal_ model calls cannot. An interactive client must
 point its internal models — the auto-mode permission/safety
 classifier and the small/fast background model (claude-code's
-`ANTHROPIC_SMALL_FAST_MODEL`) — at a direct `api`-kind endpoint: the
+**The conductor path is session-grade — unless the fast lane is
+armed.** Every `POST /v1/messages` that conducts opens a real agent
+session — `session/new` plus the client's own session-start hooks.
+When the server also carries upstream credentials
+(`BRO_PROVIDER_API_KEY`, falling back to `ANTHROPIC_API_KEY` /
+`ANTHROPIC_AUTH_TOKEN`; `BRO_PROVIDER_UPSTREAM` overrides the
+default `https://api.anthropic.com`), a _classifier-shaped_ call —
+`max_tokens` at or under the cap with an empty `tools` field —
+byte-forwards to the direct upstream instead and skips
+the session entirely. `BRO_PROVIDER_FAST_LANE=off` disables the lane;
+`BRO_PROVIDER_FAST_MAX_TOKENS` re-pins the cap (default 2048);
+`BRO_PROVIDER_FAST_MODEL` rewrites the model id the upstream sees
+when the conductor-only `<backend>/<id>` id should not reach
+Anthropic. Config-file pins: `serve.fastLane`, `serve.fastModel`.
+Tool-bearing and session-scale calls always conduct. Telemetry
+carries `conductor.lane=session|fast`; `bro doctor` reports the
+classifier-warn as ok once the lane is armed.
+
+Unarmed, the warning stands: an interactive client must point its
+internal models — the auto-mode permission/safety classifier and the
+small/fast background model (claude-code's`ANTHROPIC_SMALL_FAST_MODEL`) — at a direct `api`-kind endpoint: the
 byte-proxy mode above, or the real upstream. Routing them at the
 conductor pays a session spin-up inside a seconds-scale permission
 deadline, so every check fail-closes as "temporarily unavailable" and
