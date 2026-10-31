@@ -1,7 +1,7 @@
 {
   "$schema": "https://omp.sh/schemas/marketplace.json",
   "name": "bro",
-  "description": "Agent's sidekick — the rig that owns the PR-to-merge loop: beads claims, fleet workers, review gates, cross-repo mesh — mechanics in the bro CLI",
+  "description": "Agent's sidekick — deterministic lifecycle closure (task → agent → PR → gate → debt). Wedge: review gate + debt ledger with existing agents, task store, and PR/CI. Orchestration (fleet/convoy) is optional and progressive — not a replacement runtime."
   "owner": {
     "name": "Petr Plenkov"
   },

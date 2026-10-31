@@ -408,7 +408,7 @@ function ompManifest() {
       name: 'bro',
       version: manifest.version,
       description:
-        "Agent's sidekick — the rig that owns the PR-to-merge loop: beads claims, fleet workers, review gates, cross-repo mesh — all mechanics in the bro CLI over gh + beads",
+        "Agent's sidekick — deterministic lifecycle closure (task → agent → PR → gate → debt). Wedge: review gate + debt ledger with existing agents, task store, and PR/CI. Orchestration (fleet/convoy) is optional and progressive — not a replacement runtime.",
       author: { name: 'Petr Plenkov' },
       homepage: 'https://broject.dev',
       repository: {
