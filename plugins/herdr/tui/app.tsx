@@ -18,7 +18,7 @@
 import type { CliRenderer, NativeResourceOwner, ScrollBoxRenderable } from '@opentui/core';
 import { SyntaxStyle, TextAttributes } from '@opentui/core';
 import { onAnimationTick, render, useRenderer } from '@opentui/solid';
-import { createMemo, createSignal, For, Show } from 'solid-js';
+import { createMemo, createSignal, For, type JSX, Show } from 'solid-js';
 import { createStore, reconcile } from 'solid-js/store';
 import {
   acpCardRows,
@@ -149,22 +149,72 @@ export function createPane(
 function syntaxStyle(owner: NativeResourceOwner): SyntaxStyle {
   return SyntaxStyle.fromStyles(
     {
-      'markup.heading': { fg: theme.accent, bold: true },
-      'markup.bold': { fg: theme.warning },
-      'markup.italic': { fg: '#bb9af7' },
+      'markup.heading': { fg: theme.emph, bold: true },
+      'markup.bold': { fg: theme.emph },
+      'markup.italic': { fg: theme.muted },
       'markup.raw': { fg: theme.success },
       'markup.quote': { fg: theme.muted },
-      'markup.link': { fg: '#73daca' },
-      'markup.list': { fg: '#7dcfff' },
-      keyword: { fg: '#bb9af7' },
+      'markup.link': { fg: theme.cyan, underline: true },
+      'markup.list': { fg: theme.peach },
+      keyword: { fg: theme.cyan },
       string: { fg: theme.success },
       comment: { fg: theme.muted },
-      number: { fg: '#ff9e64' },
+      number: { fg: theme.warning },
       'diff.plus': { fg: theme.success },
       'diff.minus': { fg: theme.error },
-      'diff.delta': { fg: theme.accent },
+      'diff.delta': { fg: theme.info },
     },
     owner
+  );
+}
+
+/** Word-wrap one plain-text line to `w` columns — the `┃` block
+ *  pre-wraps so every visual row carries the bar (their capture pads
+ *  each wrapped line with `┃` + block bg). */
+function wrapPlain(line: string, w: number): string[] {
+  if (line.length <= w) return [line];
+  const out: string[] = [];
+  let rest = line;
+  while (rest.length > w) {
+    let cut = rest.lastIndexOf(' ', w);
+    if (cut <= 0) cut = w;
+    out.push(rest.slice(0, cut));
+    rest = rest.slice(cut).trimStart();
+  }
+  if (rest !== '') out.push(rest);
+  return out;
+}
+
+const URL_RE = /https?:\/\/[^\s)\]>}"']+/g;
+
+/** One plain line → text runs; URLs paint cyan-underlined (their
+ *  link chrome — `56b6c2` + underline in the capture). */
+function LinkRuns(props: { line: string; fg: string; dim?: boolean }) {
+  const parts = createMemo(() => {
+    const out: { text: string; link: boolean }[] = [];
+    let at = 0;
+    for (const m of props.line.matchAll(URL_RE)) {
+      const i = m.index ?? 0;
+      if (i > at) out.push({ text: props.line.slice(at, i), link: false });
+      out.push({ text: m[0], link: true });
+      at = i + m[0].length;
+    }
+    if (at < props.line.length) out.push({ text: props.line.slice(at), link: false });
+    if (out.length === 0) out.push({ text: props.line, link: false });
+    return out;
+  });
+  return (
+    <For each={parts()}>
+      {p => (
+        <text
+          fg={p.link ? theme.cyan : props.fg}
+          attributes={
+            (p.link ? TextAttributes.UNDERLINE : 0) | (props.dim === true ? TextAttributes.DIM : 0)
+          }
+          content={p.text}
+        />
+      )}
+    </For>
   );
 }
 
@@ -350,7 +400,7 @@ function AcpRunRow(props: {
         backgroundColor={props.selected ? theme.surface : undefined}
       >
         <text
-          fg={theme.accent}
+          fg={theme.cyan}
           attributes={props.item.status === 'live' ? undefined : TextAttributes.DIM}
           content="▸ "
         />
@@ -377,29 +427,71 @@ function AcpRunRow(props: {
   );
 }
 
-/** The injected prompt — "what was asked" at the top, visually
- *  distinct: accent `▸` gutter over the session surface, markdown
- *  body. Empty text (no `.prompt.md` sibling) is the marker. */
-function PromptRow(props: { item: Item; syntax: SyntaxStyle }) {
-  const text = () => ('text' in props.item ? props.item.text : '');
+/** One `┃`-barred row — their block grammar verbatim (capture rows
+ *  25-43): two base cells, the peach bar on `#141414`, then content
+ *  padded two cells, the surface wash filling to the right edge.
+ *  Every visual line of a block is its own `BarRow`, so wrapped
+ *  text keeps the bar and the bg (addendum 13). */
+function BarRow(props: { children?: JSX.Element }) {
   return (
-    <box flexDirection="row" width="100%" flexShrink={0} backgroundColor={theme.surface}>
-      <text fg={theme.accent} attributes={TextAttributes.BOLD} content={'▸ '} />
+    <box flexDirection="row" width="100%" flexShrink={0} backgroundColor={theme.base}>
+      <text content="  " />
+      <box flexDirection="row" flexGrow={1} flexShrink={0} backgroundColor={theme.surface}>
+        <text fg={theme.peach} content="┃  " />
+        <box flexDirection="row" flexGrow={1} flexShrink={0}>
+          {props.children}
+        </box>
+      </box>
+    </box>
+  );
+}
+
+/** A bare `┃` pad row — the blank line their blocks put around
+ *  titles and between sections (`┃` + surface fill, nothing else). */
+function BarPad() {
+  return (
+    <BarRow>
+      <text content=" " />
+    </BarRow>
+  );
+}
+
+/** The caller prompt — "what was asked" as their `┃` card: a dim
+ *  title, the prompt in their emphasis color, links cyan-underlined,
+ *  pre-wrapped so every visual row carries the bar. Empty text (no
+ *  journaled prompt, no `.prompt.md` sibling) is the marker. */
+function PromptRow(props: { item: Item; width: () => number }) {
+  const lines = createMemo(() => {
+    const text = 'text' in props.item ? props.item.text : '';
+    const w = Math.max(20, props.width() - 9);
+    const out: string[] = [];
+    for (const l of text.split('\n')) out.push(...wrapPlain(l, w));
+    return out;
+  });
+  return (
+    <box flexDirection="column" width="100%" flexShrink={0}>
+      <BarPad />
+      <BarRow>
+        <text fg={theme.muted} content="Prompt" />
+      </BarRow>
+      <BarPad />
       <Show
-        when={text() !== ''}
+        when={lines().length > 0}
         fallback={
-          <text fg={theme.muted} attributes={TextAttributes.DIM} content="prompt unavailable" />
+          <BarRow>
+            <text fg={theme.muted} attributes={TextAttributes.DIM} content="prompt unavailable" />
+          </BarRow>
         }
       >
-        <box flexGrow={1} flexShrink={0}>
-          <markdown
-            content={text()}
-            syntaxStyle={props.syntax}
-            internalBlockMode="top-level"
-            flexShrink={0}
-          />
-        </box>
+        <For each={lines()}>
+          {l => (
+            <BarRow>
+              <LinkRuns line={l} fg={theme.emph} />
+            </BarRow>
+          )}
+        </For>
       </Show>
+      <BarPad />
     </box>
   );
 }
@@ -455,6 +547,20 @@ function ItemRow(props: {
       ? it.tone
       : undefined;
   });
+  // a permission ask renders as their `┃` Questions card — legacy
+  // `permission` items and the acp `permission_record` both map
+  const perm = createMemo((): { title: string; detail: string } | undefined => {
+    const it = props.item;
+    if (it.kind === 'permission' && 'text' in it) {
+      return { title: it.text, detail: '' };
+    }
+    const vi = it.vi as { kind?: string; title?: string; outcome?: { type?: string } } | undefined;
+    if (vi?.kind === 'permission_record') {
+      const o = vi.outcome?.type ?? 'pending';
+      return { title: vi.title ?? '', detail: `outcome: ${o}` };
+    }
+    return undefined;
+  });
   return (
     // the end-user timeline gutter: every row carries its archive `ts`
     // as a dim HH:MM — one glance tells WHEN the step happened
@@ -472,84 +578,108 @@ function ItemRow(props: {
           fallback={<VerdictRow view={verdict() as VerdictView} selected={props.selected} />}
         >
           <Show
-            when={segs() === null}
-            fallback={
-              <box flexDirection="column" flexShrink={0}>
-                <AcpSegRow segs={segs() ?? []} selected={props.selected} />
-                <Show when={tool() !== undefined && !tool()?.collapsed}>
-                  <AcpToolBody
-                    item={tool() as ToolItem}
-                    syntax={props.syntax}
-                    width={props.width}
-                  />
-                </Show>
-              </box>
-            }
+            when={perm() === undefined}
+            fallback={<PermissionRow title={perm()?.title ?? ''} detail={perm()?.detail ?? ''} />}
           >
             <Show
-              when={run() === undefined}
+              when={segs() === null}
               fallback={
-                <AcpRunRow
-                  item={run() as ToolItem}
-                  selected={props.selected}
-                  width={props.width}
-                  frame={props.frame}
-                  findTool={props.findTool}
-                />
+                <box flexDirection="column" flexShrink={0}>
+                  <AcpSegRow segs={segs() ?? []} selected={props.selected} />
+                  <Show when={tool() !== undefined && !tool()?.collapsed}>
+                    <AcpToolBody
+                      item={tool() as ToolItem}
+                      syntax={props.syntax}
+                      width={props.width}
+                    />
+                  </Show>
+                </box>
               }
             >
               <Show
-                when={tool()}
-                keyed
+                when={run() === undefined}
                 fallback={
-                  <Show
-                    when={props.item.kind === 'header'}
-                    fallback={
-                      <Show
-                        when={props.item.kind === 'prompt'}
-                        fallback={
-                          <Show
-                            when={props.item.kind === 'message'}
-                            fallback={
-                              <text
-                                fg={thought() ? theme.muted : sideColor(tone())}
-                                attributes={
-                                  thought()
-                                    ? TextAttributes.DIM | TextAttributes.ITALIC
-                                    : TextAttributes.DIM
-                                }
-                                flexShrink={0}
-                                content={props.item.kind === 'tool' ? '' : props.item.text}
-                              />
-                            }
-                          >
-                            <markdown
-                              content={props.item.kind === 'tool' ? '' : props.item.text}
-                              syntaxStyle={props.syntax}
-                              streaming
-                              internalBlockMode="top-level"
-                              flexShrink={0}
-                            />
-                          </Show>
-                        }
-                      >
-                        <PromptRow item={props.item} syntax={props.syntax} />
-                      </Show>
-                    }
-                  >
-                    {/* the feed header — agent·provider·model·cwd·launched,
-                     *  a dim surface block at the top of the stream */}
-                    <box width="100%" flexShrink={0} backgroundColor={theme.surface}>
-                      <text
-                        fg={theme.muted}
-                        attributes={TextAttributes.DIM}
-                        content={props.item.kind === 'header' ? props.item.text : ''}
-                      />
-                    </box>
-                  </Show>
+                  <AcpRunRow
+                    item={run() as ToolItem}
+                    selected={props.selected}
+                    width={props.width}
+                    frame={props.frame}
+                    findTool={props.findTool}
+                  />
                 }
               >
-                {item => <ToolCard item={item} syntax={props.syntax} selected={props.selected} />}
+                <Show
+                  when={tool()}
+                  keyed
+                  fallback={
+                    <Show
+                      when={props.item.kind === 'header'}
+                      fallback={
+                        <Show
+                          when={props.item.kind === 'prompt'}
+                          fallback={
+                            <Show
+                              when={props.item.kind === 'message'}
+                              fallback={
+                                <Show
+                                  when={thought()}
+                                  fallback={
+                                    <text
+                                      fg={sideColor(tone())}
+                                      attributes={TextAttributes.DIM}
+                                      flexShrink={0}
+                                      content={props.item.kind === 'tool' ? '' : props.item.text}
+                                    />
+                                  }
+                                >
+                                  {/* `+ Thought` — their amber collapsed
+                                   *  thought row (capture rows 3/11/23) */}
+                                  <box flexDirection="row" flexShrink={0}>
+                                    <text fg={theme.amber} content="+ " />
+                                    <text fg={theme.amber} content="Thought" />
+                                    <text
+                                      fg={theme.muted}
+                                      attributes={TextAttributes.DIM}
+                                      content={` · ${props.item.kind === 'tool' ? '' : props.item.text.split('\n')[0]}`}
+                                    />
+                                  </box>
+                                </Show>
+                              }
+                            >
+                              {/* `⏺` — their assistant bullet; quiet prose
+                               *  to its right (addendum 12/13) */}
+                              <box flexDirection="row" flexShrink={0} width="100%">
+                                <text fg={theme.peach} content="⏺ " />
+                                <box flexGrow={1} flexShrink={0}>
+                                  <markdown
+                                    content={props.item.kind === 'tool' ? '' : props.item.text}
+                                    syntaxStyle={props.syntax}
+                                    streaming
+                                    internalBlockMode="top-level"
+                                    flexShrink={0}
+                                  />
+                                </box>
+                              </box>
+                            </Show>
+                          }
+                        >
+                          <PromptRow item={props.item} width={props.width} />
+                        </Show>
+                      }
+                    >
+                      {/* the feed header — agent·provider·model·cwd·launched,
+                       *  their `#141414` bar: dim label, emphasis fields */}
+                      <box width="100%" flexShrink={0} backgroundColor={theme.surface}>
+                        <text
+                          fg={theme.emph}
+                          content={`  ${props.item.kind === 'header' ? props.item.text : ''}`}
+                        />
+                      </box>
+                    </Show>
+                  }
+                >
+                  {item => <ToolCard item={item} syntax={props.syntax} selected={props.selected} />}
+                </Show>
               </Show>
             </Show>
           </Show>
@@ -568,30 +698,57 @@ const hhmm = (at: string | undefined): string => {
   return `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`;
 };
 
-/** The verdict control — `⛨ jev · <summary>` badge line plus the
- *  fields table (short — shape-checked answers only, the ▸ JSON row
- *  stays the fallback for anything else). */
+/** The verdict control as their `┃` card — a dim title, the badge
+ *  line in emphasis (their "recommended option" reads), the answer
+ *  fields dim beneath. Shape-checked answers only; the ▸ JSON row
+ *  stays the fallback for anything else. */
 function VerdictRow(props: { view: VerdictView; selected: boolean }) {
   return (
-    <box
-      flexDirection="column"
-      flexShrink={0}
-      backgroundColor={props.selected ? theme.surface : undefined}
-    >
-      <box flexDirection="row" flexShrink={0}>
-        <text fg={theme.accent} attributes={TextAttributes.BOLD} content="⛨ " />
-        <text fg={theme.accent} attributes={TextAttributes.BOLD} content={`${props.view.badge} `} />
-        <text fg={theme.text} content={props.view.summary} />
-      </box>
+    <box flexDirection="column" width="100%" flexShrink={0}>
+      <BarPad />
+      <BarRow>
+        <text fg={theme.muted} content="Verdict" />
+      </BarRow>
+      <BarPad />
+      <BarRow>
+        <text fg={theme.peach} content="⛨ " />
+        <text fg={theme.emph} content={`${props.view.badge} `} />
+        <LinkRuns line={props.view.summary} fg={theme.emph} />
+      </BarRow>
       <For each={props.view.fields}>
         {f => (
-          <box flexDirection="row" flexShrink={0}>
-            <text fg={theme.muted} attributes={TextAttributes.DIM} content="   " />
-            <text fg={theme.muted} content={`${f[0]} `} />
-            <text fg={theme.text} attributes={TextAttributes.DIM} content={f[1]} />
-          </box>
+          <BarRow>
+            <text fg={theme.muted} attributes={TextAttributes.DIM} content={`  ${f[0]} `} />
+            <LinkRuns line={f[1]} fg={theme.muted} dim />
+          </BarRow>
         )}
       </For>
+      <BarPad />
+    </box>
+  );
+}
+
+/** A permission ask as their Questions card — the `┃` block is
+ *  exactly what their capture shows for an interactive ask (the
+ *  pane stays readonly; the block just reports it). */
+function PermissionRow(props: { title: string; detail: string }) {
+  return (
+    <box flexDirection="column" width="100%" flexShrink={0}>
+      <BarPad />
+      <BarRow>
+        <text fg={theme.muted} content="Permission" />
+      </BarRow>
+      <BarPad />
+      <BarRow>
+        <text fg={theme.warning} content="⚠ " />
+        <LinkRuns line={props.title} fg={theme.emph} />
+      </BarRow>
+      <Show when={props.detail !== ''}>
+        <BarRow>
+          <LinkRuns line={props.detail} fg={theme.muted} dim />
+        </BarRow>
+      </Show>
+      <BarPad />
     </box>
   );
 }
@@ -621,10 +778,15 @@ function HeaderBar(props: { meta: PaneMeta }) {
 }
 
 /** The footer — the key hints, dim, one line; a toast ('copied')
- *  replaces them while it's set. */
-function FooterBar(props: { toast: () => string }) {
+ *  replaces them while it's set. Their bottom-right `path:branch`
+ *  status maps to the worktree slug. */
+function FooterBar(props: { toast: () => string; meta: PaneMeta }) {
+  const slug = () => {
+    const w = props.meta.worktree;
+    return w === '' ? '' : (w.split('/').filter(Boolean).pop() ?? w);
+  };
   return (
-    <box width="100%" height={1} flexShrink={0}>
+    <box flexDirection="row" width="100%" height={1} flexShrink={0} backgroundColor={theme.base}>
       <Show
         when={props.toast() === ''}
         fallback={<text fg={theme.accent} content={`  ${props.toast()}`} />}
@@ -634,6 +796,8 @@ function FooterBar(props: { toast: () => string }) {
           content="j/k select card · Enter/c fold · arrows/PgUp/Home/End scroll · Ctrl+C copy row"
         />
       </Show>
+      <box flexGrow={1} />
+      <text fg={theme.muted} content={slug()} />
     </box>
   );
 }
@@ -649,6 +813,15 @@ function Pane(props: {
   const renderer = useRenderer();
   const [frame, setFrame] = createSignal(0);
   onAnimationTick(10, () => setFrame(f => f + 1));
+  const [scroller, setScroller] = createSignal<ScrollBoxRenderable>();
+  /** off-bottom → their `Jump to latest ↓` chip shows; the wheel
+   *  path is herdr's scrollback, this covers keyboard scrolling. */
+  const atBottom = () => {
+    frame();
+    const s = scroller();
+    if (s === undefined) return true;
+    return s.scrollTop + s.height >= s.scrollHeight - 1;
+  };
   /** permission rows name their tool — look the call up by id. */
   const findTool = (toolCallId: string): unknown => {
     for (const id of props.store.state.order) {
@@ -658,15 +831,19 @@ function Pane(props: {
     return undefined;
   };
   return (
-    <box flexDirection="column" width="100%" height="100%">
+    <box flexDirection="column" width="100%" height="100%" backgroundColor={theme.base}>
       <HeaderBar meta={props.store.state.meta} />
       <scrollbox
-        ref={el => props.onScroller?.(el as ScrollBoxRenderable)}
+        ref={el => {
+          setScroller(el as ScrollBoxRenderable);
+          props.onScroller?.(el as ScrollBoxRenderable);
+        }}
         stickyScroll
         stickyStart="bottom"
         viewportCulling
         flexGrow={1}
         width="100%"
+        backgroundColor={theme.base}
       >
         <For each={props.store.state.order}>
           {(id, index) => (
@@ -700,7 +877,19 @@ function Pane(props: {
           )}
         </For>
       </scrollbox>
-      <FooterBar toast={props.toast} />
+      <Show when={!atBottom()}>
+        <box
+          flexDirection="row"
+          width="100%"
+          height={1}
+          flexShrink={0}
+          backgroundColor={theme.base}
+        >
+          <box flexGrow={1} />
+          <text fg={theme.muted} content="Jump to latest ↓ " />
+        </box>
+      </Show>
+      <FooterBar toast={props.toast} meta={props.store.state.meta} />
     </box>
   );
 }

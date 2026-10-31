@@ -46,7 +46,8 @@ const TOKENS: Record<string, SegStyle> = {
   arg: { fg: theme.muted, dim: true },
   tail: { fg: theme.muted, dim: true },
   marker: { fg: theme.muted, dim: true },
-  thought: { fg: theme.muted, italic: true, dim: true },
+  thought: { fg: theme.amber },
+  'thought.body': { fg: theme.muted, italic: true, dim: true },
   'diff.path': { fg: theme.accent },
   'diff.add': { fg: theme.success },
   'diff.del': { fg: theme.error },
@@ -54,10 +55,10 @@ const TOKENS: Record<string, SegStyle> = {
 };
 
 /** Row-fill surfaces — diff added/removed washes (dark tints that sit
- *  under the default bg, their `diff.added.bg`/`diff.removed.bg`). */
+ *  under the `#0a0a0a` base, their `diff.added.bg`/`diff.removed.bg`). */
 const FILLS: Record<string, string> = {
-  'diff.add.bg': '#16321f',
-  'diff.del.bg': '#3a1f24',
+  'diff.add.bg': '#14231a',
+  'diff.del.bg': '#2a1518',
 };
 
 /** A `CardLine`/`Segment` fill name → the row's bg color. */
@@ -123,11 +124,17 @@ const toolLine = (item: ToolCallItem, width: number, frame: number, arg?: string
   return segs;
 };
 
-/** `∴ thinking…` — one dim-italic row, first line only. */
-const thoughtLine = (item: ThoughtItem, width: number): Segment[] => [
-  { text: '∴ ', token: 'marker' },
-  { text: clipTo(firstLine(item.text).trim() || 'thinking…', width - 2), token: 'thought' },
-];
+/** `+ Thought · <gist>` — their amber collapsed-thought row: the
+ *  `+` and `Thought` in their dark amber, the thought's first line
+ *  dim after `·` (opencode chrome, addendum 13). */
+const thoughtLine = (item: ThoughtItem, width: number): Segment[] => {
+  const gist = firstLine(item.text).trim();
+  return [
+    { text: '+ ', token: 'thought' },
+    { text: 'Thought', token: 'thought' },
+    { text: clipTo(gist === '' ? '…' : ` · ${gist}`, width - 10), token: 'thought.body' },
+  ];
+};
 
 /** `◈ plan 3/7` — the checklist as one count, entries live in the
  *  side item's own rendering when expanded detail matters. */

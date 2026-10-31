@@ -641,6 +641,35 @@ line (`endFold` mutates the leader item in place on the live path,
 same fold in `dump()`); a `turn_end` with no preceding activity is
 absorbed silently.
 
+**Opencode chrome** (addendum 13 — supersedes addendum 12's generic
+bg-block spec with concrete capture values): `theme.ts` IS the real
+opencode palette, extracted from a live ANSI capture
+(`/tmp/opencode-view.ansi`): base `#0a0a0a`, block `#141414`, text
+`#ffffff`, emphasis `#eeeeee`, muted `#808080`, peach `#fab283`,
+thought amber `#97682c`, cyan `#56b6c2`, info blue `#5c9cf5`,
+warning `#f5a742`, success `#7fd88f` (`error` was absent from the
+capture slice; it keeps opencode's standard red). Their row grammar
+maps onto our surfaces: `⏺ ` peach bullet on assistant message rows;
+`+ Thought · gist` amber rows for thought items (legacy kind AND
+the acp `thoughtLine`); `┃`-barred `#141414` blocks — `BarRow`
+paints two base cells, the peach `┃`, two pad cells, and fills the
+surface to the right edge — for caller prompts (`Prompt` title,
+emphasis text, cyan-underlined links), `Verdict` cards, and
+`Permission` cards (legacy `permission` items and acp
+`permission_record` both map — their Questions card IS a permission
+ask). Prompt bodies pre-wrap (`wrapPlain`) so every visual row
+carries the bar. The feed header is a `#141414` bar; a dim
+right-aligned `Jump to latest ↓` chip appears above the footer
+while the scrollbox is off-bottom (keyboard scrolling only — the
+wheel rides herdr's native scrollback); the footer gains the
+right-aligned worktree slug (their `path:branch` bottom status).
+Links render cyan+underline via `markup.link` and `LinkRuns` in
+block content. Diff row fills retinted for the dark base
+(`#14231a`/`#2a1518`). Wire-verified on the s7409 tail: palette
+bytes `48;2;10;10;10`/`48;2;20;20;20`/`38;2;250;178;131` emit, `┃`
+verdict cards, `⏺` bullets, `▸` tallies, and prompt `┃` lines with
+a cyan link row all paint.
+
 ## Risks
 
 - **Solid's prop application is post-construction.** The reconciler
