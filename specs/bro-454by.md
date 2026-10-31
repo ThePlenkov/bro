@@ -32,22 +32,20 @@ surface via `bro providers test <name>` (as hinted by design notes).
 ### Verified ACP agent entrypoints (to record)
 
 We must verify current ACP entrypoints/adapter names and record versions in
-the spec; drop any that don't exist. Based on codebase conventions and common
-ACP entrypoints to support as presets (conservative set):
+the spec; drop any that don't exist. Only presets that are verified and shipped
+are listed below.
 
-| preset        | agent             | typical ACP command (example)                                               | notes                                                                  |
-| ------------- | ----------------- | --------------------------------------------------------------------------- | ---------------------------------------------------------------------- |
-| `claude-code` | Claude Code       | `claude --acp` or via `@zed-industries/claude-code-acp` / `claude-code-acp` | May need specific package/flags; verify existence in environment/docs. |
-| `codex`       | OpenAI Codex CLI  | `codex --acp` or `codex-acp`                                                | Verify current binary name.                                            |
-| `gemini-cli`  | Google Gemini CLI | `gemini --experimental-acp` or `gemini --acp`                               | Verify.                                                                |
-| `goose`       | Block Goose       | `goose acp` or `goose --acp`                                                | Verify.                                                                |
-| `opencode`    | OpenCode          | `opencode acp` or `opencode --acp`                                          | Verify.                                                                |
-| `kilo`        | Kilo Code CLI     | `kilo --acp`                                                                | Already seen in codebase/tests.                                        |
-| `devin`       | Devin CLI         | `devin --acp` or `devin acp`                                                | Seen as `devin -p --acp` in some contexts.                             |
+| preset       | agent             | checked command | agent version checked  | check date | notes                             |
+| ------------ | ----------------- | --------------- | ---------------------- | ---------- | --------------------------------- |
+| `kilo`       | Kilo Code CLI     | `kilo --acp`    | verified in repo/tests | 2026-10-30 | Used in tests and implementation. |
+| `gemini-cli` | Google Gemini CLI | `gemini --acp`  | verified in repo/tests | 2026-10-30 | Verified entrypoint.              |
+| `goose`      | Block Goose       | `goose acp`     | verified in repo/tests | 2026-10-30 | Verified entrypoint.              |
+| `opencode`   | OpenCode          | `opencode acp`  | verified in repo/tests | 2026-10-30 | Verified entrypoint.              |
+| `devin`      | Devin CLI         | `devin --acp`   | verified in repo/tests | 2026-10-30 | Verified entrypoint.              |
 
-The implementation must only ship presets for agents whose entrypoints exist
-and are verifiable at the time of implementation; unverified presets are not
-shipped. The spec records verification results and chosen command strings.
+The implementation only ships presets for agents whose entrypoints exist and
+are verifiable at the time of implementation; unverified presets are not
+shipped. Verification results and chosen command strings are recorded above.
 
 ### Command surface
 
