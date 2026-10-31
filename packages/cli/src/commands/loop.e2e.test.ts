@@ -10,7 +10,6 @@ import assert from 'node:assert/strict';
 import { spawn, spawnSync } from 'node:child_process';
 import { chmodSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { agentExitFileName } from '@broject/core';
 import {
   CLI_DIST,
   FAKE_BEAD,
@@ -228,16 +227,13 @@ describe('bro loop e2e', () => {
       // decidable after the spawner dies (bro-snga4)
       const registry = JSON.parse(
         readFileSync(join(f.main, '.git', 'bro', 'agents.json'), 'utf8')
-      ) as Record<string, { agentId: string; log?: string; exitStatus?: number; runId?: string }>;
+      ) as Record<string, { agentId: string; log?: string; exitStatus?: number }>;
       const entry = registry['fx-a'];
       assert.ok(entry, 'no agents-registry entry for fx-a');
       assert.ok(entry.log !== undefined && existsSync(entry.log), 'worker log missing');
       assert.match(readFileSync(entry.log!, 'utf8'), /agent land on fx-a/);
       assert.equal(
-        readFileSync(
-          join(f.main, '.git', 'bro', 'agents', agentExitFileName(entry.agentId, entry.runId)),
-          'utf8'
-        ).trim(),
+        readFileSync(join(f.main, '.git', 'bro', 'agents', `${entry.agentId}.exit`), 'utf8').trim(),
         '0'
       );
       // the harvest landed the exit classification on the entry too
@@ -534,6 +530,81 @@ describe('bro loop e2e', () => {
     });
   });
 
+  test('worker exits rate_limited with a provider reset → waits the reset, respawns the same order (bro-36bhc)', () => {
+    // the incident shape: a worker dying on a provider rate wall is a
+    // WAIT, never a verdict — the loop holds the claim until the reset
+    // and respawns the same work order (convoy's blockedDecision), it
+    // does not reopen the bead and spawn the NEXT claim into the wall
+    const f = loopFixture([{ ...FAKE_BEAD, id: 'fx-a', title: 'walled' }], {}, 'wall')
+    inside(f.main, f.root, () => {
+      const r = f.run()
+      assert.match(r.stdout, /rate_limited/)
+      assert.match(r.stdout, /loop: fx-a landed/)
+      assert.match(r.stdout, /1 landed, 0 closed, 0 parked, 0 failed/)
+      assertLandedBead(f.db, 'fx-a')
+      const evs = (readHostState(f.hostState).events ?? []) as Array<Record<string, unknown>>
+      // one wall death, one post-reset respawn — a third spawn would
+      // mean the loop churned a session into the wall
+      assert.equal(evs.filter((e) => e.wallSpawn === 'fx-a').length, 1)
+      assert.equal(evs.filter((e) => e.spawn === 'fx-a').length, 1)
+      assert.equal(
+        spawns(f).trim().split('\n').filter(Boolean).length,
+        2
+      )
+    })
+  })
+
+  test('a member waiting on a wall holds pushes — the next claim spawns after the reset (bro-36bhc)', () => {
+    // a wall wait is an ACCOUNT fact: claiming the next bead while a
+    // member waits burns that bead's spawn on the same wall — the six
+    // consecutive deaths of the incident. fx-b's worker must not start
+    // until fx-a's reset passed.
+    const f = loopFixture(
+      [
+        { ...FAKE_BEAD, id: 'fx-a', title: 'walled', priority: 1 },
+        { ...FAKE_BEAD, id: 'fx-b', title: 'queued', priority: 2 },
+      ],
+      {},
+      'wall'
+    )
+    inside(f.main, f.root, () => {
+      const r = f.run()
+      assert.match(r.stdout, /rate wall/)
+      assert.match(r.stdout, /2 landed, 0 closed, 0 parked, 0 failed/)
+      const evs = (readHostState(f.hostState).events ?? []) as Array<Record<string, unknown>>
+      const death = evs.find((e) => e.wallSpawn === 'fx-a')
+      const fxbSpawn = evs.find((e) => e.spawn === 'fx-b')
+      assert.ok(death !== undefined, 'fx-a never hit the wall')
+      assert.ok(fxbSpawn !== undefined, 'fx-b never spawned')
+      // fx-b never died on the wall itself — and the timing proves
+      // why: its worker started only after fx-a's reset passed
+      assert.equal(evs.filter((e) => e.wallSpawn === 'fx-b').length, 0)
+      assert.ok(
+        (fxbSpawn.at as number) >= Date.parse(death.resetAt as string),
+        `fx-b spawned at ${String(fxbSpawn.at)} inside the wall (reset ${String(death.resetAt)})`
+      )
+    })
+  })
+
+  test('worker exits quota with no reset → parked, never churned (bro-36bhc)', () => {
+    // the wall with no advertised end — the claim snoozes with the
+    // cause named; reopening is the respawn-burn the park exists to kill
+    const f = loopFixture([{ ...FAKE_BEAD, id: 'fx-a', title: 'walled' }], {}, 'quota')
+    inside(f.main, f.root, () => {
+      const r = f.run()
+      assert.match(r.stdout, /1 parked/)
+      // one spawn, then the park — no reopen, no respawn into the wall
+      assert.equal(
+        spawns(f).trim().split('\n').filter(Boolean).length,
+        1
+      )
+      const row = bead(f.db, 'fx-a')
+      assert.equal(row?.status, 'deferred')
+      assert.match(String(row?.notes), /quota/)
+      assert.equal(existsSync(f.worktree), true)
+    })
+  })
+
   test('agent verdict: bd close without a PR → closed, never reopened', () => {
     const f = loopFixture([{ ...FAKE_BEAD, id: 'fx-a', title: 'nothing to ship' }], {}, 'verdict');
     inside(f.main, f.root, () => {
@@ -609,6 +680,41 @@ describe('bro loop e2e', () => {
       ) as Record<string, { log?: string }>;
       const runLog = readFileSync(String(registry['fx-a']?.log), 'utf8');
       assert.equal(runLog.trim().split('\n').length, 2);
+      assert.equal(bead(f.db, 'fx-a')?.status, 'closed');
+    });
+  });
+
+  test('a fix round skipped on already-resolved threads does not burn the respawn budget', () => {
+    // the review catch: threads resolved between the gate snapshot and
+    // the fixer fetch make runFixRound skip the spawn — but the round
+    // had already been billed, so fixRounds=1 parked on the NEXT real
+    // thread instead of spawning. readQueues.threads scripts the race:
+    // open at the snapshot, empty at the fixer fetch, open again on
+    // the re-poll
+    const thread = {
+      id: 't1',
+      resolved: false,
+      outdated: false,
+      comment: {
+        author: 'reviewer',
+        bot: false,
+        path: 'work.txt',
+        line: 1,
+        body: 'fix this first',
+        createdAt: '2026-01-01',
+      },
+    };
+    const f = loopFixture([{ ...FAKE_BEAD, id: 'fx-a', title: 'iterate' }], { fixRounds: 1 });
+    writeHostState(f.hostState, {
+      threads: [thread],
+      readQueues: { threads: [[thread], []] },
+    });
+    inside(f.main, f.root, () => {
+      const r = f.run();
+      assert.match(r.stdout, /skipping fix round/, r.stderr);
+      assert.match(r.stdout, /fix round 1/, r.stderr);
+      assert.match(r.stdout, /loop: fx-a landed/, r.stderr);
+      assert.match(spawns(f), /fix resolved threads/);
       assert.equal(bead(f.db, 'fx-a')?.status, 'closed');
     });
   });
@@ -1193,6 +1299,208 @@ describe('bro loop fleet.routing', () => {
       assert.match(r.stdout, /would claim fx-a/);
       assert.match(r.stdout, /class: sweep/);
       assert.match(r.stdout, /provider: sweeper/);
+      assert.equal(bead(f.db, 'fx-a')?.status, 'open');
+    });
+  });
+});
+
+/** Provider-wall settle (bro-36bhc) — the loop honors the exit-cause
+ *  taxonomy the registry records instead of respawning into the wall:
+ *  a rate_limited death with a provider reset parks until the reset
+ *  (then wakes and respawns), a death/wall with no advertised end parks
+ *  loud, and spawn admission into a derived wall holds pushes until
+ *  the reset instead of re-claiming every interval. The cli provider
+ *  lane is required — a raw template spawn carries no `provider` the
+ *  derived wall can be attributed to. */
+describe('bro loop provider walls (bro-36bhc)', () => {
+  const walledLane = (loopCfg: Record<string, unknown> = {}): Fixture =>
+    cliLane({ provider: 'fakecli', ...loopCfg });
+
+  /** Seed a classified death straight into the agents registry — the
+   *  same record a real worker's exit harvest writes (cause/resetAt/
+   *  provider all ride the entry; spec bro-1x7p derives walls from
+   *  exactly this). */
+  const seedDeath = (f: Fixture, patch: Record<string, unknown>): void => {
+    const dir = join(f.main, '.git', 'bro');
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(
+      join(dir, 'agents.json'),
+      JSON.stringify({
+        'fx-prev': {
+          agentId: 'native-prevdead',
+          backend: 'native',
+          spawnedAt: new Date(Date.now() - 60_000).toISOString(),
+          exitStatus: 1,
+          provider: 'fakecli',
+          ...patch,
+        },
+      })
+    );
+  };
+
+  test('a rate_limited worker parks until the provider reset — then wakes and lands', () => {
+    // the incident fix: the park's snooze is the wall's own clock, not
+    // the flat 2h cooldown. The epoch reset form is absolute — the
+    // defer stamp equals it exactly, whenever the harvest runs. A
+    // far-future reset keeps run 1 deterministic on a slow CI; the
+    // wake half then simulates the clock passing rather than sleeping
+    // it out.
+    const f = walledLane();
+    inside(f.main, f.root, () => {
+      const reset = Math.floor(Date.now() / 1000) + 5400;
+      const resetIso = new Date(reset * 1000).toISOString();
+      writeHostState(f.hostState, {
+        walls: {
+          'fx-a': { tail: `API rate limit exceeded — x-ratelimit-reset: ${reset}`, exit: 1 },
+        },
+      });
+      const r = f.run();
+      assert.match(r.stdout, /1 parked/, r.stderr);
+      const row = bead(f.db, 'fx-a');
+      assert.equal(row?.status, 'deferred');
+      assert.equal(row?.defer_until, resetIso);
+      assert.match(String(row?.notes), /blocked \(rate_limited\) til /);
+      // one spawn total — the worker that died; nothing churned
+      assert.equal(spawns(f).trim().split('\n').length, 1);
+      // the wall lifts: the snooze's due stamp wakes on the next ready
+      // read, and the recorded death is operator-cleared (`bro agents
+      // down` writes the same stopped flag — spec bro-1x7p)
+      const db = JSON.parse(readFileSync(f.db, 'utf8')) as {
+        rows: Array<Record<string, unknown>>;
+      };
+      db.rows.find(r2 => r2.id === 'fx-a')!.defer_until = new Date(
+        Date.now() - 60_000
+      ).toISOString();
+      writeFileSync(f.db, JSON.stringify(db));
+      const regPath = join(f.main, '.git', 'bro', 'agents.json');
+      const reg = JSON.parse(readFileSync(regPath, 'utf8')) as Record<
+        string,
+        Record<string, unknown>
+      >;
+      reg['fx-a']!.stopped = true;
+      writeFileSync(regPath, JSON.stringify(reg));
+      const woke = f.run();
+      assert.match(woke.stdout, /loop: fx-a landed/, woke.stderr);
+      assert.equal(bead(f.db, 'fx-a')?.status, 'closed');
+      assert.match(spawns(f), /work opened pr/);
+    });
+  });
+
+  test('a manual stop over a stale rate-limit record parks on the flat cooldown', () => {
+    // the review catch: `bro agents down` only marks the entry stopped —
+    // the previous death's cause/resetAt stays on it, and the settle was
+    // handing that stale wall deadline to parkBeads, so the snooze
+    // ignored parkedWakeMin
+    const resetIso = new Date(Date.now() + 10 * 60_000).toISOString();
+    const f = walledLane();
+    writeHostState(f.hostState, {
+      stops: { 'fx-a': { cause: 'rate_limited', resetAt: resetIso } },
+    });
+    inside(f.main, f.root, () => {
+      const r = f.run();
+      assert.match(r.stdout, /1 parked/, r.stderr);
+      const row = bead(f.db, 'fx-a');
+      assert.equal(row?.status, 'deferred');
+      assert.match(String(row?.notes), /stopped/);
+      const wake = Date.parse(String(row?.defer_until));
+      assert.ok(
+        wake > Date.now() + 60 * 60_000,
+        `a manual stop takes the flat parkedWakeMin cooldown, not the stale reset — defer_until ${String(row?.defer_until)}`
+      );
+      assert.equal(spawns(f).trim().split('\n').length, 1);
+    });
+  });
+
+  test('a rate_limited death with no reported reset takes the flat cooldown', () => {
+    // no reset on the tail = a wall with no advertised end — a timed
+    // wait would invent a horizon the provider never gave
+    const f = walledLane();
+    writeHostState(f.hostState, {
+      walls: { 'fx-a': { tail: 'HTTP 429 too many requests', exit: 1 } },
+    });
+    inside(f.main, f.root, () => {
+      const r = f.run();
+      assert.match(r.stdout, /1 parked/, r.stderr);
+      const row = bead(f.db, 'fx-a');
+      assert.equal(row?.status, 'deferred');
+      assert.match(String(row?.notes), /blocked \(rate_limited\)/);
+      assert.doesNotMatch(String(row?.notes), /til /);
+      const wake = Date.parse(String(row?.defer_until));
+      assert.ok(
+        wake > Date.now() + 60 * 60_000,
+        `no-reset wall should take the parkedWakeMin cooldown — defer_until ${String(row?.defer_until)}`
+      );
+      assert.equal(spawns(f).trim().split('\n').length, 1);
+    });
+  });
+
+  test('a quota death parks the same way — an operator clears it, not a timer', () => {
+    const f = walledLane();
+    writeHostState(f.hostState, {
+      walls: { 'fx-a': { tail: 'insufficient credits — usage limit exceeded', exit: 1 } },
+    });
+    inside(f.main, f.root, () => {
+      const r = f.run();
+      assert.match(r.stdout, /1 parked/, r.stderr);
+      const row = bead(f.db, 'fx-a');
+      assert.equal(row?.status, 'deferred');
+      assert.match(String(row?.notes), /blocked \(quota\)/);
+      assert.equal(spawns(f).trim().split('\n').length, 1);
+    });
+  });
+
+  test('a derived quota wall at spawn admission parks the clump — zero workers burned', () => {
+    // a quota wall has no advertised end: the batch lane's refusal
+    // settles as a park once, not the claim → refuse → re-claim churn
+    // the bead reported
+    const f = walledLane();
+    seedDeath(f, { cause: 'quota' });
+    inside(f.main, f.root, () => {
+      const r = f.run();
+      assert.match(r.stdout, /loop: fx-a parked — fakecli walled — quota/, r.stderr);
+      assert.match(r.stdout, /1 parked/);
+      const row = bead(f.db, 'fx-a');
+      assert.equal(row?.status, 'deferred');
+      assert.match(String(row?.notes), /fakecli walled — quota/);
+      // the refusal landed before any worker existed — empty spawn ledger
+      assert.equal(spawns(f), '');
+    });
+  });
+
+  test('a rate_limited wall with no reset parks at admission too', () => {
+    const f = walledLane();
+    seedDeath(f, { cause: 'rate_limited' });
+    inside(f.main, f.root, () => {
+      const r = f.run();
+      assert.match(r.stdout, /loop: fx-a parked — fakecli walled — rate_limited/, r.stderr);
+      assert.match(r.stdout, /1 parked/);
+      assert.equal(bead(f.db, 'fx-a')?.status, 'deferred');
+      assert.equal(spawns(f), '');
+    });
+  });
+
+  test('a timed wall at spawn admission holds pushes until the reset — no churn', () => {
+    // the convoy wait contract at the admission edge: a reset the
+    // provider reported is a horizon to wait, not a wall to park — the
+    // claims release and pushes hold until it (same shape as the
+    // disk-floor hold: non-terminating under the test's own timeout)
+    const until = new Date(Date.now() + 45 * 60_000).toISOString();
+    const f = walledLane();
+    seedDeath(f, { cause: 'rate_limited', resetAt: until });
+    inside(f.main, f.root, () => {
+      const proc = spawnSync(process.execPath, [CLI_DIST, 'loop', '--interval', '0.1'], {
+        cwd: f.main,
+        env: e2eEnv(f.env),
+        encoding: 'utf8',
+        timeout: 4_000,
+      });
+      assert.equal(proc.status, null, 'run should hold pushes until the wall reset');
+      const stdout = proc.stdout ?? '';
+      assert.match(stdout, /fakecli walled — rate_limited til \S+ — pushes hold until the reset/);
+      // exactly one hold — the wall's reset is the next probe, not a tick
+      assert.equal(stdout.match(/pushes hold until the reset/g)?.length, 1);
+      // nothing spawned, nothing claimed — the released claim sits open
+      assert.equal(spawns(f), '');
       assert.equal(bead(f.db, 'fx-a')?.status, 'open');
     });
   });

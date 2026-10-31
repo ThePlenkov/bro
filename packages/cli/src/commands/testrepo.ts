@@ -126,6 +126,19 @@ export const CLI_DIST = join(
   'index.js'
 );
 
+/** The built core bundle — the fake agent requires it so fixture writes
+ *  to agents.json go through the registry's own lock+atomic-write path
+ *  (require-of-ESM is unflagged on the >=22.18 floor). */
+const CORE_DIST = join(
+  dirname(fileURLToPath(import.meta.url)),
+  '..',
+  '..',
+  '..',
+  'core',
+  'dist',
+  'index.js'
+);
+
 /** Sanitized env for spawned e2e processes — ambient GIT_/BEADS_/DEVIN_/
  *  CLAUDE_/CURSOR_/BRO_ vars from the outer agent session must not redirect a
  *  fixture's git dir, hook root, or beads store. Whitelist, not
@@ -997,7 +1010,18 @@ const facade = {
     return new Map(keys.map((k) => [k, Object.hasOwn(all, k) ? all[k]! : 0]))
   }),
   reviewedShas: () => load().reviewedShas ?? ['abc123'],
-  reviewThreads: async () => load().threads ?? [],
+  reviewThreads: async () => withState((s) => {
+    // readQueues.threads — the same mid-flight race scripting as
+    // readQueues.checks: each call shifts one list, so a test can
+    // script 'open at the gate snapshot, resolved at the fixer fetch'
+    // (the skipped fix round's no-spawn refund, bro-36bhc review)
+    const tq = s.readQueues?.threads
+    if (Array.isArray(tq) && tq.length > 0) {
+      s.readQueues.threads = tq.slice(1)
+      return tq[0]
+    }
+    return s.threads ?? []
+  }),
   resolveThread: () => {},
   replyThread: () => {},
   // per-PR labels/body — the prs map's entries carry them; the flat
@@ -1304,6 +1328,43 @@ if (prompt.includes('SAST fixer')) {
   log(cleared ? 'cleared annotations' : 'left findings (noop)')
   process.exit(0)
 }
+// a per-bead provider wall (bro-36bhc): the worker dies exactly like a
+// provider-walled real run — the tail text on stderr is what the
+// exit-cause classifier reads (rate-limit words + reset), the exit code
+// only proves death. One-shot: consuming the wall lets the woken
+// re-claim's worker run the normal scenario — the "wait the reset, then
+// respawn" e2e gets its second act from the same fixture.
+const wall = (load().walls ?? {})[process.env.BRO_BEAD_ID]
+if (wall !== undefined) {
+  withState((s) => { delete s.walls[process.env.BRO_BEAD_ID] })
+  console.error(wall.tail)
+  log('walled')
+  process.exit(wall.exit ?? 1)
+}
+// a per-bead operator stop over a stale recorded death (bro-36bhc
+// review): the worker patches its OWN registry entry stopped:true while
+// a previous run's cause/resetAt stays on it — the settle must park on
+// the flat parkedWakeMin cooldown, never that stale wall deadline. The
+// patch goes through the registry's locked, atomic writer (same
+// read-modify-write the parent's spawns/down take): a hand-rolled
+// read+writeFileSync races that writer and loses updates, and a
+// swallowed error logged 'stop-marked' for a stop that never landed
+const stop = (load().stops ?? {})[process.env.BRO_BEAD_ID]
+if (stop !== undefined) {
+  const { patchAgentRegistry, readAgentRegistry, withAgentRegistryLock } =
+    require(${JSON.stringify(CORE_DIST)})
+  withAgentRegistryLock('.', () => {
+    if (readAgentRegistry('.')[process.env.BRO_BEAD_ID] !== undefined) {
+      patchAgentRegistry('.', process.env.BRO_BEAD_ID, {
+        stopped: true,
+        cause: stop.cause,
+        resetAt: stop.resetAt,
+      })
+    }
+  })
+  log('stop-marked')
+  process.exit(stop.exit ?? 1)
+}
 switch (scenario) {
   case 'land': {
     retry(() => fs.writeFileSync('work.txt', 'did the thing\\n'))
@@ -1344,6 +1405,52 @@ switch (scenario) {
     sh('bd', ['close', process.env.BRO_BEAD_ID, '--reason', 'nothing to ship'])
     log('closed bead')
     break
+  case 'wall': {
+    // a provider rate wall that kills the FIRST spawn — wallDied marks
+    // the death so the post-reset respawn lands (bro-36bhc). The reset
+    // rides stderr like a real provider's rate-limit line, where the
+    // .stderr tail the classifier reads picks it up
+    const walled = withState((s) => {
+      if (s.wallDied === true) return false
+      s.wallDied = true
+      return true
+    })
+    if (walled) {
+      const resetAt = new Date(Date.now() + 1200).toISOString()
+      withState((s) => {
+        s.events = (s.events ?? []).concat([
+          { wallSpawn: process.env.BRO_BEAD_ID || null, branch, at: Date.now(), resetAt },
+        ])
+      })
+      log('hit the rate wall til ' + resetAt)
+      console.error('Reached free model rate limit — resets at ' + resetAt)
+      process.exit(1)
+    }
+    retry(() => fs.writeFileSync('work.txt', 'did the thing\\n'))
+    sh('git', ['add', '-A'])
+    sh('git', ['commit', '-qm', 'feat: the thing'])
+    withState((s) => {
+      s.events = (s.events ?? []).concat([
+        { spawn: process.env.BRO_BEAD_ID || null, branch, at: Date.now() },
+      ])
+      markPrOpened(s)
+    })
+    log('opened pr')
+    peekLoop('worker-done')
+    break
+  }
+  case 'quota': {
+    // the wall with no advertised end — a quota death must park, never
+    // respawn into the account wall (bro-36bhc)
+    log('hit the quota wall')
+    withState((s) => {
+      s.events = (s.events ?? []).concat([
+        { wallSpawn: process.env.BRO_BEAD_ID || null, branch, at: Date.now() },
+      ])
+    })
+    console.error('account quota exceeded — out of credits for this cycle')
+    process.exit(1)
+  }
   case 'fail':
     log('dying')
     process.exitCode = 3
