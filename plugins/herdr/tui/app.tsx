@@ -416,7 +416,12 @@ function AcpRunRow(props: {
             <box flexDirection="row" flexShrink={0} width="100%">
               <text fg={theme.muted} attributes={TextAttributes.DIM} content={'│ '} />
               <AcpSegRow
-                segs={acpLine(m, props.width() - 2, props.frame(), props.findTool)}
+                segs={acpLine(
+                  m,
+                  props.width() - 2,
+                  props.item.status === 'live' ? props.frame() : 0,
+                  props.findTool
+                )}
                 selected={false}
               />
             </box>
@@ -519,10 +524,14 @@ function ItemRow(props: {
   const segs = createMemo(() => {
     const vi = props.item.vi;
     if (vi === undefined) return null;
+    // frame ticks exist for the live spinner only — a settled row
+    // must not re-derive its line 10x/s (addendum 14: the steady-state
+    // sweep was the one proven hotspot, ~0.2ms/row/tick over all rows)
+    const frame = props.item.kind === 'tool' && props.item.status === 'live' ? props.frame() : 0;
     const line = acpLine(
       vi,
       props.width(),
-      props.frame(),
+      frame,
       props.findTool,
       'arg' in props.item ? props.item.arg : undefined
     );

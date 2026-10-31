@@ -670,6 +670,26 @@ bytes `48;2;10;10;10`/`48;2;20;20;20`/`38;2;250;178;131` emit, `┃`
 verdict cards, `⏺` bullets, `▸` tallies, and prompt `┃` lines with
 a cyan link row all paint.
 
+**Perf bench** (addendum 14 — measured, then fixed the one proven
+hotspot). Real archives: 92MB (`native-94a96fb1`), 77MB
+(`native-6cabfb8a`), 29MB (`native-af580313`). The pane only ever
+replays the last `TAIL_BYTES` (64KB) — `readTailSlice` stats+seeks,
+no whole-file reads even at 92MB. Numbers (bun, model path):
+tail read 0-3ms; `feed` 328 rows 3-4ms; `drain` 0-1ms; 203 items
+appended legacy / 97 acp (run-collapse halves it); RSS +4-7MB over
+replay; live-append cost p50 0-0.06ms, p95 <=0.15ms (worst single
+row 5.8ms, a GC or burst edge). Materialization is already windowed:
+`MAX_ITEMS=500` evicts, `viewportCulling` clips, the 64KB tail caps
+replay — no further windowing was added; the measured costs don't
+justify it. The proven hotspot was steady-state, not replay: every
+row's `segs` memo read `props.frame()` unconditionally, so the 10Hz
+spinner tick re-ran `acpLine` (~0.2ms/row) across ALL rows — ~1
+core at 500 items. Fix: `frame()` is now read only when
+`item.status === 'live'` — settled rows hold one derived line and
+never re-subscribe to the tick; run members gate the same way.
+Append path unchanged (p95 0.15ms), spinner still animates live
+rows at 10Hz.
+
 ## Risks
 
 - **Solid's prop application is post-construction.** The reconciler
