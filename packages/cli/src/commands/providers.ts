@@ -81,7 +81,7 @@ const USAGE = `usage:
 `;
 =======
   bro providers models [name…]  list every provider's models as <provider>/<model>
-  bro providers add <preset> [--name <name>] [--project] [--force]
+  bro providers add <preset> [--name <name>] [--global] [--force]
                                 add a preset ACP provider entry
   bro providers test <name>     smoke-test an ACP provider connection
 `;
@@ -243,6 +243,8 @@ function readConfigJson(path: string): Record<string, unknown> {
     }
     die(`failed to read ${path}: ${err instanceof Error ? err.message : String(err)}`);
   }
+  // should not reach
+  return {};
 }
 
 /** Verified ACP presets (only include verified entrypoints). */
@@ -362,21 +364,21 @@ async function liveCatalog(
 async function cmdAdd(argv: string[], opts: Opts): Promise<void> {
   let preset: string | undefined;
   let name: string | undefined;
-  let project = false;
+  let global = false;
   let force = false;
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i]!;
     if (a === '--global') {
-      project = false;
+      global = true;
       continue;
     }
     if (a === '--project') {
-      project = true;
+      global = false;
       continue;
     }
     // backward compatibility
     if (a === '--local') {
-      project = true;
+      global = false;
       continue;
     }
     if (a === '--force') {
@@ -401,13 +403,14 @@ async function cmdAdd(argv: string[], opts: Opts): Promise<void> {
     die(`unexpected argument ${a}`);
   }
   if (preset === undefined) {
-    die('usage: bro providers add <preset> [--name <name>] [--project] [--force]');
+    die('usage: bro providers add <preset> [--name <name>] [--global] [--force]');
   }
-  const p = Object.hasOwn(PRESETS, preset) ? PRESETS[preset] : undefined;
+  const presetKey = preset as string;
+  const p = Object.hasOwn(PRESETS, presetKey) ? PRESETS[presetKey] : undefined;
   if (p === undefined) {
-    die(`unknown preset ${preset} — available: ${Object.keys(PRESETS).join(', ')}`);
+    die(`unknown preset ${presetKey} — available: ${Object.keys(PRESETS).join(', ')}`);
   }
-  const providerName = name ?? preset;
+  const providerName = (name ?? presetKey) as string;
   if (typeof providerName !== 'string' || providerName.trim() === '') {
     die('provider name must be non-empty');
   }
@@ -419,7 +422,6 @@ async function cmdAdd(argv: string[], opts: Opts): Promise<void> {
     die('invalid provider name');
   }
   const cwd = process.cwd();
-  const global = !project;
   const dir = global ? globalConfigDir() : cwd;
   if (!global && hasBroConfigTs(dir)) {
     die(`bro.config.ts shadows bro.config.json — edit providers in ${join(dir, 'bro.config.ts')}`);
@@ -432,39 +434,34 @@ async function cmdAdd(argv: string[], opts: Opts): Promise<void> {
   let path = global ? globalConfigJsonPath() : projectConfigPath(dir);
   if (!global) {
     const mainRoot = mainWorktreeRoot(cwd);
-    if (mainRoot && mainRoot !== cwd) {
-      if (!existsSync(projectConfigPath(cwd)) && existsSync(projectConfigPath(mainRoot))) {
-        path = projectConfigPath(mainRoot);
-      }
+    if (
+      mainRoot &&
+      mainRoot !== cwd &&
+      !existsSync(projectConfigPath(cwd)) &&
+      existsSync(projectConfigPath(mainRoot))
+    ) {
+      path = projectConfigPath(mainRoot);
     }
   }
-  return withFileLock(`${path}.lock`, () => {
-    // Recheck shadowing under lock
-    if (!global) {
-      const targetDir = dirname(path);
-      if (hasBroConfigTs(targetDir)) {
-        die(
-          `bro.config.ts shadows bro.config.json — edit providers in ${join(targetDir, 'bro.config.ts')}`
-        );
-      }
-    } else {
+  const assertNoTsShadow = (targetPath: string, isGlobal: boolean): void => {
+    if (isGlobal) {
       if (existsSync(join(globalConfigDir(), 'config.ts'))) {
         die(
           `config.ts shadows config.json — edit providers in ${join(globalConfigDir(), 'config.ts')}`
         );
       }
+      return;
     }
-    // Recheck for shadowing TS config
-    if (!global && hasBroConfigTs(dirname(path))) {
+    const targetDir = dirname(targetPath);
+    if (hasBroConfigTs(targetDir)) {
       die(
-        `bro.config.ts shadows bro.config.json — edit providers in ${join(dirname(path), 'bro.config.ts')}`
+        `bro.config.ts shadows bro.config.json — edit providers in ${join(targetDir, 'bro.config.ts')}`
       );
     }
-    if (global && existsSync(join(globalConfigDir(), 'config.ts'))) {
-      die(
-        `config.ts shadows config.json — edit providers in ${join(globalConfigDir(), 'config.ts')}`
-      );
-    }
+  };
+  return withFileLock(`${path}.lock`, () => {
+    assertNoTsShadow(path, global);
+    assertNoTsShadow(path, global);
     // If writing to project config in a worktree with main worktree having config,
     // still write to projectConfigPath(dir) as before - but the thread says
     // "write the provider into the effective project config for the linked worktree instead of creating a shadowing config"
@@ -483,20 +480,14 @@ async function cmdAdd(argv: string[], opts: Opts): Promise<void> {
     if (Object.prototype.hasOwnProperty.call(providers, providerName) && !force) {
       die(`providers.${providerName} already exists — use --force to overwrite`);
     }
-    const entry: ProviderEntry = { type: 'acp', command: p.command };
-    // Validate shape
+    const entry: ProviderEntry = { type: 'acp', command: p!.command };
     if (parseProviderEntry(providerName, entry) === null) {
       die('generated entry failed validation');
     }
-    Object.defineProperty(providers, providerName, {
-      value: entry,
-      writable: true,
-      enumerable: true,
-      configurable: true,
-    });
+    providers[providerName as string] = entry;
     cfg.providers = providers;
     writeConfigJsonAtomic(path, cfg);
-    console.log(`added providers.${providerName} (${preset}) → ${path}`);
+    console.log(`added providers.${providerName} (${presetKey}) → ${path}`);
   });
 >>>>>>> eba17a92 (fix: address review threads on providers add)
 }

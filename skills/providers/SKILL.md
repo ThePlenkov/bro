@@ -158,5 +158,5 @@ a failed provider warns and never stops the rest.
 
 ## Presets and add/test
 
-- `bro providers add <preset> [--name <name>] [--project] [--force]` writes an `acp` provider entry for a verified preset (kilo, gemini-cli, goose, opencode, devin). Defaults to global `$XDG_CONFIG_HOME/bro/config.json`; `--project` writes to project `bro.config.json`. Without `--project`, refuses if `config.ts` shadows. With `--project`, refuses if `bro.config.ts` shadows. Refuses to overwrite existing entries without `--force`.
+- `bro providers add <preset> [--name <name>] [--global] [--force]` writes an `acp` provider entry for a verified preset (kilo, gemini-cli, goose, opencode, devin). Defaults to project `bro.config.json`; `--global` writes to global `$XDG_CONFIG_HOME/bro/config.json`. Without `--global`, refuses if `bro.config.ts` shadows. With `--global`, refuses if `config.ts` shadows. Refuses to overwrite existing entries without `--force`.
 - `bro providers test <name>` smoke-tests an ACP provider connection by initializing over ACP.

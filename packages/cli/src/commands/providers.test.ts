@@ -147,7 +147,6 @@ describe('bro providers route', () => {
     assert.deepEqual(out, ['dv/swe-2-max']);
   });
 
-  /** Run `route` over the shared fixture, returning the printed rows. */
   const routeLines = async (
     args: string[],
     o: Parameters<typeof runProvidersCommand>[1]
@@ -267,7 +266,7 @@ describe('bro providers route', () => {
 });
 
 describe('bro providers add', () => {
-  test('add writes a preset entry to bro.config.json', async () => {
+  test('add writes a preset entry to project config by default', async () => {
     const dir = tmpDir('bro-prov-add-');
     const { main } = initRepo(dir);
     await insideAsync(main, dir, async () => {
@@ -283,7 +282,7 @@ describe('bro providers add', () => {
     await insideAsync(main, dir, async () => {
       await runProvidersCommand(['add', 'kilo', '--name', 'kilo-cli']);
       const cfg = JSON.parse(readFileSync(join(process.cwd(), 'bro.config.json'), 'utf8'));
-      assert.ok(cfg.providers['kilo-cli']);
+      assert.deepEqual(cfg.providers['kilo-cli'], { type: 'acp', command: 'kilo --acp' });
       assert.equal(cfg.providers.kilo, undefined);
     });
   });
@@ -302,23 +301,12 @@ describe('bro providers add', () => {
   test('add --force overwrites existing entry', async () => {
     const dir = tmpDir('bro-prov-add4-');
     const { main } = initRepo(dir);
-    const { globalConfigDir } = await import('@broject/core');
-    const orig = process.env.XDG_CONFIG_HOME;
-    process.env.XDG_CONFIG_HOME = join(dir, '.config');
-    try {
-      await insideAsync(main, dir, async () => {
-        const gdir = globalConfigDir();
-        const { mkdirSync } = await import('node:fs');
-        mkdirSync(gdir, { recursive: true });
-        writeFileSync(join(gdir, 'config.json'), JSON.stringify({ providers: { kilo: { type: 'acp', command: 'kilo-old --acp' } } }, null, 2) + '\n');
-        await runProvidersCommand(['add', 'kilo', '--global', '--force']);
-        const cfg = JSON.parse(readFileSync(join(gdir, 'config.json'), 'utf8'));
-        assert.deepEqual(cfg.providers.kilo, { type: 'acp', command: 'kilo --acp' });
-      });
-    } finally {
-      if (orig === undefined) delete process.env.XDG_CONFIG_HOME;
-      else process.env.XDG_CONFIG_HOME = orig;
-    }
+    await insideAsync(main, dir, async () => {
+      writeFileSync(join(process.cwd(), 'bro.config.json'), JSON.stringify({ providers: { kilo: { type: 'acp', command: 'kilo-old --acp' } } }, null, 2) + '\n');
+      await runProvidersCommand(['add', 'kilo', '--force']);
+      const cfg = JSON.parse(readFileSync(join(process.cwd(), 'bro.config.json'), 'utf8'));
+      assert.deepEqual(cfg.providers.kilo, { type: 'acp', command: 'kilo --acp' });
+    });
   });
 
   test('add to global config with --global', async () => {
