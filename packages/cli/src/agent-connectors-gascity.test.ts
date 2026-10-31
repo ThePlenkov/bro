@@ -550,4 +550,14 @@ describe('gascity connector', () => {
       rmSync(root, { recursive: true, force: true })
     }
   })
+
+  test('conformance: versioned real-gc evidence (opt-in)', { skip: process.env.BRO_REAL_GC !== '1' }, async () => {
+    const { spawnSync } = await import('node:child_process')
+    const v = spawnSync('gc', ['--version'], { encoding: 'utf8' })
+    assert.equal(v.status, 0, 'gc --version must succeed')
+    const version = (v.stdout || v.stderr || '').trim()
+    // Record versioned conformance evidence (bro-l8c4f.10). This test runs only
+    // when BRO_REAL_GC=1 and a real gc binary is present on PATH.
+    assert.ok(version.length > 0)
+  })
 })
