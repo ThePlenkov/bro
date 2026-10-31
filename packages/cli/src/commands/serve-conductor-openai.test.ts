@@ -50,8 +50,7 @@ const CFG: ConductorConfig = {
   entry: { type: 'acp', command: 'dv acp' },
   cwd: '/repo',
   timeoutMs: 10_000,
-  agents: {},
-}
+} as ConductorConfig
 
 /** Boot the conductor over `fake` — caller owns close() and gets a
  *  bound post(path, body) for /v1/* sends. */

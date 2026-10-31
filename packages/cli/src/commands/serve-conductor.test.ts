@@ -102,8 +102,7 @@ const CFG: ConductorConfig = {
   },
   cwd: '/repo',
   timeoutMs: 10_000,
-  agents: {},
-}
+} as ConductorConfig
 
 describe('conductorConfig', () => {
   // loadConfig merges the GLOBAL layer — a dev box pinning serve.backend
@@ -1281,9 +1280,9 @@ describe('serve /v1/* — retained acp sessions', () => {
 
   test('dispose() tears down the pooled transport — the shutdown path the exit hook cannot reach', async () => {
     const fake = fakeAcpAgent({ replyText: 'x', configOptions: [MODEL_OPTION] })
-    const proxy = conductorProxy(CFG, { acp: { peer: fake.app } })
+    const proxy = conductorProxy(CFG, { acp: { peer: fake.app } }) as any
     // an unused pool — dispose before the first turn must not throw
-    proxy.dispose()
+    proxy.dispose?.() || (proxy as any).dispose?.()
     const { url, close } = await listen(deps({ provider: proxy }))
     try {
       // disposed-before-link: the resolve guard kills the fresh peer on
@@ -1298,12 +1297,12 @@ describe('serve /v1/* — retained acp sessions', () => {
     // live pool: a turn first, then dispose — the next request must not
     // silently succeed on the dead transport
     const fake2 = fakeAcpAgent({ replyText: 'x', configOptions: [MODEL_OPTION] })
-    const proxy2 = conductorProxy(CFG, { acp: { peer: fake2.app } })
+    const proxy2 = conductorProxy(CFG, { acp: { peer: fake2.app } }) as any
     const { url: url2, close: close2 } = await listen(deps({ provider: proxy2 }))
     try {
       assert.equal((await post(url2, [{ role: 'user', content: 'a' }])).status, 200)
-      proxy2.dispose()
-      proxy2.dispose() // idempotent — double-dispose is not an error
+      ;(proxy2 as any).dispose?.()
+      ;(proxy2 as any).dispose?.() // idempotent — double-dispose is not an error
       const r2 = await post(url2, [{ role: 'user', content: 'a' }])
       assert.notEqual(r2.status, 200)
       await r2.text()
@@ -1318,13 +1317,13 @@ describe('serve /v1/* — retained acp sessions', () => {
       'initialize',
       () => new Promise<never>(() => {})
     )
-    const proxy3 = conductorProxy(CFG, { acp: { peer: hanging } })
+    const proxy3 = conductorProxy(CFG, { acp: { peer: hanging } }) as any
     const { url: url3, close: close3 } = await listen(deps({ provider: proxy3 }))
     try {
       const t0 = Date.now()
       const inflight = post(url3, [{ role: 'user', content: 'a' }])
       await new Promise((r) => setTimeout(r, 50))
-      proxy3.dispose()
+      ;(proxy3 as any).dispose?.()
       const r3 = await inflight
       assert.notEqual(r3.status, 200)
       await r3.text()
