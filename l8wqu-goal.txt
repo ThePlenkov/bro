@@ -1,0 +1,5 @@
+Finish the @opentui/solid rewrite of the herdr ACP session TUI in this
+worktree and land it verified: bun typecheck + repo gates green
+(npm run typecheck, npm run build, check:plugins, touched tests),
+changes committed and pushed to work/bro-l8wqu. Do NOT open a PR —
+the user reviews the live UX first.

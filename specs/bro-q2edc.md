@@ -713,6 +713,15 @@ provider · agent · cwd · launched`) stays an in-feed item — it is
   last two painted rows are identity + keys; the feed no longer
   carries the bar.
 
+**Expansion without a mouse** (live bug report): clicks can never
+reach the pane — capture is off (addendum 7) and herdr owns the
+mouse — so runs/cards open via selection: j/k lands on a collapsed
+`▸` run or card and PREVIEWS it (members/body shown, `▾` glyph);
+Enter/c pins the toggle. `foldTouched` on the item records an
+explicit fold so toggling a selected card SHUT holds — the preview
+only opens folds the user never touched. A run member copy still
+emits every member line.
+
 ## Risks
 
 - **Solid's prop application is post-construction.** The reconciler

@@ -71,6 +71,10 @@ export interface ToolItem {
    *  terminal status still prints it, but never twice. */
   bodyLanded: boolean;
   collapsed: boolean;
+  /** The user explicitly toggled this card's fold — the selection
+   *  preview (j/k lands on a collapsed card) opens only untouched
+   *  folds, so a deliberate close survives being selected. */
+  foldTouched?: boolean;
   content: ToolContent[];
   at?: string;
   /** The row's `by` label — the turn's origin (provider/conductor),

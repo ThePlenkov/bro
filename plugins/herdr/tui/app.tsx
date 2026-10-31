@@ -127,7 +127,13 @@ export function createPane(
         if (item === undefined || item.kind !== 'tool') return;
         publish({
           ...plain,
-          byId: { ...plain.byId, [item.id]: { ...item, collapsed: !item.collapsed } },
+          // foldTouched marks the user's explicit fold — the
+          // selection preview only opens cards the user never
+          // toggled, so toggling SHUT a selected card holds
+          byId: {
+            ...plain.byId,
+            [item.id]: { ...item, collapsed: !item.collapsed, foldTouched: true },
+          },
         });
       },
       copy() {
@@ -296,11 +302,20 @@ function ToolCard(props: { item: ToolItem; syntax: SyntaxStyle; selected: boolea
         />
         <text fg={theme.muted} content={`${kind()}${argHeadSeg()}`} />
       </box>
-      <Show when={props.item.collapsed && bodyLines() > 0}>
+      <Show
+        when={
+          props.item.collapsed &&
+          (!props.selected || props.item.foldTouched === true) &&
+          bodyLines() > 0
+        }
+      >
         <text fg={theme.muted} content={`… ${bodyLines()} more`} flexShrink={0} />
       </Show>
       <Show
-        when={!props.item.collapsed && (props.item.content.length > 0 || argBlock() !== undefined)}
+        when={
+          (!props.item.collapsed || (props.selected && props.item.foldTouched !== true)) &&
+          (props.item.content.length > 0 || argBlock() !== undefined)
+        }
       >
         <box paddingLeft={1} flexShrink={0}>
           <Show when={argBlock()}>
@@ -402,7 +417,11 @@ function AcpRunRow(props: {
         <text
           fg={theme.cyan}
           attributes={props.item.status === 'live' ? undefined : TextAttributes.DIM}
-          content="▸ "
+          content={
+            props.item.collapsed === true && (!props.selected || props.item.foldTouched === true)
+              ? '▸ '
+              : '▾ '
+          }
         />
         <text
           fg={props.item.status === 'live' ? theme.text : theme.muted}
@@ -410,7 +429,10 @@ function AcpRunRow(props: {
           content={props.item.arg ?? ''}
         />
       </box>
-      <Show when={!props.item.collapsed}>
+      {/* selection previews: a still-collapsed run shows its members
+       *  while it holds the selection (j/k), Enter/c pins it open —
+       *  no mouse path exists by design (addendum 7) */}
+      <Show when={!props.item.collapsed || (props.selected && props.item.foldTouched !== true)}>
         <For each={props.item.runs ?? []}>
           {m => (
             <box flexDirection="row" flexShrink={0} width="100%">
@@ -595,7 +617,12 @@ function ItemRow(props: {
               fallback={
                 <box flexDirection="column" flexShrink={0}>
                   <AcpSegRow segs={segs() ?? []} selected={props.selected} />
-                  <Show when={tool() !== undefined && !tool()?.collapsed}>
+                  <Show
+                    when={
+                      tool() !== undefined &&
+                      (!tool()?.collapsed || (props.selected && tool()?.foldTouched !== true))
+                    }
+                  >
                     <AcpToolBody
                       item={tool() as ToolItem}
                       syntax={props.syntax}
@@ -802,7 +829,7 @@ function FooterBar(props: { toast: () => string; meta: PaneMeta }) {
       >
         <text
           fg={theme.muted}
-          content="j/k select card · Enter/c fold · arrows/PgUp/Home/End scroll · Ctrl+C copy row"
+          content="j/k select+peek · Enter/c pin fold · arrows/PgUp/Home/End scroll · Ctrl+C copy row"
         />
       </Show>
       <box flexGrow={1} />
