@@ -542,3 +542,22 @@ spawned a workspace+pane — that's scaffolding, now supersede it:
 
 Keep the seam intact; this is plugin-side orchestration, the TUI
 stays a dumb viewer.
+
+## Phase 3 ADDENDUM 18 — real markdown preview via <markdown>
+
+User asks for actual markdown formatting in message blocks —
+opencode does it, and so can we: @opentui/core ships
+MarkdownRenderable (solid: <markdown content syntaxStyle
+treeSitterClient conceal renderNode>) plus CodeRenderable with
+tree-sitter highlighting.
+
+- Route ALL prose surfaces through <markdown>: caller prompt blocks
+  (the ┃ blocks already render md-looking text like [**link**](url)
+  RAW — links must become cyan-underlined links, bold bold, lists
+  proper), agent prose, thinking content.
+- Code blocks inside prose → highlighted via treeSitterClient when
+  feasible, else CodeRenderable/plain with bg.
+- Mind wrap + bg: markdown content inside our ┃ block must respect
+  pane width and the block bg padding (same addendum-12 rule).
+- Check bundle/runtime cost of treeSitterClient — if heavy, gate it;
+  concealing (hide md markers) should stay ON.

@@ -12,11 +12,12 @@
  * Node runner. The model's and the pane state's own tests stay on
  * Node (`plugins/herdr/test/`).
  */
-import { describe, test } from 'node:test';
+
 import assert from 'node:assert/strict';
+import { describe, test } from 'node:test';
 import { createTestRenderer } from '@opentui/core/testing';
-import { SessionModel } from './model.ts';
 import type { PaneWriter } from './app.tsx';
+import { SessionModel } from './model.ts';
 
 /**
  * Load the pane the way `main.ts` does.
@@ -143,6 +144,22 @@ describe('the Solid session pane', () => {
       p.writer.toggle();
       await p.flush();
       assert.match(await p.frame(), /SECRET-OUTPUT/);
+    } finally {
+      await p.dispose();
+    }
+  });
+
+  test('a caller prompt renders real markdown — markers concealed', async () => {
+    const p = await mount();
+    try {
+      p.model.feed({ kind: 'prompt', text: 'see [**docs**](https://x.io) and **bold**' });
+      await p.flush();
+      const frame = await p.frame();
+      assert.match(frame, /docs/);
+      assert.match(frame, /bold/);
+      // real markdown: the literal markers never paint
+      assert.doesNotMatch(frame, /\[\*\*docs\]/);
+      assert.doesNotMatch(frame, /\]\(https:/);
     } finally {
       await p.dispose();
     }

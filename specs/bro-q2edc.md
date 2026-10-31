@@ -722,6 +722,20 @@ explicit fold so toggling a selected card SHUT holds — the preview
 only opens folds the user never touched. A run member copy still
 emits every member line.
 
+**Real markdown** (addendum 18): all prose surfaces route through
+`<markdown>` — assistant `⏺` prose already did; the caller prompt's
+`┃` block now does too, so `[text](url)`, `**bold**`, lists and
+fences render instead of painting literal markers (`conceal` on;
+fences highlight through the shared tree-sitter client `<code>`
+already uses). The `┃` grammar moved from per-line `BarRow`s to a
+`heavy`-bordered `BarBlock` — the border IS the bar, so markdown's
+variable-height output keeps bar + `#141414` wash without
+pre-wrapping; wrap/bg integrity holds by construction.
+Verdict/permission blocks ride the same `BarBlock` with their
+field rows. Oddity found: without `streaming` the renderable
+paints nothing under this version — both call sites set it; for a
+static prompt it merely leaves the trailing token unfinalized.
+
 ## Risks
 
 - **Solid's prop application is post-construction.** The reconciler

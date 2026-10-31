@@ -174,23 +174,6 @@ function syntaxStyle(owner: NativeResourceOwner): SyntaxStyle {
   );
 }
 
-/** Word-wrap one plain-text line to `w` columns — the `┃` block
- *  pre-wraps so every visual row carries the bar (their capture pads
- *  each wrapped line with `┃` + block bg). */
-function wrapPlain(line: string, w: number): string[] {
-  if (line.length <= w) return [line];
-  const out: string[] = [];
-  let rest = line;
-  while (rest.length > w) {
-    let cut = rest.lastIndexOf(' ', w);
-    if (cut <= 0) cut = w;
-    out.push(rest.slice(0, cut));
-    rest = rest.slice(cut).trimStart();
-  }
-  if (rest !== '') out.push(rest);
-  return out;
-}
-
 const URL_RE = /https?:\/\/[^\s)\]>}"']+/g;
 
 /** One plain line → text runs; URLs paint cyan-underlined (their
@@ -454,72 +437,65 @@ function AcpRunRow(props: {
   );
 }
 
-/** One `┃`-barred row — their block grammar verbatim (capture rows
- *  25-43): two base cells, the peach bar on `#141414`, then content
- *  padded two cells, the surface wash filling to the right edge.
- *  Every visual line of a block is its own `BarRow`, so wrapped
- *  text keeps the bar and the bg (addendum 13). */
-function BarRow(props: { children?: JSX.Element }) {
+/** One `┃`-barred block — their block grammar verbatim (capture
+ *  rows 25-43): two base cells, then the peach `┃` on `#141414`
+ *  for the block's whole height, content padded inside, the wash
+ *  filling to the right edge. The bar is the box's `heavy` left
+ *  border, so ANY content (a markdown renderable included) keeps
+ *  the bar and the bg without per-line plumbing (addendum 18). */
+function BarBlock(props: { children?: JSX.Element }) {
   return (
-    <box flexDirection="row" width="100%" flexShrink={0} backgroundColor={theme.base}>
-      <text content="  " />
-      <box flexDirection="row" flexGrow={1} flexShrink={0} backgroundColor={theme.surface}>
-        <text fg={theme.peach} content="┃  " />
-        <box flexDirection="row" flexGrow={1} flexShrink={0}>
-          {props.children}
-        </box>
-      </box>
+    <box
+      marginLeft={2}
+      width="100%"
+      flexShrink={0}
+      border={['left']}
+      borderStyle="heavy"
+      borderColor={theme.peach}
+      backgroundColor={theme.surface}
+      paddingLeft={2}
+    >
+      {props.children}
     </box>
   );
 }
 
-/** A bare `┃` pad row — the blank line their blocks put around
- *  titles and between sections (`┃` + surface fill, nothing else). */
+/** A bare pad line inside a `BarBlock` — the blank row their blocks
+ *  put around titles and between sections. */
 function BarPad() {
-  return (
-    <BarRow>
-      <text content=" " />
-    </BarRow>
-  );
+  return <box height={1} flexShrink={0} />;
 }
 
 /** The caller prompt — "what was asked" as their `┃` card: a dim
- *  title, the prompt in their emphasis color, links cyan-underlined,
- *  pre-wrapped so every visual row carries the bar. Empty text (no
- *  journaled prompt, no `.prompt.md` sibling) is the marker. */
-function PromptRow(props: { item: Item; width: () => number }) {
-  const lines = createMemo(() => {
-    const text = 'text' in props.item ? props.item.text : '';
-    const w = Math.max(20, props.width() - 9);
-    const out: string[] = [];
-    for (const l of text.split('\n')) out.push(...wrapPlain(l, w));
-    return out;
-  });
+ *  title, then the prompt as REAL markdown (addendum 18): links,
+ *  bold, lists and code fences render, markers conceal; the
+ *  tree-sitter client is the shared default <code> already uses.
+ *  Empty text (no journaled prompt, no `.prompt.md` sibling) is
+ *  the marker. */
+function PromptRow(props: { item: Item; syntax: SyntaxStyle }) {
+  const text = createMemo(() => ('text' in props.item ? props.item.text : ''));
   return (
-    <box flexDirection="column" width="100%" flexShrink={0}>
+    <BarBlock>
       <BarPad />
-      <BarRow>
-        <text fg={theme.muted} content="Prompt" />
-      </BarRow>
+      <text fg={theme.muted} content="Prompt" flexShrink={0} />
       <BarPad />
       <Show
-        when={lines().length > 0}
+        when={text() !== ''}
         fallback={
-          <BarRow>
-            <text fg={theme.muted} attributes={TextAttributes.DIM} content="prompt unavailable" />
-          </BarRow>
+          <text fg={theme.muted} attributes={TextAttributes.DIM} content="prompt unavailable" />
         }
       >
-        <For each={lines()}>
-          {l => (
-            <BarRow>
-              <LinkRuns line={l} fg={theme.emph} />
-            </BarRow>
-          )}
-        </For>
+        <markdown
+          content={text()}
+          syntaxStyle={props.syntax}
+          conceal
+          streaming
+          internalBlockMode="top-level"
+          flexShrink={0}
+        />
       </Show>
       <BarPad />
-    </box>
+    </BarBlock>
   );
 }
 
@@ -699,7 +675,7 @@ function ItemRow(props: {
                             </Show>
                           }
                         >
-                          <PromptRow item={props.item} width={props.width} />
+                          <PromptRow item={props.item} syntax={props.syntax} />
                         </Show>
                       }
                     >
@@ -740,27 +716,25 @@ const hhmm = (at: string | undefined): string => {
  *  stays the fallback for anything else. */
 function VerdictRow(props: { view: VerdictView; selected: boolean }) {
   return (
-    <box flexDirection="column" width="100%" flexShrink={0}>
+    <BarBlock>
       <BarPad />
-      <BarRow>
-        <text fg={theme.muted} content="Verdict" />
-      </BarRow>
+      <text fg={theme.muted} content="Verdict" flexShrink={0} />
       <BarPad />
-      <BarRow>
+      <box flexDirection="row" flexShrink={0}>
         <text fg={theme.peach} content="⛨ " />
         <text fg={theme.emph} content={`${props.view.badge} `} />
         <LinkRuns line={props.view.summary} fg={theme.emph} />
-      </BarRow>
+      </box>
       <For each={props.view.fields}>
         {f => (
-          <BarRow>
+          <box flexDirection="row" flexShrink={0}>
             <text fg={theme.muted} attributes={TextAttributes.DIM} content={`  ${f[0]} `} />
             <LinkRuns line={f[1]} fg={theme.muted} dim />
-          </BarRow>
+          </box>
         )}
       </For>
       <BarPad />
-    </box>
+    </BarBlock>
   );
 }
 
@@ -769,23 +743,21 @@ function VerdictRow(props: { view: VerdictView; selected: boolean }) {
  *  pane stays readonly; the block just reports it). */
 function PermissionRow(props: { title: string; detail: string }) {
   return (
-    <box flexDirection="column" width="100%" flexShrink={0}>
+    <BarBlock>
       <BarPad />
-      <BarRow>
-        <text fg={theme.muted} content="Permission" />
-      </BarRow>
+      <text fg={theme.muted} content="Permission" flexShrink={0} />
       <BarPad />
-      <BarRow>
+      <box flexDirection="row" flexShrink={0}>
         <text fg={theme.warning} content="⚠ " />
         <LinkRuns line={props.title} fg={theme.emph} />
-      </BarRow>
+      </box>
       <Show when={props.detail !== ''}>
-        <BarRow>
+        <box flexDirection="row" flexShrink={0}>
           <LinkRuns line={props.detail} fg={theme.muted} dim />
-        </BarRow>
+        </box>
       </Show>
       <BarPad />
-    </box>
+    </BarBlock>
   );
 }
 
