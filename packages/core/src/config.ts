@@ -869,7 +869,7 @@ function fleetProfiles(raw: unknown): Record<string, FleetProfile> {
   }
   const out: Record<string, FleetProfile> = Object.create(null);
   for (const [name, v] of Object.entries(raw)) {
-    if (name === 'constructor' || name === 'prototype') {
+    if (name === 'constructor' || name === 'prototype' || name === '__proto__') {
       continue;
     }
     const prof = fleetProfile(name, v);
@@ -1022,11 +1022,13 @@ export const meshSection: ConfigSection<{
   };
   const peers: Record<string, { rig: string; remote: string; transport?: string; login?: string }> =
     {};
-  if (typeof obj.peers === 'object' && obj.peers !== null && !Array.isArray(obj.peers)) {
+  if (Array.isArray(obj.peers)) {
+    // ignore arrays to avoid treating numeric indices as peer aliases
+  } else if (typeof obj.peers === 'object' && obj.peers !== null) {
     for (const [alias, entry] of Object.entries(obj.peers)) {
       // __proto__ is a setter on Object.prototype, not an own-property
       // write — a peer alias with that name would mutate the map
-      if (alias === '__proto__') {
+      if (alias === '__proto__' || alias === 'constructor' || alias === 'prototype') {
         continue;
       }
       const p = meshPeerEntry(entry);

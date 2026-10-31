@@ -80,14 +80,12 @@ for a tool-less backend that advertises nothing, and
 An unset backend falls back to the proxy; a misnamed or non-`acp`
 entry is a loud startup error, never a silent proxy.
 
-<<<<<<< HEAD
 **The conductor path is session-grade.** Every `POST /v1/messages`
 opens a real agent session — `session/new` plus the client's own
 session-start hooks. A conversation turn can afford seconds; a
 client's _internal_ model calls cannot. An interactive client must
 point its internal models — the auto-mode permission/safety
 classifier and the small/fast background model (claude-code's
-=======
 **The conductor path is session-grade — unless the fast lane is
 armed.** Every `POST /v1/messages` that conducts opens a real agent
 session — `session/new` plus the client's own session-start hooks.
@@ -108,9 +106,7 @@ classifier-warn as ok once the lane is armed.
 
 Unarmed, the warning stands: an interactive client must point its
 internal models — the auto-mode permission/safety classifier and the
-small/fast background model (claude-code's
->>>>>>> 076f3cf1 (feat(serve): conductor fast lane — classifier calls route to the direct upstream (bro-6asnu))
-`ANTHROPIC_SMALL_FAST_MODEL`) — at a direct `api`-kind endpoint: the
+small/fast background model (claude-code's`ANTHROPIC_SMALL_FAST_MODEL`) — at a direct `api`-kind endpoint: the
 byte-proxy mode above, or the real upstream. Routing them at the
 conductor pays a session spin-up inside a seconds-scale permission
 deadline, so every check fail-closes as "temporarily unavailable" and

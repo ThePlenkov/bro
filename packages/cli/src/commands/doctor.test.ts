@@ -214,7 +214,6 @@ function liveServeClient(
 }
 
 const byName = (checks: DoctorCheck[], name: string): DoctorCheck =>
-<<<<<<< HEAD
   checks.find(c => c.name === name) as DoctorCheck;
 
 /** The conductor fixture these tests boot: an acp-served devin provider
@@ -226,10 +225,7 @@ const CONDUCTOR_ACP: EnvOpts = {
   },
   bins: ['gh'],
 };
-=======
   checks.find(c => c.name === name)!;
->>>>>>> 076f3cf1 (feat(serve): conductor fast lane — classifier calls route to the direct upstream (bro-6asnu))
-
 /** A fixture dolt store — a git repo holding `refs/dolt/data` whose head
  *  tree is manifest + table files. `missing` names tables the manifest
  *  claims but the tree never gets (the bro-orcdv corruption). */
@@ -374,9 +370,7 @@ describe('bro doctor', () => {
             'bd-backend',
             'bd-store',
             'hooks',
-<<<<<<< HEAD
             'hooks-wiring',
-=======
 >>>>>>> 076f3cf1 (feat(serve): conductor fast lane — classifier calls route to the direct upstream (bro-6asnu))
             'config',
             'git-remote',
@@ -443,8 +437,6 @@ describe('bro doctor', () => {
       }
     ));
 =======
->>>>>>> 076f3cf1 (feat(serve): conductor fast lane — classifier calls route to the direct upstream (bro-6asnu))
-
   test('tasks row names the serving backend — beads by default', () =>
     withEnv(
       {
@@ -794,7 +786,6 @@ describe('bro doctor', () => {
         assert.match(c.detail, /PATH/);
       })
     ));
-<<<<<<< HEAD
 
   test('hooks-wiring: bro chain + resolved bro plugin → warn', () =>
     withEnv({ bins: ['gh'] }, dir => {
@@ -875,7 +866,6 @@ describe('bro doctor', () => {
       assert.equal(c.status, 'ok');
       assert.match(c.detail, /no bro hooks/);
     }));
-=======
 >>>>>>> 076f3cf1 (feat(serve): conductor fast lane — classifier calls route to the direct upstream (bro-6asnu))
 
   test('bro-dist: PATH-bro into a dev checkout warns when dist predates HEAD', () =>
@@ -1201,8 +1191,6 @@ describe('bro doctor', () => {
       })
   );
 =======
->>>>>>> 076f3cf1 (feat(serve): conductor fast lane — classifier calls route to the direct upstream (bro-6asnu))
-
   test('providers: configured entries are listed as name (kind, model)', () =>
     withEnv(
       {
@@ -1618,7 +1606,6 @@ describe('bro doctor', () => {
     ));
 
   test('conductor: a classifier pin naming an acp-served wire warns (bro-9ww2q)', () =>
-<<<<<<< HEAD
     withEnv(CONDUCTOR_ACP, dir => {
       mkdirSync(join(dir, '.claude'), { recursive: true });
       writeFileSync(
@@ -1667,7 +1654,6 @@ describe('bro doctor', () => {
       const c = byName(runDoctorChecks(dir), 'conductor');
       assert.equal(c.status, 'ok', JSON.stringify(c));
     }));
-=======
     withEnv(
       {
         config: {
@@ -1749,8 +1735,6 @@ describe('bro doctor', () => {
         assert.equal(c.status, 'ok', JSON.stringify(c));
       }
     ));
->>>>>>> 076f3cf1 (feat(serve): conductor fast lane — classifier calls route to the direct upstream (bro-6asnu))
-
   test('conductor: process-env pins count — <acp-name>/<id> is conductor vocabulary', () =>
     withEnv(
       {
@@ -1769,7 +1753,6 @@ describe('bro doctor', () => {
     ));
 
   test('conductor: a localhost-spelled client url still matches the 127.0.0.1 serve', () =>
-<<<<<<< HEAD
     withEnv({ ...CONDUCTOR_ACP, env: { BRO_PROVIDER_BACKEND: 'devin-acp' } }, dir => {
       liveServeClient(dir, 'http://127.0.0.1:44927', 'http://localhost:44927/');
       const c = byName(runDoctorChecks(dir), 'conductor');
@@ -1783,7 +1766,6 @@ describe('bro doctor', () => {
       const c = byName(runDoctorChecks(dir), 'conductor');
       assert.equal(c.status, 'ok', JSON.stringify(c));
     }));
-=======
     withEnv(
       {
         config: {
@@ -1815,8 +1797,6 @@ describe('bro doctor', () => {
         assert.equal(c.status, 'ok', JSON.stringify(c));
       }
     ));
->>>>>>> 076f3cf1 (feat(serve): conductor fast lane — classifier calls route to the direct upstream (bro-6asnu))
-
   test('conductor: two acp entries claiming one bare id are both named in the warn', () =>
     withEnv(
       {

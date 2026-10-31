@@ -236,7 +236,6 @@ function checkHooks(dir: string): DoctorCheck {
     'no resolution — lifecycle hooks silently no-op',
     'install @broject/bro or the agent plugin to get session-start context and the stop gate'
   );
-<<<<<<< HEAD
 }
 
 /** Devin's plugin lockfile — `<data>/devin/cli/plugins/lock.json`, the
@@ -370,7 +369,6 @@ function devinWiringCheck(root: string | null): DoctorCheck {
       ? 'drop .devin/hooks.v1.json — the plugin already wires bro (run.sh defers to a project chain while one exists)'
       : 'remove the bro hook entries from .devin/hooks.v1.json, keep the other handlers — the plugin already wires bro';
   return check('hooks-wiring', 'warn', detail, hint);
-=======
 >>>>>>> 076f3cf1 (feat(serve): conductor fast lane — classifier calls route to the direct upstream (bro-6asnu))
 }
 
@@ -496,9 +494,7 @@ function distStampMs(distDir: string): number {
     }
     const m = statSync(join(distDir, f.name), { throwIfNoEntry: false })?.mtimeMs ?? 0;
     if (m > newest) {
-      newest = m;
->>>>>>> 076f3cf1 (feat(serve): conductor fast lane — classifier calls route to the direct upstream (bro-6asnu))
-    }
+      newest = m;    }
   } catch {
     return 0;
   }
@@ -528,7 +524,6 @@ function refMovedMs(checkout: string, ref: string): number {
       : gitTry(['-C', checkout, 'rev-parse', '--symbolic-full-name', ref]).out.trim();
   if (name === '') {
     return 0;
-<<<<<<< HEAD
   }
   try {
     return (
@@ -541,14 +536,11 @@ function refMovedMs(checkout: string, ref: string): number {
     // unverifiable rather than aborting the whole doctor run
     return 0;
   }
-=======
   }
   return (
     statSync(join(resolve(checkout, gd.out.trim()), 'logs', name), { throwIfNoEntry: false })
       ?.mtimeMs ?? 0
-  );
->>>>>>> 076f3cf1 (feat(serve): conductor fast lane — classifier calls route to the direct upstream (bro-6asnu))
-}
+  );}
 
 function devDistCheck({ checkout, distDir, entry }: DevDist): DoctorCheck {
   const stamp = distStampMs(distDir);
@@ -615,7 +607,6 @@ function selfDistChecks(): DoctorCheck[] {
     out.push(check('bro-dist', 'ok', 'no dev-checkout bro — nothing to rebuild'));
   }
   return out;
-<<<<<<< HEAD
 }
 
 // --- daemon binary drift (bro-kn6bq) ------------------------------------
@@ -937,7 +928,6 @@ function daemonBinChecks(dir: string, root: string | null): DoctorCheck[] {
       "the daemon's binary and the rearm path differ — restart it under the current bro"
     ),
   ];
-=======
 >>>>>>> 076f3cf1 (feat(serve): conductor fast lane — classifier calls route to the direct upstream (bro-6asnu))
 }
 
@@ -1161,15 +1151,12 @@ function bdChecks(
         check('bd', 'warn', binProblem(bd), 'beads store is off — GitHub Issues serves tasks'),
       ];
     }
-=======
->>>>>>> 076f3cf1 (feat(serve): conductor fast lane — classifier calls route to the direct upstream (bro-6asnu))
-    return [
+=======    return [
       beadsActive
         ? check('bd', 'fail', binProblem(bd), fix)
         : check('bd', 'warn', binProblem(bd), 'beads store is off — nothing needs it'),
     ];
   }
-<<<<<<< HEAD
   const out: DoctorCheck[] = [check('bd', 'ok', bd.version ?? 'present')];
   if (githubTasksHealthy && (compat.broken || compat.missing || !compat.ok)) {
     out.push(
@@ -1199,7 +1186,6 @@ function bdChecks(
       )
     );
   } else {
-=======
   const out: DoctorCheck[] = [
     check('bd', 'ok', bd.version ?? 'present'),
     bdCompatCheck(beadsActive, compat),
@@ -1215,9 +1201,7 @@ function bdChecks(
         `bd predates the Dolt backend — upgrade beads${err}`
       )
     );
-  } else {
->>>>>>> 076f3cf1 (feat(serve): conductor fast lane — classifier calls route to the direct upstream (bro-6asnu))
-    out.push(check('bd-backend', 'ok', 'dolt remotes reachable'));
+  } else {    out.push(check('bd-backend', 'ok', 'dolt remotes reachable'));
   }
   if (beadsDir) {
     const list = bdTry(['list', '--json', '-n', '1'], 15_000, dir);
@@ -1707,7 +1691,6 @@ function liveServeEndpoint(dir: string): { url: string; pid: number } | undefine
     // torn/absent state file — not a live endpoint
   }
   return undefined;
-<<<<<<< HEAD
 =======
 }
 
@@ -1734,7 +1717,6 @@ function serveEnviron(
   }
 <<<<<<< HEAD
 >>>>>>> 076f3cf1 (feat(serve): conductor fast lane — classifier calls route to the direct upstream (bro-6asnu))
-=======
   // in tests/same-process scenarios /proc won't reflect env set after start
   if (serve.pid === process.pid) {
     for (const k of Object.keys(process.env)) {
@@ -1744,27 +1726,20 @@ function serveEnviron(
       }
     }
   }
-  return Object.keys(out).length > 0 ? out : undefined;
->>>>>>> 1d628843 (fix(doctor): consider process.env for fast lane detection)
-}
+  return Object.keys(out).length > 0 ? out : undefined;}
 
 /** The endpoint's BRO_PROVIDER_BACKEND — doctor's own env first (when
  *  the same env hosts the serve), else the running server's /proc
  *  environ. Non-/proc platforms can't read a foreign env — the
  *  client-side wire evidence below then decides the row alone. */
-<<<<<<< HEAD
 function serveBackendName(serve: { url: string; pid: number } | undefined): string | undefined {
-=======
 function serveBackendName(
   serve: { url: string; pid: number } | undefined,
   env: Record<string, string> | undefined
-): string | undefined {
->>>>>>> 076f3cf1 (feat(serve): conductor fast lane — classifier calls route to the direct upstream (bro-6asnu))
-  const own = process.env.BRO_PROVIDER_BACKEND?.trim();
+): string | undefined {  const own = process.env.BRO_PROVIDER_BACKEND?.trim();
   if (own !== undefined && own !== '') {
     return own;
   }
-<<<<<<< HEAD
   if (serve === undefined) {
     return undefined;
   }
@@ -1781,7 +1756,6 @@ function serveBackendName(
     // unreadable — raced exit or a platform without /proc
   }
   return undefined;
-=======
   const v = env?.BRO_PROVIDER_BACKEND?.trim();
   return v === undefined || v === '' ? undefined : v;
 }
@@ -1812,9 +1786,7 @@ function fastLaneArmed(env: Record<string, string> | undefined): boolean {
   // an inherited key; absent /proc, doctor's env is the leg that stands
   const effective: Record<string, string | undefined> =
     env ?? (process.env as Record<string, string | undefined>);
-  return hasKey(effective) && !flagsOff(effective.BRO_PROVIDER_FAST_LANE);
->>>>>>> 076f3cf1 (feat(serve): conductor fast lane — classifier calls route to the direct upstream (bro-6asnu))
-=======
+  return hasKey(effective) && !flagsOff(effective.BRO_PROVIDER_FAST_LANE);=======
   // server env wins when present, but also fall back to process.env
   // for vars set after process start (e.g. in tests) so /proc's
   // startup snapshot doesn't hide them
@@ -1930,7 +1902,6 @@ interface ClassifierCtx {
   ids: Map<string, string[]>;
   acpNames: Set<string>;
   nonAcpNames: Set<string>;
-<<<<<<< HEAD
 =======
   /** the serve's env proves the fast lane armed (bro-6asnu) — the
    *  conductor routes classifier calls upstream itself. */
@@ -2017,18 +1988,14 @@ function conductorClassifierChecks(dir: string, root: string | null): DoctorChec
   const serve = liveServeEndpoint(dir);
 <<<<<<< HEAD
   const backend = serveBackendName(serve);
-=======
   const env = serveEnviron(serve);
-  const backend = serveBackendName(serve, env);
->>>>>>> 076f3cf1 (feat(serve): conductor fast lane — classifier calls route to the direct upstream (bro-6asnu))
-  const conductor = backend !== undefined && acpNames.has(backend) ? backend : undefined;
+  const backend = serveBackendName(serve, env);  const conductor = backend !== undefined && acpNames.has(backend) ? backend : undefined;
   const ctx: ClassifierCtx = {
     serve,
     conductor,
     ids: acpWireIds(providers),
     acpNames,
     nonAcpNames,
-<<<<<<< HEAD
 =======
     fastArmed: fastLaneArmed(env),
 >>>>>>> 076f3cf1 (feat(serve): conductor fast lane — classifier calls route to the direct upstream (bro-6asnu))
@@ -2496,11 +2463,8 @@ function credentialScopeChecks(dir: string, cfg: any): DoctorCheck[] {
   } catch {
     return [];
   }
-=======
   }
-  return out;
->>>>>>> 076f3cf1 (feat(serve): conductor fast lane — classifier calls route to the direct upstream (bro-6asnu))
-}
+  return out;}
 
 export function runDoctorChecks(
   dir: string = process.cwd(),
@@ -2558,13 +2522,9 @@ export function runDoctorChecks(
     checkClientPlugins(dir),
     ...buildStampChecks(dir, root),
     ...(janitor === null ? [] : [janitor]),
-<<<<<<< HEAD
     ...remoteChecks(dir, root, cfg.sync.remote, beadsDir, bd.found),
     ...credentialScopeChecks(dir, cfg)
-=======
-    ...remoteChecks(dir, root, cfg.sync.remote, beadsDir, bd.found)
->>>>>>> 076f3cf1 (feat(serve): conductor fast lane — classifier calls route to the direct upstream (bro-6asnu))
-  );
+    ...remoteChecks(dir, root, cfg.sync.remote, beadsDir, bd.found)  );
 
   return checks;
 }
