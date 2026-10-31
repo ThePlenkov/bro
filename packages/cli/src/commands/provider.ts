@@ -312,7 +312,7 @@ async function cmdServe(argv: string[]): Promise<void> {
   // name, non-acp entry) stays loud. Resolved before the lock so a
   // refused start holds nothing.
   const configDir = dirname(statePath);
-  const conductorCfg = (conductorConfig as any)(process.env, configDir, undefined, 'global');
+  const conductorCfg = conductorConfig(process.env, configDir);
   const providerCfg = conductorCfg === undefined ? providerConfig(process.env) : undefined;
   if (conductorCfg === undefined && providerCfg === undefined) {
     console.error(
