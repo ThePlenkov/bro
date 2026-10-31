@@ -19,19 +19,14 @@ import {
   type ReviewFacade,
   type TaskRow,
   type TaskStore,
-} from '@broject/core'
-import {
-  currentFrame,
-  queueItems,
-  queueScope,
-  WAITING_LABEL,
-} from '@broject/drill'
-import { readyBeads, storeFor } from './ready.ts'
+} from '@broject/core';
+import { currentFrame, queueItems, queueScope, WAITING_LABEL } from '@broject/drill';
+import { readyBeads, storeFor } from './ready.ts';
 
 export interface RigNext {
-  verdict: 'step' | 'gate' | 'wait' | 'done' | 'blocked'
-  id?: string
-  detail?: string
+  verdict: 'step' | 'gate' | 'wait' | 'done' | 'blocked';
+  id?: string;
+  detail?: string;
 }
 
 /** The planes one verdict reads — every queue, frame, and ready probe
@@ -40,25 +35,25 @@ export interface RigNext {
  *  store, else the dir's configured connector) — reads that each
  *  resolved their own store could disagree on what is actionable. */
 interface NextScope {
-  dir: string
-  store: TaskStore
+  dir: string;
+  store: TaskStore;
 }
 
 /** The scope plus the row under verdict — the ladder legs below take
  *  this one context rather than threading dir/id/store separately. */
 interface VerdictCtx extends NextScope {
-  id: string
+  id: string;
   /** `gate === false` skips the worktree/PR probe — callers that own
    *  the gate themselves (drive's fixer spawn, spec bro-oy3k1.6) ask
    *  for the cheap ladder only. */
-  gate?: boolean
+  gate?: boolean;
 }
 
 /** The WAKE: predicate is the last `WAKE:` line in the frame's notes —
  *  parkFrame's append contract. */
 function wakePredicate(row: TaskRow): string | undefined {
-  const wakes = (row.notes?.split('\n') ?? []).filter((l) => l.startsWith('WAKE: '))
-  return wakes.at(-1)?.slice(6)
+  const wakes = (row.notes?.split('\n') ?? []).filter(l => l.startsWith('WAKE: '));
+  return wakes.at(-1)?.slice(6);
 }
 
 /** No-arg focus: the current frame's queue top (intake order), else
@@ -68,16 +63,17 @@ function wakePredicate(row: TaskRow): string | undefined {
  *  the same store as the ready fallback — `dir` alone would answer the
  *  ambient session's queue, not the probed checkout's. */
 export function rigFocus(dir: string, opts?: { store?: TaskStore }): string | undefined {
-  const scope: NextScope = { dir, store: opts?.store ?? storeFor(dir) }
-  const top = queueItems(queueScope(scope), scope)[0]
+  const scope: NextScope = { dir, store: opts?.store ?? storeFor(dir) };
+  const frame = queueScope(undefined, scope.dir, { store: scope.store });
+  const top = queueItems(frame, scope.dir, { store: scope.store })[0];
   if (top !== undefined) {
-    return top.id
+    return top.id;
   }
-  const leaf = currentFrame(scope)
+  const leaf = currentFrame(scope.dir, { store: scope.store });
   if (leaf) {
-    return leaf.id
+    return leaf.id;
   }
-  return readyBeads(dir, { store: scope.store }).find((r) => r.issue_type !== 'epic')?.id
+  return readyBeads(dir, { store: scope.store }).find(r => r.issue_type !== 'epic')?.id;
 }
 
 /** A live pid is liveness proof even over a 'stopped' marker — SIGTERM
@@ -86,7 +82,7 @@ function pidInFlight(entry: AgentRegistryEntry): boolean {
   return (
     typeof entry.pid === 'number' &&
     pidAlive(entry.pid, typeof entry.pidStart === 'string' ? entry.pidStart : undefined)
-  )
+  );
 }
 
 /** A live registry agent owns the step — a signal re-enters. Checked
@@ -94,29 +90,29 @@ function pidInFlight(entry: AgentRegistryEntry): boolean {
  *  even while its PR is open or settled. */
 function agentWait(entry: AgentRegistryEntry | undefined, ctx: VerdictCtx): RigNext | undefined {
   if (entry === undefined) {
-    return undefined
+    return undefined;
   }
   if (pidInFlight(entry)) {
-    return { verdict: 'wait', id: ctx.id, detail: `agent ${entry.agentId} in flight` }
+    return { verdict: 'wait', id: ctx.id, detail: `agent ${entry.agentId} in flight` };
   }
   // a recorded death trumps every liveness handle
   if (entry.stopped === true || entry.exitStatus !== undefined) {
-    return undefined
+    return undefined;
   }
   // no pid handle — a remote/detached backend (devin, copilot): absent
   // a recorded death the durable picture reads in-flight, and reporting
   // step here would invite duplicate work. Reaping stays status/
   // respawn's job — this probe never calls the remote API
   if (typeof entry.pid !== 'number') {
-    return { verdict: 'wait', id: ctx.id, detail: `agent ${entry.agentId} in flight (remote)` }
+    return { verdict: 'wait', id: ctx.id, detail: `agent ${entry.agentId} in flight (remote)` };
   }
-  return undefined
+  return undefined;
 }
 
 /** One registry entry by bead id — the Map read keeps the lookup off
  *  the dynamic-index sink while the on-disk shape stays a plain record. */
 function registryEntry(ctx: VerdictCtx): AgentRegistryEntry | undefined {
-  return new Map(Object.entries(readAgentRegistry(ctx.dir))).get(ctx.id)
+  return new Map(Object.entries(readAgentRegistry(ctx.dir))).get(ctx.id);
 }
 
 /** The item's worktree: the registry pin first, else the conventional
@@ -124,10 +120,10 @@ function registryEntry(ctx: VerdictCtx): AgentRegistryEntry | undefined {
  *  can't answer. */
 function itemWorktree(ctx: VerdictCtx, entry: AgentRegistryEntry | undefined): string | undefined {
   if (typeof entry?.worktree === 'string') {
-    return entry.worktree
+    return entry.worktree;
   }
-  const main = mainWorktreeRoot(ctx.dir)
-  return main === null ? undefined : worktreePathFor(main, ctx.id)
+  const main = mainWorktreeRoot(ctx.dir);
+  return main === null ? undefined : worktreePathFor(main, ctx.id);
 }
 
 /** The reviews facade the dir's connector plane can produce — `null`
@@ -137,18 +133,11 @@ function itemWorktree(ctx: VerdictCtx, entry: AgentRegistryEntry | undefined): s
  *  that fails throws out to the caller's 'wait' — a configured gate
  *  may hide an open PR, so its failure is never a skipped probe. */
 function reviewFacade(ctx: VerdictCtx): ReviewFacade | null {
-  const prefer = loadConfig(ctx.dir).connectors
-  if (prefer.reviews !== undefined) {
-    return reviewHost(ctx.dir, prefer)
+  const prefer = loadConfig(ctx.dir).connectors;
+  if (prefer.reviews === undefined) {
+    return null;
   }
-  try {
-    facadeName('reviews', { dir: ctx.dir }, { prefer })
-  } catch {
-    return null
-  }
-  // resolution says a provider exists — its factory can still throw,
-  // and that throw is 'unreachable', not 'absent'
-  return reviewHost(ctx.dir, prefer)
+  return reviewHost(ctx.dir, prefer);
 }
 
 /** The branch the item's worktree is on — '' when the worktree is
@@ -156,20 +145,20 @@ function reviewFacade(ctx: VerdictCtx): ReviewFacade | null {
  *  association is unknowable, so the probe skips rather than guesses
  *  a branch name. */
 function branchOf(wt: string): string {
-  return gitTry(['-C', wt, 'branch', '--show-current']).out.trim()
+  return gitTry(['-C', wt, 'branch', '--show-current']).out.trim();
 }
 
 /** The forge read itself — an open PR moves the next transition to
  *  the gate, a settled one is the cleanup edge. */
 function prsVerdict(rev: ReviewFacade, ctx: VerdictCtx, branch: string): RigNext | undefined {
-  const open = rev.prsForBranch(branch)
+  const open = rev.prsForBranch(branch);
   if (open.length > 0) {
-    return { verdict: 'gate', id: ctx.id, detail: `pr=#${open[0]}` }
+    return { verdict: 'gate', id: ctx.id, detail: `pr=#${open[0]}` };
   }
   if (rev.prsForBranch(branch, 'all').length > 0) {
-    return { verdict: 'step', id: ctx.id, detail: 'pr settled — close/ledger' }
+    return { verdict: 'step', id: ctx.id, detail: 'pr settled — close/ledger' };
   }
-  return undefined
+  return undefined;
 }
 
 /** The gate probe: an open PR on the worktree's branch moves the next
@@ -179,23 +168,23 @@ function prsVerdict(rev: ReviewFacade, ctx: VerdictCtx, branch: string): RigNext
  *  work. */
 function gateVerdict(ctx: VerdictCtx, wt: string | undefined): RigNext | undefined {
   if (wt === undefined) {
-    return undefined
+    return undefined;
   }
-  const branch = branchOf(wt)
+  const branch = branchOf(wt);
   if (branch === '') {
-    return undefined
+    return undefined;
   }
   try {
-    const rev = reviewFacade(ctx)
+    const rev = reviewFacade(ctx);
     if (rev === null) {
-      return undefined
+      return undefined;
     }
-    return prsVerdict(rev, ctx, branch)
+    return prsVerdict(rev, ctx, branch);
   } catch {
     // a configured host that doesn't answer leaves the gate unknowable —
     // 'step' could double-work a PR that's already up; wait is the
     // honest verdict and the next re-entry reads a reachable host
-    return { verdict: 'wait', id: ctx.id, detail: 'review host unreachable' }
+    return { verdict: 'wait', id: ctx.id, detail: 'review host unreachable' };
   }
 }
 
@@ -204,26 +193,23 @@ function gateVerdict(ctx: VerdictCtx, wt: string | undefined): RigNext | undefin
  *  — the row walks on to the settled/work legs. */
 function earlyVerdict(row: TaskRow, ctx: VerdictCtx): RigNext | undefined {
   if (row.status === 'closed') {
-    return { verdict: 'done', id: ctx.id }
+    return { verdict: 'done', id: ctx.id };
   }
   if (row.labels?.includes(WAITING_LABEL)) {
-    return { verdict: 'wait', id: ctx.id, detail: wakePredicate(row) }
+    return { verdict: 'wait', id: ctx.id, detail: wakePredicate(row) };
   }
-  return undefined
+  return undefined;
 }
 
 /** The settled legs — anything that supersedes the work ladder: a live
  *  registry agent owns the step (wait), an open PR on the item's
  *  worktree branch moves the transition to the gate, a settled PR is
  *  the finalize step. */
-function settledLegs(
-  ctx: VerdictCtx,
-  entry: AgentRegistryEntry | undefined
-): RigNext | undefined {
+function settledLegs(ctx: VerdictCtx, entry: AgentRegistryEntry | undefined): RigNext | undefined {
   return (
     agentWait(entry, ctx) ??
     (ctx.gate === false ? undefined : gateVerdict(ctx, itemWorktree(ctx, entry)))
-  )
+  );
 }
 
 /** The work legs — reached only when no settled leg fired: an
@@ -236,18 +222,23 @@ function workVerdict(ctx: VerdictCtx, row: TaskRow): RigNext {
     // the SERVING store's claim identity decides ownership — a pinned
     // non-beads store's assignee lives in a different identity space
     // than `bd`'s actor chain, so '' (unverifiable) can never match
-    const actor = ctx.store.actor?.() ?? ''
+    const actor = ctx.store.actor?.() ?? '';
     return actor !== '' && row.assignee === actor
       ? { verdict: 'step', id: ctx.id, detail: 'own claim — resume' }
-      : { verdict: 'blocked', id: ctx.id, detail: `claimed by ${row.assignee ?? '?'}` }
+      : { verdict: 'blocked', id: ctx.id, detail: `claimed by ${row.assignee ?? '?'}` };
   }
   // open: dep-gated/deferred beads aren't actionable work — the same
   // bd-side filtered ready list the focus read
-  if (!readyBeads(ctx.dir, { store: ctx.store }).some((r) => r.id === ctx.id)) {
-    return { verdict: 'blocked', id: ctx.id, detail: 'dep-gated or deferred' }
+  if (!readyBeads(ctx.dir, { store: ctx.store }).some(r => r.id === ctx.id)) {
+    return { verdict: 'blocked', id: ctx.id, detail: 'dep-gated or deferred' };
   }
-  const rank = queueItems(queueScope(ctx), ctx).find((q) => q.id === ctx.id)?.rank
-  return { verdict: 'step', id: ctx.id, detail: rank === undefined ? undefined : `queue rank ${rank}` }
+  const frame = queueScope(undefined, ctx.dir, { store: ctx.store });
+  const rank = queueItems(frame, ctx.dir, { store: ctx.store }).find(q => q.id === ctx.id)?.rank;
+  return {
+    verdict: 'step',
+    id: ctx.id,
+    detail: rank === undefined ? undefined : `queue rank ${rank}`,
+  };
 }
 
 /** The verdict for one item — the ladder from spec .5: done → wait →
@@ -263,20 +254,20 @@ export function rigNext(
   item?: string,
   opts?: { gate?: boolean; store?: TaskStore }
 ): RigNext {
-  const store = opts?.store ?? storeFor(dir)
-  const id = item ?? rigFocus(dir, { store })
+  const store = opts?.store ?? storeFor(dir);
+  const id = item ?? rigFocus(dir, { store });
   if (id === undefined) {
-    return { verdict: 'done' }
+    return { verdict: 'done' };
   }
-  const row = store.get<TaskRow>(id)
+  const row = store.get<TaskRow>(id);
   if (row === undefined) {
-    return { verdict: 'blocked', id, detail: 'unknown id' }
+    return { verdict: 'blocked', id, detail: 'unknown id' };
   }
-  const ctx: VerdictCtx = { dir, id, store, gate: opts?.gate }
-  const early = earlyVerdict(row, ctx)
+  const ctx: VerdictCtx = { dir, id, store, gate: opts?.gate };
+  const early = earlyVerdict(row, ctx);
   if (early !== undefined) {
-    return early
+    return early;
   }
-  const settled = settledLegs(ctx, registryEntry(ctx))
-  return settled ?? workVerdict(ctx, row)
+  const settled = settledLegs(ctx, registryEntry(ctx));
+  return settled ?? workVerdict(ctx, row);
 }
