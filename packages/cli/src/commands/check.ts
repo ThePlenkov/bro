@@ -306,9 +306,36 @@ function isSafeReportPath(root: string, file: string): boolean {
     return false
   }
   try {
+    const runsDirStat = lstatSync(runsDir)
+    if (runsDirStat.isSymbolicLink()) {
+      return false
+    }
+  } catch {
+    return false
+  }
+  try {
     const lst = lstatSync(resolvedFile)
     if (lst.isSymbolicLink()) {
       return false
+    }
+  } catch {
+    return false
+  }
+  // Reject symlinked components along the path beneath runsDir
+  try {
+    const rel = relative(runsDir, resolvedFile)
+    const parts = rel.split(sep).filter((p) => p !== '' && p !== '.')
+    let cur = runsDir
+    for (let i = 0; i < parts.length; i += 1) {
+      cur = join(cur, parts[i]!)
+      try {
+        const st = lstatSync(cur)
+        if (st.isSymbolicLink()) {
+          return false
+        }
+      } catch {
+        return false
+      }
     }
   } catch {
     return false
@@ -418,7 +445,7 @@ function collectionFailedRun(
   if (parsed.data !== undefined) {
     if (parsed.data !== null && typeof parsed.data === 'object' && !Array.isArray(parsed.data)) {
       const d = parsed.data as SverkaRunData
-      if (d.steps === undefined || Array.isArray(d.steps)) {
+      if (Array.isArray(d.steps)) {
         dataFromParsed = d
       }
     }
@@ -698,8 +725,18 @@ export function runCheckCommand(argv: string[]): void {
     process.exit(1)
   }
 
+  const startedMs = Date.now()
   const { report, data, evaluation, exitCode } = runCheck(bin, root, opts)
   if (report === undefined && data === undefined && evaluation === undefined) {
+    if (format === 'json') {
+      console.log(
+        JSON.stringify({
+          command: 'check',
+          data: {},
+          durationMs: Date.now() - startedMs,
+        })
+      )
+    }
     process.exit(exitCode)
   }
   if (format === 'json') {
@@ -714,7 +751,7 @@ export function runCheckCommand(argv: string[]): void {
         // contract; on a run whose report didn't survive it's empty,
         // its fields absent, never fabricated
         data: data ?? {},
-        durationMs: report?.durationMs ?? 0,
+        durationMs: report?.durationMs ?? Date.now() - startedMs,
         ...(evaluation !== undefined
           ? {
               evaluationStatus: evaluation.status,
