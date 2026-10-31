@@ -26,9 +26,16 @@ process.env.HERDR_BIN_PATH = FAKE_HERDR;
 process.env.HERDR_PLUGIN_STATE_DIR = join(TMP, 'state');
 process.env.FAKE_HERDR_LOG = LOG;
 process.env.FAKE_HERDR_SCENARIO = SCENARIO;
+// production binds PLUGIN_ROOT to the plugin dir — same pin here so
+// the session pane's tui/main.ts probe sees the real entrypoint
+process.env.HERDR_PLUGIN_ROOT = join(HERE, '..');
+// the session pane's bun probe is machine-dependent — pin the
+// line-mode fallback so the command assertions hold everywhere
+process.env.BUN_BIN_PATH = '';
 
 const { converge } = await import('../src/reconcile.ts');
 const { loadState, saveState, stateScope } = await import('../src/lib.ts');
+const { sessionCommand } = await import('../src/sessions.ts');
 type Planes = import('../src/planes.ts').Planes;
 
 const MAIN = join(TMP, 'main');
@@ -721,5 +728,24 @@ describe('workspace labels — lifecycle only (spec bro-u19mq)', () => {
     converge(p);
     assert.equal(called('workspace', 'rename').length, 0);
     assert.equal(loadState(scope).workspaces[tree]?.label, '[silent10h·#765 2t] Ship it');
+  });
+});
+
+describe('sessionCommand — the pane command (spec bro-q2edc)', () => {
+  test('BUN_BIN_PATH set → the OpenTUI app runs in the pane', () => {
+    process.env.BUN_BIN_PATH = '/opt/bun/bin/bun';
+    try {
+      const cmd = sessionCommand('/repo/trees/t1');
+      assert.match(cmd, /^'\/opt\/bun\/bin\/bun' run '.*tui\/main\.ts'/);
+      assert.ok(cmd.endsWith('/repo/trees/t1' + "'"));
+    } finally {
+      process.env.BUN_BIN_PATH = '';
+    }
+  });
+
+  test('BUN_BIN_PATH empty → the line-mode session-view fallback', () => {
+    process.env.BUN_BIN_PATH = '';
+    const cmd = sessionCommand('/repo/trees/t1');
+    assert.match(cmd, /herdr session-view '\/repo\/trees\/t1'/);
   });
 });

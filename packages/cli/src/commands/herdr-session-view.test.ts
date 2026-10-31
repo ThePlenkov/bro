@@ -5,15 +5,13 @@ import { dirname, join } from 'node:path';
 import { describe, test } from 'node:test';
 import { fleetStatusPath, type FleetPaneState, writeFleetState } from './fleet-state.ts';
 import {
-  resolveTarget,
   SESSION_PANE_AGENT,
+  sessionAgentOf,
   sessionMetaArgs,
   sessionReleaseArgs,
   sessionReportArgs,
-  runSessionView,
-  targetKey,
-  viewVerdict,
-} from './herdr-session-view.ts';
+} from './session-feed.ts';
+import { resolveTarget, runSessionView, targetKey, viewVerdict } from './herdr-session-view.ts';
 
 const NOW = Date.now();
 
@@ -212,8 +210,9 @@ describe('sessionMetaArgs — two-call display contract', () => {
     const t = resolveTarget(doc({ agent: 'opencode' }), '/repo/trees/t1', {});
     const calls = sessionMetaArgs(
       'w1:p2',
-      t,
-      { led: { state: 'working' }, mode: 'session/load' },
+      sessionAgentOf(t),
+      { state: 'working' },
+      'session/load',
       7
     );
     assert.equal(calls.length, 2);
@@ -231,13 +230,13 @@ describe('sessionMetaArgs — two-call display contract', () => {
     const t = resolveTarget(doc({ provider: 'oc', acpSessionId: 's' }), '/repo/trees/t1', {
       oc: { type: 'acp', command: 'opencode acp' },
     });
-    const calls = sessionMetaArgs('w1:p2', t, { led: { state: 'idle' }, mode: 'x' }, 7);
+    const calls = sessionMetaArgs('w1:p2', sessionAgentOf(t), { state: 'idle' }, 'x', 7);
     assert.equal(calls[1]![calls[1]!.indexOf('--display-agent') + 1], 'oc');
   });
 
   test('escapes in display text are stripped', () => {
     const t = resolveTarget(doc({ agent: 'a[2J' }), '/repo/trees/t1', {});
-    const calls = sessionMetaArgs('w1:p2', t, { led: { state: 'idle' }, mode: 'm' }, 7);
+    const calls = sessionMetaArgs('w1:p2', sessionAgentOf(t), { state: 'idle' }, 'm', 7);
     assert.equal(calls[1]![calls[1]!.indexOf('--display-agent') + 1], 'a[2J');
   });
 });

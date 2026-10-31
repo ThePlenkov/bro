@@ -9,6 +9,9 @@
  * is dropped, never resurrected. bro state is never written — pane
  * mechanics only.
  */
+import { spawnSync } from 'node:child_process';
+import { existsSync } from 'node:fs';
+import { join } from 'node:path';
 import {
   boundPaneIds,
   BRO,
@@ -19,6 +22,7 @@ import {
   paneExists,
   paneIdle,
   paneList,
+  PLUGIN_ROOT,
   type PluginState,
   SESSION_LABEL,
   shq,
@@ -32,7 +36,30 @@ const log = (s: string): void => console.log(`[reconcile] ${s}`);
  *  lands ~45% of the main pane's width. */
 const SESSION_RATIO = '0.55';
 
-function sessionCommand(worktreePath: string): string {
+/** The OpenTUI entrypoint under the plugin root (spec bro-q2edc). */
+const TUI_MAIN = join(PLUGIN_ROOT, 'tui', 'main.ts');
+
+/** The TUI's runtime — `BUN_BIN_PATH` is the live override (a path
+ *  wins, the empty string forces the fallback — tests and operators
+ *  pin the mode without touching PATH); unset means probe `bun
+ *  --version` once and cache. Without bun the session pane degrades
+ *  to the line-mode session-view, never breaks. */
+let probedBun: string | null | undefined;
+function bun(): string | undefined {
+  const env = process.env.BUN_BIN_PATH;
+  if (env !== undefined) return env === '' ? undefined : env;
+  if (probedBun === undefined) {
+    const ok = spawnSync('bun', ['--version'], { stdio: 'ignore' });
+    probedBun = ok.error === undefined && ok.status === 0 ? 'bun' : null;
+  }
+  return probedBun ?? undefined;
+}
+
+/** The pane command — the OpenTUI app when its entrypoint + runtime
+ *  resolve, the line-mode session-view otherwise. */
+export function sessionCommand(worktreePath: string): string {
+  const b = existsSync(TUI_MAIN) ? bun() : undefined;
+  if (b !== undefined) return `${shq(b)} run ${shq(TUI_MAIN)} ${shq(worktreePath)}`;
   return `${shq(BRO)} herdr session-view ${shq(worktreePath)}`;
 }
 

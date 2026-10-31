@@ -93,7 +93,7 @@ export const safe = (s: string): string => {
  *  a ⏎. Output paths split on it; agent-controlled ANSI still cannot
  *  reach the pane (the pane is a real terminal — pass-through means
  *  an agent owns the display). */
-const safeBlock = (s: string): string => {
+export const safeBlock = (s: string): string => {
   const c: Cur = { s, i: 0 };
   let out = '';
   for (; c.i < s.length; c.i++) {
@@ -109,8 +109,8 @@ const safeBlock = (s: string): string => {
  *  printed line is clipped BEFORE paint so ANSI never eats the count.
  *  `n` lets a caller spend a smaller budget (an arg fitting what's
  *  left of the header); under ~4 chars nothing legible survives. */
-const LINE_MAX = 120;
-const clip = (s: string, n = LINE_MAX): string =>
+export const LINE_MAX = 120;
+export const clip = (s: string, n = LINE_MAX): string =>
   n < 4 ? '' : s.length > n ? `${s.slice(0, n - 1)}…` : s;
 
 /** Tool-card bounds — a chatty tool cannot flood the scrollback: each
@@ -120,7 +120,7 @@ const ITEM_MAX = 10;
 const CARD_MAX = 30;
 
 /** Statuses that finish a tool call — the card edge. */
-const DONE_STATUS = new Set(['completed', 'failed']);
+export const DONE_STATUS = new Set(['completed', 'failed']);
 
 /** The fixed permission policy (spec): reads (and other observably
  *  non-mutating kinds) may be remembered ALWAYS; everything else is
@@ -203,7 +203,7 @@ const ARG_KEYS: Record<string, string[]> = {
  *  (an edit's `file_path` is the identity, `command` its payload). */
 const ARG_FALLBACK = ['path', 'file_path', 'filePath', 'command', 'pattern', 'url', 'query'];
 
-interface ToolWire {
+export interface ToolWire {
   rawInput?: unknown;
   locations?: { path?: unknown }[] | null;
 }
@@ -211,7 +211,7 @@ interface ToolWire {
 /** The one arg on the header — a kind-guided rawInput key first, the
  *  generic list next, a bare-string rawInput, then locations[0].
  *  Sanitized + clipped here so the header just interpolates. */
-function toolArg(u: ToolWire, kind: string | undefined): string | undefined {
+export function toolArg(u: ToolWire, kind: string | undefined): string | undefined {
   if (typeof u.rawInput === 'string' && u.rawInput !== '') return clip(safe(u.rawInput));
   if (typeof u.rawInput === 'object' && u.rawInput !== null) {
     const raw = u.rawInput as Record<string, unknown>;
@@ -223,6 +223,59 @@ function toolArg(u: ToolWire, kind: string | undefined): string | undefined {
   }
   const loc = u.locations?.find(l => typeof l.path === 'string' && l.path !== '');
   return loc !== undefined ? clip(safe(loc.path as string)) : undefined;
+}
+
+/** The text a message/thought chunk carries — sanitized block text,
+ *  or a bracketed marker for non-text content. */
+export function chunkText(u: SessionUpdateLike): string {
+  const c = u['content'] as { type?: string; text?: string } | undefined;
+  return c?.type === 'text' && typeof c.text === 'string'
+    ? safeBlock(c.text)
+    : `[${safe(u.sessionUpdate)}: ${c?.type ?? '?'}]`;
+}
+
+/** One tool `content[]` entry, classified — the shape every pane
+ *  frontend renders from: text output, a file patch, a terminal
+ *  handle (output is not archived), or an opaque unknown. */
+export type ToolContent =
+  | { kind: 'text'; text: string }
+  | { kind: 'diff'; path: string; old?: string; cur?: string }
+  | { kind: 'terminal'; id: string }
+  | { kind: 'unknown'; type: string };
+
+/** The wire-shape → ToolContent parse — one entry of a tool call's
+ *  `content[]` (spec bro-5vjpg). Text blocks sanitize through
+ *  safeBlock (newlines kept, controls gone); everything else carries
+ *  its scalars pre-cleaned for a header slot. */
+export function toolContent(item: unknown): ToolContent {
+  const it = item as {
+    type?: unknown;
+    content?: { type?: unknown; text?: unknown };
+    path?: unknown;
+    oldText?: unknown;
+    newText?: unknown;
+    terminalId?: unknown;
+  };
+  switch (it.type) {
+    case 'content': {
+      const c = it.content;
+      if (c?.type === 'text' && typeof c.text === 'string') {
+        return { kind: 'text', text: safeBlock(c.text) };
+      }
+      return { kind: 'unknown', type: safe(typeof c?.type === 'string' ? c.type : '?') };
+    }
+    case 'diff':
+      return {
+        kind: 'diff',
+        path: safe(typeof it.path === 'string' ? it.path : '?'),
+        old: typeof it.oldText === 'string' ? safeBlock(it.oldText) : undefined,
+        cur: typeof it.newText === 'string' ? safeBlock(it.newText) : undefined,
+      };
+    case 'terminal':
+      return { kind: 'terminal', id: safe(String(it.terminalId ?? '?')) };
+    default:
+      return { kind: 'unknown', type: safe(typeof it.type === 'string' ? it.type : '?') };
+  }
 }
 
 export class AcpRenderer {
@@ -285,11 +338,35 @@ export class AcpRenderer {
     this.buf = { kind, text };
   }
 
-  private static textOf(u: SessionUpdateLike): string {
-    const c = u['content'] as { type?: string; text?: string } | undefined;
-    return c?.type === 'text' && typeof c.text === 'string'
-      ? safeBlock(c.text)
-      : `[${safe(u.sessionUpdate)}: ${c?.type ?? '?'}]`;
+  /** One content item → its `│`-indented card lines (already painted):
+   *  text block, diff +/- lines under a path header, terminal note,
+   *  or a dim bracket for shapes the archive can't display. The parse
+   *  is the shared `toolContent` classifier — only painting is local. */
+  private itemLines(item: unknown): string[] {
+    const c = toolContent(item);
+    switch (c.kind) {
+      case 'text':
+        return this.capItem(c.text.split('\n').map(l => `│  ${clip(l)}`));
+      case 'diff': {
+        const head = `│  ${this.dim(`─ ${clip(c.path)}`)}`;
+        const body: string[] = [];
+        if (c.old !== undefined) {
+          for (const l of c.old.split('\n')) {
+            body.push(`│  ${this.paint(RED, `- ${clip(l)}`)}`);
+          }
+        }
+        if (c.cur !== undefined) {
+          for (const l of c.cur.split('\n')) {
+            body.push(`│  ${this.paint(GREEN, `+ ${clip(l)}`)}`);
+          }
+        }
+        return [head, ...this.capItem(body)];
+      }
+      case 'terminal':
+        return [`│  ${this.dim(`terminal output is not archived (terminal ${c.id})`)}`];
+      case 'unknown':
+        return [`│  ${this.dim(`[${c.type}]`)}`];
+    }
   }
 
   /** The header line — glyph per status edge (⣿ live, ✓ green,
@@ -316,54 +393,6 @@ export class AcpRenderer {
   private capItem(lines: string[]): string[] {
     if (lines.length <= ITEM_MAX) return lines;
     return [...lines.slice(0, ITEM_MAX), `│  ${this.dim(`… (${lines.length - ITEM_MAX} more)`)}`];
-  }
-
-  /** One content item → its `│`-indented card lines (already painted):
-   *  text block, diff +/- lines under a path header, terminal note,
-   *  or a dim bracket for shapes the archive can't display. */
-  private itemLines(item: unknown): string[] {
-    const it = item as {
-      type?: unknown;
-      content?: { type?: unknown; text?: unknown };
-      path?: unknown;
-      oldText?: unknown;
-      newText?: unknown;
-      terminalId?: unknown;
-    };
-    switch (it.type) {
-      case 'content': {
-        const c = it.content;
-        if (c?.type === 'text' && typeof c.text === 'string') {
-          return this.capItem(
-            safeBlock(c.text)
-              .split('\n')
-              .map(l => `│  ${clip(l)}`)
-          );
-        }
-        return [`│  ${this.dim(`[${safe(typeof c?.type === 'string' ? c.type : '?')}]`)}`];
-      }
-      case 'diff': {
-        const head = `│  ${this.dim(`─ ${clip(safe(typeof it.path === 'string' ? it.path : '?'))}`)}`;
-        const body: string[] = [];
-        if (typeof it.oldText === 'string') {
-          for (const l of safeBlock(it.oldText).split('\n')) {
-            body.push(`│  ${this.paint(RED, `- ${clip(l)}`)}`);
-          }
-        }
-        if (typeof it.newText === 'string') {
-          for (const l of safeBlock(it.newText).split('\n')) {
-            body.push(`│  ${this.paint(GREEN, `+ ${clip(l)}`)}`);
-          }
-        }
-        return [head, ...this.capItem(body)];
-      }
-      case 'terminal':
-        return [
-          `│  ${this.dim(`terminal output is not archived (terminal ${safe(String(it.terminalId ?? '?'))})`)}`,
-        ];
-      default:
-        return [`│  ${this.dim(`[${safe(typeof it.type === 'string' ? it.type : '?')}]`)}`];
-    }
   }
 
   /** The card body under a finished call — per-item cap inside,
@@ -492,10 +521,10 @@ export class AcpRenderer {
     switch (u.sessionUpdate) {
       case 'agent_thought_chunk':
       case 'user_message_chunk':
-        this.chunk(u.sessionUpdate, AcpRenderer.textOf(u));
+        this.chunk(u.sessionUpdate, chunkText(u));
         return;
       case 'agent_message_chunk':
-        this.chunk('agent_message_chunk', AcpRenderer.textOf(u));
+        this.chunk('agent_message_chunk', chunkText(u));
         return;
       case 'tool_call':
       case 'tool_call_update':

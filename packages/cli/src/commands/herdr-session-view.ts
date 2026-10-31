@@ -22,17 +22,7 @@
  * `bro-session` report authority held while occupied, two-call
  * metadata, release on every exit, dedup on real moves only.
  */
-import { spawnSync } from 'node:child_process';
-import {
-  closeSync,
-  mkdirSync,
-  openSync,
-  readFileSync,
-  readSync,
-  statSync,
-  watch,
-  type FSWatcher,
-} from 'node:fs';
+import { mkdirSync, readFileSync, watch, type FSWatcher } from 'node:fs';
 import { basename, dirname } from 'node:path';
 import { gitCommonDir, type ProviderEntry } from '@broject/core';
 import type {
@@ -44,60 +34,26 @@ import type {
 import {
   type FleetPaneState,
   fleetStatusPath,
-  nextSeq,
   type PaneLed,
   parseFleetState,
 } from './fleet-state.ts';
-import { PANE_SOURCE, plain } from './herdr-status-view.ts';
+import {
+  type ArchiveRow,
+  eventsVerdict,
+  parseArchiveRows,
+  readTailSlice,
+  releaseSession,
+  reportSession,
+  rowVerdict,
+  sessionAgentOf,
+  SESSION_PANE_AGENT,
+  sizeOf,
+  TAIL_BYTES,
+} from './session-feed.ts';
+import { plain } from './herdr-status-view.ts';
 import { loadBroConfig } from '../plugins.ts';
 
-export const SESSION_PANE_AGENT = 'bro-session';
-
-/** Milliseconds — every herdr call is fire-and-forget behind a short
- *  fuse; a wedged socket must not freeze the view. */
-const HERDR_TIMEOUT_MS = 5_000;
-
-const herdrBin = (): string => process.env.HERDR_BIN_PATH ?? 'herdr';
-
-function call(args: string[]): void {
-  try {
-    spawnSync(herdrBin(), args, { timeout: HERDR_TIMEOUT_MS, stdio: 'ignore' });
-  } catch {
-    // every report is advisory — a dead socket retires to the watch loop
-  }
-}
-
-/** The shared report/release/metadata envelope — `bro:fleet` source,
- *  `bro-session` agent (a distinct identity from `bro-status`: a
- *  recycled pane id must fail the status backstop's foreign check). */
-function paneArgs(verb: string, pane: string, seq: number): string[] {
-  return [
-    'pane',
-    verb,
-    pane,
-    '--source',
-    PANE_SOURCE,
-    '--agent',
-    SESSION_PANE_AGENT,
-    '--seq',
-    String(seq),
-  ];
-}
-
-/** The report-agent argv for one semantic state. */
-export function sessionReportArgs(pane: string, led: PaneLed, seq: number): string[] {
-  const args = [...paneArgs('report-agent', pane, seq), '--state', led.state];
-  if (led.message !== undefined && led.message !== '') {
-    args.push('--message', led.message);
-  }
-  return args;
-}
-
-/** The release argv for pane exit — clears name, state, and any
- *  resume binding so the shell-return probe isn't left to clean up. */
-export function sessionReleaseArgs(pane: string, seq: number): string[] {
-  return paneArgs('release-agent', pane, seq);
-}
+export { SESSION_PANE_AGENT };
 
 // --- resolution -----------------------------------------------------------------
 
@@ -207,18 +163,10 @@ interface AttachState {
 export function viewVerdict(t: SessionTarget | undefined, a: AttachState): ViewVerdict {
   if (t === undefined) return { led: { state: 'unknown' }, mode: 'waiting for projector' };
   if (a.mode === 'events') {
-    // the worker verdict is the floor — a blocked worker wins over a
-    // stale 'working' archive state (spec bro-l8wqu LED contract)
-    if (t.workerLed.state === 'blocked') {
-      return { led: { state: 'blocked' }, mode: a.rowMode ?? 'worker blocked' };
-    }
-    if (a.rowLed !== undefined) {
-      return { led: a.rowLed, mode: a.rowMode ?? 'session events' };
-    }
-    return {
-      led: { state: t.workerLed.state === 'working' ? 'working' : 'idle' },
-      mode: 'session events',
-    };
+    return eventsVerdict(
+      t.workerLed,
+      a.rowLed !== undefined ? { led: a.rowLed, mode: a.rowMode ?? 'session events' } : undefined
+    );
   }
   if (a.mode === 'acp') {
     if (a.acp === 'ended') return { led: { state: 'idle' }, mode: 'session ended' };
@@ -234,76 +182,7 @@ export function viewVerdict(t: SessionTarget | undefined, a: AttachState): ViewV
   return { led: { state: 'unknown' }, mode: 'no session' };
 }
 
-/** The display-text argvs — same two-call contract status-view
- *  carries: call 1 clears, call 2 lands display-agent + state-label
- *  (herdr rejects set-and-clear in one call). */
-export function sessionMetaArgs(
-  pane: string,
-  t: SessionTarget | undefined,
-  v: ViewVerdict,
-  seq: number
-): string[][] {
-  const calls = [[...paneArgs('report-metadata', pane, seq), '--clear-state-labels']];
-  const set = [
-    ...paneArgs('report-metadata', pane, seq + 1),
-    '--display-agent',
-    plain(t?.agent ?? t?.session?.provider ?? t?.slug ?? 'session'),
-    '--state-label',
-    `${v.led.state}=${plain(v.mode)}`,
-  ];
-  calls.push(set);
-  return calls;
-}
-
 // --- the view -------------------------------------------------------------------
-
-/** The open-tail cap — a dead session's log can run to megabytes; the
- *  pane scrolls back through the last chunk, not the corpus. */
-const LOG_TAIL_BYTES = 64 * 1024;
-
-/** statSync().size or 0 — the tail math's floor. */
-function sizeOf(path: string): number {
-  try {
-    return statSync(path).size;
-  } catch {
-    return 0;
-  }
-}
-
-/** One archive row — the shapes `agentTurnPlane` and the worker's
- *  permission seam write (spec bro-l8wqu). Unknown kinds parse
- *  through harmlessly — forward-compatible tail. */
-interface ArchiveRow {
-  kind?: string;
-  phase?: string;
-  update?: SessionUpdateLike;
-  stopReason?: string;
-  error?: string;
-  title?: string;
-  verdict?: string;
-}
-
-/** A chunk of the native log — from byte `from` to EOF. */
-function readLogSlice(path: string, from: number): { text: string; size: number } | undefined {
-  let fd: number;
-  let size: number;
-  try {
-    size = statSync(path).size;
-    fd = openSync(path, 'r');
-  } catch {
-    return undefined;
-  }
-  try {
-    const start = Math.min(Math.max(0, from), size);
-    const len = size - start;
-    if (len === 0) return { text: '', size };
-    const buf = Buffer.alloc(len);
-    readSync(fd, buf, 0, len, start);
-    return { text: buf.toString('utf8'), size };
-  } finally {
-    closeSync(fd);
-  }
-}
 
 interface Attach extends AttachState {
   /** The target key this attach serves — a refresh with the same key
@@ -408,7 +287,7 @@ export async function runSessionView(argv: string[], opts: SessionViewOpts = {})
     if (released) return;
     released = true;
     detach();
-    call(sessionReleaseArgs(ctx.pane, nextSeq()));
+    releaseSession(ctx.pane);
   };
   process.on('exit', release);
   for (const sig of ['SIGINT', 'SIGTERM', 'SIGHUP'] as const) {
@@ -420,16 +299,14 @@ export async function runSessionView(argv: string[], opts: SessionViewOpts = {})
     const mark = `${v.led.state}|${v.mode}`;
     if (mark === lastReport) return;
     lastReport = mark;
-    const seq = nextSeq();
-    call(sessionReportArgs(ctx.pane, v.led, seq));
-    for (const a of sessionMetaArgs(ctx.pane, t, v, seq)) call(a);
+    reportSession(ctx.pane, sessionAgentOf(t), v.led, v.mode);
   };
 
   /** One pump of the log tail — render whatever appended since the
    *  last read. Shared by the fs.watch handler and the refresh poll. */
   const pumpLog = (a: Attach): void => {
     if (a.logPath === undefined) return;
-    const more = readLogSlice(a.logPath, a.logOffset ?? 0);
+    const more = readTailSlice(a.logPath, a.logOffset ?? 0);
     if (more === undefined) return;
     a.logOffset = more.size;
     for (const line of more.text.split('\n')) {
@@ -442,8 +319,8 @@ export async function runSessionView(argv: string[], opts: SessionViewOpts = {})
   const tailLog = (a: Attach, path: string): void => {
     a.mode = 'log';
     a.logPath = path;
-    const from = Math.max(0, sizeOf(path) - LOG_TAIL_BYTES);
-    const slice = readLogSlice(path, from);
+    const from = Math.max(0, sizeOf(path) - TAIL_BYTES);
+    const slice = readTailSlice(path, from);
     if (slice === undefined) {
       dim(`── log tail ${path} — unreadable ──`);
       return;
@@ -476,67 +353,50 @@ export async function runSessionView(argv: string[], opts: SessionViewOpts = {})
   };
 
   /** One parsed archive row — update rows feed the renderer verbatim;
-   *  turn rows print the boundary; permission rows print the ask and
-   *  flip the LED. The pane stays readonly — rows render, nothing
-   *  answers back. */
+   *  turn rows print the boundary; permission rows print the ask. The
+   *  LED mapping is the shared verdict — the pane stays readonly:
+   *  rows render, nothing answers back. */
   const eventRow = (a: Attach, row: ArchiveRow, t: SessionTarget): void => {
     switch (row.kind) {
       case 'update':
-        if (row.update !== undefined) {
-          renderer?.update(row.update);
-          setRowLed(a, { state: 'working' }, 'streaming', t);
-        }
-        return;
+        if (row.update !== undefined) renderer?.update(row.update);
+        break;
       case 'turn':
-        if (row.phase === 'start') {
-          setRowLed(a, { state: 'working' }, 'turn', t);
-          return;
-        }
         if (row.phase === 'stop') {
           if (row.error !== undefined && row.error !== '') {
             dim(`── turn failed — ${row.error} ──`);
-            setRowLed(a, { state: 'blocked' }, 'turn error', t);
           } else {
             dim(
               `── turn complete${row.stopReason !== undefined && row.stopReason !== '' ? ` (${row.stopReason})` : ''} ──`
             );
-            // prompt-complete is the bead's 'done' — herdr has no done
-            // state; idle renders the ✓ (spec bro-l8wqu LED contract)
-            setRowLed(a, { state: 'idle' }, 'turn complete', t);
           }
         }
-        return;
+        break;
       case 'permission': {
         const what = row.title ?? 'permission request';
         const verdict = row.verdict ?? 'denied';
         dim(
           `── ⚠ permission ‹${what}› — ${verdict} (headless driver; open a terminal in this workspace to handle interactively) ──`
         );
-        setRowLed(a, { state: 'blocked' }, `permission — ${verdict}`, t);
-        return;
+        break;
       }
       default:
         return;
     }
+    const v = rowVerdict(row);
+    if (v !== undefined) setRowLed(a, v.led, v.mode, t);
   };
 
   /** One pump of the events archive — parse whatever appended since
    *  the last read. Shared by the fs.watch handler and the refresh
-   *  poll; a torn tail line (a row still being written) is dropped —
-   *  the next complete read picks it up. */
+   *  poll; a torn tail row (still being written) is dropped — the
+   *  next complete read picks it up. */
   const pumpEvents = (a: Attach, t: SessionTarget): void => {
     if (a.eventsPath === undefined) return;
-    const more = readLogSlice(a.eventsPath, a.eventsOffset ?? 0);
+    const more = readTailSlice(a.eventsPath, a.eventsOffset ?? 0);
     if (more === undefined) return;
     a.eventsOffset = more.size;
-    for (const line of more.text.split('\n')) {
-      if (line === '') continue;
-      let row: ArchiveRow;
-      try {
-        row = JSON.parse(line) as ArchiveRow;
-      } catch {
-        continue;
-      }
+    for (const row of parseArchiveRows(more.text)) {
       eventRow(a, row, t);
     }
   };
@@ -546,21 +406,16 @@ export async function runSessionView(argv: string[], opts: SessionViewOpts = {})
   const tailEvents = (a: Attach, t: SessionTarget, path: string): void => {
     a.mode = 'events';
     a.eventsPath = path;
-    const from = Math.max(0, sizeOf(path) - LOG_TAIL_BYTES);
-    const slice = readLogSlice(path, from);
+    const from = Math.max(0, sizeOf(path) - TAIL_BYTES);
+    const slice = readTailSlice(path, from);
     if (slice === undefined) {
       dim(`── session events ${path} — unreadable; waiting for the worker ──`);
       return;
     }
     a.eventsOffset = slice.size;
     const start = from > 0 ? slice.text.indexOf('\n') + 1 : 0;
-    for (const line of slice.text.slice(start).split('\n')) {
-      if (line === '') continue;
-      try {
-        eventRow(a, JSON.parse(line) as ArchiveRow, t);
-      } catch {
-        // partial head row — the mid-file offset landed inside it
-      }
+    for (const row of parseArchiveRows(slice.text.slice(start))) {
+      eventRow(a, row, t);
     }
     try {
       a.watcher = watch(path, () => pumpEvents(a, t));
