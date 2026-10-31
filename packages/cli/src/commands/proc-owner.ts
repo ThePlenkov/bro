@@ -57,7 +57,7 @@ function procIsAgentCmd(dir: string): boolean {
  *  inherits them, so a detached tool shell counts even after a setsid
  *  broke the ancestry chain. NUL-anchored for /proc; on macOS ps output
  *  is whitespace-delimited, so also allow whitespace boundaries. */
-const AGENT_ENV_RE = /(?:^|\0|\s)(?:BRO_AGENT_ID|AI_AGENT)=/;
+const AGENT_ENV_RE = /(?:^|\0|\s|=)(?:BRO_AGENT_ID|AI_AGENT)=/;
 
 function readProcText(dir: string, file: string): string {
   if (process.platform === 'linux') {
@@ -73,49 +73,54 @@ function readProcText(dir: string, file: string): string {
     try {
       if (file === 'cmdline') {
         try {
-          const out = execFileSync('ps', ['-ww', '-o', 'args=', '-p', pid], { encoding: 'utf8', timeout: 500 });
+          let out: string;
+          try {
+            out = execFileSync('ps', ['-ww', '-o', 'args=', '-p', pid], { encoding: 'utf8', timeout: 500 });
+          } catch {
+            try {
+              out = execFileSync('ps', ['-ww', '-o', 'command=', '-p', pid], { encoding: 'utf8', timeout: 500 });
+            } catch {
+              try {
+                out = execFileSync('ps', ['-o', 'command=', '-p', pid], { encoding: 'utf8', timeout: 500 });
+              } catch {
+                return '';
+              }
+            }
+          }
           const s = out.replace(/\r?\n$/, '');
           if (s.trim() === '') {
-            const out2 = execFileSync('ps', ['-ww', '-o', 'command=', '-p', pid], { encoding: 'utf8', timeout: 500 });
-            const s2 = out2.replace(/\r?\n$/, '');
-            // Try to split into tokens (best effort)
-            const tokens = s2.trim() === '' ? [] : s2.match(/(?:[^\s"']+|"[^"]*"|'[^']*')+/g) ?? s2.split(/\s+/);
-            if (tokens.length === 0) return '';
-            return tokens.map(t => t.replace(/^["']|["']$/g, '')).join('\0') + '\0';
+            return '';
           }
-          // ps -o args= gives the full command line; split respecting spaces is hard in general,
-          // but for our agent detection we need tokens - try shell-style split
           const tokens = s.match(/(?:[^\s"']+|"[^"]*"|'[^']*')+/g) ?? s.split(/\s+/);
           if (tokens.length === 0) return '';
           return tokens.map(t => t.replace(/^["']|["']$/g, '')).join('\0') + '\0';
         } catch {
-          try {
-            const out = execFileSync('ps', ['-o', 'command=', '-p', pid], { encoding: 'utf8', timeout: 500 });
-            const s = out.replace(/\r?\n$/, '');
-            const tokens = s.match(/(?:[^\s"']+|"[^"]*"|'[^']*')+/g) ?? (s.trim() === '' ? [] : s.split(/\s+/));
-            if (tokens.length === 0) return '';
-            return tokens.map(t => t.replace(/^["']|["']$/g, '')).join('\0') + '\0';
-          } catch {
-            return '';
-          }
+          return '';
         }
       }
       if (file === 'environ') {
         try {
           const out = execFileSync('ps', ['eww', '-p', pid], { encoding: 'utf8', timeout: 500 });
-          // Look for env vars in the output; try to extract KEY=VALUE pairs
-          // ps eww shows environment after command - split into tokens that contain =
-          const tokens = out.split(/\s+/).filter(t => t.includes('='));
+          // ps eww shows environment after command on macOS as space-delimited tokens
+          const tokens = out.split(/\s+/).filter(t => t.includes('=') && /^[A-Za-z_][A-Za-z0-9_]*=/.test(t));
           if (tokens.length > 0) {
             return tokens.join('\0') + '\0';
+          }
+          const tokens2 = out.split(/\s+/).filter(t => t.includes('='));
+          if (tokens2.length > 0) {
+            return tokens2.join('\0') + '\0';
           }
           return out.replace(/\n/g, '\0') + '\0';
         } catch {
           try {
             const out = execFileSync('ps', ['e', '-p', pid], { encoding: 'utf8', timeout: 500 });
-            const tokens = out.split(/\s+/).filter(t => t.includes('='));
+            const tokens = out.split(/\s+/).filter(t => t.includes('=') && /^[A-Za-z_][A-Za-z0-9_]*=/.test(t));
             if (tokens.length > 0) {
               return tokens.join('\0') + '\0';
+            }
+            const tokens2 = out.split(/\s+/).filter(t => t.includes('='));
+            if (tokens2.length > 0) {
+              return tokens2.join('\0') + '\0';
             }
             return out.replace(/\n/g, '\0') + '\0';
           } catch {
@@ -514,7 +519,17 @@ function agentProcessesInLinux(procDir: string, root: string): ProcHit[] {
   return hits;
 }
 
-function agentProcessesInDarwin(root: string): ProcHit[] {
+function agentProcessesInDarwin(root: string, procDir = '/proc'): ProcHit[] {
+  if (procDir !== '/proc') {
+    try {
+      const names = readdirSync(procDir);
+      if (names.some((n) => /^\d+$/.test(n))) {
+        return agentProcessesInProcOverride(procDir, root);
+      }
+    } catch {
+      // fall through
+    }
+  }
   const hits: ProcHit[] = [];
   try {
     const out = execFileSync('ps', ['-axo', 'pid='], { encoding: 'utf8', timeout: 2000 });
@@ -529,7 +544,7 @@ function agentProcessesInDarwin(root: string): ProcHit[] {
         if (cwd !== root && !cwd.startsWith(root + sep)) {
           continue;
         }
-        const dir = join('/proc', String(pid));
+        const dir = join(procDir === '/proc' ? '/proc' : procDir, String(pid));
         if (procIsMonitor(dir)) {
           continue;
         }
@@ -576,7 +591,7 @@ export function agentProcessesIn(worktree: string, procDir = '/proc'): ProcHit[]
     return agentProcessesInLinux(procDir, root);
   }
   if (process.platform === 'darwin') {
-    return agentProcessesInDarwin(root);
+    return agentProcessesInDarwin(root, procDir);
   }
   return [];
 }
@@ -598,11 +613,11 @@ let cachedOwner: { pid: number; start: string } | null | undefined;
 export function agentOwner(): { pid: number; start: string } | null {
   if (cachedOwner === undefined) {
     let pid: number | null = null;
-    if (existsSyncProc()) {
-      pid = procAgentRoot(`/proc/${process.ppid}`);
-    } else if (process.platform === 'darwin' || process.platform === 'freebsd' || process.platform === 'openbsd') {
+    if (process.platform === 'darwin' || process.platform === 'freebsd' || process.platform === 'openbsd') {
       // On macOS/BSD without /proc, walk using pid dirs the helpers can handle
       pid = procAgentRoot(join('/proc', String(process.ppid)));
+    } else if (existsSyncProc()) {
+      pid = procAgentRoot(`/proc/${process.ppid}`);
     }
     const start = pid === null ? '' : (procStat(pid)?.start ?? '');
     cachedOwner = pid === null || start === '' ? null : { pid, start };

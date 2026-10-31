@@ -242,10 +242,13 @@ function readProcArgv(pid: number): string[] | undefined {
           return undefined
         }
       }
-      // Don't naively split - try to be smart about git args
       const s = out.replace(/\r?\n$/, '')
-      // Try to split but be careful about spaces in paths; for gitSubcommand we need to find verb
-      // Split by whitespace but this is still imperfect - better to do tokenization
+      // Try shell-style tokenization to be less ambiguous with spaces in paths
+      const tokens = s.match(/(?:[^\s"']+|"[^"]*"|'[^']*')+/g)
+      if (tokens && tokens.length > 0) {
+        const argv = tokens.map((t) => t.replace(/^["']|["']$/g, '')).filter((x) => x !== '')
+        return argv.length > 0 ? argv : undefined
+      }
       const argv = s.split(/\s+/).filter((x) => x !== '')
       return argv.length > 0 ? argv : undefined
     } catch {

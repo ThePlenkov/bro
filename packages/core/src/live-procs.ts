@@ -221,17 +221,26 @@ export function readProcRows(procDir = '/proc'): ProcRow[] {
       const cwdMap = new Map<number, string | null>()
       try {
         if (pids.length > 0) {
-          const lout = execFileSync('lsof', ['-a', '-d', 'cwd', '-Fn', '-p', pids.join(',')], { encoding: 'utf8', timeout: 2000 })
-          let currentPid: number | null = null
-          for (const l of lout.split('\n')) {
-            if (l.startsWith('p')) {
-              const v = Number(l.slice(1))
-              currentPid = Number.isInteger(v) ? v : null
-              continue
-            }
-            if (l.startsWith('n') && currentPid !== null) {
-              cwdMap.set(currentPid, l.slice(1))
-              continue
+          // Batch in chunks to avoid very long arg lists
+          const chunkSize = 200
+          for (let i = 0; i < pids.length; i += chunkSize) {
+            const chunk = pids.slice(i, i + chunkSize)
+            try {
+              const lout = execFileSync('lsof', ['-a', '-d', 'cwd', '-Fn', '-p', chunk.join(',')], { encoding: 'utf8', timeout: 2000 })
+              let currentPid: number | null = null
+              for (const l of lout.split('\n')) {
+                if (l.startsWith('p')) {
+                  const v = Number(l.slice(1))
+                  currentPid = Number.isInteger(v) ? v : null
+                  continue
+                }
+                if (l.startsWith('n') && currentPid !== null) {
+                  cwdMap.set(currentPid, l.slice(1))
+                  continue
+                }
+              }
+            } catch {
+              // continue to next chunk
             }
           }
         }
@@ -273,13 +282,34 @@ export function readProcRows(procDir = '/proc'): ProcRow[] {
         const pid = Number(parts[0])
         const ppid = Number(parts[1])
         if (!Number.isInteger(pid) || pid <= 0) continue
-        const lstartTokens = 5
-        if (parts.length < 2 + lstartTokens + 1) continue
-        const lstart = parts.slice(2, 2 + lstartTokens).join(' ')
-        const commStartIdx = trimmed.indexOf(lstart) + lstart.length
-        let comm = trimmed.slice(commStartIdx).trim()
-        if (comm === '') {
-          comm = parts[2 + lstartTokens] ?? ''
+        // lstart can be 4 tokens (no year) or 5 tokens (with year) on macOS
+        // Find lstart by trying to parse from left; lstart is the date/time portion
+        // Try up to 6 tokens to be safe
+        let lstart = ''
+        let comm = ''
+        for (let t = 4; t <= 6 && t <= parts.length; t++) {
+          const candidate = parts.slice(2, 2 + t).join(' ')
+          const parsed = Date.parse(candidate)
+          if (!isNaN(parsed)) {
+            lstart = candidate
+            const commStartIdx = trimmed.indexOf(lstart) + lstart.length
+            comm = trimmed.slice(commStartIdx).trim()
+            if (comm === '') {
+              comm = parts[2 + t] ?? ''
+            }
+            break
+          }
+        }
+        if (lstart === '') {
+          // Fallback to old behavior
+          const lstartTokens = 5
+          if (parts.length < 2 + lstartTokens + 1) continue
+          lstart = parts.slice(2, 2 + lstartTokens).join(' ')
+          const commStartIdx = trimmed.indexOf(lstart) + lstart.length
+          comm = trimmed.slice(commStartIdx).trim()
+          if (comm === '') {
+            comm = parts[2 + lstartTokens] ?? ''
+          }
         }
         let startMs = Date.now()
         try {

@@ -1747,7 +1747,7 @@ function serveBackendName(serve: { url: string; pid: number } | undefined): stri
     } else if (process.platform === 'darwin') {
       try {
         const out = execFileSync('ps', ['eww', '-p', String(serve.pid)], { encoding: 'utf8', timeout: 1000 });
-        const m = out.match(/(?:^|\s)BRO_PROVIDER_BACKEND=([^\s]+)/);
+        const m = out.match(/(?:^|\s|[\r\n])BRO_PROVIDER_BACKEND=([^\s]+)/);
         if (m) {
           const v = m[1].trim();
           return v === '' ? undefined : v;

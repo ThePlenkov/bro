@@ -34,13 +34,13 @@ export function procStat(
       const m = trimmed.match(/^(\d+)\s+(\S+)\s+(.+)$/s)
       if (m) {
         const st = m[2]
-        return { state: st[0] ?? st ?? '', start: `${m[1]} ${m[3].trim()}` }
+        return { state: st[0] ?? st ?? '', start: m[3].trim() }
       }
       // Try without pid in output format
       const m2 = trimmed.match(/^(\S+)\s+(.+)$/s)
       if (m2) {
         const st = m2[1]
-        return { state: st[0] ?? st ?? '', start: `${pid} ${m2[2].trim()}` }
+        return { state: st[0] ?? st ?? '', start: m2[2].trim() }
       }
       // Fallback to just state
       try {

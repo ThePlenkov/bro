@@ -56,21 +56,18 @@ function peerInodeDarwin(remotePort: number, localPort: number): string | undefi
     const rp = `:${remotePort}`
     for (const line of out.split('\n')) {
       if (!line.includes('TCP') || !line.includes('->')) continue
-      // Match exact endpoints in the expected direction: peer's local = remotePort, peer's remote = localPort
-      // lsof shows NAME as "local->remote" or similar
       const nameIdx = line.indexOf('TCP')
-      // Find the part after TCP
       const afterTcp = line.slice(nameIdx)
-      // Look for pattern like host:lp->host:rp or [::]:lp->[::]:rp
       const arrowIdx = afterTcp.indexOf('->')
       if (arrowIdx === -1) continue
       const left = afterTcp.slice(0, arrowIdx)
       const right = afterTcp.slice(arrowIdx + 2)
-      if (!left.includes(rp) || !right.includes(lp)) continue
-      // Also ensure they match as the specific ports (avoid substring false matches)
-      const leftEndsWithRp = left.includes(rp)
-      const rightEndsWithLp = right.includes(lp)
-      if (!leftEndsWithRp || !rightEndsWithLp) continue
+      // Match exact endpoints in the expected direction: peer's local = remotePort, peer's remote = localPort
+      // Look for the ports as standalone tokens/ends to avoid substring matches
+      const lpRe = new RegExp(`(^|[^0-9])${localPort}$|:${localPort}\\b`)
+      const rpRe = new RegExp(`(^|[^0-9])${remotePort}$|:${remotePort}\\b`)
+      if (!rpRe.test(left)) continue
+      if (!lpRe.test(right)) continue
       const parts = line.trim().split(/\s+/)
       if (parts.length > 1 && /^\d+$/.test(parts[1])) {
         return `mac:${parts[1]}`
