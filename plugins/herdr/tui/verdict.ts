@@ -8,8 +8,12 @@
  *  Data-driven: adding a caller is a table row, not a special case. */
 
 export interface VerdictView {
-  /** Short badge label — 'jev' for judge turns. */
+  /** Short badge label — the caller's name (model when the reply
+   *  carries it, else the render site supplies provider/`by`). */
   badge: string;
+  /** The reply's `model` field when it names one — the generic
+   *  model-call label (addendum 11: provider/model, not brands). */
+  model?: string;
   /** One-line summary for the collapsed row: `route: a · noul 0.87`. */
   summary: string;
   /** The expanded fields table — `[question, rendered answer]`. */
@@ -72,6 +76,8 @@ export function verdictOf(text: string): VerdictView | undefined {
   }
   if (typeof parsed !== 'object' || parsed === null) return undefined;
   let map = parsed as Record<string, unknown>;
+  // the reply may name its model — the generic call label
+  const model = typeof map.model === 'string' && map.model !== '' ? map.model : undefined;
   // the typed call wraps answers: {answers:{…}} — unwrap it
   if (
     typeof map.answers === 'object' &&
@@ -89,7 +95,8 @@ export function verdictOf(text: string): VerdictView | undefined {
   }
   if (fields.length === 0) return undefined;
   return {
-    badge: 'jev',
+    badge: model ?? 'verdict',
+    ...(model !== undefined ? { model } : {}),
     summary: fields.map(([q, f]) => `${q} ${f}`).join(' · '),
     fields,
   };

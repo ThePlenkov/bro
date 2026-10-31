@@ -111,6 +111,7 @@ async function dump(worktree: string, argv: string[]): Promise<void> {
   const state = readState(fleetStatusPath(base, worktree));
   const target = resolveTarget(state, worktree, providers(worktree));
   const impl = await pickImpl(implArg(argv));
+  impl.setContext?.({ worktree, agent: sessionAgentOf(target) });
   if (target?.events !== undefined) {
     const from = Math.max(0, sizeOf(target.events) - TAIL_BYTES);
     const slice = readTailSlice(target.events, from);
@@ -168,6 +169,7 @@ export async function runTui(argv: string[]): Promise<void> {
   });
 
   const impl = await pickImpl(implArg(argv));
+  impl.setContext?.({ worktree });
   const pane = await mountPane({
     renderer,
     meta: { worktree },
@@ -260,6 +262,7 @@ export async function runTui(argv: string[]): Promise<void> {
     if (mark === lastReport) return;
     lastReport = mark;
     reportSession(paneId, agent, v.led, v.mode);
+    impl.setContext?.({ agent });
     pane.writer.setMeta({ agent, led: v.led.state, mode: v.mode });
   };
 

@@ -66,7 +66,7 @@ describe('the acp impl', () => {
     expect(appends[1]?.kind === 'message' && appends[1].text === ' there').toBe(true);
   });
 
-  test('a turn stop lands a turn marker', () => {
+  test('a turn stop emits no row — duration folds into the activity line', () => {
     const impl = new AcpImpl();
     impl.feed({ kind: 'turn', phase: 'stop', stopReason: 'end_turn' });
     impl.beginLive();
@@ -74,9 +74,9 @@ describe('the acp impl', () => {
       .drain()
       .filter(o => o.op === 'append')
       .map(o => o.item);
-    const turn = appended.find(i => i.kind === 'turn');
-    expect(turn).toBeDefined();
-    expect(turn?.kind === 'turn' && turn.text.includes('turn complete')).toBe(true);
+    // no 'turn' boundary row — duration/ctx fold into the ▸ line
+    // (addendum 11); with no preceding activity it drops silently
+    expect(appended.find(i => i.kind === 'turn')).toBeUndefined();
   });
 
   test('adjacent activity items collapse into one ▸ tally item', () => {

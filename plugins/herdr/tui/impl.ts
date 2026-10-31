@@ -44,6 +44,9 @@ export interface PaneImpl {
   /** The item's full raw text for clipboard copy — the impl's own
    *  line language, unclipped. Unset impls fall back to `item.text`. */
   copyText?(item: Item): string;
+  /** Shell context for impl-owned surfaces (agent id, worktree) —
+   *  the acp impl renders its feed header from this. */
+  setContext?(ctx: { worktree?: string; agent?: string }): void;
 }
 
 /** `SessionModel` is the seam's reference impl — zero delegation

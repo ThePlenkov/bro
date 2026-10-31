@@ -438,8 +438,16 @@ function ItemRow(props: {
   });
   // a judge reply classifies on its own shape — every answer must
   // match the typed table, so a prose message never trips it; the
-  // `judge` flag narrows it further on journaled turns
-  const verdict = createMemo(() => ('text' in props.item ? verdictOf(props.item.text) : undefined));
+  // `judge` flag narrows it further on journaled turns. The badge is
+  // the call's MODEL (`"model"` in the reply) else its provider `by`
+  // — generic, never a brand literal (addendum 11)
+  const verdict = createMemo(() => {
+    if (!('text' in props.item)) return undefined;
+    const v = verdictOf(props.item.text);
+    if (v === undefined) return undefined;
+    const by = 'by' in props.item ? props.item.by : undefined;
+    return v.model === undefined && by !== undefined ? { ...v, badge: by } : v;
+  });
   const thought = createMemo(() => props.item.kind === 'thought');
   const tone = createMemo(() => {
     const it = props.item;
@@ -495,34 +503,49 @@ function ItemRow(props: {
                 keyed
                 fallback={
                   <Show
-                    when={props.item.kind === 'prompt'}
+                    when={props.item.kind === 'header'}
                     fallback={
                       <Show
-                        when={props.item.kind === 'message'}
+                        when={props.item.kind === 'prompt'}
                         fallback={
-                          <text
-                            fg={thought() ? theme.muted : sideColor(tone())}
-                            attributes={
-                              thought()
-                                ? TextAttributes.DIM | TextAttributes.ITALIC
-                                : TextAttributes.DIM
+                          <Show
+                            when={props.item.kind === 'message'}
+                            fallback={
+                              <text
+                                fg={thought() ? theme.muted : sideColor(tone())}
+                                attributes={
+                                  thought()
+                                    ? TextAttributes.DIM | TextAttributes.ITALIC
+                                    : TextAttributes.DIM
+                                }
+                                flexShrink={0}
+                                content={props.item.kind === 'tool' ? '' : props.item.text}
+                              />
                             }
-                            flexShrink={0}
-                            content={props.item.kind === 'tool' ? '' : props.item.text}
-                          />
+                          >
+                            <markdown
+                              content={props.item.kind === 'tool' ? '' : props.item.text}
+                              syntaxStyle={props.syntax}
+                              streaming
+                              internalBlockMode="top-level"
+                              flexShrink={0}
+                            />
+                          </Show>
                         }
                       >
-                        <markdown
-                          content={props.item.kind === 'tool' ? '' : props.item.text}
-                          syntaxStyle={props.syntax}
-                          streaming
-                          internalBlockMode="top-level"
-                          flexShrink={0}
-                        />
+                        <PromptRow item={props.item} syntax={props.syntax} />
                       </Show>
                     }
                   >
-                    <PromptRow item={props.item} syntax={props.syntax} />
+                    {/* the feed header — agent·provider·model·cwd·launched,
+                     *  a dim surface block at the top of the stream */}
+                    <box width="100%" flexShrink={0} backgroundColor={theme.surface}>
+                      <text
+                        fg={theme.muted}
+                        attributes={TextAttributes.DIM}
+                        content={props.item.kind === 'header' ? props.item.text : ''}
+                      />
+                    </box>
                   </Show>
                 }
               >

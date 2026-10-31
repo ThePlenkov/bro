@@ -42,13 +42,16 @@ export interface TextItem {
   /** `prompt` rows are journaled by `AgentTurnPlane.start` (or the
    *  `.prompt.md` fallback on old archives) — the user-side surface
    *  (empty text = the `▸ prompt unavailable` marker). */
-  kind: 'message' | 'thought' | 'prompt';
+  kind: 'message' | 'thought' | 'prompt' | 'header';
   text: string;
   /** The row's ISO stamp — the pane's HH:MM gutter. */
   at?: string;
   /** Judge-labelled turn — the reply text may classify as a verdict
    *  control instead of a message (verdict.ts's shape table). */
   judge?: boolean;
+  /** The row's `by` label — the call's origin (provider/conductor)
+   *  rendered on turn blocks and verdict badges (addendum 11). */
+  by?: string;
   /** The impl's source item (acp impl: their Item). The view renders
    *  the impl's row language when present — opaque to this seam. */
   vi?: unknown;
@@ -70,6 +73,9 @@ export interface ToolItem {
   collapsed: boolean;
   content: ToolContent[];
   at?: string;
+  /** The row's `by` label — the turn's origin (provider/conductor),
+   *  folded into the ▸ run line's arg. */
+  by?: string;
   vi?: unknown;
   /** An activity-run group (the acp impl's `▸ N tool calls · …`
    *  line): the collapsed members, in order, for the expanded body.
@@ -86,6 +92,7 @@ export interface SideItem {
   text: string;
   tone?: 'warn' | 'error';
   at?: string;
+  by?: string;
   vi?: unknown;
 }
 

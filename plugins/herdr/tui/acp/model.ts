@@ -213,15 +213,10 @@ const permissionItem = (item: PermissionRecordItem, id: number): SideItem => {
   };
 };
 
-const markerItem = (item: MarkerItem, id: number): SideItem => {
-  if (item.markerKind === 'turn_end') {
-    return {
-      id,
-      kind: 'turn',
-      text: `── turn complete (${item.stopReason}) ──`,
-      vi: item,
-    };
-  }
+const markerItem = (item: MarkerItem, id: number): SideItem | undefined => {
+  // turn_end markers emit no row — duration/ctx fold into the ▸
+  // activity line at drain time (addendum 11)
+  if (item.markerKind === 'turn_end') return undefined;
   return item.markerKind === 'error'
     ? { id, kind: 'turn', text: `── turn failed — ${item.text} ──`, tone: 'error', vi: item }
     : { id, kind: 'note', text: item.text, vi: item };
@@ -236,31 +231,35 @@ const project = (
   args: ReadonlyMap<string, string>,
   folded = true,
   stamp?: string,
-  judge?: boolean
-): Item => {
+  judge?: boolean,
+  by?: string
+): Item | undefined => {
+  const base = { at: stamp, ...(by !== undefined ? { by } : {}) };
   switch (item.kind) {
     case 'agent_message':
       return {
         id,
         kind: 'message',
         text: item.text,
-        at: stamp,
+        ...base,
         ...(judge === true ? { judge: true } : {}),
       };
     case 'user_message':
       // our model dims user_message chunks like thoughts — parity;
       // no `vi` — their line language has no user-bubble row here
-      return { id, kind: 'thought', text: item.text, at: stamp };
+      return { id, kind: 'thought', text: item.text, ...base };
     case 'thought':
-      return { id, kind: 'thought', text: item.text, at: stamp, vi: item };
+      return { id, kind: 'thought', text: item.text, ...base, vi: item };
     case 'tool_call':
-      return toolItem(item, id, args, folded, stamp);
+      return { ...toolItem(item, id, args, folded, stamp), ...(by !== undefined ? { by } : {}) };
     case 'plan':
-      return { ...planItem(item, id), at: stamp };
+      return { ...planItem(item, id), ...base };
     case 'permission_record':
-      return { ...permissionItem(item, id), at: stamp };
-    case 'marker':
-      return { ...markerItem(item, id), at: stamp };
+      return { ...permissionItem(item, id), ...base };
+    case 'marker': {
+      const m = markerItem(item, id);
+      return m === undefined ? undefined : { ...m, ...base };
+    }
   }
 };
 
@@ -315,6 +314,16 @@ const runMembers = (
   return out;
 };
 
+/** The `by` label → the caller's short name — `acp provider 'X'`→X,
+ *  `provider:X`→X, `conductor:X`→X. The turn block's origin label. */
+const shortBy = (by: string | undefined): string | undefined => {
+  if (by === undefined || by === '') return undefined;
+  const m = /^acp provider '([^']+)'$/.exec(by) ?? /^provider:(.+)$/.exec(by);
+  if (m !== null) return m[1];
+  const c = /^conductor:(.+)$/.exec(by);
+  return c !== null ? c[1] : by;
+};
+
 /** `N tool calls` plural-safe part labels, in first-seen order. */
 const tally = (members: readonly TheirItem[]): string => {
   const names: Record<string, [string, string]> = {
@@ -340,7 +349,8 @@ const runItem = (
   members: readonly TheirItem[],
   id: number,
   folded: boolean,
-  stamp: string | undefined
+  stamp: string | undefined,
+  by: string | undefined
 ): ToolItem => {
   let started: number | undefined;
   let ended: number | undefined;
@@ -363,12 +373,13 @@ const runItem = (
     kind: 'tool',
     toolCallId: `run:${id}`,
     title: 'activity',
-    arg: `${tally(members)}${secs}`,
+    arg: `${tally(members)}${secs}${by !== undefined ? ` · ${by}` : ''}`,
     status: live ? 'live' : failed ? 'failed' : 'completed',
     bodyLanded: true,
     collapsed: folded,
     content: [],
     at: stamp,
+    ...(by !== undefined ? { by } : {}),
     runs: members,
   };
 };
@@ -396,6 +407,22 @@ export class AcpImpl implements PaneImpl {
   private readonly args = new Map<string, string>();
   /** Their sid → the row's `ts` at item birth — the gutter stamp. */
   private readonly tsMap = new Map<string, string>();
+  /** Their sid → the row's `by` at item birth — the turn's origin
+   *  (provider/conductor), folded into ▸ lines and verdict badges. */
+  private readonly byMap = new Map<string, string>();
+  /** The shell's context — agent id + worktree for the feed header. */
+  private ctx: { worktree?: string; agent?: string } = {};
+  /** The feed header item — emitted once the first row lands, then
+   *  text-patched as provider/model arrive. */
+  private headerId: number | undefined;
+  private headerText = '';
+  /** The first row's ts — the session's launch stamp. */
+  private launchTs: string | undefined;
+  /** The last emitted activity item — a turn_end's duration/ctx
+   *  folds into its arg instead of a standalone row (addendum 11). */
+  private lastActivity: { id: number; arg: string } | undefined;
+  /** The session's provider label — first non-conductor `by` seen. */
+  private provider: string | undefined;
   /** Their sids born under a judge-labelled turn — the reply text
    *  classifies as a verdict control at render. */
   private readonly judgeSids = new Set<string>();
@@ -414,13 +441,30 @@ export class AcpImpl implements PaneImpl {
   private readonly prompts: { pos: number; item: TextItem }[] = [];
   private ops: Op[] = [];
 
+  /** The shell's context — agent/worktree for the feed header. */
+  setContext(ctx: { worktree?: string; agent?: string }): void {
+    this.ctx = { ...this.ctx, ...ctx };
+  }
+
   feed(row: ArchiveRow): void {
+    this.launchTs ??= row.ts;
+    // the provider label is any `acp provider 'X'`/`provider:X` by —
+    // conductor rows name the orchestrator, not the model
+    if (row.by !== undefined && /^(?:acp provider|provider:)/.test(row.by)) {
+      this.provider ??= shortBy(row.by);
+    }
     if (row.kind === 'prompt') {
       // the prompt row marks its turn — a typed-preamble body (or a
       // judge `by`) labels the reply for the verdict classifier
       this.judgeNow = isJudgeTurn(row.text, row.by);
       const id = this.nextId++;
-      const item: TextItem = { id, kind: 'prompt', text: row.text ?? '', at: row.ts };
+      const item: TextItem = {
+        id,
+        kind: 'prompt',
+        text: row.text ?? '',
+        at: row.ts,
+        ...(row.by !== undefined ? { by: shortBy(row.by) } : {}),
+      };
       this.emitted.push(id);
       this.ops.push({ op: 'append', item });
       this.prompts.push({ pos: this.session.order.length, item });
@@ -457,6 +501,7 @@ export class AcpImpl implements PaneImpl {
       const sid = ord[i];
       if (sid === undefined) continue;
       if (row.ts !== undefined) this.tsMap.set(sid, row.ts);
+      if (row.by !== undefined) this.byMap.set(sid, shortBy(row.by) ?? row.by);
       if (this.judgeNow) this.judgeSids.add(sid);
     }
   }
@@ -498,10 +543,65 @@ export class AcpImpl implements PaneImpl {
    *  `▸ N tool calls · …` group item (the confirmed live density) —
    *  the run's leader keeps its slot and morphs in place when the
    *  second member lands. */
+  /** The session model id — the legacy model state first, then a
+   *  `model` config option (the vendored UI's own preference). */
+  private sessionModel(): string | undefined {
+    const s = this.session as { models?: { currentModelId?: string } | null };
+    if (typeof s.models?.currentModelId === 'string') return s.models.currentModelId;
+    const opts = (
+      this.session as {
+        configOptions?: readonly { id?: string; name?: string; currentValue?: unknown }[];
+      }
+    ).configOptions;
+    const m = opts?.find(o => /model/i.test(String(o.id ?? o.name ?? '')));
+    const v = m?.currentValue;
+    return typeof v === 'string' && v !== '' ? v : undefined;
+  }
+
+  /** The feed header — `▸ agent · provider · model · cwd · launched`.
+   *  Emitted once on the first drain with data, then text-patched as
+   *  provider/model arrive (never evicted — the pane's title). */
+  private emitHeader(ops: Op[]): void {
+    if (this.launchTs === undefined) return;
+    const parts = [
+      this.ctx.agent,
+      this.provider,
+      this.sessionModel(),
+      this.ctx.worktree,
+      `launched ${this.launchTs.slice(5, 16).replace('T', ' ')}`,
+    ].filter((p): p is string => p !== undefined && p !== '');
+    const text = `▸ ${parts.join(' · ')}`;
+    if (this.headerId === undefined) {
+      this.headerId = this.nextId++;
+      this.headerText = text;
+      ops.unshift({ op: 'append', item: { id: this.headerId, kind: 'header', text } });
+    } else if (text !== this.headerText) {
+      this.headerText = text;
+      ops.unshift({ op: 'text', id: this.headerId, text });
+    }
+  }
+
+  /** A turn_end marker → an arg patch on the latest ▸ activity item:
+   *  ` · 45.4s · ctx 38k/200k` appended once, no standalone row. */
+  private endFold(item: Extract<MarkerItem, { markerKind: 'turn_end' }>, ops: Op[]): void {
+    const last = this.lastActivity;
+    if (last === undefined) return;
+    const dur = item.durationMs > 0 ? ` · ${(item.durationMs / 1000).toFixed(1)}s` : '';
+    const u = item.usage;
+    const ctx =
+      u !== null && u !== undefined && u.size > 0
+        ? ` · ctx ${Math.round(u.used / 1000)}k/${Math.round(u.size / 1000)}k`
+        : '';
+    const arg = `${last.arg}${dur}${ctx}`;
+    last.arg = arg;
+    ops.push({ op: 'tool', item: { id: last.id, arg } });
+  }
+
   drain(): Op[] {
     if (this.session.items === this.prev && this.ops.length === 0) return this.ops;
     const ops = this.ops;
     this.ops = [];
+    this.emitHeader(ops);
     const items = this.session.items;
     const memberGroup = buildRuns(this.session.order, items);
     // a changed member dirties its leader's tally — the group
@@ -531,25 +631,53 @@ export class AcpImpl implements PaneImpl {
         was !== item || nowGrouped !== (this.grouped.get(sid) ?? false) || dirty.delete(sid);
       this.grouped.set(sid, nowGrouped);
       if (was === item && !changed) continue;
+      // turn_end emits no row — duration/ctx fold into the latest ▸
+      // activity line's arg (addendum 11)
+      if (item.kind === 'marker' && item.markerKind === 'turn_end') {
+        this.endFold(item, ops);
+        continue;
+      }
       let id = this.ids.get(sid);
       if (was === undefined) {
         id = this.nextId++;
         this.ids.set(sid, id);
         this.emitted.push(id);
-        ops.push({
-          op: 'append',
-          item:
-            members !== undefined
-              ? runItem(members, id, true, this.tsMap.get(sid))
-              : project(item, id, this.args, true, this.tsMap.get(sid), this.judgeSids.has(sid)),
-        });
+        const next =
+          members !== undefined
+            ? runItem(members, id, true, this.tsMap.get(sid), this.byMap.get(sid))
+            : project(
+                item,
+                id,
+                this.args,
+                true,
+                this.tsMap.get(sid),
+                this.judgeSids.has(sid),
+                this.byMap.get(sid)
+              );
+        if (next === undefined) continue;
+        ops.push({ op: 'append', item: next });
+        if (members !== undefined && next.kind === 'tool') {
+          this.lastActivity = { id, arg: next.arg ?? '' };
+        }
         continue;
       }
       if (id === undefined) continue;
       const next =
         members !== undefined
-          ? runItem(members, id, true, this.tsMap.get(sid))
-          : project(item, id, this.args, true, this.tsMap.get(sid), this.judgeSids.has(sid));
+          ? runItem(members, id, true, this.tsMap.get(sid), this.byMap.get(sid))
+          : project(
+              item,
+              id,
+              this.args,
+              true,
+              this.tsMap.get(sid),
+              this.judgeSids.has(sid),
+              this.byMap.get(sid)
+            );
+      if (next === undefined) continue;
+      if (members !== undefined && next.kind === 'tool') {
+        this.lastActivity = { id, arg: next.arg ?? '' };
+      }
       if (next.kind === 'tool') {
         // a bare tool op — `collapsed` omitted so the fold keeps the
         // user's toggle across updates
@@ -585,12 +713,18 @@ export class AcpImpl implements PaneImpl {
    *  tools keep their body below it (a dump is the full readout). */
   dump(): string[] {
     const out: string[] = [];
+    // the feed header — same block the pane renders first
+    this.emitHeader([]);
+    if (this.headerText !== '') out.push(this.headerText);
     const toolsByCall = new Map<string, TheirItem>();
     for (const sid of this.session.order) {
       const item = this.session.items.get(sid);
       if (item?.kind === 'tool_call') toolsByCall.set(item.toolCallId, item);
     }
     const find = (toolCallId: string): unknown => toolsByCall.get(toolCallId);
+    /** the last ▸ line's index — a turn_end folds duration/ctx into
+     *  its arg instead of a row (same as the drain path) */
+    let lastRun = -1;
     // prompt items interleave at the order position they landed —
     // per-turn prompts stay chronological through the readout
     let pi = 0;
@@ -618,10 +752,24 @@ export class AcpImpl implements PaneImpl {
         id = this.nextId++;
         this.ids.set(sid, id);
       }
+      // no row — duration/ctx fold into the preceding ▸ line's arg
+      if (item.kind === 'marker' && item.markerKind === 'turn_end') {
+        if (lastRun >= 0) {
+          const dur = item.durationMs > 0 ? ` · ${(item.durationMs / 1000).toFixed(1)}s` : '';
+          const u = item.usage;
+          const ctx =
+            u !== null && u !== undefined && u.size > 0
+              ? ` · ctx ${Math.round(u.used / 1000)}k/${Math.round(u.size / 1000)}k`
+              : '';
+          out[lastRun] = `${out[lastRun]}${dur}${ctx}`;
+        }
+        continue;
+      }
       if (leader === sid) {
         // the ▸-tally line; members hang under it in the │ gutter
         const members = runMembers(ord, this.session.items, sid);
-        out.push(`▸ ${runItem(members, id, false, undefined).arg}`);
+        lastRun = out.length;
+        out.push(`▸ ${runItem(members, id, false, undefined, this.byMap.get(sid)).arg}`);
         for (const m of members) {
           const ml = lineText(
             acpLine(
@@ -656,13 +804,23 @@ export class AcpImpl implements PaneImpl {
         }
         continue;
       }
-      const p = project(item, id, this.args, false, this.tsMap.get(sid), this.judgeSids.has(sid));
+      const p = project(
+        item,
+        id,
+        this.args,
+        false,
+        this.tsMap.get(sid),
+        this.judgeSids.has(sid),
+        this.byMap.get(sid)
+      );
+      if (p === undefined) continue;
       // judge replies print the verdict control, not the JSON wall —
-      // the same shape classification the pane's VerdictRow uses
+      // the same shape classification the pane's VerdictRow uses;
+      // the badge is the call's model/provider, never a brand literal
       if ('text' in p) {
         const v = verdictOf(p.text);
         if (v !== undefined) {
-          out.push(`⛨ jev · ${v.summary}`);
+          out.push(`⛨ ${v.model ?? p.by ?? 'verdict'} · ${v.summary}`);
           for (const [q, f] of v.fields) out.push(`   ${q} ${f}`);
           continue;
         }

@@ -625,6 +625,22 @@ read-mostly feed) and the live tail keeps appending below the user's
 scroll position — herdr pins or tracks that per its own pane
 semantics.
 
+**Feed header + generic turn labels** (addendum 11): the acp dump
+and pane open with a `▸` header — agent, worktree, provider, model,
+launch stamp (`setContext({worktree, agent})` on both the live and
+dump paths; model resolves from the session's `currentModelId` or
+config options). Every model call carries its caller label — the `▸`
+activity line suffixes `· <provider>` from the row's `by` (`shortBy`
+strips `acp provider 'X'`/`provider:X`/`conductor:X` to `X`), and
+verdict badges go generic: `⛨ <model>` when the reply JSON carries a
+`model` field (e.g. `typesafe/jev-1.13`), `⛨ <by>` when it does not
+(e.g. `⛨ kilo`) — no `jev` branding anywhere; the shape table in
+`verdict.ts` is the classifier. `end turn` rows are gone: their
+duration and `ctx used/size` fold into the most recent `▸` activity
+line (`endFold` mutates the leader item in place on the live path,
+same fold in `dump()`); a `turn_end` with no preceding activity is
+absorbed silently.
+
 ## Risks
 
 - **Solid's prop application is post-construction.** The reconciler

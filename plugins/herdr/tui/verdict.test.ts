@@ -17,12 +17,23 @@ test('a wrapped {answers} body classifies — badge + field table', () => {
       },
     })
   );
-  expect(v?.badge).toBe('jev');
+  expect(v?.badge).toBe('verdict');
   expect(v?.fields).toEqual([
     ['route', 'choice: a (a:0.90 b:0.10)'],
     ['sure', 'noul 0.87'],
   ]);
   expect(v?.summary).toContain('route choice: a');
+});
+
+test('a reply naming its model badges with it — generic, not branded', () => {
+  const v = verdictOf(
+    JSON.stringify({
+      model: 'typesafe/jev-1.13',
+      answers: { route: { type: 'choice', choice: 'a' } },
+    })
+  );
+  expect(v?.model).toBe('typesafe/jev-1.13');
+  expect(v?.badge).toBe('typesafe/jev-1.13');
 });
 
 test('a bare {qid:answer} map classifies; score renders', () => {
