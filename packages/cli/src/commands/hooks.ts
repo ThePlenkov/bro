@@ -429,7 +429,7 @@ export function isSelfToolCommand(cmd: string): boolean {
   if (/[;&|`$()<>\n\\]/.test(cmd)) {
     return false;
   }
-  return /^\s*(bro|bd)(\s|$)/.test(cmd) || new RegExp(`^\\s*${BRO_CMD}(\\s|$)`).test(cmd);
+  return /^\s*(bro|bd)(\s|$)/.test(cmd) || new RegExp(String.raw`^\s*${BRO_CMD}(\s|$)`).test(cmd);
 }
 
 // --- session arming -----------------------------------------------------------

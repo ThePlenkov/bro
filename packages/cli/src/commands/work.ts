@@ -58,8 +58,8 @@ import {
   type ReviewFacade,
   type TaskRow,
   type TaskStore,
+  type ExitCode,
 } from '@broject/core';
-import type { ExitCode } from '@broject/core';
 import { assertMutableConfig } from '../config-policy.ts';
 import { loopSection, loopSlug, type LoopConfig } from '@broject/loop';
 import { listWatches, type ListedWatch } from '@broject/act';
@@ -166,7 +166,8 @@ export function worktreeGitDir(path: string): string | null {
     if (statSync(dotgit).isDirectory()) {
       return dotgit;
     }
-    const m = /^gitdir:\s*(.+)$/m.exec(readFileSync(dotgit, 'utf8'));
+    const content = readFileSync(dotgit, 'utf8');
+    const m = /^gitdir:\s*([^\r\n]+)/m.exec(content);
     if (m === null) {
       return null;
     }
@@ -2113,8 +2114,8 @@ export function runWorkCommand(argv: string[]): void {
 /** Absolute git dir for cwd — used by hooks to tell linked worktrees from
  *  the primary checkout without re-parsing `worktree list`. */
 export function gitDirOf(cwd: string): string | null {
-  /* NOSONAR — git is a required runtime dep; fixed argv */ const res = spawnSync(
-    'git',
+  const res = spawnSync(
+    /* NOSONAR — git is a required runtime dep; fixed argv */ 'git',
     ['-C', cwd, 'rev-parse', '--absolute-git-dir'],
     {
       encoding: 'utf8',

@@ -1365,8 +1365,8 @@ function runBootstrap(ctx: Ctx, beads: ReadyBead[], item: LoopItem): boolean {
   if (!ctx.cfg.bootstrap) {
     return true;
   }
-  /* NOSONAR — operator-configured bootstrap */ const b = spawnSync(
-    'sh',
+  const b = spawnSync(
+    /* NOSONAR — operator-configured bootstrap */ 'sh',
     ['-c', ctx.cfg.bootstrap],
     {
       cwd: item.worktreeDir,
