@@ -23,6 +23,7 @@ import { basename, isAbsolute, resolve } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import {
   agentsJson,
+  armedWorkDetails,
   ctxJson,
   type HerdrWorkspace,
   herdrTry,
@@ -326,12 +327,32 @@ function hasLiveRunOrBoundAgent(p: Planes, treePath: string): boolean {
         ew.startsWith(treePath + '/') ||
         treePath.startsWith(ew + '/');
       if (matches) {
-        if (entry.pid !== undefined && entry.pid !== null) {
-          if (pidAlive(entry.pid)) return true;
+        if (entry.pid === undefined || entry.pid === null) {
           continue;
         }
-        // no pid - don't treat as live
-        continue;
+        if (!pidAlive(entry.pid)) {
+          continue;
+        }
+        // must correspond to a still-running agent in fleet status
+        const eid = (entry as any).agentId ?? (entry as any).id;
+        let running = false;
+        for (const a of p.status.fleet.agents || []) {
+          const aid = (a as any).agentId ?? a.id;
+          if (eid && aid && eid === aid) {
+            if (a.state === 'running') {
+              running = true;
+              break;
+            }
+            break;
+          }
+        }
+        if (!running) {
+          // if no specific fleet agent match found, be conservative only if
+          // fleet status doesn't show this agent as exited/blocked
+          // but better to not block on orphaned pid entries
+          continue;
+        }
+        return true;
       }
     }
   }
@@ -395,21 +416,45 @@ function isBranchPushedToRemote(wt: string): boolean {
   if (branch && branch !== 'HEAD') {
     const lr2 = run('git', ['-C', wt, 'show-ref', '--verify', '--quiet', `refs/remotes/origin/${branch}`]);
     if (lr2.code === 0) return true;
+    const lr3 = run('git', ['-C', wt, 'branch', '-r', '--list', `origin/${branch}`]);
+    if (lr3.code === 0 && lr3.out.trim()) return true;
+    // also check if local branch tracks origin
+    const tr = run('git', ['-C', wt, 'config', `branch.${branch}.remote`]);
+    if (tr.code === 0 && tr.out.trim() === 'origin') return true;
+    const mr = run('git', ['-C', wt, 'config', `branch.${branch}.merge`]);
+    if (tr.code === 0 && mr.code === 0 && mr.out.trim().includes(`refs/heads/${branch}`)) {
+      return true;
+    }
     // avoid unbounded network probe in reconcile; do a quick local-only check if possible with short timeout
     const lr = quickRun('git', ['-C', wt, 'ls-remote', '--exit-code', '--heads', 'origin', branch], undefined, 2000);
     if (lr.code === 0) return true;
+  } else if (branch === 'HEAD') {
+    // detached HEAD - check if current commit exists on origin
+    const head = run('git', ['-C', wt, 'rev-parse', 'HEAD']);
+    if (head.code === 0) {
+      const sha = head.out.trim();
+      // check if this commit is on any origin ref
+      const lr = quickRun('git', ['-C', wt, 'branch', '-r', '--contains', sha], undefined, 2000);
+      if (lr.code === 0 && lr.out.includes('origin/')) return true;
+    }
   }
   // If commits are merged into a verified remote base, treat as preserved
   // even if original branch ref deleted/pruned
   const bases = ['origin/main', 'origin/master', 'origin/HEAD'];
+  let anyBaseOk = false;
   for (const base of bases) {
     const rbase = run('git', ['-C', wt, 'rev-parse', '--verify', base]);
     if (rbase.code === 0) {
+      anyBaseOk = true;
       const rlog = run('git', ['-C', wt, 'log', `${base}..HEAD`, '--oneline']);
       if (rlog.code === 0 && rlog.out.trim() === '') {
         return true;
       }
     }
+  }
+  // if no bases exist, be conservative and don't assume remote-preserved
+  if (!anyBaseOk) {
+    return false;
   }
   return false;
 }
@@ -489,16 +534,24 @@ function isArmedOrClaimed(p: Planes, treePath: string): boolean {
       if (path === treePath) return true;
     }
   }
-  // also check live session markers
+  // also check live session markers directly
   try {
-    const details = (p as any).armedDetails as string[] | undefined;
-    if (details) {
-      for (const d of details) {
-        const path = resolveDetail(d, p.main, p.status.worktrees);
-        if (path === treePath) return true;
-      }
+    const details = armedWorkDetails(p.repo);
+    for (const d of details) {
+      const path = resolveDetail(d, p.main, p.status.worktrees);
+      if (path === treePath) return true;
     }
-  } catch {}
+  } catch {
+    try {
+      const details = (p as any).armedDetails as string[] | undefined;
+      if (details) {
+        for (const d of details) {
+          const path = resolveDetail(d, p.main, p.status.worktrees);
+          if (path === treePath) return true;
+        }
+      }
+    } catch {}
+  }
   for (const a of (p.status.fleet.agents || [])) {
     if (a.state === 'running' && a.worktree) {
       const ap = resolveAgentWorktreePath(a, p) ?? (a.worktree && isAbsolute(a.worktree) ? a.worktree : undefined);
@@ -547,11 +600,35 @@ function reapPreservedDead(p: Planes, ctx: WsCtx): number {
     }
     // must verify work is pushed to origin / remote-preserved
     if (!isBranchPushedToRemote(w.path)) {
-      log(`keep ${basename(w.path)} — branch not remote-preserved`);
-      continue;
+      // double-check: if branch has upstream origin or exists on origin, don't block
+      const br2 = run('git', ['-C', w.path, 'rev-parse', '--abbrev-ref', '--symbolic-full-name', '@{u}']);
+      if (br2.code === 0 && br2.out.trim().startsWith('origin/')) {
+        // fall through
+      } else {
+        const brn = run('git', ['-C', w.path, 'rev-parse', '--abbrev-ref', 'HEAD']);
+        const b = brn.out.trim();
+        if (b && b !== 'HEAD') {
+          const chk = run('git', ['-C', w.path, 'show-ref', '--verify', '--quiet', `refs/remotes/origin/${b}`]);
+          const chk2 = run('git', ['-C', w.path, 'branch', '-r', '--list', `origin/${b}`]);
+          const tr = run('git', ['-C', w.path, 'config', `branch.${b}.remote`]);
+          if (chk.code !== 0 && chk2.code !== 0 && !(tr.code === 0 && tr.out.trim() === 'origin')) {
+            log(`keep ${basename(w.path)} — branch not remote-preserved`);
+            continue;
+          }
+        } else {
+          log(`keep ${basename(w.path)} — branch not remote-preserved`);
+          continue;
+        }
+      }
     }
     // recheck occupancy immediately before closing to avoid race
-    if (isArmedOrClaimed(p, w.path) || hasLiveRunOrBoundAgent(p, w.path)) {
+    const pFresh = readPlanes(repoDir(ctxJson()));
+    if (
+      isArmedOrClaimed(pFresh, w.path) ||
+      hasLiveRunOrBoundAgent(pFresh, w.path) ||
+      isArmedOrClaimed(p, w.path) ||
+      hasLiveRunOrBoundAgent(p, w.path)
+    ) {
       log(`keep ${basename(w.path)} — occupied at close time`);
       continue;
     }
