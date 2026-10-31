@@ -208,21 +208,34 @@ export interface ToolWire {
   locations?: { path?: unknown }[] | null;
 }
 
+/** The arg's bound — generous on purpose: the value doubles as a card
+ *  body block (a heredoc command reads across lines), not just a
+ *  header tail. Still finite — the arg is agent-controlled text. */
+const ARG_MAX = 600;
+
 /** The one arg on the header — a kind-guided rawInput key first, the
  *  generic list next, a bare-string rawInput, then locations[0].
- *  Sanitized + clipped here so the header just interpolates. */
+ *  Block-sanitized so a multiline value keeps its line breaks for the
+ *  card body; every header path takes firstLine() of it instead. */
 export function toolArg(u: ToolWire, kind: string | undefined): string | undefined {
-  if (typeof u.rawInput === 'string' && u.rawInput !== '') return clip(safe(u.rawInput));
+  if (typeof u.rawInput === 'string' && u.rawInput !== '')
+    return clip(safeBlock(u.rawInput), ARG_MAX);
   if (typeof u.rawInput === 'object' && u.rawInput !== null) {
     const raw = u.rawInput as Record<string, unknown>;
     const keys = [...(kind !== undefined ? (ARG_KEYS[kind] ?? []) : []), ...ARG_FALLBACK];
     for (const k of keys) {
       const v = raw[k];
-      if (typeof v === 'string' && v !== '') return clip(safe(v));
+      if (typeof v === 'string' && v !== '') return clip(safeBlock(v), ARG_MAX);
     }
   }
   const loc = u.locations?.find(l => typeof l.path === 'string' && l.path !== '');
-  return loc !== undefined ? clip(safe(loc.path as string)) : undefined;
+  return loc !== undefined ? clip(safeBlock(loc.path as string), ARG_MAX) : undefined;
+}
+
+/** The arg's header form — its first non-empty line (a heredoc's
+ *  opening line carries the meaning; a lone \n is not content). */
+export function firstLine(arg: string): string {
+  return arg.split('\n').find(l => l.trim() !== '') ?? '';
 }
 
 /** The text a message/thought chunk carries — sanitized block text,
@@ -382,10 +395,8 @@ export class AcpRenderer {
           : '⣿';
     const head = `${glyph} ${clip(rec.title ?? rec.name ?? 'tool')}`;
     const kind = rec.kind !== undefined && rec.kind !== '' ? ` [${rec.kind}]` : '';
-    const arg =
-      rec.arg !== undefined && rec.arg !== ''
-        ? ` ${clip(rec.arg, LINE_MAX - head.length - kind.length)}`
-        : '';
+    const argText = rec.arg !== undefined ? firstLine(rec.arg) : '';
+    const arg = argText !== '' ? ` ${clip(argText, LINE_MAX - head.length - kind.length)}` : '';
     this.out(`${head}${kind === '' ? '' : this.dim(kind)}${arg === '' ? '' : this.dim(arg)}`);
   }
 

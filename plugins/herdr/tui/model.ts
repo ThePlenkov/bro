@@ -14,6 +14,7 @@ import {
   chunkText,
   clip,
   DONE_STATUS,
+  firstLine,
   safe,
   toolArg,
   toolContent,
@@ -22,6 +23,8 @@ import {
 } from '../../../packages/providers/src/acp-render.ts';
 import { rowVerdict, type ArchiveRow } from '../../../packages/cli/src/commands/session-feed.ts';
 import type { PaneLed } from '../../../packages/cli/src/commands/fleet-state.ts';
+
+export type { ToolContent };
 
 /** The scrollback bound — past it the oldest items evict (the shell
  *  destroys their renderables). opencode's notification-demo bound,
@@ -56,11 +59,13 @@ export interface ToolItem {
 }
 
 /** A one-shot line — turn boundary, permission ask, plan block, or a
- *  dim one-liner for every other update kind. */
+ *  dim one-liner for every other update kind. `tone` is the pane's
+ *  accent hint: permission asks read warn, failed turns read error. */
 export interface SideItem {
   id: number;
   kind: 'turn' | 'permission' | 'note';
   text: string;
+  tone?: 'warn' | 'error';
 }
 
 export type Item = TextItem | ToolItem | SideItem;
@@ -110,11 +115,13 @@ export class SessionModel {
         break;
       case 'turn':
         if (row.phase === 'stop') {
+          const failed = row.error !== undefined && row.error !== '';
           this.side(
             'turn',
-            row.error !== undefined && row.error !== ''
-              ? `── turn failed — ${safe(row.error)} ──`
-              : `── turn complete${row.stopReason !== undefined && row.stopReason !== '' ? ` (${safe(row.stopReason)})` : ''} ──`
+            failed
+              ? `── turn failed — ${safe(row.error ?? '')} ──`
+              : `── turn complete${row.stopReason !== undefined && row.stopReason !== '' ? ` (${safe(row.stopReason)})` : ''} ──`,
+            failed ? 'error' : undefined
           );
         }
         break;
@@ -123,7 +130,8 @@ export class SessionModel {
         const verdict = row.verdict ?? 'denied';
         this.side(
           'permission',
-          `── ⚠ permission ‹${safe(what)}› — ${safe(verdict)} (headless driver; open a terminal in this workspace to handle interactively) ──`
+          `── ⚠ permission ‹${safe(what)}› — ${safe(verdict)} (headless driver; open a terminal in this workspace to handle interactively) ──`,
+          'warn'
         );
         break;
       }
@@ -166,8 +174,8 @@ export class SessionModel {
     return it;
   }
 
-  private side(kind: SideItem['kind'], text: string): void {
-    this.push<SideItem>({ kind, text });
+  private side(kind: SideItem['kind'], text: string, tone?: SideItem['tone']): void {
+    this.push<SideItem>({ kind, text, tone });
   }
 
   /** Chunks commit incrementally — a same-kind tail item grows via a
@@ -249,7 +257,7 @@ export class SessionModel {
   }
 
   private onPlan(u: SessionUpdateLike): void {
-    const entries = (u['entries'] as { content?: string; status?: string }[] | undefined) ?? [];
+    const entries = (u.entries as { content?: string; status?: string }[] | undefined) ?? [];
     const lines = ['── plan ──'];
     for (const e of entries) {
       const box = PLAN_BOX[e.status ?? ''] ?? '[~]';
@@ -268,13 +276,13 @@ export class SessionModel {
       }
       case 'config_option_update': {
         const opts =
-          (u['configOptions'] as { id?: string; currentValue?: unknown }[] | undefined) ?? [];
+          (u.configOptions as { id?: string; currentValue?: unknown }[] | undefined) ?? [];
         return `config ${opts.map(o => `${safe(o.id ?? '?')}=${safe(scalar(o.currentValue))}`).join(' ')}`;
       }
       case 'current_mode_update':
         return `mode → ${safe(scalar((u as { currentModeId?: unknown }).currentModeId))}`;
       case 'available_commands_update':
-        return `${((u['availableCommands'] as unknown[] | undefined) ?? []).length} commands`;
+        return `${((u.availableCommands as unknown[] | undefined) ?? []).length} commands`;
       case 'session_info_update': {
         const title = (u as { title?: unknown }).title;
         return `session ${typeof title === 'string' && title !== '' ? safe(title) : '(info)'}`;
@@ -322,10 +330,8 @@ export class SessionModel {
           const glyph = it.status === 'completed' ? '✓' : it.status === 'failed' ? '✗' : '⣿';
           const head = `${glyph} ${clip(it.title)}`;
           const kind = it.toolKind !== undefined && it.toolKind !== '' ? ` [${it.toolKind}]` : '';
-          const arg =
-            it.arg !== undefined && it.arg !== ''
-              ? ` ${clip(it.arg, 120 - head.length - kind.length)}`
-              : '';
+          const argText = it.arg !== undefined ? firstLine(it.arg) : '';
+          const arg = argText !== '' ? ` ${clip(argText, 120 - head.length - kind.length)}` : '';
           lines.push(`${head}${kind}${arg}`);
           if (it.bodyLanded && !it.collapsed) {
             for (const l of dumpContent(it.content)) lines.push(`│  ${l}`);
