@@ -161,11 +161,13 @@ export async function runTui(argv: string[]): Promise<void> {
     useMouse: false,
     // no alternate screen — the feed renders INLINE, so herdr's own
     // scrollback holds every row: wheel scroll, drag-select, copy-mode
-    // all ride the terminal for free (addendum 10). 'split-footer'
-    // (pinned footer) stalled the renderer under a dumb pty —
-    // 'main-screen' is the addendum's literal ask; the hints row just
-    // scrolls off with the feed like any other line.
-    screenMode: 'main-screen',
+    // all ride the terminal for free (addendum 10). 'split-footer' +
+    // footerHeight:2 keeps the frame's last two rows pinned on screen
+    // — the identity line and the keys line (addendum 16: the kit has
+    // no top-split, so identity joins the bottom chrome; the feed
+    // scrolls under the pinned pair into scrollback above).
+    screenMode: 'split-footer',
+    footerHeight: 2,
   });
   // clean start: inline mode draws below whatever scrollback the
   // pane already held (the launch command line, prior output) —

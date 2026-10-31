@@ -699,6 +699,20 @@ at the top of a clean pane. Startup-only — never mid-run; the
 pane's prior scrollback is not content we own. Wire-verified:
 `2J`/`3J`/`H` emit before the first painted glyph.
 
+**Pinned chrome** (addendum 16): the top ` bro: session` bar was a
+feed row and scrolled away during replay. The renderer offers no
+top-split — `screenMode` is `alternate-screen`/`main-screen`/
+`split-footer` and `footerHeight` is the only pinned-region knob —
+so the sanctioned fallback is taken: `screenMode: 'split-footer'`
+- `footerHeight: 2` pins the frame's last two rows. The identity
+  line (worktree, agent, LED, mode) sits directly above the keys
+  line — both are pinned chrome now; the feed scrolls under them
+  into herdr's scrollback. The addendum-11 feed header (`▸
+provider · agent · cwd · launched`) stays an in-feed item — it is
+  the archive's identity block, not chrome. Verified: the frame's
+  last two painted rows are identity + keys; the feed no longer
+  carries the bar.
+
 ## Risks
 
 - **Solid's prop application is post-construction.** The reconciler

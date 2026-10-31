@@ -841,7 +841,6 @@ function Pane(props: {
   };
   return (
     <box flexDirection="column" width="100%" height="100%" backgroundColor={theme.base}>
-      <HeaderBar meta={props.store.state.meta} />
       <scrollbox
         ref={el => {
           setScroller(el as ScrollBoxRenderable);
@@ -898,6 +897,12 @@ function Pane(props: {
           <text fg={theme.muted} content="Jump to latest ↓ " />
         </box>
       </Show>
+      {/* the pinned pair — split-footer holds the frame's last
+       *  footerHeight rows on screen while the feed scrolls above:
+       *  identity line, then keys line (addendum 16's fallback —
+       *  no top-split exists in the renderer, so identity joins
+       *  the bottom chrome rather than the scrolling feed) */}
+      <HeaderBar meta={props.store.state.meta} />
       <FooterBar toast={props.toast} meta={props.store.state.meta} />
     </box>
   );
