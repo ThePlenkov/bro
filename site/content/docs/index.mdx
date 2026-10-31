@@ -52,16 +52,21 @@ defaults until set up.
 ```bash
 # 1) Claim work from your task store
 npx @broject/bro next
+BEAD=<bead-id>  # from the claimed work order
 
 # 2) Implement and open a PR for the claimed work
-#    (commit your changes, push the branch, and open a PR — e.g. with `gh pr create`).
-#    The review gate inspects the PR on the current branch.
+git add -A
+git commit -m "$BEAD: <summary>"
+git push -u origin HEAD
+gh pr create --fill  # open a PR for the current branch; the review gate inspects it
 
 # 3) Drive the PR through the review gate
 npx @broject/bro act status        # verdict: threads/ci/reviewers/sast/mergeable
 npx @broject/bro act threads       # work unresolved threads
 #    Must resolve all listed threads before merging (the gate blocks until clean).
-npx @broject/bro act merge --bead <bead-id>  # merge only when green; pass the claimed bead to close it
+#    Work and resolve every listed thread (e.g. via `bro act resolve`/replies),
+#    then re-check with `bro act status` until it is green.
+npx @broject/bro act merge --bead "$BEAD"  # merge only when green; pass the claimed bead to close it
 
 # 4) Sweep merged threads into debt
 npx @broject/bro debt prs          # merged PRs nobody processed yet

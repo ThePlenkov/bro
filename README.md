@@ -16,7 +16,7 @@
 
 ```bash
 npx @broject/bro act status             # review gate verdict
-npx @broject/bro debt prs               # merged PRs not yet processed
+npx @broject/bro debt prs               # unprocessed merged PRs not yet swept into the ledger
 npx @broject/bro debt collect           # sweep threads into the ledger
 npx @broject/bro debt status            # what's left
 ```
