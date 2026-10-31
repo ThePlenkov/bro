@@ -1370,7 +1370,7 @@ function loadTsConfig(name: string, path: string): unknown {
         '--eval',
         `import(${JSON.stringify(pathToFileURL(abs).href)}).then(m => process.stdout.write(JSON.stringify(m.default ?? null)))`,
       ],
-      { encoding: 'utf8' }
+      { encoding: 'utf8', windowsHide: true }
     );
     return JSON.parse(out);
   }

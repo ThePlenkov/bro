@@ -33,7 +33,9 @@ import {
   readdirSync,
   readFileSync,
   readlinkSync,
+  realpathSync,
   rmSync,
+  rmdirSync,
   symlinkSync,
   writeFileSync,
 } from 'node:fs';
@@ -709,8 +711,19 @@ function skillsLinkTarget(adapterRel) {
 function skillsLinkFresh(adapterRel) {
   const link = join(ROOT, adapterRel, 'skills');
   try {
+<<<<<<< HEAD
     const st = lstatSync(link);
-    return st.isSymbolicLink() && readlinkSync(link) === skillsLinkTarget(adapterRel);
+    if (!st.isSymbolicLink()) {
+      return false;
+    }
+    // Windows junctions (mklink /J) report as symlinks but resolve
+    // readlink() to an absolute path, so compare realpath trees too.
+    try {
+      return realpathSync(link) === realpathSync(join(ROOT, 'skills'));
+    } catch {
+      return readlinkSync(link) === skillsLinkTarget(adapterRel);
+    }
+
   } catch {
     return false;
   }
@@ -720,10 +733,19 @@ function ensureSkillsLink(adapterRel) {
   if (skillsLinkFresh(adapterRel)) {
     return;
   }
+<<<<<<< HEAD
   const link = join(ROOT, adapterRel, 'skills');
-  rmSync(link, { recursive: true, force: true });
+  try {
+    rmSync(link, { force: true });
+  } catch {
+    rmdirSync(link);
+  }
   mkdirSync(join(ROOT, adapterRel), { recursive: true });
-  symlinkSync(skillsLinkTarget(adapterRel), link);
+  try {
+    symlinkSync(skillsLinkTarget(adapterRel), link, process.platform === 'win32' ? 'junction' : undefined);
+  } catch {
+    symlinkSync(skillsLinkTarget(adapterRel), link);
+  }
 }
 
 emit(

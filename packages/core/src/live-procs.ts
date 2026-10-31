@@ -60,6 +60,7 @@ export function spawnCollect(
     detached: opts?.detached,
     env: spawnEnvironment(env, opts?.envMode),
     stdio: ['ignore', 'pipe', 'pipe'],
+    windowsHide: true,
   });
   trackChild(proc);
   let out = '';

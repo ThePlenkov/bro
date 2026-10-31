@@ -9,6 +9,7 @@ export function gh(args: string[], cwd?: string): string {
   const proc = spawnSync('gh', args, {
     cwd,
     stdio: ['ignore', 'pipe', 'pipe'],
+    windowsHide: true,
     encoding: 'utf8',
   })
   if (proc.status !== 0) {
@@ -83,6 +84,7 @@ export function ghTry(args: string[], cwd?: string): { code: number; out: string
   const proc = spawnSync('gh', args, { // NOSONAR — user-installed CLI; PATH lookup is the contract
     cwd,
     stdio: ['ignore', 'pipe', 'pipe'],
+    windowsHide: true,
     encoding: 'utf8',
   })
   return { code: proc.status ?? 1, out: proc.stdout ?? '', err: (proc.stderr ?? '').trim() }
